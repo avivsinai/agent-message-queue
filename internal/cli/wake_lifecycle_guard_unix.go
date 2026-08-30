@@ -3,10 +3,12 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"golang.org/x/sys/unix"
@@ -140,8 +142,8 @@ func withWakeLifecycleGuardModeInDir(
 		}
 		defer func() { _ = file.Close() }()
 
-		if err := unix.Flock(int(file.Fd()), lockMode); err != nil {
-			return fmt.Errorf("acquire wake lifecycle guard %s: %w", path, err)
+		if err := acquireWakeLifecycleGuard(file, path, agentDir, lockMode); err != nil {
+			return err
 		}
 		defer func() { _ = unix.Flock(int(file.Fd()), unix.LOCK_UN) }()
 
@@ -227,6 +229,14 @@ func openExistingWakeLifecycleGuardAt(dirfd int, path string) (*os.File, error) 
 // access into acquire, repair, or readiness success; it is for exact cleanup
 // of old residue while preserving the canonical successor's authority.
 func withExistingWakeLifecycleGuardInDir(agentDir *wakeAgentDir, fn func(int) error) error {
+	return withExistingWakeLifecycleGuardModeInDir(agentDir, unix.LOCK_EX, fn)
+}
+
+func withExistingWakeLifecycleGuardModeInDir(
+	agentDir *wakeAgentDir,
+	lockMode int,
+	fn func(int) error,
+) error {
 	return agentDir.withFD(func(dirfd int) error {
 		path := filepath.Join(agentDir.path, wakeLifecycleGuardFileName)
 		file, err := openExistingWakeLifecycleGuardAt(dirfd, path)
@@ -235,8 +245,8 @@ func withExistingWakeLifecycleGuardInDir(agentDir *wakeAgentDir, fn func(int) er
 		}
 		defer func() { _ = file.Close() }()
 
-		if err := unix.Flock(int(file.Fd()), unix.LOCK_EX); err != nil {
-			return fmt.Errorf("acquire existing wake lifecycle guard %s: %w", path, err)
+		if err := acquireWakeLifecycleGuard(file, path, agentDir, lockMode); err != nil {
+			return err
 		}
 		defer func() { _ = unix.Flock(int(file.Fd()), unix.LOCK_UN) }()
 
@@ -258,6 +268,47 @@ func withExistingWakeLifecycleGuardInDir(agentDir *wakeAgentDir, fn func(int) er
 		}
 		return fn(dirfd)
 	})
+}
+
+const (
+	wakeLifecycleGuardRetryInterval = 10 * time.Millisecond
+	wakeLifecycleGuardRetryTimeout  = 500 * time.Millisecond
+)
+
+func acquireWakeLifecycleGuard(
+	file *os.File,
+	path string,
+	agentDir *wakeAgentDir,
+	lockMode int,
+) error {
+	if lockMode&unix.LOCK_NB == 0 {
+		if err := unix.Flock(int(file.Fd()), lockMode); err != nil {
+			return fmt.Errorf("acquire wake lifecycle guard %s: %w", path, err)
+		}
+		return nil
+	}
+	deadline := time.Now().Add(wakeLifecycleGuardRetryTimeout)
+	for {
+		err := unix.Flock(int(file.Fd()), lockMode)
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, unix.EAGAIN) && !errors.Is(err, unix.EWOULDBLOCK) {
+			return fmt.Errorf("acquire wake lifecycle guard %s: %w", path, err)
+		}
+		if !time.Now().Before(deadline) {
+			root := filepath.Dir(filepath.Dir(agentDir.path))
+			agent := filepath.Base(agentDir.path)
+			return fmt.Errorf(
+				"wake lifecycle guard %s is held by another process; holder is unknown after %s; inspect with `amq wake check --root %s --me %s --json` or escalate manually",
+				path,
+				wakeLifecycleGuardRetryTimeout,
+				root,
+				agent,
+			)
+		}
+		time.Sleep(wakeLifecycleGuardRetryInterval)
+	}
 }
 
 func wakeLifecycleGuardMissingAt(agentDir *wakeAgentDir) (bool, error) {

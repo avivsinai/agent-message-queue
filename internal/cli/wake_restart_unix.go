@@ -1344,7 +1344,7 @@ func replaceWakeLockForResumeAt(
 	if !sameWakeLockInspection(expected, current) || !current.IdentityConfirmed {
 		return fmt.Errorf("wake resume incumbent changed before generation commit")
 	}
-	if err := unix.Renameat(dirfd, temp, dirfd, ".wake.lock"); err != nil {
+	if err := unix.Renameat(dirfd, temp, dirfd, wakeLockFileName); err != nil {
 		return fmt.Errorf("commit wake resume generation: %w", err)
 	}
 	tempPresent = false

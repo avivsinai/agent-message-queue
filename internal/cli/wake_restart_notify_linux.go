@@ -42,55 +42,56 @@ func notifyWakeRestartPlatform(
 		}
 	}()
 
-	return withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
-		metadata := readWakeLockMetadataAt(
-			dirfd,
-			agentDir,
-			expected.Root,
-			expected.Agent,
-		)
-		if !sameWakeLockGeneration(expected, metadata) {
-			return fmt.Errorf("wake changed before restart pidfd acquisition")
-		}
+	return withExistingWakeMutationScopeModeInDir(
+		agentDir,
+		unix.LOCK_EX|unix.LOCK_NB,
+		func(scope *wakeMutationScope) error {
+			metadata := readWakeLockMetadataAt(
+				scope.dirfd,
+				agentDir,
+				expected.Root,
+				expected.Agent,
+			)
+			if !sameWakeLockGeneration(expected, metadata) {
+				return fmt.Errorf("wake changed before restart pidfd acquisition")
+			}
 
-		fd, err := linuxPidfdOpen(metadata.PID, 0)
-		if err != nil {
-			return fmt.Errorf("pidfd_open wake restart process %d: %w", metadata.PID, err)
-		}
-		pidfd = fd
+			fd, err := linuxPidfdOpen(metadata.PID, 0)
+			if err != nil {
+				return fmt.Errorf("pidfd_open wake restart process %d: %w", metadata.PID, err)
+			}
+			pidfd = fd
 
-		current := inspectWakeLockAt(
-			dirfd,
-			agentDir,
-			expected.Root,
-			expected.Agent,
-		)
-		if !sameWakeLockInspection(expected, current) || !current.IdentityConfirmed {
-			return fmt.Errorf("wake changed before restart signal")
-		}
-		if err := validateWakeRestartTransportPlatform(
-			current.Lock,
-			expected.Root,
-			expected.Agent,
-		); err != nil {
-			return err
-		}
+			current := inspectWakeLockAt(
+				scope.dirfd,
+				agentDir,
+				expected.Root,
+				expected.Agent,
+			)
+			if !sameWakeLockInspection(expected, current) || !current.IdentityConfirmed {
+				return fmt.Errorf("wake changed before restart signal")
+			}
+			if err := validateWakeRestartTransportPlatform(
+				current.Lock,
+				expected.Root,
+				expected.Agent,
+			); err != nil {
+				return err
+			}
 
-		observed, exists, err := readWakeRestartRecordAt(dirfd, agentDir)
-		if err != nil {
-			return err
-		}
-		if !exists || record.Status != wakeRestartPending ||
-			observed.Status != wakeRestartPending ||
-			observed.RequestID != record.RequestID ||
-			observed.Generation != record.Generation ||
-			!sameWakeRestartRecord(observed, record) {
-			return fmt.Errorf("wake restart request changed before signal")
-		}
+			observed, exists, err := readWakeRestartRecordAt(scope.dirfd, agentDir)
+			if err != nil {
+				return err
+			}
+			if !exists || record.Status != wakeRestartPending ||
+				observed.Status != wakeRestartPending ||
+				observed.RequestID != record.RequestID ||
+				observed.Generation != record.Generation ||
+				!sameWakeRestartRecord(observed, record) {
+				return fmt.Errorf("wake restart request changed before signal")
+			}
 
-		if err := linuxPidfdSendSignal(pidfd, unix.SIGUSR1, nil, 0); err != nil {
-			return fmt.Errorf("pidfd_send_signal SIGUSR1: %w", err)
-		}
-		return nil
-	})
+			return scope.sendPidfdSignal(pidfd, unix.SIGUSR1)
+		},
+	)
 }

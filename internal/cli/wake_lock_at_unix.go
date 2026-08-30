@@ -24,7 +24,7 @@ var syncWakeLockAfterCommitDirFD = func(fd int) error {
 
 func readWakeLockFileAt(dirfd int, path string) ([]byte, os.FileInfo, error) {
 	open := func() (*os.File, error) {
-		fd, err := unix.Openat(dirfd, ".wake.lock", unix.O_RDONLY|unix.O_NONBLOCK|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		fd, err := unix.Openat(dirfd, wakeLockFileName, unix.O_RDONLY|unix.O_NONBLOCK|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 		if err != nil {
 			return nil, err
 		}
@@ -68,14 +68,14 @@ func readWakeLockFileAt(dirfd int, path string) ([]byte, os.FileInfo, error) {
 }
 
 func inspectWakeLockAt(dirfd int, agentDir *wakeAgentDir, root, me string) wakeLockInspection {
-	path := filepath.Join(agentDir.path, ".wake.lock")
+	path := filepath.Join(agentDir.path, wakeLockFileName)
 	return inspectWakeLockWithReader(root, me, path, func() ([]byte, os.FileInfo, error) {
 		return readWakeLockFileAt(dirfd, path)
 	})
 }
 
 func readWakeLockMetadataAt(dirfd int, agentDir *wakeAgentDir, root, me string) wakeLockInspection {
-	path := filepath.Join(agentDir.path, ".wake.lock")
+	path := filepath.Join(agentDir.path, wakeLockFileName)
 	return readWakeLockMetadataWithReader(root, me, path, func() ([]byte, os.FileInfo, error) {
 		return readWakeLockFileAt(dirfd, path)
 	})
@@ -106,14 +106,14 @@ func createWakeLockAt(
 	}
 	fd, err := unix.Openat(
 		dirfd,
-		".wake.lock",
+		wakeLockFileName,
 		unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC,
 		0o600,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create wake lock: %w", err)
 	}
-	file := os.NewFile(uintptr(fd), filepath.Join(agentDir.path, ".wake.lock"))
+	file := os.NewFile(uintptr(fd), filepath.Join(agentDir.path, wakeLockFileName))
 	createdInfo, statErr := file.Stat()
 	if statErr != nil {
 		_ = file.Close()
@@ -125,16 +125,16 @@ func createWakeLockAt(
 		if !committed {
 			currentFD, openErr := unix.Openat(
 				dirfd,
-				".wake.lock",
+				wakeLockFileName,
 				unix.O_RDONLY|unix.O_NONBLOCK|unix.O_NOFOLLOW|unix.O_CLOEXEC,
 				0,
 			)
 			if openErr == nil {
-				currentFile := os.NewFile(uintptr(currentFD), filepath.Join(agentDir.path, ".wake.lock"))
+				currentFile := os.NewFile(uintptr(currentFD), filepath.Join(agentDir.path, wakeLockFileName))
 				currentInfo, currentErr := currentFile.Stat()
 				_ = currentFile.Close()
 				if currentErr == nil && sameWakeFileIdentity(createdInfo, currentInfo) {
-					_ = unix.Unlinkat(dirfd, ".wake.lock", 0)
+					_ = newWakeMutationScope(agentDir, dirfd).unlinkWakeLock()
 					_ = syncWakeOwnerDirFD(dirfd)
 				}
 			}
@@ -214,7 +214,7 @@ func removeWakeLockIfUnchangedGuardedAtStatus(
 		dirfd,
 		agentDir,
 		inspection,
-		func() error { return unix.Unlinkat(dirfd, ".wake.lock", 0) },
+		func() error { return newWakeMutationScope(agentDir, dirfd).unlinkWakeLockForCleanup() },
 	)
 	return outcome.Committed, outcome.Err
 }
@@ -230,7 +230,7 @@ const (
 	wakeLockResidueDurability            wakeLockRemovalResidue = "wake lock durability"
 	wakeLockResidueDetachedCleanup       wakeLockRemovalResidue = "detached wake cleanup"
 	wakeLockResidueReplacement           wakeLockRemovalResidue = "replacement wake lock"
-	wakeLockResiduePreservedClaim        wakeLockRemovalResidue = ".wake.lock"
+	wakeLockResiduePreservedClaim        wakeLockRemovalResidue = wakeLockFileName
 	wakeLockResidueCleanup               wakeLockRemovalResidue = "wake lock cleanup"
 	wakeLockResidueSelfUpgradeDiagnostic wakeLockRemovalResidue = "wake self-upgrade diagnostic"
 )
@@ -275,7 +275,26 @@ func removeWakeLockIfUnchangedGuardedAtOutcome(
 	inspection wakeLockInspection,
 	unlink func() error,
 ) wakeLockRemovalOutcome {
-	detached := retainedWakeAgentDirIsDetached(agentDir)
+	relation, relationErr := retainedWakeAgentDirRelation(agentDir)
+	if relationErr != nil {
+		return wakeLockRemovalOutcome{Err: fmt.Errorf(
+			"cannot determine retained wake agent directory relation before lock removal: %w",
+			relationErr,
+		)}
+	}
+	switch relation {
+	case wakeAgentDirCanonical, wakeAgentDirDetached:
+	case wakeAgentDirInconclusive:
+		return wakeLockRemovalOutcome{Err: fmt.Errorf(
+			"cannot determine retained wake agent directory relation before lock removal: relation is inconclusive",
+		)}
+	default:
+		return wakeLockRemovalOutcome{Err: fmt.Errorf(
+			"cannot determine retained wake agent directory relation before lock removal: unknown relation %d",
+			relation,
+		)}
+	}
+	detached := relation == wakeAgentDirDetached
 	var detachedValidationErr error
 	if err := validateBoundWakeMutationAt(dirfd, agentDir, inspection); err != nil {
 		// A retained directory capability can outlive replacement of its
@@ -297,7 +316,7 @@ func removeWakeLockIfUnchangedGuardedAtOutcome(
 			err,
 		)}
 	}
-	path := filepath.Join(agentDir.path, ".wake.lock")
+	path := filepath.Join(agentDir.path, wakeLockFileName)
 	// The retained descriptor keeps the unlink bound to the old inode. Recheck
 	// the canonical pathname immediately before the mutation so a swap after
 	// the initial sample is reported as detached cleanup, not canonical success.
@@ -305,7 +324,9 @@ func removeWakeLockIfUnchangedGuardedAtOutcome(
 	// undetectable. The retained descriptor still prevents successor mutation;
 	// the post-commit check below surfaces swaps observed before return.
 	unlinkWithDetachedClassification := func() error {
-		markWakeDetachedCleanup(&detachedValidationErr, agentDir)
+		if err := markWakeDetachedCleanup(&detachedValidationErr, agentDir); err != nil {
+			return err
+		}
 		return unlink()
 	}
 	committed, err := removeWakeLockIfUnchangedGuardedWithIOStatus(
@@ -322,10 +343,16 @@ func removeWakeLockIfUnchangedGuardedAtOutcome(
 	// The pre-unlink check and unlink cannot be atomic against a
 	// non-cooperating namespace rename. The retained descriptor still prevents
 	// successor mutation, so surface a late replacement as detached cleanup.
-	markWakeDetachedCleanup(&detachedValidationErr, agentDir)
+	lateRelationErr := markWakeDetachedCleanup(&detachedValidationErr, agentDir)
 	outcome := wakeLockRemovalOutcome{Committed: true}
 	if detachedValidationErr != nil {
 		outcome.Err = newWakeDetachedCleanupOnlyError(detachedValidationErr)
+	}
+	if lateRelationErr != nil {
+		outcome.Err = errors.Join(
+			outcome.Err,
+			fmt.Errorf("recheck retained wake agent directory after lock removal: %w", lateRelationErr),
+		)
 	}
 	if err := removeWakeSelfUpgradeArtifactsAt(dirfd); err != nil {
 		outcome.Err = errors.Join(
@@ -430,33 +457,25 @@ func wakeDetachedCleanupValidationError() error {
 	return fmt.Errorf("retained wake agent directory is detached from the canonical successor")
 }
 
-func markWakeDetachedCleanup(err *error, agentDir *wakeAgentDir) {
-	if err == nil || *err != nil || !retainedWakeAgentDirIsDetached(agentDir) {
-		return
+func markWakeDetachedCleanup(err *error, agentDir *wakeAgentDir) error {
+	if err == nil || *err != nil {
+		return nil
 	}
-	*err = wakeDetachedCleanupValidationError()
-}
-
-func retainedWakeAgentDirIsDetached(agentDir *wakeAgentDir) bool {
-	if agentDir == nil || agentDir.file == nil {
-		return false
+	relation, relationErr := retainedWakeAgentDirRelation(agentDir)
+	if relationErr != nil {
+		return relationErr
 	}
-	retainedInfo, err := agentDir.file.Stat()
-	if err != nil {
-		return false
+	switch relation {
+	case wakeAgentDirCanonical:
+		return nil
+	case wakeAgentDirDetached:
+		*err = wakeDetachedCleanupValidationError()
+	case wakeAgentDirInconclusive:
+		return fmt.Errorf("wake agent directory relation is inconclusive during cleanup")
+	default:
+		return fmt.Errorf("unknown wake agent directory relation %d during cleanup", relation)
 	}
-	fd, err := unix.Open(
-		agentDir.path,
-		unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW,
-		0,
-	)
-	if err != nil {
-		return false
-	}
-	canonical := os.NewFile(uintptr(fd), agentDir.path)
-	defer func() { _ = canonical.Close() }()
-	canonicalInfo, err := canonical.Stat()
-	return err == nil && !os.SameFile(retainedInfo, canonicalInfo)
+	return nil
 }
 
 type wakeGenerationFileSnapshot struct {
@@ -644,6 +663,9 @@ func removeWakeGenerationFileIfSnapshotMatchesAt(
 	label string,
 	expected wakeGenerationFileSnapshot,
 ) (bool, error) {
+	if err := assertNotWakeLockName(name); err != nil {
+		return false, err
+	}
 	current, exists, err := readWakeGenerationFileSnapshotAt(
 		dirfd,
 		agentDir,

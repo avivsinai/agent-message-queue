@@ -310,6 +310,132 @@ func TestTerminateOpensPidfdBeforeIdentityInspectionAndReleasesGuardBeforeWait(t
 	}
 }
 
+func TestTerminateWakePidfdRefusesWhenLifecycleGuardIsHeld(t *testing.T) {
+	root := secureTempDirForTest(t)
+	writeWakeLockForTest(t, root, "codex", wakeLock{
+		PID:          4242,
+		TTY:          "unknown",
+		ProcessStart: "start-1",
+		BootID:       "boot-1",
+		Executable:   "/usr/bin/amq",
+		Generation:   "guard-held-generation",
+	})
+	agentDir, err := openWakeAgentDir(root, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = agentDir.Close() }()
+	if err := withWakeLifecycleGuardInDir(agentDir, func(int) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	holderDone := make(chan error, 1)
+	go func() {
+		holderDone <- withExistingWakeLifecycleGuardInDir(agentDir, func(int) error {
+			close(entered)
+			<-release
+			return nil
+		})
+	}()
+	defer releaseOnce.Do(func() { close(release) })
+
+	oldSend := linuxPidfdSendSignal
+	oldPoll := linuxPidfdPoll
+	signalCalls := 0
+	linuxPidfdSendSignal = func(int, unix.Signal, *unix.Siginfo, int) error {
+		signalCalls++
+		return nil
+	}
+	linuxPidfdPoll = func(int, time.Duration) (bool, error) {
+		t.Fatal("guard-held termination polled without signal authorization")
+		return false, nil
+	}
+	t.Cleanup(func() {
+		linuxPidfdSendSignal = oldSend
+		linuxPidfdPoll = oldPoll
+	})
+
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("lifecycle guard holder did not enter")
+	}
+	// A nonblocking acquisition retries for a bounded interval. The call must
+	// return refusal without reaching the pidfd effect.
+	expected := inspectWakeLock(root, "codex")
+	done := make(chan error, 1)
+	go func() {
+		done <- terminateWakePidfdWithAuthorization(agentDir, expected, nil, false, 77)
+	}()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "held by another process") {
+			t.Fatalf("guard-held termination error = %v, want bounded guard refusal", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("guard-held termination did not return within its bounded retry window")
+	}
+	if signalCalls != 0 {
+		t.Fatalf("guard-held termination signaled %d times", signalCalls)
+	}
+	releaseOnce.Do(func() { close(release) })
+	if err := <-holderDone; err != nil {
+		t.Fatalf("release lifecycle guard holder: %v", err)
+	}
+}
+
+func TestTerminateWakePidfdRefusesSamePIDReplacementGeneration(t *testing.T) {
+	root := secureTempDirForTest(t)
+	lock := wakeLock{
+		PID:          4242,
+		TTY:          "unknown",
+		ProcessStart: "start-1",
+		BootID:       "boot-1",
+		Executable:   "/usr/bin/amq",
+		Generation:   "original-generation",
+	}
+	writeWakeLockForTest(t, root, "codex", lock)
+	expected := inspectWakeLock(root, "codex")
+	lock.Generation = "replacement-generation"
+	writeWakeLockForTest(t, root, "codex", lock)
+
+	agentDir, err := openWakeAgentDir(root, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = agentDir.Close() }()
+	if err := withWakeLifecycleGuardInDir(agentDir, func(int) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+
+	oldSend := linuxPidfdSendSignal
+	oldPoll := linuxPidfdPoll
+	signalCalls := 0
+	linuxPidfdSendSignal = func(int, unix.Signal, *unix.Siginfo, int) error {
+		signalCalls++
+		return nil
+	}
+	linuxPidfdPoll = func(int, time.Duration) (bool, error) {
+		t.Fatal("generation-mismatched termination polled without signal authorization")
+		return false, nil
+	}
+	t.Cleanup(func() {
+		linuxPidfdSendSignal = oldSend
+		linuxPidfdPoll = oldPoll
+	})
+
+	err = terminateWakePidfdWithAuthorization(agentDir, expected, nil, false, 77)
+	if err == nil || !strings.Contains(err.Error(), "generation changed") {
+		t.Fatalf("same-PID replacement error = %v, want generation refusal", err)
+	}
+	if signalCalls != 0 {
+		t.Fatalf("same-PID replacement signaled %d times", signalCalls)
+	}
+}
+
 func TestTerminateRefusesLiveRawUnknownTerminalBeforePidfdSignal(t *testing.T) {
 	const (
 		wakePID = 4242

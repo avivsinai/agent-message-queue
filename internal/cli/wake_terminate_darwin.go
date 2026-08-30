@@ -4,19 +4,11 @@ package cli
 
 import (
 	"fmt"
-	"os"
 
 	"golang.org/x/sys/unix"
 )
 
 var (
-	signalWakeProcess = func(pid int, sig os.Signal) error {
-		proc, err := os.FindProcess(pid)
-		if err != nil {
-			return err
-		}
-		return proc.Signal(sig)
-	}
 	afterDarwinWakeSignalValidation = func() {}
 )
 
@@ -112,38 +104,42 @@ func terminateAndRemoveOrphanedWakeLockInDirWithRawConsent(
 		return false, err
 	}
 	removed := false
-	err := withExistingWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
-		current := inspectWakeLockAt(
-			dirfd,
-			agentDir,
-			inspection.Root,
-			inspection.Agent,
-		)
-		if !current.Exists {
-			removed = true
-			return nil
-		}
-		if !sameWakeLockGenerationForRetainedTermination(recheck, current) {
-			return nil
-		}
-		if requestedTarget != nil {
-			if err := requireExistingWakeTargetMatchesAt(dirfd, agentDir, current, *requestedTarget); err != nil {
+	err := withExistingWakeMutationScopeModeInDir(
+		agentDir,
+		unix.LOCK_EX|unix.LOCK_NB,
+		func(scope *wakeMutationScope) error {
+			current := inspectWakeLockAt(
+				scope.dirfd,
+				agentDir,
+				inspection.Root,
+				inspection.Agent,
+			)
+			if !current.Exists {
+				removed = true
+				return nil
+			}
+			if !sameWakeLockGenerationForRetainedTermination(recheck, current) {
+				return nil
+			}
+			if requestedTarget != nil {
+				if err := requireExistingWakeTargetMatchesAt(scope.dirfd, agentDir, current, *requestedTarget); err != nil {
+					return err
+				}
+			}
+			if err := validateWakeLockStaleRemovalAt(scope.dirfd, agentDir, current); err != nil {
 				return err
 			}
-		}
-		if err := validateWakeLockStaleRemovalAt(dirfd, agentDir, current); err != nil {
-			return err
-		}
-		var removeErr error
-		outcome := removeWakeLockIfUnchangedGuardedAtDurableOutcome(
-			dirfd,
-			agentDir,
-			current,
-			func() error { return unix.Unlinkat(dirfd, ".wake.lock", 0) },
-		)
-		removed, removeErr = outcome.Committed, outcome.Err
-		return removeErr
-	})
+			var removeErr error
+			outcome := removeWakeLockIfUnchangedGuardedAtDurableOutcome(
+				scope.dirfd,
+				agentDir,
+				current,
+				scope.unlinkWakeLockForCleanup,
+			)
+			removed, removeErr = outcome.Committed, outcome.Err
+			return removeErr
+		},
+	)
 	return removed, err
 }
 

@@ -116,7 +116,7 @@ func retireWakeIfGeneration(root, me string, requested wakeTarget, ifGeneration 
 		Status: "refused",
 		Agent:  me,
 		Root:   canonicalWakeRoot(root),
-		Lock:   filepath.Join(fsq.AgentBase(root, me), ".wake.lock"),
+		Lock:   filepath.Join(fsq.AgentBase(root, me), wakeLockFileName),
 		Target: wakeTargetPath(root, me),
 	}
 	refuse := func(reason string) (wakeRetireResult, error) {
@@ -245,7 +245,9 @@ func retireWakeIfGeneration(root, me string, requested wakeTarget, ifGeneration 
 				dirfd,
 				agentDir,
 				current,
-				func() error { return wakeRetireUnlinkAt(dirfd, ".wake.lock", 0) },
+				func() error {
+					return newWakeMutationScope(agentDir, dirfd).unlinkWakeLockWith(wakeRetireUnlinkAt)
+				},
 			)
 			if !commit.Committed {
 				return commit.Err
@@ -592,8 +594,23 @@ func validateWakeLockOwnerlessMutationAt(
 	if err != nil {
 		return newWakeStateBoundInconclusiveError(err)
 	}
+	relation, err := retainedWakeAgentDirRelation(agentDir)
+	if err != nil {
+		return newWakeStateBoundInconclusiveError(err)
+	}
+	switch relation {
+	case wakeAgentDirCanonical, wakeAgentDirDetached:
+	case wakeAgentDirInconclusive:
+		return newWakeStateBoundInconclusiveError(
+			fmt.Errorf("wake agent directory relation is inconclusive before ownerless mutation"),
+		)
+	default:
+		return newWakeStateBoundInconclusiveError(
+			fmt.Errorf("unknown wake agent directory relation %d", relation),
+		)
+	}
 	if bound {
-		if retainedWakeAgentDirIsDetached(agentDir) {
+		if relation == wakeAgentDirDetached {
 			return validateWakeLockOwnerlessBoundStateInRetainedDirAt(
 				dirfd, agentDir, inspection,
 			)
@@ -706,7 +723,22 @@ func readWakeTargetForRetainedInspectionAt(
 	if err != nil {
 		return wakeTarget{}, false, newWakeStateBoundInconclusiveError(err)
 	}
-	if !bound || !retainedWakeAgentDirIsDetached(agentDir) {
+	relation, err := retainedWakeAgentDirRelation(agentDir)
+	if err != nil {
+		return wakeTarget{}, false, newWakeStateBoundInconclusiveError(err)
+	}
+	switch relation {
+	case wakeAgentDirCanonical, wakeAgentDirDetached:
+	case wakeAgentDirInconclusive:
+		return wakeTarget{}, false, newWakeStateBoundInconclusiveError(
+			fmt.Errorf("wake agent directory relation is inconclusive before retained target read"),
+		)
+	default:
+		return wakeTarget{}, false, newWakeStateBoundInconclusiveError(
+			fmt.Errorf("unknown wake agent directory relation %d", relation),
+		)
+	}
+	if !bound || relation == wakeAgentDirCanonical {
 		return readWakeTargetFromStateForInspectionAt(
 			dirfd,
 			agentDir,

@@ -79,6 +79,31 @@ func TestAuthoritativeWakeCleanupRefusesHardlinkedLock(t *testing.T) {
 	}
 }
 
+func TestAuthoritativeWakeCleanupRefusesMissingFinalLock(t *testing.T) {
+	fixture := newAuthoritativeWakePreparedCleanupFixture(t)
+	original := beforeAuthoritativeWakeLockFinalRemoval
+	beforeAuthoritativeWakeLockFinalRemoval = func() {
+		beforeAuthoritativeWakeLockFinalRemoval = func() {}
+		if err := os.Remove(fixture.lockPath); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() { beforeAuthoritativeWakeLockFinalRemoval = original })
+
+	err := fixture.release()
+	if err == nil || !strings.Contains(err.Error(), "hard-link count") {
+		t.Fatalf("release error = %v, want unavailable hard-link count refusal", err)
+	}
+	assertPathMissingForTest(t, fixture.lockPath)
+	if _, statErr := os.Stat(fixture.targetPath); statErr != nil {
+		t.Fatalf("missing-final-lock cleanup removed wake target: %v", statErr)
+	}
+	if _, statErr := os.Stat(fixture.preparedPath); statErr != nil {
+		t.Fatalf("missing-final-lock cleanup removed prepared marker: %v", statErr)
+	}
+	fixture.assertControlSocketPresent(t)
+}
+
 func TestAuthoritativeWakeAcquireDetachedDuringReleaseStopsWithoutReacquiring(t *testing.T) {
 	fixture := newAuthoritativeWakePreparedCleanupFixture(t)
 	names := []string{".wake.lock", wakeTargetFileName, wakeStateFileName, wakePreparedFileName}
@@ -139,6 +164,48 @@ func TestAuthoritativeWakeAcquireDetachedDuringReleaseStopsWithoutReacquiring(t 
 	if _, statErr := os.Stat(filepath.Join(detachedPath, ".wake.lock")); !os.IsNotExist(statErr) {
 		t.Fatalf("detached authoritative lock = %v, want absent", statErr)
 	}
+	assertDetachedWakeFilesUnchanged(t, fixture.agentDir.path, successorBefore)
+}
+
+func TestAuthoritativeWakeCleanupDetachesBeforeStateSnapshot(t *testing.T) {
+	fixture := newAuthoritativeWakePreparedCleanupFixture(t)
+	names := []string{".wake.lock", wakeTargetFileName, wakeStateFileName, wakePreparedFileName}
+	claimBefore := snapshotDetachedWakeFiles(t, fixture.agentDir.path, names...)
+	detachedPath := fixture.agentDir.path + ".detached-state-snapshot"
+	var successorBefore map[string]detachedWakeFileSnapshot
+	original := beforeAuthoritativeWakeStateSnapshot
+	beforeAuthoritativeWakeStateSnapshot = func() {
+		beforeAuthoritativeWakeStateSnapshot = func() {}
+		if err := os.Rename(fixture.agentDir.path, detachedPath); err != nil {
+			t.Fatalf("detach authoritative wake agent directory: %v", err)
+		}
+		if err := os.Mkdir(fixture.agentDir.path, 0o700); err != nil {
+			t.Fatalf("create authoritative successor wake agent directory: %v", err)
+		}
+		for name, snapshot := range claimBefore {
+			if err := os.WriteFile(
+				filepath.Join(fixture.agentDir.path, name),
+				snapshot.raw,
+				snapshot.info.Mode().Perm(),
+			); err != nil {
+				t.Fatalf("write authoritative successor %s: %v", name, err)
+			}
+		}
+		successorBefore = snapshotDetachedWakeFiles(t, fixture.agentDir.path, names...)
+	}
+	t.Cleanup(func() { beforeAuthoritativeWakeStateSnapshot = original })
+
+	err := fixture.release()
+	var cleanupOnly *wakeDetachedCleanupOnlyError
+	if !errors.As(err, &cleanupOnly) {
+		t.Fatalf("detached state-snapshot cleanup error = %v, want detached cleanup-only", err)
+	}
+	assertPathMissingForTest(t, filepath.Join(detachedPath, ".wake.lock"))
+	assertDetachedWakeFilesUnchanged(t, detachedPath, map[string]detachedWakeFileSnapshot{
+		wakeTargetFileName:   claimBefore[wakeTargetFileName],
+		wakeStateFileName:    claimBefore[wakeStateFileName],
+		wakePreparedFileName: claimBefore[wakePreparedFileName],
+	})
 	assertDetachedWakeFilesUnchanged(t, fixture.agentDir.path, successorBefore)
 }
 

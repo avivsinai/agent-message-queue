@@ -300,7 +300,7 @@ func opsWakeLockFromWakeCheckObservation(
 	}
 	lockPath := inspection.LockPath
 	if lockPath == "" {
-		lockPath = filepath.Join(fsq.AgentBase(root, me), ".wake.lock")
+		lockPath = filepath.Join(fsq.AgentBase(root, me), wakeLockFileName)
 	}
 	opsLock := &opsWakeLock{
 		Status:          status,

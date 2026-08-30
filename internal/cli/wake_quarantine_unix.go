@@ -43,7 +43,7 @@ var beforeWakeQuarantineCleanupRevalidation = func(wakeQuarantineCleanupCandidat
 var beforeWakeRestartQuarantineRevalidation = func(wakeRestartRecordSnapshot) {}
 
 func parseWakeQuarantineName(name string) (time.Time, bool) {
-	for _, source := range []string{".wake.lock", wakeTargetFileName, wakeRestartFileName} {
+	for _, source := range []string{wakeLockFileName, wakeTargetFileName, wakeRestartFileName} {
 		prefix := source + ".quarantined."
 		if !strings.HasPrefix(name, prefix) {
 			continue
@@ -176,6 +176,9 @@ func findWakeQuarantineOlderThan(root string, cutoff time.Time) ([]wakeQuarantin
 }
 
 func removeWakeQuarantineCandidate(root string, candidate wakeQuarantineCleanupCandidate) error {
+	if err := assertNotWakeLockName(candidate.Name); err != nil {
+		return err
+	}
 	when, exact := parseWakeQuarantineName(candidate.Name)
 	if !exact || !when.Equal(candidate.Quarantined) {
 		return fmt.Errorf("wake quarantine cleanup candidate name changed")
@@ -338,7 +341,7 @@ func isJSONWhitespace(value byte) bool {
 }
 
 func wakeQuarantineName(source string, now time.Time) (string, error) {
-	if source != ".wake.lock" && source != wakeTargetFileName && source != wakeRestartFileName {
+	if source != wakeLockFileName && source != wakeTargetFileName && source != wakeRestartFileName {
 		return "", fmt.Errorf("unsupported wake quarantine source %q", source)
 	}
 	return source + ".quarantined." + now.UTC().Format(wakeQuarantineTimestampLayout), nil
@@ -517,7 +520,7 @@ func quarantineMalformedWakeLockAt(
 	return moveWakeQuarantineAt(
 		dirfd,
 		agentDir,
-		".wake.lock",
+		wakeLockFileName,
 		"wake lock",
 		wakeQuarantineSnapshot{Raw: current.raw, FileInfo: current.fileInfo},
 	)

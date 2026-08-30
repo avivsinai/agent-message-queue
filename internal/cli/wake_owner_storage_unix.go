@@ -68,7 +68,7 @@ func publishAuthoritativeWakeClaimWithDebugAt(
 		return err
 	}
 
-	existing, err := unix.Openat(dirfd, ".wake.lock", unix.O_RDONLY|unix.O_NONBLOCK|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	existing, err := unix.Openat(dirfd, wakeLockFileName, unix.O_RDONLY|unix.O_NONBLOCK|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err == nil {
 		_ = unix.Close(existing)
 		return errWakeOwnerLockExists
@@ -177,7 +177,7 @@ func publishAuthoritativeWakeClaimWithDebugAt(
 			_ = unix.Unlinkat(dirfd, lockTemp, 0)
 		}
 	}()
-	if err := publishAuthoritativeWakeLinkAt(dirfd, lockTemp, dirfd, ".wake.lock", 0); err != nil {
+	if err := publishAuthoritativeWakeLinkAt(dirfd, lockTemp, dirfd, wakeLockFileName, 0); err != nil {
 		if err == unix.EEXIST {
 			return errWakeOwnerLockExists
 		}
@@ -472,9 +472,25 @@ func removeAuthoritativeWakeClaimAt(
 	if !sameWakeLockGeneration(expected, current) {
 		return fmt.Errorf("authoritative wake claim changed before release")
 	}
+	relation, relationErr := retainedWakeAgentDirRelation(agentDir)
+	if relationErr != nil {
+		return newWakeStateBoundInconclusiveError(relationErr)
+	}
+	switch relation {
+	case wakeAgentDirCanonical, wakeAgentDirDetached:
+	case wakeAgentDirInconclusive:
+		return newWakeStateBoundInconclusiveError(
+			fmt.Errorf("wake agent directory relation is inconclusive before authoritative release"),
+		)
+	default:
+		return newWakeStateBoundInconclusiveError(
+			fmt.Errorf("unknown wake agent directory relation %d", relation),
+		)
+	}
+	detached := relation == wakeAgentDirDetached
 	var detachedValidationErr error
 	if err := validateWakeStateAgentDirAt(dirfd, agentDir); err != nil {
-		if !retainedWakeAgentDirIsDetached(agentDir) {
+		if !detached {
 			return err
 		}
 		detachedValidationErr = err
@@ -544,26 +560,76 @@ func removeAuthoritativeWakeClaimAt(
 	}
 	if detachedValidationErr == nil {
 		if err := validateWakeStateAgentDirAt(dirfd, agentDir); err != nil {
-			if retainedWakeAgentDirIsDetached(agentDir) {
-				return newWakeDetachedCleanupOnlyError(err)
+			relation, relationErr = retainedWakeAgentDirRelation(agentDir)
+			if relationErr != nil {
+				return newWakeStateBoundInconclusiveError(relationErr)
 			}
-			return err
+			switch relation {
+			case wakeAgentDirDetached:
+				detached = true
+				detachedValidationErr = err
+			case wakeAgentDirCanonical:
+				return err
+			case wakeAgentDirInconclusive:
+				return newWakeStateBoundInconclusiveError(
+					fmt.Errorf("wake agent directory relation is inconclusive during authoritative release"),
+				)
+			default:
+				return newWakeStateBoundInconclusiveError(
+					fmt.Errorf("unknown wake agent directory relation %d", relation),
+				)
+			}
 		}
 	}
 	beforeAuthoritativeWakeStateSnapshot()
+	relation, relationErr = retainedWakeAgentDirRelation(agentDir)
+	if relationErr != nil {
+		return newWakeStateBoundInconclusiveError(relationErr)
+	}
+	switch relation {
+	case wakeAgentDirCanonical:
+	case wakeAgentDirDetached:
+		if !detached {
+			detached = true
+			detachedValidationErr = wakeDetachedCleanupValidationError()
+		}
+	case wakeAgentDirInconclusive:
+		return newWakeStateBoundInconclusiveError(
+			fmt.Errorf("wake agent directory relation is inconclusive before authoritative state snapshot"),
+		)
+	default:
+		return newWakeStateBoundInconclusiveError(
+			fmt.Errorf("unknown wake agent directory relation %d", relation),
+		)
+	}
 	var releaseStateSnapshot wakeStateFileSnapshot
 	var releaseStateExists bool
 	if detachedValidationErr == nil {
 		var stateSnapshotErr error
 		releaseStateSnapshot, releaseStateExists, stateSnapshotErr = readWakeStateRawSnapshotAt(dirfd, agentDir)
 		if stateSnapshotErr != nil {
-			if retainedWakeAgentDirIsDetached(agentDir) {
-				return newWakeDetachedCleanupOnlyError(stateSnapshotErr)
+			relation, relationErr = retainedWakeAgentDirRelation(agentDir)
+			if relationErr != nil {
+				return newWakeStateBoundInconclusiveError(relationErr)
 			}
-			continueAfterWakeStateProjectionError(newWakeStateProjectionError(
-				fmt.Errorf("snapshot wake state before release: %w", stateSnapshotErr),
-			))
-			releaseStateExists = false
+			switch relation {
+			case wakeAgentDirDetached:
+				detached = true
+				detachedValidationErr = errors.Join(detachedValidationErr, stateSnapshotErr)
+			case wakeAgentDirCanonical:
+				continueAfterWakeStateProjectionError(newWakeStateProjectionError(
+					fmt.Errorf("snapshot wake state before release: %w", stateSnapshotErr),
+				))
+				releaseStateExists = false
+			case wakeAgentDirInconclusive:
+				return newWakeStateBoundInconclusiveError(
+					fmt.Errorf("wake agent directory relation is inconclusive during authoritative state snapshot"),
+				)
+			default:
+				return newWakeStateBoundInconclusiveError(
+					fmt.Errorf("unknown wake agent directory relation %d", relation),
+				)
+			}
 		}
 	}
 	if detachedValidationErr == nil {
@@ -574,12 +640,14 @@ func removeAuthoritativeWakeClaimAt(
 
 	beforeAuthoritativeWakeLockFinalRemoval()
 	finalLock := readWakeLockMetadataAt(dirfd, agentDir, expected.Root, expected.Agent)
-	if wakeLockHasMultipleLinks(finalLock.fileInfo) {
+	multipleLinks, linkErr := wakeLockHasMultipleLinks(finalLock.fileInfo)
+	if linkErr != nil {
+		err := fmt.Errorf("cannot determine authoritative wake lock hard-link count; preserving it: %w", linkErr)
+		return errors.Join(detachedValidationErr, err)
+	}
+	if multipleLinks {
 		err := fmt.Errorf("authoritative wake lock has multiple hard links; preserving it to avoid mutating an alias")
-		if detachedValidationErr != nil {
-			return newWakeDetachedCleanupOnlyError(errors.Join(detachedValidationErr, err))
-		}
-		return err
+		return errors.Join(detachedValidationErr, err)
 	}
 	if !sameWakeLockGeneration(current, finalLock) {
 		return fmt.Errorf("authoritative wake claim changed immediately before release")
@@ -589,7 +657,7 @@ func removeAuthoritativeWakeClaimAt(
 	// cooperating writer; an unguarded same-UID writer is out of contract. A
 	// rename-and-verify alternative would expose lock absence to pre-P2b readers
 	// during a two-step removal, creating a real competing-authority hazard.
-	if err := unix.Unlinkat(dirfd, ".wake.lock", 0); err != nil {
+	if err := newWakeMutationScope(agentDir, dirfd).unlinkWakeLockForCleanup(); err != nil {
 		if err == unix.ENOENT {
 			return preparedSnapshotErr
 		}
@@ -631,18 +699,38 @@ func removeAuthoritativeWakeClaimAt(
 	}
 	removeAuthoritativeWakeAfterLockRelease()
 	if err := validateWakeStateAgentDirAt(dirfd, agentDir); err != nil {
-		if retainedWakeAgentDirIsDetached(agentDir) {
+		relation, relationErr := retainedWakeAgentDirRelation(agentDir)
+		if relationErr != nil {
+			return errors.Join(cleanupErr, newWakeStateBoundInconclusiveError(relationErr))
+		}
+		switch relation {
+		case wakeAgentDirDetached:
 			return errors.Join(
 				cleanupErr,
 				newWakeDetachedCleanupOnlyError(err),
 			)
+		case wakeAgentDirCanonical:
+			return errors.Join(cleanupErr, err)
+		case wakeAgentDirInconclusive:
+			return errors.Join(
+				cleanupErr,
+				newWakeStateBoundInconclusiveError(
+					fmt.Errorf("wake agent directory relation is inconclusive after authoritative release"),
+				),
+			)
+		default:
+			return errors.Join(
+				cleanupErr,
+				newWakeStateBoundInconclusiveError(
+					fmt.Errorf("unknown wake agent directory relation %d", relation),
+				),
+			)
 		}
-		return errors.Join(cleanupErr, err)
 	}
 
 	// A replacement is never selected or cleaned. Cooperative writers cannot
 	// install one while this guard is held; this check also catches bypassers.
-	replacement, err := unix.Openat(dirfd, ".wake.lock", unix.O_RDONLY|unix.O_NONBLOCK|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	replacement, err := unix.Openat(dirfd, wakeLockFileName, unix.O_RDONLY|unix.O_NONBLOCK|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err == nil {
 		_ = unix.Close(replacement)
 		return cleanupErr
@@ -698,7 +786,9 @@ func removeAuthoritativeWakeClaimAt(
 		if nameErr != nil {
 			cleanupErr = errors.Join(cleanupErr, nameErr)
 		} else if name != "" {
-			if err := unix.Unlinkat(dirfd, name, 0); err != nil && err != unix.ENOENT {
+			if err := assertNotWakeLockName(name); err != nil {
+				cleanupErr = errors.Join(cleanupErr, err)
+			} else if err := unix.Unlinkat(dirfd, name, 0); err != nil && err != unix.ENOENT {
 				cleanupErr = errors.Join(
 					cleanupErr,
 					fmt.Errorf("remove released wake control socket: %w", err),
@@ -718,10 +808,30 @@ func removeAuthoritativeWakeClaimAt(
 	}
 	removeAuthoritativeWakeBeforeFinalAuthorityCheck()
 	if err := validateWakeStateAgentDirAt(dirfd, agentDir); err != nil {
-		if retainedWakeAgentDirIsDetached(agentDir) {
-			return errors.Join(cleanupErr, newWakeDetachedCleanupOnlyError(err))
+		relation, relationErr := retainedWakeAgentDirRelation(agentDir)
+		if relationErr != nil {
+			return errors.Join(cleanupErr, newWakeStateBoundInconclusiveError(relationErr))
 		}
-		return errors.Join(cleanupErr, err)
+		switch relation {
+		case wakeAgentDirDetached:
+			return errors.Join(cleanupErr, newWakeDetachedCleanupOnlyError(err))
+		case wakeAgentDirCanonical:
+			return errors.Join(cleanupErr, err)
+		case wakeAgentDirInconclusive:
+			return errors.Join(
+				cleanupErr,
+				newWakeStateBoundInconclusiveError(
+					fmt.Errorf("wake agent directory relation is inconclusive after authoritative release"),
+				),
+			)
+		default:
+			return errors.Join(
+				cleanupErr,
+				newWakeStateBoundInconclusiveError(
+					fmt.Errorf("unknown wake agent directory relation %d", relation),
+				),
+			)
+		}
 	}
 	return cleanupErr
 }

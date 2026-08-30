@@ -255,6 +255,9 @@ func removeEmptyDarwinWakeRestartStageDir(stagePath string) error {
 	dirPath := filepath.Dir(stagePath)
 	parentPath := filepath.Dir(dirPath)
 	name := filepath.Base(dirPath)
+	if err := assertNotWakeLockName(name); err != nil {
+		return err
+	}
 	parentFD, err := unix.Open(parentPath, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		if errors.Is(err, syscall.ENOENT) || errors.Is(err, syscall.ENOTDIR) {

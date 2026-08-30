@@ -214,6 +214,9 @@ func darwinControlSocketBasenameForCleanup(agentDir *wakeAgentDir, path string) 
 }
 
 func removeDarwinControlSocketAt(dirfd int, name string) error {
+	if err := assertNotWakeLockName(name); err != nil {
+		return err
+	}
 	err := unix.Unlinkat(dirfd, name, 0)
 	if err == nil || err == unix.ENOENT {
 		return nil
@@ -443,27 +446,30 @@ func handleDarwinOwnerControl(
 	testHooks *darwinWakeControlTestHooks,
 ) {
 	authorized := false
-	err := withExistingWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
-		_, _, err := authorizeDarwinOwnerControlAt(
-			dirfd,
-			agentDir,
-			root,
-			me,
-			lock,
-			request,
-			peerPID,
-			peerUID,
-		)
-		if err != nil {
-			return err
-		}
-		authorized = true
-		select {
-		case stopRequest <- struct{}{}:
-		default:
-		}
-		return nil
-	})
+	err := withExistingWakeMutationScopeModeInDir(
+		agentDir,
+		unix.LOCK_EX|unix.LOCK_NB,
+		func(scope *wakeMutationScope) error {
+			_, _, err := authorizeDarwinOwnerControlAt(
+				scope.dirfd,
+				agentDir,
+				root,
+				me,
+				lock,
+				request,
+				peerPID,
+				peerUID,
+			)
+			if err != nil {
+				return err
+			}
+			if err := scope.queueStopRequest(stopRequest); err != nil {
+				return err
+			}
+			authorized = true
+			return nil
+		},
+	)
 	if err != nil || !authorized {
 		return
 	}
@@ -614,26 +620,25 @@ func handleDarwinWakeRestartControl(
 	if restartSignals == nil {
 		return
 	}
-	err := withExistingWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
-		if err := authorizeDarwinWakeRestartControlAt(
-			dirfd,
-			agentDir,
-			root,
-			me,
-			lock,
-			request,
-			peerPID,
-			peerUID,
-		); err != nil {
-			return err
-		}
-		select {
-		case restartSignals <- syscall.SIGUSR1:
-			return nil
-		default:
-			return fmt.Errorf("wake restart control signal queue is full")
-		}
-	})
+	err := withExistingWakeMutationScopeModeInDir(
+		agentDir,
+		unix.LOCK_EX|unix.LOCK_NB,
+		func(scope *wakeMutationScope) error {
+			if err := authorizeDarwinWakeRestartControlAt(
+				scope.dirfd,
+				agentDir,
+				root,
+				me,
+				lock,
+				request,
+				peerPID,
+				peerUID,
+			); err != nil {
+				return err
+			}
+			return scope.queueRestartSignal(restartSignals, syscall.SIGUSR1)
+		},
+	)
 	if err != nil {
 		return
 	}
@@ -823,20 +828,27 @@ func startWakeControlListenerInDirOwnedWithRestart(
 					requestedTargetDigest = fields[1]
 				}
 				accepted := false
-				err = withExistingWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
-					current := inspectWakeLockAt(dirfd, agentDir, root, me)
-					if !current.Exists || current.Lock.Generation != lock.Generation || current.Lock.ControlSocket != path {
+				err = withExistingWakeMutationScopeModeInDir(
+					agentDir,
+					unix.LOCK_EX|unix.LOCK_NB,
+					func(scope *wakeMutationScope) error {
+						current := inspectWakeLockAt(scope.dirfd, agentDir, root, me)
+						if !current.Exists || current.Lock.Generation != lock.Generation || current.Lock.ControlSocket != path {
+							return nil
+						}
+						if err := validateWakeLockOwnerlessMutationAtForTermination(scope.dirfd, agentDir, current); err != nil {
+							return err
+						}
+						if err := validateRequestedWakeTargetDigestAt(scope.dirfd, agentDir, current, requestedTargetDigest); err != nil {
+							return err
+						}
+						if err := scope.queueStopRequest(stopRequest); err != nil {
+							return err
+						}
+						accepted = true
 						return nil
-					}
-					if err := validateWakeLockOwnerlessMutationAtForTermination(dirfd, agentDir, current); err != nil {
-						return err
-					}
-					if err := validateRequestedWakeTargetDigestAt(dirfd, agentDir, current, requestedTargetDigest); err != nil {
-						return err
-					}
-					accepted = true
-					return nil
-				})
+					},
+				)
 				if err != nil || !accepted {
 					return
 				}
@@ -845,35 +857,35 @@ func startWakeControlListenerInDirOwnedWithRestart(
 				// published until the loop has actually quiesced so a concurrent
 				// acquire cannot start a second injector.
 				_ = conn.SetDeadline(time.Time{})
-				select {
-				case stopRequest <- struct{}{}:
-				default:
-				}
 				<-loopStopped
 				if testHooks != nil && testHooks.afterLoopStopped != nil {
 					testHooks.afterLoopStopped()
 				}
 				var removal wakeLockRemovalOutcome
-				err = withExistingWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
-					current := inspectWakeLockAt(dirfd, agentDir, root, me)
-					if !current.Exists || current.Lock.Generation != lock.Generation ||
-						current.Lock.ControlSocket != path {
+				err = withExistingWakeMutationScopeModeInDir(
+					agentDir,
+					unix.LOCK_EX|unix.LOCK_NB,
+					func(scope *wakeMutationScope) error {
+						current := inspectWakeLockAt(scope.dirfd, agentDir, root, me)
+						if !current.Exists || current.Lock.Generation != lock.Generation ||
+							current.Lock.ControlSocket != path {
+							return nil
+						}
+						if err := validateWakeLockOwnerlessMutationAtForTermination(scope.dirfd, agentDir, current); err != nil {
+							return err
+						}
+						if err := validateRequestedWakeTargetDigestAt(scope.dirfd, agentDir, current, requestedTargetDigest); err != nil {
+							return err
+						}
+						removal = removeWakeLockIfUnchangedGuardedAtDurableOutcome(
+							scope.dirfd,
+							agentDir,
+							current,
+							scope.unlinkWakeLockForCleanup,
+						)
 						return nil
-					}
-					if err := validateWakeLockOwnerlessMutationAtForTermination(dirfd, agentDir, current); err != nil {
-						return err
-					}
-					if err := validateRequestedWakeTargetDigestAt(dirfd, agentDir, current, requestedTargetDigest); err != nil {
-						return err
-					}
-					removal = removeWakeLockIfUnchangedGuardedAtDurableOutcome(
-						dirfd,
-						agentDir,
-						current,
-						func() error { return unix.Unlinkat(dirfd, ".wake.lock", 0) },
-					)
-					return nil
-				})
+					},
+				)
 				if err != nil || !removal.Committed {
 					return
 				}

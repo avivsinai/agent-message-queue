@@ -47,6 +47,7 @@ type wakeLock struct {
 }
 
 const (
+	wakeLockFileName      = ".wake.lock"
 	wakeOwnerLockSchema   = 1
 	wakeOwnerWakeMode     = "owner-inject-via-v1"
 	wakeOwnerLockFileMode = os.FileMode(0o400)
@@ -148,7 +149,7 @@ func (e *wakeAlreadyRunningError) Error() string {
 }
 
 func inspectWakeLock(root, me string) wakeLockInspection {
-	lockPath := filepath.Join(fsq.AgentBase(root, me), ".wake.lock")
+	lockPath := filepath.Join(fsq.AgentBase(root, me), wakeLockFileName)
 	return inspectWakeLockWithReader(root, me, lockPath, func() ([]byte, os.FileInfo, error) {
 		return readWakeLockFileWithInfo(lockPath)
 	})
@@ -705,7 +706,11 @@ func removeWakeLockIfUnchangedGuardedWithIOStatus(
 	if inspection.fileInfo == nil || currentInfo == nil || !sameWakeFileIdentity(inspection.fileInfo, currentInfo) {
 		return false, fmt.Errorf("wake lock generation changed while cleaning stale lock; retry")
 	}
-	if wakeLockHasMultipleLinks(currentInfo) {
+	multipleLinks, linkErr := wakeLockHasMultipleLinks(currentInfo)
+	if linkErr != nil {
+		return false, fmt.Errorf("cannot determine wake lock hard-link count; preserving it: %w", linkErr)
+	}
+	if multipleLinks {
 		return false, fmt.Errorf("wake lock has multiple hard links; preserving it to avoid mutating an alias")
 	}
 	// Pathname removal is safe under the lifecycle guard held by every

@@ -112,7 +112,7 @@ func TestWakeLockRemovalClassifiesDirectorySwapAfterUnlink(t *testing.T) {
 	assertDetachedWakeFilesUnchanged(t, fixture.agentDir.path, successorBefore)
 }
 
-func TestDetachedBoundWakeResidueCleanupFailsClosedWhenCanonicalPathAbsent(t *testing.T) {
+func TestDetachedBoundWakeResidueCleanupRemovesOldClaimWhenCanonicalPathAbsent(t *testing.T) {
 	fixture := newGenericWakePreparedCleanupFixture(t, true)
 	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
 		return wakeProcessInfo{PID: pid, Running: true}
@@ -125,7 +125,6 @@ func TestDetachedBoundWakeResidueCleanupFailsClosedWhenCanonicalPathAbsent(t *te
 	residueBefore := snapshotDetachedWakeFiles(
 		t,
 		detachedPath,
-		".wake.lock",
 		wakeTargetFileName,
 		wakeStateFileName,
 		wakePreparedFileName,
@@ -135,13 +134,10 @@ func TestDetachedBoundWakeResidueCleanupFailsClosedWhenCanonicalPathAbsent(t *te
 		return removeWakeLockIfUnchangedGuardedAt(dirfd, fixture.agentDir, inspection)
 	})
 	var cleanupOnly *wakeDetachedCleanupOnlyError
-	if errors.As(err, &cleanupOnly) {
-		t.Fatalf("canonical-path-absent cleanup returned detached authority: %v", err)
+	if !errors.As(err, &cleanupOnly) {
+		t.Fatalf("canonical-path-absent cleanup error = %v, want detached cleanup-only", err)
 	}
-	var bound *wakeStateBoundInconclusiveError
-	if !errors.As(err, &bound) {
-		t.Fatalf("canonical-path-absent cleanup error = %v, want bound inconclusive", err)
-	}
+	assertPathMissingForTest(t, filepath.Join(detachedPath, ".wake.lock"))
 	assertDetachedWakeFilesUnchanged(t, detachedPath, residueBefore)
 }
 

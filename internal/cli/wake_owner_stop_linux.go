@@ -37,17 +37,6 @@ func prepareAuthoritativeWakeStopPlatform(
 		Inspection: metadata,
 		close:      func() error { return linuxPidfdClose(pidfd) },
 	}
-	exited, err := linuxPidfdPoll(pidfd, 0)
-	if err != nil {
-		_ = capability.Close()
-		return authoritativeWakeStopCapability{}, fmt.Errorf("poll authoritative wake pidfd before inspection: %w", err)
-	}
-	if exited {
-		capability.Absent = true
-		capability.Inspection.Process = wakeProcessInfo{PID: metadata.PID}
-		classifyWakeLock(metadata.Root, metadata.Agent, &capability.Inspection)
-		return capability, nil
-	}
 
 	metadata.Process = inspectWakeProcess(metadata.PID)
 	classifyWakeLock(metadata.Root, metadata.Agent, &metadata)
@@ -73,19 +62,13 @@ func prepareAuthoritativeWakeStopPlatform(
 		return authoritativeWakeStopCapability{}, fmt.Errorf("authoritative wake identity is %s: %s", metadata.Status, metadata.Reason)
 	}
 
-	exited, err = linuxPidfdPoll(pidfd, 0)
-	if err != nil {
-		_ = capability.Close()
-		return authoritativeWakeStopCapability{}, fmt.Errorf("poll authoritative wake pidfd after inspection: %w", err)
-	}
-	if exited {
-		capability.Absent = true
-		capability.Inspection.Process = wakeProcessInfo{PID: metadata.PID}
-		classifyWakeLock(metadata.Root, metadata.Agent, &capability.Inspection)
-		return capability, nil
-	}
-	capability.stop = func(wakeOwnerReleaseAuthorization) error {
-		return terminateWakePidfd(pidfd)
+	capability.stop = func(auth wakeOwnerReleaseAuthorization) error {
+		return terminateAuthoritativeWakePidfdWithAuthorization(
+			agentDir,
+			metadata,
+			auth,
+			pidfd,
+		)
 	}
 	return capability, nil
 }

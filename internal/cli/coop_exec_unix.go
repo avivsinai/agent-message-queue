@@ -1399,11 +1399,25 @@ func rollbackAuthoritativeWakeClaimInDir(
 			!sameWakeOwner(current.Lock.Owner, &owner) {
 			return fmt.Errorf("wake claim changed before exact owner rollback")
 		}
-		if retainedWakeAgentDirIsDetached(agentDir) {
+		relation, relationErr := retainedWakeAgentDirRelation(agentDir)
+		if relationErr != nil {
+			return newWakeStateBoundInconclusiveError(relationErr)
+		}
+		switch relation {
+		case wakeAgentDirCanonical:
+		case wakeAgentDirDetached:
 			if current.Status != wakeLockStale {
 				return fmt.Errorf("owner-bound wake is not conclusively absent after helper stop")
 			}
 			return removeAuthoritativeWakeClaimAt(dirfd, agentDir, current, nil)
+		case wakeAgentDirInconclusive:
+			return newWakeStateBoundInconclusiveError(
+				fmt.Errorf("wake agent directory relation is inconclusive after helper stop"),
+			)
+		default:
+			return newWakeStateBoundInconclusiveError(
+				fmt.Errorf("unknown wake agent directory relation %d", relation),
+			)
 		}
 		target, err := validateAuthoritativeWakeClaimPairAt(dirfd, agentDir, current)
 		if err != nil {

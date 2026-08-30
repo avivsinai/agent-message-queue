@@ -203,13 +203,28 @@ func validateWakeLockOwnerlessMutationAtForTermination(
 	if err != nil {
 		return newWakeStateBoundInconclusiveError(err)
 	}
-	if bound && retainedWakeAgentDirIsDetached(agentDir) {
+	relation, err := retainedWakeAgentDirRelation(agentDir)
+	if err != nil {
+		return newWakeStateBoundInconclusiveError(err)
+	}
+	switch relation {
+	case wakeAgentDirCanonical, wakeAgentDirDetached:
+	case wakeAgentDirInconclusive:
+		return newWakeStateBoundInconclusiveError(
+			fmt.Errorf("wake agent directory relation is inconclusive before ownerless mutation"),
+		)
+	default:
+		return newWakeStateBoundInconclusiveError(
+			fmt.Errorf("unknown wake agent directory relation %d", relation),
+		)
+	}
+	if bound && relation == wakeAgentDirDetached {
 		if err := validateWakeLockOwnerlessBoundStateInRetainedDirAt(
 			dirfd, agentDir, inspection,
 		); err != nil {
 			return err
 		}
-	} else if retainedWakeAgentDirIsDetached(agentDir) {
+	} else if relation == wakeAgentDirDetached {
 		if _, err := readWakeStateSelectionAtRetained(
 			dirfd,
 			agentDir,
@@ -252,7 +267,12 @@ func validateWakeLockStaleRemovalAtForTermination(
 	agentDir *wakeAgentDir,
 	inspection wakeLockInspection,
 ) error {
-	if !retainedWakeAgentDirIsDetached(agentDir) {
+	relation, err := retainedWakeAgentDirRelation(agentDir)
+	if err != nil {
+		return newWakeStateBoundInconclusiveError(err)
+	}
+	switch relation {
+	case wakeAgentDirCanonical:
 		if _, err := readWakeStateSelectionForInspectionAt(
 			dirfd,
 			agentDir,
@@ -262,6 +282,15 @@ func validateWakeLockStaleRemovalAtForTermination(
 		); err != nil {
 			return err
 		}
+	case wakeAgentDirDetached:
+	case wakeAgentDirInconclusive:
+		return newWakeStateBoundInconclusiveError(
+			fmt.Errorf("wake agent directory relation is inconclusive before stale removal"),
+		)
+	default:
+		return newWakeStateBoundInconclusiveError(
+			fmt.Errorf("unknown wake agent directory relation %d", relation),
+		)
 	}
 	if wakeLockHasOwnerMarkers(inspection) {
 		return fmt.Errorf("owner-bound wake claims require 'amq wake recover-owner --me %s'", inspection.Agent)
@@ -377,10 +406,20 @@ func resolveMissingWakeLockAfterTerminationInDir(
 		current = inspectWakeLockAt(dirfd, agentDir, inspection.Root, inspection.Agent)
 		return validateWakeStateAgentDirAt(dirfd, agentDir)
 	}); err != nil {
-		if retainedWakeAgentDirIsDetached(agentDir) {
-			return false, nil
+		relation, relationErr := retainedWakeAgentDirRelation(agentDir)
+		if relationErr != nil {
+			return false, errors.Join(err, relationErr)
 		}
-		return false, err
+		switch relation {
+		case wakeAgentDirDetached:
+			return false, nil
+		case wakeAgentDirCanonical:
+			return false, err
+		case wakeAgentDirInconclusive:
+			return false, errors.Join(err, fmt.Errorf("wake agent directory relation is inconclusive after termination"))
+		default:
+			return false, errors.Join(err, fmt.Errorf("unknown wake agent directory relation %d", relation))
+		}
 	}
 	return resolveMissingWakeLockAfterTerminationFromInspection(inspection, current, terminationErr)
 }

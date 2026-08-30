@@ -1080,7 +1080,7 @@ func repairWake(root, me string) (wakeRepairResult, error) {
 		Status: "unknown",
 		Agent:  me,
 		Root:   canonicalWakeRoot(root),
-		Lock:   filepath.Join(fsq.AgentBase(root, me), ".wake.lock"),
+		Lock:   filepath.Join(fsq.AgentBase(root, me), wakeLockFileName),
 		Target: wakeTargetPath(root, me),
 	}
 	if err := os.MkdirAll(fsq.AgentBase(root, me), 0o700); err != nil {
