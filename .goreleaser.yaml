@@ -30,12 +30,13 @@ builds:
       - -s -w -X main.version={{.Version}}
     goos:
       - darwin
+      - windows
     goarch:
       - amd64
       - arm64
     hooks:
       post:
-        - sh -ceu 'codesign --force --sign - --identifier io.github.avivsinai.amq-keepalive "$1"' _ "{{ .Path }}"
+        - sh -ceu 'if [ "$2" = darwin ]; then codesign --force --sign - --identifier io.github.avivsinai.amq-keepalive "$1"; fi' _ "{{ .Path }}" "{{ .Os }}"
 
   - id: amq-bridge
     main: ./cmd/amq-bridge
@@ -84,6 +85,9 @@ archives:
     ids: [amq-keepalive]
     formats: [tar.gz]
     name_template: "amq-keepalive_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        formats: [zip]
 
   - id: amq-bridge
     ids: [amq-bridge]

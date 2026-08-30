@@ -115,9 +115,10 @@ Download from [Releases](https://github.com/avivsinai/agent-message-queue/releas
 | Native Windows (x86_64) | `amq_*_windows_amd64.zip` |
 | WSL (x86_64) | `amq_*_linux_amd64.tar.gz` |
 
-The optional macOS wake supervisor is published separately as
-`amq-keepalive_*_darwin_arm64.tar.gz` or
-`amq-keepalive_*_darwin_amd64.tar.gz`. It is intentionally not installed by
+The optional keepalive companion is published separately as
+`amq-keepalive_*_darwin_arm64.tar.gz`,
+`amq-keepalive_*_darwin_amd64.tar.gz`, or
+`amq-keepalive_*_windows_{amd64,arm64}.zip`. It is intentionally not installed by
 the Homebrew formula. AMQ saves the resolved injector executable as part of a
 wake's identity; a versioned Homebrew Cellar path can disappear during cleanup
 and prevent an exact retirement. Install the companion as a regular executable
@@ -195,8 +196,8 @@ or the default `%USERPROFILE%\scoop`; global scope comes from
 after an authoritative direct check confirms the latest version (already
 current, or after a successful immediate replacement). A scheduled replacement
 is refreshed on the next successful check (best-effort). On Windows, `--all`
-skips companions because they are not published there, then continues with the
-core upgrade. Companion links are revalidated by their primary path; a
+upgrades a directly installed `amq-keepalive.exe` and skips `amq-bridge` and
+`amq-acp`, which are not published there. Companion links are revalidated by their primary path; a
 secondary same-name alias repointed during download is not detected.
 
 ### Platform capability matrix
@@ -211,6 +212,9 @@ secondary same-name alias repointed during download is not detected.
 WSL is a Linux environment: install a Linux asset there, not the Windows ZIP.
 On native Windows, `doctor --ops` can report wake lock files but cannot verify
 live wake process identity or auto-fix `unverified` locks.
+The separately published native `amq-keepalive.exe` supports direct
+`inject codex-queue` and `inject claude-print`; that submitted-message path is
+not an implementation of `amq wake`, `coop exec`, or terminal supervision.
 The native Windows launch API advertises only `launch_intent_v1` and
 `plan_only_commands_v1`; managed Prepare/Apply, lifecycle, and tmux features
 are omitted and fail negotiation.

@@ -130,7 +130,7 @@ func (c CodexQueue) pinExecutable(ctx context.Context) (string, error) {
 	if lookPath == nil {
 		lookPath = exec.LookPath
 	}
-	looked, err := lookPath("codex")
+	looked, err := lookPath(platformExecutableName("codex"))
 	if err != nil {
 		return "", fmt.Errorf("codex not found on PATH (%w); put a codex >= 0.149 first in PATH", err)
 	}
@@ -154,7 +154,7 @@ func (c CodexQueue) pinExecutable(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("stat codex at %s: %w; put a codex >= 0.149 first in PATH", resolved, err)
 	}
-	if !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+	if !isExecutableRegularFile(info) {
 		return "", fmt.Errorf("codex at %s is not an executable regular file; put a codex >= 0.149 first in PATH", resolved)
 	}
 	out, err := c.runner().Run(ctx, resolved, "queue", "--help")

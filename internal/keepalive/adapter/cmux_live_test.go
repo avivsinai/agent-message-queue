@@ -319,6 +319,7 @@ func cmuxLiveTTYReady(tty string) bool {
 }
 
 func TestCmuxLiveFindSurfaceEntryAndTTYReady(t *testing.T) {
+	skipCmuxNonDarwin(t)
 	blank := cmuxTreeWithSurfaceRecords(map[string]string{"id": testCmuxSurfaceID, "tty": ""})
 	entry, tty, ok := cmuxLiveFindSurfaceEntry(blank, testCmuxSurfaceID)
 	if !ok || len(entry) == 0 {

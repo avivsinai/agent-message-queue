@@ -330,9 +330,9 @@ func AssetName(tag, goos, goarch string) (string, error) {
 // AssetNameFor returns the release archive asset name for a given binary
 // (amq, amq-keepalive, amq-bridge, amq-acp). The archive name template is
 // <binary>_<version>_<os>_<arch>.<ext>, matching .goreleaser.yaml's
-// name_template per build. Only amq publishes a Windows zip; companions are
-// darwin/linux tar.gz, but this function does not enforce that — the caller
-// picks the asset for a binary the release actually publishes.
+// name_template per build. amq and amq-keepalive publish Windows zip assets;
+// the other companions are darwin/linux tar.gz. This function does not
+// enforce that matrix — the caller picks an asset the release publishes.
 func AssetNameFor(binaryName, tag, goos, goarch string) (string, error) {
 	if err := validateBinaryName(binaryName); err != nil {
 		return "", err

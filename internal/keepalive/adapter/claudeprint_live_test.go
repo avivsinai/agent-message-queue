@@ -18,7 +18,7 @@ func TestClaudePrintLiveResumeAck(t *testing.T) {
 	if os.Getenv("AMQ_CLAUDE_LIVE") != "1" {
 		t.Skip("set AMQ_CLAUDE_LIVE=1 to resume a scratch Claude session")
 	}
-	claudePath, err := exec.LookPath("claude")
+	claudePath, err := exec.LookPath(platformExecutableName("claude"))
 	if err != nil {
 		t.Fatal(err)
 	}

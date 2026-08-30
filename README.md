@@ -250,15 +250,16 @@ current, or after a successful immediate replacement). A later companion
 failure does not change that result. A scheduled replacement is reflected when
 the next successful check refreshes the cache (best-effort).
 
-On Windows, `amq upgrade --all` prints a skip line for companions because
-companion binaries are not published for Windows, then continues with the
-core upgrade.
+On Windows, `amq upgrade --all` upgrades a directly installed
+`amq-keepalive.exe`; it skips `amq-bridge` and `amq-acp`, which are not
+published for Windows, then continues with the core upgrade.
 
 ### Keepalive companion
 
 `amq-keepalive` is developed and released from this repository alongside AMQ.
 `make build` produces both binaries, and each AMQ release includes a separate
-`amq-keepalive` archive stamped with the same release version. Verify a build
+`amq-keepalive` archive stamped with the same release version, including a
+native Windows ZIP. Verify a build
 with any equivalent form:
 
 ```bash
@@ -735,9 +736,11 @@ Files are universal, debuggable, and work everywhere. No connection strings, no 
 Those require infrastructure. AMQ is for local inter-process communication where agents share a filesystem. No server to configure or keep running.
 
 **What about Windows?**
-Native Windows supports the core queue, but not `coop exec` or `wake`. Use WSL
-with the Linux binary for the complete co-op workflow. See the explicit
-[platform capability matrix](INSTALL.md#platform-capability-matrix).
+Native Windows supports the core queue and direct submitted injection into a
+live Codex or Claude Code session through `amq-keepalive.exe`; it does not
+support `coop exec`, `amq wake`, or terminal supervision. Use WSL with the
+Linux binary for the complete co-op workflow. See the explicit [platform
+capability matrix](INSTALL.md#platform-capability-matrix).
 
 **Is this production-ready?**
 For local development workflows, yes. AMQ is intentionally simple—it's not trying to be a distributed message broker.

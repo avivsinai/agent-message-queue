@@ -45,8 +45,21 @@ func TestCodexQueueLiveEnqueue(t *testing.T) {
 		t.Fatalf("read thread-writer-locks: %v", err)
 	}
 	insp := platformWriterLockInspector{}
-	var uuid string
+	uuid := strings.TrimSpace(os.Getenv("AMQ_CODEX_LIVE_THREAD"))
+	if uuid != "" {
+		if !lowercaseThreadUUIDRe.MatchString(uuid) {
+			t.Fatalf("AMQ_CODEX_LIVE_THREAD %q is not a lowercase thread uuid", uuid)
+		}
+		lockPath := filepath.Join(home, "thread-writer-locks", uuid+".lock")
+		held, heldErr := insp.Held(context.Background(), lockPath)
+		if heldErr != nil || !held {
+			t.Fatalf("AMQ_CODEX_LIVE_THREAD writer held = %v, %v; open that thread and retry", held, heldErr)
+		}
+	}
 	for _, e := range entries {
+		if uuid != "" {
+			break
+		}
 		name := e.Name()
 		if !strings.HasSuffix(name, ".lock") {
 			continue
@@ -87,7 +100,7 @@ func TestCodexQueueLiveEnqueue(t *testing.T) {
 
 func liveCodexPath() (string, error) {
 	var candidates []string
-	if p, err := exec.LookPath("codex"); err == nil {
+	if p, err := exec.LookPath(platformExecutableName("codex")); err == nil {
 		candidates = append(candidates, p)
 	}
 	candidates = append(candidates, "/opt/homebrew/bin/codex")

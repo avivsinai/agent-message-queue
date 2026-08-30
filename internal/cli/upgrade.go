@@ -114,7 +114,7 @@ func runUpgrade(args []string, currentVersion string) error {
 	} else if handled {
 		return nil
 	}
-	if err := skipUnavailableCompanionsOnWindows(allFlag, runtime.GOOS); err != nil {
+	if err := reportUnavailableCompanionsOnWindows(allFlag, runtime.GOOS); err != nil {
 		return err
 	}
 
@@ -480,19 +480,20 @@ func upgradeCompanionsWithScoopRoots(
 	homebrewPrefixes []string,
 	scoopRoots []update.ScoopInstallRoot,
 ) error {
+	companions := companionBinariesAvailableOn(companionBinariesForUpgrade, runtime.GOOS)
 	searchDirs, homeErr := companionSearchDirsForUpgrade(rawAMQPath, amqDest)
 	if homeErr != nil {
 		if err := writeStdoutLine(fmt.Sprintf("warning: cannot resolve user home directory for companion search; skipping ~/.local/bin: %v", homeErr)); err != nil {
 			return err
 		}
 	}
-	plan, err := discoverCompanionPlan(companionBinariesForUpgrade, searchDirs, amqDest, homebrewPrefixes, scoopRoots)
+	plan, err := discoverCompanionPlan(companions, searchDirs, amqDest, homebrewPrefixes, scoopRoots)
 	if err != nil {
 		return err
 	}
 
 	prepared := make([]preparedCompanionUpgrade, 0, len(plan))
-	for _, name := range companionBinariesForUpgrade {
+	for _, name := range companions {
 		_, ok := plan[name]
 		if !ok {
 			if err := writeStdoutLine(name + " not found; skipping."); err != nil {
@@ -511,7 +512,7 @@ func upgradeCompanionsWithScoopRoots(
 	}
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
-	for _, name := range companionBinariesForUpgrade {
+	for _, name := range companions {
 		target, ok := plan[name]
 		if !ok {
 			continue
@@ -1116,15 +1117,24 @@ func selectUpgradeDestination(path, resolved string, writable func(string) error
 	)
 }
 
-func skipUnavailableCompanionsOnWindows(all *bool, goos string) error {
+func reportUnavailableCompanionsOnWindows(all *bool, goos string) error {
 	if all == nil || !*all || goos != "windows" {
 		return nil
 	}
-	if err := writeStdoutLine("--all: companion binaries are not published for Windows; skipping"); err != nil {
-		return err
+	return writeStdoutLine("--all: only amq-keepalive is published for Windows; skipping amq-bridge and amq-acp")
+}
+
+func companionBinariesAvailableOn(names []string, goos string) []string {
+	if goos != "windows" {
+		return append([]string(nil), names...)
 	}
-	*all = false
-	return nil
+	available := make([]string, 0, 1)
+	for _, name := range names {
+		if name == "amq-keepalive" {
+			available = append(available, name)
+		}
+	}
+	return available
 }
 
 func selectUpgradeDestinationWithRoots(path, resolved string, writable func(string) error, homebrewPrefixes []string, scoopApps string) (string, error) {

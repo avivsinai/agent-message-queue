@@ -51,6 +51,30 @@ match the TTY contract. `notifier_live` is not consumption.
 | Claude Code print (`claude-print`) | `activation=none` + `delivery=submitted` + `session=existing-exact` + `requires_human=false`. Target grammar is only `claude-print:session:<uuid>` (no `:new`). **Shipped** in `internal/keepalive/adapter/claudeprint.go`, registered in `DefaultRegistry` and `DefaultRegistryWithLogf`. Probe resolves `claude` (LookPath → basename via `launch.ProviderForExecutable` → EvalSymlinks → regular+exec → `--help` contains `--resume`, `--output-format`, `--replay-user-messages`) and executes the resolved path. Session jsonl is exactly one `~/.claude/projects/*/<uuid>.jsonl` (scan, not decoded escaped names; slash-to-dash is lossy). Child cwd is the **last** jsonl `cwd` field; missing directory refuses. Owner gate: readable well-formed `~/.claude/sessions/<pid>.json` with matching `sessionId` and a live filename pid (`kill(pid,0)`; ESRCH = stale, never deleted) is `ErrTargetDegraded`; unreadable, malformed, non-positive pid, or pid-mismatched records fail closed. Concurrent AMQ injects take `flock LOCK_EX|LOCK_NB` on `<statedir>/claude-print/<uuid>/inject.lock` before that scan. Claude CLI itself does not refuse dual writers. Inject spawns Setsid process group, stdin one stream-json user line then close (payload never argv), stdout+stderr to `<statedir>/claude-print/<uuid>/<utc-ts>.stream.jsonl` (0600). **Submitted** = the post-init `type=user` `isReplay=true` echo of this child's stdin line (not turn finished; `result` is the child's). Live 2.1.246 `--replay-user-messages` does not echo historical user turns. Fixed permission argv: `--permission-mode auto --allowedTools 'Bash(amq *)'` (dontAsk denies Bash). `CLAUDE_CONFIG_DIR` is ambient (§9.4). Desktop sees the turn only if that same child enabled `--remote-control` (not in the default argv). | yes |
 | Grok Bot.app | none | **not a wake seat** (Mac operator UI for host G) |
 
+### Native Windows submitted adapters (2026-08-30)
+
+The `codex-queue` and `claude-print` capability vectors above are also
+implemented for native Windows direct injection. This is not a native port of
+the TTY wake lifecycle.
+
+- Executable probes resolve `codex.exe` and `claude.exe`, not shell-only
+  `.cmd` shims. A regular Windows executable does not need Unix execute bits.
+- Codex writer activity is tested by attempting a non-blocking exclusive
+  `LockFileEx` across the lock file. `ERROR_LOCK_VIOLATION` means held; a
+  successful temporary lock is immediately released and means idle. This was
+  live-verified against Codex Desktop on 2026-08-30.
+- Claude owner liveness uses `OpenProcess(SYNCHRONIZE)` and a zero-time
+  `WaitForSingleObject`. Concurrent injects use `LockFileEx` on the adapter's
+  `inject.lock`.
+- The resumed Claude process is assigned to a Windows Job Object before its
+  stdin payload is released. Timeout cleanup terminates the job, not only the
+  parent PID. Claude Code 2.1.251 live-verified the post-init `isReplay:true`
+  echo and result on 2026-08-30.
+
+The released Windows `amq-keepalive.exe` exposes this through direct
+`inject`. `amq wake`, `coop exec`, `attach`, `reattach`, and `supervise` remain
+unsupported natively, so none of those Unix terminal guarantees are implied.
+
 Hermes HTTP `/v1/runs` and `hermes acp` stdio are other processes, not the GUI
 seat. `claude-cli://` is the terminal handler, not GUI wake. This Mac's
 ChatGPT.app is `com.openai.codex` / `codex://`; Computer Use cannot automate
