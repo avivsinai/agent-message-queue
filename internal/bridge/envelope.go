@@ -343,9 +343,10 @@ func validateLowerHex(name, value string, wantLen int) error {
 	}
 	for i := 0; i < len(value); i++ {
 		b := value[i]
-		if !(b >= '0' && b <= '9') && !(b >= 'a' && b <= 'f') {
-			return fmt.Errorf("%s must be lowercase hex", name)
+		if (b >= '0' && b <= '9') || (b >= 'a' && b <= 'f') {
+			continue
 		}
+		return fmt.Errorf("%s must be lowercase hex", name)
 	}
 	return nil
 }
