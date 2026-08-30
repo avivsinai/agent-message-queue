@@ -289,9 +289,7 @@ func removeWakeLockIfUnchangedGuardedAtOutcome(
 		detachedValidationErr = err
 	}
 	if detached && detachedValidationErr == nil {
-		detachedValidationErr = fmt.Errorf(
-			"retained wake agent directory is detached from the canonical successor",
-		)
+		detachedValidationErr = wakeDetachedCleanupValidationError()
 	}
 	if err := reclaimWakeRestartStateForLockRemovalAt(dirfd, agentDir, inspection); err != nil {
 		return wakeLockRemovalOutcome{Err: fmt.Errorf(
@@ -300,10 +298,20 @@ func removeWakeLockIfUnchangedGuardedAtOutcome(
 		)}
 	}
 	path := filepath.Join(agentDir.path, ".wake.lock")
+	// The retained descriptor keeps the unlink bound to the old inode. Recheck
+	// the canonical pathname immediately before the mutation so a swap after
+	// the initial sample is reported as detached cleanup, not canonical success.
+	// A non-cooperating rename between this check and the unlink remains
+	// undetectable. The retained descriptor still prevents successor mutation;
+	// the post-commit check below surfaces swaps observed before return.
+	unlinkWithDetachedClassification := func() error {
+		markWakeDetachedCleanup(&detachedValidationErr, agentDir)
+		return unlink()
+	}
 	committed, err := removeWakeLockIfUnchangedGuardedWithIOStatus(
 		inspection,
 		func() ([]byte, os.FileInfo, error) { return readWakeLockFileAt(dirfd, path) },
-		unlink,
+		unlinkWithDetachedClassification,
 	)
 	if err != nil {
 		return wakeLockRemovalOutcome{Committed: committed, Err: err}
@@ -311,6 +319,10 @@ func removeWakeLockIfUnchangedGuardedAtOutcome(
 	if !committed {
 		return wakeLockRemovalOutcome{}
 	}
+	// The pre-unlink check and unlink cannot be atomic against a
+	// non-cooperating namespace rename. The retained descriptor still prevents
+	// successor mutation, so surface a late replacement as detached cleanup.
+	markWakeDetachedCleanup(&detachedValidationErr, agentDir)
 	outcome := wakeLockRemovalOutcome{Committed: true}
 	if detachedValidationErr != nil {
 		outcome.Err = newWakeDetachedCleanupOnlyError(detachedValidationErr)
@@ -412,6 +424,17 @@ func newWakeDetachedCleanupOnlyError(err error) error {
 		return nil
 	}
 	return &wakeDetachedCleanupOnlyError{err: err}
+}
+
+func wakeDetachedCleanupValidationError() error {
+	return fmt.Errorf("retained wake agent directory is detached from the canonical successor")
+}
+
+func markWakeDetachedCleanup(err *error, agentDir *wakeAgentDir) {
+	if err == nil || *err != nil || !retainedWakeAgentDirIsDetached(agentDir) {
+		return
+	}
+	*err = wakeDetachedCleanupValidationError()
 }
 
 func retainedWakeAgentDirIsDetached(agentDir *wakeAgentDir) bool {

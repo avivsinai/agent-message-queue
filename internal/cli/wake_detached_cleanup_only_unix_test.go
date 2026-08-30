@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"golang.org/x/sys/unix"
 )
 
 func TestDetachedBoundWakeResidueCleanupReturnsCleanupOnlyError(t *testing.T) {
@@ -19,6 +21,94 @@ func TestDetachedBoundWakeResidueCleanupReturnsCleanupOnlyError(t *testing.T) {
 	})
 	assertDetachedWakeCleanupOnlyError(t, err)
 	assertDetachedBoundWakeResidueRemoved(t, detachedPath, residueBefore)
+	assertDetachedWakeFilesUnchanged(t, fixture.agentDir.path, successorBefore)
+}
+
+func TestWakeLockRemovalClassifiesDirectorySwapBeforeUnlink(t *testing.T) {
+	fixture := newGenericWakePreparedCleanupFixture(t, false)
+	var detachedPath string
+	var successorBefore map[string]detachedWakeFileSnapshot
+	originalAfterRead := afterWakeLockAtRead
+	afterWakeLockAtRead = func() {
+		afterWakeLockAtRead = func() {}
+		detachedPath = detachGenericWakeAgentDirForTest(
+			t,
+			fixture.agentDir.path,
+			".wake.lock",
+			wakePreparedFileName,
+			wakeLifecycleGuardFileName,
+		)
+		successorBefore = snapshotDetachedWakeFiles(
+			t,
+			fixture.agentDir.path,
+			".wake.lock",
+			wakePreparedFileName,
+			wakeLifecycleGuardFileName,
+		)
+	}
+	t.Cleanup(func() { afterWakeLockAtRead = originalAfterRead })
+
+	err := withWakeLifecycleGuardInDir(fixture.agentDir, func(dirfd int) error {
+		return removeWakeLockIfUnchangedGuardedAt(dirfd, fixture.agentDir, fixture.created)
+	})
+	if detachedPath == "" {
+		t.Fatal("directory swap did not run between the initial sample and unlink")
+	}
+	var cleanupOnly *wakeDetachedCleanupOnlyError
+	if !errors.As(err, &cleanupOnly) {
+		t.Fatalf("directory-swap cleanup error = %v, want detached cleanup-only", err)
+	}
+	if err == nil {
+		t.Fatal("directory-swap cleanup reported canonical success")
+	}
+	assertPathMissingForTest(t, filepath.Join(detachedPath, ".wake.lock"))
+	assertDetachedWakeFilesUnchanged(t, fixture.agentDir.path, successorBefore)
+}
+
+func TestWakeLockRemovalClassifiesDirectorySwapAfterUnlink(t *testing.T) {
+	fixture := newGenericWakePreparedCleanupFixture(t, false)
+	var detachedPath string
+	var successorBefore map[string]detachedWakeFileSnapshot
+	var outcome wakeLockRemovalOutcome
+	err := withWakeLifecycleGuardInDir(fixture.agentDir, func(dirfd int) error {
+		outcome = removeWakeLockIfUnchangedGuardedAtOutcome(
+			dirfd,
+			fixture.agentDir,
+			fixture.created,
+			func() error {
+				if err := unix.Unlinkat(dirfd, ".wake.lock", 0); err != nil {
+					return err
+				}
+				detachedPath = detachGenericWakeAgentDirForTest(
+					t,
+					fixture.agentDir.path,
+					wakePreparedFileName,
+					wakeLifecycleGuardFileName,
+				)
+				successorBefore = snapshotDetachedWakeFiles(
+					t,
+					fixture.agentDir.path,
+					wakePreparedFileName,
+					wakeLifecycleGuardFileName,
+				)
+				return nil
+			},
+		)
+		return outcome.Err
+	})
+	if detachedPath == "" {
+		t.Fatal("directory swap did not run after unlink")
+	}
+	if !outcome.Committed {
+		t.Fatalf("directory-swap removal committed=%v err=%v, want committed cleanup", outcome.Committed, outcome.Err)
+	}
+	var cleanupOnly *wakeDetachedCleanupOnlyError
+	if !errors.As(outcome.Err, &cleanupOnly) {
+		t.Fatalf("post-unlink directory-swap error = %v, want detached cleanup-only", outcome.Err)
+	}
+	if err == nil {
+		t.Fatal("post-unlink directory swap reported canonical success")
+	}
 	assertDetachedWakeFilesUnchanged(t, fixture.agentDir.path, successorBefore)
 }
 
