@@ -90,6 +90,25 @@ func TestDarwinRetainedWakeWatcherFailsOnDirectInboxLossWithoutForwarding(t *tes
 	}
 }
 
+func TestDarwinRetainedWakeWatcherFailsOnInboxParentReplacement(t *testing.T) {
+	fixture := newDarwinRetainedWakeWatcherForTest(t)
+	inboxParent := filepath.Dir(fixture.inboxPath)
+	detachedInboxParent := inboxParent + ".detached"
+	if err := os.Rename(inboxParent, detachedInboxParent); err != nil {
+		t.Fatalf("rename retained inbox parent: %v", err)
+	}
+	if err := os.Mkdir(inboxParent, 0o700); err != nil {
+		t.Fatalf("recreate retained inbox parent: %v", err)
+	}
+	if err := os.Rename(
+		filepath.Join(detachedInboxParent, "new"),
+		filepath.Join(inboxParent, "new"),
+	); err != nil {
+		t.Fatalf("move retained inbox below replacement parent: %v", err)
+	}
+	assertDarwinRetainedWakeWatcherTerminalWithoutEvents(t, fixture.watcher)
+}
+
 func TestDarwinRetainedWakeWatcherFailsOnAncestorReplacementBeforeDetachedDelivery(t *testing.T) {
 	fixture := newDarwinRetainedWakeWatcherForTest(t)
 	detachedAgentPath := fixture.agentPath + ".detached"

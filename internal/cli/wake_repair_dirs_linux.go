@@ -28,12 +28,14 @@ type retainedWakeInboxFSNotifyWatcher struct {
 func newRetainedWakeInboxWatcher(
 	agentFD, inboxFD int,
 	agentLabel, inboxLabel string,
+	inboxParentIdentity wakeRepairDirectoryIdentity,
 ) (wakeEventWatcher, error) {
 	authority, err := newRetainedWakeDirectoryAuthority(
 		agentFD,
 		inboxFD,
 		agentLabel,
 		inboxLabel,
+		inboxParentIdentity,
 	)
 	if err != nil {
 		return nil, err
@@ -51,6 +53,17 @@ func newRetainedWakeInboxWatcher(
 		uintptr(inboxParentFD),
 		filepath.Dir(inboxLabel),
 	)
+	openedParentIdentity, err := wakeRepairDirectoryIdentityForFile(inboxParent)
+	if err != nil {
+		_ = inboxParent.Close()
+		return nil, err
+	}
+	if openedParentIdentity != inboxParentIdentity {
+		_ = inboxParent.Close()
+		return nil, fmt.Errorf(
+			"retained wake inbox parent directory no longer matches original authority",
+		)
+	}
 	namespaceWatcher, err := newRetainedWakeNamespaceFSNotifyWatcher(
 		agentFD,
 		inboxParentFD,
