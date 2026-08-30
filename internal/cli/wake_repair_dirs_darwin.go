@@ -20,40 +20,67 @@ var waitRetainedWakeInboxEvent = func(kqueueFD int, events []unix.Kevent_t) (int
 }
 
 type retainedWakeInboxKqueueWatcher struct {
-	kqueueFD  int
-	agentFD   int
-	inboxFD   int
-	authority retainedWakeDirectoryAuthority
-	events    chan fsnotify.Event
-	errors    chan error
-	done      chan struct{}
-	closing   chan struct{}
-	close     sync.Once
-	closeErr  error
+	kqueueFD      int
+	agentFD       int
+	inboxParentFD int
+	inboxFD       int
+	authority     retainedWakeDirectoryAuthority
+	events        chan fsnotify.Event
+	errors        chan error
+	done          chan struct{}
+	closing       chan struct{}
+	close         sync.Once
+	closeErr      error
 }
 
 func newRetainedWakeInboxWatcher(
 	agentFD, inboxFD int,
 	agentLabel, inboxLabel string,
+	inboxParentIdentity wakeRepairDirectoryIdentity,
 ) (wakeEventWatcher, error) {
 	authority, err := newRetainedWakeDirectoryAuthority(
 		agentFD,
 		inboxFD,
 		agentLabel,
 		inboxLabel,
+		inboxParentIdentity,
 	)
 	if err != nil {
 		return nil, err
 	}
+	inboxParentFD, err := unix.Openat(
+		inboxFD,
+		"..",
+		unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW,
+		0,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("open retained wake inbox parent directory: %w", err)
+	}
+	openedParentIdentity, err := wakeRepairDirectoryIdentityForFD(
+		inboxParentFD,
+		"retained wake inbox parent directory",
+	)
+	if err != nil {
+		_ = unix.Close(inboxParentFD)
+		return nil, err
+	}
+	if openedParentIdentity != inboxParentIdentity {
+		_ = unix.Close(inboxParentFD)
+		return nil, fmt.Errorf(
+			"retained wake inbox parent directory no longer matches original authority",
+		)
+	}
 	kqueueFD, err := unix.Kqueue()
 	if err != nil {
+		_ = unix.Close(inboxParentFD)
 		return nil, fmt.Errorf("create retained wake directory kqueue: %w", err)
 	}
 	if err := setDarwinWakeOwnerObservationCloseOnExec(
 		kqueueFD,
 		"retained wake directory kqueue",
 	); err != nil {
-		closeErr := unix.Close(kqueueFD)
+		closeErr := errors.Join(unix.Close(kqueueFD), unix.Close(inboxParentFD))
 		if closeErr != nil {
 			return nil, fmt.Errorf("%w (close kqueue: %v)", err, closeErr)
 		}
@@ -76,6 +103,12 @@ func newRetainedWakeInboxWatcher(
 			Fflags: flags,
 		},
 		{
+			Ident:  uint64(inboxParentFD),
+			Filter: unix.EVFILT_VNODE,
+			Flags:  unix.EV_ADD | unix.EV_ENABLE | unix.EV_CLEAR,
+			Fflags: flags,
+		},
+		{
 			Ident:  uint64(inboxFD),
 			Filter: unix.EVFILT_VNODE,
 			Flags:  unix.EV_ADD | unix.EV_ENABLE | unix.EV_CLEAR,
@@ -83,11 +116,11 @@ func newRetainedWakeInboxWatcher(
 		},
 	}
 	if _, err := unix.Kevent(kqueueFD, changes, nil, nil); err != nil {
-		_ = unix.Close(kqueueFD)
+		_ = errors.Join(unix.Close(kqueueFD), unix.Close(inboxParentFD))
 		return nil, fmt.Errorf("register retained wake directory kqueue: %w", err)
 	}
 	if err := authority.validateCanonical(); err != nil {
-		closeErr := unix.Close(kqueueFD)
+		closeErr := errors.Join(unix.Close(kqueueFD), unix.Close(inboxParentFD))
 		if closeErr != nil {
 			return nil, fmt.Errorf(
 				"validate retained wake directories after watch registration: %w (close kqueue: %v)",
@@ -101,14 +134,15 @@ func newRetainedWakeInboxWatcher(
 		)
 	}
 	watcher := &retainedWakeInboxKqueueWatcher{
-		kqueueFD:  kqueueFD,
-		agentFD:   agentFD,
-		inboxFD:   inboxFD,
-		authority: authority,
-		events:    make(chan fsnotify.Event, 1),
-		errors:    make(chan error, 1),
-		done:      make(chan struct{}),
-		closing:   make(chan struct{}),
+		kqueueFD:      kqueueFD,
+		agentFD:       agentFD,
+		inboxParentFD: inboxParentFD,
+		inboxFD:       inboxFD,
+		authority:     authority,
+		events:        make(chan fsnotify.Event, 1),
+		errors:        make(chan error, 1),
+		done:          make(chan struct{}),
+		closing:       make(chan struct{}),
 	}
 	go watcher.run()
 	return watcher, nil
@@ -170,6 +204,8 @@ func (w *retainedWakeInboxKqueueWatcher) eventSource(ident uint64) (string, erro
 	switch int(ident) {
 	case w.agentFD:
 		return "agent", nil
+	case w.inboxParentFD:
+		return "inbox parent", nil
 	case w.inboxFD:
 		return "inbox", nil
 	default:
@@ -195,7 +231,10 @@ func (w *retainedWakeInboxKqueueWatcher) Errors() <-chan error {
 func (w *retainedWakeInboxKqueueWatcher) Close() error {
 	w.close.Do(func() {
 		close(w.closing)
-		w.closeErr = unix.Close(w.kqueueFD)
+		w.closeErr = errors.Join(
+			unix.Close(w.kqueueFD),
+			unix.Close(w.inboxParentFD),
+		)
 		<-w.done
 	})
 	return w.closeErr

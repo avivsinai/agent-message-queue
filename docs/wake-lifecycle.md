@@ -510,6 +510,14 @@ performs migration. Existing live locks are never rewritten: a pre-P2b lock
 remains unbound and usable through P2a fallback until its wake restarts and
 republishes with the new fields.
 
+Repair handoffs have the same fail-closed mixed-version boundary. A wake
+started by a pre-schema-2 binary cannot be repaired in place by this version,
+because it cannot announce the inbox parent directory identity. Restart that
+wake from its owning terminal so it re-announces with schema 2; do not infer
+the missing identity from path names. When a newer source schema reaches an
+older binary, upgrade `amq` or restart the newer wake under the matching
+version.
+
 Recovery and rollback of a bound claim MUST validate the current binding under
 the lifecycle guard before stopping a wake or unlinking its lock. An
 inconclusive binding refuses and preserves the lock, target, prepared marker,
