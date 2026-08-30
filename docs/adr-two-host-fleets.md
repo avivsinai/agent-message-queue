@@ -51,7 +51,7 @@ message into its own Maildir.
 `amq-bridge` is not Maildir sync, not a remote `drain` of a foreign mailbox,
 and not a socket inside `amq`.
 
-Bidirectional v1 means all of:
+Bidirectional exchange means all of:
 
 1. **Alias send** — the sender addresses a receiver-owned alias.
 2. **Crash-idempotent local apply** — the destination host commits the
@@ -59,13 +59,19 @@ Bidirectional v1 means all of:
 3. **Reply on the same opaque thread ID** — the reply uses that thread ID
    as an opaque correlation key, not as routing authority.
 
-Both bridge nodes dial out. Host G accepts no inbound SSH. Reachability is
-operator-provided. The signed envelope and local apply path are frozen in
-[the companion bridge protocol ADR](adr-bridge-protocol.md). Proven
-bidirectional hops use `amq-bridge apply-file` on the destination host.
-HTTPS store-and-forward remains the courier class when an operator
-provisions a rendezvous; AMQ does not ship a hosted relay. Git is not the
-default cross-host transport. Core has no sockets.
+For the peer-exchange courier, host G is the only dialer. G starts a fixed,
+config-pinned `amq-bridge` peer-stdio session and the Mac helper responds.
+The session is duplex, so mail and signed outcomes can move in both
+directions; the Mac does not initiate this class. Host G accepts no inbound
+SSH. Reachability is operator-provided. The signed envelope and local apply
+path are frozen in [the companion bridge protocol ADR](adr-bridge-protocol.md).
+The manually operated `amq-bridge apply-file` path remains available for
+recovery and file-based exchange.
+
+HTTPS store-and-forward remains implemented as an optional courier class for
+an operator-provided rendezvous. It is not the live G-Mac hop or the live
+architecture. Git is not the default cross-host transport. Core has no
+sockets.
 
 ### Routing aliases
 
@@ -100,18 +106,25 @@ identities are not a second trust boundary.
 
 ### Receipts stay typed
 
-v1 receipt states stay distinct. They are not collapsed:
+Receipt states stay distinct. They are not collapsed:
 
 | State | Meaning |
 | --- | --- |
-| `transport_accepted` | The bridge accepted the send for transport. |
+| `transport_accepted` | The destination durably placed the exact envelope object in `rx/<peer>/new/`. |
 | `destination_maildir_committed` | The destination host applied the message into its Maildir. |
+| `destination_rejected` | The authenticated destination returned a terminal rejection. |
 | consumer-local `drain` / `start` / `complete` | A consumer on that host ingested or progressed the work. |
 
 `transport_accepted` is not `destination_maildir_committed`. Destination
-commit is not consumer-local evidence. Consumer evidence may stay local in
-v1; a remote party must not treat a wake, a transport ACK, or a missing
-remote drain receipt as proof of consumption.
+commit is not consumer-local evidence, and it does not retire the source
+`tx` object. The source retires `tx` only after a verified signed
+`destination_maildir_committed` or `destination_rejected` outcome. Consumer
+evidence may stay local; a remote party must not treat a wake, a transport
+ACK, or a missing remote drain receipt as proof of consumption.
+
+Peer-exchange outcomes use `status-tx/<peer>/returned`; `sent/` remains an
+HTTPS-only archive. Trusted peer keys use
+`trusted/<host>/<generation>` with a bounded two-generation rotation overlap.
 
 ### Wake (out of scope except the kill-list)
 
