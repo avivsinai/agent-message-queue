@@ -59,7 +59,13 @@ func TestApplyFileReplayAndConflictPreserveMaildirAndReceipt(t *testing.T) {
 		t.Fatalf("inbox entries after replay = %d, want 1", len(entries))
 	}
 
-	conflict := applyFileTestEnvelope(t, env.TransferID, []byte("different"))
+	conflict := env
+	conflict.Payload = []byte("different")
+	digest := sha256.Sum256(conflict.Payload)
+	conflict.PayloadSHA256 = hex.EncodeToString(digest[:])
+	if err := bridge.SignEnvelope(&conflict, testHostKey("grok-host", "1")); err != nil {
+		t.Fatal(err)
+	}
 	writeApplyFileEnvelope(t, root, "envelope.json", conflict)
 	err = runApplyFile([]string{"--root", root, "--file", path})
 	if !errors.Is(err, os.ErrExist) {
@@ -97,11 +103,11 @@ func TestApplyFileRejectsUnsignedEnvelopeBeforeMaildirCommit(t *testing.T) {
 	ensureHostID(t, root, "mac")
 	ensureTrusted(t, root, "grok-host")
 	env := applyFileTestEnvelope(t, "unsigned-file", []byte("unsigned"))
-	env.Signature = ""
-	raw, err := json.Marshal(env)
+	raw, err := bridge.MarshalEnvelope(env)
 	if err != nil {
 		t.Fatal(err)
 	}
+	raw = []byte(strings.Replace(string(raw), `"signature":"`+env.Signature+`"`, `"signature":""`, 1))
 	path := writeApplyFileRaw(t, root, "unsigned.json", raw)
 
 	if err := runApplyFile([]string{"--root", root, "--file", path}); err == nil {
@@ -116,6 +122,7 @@ func TestApplyFileRejectsForeignDestinationAndSymlink(t *testing.T) {
 	ensureTrusted(t, root, "grok-host")
 	env := applyFileTestEnvelope(t, "foreign-file", []byte("foreign"))
 	env.DestAlias = "other/claude"
+	env.TransferID = bridge.DeriveTransferID(env.SourceHost, env.SourceHandle, env.SourceMessageID, env.DestAlias)
 	if err := bridge.SignEnvelope(&env, testHostKey("grok-host", "1")); err != nil {
 		t.Fatal(err)
 	}
@@ -181,7 +188,6 @@ func applyFileTestEnvelope(t *testing.T, transferID string, payload []byte) brid
 	sum := sha256.Sum256(payload)
 	env := bridge.Envelope{
 		Version:         bridge.EnvelopeVersion,
-		TransferID:      transferID,
 		SourceHost:      "grok-host",
 		SourceHandle:    "codex",
 		DestAlias:       "mac/claude",
@@ -191,6 +197,7 @@ func applyFileTestEnvelope(t *testing.T, transferID string, payload []byte) brid
 		KeyGeneration:   "1",
 		Payload:         payload,
 	}
+	env.TransferID = bridge.DeriveTransferID(env.SourceHost, env.SourceHandle, env.SourceMessageID, env.DestAlias)
 	if err := bridge.SignEnvelope(&env, testHostKey("grok-host", "1")); err != nil {
 		t.Fatal(err)
 	}

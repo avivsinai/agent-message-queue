@@ -663,7 +663,6 @@ func testEnvelope(t *testing.T, transferID string) bridge.Envelope {
 	digest := sha256.Sum256(payload)
 	env := bridge.Envelope{
 		Version:         bridge.EnvelopeVersion,
-		TransferID:      transferID,
 		SourceHost:      "grok-host",
 		SourceHandle:    "codex",
 		DestAlias:       "mac/claude",
@@ -673,6 +672,7 @@ func testEnvelope(t *testing.T, transferID string) bridge.Envelope {
 		KeyGeneration:   "1",
 		Payload:         payload,
 	}
+	env.TransferID = bridge.DeriveTransferID(env.SourceHost, env.SourceHandle, env.SourceMessageID, env.DestAlias)
 	if err := bridge.SignEnvelope(&env, testHostKey("grok-host", "1")); err != nil {
 		t.Fatal(err)
 	}

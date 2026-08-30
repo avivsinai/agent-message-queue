@@ -86,17 +86,14 @@ func runWrite(args []string) error {
 	if err != nil {
 		return err
 	}
-	transferID := strings.TrimSpace(*transferIDFlag)
-	if transferID == "" {
-		transferID, err = randomID("xfer-probe-")
-		if err != nil {
-			return fmt.Errorf("generate transfer id: %w", err)
-		}
+	messageID, err := randomID("probe-message-")
+	if err != nil {
+		return fmt.Errorf("generate message id: %w", err)
 	}
-	if err := fsq.ValidateHandle(transferID); err != nil {
-		return fmt.Errorf("transfer id: %w", err)
+	transferID := bridge.DeriveTransferID(sourceHost, sourceHandle, messageID, destAlias)
+	if requested := strings.TrimSpace(*transferIDFlag); requested != "" && requested != transferID {
+		return fmt.Errorf("transfer id %q does not match routing fields", requested)
 	}
-	messageID := "probe-message-" + strings.TrimPrefix(transferID, "xfer-probe-")
 	threadID := strings.TrimSpace(*threadFlag)
 	if threadID == "" {
 		threadID = "probe/" + transferID

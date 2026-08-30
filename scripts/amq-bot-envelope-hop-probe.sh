@@ -49,6 +49,15 @@ valid_transfer_id() {
 	esac
 }
 
+valid_xfer_id() {
+	id=$1
+	[ ${#id} -eq 52 ] || return 1
+	case "$id" in
+		*[!a-z2-7]*) return 1 ;;
+		*) return 0 ;;
+	esac
+}
+
 validate_config() {
 	valid_transfer_id "$source_host" || unproven "invalid source host: $source_host"
 	case "$dest_alias" in
@@ -107,16 +116,11 @@ write_probe() {
 		unproven "cannot set G directory mode on $g_dir"
 	fi
 
-	nonce=$(LC_ALL=C od -An -N16 -tx1 /dev/urandom | tr -d '[:space:]') ||
-		unproven 'cannot generate transfer nonce'
-	transfer_id=xfer-probe-$nonce
-	valid_transfer_id "$transfer_id" || unproven 'generated invalid transfer id'
-	target=$g_dir/envelope-$transfer_id.json
+	target=$g_dir/envelope-pending.json
 	if [ -n "$thread_id" ]; then
 		output=$(run_writer \
 			--root "$g_root" \
 			--output "$target" \
-			--transfer-id "$transfer_id" \
 			--source-host "$source_host" \
 			--source-handle "$source_handle" \
 			--dest-alias "$dest_alias" \
@@ -126,12 +130,17 @@ write_probe() {
 		output=$(run_writer \
 			--root "$g_root" \
 			--output "$target" \
-			--transfer-id "$transfer_id" \
 			--source-host "$source_host" \
 			--source-handle "$source_handle" \
 			--dest-alias "$dest_alias") ||
 			unproven "cannot create signed envelope $target"
 	fi
+	transfer_id=$(printf '%s\n' "$output" | sed -n 's/^BOT_ENVELOPE_HOP_TRANSFER_ID=//p')
+	valid_xfer_id "$transfer_id" || unproven 'writer printed an invalid transfer id'
+	final=$g_dir/envelope-$transfer_id.json
+	mv "$target" "$final" || unproven "cannot publish $final"
+	output=$(printf '%s\n' "$output" | sed "s|^BOT_ENVELOPE_HOP_SOURCE=.*|BOT_ENVELOPE_HOP_SOURCE=$final|")
+	target=$final
 	mode=$(file_mode "$target") || unproven "cannot inspect mode on $target"
 	case "$mode" in
 		600|0600) ;;
@@ -195,8 +204,8 @@ check_receipt() {
 
 check_probe() {
 	transfer_id=$1
-	valid_transfer_id "$transfer_id" ||
-		unproven 'transfer id must use lowercase [a-z0-9_-] without path components'
+	valid_xfer_id "$transfer_id" ||
+		unproven 'transfer id must be 52 lowercase RFC 4648 base32 characters'
 	check_host_files "${dest_alias%%/*}"
 	source=$mac_dir/envelope-$transfer_id.json
 	[ -f "$source" ] || unproven "moved envelope is missing: $source"
