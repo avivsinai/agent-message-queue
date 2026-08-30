@@ -46,7 +46,8 @@ first_id="$(printf '%s\n' "$first_write" | sed -n 's/^BOT_ENVELOPE_HOP_TRANSFER_
 first_source="$(printf '%s\n' "$first_write" | sed -n 's/^BOT_ENVELOPE_HOP_SOURCE=//p')"
 grok_public="$(printf '%s\n' "$first_write" | sed -n 's/^BOT_ENVELOPE_HOP_PUBLIC=//p')"
 grok_generation="$(printf '%s\n' "$first_write" | sed -n 's/^BOT_ENVELOPE_HOP_KEY_GENERATION=//p')"
-[[ "$first_id" == xfer-probe-* ]] || fail "write did not print a probe transfer id"
+[[ ${#first_id} -eq 52 ]] || fail "write did not print a 52-char transfer id"
+case "$first_id" in *[!a-z2-7]*) fail "write printed a non-base32 transfer id" ;; esac
 [[ -f "$first_source" ]] || fail "write did not create $first_source"
 [[ -n "$grok_public" && -n "$grok_generation" ]] || fail "write did not expose trusted public identity metadata"
 
@@ -101,7 +102,8 @@ PY
 second_write="$(write_probe)"
 second_id="$(printf '%s\n' "$second_write" | sed -n 's/^BOT_ENVELOPE_HOP_TRANSFER_ID=//p')"
 second_source="$(printf '%s\n' "$second_write" | sed -n 's/^BOT_ENVELOPE_HOP_SOURCE=//p')"
-[[ "$second_id" == xfer-probe-* ]] || fail "second write did not print a probe transfer id"
+[[ ${#second_id} -eq 52 ]] || fail "second write did not print a 52-char transfer id"
+case "$second_id" in *[!a-z2-7]*) fail "second write printed a non-base32 transfer id" ;; esac
 [[ -f "$second_source" ]] || fail "second write did not create $second_source"
 
 unsigned_root="$work/unsigned-root"

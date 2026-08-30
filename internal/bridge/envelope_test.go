@@ -65,6 +65,14 @@ func TestValidateEnvelopeRejectsLFInThreadID(t *testing.T) {
 	}
 }
 
+func TestValidateEnvelopeAcceptsSlashInThreadID(t *testing.T) {
+	env := testEnvelope([]byte("p2p"))
+	env.ThreadID = "p2p/codex__grok"
+	if err := ValidateEnvelope(env); err != nil {
+		t.Fatalf("AMQ p2p thread_id rejected: %v", err)
+	}
+}
+
 func TestValidateEnvelopePayloadLimit(t *testing.T) {
 	max := bytes.Repeat([]byte{'x'}, MaxPayloadBytes)
 	if err := ValidateEnvelope(testEnvelope(max)); err != nil {

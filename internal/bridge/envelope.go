@@ -330,7 +330,9 @@ func validateBridgeMessageID(name, value string) error {
 	}
 	for i := 0; i < len(value); i++ {
 		b := value[i]
-		if b < 0x20 || b > 0x7e || b == '/' || b == '\\' {
+		// '/' is allowed: AMQ p2p threads are p2p/<a>__<b>. These scalars
+		// never become filesystem path components.
+		if b < 0x20 || b > 0x7e || b == '\\' {
 			return fmt.Errorf("%s is invalid", name)
 		}
 	}
