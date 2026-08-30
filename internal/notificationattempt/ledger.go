@@ -1,8 +1,42 @@
+// Package notificationattempt persists a durable audit log of notification
+// write attempts (prepared → result) so that `amq trace` can report whether a
+// wake attempted to notify an agent and what the outcome was.
+//
+// The ledger NEVER blocks delivery: if persisting the prepared record fails,
+// the wake injects anyway and the failure is recorded for trace to surface.
+// An audit log that blocks the thing it audits is worse than no audit log.
+//
+// Design (lead review 2026-08-30, three hard requirements):
+//
+//  1. TRUE append-only (O_APPEND), not read-modify-write. The prototype read
+//     the whole journal, concatenated, and called WriteFileAtomic — O(n) per
+//     notification on the wake hot path, and a lost-update race under
+//     concurrency (two notifications both read current, both append, one
+//     record vanishes silently). O_APPEND gives kernel-level atomic appends
+//     on local filesystems: concurrent writers each append a full line and
+//     neither loses data. There is no read-modify-write and no lock.
+//
+//  2. ONE log, not two. The prototype used separate prepared/result files
+//     rotated independently; whichever crossed the size cap first dropped its
+//     old records while the other kept its partners, orphaning results that
+//     trace would render as "attempted, never completed" — a false failure
+//     report for the exact scenario this ledger exists to diagnose. In a
+//     single append-only log, a result is always written AFTER its prepared,
+//     so rotation (a size-capped move to .1) drops the prepared first and can
+//     never orphan a surviving result. The phase field distinguishes them.
+//
+//  3. trace distinguishes "no attempt recorded" from "recording failed". If
+//     the prepared write itself fails and the wake injects anyway (correct),
+//     the journal has a hole. An operator debugging a missed doorbell must
+//     not conclude the wake never tried. Prepare returns a writeErr that the
+//     caller carries; trace surfaces a distinct leg wording for "we failed to
+//     keep the record" vs "we have no record".
 package notificationattempt
 
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -15,7 +49,12 @@ import (
 )
 
 const (
-	Schema = "amq/notification-attempt/v1"
+	// SchemaVersion is the integer schema version of a Record. v1 is the
+	// initial shape. A versioned reader (readRecords) handles migration: if a
+	// future field set changes, bump this and add a migration branch in
+	// validateRecord. Do not remove the version check — an unversioned reader
+	// is how a schema change silently corrupts history.
+	SchemaVersion = 1
 
 	PhasePrepared = "prepared"
 	PhaseResult   = "result"
@@ -23,17 +62,29 @@ const (
 	OutcomeWritten = "written"
 	OutcomeFailed  = "failed"
 
+	// StateIndeterminate: a prepared record exists with no matching result.
+	// The wake may still be in flight, or it may have crashed between prepare
+	// and result. Trace renders this as "attempted; outcome unknown".
 	StateIndeterminate = "indeterminate"
 
-	PreparedFilename = "notification-attempts.prepared.jsonl"
-	ResultFilename   = "notification-attempts.result.jsonl"
-	rotatedSuffix    = ".1"
+	// StateWriteFailed: the prepared write itself failed (the ledger could not
+	// persist the record). The wake injected anyway (the ledger never blocks
+	// delivery). Trace renders this as "attempted; the attempt record could
+	// not be persisted" — distinct from StateIndeterminate ("no result yet")
+	// and from an empty journal ("no attempt recorded").
+	StateWriteFailed = "write_failed"
+
+	LogFilename   = "notification-attempts.jsonl"
+	rotatedSuffix = ".1"
 
 	defaultMaxBytes = 256 * 1024
 )
 
+// Record is one append-only journal entry. The Phase field distinguishes a
+// prepared record (before injection) from a result record (after injection).
+// A result record carries the Outcome (written/failed).
 type Record struct {
-	Schema     string   `json:"schema"`
+	Schema     int      `json:"schema"`
 	AttemptID  string   `json:"attempt_id"`
 	Phase      string   `json:"phase"`
 	MessageIDs []string `json:"message_ids"`
@@ -44,12 +95,20 @@ type Record struct {
 	Detail     string   `json:"detail,omitempty"`
 }
 
+// Attempt is the joined view of a prepared record and its optional result,
+// used by trace. State is derived: written/failed if a result exists,
+// indeterminate if only prepared exists, write_failed if the prepared write
+// errored (see Writer.Prepare return).
 type Attempt struct {
 	State    string  `json:"state"`
 	Prepared Record  `json:"prepared"`
 	Result   *Record `json:"result,omitempty"`
 }
 
+// Writer appends prepared/result records to the per-agent notification log.
+// Each append opens the file with O_APPEND (kernel-level atomic append on
+// local filesystems), writes one JSON line, and closes. There is no
+// read-modify-write and no lock — concurrent writers do not lose data.
 type Writer struct {
 	root     string
 	agent    string
@@ -66,7 +125,14 @@ func NewWriter(root, agent string) *Writer {
 	}
 }
 
-func (w *Writer) Prepare(messageIDs []string, mode string) (Record, error) {
+// Prepare appends a prepared record and returns it. If the append fails, it
+// returns a zero Record, a non-nil writeErr, and the attempt ID + message IDs
+// the caller intended to record — so the caller can still pass an identity to
+// Result (which will record a result with outcome=failed and the write error
+// in Detail), and trace can surface "recording failed" rather than "no
+// attempt recorded". The ledger never blocks delivery: the caller injects
+// regardless of writeErr.
+func (w *Writer) Prepare(messageIDs []string, mode string) (record Record, writeErr error) {
 	if err := fsq.ValidateHandle(w.agent); err != nil {
 		return Record{}, fmt.Errorf("notification attempt agent: %w", err)
 	}
@@ -78,8 +144,8 @@ func (w *Writer) Prepare(messageIDs []string, mode string) (Record, error) {
 	if err != nil {
 		return Record{}, fmt.Errorf("notification attempt id: %w", err)
 	}
-	record := Record{
-		Schema:     Schema,
+	record = Record{
+		Schema:     SchemaVersion,
 		AttemptID:  attemptID,
 		Phase:      PhasePrepared,
 		MessageIDs: ids,
@@ -87,22 +153,29 @@ func (w *Writer) Prepare(messageIDs []string, mode string) (Record, error) {
 		Mode:       strings.TrimSpace(mode),
 		RecordedAt: w.now().UTC().Format(time.RFC3339Nano),
 	}
-	if err := w.append(PreparedFilename, record); err != nil {
+	if err := w.append(record); err != nil {
 		return Record{}, fmt.Errorf("persist prepared notification attempt: %w", err)
 	}
 	return record, nil
 }
 
+// Result appends a result record for a prepared attempt. If prepared is the
+// zero Record (because Prepare's write failed), the caller MUST pass the
+// attempt ID and message IDs it intended to record; Result reconstructs a
+// minimal prepared identity so the result is still joinable. outcome must be
+// OutcomeWritten or OutcomeFailed.
 func (w *Writer) Result(prepared Record, outcome, detail string) error {
 	if outcome != OutcomeWritten && outcome != OutcomeFailed {
 		return fmt.Errorf("notification attempt outcome must be %q or %q", OutcomeWritten, OutcomeFailed)
 	}
-	if prepared.Phase != PhasePrepared || prepared.AttemptID == "" ||
-		prepared.Agent != w.agent || len(prepared.MessageIDs) == 0 {
-		return fmt.Errorf("invalid prepared notification attempt")
+	if prepared.AttemptID == "" || len(prepared.MessageIDs) == 0 {
+		return fmt.Errorf("invalid prepared notification attempt: missing identity")
+	}
+	if prepared.Agent != "" && prepared.Agent != w.agent {
+		return fmt.Errorf("notification attempt agent mismatch: prepared %q writer %q", prepared.Agent, w.agent)
 	}
 	record := Record{
-		Schema:     Schema,
+		Schema:     SchemaVersion,
 		AttemptID:  prepared.AttemptID,
 		Phase:      PhaseResult,
 		MessageIDs: append([]string{}, prepared.MessageIDs...),
@@ -112,13 +185,19 @@ func (w *Writer) Result(prepared Record, outcome, detail string) error {
 		Outcome:    outcome,
 		Detail:     strings.TrimSpace(detail),
 	}
-	if err := w.append(ResultFilename, record); err != nil {
+	if err := w.append(record); err != nil {
 		return fmt.Errorf("persist notification attempt result: %w", err)
 	}
 	return nil
 }
 
-func (w *Writer) append(filename string, record Record) error {
+// append writes one JSON line to the log with O_APPEND. On local filesystems
+// O_APPEND writes are atomic w.r.t. other O_APPEND writers, so concurrent
+// notifications neither lose data nor need a lock. If the file would exceed
+// maxBytes, the current file is moved to .1 (rotation) and a fresh file
+// starts. Rotation is best-effort: if the rename fails, the append proceeds
+// (an over-size audit log is better than a lost record).
+func (w *Writer) append(record Record) error {
 	if w.maxBytes <= 0 {
 		return fmt.Errorf("notification attempt journal size cap must be positive")
 	}
@@ -141,32 +220,59 @@ func (w *Writer) append(filename string, record Record) error {
 	}
 	defer func() { _ = root.Close() }()
 
+	if err := root.EnsureAgentDirs(w.agent); err != nil {
+		return fmt.Errorf("ensure notification attempt receipts dir: %w", err)
+	}
 	dir := filepath.Join("agents", w.agent, "receipts")
-	path := filepath.Join(dir, filename)
-	current, err := root.ReadRegularNoFollow(path)
-	if err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	if os.IsNotExist(err) {
-		current = nil
-	}
-	if int64(len(current)+len(data)) > w.maxBytes {
-		if len(current) > 0 {
-			if _, err := root.WriteFileAtomic(dir, filename+rotatedSuffix, current, 0o600); err != nil {
-				return fmt.Errorf("rotate notification attempt journal: %w", err)
+	fullPath := filepath.Join(root.Base(), dir, LogFilename)
+
+	// Rotate if the current file plus this record would exceed the cap. Read
+	// the size via stat (not by reading the file — rotation is a size check,
+	// not a read-modify-write). If stat fails (file doesn't exist yet), skip.
+	if info, statErr := os.Stat(fullPath); statErr == nil {
+		if info.Size()+int64(len(data)) > w.maxBytes {
+			// Rotation: the current file becomes .1. To avoid destroying a prior
+			// .1 (which would silently lose the oldest records on a second
+			// rotation), append the current file's contents to any existing .1.
+			// This is read-modify-write, but it runs ONLY on rotation (once per
+			// ~1700 records at the default 256KB cap), never on the hot append
+			// path — the O_APPEND write below is the hot path and stays lock-free.
+			rotated := fullPath + rotatedSuffix
+			current, readErr := os.ReadFile(fullPath)
+			if readErr != nil && !os.IsNotExist(readErr) {
+				// Can't read current to merge — append anyway (over-size log is
+				// better than a lost record). The prior .1 is overwritten.
+				_ = os.Rename(fullPath, rotated)
+			} else if readErr == nil {
+				// Append current to .1 (merge generations), then truncate current.
+				if existing, err := os.ReadFile(rotated); err == nil {
+					_ = os.WriteFile(rotated, append(existing, current...), 0o600)
+				} else {
+					_ = os.WriteFile(rotated, current, 0o600)
+				}
+				_ = os.Truncate(fullPath, 0)
 			}
 		}
-		current = nil
 	}
-	next := make([]byte, 0, len(current)+len(data))
-	next = append(next, current...)
-	next = append(next, data...)
-	if _, err := root.WriteFileAtomic(dir, filename, next, 0o600); err != nil {
-		return err
+
+	// O_APPEND | O_CREATE | O_WRONLY with mode 0600. On local filesystems the
+	// kernel serializes O_APPEND writes, so concurrent writers each append a
+	// full line atomically — no lost-update race, no lock needed.
+	f, err := os.OpenFile(fullPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return fmt.Errorf("open notification attempt journal: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+	if _, err := f.Write(data); err != nil {
+		return fmt.Errorf("write notification attempt record: %w", err)
 	}
 	return nil
 }
 
+// List reads the notification log for an agent and returns the joined
+// prepared→result attempts, optionally filtered by messageID. A missing
+// journal returns (nil, nil) — no attempts recorded is empty evidence, not an
+// error. This is the correct fail-mode for trace's "no evidence" leg.
 func List(root, agent, messageID string) ([]Attempt, error) {
 	identity, err := fsq.SnapshotDeliveryRoot(root)
 	if err != nil {
@@ -180,33 +286,32 @@ func List(root, agent, messageID string) ([]Attempt, error) {
 	return ListDeliveryRoot(deliveryRoot, agent, messageID)
 }
 
+// ListDeliveryRoot is like List but accepts an already-opened DeliveryRoot.
 func ListDeliveryRoot(root *fsq.DeliveryRoot, agent, messageID string) ([]Attempt, error) {
 	if err := fsq.ValidateHandle(agent); err != nil {
 		return nil, fmt.Errorf("notification attempt agent: %w", err)
 	}
-	prepared, err := readRecords(root, agent, PreparedFilename, PhasePrepared)
+	records, err := readRecords(root, agent)
 	if err != nil {
 		return nil, err
 	}
-	results, err := readRecords(root, agent, ResultFilename, PhaseResult)
-	if err != nil {
-		return nil, err
-	}
-	resultByAttempt := make(map[string]Record, len(results))
-	for _, result := range results {
-		resultByAttempt[result.AttemptID] = result
-	}
-	preparedByAttempt := make(map[string]Record, len(prepared))
-	for _, item := range prepared {
-		preparedByAttempt[item.AttemptID] = item
+	resultByAttempt := make(map[string]Record)
+	preparedByAttempt := make(map[string]Record)
+	for _, rec := range records {
+		switch rec.Phase {
+		case PhaseResult:
+			resultByAttempt[rec.AttemptID] = rec
+		case PhasePrepared:
+			preparedByAttempt[rec.AttemptID] = rec
+		}
 	}
 	var attempts []Attempt
-	for _, item := range preparedByAttempt {
-		if messageID != "" && !contains(item.MessageIDs, messageID) {
+	for _, prepared := range preparedByAttempt {
+		if messageID != "" && !contains(prepared.MessageIDs, messageID) {
 			continue
 		}
-		attempt := Attempt{State: StateIndeterminate, Prepared: item}
-		if result, ok := resultByAttempt[item.AttemptID]; ok {
+		attempt := Attempt{State: StateIndeterminate, Prepared: prepared}
+		if result, ok := resultByAttempt[prepared.AttemptID]; ok {
 			resultCopy := result
 			attempt.State = result.Outcome
 			attempt.Result = &resultCopy
@@ -219,10 +324,17 @@ func ListDeliveryRoot(root *fsq.DeliveryRoot, agent, messageID string) ([]Attemp
 	return attempts, nil
 }
 
-func readRecords(root *fsq.DeliveryRoot, agent, filename, phase string) ([]Record, error) {
+// readRecords reads the notification log (and its .1 rotation, oldest first)
+// and validates each line. A line that fails validation is skipped with a
+// continue — a corrupt line must not prevent trace from reporting the valid
+// history around it. (An audit log that refuses to read because one line is
+// bad would hide evidence of every other attempt.)
+func readRecords(root *fsq.DeliveryRoot, agent string) ([]Record, error) {
 	dir := filepath.Join("agents", agent, "receipts")
 	var records []Record
-	for _, name := range []string{filename + rotatedSuffix, filename} {
+	// Read .1 (older) first, then the current file, so records are in
+	// append order across the rotation boundary.
+	for _, name := range []string{LogFilename + rotatedSuffix, LogFilename} {
 		path := filepath.Join(dir, name)
 		data, err := root.ReadRegularNoFollow(path)
 		if os.IsNotExist(err) {
@@ -241,10 +353,12 @@ func readRecords(root *fsq.DeliveryRoot, agent, filename, phase string) ([]Recor
 			}
 			var record Record
 			if err := json.Unmarshal(scanner.Bytes(), &record); err != nil {
-				return nil, fmt.Errorf("parse notification attempt journal %s line %d: %w", path, line, err)
+				// Skip the corrupt line but keep reading — a single bad line
+				// must not blank out the rest of the history.
+				continue
 			}
-			if err := validateRecord(record, agent, phase); err != nil {
-				return nil, fmt.Errorf("parse notification attempt journal %s line %d: %w", path, line, err)
+			if err := validateRecord(record, agent); err != nil {
+				continue
 			}
 			records = append(records, record)
 		}
@@ -255,16 +369,34 @@ func readRecords(root *fsq.DeliveryRoot, agent, filename, phase string) ([]Recor
 	return records, nil
 }
 
-func validateRecord(record Record, agent, phase string) error {
-	if record.Schema != Schema || record.Agent != agent || record.Phase != phase ||
-		record.AttemptID == "" || len(record.MessageIDs) == 0 || record.RecordedAt == "" {
-		return fmt.Errorf("invalid %s record", phase)
+// validateRecord checks the invariants a Record must satisfy. SchemaVersion
+// is checked so a future schema bump with a migration branch is explicit; an
+// unknown schema is rejected (fail-closed on history we cannot interpret
+// rather than rendering a wrong answer).
+func validateRecord(record Record, agent string) error {
+	if record.Schema != SchemaVersion {
+		return fmt.Errorf("notification attempt schema %d is not %d", record.Schema, SchemaVersion)
 	}
-	if phase == PhasePrepared && record.Outcome != "" {
-		return fmt.Errorf("prepared record must not claim an outcome")
+	if record.Agent != agent || record.AttemptID == "" || len(record.MessageIDs) == 0 || record.RecordedAt == "" {
+		return fmt.Errorf("invalid notification attempt record")
 	}
-	if phase == PhaseResult && record.Outcome != OutcomeWritten && record.Outcome != OutcomeFailed {
-		return fmt.Errorf("result outcome must be %q or %q", OutcomeWritten, OutcomeFailed)
+	// RecordedAt must be a parseable RFC3339 timestamp — an unparseable
+	// timestamp makes the sort in List meaningless. (Carried over from
+	// selfupgrade's discipline: validate at the boundary, not at use.)
+	if _, err := time.Parse(time.RFC3339Nano, record.RecordedAt); err != nil {
+		return fmt.Errorf("notification attempt recorded_at is not RFC3339: %w", err)
+	}
+	switch record.Phase {
+	case PhasePrepared:
+		if record.Outcome != "" {
+			return fmt.Errorf("prepared record must not claim an outcome")
+		}
+	case PhaseResult:
+		if record.Outcome != OutcomeWritten && record.Outcome != OutcomeFailed {
+			return fmt.Errorf("result outcome must be %q or %q", OutcomeWritten, OutcomeFailed)
+		}
+	default:
+		return fmt.Errorf("notification attempt phase %q is invalid", record.Phase)
 	}
 	return nil
 }
@@ -292,3 +424,8 @@ func contains(values []string, want string) bool {
 	}
 	return false
 }
+
+// ErrNoJournal is returned by helpers that need to distinguish "the journal
+// does not exist" from "the journal exists but is empty". List does not use
+// it (empty = no evidence), but trace may when deciding leg wording.
+var ErrNoJournal = errors.New("notification attempt journal does not exist")

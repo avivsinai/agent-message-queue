@@ -437,6 +437,20 @@ func notificationAttemptLimitation(state string) string {
 	}
 }
 
+// hasWriteFailedNotification reports whether any notification evidence
+// carries StateWriteFailed — the prepared record could not be persisted, but
+// the wake injected anyway. trace uses this to print "recording failed"
+// rather than "no attempt recorded" (Requirement 3: the two facts must not
+// print the same sentence).
+func hasWriteFailedNotification(evidence []traceEvidence) bool {
+	for _, ev := range evidence {
+		if ev.Notification != nil && ev.Notification.State == notificationattempt.StateWriteFailed {
+			return true
+		}
+	}
+	return false
+}
+
 func (c *traceCollector) addTarget(located traceLocatedHeader, authority string) {
 	c.targets = append(c.targets, located)
 	header := located.header
@@ -599,8 +613,19 @@ func (c *traceCollector) finishLegs() {
 				leg.Detail = "current file visibility found; original directory sync durability is no_evidence"
 				leg.NextStep = "inspect retained send output before retrying; do not infer retry safety from current file presence"
 			case "notification":
-				leg.Detail = "durable notifier write-attempt evidence found; this never proves human or TUI observation"
-				leg.NextStep = "treat prepared-without-result as indeterminate and written only as a byte-write outcome"
+				// Requirement 3: distinguish "no attempt recorded" from "recording
+				// failed". If any evidence has StateWriteFailed, the prepared write
+				// itself errored (the ledger could not persist the record) but the
+				// wake injected anyway — the ledger never blocks delivery. An
+				// operator debugging a missed doorbell must not conclude the wake
+				// never tried.
+				if hasWriteFailedNotification(leg.Evidence) {
+					leg.Detail = "notification attempt was made but the attempt record could not be persisted; the wake injects regardless of ledger write success"
+					leg.NextStep = "the notification was attempted — investigate the injection path, not the ledger; the missing record is a persistence gap, not a missed attempt"
+				} else {
+					leg.Detail = "durable notifier write-attempt evidence found; this never proves human or TUI observation"
+					leg.NextStep = "treat prepared-without-result as indeterminate and written only as a byte-write outcome"
+				}
 			}
 		} else {
 			leg.Status = "no_evidence"
