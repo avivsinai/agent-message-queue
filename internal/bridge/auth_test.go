@@ -1,10 +1,13 @@
 package bridge
 
 import (
+	"bytes"
 	"crypto/ed25519"
+	"encoding/binary"
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -18,9 +21,81 @@ func TestSignAndVerifyEnvelopeRoundTrip(t *testing.T) {
 	if err := SignEnvelope(&env, key); err != nil {
 		t.Fatal(err)
 	}
+	if env.Version != 2 {
+		t.Fatalf("envelope version = %d, want v2", env.Version)
+	}
 	if err := VerifyEnvelope(env, key.Public(), "1"); err != nil {
 		t.Fatalf("verify: %v", err)
 	}
+}
+
+func TestV1CanonicalBytesHadLFFieldCollision(t *testing.T) {
+	left := testEnvelope([]byte("legacy"))
+	left.ThreadID = "thread\npayload_sha256=one"
+	left.PayloadSHA256 = "two"
+	right := left
+	right.ThreadID = "thread"
+	right.PayloadSHA256 = "one\npayload_sha256=two"
+
+	if !bytes.Equal(legacyV1CanonicalBytes(left), legacyV1CanonicalBytes(right)) {
+		t.Fatal("test setup did not reproduce the v1 LF collision")
+	}
+	if bytes.Equal(CanonicalBytes(left), CanonicalBytes(right)) {
+		t.Fatal("v2 length-prefixed preimages still collide")
+	}
+}
+
+func TestCanonicalBytesUsesLengthPrefixedV2Fields(t *testing.T) {
+	env := testEnvelope([]byte("payload"))
+	got := CanonicalBytes(env)
+	want := []string{
+		"amq-bridge-envelope-v2",
+		"2",
+		env.TransferID,
+		env.SourceHost,
+		env.SourceHandle,
+		env.DestAlias,
+		env.SourceMessageID,
+		env.ThreadID,
+		env.PayloadSHA256,
+		env.KeyGeneration,
+	}
+	for i, wantField := range want {
+		if len(got) < 4 {
+			t.Fatalf("field %d has no length prefix", i)
+		}
+		length := int(binary.BigEndian.Uint32(got[:4]))
+		got = got[4:]
+		if length != len(wantField) || len(got) < length || string(got[:length]) != wantField {
+			t.Fatalf("field %d = %q with length %d, want %q with length %d", i, got[:min(length, len(got))], length, wantField, len(wantField))
+		}
+		got = got[length:]
+	}
+	if len(got) != 0 {
+		t.Fatalf("canonical preimage has %d trailing bytes", len(got))
+	}
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func legacyV1CanonicalBytes(env Envelope) []byte {
+	return []byte(strings.Join([]string{
+		"amq-bridge-envelope-v1",
+		"version=" + strconv.Itoa(env.Version),
+		"transfer_id=" + env.TransferID,
+		"source_host=" + env.SourceHost,
+		"source_handle=" + env.SourceHandle,
+		"dest_alias=" + env.DestAlias,
+		"source_message_id=" + env.SourceMessageID,
+		"thread_id=" + env.ThreadID,
+		"payload_sha256=" + env.PayloadSHA256,
+		"key_generation=" + env.KeyGeneration,
+	}, "\n"))
 }
 
 func TestVerifyEnvelopeRejectsForgedSourceHost(t *testing.T) {

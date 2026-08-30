@@ -17,7 +17,7 @@ func testEnvelope(payload []byte) Envelope {
 	sum := sha256.Sum256(payload)
 	return Envelope{
 		Version:         EnvelopeVersion,
-		TransferID:      "t1",
+		TransferID:      DeriveTransferID("grok-host", "codex", "msg-1", "mac/claude"),
 		SourceHost:      "grok-host",
 		SourceHandle:    "codex",
 		DestAlias:       "mac/claude",
@@ -86,15 +86,16 @@ func TestApplyEnvelopeIgnoresUntrustedPayloadRoutingHints(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := ApplyEnvelope(root, "mac", "claude", testEnvelope(payload))
+	env := testEnvelope(payload)
+	result, err := ApplyEnvelope(root, "mac", "claude", env)
 	if err != nil {
 		t.Fatalf("apply: %v", err)
 	}
-	want := filepath.Join(fsq.AgentInboxNew(base, "claude"), TransferFilename("grok-host", "t1"))
+	want := filepath.Join(fsq.AgentInboxNew(base, "claude"), TransferFilename(env.SourceHost, env.TransferID))
 	if result.Path != want {
 		t.Fatalf("path = %q, want dest_alias mailbox %q", result.Path, want)
 	}
-	if _, err := os.Stat(filepath.Join(fsq.AgentInboxNew(base, "attacker"), TransferFilename("grok-host", "t1"))); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(fsq.AgentInboxNew(base, "attacker"), TransferFilename(env.SourceHost, env.TransferID))); !os.IsNotExist(err) {
 		t.Fatalf("payload routed into attacker mailbox: %v", err)
 	}
 }
@@ -133,7 +134,8 @@ func TestApplyEnvelopeReplayAndConflict(t *testing.T) {
 	t.Cleanup(func() { _ = root.Close() })
 
 	payload := []byte("hello-bridge")
-	first, err := ApplyEnvelope(root, "mac", "claude", testEnvelope(payload))
+	env := testEnvelope(payload)
+	first, err := ApplyEnvelope(root, "mac", "claude", env)
 	if err != nil || first.Replayed {
 		t.Fatalf("first apply: %#v %v", first, err)
 	}
@@ -141,18 +143,18 @@ func TestApplyEnvelopeReplayAndConflict(t *testing.T) {
 		t.Fatalf("missing dest: %v", statErr)
 	}
 
-	replay, err := ApplyEnvelope(root, "mac", "claude", testEnvelope(payload))
+	replay, err := ApplyEnvelope(root, "mac", "claude", env)
 	if err != nil || !replay.Replayed {
 		t.Fatalf("replay: %#v %v", replay, err)
 	}
 
 	conflict := testEnvelope([]byte("other-digest"))
-	conflict.TransferID = "t1"
+	conflict.TransferID = env.TransferID
 	_, err = ApplyEnvelope(root, "mac", "claude", conflict)
 	if !errors.Is(err, os.ErrExist) {
 		t.Fatalf("conflict = %v, want EEXIST", err)
 	}
-	got, readErr := os.ReadFile(filepath.Join(fsq.AgentInboxNew(base, "claude"), TransferFilename("grok-host", "t1")))
+	got, readErr := os.ReadFile(filepath.Join(fsq.AgentInboxNew(base, "claude"), TransferFilename(env.SourceHost, env.TransferID)))
 	if readErr != nil || string(got) != string(payload) {
 		t.Fatalf("conflict overwrote dest: %q %v", got, readErr)
 	}
@@ -169,6 +171,7 @@ func TestApplyEnvelopeReplayAndConflict(t *testing.T) {
 
 	otherHost := testEnvelope(payload)
 	otherHost.SourceHost = "other-host"
+	otherHost.TransferID = DeriveTransferID(otherHost.SourceHost, otherHost.SourceHandle, otherHost.SourceMessageID, otherHost.DestAlias)
 	other, err := ApplyEnvelope(root, "mac", "claude", otherHost)
 	if err != nil || other.Replayed {
 		t.Fatalf("distinct source host: %#v %v", other, err)

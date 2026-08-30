@@ -1,14 +1,15 @@
 package bridge
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
@@ -43,9 +44,8 @@ func TrustedPath(root, host string) string {
 }
 
 func GenerateHostKey(generation string) (HostKey, error) {
-	generation = strings.TrimSpace(generation)
-	if generation == "" {
-		return HostKey{}, fmt.Errorf("key generation is required")
+	if err := validateBridgeIdentifier("key generation", generation); err != nil {
+		return HostKey{}, err
 	}
 	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -55,23 +55,32 @@ func GenerateHostKey(generation string) (HostKey, error) {
 }
 
 func CanonicalBytes(env Envelope) []byte {
-	return []byte(strings.Join([]string{
-		"amq-bridge-envelope-v1",
-		"version=" + strconv.Itoa(env.Version),
-		"transfer_id=" + env.TransferID,
-		"source_host=" + env.SourceHost,
-		"source_handle=" + env.SourceHandle,
-		"dest_alias=" + env.DestAlias,
-		"source_message_id=" + env.SourceMessageID,
-		"thread_id=" + env.ThreadID,
-		"payload_sha256=" + strings.ToLower(env.PayloadSHA256),
-		"key_generation=" + env.KeyGeneration,
-	}, "\n"))
+	var preimage bytes.Buffer
+	appendField := func(value string) {
+		var length [4]byte
+		binary.BigEndian.PutUint32(length[:], uint32(len(value)))
+		_, _ = preimage.Write(length[:])
+		_, _ = preimage.WriteString(value)
+	}
+	appendField("amq-bridge-envelope-v2")
+	appendField("2")
+	appendField(env.TransferID)
+	appendField(env.SourceHost)
+	appendField(env.SourceHandle)
+	appendField(env.DestAlias)
+	appendField(env.SourceMessageID)
+	appendField(env.ThreadID)
+	appendField(env.PayloadSHA256)
+	appendField(env.KeyGeneration)
+	return preimage.Bytes()
 }
 
 func SignEnvelope(env *Envelope, key HostKey) error {
 	if env == nil {
 		return fmt.Errorf("bridge envelope is required")
+	}
+	if err := validateEnvelope(*env, false); err != nil {
+		return err
 	}
 	if env.KeyGeneration != key.Generation {
 		return fmt.Errorf("envelope key_generation %q does not match identity generation %q", env.KeyGeneration, key.Generation)
@@ -82,6 +91,9 @@ func SignEnvelope(env *Envelope, key HostKey) error {
 
 func VerifyEnvelope(env Envelope, pub ed25519.PublicKey, generation string) error {
 	if err := ValidateEnvelope(env); err != nil {
+		return err
+	}
+	if err := validateBridgeIdentifier("trusted key generation", generation); err != nil {
 		return err
 	}
 	if env.KeyGeneration != generation {
@@ -120,7 +132,7 @@ func LoadHostIDFromDeliveryRoot(root *fsq.DeliveryRoot) (string, error) {
 
 func parseHostID(path string, data []byte) (string, error) {
 	host := strings.TrimSpace(string(data))
-	if err := fsq.ValidateHandle(host); err != nil {
+	if err := validateBridgeIdentifier("host-id", host); err != nil {
 		return "", fmt.Errorf("bridge host-id: %w", err)
 	}
 	if string(data) != host+"\n" && string(data) != host {
@@ -130,7 +142,7 @@ func parseHostID(path string, data []byte) (string, error) {
 }
 
 func WriteHostID(root, host string) error {
-	if err := fsq.ValidateHandle(host); err != nil {
+	if err := validateBridgeIdentifier("host-id", host); err != nil {
 		return fmt.Errorf("bridge host-id: %w", err)
 	}
 	if err := os.MkdirAll(filepath.Join(root, "bridge"), 0o700); err != nil {
@@ -155,6 +167,12 @@ func LoadIdentity(root string) (HostKey, error) {
 }
 
 func WriteIdentity(root string, key HostKey) error {
+	if err := validateBridgeIdentifier("key generation", key.Generation); err != nil {
+		return err
+	}
+	if len(key.Private) != ed25519.PrivateKeySize {
+		return fmt.Errorf("bridge identity private key must be %d bytes", ed25519.PrivateKeySize)
+	}
 	if err := os.MkdirAll(filepath.Join(root, "bridge"), 0o700); err != nil {
 		return fmt.Errorf("create bridge directory: %w", err)
 	}
@@ -163,7 +181,7 @@ func WriteIdentity(root string, key HostKey) error {
 }
 
 func LoadTrusted(root, host string) (ed25519.PublicKey, string, error) {
-	if err := fsq.ValidateHandle(host); err != nil {
+	if err := validateBridgeIdentifier("trusted source host", host); err != nil {
 		return nil, "", fmt.Errorf("trusted source host: %w", err)
 	}
 	fields, err := readKeyFields(TrustedPath(root, host), "public")
@@ -185,7 +203,7 @@ func LoadTrusted(root, host string) (ed25519.PublicKey, string, error) {
 // envelope claim until this exact trusted file is loaded and signature
 // verification succeeds.
 func LoadTrustedFromDeliveryRoot(root *fsq.DeliveryRoot, host string) (ed25519.PublicKey, string, error) {
-	if err := fsq.ValidateHandle(host); err != nil {
+	if err := validateBridgeIdentifier("trusted source host", host); err != nil {
 		return nil, "", fmt.Errorf("trusted source host: %w", err)
 	}
 	rel := filepath.Join("bridge", TrustedDirName, host)
@@ -208,12 +226,11 @@ func LoadTrustedFromDeliveryRoot(root *fsq.DeliveryRoot, host string) (ed25519.P
 }
 
 func WriteTrusted(root, host string, pub ed25519.PublicKey, generation string) error {
-	if err := fsq.ValidateHandle(host); err != nil {
+	if err := validateBridgeIdentifier("trusted source host", host); err != nil {
 		return fmt.Errorf("trusted source host: %w", err)
 	}
-	generation = strings.TrimSpace(generation)
-	if generation == "" {
-		return fmt.Errorf("trusted host generation is required")
+	if err := validateBridgeIdentifier("trusted host generation", generation); err != nil {
+		return err
 	}
 	if len(pub) != ed25519.PublicKeySize {
 		return fmt.Errorf("trusted host public key must be %d bytes", ed25519.PublicKeySize)
@@ -246,7 +263,7 @@ func parseKeyFields(path string, data []byte, secretField string) (map[string]st
 		fields[key] = value
 	}
 	generation := fields["generation"]
-	if generation == "" || generation != strings.TrimSpace(generation) {
+	if err := validateBridgeIdentifier("generation", generation); err != nil {
 		return nil, fmt.Errorf("%s generation is invalid", path)
 	}
 	if fields[secretField] == "" {

@@ -588,10 +588,9 @@ func (c *Courier) readSpool() ([]spoolItem, error) {
 
 func envelopeForMessage(cfg Config, destAlias, messageID, threadID string, payload []byte) bridge.Envelope {
 	digest := sha256.Sum256(payload)
-	transferDigest := sha256.Sum256([]byte(cfg.SourceHost + "\x00" + messageID + "\x00" + destAlias))
 	return bridge.Envelope{
 		Version:         bridge.EnvelopeVersion,
-		TransferID:      "xfer-" + hex.EncodeToString(transferDigest[:16]),
+		TransferID:      bridge.DeriveTransferID(cfg.SourceHost, cfg.SourceHandle, messageID, destAlias),
 		SourceHost:      cfg.SourceHost,
 		SourceHandle:    cfg.SourceHandle,
 		DestAlias:       destAlias,
