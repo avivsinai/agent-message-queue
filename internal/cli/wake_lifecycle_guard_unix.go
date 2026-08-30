@@ -260,6 +260,25 @@ func withExistingWakeLifecycleGuardInDir(agentDir *wakeAgentDir, fn func(int) er
 	})
 }
 
+func wakeLifecycleGuardMissingAt(agentDir *wakeAgentDir) (bool, error) {
+	missing := false
+	err := agentDir.withFD(func(dirfd int) error {
+		var info unix.Stat_t
+		err := unix.Fstatat(
+			dirfd,
+			wakeLifecycleGuardFileName,
+			&info,
+			unix.AT_SYMLINK_NOFOLLOW,
+		)
+		if err == unix.ENOENT {
+			missing = true
+			return nil
+		}
+		return err
+	})
+	return missing, err
+}
+
 func validateWakeLifecycleGuard(path string, info os.FileInfo) error {
 	if !info.Mode().IsRegular() {
 		return fmt.Errorf("wake lifecycle guard %s must be a regular file", path)

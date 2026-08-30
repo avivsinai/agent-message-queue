@@ -62,6 +62,44 @@ func terminateAndRemoveOrphanedWakeLockInDir(
 	return terminateAndRemoveOrphanedWakeLockInDirWithRawConsent(agentDir, inspection, false, nil)
 }
 
+// A legacy terminal wake may have no lifecycle guard. Exact termination
+// already holds the retained agent directory capability, so use that
+// descriptor when the guard is absent without creating a new authority file.
+func withExistingWakeLifecycleGuardOrRetainedDir(
+	agentDir *wakeAgentDir,
+	allowMissing bool,
+	fn func(int) error,
+) error {
+	if !allowMissing {
+		return withExistingWakeLifecycleGuardInDir(agentDir, fn)
+	}
+	missing, err := wakeLifecycleGuardMissingAt(agentDir)
+	if err != nil {
+		return err
+	}
+	if missing {
+		// This is the pre-guard behavior for legacy terminal wakes. It is
+		// safe only through the retained directory descriptor; it skips the
+		// flock because there is no guard file to lock. A guard-aware successor
+		// can appear after the probe, but the callback re-reads and re-verifies
+		// the exact lock generation before any signal or removal.
+		return agentDir.withFD(fn)
+	}
+	return withExistingWakeLifecycleGuardInDir(agentDir, fn)
+}
+
+func wakeLockMayUseRetainedDirWithoutGuard(inspection wakeLockInspection) bool {
+	if wakeLockHasOwnerMarkers(inspection) {
+		return false
+	}
+	switch inspection.Lock.WakeMode {
+	case "", wakeInjectModeRaw, wakeInjectModePaste, wakeInjectModeNone:
+		return true
+	default:
+		return false
+	}
+}
+
 func terminateAndRemoveOrphanedWakeLockInDirWithRawConsent(
 	agentDir *wakeAgentDir,
 	inspection wakeLockInspection,
@@ -71,7 +109,8 @@ func terminateAndRemoveOrphanedWakeLockInDirWithRawConsent(
 	var locked wakeLockInspection
 	pidfd := -1
 	provenGone := false
-	if err := withExistingWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+	allowMissingGuard := wakeLockMayUseRetainedDirWithoutGuard(inspection)
+	if err := withExistingWakeLifecycleGuardOrRetainedDir(agentDir, allowMissingGuard, func(dirfd int) error {
 		locked = readWakeLockMetadataAt(
 			dirfd,
 			agentDir,
@@ -148,7 +187,7 @@ func terminateAndRemoveOrphanedWakeLockInDirWithRawConsent(
 	}
 
 	removed := false
-	err := withExistingWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+	err := withExistingWakeLifecycleGuardOrRetainedDir(agentDir, allowMissingGuard, func(dirfd int) error {
 		current := inspectWakeLockAt(
 			dirfd,
 			agentDir,

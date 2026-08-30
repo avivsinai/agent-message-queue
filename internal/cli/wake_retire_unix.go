@@ -820,22 +820,7 @@ func validateWakeLockStaleRemovalAt(
 }
 
 func wakeRetireLifecycleGuardMissingAt(agentDir *wakeAgentDir) (bool, error) {
-	missing := false
-	err := agentDir.withFD(func(dirfd int) error {
-		var info unix.Stat_t
-		err := unix.Fstatat(
-			dirfd,
-			wakeLifecycleGuardFileName,
-			&info,
-			unix.AT_SYMLINK_NOFOLLOW,
-		)
-		if err == unix.ENOENT {
-			missing = true
-			return nil
-		}
-		return err
-	})
-	return missing, err
+	return wakeLifecycleGuardMissingAt(agentDir)
 }
 
 func requireExistingWakeTargetMatchesAt(

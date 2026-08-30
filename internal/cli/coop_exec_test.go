@@ -1366,8 +1366,10 @@ func TestRetainedAuthoritativeHelperClaimCleansDetachedOldDirectoryOnly(t *testi
 	if err := writeWakePreparedFile(root, me, inspection); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(lock.ControlSocket, []byte("socket"), 0o600); err != nil {
-		t.Fatal(err)
+	if lock.ControlSocket != "" {
+		if err := os.WriteFile(lock.ControlSocket, []byte("socket"), 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	proc := &os.Process{Pid: wakePID}
 	claim, err := captureRetainedCoopWakeHelperClaim(proc, root, me)
