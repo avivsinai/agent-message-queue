@@ -590,7 +590,6 @@ func removeAuthoritativeWakeClaimAt(
 	case wakeAgentDirCanonical:
 	case wakeAgentDirDetached:
 		if !detached {
-			detached = true
 			detachedValidationErr = wakeDetachedCleanupValidationError()
 		}
 	case wakeAgentDirInconclusive:
@@ -614,7 +613,6 @@ func removeAuthoritativeWakeClaimAt(
 			}
 			switch relation {
 			case wakeAgentDirDetached:
-				detached = true
 				detachedValidationErr = errors.Join(detachedValidationErr, stateSnapshotErr)
 			case wakeAgentDirCanonical:
 				continueAfterWakeStateProjectionError(newWakeStateProjectionError(

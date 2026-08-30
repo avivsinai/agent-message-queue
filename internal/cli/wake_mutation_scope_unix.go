@@ -23,13 +23,6 @@ func newWakeMutationScope(agentDir *wakeAgentDir, dirfd int) *wakeMutationScope 
 	return &wakeMutationScope{agentDir: agentDir, dirfd: dirfd}
 }
 
-func withWakeMutationScopeInDir(
-	agentDir *wakeAgentDir,
-	fn func(*wakeMutationScope) error,
-) error {
-	return withWakeMutationScopeModeInDir(agentDir, unix.LOCK_EX, fn)
-}
-
 func withWakeMutationScopeModeInDir(
 	agentDir *wakeAgentDir,
 	lockMode int,
@@ -38,13 +31,6 @@ func withWakeMutationScopeModeInDir(
 	return withWakeLifecycleGuardModeInDir(agentDir, lockMode, func(dirfd int) error {
 		return fn(newWakeMutationScope(agentDir, dirfd))
 	})
-}
-
-func withExistingWakeMutationScopeInDir(
-	agentDir *wakeAgentDir,
-	fn func(*wakeMutationScope) error,
-) error {
-	return withExistingWakeMutationScopeModeInDir(agentDir, unix.LOCK_EX, fn)
 }
 
 func withExistingWakeMutationScopeModeInDir(

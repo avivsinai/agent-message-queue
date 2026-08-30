@@ -44,7 +44,7 @@ var wakeMutationUnprovableUnlinkExemptions = map[string]map[int]string{
 		97:  "owned temporary target file cleanup",
 		177: "owned temporary lock file cleanup",
 		300: "owned temporary metadata file cleanup",
-		791: "validated authoritative control-socket basename cleanup; lock name rejected locally",
+		789: "validated authoritative control-socket basename cleanup; lock name rejected locally",
 	},
 	"wake_quarantine_unix.go": {
 		210: "snapshot-validated quarantine artifact cleanup; lock name rejected locally",
@@ -372,9 +372,7 @@ func isWakeLifecycleGuardCall(call *ast.CallExpr) bool {
 		"withWakeLifecycleGuardNoWaitInDir",
 		"withExistingWakeLifecycleGuardInDir",
 		"withExistingWakeLifecycleGuardModeInDir",
-		"withWakeMutationScopeInDir",
 		"withWakeMutationScopeModeInDir",
-		"withExistingWakeMutationScopeInDir",
 		"withExistingWakeMutationScopeModeInDir",
 		"withWakeMutationScopeOrRetainedDir":
 		return true
