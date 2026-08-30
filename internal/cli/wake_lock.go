@@ -705,6 +705,9 @@ func removeWakeLockIfUnchangedGuardedWithIOStatus(
 	if inspection.fileInfo == nil || currentInfo == nil || !sameWakeFileIdentity(inspection.fileInfo, currentInfo) {
 		return false, fmt.Errorf("wake lock generation changed while cleaning stale lock; retry")
 	}
+	if wakeLockHasMultipleLinks(currentInfo) {
+		return false, fmt.Errorf("wake lock has multiple hard links; preserving it to avoid mutating an alias")
+	}
 	// Pathname removal is safe under the lifecycle guard held by every
 	// cooperating writer; an unguarded same-UID writer is out of contract. A
 	// rename-and-verify alternative would expose lock absence to pre-P2b readers

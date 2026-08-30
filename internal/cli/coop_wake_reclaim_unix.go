@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -10,11 +11,27 @@ import (
 	"strings"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"golang.org/x/term"
 )
 
 func prepareCoopWakeLock(root, agent string, yes bool, remedy string) error {
-	inspection := inspectWakeLock(root, agent)
+	agentDir, err := openExistingCoopWakeAgentDir(root, agent)
+	if err != nil {
+		return err
+	}
+	if agentDir == nil {
+		return nil
+	}
+	defer func() { _ = agentDir.Close() }()
+
+	var inspection wakeLockInspection
+	if err := agentDir.withFD(func(dirfd int) error {
+		inspection = inspectWakeLockAt(dirfd, agentDir, root, agent)
+		return nil
+	}); err != nil {
+		return err
+	}
 	if !inspection.Exists {
 		return nil
 	}
@@ -25,7 +42,7 @@ func prepareCoopWakeLock(root, agent string, yes bool, remedy string) error {
 	}
 	if inspection.Status == wakeLockStale {
 		// This returns before stale owner-bound recovery advice is rendered below.
-		if err := removeWakeLockIfUnchanged(inspection); err != nil {
+		if err := removeCoopWakeLockIfUnchangedInDir(agentDir, inspection); err != nil {
 			return fmt.Errorf("remove exact stale wake lock: %w", err)
 		}
 		return nil
@@ -51,7 +68,7 @@ func prepareCoopWakeLock(root, agent string, yes bool, remedy string) error {
 		if err != nil || !proceed {
 			return err
 		}
-		retired, err := retireLiveRawOrphan(inspection)
+		retired, err := terminateAndRemoveOrphanedWakeLockInDirWithRawConsent(agentDir, inspection, true, nil)
 		if err != nil {
 			return fmt.Errorf("retire identity-confirmed live raw orphan: %w", err)
 		}
@@ -124,7 +141,7 @@ func prepareCoopWakeLock(root, agent string, yes bool, remedy string) error {
 		return err
 	}
 
-	if err := removeWakeLockIfUnchanged(inspection); err != nil {
+	if err := removeCoopWakeLockIfUnchangedInDir(agentDir, inspection); err != nil {
 		return fmt.Errorf("remove exact unverified wake lock: %w", err)
 	}
 	_ = writeStderr(
@@ -133,6 +150,127 @@ func prepareCoopWakeLock(root, agent string, yes bool, remedy string) error {
 		inspection.PID,
 		coopWakeTTYDisplay(inspection),
 	)
+	return nil
+}
+
+func openExistingCoopWakeAgentDir(root, agent string) (*wakeAgentDir, error) {
+	agentDir, err := openWakeDirectory(fsq.AgentBase(root, agent), "wake agent directory")
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	return agentDir, err
+}
+
+func removeCoopWakeLockIfUnchangedInDir(
+	agentDir *wakeAgentDir,
+	expected wakeLockInspection,
+) error {
+	// The retained descriptor is the authority for this exact cleanup. This
+	// may create the permanent guard in that retained directory, never through
+	// the canonical successor pathname.
+	return withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+		current := inspectWakeLockAt(dirfd, agentDir, expected.Root, expected.Agent)
+		if !sameWakeLockGeneration(expected, current) {
+			return nil
+		}
+		return removeWakeLockIfUnchangedGuardedAt(dirfd, agentDir, current)
+	})
+}
+
+func sameWakeLockGenerationForRetainedTermination(
+	first, second wakeLockInspection,
+) bool {
+	if sameWakeLockGeneration(first, second) {
+		return true
+	}
+	return first.Exists && second.Exists &&
+		first.fileInfo != nil && second.fileInfo != nil &&
+		os.SameFile(first.fileInfo, second.fileInfo) &&
+		bytes.Equal(first.raw, second.raw) &&
+		(first.Lock.Generation == "" || second.Lock.Generation == "" ||
+			first.Lock.Generation == second.Lock.Generation)
+}
+
+// Termination cleanup may hold a directory that is now detached from the
+// canonical mailbox. Validate the retained generation, but never use that
+// capability to select a replacement or publish success.
+func validateWakeLockOwnerlessMutationAtForTermination(
+	dirfd int,
+	agentDir *wakeAgentDir,
+	inspection wakeLockInspection,
+) error {
+	bound, err := wakeLockInspectionStateBound(inspection)
+	if err != nil {
+		return newWakeStateBoundInconclusiveError(err)
+	}
+	if bound && retainedWakeAgentDirIsDetached(agentDir) {
+		if err := validateWakeLockOwnerlessBoundStateInRetainedDirAt(
+			dirfd, agentDir, inspection,
+		); err != nil {
+			return err
+		}
+	} else if retainedWakeAgentDirIsDetached(agentDir) {
+		if _, err := readWakeStateSelectionAtRetained(
+			dirfd,
+			agentDir,
+			inspection.Root,
+			inspection.Agent,
+		); err != nil {
+			return err
+		}
+	} else if _, err := readWakeStateSelectionForInspectionAt(
+		dirfd,
+		agentDir,
+		inspection.Root,
+		inspection.Agent,
+		inspection,
+	); err != nil {
+		return err
+	}
+	if err := validateGenericWakeLifecycleTransition(inspection, wakeGenericRequestMutate); err != nil {
+		return err
+	}
+	if inspection.Lock.TargetDigest != "" {
+		target, exists, err := readWakeTargetAt(
+			dirfd,
+			agentDir,
+			inspection.Root,
+			inspection.Agent,
+		)
+		if err != nil {
+			return fmt.Errorf("wake target is unverified before ownerless mutation: %w", err)
+		}
+		if exists && target.Owner != nil {
+			return fmt.Errorf("owner-bearing wake state requires 'amq wake recover-owner --me %s'", inspection.Agent)
+		}
+	}
+	return nil
+}
+
+func validateWakeLockStaleRemovalAtForTermination(
+	dirfd int,
+	agentDir *wakeAgentDir,
+	inspection wakeLockInspection,
+) error {
+	if !retainedWakeAgentDirIsDetached(agentDir) {
+		if _, err := readWakeStateSelectionForInspectionAt(
+			dirfd,
+			agentDir,
+			inspection.Root,
+			inspection.Agent,
+			inspection,
+		); err != nil {
+			return err
+		}
+	}
+	if wakeLockHasOwnerMarkers(inspection) {
+		return fmt.Errorf("owner-bound wake claims require 'amq wake recover-owner --me %s'", inspection.Agent)
+	}
+	if err := validateWakeLockRepairable(inspection); err == nil {
+		return nil
+	} else if inspection.Status != wakeLockStale {
+		return err
+	}
 	return nil
 }
 
@@ -211,7 +349,47 @@ func resolveMissingWakeLockAfterTermination(
 	inspection wakeLockInspection,
 	terminationErr error,
 ) (bool, error) {
-	current := inspectWakeLock(inspection.Root, inspection.Agent)
+	agentDir, err := openExistingCoopWakeAgentDir(inspection.Root, inspection.Agent)
+	if err != nil {
+		return false, err
+	}
+	if agentDir == nil {
+		return resolveMissingWakeLockAfterTerminationFromInspection(
+			inspection,
+			wakeLockInspection{},
+			terminationErr,
+		)
+	}
+	defer func() { _ = agentDir.Close() }()
+	return resolveMissingWakeLockAfterTerminationInDir(agentDir, inspection, terminationErr)
+}
+
+func resolveMissingWakeLockAfterTerminationInDir(
+	agentDir *wakeAgentDir,
+	inspection wakeLockInspection,
+	terminationErr error,
+) (bool, error) {
+	var current wakeLockInspection
+	if err := agentDir.withFD(func(dirfd int) error {
+		if err := validateWakeStateAgentDirAt(dirfd, agentDir); err != nil {
+			return err
+		}
+		current = inspectWakeLockAt(dirfd, agentDir, inspection.Root, inspection.Agent)
+		return validateWakeStateAgentDirAt(dirfd, agentDir)
+	}); err != nil {
+		if retainedWakeAgentDirIsDetached(agentDir) {
+			return false, nil
+		}
+		return false, err
+	}
+	return resolveMissingWakeLockAfterTerminationFromInspection(inspection, current, terminationErr)
+}
+
+func resolveMissingWakeLockAfterTerminationFromInspection(
+	inspection wakeLockInspection,
+	current wakeLockInspection,
+	terminationErr error,
+) (bool, error) {
 	if current.Exists && !sameWakeLockGeneration(inspection, current) {
 		return false, nil
 	}

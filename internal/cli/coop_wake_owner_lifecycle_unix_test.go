@@ -864,6 +864,63 @@ func TestExactWakeCleanupPreservesReplacementGeneration(t *testing.T) {
 	}
 }
 
+func TestTerminateWakeHelperDetachedCleanupRemovesOldLockOnly(t *testing.T) {
+	root := secureTempDirForTest(t)
+	const agent = "codex"
+	cmd := exec.Command("sh", "-c", "while :; do sleep 1; done")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	waiter := newWakeProcessWaiter(cmd.Process)
+	t.Cleanup(func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		_ = waiter.waitForExit(time.Second)
+	})
+
+	establishDoctorWakeLifecycleGuardForTest(t, root, agent)
+	lockPath := writeWakeLockForTest(t, root, agent, wakeLock{
+		PID:          cmd.Process.Pid,
+		Generation:   "helper-generation",
+		ProcessStart: "helper-start",
+		BootID:       "helper-boot",
+	})
+	agentPath := filepath.Dir(lockPath)
+	running := true
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		return wakeProcessInfo{
+			PID:        pid,
+			Running:    running,
+			StartToken: "helper-start",
+			BootID:     "helper-boot",
+			Executable: "/usr/local/bin/amq",
+			Args:       []string{"amq", "wake", "--root", root, "--me", agent},
+		}
+	})
+
+	var detachedPath string
+	var successorBefore map[string]wakeCheckTreeEntry
+	originalKill := killWakeHelperProcess
+	killWakeHelperProcess = func(proc *os.Process) error {
+		detachedPath = detachGenericWakeAgentDirForTest(t, agentPath, ".wake.lock")
+		successorBefore = snapshotWakeCheckTree(t, agentPath)
+		running = false
+		return originalKill(proc)
+	}
+	t.Cleanup(func() { killWakeHelperProcess = originalKill })
+
+	err := terminateWakeHelperProcess(cmd.Process, waiter, root, agent)
+	var cleanupOnly *wakeDetachedCleanupOnlyError
+	if !errors.As(err, &cleanupOnly) {
+		t.Fatalf("detached helper cleanup error = %v, want cleanup-only refusal", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(detachedPath, ".wake.lock")); !os.IsNotExist(statErr) {
+		t.Fatalf("detached helper lock = %v, want absent", statErr)
+	}
+	assertWakeCheckTreeUnchanged(t, agentPath, successorBefore)
+}
+
 func TestStandaloneWakeRemainsOwnerless(t *testing.T) {
 	root := secureTempDirForTest(t)
 	ensureCoopWakeMailboxForTest(t, root, "codex")

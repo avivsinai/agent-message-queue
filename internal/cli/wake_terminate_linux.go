@@ -35,14 +35,43 @@ func terminateAndRemoveOrphanedWakeLock(inspection wakeLockInspection) (bool, er
 	return terminateAndRemoveOrphanedWakeLockWithRawConsent(inspection, false)
 }
 
+func terminateAndRemoveOrphanedWakeLockWithRawConsent(
+	inspection wakeLockInspection,
+	allowRawOrphan bool,
+) (bool, error) {
+	agentDir, err := openExistingCoopWakeAgentDir(inspection.Root, inspection.Agent)
+	if err != nil {
+		return false, err
+	}
+	if agentDir == nil {
+		return false, fmt.Errorf("wake agent directory disappeared before termination")
+	}
+	defer func() { _ = agentDir.Close() }()
+	return terminateAndRemoveOrphanedWakeLockInDirWithRawConsent(
+		agentDir,
+		inspection,
+		allowRawOrphan,
+		nil,
+	)
+}
+
 func terminateAndRemoveOrphanedWakeLockInDir(
 	agentDir *wakeAgentDir,
 	inspection wakeLockInspection,
 ) (bool, error) {
+	return terminateAndRemoveOrphanedWakeLockInDirWithRawConsent(agentDir, inspection, false, nil)
+}
+
+func terminateAndRemoveOrphanedWakeLockInDirWithRawConsent(
+	agentDir *wakeAgentDir,
+	inspection wakeLockInspection,
+	allowRawOrphan bool,
+	requestedTarget *wakeTarget,
+) (bool, error) {
 	var locked wakeLockInspection
 	pidfd := -1
 	provenGone := false
-	if err := withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+	if err := withExistingWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
 		locked = readWakeLockMetadataAt(
 			dirfd,
 			agentDir,
@@ -52,8 +81,13 @@ func terminateAndRemoveOrphanedWakeLockInDir(
 		if !sameWakeLockGeneration(inspection, locked) {
 			return nil
 		}
-		if err := validateWakeLockOwnerlessMutationAt(dirfd, agentDir, locked); err != nil {
+		if err := validateWakeLockOwnerlessMutationAtForTermination(dirfd, agentDir, locked); err != nil {
 			return err
+		}
+		if requestedTarget != nil {
+			if err := requireExistingWakeTargetMatchesAt(dirfd, agentDir, locked, *requestedTarget); err != nil {
+				return err
+			}
 		}
 		fd, err := linuxPidfdOpen(locked.PID, 0)
 		if err != nil {
@@ -97,7 +131,7 @@ func terminateAndRemoveOrphanedWakeLockInDir(
 	defer func() { _ = linuxPidfdClose(pidfd) }()
 
 	if locked.Process.Running && locked.Lock.WakeMode != wakeTargetInjectVia &&
-		!wakeLockNeedsReplacement(locked) {
+		!wakeLockNeedsReplacement(locked) && !allowRawOrphan {
 		return false, fmt.Errorf(
 			"live raw wake for %s (pid %d, start %s) is not eligible for automatic replacement; retry through amq coop exec to review and consent to takeover, or stop it from its owning session; refusing to signal without consent",
 			locked.Agent,
@@ -105,27 +139,16 @@ func terminateAndRemoveOrphanedWakeLockInDir(
 			locked.Lock.ProcessStart,
 		)
 	}
+	if allowRawOrphan && locked.Process.Running && locked.Lock.WakeMode != wakeTargetInjectVia &&
+		!isLiveRawOrphan(locked) {
+		return false, fmt.Errorf("live raw wake identity changed before consented termination")
+	}
 	if err := terminateWakePidfd(pidfd); err != nil {
-		missing := false
-		_ = withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
-			current := inspectWakeLockAt(
-				dirfd,
-				agentDir,
-				inspection.Root,
-				inspection.Agent,
-			)
-			missing = !current.Exists ||
-				!sameWakeLockGeneration(locked, current)
-			return nil
-		})
-		if missing {
-			return true, nil
-		}
-		return false, err
+		return resolveMissingWakeLockAfterTerminationInDir(agentDir, locked, err)
 	}
 
 	removed := false
-	err := withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+	err := withExistingWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
 		current := inspectWakeLockAt(
 			dirfd,
 			agentDir,
@@ -136,7 +159,7 @@ func terminateAndRemoveOrphanedWakeLockInDir(
 			removed = true
 			return nil
 		}
-		if !sameWakeLockGeneration(locked, current) {
+		if !sameWakeLockGenerationForRetainedTermination(locked, current) {
 			return newWakeLockResidueError(
 				wakeLockResidueReplacement,
 				errors.New("wake lock changed after wake process stopped; preserving replacement claim"),
@@ -152,6 +175,11 @@ func terminateAndRemoveOrphanedWakeLockInDir(
 			)
 			removed, removeErr = outcome.Committed, outcome.Err
 			return removeErr
+		}
+		if requestedTarget != nil {
+			if err := requireExistingWakeTargetMatchesAt(dirfd, agentDir, current, *requestedTarget); err != nil {
+				return err
+			}
 		}
 		if err := validateWakeLockStaleRemovalAt(dirfd, agentDir, current); err != nil {
 			return newWakeLockResidueError(
@@ -185,105 +213,6 @@ func terminateAndRemoveOrphanedWakeLockInDir(
 		)
 	}
 	return true, nil
-}
-
-func terminateAndRemoveOrphanedWakeLockWithRawConsent(
-	inspection wakeLockInspection,
-	allowRawOrphan bool,
-) (bool, error) {
-	var locked wakeLockInspection
-	pidfd := -1
-	provenGone := false
-	if err := withWakeLifecycleGuard(inspection.Root, inspection.Agent, func() error {
-		locked = readWakeLockMetadata(inspection.Root, inspection.Agent)
-		if !sameWakeLockGeneration(inspection, locked) {
-			return nil
-		}
-		if err := validateWakeLockOwnerlessMutation(locked); err != nil {
-			return err
-		}
-
-		// Acquire the stable process capability before any PID-based identity
-		// inspection of this locked generation. From here onward, signaling and
-		// exit detection use only this descriptor.
-		fd, err := linuxPidfdOpen(locked.PID, 0)
-		if err != nil {
-			if errors.Is(err, syscall.ESRCH) {
-				locked.Process = wakeProcessInfo{PID: locked.PID}
-				classifyWakeLock(locked.Root, locked.Agent, &locked)
-				provenGone = true
-				return removeWakeLockIfUnchangedGuarded(locked)
-			}
-			return fmt.Errorf("pidfd_open wake process %d: %w", locked.PID, err)
-		}
-		pidfd = fd
-
-		locked.Process = inspectWakeProcess(locked.PID)
-		classifyWakeLock(locked.Root, locked.Agent, &locked)
-		if !sameWakeLockInspection(inspection, locked) || !locked.IdentityConfirmed {
-			return nil
-		}
-		return nil
-	}); err != nil {
-		if pidfd >= 0 {
-			_ = linuxPidfdClose(pidfd)
-		}
-		return false, err
-	}
-	if provenGone {
-		return true, nil
-	}
-	if pidfd < 0 || !locked.IdentityConfirmed {
-		if pidfd >= 0 {
-			_ = linuxPidfdClose(pidfd)
-		}
-		return false, nil
-	}
-	defer func() { _ = linuxPidfdClose(pidfd) }()
-
-	if locked.Process.Running && locked.Lock.WakeMode != wakeTargetInjectVia {
-		allowed := wakeLockNeedsReplacement(locked)
-		if allowRawOrphan {
-			allowed = isLiveRawOrphan(locked)
-		}
-		if !allowed {
-			return false, fmt.Errorf("live raw wake for %s (pid %d, start %s) is not eligible for automatic replacement; retry through amq coop exec to review and consent to takeover, or stop it from its owning session; refusing to signal without consent", locked.Agent, locked.PID, locked.Lock.ProcessStart)
-		}
-	}
-
-	// Signaling and both waits happen without the lifecycle guard. The retained
-	// pidfd cannot retarget a recycled numeric PID.
-	if err := terminateWakePidfd(pidfd); err != nil {
-		return resolveMissingWakeLockAfterTermination(locked, err)
-	}
-
-	removed := false
-	err := withWakeLifecycleGuard(inspection.Root, inspection.Agent, func() error {
-		current := inspectWakeLock(inspection.Root, inspection.Agent)
-		if !current.Exists {
-			removed = true
-			return nil
-		}
-		if !sameWakeLockGeneration(locked, current) {
-			return nil
-		}
-		if err := validateWakeLockStaleRemoval(current); err != nil {
-			return err
-		}
-		if err := removeWakeLockIfUnchangedGuarded(current); err != nil {
-			return err
-		}
-		removed = true
-		return nil
-	})
-	return removed, err
-}
-
-func retireLiveRawOrphan(inspection wakeLockInspection) (bool, error) {
-	if !isLiveRawOrphan(inspection) {
-		return false, fmt.Errorf("wake is not an identity-confirmed live raw orphan")
-	}
-	return terminateAndRemoveOrphanedWakeLockWithRawConsent(inspection, true)
 }
 
 func terminateWakePidfd(pidfd int) error {

@@ -88,6 +88,33 @@ func TestPrepareCoopWakeLockRemovesProvenStaleWithoutPrompt(t *testing.T) {
 	}
 }
 
+func TestPrepareCoopWakeLockDetachedStaleCleansOldLockOnly(t *testing.T) {
+	root := secureTempDirForTest(t)
+	lockPath := writeWakeLockForTest(t, root, "codex", wakeLock{PID: 66121, Generation: "stale"})
+	agentPath := filepath.Dir(lockPath)
+	var detachedPath string
+	var successorBefore map[string]wakeCheckTreeEntry
+	detached := false
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		if !detached {
+			detached = true
+			detachedPath = detachGenericWakeAgentDirForTest(t, agentPath, ".wake.lock")
+			successorBefore = snapshotWakeCheckTree(t, agentPath)
+		}
+		return wakeProcessInfo{PID: pid}
+	})
+
+	err := prepareCoopWakeLock(root, "codex", false, "unused")
+	var cleanupOnly *wakeDetachedCleanupOnlyError
+	if !errors.As(err, &cleanupOnly) {
+		t.Fatalf("detached stale prepare error = %v, want cleanup-only refusal", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(detachedPath, ".wake.lock")); !os.IsNotExist(statErr) {
+		t.Fatalf("detached stale lock = %v, want absent", statErr)
+	}
+	assertWakeCheckTreeUnchanged(t, agentPath, successorBefore)
+}
+
 func TestPrepareCoopWakeLockProceedsAfterDiagnosticCleanupFailure(t *testing.T) {
 	root := secureTempDirForTest(t)
 	lockPath := writeWakeLockForTest(t, root, "codex", wakeLock{PID: 66121, Generation: "stale"})
@@ -130,6 +157,33 @@ func TestPrepareCoopWakeLockUnverifiedYesRemovesMetadataWithoutSignal(t *testing
 	if got := strings.Count(stderr, "duplicate notifications may continue"); got != 1 {
 		t.Fatalf("duplicate-notification warning count = %d, want 1: %q", got, stderr)
 	}
+}
+
+func TestPrepareCoopWakeLockDetachedUnverifiedCleansOldLockOnly(t *testing.T) {
+	root := secureTempDirForTest(t)
+	lockPath := writeUnverifiedCoopWakeLock(t, root)
+	agentPath := filepath.Dir(lockPath)
+	var detachedPath string
+	var successorBefore map[string]wakeCheckTreeEntry
+	detached := false
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		if !detached {
+			detached = true
+			detachedPath = detachGenericWakeAgentDirForTest(t, agentPath, ".wake.lock")
+			successorBefore = snapshotWakeCheckTree(t, agentPath)
+		}
+		return wakeProcessInfo{PID: pid}
+	})
+
+	err := prepareCoopWakeLock(root, "codex", true, "unused")
+	var cleanupOnly *wakeDetachedCleanupOnlyError
+	if !errors.As(err, &cleanupOnly) {
+		t.Fatalf("detached unverified prepare error = %v, want cleanup-only refusal", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(detachedPath, ".wake.lock")); !os.IsNotExist(statErr) {
+		t.Fatalf("detached unverified lock = %v, want absent", statErr)
+	}
+	assertWakeCheckTreeUnchanged(t, agentPath, successorBefore)
 }
 
 func TestResolveMissingWakeLockAfterTerminationPreservesPresentGenerationError(t *testing.T) {
@@ -176,6 +230,34 @@ func TestResolveMissingWakeLockAfterTerminationReturnsRetryForReplacementGenerat
 	if !current.Exists || current.Lock.Generation != "replacement-generation" {
 		t.Fatalf("replacement lock changed at %s: %#v", lockPath, current)
 	}
+}
+
+func TestResolveMissingWakeLockAfterTerminationDetachedSuccessorReturnsRetry(t *testing.T) {
+	root := secureTempDirForTest(t)
+	lockPath := writeWakeLockForTest(t, root, "codex", wakeLock{
+		PID:        66121,
+		Generation: "old-generation",
+	})
+	agentPath := filepath.Dir(lockPath)
+	firstInspection := true
+	var successorBefore map[string]wakeCheckTreeEntry
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		if firstInspection {
+			firstInspection = false
+			return wakeProcessInfo{PID: pid}
+		}
+		detachGenericWakeAgentDirForTest(t, agentPath, ".wake.lock")
+		successorBefore = snapshotWakeCheckTree(t, agentPath)
+		return wakeProcessInfo{PID: pid}
+	})
+	inspection := inspectWakeLock(root, "codex")
+	terminationErr := errors.New("termination outcome is unknown")
+
+	retired, err := resolveMissingWakeLockAfterTermination(inspection, terminationErr)
+	if retired || err != nil {
+		t.Fatalf("detached successor result retired=%t err=%v, want retry", retired, err)
+	}
+	assertWakeCheckTreeUnchanged(t, agentPath, successorBefore)
 }
 
 func TestPrepareCoopWakeLockProvenForeignProcessRefusesWithoutMutation(t *testing.T) {

@@ -7861,6 +7861,7 @@ func TestAcquireWakeLockSupersedesLegacyLiveLock(t *testing.T) {
 
 func TestRemoveWakeLockIfUnchangedRefusesChangedLock(t *testing.T) {
 	root := secureTempDirForTest(t)
+	establishDoctorWakeLifecycleGuardForTest(t, root, "orchestrator")
 	lockPath := writeWakeLockForTest(t, root, "orchestrator", wakeLock{PID: 4242})
 	inspection := inspectWakeLock(root, "orchestrator")
 	if !inspection.Exists {
@@ -7877,7 +7878,14 @@ func TestRemoveWakeLockIfUnchangedRefusesChangedLock(t *testing.T) {
 		t.Fatalf("write changed lock: %v", err)
 	}
 
-	err := removeWakeLockIfUnchanged(inspection)
+	agentDir, err := openWakeDirectory(filepath.Dir(lockPath), "wake agent directory")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = agentDir.Close() }()
+	err = withExistingWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+		return removeWakeLockIfUnchangedGuardedAt(dirfd, agentDir, inspection)
+	})
 	if err == nil {
 		t.Fatal("expected changed lock removal error")
 	}
@@ -7888,6 +7896,7 @@ func TestRemoveWakeLockIfUnchangedRefusesChangedLock(t *testing.T) {
 
 func TestRemoveWakeLockDoesNotDeleteReplacement(t *testing.T) {
 	root := secureTempDirForTest(t)
+	establishDoctorWakeLifecycleGuardForTest(t, root, "orchestrator")
 	lockPath := writeWakeLockForTest(t, root, "orchestrator", wakeLock{PID: 4242, Generation: "old"})
 	inspection := inspectWakeLock(root, "orchestrator")
 	if !inspection.Exists {
@@ -7909,7 +7918,14 @@ func TestRemoveWakeLockDoesNotDeleteReplacement(t *testing.T) {
 		t.Fatalf("write byte-compatible replacement lock: %v", err)
 	}
 
-	err := removeWakeLockIfUnchanged(inspection)
+	agentDir, err := openWakeDirectory(filepath.Dir(lockPath), "wake agent directory")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = agentDir.Close() }()
+	err = withExistingWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+		return removeWakeLockIfUnchangedGuardedAt(dirfd, agentDir, inspection)
+	})
 	if err == nil {
 		t.Fatal("expected replacement generation removal refusal")
 	}
@@ -8073,6 +8089,7 @@ func TestShouldReplaceOrphanedWakeLockSignalsOnlyAfterRevalidation(t *testing.T)
 	requireBarePIDWakeTermination(t)
 	const wakePID = 4242
 	root := secureTempDirForTest(t)
+	establishDoctorWakeLifecycleGuardForTest(t, root, "orchestrator")
 	lockPath := writeWakeLockForTest(t, root, "orchestrator", wakeLock{
 		PID:          wakePID,
 		TTY:          "/dev/amq-missing-tty",
@@ -8130,6 +8147,7 @@ func TestShouldReplaceOrphanedWakeLockKeepsLockWhenKillDoesNotTerminate(t *testi
 	requireBarePIDWakeTermination(t)
 	const wakePID = 4242
 	root := secureTempDirForTest(t)
+	establishDoctorWakeLifecycleGuardForTest(t, root, "orchestrator")
 	lockPath := writeWakeLockForTest(t, root, "orchestrator", wakeLock{
 		PID:          wakePID,
 		TTY:          "/dev/amq-missing-tty",
@@ -8802,6 +8820,7 @@ func TestCleanupTerminatedWakeLockRemovesOnlyCapturedStaleGeneration(t *testing.
 
 	t.Run("captured generation", func(t *testing.T) {
 		root := secureTempDirForTest(t)
+		establishDoctorWakeLifecycleGuardForTest(t, root, "orchestrator")
 		lockPath := writeWakeLockForTest(t, root, "orchestrator", wakeLock{
 			PID: wakePID, ProcessStart: "start-1", BootID: "boot-1",
 			Executable: "/opt/homebrew/bin/amq", Generation: "generation-1",
@@ -8819,6 +8838,7 @@ func TestCleanupTerminatedWakeLockRemovesOnlyCapturedStaleGeneration(t *testing.
 	t.Run("replacement generation", func(t *testing.T) {
 		running = true
 		root := secureTempDirForTest(t)
+		establishDoctorWakeLifecycleGuardForTest(t, root, "orchestrator")
 		lockPath := writeWakeLockForTest(t, root, "orchestrator", wakeLock{
 			PID: wakePID, ProcessStart: "start-1", BootID: "boot-1",
 			Executable: "/opt/homebrew/bin/amq", Generation: "generation-1",
@@ -8864,6 +8884,7 @@ func TestTerminateWakeHelperProcessKillsWaitsAndRemovesCapturedLock(t *testing.T
 		}
 	})
 	root := secureTempDirForTest(t)
+	establishDoctorWakeLifecycleGuardForTest(t, root, "orchestrator")
 	lockPath := writeWakeLockForTest(t, root, "orchestrator", wakeLock{
 		PID: wakePID, ProcessStart: "start-1", BootID: "boot-1",
 		Executable: "/opt/homebrew/bin/amq", Generation: "generation-1",
@@ -8879,7 +8900,7 @@ func TestTerminateWakeHelperProcessKillsWaitsAndRemovesCapturedLock(t *testing.T
 	}
 }
 
-func TestTerminateWakeHelperProcessRemovesLockCommittedAfterFirstInspection(t *testing.T) {
+func TestTerminateWakeHelperProcessPreservesLockCommittedWithoutRetainedDirectory(t *testing.T) {
 	cmd := exec.Command("sh", "-c", "sleep 30")
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start helper: %v", err)
@@ -8906,8 +8927,8 @@ func TestTerminateWakeHelperProcessRemovesLockCommittedAfterFirstInspection(t *t
 	if waiter.state == nil {
 		t.Fatal("wake helper was not waited")
 	}
-	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
-		t.Fatalf("post-inspection child lock was not removed, statErr=%v", err)
+	if _, err := os.Stat(lockPath); err != nil {
+		t.Fatalf("post-inspection lock without retained directory was mutated: %v", err)
 	}
 }
 

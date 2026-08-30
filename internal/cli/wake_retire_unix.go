@@ -135,11 +135,26 @@ func retireWakeIfGeneration(root, me string, requested wakeTarget, ifGeneration 
 	if wakeLockHasOwnerMarkers(inspection) {
 		return refuse(fmt.Sprintf("owner-bound wake claims require 'amq wake recover-owner --me %s'", me))
 	}
-	agentDir, err := openWakeAgentDir(root, me)
+	agentDir, err := openExistingCoopWakeAgentDir(root, me)
 	if err != nil {
 		return refuse(err.Error())
 	}
+	if agentDir == nil {
+		return refuse("wake agent directory disappeared before retirement")
+	}
 	defer func() { _ = agentDir.Close() }()
+	if inspection.Status == wakeLockStale ||
+		(inspection.Status == wakeLockValid && inspection.Lock.WakeMode == wakeTargetInjectVia) {
+		guardMissing, guardProbeErr := wakeRetireLifecycleGuardMissingAt(agentDir)
+		if guardProbeErr == nil && guardMissing {
+			if err := agentDir.withFD(func(dirfd int) error {
+				_, err := snapshotWakeRetireArtifactsAt(dirfd, agentDir, inspection, requested)
+				return err
+			}); err != nil {
+				return refuse(err.Error())
+			}
+		}
+	}
 
 	switch inspection.Status {
 	case wakeLockValid:
@@ -152,7 +167,7 @@ func retireWakeIfGeneration(root, me string, requested wakeTarget, ifGeneration 
 
 		var confirmed wakeLockInspection
 		var artifacts wakeRetireArtifactSnapshot
-		if err := withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+		if err := withExistingWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
 			confirmed = inspectWakeLockAt(dirfd, agentDir, root, me)
 			if !sameWakeLockInspection(inspection, confirmed) || !confirmed.IdentityConfirmed {
 				return errors.New("wake lock changed before retirement")
@@ -171,7 +186,12 @@ func retireWakeIfGeneration(root, me string, requested wakeTarget, ifGeneration 
 
 		afterWakeRetireValidation()
 		var commit wakeLockRemovalOutcome
-		commit.Committed, commit.Err = terminateAndRemoveOrphanedWakeLockInDir(agentDir, confirmed)
+		commit.Committed, commit.Err = terminateAndRemoveOrphanedWakeLockInDirWithRawConsent(
+			agentDir,
+			confirmed,
+			false,
+			&requested,
+		)
 		if !commit.Committed {
 			if commit.Err != nil {
 				return refuse(commit.Err.Error())
@@ -182,7 +202,7 @@ func retireWakeIfGeneration(root, me string, requested wakeTarget, ifGeneration 
 		cleanup := preserveWakeRetireArtifacts(artifacts, nil)
 		if commit.Err == nil {
 			cleanup = wakeRetireCleanupOutcome{}
-			if err := withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+			if err := withExistingWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
 				cleanup = removeWakeRetireArtifactsAt(dirfd, agentDir, confirmed, artifacts)
 				return nil
 			}); err != nil {
@@ -200,7 +220,7 @@ func retireWakeIfGeneration(root, me string, requested wakeTarget, ifGeneration 
 		var commit wakeLockRemovalOutcome
 		var cleanup wakeRetireCleanupOutcome
 		var artifacts wakeRetireArtifactSnapshot
-		err := withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+		err := withExistingWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
 			current := inspectWakeLockAt(dirfd, agentDir, root, me)
 			if !sameWakeLockGeneration(inspection, current) || current.Status != wakeLockStale {
 				return errors.New("wake lock changed before retirement")
@@ -218,6 +238,9 @@ func retireWakeIfGeneration(root, me string, requested wakeTarget, ifGeneration 
 				return err
 			}
 			afterWakeRetireValidation()
+			if err := requireExistingWakeTargetMatchesAt(dirfd, agentDir, current, requested); err != nil {
+				return err
+			}
 			commit = removeWakeLockIfUnchangedGuardedAtDurableOutcome(
 				dirfd,
 				agentDir,
@@ -338,7 +361,7 @@ func removeWakeRetireArtifactsAt(
 	retired wakeLockInspection,
 	expected wakeRetireArtifactSnapshot,
 ) wakeRetireCleanupOutcome {
-	if err := validateWakeStateAgentDirAt(dirfd, agentDir); err != nil {
+	if err := validateWakeStateRetainedAgentDirAt(dirfd, agentDir); err != nil {
 		return preserveWakeRetireArtifacts(expected, err)
 	}
 	if err := validateWakeRetireCleanupSnapshotAt(
@@ -435,7 +458,9 @@ func validateWakeRetireArtifactSnapshotsAt(
 	if !exists || !sameWakeRetireTargetSnapshot(expected.Target, currentTarget) {
 		return errors.New("retired wake target changed before cleanup; preserving retirement artifacts")
 	}
-	currentState, stateExists, stateErr := readWakeStateRawSnapshotAt(dirfd, agentDir)
+	currentState, stateExists, stateErr := readWakeStateRawSnapshotAtWithCanonicalValidation(
+		dirfd, agentDir, false,
+	)
 	if expected.StateWasPresent {
 		if expected.State.FileInfo == nil {
 			return nil
@@ -462,7 +487,7 @@ func removeWakeRetireStateIfSnapshotMatchesAt(
 	agentDir *wakeAgentDir,
 	expected wakeStateFileSnapshot,
 ) (bool, error) {
-	if err := validateWakeStateAgentDirAt(dirfd, agentDir); err != nil {
+	if err := validateWakeStateRetainedAgentDirAt(dirfd, agentDir); err != nil {
 		return false, err
 	}
 	var targetInfo unix.Stat_t
@@ -471,7 +496,9 @@ func removeWakeRetireStateIfSnapshotMatchesAt(
 	} else if err != unix.ENOENT {
 		return false, fmt.Errorf("verify wake target absence before state cleanup: %w", err)
 	}
-	current, exists, err := readWakeStateRawSnapshotAt(dirfd, agentDir)
+	current, exists, err := readWakeStateRawSnapshotAtWithCanonicalValidation(
+		dirfd, agentDir, false,
+	)
 	if err != nil {
 		return false, fmt.Errorf("re-read corresponding wake state before removal: %w", err)
 	}
@@ -788,6 +815,58 @@ func validateWakeLockStaleRemovalAt(
 		return nil
 	} else if inspection.Status != wakeLockStale {
 		return err
+	}
+	return nil
+}
+
+func wakeRetireLifecycleGuardMissingAt(agentDir *wakeAgentDir) (bool, error) {
+	missing := false
+	err := agentDir.withFD(func(dirfd int) error {
+		var info unix.Stat_t
+		err := unix.Fstatat(
+			dirfd,
+			wakeLifecycleGuardFileName,
+			&info,
+			unix.AT_SYMLINK_NOFOLLOW,
+		)
+		if err == unix.ENOENT {
+			missing = true
+			return nil
+		}
+		return err
+	})
+	return missing, err
+}
+
+func requireExistingWakeTargetMatchesAt(
+	dirfd int,
+	agentDir *wakeAgentDir,
+	inspection wakeLockInspection,
+	requested wakeTarget,
+) error {
+	persisted, exists, err := readWakeTargetAt(
+		dirfd,
+		agentDir,
+		inspection.Root,
+		inspection.Agent,
+	)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return errors.New("no saved inject-via wake target; refusing retirement")
+	}
+	if persisted.Owner != nil {
+		return fmt.Errorf("owner-bearing wake state requires 'amq wake recover-owner --me %s'", inspection.Agent)
+	}
+	if err := validateWakeTarget(persisted, inspection.Root, inspection.Agent); err != nil {
+		return err
+	}
+	if err := validateWakeTargetMatchesLock(inspection.Lock, persisted); err != nil {
+		return err
+	}
+	if !sameWakeInjectorIdentity(persisted, requested) {
+		return errors.New("saved wake target uses a different injector identity or retry acknowledgement policy")
 	}
 	return nil
 }

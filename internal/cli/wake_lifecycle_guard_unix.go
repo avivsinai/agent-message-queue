@@ -204,6 +204,62 @@ func openWakeLifecycleGuardAt(dirfd int, path string) (*os.File, error) {
 	return file, nil
 }
 
+func openExistingWakeLifecycleGuardAt(dirfd int, path string) (*os.File, error) {
+	flags := unix.O_RDWR | unix.O_NONBLOCK | unix.O_NOFOLLOW | unix.O_CLOEXEC
+	fd, err := unix.Openat(dirfd, wakeLifecycleGuardFileName, flags, 0)
+	if err != nil {
+		return nil, fmt.Errorf("open existing wake lifecycle guard %s: %w", path, err)
+	}
+	file := os.NewFile(uintptr(fd), path)
+	info, statErr := file.Stat()
+	if statErr != nil {
+		_ = file.Close()
+		return nil, fmt.Errorf("stat wake lifecycle guard %s: %w", path, statErr)
+	}
+	if validateErr := validateWakeLifecycleGuard(path, info); validateErr != nil {
+		_ = file.Close()
+		return nil, validateErr
+	}
+	return file, nil
+}
+
+// This boundary is plumbing only. Callers must not turn detached-directory
+// access into acquire, repair, or readiness success; it is for exact cleanup
+// of old residue while preserving the canonical successor's authority.
+func withExistingWakeLifecycleGuardInDir(agentDir *wakeAgentDir, fn func(int) error) error {
+	return agentDir.withFD(func(dirfd int) error {
+		path := filepath.Join(agentDir.path, wakeLifecycleGuardFileName)
+		file, err := openExistingWakeLifecycleGuardAt(dirfd, path)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = file.Close() }()
+
+		if err := unix.Flock(int(file.Fd()), unix.LOCK_EX); err != nil {
+			return fmt.Errorf("acquire existing wake lifecycle guard %s: %w", path, err)
+		}
+		defer func() { _ = unix.Flock(int(file.Fd()), unix.LOCK_UN) }()
+
+		info, err := file.Stat()
+		if err != nil {
+			return fmt.Errorf("stat wake lifecycle guard %s: %w", path, err)
+		}
+		pathFile, err := openExistingWakeLifecycleGuardAt(dirfd, path)
+		if err != nil {
+			return fmt.Errorf("re-open existing wake lifecycle guard after acquisition: %w", err)
+		}
+		pathInfo, statErr := pathFile.Stat()
+		_ = pathFile.Close()
+		if statErr != nil {
+			return fmt.Errorf("stat wake lifecycle guard path %s: %w", path, statErr)
+		}
+		if !sameWakeFileIdentity(info, pathInfo) {
+			return fmt.Errorf("wake lifecycle guard %s changed while acquiring", path)
+		}
+		return fn(dirfd)
+	})
+}
+
 func validateWakeLifecycleGuard(path string, info os.FileInfo) error {
 	if !info.Mode().IsRegular() {
 		return fmt.Errorf("wake lifecycle guard %s must be a regular file", path)

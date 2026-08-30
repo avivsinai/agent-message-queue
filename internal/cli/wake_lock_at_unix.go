@@ -275,6 +275,7 @@ func removeWakeLockIfUnchangedGuardedAtOutcome(
 	inspection wakeLockInspection,
 	unlink func() error,
 ) wakeLockRemovalOutcome {
+	detached := retainedWakeAgentDirIsDetached(agentDir)
 	var detachedValidationErr error
 	if err := validateBoundWakeMutationAt(dirfd, agentDir, inspection); err != nil {
 		// A retained directory capability can outlive replacement of its
@@ -282,10 +283,15 @@ func removeWakeLockIfUnchangedGuardedAtOutcome(
 		// cannot signal or unlink the successor claim, so it may reap its own
 		// private residue even though canonical bound-state validation is no
 		// longer possible.
-		if !retainedWakeAgentDirIsDetached(agentDir) {
+		if !detached {
 			return wakeLockRemovalOutcome{Err: err}
 		}
 		detachedValidationErr = err
+	}
+	if detached && detachedValidationErr == nil {
+		detachedValidationErr = fmt.Errorf(
+			"retained wake agent directory is detached from the canonical successor",
+		)
 	}
 	if err := reclaimWakeRestartStateForLockRemovalAt(dirfd, agentDir, inspection); err != nil {
 		return wakeLockRemovalOutcome{Err: fmt.Errorf(

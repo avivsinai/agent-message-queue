@@ -31,7 +31,7 @@ func prepareAuthoritativeWakeStopPlatform(
 	return authoritativeWakeStopCapability{
 		Inspection: current,
 		stop: func(auth wakeOwnerReleaseAuthorization) error {
-			stopped, err := cooperativeStopAuthoritativeWake(current, auth)
+			stopped, err := cooperativeStopAuthoritativeWakeInDir(agentDir, current, auth)
 			if err != nil {
 				return err
 			}

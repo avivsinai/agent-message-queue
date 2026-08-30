@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"os"
@@ -37,6 +38,45 @@ func TestAuthoritativeWakeCleanupRemovesExactPreparedMarker(t *testing.T) {
 	fixture.assertReleasedClaimMissing(t)
 	assertPathMissingForTest(t, fixture.preparedPath)
 	fixture.assertControlSocketMissing(t)
+}
+
+func TestAuthoritativeWakeCleanupRefusesHardlinkedLock(t *testing.T) {
+	fixture := newAuthoritativeWakePreparedCleanupFixture(t)
+	aliasPath := filepath.Join(t.TempDir(), "wake-lock-alias")
+	want, err := os.ReadFile(fixture.lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := beforeAuthoritativeWakeLockFinalRemoval
+	beforeAuthoritativeWakeLockFinalRemoval = func() {
+		beforeAuthoritativeWakeLockFinalRemoval = func() {}
+		if err := os.Link(fixture.lockPath, aliasPath); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() { beforeAuthoritativeWakeLockFinalRemoval = original })
+
+	err = fixture.release()
+	if err == nil || !strings.Contains(err.Error(), "multiple hard links") {
+		t.Fatalf("release error = %v, want hardlink refusal", err)
+	}
+	for _, path := range []string{fixture.lockPath, aliasPath} {
+		got, readErr := os.ReadFile(path)
+		if readErr != nil {
+			t.Fatalf("read preserved %s: %v", path, readErr)
+		}
+		if !bytes.Equal(got, want) {
+			t.Fatalf("hardlinked claim changed at %s", path)
+		}
+		info, statErr := os.Stat(path)
+		if statErr != nil {
+			t.Fatal(statErr)
+		}
+		stat, ok := info.Sys().(*syscall.Stat_t)
+		if !ok || uint64(stat.Nlink) != 2 {
+			t.Fatalf("hardlink count for %s = %#v, want 2", path, info.Sys())
+		}
+	}
 }
 
 func TestAuthoritativeWakeAcquireDetachedDuringReleaseStopsWithoutReacquiring(t *testing.T) {

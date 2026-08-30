@@ -443,7 +443,7 @@ func handleDarwinOwnerControl(
 	testHooks *darwinWakeControlTestHooks,
 ) {
 	authorized := false
-	err := withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+	err := withExistingWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
 		_, _, err := authorizeDarwinOwnerControlAt(
 			dirfd,
 			agentDir,
@@ -458,6 +458,10 @@ func handleDarwinOwnerControl(
 			return err
 		}
 		authorized = true
+		select {
+		case stopRequest <- struct{}{}:
+		default:
+		}
 		return nil
 	})
 	if err != nil || !authorized {
@@ -465,17 +469,13 @@ func handleDarwinOwnerControl(
 	}
 
 	_ = conn.SetDeadline(time.Time{})
-	select {
-	case stopRequest <- struct{}{}:
-	default:
-	}
 	<-loopStopped
 	if testHooks != nil && testHooks.afterLoopStopped != nil {
 		testHooks.afterLoopStopped()
 	}
 
 	removed := false
-	err = withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+	err = withExistingWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
 		current, target, err := authorizeDarwinOwnerControlAt(
 			dirfd,
 			agentDir,
@@ -614,7 +614,7 @@ func handleDarwinWakeRestartControl(
 	if restartSignals == nil {
 		return
 	}
-	err := withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+	err := withExistingWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
 		if err := authorizeDarwinWakeRestartControlAt(
 			dirfd,
 			agentDir,
@@ -721,6 +721,9 @@ func startWakeControlListenerInDirOwnedWithRestart(
 		return nil, nil, nil, err
 	}
 	if err := withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+		if err := validateWakeStateAgentDirAt(dirfd, agentDir); err != nil {
+			return err
+		}
 		current := inspectWakeLockAt(dirfd, agentDir, root, me)
 		if !current.Exists || current.Lock.Generation != lock.Generation || current.Lock.ControlSocket != path {
 			return fmt.Errorf("wake control metadata changed before listener start")
@@ -811,16 +814,24 @@ func startWakeControlListenerInDirOwnedWithRestart(
 					}
 					return
 				}
-				if strings.TrimSpace(line) != lock.Generation {
+				fields := strings.Fields(line)
+				if len(fields) < 1 || len(fields) > 2 || fields[0] != lock.Generation {
 					return
 				}
+				requestedTargetDigest := ""
+				if len(fields) == 2 {
+					requestedTargetDigest = fields[1]
+				}
 				accepted := false
-				err = withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+				err = withExistingWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
 					current := inspectWakeLockAt(dirfd, agentDir, root, me)
 					if !current.Exists || current.Lock.Generation != lock.Generation || current.Lock.ControlSocket != path {
 						return nil
 					}
-					if err := validateWakeLockOwnerlessMutationAt(dirfd, agentDir, current); err != nil {
+					if err := validateWakeLockOwnerlessMutationAtForTermination(dirfd, agentDir, current); err != nil {
+						return err
+					}
+					if err := validateRequestedWakeTargetDigestAt(dirfd, agentDir, current, requestedTargetDigest); err != nil {
 						return err
 					}
 					accepted = true
@@ -843,13 +854,16 @@ func startWakeControlListenerInDirOwnedWithRestart(
 					testHooks.afterLoopStopped()
 				}
 				var removal wakeLockRemovalOutcome
-				err = withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+				err = withExistingWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
 					current := inspectWakeLockAt(dirfd, agentDir, root, me)
 					if !current.Exists || current.Lock.Generation != lock.Generation ||
 						current.Lock.ControlSocket != path {
 						return nil
 					}
-					if err := validateWakeLockOwnerlessMutationAt(dirfd, agentDir, current); err != nil {
+					if err := validateWakeLockOwnerlessMutationAtForTermination(dirfd, agentDir, current); err != nil {
+						return err
+					}
+					if err := validateRequestedWakeTargetDigestAt(dirfd, agentDir, current, requestedTargetDigest); err != nil {
 						return err
 					}
 					removal = removeWakeLockIfUnchangedGuardedAtDurableOutcome(
@@ -878,7 +892,7 @@ func startWakeControlListenerInDirOwnedWithRestart(
 			_ = listener.Close()
 			<-acceptDone
 			handlers.Wait()
-			_ = withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+			_ = withExistingWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
 				if cur := inspectWakeLockAt(dirfd, agentDir, root, me); cur.Exists && cur.Lock.Generation != lock.Generation {
 					return nil
 				}
@@ -909,12 +923,22 @@ func cooperativeStopInjectVia(i wakeLockInspection) (bool, error) {
 		return false, fmt.Errorf("cooperative wake stop unavailable: %w", err)
 	}
 	defer func() { _ = agentDir.Close() }()
-	return cooperativeStopInjectViaInDir(agentDir, i)
+	if err := withExistingWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+		current := inspectWakeLockAt(dirfd, agentDir, i.Root, i.Agent)
+		if !sameWakeLockGeneration(i, current) {
+			return fmt.Errorf("wake generation changed before cooperative stop")
+		}
+		return validateWakeStateAgentDirAt(dirfd, agentDir)
+	}); err != nil {
+		return false, fmt.Errorf("cooperative wake stop unavailable: %w", err)
+	}
+	return cooperativeStopInjectViaInDir(agentDir, i, nil)
 }
 
 func cooperativeStopInjectViaInDir(
 	agentDir *wakeAgentDir,
 	i wakeLockInspection,
+	requestedTarget *wakeTarget,
 ) (bool, error) {
 	if agentDir == nil {
 		return false, fmt.Errorf("cooperative wake stop agent capability is missing")
@@ -929,7 +953,31 @@ func cooperativeStopInjectViaInDir(
 	}
 	defer func() { _ = conn.Close() }()
 	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
-	if _, err = fmt.Fprintf(conn, "%s\n", i.Lock.Generation); err != nil {
+	request := i.Lock.Generation
+	if requestedTarget != nil {
+		var persistedDigest string
+		if err := withExistingWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+			current := inspectWakeLockAt(dirfd, agentDir, i.Root, i.Agent)
+			if !sameWakeLockGeneration(i, current) {
+				return fmt.Errorf("wake generation changed before cooperative stop")
+			}
+			persisted, exists, err := readWakeTargetAt(
+				dirfd, agentDir, i.Root, i.Agent,
+			)
+			if err != nil {
+				return err
+			}
+			if !exists || !sameWakeInjectorIdentity(persisted, *requestedTarget) {
+				return fmt.Errorf("requested wake target does not match wake lock")
+			}
+			persistedDigest, err = wakeTargetDigest(persisted)
+			return err
+		}); err != nil {
+			return false, err
+		}
+		request += " " + persistedDigest
+	}
+	if _, err = fmt.Fprintf(conn, "%s\n", request); err != nil {
 		return false, err
 	}
 	_ = conn.SetDeadline(time.Time{})
@@ -945,7 +993,7 @@ func cooperativeStopInjectViaInDir(
 	for _, cause := range residue {
 		postCommitErr = errors.Join(postCommitErr, wakeControlResidueError(cause))
 	}
-	err = withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+	err = withExistingWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
 		cur := inspectWakeLockAt(dirfd, agentDir, i.Root, i.Agent)
 		if cur.Exists {
 			postCommitErr = errors.Join(postCommitErr, newWakeLockResidueError(
@@ -958,7 +1006,42 @@ func cooperativeStopInjectViaInDir(
 	return true, errors.Join(postCommitErr, err)
 }
 
-func cooperativeStopAuthoritativeWake(
+func validateRequestedWakeTargetDigestAt(
+	dirfd int,
+	agentDir *wakeAgentDir,
+	inspection wakeLockInspection,
+	requestedDigest string,
+) error {
+	if requestedDigest == "" {
+		return nil
+	}
+	if requestedDigest != inspection.Lock.TargetDigest {
+		return fmt.Errorf("requested wake target no longer matches wake lock")
+	}
+	target, exists, err := readWakeTargetAt(
+		dirfd,
+		agentDir,
+		inspection.Root,
+		inspection.Agent,
+	)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return fmt.Errorf("requested wake target is missing")
+	}
+	digest, err := wakeTargetDigest(target)
+	if err != nil {
+		return err
+	}
+	if digest != requestedDigest {
+		return fmt.Errorf("requested wake target changed before cooperative stop")
+	}
+	return nil
+}
+
+func cooperativeStopAuthoritativeWakeInDir(
+	agentDir *wakeAgentDir,
 	i wakeLockInspection,
 	auth wakeOwnerReleaseAuthorization,
 ) (bool, error) {
@@ -980,11 +1063,22 @@ func cooperativeStopAuthoritativeWake(
 	if err != nil {
 		return false, fmt.Errorf("marshal authoritative wake stop request: %w", err)
 	}
-	agentDir, err := openWakeAgentDir(i.Root, i.Agent)
-	if err != nil {
+	if agentDir == nil {
+		return false, fmt.Errorf("cooperative authoritative wake stop unavailable: wake agent directory capability is missing")
+	}
+	if err := withExistingWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+		if err := validateWakeStateAgentDirAt(dirfd, agentDir); err != nil {
+			return err
+		}
+		current := inspectWakeLockAt(dirfd, agentDir, i.Root, i.Agent)
+		if !sameWakeLockGeneration(i, current) {
+			return fmt.Errorf("authoritative wake generation changed before cooperative stop")
+		}
+		_, err := validateAuthoritativeWakeClaimPairAt(dirfd, agentDir, current)
+		return err
+	}); err != nil {
 		return false, fmt.Errorf("cooperative authoritative wake stop unavailable: %w", err)
 	}
-	defer func() { _ = agentDir.Close() }()
 	name, err := darwinControlSocketName(agentDir, i.Lock.ControlSocket)
 	if err != nil {
 		return false, fmt.Errorf("cooperative authoritative wake stop unavailable: %w", err)
@@ -1004,7 +1098,7 @@ func cooperativeStopAuthoritativeWake(
 		return false, fmt.Errorf("cooperative authoritative wake stop refused")
 	}
 	gone := false
-	err = withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+	err = withExistingWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
 		current := inspectWakeLockAt(dirfd, agentDir, i.Root, i.Agent)
 		gone = !current.Exists || current.Lock.Generation != i.Lock.Generation
 		return nil

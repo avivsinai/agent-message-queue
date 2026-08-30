@@ -370,3 +370,29 @@ func assertDetachedWakeFilesUnchanged(
 		assertWakeFileSnapshotUnchangedForTest(t, path, snapshot.raw, snapshot.info)
 	}
 }
+
+func detachGenericWakeAgentDirForTest(t *testing.T, path string, successorNames ...string) string {
+	t.Helper()
+	detachedPath := path + ".detached-generic"
+	if err := os.Rename(path, detachedPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range successorNames {
+		fromPath := filepath.Join(detachedPath, name)
+		raw, err := os.ReadFile(fromPath)
+		if err != nil {
+			t.Fatalf("read detached successor source %s: %v", name, err)
+		}
+		info, err := os.Stat(fromPath)
+		if err != nil {
+			t.Fatalf("stat detached successor source %s: %v", name, err)
+		}
+		if err := os.WriteFile(filepath.Join(path, name), raw, info.Mode().Perm()); err != nil {
+			t.Fatalf("write detached successor %s: %v", name, err)
+		}
+	}
+	return detachedPath
+}

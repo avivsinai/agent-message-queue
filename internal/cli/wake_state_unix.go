@@ -380,7 +380,17 @@ func readWakeStateSnapshotAt(
 	dirfd int,
 	agentDir *wakeAgentDir,
 ) (wakeStateFileSnapshot, bool, error) {
-	snapshot, exists, err := readWakeStateRawSnapshotAt(dirfd, agentDir)
+	return readWakeStateSnapshotAtWithCanonicalValidation(dirfd, agentDir, true)
+}
+
+func readWakeStateSnapshotAtWithCanonicalValidation(
+	dirfd int,
+	agentDir *wakeAgentDir,
+	validateCanonical bool,
+) (wakeStateFileSnapshot, bool, error) {
+	snapshot, exists, err := readWakeStateRawSnapshotAtWithCanonicalValidation(
+		dirfd, agentDir, validateCanonical,
+	)
 	if err != nil || !exists {
 		return snapshot, exists, err
 	}
@@ -396,8 +406,21 @@ func readWakeStateRawSnapshotAt(
 	dirfd int,
 	agentDir *wakeAgentDir,
 ) (wakeStateFileSnapshot, bool, error) {
-	if err := validateWakeStateAgentDirAt(dirfd, agentDir); err != nil {
-		return wakeStateFileSnapshot{}, false, err
+	return readWakeStateRawSnapshotAtWithCanonicalValidation(dirfd, agentDir, true)
+}
+
+func readWakeStateRawSnapshotAtWithCanonicalValidation(
+	dirfd int,
+	agentDir *wakeAgentDir,
+	validateCanonical bool,
+) (wakeStateFileSnapshot, bool, error) {
+	if validateCanonical {
+		if err := validateWakeStateAgentDirAt(dirfd, agentDir); err != nil {
+			return wakeStateFileSnapshot{}, false, err
+		}
+	}
+	if agentDir == nil || agentDir.file == nil || dirfd != int(agentDir.file.Fd()) {
+		return wakeStateFileSnapshot{}, false, fmt.Errorf("wake state agent directory capability is missing")
 	}
 	path := filepath.Join(agentDir.path, wakeStateFileName)
 	open := func() (*os.File, error) {
@@ -580,6 +603,17 @@ func validateWakeStateAgentDirAt(dirfd int, agentDir *wakeAgentDir) error {
 		return fmt.Errorf("canonical wake agent directory no longer matches retained authority")
 	}
 	return nil
+}
+
+func validateWakeStateRetainedAgentDirAt(dirfd int, agentDir *wakeAgentDir) error {
+	if agentDir == nil || agentDir.file == nil || dirfd != int(agentDir.file.Fd()) {
+		return fmt.Errorf("wake state agent directory capability is missing")
+	}
+	info, err := agentDir.file.Stat()
+	if err != nil {
+		return fmt.Errorf("stat retained wake agent directory: %w", err)
+	}
+	return validateWakeAgentDir(agentDir.path, info)
 }
 
 func createWakeStateTempAt(dirfd int) (string, *os.File, error) {

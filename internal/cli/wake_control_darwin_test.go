@@ -292,6 +292,34 @@ func TestDarwinStableOwnerStopTreatsDifferentLivePIDOccupantAsAbsent(t *testing.
 	}
 }
 
+func TestDarwinAuthoritativeStopRefusesDetachAfterPreparation(t *testing.T) {
+	root, agent, owner, _, _, _ := testDarwinOwnerControlLock(t)
+	agentDir, err := openWakeAgentDir(root, agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = agentDir.Close() }()
+	var capability authoritativeWakeStopCapability
+	err = withExistingWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+		expected := inspectWakeLockAt(dirfd, agentDir, root, agent)
+		var prepareErr error
+		capability, prepareErr = prepareAuthoritativeWakeStopPlatform(dirfd, agentDir, expected)
+		return prepareErr
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := []string{".wake.lock", wakeTargetFileName, wakeStateFileName, wakeLifecycleGuardFileName}
+	_ = detachGenericWakeAgentDirForTest(t, agentDir.path, names...)
+	successorBefore := snapshotDetachedWakeFiles(t, agentDir.path, names...)
+
+	err = capability.Stop(wakeOwnerReleaseAuthorization{Token: &owner, Rollback: true})
+	if err == nil || !strings.Contains(err.Error(), "canonical wake agent directory") {
+		t.Fatalf("authoritative stop error = %v, want detached-authority refusal", err)
+	}
+	assertDetachedWakeFilesUnchanged(t, agentDir.path, successorBefore)
+}
+
 func sendDarwinOwnerControlRequest(
 	t *testing.T,
 	root string,
@@ -695,6 +723,72 @@ func TestDarwinCooperativeStopACKAfterLockRemoval(t *testing.T) {
 	}
 	if current := inspectWakeLock(root, agent); current.Exists {
 		t.Fatal("ACK arrived before lock removal")
+	}
+}
+
+func TestDarwinRetireTargetChangeAfterQuiesceRefusesClaimRemoval(t *testing.T) {
+	root := secureTempDirForTest(t)
+	const agent = "codex"
+	establishDoctorWakeLifecycleGuardForTest(t, root, agent)
+	injector := writeExecutableForTest(t, "darwin-retire-target")
+	requested := mustNewWakeTargetForTest(t, root, agent, injector, []string{"terminal-a"})
+	if err := writeWakeTarget(root, agent, requested); err != nil {
+		t.Fatal(err)
+	}
+	lock := bindWakeLockToTarget(wakeLock{
+		PID: os.Getpid(), Root: canonicalWakeRoot(root), Agent: agent,
+		WakeMode: wakeTargetInjectVia, Generation: "darwin-target-consent-generation",
+	}, requested)
+	lock.ControlSocket = wakeControlSocketPath(root, agent, lock.Generation)
+	lockPath := writeWakeLockForTest(t, root, agent, lock)
+	listenerDir, err := openWakeAgentDir(root, agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = listenerDir.Close() }()
+	replacement := mustNewWakeTargetForTest(t, root, agent, injector, []string{"terminal-b"})
+	hooks := &darwinWakeControlTestHooks{afterLoopStopped: func() {
+		if err := writeWakeTarget(root, agent, replacement); err != nil {
+			t.Error(err)
+		}
+	}}
+	cleanup, stopped, markStopped, err := startWakeControlListenerInDirOwned(
+		listenerDir, root, agent, lock, false, hooks,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	clientDir, err := openWakeAgentDir(root, agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = clientDir.Close() }()
+	type result struct {
+		stopped bool
+		err     error
+	}
+	resultCh := make(chan result, 1)
+	go func() {
+		ok, stopErr := cooperativeStopInjectViaInDir(clientDir, inspectWakeLock(root, agent), &requested)
+		resultCh <- result{stopped: ok, err: stopErr}
+	}()
+	select {
+	case <-stopped:
+	case <-time.After(2 * time.Second):
+		t.Fatal("listener did not accept target-bound stop")
+	}
+	markStopped()
+	select {
+	case got := <-resultCh:
+		if got.stopped || got.err == nil {
+			t.Fatalf("stop result = %+v, want refusal without ACK", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("target-changed stop did not return")
+	}
+	if _, err := os.Stat(lockPath); err != nil {
+		t.Fatalf("target-changed stop removed lock: %v", err)
 	}
 }
 
@@ -1492,26 +1586,24 @@ func TestDarwinControlAuthenticationPinsAuthorizedAgentDirectory(t *testing.T) {
 		resultCh <- stopResult{stopped: stopped, err: err}
 	}()
 	select {
-	case <-stopped:
-	case err := <-swapErr:
-		t.Fatal(err)
-	case <-time.After(2 * time.Second):
-		t.Fatal("listener did not request stop after authenticated ancestor swap")
-	}
-	markStopped()
-	select {
 	case got := <-resultCh:
-		if got.err != nil || !got.stopped {
-			t.Fatalf("stop=(%v,%v)", got.stopped, got.err)
+		if got.err == nil || got.stopped {
+			t.Fatalf("stop=(%v,%v), want pre-stop authority refusal", got.stopped, got.err)
 		}
 	case err := <-swapErr:
 		t.Fatal(err)
 	case <-time.After(2 * time.Second):
-		t.Fatal("listener did not ACK after authenticated ancestor swap")
+		t.Fatal("pre-stop authority refusal did not return")
 	}
+	select {
+	case <-stopped:
+		t.Fatal("detached retained directory requested stop")
+	default:
+	}
+	markStopped()
 
-	if _, err := os.Lstat(filepath.Join(fsq.AgentBase(parkedRoot, agent), ".wake.lock")); !os.IsNotExist(err) {
-		t.Fatalf("authorized generation survived cooperative cleanup: %v", err)
+	if _, err := os.Lstat(filepath.Join(fsq.AgentBase(parkedRoot, agent), ".wake.lock")); err != nil {
+		t.Fatalf("detached authorized generation was mutated: %v", err)
 	}
 	if _, err := os.Lstat(filepath.Join(fsq.AgentBase(root, agent), ".wake.lock")); err != nil {
 		t.Fatalf("replacement-tree generation was modified: %v", err)

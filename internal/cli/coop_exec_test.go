@@ -1129,12 +1129,19 @@ func TestFreshWakeHelperCleanupAttemptsStopWaitAndClose(t *testing.T) {
 
 func TestFreshWakeHelperCleanupPreservesChangedGeneration(t *testing.T) {
 	root := t.TempDir()
+	establishDoctorWakeLifecycleGuardForTest(t, root, "codex")
 	const wakePID = 5252
 	writeWakeLockForTest(t, root, "codex", wakeLock{
 		PID:        wakePID,
 		Generation: "helper-generation",
 	})
 	expected := inspectWakeLock(root, "codex")
+	agentDir, err := openWakeDirectory(filepath.Dir(expected.LockPath), "wake agent directory")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = agentDir.Close() }()
+	claim := &retainedCoopWakeHelperClaim{inspection: expected, agentDir: agentDir}
 	capability := &authoritativeWakeChildCapability{
 		stop: func() error {
 			writeWakeLockForTest(t, root, "codex", wakeLock{
@@ -1154,7 +1161,7 @@ func TestFreshWakeHelperCleanupPreservesChangedGeneration(t *testing.T) {
 		root,
 		"codex",
 		wakeOwner{},
-		&expected,
+		claim,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -1166,6 +1173,7 @@ func TestFreshWakeHelperCleanupPreservesChangedGeneration(t *testing.T) {
 
 func TestFreshWakeHelperCleanupRetainsStalePublishedGeneration(t *testing.T) {
 	root := t.TempDir()
+	establishDoctorWakeLifecycleGuardForTest(t, root, "codex")
 	const wakePID = 5252
 	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
 		return wakeProcessInfo{PID: pid}
@@ -1178,10 +1186,15 @@ func TestFreshWakeHelperCleanupRetainsStalePublishedGeneration(t *testing.T) {
 	if current.Status != wakeLockStale {
 		t.Fatalf("published helper fixture is %s, want stale: %#v", current.Status, current)
 	}
-	claim := exactCoopWakeHelperClaim(&os.Process{Pid: wakePID}, current)
-	if claim == nil {
+	inspection := exactCoopWakeHelperClaim(&os.Process{Pid: wakePID}, current)
+	if inspection == nil {
 		t.Fatal("same-helper stale generation was not retained for exact cleanup")
 	}
+	agentDir, err := openWakeDirectory(filepath.Dir(lockPath), "wake agent directory")
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim := &retainedCoopWakeHelperClaim{inspection: *inspection, agentDir: agentDir}
 	capability := &authoritativeWakeChildCapability{
 		stop:  func() error { return nil },
 		close: func() error { return nil },
@@ -1204,6 +1217,184 @@ func TestFreshWakeHelperCleanupRetainsStalePublishedGeneration(t *testing.T) {
 	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
 		t.Fatalf("stale same-helper generation survived exact cleanup: %v", err)
 	}
+}
+
+func TestRetainedGenericHelperClaimCleansDetachedOldDirectoryOnly(t *testing.T) {
+	root := secureTempDirForTest(t)
+	establishDoctorWakeLifecycleGuardForTest(t, root, "codex")
+	const wakePID = 5252
+	stopped := false
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		if stopped {
+			return wakeProcessInfo{PID: pid}
+		}
+		return wakeProcessInfo{PID: pid, Running: true, StartToken: "start-1", BootID: "boot-1", Executable: "/usr/bin/amq", Args: []string{"amq", "wake"}}
+	})
+	lockPath := writeWakeLockForTest(t, root, "codex", wakeLock{
+		PID: wakePID, ProcessStart: "start-1", BootID: "boot-1", Executable: "/usr/bin/amq",
+		Args: []string{"amq", "wake"}, Generation: "retained-generic-claim",
+	})
+	proc := &os.Process{Pid: wakePID}
+	claim, err := captureRetainedCoopWakeHelperClaim(proc, root, "codex")
+	if err != nil || claim == nil {
+		t.Fatalf("capture retained claim = (%#v, %v)", claim, err)
+	}
+	var detachedPath string
+	var successorBefore map[string]detachedWakeFileSnapshot
+	capability := &authoritativeWakeChildCapability{stop: func() error {
+		stopped = true
+		detachedPath = detachGenericWakeAgentDirForTest(
+			t, filepath.Dir(lockPath), ".wake.lock", wakeLifecycleGuardFileName,
+		)
+		successorBefore = snapshotDetachedWakeFiles(t, filepath.Dir(lockPath), ".wake.lock", wakeLifecycleGuardFileName)
+		return nil
+	}}
+	waiter := &wakeProcessWaiter{done: make(chan struct{})}
+	close(waiter.done)
+	owner := wakeOwner{}
+	err = cleanupCoopWakeStartupHelper(proc, waiter, capability, &owner, root, "codex", false, claim)
+	var cleanupOnly *wakeDetachedCleanupOnlyError
+	if !errors.As(err, &cleanupOnly) {
+		t.Fatalf("cleanup error = %v, want detached cleanup-only", err)
+	}
+	assertPathMissingForTest(t, filepath.Join(detachedPath, ".wake.lock"))
+	assertDetachedWakeFilesUnchanged(t, filepath.Dir(lockPath), successorBefore)
+}
+
+func TestValidatePreparedCoopWakeClaimDoesNotCreateSuccessorGuard(t *testing.T) {
+	root := secureTempDirForTest(t)
+	establishDoctorWakeLifecycleGuardForTest(t, root, "codex")
+	const wakePID = 5252
+	lockPath := writeWakeLockForTest(t, root, "codex", wakeLock{
+		PID: wakePID, ProcessStart: "start-1", BootID: "boot-1", Executable: "/usr/bin/amq",
+		Args: []string{"amq", "wake"}, Generation: "prepared-successor-guard",
+	})
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		return wakeProcessInfo{PID: pid, Running: true, StartToken: "start-1", BootID: "boot-1", Executable: "/usr/bin/amq", Args: []string{"amq", "wake"}}
+	})
+	_ = detachGenericWakeAgentDirForTest(t, filepath.Dir(lockPath), ".wake.lock")
+
+	_, err := validatePreparedCoopWakeClaim(root, "codex", "", nil, wakeOwner{}, wakePID)
+	if err == nil || !strings.Contains(err.Error(), "existing wake lifecycle guard") {
+		t.Fatalf("validation error = %v, want missing existing guard", err)
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(lockPath), wakeLifecycleGuardFileName)); !os.IsNotExist(err) {
+		t.Fatalf("prepared validation created successor guard: %v", err)
+	}
+}
+
+func TestValidatePreparedCoopWakeClaimRefusesPostOpenDetach(t *testing.T) {
+	root := secureTempDirForTest(t)
+	establishDoctorWakeLifecycleGuardForTest(t, root, "codex")
+	const wakePID = 5252
+	lockPath := writeWakeLockForTest(t, root, "codex", wakeLock{
+		PID: wakePID, ProcessStart: "start-1", BootID: "boot-1", Executable: "/usr/bin/amq",
+		Args: []string{"amq", "wake"}, Generation: "prepared-post-open-detach",
+	})
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		return wakeProcessInfo{PID: pid, Running: true, StartToken: "start-1", BootID: "boot-1", Executable: "/usr/bin/amq", Args: []string{"amq", "wake"}}
+	})
+	var successorBefore map[string]detachedWakeFileSnapshot
+	original := beforeValidatePreparedCoopWakeClaim
+	beforeValidatePreparedCoopWakeClaim = func(*wakeAgentDir) {
+		beforeValidatePreparedCoopWakeClaim = func(*wakeAgentDir) {}
+		_ = detachGenericWakeAgentDirForTest(t, filepath.Dir(lockPath), ".wake.lock", wakeLifecycleGuardFileName)
+		successorBefore = snapshotDetachedWakeFiles(t, filepath.Dir(lockPath), ".wake.lock", wakeLifecycleGuardFileName)
+	}
+	t.Cleanup(func() { beforeValidatePreparedCoopWakeClaim = original })
+
+	_, err := validatePreparedCoopWakeClaim(root, "codex", "", nil, wakeOwner{}, wakePID)
+	if err == nil || !strings.Contains(err.Error(), "canonical wake agent directory") {
+		t.Fatalf("validation error = %v, want detached-authority refusal", err)
+	}
+	assertDetachedWakeFilesUnchanged(t, filepath.Dir(lockPath), successorBefore)
+}
+
+func TestRetainedAuthoritativeHelperClaimCleansDetachedOldDirectoryOnly(t *testing.T) {
+	root := secureTempDirForTest(t)
+	const me = "codex"
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureAgentDirs(root, me); err != nil {
+		t.Fatal(err)
+	}
+	owner, err := captureAuthoritativeCurrentWakeOwner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	injector := writeExecutableForTest(t, "retained-authoritative-helper")
+	target := mustNewWakeTargetForTest(t, root, me, injector, nil)
+	target.Owner = &owner
+	const wakePID = 5252
+	lock := bindWakeLockToTarget(wakeLock{
+		PID: wakePID, TTY: "unknown", Root: canonicalWakeRoot(root), Agent: me,
+		ProcessStart: owner.ProcessStart, BootID: owner.BootID, Executable: "/usr/local/bin/amq",
+		Args:       []string{"amq", "wake", "--root", root, "--me", me, "--inject-via", injector},
+		Generation: "0123456789abcdef0123456789abcdef", OwnerSchema: wakeOwnerLockSchema, Owner: &owner,
+	}, target)
+	lock.WakeMode = wakeOwnerWakeMode
+	lock.ControlSocket = wakeControlSocketPath(root, me, lock.Generation)
+	agentDir, err := openWakeAgentDir(root, me)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = agentDir.Close() }()
+	if err := withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+		return publishAuthoritativeWakeClaimAt(dirfd, agentDir, root, me, target, lock)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	stopped := false
+	realInspect := inspectWakeProcess
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		if pid != wakePID {
+			return realInspect(pid)
+		}
+		if stopped {
+			return wakeProcessInfo{PID: pid}
+		}
+		return wakeProcessInfo{
+			PID: pid, Running: true, StartToken: lock.ProcessStart, BootID: lock.BootID,
+			Executable: lock.Executable, Args: lock.Args,
+		}
+	})
+	inspection := inspectWakeLock(root, me)
+	if !inspection.IdentityConfirmed || classifyPersistedWakeClaim(inspection) != wakeClaimAuthoritative {
+		t.Fatalf("authoritative helper fixture = %#v", inspection)
+	}
+	if err := writeWakePreparedFile(root, me, inspection); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(lock.ControlSocket, []byte("socket"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	proc := &os.Process{Pid: wakePID}
+	claim, err := captureRetainedCoopWakeHelperClaim(proc, root, me)
+	if err != nil || claim == nil {
+		t.Fatalf("capture retained authoritative claim = (%#v, %v)", claim, err)
+	}
+	names := []string{".wake.lock", wakeTargetFileName, wakeStateFileName, wakePreparedFileName, wakeLifecycleGuardFileName}
+	if socket := inspection.Lock.ControlSocket; socket != "" {
+		names = append(names, filepath.Base(socket))
+	}
+	var detachedPath string
+	var successorBefore map[string]detachedWakeFileSnapshot
+	capability := &authoritativeWakeChildCapability{stop: func() error {
+		stopped = true
+		detachedPath = detachGenericWakeAgentDirForTest(t, agentDir.path, names...)
+		successorBefore = snapshotDetachedWakeFiles(t, agentDir.path, names...)
+		return nil
+	}}
+	waiter := &wakeProcessWaiter{done: make(chan struct{})}
+	close(waiter.done)
+	err = cleanupCoopWakeStartupHelper(proc, waiter, capability, &owner, root, me, false, claim)
+	var cleanupOnly *wakeDetachedCleanupOnlyError
+	if !errors.As(err, &cleanupOnly) {
+		t.Fatalf("cleanup error = %v, want detached cleanup-only", err)
+	}
+	assertPathMissingForTest(t, filepath.Join(detachedPath, ".wake.lock"))
+	assertDetachedWakeFilesUnchanged(t, agentDir.path, successorBefore)
 }
 
 func TestConfirmedLiveWakeRejectsStaleLockWithReusedPID(t *testing.T) {
