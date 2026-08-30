@@ -225,6 +225,22 @@ func terminateAndRemoveOrphanedWakeLockInDirWithRawConsent(
 		}
 		switch relation {
 		case wakeAgentDirDetached:
+			// Termination observes after a process effect. An absent canonical
+			// pathname is not enough to prove that a successor exists, so preserve
+			// the retained claim instead of treating the same ENOENT as cleanup authority.
+			canonicalPresent, canonicalErr := canonicalWakeAgentDirPathPresent(agentDir)
+			if canonicalErr != nil {
+				return newWakeLockResidueError(
+					wakeLockResiduePreservedClaim,
+					fmt.Errorf("canonical wake agent directory cannot be confirmed after wake process stopped; preserving retained claim: %w", canonicalErr),
+				)
+			}
+			if !canonicalPresent {
+				return newWakeLockResidueError(
+					wakeLockResiduePreservedClaim,
+					errors.New("canonical wake agent directory disappeared after wake process stopped; preserving retained claim"),
+				)
+			}
 			var removeErr error
 			scope := newWakeMutationScope(agentDir, dirfd)
 			outcome := removeWakeLockIfUnchangedGuardedAtDurableOutcome(
@@ -346,7 +362,7 @@ func terminateWakePidfdWithAuthorization(
 						}
 					}
 				}
-				return scope.sendPidfdSignal(pidfd, signal)
+				return scope.sendPidfdSignalForTermination(pidfd, signal)
 			},
 		)
 	}
@@ -448,6 +464,9 @@ func terminateWakePidfdWithSignalAuthorization(
 	send func(unix.Signal) error,
 ) error {
 	if err := send(unix.SIGTERM); err != nil {
+		if errors.Is(err, syscall.ESRCH) {
+			return nil
+		}
 		return err
 	}
 	exited, err := linuxPidfdPoll(pidfd, wakeTerminateGrace)
@@ -458,6 +477,9 @@ func terminateWakePidfdWithSignalAuthorization(
 		return nil
 	}
 	if err := send(unix.SIGKILL); err != nil {
+		if errors.Is(err, syscall.ESRCH) {
+			return nil
+		}
 		return err
 	}
 	exited, err = linuxPidfdPoll(pidfd, wakeTerminateKillConfirm)

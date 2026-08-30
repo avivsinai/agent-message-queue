@@ -294,6 +294,9 @@ func removeWakeLockIfUnchangedGuardedAtOutcome(
 			relation,
 		)}
 	}
+	// Detached residue cleanup has already classified the retained relation.
+	// Even when the canonical pathname is absent, the retained descriptor pins
+	// the old inode, so remove only that old claim and report detached cleanup.
 	detached := relation == wakeAgentDirDetached
 	var detachedValidationErr error
 	if err := validateBoundWakeMutationAt(dirfd, agentDir, inspection); err != nil {

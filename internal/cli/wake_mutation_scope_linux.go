@@ -3,9 +3,7 @@
 package cli
 
 import (
-	"errors"
 	"fmt"
-	"syscall"
 
 	"golang.org/x/sys/unix"
 )
@@ -16,6 +14,8 @@ var (
 	linuxPidfdClose      = unix.Close
 )
 
+// sendPidfdSignal is for non-termination effects. It requires the retained
+// directory to remain canonical before signaling.
 func (scope *wakeMutationScope) sendPidfdSignal(pidfd int, signal unix.Signal) error {
 	if err := scope.requireCanonical(); err != nil {
 		return err
@@ -23,11 +23,20 @@ func (scope *wakeMutationScope) sendPidfdSignal(pidfd int, signal unix.Signal) e
 	return sendWakePidfdSignal(pidfd, signal)
 }
 
+// sendPidfdSignalForTermination is only for intentionally ending the exact
+// wake process already authorized by termination. Its pidfd pins that
+// process; canonical or proven-detached retained authority is sufficient,
+// while an inconclusive relation still refuses the effect. Every other signal
+// uses sendPidfdSignal.
+func (scope *wakeMutationScope) sendPidfdSignalForTermination(pidfd int, signal unix.Signal) error {
+	if _, err := scope.requireCanonicalOrDetached(); err != nil {
+		return err
+	}
+	return sendWakePidfdSignal(pidfd, signal)
+}
+
 func sendWakePidfdSignal(pidfd int, signal unix.Signal) error {
 	if err := linuxPidfdSendSignal(pidfd, signal, nil, 0); err != nil {
-		if errors.Is(err, syscall.ESRCH) {
-			return nil
-		}
 		return fmt.Errorf("pidfd_send_signal %s: %w", signal, err)
 	}
 	return nil

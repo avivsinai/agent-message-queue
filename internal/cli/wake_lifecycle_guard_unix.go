@@ -134,6 +134,34 @@ func withWakeLifecycleGuardModeInDir(
 	lockMode int,
 	fn func(int) error,
 ) error {
+	return withWakeLifecycleGuardModeAndTimeoutInDir(
+		agentDir,
+		lockMode,
+		wakeLifecycleGuardRetryTimeout,
+		fn,
+	)
+}
+
+// Reload authentication runs in a handler that Close must be able to drain
+// promptly. It refuses a held guard instead of waiting for another owner.
+func withWakeLifecycleGuardNoWaitInDir(
+	agentDir *wakeAgentDir,
+	fn func(int) error,
+) error {
+	return withWakeLifecycleGuardModeAndTimeoutInDir(
+		agentDir,
+		unix.LOCK_EX|unix.LOCK_NB,
+		0,
+		fn,
+	)
+}
+
+func withWakeLifecycleGuardModeAndTimeoutInDir(
+	agentDir *wakeAgentDir,
+	lockMode int,
+	retryTimeout time.Duration,
+	fn func(int) error,
+) error {
 	return agentDir.withFD(func(dirfd int) error {
 		path := filepath.Join(agentDir.path, wakeLifecycleGuardFileName)
 		file, err := openWakeLifecycleGuardAt(dirfd, path)
@@ -142,7 +170,7 @@ func withWakeLifecycleGuardModeInDir(
 		}
 		defer func() { _ = file.Close() }()
 
-		if err := acquireWakeLifecycleGuard(file, path, agentDir, lockMode); err != nil {
+		if err := acquireWakeLifecycleGuard(file, path, agentDir, lockMode, retryTimeout); err != nil {
 			return err
 		}
 		defer func() { _ = unix.Flock(int(file.Fd()), unix.LOCK_UN) }()
@@ -245,7 +273,13 @@ func withExistingWakeLifecycleGuardModeInDir(
 		}
 		defer func() { _ = file.Close() }()
 
-		if err := acquireWakeLifecycleGuard(file, path, agentDir, lockMode); err != nil {
+		if err := acquireWakeLifecycleGuard(
+			file,
+			path,
+			agentDir,
+			lockMode,
+			wakeLifecycleGuardRetryTimeout,
+		); err != nil {
 			return err
 		}
 		defer func() { _ = unix.Flock(int(file.Fd()), unix.LOCK_UN) }()
@@ -280,6 +314,7 @@ func acquireWakeLifecycleGuard(
 	path string,
 	agentDir *wakeAgentDir,
 	lockMode int,
+	retryTimeout time.Duration,
 ) error {
 	if lockMode&unix.LOCK_NB == 0 {
 		if err := unix.Flock(int(file.Fd()), lockMode); err != nil {
@@ -287,7 +322,7 @@ func acquireWakeLifecycleGuard(
 		}
 		return nil
 	}
-	deadline := time.Now().Add(wakeLifecycleGuardRetryTimeout)
+	deadline := time.Now().Add(retryTimeout)
 	for {
 		err := unix.Flock(int(file.Fd()), lockMode)
 		if err == nil {
@@ -302,7 +337,7 @@ func acquireWakeLifecycleGuard(
 			return fmt.Errorf(
 				"wake lifecycle guard %s is held by another process; holder is unknown after %s; inspect with `amq wake check --root %s --me %s --json` or escalate manually",
 				path,
-				wakeLifecycleGuardRetryTimeout,
+				retryTimeout,
 				root,
 				agent,
 			)

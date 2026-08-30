@@ -571,7 +571,7 @@ func (transport *linuxWakeReloadTransport) authorize(request wakeReloadTransport
 	if linuxWakeReloadBeforeGuard != nil {
 		linuxWakeReloadBeforeGuard()
 	}
-	authErr := withWakeLifecycleGuardModeInDir(transport.agentDir, unix.LOCK_EX|unix.LOCK_NB, func(dirfd int) error {
+	authErr := withWakeLifecycleGuardNoWaitInDir(transport.agentDir, func(dirfd int) error {
 		current := inspectWakeLockAt(dirfd, transport.agentDir, transport.root, transport.agent)
 		return validateLinuxWakeReloadCurrentLock(
 			transport.expected,

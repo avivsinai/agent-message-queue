@@ -369,6 +369,7 @@ func isWakeLifecycleGuardCall(call *ast.CallExpr) bool {
 	switch callName(call.Fun) {
 	case "withWakeLifecycleGuardInDir",
 		"withWakeLifecycleGuardModeInDir",
+		"withWakeLifecycleGuardNoWaitInDir",
 		"withExistingWakeLifecycleGuardInDir",
 		"withExistingWakeLifecycleGuardModeInDir",
 		"withWakeMutationScopeInDir",

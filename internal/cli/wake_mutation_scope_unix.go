@@ -215,3 +215,24 @@ func retainedWakeAgentDirRelation(agentDir *wakeAgentDir) (wakeAgentDirRelation,
 	}
 	return wakeAgentDirDetached, nil
 }
+
+func canonicalWakeAgentDirPathPresent(agentDir *wakeAgentDir) (bool, error) {
+	if agentDir == nil || agentDir.file == nil {
+		return false, fmt.Errorf("wake agent directory capability is missing")
+	}
+	fd, err := unix.Open(
+		agentDir.path,
+		unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW,
+		0,
+	)
+	if err != nil {
+		if errors.Is(err, unix.ENOENT) {
+			return false, nil
+		}
+		return false, fmt.Errorf("open canonical wake agent directory %s: %w", agentDir.path, err)
+	}
+	if err := unix.Close(fd); err != nil {
+		return false, fmt.Errorf("close canonical wake agent directory %s: %w", agentDir.path, err)
+	}
+	return true, nil
+}
