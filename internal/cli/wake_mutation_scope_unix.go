@@ -169,7 +169,7 @@ func withWakeMutationScopeOrRetainedDir(
 		return err
 	}
 	if missing {
-		return withWakeMutationScopeRetainedDirNoGuard(agentDir, fn)
+		return withWakeMutationScopeInDir(agentDir, fn)
 	}
 	return withExistingWakeMutationScopeInDir(agentDir, fn)
 }
@@ -187,7 +187,7 @@ func withWakeMutationScopeOrRetainedDirNoWait(
 		return err
 	}
 	if missing {
-		return withWakeMutationScopeRetainedDirNoGuard(agentDir, fn)
+		return withWakeMutationScopeNoWaitInDir(agentDir, fn)
 	}
 	return withExistingWakeMutationScopeNoWaitInDir(agentDir, fn)
 }
