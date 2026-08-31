@@ -11,9 +11,9 @@ import (
 )
 
 var (
-	linuxPidfdOpen  = unix.PidfdOpen
-	linuxPidfdSend  wakemutation.PidfdSenderFunc
-	linuxPidfdClose = unix.Close
+	linuxPidfdOpen                               = unix.PidfdOpen
+	linuxPidfdSend  wakemutation.PidfdSenderFunc = wakemutation.PidfdSendSignal
+	linuxPidfdClose                              = unix.Close
 
 	// Tests use this barrier to force a successor publication between the
 	// missing-guard probe and acquisition of the permanent guard.
@@ -33,8 +33,8 @@ func withWakeMutationScopeRetainedDirNoGuard(
 			return fmt.Errorf("no-guard wake mutation requires a proven detached retained directory")
 		}
 		scope := newWakeMutationScope(agentDir, dirfd, nil)
-		defer func() { retErr = errors.Join(retErr, scope.release()) }()
-		return fn(scope)
+		retErr = fn(scope)
+		return errors.Join(retErr, scope.release())
 	})
 }
 

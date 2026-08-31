@@ -956,7 +956,7 @@ func wakeMutationEffectSignature(typ types.Type) bool {
 			wakeMutationBasicKind(params.At(2).Type(), types.Int)
 	case 4:
 		return (wakeMutationBasicKind(params.At(0).Type(), types.Int) &&
-			wakeMutationNamedType(params.At(1).Type()) == "golang.org/x/sys/unix.Signal" &&
+			wakeMutationIsSignalType(params.At(1).Type()) &&
 			wakeMutationNamedType(params.At(2).Type()) == "golang.org/x/sys/unix.Siginfo" &&
 			wakeMutationBasicKind(params.At(3).Type(), types.Int)) ||
 			(wakeMutationBasicKind(params.At(0).Type(), types.Int) &&
@@ -969,6 +969,15 @@ func wakeMutationEffectSignature(typ types.Type) bool {
 			wakeMutationBasicKind(params.At(2).Type(), types.Int) &&
 			wakeMutationBasicKind(params.At(3).Type(), types.String) &&
 			wakeMutationBasicKind(params.At(4).Type(), types.Int)
+	default:
+		return false
+	}
+}
+
+func wakeMutationIsSignalType(typ types.Type) bool {
+	switch wakeMutationNamedType(typ) {
+	case "golang.org/x/sys/unix.Signal", "syscall.Signal":
+		return true
 	default:
 		return false
 	}
