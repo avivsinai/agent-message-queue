@@ -15,10 +15,6 @@ var pidfdSendSignal PidfdSenderFunc = func(
 	return unix.PidfdSendSignal(pidfd, signal, info, flags)
 }
 
-func PidfdSendSignal(pidfd int, signal unix.Signal, info *unix.Siginfo, flags int) error {
-	return pidfdSendSignal(pidfd, signal, info, flags)
-}
-
 func (lease *Lease) SendPidfdSignal(pidfd int, signal unix.Signal) error {
 	return lease.SendPidfdSignalWith(pidfdSendSignal, pidfd, signal)
 }

@@ -11,18 +11,72 @@ import (
 )
 
 var (
-	linuxPidfdOpen                               = unix.PidfdOpen
-	linuxPidfdSend  wakemutation.PidfdSenderFunc = wakemutation.PidfdSendSignal
-	linuxPidfdClose                              = unix.Close
+	linuxPidfdOpen  = unix.PidfdOpen
+	linuxPidfdSend  wakemutation.PidfdSenderFunc
+	linuxPidfdClose = unix.Close
 
 	// Tests use this barrier to force a successor publication between the
 	// missing-guard probe and acquisition of the permanent guard.
 	wakeMutationAfterLifecycleGuardProbe = func(*wakeAgentDir, bool) {}
 )
 
+// detachedWakeCleanupScope intentionally carries only the retained directory
+// capability needed to unlink residue. It cannot signal or perform any other
+// lifecycle effect.
+type detachedWakeCleanupScope struct {
+	agentDir     *wakeAgentDir
+	dirfd        int
+	active       func() bool
+	unlink       func() error
+	releaseLease func() error
+}
+
+func newDetachedWakeCleanupScope(agentDir *wakeAgentDir, dirfd int) *detachedWakeCleanupScope {
+	lease := wakemutation.New(nil)
+	return &detachedWakeCleanupScope{
+		agentDir: agentDir,
+		dirfd:    dirfd,
+		active:   lease.Active,
+		unlink: func() error {
+			return lease.UnlinkAt(dirfd, wakeLockFileName, 0)
+		},
+		releaseLease: lease.Close,
+	}
+}
+
+func (scope *detachedWakeCleanupScope) release() error {
+	if scope == nil || scope.releaseLease == nil {
+		return unix.EINVAL
+	}
+	return scope.releaseLease()
+}
+
+func (scope *detachedWakeCleanupScope) location() (int, *wakeAgentDir, error) {
+	if scope == nil || scope.active == nil || !scope.active() {
+		return 0, nil, fmt.Errorf("detached wake cleanup scope is inactive")
+	}
+	if scope.agentDir == nil || scope.agentDir.file == nil {
+		return 0, nil, unix.EINVAL
+	}
+	if scope.dirfd != int(scope.agentDir.file.Fd()) {
+		return 0, nil, fmt.Errorf("detached wake cleanup scope directory capability does not match retained descriptor")
+	}
+	return scope.dirfd, scope.agentDir, nil
+}
+
+func (scope *detachedWakeCleanupScope) unlinkWakeLockForCleanup() error {
+	if _, _, err := scope.location(); err != nil {
+		return err
+	}
+	if scope.unlink == nil {
+		return unix.EINVAL
+	}
+	return scope.unlink()
+}
+
 func withWakeMutationScopeRetainedDirNoGuard(
 	agentDir *wakeAgentDir,
-	fn func(*wakeMutationScope) error,
+	fn func(wakeRetainedCleanupScope) error,
 ) error {
 	return agentDir.withFD(func(dirfd int) (retErr error) {
 		relation, err := retainedWakeAgentDirRelationAt(agentDir, dirfd)
@@ -32,7 +86,7 @@ func withWakeMutationScopeRetainedDirNoGuard(
 		if relation != wakeAgentDirDetached {
 			return fmt.Errorf("no-guard wake mutation requires a proven detached retained directory")
 		}
-		scope := newWakeMutationScope(agentDir, dirfd, nil)
+		scope := newDetachedWakeCleanupScope(agentDir, dirfd)
 		retErr = fn(scope)
 		return errors.Join(retErr, scope.release())
 	})
@@ -41,10 +95,12 @@ func withWakeMutationScopeRetainedDirNoGuard(
 func withWakeMutationScopeForRetainedCleanup(
 	agentDir *wakeAgentDir,
 	allowMissing bool,
-	fn func(*wakeMutationScope) error,
+	fn func(wakeRetainedCleanupScope) error,
 ) error {
 	if !allowMissing {
-		return withExistingWakeMutationScopeNoWaitInDir(agentDir, fn)
+		return withExistingWakeMutationScopeNoWaitInDir(agentDir, func(scope *wakeMutationScope) error {
+			return fn(scope)
+		})
 	}
 	missing, err := wakeLifecycleGuardMissingAt(agentDir)
 	if err != nil {
@@ -59,7 +115,9 @@ func withWakeMutationScopeForRetainedCleanup(
 			return withWakeMutationScopeRetainedDirNoGuard(agentDir, fn)
 		}
 	}
-	return withWakeMutationScopeOrRetainedDirNoWait(agentDir, allowMissing, fn)
+	return withWakeMutationScopeOrRetainedDirNoWait(agentDir, allowMissing, func(scope *wakeMutationScope) error {
+		return fn(scope)
+	})
 }
 
 func withWakeMutationScopeOrRetainedDirNoWait(

@@ -190,7 +190,7 @@ func createWakeRepairLockAt(
 }
 
 func removeWakeLockIfUnchangedGuardedAt(
-	scope *wakeMutationScope,
+	scope wakeRetainedCleanupScope,
 	inspection wakeLockInspection,
 ) error {
 	committed, err := removeWakeLockIfUnchangedGuardedAtStatus(scope, inspection)
@@ -209,7 +209,7 @@ func removeWakeLockIfUnchangedGuardedAt(
 }
 
 func removeWakeLockIfUnchangedGuardedAtStatus(
-	scope *wakeMutationScope,
+	scope wakeRetainedCleanupScope,
 	inspection wakeLockInspection,
 ) (bool, error) {
 	outcome := removeWakeLockIfUnchangedGuardedAtOutcome(
@@ -271,7 +271,7 @@ func splitWakeSelfUpgradeDiagnosticResidue(err error) (blocking, diagnostic erro
 }
 
 func removeWakeLockIfUnchangedGuardedAtOutcome(
-	scope *wakeMutationScope,
+	scope wakeRetainedCleanupScope,
 	inspection wakeLockInspection,
 	unlink func() error,
 ) wakeLockRemovalOutcome {
@@ -303,16 +303,24 @@ func removeWakeLockIfUnchangedGuardedAtOutcome(
 	// the old inode, so remove only that old claim and report detached cleanup.
 	detached := relation == wakeAgentDirDetached
 	var detachedValidationErr error
-	if err := validateBoundWakeMutationAt(scope, inspection); err != nil {
-		// A retained directory capability can outlive replacement of its
-		// canonical pathname. Exact cleanup inside that proven-detached inode
-		// cannot signal or unlink the successor claim, so it may reap its own
-		// private residue even though canonical bound-state validation is no
-		// longer possible.
-		if !detached {
-			return wakeLockRemovalOutcome{Err: err}
+	guardedScope, hasGuardedScope := scope.(*wakeMutationScope)
+	if !hasGuardedScope && !detached {
+		return wakeLockRemovalOutcome{Err: fmt.Errorf(
+			"canonical wake lock cleanup requires a guarded mutation scope",
+		)}
+	}
+	if hasGuardedScope {
+		if err := validateBoundWakeMutationAt(guardedScope, inspection); err != nil {
+			// A retained directory capability can outlive replacement of its
+			// canonical pathname. Exact cleanup inside that proven-detached inode
+			// cannot signal or unlink the successor claim, so it may reap its own
+			// private residue even though canonical bound-state validation is no
+			// longer possible.
+			if !detached {
+				return wakeLockRemovalOutcome{Err: err}
+			}
+			detachedValidationErr = err
 		}
-		detachedValidationErr = err
 	}
 	if detached && detachedValidationErr == nil {
 		detachedValidationErr = wakeDetachedCleanupValidationError()
@@ -374,7 +382,7 @@ func removeWakeLockIfUnchangedGuardedAtOutcome(
 }
 
 func removeWakeLockIfUnchangedGuardedAtDurableOutcome(
-	scope *wakeMutationScope,
+	scope wakeRetainedCleanupScope,
 	inspection wakeLockInspection,
 	unlink func() error,
 ) wakeLockRemovalOutcome {

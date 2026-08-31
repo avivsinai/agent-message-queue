@@ -34,7 +34,15 @@ func stubLinuxPidfd(t *testing.T, open func(int, int) (int, error), send func(in
 	})
 }
 
+func useRealLinuxPidfdSender(t *testing.T) {
+	t.Helper()
+	oldSend := linuxPidfdSend
+	linuxPidfdSend = unix.PidfdSendSignal
+	t.Cleanup(func() { linuxPidfdSend = oldSend })
+}
+
 func TestTerminateWakePidfdKillsValidatedChildAndCannotSignalAfterExit(t *testing.T) {
+	useRealLinuxPidfdSender(t)
 	cmd := exec.Command("sleep", "30")
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start child: %v", err)
@@ -66,6 +74,7 @@ func TestTerminateWakePidfdKillsValidatedChildAndCannotSignalAfterExit(t *testin
 }
 
 func TestRetireDoesNotSignalRecycledPID(t *testing.T) {
+	useRealLinuxPidfdSender(t)
 	old := exec.Command("sleep", "30")
 	if err := old.Start(); err != nil {
 		t.Fatalf("start old child: %v", err)
@@ -882,6 +891,7 @@ func matchingLinuxWakeProcess(pid int, root string) wakeProcessInfo {
 }
 
 func TestTerminateWakePidfdKillsChildThatIgnoresSIGTERM(t *testing.T) {
+	useRealLinuxPidfdSender(t)
 	cmd := exec.Command("sh", "-c", "trap '' TERM; exec sleep 30")
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start child: %v", err)

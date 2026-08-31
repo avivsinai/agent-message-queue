@@ -22,6 +22,15 @@ type wakeMutationScope struct {
 	lease    *wakemutation.Lease
 }
 
+type wakeMutationLocationScope interface {
+	location() (int, *wakeAgentDir, error)
+}
+
+type wakeRetainedCleanupScope interface {
+	wakeMutationLocationScope
+	unlinkWakeLockForCleanup() error
+}
+
 var wakeRetireUnlinkWakeLockAt wakemutation.UnlinkAtFunc = wakeUnlinkAt
 
 func newWakeMutationScope(

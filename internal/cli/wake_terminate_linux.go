@@ -183,7 +183,7 @@ func terminateAndRemoveOrphanedWakeLockInDirWithRawConsent(
 	}
 
 	removed := false
-	err = withWakeMutationScopeForRetainedCleanup(agentDir, allowMissingGuard, func(scope *wakeMutationScope) error {
+	err = withWakeMutationScopeForRetainedCleanup(agentDir, allowMissingGuard, func(scope wakeRetainedCleanupScope) error {
 		dirfd, scopedAgentDir, err := scope.location()
 		if err != nil {
 			return err
