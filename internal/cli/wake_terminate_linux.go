@@ -278,6 +278,7 @@ func terminateWakePidfdWithAuthorization(
 ) (bool, error) {
 	attempted := false
 	send := func(signal unix.Signal) error {
+		signalName := wakeSignalName(signal)
 		return withWakeMutationScopeOrRetainedDirNoWait(
 			agentDir,
 			allowMissingGuard,
@@ -293,34 +294,37 @@ func terminateWakePidfdWithAuthorization(
 					expected.Agent,
 				)
 				if !current.Exists {
-					return fmt.Errorf(
-						"wake lock is missing before %s; refusing to signal; inspect with %s",
-						signal,
-						wakeCheckRemedy(expected.Root, expected.Agent).String(),
-					)
-				}
-				if !sameWakeLockGeneration(expected, current) {
-					return fmt.Errorf(
-						"wake lock generation changed before %s; refusing to signal; inspect with %s",
-						signal,
-						wakeCheckRemedy(expected.Root, expected.Agent).String(),
-					)
-				}
-				if err := validateWakeLockOwnerlessMutationAtForTermination(
-					dirfd,
-					scopedAgentDir,
-					current,
-				); err != nil {
-					return fmt.Errorf("authorize wake before %s: %w", signal, err)
-				}
-				if requestedTarget != nil {
-					if err := requireExistingWakeTargetMatchesAt(
+					if !attempted {
+						return fmt.Errorf(
+							"wake lock is missing before %s; refusing to signal; inspect with %s",
+							signalName,
+							wakeCheckRemedy(expected.Root, expected.Agent).String(),
+						)
+					}
+				} else {
+					if !sameWakeLockGeneration(expected, current) {
+						return fmt.Errorf(
+							"wake lock generation changed before %s; refusing to signal; inspect with %s",
+							signalName,
+							wakeCheckRemedy(expected.Root, expected.Agent).String(),
+						)
+					}
+					if err := validateWakeLockOwnerlessMutationAtForTermination(
 						dirfd,
 						scopedAgentDir,
 						current,
-						*requestedTarget,
 					); err != nil {
-						return fmt.Errorf("authorize wake target before %s: %w", signal, err)
+						return fmt.Errorf("authorize wake before %s: %w", signalName, err)
+					}
+					if requestedTarget != nil {
+						if err := requireExistingWakeTargetMatchesAt(
+							dirfd,
+							scopedAgentDir,
+							current,
+							*requestedTarget,
+						); err != nil {
+							return fmt.Errorf("authorize wake target before %s: %w", signalName, err)
+						}
 					}
 				}
 				signalAttempted, err := scope.sendPidfdSignalForTermination(pidfd, signal)
@@ -340,12 +344,13 @@ func terminateAuthoritativeWakePidfdWithAuthorization(
 	pidfd int,
 ) error {
 	send := func(signal unix.Signal) error {
+		signalName := wakeSignalName(signal)
 		if expected.Lock.Owner == nil {
-			return fmt.Errorf("authoritative wake owner is missing before %s", signal)
+			return fmt.Errorf("authoritative wake owner is missing before %s", signalName)
 		}
 		observation, err := observeAuthoritativeWakeOwner(*expected.Lock.Owner)
 		if err != nil {
-			return fmt.Errorf("observe authoritative wake owner before %s: %w", signal, err)
+			return fmt.Errorf("observe authoritative wake owner before %s: %w", signalName, err)
 		}
 		sendErr := withExistingWakeMutationScopeNoWaitInDir(
 			agentDir,
@@ -355,7 +360,7 @@ func terminateAuthoritativeWakePidfdWithAuthorization(
 					return err
 				}
 				if err := scope.requireCanonical(); err != nil {
-					return fmt.Errorf("authorize authoritative wake before %s: %w", signal, err)
+					return fmt.Errorf("authorize authoritative wake before %s: %w", signalName, err)
 				}
 				current := inspectWakeLockAt(
 					dirfd,
@@ -365,23 +370,23 @@ func terminateAuthoritativeWakePidfdWithAuthorization(
 				)
 				if !sameWakeLockGeneration(expected, current) {
 					return withWakeDiagnostic(
-						fmt.Errorf("authoritative wake generation changed before %s; refusing to signal", signal),
+						fmt.Errorf("authoritative wake generation changed before %s; refusing to signal", signalName),
 						expected.Root,
 						expected.Agent,
 					)
 				}
 				if err := validateBoundWakeMutationAt(scope, current); err != nil {
-					return fmt.Errorf("authorize authoritative wake before %s: %w", signal, err)
+					return fmt.Errorf("authorize authoritative wake before %s: %w", signalName, err)
 				}
 				if classifyPersistedWakeClaim(current) != wakeClaimAuthoritative {
 					return withWakeDiagnostic(
-						fmt.Errorf("authoritative wake claim changed before %s; refusing to signal", signal),
+						fmt.Errorf("authoritative wake claim changed before %s; refusing to signal", signalName),
 						expected.Root,
 						expected.Agent,
 					)
 				}
 				if err := validateAuthoritativeWakeStopAuthorization(current, auth, observation); err != nil {
-					return fmt.Errorf("authorize authoritative wake before %s: %w", signal, err)
+					return fmt.Errorf("authorize authoritative wake before %s: %w", signalName, err)
 				}
 				return scope.sendPidfdSignal(pidfd, signal)
 			},

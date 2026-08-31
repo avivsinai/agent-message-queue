@@ -123,7 +123,7 @@ func retireWakeIfGeneration(root, me string, requested wakeTarget, ifGeneration 
 	refuse := func(reason string) (wakeRetireResult, error) {
 		result.Status = "refused"
 		err := withWakeDiagnostic(errors.New(reason), result.Root, result.Agent)
-		result.Reason = err.Error()
+		result.Reason = reason
 		return result, err
 	}
 	inspection := inspectWakeLock(root, me)

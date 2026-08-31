@@ -41,7 +41,18 @@ func (scope *wakeMutationScope) sendPidfdSignalForTermination(pidfd int, signal 
 
 func sendWakePidfdSignal(pidfd int, signal unix.Signal) error {
 	if err := linuxPidfdSendSignal(pidfd, signal, nil, 0); err != nil {
-		return fmt.Errorf("pidfd_send_signal %s: %w", signal, err)
+		return fmt.Errorf("pidfd_send_signal %s: %w", wakeSignalName(signal), err)
 	}
 	return nil
+}
+
+func wakeSignalName(signal unix.Signal) string {
+	switch signal {
+	case unix.SIGTERM:
+		return "SIGTERM"
+	case unix.SIGKILL:
+		return "SIGKILL"
+	default:
+		return fmt.Sprintf("signal %d", signal)
+	}
 }

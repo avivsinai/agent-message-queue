@@ -696,7 +696,7 @@ func TestWakeCheckPreservesUnverifiedWakeState(t *testing.T) {
 	}
 	if got.WakeStatus != string(wakeLockUnverified) ||
 		got.RestartCapability != wakeRestartUnavailable ||
-		got.NextAction != "preserve the unverified wake state and inspect it with "+wakeCheckRemedy(root, "codex").String() {
+		got.NextAction != "preserve the unverified wake state and inspect it with amq doctor --ops" {
 		t.Fatalf("unverified capability = %#v", got)
 	}
 	assertWakeCheckTreeUnchanged(t, root, before)

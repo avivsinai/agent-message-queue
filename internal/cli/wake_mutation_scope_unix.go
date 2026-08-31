@@ -11,10 +11,10 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// wakeMutationScope owns the lifecycle guard lease and the retained directory
-// descriptor for one mutation callback. Its lifetime ends before the guard is
-// unlocked, so an escaped scope cannot commit an effect after its authority is
-// released.
+// wakeMutationScope owns a lifecycle guard lease when present and the retained
+// directory descriptor for one mutation callback. Its lifetime ends before the
+// guard is unlocked, so an escaped scope cannot commit an effect after its
+// authority is released.
 type wakeMutationScope struct {
 	agentDir *wakeAgentDir
 	dirfd    int
@@ -58,7 +58,7 @@ func (scope *wakeMutationScope) requireActive() error {
 	if scope == nil || scope.active == nil || !scope.active.Load() {
 		return fmt.Errorf("wake mutation scope is inactive")
 	}
-	if scope.guard == nil || scope.guard.file == nil || scope.guard.released {
+	if scope.guard != nil && (scope.guard.file == nil || scope.guard.released) {
 		return fmt.Errorf("wake mutation scope lifecycle guard is unavailable")
 	}
 	if scope.agentDir == nil || scope.agentDir.file == nil {
@@ -111,6 +111,17 @@ func withWakeMutationScopeNoWaitInDir(
 	)
 }
 
+func withWakeMutationScopeRetainedDirNoGuard(
+	agentDir *wakeAgentDir,
+	fn func(*wakeMutationScope) error,
+) error {
+	return agentDir.withFD(func(dirfd int) (retErr error) {
+		scope := newWakeMutationScope(agentDir, dirfd, nil)
+		defer func() { retErr = errors.Join(retErr, scope.release()) }()
+		return fn(scope)
+	})
+}
+
 func withExistingWakeMutationScopeInDir(
 	agentDir *wakeAgentDir,
 	fn func(*wakeMutationScope) error,
@@ -158,7 +169,7 @@ func withWakeMutationScopeOrRetainedDir(
 		return err
 	}
 	if missing {
-		return withWakeMutationScopeInDir(agentDir, fn)
+		return withWakeMutationScopeRetainedDirNoGuard(agentDir, fn)
 	}
 	return withExistingWakeMutationScopeInDir(agentDir, fn)
 }
@@ -176,7 +187,7 @@ func withWakeMutationScopeOrRetainedDirNoWait(
 		return err
 	}
 	if missing {
-		return withWakeMutationScopeNoWaitInDir(agentDir, fn)
+		return withWakeMutationScopeRetainedDirNoGuard(agentDir, fn)
 	}
 	return withExistingWakeMutationScopeNoWaitInDir(agentDir, fn)
 }

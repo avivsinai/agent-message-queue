@@ -720,6 +720,7 @@ func wakeMutationScopeOwnerSet() map[string]struct{} {
 		"withWakeMutationScopeNoWaitInDir",
 		"withExistingWakeMutationScopeInDir",
 		"withExistingWakeMutationScopeNoWaitInDir",
+		"withWakeMutationScopeRetainedDirNoGuard",
 		"withWakeMutationScopeOrRetainedDir",
 		"withWakeMutationScopeOrRetainedDirNoWait",
 	)
