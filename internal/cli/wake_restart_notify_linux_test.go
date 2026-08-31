@@ -3,7 +3,10 @@
 package cli
 
 import (
+	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"syscall"
@@ -258,9 +261,15 @@ func TestNotifyWakeRestartLinuxRefusesChangedPendingRecord(t *testing.T) {
 				func(int, int) (int, error) {
 					changed := fixture.record
 					test.mutate(&changed)
-					if err := withWakeMutationScopeInDir(fixture.agentDir, func(scope *wakeMutationScope) error {
-						return writeWakeRestartRecordAt(scope, changed)
-					}); err != nil {
+					raw, err := json.Marshal(changed)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(
+						filepath.Join(fixture.agentDir.path, wakeRestartFileName),
+						append(raw, '\n'),
+						0o600,
+					); err != nil {
 						t.Fatal(err)
 					}
 					return 44, nil

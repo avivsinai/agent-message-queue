@@ -375,10 +375,14 @@ func (visitor *wakeMutationVisitor) inspectCall(call *ast.CallExpr) {
 	if wakeFunctionIsGuard(fn) {
 		visitor.inspectGuardCallback(call)
 	}
-	if wakeFunctionIsRawPidfdEffect(fn) && !isWakeMutationDirectEffectOwner(visitor.owner) {
+	if wakeFunctionIsRawPidfdEffect(fn) &&
+		!isWakeMutationDirectEffectOwner(visitor.owner) &&
+		!wakeFunctionIsRawWakeWrapper(visitor.owner) {
 		visitor.add(call, "direct pidfd wake signal", visitor.owner)
 	}
-	if wakeFunctionIsRawWakeWrapper(fn) && !isWakeMutationDirectEffectOwner(visitor.owner) {
+	if wakeFunctionIsRawWakeWrapper(fn) &&
+		!isWakeMutationDirectEffectOwner(visitor.owner) &&
+		!wakeFunctionIsRawWakeWrapper(visitor.owner) {
 		visitor.add(call, "raw wake mutation helper called outside its owner", visitor.owner)
 	}
 	if wakeFunctionIsRemoval(fn) {
@@ -1179,6 +1183,6 @@ package cli
 import "syscall"
 
 func badSyscallUnlinkat(fd int) {
-	_ = syscall.Unlinkat(fd, ".wake.lock", 0)
+	_ = syscall.Unlinkat(fd, ".wake.lock")
 }
 `
