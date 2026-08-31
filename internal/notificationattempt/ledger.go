@@ -225,27 +225,76 @@ func (w *Writer) append(record Record) error {
 	}
 	dir := filepath.Join("agents", w.agent, "receipts")
 	fullPath := filepath.Join(root.Base(), dir, LogFilename)
+	lockPath := fullPath + ".lock"
 
-	// Rotate if the current file plus this record would exceed the cap. Read
-	// the size via stat (not by reading the file — rotation is a size check,
-	// not a read-modify-write). If stat fails (file doesn't exist yet), skip.
+	// Coordination model: a separate lock file carries the flock; the data file
+	// stays O_APPEND so the hot-path write remains kernel-atomic at EOF among
+	// concurrent appenders (requirement 1, unchanged). The lock gates ONLY the
+	// rare rotation.
+	//
+	//	appender: flock(LOCK_SH) on lock file -> O_APPEND write on data file
+	//	rotator:  flock(LOCK_EX) on lock file -> read+merge+truncate data file
+	//
+	// LOCK_SH holders do not contend with each other, so concurrent appenders
+	// stay concurrent — the hot path keeps its lock-free-among-appenders
+	// property; the cost is one flock(LOCK_SH) syscall, never serialization
+	// between appends. LOCK_EX waits for in-flight appenders and blocks new
+	// ones only for the rotation window, closing the race where an O_APPEND
+	// write landed between rotation's read and its truncate — the exact
+	// silent-loss path REQ1 removed on the hot path but rotation reintroduced.
+	//
+	// The lock file is distinct from the data file so rotation may freely
+	// truncate or rename the data file without invalidating anyone's lock:
+	// appenders lock the lock file, not the data file, so a rotated/recreated
+	// data file does not orphan a held lock. (flock is per-inode; had we locked
+	// the data file, a rename-based rotation would detach the lock. We truncate
+	// in place anyway, but the separate lock file is robust to either choice.)
+	lockFile, err := os.OpenFile(lockPath, os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return fmt.Errorf("open notification attempt journal lock: %w", err)
+	}
+	defer func() { _ = lockFile.Close() }()
+
+	// Decide whether this append triggers a rotation. The size check is a stat
+	// on the data file BEFORE taking the lock: it is a hint, not a commitment.
+	// If two appenders race past this check, the one that wins LOCK_EX below
+	// rotates; the loser, on acquiring LOCK_SH, finds the file already
+	// truncated and simply appends to the fresh file. A stale-high stat (size
+	// grew after we read it) is harmless — the locked re-check corrects it.
+	rotate := false
 	if info, statErr := os.Stat(fullPath); statErr == nil {
-		if info.Size()+int64(len(data)) > w.maxBytes {
-			// Rotation: the current file becomes .1. To avoid destroying a prior
-			// .1 (which would silently lose the oldest records on a second
-			// rotation), append the current file's contents to any existing .1.
-			// This is read-modify-write, but it runs ONLY on rotation (once per
-			// ~1700 records at the default 256KB cap), never on the hot append
-			// path — the O_APPEND write below is the hot path and stays lock-free.
+		rotate = info.Size()+int64(len(data)) > w.maxBytes
+	}
+
+	if rotate {
+		// LOCK_EX serializes rotation against all appenders: it blocks until
+		// every in-flight LOCK_SH appender has finished its write and released,
+		// then prevents new appends for the duration of read->merge->truncate.
+		if err := flockExclusive(lockFile); err != nil {
+			return fmt.Errorf("lock notification attempt journal for rotation: %w", err)
+		}
+		// Re-check the size UNDER LOCK_EX: another rotator that held EX before
+		// us may have already truncated, making rotation unnecessary now. This
+		// is what prevents double rotation and the lost-record window.
+		if info2, e2 := os.Stat(fullPath); e2 == nil {
+			rotate = info2.Size()+int64(len(data)) > w.maxBytes
+		} else {
+			rotate = false
+		}
+		if rotate {
 			rotated := fullPath + rotatedSuffix
 			current, readErr := os.ReadFile(fullPath)
 			if readErr != nil && !os.IsNotExist(readErr) {
-				// Can't read current to merge — append anyway (over-size log is
-				// better than a lost record). The prior .1 is overwritten.
+				// Can't read current to merge — shed the over-size log by rename
+				// (better than a lost record); the prior .1 is overwritten. Still
+				// under LOCK_EX so no appender is racing us.
 				_ = os.Rename(fullPath, rotated)
 			} else if readErr == nil {
-				// Append current to .1 (merge generations), then truncate current.
-				if existing, err := os.ReadFile(rotated); err == nil {
+				// Merge current into .1 (preserve older generations), then
+				// truncate current in place. We hold LOCK_EX so no appender can
+				// O_APPEND a record between this read and the truncate — the
+				// race that reintroduced silent loss is closed.
+				if existing, eerr := os.ReadFile(rotated); eerr == nil {
 					_ = os.WriteFile(rotated, append(existing, current...), 0o600)
 				} else {
 					_ = os.WriteFile(rotated, current, 0o600)
@@ -253,11 +302,30 @@ func (w *Writer) append(record Record) error {
 				_ = os.Truncate(fullPath, 0)
 			}
 		}
+		// Downgrade LOCK_EX -> LOCK_SH for the append. flock downgrades are a
+		// single LOCK_SH call: it atomically releases EX and acquires SH, so
+		// waiting appenders can proceed while we still hold SH for our own write.
+		if err := flockShared(lockFile); err != nil {
+			flockRelease(lockFile)
+			return fmt.Errorf("downgrade to shared lock for append: %w", err)
+		}
+		defer flockRelease(lockFile)
+	} else {
+		// Hot path: shared lock. Does not contend with other appenders, so the
+		// O_APPEND write below stays concurrent and kernel-atomic at EOF. The
+		// lock excludes only the rare rotation (LOCK_EX), which is the point.
+		if err := flockShared(lockFile); err != nil {
+			return fmt.Errorf("lock notification attempt journal for append: %w", err)
+		}
+		defer flockRelease(lockFile)
 	}
 
-	// O_APPEND | O_CREATE | O_WRONLY with mode 0600. On local filesystems the
-	// kernel serializes O_APPEND writes, so concurrent writers each append a
-	// full line atomically — no lost-update race, no lock needed.
+	// O_APPEND | O_CREATE | O_WRONLY, mode 0600. Opened AFTER acquiring the
+	// lock so the fd we write through reflects any rotation that just ran (a
+	// truncated or renamed-and-recreated current file). We hold LOCK_SH, so no
+	// rotator can truncate beneath this write. Among concurrent appenders the
+	// kernel serializes O_APPEND writes — each lands a full line at EOF
+	// atomically, no lost-update race (requirement 1, preserved).
 	f, err := os.OpenFile(fullPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return fmt.Errorf("open notification attempt journal: %w", err)

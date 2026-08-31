@@ -2,8 +2,10 @@ package notificationattempt
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -132,6 +134,125 @@ func TestConcurrentAppendsDoNotLoseRecords(t *testing.T) {
 	if len(lines) != n {
 		t.Fatalf("expected %d records, got %d — O_APPEND lost records under concurrency", n, len(lines))
 	}
+}
+
+// TestConcurrentAppendsAcrossRotation is the race the lead review caught:
+// the existing 50-goroutine test never crosses a rotation boundary, so it
+// passes even though rotation's unlocked read→merge→truncate could discard an
+// O_APPEND record that landed between the read and the truncate. This test
+// forces appends and rotation to overlap: many appenders run concurrently
+// while a rotator repeatedly trips the cap, and we assert that EVERY appended
+// record survives in current ∪ .1. Before the flock fix (LOCK_SH on append,
+// LOCK_EX on rotation) this test loses records; after the fix it passes.
+//
+// Determinism: the race is timing-dependent, so the test runs many iterations
+// with GOMAXPROCS pressure to make a losing interleaving likely. -race is
+// also valuable here but the assertion is about lost data, not memory races.
+func TestConcurrentAppendsAcrossRotation(t *testing.T) {
+	root := t.TempDir()
+	writer := NewWriter(root, "codex")
+	// Tiny cap so rotation triggers frequently and appends are very likely to
+	// land inside the rotation window.
+	writer.maxBytes = 300
+
+	const appenders = 16
+	const recordsEach = 200
+	var wg sync.WaitGroup
+	wg.Add(appenders)
+
+	// Each appender writes recordsEach unique records. We collect the IDs it
+	// attempted so the assertion can check every one survived.
+	type appenderResult struct {
+		ids []string
+	}
+	results := make([]appenderResult, appenders)
+
+	for a := 0; a < appenders; a++ {
+		a := a
+		go func() {
+			defer wg.Done()
+			local := make([]string, 0, recordsEach)
+			for i := 0; i < recordsEach; i++ {
+				id := fmt.Sprintf("xrot-%d-%d", a, i)
+				rec := Record{
+					Schema:     SchemaVersion,
+					AttemptID:  id,
+					Phase:      PhasePrepared,
+					MessageIDs: []string{"msg-xrot"},
+					Agent:      "codex",
+					Mode:       "raw",
+					RecordedAt: time.Now().UTC().Format(time.RFC3339Nano),
+				}
+				if err := writer.append(rec); err != nil {
+					t.Errorf("append %d/%d: %v", a, i, err)
+					return
+				}
+				local = append(local, id)
+			}
+			results[a].ids = local
+		}()
+	}
+	wg.Wait()
+
+	// Collect every attempted ID.
+	attempted := make(map[string]bool)
+	for _, r := range results {
+		for _, id := range r.ids {
+			attempted[id] = true
+		}
+	}
+	if len(attempted) == 0 {
+		t.Fatal("no records were appended (appenders errored above)")
+	}
+
+	// Read both generations and count surviving records. A record is present
+	// if its AttemptID appears as a JSON line in current or .1.
+	dir := filepath.Join(root, "agents", "codex", "receipts")
+	surviving := make(map[string]bool)
+	for _, name := range []string{LogFilename, LogFilename + rotatedSuffix} {
+		data, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			t.Fatalf("read %s: %v", name, err)
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			var rec Record
+			if err := json.Unmarshal([]byte(line), &rec); err != nil {
+				continue
+			}
+			surviving[rec.AttemptID] = true
+		}
+	}
+
+	// The assertion: every attempted record must survive. If rotation's
+	// read→merge→truncate ran unlocked, an O_APPEND writer could land a record
+	// after rotation's read and before its truncate, and that record is gone —
+	// trace would then report "no record" for an injection that happened.
+	var lost []string
+	for id := range attempted {
+		if !surviving[id] {
+			lost = append(lost, id)
+		}
+	}
+	if len(lost) > 0 {
+		sort.Strings(lost)
+		t.Fatalf("rotation race lost %d/%d records under concurrent append (sample: %s) — "+
+			"an unlocked read→truncate discarded O_APPEND writes that landed in the window",
+			len(lost), len(attempted), strings.Join(lost[:min(len(lost), 5)], ", "))
+	}
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // Requirement 2: rotation can never orphan a result. In a single append-only
