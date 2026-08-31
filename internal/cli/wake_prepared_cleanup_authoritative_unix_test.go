@@ -239,10 +239,9 @@ func TestAuthoritativeWakeCleanupDeadOwnerExactPreparedAllowsFirstReacquire(t *t
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = agentDir.Close() })
-	if err := withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+	if err := withWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
 		if err := publishAuthoritativeWakeClaimAt(
-			dirfd,
-			agentDir,
+			scope,
 			root,
 			me,
 			oldTarget,
@@ -251,7 +250,7 @@ func TestAuthoritativeWakeCleanupDeadOwnerExactPreparedAllowsFirstReacquire(t *t
 			return err
 		}
 		if err := writeWakeGenerationFileAt(
-			dirfd,
+			scope,
 			wakePreparedFileName,
 			"wake prepared marker",
 			wakeReady{
@@ -262,7 +261,7 @@ func TestAuthoritativeWakeCleanupDeadOwnerExactPreparedAllowsFirstReacquire(t *t
 		); err != nil {
 			return err
 		}
-		return reconcileWakeStateAfterLegacyMutationAt(dirfd, agentDir, root, me)
+		return reconcileWakeStateAfterLegacyMutationAt(scope, root, me)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -277,10 +276,9 @@ func TestAuthoritativeWakeCleanupDeadOwnerExactPreparedAllowsFirstReacquire(t *t
 		observeCalls++
 		return deadWakeOwnerObservation("old owner is dead"), nil
 	}
-	releaseErr := withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+	releaseErr := withWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
 		return removeAuthoritativeWakeClaimAt(
-			dirfd,
-			agentDir,
+			scope,
 			inspection,
 			&oldTarget,
 		)
@@ -589,8 +587,8 @@ func newAuthoritativeWakePreparedCleanupFixture(
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = agentDir.Close() })
-	if err := withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
-		return publishAuthoritativeWakeClaimAt(dirfd, agentDir, root, me, target, lock)
+	if err := withWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+		return publishAuthoritativeWakeClaimAt(scope, root, me, target, lock)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -630,10 +628,9 @@ func newAuthoritativeWakePreparedCleanupFixture(
 }
 
 func (fixture *authoritativeWakePreparedCleanupFixture) release() error {
-	return withWakeLifecycleGuardInDir(fixture.agentDir, func(dirfd int) error {
+	return withWakeMutationScopeInDir(fixture.agentDir, func(scope *wakeMutationScope) error {
 		return removeAuthoritativeWakeClaimAt(
-			dirfd,
-			fixture.agentDir,
+			scope,
 			fixture.inspection,
 			&fixture.target,
 		)

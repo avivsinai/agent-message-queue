@@ -42,12 +42,15 @@ func notifyWakeRestartPlatform(
 		}
 	}()
 
-	return withExistingWakeMutationScopeModeInDir(
+	return withExistingWakeMutationScopeNoWaitInDir(
 		agentDir,
-		unix.LOCK_EX|unix.LOCK_NB,
 		func(scope *wakeMutationScope) error {
+			dirfd, _, err := scope.location()
+			if err != nil {
+				return err
+			}
 			metadata := readWakeLockMetadataAt(
-				scope.dirfd,
+				dirfd,
 				agentDir,
 				expected.Root,
 				expected.Agent,
@@ -63,7 +66,7 @@ func notifyWakeRestartPlatform(
 			pidfd = fd
 
 			current := inspectWakeLockAt(
-				scope.dirfd,
+				dirfd,
 				agentDir,
 				expected.Root,
 				expected.Agent,
@@ -79,7 +82,7 @@ func notifyWakeRestartPlatform(
 				return err
 			}
 
-			observed, exists, err := readWakeRestartRecordAt(scope.dirfd, agentDir)
+			observed, exists, err := readWakeRestartRecordAt(dirfd, agentDir)
 			if err != nil {
 				return err
 			}

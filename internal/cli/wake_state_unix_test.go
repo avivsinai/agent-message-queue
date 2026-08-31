@@ -213,9 +213,9 @@ func TestRemoveWakeStateIfSnapshotMatchesRemovesExactSnapshot(t *testing.T) {
 	}
 
 	var removed bool
-	if err := fixture.agentDir.withFD(func(dirfd int) error {
+	if err := withWakeMutationScopeInDir(fixture.agentDir, func(scope *wakeMutationScope) error {
 		var err error
-		removed, err = removeWakeStateIfSnapshotMatchesAt(dirfd, fixture.agentDir, snapshot)
+		removed, err = removeWakeStateIfSnapshotMatchesAt(scope, snapshot)
 		return err
 	}); err != nil {
 		t.Fatal(err)
@@ -251,8 +251,8 @@ func TestRemoveWakeStateIfSnapshotMatchesPreservesReplacement(t *testing.T) {
 
 	var removed bool
 	var removeErr error
-	if err := fixture.agentDir.withFD(func(dirfd int) error {
-		removed, removeErr = removeWakeStateIfSnapshotMatchesAt(dirfd, fixture.agentDir, snapshot)
+	if err := withWakeMutationScopeInDir(fixture.agentDir, func(scope *wakeMutationScope) error {
+		removed, removeErr = removeWakeStateIfSnapshotMatchesAt(scope, snapshot)
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -291,8 +291,8 @@ func TestRemoveWakeStatePreservesReboundSiblingDirectory(t *testing.T) {
 	}
 
 	var removeErr error
-	if err := fixture.agentDir.withFD(func(dirfd int) error {
-		_, removeErr = removeWakeStateIfSnapshotMatchesAt(dirfd, fixture.agentDir, snapshot)
+	if err := withWakeMutationScopeInDir(fixture.agentDir, func(scope *wakeMutationScope) error {
+		_, removeErr = removeWakeStateIfSnapshotMatchesAt(scope, snapshot)
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -376,11 +376,10 @@ func publishWakeStateForTest(
 	expected wakeStateLegacySnapshot,
 ) (wakeStateFileSnapshot, error) {
 	var snapshot wakeStateFileSnapshot
-	err := withWakeLifecycleGuardInDir(fixture.agentDir, func(dirfd int) error {
+	err := withWakeMutationScopeInDir(fixture.agentDir, func(scope *wakeMutationScope) error {
 		var err error
 		snapshot, err = publishWakeStateAt(
-			dirfd,
-			fixture.agentDir,
+			scope,
 			fixture.root,
 			fixture.agent,
 			expected,

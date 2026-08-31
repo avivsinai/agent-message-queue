@@ -142,8 +142,8 @@ func writeWakeCheckSelfUpgradeRestartRecord(
 	record wakeRestartRecord,
 ) {
 	t.Helper()
-	if err := withWakeLifecycleGuardInDir(fixture.agentDir, func(dirfd int) error {
-		return writeWakeRestartRecordAt(dirfd, fixture.agentDir, record)
+	if err := withWakeMutationScopeInDir(fixture.agentDir, func(scope *wakeMutationScope) error {
+		return writeWakeRestartRecordAt(scope, record)
 	}); err != nil {
 		t.Fatal(err)
 	}

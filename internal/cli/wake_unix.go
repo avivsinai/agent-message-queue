@@ -233,10 +233,13 @@ func acquireWakeLockWithOptionsRetained(
 }
 
 func supersedeUnverifiedGenericWakeAt(
-	dirfd int,
-	agentDir *wakeAgentDir,
+	scope *wakeMutationScope,
 	expected wakeLockInspection,
 ) error {
+	dirfd, agentDir, err := scope.location()
+	if err != nil {
+		return err
+	}
 	current := inspectWakeLockAt(dirfd, agentDir, expected.Root, expected.Agent)
 	if !sameWakeLockGeneration(expected, current) {
 		return fmt.Errorf("unverified wake changed before supersession; retry")
@@ -249,7 +252,7 @@ func supersedeUnverifiedGenericWakeAt(
 			expected.Agent,
 		)
 	}
-	if err := removeWakeLockIfUnchangedGuardedAt(dirfd, agentDir, current); err != nil {
+	if err := removeWakeLockIfUnchangedGuardedAt(scope, current); err != nil {
 		return fmt.Errorf("supersede exact unverified wake claim: %w", err)
 	}
 
@@ -285,7 +288,12 @@ func acquireWakeLockWithOptionsInDir(
 		var replace wakeLockInspection
 		var created wakeLockInspection
 		quarantined := false
-		err := withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+		err := withWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+			dirfd, scopedAgentDir, err := scope.location()
+			if err != nil {
+				return err
+			}
+			agentDir = scopedAgentDir
 			inspection := inspectWakeLockAt(dirfd, agentDir, root, me)
 			if options.repairLineage != nil && inspection.Exists {
 				return fmt.Errorf("wake lock changed before repair acquisition")
@@ -320,17 +328,13 @@ func acquireWakeLockWithOptionsInDir(
 			if inspection.Exists {
 				switch inspection.Status {
 				case wakeLockStale:
-					if err := reconcileBoundWakePreparedProjectionAt(dirfd, agentDir, inspection); err != nil {
+					if err := reconcileBoundWakePreparedProjectionAt(scope, inspection); err != nil {
 						return err
 					}
 					if err := validateWakeLockStaleRemovalAt(dirfd, agentDir, inspection); err != nil {
 						return err
 					}
-					if err := removeWakeLockIfUnchangedGuardedAt(
-						dirfd,
-						agentDir,
-						inspection,
-					); err != nil {
+					if err := removeWakeLockIfUnchangedGuardedAt(scope, inspection); err != nil {
 						return err
 					}
 				case wakeLockCreating:
@@ -372,7 +376,7 @@ func acquireWakeLockWithOptionsInDir(
 							inspection.Root,
 						)
 					}
-					if err := supersedeUnverifiedGenericWakeAt(dirfd, agentDir, inspection); err != nil {
+					if err := supersedeUnverifiedGenericWakeAt(scope, inspection); err != nil {
 						return err
 					}
 				}
@@ -438,7 +442,7 @@ func acquireWakeLockWithOptionsInDir(
 				); err != nil {
 					return fmt.Errorf("write no-lock wake shadow diagnostic: %w", err)
 				}
-				if err := writeWakeTargetGuardedAt(dirfd, agentDir, root, me, *options.target); err != nil {
+				if err := writeWakeTargetGuardedAt(scope, root, me, *options.target); err != nil {
 					return err
 				}
 			} else {
@@ -449,7 +453,7 @@ func acquireWakeLockWithOptionsInDir(
 				if targetExists {
 					return fmt.Errorf("orphan wake target is preserved because it may be an uncommitted bound-claim shadow")
 				}
-				if err := removeWakeTargetGuardedAt(dirfd, agentDir); err != nil {
+				if err := removeWakeTargetGuardedAt(scope); err != nil {
 					return err
 				}
 			}
@@ -459,21 +463,20 @@ func acquireWakeLockWithOptionsInDir(
 				return err
 			}
 			if options.target != nil {
-				if err := publishWakeStateAndBindLockAt(dirfd, agentDir, root, me, &lock); err != nil {
+				if err := publishWakeStateAndBindLockAt(scope, root, me, &lock); err != nil {
 					return fmt.Errorf("publish wake state before generic wake lock: %w", err)
 				}
 			}
 			if options.repairLineage != nil {
 				err = createWakeRepairLockAt(
-					dirfd,
-					agentDir,
+					scope,
 					root,
 					me,
 					options.repairLineage.source.RootIdentity,
 					lock,
 				)
 			} else {
-				err = createWakeLockAt(dirfd, agentDir, root, me, lock)
+				err = createWakeLockAt(scope, root, me, lock)
 			}
 			if err != nil {
 				return err
@@ -506,10 +509,9 @@ func acquireWakeLockWithOptionsInDir(
 		}
 
 		cleanup = func() {
-			if cleanupErr := withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+			if cleanupErr := withWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
 				return cleanupGenericWakeGenerationAt(
-					dirfd,
-					agentDir,
+					scope,
 					root,
 					me,
 					created,
@@ -524,18 +526,21 @@ func acquireWakeLockWithOptionsInDir(
 }
 
 func cleanupGenericWakeGenerationAt(
-	dirfd int,
-	agentDir *wakeAgentDir,
+	scope *wakeMutationScope,
 	root string,
 	me string,
 	created wakeLockInspection,
 	options wakeLockAcquireOptions,
 ) error {
+	dirfd, agentDir, err := scope.location()
+	if err != nil {
+		return err
+	}
 	current := inspectWakeLockAt(dirfd, agentDir, root, me)
 	if !sameWakeLockGeneration(created, current) || !currentWakeLockMatches(current.Lock) {
 		return nil
 	}
-	if err := reconcileBoundWakePreparedProjectionAt(dirfd, agentDir, current); err != nil {
+	if err := reconcileBoundWakePreparedProjectionAt(scope, current); err != nil {
 		return err
 	}
 
@@ -546,7 +551,7 @@ func cleanupGenericWakeGenerationAt(
 		me,
 		current,
 	)
-	committed, lockRemovalErr := removeWakeLockIfUnchangedGuardedAtStatus(dirfd, agentDir, current)
+	committed, lockRemovalErr := removeWakeLockIfUnchangedGuardedAtStatus(scope, current)
 	blockingRemovalErr, diagnosticRemovalErr := splitWakeSelfUpgradeDiagnosticResidue(lockRemovalErr)
 	if blockingRemovalErr != nil {
 		return errors.Join(
@@ -574,8 +579,7 @@ func cleanupGenericWakeGenerationAt(
 	var preparedCleanupErr error
 	if !replacement.Exists && preparedSnapshot != nil {
 		_, preparedCleanupErr = removeWakeGenerationFileIfSnapshotMatchesAt(
-			dirfd,
-			agentDir,
+			scope,
 			wakePreparedFileName,
 			"wake prepared marker",
 			*preparedSnapshot,
@@ -589,7 +593,7 @@ func cleanupGenericWakeGenerationAt(
 	}
 	var stateRefreshErr error
 	if !replacement.Exists {
-		stateRefreshErr = reconcileWakeStateAfterLegacyMutationAt(dirfd, agentDir, root, me)
+		stateRefreshErr = reconcileWakeStateAfterLegacyMutationAt(scope, root, me)
 		if stateRefreshErr != nil {
 			if continueAfterWakeStateProjectionError(stateRefreshErr) {
 				stateRefreshErr = nil
@@ -1102,7 +1106,12 @@ func repairWake(root, me string) (wakeRepairResult, error) {
 	var unverifiedSupersession wakeLockInspection
 	var inboxDir *wakeInboxDir
 	defer func() { _ = inboxDir.Close() }()
-	prepareErr := withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+	prepareErr := withWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+		dirfd, scopedAgentDir, err := scope.location()
+		if err != nil {
+			return err
+		}
+		agentDir = scopedAgentDir
 		inspection := inspectWakeLockAt(dirfd, agentDir, root, me)
 		if !inspection.Exists {
 			result.Status = "refused"
@@ -1142,7 +1151,7 @@ func repairWake(root, me string) (wakeRepairResult, error) {
 			result.Reason = fmt.Sprintf("wake lock status %q is not repairable", inspection.Status)
 			return errors.New(result.Reason)
 		}
-		if err := reconcileBoundWakePreparedProjectionAt(dirfd, agentDir, inspection); err != nil {
+		if err := reconcileBoundWakePreparedProjectionAt(scope, inspection); err != nil {
 			result.Status = "refused"
 			result.PID = inspection.PID
 			result.Reason = err.Error()
@@ -1150,7 +1159,6 @@ func repairWake(root, me string) (wakeRepairResult, error) {
 		}
 
 		var exists bool
-		var err error
 		target, exists, err = readWakeTargetFromStateForInspectionAt(
 			dirfd, agentDir, root, me, inspection,
 		)
@@ -1238,13 +1246,9 @@ func repairWake(root, me string) (wakeRepairResult, error) {
 		result.RepairAvailable = true
 		var removeErr error
 		if unverifiedSupersession.Exists {
-			removeErr = supersedeUnverifiedGenericWakeAt(
-				dirfd,
-				agentDir,
-				unverifiedSupersession,
-			)
+			removeErr = supersedeUnverifiedGenericWakeAt(scope, unverifiedSupersession)
 		} else {
-			removeErr = removeWakeLockIfUnchangedGuardedAt(dirfd, agentDir, inspection)
+			removeErr = removeWakeLockIfUnchangedGuardedAt(scope, inspection)
 		}
 		if removeErr != nil {
 			result.Status = "refused"
@@ -1468,7 +1472,12 @@ func cleanupFailedWakeRepairChild(
 	if child.Process == nil || child.Process.Pid <= 0 {
 		return cleanupErr
 	}
-	metadataErr := withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+	metadataErr := withWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+		dirfd, scopedAgentDir, err := scope.location()
+		if err != nil {
+			return err
+		}
+		agentDir = scopedAgentDir
 		current := inspectWakeLockAt(dirfd, agentDir, root, me)
 		if !current.Exists {
 			return nil
@@ -1485,7 +1494,7 @@ func cleanupFailedWakeRepairChild(
 			current.Lock.Generation != generation {
 			return nil
 		}
-		if err := removeWakeLockIfUnchangedGuardedAt(dirfd, agentDir, current); err != nil {
+		if err := removeWakeLockIfUnchangedGuardedAt(scope, current); err != nil {
 			return err
 		}
 		return removeWakeRepairFloorIfGenerationGuardedAt(

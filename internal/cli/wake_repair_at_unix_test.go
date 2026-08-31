@@ -120,16 +120,20 @@ func TestWakeRepairMetadataAtUsesRetainedAgentDirectory(t *testing.T) {
 		t.Fatalf("create replacement agent directory: %v", err)
 	}
 
-	err = agentDir.withFD(func(dirfd int) error {
-		if err := writeWakeTargetGuardedAt(dirfd, agentDir, root, "codex", target); err != nil {
+	err = withWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+		dirfd, scopedAgentDir, err := scope.location()
+		if err != nil {
+			return err
+		}
+		agentDir = scopedAgentDir
+		if err := writeWakeTargetGuardedAt(scope, root, "codex", target); err != nil {
 			return err
 		}
 		if err := writeWakeRepairFloorAt(dirfd, agentDir, root, floor); err != nil {
 			return err
 		}
 		return createWakeRepairLockAt(
-			dirfd,
-			agentDir,
+			scope,
 			root,
 			"codex",
 			floor.RootIdentity,

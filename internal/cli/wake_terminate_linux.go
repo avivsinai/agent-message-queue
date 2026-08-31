@@ -59,26 +59,6 @@ func terminateAndRemoveOrphanedWakeLockInDir(
 	return terminateAndRemoveOrphanedWakeLockInDirWithRawConsent(agentDir, inspection, false, nil)
 }
 
-// Legacy terminal wakes may have no lifecycle guard. Create a transient guard
-// before any exact termination effect and keep it until cleanup commits.
-func withExistingWakeLifecycleGuardOrRetainedDir(
-	agentDir *wakeAgentDir,
-	allowMissing bool,
-	fn func(int) error,
-) error {
-	if !allowMissing {
-		return withExistingWakeLifecycleGuardInDir(agentDir, fn)
-	}
-	missing, err := wakeLifecycleGuardMissingAt(agentDir)
-	if err != nil {
-		return err
-	}
-	if missing {
-		return withWakeLifecycleGuardInDir(agentDir, fn)
-	}
-	return withExistingWakeLifecycleGuardInDir(agentDir, fn)
-}
-
 func wakeLockMayUseRetainedDirWithoutGuard(inspection wakeLockInspection) bool {
 	if wakeLockHasOwnerMarkers(inspection) {
 		return false
@@ -109,21 +89,25 @@ func terminateAndRemoveOrphanedWakeLockInDirWithRawConsent(
 		}
 		legacyGuardCreated = missing
 	}
-	if err := withExistingWakeLifecycleGuardOrRetainedDir(agentDir, allowMissingGuard, func(dirfd int) error {
+	if err := withWakeMutationScopeOrRetainedDir(agentDir, allowMissingGuard, func(scope *wakeMutationScope) error {
+		dirfd, scopedAgentDir, err := scope.location()
+		if err != nil {
+			return err
+		}
 		locked = readWakeLockMetadataAt(
 			dirfd,
-			agentDir,
+			scopedAgentDir,
 			inspection.Root,
 			inspection.Agent,
 		)
 		if !sameWakeLockGeneration(inspection, locked) {
 			return nil
 		}
-		if err := validateWakeLockOwnerlessMutationAtForTermination(dirfd, agentDir, locked); err != nil {
+		if err := validateWakeLockOwnerlessMutationAtForTermination(dirfd, scopedAgentDir, locked); err != nil {
 			return err
 		}
 		if requestedTarget != nil {
-			if err := requireExistingWakeTargetMatchesAt(dirfd, agentDir, locked, *requestedTarget); err != nil {
+			if err := requireExistingWakeTargetMatchesAt(dirfd, scopedAgentDir, locked, *requestedTarget); err != nil {
 				return err
 			}
 		}
@@ -133,10 +117,8 @@ func terminateAndRemoveOrphanedWakeLockInDirWithRawConsent(
 				locked.Process = wakeProcessInfo{PID: locked.PID}
 				classifyWakeLock(locked.Root, locked.Agent, &locked)
 				var removeErr error
-				scope := newWakeMutationScope(agentDir, dirfd)
 				outcome := removeWakeLockIfUnchangedGuardedAtDurableOutcome(
-					dirfd,
-					agentDir,
+					scope,
 					locked,
 					scope.unlinkWakeLockForCleanup,
 				)
@@ -196,17 +178,21 @@ func terminateAndRemoveOrphanedWakeLockInDirWithRawConsent(
 	}
 
 	removed := false
-	err := withExistingWakeLifecycleGuardOrRetainedDir(agentDir, allowMissingGuard, func(dirfd int) error {
+	err := withWakeMutationScopeOrRetainedDir(agentDir, allowMissingGuard, func(scope *wakeMutationScope) error {
+		dirfd, scopedAgentDir, err := scope.location()
+		if err != nil {
+			return err
+		}
 		current := inspectWakeLockAt(
 			dirfd,
-			agentDir,
+			scopedAgentDir,
 			inspection.Root,
 			inspection.Agent,
 		)
 		if !current.Exists {
 			removed = true
 			if legacyGuardCreated {
-				return newWakeMutationScope(agentDir, dirfd).unlinkLifecycleGuard()
+				return scope.unlinkLifecycleGuard()
 			}
 			return nil
 		}
@@ -216,7 +202,7 @@ func terminateAndRemoveOrphanedWakeLockInDirWithRawConsent(
 				errors.New("wake lock changed after wake process stopped; preserving replacement claim"),
 			)
 		}
-		relation, relationErr := retainedWakeAgentDirRelation(agentDir)
+		relation, relationErr := retainedWakeAgentDirRelationAt(scopedAgentDir, dirfd)
 		if relationErr != nil {
 			return newWakeLockResidueError(
 				wakeLockResiduePreservedClaim,
@@ -228,7 +214,7 @@ func terminateAndRemoveOrphanedWakeLockInDirWithRawConsent(
 			// Termination observes after a process effect. An absent canonical
 			// pathname is not enough to prove that a successor exists, so preserve
 			// the retained claim instead of treating the same ENOENT as cleanup authority.
-			canonicalPresent, canonicalErr := canonicalWakeAgentDirPathPresent(agentDir)
+			canonicalPresent, canonicalErr := canonicalWakeAgentDirPathPresent(scopedAgentDir)
 			if canonicalErr != nil {
 				return newWakeLockResidueError(
 					wakeLockResiduePreservedClaim,
@@ -242,10 +228,8 @@ func terminateAndRemoveOrphanedWakeLockInDirWithRawConsent(
 				)
 			}
 			var removeErr error
-			scope := newWakeMutationScope(agentDir, dirfd)
 			outcome := removeWakeLockIfUnchangedGuardedAtDurableOutcome(
-				dirfd,
-				agentDir,
+				scope,
 				current,
 				scope.unlinkWakeLockForCleanup,
 			)
@@ -267,21 +251,19 @@ func terminateAndRemoveOrphanedWakeLockInDirWithRawConsent(
 			)
 		}
 		if requestedTarget != nil {
-			if err := requireExistingWakeTargetMatchesAt(dirfd, agentDir, current, *requestedTarget); err != nil {
+			if err := requireExistingWakeTargetMatchesAt(dirfd, scopedAgentDir, current, *requestedTarget); err != nil {
 				return err
 			}
 		}
-		if err := validateWakeLockStaleRemovalAt(dirfd, agentDir, current); err != nil {
+		if err := validateWakeLockStaleRemovalAt(dirfd, scopedAgentDir, current); err != nil {
 			return newWakeLockResidueError(
 				wakeLockResiduePreservedClaim,
 				fmt.Errorf("wake process stopped but exact wake lock cleanup is unavailable; preserving retained claim: %w", err),
 			)
 		}
 		var removeErr error
-		scope := newWakeMutationScope(agentDir, dirfd)
 		outcome := removeWakeLockIfUnchangedGuardedAtDurableOutcome(
-			dirfd,
-			agentDir,
+			scope,
 			current,
 			scope.unlinkWakeLockForCleanup,
 		)
@@ -309,13 +291,6 @@ func terminateAndRemoveOrphanedWakeLockInDirWithRawConsent(
 	return true, nil
 }
 
-func terminateWakePidfd(pidfd int) error {
-	send := func(signal unix.Signal) error {
-		return sendWakePidfdSignal(pidfd, signal)
-	}
-	return terminateWakePidfdWithSignalAuthorization(pidfd, send)
-}
-
 func terminateWakePidfdWithAuthorization(
 	agentDir *wakeAgentDir,
 	expected wakeLockInspection,
@@ -324,14 +299,17 @@ func terminateWakePidfdWithAuthorization(
 	pidfd int,
 ) error {
 	send := func(signal unix.Signal) error {
-		return withWakeMutationScopeOrRetainedDir(
+		return withWakeMutationScopeOrRetainedDirNoWait(
 			agentDir,
 			allowMissingGuard,
-			unix.LOCK_EX|unix.LOCK_NB,
 			func(scope *wakeMutationScope) error {
+				dirfd, scopedAgentDir, err := scope.location()
+				if err != nil {
+					return err
+				}
 				current := inspectWakeLockAt(
-					scope.dirfd,
-					scope.agentDir,
+					dirfd,
+					scopedAgentDir,
 					expected.Root,
 					expected.Agent,
 				)
@@ -345,16 +323,16 @@ func terminateWakePidfdWithAuthorization(
 						)
 					}
 					if err := validateWakeLockOwnerlessMutationAtForTermination(
-						scope.dirfd,
-						scope.agentDir,
+						dirfd,
+						scopedAgentDir,
 						current,
 					); err != nil {
 						return fmt.Errorf("authorize wake before %s: %w", signal, err)
 					}
 					if requestedTarget != nil {
 						if err := requireExistingWakeTargetMatchesAt(
-							scope.dirfd,
-							scope.agentDir,
+							dirfd,
+							scopedAgentDir,
 							current,
 							*requestedTarget,
 						); err != nil {
@@ -383,23 +361,26 @@ func terminateAuthoritativeWakePidfdWithAuthorization(
 		if err != nil {
 			return fmt.Errorf("observe authoritative wake owner before %s: %w", signal, err)
 		}
-		sendErr := withExistingWakeMutationScopeModeInDir(
+		sendErr := withExistingWakeMutationScopeNoWaitInDir(
 			agentDir,
-			unix.LOCK_EX|unix.LOCK_NB,
 			func(scope *wakeMutationScope) error {
+				dirfd, scopedAgentDir, err := scope.location()
+				if err != nil {
+					return err
+				}
 				if err := scope.requireCanonical(); err != nil {
 					return fmt.Errorf("authorize authoritative wake before %s: %w", signal, err)
 				}
 				current := inspectWakeLockAt(
-					scope.dirfd,
-					scope.agentDir,
+					dirfd,
+					scopedAgentDir,
 					expected.Root,
 					expected.Agent,
 				)
 				if !sameWakeLockGeneration(expected, current) {
 					return fmt.Errorf("authoritative wake generation changed before %s; refusing to signal", signal)
 				}
-				if err := validateBoundWakeMutationAt(scope.dirfd, scope.agentDir, current); err != nil {
+				if err := validateBoundWakeMutationAt(scope, current); err != nil {
 					return fmt.Errorf("authorize authoritative wake before %s: %w", signal, err)
 				}
 				if classifyPersistedWakeClaim(current) != wakeClaimAuthoritative {

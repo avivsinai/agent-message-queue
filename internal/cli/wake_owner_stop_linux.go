@@ -9,15 +9,18 @@ import (
 )
 
 func prepareAuthoritativeWakeStopPlatform(
-	dirfd int,
-	agentDir *wakeAgentDir,
+	scope *wakeMutationScope,
 	expected wakeLockInspection,
 ) (authoritativeWakeStopCapability, error) {
+	dirfd, agentDir, err := scope.location()
+	if err != nil {
+		return authoritativeWakeStopCapability{}, err
+	}
 	metadata := readWakeLockMetadataAt(dirfd, agentDir, expected.Root, expected.Agent)
 	if !sameWakeLockGeneration(expected, metadata) {
 		return authoritativeWakeStopCapability{}, fmt.Errorf("authoritative wake generation changed before stable stop preparation")
 	}
-	if err := validateBoundWakeMutationAt(dirfd, agentDir, metadata); err != nil {
+	if err := validateBoundWakeMutationAt(scope, metadata); err != nil {
 		return authoritativeWakeStopCapability{}, err
 	}
 	if classifyPersistedWakeClaim(metadata) != wakeClaimAuthoritative {

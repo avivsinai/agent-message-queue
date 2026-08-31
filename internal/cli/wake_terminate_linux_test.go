@@ -182,8 +182,8 @@ func TestTerminateTreatsPidfdESRCHAsProvenGone(t *testing.T) {
 		Owner:               validWakeResumeOwnerForTest(),
 		Candidate:           candidate,
 	}
-	if err := withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
-		return writeWakeRestartRecordAt(dirfd, agentDir, restart)
+	if err := withWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+		return writeWakeRestartRecordAt(scope, restart)
 	}); err != nil {
 		t.Fatal(err)
 	}

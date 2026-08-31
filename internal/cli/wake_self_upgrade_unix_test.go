@@ -394,8 +394,8 @@ func TestMaintainWakeSelfUpgradeRefusedMemorySurvivesTicks(t *testing.T) {
 		StagePath:          stagePath,
 		PreviousBoundImage: previousDarwinWakeRestartStageForLock(fixture.lock.Lock),
 	}
-	if err := fixture.agentDir.withFD(func(dirfd int) error {
-		return writeWakeRestartRecordAt(dirfd, fixture.agentDir, record)
+	if err := withWakeMutationScopeInDir(fixture.agentDir, func(scope *wakeMutationScope) error {
+		return writeWakeRestartRecordAt(scope, record)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -478,8 +478,8 @@ func TestPublishWakeSelfUpgradePendingCarriesLegacyRefusalMemory(t *testing.T) {
 		Candidate:  evidenceA,
 		Reason:     "legacy refusal",
 	}
-	if err := fixture.agentDir.withFD(func(dirfd int) error {
-		return writeWakeRestartRecordAt(dirfd, fixture.agentDir, legacy)
+	if err := withWakeMutationScopeInDir(fixture.agentDir, func(scope *wakeMutationScope) error {
+		return writeWakeRestartRecordAt(scope, legacy)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -570,8 +570,8 @@ func TestPublishWakeSelfUpgradePendingResetsRefusalsForNewGeneration(t *testing.
 		},
 		Reason: "old generation refusal",
 	}
-	if err := fixture.agentDir.withFD(func(dirfd int) error {
-		return writeWakeRestartRecordAt(dirfd, fixture.agentDir, old)
+	if err := withWakeMutationScopeInDir(fixture.agentDir, func(scope *wakeMutationScope) error {
+		return writeWakeRestartRecordAt(scope, old)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -985,8 +985,8 @@ func TestRefuseWakeRestartRecordNeverProducesSchema2(t *testing.T) {
 		StagePath:          stagePath,
 		PreviousBoundImage: previousDarwinWakeRestartStageForLock(fixture.lock.Lock),
 	}
-	if err := fixture.agentDir.withFD(func(dirfd int) error {
-		return writeWakeRestartRecordAt(dirfd, fixture.agentDir, record)
+	if err := withWakeMutationScopeInDir(fixture.agentDir, func(scope *wakeMutationScope) error {
+		return writeWakeRestartRecordAt(scope, record)
 	}); err != nil {
 		t.Fatal(err)
 	}

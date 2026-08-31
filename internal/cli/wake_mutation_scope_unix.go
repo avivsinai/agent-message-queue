@@ -6,89 +6,220 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync/atomic"
 
 	"golang.org/x/sys/unix"
 )
 
-// wakeMutationScope is the only production capability that owns a lifecycle
-// guard and the retained directory descriptor while a wake mutation commits.
-// Callers keep all waits outside its callback and use action methods for raw
-// effects.
+// wakeMutationScope owns the lifecycle guard lease and the retained directory
+// descriptor for one mutation callback. Its lifetime ends before the guard is
+// unlocked, so an escaped scope cannot commit an effect after its authority is
+// released.
 type wakeMutationScope struct {
 	agentDir *wakeAgentDir
 	dirfd    int
+	guard    *wakeLifecycleGuardLease
+	active   *atomic.Bool
 }
 
-func newWakeMutationScope(agentDir *wakeAgentDir, dirfd int) *wakeMutationScope {
-	return &wakeMutationScope{agentDir: agentDir, dirfd: dirfd}
-}
+var wakeRetireUnlinkWakeLockAt = unix.Unlinkat
 
-func withWakeMutationScopeModeInDir(
+func newWakeMutationScope(
 	agentDir *wakeAgentDir,
-	lockMode int,
+	dirfd int,
+	guard *wakeLifecycleGuardLease,
+) *wakeMutationScope {
+	active := &atomic.Bool{}
+	active.Store(true)
+	return &wakeMutationScope{
+		agentDir: agentDir,
+		dirfd:    dirfd,
+		guard:    guard,
+		active:   active,
+	}
+}
+
+func (scope *wakeMutationScope) release() error {
+	if scope == nil {
+		return unix.EINVAL
+	}
+	if scope.active != nil {
+		scope.active.Store(false)
+	}
+	guard := scope.guard
+	scope.guard = nil
+	if guard == nil {
+		return nil
+	}
+	return guard.release()
+}
+
+func (scope *wakeMutationScope) requireActive() error {
+	if scope == nil || scope.active == nil || !scope.active.Load() {
+		return fmt.Errorf("wake mutation scope is inactive")
+	}
+	if scope.guard == nil || scope.guard.file == nil || scope.guard.released {
+		return fmt.Errorf("wake mutation scope lifecycle guard is unavailable")
+	}
+	if scope.agentDir == nil || scope.agentDir.file == nil {
+		return unix.EINVAL
+	}
+	if scope.dirfd != int(scope.agentDir.file.Fd()) {
+		return fmt.Errorf("wake mutation scope directory capability does not match retained descriptor")
+	}
+	return nil
+}
+
+func (scope *wakeMutationScope) location() (int, *wakeAgentDir, error) {
+	if err := scope.requireActive(); err != nil {
+		return 0, nil, err
+	}
+	return scope.dirfd, scope.agentDir, nil
+}
+
+func (scope *wakeMutationScope) unlinkAt(name string, flags int) error {
+	dirfd, _, err := scope.location()
+	if err != nil {
+		return err
+	}
+	return unix.Unlinkat(dirfd, name, flags)
+}
+
+func withWakeMutationScopeInDir(
+	agentDir *wakeAgentDir,
 	fn func(*wakeMutationScope) error,
 ) error {
-	return withWakeLifecycleGuardModeInDir(agentDir, lockMode, func(dirfd int) error {
-		return fn(newWakeMutationScope(agentDir, dirfd))
-	})
+	return withWakeLifecycleGuardLeaseModeAndTimeoutInDir(
+		agentDir,
+		false,
+		unix.LOCK_EX,
+		wakeLifecycleGuardRetryTimeout,
+		func(dirfd int, guard *wakeLifecycleGuardLease) (retErr error) {
+			scope := newWakeMutationScope(agentDir, dirfd, guard)
+			defer func() { retErr = errors.Join(retErr, scope.release()) }()
+			return fn(scope)
+		},
+	)
 }
 
-func withExistingWakeMutationScopeModeInDir(
+func withWakeMutationScopeNoWaitInDir(
 	agentDir *wakeAgentDir,
-	lockMode int,
 	fn func(*wakeMutationScope) error,
 ) error {
-	return withExistingWakeLifecycleGuardModeInDir(agentDir, lockMode, func(dirfd int) error {
-		return fn(newWakeMutationScope(agentDir, dirfd))
-	})
+	return withWakeLifecycleGuardLeaseModeAndTimeoutInDir(
+		agentDir,
+		false,
+		unix.LOCK_EX|unix.LOCK_NB,
+		wakeLifecycleGuardRetryTimeout,
+		func(dirfd int, guard *wakeLifecycleGuardLease) (retErr error) {
+			scope := newWakeMutationScope(agentDir, dirfd, guard)
+			defer func() { retErr = errors.Join(retErr, scope.release()) }()
+			return fn(scope)
+		},
+	)
+}
+
+func withExistingWakeMutationScopeInDir(
+	agentDir *wakeAgentDir,
+	fn func(*wakeMutationScope) error,
+) error {
+	return withWakeLifecycleGuardLeaseModeAndTimeoutInDir(
+		agentDir,
+		true,
+		unix.LOCK_EX,
+		wakeLifecycleGuardRetryTimeout,
+		func(dirfd int, guard *wakeLifecycleGuardLease) (retErr error) {
+			scope := newWakeMutationScope(agentDir, dirfd, guard)
+			defer func() { retErr = errors.Join(retErr, scope.release()) }()
+			return fn(scope)
+		},
+	)
+}
+
+func withExistingWakeMutationScopeNoWaitInDir(
+	agentDir *wakeAgentDir,
+	fn func(*wakeMutationScope) error,
+) error {
+	return withWakeLifecycleGuardLeaseModeAndTimeoutInDir(
+		agentDir,
+		true,
+		unix.LOCK_EX|unix.LOCK_NB,
+		wakeLifecycleGuardRetryTimeout,
+		func(dirfd int, guard *wakeLifecycleGuardLease) (retErr error) {
+			scope := newWakeMutationScope(agentDir, dirfd, guard)
+			defer func() { retErr = errors.Join(retErr, scope.release()) }()
+			return fn(scope)
+		},
+	)
 }
 
 func withWakeMutationScopeOrRetainedDir(
 	agentDir *wakeAgentDir,
 	allowMissing bool,
-	lockMode int,
 	fn func(*wakeMutationScope) error,
 ) error {
 	if !allowMissing {
-		return withExistingWakeMutationScopeModeInDir(agentDir, lockMode, fn)
+		return withExistingWakeMutationScopeInDir(agentDir, fn)
 	}
 	missing, err := wakeLifecycleGuardMissingAt(agentDir)
 	if err != nil {
 		return err
 	}
 	if missing {
-		return withWakeMutationScopeModeInDir(agentDir, lockMode, fn)
+		return withWakeMutationScopeInDir(agentDir, fn)
 	}
-	return withExistingWakeMutationScopeModeInDir(agentDir, lockMode, fn)
+	return withExistingWakeMutationScopeInDir(agentDir, fn)
+}
+
+func withWakeMutationScopeOrRetainedDirNoWait(
+	agentDir *wakeAgentDir,
+	allowMissing bool,
+	fn func(*wakeMutationScope) error,
+) error {
+	if !allowMissing {
+		return withExistingWakeMutationScopeNoWaitInDir(agentDir, fn)
+	}
+	missing, err := wakeLifecycleGuardMissingAt(agentDir)
+	if err != nil {
+		return err
+	}
+	if missing {
+		return withWakeMutationScopeNoWaitInDir(agentDir, fn)
+	}
+	return withExistingWakeMutationScopeNoWaitInDir(agentDir, fn)
 }
 
 func (scope *wakeMutationScope) unlinkWakeLock() error {
-	if err := scope.requireCanonical(); err != nil {
+	dirfd, _, err := scope.location()
+	if err != nil {
 		return err
-	}
-	return unix.Unlinkat(scope.dirfd, wakeLockFileName, 0)
-}
-
-func (scope *wakeMutationScope) unlinkWakeLockWith(
-	unlink func(int, string, int) error,
-) error {
-	if unlink == nil {
-		return unix.EINVAL
 	}
 	if err := scope.requireCanonical(); err != nil {
 		return err
 	}
-	return unlink(scope.dirfd, wakeLockFileName, 0)
+	return unix.Unlinkat(dirfd, wakeLockFileName, 0)
 }
 
-// unlinkWakeLockForCleanup permits only exact cleanup in either the canonical
-// retained directory or a directory proven detached from its canonical path.
-// It never selects or signals a successor claim.
 func (scope *wakeMutationScope) unlinkWakeLockForCleanup() error {
+	dirfd, _, err := scope.location()
+	if err != nil {
+		return err
+	}
 	if _, err := scope.requireCanonicalOrDetached(); err != nil {
 		return err
 	}
-	return unix.Unlinkat(scope.dirfd, wakeLockFileName, 0)
+	return unix.Unlinkat(dirfd, wakeLockFileName, 0)
+}
+
+func (scope *wakeMutationScope) unlinkWakeLockForRetire() error {
+	dirfd, _, err := scope.location()
+	if err != nil {
+		return err
+	}
+	if err := scope.requireCanonical(); err != nil {
+		return err
+	}
+	return wakeRetireUnlinkWakeLockAt(dirfd, wakeLockFileName, 0)
 }
 
 func assertNotWakeLockName(name string) error {
@@ -99,10 +230,14 @@ func assertNotWakeLockName(name string) error {
 }
 
 func (scope *wakeMutationScope) unlinkLifecycleGuard() error {
+	dirfd, _, err := scope.location()
+	if err != nil {
+		return err
+	}
 	if _, err := scope.requireCanonicalOrDetached(); err != nil {
 		return err
 	}
-	err := unix.Unlinkat(scope.dirfd, wakeLifecycleGuardFileName, 0)
+	err = unix.Unlinkat(dirfd, wakeLifecycleGuardFileName, 0)
 	if err == unix.ENOENT {
 		return nil
 	}
@@ -110,26 +245,25 @@ func (scope *wakeMutationScope) unlinkLifecycleGuard() error {
 }
 
 func (scope *wakeMutationScope) requireCanonical() error {
-	if scope == nil || scope.agentDir == nil {
-		return unix.EINVAL
+	dirfd, agentDir, err := scope.location()
+	if err != nil {
+		return err
 	}
-	return validateWakeStateAgentDirAt(scope.dirfd, scope.agentDir)
+	return validateWakeStateAgentDirAt(dirfd, agentDir)
 }
 
 func (scope *wakeMutationScope) requireCanonicalOrDetached() (wakeAgentDirRelation, error) {
-	if scope == nil || scope.agentDir == nil || scope.agentDir.file == nil {
-		return wakeAgentDirInconclusive, unix.EINVAL
+	dirfd, agentDir, err := scope.location()
+	if err != nil {
+		return wakeAgentDirInconclusive, err
 	}
-	if scope.dirfd != int(scope.agentDir.file.Fd()) {
-		return wakeAgentDirInconclusive, fmt.Errorf("wake mutation scope directory capability does not match retained descriptor")
-	}
-	relation, err := retainedWakeAgentDirRelation(scope.agentDir)
+	relation, err := retainedWakeAgentDirRelationAt(agentDir, dirfd)
 	if err != nil {
 		return wakeAgentDirInconclusive, fmt.Errorf("wake agent directory relation is inconclusive before cleanup: %w", err)
 	}
 	switch relation {
 	case wakeAgentDirCanonical:
-		if err := scope.requireCanonical(); err != nil {
+		if err := validateWakeStateAgentDirAt(dirfd, agentDir); err != nil {
 			return wakeAgentDirInconclusive, err
 		}
 		return wakeAgentDirCanonical, nil
@@ -153,22 +287,33 @@ const (
 // retainedWakeAgentDirRelation distinguishes a proven detached retained
 // directory from a namespace lookup that failed for an unknown reason.
 func retainedWakeAgentDirRelation(agentDir *wakeAgentDir) (wakeAgentDirRelation, error) {
+	if agentDir == nil {
+		return wakeAgentDirInconclusive, fmt.Errorf("wake agent directory capability is missing")
+	}
+	var relation wakeAgentDirRelation
+	err := agentDir.withFD(func(dirfd int) error {
+		var err error
+		relation, err = retainedWakeAgentDirRelationAt(agentDir, dirfd)
+		return err
+	})
+	return relation, err
+}
+
+func retainedWakeAgentDirRelationAt(
+	agentDir *wakeAgentDir,
+	dirfd int,
+) (wakeAgentDirRelation, error) {
 	if agentDir == nil || agentDir.file == nil {
 		return wakeAgentDirInconclusive, fmt.Errorf("wake agent directory capability is missing")
 	}
-	var retainedInfo os.FileInfo
-	if err := agentDir.withFD(func(int) error {
-		info, err := agentDir.file.Stat()
-		if err != nil {
-			return fmt.Errorf("stat retained wake agent directory %s: %w", agentDir.path, err)
-		}
-		retainedInfo = info
-		return nil
-	}); err != nil {
-		return wakeAgentDirInconclusive, err
+	if dirfd != int(agentDir.file.Fd()) {
+		return wakeAgentDirInconclusive, fmt.Errorf("wake agent directory descriptor does not match retained capability")
 	}
-
-	fd, err := unix.Open(
+	retainedInfo, err := agentDir.file.Stat()
+	if err != nil {
+		return wakeAgentDirInconclusive, fmt.Errorf("stat retained wake agent directory %s: %w", agentDir.path, err)
+	}
+	canonicalFD, err := unix.Open(
 		agentDir.path,
 		unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW,
 		0,
@@ -183,7 +328,7 @@ func retainedWakeAgentDirRelation(agentDir *wakeAgentDir) (wakeAgentDirRelation,
 			err,
 		)
 	}
-	canonical := os.NewFile(uintptr(fd), agentDir.path)
+	canonical := os.NewFile(uintptr(canonicalFD), agentDir.path)
 	defer func() { _ = canonical.Close() }()
 	canonicalInfo, err := canonical.Stat()
 	if err != nil {

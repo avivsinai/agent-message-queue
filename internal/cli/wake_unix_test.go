@@ -7883,8 +7883,8 @@ func TestRemoveWakeLockIfUnchangedRefusesChangedLock(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = agentDir.Close() }()
-	err = withExistingWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
-		return removeWakeLockIfUnchangedGuardedAt(dirfd, agentDir, inspection)
+	err = withExistingWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+		return removeWakeLockIfUnchangedGuardedAt(scope, inspection)
 	})
 	if err == nil {
 		t.Fatal("expected changed lock removal error")
@@ -7923,8 +7923,8 @@ func TestRemoveWakeLockDoesNotDeleteReplacement(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = agentDir.Close() }()
-	err = withExistingWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
-		return removeWakeLockIfUnchangedGuardedAt(dirfd, agentDir, inspection)
+	err = withExistingWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+		return removeWakeLockIfUnchangedGuardedAt(scope, inspection)
 	})
 	if err == nil {
 		t.Fatal("expected replacement generation removal refusal")

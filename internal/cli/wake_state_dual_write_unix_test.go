@@ -885,10 +885,9 @@ func TestBoundAuthoritativeWakeReleaseRefusesWhenTargetAlreadyMissing(t *testing
 	}
 	statePath := filepath.Join(fixture.agentDir.path, wakeStateFileName)
 	before := snapshotWakeCheckTree(t, fixture.root)
-	err := withWakeLifecycleGuardInDir(fixture.agentDir, func(dirfd int) error {
+	err := withWakeMutationScopeInDir(fixture.agentDir, func(scope *wakeMutationScope) error {
 		return removeAuthoritativeWakeClaimAt(
-			dirfd,
-			fixture.agentDir,
+			scope,
 			fixture.inspection,
 			nil,
 		)
@@ -913,10 +912,9 @@ func TestUnboundP2aAuthoritativeWakeReleaseRemovesStateWhenTargetAlreadyMissing(
 		t.Fatal(err)
 	}
 	statePath := filepath.Join(fixture.agentDir.path, wakeStateFileName)
-	if err := withWakeLifecycleGuardInDir(fixture.agentDir, func(dirfd int) error {
+	if err := withWakeMutationScopeInDir(fixture.agentDir, func(scope *wakeMutationScope) error {
 		return removeAuthoritativeWakeClaimAt(
-			dirfd,
-			fixture.agentDir,
+			scope,
 			fixture.inspection,
 			nil,
 		)

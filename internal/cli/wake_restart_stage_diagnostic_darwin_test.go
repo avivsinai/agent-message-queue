@@ -221,8 +221,8 @@ func TestDoctorFixReclaimsValidDarwinRestartStageWithoutLock(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = agentDir.Close() }()
-	if err := agentDir.withFD(func(dirfd int) error {
-		return writeWakeRestartRecordAt(dirfd, agentDir, record)
+	if err := withWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+		return writeWakeRestartRecordAt(scope, record)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -334,8 +334,8 @@ func TestDoctorReportsRefusedSurvivingDarwinStageAsCleanupFailed(t *testing.T) {
 	record.Owner = fixture.owner
 	evidence := bound.evidence
 	record.BoundImage = &evidence
-	if err := fixture.agentDir.withFD(func(dirfd int) error {
-		return writeWakeRestartRecordAt(dirfd, fixture.agentDir, record)
+	if err := withWakeMutationScopeInDir(fixture.agentDir, func(scope *wakeMutationScope) error {
+		return writeWakeRestartRecordAt(scope, record)
 	}); err != nil {
 		t.Fatal(err)
 	}

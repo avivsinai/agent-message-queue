@@ -1340,8 +1340,8 @@ func TestRetainedAuthoritativeHelperClaimCleansDetachedOldDirectoryOnly(t *testi
 		t.Fatal(err)
 	}
 	defer func() { _ = agentDir.Close() }()
-	if err := withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
-		return publishAuthoritativeWakeClaimAt(dirfd, agentDir, root, me, target, lock)
+	if err := withWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+		return publishAuthoritativeWakeClaimAt(scope, root, me, target, lock)
 	}); err != nil {
 		t.Fatal(err)
 	}

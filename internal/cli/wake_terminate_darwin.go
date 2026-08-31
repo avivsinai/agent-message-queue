@@ -4,8 +4,6 @@ package cli
 
 import (
 	"fmt"
-
-	"golang.org/x/sys/unix"
 )
 
 var (
@@ -104,12 +102,15 @@ func terminateAndRemoveOrphanedWakeLockInDirWithRawConsent(
 		return false, err
 	}
 	removed := false
-	err := withExistingWakeMutationScopeModeInDir(
+	err := withExistingWakeMutationScopeNoWaitInDir(
 		agentDir,
-		unix.LOCK_EX|unix.LOCK_NB,
 		func(scope *wakeMutationScope) error {
+			dirfd, _, err := scope.location()
+			if err != nil {
+				return err
+			}
 			current := inspectWakeLockAt(
-				scope.dirfd,
+				dirfd,
 				agentDir,
 				inspection.Root,
 				inspection.Agent,
@@ -122,17 +123,16 @@ func terminateAndRemoveOrphanedWakeLockInDirWithRawConsent(
 				return nil
 			}
 			if requestedTarget != nil {
-				if err := requireExistingWakeTargetMatchesAt(scope.dirfd, agentDir, current, *requestedTarget); err != nil {
+				if err := requireExistingWakeTargetMatchesAt(dirfd, agentDir, current, *requestedTarget); err != nil {
 					return err
 				}
 			}
-			if err := validateWakeLockStaleRemovalAt(scope.dirfd, agentDir, current); err != nil {
+			if err := validateWakeLockStaleRemovalAt(dirfd, agentDir, current); err != nil {
 				return err
 			}
 			var removeErr error
 			outcome := removeWakeLockIfUnchangedGuardedAtDurableOutcome(
-				scope.dirfd,
-				agentDir,
+				scope,
 				current,
 				scope.unlinkWakeLockForCleanup,
 			)

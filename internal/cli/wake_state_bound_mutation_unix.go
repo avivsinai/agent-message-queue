@@ -13,10 +13,13 @@ import (
 // prepared projection. The caller holds the retained directory's lifecycle
 // guard. Every other divergence remains for the existing fail-closed gate.
 func reconcileBoundWakePreparedProjectionAt(
-	dirfd int,
-	agentDir *wakeAgentDir,
+	scope *wakeMutationScope,
 	inspection wakeLockInspection,
 ) error {
+	dirfd, agentDir, err := scope.location()
+	if err != nil {
+		return err
+	}
 	bound, err := wakeLockInspectionStateBound(inspection)
 	if err != nil {
 		return newWakeStateBoundInconclusiveError(err)
@@ -75,8 +78,7 @@ func reconcileBoundWakePreparedProjectionAt(
 	}
 
 	_, err = publishWakeStateValidatedAt(
-		dirfd,
-		agentDir,
+		scope,
 		inspection.Root,
 		inspection.Agent,
 		legacy,
@@ -130,10 +132,13 @@ func reconcileBoundWakePreparedProjectionAt(
 // invocation re-reads the legacy pair and state snapshot; PR2 will consolidate
 // that accepted correctness-first cost around retained wake authority.
 func validateBoundWakeMutationAt(
-	dirfd int,
-	agentDir *wakeAgentDir,
+	scope *wakeMutationScope,
 	inspection wakeLockInspection,
 ) error {
+	dirfd, agentDir, err := scope.location()
+	if err != nil {
+		return err
+	}
 	bound, err := wakeLockInspectionStateBound(inspection)
 	if err != nil {
 		return newWakeStateBoundInconclusiveError(err)
@@ -141,7 +146,7 @@ func validateBoundWakeMutationAt(
 	if !bound {
 		return nil
 	}
-	if err := reconcileBoundWakePreparedProjectionAt(dirfd, agentDir, inspection); err != nil {
+	if err := reconcileBoundWakePreparedProjectionAt(scope, inspection); err != nil {
 		return err
 	}
 	_, err = readWakeStateSelectionForInspectionAt(

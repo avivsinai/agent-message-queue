@@ -219,9 +219,9 @@ func requestWakeRestart(root, me string) (result wakeRestartResult, returnErr er
 	// wakeResumePreflightTimeout. Hold the exclusive lifecycle guard only for
 	// snapshot and later exact lock-record CAS; never across the child wait.
 	var needPreflight bool
-	err = withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+	err = withWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
 		var recErr error
-		needPreflight, recErr = reconcileWakeRestartPublicationAt(dirfd, &state, false)
+		needPreflight, recErr = reconcileWakeRestartPublicationAt(scope, &state, false)
 		return recErr
 	})
 	if err != nil {
@@ -240,8 +240,8 @@ func requestWakeRestart(root, me string) (result wakeRestartResult, returnErr er
 			result.Reason = err.Error()
 			return result, err
 		}
-		err = withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
-			_, recErr := reconcileWakeRestartPublicationAt(dirfd, &state, true)
+		err = withWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+			_, recErr := reconcileWakeRestartPublicationAt(scope, &state, true)
 			return recErr
 		})
 		if err != nil {
@@ -359,10 +359,15 @@ type wakeRestartPublicationState struct {
 }
 
 func reconcileWakeRestartPublicationAt(
-	dirfd int,
+	scope *wakeMutationScope,
 	state *wakeRestartPublicationState,
 	publish bool,
 ) (needPreflight bool, err error) {
+	dirfd, agentDir, err := scope.location()
+	if err != nil {
+		return false, err
+	}
+	state.agentDir = agentDir
 	current := inspectWakeLockAt(dirfd, state.agentDir, state.root, state.me)
 	if publish {
 		if !sameWakeLockInspection(state.expected, current) || !current.IdentityConfirmed {
@@ -455,7 +460,7 @@ func reconcileWakeRestartPublicationAt(
 			state.needsNotify = needsNotify
 			return true, nil
 		}
-		if err := writeWakeRestartRecordAt(dirfd, state.agentDir, record); err != nil {
+		if err := writeWakeRestartRecordAt(scope, record); err != nil {
 			return false, err
 		}
 		createdSnapshot, created, readErr := readWakeRestartRecordSnapshotAt(dirfd, state.agentDir)
@@ -878,7 +883,7 @@ func observeWakeRestartReadiness(
 	return readiness, err
 }
 
-func writeWakeRestartRecordAt(dirfd int, agentDir *wakeAgentDir, record wakeRestartRecord) error {
+func writeWakeRestartRecordAt(scope *wakeMutationScope, record wakeRestartRecord) error {
 	if err := validateWakeRestartRecord(record); err != nil {
 		return err
 	}
@@ -886,9 +891,8 @@ func writeWakeRestartRecordAt(dirfd int, agentDir *wakeAgentDir, record wakeRest
 	if err != nil {
 		return err
 	}
-	return writeWakeRepairMetadataAt(
-		dirfd,
-		agentDir,
+	return writeWakeMutationMetadataAt(
+		scope,
 		wakeRestartFileName,
 		"wake restart request",
 		append(raw, '\n'),
@@ -904,11 +908,14 @@ func sameWakeRestartObjectSnapshot(first, second wakeRestartRecordSnapshot) bool
 }
 
 func claimWakeRestartSuccessorAt(
-	dirfd int,
-	agentDir *wakeAgentDir,
+	scope *wakeMutationScope,
 	expected wakeRestartRecordSnapshot,
 	successorGeneration string,
 ) (wakeRestartRecord, error) {
+	dirfd, agentDir, err := scope.location()
+	if err != nil {
+		return wakeRestartRecord{}, err
+	}
 	if expected.Record.Schema != wakeRestartSchemaV1 ||
 		expected.Record.Status != wakeRestartPending ||
 		!validWakeReloadTransportGeneration(successorGeneration) ||
@@ -928,7 +935,7 @@ func claimWakeRestartSuccessorAt(
 	claimed := current.Record
 	claimed.Schema = wakeRestartSchemaV2
 	claimed.SuccessorGeneration = successorGeneration
-	if err := writeWakeRestartRecordAt(dirfd, agentDir, claimed); err != nil {
+	if err := writeWakeRestartRecordAt(scope, claimed); err != nil {
 		return wakeRestartRecord{}, err
 	}
 	installed, installedExists, err := readWakeRestartRecordAt(dirfd, agentDir)
@@ -942,11 +949,14 @@ func claimWakeRestartSuccessorAt(
 }
 
 func removeWakeRestartRecordSnapshotAt(
-	dirfd int,
-	agentDir *wakeAgentDir,
+	scope *wakeMutationScope,
 	expected wakeRestartRecordSnapshot,
 	description string,
 ) error {
+	dirfd, agentDir, err := scope.location()
+	if err != nil {
+		return err
+	}
 	current, exists, err := readWakeRestartRecordSnapshotAt(dirfd, agentDir)
 	if err != nil {
 		return err
@@ -967,17 +977,20 @@ func removeWakeRestartRecordSnapshotAt(
 }
 
 func refuseWakeRestartRecord(agentDir *wakeAgentDir, expected wakeRestartRecord, reason string) error {
-	return withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
-		return refuseWakeRestartRecordAt(dirfd, agentDir, expected, reason)
+	return withWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+		return refuseWakeRestartRecordAt(scope, expected, reason)
 	})
 }
 
 func refuseWakeRestartRecordAt(
-	dirfd int,
-	agentDir *wakeAgentDir,
+	scope *wakeMutationScope,
 	expected wakeRestartRecord,
 	reason string,
 ) error {
+	dirfd, agentDir, err := scope.location()
+	if err != nil {
+		return err
+	}
 	reason = strings.TrimSpace(reason)
 	if reason == "" {
 		reason = "restart refused"
@@ -999,7 +1012,7 @@ func refuseWakeRestartRecordAt(
 	}
 	current.Status = wakeRestartRefused
 	current.Reason = wakeRestartReasonWithRemedy(reason, current.Root, current.Agent)
-	return writeWakeRestartRecordAt(dirfd, agentDir, current)
+	return writeWakeRestartRecordAt(scope, current)
 }
 
 func sameWakeRestartAttemptIdentity(expected, current wakeRestartRecord) bool {
@@ -1039,7 +1052,12 @@ func retryWakeSelfUpgradeRefusal(
 	agentDir *wakeAgentDir,
 	pending wakeSelfUpgradeRefusalPending,
 ) (resolved, persisted, continueObservation bool, returnErr error) {
-	returnErr = withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+	returnErr = withWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+		dirfd, scopedAgentDir, err := scope.location()
+		if err != nil {
+			return err
+		}
+		agentDir = scopedAgentDir
 		currentLock := wakeSelfUpgradeInspectLockAt(
 			dirfd,
 			agentDir,
@@ -1089,8 +1107,7 @@ func retryWakeSelfUpgradeRefusal(
 		}
 
 		persistErr := refuseWakeRestartRecordAt(
-			dirfd,
-			agentDir,
+			scope,
 			pending.Record,
 			pending.Reason,
 		)
@@ -1188,7 +1205,12 @@ func acquireWakeLockAfterResumeInDir(
 	bootstrap wakeResumeBootstrap,
 ) (func(), error) {
 	var created wakeLockInspection
-	err := withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+	err := withWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+		dirfd, scopedAgentDir, err := scope.location()
+		if err != nil {
+			return err
+		}
+		agentDir = scopedAgentDir
 		current := inspectWakeLockAt(dirfd, agentDir, root, me)
 		if !current.Exists || current.Status != wakeLockValid || !current.IdentityConfirmed ||
 			current.PID != os.Getpid() || current.Lock.Generation != bootstrap.Generation {
@@ -1234,15 +1256,14 @@ func acquireWakeLockAfterResumeInDir(
 			return fmt.Errorf("wake resume did not preserve process identity")
 		}
 		claimed, err := claimWakeRestartSuccessorAt(
-			dirfd,
-			agentDir,
+			scope,
 			recordSnapshot,
 			lock.Generation,
 		)
 		if err != nil {
 			return err
 		}
-		if err := replaceWakeLockForResumeAt(dirfd, agentDir, current, lock); err != nil {
+		if err := replaceWakeLockForResumeAt(scope, current, lock); err != nil {
 			return err
 		}
 		created = inspectWakeLockAt(dirfd, agentDir, root, me)
@@ -1260,8 +1281,8 @@ func acquireWakeLockAfterResumeInDir(
 		return nil, err
 	}
 	return func() {
-		if err := withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
-			return cleanupGenericWakeGenerationAt(dirfd, agentDir, root, me, created, options)
+		if err := withWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+			return cleanupGenericWakeGenerationAt(scope, root, me, created, options)
 		}); err != nil {
 			_ = writeStderr("amq wake: cleanup failed: %v\n", err)
 		}
@@ -1274,7 +1295,12 @@ func consumeWakeRestartAfterPrepared(
 	current wakeLockInspection,
 	bootstrap wakeResumeBootstrap,
 ) error {
-	return withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+	return withWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+		dirfd, scopedAgentDir, err := scope.location()
+		if err != nil {
+			return err
+		}
+		agentDir = scopedAgentDir
 		observed := inspectWakeLockAt(dirfd, agentDir, root, me)
 		if !sameWakeLockInspection(current, observed) || !observed.IdentityConfirmed ||
 			observed.PID != os.Getpid() || observed.Lock.Generation == bootstrap.Generation {
@@ -1305,8 +1331,7 @@ func consumeWakeRestartAfterPrepared(
 			return fmt.Errorf("wake resume request changed before readiness commit")
 		}
 		return removeWakeRestartRecordSnapshotAt(
-			dirfd,
-			agentDir,
+			scope,
 			recordSnapshot,
 			"ready wake restart request",
 		)
@@ -1318,11 +1343,14 @@ func lockProcessInfo(lock wakeLock) wakeProcessInfo {
 }
 
 func replaceWakeLockForResumeAt(
-	dirfd int,
-	agentDir *wakeAgentDir,
+	scope *wakeMutationScope,
 	expected wakeLockInspection,
 	replacement wakeLock,
 ) error {
+	dirfd, agentDir, err := scope.location()
+	if err != nil {
+		return err
+	}
 	if replacement.Generation == "" || replacement.Generation == expected.Lock.Generation {
 		return fmt.Errorf("wake resume replacement generation is invalid")
 	}
@@ -1330,7 +1358,7 @@ func replaceWakeLockForResumeAt(
 	if err != nil {
 		return err
 	}
-	temp, err := writeWakeOwnerTempAt(dirfd, "wake-resume-lock", raw, 0o600)
+	temp, err := writeWakeOwnerTempAt(scope, "wake-resume-lock", raw, 0o600)
 	if err != nil {
 		return err
 	}
@@ -1372,7 +1400,12 @@ func persistWakeRestartBoundImage(
 	}
 	defer func() { _ = agentDir.Close() }()
 	var persisted wakeRestartRecord
-	err = withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+	err = withWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+		dirfd, scopedAgentDir, err := scope.location()
+		if err != nil {
+			return err
+		}
+		agentDir = scopedAgentDir
 		current, exists, err := readWakeRestartRecordSnapshotAt(dirfd, agentDir)
 		if err != nil {
 			return err
@@ -1384,7 +1417,7 @@ func persistWakeRestartBoundImage(
 		}
 		persisted = current.Record
 		persisted.BoundImage = &bound
-		if err := writeWakeRestartRecordAt(dirfd, agentDir, persisted); err != nil {
+		if err := writeWakeRestartRecordAt(scope, persisted); err != nil {
 			return err
 		}
 		installed, installedExists, err := readWakeRestartRecordAt(dirfd, agentDir)

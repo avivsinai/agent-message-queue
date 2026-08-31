@@ -348,14 +348,14 @@ func TestRetireWakeStateUnlinkFailureIsSuccessfulResidue(t *testing.T) {
 	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
 		return wakeProcessInfo{PID: pid, Running: false}
 	})
-	originalUnlink := wakeRetireUnlinkAt
-	wakeRetireUnlinkAt = func(dirfd int, name string, flags int) error {
+	originalUnlink := wakeRetireUnlinkStateAt
+	wakeRetireUnlinkStateAt = func(dirfd int, name string, flags int) error {
 		if name == wakeStateFileName {
 			return syscall.EIO
 		}
 		return originalUnlink(dirfd, name, flags)
 	}
-	t.Cleanup(func() { wakeRetireUnlinkAt = originalUnlink })
+	t.Cleanup(func() { wakeRetireUnlinkStateAt = originalUnlink })
 
 	result, err := retireWake(fixture.root, fixture.me, requested)
 	if err != nil || result.Status != "retired_with_residue" ||
@@ -407,14 +407,14 @@ func TestRetireWakeStaleLockPreUnlinkFailureIsRefused(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	originalUnlink := wakeRetireUnlinkAt
-	wakeRetireUnlinkAt = func(dirfd int, name string, flags int) error {
+	originalUnlink := wakeRetireUnlinkWakeLockAt
+	wakeRetireUnlinkWakeLockAt = func(dirfd int, name string, flags int) error {
 		if name == ".wake.lock" {
 			return syscall.EPERM
 		}
 		return originalUnlink(dirfd, name, flags)
 	}
-	t.Cleanup(func() { wakeRetireUnlinkAt = originalUnlink })
+	t.Cleanup(func() { wakeRetireUnlinkWakeLockAt = originalUnlink })
 
 	result, err := retireWake(root, "codex", requested)
 	if err == nil || result.Status != "refused" || !strings.Contains(result.Reason, "remove stale wake lock") {

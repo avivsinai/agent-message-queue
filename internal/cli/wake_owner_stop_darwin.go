@@ -5,15 +5,18 @@ package cli
 import "fmt"
 
 func prepareAuthoritativeWakeStopPlatform(
-	dirfd int,
-	agentDir *wakeAgentDir,
+	scope *wakeMutationScope,
 	expected wakeLockInspection,
 ) (authoritativeWakeStopCapability, error) {
+	dirfd, agentDir, err := scope.location()
+	if err != nil {
+		return authoritativeWakeStopCapability{}, err
+	}
 	current := inspectWakeLockAt(dirfd, agentDir, expected.Root, expected.Agent)
 	if !sameWakeLockGeneration(expected, current) {
 		return authoritativeWakeStopCapability{}, fmt.Errorf("authoritative wake generation changed before cooperative stop preparation")
 	}
-	if err := validateBoundWakeMutationAt(dirfd, agentDir, current); err != nil {
+	if err := validateBoundWakeMutationAt(scope, current); err != nil {
 		return authoritativeWakeStopCapability{}, err
 	}
 	if classifyPersistedWakeClaim(current) != wakeClaimAuthoritative {

@@ -110,8 +110,9 @@ func publishWakeReadyFile(path string, marker wakeReady) (*wakeReadyPublication,
 	var snapshot wakeGenerationFileSnapshot
 	err = parent.withFD(func(dirfd int) error {
 		var err error
-		snapshot, err = writeWakeGenerationFileAtWithSnapshot(
+		snapshot, err = writeWakeReadyGenerationFileAtWithSnapshot(
 			dirfd,
+			parent,
 			name,
 			"wake ready file",
 			marker,
@@ -171,7 +172,7 @@ func (publication *wakeReadyPublication) removeIfUnchanged() error {
 	}
 	beforeWakeReadyCleanupUnlink()
 	return publication.dir.withFD(func(dirfd int) error {
-		_, err := removeWakeGenerationFileIfSnapshotMatchesAt(
+		_, err := removeWakeReadyGenerationFileIfSnapshotMatchesAt(
 			dirfd,
 			publication.dir,
 			publication.name,

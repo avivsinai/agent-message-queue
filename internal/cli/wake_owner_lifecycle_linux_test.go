@@ -119,8 +119,8 @@ func TestLinuxStableOwnerStopRefusesBoundInconclusiveBeforePidfd(t *testing.T) {
 	}
 	t.Cleanup(func() { linuxPidfdOpen = originalOpen })
 
-	err := withWakeLifecycleGuardInDir(fixture.agentDir, func(dirfd int) error {
-		_, err := prepareAuthoritativeWakeStopPlatform(dirfd, fixture.agentDir, fixture.inspection)
+	err := withWakeMutationScopeInDir(fixture.agentDir, func(scope *wakeMutationScope) error {
+		_, err := prepareAuthoritativeWakeStopPlatform(scope, fixture.inspection)
 		return err
 	})
 	var inconclusive *wakeStateBoundInconclusiveError
@@ -696,9 +696,14 @@ func TestLinuxStableOwnerWakeStopNeverSignalsReusedNumericPID(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = agentDir.Close() }()
-	err = withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+	err = withWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+		dirfd, scopedAgentDir, err := scope.location()
+		if err != nil {
+			return err
+		}
+		agentDir = scopedAgentDir
 		expected := readWakeLockMetadataAt(dirfd, agentDir, root, "codex")
-		capability, err := prepareAuthoritativeWakeStopPlatform(dirfd, agentDir, expected)
+		capability, err := prepareAuthoritativeWakeStopPlatform(scope, expected)
 		if err != nil {
 			return err
 		}
@@ -792,9 +797,14 @@ func TestLinuxMalformedOwnerWakeIdentityNeverSignalsMatchingArgvPID(t *testing.T
 		t.Fatal(err)
 	}
 	defer func() { _ = agentDir.Close() }()
-	err = withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+	err = withWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+		dirfd, scopedAgentDir, err := scope.location()
+		if err != nil {
+			return err
+		}
+		agentDir = scopedAgentDir
 		expected := readWakeLockMetadataAt(dirfd, agentDir, root, "codex")
-		_, err := prepareAuthoritativeWakeStopPlatform(dirfd, agentDir, expected)
+		_, err := prepareAuthoritativeWakeStopPlatform(scope, expected)
 		return err
 	})
 	if err == nil || !strings.Contains(err.Error(), "not authoritative") {

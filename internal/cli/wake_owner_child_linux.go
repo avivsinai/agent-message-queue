@@ -7,7 +7,19 @@ import (
 	"os"
 	"os/exec"
 	"syscall"
+
+	"golang.org/x/sys/unix"
 )
+
+// terminateWakePidfd owns the parent-created pidfd used to stop a child that
+// this process launched. It is separate from mailbox termination, which must
+// re-authorize every signal through a live mutation scope.
+func terminateWakePidfd(pidfd int) error {
+	send := func(signal unix.Signal) error {
+		return sendWakePidfdSignal(pidfd, signal)
+	}
+	return terminateWakePidfdWithSignalAuthorization(pidfd, send)
+}
 
 func prepareAuthoritativeWakeChildPlatform(cmd *exec.Cmd) (*authoritativeWakeChildCapability, error) {
 	// Prove the syscall boundary before launch so a conclusively unsupported

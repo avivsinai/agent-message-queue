@@ -583,7 +583,12 @@ func publishWakeSelfUpgradePending(
 	record wakeRestartRecord,
 	decision wakeSelfUpgradeDecision,
 ) (wakeSelfUpgradeDecision, error) {
-	err := withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+	err := withWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+		dirfd, scopedAgentDir, err := scope.location()
+		if err != nil {
+			return err
+		}
+		agentDir = scopedAgentDir
 		current := inspectWakeLockAt(dirfd, agentDir, expected.Root, expected.Agent)
 		if !sameWakeLockInspection(expected, current) || !current.IdentityConfirmed {
 			return fmt.Errorf("wake changed before self-upgrade publication")
@@ -647,7 +652,7 @@ func publishWakeSelfUpgradePending(
 				return nil
 			}
 		}
-		if err := writeWakeRestartRecordAt(dirfd, agentDir, record); err != nil {
+		if err := writeWakeRestartRecordAt(scope, record); err != nil {
 			return err
 		}
 		installed, installedExists, err := wakeSelfUpgradeReadPublished(dirfd, agentDir)

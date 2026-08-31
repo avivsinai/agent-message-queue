@@ -26,8 +26,8 @@ func TestDarwinWakeRestartVerifiesBoundStageBeforeExec(t *testing.T) {
 	fixture := newWakeRestartFixture(t)
 	writeWakeRestartLoopCandidateCopy(t, &fixture)
 	fixture.record.Source = wakeRestartSourceForeign
-	if err := withWakeLifecycleGuardInDir(fixture.agentDir, func(dirfd int) error {
-		return writeWakeRestartRecordAt(dirfd, fixture.agentDir, fixture.record)
+	if err := withWakeMutationScopeInDir(fixture.agentDir, func(scope *wakeMutationScope) error {
+		return writeWakeRestartRecordAt(scope, fixture.record)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -510,8 +510,8 @@ func TestDarwinWakeSelfUpgradeDefersHashTimeCTimeThenBindsOnRetry(t *testing.T) 
 	fixture.record.Source = wakeRestartSourceSelf
 	fixture.record.StagePath = stagePath
 	fixture.record.PreviousBoundImage = previousDarwinWakeRestartStageForLock(fixture.lock.Lock)
-	if err := withWakeLifecycleGuardInDir(fixture.agentDir, func(dirfd int) error {
-		return writeWakeRestartRecordAt(dirfd, fixture.agentDir, fixture.record)
+	if err := withWakeMutationScopeInDir(fixture.agentDir, func(scope *wakeMutationScope) error {
+		return writeWakeRestartRecordAt(scope, fixture.record)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -589,8 +589,8 @@ func writeWakeRestartLoopCandidateCopy(t *testing.T, fixture *wakeRestartFixture
 	}
 	fixture.candidate = candidate
 	fixture.record.Candidate = candidate
-	if err := withWakeLifecycleGuardInDir(fixture.agentDir, func(dirfd int) error {
-		return writeWakeRestartRecordAt(dirfd, fixture.agentDir, fixture.record)
+	if err := withWakeMutationScopeInDir(fixture.agentDir, func(scope *wakeMutationScope) error {
+		return writeWakeRestartRecordAt(scope, fixture.record)
 	}); err != nil {
 		t.Fatal(err)
 	}

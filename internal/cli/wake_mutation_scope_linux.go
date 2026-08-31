@@ -10,9 +10,13 @@ import (
 
 var (
 	linuxPidfdOpen       = unix.PidfdOpen
-	linuxPidfdSendSignal = unix.PidfdSendSignal
+	linuxPidfdSendSignal = sendLinuxPidfdSignalRaw
 	linuxPidfdClose      = unix.Close
 )
+
+func sendLinuxPidfdSignalRaw(pidfd int, signal unix.Signal, info *unix.Siginfo, flags uint) error {
+	return unix.PidfdSendSignal(pidfd, signal, info, flags)
+}
 
 // sendPidfdSignal is for non-termination effects. It requires the retained
 // directory to remain canonical before signaling.

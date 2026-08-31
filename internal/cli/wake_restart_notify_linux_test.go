@@ -258,8 +258,8 @@ func TestNotifyWakeRestartLinuxRefusesChangedPendingRecord(t *testing.T) {
 				func(int, int) (int, error) {
 					changed := fixture.record
 					test.mutate(&changed)
-					if err := fixture.agentDir.withFD(func(dirfd int) error {
-						return writeWakeRestartRecordAt(dirfd, fixture.agentDir, changed)
+					if err := withWakeMutationScopeInDir(fixture.agentDir, func(scope *wakeMutationScope) error {
+						return writeWakeRestartRecordAt(scope, changed)
 					}); err != nil {
 						t.Fatal(err)
 					}

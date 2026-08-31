@@ -114,8 +114,8 @@ func newWakeRestartFixture(t *testing.T) wakeRestartFixture {
 		Owner:      owner,
 		Candidate:  candidate,
 	}
-	if err := withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
-		return writeWakeRestartRecordAt(dirfd, agentDir, record)
+	if err := withWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+		return writeWakeRestartRecordAt(scope, record)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -169,8 +169,8 @@ func prepareWakeRestartRecordForBoundResumeTest(
 	fixture.record.StagePath = stagePath
 	boundCopy := *bound
 	fixture.record.BoundImage = &boundCopy
-	if err := withWakeLifecycleGuardInDir(fixture.agentDir, func(dirfd int) error {
-		return writeWakeRestartRecordAt(dirfd, fixture.agentDir, fixture.record)
+	if err := withWakeMutationScopeInDir(fixture.agentDir, func(scope *wakeMutationScope) error {
+		return writeWakeRestartRecordAt(scope, fixture.record)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -863,10 +863,9 @@ func TestWakeRestartAckFailurePreservesClaimedSuccessor(t *testing.T) {
 func TestGenericCleanupReconcilesPendingRestartOwnership(t *testing.T) {
 	t.Run("schema 1 stop wins before successor claim", func(t *testing.T) {
 		fixture := newWakeRestartFixture(t)
-		if err := withWakeLifecycleGuardInDir(fixture.agentDir, func(dirfd int) error {
+		if err := withWakeMutationScopeInDir(fixture.agentDir, func(scope *wakeMutationScope) error {
 			return cleanupGenericWakeGenerationAt(
-				dirfd,
-				fixture.agentDir,
+				scope,
 				fixture.root,
 				fixture.agent,
 				fixture.lock,
@@ -898,10 +897,9 @@ func TestGenericCleanupReconcilesPendingRestartOwnership(t *testing.T) {
 		); err != nil {
 			t.Fatal(err)
 		}
-		if err := withWakeLifecycleGuardInDir(fixture.agentDir, func(dirfd int) error {
+		if err := withWakeMutationScopeInDir(fixture.agentDir, func(scope *wakeMutationScope) error {
 			return cleanupGenericWakeGenerationAt(
-				dirfd,
-				fixture.agentDir,
+				scope,
 				fixture.root,
 				fixture.agent,
 				fixture.lock,
@@ -948,10 +946,9 @@ func TestGenericCleanupReconcilesPendingRestartOwnership(t *testing.T) {
 		}
 		defer cleanup()
 		current := inspectWakeLock(fixture.root, fixture.agent)
-		err = withWakeLifecycleGuardInDir(fixture.agentDir, func(dirfd int) error {
+		err = withWakeMutationScopeInDir(fixture.agentDir, func(scope *wakeMutationScope) error {
 			return cleanupGenericWakeGenerationAt(
-				dirfd,
-				fixture.agentDir,
+				scope,
 				fixture.root,
 				fixture.agent,
 				current,
@@ -1464,8 +1461,8 @@ func TestWakeRestartRejectsRegisteredOwnerlessInjectViaBeforeSignal(t *testing.T
 func TestWakeRestartAdoptsPendingCurrentGenerationAndRenotifies(t *testing.T) {
 	fixture := newWakeRestartFixture(t)
 	pending := fixture.record
-	if err := withWakeLifecycleGuardInDir(fixture.agentDir, func(dirfd int) error {
-		return writeWakeRestartRecordAt(dirfd, fixture.agentDir, pending)
+	if err := withWakeMutationScopeInDir(fixture.agentDir, func(scope *wakeMutationScope) error {
+		return writeWakeRestartRecordAt(scope, pending)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -1521,8 +1518,8 @@ func TestWakeRestartPreservesClaimBeforeSuccessorPublication(t *testing.T) {
 	claimed := fixture.record
 	claimed.Schema = wakeRestartSchemaV2
 	claimed.SuccessorGeneration = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	if err := withWakeLifecycleGuardInDir(fixture.agentDir, func(dirfd int) error {
-		return writeWakeRestartRecordAt(dirfd, fixture.agentDir, claimed)
+	if err := withWakeMutationScopeInDir(fixture.agentDir, func(scope *wakeMutationScope) error {
+		return writeWakeRestartRecordAt(scope, claimed)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -1570,8 +1567,8 @@ func TestWakeRestartPreservesPendingForeignGeneration(t *testing.T) {
 	fixture := newWakeRestartFixture(t)
 	pending := fixture.record
 	pending.Generation = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	if err := withWakeLifecycleGuardInDir(fixture.agentDir, func(dirfd int) error {
-		return writeWakeRestartRecordAt(dirfd, fixture.agentDir, pending)
+	if err := withWakeMutationScopeInDir(fixture.agentDir, func(scope *wakeMutationScope) error {
+		return writeWakeRestartRecordAt(scope, pending)
 	}); err != nil {
 		t.Fatal(err)
 	}

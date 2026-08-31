@@ -14,7 +14,12 @@ func fixStaleWakeLockForDoctor(
 	}
 	defer func() { _ = agentDir.Close() }()
 
-	return withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+	return withWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+		dirfd, scopedAgentDir, err := scope.location()
+		if err != nil {
+			return err
+		}
+		agentDir = scopedAgentDir
 		recheck := inspectWakeLockAt(dirfd, agentDir, root, agent)
 		sameGeneration := sameWakeLockGeneration(*inspection, recheck)
 		*inspection = recheck
@@ -23,13 +28,13 @@ func fixStaleWakeLockForDoctor(
 			lock.Reason = "wake lock changed before fix"
 			return nil
 		}
-		if err := reconcileBoundWakePreparedProjectionAt(dirfd, agentDir, recheck); err != nil {
+		if err := reconcileBoundWakePreparedProjectionAt(scope, recheck); err != nil {
 			return err
 		}
 		if err := validateWakeLockStaleRemovalAt(dirfd, agentDir, recheck); err != nil {
 			return err
 		}
-		committed, err := removeWakeLockIfUnchangedGuardedAtStatus(dirfd, agentDir, recheck)
+		committed, err := removeWakeLockIfUnchangedGuardedAtStatus(scope, recheck)
 		if committed {
 			lock.Removed = true
 		}

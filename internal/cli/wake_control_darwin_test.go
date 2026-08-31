@@ -26,8 +26,8 @@ func TestDarwinStableOwnerStopRefusesBoundInconclusiveBeforeControl(t *testing.T
 		t.Fatal(err)
 	}
 
-	err := withWakeLifecycleGuardInDir(fixture.agentDir, func(dirfd int) error {
-		capability, err := prepareAuthoritativeWakeStopPlatform(dirfd, fixture.agentDir, fixture.inspection)
+	err := withWakeMutationScopeInDir(fixture.agentDir, func(scope *wakeMutationScope) error {
+		capability, err := prepareAuthoritativeWakeStopPlatform(scope, fixture.inspection)
 		if err == nil && capability.stop != nil {
 			t.Fatal("bound-inconclusive stop created a cooperative control capability")
 		}
@@ -90,8 +90,8 @@ func testDarwinOwnerControlLock(
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
-		return publishAuthoritativeWakeClaimAt(dirfd, agentDir, root, agent, target, lock)
+	if err := withWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+		return publishAuthoritativeWakeClaimAt(scope, root, agent, target, lock)
 	}); err != nil {
 		_ = agentDir.Close()
 		t.Fatal(err)
@@ -220,8 +220,8 @@ func writeDarwinWakeRestartRecordForTest(
 		t.Fatal(err)
 	}
 	defer func() { _ = agentDir.Close() }()
-	if err := withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
-		return writeWakeRestartRecordAt(dirfd, agentDir, record)
+	if err := withWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+		return writeWakeRestartRecordAt(scope, record)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -272,12 +272,17 @@ func TestDarwinStableOwnerStopTreatsDifferentLivePIDOccupantAsAbsent(t *testing.
 		t.Fatal(err)
 	}
 	defer func() { _ = agentDir.Close() }()
-	err = withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+	err = withWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+		dirfd, scopedAgentDir, err := scope.location()
+		if err != nil {
+			return err
+		}
+		agentDir = scopedAgentDir
 		expected := inspectWakeLockAt(dirfd, agentDir, root, agent)
 		if expected.Status != wakeLockStale {
 			t.Fatalf("reused wake PID status = %s, want stale", expected.Status)
 		}
-		capability, err := prepareAuthoritativeWakeStopPlatform(dirfd, agentDir, expected)
+		capability, err := prepareAuthoritativeWakeStopPlatform(scope, expected)
 		if err != nil {
 			return err
 		}
@@ -300,10 +305,15 @@ func TestDarwinAuthoritativeStopRefusesDetachAfterPreparation(t *testing.T) {
 	}
 	defer func() { _ = agentDir.Close() }()
 	var capability authoritativeWakeStopCapability
-	err = withExistingWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+	err = withExistingWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+		dirfd, scopedAgentDir, err := scope.location()
+		if err != nil {
+			return err
+		}
+		agentDir = scopedAgentDir
 		expected := inspectWakeLockAt(dirfd, agentDir, root, agent)
 		var prepareErr error
-		capability, prepareErr = prepareAuthoritativeWakeStopPlatform(dirfd, agentDir, expected)
+		capability, prepareErr = prepareAuthoritativeWakeStopPlatform(scope, expected)
 		return prepareErr
 	})
 	if err != nil {

@@ -117,7 +117,12 @@ func recoverOwnerWakeWithStopPreparer(
 	for {
 		var stopCapability *authoritativeWakeStopCapability
 		var stopAuthorization wakeOwnerReleaseAuthorization
-		err := withWakeLifecycleGuardInDir(agentDir, func(dirfd int) (retErr error) {
+		err := withWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) (retErr error) {
+			dirfd, scopedAgentDir, err := scope.location()
+			if err != nil {
+				return err
+			}
+			agentDir = scopedAgentDir
 			inspection := inspectWakeLockForOwnerTransition(dirfd, agentDir, root, me)
 			result.PID = inspection.PID
 			switch classifyPersistedWakeClaim(inspection) {
@@ -168,7 +173,7 @@ func recoverOwnerWakeWithStopPreparer(
 						continueAfterWakeStateProjectionError(newWakeStateProjectionError(stateErr))
 						stateExists = false
 					}
-					removed, err := removeWakeTargetIfSnapshotMatchesAt(dirfd, agentDir, root, me, target)
+					removed, err := removeWakeTargetIfSnapshotMatchesAt(scope, root, me, target)
 					if err != nil {
 						return err
 					}
@@ -179,8 +184,7 @@ func recoverOwnerWakeWithStopPreparer(
 						return fmt.Errorf("sync owner-bearing orphan target recovery: %w", err)
 					}
 					_, err = removeWakeStateIfTargetAbsentAt(
-						dirfd,
-						agentDir,
+						scope,
 						stateSnapshot,
 						stateExists,
 					)
@@ -197,8 +201,7 @@ func recoverOwnerWakeWithStopPreparer(
 					stateExists = false
 				}
 				if _, err := removeWakeStateIfTargetAbsentAt(
-					dirfd,
-					agentDir,
+					scope,
 					stateSnapshot,
 					stateExists,
 				); err != nil {
@@ -215,7 +218,7 @@ func recoverOwnerWakeWithStopPreparer(
 				return refuse("wake owner claim is unverified or corrupt", "inspect the claim and retry without mutating it")
 			}
 
-			target, err := authoritativeWakeRecoveryTargetAt(dirfd, agentDir, inspection)
+			target, err := authoritativeWakeRecoveryTargetAt(scope, inspection)
 			if err != nil {
 				return refuse("wake owner claim is unverified: "+err.Error(), "repair the metadata manually only after preserving evidence")
 			}
@@ -279,7 +282,7 @@ func recoverOwnerWakeWithStopPreparer(
 					"preserve the claim and retry after owner monitoring is healthy",
 				), err)
 			}
-			wakeCapability, err := prepareStop(dirfd, agentDir, inspection)
+			wakeCapability, err := prepareStop(scope, inspection)
 			if err != nil {
 				return refuse("exact wake inspection is unavailable: "+err.Error(), "preserve the claim and retry")
 			}
@@ -300,7 +303,7 @@ func recoverOwnerWakeWithStopPreparer(
 			})
 			switch action {
 			case wakeOwnerActionRelease:
-				if err := removeAuthoritativeWakeClaimAt(dirfd, agentDir, classified, target); err != nil {
+				if err := removeAuthoritativeWakeClaimAt(scope, classified, target); err != nil {
 					return err
 				}
 				result.Status = "recovered"
@@ -308,7 +311,7 @@ func recoverOwnerWakeWithStopPreparer(
 				return nil
 			case wakeOwnerActionStopAndRelease:
 				if wakeCapability.Absent {
-					if err := removeAuthoritativeWakeClaimAt(dirfd, agentDir, classified, target); err != nil {
+					if err := removeAuthoritativeWakeClaimAt(scope, classified, target); err != nil {
 						return err
 					}
 					result.Status = "recovered"

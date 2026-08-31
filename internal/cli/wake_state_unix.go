@@ -42,11 +42,14 @@ type wakeStateFileSnapshot struct {
 }
 
 func reconcileWakeStateAfterLegacyMutationAt(
-	dirfd int,
-	agentDir *wakeAgentDir,
+	scope *wakeMutationScope,
 	root string,
 	me string,
 ) (retErr error) {
+	dirfd, agentDir, err := scope.location()
+	if err != nil {
+		return err
+	}
 	// Precondition: the caller holds this agent directory's lifecycle guard and
 	// has already committed the authorized legacy mutation.
 	defer func() {
@@ -63,23 +66,26 @@ func reconcileWakeStateAfterLegacyMutationAt(
 		if err != nil || !stateExists {
 			return err
 		}
-		_, err = removeWakeStateIfSnapshotMatchesAt(dirfd, agentDir, state)
+		_, err = removeWakeStateIfSnapshotMatchesAt(scope, state)
 		return err
 	}
 	expected, err := captureWakeStateLegacySnapshotAt(dirfd, agentDir, root, me)
 	if err != nil {
 		return err
 	}
-	_, err = publishWakeStateAt(dirfd, agentDir, root, me, expected)
+	_, err = publishWakeStateAt(scope, root, me, expected)
 	return err
 }
 
 func removeWakeStateIfTargetAbsentAt(
-	dirfd int,
-	agentDir *wakeAgentDir,
+	scope *wakeMutationScope,
 	expected wakeStateFileSnapshot,
 	expectedExists bool,
 ) (removed bool, retErr error) {
+	dirfd, _, err := scope.location()
+	if err != nil {
+		return false, err
+	}
 	// Precondition: the caller holds this agent directory's lifecycle guard and
 	// captured expected before removing the target.
 	defer func() {
@@ -88,7 +94,7 @@ func removeWakeStateIfTargetAbsentAt(
 		}
 	}()
 	var targetInfo unix.Stat_t
-	err := unix.Fstatat(dirfd, wakeTargetFileName, &targetInfo, unix.AT_SYMLINK_NOFOLLOW)
+	err = unix.Fstatat(dirfd, wakeTargetFileName, &targetInfo, unix.AT_SYMLINK_NOFOLLOW)
 	targetExists := err == nil
 	if err != nil && err != unix.ENOENT {
 		return false, fmt.Errorf("verify wake target absence before state removal: %w", err)
@@ -96,7 +102,7 @@ func removeWakeStateIfTargetAbsentAt(
 	if targetExists || !expectedExists {
 		return false, nil
 	}
-	return removeWakeStateIfSnapshotMatchesAt(dirfd, agentDir, expected)
+	return removeWakeStateIfSnapshotMatchesAt(scope, expected)
 }
 
 func (snapshot wakeStateLegacySnapshot) legacy() wakeStateLegacy {
@@ -158,23 +164,25 @@ func captureWakeStateLegacySnapshotAt(
 }
 
 func publishWakeStateAt(
-	dirfd int,
-	agentDir *wakeAgentDir,
+	scope *wakeMutationScope,
 	root string,
 	me string,
 	expected wakeStateLegacySnapshot,
 ) (wakeStateFileSnapshot, error) {
-	return publishWakeStateValidatedAt(dirfd, agentDir, root, me, expected, nil)
+	return publishWakeStateValidatedAt(scope, root, me, expected, nil)
 }
 
 func publishWakeStateValidatedAt(
-	dirfd int,
-	agentDir *wakeAgentDir,
+	scope *wakeMutationScope,
 	root string,
 	me string,
 	expected wakeStateLegacySnapshot,
 	validateBeforeInstall func() error,
 ) (wakeStateFileSnapshot, error) {
+	dirfd, agentDir, err := scope.location()
+	if err != nil {
+		return wakeStateFileSnapshot{}, err
+	}
 	// Precondition: the caller holds this agent directory's lifecycle guard.
 	// Every schema generation uses that guard, which excludes legitimate writers
 	// across the final destination validation-to-rename window. The fd-bound
@@ -315,8 +323,7 @@ func publishWakeStateValidatedAt(
 }
 
 func publishWakeStateAndBindLockAt(
-	dirfd int,
-	agentDir *wakeAgentDir,
+	scope *wakeMutationScope,
 	root string,
 	me string,
 	lock *wakeLock,
@@ -324,11 +331,15 @@ func publishWakeStateAndBindLockAt(
 	if lock == nil {
 		return fmt.Errorf("wake lock is missing")
 	}
+	dirfd, agentDir, err := scope.location()
+	if err != nil {
+		return err
+	}
 	expected, err := captureWakeStateLegacySnapshotAt(dirfd, agentDir, root, me)
 	if err != nil {
 		return err
 	}
-	installed, err := publishWakeStateAt(dirfd, agentDir, root, me, expected)
+	installed, err := publishWakeStateAt(scope, root, me, expected)
 	if err != nil {
 		return err
 	}
@@ -483,10 +494,13 @@ func readWakeStateRawSnapshotAtWithCanonicalValidation(
 }
 
 func removeWakeStateIfSnapshotMatchesAt(
-	dirfd int,
-	agentDir *wakeAgentDir,
+	scope *wakeMutationScope,
 	expected wakeStateFileSnapshot,
 ) (bool, error) {
+	dirfd, agentDir, err := scope.location()
+	if err != nil {
+		return false, err
+	}
 	// Precondition: the caller holds this agent directory's lifecycle guard.
 	// The guard closes the check-to-unlink window against legitimate writers;
 	// the exact fd-bound snapshot check preserves bypassing replacements.

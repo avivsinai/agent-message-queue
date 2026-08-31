@@ -22,7 +22,9 @@ const wakeReadyTimeout = 25 * time.Second
 
 const wakeProcessExitTimeout = 5 * time.Second
 
-var killWakeHelperProcess = func(proc *os.Process) error { return proc.Kill() }
+func killWakeHelperProcessWithHandle(proc *os.Process) error { return proc.Kill() }
+
+var killWakeHelperProcess = killWakeHelperProcessWithHandle
 
 var coopExecProcess = syscall.Exec
 
@@ -973,7 +975,12 @@ func validatePreparedCoopWakeClaim(
 	beforeValidatePreparedCoopWakeClaim(agentDir)
 
 	var current wakeLockInspection
-	err = withExistingWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+	err = withExistingWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+		dirfd, scopedAgentDir, err := scope.location()
+		if err != nil {
+			return err
+		}
+		agentDir = scopedAgentDir
 		if err := validateWakeStateAgentDirAt(dirfd, agentDir); err != nil {
 			return err
 		}
@@ -993,7 +1000,7 @@ func validatePreparedCoopWakeClaim(
 		if classifyPersistedWakeClaim(current) != wakeClaimAuthoritative {
 			return fmt.Errorf("prepared inject-via wake is not an authoritative owner claim")
 		}
-		target, err := validateAuthoritativeWakeClaimPairAt(dirfd, agentDir, current)
+		target, err := validateAuthoritativeWakeClaimPairAt(scope, current)
 		if err != nil {
 			return fmt.Errorf("validate prepared inject-via owner claim: %w", err)
 		}
@@ -1387,7 +1394,12 @@ func rollbackAuthoritativeWakeClaimInDir(
 	if currentOwner != owner {
 		return fmt.Errorf("current process is not the exact owner authorized for wake rollback")
 	}
-	return withExistingWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+	return withExistingWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+		dirfd, scopedAgentDir, err := scope.location()
+		if err != nil {
+			return err
+		}
+		agentDir = scopedAgentDir
 		current := inspectWakeLockAt(dirfd, agentDir, root, me)
 		if !current.Exists {
 			return nil
@@ -1399,7 +1411,7 @@ func rollbackAuthoritativeWakeClaimInDir(
 			!sameWakeOwner(current.Lock.Owner, &owner) {
 			return fmt.Errorf("wake claim changed before exact owner rollback")
 		}
-		relation, relationErr := retainedWakeAgentDirRelation(agentDir)
+		relation, relationErr := retainedWakeAgentDirRelationAt(agentDir, dirfd)
 		if relationErr != nil {
 			return newWakeStateBoundInconclusiveError(relationErr)
 		}
@@ -1409,7 +1421,7 @@ func rollbackAuthoritativeWakeClaimInDir(
 			if current.Status != wakeLockStale {
 				return fmt.Errorf("owner-bound wake is not conclusively absent after helper stop")
 			}
-			return removeAuthoritativeWakeClaimAt(dirfd, agentDir, current, nil)
+			return removeAuthoritativeWakeClaimAt(scope, current, nil)
 		case wakeAgentDirInconclusive:
 			return newWakeStateBoundInconclusiveError(
 				fmt.Errorf("wake agent directory relation is inconclusive after helper stop"),
@@ -1419,14 +1431,14 @@ func rollbackAuthoritativeWakeClaimInDir(
 				fmt.Errorf("unknown wake agent directory relation %d", relation),
 			)
 		}
-		target, err := validateAuthoritativeWakeClaimPairAt(dirfd, agentDir, current)
+		target, err := validateAuthoritativeWakeClaimPairAt(scope, current)
 		if err != nil {
 			return err
 		}
 		if current.Status != wakeLockStale {
 			return fmt.Errorf("owner-bound wake is not conclusively absent after helper stop")
 		}
-		return removeAuthoritativeWakeClaimAt(dirfd, agentDir, current, &target)
+		return removeAuthoritativeWakeClaimAt(scope, current, &target)
 	})
 }
 
@@ -1440,7 +1452,12 @@ func cleanupTerminatedWakeLock(expected wakeLockInspection) error {
 }
 
 func cleanupTerminatedWakeLockInDir(agentDir *wakeAgentDir, expected wakeLockInspection) error {
-	return withExistingWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+	return withExistingWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+		dirfd, scopedAgentDir, err := scope.location()
+		if err != nil {
+			return err
+		}
+		agentDir = scopedAgentDir
 		current := inspectWakeLockAt(dirfd, agentDir, expected.Root, expected.Agent)
 		if !sameWakeLockGeneration(expected, current) {
 			return nil
@@ -1451,7 +1468,7 @@ func cleanupTerminatedWakeLockInDir(agentDir *wakeAgentDir, expected wakeLockIns
 		if err := validateWakeLockStaleRemovalAtForTermination(dirfd, agentDir, current); err != nil {
 			return err
 		}
-		return removeWakeLockIfUnchangedGuardedAt(dirfd, agentDir, current)
+		return removeWakeLockIfUnchangedGuardedAt(scope, current)
 	})
 }
 
@@ -1460,7 +1477,12 @@ func cleanupTerminatedWakeLockForPIDInDir(
 	root, me string,
 	terminatedPID int,
 ) error {
-	return withExistingWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+	return withExistingWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+		dirfd, scopedAgentDir, err := scope.location()
+		if err != nil {
+			return err
+		}
+		agentDir = scopedAgentDir
 		current := inspectWakeLockAt(dirfd, agentDir, root, me)
 		if !current.Exists || current.PID != terminatedPID || current.Lock.Generation == "" {
 			return nil
@@ -1471,7 +1493,7 @@ func cleanupTerminatedWakeLockForPIDInDir(
 		if err := validateWakeLockStaleRemovalAtForTermination(dirfd, agentDir, current); err != nil {
 			return err
 		}
-		return removeWakeLockIfUnchangedGuardedAt(dirfd, agentDir, current)
+		return removeWakeLockIfUnchangedGuardedAt(scope, current)
 	})
 }
 

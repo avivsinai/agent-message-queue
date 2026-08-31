@@ -16,8 +16,8 @@ func TestDetachedBoundWakeResidueCleanupReturnsCleanupOnlyError(t *testing.T) {
 	successorBefore := snapshotDetachedWakeFiles(t, fixture.agentDir.path, ".wake.lock", wakeTargetFileName, wakeStateFileName, wakePreparedFileName)
 	residueBefore := snapshotDetachedWakeFiles(t, detachedPath, wakeTargetFileName, wakePreparedFileName)
 
-	err := withWakeLifecycleGuardInDir(fixture.agentDir, func(dirfd int) error {
-		return removeWakeLockIfUnchangedGuardedAt(dirfd, fixture.agentDir, inspection)
+	err := withWakeMutationScopeInDir(fixture.agentDir, func(scope *wakeMutationScope) error {
+		return removeWakeLockIfUnchangedGuardedAt(scope, inspection)
 	})
 	assertDetachedWakeCleanupOnlyError(t, err)
 	assertDetachedBoundWakeResidueRemoved(t, detachedPath, residueBefore)
@@ -48,8 +48,8 @@ func TestWakeLockRemovalClassifiesDirectorySwapBeforeUnlink(t *testing.T) {
 	}
 	t.Cleanup(func() { afterWakeLockAtRead = originalAfterRead })
 
-	err := withWakeLifecycleGuardInDir(fixture.agentDir, func(dirfd int) error {
-		return removeWakeLockIfUnchangedGuardedAt(dirfd, fixture.agentDir, fixture.created)
+	err := withWakeMutationScopeInDir(fixture.agentDir, func(scope *wakeMutationScope) error {
+		return removeWakeLockIfUnchangedGuardedAt(scope, fixture.created)
 	})
 	if detachedPath == "" {
 		t.Fatal("directory swap did not run between the initial sample and unlink")
@@ -70,10 +70,13 @@ func TestWakeLockRemovalClassifiesDirectorySwapAfterUnlink(t *testing.T) {
 	var detachedPath string
 	var successorBefore map[string]detachedWakeFileSnapshot
 	var outcome wakeLockRemovalOutcome
-	err := withWakeLifecycleGuardInDir(fixture.agentDir, func(dirfd int) error {
+	err := withWakeMutationScopeInDir(fixture.agentDir, func(scope *wakeMutationScope) error {
+		dirfd, _, err := scope.location()
+		if err != nil {
+			return err
+		}
 		outcome = removeWakeLockIfUnchangedGuardedAtOutcome(
-			dirfd,
-			fixture.agentDir,
+			scope,
 			fixture.created,
 			func() error {
 				if err := unix.Unlinkat(dirfd, ".wake.lock", 0); err != nil {
@@ -130,8 +133,8 @@ func TestDetachedBoundWakeResidueCleanupRemovesOldClaimWhenCanonicalPathAbsent(t
 		wakePreparedFileName,
 	)
 
-	err := withWakeLifecycleGuardInDir(fixture.agentDir, func(dirfd int) error {
-		return removeWakeLockIfUnchangedGuardedAt(dirfd, fixture.agentDir, inspection)
+	err := withWakeMutationScopeInDir(fixture.agentDir, func(scope *wakeMutationScope) error {
+		return removeWakeLockIfUnchangedGuardedAt(scope, inspection)
 	})
 	var cleanupOnly *wakeDetachedCleanupOnlyError
 	if !errors.As(err, &cleanupOnly) {

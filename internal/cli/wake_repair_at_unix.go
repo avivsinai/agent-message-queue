@@ -348,12 +348,14 @@ func restoreWakeRepairFloorQuarantineAt(dirfd int, quarantine string) error {
 }
 
 func writeWakeTargetGuardedAt(
-	dirfd int,
-	agentDir *wakeAgentDir,
+	scope *wakeMutationScope,
 	root string,
 	me string,
 	target wakeTarget,
 ) error {
+	if _, _, err := scope.location(); err != nil {
+		return err
+	}
 	if err := validateWakeTarget(target, root, me); err != nil {
 		return err
 	}
@@ -361,9 +363,8 @@ func writeWakeTargetGuardedAt(
 	if err != nil {
 		return fmt.Errorf("marshal wake target: %w", err)
 	}
-	return writeWakeRepairMetadataAt(
-		dirfd,
-		agentDir,
+	return writeWakeMutationMetadataAt(
+		scope,
 		wakeTargetFileName,
 		"wake target",
 		append(data, '\n'),
@@ -371,7 +372,11 @@ func writeWakeTargetGuardedAt(
 	)
 }
 
-func removeWakeTargetGuardedAt(dirfd int, agentDir *wakeAgentDir) error {
+func removeWakeTargetGuardedAt(scope *wakeMutationScope) error {
+	dirfd, agentDir, err := scope.location()
+	if err != nil {
+		return err
+	}
 	stateSnapshot, stateExists, err := readWakeStateRawSnapshotAt(dirfd, agentDir)
 	if err != nil {
 		continueAfterWakeStateProjectionError(newWakeStateProjectionError(err))
@@ -389,14 +394,66 @@ func removeWakeTargetGuardedAt(dirfd int, agentDir *wakeAgentDir) error {
 		}
 	}
 	if _, err := removeWakeStateIfTargetAbsentAt(
-		dirfd,
-		agentDir,
+		scope,
 		stateSnapshot,
 		stateExists,
 	); err != nil {
 		if !continueAfterWakeStateProjectionError(err) {
 			return fmt.Errorf("remove wake state after target removal: %w", err)
 		}
+	}
+	return nil
+}
+
+func writeWakeMutationMetadataAt(
+	scope *wakeMutationScope,
+	name string,
+	label string,
+	data []byte,
+	maxBytes int,
+) error {
+	dirfd, agentDir, err := scope.location()
+	if err != nil {
+		return err
+	}
+	if err := validateWakeRepairMetadataDestinationAt(dirfd, agentDir, name, label); err != nil {
+		return err
+	}
+	temp, err := writeWakeOwnerTempAt(scope, strings.TrimLeft(name, "."), data, 0o600)
+	if err != nil {
+		return err
+	}
+	tempPresent := true
+	defer func() {
+		if tempPresent {
+			_ = unix.Unlinkat(dirfd, temp, 0)
+		}
+	}()
+	if err := syncWakeOwnerDirFD(dirfd); err != nil {
+		return fmt.Errorf("sync %s directory before install: %w", label, err)
+	}
+	if err := validateWakeRepairMetadataDestinationAt(dirfd, agentDir, name, label); err != nil {
+		return err
+	}
+	if err := unix.Renameat(dirfd, temp, dirfd, name); err != nil {
+		return fmt.Errorf("install %s: %w", label, err)
+	}
+	tempPresent = false
+	if err := syncWakeOwnerDirFD(dirfd); err != nil {
+		return fmt.Errorf("sync %s directory after install: %w", label, err)
+	}
+	installed, _, exists, err := readWakeRepairMetadataAt(
+		dirfd,
+		name,
+		label,
+		filepath.Join(agentDir.path, name),
+		maxBytes,
+	)
+	if err != nil {
+		return fmt.Errorf("verify installed %s: %w", label, err)
+	}
+	if !exists || !bytes.Equal(installed, data) {
+		return fmt.Errorf("installed %s changed before verification", label)
 	}
 	return nil
 }
@@ -412,16 +469,44 @@ func writeWakeRepairMetadataAt(
 	if err := validateWakeRepairMetadataDestinationAt(dirfd, agentDir, name, label); err != nil {
 		return err
 	}
-	temp, err := writeWakeOwnerTempAt(dirfd, strings.TrimLeft(name, "."), data, 0o600)
-	if err != nil {
-		return err
+	var nonce [12]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return fmt.Errorf("generate %s temp name: %w", label, err)
 	}
+	temp := fmt.Sprintf(".%s.tmp.%d.%s", strings.TrimLeft(name, "."), os.Getpid(), hex.EncodeToString(nonce[:]))
+	fd, err := unix.Openat(
+		dirfd,
+		temp,
+		unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC,
+		0o600,
+	)
+	if err != nil {
+		return fmt.Errorf("create %s temp: %w", label, err)
+	}
+	file := os.NewFile(uintptr(fd), temp)
 	tempPresent := true
 	defer func() {
+		_ = file.Close()
 		if tempPresent {
 			_ = unix.Unlinkat(dirfd, temp, 0)
 		}
 	}()
+	if err := file.Chmod(0o600); err != nil {
+		return fmt.Errorf("chmod %s temp: %w", label, err)
+	}
+	n, err := file.Write(data)
+	if err != nil {
+		return fmt.Errorf("write %s temp: %w", label, err)
+	}
+	if n != len(data) {
+		return fmt.Errorf("write %s temp: %w", label, io.ErrShortWrite)
+	}
+	if err := file.Sync(); err != nil {
+		return fmt.Errorf("sync %s temp: %w", label, err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close %s temp: %w", label, err)
+	}
 	if err := syncWakeOwnerDirFD(dirfd); err != nil {
 		return fmt.Errorf("sync %s directory before install: %w", label, err)
 	}

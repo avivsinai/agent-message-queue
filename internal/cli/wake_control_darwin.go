@@ -355,8 +355,7 @@ func captureDarwinControlPeerOwner(pid int) (wakeOwner, error) {
 }
 
 func authorizeDarwinOwnerControlAt(
-	dirfd int,
-	agentDir *wakeAgentDir,
+	scope *wakeMutationScope,
 	root string,
 	me string,
 	expected wakeLock,
@@ -364,6 +363,10 @@ func authorizeDarwinOwnerControlAt(
 	peerPID int,
 	peerUID uint32,
 ) (authorized wakeLockInspection, authorizedTarget *wakeTarget, retErr error) {
+	dirfd, agentDir, err := scope.location()
+	if err != nil {
+		return wakeLockInspection{}, nil, err
+	}
 	if peerUID != uint32(os.Geteuid()) {
 		return wakeLockInspection{}, nil, fmt.Errorf("wake control peer uid is not authorized")
 	}
@@ -374,13 +377,13 @@ func authorizeDarwinOwnerControlAt(
 		request.Generation != expected.Generation {
 		return wakeLockInspection{}, nil, fmt.Errorf("authoritative wake generation changed")
 	}
-	if err := validateBoundWakeMutationAt(dirfd, agentDir, current); err != nil {
+	if err := validateBoundWakeMutationAt(scope, current); err != nil {
 		return wakeLockInspection{}, nil, err
 	}
 	if classifyPersistedWakeClaim(current) != wakeClaimAuthoritative {
 		return wakeLockInspection{}, nil, fmt.Errorf("wake control target is not an authoritative owner claim")
 	}
-	target, err := authoritativeWakeRecoveryTargetAt(dirfd, agentDir, current)
+	target, err := authoritativeWakeRecoveryTargetAt(scope, current)
 	if err != nil {
 		return wakeLockInspection{}, nil, err
 	}
@@ -446,13 +449,15 @@ func handleDarwinOwnerControl(
 	testHooks *darwinWakeControlTestHooks,
 ) {
 	authorized := false
-	err := withExistingWakeMutationScopeModeInDir(
+	err := withExistingWakeMutationScopeNoWaitInDir(
 		agentDir,
-		unix.LOCK_EX|unix.LOCK_NB,
 		func(scope *wakeMutationScope) error {
-			_, _, err := authorizeDarwinOwnerControlAt(
-				scope.dirfd,
-				agentDir,
+			_, _, err := scope.location()
+			if err != nil {
+				return err
+			}
+			_, _, err = authorizeDarwinOwnerControlAt(
+				scope,
 				root,
 				me,
 				lock,
@@ -481,10 +486,14 @@ func handleDarwinOwnerControl(
 	}
 
 	removed := false
-	err = withExistingWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+	err = withExistingWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+		_, scopedAgentDir, err := scope.location()
+		if err != nil {
+			return err
+		}
+		agentDir = scopedAgentDir
 		current, target, err := authorizeDarwinOwnerControlAt(
-			dirfd,
-			agentDir,
+			scope,
 			root,
 			me,
 			lock,
@@ -495,7 +504,7 @@ func handleDarwinOwnerControl(
 		if err != nil {
 			return err
 		}
-		if err := removeAuthoritativeWakeClaimAt(dirfd, agentDir, current, target); err != nil {
+		if err := removeAuthoritativeWakeClaimAt(scope, current, target); err != nil {
 			return err
 		}
 		removed = true
@@ -620,12 +629,15 @@ func handleDarwinWakeRestartControl(
 	if restartSignals == nil {
 		return
 	}
-	err := withExistingWakeMutationScopeModeInDir(
+	err := withExistingWakeMutationScopeNoWaitInDir(
 		agentDir,
-		unix.LOCK_EX|unix.LOCK_NB,
 		func(scope *wakeMutationScope) error {
+			dirfd, _, err := scope.location()
+			if err != nil {
+				return err
+			}
 			if err := authorizeDarwinWakeRestartControlAt(
-				scope.dirfd,
+				dirfd,
 				agentDir,
 				root,
 				me,
@@ -828,18 +840,21 @@ func startWakeControlListenerInDirOwnedWithRestart(
 					requestedTargetDigest = fields[1]
 				}
 				accepted := false
-				err = withExistingWakeMutationScopeModeInDir(
+				err = withExistingWakeMutationScopeNoWaitInDir(
 					agentDir,
-					unix.LOCK_EX|unix.LOCK_NB,
 					func(scope *wakeMutationScope) error {
-						current := inspectWakeLockAt(scope.dirfd, agentDir, root, me)
+						dirfd, _, err := scope.location()
+						if err != nil {
+							return err
+						}
+						current := inspectWakeLockAt(dirfd, agentDir, root, me)
 						if !current.Exists || current.Lock.Generation != lock.Generation || current.Lock.ControlSocket != path {
 							return nil
 						}
-						if err := validateWakeLockOwnerlessMutationAtForTermination(scope.dirfd, agentDir, current); err != nil {
+						if err := validateWakeLockOwnerlessMutationAtForTermination(dirfd, agentDir, current); err != nil {
 							return err
 						}
-						if err := validateRequestedWakeTargetDigestAt(scope.dirfd, agentDir, current, requestedTargetDigest); err != nil {
+						if err := validateRequestedWakeTargetDigestAt(dirfd, agentDir, current, requestedTargetDigest); err != nil {
 							return err
 						}
 						if err := scope.queueStopRequest(stopRequest); err != nil {
@@ -862,24 +877,26 @@ func startWakeControlListenerInDirOwnedWithRestart(
 					testHooks.afterLoopStopped()
 				}
 				var removal wakeLockRemovalOutcome
-				err = withExistingWakeMutationScopeModeInDir(
+				err = withExistingWakeMutationScopeNoWaitInDir(
 					agentDir,
-					unix.LOCK_EX|unix.LOCK_NB,
 					func(scope *wakeMutationScope) error {
-						current := inspectWakeLockAt(scope.dirfd, agentDir, root, me)
+						dirfd, _, err := scope.location()
+						if err != nil {
+							return err
+						}
+						current := inspectWakeLockAt(dirfd, agentDir, root, me)
 						if !current.Exists || current.Lock.Generation != lock.Generation ||
 							current.Lock.ControlSocket != path {
 							return nil
 						}
-						if err := validateWakeLockOwnerlessMutationAtForTermination(scope.dirfd, agentDir, current); err != nil {
+						if err := validateWakeLockOwnerlessMutationAtForTermination(dirfd, agentDir, current); err != nil {
 							return err
 						}
-						if err := validateRequestedWakeTargetDigestAt(scope.dirfd, agentDir, current, requestedTargetDigest); err != nil {
+						if err := validateRequestedWakeTargetDigestAt(dirfd, agentDir, current, requestedTargetDigest); err != nil {
 							return err
 						}
 						removal = removeWakeLockIfUnchangedGuardedAtDurableOutcome(
-							scope.dirfd,
-							agentDir,
+							scope,
 							current,
 							scope.unlinkWakeLockForCleanup,
 						)
@@ -1078,7 +1095,12 @@ func cooperativeStopAuthoritativeWakeInDir(
 	if agentDir == nil {
 		return false, fmt.Errorf("cooperative authoritative wake stop unavailable: wake agent directory capability is missing")
 	}
-	if err := withExistingWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+	if err := withExistingWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+		dirfd, scopedAgentDir, err := scope.location()
+		if err != nil {
+			return err
+		}
+		agentDir = scopedAgentDir
 		if err := validateWakeStateAgentDirAt(dirfd, agentDir); err != nil {
 			return err
 		}
@@ -1086,7 +1108,7 @@ func cooperativeStopAuthoritativeWakeInDir(
 		if !sameWakeLockGeneration(i, current) {
 			return fmt.Errorf("authoritative wake generation changed before cooperative stop")
 		}
-		_, err := validateAuthoritativeWakeClaimPairAt(dirfd, agentDir, current)
+		_, err = validateAuthoritativeWakeClaimPairAt(scope, current)
 		return err
 	}); err != nil {
 		return false, fmt.Errorf("cooperative authoritative wake stop unavailable: %w", err)

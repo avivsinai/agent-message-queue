@@ -21,8 +21,11 @@ func (scope *wakeMutationScope) signalProcess(pid int, signal os.Signal) error {
 }
 
 func (scope *wakeMutationScope) queueStopRequest(stopRequest chan<- struct{}) error {
-	if scope == nil || scope.agentDir == nil || stopRequest == nil {
+	if stopRequest == nil {
 		return fmt.Errorf("wake stop control queue is missing")
+	}
+	if _, _, err := scope.location(); err != nil {
+		return err
 	}
 	if _, err := scope.requireCanonicalOrDetached(); err != nil {
 		return err
@@ -39,8 +42,11 @@ func (scope *wakeMutationScope) queueRestartSignal(
 	restartSignals chan<- os.Signal,
 	signal os.Signal,
 ) error {
-	if scope == nil || scope.agentDir == nil || restartSignals == nil {
+	if restartSignals == nil {
 		return fmt.Errorf("wake restart control queue is missing")
+	}
+	if _, _, err := scope.location(); err != nil {
+		return err
 	}
 	if _, err := scope.requireCanonicalOrDetached(); err != nil {
 		return err

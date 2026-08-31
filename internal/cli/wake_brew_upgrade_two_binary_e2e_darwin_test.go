@@ -189,8 +189,8 @@ func persistAdjacentRefusedRestart(t *testing.T, binaryA, root, agent, generatio
 		t.Fatal(err)
 	}
 	defer func() { _ = agentDir.Close() }()
-	if err := agentDir.withFD(func(dirfd int) error {
-		return writeWakeRestartRecordAt(dirfd, agentDir, record)
+	if err := withWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+		return writeWakeRestartRecordAt(scope, record)
 	}); err != nil {
 		t.Fatal(err)
 	}
