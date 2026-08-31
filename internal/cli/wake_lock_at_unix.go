@@ -331,7 +331,7 @@ func removeWakeLockIfUnchangedGuardedAtOutcome(
 	// undetectable. The retained descriptor still prevents successor mutation;
 	// the post-commit check below surfaces swaps observed before return.
 	unlinkWithDetachedClassification := func() error {
-		if err := markWakeDetachedCleanup(&detachedValidationErr, agentDir); err != nil {
+		if err := markWakeDetachedCleanup(&detachedValidationErr, agentDir, dirfd); err != nil {
 			return err
 		}
 		return unlink()
@@ -350,7 +350,7 @@ func removeWakeLockIfUnchangedGuardedAtOutcome(
 	// The pre-unlink check and unlink cannot be atomic against a
 	// non-cooperating namespace rename. The retained descriptor still prevents
 	// successor mutation, so surface a late replacement as detached cleanup.
-	lateRelationErr := markWakeDetachedCleanup(&detachedValidationErr, agentDir)
+	lateRelationErr := markWakeDetachedCleanup(&detachedValidationErr, agentDir, dirfd)
 	outcome := wakeLockRemovalOutcome{Committed: true}
 	if detachedValidationErr != nil {
 		outcome.Err = newWakeDetachedCleanupOnlyError(detachedValidationErr)
@@ -468,11 +468,11 @@ func wakeDetachedCleanupValidationError() error {
 	return fmt.Errorf("retained wake agent directory is detached from the canonical successor")
 }
 
-func markWakeDetachedCleanup(err *error, agentDir *wakeAgentDir) error {
+func markWakeDetachedCleanup(err *error, agentDir *wakeAgentDir, dirfd int) error {
 	if err == nil || *err != nil {
 		return nil
 	}
-	relation, relationErr := retainedWakeAgentDirRelation(agentDir)
+	relation, relationErr := retainedWakeAgentDirRelationAt(agentDir, dirfd)
 	if relationErr != nil {
 		return relationErr
 	}

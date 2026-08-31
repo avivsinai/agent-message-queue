@@ -208,7 +208,7 @@ func validateWakeLockOwnerlessMutationAtForTermination(
 	if err != nil {
 		return newWakeStateBoundInconclusiveError(err)
 	}
-	relation, err := retainedWakeAgentDirRelation(agentDir)
+	relation, err := retainedWakeAgentDirRelationAt(agentDir, dirfd)
 	if err != nil {
 		return newWakeStateBoundInconclusiveError(err)
 	}
@@ -272,7 +272,7 @@ func validateWakeLockStaleRemovalAtForTermination(
 	agentDir *wakeAgentDir,
 	inspection wakeLockInspection,
 ) error {
-	relation, err := retainedWakeAgentDirRelation(agentDir)
+	relation, err := retainedWakeAgentDirRelationAt(agentDir, dirfd)
 	if err != nil {
 		return newWakeStateBoundInconclusiveError(err)
 	}

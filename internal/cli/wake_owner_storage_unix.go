@@ -569,7 +569,7 @@ func removeAuthoritativeWakeClaimAt(
 	}
 	if detachedValidationErr == nil {
 		if err := validateWakeStateAgentDirAt(dirfd, agentDir); err != nil {
-			relation, relationErr = retainedWakeAgentDirRelation(agentDir)
+			relation, relationErr = retainedWakeAgentDirRelationAt(agentDir, dirfd)
 			if relationErr != nil {
 				return newWakeStateBoundInconclusiveError(relationErr)
 			}
@@ -591,7 +591,7 @@ func removeAuthoritativeWakeClaimAt(
 		}
 	}
 	beforeAuthoritativeWakeStateSnapshot()
-	relation, relationErr = retainedWakeAgentDirRelation(agentDir)
+	relation, relationErr = retainedWakeAgentDirRelationAt(agentDir, dirfd)
 	if relationErr != nil {
 		return newWakeStateBoundInconclusiveError(relationErr)
 	}
@@ -616,7 +616,7 @@ func removeAuthoritativeWakeClaimAt(
 		var stateSnapshotErr error
 		releaseStateSnapshot, releaseStateExists, stateSnapshotErr = readWakeStateRawSnapshotAt(dirfd, agentDir)
 		if stateSnapshotErr != nil {
-			relation, relationErr = retainedWakeAgentDirRelation(agentDir)
+			relation, relationErr = retainedWakeAgentDirRelationAt(agentDir, dirfd)
 			if relationErr != nil {
 				return newWakeStateBoundInconclusiveError(relationErr)
 			}
@@ -706,7 +706,7 @@ func removeAuthoritativeWakeClaimAt(
 	}
 	removeAuthoritativeWakeAfterLockRelease()
 	if err := validateWakeStateAgentDirAt(dirfd, agentDir); err != nil {
-		relation, relationErr := retainedWakeAgentDirRelation(agentDir)
+		relation, relationErr := retainedWakeAgentDirRelationAt(agentDir, dirfd)
 		if relationErr != nil {
 			return errors.Join(cleanupErr, newWakeStateBoundInconclusiveError(relationErr))
 		}
@@ -812,7 +812,7 @@ func removeAuthoritativeWakeClaimAt(
 	}
 	removeAuthoritativeWakeBeforeFinalAuthorityCheck()
 	if err := validateWakeStateAgentDirAt(dirfd, agentDir); err != nil {
-		relation, relationErr := retainedWakeAgentDirRelation(agentDir)
+		relation, relationErr := retainedWakeAgentDirRelationAt(agentDir, dirfd)
 		if relationErr != nil {
 			return errors.Join(cleanupErr, newWakeStateBoundInconclusiveError(relationErr))
 		}

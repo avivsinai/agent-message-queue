@@ -276,6 +276,8 @@ func retainedWakeAgentDirRelation(agentDir *wakeAgentDir) (wakeAgentDirRelation,
 	return relation, err
 }
 
+// retainedWakeAgentDirRelationAt inspects an already-held directory descriptor
+// without acquiring agentDir.mu. Use it from an active withFD callback.
 func retainedWakeAgentDirRelationAt(
 	agentDir *wakeAgentDir,
 	dirfd int,

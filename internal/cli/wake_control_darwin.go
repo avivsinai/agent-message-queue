@@ -921,6 +921,8 @@ func startWakeControlListenerInDirOwnedWithRestart(
 			_ = listener.Close()
 			<-acceptDone
 			handlers.Wait()
+			// Every accepted handler has returned, so no handler can still hold
+			// a lifecycle scope or the agent-directory read lock here.
 			_ = withExistingWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
 				if cur := inspectWakeLockAt(dirfd, agentDir, root, me); cur.Exists && cur.Lock.Generation != lock.Generation {
 					return nil
