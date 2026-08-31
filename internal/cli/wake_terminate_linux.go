@@ -167,18 +167,22 @@ func terminateAndRemoveOrphanedWakeLockInDirWithRawConsent(
 		!isLiveRawOrphan(locked) {
 		return false, fmt.Errorf("live raw wake identity changed before consented termination")
 	}
-	if err := terminateWakePidfdWithAuthorization(
+	attempted, err := terminateWakePidfdWithAuthorization(
 		agentDir,
 		locked,
 		requestedTarget,
 		allowMissingGuard,
 		pidfd,
-	); err != nil {
+	)
+	if err != nil {
+		if !attempted {
+			return false, err
+		}
 		return resolveMissingWakeLockAfterTerminationInDir(agentDir, locked, err)
 	}
 
 	removed := false
-	err := withWakeMutationScopeOrRetainedDir(agentDir, allowMissingGuard, func(scope *wakeMutationScope) error {
+	err = withWakeMutationScopeOrRetainedDir(agentDir, allowMissingGuard, func(scope *wakeMutationScope) error {
 		dirfd, scopedAgentDir, err := scope.location()
 		if err != nil {
 			return err
@@ -297,7 +301,8 @@ func terminateWakePidfdWithAuthorization(
 	requestedTarget *wakeTarget,
 	allowMissingGuard bool,
 	pidfd int,
-) error {
+) (bool, error) {
+	attempted := false
 	send := func(signal unix.Signal) error {
 		return withWakeMutationScopeOrRetainedDirNoWait(
 			agentDir,
@@ -313,38 +318,42 @@ func terminateWakePidfdWithAuthorization(
 					expected.Root,
 					expected.Agent,
 				)
-				if current.Exists {
-					if !sameWakeLockGeneration(expected, current) {
-						return fmt.Errorf(
-							"wake lock generation changed before %s; refusing to signal; inspect with `amq wake check --root %s --me %s --json`",
-							signal,
-							expected.Root,
-							expected.Agent,
-						)
-					}
-					if err := validateWakeLockOwnerlessMutationAtForTermination(
+				if !current.Exists {
+					return fmt.Errorf("wake lock is missing before %s; refusing to signal", signal)
+				}
+				if !sameWakeLockGeneration(expected, current) {
+					return fmt.Errorf(
+						"wake lock generation changed before %s; refusing to signal; inspect with `amq wake check --root %s --me %s --json`",
+						signal,
+						expected.Root,
+						expected.Agent,
+					)
+				}
+				if err := validateWakeLockOwnerlessMutationAtForTermination(
+					dirfd,
+					scopedAgentDir,
+					current,
+				); err != nil {
+					return fmt.Errorf("authorize wake before %s: %w", signal, err)
+				}
+				if requestedTarget != nil {
+					if err := requireExistingWakeTargetMatchesAt(
 						dirfd,
 						scopedAgentDir,
 						current,
+						*requestedTarget,
 					); err != nil {
-						return fmt.Errorf("authorize wake before %s: %w", signal, err)
-					}
-					if requestedTarget != nil {
-						if err := requireExistingWakeTargetMatchesAt(
-							dirfd,
-							scopedAgentDir,
-							current,
-							*requestedTarget,
-						); err != nil {
-							return fmt.Errorf("authorize wake target before %s: %w", signal, err)
-						}
+						return fmt.Errorf("authorize wake target before %s: %w", signal, err)
 					}
 				}
-				return scope.sendPidfdSignalForTermination(pidfd, signal)
+				signalAttempted, err := scope.sendPidfdSignalForTermination(pidfd, signal)
+				attempted = attempted || signalAttempted
+				return err
 			},
 		)
 	}
-	return terminateWakePidfdWithSignalAuthorization(pidfd, send)
+	err := terminateWakePidfdWithSignalAuthorization(pidfd, send)
+	return attempted, err
 }
 
 func terminateAuthoritativeWakePidfdWithAuthorization(

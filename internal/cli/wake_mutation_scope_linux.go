@@ -32,11 +32,11 @@ func (scope *wakeMutationScope) sendPidfdSignal(pidfd int, signal unix.Signal) e
 // process; canonical or proven-detached retained authority is sufficient,
 // while an inconclusive relation still refuses the effect. Every other signal
 // uses sendPidfdSignal.
-func (scope *wakeMutationScope) sendPidfdSignalForTermination(pidfd int, signal unix.Signal) error {
+func (scope *wakeMutationScope) sendPidfdSignalForTermination(pidfd int, signal unix.Signal) (bool, error) {
 	if _, err := scope.requireCanonicalOrDetached(); err != nil {
-		return err
+		return false, err
 	}
-	return sendWakePidfdSignal(pidfd, signal)
+	return true, sendWakePidfdSignal(pidfd, signal)
 }
 
 func sendWakePidfdSignal(pidfd int, signal unix.Signal) error {
