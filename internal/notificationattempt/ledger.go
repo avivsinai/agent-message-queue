@@ -302,9 +302,16 @@ func (w *Writer) append(record Record) error {
 				_ = os.Truncate(fullPath, 0)
 			}
 		}
-		// Downgrade LOCK_EX -> LOCK_SH for the append. flock downgrades are a
-		// single LOCK_SH call: it atomically releases EX and acquires SH, so
-		// waiting appenders can proceed while we still hold SH for our own write.
+		// Downgrade LOCK_EX -> LOCK_SH for the append. A flock conversion is
+		// NOT atomic on Linux: the EX is released and then the SH acquired, so
+		// a pending rotator's EX can be granted in the gap before our SH lands.
+		// Correctness here does NOT depend on atomic conversion — it comes from
+		// re-opening the data file AFTER this SH is finally held (below). Any
+		// rotator that sneaks into the gap is drained (it holds EX, finishes its
+		// read/merge/truncate, releases) before our subsequent open sees a stable
+		// data file; our write then lands under our SH, which excludes further
+		// rotation. Do not lean on atomic conversion in a path not backstopped by
+		// open-after-lock.
 		if err := flockShared(lockFile); err != nil {
 			flockRelease(lockFile)
 			return fmt.Errorf("downgrade to shared lock for append: %w", err)

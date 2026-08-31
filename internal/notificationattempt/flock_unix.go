@@ -30,8 +30,12 @@ func flockExclusive(f *os.File) error {
 }
 
 // flockRelease releases any held advisory lock. Safe to call on an unlocked fd.
-// A single LOCK_SH call after holding LOCK_EX atomically downgrades EX→SH,
-// letting waiting appenders proceed while we keep SH for our own append.
+//
+// Note: a LOCK_SH call while holding LOCK_EX converts EX->SH, but this is NOT
+// atomic on Linux — the EX is dropped before the SH is acquired, so a pending
+// EX elsewhere may be granted in the gap. Callers that downgrade must not rely
+// on atomic conversion for correctness; the append path is safe because it
+// re-opens the data file only after the SH is held.
 func flockRelease(f *os.File) {
 	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 }
