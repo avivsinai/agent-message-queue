@@ -678,8 +678,9 @@ Schema 1 is the byte-compatible default for a missing lock. Live or stale
 locks additionally report `wake_generation` and `wake_target_digest` when
 those values exist (omitted when empty). Schema 2 is explicit with
 `--json-schema=2` and requires `--json`. It replaces prose parsing with a
-closed action kind, actor, reason code, and an argv command object when one
-action is directly executable. Missing evidence is an explicit JSON `null`,
+closed action kind, actor, reason code, and an argv command object for a
+directly executable action or safe operator diagnostic. Missing evidence is
+an explicit JSON `null`,
 including `wake.generation` and `wake.target_digest`;
 `image.status="unknown"` remains a real classification, not an error. In
 doctor schema 2, each wake-lock entry carries the same decision under

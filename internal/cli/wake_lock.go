@@ -618,7 +618,7 @@ func validateWakeLockStaleRemoval(inspection wakeLockInspection) error {
 		return err
 	}
 	if wakeLockHasOwnerMarkers(inspection) {
-		return fmt.Errorf("owner-bound wake claims require 'amq wake recover-owner --me %s'", inspection.Agent)
+		return fmt.Errorf("owner-bound wake claims require %s", wakeRecoverOwnerCommand(inspection.Root, inspection.Agent))
 	}
 	if err := validateWakeLockRepairable(inspection); err == nil {
 		return nil

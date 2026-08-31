@@ -65,7 +65,10 @@ func wakeControlResidueACK(err error) string {
 	return "ACK RESIDUE " + strings.Join(tokens, ",") + "\n"
 }
 
-func parseWakeControlResidueACK(line string) ([]wakeLockRemovalResidue, error) {
+func parseWakeControlResidueACK(line, root, agent string) ([]wakeLockRemovalResidue, error) {
+	refuse := func() error {
+		return withWakeDiagnostic(errors.New("cooperative wake stop refused"), root, agent)
+	}
 	response := strings.TrimSpace(line)
 	switch response {
 	case "ACK":
@@ -75,7 +78,7 @@ func parseWakeControlResidueACK(line string) ([]wakeLockRemovalResidue, error) {
 	}
 	const prefix = "ACK RESIDUE "
 	if !strings.HasPrefix(response, prefix) {
-		return nil, fmt.Errorf("cooperative wake stop refused")
+		return nil, refuse()
 	}
 	var residue []wakeLockRemovalResidue
 	for _, token := range strings.Split(strings.TrimPrefix(response, prefix), ",") {
@@ -86,11 +89,11 @@ func parseWakeControlResidueACK(line string) ([]wakeLockRemovalResidue, error) {
 		case "detached-cleanup":
 			cause = wakeLockResidueDetachedCleanup
 		default:
-			return nil, fmt.Errorf("cooperative wake stop refused")
+			return nil, refuse()
 		}
 		next := appendWakeLockRemovalResidue(residue, cause)
 		if len(next) == len(residue) {
-			return nil, fmt.Errorf("cooperative wake stop refused")
+			return nil, refuse()
 		}
 		residue = next
 	}
@@ -363,6 +366,7 @@ func authorizeDarwinOwnerControlAt(
 	peerPID int,
 	peerUID uint32,
 ) (authorized wakeLockInspection, authorizedTarget *wakeTarget, retErr error) {
+	defer func() { retErr = withWakeDiagnostic(retErr, root, me) }()
 	dirfd, agentDir, err := scope.location()
 	if err != nil {
 		return wakeLockInspection{}, nil, err
@@ -526,12 +530,17 @@ func authorizeDarwinWakeRestartControlAt(
 	peerPID int,
 	peerUID uint32,
 ) (retErr error) {
+	defer func() { retErr = withWakeDiagnostic(retErr, root, me) }()
 	canonicalRoot := canonicalWakeRoot(root)
 	if request.Operation != wakeControlRestartOperation {
 		return fmt.Errorf("wake restart control operation is unsupported")
 	}
 	if request.Rollback {
-		return fmt.Errorf("wake restart control refuses rollback authorization")
+		return withWakeDiagnostic(
+			fmt.Errorf("wake restart control refuses rollback authorization"),
+			root,
+			me,
+		)
 	}
 	if peerUID != uint32(os.Geteuid()) {
 		return fmt.Errorf("wake restart control peer uid is not authorized")
@@ -945,7 +954,8 @@ func startWakeControlListenerInDirOwnedWithRestart(
 	return cleanup, exposedStop, markLoopStopped, nil
 }
 
-func cooperativeStopInjectVia(i wakeLockInspection) (bool, error) {
+func cooperativeStopInjectVia(i wakeLockInspection) (stopped bool, retErr error) {
+	defer func() { retErr = withWakeDiagnostic(retErr, i.Root, i.Agent) }()
 	if i.Lock.ControlSocket == "" || i.Lock.Generation == "" {
 		return false, fmt.Errorf("live inject-via wake orphan has no cooperative control endpoint; stop the owning supervisor")
 	}
@@ -970,7 +980,8 @@ func cooperativeStopInjectViaInDir(
 	agentDir *wakeAgentDir,
 	i wakeLockInspection,
 	requestedTarget *wakeTarget,
-) (bool, error) {
+) (stopped bool, retErr error) {
+	defer func() { retErr = withWakeDiagnostic(retErr, i.Root, i.Agent) }()
 	if agentDir == nil {
 		return false, fmt.Errorf("cooperative wake stop agent capability is missing")
 	}
@@ -1014,9 +1025,13 @@ func cooperativeStopInjectViaInDir(
 	_ = conn.SetDeadline(time.Time{})
 	line, err := bufio.NewReader(io.LimitReader(conn, wakeControlInjectViaACKMaxBytes+1)).ReadString('\n')
 	if err != nil || len(line) > wakeControlInjectViaACKMaxBytes {
-		return false, fmt.Errorf("cooperative wake stop refused")
+		return false, withWakeDiagnostic(
+			fmt.Errorf("cooperative wake stop refused"),
+			i.Root,
+			i.Agent,
+		)
 	}
-	residue, err := parseWakeControlResidueACK(line)
+	residue, err := parseWakeControlResidueACK(line, i.Root, i.Agent)
 	if err != nil {
 		return false, err
 	}
@@ -1042,7 +1057,8 @@ func validateRequestedWakeTargetDigestAt(
 	agentDir *wakeAgentDir,
 	inspection wakeLockInspection,
 	requestedDigest string,
-) error {
+) (retErr error) {
+	defer func() { retErr = withWakeDiagnostic(retErr, inspection.Root, inspection.Agent) }()
 	if requestedDigest == "" {
 		return nil
 	}
@@ -1075,7 +1091,8 @@ func cooperativeStopAuthoritativeWakeInDir(
 	agentDir *wakeAgentDir,
 	i wakeLockInspection,
 	auth wakeOwnerReleaseAuthorization,
-) (bool, error) {
+) (gone bool, retErr error) {
+	defer func() { retErr = withWakeDiagnostic(retErr, i.Root, i.Agent) }()
 	if i.Lock.WakeMode != wakeOwnerWakeMode ||
 		i.Lock.ControlSocket == "" ||
 		i.Lock.Generation == "" ||
@@ -1131,9 +1148,13 @@ func cooperativeStopAuthoritativeWakeInDir(
 	_ = conn.SetDeadline(time.Time{})
 	line, err := bufio.NewReader(conn).ReadString('\n')
 	if err != nil || strings.TrimSpace(line) != "ACK" {
-		return false, fmt.Errorf("cooperative authoritative wake stop refused")
+		return false, withWakeDiagnostic(
+			fmt.Errorf("cooperative authoritative wake stop refused"),
+			i.Root,
+			i.Agent,
+		)
 	}
-	gone := false
+	gone = false
 	err = withExistingWakeLifecycleGuardNoWaitInDir(agentDir, func(dirfd int) error {
 		current := inspectWakeLockAt(dirfd, agentDir, i.Root, i.Agent)
 		gone = !current.Exists || current.Lock.Generation != i.Lock.Generation

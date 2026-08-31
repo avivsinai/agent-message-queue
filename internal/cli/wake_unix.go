@@ -247,9 +247,9 @@ func supersedeUnverifiedGenericWakeAt(
 	if current.Status != wakeLockUnverified ||
 		classifyPersistedWakeClaim(current) != wakeClaimGeneric {
 		return fmt.Errorf(
-			"wake state for %s is not an unverified ownerless generic claim; use 'amq wake recover-owner --me %s' for an owner-bound claim",
+			"wake state for %s is not an unverified ownerless generic claim; use %s for an owner-bound claim",
 			expected.Agent,
-			expected.Agent,
+			wakeRecoverOwnerCommand(expected.Root, expected.Agent),
 		)
 	}
 	if err := removeWakeLockIfUnchangedGuardedAt(scope, current); err != nil {
@@ -278,7 +278,7 @@ func acquireWakeLockWithOptionsInDir(
 		return nil, fmt.Errorf("wake agent directory capability is missing")
 	}
 	if options.repairLineage != nil && options.target != nil && options.target.Owner != nil {
-		return nil, fmt.Errorf("owner-bearing wake state requires 'amq wake recover-owner --me %s'", me)
+		return nil, fmt.Errorf("owner-bearing wake state requires %s", wakeRecoverOwnerCommand(root, me))
 	}
 	if options.target != nil && options.target.Owner != nil {
 		return acquireAuthoritativeWakeLockWithOptionsInDir(agentDir, root, me, options)
@@ -300,10 +300,10 @@ func acquireWakeLockWithOptionsInDir(
 			}
 			if inspection.Status == wakeLockUnverified && wakeLockHasOwnerMarkers(inspection) {
 				return fmt.Errorf(
-					"wake state for %s is unverified: %s; run 'amq wake recover-owner --me %s'",
+					"wake state for %s is unverified: %s; run %s",
 					me,
 					inspection.Reason,
-					me,
+					wakeRecoverOwnerCommand(root, me),
 				)
 			}
 			if wakeLockEligibleForQuarantine(inspection, wakeQuarantineNow()) {
@@ -322,7 +322,7 @@ func acquireWakeLockWithOptionsInDir(
 					return fmt.Errorf("persisted wake target for %s is unverified: %w", me, readErr)
 				}
 				if exists && persisted.Owner != nil {
-					return fmt.Errorf("wake handle %s has legacy owner-bearing state; run 'amq wake recover-owner --me %s'", me, me)
+					return fmt.Errorf("wake handle %s has legacy owner-bearing state; run %s", me, wakeRecoverOwnerCommand(root, me))
 				}
 			}
 			if inspection.Exists {
@@ -391,7 +391,7 @@ func acquireWakeLockWithOptionsInDir(
 					return fmt.Errorf("orphan wake target is unverified before targetless acquisition: %w", readErr)
 				}
 				if readErr == nil && exists && orphan.Target.Owner != nil {
-					return fmt.Errorf("wake handle %s has an owner-bearing orphan target; run 'amq wake recover-owner --me %s'", me, me)
+					return fmt.Errorf("wake handle %s has an owner-bearing orphan target; run %s", me, wakeRecoverOwnerCommand(root, me))
 				}
 				if readErr != nil && malformedWakeTargetLooksOwnerShaped(orphan.Raw) {
 					return fmt.Errorf("wake handle %s has an unverified owner-shaped orphan target; inspect the target because automatic owner recovery is unavailable", me)
@@ -407,7 +407,7 @@ func acquireWakeLockWithOptionsInDir(
 			if orphan, exists, readErr := readWakeTargetAt(dirfd, agentDir, root, me); readErr != nil {
 				return fmt.Errorf("wake target for %s is unverified: %w", me, readErr)
 			} else if exists && orphan.Owner != nil {
-				return fmt.Errorf("wake handle %s has an owner-bearing orphan target; run 'amq wake recover-owner --me %s'", me, me)
+				return fmt.Errorf("wake handle %s has an owner-bearing orphan target; run %s", me, wakeRecoverOwnerCommand(root, me))
 			}
 			if options.repairLineage != nil {
 				if options.target == nil {
@@ -792,7 +792,7 @@ func validateWakeLockOwnerlessMutation(inspection wakeLockInspection) error {
 			return fmt.Errorf("wake target is unverified before ownerless mutation: %w", err)
 		}
 		if exists && target.Owner != nil {
-			return fmt.Errorf("owner-bearing wake state requires 'amq wake recover-owner --me %s'", inspection.Agent)
+			return fmt.Errorf("owner-bearing wake state requires %s", wakeRecoverOwnerCommand(inspection.Root, inspection.Agent))
 		}
 	}
 	return nil
@@ -1089,12 +1089,14 @@ func repairWake(root, me string) (wakeRepairResult, error) {
 	}
 	if err := os.MkdirAll(fsq.AgentBase(root, me), 0o700); err != nil {
 		result.Status = "error"
+		err = withWakeDiagnostic(err, result.Root, result.Agent)
 		result.Reason = err.Error()
 		return result, err
 	}
 	agentDir, err := openWakeAgentDir(root, me)
 	if err != nil {
 		result.Status = "error"
+		err = withWakeDiagnostic(err, result.Root, result.Agent)
 		result.Reason = err.Error()
 		return result, err
 	}
@@ -1140,8 +1142,8 @@ func repairWake(root, me string) (wakeRepairResult, error) {
 				result.Status = "refused"
 				result.PID = inspection.PID
 				result.Reason = fmt.Sprintf(
-					"unverified wake is not an ownerless generic claim; use 'amq wake recover-owner --me %s' for an owner-bound claim",
-					me,
+					"unverified wake is not an ownerless generic claim; use %s for an owner-bound claim",
+					wakeRecoverOwnerCommand(root, me),
 				)
 				return errors.New(result.Reason)
 			}
@@ -1180,7 +1182,7 @@ func repairWake(root, me string) (wakeRepairResult, error) {
 		if target.Owner != nil {
 			result.Status = "refused"
 			result.PID = inspection.PID
-			result.Reason = fmt.Sprintf("owner-bearing wake state requires 'amq wake recover-owner --me %s'", me)
+			result.Reason = fmt.Sprintf("owner-bearing wake state requires %s", wakeRecoverOwnerCommand(root, me))
 			return errors.New(result.Reason)
 		}
 		if err := validateWakeTargetMatchesLock(inspection.Lock, target); err != nil {
@@ -1265,6 +1267,8 @@ func repairWake(root, me string) (wakeRepairResult, error) {
 		return nil
 	})
 	if prepareErr != nil {
+		prepareErr = withWakeDiagnostic(prepareErr, result.Root, result.Agent)
+		result.Reason = prepareErr.Error()
 		return result, prepareErr
 	}
 
@@ -1277,6 +1281,7 @@ func repairWake(root, me string) (wakeRepairResult, error) {
 		}
 		result.RepairAvailable = false
 		result.Status = "error"
+		startErr = withWakeDiagnostic(startErr, result.Root, result.Agent)
 		result.Reason = startErr.Error()
 		return result, startErr
 	}
@@ -1297,9 +1302,13 @@ func repairWake(root, me string) (wakeRepairResult, error) {
 		}
 		result.Reason = fmt.Sprintf("repaired wake failed exact preparation validation: %v", winnerErr)
 		if cleanupErr != nil {
-			return result, fmt.Errorf("%s (cleanup: %v)", result.Reason, cleanupErr)
+			winnerErr = fmt.Errorf("%s (cleanup: %v)", result.Reason, cleanupErr)
+		} else {
+			winnerErr = errors.New(result.Reason)
 		}
-		return result, errors.New(result.Reason)
+		winnerErr = withWakeDiagnostic(winnerErr, result.Root, result.Agent)
+		result.Reason = winnerErr.Error()
+		return result, winnerErr
 	}
 	validateAfterAcknowledgement := child.validateAdmission
 	child.validateAdmission = func() error {
@@ -1326,9 +1335,13 @@ func repairWake(root, me string) (wakeRepairResult, error) {
 		result.PID = winner.PID
 		result.Reason = fmt.Sprintf("repaired wake admission failed: %v", err)
 		if cleanupErr != nil {
-			return result, fmt.Errorf("%s (cleanup: %v)", result.Reason, cleanupErr)
+			err = fmt.Errorf("%s (cleanup: %v)", result.Reason, cleanupErr)
+		} else {
+			err = errors.New(result.Reason)
 		}
-		return result, errors.New(result.Reason)
+		err = withWakeDiagnostic(err, result.Root, result.Agent)
+		result.Reason = err.Error()
+		return result, err
 	}
 	result.Status = "repaired"
 	result.PID = winner.PID
@@ -2119,7 +2132,7 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 		return writeStdoutLine(wakeResumePreflightOK)
 	}
 	if repairGeneration != "" && requestedOwner != nil {
-		return fmt.Errorf("owner-bearing wake state requires 'amq wake recover-owner --me %s'", me)
+		return fmt.Errorf("owner-bearing wake state requires %s", wakeRecoverOwnerCommand(root, me))
 	}
 	var ownerObservation wakeOwnerObservation
 	if requestedOwner != nil {

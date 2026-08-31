@@ -7,7 +7,8 @@ import "fmt"
 func prepareAuthoritativeWakeStopPlatform(
 	scope *wakeMutationScope,
 	expected wakeLockInspection,
-) (authoritativeWakeStopCapability, error) {
+) (capability authoritativeWakeStopCapability, retErr error) {
+	defer func() { retErr = withWakeDiagnostic(retErr, expected.Root, expected.Agent) }()
 	dirfd, agentDir, err := scope.location()
 	if err != nil {
 		return authoritativeWakeStopCapability{}, err

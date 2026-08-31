@@ -393,12 +393,12 @@ func acquireWakeLifecycleGuard(
 		if !time.Now().Before(deadline) {
 			root := filepath.Dir(filepath.Dir(agentDir.path))
 			agent := filepath.Base(agentDir.path)
+			remedy := wakeCheckRemedy(root, agent).String()
 			return fmt.Errorf(
-				"wake lifecycle guard %s is held by another process; holder is unknown after %s; inspect with `amq wake check --root %s --me %s --json` or escalate manually",
+				"wake lifecycle guard %s is held by another process; holder is unknown after %s; inspect with %s or escalate manually",
 				path,
 				retryTimeout,
-				root,
-				agent,
+				remedy,
 			)
 		}
 		time.Sleep(wakeLifecycleGuardRetryInterval)

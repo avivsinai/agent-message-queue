@@ -122,8 +122,9 @@ func retireWakeIfGeneration(root, me string, requested wakeTarget, ifGeneration 
 	}
 	refuse := func(reason string) (wakeRetireResult, error) {
 		result.Status = "refused"
-		result.Reason = reason
-		return result, errors.New(reason)
+		err := withWakeDiagnostic(errors.New(reason), result.Root, result.Agent)
+		result.Reason = err.Error()
+		return result, err
 	}
 	inspection := inspectWakeLock(root, me)
 	if !inspection.Exists {
@@ -134,7 +135,7 @@ func retireWakeIfGeneration(root, me string, requested wakeTarget, ifGeneration 
 		return refuse("wake generation changed before retirement")
 	}
 	if wakeLockHasOwnerMarkers(inspection) {
-		return refuse(fmt.Sprintf("owner-bound wake claims require 'amq wake recover-owner --me %s'", me))
+		return refuse(fmt.Sprintf("owner-bound wake claims require %s", wakeRecoverOwnerCommand(root, me)))
 	}
 	agentDir, err := openExistingCoopWakeAgentDir(root, me)
 	if err != nil {
@@ -313,10 +314,14 @@ func snapshotWakeRetireArtifactsAt(
 		return wakeRetireArtifactSnapshot{}, err
 	}
 	if !exists {
-		return wakeRetireArtifactSnapshot{}, errors.New("no saved inject-via wake target; refusing retirement")
+		return wakeRetireArtifactSnapshot{}, withWakeDiagnostic(
+			errors.New("no saved inject-via wake target; refusing retirement"),
+			inspection.Root,
+			inspection.Agent,
+		)
 	}
 	if persisted.Target.Owner != nil {
-		return wakeRetireArtifactSnapshot{}, fmt.Errorf("owner-bearing wake state requires 'amq wake recover-owner --me %s'", inspection.Agent)
+		return wakeRetireArtifactSnapshot{}, fmt.Errorf("owner-bearing wake state requires %s", wakeRecoverOwnerCommand(inspection.Root, inspection.Agent))
 	}
 	if err := validateWakeTarget(persisted.Target, inspection.Root, inspection.Agent); err != nil {
 		return wakeRetireArtifactSnapshot{}, err
@@ -650,7 +655,7 @@ func validateWakeLockOwnerlessMutationAt(
 			return fmt.Errorf("wake target is unverified before ownerless mutation: %w", err)
 		}
 		if exists && target.Owner != nil {
-			return fmt.Errorf("owner-bearing wake state requires 'amq wake recover-owner --me %s'", inspection.Agent)
+			return fmt.Errorf("owner-bearing wake state requires %s", wakeRecoverOwnerCommand(inspection.Root, inspection.Agent))
 		}
 	}
 	return nil
@@ -852,7 +857,7 @@ func validateWakeLockStaleRemovalAt(
 		}
 	}
 	if wakeLockHasOwnerMarkers(inspection) {
-		return fmt.Errorf("owner-bound wake claims require 'amq wake recover-owner --me %s'", inspection.Agent)
+		return fmt.Errorf("owner-bound wake claims require %s", wakeRecoverOwnerCommand(inspection.Root, inspection.Agent))
 	}
 	if err := validateWakeLockRepairable(inspection); err == nil {
 		return nil
@@ -882,10 +887,14 @@ func requireExistingWakeTargetMatchesAt(
 		return err
 	}
 	if !exists {
-		return errors.New("no saved inject-via wake target; refusing retirement")
+		return withWakeDiagnostic(
+			errors.New("no saved inject-via wake target; refusing retirement"),
+			inspection.Root,
+			inspection.Agent,
+		)
 	}
 	if persisted.Owner != nil {
-		return fmt.Errorf("owner-bearing wake state requires 'amq wake recover-owner --me %s'", inspection.Agent)
+		return fmt.Errorf("owner-bearing wake state requires %s", wakeRecoverOwnerCommand(inspection.Root, inspection.Agent))
 	}
 	if err := validateWakeTarget(persisted, inspection.Root, inspection.Agent); err != nil {
 		return err

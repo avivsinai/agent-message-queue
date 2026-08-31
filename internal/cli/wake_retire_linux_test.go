@@ -201,7 +201,7 @@ func TestRetireWakeLinuxDetachedBoundStateValidationUsesRetainedDirectory(t *tes
 	}
 }
 
-func TestRetireWakeLinuxPreservesRetainedLockWhenCanonicalDirectoryDisappearsAfterStop(t *testing.T) {
+func TestRetireWakeLinuxRemovesRetainedLockWhenCanonicalDirectoryDisappearsAfterStop(t *testing.T) {
 	fixture, requested, stopped := setupBoundLinuxRetire(t)
 	detachedPath := fixture.agentDir.path + ".post-stop-no-successor"
 	originalPoll := linuxPidfdPoll
@@ -221,12 +221,10 @@ func TestRetireWakeLinuxPreservesRetainedLockWhenCanonicalDirectoryDisappearsAft
 		t.Fatalf("result=%#v err=%v", result, err)
 	}
 	if strings.Contains(result.Reason, "wake lock durability") ||
-		!strings.Contains(result.Reason, ".wake.lock") {
-		t.Fatalf("preserved-lock residue reason = %q", result.Reason)
+		!strings.Contains(result.Reason, "detached wake cleanup") {
+		t.Fatalf("detached residue reason = %q", result.Reason)
 	}
-	if _, err := os.Stat(filepath.Join(detachedPath, ".wake.lock")); err != nil {
-		t.Fatalf("retained wake lock was not preserved: %v", err)
-	}
+	assertPathMissingForTest(t, filepath.Join(detachedPath, ".wake.lock"))
 }
 
 func setupBoundLinuxRetire(

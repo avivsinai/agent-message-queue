@@ -262,7 +262,9 @@ const (
 )
 
 // retainedWakeAgentDirRelation distinguishes a proven detached retained
-// directory from a namespace lookup that failed for an unknown reason.
+// directory from a namespace lookup that failed for an unknown reason. It
+// reacquires agentDir.withFD, so call it only when no withFD callback is active;
+// use retainedWakeAgentDirRelationAt inside one.
 func retainedWakeAgentDirRelation(agentDir *wakeAgentDir) (wakeAgentDirRelation, error) {
 	if agentDir == nil {
 		return wakeAgentDirInconclusive, fmt.Errorf("wake agent directory capability is missing")
@@ -324,25 +326,4 @@ func retainedWakeAgentDirRelationAt(
 		return wakeAgentDirCanonical, nil
 	}
 	return wakeAgentDirDetached, nil
-}
-
-func canonicalWakeAgentDirPathPresent(agentDir *wakeAgentDir) (bool, error) {
-	if agentDir == nil || agentDir.file == nil {
-		return false, fmt.Errorf("wake agent directory capability is missing")
-	}
-	fd, err := unix.Open(
-		agentDir.path,
-		unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW,
-		0,
-	)
-	if err != nil {
-		if errors.Is(err, unix.ENOENT) {
-			return false, nil
-		}
-		return false, fmt.Errorf("open canonical wake agent directory %s: %w", agentDir.path, err)
-	}
-	if err := unix.Close(fd); err != nil {
-		return false, fmt.Errorf("close canonical wake agent directory %s: %w", agentDir.path, err)
-	}
-	return true, nil
 }

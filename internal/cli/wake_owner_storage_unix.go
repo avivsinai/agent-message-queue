@@ -472,7 +472,8 @@ func removeAuthoritativeWakeClaimAt(
 	scope *wakeMutationScope,
 	expected wakeLockInspection,
 	target *wakeTarget,
-) error {
+) (retErr error) {
+	defer func() { retErr = withWakeDiagnostic(retErr, expected.Root, expected.Agent) }()
 	dirfd, agentDir, err := scope.location()
 	if err != nil {
 		return err

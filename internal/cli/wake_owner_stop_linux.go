@@ -11,7 +11,8 @@ import (
 func prepareAuthoritativeWakeStopPlatform(
 	scope *wakeMutationScope,
 	expected wakeLockInspection,
-) (authoritativeWakeStopCapability, error) {
+) (capability authoritativeWakeStopCapability, retErr error) {
+	defer func() { retErr = withWakeDiagnostic(retErr, expected.Root, expected.Agent) }()
 	dirfd, agentDir, err := scope.location()
 	if err != nil {
 		return authoritativeWakeStopCapability{}, err
@@ -36,7 +37,7 @@ func prepareAuthoritativeWakeStopPlatform(
 		}
 		return authoritativeWakeStopCapability{}, fmt.Errorf("pidfd_open authoritative wake process %d: %w", metadata.PID, err)
 	}
-	capability := authoritativeWakeStopCapability{
+	capability = authoritativeWakeStopCapability{
 		Inspection: metadata,
 		close:      func() error { return linuxPidfdClose(pidfd) },
 	}

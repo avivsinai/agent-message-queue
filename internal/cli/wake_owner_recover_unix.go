@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
@@ -23,6 +24,18 @@ type wakeOwnerRecoverResult struct {
 	OwnerSession int    `json:"owner_session,omitempty"`
 	Reason       string `json:"reason,omitempty"`
 	NextAction   string `json:"next_action,omitempty"`
+}
+
+func wakeOwnerRecoveryNextAction(next, root, agent string) string {
+	next = strings.TrimSpace(next)
+	remedy := wakeCheckRemedy(root, agent).String()
+	if next == "" {
+		return "inspect with " + remedy
+	}
+	if strings.Contains(next, "amq ") {
+		return next
+	}
+	return next + "; inspect with " + remedy
 }
 
 func runWakeRecoverOwner(args []string) error {
@@ -96,12 +109,14 @@ func recoverOwnerWakeWithStopPreparer(
 	}
 	if err := os.MkdirAll(fsq.AgentBase(root, me), 0o700); err != nil {
 		result.Status = "error"
+		err = withWakeDiagnostic(err, result.Root, result.Agent)
 		result.Reason = err.Error()
 		return result, err
 	}
 	agentDir, err := openWakeAgentDir(root, me)
 	if err != nil {
 		result.Status = "error"
+		err = withWakeDiagnostic(err, result.Root, result.Agent)
 		result.Reason = err.Error()
 		return result, err
 	}
@@ -110,7 +125,7 @@ func recoverOwnerWakeWithStopPreparer(
 	refuse := func(reason, next string) error {
 		result.Status = "refused"
 		result.Reason = reason
-		result.NextAction = next
+		result.NextAction = wakeOwnerRecoveryNextAction(next, result.Root, result.Agent)
 		return errors.New(reason)
 	}
 
@@ -159,7 +174,7 @@ func recoverOwnerWakeWithStopPreparer(
 						closeErr := observation.Close()
 						return errors.Join(refuse(
 							"orphan target owner is still live",
-							fmt.Sprintf("exit or stop owner pid %d, then rerun amq wake recover-owner --me %s", owner.PID, me),
+							fmt.Sprintf("exit or stop owner pid %d, then rerun %s", owner.PID, wakeRecoverOwnerCommand(result.Root, result.Agent)),
 						), closeErr)
 					}
 					if err := observation.Close(); err != nil {
@@ -264,7 +279,7 @@ func recoverOwnerWakeWithStopPreparer(
 				if callerSession != owner.SessionID {
 					return refuse(
 						fmt.Sprintf("recovery caller OS session %d does not match owner OS session %d", callerSession, owner.SessionID),
-						fmt.Sprintf("exit or stop owner pid %d, then rerun amq wake recover-owner --me %s", owner.PID, me),
+						fmt.Sprintf("exit or stop owner pid %d, then rerun %s", owner.PID, wakeRecoverOwnerCommand(result.Root, result.Agent)),
 					)
 				}
 				authenticated = true
@@ -332,7 +347,7 @@ func recoverOwnerWakeWithStopPreparer(
 				case wakeOwnerSame:
 					return refuse(
 						fmt.Sprintf("handle %s is owned by live process pid %d, OS session %d", me, owner.PID, owner.SessionID),
-						fmt.Sprintf("exit or stop that process, then rerun amq wake recover-owner --me %s", me),
+						fmt.Sprintf("exit or stop that process, then rerun %s", wakeRecoverOwnerCommand(result.Root, result.Agent)),
 					)
 				default:
 					return refuse("wake process identity is not exactly stoppable", "preserve the claim and retry")
@@ -343,6 +358,7 @@ func recoverOwnerWakeWithStopPreparer(
 			if stopCapability != nil {
 				_ = stopCapability.Close()
 			}
+			err = withWakeDiagnostic(err, result.Root, result.Agent)
 			if result.Status == "unknown" {
 				result.Status = "error"
 				result.Reason = err.Error()
@@ -356,11 +372,13 @@ func recoverOwnerWakeWithStopPreparer(
 		closeErr := stopCapability.Close()
 		if stopErr != nil {
 			result.Status = "error"
+			stopErr = withWakeDiagnostic(stopErr, result.Root, result.Agent)
 			result.Reason = stopErr.Error()
 			return result, stopErr
 		}
 		if closeErr != nil {
 			result.Status = "error"
+			closeErr = withWakeDiagnostic(closeErr, result.Root, result.Agent)
 			result.Reason = closeErr.Error()
 			return result, closeErr
 		}

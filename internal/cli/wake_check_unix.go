@@ -343,11 +343,8 @@ func unstableWakeCheckDecision(root, me string, inspection wakeLockInspection) w
 		Kind:       wakeActionRetryCheck,
 		Actor:      wakeActionActorAgent,
 		ReasonCode: wakeReasonObservationChanged,
-		Command: wakeCheckActionCommand(
-			"wake", "check", "--root", decision.Root, "--me", decision.Agent,
-			"--json", "--json-schema=2",
-		),
-		Message: "wake state changed during inspection; retry amq wake check",
+		Command:    wakeCheckRemedy(decision.Root, decision.Agent).actionCommand(),
+		Message:    "wake state changed during inspection; retry amq wake check",
 	}
 	decision.Reload = wakeCheckReloadDecision{
 		Status:     wakeReloadUnavailable,
@@ -699,14 +696,13 @@ func classifyWakeCheckRestart(
 	inspection wakeLockInspection,
 	opsLock *opsWakeLock,
 ) {
-	startCommand := wakeStartCommand(decision.Root, decision.Agent)
-	startArgv := wakeCheckActionCommand(
-		"wake", "--root", decision.Root, "--me", decision.Agent,
-	)
-	retryCheckArgv := wakeCheckActionCommand(
-		"wake", "check", "--root", decision.Root, "--me", decision.Agent,
-		"--json", "--json-schema=2",
-	)
+	startRemedy := wakeStartRemedy(decision.Root, decision.Agent)
+	startCommand := startRemedy.String()
+	startArgv := startRemedy.actionCommand()
+	diagnosticRemedy := wakeCheckRemedy(decision.Root, decision.Agent)
+	diagnosticCommand := diagnosticRemedy.String()
+	diagnosticArgv := diagnosticRemedy.actionCommand()
+	retryCheckArgv := diagnosticArgv
 	if !inspection.Exists {
 		switch {
 		case decision.Start.Available && decision.Start.Mode != wakeInjectModeNone:
@@ -724,7 +720,8 @@ func classifyWakeCheckRestart(
 				Kind:       wakeActionConfigureInjector,
 				Actor:      wakeActionActorOperator,
 				ReasonCode: wakeReasonFullStrengthUnavailable,
-				Message:    "restore a supported full-strength injector or configure --inject-via; do not accept an attention-only downgrade",
+				Command:    diagnosticArgv,
+				Message:    "restore a supported full-strength injector or configure --inject-via; do not accept an attention-only downgrade; inspect with " + diagnosticCommand,
 			}
 		default:
 			decision.RestartCapability = wakeRestartOperatorOnly
@@ -762,10 +759,8 @@ func classifyWakeCheckRestart(
 			Kind:       wakeActionRepairWake,
 			Actor:      wakeActionActorAgent,
 			ReasonCode: wakeReasonStaleRepairAvailable,
-			Command: wakeCheckActionCommand(
-				"wake", "repair", "--root", decision.Root, "--me", decision.Agent,
-			),
-			Message: opsLock.Repair,
+			Command:    wakeRepairRemedy(decision.Root, decision.Agent).actionCommand(),
+			Message:    opsLock.Repair,
 		}
 		return
 	}
@@ -776,10 +771,8 @@ func classifyWakeCheckRestart(
 				Kind:       wakeActionRestartWake,
 				Actor:      wakeActionActorAgent,
 				ReasonCode: wakeReloadReasonReady,
-				Command: wakeCheckActionCommand(
-					"wake", "restart", "--root", decision.Root, "--me", decision.Agent,
-				),
-				Message: "ask the live wake to restart itself with amq wake restart",
+				Command:    wakeRestartRemedy(decision.Root, decision.Agent).actionCommand(),
+				Message:    "ask the live wake to restart itself with amq wake restart",
 			}
 			return
 		}
@@ -791,8 +784,9 @@ func classifyWakeCheckRestart(
 			Kind:             wakeActionPreserveLiveWake,
 			Actor:            wakeActionActorOperator,
 			ReasonCode:       wakeReasonLiveWakePreserve,
+			Command:          diagnosticArgv,
 			TerminalRequired: terminalRequired,
-			Message:          "leave the live wake running; restart it from its owning terminal or supervisor after verifying replacement readiness",
+			Message:          "leave the live wake running; restart it from its owning terminal or supervisor after verifying replacement readiness; inspect with " + diagnosticCommand,
 		}
 		return
 	}
@@ -805,24 +799,20 @@ func classifyWakeCheckRestart(
 				Kind:       wakeActionRecoverOwner,
 				Actor:      wakeActionActorOperator,
 				ReasonCode: wakeReasonOwnerRecoveryRequired,
-				Command: wakeCheckActionCommand(
-					"wake", "recover-owner", "--root", decision.Root, "--me", decision.Agent,
-				),
-				Message: message,
+				Command:    wakeRecoverOwnerRemedy(decision.Root, decision.Agent).actionCommand(),
+				Message:    message,
 			}
 			return
 		}
 		if wakeInspectionBinaryDirGone(inspection) {
-			fix := doctorRootCommandForOS(decision.Root, "", runtime.GOOS, "--ops", "--fix-wake-locks")
+			fixRemedy := wakeDoctorStaleWakeRemedy(decision.Root)
 			decision.RestartCapability = wakeRestartAgentSafe
 			decision.Action = wakeCheckActionDecision{
 				Kind:       wakeActionManualStaleCleanup,
 				Actor:      wakeActionActorAgent,
 				ReasonCode: wakeReasonBinaryDirGone,
-				Command: wakeCheckActionCommand(
-					"doctor", "--root", decision.Root, "--ops", "--fix-wake-locks",
-				),
-				Message: wakeBinaryDirGoneMessage + "; run " + fix,
+				Command:    fixRemedy.actionCommand(),
+				Message:    wakeBinaryDirGoneMessage + "; run " + fixRemedy.String(),
 			}
 			return
 		}
@@ -832,7 +822,8 @@ func classifyWakeCheckRestart(
 				Kind:       wakeActionConfigureInjector,
 				Actor:      wakeActionActorOperator,
 				ReasonCode: wakeReasonFullStrengthUnavailable,
-				Message:    "restore the configured --inject-via supervisor or reconfigure a supported full-strength injector before replacing this stale wake; do not fall back to raw terminal injection",
+				Command:    diagnosticArgv,
+				Message:    "restore the configured --inject-via supervisor or reconfigure a supported full-strength injector before replacing this stale wake; do not fall back to raw terminal injection; inspect with " + diagnosticCommand,
 			}
 			return
 		}
@@ -842,13 +833,14 @@ func classifyWakeCheckRestart(
 				Kind:       wakeActionConfigureInjector,
 				Actor:      wakeActionActorOperator,
 				ReasonCode: wakeReasonFullStrengthUnavailable,
-				Message:    "restore a supported full-strength injector or configure --inject-via; do not accept an attention-only downgrade",
+				Command:    diagnosticArgv,
+				Message:    "restore a supported full-strength injector or configure --inject-via; do not accept an attention-only downgrade; inspect with " + diagnosticCommand,
 			}
 			return
 		}
 		message := fmt.Sprintf(
 			"from the owning terminal, remove the proven-stale lock with %s, then run %s",
-			doctorRootCommandForOS(decision.Root, "", runtime.GOOS, "--ops", "--fix-wake-locks"),
+			wakeDoctorStaleWakeRemedy(decision.Root).String(),
 			startCommand,
 		)
 		decision.RestartCapability = wakeRestartOperatorOnly
@@ -856,8 +848,9 @@ func classifyWakeCheckRestart(
 			Kind:             wakeActionManualStaleCleanup,
 			Actor:            wakeActionActorOperator,
 			ReasonCode:       wakeReasonStaleManualCleanupRequired,
+			Command:          diagnosticArgv,
 			TerminalRequired: true,
-			Message:          message,
+			Message:          message + "; inspect with " + diagnosticCommand,
 		}
 	case wakeLockCreating:
 		decision.RestartCapability = wakeRestartUnavailable
@@ -874,7 +867,8 @@ func classifyWakeCheckRestart(
 			Kind:       wakeActionInspectUnverified,
 			Actor:      wakeActionActorOperator,
 			ReasonCode: wakeReasonWakeStateUnverified,
-			Message:    "preserve the unverified wake state and inspect it with amq doctor --ops",
+			Command:    diagnosticArgv,
+			Message:    "preserve the unverified wake state and inspect it with " + diagnosticCommand,
 		}
 	}
 }
@@ -962,11 +956,7 @@ func wakeCheckRepairIneligibility(inspection wakeLockInspection, ownerBound bool
 }
 
 func wakeStartCommand(root, me string) string {
-	return fmt.Sprintf(
-		"amq wake --root %s --me %s",
-		shellQuoteArg(root),
-		shellQuoteArg(me),
-	)
+	return wakeStartRemedy(root, me).String()
 }
 
 func writeWakeCheckText(result wakeCheckResult) error {

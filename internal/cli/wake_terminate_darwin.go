@@ -17,7 +17,8 @@ func terminateAndRemoveOrphanedWakeLock(inspection wakeLockInspection) (bool, er
 func terminateAndRemoveOrphanedWakeLockWithRawConsent(
 	inspection wakeLockInspection,
 	allowRawOrphan bool,
-) (bool, error) {
+) (removed bool, retErr error) {
+	defer func() { retErr = withWakeDiagnostic(retErr, inspection.Root, inspection.Agent) }()
 	agentDir, err := openExistingCoopWakeAgentDir(inspection.Root, inspection.Agent)
 	if err != nil {
 		return false, err
@@ -46,7 +47,8 @@ func terminateAndRemoveOrphanedWakeLockInDirWithRawConsent(
 	inspection wakeLockInspection,
 	allowRawOrphan bool,
 	requestedTarget *wakeTarget,
-) (bool, error) {
+) (removed bool, retErr error) {
+	defer func() { retErr = withWakeDiagnostic(retErr, inspection.Root, inspection.Agent) }()
 	var recheck wakeLockInspection
 	if err := withExistingWakeLifecycleGuardNoWaitInDir(agentDir, func(dirfd int) error {
 		recheck = inspectWakeLockAt(
@@ -74,12 +76,12 @@ func terminateAndRemoveOrphanedWakeLockInDirWithRawConsent(
 	if recheck.Process.Running &&
 		recheck.Lock.WakeMode != wakeTargetInjectVia &&
 		!wakeLockNeedsReplacement(recheck) && !allowRawOrphan {
-		return false, fmt.Errorf(
+		return false, withWakeDiagnostic(fmt.Errorf(
 			"live raw wake for %s (pid %d, start %s) is not eligible for automatic replacement; retry through amq coop exec to review and consent to takeover, or stop it from its owning session; refusing to signal without consent",
 			recheck.Agent,
 			recheck.PID,
 			recheck.Lock.ProcessStart,
-		)
+		), inspection.Root, inspection.Agent)
 	}
 	if allowRawOrphan && recheck.Process.Running &&
 		recheck.Lock.WakeMode != wakeTargetInjectVia &&
@@ -102,7 +104,7 @@ func terminateAndRemoveOrphanedWakeLockInDirWithRawConsent(
 		}
 		return false, err
 	}
-	removed := false
+	removed = false
 	err := withExistingWakeMutationScopeNoWaitInDir(
 		agentDir,
 		func(scope *wakeMutationScope) error {
@@ -146,7 +148,11 @@ func terminateAndRemoveOrphanedWakeLockInDirWithRawConsent(
 
 func terminateWakeProcess(inspection wakeLockInspection) error {
 	if !sameConfirmedWakeLock(inspection) {
-		return fmt.Errorf("wake process identity changed before SIGTERM")
+		return withWakeDiagnostic(
+			fmt.Errorf("wake process identity changed before SIGTERM"),
+			inspection.Root,
+			inspection.Agent,
+		)
 	}
 	afterDarwinWakeSignalValidation()
 	// Darwin has no pidfd. kill(pid) after the last identity recheck can hit a
@@ -154,6 +160,7 @@ func terminateWakeProcess(inspection wakeLockInspection) error {
 	// signaling is operator_only.
 	return newWakeOperatorOnlyError(
 		"darwin raw numeric signaling is operator_only; stop the wake from its owning terminal or supervisor",
+		wakeCheckRemedy(inspection.Root, inspection.Agent),
 	)
 }
 
@@ -163,14 +170,19 @@ func terminateWakeProcessInDir(
 ) error {
 	confirmed, err := sameConfirmedWakeLockInDir(agentDir, inspection)
 	if err != nil {
-		return err
+		return withWakeDiagnostic(err, inspection.Root, inspection.Agent)
 	}
 	if !confirmed {
-		return fmt.Errorf("wake process identity changed before SIGTERM")
+		return withWakeDiagnostic(
+			fmt.Errorf("wake process identity changed before SIGTERM"),
+			inspection.Root,
+			inspection.Agent,
+		)
 	}
 	afterDarwinWakeSignalValidation()
 	return newWakeOperatorOnlyError(
 		"darwin raw numeric signaling is operator_only; stop the wake from its owning terminal or supervisor",
+		wakeCheckRemedy(inspection.Root, inspection.Agent),
 	)
 }
 

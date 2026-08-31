@@ -492,11 +492,7 @@ func newWakeRestartRequestID() (string, error) {
 }
 
 func wakeRestartCheckCommand(root, me string) string {
-	return fmt.Sprintf(
-		"amq wake check --root %s --me %s --json --json-schema=2",
-		shellQuoteArg(root),
-		shellQuoteArg(me),
-	)
+	return wakeCheckRemedy(root, me).String()
 }
 
 func wakeRestartReasonWithRemedy(reason, root, me string) string {

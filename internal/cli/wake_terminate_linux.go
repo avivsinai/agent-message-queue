@@ -38,18 +38,23 @@ func terminateAndRemoveOrphanedWakeLockWithRawConsent(
 ) (bool, error) {
 	agentDir, err := openExistingCoopWakeAgentDir(inspection.Root, inspection.Agent)
 	if err != nil {
-		return false, err
+		return false, withWakeDiagnostic(err, inspection.Root, inspection.Agent)
 	}
 	if agentDir == nil {
-		return false, fmt.Errorf("wake agent directory disappeared before termination")
+		return false, withWakeDiagnostic(
+			fmt.Errorf("wake agent directory disappeared before termination"),
+			inspection.Root,
+			inspection.Agent,
+		)
 	}
 	defer func() { _ = agentDir.Close() }()
-	return terminateAndRemoveOrphanedWakeLockInDirWithRawConsent(
+	removed, err := terminateAndRemoveOrphanedWakeLockInDirWithRawConsent(
 		agentDir,
 		inspection,
 		allowRawOrphan,
 		nil,
 	)
+	return removed, withWakeDiagnostic(err, inspection.Root, inspection.Agent)
 }
 
 func terminateAndRemoveOrphanedWakeLockInDir(
@@ -130,7 +135,7 @@ func terminateAndRemoveOrphanedWakeLockInDirWithRawConsent(
 		if pidfd >= 0 {
 			_ = linuxPidfdClose(pidfd)
 		}
-		return provenGone, err
+		return provenGone, withWakeDiagnostic(err, inspection.Root, inspection.Agent)
 	}
 	if provenGone {
 		return true, nil
@@ -145,16 +150,20 @@ func terminateAndRemoveOrphanedWakeLockInDirWithRawConsent(
 
 	if locked.Process.Running && locked.Lock.WakeMode != wakeTargetInjectVia &&
 		!wakeLockNeedsReplacement(locked) && !allowRawOrphan {
-		return false, fmt.Errorf(
+		return false, withWakeDiagnostic(fmt.Errorf(
 			"live raw wake for %s (pid %d, start %s) is not eligible for automatic replacement; retry through amq coop exec to review and consent to takeover, or stop it from its owning session; refusing to signal without consent",
 			locked.Agent,
 			locked.PID,
 			locked.Lock.ProcessStart,
-		)
+		), inspection.Root, inspection.Agent)
 	}
 	if allowRawOrphan && locked.Process.Running && locked.Lock.WakeMode != wakeTargetInjectVia &&
 		!isLiveRawOrphan(locked) {
-		return false, fmt.Errorf("live raw wake identity changed before consented termination")
+		return false, withWakeDiagnostic(
+			fmt.Errorf("live raw wake identity changed before consented termination"),
+			inspection.Root,
+			inspection.Agent,
+		)
 	}
 	attempted, err := terminateWakePidfdWithAuthorization(
 		agentDir,
@@ -165,9 +174,10 @@ func terminateAndRemoveOrphanedWakeLockInDirWithRawConsent(
 	)
 	if err != nil {
 		if !attempted {
-			return false, err
+			return false, withWakeDiagnostic(err, inspection.Root, inspection.Agent)
 		}
-		return resolveMissingWakeLockAfterTerminationInDir(agentDir, locked, err)
+		removed, resolveErr := resolveMissingWakeLockAfterTerminationInDir(agentDir, locked, err)
+		return removed, withWakeDiagnostic(resolveErr, inspection.Root, inspection.Agent)
 	}
 
 	removed := false
@@ -187,10 +197,10 @@ func terminateAndRemoveOrphanedWakeLockInDirWithRawConsent(
 			return nil
 		}
 		if !sameWakeLockGenerationForRetainedTermination(locked, current) {
-			return newWakeLockResidueError(
+			return withWakeDiagnostic(newWakeLockResidueError(
 				wakeLockResidueReplacement,
 				errors.New("wake lock changed after wake process stopped; preserving replacement claim"),
-			)
+			), inspection.Root, inspection.Agent)
 		}
 		relation, relationErr := retainedWakeAgentDirRelationAt(scopedAgentDir, dirfd)
 		if relationErr != nil {
@@ -201,22 +211,6 @@ func terminateAndRemoveOrphanedWakeLockInDirWithRawConsent(
 		}
 		switch relation {
 		case wakeAgentDirDetached:
-			// Termination observes after a process effect. An absent canonical
-			// pathname is not enough to prove that a successor exists, so preserve
-			// the retained claim instead of treating the same ENOENT as cleanup authority.
-			canonicalPresent, canonicalErr := canonicalWakeAgentDirPathPresent(scopedAgentDir)
-			if canonicalErr != nil {
-				return newWakeLockResidueError(
-					wakeLockResiduePreservedClaim,
-					fmt.Errorf("canonical wake agent directory cannot be confirmed after wake process stopped; preserving retained claim: %w", canonicalErr),
-				)
-			}
-			if !canonicalPresent {
-				return newWakeLockResidueError(
-					wakeLockResiduePreservedClaim,
-					errors.New("canonical wake agent directory disappeared after wake process stopped; preserving retained claim"),
-				)
-			}
 			var removeErr error
 			outcome := removeWakeLockIfUnchangedGuardedAtDurableOutcome(
 				scope,
@@ -243,10 +237,10 @@ func terminateAndRemoveOrphanedWakeLockInDirWithRawConsent(
 			}
 		}
 		if err := validateWakeLockStaleRemovalAt(dirfd, scopedAgentDir, current); err != nil {
-			return newWakeLockResidueError(
+			return withWakeDiagnostic(newWakeLockResidueError(
 				wakeLockResiduePreservedClaim,
 				fmt.Errorf("wake process stopped but exact wake lock cleanup is unavailable; preserving retained claim: %w", err),
-			)
+			), inspection.Root, inspection.Agent)
 		}
 		var removeErr error
 		outcome := removeWakeLockIfUnchangedGuardedAtDurableOutcome(
@@ -259,18 +253,18 @@ func terminateAndRemoveOrphanedWakeLockInDirWithRawConsent(
 	})
 	if err != nil {
 		if len(wakeLockRemovalResiduesFromError(err)) == 0 {
-			err = newWakeLockResidueError(
+			err = withWakeDiagnostic(newWakeLockResidueError(
 				wakeLockResiduePreservedClaim,
 				fmt.Errorf("wake process stopped but wake lock cleanup did not complete; preserving exact claim: %w", err),
-			)
+			), inspection.Root, inspection.Agent)
 		}
-		return true, err
+		return true, withWakeDiagnostic(err, inspection.Root, inspection.Agent)
 	}
 	if !removed {
-		return true, newWakeLockResidueError(
+		return true, withWakeDiagnostic(newWakeLockResidueError(
 			wakeLockResidueCleanup,
 			errors.New("wake process stopped but exact wake lock cleanup outcome changed"),
-		)
+		), inspection.Root, inspection.Agent)
 	}
 	return true, nil
 }
@@ -299,14 +293,17 @@ func terminateWakePidfdWithAuthorization(
 					expected.Agent,
 				)
 				if !current.Exists {
-					return fmt.Errorf("wake lock is missing before %s; refusing to signal", signal)
+					return fmt.Errorf(
+						"wake lock is missing before %s; refusing to signal; inspect with %s",
+						signal,
+						wakeCheckRemedy(expected.Root, expected.Agent).String(),
+					)
 				}
 				if !sameWakeLockGeneration(expected, current) {
 					return fmt.Errorf(
-						"wake lock generation changed before %s; refusing to signal; inspect with `amq wake check --root %s --me %s --json`",
+						"wake lock generation changed before %s; refusing to signal; inspect with %s",
 						signal,
-						expected.Root,
-						expected.Agent,
+						wakeCheckRemedy(expected.Root, expected.Agent).String(),
 					)
 				}
 				if err := validateWakeLockOwnerlessMutationAtForTermination(
@@ -333,7 +330,7 @@ func terminateWakePidfdWithAuthorization(
 		)
 	}
 	err := terminateWakePidfdWithSignalAuthorization(pidfd, send)
-	return attempted, err
+	return attempted, withWakeDiagnostic(err, expected.Root, expected.Agent)
 }
 
 func terminateAuthoritativeWakePidfdWithAuthorization(
@@ -367,13 +364,21 @@ func terminateAuthoritativeWakePidfdWithAuthorization(
 					expected.Agent,
 				)
 				if !sameWakeLockGeneration(expected, current) {
-					return fmt.Errorf("authoritative wake generation changed before %s; refusing to signal", signal)
+					return withWakeDiagnostic(
+						fmt.Errorf("authoritative wake generation changed before %s; refusing to signal", signal),
+						expected.Root,
+						expected.Agent,
+					)
 				}
 				if err := validateBoundWakeMutationAt(scope, current); err != nil {
 					return fmt.Errorf("authorize authoritative wake before %s: %w", signal, err)
 				}
 				if classifyPersistedWakeClaim(current) != wakeClaimAuthoritative {
-					return fmt.Errorf("authoritative wake claim changed before %s; refusing to signal", signal)
+					return withWakeDiagnostic(
+						fmt.Errorf("authoritative wake claim changed before %s; refusing to signal", signal),
+						expected.Root,
+						expected.Agent,
+					)
 				}
 				if err := validateAuthoritativeWakeStopAuthorization(current, auth, observation); err != nil {
 					return fmt.Errorf("authorize authoritative wake before %s: %w", signal, err)
@@ -384,7 +389,11 @@ func terminateAuthoritativeWakePidfdWithAuthorization(
 		closeErr := observation.Close()
 		return errors.Join(sendErr, closeErr)
 	}
-	return terminateWakePidfdWithSignalAuthorization(pidfd, send)
+	return withWakeDiagnostic(
+		terminateWakePidfdWithSignalAuthorization(pidfd, send),
+		expected.Root,
+		expected.Agent,
+	)
 }
 
 func validateAuthoritativeWakeStopAuthorization(

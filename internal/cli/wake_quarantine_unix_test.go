@@ -237,7 +237,7 @@ func TestTargetlessAcquisitionPreservesOwnerBearingOrphanTarget(t *testing.T) {
 		root,
 		agentDir,
 		raw,
-		"owner-bearing orphan target; run 'amq wake recover-owner --me codex'",
+		"owner-bearing orphan target; run "+wakeRecoverOwnerCommand(root, "codex"),
 	)
 }
 

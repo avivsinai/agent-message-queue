@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"runtime"
 	"strings"
 	"time"
 
@@ -15,7 +14,8 @@ import (
 	"golang.org/x/term"
 )
 
-func prepareCoopWakeLock(root, agent string, yes bool, remedy string) error {
+func prepareCoopWakeLock(root, agent string, yes bool, remedy string) (retErr error) {
+	defer func() { retErr = withWakeDiagnostic(retErr, root, agent) }()
 	agentDir, err := openExistingCoopWakeAgentDir(root, agent)
 	if err != nil {
 		return err
@@ -38,7 +38,7 @@ func prepareCoopWakeLock(root, agent string, yes bool, remedy string) error {
 	// A live process that affirmative process inspection proves is not this wake
 	// must never be signaled or have its lock removed by a coop retry.
 	if inspection.Process.Running && wakeProcessProvenNotWake(inspection.Process) {
-		return fmt.Errorf("wake lock for %s names a running process proven not to be this wake; refusing to signal or remove it; lock: %s; root: %s; reason: %s", agent, inspection.LockPath, inspection.Root, inspection.Reason)
+		return fmt.Errorf("wake lock for %s names a running process proven not to be this wake; refusing to signal or remove it; lock: %s; root: %s; reason: %s; inspect with %s", agent, inspection.LockPath, inspection.Root, inspection.Reason, wakeCheckRemedy(inspection.Root, inspection.Agent).String())
 	}
 	if inspection.Status == wakeLockStale {
 		// This returns before stale owner-bound recovery advice is rendered below.
@@ -261,7 +261,7 @@ func validateWakeLockOwnerlessMutationAtForTermination(
 			return fmt.Errorf("wake target is unverified before ownerless mutation: %w", err)
 		}
 		if exists && target.Owner != nil {
-			return fmt.Errorf("owner-bearing wake state requires 'amq wake recover-owner --me %s'", inspection.Agent)
+			return fmt.Errorf("owner-bearing wake state requires %s", wakeRecoverOwnerCommand(inspection.Root, inspection.Agent))
 		}
 	}
 	return nil
@@ -298,7 +298,7 @@ func validateWakeLockStaleRemovalAtForTermination(
 		)
 	}
 	if wakeLockHasOwnerMarkers(inspection) {
-		return fmt.Errorf("owner-bound wake claims require 'amq wake recover-owner --me %s'", inspection.Agent)
+		return fmt.Errorf("owner-bound wake claims require %s", wakeRecoverOwnerCommand(inspection.Root, inspection.Agent))
 	}
 	if err := validateWakeLockRepairable(inspection); err == nil {
 		return nil
@@ -382,7 +382,8 @@ func coopWakeTTYDisplay(inspection wakeLockInspection) string {
 func resolveMissingWakeLockAfterTermination(
 	inspection wakeLockInspection,
 	terminationErr error,
-) (bool, error) {
+) (resolved bool, retErr error) {
+	defer func() { retErr = withWakeDiagnostic(retErr, inspection.Root, inspection.Agent) }()
 	agentDir, err := openExistingCoopWakeAgentDir(inspection.Root, inspection.Agent)
 	if err != nil {
 		return false, err
@@ -402,7 +403,8 @@ func resolveMissingWakeLockAfterTerminationInDir(
 	agentDir *wakeAgentDir,
 	inspection wakeLockInspection,
 	terminationErr error,
-) (bool, error) {
+) (resolved bool, retErr error) {
+	defer func() { retErr = withWakeDiagnostic(retErr, inspection.Root, inspection.Agent) }()
 	var current wakeLockInspection
 	if err := agentDir.withFD(func(dirfd int) error {
 		if err := validateWakeStateAgentDirAt(dirfd, agentDir); err != nil {
@@ -433,7 +435,8 @@ func resolveMissingWakeLockAfterTerminationFromInspection(
 	inspection wakeLockInspection,
 	current wakeLockInspection,
 	terminationErr error,
-) (bool, error) {
+) (resolved bool, retErr error) {
+	defer func() { retErr = withWakeDiagnostic(retErr, inspection.Root, inspection.Agent) }()
 	if current.Exists && !sameWakeLockGeneration(inspection, current) {
 		return false, nil
 	}
@@ -454,17 +457,14 @@ func resolveMissingWakeLockAfterTerminationFromInspection(
 }
 
 func coopWakeRemedy(inspection wakeLockInspection, state, command string) string {
-	return fmt.Sprintf("wake for %s is blocking startup and cannot notify you.\n  lock: %s\n  state: %s\n\nRe-run with -y to clear it and start a fresh wake:\n  %s\n\nTo inspect first:\n  %s", inspection.Agent, inspection.LockPath, state, command, doctorRootCommandForOS(inspection.Root, "", runtime.GOOS, "--ops"))
+	inspect := newWakeRemedy("amq", "doctor", "--root", inspection.Root, "--ops").String()
+	return fmt.Sprintf("wake for %s is blocking startup and cannot notify you.\n  lock: %s\n  state: %s\n\nRe-run with -y to clear it and start a fresh wake:\n  %s\n\nTo inspect first:\n  %s", inspection.Agent, inspection.LockPath, state, command, inspect)
 }
 
 func coopWakeRemedyForCommand(root, agent, command string, commandArgs []string) string {
-	quoted := []string{"amq", "coop", "exec", "-y", "--root", root, "--me", agent, command}
-	quoted = append(quoted, commandArgs...)
-	parts := make([]string, 0, len(quoted))
-	for _, arg := range quoted {
-		parts = append(parts, shellQuoteArg(arg))
-	}
-	return strings.Join(parts, " ")
+	argv := newWakeRemedy("amq", "coop", "exec", "-y", "--root", root, "--me", agent, command)
+	argv = append(argv, commandArgs...)
+	return argv.String()
 }
 
 func coopWakeStartupConflictError(inspection wakeLockInspection, cause error) error {
@@ -475,29 +475,26 @@ func coopWakeStartupConflictError(inspection wakeLockInspection, cause error) er
 		if started == "" {
 			started = "unknown"
 		}
+		inspect := wakeCheckRemedy(inspection.Root, inspection.Agent).String()
 		message = fmt.Sprintf(
 			"wake for %s is owned by a live process\n"+
 				"  pid:     %d\n"+
 				"  tty:     %s\n"+
 				"  started: %s\n"+
 				"  root:    %s\n\n"+
-				"No AMQ command can safely take over this live wake; use that terminal, "+
+				"No AMQ command can safely take over this live wake; inspect first with %s, "+
+				"then use that terminal, "+
 				"or stop process %d and retry amq coop exec.",
 			inspection.Agent,
 			inspection.PID,
 			coopWakeTTYDisplay(inspection),
 			started,
 			inspection.Root,
+			inspect,
 			inspection.PID,
 		)
 	case inspection.Status == wakeLockStale:
-		repair := doctorRootCommandForOS(
-			inspection.Root,
-			"",
-			runtime.GOOS,
-			"--ops",
-			"--fix-wake-locks",
-		)
+		repair := wakeDoctorStaleWakeRemedy(inspection.Root).String()
 		action := "Remove only the proven-stale session lock, then retry:\n  " + repair
 		if wakeLockHasOwnerMarkers(inspection) {
 			action = "Recover the exact owner-bound claim, then retry:\n  " +
@@ -529,14 +526,18 @@ func coopWakeStartupConflictError(inspection wakeLockInspection, cause error) er
 			inspection.PID,
 			inspection.Reason,
 			inspection.Root,
-			doctorRootCommandForOS(inspection.Root, "", runtime.GOOS, "--ops"),
+			newWakeRemedy("amq", "doctor", "--root", inspection.Root, "--ops").String(),
 		)
 	}
 	if message == "" {
 		if cause == nil {
-			return errors.New("wake startup conflict could not be classified")
+			return withWakeDiagnostic(
+				errors.New("wake startup conflict could not be classified"),
+				inspection.Root,
+				inspection.Agent,
+			)
 		}
-		return cause
+		return withWakeDiagnostic(cause, inspection.Root, inspection.Agent)
 	}
 	if cause == nil {
 		return errors.New(message)

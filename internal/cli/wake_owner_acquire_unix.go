@@ -141,7 +141,8 @@ func acquireAuthoritativeWakeLockWithOptionsAndStopPreparer(
 	me string,
 	options wakeLockAcquireOptions,
 	prepareStop authoritativeWakeStopPreparer,
-) (func(), error) {
+) (cleanup func(), retErr error) {
+	defer func() { retErr = withWakeDiagnostic(retErr, root, me) }()
 	if err := os.MkdirAll(fsq.AgentBase(root, me), 0o700); err != nil {
 		return nil, fmt.Errorf("failed to create agent directory: %w", err)
 	}
@@ -180,7 +181,8 @@ func acquireAuthoritativeWakeLockWithOptionsInDirAndStopPreparer(
 	me string,
 	options wakeLockAcquireOptions,
 	prepareStop authoritativeWakeStopPreparer,
-) (func(), error) {
+) (cleanup func(), retErr error) {
+	defer func() { retErr = withWakeDiagnostic(retErr, root, me) }()
 	if agentDir == nil {
 		return nil, fmt.Errorf("wake agent directory capability is missing")
 	}
@@ -211,7 +213,11 @@ func acquireAuthoritativeWakeLockWithOptionsInDirAndStopPreparer(
 				if reason == "" {
 					reason = "persisted wake claim is not authoritative"
 				}
-				return fmt.Errorf("wake state for %s is unverified; refusing owner-bound acquisition: %s", me, reason)
+				return withWakeDiagnostic(
+					fmt.Errorf("wake state for %s is unverified; refusing owner-bound acquisition: %s", me, reason),
+					root,
+					me,
+				)
 			}
 
 			requestedObservation, observeErr := observeAuthoritativeWakeOwner(*requested.Owner)
@@ -299,11 +305,11 @@ func acquireAuthoritativeWakeLockWithOptionsInDirAndStopPreparer(
 						if !ownersEqual {
 							return fmt.Errorf("wake handle %s is owned by live process pid %d, OS session %d", me, inspection.Lock.Owner.PID, inspection.Lock.Owner.SessionID)
 						}
-						return fmt.Errorf("wake handle %s has a live owner but an unusable wake; run 'amq wake recover-owner --me %s'", me, me)
+						return fmt.Errorf("wake handle %s has a live owner but an unusable wake; run %s", me, wakeRecoverOwnerCommand(root, me))
 					case wakeOwnerUnknown:
 						return fmt.Errorf("wake owner for %s is unknown (%s); preserving owner claim", me, persistedReason)
 					default:
-						return fmt.Errorf("wake owner for %s cannot be safely reclaimed; run 'amq wake recover-owner --me %s'", me, me)
+						return fmt.Errorf("wake owner for %s cannot be safely reclaimed; run %s", me, wakeRecoverOwnerCommand(root, me))
 					}
 				}
 			}
