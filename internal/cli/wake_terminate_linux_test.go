@@ -146,6 +146,56 @@ func TestTerminateFailsClosedWhenPidfdOpenIsUnsupported(t *testing.T) {
 	}
 }
 
+func TestTerminateRetainsLifecycleGuardCreatedForLegacyWake(t *testing.T) {
+	const wakePID = 4242
+	root := secureTempDirForTest(t)
+	lockPath := writeWakeLockForTest(t, root, "codex", wakeLock{
+		PID:          wakePID,
+		TTY:          "missing",
+		ProcessStart: "start-1",
+		BootID:       "boot-1",
+		Executable:   "/usr/bin/amq",
+		WakeMode:     wakeInjectModeRaw,
+		Generation:   "legacy-missing-guard",
+	})
+	guardPath := wakeLifecycleGuardPath(root, "codex")
+	if _, err := os.Stat(guardPath); !os.IsNotExist(err) {
+		t.Fatalf("legacy fixture unexpectedly has lifecycle guard: %v", err)
+	}
+	stubLinuxPidfd(
+		t,
+		func(pid, flags int) (int, error) {
+			if pid != wakePID || flags != 0 {
+				t.Fatalf("pidfd_open = (%d, %d), want (%d, 0)", pid, flags, wakePID)
+			}
+			return -1, syscall.ESRCH
+		},
+		func(int, unix.Signal, *unix.Siginfo, int) error {
+			t.Fatal("must not signal a proven-gone process")
+			return nil
+		},
+		func(int, time.Duration) (bool, error) {
+			t.Fatal("must not poll a proven-gone process")
+			return false, nil
+		},
+	)
+
+	replaced, err := terminateAndRemoveOrphanedWakeLock(inspectWakeLock(root, "codex"))
+	if err != nil || !replaced {
+		t.Fatalf("legacy proven-gone cleanup = (%v, %v), want (true, nil)", replaced, err)
+	}
+	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
+		t.Fatalf("legacy wake lock was not removed: %v", err)
+	}
+	info, err := os.Stat(guardPath)
+	if err != nil {
+		t.Fatalf("lifecycle guard created for legacy wake was not retained: %v", err)
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
+		t.Fatalf("retained lifecycle guard mode = %v, want regular 0600", info.Mode())
+	}
+}
+
 func TestTerminateTreatsPidfdESRCHAsProvenGone(t *testing.T) {
 	const wakePID = 4242
 	root := secureTempDirForTest(t)

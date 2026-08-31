@@ -221,21 +221,6 @@ func assertNotWakeLockName(name string) error {
 	return nil
 }
 
-func (scope *wakeMutationScope) unlinkLifecycleGuard() error {
-	dirfd, _, err := scope.location()
-	if err != nil {
-		return err
-	}
-	if _, err := scope.requireCanonicalOrDetached(); err != nil {
-		return err
-	}
-	err = unix.Unlinkat(dirfd, wakeLifecycleGuardFileName, 0)
-	if err == unix.ENOENT {
-		return nil
-	}
-	return err
-}
-
 func (scope *wakeMutationScope) requireCanonical() error {
 	dirfd, agentDir, err := scope.location()
 	if err != nil {

@@ -81,14 +81,6 @@ func terminateAndRemoveOrphanedWakeLockInDirWithRawConsent(
 	pidfd := -1
 	provenGone := false
 	allowMissingGuard := wakeLockMayUseRetainedDirWithoutGuard(inspection)
-	legacyGuardCreated := false
-	if allowMissingGuard {
-		missing, err := wakeLifecycleGuardMissingAt(agentDir)
-		if err != nil {
-			return false, err
-		}
-		legacyGuardCreated = missing
-	}
 	if err := withWakeMutationScopeOrRetainedDirNoWait(agentDir, allowMissingGuard, func(scope *wakeMutationScope) error {
 		dirfd, scopedAgentDir, err := scope.location()
 		if err != nil {
@@ -122,9 +114,6 @@ func terminateAndRemoveOrphanedWakeLockInDirWithRawConsent(
 					locked,
 					scope.unlinkWakeLockForCleanup,
 				)
-				if outcome.Committed && legacyGuardCreated {
-					outcome.Err = errors.Join(outcome.Err, scope.unlinkLifecycleGuard())
-				}
 				provenGone, removeErr = outcome.Committed, outcome.Err
 				return removeErr
 			}
@@ -195,9 +184,6 @@ func terminateAndRemoveOrphanedWakeLockInDirWithRawConsent(
 		)
 		if !current.Exists {
 			removed = true
-			if legacyGuardCreated {
-				return scope.unlinkLifecycleGuard()
-			}
 			return nil
 		}
 		if !sameWakeLockGenerationForRetainedTermination(locked, current) {
@@ -237,9 +223,6 @@ func terminateAndRemoveOrphanedWakeLockInDirWithRawConsent(
 				current,
 				scope.unlinkWakeLockForCleanup,
 			)
-			if outcome.Committed && legacyGuardCreated {
-				outcome.Err = errors.Join(outcome.Err, scope.unlinkLifecycleGuard())
-			}
 			removed, removeErr = outcome.Committed, outcome.Err
 			return removeErr
 		case wakeAgentDirCanonical:
@@ -271,9 +254,6 @@ func terminateAndRemoveOrphanedWakeLockInDirWithRawConsent(
 			current,
 			scope.unlinkWakeLockForCleanup,
 		)
-		if outcome.Committed && legacyGuardCreated {
-			outcome.Err = errors.Join(outcome.Err, scope.unlinkLifecycleGuard())
-		}
 		removed, removeErr = outcome.Committed, outcome.Err
 		return removeErr
 	})
