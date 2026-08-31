@@ -13,13 +13,6 @@ var signalWakeProcess = func(pid int, sig os.Signal) error {
 	)
 }
 
-func (scope *wakeMutationScope) signalProcess(pid int, signal os.Signal) error {
-	if err := scope.requireCanonical(); err != nil {
-		return err
-	}
-	return signalWakeProcess(pid, signal)
-}
-
 func (scope *wakeMutationScope) queueStopRequest(stopRequest chan<- struct{}) error {
 	if stopRequest == nil {
 		return fmt.Errorf("wake stop control queue is missing")

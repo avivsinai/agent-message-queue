@@ -729,7 +729,6 @@ func wakeMutationScopeOwnerSet() map[string]struct{} {
 		"release",
 		"requireActive",
 		"location",
-		"unlinkAt",
 		"unlinkWakeLock",
 		"unlinkWakeLockForCleanup",
 		"unlinkWakeLockForRetire",
@@ -738,7 +737,6 @@ func wakeMutationScopeOwnerSet() map[string]struct{} {
 		"requireCanonicalOrDetached",
 		"sendPidfdSignal",
 		"sendPidfdSignalForTermination",
-		"signalProcess",
 		"queueStopRequest",
 		"queueRestartSignal",
 	) {

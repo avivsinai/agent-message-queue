@@ -142,17 +142,6 @@ func removeWakeSelfUpgradeArtifactsAt(dirfd int) error {
 	return removeWakeSelfUpgradeDiagnosticAt(dirfd)
 }
 
-func removeWakeSelfUpgradeArtifactsGuarded(root, agent string) error {
-	agentDir, err := openWakeAgentDir(root, agent)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = agentDir.Close() }()
-	return agentDir.withFD(func(dirfd int) error {
-		return removeWakeSelfUpgradeArtifactsAt(dirfd)
-	})
-}
-
 func loadWakeSelfUpgradeAttemptAtStartup(
 	state *wakeSelfUpgradeState,
 	agentDir *wakeAgentDir,

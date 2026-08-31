@@ -77,14 +77,6 @@ func (scope *wakeMutationScope) location() (int, *wakeAgentDir, error) {
 	return scope.dirfd, scope.agentDir, nil
 }
 
-func (scope *wakeMutationScope) unlinkAt(name string, flags int) error {
-	dirfd, _, err := scope.location()
-	if err != nil {
-		return err
-	}
-	return unix.Unlinkat(dirfd, name, flags)
-}
-
 func withWakeMutationScopeInDir(
 	agentDir *wakeAgentDir,
 	fn func(*wakeMutationScope) error,
