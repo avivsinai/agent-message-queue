@@ -992,26 +992,7 @@ func sameWakeLockInspection(first, second wakeLockInspection) bool {
 
 // processAlive checks if a process with given PID is running.
 func processAlive(pid int) bool {
-	// Guard against invalid PIDs - pid<=0 would signal process group
-	if pid <= 0 {
-		return false
-	}
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	// On Unix, FindProcess always succeeds; send signal 0 to check.
-	// ESRCH => process doesn't exist (dead).
-	// EPERM => process exists but we lack permission (alive).
-	// nil   => process exists and we can signal it (alive).
-	err = proc.Signal(syscall.Signal(0))
-	if err == nil {
-		return true
-	}
-	if errors.Is(err, syscall.EPERM) {
-		return true // process exists, just can't signal it
-	}
-	return false // ESRCH or other error => treat as dead
+	return processAliveByCapability(pid)
 }
 
 type wakeLoopFunc func(wakeConfig) error

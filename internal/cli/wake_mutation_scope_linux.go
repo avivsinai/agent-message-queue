@@ -6,13 +6,18 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/avivsinai/agent-message-queue/internal/cli/wakemutation"
 	"golang.org/x/sys/unix"
 )
 
 var (
-	linuxPidfdOpen       = unix.PidfdOpen
-	linuxPidfdSendSignal = sendLinuxPidfdSignalRaw
-	linuxPidfdClose      = unix.Close
+	linuxPidfdOpen  = unix.PidfdOpen
+	linuxPidfdSend  wakemutation.PidfdSenderFunc
+	linuxPidfdClose = unix.Close
+
+	// Tests use this barrier to force a successor publication between the
+	// missing-guard probe and acquisition of the permanent guard.
+	wakeMutationAfterLifecycleGuardProbe = func(*wakeAgentDir, bool) {}
 )
 
 func withWakeMutationScopeRetainedDirNoGuard(
@@ -20,10 +25,41 @@ func withWakeMutationScopeRetainedDirNoGuard(
 	fn func(*wakeMutationScope) error,
 ) error {
 	return agentDir.withFD(func(dirfd int) (retErr error) {
+		relation, err := retainedWakeAgentDirRelationAt(agentDir, dirfd)
+		if err != nil {
+			return fmt.Errorf("determine retained wake agent directory relation before no-guard cleanup: %w", err)
+		}
+		if relation != wakeAgentDirDetached {
+			return fmt.Errorf("no-guard wake mutation requires a proven detached retained directory")
+		}
 		scope := newWakeMutationScope(agentDir, dirfd, nil)
 		defer func() { retErr = errors.Join(retErr, scope.release()) }()
 		return fn(scope)
 	})
+}
+
+func withWakeMutationScopeForRetainedCleanup(
+	agentDir *wakeAgentDir,
+	allowMissing bool,
+	fn func(*wakeMutationScope) error,
+) error {
+	if !allowMissing {
+		return withExistingWakeMutationScopeNoWaitInDir(agentDir, fn)
+	}
+	missing, err := wakeLifecycleGuardMissingAt(agentDir)
+	if err != nil {
+		return err
+	}
+	if missing {
+		relation, err := retainedWakeAgentDirRelation(agentDir)
+		if err != nil {
+			return err
+		}
+		if relation == wakeAgentDirDetached {
+			return withWakeMutationScopeRetainedDirNoGuard(agentDir, fn)
+		}
+	}
+	return withWakeMutationScopeOrRetainedDirNoWait(agentDir, allowMissing, fn)
 }
 
 func withWakeMutationScopeOrRetainedDirNoWait(
@@ -38,14 +74,11 @@ func withWakeMutationScopeOrRetainedDirNoWait(
 	if err != nil {
 		return err
 	}
+	wakeMutationAfterLifecycleGuardProbe(agentDir, missing)
 	if missing {
 		return withWakeMutationScopeNoWaitInDir(agentDir, fn)
 	}
 	return withExistingWakeMutationScopeNoWaitInDir(agentDir, fn)
-}
-
-func sendLinuxPidfdSignalRaw(pidfd int, signal unix.Signal, info *unix.Siginfo, flags int) error {
-	return unix.PidfdSendSignal(pidfd, signal, info, flags)
 }
 
 // sendPidfdSignal is for non-termination effects. It requires the retained
@@ -54,7 +87,7 @@ func (scope *wakeMutationScope) sendPidfdSignal(pidfd int, signal unix.Signal) e
 	if err := scope.requireCanonical(); err != nil {
 		return err
 	}
-	return sendWakePidfdSignal(pidfd, signal)
+	return sendWakePidfdSignalWithLease(scope.lease, pidfd, signal)
 }
 
 // sendPidfdSignalForTermination is only for intentionally ending the exact
@@ -66,11 +99,23 @@ func (scope *wakeMutationScope) sendPidfdSignalForTermination(pidfd int, signal 
 	if _, err := scope.requireCanonicalOrDetached(); err != nil {
 		return false, err
 	}
-	return true, sendWakePidfdSignal(pidfd, signal)
+	return true, sendWakePidfdSignalWithLease(scope.lease, pidfd, signal)
 }
 
 func sendWakePidfdSignal(pidfd int, signal unix.Signal) error {
-	if err := linuxPidfdSendSignal(pidfd, signal, nil, 0); err != nil {
+	lease := wakemutation.New(nil)
+	defer func() { _ = lease.Close() }()
+	return sendWakePidfdSignalWithLease(lease, pidfd, signal)
+}
+
+func sendWakePidfdSignalWithLease(lease *wakemutation.Lease, pidfd int, signal unix.Signal) error {
+	var err error
+	if linuxPidfdSend == nil {
+		err = lease.SendPidfdSignal(pidfd, signal)
+	} else {
+		err = lease.SendPidfdSignalWith(linuxPidfdSend, pidfd, signal)
+	}
+	if err != nil {
 		return fmt.Errorf("pidfd_send_signal %s: %w", wakeSignalName(signal), err)
 	}
 	return nil

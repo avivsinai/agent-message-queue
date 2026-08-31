@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -17,8 +18,9 @@ import (
 )
 
 const (
-	wakeMutationModulePath     = "github.com/avivsinai/agent-message-queue"
-	wakeMutationCLIPackagePath = wakeMutationModulePath + "/internal/cli"
+	wakeMutationModulePath            = "github.com/avivsinai/agent-message-queue"
+	wakeMutationCLIPackagePath        = wakeMutationModulePath + "/internal/cli"
+	wakeMutationCapabilityPackagePath = wakeMutationCLIPackagePath + "/wakemutation"
 )
 
 type wakeMutationSourceFile struct {
@@ -32,6 +34,7 @@ type wakeMutationPackage struct {
 	files         []wakeMutationSourceFile
 	aliases       map[*types.Var]*types.Func
 	ambiguous     map[*types.Var]bool
+	typeAssertVar map[*types.Var]bool
 	channelAlias  map[*types.Var]string
 	channelAmbig  map[*types.Var]bool
 	stringAliases map[*types.Var]string
@@ -107,10 +110,17 @@ func wakeMutationPackagesEnv() []string {
 
 func scanWakeMutationPackages(pkgs []*packages.Package) []wakeMutationArchitectureOffender {
 	var offenders []wakeMutationArchitectureOffender
+	seenPackages := make(map[string]struct{})
 	for _, pkg := range pkgs {
-		if !isWakeMutationProductionPackage(pkg) || pkg.TypesInfo == nil {
+		if !isWakeMutationProductionPackage(pkg) ||
+			isWakeMutationCapabilityPackage(pkg) ||
+			pkg.TypesInfo == nil {
 			continue
 		}
+		if _, seen := seenPackages[pkg.PkgPath]; seen {
+			continue
+		}
+		seenPackages[pkg.PkgPath] = struct{}{}
 		context := newWakeMutationPackage(pkg)
 		for _, source := range context.files {
 			visitor := &wakeMutationVisitor{
@@ -129,9 +139,6 @@ func scanWakeMutationPackages(pkgs []*packages.Package) []wakeMutationArchitectu
 			ast.Walk(visitor, source.file)
 		}
 	}
-	if shapeOffenders := validateWakeMutationRawEffectOwnerShapes(pkgs); len(shapeOffenders) != 0 {
-		offenders = append(offenders, shapeOffenders...)
-	}
 	sort.Slice(offenders, func(i, j int) bool {
 		if offenders[i].path != offenders[j].path {
 			return offenders[i].path < offenders[j].path
@@ -147,6 +154,14 @@ func scanWakeMutationPackages(pkgs []*packages.Package) []wakeMutationArchitectu
 	return offenders
 }
 
+func isWakeMutationCapabilityPackage(pkg *packages.Package) bool {
+	return pkg != nil && pkg.PkgPath == wakeMutationCapabilityPackagePath
+}
+
+func isWakeMutationCLIPackage(pkg *packages.Package) bool {
+	return pkg != nil && pkg.PkgPath == wakeMutationCLIPackagePath
+}
+
 func isWakeMutationProductionPackage(pkg *packages.Package) bool {
 	return pkg != nil &&
 		(pkg.PkgPath == wakeMutationModulePath || strings.HasPrefix(pkg.PkgPath, wakeMutationModulePath+"/"))
@@ -157,6 +172,7 @@ func newWakeMutationPackage(pkg *packages.Package) *wakeMutationPackage {
 		pkg:           pkg,
 		aliases:       make(map[*types.Var]*types.Func),
 		ambiguous:     make(map[*types.Var]bool),
+		typeAssertVar: make(map[*types.Var]bool),
 		channelAlias:  make(map[*types.Var]string),
 		channelAmbig:  make(map[*types.Var]bool),
 		stringAliases: make(map[*types.Var]string),
@@ -176,6 +192,11 @@ func newWakeMutationPackage(pkg *packages.Package) *wakeMutationPackage {
 	var assignments []wakeMutationAssignment
 	for _, source := range context.files {
 		collectWakeMutationAssignments(pkg.TypesInfo, source.file, &assignments)
+	}
+	for _, assignment := range assignments {
+		if wakeMutationExprContainsTypeAssertion(assignment.rhs) {
+			context.typeAssertVar[assignment.lhs] = true
+		}
 	}
 	for changed := true; changed; {
 		changed = false
@@ -320,10 +341,29 @@ func (visitor *wakeMutationVisitor) Visit(node ast.Node) ast.Visitor {
 	if literal, ok := node.(*ast.FuncLit); ok {
 		frame.functionLiteral = literal
 		frame.functionScopeVars = wakeMutationScopeVars(visitor.context.pkg.TypesInfo, literal)
+		visitor.owner = wakeMutationLiteralOwner(visitor.context, visitor.file, literal)
 		visitor.frames[len(visitor.frames)-1] = frame
 	}
 	visitor.inspectNode(node)
 	return visitor
+}
+
+func wakeMutationLiteralOwner(
+	context *wakeMutationPackage,
+	file wakeMutationSourceFile,
+	literal *ast.FuncLit,
+) *types.Func {
+	signature, _ := context.pkg.TypesInfo.TypeOf(literal).(*types.Signature)
+	if signature == nil {
+		return nil
+	}
+	position := context.pkg.Fset.Position(literal.Pos())
+	return types.NewFunc(
+		literal.Pos(),
+		context.pkg.Types,
+		fmt.Sprintf("<func-literal %s:%d>", filepath.Base(file.path), position.Line),
+		signature,
+	)
 }
 
 func (visitor *wakeMutationVisitor) inspectNode(node ast.Node) {
@@ -346,8 +386,11 @@ func (visitor *wakeMutationVisitor) inspectNode(node ast.Node) {
 			}
 		}
 	case *ast.AssignStmt:
-		for _, result := range node.Rhs {
+		for index, result := range node.Rhs {
 			if wakeMutationIsScopePointer(info.TypeOf(result)) && !isWakeMutationScopeOwner(visitor.owner) {
+				if isWakeMutationScopeLocalAssignment(visitor, node, index) {
+					continue
+				}
 				visitor.add(result, "mutation scope escaped through assignment", visitor.owner)
 			}
 		}
@@ -364,61 +407,46 @@ func (visitor *wakeMutationVisitor) inspectNode(node ast.Node) {
 func (visitor *wakeMutationVisitor) inspectCall(call *ast.CallExpr) {
 	fn := resolveWakeFunctionExpr(visitor.context, call.Fun)
 	if fn == nil {
+		if isWakeMutationUnresolvedEffectCall(visitor.context, call) {
+			visitor.add(call, "unresolved wake effect call in cli", visitor.owner)
+		}
 		return
 	}
 	if wakeFunctionIsReflective(fn) {
 		visitor.add(call, "reflective call can bypass mutation authorization", visitor.owner)
 	}
-	if wakeFunctionIsMutationScopeConstructor(fn) && !isWakeMutationScopeOwner(visitor.owner) {
+	if wakeFunctionIsMutationScopeConstructor(fn) && !visitor.scopeConstructorIsOwned() {
 		visitor.add(call, "mutation scope constructed outside its owner", visitor.owner)
 	}
 	if wakeFunctionIsGuard(fn) {
 		visitor.inspectGuardCallback(call)
 	}
-	if wakeFunctionIsRawPidfdEffect(fn) &&
-		!isWakeMutationDirectEffectOwner(visitor.owner) &&
-		!wakeFunctionIsRawWakeWrapper(visitor.owner) {
-		visitor.add(call, "direct pidfd wake signal", visitor.owner)
+	if visitor.context.pkg.PkgPath != wakeMutationCapabilityPackagePath &&
+		visitor.isWakeFilesystemEffect(call, fn) {
+		visitor.add(call, "raw wake filesystem effect outside capability package", visitor.owner)
 	}
-	if wakeFunctionIsRawWakeWrapper(fn) &&
-		!isWakeMutationDirectEffectOwner(visitor.owner) &&
-		!wakeFunctionIsRawWakeWrapper(visitor.owner) {
-		visitor.add(call, "raw wake mutation helper called outside its owner", visitor.owner)
+	if isWakeMutationCLIPackage(visitor.context.pkg) &&
+		wakeFunctionIsRawPidfdEffect(fn) {
+		visitor.add(call, "direct pidfd wake signal outside capability package", visitor.owner)
 	}
-	if wakeFunctionIsRemoval(fn) {
-		visitor.inspectRemoval(call, fn)
+	if isWakeMutationCLIPackage(visitor.context.pkg) && wakeFunctionIsProcessSignal(fn) &&
+		!isWakeZeroSignalCall(visitor.context, call) {
+		visitor.add(call, "direct wake process signal outside capability package", visitor.owner)
 	}
-	if wakeFunctionIsProcessSignal(fn) && !isWakeZeroSignalCall(visitor.context, call) {
-		visitor.add(call, "direct wake process signal", visitor.owner)
-	}
-	if wakeFunctionIsProcessKill(fn) && visitor.context.pkg.PkgPath == wakeMutationCLIPackagePath &&
-		!isWakeMutationProcessKillOwner(visitor.owner) {
-		visitor.add(call, "direct wake child kill", visitor.owner)
+	if isWakeMutationCLIPackage(visitor.context.pkg) && wakeFunctionIsProcessKill(fn) {
+		visitor.add(call, "direct wake process kill outside capability package", visitor.owner)
 	}
 }
 
-func (visitor *wakeMutationVisitor) inspectRemoval(call *ast.CallExpr, fn *types.Func) {
+func (visitor *wakeMutationVisitor) isWakeFilesystemEffect(call *ast.CallExpr, fn *types.Func) bool {
+	if !wakeFunctionIsRawFilesystemEffect(fn) {
+		return false
+	}
+	if wakeFunctionIsRawUnixFilesystemEffect(fn) {
+		return isWakeMutationCLIPackage(visitor.context.pkg)
+	}
 	pathExpression := wakeRemovalPathExpression(call, fn)
-	wakeArtifact := pathExpression != nil && isWakeArtifactExpr(visitor.context, pathExpression)
-	if !wakeArtifact && !isWakeMutationDynamicRemoval(fn) {
-		return
-	}
-	if isWakeMutationSeparateDomainOwner(visitor.owner) {
-		return
-	}
-	if isWakeMutationAgentDirEffectOwner(visitor.owner) {
-		if !wakeMutationFunctionHasScopeParam(visitor.owner) {
-			visitor.add(call, "agent-dir removal owner must take *wakeMutationScope", visitor.owner)
-		}
-		return
-	}
-	if isWakeMutationParentOwnedHandleOwner(visitor.owner) {
-		visitor.add(call, "parent-owned process handle cannot remove agent-dir artifacts", visitor.owner)
-		return
-	}
-	if !isWakeMutationScopeOwner(visitor.owner) {
-		visitor.add(call, "raw removal is outside its exact owner", visitor.owner)
-	}
+	return pathExpression != nil && isWakeArtifactExpr(visitor.context, pathExpression)
 }
 
 func (visitor *wakeMutationVisitor) inspectLifecycleSend(send *ast.SendStmt) {
@@ -429,12 +457,8 @@ func (visitor *wakeMutationVisitor) inspectLifecycleSend(send *ast.SendStmt) {
 	if origin != "stopRequest" && origin != "restartSignals" {
 		return
 	}
-	allowed := wakeFunctionKey(wakeMutationCLIPackagePath, "wakeMutationScope", "queueStopRequest")
-	if origin == "restartSignals" {
-		allowed = wakeFunctionKey(wakeMutationCLIPackagePath, "wakeMutationScope", "queueRestartSignal")
-	}
-	if wakeFunctionIdentity(visitor.owner) != allowed {
-		visitor.add(send, "direct lifecycle control send", visitor.owner)
+	if isWakeMutationCLIPackage(visitor.context.pkg) {
+		visitor.add(send, "direct lifecycle control send outside capability package", visitor.owner)
 	}
 }
 
@@ -478,17 +502,61 @@ func (visitor *wakeMutationVisitor) inspectScopeField(selector *ast.SelectorExpr
 func (visitor *wakeMutationVisitor) inspectScopeCapture(identifier *ast.Ident) {
 	object := visitor.context.pkg.TypesInfo.ObjectOf(identifier)
 	variable, ok := object.(*types.Var)
-	if !ok || variable.IsField() || !wakeMutationIsScopePointer(variable.Type()) || len(visitor.frames) == 0 {
+	if !ok || variable.IsField() || !wakeMutationIsScopePointer(variable.Type()) {
 		return
 	}
-	frame := visitor.frames[len(visitor.frames)-1]
-	if frame.functionLiteral == nil {
+	frame := visitor.currentFunctionFrame()
+	if frame == nil {
 		return
 	}
 	if _, local := frame.functionScopeVars[variable]; local || isWakeMutationScopeOwner(visitor.owner) {
 		return
 	}
 	visitor.add(identifier, "mutation scope captured by nested function", visitor.owner)
+}
+
+func (visitor *wakeMutationVisitor) scopeConstructorIsOwned() bool {
+	if isWakeMutationScopeOwner(visitor.owner) {
+		return true
+	}
+	frame := visitor.currentFunctionFrame()
+	if frame == nil {
+		return false
+	}
+	return isWakeMutationScopeOwner(frame.owner)
+}
+
+func (visitor *wakeMutationVisitor) currentFunctionFrame() *wakeMutationVisitorFrame {
+	for index := len(visitor.frames) - 1; index >= 0; index-- {
+		if visitor.frames[index].functionLiteral != nil {
+			return &visitor.frames[index]
+		}
+	}
+	return nil
+}
+
+func isWakeMutationScopeLocalAssignment(
+	visitor *wakeMutationVisitor,
+	assignment *ast.AssignStmt,
+	index int,
+) bool {
+	if visitor == nil || assignment == nil || index >= len(assignment.Lhs) {
+		return false
+	}
+	ident, ok := assignment.Lhs[index].(*ast.Ident)
+	if !ok {
+		return false
+	}
+	variable, ok := visitor.context.pkg.TypesInfo.ObjectOf(ident).(*types.Var)
+	if !ok {
+		return false
+	}
+	frame := visitor.currentFunctionFrame()
+	if frame == nil {
+		return false
+	}
+	_, local := frame.functionScopeVars[variable]
+	return local
 }
 
 func wakeMutationScopeVars(info *types.Info, literal *ast.FuncLit) map[*types.Var]struct{} {
@@ -721,6 +789,7 @@ func wakeMutationScopeOwnerSet() map[string]struct{} {
 		"withExistingWakeMutationScopeInDir",
 		"withExistingWakeMutationScopeNoWaitInDir",
 		"withWakeMutationScopeRetainedDirNoGuard",
+		"withWakeMutationScopeForRetainedCleanup",
 		"withWakeMutationScopeOrRetainedDirNoWait",
 	)
 	for key := range wakeFunctionSet(
@@ -738,168 +807,18 @@ func wakeMutationScopeOwnerSet() map[string]struct{} {
 		"sendPidfdSignalForTermination",
 		"queueStopRequest",
 		"queueRestartSignal",
+		"unlinkAt",
+		"unlinkAtWith",
+		"renameAt",
+		"linkAtWith",
 	) {
 		set[key] = struct{}{}
 	}
 	return set
 }
 
-func wakeMutationAgentDirEffectOwnerSet() map[string]struct{} {
-	return wakeFunctionSet(
-		wakeMutationCLIPackagePath,
-		"",
-		"removeWakeGenerationFileIfSnapshotMatchesAt",
-		"publishAuthoritativeWakeClaimWithDebugAt",
-		"writeWakeOwnerTempAt",
-		"removeAuthoritativeWakeClaimAt",
-		"removeWakeTargetIfSnapshotMatchesAt",
-		"removeWakeTargetGuardedAt",
-		"removeWakeRestartRecordSnapshotAt",
-		"removeWakeRetireStateIfSnapshotMatchesAt",
-		"replaceWakeLockForResumeAt",
-		"publishWakeStateValidatedAt",
-		"removeWakeStateIfSnapshotMatchesAt",
-		"writeWakeMutationMetadataAt",
-		"writeWakeRestartRecordAt",
-	)
-}
-
-func wakeMutationParentOwnedHandleOwnerSet() map[string]struct{} {
-	return wakeFunctionSet(
-		wakeMutationCLIPackagePath,
-		"",
-		"terminateWakePidfd",
-		"killWakeHelperProcessWithHandle",
-		"killWakeRepairDarwinChildWithHandle",
-	)
-}
-
-func wakeMutationSeparateDomainOwnerSet() map[string]string {
-	return map[string]string{
-		wakeFunctionKey(wakeMutationCLIPackagePath, "", "removeWakeSelfUpgradeAttemptAt"):             "lifecycle guard plus exact self-upgrade generation and identity validation",
-		wakeFunctionKey(wakeMutationCLIPackagePath, "", "removeWakeSelfUpgradeDiagnosticAt"):          "lifecycle guard plus exact self-upgrade generation and identity validation",
-		wakeFunctionKey(wakeMutationCLIPackagePath, "", "removeWakeRepairFloorGuardedAt"):             "expected authority validation and lifecycle-guarded repair-floor cleanup",
-		wakeFunctionKey(wakeMutationCLIPackagePath, "", "removeWakeRepairFloorIfGenerationGuardedAt"): "expected authority validation, quarantine rename, identity and digest revalidation, and restore",
-		wakeFunctionKey(wakeMutationCLIPackagePath, "", "removeWakeQuarantineCandidate"):              "lifecycle guard plus candidate name, time, identity, and raw-byte revalidation",
-		wakeFunctionKey(wakeMutationCLIPackagePath, "", "removeLinuxWakeReloadSocketIfSameAt"):        "retained agent directory FD plus socket identity and rename-to-private restoration",
-		wakeFunctionKey(wakeMutationCLIPackagePath, "", "removeDarwinControlSocketAt"):                "guarded cleanup plus control-socket basename validation and wake-lock exclusion",
-		wakeFunctionKey(wakeMutationCLIPackagePath, "", "writeWakeRepairMetadataAt"):                  "separate repair-floor or self-upgrade guard and destination validation",
-	}
-}
-
-func wakeMutationRawEffectOwnerSet() map[string]struct{} {
-	set := wakeMutationScopeOwnerSet()
-	for key := range wakeMutationAgentDirEffectOwnerSet() {
-		set[key] = struct{}{}
-	}
-	for key := range wakeMutationParentOwnedHandleOwnerSet() {
-		set[key] = struct{}{}
-	}
-	for key := range wakeMutationSeparateDomainOwnerSet() {
-		set[key] = struct{}{}
-	}
-	return set
-}
-
-func isWakeMutationAgentDirEffectOwner(fn *types.Func) bool {
-	_, ok := wakeMutationAgentDirEffectOwnerSet()[wakeFunctionIdentity(fn)]
-	return ok
-}
-
-func isWakeMutationParentOwnedHandleOwner(fn *types.Func) bool {
-	_, ok := wakeMutationParentOwnedHandleOwnerSet()[wakeFunctionIdentity(fn)]
-	return ok
-}
-
-func isWakeMutationSeparateDomainOwner(fn *types.Func) bool {
-	_, ok := wakeMutationSeparateDomainOwnerSet()[wakeFunctionIdentity(fn)]
-	return ok
-}
-
-func isWakeMutationDirectEffectOwner(fn *types.Func) bool {
-	return isWakeMutationScopeOwner(fn) ||
-		isWakeMutationAgentDirEffectOwner(fn) ||
-		isWakeMutationParentOwnedHandleOwner(fn)
-}
-
-func wakeMutationFunctionHasScopeParam(fn *types.Func) bool {
-	if fn == nil {
-		return false
-	}
-	signature, ok := fn.Type().(*types.Signature)
-	if !ok || signature.Params() == nil {
-		return false
-	}
-	for index := 0; index < signature.Params().Len(); index++ {
-		if wakeMutationIsScopePointer(signature.Params().At(index).Type()) {
-			return true
-		}
-	}
-	return false
-}
-
-func validateWakeMutationRawEffectOwnerShapes(pkgs []*packages.Package) []wakeMutationArchitectureOffender {
-	var offenders []wakeMutationArchitectureOffender
-	for key := range wakeMutationAgentDirEffectOwnerSet() {
-		fn, pkg := lookupWakeMutationFunction(pkgs, key)
-		if fn == nil || pkg == nil || wakeMutationFunctionHasScopeParam(fn) {
-			continue
-		}
-		position := pkg.Fset.PositionFor(fn.Pos(), false)
-		offenders = append(offenders, wakeMutationArchitectureOffender{
-			path:   filepath.ToSlash(position.Filename),
-			line:   position.Line,
-			owner:  key,
-			reason: "agent-dir effect owner must take *wakeMutationScope",
-		})
-	}
-	return offenders
-}
-
-func lookupWakeMutationFunction(pkgs []*packages.Package, key string) (*types.Func, *packages.Package) {
-	if !strings.HasPrefix(key, wakeMutationCLIPackagePath+"::") {
-		return nil, nil
-	}
-	name := key[strings.LastIndex(key, ".")+1:]
-	for _, pkg := range pkgs {
-		if pkg == nil || pkg.PkgPath != wakeMutationCLIPackagePath || pkg.Types == nil {
-			continue
-		}
-		if fn, ok := pkg.Types.Scope().Lookup(name).(*types.Func); ok && wakeFunctionIdentity(fn) == key {
-			return fn, pkg
-		}
-	}
-	return nil, nil
-}
-
-func isWakeMutationDynamicRemoval(fn *types.Func) bool {
-	if fn == nil || fn.Pkg() == nil || fn.Pkg().Path() != wakeMutationCLIPackagePath {
-		return false
-	}
-	return isWakeMutationRawEffectOwner(fn)
-}
-
-func wakeMutationProcessKillOwnerSet() map[string]struct{} {
-	return wakeFunctionSet(
-		wakeMutationCLIPackagePath,
-		"",
-		"killWakeHelperProcessWithHandle",
-		"killWakeRepairDarwinChildWithHandle",
-	)
-}
-
 func isWakeMutationScopeOwner(fn *types.Func) bool {
 	_, ok := wakeMutationScopeOwnerSet()[wakeFunctionIdentity(fn)]
-	return ok
-}
-
-func isWakeMutationRawEffectOwner(fn *types.Func) bool {
-	_, ok := wakeMutationRawEffectOwnerSet()[wakeFunctionIdentity(fn)]
-	return ok
-}
-
-func isWakeMutationProcessKillOwner(fn *types.Func) bool {
-	_, ok := wakeMutationProcessKillOwnerSet()[wakeFunctionIdentity(fn)]
 	return ok
 }
 
@@ -925,6 +844,7 @@ func wakeFunctionIsGuard(fn *types.Func) bool {
 		"withWakeMutationScopeNoWaitInDir",
 		"withExistingWakeMutationScopeInDir",
 		"withExistingWakeMutationScopeNoWaitInDir",
+		"withWakeMutationScopeForRetainedCleanup",
 		"withWakeMutationScopeOrRetainedDirNoWait":
 		return true
 	default:
@@ -936,25 +856,38 @@ func wakeFunctionIsRawPidfdEffect(fn *types.Func) bool {
 	return fn != nil && wakeFunctionIdentity(fn) == wakeFunctionKey("golang.org/x/sys/unix", "", "PidfdSendSignal")
 }
 
-func wakeFunctionIsRawWakeWrapper(fn *types.Func) bool {
-	if fn == nil {
-		return false
-	}
-	key := wakeFunctionIdentity(fn)
-	return key == wakeFunctionKey(wakeMutationCLIPackagePath, "", "sendWakePidfdSignal") ||
-		key == wakeFunctionKey(wakeMutationCLIPackagePath, "", "sendLinuxPidfdSignalRaw")
-}
-
-func wakeFunctionIsRemoval(fn *types.Func) bool {
+func wakeFunctionIsRawFilesystemEffect(fn *types.Func) bool {
 	if fn == nil {
 		return false
 	}
 	switch wakeFunctionIdentity(fn) {
 	case wakeFunctionKey("golang.org/x/sys/unix", "", "Unlinkat"),
+		wakeFunctionKey("golang.org/x/sys/unix", "", "Renameat"),
+		wakeFunctionKey("golang.org/x/sys/unix", "", "Renameat2"),
+		wakeFunctionKey("golang.org/x/sys/unix", "", "RenameatxNp"),
+		wakeFunctionKey("golang.org/x/sys/unix", "", "Linkat"),
 		wakeFunctionKey("syscall", "", "Unlink"),
 		wakeFunctionKey("syscall", "", "Unlinkat"),
 		wakeFunctionKey("os", "", "Remove"),
 		wakeFunctionKey("os", "", "RemoveAll"):
+		return true
+	default:
+		return false
+	}
+}
+
+func wakeFunctionIsRawUnixFilesystemEffect(fn *types.Func) bool {
+	if fn == nil {
+		return false
+	}
+	switch wakeFunctionIdentity(fn) {
+	case wakeFunctionKey("golang.org/x/sys/unix", "", "Unlinkat"),
+		wakeFunctionKey("golang.org/x/sys/unix", "", "Renameat"),
+		wakeFunctionKey("golang.org/x/sys/unix", "", "Renameat2"),
+		wakeFunctionKey("golang.org/x/sys/unix", "", "RenameatxNp"),
+		wakeFunctionKey("golang.org/x/sys/unix", "", "Linkat"),
+		wakeFunctionKey("syscall", "", "Unlink"),
+		wakeFunctionKey("syscall", "", "Unlinkat"):
 		return true
 	default:
 		return false
@@ -967,6 +900,95 @@ func wakeFunctionIsProcessSignal(fn *types.Func) bool {
 
 func wakeFunctionIsProcessKill(fn *types.Func) bool {
 	return fn != nil && wakeFunctionIdentity(fn) == wakeFunctionKey("os", "Process", "Kill")
+}
+
+func isWakeMutationUnresolvedEffectCall(context *wakeMutationPackage, call *ast.CallExpr) bool {
+	if context == nil || call == nil || context.pkg.PkgPath != wakeMutationCLIPackagePath {
+		return false
+	}
+	if wakeMutationExprContainsTypeAssertion(call.Fun) {
+		return true
+	}
+	if identifier, ok := call.Fun.(*ast.Ident); ok {
+		if variable, ok := context.pkg.TypesInfo.ObjectOf(identifier).(*types.Var); ok && context.typeAssertVar[variable] {
+			return true
+		}
+	}
+	return wakeMutationEffectSignature(context.pkg.TypesInfo.TypeOf(call.Fun)) &&
+		wakeMutationUnresolvedCallableShape(call.Fun)
+}
+
+func wakeMutationExprContainsTypeAssertion(expression ast.Expr) bool {
+	switch expression := expression.(type) {
+	case *ast.TypeAssertExpr:
+		return true
+	case *ast.ParenExpr:
+		return wakeMutationExprContainsTypeAssertion(expression.X)
+	default:
+		return false
+	}
+}
+
+func wakeMutationUnresolvedCallableShape(expression ast.Expr) bool {
+	switch expression := expression.(type) {
+	case *ast.CallExpr, *ast.IndexExpr, *ast.IndexListExpr, *ast.SelectorExpr:
+		return true
+	case *ast.ParenExpr:
+		return wakeMutationUnresolvedCallableShape(expression.X)
+	default:
+		return false
+	}
+}
+
+func wakeMutationEffectSignature(typ types.Type) bool {
+	signature, ok := types.Unalias(typ).(*types.Signature)
+	if !ok || signature.Results() == nil || signature.Results().Len() != 1 ||
+		!types.AssignableTo(signature.Results().At(0).Type(), types.Universe.Lookup("error").Type()) {
+		return false
+	}
+	params := signature.Params()
+	switch params.Len() {
+	case 1:
+		return wakeMutationNamedType(params.At(0).Type()) == "os.Signal"
+	case 3:
+		return wakeMutationBasicKind(params.At(0).Type(), types.Int) &&
+			wakeMutationBasicKind(params.At(1).Type(), types.String) &&
+			wakeMutationBasicKind(params.At(2).Type(), types.Int)
+	case 4:
+		return (wakeMutationBasicKind(params.At(0).Type(), types.Int) &&
+			wakeMutationNamedType(params.At(1).Type()) == "golang.org/x/sys/unix.Signal" &&
+			wakeMutationNamedType(params.At(2).Type()) == "golang.org/x/sys/unix.Siginfo" &&
+			wakeMutationBasicKind(params.At(3).Type(), types.Int)) ||
+			(wakeMutationBasicKind(params.At(0).Type(), types.Int) &&
+				wakeMutationBasicKind(params.At(1).Type(), types.String) &&
+				wakeMutationBasicKind(params.At(2).Type(), types.Int) &&
+				wakeMutationBasicKind(params.At(3).Type(), types.String))
+	case 5:
+		return wakeMutationBasicKind(params.At(0).Type(), types.Int) &&
+			wakeMutationBasicKind(params.At(1).Type(), types.String) &&
+			wakeMutationBasicKind(params.At(2).Type(), types.Int) &&
+			wakeMutationBasicKind(params.At(3).Type(), types.String) &&
+			wakeMutationBasicKind(params.At(4).Type(), types.Int)
+	default:
+		return false
+	}
+}
+
+func wakeMutationBasicKind(typ types.Type, want types.BasicKind) bool {
+	basic, ok := types.Unalias(typ).(*types.Basic)
+	return ok && basic.Kind() == want
+}
+
+func wakeMutationNamedType(typ types.Type) string {
+	pointer, isPointer := types.Unalias(typ).(*types.Pointer)
+	if isPointer {
+		typ = pointer.Elem()
+	}
+	named, ok := types.Unalias(typ).(*types.Named)
+	if !ok || named.Obj() == nil || named.Obj().Pkg() == nil {
+		return ""
+	}
+	return named.Obj().Pkg().Path() + "." + named.Obj().Name()
 }
 
 func wakeFunctionIsReflective(fn *types.Func) bool {
@@ -1039,38 +1061,69 @@ func TestWakeMutationNegativeCorpus(t *testing.T) {
 		t.Fatal(err)
 	}
 	offenders := scanWakeMutationPackages(pkgs)
-	want := []string{
-		"badDirectUnlink",
-		"badAliasUnlink",
-		"badProcessSignalAlias",
-		"badProcessKill",
-		"badChannelAlias",
-		"badRemove",
-		"badSyscallUnlink",
-		"badScopeConstructor",
-		"badScopeComposite",
-		"badScopeEscape",
-		"badScopeCapture",
-		"badScopeField",
-		"badPidfdEscape",
-		"badReflection",
-		"badGuardWait",
-		"removeWakeTargetIfSnapshotMatchesAt",
-		wakeMutationModulePath + "/internal/other::.badOther",
+	type expectation struct {
+		file        string
+		line        int
+		reason      string
+		ownerSuffix string
+	}
+	line := func(source, marker string) int {
+		t.Helper()
+		index := strings.Index(source, marker)
+		if index < 0 {
+			t.Fatalf("negative corpus marker %q not found", marker)
+		}
+		return 1 + strings.Count(source[:index], "\n")
+	}
+	want := []expectation{
+		{"case.go", line(wakeMutationNegativeCorpusCLI, `unix.Unlinkat(fd, ".wake.lock", 0)`), "raw wake filesystem effect outside capability package", ".badDirectUnlink"},
+		{"case.go", line(wakeMutationNegativeCorpusCLI, `u(fd, ".wake.lock", 0)`), "raw wake filesystem effect outside capability package", ".badAliasUnlink"},
+		{"case.go", line(wakeMutationNegativeCorpusCLI, "_ = signal(syscall.SIGTERM)"), "direct wake process signal outside capability package", ".badProcessSignalAlias"},
+		{"case.go", line(wakeMutationNegativeCorpusCLI, "_ = process.Kill()"), "direct wake process kill outside capability package", ".badProcessKill"},
+		{"case.go", line(wakeMutationNegativeCorpusCLI, "local <- struct{}{}"), "direct lifecycle control send outside capability package", ".badChannelAlias"},
+		{"case.go", line(wakeMutationNegativeCorpusCLI, `os.Remove(".wake.lock")`), "raw wake filesystem effect outside capability package", ".badRemove"},
+		{"case.go", line(wakeMutationNegativeCorpusCLI, `syscall.Unlink(".wake.lock")`), "raw wake filesystem effect outside capability package", ".badSyscallUnlink"},
+		{"case.go", line(wakeMutationNegativeCorpusCLI, "_ = newWakeMutationScope()"), "mutation scope constructed outside its owner", ".badScopeConstructor"},
+		{"case.go", line(wakeMutationNegativeCorpusCLI, "_ = newWakeMutationScope()"), "mutation scope escaped through assignment", ".badScopeConstructor"},
+		{"case.go", line(wakeMutationNegativeCorpusCLI, "_ = &wakeMutationScope{}"), "mutation scope forged outside its owner", ".badScopeComposite"},
+		{"case.go", line(wakeMutationNegativeCorpusCLI, "_ = &wakeMutationScope{}"), "mutation scope escaped through assignment", ".badScopeComposite"},
+		{"case.go", line(wakeMutationNegativeCorpusCLI, "saved := scope"), "mutation scope escaped through assignment", ".badScopeEscape"},
+		{"case.go", line(wakeMutationNegativeCorpusCLI, "return saved"), "mutation scope escaped through return", ".badScopeEscape"},
+		{"case.go", line(wakeMutationNegativeCorpusCLI, "func() { _ = scope }"), "mutation scope captured by nested function", "<func-literal case.go:" + strconv.Itoa(line(wakeMutationNegativeCorpusCLI, "func() { _ = scope }")) + ">"},
+		{"case.go", line(wakeMutationNegativeCorpusCLI, "func() { _ = scope }"), "mutation scope escaped through assignment", "<func-literal case.go:" + strconv.Itoa(line(wakeMutationNegativeCorpusCLI, "func() { _ = scope }")) + ">"},
+		{"case.go", line(wakeMutationNegativeCorpusCLI, "return scope.dirfd"), "mutation scope field accessed outside its owner", ".badScopeField"},
+		{"case.go", line(wakeMutationNegativeCorpusCLI, `_ = sender(0, ".wake.lock", 0)`), "unresolved wake effect call in cli", ".badTypeAssertCall"},
+		{"case.go", line(wakeMutationNegativeCorpusCLI, `senders["unlink"](fd, ".wake.lock", 0)`), "unresolved wake effect call in cli", ".badContainerUnlink"},
+		{"case.go", line(wakeMutationNegativeCorpusCLI, `unix.Renameat(fd, ".wake.tmp", fd, ".wake.lock")`), "raw wake filesystem effect outside capability package", ".badDirectRename"},
+		{"case.go", line(wakeMutationNegativeCorpusCLI, `unix.Unlinkat(fd, ".wake.nested", 0)`), "raw wake filesystem effect outside capability package", "<func-literal case.go:" + strconv.Itoa(line(wakeMutationNegativeCorpusCLI, "go func()")) + ">"},
+		{"case.go", line(wakeMutationNegativeCorpusCLI, "value.Call(nil)"), "reflective call can bypass mutation authorization", ".badReflection"},
+		{"case.go", line(wakeMutationNegativeCorpusCLI, "withWakeLifecycleGuardInDir(func() { waitForWake() })"), "wait inside lifecycle guard scope", ".badGuardWait"},
+		{"case.go", line(wakeMutationNegativeCorpusCLI, "os.Remove(wakeTargetFileName)"), "raw wake filesystem effect outside capability package", ".removeWakeTargetIfSnapshotMatchesAt"},
+		{"case.go", line(wakeMutationNegativeCorpusOther, `os.Remove(".wake.lock")`), "raw wake filesystem effect outside capability package", ".badOther"},
 	}
 	if runtime.GOOS == "linux" {
-		want = append(want, "badSyscallUnlinkat")
+		unlinkAtLine := line(wakeMutationNegativeCorpusCLILinux, `syscall.Unlinkat(fd, ".wake.lock")`)
+		want = append(want,
+			expectation{"case_linux.go", unlinkAtLine, "raw wake filesystem effect outside capability package", ".badSyscallUnlinkat"},
+			expectation{"case_linux.go", line(wakeMutationNegativeCorpusCLILinux, `senders["send"](fd, signal, nil, 0)`), "unresolved wake effect call in cli", ".badPidfdEscape"},
+		)
 	}
-	for _, functionName := range want {
+	if len(offenders) != len(want) {
+		t.Fatalf("negative corpus produced %d offenders, want %d:\n%s", len(offenders), len(want), formatWakeMutationOffenders(offenders))
+	}
+	for _, expected := range want {
 		found := false
 		for _, offender := range offenders {
-			if strings.HasSuffix(offender.owner, "."+functionName) || offender.owner == functionName {
+			if filepath.Base(offender.path) == expected.file &&
+				offender.line == expected.line &&
+				offender.reason == expected.reason &&
+				strings.HasSuffix(offender.owner, expected.ownerSuffix) {
 				found = true
 				break
 			}
 		}
 		if !found {
-			t.Errorf("negative corpus case %s was not rejected; offenders:\n%s", functionName, formatWakeMutationOffenders(offenders))
+			t.Errorf("negative corpus offender missing at %s:%d for %s (%s); offenders:\n%s", expected.file, expected.line, expected.reason, expected.ownerSuffix, formatWakeMutationOffenders(offenders))
 		}
 	}
 }
@@ -1090,8 +1143,6 @@ type wakeMutationScope struct {
 }
 
 func newWakeMutationScope() *wakeMutationScope { return nil }
-
-func sendWakePidfdSignal(int, unix.Signal) error { return nil }
 
 func withWakeLifecycleGuardInDir(func()) {}
 
@@ -1128,6 +1179,26 @@ func badSyscallUnlink() {
 	_ = syscall.Unlink(".wake.lock")
 }
 
+func badDirectRename(fd int) {
+	_ = unix.Renameat(fd, ".wake.tmp", fd, ".wake.lock")
+}
+
+func badContainerUnlink(fd int) {
+	senders := map[string]func(int, string, int) error{"unlink": unix.Unlinkat}
+	_ = senders["unlink"](fd, ".wake.lock", 0)
+}
+
+func badTypeAssertCall(value interface{}) {
+	sender := value.(func(int, string, int) error)
+	_ = sender(0, ".wake.lock", 0)
+}
+
+func badNestedGoroutine(fd int) {
+	go func() {
+		_ = unix.Unlinkat(fd, ".wake.nested", 0)
+	}()
+}
+
 func badScopeConstructor() {
 	_ = newWakeMutationScope()
 }
@@ -1149,10 +1220,6 @@ func badScopeField(scope *wakeMutationScope) int {
 	return scope.dirfd
 }
 
-func badPidfdEscape(fd int, signal unix.Signal) {
-	_ = sendWakePidfdSignal(fd, signal)
-}
-
 func badReflection(value reflect.Value) {
 	_ = value.Call(nil)
 }
@@ -1161,7 +1228,11 @@ func badGuardWait() {
 	withWakeLifecycleGuardInDir(func() { waitForWake() })
 }
 
-func removeWakeTargetIfSnapshotMatchesAt(fd int) {}
+const wakeTargetFileName = ".wake.target"
+
+func removeWakeTargetIfSnapshotMatchesAt() {
+	_ = os.Remove(wakeTargetFileName)
+}
 `
 
 const wakeMutationNegativeCorpusOther = `package other
@@ -1177,9 +1248,18 @@ const wakeMutationNegativeCorpusCLILinux = `//go:build linux
 
 package cli
 
-import "syscall"
+import (
+	"syscall"
+
+	"golang.org/x/sys/unix"
+)
 
 func badSyscallUnlinkat(fd int) {
 	_ = syscall.Unlinkat(fd, ".wake.lock")
+}
+
+func badPidfdEscape(fd int, signal unix.Signal) {
+	senders := map[string]func(int, unix.Signal, *unix.Siginfo, int) error{"send": unix.PidfdSendSignal}
+	_ = senders["send"](fd, signal, nil, 0)
 }
 `

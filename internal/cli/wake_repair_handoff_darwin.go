@@ -28,7 +28,7 @@ var (
 	killWakeRepairDarwinChild         = killWakeRepairDarwinChildWithHandle
 )
 
-func killWakeRepairDarwinChildWithHandle(process *os.Process) error { return process.Kill() }
+func killWakeRepairDarwinChildWithHandle(process *os.Process) error { return killWakeProcess(process) }
 
 func prepareWakeRepairChildCapabilityPlatform(cmd *exec.Cmd) (*wakeRepairChildCapability, error) {
 	if cmd == nil {

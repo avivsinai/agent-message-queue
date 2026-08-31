@@ -66,7 +66,7 @@ func writeWakePreparedFileInDir(
 			Generation:   current.Lock.Generation,
 			TargetDigest: current.Lock.TargetDigest,
 		}
-		refreshState := func() error {
+		refreshState := func(scope *wakeMutationScope) error {
 			if err := reconcileWakeStateAfterLegacyMutationAt(scope, root, me); err != nil {
 				if current.Lock.StateGeneration != "" && current.Lock.StateDigest != "" {
 					return fmt.Errorf("wake prepared marker committed; refresh bound wake state: %w", err)
@@ -84,7 +84,7 @@ func writeWakePreparedFileInDir(
 		if err := writeWakeGenerationFileAt(scope, wakePreparedFileName, "wake prepared marker", marker); err != nil {
 			return err
 		}
-		return refreshState()
+		return refreshState(scope)
 	})
 }
 

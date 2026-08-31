@@ -298,7 +298,7 @@ func listenLinuxWakeReloadTransportAt(
 				return err
 			}
 		}
-		if err := unix.Renameat2(dirfd, stagingName, dirfd, name, unix.RENAME_NOREPLACE); err != nil {
+		if err := renameWakeNoReplaceAt(dirfd, stagingName, dirfd, name); err != nil {
 			return fmt.Errorf("publish wake reload endpoint %s: %w", path, err)
 		}
 		cleanupName = name
@@ -416,7 +416,7 @@ func removeLinuxWakeReloadSocketIfSameAt(
 	if err != nil {
 		return err
 	}
-	if err := unix.Renameat2(dirfd, name, dirfd, retiredName, unix.RENAME_NOREPLACE); errors.Is(err, syscall.ENOENT) {
+	if err := renameWakeNoReplaceAt(dirfd, name, dirfd, retiredName); errors.Is(err, syscall.ENOENT) {
 		return nil
 	} else if err != nil {
 		return err
@@ -432,14 +432,14 @@ func removeLinuxWakeReloadSocketIfSameAt(
 		filepath.Join(dirPath, retiredName),
 	)
 	if inspectErr == nil && sameLinuxWakeReloadStableSocketIdentity(retired, expected) {
-		if err := unix.Unlinkat(dirfd, retiredName, 0); err != nil && !errors.Is(err, syscall.ENOENT) {
+		if err := wakeUnlinkAt(dirfd, retiredName, 0); err != nil && !errors.Is(err, syscall.ENOENT) {
 			return err
 		}
 		return nil
 	}
 	// A non-matching retired object is never unlinked. Restore it only if
 	// no successor claimed the public name; otherwise preserve both names.
-	restoreErr := unix.Renameat2(dirfd, retiredName, dirfd, name, unix.RENAME_NOREPLACE)
+	restoreErr := renameWakeNoReplaceAt(dirfd, retiredName, dirfd, name)
 	identityErr := fmt.Errorf("wake reload endpoint identity changed; refused cleanup")
 	if restoreErr == nil {
 		return errors.Join(inspectErr, identityErr)

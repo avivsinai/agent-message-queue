@@ -216,12 +216,12 @@ func publishWakeStateValidatedAt(
 		return wakeStateFileSnapshot{}, err
 	}
 	tempPresent := true
-	defer func() {
+	defer func(scope *wakeMutationScope) {
 		_ = tempFile.Close()
 		if tempPresent {
-			_ = unix.Unlinkat(dirfd, tempName, 0)
+			_ = scope.unlinkAt(tempName, 0)
 		}
-	}()
+	}(scope)
 	if err := tempFile.Chmod(0o600); err != nil {
 		return wakeStateFileSnapshot{}, fmt.Errorf("chmod wake state temp: %w", err)
 	}
@@ -278,7 +278,7 @@ func publishWakeStateValidatedAt(
 			return wakeStateFileSnapshot{}, err
 		}
 	}
-	if err := unix.Renameat(dirfd, tempName, dirfd, wakeStateFileName); err != nil {
+	if err := scope.renameAt(dirfd, tempName, dirfd, wakeStateFileName); err != nil {
 		return wakeStateFileSnapshot{}, fmt.Errorf("install wake state: %w", err)
 	}
 	tempPresent = false
@@ -525,7 +525,7 @@ func removeWakeStateIfSnapshotMatchesAt(
 		!bytes.Equal(expected.Raw, current.Raw) {
 		return false, fmt.Errorf("wake state changed before removal; preserving it")
 	}
-	if err := unix.Unlinkat(dirfd, wakeStateFileName, 0); err != nil {
+	if err := scope.unlinkAt(wakeStateFileName, 0); err != nil {
 		if err == unix.ENOENT {
 			return false, nil
 		}

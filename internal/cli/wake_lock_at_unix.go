@@ -125,7 +125,7 @@ func createWakeLockAt(
 		return fmt.Errorf("stat created wake lock: %w", statErr)
 	}
 	committed := false
-	defer func() {
+	defer func(scope *wakeMutationScope) {
 		_ = file.Close()
 		if !committed {
 			currentFD, openErr := unix.Openat(
@@ -144,7 +144,7 @@ func createWakeLockAt(
 				}
 			}
 		}
-	}()
+	}(scope)
 	if err := file.Chmod(0o600); err != nil {
 		return fmt.Errorf("chmod created wake lock: %w", err)
 	}
@@ -703,7 +703,7 @@ func removeWakeGenerationFileIfSnapshotMatchesAt(
 		expected.Marker.TargetDigest != current.Marker.TargetDigest {
 		return false, fmt.Errorf("%s semantics changed before removal; preserving it", label)
 	}
-	if err := unix.Unlinkat(dirfd, name, 0); err != nil {
+	if err := scope.unlinkAt(name, 0); err != nil {
 		if err == unix.ENOENT {
 			return false, nil
 		}
@@ -747,7 +747,7 @@ func writeWakeGenerationFileAtWithSnapshot(
 	tempPresent := true
 	defer func() {
 		if tempPresent {
-			_ = unix.Unlinkat(dirfd, temp, 0)
+			_ = wakeUnlinkAt(dirfd, temp, 0)
 		}
 	}()
 	tempFD, err := unix.Openat(
@@ -776,7 +776,7 @@ func writeWakeGenerationFileAtWithSnapshot(
 		Raw:      bytes.Clone(raw),
 		FileInfo: tempInfo,
 	}
-	if err := unix.Renameat(dirfd, temp, dirfd, name); err != nil {
+	if err := scope.renameAt(dirfd, temp, dirfd, name); err != nil {
 		return wakeGenerationFileSnapshot{}, fmt.Errorf("install %s: %w", label, err)
 	}
 	tempPresent = false
@@ -846,7 +846,7 @@ func removeWakeReadyGenerationFileIfSnapshotMatchesAt(
 		expected.Marker.TargetDigest != current.Marker.TargetDigest {
 		return false, fmt.Errorf("%s semantics changed before removal; preserving it", label)
 	}
-	if err := unix.Unlinkat(dirfd, name, 0); err != nil {
+	if err := wakeUnlinkAt(dirfd, name, 0); err != nil {
 		if err == unix.ENOENT {
 			return false, nil
 		}
@@ -877,7 +877,7 @@ func writeWakeReadyGenerationFileAtWithSnapshot(
 	tempPresent := true
 	defer func() {
 		if tempPresent {
-			_ = unix.Unlinkat(dirfd, temp, 0)
+			_ = wakeUnlinkAt(dirfd, temp, 0)
 		}
 	}()
 	tempFD, err := unix.Openat(
@@ -906,7 +906,7 @@ func writeWakeReadyGenerationFileAtWithSnapshot(
 		Raw:      bytes.Clone(raw),
 		FileInfo: tempInfo,
 	}
-	if err := unix.Renameat(dirfd, temp, dirfd, name); err != nil {
+	if err := wakeRenameAt(dirfd, temp, dirfd, name); err != nil {
 		return wakeGenerationFileSnapshot{}, fmt.Errorf("install %s: %w", label, err)
 	}
 	tempPresent = false
@@ -969,7 +969,7 @@ func writeWakeReadyTempAt(dirfd int, label string, data []byte, mode os.FileMode
 	defer func() {
 		_ = file.Close()
 		if !keep {
-			_ = unix.Unlinkat(dirfd, name, 0)
+			_ = wakeUnlinkAt(dirfd, name, 0)
 		}
 	}()
 	if err := file.Chmod(mode); err != nil {

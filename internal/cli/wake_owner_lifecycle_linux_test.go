@@ -656,7 +656,7 @@ func TestLinuxStableOwnerWakeStopNeverSignalsReusedNumericPID(t *testing.T) {
 	oldOpen := linuxPidfdOpen
 	oldPoll := linuxPidfdPoll
 	oldClose := linuxPidfdClose
-	oldSignal := linuxPidfdSendSignal
+	oldSignal := linuxPidfdSend
 	linuxPidfdOpen = func(pid, flags int) (int, error) {
 		events = append(events, "open")
 		return 88, nil
@@ -669,7 +669,7 @@ func TestLinuxStableOwnerWakeStopNeverSignalsReusedNumericPID(t *testing.T) {
 		events = append(events, "close")
 		return nil
 	}
-	linuxPidfdSendSignal = func(int, unix.Signal, *unix.Siginfo, int) error {
+	linuxPidfdSend = func(int, unix.Signal, *unix.Siginfo, int) error {
 		t.Fatal("reused numeric PID received a signal")
 		return nil
 	}
@@ -677,7 +677,7 @@ func TestLinuxStableOwnerWakeStopNeverSignalsReusedNumericPID(t *testing.T) {
 		linuxPidfdOpen = oldOpen
 		linuxPidfdPoll = oldPoll
 		linuxPidfdClose = oldClose
-		linuxPidfdSendSignal = oldSignal
+		linuxPidfdSend = oldSignal
 	})
 	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
 		events = append(events, "inspect")
@@ -759,18 +759,18 @@ func TestLinuxMalformedOwnerWakeIdentityNeverSignalsMatchingArgvPID(t *testing.T
 	}
 
 	oldOpen := linuxPidfdOpen
-	oldSignal := linuxPidfdSendSignal
+	oldSignal := linuxPidfdSend
 	linuxPidfdOpen = func(int, int) (int, error) {
 		t.Fatal("malformed authoritative identity reached pidfd_open")
 		return -1, nil
 	}
-	linuxPidfdSendSignal = func(int, unix.Signal, *unix.Siginfo, int) error {
+	linuxPidfdSend = func(int, unix.Signal, *unix.Siginfo, int) error {
 		t.Fatal("matching-argv PID received a signal from malformed owner lock")
 		return nil
 	}
 	t.Cleanup(func() {
 		linuxPidfdOpen = oldOpen
-		linuxPidfdSendSignal = oldSignal
+		linuxPidfdSend = oldSignal
 	})
 	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
 		return wakeProcessInfo{

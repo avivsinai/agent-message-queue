@@ -125,7 +125,7 @@ func writeWakeSelfUpgradeAttemptAt(
 }
 
 func removeWakeSelfUpgradeAttemptAt(dirfd int) error {
-	err := unix.Unlinkat(dirfd, wakeSelfUpgradeAttemptFileName, 0)
+	err := wakeUnlinkAt(dirfd, wakeSelfUpgradeAttemptFileName, 0)
 	if err == unix.ENOENT {
 		return nil
 	}

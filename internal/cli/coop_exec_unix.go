@@ -22,7 +22,7 @@ const wakeReadyTimeout = 25 * time.Second
 
 const wakeProcessExitTimeout = 5 * time.Second
 
-func killWakeHelperProcessWithHandle(proc *os.Process) error { return proc.Kill() }
+func killWakeHelperProcessWithHandle(proc *os.Process) error { return killWakeProcess(proc) }
 
 var killWakeHelperProcess = killWakeHelperProcessWithHandle
 

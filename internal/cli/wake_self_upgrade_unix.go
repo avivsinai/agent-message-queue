@@ -801,7 +801,7 @@ func sameWakeSelfUpgradeDiagnostic(first, second wakeSelfUpgradeDiagnostic) bool
 }
 
 func removeWakeSelfUpgradeDiagnosticAt(dirfd int) error {
-	err := unix.Unlinkat(dirfd, wakeSelfUpgradeFileName, 0)
+	err := wakeUnlinkAt(dirfd, wakeSelfUpgradeFileName, 0)
 	if err == unix.ENOENT {
 		return nil
 	}

@@ -23,7 +23,6 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/selfupgrade"
-	"golang.org/x/sys/unix"
 )
 
 const (
@@ -963,7 +962,7 @@ func removeWakeRestartRecordSnapshotAt(
 			fmt.Errorf("%s changed before removal", description),
 		)
 	}
-	if err := unix.Unlinkat(dirfd, wakeRestartFileName, 0); err != nil {
+	if err := scope.unlinkAt(wakeRestartFileName, 0); err != nil {
 		return fmt.Errorf("remove %s: %w", description, err)
 	}
 	if err := syncWakeOwnerDirFD(dirfd); err != nil {
@@ -1359,16 +1358,16 @@ func replaceWakeLockForResumeAt(
 		return err
 	}
 	tempPresent := true
-	defer func() {
+	defer func(scope *wakeMutationScope) {
 		if tempPresent {
-			_ = unix.Unlinkat(dirfd, temp, 0)
+			_ = scope.unlinkAt(temp, 0)
 		}
-	}()
+	}(scope)
 	current := inspectWakeLockAt(dirfd, agentDir, expected.Root, expected.Agent)
 	if !sameWakeLockInspection(expected, current) || !current.IdentityConfirmed {
 		return fmt.Errorf("wake resume incumbent changed before generation commit")
 	}
-	if err := unix.Renameat(dirfd, temp, dirfd, wakeLockFileName); err != nil {
+	if err := scope.renameAt(dirfd, temp, dirfd, wakeLockFileName); err != nil {
 		return fmt.Errorf("commit wake resume generation: %w", err)
 	}
 	tempPresent = false

@@ -191,7 +191,7 @@ func writeWakeRepairFloorAndCaptureAuthorityAt(
 }
 
 func removeWakeRepairFloorGuardedAt(dirfd int, agentDir *wakeAgentDir) error {
-	if err := unix.Unlinkat(dirfd, wakeRepairFloorFileName, 0); err != nil {
+	if err := wakeUnlinkAt(dirfd, wakeRepairFloorFileName, 0); err != nil {
 		if err == unix.ENOENT {
 			return nil
 		}
@@ -270,7 +270,7 @@ func removeWakeRepairFloorIfGenerationGuardedAt(
 			restoreErr,
 		)
 	}
-	if err := unix.Unlinkat(dirfd, quarantine, 0); err != nil {
+	if err := wakeUnlinkAt(dirfd, quarantine, 0); err != nil {
 		if err == unix.ENOENT {
 			return nil
 		}
@@ -383,7 +383,7 @@ func removeWakeTargetGuardedAt(scope *wakeMutationScope) error {
 		stateExists = false
 	}
 	removedTarget := false
-	if err := unix.Unlinkat(dirfd, wakeTargetFileName, 0); err != nil && err != unix.ENOENT {
+	if err := scope.unlinkAt(wakeTargetFileName, 0); err != nil && err != unix.ENOENT {
 		return fmt.Errorf("remove wake target: %w", err)
 	} else if err == nil {
 		removedTarget = true
@@ -424,18 +424,18 @@ func writeWakeMutationMetadataAt(
 		return err
 	}
 	tempPresent := true
-	defer func() {
+	defer func(scope *wakeMutationScope) {
 		if tempPresent {
-			_ = unix.Unlinkat(dirfd, temp, 0)
+			_ = scope.unlinkAt(temp, 0)
 		}
-	}()
+	}(scope)
 	if err := syncWakeOwnerDirFD(dirfd); err != nil {
 		return fmt.Errorf("sync %s directory before install: %w", label, err)
 	}
 	if err := validateWakeRepairMetadataDestinationAt(dirfd, agentDir, name, label); err != nil {
 		return err
 	}
-	if err := unix.Renameat(dirfd, temp, dirfd, name); err != nil {
+	if err := scope.renameAt(dirfd, temp, dirfd, name); err != nil {
 		return fmt.Errorf("install %s: %w", label, err)
 	}
 	tempPresent = false
@@ -488,7 +488,7 @@ func writeWakeRepairMetadataAt(
 	defer func() {
 		_ = file.Close()
 		if tempPresent {
-			_ = unix.Unlinkat(dirfd, temp, 0)
+			_ = wakeUnlinkAt(dirfd, temp, 0)
 		}
 	}()
 	if err := file.Chmod(0o600); err != nil {
@@ -513,7 +513,7 @@ func writeWakeRepairMetadataAt(
 	if err := validateWakeRepairMetadataDestinationAt(dirfd, agentDir, name, label); err != nil {
 		return err
 	}
-	if err := unix.Renameat(dirfd, temp, dirfd, name); err != nil {
+	if err := wakeRenameAt(dirfd, temp, dirfd, name); err != nil {
 		return fmt.Errorf("install %s: %w", label, err)
 	}
 	tempPresent = false

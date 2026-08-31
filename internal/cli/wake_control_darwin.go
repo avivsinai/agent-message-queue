@@ -220,7 +220,7 @@ func removeDarwinControlSocketAt(dirfd int, name string) error {
 	if err := assertNotWakeLockName(name); err != nil {
 		return err
 	}
-	err := unix.Unlinkat(dirfd, name, 0)
+	err := wakeUnlinkAt(dirfd, name, 0)
 	if err == nil || err == unix.ENOENT {
 		return nil
 	}

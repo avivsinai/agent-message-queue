@@ -207,7 +207,7 @@ func removeWakeQuarantineCandidate(root string, candidate wakeQuarantineCleanupC
 				fmt.Errorf("wake quarantine artifact changed before cleanup; preserving it"),
 			)
 		}
-		if err := unix.Unlinkat(dirfd, candidate.Name, 0); err != nil {
+		if err := wakeUnlinkAt(dirfd, candidate.Name, 0); err != nil {
 			return fmt.Errorf("remove exact wake quarantine artifact: %w", err)
 		}
 		if err := syncWakeOwnerDirFD(dirfd); err != nil {

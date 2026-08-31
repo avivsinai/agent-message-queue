@@ -23,14 +23,14 @@ func stubWakeRestartPidfdForTest(
 ) {
 	t.Helper()
 	oldOpen := linuxPidfdOpen
-	oldSend := linuxPidfdSendSignal
+	oldSend := linuxPidfdSend
 	oldClose := linuxPidfdClose
 	linuxPidfdOpen = open
-	linuxPidfdSendSignal = send
+	linuxPidfdSend = send
 	linuxPidfdClose = close
 	t.Cleanup(func() {
 		linuxPidfdOpen = oldOpen
-		linuxPidfdSendSignal = oldSend
+		linuxPidfdSend = oldSend
 		linuxPidfdClose = oldClose
 	})
 }

@@ -6,8 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"sync/atomic"
 
+	"github.com/avivsinai/agent-message-queue/internal/cli/wakemutation"
 	"golang.org/x/sys/unix"
 )
 
@@ -19,23 +19,26 @@ type wakeMutationScope struct {
 	agentDir *wakeAgentDir
 	dirfd    int
 	guard    *wakeLifecycleGuardLease
-	active   *atomic.Bool
+	lease    *wakemutation.Lease
 }
 
-var wakeRetireUnlinkWakeLockAt = unix.Unlinkat
+var wakeRetireUnlinkWakeLockAt wakemutation.UnlinkAtFunc = wakeUnlinkAt
 
 func newWakeMutationScope(
 	agentDir *wakeAgentDir,
 	dirfd int,
 	guard *wakeLifecycleGuardLease,
 ) *wakeMutationScope {
-	active := &atomic.Bool{}
-	active.Store(true)
 	return &wakeMutationScope{
 		agentDir: agentDir,
 		dirfd:    dirfd,
 		guard:    guard,
-		active:   active,
+		lease: wakemutation.New(func() error {
+			if guard == nil {
+				return nil
+			}
+			return guard.release()
+		}),
 	}
 }
 
@@ -43,23 +46,12 @@ func (scope *wakeMutationScope) release() error {
 	if scope == nil {
 		return unix.EINVAL
 	}
-	if scope.active != nil {
-		scope.active.Store(false)
-	}
-	guard := scope.guard
-	scope.guard = nil
-	if guard == nil {
-		return nil
-	}
-	return guard.release()
+	return scope.lease.Close()
 }
 
 func (scope *wakeMutationScope) requireActive() error {
-	if scope == nil || scope.active == nil || !scope.active.Load() {
+	if scope == nil || !scope.lease.Active() {
 		return fmt.Errorf("wake mutation scope is inactive")
-	}
-	if scope.guard != nil && (scope.guard.file == nil || scope.guard.released) {
-		return fmt.Errorf("wake mutation scope lifecycle guard is unavailable")
 	}
 	if scope.agentDir == nil || scope.agentDir.file == nil {
 		return unix.EINVAL
@@ -77,6 +69,76 @@ func (scope *wakeMutationScope) location() (int, *wakeAgentDir, error) {
 	return scope.dirfd, scope.agentDir, nil
 }
 
+func wakeUnlinkAt(dirfd int, name string, flags int) error {
+	lease := wakemutation.New(nil)
+	defer func() { _ = lease.Close() }()
+	return lease.UnlinkAt(dirfd, name, flags)
+}
+
+func wakeRenameAt(fromDirFD int, from string, toDirFD int, to string) error {
+	lease := wakemutation.New(nil)
+	defer func() { _ = lease.Close() }()
+	return lease.RenameAt(fromDirFD, from, toDirFD, to)
+}
+
+func wakeRenameNoReplaceAt(fromDirFD int, from string, toDirFD int, to string) error {
+	lease := wakemutation.New(nil)
+	defer func() { _ = lease.Close() }()
+	return lease.RenameNoReplaceAt(fromDirFD, from, toDirFD, to)
+}
+
+func wakeLinkAt(fromDirFD int, from string, toDirFD int, to string, flags int) error {
+	lease := wakemutation.New(nil)
+	defer func() { _ = lease.Close() }()
+	return lease.LinkAt(fromDirFD, from, toDirFD, to, flags)
+}
+
+func killWakeProcess(process *os.Process) error {
+	lease := wakemutation.New(nil)
+	defer func() { _ = lease.Close() }()
+	return lease.KillProcess(process)
+}
+
+func processAliveByCapability(pid int) bool {
+	return wakemutation.ProcessAlive(pid)
+}
+
+func (scope *wakeMutationScope) unlinkAt(name string, flags int) error {
+	return scope.unlinkAtWith(wakeUnlinkAt, name, flags)
+}
+
+func (scope *wakeMutationScope) unlinkAtWith(
+	unlink wakemutation.UnlinkAtFunc,
+	name string,
+	flags int,
+) error {
+	dirfd, _, err := scope.location()
+	if err != nil {
+		return err
+	}
+	return scope.lease.UnlinkAtWith(unlink, dirfd, name, flags)
+}
+
+func (scope *wakeMutationScope) renameAt(
+	fromDirFD int,
+	from string,
+	toDirFD int,
+	to string,
+) error {
+	return scope.lease.RenameAt(fromDirFD, from, toDirFD, to)
+}
+
+func (scope *wakeMutationScope) linkAtWith(
+	link wakemutation.LinkAtFunc,
+	fromDirFD int,
+	from string,
+	toDirFD int,
+	to string,
+	flags int,
+) error {
+	return scope.lease.LinkAtWith(link, fromDirFD, from, toDirFD, to, flags)
+}
+
 func withWakeMutationScopeInDir(
 	agentDir *wakeAgentDir,
 	fn func(*wakeMutationScope) error,
@@ -88,7 +150,7 @@ func withWakeMutationScopeInDir(
 		wakeLifecycleGuardRetryTimeout,
 		func(dirfd int, guard *wakeLifecycleGuardLease) (retErr error) {
 			scope := newWakeMutationScope(agentDir, dirfd, guard)
-			defer func() { retErr = errors.Join(retErr, scope.release()) }()
+			defer func(scope *wakeMutationScope) { retErr = errors.Join(retErr, scope.release()) }(scope)
 			return fn(scope)
 		},
 	)
@@ -105,7 +167,7 @@ func withWakeMutationScopeNoWaitInDir(
 		wakeLifecycleGuardRetryTimeout,
 		func(dirfd int, guard *wakeLifecycleGuardLease) (retErr error) {
 			scope := newWakeMutationScope(agentDir, dirfd, guard)
-			defer func() { retErr = errors.Join(retErr, scope.release()) }()
+			defer func(scope *wakeMutationScope) { retErr = errors.Join(retErr, scope.release()) }(scope)
 			return fn(scope)
 		},
 	)
@@ -122,7 +184,7 @@ func withExistingWakeMutationScopeInDir(
 		wakeLifecycleGuardRetryTimeout,
 		func(dirfd int, guard *wakeLifecycleGuardLease) (retErr error) {
 			scope := newWakeMutationScope(agentDir, dirfd, guard)
-			defer func() { retErr = errors.Join(retErr, scope.release()) }()
+			defer func(scope *wakeMutationScope) { retErr = errors.Join(retErr, scope.release()) }(scope)
 			return fn(scope)
 		},
 	)
@@ -139,43 +201,40 @@ func withExistingWakeMutationScopeNoWaitInDir(
 		wakeLifecycleGuardRetryTimeout,
 		func(dirfd int, guard *wakeLifecycleGuardLease) (retErr error) {
 			scope := newWakeMutationScope(agentDir, dirfd, guard)
-			defer func() { retErr = errors.Join(retErr, scope.release()) }()
+			defer func(scope *wakeMutationScope) { retErr = errors.Join(retErr, scope.release()) }(scope)
 			return fn(scope)
 		},
 	)
 }
 
 func (scope *wakeMutationScope) unlinkWakeLock() error {
-	dirfd, _, err := scope.location()
-	if err != nil {
+	if _, _, err := scope.location(); err != nil {
 		return err
 	}
 	if err := scope.requireCanonical(); err != nil {
 		return err
 	}
-	return unix.Unlinkat(dirfd, wakeLockFileName, 0)
+	return scope.unlinkAt(wakeLockFileName, 0)
 }
 
 func (scope *wakeMutationScope) unlinkWakeLockForCleanup() error {
-	dirfd, _, err := scope.location()
-	if err != nil {
+	if _, _, err := scope.location(); err != nil {
 		return err
 	}
 	if _, err := scope.requireCanonicalOrDetached(); err != nil {
 		return err
 	}
-	return unix.Unlinkat(dirfd, wakeLockFileName, 0)
+	return scope.unlinkAt(wakeLockFileName, 0)
 }
 
 func (scope *wakeMutationScope) unlinkWakeLockForRetire() error {
-	dirfd, _, err := scope.location()
-	if err != nil {
+	if _, _, err := scope.location(); err != nil {
 		return err
 	}
 	if err := scope.requireCanonical(); err != nil {
 		return err
 	}
-	return wakeRetireUnlinkWakeLockAt(dirfd, wakeLockFileName, 0)
+	return scope.unlinkAtWith(wakeRetireUnlinkWakeLockAt, wakeLockFileName, 0)
 }
 
 func assertNotWakeLockName(name string) error {

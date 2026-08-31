@@ -728,7 +728,7 @@ func (d *wakeInboxDir) UnlinkBaselineBarrier(name string) error {
 		return err
 	}
 	return d.withFD(func(dirfd int) error {
-		if err := unix.Unlinkat(dirfd, name, 0); err != nil && !errors.Is(err, syscall.ENOENT) {
+		if err := wakeUnlinkAt(dirfd, name, 0); err != nil && !errors.Is(err, syscall.ENOENT) {
 			return fmt.Errorf("unlink retained wake baseline barrier: %w", err)
 		}
 		return nil

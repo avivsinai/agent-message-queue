@@ -21,14 +21,14 @@ type wakeOwnerPublicationError struct {
 }
 
 var errWakeOwnerLockExists = errors.New("wake lock already exists")
-var publishAuthoritativeWakeLinkAt = unix.Linkat
+var publishAuthoritativeWakeLinkAt = wakeLinkAt
 var publishAuthoritativeWakeAfterTargetRename = func() {}
 var removeAuthoritativeWakeAfterLockRelease = func() {}
 var removeAuthoritativeWakeBeforeFinalAuthorityCheck = func() {}
 var beforeAuthoritativeWakeStateSnapshot = func() {}
 var beforeAuthoritativeWakeLockFinalRemoval = func() {}
 var afterWakeTargetSnapshotDataRead = func() {}
-var removeAuthoritativeWakeLockTempAfterCommitAt = unix.Unlinkat
+var removeAuthoritativeWakeLockTempAfterCommitAt = wakeUnlinkAt
 var syncAuthoritativeWakeLockAfterCommitDirFD = func(fd int) error {
 	return syncWakeOwnerDirFD(fd)
 }
@@ -94,11 +94,11 @@ func publishAuthoritativeWakeClaimWithDebugAt(
 		return err
 	}
 	targetInstalled := false
-	defer func() {
+	defer func(scope *wakeMutationScope) {
 		if !targetInstalled {
-			_ = unix.Unlinkat(dirfd, targetTemp, 0)
+			_ = scope.unlinkAt(targetTemp, 0)
 		}
-	}()
+	}(scope)
 	targetFD, err := unix.Openat(
 		dirfd,
 		targetTemp,
@@ -132,7 +132,7 @@ func publishAuthoritativeWakeClaimWithDebugAt(
 		Raw:      bytes.Clone(targetRaw),
 		FileInfo: targetInfo,
 	}
-	if err := unix.Renameat(dirfd, targetTemp, dirfd, wakeTargetFileName); err != nil {
+	if err := scope.renameAt(dirfd, targetTemp, dirfd, wakeTargetFileName); err != nil {
 		return fmt.Errorf("install authoritative wake target: %w", err)
 	}
 	targetInstalled = true
@@ -174,12 +174,12 @@ func publishAuthoritativeWakeClaimWithDebugAt(
 		return err
 	}
 	lockTempPresent := true
-	defer func() {
+	defer func(scope *wakeMutationScope) {
 		if lockTempPresent {
-			_ = unix.Unlinkat(dirfd, lockTemp, 0)
+			_ = scope.unlinkAt(lockTemp, 0)
 		}
-	}()
-	if err := publishAuthoritativeWakeLinkAt(dirfd, lockTemp, dirfd, wakeLockFileName, 0); err != nil {
+	}(scope)
+	if err := scope.linkAtWith(publishAuthoritativeWakeLinkAt, dirfd, lockTemp, dirfd, wakeLockFileName, 0); err != nil {
 		if err == unix.EEXIST {
 			return errWakeOwnerLockExists
 		}
@@ -187,7 +187,7 @@ func publishAuthoritativeWakeClaimWithDebugAt(
 			Err: fmt.Errorf("publish authoritative wake lock: %w", err),
 		}
 	}
-	if err := removeAuthoritativeWakeLockTempAfterCommitAt(dirfd, lockTemp, 0); err != nil {
+	if err := scope.unlinkAtWith(removeAuthoritativeWakeLockTempAfterCommitAt, lockTemp, 0); err != nil {
 		return &wakeOwnerPublicationError{
 			Err:       fmt.Errorf("remove authoritative wake lock temp after commit: %w", err),
 			Committed: true,
@@ -300,12 +300,12 @@ func writeWakeOwnerTempAt(scope *wakeMutationScope, label string, data []byte, m
 	}
 	file := os.NewFile(uintptr(fd), name)
 	keep := false
-	defer func() {
+	defer func(scope *wakeMutationScope) {
 		_ = file.Close()
 		if !keep {
-			_ = unix.Unlinkat(dirfd, name, 0)
+			_ = scope.unlinkAt(name, 0)
 		}
-	}()
+	}(scope)
 	if err := file.Chmod(mode); err != nil {
 		return "", fmt.Errorf("chmod %s temp: %w", label, err)
 	}
@@ -793,7 +793,7 @@ func removeAuthoritativeWakeClaimAt(
 		} else if name != "" {
 			if err := assertNotWakeLockName(name); err != nil {
 				cleanupErr = errors.Join(cleanupErr, err)
-			} else if err := unix.Unlinkat(dirfd, name, 0); err != nil && err != unix.ENOENT {
+			} else if err := scope.unlinkAt(name, 0); err != nil && err != unix.ENOENT {
 				cleanupErr = errors.Join(
 					cleanupErr,
 					fmt.Errorf("remove released wake control socket: %w", err),
@@ -875,7 +875,7 @@ func removeWakeTargetIfSnapshotMatchesAt(
 	if expectedDigest != currentDigest {
 		return false, fmt.Errorf("released wake target digest changed before cleanup; preserving it")
 	}
-	if err := unix.Unlinkat(dirfd, wakeTargetFileName, 0); err != nil {
+	if err := scope.unlinkAt(wakeTargetFileName, 0); err != nil {
 		if err == unix.ENOENT {
 			return false, nil
 		}

@@ -298,7 +298,7 @@ func removeEmptyDarwinWakeRestartStageDir(stagePath string) error {
 	} else if err != nil || before.Dev != after.Dev || before.Ino != after.Ino || before.Ctim != after.Ctim {
 		return fmt.Errorf("darwin wake restart stage directory changed before reclaim")
 	}
-	if err := unix.Unlinkat(parentFD, name, unix.AT_REMOVEDIR); err != nil && !errors.Is(err, syscall.ENOENT) {
+	if err := wakeUnlinkAt(parentFD, name, unix.AT_REMOVEDIR); err != nil && !errors.Is(err, syscall.ENOENT) {
 		return fmt.Errorf("remove empty Darwin wake restart stage directory: %w", err)
 	}
 	return nil

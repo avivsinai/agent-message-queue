@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/avivsinai/agent-message-queue/internal/cli/wakemutation"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"golang.org/x/sys/unix"
 )
@@ -19,7 +20,7 @@ var afterWakeRetireLockRemoval = func() {}
 var afterWakeRetireArtifactSnapshot = func() {}
 var afterWakeRetireValidation = func() {}
 
-var wakeRetireUnlinkStateAt = unix.Unlinkat
+var wakeRetireUnlinkStateAt wakemutation.UnlinkAtFunc = wakeUnlinkAt
 
 type wakeRetireArtifactSnapshot struct {
 	Target             wakeTargetSnapshot
@@ -526,7 +527,7 @@ func removeWakeRetireStateIfSnapshotMatchesAt(
 	if !sameWakeRetireStateSnapshot(expected, current) {
 		return false, errors.New("wake state changed before removal; preserving replacement")
 	}
-	if err := wakeRetireUnlinkStateAt(dirfd, wakeStateFileName, 0); err != nil {
+	if err := scope.unlinkAtWith(wakeRetireUnlinkStateAt, wakeStateFileName, 0); err != nil {
 		if err == unix.ENOENT {
 			return false, nil
 		}
