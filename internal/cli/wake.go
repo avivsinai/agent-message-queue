@@ -13,6 +13,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/notificationattempt"
 )
 
 type wakeConfig struct {
@@ -299,6 +300,7 @@ var (
 )
 
 type wakeMsgInfo struct {
+	id       string
 	from     string
 	subject  string
 	priority string
@@ -495,7 +497,7 @@ func notifyNewMessages(cfg *wakeConfig) error {
 		currentPending[name] = pendingInfo
 		if err != nil {
 			// Count corrupt messages too
-			messages = append(messages, wakeMsgInfo{from: "unknown", subject: "(parse error)"})
+			messages = append(messages, wakeMsgInfo{id: strings.TrimSuffix(name, filepath.Ext(name)), from: "unknown", subject: "(parse error)"})
 			continue
 		}
 
@@ -509,6 +511,7 @@ func notifyNewMessages(cfg *wakeConfig) error {
 		priority := strings.TrimSpace(header.Priority)
 
 		info := wakeMsgInfo{
+			id:       header.ID,
 			from:     from,
 			subject:  subject,
 			priority: priority,
@@ -547,10 +550,10 @@ func notifyNewMessages(cfg *wakeConfig) error {
 			notice = operatorWakeNotification(interruptText)
 		}
 		if cfg.inputRecoveryRequired {
-			return deliverNewMessageNotification(cfg, notice, false, currentPending)
+			return deliverWithNotificationLedger(cfg, wakeMessageIDs(interruptMessages), notice, false, currentPending)
 		}
 		if cfg.injectMode == wakeInjectModeNone {
-			return deliverNewMessageNotification(cfg, notice, false, currentPending)
+			return deliverWithNotificationLedger(cfg, wakeMessageIDs(interruptMessages), notice, false, currentPending)
 		}
 		now := time.Now()
 		if !usesCoopDoorbell(cfg) &&
@@ -589,7 +592,7 @@ func notifyNewMessages(cfg *wakeConfig) error {
 				}
 			}
 		}
-		return deliverNewMessageNotification(cfg, notice, false, currentPending)
+		return deliverWithNotificationLedger(cfg, wakeMessageIDs(interruptMessages), notice, false, currentPending)
 	}
 
 	var notice wakeNotification
@@ -603,7 +606,81 @@ func notifyNewMessages(cfg *wakeConfig) error {
 		)
 	}
 
-	return deliverNewMessageNotification(cfg, notice, true, currentPending)
+	return deliverWithNotificationLedger(cfg, wakeMessageIDs(messages), notice, true, currentPending)
+}
+
+// wakeMessageIDs collects the non-empty IDs from a slice of wakeMsgInfo.
+// Corrupt messages (parse error) use the filename stem as a fallback ID so
+// they are still represented in the notification attempt ledger.
+func wakeMessageIDs(messages []wakeMsgInfo) []string {
+	ids := make([]string, 0, len(messages))
+	for _, m := range messages {
+		if m.id != "" {
+			ids = append(ids, m.id)
+		}
+	}
+	return ids
+}
+
+// deliverWithNotificationLedger wraps deliverNewMessageNotification with a
+// durable notification attempt record (prepared → result). The ledger NEVER
+// blocks delivery: if persisting the prepared record fails, the notification
+// is delivered anyway and the write failure is recorded for trace to surface
+// as StateWriteFailed ("attempt was made but the record could not be
+// persisted" — distinct from "no attempt recorded").
+func deliverWithNotificationLedger(
+	cfg *wakeConfig,
+	messageIDs []string,
+	notice wakeNotification,
+	deferForInput bool,
+	currentPending map[string]os.FileInfo,
+) error {
+	if len(messageIDs) == 0 {
+		// No message IDs (e.g. an operator-injected command with no parsed
+		// messages) — deliver without recording. The ledger records attempts
+		// to notify about specific messages.
+		return deliverNewMessageNotification(cfg, notice, deferForInput, currentPending)
+	}
+	writer := notificationattempt.NewWriter(cfg.root, cfg.me)
+	prepared, prepareErr := writer.Prepare(messageIDs, notificationAttemptMode(cfg))
+	deliverErr := deliverNewMessageNotification(cfg, notice, deferForInput, currentPending)
+	if prepareErr != nil {
+		// The prepared write failed. Record a result with outcome=failed so
+		// trace can surface "recording failed" rather than a silent hole.
+		// The delivery happened regardless (ledger never blocks delivery).
+		reconstructed := notificationattempt.Record{
+			AttemptID:  prepared.AttemptID,
+			MessageIDs: messageIDs,
+			Agent:      cfg.me,
+		}
+		if resultErr := writer.Result(reconstructed, notificationattempt.OutcomeFailed, "prepared write failed: "+prepareErr.Error()); resultErr != nil && cfg.debug {
+			_, _ = fmt.Fprintf(os.Stderr, "amq wake [debug]: persist notification attempt result: %v\n", resultErr)
+		}
+		return deliverErr
+	}
+	outcome := notificationattempt.OutcomeFailed
+	detail := ""
+	if deliverErr == nil {
+		outcome = notificationattempt.OutcomeWritten
+	} else {
+		detail = deliverErr.Error()
+	}
+	if resultErr := writer.Result(prepared, outcome, detail); resultErr != nil && cfg.debug {
+		_, _ = fmt.Fprintf(os.Stderr, "amq wake [debug]: persist notification attempt result: %v\n", resultErr)
+	}
+	return deliverErr
+}
+
+// notificationAttemptMode returns a human-readable label for the injection
+// mode used, recorded in the ledger for trace.
+func notificationAttemptMode(cfg *wakeConfig) string {
+	if cfg.injectMode == wakeInjectModeNone {
+		return "stderr"
+	}
+	if cfg.injectVia != "" {
+		return "external"
+	}
+	return effectiveInjectMode(cfg)
 }
 
 func deliverNewMessageNotification(

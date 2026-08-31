@@ -10,6 +10,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/notificationattempt"
 	"github.com/avivsinai/agent-message-queue/internal/receipt"
 )
 
@@ -42,19 +43,20 @@ type traceLeg struct {
 }
 
 type traceEvidence struct {
-	Authority  string              `json:"authority"`
-	Path       string              `json:"path,omitempty"`
-	Agent      string              `json:"agent,omitempty"`
-	Area       string              `json:"area,omitempty"`
-	Box        string              `json:"box,omitempty"`
-	Message    *traceMessage       `json:"message,omitempty"`
-	Route      *traceRouteEvidence `json:"route,omitempty"`
-	DLQ        *fsq.DLQEnvelope    `json:"dlq,omitempty"`
-	Receipt    *receipt.Receipt    `json:"receipt,omitempty"`
-	Relation   *traceRelation      `json:"relation,omitempty"`
-	State      string              `json:"state,omitempty"`
-	Durability string              `json:"durability,omitempty"`
-	Limitation string              `json:"limitation,omitempty"`
+	Authority    string                       `json:"authority"`
+	Path         string                       `json:"path,omitempty"`
+	Agent        string                       `json:"agent,omitempty"`
+	Area         string                       `json:"area,omitempty"`
+	Box          string                       `json:"box,omitempty"`
+	Message      *traceMessage                `json:"message,omitempty"`
+	Route        *traceRouteEvidence          `json:"route,omitempty"`
+	DLQ          *fsq.DLQEnvelope             `json:"dlq,omitempty"`
+	Receipt      *receipt.Receipt             `json:"receipt,omitempty"`
+	Relation     *traceRelation               `json:"relation,omitempty"`
+	Notification *notificationattempt.Attempt `json:"notification,omitempty"`
+	State        string                       `json:"state,omitempty"`
+	Durability   string                       `json:"durability,omitempty"`
+	Limitation   string                       `json:"limitation,omitempty"`
 }
 
 type traceMessage struct {
@@ -111,7 +113,8 @@ func runTrace(args []string) error {
 		"Join current on-disk evidence for one message without mutating the queue.",
 		"",
 		"Phase A reports message copies, route fields, visible delivery artifacts, DLQ entries,",
-		"delivery receipts, thread references, and explicit no_evidence for notification attempts.",
+		"delivery receipts, thread references, and durable agent-owned notification write attempts.",
+		"Notification evidence never proves that a TUI or person saw, displayed, or submitted it.",
 	)
 
 	messageID := ""
@@ -192,6 +195,7 @@ func collectTrace(root, messageID string) traceResult {
 	collector.scanMessages()
 	collector.scanDLQ()
 	collector.scanReceipts()
+	collector.scanNotificationAttempts()
 	collector.joinHeaders()
 	collector.finishLegs()
 	return collector.result()
@@ -201,8 +205,8 @@ func (c *traceCollector) result() traceResult {
 	status := "found"
 	hasEvidence := false
 	hasErrors := false
-	for name, leg := range c.legs {
-		if name != "notification" && len(leg.Evidence) > 0 {
+	for _, leg := range c.legs {
+		if len(leg.Evidence) > 0 {
 			hasEvidence = true
 		}
 		if leg.Status == "error" {
@@ -232,6 +236,7 @@ func (c *traceCollector) listAgents() []string {
 		c.addError("dlq", fmt.Sprintf("scan agents: %v", err))
 		c.addError("receipts", fmt.Sprintf("scan agents: %v", err))
 		c.addError("thread", fmt.Sprintf("scan agents: %v", err))
+		c.addError("notification", fmt.Sprintf("scan agents: %v", err))
 		return []string{}
 	}
 	agents := make([]string, 0, len(entries))
@@ -400,6 +405,52 @@ func (c *traceCollector) scanReceipts() {
 	}
 }
 
+func (c *traceCollector) scanNotificationAttempts() {
+	for _, agent := range c.agents {
+		attempts, err := notificationattempt.ListDeliveryRoot(c.deliveryRoot, agent, c.messageID)
+		if err != nil {
+			c.addError("notification", fmt.Sprintf("scan agent %s notification attempts: %v", agent, err))
+			continue
+		}
+		for i := range attempts {
+			attempt := attempts[i]
+			c.addEvidence("notification", traceEvidence{
+				Authority:    "notification_attempt",
+				Path:         filepath.ToSlash(filepath.Join("agents", agent, "receipts")),
+				Agent:        agent,
+				State:        attempt.State,
+				Notification: &attempt,
+				Limitation:   notificationAttemptLimitation(attempt.State),
+			})
+		}
+	}
+}
+
+func notificationAttemptLimitation(state string) string {
+	switch state {
+	case notificationattempt.StateIndeterminate:
+		return "prepared without a durable result is indeterminate; it does not prove that notification bytes were written"
+	case notificationattempt.OutcomeWritten:
+		return "written means only that notifier bytes were accepted; it does not prove seen, displayed, or submitted"
+	default:
+		return "failed records a notifier write failure; it does not establish any terminal or user-visible state"
+	}
+}
+
+// hasWriteFailedNotification reports whether any notification evidence
+// carries StateWriteFailed — the prepared record could not be persisted, but
+// the wake injected anyway. trace uses this to print "recording failed"
+// rather than "no attempt recorded" (Requirement 3: the two facts must not
+// print the same sentence).
+func hasWriteFailedNotification(evidence []traceEvidence) bool {
+	for _, ev := range evidence {
+		if ev.Notification != nil && ev.Notification.State == notificationattempt.StateWriteFailed {
+			return true
+		}
+	}
+	return false
+}
+
 func (c *traceCollector) addTarget(located traceLocatedHeader, authority string) {
 	c.targets = append(c.targets, located)
 	header := located.header
@@ -542,7 +593,7 @@ func (c *traceCollector) finishLegs() {
 			next:   "inspect the message thread with 'amq thread --id <thread-id> --json' when a parsable header is available",
 		},
 		"notification": {
-			detail: "notification attempt history is unavailable because Phase A has no durable attempt ledger",
+			detail: "no durable notification attempt record was found",
 			next:   "run 'amq doctor --ops' for current wake health; do not infer historical notification success",
 		},
 	}
@@ -561,6 +612,20 @@ func (c *traceCollector) finishLegs() {
 			case "delivery":
 				leg.Detail = "current file visibility found; original directory sync durability is no_evidence"
 				leg.NextStep = "inspect retained send output before retrying; do not infer retry safety from current file presence"
+			case "notification":
+				// Requirement 3: distinguish "no attempt recorded" from "recording
+				// failed". If any evidence has StateWriteFailed, the prepared write
+				// itself errored (the ledger could not persist the record) but the
+				// wake injected anyway — the ledger never blocks delivery. An
+				// operator debugging a missed doorbell must not conclude the wake
+				// never tried.
+				if hasWriteFailedNotification(leg.Evidence) {
+					leg.Detail = "notification attempt was made but the attempt record could not be persisted; the wake injects regardless of ledger write success"
+					leg.NextStep = "the notification was attempted — investigate the injection path, not the ledger; the missing record is a persistence gap, not a missed attempt"
+				} else {
+					leg.Detail = "durable notifier write-attempt evidence found; this never proves human or TUI observation"
+					leg.NextStep = "treat prepared-without-result as indeterminate and written only as a byte-write outcome"
+				}
 			}
 		} else {
 			leg.Status = "no_evidence"
@@ -582,7 +647,7 @@ func (c *traceCollector) addError(legName, detail string) {
 }
 
 func (c *traceCollector) addRootError(err error) {
-	for _, name := range []string{"message", "dlq", "receipts", "thread"} {
+	for _, name := range []string{"message", "dlq", "receipts", "thread", "notification"} {
 		c.addError(name, fmt.Sprintf("open root: %v", err))
 	}
 }
@@ -668,6 +733,10 @@ func traceEvidenceText(legName string, evidence traceEvidence) string {
 	case "thread":
 		if evidence.Relation != nil {
 			return fmt.Sprintf("%s %s", evidence.Relation.Relation, evidence.Relation.MessageID)
+		}
+	case "notification":
+		if evidence.Notification != nil {
+			return fmt.Sprintf("%s by %s at %s", evidence.State, evidence.Agent, evidence.Notification.Prepared.RecordedAt)
 		}
 	}
 	return ""

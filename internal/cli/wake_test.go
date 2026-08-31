@@ -13,6 +13,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/notificationattempt"
 )
 
 type wakeInfoErrorDirEntry struct {
@@ -266,6 +267,77 @@ func TestInjectNotification_InjectVia(t *testing.T) {
 	}
 	if string(got) != text {
 		t.Fatalf("expected %q, got %q", text, string(got))
+	}
+}
+
+// TestDeliverWithNotificationLedgerDoesNotBlockOnWriteFailure pins the single
+// most important invariant of the notification-attempt ledger: a wake delivers
+// the notification EVEN WHEN the ledger write fails. The ledger must never
+// block a doorbell. This is the wake-layer assertion that was lost when the
+// obsolete TestNotificationAttemptLoggingIsBestEffort was removed (it called
+// the deleted attemptNotification symbol); the package-level Writer test
+// (TestPrepareWriteFailureDoesNotBlockAndResultIsRecordable) proves the Writer
+// degrades gracefully, but only this test exercises the wake wiring
+// (deliverWithNotificationLedger -> deliverNewMessageNotification) and can
+// catch a future refactor that returns early on prepareErr before delivery.
+//
+// We force the ledger Prepare to fail by setting cfg.me to a handle
+// ValidateHandle rejects (contains ".."), then call deliverWithNotificationLedger
+// directly and assert: (1) the external notifier still produced its output
+// (delivery happened), and (2) the returned error is the delivery error (nil
+// here, since the external notifier succeeds), NOT the ledger prepareErr — a
+// regression that leaked the ledger error through the return would surface as
+// a non-nil error mentioning "notification attempt agent".
+func TestDeliverWithNotificationLedgerDoesNotBlockOnWriteFailure(t *testing.T) {
+	cfg, outputPath := injectViaCaptureConfig(t, "doorbell")
+	// A root must exist so EnsureAgentDirs can create the receipts dir; the
+	// ledger failure comes from the invalid agent handle, not a missing root.
+	cfg.root = t.TempDir()
+	// Force Prepare to fail: ValidateHandle rejects handles containing ".." or
+	// "/", so the Writer's Prepare returns a non-nil prepareErr before any
+	// record is persisted. Delivery must proceed anyway.
+	cfg.me = "../invalid-ledger-owner"
+	// inject-via delivery requires a non-none inject mode; raw is the simplest.
+	cfg.injectMode = wakeInjectModeRaw
+
+	notice := peerWakeNotification("doorbell")
+	messageIDs := []string{"msg-best-effort"}
+	// deliverNewMessageNotification gates on doorbell.plan(now, currentPending).attempt:
+	// an empty map returns attempt=false and the function returns before delivery.
+	// A non-empty map with a zero-value doorbell state arms and attempts. The
+	// FileInfo may be nil (snapshotWakeFileIdentities accepts nil), so a bare
+	// key is enough to make delivery proceed.
+	currentPending := map[string]os.FileInfo{"msg-best-effort.md": nil}
+
+	deliverErr := deliverWithNotificationLedger(cfg, messageIDs, notice, false, currentPending)
+
+	// (1) Delivery happened despite the ledger write failure: the external
+	// notifier wrote its payload to the capture file. If the ledger error had
+	// blocked delivery, this file would not exist (or be empty).
+	got, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatalf("delivery did not happen on ledger write failure — notifier output not written: %v", err)
+	}
+	if !strings.Contains(string(got), "doorbell") {
+		t.Fatalf("notifier output = %q, want it to contain %q (delivery happened but payload wrong)", got, "doorbell")
+	}
+
+	// (2) The return is the DELIVERY error, not the ledger prepareErr. The
+	// external notifier succeeded, so deliverErr must be nil. If a future
+	// refactor leaked prepareErr through the return, deliverErr would be
+	// non-nil and mention "notification attempt agent" (the ValidateHandle
+	// error string from Prepare).
+	if deliverErr != nil {
+		t.Fatalf("deliverWithNotificationLedger returned the ledger error instead of the delivery error: got %v (delivery succeeded, so this should be nil)", deliverErr)
+	}
+
+	// (3) No journal file should exist — Prepare failed before any write. This
+	// confirms the failure was the intended ledger-write path, not a silent
+	// skip, and that trace would surface StateWriteFailed rather than a bogus
+	// "written" record.
+	journalPath := filepath.Join(cfg.root, "agents", cfg.me, "receipts", notificationattempt.LogFilename)
+	if _, err := os.Stat(journalPath); !os.IsNotExist(err) {
+		t.Fatalf("ledger journal should not exist after Prepare failure, got err: %v", err)
 	}
 }
 
