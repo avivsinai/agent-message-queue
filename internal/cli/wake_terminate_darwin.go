@@ -48,7 +48,7 @@ func terminateAndRemoveOrphanedWakeLockInDirWithRawConsent(
 	requestedTarget *wakeTarget,
 ) (bool, error) {
 	var recheck wakeLockInspection
-	if err := withExistingWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+	if err := withExistingWakeLifecycleGuardNoWaitInDir(agentDir, func(dirfd int) error {
 		recheck = inspectWakeLockAt(
 			dirfd,
 			agentDir,
@@ -174,7 +174,7 @@ func sameConfirmedWakeLockInDir(
 	inspection wakeLockInspection,
 ) bool {
 	confirmed := false
-	_ = withExistingWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+	_ = withExistingWakeLifecycleGuardNoWaitInDir(agentDir, func(dirfd int) error {
 		recheck := inspectWakeLockAt(
 			dirfd,
 			agentDir,

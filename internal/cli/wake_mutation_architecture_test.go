@@ -920,6 +920,7 @@ func wakeFunctionIsGuard(fn *types.Func) bool {
 		"withWakeLifecycleGuardModeAndTimeoutInDir",
 		"withWakeLifecycleGuardLeaseModeAndTimeoutInDir",
 		"withExistingWakeLifecycleGuardInDir",
+		"withExistingWakeLifecycleGuardNoWaitInDir",
 		"withExistingWakeLifecycleGuardModeInDir",
 		"withWakeMutationScopeInDir",
 		"withWakeMutationScopeNoWaitInDir",

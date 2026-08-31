@@ -388,6 +388,63 @@ func TestTerminateWakePidfdRefusesWhenLifecycleGuardIsHeld(t *testing.T) {
 	}
 }
 
+func TestTerminateOrphanedWakeRefusesWhenLifecycleGuardIsHeld(t *testing.T) {
+	root := secureTempDirForTest(t)
+	writeWakeLockForTest(t, root, "codex", wakeLock{
+		PID:          4242,
+		TTY:          "unknown",
+		ProcessStart: "start-1",
+		BootID:       "boot-1",
+		Executable:   "/usr/bin/amq",
+		WakeMode:     wakeInjectModeRaw,
+		Generation:   "top-level-guard-held-generation",
+	})
+
+	guardEntered := make(chan struct{})
+	guardRelease := make(chan struct{})
+	guardDone := make(chan error, 1)
+	var releaseOnce sync.Once
+	releaseGuard := func() { releaseOnce.Do(func() { close(guardRelease) }) }
+	t.Cleanup(releaseGuard)
+	go func() {
+		guardDone <- withWakeLifecycleGuard(root, "codex", func() error {
+			close(guardEntered)
+			<-guardRelease
+			return nil
+		})
+	}()
+	select {
+	case <-guardEntered:
+	case <-time.After(time.Second):
+		t.Fatal("lifecycle guard holder did not enter")
+	}
+
+	inspection := inspectWakeLock(root, "codex")
+	done := make(chan struct {
+		replaced bool
+		err      error
+	}, 1)
+	go func() {
+		replaced, err := terminateAndRemoveOrphanedWakeLock(inspection)
+		done <- struct {
+			replaced bool
+			err      error
+		}{replaced: replaced, err: err}
+	}()
+	select {
+	case got := <-done:
+		if got.err == nil || got.replaced || !strings.Contains(got.err.Error(), "held by another process") {
+			t.Fatalf("top-level held-guard termination = (%v,%v), want bounded refusal", got.replaced, got.err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("top-level termination remained blocked on the lifecycle guard")
+	}
+	releaseGuard()
+	if err := <-guardDone; err != nil {
+		t.Fatalf("release lifecycle guard holder: %v", err)
+	}
+}
+
 func TestTerminateWakePidfdRefusesSamePIDReplacementGeneration(t *testing.T) {
 	root := secureTempDirForTest(t)
 	lock := wakeLock{

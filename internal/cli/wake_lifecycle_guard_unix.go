@@ -342,6 +342,10 @@ func withExistingWakeLifecycleGuardInDir(agentDir *wakeAgentDir, fn func(int) er
 	return withExistingWakeLifecycleGuardModeInDir(agentDir, unix.LOCK_EX, fn)
 }
 
+func withExistingWakeLifecycleGuardNoWaitInDir(agentDir *wakeAgentDir, fn func(int) error) error {
+	return withExistingWakeLifecycleGuardModeInDir(agentDir, unix.LOCK_EX|unix.LOCK_NB, fn)
+}
+
 func withExistingWakeLifecycleGuardModeInDir(
 	agentDir *wakeAgentDir,
 	lockMode int,

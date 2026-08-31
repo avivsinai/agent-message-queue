@@ -89,7 +89,7 @@ func terminateAndRemoveOrphanedWakeLockInDirWithRawConsent(
 		}
 		legacyGuardCreated = missing
 	}
-	if err := withWakeMutationScopeOrRetainedDir(agentDir, allowMissingGuard, func(scope *wakeMutationScope) error {
+	if err := withWakeMutationScopeOrRetainedDirNoWait(agentDir, allowMissingGuard, func(scope *wakeMutationScope) error {
 		dirfd, scopedAgentDir, err := scope.location()
 		if err != nil {
 			return err
@@ -182,7 +182,7 @@ func terminateAndRemoveOrphanedWakeLockInDirWithRawConsent(
 	}
 
 	removed := false
-	err = withWakeMutationScopeOrRetainedDir(agentDir, allowMissingGuard, func(scope *wakeMutationScope) error {
+	err = withWakeMutationScopeOrRetainedDirNoWait(agentDir, allowMissingGuard, func(scope *wakeMutationScope) error {
 		dirfd, scopedAgentDir, err := scope.location()
 		if err != nil {
 			return err

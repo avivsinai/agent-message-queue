@@ -486,7 +486,7 @@ func handleDarwinOwnerControl(
 	}
 
 	removed := false
-	err = withExistingWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+	err = withExistingWakeMutationScopeNoWaitInDir(agentDir, func(scope *wakeMutationScope) error {
 		_, scopedAgentDir, err := scope.location()
 		if err != nil {
 			return err
@@ -952,7 +952,7 @@ func cooperativeStopInjectVia(i wakeLockInspection) (bool, error) {
 		return false, fmt.Errorf("cooperative wake stop unavailable: %w", err)
 	}
 	defer func() { _ = agentDir.Close() }()
-	if err := withExistingWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+	if err := withExistingWakeLifecycleGuardNoWaitInDir(agentDir, func(dirfd int) error {
 		current := inspectWakeLockAt(dirfd, agentDir, i.Root, i.Agent)
 		if !sameWakeLockGeneration(i, current) {
 			return fmt.Errorf("wake generation changed before cooperative stop")
@@ -985,7 +985,7 @@ func cooperativeStopInjectViaInDir(
 	request := i.Lock.Generation
 	if requestedTarget != nil {
 		var persistedDigest string
-		if err := withExistingWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+		if err := withExistingWakeLifecycleGuardNoWaitInDir(agentDir, func(dirfd int) error {
 			current := inspectWakeLockAt(dirfd, agentDir, i.Root, i.Agent)
 			if !sameWakeLockGeneration(i, current) {
 				return fmt.Errorf("wake generation changed before cooperative stop")
@@ -1022,7 +1022,7 @@ func cooperativeStopInjectViaInDir(
 	for _, cause := range residue {
 		postCommitErr = errors.Join(postCommitErr, wakeControlResidueError(cause))
 	}
-	err = withExistingWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+	err = withExistingWakeLifecycleGuardNoWaitInDir(agentDir, func(dirfd int) error {
 		cur := inspectWakeLockAt(dirfd, agentDir, i.Root, i.Agent)
 		if cur.Exists {
 			postCommitErr = errors.Join(postCommitErr, newWakeLockResidueError(
@@ -1095,7 +1095,7 @@ func cooperativeStopAuthoritativeWakeInDir(
 	if agentDir == nil {
 		return false, fmt.Errorf("cooperative authoritative wake stop unavailable: wake agent directory capability is missing")
 	}
-	if err := withExistingWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+	if err := withExistingWakeMutationScopeNoWaitInDir(agentDir, func(scope *wakeMutationScope) error {
 		dirfd, scopedAgentDir, err := scope.location()
 		if err != nil {
 			return err
@@ -1132,7 +1132,7 @@ func cooperativeStopAuthoritativeWakeInDir(
 		return false, fmt.Errorf("cooperative authoritative wake stop refused")
 	}
 	gone := false
-	err = withExistingWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+	err = withExistingWakeLifecycleGuardNoWaitInDir(agentDir, func(dirfd int) error {
 		current := inspectWakeLockAt(dirfd, agentDir, i.Root, i.Agent)
 		gone = !current.Exists || current.Lock.Generation != i.Lock.Generation
 		return nil

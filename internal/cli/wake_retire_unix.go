@@ -148,7 +148,7 @@ func retireWakeIfGeneration(root, me string, requested wakeTarget, ifGeneration 
 		(inspection.Status == wakeLockValid && inspection.Lock.WakeMode == wakeTargetInjectVia) {
 		guardMissing, guardProbeErr := wakeRetireLifecycleGuardMissingAt(agentDir)
 		if guardProbeErr == nil && guardMissing {
-			if err := withWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+			if err := withWakeMutationScopeNoWaitInDir(agentDir, func(scope *wakeMutationScope) error {
 				_, err := snapshotWakeRetireArtifactsAt(scope, inspection, requested)
 				return err
 			}); err != nil {
@@ -168,7 +168,7 @@ func retireWakeIfGeneration(root, me string, requested wakeTarget, ifGeneration 
 
 		var confirmed wakeLockInspection
 		var artifacts wakeRetireArtifactSnapshot
-		if err := withExistingWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+		if err := withExistingWakeMutationScopeNoWaitInDir(agentDir, func(scope *wakeMutationScope) error {
 			dirfd, scopedAgentDir, err := scope.location()
 			if err != nil {
 				return err
@@ -206,7 +206,7 @@ func retireWakeIfGeneration(root, me string, requested wakeTarget, ifGeneration 
 		cleanup := preserveWakeRetireArtifacts(artifacts, nil)
 		if commit.Err == nil {
 			cleanup = wakeRetireCleanupOutcome{}
-			if err := withExistingWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+			if err := withExistingWakeMutationScopeNoWaitInDir(agentDir, func(scope *wakeMutationScope) error {
 				cleanup = removeWakeRetireArtifactsAt(scope, confirmed, artifacts)
 				return nil
 			}); err != nil {
@@ -224,7 +224,7 @@ func retireWakeIfGeneration(root, me string, requested wakeTarget, ifGeneration 
 		var commit wakeLockRemovalOutcome
 		var cleanup wakeRetireCleanupOutcome
 		var artifacts wakeRetireArtifactSnapshot
-		err := withExistingWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+		err := withExistingWakeMutationScopeNoWaitInDir(agentDir, func(scope *wakeMutationScope) error {
 			dirfd, scopedAgentDir, err := scope.location()
 			if err != nil {
 				return err
