@@ -96,8 +96,9 @@ func terminateAndRemoveOrphanedWakeLockInDirWithRawConsent(
 		// Darwin raw signaling is operator_only, so terminate* always errors here.
 		// The lock-removal path below is reachable only through the cooperative stop.
 		err := terminateWakeProcessInDir(agentDir, recheck)
-		if !sameConfirmedWakeLockInDir(agentDir, recheck) {
-			return true, nil
+		_, confirmErr := sameConfirmedWakeLockInDir(agentDir, recheck)
+		if confirmErr != nil {
+			return false, confirmErr
 		}
 		return false, err
 	}
@@ -160,7 +161,11 @@ func terminateWakeProcessInDir(
 	agentDir *wakeAgentDir,
 	inspection wakeLockInspection,
 ) error {
-	if !sameConfirmedWakeLockInDir(agentDir, inspection) {
+	confirmed, err := sameConfirmedWakeLockInDir(agentDir, inspection)
+	if err != nil {
+		return err
+	}
+	if !confirmed {
 		return fmt.Errorf("wake process identity changed before SIGTERM")
 	}
 	afterDarwinWakeSignalValidation()
@@ -172,9 +177,9 @@ func terminateWakeProcessInDir(
 func sameConfirmedWakeLockInDir(
 	agentDir *wakeAgentDir,
 	inspection wakeLockInspection,
-) bool {
+) (bool, error) {
 	confirmed := false
-	_ = withExistingWakeLifecycleGuardNoWaitInDir(agentDir, func(dirfd int) error {
+	err := withExistingWakeLifecycleGuardNoWaitInDir(agentDir, func(dirfd int) error {
 		recheck := inspectWakeLockAt(
 			dirfd,
 			agentDir,
@@ -185,7 +190,7 @@ func sameConfirmedWakeLockInDir(
 			recheck.IdentityConfirmed
 		return nil
 	})
-	return confirmed
+	return confirmed, err
 }
 
 func sameConfirmedWakeLock(inspection wakeLockInspection) bool {
