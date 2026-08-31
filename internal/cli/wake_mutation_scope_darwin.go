@@ -41,7 +41,7 @@ func (scope *wakeMutationScope) queueRestartSignal(
 	if _, _, err := scope.location(); err != nil {
 		return err
 	}
-	if _, err := scope.requireCanonicalOrDetached(); err != nil {
+	if err := scope.requireCanonical(); err != nil {
 		return err
 	}
 	select {

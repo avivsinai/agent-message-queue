@@ -474,6 +474,38 @@ func TestDarwinWakeRestartControlEnqueuesSignalWithoutStopping(t *testing.T) {
 	}
 }
 
+func TestDarwinWakeRestartControlRefusesDetachedRetainedGeneration(t *testing.T) {
+	root, agent, _, _, _ := testDarwinWakeRestartControlLock(t)
+	if err := withWakeLifecycleGuard(root, agent, func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	agentDir, err := openWakeAgentDir(root, agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = agentDir.Close() }()
+	detachedPath := fsq.AgentBase(root, agent) + ".restart-detached"
+	if err := os.Rename(agentDir.path, detachedPath); err != nil {
+		t.Fatalf("detach retained agent directory: %v", err)
+	}
+
+	restartSignals := make(chan os.Signal, 1)
+	err = withExistingWakeMutationScopeNoWaitInDir(agentDir, func(scope *wakeMutationScope) error {
+		return scope.queueRestartSignal(restartSignals, syscall.SIGUSR1)
+	})
+	if err == nil {
+		t.Fatal("detached retained generation queued a restart signal")
+	}
+	select {
+	case signal := <-restartSignals:
+		t.Fatalf("detached retained generation queued signal %v", signal)
+	default:
+	}
+	if current := inspectWakeLock(root, agent); current.Exists {
+		t.Fatalf("detached retained generation exposed a canonical lock: %#v", current)
+	}
+}
+
 func TestDarwinWakeRestartControlRefusesMismatchedAuthorization(t *testing.T) {
 	tests := []struct {
 		name   string
