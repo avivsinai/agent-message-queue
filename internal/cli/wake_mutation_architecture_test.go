@@ -721,7 +721,6 @@ func wakeMutationScopeOwnerSet() map[string]struct{} {
 		"withExistingWakeMutationScopeInDir",
 		"withExistingWakeMutationScopeNoWaitInDir",
 		"withWakeMutationScopeRetainedDirNoGuard",
-		"withWakeMutationScopeOrRetainedDir",
 		"withWakeMutationScopeOrRetainedDirNoWait",
 	)
 	for key := range wakeFunctionSet(
@@ -926,7 +925,6 @@ func wakeFunctionIsGuard(fn *types.Func) bool {
 		"withWakeMutationScopeNoWaitInDir",
 		"withExistingWakeMutationScopeInDir",
 		"withExistingWakeMutationScopeNoWaitInDir",
-		"withWakeMutationScopeOrRetainedDir",
 		"withWakeMutationScopeOrRetainedDirNoWait":
 		return true
 	default:

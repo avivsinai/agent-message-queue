@@ -142,20 +142,6 @@ func withWakeLifecycleGuardModeInDir(
 	)
 }
 
-// Reload authentication runs in a handler that Close must be able to drain
-// promptly. It refuses a held guard instead of waiting for another owner.
-func withWakeLifecycleGuardNoWaitInDir(
-	agentDir *wakeAgentDir,
-	fn func(int) error,
-) error {
-	return withWakeLifecycleGuardModeAndTimeoutInDir(
-		agentDir,
-		unix.LOCK_EX|unix.LOCK_NB,
-		0,
-		fn,
-	)
-}
-
 func withWakeLifecycleGuardModeAndTimeoutInDir(
 	agentDir *wakeAgentDir,
 	lockMode int,
@@ -340,10 +326,6 @@ func openExistingWakeLifecycleGuardAt(dirfd int, path string) (*os.File, error) 
 // of old residue while preserving the canonical successor's authority.
 func withExistingWakeLifecycleGuardInDir(agentDir *wakeAgentDir, fn func(int) error) error {
 	return withExistingWakeLifecycleGuardModeInDir(agentDir, unix.LOCK_EX, fn)
-}
-
-func withExistingWakeLifecycleGuardNoWaitInDir(agentDir *wakeAgentDir, fn func(int) error) error {
-	return withExistingWakeLifecycleGuardModeInDir(agentDir, unix.LOCK_EX|unix.LOCK_NB, fn)
 }
 
 func withExistingWakeLifecycleGuardModeInDir(

@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 
 	"golang.org/x/sys/unix"
@@ -13,6 +14,35 @@ var (
 	linuxPidfdSendSignal = sendLinuxPidfdSignalRaw
 	linuxPidfdClose      = unix.Close
 )
+
+func withWakeMutationScopeRetainedDirNoGuard(
+	agentDir *wakeAgentDir,
+	fn func(*wakeMutationScope) error,
+) error {
+	return agentDir.withFD(func(dirfd int) (retErr error) {
+		scope := newWakeMutationScope(agentDir, dirfd, nil)
+		defer func() { retErr = errors.Join(retErr, scope.release()) }()
+		return fn(scope)
+	})
+}
+
+func withWakeMutationScopeOrRetainedDirNoWait(
+	agentDir *wakeAgentDir,
+	allowMissing bool,
+	fn func(*wakeMutationScope) error,
+) error {
+	if !allowMissing {
+		return withExistingWakeMutationScopeNoWaitInDir(agentDir, fn)
+	}
+	missing, err := wakeLifecycleGuardMissingAt(agentDir)
+	if err != nil {
+		return err
+	}
+	if missing {
+		return withWakeMutationScopeNoWaitInDir(agentDir, fn)
+	}
+	return withExistingWakeMutationScopeNoWaitInDir(agentDir, fn)
+}
 
 func sendLinuxPidfdSignalRaw(pidfd int, signal unix.Signal, info *unix.Siginfo, flags int) error {
 	return unix.PidfdSendSignal(pidfd, signal, info, flags)

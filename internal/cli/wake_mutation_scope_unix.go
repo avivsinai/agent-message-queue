@@ -111,17 +111,6 @@ func withWakeMutationScopeNoWaitInDir(
 	)
 }
 
-func withWakeMutationScopeRetainedDirNoGuard(
-	agentDir *wakeAgentDir,
-	fn func(*wakeMutationScope) error,
-) error {
-	return agentDir.withFD(func(dirfd int) (retErr error) {
-		scope := newWakeMutationScope(agentDir, dirfd, nil)
-		defer func() { retErr = errors.Join(retErr, scope.release()) }()
-		return fn(scope)
-	})
-}
-
 func withExistingWakeMutationScopeInDir(
 	agentDir *wakeAgentDir,
 	fn func(*wakeMutationScope) error,
@@ -154,42 +143,6 @@ func withExistingWakeMutationScopeNoWaitInDir(
 			return fn(scope)
 		},
 	)
-}
-
-func withWakeMutationScopeOrRetainedDir(
-	agentDir *wakeAgentDir,
-	allowMissing bool,
-	fn func(*wakeMutationScope) error,
-) error {
-	if !allowMissing {
-		return withExistingWakeMutationScopeInDir(agentDir, fn)
-	}
-	missing, err := wakeLifecycleGuardMissingAt(agentDir)
-	if err != nil {
-		return err
-	}
-	if missing {
-		return withWakeMutationScopeInDir(agentDir, fn)
-	}
-	return withExistingWakeMutationScopeInDir(agentDir, fn)
-}
-
-func withWakeMutationScopeOrRetainedDirNoWait(
-	agentDir *wakeAgentDir,
-	allowMissing bool,
-	fn func(*wakeMutationScope) error,
-) error {
-	if !allowMissing {
-		return withExistingWakeMutationScopeNoWaitInDir(agentDir, fn)
-	}
-	missing, err := wakeLifecycleGuardMissingAt(agentDir)
-	if err != nil {
-		return err
-	}
-	if missing {
-		return withWakeMutationScopeNoWaitInDir(agentDir, fn)
-	}
-	return withExistingWakeMutationScopeNoWaitInDir(agentDir, fn)
 }
 
 func (scope *wakeMutationScope) unlinkWakeLock() error {

@@ -973,10 +973,6 @@ func wakeCheckRepairIneligibility(inspection wakeLockInspection, ownerBound bool
 	}
 }
 
-func wakeStartCommand(root, me string) string {
-	return wakeStartRemedy(root, me).String()
-}
-
 func writeWakeCheckText(result wakeCheckResult) error {
 	lines := []string{
 		"AMQ Wake Check",
