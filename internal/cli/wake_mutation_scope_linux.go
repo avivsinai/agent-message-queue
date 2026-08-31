@@ -14,7 +14,7 @@ var (
 	linuxPidfdClose      = unix.Close
 )
 
-func sendLinuxPidfdSignalRaw(pidfd int, signal unix.Signal, info *unix.Siginfo, flags uint) error {
+func sendLinuxPidfdSignalRaw(pidfd int, signal unix.Signal, info *unix.Siginfo, flags int) error {
 	return unix.PidfdSendSignal(pidfd, signal, info, flags)
 }
 

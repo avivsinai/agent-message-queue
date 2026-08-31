@@ -804,7 +804,7 @@ func TestLinuxMalformedOwnerWakeIdentityNeverSignalsMatchingArgvPID(t *testing.T
 		}
 		agentDir = scopedAgentDir
 		expected := readWakeLockMetadataAt(dirfd, agentDir, root, "codex")
-		_, err := prepareAuthoritativeWakeStopPlatform(scope, expected)
+		_, err = prepareAuthoritativeWakeStopPlatform(scope, expected)
 		return err
 	})
 	if err == nil || !strings.Contains(err.Error(), "not authoritative") {
