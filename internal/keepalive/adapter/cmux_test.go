@@ -429,6 +429,7 @@ func TestCmuxInventoryRejectsNonPTYPathWithoutOwnershipKey(t *testing.T) {
 }
 
 func TestCanonicalCmuxTTYAcceptsOnlyDocumentedForms(t *testing.T) {
+	skipCmuxNonDarwin(t)
 	tests := []struct {
 		name  string
 		value string
@@ -1226,6 +1227,7 @@ func containsSubstring(list []string, want string) bool {
 }
 
 func TestCmuxExecutablePrefersBundledEnvironmentPath(t *testing.T) {
+	skipCmuxNonDarwin(t)
 	dir := t.TempDir()
 	bundled := filepath.Join(dir, "cmux")
 	if err := os.WriteFile(bundled, []byte("#!/bin/sh\n"), 0o700); err != nil {

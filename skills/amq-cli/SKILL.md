@@ -32,6 +32,20 @@ Requires `amq` binary in PATH. Install:
 curl -fsSL https://raw.githubusercontent.com/avivsinai/agent-message-queue/main/scripts/install.sh | bash
 ```
 
+### Native Windows submitted injection
+
+The native Windows core queue works, and the separately published
+`amq-keepalive.exe` can submit to an exact live Codex or Claude Code session:
+
+```powershell
+amq-keepalive.exe inject codex-queue "codex-queue:thread:$env:CODEX_THREAD_ID" "check the AMQ inbox"
+amq-keepalive.exe inject claude-print "claude-print:session:<uuid>" "check the AMQ inbox"
+```
+
+Do not translate this into `amq wake` or `coop exec`: native Windows does not
+provide their Unix terminal lifecycle. `codex-queue` also requires an active
+writer for the exact thread; an idle lock file is not sufficient.
+
 ## Environment Rules
 
 AMQ primarily uses `AM_ROOT` (which mailbox tree) and `AM_ME` (which agent).

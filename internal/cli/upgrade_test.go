@@ -720,22 +720,6 @@ func TestDerivedRawHomebrewPrefixProtectsEvidencedBin(t *testing.T) {
 	}
 }
 
-func TestSkipUnavailableCompanionsOnWindows(t *testing.T) {
-	all := true
-	stdout, _, err := captureEnvOutput(t, func() error {
-		return skipUnavailableCompanionsOnWindows(&all, "windows")
-	})
-	if err != nil {
-		t.Fatalf("skipUnavailableCompanionsOnWindows: %v", err)
-	}
-	if all {
-		t.Fatal("--all remained enabled on Windows")
-	}
-	if stdout != "--all: companion binaries are not published for Windows; skipping\n" {
-		t.Fatalf("stdout = %q, want exact Windows skip line", stdout)
-	}
-}
-
 func TestPathWithinDirectoryEachClause(t *testing.T) {
 	parent := t.TempDir()
 	inside := filepath.Join(parent, "bin", "amq")

@@ -246,7 +246,7 @@ func (c ClaudePrint) pinExecutable(ctx context.Context) (string, error) {
 	if lookPath == nil {
 		lookPath = exec.LookPath
 	}
-	looked, err := lookPath("claude")
+	looked, err := lookPath(platformExecutableName("claude"))
 	if err != nil {
 		return "", fmt.Errorf("claude not found on PATH (%w); put claude on PATH", err)
 	}
@@ -268,7 +268,7 @@ func (c ClaudePrint) pinExecutable(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("stat claude at %s: %w; put claude on PATH", resolved, err)
 	}
-	if !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+	if !isExecutableRegularFile(info) {
 		return "", fmt.Errorf("claude at %s is not an executable regular file; put claude on PATH", resolved)
 	}
 	out, err := c.runner().Run(ctx, resolved, "--help")

@@ -97,6 +97,8 @@ jobs:
         run: go test ./internal/cli -run '^TestDrainInboxItems' -count=1
       - name: Windows launch API compatibility
         run: go test ./launchapi -run '^TestWindowsCompatibilityAdvertisesOnlyCallableLaunchSurface$' -count=1
+      - name: Native Windows Codex and Claude adapters
+        run: go test ./internal/keepalive/adapter -run '^(TestWindows|TestClaudePrint|TestCodexQueue)' -count=1
 
   # Darwin test leg. Linux + a windows claim job run elsewhere; this gates the
   # defect class where a test passes on Linux but fails on macOS (e.g. macOS

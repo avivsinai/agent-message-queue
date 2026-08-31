@@ -11,7 +11,8 @@ checked, and retired through the public `amq` CLI.
 ## Build and version
 
 `make build` creates `./amq` and `./amq-keepalive` with the same release stamp.
-The release publishes a separate keepalive archive under the same AMQ tag.
+The release publishes a separate keepalive archive under the same AMQ tag,
+including a ZIP containing `amq-keepalive.exe` for native Windows.
 
 ```sh
 make build
@@ -33,6 +34,22 @@ The supported target forms are:
 - `claude-print:session:<uuid>` for an existing Claude Code session (`claude -p --resume` stream-json; submitted when the child echoes this inject's stdin with `isReplay` after `system/init`);
 - `file` targets for deterministic development and tests.
 
+On native Windows, the supported contract is direct `inject` through
+`codex-queue` or `claude-print`. Codex writer activity is proven with a
+non-blocking `LockFileEx` probe; Claude children run in a Windows Job Object so
+timeout cleanup terminates the process tree, and the per-session injection lock
+also uses `LockFileEx`. The executable probes deliberately resolve
+`codex.exe`/`claude.exe`, not shell-only `.cmd` shims.
+
+This does not make the Unix terminal lifecycle native on Windows:
+`amq wake`, `coop exec`, `attach`, `reattach`, and `supervise` remain outside
+the Windows support contract. Use `amq-keepalive.exe inject` directly:
+
+```powershell
+amq-keepalive.exe inject codex-queue "codex-queue:thread:$env:CODEX_THREAD_ID" "check the AMQ inbox"
+amq-keepalive.exe inject claude-print "claude-print:session:<uuid>" "check the AMQ inbox"
+```
+
 cmux short references such as `surface:2` are rejected because they can drift.
 cmux UUIDs are canonicalized before registration, and the adapter fails closed
 when a surface UUID is missing, not `type==terminal`, or physically ambiguous.
@@ -51,6 +68,7 @@ shell inside the matching surface:
 AMQ_CMUX_LIVE=1 go test ./internal/keepalive/adapter -run TestCmuxLiveDiscoverProbe -count=1 -v
 AMQ_GHOSTTY_LIVE=1 go test ./internal/keepalive/adapter -run TestGhosttyLiveDiscoverProbe -count=1 -v
 AMQ_CLAUDE_LIVE=1 go test ./internal/keepalive/adapter -run TestClaudePrintLiveResumeAck -count=1 -v
+AMQ_CODEX_LIVE=1 AMQ_CODEX_LIVE_THREAD=<uuid> go test ./internal/keepalive/adapter -run TestCodexQueueLiveEnqueue -count=1 -v
 ```
 
 ## Attach and reattach
