@@ -11,6 +11,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/config"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/notificationattempt"
 	"github.com/avivsinai/agent-message-queue/internal/presence"
 )
 
@@ -106,6 +107,49 @@ func TestRunOpsChecks_BasicAgentStats(t *testing.T) {
 		t.Errorf("bob presence = %q, want %q", bob.PresenceStatus, "unknown")
 	}
 
+}
+
+func TestRunOpsChecksProjectsDeferredNotificationAttempt(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatalf("ensure root dirs: %v", err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+		t.Fatalf("ensure agent dirs: %v", err)
+	}
+	if err := config.WriteConfig(filepath.Join(root, "meta", "config.json"), config.Config{
+		Version: 1,
+		Agents:  []string{"codex"},
+	}, true); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	writer := notificationattempt.NewWriter(root, "codex")
+	lifecycle, err := writer.Begin([]string{"msg-doctor-deferred"}, "external")
+	if err != nil {
+		t.Fatalf("begin notification attempt: %v", err)
+	}
+	if err := writer.Transition(lifecycle, notificationattempt.StateDeferred, "provider busy"); err != nil {
+		t.Fatalf("defer notification attempt: %v", err)
+	}
+
+	result := runOpsChecks(root, "test_source", false)
+	if len(result.Agents) != 1 || len(result.Agents[0].NotificationAttempts) != 1 {
+		t.Fatalf("ops agents = %#v, want one projected notification attempt", result.Agents)
+	}
+	attempt := result.Agents[0].NotificationAttempts[0]
+	if attempt.State != notificationattempt.StateDeferred || !attempt.RetryPending {
+		t.Fatalf("projected notification attempt = %#v, want deferred retry-pending", attempt)
+	}
+	foundHint := false
+	for _, hint := range result.Hints {
+		if hint.Code == "notification_deferred" {
+			foundHint = true
+			break
+		}
+	}
+	if !foundHint {
+		t.Fatalf("ops hints = %#v, want notification_deferred warning", result.Hints)
+	}
 }
 
 func TestRunOpsChecks_DoorbellParkedHintRequiresUnreadBacklog(t *testing.T) {

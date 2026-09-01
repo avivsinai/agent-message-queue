@@ -12,6 +12,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/config"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/notificationattempt"
 	"github.com/avivsinai/agent-message-queue/internal/presence"
 )
 
@@ -36,19 +37,31 @@ type opsRoot struct {
 }
 
 type opsAgent struct {
-	Handle                 string  `json:"handle"`
-	UnreadCount            int     `json:"unread_count"`
-	OldestUnreadAgeSeconds float64 `json:"oldest_unread_age_seconds"`
-	DLQCount               int     `json:"dlq_count"`
-	OldestDLQAgeSeconds    float64 `json:"oldest_dlq_age_seconds"`
-	PresenceStatus         string  `json:"presence_status"`
-	PresenceAgeSeconds     float64 `json:"presence_age_seconds"`
-	PresenceSource         string  `json:"presence_source,omitempty"`
-	NotifierStatus         string  `json:"notifier_status,omitempty"`
-	NotifierMode           string  `json:"notifier_mode,omitempty"`
-	NotifierReason         string  `json:"notifier_reason,omitempty"`
-	DoorbellParked         bool    `json:"doorbell_parked,omitempty"`
-	DoorbellAttempts       uint    `json:"doorbell_attempts,omitempty"`
+	Handle                 string                   `json:"handle"`
+	UnreadCount            int                      `json:"unread_count"`
+	OldestUnreadAgeSeconds float64                  `json:"oldest_unread_age_seconds"`
+	DLQCount               int                      `json:"dlq_count"`
+	OldestDLQAgeSeconds    float64                  `json:"oldest_dlq_age_seconds"`
+	PresenceStatus         string                   `json:"presence_status"`
+	PresenceAgeSeconds     float64                  `json:"presence_age_seconds"`
+	PresenceSource         string                   `json:"presence_source,omitempty"`
+	NotifierStatus         string                   `json:"notifier_status,omitempty"`
+	NotifierMode           string                   `json:"notifier_mode,omitempty"`
+	NotifierReason         string                   `json:"notifier_reason,omitempty"`
+	DoorbellParked         bool                     `json:"doorbell_parked,omitempty"`
+	DoorbellAttempts       uint                     `json:"doorbell_attempts,omitempty"`
+	NotificationAttempts   []opsNotificationAttempt `json:"notification_attempts,omitempty"`
+}
+
+type opsNotificationAttempt struct {
+	AttemptID    string   `json:"attempt_id"`
+	State        string   `json:"state"`
+	MessageIDs   []string `json:"message_ids"`
+	Mode         string   `json:"mode"`
+	RecordedAt   string   `json:"recorded_at"`
+	Sequence     uint64   `json:"sequence,omitempty"`
+	Detail       string   `json:"detail,omitempty"`
+	RetryPending bool     `json:"retry_pending,omitempty"`
 }
 
 type opsOperatorGate struct {
@@ -259,6 +272,14 @@ func runOpsChecksWithSchema(
 			agent.PresenceStatus = "unknown"
 		}
 		agent.PresenceSource = resolvePresenceSource(root, handle, recentActivity)
+		agent.NotificationAttempts, err = readOpsNotificationAttempts(root, handle)
+		if err != nil {
+			result.Hints = append(result.Hints, opsHint{
+				Code:    "notification_attempt_ledger_error",
+				Status:  "warn",
+				Message: fmt.Sprintf("Cannot read notification attempt ledger for %s: %v", handle, err),
+			})
+		}
 
 		// Round to reasonable precision
 		agent.OldestUnreadAgeSeconds = math.Round(agent.OldestUnreadAgeSeconds)
@@ -276,6 +297,21 @@ func runOpsChecksWithSchema(
 					agent.Handle,
 					agent.DoorbellAttempts,
 					agent.OldestUnreadAgeSeconds,
+				),
+			})
+		}
+		for _, attempt := range agent.NotificationAttempts {
+			if !attempt.RetryPending {
+				continue
+			}
+			result.Hints = append(result.Hints, opsHint{
+				Code:   "notification_deferred",
+				Status: "warn",
+				Message: fmt.Sprintf(
+					"Agent %s notification attempt %s is %s; the unread cohort is retained and the existing wake retry loop will try again",
+					agent.Handle,
+					attempt.AttemptID,
+					attempt.State,
 				),
 			})
 		}
@@ -303,6 +339,39 @@ func runOpsChecksWithSchema(
 	result.Hints = append(result.Hints, checkSymphonyHint()...)
 
 	return result
+}
+
+func readOpsNotificationAttempts(root, agent string) ([]opsNotificationAttempt, error) {
+	attempts, err := notificationattempt.List(root, agent, "")
+	if err != nil {
+		return nil, err
+	}
+	if len(attempts) == 0 {
+		return nil, nil
+	}
+	result := make([]opsNotificationAttempt, 0, len(attempts))
+	for _, attempt := range attempts {
+		recordedAt := attempt.Prepared.RecordedAt
+		sequence := attempt.Prepared.Sequence
+		detail := ""
+		if attempt.Result != nil {
+			recordedAt = attempt.Result.RecordedAt
+			sequence = attempt.Result.Sequence
+			detail = attempt.Result.Detail
+		}
+		result = append(result, opsNotificationAttempt{
+			AttemptID:  attempt.Prepared.AttemptID,
+			State:      attempt.State,
+			MessageIDs: append([]string{}, attempt.Prepared.MessageIDs...),
+			Mode:       attempt.Prepared.Mode,
+			RecordedAt: recordedAt,
+			Sequence:   sequence,
+			Detail:     detail,
+			RetryPending: attempt.State == notificationattempt.StateDeferred ||
+				attempt.State == notificationattempt.StateRetried,
+		})
+	}
+	return result, nil
 }
 
 func checkUnreadBacklogNoNotifierHints(root string, agents []opsAgent, wakeLocks []opsWakeLock) []opsHint {

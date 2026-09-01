@@ -1149,7 +1149,13 @@ func (a App) inject(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	return selected.Inject(ctx, args[1], args[2])
+	if err := selected.Inject(ctx, args[1], args[2]); err != nil {
+		return err
+	}
+	if _, ok := selected.(adapter.ProviderAcceptanceReporter); ok {
+		_, _ = fmt.Fprintln(a.Stderr, "AMQ_INJECT_PROGRESS=accepted")
+	}
+	return nil
 }
 
 func (a App) doctor(args []string) error {

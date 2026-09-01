@@ -15,7 +15,10 @@ ChatGPT.app) are real agents. Pretending they are a pty, or silently substitutin
 notify/prefill for inject, lies about delivery.
 
 TTY inject remains defined by [wake operations](wake-operations.md). This ADR
-does not change that path.
+does not change that path. Raw TIOCSTI proves only that AMQ accepted terminal
+bytes; it does not prove provider presentation, submission, or consumption.
+The raw path therefore records `written` evidence and never claims provider
+acceptance.
 
 ## Decision
 
@@ -38,6 +41,16 @@ Unknown apps fail closed. Prompt text must not drive generic `osascript`.
 
 App repair/restart is `operator_only` until identity and generation checks
 match the TTY contract. `notifier_live` is not consumption.
+
+An external `--inject-via` provider must use the AMQ transport protocol. Exit
+zero is accepted only with the exact stderr marker
+`AMQ_INJECT_PROGRESS=accepted`. `AMQ_INJECT_PROGRESS=deferred` means
+pre-dispatch busy/transition and keeps the same unread cohort on the wake retry
+ladder. `AMQ_INJECT_PROGRESS=uncertain` wins over every other marker and enters
+recovery. Other nonzero exits and timeouts are terminal `failed` outcomes for
+the current AttemptID and are not silently replayed. A bare legacy exit zero is
+`written`/uncertain evidence, never an accepted provider dispatch. This
+transport gap is tracked in [#703](https://github.com/avivsinai/agent-message-queue/issues/703).
 
 ## v1 seats (docs + local inspect, 2026-08-20)
 

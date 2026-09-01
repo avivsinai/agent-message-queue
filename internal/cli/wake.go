@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -64,6 +65,12 @@ type wakeConfig struct {
 	doorbellNow                   func() time.Time
 	lastAttemptAttention          bool
 	lastAttemptTransientAttention bool
+	lastInjectorOutcome           wakeInjectorOutcome
+	lastInjectorDetail            string
+	skipExternalInjector          bool
+	terminalInjectorCohort        []string
+	terminalInjectorMode          string
+	notificationAttempt           *notificationattempt.Lifecycle
 	onBaselineReady               func(map[string]wakeFileIdentity) error
 	onPrepared                    func(wakeAdmissionWatcher) error
 	retainedAgent                 wakeRetainedAgent
@@ -73,6 +80,7 @@ type wakeConfig struct {
 	maintenanceOutputs            []*os.File
 	preconditionCheck             func(*wakeConfig) error
 	onPendingNotify               func()
+	onNotificationAttemptStart    func()
 	onNotificationAttemptComplete func()
 	recordNotifierStatus          func(status, mode, reason string) error
 	pendingNotifierStatus         *wakeNotifierStatus
@@ -98,6 +106,17 @@ type wakeDoorbellStatus struct {
 }
 
 const maxWakeNotificationSenderClauses = 8
+
+type wakeInjectorOutcome uint8
+
+const (
+	wakeInjectorOutcomeNone wakeInjectorOutcome = iota
+	wakeInjectorOutcomeAccepted
+	wakeInjectorOutcomeDeferred
+	wakeInjectorOutcomeUncertain
+	wakeInjectorOutcomeFailed
+	wakeInjectorOutcomeLegacy
+)
 
 type wakeInputDeliveryPhase uint8
 
@@ -623,11 +642,10 @@ func wakeMessageIDs(messages []wakeMsgInfo) []string {
 }
 
 // deliverWithNotificationLedger wraps deliverNewMessageNotification with a
-// durable notification attempt record (prepared → result). The ledger NEVER
-// blocks delivery: if persisting the prepared record fails, the notification
-// is delivered anyway and the write failure is recorded for trace to surface
-// as StateWriteFailed ("attempt was made but the record could not be
-// persisted" — distinct from "no attempt recorded").
+// durable notification attempt record. Raw TIOCSTI and attention-only paths
+// retain the v1 byte-write record. External injectors use the v2 lifecycle so
+// deferred provider dispatch keeps one AttemptID until it is accepted or
+// terminally failed. The ledger NEVER blocks delivery.
 func deliverWithNotificationLedger(
 	cfg *wakeConfig,
 	messageIDs []string,
@@ -641,34 +659,194 @@ func deliverWithNotificationLedger(
 		// to notify about specific messages.
 		return deliverNewMessageNotification(cfg, notice, deferForInput, currentPending)
 	}
+	if cfg.inputRecoveryRequired && cfg.notificationAttempt == nil {
+		// Recovery attention is not a new provider attempt. Avoid creating an
+		// orphaned prepared record while the exact terminal-input debt is held.
+		return deliverNewMessageNotification(cfg, notice, deferForInput, currentPending)
+	}
+	if terminalInjectorForCohort(cfg, messageIDs) {
+		// A provider failure is terminal for the injector, but the existing
+		// attention cadence may still remind the operator. Suppress only the
+		// provider replay for this unchanged cohort; a new message cohort clears
+		// this latch in ensureNotificationAttempt and can try the provider.
+		previousSkip := cfg.skipExternalInjector
+		cfg.skipExternalInjector = true
+		defer func() { cfg.skipExternalInjector = previousSkip }()
+		return deliverNewMessageNotification(cfg, notice, deferForInput, currentPending)
+	}
 	writer := notificationattempt.NewWriter(cfg.root, cfg.me)
-	prepared, prepareErr := writer.Prepare(messageIDs, notificationAttemptMode(cfg))
-	deliverErr := deliverNewMessageNotification(cfg, notice, deferForInput, currentPending)
-	if prepareErr != nil {
-		// The prepared write failed. Record a result with outcome=failed so
-		// trace can surface "recording failed" rather than a silent hole.
-		// The delivery happened regardless (ledger never blocks delivery).
-		reconstructed := notificationattempt.Record{
-			AttemptID:  prepared.AttemptID,
-			MessageIDs: messageIDs,
-			Agent:      cfg.me,
+	if cfg.injectVia == "" || cfg.injectMode == wakeInjectModeNone {
+		prepared, prepareErr := writer.Prepare(messageIDs, notificationAttemptMode(cfg))
+		deliverErr := deliverNewMessageNotification(cfg, notice, deferForInput, currentPending)
+		if prepareErr != nil {
+			// The prepared write failed. Record a result with outcome=failed so
+			// trace can surface "recording failed" rather than a silent hole.
+			reconstructed := notificationattempt.Record{
+				AttemptID:  prepared.AttemptID,
+				MessageIDs: messageIDs,
+				Agent:      cfg.me,
+			}
+			if resultErr := writer.Result(reconstructed, notificationattempt.OutcomeFailed, "prepared write failed: "+prepareErr.Error()); resultErr != nil && cfg.debug {
+				_, _ = fmt.Fprintf(os.Stderr, "amq wake [debug]: persist notification attempt result: %v\n", resultErr)
+			}
+			return deliverErr
 		}
-		if resultErr := writer.Result(reconstructed, notificationattempt.OutcomeFailed, "prepared write failed: "+prepareErr.Error()); resultErr != nil && cfg.debug {
+		outcome := notificationattempt.OutcomeFailed
+		detail := ""
+		if deliverErr == nil {
+			outcome = notificationattempt.OutcomeWritten
+		} else {
+			detail = deliverErr.Error()
+		}
+		if resultErr := writer.Result(prepared, outcome, detail); resultErr != nil && cfg.debug {
 			_, _ = fmt.Fprintf(os.Stderr, "amq wake [debug]: persist notification attempt result: %v\n", resultErr)
 		}
 		return deliverErr
 	}
-	outcome := notificationattempt.OutcomeFailed
-	detail := ""
-	if deliverErr == nil {
-		outcome = notificationattempt.OutcomeWritten
-	} else {
-		detail = deliverErr.Error()
+
+	cfg.lastInjectorOutcome = wakeInjectorOutcomeNone
+	var lifecycle *notificationattempt.Lifecycle
+	var prepareErr error
+	previousAttemptStart := cfg.onNotificationAttemptStart
+	cfg.onNotificationAttemptStart = func() {
+		if previousAttemptStart != nil {
+			previousAttemptStart()
+		}
+		if lifecycle != nil || prepareErr != nil {
+			return
+		}
+		lifecycle, prepareErr = ensureNotificationAttempt(cfg, writer, messageIDs)
 	}
-	if resultErr := writer.Result(prepared, outcome, detail); resultErr != nil && cfg.debug {
-		_, _ = fmt.Fprintf(os.Stderr, "amq wake [debug]: persist notification attempt result: %v\n", resultErr)
+	defer func() { cfg.onNotificationAttemptStart = previousAttemptStart }()
+	deliverErr := deliverNewMessageNotification(cfg, notice, deferForInput, currentPending)
+	if isTerminalInjectorOutcome(cfg.lastInjectorOutcome) {
+		cfg.terminalInjectorCohort = append([]string{}, messageIDs...)
+		cfg.terminalInjectorMode = notificationAttemptMode(cfg)
+	}
+	if prepareErr != nil {
+		if cfg.debug {
+			_, _ = fmt.Fprintf(os.Stderr, "amq wake [debug]: persist notification attempt: %v\n", prepareErr)
+		}
+		return deliverErr
+	}
+	if lifecycle == nil || cfg.lastInjectorOutcome == wakeInjectorOutcomeNone {
+		return deliverErr
+	}
+
+	if lifecycle.State == notificationattempt.StateDeferred {
+		if err := writer.Transition(lifecycle, notificationattempt.StateRetried, "provider retry attempted"); err != nil && cfg.debug {
+			_, _ = fmt.Fprintf(os.Stderr, "amq wake [debug]: persist notification retry: %v\n", err)
+		}
+	}
+	state, detail := notificationAttemptLifecycleResult(cfg, deliverErr)
+	if state == "" {
+		return deliverErr
+	}
+	if state == notificationattempt.OutcomeWritten {
+		// A legacy external injector wrote bytes but did not declare the v2
+		// protocol. Preserve the byte-write taxonomy without claiming provider
+		// acceptance.
+		prepared := notificationattempt.Record{
+			Schema:     notificationattempt.SchemaVersion,
+			AttemptID:  lifecycle.AttemptID,
+			Phase:      notificationattempt.PhasePrepared,
+			MessageIDs: append([]string{}, lifecycle.MessageIDs...),
+			Agent:      lifecycle.Agent,
+			Mode:       lifecycle.Mode,
+			State:      notificationattempt.StateAttempt,
+		}
+		if err := writer.Result(prepared, notificationattempt.OutcomeWritten, detail); err != nil && cfg.debug {
+			_, _ = fmt.Fprintf(os.Stderr, "amq wake [debug]: persist legacy notification result: %v\n", err)
+		}
+		cfg.notificationAttempt = nil
+		return deliverErr
+	}
+	if err := writer.Transition(lifecycle, state, detail); err != nil && cfg.debug {
+		_, _ = fmt.Fprintf(os.Stderr, "amq wake [debug]: persist notification lifecycle: %v\n", err)
+	}
+	if state != notificationattempt.StateDeferred {
+		cfg.notificationAttempt = nil
 	}
 	return deliverErr
+}
+
+func ensureNotificationAttempt(
+	cfg *wakeConfig,
+	writer *notificationattempt.Writer,
+	messageIDs []string,
+) (*notificationattempt.Lifecycle, error) {
+	mode := notificationAttemptMode(cfg)
+	if cfg.notificationAttempt != nil &&
+		cfg.notificationAttempt.Agent == cfg.me &&
+		cfg.notificationAttempt.Mode == mode &&
+		sameWakeMessageIDs(cfg.notificationAttempt.MessageIDs, messageIDs) &&
+		cfg.notificationAttempt.State != notificationattempt.StateAccepted &&
+		cfg.notificationAttempt.State != notificationattempt.StateFailed {
+		return cfg.notificationAttempt, nil
+	}
+	lifecycle, err := writer.Begin(messageIDs, mode)
+	if err != nil {
+		return nil, err
+	}
+	cfg.notificationAttempt = lifecycle
+	return lifecycle, nil
+}
+
+func terminalInjectorForCohort(cfg *wakeConfig, messageIDs []string) bool {
+	return cfg != nil &&
+		cfg.injectVia != "" &&
+		len(cfg.terminalInjectorCohort) > 0 &&
+		cfg.terminalInjectorMode == notificationAttemptMode(cfg) &&
+		sameWakeMessageIDs(cfg.terminalInjectorCohort, messageIDs)
+}
+
+func isTerminalInjectorOutcome(outcome wakeInjectorOutcome) bool {
+	return outcome == wakeInjectorOutcomeFailed || outcome == wakeInjectorOutcomeUncertain
+}
+
+func sameWakeMessageIDs(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	leftCopy := append([]string{}, left...)
+	rightCopy := append([]string{}, right...)
+	sort.Strings(leftCopy)
+	sort.Strings(rightCopy)
+	for i := range leftCopy {
+		if strings.TrimSpace(leftCopy[i]) != strings.TrimSpace(rightCopy[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func notificationAttemptLifecycleResult(cfg *wakeConfig, deliveryErr error) (string, string) {
+	detail := ""
+	if deliveryErr != nil {
+		detail = deliveryErr.Error()
+	} else {
+		detail = cfg.lastInjectorDetail
+	}
+	switch cfg.lastInjectorOutcome {
+	case wakeInjectorOutcomeAccepted:
+		return notificationattempt.StateAccepted, detail
+	case wakeInjectorOutcomeDeferred:
+		return notificationattempt.StateDeferred, detail
+	case wakeInjectorOutcomeLegacy:
+		if detail == "" {
+			detail = "injector exited 0 without AMQ_INJECT_PROGRESS=accepted; provider acceptance is uncertain"
+		}
+		return notificationattempt.OutcomeWritten, detail
+	case wakeInjectorOutcomeUncertain:
+		if detail == "" {
+			detail = "provider acceptance is uncertain; replay is prohibited"
+		}
+		return notificationattempt.StateFailed, detail
+	case wakeInjectorOutcomeFailed:
+		return notificationattempt.StateFailed, detail
+	default:
+		return "", detail
+	}
 }
 
 // notificationAttemptMode returns a human-readable label for the injection
@@ -718,6 +896,9 @@ func deliverNewMessageNotification(
 		if cfg.inputDelivery.pending() {
 			return nil
 		}
+	}
+	if cfg.onNotificationAttemptStart != nil {
+		cfg.onNotificationAttemptStart()
 	}
 	ownerBound := usesCoopDoorbell(cfg)
 	if cfg.injectMode != wakeInjectModeNone {
@@ -796,8 +977,19 @@ func recordWakeAttempt(
 	if cfg.retryUntil == wakeRetryUntilInjected &&
 		deliveryErr == nil &&
 		!cfg.lastAttemptAttention &&
-		!cfg.lastAttemptTransientAttention {
+		!cfg.lastAttemptTransientAttention &&
+		(cfg.injectVia == "" ||
+			cfg.lastInjectorOutcome == wakeInjectorOutcomeAccepted ||
+			cfg.lastInjectorOutcome == wakeInjectorOutcomeLegacy) {
 		cfg.doorbell.recordInjected(currentPending)
+		return
+	}
+	if isWakeInjectorDeferred(deliveryErr) {
+		// Provider-side busy/transition is a silent transport deferral. Keep
+		// the existing cohort and its normal input retry ladder; do not spend
+		// the reminder budget or emit attention output.
+		cfg.doorbell.recordDeferredInputAttempt(now)
+		persistWakeDoorbellStatusBestEffort(cfg)
 		return
 	}
 	var attentionErr *wakeAttentionDeliveryError
@@ -1187,6 +1379,8 @@ func injectNotification(cfg *wakeConfig, text string, deferForInput bool) error 
 func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForInput bool) error {
 	cfg.lastAttemptAttention = false
 	cfg.lastAttemptTransientAttention = false
+	cfg.lastInjectorOutcome = wakeInjectorOutcomeNone
+	cfg.lastInjectorDetail = ""
 	ownerBound := usesCoopDoorbell(cfg)
 	if ownerBound {
 		if notice.submitOnly && notice.input.provenance == wakePayloadSystemFixed {
@@ -1225,11 +1419,16 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 
 	// External injection: delegate to user-specified command instead of TIOCSTI.
 	// The command receives the notification text as its last argument. Exit zero
-	// remains presentation-confirmation evidence. Post-text Enter/submit failure
-	// is encoded in child output as AMQ_INJECT_PROGRESS=uncertain; that path
-	// must not replay the payload.
+	// is accepted only when the child emits AMQ_INJECT_PROGRESS=accepted.
+	// Provider busy/transition is AMQ_INJECT_PROGRESS=deferred; post-dispatch
+	// ambiguity is AMQ_INJECT_PROGRESS=uncertain. Neither may replay the
+	// payload.
 	if cfg.injectVia != "" {
+		if cfg.skipExternalInjector {
+			return deliverWakeAttentionOnly(cfg, notice.output)
+		}
 		if cfg.inputDelivery.acceptanceUncertain {
+			cfg.lastInjectorOutcome = wakeInjectorOutcomeUncertain
 			return &wakeInputDemotionBlockedError{
 				err: errors.New("a prior terminal write has uncertain acceptance"),
 			}
@@ -1246,13 +1445,30 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 			return deliverWakeAttentionOnly(cfg, notice.output)
 		}
 		if err := injectVia(cfg, plainText); err != nil {
+			cfg.lastInjectorDetail = err.Error()
+			if isWakeInjectorDeferred(err) {
+				cfg.lastInjectorOutcome = wakeInjectorOutcomeDeferred
+				return err
+			}
+			if isWakeInjectorLegacy(err) {
+				cfg.lastInjectorOutcome = wakeInjectorOutcomeLegacy
+				// Preserve the v1 external-injector contract: a marker-less
+				// exit-zero command is a successful transport result. The
+				// lifecycle ledger records it as written/uncertain, while the
+				// wake loop keeps its existing retry-until policy.
+				return nil
+			}
 			var uncertain *wakeTerminalProgressUncertainError
 			if errors.As(err, &uncertain) {
+				if cfg.lastInjectorOutcome == wakeInjectorOutcomeNone {
+					cfg.lastInjectorOutcome = wakeInjectorOutcomeUncertain
+				}
 				cfg.inputDelivery.acceptanceUncertain = true
 				_ = writeWakeDiagnostic(cfg, "amq wake: warning: %v\n", uncertain)
 				cfg.fallbackWarn = false
 				return &wakeInputDemotionBlockedError{err: uncertain}
 			}
+			cfg.lastInjectorOutcome = wakeInjectorOutcomeFailed
 			if cfg.fallbackWarn {
 				_ = writeWakeDiagnostic(cfg, "amq wake: --inject-via failed: %v\n", err)
 				_ = writeWakeDiagnostic(cfg, "amq wake: falling back to stderr notification\n")
@@ -1260,6 +1476,7 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 			}
 			return deliverWakeAttentionOnly(cfg, notice.output)
 		}
+		cfg.lastInjectorOutcome = wakeInjectorOutcomeAccepted
 		return nil
 	}
 
@@ -2026,24 +2243,49 @@ func injectVia(cfg *wakeConfig, text string) error {
 		waitDelay = 100 * time.Millisecond
 	}
 	cmd.WaitDelay = waitDelay
-	out, runErr := cmd.CombinedOutput()
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	runErr := cmd.Run()
+	output := stdout.String() + stderr.String()
 	if ctx.Err() == context.DeadlineExceeded || errors.Is(runErr, exec.ErrWaitDelay) {
 		if cfg.debug {
-			_ = writeWakeDiagnostic(cfg, "amq wake [debug]: inject-via timed out after %s (%s)\n", timeout, string(out))
+			_ = writeWakeDiagnostic(cfg, "amq wake [debug]: inject-via timed out after %s (%s)\n", timeout, output)
 		}
 		return fmt.Errorf("inject-via timed out after %s", timeout)
 	}
+	progress := parseWakeInjectorProgress(stderr.String())
 	if runErr != nil {
 		if cfg.debug {
-			_ = writeWakeDiagnostic(cfg, "amq wake [debug]: inject-via failed: %v (%s)\n", runErr, string(out))
+			_ = writeWakeDiagnostic(cfg, "amq wake [debug]: inject-via failed: %v (%s)\n", runErr, output)
 		}
-		if strings.Contains(string(out), "AMQ_INJECT_PROGRESS=uncertain") {
+		if progress == wakeInjectorProgressUncertain {
 			return &wakeTerminalProgressUncertainError{err: runErr}
+		}
+		if progress == wakeInjectorProgressDeferred {
+			return &wakeInjectorDeferredError{err: runErr}
 		}
 		return runErr
 	}
 
-	return nil
+	switch progress {
+	case wakeInjectorProgressAccepted:
+		return nil
+	case wakeInjectorProgressUncertain:
+		return &wakeTerminalProgressUncertainError{
+			err: errors.New("inject-via declared uncertain progress"),
+		}
+	case wakeInjectorProgressDeferred:
+		return &wakeTerminalProgressUncertainError{
+			err: errors.New("inject-via declared deferred progress with exit status 0"),
+		}
+	default:
+		return &wakeInjectorLegacyError{
+			err: &wakeTerminalProgressUncertainError{
+				err: errors.New("inject-via exited 0 without AMQ_INJECT_PROGRESS=accepted"),
+			},
+		}
+	}
 }
 
 func sanitizeForTTY(s string) string {

@@ -57,6 +57,11 @@ type ClaudePrint struct {
 
 func (ClaudePrint) Name() string { return claudePrintName }
 
+// ReportsProviderAcceptance marks Claude Print as an application-level
+// acceptance reporter. Inject waits for the matching isReplay user event in
+// the Claude stream before returning nil.
+func (ClaudePrint) ReportsProviderAcceptance() {}
+
 func (ClaudePrint) Capability() Capability {
 	return Capability{
 		Activation:    ActivationNone,

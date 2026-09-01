@@ -20,6 +20,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/notificationattempt"
 	"github.com/avivsinai/agent-message-queue/internal/presence"
 	"github.com/fsnotify/fsnotify"
 )
@@ -6223,6 +6224,322 @@ exit 1
 	if attentionWrites != 1 {
 		t.Fatalf("ordinary inject-via failure emitted %d attention writes, want one", attentionWrites)
 	}
+}
+
+func TestInjectViaDeferredRetainsCohortWithoutAttentionOrAcceptance(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatalf("EnsureRootDirs: %v", err)
+	}
+	injector := writeExecutableScriptForTest(t, "deferred-injector", `#!/bin/sh
+echo AMQ_INJECT_PROGRESS=deferred >&2
+exit 1
+`)
+	attentionWrites := 0
+	cfg := protocolWakeConfigForTest(t, root, injector, &attentionWrites)
+	current := wakeDoorbellTestFiles(t, "pending.md")
+
+	err := deliverWithNotificationLedger(
+		cfg,
+		[]string{"msg-deferred"},
+		peerWakeNotification("pending message"),
+		false,
+		current,
+	)
+	if !isWakeInjectorDeferred(err) {
+		t.Fatalf("delivery error = %v, want deferred", err)
+	}
+	if attentionWrites != 0 {
+		t.Fatalf("deferred provider emitted %d attention writes, want 0", attentionWrites)
+	}
+	if cfg.doorbell.phase != wakeDoorbellRetrying || cfg.doorbell.reminderAttempts != 0 || cfg.doorbell.presentationConfirmed {
+		t.Fatalf("deferred doorbell state = %#v, want retained retrying cohort without acceptance", cfg.doorbell)
+	}
+
+	attempts := listNotificationAttemptsForTest(t, root, "msg-deferred")
+	if len(attempts) != 1 || attempts[0].State != notificationattempt.StateDeferred {
+		t.Fatalf("notification attempts = %#v, want one deferred attempt", attempts)
+	}
+}
+
+func TestInjectViaDeferredThenAcceptedUsesOneAttemptAndNoDuplicate(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatalf("EnsureRootDirs: %v", err)
+	}
+	countPath := filepath.Join(secureTempDirForTest(t), "inject-count")
+	injector := writeExecutableScriptForTest(t, "deferred-then-accepted", fmt.Sprintf(`#!/bin/sh
+count=0
+if [ -f %q ]; then count=$(cat %q); fi
+count=$((count + 1))
+printf '%%s' "$count" > %q
+if [ "$count" -eq 1 ]; then
+  echo AMQ_INJECT_PROGRESS=deferred >&2
+  exit 1
+fi
+echo AMQ_INJECT_PROGRESS=accepted >&2
+exit 0
+`, countPath, countPath, countPath))
+	attentionWrites := 0
+	cfg := protocolWakeConfigForTest(t, root, injector, &attentionWrites)
+	cfg.retryUntil = wakeRetryUntilInjected
+	current := wakeDoorbellTestFiles(t, "pending.md")
+	messageIDs := []string{"msg-deferred-accepted"}
+	notice := peerWakeNotification("pending message")
+
+	if err := deliverWithNotificationLedger(cfg, messageIDs, notice, false, current); !isWakeInjectorDeferred(err) {
+		t.Fatalf("first delivery error = %v, want deferred", err)
+	}
+	first := listNotificationAttemptsForTest(t, root, messageIDs[0])
+	if len(first) != 1 || first[0].State != notificationattempt.StateDeferred {
+		t.Fatalf("first notification attempts = %#v, want one deferred attempt", first)
+	}
+	cfg.doorbell.makeDue(cfg.wakeDoorbellNow())
+	if err := deliverWithNotificationLedger(cfg, messageIDs, notice, false, current); err != nil {
+		t.Fatalf("accepted retry error = %v", err)
+	}
+
+	data, err := os.ReadFile(countPath)
+	if err != nil {
+		t.Fatalf("read injector count: %v", err)
+	}
+	if got := strings.TrimSpace(string(data)); got != "2" {
+		t.Fatalf("injector calls = %q, want deferred plus one accepted call", got)
+	}
+	if attentionWrites != 0 || cfg.doorbell.phase != wakeDoorbellAnnounced {
+		t.Fatalf("post-accept attention/state = %d/%#v, want 0/announced", attentionWrites, cfg.doorbell)
+	}
+	accepted := listNotificationAttemptsForTest(t, root, messageIDs[0])
+	if len(accepted) != 1 || accepted[0].State != notificationattempt.StateAccepted {
+		t.Fatalf("accepted notification attempts = %#v, want one terminal accepted attempt", accepted)
+	}
+	if accepted[0].Prepared.AttemptID != first[0].Prepared.AttemptID || len(accepted[0].History) != 4 {
+		t.Fatalf("accepted lifecycle = %#v, want same ID and attempt/deferred/retried/accepted history", accepted[0])
+	}
+	if err := deliverWithNotificationLedger(cfg, messageIDs, notice, false, current); err != nil {
+		t.Fatalf("post-accept scan error = %v", err)
+	}
+	data, err = os.ReadFile(countPath)
+	if err != nil {
+		t.Fatalf("read injector count after post-accept scan: %v", err)
+	}
+	if got := strings.TrimSpace(string(data)); got != "2" {
+		t.Fatalf("post-accept injector calls = %q, want 2", got)
+	}
+}
+
+func TestInjectViaLegacyExitZeroIsWrittenButNotAccepted(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatalf("EnsureRootDirs: %v", err)
+	}
+	countPath := filepath.Join(secureTempDirForTest(t), "inject-count")
+	injector := writeExecutableScriptForTest(t, "legacy-injector", fmt.Sprintf(`#!/bin/sh
+count=0
+if [ -f %q ]; then count=$(cat %q); fi
+count=$((count + 1))
+printf '%%s' "$count" > %q
+exit 0
+`, countPath, countPath, countPath))
+	attentionWrites := 0
+	cfg := protocolWakeConfigForTest(t, root, injector, &attentionWrites)
+	cfg.retryUntil = wakeRetryUntilInjected
+	current := wakeDoorbellTestFiles(t, "pending.md")
+
+	if err := deliverWithNotificationLedger(cfg, []string{"msg-legacy"}, peerWakeNotification("pending message"), false, current); err != nil {
+		t.Fatalf("legacy delivery error = %v, want legacy success", err)
+	}
+	if attentionWrites != 0 || cfg.inputRecoveryRequired || cfg.doorbell.phase != wakeDoorbellAnnounced {
+		t.Fatalf("legacy loop state = attention %d recovery %v doorbell %#v; want no recovery and announced", attentionWrites, cfg.inputRecoveryRequired, cfg.doorbell)
+	}
+	attempts := listNotificationAttemptsForTest(t, root, "msg-legacy")
+	if len(attempts) != 1 || attempts[0].State != notificationattempt.OutcomeWritten {
+		t.Fatalf("legacy notification attempts = %#v, want written byte evidence", attempts)
+	}
+	if attempts[0].State == notificationattempt.StateAccepted || attempts[0].Result == nil || !strings.Contains(attempts[0].Result.Detail, "uncertain") {
+		t.Fatalf("legacy result = %#v, want uncertain non-accepted detail", attempts[0].Result)
+	}
+	data, err := os.ReadFile(countPath)
+	if err != nil {
+		t.Fatalf("read legacy injector count: %v", err)
+	}
+	if got := strings.TrimSpace(string(data)); got != "1" {
+		t.Fatalf("legacy injector calls = %q, want one call under retry-until-injected", got)
+	}
+}
+
+func TestInjectViaDualMarkersIsUncertainAndNeverReplayed(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatalf("EnsureRootDirs: %v", err)
+	}
+	countPath := filepath.Join(secureTempDirForTest(t), "inject-count")
+	injector := writeExecutableScriptForTest(t, "dual-marker-injector", fmt.Sprintf(`#!/bin/sh
+count=0
+if [ -f %q ]; then count=$(cat %q); fi
+count=$((count + 1))
+printf '%%s' "$count" > %q
+echo AMQ_INJECT_PROGRESS=deferred >&2
+echo AMQ_INJECT_PROGRESS=uncertain >&2
+exit 1
+`, countPath, countPath, countPath))
+	attentionWrites := 0
+	cfg := protocolWakeConfigForTest(t, root, injector, &attentionWrites)
+	current := wakeDoorbellTestFiles(t, "pending.md")
+	messageIDs := []string{"msg-dual-marker"}
+	notice := peerWakeNotification("pending message")
+	if err := deliverWithNotificationLedger(cfg, messageIDs, notice, false, current); err != nil {
+		t.Fatalf("dual-marker delivery error = %v, want recovery transition", err)
+	}
+	if !cfg.inputRecoveryRequired || attentionWrites != 1 {
+		t.Fatalf("dual-marker recovery = required %v attention %d, want true/1", cfg.inputRecoveryRequired, attentionWrites)
+	}
+	if err := deliverWithNotificationLedger(cfg, messageIDs, notice, false, current); err != nil {
+		t.Fatalf("dual-marker recovery scan error = %v", err)
+	}
+	data, err := os.ReadFile(countPath)
+	if err != nil {
+		t.Fatalf("read injector count: %v", err)
+	}
+	if got := strings.TrimSpace(string(data)); got != "1" {
+		t.Fatalf("dual-marker injector calls = %q, want 1", got)
+	}
+	attempts := listNotificationAttemptsForTest(t, root, messageIDs[0])
+	if len(attempts) != 1 || attempts[0].State == notificationattempt.StateAccepted || attempts[0].Result == nil || !strings.Contains(attempts[0].Result.Detail, "uncertain") {
+		t.Fatalf("dual-marker notification attempts = %#v, want terminal non-accepted uncertainty", attempts)
+	}
+}
+
+func TestInjectViaTimeoutWithDeferredMarkerIsFailedAndAttentionOnly(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatalf("EnsureRootDirs: %v", err)
+	}
+	countPath := filepath.Join(secureTempDirForTest(t), "inject-count")
+	injector := writeExecutableScriptForTest(t, "timeout-deferred-injector", fmt.Sprintf(`#!/bin/sh
+printf '1' > %q
+echo AMQ_INJECT_PROGRESS=deferred >&2
+sleep 5
+`, countPath))
+	attentionWrites := 0
+	cfg := protocolWakeConfigForTest(t, root, injector, &attentionWrites)
+	cfg.injectTimeout = time.Second
+	current := wakeDoorbellTestFiles(t, "pending.md")
+	if err := deliverWithNotificationLedger(cfg, []string{"msg-timeout"}, peerWakeNotification("pending message"), false, current); err != nil {
+		t.Fatalf("timeout delivery error = %v, want attention fallback", err)
+	}
+	if attentionWrites != 1 || cfg.inputRecoveryRequired {
+		t.Fatalf("timeout fallback = attention %d recovery %v, want 1/false", attentionWrites, cfg.inputRecoveryRequired)
+	}
+	attempts := listNotificationAttemptsForTest(t, root, "msg-timeout")
+	if len(attempts) != 1 || attempts[0].State != notificationattempt.StateFailed || attempts[0].Result == nil || !strings.Contains(attempts[0].Result.Detail, "timed out") {
+		t.Fatalf("timeout notification attempts = %#v, want terminal failed timeout", attempts)
+	}
+	cfg.doorbell.makeDue(cfg.wakeDoorbellNow())
+	if err := deliverWithNotificationLedger(cfg, []string{"msg-timeout"}, peerWakeNotification("pending message"), false, current); err != nil {
+		t.Fatalf("timeout due retry error = %v", err)
+	}
+	data, err := os.ReadFile(countPath)
+	if err != nil {
+		t.Fatalf("read timeout injector count: %v", err)
+	}
+	if got := strings.TrimSpace(string(data)); got != "1" {
+		t.Fatalf("timeout injector calls = %q, want terminal failure not replayed", got)
+	}
+}
+
+func TestRawTIOCSTIRecordsWrittenWithoutAcceptanceClaim(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatalf("EnsureRootDirs: %v", err)
+	}
+	var writes []string
+	cfg := &wakeConfig{
+		me:         "codex",
+		root:       root,
+		wakeOwner:  &wakeOwner{},
+		injectMode: wakeInjectModeRaw,
+		terminalWrite: func(chunk string) error {
+			writes = append(writes, chunk)
+			return nil
+		},
+	}
+	current := wakeDoorbellTestFiles(t, "pending.md")
+	if err := deliverWithNotificationLedger(cfg, []string{"msg-raw"}, peerWakeNotification("pending message"), false, current); err != nil {
+		t.Fatalf("raw delivery error = %v", err)
+	}
+	if len(writes) == 0 {
+		t.Fatal("raw TIOCSTI test injected no terminal bytes")
+	}
+	attempts := listNotificationAttemptsForTest(t, root, "msg-raw")
+	if len(attempts) != 1 || attempts[0].State != notificationattempt.OutcomeWritten {
+		t.Fatalf("raw notification attempts = %#v, want written byte evidence", attempts)
+	}
+	if attempts[0].State == notificationattempt.StateAccepted || cfg.doorbell.phase == wakeDoorbellAnnounced {
+		t.Fatalf("raw delivery claimed acceptance: attempt=%#v doorbell=%#v", attempts[0], cfg.doorbell)
+	}
+}
+
+func TestRawTIOCSTIRetryUntilInjectedStopsAfterByteWrite(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatalf("EnsureRootDirs: %v", err)
+	}
+	writes := 0
+	cfg := &wakeConfig{
+		me:         "codex",
+		root:       root,
+		wakeOwner:  &wakeOwner{},
+		injectMode: wakeInjectModeRaw,
+		retryUntil: wakeRetryUntilInjected,
+		terminalWrite: func(string) error {
+			writes++
+			return nil
+		},
+	}
+	current := wakeDoorbellTestFiles(t, "pending.md")
+	if err := deliverWithNotificationLedger(cfg, []string{"msg-raw-retry"}, peerWakeNotification("pending message"), false, current); err != nil {
+		t.Fatalf("raw delivery error = %v", err)
+	}
+	if cfg.doorbell.phase != wakeDoorbellAnnounced {
+		t.Fatalf("raw doorbell phase = %v, want announced after byte-write success", cfg.doorbell.phase)
+	}
+	firstWrites := writes
+	cfg.doorbell.makeDue(cfg.wakeDoorbellNow())
+	if err := deliverNewMessageNotification(cfg, peerWakeNotification("pending message"), false, current); err != nil {
+		t.Fatalf("raw post-ack scan error = %v", err)
+	}
+	if writes != firstWrites {
+		t.Fatalf("raw post-ack writes = %d, want %d", writes, firstWrites)
+	}
+}
+
+func protocolWakeConfigForTest(t *testing.T, root, injector string, attentionWrites *int) *wakeConfig {
+	t.Helper()
+	return &wakeConfig{
+		me:             "codex",
+		root:           root,
+		wakeOwner:      &wakeOwner{},
+		injectMode:     wakeInjectModePaste,
+		injectVia:      injector,
+		injectTimeout:  time.Second,
+		attentionIsTTY: func() bool { return false },
+		attentionWrite: func(data []byte) (int, error) {
+			if attentionWrites != nil {
+				(*attentionWrites)++
+			}
+			return len(data), nil
+		},
+	}
+}
+
+func listNotificationAttemptsForTest(t *testing.T, root, messageID string) []notificationattempt.Attempt {
+	t.Helper()
+	attempts, err := notificationattempt.List(root, "codex", messageID)
+	if err != nil {
+		t.Fatalf("List notification attempts: %v", err)
+	}
+	return attempts
 }
 
 func TestRunWakeWithLoopKeepsOldWakeTargetWhenNewTargetIsUnsafe(t *testing.T) {
