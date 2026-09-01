@@ -27,21 +27,41 @@ func TestTraceJoinsWrittenAndIndeterminateNotificationAttempts(t *testing.T) {
 	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
 		t.Fatal(err)
 	}
-	writer := notificationattempt.NewWriter(root, "codex")
-	written, err := writer.Prepare([]string{"msg-notification"}, "raw")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := writer.Result(written, notificationattempt.OutcomeWritten, "terminal bytes accepted"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := writer.Prepare([]string{"msg-notification"}, "external"); err != nil {
-		t.Fatal(err)
-	}
+	writeTraceNotificationJournal(t, root, "codex",
+		notificationattempt.Record{
+			Schema:     notificationattempt.SchemaVersion,
+			AttemptID:  "attempt-written",
+			Phase:      notificationattempt.PhasePrepared,
+			MessageIDs: []string{"msg-notification"},
+			Agent:      "codex",
+			Mode:       "raw",
+			RecordedAt: "2026-09-01T08:00:00Z",
+		},
+		notificationattempt.Record{
+			Schema:     notificationattempt.SchemaVersion,
+			AttemptID:  "attempt-written",
+			Phase:      notificationattempt.PhaseResult,
+			MessageIDs: []string{"msg-notification"},
+			Agent:      "codex",
+			Mode:       "raw",
+			RecordedAt: "2026-09-01T08:00:01Z",
+			Outcome:    notificationattempt.OutcomeWritten,
+			Detail:     "terminal bytes accepted",
+		},
+		notificationattempt.Record{
+			Schema:     notificationattempt.SchemaVersion,
+			AttemptID:  "attempt-indeterminate",
+			Phase:      notificationattempt.PhasePrepared,
+			MessageIDs: []string{"msg-notification"},
+			Agent:      "codex",
+			Mode:       "external",
+			RecordedAt: "2026-09-01T08:00:02Z",
+		},
+	)
 
 	result := collectTrace(root, "msg-notification")
 	leg := result.Legs["notification"]
-	if leg.Status != "evidence" || len(leg.Evidence) != 2 {
+	if leg.Status != "evidence" || leg.State != traceNotificationRecordPresent || len(leg.Evidence) != 2 {
 		t.Fatalf("notification leg = %+v", leg)
 	}
 	states := map[string]bool{}
@@ -61,7 +81,9 @@ func TestTraceJoinsWrittenAndIndeterminateNotificationAttempts(t *testing.T) {
 
 type traceLegJSON struct {
 	Status   string            `json:"status"`
+	State    string            `json:"state"`
 	Evidence []json.RawMessage `json:"evidence"`
+	Detail   string            `json:"detail"`
 	NextStep string            `json:"next_step"`
 }
 
@@ -153,6 +175,9 @@ func TestTraceCommandEntryPointJoinsCurrentEvidence(t *testing.T) {
 	if notification.Status != "no_evidence" || notification.NextStep == "" {
 		t.Fatalf("notification leg = %#v", notification)
 	}
+	if notification.State != traceNotificationLedgerAbsent || notification.Detail != "no notification attempt ledger file was found" {
+		t.Fatalf("notification absent state = %#v", notification)
+	}
 
 	textOutput, _ := captureOutput(t, func() error {
 		return runTrace([]string{messageID, "--root", root})
@@ -161,6 +186,82 @@ func TestTraceCommandEntryPointJoinsCurrentEvidence(t *testing.T) {
 		if !strings.Contains(textOutput, want) {
 			t.Fatalf("trace text missing %q:\n%s", want, textOutput)
 		}
+	}
+}
+
+func TestTraceNotificationLedgerPresentWithoutMessageUsesPlatformPath(t *testing.T) {
+	root := t.TempDir()
+	if err := fsq.EnsureAgentDirs(root, "bob"); err != nil {
+		t.Fatal(err)
+	}
+	writeTraceNotificationJournal(t, root, "bob", notificationattempt.Record{
+		Schema:     notificationattempt.SchemaVersion,
+		AttemptID:  "attempt-other-message",
+		Phase:      notificationattempt.PhasePrepared,
+		MessageIDs: []string{"other-message"},
+		Agent:      "bob",
+		Mode:       "raw",
+		RecordedAt: "2026-09-01T08:10:00Z",
+	})
+
+	result := collectTrace(root, "target-message")
+	leg := result.Legs["notification"]
+	if leg.Status != "no_evidence" || leg.State != traceNotificationLedgerPresentNoRecord {
+		t.Fatalf("notification leg = %#v, want present ledger without target record", leg)
+	}
+	if leg.Detail != "notification attempt ledger exists, but no record for this message was found" {
+		t.Fatalf("notification detail = %q", leg.Detail)
+	}
+
+	textOutput, _ := captureOutput(t, func() error {
+		return runTrace([]string{"target-message", "--root", root})
+	})
+	if !strings.Contains(textOutput, "notification no_evidence [ledger_present_no_record]") {
+		t.Fatalf("trace text did not expose ledger state:\n%s", textOutput)
+	}
+}
+
+func TestTraceNotificationLedgerPresenceIncludesRotatedJournal(t *testing.T) {
+	root := t.TempDir()
+	if err := fsq.EnsureAgentDirs(root, "bob"); err != nil {
+		t.Fatal(err)
+	}
+	writeTraceNotificationJournalNamed(t, root, "bob", notificationattempt.LogFilename+notificationattempt.RotatedSuffix, notificationattempt.Record{
+		Schema:     notificationattempt.SchemaVersion,
+		AttemptID:  "attempt-rotated-other-message",
+		Phase:      notificationattempt.PhasePrepared,
+		MessageIDs: []string{"other-message"},
+		Agent:      "bob",
+		Mode:       "raw",
+		RecordedAt: "2026-09-01T08:20:00Z",
+	})
+
+	leg := collectTrace(root, "target-message").Legs["notification"]
+	if leg.State != traceNotificationLedgerPresentNoRecord {
+		t.Fatalf("notification state = %q, want rotated ledger present/no record", leg.State)
+	}
+}
+
+func TestNotificationAttemptTraceStatePrecedence(t *testing.T) {
+	tests := []struct {
+		name          string
+		ledgerPresent bool
+		recordPresent bool
+		supported     bool
+		want          string
+	}{
+		{name: "absent", want: traceNotificationLedgerAbsent, supported: true},
+		{name: "present without record", ledgerPresent: true, want: traceNotificationLedgerPresentNoRecord, supported: true},
+		{name: "record present", ledgerPresent: true, recordPresent: true, want: traceNotificationRecordPresent, supported: true},
+		{name: "unsupported without journal", want: traceNotificationLedgerUnsupported},
+		{name: "unsupported with existing journal", ledgerPresent: true, want: traceNotificationLedgerPresentNoRecord},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := notificationAttemptTraceState(tt.ledgerPresent, tt.recordPresent, tt.supported); got != tt.want {
+				t.Fatalf("notificationAttemptTraceState(%v, %v, %v) = %q, want %q", tt.ledgerPresent, tt.recordPresent, tt.supported, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -381,4 +482,31 @@ func decodeTraceEvidence(t *testing.T, raw json.RawMessage) map[string]any {
 		t.Fatalf("unmarshal trace evidence: %v\nraw: %s", err, raw)
 	}
 	return evidence
+}
+
+func writeTraceNotificationJournal(t testing.TB, root, agent string, records ...notificationattempt.Record) {
+	t.Helper()
+	writeTraceNotificationJournalNamed(t, root, agent, notificationattempt.LogFilename, records...)
+}
+
+func writeTraceNotificationJournalNamed(t testing.TB, root, agent, filename string, records ...notificationattempt.Record) {
+	t.Helper()
+	var data []byte
+	for _, record := range records {
+		line, err := json.Marshal(record)
+		if err != nil {
+			t.Fatalf("marshal notification attempt record: %v", err)
+		}
+		data = append(data, line...)
+		data = append(data, '\n')
+	}
+	deliveryRoot := openDeliveryRootForCLITest(t, root)
+	if _, err := deliveryRoot.WriteFileAtomic(
+		filepath.Join("agents", agent, "receipts"),
+		filename,
+		data,
+		0o600,
+	); err != nil {
+		t.Fatalf("write notification attempt journal: %v", err)
+	}
 }

@@ -85,7 +85,8 @@ const (
 	StateInvalid  = "invalid"
 
 	LogFilename   = "notification-attempts.jsonl"
-	rotatedSuffix = ".1"
+	RotatedSuffix = ".1"
+	rotatedSuffix = RotatedSuffix
 
 	defaultMaxBytes = 256 * 1024
 )
