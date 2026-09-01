@@ -871,6 +871,14 @@ type acceptedInjectProgressAdapter struct {
 
 func (acceptedInjectProgressAdapter) ReportsProviderAcceptance() {}
 
+type uncertainInjectProgressAdapter struct {
+	injectProgressAdapter
+}
+
+func (uncertainInjectProgressAdapter) Inject(context.Context, string, string) error {
+	return fmt.Errorf("submit failed: %w: %s", adapter.ErrInjectUncertain, adapter.ErrInjectUncertain)
+}
+
 func TestInjectReportsProviderAcceptanceOnlyForOptInAdapters(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -905,6 +913,30 @@ func TestInjectReportsProviderAcceptanceOnlyForOptInAdapters(t *testing.T) {
 				t.Fatalf("accepted marker = %t, want %t; stderr = %q", gotMarker, test.wantMarker, stderr.String())
 			}
 		})
+	}
+}
+
+func TestInjectUncertainPrintsStandaloneMarkerAndSeparateDiagnostics(t *testing.T) {
+	selected := uncertainInjectProgressAdapter{
+		injectProgressAdapter: injectProgressAdapter{name: "uncertain"},
+	}
+	adapters := adapter.NewRegistry(selected)
+	var stderr bytes.Buffer
+	code := (App{Stdout: &bytes.Buffer{}, Stderr: &stderr, Adapters: &adapters}).Run(
+		context.Background(),
+		[]string{"inject", selected.Name(), "target", "payload"},
+	)
+	if code != 1 {
+		t.Fatalf("inject code = %d, want 1; stderr = %q", code, stderr.String())
+	}
+	lines := strings.Split(strings.TrimSuffix(stderr.String(), "\n"), "\n")
+	if len(lines) < 2 || lines[0] != adapter.ErrInjectUncertain.Error() {
+		t.Fatalf("stderr = %q, want standalone uncertainty marker followed by diagnostics", stderr.String())
+	}
+	for _, line := range lines[1:] {
+		if strings.Contains(line, adapter.ErrInjectUncertain.Error()) {
+			t.Fatalf("diagnostic line %q repeats the machine-readable marker", line)
+		}
 	}
 }
 

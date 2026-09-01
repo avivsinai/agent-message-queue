@@ -134,6 +134,33 @@ func TestBuildInterruptText_CustomOverride(t *testing.T) {
 	}
 }
 
+func TestParseWakeInjectorProgressRequiresExactMarkerLines(t *testing.T) {
+	tests := []struct {
+		name   string
+		stderr string
+		want   wakeInjectorProgress
+	}{
+		{name: "accepted", stderr: "AMQ_INJECT_PROGRESS=accepted\n", want: wakeInjectorProgressAccepted},
+		{name: "deferred", stderr: "AMQ_INJECT_PROGRESS=deferred\n", want: wakeInjectorProgressDeferred},
+		{name: "uncertain", stderr: "AMQ_INJECT_PROGRESS=uncertain\n", want: wakeInjectorProgressUncertain},
+		{name: "crlf", stderr: "AMQ_INJECT_PROGRESS=accepted\r\n", want: wakeInjectorProgressAccepted},
+		{name: "leading space", stderr: " AMQ_INJECT_PROGRESS=uncertain\n", want: ""},
+		{name: "trailing space", stderr: "AMQ_INJECT_PROGRESS=accepted \n", want: ""},
+		{name: "quoted marker", stderr: "diagnostic: AMQ_INJECT_PROGRESS=uncertain\n", want: ""},
+		{name: "marker suffix", stderr: "AMQ_INJECT_PROGRESS=accepted: provider\n", want: ""},
+		{name: "embedded marker", stderr: "prefix AMQ_INJECT_PROGRESS=deferred suffix\n", want: ""},
+		{name: "uncertain precedence", stderr: "AMQ_INJECT_PROGRESS=accepted\nAMQ_INJECT_PROGRESS=uncertain\n", want: wakeInjectorProgressUncertain},
+		{name: "quoted uncertain ignored", stderr: "AMQ_INJECT_PROGRESS=accepted\nquoted AMQ_INJECT_PROGRESS=uncertain\n", want: wakeInjectorProgressAccepted},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := parseWakeInjectorProgress(test.stderr); got != test.want {
+				t.Fatalf("parseWakeInjectorProgress(%q) = %q, want %q", test.stderr, got, test.want)
+			}
+		})
+	}
+}
+
 func TestBuildNotificationTextRestoresPeerHeadersForOutput(t *testing.T) {
 	text := buildNotificationText(
 		"collab",
@@ -203,6 +230,7 @@ func TestNotificationPrefix(t *testing.T) {
 }
 
 const injectViaHelperEnv = "AMQ_TEST_INJECT_VIA_HELPER"
+const injectViaProgressEnv = "AMQ_TEST_INJECT_VIA_PROGRESS"
 
 func injectViaCaptureConfig(t *testing.T, fixedArgs ...string) (*wakeConfig, string) {
 	t.Helper()
@@ -246,11 +274,27 @@ func TestInjectViaHelperProcess(t *testing.T) {
 	}
 	outputPath := os.Args[separator+1]
 	payload := strings.Join(os.Args[separator+2:], "\n")
+	switch os.Getenv(injectViaProgressEnv) {
+	case "timeout":
+		time.Sleep(2 * time.Second)
+	}
 	if err := os.WriteFile(outputPath, []byte(payload), 0o600); err != nil {
 		_, _ = os.Stderr.WriteString("write inject-via helper output: " + err.Error() + "\n")
 		os.Exit(3)
 	}
-	_, _ = os.Stderr.WriteString("AMQ_INJECT_PROGRESS=accepted\n")
+	switch os.Getenv(injectViaProgressEnv) {
+	case "legacy", "":
+		if os.Getenv(injectViaProgressEnv) == "legacy" {
+			os.Exit(0)
+		}
+		_, _ = os.Stderr.WriteString("AMQ_INJECT_PROGRESS=accepted\n")
+	case "deferred":
+		_, _ = os.Stderr.WriteString("AMQ_INJECT_PROGRESS=deferred\n")
+		os.Exit(1)
+	case "uncertain":
+		_, _ = os.Stderr.WriteString("AMQ_INJECT_PROGRESS=uncertain\n")
+		os.Exit(1)
+	}
 	os.Exit(0)
 }
 
@@ -1762,6 +1806,83 @@ func TestNotifyNewMessages_InjectViaExitZeroAdvancesInterruptCooldown(t *testing
 	}
 	if string(got) != expected {
 		t.Fatalf("expected inject-via log %q, got %q", expected, string(got))
+	}
+}
+
+func TestNotifyNewMessagesInjectViaInterruptClassifiesEveryOutcome(t *testing.T) {
+	tests := []struct {
+		name          string
+		progress      string
+		injectTimeout time.Duration
+		wantOutcome   wakeInjectorOutcome
+		wantErr       bool
+		wantRecovery  bool
+		wantCooldown  bool
+	}{
+		{name: "accepted", progress: "", wantOutcome: wakeInjectorOutcomeAccepted, wantCooldown: true},
+		{name: "legacy zero exit", progress: "legacy", wantOutcome: wakeInjectorOutcomeLegacy, wantCooldown: true},
+		{name: "deferred", progress: "deferred", wantOutcome: wakeInjectorOutcomeDeferred, wantErr: true},
+		{name: "uncertain", progress: "uncertain", wantOutcome: wakeInjectorOutcomeUncertain, wantRecovery: true},
+		{name: "timeout", progress: "timeout", injectTimeout: 20 * time.Millisecond, wantOutcome: wakeInjectorOutcomeFailed},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv(injectViaProgressEnv, test.progress)
+			root := secureTempDirForTest(t)
+			if err := fsq.EnsureRootDirs(root); err != nil {
+				t.Fatalf("EnsureRootDirs: %v", err)
+			}
+			if err := fsq.EnsureAgentDirs(root, "alice"); err != nil {
+				t.Fatalf("EnsureAgentDirs: %v", err)
+			}
+			message := format.Message{Header: format.Header{
+				Schema: 1, ID: "interrupt-" + test.name, From: "codex", To: []string{"alice"},
+				Thread: "p2p/alice__codex", Subject: "urgent", Created: "2026-09-01T10:00:00Z",
+				Priority: "urgent", Labels: []string{"interrupt"},
+			}}
+			data, err := message.Marshal()
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			if _, err := deliverToInboxForTest(t, root, "alice", "interrupt.md", data); err != nil {
+				t.Fatalf("deliver: %v", err)
+			}
+
+			cfg, _ := injectViaCaptureConfig(t)
+			cfg.me = "alice"
+			cfg.root = root
+			cfg.session = "session1"
+			cfg.injectMode = wakeInjectModeRaw
+			cfg.injectTimeout = test.injectTimeout
+			cfg.interrupt = true
+			cfg.interruptKey = "\x03"
+			cfg.interruptLabel = "interrupt"
+			cfg.interruptPriority = "urgent"
+			cfg.interruptCooldown = time.Minute
+			cfg.attentionIsTTY = func() bool { return false }
+			cfg.attentionWrite = func(data []byte) (int, error) { return len(data), nil }
+
+			deliveryErr := notifyNewMessages(cfg)
+			if test.wantErr {
+				if deliveryErr == nil || !isWakeInjectorDeferred(deliveryErr) {
+					t.Fatalf("notify error = %v, want deferred injector error", deliveryErr)
+				}
+			} else if deliveryErr != nil {
+				t.Fatalf("notify error = %v", deliveryErr)
+			}
+			if cfg.lastInjectorOutcome != test.wantOutcome {
+				t.Fatalf("last injector outcome = %v, want %v", cfg.lastInjectorOutcome, test.wantOutcome)
+			}
+			if got := !cfg.lastInterrupt.IsZero(); got != test.wantCooldown {
+				t.Fatalf("interrupt cooldown recorded = %t, want %t", got, test.wantCooldown)
+			}
+			if cfg.inputRecoveryRequired != test.wantRecovery {
+				t.Fatalf("input recovery required = %t, want %t", cfg.inputRecoveryRequired, test.wantRecovery)
+			}
+			if test.wantRecovery && !cfg.inputDelivery.acceptanceUncertain {
+				t.Fatal("uncertain interrupt did not retain acceptance uncertainty")
+			}
+		})
 	}
 }
 

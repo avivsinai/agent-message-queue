@@ -15,7 +15,8 @@
 //     concurrency (two notifications both read current, both append, one
 //     record vanishes silently). O_APPEND gives kernel-level atomic appends
 //     on local filesystems: concurrent writers each append a full line and
-//     neither loses data. There is no read-modify-write and no lock.
+//     neither loses data. A stable sidecar lock gates rotation and readers;
+//     shared append locks do not serialize ordinary writers.
 //
 //  2. ONE log, not two. The prototype used separate prepared/result files
 //     rotated independently; whichever crossed the size cap first dropped its
@@ -36,6 +37,7 @@ package notificationattempt
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -87,6 +89,7 @@ const (
 	LogFilename   = "notification-attempts.jsonl"
 	RotatedSuffix = ".1"
 	rotatedSuffix = RotatedSuffix
+	lockFilename  = LogFilename + ".lock"
 
 	defaultMaxBytes = 256 * 1024
 )
@@ -133,8 +136,8 @@ type Lifecycle struct {
 
 // Writer appends prepared/result records to the per-agent notification log.
 // Each append opens the file with O_APPEND (kernel-level atomic append on
-// local filesystems), writes one JSON line, and closes. There is no
-// read-modify-write and no lock — concurrent writers do not lose data.
+// local filesystems), writes one JSON line, and closes. A stable sidecar lock
+// gates rotation and readers without serializing ordinary appenders.
 type Writer struct {
 	root     string
 	agent    string
@@ -277,11 +280,12 @@ func (w *Writer) Result(prepared Record, outcome, detail string) error {
 }
 
 // append writes one JSON line to the log with O_APPEND. On local filesystems
-// O_APPEND writes are atomic w.r.t. other O_APPEND writers, so concurrent
-// notifications neither lose data nor need a lock. If the file would exceed
-// maxBytes, the current file is moved to .1 (rotation) and a fresh file
-// starts. Rotation is best-effort: if the rename fails, the append proceeds
-// (an over-size audit log is better than a lost record).
+// O_APPEND writes are atomic w.r.t. other O_APPEND writers. If the file would
+// exceed maxBytes, rotation compacts both generations into an atomically
+// replaced .1 file while holding the exclusive sidecar lock, then truncates
+// the current file only after the replacement succeeds. A rotation error is
+// returned after the append so callers see the persistence problem without
+// losing the new record.
 func (w *Writer) append(record Record) error {
 	if w.maxBytes <= 0 {
 		return fmt.Errorf("notification attempt journal size cap must be positive")
@@ -310,7 +314,6 @@ func (w *Writer) append(record Record) error {
 	}
 	dir := filepath.Join("agents", w.agent, "receipts")
 	fullPath := filepath.Join(root.Base(), dir, LogFilename)
-	lockPath := fullPath + ".lock"
 
 	// Coordination model: a separate lock file carries the flock; the data file
 	// stays O_APPEND so the hot-path write remains kernel-atomic at EOF among
@@ -334,7 +337,7 @@ func (w *Writer) append(record Record) error {
 	// data file does not orphan a held lock. (flock is per-inode; had we locked
 	// the data file, a rename-based rotation would detach the lock. We truncate
 	// in place anyway, but the separate lock file is robust to either choice.)
-	lockFile, err := os.OpenFile(lockPath, os.O_RDWR|os.O_CREATE, 0o600)
+	lockFile, err := root.OpenLockFile(dir, lockFilename, 0o600)
 	if err != nil {
 		return fmt.Errorf("open notification attempt journal lock: %w", err)
 	}
@@ -351,6 +354,7 @@ func (w *Writer) append(record Record) error {
 		rotate = info.Size()+int64(len(data)) > w.maxBytes
 	}
 
+	var rotationErr error
 	if rotate {
 		// LOCK_EX serializes rotation against all appenders: it blocks until
 		// every in-flight LOCK_SH appender has finished its write and released,
@@ -367,24 +371,8 @@ func (w *Writer) append(record Record) error {
 			rotate = false
 		}
 		if rotate {
-			rotated := fullPath + rotatedSuffix
-			current, readErr := os.ReadFile(fullPath)
-			if readErr != nil && !os.IsNotExist(readErr) {
-				// Can't read current to merge — shed the over-size log by rename
-				// (better than a lost record); the prior .1 is overwritten. Still
-				// under LOCK_EX so no appender is racing us.
-				_ = os.Rename(fullPath, rotated)
-			} else if readErr == nil {
-				// Merge current into .1 (preserve older generations), then
-				// truncate current in place. We hold LOCK_EX so no appender can
-				// O_APPEND a record between this read and the truncate — the
-				// race that reintroduced silent loss is closed.
-				if existing, eerr := os.ReadFile(rotated); eerr == nil {
-					_ = os.WriteFile(rotated, append(existing, current...), 0o600)
-				} else {
-					_ = os.WriteFile(rotated, current, 0o600)
-				}
-				_ = os.Truncate(fullPath, 0)
+			if err := w.rotateJournal(root, dir, fullPath); err != nil {
+				rotationErr = fmt.Errorf("rotate notification attempt journal: %w", err)
 			}
 		}
 		// Downgrade LOCK_EX -> LOCK_SH for the append. A flock conversion is
@@ -420,13 +408,42 @@ func (w *Writer) append(record Record) error {
 	// atomically, no lost-update race (requirement 1, preserved).
 	f, err := os.OpenFile(fullPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
-		return fmt.Errorf("open notification attempt journal: %w", err)
+		return errors.Join(rotationErr, fmt.Errorf("open notification attempt journal: %w", err))
 	}
 	defer func() { _ = f.Close() }()
 	if _, err := f.Write(data); err != nil {
-		return fmt.Errorf("write notification attempt record: %w", err)
+		return errors.Join(rotationErr, fmt.Errorf("write notification attempt record: %w", err))
 	}
-	return nil
+	return rotationErr
+}
+
+func (w *Writer) rotateJournal(root *fsq.DeliveryRoot, dir, fullPath string) error {
+	records, err := readRecordsUnlocked(root, w.agent)
+	if err != nil {
+		return err
+	}
+	records = deduplicateRecords(records)
+	archive, err := compactRecords(records, w.agent, w.maxBytes)
+	if err != nil {
+		return err
+	}
+	if _, err := root.WriteFileAtomic(dir, LogFilename+rotatedSuffix, archive, 0o600); err != nil {
+		return err
+	}
+
+	current, err := os.OpenFile(fullPath, os.O_WRONLY, 0o600)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("open current journal for truncation: %w", err)
+	}
+	truncateErr := current.Truncate(0)
+	if truncateErr == nil {
+		truncateErr = current.Sync()
+	}
+	closeErr := current.Close()
+	return errors.Join(truncateErr, closeErr)
 }
 
 // List reads the notification log for an agent and returns the joined
@@ -502,10 +519,14 @@ func ListDeliveryRoot(root *fsq.DeliveryRoot, agent, messageID string) ([]Attemp
 }
 
 func foldLifecycle(prepared Record, events []Record, legacyResult *Record) Attempt {
+	orderedEvents := append([]Record{}, events...)
+	sort.SliceStable(orderedEvents, func(i, j int) bool {
+		return orderedEvents[i].Sequence < orderedEvents[j].Sequence
+	})
 	attempt := Attempt{
 		State:    StateInvalid,
 		Prepared: prepared,
-		History:  append([]Record{prepared}, events...),
+		History:  append([]Record{prepared}, orderedEvents...),
 	}
 	if prepared.State != StateAttempt || prepared.Sequence != 0 || prepared.Outcome != "" {
 		return attempt
@@ -528,12 +549,12 @@ func foldLifecycle(prepared Record, events []Record, legacyResult *Record) Attem
 	}
 	state := prepared.State
 	sequence := prepared.Sequence
-	for _, event := range events {
+	for _, event := range orderedEvents {
 		if event.AttemptID != prepared.AttemptID ||
 			event.Agent != prepared.Agent ||
 			event.Mode != prepared.Mode ||
 			!sameStrings(event.MessageIDs, prepared.MessageIDs) ||
-			event.Sequence != sequence+1 ||
+			event.Sequence <= sequence ||
 			!validLifecycleTransition(state, event.State) {
 			return attempt
 		}
@@ -552,6 +573,40 @@ func foldLifecycle(prepared Record, events []Record, legacyResult *Record) Attem
 // history around it. (An audit log that refuses to read because one line is
 // bad would hide evidence of every other attempt.)
 func readRecords(root *fsq.DeliveryRoot, agent string) ([]Record, error) {
+	dir := filepath.Join("agents", agent, "receipts")
+	if LedgerSupported {
+		lockFile, err := openExistingLockFile(root, dir)
+		if err != nil {
+			return nil, fmt.Errorf("open notification attempt journal lock: %w", err)
+		}
+		if lockFile != nil {
+			defer func() { _ = lockFile.Close() }()
+			if err := flockShared(lockFile); err != nil {
+				return nil, fmt.Errorf("lock notification attempt journal for read: %w", err)
+			}
+			defer flockRelease(lockFile)
+		}
+	}
+
+	records, err := readRecordsUnlocked(root, agent)
+	if err != nil {
+		return nil, err
+	}
+	return deduplicateRecords(records), nil
+}
+
+func openExistingLockFile(root *fsq.DeliveryRoot, dir string) (*os.File, error) {
+	lockFile, _, err := root.OpenRegularNoFollow(filepath.Join(dir, lockFilename))
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return lockFile, nil
+}
+
+func readRecordsUnlocked(root *fsq.DeliveryRoot, agent string) ([]Record, error) {
 	dir := filepath.Join("agents", agent, "receipts")
 	var records []Record
 	// Read .1 (older) first, then the current file, so records are in
@@ -589,6 +644,314 @@ func readRecords(root *fsq.DeliveryRoot, agent string) ([]Record, error) {
 		}
 	}
 	return records, nil
+}
+
+func deduplicateRecords(records []Record) []Record {
+	seen := make(map[recordDedupKey]struct{}, len(records))
+	deduplicated := make([]Record, 0, len(records))
+	for _, record := range records {
+		key := recordDeduplicationKey(record)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		deduplicated = append(deduplicated, record)
+	}
+	return deduplicated
+}
+
+type recordDedupKey struct {
+	schema    int
+	attemptID string
+	sequence  uint64
+	phase     string
+}
+
+func recordDeduplicationKey(record Record) recordDedupKey {
+	// A v2 sequence identifies one lifecycle event. Keep phase in the key so
+	// sequence-zero prepared records and v2 legacy result pairs remain distinct.
+	// The schema also keeps a legacy v1 prepared/result pair intact.
+	return recordDedupKey{
+		schema:    record.Schema,
+		attemptID: record.AttemptID,
+		sequence:  record.Sequence,
+		phase:     record.Phase,
+	}
+}
+
+type compactedAttempt struct {
+	id         string
+	records    []Record
+	mandatory  bool
+	latestTime string
+}
+
+func compactRecords(records []Record, agent string, maxBytes int64) ([]byte, error) {
+	groups := make(map[string][]Record)
+	for _, record := range deduplicateRecords(records) {
+		groups[record.AttemptID] = append(groups[record.AttemptID], record)
+	}
+
+	ids := make([]string, 0, len(groups))
+	for id := range groups {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+
+	var mandatory []compactedAttempt
+	var optional []compactedAttempt
+	for _, id := range ids {
+		compacted, err := compactAttempt(id, groups[id])
+		if err != nil {
+			return nil, err
+		}
+		if compacted.mandatory {
+			mandatory = append(mandatory, compacted)
+		} else {
+			optional = append(optional, compacted)
+		}
+	}
+
+	var archive []Record
+	for _, attempt := range mandatory {
+		archive = append(archive, attempt.records...)
+	}
+	mandatoryData, err := marshalRecords(archive)
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(mandatoryData)) > maxBytes {
+		return nil, fmt.Errorf(
+			"notification attempt journal compaction needs %d bytes for nonterminal attempts, cap is %d",
+			len(mandatoryData), maxBytes,
+		)
+	}
+
+	sort.SliceStable(optional, func(i, j int) bool {
+		if optional[i].latestTime == optional[j].latestTime {
+			return optional[i].id < optional[j].id
+		}
+		return optional[i].latestTime > optional[j].latestTime
+	})
+	for _, attempt := range optional {
+		candidate := append(append([]Record{}, archive...), attempt.records...)
+		candidateData, err := marshalRecords(candidate)
+		if err != nil {
+			return nil, err
+		}
+		if int64(len(candidateData)) > maxBytes {
+			continue
+		}
+		archive = candidate
+	}
+
+	if err := validateCompactedRecords(archive, agent); err != nil {
+		return nil, fmt.Errorf("validate compacted notification attempt journal: %w", err)
+	}
+	return marshalRecords(archive)
+}
+
+func compactAttempt(id string, records []Record) (compactedAttempt, error) {
+	ordered := append([]Record{}, records...)
+
+	var prepared *Record
+	var lifecycle []Record
+	var legacyResults []Record
+	for i := range ordered {
+		record := ordered[i]
+		switch record.Phase {
+		case PhasePrepared:
+			if prepared == nil {
+				copy := record
+				prepared = &copy
+			}
+		case PhaseResult:
+			if record.State != "" {
+				lifecycle = append(lifecycle, record)
+			} else {
+				legacyResults = append(legacyResults, record)
+			}
+		}
+	}
+
+	latestTime := ""
+	for _, record := range ordered {
+		if record.RecordedAt > latestTime {
+			latestTime = record.RecordedAt
+		}
+	}
+	result := compactedAttempt{id: id, latestTime: latestTime}
+	if prepared == nil {
+		// An orphan result cannot create an Attempt without synthesizing a
+		// prepared record. Keep its newest raw record as optional evidence.
+		return compactedAttempt{
+			id:         id,
+			records:    []Record{ordered[len(ordered)-1]},
+			latestTime: latestTime,
+		}, nil
+	}
+
+	if prepared.Schema == legacySchemaVersion {
+		if legacy := matchingLegacyResult(*prepared, legacyResults); legacy != nil {
+			result.records = []Record{*prepared, *legacy}
+			return result, nil
+		}
+		result.records = []Record{*prepared}
+		result.mandatory = true
+		return result, nil
+	}
+
+	if prepared.State == "" {
+		if len(lifecycle) > 0 {
+			result.records = []Record{*prepared}
+			result.mandatory = true
+			return result, nil
+		}
+		if legacy := matchingLegacyResult(*prepared, legacyResults); legacy != nil {
+			result.records = []Record{*prepared, *legacy}
+			return result, nil
+		}
+		result.records = []Record{*prepared}
+		result.mandatory = true
+		return result, nil
+	}
+
+	if len(legacyResults) > 0 {
+		if legacy := matchingLegacyResult(*prepared, legacyResults); legacy != nil {
+			// Marker-less external injectors use a v2 prepared lifecycle record
+			// followed by a v1-shaped written result. Preserve that compatibility
+			// taxonomy instead of turning a terminal result back into "attempt".
+			result.records = []Record{*prepared, *legacy}
+			return result, nil
+		}
+		result.records = []Record{*prepared}
+		result.mandatory = true
+		return result, nil
+	}
+	if len(lifecycle) == 0 {
+		result.records = []Record{*prepared}
+		result.mandatory = true
+		return result, nil
+	}
+
+	orderedLifecycle := append([]Record{}, lifecycle...)
+	sort.SliceStable(orderedLifecycle, func(i, j int) bool {
+		return orderedLifecycle[i].Sequence < orderedLifecycle[j].Sequence
+	})
+	folded := foldLifecycle(*prepared, orderedLifecycle, nil)
+	if folded.State == StateInvalid {
+		result.records = []Record{*prepared}
+		result.mandatory = true
+		return result, nil
+	}
+
+	switch folded.State {
+	case StateDeferred:
+		result.records = []Record{*prepared, latestLifecycleState(orderedLifecycle, StateDeferred)}
+		result.mandatory = true
+	case StateRetried:
+		latestRetried := latestLifecycleState(orderedLifecycle, StateRetried)
+		deferred := latestLifecycleStateBefore(orderedLifecycle, StateDeferred, latestRetried.Sequence)
+		if deferred.State == "" {
+			result.records = []Record{*prepared}
+			result.mandatory = true
+			return result, nil
+		}
+		result.records = []Record{*prepared, deferred, latestRetried}
+		result.mandatory = true
+	case StateAccepted, StateFailed:
+		result.records = []Record{*prepared, latestLifecycleState(orderedLifecycle, folded.State)}
+	default:
+		result.records = []Record{*prepared}
+		result.mandatory = true
+	}
+
+	return result, nil
+}
+
+func matchingLegacyResult(prepared Record, results []Record) *Record {
+	for i := len(results) - 1; i >= 0; i-- {
+		result := results[i]
+		if result.AttemptID == prepared.AttemptID &&
+			result.Agent == prepared.Agent &&
+			result.Mode == prepared.Mode &&
+			sameStrings(result.MessageIDs, prepared.MessageIDs) {
+			copy := result
+			return &copy
+		}
+	}
+	return nil
+}
+
+func latestLifecycleState(events []Record, state string) Record {
+	for i := len(events) - 1; i >= 0; i-- {
+		if events[i].State == state {
+			return events[i]
+		}
+	}
+	return Record{}
+}
+
+func latestLifecycleStateBefore(events []Record, state string, sequence uint64) Record {
+	for i := len(events) - 1; i >= 0; i-- {
+		if events[i].Sequence < sequence && events[i].State == state {
+			return events[i]
+		}
+	}
+	return Record{}
+}
+
+func marshalRecords(records []Record) ([]byte, error) {
+	var data bytes.Buffer
+	for _, record := range records {
+		line, err := json.Marshal(record)
+		if err != nil {
+			return nil, err
+		}
+		data.Write(line)
+		data.WriteByte('\n')
+	}
+	return data.Bytes(), nil
+}
+
+func validateCompactedRecords(records []Record, agent string) error {
+	for _, record := range records {
+		if err := validateRecord(record, agent); err != nil {
+			return err
+		}
+	}
+	byAttempt := make(map[string][]Record)
+	for _, record := range records {
+		byAttempt[record.AttemptID] = append(byAttempt[record.AttemptID], record)
+	}
+	for attemptID, group := range byAttempt {
+		var prepared *Record
+		var events []Record
+		var legacy *Record
+		for i := range group {
+			record := group[i]
+			switch {
+			case record.Phase == PhasePrepared && prepared == nil:
+				copy := record
+				prepared = &copy
+			case record.Phase == PhaseResult && record.State != "":
+				events = append(events, record)
+			case record.Phase == PhaseResult && legacy == nil:
+				copy := record
+				legacy = &copy
+			}
+		}
+		if prepared == nil ||
+			prepared.Schema == legacySchemaVersion ||
+			(prepared.State == "" && len(events) == 0) {
+			continue
+		}
+		folded := foldLifecycle(*prepared, events, legacy)
+		if folded.State == StateInvalid {
+			return fmt.Errorf("attempt %q has invalid compacted lifecycle", attemptID)
+		}
+	}
+	return nil
 }
 
 // validateRecord checks the invariants a Record must satisfy. SchemaVersion

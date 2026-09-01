@@ -6226,6 +6226,157 @@ exit 1
 	}
 }
 
+func TestTerminalInjectorLatchDoesNotSuppressPhysicalReplacement(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatalf("EnsureRootDirs: %v", err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+
+	countPath := filepath.Join(secureTempDirForTest(t), "inject-count")
+	injector := writeExecutableScriptForTest(t, "fail-then-accept", fmt.Sprintf(`#!/bin/sh
+count=0
+if [ -f %q ]; then count=$(cat %q); fi
+count=$((count + 1))
+printf '%%s' "$count" > %q
+if [ "$count" -eq 1 ]; then
+  echo ordinary failure >&2
+  exit 1
+fi
+echo AMQ_INJECT_PROGRESS=accepted >&2
+exit 0
+`, countPath, countPath, countPath))
+	writeMessage := func(filename, id string) {
+		t.Helper()
+		message := format.Message{Header: format.Header{
+			Schema: 1, ID: id, From: "peer", To: []string{"codex"},
+			Thread: "p2p/peer__codex", Subject: id,
+			Created: "2026-09-01T09:00:00Z",
+		}}
+		data, err := message.Marshal()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := deliverToInboxForTest(t, root, "codex", filename, data); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	writeMessage("same-name.md", "same-id")
+	cfg := protocolWakeConfigForTest(t, root, injector, nil)
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("first notify: %v", err)
+	}
+
+	path := filepath.Join(fsq.AgentInboxNew(root, "codex"), "same-name.md")
+	replacement := path + ".replacement"
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read original message: %v", err)
+	}
+	if err := os.WriteFile(replacement, data, 0o600); err != nil {
+		t.Fatalf("write replacement message: %v", err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("remove original message: %v", err)
+	}
+	if err := os.Rename(replacement, path); err != nil {
+		t.Fatalf("rename replacement message: %v", err)
+	}
+
+	if err := notifyNewMessages(cfg); err != nil {
+		t.Fatalf("replacement notify: %v", err)
+	}
+	count, err := os.ReadFile(countPath)
+	if err != nil {
+		t.Fatalf("read injector count: %v", err)
+	}
+	if got := strings.TrimSpace(string(count)); got != "2" {
+		t.Fatalf("injector calls after physical replacement = %q, want 2", got)
+	}
+}
+
+func TestTerminalInjectorLatchDoesNotSuppressShrunkCohort(t *testing.T) {
+	current := wakeDoorbellTestFiles(t, "first.md", "second.md")
+	cfg := &wakeConfig{
+		injectVia:                "/injector",
+		terminalInjectorCohort:   []string{"first", "second"},
+		terminalInjectorMode:     "external",
+		terminalInjectorPhysical: snapshotWakeFileIdentities(current),
+	}
+	if terminalInjectorForCohort(cfg, []string{"second"}, current) {
+		t.Fatal("terminal injector latch suppressed a shrunk cohort")
+	}
+}
+
+func TestDeferredNotificationAttemptDoesNotReusePhysicalReplacement(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatalf("EnsureRootDirs: %v", err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+
+	mailbox := t.TempDir()
+	path := filepath.Join(mailbox, "pending.md")
+	if err := os.WriteFile(path, []byte("first"), 0o600); err != nil {
+		t.Fatalf("write original pending file: %v", err)
+	}
+	originalInfo, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat original pending file: %v", err)
+	}
+	current := map[string]os.FileInfo{"pending.md": originalInfo}
+
+	cfg := &wakeConfig{
+		me:         "codex",
+		root:       root,
+		injectVia:  "/injector",
+		injectMode: wakeInjectModePaste,
+	}
+	writer := notificationattempt.NewWriter(root, "codex")
+	lifecycle, err := writer.Begin([]string{"same-message"}, notificationAttemptMode(cfg))
+	if err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	cfg.notificationAttempt = lifecycle
+	cfg.notificationAttemptPhysical = snapshotWakeFileIdentities(current)
+
+	reused, err := ensureNotificationAttempt(cfg, writer, []string{"same-message"}, current)
+	if err != nil {
+		t.Fatalf("reuse current lifecycle: %v", err)
+	}
+	if reused != lifecycle {
+		t.Fatal("unchanged physical cohort did not reuse deferred lifecycle")
+	}
+
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("remove original pending file: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("replacement"), 0o600); err != nil {
+		t.Fatalf("write replacement pending file: %v", err)
+	}
+	replacementInfo, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat replacement pending file: %v", err)
+	}
+	replacement := map[string]os.FileInfo{"pending.md": replacementInfo}
+	if sameKnownWakeCohort(cfg.notificationAttemptPhysical, replacement) {
+		t.Fatal("physical replacement retained the old cohort identity")
+	}
+
+	fresh, err := ensureNotificationAttempt(cfg, writer, []string{"same-message"}, replacement)
+	if err != nil {
+		t.Fatalf("begin replacement lifecycle: %v", err)
+	}
+	if fresh == lifecycle || fresh.AttemptID == lifecycle.AttemptID {
+		t.Fatalf("replacement reused deferred attempt ID: old=%q new=%q", lifecycle.AttemptID, fresh.AttemptID)
+	}
+}
+
 func TestInjectViaDeferredRetainsCohortWithoutAttentionOrAcceptance(t *testing.T) {
 	root := secureTempDirForTest(t)
 	if err := fsq.EnsureRootDirs(root); err != nil {

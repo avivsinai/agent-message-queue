@@ -21,35 +21,38 @@ const (
 	wakeInjectorProgressUncertain wakeInjectorProgress = "uncertain"
 )
 
-// parseWakeInjectorProgress accepts only complete marker lines. Uncertain has
+// parseWakeInjectorProgress accepts only exact complete marker lines. A single
+// trailing carriage return is allowed for CRLF output. Uncertain has
 // precedence over every other marker so a contradictory provider response can
 // never be treated as a successful or replayable delivery.
 func parseWakeInjectorProgress(stderr string) wakeInjectorProgress {
-	if strings.Contains(stderr, wakeInjectorProgressPrefix+string(wakeInjectorProgressUncertain)) {
-		return wakeInjectorProgressUncertain
-	}
-	var progress wakeInjectorProgress
 	accepted := false
 	deferred := false
+	uncertain := false
 	for _, rawLine := range strings.Split(stderr, "\n") {
-		line := strings.TrimSpace(rawLine)
-		if !strings.HasPrefix(line, wakeInjectorProgressPrefix) {
-			continue
-		}
-		candidate := wakeInjectorProgress(strings.TrimSpace(strings.TrimPrefix(line, wakeInjectorProgressPrefix)))
-		switch candidate {
-		case wakeInjectorProgressDeferred:
+		line := strings.TrimSuffix(rawLine, "\r")
+		switch line {
+		case wakeInjectorProgressPrefix + string(wakeInjectorProgressDeferred):
 			deferred = true
-			progress = candidate
-		case wakeInjectorProgressAccepted:
+		case wakeInjectorProgressPrefix + string(wakeInjectorProgressAccepted):
 			accepted = true
-			progress = candidate
+		case wakeInjectorProgressPrefix + string(wakeInjectorProgressUncertain):
+			uncertain = true
 		}
+	}
+	if uncertain {
+		return wakeInjectorProgressUncertain
 	}
 	if accepted && deferred {
 		return wakeInjectorProgressUncertain
 	}
-	return progress
+	if deferred {
+		return wakeInjectorProgressDeferred
+	}
+	if accepted {
+		return wakeInjectorProgressAccepted
+	}
+	return ""
 }
 
 type wakeInjectorDeferredError struct {

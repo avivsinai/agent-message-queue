@@ -120,10 +120,28 @@ func (a App) Run(ctx context.Context, args []string) int {
 		return 2
 	}
 	if err != nil {
-		_, _ = fmt.Fprintln(a.Stderr, err)
+		writeCommandError(a.Stderr, err)
 		return 1
 	}
 	return 0
+}
+
+func writeCommandError(w io.Writer, err error) {
+	if !errors.Is(err, adapter.ErrInjectUncertain) {
+		_, _ = fmt.Fprintln(w, err)
+		return
+	}
+
+	// Keep the machine-readable marker on its own line. The wrapped error is
+	// still useful to an operator, but its diagnostics must not look like a
+	// second progress marker to a strict line parser.
+	marker := adapter.ErrInjectUncertain.Error()
+	_, _ = fmt.Fprintln(w, marker)
+	detail := strings.TrimSpace(strings.ReplaceAll(err.Error(), marker, ""))
+	detail = strings.TrimLeft(detail, ": ")
+	if detail != "" {
+		_, _ = fmt.Fprintln(w, detail)
+	}
 }
 
 type registerOptions struct {

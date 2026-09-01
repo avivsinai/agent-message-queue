@@ -30,8 +30,11 @@ turns; standalone AMQ keeps the second fact as its safer default.
 
 - `drained` is the default and preserves the existing retry ladder.
 - `injected` requires `--inject-via`. Only exit zero with the exact stderr line
-  `AMQ_INJECT_PROGRESS=accepted` acknowledges the current physical inbox
-  cohort and suppresses further input retries for that unchanged cohort.
+  `AMQ_INJECT_PROGRESS=accepted` acknowledges provider dispatch for the current
+  physical inbox cohort and suppresses further input retries for that unchanged
+  cohort. A marker-less exit-zero command remains a legacy transport success:
+  its ledger state is `written`, not provider `accepted`, but compatibility
+  transitions the current cohort to `announced` under `--retry-until injected`.
 - `AMQ_INJECT_PROGRESS=deferred` with a nonzero exit means the provider was
   busy or transitioning before dispatch. AMQ MUST retain the cohort, emit no
   terminal or attention fallback, and retry through the existing wake loop.
