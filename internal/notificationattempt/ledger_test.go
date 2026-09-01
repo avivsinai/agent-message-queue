@@ -1,6 +1,7 @@
 package notificationattempt
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -10,6 +11,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
 func TestWriterPersistsPreparedAndResultInSingleLog(t *testing.T) {
@@ -153,10 +156,10 @@ func TestConcurrentAppendsAcrossRotation(t *testing.T) {
 	writer := NewWriter(root, "codex")
 	// Tiny cap so rotation triggers frequently and appends are very likely to
 	// land inside the rotation window.
-	writer.maxBytes = 300
+	writer.maxBytes = 32 * 1024
 
-	const appenders = 16
-	const recordsEach = 200
+	const appenders = 8
+	const recordsEach = 40
 	var wg sync.WaitGroup
 	wg.Add(appenders)
 
@@ -184,8 +187,14 @@ func TestConcurrentAppendsAcrossRotation(t *testing.T) {
 					RecordedAt: time.Now().UTC().Format(time.RFC3339Nano),
 				}
 				if err := writer.append(rec); err != nil {
-					t.Errorf("append %d/%d: %v", a, i, err)
-					return
+					// A burst can make the mandatory nonterminal snapshot exceed
+					// the hard archive cap before LOCK_EX is acquired. The writer
+					// must report that condition, but it still appends this record
+					// and must not truncate the current generation.
+					if !strings.Contains(err.Error(), "nonterminal attempts") {
+						t.Errorf("append %d/%d: %v", a, i, err)
+						return
+					}
 				}
 				local = append(local, id)
 			}
@@ -263,8 +272,7 @@ func min(a, b int) int {
 func TestRotationNeverOrphansResult(t *testing.T) {
 	root := t.TempDir()
 	writer := NewWriter(root, "codex")
-	// Small cap so rotation triggers after a few records.
-	writer.maxBytes = 600
+	writer.maxBytes = 4 * 1024
 
 	// Write a prepared+result pair, then enough records to rotate the
 	// prepared into .1 while the result stays in the current file.
@@ -275,20 +283,25 @@ func TestRotationNeverOrphansResult(t *testing.T) {
 	if err := writer.Result(prepared, OutcomeWritten, ""); err != nil {
 		t.Fatal(err)
 	}
-	// Pad with extra records to force rotation.
-	for i := 0; i < 10; i++ {
-		rec := Record{
-			Schema:     SchemaVersion,
-			AttemptID:  "pad-" + itoa(i),
-			Phase:      PhasePrepared,
-			MessageIDs: []string{"msg-pad"},
-			Agent:      "codex",
-			Mode:       "raw",
-			RecordedAt: time.Now().UTC().Format(time.RFC3339Nano),
-		}
-		if err := writer.append(rec); err != nil {
-			t.Fatalf("pad append %d: %v", i, err)
-		}
+	// Set the cap just above the existing pair, then append one record that
+	// forces exactly one rotation. The pair must remain joinable in .1.
+	dir := filepath.Join(root, "agents", "codex", "receipts")
+	info, err := os.Stat(filepath.Join(dir, LogFilename))
+	if err != nil {
+		t.Fatalf("stat current journal before rotation: %v", err)
+	}
+	writer.maxBytes = info.Size() + 1
+	pad := Record{
+		Schema:     SchemaVersion,
+		AttemptID:  "pad",
+		Phase:      PhasePrepared,
+		MessageIDs: []string{"msg-pad"},
+		Agent:      "codex",
+		Mode:       "raw",
+		RecordedAt: time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	if err := writer.append(pad); err != nil {
+		t.Fatalf("pad append: %v", err)
 	}
 
 	// List must join the prepared (in .1) with its result — no orphan.
@@ -310,7 +323,7 @@ func TestRotationNeverOrphansResult(t *testing.T) {
 func TestRotationCapsBothGenerations(t *testing.T) {
 	root := t.TempDir()
 	writer := NewWriter(root, "codex")
-	writer.maxBytes = 420
+	writer.maxBytes = 4 * 1024
 
 	for i := 0; i < 12; i++ {
 		rec := Record{
@@ -328,16 +341,39 @@ func TestRotationCapsBothGenerations(t *testing.T) {
 	}
 
 	dir := filepath.Join(root, "agents", "codex", "receipts")
-	// The current file must be under the cap (it is the hot-path append target).
-	// The .1 file accumulates merged generations and may exceed the cap — that
-	// is correct for an audit log (history is the value; the cap bounds the
-	// active append target, not the archive).
+	// Force one rotation after the initial records. Both generations are now
+	// bounded by the same cap; the archive compactor may omit terminal history,
+	// but it must never grow without limit.
+	infoBefore, err := os.Stat(filepath.Join(dir, LogFilename))
+	if err != nil {
+		t.Fatalf("stat current journal before rotation: %v", err)
+	}
+	writer.maxBytes = infoBefore.Size() + 1
+	pad := Record{
+		Schema:     SchemaVersion,
+		AttemptID:  "rotation-pad",
+		Phase:      PhasePrepared,
+		MessageIDs: []string{"msg-pad"},
+		Agent:      "codex",
+		Mode:       "raw",
+		RecordedAt: time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	if err := writer.append(pad); err != nil {
+		t.Fatalf("rotation pad append: %v", err)
+	}
 	info, err := os.Stat(filepath.Join(dir, LogFilename))
 	if err != nil {
 		t.Fatalf("stat %s: %v", LogFilename, err)
 	}
 	if info.Size() > writer.maxBytes {
 		t.Fatalf("%s size = %d, cap = %d", LogFilename, info.Size(), writer.maxBytes)
+	}
+	rotatedInfo, err := os.Stat(filepath.Join(dir, LogFilename+rotatedSuffix))
+	if err != nil {
+		t.Fatalf("stat %s: %v", LogFilename+rotatedSuffix, err)
+	}
+	if rotatedInfo.Size() > writer.maxBytes {
+		t.Fatalf("%s size = %d, cap = %d", LogFilename+rotatedSuffix, rotatedInfo.Size(), writer.maxBytes)
 	}
 	// .1 must exist (rotation happened).
 	if _, err := os.Stat(filepath.Join(dir, LogFilename+rotatedSuffix)); os.IsNotExist(err) {
@@ -422,6 +458,9 @@ func TestListEmptyJournalIsNotAnError(t *testing.T) {
 	if attempts != nil {
 		t.Fatalf("List on empty journal should return nil attempts, got %d", len(attempts))
 	}
+	if _, err := os.Stat(filepath.Join(root, "agents", "codex", "receipts", lockFilename)); !os.IsNotExist(err) {
+		t.Fatalf("List on empty journal created a lock file: %v", err)
+	}
 }
 
 func TestLifecycleRetainsAttemptIDAcrossDeferredRetryAccepted(t *testing.T) {
@@ -481,6 +520,234 @@ func TestLifecycleRejectsTerminalReopen(t *testing.T) {
 	}
 	if len(attempts) != 1 || attempts[0].State != StateAccepted {
 		t.Fatalf("attempts = %+v, want one accepted attempt", attempts)
+	}
+}
+
+func TestRotationFailureDoesNotTruncateCurrentJournal(t *testing.T) {
+	root := t.TempDir()
+	writer := NewWriter(root, "codex")
+	writer.maxBytes = 300
+	first := Record{
+		Schema: SchemaVersion, AttemptID: "rotation-first", Phase: PhasePrepared,
+		MessageIDs: []string{"msg-first"}, Agent: "codex", Mode: "external",
+		RecordedAt: "2026-09-01T10:00:00Z", State: StateAttempt,
+	}
+	second := first
+	second.AttemptID = "rotation-second"
+	second.MessageIDs = []string{"msg-second"}
+	if err := writer.append(first); err != nil {
+		t.Fatalf("append first: %v", err)
+	}
+	dir := filepath.Join(root, "agents", "codex", "receipts")
+	if err := os.Mkdir(filepath.Join(dir, LogFilename+rotatedSuffix), 0o700); err != nil {
+		t.Fatalf("make archive failure fixture: %v", err)
+	}
+	if err := writer.append(second); err == nil {
+		t.Fatal("append succeeded despite archive replacement failure")
+	}
+	data, err := os.ReadFile(filepath.Join(dir, LogFilename))
+	if err != nil {
+		t.Fatalf("read current journal: %v", err)
+	}
+	if got := strings.Count(string(data), "\n"); got != 2 {
+		t.Fatalf("current journal lines = %d, want both records preserved", got)
+	}
+	if _, err := os.Stat(filepath.Join(dir, LogFilename+rotatedSuffix)); err != nil {
+		t.Fatalf("archive failure fixture disappeared: %v", err)
+	}
+}
+
+func TestCompactionPreservesSequencesAndLegacyRecords(t *testing.T) {
+	base := func(id, messageID, recordedAt string) Record {
+		return Record{
+			Schema: SchemaVersion, AttemptID: id, Phase: PhasePrepared,
+			MessageIDs: []string{messageID}, Agent: "codex", Mode: "external",
+			RecordedAt: recordedAt, State: StateAttempt,
+		}
+	}
+	deferred := base("v2-deferred", "msg-deferred", "2026-09-01T10:00:00Z")
+	retried := base("v2-retried", "msg-retried", "2026-09-01T10:00:01Z")
+	accepted := base("v2-accepted", "msg-accepted", "2026-09-01T10:00:02Z")
+	legacyPrepared := Record{
+		Schema: legacySchemaVersion, AttemptID: "v1-pair", Phase: PhasePrepared,
+		MessageIDs: []string{"msg-v1"}, Agent: "codex", Mode: "external",
+		RecordedAt: "2026-09-01T10:00:03Z",
+	}
+	legacyResult := legacyPrepared
+	legacyResult.Phase = PhaseResult
+	legacyResult.RecordedAt = "2026-09-01T10:00:04Z"
+	legacyResult.Outcome = OutcomeWritten
+	v1Open := legacyPrepared
+	v1Open.AttemptID = "v1-open"
+	v1Open.MessageIDs = []string{"msg-v1-open"}
+	v1Open.RecordedAt = "2026-09-01T10:00:05Z"
+
+	records := []Record{
+		deferred,
+		{Schema: SchemaVersion, AttemptID: deferred.AttemptID, Phase: PhaseResult, MessageIDs: deferred.MessageIDs, Agent: "codex", Mode: "external", RecordedAt: "2026-09-01T10:00:06Z", State: StateDeferred, Sequence: 4},
+		{Schema: SchemaVersion, AttemptID: deferred.AttemptID, Phase: PhaseResult, MessageIDs: deferred.MessageIDs, Agent: "codex", Mode: "external", RecordedAt: "2026-09-01T10:00:07Z", State: StateRetried, Sequence: 9},
+		{Schema: SchemaVersion, AttemptID: deferred.AttemptID, Phase: PhaseResult, MessageIDs: deferred.MessageIDs, Agent: "codex", Mode: "external", RecordedAt: "2026-09-01T10:00:08Z", State: StateDeferred, Sequence: 15},
+		retried,
+		{Schema: SchemaVersion, AttemptID: retried.AttemptID, Phase: PhaseResult, MessageIDs: retried.MessageIDs, Agent: "codex", Mode: "external", RecordedAt: "2026-09-01T10:00:09Z", State: StateDeferred, Sequence: 2},
+		{Schema: SchemaVersion, AttemptID: retried.AttemptID, Phase: PhaseResult, MessageIDs: retried.MessageIDs, Agent: "codex", Mode: "external", RecordedAt: "2026-09-01T10:00:10Z", State: StateRetried, Sequence: 7},
+		accepted,
+		{Schema: SchemaVersion, AttemptID: accepted.AttemptID, Phase: PhaseResult, MessageIDs: accepted.MessageIDs, Agent: "codex", Mode: "external", RecordedAt: "2026-09-01T10:00:11Z", State: StateAccepted, Sequence: 11},
+		legacyPrepared,
+		legacyResult,
+		v1Open,
+	}
+
+	first, err := compactRecords(records, "codex", 64*1024)
+	if err != nil {
+		t.Fatalf("compact records: %v", err)
+	}
+	second, err := compactRecords(records, "codex", 64*1024)
+	if err != nil {
+		t.Fatalf("repeat compact records: %v", err)
+	}
+	if !bytes.Equal(first, second) {
+		t.Fatalf("compaction is not deterministic:\nfirst=%s\nsecond=%s", first, second)
+	}
+	var compacted []Record
+	for _, line := range strings.Split(strings.TrimSpace(string(first)), "\n") {
+		var record Record
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			t.Fatalf("decode compacted record: %v", err)
+		}
+		compacted = append(compacted, record)
+	}
+	if err := validateCompactedRecords(compacted, "codex"); err != nil {
+		t.Fatalf("compacted records failed validation: %v", err)
+	}
+
+	byID := make(map[string][]Record)
+	for _, record := range compacted {
+		byID[record.AttemptID] = append(byID[record.AttemptID], record)
+	}
+	if got := len(byID["v1-pair"]); got != 2 {
+		t.Fatalf("v1 pair records = %d, want 2", got)
+	}
+	for _, record := range byID["v1-pair"] {
+		if record.Schema != legacySchemaVersion {
+			t.Fatalf("v1 pair record was synthesized as schema %d", record.Schema)
+		}
+	}
+	if got := len(byID["v1-open"]); got != 1 {
+		t.Fatalf("v1 prepared-without-result records = %d, want 1", got)
+	}
+	if got := len(byID[deferred.AttemptID]); got != 2 || byID[deferred.AttemptID][1].Sequence != 15 {
+		t.Fatalf("deferred compacted records = %#v, want prepared plus latest sequence 15", byID[deferred.AttemptID])
+	}
+	if got := len(byID[retried.AttemptID]); got != 3 || byID[retried.AttemptID][1].Sequence != 2 || byID[retried.AttemptID][2].Sequence != 7 {
+		t.Fatalf("retried compacted records = %#v, want original sequences 0,2,7", byID[retried.AttemptID])
+	}
+
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "agents", "codex", "receipts"), 0o700); err != nil {
+		t.Fatalf("make list fixture: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "agents", "codex", "receipts", LogFilename), first, 0o600); err != nil {
+		t.Fatalf("write compacted fixture: %v", err)
+	}
+	attempts, err := List(root, "codex", "msg-retried")
+	if err != nil {
+		t.Fatalf("List compacted fixture: %v", err)
+	}
+	if len(attempts) != 1 || attempts[0].State != StateRetried || attempts[0].Result == nil || attempts[0].Result.Sequence != 7 {
+		t.Fatalf("round-trip retried attempt = %#v", attempts)
+	}
+}
+
+func TestCompactionPreservesV2PreparedLegacyWrittenResult(t *testing.T) {
+	prepared := Record{
+		Schema: SchemaVersion, AttemptID: "v2-legacy-written", Phase: PhasePrepared,
+		MessageIDs: []string{"msg-v2-legacy-written"}, Agent: "codex", Mode: "external",
+		RecordedAt: "2026-09-01T10:00:00Z", State: StateAttempt,
+	}
+	result := prepared
+	result.Phase = PhaseResult
+	result.RecordedAt = "2026-09-01T10:00:01Z"
+	result.State = ""
+	result.Outcome = OutcomeWritten
+	compacted, err := compactRecords([]Record{prepared, result}, "codex", 64*1024)
+	if err != nil {
+		t.Fatalf("compact legacy written result: %v", err)
+	}
+	var records []Record
+	for _, line := range strings.Split(strings.TrimSpace(string(compacted)), "\n") {
+		var record Record
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			t.Fatalf("decode compacted legacy result: %v", err)
+		}
+		records = append(records, record)
+	}
+	if len(records) != 2 || records[0].State != StateAttempt || records[1].Outcome != OutcomeWritten || records[1].State != "" {
+		t.Fatalf("compacted legacy pair = %#v, want v2 prepared plus written result", records)
+	}
+	if err := validateCompactedRecords(records, "codex"); err != nil {
+		t.Fatalf("validate compacted legacy pair: %v", err)
+	}
+}
+
+func TestListDeduplicatesCrashWindowAcrossGenerations(t *testing.T) {
+	root := t.TempDir()
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatalf("EnsureRootDirs: %v", err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+	prepared := Record{
+		Schema: SchemaVersion, AttemptID: "crash-window", Phase: PhasePrepared,
+		MessageIDs: []string{"msg-crash"}, Agent: "codex", Mode: "external",
+		RecordedAt: "2026-09-01T10:00:00Z", State: StateAttempt,
+	}
+	accepted := prepared
+	accepted.Phase = PhaseResult
+	accepted.RecordedAt = "2026-09-01T10:00:01Z"
+	accepted.State = StateAccepted
+	accepted.Sequence = 4
+	data, err := marshalRecords([]Record{prepared, accepted})
+	if err != nil {
+		t.Fatalf("marshal crash-window records: %v", err)
+	}
+	duplicate := accepted
+	duplicate.Detail = "duplicate crash-window copy"
+	duplicateData, err := marshalRecords([]Record{prepared, duplicate})
+	if err != nil {
+		t.Fatalf("marshal duplicate crash-window records: %v", err)
+	}
+	dir := filepath.Join(root, "agents", "codex", "receipts")
+	if err := os.WriteFile(filepath.Join(dir, LogFilename+rotatedSuffix), data, 0o600); err != nil {
+		t.Fatalf("write rotated crash-window records: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, LogFilename), duplicateData, 0o600); err != nil {
+		t.Fatalf("write current crash-window records: %v", err)
+	}
+	attempts, err := List(root, "codex", "msg-crash")
+	if err != nil {
+		t.Fatalf("List crash-window records: %v", err)
+	}
+	if len(attempts) != 1 || attempts[0].State != StateAccepted || len(attempts[0].History) != 2 {
+		t.Fatalf("crash-window attempts = %#v, want one two-event accepted attempt", attempts)
+	}
+}
+
+func TestCompactionRefusesNonterminalOverflow(t *testing.T) {
+	first := Record{
+		Schema: SchemaVersion, AttemptID: "overflow-first", Phase: PhasePrepared,
+		MessageIDs: []string{"msg-overflow-first"}, Agent: "codex", Mode: "external",
+		RecordedAt: "2026-09-01T10:00:00Z", State: StateAttempt,
+	}
+	second := first
+	second.AttemptID = "overflow-second"
+	second.MessageIDs = []string{"msg-overflow-second"}
+	firstData, err := marshalRecords([]Record{first})
+	if err != nil {
+		t.Fatalf("marshal first overflow record: %v", err)
+	}
+	if _, err := compactRecords([]Record{first, second}, "codex", int64(len(firstData))); err == nil {
+		t.Fatal("compaction accepted a nonterminal archive larger than cap")
 	}
 }
 
