@@ -44,18 +44,20 @@ func wakeRepairProtocolPreparedForTest(
 ) (wakeRepairHandoffSource, wakeRepairHandoffPrepared) {
 	t.Helper()
 	source := wakeRepairHandoffSource{
-		schema:             wakeRepairHandoffSchema,
-		root:               "/tmp/amq",
-		rootIdentity:       "v1:linux:1:2",
-		agent:              "codex",
-		sourceGeneration:   "source-generation",
-		sourceTargetDigest: "sha256:" + strings.Repeat("1", 64),
-		sourceFloorDigest:  "sha256:" + strings.Repeat("2", 64),
-		bootID:             "boot-id",
-		agentDirDevice:     1,
-		agentDirInode:      2,
-		inboxDirDevice:     1,
-		inboxDirInode:      3,
+		schema:               wakeRepairHandoffSchema,
+		root:                 "/tmp/amq",
+		rootIdentity:         "v1:linux:1:2",
+		agent:                "codex",
+		sourceGeneration:     "source-generation",
+		sourceTargetDigest:   "sha256:" + strings.Repeat("1", 64),
+		sourceFloorDigest:    "sha256:" + strings.Repeat("2", 64),
+		bootID:               "boot-id",
+		agentDirDevice:       1,
+		agentDirInode:        2,
+		inboxParentDirDevice: 1,
+		inboxParentDirInode:  4,
+		inboxDirDevice:       1,
+		inboxDirInode:        3,
 	}
 	prepared, err := newWakeRepairHandoffPrepared(
 		source,
@@ -73,18 +75,20 @@ func wakeRepairProtocolPreparedForTest(
 
 func TestWakeRepairHandoffMessagesBindExactSourcePreparedAndAdmit(t *testing.T) {
 	source := wakeRepairHandoffSource{
-		schema:             wakeRepairHandoffSchema,
-		root:               "/private/tmp/amq",
-		rootIdentity:       "v1:darwin:1:2",
-		agent:              "codex",
-		sourceGeneration:   "source-generation",
-		sourceTargetDigest: "sha256:" + strings.Repeat("1", 64),
-		sourceFloorDigest:  "sha256:" + strings.Repeat("2", 64),
-		bootID:             "boot-id",
-		agentDirDevice:     1,
-		agentDirInode:      2,
-		inboxDirDevice:     1,
-		inboxDirInode:      3,
+		schema:               wakeRepairHandoffSchema,
+		root:                 "/private/tmp/amq",
+		rootIdentity:         "v1:darwin:1:2",
+		agent:                "codex",
+		sourceGeneration:     "source-generation",
+		sourceTargetDigest:   "sha256:" + strings.Repeat("1", 64),
+		sourceFloorDigest:    "sha256:" + strings.Repeat("2", 64),
+		bootID:               "boot-id",
+		agentDirDevice:       1,
+		agentDirInode:        2,
+		inboxParentDirDevice: 1,
+		inboxParentDirInode:  4,
+		inboxDirDevice:       1,
+		inboxDirInode:        3,
 	}
 	if err := source.validate(); err != nil {
 		t.Fatalf("validate source: %v", err)
@@ -92,6 +96,15 @@ func TestWakeRepairHandoffMessagesBindExactSourcePreparedAndAdmit(t *testing.T) 
 	sourceDigest, err := source.digest()
 	if err != nil {
 		t.Fatalf("digest source: %v", err)
+	}
+	replacedParent := source
+	replacedParent.inboxParentDirInode++
+	replacedParentDigest, err := replacedParent.digest()
+	if err != nil {
+		t.Fatalf("digest source with replaced inbox parent identity: %v", err)
+	}
+	if replacedParentDigest == sourceDigest {
+		t.Fatal("source digest does not bind the original inbox parent identity")
 	}
 
 	prepared, err := newWakeRepairHandoffPrepared(
@@ -145,18 +158,20 @@ func TestWakeRepairHandoffMessagesBindExactSourcePreparedAndAdmit(t *testing.T) 
 
 func TestWakeRepairHandoffFrameRoundTripIsStrictAndBounded(t *testing.T) {
 	source := wakeRepairHandoffSource{
-		schema:             wakeRepairHandoffSchema,
-		root:               "/tmp/amq",
-		rootIdentity:       "v1:linux:1:2",
-		agent:              "codex",
-		sourceGeneration:   "source-generation",
-		sourceTargetDigest: "sha256:" + strings.Repeat("1", 64),
-		sourceFloorDigest:  "sha256:" + strings.Repeat("2", 64),
-		bootID:             "boot-id",
-		agentDirDevice:     1,
-		agentDirInode:      2,
-		inboxDirDevice:     1,
-		inboxDirInode:      3,
+		schema:               wakeRepairHandoffSchema,
+		root:                 "/tmp/amq",
+		rootIdentity:         "v1:linux:1:2",
+		agent:                "codex",
+		sourceGeneration:     "source-generation",
+		sourceTargetDigest:   "sha256:" + strings.Repeat("1", 64),
+		sourceFloorDigest:    "sha256:" + strings.Repeat("2", 64),
+		bootID:               "boot-id",
+		agentDirDevice:       1,
+		agentDirInode:        2,
+		inboxParentDirDevice: 1,
+		inboxParentDirInode:  4,
+		inboxDirDevice:       1,
+		inboxDirInode:        3,
 	}
 	var encoded bytes.Buffer
 	if err := writeWakeRepairHandoffSource(&encoded, source); err != nil {
@@ -181,20 +196,47 @@ func TestWakeRepairHandoffFrameRoundTripIsStrictAndBounded(t *testing.T) {
 	}
 }
 
+func TestWakeRepairHandoffRejectsLegacySourceWithoutInboxParentIdentity(t *testing.T) {
+	source, _ := wakeRepairProtocolPreparedForTest(t, "child-generation")
+	legacy := source.wire()
+	legacy.Schema = wakeRepairHandoffSchemaV1
+	legacy.InboxParentDirDevice = 0
+	legacy.InboxParentDirInode = 0
+
+	_, err := sourceFromWire(legacy)
+	if err == nil ||
+		!strings.Contains(err.Error(), "schema 1 unsupported") ||
+		!strings.Contains(err.Error(), "inbox parent directory identity is not bound") ||
+		!strings.Contains(err.Error(), "restart that wake from its owning terminal so it re-announces at schema 2") {
+		t.Fatalf("legacy source compatibility error = %v", err)
+	}
+
+	newer := source.wire()
+	newer.Schema = wakeRepairHandoffSchema + 1
+	_, err = sourceFromWire(newer)
+	if err == nil ||
+		!strings.Contains(err.Error(), "schema 3 unsupported") ||
+		!strings.Contains(err.Error(), "upgrade amq or restart the newer wake under the matching version") {
+		t.Fatalf("newer source compatibility error = %v", err)
+	}
+}
+
 func TestWakeRepairPrivateHandoffRequiresExactAdmittedEcho(t *testing.T) {
 	source := wakeRepairHandoffSource{
-		schema:             wakeRepairHandoffSchema,
-		root:               "/tmp/amq",
-		rootIdentity:       "v1:linux:1:2",
-		agent:              "codex",
-		sourceGeneration:   "source-generation",
-		sourceTargetDigest: "sha256:" + strings.Repeat("1", 64),
-		sourceFloorDigest:  "sha256:" + strings.Repeat("2", 64),
-		bootID:             "boot-id",
-		agentDirDevice:     1,
-		agentDirInode:      2,
-		inboxDirDevice:     1,
-		inboxDirInode:      3,
+		schema:               wakeRepairHandoffSchema,
+		root:                 "/tmp/amq",
+		rootIdentity:         "v1:linux:1:2",
+		agent:                "codex",
+		sourceGeneration:     "source-generation",
+		sourceTargetDigest:   "sha256:" + strings.Repeat("1", 64),
+		sourceFloorDigest:    "sha256:" + strings.Repeat("2", 64),
+		bootID:               "boot-id",
+		agentDirDevice:       1,
+		agentDirInode:        2,
+		inboxParentDirDevice: 1,
+		inboxParentDirInode:  4,
+		inboxDirDevice:       1,
+		inboxDirInode:        3,
 	}
 	prepared, err := newWakeRepairHandoffPrepared(
 		source,
@@ -753,18 +795,20 @@ func TestWakeRepairPostReleaseValidationFailureDoesNotPassGate(t *testing.T) {
 
 func TestWakeRepairChildCannotPassAdmissionGateOnParentEOF(t *testing.T) {
 	source := wakeRepairHandoffSource{
-		schema:             wakeRepairHandoffSchema,
-		root:               "/tmp/amq",
-		rootIdentity:       "v1:linux:1:2",
-		agent:              "codex",
-		sourceGeneration:   "source-generation",
-		sourceTargetDigest: "sha256:" + strings.Repeat("1", 64),
-		sourceFloorDigest:  "sha256:" + strings.Repeat("2", 64),
-		bootID:             "boot-id",
-		agentDirDevice:     1,
-		agentDirInode:      2,
-		inboxDirDevice:     1,
-		inboxDirInode:      3,
+		schema:               wakeRepairHandoffSchema,
+		root:                 "/tmp/amq",
+		rootIdentity:         "v1:linux:1:2",
+		agent:                "codex",
+		sourceGeneration:     "source-generation",
+		sourceTargetDigest:   "sha256:" + strings.Repeat("1", 64),
+		sourceFloorDigest:    "sha256:" + strings.Repeat("2", 64),
+		bootID:               "boot-id",
+		agentDirDevice:       1,
+		agentDirInode:        2,
+		inboxParentDirDevice: 1,
+		inboxParentDirInode:  4,
+		inboxDirDevice:       1,
+		inboxDirInode:        3,
 	}
 	prepared, err := newWakeRepairHandoffPrepared(
 		source,
@@ -800,18 +844,20 @@ func TestWakeRepairChildCannotPassAdmissionGateOnParentEOF(t *testing.T) {
 
 func TestWakeRepairParentAdmissionAcknowledgementIsBounded(t *testing.T) {
 	source := wakeRepairHandoffSource{
-		schema:             wakeRepairHandoffSchema,
-		root:               "/tmp/amq",
-		rootIdentity:       "v1:linux:1:2",
-		agent:              "codex",
-		sourceGeneration:   "source-generation",
-		sourceTargetDigest: "sha256:" + strings.Repeat("1", 64),
-		sourceFloorDigest:  "sha256:" + strings.Repeat("2", 64),
-		bootID:             "boot-id",
-		agentDirDevice:     1,
-		agentDirInode:      2,
-		inboxDirDevice:     1,
-		inboxDirInode:      3,
+		schema:               wakeRepairHandoffSchema,
+		root:                 "/tmp/amq",
+		rootIdentity:         "v1:linux:1:2",
+		agent:                "codex",
+		sourceGeneration:     "source-generation",
+		sourceTargetDigest:   "sha256:" + strings.Repeat("1", 64),
+		sourceFloorDigest:    "sha256:" + strings.Repeat("2", 64),
+		bootID:               "boot-id",
+		agentDirDevice:       1,
+		agentDirInode:        2,
+		inboxParentDirDevice: 1,
+		inboxParentDirInode:  4,
+		inboxDirDevice:       1,
+		inboxDirInode:        3,
 	}
 	prepared, err := newWakeRepairHandoffPrepared(
 		source,

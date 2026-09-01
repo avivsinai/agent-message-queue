@@ -169,18 +169,20 @@ func (err *wakeLockCreatingError) Error() string {
 
 func childRepairSource(lineage *wakeRepairLineage) wakeRepairHandoffSource {
 	source := wakeRepairHandoffSource{
-		schema:             wakeRepairHandoffSchema,
-		root:               lineage.source.Root,
-		rootIdentity:       lineage.source.RootIdentity,
-		agent:              lineage.source.Agent,
-		sourceGeneration:   lineage.source.DeadGeneration,
-		sourceTargetDigest: lineage.source.SourceTargetDigest,
-		sourceFloorDigest:  lineage.source.SourceFloorDigest,
-		bootID:             lineage.source.BootID,
-		agentDirDevice:     lineage.source.AgentDirDevice,
-		agentDirInode:      lineage.source.AgentDirInode,
-		inboxDirDevice:     lineage.source.InboxDirDevice,
-		inboxDirInode:      lineage.source.InboxDirInode,
+		schema:               wakeRepairHandoffSchema,
+		root:                 lineage.source.Root,
+		rootIdentity:         lineage.source.RootIdentity,
+		agent:                lineage.source.Agent,
+		sourceGeneration:     lineage.source.DeadGeneration,
+		sourceTargetDigest:   lineage.source.SourceTargetDigest,
+		sourceFloorDigest:    lineage.source.SourceFloorDigest,
+		bootID:               lineage.source.BootID,
+		agentDirDevice:       lineage.source.AgentDirDevice,
+		agentDirInode:        lineage.source.AgentDirInode,
+		inboxParentDirDevice: lineage.source.InboxParentDirDevice,
+		inboxParentDirInode:  lineage.source.InboxParentDirInode,
+		inboxDirDevice:       lineage.source.InboxDirDevice,
+		inboxDirInode:        lineage.source.InboxDirInode,
 	}
 	if lineage.source.Owner != nil {
 		source.hasOwner = true
@@ -1211,18 +1213,20 @@ func repairWake(root, me string) (wakeRepairResult, error) {
 		}
 		lineage = wakeRepairLineage{
 			source: wakeRepairSource{
-				Root:               handoffSource.Root(),
-				RootIdentity:       handoffSource.RootIdentity(),
-				Agent:              handoffSource.Agent(),
-				DeadGeneration:     handoffSource.SourceGeneration(),
-				BootID:             handoffSource.BootID(),
-				Owner:              handoffSource.Owner(),
-				SourceTargetDigest: handoffSource.SourceTargetDigest(),
-				SourceFloorDigest:  handoffSource.SourceFloorDigest(),
-				AgentDirDevice:     handoffSource.agentDirDevice,
-				AgentDirInode:      handoffSource.agentDirInode,
-				InboxDirDevice:     handoffSource.inboxDirDevice,
-				InboxDirInode:      handoffSource.inboxDirInode,
+				Root:                 handoffSource.Root(),
+				RootIdentity:         handoffSource.RootIdentity(),
+				Agent:                handoffSource.Agent(),
+				DeadGeneration:       handoffSource.SourceGeneration(),
+				BootID:               handoffSource.BootID(),
+				Owner:                handoffSource.Owner(),
+				SourceTargetDigest:   handoffSource.SourceTargetDigest(),
+				SourceFloorDigest:    handoffSource.SourceFloorDigest(),
+				AgentDirDevice:       handoffSource.agentDirDevice,
+				AgentDirInode:        handoffSource.agentDirInode,
+				InboxParentDirDevice: handoffSource.inboxParentDirDevice,
+				InboxParentDirInode:  handoffSource.inboxParentDirInode,
+				InboxDirDevice:       handoffSource.inboxDirDevice,
+				InboxDirInode:        handoffSource.inboxDirInode,
 			},
 			floor: repairFloor,
 		}
@@ -1521,6 +1525,8 @@ func startWakeFromTargetDefault(
 		source.RootIdentity() != lineage.source.RootIdentity ||
 		source.agentDirDevice != lineage.source.AgentDirDevice ||
 		source.agentDirInode != lineage.source.AgentDirInode ||
+		source.inboxParentDirDevice != lineage.source.InboxParentDirDevice ||
+		source.inboxParentDirInode != lineage.source.InboxParentDirInode ||
 		source.inboxDirDevice != lineage.source.InboxDirDevice ||
 		source.inboxDirInode != lineage.source.InboxDirInode {
 		return nil, fmt.Errorf("wake repair child source does not match retained lineage")
@@ -2257,18 +2263,20 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 			}
 			repairLineage = &wakeRepairLineage{
 				source: wakeRepairSource{
-					Root:               source.Root(),
-					RootIdentity:       source.RootIdentity(),
-					Agent:              source.Agent(),
-					DeadGeneration:     source.SourceGeneration(),
-					BootID:             source.BootID(),
-					Owner:              source.Owner(),
-					SourceTargetDigest: source.SourceTargetDigest(),
-					SourceFloorDigest:  source.SourceFloorDigest(),
-					AgentDirDevice:     source.agentDirDevice,
-					AgentDirInode:      source.agentDirInode,
-					InboxDirDevice:     source.inboxDirDevice,
-					InboxDirInode:      source.inboxDirInode,
+					Root:                 source.Root(),
+					RootIdentity:         source.RootIdentity(),
+					Agent:                source.Agent(),
+					DeadGeneration:       source.SourceGeneration(),
+					BootID:               source.BootID(),
+					Owner:                source.Owner(),
+					SourceTargetDigest:   source.SourceTargetDigest(),
+					SourceFloorDigest:    source.SourceFloorDigest(),
+					AgentDirDevice:       source.agentDirDevice,
+					AgentDirInode:        source.agentDirInode,
+					InboxParentDirDevice: source.inboxParentDirDevice,
+					InboxParentDirInode:  source.inboxParentDirInode,
+					InboxDirDevice:       source.inboxDirDevice,
+					InboxDirInode:        source.inboxDirInode,
 				},
 				floor: floor,
 			}
