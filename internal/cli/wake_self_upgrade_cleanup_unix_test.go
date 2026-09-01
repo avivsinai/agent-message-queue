@@ -16,8 +16,8 @@ func TestWakeSelfUpgradeDiagnosticCleanupAfterGenericRetainedFDLockRemoval(t *te
 	fixture := newGenericWakePreparedCleanupFixture(t, false)
 	diagnosticPath := writeWakeSelfUpgradeDiagnosticForCleanupTest(t, fixture.root, fixture.me)
 
-	if err := withWakeLifecycleGuardInDir(fixture.agentDir, func(dirfd int) error {
-		return removeWakeLockIfUnchangedGuardedAt(dirfd, fixture.agentDir, fixture.created)
+	if err := withWakeMutationScopeInDir(fixture.agentDir, func(scope *wakeMutationScope) error {
+		return removeWakeLockIfUnchangedGuardedAt(scope, fixture.created)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -82,9 +82,9 @@ func TestWakeSelfUpgradeDiagnosticCleanupFailureIsResidueAfterLockCommit(t *test
 	}
 
 	var committed bool
-	err := withWakeLifecycleGuardInDir(fixture.agentDir, func(dirfd int) error {
+	err := withWakeMutationScopeInDir(fixture.agentDir, func(scope *wakeMutationScope) error {
 		var removeErr error
-		committed, removeErr = removeWakeLockIfUnchangedGuardedAtStatus(dirfd, fixture.agentDir, fixture.created)
+		committed, removeErr = removeWakeLockIfUnchangedGuardedAtStatus(scope, fixture.created)
 		return removeErr
 	})
 	if !committed {
@@ -108,8 +108,8 @@ func TestWakeSelfUpgradeDiagnosticCleanupFailureDoesNotBlockPlainLockRemoval(t *
 	}
 
 	stderr := captureWakeStderr(t, func() {
-		if err := withWakeLifecycleGuardInDir(fixture.agentDir, func(dirfd int) error {
-			return removeWakeLockIfUnchangedGuardedAt(dirfd, fixture.agentDir, fixture.created)
+		if err := withWakeMutationScopeInDir(fixture.agentDir, func(scope *wakeMutationScope) error {
+			return removeWakeLockIfUnchangedGuardedAt(scope, fixture.created)
 		}); err != nil {
 			t.Fatalf("plain lock removal blocked on diagnostic residue: %v", err)
 		}

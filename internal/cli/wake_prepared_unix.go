@@ -40,7 +40,12 @@ func writeWakePreparedFileInDir(
 	if agentDir == nil {
 		return fmt.Errorf("wake agent directory capability is missing")
 	}
-	return withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+	return withWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+		dirfd, scopedAgentDir, err := scope.location()
+		if err != nil {
+			return err
+		}
+		agentDir = scopedAgentDir
 		current := inspectWakeLockAt(dirfd, agentDir, root, me)
 		if !sameWakeLockGeneration(expected, current) {
 			return fmt.Errorf("wake lock generation changed before preparation publication")
@@ -53,7 +58,7 @@ func writeWakePreparedFileInDir(
 			)
 		}
 		current = confirmed
-		if err := reconcileBoundWakePreparedProjectionAt(dirfd, agentDir, current); err != nil {
+		if err := reconcileBoundWakePreparedProjectionAt(scope, current); err != nil {
 			return fmt.Errorf("refresh bound wake state before preparation publication: %w", err)
 		}
 		marker := wakeReady{
@@ -61,8 +66,8 @@ func writeWakePreparedFileInDir(
 			Generation:   current.Lock.Generation,
 			TargetDigest: current.Lock.TargetDigest,
 		}
-		refreshState := func() error {
-			if err := reconcileWakeStateAfterLegacyMutationAt(dirfd, agentDir, root, me); err != nil {
+		refreshState := func(scope *wakeMutationScope) error {
+			if err := reconcileWakeStateAfterLegacyMutationAt(scope, root, me); err != nil {
 				if current.Lock.StateGeneration != "" && current.Lock.StateDigest != "" {
 					return fmt.Errorf("wake prepared marker committed; refresh bound wake state: %w", err)
 				}
@@ -76,10 +81,10 @@ func writeWakePreparedFileInDir(
 		if err := validateWakeReadyLockAndTargetForInspectionAt(dirfd, agentDir, root, me, current, marker); err != nil {
 			return err
 		}
-		if err := writeWakeGenerationFileAt(dirfd, wakePreparedFileName, "wake prepared marker", marker); err != nil {
+		if err := writeWakeGenerationFileAt(scope, wakePreparedFileName, "wake prepared marker", marker); err != nil {
 			return err
 		}
-		return refreshState()
+		return refreshState(scope)
 	})
 }
 

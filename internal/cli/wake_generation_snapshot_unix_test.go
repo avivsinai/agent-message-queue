@@ -50,9 +50,9 @@ func TestRemoveWakeGenerationFileIfSnapshotMatchesMissingIsNoop(t *testing.T) {
 
 func TestRemoveWakeGenerationFileIfSnapshotMatchesPreservesNewInodeReplacement(t *testing.T) {
 	fixture := newWakeGenerationSnapshotFixture(t)
-	if err := fixture.agentDir.withFD(func(dirfd int) error {
+	if err := withWakeMutationScopeInDir(fixture.agentDir, func(scope *wakeMutationScope) error {
 		return writeWakeGenerationFileAt(
-			dirfd,
+			scope,
 			testWakeGenerationSnapshotName,
 			fixture.label,
 			fixture.marker,
@@ -140,9 +140,9 @@ func newWakeGenerationSnapshotFixture(t *testing.T) wakeGenerationSnapshotFixtur
 			TargetDigest: "sha256:" + strings.Repeat("a", 64),
 		},
 	}
-	if err := agentDir.withFD(func(dirfd int) error {
+	if err := withWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
 		return writeWakeGenerationFileAt(
-			dirfd,
+			scope,
 			testWakeGenerationSnapshotName,
 			fixture.label,
 			fixture.marker,
@@ -176,10 +176,9 @@ func removeWakeGenerationSnapshotForTest(
 	t.Helper()
 	var removed bool
 	var removeErr error
-	err := fixture.agentDir.withFD(func(dirfd int) error {
+	err := withWakeMutationScopeInDir(fixture.agentDir, func(scope *wakeMutationScope) error {
 		removed, removeErr = removeWakeGenerationFileIfSnapshotMatchesAt(
-			dirfd,
-			fixture.agentDir,
+			scope,
 			testWakeGenerationSnapshotName,
 			fixture.label,
 			expected,

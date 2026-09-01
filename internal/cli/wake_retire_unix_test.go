@@ -8,8 +8,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
@@ -30,6 +32,64 @@ func installRetireWakeFixture(t *testing.T, root, me, injector string, args []st
 		Generation:   "0123456789abcdef0123456789abcdef",
 	}, target))
 	return target, lockPath
+}
+
+func TestRetireWakeRefusesWhenLifecycleGuardIsHeld(t *testing.T) {
+	const wakePID = 4242
+	root := secureTempDirForTest(t)
+	injector := writeExecutableForTest(t, "injector")
+	requested, lockPath := installRetireWakeFixture(t, root, "codex", injector, []string{"exec", "terminal-a"}, wakePID)
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		return matchingRetireWakeProcess(pid, root, "codex", injector)
+	})
+
+	guardEntered := make(chan struct{})
+	guardRelease := make(chan struct{})
+	guardDone := make(chan error, 1)
+	var releaseOnce sync.Once
+	releaseGuard := func() { releaseOnce.Do(func() { close(guardRelease) }) }
+	t.Cleanup(releaseGuard)
+	go func() {
+		guardDone <- withWakeLifecycleGuard(root, "codex", func() error {
+			close(guardEntered)
+			<-guardRelease
+			return nil
+		})
+	}()
+	select {
+	case <-guardEntered:
+	case <-time.After(time.Second):
+		t.Fatal("lifecycle guard holder did not enter")
+	}
+
+	type retireResult struct {
+		result wakeRetireResult
+		err    error
+	}
+	done := make(chan retireResult, 1)
+	go func() {
+		result, err := retireWake(root, "codex", requested)
+		done <- retireResult{result: result, err: err}
+	}()
+	select {
+	case got := <-done:
+		if got.err == nil || got.result.Status != "refused" ||
+			!strings.Contains(got.err.Error(), "held by another process") {
+			t.Fatalf("held-guard retire = %#v err=%v, want bounded refusal", got.result, got.err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("retire remained blocked on the lifecycle guard")
+	}
+	releaseGuard()
+	if err := <-guardDone; err != nil {
+		t.Fatalf("release lifecycle guard holder: %v", err)
+	}
+	if _, err := os.Stat(lockPath); err != nil {
+		t.Fatalf("held-guard retire changed wake lock: %v", err)
+	}
+	if _, err := os.Stat(wakeTargetPath(root, "codex")); err != nil {
+		t.Fatalf("held-guard retire changed wake target: %v", err)
+	}
 }
 
 func matchingRetireWakeProcess(pid int, root, me, injector string) wakeProcessInfo {
@@ -348,14 +408,14 @@ func TestRetireWakeStateUnlinkFailureIsSuccessfulResidue(t *testing.T) {
 	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
 		return wakeProcessInfo{PID: pid, Running: false}
 	})
-	originalUnlink := wakeRetireUnlinkAt
-	wakeRetireUnlinkAt = func(dirfd int, name string, flags int) error {
+	originalUnlink := wakeRetireUnlinkStateAt
+	wakeRetireUnlinkStateAt = func(dirfd int, name string, flags int) error {
 		if name == wakeStateFileName {
 			return syscall.EIO
 		}
 		return originalUnlink(dirfd, name, flags)
 	}
-	t.Cleanup(func() { wakeRetireUnlinkAt = originalUnlink })
+	t.Cleanup(func() { wakeRetireUnlinkStateAt = originalUnlink })
 
 	result, err := retireWake(fixture.root, fixture.me, requested)
 	if err != nil || result.Status != "retired_with_residue" ||
@@ -407,14 +467,14 @@ func TestRetireWakeStaleLockPreUnlinkFailureIsRefused(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	originalUnlink := wakeRetireUnlinkAt
-	wakeRetireUnlinkAt = func(dirfd int, name string, flags int) error {
+	originalUnlink := wakeRetireUnlinkWakeLockAt
+	wakeRetireUnlinkWakeLockAt = func(dirfd int, name string, flags int) error {
 		if name == ".wake.lock" {
 			return syscall.EPERM
 		}
 		return originalUnlink(dirfd, name, flags)
 	}
-	t.Cleanup(func() { wakeRetireUnlinkAt = originalUnlink })
+	t.Cleanup(func() { wakeRetireUnlinkWakeLockAt = originalUnlink })
 
 	result, err := retireWake(root, "codex", requested)
 	if err == nil || result.Status != "refused" || !strings.Contains(result.Reason, "remove stale wake lock") {

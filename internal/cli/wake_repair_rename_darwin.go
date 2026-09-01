@@ -2,15 +2,13 @@
 
 package cli
 
-import "golang.org/x/sys/unix"
-
 func renameWakeNoReplaceAt(
 	fromDirFD int,
 	from string,
 	toDirFD int,
 	to string,
 ) error {
-	return unix.RenameatxNp(fromDirFD, from, toDirFD, to, unix.RENAME_EXCL)
+	return wakeRenameNoReplaceAt(fromDirFD, from, toDirFD, to)
 }
 
 func renameWakeRepairNoReplaceAt(fromDirFD int, from string, toDirFD int, to string) error {

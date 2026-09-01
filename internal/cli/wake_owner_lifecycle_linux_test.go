@@ -119,8 +119,8 @@ func TestLinuxStableOwnerStopRefusesBoundInconclusiveBeforePidfd(t *testing.T) {
 	}
 	t.Cleanup(func() { linuxPidfdOpen = originalOpen })
 
-	err := withWakeLifecycleGuardInDir(fixture.agentDir, func(dirfd int) error {
-		_, err := prepareAuthoritativeWakeStopPlatform(dirfd, fixture.agentDir, fixture.inspection)
+	err := withWakeMutationScopeInDir(fixture.agentDir, func(scope *wakeMutationScope) error {
+		_, err := prepareAuthoritativeWakeStopPlatform(scope, fixture.inspection)
 		return err
 	})
 	var inconclusive *wakeStateBoundInconclusiveError
@@ -656,7 +656,7 @@ func TestLinuxStableOwnerWakeStopNeverSignalsReusedNumericPID(t *testing.T) {
 	oldOpen := linuxPidfdOpen
 	oldPoll := linuxPidfdPoll
 	oldClose := linuxPidfdClose
-	oldSignal := linuxPidfdSendSignal
+	oldSignal := linuxPidfdSend
 	linuxPidfdOpen = func(pid, flags int) (int, error) {
 		events = append(events, "open")
 		return 88, nil
@@ -669,7 +669,7 @@ func TestLinuxStableOwnerWakeStopNeverSignalsReusedNumericPID(t *testing.T) {
 		events = append(events, "close")
 		return nil
 	}
-	linuxPidfdSendSignal = func(int, unix.Signal, *unix.Siginfo, int) error {
+	linuxPidfdSend = func(int, unix.Signal, *unix.Siginfo, int) error {
 		t.Fatal("reused numeric PID received a signal")
 		return nil
 	}
@@ -677,7 +677,7 @@ func TestLinuxStableOwnerWakeStopNeverSignalsReusedNumericPID(t *testing.T) {
 		linuxPidfdOpen = oldOpen
 		linuxPidfdPoll = oldPoll
 		linuxPidfdClose = oldClose
-		linuxPidfdSendSignal = oldSignal
+		linuxPidfdSend = oldSignal
 	})
 	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
 		events = append(events, "inspect")
@@ -696,9 +696,14 @@ func TestLinuxStableOwnerWakeStopNeverSignalsReusedNumericPID(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = agentDir.Close() }()
-	err = withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+	err = withWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+		dirfd, scopedAgentDir, err := scope.location()
+		if err != nil {
+			return err
+		}
+		agentDir = scopedAgentDir
 		expected := readWakeLockMetadataAt(dirfd, agentDir, root, "codex")
-		capability, err := prepareAuthoritativeWakeStopPlatform(dirfd, agentDir, expected)
+		capability, err := prepareAuthoritativeWakeStopPlatform(scope, expected)
 		if err != nil {
 			return err
 		}
@@ -754,18 +759,18 @@ func TestLinuxMalformedOwnerWakeIdentityNeverSignalsMatchingArgvPID(t *testing.T
 	}
 
 	oldOpen := linuxPidfdOpen
-	oldSignal := linuxPidfdSendSignal
+	oldSignal := linuxPidfdSend
 	linuxPidfdOpen = func(int, int) (int, error) {
 		t.Fatal("malformed authoritative identity reached pidfd_open")
 		return -1, nil
 	}
-	linuxPidfdSendSignal = func(int, unix.Signal, *unix.Siginfo, int) error {
+	linuxPidfdSend = func(int, unix.Signal, *unix.Siginfo, int) error {
 		t.Fatal("matching-argv PID received a signal from malformed owner lock")
 		return nil
 	}
 	t.Cleanup(func() {
 		linuxPidfdOpen = oldOpen
-		linuxPidfdSendSignal = oldSignal
+		linuxPidfdSend = oldSignal
 	})
 	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
 		return wakeProcessInfo{
@@ -792,9 +797,14 @@ func TestLinuxMalformedOwnerWakeIdentityNeverSignalsMatchingArgvPID(t *testing.T
 		t.Fatal(err)
 	}
 	defer func() { _ = agentDir.Close() }()
-	err = withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+	err = withWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+		dirfd, scopedAgentDir, err := scope.location()
+		if err != nil {
+			return err
+		}
+		agentDir = scopedAgentDir
 		expected := readWakeLockMetadataAt(dirfd, agentDir, root, "codex")
-		_, err := prepareAuthoritativeWakeStopPlatform(dirfd, agentDir, expected)
+		_, err = prepareAuthoritativeWakeStopPlatform(scope, expected)
 		return err
 	})
 	if err == nil || !strings.Contains(err.Error(), "not authoritative") {

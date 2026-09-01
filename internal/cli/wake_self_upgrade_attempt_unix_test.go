@@ -24,8 +24,8 @@ func TestWakeSelfUpgradeAttemptSurvivesStaleLockReclaimAndRefusesOldWake(t *test
 	record := fixture.record
 	record.Source = wakeRestartSourceSelf
 	record.Candidate = candidate
-	if err := withWakeLifecycleGuardInDir(fixture.agentDir, func(dirfd int) error {
-		return writeWakeRestartRecordAt(dirfd, fixture.agentDir, record)
+	if err := withWakeMutationScopeInDir(fixture.agentDir, func(scope *wakeMutationScope) error {
+		return writeWakeRestartRecordAt(scope, record)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -148,8 +148,8 @@ func TestWakeSelfUpgradeAttemptPersistsBeforeRestartExec(t *testing.T) {
 	removeWakeRestartRecordForTest(t, fixture)
 	record := fixture.record
 	record.Source = wakeRestartSourceSelf
-	if err := withWakeLifecycleGuardInDir(fixture.agentDir, func(dirfd int) error {
-		return writeWakeRestartRecordAt(dirfd, fixture.agentDir, record)
+	if err := withWakeMutationScopeInDir(fixture.agentDir, func(scope *wakeMutationScope) error {
+		return writeWakeRestartRecordAt(scope, record)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -180,8 +180,8 @@ func TestWakeSelfUpgradeSettledCandidateDoesNotRearmAttempt(t *testing.T) {
 	removeWakeRestartRecordForTest(t, fixture)
 	record := fixture.record
 	record.Source = wakeRestartSourceSelf
-	if err := withWakeLifecycleGuardInDir(fixture.agentDir, func(dirfd int) error {
-		return writeWakeRestartRecordAt(dirfd, fixture.agentDir, record)
+	if err := withWakeMutationScopeInDir(fixture.agentDir, func(scope *wakeMutationScope) error {
+		return writeWakeRestartRecordAt(scope, record)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -216,8 +216,8 @@ func TestWakeSelfUpgradeAttemptBoundaryPreservesFutureUncertainEntry(t *testing.
 	removeWakeRestartRecordForTest(t, fixture)
 	record := fixture.record
 	record.Source = wakeRestartSourceSelf
-	if err := withWakeLifecycleGuardInDir(fixture.agentDir, func(dirfd int) error {
-		return writeWakeRestartRecordAt(dirfd, fixture.agentDir, record)
+	if err := withWakeMutationScopeInDir(fixture.agentDir, func(scope *wakeMutationScope) error {
+		return writeWakeRestartRecordAt(scope, record)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -533,8 +533,8 @@ func TestWakeSelfUpgradeAttemptCleanupAfterLockRemoval(t *testing.T) {
 	attempt := selfupgrade.NewAttempt(evidence, time.Now())
 	writeWakeSelfUpgradeAttemptForGenericCleanupTest(t, fixture, attempt)
 
-	if err := withWakeLifecycleGuardInDir(fixture.agentDir, func(dirfd int) error {
-		return removeWakeLockIfUnchangedGuardedAt(dirfd, fixture.agentDir, fixture.created)
+	if err := withWakeMutationScopeInDir(fixture.agentDir, func(scope *wakeMutationScope) error {
+		return removeWakeLockIfUnchangedGuardedAt(scope, fixture.created)
 	}); err != nil {
 		t.Fatal(err)
 	}

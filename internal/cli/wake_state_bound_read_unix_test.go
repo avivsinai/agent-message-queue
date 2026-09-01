@@ -346,12 +346,17 @@ func TestBoundWakeStateSelectionRejectsRepublishedTargetDigest(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = agentDir.Close() })
-	if err := withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+	if err := withWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+		dirfd, scopedAgentDir, err := scope.location()
+		if err != nil {
+			return err
+		}
+		agentDir = scopedAgentDir
 		expected, err := captureWakeStateLegacySnapshotAt(dirfd, agentDir, root, "codex")
 		if err != nil {
 			return err
 		}
-		_, err = publishWakeStateAt(dirfd, agentDir, root, "codex", expected)
+		_, err = publishWakeStateAt(scope, root, "codex", expected)
 		return err
 	}); err != nil {
 		t.Fatal(err)

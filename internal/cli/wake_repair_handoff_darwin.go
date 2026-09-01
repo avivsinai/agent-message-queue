@@ -25,8 +25,10 @@ const (
 var (
 	writeWakeRepairDarwinChildControl = writeWakeRepairChildControl
 	closeWakeRepairDarwinChildControl = func(file *os.File) error { return file.Close() }
-	killWakeRepairDarwinChild         = func(process *os.Process) error { return process.Kill() }
+	killWakeRepairDarwinChild         = killWakeRepairDarwinChildWithHandle
 )
+
+func killWakeRepairDarwinChildWithHandle(process *os.Process) error { return killWakeProcess(process) }
 
 func prepareWakeRepairChildCapabilityPlatform(cmd *exec.Cmd) (*wakeRepairChildCapability, error) {
 	if cmd == nil {

@@ -404,6 +404,7 @@ func TestWakeCheckV2ClassifierActions(t *testing.T) {
 			},
 			kind: wakeActionConfigureInjector, actor: wakeActionActorOperator,
 			reason: wakeReasonFullStrengthUnavailable, restart: wakeRestartUnavailable,
+			args: []string{"wake", "check", "--root", "/queue with spaces", "--me", "codex", "--json", "--json-schema=2"},
 		},
 		{
 			name: "missing owning terminal",
@@ -440,6 +441,7 @@ func TestWakeCheckV2ClassifierActions(t *testing.T) {
 			},
 			kind: wakeActionPreserveLiveWake, actor: wakeActionActorOperator,
 			reason: wakeReasonLiveWakePreserve, restart: wakeRestartOperatorOnly,
+			args:     []string{"wake", "check", "--root", "/queue with spaces", "--me", "codex", "--json", "--json-schema=2"},
 			terminal: true,
 		},
 		{
@@ -452,6 +454,7 @@ func TestWakeCheckV2ClassifierActions(t *testing.T) {
 			},
 			kind: wakeActionPreserveLiveWake, actor: wakeActionActorOperator,
 			reason: wakeReasonLiveWakePreserve, restart: wakeRestartOperatorOnly,
+			args: []string{"wake", "check", "--root", "/queue with spaces", "--me", "codex", "--json", "--json-schema=2"},
 		},
 		{
 			name: "stale owner-bound wake",
@@ -473,6 +476,7 @@ func TestWakeCheckV2ClassifierActions(t *testing.T) {
 			},
 			kind: wakeActionConfigureInjector, actor: wakeActionActorOperator,
 			reason: wakeReasonFullStrengthUnavailable, restart: wakeRestartUnavailable,
+			args: []string{"wake", "check", "--root", "/queue with spaces", "--me", "codex", "--json", "--json-schema=2"},
 		},
 		{
 			name: "stale generic without full strength injector",
@@ -485,6 +489,7 @@ func TestWakeCheckV2ClassifierActions(t *testing.T) {
 			},
 			kind: wakeActionConfigureInjector, actor: wakeActionActorOperator,
 			reason: wakeReasonFullStrengthUnavailable, restart: wakeRestartUnavailable,
+			args: []string{"wake", "check", "--root", "/queue with spaces", "--me", "codex", "--json", "--json-schema=2"},
 		},
 		{
 			name: "stale generic manual cleanup",
@@ -495,6 +500,7 @@ func TestWakeCheckV2ClassifierActions(t *testing.T) {
 			},
 			kind: wakeActionManualStaleCleanup, actor: wakeActionActorOperator,
 			reason: wakeReasonStaleManualCleanupRequired, restart: wakeRestartOperatorOnly,
+			args:     []string{"wake", "check", "--root", "/queue with spaces", "--me", "codex", "--json", "--json-schema=2"},
 			terminal: true,
 		},
 		{
@@ -531,6 +537,7 @@ func TestWakeCheckV2ClassifierActions(t *testing.T) {
 			},
 			kind: wakeActionInspectUnverified, actor: wakeActionActorOperator,
 			reason: wakeReasonWakeStateUnverified, restart: wakeRestartUnavailable,
+			args: []string{"wake", "check", "--root", "/queue with spaces", "--me", "codex", "--json", "--json-schema=2"},
 		},
 	}
 

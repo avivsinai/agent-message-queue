@@ -399,10 +399,9 @@ func newGenericWakePreparedCleanupFixture(
 }
 
 func (fixture *genericWakePreparedCleanupFixture) cleanupNow() error {
-	return withWakeLifecycleGuardInDir(fixture.agentDir, func(dirfd int) error {
+	return withWakeMutationScopeInDir(fixture.agentDir, func(scope *wakeMutationScope) error {
 		return cleanupGenericWakeGenerationAt(
-			dirfd,
-			fixture.agentDir,
+			scope,
 			fixture.root,
 			fixture.me,
 			fixture.created,

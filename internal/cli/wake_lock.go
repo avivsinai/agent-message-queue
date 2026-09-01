@@ -47,6 +47,7 @@ type wakeLock struct {
 }
 
 const (
+	wakeLockFileName      = ".wake.lock"
 	wakeOwnerLockSchema   = 1
 	wakeOwnerWakeMode     = "owner-inject-via-v1"
 	wakeOwnerLockFileMode = os.FileMode(0o400)
@@ -148,7 +149,7 @@ func (e *wakeAlreadyRunningError) Error() string {
 }
 
 func inspectWakeLock(root, me string) wakeLockInspection {
-	lockPath := filepath.Join(fsq.AgentBase(root, me), ".wake.lock")
+	lockPath := filepath.Join(fsq.AgentBase(root, me), wakeLockFileName)
 	return inspectWakeLockWithReader(root, me, lockPath, func() ([]byte, os.FileInfo, error) {
 		return readWakeLockFileWithInfo(lockPath)
 	})
@@ -617,7 +618,7 @@ func validateWakeLockStaleRemoval(inspection wakeLockInspection) error {
 		return err
 	}
 	if wakeLockHasOwnerMarkers(inspection) {
-		return fmt.Errorf("owner-bound wake claims require 'amq wake recover-owner --me %s'", inspection.Agent)
+		return fmt.Errorf("owner-bound wake claims require %s", wakeRecoverOwnerCommand(inspection.Root, inspection.Agent))
 	}
 	if err := validateWakeLockRepairable(inspection); err == nil {
 		return nil
@@ -649,41 +650,6 @@ func wakeProcessProvenNotWake(proc wakeProcessInfo) bool {
 	return len(proc.Args) > 0 && !processArgsLookLikeWake(proc.Args)
 }
 
-func removeWakeLockIfUnchanged(inspection wakeLockInspection) error {
-	return withWakeLifecycleGuard(inspection.Root, inspection.Agent, func() error {
-		return removeWakeLockIfUnchangedGuarded(inspection)
-	})
-}
-
-func removeWakeLockIfUnchangedGuarded(inspection wakeLockInspection) error {
-	if _, err := readWakeStateSelectionForInspection(
-		inspection.Root,
-		inspection.Agent,
-		inspection,
-	); err != nil {
-		return err
-	}
-	if err := reclaimWakeRestartStateForGuardedLockRemoval(inspection); err != nil {
-		return fmt.Errorf("reconcile wake restart ownership before lock removal: %w", err)
-	}
-	committed, err := removeWakeLockIfUnchangedGuardedWithIOStatus(
-		inspection,
-		func() ([]byte, os.FileInfo, error) { return readWakeLockFileWithInfo(inspection.LockPath) },
-		func() error { return os.Remove(inspection.LockPath) },
-	)
-	if err != nil || !committed {
-		return err
-	}
-	if err := removeWakeSelfUpgradeArtifactsGuarded(inspection.Root, inspection.Agent); err != nil {
-		_ = writeStderr(
-			"warning: removed wake lock for %s but left diagnostic-only self-upgrade residue: %v\n",
-			inspection.Agent,
-			err,
-		)
-	}
-	return nil
-}
-
 func removeWakeLockIfUnchangedGuardedWithIOStatus(
 	inspection wakeLockInspection,
 	read wakeLockFileReader,
@@ -704,6 +670,13 @@ func removeWakeLockIfUnchangedGuardedWithIOStatus(
 	}
 	if inspection.fileInfo == nil || currentInfo == nil || !sameWakeFileIdentity(inspection.fileInfo, currentInfo) {
 		return false, fmt.Errorf("wake lock generation changed while cleaning stale lock; retry")
+	}
+	multipleLinks, linkErr := wakeLockHasMultipleLinks(currentInfo)
+	if linkErr != nil {
+		return false, fmt.Errorf("cannot determine wake lock hard-link count; preserving it: %w", linkErr)
+	}
+	if multipleLinks {
+		return false, fmt.Errorf("wake lock has multiple hard links; preserving it to avoid mutating an alias")
 	}
 	// Pathname removal is safe under the lifecycle guard held by every
 	// cooperating writer; an unguarded same-UID writer is out of contract. A

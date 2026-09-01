@@ -569,8 +569,16 @@ func TestWakeP0BinaryJSONFieldsAndEnums(t *testing.T) {
 		t.Fatalf("reload missing-lock decision = %#v", reload)
 	}
 	if startMode == "none" {
-		if result["restart_capability"] != "unavailable" || action["kind"] != "configure_injector" || action["actor"] != "operator" || action["reason_code"] != "full_strength_injector_unavailable" || action["terminal_required"] != false || action["command"] != nil {
+		if result["restart_capability"] != "unavailable" || action["kind"] != "configure_injector" || action["actor"] != "operator" || action["reason_code"] != "full_strength_injector_unavailable" || action["terminal_required"] != false {
 			t.Fatalf("no-injector action = %#v, result=%#v", action, result)
+		}
+		command := wakeABINestedObject(t, action, "command")
+		if command["program"] != filepath.Clean(binary) {
+			t.Fatalf("action.command.program = %#v", command["program"])
+		}
+		args, ok := command["args"].([]any)
+		if !ok || len(args) != 8 || args[0] != "wake" || args[1] != "check" || args[2] != "--root" || args[3] != canonicalWakeABIRoot(t, root) || args[4] != "--me" || args[5] != "codex" || args[6] != "--json" || args[7] != "--json-schema=2" {
+			t.Fatalf("action.command.args = %#v", command["args"])
 		}
 	} else {
 		if result["restart_capability"] != "operator_only" || action["kind"] != "start_wake" || action["actor"] != "operator" || action["reason_code"] != "owning_terminal_required" || action["terminal_required"] != true {

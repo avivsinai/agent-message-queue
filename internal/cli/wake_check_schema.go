@@ -170,6 +170,7 @@ type wakeCheckActionDecision struct {
 	Command          *wakeCheckCommand
 	TerminalRequired bool
 	Message          string
+	legacyMessage    string
 }
 
 type wakeCheckCommand struct {
@@ -395,6 +396,9 @@ func finalizeWakeCheckDecision(decision *wakeCheckDecision) {
 	decision.legacyRestartCapability = decision.RestartCapability
 	decision.legacyTerminalRequired = decision.Action.TerminalRequired
 	decision.legacyActionMessage = decision.Action.Message
+	if decision.Action.legacyMessage != "" {
+		decision.legacyActionMessage = decision.Action.legacyMessage
+	}
 	if !wakeCheckActionRequiresExecutable(decision.Action) || decision.Action.Command != nil {
 		return
 	}

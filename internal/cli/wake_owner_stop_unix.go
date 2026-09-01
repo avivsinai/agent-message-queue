@@ -15,8 +15,7 @@ type authoritativeWakeStopCapability struct {
 }
 
 type authoritativeWakeStopPreparer func(
-	dirfd int,
-	agentDir *wakeAgentDir,
+	scope *wakeMutationScope,
 	expected wakeLockInspection,
 ) (authoritativeWakeStopCapability, error)
 

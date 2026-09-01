@@ -79,8 +79,8 @@ func TestOwnerFencePreservesClaimAgainstExactE370Binary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
-		return publishAuthoritativeWakeClaimAt(dirfd, agentDir, root, "codex", target, lock)
+	err = withWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+		return publishAuthoritativeWakeClaimAt(scope, root, "codex", target, lock)
 	})
 	_ = agentDir.Close()
 	if err != nil {

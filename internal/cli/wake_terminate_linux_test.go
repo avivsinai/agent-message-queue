@@ -19,22 +19,30 @@ import (
 func stubLinuxPidfd(t *testing.T, open func(int, int) (int, error), send func(int, unix.Signal, *unix.Siginfo, int) error, poll func(int, time.Duration) (bool, error)) {
 	t.Helper()
 	oldOpen := linuxPidfdOpen
-	oldSend := linuxPidfdSendSignal
+	oldSend := linuxPidfdSend
 	oldPoll := linuxPidfdPoll
 	oldClose := linuxPidfdClose
 	linuxPidfdOpen = open
-	linuxPidfdSendSignal = send
+	linuxPidfdSend = send
 	linuxPidfdPoll = poll
 	linuxPidfdClose = func(int) error { return nil }
 	t.Cleanup(func() {
 		linuxPidfdOpen = oldOpen
-		linuxPidfdSendSignal = oldSend
+		linuxPidfdSend = oldSend
 		linuxPidfdPoll = oldPoll
 		linuxPidfdClose = oldClose
 	})
 }
 
+func useRealLinuxPidfdSender(t *testing.T) {
+	t.Helper()
+	oldSend := linuxPidfdSend
+	linuxPidfdSend = unix.PidfdSendSignal
+	t.Cleanup(func() { linuxPidfdSend = oldSend })
+}
+
 func TestTerminateWakePidfdKillsValidatedChildAndCannotSignalAfterExit(t *testing.T) {
+	useRealLinuxPidfdSender(t)
 	cmd := exec.Command("sleep", "30")
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start child: %v", err)
@@ -60,12 +68,13 @@ func TestTerminateWakePidfdKillsValidatedChildAndCannotSignalAfterExit(t *testin
 	// Wait may report a normal exit when the child handles SIGTERM; pidfd
 	// ESRCH below is the authoritative proof that the process is gone.
 	_, _ = cmd.Process.Wait()
-	if err := linuxPidfdSendSignal(pidfd, unix.SIGTERM, nil, 0); !errors.Is(err, syscall.ESRCH) {
+	if err := linuxPidfdSend(pidfd, unix.SIGTERM, nil, 0); !errors.Is(err, syscall.ESRCH) {
 		t.Fatalf("signal retained pidfd after exit = %v, want ESRCH", err)
 	}
 }
 
 func TestRetireDoesNotSignalRecycledPID(t *testing.T) {
+	useRealLinuxPidfdSender(t)
 	old := exec.Command("sleep", "30")
 	if err := old.Start(); err != nil {
 		t.Fatalf("start old child: %v", err)
@@ -85,7 +94,7 @@ func TestRetireDoesNotSignalRecycledPID(t *testing.T) {
 		t.Fatalf("pidfd_open old child: %v", err)
 	}
 	defer func() { _ = linuxPidfdClose(pidfd) }()
-	if err := linuxPidfdSendSignal(pidfd, unix.SIGKILL, nil, 0); err != nil {
+	if err := linuxPidfdSend(pidfd, unix.SIGKILL, nil, 0); err != nil {
 		t.Fatalf("kill old child via pidfd: %v", err)
 	}
 	if exited, err := linuxPidfdPoll(pidfd, time.Second); err != nil || !exited {
@@ -102,7 +111,7 @@ func TestRetireDoesNotSignalRecycledPID(t *testing.T) {
 		_ = replacement.Process.Kill()
 		_, _ = replacement.Process.Wait()
 	})
-	if err := linuxPidfdSendSignal(pidfd, unix.SIGTERM, nil, 0); !errors.Is(err, syscall.ESRCH) {
+	if err := linuxPidfdSend(pidfd, unix.SIGTERM, nil, 0); !errors.Is(err, syscall.ESRCH) {
 		t.Fatalf("signal old pidfd after replacement start = %v, want ESRCH", err)
 	}
 	if err := replacement.Process.Signal(syscall.Signal(0)); err != nil {
@@ -146,6 +155,56 @@ func TestTerminateFailsClosedWhenPidfdOpenIsUnsupported(t *testing.T) {
 	}
 }
 
+func TestTerminateRetainsLifecycleGuardCreatedForLegacyWake(t *testing.T) {
+	const wakePID = 4242
+	root := secureTempDirForTest(t)
+	lockPath := writeWakeLockForTest(t, root, "codex", wakeLock{
+		PID:          wakePID,
+		TTY:          "missing",
+		ProcessStart: "start-1",
+		BootID:       "boot-1",
+		Executable:   "/usr/bin/amq",
+		WakeMode:     wakeInjectModeRaw,
+		Generation:   "legacy-missing-guard",
+	})
+	guardPath := wakeLifecycleGuardPath(root, "codex")
+	if _, err := os.Stat(guardPath); !os.IsNotExist(err) {
+		t.Fatalf("legacy fixture unexpectedly has lifecycle guard: %v", err)
+	}
+	stubLinuxPidfd(
+		t,
+		func(pid, flags int) (int, error) {
+			if pid != wakePID || flags != 0 {
+				t.Fatalf("pidfd_open = (%d, %d), want (%d, 0)", pid, flags, wakePID)
+			}
+			return -1, syscall.ESRCH
+		},
+		func(int, unix.Signal, *unix.Siginfo, int) error {
+			t.Fatal("must not signal a proven-gone process")
+			return nil
+		},
+		func(int, time.Duration) (bool, error) {
+			t.Fatal("must not poll a proven-gone process")
+			return false, nil
+		},
+	)
+
+	replaced, err := terminateAndRemoveOrphanedWakeLock(inspectWakeLock(root, "codex"))
+	if err != nil || !replaced {
+		t.Fatalf("legacy proven-gone cleanup = (%v, %v), want (true, nil)", replaced, err)
+	}
+	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
+		t.Fatalf("legacy wake lock was not removed: %v", err)
+	}
+	info, err := os.Stat(guardPath)
+	if err != nil {
+		t.Fatalf("lifecycle guard created for legacy wake was not retained: %v", err)
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
+		t.Fatalf("retained lifecycle guard mode = %v, want regular 0600", info.Mode())
+	}
+}
+
 func TestTerminateTreatsPidfdESRCHAsProvenGone(t *testing.T) {
 	const wakePID = 4242
 	root := secureTempDirForTest(t)
@@ -182,8 +241,8 @@ func TestTerminateTreatsPidfdESRCHAsProvenGone(t *testing.T) {
 		Owner:               validWakeResumeOwnerForTest(),
 		Candidate:           candidate,
 	}
-	if err := withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
-		return writeWakeRestartRecordAt(dirfd, agentDir, restart)
+	if err := withWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+		return writeWakeRestartRecordAt(scope, restart)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -310,6 +369,445 @@ func TestTerminateOpensPidfdBeforeIdentityInspectionAndReleasesGuardBeforeWait(t
 	}
 }
 
+func TestTerminateWakePidfdRefusesWhenLifecycleGuardIsHeld(t *testing.T) {
+	root := secureTempDirForTest(t)
+	writeWakeLockForTest(t, root, "codex", wakeLock{
+		PID:          4242,
+		TTY:          "unknown",
+		ProcessStart: "start-1",
+		BootID:       "boot-1",
+		Executable:   "/usr/bin/amq",
+		Generation:   "guard-held-generation",
+	})
+	agentDir, err := openWakeAgentDir(root, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = agentDir.Close() }()
+	if err := withWakeLifecycleGuardInDir(agentDir, func(int) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	holderDone := make(chan error, 1)
+	go func() {
+		holderDone <- withExistingWakeLifecycleGuardInDir(agentDir, func(int) error {
+			close(entered)
+			<-release
+			return nil
+		})
+	}()
+	defer releaseOnce.Do(func() { close(release) })
+
+	oldSend := linuxPidfdSend
+	oldPoll := linuxPidfdPoll
+	signalCalls := 0
+	linuxPidfdSend = func(int, unix.Signal, *unix.Siginfo, int) error {
+		signalCalls++
+		return nil
+	}
+	linuxPidfdPoll = func(int, time.Duration) (bool, error) {
+		t.Fatal("guard-held termination polled without signal authorization")
+		return false, nil
+	}
+	t.Cleanup(func() {
+		linuxPidfdSend = oldSend
+		linuxPidfdPoll = oldPoll
+	})
+
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("lifecycle guard holder did not enter")
+	}
+	// A nonblocking acquisition retries for a bounded interval. The call must
+	// return refusal without reaching the pidfd effect.
+	expected := inspectWakeLock(root, "codex")
+	done := make(chan error, 1)
+	go func() {
+		_, err := terminateWakePidfdWithAuthorization(agentDir, expected, nil, false, 77)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "held by another process") {
+			t.Fatalf("guard-held termination error = %v, want bounded guard refusal", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("guard-held termination did not return within its bounded retry window")
+	}
+	if signalCalls != 0 {
+		t.Fatalf("guard-held termination signaled %d times", signalCalls)
+	}
+	releaseOnce.Do(func() { close(release) })
+	if err := <-holderDone; err != nil {
+		t.Fatalf("release lifecycle guard holder: %v", err)
+	}
+}
+
+func TestTerminateOrphanedWakeRefusesWhenLifecycleGuardIsHeld(t *testing.T) {
+	root := secureTempDirForTest(t)
+	writeWakeLockForTest(t, root, "codex", wakeLock{
+		PID:          4242,
+		TTY:          "unknown",
+		ProcessStart: "start-1",
+		BootID:       "boot-1",
+		Executable:   "/usr/bin/amq",
+		WakeMode:     wakeInjectModeRaw,
+		Generation:   "top-level-guard-held-generation",
+	})
+
+	guardEntered := make(chan struct{})
+	guardRelease := make(chan struct{})
+	guardDone := make(chan error, 1)
+	var releaseOnce sync.Once
+	releaseGuard := func() { releaseOnce.Do(func() { close(guardRelease) }) }
+	t.Cleanup(releaseGuard)
+	go func() {
+		guardDone <- withWakeLifecycleGuard(root, "codex", func() error {
+			close(guardEntered)
+			<-guardRelease
+			return nil
+		})
+	}()
+	select {
+	case <-guardEntered:
+	case <-time.After(time.Second):
+		t.Fatal("lifecycle guard holder did not enter")
+	}
+
+	inspection := inspectWakeLock(root, "codex")
+	done := make(chan struct {
+		replaced bool
+		err      error
+	}, 1)
+	go func() {
+		replaced, err := terminateAndRemoveOrphanedWakeLock(inspection)
+		done <- struct {
+			replaced bool
+			err      error
+		}{replaced: replaced, err: err}
+	}()
+	select {
+	case got := <-done:
+		if got.err == nil || got.replaced || !strings.Contains(got.err.Error(), "held by another process") {
+			t.Fatalf("top-level held-guard termination = (%v,%v), want bounded refusal", got.replaced, got.err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("top-level termination remained blocked on the lifecycle guard")
+	}
+	releaseGuard()
+	if err := <-guardDone; err != nil {
+		t.Fatalf("release lifecycle guard holder: %v", err)
+	}
+}
+
+func TestTerminateWakePidfdRefusesSamePIDReplacementGeneration(t *testing.T) {
+	root := secureTempDirForTest(t)
+	lock := wakeLock{
+		PID:          4242,
+		TTY:          "unknown",
+		ProcessStart: "start-1",
+		BootID:       "boot-1",
+		Executable:   "/usr/bin/amq",
+		Generation:   "original-generation",
+	}
+	writeWakeLockForTest(t, root, "codex", lock)
+	expected := inspectWakeLock(root, "codex")
+	lock.Generation = "replacement-generation"
+	writeWakeLockForTest(t, root, "codex", lock)
+
+	agentDir, err := openWakeAgentDir(root, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = agentDir.Close() }()
+	if err := withWakeLifecycleGuardInDir(agentDir, func(int) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+
+	oldSend := linuxPidfdSend
+	oldPoll := linuxPidfdPoll
+	signalCalls := 0
+	linuxPidfdSend = func(int, unix.Signal, *unix.Siginfo, int) error {
+		signalCalls++
+		return nil
+	}
+	linuxPidfdPoll = func(int, time.Duration) (bool, error) {
+		t.Fatal("generation-mismatched termination polled without signal authorization")
+		return false, nil
+	}
+	t.Cleanup(func() {
+		linuxPidfdSend = oldSend
+		linuxPidfdPoll = oldPoll
+	})
+
+	attempted, err := terminateWakePidfdWithAuthorization(agentDir, expected, nil, false, 77)
+	if err == nil || !strings.Contains(err.Error(), "generation changed") {
+		t.Fatalf("same-PID replacement error = %v, want generation refusal", err)
+	}
+	if attempted {
+		t.Fatal("same-PID replacement reported an attempted signal")
+	}
+	if signalCalls != 0 {
+		t.Fatalf("same-PID replacement signaled %d times", signalCalls)
+	}
+}
+
+func TestTerminateWakePidfdRefusesWhenWakeLockDisappears(t *testing.T) {
+	root := secureTempDirForTest(t)
+	lockPath := writeWakeLockForTest(t, root, "codex", wakeLock{
+		PID:          4242,
+		ProcessStart: "start-1",
+		BootID:       "boot-1",
+		Executable:   "/usr/bin/amq",
+		Generation:   "absent-lock-generation",
+	})
+	expected := inspectWakeLock(root, "codex")
+	if err := os.Remove(lockPath); err != nil {
+		t.Fatalf("remove wake lock before signal authorization: %v", err)
+	}
+
+	var signalCalls, pollCalls int
+	stubLinuxPidfd(
+		t,
+		func(int, int) (int, error) { return 77, nil },
+		func(int, unix.Signal, *unix.Siginfo, int) error {
+			signalCalls++
+			return nil
+		},
+		func(int, time.Duration) (bool, error) {
+			pollCalls++
+			return true, nil
+		},
+	)
+
+	agentDir, err := openWakeAgentDir(root, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = agentDir.Close() }()
+
+	attempted, err := terminateWakePidfdWithAuthorization(agentDir, expected, nil, true, 77)
+	if err == nil || !strings.Contains(err.Error(), "wake lock is missing before SIGTERM") {
+		t.Fatalf("missing-lock authorization error = %v, want refusal", err)
+	}
+	if attempted {
+		t.Fatal("missing-lock authorization reported an attempted signal")
+	}
+	if signalCalls != 0 {
+		t.Fatalf("missing-lock authorization sent %d signals", signalCalls)
+	}
+	if pollCalls != 0 {
+		t.Fatalf("missing-lock authorization polled %d times", pollCalls)
+	}
+}
+
+func TestTerminateDoesNotSignalOrRemoveSuccessorAfterMissingGuardProbe(t *testing.T) {
+	const wakePID = 4242
+	root := secureTempDirForTest(t)
+	lockPath := writeWakeLockForTest(t, root, "codex", wakeLock{
+		PID:          wakePID,
+		ProcessStart: "start-1",
+		BootID:       "boot-1",
+		Executable:   "/usr/bin/amq",
+		Args:         []string{"/usr/bin/amq", "wake", "--root", root, "--me", "codex"},
+		WakeMode:     wakeInjectModeRaw,
+		Generation:   "original-generation",
+	})
+	guardPath := wakeLifecycleGuardPath(root, "codex")
+	if _, err := os.Stat(guardPath); !os.IsNotExist(err) {
+		t.Fatalf("barrier fixture unexpectedly has lifecycle guard: %v", err)
+	}
+	expected := inspectWakeLock(root, "codex")
+
+	probeEntered := make(chan struct{})
+	releaseProbe := make(chan struct{})
+	var probeOnce sync.Once
+	oldProbe := wakeMutationAfterLifecycleGuardProbe
+	wakeMutationAfterLifecycleGuardProbe = func(agentDir *wakeAgentDir, missing bool) {
+		if agentDir == nil || agentDir.path != filepath.Dir(lockPath) || !missing {
+			return
+		}
+		probeOnce.Do(func() {
+			close(probeEntered)
+			<-releaseProbe
+		})
+	}
+	t.Cleanup(func() {
+		wakeMutationAfterLifecycleGuardProbe = oldProbe
+		select {
+		case <-releaseProbe:
+		default:
+			close(releaseProbe)
+		}
+	})
+
+	var openCalls, signalCalls, pollCalls int
+	stubLinuxPidfd(
+		t,
+		func(int, int) (int, error) {
+			openCalls++
+			return -1, errors.New("unexpected pidfd_open after successor publication")
+		},
+		func(int, unix.Signal, *unix.Siginfo, int) error {
+			signalCalls++
+			return nil
+		},
+		func(int, time.Duration) (bool, error) {
+			pollCalls++
+			return false, nil
+		},
+	)
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		return matchingLinuxWakeProcess(pid, root)
+	})
+
+	type result struct {
+		replaced bool
+		err      error
+	}
+	done := make(chan result, 1)
+	go func() {
+		replaced, err := terminateAndRemoveOrphanedWakeLock(expected)
+		done <- result{replaced: replaced, err: err}
+	}()
+	select {
+	case <-probeEntered:
+	case <-time.After(time.Second):
+		t.Fatal("termination did not reach the missing-guard probe")
+	}
+
+	replacement := expected.Lock
+	replacement.Generation = "successor-generation"
+	if err := withWakeLifecycleGuard(root, "codex", func() error {
+		writeWakeLockForTest(t, root, "codex", replacement)
+		return nil
+	}); err != nil {
+		t.Fatalf("publish successor under lifecycle guard: %v", err)
+	}
+	replacementRaw, err := os.ReadFile(lockPath)
+	if err != nil {
+		t.Fatalf("read successor wake lock: %v", err)
+	}
+	close(releaseProbe)
+
+	got := <-done
+	if got.err != nil || got.replaced {
+		t.Fatalf("termination after successor publication = (%v, %v), want no-op", got.replaced, got.err)
+	}
+	if openCalls != 0 {
+		t.Fatalf("pidfd open calls = %d, want 0 after successor publication", openCalls)
+	}
+	if signalCalls != 0 {
+		t.Fatalf("successor received %d pidfd signals", signalCalls)
+	}
+	if pollCalls != 0 {
+		t.Fatalf("successor termination polled %d times", pollCalls)
+	}
+	after, err := os.ReadFile(lockPath)
+	if err != nil {
+		t.Fatalf("read successor after refusal: %v", err)
+	}
+	if string(after) != string(replacementRaw) {
+		t.Fatal("successor wake lock changed after missing-guard race")
+	}
+	if _, err := os.Stat(guardPath); err != nil {
+		t.Fatalf("successor lifecycle guard disappeared: %v", err)
+	}
+}
+
+func TestRetireWakeRefusesMissingLockBeforeSignal(t *testing.T) {
+	const wakePID = 4242
+	root := secureTempDirForTest(t)
+	injector := writeExecutableForTest(t, "injector")
+	requested, lockPath := installRetireWakeFixture(t, root, "codex", injector, []string{"exec", "terminal-a"}, wakePID)
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		return matchingRetireWakeProcess(pid, root, "codex", injector)
+	})
+
+	var signalCalls, pollCalls int
+	stubLinuxPidfd(
+		t,
+		func(pid, flags int) (int, error) {
+			if pid != wakePID || flags != 0 {
+				t.Fatalf("pidfd_open = (%d, %d), want (%d, 0)", pid, flags, wakePID)
+			}
+			if err := os.Remove(lockPath); err != nil {
+				t.Fatalf("remove lock during pidfd authorization: %v", err)
+			}
+			return 99, nil
+		},
+		func(int, unix.Signal, *unix.Siginfo, int) error {
+			signalCalls++
+			return nil
+		},
+		func(int, time.Duration) (bool, error) {
+			pollCalls++
+			return true, nil
+		},
+	)
+
+	result, err := retireWake(root, "codex", requested)
+	if err == nil || result.Status != "refused" || !strings.Contains(result.Reason, "wake lock is missing before SIGTERM") {
+		t.Fatalf("missing-lock retirement = %#v err=%v, want pre-signal refusal", result, err)
+	}
+	if signalCalls != 0 {
+		t.Fatalf("missing-lock retirement sent %d signals", signalCalls)
+	}
+	if pollCalls != 0 {
+		t.Fatalf("missing-lock retirement polled %d times", pollCalls)
+	}
+}
+
+func TestRetireWakeRefusesSuccessorGenerationBeforeSignal(t *testing.T) {
+	const wakePID = 4242
+	root := secureTempDirForTest(t)
+	injector := writeExecutableForTest(t, "injector")
+	requested, lockPath := installRetireWakeFixture(t, root, "codex", injector, []string{"exec", "terminal-a"}, wakePID)
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		return matchingRetireWakeProcess(pid, root, "codex", injector)
+	})
+
+	var signalCalls, pollCalls int
+	stubLinuxPidfd(
+		t,
+		func(pid, flags int) (int, error) {
+			if pid != wakePID || flags != 0 {
+				t.Fatalf("pidfd_open = (%d, %d), want (%d, 0)", pid, flags, wakePID)
+			}
+			current := inspectWakeLock(root, "codex").Lock
+			current.Generation = "successor-generation"
+			writeWakeLockForTest(t, root, "codex", current)
+			return 99, nil
+		},
+		func(int, unix.Signal, *unix.Siginfo, int) error {
+			signalCalls++
+			return nil
+		},
+		func(int, time.Duration) (bool, error) {
+			pollCalls++
+			return true, nil
+		},
+	)
+
+	result, err := retireWake(root, "codex", requested)
+	if err == nil || result.Status != "refused" || !strings.Contains(result.Reason, "wake lock generation changed before SIGTERM") {
+		t.Fatalf("successor-generation retirement = %#v err=%v, want pre-signal refusal", result, err)
+	}
+	if signalCalls != 0 {
+		t.Fatalf("successor-generation retirement sent %d signals", signalCalls)
+	}
+	if pollCalls != 0 {
+		t.Fatalf("successor-generation retirement polled %d times", pollCalls)
+	}
+	if _, err := os.Stat(lockPath); err != nil {
+		t.Fatalf("successor lock disappeared after refusal: %v", err)
+	}
+}
+
 func TestTerminateRefusesLiveRawUnknownTerminalBeforePidfdSignal(t *testing.T) {
 	const (
 		wakePID = 4242
@@ -393,6 +891,7 @@ func matchingLinuxWakeProcess(pid int, root string) wakeProcessInfo {
 }
 
 func TestTerminateWakePidfdKillsChildThatIgnoresSIGTERM(t *testing.T) {
+	useRealLinuxPidfdSender(t)
 	cmd := exec.Command("sh", "-c", "trap '' TERM; exec sleep 30")
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start child: %v", err)
@@ -410,7 +909,7 @@ func TestTerminateWakePidfdKillsChildThatIgnoresSIGTERM(t *testing.T) {
 		t.Fatalf("terminate TERM-immune child: %v", err)
 	}
 	_, _ = cmd.Process.Wait()
-	if err := linuxPidfdSendSignal(pidfd, unix.SIGTERM, nil, 0); !errors.Is(err, syscall.ESRCH) {
+	if err := linuxPidfdSend(pidfd, unix.SIGTERM, nil, 0); !errors.Is(err, syscall.ESRCH) {
 		t.Fatalf("signal retained pidfd after exit = %v, want ESRCH", err)
 	}
 }

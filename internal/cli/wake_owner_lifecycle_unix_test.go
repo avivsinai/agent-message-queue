@@ -17,8 +17,7 @@ import (
 )
 
 func absentAuthoritativeWakeStopForTest(
-	_ int,
-	_ *wakeAgentDir,
+	_ *wakeMutationScope,
 	expected wakeLockInspection,
 ) (authoritativeWakeStopCapability, error) {
 	return authoritativeWakeStopCapability{Inspection: expected, Absent: true}, nil
@@ -373,8 +372,8 @@ func TestPublishAuthoritativeWakeClaimCommitsACompleteReadOnlyGeneration(t *test
 		t.Fatal(err)
 	}
 	defer func() { _ = agentDir.Close() }()
-	if err := withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
-		return publishAuthoritativeWakeClaimAt(dirfd, agentDir, root, "codex", target, lock)
+	if err := withWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+		return publishAuthoritativeWakeClaimAt(scope, root, "codex", target, lock)
 	}); err != nil {
 		t.Fatalf("publish owner claim: %v", err)
 	}
@@ -413,8 +412,8 @@ func TestPublishAuthoritativeWakeClaimCommitsACompleteReadOnlyGeneration(t *test
 	replacementTarget := target
 	replacementTarget.Created = "2026-07-23T01:00:00Z"
 	replacement.TargetDigest = mustWakeTargetDigest(replacementTarget)
-	err = withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
-		return publishAuthoritativeWakeClaimAt(dirfd, agentDir, root, "codex", replacementTarget, replacement)
+	err = withWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+		return publishAuthoritativeWakeClaimAt(scope, root, "codex", replacementTarget, replacement)
 	})
 	if err == nil || !strings.Contains(err.Error(), "already exists") {
 		t.Fatalf("replacement publication error = %v, want no-replace refusal", err)
@@ -470,8 +469,8 @@ func TestPublishAuthoritativeWakeClaimDirectorySyncFailureIsNotDegradable(t *tes
 		t.Fatal(err)
 	}
 	defer func() { _ = agentDir.Close() }()
-	err = withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
-		return publishAuthoritativeWakeClaimAt(dirfd, agentDir, root, "codex", target, lock)
+	err = withWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+		return publishAuthoritativeWakeClaimAt(scope, root, "codex", target, lock)
 	})
 	var publicationErr *wakeOwnerPublicationError
 	if !errors.As(err, &publicationErr) {
@@ -508,7 +507,12 @@ func TestReleasedWakeTargetCleanupPreservesAReplacementSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = agentDir.Close() }()
-	err = withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+	err = withWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+		dirfd, scopedAgentDir, err := scope.location()
+		if err != nil {
+			return err
+		}
+		agentDir = scopedAgentDir
 		snapshot, exists, err := readWakeTargetSnapshotAt(dirfd, agentDir, root, "codex")
 		if err != nil || !exists {
 			return errors.New("initial wake target snapshot is unavailable")
@@ -527,8 +531,7 @@ func TestReleasedWakeTargetCleanupPreservesAReplacementSnapshot(t *testing.T) {
 			return err
 		}
 		removed, err := removeWakeTargetIfSnapshotMatchesAt(
-			dirfd,
-			agentDir,
+			scope,
 			root,
 			"codex",
 			snapshot,
@@ -772,8 +775,8 @@ func TestConcurrentAuthoritativeAcquisitionPublishesOneGeneration(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
-		_, err := validateAuthoritativeWakeClaimPairAt(dirfd, agentDir, inspection)
+	err = withWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+		_, err := validateAuthoritativeWakeClaimPairAt(scope, inspection)
 		return err
 	})
 	_ = agentDir.Close()
@@ -865,8 +868,8 @@ func TestAcquireAuthoritativeWakeClaimReclaimsOnlyADeadOwnerWithAbsentWake(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
-		return publishAuthoritativeWakeClaimAt(dirfd, agentDir, root, "codex", oldTarget, oldLock)
+	if err := withWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+		return publishAuthoritativeWakeClaimAt(scope, root, "codex", oldTarget, oldLock)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -1098,8 +1101,8 @@ func TestExactHelperCleanupRollsBackOnlyCurrentAuthoritativeOwner(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
-		return publishAuthoritativeWakeClaimAt(dirfd, agentDir, root, "codex", target, lock)
+	err = withWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+		return publishAuthoritativeWakeClaimAt(scope, root, "codex", target, lock)
 	})
 	_ = agentDir.Close()
 	if err != nil {
@@ -1161,8 +1164,8 @@ func TestExactHelperCleanupRollsBackOnlyCurrentAuthoritativeOwner(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
-		return publishAuthoritativeWakeClaimAt(dirfd, agentDir, root, "codex", target, lock)
+	err = withWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+		return publishAuthoritativeWakeClaimAt(scope, root, "codex", target, lock)
 	})
 	_ = agentDir.Close()
 	if err != nil {

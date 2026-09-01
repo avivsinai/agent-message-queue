@@ -5,7 +5,6 @@ package cli
 import (
 	"os"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -180,9 +179,16 @@ func TestPrepareCoopWakeLockLiveRawSelfCleanupAfterPidfdExitSucceeds(t *testing.
 	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
 		t.Errorf("self-cleaned live raw lock exists after successful takeover: %v", err)
 	}
+	guardInfo, err := os.Stat(wakeLifecycleGuardPath(root, "codex"))
+	if err != nil {
+		t.Fatalf("live wake cleanup did not retain lifecycle guard: %v", err)
+	}
+	if !guardInfo.Mode().IsRegular() || guardInfo.Mode().Perm() != 0o600 {
+		t.Errorf("retained lifecycle guard mode = %v, want regular 0600", guardInfo.Mode())
+	}
 }
 
-func TestPrepareCoopWakeLockLiveRawPartialTakeoverWarnsAndSucceeds(t *testing.T) {
+func TestPrepareCoopWakeLockLiveRawPartialTakeoverRefusesAfterLockDisappears(t *testing.T) {
 	const (
 		pid   = 4242
 		pidfd = 99
@@ -210,6 +216,7 @@ func TestPrepareCoopWakeLockLiveRawPartialTakeoverWarnsAndSucceeds(t *testing.T)
 
 	var signals []unix.Signal
 	pollCalls := 0
+	processStillAliveAfterSIGTERM := false
 	stubLinuxPidfd(
 		t,
 		func(gotPID, flags int) (int, error) {
@@ -230,7 +237,8 @@ func TestPrepareCoopWakeLockLiveRawPartialTakeoverWarnsAndSucceeds(t *testing.T)
 				}
 				return nil
 			case unix.SIGKILL:
-				return syscall.EPERM
+				t.Fatal("must not send SIGKILL after wake lock disappearance")
+				return nil
 			default:
 				t.Fatalf("unexpected wake signal: %v", signal)
 				return nil
@@ -244,42 +252,70 @@ func TestPrepareCoopWakeLockLiveRawPartialTakeoverWarnsAndSucceeds(t *testing.T)
 			if timeout <= 0 {
 				t.Fatalf("pidfd poll timeout = %s, want positive", timeout)
 			}
+			if process := inspectWakeProcess(pid); !process.Running {
+				t.Fatalf("pidfd poll fixture must keep wake process alive after SIGTERM: %+v", process)
+			}
+			processStillAliveAfterSIGTERM = true
 			return false, nil
 		},
 	)
 
 	var prepareErr error
-	stderr := captureWakeStderr(t, func() {
+	_ = captureWakeStderr(t, func() {
 		prepareErr = prepareCoopWakeLock(root, "codex", true, "unused")
 	})
-	if prepareErr != nil {
-		t.Errorf("partially applied approved takeover = %v, want success with warning", prepareErr)
+	if prepareErr == nil || !strings.Contains(prepareErr.Error(), "wake lock is missing before SIGKILL") {
+		t.Errorf("partially applied approved takeover = %v, want SIGKILL authorization refusal", prepareErr)
 	}
-	if len(signals) != 2 || signals[0] != unix.SIGTERM || signals[1] != unix.SIGKILL {
-		t.Errorf("guarded pidfd signals = %v, want [SIGTERM SIGKILL]", signals)
+	if len(signals) != 1 || signals[0] != unix.SIGTERM {
+		t.Errorf("guarded pidfd signals = %v, want [SIGTERM]", signals)
 	}
 	if pollCalls != 1 {
-		t.Errorf("pidfd poll calls = %d, want 1 before SIGKILL failure", pollCalls)
+		t.Errorf("pidfd poll calls = %d, want 1 before SIGKILL refusal", pollCalls)
+	}
+	if !processStillAliveAfterSIGTERM {
+		t.Error("pidfd poll did not exercise a still-live wake process after SIGTERM")
 	}
 	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
-		t.Errorf("self-removed wake lock exists after partial takeover: %v", err)
+		t.Errorf("self-removed wake lock exists after partial takeover refusal: %v", err)
 	}
-	if got := strings.Count(stderr, "duplicate notifications may continue"); got != 1 {
-		t.Errorf("duplicate warning count = %d, want exactly 1; stderr: %q", got, stderr)
+	guardInfo, err := os.Stat(wakeLifecycleGuardPath(root, "codex"))
+	if err != nil {
+		t.Fatalf("live wake refusal did not retain lifecycle guard: %v", err)
 	}
-	warningAt := strings.Index(stderr, "warning:")
-	if warningAt < 0 {
-		return
+	if !guardInfo.Mode().IsRegular() || guardInfo.Mode().Perm() != 0o600 {
+		t.Errorf("retained lifecycle guard mode = %v, want regular 0600", guardInfo.Mode())
 	}
-	warning := stderr[warningAt:]
-	for _, want := range []string{
-		"4242",
-		tty,
-		"fresh wake is starting, but duplicate notifications may continue until the old helper exits",
-		"stop that helper if duplicates persist",
-	} {
-		if !strings.Contains(warning, want) {
-			t.Errorf("partial-takeover warning %q does not contain %q", warning, want)
-		}
+}
+
+func TestTerminateRefusesNonLegacyWakeWhenLifecycleGuardIsAbsent(t *testing.T) {
+	const wakePID = 4242
+	root := secureTempDirForTest(t)
+	lockPath := writeWakeLockForTest(t, root, "codex", wakeLock{
+		PID:          wakePID,
+		ProcessStart: "start-1",
+		BootID:       "boot-1",
+		Executable:   "/usr/bin/amq",
+		Args:         []string{"/usr/bin/amq", "wake", "--root", root, "--me", "codex", "--inject-via", "/tmp/injector"},
+		WakeMode:     wakeTargetInjectVia,
+		Generation:   "non-legacy-without-guard",
+	})
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		return matchingLinuxWakeProcess(pid, root)
+	})
+
+	inspection := inspectWakeLock(root, "codex")
+	replaced, err := terminateAndRemoveOrphanedWakeLock(inspection)
+	if err == nil || !strings.Contains(err.Error(), "existing wake lifecycle guard") {
+		t.Fatalf("non-legacy termination error = %v, want missing existing guard", err)
+	}
+	if replaced {
+		t.Fatal("non-legacy wake was replaced without its lifecycle guard")
+	}
+	if _, err := os.Stat(lockPath); err != nil {
+		t.Fatalf("non-legacy wake lock changed: %v", err)
+	}
+	if _, err := os.Stat(wakeLifecycleGuardPath(root, "codex")); !os.IsNotExist(err) {
+		t.Fatalf("non-legacy refusal manufactured lifecycle guard: %v", err)
 	}
 }

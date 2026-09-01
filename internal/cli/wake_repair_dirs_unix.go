@@ -724,8 +724,11 @@ func (d *wakeInboxDir) UnlinkBaselineBarrier(name string) error {
 	if filepath.Base(name) != name || !strings.HasPrefix(name, ".wake-baseline-barrier-") {
 		return fmt.Errorf("invalid wake baseline barrier name %q", name)
 	}
+	if err := assertNotWakeLockName(name); err != nil {
+		return err
+	}
 	return d.withFD(func(dirfd int) error {
-		if err := unix.Unlinkat(dirfd, name, 0); err != nil && !errors.Is(err, syscall.ENOENT) {
+		if err := wakeUnlinkAt(dirfd, name, 0); err != nil && !errors.Is(err, syscall.ENOENT) {
 			return fmt.Errorf("unlink retained wake baseline barrier: %w", err)
 		}
 		return nil

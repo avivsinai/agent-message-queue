@@ -117,7 +117,8 @@ func decideOwnerLifecycleTransition(e wakeOwnerTransitionEvidence) wakeOwnerTran
 func validateGenericWakeLifecycleTransition(
 	inspection wakeLockInspection,
 	request wakeOwnerTransitionRequest,
-) error {
+) (retErr error) {
+	defer func() { retErr = withWakeDiagnostic(retErr, inspection.Root, inspection.Agent) }()
 	claim := classifyWakeClaimForGenericTransition(inspection)
 	action := decideOwnerLifecycleTransition(wakeOwnerTransitionEvidence{
 		Request: request,
@@ -132,8 +133,8 @@ func validateGenericWakeLifecycleTransition(
 	}
 	if claim == wakeClaimAuthoritative {
 		return fmt.Errorf(
-			"owner-bound wake claims require 'amq wake recover-owner --me %s'",
-			inspection.Agent,
+			"owner-bound wake claims require %s",
+			wakeRecoverOwnerCommand(inspection.Root, inspection.Agent),
 		)
 	}
 	reason := strings.TrimSpace(inspection.Reason)
@@ -141,19 +142,19 @@ func validateGenericWakeLifecycleTransition(
 		reason = "persisted wake claim is not a valid ownerless generation"
 	}
 	if inspection.observationErr != nil {
-		return fmt.Errorf(
+		return withWakeDiagnostic(fmt.Errorf(
 			"wake state for %s is unverified; refusing generic %s: cannot read lock: %w",
 			inspection.Agent,
 			operation,
 			inspection.observationErr,
-		)
+		), inspection.Root, inspection.Agent)
 	}
-	return fmt.Errorf(
+	return withWakeDiagnostic(fmt.Errorf(
 		"wake state for %s is unverified; refusing generic %s: %s",
 		inspection.Agent,
 		operation,
 		reason,
-	)
+	), inspection.Root, inspection.Agent)
 }
 
 func ownerReleaseAction(e wakeOwnerTransitionEvidence) wakeOwnerTransitionAction {

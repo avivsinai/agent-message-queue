@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"golang.org/x/sys/unix"
 )
 
 func TestDetachedBoundWakeResidueCleanupReturnsCleanupOnlyError(t *testing.T) {
@@ -14,15 +16,106 @@ func TestDetachedBoundWakeResidueCleanupReturnsCleanupOnlyError(t *testing.T) {
 	successorBefore := snapshotDetachedWakeFiles(t, fixture.agentDir.path, ".wake.lock", wakeTargetFileName, wakeStateFileName, wakePreparedFileName)
 	residueBefore := snapshotDetachedWakeFiles(t, detachedPath, wakeTargetFileName, wakePreparedFileName)
 
-	err := withWakeLifecycleGuardInDir(fixture.agentDir, func(dirfd int) error {
-		return removeWakeLockIfUnchangedGuardedAt(dirfd, fixture.agentDir, inspection)
+	err := withWakeMutationScopeInDir(fixture.agentDir, func(scope *wakeMutationScope) error {
+		return removeWakeLockIfUnchangedGuardedAt(scope, inspection)
 	})
 	assertDetachedWakeCleanupOnlyError(t, err)
 	assertDetachedBoundWakeResidueRemoved(t, detachedPath, residueBefore)
 	assertDetachedWakeFilesUnchanged(t, fixture.agentDir.path, successorBefore)
 }
 
-func TestDetachedBoundWakeResidueCleanupFailsClosedWhenCanonicalPathAbsent(t *testing.T) {
+func TestWakeLockRemovalClassifiesDirectorySwapBeforeUnlink(t *testing.T) {
+	fixture := newGenericWakePreparedCleanupFixture(t, false)
+	var detachedPath string
+	var successorBefore map[string]detachedWakeFileSnapshot
+	originalAfterRead := afterWakeLockAtRead
+	afterWakeLockAtRead = func() {
+		afterWakeLockAtRead = func() {}
+		detachedPath = detachGenericWakeAgentDirForTest(
+			t,
+			fixture.agentDir.path,
+			".wake.lock",
+			wakePreparedFileName,
+			wakeLifecycleGuardFileName,
+		)
+		successorBefore = snapshotDetachedWakeFiles(
+			t,
+			fixture.agentDir.path,
+			".wake.lock",
+			wakePreparedFileName,
+			wakeLifecycleGuardFileName,
+		)
+	}
+	t.Cleanup(func() { afterWakeLockAtRead = originalAfterRead })
+
+	err := withWakeMutationScopeInDir(fixture.agentDir, func(scope *wakeMutationScope) error {
+		return removeWakeLockIfUnchangedGuardedAt(scope, fixture.created)
+	})
+	if detachedPath == "" {
+		t.Fatal("directory swap did not run between the initial sample and unlink")
+	}
+	var cleanupOnly *wakeDetachedCleanupOnlyError
+	if !errors.As(err, &cleanupOnly) {
+		t.Fatalf("directory-swap cleanup error = %v, want detached cleanup-only", err)
+	}
+	if err == nil {
+		t.Fatal("directory-swap cleanup reported canonical success")
+	}
+	assertPathMissingForTest(t, filepath.Join(detachedPath, ".wake.lock"))
+	assertDetachedWakeFilesUnchanged(t, fixture.agentDir.path, successorBefore)
+}
+
+func TestWakeLockRemovalClassifiesDirectorySwapAfterUnlink(t *testing.T) {
+	fixture := newGenericWakePreparedCleanupFixture(t, false)
+	var detachedPath string
+	var successorBefore map[string]detachedWakeFileSnapshot
+	var outcome wakeLockRemovalOutcome
+	err := withWakeMutationScopeInDir(fixture.agentDir, func(scope *wakeMutationScope) error {
+		dirfd, _, err := scope.location()
+		if err != nil {
+			return err
+		}
+		outcome = removeWakeLockIfUnchangedGuardedAtOutcome(
+			scope,
+			fixture.created,
+			func() error {
+				if err := unix.Unlinkat(dirfd, ".wake.lock", 0); err != nil {
+					return err
+				}
+				detachedPath = detachGenericWakeAgentDirForTest(
+					t,
+					fixture.agentDir.path,
+					wakePreparedFileName,
+					wakeLifecycleGuardFileName,
+				)
+				successorBefore = snapshotDetachedWakeFiles(
+					t,
+					fixture.agentDir.path,
+					wakePreparedFileName,
+					wakeLifecycleGuardFileName,
+				)
+				return nil
+			},
+		)
+		return outcome.Err
+	})
+	if detachedPath == "" {
+		t.Fatal("directory swap did not run after unlink")
+	}
+	if !outcome.Committed {
+		t.Fatalf("directory-swap removal committed=%v err=%v, want committed cleanup", outcome.Committed, outcome.Err)
+	}
+	var cleanupOnly *wakeDetachedCleanupOnlyError
+	if !errors.As(outcome.Err, &cleanupOnly) {
+		t.Fatalf("post-unlink directory-swap error = %v, want detached cleanup-only", outcome.Err)
+	}
+	if err == nil {
+		t.Fatal("post-unlink directory swap reported canonical success")
+	}
+	assertDetachedWakeFilesUnchanged(t, fixture.agentDir.path, successorBefore)
+}
+
+func TestDetachedBoundWakeResidueCleanupRemovesOldClaimWhenCanonicalPathAbsent(t *testing.T) {
 	fixture := newGenericWakePreparedCleanupFixture(t, true)
 	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
 		return wakeProcessInfo{PID: pid, Running: true}
@@ -35,23 +128,19 @@ func TestDetachedBoundWakeResidueCleanupFailsClosedWhenCanonicalPathAbsent(t *te
 	residueBefore := snapshotDetachedWakeFiles(
 		t,
 		detachedPath,
-		".wake.lock",
 		wakeTargetFileName,
 		wakeStateFileName,
 		wakePreparedFileName,
 	)
 
-	err := withWakeLifecycleGuardInDir(fixture.agentDir, func(dirfd int) error {
-		return removeWakeLockIfUnchangedGuardedAt(dirfd, fixture.agentDir, inspection)
+	err := withWakeMutationScopeInDir(fixture.agentDir, func(scope *wakeMutationScope) error {
+		return removeWakeLockIfUnchangedGuardedAt(scope, inspection)
 	})
 	var cleanupOnly *wakeDetachedCleanupOnlyError
-	if errors.As(err, &cleanupOnly) {
-		t.Fatalf("canonical-path-absent cleanup returned detached authority: %v", err)
+	if !errors.As(err, &cleanupOnly) {
+		t.Fatalf("canonical-path-absent cleanup error = %v, want detached cleanup-only", err)
 	}
-	var bound *wakeStateBoundInconclusiveError
-	if !errors.As(err, &bound) {
-		t.Fatalf("canonical-path-absent cleanup error = %v, want bound inconclusive", err)
-	}
+	assertPathMissingForTest(t, filepath.Join(detachedPath, ".wake.lock"))
 	assertDetachedWakeFilesUnchanged(t, detachedPath, residueBefore)
 }
 
@@ -369,4 +458,30 @@ func assertDetachedWakeFilesUnchanged(
 		path := filepath.Join(dir, name)
 		assertWakeFileSnapshotUnchangedForTest(t, path, snapshot.raw, snapshot.info)
 	}
+}
+
+func detachGenericWakeAgentDirForTest(t *testing.T, path string, successorNames ...string) string {
+	t.Helper()
+	detachedPath := path + ".detached-generic"
+	if err := os.Rename(path, detachedPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range successorNames {
+		fromPath := filepath.Join(detachedPath, name)
+		raw, err := os.ReadFile(fromPath)
+		if err != nil {
+			t.Fatalf("read detached successor source %s: %v", name, err)
+		}
+		info, err := os.Stat(fromPath)
+		if err != nil {
+			t.Fatalf("stat detached successor source %s: %v", name, err)
+		}
+		if err := os.WriteFile(filepath.Join(path, name), raw, info.Mode().Perm()); err != nil {
+			t.Fatalf("write detached successor %s: %v", name, err)
+		}
+	}
+	return detachedPath
 }

@@ -95,16 +95,43 @@ func readWakeStateSelectionAt(
 	root string,
 	me string,
 ) (wakeStateReadSelection, error) {
-	before, beforePreparedErr, err := readWakeStateLegacyPairAt(dirfd, agentDir, root, me)
+	return readWakeStateSelectionAtWithCanonicalValidation(dirfd, agentDir, root, me, true)
+}
+
+func readWakeStateSelectionAtRetained(
+	dirfd int,
+	agentDir *wakeAgentDir,
+	root string,
+	me string,
+) (wakeStateReadSelection, error) {
+	return readWakeStateSelectionAtWithCanonicalValidation(dirfd, agentDir, root, me, false)
+}
+
+func readWakeStateSelectionAtWithCanonicalValidation(
+	dirfd int,
+	agentDir *wakeAgentDir,
+	root string,
+	me string,
+	validateCanonical bool,
+) (wakeStateReadSelection, error) {
+	before, beforePreparedErr, err := readWakeStateLegacyPairAtWithCanonicalValidation(
+		dirfd, agentDir, root, me, validateCanonical,
+	)
 	if err != nil {
 		return wakeStateSelectionFromLegacy(before), err
 	}
-	state, stateExists, stateErr := readWakeStateSnapshotAt(dirfd, agentDir)
-	if err := validateWakeStateAgentDirAt(dirfd, agentDir); err != nil {
-		return wakeStateReadSelection{}, err
+	state, stateExists, stateErr := readWakeStateSnapshotAtWithCanonicalValidation(
+		dirfd, agentDir, validateCanonical,
+	)
+	if validateCanonical {
+		if err := validateWakeStateAgentDirAt(dirfd, agentDir); err != nil {
+			return wakeStateReadSelection{}, err
+		}
 	}
 	afterWakeStateDualReadDocument()
-	after, afterPreparedErr, err := readWakeStateLegacyPairAt(dirfd, agentDir, root, me)
+	after, afterPreparedErr, err := readWakeStateLegacyPairAtWithCanonicalValidation(
+		dirfd, agentDir, root, me, validateCanonical,
+	)
 	if err != nil {
 		changed := newWakeSnapshotReadChangedError(
 			fmt.Errorf("wake legacy state changed during closing observation: %w", err),
@@ -282,8 +309,20 @@ func readWakeStateLegacyPairAt(
 	root string,
 	me string,
 ) (wakeStateLegacySnapshot, error, error) {
-	if err := validateWakeStateAgentDirAt(dirfd, agentDir); err != nil {
-		return wakeStateLegacySnapshot{}, nil, err
+	return readWakeStateLegacyPairAtWithCanonicalValidation(dirfd, agentDir, root, me, true)
+}
+
+func readWakeStateLegacyPairAtWithCanonicalValidation(
+	dirfd int,
+	agentDir *wakeAgentDir,
+	root string,
+	me string,
+	validateCanonical bool,
+) (wakeStateLegacySnapshot, error, error) {
+	if validateCanonical {
+		if err := validateWakeStateAgentDirAt(dirfd, agentDir); err != nil {
+			return wakeStateLegacySnapshot{}, nil, err
+		}
 	}
 	target, targetPresent, err := readWakeTargetSnapshotAt(dirfd, agentDir, root, me)
 	snapshot := wakeStateLegacySnapshot{

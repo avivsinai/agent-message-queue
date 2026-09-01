@@ -254,10 +254,9 @@ func TestWakeLockJSONTrustMatrix(t *testing.T) {
 							t.Fatalf("doctor fix result = %#v, want preserved unverified lock", locks)
 						}
 					case "release":
-						_ = withWakeLifecycleGuardInDir(fixture.agentDir, func(dirfd int) error {
+						_ = withWakeMutationScopeInDir(fixture.agentDir, func(scope *wakeMutationScope) error {
 							return cleanupGenericWakeGenerationAt(
-								dirfd,
-								fixture.agentDir,
+								scope,
 								fixture.root,
 								fixture.me,
 								inspection,
@@ -299,10 +298,9 @@ func TestWakeLockJSONTrustMatrix(t *testing.T) {
 					before := snapshotWakeCheckTree(t, fixture.root)
 					switch operation {
 					case "authoritative release":
-						err := withWakeLifecycleGuardInDir(fixture.agentDir, func(dirfd int) error {
+						err := withWakeMutationScopeInDir(fixture.agentDir, func(scope *wakeMutationScope) error {
 							return removeAuthoritativeWakeClaimAt(
-								dirfd,
-								fixture.agentDir,
+								scope,
 								inspection,
 								&fixture.target,
 							)

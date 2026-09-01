@@ -129,8 +129,8 @@ func newConsecutiveDarwinWakeRestartFixture(t *testing.T) consecutiveDarwinWakeR
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = agentDir.Close() })
-	if err := agentDir.withFD(func(dirfd int) error {
-		return writeWakeRestartRecordAt(dirfd, agentDir, record)
+	if err := withWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+		return writeWakeRestartRecordAt(scope, record)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -571,8 +571,8 @@ func TestDoctorFixRetriesExactPersistedDarwinRestartStageReclaim(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = agentDir.Close() }()
-	if err := agentDir.withFD(func(dirfd int) error {
-		return writeWakeRestartRecordAt(dirfd, agentDir, record)
+	if err := withWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+		return writeWakeRestartRecordAt(scope, record)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -775,8 +775,8 @@ func TestForeignDarwinRestartRecordDoesNotDeadEndLockRemoval(t *testing.T) {
 			foreign := fixture.record
 			foreign.Generation = "11111111111111111111111111111111"
 			foreign.SuccessorGeneration = "22222222222222222222222222222222"
-			if err := withWakeLifecycleGuardInDir(fixture.agentDir, func(dirfd int) error {
-				return writeWakeRestartRecordAt(dirfd, fixture.agentDir, foreign)
+			if err := withWakeMutationScopeInDir(fixture.agentDir, func(scope *wakeMutationScope) error {
+				return writeWakeRestartRecordAt(scope, foreign)
 			}); err != nil {
 				t.Fatal(err)
 			}
@@ -912,8 +912,8 @@ func TestDarwinRestartRetryReclaimsAndQuarantinesRefusedOwnedStage(t *testing.T)
 	refused.Generation = fixture.lock.Lock.Generation
 	refused.Owner = fixture.owner
 	refused.BoundImage = &boundEvidence
-	if err := withWakeLifecycleGuardInDir(fixture.agentDir, func(dirfd int) error {
-		return writeWakeRestartRecordAt(dirfd, fixture.agentDir, refused)
+	if err := withWakeMutationScopeInDir(fixture.agentDir, func(scope *wakeMutationScope) error {
+		return writeWakeRestartRecordAt(scope, refused)
 	}); err != nil {
 		t.Fatal(err)
 	}

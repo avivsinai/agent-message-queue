@@ -183,8 +183,8 @@ func TestOwnerAcquisitionCommittedPublicationFailurePreservesExactClaim(t *testi
 		t.Fatal(openErr)
 	}
 	defer func() { _ = agentDir.Close() }()
-	if verifyErr := withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
-		_, pairErr := validateAuthoritativeWakeClaimPairAt(dirfd, agentDir, inspection)
+	if verifyErr := withWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+		_, pairErr := validateAuthoritativeWakeClaimPairAt(scope, inspection)
 		return pairErr
 	}); verifyErr != nil {
 		t.Fatalf("committed claim pair is invalid: %v", verifyErr)

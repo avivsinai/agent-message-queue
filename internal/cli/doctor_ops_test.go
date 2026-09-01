@@ -742,6 +742,13 @@ func TestRunOpsChecks_FixesStaleWakeLock(t *testing.T) {
 	}
 }
 
+func establishDoctorWakeLifecycleGuardForTest(t *testing.T, root, agent string) {
+	t.Helper()
+	if err := withWakeLifecycleGuard(root, agent, func() error { return nil }); err != nil {
+		t.Fatalf("establish wake lifecycle guard: %v", err)
+	}
+}
+
 func TestRunOpsChecks_RequiresWakeRepairFloor(t *testing.T) {
 	root := secureTempDirForTest(t)
 	if err := fsq.EnsureRootDirs(root); err != nil {

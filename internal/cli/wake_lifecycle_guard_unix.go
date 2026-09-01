@@ -3,10 +3,12 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"golang.org/x/sys/unix"
@@ -132,40 +134,136 @@ func withWakeLifecycleGuardModeInDir(
 	lockMode int,
 	fn func(int) error,
 ) error {
+	return withWakeLifecycleGuardModeAndTimeoutInDir(
+		agentDir,
+		lockMode,
+		wakeLifecycleGuardRetryTimeout,
+		fn,
+	)
+}
+
+func withWakeLifecycleGuardModeAndTimeoutInDir(
+	agentDir *wakeAgentDir,
+	lockMode int,
+	retryTimeout time.Duration,
+	fn func(int) error,
+) error {
+	return withWakeLifecycleGuardLeaseModeAndTimeoutInDir(
+		agentDir,
+		false,
+		lockMode,
+		retryTimeout,
+		func(dirfd int, lease *wakeLifecycleGuardLease) (retErr error) {
+			defer func() { retErr = errors.Join(retErr, lease.release()) }()
+			return fn(dirfd)
+		},
+	)
+}
+
+type wakeLifecycleGuardLease struct {
+	file     *os.File
+	path     string
+	locked   bool
+	released bool
+}
+
+func (lease *wakeLifecycleGuardLease) release() error {
+	if lease == nil || lease.released {
+		return nil
+	}
+	lease.released = true
+	if lease.file == nil {
+		return nil
+	}
+	var unlockErr error
+	if lease.locked {
+		unlockErr = unix.Flock(int(lease.file.Fd()), unix.LOCK_UN)
+	}
+	closeErr := lease.file.Close()
+	return errors.Join(unlockErr, closeErr)
+}
+
+func withWakeLifecycleGuardLeaseModeAndTimeoutInDir(
+	agentDir *wakeAgentDir,
+	existing bool,
+	lockMode int,
+	retryTimeout time.Duration,
+	fn func(int, *wakeLifecycleGuardLease) error,
+) error {
 	return agentDir.withFD(func(dirfd int) error {
 		path := filepath.Join(agentDir.path, wakeLifecycleGuardFileName)
-		file, err := openWakeLifecycleGuardAt(dirfd, path)
+		lease, err := openAndAcquireWakeLifecycleGuardLeaseAt(
+			dirfd,
+			path,
+			agentDir,
+			existing,
+			lockMode,
+			retryTimeout,
+		)
 		if err != nil {
 			return err
 		}
-		defer func() { _ = file.Close() }()
-
-		if err := unix.Flock(int(file.Fd()), lockMode); err != nil {
-			return fmt.Errorf("acquire wake lifecycle guard %s: %w", path, err)
-		}
-		defer func() { _ = unix.Flock(int(file.Fd()), unix.LOCK_UN) }()
-
-		info, err := file.Stat()
-		if err != nil {
-			return fmt.Errorf("stat wake lifecycle guard %s: %w", path, err)
-		}
-		if err := validateWakeLifecycleGuard(path, info); err != nil {
-			return err
-		}
-		pathFile, err := openWakeLifecycleGuardAt(dirfd, path)
-		if err != nil {
-			return fmt.Errorf("re-open wake lifecycle guard after acquisition: %w", err)
-		}
-		pathInfo, statErr := pathFile.Stat()
-		_ = pathFile.Close()
-		if statErr != nil {
-			return fmt.Errorf("stat wake lifecycle guard path %s: %w", path, statErr)
-		}
-		if !sameWakeFileIdentity(info, pathInfo) {
-			return fmt.Errorf("wake lifecycle guard %s changed while acquiring", path)
-		}
-		return fn(dirfd)
+		return fn(dirfd, lease)
 	})
+}
+
+func openAndAcquireWakeLifecycleGuardLeaseAt(
+	dirfd int,
+	path string,
+	agentDir *wakeAgentDir,
+	existing bool,
+	lockMode int,
+	retryTimeout time.Duration,
+) (*wakeLifecycleGuardLease, error) {
+	var (
+		file *os.File
+		err  error
+	)
+	if existing {
+		file, err = openExistingWakeLifecycleGuardAt(dirfd, path)
+	} else {
+		file, err = openWakeLifecycleGuardAt(dirfd, path)
+	}
+	if err != nil {
+		return nil, err
+	}
+	lease := &wakeLifecycleGuardLease{file: file, path: path}
+	if err := acquireWakeLifecycleGuard(file, path, agentDir, lockMode, retryTimeout); err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	lease.locked = true
+
+	info, err := file.Stat()
+	if err != nil {
+		_ = lease.release()
+		return nil, fmt.Errorf("stat wake lifecycle guard %s: %w", path, err)
+	}
+	if err := validateWakeLifecycleGuard(path, info); err != nil {
+		_ = lease.release()
+		return nil, err
+	}
+	var pathFile *os.File
+	if existing {
+		pathFile, err = openExistingWakeLifecycleGuardAt(dirfd, path)
+	} else {
+		pathFile, err = openWakeLifecycleGuardAt(dirfd, path)
+	}
+	if err != nil {
+		_ = lease.release()
+		return nil, fmt.Errorf("re-open wake lifecycle guard after acquisition: %w", err)
+	}
+	pathInfo, statErr := pathFile.Stat()
+	_ = pathFile.Close()
+	if statErr != nil {
+		_ = lease.release()
+		return nil, fmt.Errorf("stat wake lifecycle guard path %s: %w", path, statErr)
+	}
+	if !sameWakeFileIdentity(info, pathInfo) {
+		_ = lease.release()
+		return nil, fmt.Errorf("wake lifecycle guard %s changed while acquiring", path)
+	}
+	return lease, nil
 }
 
 func openWakeLifecycleGuardAt(dirfd int, path string) (*os.File, error) {
@@ -202,6 +300,110 @@ func openWakeLifecycleGuardAt(dirfd int, path string) (*os.File, error) {
 		return nil, validateErr
 	}
 	return file, nil
+}
+
+func openExistingWakeLifecycleGuardAt(dirfd int, path string) (*os.File, error) {
+	flags := unix.O_RDWR | unix.O_NONBLOCK | unix.O_NOFOLLOW | unix.O_CLOEXEC
+	fd, err := unix.Openat(dirfd, wakeLifecycleGuardFileName, flags, 0)
+	if err != nil {
+		return nil, fmt.Errorf("open existing wake lifecycle guard %s: %w", path, err)
+	}
+	file := os.NewFile(uintptr(fd), path)
+	info, statErr := file.Stat()
+	if statErr != nil {
+		_ = file.Close()
+		return nil, fmt.Errorf("stat wake lifecycle guard %s: %w", path, statErr)
+	}
+	if validateErr := validateWakeLifecycleGuard(path, info); validateErr != nil {
+		_ = file.Close()
+		return nil, validateErr
+	}
+	return file, nil
+}
+
+// This boundary is plumbing only. Callers must not turn detached-directory
+// access into acquire, repair, or readiness success; it is for exact cleanup
+// of old residue while preserving the canonical successor's authority.
+func withExistingWakeLifecycleGuardInDir(agentDir *wakeAgentDir, fn func(int) error) error {
+	return withExistingWakeLifecycleGuardModeInDir(agentDir, unix.LOCK_EX, fn)
+}
+
+func withExistingWakeLifecycleGuardModeInDir(
+	agentDir *wakeAgentDir,
+	lockMode int,
+	fn func(int) error,
+) error {
+	return withWakeLifecycleGuardLeaseModeAndTimeoutInDir(
+		agentDir,
+		true,
+		lockMode,
+		wakeLifecycleGuardRetryTimeout,
+		func(dirfd int, lease *wakeLifecycleGuardLease) (retErr error) {
+			defer func() { retErr = errors.Join(retErr, lease.release()) }()
+			return fn(dirfd)
+		},
+	)
+}
+
+const (
+	wakeLifecycleGuardRetryInterval = 10 * time.Millisecond
+	wakeLifecycleGuardRetryTimeout  = 500 * time.Millisecond
+)
+
+func acquireWakeLifecycleGuard(
+	file *os.File,
+	path string,
+	agentDir *wakeAgentDir,
+	lockMode int,
+	retryTimeout time.Duration,
+) error {
+	if lockMode&unix.LOCK_NB == 0 {
+		if err := unix.Flock(int(file.Fd()), lockMode); err != nil {
+			return fmt.Errorf("acquire wake lifecycle guard %s: %w", path, err)
+		}
+		return nil
+	}
+	deadline := time.Now().Add(retryTimeout)
+	for {
+		err := unix.Flock(int(file.Fd()), lockMode)
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, unix.EAGAIN) && !errors.Is(err, unix.EWOULDBLOCK) {
+			return fmt.Errorf("acquire wake lifecycle guard %s: %w", path, err)
+		}
+		if !time.Now().Before(deadline) {
+			root := filepath.Dir(filepath.Dir(agentDir.path))
+			agent := filepath.Base(agentDir.path)
+			remedy := wakeCheckRemedy(root, agent).String()
+			return fmt.Errorf(
+				"wake lifecycle guard %s is held by another process; holder is unknown after %s; inspect with %s or escalate manually",
+				path,
+				retryTimeout,
+				remedy,
+			)
+		}
+		time.Sleep(wakeLifecycleGuardRetryInterval)
+	}
+}
+
+func wakeLifecycleGuardMissingAt(agentDir *wakeAgentDir) (bool, error) {
+	missing := false
+	err := agentDir.withFD(func(dirfd int) error {
+		var info unix.Stat_t
+		err := unix.Fstatat(
+			dirfd,
+			wakeLifecycleGuardFileName,
+			&info,
+			unix.AT_SYMLINK_NOFOLLOW,
+		)
+		if err == unix.ENOENT {
+			missing = true
+			return nil
+		}
+		return err
+	})
+	return missing, err
 }
 
 func validateWakeLifecycleGuard(path string, info os.FileInfo) error {

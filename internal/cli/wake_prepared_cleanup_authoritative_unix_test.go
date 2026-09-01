@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"os"
@@ -37,6 +38,70 @@ func TestAuthoritativeWakeCleanupRemovesExactPreparedMarker(t *testing.T) {
 	fixture.assertReleasedClaimMissing(t)
 	assertPathMissingForTest(t, fixture.preparedPath)
 	fixture.assertControlSocketMissing(t)
+}
+
+func TestAuthoritativeWakeCleanupRefusesHardlinkedLock(t *testing.T) {
+	fixture := newAuthoritativeWakePreparedCleanupFixture(t)
+	aliasPath := filepath.Join(t.TempDir(), "wake-lock-alias")
+	want, err := os.ReadFile(fixture.lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := beforeAuthoritativeWakeLockFinalRemoval
+	beforeAuthoritativeWakeLockFinalRemoval = func() {
+		beforeAuthoritativeWakeLockFinalRemoval = func() {}
+		if err := os.Link(fixture.lockPath, aliasPath); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() { beforeAuthoritativeWakeLockFinalRemoval = original })
+
+	err = fixture.release()
+	if err == nil || !strings.Contains(err.Error(), "multiple hard links") {
+		t.Fatalf("release error = %v, want hardlink refusal", err)
+	}
+	for _, path := range []string{fixture.lockPath, aliasPath} {
+		got, readErr := os.ReadFile(path)
+		if readErr != nil {
+			t.Fatalf("read preserved %s: %v", path, readErr)
+		}
+		if !bytes.Equal(got, want) {
+			t.Fatalf("hardlinked claim changed at %s", path)
+		}
+		info, statErr := os.Stat(path)
+		if statErr != nil {
+			t.Fatal(statErr)
+		}
+		stat, ok := info.Sys().(*syscall.Stat_t)
+		if !ok || uint64(stat.Nlink) != 2 {
+			t.Fatalf("hardlink count for %s = %#v, want 2", path, info.Sys())
+		}
+	}
+}
+
+func TestAuthoritativeWakeCleanupRefusesMissingFinalLock(t *testing.T) {
+	fixture := newAuthoritativeWakePreparedCleanupFixture(t)
+	original := beforeAuthoritativeWakeLockFinalRemoval
+	beforeAuthoritativeWakeLockFinalRemoval = func() {
+		beforeAuthoritativeWakeLockFinalRemoval = func() {}
+		if err := os.Remove(fixture.lockPath); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() { beforeAuthoritativeWakeLockFinalRemoval = original })
+
+	err := fixture.release()
+	if err == nil || !strings.Contains(err.Error(), "hard-link count") {
+		t.Fatalf("release error = %v, want unavailable hard-link count refusal", err)
+	}
+	assertPathMissingForTest(t, fixture.lockPath)
+	if _, statErr := os.Stat(fixture.targetPath); statErr != nil {
+		t.Fatalf("missing-final-lock cleanup removed wake target: %v", statErr)
+	}
+	if _, statErr := os.Stat(fixture.preparedPath); statErr != nil {
+		t.Fatalf("missing-final-lock cleanup removed prepared marker: %v", statErr)
+	}
+	fixture.assertControlSocketPresent(t)
 }
 
 func TestAuthoritativeWakeAcquireDetachedDuringReleaseStopsWithoutReacquiring(t *testing.T) {
@@ -102,6 +167,48 @@ func TestAuthoritativeWakeAcquireDetachedDuringReleaseStopsWithoutReacquiring(t 
 	assertDetachedWakeFilesUnchanged(t, fixture.agentDir.path, successorBefore)
 }
 
+func TestAuthoritativeWakeCleanupDetachesBeforeStateSnapshot(t *testing.T) {
+	fixture := newAuthoritativeWakePreparedCleanupFixture(t)
+	names := []string{".wake.lock", wakeTargetFileName, wakeStateFileName, wakePreparedFileName}
+	claimBefore := snapshotDetachedWakeFiles(t, fixture.agentDir.path, names...)
+	detachedPath := fixture.agentDir.path + ".detached-state-snapshot"
+	var successorBefore map[string]detachedWakeFileSnapshot
+	original := beforeAuthoritativeWakeStateSnapshot
+	beforeAuthoritativeWakeStateSnapshot = func() {
+		beforeAuthoritativeWakeStateSnapshot = func() {}
+		if err := os.Rename(fixture.agentDir.path, detachedPath); err != nil {
+			t.Fatalf("detach authoritative wake agent directory: %v", err)
+		}
+		if err := os.Mkdir(fixture.agentDir.path, 0o700); err != nil {
+			t.Fatalf("create authoritative successor wake agent directory: %v", err)
+		}
+		for name, snapshot := range claimBefore {
+			if err := os.WriteFile(
+				filepath.Join(fixture.agentDir.path, name),
+				snapshot.raw,
+				snapshot.info.Mode().Perm(),
+			); err != nil {
+				t.Fatalf("write authoritative successor %s: %v", name, err)
+			}
+		}
+		successorBefore = snapshotDetachedWakeFiles(t, fixture.agentDir.path, names...)
+	}
+	t.Cleanup(func() { beforeAuthoritativeWakeStateSnapshot = original })
+
+	err := fixture.release()
+	var cleanupOnly *wakeDetachedCleanupOnlyError
+	if !errors.As(err, &cleanupOnly) {
+		t.Fatalf("detached state-snapshot cleanup error = %v, want detached cleanup-only", err)
+	}
+	assertPathMissingForTest(t, filepath.Join(detachedPath, ".wake.lock"))
+	assertDetachedWakeFilesUnchanged(t, detachedPath, map[string]detachedWakeFileSnapshot{
+		wakeTargetFileName:   claimBefore[wakeTargetFileName],
+		wakeStateFileName:    claimBefore[wakeStateFileName],
+		wakePreparedFileName: claimBefore[wakePreparedFileName],
+	})
+	assertDetachedWakeFilesUnchanged(t, fixture.agentDir.path, successorBefore)
+}
+
 func TestAuthoritativeWakeCleanupDeadOwnerExactPreparedAllowsFirstReacquire(t *testing.T) {
 	root := secureTempDirForTest(t)
 	const me = "codex"
@@ -132,10 +239,9 @@ func TestAuthoritativeWakeCleanupDeadOwnerExactPreparedAllowsFirstReacquire(t *t
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = agentDir.Close() })
-	if err := withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+	if err := withWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
 		if err := publishAuthoritativeWakeClaimAt(
-			dirfd,
-			agentDir,
+			scope,
 			root,
 			me,
 			oldTarget,
@@ -144,7 +250,7 @@ func TestAuthoritativeWakeCleanupDeadOwnerExactPreparedAllowsFirstReacquire(t *t
 			return err
 		}
 		if err := writeWakeGenerationFileAt(
-			dirfd,
+			scope,
 			wakePreparedFileName,
 			"wake prepared marker",
 			wakeReady{
@@ -155,7 +261,7 @@ func TestAuthoritativeWakeCleanupDeadOwnerExactPreparedAllowsFirstReacquire(t *t
 		); err != nil {
 			return err
 		}
-		return reconcileWakeStateAfterLegacyMutationAt(dirfd, agentDir, root, me)
+		return reconcileWakeStateAfterLegacyMutationAt(scope, root, me)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -170,10 +276,9 @@ func TestAuthoritativeWakeCleanupDeadOwnerExactPreparedAllowsFirstReacquire(t *t
 		observeCalls++
 		return deadWakeOwnerObservation("old owner is dead"), nil
 	}
-	releaseErr := withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
+	releaseErr := withWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
 		return removeAuthoritativeWakeClaimAt(
-			dirfd,
-			agentDir,
+			scope,
 			inspection,
 			&oldTarget,
 		)
@@ -482,8 +587,8 @@ func newAuthoritativeWakePreparedCleanupFixture(
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = agentDir.Close() })
-	if err := withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
-		return publishAuthoritativeWakeClaimAt(dirfd, agentDir, root, me, target, lock)
+	if err := withWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+		return publishAuthoritativeWakeClaimAt(scope, root, me, target, lock)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -523,10 +628,9 @@ func newAuthoritativeWakePreparedCleanupFixture(
 }
 
 func (fixture *authoritativeWakePreparedCleanupFixture) release() error {
-	return withWakeLifecycleGuardInDir(fixture.agentDir, func(dirfd int) error {
+	return withWakeMutationScopeInDir(fixture.agentDir, func(scope *wakeMutationScope) error {
 		return removeAuthoritativeWakeClaimAt(
-			dirfd,
-			fixture.agentDir,
+			scope,
 			fixture.inspection,
 			&fixture.target,
 		)

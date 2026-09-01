@@ -3,7 +3,10 @@
 package cli
 
 import (
+	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"syscall"
@@ -20,14 +23,14 @@ func stubWakeRestartPidfdForTest(
 ) {
 	t.Helper()
 	oldOpen := linuxPidfdOpen
-	oldSend := linuxPidfdSendSignal
+	oldSend := linuxPidfdSend
 	oldClose := linuxPidfdClose
 	linuxPidfdOpen = open
-	linuxPidfdSendSignal = send
+	linuxPidfdSend = send
 	linuxPidfdClose = close
 	t.Cleanup(func() {
 		linuxPidfdOpen = oldOpen
-		linuxPidfdSendSignal = oldSend
+		linuxPidfdSend = oldSend
 		linuxPidfdClose = oldClose
 	})
 }
@@ -258,9 +261,15 @@ func TestNotifyWakeRestartLinuxRefusesChangedPendingRecord(t *testing.T) {
 				func(int, int) (int, error) {
 					changed := fixture.record
 					test.mutate(&changed)
-					if err := fixture.agentDir.withFD(func(dirfd int) error {
-						return writeWakeRestartRecordAt(dirfd, fixture.agentDir, changed)
-					}); err != nil {
+					raw, err := json.Marshal(changed)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(
+						filepath.Join(fixture.agentDir.path, wakeRestartFileName),
+						append(raw, '\n'),
+						0o600,
+					); err != nil {
 						t.Fatal(err)
 					}
 					return 44, nil

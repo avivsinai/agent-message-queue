@@ -6,26 +6,6 @@ import "fmt"
 
 var reclaimWakeRestartStageForStaleLock = reclaimWakeRestartStagePlatform
 
-func reclaimWakeRestartStateForGuardedLockRemoval(inspection wakeLockInspection) error {
-	agentDir, err := openWakeAgentDir(inspection.Root, inspection.Agent)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = agentDir.Close() }()
-	return agentDir.withFD(func(dirfd int) error {
-		current := readWakeLockMetadataAt(
-			dirfd,
-			agentDir,
-			inspection.Root,
-			inspection.Agent,
-		)
-		if !sameWakeLockGeneration(inspection, current) {
-			return fmt.Errorf("wake lock changed before restart-state reconciliation")
-		}
-		return reclaimWakeRestartStateForLockRemovalAt(dirfd, agentDir, inspection)
-	})
-}
-
 func reclaimWakeRestartStateForLockRemovalAt(
 	dirfd int,
 	agentDir *wakeAgentDir,

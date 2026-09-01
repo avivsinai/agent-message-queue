@@ -239,6 +239,7 @@ func testPrepareCoopWakeLockLiveRawTakeoverRefused(
 
 	const pid = 66121
 	root := secureTempDirForTest(t)
+	establishDoctorWakeLifecycleGuardForTest(t, root, "codex")
 	lockPath := writeWakeLockForTest(t, root, "codex", wakeLock{
 		PID:          pid,
 		TTY:          tty,

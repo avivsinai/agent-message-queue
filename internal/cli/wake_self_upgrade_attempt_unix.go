@@ -125,7 +125,7 @@ func writeWakeSelfUpgradeAttemptAt(
 }
 
 func removeWakeSelfUpgradeAttemptAt(dirfd int) error {
-	err := unix.Unlinkat(dirfd, wakeSelfUpgradeAttemptFileName, 0)
+	err := wakeUnlinkAt(dirfd, wakeSelfUpgradeAttemptFileName, 0)
 	if err == unix.ENOENT {
 		return nil
 	}
@@ -140,17 +140,6 @@ func removeWakeSelfUpgradeAttemptAt(dirfd int) error {
 
 func removeWakeSelfUpgradeArtifactsAt(dirfd int) error {
 	return removeWakeSelfUpgradeDiagnosticAt(dirfd)
-}
-
-func removeWakeSelfUpgradeArtifactsGuarded(root, agent string) error {
-	agentDir, err := openWakeAgentDir(root, agent)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = agentDir.Close() }()
-	return agentDir.withFD(func(dirfd int) error {
-		return removeWakeSelfUpgradeArtifactsAt(dirfd)
-	})
 }
 
 func loadWakeSelfUpgradeAttemptAtStartup(

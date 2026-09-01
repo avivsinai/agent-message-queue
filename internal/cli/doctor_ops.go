@@ -327,11 +327,9 @@ func checkUnreadBacklogNoNotifierHints(root string, agents []opsAgent, wakeLocks
 		if agent.UnreadCount == 1 {
 			messageWord = "message"
 		}
-		command := fmt.Sprintf(
-			"amq wake check --root %s --me %s",
-			shellQuoteArg(root),
-			agent.Handle,
-		)
+		command := newWakeRemedy(
+			"amq", "wake", "check", "--root", root, "--me", agent.Handle,
+		).String()
 		remedy := "drain from the owning session"
 		hints = append(hints, opsHint{
 			Code:   "unread_backlog_no_notifier",
@@ -739,11 +737,11 @@ func validateWakeLockAgentPath(root, agent string) error {
 }
 
 func wakeRepairCommand(root, agent string) string {
-	return fmt.Sprintf("amq wake repair --root %s --me %s", shellQuoteArg(root), shellQuoteArg(agent))
+	return wakeRepairRemedy(root, agent).String()
 }
 
 func wakeRecoverOwnerCommand(root, agent string) string {
-	return fmt.Sprintf("amq wake recover-owner --root %s --me %s", shellQuoteArg(root), shellQuoteArg(agent))
+	return wakeRecoverOwnerRemedy(root, agent).String()
 }
 
 func shellQuoteArg(value string) string {

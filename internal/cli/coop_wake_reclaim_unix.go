@@ -3,29 +3,46 @@
 package cli
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
-	"runtime"
 	"strings"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"golang.org/x/term"
 )
 
-func prepareCoopWakeLock(root, agent string, yes bool, remedy string) error {
-	inspection := inspectWakeLock(root, agent)
+func prepareCoopWakeLock(root, agent string, yes bool, remedy string) (retErr error) {
+	defer func() { retErr = withWakeDiagnostic(retErr, root, agent) }()
+	agentDir, err := openExistingCoopWakeAgentDir(root, agent)
+	if err != nil {
+		return err
+	}
+	if agentDir == nil {
+		return nil
+	}
+	defer func() { _ = agentDir.Close() }()
+
+	var inspection wakeLockInspection
+	if err := agentDir.withFD(func(dirfd int) error {
+		inspection = inspectWakeLockAt(dirfd, agentDir, root, agent)
+		return nil
+	}); err != nil {
+		return err
+	}
 	if !inspection.Exists {
 		return nil
 	}
 	// A live process that affirmative process inspection proves is not this wake
 	// must never be signaled or have its lock removed by a coop retry.
 	if inspection.Process.Running && wakeProcessProvenNotWake(inspection.Process) {
-		return fmt.Errorf("wake lock for %s names a running process proven not to be this wake; refusing to signal or remove it; lock: %s; root: %s; reason: %s", agent, inspection.LockPath, inspection.Root, inspection.Reason)
+		return fmt.Errorf("wake lock for %s names a running process proven not to be this wake; refusing to signal or remove it; lock: %s; root: %s; reason: %s; inspect with %s", agent, inspection.LockPath, inspection.Root, inspection.Reason, wakeCheckRemedy(inspection.Root, inspection.Agent).String())
 	}
 	if inspection.Status == wakeLockStale {
 		// This returns before stale owner-bound recovery advice is rendered below.
-		if err := removeWakeLockIfUnchanged(inspection); err != nil {
+		if err := removeCoopWakeLockIfUnchangedInDir(agentDir, inspection); err != nil {
 			return fmt.Errorf("remove exact stale wake lock: %w", err)
 		}
 		return nil
@@ -51,7 +68,7 @@ func prepareCoopWakeLock(root, agent string, yes bool, remedy string) error {
 		if err != nil || !proceed {
 			return err
 		}
-		retired, err := retireLiveRawOrphan(inspection)
+		retired, err := terminateAndRemoveOrphanedWakeLockInDirWithRawConsent(agentDir, inspection, true, nil)
 		if err != nil {
 			return fmt.Errorf("retire identity-confirmed live raw orphan: %w", err)
 		}
@@ -124,7 +141,7 @@ func prepareCoopWakeLock(root, agent string, yes bool, remedy string) error {
 		return err
 	}
 
-	if err := removeWakeLockIfUnchanged(inspection); err != nil {
+	if err := removeCoopWakeLockIfUnchangedInDir(agentDir, inspection); err != nil {
 		return fmt.Errorf("remove exact unverified wake lock: %w", err)
 	}
 	_ = writeStderr(
@@ -133,6 +150,161 @@ func prepareCoopWakeLock(root, agent string, yes bool, remedy string) error {
 		inspection.PID,
 		coopWakeTTYDisplay(inspection),
 	)
+	return nil
+}
+
+func openExistingCoopWakeAgentDir(root, agent string) (*wakeAgentDir, error) {
+	agentDir, err := openWakeDirectory(fsq.AgentBase(root, agent), "wake agent directory")
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	return agentDir, err
+}
+
+func removeCoopWakeLockIfUnchangedInDir(
+	agentDir *wakeAgentDir,
+	expected wakeLockInspection,
+) error {
+	// The retained descriptor is the authority for this exact cleanup. This
+	// may create the permanent guard in that retained directory, never through
+	// the canonical successor pathname.
+	return withWakeMutationScopeInDir(agentDir, func(scope *wakeMutationScope) error {
+		dirfd, scopedAgentDir, err := scope.location()
+		if err != nil {
+			return err
+		}
+		agentDir = scopedAgentDir
+		current := inspectWakeLockAt(dirfd, agentDir, expected.Root, expected.Agent)
+		if !sameWakeLockGeneration(expected, current) {
+			return nil
+		}
+		return removeWakeLockIfUnchangedGuardedAt(scope, current)
+	})
+}
+
+func sameWakeLockGenerationForRetainedTermination(
+	first, second wakeLockInspection,
+) bool {
+	if sameWakeLockGeneration(first, second) {
+		return true
+	}
+	return first.Exists && second.Exists &&
+		first.fileInfo != nil && second.fileInfo != nil &&
+		os.SameFile(first.fileInfo, second.fileInfo) &&
+		bytes.Equal(first.raw, second.raw) &&
+		(first.Lock.Generation == "" || second.Lock.Generation == "" ||
+			first.Lock.Generation == second.Lock.Generation)
+}
+
+// Termination cleanup may hold a directory that is now detached from the
+// canonical mailbox. Validate the retained generation, but never use that
+// capability to select a replacement or publish success.
+func validateWakeLockOwnerlessMutationAtForTermination(
+	dirfd int,
+	agentDir *wakeAgentDir,
+	inspection wakeLockInspection,
+) error {
+	bound, err := wakeLockInspectionStateBound(inspection)
+	if err != nil {
+		return newWakeStateBoundInconclusiveError(err)
+	}
+	relation, err := retainedWakeAgentDirRelationAt(agentDir, dirfd)
+	if err != nil {
+		return newWakeStateBoundInconclusiveError(err)
+	}
+	switch relation {
+	case wakeAgentDirCanonical, wakeAgentDirDetached:
+	case wakeAgentDirInconclusive:
+		return newWakeStateBoundInconclusiveError(
+			fmt.Errorf("wake agent directory relation is inconclusive before ownerless mutation"),
+		)
+	default:
+		return newWakeStateBoundInconclusiveError(
+			fmt.Errorf("unknown wake agent directory relation %d", relation),
+		)
+	}
+	if bound && relation == wakeAgentDirDetached {
+		if err := validateWakeLockOwnerlessBoundStateInRetainedDirAt(
+			dirfd, agentDir, inspection,
+		); err != nil {
+			return err
+		}
+	} else if relation == wakeAgentDirDetached {
+		if _, err := readWakeStateSelectionAtRetained(
+			dirfd,
+			agentDir,
+			inspection.Root,
+			inspection.Agent,
+		); err != nil {
+			return err
+		}
+	} else if _, err := readWakeStateSelectionForInspectionAt(
+		dirfd,
+		agentDir,
+		inspection.Root,
+		inspection.Agent,
+		inspection,
+	); err != nil {
+		return err
+	}
+	if err := validateGenericWakeLifecycleTransition(inspection, wakeGenericRequestMutate); err != nil {
+		return err
+	}
+	if inspection.Lock.TargetDigest != "" {
+		target, exists, err := readWakeTargetAt(
+			dirfd,
+			agentDir,
+			inspection.Root,
+			inspection.Agent,
+		)
+		if err != nil {
+			return fmt.Errorf("wake target is unverified before ownerless mutation: %w", err)
+		}
+		if exists && target.Owner != nil {
+			return fmt.Errorf("owner-bearing wake state requires %s", wakeRecoverOwnerCommand(inspection.Root, inspection.Agent))
+		}
+	}
+	return nil
+}
+
+func validateWakeLockStaleRemovalAtForTermination(
+	dirfd int,
+	agentDir *wakeAgentDir,
+	inspection wakeLockInspection,
+) error {
+	relation, err := retainedWakeAgentDirRelationAt(agentDir, dirfd)
+	if err != nil {
+		return newWakeStateBoundInconclusiveError(err)
+	}
+	switch relation {
+	case wakeAgentDirCanonical:
+		if _, err := readWakeStateSelectionForInspectionAt(
+			dirfd,
+			agentDir,
+			inspection.Root,
+			inspection.Agent,
+			inspection,
+		); err != nil {
+			return err
+		}
+	case wakeAgentDirDetached:
+	case wakeAgentDirInconclusive:
+		return newWakeStateBoundInconclusiveError(
+			fmt.Errorf("wake agent directory relation is inconclusive before stale removal"),
+		)
+	default:
+		return newWakeStateBoundInconclusiveError(
+			fmt.Errorf("unknown wake agent directory relation %d", relation),
+		)
+	}
+	if wakeLockHasOwnerMarkers(inspection) {
+		return fmt.Errorf("owner-bound wake claims require %s", wakeRecoverOwnerCommand(inspection.Root, inspection.Agent))
+	}
+	if err := validateWakeLockRepairable(inspection); err == nil {
+		return nil
+	} else if inspection.Status != wakeLockStale {
+		return err
+	}
 	return nil
 }
 
@@ -210,8 +382,61 @@ func coopWakeTTYDisplay(inspection wakeLockInspection) string {
 func resolveMissingWakeLockAfterTermination(
 	inspection wakeLockInspection,
 	terminationErr error,
-) (bool, error) {
-	current := inspectWakeLock(inspection.Root, inspection.Agent)
+) (resolved bool, retErr error) {
+	defer func() { retErr = withWakeDiagnostic(retErr, inspection.Root, inspection.Agent) }()
+	agentDir, err := openExistingCoopWakeAgentDir(inspection.Root, inspection.Agent)
+	if err != nil {
+		return false, err
+	}
+	if agentDir == nil {
+		return resolveMissingWakeLockAfterTerminationFromInspection(
+			inspection,
+			wakeLockInspection{},
+			terminationErr,
+		)
+	}
+	defer func() { _ = agentDir.Close() }()
+	return resolveMissingWakeLockAfterTerminationInDir(agentDir, inspection, terminationErr)
+}
+
+func resolveMissingWakeLockAfterTerminationInDir(
+	agentDir *wakeAgentDir,
+	inspection wakeLockInspection,
+	terminationErr error,
+) (resolved bool, retErr error) {
+	defer func() { retErr = withWakeDiagnostic(retErr, inspection.Root, inspection.Agent) }()
+	var current wakeLockInspection
+	if err := agentDir.withFD(func(dirfd int) error {
+		if err := validateWakeStateAgentDirAt(dirfd, agentDir); err != nil {
+			return err
+		}
+		current = inspectWakeLockAt(dirfd, agentDir, inspection.Root, inspection.Agent)
+		return validateWakeStateAgentDirAt(dirfd, agentDir)
+	}); err != nil {
+		relation, relationErr := retainedWakeAgentDirRelation(agentDir)
+		if relationErr != nil {
+			return false, errors.Join(err, relationErr)
+		}
+		switch relation {
+		case wakeAgentDirDetached:
+			return false, nil
+		case wakeAgentDirCanonical:
+			return false, err
+		case wakeAgentDirInconclusive:
+			return false, errors.Join(err, fmt.Errorf("wake agent directory relation is inconclusive after termination"))
+		default:
+			return false, errors.Join(err, fmt.Errorf("unknown wake agent directory relation %d", relation))
+		}
+	}
+	return resolveMissingWakeLockAfterTerminationFromInspection(inspection, current, terminationErr)
+}
+
+func resolveMissingWakeLockAfterTerminationFromInspection(
+	inspection wakeLockInspection,
+	current wakeLockInspection,
+	terminationErr error,
+) (resolved bool, retErr error) {
+	defer func() { retErr = withWakeDiagnostic(retErr, inspection.Root, inspection.Agent) }()
 	if current.Exists && !sameWakeLockGeneration(inspection, current) {
 		return false, nil
 	}
@@ -232,17 +457,14 @@ func resolveMissingWakeLockAfterTermination(
 }
 
 func coopWakeRemedy(inspection wakeLockInspection, state, command string) string {
-	return fmt.Sprintf("wake for %s is blocking startup and cannot notify you.\n  lock: %s\n  state: %s\n\nRe-run with -y to clear it and start a fresh wake:\n  %s\n\nTo inspect first:\n  %s", inspection.Agent, inspection.LockPath, state, command, doctorRootCommandForOS(inspection.Root, "", runtime.GOOS, "--ops"))
+	inspect := newWakeRemedy("amq", "doctor", "--root", inspection.Root, "--ops").String()
+	return fmt.Sprintf("wake for %s is blocking startup and cannot notify you.\n  lock: %s\n  state: %s\n\nRe-run with -y to clear it and start a fresh wake:\n  %s\n\nTo inspect first:\n  %s", inspection.Agent, inspection.LockPath, state, command, inspect)
 }
 
 func coopWakeRemedyForCommand(root, agent, command string, commandArgs []string) string {
-	quoted := []string{"amq", "coop", "exec", "-y", "--root", root, "--me", agent, command}
-	quoted = append(quoted, commandArgs...)
-	parts := make([]string, 0, len(quoted))
-	for _, arg := range quoted {
-		parts = append(parts, shellQuoteArg(arg))
-	}
-	return strings.Join(parts, " ")
+	argv := newWakeRemedy("amq", "coop", "exec", "-y", "--root", root, "--me", agent, command)
+	argv = append(argv, commandArgs...)
+	return argv.String()
 }
 
 func coopWakeStartupConflictError(inspection wakeLockInspection, cause error) error {
@@ -253,29 +475,26 @@ func coopWakeStartupConflictError(inspection wakeLockInspection, cause error) er
 		if started == "" {
 			started = "unknown"
 		}
+		inspect := wakeCheckRemedy(inspection.Root, inspection.Agent).String()
 		message = fmt.Sprintf(
 			"wake for %s is owned by a live process\n"+
 				"  pid:     %d\n"+
 				"  tty:     %s\n"+
 				"  started: %s\n"+
 				"  root:    %s\n\n"+
-				"No AMQ command can safely take over this live wake; use that terminal, "+
+				"No AMQ command can safely take over this live wake; inspect first with %s, "+
+				"then use that terminal, "+
 				"or stop process %d and retry amq coop exec.",
 			inspection.Agent,
 			inspection.PID,
 			coopWakeTTYDisplay(inspection),
 			started,
 			inspection.Root,
+			inspect,
 			inspection.PID,
 		)
 	case inspection.Status == wakeLockStale:
-		repair := doctorRootCommandForOS(
-			inspection.Root,
-			"",
-			runtime.GOOS,
-			"--ops",
-			"--fix-wake-locks",
-		)
+		repair := wakeDoctorStaleWakeRemedy(inspection.Root).String()
 		action := "Remove only the proven-stale session lock, then retry:\n  " + repair
 		if wakeLockHasOwnerMarkers(inspection) {
 			action = "Recover the exact owner-bound claim, then retry:\n  " +
@@ -307,14 +526,18 @@ func coopWakeStartupConflictError(inspection wakeLockInspection, cause error) er
 			inspection.PID,
 			inspection.Reason,
 			inspection.Root,
-			doctorRootCommandForOS(inspection.Root, "", runtime.GOOS, "--ops"),
+			newWakeRemedy("amq", "doctor", "--root", inspection.Root, "--ops").String(),
 		)
 	}
 	if message == "" {
 		if cause == nil {
-			return errors.New("wake startup conflict could not be classified")
+			return withWakeDiagnostic(
+				errors.New("wake startup conflict could not be classified"),
+				inspection.Root,
+				inspection.Agent,
+			)
 		}
-		return cause
+		return withWakeDiagnostic(cause, inspection.Root, inspection.Agent)
 	}
 	if cause == nil {
 		return errors.New(message)
