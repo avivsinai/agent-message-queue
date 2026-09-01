@@ -33,8 +33,9 @@ The top-level schema is `amq/trace/v1`:
     },
     "notification": {
       "status": "no_evidence",
+      "state": "ledger_absent",
       "evidence": [],
-      "detail": "notification attempt history is unavailable because Phase A has no durable attempt ledger",
+      "detail": "no notification attempt ledger file was found",
       "next_step": "run 'amq doctor --ops' for current wake health; do not infer historical notification success"
     }
   }
@@ -75,7 +76,12 @@ presence.
 
 Notification success is never inferred from wake state, a mailbox file, or a
 delivery receipt. Phase A reports the notification leg as `no_evidence` when
-the journal is absent. When present, schema 2 distinguishes `accepted`
+the journal is absent. Its optional `state` distinguishes `ledger_absent`
+(no journal file), `ledger_present_no_record` (the active or rotated journal
+exists but has no record for this message), and `record_present`. On platforms
+where notification-attempt locking is unsupported, an absent journal is
+reported as `ledger_unsupported` rather than as a missing attempt. When present,
+schema 2 distinguishes `accepted`
 (explicit external-provider dispatch), `deferred`/`retried` (pre-dispatch busy
 with the cohort retained), and terminal `failed`; raw TIOCSTI and legacy
 injectors remain `written` byte evidence only. None of these states proves

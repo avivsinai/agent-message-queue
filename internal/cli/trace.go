@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 
@@ -15,6 +16,13 @@ import (
 )
 
 const traceSchema = "amq/trace/v1"
+
+const (
+	traceNotificationLedgerAbsent          = "ledger_absent"
+	traceNotificationLedgerPresentNoRecord = "ledger_present_no_record"
+	traceNotificationRecordPresent         = "record_present"
+	traceNotificationLedgerUnsupported     = "ledger_unsupported"
+)
 
 var traceLegOrder = []string{
 	"message",
@@ -37,6 +45,7 @@ type traceResult struct {
 
 type traceLeg struct {
 	Status   string          `json:"status"`
+	State    string          `json:"state,omitempty"`
 	Evidence []traceEvidence `json:"evidence"`
 	Detail   string          `json:"detail,omitempty"`
 	NextStep string          `json:"next_step,omitempty"`
@@ -92,16 +101,17 @@ type traceLocatedHeader struct {
 }
 
 type traceCollector struct {
-	root         string
-	deliveryRoot *fsq.DeliveryRoot
-	messageID    string
-	agents       []string
-	headers      []traceLocatedHeader
-	targets      []traceLocatedHeader
-	legs         map[string]traceLeg
-	legErrors    map[string][]string
-	seenRoutes   map[string]bool
-	seenThread   map[string]bool
+	root                      string
+	deliveryRoot              *fsq.DeliveryRoot
+	messageID                 string
+	agents                    []string
+	headers                   []traceLocatedHeader
+	targets                   []traceLocatedHeader
+	legs                      map[string]traceLeg
+	legErrors                 map[string][]string
+	seenRoutes                map[string]bool
+	seenThread                map[string]bool
+	notificationLedgerPresent bool
 }
 
 func runTrace(args []string) error {
@@ -407,6 +417,13 @@ func (c *traceCollector) scanReceipts() {
 
 func (c *traceCollector) scanNotificationAttempts() {
 	for _, agent := range c.agents {
+		ledgerPresent, err := c.notificationAttemptLedgerPresent(agent)
+		if err != nil {
+			c.addError("notification", fmt.Sprintf("scan agent %s notification attempt ledger: %v", agent, err))
+			continue
+		}
+		c.notificationLedgerPresent = c.notificationLedgerPresent || ledgerPresent
+
 		attempts, err := notificationattempt.ListDeliveryRoot(c.deliveryRoot, agent, c.messageID)
 		if err != nil {
 			c.addError("notification", fmt.Sprintf("scan agent %s notification attempts: %v", agent, err))
@@ -423,6 +440,37 @@ func (c *traceCollector) scanNotificationAttempts() {
 				Limitation:   notificationAttemptLimitation(attempt.State),
 			})
 		}
+	}
+}
+
+// notificationAttemptLedgerPresent checks both the active journal and its one
+// retained rotation. It uses the pinned DeliveryRoot rather than reopening
+// the base path, and filepath.Join keeps the relative path valid on Windows.
+func (c *traceCollector) notificationAttemptLedgerPresent(agent string) (bool, error) {
+	for _, filename := range []string{
+		notificationattempt.LogFilename,
+		notificationattempt.LogFilename + notificationattempt.RotatedSuffix,
+	} {
+		path := filepath.Join("agents", agent, "receipts", filename)
+		if _, err := c.deliveryRoot.Stat(path); err == nil {
+			return true, nil
+		} else if !os.IsNotExist(err) {
+			return false, fmt.Errorf("stat %s: %w", c.relative(path), err)
+		}
+	}
+	return false, nil
+}
+
+func notificationAttemptTraceState(ledgerPresent, recordPresent, supported bool) string {
+	switch {
+	case recordPresent:
+		return traceNotificationRecordPresent
+	case ledgerPresent:
+		return traceNotificationLedgerPresentNoRecord
+	case !supported:
+		return traceNotificationLedgerUnsupported
+	default:
+		return traceNotificationLedgerAbsent
 	}
 }
 
@@ -619,6 +667,7 @@ func (c *traceCollector) finishLegs() {
 				leg.Detail = "current file visibility found; original directory sync durability is no_evidence"
 				leg.NextStep = "inspect retained send output before retrying; do not infer retry safety from current file presence"
 			case "notification":
+				leg.State = traceNotificationRecordPresent
 				// Requirement 3: distinguish "no attempt recorded" from "recording
 				// failed". If any evidence has StateWriteFailed, the prepared write
 				// itself errored (the ledger could not persist the record) but the
@@ -637,6 +686,22 @@ func (c *traceCollector) finishLegs() {
 			leg.Status = "no_evidence"
 			leg.Detail = noEvidence[name].detail
 			leg.NextStep = noEvidence[name].next
+			if name == "notification" {
+				leg.State = notificationAttemptTraceState(
+					c.notificationLedgerPresent,
+					false,
+					notificationattempt.LedgerSupported,
+				)
+				switch leg.State {
+				case traceNotificationLedgerAbsent:
+					leg.Detail = "no notification attempt ledger file was found"
+				case traceNotificationLedgerPresentNoRecord:
+					leg.Detail = "notification attempt ledger exists, but no record for this message was found"
+				case traceNotificationLedgerUnsupported:
+					leg.Detail = fmt.Sprintf("notification attempt ledger is not supported on %s; delivery is not recorded", runtime.GOOS)
+					leg.NextStep = "inspect provider or terminal output; do not infer notification outcome from this trace"
+				}
+			}
 		}
 		c.legs[name] = leg
 	}
@@ -691,6 +756,9 @@ func writeTraceText(result traceResult) error {
 	for _, name := range traceLegOrder {
 		leg := result.Legs[name]
 		line := fmt.Sprintf("  %-12s %s", name, leg.Status)
+		if leg.State != "" {
+			line += " [" + leg.State + "]"
+		}
 		if len(leg.Evidence) > 0 {
 			line += fmt.Sprintf(" (%d)", len(leg.Evidence))
 		}
