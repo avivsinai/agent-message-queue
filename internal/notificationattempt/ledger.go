@@ -1,6 +1,7 @@
 // Package notificationattempt persists a durable audit log of notification
-// write attempts (prepared → result) so that `amq trace` can report whether a
-// wake attempted to notify an agent and what the outcome was.
+// write attempts and their lifecycle so that `amq trace` and `amq doctor
+// --ops` can report whether a wake attempted to notify an agent and what the
+// outcome was.
 //
 // The ledger NEVER blocks delivery: if persisting the prepared record fails,
 // the wake injects anyway and the failure is recorded for trace to surface.
@@ -49,12 +50,12 @@ import (
 )
 
 const (
-	// SchemaVersion is the integer schema version of a Record. v1 is the
-	// initial shape. A versioned reader (readRecords) handles migration: if a
-	// future field set changes, bump this and add a migration branch in
-	// validateRecord. Do not remove the version check — an unversioned reader
+	// SchemaVersion is the current integer schema version of a Record. Version
+	// 2 adds ordered lifecycle state events while keeping the v1 prepared/result
+	// records readable. Do not remove the version check: an unversioned reader
 	// is how a schema change silently corrupts history.
-	SchemaVersion = 1
+	SchemaVersion       = 2
+	legacySchemaVersion = 1
 
 	PhasePrepared = "prepared"
 	PhaseResult   = "result"
@@ -74,6 +75,15 @@ const (
 	// and from an empty journal ("no attempt recorded").
 	StateWriteFailed = "write_failed"
 
+	// Lifecycle states are deliberately small. They describe AMQ's durable
+	// attempt state, not provider-side presentation or consumption.
+	StateAttempt  = "attempt"
+	StateDeferred = "deferred"
+	StateRetried  = "retried"
+	StateAccepted = "accepted"
+	StateFailed   = "failed"
+	StateInvalid  = "invalid"
+
 	LogFilename   = "notification-attempts.jsonl"
 	rotatedSuffix = ".1"
 
@@ -82,7 +92,8 @@ const (
 
 // Record is one append-only journal entry. The Phase field distinguishes a
 // prepared record (before injection) from a result record (after injection).
-// A result record carries the Outcome (written/failed).
+// Version 1 result records carry Outcome (written/failed). Version 2
+// lifecycle records carry State and Sequence instead.
 type Record struct {
 	Schema     int      `json:"schema"`
 	AttemptID  string   `json:"attempt_id"`
@@ -93,16 +104,30 @@ type Record struct {
 	RecordedAt string   `json:"recorded_at"`
 	Outcome    string   `json:"outcome,omitempty"`
 	Detail     string   `json:"detail,omitempty"`
+	State      string   `json:"state,omitempty"`
+	Sequence   uint64   `json:"sequence,omitempty"`
 }
 
 // Attempt is the joined view of a prepared record and its optional result,
-// used by trace. State is derived: written/failed if a result exists,
-// indeterminate if only prepared exists, write_failed if the prepared write
-// errored (see Writer.Prepare return).
+// used by trace and doctor. State is derived from the ordered lifecycle for a
+// v2 attempt, or from the v1 result outcome for a legacy attempt.
 type Attempt struct {
-	State    string  `json:"state"`
-	Prepared Record  `json:"prepared"`
-	Result   *Record `json:"result,omitempty"`
+	State    string   `json:"state"`
+	Prepared Record   `json:"prepared"`
+	Result   *Record  `json:"result,omitempty"`
+	History  []Record `json:"history,omitempty"`
+}
+
+// Lifecycle is the in-process handle for one durable notification attempt.
+// The handle keeps one AttemptID across deferred/retried delivery and is not
+// itself a source of authority; the append-only journal is.
+type Lifecycle struct {
+	AttemptID  string
+	MessageIDs []string
+	Agent      string
+	Mode       string
+	State      string
+	Sequence   uint64
 }
 
 // Writer appends prepared/result records to the per-agent notification log.
@@ -133,6 +158,64 @@ func NewWriter(root, agent string) *Writer {
 // attempt recorded". The ledger never blocks delivery: the caller injects
 // regardless of writeErr.
 func (w *Writer) Prepare(messageIDs []string, mode string) (record Record, writeErr error) {
+	return w.prepare(messageIDs, mode, "")
+}
+
+// Begin appends the initial v2 lifecycle event for one notification attempt.
+// The returned handle must be used for every later state transition so a
+// deferred attempt keeps the same AttemptID and cohort.
+func (w *Writer) Begin(messageIDs []string, mode string) (*Lifecycle, error) {
+	record, err := w.prepare(messageIDs, mode, StateAttempt)
+	if err != nil {
+		return nil, err
+	}
+	return &Lifecycle{
+		AttemptID:  record.AttemptID,
+		MessageIDs: append([]string{}, record.MessageIDs...),
+		Agent:      record.Agent,
+		Mode:       record.Mode,
+		State:      record.State,
+		Sequence:   record.Sequence,
+	}, nil
+}
+
+// Transition appends one ordered v2 lifecycle state. Invalid transitions are
+// rejected before writing, so a terminal state cannot silently be reopened.
+func (w *Writer) Transition(lifecycle *Lifecycle, state, detail string) error {
+	if lifecycle == nil || lifecycle.AttemptID == "" || len(lifecycle.MessageIDs) == 0 {
+		return fmt.Errorf("invalid notification attempt lifecycle: missing identity")
+	}
+	if lifecycle.Agent != "" && lifecycle.Agent != w.agent {
+		return fmt.Errorf("notification attempt agent mismatch: lifecycle %q writer %q", lifecycle.Agent, w.agent)
+	}
+	state = strings.TrimSpace(state)
+	if !validLifecycleState(state) {
+		return fmt.Errorf("notification attempt lifecycle state %q is invalid", state)
+	}
+	if !validLifecycleTransition(lifecycle.State, state) {
+		return fmt.Errorf("notification attempt lifecycle transition %q -> %q is invalid", lifecycle.State, state)
+	}
+	record := Record{
+		Schema:     SchemaVersion,
+		AttemptID:  lifecycle.AttemptID,
+		Phase:      PhaseResult,
+		MessageIDs: append([]string{}, lifecycle.MessageIDs...),
+		Agent:      w.agent,
+		Mode:       lifecycle.Mode,
+		RecordedAt: w.now().UTC().Format(time.RFC3339Nano),
+		Detail:     strings.TrimSpace(detail),
+		State:      state,
+		Sequence:   lifecycle.Sequence + 1,
+	}
+	if err := w.append(record); err != nil {
+		return fmt.Errorf("persist notification attempt transition: %w", err)
+	}
+	lifecycle.State = state
+	lifecycle.Sequence = record.Sequence
+	return nil
+}
+
+func (w *Writer) prepare(messageIDs []string, mode, state string) (record Record, writeErr error) {
 	if err := fsq.ValidateHandle(w.agent); err != nil {
 		return Record{}, fmt.Errorf("notification attempt agent: %w", err)
 	}
@@ -152,6 +235,7 @@ func (w *Writer) Prepare(messageIDs []string, mode string) (record Record, write
 		Agent:      w.agent,
 		Mode:       strings.TrimSpace(mode),
 		RecordedAt: w.now().UTC().Format(time.RFC3339Nano),
+		State:      strings.TrimSpace(state),
 	}
 	if err := w.append(record); err != nil {
 		return Record{}, fmt.Errorf("persist prepared notification attempt: %w", err)
@@ -370,12 +454,17 @@ func ListDeliveryRoot(root *fsq.DeliveryRoot, agent, messageID string) ([]Attemp
 	if err != nil {
 		return nil, err
 	}
-	resultByAttempt := make(map[string]Record)
 	preparedByAttempt := make(map[string]Record)
+	legacyResultByAttempt := make(map[string]Record)
+	lifecycleByAttempt := make(map[string][]Record)
 	for _, rec := range records {
 		switch rec.Phase {
 		case PhaseResult:
-			resultByAttempt[rec.AttemptID] = rec
+			if rec.State != "" {
+				lifecycleByAttempt[rec.AttemptID] = append(lifecycleByAttempt[rec.AttemptID], rec)
+			} else {
+				legacyResultByAttempt[rec.AttemptID] = rec
+			}
 		case PhasePrepared:
 			preparedByAttempt[rec.AttemptID] = rec
 		}
@@ -386,10 +475,22 @@ func ListDeliveryRoot(root *fsq.DeliveryRoot, agent, messageID string) ([]Attemp
 			continue
 		}
 		attempt := Attempt{State: StateIndeterminate, Prepared: prepared}
-		if result, ok := resultByAttempt[prepared.AttemptID]; ok {
+		if prepared.State != "" || len(lifecycleByAttempt[prepared.AttemptID]) > 0 {
+			var legacyResult *Record
+			if result, ok := legacyResultByAttempt[prepared.AttemptID]; ok {
+				resultCopy := result
+				legacyResult = &resultCopy
+			}
+			attempt = foldLifecycle(
+				prepared,
+				lifecycleByAttempt[prepared.AttemptID],
+				legacyResult,
+			)
+		} else if result, ok := legacyResultByAttempt[prepared.AttemptID]; ok {
 			resultCopy := result
 			attempt.State = result.Outcome
 			attempt.Result = &resultCopy
+			attempt.History = []Record{prepared, result}
 		}
 		attempts = append(attempts, attempt)
 	}
@@ -397,6 +498,51 @@ func ListDeliveryRoot(root *fsq.DeliveryRoot, agent, messageID string) ([]Attemp
 		return attempts[i].Prepared.RecordedAt < attempts[j].Prepared.RecordedAt
 	})
 	return attempts, nil
+}
+
+func foldLifecycle(prepared Record, events []Record, legacyResult *Record) Attempt {
+	attempt := Attempt{
+		State:    StateInvalid,
+		Prepared: prepared,
+		History:  append([]Record{prepared}, events...),
+	}
+	if prepared.State != StateAttempt || prepared.Sequence != 0 || prepared.Outcome != "" {
+		return attempt
+	}
+	if len(events) == 0 && legacyResult != nil {
+		if legacyResult.AttemptID != prepared.AttemptID ||
+			legacyResult.Agent != prepared.Agent ||
+			legacyResult.Mode != prepared.Mode ||
+			!sameStrings(legacyResult.MessageIDs, prepared.MessageIDs) {
+			return attempt
+		}
+		resultCopy := *legacyResult
+		attempt.State = resultCopy.Outcome
+		attempt.Result = &resultCopy
+		attempt.History = append(attempt.History, resultCopy)
+		return attempt
+	}
+	if legacyResult != nil {
+		return attempt
+	}
+	state := prepared.State
+	sequence := prepared.Sequence
+	for _, event := range events {
+		if event.AttemptID != prepared.AttemptID ||
+			event.Agent != prepared.Agent ||
+			event.Mode != prepared.Mode ||
+			!sameStrings(event.MessageIDs, prepared.MessageIDs) ||
+			event.Sequence != sequence+1 ||
+			!validLifecycleTransition(state, event.State) {
+			return attempt
+		}
+		state = event.State
+		sequence = event.Sequence
+		resultCopy := event
+		attempt.Result = &resultCopy
+	}
+	attempt.State = state
+	return attempt
 }
 
 // readRecords reads the notification log (and its .1 rotation, oldest first)
@@ -449,8 +595,8 @@ func readRecords(root *fsq.DeliveryRoot, agent string) ([]Record, error) {
 // unknown schema is rejected (fail-closed on history we cannot interpret
 // rather than rendering a wrong answer).
 func validateRecord(record Record, agent string) error {
-	if record.Schema != SchemaVersion {
-		return fmt.Errorf("notification attempt schema %d is not %d", record.Schema, SchemaVersion)
+	if record.Schema != SchemaVersion && record.Schema != legacySchemaVersion {
+		return fmt.Errorf("notification attempt schema %d is not %d or legacy %d", record.Schema, SchemaVersion, legacySchemaVersion)
 	}
 	if record.Agent != agent || record.AttemptID == "" || len(record.MessageIDs) == 0 || record.RecordedAt == "" {
 		return fmt.Errorf("invalid notification attempt record")
@@ -466,14 +612,45 @@ func validateRecord(record Record, agent string) error {
 		if record.Outcome != "" {
 			return fmt.Errorf("prepared record must not claim an outcome")
 		}
+		if record.State != "" {
+			if record.Schema != SchemaVersion || record.State != StateAttempt || record.Sequence != 0 {
+				return fmt.Errorf("prepared lifecycle record must start at state %q sequence 0", StateAttempt)
+			}
+		}
 	case PhaseResult:
-		if record.Outcome != OutcomeWritten && record.Outcome != OutcomeFailed {
+		if record.State != "" {
+			if record.Schema != SchemaVersion || record.Sequence == 0 || !validLifecycleState(record.State) || record.Outcome != "" {
+				return fmt.Errorf("invalid notification attempt lifecycle result")
+			}
+		} else if record.Outcome != OutcomeWritten && record.Outcome != OutcomeFailed {
 			return fmt.Errorf("result outcome must be %q or %q", OutcomeWritten, OutcomeFailed)
 		}
 	default:
 		return fmt.Errorf("notification attempt phase %q is invalid", record.Phase)
 	}
 	return nil
+}
+
+func validLifecycleState(state string) bool {
+	switch state {
+	case StateAttempt, StateDeferred, StateRetried, StateAccepted, StateFailed:
+		return true
+	default:
+		return false
+	}
+}
+
+func validLifecycleTransition(from, to string) bool {
+	switch from {
+	case StateAttempt:
+		return to == StateDeferred || to == StateAccepted || to == StateFailed
+	case StateDeferred:
+		return to == StateRetried
+	case StateRetried:
+		return to == StateDeferred || to == StateAccepted || to == StateFailed
+	default:
+		return false
+	}
 }
 
 func normalizedMessageIDs(messageIDs []string) []string {
@@ -498,6 +675,18 @@ func contains(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func sameStrings(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // ErrNoJournal is returned by helpers that need to distinguish "the journal

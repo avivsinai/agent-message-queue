@@ -28,6 +28,14 @@ type Adapter interface {
 	Inject(ctx context.Context, target string, payload string) error
 }
 
+// ProviderAcceptanceReporter is an opt-in marker for adapters whose Inject
+// implementation observes an application-level acceptance receipt. It is
+// deliberately separate from Capability.DeliverySubmitted: a submitted TTY
+// or file write does not prove that the provider accepted the payload.
+type ProviderAcceptanceReporter interface {
+	ReportsProviderAcceptance()
+}
+
 type Discoverer interface {
 	Discover(ctx context.Context) (string, error)
 }

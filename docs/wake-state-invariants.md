@@ -64,6 +64,34 @@ delete a newer target.
 
 Source anchors: `wake_target.go` and `wake_owner_storage_unix.go`.
 
+## `notification-attempts.jsonl`: durable notifier lifecycle audit
+
+**Owns:** the audit of one AMQ notification attempt for one message cohort.
+It does not own inbox delivery, provider consumption, terminal ownership, or
+the in-memory doorbell schedule. Schema 2 writes one prepared `attempt` event
+followed by ordered result states: `deferred`, `retried`, `accepted`, or
+`failed`. A deferred/retried sequence keeps the same AttemptID and cohort;
+`accepted` and `failed` are terminal. A later unread notification gets a new
+AttemptID. Schema 1 prepared/result records remain readable.
+
+**Commit domain:** each event is one O_APPEND JSON line in the single journal,
+with the existing rotation lock protecting rotation. The ledger is best effort:
+a journal write failure never blocks wake delivery. Readers fold only
+contiguous, valid lifecycle sequences. An out-of-order or contradictory
+sequence is `invalid`, never accepted evidence.
+
+**Transport taxonomy:** an external injector may claim provider dispatch only
+with stderr marker `AMQ_INJECT_PROGRESS=accepted` and exit zero. A deferred
+marker is a pre-dispatch busy result and produces no attention or acceptance
+claim. An uncertain marker wins over every other marker and enters recovery.
+Timeout is failed even when stderr contains deferred. A bare legacy exit zero
+is byte-write/uncertain evidence, not provider acceptance. Raw TIOCSTI remains
+`written` byte evidence only. `amq doctor --ops` projects the same folded state
+and warns for deferred/retried attempts.
+
+Source anchors: `internal/notificationattempt/ledger.go`, `wake.go`, and
+`doctor_ops.go`. The external-injector ambiguity is tracked in [#703](https://github.com/avivsinai/agent-message-queue/issues/703).
+
 Retirement results are exactly `refused`, `retired`, and
 `retired_with_residue`. The last is exit-0 success with a warning: ownership is
 already retired, but target/state cleanup failed or was skipped. The next

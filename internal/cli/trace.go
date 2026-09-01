@@ -432,8 +432,14 @@ func notificationAttemptLimitation(state string) string {
 		return "prepared without a durable result is indeterminate; it does not prove that notification bytes were written"
 	case notificationattempt.OutcomeWritten:
 		return "written means only that notifier bytes were accepted; it does not prove seen, displayed, or submitted"
+	case notificationattempt.StateAccepted:
+		return "accepted means the external injector declared provider dispatch; it does not prove that the provider displayed, submitted, or consumed the doorbell"
+	case notificationattempt.StateDeferred, notificationattempt.StateRetried:
+		return "deferred/retried means the provider reported pre-dispatch busy or transition; the unread cohort remains pending and no provider acceptance is claimed"
+	case notificationattempt.StateInvalid:
+		return "invalid lifecycle ordering is ignored for acceptance; inspect the append-only notification journal"
 	default:
-		return "failed records a notifier write failure; it does not establish any terminal or user-visible state"
+		return "failed is terminal injector failure or uncertainty; it does not establish any terminal or user-visible state and is not silently replayed"
 	}
 }
 

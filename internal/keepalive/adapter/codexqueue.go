@@ -39,6 +39,11 @@ type CodexQueue struct {
 
 func (CodexQueue) Name() string { return codexQueueName }
 
+// ReportsProviderAcceptance marks Codex Queue as an application-level
+// acceptance reporter. Inject returns nil only after the queue command
+// accepts the message.
+func (CodexQueue) ReportsProviderAcceptance() {}
+
 // Capability is the honest submitted vector. Queue enqueues to the thread's
 // existing writer; it never raises/focuses the app.
 func (CodexQueue) Capability() Capability {

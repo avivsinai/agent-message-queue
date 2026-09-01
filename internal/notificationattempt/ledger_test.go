@@ -424,6 +424,66 @@ func TestListEmptyJournalIsNotAnError(t *testing.T) {
 	}
 }
 
+func TestLifecycleRetainsAttemptIDAcrossDeferredRetryAccepted(t *testing.T) {
+	root := t.TempDir()
+	writer := NewWriter(root, "codex")
+	lifecycle, err := writer.Begin([]string{"msg-lifecycle"}, "external")
+	if err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	attemptID := lifecycle.AttemptID
+	for _, state := range []string{StateDeferred, StateRetried, StateAccepted} {
+		if err := writer.Transition(lifecycle, state, "test"); err != nil {
+			t.Fatalf("Transition(%q): %v", state, err)
+		}
+	}
+
+	attempts, err := List(root, "codex", "msg-lifecycle")
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(attempts) != 1 {
+		t.Fatalf("attempt count = %d, want 1", len(attempts))
+	}
+	attempt := attempts[0]
+	if attempt.State != StateAccepted || attempt.Prepared.AttemptID != attemptID {
+		t.Fatalf("attempt = %+v, want accepted attempt %q", attempt, attemptID)
+	}
+	if len(attempt.History) != 4 {
+		t.Fatalf("history length = %d, want attempt plus three transitions", len(attempt.History))
+	}
+	for index, record := range attempt.History {
+		if record.AttemptID != attemptID {
+			t.Fatalf("history[%d] attempt ID = %q, want %q", index, record.AttemptID, attemptID)
+		}
+		if index > 0 && record.Sequence != uint64(index) {
+			t.Fatalf("history[%d] sequence = %d, want %d", index, record.Sequence, index)
+		}
+	}
+}
+
+func TestLifecycleRejectsTerminalReopen(t *testing.T) {
+	root := t.TempDir()
+	writer := NewWriter(root, "codex")
+	lifecycle, err := writer.Begin([]string{"msg-terminal"}, "external")
+	if err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	if err := writer.Transition(lifecycle, StateAccepted, "done"); err != nil {
+		t.Fatalf("Transition accepted: %v", err)
+	}
+	if err := writer.Transition(lifecycle, StateDeferred, "must reject"); err == nil {
+		t.Fatal("terminal lifecycle reopened")
+	}
+	attempts, err := List(root, "codex", "msg-terminal")
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(attempts) != 1 || attempts[0].State != StateAccepted {
+		t.Fatalf("attempts = %+v, want one accepted attempt", attempts)
+	}
+}
+
 // itoa is a tiny dependency-free int→string to keep the test file self-contained.
 func itoa(i int) string {
 	if i == 0 {

@@ -74,4 +74,9 @@ durability as `no_evidence`; do not infer retry safety from current file
 presence.
 
 Notification success is never inferred from wake state, a mailbox file, or a
-delivery receipt. Phase A reports the notification leg as `no_evidence`.
+delivery receipt. Phase A reports the notification leg as `no_evidence` when
+the journal is absent. When present, schema 2 distinguishes `accepted`
+(explicit external-provider dispatch), `deferred`/`retried` (pre-dispatch busy
+with the cohort retained), and terminal `failed`; raw TIOCSTI and legacy
+injectors remain `written` byte evidence only. None of these states proves
+human or agent consumption.

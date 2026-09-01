@@ -3778,6 +3778,18 @@ func runWakeLoop(cfg wakeConfig) error {
 			}
 			return nil
 		}
+		if isWakeInjectorDeferred(err) {
+			// The provider refused before dispatch. The transport already
+			// retained the cohort and armed its input retry deadline; keep this
+			// loop silent and let that existing deadline drive the next attempt.
+			pendingNotify = false
+			clearTerminalAuthorityRetry()
+			scheduleDoorbellDeadline()
+			if cfg.debug {
+				_ = writeWakeDiagnostic(&cfg, "amq wake [debug]: provider deferred notification; retaining cohort for retry: %v\n", err)
+			}
+			return nil
+		}
 		var attentionErr *wakeAttentionDeliveryError
 		if errors.As(err, &attentionErr) &&
 			!isWakeTerminalAuthorityLoss(err) {

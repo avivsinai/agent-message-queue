@@ -250,6 +250,7 @@ func TestInjectViaHelperProcess(t *testing.T) {
 		_, _ = os.Stderr.WriteString("write inject-via helper output: " + err.Error() + "\n")
 		os.Exit(3)
 	}
+	_, _ = os.Stderr.WriteString("AMQ_INJECT_PROGRESS=accepted\n")
 	os.Exit(0)
 }
 
@@ -1703,7 +1704,7 @@ func TestNotifyNewMessages_InjectViaExitZeroAdvancesInterruptCooldown(t *testing
 
 	logPath := filepath.Join(root, "inject.log")
 	scriptPath := filepath.Join(root, "inject.sh")
-	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh\nprintf '%s\\n' \"$1\" >> "+logPath+"\n"), 0o755); err != nil {
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh\nprintf '%s\\n' \"$1\" >> "+logPath+"\nprintf 'AMQ_INJECT_PROGRESS=accepted\\n' >&2\n"), 0o755); err != nil {
 		t.Fatalf("write script: %v", err)
 	}
 

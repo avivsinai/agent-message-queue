@@ -857,6 +857,57 @@ func (undeclaredAdapter) Name() string                                 { return 
 func (undeclaredAdapter) Probe(context.Context, string) error          { return nil }
 func (undeclaredAdapter) Inject(context.Context, string, string) error { return nil }
 
+type injectProgressAdapter struct {
+	name string
+}
+
+func (a injectProgressAdapter) Name() string                               { return a.name }
+func (injectProgressAdapter) Probe(context.Context, string) error          { return nil }
+func (injectProgressAdapter) Inject(context.Context, string, string) error { return nil }
+
+type acceptedInjectProgressAdapter struct {
+	injectProgressAdapter
+}
+
+func (acceptedInjectProgressAdapter) ReportsProviderAcceptance() {}
+
+func TestInjectReportsProviderAcceptanceOnlyForOptInAdapters(t *testing.T) {
+	tests := []struct {
+		name       string
+		adapter    adapter.Adapter
+		wantMarker bool
+	}{
+		{
+			name:    "transport-only adapter",
+			adapter: injectProgressAdapter{name: "transport-only"},
+		},
+		{
+			name: "provider-ack adapter",
+			adapter: acceptedInjectProgressAdapter{
+				injectProgressAdapter: injectProgressAdapter{name: "provider-ack"},
+			},
+			wantMarker: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			adapters := adapter.NewRegistry(test.adapter)
+			var stderr bytes.Buffer
+			code := (App{Stdout: &bytes.Buffer{}, Stderr: &stderr, Adapters: &adapters}).Run(
+				context.Background(),
+				[]string{"inject", test.adapter.Name(), "target", "payload"},
+			)
+			if code != 0 {
+				t.Fatalf("inject code = %d, stderr = %q", code, stderr.String())
+			}
+			gotMarker := strings.Contains(stderr.String(), "AMQ_INJECT_PROGRESS=accepted")
+			if gotMarker != test.wantMarker {
+				t.Fatalf("accepted marker = %t, want %t; stderr = %q", gotMarker, test.wantMarker, stderr.String())
+			}
+		})
+	}
+}
+
 func TestRegisterCapabilityGateTreatsUndeclaredAdapterAsUnknown(t *testing.T) {
 	// An undeclared adapter is treated as UnknownCapability(): weakest on
 	// every ordered axis and requires a human. It is REFUSED under the default

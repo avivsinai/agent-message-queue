@@ -1355,6 +1355,7 @@ func TestWakeRepairFDInspectorHelperProcess(t *testing.T) {
 		_, _ = os.Stderr.WriteString("write repair descriptor inspection: " + err.Error() + "\n")
 		os.Exit(3)
 	}
+	_, _ = os.Stderr.WriteString("AMQ_INJECT_PROGRESS=accepted\n")
 	os.Exit(0)
 }
 
