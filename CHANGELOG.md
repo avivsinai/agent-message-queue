@@ -8,6 +8,23 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.77.0](https://github.com/avivsinai/agent-message-queue/compare/v0.76.0...v0.77.0) (2026-09-02)
+
+
+### Features
+
+* **wake:** add durable notification-attempt ledger ([#700](https://github.com/avivsinai/agent-message-queue/issues/700)) ([3601cb6](https://github.com/avivsinai/agent-message-queue/commit/3601cb6881ca49c388ef41008f75634eb295e7f0))
+* **wake:** add inject-via provider acceptance protocol ([#704](https://github.com/avivsinai/agent-message-queue/issues/704)) ([7d7490b](https://github.com/avivsinai/agent-message-queue/commit/7d7490b71648e82f56a75f7006c87550c89390eb))
+
+
+### Bug Fixes
+
+* **trace:** distinguish absent ledger from missing record ([#705](https://github.com/avivsinai/agent-message-queue/issues/705)) ([7a27195](https://github.com/avivsinai/agent-message-queue/commit/7a2719522cf927fb3b22106dcb5a788512cf0c8d))
+* **wake:** bind the inbox parent directory identity through repair ([#698](https://github.com/avivsinai/agent-message-queue/issues/698)) ([7f96d4c](https://github.com/avivsinai/agent-message-queue/commit/7f96d4ce438ed40299d1ecd763451738845eed72))
+* **wake:** close release-gate injector and ledger findings ([#706](https://github.com/avivsinai/agent-message-queue/issues/706)) ([c8837fb](https://github.com/avivsinai/agent-message-queue/commit/c8837fbc998b64216707a5e8cb525f56d4889a80))
+* **wake:** protect a published successor during cleanup and stop ([#695](https://github.com/avivsinai/agent-message-queue/issues/695)) ([8605c49](https://github.com/avivsinai/agent-message-queue/commit/8605c49ed318072760afb209d98034858e307842))
+* **wake:** record deferred interrupts and restore ledger write-failure evidence ([#709](https://github.com/avivsinai/agent-message-queue/issues/709)) ([2674059](https://github.com/avivsinai/agent-message-queue/commit/2674059388b0f285229b33e3ffcf4168ec3f95cf))
+
 ## [0.76.0](https://github.com/avivsinai/agent-message-queue/compare/v0.75.0...v0.76.0) (2026-08-31)
 
 
