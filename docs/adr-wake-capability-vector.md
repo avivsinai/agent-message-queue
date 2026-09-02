@@ -50,7 +50,9 @@ ladder. `AMQ_INJECT_PROGRESS=uncertain` wins over every other marker and enters
 recovery. Other nonzero exits and timeouts are terminal `failed` outcomes for
 the current AttemptID and are not silently replayed. A bare legacy exit zero is
 `written`/uncertain evidence, never an accepted provider dispatch. This
-transport gap is tracked in [#703](https://github.com/avivsinai/agent-message-queue/issues/703).
+transport gap is a documented raw-mode limitation
+([#703](https://github.com/avivsinai/agent-message-queue/issues/703)); the
+`--inject-via` acceptance protocol is the proof-capable path.
 
 ## v1 seats (docs + local inspect, 2026-08-20)
 

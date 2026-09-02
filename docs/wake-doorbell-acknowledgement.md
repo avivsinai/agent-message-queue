@@ -38,6 +38,8 @@ turns; standalone AMQ keeps the second fact as its safer default.
 - `AMQ_INJECT_PROGRESS=deferred` with a nonzero exit means the provider was
   busy or transitioning before dispatch. AMQ MUST retain the cohort, emit no
   terminal or attention fallback, and retry through the existing wake loop.
+- A timeout or deadline is classified `failed` before any marker is read —
+  timeout wins over every marker, including `uncertain`.
 - `AMQ_INJECT_PROGRESS=uncertain` wins over every other marker, including a
   deferred/uncertain pair. AMQ MUST enter existing recovery and MUST NOT
   replay the payload before durable inbox progress.
@@ -127,7 +129,9 @@ The same AttemptID and message cohort MUST be used across `deferred` and
 `retried` events. A terminal `accepted` or `failed` event closes that ID. A
 later unread re-notification starts a new AttemptID. The raw TIOCSTI path has
 only byte-write evidence (`written`); it never claims provider presentation or
-acceptance. This contract closes P1 issue [#703](https://github.com/avivsinai/agent-message-queue/issues/703).
+acceptance. Raw byte-level injection cannot observe provider rejection
+([#703](https://github.com/avivsinai/agent-message-queue/issues/703)); the
+injector protocol above is the acceptance-proof path.
 
 The announced state is process-local. A wake process replacement MAY produce
 one fresh doorbell for an unread cohort; cross-process exactly-once injection

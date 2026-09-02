@@ -411,16 +411,20 @@ func TestPrepareWriteFailureDoesNotBlockAndResultIsRecordable(t *testing.T) {
 	if err == nil {
 		t.Fatal("Prepare should fail on a nonexistent root")
 	}
-	if prepared.AttemptID != "" {
-		t.Fatalf("Prepare should return zero Record on failure, got AttemptID %q", prepared.AttemptID)
+	// Requirement 3 depends on the FAILED Prepare still handing back the
+	// attempt identity — the production caller reconstructs from
+	// prepared.AttemptID; a zero Record here silently kills the
+	// "recording failed" trace state.
+	if prepared.AttemptID == "" {
+		t.Fatal("Prepare must return the built identity with the error")
 	}
 
 	// The caller reconstructs a minimal prepared identity to record the
-	// result — the ledger must accept this so trace can surface "recording
-	// failed" rather than a silent hole.
+	// result — sourced from the failed Prepare's return, exactly as
+	// deliverWithNotificationLedger does.
 	reconstructed := Record{
-		AttemptID:  "recovered-from-write-failure",
-		MessageIDs: []string{"msg-1"},
+		AttemptID:  prepared.AttemptID,
+		MessageIDs: prepared.MessageIDs,
 		Agent:      "codex",
 	}
 	// This writes to a valid root now.
@@ -428,22 +432,145 @@ func TestPrepareWriteFailureDoesNotBlockAndResultIsRecordable(t *testing.T) {
 	if err := writer2.Result(reconstructed, OutcomeFailed, "prepared write failed: "+err.Error()); err != nil {
 		t.Fatalf("Result with reconstructed identity: %v", err)
 	}
-	// Only the result was recorded (no prepared) — it is not joined to a
-	// prepared, so it does not appear as an Attempt. This is correct: a
-	// result without a prepared is a write-failure marker, surfaced by trace
-	// via a separate path (the leg checks for orphan results). The key
-	// assertion is that the result WAS persisted (the write didn't silently
-	// drop it).
+	// The orphan result (no prepared record) must be persisted AND surfaced
+	// by List as a write-failed attempt — this is exactly the evidence trace
+	// renders as "recording failed" (requirement 3).
 	dir := filepath.Join(writer2.root, "agents", "codex", "receipts")
 	data, err := os.ReadFile(filepath.Join(dir, LogFilename))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(data), "recovered-from-write-failure") {
+	if !strings.Contains(string(data), prepared.AttemptID) {
 		t.Fatal("the write-failure result was not persisted — trace would see a silent hole")
 	}
 	if !strings.Contains(string(data), OutcomeFailed) {
 		t.Fatal("the write-failure result did not record outcome=failed")
+	}
+	attempts, err := List(writer2.root, "codex", "")
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(attempts) != 1 {
+		t.Fatalf("orphan write-failure result surfaced %d attempts, want 1", len(attempts))
+	}
+	if attempts[0].State != StateWriteFailed {
+		t.Fatalf("orphan result state = %q, want %q", attempts[0].State, StateWriteFailed)
+	}
+	if attempts[0].Prepared.AttemptID != prepared.AttemptID {
+		t.Fatalf("orphan attempt id = %q, want %q", attempts[0].Prepared.AttemptID, prepared.AttemptID)
+	}
+	// Filtering by an unrelated message must not surface it.
+	filtered, err := List(writer2.root, "codex", "other-msg")
+	if err != nil {
+		t.Fatalf("List filtered: %v", err)
+	}
+	if len(filtered) != 0 {
+		t.Fatalf("unrelated message filter surfaced %d attempts, want 0", len(filtered))
+	}
+}
+
+// Begin must hand back the built lifecycle identity WITH the append error —
+// the wake caller records a "recording failed" result from exactly that
+// identity (requirement 3). A Begin that returns nil on append failure makes
+// the v2 write-failure path unreachable.
+func TestBeginReturnsIdentityWithAppendError(t *testing.T) {
+	writer := NewWriter("/nonexistent/root/path", "codex")
+	lifecycle, err := writer.Begin([]string{"msg-v2-fail"}, "inject-via")
+	if err == nil {
+		t.Fatal("Begin should fail on a nonexistent root")
+	}
+	if lifecycle == nil || lifecycle.AttemptID == "" {
+		t.Fatal("Begin must return the built lifecycle identity with the error")
+	}
+	// Mirror the wake caller: persist the failure result from that identity
+	// into a working root, then List must surface it as write_failed.
+	writer2 := NewWriter(t.TempDir(), "codex")
+	reconstructed := Record{
+		AttemptID:  lifecycle.AttemptID,
+		MessageIDs: append([]string{}, lifecycle.MessageIDs...),
+		Agent:      lifecycle.Agent,
+		Mode:       lifecycle.Mode,
+	}
+	if err := writer2.Result(reconstructed, OutcomeFailed, "prepared write failed: "+err.Error()); err != nil {
+		t.Fatalf("Result from Begin identity: %v", err)
+	}
+	attempts, err := List(writer2.root, "codex", "msg-v2-fail")
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(attempts) != 1 || attempts[0].State != StateWriteFailed {
+		t.Fatalf("v2 write-failure evidence = %+v, want one write_failed attempt", attempts)
+	}
+}
+
+// A compliant injector can degrade to marker-less legacy mid-lifecycle: the
+// wake writer closes attempt→deferred→retried with a v1 written result. The
+// fold must accept that close as `written` — a naive model that rejects any
+// lifecycle+legacy mix as invalid corrupts honest history. A legacy result on
+// a TERMINAL lifecycle stays invalid.
+func TestFoldAcceptsLegacyCloseOfNonterminalLifecycle(t *testing.T) {
+	writer := NewWriter(t.TempDir(), "codex")
+	lifecycle, err := writer.Begin([]string{"msg-legacy-close"}, "inject-via")
+	if err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	if err := writer.Transition(lifecycle, StateDeferred, "provider busy"); err != nil {
+		t.Fatalf("Transition deferred: %v", err)
+	}
+	if err := writer.Transition(lifecycle, StateRetried, "provider retry attempted"); err != nil {
+		t.Fatalf("Transition retried: %v", err)
+	}
+	prepared := Record{
+		Schema:     SchemaVersion,
+		AttemptID:  lifecycle.AttemptID,
+		Phase:      PhasePrepared,
+		MessageIDs: append([]string{}, lifecycle.MessageIDs...),
+		Agent:      lifecycle.Agent,
+		Mode:       lifecycle.Mode,
+		State:      StateAttempt,
+	}
+	if err := writer.Result(prepared, OutcomeWritten, "injector exited 0 without AMQ_INJECT_PROGRESS=accepted"); err != nil {
+		t.Fatalf("Result legacy close: %v", err)
+	}
+	attempts, err := List(writer.root, "codex", "msg-legacy-close")
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(attempts) != 1 {
+		t.Fatalf("attempts = %d, want 1", len(attempts))
+	}
+	if attempts[0].State != OutcomeWritten {
+		t.Fatalf("legacy close of nonterminal lifecycle folded to %q, want %q", attempts[0].State, OutcomeWritten)
+	}
+
+	// Negative: the same legacy close on a TERMINAL lifecycle is contradictory
+	// history and must stay invalid.
+	writer2 := NewWriter(t.TempDir(), "codex")
+	term, err := writer2.Begin([]string{"msg-terminal"}, "inject-via")
+	if err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	if err := writer2.Transition(term, StateAccepted, ""); err != nil {
+		t.Fatalf("Transition accepted: %v", err)
+	}
+	termPrepared := Record{
+		Schema:     SchemaVersion,
+		AttemptID:  term.AttemptID,
+		Phase:      PhasePrepared,
+		MessageIDs: append([]string{}, term.MessageIDs...),
+		Agent:      term.Agent,
+		Mode:       term.Mode,
+		State:      StateAttempt,
+	}
+	if err := writer2.Result(termPrepared, OutcomeWritten, ""); err != nil {
+		t.Fatalf("Result on terminal: %v", err)
+	}
+	terminalAttempts, err := List(writer2.root, "codex", "msg-terminal")
+	if err != nil {
+		t.Fatalf("List terminal: %v", err)
+	}
+	if len(terminalAttempts) != 1 || terminalAttempts[0].State != StateInvalid {
+		t.Fatalf("legacy close of TERMINAL lifecycle = %q, want %q", terminalAttempts[0].State, StateInvalid)
 	}
 }
 

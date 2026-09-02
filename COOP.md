@@ -310,8 +310,10 @@ attention-only attempts continue through 4 and 8 minutes to a 15-minute cap.
 Retries never give up while the cohort remains unread. Contextual peer headers
 appear only in terminal output or attention; terminal input always uses the
 fixed doorbell. The delay starts after the prior injector process exits or times
-out. Because an external injector is arbitrary local code, retries can duplicate
-its side effects. Added messages join the pending cohort and share its next
+out. A protocol injector controls replay explicitly: only a `deferred` outcome
+is retried for an unchanged cohort; `failed` and `uncertain` are terminal until
+the inbox changes. A marker-less legacy injector is arbitrary local code and
+its retries can duplicate side effects. Added messages join the pending cohort and share its next
 notification without resetting the retry ladder. Input-delivery additions may
 pull a decayed deadline forward to the delivery floor 5 seconds after the last
 input attempt, or immediately if that floor has already passed; attention-only
