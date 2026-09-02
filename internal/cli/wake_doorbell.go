@@ -141,6 +141,37 @@ func (state *wakeDoorbellState) recordAttempt(now time.Time) {
 	}
 }
 
+// reconcileDeferredCohort mirrors plan()'s announced/parked expansion handling
+// for attempts recorded outside a plan() pass — the interrupt path injects
+// before the doorbell plan runs. A deferred provider outcome must leave the
+// retry ladder armed for cohort content the agent has not seen; without this,
+// a deferred attempt recorded in the announced or parked phase writes into
+// state nextDeadline() never reads and the doorbell stalls until an unrelated
+// inbox event.
+func (state *wakeDoorbellState) reconcileDeferredCohort(current map[string]os.FileInfo) {
+	if len(current) == 0 {
+		return
+	}
+	switch state.phase {
+	case wakeDoorbellAnnounced:
+		// A replaced physical file keeps its name but is a message the agent
+		// has never seen; it re-arms like an addition (same rule as plan()).
+		if wakeCohortExpanded(state.cohort, current) ||
+			wakeCohortReplacedInPlace(state.cohort, current) {
+			state.arm(current)
+		}
+	case wakeDoorbellParked:
+		if wakeCohortExpanded(state.cohort, current) {
+			state.cohort = snapshotWakeFileIdentities(current)
+			state.presentationConfirmed = false
+			if state.attemptBudget < wakeDoorbellLifetimeAttemptCap {
+				state.attemptBudget++
+				state.phase = wakeDoorbellRetrying
+			}
+		}
+	}
+}
+
 func (state *wakeDoorbellState) recordDeferredInputAttempt(now time.Time) {
 	state.recordAttemptWithBase(now, wakeDoorbellRetryBase, wakeDoorbellRetryMax)
 }

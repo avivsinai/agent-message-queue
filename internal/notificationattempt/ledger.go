@@ -146,12 +146,40 @@ type Writer struct {
 }
 
 func NewWriter(root, agent string) *Writer {
+	return NewWriterWithMaxBytes(root, agent, defaultMaxBytes)
+}
+
+// NewWriterWithMaxBytes is NewWriter with an explicit journal size cap.
+func NewWriterWithMaxBytes(root, agent string, maxBytes int64) *Writer {
 	return &Writer{
 		root:     root,
 		agent:    agent,
-		maxBytes: defaultMaxBytes,
+		maxBytes: maxBytes,
 		now:      time.Now,
 	}
+}
+
+// RotationError reports that the RECORD WAS PERSISTED but the size-capped
+// journal rotation around it failed or was refused. Callers distinguishing
+// "record lost" from "record kept, journal over its cap" must errors.As for
+// this type: treating a rotation-only error as a lost record fabricates a
+// failure result for an attempt whose prepared record exists (and the two
+// then join into a false `failed` attempt in trace).
+type RotationError struct {
+	Err error
+}
+
+func (e *RotationError) Error() string {
+	return fmt.Sprintf("notification attempt record persisted; journal rotation failed: %v", e.Err)
+}
+
+func (e *RotationError) Unwrap() error { return e.Err }
+
+// IsRotationOnly reports whether err means the append succeeded and only the
+// journal rotation failed.
+func IsRotationOnly(err error) bool {
+	var rotation *RotationError
+	return errors.As(err, &rotation)
 }
 
 // Prepare appends a prepared record and returns it. If the append fails, it
@@ -432,7 +460,12 @@ func (w *Writer) append(record Record) error {
 	if _, err := f.Write(data); err != nil {
 		return errors.Join(rotationErr, fmt.Errorf("write notification attempt record: %w", err))
 	}
-	return rotationErr
+	if rotationErr != nil {
+		// The record itself landed; only rotation failed. Type it so callers
+		// do not fabricate a lost-record failure for a persisted attempt.
+		return &RotationError{Err: rotationErr}
+	}
+	return nil
 }
 
 func (w *Writer) rotateJournal(root *fsq.DeliveryRoot, dir, fullPath string) error {
@@ -581,6 +614,8 @@ func foldLifecycle(prepared Record, events []Record, legacyResult *Record) Attem
 			legacyResult.Agent != prepared.Agent ||
 			legacyResult.Mode != prepared.Mode ||
 			!sameStrings(legacyResult.MessageIDs, prepared.MessageIDs) {
+			resultCopy := *legacyResult
+			attempt.History = append(attempt.History, resultCopy)
 			return attempt
 		}
 		resultCopy := *legacyResult
@@ -623,6 +658,10 @@ func foldLifecycle(prepared Record, events []Record, legacyResult *Record) Attem
 			attempt.History = append(attempt.History, resultCopy)
 			return attempt
 		}
+		// Invalid fold: keep the contradicting legacy record in History so
+		// trace shows the evidence, not just the `invalid` verdict.
+		resultCopy := *legacyResult
+		attempt.History = append(attempt.History, resultCopy)
 		return attempt
 	}
 	attempt.State = state
