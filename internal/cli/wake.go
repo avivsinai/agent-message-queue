@@ -713,15 +713,9 @@ func deliverWithNotificationLedger(
 		}
 		deliverErr := deliverNewMessageNotification(cfg, notice, deferForInput, currentPending)
 		if prepareErr != nil {
-			// The prepared write failed. Record a result with outcome=failed so
-			// trace can surface "recording failed" rather than a silent hole.
-			reconstructed := notificationattempt.Record{
-				AttemptID:  prepared.AttemptID,
-				MessageIDs: messageIDs,
-				Agent:      cfg.me,
-				Mode:       notificationAttemptMode(cfg),
-			}
-			if resultErr := writer.Result(reconstructed, notificationattempt.OutcomeFailed, "prepared write failed: "+prepareErr.Error()); resultErr != nil && cfg.debug {
+			// The prepared write failed. Record a failed result so trace can
+			// surface "recording failed" rather than a silent hole.
+			if resultErr := writer.WriteFailure(prepared.AttemptID, messageIDs, notificationAttemptMode(cfg), prepareErr); resultErr != nil && cfg.debug {
 				_, _ = fmt.Fprintf(os.Stderr, "amq wake [debug]: persist notification attempt result: %v\n", resultErr)
 			}
 			return deliverErr
@@ -767,13 +761,7 @@ func deliverWithNotificationLedger(
 			// Best-effort requirement-3 marker: record that an attempt was
 			// made but its prepared record could not be persisted, so trace
 			// reports "recording failed" instead of "no attempt recorded".
-			reconstructed := notificationattempt.Record{
-				AttemptID:  lifecycle.AttemptID,
-				MessageIDs: append([]string{}, lifecycle.MessageIDs...),
-				Agent:      lifecycle.Agent,
-				Mode:       lifecycle.Mode,
-			}
-			if resultErr := writer.Result(reconstructed, notificationattempt.OutcomeFailed, "prepared write failed: "+prepareErr.Error()); resultErr != nil && cfg.debug {
+			if resultErr := writer.WriteFailure(lifecycle.AttemptID, lifecycle.MessageIDs, lifecycle.Mode, prepareErr); resultErr != nil && cfg.debug {
 				_, _ = fmt.Fprintf(os.Stderr, "amq wake [debug]: persist notification attempt result: %v\n", resultErr)
 			}
 		}
