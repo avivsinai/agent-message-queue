@@ -90,7 +90,9 @@ is byte-write/uncertain evidence, not provider acceptance. Raw TIOCSTI remains
 and warns for deferred/retried attempts.
 
 Source anchors: `internal/notificationattempt/ledger.go`, `wake.go`, and
-`doctor_ops.go`. The external-injector ambiguity is tracked in [#703](https://github.com/avivsinai/agent-message-queue/issues/703).
+`doctor_ops.go`. Raw-mode injection carries byte-level evidence only
+([#703](https://github.com/avivsinai/agent-message-queue/issues/703)); provider
+acceptance requires the injector marker protocol.
 
 Retirement results are exactly `refused`, `retired`, and
 `retired_with_residue`. The last is exit-0 success with a warning: ownership is

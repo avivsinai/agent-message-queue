@@ -171,7 +171,21 @@ func (w *Writer) Prepare(messageIDs []string, mode string) (record Record, write
 func (w *Writer) Begin(messageIDs []string, mode string) (*Lifecycle, error) {
 	record, err := w.prepare(messageIDs, mode, StateAttempt)
 	if err != nil {
-		return nil, err
+		if record.AttemptID == "" {
+			// Identity could not even be built (validation/ID failure) — there
+			// is nothing for the caller to record against.
+			return nil, err
+		}
+		// The append failed but the identity exists: return it WITH the error
+		// so the caller can persist a "recording failed" result (requirement 3).
+		return &Lifecycle{
+			AttemptID:  record.AttemptID,
+			MessageIDs: append([]string{}, record.MessageIDs...),
+			Agent:      record.Agent,
+			Mode:       record.Mode,
+			State:      record.State,
+			Sequence:   record.Sequence,
+		}, err
 	}
 	return &Lifecycle{
 		AttemptID:  record.AttemptID,
@@ -242,7 +256,11 @@ func (w *Writer) prepare(messageIDs []string, mode, state string) (record Record
 		State:      strings.TrimSpace(state),
 	}
 	if err := w.append(record); err != nil {
-		return Record{}, fmt.Errorf("persist prepared notification attempt: %w", err)
+		// Return the BUILT record with the error: the caller needs the attempt
+		// identity to record a "recording failed" result (requirement 3 —
+		// trace must distinguish "recording failed" from "no attempt
+		// recorded"). A zero Record here would make that path unreachable.
+		return record, fmt.Errorf("persist prepared notification attempt: %w", err)
 	}
 	return record, nil
 }
@@ -488,6 +506,33 @@ func ListDeliveryRoot(root *fsq.DeliveryRoot, agent, messageID string) ([]Attemp
 		}
 	}
 	var attempts []Attempt
+	// An orphan result (no prepared record for its AttemptID) is the signature
+	// of a failed prepared write whose failure result WAS persisted
+	// (requirement 3). Surface it as a write-failed attempt instead of
+	// dropping the evidence.
+	for id, result := range legacyResultByAttempt {
+		if _, ok := preparedByAttempt[id]; ok {
+			continue
+		}
+		if messageID != "" && !contains(result.MessageIDs, messageID) {
+			continue
+		}
+		resultCopy := result
+		attempts = append(attempts, Attempt{
+			State: StateWriteFailed,
+			Prepared: Record{
+				Schema:     result.Schema,
+				AttemptID:  result.AttemptID,
+				Phase:      PhasePrepared,
+				MessageIDs: append([]string{}, result.MessageIDs...),
+				Agent:      result.Agent,
+				Mode:       result.Mode,
+				RecordedAt: result.RecordedAt,
+			},
+			Result:  &resultCopy,
+			History: []Record{result},
+		})
+	}
 	for _, prepared := range preparedByAttempt {
 		if messageID != "" && !contains(prepared.MessageIDs, messageID) {
 			continue
@@ -544,9 +589,6 @@ func foldLifecycle(prepared Record, events []Record, legacyResult *Record) Attem
 		attempt.History = append(attempt.History, resultCopy)
 		return attempt
 	}
-	if legacyResult != nil {
-		return attempt
-	}
 	state := prepared.State
 	sequence := prepared.Sequence
 	for _, event := range orderedEvents {
@@ -562,6 +604,26 @@ func foldLifecycle(prepared Record, events []Record, legacyResult *Record) Attem
 		sequence = event.Sequence
 		resultCopy := event
 		attempt.Result = &resultCopy
+	}
+	if legacyResult != nil {
+		// The wake writer deliberately closes a v2 lifecycle with a v1
+		// written/failed result when the injector degrades to marker-less
+		// legacy compatibility mid-lifecycle. Accept that close while the
+		// lifecycle is still nonterminal and the identity matches; a legacy
+		// result on top of a TERMINAL lifecycle is contradictory history and
+		// stays invalid.
+		if (state == StateDeferred || state == StateRetried) &&
+			legacyResult.AttemptID == prepared.AttemptID &&
+			legacyResult.Agent == prepared.Agent &&
+			legacyResult.Mode == prepared.Mode &&
+			sameStrings(legacyResult.MessageIDs, prepared.MessageIDs) {
+			resultCopy := *legacyResult
+			attempt.State = resultCopy.Outcome
+			attempt.Result = &resultCopy
+			attempt.History = append(attempt.History, resultCopy)
+			return attempt
+		}
+		return attempt
 	}
 	attempt.State = state
 	return attempt

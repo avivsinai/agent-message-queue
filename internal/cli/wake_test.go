@@ -1818,10 +1818,16 @@ func TestNotifyNewMessagesInjectViaInterruptClassifiesEveryOutcome(t *testing.T)
 		wantErr       bool
 		wantRecovery  bool
 		wantCooldown  bool
+		// wantDeferredLadder asserts the deferred interrupt armed the doorbell
+		// cohort and advanced the input retry ladder — a deferred outcome that
+		// records nothing either stalls the cohort forever (never armed) or
+		// hot-loops the injector against a busy provider (deadline never
+		// advanced).
+		wantDeferredLadder bool
 	}{
 		{name: "accepted", progress: "", wantOutcome: wakeInjectorOutcomeAccepted, wantCooldown: true},
 		{name: "legacy zero exit", progress: "legacy", wantOutcome: wakeInjectorOutcomeLegacy, wantCooldown: true},
-		{name: "deferred", progress: "deferred", wantOutcome: wakeInjectorOutcomeDeferred, wantErr: true},
+		{name: "deferred", progress: "deferred", wantOutcome: wakeInjectorOutcomeDeferred, wantErr: true, wantDeferredLadder: true},
 		{name: "uncertain", progress: "uncertain", wantOutcome: wakeInjectorOutcomeUncertain, wantRecovery: true},
 		{name: "timeout", progress: "timeout", injectTimeout: 20 * time.Millisecond, wantOutcome: wakeInjectorOutcomeFailed},
 	}
@@ -1881,6 +1887,20 @@ func TestNotifyNewMessagesInjectViaInterruptClassifiesEveryOutcome(t *testing.T)
 			}
 			if test.wantRecovery && !cfg.inputDelivery.acceptanceUncertain {
 				t.Fatal("uncertain interrupt did not retain acceptance uncertainty")
+			}
+			if test.wantDeferredLadder {
+				if len(cfg.doorbell.cohort) == 0 {
+					t.Fatal("deferred interrupt left the doorbell cohort unarmed (silent stall)")
+				}
+				if cfg.doorbell.attempts == 0 {
+					t.Fatal("deferred interrupt did not record an input retry attempt")
+				}
+				if !cfg.doorbell.nextAttempt.After(time.Now().Add(-time.Second)) || cfg.doorbell.nextAttempt.IsZero() {
+					t.Fatalf("deferred interrupt did not advance the retry deadline (nextAttempt=%v)", cfg.doorbell.nextAttempt)
+				}
+				if cfg.doorbell.reminderAttempts != 0 {
+					t.Fatalf("deferred interrupt spent the reminder budget (reminderAttempts=%d), want the input retry ladder", cfg.doorbell.reminderAttempts)
+				}
 			}
 		})
 	}

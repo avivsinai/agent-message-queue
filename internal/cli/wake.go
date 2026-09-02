@@ -599,7 +599,14 @@ func notifyNewMessages(cfg *wakeConfig) error {
 						time.Sleep(50 * time.Millisecond)
 					case wakeInjectorOutcomeDeferred:
 						// Provider-side busy/transition is replayable, but must not
-						// fall back to a second notification in this scan.
+						// fall back to a second notification in this scan. Record the
+						// deferral exactly like the notification path: arm the cohort
+						// if this was its first attempt and advance the input retry
+						// ladder with backoff, so the doorbell deadline stays armed
+						// (no silent stall) and the injector is not re-invoked hot
+						// against a provider that just declared busy. The ledger keeps
+						// tracking the payload notification, not this control effect.
+						recordWakeAttempt(cfg, cfg.wakeDoorbellNow(), currentPending, err)
 						return err
 					case wakeInjectorOutcomeUncertain:
 						// The key may have landed. Hold the exact completion debt
@@ -746,6 +753,20 @@ func deliverWithNotificationLedger(
 		if cfg.debug {
 			_, _ = fmt.Fprintf(os.Stderr, "amq wake [debug]: persist notification attempt: %v\n", prepareErr)
 		}
+		if lifecycle != nil && lifecycle.AttemptID != "" {
+			// Best-effort requirement-3 marker: record that an attempt was
+			// made but its prepared record could not be persisted, so trace
+			// reports "recording failed" instead of "no attempt recorded".
+			reconstructed := notificationattempt.Record{
+				AttemptID:  lifecycle.AttemptID,
+				MessageIDs: append([]string{}, lifecycle.MessageIDs...),
+				Agent:      lifecycle.Agent,
+				Mode:       lifecycle.Mode,
+			}
+			if resultErr := writer.Result(reconstructed, notificationattempt.OutcomeFailed, "prepared write failed: "+prepareErr.Error()); resultErr != nil && cfg.debug {
+				_, _ = fmt.Fprintf(os.Stderr, "amq wake [debug]: persist notification attempt result: %v\n", resultErr)
+			}
+		}
 		return deliverErr
 	}
 	if lifecycle == nil || cfg.lastInjectorOutcome == wakeInjectorOutcomeNone {
@@ -809,7 +830,10 @@ func ensureNotificationAttempt(
 	}
 	lifecycle, err := writer.Begin(messageIDs, mode)
 	if err != nil {
-		return nil, err
+		// Begin may return the built identity with the error (append failure).
+		// Pass it through so the caller can record "recording failed"
+		// (requirement 3), but do NOT cache an unpersisted lifecycle.
+		return lifecycle, err
 	}
 	cfg.notificationAttempt = lifecycle
 	cfg.notificationAttemptPhysical = snapshotWakeFileIdentities(currentPending)
