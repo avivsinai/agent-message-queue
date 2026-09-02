@@ -1,3 +1,8 @@
+//go:build darwin || linux
+
+// These tests drive the raw (TIOCSTI) v1 delivery path and reuse the unix-only
+// wake test helpers, so they share wake_unix_test.go's build constraint.
+
 package cli
 
 import (
