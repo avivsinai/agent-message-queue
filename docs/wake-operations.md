@@ -91,8 +91,10 @@ socket. Raw wakes are stopped from the owning terminal or supervisor.
 Retirement preserves mailbox contents. Exact lock removal is its commit point:
 a failure before that point is `refused`; a later target or state cleanup
 failure is `retired_with_residue`, an exit-0 success with a warning. The other
-successful result is `retired`. A replacement generation is never selected
-for cleanup.
+successful result is `retired`. A wake that removes its own lock while exiting
+from the retire's SIGTERM is `retired` once that exact process is gone; a lock
+that vanishes while the process stays alive is `refused`. A replacement
+generation is never selected for cleanup.
 
 The lifecycle boundaries are:
 

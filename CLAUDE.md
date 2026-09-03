@@ -243,9 +243,16 @@ Opt-in live proofs (`AMQ_CMUX_LIVE`, `AMQ_GHOSTTY_LIVE`, `AMQ_CLAUDE_LIVE`,
 part of `make ci`. Operator commands are in
 [the public launch API guide](docs/launch-api.md).
 
-Tests must include a negative case that a plausible wrong implementation would
-fail. For concurrency, routing, wake, and filesystem work, exercise the actual
-hostile boundary rather than only a helper or mock.
+Two kinds of test exist. One small happy-path test per user-visible behavior
+ships in the same PR as the behavior. A regression test for a defect observed
+in the field or in CI ships in the same PR as the fix and reproduces that
+failure and nothing more; its comment names the issue or CI run it came from.
+Both are deterministic and fast (under 5 seconds, no child process, no
+network) unless the observed defect lives at exactly that boundary and cannot
+be reproduced without it. Do not add speculative negative cases, mutation
+demonstrations, guard tests about tests, or tests for existing behavior with
+no observed defect. A slow or flaky test is deleted or rewritten to this bar,
+not tuned.
 
 ## Security
 
@@ -265,7 +272,7 @@ hostile boundary rather than only a helper or mock.
   `fix(wake): preserve replacement generation`.
 - Run `make ci` before committing and follow every pushed CI run to completion.
 - Do not commit placeholders, weaken a validator, regenerate goldens to hide a
-  defect, or split code from the tests that prove it.
+  defect, or split code from the test that ships with it.
 
 ## Documentation Policy
 
