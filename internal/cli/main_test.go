@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/avivsinai/agent-message-queue/internal/update"
@@ -17,11 +18,17 @@ const (
 
 var cliSecureTempRoot string
 
-// cliTestPackageDir is the package source directory the test process started
-// in. TestMain moves the process cwd to the secure temp root (issue #707), so
-// tests that need the repository (building ./cmd/amq, launchapi goldens, git
-// history) resolve it from here instead of from cwd.
-var cliTestPackageDir string
+// cliTestPackageDir is this package's source directory, resolved from the
+// test source file itself rather than from cwd. TestMain moves the process cwd
+// to the secure temp root (issue #707), so tests that need the repository
+// (building ./cmd/amq, launchapi goldens, git history) resolve it from here.
+var cliTestPackageDir = func() string {
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		panic("resolve cli test package directory: runtime.Caller failed")
+	}
+	return filepath.Dir(file)
+}()
 
 // cliTestRepoRoot returns the absolute repository root for tests that build or
 // read repository files. It does not depend on the process cwd.
@@ -84,7 +91,6 @@ func TestMain(m *testing.M) {
 		_ = os.RemoveAll(tempRoot)
 		os.Exit(1)
 	}
-	cliTestPackageDir = workingDir
 	// Run every test from the secure temp root, not the package directory.
 	// The cwd-local routing guard walks up from cwd to the Git top looking for
 	// an initialized .agent-mail; on a developer checkout that finds the live
