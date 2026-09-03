@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/avivsinai/agent-message-queue/internal/update"
@@ -16,6 +17,24 @@ const (
 )
 
 var cliSecureTempRoot string
+
+// cliTestPackageDir is this package's source directory, resolved from the
+// test source file itself rather than from cwd. TestMain moves the process cwd
+// to the secure temp root (issue #707), so tests that need the repository
+// (building ./cmd/amq, launchapi goldens, git history) resolve it from here.
+var cliTestPackageDir = func() string {
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		panic("resolve cli test package directory: runtime.Caller failed")
+	}
+	return filepath.Dir(file)
+}()
+
+// cliTestRepoRoot returns the absolute repository root for tests that build or
+// read repository files. It does not depend on the process cwd.
+func cliTestRepoRoot() (string, error) {
+	return filepath.Abs(filepath.Join(cliTestPackageDir, "..", ".."))
+}
 
 // TestMain gives the cli package a hermetic environment so the developer's shell
 // can't leak routing context into tests. The cross-tree send guard (issue #144)
@@ -66,6 +85,29 @@ func TestMain(m *testing.M) {
 	}
 
 	cliSecureTempRoot = tempRoot
+	workingDir, err := os.Getwd()
+	if err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "resolve test working directory: %v\n", err)
+		_ = os.RemoveAll(tempRoot)
+		os.Exit(1)
+	}
+	// Run every test from the secure temp root, not the package directory.
+	// The cwd-local routing guard walks up from cwd to the Git top looking for
+	// an initialized .agent-mail; on a developer checkout that finds the live
+	// queue, and every test that pins a temp root then fails with "active
+	// root ... conflicts with initialized repo-local root ... detected from
+	// cwd" (issue #707). CI never sees this because its checkout has no queue.
+	// The temp root sits directly under HOME, which the walk treats as global
+	// state rather than repo-local evidence, unless HOME is itself a Git
+	// worktree (dotfiles kept as a repo in HOME): then the walk's ceiling is
+	// HOME, ~/.amqrc becomes worktree-local authority, and the same refusal
+	// returns. TestProcessWorkingDirectoryIsIsolatedFromRepoLocalQueue names
+	// that state instead of letting pinned tests fail one by one.
+	if err := os.Chdir(tempRoot); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "isolate test working directory: %v\n", err)
+		_ = os.RemoveAll(tempRoot)
+		os.Exit(1)
+	}
 
 	// Isolate the update-check cache (issue #646 class) so tests that drive
 	// runUpgrade / the update Notifier never write through to the developer's
@@ -91,6 +133,10 @@ func TestMain(m *testing.M) {
 	}
 
 	exitCode := m.Run()
+	if err := os.Chdir(workingDir); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "restore test working directory: %v\n", err)
+		exitCode = 1
+	}
 	cliSecureTempRoot = ""
 	if err := os.RemoveAll(tempRoot); err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "remove secure test temp root: %v\n", err)

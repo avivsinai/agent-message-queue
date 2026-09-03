@@ -466,6 +466,22 @@ func (r *DeliveryRoot) EnsureAgentDirs(agent string) error {
 	return nil
 }
 
+// EnsureAgentDir creates exactly one mailbox leaf for an agent through the
+// pinned root capability. Writers that own a single leaf (for example the
+// notification-attempt ledger under receipts) use this instead of
+// EnsureAgentDirs so a routine write never recreates inbox or DLQ components
+// an operator or repair path deliberately removed or replaced. Mailbox
+// provisioning stays explicit: init, coop, and launch own EnsureAgentDirs.
+func (r *DeliveryRoot) EnsureAgentDir(agent string, leaf MailboxLeaf) error {
+	if err := ValidateHandle(agent); err != nil {
+		return err
+	}
+	if err := r.VerifyBase(); err != nil {
+		return err
+	}
+	return r.root.MkdirAll(MailboxRootRelativePath(agent, leaf), 0o700)
+}
+
 // LayoutState classifies a pinned root's top-level queue layout.
 type LayoutState int
 

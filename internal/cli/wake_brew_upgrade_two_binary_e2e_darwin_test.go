@@ -41,7 +41,7 @@ func TestTwoBinaryBrewUpgradeStaleLockRemoval(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds and executes two real amq binaries")
 	}
-	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	repoRoot, err := cliTestRepoRoot()
 	if err != nil {
 		t.Fatal(err)
 	}

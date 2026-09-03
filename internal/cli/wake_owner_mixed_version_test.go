@@ -23,7 +23,7 @@ const wakeStateLegacyWriterCommit = "fbc574a8d2b26b2526dfae5d9c5c87408007ac39"
 const wakeStateP2aRollbackCommit = "acd9e35511f0d5f13c9ed68349929bfcf488cecf"
 
 func TestOwnerFencePreservesClaimAgainstExactE370Binary(t *testing.T) {
-	repoRootCommand := exec.Command("git", "rev-parse", "--show-toplevel")
+	repoRootCommand := exec.Command("git", "-C", cliTestPackageDir, "rev-parse", "--show-toplevel")
 	repoRootOutput, err := repoRootCommand.CombinedOutput()
 	if err != nil {
 		t.Skipf("mixed-version git history unavailable: %v", err)
@@ -621,7 +621,7 @@ func runHistoricalDoctorOpsForCoexistenceTest(t *testing.T, binary, root string)
 
 func buildHistoricalAMQForWakeStateTest(t *testing.T, commit string) string {
 	t.Helper()
-	repoRootOutput, err := exec.Command("git", "rev-parse", "--show-toplevel").CombinedOutput()
+	repoRootOutput, err := exec.Command("git", "-C", cliTestPackageDir, "rev-parse", "--show-toplevel").CombinedOutput()
 	if err != nil {
 		t.Skipf("mixed-version git history unavailable: %v", err)
 	}

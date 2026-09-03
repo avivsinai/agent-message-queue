@@ -397,7 +397,7 @@ func TestCLIResultEncoderUsesPackageGoldens(t *testing.T) {
 		{file: "prepare_result_v1.golden.json", result: &launchapi.PrepareResultV1{}},
 		{file: "apply_result_v1.golden.json", result: &launchapi.ApplyResultV1{}},
 	} {
-		golden, err := os.ReadFile(filepath.Join("..", "..", "launchapi", "testdata", test.file))
+		golden, err := os.ReadFile(filepath.Join(cliTestPackageDir, "..", "..", "launchapi", "testdata", test.file))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -446,7 +446,7 @@ func dereferenceGoldenResult(result any) any {
 }
 
 func TestCLIAndPackageResultGoldenParity(t *testing.T) {
-	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	repoRoot, err := cliTestRepoRoot()
 	if err != nil {
 		t.Fatal(err)
 	}
