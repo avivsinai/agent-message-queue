@@ -11,17 +11,22 @@ import (
 )
 
 func TestProductionDefaultRootCallsStayBehindErrorPreservingRegistration(t *testing.T) {
-	entries, err := os.ReadDir(".")
+	// The process cwd is the secure temp root (TestMain, issue #707), so scan
+	// the package source directory explicitly. A scan of cwd here would see
+	// zero production files and pass this architecture guard vacuously.
+	entries, err := os.ReadDir(cliTestPackageDir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	files := token.NewFileSet()
+	scanned := 0
 	for _, entry := range entries {
 		name := entry.Name()
 		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
 			continue
 		}
-		file, err := parser.ParseFile(files, filepath.Join(".", name), nil, 0)
+		scanned++
+		file, err := parser.ParseFile(files, filepath.Join(cliTestPackageDir, name), nil, 0)
 		if err != nil {
 			t.Fatalf("parse %s: %v", name, err)
 		}
@@ -45,5 +50,8 @@ func TestProductionDefaultRootCallsStayBehindErrorPreservingRegistration(t *test
 				return true
 			})
 		}
+	}
+	if scanned == 0 {
+		t.Fatalf("scanned no production files under %s; the guard is vacuous", cliTestPackageDir)
 	}
 }

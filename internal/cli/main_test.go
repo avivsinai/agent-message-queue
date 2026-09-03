@@ -92,7 +92,11 @@ func TestMain(m *testing.M) {
 	// root ... conflicts with initialized repo-local root ... detected from
 	// cwd" (issue #707). CI never sees this because its checkout has no queue.
 	// The temp root sits directly under HOME, which the walk treats as global
-	// state rather than repo-local evidence.
+	// state rather than repo-local evidence, unless HOME is itself a Git
+	// worktree (dotfiles kept as a repo in HOME): then the walk's ceiling is
+	// HOME, ~/.amqrc becomes worktree-local authority, and the same refusal
+	// returns. TestProcessWorkingDirectoryIsIsolatedFromRepoLocalQueue names
+	// that state instead of letting pinned tests fail one by one.
 	if err := os.Chdir(tempRoot); err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "isolate test working directory: %v\n", err)
 		_ = os.RemoveAll(tempRoot)
