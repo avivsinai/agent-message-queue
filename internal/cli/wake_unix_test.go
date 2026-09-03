@@ -629,13 +629,16 @@ func stubSignalWakeProcess(t *testing.T, fn func(pid int, sig os.Signal) error) 
 	oldSignal := signalWakeProcess
 	oldGrace := wakeTerminateGrace
 	oldKillConfirm := wakeTerminateKillConfirm
+	oldGracefulExitConfirm := wakeTerminateGracefulExitConfirm
 	signalWakeProcess = fn
 	wakeTerminateGrace = 0
 	wakeTerminateKillConfirm = 0
+	wakeTerminateGracefulExitConfirm = 0
 	t.Cleanup(func() {
 		signalWakeProcess = oldSignal
 		wakeTerminateGrace = oldGrace
 		wakeTerminateKillConfirm = oldKillConfirm
+		wakeTerminateGracefulExitConfirm = oldGracefulExitConfirm
 	})
 }
 

@@ -18,12 +18,6 @@ var (
 	linuxPidfdPoll = pollLinuxPidfd
 
 	errWakeTerminationAuthorizationLost = errors.New("wake termination authorization lost")
-
-	// wakeTerminateGracefulExitConfirm bounds how long a retire waits for the
-	// exact signaled process to finish a graceful exit whose lock teardown
-	// already outlived wakeTerminateGrace (issue #714). It is a shutdown
-	// bound, not a kill-reap bound, even though today both are 3 s.
-	wakeTerminateGracefulExitConfirm = 3 * time.Second
 )
 
 // readWakeLockMetadata reads one exact lock generation without consulting the
@@ -473,8 +467,8 @@ func terminateWakePidfdWithSignalAuthorization(
 			// removes its lock before the process itself is gone, so this is
 			// the expected shape of a graceful stop that outlived the grace
 			// window, not an unknown actor. The pidfd is the exact process we
-			// signaled: if it exits within the kill-confirm window the retire
-			// succeeded and nothing else is signaled. Only a process that is
+			// signaled: if it exits within the graceful-exit confirm window
+			// the retire succeeded and nothing else is signaled. Only a process that is
 			// still alive with its lock gone is genuinely ambiguous, and that
 			// keeps the refusal (issue #714).
 			exited, pollErr := linuxPidfdPoll(pidfd, wakeTerminateGracefulExitConfirm)
