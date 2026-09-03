@@ -743,7 +743,7 @@ func TestCompactionPreservesSequencesAndLegacyRecords(t *testing.T) {
 		}
 		compacted = append(compacted, record)
 	}
-	if err := validateCompactedRecords(compacted, "codex"); err != nil {
+	if err := validateCompactedRecords(compacted, nil, "codex"); err != nil {
 		t.Fatalf("compacted records failed validation: %v", err)
 	}
 
@@ -811,7 +811,7 @@ func TestCompactionPreservesV2PreparedLegacyWrittenResult(t *testing.T) {
 	if len(records) != 2 || records[0].State != StateAttempt || records[1].Outcome != OutcomeWritten || records[1].State != "" {
 		t.Fatalf("compacted legacy pair = %#v, want v2 prepared plus written result", records)
 	}
-	if err := validateCompactedRecords(records, "codex"); err != nil {
+	if err := validateCompactedRecords(records, nil, "codex"); err != nil {
 		t.Fatalf("validate compacted legacy pair: %v", err)
 	}
 }
@@ -941,5 +941,127 @@ func TestAppendDoesNotRecreateRemovedInboxComponent(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(fsq.AgentBase(root, "claude"), "receipts", LogFilename)); err != nil {
 		t.Fatalf("receipts leaf not created on demand: %v", err)
+	}
+}
+
+func decodeCompactedForTest(t *testing.T, data []byte) []Record {
+	t.Helper()
+	var records []Record
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		var record Record
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			t.Fatalf("decode compacted record: %v", err)
+		}
+		records = append(records, record)
+	}
+	return records
+}
+
+// A TERMINAL v2 lifecycle followed by a legacy written result is
+// contradictory history: List folds it to `invalid` with the legacy record
+// kept as evidence. Compaction must not reduce that group to
+// [prepared, legacy], which re-folds as a clean `written` and launders the
+// contradiction through rotation (issue #708). Legacy `written` is never
+// acceptance, so this is an audit-fidelity defect, not a false accept.
+func TestCompactionPreservesContradictoryTerminalLegacyHistory(t *testing.T) {
+	prepared := Record{
+		Schema: SchemaVersion, AttemptID: "terminal-legacy", Phase: PhasePrepared,
+		MessageIDs: []string{"msg-terminal-legacy"}, Agent: "codex", Mode: "external",
+		RecordedAt: "2026-09-01T10:00:00Z", State: StateAttempt,
+	}
+	accepted := prepared
+	accepted.Phase = PhaseResult
+	accepted.RecordedAt = "2026-09-01T10:00:01Z"
+	accepted.State = StateAccepted
+	accepted.Sequence = 1
+	legacy := prepared
+	legacy.Phase = PhaseResult
+	legacy.RecordedAt = "2026-09-01T10:00:02Z"
+	legacy.State = ""
+	legacy.Outcome = OutcomeWritten
+	legacy.Detail = "contradicts terminal accepted"
+
+	before := foldLifecycle(prepared, []Record{accepted}, &legacy)
+	if before.State != StateInvalid {
+		t.Fatalf("fixture fold = %q, want invalid", before.State)
+	}
+
+	compacted, err := compactRecords([]Record{prepared, accepted, legacy}, "codex", 64*1024)
+	if err != nil {
+		t.Fatalf("compact contradictory history: %v", err)
+	}
+	records := decodeCompactedForTest(t, compacted)
+	if len(records) != 3 {
+		t.Fatalf("compacted contradictory group = %d records, want all 3 preserved: %#v", len(records), records)
+	}
+
+	root := t.TempDir()
+	dir := filepath.Join(root, "agents", "codex", "receipts")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, LogFilename+rotatedSuffix), compacted, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	attempts, err := List(root, "codex", "msg-terminal-legacy")
+	if err != nil {
+		t.Fatalf("List rotated contradictory history: %v", err)
+	}
+	if len(attempts) != 1 || attempts[0].State != StateInvalid {
+		t.Fatalf("post-rotation attempts = %#v, want one invalid attempt (compaction laundered the verdict)", attempts)
+	}
+	found := false
+	for _, rec := range attempts[0].History {
+		if rec.Detail == legacy.Detail {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("post-rotation history dropped the contradicting legacy record")
+	}
+}
+
+// The validator's contract is that compaction never changes a verdict. A
+// hand-built archive that reduces a contradictory (invalid) group to a clean
+// written pair must be rejected when the original is supplied, and an
+// invalid archive with no original context stays rejected as before.
+func TestValidateCompactedRecordsRejectsVerdictChange(t *testing.T) {
+	prepared := Record{
+		Schema: SchemaVersion, AttemptID: "laundered", Phase: PhasePrepared,
+		MessageIDs: []string{"msg-laundered"}, Agent: "codex", Mode: "external",
+		RecordedAt: "2026-09-01T10:00:00Z", State: StateAttempt,
+	}
+	accepted := prepared
+	accepted.Phase = PhaseResult
+	accepted.RecordedAt = "2026-09-01T10:00:01Z"
+	accepted.State = StateAccepted
+	accepted.Sequence = 1
+	legacy := prepared
+	legacy.Phase = PhaseResult
+	legacy.RecordedAt = "2026-09-01T10:00:02Z"
+	legacy.State = ""
+	legacy.Outcome = OutcomeWritten
+	original := map[string][]Record{"laundered": {prepared, accepted, legacy}}
+
+	laundered := []Record{prepared, legacy}
+	if err := validateCompactedRecords(laundered, original, "codex"); err == nil {
+		t.Fatal("validator accepted an archive that changed invalid -> written")
+	}
+	preserved := []Record{prepared, accepted, legacy}
+	if err := validateCompactedRecords(preserved, original, "codex"); err != nil {
+		t.Fatalf("validator rejected a verbatim-preserved contradictory group: %v", err)
+	}
+	if err := validateCompactedRecords(preserved, nil, "codex"); err == nil {
+		t.Fatal("validator accepted an invalid archive with no original context")
+	}
+	// Dropping the evidence record while staying invalid is also refused:
+	// the group must be preserved record-for-record.
+	partial := []Record{prepared, accepted, {
+		Schema: SchemaVersion, AttemptID: "laundered", Phase: PhaseResult,
+		MessageIDs: prepared.MessageIDs, Agent: "codex", Mode: "external",
+		RecordedAt: "2026-09-01T10:00:03Z", State: StateDeferred, Sequence: 2,
+	}}
+	if err := validateCompactedRecords(partial, original, "codex"); err == nil {
+		t.Fatal("validator accepted an invalid group that was not preserved verbatim")
 	}
 }

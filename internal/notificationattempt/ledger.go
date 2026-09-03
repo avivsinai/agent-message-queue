@@ -880,7 +880,7 @@ func compactRecords(records []Record, agent string, maxBytes int64) ([]byte, err
 		archive = candidate
 	}
 
-	if err := validateCompactedRecords(archive, agent); err != nil {
+	if err := validateCompactedRecords(archive, groups, agent); err != nil {
 		return nil, fmt.Errorf("validate compacted notification attempt journal: %w", err)
 	}
 	return marshalRecords(archive)
@@ -953,6 +953,23 @@ func compactAttempt(id string, records []Record) (compactedAttempt, error) {
 
 	if len(legacyResults) > 0 {
 		if legacy := matchingLegacyResult(*prepared, legacyResults); legacy != nil {
+			if len(lifecycle) > 0 {
+				// A legacy close on top of a lifecycle is only valid while the
+				// lifecycle is nonterminal. On a TERMINAL lifecycle it is
+				// contradictory history; compacting it to [prepared, legacy]
+				// would re-fold as a clean `written` and launder the
+				// contradiction (issue #708). Keep the whole group verbatim
+				// so the verdict and its evidence survive rotation.
+				orderedLifecycle := append([]Record{}, lifecycle...)
+				sort.SliceStable(orderedLifecycle, func(i, j int) bool {
+					return orderedLifecycle[i].Sequence < orderedLifecycle[j].Sequence
+				})
+				if foldLifecycle(*prepared, orderedLifecycle, legacy).State == StateInvalid {
+					result.records = append([]Record{}, ordered...)
+					result.mandatory = true
+					return result, nil
+				}
+			}
 			// Marker-less external injectors use a v2 prepared lifecycle record
 			// followed by a v1-shaped written result. Preserve that compatibility
 			// taxonomy instead of turning a terminal result back into "attempt".
@@ -1049,7 +1066,16 @@ func marshalRecords(records []Record) ([]byte, error) {
 	return data.Bytes(), nil
 }
 
-func validateCompactedRecords(records []Record, agent string) error {
+// validateCompactedRecords checks that a compacted archive is well formed and
+// that compaction did not change any attempt's verdict. original is the
+// pre-compaction record set grouped by attempt id; when it is nil (tests
+// validating a hand-built archive) an invalid fold is rejected outright.
+// When it is present, an invalid fold is acceptable only if the original
+// group also folded invalid and was preserved record-for-record: a
+// contradictory history is evidence that must survive rotation, while a
+// compaction that turns a valid history invalid, or an invalid one valid, is
+// a defect.
+func validateCompactedRecords(records []Record, original map[string][]Record, agent string) error {
 	for _, record := range records {
 		if err := validateRecord(record, agent); err != nil {
 			return err
@@ -1060,33 +1086,87 @@ func validateCompactedRecords(records []Record, agent string) error {
 		byAttempt[record.AttemptID] = append(byAttempt[record.AttemptID], record)
 	}
 	for attemptID, group := range byAttempt {
-		var prepared *Record
-		var events []Record
-		var legacy *Record
-		for i := range group {
-			record := group[i]
-			switch {
-			case record.Phase == PhasePrepared && prepared == nil:
-				copy := record
-				prepared = &copy
-			case record.Phase == PhaseResult && record.State != "":
-				events = append(events, record)
-			case record.Phase == PhaseResult && legacy == nil:
-				copy := record
-				legacy = &copy
-			}
-		}
-		if prepared == nil ||
-			prepared.Schema == legacySchemaVersion ||
-			(prepared.State == "" && len(events) == 0) {
+		folded, ok := foldRecordGroup(group)
+		if !ok {
 			continue
 		}
-		folded := foldLifecycle(*prepared, events, legacy)
+		var originalFolded *Attempt
+		if original != nil {
+			if originalGroup, present := original[attemptID]; present {
+				if attempt, ok := foldRecordGroup(deduplicateRecords(originalGroup)); ok {
+					originalFolded = &attempt
+				}
+			}
+		}
 		if folded.State == StateInvalid {
-			return fmt.Errorf("attempt %q has invalid compacted lifecycle", attemptID)
+			if originalFolded == nil || originalFolded.State != StateInvalid {
+				return fmt.Errorf("attempt %q has invalid compacted lifecycle", attemptID)
+			}
+			if !sameRecordIdentities(group, deduplicateRecords(original[attemptID])) {
+				return fmt.Errorf("attempt %q: contradictory history was not preserved verbatim through compaction", attemptID)
+			}
+			continue
+		}
+		if originalFolded != nil && originalFolded.State != folded.State {
+			return fmt.Errorf(
+				"attempt %q: compaction changed the verdict from %q to %q",
+				attemptID, originalFolded.State, folded.State,
+			)
 		}
 	}
 	return nil
+}
+
+// sameRecordIdentities reports whether two record groups carry exactly the
+// same records by deduplication identity (schema, attempt, sequence, phase).
+func sameRecordIdentities(left, right []Record) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	seen := make(map[recordDedupKey]int, len(left))
+	for _, record := range left {
+		seen[recordDeduplicationKey(record)]++
+	}
+	for _, record := range right {
+		key := recordDeduplicationKey(record)
+		if seen[key] == 0 {
+			return false
+		}
+		seen[key]--
+	}
+	return true
+}
+
+// foldRecordGroup folds one attempt's records the way List does. ok is false
+// when the group carries no v2 lifecycle information to fold (no prepared
+// record, a legacy v1 prepared record, or a v1-shaped pair with no events).
+func foldRecordGroup(group []Record) (Attempt, bool) {
+	var prepared *Record
+	var events []Record
+	var legacy *Record
+	for i := range group {
+		record := group[i]
+		switch {
+		case record.Phase == PhasePrepared && prepared == nil:
+			copy := record
+			prepared = &copy
+		case record.Phase == PhaseResult && record.State != "":
+			events = append(events, record)
+		case record.Phase == PhaseResult && legacy == nil:
+			copy := record
+			legacy = &copy
+		}
+	}
+	if prepared == nil ||
+		prepared.Schema == legacySchemaVersion ||
+		(prepared.State == "" && len(events) == 0) {
+		return Attempt{}, false
+	}
+	ordered := append([]Record{}, events...)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		return ordered[i].Sequence < ordered[j].Sequence
+	})
+	return foldLifecycle(*prepared, ordered, legacy), true
 }
 
 // validateRecord checks the invariants a Record must satisfy. SchemaVersion
