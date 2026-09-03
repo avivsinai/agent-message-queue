@@ -25,18 +25,23 @@ import (
 )
 
 var (
-	wakeTerminateGrace              = 100 * time.Millisecond
-	wakeTerminateKillConfirm        = 3 * time.Second
-	wakeBaselineTimeout             = 5 * time.Second
-	wakeBaselineSettle              = 50 * time.Millisecond
-	wakeTerminalAuthorityRetryDelay = 250 * time.Millisecond
-	wakeInboxScanRetryBase          = 250 * time.Millisecond
-	wakeInboxScanRetryMax           = 30 * time.Second
-	getWakeCurrentTTY               = getCurrentTTY
-	getWakeProcessSID               = unix.Getsid
-	wakeTIOCSTIAvailable            = func() bool { return tiocsti.Available() }
-	wakeInputIsTTY                  = func() bool { return tiocsti.IsTTY() }
-	newWakeBaselineEventWatcher     = newWakePathEventWatcher
+	wakeTerminateGrace       = 100 * time.Millisecond
+	wakeTerminateKillConfirm = 3 * time.Second
+	// wakeTerminateGracefulExitConfirm bounds how long a retire waits for the
+	// exact signaled process to finish a graceful exit whose lock teardown
+	// already outlived wakeTerminateGrace (issue #714). It is a shutdown
+	// bound, not a kill-reap bound, even though today both are 3 s.
+	wakeTerminateGracefulExitConfirm = 3 * time.Second
+	wakeBaselineTimeout              = 5 * time.Second
+	wakeBaselineSettle               = 50 * time.Millisecond
+	wakeTerminalAuthorityRetryDelay  = 250 * time.Millisecond
+	wakeInboxScanRetryBase           = 250 * time.Millisecond
+	wakeInboxScanRetryMax            = 30 * time.Second
+	getWakeCurrentTTY                = getCurrentTTY
+	getWakeProcessSID                = unix.Getsid
+	wakeTIOCSTIAvailable             = func() bool { return tiocsti.Available() }
+	wakeInputIsTTY                   = func() bool { return tiocsti.IsTTY() }
+	newWakeBaselineEventWatcher      = newWakePathEventWatcher
 )
 
 type fsnotifyWakeEventWatcher struct {
