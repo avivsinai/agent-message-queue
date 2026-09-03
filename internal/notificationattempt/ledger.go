@@ -309,7 +309,11 @@ func (w *Writer) append(record Record) error {
 	}
 	defer func() { _ = root.Close() }()
 
-	if err := root.EnsureAgentDirs(w.agent); err != nil {
+	// Only the receipts leaf: a ledger append must never recreate inbox or
+	// DLQ components as a side effect. A repaired wake writes its result
+	// record after the doorbell lands, and recreating a replaced inbox in
+	// that window races the operator (issue #707).
+	if err := root.EnsureAgentDir(w.agent, fsq.MailboxReceipts); err != nil {
 		return fmt.Errorf("ensure notification attempt receipts dir: %w", err)
 	}
 	dir := filepath.Join("agents", w.agent, "receipts")

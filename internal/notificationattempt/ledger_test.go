@@ -773,3 +773,46 @@ func itoa(i int) string {
 	}
 	return string(buf[pos:])
 }
+
+// A ledger append must create only its own receipts leaf. Recreating a
+// removed inbox component as a side effect of writing a receipt races the
+// operator or repair path that removed it (issue #707: the repaired wake's
+// result append re-created agents/codex/inbox between a test's rename and
+// mkdir, failing with "file exists" only under cross-package load). An
+// implementation that calls EnsureAgentDirs here fails this test.
+func TestAppendDoesNotRecreateRemovedInboxComponent(t *testing.T) {
+	root := t.TempDir()
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatalf("EnsureRootDirs: %v", err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+	inbox := filepath.Join(fsq.AgentBase(root, "codex"), "inbox")
+	if err := os.RemoveAll(inbox); err != nil {
+		t.Fatal(err)
+	}
+	dlq := filepath.Join(fsq.AgentBase(root, "codex"), "dlq")
+	if err := os.RemoveAll(dlq); err != nil {
+		t.Fatal(err)
+	}
+
+	writer := NewWriter(root, "codex")
+	if _, err := writer.Prepare([]string{"msg-no-recreate"}, "raw"); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+
+	for _, removed := range []string{inbox, dlq} {
+		if _, err := os.Lstat(removed); !os.IsNotExist(err) {
+			t.Fatalf("ledger append recreated removed mailbox component %s (err=%v)", removed, err)
+		}
+	}
+	// The receipts leaf itself is still created on demand for a fresh agent.
+	fresh := NewWriter(root, "claude")
+	if _, err := fresh.Prepare([]string{"msg-fresh"}, "raw"); err != nil {
+		t.Fatalf("Prepare for fresh agent: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(fsq.AgentBase(root, "claude"), "receipts", LogFilename)); err != nil {
+		t.Fatalf("receipts leaf not created on demand: %v", err)
+	}
+}

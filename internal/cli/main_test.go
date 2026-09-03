@@ -66,6 +66,25 @@ func TestMain(m *testing.M) {
 	}
 
 	cliSecureTempRoot = tempRoot
+	workingDir, err := os.Getwd()
+	if err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "resolve test working directory: %v\n", err)
+		_ = os.RemoveAll(tempRoot)
+		os.Exit(1)
+	}
+	// Run every test from the secure temp root, not the package directory.
+	// The cwd-local routing guard walks up from cwd to the Git top looking for
+	// an initialized .agent-mail; on a developer checkout that finds the live
+	// queue, and every test that pins a temp root then fails with "active
+	// root ... conflicts with initialized repo-local root ... detected from
+	// cwd" (issue #707). CI never sees this because its checkout has no queue.
+	// The temp root sits directly under HOME, which the walk treats as global
+	// state rather than repo-local evidence.
+	if err := os.Chdir(tempRoot); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "isolate test working directory: %v\n", err)
+		_ = os.RemoveAll(tempRoot)
+		os.Exit(1)
+	}
 
 	// Isolate the update-check cache (issue #646 class) so tests that drive
 	// runUpgrade / the update Notifier never write through to the developer's
@@ -91,6 +110,10 @@ func TestMain(m *testing.M) {
 	}
 
 	exitCode := m.Run()
+	if err := os.Chdir(workingDir); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "restore test working directory: %v\n", err)
+		exitCode = 1
+	}
 	cliSecureTempRoot = ""
 	if err := os.RemoveAll(tempRoot); err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "remove secure test temp root: %v\n", err)
