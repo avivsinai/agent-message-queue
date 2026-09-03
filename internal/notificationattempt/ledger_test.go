@@ -743,7 +743,7 @@ func TestCompactionPreservesSequencesAndLegacyRecords(t *testing.T) {
 		}
 		compacted = append(compacted, record)
 	}
-	if err := validateCompactedRecords(compacted, "codex"); err != nil {
+	if err := validateCompactedRecords(compacted, nil, "codex"); err != nil {
 		t.Fatalf("compacted records failed validation: %v", err)
 	}
 
@@ -811,7 +811,7 @@ func TestCompactionPreservesV2PreparedLegacyWrittenResult(t *testing.T) {
 	if len(records) != 2 || records[0].State != StateAttempt || records[1].Outcome != OutcomeWritten || records[1].State != "" {
 		t.Fatalf("compacted legacy pair = %#v, want v2 prepared plus written result", records)
 	}
-	if err := validateCompactedRecords(records, "codex"); err != nil {
+	if err := validateCompactedRecords(records, nil, "codex"); err != nil {
 		t.Fatalf("validate compacted legacy pair: %v", err)
 	}
 }
@@ -941,5 +941,307 @@ func TestAppendDoesNotRecreateRemovedInboxComponent(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(fsq.AgentBase(root, "claude"), "receipts", LogFilename)); err != nil {
 		t.Fatalf("receipts leaf not created on demand: %v", err)
+	}
+}
+
+func decodeCompactedForTest(t *testing.T, data []byte) []Record {
+	t.Helper()
+	var records []Record
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		var record Record
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			t.Fatalf("decode compacted record: %v", err)
+		}
+		records = append(records, record)
+	}
+	return records
+}
+
+// A TERMINAL v2 lifecycle followed by a legacy written result is
+// contradictory history: List folds it to `invalid` with the legacy record
+// kept as evidence. Compaction must not reduce that group to
+// [prepared, legacy], which re-folds as a clean `written` and launders the
+// contradiction through rotation (issue #708). Legacy `written` is never
+// acceptance, so this is an audit-fidelity defect, not a false accept.
+func TestCompactionPreservesContradictoryTerminalLegacyHistory(t *testing.T) {
+	prepared := Record{
+		Schema: SchemaVersion, AttemptID: "terminal-legacy", Phase: PhasePrepared,
+		MessageIDs: []string{"msg-terminal-legacy"}, Agent: "codex", Mode: "external",
+		RecordedAt: "2026-09-01T10:00:00Z", State: StateAttempt,
+	}
+	accepted := prepared
+	accepted.Phase = PhaseResult
+	accepted.RecordedAt = "2026-09-01T10:00:01Z"
+	accepted.State = StateAccepted
+	accepted.Sequence = 1
+	legacy := prepared
+	legacy.Phase = PhaseResult
+	legacy.RecordedAt = "2026-09-01T10:00:02Z"
+	legacy.State = ""
+	legacy.Outcome = OutcomeWritten
+	legacy.Detail = "contradicts terminal accepted"
+
+	before := foldLifecycle(prepared, []Record{accepted}, &legacy)
+	if before.State != StateInvalid {
+		t.Fatalf("fixture fold = %q, want invalid", before.State)
+	}
+
+	compacted, err := compactRecords([]Record{prepared, accepted, legacy}, "codex", 64*1024)
+	if err != nil {
+		t.Fatalf("compact contradictory history: %v", err)
+	}
+	records := decodeCompactedForTest(t, compacted)
+	if len(records) != 3 {
+		t.Fatalf("compacted contradictory group = %d records, want all 3 preserved: %#v", len(records), records)
+	}
+
+	root := t.TempDir()
+	dir := filepath.Join(root, "agents", "codex", "receipts")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, LogFilename+rotatedSuffix), compacted, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	attempts, err := List(root, "codex", "msg-terminal-legacy")
+	if err != nil {
+		t.Fatalf("List rotated contradictory history: %v", err)
+	}
+	if len(attempts) != 1 || attempts[0].State != StateInvalid {
+		t.Fatalf("post-rotation attempts = %#v, want one invalid attempt (compaction laundered the verdict)", attempts)
+	}
+	found := false
+	for _, rec := range attempts[0].History {
+		if rec.Detail == legacy.Detail {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("post-rotation history dropped the contradicting legacy record")
+	}
+}
+
+// The validator's contract is that compaction never changes a verdict. A
+// hand-built archive that reduces a contradictory (invalid) group to a clean
+// written pair must be rejected when the original is supplied, and an
+// invalid archive with no original context stays rejected as before.
+func TestValidateCompactedRecordsRejectsVerdictChange(t *testing.T) {
+	prepared := Record{
+		Schema: SchemaVersion, AttemptID: "laundered", Phase: PhasePrepared,
+		MessageIDs: []string{"msg-laundered"}, Agent: "codex", Mode: "external",
+		RecordedAt: "2026-09-01T10:00:00Z", State: StateAttempt,
+	}
+	accepted := prepared
+	accepted.Phase = PhaseResult
+	accepted.RecordedAt = "2026-09-01T10:00:01Z"
+	accepted.State = StateAccepted
+	accepted.Sequence = 1
+	legacy := prepared
+	legacy.Phase = PhaseResult
+	legacy.RecordedAt = "2026-09-01T10:00:02Z"
+	legacy.State = ""
+	legacy.Outcome = OutcomeWritten
+	original := map[string][]Record{"laundered": {prepared, accepted, legacy}}
+
+	laundered := []Record{prepared, legacy}
+	if err := validateCompactedRecords(laundered, original, "codex"); err == nil {
+		t.Fatal("validator accepted an archive that changed invalid -> written")
+	}
+	preserved := []Record{prepared, accepted, legacy}
+	if err := validateCompactedRecords(preserved, original, "codex"); err != nil {
+		t.Fatalf("validator rejected a verbatim-preserved contradictory group: %v", err)
+	}
+	if err := validateCompactedRecords(preserved, nil, "codex"); err == nil {
+		t.Fatal("validator accepted an invalid archive with no original context")
+	}
+	// Staying invalid is not enough: the contradicting legacy record must be
+	// retained, and nothing may be synthesized.
+	withoutEvidence := []Record{prepared, accepted, {
+		Schema: SchemaVersion, AttemptID: "laundered", Phase: PhaseResult,
+		MessageIDs: prepared.MessageIDs, Agent: "codex", Mode: "external",
+		RecordedAt: "2026-09-01T10:00:03Z", State: StateDeferred, Sequence: 2,
+	}}
+	if err := validateCompactedRecords(withoutEvidence, original, "codex"); err == nil {
+		t.Fatal("validator accepted an invalid group that dropped the contradicting legacy record")
+	}
+	synthesized := prepared
+	synthesized.Phase = PhaseResult
+	synthesized.State = StateFailed
+	synthesized.Sequence = 7
+	synthesized.RecordedAt = "2026-09-01T10:00:04Z"
+	if err := validateCompactedRecords([]Record{prepared, synthesized, legacy}, original, "codex"); err == nil {
+		t.Fatal("validator accepted a compacted record that never existed in the original")
+	}
+}
+
+// A long deferred/retried chain closed by a contradictory legacy result is
+// ordinary wake behavior plus one bad write. Preserving it verbatim would make
+// the group's mandatory footprint unbounded and block rotation; the bound
+// [prepared, latest event, legacy] must still fold invalid and keep the
+// legacy record. Sizing the cap below the verbatim footprint proves the bound
+// is what gets written.
+func TestCompactionBoundsContradictoryHistory(t *testing.T) {
+	prepared := Record{
+		Schema: SchemaVersion, AttemptID: "long-contradiction", Phase: PhasePrepared,
+		MessageIDs: []string{"msg-long"}, Agent: "codex", Mode: "external",
+		RecordedAt: "2026-09-01T10:00:00Z", State: StateAttempt,
+	}
+	records := []Record{prepared}
+	state := StateDeferred
+	for seq := uint64(1); seq <= 200; seq++ {
+		event := prepared
+		event.Phase = PhaseResult
+		event.State = state
+		event.Sequence = seq
+		event.RecordedAt = fmt.Sprintf("2026-09-01T10:%02d:%02dZ", seq/60, seq%60)
+		records = append(records, event)
+		if state == StateDeferred {
+			state = StateRetried
+		} else {
+			state = StateDeferred
+		}
+	}
+	accepted := prepared
+	accepted.Phase = PhaseResult
+	accepted.State = StateAccepted
+	accepted.Sequence = 201
+	accepted.RecordedAt = "2026-09-01T11:00:00Z"
+	legacy := prepared
+	legacy.Phase = PhaseResult
+	legacy.State = ""
+	legacy.Outcome = OutcomeWritten
+	legacy.RecordedAt = "2026-09-01T11:00:01Z"
+	legacy.Detail = "contradicts terminal accepted"
+	records = append(records, accepted, legacy)
+
+	compacted, err := compactRecords(records, "codex", 2048)
+	if err != nil {
+		t.Fatalf("compact long contradictory history under a tight cap: %v", err)
+	}
+	group := decodeCompactedForTest(t, compacted)
+	if len(group) != 3 || group[1].Sequence != 201 || group[2].Outcome != OutcomeWritten {
+		t.Fatalf("bounded contradictory group = %#v, want [prepared, accepted(201), legacy]", group)
+	}
+	folded, ok := foldRecordGroup(group)
+	if !ok || folded.State != StateInvalid {
+		t.Fatalf("bounded group folds to %q, want invalid", folded.State)
+	}
+}
+
+// A legacy result whose identity does not match the prepared record (message
+// set drift) is invalid in List. Compaction used to drop the unmatched record
+// and yield [prepared], which re-folds as `attempt`; with the verdict gate that
+// would fail every rotation forever. The group must keep the legacy record,
+// with or without lifecycle events.
+func TestCompactionPreservesUnmatchedLegacyResult(t *testing.T) {
+	prepared := Record{
+		Schema: SchemaVersion, AttemptID: "unmatched-legacy", Phase: PhasePrepared,
+		MessageIDs: []string{"msg-a"}, Agent: "codex", Mode: "external",
+		RecordedAt: "2026-09-01T10:00:00Z", State: StateAttempt,
+	}
+	legacy := prepared
+	legacy.Phase = PhaseResult
+	legacy.State = ""
+	legacy.MessageIDs = []string{"msg-a", "msg-b"}
+	legacy.Outcome = OutcomeWritten
+	legacy.RecordedAt = "2026-09-01T10:00:02Z"
+	deferred := prepared
+	deferred.Phase = PhaseResult
+	deferred.State = StateDeferred
+	deferred.Sequence = 1
+	deferred.RecordedAt = "2026-09-01T10:00:01Z"
+
+	for name, records := range map[string][]Record{
+		"no events":   {prepared, legacy},
+		"with events": {prepared, deferred, legacy},
+	} {
+		compacted, err := compactRecords(records, "codex", 64*1024)
+		if err != nil {
+			t.Fatalf("%s: compact unmatched legacy result: %v", name, err)
+		}
+		group := decodeCompactedForTest(t, compacted)
+		if len(group) != len(records) || !hasLegacyResult(group) {
+			t.Fatalf("%s: compacted group = %#v, want the unmatched legacy record retained", name, group)
+		}
+		folded, ok := foldRecordGroup(group)
+		if !ok || folded.State != StateInvalid {
+			t.Fatalf("%s: compacted group folds to %q, want invalid", name, folded.State)
+		}
+	}
+}
+
+// A corrupt lifecycle with no legacy result (an illegal transition, or the
+// sequence reuse the pre-#710 Transition defect produced) is invalid in List. Compaction used to reduce it to
+// [prepared], re-folding as a clean `attempt`; the evidence must survive.
+func TestCompactionPreservesCorruptLifecycleVerbatim(t *testing.T) {
+	prepared := Record{
+		Schema: SchemaVersion, AttemptID: "sequence-reuse", Phase: PhasePrepared,
+		MessageIDs: []string{"msg-reuse"}, Agent: "codex", Mode: "external",
+		RecordedAt: "2026-09-01T10:00:00Z", State: StateAttempt,
+	}
+	// attempt -> retried is an illegal transition; List renders it invalid.
+	gap := prepared
+	gap.Phase = PhaseResult
+	gap.State = StateRetried
+	gap.Sequence = 1
+	gap.RecordedAt = "2026-09-01T10:00:01Z"
+
+	records := []Record{prepared, gap}
+	compacted, err := compactRecords(records, "codex", 64*1024)
+	if err != nil {
+		t.Fatalf("compact corrupt lifecycle: %v", err)
+	}
+	group := decodeCompactedForTest(t, compacted)
+	if len(group) != 2 {
+		t.Fatalf("corrupt lifecycle compacted to %#v, want both records preserved", group)
+	}
+	folded, ok := foldRecordGroup(group)
+	if !ok || folded.State != StateInvalid {
+		t.Fatalf("corrupt lifecycle compacted group folds to %q, want invalid", folded.State)
+	}
+}
+
+// The valid legacy-close shape must keep compacting: a nonterminal lifecycle
+// (deferred/retried) closed by a matching legacy written result is the
+// marker-less degradation path, not a contradiction. It compacts to
+// [prepared, legacy] and re-folds `written`. An implementation that preserves
+// every lifecycle-plus-legacy group verbatim passes the contradiction tests
+// and fails this one.
+func TestCompactionStillReducesValidNonterminalLegacyClose(t *testing.T) {
+	prepared := Record{
+		Schema: SchemaVersion, AttemptID: "nonterminal-legacy", Phase: PhasePrepared,
+		MessageIDs: []string{"msg-nonterminal"}, Agent: "codex", Mode: "external",
+		RecordedAt: "2026-09-01T10:00:00Z", State: StateAttempt,
+	}
+	records := []Record{prepared}
+	for seq, state := range []string{StateDeferred, StateRetried, StateDeferred} {
+		event := prepared
+		event.Phase = PhaseResult
+		event.State = state
+		event.Sequence = uint64(seq + 1)
+		event.RecordedAt = fmt.Sprintf("2026-09-01T10:00:0%dZ", seq+1)
+		records = append(records, event)
+	}
+	legacy := prepared
+	legacy.Phase = PhaseResult
+	legacy.State = ""
+	legacy.Outcome = OutcomeWritten
+	legacy.RecordedAt = "2026-09-01T10:00:09Z"
+	records = append(records, legacy)
+
+	if before := foldLifecycle(prepared, records[1:4], &legacy); before.State != OutcomeWritten {
+		t.Fatalf("fixture fold = %q, want written", before.State)
+	}
+	compacted, err := compactRecords(records, "codex", 64*1024)
+	if err != nil {
+		t.Fatalf("compact valid legacy close: %v", err)
+	}
+	group := decodeCompactedForTest(t, compacted)
+	if len(group) != 2 || group[0].Phase != PhasePrepared || group[1].Outcome != OutcomeWritten {
+		t.Fatalf("valid legacy close compacted to %#v, want [prepared, legacy]", group)
+	}
+	folded, ok := foldRecordGroup(group)
+	if !ok || folded.State != OutcomeWritten {
+		t.Fatalf("compacted valid legacy close folds to %q, want written", folded.State)
 	}
 }

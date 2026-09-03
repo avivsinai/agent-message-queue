@@ -857,7 +857,7 @@ func compactRecords(records []Record, agent string, maxBytes int64) ([]byte, err
 	}
 	if int64(len(mandatoryData)) > maxBytes {
 		return nil, fmt.Errorf(
-			"notification attempt journal compaction needs %d bytes for nonterminal attempts, cap is %d",
+			"notification attempt journal compaction needs %d bytes for nonterminal attempts and preserved contradictory history, cap is %d",
 			len(mandatoryData), maxBytes,
 		)
 	}
@@ -880,7 +880,7 @@ func compactRecords(records []Record, agent string, maxBytes int64) ([]byte, err
 		archive = candidate
 	}
 
-	if err := validateCompactedRecords(archive, agent); err != nil {
+	if err := validateCompactedRecords(archive, groups, agent); err != nil {
 		return nil, fmt.Errorf("validate compacted notification attempt journal: %w", err)
 	}
 	return marshalRecords(archive)
@@ -951,15 +951,31 @@ func compactAttempt(id string, records []Record) (compactedAttempt, error) {
 		return result, nil
 	}
 
+	orderedLifecycle := append([]Record{}, lifecycle...)
+	sort.SliceStable(orderedLifecycle, func(i, j int) bool {
+		return orderedLifecycle[i].Sequence < orderedLifecycle[j].Sequence
+	})
 	if len(legacyResults) > 0 {
-		if legacy := matchingLegacyResult(*prepared, legacyResults); legacy != nil {
+		// List keeps the LAST legacy result it reads for an attempt, so fold
+		// against that record, not the last matching one: a matching legacy
+		// result followed by an unmatched one renders invalid in trace.
+		legacy := legacyResults[len(legacyResults)-1]
+		if foldLifecycle(*prepared, orderedLifecycle, &legacy).State != StateInvalid {
 			// Marker-less external injectors use a v2 prepared lifecycle record
 			// followed by a v1-shaped written result. Preserve that compatibility
 			// taxonomy instead of turning a terminal result back into "attempt".
-			result.records = []Record{*prepared, *legacy}
+			result.records = []Record{*prepared, legacy}
 			return result, nil
 		}
-		result.records = []Record{*prepared}
+		// Contradictory history (a legacy close on a terminal lifecycle, or a
+		// legacy result whose identity does not match). Compacting it to
+		// [prepared, legacy] or [prepared] would re-fold as a clean verdict
+		// and launder the contradiction through rotation (issue #708). Keep
+		// the verdict AND the contradicting record, bounded: prepared, the
+		// latest lifecycle event, and the legacy record re-fold invalid for
+		// every contradiction class; fall back to the verbatim group only if
+		// the lifecycle itself is corrupt enough that the bound would not.
+		result.records = preserveContradictoryGroup(*prepared, orderedLifecycle, legacy, ordered)
 		result.mandatory = true
 		return result, nil
 	}
@@ -969,13 +985,12 @@ func compactAttempt(id string, records []Record) (compactedAttempt, error) {
 		return result, nil
 	}
 
-	orderedLifecycle := append([]Record{}, lifecycle...)
-	sort.SliceStable(orderedLifecycle, func(i, j int) bool {
-		return orderedLifecycle[i].Sequence < orderedLifecycle[j].Sequence
-	})
 	folded := foldLifecycle(*prepared, orderedLifecycle, nil)
 	if folded.State == StateInvalid {
-		result.records = []Record{*prepared}
+		// A corrupt lifecycle (sequence reuse, illegal transition) renders
+		// invalid in trace. Dropping the events would re-fold as a clean
+		// `attempt` and hide the corruption; keep the evidence verbatim.
+		result.records = append([]Record{}, ordered...)
 		result.mandatory = true
 		return result, nil
 	}
@@ -1049,7 +1064,17 @@ func marshalRecords(records []Record) ([]byte, error) {
 	return data.Bytes(), nil
 }
 
-func validateCompactedRecords(records []Record, agent string) error {
+// validateCompactedRecords checks that a compacted archive is well formed and
+// that compaction did not change any attempt's verdict. original is the
+// pre-compaction record set grouped by attempt id; when it is nil (tests
+// validating a hand-built archive) an invalid fold is rejected outright.
+// When it is present, an invalid fold is acceptable only if the original
+// group also folded invalid and the compacted group is drawn from the
+// original records with its contradicting legacy record retained: a
+// contradictory history is evidence that must survive rotation, while a
+// compaction that turns a valid history invalid, or an invalid one valid, is
+// a defect.
+func validateCompactedRecords(records []Record, original map[string][]Record, agent string) error {
 	for _, record := range records {
 		if err := validateRecord(record, agent); err != nil {
 			return err
@@ -1060,33 +1085,120 @@ func validateCompactedRecords(records []Record, agent string) error {
 		byAttempt[record.AttemptID] = append(byAttempt[record.AttemptID], record)
 	}
 	for attemptID, group := range byAttempt {
-		var prepared *Record
-		var events []Record
-		var legacy *Record
-		for i := range group {
-			record := group[i]
-			switch {
-			case record.Phase == PhasePrepared && prepared == nil:
-				copy := record
-				prepared = &copy
-			case record.Phase == PhaseResult && record.State != "":
-				events = append(events, record)
-			case record.Phase == PhaseResult && legacy == nil:
-				copy := record
-				legacy = &copy
-			}
-		}
-		if prepared == nil ||
-			prepared.Schema == legacySchemaVersion ||
-			(prepared.State == "" && len(events) == 0) {
+		folded, ok := foldRecordGroup(group)
+		if !ok {
 			continue
 		}
-		folded := foldLifecycle(*prepared, events, legacy)
+		var originalFolded *Attempt
+		var originalGroup []Record
+		if original != nil {
+			if candidate, present := original[attemptID]; present {
+				originalGroup = deduplicateRecords(candidate)
+				if attempt, ok := foldRecordGroup(originalGroup); ok {
+					originalFolded = &attempt
+				}
+			}
+		}
 		if folded.State == StateInvalid {
-			return fmt.Errorf("attempt %q has invalid compacted lifecycle", attemptID)
+			if originalFolded == nil || originalFolded.State != StateInvalid {
+				return fmt.Errorf("attempt %q has invalid compacted lifecycle", attemptID)
+			}
+			// A preserved contradiction must be drawn from the original records
+			// (nothing synthesized) and must keep the contradicting legacy
+			// record when the original had one: the verdict without its
+			// evidence is not audit history.
+			if !recordGroupIsSubset(group, originalGroup) ||
+				(hasLegacyResult(originalGroup) && !hasLegacyResult(group)) {
+				return fmt.Errorf("attempt %q: contradictory history lost its evidence through compaction", attemptID)
+			}
+			continue
+		}
+		if originalFolded != nil && originalFolded.State != folded.State {
+			return fmt.Errorf(
+				"attempt %q: compaction changed the verdict from %q to %q",
+				attemptID, originalFolded.State, folded.State,
+			)
 		}
 	}
 	return nil
+}
+
+// preserveContradictoryGroup returns the smallest record set that still folds
+// to the same invalid verdict as the full group and retains the contradicting
+// legacy record: prepared, the latest lifecycle event (if any), and the legacy
+// result. When even that bound would fold valid (the lifecycle itself is
+// corrupt in a way the bound hides), the full group is returned verbatim.
+func preserveContradictoryGroup(prepared Record, orderedLifecycle []Record, legacy Record, full []Record) []Record {
+	bounded := []Record{prepared}
+	var boundedEvents []Record
+	if len(orderedLifecycle) > 0 {
+		latest := orderedLifecycle[len(orderedLifecycle)-1]
+		bounded = append(bounded, latest)
+		boundedEvents = []Record{latest}
+	}
+	bounded = append(bounded, legacy)
+	if foldLifecycle(prepared, boundedEvents, &legacy).State == StateInvalid {
+		return bounded
+	}
+	return append([]Record{}, full...)
+}
+
+// recordGroupIsSubset reports whether every record in group has an identity
+// (schema, attempt, sequence, phase) present in original, with multiplicity.
+func recordGroupIsSubset(group, original []Record) bool {
+	available := make(map[recordDedupKey]int, len(original))
+	for _, record := range original {
+		available[recordDeduplicationKey(record)]++
+	}
+	for _, record := range group {
+		key := recordDeduplicationKey(record)
+		if available[key] == 0 {
+			return false
+		}
+		available[key]--
+	}
+	return true
+}
+
+func hasLegacyResult(group []Record) bool {
+	for _, record := range group {
+		if record.Phase == PhaseResult && record.State == "" {
+			return true
+		}
+	}
+	return false
+}
+
+// foldRecordGroup folds one attempt's records the way List does. ok is false
+// when the group carries no v2 lifecycle information to fold (no prepared
+// record, a legacy v1 prepared record, or a v1-shaped pair with no events).
+func foldRecordGroup(group []Record) (Attempt, bool) {
+	var prepared *Record
+	var events []Record
+	var legacy *Record
+	for i := range group {
+		record := group[i]
+		switch {
+		case record.Phase == PhasePrepared && prepared == nil:
+			copy := record
+			prepared = &copy
+		case record.Phase == PhaseResult && record.State != "":
+			events = append(events, record)
+		case record.Phase == PhaseResult && legacy == nil:
+			copy := record
+			legacy = &copy
+		}
+	}
+	if prepared == nil ||
+		prepared.Schema == legacySchemaVersion ||
+		(prepared.State == "" && len(events) == 0) {
+		return Attempt{}, false
+	}
+	ordered := append([]Record{}, events...)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		return ordered[i].Sequence < ordered[j].Sequence
+	})
+	return foldLifecycle(*prepared, ordered, legacy), true
 }
 
 // validateRecord checks the invariants a Record must satisfy. SchemaVersion
