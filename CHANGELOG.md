@@ -8,6 +8,16 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.77.1](https://github.com/avivsinai/agent-message-queue/compare/v0.77.0...v0.77.1) (2026-09-03)
+
+
+### Bug Fixes
+
+* **test:** isolate the test cwd from live queues and stop ledger appends recreating mailboxes ([#712](https://github.com/avivsinai/agent-message-queue/issues/712)) ([324ceb5](https://github.com/avivsinai/agent-message-queue/commit/324ceb52b4e422b56a901a08ace15f27aacf101c))
+* **trace:** preserve contradictory ledger history through compaction ([#713](https://github.com/avivsinai/agent-message-queue/issues/713)) ([d4abe78](https://github.com/avivsinai/agent-message-queue/commit/d4abe78e3f2689b8a7171fb760069926732316c3))
+* **wake:** re-arm deferred cohorts and type rotation-only ledger errors ([#710](https://github.com/avivsinai/agent-message-queue/issues/710)) ([a2b30f3](https://github.com/avivsinai/agent-message-queue/commit/a2b30f3a87348e5ee4aba88572b4347d2eadec5e))
+* **wake:** retire a wake whose lock vanished during its graceful exit ([#715](https://github.com/avivsinai/agent-message-queue/issues/715)) ([92afe29](https://github.com/avivsinai/agent-message-queue/commit/92afe2997fb569cfdea14a05978536cc6a0fb925))
+
 ## [0.77.0](https://github.com/avivsinai/agent-message-queue/compare/v0.76.0...v0.77.0) (2026-09-02)
 
 
