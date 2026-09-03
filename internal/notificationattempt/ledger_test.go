@@ -1200,3 +1200,48 @@ func TestCompactionPreservesCorruptLifecycleVerbatim(t *testing.T) {
 		t.Fatalf("corrupt lifecycle compacted group folds to %q, want invalid", folded.State)
 	}
 }
+
+// The valid legacy-close shape must keep compacting: a nonterminal lifecycle
+// (deferred/retried) closed by a matching legacy written result is the
+// marker-less degradation path, not a contradiction. It compacts to
+// [prepared, legacy] and re-folds `written`. An implementation that preserves
+// every lifecycle-plus-legacy group verbatim passes the contradiction tests
+// and fails this one.
+func TestCompactionStillReducesValidNonterminalLegacyClose(t *testing.T) {
+	prepared := Record{
+		Schema: SchemaVersion, AttemptID: "nonterminal-legacy", Phase: PhasePrepared,
+		MessageIDs: []string{"msg-nonterminal"}, Agent: "codex", Mode: "external",
+		RecordedAt: "2026-09-01T10:00:00Z", State: StateAttempt,
+	}
+	records := []Record{prepared}
+	for seq, state := range []string{StateDeferred, StateRetried, StateDeferred} {
+		event := prepared
+		event.Phase = PhaseResult
+		event.State = state
+		event.Sequence = uint64(seq + 1)
+		event.RecordedAt = fmt.Sprintf("2026-09-01T10:00:0%dZ", seq+1)
+		records = append(records, event)
+	}
+	legacy := prepared
+	legacy.Phase = PhaseResult
+	legacy.State = ""
+	legacy.Outcome = OutcomeWritten
+	legacy.RecordedAt = "2026-09-01T10:00:09Z"
+	records = append(records, legacy)
+
+	if before := foldLifecycle(prepared, records[1:4], &legacy); before.State != OutcomeWritten {
+		t.Fatalf("fixture fold = %q, want written", before.State)
+	}
+	compacted, err := compactRecords(records, "codex", 64*1024)
+	if err != nil {
+		t.Fatalf("compact valid legacy close: %v", err)
+	}
+	group := decodeCompactedForTest(t, compacted)
+	if len(group) != 2 || group[0].Phase != PhasePrepared || group[1].Outcome != OutcomeWritten {
+		t.Fatalf("valid legacy close compacted to %#v, want [prepared, legacy]", group)
+	}
+	folded, ok := foldRecordGroup(group)
+	if !ok || folded.State != OutcomeWritten {
+		t.Fatalf("compacted valid legacy close folds to %q, want written", folded.State)
+	}
+}
