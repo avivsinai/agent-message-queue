@@ -146,12 +146,40 @@ type Writer struct {
 }
 
 func NewWriter(root, agent string) *Writer {
+	return NewWriterWithMaxBytes(root, agent, defaultMaxBytes)
+}
+
+// NewWriterWithMaxBytes is NewWriter with an explicit journal size cap.
+func NewWriterWithMaxBytes(root, agent string, maxBytes int64) *Writer {
 	return &Writer{
 		root:     root,
 		agent:    agent,
-		maxBytes: defaultMaxBytes,
+		maxBytes: maxBytes,
 		now:      time.Now,
 	}
+}
+
+// RotationError reports that the RECORD WAS PERSISTED but the size-capped
+// journal rotation around it failed or was refused. Callers distinguishing
+// "record lost" from "record kept, journal over its cap" must errors.As for
+// this type: treating a rotation-only error as a lost record fabricates a
+// failure result for an attempt whose prepared record exists (and the two
+// then join into a false `failed` attempt in trace).
+type RotationError struct {
+	Err error
+}
+
+func (e *RotationError) Error() string {
+	return fmt.Sprintf("notification attempt record persisted; journal rotation failed: %v", e.Err)
+}
+
+func (e *RotationError) Unwrap() error { return e.Err }
+
+// IsRotationOnly reports whether err means the append succeeded and only the
+// journal rotation failed.
+func IsRotationOnly(err error) bool {
+	var rotation *RotationError
+	return errors.As(err, &rotation)
 }
 
 // Prepare appends a prepared record and returns it. If the append fails, it
@@ -225,11 +253,19 @@ func (w *Writer) Transition(lifecycle *Lifecycle, state, detail string) error {
 		State:      state,
 		Sequence:   lifecycle.Sequence + 1,
 	}
-	if err := w.append(record); err != nil {
+	err := w.append(record)
+	if err == nil || IsRotationOnly(err) {
+		// The record landed (a rotation-only error keeps it). Advance the
+		// handle: leaving it behind makes the next transition reuse this
+		// sequence, and a repeated sequence folds the whole attempt to
+		// invalid — a delivered notification would then trace as invalid
+		// because the journal was over its cap.
+		lifecycle.State = state
+		lifecycle.Sequence = record.Sequence
+	}
+	if err != nil {
 		return fmt.Errorf("persist notification attempt transition: %w", err)
 	}
-	lifecycle.State = state
-	lifecycle.Sequence = record.Sequence
 	return nil
 }
 
@@ -295,6 +331,28 @@ func (w *Writer) Result(prepared Record, outcome, detail string) error {
 		return fmt.Errorf("persist notification attempt result: %w", err)
 	}
 	return nil
+}
+
+// WriteFailure records that an attempt was made but its prepared record could
+// not be persisted (requirement 3: trace must distinguish "recording failed"
+// from "no attempt recorded"). It reconstructs the minimal prepared identity
+// from the attempt id the failed Prepare/Begin returned and appends a failed
+// result carrying the write error, so List surfaces the orphan as a
+// write-failed attempt with its mode and normalized ids intact.
+func (w *Writer) WriteFailure(attemptID string, messageIDs []string, mode string, writeErr error) error {
+	detail := "prepared write failed"
+	if writeErr != nil {
+		detail += ": " + writeErr.Error()
+	}
+	// The caller's raw ids; a persisted prepared record carries normalized
+	// ones. Normalize so the orphan surfaces with the same ids a prepared
+	// record would have had (and an all-blank list is refused by Result).
+	return w.Result(Record{
+		AttemptID:  attemptID,
+		MessageIDs: normalizedMessageIDs(messageIDs),
+		Agent:      w.agent,
+		Mode:       strings.TrimSpace(mode),
+	}, OutcomeFailed, detail)
 }
 
 // append writes one JSON line to the log with O_APPEND. On local filesystems
@@ -432,7 +490,12 @@ func (w *Writer) append(record Record) error {
 	if _, err := f.Write(data); err != nil {
 		return errors.Join(rotationErr, fmt.Errorf("write notification attempt record: %w", err))
 	}
-	return rotationErr
+	if rotationErr != nil {
+		// The record itself landed; only rotation failed. Type it so callers
+		// do not fabricate a lost-record failure for a persisted attempt.
+		return &RotationError{Err: rotationErr}
+	}
+	return nil
 }
 
 func (w *Writer) rotateJournal(root *fsq.DeliveryRoot, dir, fullPath string) error {
@@ -581,6 +644,8 @@ func foldLifecycle(prepared Record, events []Record, legacyResult *Record) Attem
 			legacyResult.Agent != prepared.Agent ||
 			legacyResult.Mode != prepared.Mode ||
 			!sameStrings(legacyResult.MessageIDs, prepared.MessageIDs) {
+			resultCopy := *legacyResult
+			attempt.History = append(attempt.History, resultCopy)
 			return attempt
 		}
 		resultCopy := *legacyResult
@@ -623,6 +688,10 @@ func foldLifecycle(prepared Record, events []Record, legacyResult *Record) Attem
 			attempt.History = append(attempt.History, resultCopy)
 			return attempt
 		}
+		// Invalid fold: keep the contradicting legacy record in History so
+		// trace shows the evidence, not just the `invalid` verdict.
+		resultCopy := *legacyResult
+		attempt.History = append(attempt.History, resultCopy)
 		return attempt
 	}
 	attempt.State = state

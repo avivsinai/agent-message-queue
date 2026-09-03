@@ -702,16 +702,20 @@ func deliverWithNotificationLedger(
 	writer := notificationattempt.NewWriter(cfg.root, cfg.me)
 	if cfg.injectVia == "" || cfg.injectMode == wakeInjectModeNone {
 		prepared, prepareErr := writer.Prepare(messageIDs, notificationAttemptMode(cfg))
+		if notificationattempt.IsRotationOnly(prepareErr) {
+			// The prepared record persisted; only the size-capped rotation
+			// failed. Proceed on the normal path — recording a failure result
+			// here would join a REAL prepared record into a false `failed`.
+			if cfg.debug {
+				_, _ = fmt.Fprintf(os.Stderr, "amq wake [debug]: notification journal rotation: %v\n", prepareErr)
+			}
+			prepareErr = nil
+		}
 		deliverErr := deliverNewMessageNotification(cfg, notice, deferForInput, currentPending)
 		if prepareErr != nil {
-			// The prepared write failed. Record a result with outcome=failed so
-			// trace can surface "recording failed" rather than a silent hole.
-			reconstructed := notificationattempt.Record{
-				AttemptID:  prepared.AttemptID,
-				MessageIDs: messageIDs,
-				Agent:      cfg.me,
-			}
-			if resultErr := writer.Result(reconstructed, notificationattempt.OutcomeFailed, "prepared write failed: "+prepareErr.Error()); resultErr != nil && cfg.debug {
+			// The prepared write failed. Record a failed result so trace can
+			// surface "recording failed" rather than a silent hole.
+			if resultErr := writer.WriteFailure(prepared.AttemptID, messageIDs, notificationAttemptMode(cfg), prepareErr); resultErr != nil && cfg.debug {
 				_, _ = fmt.Fprintf(os.Stderr, "amq wake [debug]: persist notification attempt result: %v\n", resultErr)
 			}
 			return deliverErr
@@ -757,13 +761,7 @@ func deliverWithNotificationLedger(
 			// Best-effort requirement-3 marker: record that an attempt was
 			// made but its prepared record could not be persisted, so trace
 			// reports "recording failed" instead of "no attempt recorded".
-			reconstructed := notificationattempt.Record{
-				AttemptID:  lifecycle.AttemptID,
-				MessageIDs: append([]string{}, lifecycle.MessageIDs...),
-				Agent:      lifecycle.Agent,
-				Mode:       lifecycle.Mode,
-			}
-			if resultErr := writer.Result(reconstructed, notificationattempt.OutcomeFailed, "prepared write failed: "+prepareErr.Error()); resultErr != nil && cfg.debug {
+			if resultErr := writer.WriteFailure(lifecycle.AttemptID, lifecycle.MessageIDs, lifecycle.Mode, prepareErr); resultErr != nil && cfg.debug {
 				_, _ = fmt.Fprintf(os.Stderr, "amq wake [debug]: persist notification attempt result: %v\n", resultErr)
 			}
 		}
@@ -829,6 +827,15 @@ func ensureNotificationAttempt(
 		return cfg.notificationAttempt, nil
 	}
 	lifecycle, err := writer.Begin(messageIDs, mode)
+	if notificationattempt.IsRotationOnly(err) && lifecycle != nil {
+		// The lifecycle record persisted; only journal rotation failed. This
+		// IS a live attempt — cache it and continue, or a later transition
+		// would begin a duplicate AttemptID for the same cohort.
+		if cfg.debug {
+			_, _ = fmt.Fprintf(os.Stderr, "amq wake [debug]: notification journal rotation: %v\n", err)
+		}
+		err = nil
+	}
 	if err != nil {
 		// Begin may return the built identity with the error (append failure).
 		// Pass it through so the caller can record "recording failed"
@@ -1058,7 +1065,10 @@ func recordWakeAttempt(
 	if isWakeInjectorDeferred(deliveryErr) {
 		// Provider-side busy/transition is a silent transport deferral. Keep
 		// the existing cohort and its normal input retry ladder; do not spend
-		// the reminder budget or emit attention output.
+		// the reminder budget or emit attention output. Reconcile an
+		// announced/parked cohort first: the interrupt path records before
+		// plan() runs, and unseen additions must re-arm the ladder.
+		cfg.doorbell.reconcileDeferredCohort(currentPending)
 		cfg.doorbell.recordDeferredInputAttempt(now)
 		persistWakeDoorbellStatusBestEffort(cfg)
 		return

@@ -61,15 +61,8 @@ func (state *wakeDoorbellState) plan(
 		return wakeDoorbellPlan{}
 	}
 	if state.phase == wakeDoorbellAnnounced {
-		// A replaced physical file keeps its name but is a message the agent
-		// has never seen; it re-arms like an addition, not like a drain.
-		if wakeCohortExpanded(state.cohort, current) ||
-			wakeCohortReplacedInPlace(state.cohort, current) {
-			state.arm(current)
+		if state.reconcileAnnouncedCohort(current) {
 			return wakeDoorbellPlan{attempt: true, prompt: coopWakeDoorbell}
-		}
-		if wakeCohortProgressed(state.cohort, current) {
-			state.recordInjected(current)
 		}
 		return wakeDoorbellPlan{}
 	}
@@ -86,11 +79,7 @@ func (state *wakeDoorbellState) plan(
 		// "drain everything" doorbell covers the whole current cohort, so N
 		// unread messages do not need N doorbells.
 		if state.phase == wakeDoorbellParked {
-			state.cohort = snapshotWakeFileIdentities(current)
-			state.presentationConfirmed = false
-			if state.attemptBudget < wakeDoorbellLifetimeAttemptCap {
-				state.attemptBudget++
-				state.phase = wakeDoorbellRetrying
+			if state.reviveParkedCohort(current) {
 				state.pullForwardForAddition(now)
 			}
 		} else {
@@ -138,6 +127,68 @@ func (state *wakeDoorbellState) recordAttempt(now time.Time) {
 	state.reminderAttempts++
 	if state.reminderAttempts >= state.attemptBudget {
 		state.parkCurrentCohort()
+	}
+}
+
+// reconcileAnnouncedCohort applies the announced-phase cohort rules shared by
+// plan() and the deferred interrupt path. A replaced physical file keeps its
+// name but is a message the agent has never seen; it re-arms like an
+// addition, not like a drain. Progress alone re-snapshots the cohort to what
+// remains. It reports whether the ladder was re-armed.
+func (state *wakeDoorbellState) reconcileAnnouncedCohort(current map[string]os.FileInfo) bool {
+	if wakeCohortExpanded(state.cohort, current) ||
+		wakeCohortReplacedInPlace(state.cohort, current) {
+		state.arm(current)
+		return true
+	}
+	if wakeCohortProgressed(state.cohort, current) {
+		state.recordInjected(current)
+	}
+	return false
+}
+
+// reviveParkedCohort applies the parked-phase addition rule shared by plan()
+// and the deferred interrupt path: the parked cohort adopts the expanded
+// content, and the ladder revives only while the lifetime attempt budget
+// allows another announcement. It reports whether the ladder revived.
+func (state *wakeDoorbellState) reviveParkedCohort(current map[string]os.FileInfo) bool {
+	state.cohort = snapshotWakeFileIdentities(current)
+	state.presentationConfirmed = false
+	if state.attemptBudget >= wakeDoorbellLifetimeAttemptCap {
+		return false
+	}
+	state.attemptBudget++
+	state.phase = wakeDoorbellRetrying
+	return true
+}
+
+// reconcileDeferredCohort applies plan()'s announced/parked cohort rules for
+// attempts recorded outside a plan() pass — the interrupt path injects before
+// the doorbell plan runs. A deferred provider outcome must leave the retry
+// ladder armed for cohort content the agent has not seen; without this, a
+// deferred attempt recorded in the announced or parked phase writes into
+// state nextDeadline() never reads and the doorbell stalls until an unrelated
+// inbox event. The caller advances the retry deadline afterwards, so no
+// pull-forward happens here.
+func (state *wakeDoorbellState) reconcileDeferredCohort(current map[string]os.FileInfo) {
+	if len(current) == 0 {
+		return
+	}
+	switch state.phase {
+	case wakeDoorbellAnnounced:
+		state.reconcileAnnouncedCohort(current)
+	case wakeDoorbellParked:
+		if wakeCohortProgressed(state.cohort, current) {
+			// plan(): progress on a parked cohort (a drain or an in-place
+			// replacement) resets the ladder and arms the remaining cohort
+			// fresh.
+			state.reset()
+			state.arm(current)
+			return
+		}
+		if wakeCohortExpanded(state.cohort, current) {
+			state.reviveParkedCohort(current)
+		}
 	}
 }
 
