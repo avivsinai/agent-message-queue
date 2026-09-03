@@ -461,6 +461,25 @@ func terminateWakePidfdWithSignalAuthorization(
 		if errors.Is(err, syscall.ESRCH) {
 			return nil
 		}
+		if errors.Is(err, errWakeTerminationAuthorizationLost) {
+			// The lock we authorized against is gone or re-generated AFTER
+			// our SIGTERM was delivered. A wake exits SIGTERM cleanly and
+			// removes its lock before the process itself is gone, so this is
+			// the expected shape of a graceful stop that outlived the grace
+			// window, not an unknown actor. The pidfd is the exact process we
+			// signaled: if it exits within the kill-confirm window the retire
+			// succeeded and nothing else is signaled. Only a process that is
+			// still alive with its lock gone is genuinely ambiguous, and that
+			// keeps the refusal (issue #714).
+			exited, pollErr := linuxPidfdPoll(pidfd, wakeTerminateKillConfirm)
+			if pollErr != nil {
+				return fmt.Errorf("poll pidfd after lost authorization: %w", pollErr)
+			}
+			if exited {
+				return nil
+			}
+			return err
+		}
 		return err
 	}
 	exited, err = linuxPidfdPoll(pidfd, wakeTerminateKillConfirm)
