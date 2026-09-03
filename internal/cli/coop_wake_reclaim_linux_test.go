@@ -270,8 +270,12 @@ func TestPrepareCoopWakeLockLiveRawPartialTakeoverRefusesAfterLockDisappears(t *
 	if len(signals) != 1 || signals[0] != unix.SIGTERM {
 		t.Errorf("guarded pidfd signals = %v, want [SIGTERM]", signals)
 	}
-	if pollCalls != 1 {
-		t.Errorf("pidfd poll calls = %d, want 1 before SIGKILL refusal", pollCalls)
+	// The lock vanished after OUR SIGTERM, so the retire polls the exact pidfd
+	// for the kill-confirm window before refusing: a wake that removes its lock
+	// during a graceful exit must retire, and only a process still alive with
+	// its lock gone is refused (issue #714). Two polls: grace, then confirm.
+	if pollCalls != 2 {
+		t.Errorf("pidfd poll calls = %d, want grace then kill-confirm before the SIGKILL refusal", pollCalls)
 	}
 	if !processStillAliveAfterSIGTERM {
 		t.Error("pidfd poll did not exercise a still-live wake process after SIGTERM")
