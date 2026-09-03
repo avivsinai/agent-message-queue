@@ -26,7 +26,7 @@ func TestTmuxRealBinaryFreshServerRestartResumeLoop(t *testing.T) {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux is not installed")
 	}
-	repo, err := filepath.Abs(filepath.Join("..", ".."))
+	repo, err := cliTestRepoRoot()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -219,7 +219,7 @@ func TestRunRealAMQJSONParseIgnoresUpdateHintOnStderr(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds and executes the real amq binary")
 	}
-	repo, err := filepath.Abs(filepath.Join("..", ".."))
+	repo, err := cliTestRepoRoot()
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -17,6 +17,18 @@ const (
 
 var cliSecureTempRoot string
 
+// cliTestPackageDir is the package source directory the test process started
+// in. TestMain moves the process cwd to the secure temp root (issue #707), so
+// tests that need the repository (building ./cmd/amq, launchapi goldens, git
+// history) resolve it from here instead of from cwd.
+var cliTestPackageDir string
+
+// cliTestRepoRoot returns the absolute repository root for tests that build or
+// read repository files. It does not depend on the process cwd.
+func cliTestRepoRoot() (string, error) {
+	return filepath.Abs(filepath.Join(cliTestPackageDir, "..", ".."))
+}
+
 // TestMain gives the cli package a hermetic environment so the developer's shell
 // can't leak routing context into tests. The cross-tree send guard (issue #144)
 // keys off AM_ROOT / AM_BASE_ROOT; without this, running the suite from inside a
@@ -72,6 +84,7 @@ func TestMain(m *testing.M) {
 		_ = os.RemoveAll(tempRoot)
 		os.Exit(1)
 	}
+	cliTestPackageDir = workingDir
 	// Run every test from the secure temp root, not the package directory.
 	// The cwd-local routing guard walks up from cwd to the Git top looking for
 	// an initialized .agent-mail; on a developer checkout that finds the live

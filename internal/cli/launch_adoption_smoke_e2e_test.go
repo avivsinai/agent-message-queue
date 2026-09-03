@@ -406,7 +406,7 @@ func TestResolveRealAMQBinaryRejectsRelativePath(t *testing.T) {
 
 func buildAdoptionSmokeAMQ(t *testing.T) string {
 	t.Helper()
-	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	repoRoot, err := cliTestRepoRoot()
 	if err != nil {
 		t.Fatal(err)
 	}

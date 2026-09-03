@@ -46,7 +46,7 @@ func TestWakeSelfUpgradeRestartRecordIsCompatibleWithV0580Reader(t *testing.T) {
 
 func extractWakeSelfUpgradeHistoricalV0580(t *testing.T) string {
 	t.Helper()
-	repoRootOutput, err := exec.Command("git", "rev-parse", "--show-toplevel").CombinedOutput()
+	repoRootOutput, err := exec.Command("git", "-C", cliTestPackageDir, "rev-parse", "--show-toplevel").CombinedOutput()
 	if err != nil {
 		t.Fatalf("mixed-version git history unavailable: %v", err)
 	}
