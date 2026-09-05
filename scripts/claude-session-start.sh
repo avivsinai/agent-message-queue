@@ -117,21 +117,21 @@ if command -v amq &> /dev/null; then
     if [ -n "$RESOLVED_ROOT" ]; then
         ENV_JSON=$(cd "$PROJECT_DIR" && amq env --me "$ME" --root "$RESOLVED_ROOT" --json 2>>"$HOOK_LOG") || ENV_JSON=""
         PRESENCE_JSON=$(amq presence list --root "$RESOLVED_ROOT" --json 2>>"$HOOK_LOG") || PRESENCE_JSON="[]"
-        WHO_JSON=$(amq who --root "$RESOLVED_ROOT" --json 2>>"$HOOK_LOG") || WHO_JSON="[]"
+        WAKE_JSON=$(amq wake check --me "$ME" --root "$RESOLVED_ROOT" --json 2>>"$HOOK_LOG") || WAKE_JSON="{}"
         # Count unread via pipe to avoid passing large JSON as argv
         INBOX_COUNT=$(amq list --me "$ME" --root "$RESOLVED_ROOT" --new --json 2>>"$HOOK_LOG" \
             | python3 -c "import json,sys;print(len(json.load(sys.stdin)))" 2>>"$HOOK_LOG") || INBOX_COUNT=0
     else
         ENV_JSON=$(cd "$PROJECT_DIR" && amq env --me "$ME" --json 2>>"$HOOK_LOG") || ENV_JSON=""
         PRESENCE_JSON=$(amq presence list --json 2>>"$HOOK_LOG") || PRESENCE_JSON="[]"
-        WHO_JSON=$(amq who --json 2>>"$HOOK_LOG") || WHO_JSON="[]"
+        WAKE_JSON=$(amq wake check --me "$ME" --json 2>>"$HOOK_LOG") || WAKE_JSON="{}"
         # Count unread via pipe to avoid passing large JSON as argv
         INBOX_COUNT=$(amq list --me "$ME" --new --json 2>>"$HOOK_LOG" \
             | python3 -c "import json,sys;print(len(json.load(sys.stdin)))" 2>>"$HOOK_LOG") || INBOX_COUNT=0
     fi
 
     if [ -n "$ENV_JSON" ]; then
-        python3 - "$ME" "$ENV_JSON" "$PRESENCE_JSON" "$INBOX_COUNT" "$WHO_JSON" 2>>"$HOOK_LOG" <<'PYEOF' || true
+        python3 - "$ME" "$ENV_JSON" "$PRESENCE_JSON" "$INBOX_COUNT" "$WAKE_JSON" 2>>"$HOOK_LOG" <<'PYEOF' || true
 import json, sys
 from datetime import datetime, timezone, timedelta
 
@@ -164,19 +164,19 @@ try:
 
     peer_str = ",".join(f'{p["handle"]}({p["status"]})' for p in peers)
 
-    # Wake state for me: a live wake already delivers a doorbell into this
-    # terminal, so the model must not start watch/monitor/polling (issue #717).
+    # Wake state for me, from `amq wake check`: it answers for this exact
+    # (root, me) pair and reports the inject mode. A live INJECTING wake
+    # already delivers a doorbell into this terminal, so the model must not
+    # start watch/monitor/polling (issue #717). A notify-only wake (mode none)
+    # is the supervisor recipe, where monitor is the consumer.
+    wake_mode = ""
     wake_live = False
     try:
-        who = json.loads(sys.argv[5]) if len(sys.argv) > 5 else []
-        sessions = who if isinstance(who, list) else who.get("sessions", [])
-        for s in sessions:
-            if session and s.get("name") not in (session, ""):
-                continue
-            for a in s.get("agents", []):
-                if a.get("handle") == me and a.get("presence_source") == "notifier_live":
-                    wake_live = True
-    except (ValueError, TypeError, AttributeError):
+        wake = json.loads(sys.argv[5]) if len(sys.argv) > 5 else {}
+        if isinstance(wake, dict) and wake.get("live_wake"):
+            wake_mode = wake.get("wake_mode") or "legacy"
+            wake_live = wake_mode != "none"
+    except (ValueError, TypeError):
         pass
 
     # Line 1: identity + session
@@ -188,7 +188,7 @@ try:
         line1 += f" project={project}"
     if peer_str:
         line1 += f" peers={peer_str}"
-    line1 += f" wake={'live' if wake_live else 'none'}."
+    line1 += f" wake={'live(' + wake_mode + ')' if wake_live else 'none'}."
 
     parts = [line1]
     if unread:
