@@ -22,15 +22,18 @@ import (
 )
 
 const (
-	codexNamedDiscoveryTimeout = 90 * time.Second
-	codexNamedRPCTimeout       = 10 * time.Second
-	codexNamedStopGrace        = 750 * time.Millisecond
-	codexNamedMaxMetadata      = 256 << 10
-	codexNamedMaxToolOutput    = 4 << 20
-	codexNamedMaxRPCMessage    = 1 << 20
+	codexNamedProbeTimeout  = 10 * time.Second
+	codexNamedRPCTimeout    = 10 * time.Second
+	codexNamedStopGrace     = 750 * time.Millisecond
+	codexNamedMaxMetadata   = 256 << 10
+	codexNamedMaxToolOutput = 4 << 20
+	codexNamedMaxRPCMessage = 1 << 20
 )
 
-var errCodexThreadNotReady = errors.New("codex thread is not yet persisted")
+var (
+	errCodexThreadNotReady    = errors.New("codex thread is not yet persisted")
+	errCodexNamingTargetEnded = errors.New("spawned Codex process ended")
+)
 
 var (
 	codexNamedDiscoveryPoll         = time.Second
@@ -133,11 +136,14 @@ func processInspectionReason(info wakeProcessInfo) string {
 
 func validateCodexNamingTarget(target codexNamingTarget) (bool, error) {
 	info := inspectCodexNamingProcess(target.PID)
-	if !info.Running || info.InspectError != nil {
+	if !info.Running && info.InspectError == nil {
+		return false, errCodexNamingTargetEnded
+	}
+	if !info.Running || info.InspectError != nil || info.StartToken == "" || info.BootID == "" {
 		return false, fmt.Errorf("spawned Codex process is unavailable: %s", processInspectionReason(info))
 	}
 	if info.StartToken != target.ProcessStart || info.BootID != target.BootID {
-		return false, errors.New("spawned Codex process identity changed")
+		return false, fmt.Errorf("%w: process identity changed", errCodexNamingTargetEnded)
 	}
 	executable := info.ExecutablePath
 	if executable == "" {
@@ -246,7 +252,9 @@ func locateCodexProcessThread(ctx context.Context, target codexNamingTarget) (co
 
 func waitForCodexProcessThread(ctx context.Context, target codexNamingTarget) (codexProcessThread, error) {
 	for {
-		thread, err := locateCodexProcessThreadForWait(ctx, target)
+		probeCtx, cancelProbe := context.WithTimeout(ctx, codexNamedProbeTimeout)
+		thread, err := locateCodexProcessThreadForWait(probeCtx, target)
+		cancelProbe()
 		if err == nil {
 			return thread, nil
 		}
@@ -637,9 +645,13 @@ func (sidecar *codexSidecar) call(ctx context.Context, request codexSidecarMessa
 }
 
 func runCodexNamedSidecar(name string, target codexNamingTarget) error {
-	discoveryCtx, cancelDiscovery := context.WithTimeout(context.Background(), codexNamedDiscoveryTimeout)
-	thread, err := waitForCodexProcessThread(discoveryCtx, target)
-	cancelDiscovery()
+	// Codex defers persistence until the first user turn. An idle composer has
+	// no naming target yet, regardless of how long it has been open. Each probe
+	// is bounded, and process identity checks end the wait when this CLI exits.
+	thread, err := waitForCodexProcessThread(context.Background(), target)
+	if errors.Is(err, errCodexNamingTargetEnded) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}

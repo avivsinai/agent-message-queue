@@ -64,8 +64,10 @@ amq coop exec grok
 
 Direct `coop exec` names sessions by default as `<session>/<handle>`, or as
 `<handle>` for a sessionless root. Claude and Pi receive the name as an argv
-flag. For Codex, AMQ waits up to 90 seconds for the launched process to open its
-main user thread, then uses Codex's naming API and confirms the result. It does
+flag. For Codex, AMQ waits while the launched process is alive for its main
+user thread to persist (normally after the first user turn), then uses Codex's
+naming API and confirms the result. Idle time is not a naming failure; each
+discovery probe is bounded, and the helper exits when the CLI exits. It does
 not type into the Codex terminal. Process and file identities must agree;
 macOS requires `lsof`, and Linux uses `/proc`. If naming is unavailable or
 ambiguous, AMQ prints the manual `/rename` command. This affects the CLI display

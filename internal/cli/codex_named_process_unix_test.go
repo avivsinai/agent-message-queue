@@ -130,6 +130,61 @@ func TestWaitForCodexProcessThreadRetriesDelayedPersistence(t *testing.T) {
 	}
 }
 
+// An untouched composer is a valid session state, not a naming failure.
+// Exercise the real wait loop through idle probes and a verified process exit.
+func TestCodexNamingWaitsForIdleComposerAndStopsWhenProcessEnds(t *testing.T) {
+	oldLocate, oldPoll, oldStart := locateCodexProcessThreadForWait, codexNamedDiscoveryPoll, startCodexNamingSidecar
+	t.Cleanup(func() {
+		locateCodexProcessThreadForWait, codexNamedDiscoveryPoll, startCodexNamingSidecar = oldLocate, oldPoll, oldStart
+	})
+	codexNamedDiscoveryPoll = time.Millisecond
+	calls := 0
+	locateCodexProcessThreadForWait = func(ctx context.Context, _ codexNamingTarget) (codexProcessThread, error) {
+		deadline, ok := ctx.Deadline()
+		if !ok || time.Until(deadline) > codexNamedProbeTimeout {
+			t.Fatal("discovery probe has no bounded deadline")
+		}
+		calls++
+		if calls < 4 {
+			return codexProcessThread{}, errCodexThreadNotReady
+		}
+		return codexProcessThread{}, errCodexNamingTargetEnded
+	}
+	startCodexNamingSidecar = func(string) (*codexSidecar, error) {
+		t.Fatal("idle composer caused a naming mutation")
+		return nil, errors.New("unexpected")
+	}
+	if err := runCodexNamedSidecar("session1/codex", codexNamingTarget{}); err != nil {
+		t.Fatalf("normal idle-then-exit produced a warning: %v", err)
+	}
+	if calls != 4 {
+		t.Fatalf("discovery calls = %d, want 4", calls)
+	}
+}
+
+func TestCodexNamingStopsOnVerifiedExitButReportsInspectionFailure(t *testing.T) {
+	oldInspect := inspectCodexNamingProcess
+	t.Cleanup(func() { inspectCodexNamingProcess = oldInspect })
+	for _, tc := range []struct {
+		name  string
+		info  wakeProcessInfo
+		ended bool
+	}{
+		{name: "exited", info: wakeProcessInfo{}, ended: true},
+		{name: "reused PID", info: wakeProcessInfo{Running: true, StartToken: "replacement", BootID: "boot"}, ended: true},
+		{name: "inspection failed", info: wakeProcessInfo{InspectError: errors.New("permission denied")}},
+		{name: "missing identity", info: wakeProcessInfo{Running: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inspectCodexNamingProcess = func(int) wakeProcessInfo { return tc.info }
+			_, err := validateCodexNamingTarget(codexNamingTarget{PID: 42, ProcessStart: "original", BootID: "boot"})
+			if err == nil || errors.Is(err, errCodexNamingTargetEnded) != tc.ended {
+				t.Fatalf("validation = %v, want ended=%v", err, tc.ended)
+			}
+		})
+	}
+}
+
 func TestRunCodexNamedSidecarDoesNotStartRPCOnAmbiguousRoots(t *testing.T) {
 	oldLocate := locateCodexProcessThreadForWait
 	oldStart := startCodexNamingSidecar
