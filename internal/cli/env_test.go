@@ -705,7 +705,7 @@ func TestResolveEnvConfigInvalidAmqrcWithAutoDetect(t *testing.T) {
 }
 
 func TestResolveEnvConfigNoConfig(t *testing.T) {
-	root := t.TempDir()
+	root := setupProjectFixture(t, "codex")
 
 	// Isolate from the developer's real global config: a ~/.amqrc or
 	// AMQ_GLOBAL_ROOT on the machine would make resolution succeed.
@@ -729,6 +729,24 @@ func TestResolveEnvConfigNoConfig(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "cannot determine root") {
 		t.Errorf("unexpected error message: %v", err)
+	}
+	for _, want := range []string{"from your terminal", "amq setup --project-root \"$PWD\""} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("no-root error missing recovery instruction %q: %v", want, err)
+		}
+	}
+	// Exercise the printed terminal command, accepting its prompted defaults.
+	// A preview/-y suggestion without the required first-setup flags is a loop.
+	setupIsTerminal = func() bool { return true }
+	restoreInput := withStdin(t, "\n\n\nyes\n")
+	defer restoreInput()
+	if _, err := captureEnvStdout(t, func() error {
+		return runSetup([]string{"--project-root", root})
+	}); err != nil {
+		t.Fatalf("suggested setup: %v", err)
+	}
+	if got, _, err := resolveEnvConfig("", ""); err != nil || got == "" {
+		t.Fatalf("env after suggested recovery: root=%q err=%v", got, err)
 	}
 }
 

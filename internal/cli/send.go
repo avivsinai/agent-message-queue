@@ -121,6 +121,7 @@ func runSendWithAfterBodyRead(args []string, afterBodyRead func()) error {
 	// Determine delivery root: local, cross-session, or cross-project.
 	deliveryRoot := root
 	peerBaseRoot := ""
+	var routePlan deliveryRoutePlan
 	targetSession := strings.TrimSpace(*sessionFlag)
 	// Inline session from @project:session takes effect only when not overridden.
 	if targetSession == "" && inlineSession != "" {
@@ -232,7 +233,7 @@ func runSendWithAfterBodyRead(args []string, afterBodyRead func()) error {
 		sourceSession = fromSession
 	}
 	if targetProject != "" || targetSession != "" {
-		routePlan, err := planDeliveryRoute(sourceRoot, targetProject, targetSession, deliveryRouteOptions{
+		routePlan, err = planDeliveryRoute(sourceRoot, targetProject, targetSession, deliveryRouteOptions{
 			MirrorPeerSession: true,
 		})
 		if err != nil {
@@ -248,6 +249,9 @@ func runSendWithAfterBodyRead(args []string, afterBodyRead func()) error {
 	// capabilities below must prove it got these exact directories.
 	deliveryIdentity, err := fsq.SnapshotDeliveryRoot(deliveryRoot)
 	if err != nil {
+		if targetProject != "" && !dirExists(peerBaseRoot) {
+			return peerDeliveryRootError(routePlan, deliveryRoot, err)
+		}
 		return err
 	}
 	sourceIdentity := deliveryIdentity

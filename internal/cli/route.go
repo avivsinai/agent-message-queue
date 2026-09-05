@@ -209,11 +209,12 @@ func resolveRouteSource(fromRoot, meFlag string) (sourceRoot, me string, err err
 }
 
 type deliveryRoutePlan struct {
-	DeliveryRoot  string
-	PeerBaseRoot  string
-	SourceProject string
-	TargetProject string
-	TargetSession string
+	DeliveryRoot     string
+	PeerBaseRoot     string
+	SourceConfigPath string
+	SourceProject    string
+	TargetProject    string
+	TargetSession    string
 }
 
 type deliveryRouteOptions struct {
@@ -234,6 +235,7 @@ func planDeliveryRoute(sourceRoot, targetProject, targetSession string, opts del
 		if err != nil {
 			return plan, federationSourceProjectError(sourceRoot)
 		}
+		plan.SourceConfigPath = routeConfig.Path
 		sourceProject, err := requireFederationSourceProject(routeConfig, sourceRoot)
 		if err != nil {
 			return plan, err
@@ -254,12 +256,18 @@ func planDeliveryRoute(sourceRoot, targetProject, targetSession string, opts del
 			plan.TargetSession = normalized
 			plan.DeliveryRoot, err = resolveSessionRoot(peerBaseRoot, plan.TargetSession)
 			if err != nil {
+				if !dirExists(peerBaseRoot) {
+					return plan, peerDeliveryRootError(plan, peerBaseRoot, err)
+				}
 				return plan, err
 			}
 		} else if opts.MirrorPeerSession && classifyRoot(sourceRoot) != "" {
 			plan.TargetSession = sessionName(sourceRoot)
 			plan.DeliveryRoot, err = resolveSessionRoot(peerBaseRoot, plan.TargetSession)
 			if err != nil {
+				if !dirExists(peerBaseRoot) {
+					return plan, peerDeliveryRootError(plan, peerBaseRoot, err)
+				}
 				return plan, err
 			}
 		} else {
@@ -285,6 +293,21 @@ func planDeliveryRoute(sourceRoot, targetProject, targetSession string, opts del
 	}
 
 	return plan, nil
+}
+
+func peerDeliveryRootError(plan deliveryRoutePlan, deliveryRoot string, cause error) error {
+	configPath := plan.SourceConfigPath
+	if configPath == "" {
+		configPath = "the selected source .amqrc"
+	}
+	return fmt.Errorf(
+		"cannot access selected peer %q delivery root %s: %w; check that the peer root exists and is accessible; if the peer moved, fix the %q path in the peers map of .amqrc at %s, then retry the command",
+		plan.TargetProject,
+		deliveryRoot,
+		cause,
+		plan.TargetProject,
+		configPath,
+	)
 }
 
 func requireFederationSourceProject(result amqrcResult, sourceRoot string) (string, error) {

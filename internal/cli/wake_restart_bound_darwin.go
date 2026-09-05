@@ -433,7 +433,7 @@ func cleanupDarwinWakeRestartStage(bound wakeImageEvidenceV1, allowNamespaceCTim
 	}
 	if evidence != bound &&
 		(!allowNamespaceCTimeChange || !sameDarwinStagedWakeImageEvidence(evidence, bound)) {
-		return fmt.Errorf("refuse cleanup of changed Darwin wake restart stage")
+		return &wakeRestartStageIdentityError{path: stagePath}
 	}
 	confirmed, err := os.Lstat(stagePath)
 	if err != nil || !os.SameFile(lstat, confirmed) {

@@ -206,7 +206,7 @@ func fixWakeRestartResidueWithoutLock(root, agent string) error {
 			}
 		} else if !exists {
 			return diagnosticErr
-		} else if err := reclaimWakeRestartStagePlatform(snapshot.Record); err != nil {
+		} else if err := reclaimWakeRestartStagePlatform(snapshot.Record); err != nil && !preserveChangedWakeRestartStage(err) {
 			return errors.Join(diagnosticErr, fmt.Errorf("reclaim wake restart stage before quarantine: %w", err))
 		}
 

@@ -585,7 +585,7 @@ func validateKnownHandlesFromAgents(agents []string, loadErr error, strict bool,
 	if strict {
 		return errors.New(msg)
 	}
-	_ = writeStderr("warning: %s\n", msg)
+	_ = writeStderr("warning: %s; verify the handle with 'amq who --json' because the message may not be read\n", msg)
 	return nil
 }
 

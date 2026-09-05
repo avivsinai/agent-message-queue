@@ -329,10 +329,11 @@ func TestPrepareCoopWakeLockLiveAuthoritativeRefusesWithoutMutation(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
+	processRunning := true
 	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
 		return wakeProcessInfo{
 			PID:        pid,
-			Running:    true,
+			Running:    processRunning,
 			StartToken: owner.ProcessStart,
 			BootID:     owner.BootID,
 			Executable: wakeArgs[0],
@@ -394,6 +395,15 @@ func TestPrepareCoopWakeLockLiveAuthoritativeRefusesWithoutMutation(t *testing.T
 	}
 
 	ownerState = wakeOwnerDead
+	processRunning = false
+	err = prepareCoopWakeLock(root, "codex", true, "unused")
+	wantRecovery := wakeRecoverOwnerCommand(root, "codex")
+	if err == nil || !strings.Contains(err.Error(), wantRecovery) ||
+		!strings.Contains(err.Error(), "then retry") ||
+		strings.Contains(err.Error(), "'amq wake recover-owner --me codex'") {
+		t.Fatalf("stale authoritative wake result = %v, want actionable %q remedy", err, wantRecovery)
+	}
+	processRunning = true
 	if err := prepareCoopWakeLock(root, "codex", true, "unused"); err != nil {
 		t.Fatalf("dead-owner authoritative wake blocked automatic takeover: %v", err)
 	}

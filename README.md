@@ -346,8 +346,11 @@ low-level path is intentionally required.
 
 Direct `coop exec` names the provider session by default as
 `<session>/<handle>` (or `<handle>` for a sessionless root). Claude and Pi
-receive the name in their argv. Codex and Cursor `agent` receive a best-effort
-TUI rename after AMQ verifies the newly created session. Codex supports direct
+receive the name in their argv. Codex receives its name through its native API
+after AMQ identifies the main thread opened by the launched process. If that
+cannot be confirmed, AMQ prints a manual `/rename` command; queue delivery is
+unaffected. Cursor `agent` receives a best-effort TUI rename after AMQ verifies
+the newly created session. Codex supports direct
 resume by name, for example `codex resume session1/codex`. Cursor `agent`
 resumes through its picker only; resume-by-name is unproven. Set
 `--named=false`, `AMQ_COOP_NAMED=0`, or `"named": false` in `.amq/launch.json`

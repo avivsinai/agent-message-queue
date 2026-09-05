@@ -513,6 +513,66 @@ func TestCrossProjectSendReportsIncompleteMailboxCauseAndPeerRepair(t *testing.T
 	}
 }
 
+func TestCrossProjectSendReportsMovedPeerRootAndConfigRepair(t *testing.T) {
+	clearSendMailboxTestEnv(t)
+	srcProjectDir := t.TempDir()
+	srcRoot := filepath.Join(srcProjectDir, ".agent-mail", "collab")
+	if err := fsq.EnsureAgentDirs(srcRoot, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	missingPeer := filepath.Join(t.TempDir(), "moved-peer", ".agent-mail")
+	rcData, err := json.Marshal(map[string]any{
+		"root":    ".agent-mail",
+		"project": "source",
+		"peers":   map[string]string{"peer": missingPeer},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rcPath := filepath.Join(srcProjectDir, ".amqrc")
+	if err := os.WriteFile(rcPath, rcData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	err = runSend([]string{"--root", srcRoot, "--me", "alice", "--to", "bob", "--project", "peer", "--body", "no delivery root"})
+	if err == nil {
+		t.Fatal("send to missing peer root succeeded")
+	}
+	for _, want := range []string{`selected peer "peer"`, missingPeer, "peers map", rcPath, `fix the "peer" path`} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("peer root error missing %q: %v", want, err)
+		}
+	}
+	// Follow the remedy and retry: changing the selected peer path must deliver
+	// to that peer's mirrored session without changing the source queue.
+	peerBase := filepath.Join(t.TempDir(), ".agent-mail")
+	peerSession := filepath.Join(peerBase, "collab")
+	if err := fsq.EnsureAgentDirs(peerSession, "bob"); err != nil {
+		t.Fatal(err)
+	}
+	var repaired map[string]any
+	if err := json.Unmarshal(rcData, &repaired); err != nil {
+		t.Fatal(err)
+	}
+	repaired["peers"] = map[string]string{"peer": peerBase}
+	repairedData, err := json.Marshal(repaired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(rcPath, repairedData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := captureEnvStdout(t, func() error {
+		return runSend([]string{"--root", srcRoot, "--me", "alice", "--to", "bob", "--project", "peer", "--body", "repaired peer route"})
+	}); err != nil {
+		t.Fatalf("send after suggested peer repair: %v", err)
+	}
+	entries, err := os.ReadDir(filepath.Join(peerSession, "agents", "bob", "inbox", "new"))
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("delivery after repair: entries=%d err=%v", len(entries), err)
+	}
+}
+
 func TestCrossProjectRepairCommandUsesSessionConfigAuthorityWhenBaseHasNoConfig(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("exact printed command execution uses the POSIX test shell")
