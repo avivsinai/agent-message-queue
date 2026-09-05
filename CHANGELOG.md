@@ -8,6 +8,13 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.77.2](https://github.com/avivsinai/agent-message-queue/compare/v0.77.1...v0.77.2) (2026-09-05)
+
+
+### Bug Fixes
+
+* **coop:** recover stale reboot state and bind Codex naming to process ([#719](https://github.com/avivsinai/agent-message-queue/issues/719)) ([f247e37](https://github.com/avivsinai/agent-message-queue/commit/f247e3752c2cd5f9a1c9b5fa00976a765c242f2f))
+
 ## [0.77.1](https://github.com/avivsinai/agent-message-queue/compare/v0.77.0...v0.77.1) (2026-09-03)
 
 
