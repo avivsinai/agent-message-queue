@@ -88,6 +88,7 @@ func runMonitor(args []string) error {
 	if err := validateKnownHandlesDeliveryRoot(deliveryRoot, common.Strict, me); err != nil {
 		return err
 	}
+	noteLiveWakeBeforeBlockingWait("monitor", root, me)
 	validator, err := newHeaderValidatorDeliveryRoot(deliveryRoot, common.Strict)
 	if err != nil {
 		return err
