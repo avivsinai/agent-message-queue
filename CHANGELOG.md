@@ -8,6 +8,14 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.77.3](https://github.com/avivsinai/agent-message-queue/compare/v0.77.2...v0.77.3) (2026-09-05)
+
+
+### Bug Fixes
+
+* **cli:** tell agents a live wake makes watch and monitor redundant ([#718](https://github.com/avivsinai/agent-message-queue/issues/718)) ([2de1bae](https://github.com/avivsinai/agent-message-queue/commit/2de1baeaa4310c38483cf5cc089207ec4bacb173))
+* **skills:** support Grok Bot local AMQ and wake-first waits ([#722](https://github.com/avivsinai/agent-message-queue/issues/722)) ([5b7ee45](https://github.com/avivsinai/agent-message-queue/commit/5b7ee45b6ee62ce6c7c7ba8e99220d7c20182bf8))
+
 ## [0.77.2](https://github.com/avivsinai/agent-message-queue/compare/v0.77.1...v0.77.2) (2026-09-05)
 
 
