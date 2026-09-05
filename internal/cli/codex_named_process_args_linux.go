@@ -14,7 +14,7 @@ func readCodexProcessArgs(pid int) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	data, err := io.ReadAll(io.LimitReader(file, codexNamedMaxToolOutput+1))
 	if err != nil {
 		return nil, err
