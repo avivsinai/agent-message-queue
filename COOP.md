@@ -261,8 +261,9 @@ amq watch --timeout 60s                           # Block until message arrives 
 amq list --new                                    # Peek without side effects
 ```
 
-If `amq wake` is running for you (`amq who` shows `notifier_live`), it already
-delivers a doorbell into your terminal. Do not also run `watch`, `monitor`, or a
+If `amq wake` is running for you (`amq wake check --me <you> --json` reports
+`live_wake` true with a mode other than `none`), it already delivers a
+doorbell into your terminal. Do not also run `watch`, `monitor`, or a
 polling loop: a blocking wait holds your turn and the doorbell queues behind
 it. Receive with `amq drain --include-body` when the doorbell fires. The one
 exception is the supervisor recipe below, where the wake is notify-only

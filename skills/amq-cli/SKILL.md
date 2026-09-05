@@ -585,8 +585,9 @@ amq send --to grok --body "hello"                 # Grok is a normal peer handle
 ```
 
 **Under a live wake, drain is the only receive verb.** If `amq wake` is running
-for you (`amq who` shows `notifier_live`, or your session-start context says
-`wake=live`), it delivers a doorbell into your terminal. Do not run `watch`,
+for you (your session-start context says `wake=live(...)`, or
+`amq wake check --me <you> --json` reports `live_wake` true with a mode other
+than `none`), it delivers a doorbell into your terminal. Do not run `watch`,
 `monitor`, or a background polling loop: a blocking wait holds your turn and
 the doorbell queues behind it. When the doorbell fires, run
 `amq drain --include-body` and act on it. The exception is a notify-only wake
