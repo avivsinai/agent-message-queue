@@ -244,6 +244,17 @@ func TestCodexSidecarCallDeadlineInterruptsBlockedRead(t *testing.T) {
 }
 
 func TestCodexNamedSidecarProtocolSmokeUsesSyntheticStore(t *testing.T) {
+	for _, concurrentRename := range []bool{false, true} {
+		name := "unnamed thread"
+		if concurrentRename {
+			name = "manual rename during ownership probe"
+		}
+		t.Run(name, func(t *testing.T) { testCodexNativeNaming(t, concurrentRename) })
+	}
+}
+
+func testCodexNativeNaming(t *testing.T, concurrentRename bool) {
+	t.Helper()
 	codex, err := exec.LookPath("codex")
 	if err != nil {
 		t.Skip("codex executable is unavailable")
@@ -315,23 +326,32 @@ func TestCodexNamedSidecarProtocolSmokeUsesSyntheticStore(t *testing.T) {
 		t.Fatal(err)
 	}
 	thread := codexProcessThread{ThreadID: threadID, RolloutPath: rollout, Identity: rolloutIdentity}
+	wantName, wantRevalidations := "session1/codex", 3
+	if concurrentRename {
+		wantName, wantRevalidations = "user-custom-name", 2
+	}
 	revalidations := 0
 	if err := setCodexThreadNameIfEmpty(ctx, sidecar, thread, "session1/codex", func() error {
 		revalidations++
+		if concurrentRename && revalidations == 2 {
+			params, _ := json.Marshal(map[string]string{"threadId": thread.ThreadID, "name": wantName})
+			_, err := sidecar.call(ctx, codexSidecarMessage{JSONRPC: "2.0", ID: 99, Method: "thread/name/set", Params: params})
+			return err
+		}
 		return nil
 	}); err != nil {
 		t.Fatalf("setCodexThreadNameIfEmpty: %v", err)
 	}
-	if revalidations != 3 {
-		t.Fatalf("ownership revalidations = %d, want 3", revalidations)
+	if revalidations != wantRevalidations {
+		t.Fatalf("ownership revalidations = %d, want %d", revalidations, wantRevalidations)
 	}
-	if name, err := readCodexThreadName(ctx, sidecar, thread, 4); err != nil || name != "session1/codex" {
+	if name, err := readCodexThreadName(ctx, sidecar, thread, 4); err != nil || name != wantName {
 		t.Fatalf("updated thread name = %q, err=%v", name, err)
 	}
 	if err := setCodexThreadNameIfEmpty(ctx, sidecar, thread, "replacement", func() error { return nil }); err != nil {
 		t.Fatalf("preserve existing name: %v", err)
 	}
-	if name, err := readCodexThreadName(ctx, sidecar, thread, 5); err != nil || name != "session1/codex" {
+	if name, err := readCodexThreadName(ctx, sidecar, thread, 5); err != nil || name != wantName {
 		t.Fatalf("preserved thread name = %q, err=%v", name, err)
 	}
 }

@@ -688,14 +688,24 @@ func setCodexThreadNameIfEmpty(ctx context.Context, sidecar *codexSidecar, threa
 	if err := revalidate(); err != nil {
 		return err
 	}
+	// Ownership discovery can be slow. Preserve a name set during that probe
+	// by reading again immediately before mutation. Codex has no conditional
+	// set-name operation, so the final read/set pair is still best effort.
+	currentName, err = readCodexThreadName(ctx, sidecar, thread, 3)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(currentName) != "" {
+		return nil
+	}
 	params, _ := json.Marshal(map[string]string{"threadId": thread.ThreadID, "name": name})
-	if _, err := sidecar.call(ctx, codexSidecarMessage{JSONRPC: "2.0", ID: 3, Method: "thread/name/set", Params: params}); err != nil {
+	if _, err := sidecar.call(ctx, codexSidecarMessage{JSONRPC: "2.0", ID: 4, Method: "thread/name/set", Params: params}); err != nil {
 		return fmt.Errorf("set Codex thread name: %w", err)
 	}
 	if err := revalidate(); err != nil {
 		return err
 	}
-	actual, err := readCodexThreadName(ctx, sidecar, thread, 4)
+	actual, err := readCodexThreadName(ctx, sidecar, thread, 5)
 	if err != nil {
 		return err
 	}

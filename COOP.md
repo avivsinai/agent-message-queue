@@ -76,8 +76,10 @@ TUI rename after AMQ finds one newly created session for the spawn directory.
 Codex resumes by name,
 for example `codex resume session1/codex`. Cursor `agent` resumes through its
 picker only; resume-by-name is unproven. Disable this with `--named=false`,
-`AMQ_COOP_NAMED=0`, or `"named": false` in `.amq/launch.json`. Existing names
-and resume or continue flags are preserved, including `codex resume` and
+`AMQ_COOP_NAMED=0`, or `"named": false` in `.amq/launch.json`. Codex naming
+checks for an existing name immediately before setting one. This is best effort:
+Codex has no atomic set-if-unnamed API, so a manual rename in the final read/set
+window can still race. Resume or continue flags are preserved, including `codex resume` and
 `agent --resume`. Committed managed launches apply the same policy to Claude
 fresh plans: `agents[].named` overrides top-level `named` (default true), and
 the ticket owns `--name`. Resume plans never add it. Codex, Cursor, and Grok
