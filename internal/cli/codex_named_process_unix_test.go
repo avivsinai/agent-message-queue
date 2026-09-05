@@ -59,6 +59,13 @@ func TestReadCodexSessionMetaRejectsChangedFileIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Hold the original inode alive across replacement: a freed inode may be
+	// reused for the new file, which would make the identities agree.
+	held, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = held.Close() }()
 	if err := os.Remove(path); err != nil {
 		t.Fatal(err)
 	}
