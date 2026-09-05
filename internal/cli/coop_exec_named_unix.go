@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/avivsinai/agent-message-queue/internal/launch"
 )
 
 const coopNamedTUIStartupDelay = 3 * time.Second
@@ -42,15 +44,33 @@ func startCoopNamedTUIInjectorProcess(name, cmdName string, execStart time.Time)
 	if err != nil {
 		return err
 	}
-	cmd := exec.Command(
+	args := []string{
 		amqBin,
 		"--no-update-check",
 		"coop",
 		"named-inject",
 		"--name", name,
-		"--binary", filepath.Base(cmdName),
+		"--binary", cmdName,
 		"--exec-start-ns", strconv.FormatInt(execStart.UnixNano(), 10),
-	)
+	}
+	if launch.ProviderForExecutable(cmdName) == launch.CodexProvider {
+		target, err := captureCodexNamingTarget(cmdName)
+		if err != nil {
+			return err
+		}
+		args = append(args,
+			"--parent-pid", strconv.Itoa(target.PID),
+			"--parent-process-start", target.ProcessStart,
+			"--parent-boot-id", target.BootID,
+			"--parent-executable", target.InitialExecutable,
+			"--parent-executable-device", strconv.FormatUint(target.InitialIdentity.Device, 10),
+			"--parent-executable-inode", strconv.FormatUint(target.InitialIdentity.Inode, 10),
+			"--provider-binary", target.ProviderBinary,
+			"--provider-binary-device", strconv.FormatUint(target.ProviderIdentity.Device, 10),
+			"--provider-binary-inode", strconv.FormatUint(target.ProviderIdentity.Inode, 10),
+		)
+	}
+	cmd := exec.Command(args[0], args[1:]...)
 	// Leave stdin/stdout on the null device so the helper does not steal the
 	// agent's TTY fds. Injection opens the controlling terminal via /dev/tty.
 	cmd.Stdin = nil
@@ -82,6 +102,15 @@ func runCoopNamedInject(args []string) error {
 	binaryFlag := fs.String("binary", "", "Spawned CLI binary basename")
 	delayFlag := fs.Duration("startup-delay", coopNamedTUIStartupDelay, "Delay before terminal injection")
 	execStartFlag := fs.Int64("exec-start-ns", 0, "Internal coop exec start timestamp")
+	parentPIDFlag := fs.Int("parent-pid", os.Getppid(), "Internal spawned CLI PID")
+	parentProcessStartFlag := fs.String("parent-process-start", "", "Internal spawned CLI process start token")
+	parentBootIDFlag := fs.String("parent-boot-id", "", "Internal spawned CLI boot identity")
+	parentExecutableFlag := fs.String("parent-executable", "", "Internal pre-exec AMQ executable")
+	parentExecutableDeviceFlag := fs.Uint64("parent-executable-device", 0, "Internal pre-exec AMQ executable device")
+	parentExecutableInodeFlag := fs.Uint64("parent-executable-inode", 0, "Internal pre-exec AMQ executable inode")
+	providerBinaryFlag := fs.String("provider-binary", "", "Internal resolved provider executable")
+	providerBinaryDeviceFlag := fs.Uint64("provider-binary-device", 0, "Internal provider executable device")
+	providerBinaryInodeFlag := fs.Uint64("provider-binary-inode", 0, "Internal provider executable inode")
 	usage := func() {
 		_ = writeStderr("usage: amq coop named-inject --name <session/name> --binary <basename>\n")
 	}
@@ -100,10 +129,11 @@ func runCoopNamedInject(args []string) error {
 	if err := validateCoopNamedSessionLabel(name); err != nil {
 		return UsageError("--name: %v", err)
 	}
-	binaryBase := strings.TrimSpace(*binaryFlag)
-	if binaryBase == "" {
+	binaryPath := strings.TrimSpace(*binaryFlag)
+	if binaryPath == "" {
 		return UsageError("--binary is required")
 	}
+	binaryBase := filepath.Base(binaryPath)
 	if coopNamedModeFor(binaryBase) != coopNamedModeTUI {
 		return UsageError("--binary %q does not use coop named terminal injection", binaryBase)
 	}
@@ -113,6 +143,28 @@ func runCoopNamedInject(args []string) error {
 	}
 	if *delayFlag > 0 {
 		coopNamedStartupSleep(*delayFlag)
+	}
+	if launch.ProviderForExecutable(binaryBase) == launch.CodexProvider {
+		target := codexNamingTarget{
+			PID:               *parentPIDFlag,
+			ProcessStart:      strings.TrimSpace(*parentProcessStartFlag),
+			BootID:            strings.TrimSpace(*parentBootIDFlag),
+			InitialExecutable: strings.TrimSpace(*parentExecutableFlag),
+			InitialIdentity:   codexFileIdentity{Device: *parentExecutableDeviceFlag, Inode: *parentExecutableInodeFlag},
+			ProviderBinary:    strings.TrimSpace(*providerBinaryFlag),
+			ProviderIdentity:  codexFileIdentity{Device: *providerBinaryDeviceFlag, Inode: *providerBinaryInodeFlag},
+		}
+		if target.PID <= 0 || target.ProcessStart == "" || target.BootID == "" ||
+			target.InitialExecutable == "" || !filepath.IsAbs(target.InitialExecutable) || filepath.Clean(target.InitialExecutable) != target.InitialExecutable ||
+			target.InitialIdentity.Device == 0 || target.InitialIdentity.Inode == 0 ||
+			target.ProviderBinary == "" || !filepath.IsAbs(target.ProviderBinary) || filepath.Clean(target.ProviderBinary) != target.ProviderBinary ||
+			target.ProviderIdentity.Device == 0 || target.ProviderIdentity.Inode == 0 {
+			return UsageError("Codex named-inject requires complete parent process identity and provider binary")
+		}
+		if err := runCodexNamedSidecar(name, target); err != nil {
+			_ = writeStderr("%s\n", coopNamedTUIManualReminder(name, binaryBase, err.Error()))
+		}
+		return nil
 	}
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -148,7 +200,7 @@ func validateCoopNamedSessionLabel(name string) error {
 
 func coopNamedTUIManualReminder(name, binaryBase, reason string) string {
 	return fmt.Sprintf(
-		"warning: cannot confirm %s CLI session %q (%s); enter %q manually",
+		"warning: unable to set or confirm the %s CLI display name %q (%s); this affects only the CLI display name; enter %q manually",
 		filepath.Base(binaryBase), name, reason, coopNamedTUICommand(binaryBase, name),
 	)
 }

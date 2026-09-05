@@ -33,6 +33,13 @@ conservative problem states:
 - `unverified`: AMQ cannot prove ownership or staleness. Startup fails closed
   and doctor preserves the lock for operator inspection.
 
+Stale-lock removal and staged-executable deletion use independent identity
+checks. If a stage no longer matches its saved file identity (for example,
+device numbering changed after a reboot), cleanup preserves that file and
+prints its path, while exact stale-lock removal can continue. Doctor also
+quarantines an abandoned restart record while preserving its unmatched stage
+when no wake lock exists. This does not authorize deleting the retained file.
+
 Wake-lock repair follows the session guard. A target outside the authenticated
 pinned base is inspected but not changed unless the command has an explicit
 root and `--ignore-session-pin`. A guard refusal is a structured doctor error;

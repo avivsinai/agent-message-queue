@@ -3,7 +3,6 @@
 package cli
 
 import (
-	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -14,10 +13,6 @@ import (
 	"testing"
 	"time"
 )
-
-func codexTestRolloutPath(dir string, createdAt time.Time, suffix string) string {
-	return filepath.Join(dir, "rollout-"+createdAt.Format(codexRolloutTimestampLayout)+"-"+suffix+".jsonl")
-}
 
 func TestCoopNamedSessionLabel(t *testing.T) {
 	for _, test := range []struct {
@@ -104,201 +99,6 @@ func TestResolveCoopNamedEnabledUsesLaunchConfig(t *testing.T) {
 	got, err := resolveCoopNamedEnabled(false, true)
 	if err != nil || got {
 		t.Fatalf("launch config off switch = %v, %v", got, err)
-	}
-}
-
-func TestCodexNamedStoreReaderUsesReadOnlyStoreAndFiltersWindow(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("CODEX_HOME", home)
-	start := time.Now()
-	rollout := codexTestRolloutPath(home, start, "test")
-	if err := os.WriteFile(rollout, []byte("{}\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	oldQuery := runCodexSQLiteQuery
-	t.Cleanup(func() { runCodexSQLiteQuery = oldQuery })
-	var gotDB string
-	runCodexSQLiteQuery = func(dbPath string) ([]byte, error) {
-		gotDB = dbPath
-		return []byte(`[{
-  "cwd": "` + cwd + `",
-  "name": "",
-  "rollout_path": "` + rollout + `"
-}]`), nil
-	}
-	candidate, err := (codexNamedStoreReader{}).locate(cwd, start)
-	if err != nil {
-		t.Fatalf("locate Codex candidate: %v", err)
-	}
-	if candidate.storePath != filepath.Join(home, codexStateFilename) || candidate.key != rollout {
-		t.Fatalf("candidate = %#v", candidate)
-	}
-	if gotDB != candidate.storePath {
-		t.Fatalf("sqlite database = %q, want %q", gotDB, candidate.storePath)
-	}
-	second := codexTestRolloutPath(home, start, "second")
-	runCodexSQLiteQuery = func(string) ([]byte, error) {
-		return []byte(`[{"cwd":"` + cwd + `","name":"","title":"feature/codex","rollout_path":"` + rollout + `"},{"cwd":"` + cwd + `","name":"other","rollout_path":"` + second + `"}]`), nil
-	}
-	if got, err := (codexNamedStoreReader{}).readName(candidate); err != nil || got != "feature/codex" {
-		t.Fatalf("legacy Codex title readback = %q, %v", got, err)
-	}
-
-	runCodexSQLiteQuery = func(string) ([]byte, error) {
-		return []byte(`[{
-  "cwd": "` + cwd + `",
-  "name": "",
-  "rollout_path": "` + rollout + `"
-}, {
-  "cwd": "` + cwd + `",
-  "name": "other",
-  "rollout_path": "` + second + `"
-}]`), nil
-	}
-	if err := os.WriteFile(second, []byte("{}\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := (codexNamedStoreReader{}).locate(cwd, start); err == nil || !strings.Contains(err.Error(), "ambiguous") {
-		t.Fatalf("multiple candidates error = %v", err)
-	}
-}
-
-func TestCodexNamedStoreReaderSkipsCWDAndOldRollouts(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("CODEX_HOME", home)
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	start := time.Now()
-	current := codexTestRolloutPath(home, start, "current")
-	other := codexTestRolloutPath(home, start, "other")
-	old := codexTestRolloutPath(home, start.Add(-3*time.Second), "old")
-	for _, path := range []string{current, other, old} {
-		if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	oldTime := time.Now()
-	if err := os.Chtimes(old, oldTime, oldTime); err != nil {
-		t.Fatal(err)
-	}
-	rows, err := json.Marshal([]codexThreadRow{
-		{CWD: cwd, RolloutPath: current},
-		{CWD: filepath.Join(home, "other-cwd"), RolloutPath: other},
-		{CWD: cwd, RolloutPath: old},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	oldQuery := runCodexSQLiteQuery
-	t.Cleanup(func() { runCodexSQLiteQuery = oldQuery })
-	runCodexSQLiteQuery = func(string) ([]byte, error) { return rows, nil }
-	candidate, err := (codexNamedStoreReader{}).locate(cwd, start)
-	if err != nil {
-		t.Fatalf("locate filtered Codex candidate: %v", err)
-	}
-	if candidate.key != current {
-		t.Fatalf("candidate = %#v, want current rollout", candidate)
-	}
-}
-
-func TestCodexNamedStoreReaderAcceptsClockSlackButFiltersOlderRollouts(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("CODEX_HOME", home)
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	start := time.Now()
-	withinCreated := start.Add(-time.Second)
-	oldCreated := start.Add(-3 * time.Second)
-	within := codexTestRolloutPath(home, withinCreated, "within")
-	old := codexTestRolloutPath(home, oldCreated, "old")
-	for _, path := range []string{within, old} {
-		if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	withinTime := time.Now()
-	oldTime := withinTime
-	if err := os.Chtimes(within, withinTime, withinTime); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chtimes(old, oldTime, oldTime); err != nil {
-		t.Fatal(err)
-	}
-	rows, err := json.Marshal([]codexThreadRow{
-		{CWD: cwd, RolloutPath: within},
-		{CWD: cwd, RolloutPath: old},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	oldQuery := runCodexSQLiteQuery
-	t.Cleanup(func() { runCodexSQLiteQuery = oldQuery })
-	runCodexSQLiteQuery = func(string) ([]byte, error) { return rows, nil }
-	candidate, err := (codexNamedStoreReader{}).locate(cwd, start)
-	if err != nil {
-		t.Fatalf("locate Codex candidate with clock slack: %v", err)
-	}
-	if candidate.key != within {
-		t.Fatalf("candidate = %#v, want rollout within clock slack", candidate)
-	}
-}
-
-func TestCodexNamedStoreReaderMissingSQLiteIsUnknown(t *testing.T) {
-	t.Setenv("CODEX_HOME", t.TempDir())
-	t.Setenv("PATH", t.TempDir())
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = (codexNamedStoreReader{}).locate(cwd, time.Now())
-	if err == nil || !strings.Contains(err.Error(), "sqlite3") {
-		t.Fatalf("missing sqlite3 error = %v", err)
-	}
-}
-
-func TestRunCodexSQLiteQueryProcessUsesFixedReadOnlyQuery(t *testing.T) {
-	dir := t.TempDir()
-	argsPath := filepath.Join(dir, "args")
-	script := filepath.Join(dir, "sqlite3")
-	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$AMQ_TEST_SQLITE_ARGS\"\nprintf '[]\\n'\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", dir)
-	t.Setenv("AMQ_TEST_SQLITE_ARGS", argsPath)
-	dbPath := filepath.Join(dir, "database with spaces")
-	data, err := runCodexSQLiteQueryProcess(dbPath)
-	if err != nil {
-		t.Fatalf("run sqlite3 query: %v", err)
-	}
-	if string(data) != "[]\n" {
-		t.Fatalf("sqlite3 output = %q", data)
-	}
-	args, err := os.ReadFile(argsPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := "-readonly\n-json\n" + dbPath + "\n" + codexThreadsQuery + "\n"
-	if string(args) != want {
-		t.Fatalf("sqlite3 args = %q, want %q", args, want)
-	}
-}
-
-func TestReadCodexThreadRowsRejectsSchemaMismatch(t *testing.T) {
-	oldQuery := runCodexSQLiteQuery
-	t.Cleanup(func() { runCodexSQLiteQuery = oldQuery })
-	runCodexSQLiteQuery = func(string) ([]byte, error) {
-		return []byte(`[{"cwd":"cwd","name":"name","rollout_path":"rollout","unexpected":true}]`), nil
-	}
-	if _, err := readCodexThreadRows("ignored"); err == nil || !strings.Contains(err.Error(), "unknown field") {
-		t.Fatalf("schema mismatch error = %v", err)
 	}
 }
 
@@ -537,55 +337,6 @@ func TestRunCoopNamedTUIUnknownStoreSkipsInjection(t *testing.T) {
 	})
 	if err != nil || injections != 0 || !strings.Contains(stderr, "store unavailable") {
 		t.Fatalf("unknown store: err=%v injections=%d stderr=%q", err, injections, stderr)
-	}
-}
-
-func TestRunCoopNamedInjectMissingSQLiteSkipsInjection(t *testing.T) {
-	t.Setenv("CODEX_HOME", t.TempDir())
-	t.Setenv("PATH", t.TempDir())
-	oldInject := coopNamedTTYInject
-	t.Cleanup(func() { coopNamedTTYInject = oldInject })
-	injections := 0
-	coopNamedTTYInject = func(string, string) error {
-		injections++
-		return nil
-	}
-	reader := codexNamedStoreReader{}
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, stderr, err := captureEnvOutput(t, func() error {
-		return runCoopNamedTUI(&reader, "feature/codex", "codex", cwd, time.Now())
-	})
-	if err != nil || injections != 0 || !strings.Contains(stderr, "manually") {
-		t.Fatalf("missing sqlite3: err=%v injections=%d stderr=%q", err, injections, stderr)
-	}
-}
-
-func TestCodexNamedStoreReaderLive(t *testing.T) {
-	if os.Getenv("AMQ_CODEX_LIVE") != "1" {
-		t.Skip("set AMQ_CODEX_LIVE=1 to run the scratch Codex session proof")
-	}
-	codex, err := exec.LookPath("codex")
-	if err != nil {
-		t.Skipf("codex is unavailable: %v", err)
-	}
-	home := t.TempDir()
-	cwd := t.TempDir()
-	start := time.Now()
-	cmd := exec.Command(codex, "exec", "--skip-git-repo-check", "--json", "Reply with exactly OK")
-	cmd.Dir = cwd
-	cmd.Env = append(os.Environ(), "CODEX_HOME="+home)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("scratch Codex session: %v\n%s", err, output)
-	}
-	candidate, err := (codexNamedStoreReader{}).locate(cwd, start)
-	if err != nil {
-		t.Fatalf("read scratch Codex store: %v", err)
-	}
-	if _, err := (codexNamedStoreReader{}).readName(candidate); err != nil {
-		t.Fatalf("read scratch Codex name: %v", err)
 	}
 }
 

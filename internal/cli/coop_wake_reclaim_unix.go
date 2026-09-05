@@ -41,7 +41,9 @@ func prepareCoopWakeLock(root, agent string, yes bool, remedy string) (retErr er
 		return fmt.Errorf("wake lock for %s names a running process proven not to be this wake; refusing to signal or remove it; lock: %s; root: %s; reason: %s; inspect with %s", agent, inspection.LockPath, inspection.Root, inspection.Reason, wakeCheckRemedy(inspection.Root, inspection.Agent).String())
 	}
 	if inspection.Status == wakeLockStale {
-		// This returns before stale owner-bound recovery advice is rendered below.
+		if wakeLockHasOwnerMarkers(inspection) {
+			return coopWakeStartupConflictError(inspection, nil)
+		}
 		if err := removeCoopWakeLockIfUnchangedInDir(agentDir, inspection); err != nil {
 			return fmt.Errorf("remove exact stale wake lock: %w", err)
 		}

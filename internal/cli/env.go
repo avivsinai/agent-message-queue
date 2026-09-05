@@ -436,7 +436,7 @@ func resolveEnvConfigWithSource(rootFlag, meFlag string) (string, rootSource, st
 		if insideGit {
 			return "", "", "", noEligibleRootInGitError(gitTop)
 		}
-		return "", "", "", fmt.Errorf("cannot determine root: no .amqrc found, no .agent-mail/ directory, AM_ROOT not set, and no global config (~/.amqrc or AMQ_GLOBAL_ROOT)")
+		return "", "", "", fmt.Errorf("cannot determine root: no .amqrc found, no .agent-mail/ directory, AM_ROOT not set, and no global config (~/.amqrc or AMQ_GLOBAL_ROOT); from your terminal, run 'amq setup --project-root \"$PWD\"' to configure this project; for an existing queue, set AMQ_GLOBAL_ROOT to its path")
 	}
 
 	// Canonicalize the winning root before pin validation, JSON/shell output,

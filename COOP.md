@@ -64,8 +64,14 @@ amq coop exec grok
 
 Direct `coop exec` names sessions by default as `<session>/<handle>`, or as
 `<handle>` for a sessionless root. Claude and Pi receive the name as an argv
-flag. Codex and Cursor `agent` receive a best-effort TUI rename only after AMQ
-finds one newly created session for the spawn directory. Codex resumes by name,
+flag. For Codex, AMQ waits up to 90 seconds for the launched process to open its
+main user thread, then uses Codex's naming API and confirms the result. It does
+not type into the Codex terminal. Process and file identities must agree;
+macOS requires `lsof`, and Linux uses `/proc`. If naming is unavailable or
+ambiguous, AMQ prints the manual `/rename` command. This affects the CLI display
+name only, not the AMQ queue or session. Cursor `agent` receives a best-effort
+TUI rename after AMQ finds one newly created session for the spawn directory.
+Codex resumes by name,
 for example `codex resume session1/codex`. Cursor `agent` resumes through its
 picker only; resume-by-name is unproven. Disable this with `--named=false`,
 `AMQ_COOP_NAMED=0`, or `"named": false` in `.amq/launch.json`. Existing names

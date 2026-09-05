@@ -69,6 +69,9 @@ func TestSendCompletesUnknownDestinationMailboxInInitializedRoot(t *testing.T) {
 	if !strings.Contains(stderr, `warning: handle "clade" not in config.json`) {
 		t.Fatalf("unknown-handle warning changed: %q", stderr)
 	}
+	if !strings.Contains(stderr, "amq who --json") || !strings.Contains(stderr, "message may not be read") {
+		t.Fatalf("unknown-handle warning missing verification remedy: %q", stderr)
+	}
 	assertCompleteSendMailbox(t, root, "clade")
 
 	listed, _, err := captureEnvOutput(t, func() error {

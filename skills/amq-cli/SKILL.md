@@ -222,7 +222,9 @@ Without `--session` or `--root`, `coop exec` uses the declared `default_session`
 
 Direct `coop exec` names the provider session by default as
 `<session>/<handle>`, or as `<handle>` for a sessionless root. Claude and Pi
-get `--name`; Codex and Cursor `agent` get a best-effort TUI rename after the
+get `--name`; Codex uses its native naming API after process-bound thread
+discovery, with a manual `/rename` fallback that does not affect queue delivery.
+Cursor `agent` gets a best-effort TUI rename after the
 new session store is verified. Codex resumes by name, for example `codex resume
 session1/codex`. Cursor `agent` resumes through its picker only; resume-by-name
 is unproven. Existing names and `--resume`, `-r`, `--continue`, or `-c` flags
