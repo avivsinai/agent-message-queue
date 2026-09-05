@@ -216,9 +216,11 @@ See [Wake operations](docs/wake-operations.md) for the full contract.
 ## Coordination Workflows
 
 During active work, run `amq drain --include-body` between phases. Use
-`send --wait-for drained` when delivery proof matters and `watch` when waiting
-for a response. Reply to the initiator, preserve the existing thread, send
-status at start and phase boundaries, and finish with changes and verification.
+`send --wait-for drained` when delivery proof matters. Use `watch` only when no
+wake is live for you; a live wake already delivers a doorbell, and a blocking
+wait would hold your turn while the doorbell queues behind it. Reply to the
+initiator, preserve the existing thread, send status at start and phase
+boundaries, and finish with changes and verification.
 
 The [co-op guide](COOP.md) owns peer roles, phased flow, wake use, supervisor
 recipes, and troubleshooting. The `amq-cli` skill owns agent-facing command

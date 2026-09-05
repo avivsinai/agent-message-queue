@@ -579,10 +579,18 @@ amq send --to codex --body "Message"              # Send (uses AM_ROOT/AM_ME fro
 amq drain --include-body                          # Receive (one-shot, silent when empty)
 amq drain --session auth --include-body           # Deliberate sibling-session receive
 amq reply --id <msg_id> --body "Response"          # Reply in thread
-amq watch --timeout 60s                           # Block until message arrives
+amq watch --timeout 60s                           # Block until message arrives (only when no wake is live for you)
 amq list --new                                    # Peek without side effects
 amq send --to grok --body "hello"                 # Grok is a normal peer handle, like codex or claude
 ```
+
+**Under a live wake, drain is the only receive verb.** If `amq wake` is running
+for you (`amq who` shows `notifier_live`, or your session-start context says
+`wake=live`), it delivers a doorbell into your terminal. Do not run `watch`,
+`monitor`, or a background polling loop: a blocking wait holds your turn and
+the doorbell queues behind it. When the doorbell fires, run
+`amq drain --include-body` and act on it. The exception is a notify-only wake
+(`--inject-mode none`) paired with a `monitor` service, the supervisor recipe.
 
 ### Send with metadata
 ```bash

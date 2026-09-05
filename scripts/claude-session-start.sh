@@ -117,19 +117,21 @@ if command -v amq &> /dev/null; then
     if [ -n "$RESOLVED_ROOT" ]; then
         ENV_JSON=$(cd "$PROJECT_DIR" && amq env --me "$ME" --root "$RESOLVED_ROOT" --json 2>>"$HOOK_LOG") || ENV_JSON=""
         PRESENCE_JSON=$(amq presence list --root "$RESOLVED_ROOT" --json 2>>"$HOOK_LOG") || PRESENCE_JSON="[]"
+        WHO_JSON=$(amq who --root "$RESOLVED_ROOT" --json 2>>"$HOOK_LOG") || WHO_JSON="[]"
         # Count unread via pipe to avoid passing large JSON as argv
         INBOX_COUNT=$(amq list --me "$ME" --root "$RESOLVED_ROOT" --new --json 2>>"$HOOK_LOG" \
             | python3 -c "import json,sys;print(len(json.load(sys.stdin)))" 2>>"$HOOK_LOG") || INBOX_COUNT=0
     else
         ENV_JSON=$(cd "$PROJECT_DIR" && amq env --me "$ME" --json 2>>"$HOOK_LOG") || ENV_JSON=""
         PRESENCE_JSON=$(amq presence list --json 2>>"$HOOK_LOG") || PRESENCE_JSON="[]"
+        WHO_JSON=$(amq who --json 2>>"$HOOK_LOG") || WHO_JSON="[]"
         # Count unread via pipe to avoid passing large JSON as argv
         INBOX_COUNT=$(amq list --me "$ME" --new --json 2>>"$HOOK_LOG" \
             | python3 -c "import json,sys;print(len(json.load(sys.stdin)))" 2>>"$HOOK_LOG") || INBOX_COUNT=0
     fi
 
     if [ -n "$ENV_JSON" ]; then
-        python3 - "$ME" "$ENV_JSON" "$PRESENCE_JSON" "$INBOX_COUNT" 2>>"$HOOK_LOG" <<'PYEOF' || true
+        python3 - "$ME" "$ENV_JSON" "$PRESENCE_JSON" "$INBOX_COUNT" "$WHO_JSON" 2>>"$HOOK_LOG" <<'PYEOF' || true
 import json, sys
 from datetime import datetime, timezone, timedelta
 
@@ -162,6 +164,21 @@ try:
 
     peer_str = ",".join(f'{p["handle"]}({p["status"]})' for p in peers)
 
+    # Wake state for me: a live wake already delivers a doorbell into this
+    # terminal, so the model must not start watch/monitor/polling (issue #717).
+    wake_live = False
+    try:
+        who = json.loads(sys.argv[5]) if len(sys.argv) > 5 else []
+        sessions = who if isinstance(who, list) else who.get("sessions", [])
+        for s in sessions:
+            if session and s.get("name") not in (session, ""):
+                continue
+            for a in s.get("agents", []):
+                if a.get("handle") == me and a.get("presence_source") == "notifier_live":
+                    wake_live = True
+    except (ValueError, TypeError, AttributeError):
+        pass
+
     # Line 1: identity + session
     if session:
         line1 = f"AMQ coop active: me={me} session={session}"
@@ -171,11 +188,13 @@ try:
         line1 += f" project={project}"
     if peer_str:
         line1 += f" peers={peer_str}"
-    line1 += "."
+    line1 += f" wake={'live' if wake_live else 'none'}."
 
     parts = [line1]
     if unread:
         parts.append(f"Inbox: {unread} unread message(s). Run: amq drain --me {me}")
+    if wake_live:
+        parts.append("A wake notifies this terminal: receive with amq drain --include-body when the doorbell fires. Do not run amq watch, amq monitor, or a polling loop; a blocking wait holds your turn and the doorbell queues behind it.")
     parts.append("Use amq send/reply/drain for peer coordination. Preserve thread IDs on replies.")
 
     preamble = "\n".join(parts)
