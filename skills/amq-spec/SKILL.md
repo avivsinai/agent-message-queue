@@ -134,6 +134,13 @@ approved and assigns work.
 
 ## Protocol Discipline
 
+- **Use the existing wake while waiting** — if a live injecting wake notifies
+  this terminal, finish independent work and yield. On its doorbell, run
+  `amq drain --include-body`. Do not start `amq watch`, `amq monitor`, or a
+  background polling loop for peer replies. Check `amq wake check --me <handle>
+  --json` when the capability is unknown. A bounded watch is a fallback only
+  without an injecting wake; notify-only supervisor consumers remain valid.
+
 These rules exist because violations silently break the workflow's value proposition:
 
 - **Send before researching** — parallel research is the whole point. Pre-researching wastes your partner's time and biases the outcome toward your initial framing.

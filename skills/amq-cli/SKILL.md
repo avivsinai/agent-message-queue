@@ -159,7 +159,8 @@ Before diving in, match the task to the right workflow — this avoids wasted ef
 | **"spec", "design with", "collaborative spec"** | Use `/amq-spec` instead — it has structured phase-by-phase guidance for parallel-research workflows. |
 | **Send a message, review request, question** | Use `amq send` (see Messaging below) |
 | **Buzz / ACP / `amq-acp`** | Companion `amq-acp` queues to `AMQ_ACP_TO`; pool workers must not drain. Chat must not pass `--root`, recipients, or argv. `[Context]` is not routing. See [`cmd/amq-acp/README.md`](../../cmd/amq-acp/README.md). |
-| **Two-host / Grok computer / `amq-bridge`** | Companion `amq-bridge`, never a foreign `--root`. See Two-host fleets below. |
+| **Grok Bot runs commands on a registered Mac** | Ordinary local AMQ on that Mac. See [registered-machine execution](references/registered-machine.md); select the machine before resolving the project/session. |
+| **Two separate host queues / Grok cloud computer / `amq-bridge`** | Companion `amq-bridge`, never a foreign `--root`. See Two-host fleets below. |
 | **Swarm / agent teams** | Read [references/swarm-mode.md](references/swarm-mode.md), then use `amq swarm` |
 | **Received message with labels `workflow:spec`** | Follow the spec skill protocol: do independent research first, then engage on the `spec/<topic>` thread — don't skip straight to implementation. |
 
@@ -508,11 +509,31 @@ When you receive a message where `from` matches your own handle (e.g., `from: "c
 
 After sending a cross-project message (via `--project`), your `AM_ROOT` still points to YOUR project. To send to your own partner (same project), use plain `amq send --to codex` — do NOT use `--project`. The `--project` flag is ONLY for sending to agents in OTHER projects.
 
+## Registered-machine execution
+
+Choose the AMQ lane by **where the command executes**, not where the Bot's
+conversation runs. When Grok Bot uses an already-authorized registered-machine
+shell to run the Mac's `amq`, it is a local participant on that Mac. Use normal
+`env`, `send`, `drain`, and `reply`; no bridge or network setup is needed.
+`--project` still means another project on that same machine.
+
+Select the registered machine explicitly, resolve the chosen project/session
+on it, and keep the assigned sender handle. Carry bodies through quoted stdin
+or a local file, preserve returned message IDs, and never resend merely because
+the provider lost command output or a receipt wait expired. A thread ID is
+correlation, not duplicate suppression. Local recipient wakes do not prove
+that the hosted Bot receives a return notification.
+
+See [references/registered-machine.md](references/registered-machine.md) for
+the executable workflow, reply collection, and uncertain-result recovery.
+
 ## Two-host fleets
 
-A different machine is a different AMQ host, not a `--project` and not a
+A queue on a different machine is a different AMQ host, not a `--project` and not a
 foreign `--root`. Each host has its own handles; `claude` on G is not `claude`
-on the Mac. Cross-host mail is companion `amq-bridge` only.
+on the Mac. Exchange between those host queues is companion `amq-bridge`
+only. A registered-machine shell executing AMQ on the destination Mac is the
+local-execution lane above; it does not transfer a cloud Maildir.
 
 - Address receiver-owned aliases `<host>/<agent>`.
 - The destination host applies the signed envelope into its own Maildir.
