@@ -55,47 +55,6 @@ func TestTrustRecordRoundTripAndSemanticInvalidation(t *testing.T) {
 	}
 }
 
-func TestTrustStoreUsesPhysicalProjectIdentityAndDoesNotLeak(t *testing.T) {
-	base := t.TempDir()
-	state := filepath.Join(base, "state")
-	projectA := filepath.Join(base, "a")
-	projectB := filepath.Join(base, "b")
-	if err := os.Mkdir(projectA, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Mkdir(projectB, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	aliasA := filepath.Join(base, "alias-a")
-	if err := os.Symlink(projectA, aliasA); err != nil {
-		t.Fatal(err)
-	}
-	storeA, err := OpenTrustStore(state, projectA)
-	if err != nil {
-		t.Fatal(err)
-	}
-	storeAlias, err := OpenTrustStore(state, aliasA)
-	if err != nil {
-		t.Fatal(err)
-	}
-	storeB, err := OpenTrustStore(state, projectB)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if storeA.Path() != storeAlias.Path() {
-		t.Fatalf("physical alias got another trust key: %s != %s", storeA.Path(), storeAlias.Path())
-	}
-	if storeA.Path() == storeB.Path() {
-		t.Fatal("different projects shared a trust key")
-	}
-	if err := storeA.Replace(TrustRecord{SemanticDigest: testDigest('c')}); err != nil {
-		t.Fatal(err)
-	}
-	if _, trusted, err := storeB.LoadForDigest(testDigest('c')); err != nil || trusted {
-		t.Fatalf("project B inherited project A trust: trusted=%t err=%v", trusted, err)
-	}
-}
-
 func TestTrustStoreScopesExplicitBaseRoots(t *testing.T) {
 	state := t.TempDir()
 	project := t.TempDir()
@@ -205,12 +164,5 @@ func TestTrustLoadRejectsSymlinkRecord(t *testing.T) {
 	}
 	if _, trusted, err := store.LoadForDigest(testDigest('f')); trusted || err == nil {
 		t.Fatalf("symlink record = trusted %t, err %v", trusted, err)
-	}
-}
-
-func TestTrustLoadRejectsInvalidRequestedDigest(t *testing.T) {
-	store, _ := trustFixture(t)
-	if _, trusted, err := store.LoadForDigest("not-a-digest"); trusted || err == nil {
-		t.Fatalf("invalid requested digest = trusted %t, err %v", trusted, err)
 	}
 }

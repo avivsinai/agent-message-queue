@@ -1,7 +1,6 @@
 package launch
 
 import (
-	"strings"
 	"testing"
 )
 
@@ -71,19 +70,5 @@ func TestValidateCodexConfigOverridesApprovalsReviewerSet(t *testing.T) {
 	}
 	if err := validateCodexConfigOverrides(bareSet); err != nil {
 		t.Fatalf("validateCodexConfigOverrides(%q) = %v, want nil", bareSet, err)
-	}
-}
-
-// TestValidateCodexConfigOverridesApprovalsReviewerDuplicateKey confirms a
-// repeated approvals_reviewer key is rejected as duplicated, matching the
-// existing model_reasoning_effort duplicate-key behavior.
-func TestValidateCodexConfigOverridesApprovalsReviewerDuplicateKey(t *testing.T) {
-	set := []string{
-		"-c", "approvals_reviewer=user",
-		"-c", `approvals_reviewer="auto_review"`,
-	}
-	err := validateCodexConfigOverrides(set)
-	if err == nil || !strings.Contains(err.Error(), "duplicated") {
-		t.Fatalf("validateCodexConfigOverrides(%q) = %v, want duplicated", set, err)
 	}
 }

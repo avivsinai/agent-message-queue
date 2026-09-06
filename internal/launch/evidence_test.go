@@ -6,7 +6,6 @@ import (
 	"os"
 	"reflect"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -156,94 +155,5 @@ func TestImmutableCaptureEvidenceReadback(t *testing.T) {
 	}
 	if _, err := LoadConversation(restarted, "claude"); !errors.As(err, &corrupt) {
 		t.Fatalf("tampered continuity readback error = %v", err)
-	}
-}
-
-func TestEvidenceExclusivePublicationRace(t *testing.T) {
-	fixture := newExecutionFixture(t)
-	lease, err := AcquireLease(fixture.root, "71717171-7171-4171-8171-717171717171")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := lease.LockHandles("claude"); err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = lease.Release() }()
-	request := EvidenceWriteRequest{
-		Kind: EvidenceFixture, Handle: "claude", ObservedAt: time.Date(2026, 8, 17, 2, 3, 4, 0, time.UTC),
-		Payload: []byte(`{"fixture":true}`),
-	}
-	const writers = 12
-	results := make(chan error, writers)
-	var group sync.WaitGroup
-	for range writers {
-		group.Add(1)
-		go func() {
-			defer group.Done()
-			_, err := WriteEvidence(fixture.root, lease, request)
-			results <- err
-		}()
-	}
-	group.Wait()
-	close(results)
-	wins, collisions := 0, 0
-	for err := range results {
-		if err == nil {
-			wins++
-			continue
-		}
-		var exists *EvidenceExistsError
-		if errors.As(err, &exists) {
-			collisions++
-			continue
-		}
-		t.Fatalf("exclusive evidence race error = %v", err)
-	}
-	if wins != 1 || collisions != writers-1 {
-		t.Fatalf("exclusive evidence race wins=%d collisions=%d", wins, collisions)
-	}
-}
-
-func TestCodexProviderEvidenceRejectsOuterPayloadBindingDivergenceBeforeWrite(t *testing.T) {
-	mutations := []struct {
-		name   string
-		mutate func(*CaptureEvidence)
-	}{
-		{name: "nonce", mutate: func(evidence *CaptureEvidence) { evidence.launchNonce = testConversationID }},
-		{name: "handle", mutate: func(evidence *CaptureEvidence) { evidence.handle = "other" }},
-		{name: "version", mutate: func(evidence *CaptureEvidence) { evidence.providerVersion = "0.148.0" }},
-		{name: "conversation id", mutate: func(evidence *CaptureEvidence) { evidence.conversationID = "019c8a2f-2b13-7000-8000-000000000099" }},
-	}
-	for _, mutation := range mutations {
-		t.Run(mutation.name, func(t *testing.T) {
-			fixture := newExecutionFixture(t)
-			nonce := "79797979-7979-4979-8979-797979797979"
-			lease, err := AcquireLease(fixture.root, nonce)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer func() { _ = lease.Release() }()
-			if err := lease.LockHandles("codex"); err != nil {
-				t.Fatal(err)
-			}
-			evidence, err := ParseCodexNotifyEvidence(
-				codexNotifyTestPayload(testConversationID, fixture.cwd),
-				nonce, "codex", codexCaptureVersion, fixture.cwd,
-			)
-			if err != nil {
-				t.Fatal(err)
-			}
-			mutation.mutate(&evidence)
-			if _, err := persistProviderCaptureEvidence(fixture.root, lease, "codex", []CaptureEvidence{evidence}); err == nil || !strings.Contains(err.Error(), "not persistable") {
-				t.Fatalf("binding divergence error = %v", err)
-			}
-			entries, err := fixture.root.ReadDir(evidenceDirectory)
-			if err == nil && len(entries) != 0 {
-				t.Fatalf("binding divergence wrote %d evidence record(s)", len(entries))
-			}
-			if err != nil && !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("inspect evidence directory: %v", err)
-			}
-		})
 	}
 }

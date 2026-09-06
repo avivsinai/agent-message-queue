@@ -211,10 +211,6 @@ func EvidencePath(sessionRoot, id string) string {
 	return filepath.Join(sessionRoot, evidenceDirectory, evidenceFilename(id))
 }
 
-func persistProviderCaptureEvidence(root *fsq.DeliveryRoot, lease *Lease, handle string, evidence []CaptureEvidence) ([]string, error) {
-	return persistProviderCaptureEvidenceWithContext(root, lease, handle, nil, evidence)
-}
-
 func persistProviderCaptureEvidenceWithContext(root *fsq.DeliveryRoot, lease *Lease, handle string, callerContext map[string]string, evidence []CaptureEvidence) ([]string, error) {
 	refs := make([]string, 0, len(evidence))
 	for _, item := range evidence {

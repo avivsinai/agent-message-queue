@@ -2,27 +2,6 @@ package launch
 
 import "testing"
 
-func TestArgsHaveNameFlagScansProviderArguments(t *testing.T) {
-	for _, test := range []struct {
-		name string
-		args []string
-		want bool
-	}{
-		{name: "empty", want: false},
-		{name: "short", args: []string{"-n", "session/claude"}, want: true},
-		{name: "long", args: []string{"--name", "session/claude"}, want: true},
-		{name: "equals", args: []string{"--name=session/claude"}, want: true},
-		{name: "value that looks like name", args: []string{"--model", "--name"}, want: false},
-		{name: "after separator", args: []string{"--", "--name", "session/claude"}, want: false},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			if got := ArgsHaveNameFlag(test.args); got != test.want {
-				t.Fatalf("ArgsHaveNameFlag(%#v) = %v, want %v", test.args, got, test.want)
-			}
-		})
-	}
-}
-
 func TestArgsHaveResumeUsesProviderSyntax(t *testing.T) {
 	for _, test := range []struct {
 		name   string

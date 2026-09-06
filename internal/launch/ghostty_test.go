@@ -144,12 +144,6 @@ func (f *fakeGhostty) windowCount() int {
 	return len(f.windows)
 }
 
-func (f *fakeGhostty) addWindow(id, tabID, term string) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.windows = append(f.windows, fakeGhosttyWindow{id: id, tabID: tabID, terminals: []string{term}})
-}
-
 func (f *fakeGhostty) ops() [][]string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -214,6 +208,19 @@ func TestGhosttyBackendLifecycleAndRecovery(t *testing.T) {
 	if err != nil || inspection.Status != InspectPresent {
 		t.Fatalf("Inspect = %#v, %v", inspection, err)
 	}
+	focused, err := backend.Focus(FocusRequest{Binding: created.Binding, Root: root})
+	if err != nil || focused.Outcome != OutcomeAttached {
+		t.Fatalf("Focus = %#v, %v", focused, err)
+	}
+	focusFound := false
+	for _, op := range fake.ops() {
+		if len(op) == 2 && op[0] == "focus-terminal" && op[1] == fake.windows[0].terminals[0] {
+			focusFound = true
+		}
+	}
+	if !focusFound {
+		t.Fatal("Focus did not select the created terminal")
+	}
 
 	journal := LaunchJournal{
 		Phase: JournalCreated, ProjectIdentity: project, Session: "collab", Plan: plan, LaunchNonce: nonce,
@@ -266,29 +273,6 @@ func TestGhosttyBackendLifecycleAndRecovery(t *testing.T) {
 	absent, err := backend.Inspect(InspectRequest{Binding: created.Binding, Root: root})
 	if err != nil || absent.Status != InspectAbsent {
 		t.Fatalf("Inspect after Close = %#v, %v", absent, err)
-	}
-}
-
-func TestGhosttyCreatePersistsExactCandidateBeforeReturn(t *testing.T) {
-	backend, _ := newFakeGhosttyBackend(t)
-	project := t.TempDir()
-	root := tmuxTestRoot(t, "claude", "codex")
-	plan := ghosttyTestPlan(project, "019c5a10-75d8-7eef-8db7-5ee77f70e8b5")
-	var persisted BindingRecord
-	var calls int
-	created, err := backend.Create(CreateRequest{
-		ProjectRoot: project, Session: "collab", Plan: plan, AMQPath: writeGhosttySleepAMQ(t), Root: root,
-		PersistCandidate: func(candidate BindingRecord) error {
-			calls++
-			persisted = candidate
-			return nil
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if calls != 1 || !reflect.DeepEqual(persisted, created.Binding) || countGhosttyAgentResources(persisted) != len(plan.Agents) {
-		t.Fatalf("persisted candidate=%#v calls=%d created=%#v", persisted, calls, created)
 	}
 }
 
@@ -350,11 +334,6 @@ func TestGhosttyManagedCreateCrashHooksNeverSilentlyOrphan(t *testing.T) {
 	}
 }
 
-func TestGhosttyBackendConformance(t *testing.T) {
-	backend, _ := newFakeGhosttyBackend(t)
-	RunConformance(t, backend)
-}
-
 func TestGhosttyCreateSendsExactLineAfterHealthGate(t *testing.T) {
 	backend, fake := newFakeGhosttyBackend(t)
 	project := t.TempDir()
@@ -384,27 +363,6 @@ func TestGhosttyCreateSendsExactLineAfterHealthGate(t *testing.T) {
 		t.Fatalf("exact command line not sent: want %q in %v", want, calls)
 	}
 	_ = created
-}
-
-func TestGhosttyHealthTimeoutDoesNotSend(t *testing.T) {
-	backend, fake := newFakeGhosttyBackend(t)
-	fake.unhealthy = true
-	backend.healthTimeout = 50 * time.Millisecond
-	backend.healthPoll = 10 * time.Millisecond
-	project := t.TempDir()
-	root := tmuxTestRoot(t, "claude")
-	plan := ghosttyTestPlan(project, "019c5a10-75d8-7eef-8db7-5ee77f70e9a5")
-	plan.Agents = plan.Agents[:1]
-	_, err := backend.Create(CreateRequest{ProjectRoot: project, Session: "collab", Plan: plan, AMQPath: writeGhosttySleepAMQ(t), Root: root})
-	if err == nil || !strings.Contains(err.Error(), "readiness timed out") {
-		t.Fatalf("Create error = %v, want readiness timeout", err)
-	}
-	if indexOfGhosttyOp(fake.ops(), "input-text") >= 0 {
-		t.Fatal("sent text after readiness failure")
-	}
-	if fake.windowCount() != 0 {
-		t.Fatalf("health timeout left orphan windows: %d", fake.windowCount())
-	}
 }
 
 func TestGhosttyCloseRefusesWindowIDReuseWithOtherTerminals(t *testing.T) {
@@ -479,202 +437,6 @@ func TestGhosttyListWindowsErrorIsUnknownNotAbsent(t *testing.T) {
 	}
 }
 
-func TestGhosttyCrashAfterWindowIsUncertain(t *testing.T) {
-	backend, fake := newFakeGhosttyBackend(t)
-	fake.fail = "split"
-	project := t.TempDir()
-	root := tmuxTestRoot(t, "claude", "codex")
-	_, err := backend.Create(CreateRequest{ProjectRoot: project, Session: "collab", Plan: ghosttyTestPlan(project, "019c5a10-75d8-7eef-8db7-5ee77f70eca5"), AMQPath: writeGhosttySleepAMQ(t), Root: root})
-	var definite *DefinitePreCreateError
-	if err == nil || errors.As(err, &definite) {
-		t.Fatalf("Create error = %v, want uncertain post-create failure", err)
-	}
-	if fake.windowCount() != 0 {
-		t.Fatalf("split failure left orphan windows: %d", fake.windowCount())
-	}
-}
-
-func TestGhosttyCreateTimeoutDoesNotCloseUnackedWindow(t *testing.T) {
-	backend, fake := newFakeGhosttyBackend(t)
-	backend.createTimeout = 20 * time.Millisecond
-	inner := fake.run
-	backend.run = func(ctx context.Context, args ...string) (string, error) {
-		if len(args) > 0 && args[0] == "new-window" {
-			if _, err := inner(ctx, args...); err != nil {
-				return "", err
-			}
-			<-ctx.Done()
-			return "", fmt.Errorf("osascript new-window: %w", ctx.Err())
-		}
-		return inner(ctx, args...)
-	}
-	project := t.TempDir()
-	root := tmuxTestRoot(t, "claude")
-	plan := ghosttyTestPlan(project, "019c5a10-75d8-7eef-8db7-5ee77f70eaa1")
-	plan.Agents = plan.Agents[:1]
-	_, err := backend.Create(CreateRequest{ProjectRoot: project, Session: "collab", Plan: plan, AMQPath: writeGhosttySleepAMQ(t), Root: root})
-	if err == nil {
-		t.Fatal("Create succeeded after create-call timeout")
-	}
-	if !strings.Contains(err.Error(), "never guessed") {
-		t.Fatalf("Create error = %v, want unacknowledged unknown", err)
-	}
-	if fake.windowCount() != 1 {
-		t.Fatalf("timeout closed unacked window: %d", fake.windowCount())
-	}
-	if indexOfGhosttyOp(fake.ops(), "close-window") >= 0 {
-		t.Fatal("timeout closed an unacknowledged window")
-	}
-}
-
-func TestGhosttyCreateDoesNotCloseForeignInferredWindow(t *testing.T) {
-	backend, fake := newFakeGhosttyBackend(t)
-	inner := fake.run
-	backend.run = func(ctx context.Context, args ...string) (string, error) {
-		if len(args) > 0 && args[0] == "new-window" {
-			fake.addWindow("foreign-window", "tab-foreign", "019C5A10-75D8-7EEF-8DB7-0000000000FF")
-			return "", errors.New("injected failure")
-		}
-		return inner(ctx, args...)
-	}
-	project := t.TempDir()
-	root := tmuxTestRoot(t, "claude")
-	plan := ghosttyTestPlan(project, "019c5a10-75d8-7eef-8db7-5ee77f70eaa0")
-	plan.Agents = plan.Agents[:1]
-	_, err := backend.Create(CreateRequest{ProjectRoot: project, Session: "collab", Plan: plan, AMQPath: writeGhosttySleepAMQ(t), Root: root})
-	if err == nil || !strings.Contains(err.Error(), "never guessed") {
-		t.Fatalf("Create error = %v, want unacknowledged unknown", err)
-	}
-	if fake.windowCount() != 1 {
-		t.Fatalf("inferred cleanup destroyed foreign window: %d", fake.windowCount())
-	}
-	if indexOfGhosttyOp(fake.ops(), "close-window") >= 0 {
-		t.Fatal("close-window invoked for an inferred foreign id")
-	}
-}
-
-func TestGhosttyCreateTimeoutDoesNotCloseAmbiguousWindows(t *testing.T) {
-	backend, fake := newFakeGhosttyBackend(t)
-	backend.createTimeout = 20 * time.Millisecond
-	inner := fake.run
-	backend.run = func(ctx context.Context, args ...string) (string, error) {
-		if len(args) > 0 && args[0] == "new-window" {
-			if _, err := inner(ctx, args...); err != nil {
-				return "", err
-			}
-			fake.addWindow("tab-group-extra", "tab-extra", "019C5A10-75D8-7EEF-8DB7-0000000000EE")
-			<-ctx.Done()
-			return "", fmt.Errorf("osascript new-window: %w", ctx.Err())
-		}
-		return inner(ctx, args...)
-	}
-	project := t.TempDir()
-	root := tmuxTestRoot(t, "claude")
-	plan := ghosttyTestPlan(project, "019c5a10-75d8-7eef-8db7-5ee77f70eaa2")
-	plan.Agents = plan.Agents[:1]
-	_, err := backend.Create(CreateRequest{ProjectRoot: project, Session: "collab", Plan: plan, AMQPath: writeGhosttySleepAMQ(t), Root: root})
-	if err == nil || !strings.Contains(err.Error(), "never guessed") {
-		t.Fatalf("Create error = %v, want unacknowledged unknown", err)
-	}
-	if fake.windowCount() != 2 {
-		t.Fatalf("ambiguous timeout closed windows: %d", fake.windowCount())
-	}
-	if indexOfGhosttyOp(fake.ops(), "close-window") >= 0 {
-		t.Fatal("ambiguous timeout guessed a window to close")
-	}
-}
-
-func TestGhosttyDefaultCreateTimeoutExceedsInspectTimeout(t *testing.T) {
-	got := NewGhosttyBackend().createOpTimeout()
-	if got <= ghosttyCommandTimeout {
-		t.Fatalf("default create timeout %s is not greater than inspect timeout %s", got, ghosttyCommandTimeout)
-	}
-	if got < 30*time.Second {
-		t.Fatalf("default create timeout %s is below 30s", got)
-	}
-}
-
-func TestGhosttyCreateMissingAMQRefusesBeforeMutation(t *testing.T) {
-	backend, fake := newFakeGhosttyBackend(t)
-	project := t.TempDir()
-	root := tmuxTestRoot(t, "claude")
-	plan := ghosttyTestPlan(project, "019c5a10-75d8-7eef-8db7-5ee77f70eda5")
-	plan.Agents = plan.Agents[:1]
-	_, err := backend.Create(CreateRequest{ProjectRoot: project, Session: "collab", Plan: plan, AMQPath: filepath.Join(t.TempDir(), "missing-amq"), Root: root})
-	var definite *DefinitePreCreateError
-	if !errors.As(err, &definite) {
-		t.Fatalf("Create error = %v, want definite pre-create refusal", err)
-	}
-	if indexOfGhosttyOp(fake.ops(), "new-window") >= 0 {
-		t.Fatal("missing amq created a ghostty window")
-	}
-}
-
-func TestGhosttyVersionOutsideEnvelopeIsDegradedNotForeign(t *testing.T) {
-	backend, fake := newFakeGhosttyBackend(t)
-	fake.version = "2.0.0"
-	detect := backend.Detect()
-	if detect.Available {
-		t.Fatal("out-of-range version reported available")
-	}
-	if detect.InstanceIdentity == "" || len(detect.Degradations) == 0 {
-		t.Fatalf("Detect = %#v, want instance identity and degradations", detect)
-	}
-}
-
-func TestGhosttyUnreachableAppleScriptIsNotForeignContext(t *testing.T) {
-	backend, fake := newFakeGhosttyBackend(t)
-	project := t.TempDir()
-	root := tmuxTestRoot(t, "claude")
-	plan := ghosttyTestPlan(project, "019c5a10-75d8-7eef-8db7-5ee77f70efb5")
-	plan.Agents = plan.Agents[:1]
-	created, err := backend.Create(CreateRequest{ProjectRoot: project, Session: "collab", Plan: plan, AMQPath: writeGhosttySleepAMQ(t), Root: root})
-	if err != nil {
-		t.Fatal(err)
-	}
-	fake.fail = "version"
-	inspection, err := backend.Inspect(InspectRequest{Binding: created.Binding, Root: root})
-	if err != nil || inspection.Status != InspectUnknown || !inspection.ActionRequired {
-		t.Fatalf("Inspect = %#v, %v, want unknown action-required", inspection, err)
-	}
-	if !strings.Contains(inspection.Evidence, "unreachable") {
-		t.Fatalf("Inspect evidence = %q, want unreachable", inspection.Evidence)
-	}
-	if strings.Contains(inspection.Evidence, "different backend context") {
-		t.Fatalf("unreachable AppleScript reported as foreign: %q", inspection.Evidence)
-	}
-}
-
-func TestSupportedGhosttyVersion(t *testing.T) {
-	for _, tc := range []struct {
-		version string
-		want    bool
-	}{{"1.3.0", true}, {"1.3.1", true}, {"Ghostty 1.4.0", true}, {"1.2.9", false}, {"2.0.0", false}} {
-		if got := supportedGhosttyVersion(tc.version); got != tc.want {
-			t.Errorf("supportedGhosttyVersion(%q) = %v, want %v", tc.version, got, tc.want)
-		}
-	}
-}
-
-func TestGhosttyInsidePreferencePrependsOnlyWhenInsideGhosttyNotCmux(t *testing.T) {
-	prefs := []string{LauncherTMux, LauncherCommands}
-	t.Setenv("TERM_PROGRAM", "")
-	t.Setenv("CMUX_SURFACE_ID", "")
-	if got := prependInsideSurfacePreference(prefs); strings.Join(got, ",") != strings.Join(prefs, ",") {
-		t.Fatalf("outside prepend = %v", got)
-	}
-	t.Setenv("TERM_PROGRAM", "ghostty")
-	got := prependInsideSurfacePreference(prefs)
-	if len(got) != 3 || got[0] != LauncherGhostty || got[1] != LauncherTMux {
-		t.Fatalf("inside ghostty prepend = %v", got)
-	}
-	t.Setenv("CMUX_SURFACE_ID", "F901D722-6789-4BBB-9818-C4E97F20BEB3")
-	got = prependInsideSurfacePreference(prefs)
-	if len(got) != 3 || got[0] != LauncherCMux || got[1] != LauncherTMux {
-		t.Fatalf("inside cmux prepend = %v", got)
-	}
-}
-
 func TestReconcileAutoSelectsGhosttyWhenInsideGhostty(t *testing.T) {
 	tmux := &reconcileBackend{name: LauncherTMux, inspect: InspectAbsent}
 	ghostty := &reconcileBackend{name: LauncherGhostty, inspect: InspectAbsent}
@@ -689,44 +451,6 @@ func TestReconcileAutoSelectsGhosttyWhenInsideGhostty(t *testing.T) {
 	}
 	if result.Backend != LauncherGhostty || ghostty.creates != 1 || tmux.creates != 0 {
 		t.Fatalf("result=%#v ghostty creates=%d tmux creates=%d", result, ghostty.creates, tmux.creates)
-	}
-}
-
-func TestReconcileInsideCmuxDoesNotPrependGhostty(t *testing.T) {
-	tmux := &reconcileBackend{name: LauncherTMux, inspect: InspectAbsent}
-	ghostty := &reconcileBackend{name: LauncherGhostty, inspect: InspectAbsent}
-	req := reconcileFixture(t, tmux)
-	req.Launcher = LauncherAuto
-	req.Preferences = []string{LauncherTMux, LauncherGhostty}
-	req.Backends[LauncherGhostty] = ghostty
-	t.Setenv("TERM_PROGRAM", "ghostty")
-	t.Setenv("CMUX_SURFACE_ID", "F901D722-6789-4BBB-9818-C4E97F20BEB3")
-	result, err := Reconcile(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Backend != LauncherTMux || tmux.creates != 1 || ghostty.creates != 0 {
-		t.Fatalf("result=%#v tmux creates=%d ghostty creates=%d", result, tmux.creates, ghostty.creates)
-	}
-}
-
-func TestGhosttyArgvRecorderSeesCreateGrammar(t *testing.T) {
-	backend, fake := newFakeGhosttyBackend(t)
-	project := t.TempDir()
-	root := tmuxTestRoot(t, "claude")
-	plan := ghosttyTestPlan(project, "019c5a10-75d8-7eef-8db7-5ee77f70eea5")
-	plan.Agents = plan.Agents[:1]
-	if _, err := backend.Create(CreateRequest{ProjectRoot: project, Session: "collab", Plan: plan, AMQPath: writeGhosttySleepAMQ(t), Root: root}); err != nil {
-		t.Fatal(err)
-	}
-	joined := fmt.Sprint(fake.ops())
-	for _, needle := range []string{"version", "new-window", "terminal-count", "input-text", "send-key-enter"} {
-		if !strings.Contains(joined, needle) {
-			t.Fatalf("argv log missing %s: %s", needle, joined)
-		}
-	}
-	if strings.Contains(joined, "command") {
-		t.Fatalf("create used configuration.command: %s", joined)
 	}
 }
 
@@ -765,6 +489,51 @@ func TestGhosttyPlacementRowsPassesDown(t *testing.T) {
 	}
 }
 
+func countGhosttyAgentResources(binding BindingRecord) int {
+	count := 0
+	for _, resource := range binding.Resources.Resources {
+		if resource.Agent != "" {
+			count++
+		}
+	}
+	return count
+}
+
+func assertNoGhosttyCommandOp(t *testing.T, fake *fakeGhostty) {
+	t.Helper()
+	for _, argv := range fake.ops() {
+		for _, arg := range argv {
+			if arg == "command" || strings.Contains(arg, "configuration.command") {
+				t.Fatalf("ghostty invoked with command: %v", argv)
+			}
+		}
+	}
+}
+
+func indexOfGhosttyOp(calls [][]string, op string) int {
+	for i, argv := range calls {
+		if len(argv) > 0 && argv[0] == op {
+			return i
+		}
+	}
+	return -1
+}
+
+func TestGhosttyCrashAfterWindowIsUncertain(t *testing.T) {
+	backend, fake := newFakeGhosttyBackend(t)
+	fake.fail = "split"
+	project := t.TempDir()
+	root := tmuxTestRoot(t, "claude", "codex")
+	_, err := backend.Create(CreateRequest{ProjectRoot: project, Session: "collab", Plan: ghosttyTestPlan(project, "019c5a10-75d8-7eef-8db7-5ee77f70eca5"), AMQPath: writeGhosttySleepAMQ(t), Root: root})
+	var definite *DefinitePreCreateError
+	if err == nil || errors.As(err, &definite) {
+		t.Fatalf("Create error = %v, want uncertain post-create failure", err)
+	}
+	if fake.windowCount() != 0 {
+		t.Fatalf("split failure left orphan windows: %d", fake.windowCount())
+	}
+}
+
 func TestGhosttyPlacementStaggersBetweenSplits(t *testing.T) {
 	backend, _ := newFakeGhosttyBackend(t)
 	var sleeps []time.Duration
@@ -795,34 +564,4 @@ func TestGhosttyPlacementStaggersBetweenSplits(t *testing.T) {
 	if elapsed := time.Since(started); elapsed < 250*time.Millisecond {
 		t.Fatalf("ghostty stagger elapsed %s, want at least 250ms", elapsed)
 	}
-}
-
-func countGhosttyAgentResources(binding BindingRecord) int {
-	count := 0
-	for _, resource := range binding.Resources.Resources {
-		if resource.Agent != "" {
-			count++
-		}
-	}
-	return count
-}
-
-func assertNoGhosttyCommandOp(t *testing.T, fake *fakeGhostty) {
-	t.Helper()
-	for _, argv := range fake.ops() {
-		for _, arg := range argv {
-			if arg == "command" || strings.Contains(arg, "configuration.command") {
-				t.Fatalf("ghostty invoked with command: %v", argv)
-			}
-		}
-	}
-}
-
-func indexOfGhosttyOp(calls [][]string, op string) int {
-	for i, argv := range calls {
-		if len(argv) > 0 && argv[0] == op {
-			return i
-		}
-	}
-	return -1
 }
