@@ -8,10 +8,7 @@ import (
 	"time"
 )
 
-const (
-	darwinWakeOwnerDescendantHelperEnv  = "AMQ_TEST_DARWIN_WAKE_OWNER_DESCENDANT"
-	darwinWakeOwnerDescendantProbeFDEnv = "AMQ_TEST_DARWIN_WAKE_OWNER_PROBE_FD"
-)
+const ()
 
 func TestDarwinWakeOwnerPrivateStopRequiresExplicitByte(t *testing.T) {
 	t.Run("explicit rollback byte stops", func(t *testing.T) {

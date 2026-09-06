@@ -3,7 +3,6 @@
 package cli
 
 import (
-	"os"
 	"testing"
 )
 
@@ -22,15 +21,6 @@ func TestWakeStateDualReadPrefersExactState(t *testing.T) {
 		t.Fatalf("target args = %v", got)
 	}
 }
-
-type wakeGenerationFileInfoOverride struct {
-	os.FileInfo
-	mode os.FileMode
-	size int64
-}
-
-func (info wakeGenerationFileInfoOverride) Mode() os.FileMode { return info.mode }
-func (info wakeGenerationFileInfoOverride) Size() int64       { return info.size }
 
 func readWakeStateSelectionForTest(t *testing.T, fixture wakeStateUnixFixture) (wakeStateReadSelection, error) {
 	t.Helper()

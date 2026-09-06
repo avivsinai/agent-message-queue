@@ -3,10 +3,7 @@
 package cli
 
 import (
-	"bytes"
-	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -14,8 +11,6 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
-
-const publicCoopPTYTimeout = 12 * time.Second
 
 func TestCoopRawDoorbellDoesNotContainMessageDerivedBytes(t *testing.T) {
 	root := secureTempDirForTest(t)
@@ -126,47 +121,4 @@ func deliverAdversarialWakeMessage(t *testing.T, root, me string, message format
 		t.Fatalf("deliver adversarial message: %v", err)
 	}
 	return path
-}
-
-type publicCoopPTYFixture struct {
-	root           string
-	ownerPath      string
-	linePath       string
-	interruptPath  string
-	cmd            *exec.Cmd
-	processGroup   int
-	commandPIDPath string
-	done           chan error
-	output         *bytes.Buffer
-	stdin          *os.File
-	ownerPID       int
-	wakeClaim      *wakeLockInspection
-	waited         bool
-}
-
-func (fixture *publicCoopPTYFixture) wait() error {
-	if fixture.waited {
-		return nil
-	}
-	if fixture.stdin != nil {
-		_ = fixture.stdin.Close()
-		fixture.stdin = nil
-	}
-	timer := time.NewTimer(publicCoopPTYTimeout)
-	defer timer.Stop()
-	select {
-	case err := <-fixture.done:
-		fixture.waited = true
-		return err
-	case <-timer.C:
-		if fixture.cmd.Process != nil {
-			_ = fixture.cmd.Process.Kill()
-		}
-		select {
-		case <-fixture.done:
-			fixture.waited = true
-		case <-time.After(3 * time.Second):
-		}
-		return fmt.Errorf("public coop PTY did not exit within %s", publicCoopPTYTimeout)
-	}
 }

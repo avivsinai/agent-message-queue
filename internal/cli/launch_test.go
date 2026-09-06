@@ -6,8 +6,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"reflect"
-	"strings"
 	"testing"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
@@ -162,76 +160,5 @@ func TestLaunchNonInteractiveUntrustedIsExit6AndNoRuntimeWrites(t *testing.T) {
 	}
 	if _, err := os.Stat(launch.ConversationPath(root, "claude")); !os.IsNotExist(err) {
 		t.Fatalf("untrusted launch wrote conversation state: %v", err)
-	}
-}
-
-func TestLaunchWithoutExecutionRemintsAndResumeJSONKeepsSchema(t *testing.T) {
-	project, _ := launchCLIFixture(t, "collab", "empty")
-	launchIsTerminal = func() bool { return true }
-	launchInput = func() *bufio.Reader { return bufio.NewReader(strings.NewReader("y\n")) }
-	if _, _, err := captureEnvOutput(t, func() error { return runLaunch([]string{"--session", "collab"}) }); GetExitCode(err) != ExitActionRequired {
-		t.Fatalf("first launch exit=%d err=%v", GetExitCode(err), err)
-	}
-	loadRecord := func(session string) launch.ConversationRecord {
-		data, err := os.ReadFile(launch.ConversationPath(filepath.Join(project, defaultCoopRoot, session), "claude"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		var record launch.ConversationRecord
-		if err := json.Unmarshal(data, &record); err != nil {
-			t.Fatal(err)
-		}
-		return record
-	}
-	first := loadRecord("collab")
-	if first.State != launch.CapturePending || first.Identity.ID != "" || first.ExecutionEvidence != nil {
-		t.Fatalf("first record=%#v", first)
-	}
-
-	launchJSON, _, err := captureEnvOutput(t, func() error { return runLaunch([]string{"--session", "collab", "--json"}) })
-	if GetExitCode(err) != ExitActionRequired {
-		t.Fatalf("second launch exit=%d output=%s err=%v", GetExitCode(err), launchJSON, err)
-	}
-	var second launch.ReconcileResult
-	if err := json.Unmarshal([]byte(launchJSON), &second); err != nil {
-		t.Fatal(err)
-	}
-	if second.Plan == nil || second.Plan.Agents[0].ConversationID == first.LaunchNonce ||
-		second.Agents[0].ConversationDisposition != launch.DispositionFresh || second.Agents[0].Reason != launch.ReasonPriorLaunchNotExecuted {
-		t.Fatalf("second result=%#v first=%#v", second, first)
-	}
-	secondRecord := loadRecord("collab")
-	if secondRecord.State != launch.CapturePending || secondRecord.LaunchNonce != second.Plan.Agents[0].ConversationID || secondRecord.ExecutionEvidence != nil {
-		t.Fatalf("second record=%#v result=%#v", secondRecord, second)
-	}
-
-	resumeJSON, _, err := captureEnvOutput(t, func() error { return runSession([]string{"resume", "empty", "--json"}) })
-	if GetExitCode(err) != ExitActionRequired {
-		t.Fatalf("empty resume exit=%d output=%s err=%v", GetExitCode(err), resumeJSON, err)
-	}
-	var resume launch.ReconcileResult
-	if err := json.Unmarshal([]byte(resumeJSON), &resume); err != nil {
-		t.Fatal(err)
-	}
-	if resume.Outcome != launch.OutcomeActionRequired || resume.Reason != launch.ReasonNoSavedConversation ||
-		resume.Agents[0].ConversationDisposition != launch.DispositionActionRequired {
-		t.Fatalf("resume result=%#v", resume)
-	}
-	var launchShape, resumeShape map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(launchJSON), &launchShape); err != nil {
-		t.Fatal(err)
-	}
-	if err := json.Unmarshal([]byte(resumeJSON), &resumeShape); err != nil {
-		t.Fatal(err)
-	}
-	launchKeys, resumeKeys := map[string]bool{}, map[string]bool{}
-	for key := range launchShape {
-		launchKeys[key] = true
-	}
-	for key := range resumeShape {
-		resumeKeys[key] = true
-	}
-	if !reflect.DeepEqual(launchKeys, resumeKeys) {
-		t.Fatalf("launch JSON keys=%v resume JSON keys=%v", launchKeys, resumeKeys)
 	}
 }

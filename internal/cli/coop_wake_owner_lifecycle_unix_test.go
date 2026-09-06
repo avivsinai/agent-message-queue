@@ -19,10 +19,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
-const (
-	coopWakeSignalHelperEnv = "AMQ_TEST_COOP_WAKE_SIGNAL_HELPER"
-	coopWakePTYHelperEnv    = "AMQ_TEST_COOP_WAKE_PTY_HELPER"
-)
+const ()
 
 func TestCoopWakeAllModesInstallExactOwnerSupervisor(t *testing.T) {
 	owner := currentAuthoritativeOwnerForCoopWakeTest(t)

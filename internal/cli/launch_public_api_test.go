@@ -281,3 +281,28 @@ func TestPublicApplyFailureDetailIsStderrOnly(t *testing.T) {
 		t.Fatalf("exit=%d err=%v stderr=%q", GetExitCode(err), err, stderr)
 	}
 }
+
+func TestPublicLaunchRequestRejectsPrepareRequestV1ThroughPlan(t *testing.T) {
+	launchCLIFixture(t, "collab")
+	// A full PrepareRequestV1 (with request_version) fed to --plan must still
+	// reject with the unknown-field error the issue cites, confirming --request
+	// is the path that owns the full request and --plan stays intent-only.
+	request := launchapi.PrepareRequestV1{
+		RequestVersion: launchapi.RequestVersionV1,
+		Target:         launchapi.TargetV1{ProjectRoot: "/tmp/project", SessionRoot: "/tmp/project/.agent-mail/collab", Session: "collab"},
+		Launcher:       "commands",
+		Intent:         launchapi.LaunchIntentV1{IntentVersion: launchapi.IntentVersionV1, Participants: []launchapi.ParticipantV1{{Handle: "operator", Runnable: false}}},
+	}
+	data, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "prepare.json")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err = runLaunch([]string{"--plan", path, "--prepare", "--json"})
+	if GetExitCode(err) != ExitUsage || !strings.Contains(err.Error(), "request_version") {
+		t.Fatalf("--plan on a PrepareRequestV1 error = %v (exit=%d), want usage mentioning request_version", err, GetExitCode(err))
+	}
+}

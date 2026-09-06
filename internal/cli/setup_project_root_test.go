@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/avivsinai/agent-message-queue/internal/launch"
 )
 
 // seedParentProject runs a complete setup in dir so it owns a committed
@@ -220,5 +222,57 @@ func TestSetupProjectRootFlagRefusesSymlink(t *testing.T) {
 	}
 	if _, statErr := os.Stat(filepath.Join(target, setupConfigPath)); !os.IsNotExist(statErr) {
 		t.Fatalf("symlink --project-root wrote target project config: %v", statErr)
+	}
+}
+
+// TestSetupTreatsCwdWithLocalConfigAsProjectRootWithoutFlag covers issue #648
+// item 1(a): an existing explicit .amq/launch.json in cwd is authority, so
+// setup treats cwd as the project root without --project-root and does not
+// redirect writes to a Git worktree top. The parent here owns no .amqrc, so
+// there is no parent adoption to refuse; the local config alone pins the root.
+func TestSetupTreatsCwdWithLocalConfigAsProjectRootWithoutFlag(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is required for nested project-root authority tests")
+	}
+	parent := setupProjectFixture(t, "claude")
+	// A parent Git repo with NO .amqrc: only the nested dir's local config
+	// can pin the project root.
+	runGitForTest(t, parent, "init")
+	runGitForTest(t, parent, "-c", "user.name=AMQ Test", "-c", "user.email=amq@example.invalid", "commit", "--allow-empty", "-m", "fixture")
+	parentMail := filepath.Join(parent, defaultCoopRoot)
+
+	// A nested dir that already owns .amq/launch.json is its own project root.
+	nested := filepath.Join(parent, "nested", "owned")
+	if err := os.MkdirAll(filepath.Join(nested, ".amq"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	projectConfig := launch.ProjectConfig{
+		Schema: launch.ProjectConfigSchema, DefaultSession: "collab", Layout: launch.LayoutIntent{Type: launch.LayoutColumns},
+		Agents: []launch.ProjectAgentConfig{{Handle: "claude", Adapter: "claude", Command: []string{"claude"}, ResumePolicy: launch.ResumeEnabled}},
+	}
+	projectData, err := launch.MarshalProjectConfig(projectConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(nested, setupConfigPath), projectData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(nested); err != nil {
+		t.Fatal(err)
+	}
+	resetAmqrcCache()
+
+	_, err = captureEnvStdout(t, func() error {
+		return runSetup([]string{"-y", "--agents", "claude", "--default-session", "collab", "--launcher-preference", "commands", "--json"})
+	})
+	if err != nil {
+		t.Fatalf("nested setup with local config: %v", err)
+	}
+	// The nested dir owns its base root; the parent never gains one.
+	if _, statErr := os.Stat(filepath.Join(nested, ".amqrc")); statErr != nil {
+		t.Fatalf("local-config cwd did not write nested .amqrc: %v", statErr)
+	}
+	if _, statErr := os.Stat(parentMail); !os.IsNotExist(statErr) {
+		t.Fatalf("parent base root was created when cwd owned a local config: %v", statErr)
 	}
 }

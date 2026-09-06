@@ -7,7 +7,6 @@ import (
 	"os"
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestPrepareCoopWakeLockRemovesProvenStaleWithoutPrompt(t *testing.T) {
@@ -168,9 +167,4 @@ func TestPrepareCoopWakeLockLiveAuthoritativeRefusesWithoutMutation(t *testing.T
 	if !observationClosed {
 		t.Fatal("owner observation failure leaked its returned capability")
 	}
-}
-
-func writeUnverifiedCoopWakeLock(t *testing.T, root string) string {
-	t.Helper()
-	return writeWakeLockForTest(t, root, "codex", wakeLock{PID: 66121, TTY: "", Hostname: "definitely-not-this-host", Started: time.Now().Add(-8 * 24 * time.Hour).UTC().Format(time.RFC3339), Generation: "unverified"})
 }

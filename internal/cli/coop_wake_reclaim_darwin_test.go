@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestPrepareCoopWakeLockLiveRawAttachedIsRefusedWithoutMutation(t *testing.T) {
@@ -90,4 +91,9 @@ func testPrepareCoopWakeLockHealthyRawRefused(
 	if _, err := os.Stat(lockPath); err != nil {
 		t.Fatalf("healthy raw lock changed: %v", err)
 	}
+}
+
+func writeUnverifiedCoopWakeLock(t *testing.T, root string) string {
+	t.Helper()
+	return writeWakeLockForTest(t, root, "codex", wakeLock{PID: 66121, TTY: "", Hostname: "definitely-not-this-host", Started: time.Now().Add(-8 * 24 * time.Hour).UTC().Format(time.RFC3339), Generation: "unverified"})
 }

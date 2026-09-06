@@ -11,22 +11,6 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 )
 
-type countingLaunchBackend struct {
-	launch.Backend
-	creates *int
-	closes  *int
-}
-
-func (b countingLaunchBackend) Create(req launch.CreateRequest) (launch.CreateResult, error) {
-	*b.creates++
-	return b.Backend.Create(req)
-}
-
-func (b countingLaunchBackend) Close(req launch.CloseRequest) (launch.CloseResult, error) {
-	*b.closes++
-	return b.Backend.Close(req)
-}
-
 func TestLaunchPathDeclaredPlanOnlyEmitsCoopExec(t *testing.T) {
 	project, _ := launchCLIFixture(t, "collab")
 	launchIsTerminal = func() bool { return true }

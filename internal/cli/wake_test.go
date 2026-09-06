@@ -15,50 +15,6 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/notificationattempt"
 )
 
-type wakeInfoErrorDirEntry struct {
-	os.DirEntry
-	err error
-}
-
-type wakeTestAcceptedProgressError struct {
-	err      error
-	accepted int
-}
-
-func (err *wakeTestAcceptedProgressError) Error() string {
-	return err.err.Error()
-}
-
-func (err *wakeTestAcceptedProgressError) Unwrap() error {
-	return err.err
-}
-
-func (err *wakeTestAcceptedProgressError) wakeAcceptedBytes() int {
-	return err.accepted
-}
-
-func (entry wakeInfoErrorDirEntry) Info() (os.FileInfo, error) {
-	info, _ := entry.DirEntry.Info()
-	return info, entry.err
-}
-
-type wakeStaticInboxReader struct {
-	entries []os.DirEntry
-	headers map[string]format.Header
-}
-
-func (reader wakeStaticInboxReader) ReadDir() ([]os.DirEntry, error) {
-	return reader.entries, nil
-}
-
-func (reader wakeStaticInboxReader) ReadHeader(name string) (format.Header, error) {
-	header, ok := reader.headers[name]
-	if !ok {
-		return format.Header{}, os.ErrNotExist
-	}
-	return header, nil
-}
-
 func deliverPartialWakeMessageForTest(t *testing.T, root, me, id string) {
 	t.Helper()
 	if err := fsq.EnsureRootDirs(root); err != nil {
@@ -1102,3 +1058,34 @@ func TestInjectViaHelperProcess(t *testing.T) {
 }
 
 const injectViaProgressEnv = "AMQ_TEST_INJECT_VIA_PROGRESS"
+
+func TestRawInjectSettleDelayClearsCodexEnterSuppressWindow(t *testing.T) {
+	// Regression guard for the v0.41.0 Enter swallow: the settle (and rescue
+	// spacing, which reuses it) must exceed codex-tui's Enter-suppress window,
+	// or injected CRs are inserted as pasted newlines instead of submitting.
+	// A revert to the old 50ms floor must fail this test, not just review.
+	if rawInjectSettleDelay <= codexTUIEnterSuppressWindow {
+		t.Fatalf("rawInjectSettleDelay = %s, must exceed codex-tui Enter-suppress window %s",
+			rawInjectSettleDelay, codexTUIEnterSuppressWindow)
+	}
+	if margin := rawInjectSettleDelay - codexTUIEnterSuppressWindow; margin < 20*time.Millisecond {
+		t.Fatalf("settle margin over suppress window = %s, want >= 20ms for scheduler jitter", margin)
+	}
+}
+
+func TestInjectNotification_InjectVia(t *testing.T) {
+	cfg, outputPath := injectViaCaptureConfig(t)
+
+	text := "AMQ [collab]: message from codex - hello"
+	if err := injectNotification(cfg, text, true); err != nil {
+		t.Fatalf("injectNotification failed: %v", err)
+	}
+
+	got, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatalf("failed to read output: %v", err)
+	}
+	if string(got) != text {
+		t.Fatalf("expected %q, got %q", text, string(got))
+	}
+}

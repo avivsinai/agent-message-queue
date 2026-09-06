@@ -9,25 +9,7 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
-	"github.com/fsnotify/fsnotify"
 )
-
-type scriptedWakeEventWatcher struct {
-	events chan fsnotify.Event
-	errs   chan error
-}
-
-func (watcher *scriptedWakeEventWatcher) Events() <-chan fsnotify.Event {
-	return watcher.events
-}
-
-func (watcher *scriptedWakeEventWatcher) Errors() <-chan error {
-	return watcher.errs
-}
-
-func (watcher *scriptedWakeEventWatcher) Close() error {
-	return nil
-}
 
 func stubFastWakeInboxRetry(t *testing.T) {
 	t.Helper()

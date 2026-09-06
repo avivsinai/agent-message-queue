@@ -172,15 +172,6 @@ func (fixture *authoritativeWakePreparedCleanupFixture) assertControlSocketMissi
 	}
 }
 
-func (fixture *authoritativeWakePreparedCleanupFixture) assertControlSocketPresent(t *testing.T) {
-	t.Helper()
-	if path := fixture.inspection.Lock.ControlSocket; path != "" {
-		if _, err := os.Stat(path); err != nil {
-			t.Fatalf("replacement lock did not preserve control socket: %v", err)
-		}
-	}
-}
-
 func writeAuthoritativePreparedMarkerForTest(
 	t *testing.T,
 	path string,

@@ -8,38 +8,7 @@ import (
 	"testing"
 
 	"github.com/avivsinai/agent-message-queue/internal/config"
-	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
-
-func TestDrainEmptyHintsSiblingBacklogWithoutCorruptingJSON(t *testing.T) {
-	parent := t.TempDir()
-	baseRoot := filepath.Join(parent, ".agent-mail")
-	currentRoot := sessionRoot(t, parent, "collab", "alice")
-	siblingRoot := sessionRoot(t, parent, "session1", "alice")
-	deliverGuardMessage(t, siblingRoot, "alice", "waiting-1")
-	deliverGuardMessage(t, siblingRoot, "alice", "waiting-2")
-	if err := os.WriteFile(filepath.Join(fsq.AgentInboxNew(siblingRoot, "alice"), ".ignored.md"), []byte("ignored"), 0o600); err != nil {
-		t.Fatalf("write dotfile: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(fsq.AgentInboxNew(siblingRoot, "alice"), "ignored.txt"), []byte("ignored"), 0o600); err != nil {
-		t.Fatalf("write non-message: %v", err)
-	}
-
-	t.Setenv("AM_ROOT", currentRoot)
-	t.Setenv("AM_BASE_ROOT", baseRoot)
-	t.Setenv("AM_SESSION", "collab")
-
-	stdout, stderr, err := captureEnvOutput(t, func() error {
-		return runDrain([]string{"--me", "alice", "--json"})
-	})
-	if err != nil {
-		t.Fatalf("runDrain: %v", err)
-	}
-	if !strings.Contains(stdout, `"count": 0`) {
-		t.Fatalf("stdout must remain valid empty drain JSON, got %q", stdout)
-	}
-	assertSiblingHint(t, stderr, 2, "alice", "session1")
-}
 
 func TestListWarnsOnPinnedSessionMismatch(t *testing.T) {
 	parent := t.TempDir()

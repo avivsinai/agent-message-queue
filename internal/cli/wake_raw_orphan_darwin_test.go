@@ -29,7 +29,7 @@ func TestDoctorReportsLiveRawOrphan(t *testing.T) {
 		}
 	})
 
-	locks := checkWakeLocks(root, []string{"codex"}, false)
+	locks := runOpsChecks(root, "test", false).WakeLocks
 	if len(locks) != 1 {
 		t.Fatalf("wake locks = %#v", locks)
 	}

@@ -15,7 +15,6 @@ const (
 	wakeABISessionEnv    = "AM_SESSION"
 	wakeABIGlobalRootEnv = "AMQ_GLOBAL_ROOT"
 	wakeABIWakeOwnerEnv  = "AMQ_WAKE_OWNER"
-	wakeABITIOCSTIPath   = "/proc/sys/dev/tty/legacy_tiocsti"
 )
 
 // These tests deliberately invoke a freshly built cmd/amq binary. They are

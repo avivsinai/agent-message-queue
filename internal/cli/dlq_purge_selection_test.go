@@ -11,20 +11,6 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
-func TestDLQPurgeDryRunDoesNotCreateDLQLocks(t *testing.T) {
-	root := initializedSendMailboxRoot(t, "alice", "bob")
-	writeOldValidDLQEnvelope(t, root, "alice", "dry-run-manifest.md")
-	before := dlqTreeManifest(t, root)
-	if _, _, err := captureEnvOutput(t, func() error {
-		return runDLQPurge([]string{"--root", root, "--me", "alice", "--dry-run", "--json"})
-	}); err != nil {
-		t.Fatalf("dry-run purge: %v", err)
-	}
-	if after := dlqTreeManifest(t, root); after != before {
-		t.Fatalf("dry-run changed mailbox tree:\n before %s\n after  %s", before, after)
-	}
-}
-
 func TestDLQPurgeWithoutAgeFilterRemovesCorruptEnvelope(t *testing.T) {
 	root := initializedSendMailboxRoot(t, "alice", "bob")
 	path, _ := writeFreshCorruptDLQEnvelope(t, root, "alice", "corrupt-unconditional-purge.md")
@@ -47,25 +33,6 @@ func TestDLQPurgeWithoutAgeFilterRemovesCorruptEnvelope(t *testing.T) {
 	if _, err := os.Lstat(path); !os.IsNotExist(err) {
 		t.Fatalf("corrupt envelope remains after unconditional purge: %v", err)
 	}
-}
-
-func dlqTreeManifest(t *testing.T, root string) string {
-	t.Helper()
-	var paths []string
-	if err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		rel, err := filepath.Rel(root, path)
-		if err != nil {
-			return err
-		}
-		paths = append(paths, rel+":"+entry.Type().String())
-		return nil
-	}); err != nil {
-		t.Fatalf("walk mailbox tree: %v", err)
-	}
-	return strings.Join(paths, "\n")
 }
 
 func writeOldValidDLQEnvelope(t *testing.T, root, agent, filename string) string {

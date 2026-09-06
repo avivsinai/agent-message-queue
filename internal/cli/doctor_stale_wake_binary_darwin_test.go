@@ -13,13 +13,7 @@ import (
 
 const testDarwinCorroboratedImageMethod wakeBinaryComparisonMethod = "darwin_process_image"
 
-const (
-	testDarwinImageCaptureHelperEnv = "AMQ_TEST_DARWIN_IMAGE_CAPTURE_HELPER"
-	testDarwinImageReadyEnv         = "AMQ_TEST_DARWIN_IMAGE_READY"
-	testDarwinImageCaptureGateEnv   = "AMQ_TEST_DARWIN_IMAGE_CAPTURE_GATE"
-	testDarwinImageCaptureResultEnv = "AMQ_TEST_DARWIN_IMAGE_CAPTURE_RESULT"
-	testDarwinImageReleaseEnv       = "AMQ_TEST_DARWIN_IMAGE_RELEASE"
-)
+const ()
 
 func TestDarwinWakeBinaryComparisonReportsCurrentFromCorroboratedLiveImage(t *testing.T) {
 	path, err := readDarwinProcessExecutablePath(os.Getpid())

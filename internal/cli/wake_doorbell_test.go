@@ -7,17 +7,6 @@ import (
 	"time"
 )
 
-type wakeIdentityUnavailableFileInfo struct {
-	name string
-}
-
-func (info wakeIdentityUnavailableFileInfo) Name() string  { return info.name }
-func (wakeIdentityUnavailableFileInfo) Size() int64        { return 0 }
-func (wakeIdentityUnavailableFileInfo) Mode() os.FileMode  { return 0o600 }
-func (wakeIdentityUnavailableFileInfo) ModTime() time.Time { return time.Time{} }
-func (wakeIdentityUnavailableFileInfo) IsDir() bool        { return false }
-func (wakeIdentityUnavailableFileInfo) Sys() any           { return nil }
-
 func wakeDoorbellTestFiles(t *testing.T, names ...string) map[string]os.FileInfo {
 	t.Helper()
 	dir := t.TempDir()
