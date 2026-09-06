@@ -1058,3 +1058,47 @@ func TestWaitForInputQuietDemotesWhenActiveThroughMaxHold(t *testing.T) {
 		t.Fatalf("sleeps = %v, want [10ms 10ms 5ms]", sleeps)
 	}
 }
+
+func TestInjectViaHelperProcess(t *testing.T) {
+	if os.Getenv(injectViaHelperEnv) != "1" {
+		return
+	}
+
+	separator := -1
+	for i, arg := range os.Args {
+		if arg == "--" {
+			separator = i
+			break
+		}
+	}
+	if separator < 0 || separator+1 >= len(os.Args) {
+		_, _ = os.Stderr.WriteString("missing inject-via helper output path\n")
+		os.Exit(2)
+	}
+	outputPath := os.Args[separator+1]
+	payload := strings.Join(os.Args[separator+2:], "\n")
+	switch os.Getenv(injectViaProgressEnv) {
+	case "timeout":
+		time.Sleep(2 * time.Second)
+	}
+	if err := os.WriteFile(outputPath, []byte(payload), 0o600); err != nil {
+		_, _ = os.Stderr.WriteString("write inject-via helper output: " + err.Error() + "\n")
+		os.Exit(3)
+	}
+	switch os.Getenv(injectViaProgressEnv) {
+	case "legacy", "":
+		if os.Getenv(injectViaProgressEnv) == "legacy" {
+			os.Exit(0)
+		}
+		_, _ = os.Stderr.WriteString("AMQ_INJECT_PROGRESS=accepted\n")
+	case "deferred":
+		_, _ = os.Stderr.WriteString("AMQ_INJECT_PROGRESS=deferred\n")
+		os.Exit(1)
+	case "uncertain":
+		_, _ = os.Stderr.WriteString("AMQ_INJECT_PROGRESS=uncertain\n")
+		os.Exit(1)
+	}
+	os.Exit(0)
+}
+
+const injectViaProgressEnv = "AMQ_TEST_INJECT_VIA_PROGRESS"

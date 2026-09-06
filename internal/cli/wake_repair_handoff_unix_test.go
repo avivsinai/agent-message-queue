@@ -196,3 +196,55 @@ func assertWakeRepairDescriptorsClosedInInjector(t *testing.T, fds []int) {
 		t.Fatalf("repair descriptors leaked into injector child: %s", data)
 	}
 }
+
+func TestWakeRepairFDInspectorHelperProcess(t *testing.T) {
+	if os.Getenv(injectViaHelperEnv) != "1" {
+		return
+	}
+
+	separator := -1
+	for index, arg := range os.Args {
+		if arg == "--" {
+			separator = index
+			break
+		}
+	}
+	if separator < 0 || separator+2 >= len(os.Args) {
+		_, _ = os.Stderr.WriteString("missing repair descriptor inspector arguments\n")
+		os.Exit(2)
+	}
+	output := os.Args[separator+1]
+	count, err := strconv.Atoi(os.Args[separator+2])
+	if err != nil || count < 0 || separator+3+count > len(os.Args) {
+		_, _ = os.Stderr.WriteString("invalid repair descriptor inspector count\n")
+		os.Exit(2)
+	}
+
+	var leaked []string
+	for _, encoded := range os.Args[separator+3 : separator+3+count] {
+		parts := strings.Split(encoded, ":")
+		if len(parts) != 3 {
+			_, _ = os.Stderr.WriteString("invalid repair descriptor identity\n")
+			os.Exit(2)
+		}
+		fd, fdErr := strconv.Atoi(parts[0])
+		device, deviceErr := strconv.ParseUint(parts[1], 10, 64)
+		inode, inodeErr := strconv.ParseUint(parts[2], 10, 64)
+		if fdErr != nil || deviceErr != nil || inodeErr != nil {
+			_, _ = os.Stderr.WriteString("invalid repair descriptor identity\n")
+			os.Exit(2)
+		}
+		var stat unix.Stat_t
+		if statErr := unix.Fstat(fd, &stat); statErr == nil &&
+			uint64(stat.Dev) == device &&
+			uint64(stat.Ino) == inode {
+			leaked = append(leaked, strconv.Itoa(fd))
+		}
+	}
+	if err := os.WriteFile(output, []byte(strings.Join(leaked, "\n")), 0o600); err != nil {
+		_, _ = os.Stderr.WriteString("write repair descriptor inspection: " + err.Error() + "\n")
+		os.Exit(3)
+	}
+	_, _ = os.Stderr.WriteString("AMQ_INJECT_PROGRESS=accepted\n")
+	os.Exit(0)
+}

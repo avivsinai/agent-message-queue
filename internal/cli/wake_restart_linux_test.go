@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -63,4 +64,24 @@ func TestLinuxWakeRestartBindingSurvivesPublicPathSwap(t *testing.T) {
 	if err != nil || !strings.Contains(string(output), "BOUND_IMAGE_A") {
 		t.Fatalf("execute parent-FD-bound image after swap: err=%v output=%q", err, output)
 	}
+}
+
+func TestLinuxWakeRestartBoundExecHelper(t *testing.T) {
+	if os.Getenv(wakeRestartBoundExecHelperEnv) != "exec" {
+		t.Skip("bound-image exec helper")
+	}
+	env := setEnvVar(os.Environ(), wakeRestartBoundExecHelperEnv, "payload")
+	err := syscall.Exec(
+		"/proc/self/fd/3",
+		[]string{"bound-amq", "-test.run=^TestLinuxWakeRestartBoundPayload$"},
+		env,
+	)
+	t.Fatalf("exec bound image: %v", err)
+}
+
+func TestLinuxWakeRestartBoundPayload(t *testing.T) {
+	if os.Getenv(wakeRestartBoundExecHelperEnv) != "payload" {
+		t.Skip("bound-image payload helper")
+	}
+	_, _ = os.Stdout.WriteString("BOUND_IMAGE_A\n")
 }

@@ -254,3 +254,10 @@ func readRefusedWakeRestartForTest(t *testing.T, fixture wakeRestartFixture) wak
 	}
 	return record
 }
+
+func TestDarwinWakeRestartBoundPayload(t *testing.T) {
+	if os.Getenv("AMQ_TEST_WAKE_RESTART_BOUND_EXEC") != "payload" {
+		t.Skip("bound-image payload helper")
+	}
+	_, _ = os.Stdout.WriteString("BOUND_IMAGE_A\n")
+}
