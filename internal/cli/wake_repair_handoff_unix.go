@@ -883,18 +883,6 @@ func prepareWakeRepairHandoff(
 	}, nil
 }
 
-func newWakeRepairParentHandoffForFiles(
-	writer *os.File,
-	reader *os.File,
-) *wakeRepairParentHandoff {
-	return &wakeRepairParentHandoff{
-		reader:    bufio.NewReader(reader),
-		writer:    writer,
-		readFile:  reader,
-		writeFile: writer,
-	}
-}
-
 func (handoff *wakeRepairParentHandoff) Bind(process *os.Process) error {
 	if handoff == nil || process == nil || process.Pid <= 0 {
 		return fmt.Errorf("wake repair handoff child process is missing")
@@ -1171,18 +1159,6 @@ func (handoff *wakeRepairChildHandoff) TakeRetainedDirectories(
 	handoff.agentFile = nil
 	handoff.inboxFile = nil
 	return openInheritedWakeRepairDirectories(agentFile, inboxFile, source)
-}
-
-func newWakeRepairChildHandoffForFiles(
-	reader *os.File,
-	writer *os.File,
-) *wakeRepairChildHandoff {
-	return &wakeRepairChildHandoff{
-		reader:    bufio.NewReader(reader),
-		writer:    writer,
-		readFile:  reader,
-		writeFile: writer,
-	}
 }
 
 func (handoff *wakeRepairChildHandoff) ReceiveSource() (wakeRepairHandoffSource, error) {

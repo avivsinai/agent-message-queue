@@ -286,11 +286,6 @@ func stableDarwinWakeRestartStageParts(stagePath string) ([]string, bool, error)
 	return parts, true, nil
 }
 
-func wakeRestartStageUsesStableStatePlatform(stagePath string) (bool, error) {
-	_, stable, err := stableDarwinWakeRestartStageParts(stagePath)
-	return stable, err
-}
-
 func sameWakeImageContent(first, second wakeImageEvidenceV1) bool {
 	first.Method = second.Method
 	first.ExecutionPath = second.ExecutionPath

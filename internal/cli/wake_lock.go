@@ -609,27 +609,6 @@ func validateWakeLockRepairable(inspection wakeLockInspection) error {
 	}
 }
 
-func validateWakeLockStaleRemoval(inspection wakeLockInspection) error {
-	if _, err := readWakeStateSelectionForInspection(
-		inspection.Root,
-		inspection.Agent,
-		inspection,
-	); err != nil {
-		return err
-	}
-	if wakeLockHasOwnerMarkers(inspection) {
-		return fmt.Errorf("owner-bound wake claims require %s", wakeRecoverOwnerCommand(inspection.Root, inspection.Agent))
-	}
-	if err := validateWakeLockRepairable(inspection); err == nil {
-		return nil
-	} else if inspection.Status != wakeLockStale {
-		return err
-	}
-	// Identity mismatches reach stale only when the tri-state classifier has
-	// affirmative proof that the recorded generation is gone or different.
-	return nil
-}
-
 func wakeLockHasOwnerMarkers(inspection wakeLockInspection) bool {
 	if inspection.Lock.OwnerSchema != 0 || inspection.Lock.Owner != nil || inspection.Lock.WakeMode == wakeOwnerWakeMode {
 		return true
@@ -972,10 +951,6 @@ func compareWakeBootID(recorded string, proc wakeProcessInfo) bootIDComparison {
 		return bootIDMismatch
 	}
 	return bootIDUnknown
-}
-
-func wakeBootIDMismatch(recorded string, proc wakeProcessInfo) bool {
-	return compareWakeBootID(recorded, proc) == bootIDMismatch
 }
 
 func isDarwinBootUUID(value string) bool {

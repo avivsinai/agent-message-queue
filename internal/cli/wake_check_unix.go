@@ -124,10 +124,6 @@ func runWakeCheck(args []string) error {
 	return writeWakeCheckText(renderWakeCheckV1(decision))
 }
 
-func inspectWakeCheck(root, me string) wakeCheckResult {
-	return renderWakeCheckV1(inspectWakeCheckDecision(root, me))
-}
-
 func inspectWakeCheckDecision(root, me string) wakeCheckDecision {
 	return inspectWakeCheckSnapshot(root, me).Decision
 }

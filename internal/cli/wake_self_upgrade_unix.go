@@ -84,10 +84,6 @@ func wakeSelfUpgradeCandidateFromEvidence(evidence wakeImageEvidenceV1) *wakeSel
 	}
 }
 
-func wakeSelfUpgradeRefusedCandidateFromEvidence(evidence wakeImageEvidenceV1) wakeSelfUpgradeRefusedCandidate {
-	return selfupgrade.RefusedCandidateFromEvidence(evidence)
-}
-
 func sameWakeSelfUpgradeRefusedCandidates(
 	first, second []wakeSelfUpgradeRefusedCandidate,
 ) bool {

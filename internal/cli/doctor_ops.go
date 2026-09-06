@@ -548,11 +548,6 @@ func discoveredWakeLockAgents(root string, configured []string) []string {
 	return agents
 }
 
-func checkWakeLocks(root string, agents []string, fix bool) []opsWakeLock {
-	locks, _ := checkWakeLocksWithHints(root, agents, fix)
-	return locks
-}
-
 type wakeRepairAssessment struct {
 	TargetPresent   bool
 	TargetReason    string

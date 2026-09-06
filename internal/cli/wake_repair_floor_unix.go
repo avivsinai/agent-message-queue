@@ -338,28 +338,6 @@ func validateWakeRepairFloorAvailable(
 	return validateWakeRepairFloorCurrentBoot(floor)
 }
 
-func validateWakeRepairLineageGuarded(
-	root, me string,
-	target wakeTarget,
-	lineage *wakeRepairLineage,
-) error {
-	agentDir, err := openWakeAgentDir(root, me)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = agentDir.Close() }()
-	return agentDir.withFD(func(dirfd int) error {
-		return validateWakeRepairLineageGuardedAt(
-			dirfd,
-			agentDir,
-			root,
-			me,
-			target,
-			lineage,
-		)
-	})
-}
-
 func validateWakeRepairLineageGuardedAt(
 	dirfd int,
 	agentDir *wakeAgentDir,
@@ -415,22 +393,4 @@ func validateWakeRepairLineageGuardedAt(
 		return fmt.Errorf("wake repair target changed before acquisition")
 	}
 	return nil
-}
-
-func removeWakeRepairFloorGuarded(root, me string) error {
-	if err := os.Remove(wakeRepairFloorPath(root, me)); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("remove wake repair floor: %w", err)
-	}
-	return nil
-}
-
-func removeWakeRepairFloorIfGenerationGuarded(root, me, generation string) error {
-	floor, exists, err := readWakeRepairFloor(root, me)
-	if err != nil {
-		return err
-	}
-	if !exists || floor.Generation != generation {
-		return nil
-	}
-	return removeWakeRepairFloorGuarded(root, me)
 }

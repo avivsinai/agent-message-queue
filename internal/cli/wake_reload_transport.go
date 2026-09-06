@@ -29,11 +29,6 @@ type wakeReloadTransportRequest struct {
 	Candidate  wakeImageEvidenceV1 `json:"candidate"`
 }
 
-type wakeReloadTransportResponse struct {
-	Status     string `json:"status"`
-	ReasonCode string `json:"reason_code"`
-}
-
 // wakeReloadTransportUnavailableError marks failures that occur only while
 // creating the optional endpoint. Authority and lifecycle failures remain
 // ordinary errors and must still stop wake startup.
@@ -113,22 +108,4 @@ func validWakeReloadTransportGeneration(generation string) bool {
 	}
 	decoded, err := hex.DecodeString(generation)
 	return err == nil && len(decoded) == 16
-}
-
-func wakeReloadTransportUnavailableResponse() wakeReloadTransportResponse {
-	return wakeReloadTransportResponse{
-		Status:     wakeReloadUnavailable,
-		ReasonCode: wakeReloadReasonCommandUnavailable,
-	}
-}
-
-func encodeWakeReloadTransportResponse(response wakeReloadTransportResponse) ([]byte, error) {
-	if response != wakeReloadTransportUnavailableResponse() {
-		return nil, fmt.Errorf("wake reload transport response is not a closed refusal")
-	}
-	payload, err := json.Marshal(response)
-	if err != nil {
-		return nil, err
-	}
-	return append(payload, '\n'), nil
 }

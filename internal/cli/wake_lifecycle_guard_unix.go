@@ -321,30 +321,6 @@ func openExistingWakeLifecycleGuardAt(dirfd int, path string) (*os.File, error) 
 	return file, nil
 }
 
-// This boundary is plumbing only. Callers must not turn detached-directory
-// access into acquire, repair, or readiness success; it is for exact cleanup
-// of old residue while preserving the canonical successor's authority.
-func withExistingWakeLifecycleGuardInDir(agentDir *wakeAgentDir, fn func(int) error) error {
-	return withExistingWakeLifecycleGuardModeInDir(agentDir, unix.LOCK_EX, fn)
-}
-
-func withExistingWakeLifecycleGuardModeInDir(
-	agentDir *wakeAgentDir,
-	lockMode int,
-	fn func(int) error,
-) error {
-	return withWakeLifecycleGuardLeaseModeAndTimeoutInDir(
-		agentDir,
-		true,
-		lockMode,
-		wakeLifecycleGuardRetryTimeout,
-		func(dirfd int, lease *wakeLifecycleGuardLease) (retErr error) {
-			defer func() { retErr = errors.Join(retErr, lease.release()) }()
-			return fn(dirfd)
-		},
-	)
-}
-
 const (
 	wakeLifecycleGuardRetryInterval = 10 * time.Millisecond
 	wakeLifecycleGuardRetryTimeout  = 500 * time.Millisecond

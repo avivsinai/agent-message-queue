@@ -1139,13 +1139,6 @@ func (waiter *wakeProcessWaiter) waitForExit(timeout time.Duration) error {
 	}
 }
 
-func waitForWakeReady(proc *os.Process, readyPath, root, me string, timeout time.Duration) error {
-	if proc == nil {
-		return fmt.Errorf("amq wake process missing")
-	}
-	return waitForWakeReadyWithWaiter(newWakeProcessWaiter(proc), readyPath, root, me, timeout)
-}
-
 func waitForWakeReadyWithWaiter(waiter *wakeProcessWaiter, readyPath, root, me string, timeout time.Duration) error {
 	return waitForWakeReadyWithOwner(waiter, readyPath, root, me, nil, timeout)
 }
@@ -1283,33 +1276,6 @@ func cleanupStartedWakeHelper(
 	)
 }
 
-func terminateAuthoritativeWakeHelperProcess(
-	proc *os.Process,
-	waiter *wakeProcessWaiter,
-	capability *authoritativeWakeChildCapability,
-	root string,
-	me string,
-	owner wakeOwner,
-) error {
-	claim, err := captureRetainedCoopWakeHelperClaim(proc, root, me)
-	if err != nil {
-		return err
-	}
-	if claim == nil {
-		return fmt.Errorf("retained wake helper claim is missing")
-	}
-	defer func() { _ = claim.Close() }()
-	return terminateAuthoritativeWakeHelperProcessForClaim(
-		proc,
-		waiter,
-		capability,
-		root,
-		me,
-		owner,
-		claim,
-	)
-}
-
 func terminateAuthoritativeWakeHelperProcessForClaim(
 	proc *os.Process,
 	waiter *wakeProcessWaiter,
@@ -1360,25 +1326,6 @@ func terminateAuthoritativeWakeHelperProcessForClaim(
 		}
 	}
 	return errors.Join(stopErr, waitErr, closeErr, claimErr)
-}
-
-func rollbackAuthoritativeWakeClaim(root, me string, owner wakeOwner) error {
-	agentDir, err := openExistingCoopWakeAgentDir(root, me)
-	if err != nil {
-		return err
-	}
-	if agentDir == nil {
-		return fmt.Errorf("retained authoritative wake agent directory is missing")
-	}
-	defer func() { _ = agentDir.Close() }()
-	var expected wakeLockInspection
-	if err := agentDir.withFD(func(dirfd int) error {
-		expected = inspectWakeLockAt(dirfd, agentDir, root, me)
-		return nil
-	}); err != nil {
-		return err
-	}
-	return rollbackAuthoritativeWakeClaimInDir(agentDir, root, me, owner, expected)
 }
 
 func rollbackAuthoritativeWakeClaimInDir(

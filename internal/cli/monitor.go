@@ -258,15 +258,6 @@ func monitorInboxItems(
 	return drainInboxItems(deliveryRoot, root, me, includeBody, limit, validator)
 }
 
-func monitorWithFsnotify(ctx context.Context, inboxNew string, revalidateContext func() error) (string, error) {
-	return monitorWithFsnotifyProbe(
-		ctx,
-		inboxNew,
-		func() (bool, error) { return hasMessageFiles(inboxNew) },
-		revalidateContext,
-	)
-}
-
 func monitorWithFsnotifyDeliveryRoot(
 	ctx context.Context,
 	root *fsq.DeliveryRoot,
@@ -360,14 +351,6 @@ func monitorWithFsnotifyProbe(
 	}
 }
 
-func monitorWithPolling(ctx context.Context, inboxNew string, revalidateContext func() error) (string, error) {
-	return monitorWithPollingProbe(
-		ctx,
-		func() (bool, error) { return hasMessageFiles(inboxNew) },
-		revalidateContext,
-	)
-}
-
 func monitorWithPollingDeliveryRoot(
 	ctx context.Context,
 	root *fsq.DeliveryRoot,
@@ -427,15 +410,6 @@ func monitorWithPollingProbe(
 			}
 		}
 	}
-}
-
-// hasMessageFiles checks if inbox/new contains any message files (.md, non-dotfile)
-func hasMessageFiles(dir string) (bool, error) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return false, err
-	}
-	return messageFilesPresent(entries), nil
 }
 
 func hasMessageFilesDeliveryRoot(root *fsq.DeliveryRoot, dir string) (bool, error) {

@@ -418,13 +418,6 @@ func wakeLegacyDigest(raw []byte) string {
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
-func wakeCanonicalStateDigest(data []byte) (string, error) {
-	if _, err := decodeWakeState(data); err != nil {
-		return "", err
-	}
-	return wakeLegacyDigest(data), nil
-}
-
 func validWakeStateDigest(value string) bool {
 	const prefix = "sha256:"
 	if len(value) != len(prefix)+sha256.Size*2 || !strings.HasPrefix(value, prefix) {
