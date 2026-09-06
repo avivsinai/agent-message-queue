@@ -1,18 +1,7 @@
 ---
 name: amq-spec
 version: 0.77.3 # x-release-please-version
-description: >-
-  Parallel-research-then-converge design workflow between two agents. Use this
-  skill when the user wants two agents to independently think through a design
-  problem before aligning on a solution — "spec X with codex", "design X
-  together", "both agents think through X", "brainstorm architecture together",
-  "parallel research then joint proposal", "think through separately then
-  align", "careful thought from both sides before coding", or any variation
-  where the user wants collaborative design rather than just splitting
-  implementation work. Also use this when you receive a message labeled
-  workflow:spec and need to know the correct receiver-side protocol. Not for
-  sending simple messages or reviews (use /amq-cli), implementing completed
-  designs, or creating document templates.
+description: Use two agents to research a design independently and converge on one specification through AMQ. Trigger for collaborative design or messages labeled workflow:spec; use amq-cli for ordinary coordination.
 argument-hint: "<description of what to design> [with <partner>]"
 metadata:
   short-description: Multi-agent collaborative spec workflow
