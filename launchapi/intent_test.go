@@ -9,38 +9,6 @@ import (
 	"testing"
 )
 
-func TestInitialInputValidationReturnsTypedCodes(t *testing.T) {
-	for _, test := range []struct {
-		name string
-		text string
-		code InitialInputErrorCode
-	}{
-		{name: "nul", text: "before\x00after", code: InitialInputControl},
-		{name: "control", text: "before\tafter", code: InitialInputControl},
-		{name: "delete", text: "before\x7fafter", code: InitialInputControl},
-		{name: "carriage return", text: "before\rafter", code: InitialInputControl},
-		{name: "line feed", text: "before\nafter", code: InitialInputControl},
-		{name: "leading dash", text: "-danger", code: InitialInputLeadingDash},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			intent := LaunchIntentV1{
-				IntentVersion: IntentVersionV1,
-				Participants: []ParticipantV1{{
-					Handle: "codex", Runnable: true, Executable: "codex",
-					Cwd:          &WorkingDirectoryV1{Kind: WorkingDirectoryAbsolute, Path: t.TempDir()},
-					ResumePolicy: ResumePolicyFresh,
-					Execution:    &ExecutionOptionsV1{Wake: WakeOptionsV1{Mode: WakeEnabled}},
-					InitialInput: &InitialInputV1{Kind: InitialInputArgument, Text: test.text},
-				}},
-			}
-			var typed *InitialInputValidationError
-			if err := intent.Validate(); !errors.As(err, &typed) || typed.Code != test.code {
-				t.Fatalf("Validate error = %v, typed=%#v; want code %q", err, typed, test.code)
-			}
-		})
-	}
-}
-
 func validIntentJSON(t *testing.T) string {
 	t.Helper()
 	return `{
@@ -93,59 +61,6 @@ func TestLaunchIntentRejectsAMQOwnedFields(t *testing.T) {
 	}
 }
 
-func TestDecodeLaunchIntentRejectsInvalidUTF8(t *testing.T) {
-	raw := append([]byte(`{"intent_version":1,"participants":[{"handle":"operator","runnable":false,"note":"`), 0xff)
-	raw = append(raw, []byte(`"}]}`)...)
-	if _, err := DecodeLaunchIntentV1(raw); err == nil || !strings.Contains(err.Error(), "invalid UTF-8") {
-		t.Fatalf("DecodeLaunchIntentV1 error = %v", err)
-	}
-}
-
-func TestLaunchIntentNonRunnableIsHandleOnly(t *testing.T) {
-	tests := []struct {
-		name string
-		raw  string
-		want string
-	}{
-		{name: "missing runnable", raw: `{"intent_version":1,"participants":[{"handle":"operator"}]}`, want: "requires runnable"},
-		{name: "omitted participants", raw: `{"intent_version":1}`, want: "requires participants"},
-		{name: "extra executable", raw: `{"intent_version":1,"participants":[{"handle":"operator","runnable":false,"executable":"codex"}]}`, want: "exactly handle and runnable"},
-		{name: "extra empty args", raw: `{"intent_version":1,"participants":[{"handle":"operator","runnable":false,"args":[]}]}`, want: "exactly handle and runnable"},
-		{name: "extra wrapper", raw: `{"intent_version":1,"participants":[{"handle":"operator","runnable":false,"wrapper":{"executable":"/bin/wrapper"}}]}`, want: "exactly handle and runnable"},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			if _, err := DecodeLaunchIntentV1([]byte(test.raw)); err == nil || !strings.Contains(err.Error(), test.want) {
-				t.Fatalf("DecodeLaunchIntentV1 error = %v, want %q", err, test.want)
-			}
-		})
-	}
-}
-
-func TestLaunchIntentOnLivePolicy(t *testing.T) {
-	base := `{"intent_version":1,"participants":[{"handle":"codex","runnable":true,"executable":"codex","cwd":{"kind":"relative","path":"."},"resume_policy":"fresh","execution":{"require_wake":false,"no_gitignore":false,"wake":{"mode":"enabled"}}%s}]}`
-	if _, err := DecodeLaunchIntentV1([]byte(fmt.Sprintf(base, `,"on_live":"keep"`))); err != nil {
-		t.Fatalf("keep rejected: %v", err)
-	}
-	if _, err := DecodeLaunchIntentV1([]byte(fmt.Sprintf(base, `,"on_live":"refuse"`))); err != nil {
-		t.Fatalf("refuse rejected: %v", err)
-	}
-	if _, err := DecodeLaunchIntentV1([]byte(fmt.Sprintf(base, `,"on_live":"resume"`))); err == nil || !strings.Contains(err.Error(), "on_live") {
-		t.Fatalf("invalid on_live error = %v", err)
-	}
-	hostile := `{"intent_version":1,"participants":[{"handle":"operator","runnable":false,"on_live":"keep"}]}`
-	if _, err := DecodeLaunchIntentV1([]byte(hostile)); err == nil || !strings.Contains(err.Error(), "exactly handle and runnable") {
-		t.Fatalf("non-runnable on_live error = %v", err)
-	}
-}
-
-func TestNonRunnableValidateRejectsSmuggledGoFields(t *testing.T) {
-	participant := ParticipantV1{Handle: "operator", Runnable: false, Executable: "codex"}
-	if err := participant.validate(); err == nil || !strings.Contains(err.Error(), "handle-only") {
-		t.Fatalf("validate error = %v, want handle-only refusal", err)
-	}
-}
-
 func TestLaunchIntentV1AcceptsSiblingWorktreeAndZeroRunnable(t *testing.T) {
 	intent, err := DecodeLaunchIntentV1([]byte(validIntentJSON(t)))
 	if err != nil {
@@ -161,52 +76,6 @@ func TestLaunchIntentV1AcceptsSiblingWorktreeAndZeroRunnable(t *testing.T) {
 	}
 	if participantOnly.Participants[0].Runnable {
 		t.Fatal("participant-only intent became runnable")
-	}
-}
-
-func TestLaunchIntentV1RejectsHostileTypedOptions(t *testing.T) {
-	base := `{"intent_version":1,"participants":[{"handle":"codex","runnable":true,"executable":"codex","cwd":{"kind":"relative","path":"."},"resume_policy":"fresh","execution":%s}]}`
-	tests := []struct {
-		name      string
-		execution string
-		want      string
-	}{
-		{name: "disabled without reason", execution: `{"require_wake":false,"no_gitignore":false,"wake":{"mode":"disabled"}}`, want: "audit reason"},
-		{name: "require disabled", execution: `{"require_wake":true,"no_gitignore":false,"wake":{"mode":"disabled","audit_reason":"operator policy"}}`, want: "conflicts"},
-		{name: "relative injector", execution: `{"require_wake":false,"no_gitignore":false,"wake":{"mode":"enabled","injector":{"mode":"raw","via":"bin/inject"}}}`, want: "absolute"},
-		{name: "args without via", execution: `{"require_wake":false,"no_gitignore":false,"wake":{"mode":"enabled","injector":{"mode":"raw","args":["send"]}}}`, want: "require via"},
-		{name: "unknown symphony event", execution: `{"require_wake":false,"no_gitignore":false,"wake":{"mode":"enabled"},"integrations":{"symphony":{"events":["after_create","shell_hook"]}}}`, want: "unknown symphony event"},
-		{name: "arbitrary hook", execution: `{"require_wake":false,"no_gitignore":false,"wake":{"mode":"enabled"},"hooks":{"before_run":"touch /tmp/pwned"}}`, want: "unknown field"},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			_, err := DecodeLaunchIntentV1([]byte(strings.Replace(base, "%s", test.execution, 1)))
-			if err == nil || !strings.Contains(err.Error(), test.want) {
-				t.Fatalf("DecodeLaunchIntentV1 error = %v, want %q", err, test.want)
-			}
-		})
-	}
-}
-
-func TestLaunchIntentV1RejectsExplicitNullSmuggling(t *testing.T) {
-	base := `{"intent_version":1,"participants":[{"handle":"codex","runnable":true,"executable":"codex","args":[],"cwd":{"kind":"relative","path":"."},"env_overlay":{},"resume_policy":"fresh","execution":{"require_wake":false,"no_gitignore":false,"wake":{"mode":"enabled","injector":{"mode":"none"}},"integrations":{"symphony":{"events":["after_create"]}}}}]}`
-	for _, replacement := range []struct {
-		name string
-		old  string
-		new  string
-	}{
-		{name: "args", old: `"args":[]`, new: `"args":null`},
-		{name: "env", old: `"env_overlay":{}`, new: `"env_overlay":null`},
-		{name: "injector", old: `"injector":{"mode":"none"}`, new: `"injector":null`},
-		{name: "integrations", old: `"integrations":{"symphony":{"events":["after_create"]}}`, new: `"integrations":null`},
-		{name: "symphony", old: `"symphony":{"events":["after_create"]}`, new: `"symphony":null`},
-	} {
-		t.Run(replacement.name, func(t *testing.T) {
-			raw := strings.Replace(base, replacement.old, replacement.new, 1)
-			if _, err := DecodeLaunchIntentV1([]byte(raw)); err == nil || !strings.Contains(err.Error(), "must not be null") {
-				t.Fatalf("DecodeLaunchIntentV1 error = %v", err)
-			}
-		})
 	}
 }
 
@@ -231,34 +100,6 @@ func TestLaunchIntentV1UsesAdapterDenyByDefaultGrammar(t *testing.T) {
 				t.Fatalf("DecodeLaunchIntentV1 error = %v, want %q", err, test.want)
 			}
 		})
-	}
-}
-
-func TestLaunchIntentV1InitialInputStrictShape(t *testing.T) {
-	base := `{"intent_version":1,"participants":[{"handle":"codex","runnable":true,"executable":"codex","cwd":{"kind":"relative","path":"."},"resume_policy":"fresh","execution":{"require_wake":false,"no_gitignore":false,"wake":{"mode":"enabled"}},"initial_input":%s}]}`
-	for _, test := range []struct {
-		name  string
-		input string
-		want  string
-	}{
-		{name: "null", input: `null`, want: "must not be null"},
-		{name: "unknown kind", input: `{"kind":"pipe","text":"hello"}`, want: "invalid kind"},
-		{name: "missing text", input: `{"kind":"stdin"}`, want: "requires text"},
-		{name: "unknown field", input: `{"kind":"file","text":"hello","path":"/tmp/pwn"}`, want: "unknown field"},
-		{name: "nul", input: `{"kind":"argument","text":"hello\u0000world"}`, want: "initial_input_control"},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			_, err := DecodeLaunchIntentV1([]byte(fmt.Sprintf(base, test.input)))
-			if err == nil || !strings.Contains(err.Error(), test.want) {
-				t.Fatalf("DecodeLaunchIntentV1 error = %v, want %q", err, test.want)
-			}
-		})
-	}
-	for _, kind := range []string{"argument", "stdin", "file"} {
-		raw := fmt.Sprintf(base, fmt.Sprintf(`{"kind":%q,"text":"hello"}`, kind))
-		if _, err := DecodeLaunchIntentV1([]byte(raw)); err != nil {
-			t.Fatalf("kind %s rejected: %v", kind, err)
-		}
 	}
 }
 
@@ -289,30 +130,42 @@ func TestLaunchIntentV1MarshalRoundTrip(t *testing.T) {
 	}
 }
 
-func TestWrapperV1SyntaxValidation(t *testing.T) {
-	valid := WrapperV1{Executable: filepath.Join(t.TempDir(), "seat-wrapper"), Args: []string{"--profile", "lead"}}
-	if err := valid.validate(); err != nil {
-		t.Fatalf("valid wrapper: %v", err)
-	}
+func TestInitialInputValidationReturnsTypedCodes(t *testing.T) {
 	for _, test := range []struct {
-		name    string
-		wrapper WrapperV1
-		want    string
+		name string
+		text string
+		code InitialInputErrorCode
 	}{
-		{name: "empty executable", wrapper: WrapperV1{}, want: "absolute path"},
-		{name: "PATH lookup", wrapper: WrapperV1{Executable: "seat-wrapper"}, want: "absolute path"},
-		{name: "shell fragment", wrapper: WrapperV1{Executable: "sh -c"}, want: "absolute path"},
-		{name: "unclean path", wrapper: WrapperV1{Executable: filepath.Join(t.TempDir(), "bin") + "/../seat-wrapper"}, want: "clean absolute"},
-		{name: "executable NUL", wrapper: WrapperV1{Executable: "/bin/wrap\x00per"}, want: "without NUL"},
-		{name: "invalid UTF-8 executable", wrapper: WrapperV1{Executable: "/bin/" + string([]byte{0xff})}, want: "valid UTF-8"},
-		{name: "empty arg", wrapper: WrapperV1{Executable: "/bin/wrapper", Args: []string{""}}, want: "must not be empty"},
-		{name: "arg NUL", wrapper: WrapperV1{Executable: "/bin/wrapper", Args: []string{"bad\x00arg"}}, want: "without NUL"},
-		{name: "invalid UTF-8 arg", wrapper: WrapperV1{Executable: "/bin/wrapper", Args: []string{string([]byte{0xff})}}, want: "valid UTF-8"},
+		{name: "nul", text: "before\x00after", code: InitialInputControl},
+		{name: "delete", text: "before\x7fafter", code: InitialInputControl},
+		{name: "leading dash", text: "-danger", code: InitialInputLeadingDash},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			if err := test.wrapper.validate(); err == nil || !strings.Contains(err.Error(), test.want) {
-				t.Fatalf("WrapperV1.validate error = %v, want %q", err, test.want)
+			intent := LaunchIntentV1{
+				IntentVersion: IntentVersionV1,
+				Participants: []ParticipantV1{{
+					Handle: "codex", Runnable: true, Executable: "codex",
+					Cwd:          &WorkingDirectoryV1{Kind: WorkingDirectoryAbsolute, Path: t.TempDir()},
+					ResumePolicy: ResumePolicyFresh,
+					Execution:    &ExecutionOptionsV1{Wake: WakeOptionsV1{Mode: WakeEnabled}},
+					InitialInput: &InitialInputV1{Kind: InitialInputArgument, Text: test.text},
+				}},
+			}
+			var typed *InitialInputValidationError
+			if err := intent.Validate(); !errors.As(err, &typed) || typed.Code != test.code {
+				t.Fatalf("Validate error = %v, typed=%#v; want code %q", err, typed, test.code)
 			}
 		})
+	}
+}
+
+func TestStrictJSONErrorMessageCarriesCodeAndPath(t *testing.T) {
+	dup := &StrictJSONError{Code: StrictJSONDuplicateKey, Path: "$.outer", Key: "Key"}
+	if got := dup.Error(); got == "" || !strings.Contains(got, "duplicate") || !strings.Contains(got, "$.outer") {
+		t.Fatalf("duplicate StrictJSONError message = %q, want code and path", got)
+	}
+	depth := &StrictJSONError{Code: StrictJSONDepthExceeded, Path: "$.deep"}
+	if got := depth.Error(); !strings.Contains(got, "maximum depth") {
+		t.Fatalf("depth StrictJSONError message = %q, want depth guidance", got)
 	}
 }

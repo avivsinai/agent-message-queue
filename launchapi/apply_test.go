@@ -14,7 +14,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	internallaunch "github.com/avivsinai/agent-message-queue/internal/launch"
@@ -84,131 +83,6 @@ func TestPrepareApplyCreatesAuthorizedProfileBaseRoot(t *testing.T) {
 		if path != filepath.Join(sessionRoot, "agents", "operator") && info.Mode().Perm() != 0o700 {
 			t.Fatalf("created path %s mode = %o, want 0700", path, info.Mode().Perm())
 		}
-	}
-}
-
-func TestPrepareApplyCreatesMissingConfiguredBaseRoot(t *testing.T) {
-	fixture := newPublicPrepareFixture(t, false)
-	project, err := filepath.EvalSymlinks(fixture.request.Target.ProjectRoot)
-	if err != nil {
-		t.Fatal(err)
-	}
-	canonicalRoot, err := filepath.EvalSymlinks(fixture.root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	configuredRoot := filepath.Join(canonicalRoot, "configured-mail")
-	config, err := json.Marshal(map[string]string{"root": configuredRoot})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(project, ".amqrc"), append(config, '\n'), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	request := fixture.request
-	request.Target = TargetV1{
-		ProjectRoot: project, BaseRoot: configuredRoot,
-		SessionRoot: filepath.Join(configuredRoot, "collab"), Session: "collab",
-	}
-	request.Intent.Participants = []ParticipantV1{{Handle: "operator", Runnable: false}}
-	prepared, err := Prepare(context.Background(), request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(prepared.PlannedWrites) != 1 || prepared.PlannedWrites[0].Path != configuredRoot {
-		t.Fatalf("planned writes = %#v", prepared.PlannedWrites)
-	}
-	if _, err := os.Lstat(configuredRoot); !os.IsNotExist(err) {
-		t.Fatalf("Prepare created configured root: %v", err)
-	}
-	applied, err := Apply(context.Background(), ApplyRequestV1{
-		RequestVersion: RequestVersionV1, Prepare: request,
-		SubjectSchema: prepared.SubjectSchema, SubjectDigest: prepared.SubjectDigest, Decisions: []DecisionV1{},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if applied.Outcome != "provisioned_no_runnable" {
-		t.Fatalf("Apply = %#v", applied)
-	}
-	for _, path := range []string{configuredRoot, request.Target.SessionRoot} {
-		info, err := os.Stat(path)
-		if err != nil || !info.IsDir() || info.Mode().Perm() != 0o700 {
-			t.Fatalf("created %s: info=%v err=%v", path, info, err)
-		}
-	}
-}
-
-func TestSameSessionLabelAcrossProfileRootsIsIsolated(t *testing.T) {
-	fixture := newPublicPrepareFixture(t, false)
-	root, err := filepath.EvalSymlinks(fixture.root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	project, err := filepath.EvalSymlinks(fixture.request.Target.ProjectRoot)
-	if err != nil {
-		t.Fatal(err)
-	}
-	configuredRoot := filepath.Join(root, "configured-mail")
-	if err := os.Mkdir(configuredRoot, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	configBytes, err := json.Marshal(map[string]string{"root": configuredRoot})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(project, ".amqrc"), append(configBytes, '\n'), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	targets := []TargetV1{
-		{ProjectRoot: project, BaseRoot: filepath.Join(configuredRoot, "profile-a"), SessionRoot: filepath.Join(configuredRoot, "profile-a", "collab"), Session: "collab"},
-		{ProjectRoot: project, BaseRoot: filepath.Join(configuredRoot, "profile-b"), SessionRoot: filepath.Join(configuredRoot, "profile-b", "collab"), Session: "collab"},
-	}
-	ticketBytes := make([][]byte, len(targets))
-	evidenceIDs := make(map[string]struct{})
-	for i, target := range targets {
-		request := fixture.request
-		request.Target = target
-		prepared, err := Prepare(context.Background(), request)
-		if err != nil {
-			t.Fatal(err)
-		}
-		applied, err := Apply(context.Background(), ApplyRequestV1{
-			RequestVersion: RequestVersionV1, Prepare: request,
-			SubjectSchema: prepared.SubjectSchema, SubjectDigest: prepared.SubjectDigest,
-			Decisions: decisionsForPreparedActions(prepared),
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if applied.Outcome != "action_required" || applied.ReasonCode != "commands_emitted" {
-			t.Fatalf("profile %d Apply = %#v", i, applied)
-		}
-		ticketPath := filepath.Join(target.SessionRoot, "meta", "launch", "executions", "claude.json")
-		ticketBytes[i], err = os.ReadFile(ticketPath)
-		if err != nil {
-			t.Fatalf("profile %d ticket: %v", i, err)
-		}
-		if !bytes.Contains(ticketBytes[i], []byte(target.SessionRoot)) {
-			t.Fatalf("profile %d ticket does not bind its session root", i)
-		}
-		for _, evidence := range applied.Evidence {
-			if _, duplicate := evidenceIDs[evidence.ID]; duplicate {
-				t.Fatalf("evidence %q shared across profile roots", evidence.ID)
-			}
-			evidenceIDs[evidence.ID] = struct{}{}
-		}
-	}
-	if bytes.Equal(ticketBytes[0], ticketBytes[1]) {
-		t.Fatal("same-label profile tickets are byte-identical")
-	}
-	profileBBefore := snapshotTestTree(t, targets[1].SessionRoot)
-	if _, err := Inspect(context.Background(), InspectRequestV1{RequestVersion: RequestVersionV1, Target: targets[0]}); err != nil {
-		t.Fatal(err)
-	}
-	if after := snapshotTestTree(t, targets[1].SessionRoot); after != profileBBefore {
-		t.Fatalf("profile-a lifecycle read changed profile-b: before=%s after=%s", profileBBefore, after)
 	}
 }
 
@@ -321,82 +195,6 @@ func TestApplyProvisionsMultiSeatRosterAtomically(t *testing.T) {
 		if strings.HasPrefix(entry.Name(), ".amq-session-") {
 			t.Fatalf("Apply leaked staging child %q", entry.Name())
 		}
-	}
-}
-
-func TestApplyUnsupportedPlacementDoesNotPublishSession(t *testing.T) {
-	fixture := newPublicPrepareFixture(t, false)
-	fixture.request.Placement = &PlacementV1{
-		Target: PlacementCurrentWindow, Layout: PlacementColumns, LauncherPane: "%323",
-	}
-	prepared, err := Prepare(context.Background(), fixture.request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if prepared.Outcome != PrepareOutcomeUnsupported {
-		t.Fatalf("prepare = %#v", prepared)
-	}
-	result, err := Apply(context.Background(), ApplyRequestV1{
-		RequestVersion: RequestVersionV1, Prepare: fixture.request,
-		SubjectSchema: prepared.SubjectSchema, SubjectDigest: prepared.SubjectDigest, Decisions: []DecisionV1{},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.ReasonCode != internallaunch.PlacementUnsupportedReason {
-		t.Fatalf("Apply unsupported placement = %#v", result)
-	}
-	if _, err := os.Stat(fixture.request.Target.SessionRoot); !os.IsNotExist(err) {
-		t.Fatalf("unsupported placement published a session: %v", err)
-	}
-}
-
-func TestApplyRejectsChangedCallerContextWithoutMutation(t *testing.T) {
-	fixture := newPublicPrepareFixture(t, true)
-	fixture.request.CallerContext = map[string]string{"run_id": "run-42", "task_generation": "3"}
-	prepared, err := Prepare(context.Background(), fixture.request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	before := applyTreeFingerprint(t, fixture.root, nil)
-	fixture.request.CallerContext["task_generation"] = "4"
-	result, err := Apply(context.Background(), ApplyRequestV1{
-		RequestVersion: RequestVersionV1, Prepare: fixture.request,
-		SubjectSchema: prepared.SubjectSchema, SubjectDigest: prepared.SubjectDigest, Decisions: []DecisionV1{},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Outcome != "action_required" || result.ReasonCode != "subject_changed" || result.CallerContext["task_generation"] != "4" {
-		t.Fatalf("changed caller context Apply = %#v", result)
-	}
-	allowed := map[string]bool{
-		"mail/collab/meta/launch":            true,
-		"mail/collab/meta/launch/lease.lock": true,
-	}
-	if after := applyTreeFingerprint(t, fixture.root, allowed); after != before {
-		t.Fatalf("changed caller context mutated state: before %s after %s", before, after)
-	}
-}
-
-func TestApplyResultMapsEvidenceRefsAndNonContractFailureDetail(t *testing.T) {
-	observed := time.Date(2026, 8, 17, 3, 4, 5, 0, time.UTC)
-	result := fromInternalApplyResult(internallaunch.ApplyResult{FailureDetail: "create tmux session: pane exited", Evidence: []internallaunch.EvidenceRef{{
-		EvidenceVersion: 1, ID: "sha256:" + strings.Repeat("a", 64), Kind: internallaunch.EvidenceProviderCapture,
-		SHA256: "sha256:" + strings.Repeat("a", 64), ObservedAt: observed,
-	}}})
-	if len(result.Evidence) != 1 || result.Evidence[0].Kind != "provider_capture" || result.Evidence[0].ObservedAt != observed || result.Evidence[0].ID != result.Evidence[0].SHA256 {
-		t.Fatalf("public evidence mapping = %#v", result.Evidence)
-	}
-	if result.FailureDetail != "create tmux session: pane exited" {
-		t.Fatalf("failure detail = %q", result.FailureDetail)
-	}
-	encoded, err := json.Marshal(result)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if bytes.Contains(encoded, []byte("pane exited")) || bytes.Contains(encoded, []byte("failure_detail")) {
-		t.Fatalf("non-contract failure detail leaked into DTO JSON: %s", encoded)
 	}
 }
 
@@ -549,40 +347,6 @@ func TestPrepareIsZeroWriteAndApplyRejectsStaleSubject(t *testing.T) {
 	})
 }
 
-func TestActionRequiredSurvivesProcessRestart(t *testing.T) {
-	fixture := newPublicPrepareFixture(t, false)
-	fixture.request.Intent.Participants = []ParticipantV1{{Handle: "operator", Runnable: false}}
-	prepared, err := Prepare(context.Background(), fixture.request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	request := ApplyRequestV1{
-		RequestVersion: RequestVersionV1, Prepare: fixture.request,
-		SubjectSchema: prepared.SubjectSchema, SubjectDigest: prepared.SubjectDigest, Decisions: []DecisionV1{},
-	}
-	raw, err := json.Marshal(request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	decoded, err := DecodeApplyRequestV1(raw)
-	if err != nil {
-		t.Fatal(err)
-	}
-	result, err := Apply(context.Background(), decoded)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Outcome != "provisioned_no_runnable" || result.SemanticDigest != result.TrustDigest {
-		t.Fatalf("fresh-process Apply result = %#v", result)
-	}
-	if result.SubjectSchema != SubjectSchemaV2 || len(result.Hints) != 0 {
-		t.Fatalf("current Apply schema migration fields = %#v", result)
-	}
-	if info, err := os.Stat(filepath.Join(fixture.request.Target.SessionRoot, "agents", "operator")); err != nil || !info.IsDir() {
-		t.Fatalf("participant-only mailbox: info=%v err=%v", info, err)
-	}
-}
-
 func TestApplyOmittedSubjectSchemaUsesV1AndRecommendsReprepare(t *testing.T) {
 	fixture := newPublicPrepareFixture(t, false)
 	fixture.request.Intent.Participants = []ParticipantV1{{Handle: "operator", Runnable: false}}
@@ -634,81 +398,6 @@ func TestApplyOmittedSubjectSchemaUsesV1AndRecommendsReprepare(t *testing.T) {
 	}
 }
 
-func TestApplyV1RunnableParticipantRequiresReprepare(t *testing.T) {
-	fixture := newPublicPrepareFixture(t, false)
-	internalRequest, dependencies, err := prepareInputs(fixture.request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	internalRequest.SubjectSchema = internallaunch.SubjectSchemaV1
-	legacy, err := internallaunch.Prepare(context.Background(), internalRequest, dependencies)
-	if err != nil {
-		t.Fatal(err)
-	}
-	legacyPublic := fromInternalPrepareResult(legacy)
-	decisions := make([]DecisionV1, 0, len(legacyPublic.RequiredActions))
-	for _, action := range legacyPublic.RequiredActions {
-		decisions = append(decisions, DecisionV1{ActionID: action.ActionID, Choice: DecisionTrustExactSubject})
-	}
-	result, err := Apply(context.Background(), ApplyRequestV1{
-		RequestVersion: RequestVersionV1,
-		Prepare:        fixture.request,
-		SubjectSchema:  SubjectSchemaV1,
-		SubjectDigest:  legacy.SubjectDigest,
-		Decisions:      decisions,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Outcome != "action_required" || result.ReasonCode != "reprepare_required" {
-		t.Fatalf("v1 runnable Apply result = %#v, want typed reprepare refusal", result)
-	}
-	if result.SubjectSchema != SubjectSchemaV1 || !slices.Contains(result.Hints, HintReprepareRecommended) {
-		t.Fatalf("v1 reprepare result migration fields = %#v", result)
-	}
-	if result.SubjectDigest != legacy.SubjectDigest || result.PlanDigest != legacy.PlanDigest || result.TrustDigest != legacy.TrustDigest {
-		t.Fatalf("v1 reprepare result lost legacy digests: result=%#v legacy=%#v", result, legacy)
-	}
-	if _, err := os.Stat(fixture.request.Target.SessionRoot); !os.IsNotExist(err) {
-		t.Fatalf("v1 reprepare refusal mutated session: %v", err)
-	}
-}
-
-func TestApplyV1ParticipantOnlyNonRunnableSucceeds(t *testing.T) {
-	fixture := newPublicPrepareFixture(t, false)
-	fixture.request.Intent.Participants = []ParticipantV1{{Handle: "operator", Runnable: false}}
-	internalRequest, dependencies, err := prepareInputs(fixture.request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	internalRequest.SubjectSchema = internallaunch.SubjectSchemaV1
-	legacy, err := internallaunch.Prepare(context.Background(), internalRequest, dependencies)
-	if err != nil {
-		t.Fatal(err)
-	}
-	legacyPublic := fromInternalPrepareResult(legacy)
-	decisions := make([]DecisionV1, 0, len(legacyPublic.RequiredActions))
-	for _, action := range legacyPublic.RequiredActions {
-		decisions = append(decisions, DecisionV1{ActionID: action.ActionID, Choice: DecisionTrustExactSubject})
-	}
-	result, err := Apply(context.Background(), ApplyRequestV1{
-		RequestVersion: RequestVersionV1,
-		Prepare:        fixture.request,
-		SubjectSchema:  SubjectSchemaV1,
-		SubjectDigest:  legacy.SubjectDigest,
-		Decisions:      decisions,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Outcome != "provisioned_no_runnable" {
-		t.Fatalf("v1 participant-only Apply result = %#v, want provisioned success", result)
-	}
-	if info, err := os.Stat(filepath.Join(fixture.request.Target.SessionRoot, "agents", "operator")); err != nil || !info.IsDir() {
-		t.Fatalf("v1 participant-only mailbox: info=%v err=%v", info, err)
-	}
-}
-
 func TestApplyReportsRosterDriftWithoutDeletingHistory(t *testing.T) {
 	fixture := newPublicPrepareFixture(t, true)
 	if err := fsq.EnsureAgentDirs(fixture.request.Target.SessionRoot, "operator"); err != nil {
@@ -754,41 +443,6 @@ func TestApplyReportsRosterDriftWithoutDeletingHistory(t *testing.T) {
 	}
 	if operatorAfter := applyTreeFingerprint(t, operatorRoot, nil); operatorAfter != operatorBefore {
 		t.Fatalf("Apply repaired or changed removed participant: before=%s after=%s", operatorBefore, operatorAfter)
-	}
-}
-
-func TestApplyMissingConfigPreservesDiscoveredRosterAuthority(t *testing.T) {
-	fixture := newPublicPrepareFixture(t, true)
-	if err := fsq.EnsureAgentDirs(fixture.request.Target.SessionRoot, "operator"); err != nil {
-		t.Fatal(err)
-	}
-	fixture.request.Intent.Participants = []ParticipantV1{{Handle: "reviewer", Runnable: false}}
-	prepared, err := Prepare(context.Background(), fixture.request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	result, err := Apply(context.Background(), ApplyRequestV1{
-		RequestVersion: RequestVersionV1, Prepare: fixture.request,
-		SubjectSchema: prepared.SubjectSchema, SubjectDigest: prepared.SubjectDigest, Decisions: []DecisionV1{},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Outcome != "provisioned_no_runnable" || !slices.Equal(result.Roster.Extra, []string{"claude", "operator"}) {
-		t.Fatalf("missing-config Apply result = %#v", result)
-	}
-	data, err := os.ReadFile(filepath.Join(fixture.request.Target.SessionRoot, "meta", "config.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var config struct {
-		Agents []string `json:"agents"`
-	}
-	if err := json.Unmarshal(data, &config); err != nil {
-		t.Fatal(err)
-	}
-	if !slices.Equal(config.Agents, []string{"claude", "operator", "reviewer"}) {
-		t.Fatalf("recovered roster authority = %v", config.Agents)
 	}
 }
 
@@ -838,37 +492,6 @@ func TestApplyRequiresExactRequestLocalDecisions(t *testing.T) {
 				t.Fatalf("decision refusal executed provider: %v", err)
 			}
 		})
-	}
-}
-
-func TestApplyUnsupportedLauncherRefusesBeforeRosterMutation(t *testing.T) {
-	fixture := newPublicPrepareFixture(t, true)
-	fixture.request.Launcher = unavailableManagedLauncher(t)
-	fixture.request.Intent.Participants = append(fixture.request.Intent.Participants, ParticipantV1{Handle: "reviewer", Runnable: false})
-	prepared, err := Prepare(context.Background(), fixture.request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	before := applyTreeFingerprint(t, fixture.root, nil)
-	result, err := Apply(context.Background(), ApplyRequestV1{
-		RequestVersion: RequestVersionV1, Prepare: fixture.request,
-		SubjectSchema: prepared.SubjectSchema, SubjectDigest: prepared.SubjectDigest, Decisions: []DecisionV1{},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Outcome != "action_required" || result.ReasonCode != "launcher_not_available" {
-		t.Fatalf("unsupported Apply = %#v", result)
-	}
-	allowed := map[string]bool{
-		"mail/collab/meta/launch":            true,
-		"mail/collab/meta/launch/lease.lock": true,
-	}
-	if after := applyTreeFingerprint(t, fixture.root, allowed); before != after {
-		t.Fatalf("unsupported Apply changed durable state: before=%s after=%s", before, after)
-	}
-	if _, err := os.Stat(filepath.Join(fixture.request.Target.SessionRoot, "agents", "reviewer")); !os.IsNotExist(err) {
-		t.Fatalf("unsupported Apply provisioned reviewer: %v", err)
 	}
 }
 

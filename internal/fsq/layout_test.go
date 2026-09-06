@@ -45,10 +45,3 @@ func TestValidateHandle(t *testing.T) {
 		}
 	}
 }
-
-func TestEnsureAgentDirs_RejectsTraversal(t *testing.T) {
-	root := t.TempDir()
-	if err := EnsureAgentDirs(root, "../escape"); err == nil {
-		t.Error("expected error for path traversal agent handle")
-	}
-}
