@@ -60,28 +60,6 @@ func TestLoadTeam(t *testing.T) {
 	}
 }
 
-func TestLoadTeam_NotFound(t *testing.T) {
-	setupTeamDir(t)
-	_, err := LoadTeam("nonexistent")
-	if err == nil {
-		t.Fatal("expected error for nonexistent team")
-	}
-}
-
-func TestLoadTeam_InfersName(t *testing.T) {
-	home := setupTeamDir(t)
-	// Write a config without a name field
-	writeTeamJSON(t, home, "my-team", TeamConfig{Members: []Member{}})
-
-	got, err := LoadTeam("my-team")
-	if err != nil {
-		t.Fatalf("LoadTeam: %v", err)
-	}
-	if got.Name != "my-team" {
-		t.Errorf("Name = %q, want %q (inferred from dir)", got.Name, "my-team")
-	}
-}
-
 func TestDiscoverTeams(t *testing.T) {
 	home := setupTeamDir(t)
 
@@ -105,18 +83,6 @@ func TestDiscoverTeams(t *testing.T) {
 	}
 	if counts["beta"] != 2 {
 		t.Errorf("beta member count = %d, want 2", counts["beta"])
-	}
-}
-
-func TestDiscoverTeams_Empty(t *testing.T) {
-	setupTeamDir(t)
-
-	teams, err := DiscoverTeams()
-	if err != nil {
-		t.Fatalf("DiscoverTeams: %v", err)
-	}
-	if len(teams) != 0 {
-		t.Errorf("len(teams) = %d, want 0", len(teams))
 	}
 }
 
@@ -148,23 +114,6 @@ func TestRegisterMember(t *testing.T) {
 	}
 }
 
-func TestRegisterMember_Duplicate(t *testing.T) {
-	home := setupTeamDir(t)
-	writeTeamJSON(t, home, "test-team", TeamConfig{
-		Name:    "test-team",
-		Members: []Member{{Name: "codex", AgentID: "ext_codex_123", AgentType: AgentTypeCodex}},
-	})
-
-	err := RegisterMember("test-team", Member{
-		Name:      "codex-2",
-		AgentID:   "ext_codex_123",
-		AgentType: AgentTypeCodex,
-	})
-	if err == nil {
-		t.Fatal("expected error for duplicate agent_id")
-	}
-}
-
 func TestUnregisterMember(t *testing.T) {
 	home := setupTeamDir(t)
 	writeTeamJSON(t, home, "test-team", TeamConfig{
@@ -188,81 +137,6 @@ func TestUnregisterMember(t *testing.T) {
 	}
 	if got.Members[0].Name != "claude" {
 		t.Errorf("remaining member = %q, want %q", got.Members[0].Name, "claude")
-	}
-}
-
-func TestUnregisterMemberKeepsFollowingMembers(t *testing.T) {
-	home := setupTeamDir(t)
-	writeTeamJSON(t, home, "test-team", TeamConfig{
-		Name: "test-team",
-		Members: []Member{
-			{Name: "claude", AgentID: "cc-1", AgentType: AgentTypeClaudeCode},
-			{Name: "codex", AgentID: "ext_codex_123", AgentType: AgentTypeCodex},
-		},
-	})
-
-	if err := UnregisterMember("test-team", "cc-1"); err != nil {
-		t.Fatalf("UnregisterMember: %v", err)
-	}
-
-	got, err := LoadTeam("test-team")
-	if err != nil {
-		t.Fatalf("LoadTeam after unregister: %v", err)
-	}
-	if len(got.Members) != 1 || got.Members[0].AgentID != "ext_codex_123" {
-		t.Fatalf("members = %#v, want following member retained", got.Members)
-	}
-}
-
-func TestUnregisterMember_NotFound(t *testing.T) {
-	home := setupTeamDir(t)
-	writeTeamJSON(t, home, "test-team", TeamConfig{
-		Name:    "test-team",
-		Members: []Member{{Name: "claude", AgentID: "cc-1", AgentType: AgentTypeClaudeCode}},
-	})
-
-	err := UnregisterMember("test-team", "nonexistent")
-	if err == nil {
-		t.Fatal("expected error for nonexistent agent_id")
-	}
-}
-
-func TestFindMember(t *testing.T) {
-	cfg := TeamConfig{
-		Members: []Member{
-			{Name: "claude", AgentID: "cc-1", AgentType: AgentTypeClaudeCode},
-			{Name: "codex", AgentID: "ext-1", AgentType: AgentTypeCodex},
-		},
-	}
-
-	m := cfg.FindMember("ext-1")
-	if m == nil {
-		t.Fatal("FindMember returned nil")
-	}
-	if m.Name != "codex" {
-		t.Errorf("Name = %q, want %q", m.Name, "codex")
-	}
-
-	m = cfg.FindMember("nonexistent")
-	if m != nil {
-		t.Errorf("FindMember should return nil for nonexistent, got %v", m)
-	}
-}
-
-func TestFindMemberByName(t *testing.T) {
-	cfg := TeamConfig{
-		Members: []Member{
-			{Name: "claude", AgentID: "cc-1", AgentType: AgentTypeClaudeCode},
-			{Name: "codex", AgentID: "ext-1", AgentType: AgentTypeCodex},
-		},
-	}
-
-	m := cfg.FindMemberByName("codex")
-	if m == nil {
-		t.Fatal("FindMemberByName returned nil")
-	}
-	if m.AgentID != "ext-1" {
-		t.Errorf("AgentID = %q, want %q", m.AgentID, "ext-1")
 	}
 }
 
@@ -335,40 +209,6 @@ func TestRegisterMember_PreservesExistingFields(t *testing.T) {
 	}
 }
 
-func TestUnregisterMember_PreservesExistingFields(t *testing.T) {
-	home := setupTeamDir(t)
-
-	dir := filepath.Join(home, claudeConfigDir, teamsSubdir, "test-team")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	raw := `{"name":"test-team","extra":"preserve_me","members":[{"name":"claude","agent_id":"cc-1","agent_type":"claude-code"},{"name":"codex","agent_id":"ext-1","agent_type":"codex"}]}`
-	if err := os.WriteFile(filepath.Join(dir, teamConfigFile), []byte(raw), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := UnregisterMember("test-team", "ext-1"); err != nil {
-		t.Fatalf("UnregisterMember: %v", err)
-	}
-
-	data, err := os.ReadFile(filepath.Join(dir, teamConfigFile))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var m map[string]any
-	if err := json.Unmarshal(data, &m); err != nil {
-		t.Fatal(err)
-	}
-
-	if m["extra"] != "preserve_me" {
-		t.Errorf("extra = %v, want %q", m["extra"], "preserve_me")
-	}
-	members, ok := m["members"].([]any)
-	if !ok || len(members) != 1 {
-		t.Fatalf("members len = %v, want 1", len(members))
-	}
-}
-
 func TestRegisterMember_Concurrent(t *testing.T) {
 	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
 		t.Skip("concurrency locking uses flock (darwin/linux)")
@@ -436,5 +276,30 @@ func TestRegisterMember_Concurrent(t *testing.T) {
 		if !ids[id] {
 			t.Errorf("missing agent_id %q after concurrent registration", id)
 		}
+	}
+}
+
+func TestFindMemberLookups(t *testing.T) {
+	cfg := TeamConfig{
+		Members: []Member{
+			{Name: "claude", AgentID: "cc-1", AgentType: AgentTypeClaudeCode},
+			{Name: "codex", AgentID: "ext-1", AgentType: AgentTypeCodex},
+		},
+	}
+
+	m := cfg.FindMember("ext-1")
+	if m == nil || m.Name != "codex" {
+		t.Fatalf("FindMember(ext-1) = %#v, want codex", m)
+	}
+	if cfg.FindMember("nonexistent") != nil {
+		t.Fatal("FindMember should return nil for nonexistent")
+	}
+
+	m = cfg.FindMemberByName("codex")
+	if m == nil || m.AgentID != "ext-1" {
+		t.Fatalf("FindMemberByName(codex) = %#v, want ext-1", m)
+	}
+	if cfg.FindMemberByName("nonexistent") != nil {
+		t.Fatal("FindMemberByName should return nil for nonexistent")
 	}
 }

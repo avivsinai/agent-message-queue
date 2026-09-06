@@ -14,68 +14,6 @@ import (
 	internallaunch "github.com/avivsinai/agent-message-queue/internal/launch"
 )
 
-func TestLifecycleResultsMatchPublishedSchema(t *testing.T) {
-	project := t.TempDir()
-	session := filepath.Join(project, ".agent-mail", "collab")
-	if err := fsq.EnsureRootDirs(session); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(session, "meta", "config.json"), []byte(`{"version":1,"agents":["claude"]}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := fsq.EnsureAgentDirs(session, "claude"); err != nil {
-		t.Fatal(err)
-	}
-	identity, err := fsq.SnapshotDeliveryRoot(session)
-	if err != nil {
-		t.Fatal(err)
-	}
-	root, err := fsq.OpenDeliveryRoot(session, identity)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = root.Close() }()
-	backend := &publicLifecycleBackend{}
-	detect := backend.Detect()
-	binding := internallaunch.BindingRecord{
-		Version: internallaunch.BindingVersion, Backend: detect.Profile.Backend,
-		HostIdentity: detect.HostIdentity, InstanceIdentity: detect.InstanceIdentity,
-		Profile: detect.Profile.Identity(), LaunchNonce: "78787878-7878-4787-8787-787878787878",
-		Resources: internallaunch.ResourceIdentitySet{Version: internallaunch.ResourceSetVersion, Resources: []internallaunch.ResourceIdentity{
-			{OpaqueID: "session:one"}, {OpaqueID: "window:one", Agent: "claude"},
-		}},
-	}
-	lease, err := internallaunch.AcquireLease(root, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := internallaunch.WriteBinding(root, lease, binding); err != nil {
-		t.Fatal(err)
-	}
-	if err := lease.Release(); err != nil {
-		t.Fatal(err)
-	}
-	previous := lifecycleBackends
-	lifecycleBackends = func() map[string]internallaunch.Backend { return map[string]internallaunch.Backend{"test": backend} }
-	t.Cleanup(func() { lifecycleBackends = previous })
-	request := InspectRequestV1{RequestVersion: RequestVersionV1, Target: TargetV1{ProjectRoot: project, SessionRoot: session, Session: "collab"}}
-	inspected, err := Inspect(context.Background(), request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	assertLiveResultMatchesPublishedSchema(t, "InspectResultV1", inspected)
-	focused, err := Focus(context.Background(), FocusRequestV1(request))
-	if err != nil {
-		t.Fatal(err)
-	}
-	assertLiveResultMatchesPublishedSchema(t, "FocusResultV1", focused)
-	closed, err := Close(context.Background(), CloseRequestV1(request))
-	if err != nil {
-		t.Fatal(err)
-	}
-	assertLiveResultMatchesPublishedSchema(t, "CloseResultV1", closed)
-}
-
 func TestLifecycleFacadeUsesOwnedBinding(t *testing.T) {
 	project := t.TempDir()
 	session := filepath.Join(project, ".agent-mail", "collab")

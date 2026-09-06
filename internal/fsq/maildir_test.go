@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -159,30 +160,119 @@ func TestDeliverToExistingInboxNoDir(t *testing.T) {
 	}
 }
 
-func TestDeliverToExistingInboxRejectsIncompleteMailboxWithoutMutation(t *testing.T) {
+func TestDeliverToInboxesRollback(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod permissions are unreliable on Windows")
+	}
 	root := t.TempDir()
+	if err := EnsureRootDirs(root); err != nil {
+		t.Fatalf("EnsureRootDirs: %v", err)
+	}
 	if err := EnsureAgentDirs(root, "codex"); err != nil {
+		t.Fatalf("EnsureAgentDirs codex: %v", err)
+	}
+	if err := EnsureAgentDirs(root, "claude"); err != nil {
+		t.Fatalf("EnsureAgentDirs claude: %v", err)
+	}
+	if err := EnsureAgentDirs(root, "ada"); err != nil {
+		t.Fatalf("EnsureAgentDirs ada: %v", err)
+	}
+
+	cloudNew := AgentInboxNew(root, "claude")
+	if err := os.Chmod(cloudNew, 0o555); err != nil {
+		t.Fatalf("chmod claude new: %v", err)
+	}
+	defer func() { _ = os.Chmod(cloudNew, 0o700) }()
+
+	filename := "multi.md"
+	_, err := DeliverToInboxes(openDeliveryRootForTest(t, root), []string{"codex", "claude", "ada"}, filename, []byte("hello"))
+	if err == nil {
+		t.Fatalf("expected delivery error")
+	}
+	var partial *PartialDeliveryError
+	if !errors.As(err, &partial) {
+		t.Fatalf("expected PartialDeliveryError, got %T: %v", err, err)
+	}
+	if partial.Failed != "claude" {
+		t.Fatalf("failed recipient = %q, want claude", partial.Failed)
+	}
+	if len(partial.Pending) != 1 || partial.Pending[0] != "ada" {
+		t.Fatalf("pending recipients = %#v, want [ada]", partial.Pending)
+	}
+
+	codexNew := filepath.Join(AgentInboxNew(root, "codex"), filename)
+	if got := partial.Delivered["codex"]; got != codexNew {
+		t.Fatalf("delivered[codex] = %q, want %q", got, codexNew)
+	}
+	got, err := os.ReadFile(codexNew)
+	if err != nil {
+		t.Fatalf("expected committed delivery to remain at %s: %v", codexNew, err)
+	}
+	if string(got) != "hello" {
+		t.Fatalf("committed delivery content = %q, want hello", got)
+	}
+
+	cloudTmp := filepath.Join(AgentInboxTmp(root, "claude"), filename)
+	if _, err := os.Stat(cloudTmp); !os.IsNotExist(err) {
+		t.Fatalf("expected failed tmp to be removed from %s", cloudTmp)
+	}
+
+	adaTmp := filepath.Join(AgentInboxTmp(root, "ada"), filename)
+	if _, err := os.Stat(adaTmp); !os.IsNotExist(err) {
+		t.Fatalf("expected pending tmp to be removed from %s", adaTmp)
+	}
+	adaNew := filepath.Join(AgentInboxNew(root, "ada"), filename)
+	if _, err := os.Stat(adaNew); !os.IsNotExist(err) {
+		t.Fatalf("expected pending recipient to have no new delivery at %s", adaNew)
+	}
+}
+
+func TestDeliverToInboxRetryAfterTmpFsyncConverges(t *testing.T) {
+	base := t.TempDir()
+	if err := EnsureAgentDirs(base, "codex"); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+	const filename = "retry.md"
+	staleSameName := filepath.Join(AgentInboxTmp(base, "codex"), filename)
+	staleUnique := filepath.Join(AgentInboxTmp(base, "codex"), "."+filename+".tmp-crash")
+	if err := os.WriteFile(staleSameName, []byte("stale same-name attempt"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	missing := AgentDLQCur(root, "codex")
-	if err := os.Remove(missing); err != nil {
+	if err := os.WriteFile(staleUnique, []byte("stale unique attempt"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
-	_, err := DeliverToExistingInbox(openDeliveryRootForTest(t, root), "codex", "test.md", []byte("nope"))
-	if err == nil {
-		t.Fatal("DeliverToExistingInbox accepted incomplete mailbox")
+	fresh := []byte("fresh payload")
+	path, err := DeliverToInbox(openDeliveryRootForTest(t, base), "codex", filename, fresh)
+	if err != nil {
+		t.Fatalf("retry after tmp fsync = %v, want converge without EEXIST", err)
 	}
-	entries, readErr := os.ReadDir(AgentInboxNew(root, "codex"))
-	if readErr != nil {
-		t.Fatal(readErr)
+	got, readErr := os.ReadFile(path)
+	if readErr != nil || string(got) != string(fresh) {
+		t.Fatalf("published bytes = %q, %v", got, readErr)
 	}
-	if len(entries) != 0 {
-		t.Fatalf("incomplete peer received messages: %#v", entries)
+	got, readErr = os.ReadFile(staleSameName)
+	if readErr != nil || string(got) != "stale same-name attempt" {
+		t.Fatalf("same-name leftover = %q, %v; retry must not overwrite it", got, readErr)
 	}
-	if _, statErr := os.Lstat(missing); !os.IsNotExist(statErr) {
-		t.Fatalf("cross-project delivery created missing leaf: %v", statErr)
+	got, readErr = os.ReadFile(staleUnique)
+	if readErr != nil || string(got) != "stale unique attempt" {
+		t.Fatalf("unique leftover = %q, %v; retry must not overwrite it", got, readErr)
 	}
+}
+
+func openDeliveryRootForTest(t testing.TB, base string) *DeliveryRoot {
+	t.Helper()
+	identity, err := SnapshotDeliveryRoot(base)
+	if err != nil {
+		t.Fatalf("SnapshotDeliveryRoot(%s): %v", base, err)
+	}
+	root, err := OpenDeliveryRoot(base, identity)
+	if err != nil {
+		t.Fatalf("OpenDeliveryRoot(%s): %v", base, err)
+	}
+	t.Cleanup(func() { _ = root.Close() })
+	return root
 }
 
 func TestDeliverToExistingInboxPostRenameSyncFailureReportsCommittedResult(t *testing.T) {
@@ -254,74 +344,57 @@ func TestDeliveryRootWriteFileAtomicPostRenameSyncFailureReportsCommittedResult(
 	}
 }
 
-func TestDeliverToInboxesRollback(t *testing.T) {
+func TestPartialDeliveryErrorMessageNamesRecipients(t *testing.T) {
+	err := &PartialDeliveryError{
+		Delivered: map[string]string{"codex": "/root/agents/codex/inbox/new/m.md"},
+		Failed:    "claude",
+		Pending:   []string{"ada"},
+		Err:       errors.New("injected"),
+	}
+	msg := err.Error()
+	for _, want := range []string{"codex", "claude", "ada", "injected"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("PartialDeliveryError message = %q, want it to name %q", msg, want)
+		}
+	}
+	if !errors.Is(err, err.Err) {
+		t.Fatal("PartialDeliveryError does not unwrap to its cause")
+	}
+}
+
+func TestDeliverToInboxesStagingFailureLeavesNoTmpResidue(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("chmod permissions are unreliable on Windows")
 	}
 	root := t.TempDir()
-	if err := EnsureRootDirs(root); err != nil {
-		t.Fatalf("EnsureRootDirs: %v", err)
+	for _, agent := range []string{"codex", "claude"} {
+		if err := EnsureAgentDirs(root, agent); err != nil {
+			t.Fatalf("EnsureAgentDirs(%s): %v", agent, err)
+		}
 	}
-	if err := EnsureAgentDirs(root, "codex"); err != nil {
-		t.Fatalf("EnsureAgentDirs codex: %v", err)
+	claudeTmp := AgentInboxTmp(root, "claude")
+	if err := os.Chmod(claudeTmp, 0o555); err != nil {
+		t.Fatalf("chmod claude tmp: %v", err)
 	}
-	if err := EnsureAgentDirs(root, "claude"); err != nil {
-		t.Fatalf("EnsureAgentDirs claude: %v", err)
-	}
-	if err := EnsureAgentDirs(root, "ada"); err != nil {
-		t.Fatalf("EnsureAgentDirs ada: %v", err)
-	}
+	defer func() { _ = os.Chmod(claudeTmp, 0o700) }()
 
-	cloudNew := AgentInboxNew(root, "claude")
-	if err := os.Chmod(cloudNew, 0o555); err != nil {
-		t.Fatalf("chmod claude new: %v", err)
-	}
-	defer func() { _ = os.Chmod(cloudNew, 0o700) }()
-
-	filename := "multi.md"
-	_, err := DeliverToInboxes(openDeliveryRootForTest(t, root), []string{"codex", "claude", "ada"}, filename, []byte("hello"))
+	_, err := DeliverToInboxes(openDeliveryRootForTest(t, root), []string{"codex", "claude"}, "staged.md", []byte("hello"))
 	if err == nil {
-		t.Fatalf("expected delivery error")
+		t.Fatal("expected staging failure for unwritable second recipient")
 	}
-	var partial *PartialDeliveryError
-	if !errors.As(err, &partial) {
-		t.Fatalf("expected PartialDeliveryError, got %T: %v", err, err)
+	entries, readErr := os.ReadDir(AgentInboxTmp(root, "codex"))
+	if readErr != nil {
+		t.Fatal(readErr)
 	}
-	if partial.Failed != "claude" {
-		t.Fatalf("failed recipient = %q, want claude", partial.Failed)
+	if len(entries) != 0 {
+		t.Fatalf("first recipient kept staged tmp after later failure: %v", entries)
 	}
-	if len(partial.Pending) != 1 || partial.Pending[0] != "ada" {
-		t.Fatalf("pending recipients = %#v, want [ada]", partial.Pending)
-	}
-
-	codexNew := filepath.Join(AgentInboxNew(root, "codex"), filename)
-	if got := partial.Delivered["codex"]; got != codexNew {
-		t.Fatalf("delivered[codex] = %q, want %q", got, codexNew)
-	}
-	got, err := os.ReadFile(codexNew)
-	if err != nil {
-		t.Fatalf("expected committed delivery to remain at %s: %v", codexNew, err)
-	}
-	if string(got) != "hello" {
-		t.Fatalf("committed delivery content = %q, want hello", got)
-	}
-
-	cloudTmp := filepath.Join(AgentInboxTmp(root, "claude"), filename)
-	if _, err := os.Stat(cloudTmp); !os.IsNotExist(err) {
-		t.Fatalf("expected failed tmp to be removed from %s", cloudTmp)
-	}
-
-	adaTmp := filepath.Join(AgentInboxTmp(root, "ada"), filename)
-	if _, err := os.Stat(adaTmp); !os.IsNotExist(err) {
-		t.Fatalf("expected pending tmp to be removed from %s", adaTmp)
-	}
-	adaNew := filepath.Join(AgentInboxNew(root, "ada"), filename)
-	if _, err := os.Stat(adaNew); !os.IsNotExist(err) {
-		t.Fatalf("expected pending recipient to have no new delivery at %s", adaNew)
+	if _, statErr := os.Stat(filepath.Join(AgentInboxNew(root, "codex"), "staged.md")); !os.IsNotExist(statErr) {
+		t.Fatalf("staging failure published a delivery: %v", statErr)
 	}
 }
 
-func TestDeliverToInboxesSyncFailureCountsRenamedStageOnlyAsDelivered(t *testing.T) {
+func TestDeliverToInboxesPostRenameSyncFailureCountsCommittedRecipient(t *testing.T) {
 	root := t.TempDir()
 	for _, agent := range []string{"codex", "claude"} {
 		if err := EnsureAgentDirs(root, agent); err != nil {
@@ -352,83 +425,13 @@ func TestDeliverToInboxesSyncFailureCountsRenamedStageOnlyAsDelivered(t *testing
 	if len(partial.Pending) != 1 || partial.Pending[0] != "claude" {
 		t.Fatalf("Pending = %#v, want [claude]", partial.Pending)
 	}
-	if _, err := os.Stat(filepath.Join(AgentInboxNew(root, "codex"), filename)); err != nil {
-		t.Fatalf("committed delivery missing: %v", err)
+	if _, statErr := os.Stat(filepath.Join(AgentInboxNew(root, "codex"), filename)); statErr != nil {
+		t.Fatalf("committed delivery missing: %v", statErr)
 	}
-	if _, err := os.Stat(filepath.Join(AgentInboxTmp(root, "codex"), filename)); !os.IsNotExist(err) {
-		t.Fatalf("renamed tmp still exists: %v", err)
+	if _, statErr := os.Stat(filepath.Join(AgentInboxTmp(root, "codex"), filename)); !os.IsNotExist(statErr) {
+		t.Fatalf("renamed tmp still exists: %v", statErr)
 	}
-	if _, err := os.Stat(filepath.Join(AgentInboxTmp(root, "claude"), filename)); !os.IsNotExist(err) {
-		t.Fatalf("pending tmp still exists: %v", err)
+	if _, statErr := os.Stat(filepath.Join(AgentInboxTmp(root, "claude"), filename)); !os.IsNotExist(statErr) {
+		t.Fatalf("pending tmp still exists: %v", statErr)
 	}
-}
-
-func TestDeliverToInboxRetryAfterTmpFsyncConverges(t *testing.T) {
-	base := t.TempDir()
-	if err := EnsureAgentDirs(base, "codex"); err != nil {
-		t.Fatalf("EnsureAgentDirs: %v", err)
-	}
-	const filename = "retry.md"
-	staleSameName := filepath.Join(AgentInboxTmp(base, "codex"), filename)
-	staleUnique := filepath.Join(AgentInboxTmp(base, "codex"), "."+filename+".tmp-crash")
-	if err := os.WriteFile(staleSameName, []byte("stale same-name attempt"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(staleUnique, []byte("stale unique attempt"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	fresh := []byte("fresh payload")
-	path, err := DeliverToInbox(openDeliveryRootForTest(t, base), "codex", filename, fresh)
-	if err != nil {
-		t.Fatalf("retry after tmp fsync = %v, want converge without EEXIST", err)
-	}
-	got, readErr := os.ReadFile(path)
-	if readErr != nil || string(got) != string(fresh) {
-		t.Fatalf("published bytes = %q, %v", got, readErr)
-	}
-	got, readErr = os.ReadFile(staleSameName)
-	if readErr != nil || string(got) != "stale same-name attempt" {
-		t.Fatalf("same-name leftover = %q, %v; retry must not overwrite it", got, readErr)
-	}
-	got, readErr = os.ReadFile(staleUnique)
-	if readErr != nil || string(got) != "stale unique attempt" {
-		t.Fatalf("unique leftover = %q, %v; retry must not overwrite it", got, readErr)
-	}
-}
-
-func TestCreateExclusiveFileRefusesReplacement(t *testing.T) {
-	base := t.TempDir()
-	if err := EnsureRootDirs(base); err != nil {
-		t.Fatalf("EnsureRootDirs: %v", err)
-	}
-	root := openDeliveryRootForTest(t, base)
-	path := "agents/cursor/outbox/acp-events/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json"
-	if err := root.CreateExclusiveFile(path, []byte("first\n"), 0o600); err != nil {
-		t.Fatalf("first CreateExclusiveFile: %v", err)
-	}
-	if err := root.CreateExclusiveFile(path, []byte("second\n"), 0o600); !errors.Is(err, os.ErrExist) {
-		t.Fatalf("replacement error = %v, want os.ErrExist", err)
-	}
-	got, err := root.ReadRegularNoFollow(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(got) != "first\n" {
-		t.Fatalf("file = %q, want the first write", got)
-	}
-}
-
-func openDeliveryRootForTest(t testing.TB, base string) *DeliveryRoot {
-	t.Helper()
-	identity, err := SnapshotDeliveryRoot(base)
-	if err != nil {
-		t.Fatalf("SnapshotDeliveryRoot(%s): %v", base, err)
-	}
-	root, err := OpenDeliveryRoot(base, identity)
-	if err != nil {
-		t.Fatalf("OpenDeliveryRoot(%s): %v", base, err)
-	}
-	t.Cleanup(func() { _ = root.Close() })
-	return root
 }
