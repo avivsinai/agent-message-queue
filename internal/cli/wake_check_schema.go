@@ -2,10 +2,8 @@ package cli
 
 import (
 	"flag"
-	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 )
 
@@ -358,20 +356,6 @@ func validateJSONSchemaFlag(fs *flag.FlagSet, jsonOutput bool, schema int) error
 	return nil
 }
 
-func wakeCheckV2OptInPresent(args []string) bool {
-	fs := flag.NewFlagSet("wake check v2 opt-in", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	jsonOutput := fs.Bool("json", false, "")
-	jsonSchema := fs.Int("json-schema", wakeCheckSchemaV1, "")
-	_ = fs.String("root", "", "")
-	_ = fs.String("me", "", "")
-	_ = fs.Bool("strict", false, "")
-	if err := fs.Parse(args); err != nil {
-		return false
-	}
-	return *jsonOutput && *jsonSchema == wakeCheckSchemaV2
-}
-
 func wakeCheckActionProgram() string {
 	path, err := wakeCheckExecutable()
 	if err != nil {
@@ -436,50 +420,4 @@ func wakeCheckOptionalInt(value int) *int {
 		return nil
 	}
 	return &value
-}
-
-func unsupportedWakeCheckDecision(root, agent string) wakeCheckDecision {
-	reason := wakeReasonPlatformUnsupported
-	detail := "amq wake is not supported on this platform"
-	return wakeCheckDecision{
-		Agent: agent,
-		Root:  canonicalWakeRoot(root),
-		Platform: wakeCheckPlatformDecision{
-			OS:            runtime.GOOS,
-			WakeSupported: false,
-			ReasonCode:    &reason,
-		},
-		Start: wakeCheckStartDecision{
-			Available:  false,
-			Mode:       wakeInjectModeNone,
-			ReasonCode: &reason,
-			Detail:     &detail,
-		},
-		Wake: wakeCheckWakeDecision{
-			Status: string(wakeLockMissing),
-		},
-		Image: wakeCheckImageDecision{
-			Current: wakeCheckImageEvidenceDecision{
-				Path:    wakeCheckOptionalString(wakeCheckActionProgram()),
-				Version: wakeCheckOptionalString(cliVersion),
-			},
-			Status: wakeImageUnknown,
-		},
-		Repair: wakeCheckRepairDecision{
-			ReasonCode:   &reason,
-			Detail:       &detail,
-			legacyReason: detail,
-		},
-		Reload: wakeCheckReloadDecision{
-			Status:     wakeReloadUnavailable,
-			ReasonCode: wakeReloadReasonPlatformUnsupported,
-		},
-		RestartCapability: wakeRestartUnavailable,
-		Action: wakeCheckActionDecision{
-			Kind:       wakeActionUnsupported,
-			Actor:      wakeActionActorNone,
-			ReasonCode: reason,
-			Message:    detail,
-		},
-	}
 }

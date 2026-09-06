@@ -251,19 +251,6 @@ func findCommand(name string) *CommandInfo {
 	return nil
 }
 
-// findChild returns a subcommand by name under the given parent command.
-func findChild(parent *CommandInfo, name string) *CommandInfo {
-	if parent == nil {
-		return nil
-	}
-	for i := range parent.Children {
-		if parent.Children[i].Name == name {
-			return &parent.Children[i]
-		}
-	}
-	return nil
-}
-
 // topLevelUsageLines returns the top-level usage lines from the command registry.
 func topLevelUsageLines() []string {
 	lines := []string{

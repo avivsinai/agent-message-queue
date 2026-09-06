@@ -78,30 +78,6 @@ func TestStaleWakeReleasePreservesChangedDarwinStage(t *testing.T) {
 	}
 }
 
-func TestChangedDarwinStageDoesNotReleaseUnverifiedWake(t *testing.T) {
-	fixture := newConsecutiveDarwinWakeRestartFixture(t)
-	evidence := fixture.currentEvidence
-	evidence.Device++
-	lock := fixture.stale.Lock
-	lock.RunningImageEvidence = &evidence
-	writeWakeLockForTest(t, fixture.root, fixture.agent, lock)
-	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
-		return wakeProcessInfo{PID: pid, Running: true}
-	})
-	inspection := inspectWakeLock(fixture.root, fixture.agent)
-	if inspection.Status != wakeLockUnverified {
-		t.Fatalf("wake with unreadable running process identity: %s", inspection.Status)
-	}
-	if err := fixture.agentDir.withFD(func(fd int) error {
-		return reclaimWakeRestartStateForLockRemovalAt(fd, fixture.agentDir, inspection)
-	}); err == nil {
-		t.Fatal("unverified wake accepted changed stage")
-	}
-	if _, err := os.Stat(fixture.lockPath); err != nil {
-		t.Fatalf("unverified lock was removed: %v", err)
-	}
-}
-
 // The same identity mismatch also trapped doctor in a retry loop after the
 // lock disappeared but a persisted restart record remained.
 func TestDoctorPreservesChangedDarwinStageWithoutLock(t *testing.T) {

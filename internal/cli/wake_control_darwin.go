@@ -954,28 +954,6 @@ func startWakeControlListenerInDirOwnedWithRestart(
 	return cleanup, exposedStop, markLoopStopped, nil
 }
 
-func cooperativeStopInjectVia(i wakeLockInspection) (stopped bool, retErr error) {
-	defer func() { retErr = withWakeDiagnostic(retErr, i.Root, i.Agent) }()
-	if i.Lock.ControlSocket == "" || i.Lock.Generation == "" {
-		return false, fmt.Errorf("live inject-via wake orphan has no cooperative control endpoint; stop the owning supervisor")
-	}
-	agentDir, err := openWakeAgentDir(i.Root, i.Agent)
-	if err != nil {
-		return false, fmt.Errorf("cooperative wake stop unavailable: %w", err)
-	}
-	defer func() { _ = agentDir.Close() }()
-	if err := withExistingWakeLifecycleGuardNoWaitInDir(agentDir, func(dirfd int) error {
-		current := inspectWakeLockAt(dirfd, agentDir, i.Root, i.Agent)
-		if !sameWakeLockGeneration(i, current) {
-			return fmt.Errorf("wake generation changed before cooperative stop")
-		}
-		return validateWakeStateAgentDirAt(dirfd, agentDir)
-	}); err != nil {
-		return false, fmt.Errorf("cooperative wake stop unavailable: %w", err)
-	}
-	return cooperativeStopInjectViaInDir(agentDir, i, nil)
-}
-
 func cooperativeStopInjectViaInDir(
 	agentDir *wakeAgentDir,
 	i wakeLockInspection,
@@ -1161,4 +1139,11 @@ func cooperativeStopAuthoritativeWakeInDir(
 		return nil
 	})
 	return gone, err
+}
+
+// This boundary is plumbing only. Callers must not turn detached-directory
+// access into acquire, repair, or readiness success; it is for exact cleanup
+// of old residue while preserving the canonical successor's authority.
+func withExistingWakeLifecycleGuardInDir(agentDir *wakeAgentDir, fn func(int) error) error {
+	return withExistingWakeLifecycleGuardModeInDir(agentDir, unix.LOCK_EX, fn)
 }

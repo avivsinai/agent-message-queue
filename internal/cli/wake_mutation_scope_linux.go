@@ -189,3 +189,20 @@ func wakeSignalName(signal unix.Signal) string {
 		return fmt.Sprintf("signal %d", signal)
 	}
 }
+
+// retainedWakeAgentDirRelation distinguishes a proven detached retained
+// directory from a namespace lookup that failed for an unknown reason. It
+// reacquires agentDir.withFD, so call it only when no withFD callback is active;
+// use retainedWakeAgentDirRelationAt inside one.
+func retainedWakeAgentDirRelation(agentDir *wakeAgentDir) (wakeAgentDirRelation, error) {
+	if agentDir == nil {
+		return wakeAgentDirInconclusive, fmt.Errorf("wake agent directory capability is missing")
+	}
+	var relation wakeAgentDirRelation
+	err := agentDir.withFD(func(dirfd int) error {
+		var err error
+		relation, err = retainedWakeAgentDirRelationAt(agentDir, dirfd)
+		return err
+	})
+	return relation, err
+}

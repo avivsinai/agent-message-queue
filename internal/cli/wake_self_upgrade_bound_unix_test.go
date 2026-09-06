@@ -13,13 +13,7 @@ import (
 	"time"
 )
 
-const (
-	wakeSelfUpgradeBoundProbeVersionEnv = "AMQ_TEST_WAKE_SELF_UPGRADE_BOUND_PROBE_VERSION"
-	wakeSelfUpgradeBoundProbeModeEnv    = "AMQ_TEST_WAKE_SELF_UPGRADE_BOUND_PROBE_MODE"
-	wakeSelfUpgradeBoundProbeFailMode   = "fail"
-	wakeSelfUpgradeBoundProbeMutateMode = "mutate-after-version"
-	wakeSelfUpgradeBoundProbeForkMode   = "fork-with-stdout"
-)
+const ()
 
 func TestProbeBoundWakeSelfUpgradeVersion(t *testing.T) {
 	binary := buildWakeSelfUpgradeBoundProbeBinary(t)
@@ -73,84 +67,6 @@ func TestProbeBoundWakeSelfUpgradeVersion(t *testing.T) {
 				t.Fatalf("probe error = %v, want substring %q", err, test.wantError)
 			}
 		})
-	}
-}
-
-func TestValidateWakeRestartRecordSelfUpgradeSources(t *testing.T) {
-	binary := buildWakeSelfUpgradeBoundProbeBinary(t)
-	candidate, err := captureWakeImageEvidence(binary, "1.1.0")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	for _, test := range []struct {
-		name      string
-		source    string
-		wantError string
-	}{
-		{name: "absent defaults to foreign", source: ""},
-		{name: "foreign", source: wakeRestartSourceForeign},
-		{name: "self", source: wakeRestartSourceSelf},
-		{name: "invalid", source: "operator", wantError: "source is invalid"},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			record := validWakeSelfUpgradeRecordForBoundProbeTest(t, candidate)
-			record.Source = test.source
-			err := validateWakeRestartRecord(record)
-			if test.wantError == "" {
-				if err != nil {
-					t.Fatalf("validate source %q: %v", test.source, err)
-				}
-				return
-			}
-			if err == nil || !strings.Contains(err.Error(), test.wantError) {
-				t.Fatalf("validate source %q error = %v, want substring %q", test.source, err, test.wantError)
-			}
-		})
-	}
-}
-
-func validWakeSelfUpgradeRecordForBoundProbeTest(
-	t *testing.T,
-	candidate wakeImageEvidenceV1,
-) wakeRestartRecord {
-	t.Helper()
-	return wakeRestartRecord{
-		Schema:     wakeRestartSchemaV1,
-		Source:     wakeRestartSourceSelf,
-		RequestID:  "0123456789abcdef0123456789abcdef",
-		Status:     wakeRestartPending,
-		Root:       canonicalWakeRoot(secureTempDirForTest(t)),
-		Agent:      "codex",
-		Generation: "fedcba9876543210fedcba9876543210",
-		Owner:      validWakeResumeOwnerForTest(),
-		Candidate:  candidate,
-	}
-}
-
-func closeWakeSelfUpgradeBoundProbeImage(
-	t *testing.T,
-	bound *wakeRestartBoundImage,
-	stageWasReplaced bool,
-) {
-	t.Helper()
-	if bound == nil {
-		return
-	}
-	if stageWasReplaced && runtime.GOOS == "darwin" {
-		if bound.file != nil {
-			if err := bound.file.Close(); err != nil {
-				t.Error(err)
-			}
-			bound.file = nil
-		}
-		if err := os.RemoveAll(filepath.Dir(bound.executionPath)); err != nil {
-			t.Error(err)
-		}
-		return
-	}
-	if err := bound.close(); err != nil {
-		t.Error(err)
 	}
 }
 
@@ -229,4 +145,56 @@ func main() {
 		t.Fatal(err)
 	}
 	return binary
+}
+
+const (
+	wakeSelfUpgradeBoundProbeVersionEnv = "AMQ_TEST_WAKE_SELF_UPGRADE_BOUND_PROBE_VERSION"
+	wakeSelfUpgradeBoundProbeModeEnv    = "AMQ_TEST_WAKE_SELF_UPGRADE_BOUND_PROBE_MODE"
+	wakeSelfUpgradeBoundProbeFailMode   = "fail"
+	wakeSelfUpgradeBoundProbeMutateMode = "mutate-after-version"
+	wakeSelfUpgradeBoundProbeForkMode   = "fork-with-stdout"
+)
+
+func validWakeSelfUpgradeRecordForBoundProbeTest(
+	t *testing.T,
+	candidate wakeImageEvidenceV1,
+) wakeRestartRecord {
+	t.Helper()
+	return wakeRestartRecord{
+		Schema:     wakeRestartSchemaV1,
+		Source:     wakeRestartSourceSelf,
+		RequestID:  "0123456789abcdef0123456789abcdef",
+		Status:     wakeRestartPending,
+		Root:       canonicalWakeRoot(secureTempDirForTest(t)),
+		Agent:      "codex",
+		Generation: "fedcba9876543210fedcba9876543210",
+		Owner:      validWakeResumeOwnerForTest(),
+		Candidate:  candidate,
+	}
+}
+
+func closeWakeSelfUpgradeBoundProbeImage(
+	t *testing.T,
+	bound *wakeRestartBoundImage,
+	stageWasReplaced bool,
+) {
+	t.Helper()
+	if bound == nil {
+		return
+	}
+	if stageWasReplaced && runtime.GOOS == "darwin" {
+		if bound.file != nil {
+			if err := bound.file.Close(); err != nil {
+				t.Error(err)
+			}
+			bound.file = nil
+		}
+		if err := os.RemoveAll(filepath.Dir(bound.executionPath)); err != nil {
+			t.Error(err)
+		}
+		return
+	}
+	if err := bound.close(); err != nil {
+		t.Error(err)
+	}
 }

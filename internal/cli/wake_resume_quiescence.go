@@ -184,24 +184,3 @@ func classifyWakeResumeQuiescence(state wakeResumeQuiescence) wakeResumeQuiescen
 		return wakeResumeQuiescenceDecision{Disposition: wakeResumeProceed}
 	}
 }
-
-func wakeInputDeliveryPhaseName(phase wakeInputDeliveryPhase) string {
-	switch phase {
-	case wakeInputDeliveryIdle:
-		return "idle"
-	case wakeInputPayloadPending:
-		return "payload_pending"
-	case wakeInputRawPreludePending:
-		return "raw_prelude_pending"
-	case wakeInputPrimarySubmitPending:
-		return "primary_submit_pending"
-	case wakeInputRawFirstSubmitQueued:
-		return "raw_first_submit_queued"
-	case wakeInputRawRescuePending:
-		return "raw_rescue_pending"
-	case wakeInputRawRescueQueued:
-		return "raw_rescue_queued"
-	default:
-		return "unknown"
-	}
-}

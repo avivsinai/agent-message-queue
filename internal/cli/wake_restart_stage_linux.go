@@ -34,6 +34,4 @@ func wakeRestartStageExistsPlatform(wakeRestartRecord) (bool, error) {
 	return false, nil
 }
 
-func wakeRestartStageUsesStableStatePlatform(string) (bool, error) { return false, nil }
-
 func reclaimWakeRestartRunningImagePlatform(wakeLock) error { return nil }

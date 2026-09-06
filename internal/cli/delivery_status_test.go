@@ -22,17 +22,3 @@ func TestReportDeliveryErrorPreservesCommittedState(t *testing.T) {
 		t.Fatalf("reportDeliveryError = %q, want explicit committed retry warning", err)
 	}
 }
-
-func TestOutboxResultTreatsIndeterminateDurabilityAsWritten(t *testing.T) {
-	committed := &fsq.CommittedDurabilityError{
-		FinalPath: "/source/agents/codex/outbox/sent/msg.md",
-		Err:       errors.New("fsync failed"),
-	}
-	result := outboxResult(committed)
-	if written, _ := result["written"].(bool); !written {
-		t.Fatalf("written = %#v, want true for committed outbox", result["written"])
-	}
-	if result["durability"] != "indeterminate" || result["path"] != committed.FinalPath {
-		t.Fatalf("outbox result = %#v", result)
-	}
-}

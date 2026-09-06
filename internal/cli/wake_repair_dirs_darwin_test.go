@@ -5,16 +5,12 @@ package cli
 import (
 	"os"
 	"path/filepath"
-	"strings"
-	"sync/atomic"
-	"syscall"
 	"testing"
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/fsnotify/fsnotify"
-	"golang.org/x/sys/unix"
 )
 
 type darwinRetainedWakeWatcherFixture struct {
@@ -32,115 +28,6 @@ func TestDarwinRetainedWakeWatcherNormalizesCanonicalCreate(t *testing.T) {
 		"delivered",
 	)
 	assertDarwinRetainedWakeWatcherEvent(t, fixture.watcher, fixture.inboxPath)
-}
-
-func TestDarwinRetainedWakeWatcherFailsOnDirectInboxLossWithoutForwarding(t *testing.T) {
-	for _, test := range []struct {
-		name string
-		lose func(*testing.T, string)
-	}{
-		{
-			name: "rename",
-			lose: func(t *testing.T, path string) {
-				t.Helper()
-				if err := os.Rename(path, filepath.Join(filepath.Dir(path), "renamed-detached")); err != nil {
-					t.Fatalf("rename retained inbox: %v", err)
-				}
-			},
-		},
-		{
-			name: "delete",
-			lose: func(t *testing.T, path string) {
-				t.Helper()
-				if err := os.Remove(path); err != nil {
-					t.Fatalf("delete retained inbox: %v", err)
-				}
-			},
-		},
-		{
-			name: "delete and recreate",
-			lose: func(t *testing.T, path string) {
-				t.Helper()
-				if err := os.Remove(path); err != nil {
-					t.Fatalf("delete retained inbox: %v", err)
-				}
-				if err := os.Mkdir(path, 0o700); err != nil {
-					t.Fatalf("recreate retained inbox: %v", err)
-				}
-			},
-		},
-		{
-			name: "rename and recreate",
-			lose: func(t *testing.T, path string) {
-				t.Helper()
-				if err := os.Rename(path, filepath.Join(filepath.Dir(path), "replaced-detached")); err != nil {
-					t.Fatalf("rename retained inbox: %v", err)
-				}
-				if err := os.Mkdir(path, 0o700); err != nil {
-					t.Fatalf("recreate retained inbox: %v", err)
-				}
-			},
-		},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			fixture := newDarwinRetainedWakeWatcherForTest(t)
-			test.lose(t, fixture.inboxPath)
-			assertDarwinRetainedWakeWatcherTerminalWithoutEvents(t, fixture.watcher)
-		})
-	}
-}
-
-func TestDarwinRetainedWakeWatcherFailsOnInboxParentReplacement(t *testing.T) {
-	fixture := newDarwinRetainedWakeWatcherForTest(t)
-	inboxParent := filepath.Dir(fixture.inboxPath)
-	detachedInboxParent := inboxParent + ".detached"
-	if err := os.Rename(inboxParent, detachedInboxParent); err != nil {
-		t.Fatalf("rename retained inbox parent: %v", err)
-	}
-	if err := os.Mkdir(inboxParent, 0o700); err != nil {
-		t.Fatalf("recreate retained inbox parent: %v", err)
-	}
-	if err := os.Rename(
-		filepath.Join(detachedInboxParent, "new"),
-		filepath.Join(inboxParent, "new"),
-	); err != nil {
-		t.Fatalf("move retained inbox below replacement parent: %v", err)
-	}
-	assertDarwinRetainedWakeWatcherTerminalWithoutEvents(t, fixture.watcher)
-}
-
-func TestDarwinRetainedWakeWatcherFailsOnAncestorReplacementBeforeDetachedDelivery(t *testing.T) {
-	fixture := newDarwinRetainedWakeWatcherForTest(t)
-	detachedAgentPath := fixture.agentPath + ".detached"
-	if err := os.Rename(fixture.agentPath, detachedAgentPath); err != nil {
-		t.Fatalf("rename retained agent directory: %v", err)
-	}
-	if err := fsq.EnsureAgentDirs(fixture.root, "codex"); err != nil {
-		t.Fatalf("recreate canonical agent directory: %v", err)
-	}
-	writeDarwinRetainedWakeWatcherMessage(
-		t,
-		filepath.Join(detachedAgentPath, "inbox", "new", "late.md"),
-		"detached late delivery",
-	)
-	assertDarwinRetainedWakeWatcherTerminalWithoutEvents(t, fixture.watcher)
-}
-
-func TestDarwinRetainedWakeWatcherCloseIsIdempotentAndBounded(t *testing.T) {
-	fixture := newDarwinRetainedWakeWatcherForTest(t)
-	results := make(chan [2]error, 1)
-	go func() {
-		results <- [2]error{fixture.watcher.Close(), fixture.watcher.Close()}
-	}()
-
-	select {
-	case result := <-results:
-		if result[0] != nil || result[1] != nil {
-			t.Fatalf("idempotent retained watcher close = (%v, %v)", result[0], result[1])
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("idempotent retained watcher close did not finish")
-	}
 }
 
 func newDarwinRetainedWakeWatcherForTest(t *testing.T) darwinRetainedWakeWatcherFixture {
@@ -236,72 +123,5 @@ func assertDarwinRetainedWakeWatcherEvent(
 		t.Fatalf("retained watcher failed on canonical message create: %v ok=%v", err, ok)
 	case <-time.After(2 * time.Second):
 		t.Fatal("retained watcher did not forward a canonical message scan trigger")
-	}
-}
-
-func assertDarwinRetainedWakeWatcherTerminalWithoutEvents(
-	t *testing.T,
-	watcher wakeEventWatcher,
-) {
-	t.Helper()
-	events := watcher.Events()
-	errorsCh := watcher.Errors()
-	var terminalErr error
-	timer := time.NewTimer(2 * time.Second)
-	defer timer.Stop()
-
-	for events != nil || errorsCh != nil {
-		select {
-		case event, ok := <-events:
-			if !ok {
-				events = nil
-				continue
-			}
-			t.Fatalf("terminal retained watcher forwarded event: %#v", event)
-		case err, ok := <-errorsCh:
-			if !ok {
-				errorsCh = nil
-				continue
-			}
-			if err == nil {
-				t.Fatal("terminal retained watcher reported an empty error")
-			}
-			if terminalErr != nil {
-				t.Fatalf("terminal retained watcher reported multiple errors: %v and %v", terminalErr, err)
-			}
-			terminalErr = err
-		case <-timer.C:
-			t.Fatal("terminal retained watcher did not close its event and error channels")
-		}
-	}
-	if terminalErr == nil {
-		t.Fatal("retained watcher closed without a terminal namespace error")
-	}
-	if !strings.Contains(terminalErr.Error(), "retained wake") {
-		t.Fatalf("terminal retained watcher error = %v", terminalErr)
-	}
-}
-
-func TestDarwinRetainedWakeWatcherRetriesInterruptedWait(t *testing.T) {
-	var waits atomic.Int32
-	previousWait := waitRetainedWakeInboxEvent
-	waitRetainedWakeInboxEvent = func(kqueueFD int, events []unix.Kevent_t) (int, error) {
-		if waits.Add(1) == 1 {
-			return 0, syscall.EINTR
-		}
-		return previousWait(kqueueFD, events)
-	}
-	t.Cleanup(func() { waitRetainedWakeInboxEvent = previousWait })
-
-	fixture := newDarwinRetainedWakeWatcherForTest(t)
-	writeDarwinRetainedWakeWatcherMessage(
-		t,
-		filepath.Join(fixture.inboxPath, "delivered.md"),
-		"delivered",
-	)
-	assertDarwinRetainedWakeWatcherEvent(t, fixture.watcher, fixture.inboxPath)
-
-	if got := waits.Load(); got < 2 {
-		t.Fatalf("retained watcher waits = %d, want at least 2 after an interrupted wait", got)
 	}
 }

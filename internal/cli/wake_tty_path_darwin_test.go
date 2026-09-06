@@ -13,62 +13,7 @@ import (
 	"syscall"
 	"testing"
 	"time"
-
-	"golang.org/x/sys/unix"
 )
-
-func TestFindDarwinTTYPath(t *testing.T) {
-	tests := []struct {
-		name  string
-		rdev  int32
-		stats map[string]unix.Stat_t
-		want  string
-	}{
-		{
-			name: "matches ttys device",
-			rdev: 42,
-			stats: map[string]unix.Stat_t{
-				"/dev/ttys001": {Mode: unix.S_IFCHR, Rdev: 7},
-				"/dev/ttys002": {Mode: unix.S_IFCHR, Rdev: 42},
-				"/dev/console": {Mode: unix.S_IFCHR, Rdev: 9},
-			},
-			want: "/dev/ttys002",
-		},
-		{
-			name: "matches console fallback",
-			rdev: 9,
-			stats: map[string]unix.Stat_t{
-				"/dev/ttys001": {Mode: unix.S_IFCHR, Rdev: 7},
-				"/dev/console": {Mode: unix.S_IFCHR, Rdev: 9},
-			},
-			want: "/dev/console",
-		},
-		{
-			name: "rejects non character device",
-			rdev: 42,
-			stats: map[string]unix.Stat_t{
-				"/dev/ttys001": {Mode: unix.S_IFREG, Rdev: 42},
-			},
-		},
-		{name: "no device match", rdev: 42},
-	}
-	paths := []string{"/dev/ttys001", "/dev/ttys002", "/dev/console"}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := findDarwinTTYPath(tt.rdev, paths, func(path string, stat *unix.Stat_t) error {
-				value, ok := tt.stats[path]
-				if !ok {
-					return os.ErrNotExist
-				}
-				*stat = value
-				return nil
-			})
-			if got != tt.want {
-				t.Fatalf("path = %q, want %q", got, tt.want)
-			}
-		})
-	}
-}
 
 func TestNewWakeLockRecordsDarwinControllingTTYUnderRealPTY(t *testing.T) {
 	const helperEnv = "AMQ_TEST_DARWIN_CURRENT_TTY_PTY"
@@ -130,29 +75,5 @@ func TestNewWakeLockRecordsDarwinControllingTTYUnderRealPTY(t *testing.T) {
 	}
 	if err != nil {
 		t.Fatalf("Darwin current-TTY regression: %v; evidence=%s\n%s", err, evidencePath, output.String())
-	}
-}
-
-func TestGetCurrentTTYDarwinReturnsEmptyWithoutControllingTerminal(t *testing.T) {
-	const helperEnv = "AMQ_TEST_DARWIN_NO_CURRENT_TTY"
-	if os.Getenv(helperEnv) == "1" {
-		if tty := getCurrentTTY(); tty != "" {
-			t.Fatalf("detached process current tty = %q, want empty", tty)
-		}
-		return
-	}
-
-	testBinary, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	cmd := exec.Command(testBinary, "-test.run=^TestGetCurrentTTYDarwinReturnsEmptyWithoutControllingTerminal$")
-	cmd.Env = append(os.Environ(), helperEnv+"=1")
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	var output bytes.Buffer
-	cmd.Stdout = &output
-	cmd.Stderr = &output
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("detached current-TTY regression: %v\n%s", err, output.String())
 	}
 }

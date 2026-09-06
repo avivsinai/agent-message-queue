@@ -404,27 +404,6 @@ func replacePreparedUpgrade(binaryName string, prepared preparedUpgrade) (direct
 	return directUpgradeResult{}, nil
 }
 
-// runDirectUpgradeWithProtection prepares one release and then replaces its
-// destination after the independent package-manager guard succeeds.
-func runDirectUpgradeWithProtection(
-	ctx context.Context,
-	client *http.Client,
-	binaryName, latestTag, latest, destPath string,
-	homebrewPrefixes []string,
-	scoopApps string,
-) (directUpgradeResult, error) {
-	return runDirectUpgradeWithScoopRoots(
-		ctx,
-		client,
-		binaryName,
-		latestTag,
-		latest,
-		destPath,
-		homebrewPrefixes,
-		legacyScoopRoots(scoopApps),
-	)
-}
-
 func runDirectUpgradeWithScoopRoots(
 	ctx context.Context,
 	client *http.Client,
@@ -452,25 +431,6 @@ func runDirectUpgradeWithScoopRoots(
 		return directUpgradeResult{}, err
 	}
 	return replacePreparedUpgrade(binaryName, prepared)
-}
-
-func upgradeCompanionsWithProtection(
-	ctx context.Context,
-	client *http.Client,
-	latestTag, latest, amqDest string,
-	homebrewPrefixes []string,
-	scoopApps string,
-) error {
-	return upgradeCompanionsWithScoopRoots(
-		ctx,
-		client,
-		latestTag,
-		latest,
-		amqDest,
-		amqDest,
-		homebrewPrefixes,
-		legacyScoopRoots(scoopApps),
-	)
 }
 
 func upgradeCompanionsWithScoopRoots(
@@ -701,18 +661,6 @@ func discoverCompanionPlan(names []string, dirs []string, amqDest string, homebr
 	return plan, nil
 }
 
-func findCompanionMatches(name string, dirs []string, amqDest string, homebrewPrefixes []string, scoopApps string) ([]string, error) {
-	plan, err := discoverCompanionPlan([]string{name}, dirs, amqDest, homebrewPrefixes, legacyScoopRoots(scoopApps))
-	if err != nil {
-		return nil, err
-	}
-	item, ok := plan[name]
-	if !ok {
-		return nil, nil
-	}
-	return []string{item.target}, nil
-}
-
 func inspectCompanionCandidate(name, candidate string, amqInfo os.FileInfo, homebrewPrefixes []string, scoopRoots []update.ScoopInstallRoot) (companionTarget, bool, error) {
 	linkInfo, err := os.Lstat(candidate)
 	if errors.Is(err, os.ErrNotExist) {
@@ -917,13 +865,6 @@ func refuseUnknownScoopInstall(path, resolved string) error {
 	return fmt.Errorf("amq is in an unrecognized Scoop apps directory at %s; set SCOOP or SCOOP_GLOBAL to that Scoop root, or reinstall amq under a direct path", location)
 }
 
-func legacyScoopRoots(path string) []update.ScoopInstallRoot {
-	if path == "" {
-		return nil
-	}
-	return []update.ScoopInstallRoot{{Path: path, Scope: update.ScoopScopeUser}}
-}
-
 func homebrewPrefixesFromInstallations(installations []homebrewInstallation) []string {
 	prefixes := make([]string, 0, len(installations))
 	seen := make(map[string]struct{}, len(installations))
@@ -1099,24 +1040,6 @@ func isSymlinkToHomebrewCellar(path, cellar string) bool {
 	return err == nil && pathWithinDirectory(filepath.Clean(resolved), cellar)
 }
 
-// selectUpgradeDestination resolves the write target for a direct install and
-// performs the last package-manager safety check before any download starts.
-func selectUpgradeDestination(path, resolved string, writable func(string) error) (string, error) {
-	installations := homebrewInstallationsForUpgrade()
-	var err error
-	installations, err = addDerivedHomebrewInstallations(path, resolved, installations)
-	if err != nil {
-		return "", err
-	}
-	return selectUpgradeDestinationWithScoopRoots(
-		path,
-		resolved,
-		writable,
-		homebrewPrefixesFromInstallations(installations),
-		update.ScoopInstallRoots(),
-	)
-}
-
 func reportUnavailableCompanionsOnWindows(all *bool, goos string) error {
 	if all == nil || !*all || goos != "windows" {
 		return nil
@@ -1135,16 +1058,6 @@ func companionBinariesAvailableOn(names []string, goos string) []string {
 		}
 	}
 	return available
-}
-
-func selectUpgradeDestinationWithRoots(path, resolved string, writable func(string) error, homebrewPrefixes []string, scoopApps string) (string, error) {
-	return selectUpgradeDestinationWithScoopRoots(
-		path,
-		resolved,
-		writable,
-		homebrewPrefixes,
-		legacyScoopRoots(scoopApps),
-	)
 }
 
 func selectUpgradeDestinationWithScoopRoots(path, resolved string, writable func(string) error, homebrewPrefixes []string, scoopRoots []update.ScoopInstallRoot) (string, error) {
@@ -1169,10 +1082,6 @@ func selectUpgradeDestinationWithScoopRoots(path, resolved string, writable func
 		return "", fmt.Errorf("cannot write the amq install location %s: %w", destPath, err)
 	}
 	return destPath, nil
-}
-
-func refusePackageManagedDestination(path string, homebrewPrefixes []string, scoopApps string) error {
-	return refusePackageManagedDestinationWithScoopRoots(path, homebrewPrefixes, legacyScoopRoots(scoopApps))
 }
 
 func refusePackageManagedDestinationWithScoopRoots(path string, homebrewPrefixes []string, scoopRoots []update.ScoopInstallRoot) error {
@@ -1301,16 +1210,6 @@ func cleanHomebrewPrefix(prefix string) string {
 		return ""
 	}
 	return filepath.Clean(prefix)
-}
-
-func homebrewOwnsUpgradePath(prefix, path string) bool {
-	if path == "" {
-		return false
-	}
-	path = update.CanonicalPath(path)
-	prefix = canonicalHomebrewPrefix(prefix)
-	return pathWithinDirectory(path, filepath.Join(prefix, "bin")) ||
-		pathWithinDirectory(path, filepath.Join(prefix, "Cellar"))
 }
 
 func pathWithinDirectory(path, directory string) bool {

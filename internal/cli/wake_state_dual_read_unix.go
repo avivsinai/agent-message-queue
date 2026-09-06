@@ -62,33 +62,6 @@ func newWakeStateBoundInconclusiveError(err error) error {
 	return &wakeStateBoundInconclusiveError{err: err}
 }
 
-func readWakeStateSelection(root, me string) (wakeStateReadSelection, error) {
-	if err := fsq.ValidateHandle(me); err != nil {
-		return wakeStateReadSelection{}, err
-	}
-	agentDir, err := openWakeDirectory(fsq.AgentBase(root, me), "wake agent directory")
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return wakeStateReadSelection{}, nil
-		}
-		return wakeStateReadSelection{}, err
-	}
-	defer func() { _ = agentDir.Close() }()
-	var selection wakeStateReadSelection
-	err = agentDir.withFD(func(dirfd int) error {
-		var readErr error
-		selection, readErr = readWakeStateSelectionAt(dirfd, agentDir, root, me)
-		return readErr
-	})
-	if err != nil {
-		return selection, err
-	}
-	if err := validateCanonicalWakeAgentDir(agentDir); err != nil {
-		return wakeStateReadSelection{}, err
-	}
-	return selection, nil
-}
-
 func readWakeStateSelectionAt(
 	dirfd int,
 	agentDir *wakeAgentDir,
@@ -349,11 +322,6 @@ func readWakeStateLegacyPairAtWithCanonicalValidation(
 		return snapshot, err, nil
 	}
 	return snapshot, nil, nil
-}
-
-func readWakeTargetFromState(root, me string) (wakeTarget, bool, error) {
-	selection, err := readWakeStateSelection(root, me)
-	return selection.Target, selection.TargetPresent, err
 }
 
 func readWakeTargetFromStateForInspection(

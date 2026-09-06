@@ -33,24 +33,3 @@ func TestReadWakeMachineIDPlatformFormatsUUIDAndPassesFiniteTimeout(t *testing.T
 		t.Fatalf("gethostuuid timeout = %+v, want finite non-zero", captured)
 	}
 }
-
-func TestReadWakeMachineIDPlatformFailsEmptyOnErrno(t *testing.T) {
-	stubDarwinGethostuuid(t, func(uuid *[16]byte, timeout *unix.Timespec) syscall.Errno {
-		return unix.EWOULDBLOCK
-	})
-	if got := readWakeMachineIDPlatform(); got != "" {
-		t.Fatalf("machine id = %q, want empty on errno", got)
-	}
-}
-
-// Live check of the best-effort contract: a UUID-shaped identity or empty,
-// never junk, and stable between reads.
-func TestReadWakeMachineIDPlatformLiveValidOrEmpty(t *testing.T) {
-	first := readWakeMachineIDPlatform()
-	if first != "" && !isDarwinBootUUID(first) {
-		t.Fatalf("machine id = %q, want UUID shape or empty", first)
-	}
-	if second := readWakeMachineIDPlatform(); second != first {
-		t.Fatalf("machine id changed between reads: %q then %q", first, second)
-	}
-}

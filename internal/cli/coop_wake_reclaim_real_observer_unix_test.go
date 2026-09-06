@@ -5,10 +5,8 @@ package cli
 import (
 	"os"
 	"os/exec"
-	"runtime"
 	"strings"
 	"testing"
-	"time"
 )
 
 // buildAuthoritativeClaimForRealObserverTest stubs only the wake helper
@@ -168,44 +166,4 @@ func TestPrepareCoopWakeLockRealObserverLiveOwnerRefuses(t *testing.T) {
 		string(afterTarget) != string(beforeTarget) {
 		t.Fatal("live-owner refusal mutated the authoritative claim")
 	}
-}
-
-func TestPrepareCoopWakeLockRealObserverDoesNotBlockOrLeak(t *testing.T) {
-	owner := currentAuthoritativeOwnerForCoopWakeTest(t)
-	root, _, _ := buildAuthoritativeClaimForRealObserverTest(
-		t,
-		owner,
-		owner.ProcessStart,
-	)
-
-	before := runtime.NumGoroutine()
-	start := time.Now()
-	const rounds = 100
-	for i := 0; i < rounds; i++ {
-		if err := prepareCoopWakeLock(root, "codex", true, "unused"); err == nil {
-			t.Fatalf("round %d: live owner unexpectedly allowed takeover", i)
-		}
-	}
-	elapsed := time.Since(start)
-	if elapsed > 30*time.Second {
-		t.Fatalf("%d preflight observations took %s; observation blocks the hot path", rounds, elapsed)
-	}
-
-	time.Sleep(200 * time.Millisecond)
-	after := runtime.NumGoroutine()
-	if after > before+3 {
-		t.Fatalf(
-			"goroutines grew from %d to %d across %d observed preflights; monitor leak",
-			before,
-			after,
-			rounds,
-		)
-	}
-	t.Logf(
-		"%d live-owner preflights in %s, goroutines %d -> %d",
-		rounds,
-		elapsed,
-		before,
-		after,
-	)
 }

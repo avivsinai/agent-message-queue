@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -771,4 +772,27 @@ func closeLinuxWakeReloadAncillary(oob []byte) (bool, error) {
 		}
 	}
 	return len(messages) > 0, closeErr
+}
+
+func encodeWakeReloadTransportResponse(response wakeReloadTransportResponse) ([]byte, error) {
+	if response != wakeReloadTransportUnavailableResponse() {
+		return nil, fmt.Errorf("wake reload transport response is not a closed refusal")
+	}
+	payload, err := json.Marshal(response)
+	if err != nil {
+		return nil, err
+	}
+	return append(payload, '\n'), nil
+}
+
+func wakeReloadTransportUnavailableResponse() wakeReloadTransportResponse {
+	return wakeReloadTransportResponse{
+		Status:     wakeReloadUnavailable,
+		ReasonCode: wakeReloadReasonCommandUnavailable,
+	}
+}
+
+type wakeReloadTransportResponse struct {
+	Status     string `json:"status"`
+	ReasonCode string `json:"reason_code"`
 }

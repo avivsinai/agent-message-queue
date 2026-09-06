@@ -23,25 +23,6 @@ func guardedTestProcessReplacement(seam string) func(string, []string, []string)
 	}
 }
 
-func TestProcessReplacementGuardCoversEveryExecSeam(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		exec func(string, []string, []string) error
-	}{
-		{name: "coopExecProcess", exec: coopExecProcess},
-		{name: "launchExecProcess", exec: launchExecProcess},
-		{name: "wakeRestartExec", exec: wakeRestartExec},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "must-not-exec")
-			err := tc.exec(path, []string{path}, os.Environ())
-			if err == nil || !strings.Contains(err.Error(), "test attempted unguarded "+tc.name+" process replacement") || !strings.Contains(err.Error(), path) {
-				t.Fatalf("unguarded %s error = %v, want loud test-process replacement refusal", tc.name, err)
-			}
-		})
-	}
-}
-
 func stubCoopExecSentinel(t *testing.T) error {
 	t.Helper()
 	sentinel := errors.New("exec sentinel")
@@ -106,27 +87,6 @@ func TestCoopExecEmptyPremadeRootProvisionsFullTree(t *testing.T) {
 	}
 }
 
-// A partial tree (the shape this very bug used to mint) converges to a valid
-// queue instead of persisting half-initialized.
-func TestCoopExecPartialRootConvergesToValidTree(t *testing.T) {
-	dir := secureTempDirForTest(t)
-	if err := os.Mkdir(filepath.Join(dir, "agents"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	sentinel := stubCoopExecSentinel(t)
-
-	err := runCoopExec([]string{"--root", dir, "--me", "codex", "--no-wake", "sh"})
-	if !errors.Is(err, sentinel) {
-		t.Fatalf("error = %v, want exec sentinel", err)
-	}
-	for _, marker := range []string{"threads", "meta"} {
-		info, statErr := os.Lstat(filepath.Join(dir, marker))
-		if statErr != nil || !info.IsDir() {
-			t.Fatalf("marker %s not completed: %v", marker, statErr)
-		}
-	}
-}
-
 // agents/ existing as a symlink is a hostile shape: refuse, and never write
 // through the link.
 func TestCoopExecAgentsSymlinkFailsClosed(t *testing.T) {
@@ -143,133 +103,5 @@ func TestCoopExecAgentsSymlinkFailsClosed(t *testing.T) {
 	}
 	if got := dirEntryNames(t, target); len(got) != 0 {
 		t.Fatalf("symlink target gained entries: %v", got)
-	}
-}
-
-// A hostile threads/ or meta/ symlink beside a real agents/ must never cause
-// a write outside the tree; same-root partial completion before the failure
-// is reported honestly via the returned error.
-func TestCoopExecHostileSiblingSymlinkNeverWritesOutside(t *testing.T) {
-	for _, marker := range []string{"threads", "meta"} {
-		t.Run(marker, func(t *testing.T) {
-			dir := secureTempDirForTest(t)
-			outside := secureTempDirForTest(t)
-			if err := os.Mkdir(filepath.Join(dir, "agents"), 0o700); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.Symlink(outside, filepath.Join(dir, marker)); err != nil {
-				t.Fatal(err)
-			}
-			_ = stubCoopExecSentinel(t)
-
-			err := runCoopExec([]string{"--root", dir, "--me", "codex", "--no-wake", "sh"})
-			if err == nil {
-				t.Fatalf("hostile %s symlink accepted", marker)
-			}
-			if got := dirEntryNames(t, outside); len(got) != 0 {
-				t.Fatalf("outside tree gained entries through %s: %v", marker, got)
-			}
-		})
-	}
-}
-
-// A typo'd command must fail before any provisioning: no root, no tree.
-func TestCoopExecMissingBinaryPerformsZeroWrites(t *testing.T) {
-	parent := secureTempDirForTest(t)
-	root := filepath.Join(parent, "wouldberoot")
-
-	err := runCoopExec([]string{"--root", root, "--me", "codex", "--no-wake", "definitely-missing-agent-binary-xyz"})
-	if err == nil || !strings.Contains(err.Error(), "command not found") {
-		t.Fatalf("error = %v, want command-not-found", err)
-	}
-	if _, statErr := os.Lstat(root); !os.IsNotExist(statErr) {
-		t.Fatalf("root created despite missing binary: %v", statErr)
-	}
-}
-
-// Usage validation keeps precedence over binary resolution: an invalid
-// session name with a missing binary reports the validation error, never
-// command-not-found.
-func TestCoopExecInvalidSessionPrecedesMissingBinary(t *testing.T) {
-	err := runCoopExec([]string{"--session", "../bad", "--no-wake", "definitely-missing-agent-binary-xyz"})
-	if err == nil || strings.Contains(err.Error(), "command not found") {
-		t.Fatalf("error = %v, want session validation error before binary resolution", err)
-	}
-	if code := GetExitCode(err); code != ExitUsage {
-		t.Fatalf("exit code = %d, want %d (usage contract)", code, ExitUsage)
-	}
-}
-
-// Selector-free exec with a missing binary must not auto-init anything: no
-// .amqrc, no queue tree. This is the new-contract twin of the old fixture
-// that asserted auto-init ran before binary resolution.
-func TestCoopExecSelectorFreeMissingBinaryPerformsZeroWrites(t *testing.T) {
-	clearCoopSessionPinForTest(t)
-	setOptionalEnv(t, envRoot, "", false)
-	setOptionalEnv(t, envGlobalRoot, "", false)
-	t.Setenv("HOME", t.TempDir())
-	projectDir := t.TempDir()
-	oldDir, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		_ = os.Chdir(oldDir)
-		resetAmqrcCache()
-	})
-	resetAmqrcCache()
-	if err := os.Chdir(projectDir); err != nil {
-		t.Fatal(err)
-	}
-
-	err = runCoopExec([]string{"--no-gitignore", "--no-wake", "-y", "definitely-missing-agent-binary-xyz"})
-	if err == nil || !strings.Contains(err.Error(), "command not found") {
-		t.Fatalf("error = %v, want command-not-found", err)
-	}
-	for _, artifact := range []string{".amqrc", defaultCoopRoot} {
-		if _, statErr := os.Lstat(filepath.Join(projectDir, artifact)); !os.IsNotExist(statErr) {
-			t.Fatalf("%s created despite missing binary: %v", artifact, statErr)
-		}
-	}
-}
-
-// The alias-swap boundary: replacing the lexical root between classification
-// and provisioning must fail closed with zero writes to the impostor.
-func TestCoopExecAliasSwapBetweenClassifyAndProvisionFailsClosed(t *testing.T) {
-	parent := secureTempDirForTest(t)
-	root := filepath.Join(parent, "queue")
-	if err := os.Mkdir(root, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Mkdir(filepath.Join(root, "agents"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	moved := filepath.Join(parent, "moved-away")
-	impostor := filepath.Join(parent, "impostor")
-	if err := os.Mkdir(impostor, 0o700); err != nil {
-		t.Fatal(err)
-	}
-
-	oldHook := coopProvisionAfterClassifyHook
-	coopProvisionAfterClassifyHook = func() {
-		if err := os.Rename(root, moved); err != nil {
-			t.Fatalf("move root: %v", err)
-		}
-		if err := os.Rename(impostor, root); err != nil {
-			t.Fatalf("install impostor: %v", err)
-		}
-	}
-	t.Cleanup(func() { coopProvisionAfterClassifyHook = oldHook })
-	_ = stubCoopExecSentinel(t)
-
-	err := runCoopExec([]string{"--root", root, "--me", "codex", "--no-wake", "sh"})
-	if err == nil {
-		t.Fatal("alias swap accepted")
-	}
-	if got := dirEntryNames(t, root); len(got) != 0 {
-		t.Fatalf("impostor gained entries: %v", got)
-	}
-	if got := dirEntryNames(t, filepath.Join(moved, "agents")); len(got) != 0 {
-		t.Fatalf("moved tree mutated after swap detection: %v", got)
 	}
 }

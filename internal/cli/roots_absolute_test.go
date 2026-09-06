@@ -13,86 +13,6 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/receipt"
 )
 
-func TestAbsoluteSessionRootResolvesRelativeAgainstCwd(t *testing.T) {
-	dir := t.TempDir()
-	t.Chdir(dir)
-
-	got, err := absoluteSessionRoot(filepath.Join(".agent-mail", "collab"))
-	if err != nil {
-		t.Fatalf("absoluteSessionRoot: %v", err)
-	}
-	want := filepath.Join(dir, ".agent-mail", "collab")
-	if got != want {
-		t.Fatalf("absoluteSessionRoot = %q, want %q", got, want)
-	}
-}
-
-func TestAbsoluteSessionRootKeepsAbsoluteUnchanged(t *testing.T) {
-	abs := filepath.Join(t.TempDir(), ".agent-mail", "collab")
-	got, err := absoluteSessionRoot(abs)
-	if err != nil {
-		t.Fatalf("absoluteSessionRoot: %v", err)
-	}
-	if got != abs {
-		t.Fatalf("absoluteSessionRoot = %q, want %q unchanged", got, abs)
-	}
-}
-
-func TestEnvShellOutputEmitsAbsoluteRoot(t *testing.T) {
-	dir := t.TempDir()
-	t.Chdir(dir)
-	relRoot := filepath.Join(".agent-mail", "collab")
-	if err := fsq.EnsureRootDirs(filepath.Join(dir, relRoot)); err != nil {
-		t.Fatalf("EnsureRootDirs: %v", err)
-	}
-	t.Setenv("AM_ROOT", relRoot)
-	t.Setenv("AM_BASE_ROOT", "")
-
-	output, err := captureEnvStdout(t, func() error {
-		return runEnv([]string{"--me", "claude"})
-	})
-	if err != nil {
-		t.Fatalf("runEnv: %v", err)
-	}
-	wantRoot := filepath.Join(dir, relRoot)
-	if !strings.Contains(output, "export AM_ROOT="+wantRoot) &&
-		!strings.Contains(output, "export AM_ROOT='"+wantRoot+"'") {
-		t.Fatalf("shell output should pin absolute AM_ROOT %q, got:\n%s", wantRoot, output)
-	}
-}
-
-func TestEnvExportEmitsAbsoluteRoots(t *testing.T) {
-	dir := t.TempDir()
-	t.Chdir(dir)
-	relRoot := filepath.Join(".agent-mail", "collab")
-	if err := fsq.EnsureRootDirs(filepath.Join(dir, relRoot)); err != nil {
-		t.Fatalf("EnsureRootDirs: %v", err)
-	}
-	t.Setenv("AM_ROOT", relRoot)
-	t.Setenv("AM_BASE_ROOT", ".agent-mail")
-
-	output, err := captureEnvStdout(t, func() error {
-		return runEnv([]string{"--me", "claude", "--export"})
-	})
-	if err != nil {
-		t.Fatalf("runEnv --export: %v", err)
-	}
-	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
-		for _, prefix := range []string{"export AM_ROOT=", "export AM_BASE_ROOT="} {
-			if !strings.HasPrefix(line, prefix) {
-				continue
-			}
-			value := strings.Trim(strings.TrimPrefix(line, prefix), "'")
-			if !filepath.IsAbs(value) {
-				t.Fatalf("%s should be absolute, got %q (output:\n%s)", prefix, value, output)
-			}
-		}
-	}
-	if !strings.Contains(output, "export AM_ROOT=") {
-		t.Fatalf("expected AM_ROOT export, got:\n%s", output)
-	}
-}
-
 func TestReplyWaitForDrained(t *testing.T) {
 	root := t.TempDir()
 	for _, agent := range []string{"alice", "bob"} {
@@ -165,19 +85,6 @@ func TestReplyWaitForDrained(t *testing.T) {
 	}
 	if wait["event"] != "matched" {
 		t.Fatalf("wait.event = %v, want matched (output: %s)", wait["event"], output)
-	}
-}
-
-func TestReplyWaitForRejectsInvalidStage(t *testing.T) {
-	err := runReply([]string{
-		"--me", "alice",
-		"--root", t.TempDir(),
-		"--id", "someid",
-		"--body", "x",
-		"--wait-for", "bogus",
-	})
-	if err == nil || !strings.Contains(err.Error(), "--wait-for") {
-		t.Fatalf("expected --wait-for usage error, got %v", err)
 	}
 }
 

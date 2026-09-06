@@ -1148,17 +1148,6 @@ func findAmqrcForRoot(root string) (amqrcResult, error) {
 	return findAndLoadAmqrc()
 }
 
-// resolvePeer looks up a peer project name in the .amqrc peers map and returns
-// the absolute base root path for that peer. Returns an error if .amqrc is not
-// found, has no peers, or the peer name is not registered.
-func resolvePeer(root, project string) (string, error) {
-	result, err := findAmqrcForRoot(root)
-	if err != nil {
-		return "", fmt.Errorf("cannot resolve peer %q: %w", project, err)
-	}
-	return resolvePeerFromAmqrcResult(result, project)
-}
-
 func resolvePeerFromAmqrcResult(result amqrcResult, project string) (string, error) {
 	if len(result.Config.Peers) == 0 {
 		return "", fmt.Errorf("no peers configured in .amqrc (looking for %q)", project)

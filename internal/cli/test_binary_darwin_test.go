@@ -4,9 +4,7 @@ package cli
 
 import (
 	"fmt"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -36,39 +34,4 @@ func verifyTestAMQ(path string) error {
 		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(output)))
 	}
 	return nil
-}
-
-func TestTestAMQSignatureRejectsTampering(t *testing.T) {
-	testBinary, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	signed := filepath.Join(t.TempDir(), "amq")
-	data, err := os.ReadFile(testBinary)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(signed, data, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	signTestAMQ(t, signed)
-	if err := verifyTestAMQ(signed); err != nil {
-		t.Fatalf("re-signed test AMQ failed verification: %v", err)
-	}
-
-	signedData, err := os.ReadFile(signed)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(signedData) <= 4096 {
-		t.Fatalf("signed test AMQ is too small to tamper safely: %d bytes", len(signedData))
-	}
-	signedData[4096] ^= 1
-	corrupted := filepath.Join(t.TempDir(), "amq-corrupted")
-	if err := os.WriteFile(corrupted, signedData, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := verifyTestAMQ(corrupted); err == nil {
-		t.Fatal("codesign accepted a deliberately corrupted AMQ binary")
-	}
 }

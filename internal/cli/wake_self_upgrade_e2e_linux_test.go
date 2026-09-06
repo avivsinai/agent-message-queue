@@ -64,3 +64,26 @@ func TestLinuxWakeSelfUpgradeRealPTYStableSymlink(t *testing.T) {
 		t.Fatalf("Linux self-upgrade helper proof missing:\n%s", output)
 	}
 }
+
+func wakeABIShellQuoteArg(value string) string {
+	if value == "" {
+		return "''"
+	}
+	if strings.IndexFunc(value, func(r rune) bool {
+		switch {
+		case r >= 'a' && r <= 'z':
+			return false
+		case r >= 'A' && r <= 'Z':
+			return false
+		case r >= '0' && r <= '9':
+			return false
+		case strings.ContainsRune("@%_+=:,./-", r):
+			return false
+		default:
+			return true
+		}
+	}) == -1 {
+		return value
+	}
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
+}

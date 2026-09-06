@@ -870,19 +870,6 @@ func wakeLockTerminalGone(inspection wakeLockInspection) bool {
 	return wakeLockTerminalAttachment(inspection) == wakeTerminalGone
 }
 
-func requireWakeLockUsable(inspection wakeLockInspection, requiredMode string, requestedTarget *wakeTarget) error {
-	return requireWakeLockUsableWithTargetReader(
-		inspection,
-		requiredMode,
-		requestedTarget,
-		func() (wakeTarget, bool, error) {
-			return readWakeTargetFromStateForInspection(
-				inspection.Root, inspection.Agent, inspection,
-			)
-		},
-	)
-}
-
 func requireWakeLockUsableAt(
 	dirfd int,
 	agentDir *wakeAgentDir,

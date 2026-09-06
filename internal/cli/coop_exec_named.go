@@ -57,10 +57,6 @@ func agentArgsHasNameFlag(args []string) bool {
 	return launch.ArgsHaveNameFlag(args)
 }
 
-func agentArgsPreventAutoName(args []string) bool {
-	return agentArgsPreventAutoNameFor("", args)
-}
-
 func agentArgsPreventAutoNameFor(cmdName string, args []string) bool {
 	resumeSyntax := coopNamedResumeFlags
 	if harness, ok := coopNamedHarnessFor(cmdName); ok {
@@ -126,15 +122,6 @@ func coopNamedUnknownReminder(me, binary string) string {
 		me,
 		filepath.Base(binary),
 	)
-}
-
-func applyCoopNamedBeforeExec(
-	named bool,
-	cmdName string,
-	agentArgs []string,
-	me string,
-) ([]string, error) {
-	return applyCoopNamedBeforeExecAt(named, cmdName, agentArgs, me, time.Now())
 }
 
 func applyCoopNamedBeforeExecAt(

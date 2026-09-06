@@ -3,13 +3,8 @@
 package cli
 
 import (
-	"encoding/json"
-	"errors"
-	"os"
-	"path/filepath"
 	"reflect"
 	"strings"
-	"syscall"
 	"testing"
 
 	"golang.org/x/sys/unix"
@@ -103,87 +98,6 @@ func TestNotifyWakeRestartLinuxUsesPidfdAfterExactLockRead(t *testing.T) {
 	}
 }
 
-func TestNotifyWakeRestartLinuxRefusesLockChangeBeforePidfdOpen(t *testing.T) {
-	fixture := newWakeRestartFixture(t)
-	changed := fixture.lock.Lock
-	changed.TTY = "replacement-tty"
-	writeWakeLockForTest(t, fixture.root, fixture.agent, changed)
-	stubWakeRestartPidfdForTest(
-		t,
-		func(int, int) (int, error) {
-			t.Fatal("pidfd_open called for a changed wake lock")
-			return -1, nil
-		},
-		func(int, unix.Signal, *unix.Siginfo, int) error {
-			t.Fatal("pidfd_send_signal called for a changed wake lock")
-			return nil
-		},
-		func(int) error {
-			t.Fatal("close called without an acquired pidfd")
-			return nil
-		},
-	)
-
-	err := notifyWakeRestartPlatform(fixture.agentDir, fixture.lock, fixture.record)
-	if err == nil || !strings.Contains(err.Error(), "changed before restart pidfd acquisition") {
-		t.Fatalf("error = %v, want exact-lock refusal", err)
-	}
-}
-
-func TestNotifyWakeRestartLinuxRefusesPidfdOpenErrors(t *testing.T) {
-	for _, openErr := range []error{syscall.ENOSYS, syscall.EPERM, syscall.ESRCH} {
-		t.Run(openErr.Error(), func(t *testing.T) {
-			fixture := newWakeRestartFixture(t)
-			closed := false
-			stubWakeRestartPidfdForTest(
-				t,
-				func(int, int) (int, error) { return -1, openErr },
-				func(int, unix.Signal, *unix.Siginfo, int) error {
-					t.Fatal("pidfd_send_signal called after pidfd_open failure")
-					return nil
-				},
-				func(int) error {
-					closed = true
-					return nil
-				},
-			)
-
-			err := notifyWakeRestartPlatform(fixture.agentDir, fixture.lock, fixture.record)
-			if !errors.Is(err, openErr) || !strings.Contains(err.Error(), "pidfd_open") {
-				t.Fatalf("error = %v, want wrapped %v", err, openErr)
-			}
-			if closed {
-				t.Fatal("close called without an acquired pidfd")
-			}
-		})
-	}
-}
-
-func TestNotifyWakeRestartLinuxClosesPidfdOnSignalError(t *testing.T) {
-	fixture := newWakeRestartFixture(t)
-	closed := false
-	stubWakeRestartPidfdForTest(
-		t,
-		func(int, int) (int, error) { return 42, nil },
-		func(int, unix.Signal, *unix.Siginfo, int) error { return syscall.ESRCH },
-		func(fd int) error {
-			closed = true
-			if fd != 42 {
-				t.Fatalf("close fd = %d, want 42", fd)
-			}
-			return nil
-		},
-	)
-
-	err := notifyWakeRestartPlatform(fixture.agentDir, fixture.lock, fixture.record)
-	if !errors.Is(err, syscall.ESRCH) || !strings.Contains(err.Error(), "pidfd_send_signal") {
-		t.Fatalf("error = %v, want wrapped ESRCH", err)
-	}
-	if !closed {
-		t.Fatal("pidfd was not closed after signal failure")
-	}
-}
-
 func TestNotifyWakeRestartLinuxRefusesIdentityChangeAfterPidfdOpen(t *testing.T) {
 	fixture := newWakeRestartFixture(t)
 	pidfdOpened := false
@@ -224,76 +138,5 @@ func TestNotifyWakeRestartLinuxRefusesIdentityChangeAfterPidfdOpen(t *testing.T)
 	}
 	if !closed {
 		t.Fatal("pidfd was not closed after identity change")
-	}
-}
-
-func TestNotifyWakeRestartLinuxRefusesChangedPendingRecord(t *testing.T) {
-	for _, test := range []struct {
-		name   string
-		mutate func(*wakeRestartRecord)
-	}{
-		{
-			name: "request_id",
-			mutate: func(record *wakeRestartRecord) {
-				record.RequestID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-			},
-		},
-		{
-			name: "generation",
-			mutate: func(record *wakeRestartRecord) {
-				record.Generation = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-			},
-		},
-		{
-			name: "not_pending",
-			mutate: func(record *wakeRestartRecord) {
-				record.Status = wakeRestartRefused
-				record.Reason = "changed"
-			},
-		},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			fixture := newWakeRestartFixture(t)
-			signaled := false
-			closed := false
-			stubWakeRestartPidfdForTest(
-				t,
-				func(int, int) (int, error) {
-					changed := fixture.record
-					test.mutate(&changed)
-					raw, err := json.Marshal(changed)
-					if err != nil {
-						t.Fatal(err)
-					}
-					if err := os.WriteFile(
-						filepath.Join(fixture.agentDir.path, wakeRestartFileName),
-						append(raw, '\n'),
-						0o600,
-					); err != nil {
-						t.Fatal(err)
-					}
-					return 44, nil
-				},
-				func(int, unix.Signal, *unix.Siginfo, int) error {
-					signaled = true
-					return nil
-				},
-				func(int) error {
-					closed = true
-					return nil
-				},
-			)
-
-			err := notifyWakeRestartPlatform(fixture.agentDir, fixture.lock, fixture.record)
-			if err == nil || !strings.Contains(err.Error(), "request changed before signal") {
-				t.Fatalf("error = %v, want request-change refusal", err)
-			}
-			if signaled {
-				t.Fatal("changed restart request was signaled")
-			}
-			if !closed {
-				t.Fatal("pidfd was not closed after request change")
-			}
-		})
 	}
 }

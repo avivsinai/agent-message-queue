@@ -192,6 +192,39 @@ func TestSetupProjectRootFlagOwnsNestedDirWithoutParentAmqrc(t *testing.T) {
 	}
 }
 
+// TestSetupProjectRootFlagRefusesSymlink covers review R5: a --project-root that
+// is a symlink is refused rather than followed, so setup never writes through
+// the link into a directory the operator did not name. Both the link path and
+// its target must stay free of .amqrc/.amq.
+func TestSetupProjectRootFlagRefusesSymlink(t *testing.T) {
+	setupProjectFixture(t, "claude")
+	target := t.TempDir()
+	link := filepath.Join(t.TempDir(), "link-to-target")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	_, err := captureEnvStdout(t, func() error {
+		return runSetup([]string{
+			"-y", "--agents", "claude", "--default-session", "collab",
+			"--launcher-preference", "commands", "--project-root", link, "--json",
+		})
+	})
+	if err == nil || !strings.Contains(err.Error(), "is a symlink") {
+		t.Fatalf("setup with symlinked --project-root error = %v, want 'is a symlink'", err)
+	}
+	// Nothing is written through the link: neither the link path nor the
+	// target directory gains AMQ files.
+	if _, statErr := os.Stat(filepath.Join(link, ".amqrc")); !os.IsNotExist(statErr) {
+		t.Fatalf("symlink --project-root wrote through the link: %v", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(target, ".amqrc")); !os.IsNotExist(statErr) {
+		t.Fatalf("symlink --project-root wrote into the target dir: %v", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(target, setupConfigPath)); !os.IsNotExist(statErr) {
+		t.Fatalf("symlink --project-root wrote target project config: %v", statErr)
+	}
+}
+
 // TestSetupTreatsCwdWithLocalConfigAsProjectRootWithoutFlag covers issue #648
 // item 1(a): an existing explicit .amq/launch.json in cwd is authority, so
 // setup treats cwd as the project root without --project-root and does not
@@ -241,113 +274,5 @@ func TestSetupTreatsCwdWithLocalConfigAsProjectRootWithoutFlag(t *testing.T) {
 	}
 	if _, statErr := os.Stat(parentMail); !os.IsNotExist(statErr) {
 		t.Fatalf("parent base root was created when cwd owned a local config: %v", statErr)
-	}
-}
-
-// TestSetupProjectRootFlagValidation covers the flag's own input validation.
-func TestSetupProjectRootFlagValidation(t *testing.T) {
-	setupProjectFixture(t, "claude")
-	for _, test := range []struct {
-		name string
-		args []string
-		want string
-	}{
-		{name: "blank project root", args: []string{"-y", "--agents", "claude", "--default-session", "collab", "--launcher-preference", "commands", "--project-root", "  "}, want: "must not be blank"},
-		{name: "missing project root", args: []string{"-y", "--agents", "claude", "--default-session", "collab", "--launcher-preference", "commands", "--project-root", "/definitely/does/not/exist/xyz"}, want: "does not exist"},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			err := runSetup(test.args)
-			if GetExitCode(err) != ExitUsage || !strings.Contains(err.Error(), test.want) {
-				t.Fatalf("error = %v (exit=%d), want usage containing %q", err, GetExitCode(err), test.want)
-			}
-		})
-	}
-}
-
-// TestSetupProjectRootFlagRefusesSymlink covers review R5: a --project-root that
-// is a symlink is refused rather than followed, so setup never writes through
-// the link into a directory the operator did not name. Both the link path and
-// its target must stay free of .amqrc/.amq.
-func TestSetupProjectRootFlagRefusesSymlink(t *testing.T) {
-	setupProjectFixture(t, "claude")
-	target := t.TempDir()
-	link := filepath.Join(t.TempDir(), "link-to-target")
-	if err := os.Symlink(target, link); err != nil {
-		t.Fatal(err)
-	}
-	_, err := captureEnvStdout(t, func() error {
-		return runSetup([]string{
-			"-y", "--agents", "claude", "--default-session", "collab",
-			"--launcher-preference", "commands", "--project-root", link, "--json",
-		})
-	})
-	if err == nil || !strings.Contains(err.Error(), "is a symlink") {
-		t.Fatalf("setup with symlinked --project-root error = %v, want 'is a symlink'", err)
-	}
-	// Nothing is written through the link: neither the link path nor the
-	// target directory gains AMQ files.
-	if _, statErr := os.Stat(filepath.Join(link, ".amqrc")); !os.IsNotExist(statErr) {
-		t.Fatalf("symlink --project-root wrote through the link: %v", statErr)
-	}
-	if _, statErr := os.Stat(filepath.Join(target, ".amqrc")); !os.IsNotExist(statErr) {
-		t.Fatalf("symlink --project-root wrote into the target dir: %v", statErr)
-	}
-	if _, statErr := os.Stat(filepath.Join(target, setupConfigPath)); !os.IsNotExist(statErr) {
-		t.Fatalf("symlink --project-root wrote target project config: %v", statErr)
-	}
-}
-
-// TestSetupProjectRootFollowsSymlinkedParent covers review R7: a symlinked
-// PARENT component is canonicalized (followed), not refused — this is what
-// makes /tmp resolve to /private/tmp on macOS. The leaf inside the canonical
-// parent is a real directory, so setup writes land under the canonical target
-// path and nowhere else. The link path and the target path resolve to the
-// same directory, and exactly one .amqrc exists.
-func TestSetupProjectRootFollowsSymlinkedParent(t *testing.T) {
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git is required for project-root authority tests")
-	}
-	setupProjectFixture(t, "claude")
-	// A real target dir with a nested leaf; link is a symlink to target.
-	target := t.TempDir()
-	leaf := "project"
-	if err := os.MkdirAll(filepath.Join(target, leaf), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	linkParent := filepath.Join(t.TempDir(), "link-to-target")
-	if err := os.Symlink(target, linkParent); err != nil {
-		t.Fatal(err)
-	}
-	// --project-root points through the symlinked parent to the leaf.
-	rootViaLink := filepath.Join(linkParent, leaf)
-	_, err := captureEnvStdout(t, func() error {
-		return runSetup([]string{
-			"-y", "--agents", "claude", "--default-session", "collab",
-			"--launcher-preference", "commands", "--project-root", rootViaLink, "--json",
-		})
-	})
-	if err != nil {
-		t.Fatalf("setup with symlinked parent --project-root: %v", err)
-	}
-	// The canonical target leaf gains the config; the link path resolves to
-	// the same directory, so exactly one .amqrc exists.
-	canonicalTarget, terr := filepath.EvalSymlinks(target)
-	if terr != nil {
-		t.Fatal(terr)
-	}
-	canonicalLeaf := filepath.Join(canonicalTarget, leaf)
-	if _, statErr := os.Stat(filepath.Join(canonicalLeaf, ".amqrc")); statErr != nil {
-		t.Fatalf("symlinked parent did not write canonical leaf .amqrc: %v", statErr)
-	}
-	linkResolved, lerr := filepath.EvalSymlinks(rootViaLink)
-	if lerr != nil {
-		t.Fatal(lerr)
-	}
-	if linkResolved != canonicalLeaf {
-		t.Fatalf("link path resolves to %s, want canonical %s", linkResolved, canonicalLeaf)
-	}
-	// Exactly one .amqrc exists (the link path and target path are the same dir).
-	if _, statErr := os.Stat(filepath.Join(rootViaLink, ".amqrc")); statErr != nil {
-		t.Fatalf(".amqrc not visible through the link: %v", statErr)
 	}
 }

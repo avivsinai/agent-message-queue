@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"os"
+	"runtime"
 )
 
 func decorateOpsWakeLockWithWakeCheck(
@@ -54,4 +55,50 @@ func runWakeCheckUnsupported(args []string) error {
 		return err
 	}
 	return writeJSON(os.Stdout, renderWakeCheckV2(unsupportedWakeCheckDecision(root, me)))
+}
+
+func unsupportedWakeCheckDecision(root, agent string) wakeCheckDecision {
+	reason := wakeReasonPlatformUnsupported
+	detail := "amq wake is not supported on this platform"
+	return wakeCheckDecision{
+		Agent: agent,
+		Root:  canonicalWakeRoot(root),
+		Platform: wakeCheckPlatformDecision{
+			OS:            runtime.GOOS,
+			WakeSupported: false,
+			ReasonCode:    &reason,
+		},
+		Start: wakeCheckStartDecision{
+			Available:  false,
+			Mode:       wakeInjectModeNone,
+			ReasonCode: &reason,
+			Detail:     &detail,
+		},
+		Wake: wakeCheckWakeDecision{
+			Status: string(wakeLockMissing),
+		},
+		Image: wakeCheckImageDecision{
+			Current: wakeCheckImageEvidenceDecision{
+				Path:    wakeCheckOptionalString(wakeCheckActionProgram()),
+				Version: wakeCheckOptionalString(cliVersion),
+			},
+			Status: wakeImageUnknown,
+		},
+		Repair: wakeCheckRepairDecision{
+			ReasonCode:   &reason,
+			Detail:       &detail,
+			legacyReason: detail,
+		},
+		Reload: wakeCheckReloadDecision{
+			Status:     wakeReloadUnavailable,
+			ReasonCode: wakeReloadReasonPlatformUnsupported,
+		},
+		RestartCapability: wakeRestartUnavailable,
+		Action: wakeCheckActionDecision{
+			Kind:       wakeActionUnsupported,
+			Actor:      wakeActionActorNone,
+			ReasonCode: reason,
+			Message:    detail,
+		},
+	}
 }

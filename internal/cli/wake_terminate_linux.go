@@ -6,11 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"syscall"
 	"time"
 
-	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"golang.org/x/sys/unix"
 )
 
@@ -19,16 +17,6 @@ var (
 
 	errWakeTerminationAuthorizationLost = errors.New("wake termination authorization lost")
 )
-
-// readWakeLockMetadata reads one exact lock generation without consulting the
-// process table. Linux orphan retirement uses this to acquire a pidfd before
-// the first PID-based identity inspection of the locked generation.
-func readWakeLockMetadata(root, me string) wakeLockInspection {
-	lockPath := filepath.Join(fsq.AgentBase(root, me), wakeLockFileName)
-	return readWakeLockMetadataWithReader(root, me, lockPath, func() ([]byte, os.FileInfo, error) {
-		return readWakeLockFileWithInfo(lockPath)
-	})
-}
 
 func terminateAndRemoveOrphanedWakeLock(inspection wakeLockInspection) (bool, error) {
 	return terminateAndRemoveOrphanedWakeLockWithRawConsent(inspection, false)
@@ -525,4 +513,61 @@ func pollLinuxPidfd(pidfd int, timeout time.Duration) (bool, error) {
 			return false, fmt.Errorf("pidfd poll reported an error")
 		}
 	}
+}
+
+func resolveMissingWakeLockAfterTerminationInDir(
+	agentDir *wakeAgentDir,
+	inspection wakeLockInspection,
+	terminationErr error,
+) (resolved bool, retErr error) {
+	defer func() { retErr = withWakeDiagnostic(retErr, inspection.Root, inspection.Agent) }()
+	var current wakeLockInspection
+	if err := agentDir.withFD(func(dirfd int) error {
+		if err := validateWakeStateAgentDirAt(dirfd, agentDir); err != nil {
+			return err
+		}
+		current = inspectWakeLockAt(dirfd, agentDir, inspection.Root, inspection.Agent)
+		return validateWakeStateAgentDirAt(dirfd, agentDir)
+	}); err != nil {
+		relation, relationErr := retainedWakeAgentDirRelation(agentDir)
+		if relationErr != nil {
+			return false, errors.Join(err, relationErr)
+		}
+		switch relation {
+		case wakeAgentDirDetached:
+			return false, nil
+		case wakeAgentDirCanonical:
+			return false, err
+		case wakeAgentDirInconclusive:
+			return false, errors.Join(err, fmt.Errorf("wake agent directory relation is inconclusive after termination"))
+		default:
+			return false, errors.Join(err, fmt.Errorf("unknown wake agent directory relation %d", relation))
+		}
+	}
+	return resolveMissingWakeLockAfterTerminationFromInspection(inspection, current, terminationErr)
+}
+
+func resolveMissingWakeLockAfterTerminationFromInspection(
+	inspection wakeLockInspection,
+	current wakeLockInspection,
+	terminationErr error,
+) (resolved bool, retErr error) {
+	defer func() { retErr = withWakeDiagnostic(retErr, inspection.Root, inspection.Agent) }()
+	if current.Exists && !sameWakeLockGeneration(inspection, current) {
+		return false, nil
+	}
+	if current.Exists {
+		return false, terminationErr
+	}
+	// This PID-based inspection only decides whether to print the warning. Both
+	// outcomes proceed identically, so PID reuse cannot authorize an action.
+	if inspectWakeIdentity(inspection) != wakeIdentityGoneOrDifferent {
+		_ = writeStderr(
+			"warning: superseded wake helper for %s (pid %d on %s) after its lock disappeared during termination without a confirmed exit; fresh wake is starting, but duplicate notifications may continue until the old helper exits; stop that helper if duplicates persist\n",
+			inspection.Agent,
+			inspection.PID,
+			coopWakeTTYDisplay(inspection),
+		)
+	}
+	return true, nil
 }

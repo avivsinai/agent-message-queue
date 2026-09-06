@@ -177,26 +177,6 @@ func validateWakePreparedSelection(
 	return observation == wakeStatePreparedCurrent, nil
 }
 
-func writeWakeReadyFileForPreparedWake(root, me, path string, expected wakeLockInspection, deadline time.Time) error {
-	agentDir, err := openWakeAgentDir(root, me)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = agentDir.Close() }()
-	publication, err := writeWakeReadyFileForPreparedWakeInDir(
-		agentDir,
-		root,
-		me,
-		path,
-		expected,
-		deadline,
-	)
-	if publication != nil {
-		_ = publication.Close()
-	}
-	return err
-}
-
 func writeWakeReadyFileForPreparedWakeInDir(
 	agentDir *wakeAgentDir,
 	root, me, path string,

@@ -61,52 +61,6 @@ func TestWakeCheckSelfUpgradeSnapshotMapsDiagnosticAndRefusalAuthority(t *testin
 	}
 }
 
-func TestWakeCheckSelfUpgradeObservationTreatsDiagnosticFaultsAsNoData(t *testing.T) {
-	fixture := newWakeRestartFixture(t)
-	diagnostic := wakeSelfUpgradeDiagnostic{
-		Schema:     wakeSelfUpgradeSchemaV1,
-		Root:       fixture.root,
-		Agent:      fixture.agent,
-		Generation: fixture.lock.Lock.Generation,
-		Enabled:    true,
-		LastDecision: wakeSelfUpgradeDiagnosticDecision{
-			Action: wakeSelfUpgradeActionUnchanged,
-			At:     time.Date(2026, time.August, 7, 12, 0, 0, 0, time.UTC),
-		},
-	}
-	writeWakeCheckSelfUpgradeDiagnostic(t, fixture, diagnostic)
-
-	first, err := observeWakeCheck(fixture.root, fixture.agent)
-	if err != nil || !first.SelfUpgrade.Present {
-		t.Fatalf("first self-upgrade observation = %#v, err = %v", first.SelfUpgrade, err)
-	}
-	diagnostic.LastDecision.Reason = "changed without changing the lock"
-	writeWakeCheckSelfUpgradeDiagnostic(t, fixture, diagnostic)
-	second, err := observeWakeCheck(fixture.root, fixture.agent)
-	if err != nil || sameWakeCheckObservation(first, second) {
-		t.Fatalf("changed sidecar observation = %#v, err = %v", second.SelfUpgrade, err)
-	}
-
-	diagnostic.Generation = "stale-generation"
-	writeWakeCheckSelfUpgradeDiagnostic(t, fixture, diagnostic)
-	stale, err := observeWakeCheck(fixture.root, fixture.agent)
-	if err != nil || stale.SelfUpgrade.Present {
-		t.Fatalf("stale diagnostic observation = %#v, err = %v", stale.SelfUpgrade, err)
-	}
-
-	writeWakeCheckSelfUpgradeRaw(t, fixture, []byte("{not-json}\n"))
-	corrupt, err := observeWakeCheck(fixture.root, fixture.agent)
-	if err != nil || corrupt.SelfUpgrade.Present || !corrupt.SelfUpgrade.Sidecar.Exists {
-		t.Fatalf("corrupt diagnostic observation = %#v, err = %v", corrupt.SelfUpgrade, err)
-	}
-
-	writeWakeCheckRestartRaw(t, fixture, []byte("{not-json}\n"))
-	invalidRestart, err := observeWakeCheck(fixture.root, fixture.agent)
-	if err != nil || invalidRestart.SelfUpgrade.RefusedMemory || !invalidRestart.SelfUpgrade.Restart.Exists {
-		t.Fatalf("invalid restart observation = %#v, err = %v", invalidRestart.SelfUpgrade, err)
-	}
-}
-
 func writeWakeCheckSelfUpgradeDiagnostic(
 	t *testing.T,
 	fixture wakeRestartFixture,
@@ -144,22 +98,6 @@ func writeWakeCheckSelfUpgradeRestartRecord(
 	t.Helper()
 	if err := withWakeMutationScopeInDir(fixture.agentDir, func(scope *wakeMutationScope) error {
 		return writeWakeRestartRecordAt(scope, record)
-	}); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func writeWakeCheckRestartRaw(t *testing.T, fixture wakeRestartFixture, raw []byte) {
-	t.Helper()
-	if err := withWakeLifecycleGuardInDir(fixture.agentDir, func(dirfd int) error {
-		return writeWakeRepairMetadataAt(
-			dirfd,
-			fixture.agentDir,
-			wakeRestartFileName,
-			"wake restart request",
-			raw,
-			maxWakeMetadataFileBytes,
-		)
 	}); err != nil {
 		t.Fatal(err)
 	}

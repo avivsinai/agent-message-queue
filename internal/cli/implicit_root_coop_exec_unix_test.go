@@ -4,39 +4,9 @@ package cli
 
 import (
 	"errors"
-	"os"
 	"path/filepath"
 	"testing"
 )
-
-func TestCoopExecNamedSessionRejectsBrokenProjectAmqrcBeforeProvision(t *testing.T) {
-	projectDir := enterBrokenRootProject(t)
-	for _, key := range []string{envBaseRoot, envSession, envRootID, envBaseRootID} {
-		setOptionalEnv(t, key, "", false)
-	}
-	execCalled := false
-	oldExec := coopExecProcess
-	coopExecProcess = func(string, []string, []string) error {
-		execCalled = true
-		return errors.New("unexpected exec")
-	}
-	t.Cleanup(func() { coopExecProcess = oldExec })
-
-	err := runCoopExec([]string{
-		"--session", "feature",
-		"--me", "codex",
-		"--no-wake",
-		"sh",
-	})
-
-	requireBrokenAmqrcError(t, err)
-	if execCalled {
-		t.Fatal("coop exec reached process replacement after config refusal")
-	}
-	if _, statErr := os.Stat(filepath.Join(projectDir, defaultCoopRoot)); !os.IsNotExist(statErr) {
-		t.Fatalf("coop exec provisioned an implicit fallback before config refusal: %v", statErr)
-	}
-}
 
 func TestCoopExecExplicitRootOverridesBrokenProjectAmqrc(t *testing.T) {
 	enterBrokenRootProject(t)

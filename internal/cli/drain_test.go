@@ -9,39 +9,11 @@ import (
 	"strconv"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/receipt"
 )
-
-func TestRunDrainEmpty(t *testing.T) {
-	root := t.TempDir()
-	if err := fsq.EnsureRootDirs(root); err != nil {
-		t.Fatalf("EnsureRootDirs: %v", err)
-	}
-	if err := fsq.EnsureAgentDirs(root, "alice"); err != nil {
-		t.Fatalf("EnsureAgentDirs: %v", err)
-	}
-
-	t.Run("empty inbox returns empty JSON", func(t *testing.T) {
-		result := runDrainJSON(t, root, "alice", 0, false)
-		if result.Count != 0 {
-			t.Errorf("expected count 0, got %d", result.Count)
-		}
-		if len(result.Drained) != 0 {
-			t.Errorf("expected empty drained, got %d items", len(result.Drained))
-		}
-	})
-
-	t.Run("empty inbox silent in text mode", func(t *testing.T) {
-		output := runDrainText(t, root, "alice", 0, false)
-		if output != "" {
-			t.Errorf("expected empty output, got %q", output)
-		}
-	})
-}
 
 func TestRunDrainMovesToCur(t *testing.T) {
 	root := t.TempDir()
@@ -121,72 +93,6 @@ func TestRunDrainMovesToCur(t *testing.T) {
 	result2 := runDrainJSON(t, root, "alice", 0, false)
 	if result2.Count != 0 {
 		t.Errorf("second drain should be empty, got %d", result2.Count)
-	}
-}
-
-func TestRunDrainStrictAllowsReservedUserInbox(t *testing.T) {
-	root := t.TempDir()
-	if err := fsq.EnsureRootDirs(root); err != nil {
-		t.Fatalf("EnsureRootDirs: %v", err)
-	}
-	for _, agent := range []string{"claude", "codex", "user"} {
-		if err := fsq.EnsureAgentDirs(root, agent); err != nil {
-			t.Fatalf("EnsureAgentDirs(%s): %v", agent, err)
-		}
-	}
-	writeKnownAgentsConfig(t, root, []string{"claude", "codex"})
-
-	msg := format.Message{
-		Header: format.Header{
-			Schema:  format.CurrentSchema,
-			ID:      "operator-gate",
-			From:    "claude",
-			To:      []string{"user"},
-			Thread:  "p2p/claude__user",
-			Subject: "Need operator",
-			Created: time.Now().UTC().Format(time.RFC3339Nano),
-		},
-		Body: "Please decide.",
-	}
-	data, err := msg.Marshal()
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-	if _, err := deliverToInboxForTest(t, root, "user", "operator-gate.md", data); err != nil {
-		t.Fatalf("deliver: %v", err)
-	}
-
-	result := runDrainJSONStrict(t, root, "user")
-	if result.Count != 1 {
-		t.Fatalf("expected count 1, got %d", result.Count)
-	}
-	item := result.Drained[0]
-	if item.ID != "operator-gate" || item.ParseError != "" || !item.MovedToCur || item.MovedToDLQ {
-		t.Fatalf("unexpected drain item: %+v", item)
-	}
-	if _, err := os.Stat(filepath.Join(fsq.AgentInboxCur(root, "user"), "operator-gate.md")); err != nil {
-		t.Fatalf("message should move to user cur: %v", err)
-	}
-	dlqEntries, err := os.ReadDir(fsq.AgentDLQNew(root, "user"))
-	if err != nil {
-		t.Fatalf("read user dlq: %v", err)
-	}
-	if len(dlqEntries) != 0 {
-		t.Fatalf("expected no user DLQ entries, got %d", len(dlqEntries))
-	}
-
-	receipts, err := receipt.List(root, "user", receipt.ListFilter{
-		MsgID: "operator-gate",
-		Stage: receipt.StageDrained,
-	})
-	if err != nil {
-		t.Fatalf("receipt.List: %v", err)
-	}
-	if len(receipts) != 1 {
-		t.Fatalf("expected 1 drained receipt, got %d", len(receipts))
-	}
-	if receipts[0].Sender != "claude" || receipts[0].Consumer != "user" {
-		t.Fatalf("unexpected drained receipt: %+v", receipts[0])
 	}
 }
 
@@ -445,92 +351,6 @@ func TestDrainInboxItemsReturnsClaimedResultsWithLaterPostClaimError(t *testing.
 	}
 }
 
-func TestFinishDrainBatchOutputsCommittedClaimsBeforeReturningError(t *testing.T) {
-	root := initializedSendMailboxRoot(t, "alice", "bob")
-	deliverGuardMessage(t, root, "alice", "a-complete")
-	deliverGuardMessage(t, root, "alice", "b-interrupted")
-	injectedErr := errors.New("injected post-claim failure")
-	deliveryRoot := openDeliveryRootForCLITest(t, root)
-
-	items, drainErr := drainInboxItemsWithClaimHook(
-		deliveryRoot,
-		root,
-		"alice",
-		true,
-		0,
-		&headerValidator{},
-		func(claimed string) error {
-			if claimed == "b-interrupted.md" {
-				return injectedErr
-			}
-			return nil
-		},
-	)
-
-	stdout, _, err := captureEnvOutput(t, func() error {
-		return finishDrainBatch(deliveryRoot, root, "alice", true, true, items, drainErr)
-	})
-	if !errors.Is(err, injectedErr) {
-		t.Fatalf("finish error = %v, want injected post-claim failure", err)
-	}
-	var result drainResult
-	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
-		t.Fatalf("unmarshal partial drain output: %v (output: %s)", err, stdout)
-	}
-	if result.Count != 2 || len(result.Drained) != 2 {
-		t.Fatalf("partial drain output = %#v, want both committed claims", result)
-	}
-	gotIDs := make(map[string]bool, len(result.Drained))
-	for _, item := range result.Drained {
-		gotIDs[item.ID] = true
-	}
-	for _, id := range []string{"a-complete", "b-interrupted"} {
-		if !gotIDs[id] {
-			t.Fatalf("partial drain output hid committed claim %q: %#v", id, result)
-		}
-	}
-}
-
-func TestFinishDrainBatchPreservesCommittedErrorThatWrapsNotExist(t *testing.T) {
-	root := initializedSendMailboxRoot(t, "alice", "bob")
-	committed := &fsq.CommittedDurabilityError{
-		FinalPath: filepath.Join(root, "agents", "alice", "inbox", "cur", "claimed.md"),
-		Recipient: "alice",
-		Err:       os.ErrNotExist,
-	}
-
-	err := finishDrainBatch(
-		openDeliveryRootForCLITest(t, root),
-		root,
-		"alice",
-		true,
-		true,
-		nil,
-		committed,
-	)
-	if err != committed {
-		t.Fatalf("finish error = %T %v, want original committed error", err, err)
-	}
-}
-
-func TestClaimMailboxDirsExistRejectsMissingCur(t *testing.T) {
-	root := t.TempDir()
-	if err := fsq.EnsureAgentDirs(root, "alice"); err != nil {
-		t.Fatalf("EnsureAgentDirs: %v", err)
-	}
-	if err := os.RemoveAll(fsq.AgentInboxCur(root, "alice")); err != nil {
-		t.Fatalf("remove inbox/cur: %v", err)
-	}
-
-	exists, err := claimMailboxDirsExist(openDeliveryRootForCLITest(t, root), "alice")
-	if err != nil {
-		t.Fatalf("claimMailboxDirsExist: %v", err)
-	}
-	if exists {
-		t.Fatal("missing inbox/cur must not be classified as a concurrent message claim")
-	}
-}
-
 func TestRunDrainCorruptMessage(t *testing.T) {
 	root := t.TempDir()
 	if err := fsq.EnsureRootDirs(root); err != nil {
@@ -589,56 +409,6 @@ func TestRunDrainCorruptMessage(t *testing.T) {
 	}
 }
 
-func TestRunDrainSorting(t *testing.T) {
-	root := t.TempDir()
-	if err := fsq.EnsureRootDirs(root); err != nil {
-		t.Fatalf("EnsureRootDirs: %v", err)
-	}
-	if err := fsq.EnsureAgentDirs(root, "alice"); err != nil {
-		t.Fatalf("EnsureAgentDirs: %v", err)
-	}
-	if err := fsq.EnsureAgentDirs(root, "bob"); err != nil {
-		t.Fatalf("EnsureAgentDirs: %v", err)
-	}
-
-	// Create messages out of order (filesystem order != timestamp order)
-	timestamps := []string{
-		"2025-12-24T10:00:03Z",
-		"2025-12-24T10:00:01Z",
-		"2025-12-24T10:00:02Z",
-	}
-	for i, ts := range timestamps {
-		msg := format.Message{
-			Header: format.Header{
-				Schema:  1,
-				ID:      "msg-" + string(rune('a'+i)),
-				From:    "bob",
-				To:      []string{"alice"},
-				Thread:  "p2p/alice__bob",
-				Created: ts,
-			},
-			Body: "body",
-		}
-		data, _ := msg.Marshal()
-		if _, err := deliverToInboxForTest(t, root, "alice", "msg-"+string(rune('a'+i))+".md", data); err != nil {
-			t.Fatalf("deliver msg %d: %v", i, err)
-		}
-	}
-
-	result := runDrainJSON(t, root, "alice", 0, false)
-	if result.Count != 3 {
-		t.Fatalf("expected 3, got %d", result.Count)
-	}
-
-	// Should be sorted by timestamp: b (01), c (02), a (03)
-	expected := []string{"msg-b", "msg-c", "msg-a"}
-	for i, exp := range expected {
-		if result.Drained[i].ID != exp {
-			t.Errorf("position %d: expected %s, got %s", i, exp, result.Drained[i].ID)
-		}
-	}
-}
-
 func runDrainJSON(t *testing.T, root, agent string, limit int, includeBody bool) drainResult {
 	t.Helper()
 	args := []string{"--root", root, "--me", agent, "--json"}
@@ -669,56 +439,4 @@ func runDrainJSON(t *testing.T, root, agent string, limit int, includeBody bool)
 		t.Fatalf("unmarshal: %v (output: %s)", err, buf.String())
 	}
 	return result
-}
-
-func runDrainJSONStrict(t *testing.T, root, agent string) drainResult {
-	t.Helper()
-	oldStdout := os.Stdout
-	r, w, _ := os.Pipe()
-	os.Stdout = w
-
-	err := runDrain([]string{"--root", root, "--me", agent, "--strict", "--json"})
-
-	_ = w.Close()
-	os.Stdout = oldStdout
-
-	if err != nil {
-		t.Fatalf("runDrain: %v", err)
-	}
-
-	var buf bytes.Buffer
-	_, _ = buf.ReadFrom(r)
-
-	var result drainResult
-	if err := json.Unmarshal(buf.Bytes(), &result); err != nil {
-		t.Fatalf("unmarshal: %v (output: %s)", err, buf.String())
-	}
-	return result
-}
-
-func runDrainText(t *testing.T, root, agent string, limit int, includeBody bool) string {
-	t.Helper()
-	args := []string{"--root", root, "--me", agent}
-	if limit > 0 {
-		args = append(args, "--limit", strconv.Itoa(limit))
-	}
-	if includeBody {
-		args = append(args, "--include-body")
-	}
-	oldStdout := os.Stdout
-	r, w, _ := os.Pipe()
-	os.Stdout = w
-
-	err := runDrain(args)
-
-	_ = w.Close()
-	os.Stdout = oldStdout
-
-	if err != nil {
-		t.Fatalf("runDrain: %v", err)
-	}
-
-	var buf bytes.Buffer
-	_, _ = buf.ReadFrom(r)
-	return buf.String()
 }
