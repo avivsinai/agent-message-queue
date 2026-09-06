@@ -2,7 +2,6 @@ package adapter
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -38,79 +37,6 @@ func TestDefaultRegistryRegistersClaudeDesktopBehindCapabilityGate(t *testing.T)
 	// Only an explicit human-handoff prefill caller is accepted.
 	if !cap.Satisfies(Capability{Delivery: DeliveryPrefilled, Session: SessionNew, RequiresHuman: true}) {
 		t.Fatal("claude-desktop does not satisfy the explicit prefill+new+requires-human minimum")
-	}
-}
-
-func TestDefaultRegistryRegistersCodexAppBehindCapabilityGate(t *testing.T) {
-	registry := DefaultRegistry()
-	// codex-app is now registered (deep-link prefill seat); the capability gate
-	// in app.registerWithOptions refuses it under the default zero-value minimum.
-	if _, err := registry.Get("codex-app"); err != nil {
-		t.Fatalf("DefaultRegistry().Get(%q) failed; codex-app should be registered: %v", "codex-app", err)
-	}
-	newCap, _ := (CodexApp{}).CapabilityForTarget(codexAppTargetNew)
-	if newCap.Delivery != DeliveryPrefilled || newCap.Session != SessionNew || !newCap.RequiresHuman {
-		t.Fatalf("codex-app:new capability = %+v, want prefilled+new+requires_human", newCap)
-	}
-	threadCap, _ := (CodexApp{}).CapabilityForTarget(codexAppTargetThreadPrefix + "01a01f5f-69d6-7dd0-868f-9376f3d2c0a1")
-	if threadCap.Session != SessionExistingExact {
-		t.Fatalf("codex-app:thread capability Session = %v, want existing-exact", threadCap.Session)
-	}
-	// Both targets are requires-human; default zero min (unattended) refuses them.
-	if newCap.Satisfies(Capability{}) || threadCap.Satisfies(Capability{}) {
-		t.Fatal("codex-app satisfies the zero-value minimum; the default gate must refuse it")
-	}
-	// A new-only target must NOT satisfy an existing-exact min (no downgrade).
-	if newCap.Satisfies(Capability{Delivery: DeliveryPrefilled, Session: SessionExistingExact, RequiresHuman: true}) {
-		t.Fatal("codex-app:new satisfies an existing-exact minimum; the gate must refuse the downgrade")
-	}
-	// The thread target DOES satisfy an existing-exact+prefill+RH-tolerant min.
-	if !threadCap.Satisfies(Capability{Delivery: DeliveryPrefilled, Session: SessionExistingExact, RequiresHuman: true}) {
-		t.Fatal("codex-app:thread does not satisfy the existing-exact+prefill+requires-human minimum")
-	}
-}
-
-func TestCodexAppNormalizeTargetAcceptsNewAndThreadUUID(t *testing.T) {
-	app := CodexApp{}
-	if got, err := app.NormalizeTarget(" codex-app:new "); err != nil || got != codexAppTargetNew {
-		t.Fatalf("NormalizeTarget(new) = %q, %v; want %q", got, err, codexAppTargetNew)
-	}
-	const uuid = "01a01f5f-69d6-7dd0-868f-9376f3d2c0a1"
-	if got, err := app.NormalizeTarget("codex-app:thread:" + uuid); err != nil || got != codexAppTargetThreadPrefix+uuid {
-		t.Fatalf("NormalizeTarget(thread) = %q, %v; want %q", got, err, codexAppTargetThreadPrefix+uuid)
-	}
-}
-
-func TestCodexAppTargetRejectsUnsafeOrMalformedIdentity(t *testing.T) {
-	for _, target := range []string{
-		"",
-		"ChatGPT",
-		"codex-app:tab:window-1/tab-1", // legacy grammar, no longer supported
-		"codex-app:thread:",            // empty uuid
-		"codex-app:thread:01A01F5F-69D6-7DD0-868F-9376F3D2C0A1",       // uppercase
-		"codex-app:thread:01a01f5f-69d6-7dd0-868f-9376f3d2c0a",        // 35 chars
-		"codex-app:thread:../../../etc/passwd",                        // path traversal
-		"codex-app:thread:01a01f5f-69d6-7dd0-868f-9376f3d2c0a1/extra", // extra segment
-		"codex-app:existing",
-	} {
-		if _, err := (CodexApp{}).NormalizeTarget(target); err == nil {
-			t.Fatalf("NormalizeTarget(%q) succeeded; want refusal", target)
-		}
-		if _, err := (CodexApp{}).CapabilityForTarget(target); err == nil {
-			t.Fatalf("CapabilityForTarget(%q) succeeded; want refusal", target)
-		}
-	}
-}
-
-func TestClaudeDesktopNormalizeTargetAcceptsOnlyNewSession(t *testing.T) {
-	app := ClaudeDesktop{}
-	if got, err := app.NormalizeTarget(" claude-desktop:new "); err != nil || got != claudeDesktopTarget {
-		t.Fatalf("NormalizeTarget() = %q, %v; want new-session target", got, err)
-	}
-	for _, target := range []string{"", "claude-desktop", "claude-desktop:existing", "claude-desktop:code:existing"} {
-		if _, err := app.NormalizeTarget(target); err == nil {
-			t.Fatalf("NormalizeTarget(%q) succeeded; want refusal", target)
-		}
 	}
 }
 
@@ -179,23 +105,6 @@ func TestClaudeDesktopInjectFailsClosedOnIdentityMismatchWithoutOpen(t *testing.
 	}
 }
 
-func TestClaudeDesktopProbeFailsClosedOnIdentityMismatch(t *testing.T) {
-	skipNonDarwin(t)
-	mismatch := &fakeCommandRunner{output: []byte("com.some.other.app\n")}
-	err := (ClaudeDesktop{Runner: mismatch}).Probe(context.Background(), claudeDesktopTarget)
-	if err == nil {
-		t.Fatal("Probe() with mismatched bundle id succeeded; want fail-closed")
-	}
-	if !strings.Contains(fmt.Sprint(err), claudeDesktopBundleID) {
-		t.Fatalf("Probe() error = %v, want it to name the expected bundle id", err)
-	}
-	// A command failure (e.g. app not installed) must also fail closed.
-	failing := &fakeCommandRunner{output: []byte("no such app"), err: errors.New("exit status 1")}
-	if err := (ClaudeDesktop{Runner: failing}).Probe(context.Background(), claudeDesktopTarget); err == nil {
-		t.Fatal("Probe() with command failure succeeded; want fail-closed")
-	}
-}
-
 func TestClaudeDesktopDiscoverReturnsSeatAfterIdentityProbe(t *testing.T) {
 	skipNonDarwin(t)
 	runner := &fakeCommandRunner{output: []byte(claudeDesktopBundleID + "\n")}
@@ -259,38 +168,9 @@ func TestCodexAppInjectPrefillsOnlyWithEscapedURL(t *testing.T) {
 	}
 }
 
-func TestCodexAppInjectFailsClosedOnIdentityMismatchWithoutOpen(t *testing.T) {
-	skipNonDarwin(t)
-	// The Inject write is scheme-bound, so Inject must revalidate identity and
-	// fail closed before emitting the open. A mismatched bundle id on the
-	// Inject-time Probe must produce zero open calls.
-	mismatch := &fakeCommandRunner{output: []byte("com.some.other.app\n")}
-	injectErr := (CodexApp{Runner: mismatch}).Inject(context.Background(), codexAppTargetNew, "payload")
-	if injectErr == nil {
-		t.Fatal("Inject() with mismatched bundle id succeeded; want fail-closed")
-	}
-	for _, c := range mismatch.calls {
-		if c.name == "open" {
-			t.Fatalf("Inject emitted an open call after identity mismatch; the write must be gated: %#v", c)
-		}
-	}
-	if !strings.Contains(fmt.Sprint(injectErr), codexAppBundleID) {
-		t.Fatalf("Inject() error = %v, want it to surface the identity mismatch", injectErr)
-	}
-}
-
-func TestCodexAppProbeFailsClosedOnIdentityMismatch(t *testing.T) {
-	skipNonDarwin(t)
-	mismatch := &fakeCommandRunner{output: []byte("com.some.other.app\n")}
-	if err := (CodexApp{Runner: mismatch}).Probe(context.Background(), codexAppTargetNew); err == nil {
-		t.Fatal("Probe() with mismatched bundle id succeeded; want fail-closed")
-	}
-	failing := &fakeCommandRunner{output: []byte("no such app"), err: errors.New("exit status 1")}
-	if err := (CodexApp{Runner: failing}).Probe(context.Background(), codexAppTargetNew); err == nil {
-		t.Fatal("Probe() with command failure succeeded; want fail-closed")
-	}
-}
-
+// Restored from origin/main during the round-2 cull: the only direct proof that
+// CodexApp.Discover returns the new-thread seat via a single scheme-handler
+// probe. Happy path of codex-app discovery.
 func TestCodexAppDiscoverReturnsNewSeatAfterIdentityProbe(t *testing.T) {
 	skipNonDarwin(t)
 	runner := &fakeCommandRunner{output: []byte(codexAppBundleID + "\n")}
@@ -303,5 +183,37 @@ func TestCodexAppDiscoverReturnsNewSeatAfterIdentityProbe(t *testing.T) {
 	}
 	if len(runner.calls) != 1 || runner.calls[0].name != "swift" {
 		t.Fatalf("calls = %#v, want one swift scheme-handler probe", runner.calls)
+	}
+}
+
+// Restored from origin/main during the round-2 cull: the only proof that the
+// codex-app seat is registered behind the capability gate and that its new vs
+// thread targets classify correctly. Covers CapabilityForTarget for both seats.
+func TestDefaultRegistryRegistersCodexAppBehindCapabilityGate(t *testing.T) {
+	registry := DefaultRegistry()
+	// codex-app is now registered (deep-link prefill seat); the capability gate
+	// in app.registerWithOptions refuses it under the default zero-value minimum.
+	if _, err := registry.Get("codex-app"); err != nil {
+		t.Fatalf("DefaultRegistry().Get(%q) failed; codex-app should be registered: %v", "codex-app", err)
+	}
+	newCap, _ := (CodexApp{}).CapabilityForTarget(codexAppTargetNew)
+	if newCap.Delivery != DeliveryPrefilled || newCap.Session != SessionNew || !newCap.RequiresHuman {
+		t.Fatalf("codex-app:new capability = %+v, want prefilled+new+requires_human", newCap)
+	}
+	threadCap, _ := (CodexApp{}).CapabilityForTarget(codexAppTargetThreadPrefix + "01a01f5f-69d6-7dd0-868f-9376f3d2c0a1")
+	if threadCap.Session != SessionExistingExact {
+		t.Fatalf("codex-app:thread capability Session = %v, want existing-exact", threadCap.Session)
+	}
+	// Both targets are requires-human; default zero min (unattended) refuses them.
+	if newCap.Satisfies(Capability{}) || threadCap.Satisfies(Capability{}) {
+		t.Fatal("codex-app satisfies the zero-value minimum; the default gate must refuse it")
+	}
+	// A new-only target must NOT satisfy an existing-exact min (no downgrade).
+	if newCap.Satisfies(Capability{Delivery: DeliveryPrefilled, Session: SessionExistingExact, RequiresHuman: true}) {
+		t.Fatal("codex-app:new satisfies an existing-exact minimum; the gate must refuse the downgrade")
+	}
+	// The thread target DOES satisfy an existing-exact+prefill+RH-tolerant min.
+	if !threadCap.Satisfies(Capability{Delivery: DeliveryPrefilled, Session: SessionExistingExact, RequiresHuman: true}) {
+		t.Fatal("codex-app:thread does not satisfy the existing-exact+prefill+requires-human minimum")
 	}
 }

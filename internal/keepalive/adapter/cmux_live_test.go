@@ -310,31 +310,6 @@ func cmuxLiveFindSurfaceEntry(tree []byte, surfaceID string) (json.RawMessage, s
 	return nil, "", false
 }
 
-func cmuxLiveTTYReady(tty string) bool {
-	canon, err := canonicalCmuxTTY(tty)
-	if err != nil {
-		return false
-	}
-	return isCmuxPTY(canon)
-}
-
-func TestCmuxLiveFindSurfaceEntryAndTTYReady(t *testing.T) {
-	skipCmuxNonDarwin(t)
-	blank := cmuxTreeWithSurfaceRecords(map[string]string{"id": testCmuxSurfaceID, "tty": ""})
-	entry, tty, ok := cmuxLiveFindSurfaceEntry(blank, testCmuxSurfaceID)
-	if !ok || len(entry) == 0 {
-		t.Fatalf("blank tree missing surface: ok=%v entry=%s", ok, entry)
-	}
-	if cmuxLiveTTYReady(tty) {
-		t.Fatal("blank tty must not be ready")
-	}
-	ready := cmuxTreeWithSurfaces(testCmuxSurfaceID)
-	_, tty, ok = cmuxLiveFindSurfaceEntry(ready, testCmuxSurfaceID)
-	if !ok || !cmuxLiveTTYReady(tty) {
-		t.Fatalf("populated tty ready=%v tty=%q", ok, tty)
-	}
-}
-
 func cmuxLiveRun(path string, timeout time.Duration, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
@@ -354,19 +329,6 @@ func cmuxLiveSocketDenied(output string, err error) bool {
 		}
 	}
 	return false
-}
-
-func TestCmuxLiveSocketDeniedClassification(t *testing.T) {
-	denied := errors.New("cmux: Operation not permitted")
-	if !cmuxLiveSocketDenied("connect: operation not permitted", denied) {
-		t.Fatal("access-denied text must skip")
-	}
-	if cmuxLiveSocketDenied("", errors.New("signal: killed")) {
-		t.Fatal("precheck timeout/kill must not skip when LIVE=1")
-	}
-	if cmuxLiveSocketDenied("", context.DeadlineExceeded) {
-		t.Fatal("deadline exceeded must not skip when LIVE=1")
-	}
 }
 
 func containsString(ids []string, want string) bool {

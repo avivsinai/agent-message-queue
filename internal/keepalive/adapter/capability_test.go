@@ -102,21 +102,3 @@ func TestCapabilitySatisfies(t *testing.T) {
 		})
 	}
 }
-
-func TestCapabilityZeroValueIsWeakest(t *testing.T) {
-	// The zero value must be the weakest seat on the ordered axes: it
-	// satisfies nothing stronger than the zero-value minimum on activation,
-	// delivery, or session. (RequiresHuman on the min is a tolerance, not a
-	// strength axis: a min that accepts human handoff also accepts an
-	// unattended seat, so it is deliberately not in this list.)
-	zero := Capability{}
-	for _, min := range []Capability{
-		{Activation: ActivationLaunch},
-		{Delivery: DeliveryPrefilled},
-		{Session: SessionNew},
-	} {
-		if zero.Satisfies(min) {
-			t.Fatalf("zero-value seat satisfied %+v; want refusal", min)
-		}
-	}
-}

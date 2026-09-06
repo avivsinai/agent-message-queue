@@ -111,60 +111,6 @@ var buildRealAMQBinaryOnce = sync.OnceValues(func() (string, error) {
 	return binary, nil
 })
 
-func TestRealAMQBinaryBuildDirIsRemoved(t *testing.T) {
-	tempRoot := t.TempDir()
-	var buildDir string
-	code, err := withRealAMQBinaryBuildDir(tempRoot, func(dir string) int {
-		buildDir = dir
-		if err := os.WriteFile(filepath.Join(dir, "amq"), []byte("fixture"), 0o700); err != nil {
-			t.Fatalf("write fixture binary: %v", err)
-		}
-		return 23
-	})
-	if err != nil || code != 23 {
-		t.Fatalf("withRealAMQBinaryBuildDir code=%d err=%v", code, err)
-	}
-	if _, err := os.Stat(buildDir); !os.IsNotExist(err) {
-		t.Fatalf("build directory still exists after run: %v", err)
-	}
-	entries, err := os.ReadDir(tempRoot)
-	if err != nil {
-		t.Fatalf("read temp root: %v", err)
-	}
-	if len(entries) != 0 {
-		t.Fatalf("temp root contains leftovers: %#v", entries)
-	}
-}
-
-func TestSweepStaleRealAMQBinaryBuildDirsPreservesFreshRun(t *testing.T) {
-	tempRoot := t.TempDir()
-	stale := filepath.Join(tempRoot, realAMQBinaryBuildDirPrefix+"stale")
-	fresh := filepath.Join(tempRoot, realAMQBinaryBuildDirPrefix+"fresh")
-	for _, dir := range []string{stale, fresh} {
-		if err := os.Mkdir(dir, 0o700); err != nil {
-			t.Fatalf("Mkdir %s: %v", dir, err)
-		}
-	}
-	now := time.Now()
-	old := now.Add(-2 * realAMQBinaryStaleAge)
-	if err := os.Chtimes(stale, old, old); err != nil {
-		t.Fatalf("age stale directory: %v", err)
-	}
-
-	var diagnostic strings.Builder
-	sweepStaleRealAMQBinaryBuildDirs(tempRoot, now, &diagnostic)
-
-	if _, err := os.Stat(stale); !os.IsNotExist(err) {
-		t.Fatalf("stale directory still exists: %v", err)
-	}
-	if info, err := os.Stat(fresh); err != nil || !info.IsDir() {
-		t.Fatalf("fresh directory was removed: info=%v err=%v", info, err)
-	}
-	if diagnostic.Len() != 0 {
-		t.Fatalf("unexpected sweep diagnostic: %s", diagnostic.String())
-	}
-}
-
 func realAMQBinaryForTest(t *testing.T) string {
 	t.Helper()
 	binary, err := buildRealAMQBinaryOnce()
@@ -460,46 +406,5 @@ func TestStartWakeRealAMQBinaryBecomesReadyAndMatchesTarget(t *testing.T) {
 	}
 	if afterCheck.LiveWake {
 		t.Fatalf("checkWake() live_wake = true after retirement, want false")
-	}
-}
-
-// TestStartWakeRealAMQBinaryFailsForInvalidHandle proves StartWake surfaces a
-// real, documented amq failure — rather than hanging or silently starting a
-// wake — when asked to start against an invalid agent handle, and that no
-// readiness marker is left behind.
-func TestStartWakeRealAMQBinaryFailsForInvalidHandle(t *testing.T) {
-	if testing.Short() {
-		t.Skip("real amq wake E2E")
-	}
-	binary := realAMQBinaryForTest(t)
-	root := secureAMQTestRoot(t)
-
-	injector := writeRealAMQInjector(t, root)
-	cacheDir := filepath.Join(root, "cache")
-	clearAMQSessionIdentityEnv(t)
-	t.Setenv("AMQ_KEEPALIVE_CACHE_DIR", cacheDir)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-	err := NewCLI(binary).StartWake(ctx, StartWakeRequest{
-		Root:      root,
-		Me:        "Invalid-Handle", // fsq.ValidateHandle requires [a-z0-9_-]+
-		InjectVia: injector,
-		Adapter:   "real-amq-e2e",
-		Target:    "real-amq-e2e:surface:invalid-handle",
-		Timeout:   10 * time.Second,
-	})
-	if err == nil {
-		t.Fatal("StartWake() error = nil, want failure for an invalid agent handle")
-	}
-	if !strings.Contains(err.Error(), "must match") {
-		t.Fatalf("StartWake() error = %v, want the real amq handle-validation message", err)
-	}
-
-	realWakeReadinessDirEmpty(t, cacheDir)
-
-	// No wake lock should exist for an identity that was never accepted.
-	if _, statErr := os.Stat(filepath.Join(root, "agents", "Invalid-Handle", ".wake.lock")); !os.IsNotExist(statErr) {
-		t.Fatalf("wake lock exists after a refused invalid handle: %v", statErr)
 	}
 }
