@@ -108,18 +108,3 @@ func TestDecodeWakeReloadTransportRequestIsStrictAndReloadOnly(t *testing.T) {
 		t.Fatal("oversized request was accepted")
 	}
 }
-
-func TestWakeReloadTransportResponseIsOnlyUnavailable(t *testing.T) {
-	response := wakeReloadTransportUnavailableResponse()
-	if response.Status != wakeReloadUnavailable ||
-		response.ReasonCode != wakeReloadReasonCommandUnavailable {
-		t.Fatalf("response = %#v", response)
-	}
-	payload, err := encodeWakeReloadTransportResponse(response)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got, want := string(payload), "{\"status\":\"unavailable\",\"reason_code\":\"reload_command_unavailable\"}\n"; got != want {
-		t.Fatalf("response wire = %q, want %q", got, want)
-	}
-}

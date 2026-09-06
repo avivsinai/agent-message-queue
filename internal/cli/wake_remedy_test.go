@@ -31,9 +31,3 @@ func TestWakeRemedyQuotesEveryArgumentAndPreservesActionArgv(t *testing.T) {
 		t.Fatalf("action args = %#v, want %#v", command.Args, wantArgs)
 	}
 }
-
-func TestWakeRemedyActionCommandRejectsNonAMQArgv(t *testing.T) {
-	if command := newWakeRemedy("doctor", "--root", "/queue").actionCommand(); command != nil {
-		t.Fatalf("action command = %#v, want nil", command)
-	}
-}

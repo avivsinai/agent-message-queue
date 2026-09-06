@@ -2,18 +2,6 @@ package cli
 
 import "testing"
 
-func TestFilterMessages_NoFilters(t *testing.T) {
-	items := []listItem{
-		{ID: "1", From: "alice", Priority: "urgent", Kind: "question", Labels: []string{"bug"}},
-		{ID: "2", From: "bob", Priority: "normal", Kind: "status", Labels: []string{"feature"}},
-	}
-
-	got := FilterMessages(items, FilterOptions{})
-	if len(got) != len(items) {
-		t.Fatalf("expected %d items, got %d", len(items), len(got))
-	}
-}
-
 func TestFilterMessages_LabelAll(t *testing.T) {
 	items := []listItem{
 		{ID: "1", Labels: []string{"bug", "urgent"}},

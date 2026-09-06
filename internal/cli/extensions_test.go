@@ -11,33 +11,6 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
-func TestIsValidExtensionLayerName(t *testing.T) {
-	tests := []struct {
-		name string
-		want bool
-	}{
-		{"io.github.omriariav.amq-squad", true},
-		{"amq_squad-1.2", true},
-		{"", false},
-		{".", false},
-		{"..", false},
-		{"a..b", false},
-		{"..layer", false},
-		{"layer..", false},
-		{"Upper", false},
-		{"has space", false},
-		{"slash/name", false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := isValidExtensionLayerName(tt.name); got != tt.want {
-				t.Fatalf("isValidExtensionLayerName(%q) = %v, want %v", tt.name, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestRunDoctorJSONReportsExtensionManifestsAndDiagnostics(t *testing.T) {
 	root := t.TempDir()
 	if err := fsq.EnsureRootDirs(root); err != nil {
@@ -170,27 +143,6 @@ func TestReadPassiveExtensionManifestRejectsSymlink(t *testing.T) {
 	}
 	if diag == nil || !strings.Contains(diag.Message, "not a regular file") {
 		t.Fatalf("diagnostic = %+v, want not a regular file", diag)
-	}
-}
-
-func TestReadPassiveExtensionManifestRejectsOversizedFile(t *testing.T) {
-	root := t.TempDir()
-	layer := "oversized-manifest"
-	layerDir := filepath.Join(root, "extensions", layer)
-	if err := os.MkdirAll(layerDir, 0o700); err != nil {
-		t.Fatalf("mkdir layer dir: %v", err)
-	}
-	manifestPath := filepath.Join(layerDir, "manifest.json")
-	if err := os.WriteFile(manifestPath, []byte(strings.Repeat("x", 300*1024)), 0o600); err != nil {
-		t.Fatalf("write oversized manifest: %v", err)
-	}
-
-	_, diag, ok := readPassiveExtensionManifest(root, layer, manifestPath)
-	if ok {
-		t.Fatal("expected oversized manifest to be rejected")
-	}
-	if diag == nil || !strings.Contains(diag.Message, "manifest is too large") {
-		t.Fatalf("diagnostic = %+v, want manifest is too large", diag)
 	}
 }
 

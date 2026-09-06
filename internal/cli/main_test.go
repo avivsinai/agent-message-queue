@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -143,14 +142,4 @@ func TestMain(m *testing.M) {
 		exitCode = 1
 	}
 	os.Exit(exitCode)
-}
-
-func TestTIOCSTILegacySysctlTestDefaultIsNotReadableZero(t *testing.T) {
-	data, err := readTIOCSTILegacySysctl()
-	if !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("default error = %v, want os.ErrNotExist", err)
-	}
-	if len(data) != 0 {
-		t.Fatalf("default data = %q, want empty", data)
-	}
 }

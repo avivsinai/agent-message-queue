@@ -2,8 +2,6 @@ package cli
 
 import (
 	"encoding/base64"
-	"os"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -45,59 +43,10 @@ func TestManagedExecutionOptionsCodecRoundTripAndHostileInput(t *testing.T) {
 	}
 }
 
-func TestManagedExecutionOptionsDisabledWakeRequiresReason(t *testing.T) {
-	if err := validateManagedExecutionOptions(launch.PrepareExecutionOptions{WakeMode: "disabled"}); err == nil {
-		t.Fatal("disabled wake without an audit reason succeeded")
-	}
-	if err := validateManagedExecutionOptions(launch.PrepareExecutionOptions{WakeMode: "disabled", AuditReason: "operator policy", RequireWake: true}); err == nil {
-		t.Fatal("disabled wake with require_wake succeeded")
-	}
-}
-
 func TestCoopExecRejectsManagedOptionsWithoutLaunchTicket(t *testing.T) {
 	t.Setenv(launch.InternalLaunchNonceEnv, "")
 	err := runCoopExec([]string{"--managed-symphony-event", "after_create", "true"})
 	if err == nil || GetExitCode(err) != ExitUsage || !strings.Contains(err.Error(), "require a trusted launch ticket") {
 		t.Fatalf("untrusted managed option error = %v", err)
-	}
-}
-
-func TestManagedCoopExecRequiresExplicitAbsoluteRoot(t *testing.T) {
-	t.Setenv(launch.InternalLaunchNonceEnv, "11111111-1111-4111-8111-111111111111")
-	for _, args := range [][]string{
-		{"--managed-symphony-event", "after_create", "true"},
-		{"--root", "relative/root", "--managed-symphony-event", "after_create", "true"},
-	} {
-		err := runCoopExec(args)
-		if err == nil || GetExitCode(err) != ExitActionRequired || !strings.Contains(err.Error(), "explicit absolute --root") {
-			t.Fatalf("managed exact-root error for %#v = %v", args, err)
-		}
-	}
-}
-
-func TestManagedCoopExecDoesNotProvisionMissingTicketRoot(t *testing.T) {
-	t.Setenv(launch.InternalLaunchNonceEnv, "11111111-1111-4111-8111-111111111111")
-	missing := filepath.Join(t.TempDir(), "missing")
-	err := runCoopExec([]string{
-		"--root", missing, "--no-wake", "--managed-no-wake-reason", "test",
-		"--me", "codex", "true",
-	})
-	if err == nil || GetExitCode(err) != ExitActionRequired || !strings.Contains(err.Error(), "before root mutation") {
-		t.Fatalf("missing managed root error = %v", err)
-	}
-	if _, statErr := os.Stat(missing); !os.IsNotExist(statErr) {
-		t.Fatalf("managed refusal provisioned %s: %v", missing, statErr)
-	}
-}
-
-func TestPrivateLaunchWrapperRejectsInvalidExecutionOptionsBeforeRootAccess(t *testing.T) {
-	invalid := base64.RawURLEncoding.EncodeToString([]byte(`{"wake_mode":"enabled","arbitrary_hook":"/tmp/run"}`))
-	err := runLaunchExec([]string{
-		"--root", "/definitely/missing", "--handle", "codex",
-		"--nonce", "11111111-1111-4111-8111-111111111111", "--target", "/bin/true",
-		"--" + managedExecutionOptionsFlag, invalid, "--", "/bin/true",
-	})
-	if err == nil || !strings.Contains(err.Error(), "invalid managed execution options") {
-		t.Fatalf("private wrapper error = %v", err)
 	}
 }

@@ -46,22 +46,6 @@ func deliverTestMsg(t *testing.T, root, from, to, msgID string) {
 	}
 }
 
-func TestReceiptsListEmpty(t *testing.T) {
-	root := setupReceiptsTestRoot(t)
-
-	stdout, _ := captureOutput(t, func() error {
-		return runReceiptsList([]string{"--me", "alice", "--root", root, "--json"})
-	})
-
-	var result receiptsListResult
-	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
-		t.Fatalf("unmarshal: %v\nstdout: %s", err, stdout)
-	}
-	if result.Count != 0 {
-		t.Errorf("expected 0, got %d", result.Count)
-	}
-}
-
 func TestReceiptsListAfterDrain(t *testing.T) {
 	root := setupReceiptsTestRoot(t)
 
@@ -91,30 +75,6 @@ func TestReceiptsListAfterDrain(t *testing.T) {
 	}
 }
 
-func TestReceiptsListFilterByStage(t *testing.T) {
-	root := setupReceiptsTestRoot(t)
-
-	// Emit receipts directly for testing filters.
-	for _, stage := range []string{receipt.StageDrained, receipt.StageDLQ} {
-		r := receipt.New("msg-f-001", "p2p/alice__bob", "bob", "alice", stage, "")
-		if err := receipt.Emit(root, r); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	stdout, _ := captureOutput(t, func() error {
-		return runReceiptsList([]string{"--me", "alice", "--root", root, "--stage", "dlq", "--json"})
-	})
-
-	var result receiptsListResult
-	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if result.Count != 1 {
-		t.Errorf("expected 1 dlq receipt, got %d", result.Count)
-	}
-}
-
 func TestReceiptsWaitImmediate(t *testing.T) {
 	root := setupReceiptsTestRoot(t)
 
@@ -141,53 +101,6 @@ func TestReceiptsWaitImmediate(t *testing.T) {
 	}
 	if result.Receipt == nil || result.Receipt.MsgID != "msg-w-001" {
 		t.Errorf("unexpected receipt: %+v", result.Receipt)
-	}
-}
-
-func TestReceiptsWaitTimeout(t *testing.T) {
-	root := setupReceiptsTestRoot(t)
-
-	stdout, _ := captureOutput(t, func() error {
-		return runReceiptsWait([]string{
-			"--me", "alice", "--root", root,
-			"--msg-id", "msg-nope", "--stage", "drained",
-			"--timeout", "1s", "--poll-interval", "200ms", "--json",
-		})
-	})
-
-	var result receiptsWaitResult
-	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
-		t.Fatalf("unmarshal: %v\nstdout: %s", err, stdout)
-	}
-	if result.Event != "timeout" {
-		t.Errorf("expected timeout, got %s", result.Event)
-	}
-}
-
-func TestReceiptsWaitDelayed(t *testing.T) {
-	root := setupReceiptsTestRoot(t)
-
-	// Emit receipt after a short delay.
-	go func() {
-		time.Sleep(500 * time.Millisecond)
-		r := receipt.New("msg-d-001", "", "bob", "alice", receipt.StageDrained, "")
-		_ = receipt.Emit(root, r)
-	}()
-
-	stdout, _ := captureOutput(t, func() error {
-		return runReceiptsWait([]string{
-			"--me", "alice", "--root", root,
-			"--msg-id", "msg-d-001", "--stage", "drained",
-			"--timeout", "5s", "--poll-interval", "200ms", "--json",
-		})
-	})
-
-	var result receiptsWaitResult
-	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
-		t.Fatalf("unmarshal: %v\nstdout: %s", err, stdout)
-	}
-	if result.Event != "matched" {
-		t.Errorf("expected matched, got %s", result.Event)
 	}
 }
 

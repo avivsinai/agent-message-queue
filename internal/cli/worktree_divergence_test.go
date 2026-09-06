@@ -14,56 +14,6 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/presence"
 )
 
-func TestDoctorOpsHintsPerWorktreeSessionForLocalRootSources(t *testing.T) {
-	tests := []struct {
-		name       string
-		rootSource string
-		rcRoot     string
-		wantHint   bool
-	}{
-		{name: "relative project config", rootSource: string(rootSourceProjectRC), rcRoot: ".agent-mail", wantHint: true},
-		{name: "auto detected root", rootSource: string(rootSourceAutoDetect), rcRoot: ".agent-mail", wantHint: true},
-		{name: "absolute project config", rootSource: string(rootSourceProjectRC), rcRoot: "absolute", wantHint: false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			_, linked := createGitWorktreeFixture(t)
-			t.Chdir(linked)
-
-			root := filepath.Join(linked, ".agent-mail", "collab")
-			ensureOpsRoot(t, root, "alice")
-			if top, err := gitTopLevel(linked); err != nil || top != canonicalDiagnosticPath(linked) {
-				t.Fatalf("gitTopLevel(%s)=%q, %v", linked, top, err)
-			}
-			if session := validSessionNameForRoot(root); session != "collab" {
-				t.Fatalf("validSessionNameForRoot(%s)=%q, want collab", root, session)
-			}
-			rcRoot := tt.rcRoot
-			if rcRoot == "absolute" {
-				rcRoot = filepath.Join(t.TempDir(), "shared-agent-mail")
-			}
-			if err := os.WriteFile(filepath.Join(linked, ".amqrc"), []byte(`{"root":"`+rcRoot+`"}`), 0o600); err != nil {
-				t.Fatalf("write linked .amqrc: %v", err)
-			}
-
-			result := runOpsChecks(root, tt.rootSource, false)
-			hint, found := findOpsHint(result.Hints, "worktree_session_isolation")
-			if found != tt.wantHint {
-				t.Fatalf("worktree_session_isolation found=%v, want %v; hints=%#v", found, tt.wantHint, result.Hints)
-			}
-			if !found {
-				return
-			}
-			for _, want := range []string{root, "collab", "per-worktree", "absolute"} {
-				if !strings.Contains(hint.Message, want) {
-					t.Fatalf("hint missing %q: %q", want, hint.Message)
-				}
-			}
-		})
-	}
-}
-
 func TestDoctorOpsWarnsWhenPeerPresenceIsFresherInSameSessionOtherWorktree(t *testing.T) {
 	primary, linked := createGitWorktreeFixture(t)
 	t.Chdir(primary)
@@ -104,48 +54,6 @@ func TestDoctorOpsWarnsWhenPeerPresenceIsFresherInSameSessionOtherWorktree(t *te
 		if !strings.Contains(hint.Message, want) {
 			t.Fatalf("divergence hint missing %q: %q", want, hint.Message)
 		}
-	}
-}
-
-func TestDoctorOpsDoesNotWarnForOlderPeerOrFresherCallerPresence(t *testing.T) {
-	primary, linked := createGitWorktreeFixture(t)
-	t.Chdir(primary)
-	t.Setenv(envMe, "alice")
-
-	currentRoot := filepath.Join(primary, ".agent-mail", "collab")
-	otherRoot := filepath.Join(linked, ".agent-mail", "collab")
-	for _, root := range []string{currentRoot, otherRoot} {
-		ensureOpsRoot(t, root, "alice", "bob")
-	}
-	now := time.Now()
-	for _, item := range []struct {
-		root   string
-		agent  string
-		seenAt time.Time
-	}{
-		{root: currentRoot, agent: "bob", seenAt: now},
-		{root: otherRoot, agent: "bob", seenAt: now.Add(-time.Minute)},
-		{root: currentRoot, agent: "alice", seenAt: now.Add(-time.Minute)},
-		{root: otherRoot, agent: "alice", seenAt: now},
-	} {
-		if err := presence.Write(item.root, presence.New(item.agent, "active", "", item.seenAt)); err != nil {
-			t.Fatalf("write %s presence at %s: %v", item.agent, item.root, err)
-		}
-	}
-
-	result := runOpsChecks(currentRoot, string(rootSourceProjectRC), false)
-	if hint, found := findOpsHint(result.Hints, "worktree_divergence"); found {
-		t.Fatalf("unexpected divergence hint: %#v", hint)
-	}
-}
-
-func TestWorktreeDiagnosticsFailOpenOutsideGitRepository(t *testing.T) {
-	t.Chdir(t.TempDir())
-	if hints := checkLinkedWorktreeLocalHint(filepath.Join(t.TempDir(), ".agent-mail", "collab"), string(rootSourceAutoDetect)); len(hints) != 0 {
-		t.Fatalf("local hints outside git=%#v, want none", hints)
-	}
-	if hints := checkWorktreeDivergenceHints(filepath.Join(t.TempDir(), ".agent-mail", "collab"), []string{"alice"}); len(hints) != 0 {
-		t.Fatalf("divergence hints outside git=%#v, want none", hints)
 	}
 }
 

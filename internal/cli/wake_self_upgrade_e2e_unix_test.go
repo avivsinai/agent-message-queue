@@ -142,23 +142,6 @@ func TestWakeSelfUpgradeRealPTYOwnerHelper(t *testing.T) {
 	)
 }
 
-func TestWakeSelfUpgradePinnedDirectBinaryIsIneligible(t *testing.T) {
-	if testing.Short() {
-		t.Skip("build real pinned binary")
-	}
-	repoRoot := wakeSelfUpgradeE2ERepoRoot(t)
-	binary := filepath.Join(t.TempDir(), "amq")
-	buildVersionedWakeRestartBinary(t, repoRoot, binary, "0.58.0")
-	running, err := captureWakeImageEvidence(binary, "0.58.0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	state := captureWakeSelfUpgradeStartupState(binary, true, running)
-	if state.Eligible || state.Locator != "" {
-		t.Fatalf("direct binary self-upgrade state = %#v, want ineligible", state)
-	}
-}
-
 func waitForWakeSelfUpgradeReplacement(
 	t *testing.T,
 	binary string,

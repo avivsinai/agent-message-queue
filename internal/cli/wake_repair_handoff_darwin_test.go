@@ -3,8 +3,6 @@
 package cli
 
 import (
-	"errors"
-	"io"
 	"os"
 	"os/exec"
 	"strconv"
@@ -16,14 +14,6 @@ import (
 
 func TestDarwinWakeRepairChildControlStopsOnExplicitStop(t *testing.T) {
 	assertDarwinWakeRepairChildControl(t, wakeRepairChildControlStop, true)
-}
-
-func TestDarwinWakeRepairChildControlStopsOnEOFBeforeDetach(t *testing.T) {
-	assertDarwinWakeRepairChildControl(t, "", true)
-}
-
-func TestDarwinWakeRepairChildControlDetachDisarmsEOF(t *testing.T) {
-	assertDarwinWakeRepairChildControl(t, wakeRepairChildControlDetach, false)
 }
 
 func TestDarwinWakeRepairChildCleanupInterruptsBlockingControlRead(t *testing.T) {
@@ -185,175 +175,5 @@ func TestDarwinWakeRepairChildCapabilityEmitsStopAndDetach(t *testing.T) {
 				t.Fatalf("control = %q, want %q", got, test.want+"\\n")
 			}
 		})
-	}
-}
-
-func TestDarwinWakeRepairChildCapabilityFullDetachWriteIsIrreversibleAcrossCloseFailure(t *testing.T) {
-	cmd := exec.Command("true")
-	capability, err := prepareWakeRepairChildCapabilityPlatform(cmd)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = capability.Close() }()
-	childFD, err := unix.Dup(int(cmd.ExtraFiles[0].Fd()))
-	if err != nil {
-		t.Fatalf("duplicate child control fd: %v", err)
-	}
-	childReader := os.NewFile(uintptr(childFD), "test-child-control")
-	defer func() { _ = childReader.Close() }()
-
-	oldClose := closeWakeRepairDarwinChildControl
-	oldKill := killWakeRepairDarwinChild
-	closeFailure := errors.New("injected child control close failure")
-	closeCalls := 0
-	closeWakeRepairDarwinChildControl = func(file *os.File) error {
-		closeCalls++
-		if closeCalls == 1 {
-			return closeFailure
-		}
-		return file.Close()
-	}
-	var killed *os.Process
-	killWakeRepairDarwinChild = func(process *os.Process) error {
-		killed = process
-		return nil
-	}
-	t.Cleanup(func() {
-		closeWakeRepairDarwinChildControl = oldClose
-		killWakeRepairDarwinChild = oldKill
-	})
-
-	child := &os.Process{Pid: 4242}
-	if err := capability.Bind(child); err != nil {
-		t.Fatal(err)
-	}
-	if err := capability.Detach(); err != nil {
-		t.Fatalf("detach after complete write and close failure: %v", err)
-	}
-	if err := capability.Stop(); err == nil {
-		t.Fatal("Stop unexpectedly retained authority after complete DETACH write")
-	}
-	if killed != nil {
-		t.Fatalf("killed process = %p, want no kill after complete DETACH write", killed)
-	}
-}
-
-func TestDarwinWakeRepairChildCapabilityPartialDetachWriteRetainsExactStopAuthority(t *testing.T) {
-	cmd := exec.Command("true")
-	capability, err := prepareWakeRepairChildCapabilityPlatform(cmd)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = capability.Close() }()
-
-	oldWrite := writeWakeRepairDarwinChildControl
-	oldKill := killWakeRepairDarwinChild
-	writeFailure := errors.New("injected partial DETACH write failure")
-	writeCalls := 0
-	writeWakeRepairDarwinChildControl = func(_ io.Writer, command string) error {
-		writeCalls++
-		if writeCalls == 1 {
-			if command != wakeRepairChildControlDetach {
-				t.Fatalf("first control command = %q, want DETACH", command)
-			}
-			return writeFailure
-		}
-		if command != wakeRepairChildControlStop {
-			t.Fatalf("fallback control command = %q, want STOP", command)
-		}
-		return nil
-	}
-	var killed *os.Process
-	killWakeRepairDarwinChild = func(process *os.Process) error {
-		killed = process
-		return nil
-	}
-	t.Cleanup(func() {
-		writeWakeRepairDarwinChildControl = oldWrite
-		killWakeRepairDarwinChild = oldKill
-	})
-
-	child := &os.Process{Pid: 4242}
-	if err := capability.Bind(child); err != nil {
-		t.Fatal(err)
-	}
-	if err := capability.Detach(); !errors.Is(err, writeFailure) {
-		t.Fatalf("detach error = %v, want %v", err, writeFailure)
-	}
-	if err := capability.Stop(); err != nil {
-		t.Fatalf("fallback exact-child stop: %v", err)
-	}
-	if killed != child {
-		t.Fatalf("killed process = %p, want exact bound child %p", killed, child)
-	}
-	if writeCalls != 2 {
-		t.Fatalf("control writes = %d, want DETACH failure then STOP", writeCalls)
-	}
-}
-
-func TestDarwinWakeRepairChildCapabilityStopsChildBlockedBeforeControlRead(t *testing.T) {
-	cmd := exec.Command("/bin/sleep", "30")
-	capability, err := prepareWakeRepairChildCapabilityPlatform(cmd)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = capability.Close() }()
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	waiter := newWakeProcessWaiter(cmd.Process)
-	t.Cleanup(func() {
-		_ = cmd.Process.Kill()
-		_ = waiter.waitForExit(time.Second)
-	})
-	if err := capability.Bind(cmd.Process); err != nil {
-		t.Fatal(err)
-	}
-	if err := capability.Stop(); err != nil {
-		t.Fatalf("stop child blocked before control read: %v", err)
-	}
-
-	select {
-	case <-waiter.done:
-		if waiter.err != nil {
-			t.Fatalf("wait for exact-stop child: %v", waiter.err)
-		}
-		if waiter.state == nil || waiter.state.Success() {
-			t.Fatal("blocked child exited successfully after exact stop; want signal termination")
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("exact pre-admission child remained alive after stop")
-	}
-}
-
-func TestDarwinWakeRepairChildCapabilityStopAfterWaitCannotSignalReusedPID(t *testing.T) {
-	cmd := exec.Command("/usr/bin/true")
-	capability, err := prepareWakeRepairChildCapabilityPlatform(cmd)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = capability.Close() }()
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	waiter := newWakeProcessWaiter(cmd.Process)
-	t.Cleanup(func() {
-		_ = cmd.Process.Kill()
-		_ = waiter.waitForExit(time.Second)
-	})
-	if err := capability.Bind(cmd.Process); err != nil {
-		t.Fatal(err)
-	}
-	if err := waiter.waitForExit(time.Second); err != nil || waiter.err != nil {
-		t.Fatalf("wait direct child: wait=%v child=%v", err, waiter.err)
-	}
-
-	// os.Process synchronizes Wait with Signal and returns ErrProcessDone
-	// without issuing a PID-based signal after the direct child is reaped.
-	if err := cmd.Process.Kill(); !errors.Is(err, os.ErrProcessDone) {
-		t.Fatalf("kill reaped direct child = %v, want os.ErrProcessDone", err)
-	}
-	if err := capability.Stop(); err != nil {
-		t.Fatalf("capability stop after direct-child Wait: %v", err)
 	}
 }

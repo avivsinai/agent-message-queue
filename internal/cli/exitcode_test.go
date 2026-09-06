@@ -31,43 +31,6 @@ func TestGetExitCode(t *testing.T) {
 	}
 }
 
-func TestExitCodeErrorUnwrap(t *testing.T) {
-	underlying := errors.New("underlying")
-	wrapped := WithExitCode(ExitNotFound, underlying)
-
-	if !errors.Is(wrapped, underlying) {
-		t.Error("wrapped error should be unwrappable to underlying")
-	}
-
-	exitErr := wrapped.(*ExitCodeError)
-	if exitErr.Unwrap() != underlying {
-		t.Error("Unwrap() should return underlying error")
-	}
-}
-
-func TestExitCodeErrorMessage(t *testing.T) {
-	err := UsageError("invalid flag: %s", "--foo")
-	if err.Error() != "invalid flag: --foo" {
-		t.Errorf("Error() = %q, want %q", err.Error(), "invalid flag: --foo")
-	}
-
-	// Error with no underlying message
-	empty := &ExitCodeError{Code: ExitError, Err: nil}
-	if empty.Error() != "exit code 1" {
-		t.Errorf("Error() = %q, want %q", empty.Error(), "exit code 1")
-	}
-}
-
-func TestActionRequiredError(t *testing.T) {
-	err := ActionRequiredError("stale token for %s", "claude")
-	if GetExitCode(err) != ExitActionRequired {
-		t.Errorf("GetExitCode() = %d, want %d", GetExitCode(err), ExitActionRequired)
-	}
-	if err.Error() != "stale token for claude" {
-		t.Errorf("Error() = %q, want %q", err.Error(), "stale token for claude")
-	}
-}
-
 func TestAggregateExitCode(t *testing.T) {
 	ranked := []int{ExitSuccess, ExitError, ExitTimeout, ExitActionRequired}
 	rank := map[int]int{

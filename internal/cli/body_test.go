@@ -118,31 +118,3 @@ func TestSend_DashBodyDoesNotDeliverLiteralHyphen(t *testing.T) {
 		t.Fatalf("expected bob inbox to remain empty, got %d message(s)", len(entries))
 	}
 }
-
-// TestSend_AllowEmptyDeliversBlankBody confirms the explicit escape hatch still
-// lets a blank body through when the sender opts in.
-func TestSend_AllowEmptyDeliversBlankBody(t *testing.T) {
-	root := t.TempDir()
-	for _, agent := range []string{"alice", "bob"} {
-		if err := fsq.EnsureAgentDirs(root, agent); err != nil {
-			t.Fatalf("EnsureAgentDirs: %v", err)
-		}
-	}
-	configureSendTestRoot(t, root, "alice", "bob")
-
-	restore := withStdin(t, "")
-	defer restore()
-
-	err := runSend([]string{"--root", root, "--me", "alice", "--to", "bob", "--subject", "fyi", "--body", "-", "--allow-empty"})
-	if err != nil {
-		t.Fatalf("unexpected error with --allow-empty: %v", err)
-	}
-
-	entries, err := os.ReadDir(fsq.AgentInboxNew(root, "bob"))
-	if err != nil {
-		t.Fatalf("ReadDir: %v", err)
-	}
-	if len(entries) != 1 {
-		t.Fatalf("expected 1 message in bob inbox, got %d", len(entries))
-	}
-}

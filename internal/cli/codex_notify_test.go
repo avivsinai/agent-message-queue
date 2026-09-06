@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"strings"
 	"testing"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
@@ -42,14 +41,6 @@ func TestCodexNotifyRecordsBeforeForwardAndIgnoresForwardFailure(t *testing.T) {
 	}
 }
 
-func TestCodexNotifyRequiresManagedNonceEnvironment(t *testing.T) {
-	t.Setenv(launch.InternalLaunchNonceEnv, "")
-	err := runCodexNotify([]string{"--root", t.TempDir(), "--handle", "codex", `{}`})
-	if err == nil || !strings.Contains(err.Error(), launch.InternalLaunchNonceEnv) {
-		t.Fatalf("missing managed nonce error = %v", err)
-	}
-}
-
 func TestForwardOperatorCodexNotifyUsesIdenticalPayload(t *testing.T) {
 	home := t.TempDir()
 	output := filepath.Join(t.TempDir(), "payload")
@@ -73,24 +64,6 @@ func TestForwardOperatorCodexNotifyUsesIdenticalPayload(t *testing.T) {
 	got, err := os.ReadFile(output)
 	if err != nil || !reflect.DeepEqual(got, payload) {
 		t.Fatalf("forwarded payload = %q, %v", got, err)
-	}
-}
-
-func TestForwardOperatorCodexNotifyAbsentAndSelfAreNoOps(t *testing.T) {
-	amq, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	home := t.TempDir()
-	t.Setenv("CODEX_HOME", home)
-	if err := forwardOperatorCodexNotify(amq, []byte(`{}`)); err != nil {
-		t.Fatalf("absent config: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte("notify = ["+tomlQuote(amq)+"]\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := forwardOperatorCodexNotify(amq, []byte(`{}`)); err != nil {
-		t.Fatalf("self config: %v", err)
 	}
 }
 

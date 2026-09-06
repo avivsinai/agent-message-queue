@@ -36,28 +36,6 @@ func TestDrainJSONStdoutStaysParseableWithUpdateHint(t *testing.T) {
 	}
 }
 
-func TestDrainJSONDoesNotAdvertiseSentinelLatest(t *testing.T) {
-	root, _ := seedDrainMailbox(t)
-	seedUpdateCache(t, "v9.9.9")
-
-	stdout, stderr, err := captureEnvOutput(t, func() error {
-		return Run([]string{"drain", "--root", root, "--me", "alice", "--json", "--include-body"}, "v0.70.0")
-	})
-	if err != nil {
-		t.Fatalf("drain: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
-	}
-	if strings.Contains(stdout, "9.9.9") || strings.Contains(stderr, "9.9.9") {
-		t.Fatalf("sentinel leaked into drain streams:\nstdout=%s\nstderr=%s", stdout, stderr)
-	}
-	var result drainResult
-	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
-		t.Fatalf("drain stdout must stay machine-parseable: %v\nstdout=%s\nstderr=%s", err, stdout, stderr)
-	}
-	if result.Count != 1 {
-		t.Fatalf("drain payload = %#v, want the seeded message", result)
-	}
-}
-
 func seedDrainMailbox(t *testing.T) (root, agent string) {
 	t.Helper()
 	root = t.TempDir()

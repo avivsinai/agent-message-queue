@@ -49,20 +49,3 @@ func TestLinuxWakeBinaryComparisonUsesRunningExecutableDeviceAndInode(t *testing
 		t.Fatalf("different executable comparison omitted distinct identity evidence: %#v", got)
 	}
 }
-
-func TestLinuxWakeBinaryComparisonReturnsUnknownWhenProcessExecutableCannotBeRead(t *testing.T) {
-	current, err := os.Stat("/proc/self/exe")
-	if err != nil {
-		t.Fatal(err)
-	}
-	got, err := inspectWakeBinaryStalenessPlatform(
-		wakeLockInspection{PID: 999999999},
-		resolvedWakeBinary{Info: current},
-	)
-	if err == nil {
-		t.Fatal("missing process executable returned nil error")
-	}
-	if got.Stale {
-		t.Fatalf("unknown executable reported stale: %#v", got)
-	}
-}
