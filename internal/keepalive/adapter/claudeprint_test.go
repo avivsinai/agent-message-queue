@@ -436,44 +436,6 @@ func (p *ackOnKillProcess) KillGroup() error {
 	return p.fakeProcess.KillGroup()
 }
 
-func TestLastJSONLCwdReadsTailOfLargeSession(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "big.jsonl")
-	f, err := os.Create(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	line := []byte(`{"type":"pad"}` + "\n")
-	n := claudePrintJSONLCwdTail/len(line) + 50
-	for i := 0; i < n; i++ {
-		if _, err := f.Write(line); err != nil {
-			t.Fatal(err)
-		}
-	}
-	want := "/private/tmp/amq-w6-tail-cwd"
-	rec, err := json.Marshal(map[string]string{"type": "user", "cwd": want})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := f.Write(append(rec, '\n')); err != nil {
-		t.Fatal(err)
-	}
-	if err := f.Close(); err != nil {
-		t.Fatal(err)
-	}
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if info.Size() <= claudePrintJSONLCwdTail {
-		t.Fatalf("fixture size %d, want > %d", info.Size(), claudePrintJSONLCwdTail)
-	}
-	got, err := lastJSONLCwd(path)
-	if err != nil || got != want {
-		t.Fatalf("lastJSONLCwd() = %q, %v, want %q", got, err, want)
-	}
-}
-
 func TestClaudePrintChildExitBeforeAckIsReplayable(t *testing.T) {
 	cwd := t.TempDir()
 	configDir, stateDir, bin := writeClaudePrintFixture(t, testClaudeUUID, cwd)

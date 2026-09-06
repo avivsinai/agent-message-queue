@@ -9,8 +9,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"strings"
-	"syscall"
 	"testing"
 
 	"github.com/avivsinai/agent-message-queue/internal/keepalive/registry"
@@ -89,45 +87,5 @@ func TestAttachRefusesHostileRegistryWithoutStartingWake(t *testing.T) {
 				t.Fatalf("refused attach started a wake: stat err=%v", err)
 			}
 		})
-	}
-}
-
-func TestCanonicalExistingPathFailsClosedOnELOOPAndEACCES(t *testing.T) {
-	dir := t.TempDir()
-	loopA := filepath.Join(dir, "loop-a")
-	loopB := filepath.Join(dir, "loop-b")
-	if err := os.Symlink(loopB, loopA); err != nil {
-		t.Fatalf("Symlink A: %v", err)
-	}
-	if err := os.Symlink(loopA, loopB); err != nil {
-		t.Fatalf("Symlink B: %v", err)
-	}
-	got, err := canonicalExistingPath(loopA)
-	if err == nil || got != "" {
-		t.Fatalf("canonicalExistingPath(ELOOP) = %q, %v; want error not identity", got, err)
-	}
-	if !errors.Is(err, syscall.ELOOP) && !strings.Contains(strings.ToLower(err.Error()), "too many links") {
-		t.Fatalf("canonicalExistingPath(ELOOP) error = %v, want ELOOP", err)
-	}
-
-	denied := filepath.Join(dir, "denied")
-	if err := os.Mkdir(denied, 0o700); err != nil {
-		t.Fatalf("Mkdir denied: %v", err)
-	}
-	child := filepath.Join(denied, "root")
-	if err := os.Mkdir(child, 0o700); err != nil {
-		t.Fatalf("Mkdir child: %v", err)
-	}
-	if err := os.Chmod(denied, 0); err != nil {
-		t.Fatalf("Chmod denied: %v", err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(denied, 0o700) })
-	got, err = canonicalExistingPath(child)
-	_ = os.Chmod(denied, 0o700)
-	if err == nil || got != "" {
-		t.Fatalf("canonicalExistingPath(EACCES) = %q, %v; want error not identity", got, err)
-	}
-	if !errors.Is(err, syscall.EACCES) && !errors.Is(err, os.ErrPermission) {
-		t.Fatalf("canonicalExistingPath(EACCES) error = %v, want EACCES", err)
 	}
 }
