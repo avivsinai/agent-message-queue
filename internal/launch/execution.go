@@ -108,10 +108,6 @@ type ExecutionEnvelope struct {
 	Execution                              *PrepareExecutionOptions
 }
 
-func ExecutionTicketPath(sessionRoot, handle string) string {
-	return filepath.Join(sessionRoot, executionDirectory, handle+".json")
-}
-
 // NewExecutionTicket canonicalizes every filesystem input and snapshots its
 // physical identity before the ticket can be persisted.
 func NewExecutionTicket(request ExecutionTicketRequest) (ExecutionTicket, error) {

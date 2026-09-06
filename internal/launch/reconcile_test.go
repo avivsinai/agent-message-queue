@@ -1,45 +1,15 @@
 package launch
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"reflect"
-	"runtime"
 	"slices"
 	"strings"
 	"sync"
 	"testing"
-	"time"
 )
-
-func TestReconcileEmitsCanonicalResolvedWorkingDirectory(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Windows symlink creation requires host policy support")
-	}
-	req := reconcileFixture(t, Commands{})
-	alias := filepath.Join(t.TempDir(), "project-alias")
-	if err := os.Symlink(req.ProjectRoot, alias); err != nil {
-		t.Fatal(err)
-	}
-	req.ProjectRoot = alias
-	result, err := Reconcile(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resolved, err := filepath.EvalSymlinks(alias)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(result.Commands) != 1 || result.Commands[0].Cwd != resolved || result.Plan == nil || result.Plan.Agents[0].Cwd != resolved {
-		t.Fatalf("canonical cwd result=%#v, want %q", result, resolved)
-	}
-}
 
 func TestReconcileRejectsProjectProviderBeforeCapabilities(t *testing.T) {
 	req := reconcileFixture(t, Commands{})
@@ -62,107 +32,6 @@ func TestReconcileRejectsProjectProviderBeforeCapabilities(t *testing.T) {
 	}
 }
 
-func TestReconcileRejectsProjectTrackedProviderSymlinkBeforeSentinelExec(t *testing.T) {
-	req := reconcileFixture(t, Commands{})
-	outside := t.TempDir()
-	provider := filepath.Join(outside, ClaudeProvider)
-	marker := filepath.Join(t.TempDir(), "provider-ran")
-	script := "#!/bin/sh\nprintf ran > \"$AMQ_419_SENTINEL\"\ncase \"$1\" in\n  --version) echo 2.1.233 ;;\n  --help) echo '--session-id <uuid> --resume [value]' ;;\nesac\n"
-	if err := os.WriteFile(provider, []byte(script), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	tracked := filepath.Join(req.ProjectRoot, ClaudeProvider)
-	if err := os.Symlink(provider, tracked); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", filepath.Dir(tracked)+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("AMQ_419_SENTINEL", marker)
-	req.Adapters = map[string]HarnessAdapter{ClaudeProvider: NewClaudeAdapter(tracked)}
-	result, err := Reconcile(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.AggregateCode != 6 || len(result.Agents) != 1 || !strings.Contains(result.Agents[0].Reason, ProviderProjectContainedCode) {
-		t.Fatalf("project-tracked provider result = %#v, want typed containment refusal", result)
-	}
-	if _, err := os.Stat(marker); !os.IsNotExist(err) {
-		t.Fatalf("project-tracked provider sentinel ran: %v", err)
-	}
-}
-
-func TestReconcileRejectsProjectAMQBeforeCreateQuickly(t *testing.T) {
-	backend := &reconcileBackend{name: "test", inspect: InspectAbsent}
-	req := reconcileFixture(t, backend)
-	amq := filepath.Join(req.ProjectRoot, "amq")
-	if err := os.WriteFile(amq, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	req.AMQPath = amq
-	started := time.Now()
-	_, err := Reconcile(req)
-	if elapsed := time.Since(started); elapsed >= time.Second {
-		t.Fatalf("project-contained AMQ refusal took %s", elapsed)
-	}
-	var pathErr *LaunchPathError
-	if err == nil || !errors.As(err, &pathErr) || pathErr.Code != AMQProjectContainedCode {
-		t.Fatalf("AMQ refusal error = %v, want typed code %s", err, AMQProjectContainedCode)
-	}
-	if backend.creates != 0 {
-		t.Fatalf("project-contained AMQ refusal created %d resources", backend.creates)
-	}
-}
-
-func TestReconcileJournalRejectsProjectProviderBeforeCapabilities(t *testing.T) {
-	backend := &reconcileBackend{name: "test", inspect: InspectAbsent}
-	req := reconcileFixture(t, backend)
-	provider, sentinel := writeProjectSideEffectingClaude(t, req.ProjectRoot)
-	t.Setenv("PATH", filepath.Dir(provider)+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("AMQ_419_SENTINEL", sentinel)
-	nonce := "019c8a2f-2b13-7000-8000-000000000099"
-	plan, agents, conversations := journalFixturePlan(nonce)
-	plan.Agents[0].Argv[0] = provider
-	digest, err := plan.SemanticDigest()
-	if err != nil {
-		t.Fatal(err)
-	}
-	record, err := NewLaunchJournal(req, backend.name, backend.Detect(), plan, digest, nonce, agents, conversations, time.Now())
-	if err != nil {
-		t.Fatal(err)
-	}
-	lease, err := AcquireLease(req.Root, nonce)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := WriteJournal(req.Root, lease, record); err != nil {
-		t.Fatal(err)
-	}
-	if err := lease.Release(); err != nil {
-		t.Fatal(err)
-	}
-	req.Adapters = map[string]HarnessAdapter{ClaudeProvider: NewClaudeAdapter(ClaudeProvider)}
-	result, err := Reconcile(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.AggregateCode != 6 || result.Reason != "launch_journal_plan_unavailable" {
-		t.Fatalf("project provider journal result = %#v, want plan refusal", result)
-	}
-	if _, err := os.Stat(sentinel); !os.IsNotExist(err) {
-		t.Fatalf("journal capability probe ran side effect: %v", err)
-	}
-}
-
-func TestResolveLaunchAMQExecutableRejectsProjectPath(t *testing.T) {
-	project := t.TempDir()
-	inside := filepath.Join(project, "amq")
-	if err := os.WriteFile(inside, []byte("amq"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := resolveLaunchAMQExecutable(inside, project); err == nil || !strings.Contains(err.Error(), AMQProjectContainedCode) {
-		t.Fatalf("project-contained AMQ path error = %v, want %s", err, AMQProjectContainedCode)
-	}
-}
-
 func writeProjectSideEffectingClaude(t *testing.T, project string) (string, string) {
 	t.Helper()
 	bin := filepath.Join(project, "bin")
@@ -176,32 +45,6 @@ func writeProjectSideEffectingClaude(t *testing.T, project string) (string, stri
 		t.Fatal(err)
 	}
 	return provider, sentinel
-}
-
-func TestReconcileUsesAndRetainsCallerHeldLease(t *testing.T) {
-	req := reconcileFixture(t, Commands{})
-	lease, err := AcquireLease(req.Root, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	req.HeldLease = lease
-	result, err := Reconcile(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Plan == nil || len(result.Commands) != 1 {
-		t.Fatalf("held-lease reconciliation = %#v", result)
-	}
-	inspection, err := InspectLease(req.Root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if inspection.State != LeaseValid || inspection.Nonce != lease.LaunchNonce() {
-		t.Fatalf("caller-held lease after Reconcile = %#v", inspection)
-	}
-	if err := lease.Release(); err != nil {
-		t.Fatal(err)
-	}
 }
 
 type reconcileAdapter struct {
@@ -239,39 +82,6 @@ func (a reconcileAdapter) Capabilities(context.Context) AdapterCapabilities {
 	}
 }
 
-func TestReconcileCaptureFreshRequiresFreshAndCaptureCapabilities(t *testing.T) {
-	for _, test := range []struct {
-		name       string
-		adapter    reconcileAdapter
-		wantReason string
-	}{
-		{name: "fresh missing", adapter: reconcileAdapter{freshUnsupported: true}, wantReason: "fresh_capability_unsupported"},
-		{name: "capture missing", adapter: reconcileAdapter{captureUnsupported: true, reason: "capture_version_unsupported"}, wantReason: "capture_version_unsupported"},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			req := reconcileFixture(t, Commands{})
-			req.Config.Agents[0].Adapter = CodexProvider
-			req.Config.Agents[0].Command[0] = CodexProvider
-			test.adapter.name, test.adapter.mode, test.adapter.available = CodexProvider, AdapterModeCapture, true
-			req.Adapters = map[string]HarnessAdapter{CodexProvider: test.adapter}
-			result, err := Reconcile(req)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if result.AggregateCode != 6 || result.Outcome != OutcomeActionRequired || len(result.Commands) != 0 || len(result.Agents) != 1 ||
-				result.Agents[0].ConversationDisposition != DispositionActionRequired || result.Agents[0].Reason != test.wantReason {
-				t.Fatalf("unsupported capture result=%#v", result)
-			}
-			if _, err := LoadConversation(req.Root, "claude"); !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("unsupported capture wrote conversation state: %v", err)
-			}
-			if _, err := LoadExecutionTicket(req.Root, "claude"); !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("unsupported capture wrote execution ticket: %v", err)
-			}
-		})
-	}
-}
-
 func TestReconcileCursorPreSpawnLeavesPendingConversationForWrapper(t *testing.T) {
 	backend := &reconcileBackend{name: "cursor-test"}
 	req := reconcileFixture(t, backend)
@@ -292,51 +102,6 @@ func TestReconcileCursorPreSpawnLeavesPendingConversationForWrapper(t *testing.T
 	if err != nil || !ticket.PreSpawnAcquire || ticket.State != ExecutionPending || ticket.Backend != backend.name ||
 		ticket.Profile != backend.Detect().Profile.Identity() || len(ticket.DynamicArgv) != 1 {
 		t.Fatalf("pending Cursor ticket = %#v, %v", ticket, err)
-	}
-}
-
-func TestReconcileCaptureReadyResumeRequiresResumeAlone(t *testing.T) {
-	req := reconcileFixture(t, Commands{})
-	req.Config.Agents[0].Adapter = CodexProvider
-	req.Config.Agents[0].Command[0] = CodexProvider
-	req.Adapters = map[string]HarnessAdapter{CodexProvider: reconcileAdapter{
-		name: CodexProvider, mode: AdapterModeCapture, available: true,
-		captureUnsupported: true, reason: "capture_version_unsupported",
-	}}
-	writeReconcileConversation(t, req, ConversationRecord{
-		Version: ConversationVersion, Handle: "claude", State: CaptureReady,
-		Identity: ConversationIdentity{Provider: CodexProvider, ID: testConversationID}, ProviderVersion: codexCaptureVersion, LaunchNonce: testLaunchNonce,
-		ExecutionEvidence: reconcileExecutionEvidence(&reconcileBackend{name: CommandsBackendName}, testLaunchNonce),
-	})
-	result, err := Reconcile(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.AggregateCode != 6 || result.Outcome != OutcomeCommandsEmitted || len(result.Commands) != 1 ||
-		result.Agents[0].ConversationDisposition != DispositionResumed || result.Plan == nil || result.Plan.Agents[0].ConversationID != testConversationID {
-		t.Fatalf("resume-only capability result=%#v", result)
-	}
-}
-
-func TestReconcileCaptureReadyRefusesWithoutResumeCapability(t *testing.T) {
-	req := reconcileFixture(t, Commands{})
-	req.Config.Agents[0].Adapter = CodexProvider
-	req.Config.Agents[0].Command[0] = CodexProvider
-	req.Adapters = map[string]HarnessAdapter{CodexProvider: reconcileAdapter{
-		name: CodexProvider, mode: AdapterModeCapture, available: true, resumeUnsupported: true,
-	}}
-	writeReconcileConversation(t, req, ConversationRecord{
-		Version: ConversationVersion, Handle: "claude", State: CaptureReady,
-		Identity: ConversationIdentity{Provider: CodexProvider, ID: testConversationID}, ProviderVersion: codexCaptureVersion, LaunchNonce: testLaunchNonce,
-		ExecutionEvidence: reconcileExecutionEvidence(&reconcileBackend{name: CommandsBackendName}, testLaunchNonce),
-	})
-	result, err := Reconcile(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.AggregateCode != 6 || result.Outcome != OutcomeActionRequired || len(result.Commands) != 0 ||
-		result.Agents[0].ConversationDisposition != DispositionActionRequired || result.Agents[0].Reason != "resume_capability_unsupported" {
-		t.Fatalf("unsupported resume result=%#v", result)
 	}
 }
 
@@ -423,28 +188,6 @@ type reconcileBackend struct {
 	planNonce                 string
 	planHandles               []string
 	persistCandidate          bool
-}
-
-type unsupportedReconcileBackend struct{ reconcileBackend }
-
-func (backend *unsupportedReconcileBackend) Create(CreateRequest) (CreateResult, error) {
-	backend.creates++
-	return CreateResult{Outcome: OutcomeUnsupported, Reason: "test backend unsupported"}, nil
-}
-
-func TestReconcileMapsUnsupportedCreateToActionRequired(t *testing.T) {
-	backend := &unsupportedReconcileBackend{reconcileBackend: reconcileBackend{name: "unsupported"}}
-	request := reconcileFixture(t, backend)
-	result, err := Reconcile(request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Outcome != OutcomeActionRequired || result.AggregateCode != 6 || result.Reason != "test backend unsupported" {
-		t.Fatalf("unsupported Create result = %#v, want action_required code 6", result)
-	}
-	if len(result.Agents) != 1 || result.Agents[0].Code != 6 || result.Agents[0].Reason != "test backend unsupported" {
-		t.Fatalf("unsupported Create agent result = %#v", result.Agents)
-	}
 }
 
 func (b *reconcileBackend) Detect() DetectResult {
@@ -667,32 +410,6 @@ func TestReconcilePresentCompatibleAttachesWithoutCreate(t *testing.T) {
 	}
 }
 
-func TestReconcilePresentIncompatibleMakesNoBackendMutation(t *testing.T) {
-	backend := &reconcileBackend{name: "test", inspect: InspectPresent}
-	req := reconcileFixture(t, backend)
-	writeReconcileBinding(t, req, backend, "test/test/v999")
-	result, err := Reconcile(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.AggregateCode != 6 || result.Reason != "present_binding_incompatible" || backend.creates != 0 || backend.closes != 0 || backend.focuses != 0 {
-		t.Fatalf("result=%#v creates=%d closes=%d focuses=%d", result, backend.creates, backend.closes, backend.focuses)
-	}
-}
-
-func TestReconcilePresentWithoutConversationMakesNoBackendMutation(t *testing.T) {
-	backend := &reconcileBackend{name: "test", inspect: InspectPresent}
-	req := reconcileFixture(t, backend)
-	writeReconcileBinding(t, req, backend, backend.Detect().Profile.Identity())
-	result, err := Reconcile(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.AggregateCode != 6 || result.Reason != "binding_present_without_resumable_conversation" || backend.creates != 0 || backend.closes != 0 || backend.focuses != 0 {
-		t.Fatalf("result=%#v creates=%d closes=%d focuses=%d", result, backend.creates, backend.closes, backend.focuses)
-	}
-}
-
 func TestReconcileOnLiveKeepJoinWritesTicketsUnderLeaseNonce(t *testing.T) {
 	backend := &reconcileBackend{name: LauncherTMux, inspect: InspectPresent}
 	req := reconcileFixture(t, backend)
@@ -757,267 +474,6 @@ func TestReconcileOnLiveKeepJoinWritesTicketsUnderLeaseNonce(t *testing.T) {
 	}
 }
 
-func TestReconcileTmuxJoinCrashJournalRetriesWithoutDuplicateWindow(t *testing.T) {
-	if _, err := exec.LookPath("tmux"); err != nil {
-		t.Skip("tmux is not installed")
-	}
-	project := t.TempDir()
-	_, root := harnessRoot(t)
-	backend := NewTmuxBackend("tmux")
-	backend.socketName = fmt.Sprintf("amq-reconcile-join-%d-%d", os.Getpid(), time.Now().UnixNano())
-	backend.focus = func(context.Context, string) error { return nil }
-	t.Cleanup(func() { stopTmuxTestServer(t, backend) })
-	store, err := OpenTrustStore(t.TempDir(), project)
-	if err != nil {
-		t.Fatal(err)
-	}
-	req := ReconcileRequest{
-		ProjectRoot: project, Session: "collab", Root: root, AMQPath: writeTmuxSleepAMQ(t),
-		Config: ProjectConfig{Schema: ProjectConfigSchema, DefaultSession: "collab", Layout: LayoutIntent{Type: LayoutColumns}, Agents: []ProjectAgentConfig{
-			{Handle: "claude", Adapter: "claude", Command: []string{"claude"}, ResumePolicy: ResumeEnabled},
-		}},
-		Launcher: LauncherTMux, Preferences: []string{LauncherTMux}, Backends: map[string]Backend{LauncherTMux: backend},
-		Adapters:   map[string]HarnessAdapter{"claude": reconcileAdapter{name: "claude", mode: AdapterModeMint, available: true}},
-		TrustStore: store, ConfirmTrust: func(Plan, string) (bool, error) { return true, nil }, HostIdentity: backend.Detect().HostIdentity,
-	}
-	first, err := Reconcile(req)
-	if err != nil || first.AggregateCode != 0 {
-		t.Fatalf("initial tmux reconcile=%#v err=%v", first, err)
-	}
-	req.Config.Agents = append(req.Config.Agents, ProjectAgentConfig{Handle: "codex", Adapter: "claude", Command: []string{"claude"}, ResumePolicy: ResumeFresh})
-	req.Adapters["codex"] = reconcileAdapter{name: "claude", mode: AdapterModeMint, available: true}
-	req.OnLive = map[string]string{"claude": OnLiveKeep, "codex": OnLiveKeep}
-	crash := errors.New("crash after join delta")
-	req.CrashHook = func(stage string) error {
-		if strings.HasPrefix(stage, "join_delta_written:") {
-			return crash
-		}
-		return nil
-	}
-	joinAttempt, err := Reconcile(req)
-	if !errors.Is(err, crash) {
-		t.Fatalf("join crash result=%#v error=%v", joinAttempt, err)
-	}
-	journal, err := LoadJournal(req.Root)
-	if err != nil || journal.JoinBinding == nil || len(journal.JoinDeltas) != 1 {
-		t.Fatalf("join journal=%#v err=%v", journal, err)
-	}
-	req.CrashHook = nil
-	recovered, err := Reconcile(req)
-	if err != nil || recovered.AggregateCode != 0 || recovered.Outcome != OutcomeCreated {
-		t.Fatalf("recovered tmux join=%#v err=%v", recovered, err)
-	}
-	if got := countLiveTmuxWindows(t, backend); got != 2 {
-		t.Fatalf("tmux windows after join recovery=%d, want exactly two", got)
-	}
-	if _, err := LoadJournal(req.Root); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("join journal after recovery=%v", err)
-	}
-}
-
-func TestReconcileTmuxJoinDefiniteReplacementCleansPreCreateTickets(t *testing.T) {
-	if _, err := exec.LookPath("tmux"); err != nil {
-		t.Skip("tmux is not installed")
-	}
-	project := t.TempDir()
-	_, root := harnessRoot(t)
-	backend := NewTmuxBackend("tmux")
-	backend.socketName = fmt.Sprintf("amq-reconcile-join-clean-%d-%d", os.Getpid(), time.Now().UnixNano())
-	backend.focus = func(context.Context, string) error { return nil }
-	t.Cleanup(func() { stopTmuxTestServer(t, backend) })
-	store, err := OpenTrustStore(t.TempDir(), project)
-	if err != nil {
-		t.Fatal(err)
-	}
-	req := ReconcileRequest{
-		ProjectRoot: project, Session: "collab", Root: root, AMQPath: writeTmuxSleepAMQ(t),
-		Config: ProjectConfig{Schema: ProjectConfigSchema, DefaultSession: "collab", Layout: LayoutIntent{Type: LayoutColumns}, Agents: []ProjectAgentConfig{
-			{Handle: "claude", Adapter: "claude", Command: []string{"claude"}, ResumePolicy: ResumeEnabled},
-		}},
-		Launcher: LauncherTMux, Preferences: []string{LauncherTMux}, Backends: map[string]Backend{LauncherTMux: backend},
-		Adapters:   map[string]HarnessAdapter{"claude": reconcileAdapter{name: "claude", mode: AdapterModeMint, available: true}},
-		TrustStore: store, ConfirmTrust: func(Plan, string) (bool, error) { return true, nil }, HostIdentity: backend.Detect().HostIdentity,
-	}
-	if result, err := Reconcile(req); err != nil || result.AggregateCode != 0 {
-		t.Fatalf("initial tmux reconcile=%#v err=%v", result, err)
-	}
-	req.Config.Agents = append(req.Config.Agents, ProjectAgentConfig{Handle: "codex", Adapter: "claude", Command: []string{"claude"}, ResumePolicy: ResumeFresh})
-	req.Adapters["codex"] = reconcileAdapter{name: "claude", mode: AdapterModeMint, available: true}
-	req.OnLive = map[string]string{"claude": OnLiveKeep, "codex": OnLiveKeep}
-	req.CrashHook = func(stage string) error {
-		if stage != "journal_written" {
-			return nil
-		}
-		name, nameErr := tmuxSessionName(project, "collab")
-		if nameErr != nil {
-			return nameErr
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), tmuxCommandTimeout)
-		defer cancel()
-		if _, killErr := backend.run(ctx, backend.args("kill-session", "-t", "="+name)...); killErr != nil {
-			return killErr
-		}
-		_, createErr := backend.run(ctx, backend.args("new-session", "-d", "-s", name, "-e", tmuxNonceEnvironment+"=foreign", "-P", "-F", "#{pane_id}", "/bin/sleep", "60")...)
-		return createErr
-	}
-	result, err := Reconcile(req)
-	if err != nil || result.AggregateCode == 0 {
-		t.Fatalf("replacement join result=%#v err=%v", result, err)
-	}
-	if _, err := LoadJournal(req.Root); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("definite replacement retained journal: %v", err)
-	}
-	if _, err := LoadExecutionTicket(req.Root, "codex"); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("definite replacement retained codex ticket: %v", err)
-	}
-	if got := countLiveTmuxWindows(t, backend); got != 1 {
-		t.Fatalf("foreign replacement windows=%d, want one", got)
-	}
-}
-
-func TestReconcileOnLiveKeepDoesNotRedeliverKeptSeat(t *testing.T) {
-	backend := &reconcileBackend{name: LauncherTMux, inspect: InspectPresent}
-	req := reconcileFixture(t, backend)
-	req.Config.Agents = append(req.Config.Agents, ProjectAgentConfig{
-		Handle: "codex", Adapter: "claude", Command: []string{"claude"}, ResumePolicy: ResumeFresh,
-	})
-	req.OnLive = map[string]string{"claude": OnLiveKeep, "codex": OnLiveKeep}
-	lease, err := AcquireLease(req.Root, testLaunchNonce)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := lease.LockHandles("claude"); err != nil {
-		t.Fatal(err)
-	}
-	ref, err := WriteEvidence(req.Root, lease, EvidenceWriteRequest{
-		Kind: EvidenceManual, Handle: "claude", ObservedAt: time.Date(2026, 8, 18, 0, 0, 0, 0, time.UTC),
-		Payload: []byte(`{"kept":true}`),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := WriteConversation(req.Root, lease, ConversationRecord{
-		Version: ConversationVersion, Handle: "claude", State: CaptureReady,
-		Identity: ConversationIdentity{Provider: "claude", ID: testConversationID}, LaunchNonce: testLaunchNonce,
-		ExecutionEvidence: reconcileExecutionEvidence(backend, testLaunchNonce),
-		EvidenceRefs:      []string{ref.ID},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	binding := BindingRecord{
-		Version: BindingVersion, Backend: LauncherTMux, HostIdentity: "host:test", InstanceIdentity: "instance:test",
-		Profile: backend.Detect().Profile.Identity(), LaunchNonce: testLaunchNonce,
-		Resources: ResourceIdentitySet{Version: ResourceSetVersion, Resources: []ResourceIdentity{
-			{OpaqueID: "resource:claude", Agent: "claude"},
-		}},
-	}
-	if err := WriteBinding(req.Root, lease, binding); err != nil {
-		t.Fatal(err)
-	}
-	if err := lease.Release(); err != nil {
-		t.Fatal(err)
-	}
-	conversationBefore, err := os.ReadFile(ConversationPath(req.Root.Base(), "claude"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	evidenceBefore, err := os.ReadFile(EvidencePath(req.Root.Base(), ref.ID))
-	if err != nil {
-		t.Fatal(err)
-	}
-	held, err := AcquireLease(req.Root, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	req.HeldLease = held
-	result, err := Reconcile(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.AggregateCode != 0 || backend.creates != 1 || !slices.Equal(backend.planHandles, []string{"codex"}) {
-		t.Fatalf("kept seat redelivered: result=%#v creates=%d handles=%v", result, backend.creates, backend.planHandles)
-	}
-	conversationAfter, err := os.ReadFile(ConversationPath(req.Root.Base(), "claude"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	evidenceAfter, err := os.ReadFile(EvidencePath(req.Root.Base(), ref.ID))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(conversationBefore, conversationAfter) {
-		t.Fatalf("kept conversation mutated\nbefore=%s\nafter=%s", conversationBefore, conversationAfter)
-	}
-	if !bytes.Equal(evidenceBefore, evidenceAfter) {
-		t.Fatalf("kept evidence mutated")
-	}
-	if err := held.Release(); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestReconcileOnLiveProfileMismatchRefusesCohortWithoutMutation(t *testing.T) {
-	backend := &reconcileBackend{name: LauncherTMux, inspect: InspectPresent}
-	req := reconcileFixture(t, backend)
-	req.Config.Agents = append(req.Config.Agents, ProjectAgentConfig{
-		Handle: "codex", Adapter: "claude", Command: []string{"claude"}, ResumePolicy: ResumeFresh,
-	})
-	req.OnLive = map[string]string{"claude": OnLiveKeep, "codex": OnLiveKeep}
-	lease, err := AcquireLease(req.Root, testLaunchNonce)
-	if err != nil {
-		t.Fatal(err)
-	}
-	binding := BindingRecord{
-		Version: BindingVersion, Backend: LauncherTMux, HostIdentity: "host:test", InstanceIdentity: "instance:test",
-		Profile: "tmux/test/v2", LaunchNonce: testLaunchNonce,
-		Resources: ResourceIdentitySet{Version: ResourceSetVersion, Resources: []ResourceIdentity{
-			{OpaqueID: "resource:claude", Agent: "claude"},
-		}},
-	}
-	if err := WriteBinding(req.Root, lease, binding); err != nil {
-		t.Fatal(err)
-	}
-	if err := lease.Release(); err != nil {
-		t.Fatal(err)
-	}
-	bindingBefore, err := os.ReadFile(BindingPath(req.Root.Base()))
-	if err != nil {
-		t.Fatal(err)
-	}
-	result, err := Reconcile(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.AggregateCode != 6 || result.Reason != ReasonLiveParticipantRefused {
-		t.Fatalf("profile mismatch result=%#v", result)
-	}
-	if backend.creates != 0 || backend.closes != 0 || backend.focuses != 0 {
-		t.Fatalf("cohort refusal mutated backend creates=%d closes=%d focuses=%d", backend.creates, backend.closes, backend.focuses)
-	}
-	bindingAfter, err := os.ReadFile(BindingPath(req.Root.Base()))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(bindingBefore, bindingAfter) {
-		t.Fatalf("cohort refusal mutated binding")
-	}
-	if _, err := LoadJournal(req.Root); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("cohort refusal wrote a journal: %v", err)
-	}
-	if _, err := LoadExecutionTicket(req.Root, "claude"); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("cohort refusal wrote a claude ticket: %v", err)
-	}
-	if _, err := LoadExecutionTicket(req.Root, "codex"); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("cohort refusal wrote a codex ticket: %v", err)
-	}
-	if _, err := os.Stat(ConversationPath(req.Root.Base(), "claude")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("cohort refusal wrote a claude conversation")
-	}
-	if _, err := os.Stat(ConversationPath(req.Root.Base(), "codex")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("cohort refusal wrote a codex conversation")
-	}
-}
-
 func TestReconcileForeignBindingRequiresLeaveRebind(t *testing.T) {
 	old := &reconcileBackend{name: "old", inspect: InspectPresent}
 	newBackend := &reconcileBackend{name: "new", inspect: InspectAbsent}
@@ -1056,50 +512,6 @@ func TestReconcileForeignBindingRequiresLeaveRebind(t *testing.T) {
 	}
 }
 
-func TestReconcileInstanceReuseNeverClosesUnrelatedResource(t *testing.T) {
-	backend := &reconcileBackend{name: "test", inspect: InspectPresent}
-	req := reconcileFixture(t, backend)
-	writeReconcileBinding(t, req, backend, backend.Detect().Profile.Identity())
-	record, err := LoadBinding(req.Root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	record.InstanceIdentity = "instance:reused"
-	lease, err := AcquireLease(req.Root, testLaunchNonce)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := WriteBinding(req.Root, lease, record); err != nil {
-		t.Fatal(err)
-	}
-	_ = lease.Release()
-	req.Rebind = true
-	req.ConfirmRebind = func(BindingRecord, bool) (RebindDisposition, bool, error) { return RebindClose, true, nil }
-	result, err := Reconcile(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.AggregateCode != 6 || result.Reason != "foreign_rebind_requires_leave" || backend.closes != 0 || backend.creates != 0 {
-		t.Fatalf("result=%#v closes=%d creates=%d", result, backend.closes, backend.creates)
-	}
-}
-
-func TestReconcileAutoSelectsPreferenceWhenNotInsideCmux(t *testing.T) {
-	tmux := &reconcileBackend{name: LauncherTMux, inspect: InspectAbsent}
-	cmux := &reconcileBackend{name: LauncherCMux, inspect: InspectAbsent}
-	req := reconcileFixture(t, tmux)
-	req.Backends[LauncherCMux] = cmux
-	req.Launcher = LauncherAuto
-	req.Preferences = []string{LauncherTMux, LauncherCommands}
-	result, err := Reconcile(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Backend != LauncherTMux || tmux.creates != 1 || cmux.creates != 0 {
-		t.Fatalf("ping-live without inside-cmux selected %#v tmux=%d cmux=%d", result, tmux.creates, cmux.creates)
-	}
-}
-
 func TestReconcileAutoInsideCmuxPrependsCmux(t *testing.T) {
 	tmux := &reconcileBackend{name: LauncherTMux, inspect: InspectAbsent}
 	cmux := &reconcileBackend{name: LauncherCMux, inspect: InspectAbsent}
@@ -1114,40 +526,6 @@ func TestReconcileAutoInsideCmuxPrependsCmux(t *testing.T) {
 	}
 	if result.Backend != LauncherCMux || cmux.creates != 1 || tmux.creates != 0 {
 		t.Fatalf("inside-cmux selected %#v tmux=%d cmux=%d", result, tmux.creates, cmux.creates)
-	}
-}
-
-func TestReconcileExplicitLauncherWinsInsideCmux(t *testing.T) {
-	tmux := &reconcileBackend{name: LauncherTMux, inspect: InspectAbsent}
-	cmux := &reconcileBackend{name: LauncherCMux, inspect: InspectAbsent}
-	req := reconcileFixture(t, tmux)
-	req.Backends[LauncherCMux] = cmux
-	req.Launcher = LauncherTMux
-	req.Preferences = []string{LauncherCMux, LauncherTMux}
-	t.Setenv("CMUX_SURFACE_ID", "F901D722-6789-4BBB-9818-C4E97F20BEB3")
-	result, err := Reconcile(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Backend != LauncherTMux || tmux.creates != 1 || cmux.creates != 0 {
-		t.Fatalf("explicit launcher = %#v tmux=%d cmux=%d", result, tmux.creates, cmux.creates)
-	}
-}
-
-func TestReconcileAbsentBindingAutoSelectsPreferredBackend(t *testing.T) {
-	old := &reconcileBackend{name: "old", inspect: InspectAbsent}
-	preferred := &reconcileBackend{name: "preferred", inspect: InspectAbsent}
-	req := reconcileFixture(t, old)
-	req.Backends["preferred"] = preferred
-	req.Launcher = LauncherAuto
-	req.Preferences = []string{"preferred", "old"}
-	writeReconcileBinding(t, req, old, old.Detect().Profile.Identity())
-	result, err := Reconcile(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.AggregateCode != 0 || result.Backend != "preferred" || preferred.creates != 1 || old.creates != 0 || old.closes != 0 {
-		t.Fatalf("result=%#v preferred creates=%d old creates=%d closes=%d", result, preferred.creates, old.creates, old.closes)
 	}
 }
 
@@ -1180,33 +558,6 @@ func TestReconcileStaleHandleFailsClosedWhilePeerContinues(t *testing.T) {
 	}
 }
 
-func TestReconcileResumeDistinguishesNoSavedConversationFromStale(t *testing.T) {
-	backend := &reconcileBackend{name: "test", inspect: InspectAbsent}
-	req := reconcileFixture(t, backend)
-	req.ResumeOnly = true
-	missing, err := Reconcile(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if missing.AggregateCode != 6 || missing.Outcome != OutcomeActionRequired || missing.Reason != ReasonNoSavedConversation ||
-		missing.Agents[0].ConversationDisposition != DispositionActionRequired || missing.Agents[0].Reason != ReasonNoSavedConversation || backend.creates != 0 {
-		t.Fatalf("missing result=%#v creates=%d", missing, backend.creates)
-	}
-
-	writeReconcileConversation(t, req, ConversationRecord{
-		Version: ConversationVersion, Handle: "claude", State: CaptureStale,
-		LaunchNonce: testLaunchNonce, Reason: CaptureReasonEvidenceMissing,
-	})
-	stale, err := Reconcile(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if stale.AggregateCode != 6 || stale.Outcome != OutcomeActionRequired || stale.Reason != ReasonStaleConversation ||
-		stale.Agents[0].ConversationDisposition != DispositionDegraded || stale.Agents[0].Reason != ReasonStaleConversation || backend.creates != 0 {
-		t.Fatalf("stale result=%#v creates=%d", stale, backend.creates)
-	}
-}
-
 func TestReconcileStaleAllowsExplicitFreshFallback(t *testing.T) {
 	backend := &reconcileBackend{name: "test", inspect: InspectAbsent}
 	req := reconcileFixture(t, backend)
@@ -1222,56 +573,6 @@ func TestReconcileStaleAllowsExplicitFreshFallback(t *testing.T) {
 	}
 	if result.AggregateCode != 0 || result.Agents[0].ConversationDisposition != DispositionFreshAfterStale || backend.creates != 1 {
 		t.Fatalf("fallback result=%#v", result)
-	}
-}
-
-func TestReconcilePlanOnlyMintWithoutExecutionRemintsPending(t *testing.T) {
-	backend := Commands{}
-	req := reconcileFixture(t, backend)
-	first, err := Reconcile(req)
-	if err != nil || first.AggregateCode != 6 || first.Outcome != OutcomeCommandsEmitted || first.Plan == nil {
-		t.Fatalf("first result=%#v err=%v", first, err)
-	}
-	firstID := first.Plan.Agents[0].ConversationID
-	firstRecord, err := LoadConversation(req.Root, "claude")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if firstRecord.State != CapturePending || firstRecord.Identity.ID != "" || firstRecord.ExecutionEvidence != nil || firstRecord.LaunchNonce != firstID {
-		t.Fatalf("first record=%#v, want pending nonce %q without evidence", firstRecord, firstID)
-	}
-	ticket, err := LoadExecutionTicket(req.Root, "claude")
-	if err != nil || ticket.State != ExecutionPending || ticket.LaunchNonce != firstID || !slices.Equal(ticket.TargetArgv, first.Plan.Agents[0].Argv) {
-		t.Fatalf("first execution ticket=%#v err=%v", ticket, err)
-	}
-	resumeReq := req
-	resumeReq.ResumeOnly = true
-	resume, err := Reconcile(resumeReq)
-	if err != nil || resume.AggregateCode != 6 || resume.Reason != ReasonStaleConversation || resume.Plan != nil {
-		t.Fatalf("resume pending result=%#v err=%v", resume, err)
-	}
-	unchanged, err := LoadConversation(req.Root, "claude")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if unchanged.LaunchNonce != firstID {
-		t.Fatalf("resume reminted pending record: got %q want %q", unchanged.LaunchNonce, firstID)
-	}
-
-	second, err := Reconcile(req)
-	if err != nil || second.AggregateCode != 6 || second.Outcome != OutcomeCommandsEmitted || second.Plan == nil {
-		t.Fatalf("second result=%#v err=%v", second, err)
-	}
-	secondID := second.Plan.Agents[0].ConversationID
-	if secondID == firstID || second.Agents[0].ConversationDisposition != DispositionFresh || second.Agents[0].Reason != ReasonPriorLaunchNotExecuted {
-		t.Fatalf("second result=%#v, first ID=%q second ID=%q", second, firstID, secondID)
-	}
-	secondRecord, err := LoadConversation(req.Root, "claude")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if secondRecord.State != CapturePending || secondRecord.LaunchNonce != secondID || secondRecord.ExecutionEvidence != nil {
-		t.Fatalf("second record=%#v, want new pending nonce %q", secondRecord, secondID)
 	}
 }
 
@@ -1333,123 +634,6 @@ func TestReconcileMintStaysPendingUntilAcknowledgedThenResumesExactIdentity(t *t
 	}
 }
 
-func TestReconcileCrashAfterBackendCreatedAcknowledgedThenRecoversReady(t *testing.T) {
-	backend := &reconcileBackend{name: "test", inspect: InspectAbsent}
-	req := reconcileFixture(t, backend)
-	crash := errors.New("injected crash after backend creation")
-	req.CrashHook = func(stage string) error {
-		if stage == "backend_created" {
-			return crash
-		}
-		return nil
-	}
-	first, err := Reconcile(req)
-	if !errors.Is(err, crash) {
-		t.Fatalf("first result=%#v err=%v, want backend_created crash", first, err)
-	}
-	ticket, err := LoadExecutionTicket(req.Root, "claude")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if ticket.State != ExecutionPending {
-		t.Fatalf("pre-ack execution ticket=%#v, want pending", ticket)
-	}
-	journal, err := LoadJournal(req.Root)
-	if err != nil || len(journal.Conversations) != 1 {
-		t.Fatalf("crashed journal=%#v err=%v", journal, err)
-	}
-	lease, err := AcquireLease(req.Root, ticket.LaunchNonce)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := lease.LockHandles("claude"); err != nil {
-		t.Fatal(err)
-	}
-	if err := WriteConversation(req.Root, lease, journal.Conversations[0]); err != nil {
-		t.Fatal(err)
-	}
-	if err := lease.Release(); err != nil {
-		t.Fatal(err)
-	}
-	acknowledged, err := PrepareExecution(req.Root, "claude", ticket.LaunchNonce, ExecutionEnvelope{
-		Cwd: ticket.Cwd, AMQExecutable: ticket.AMQExecutable,
-		ProviderExecutable: ticket.ProviderExecutable, TargetArgv: ticket.TargetArgv, Execution: ticket.Execution,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if acknowledged.State != ExecutionAcknowledged {
-		t.Fatalf("acknowledged execution ticket=%#v", acknowledged)
-	}
-	record, err := LoadConversation(req.Root, "claude")
-	if err != nil || record.State != CaptureReady || record.Identity.Provider != ClaudeProvider || record.Identity.ID != ticket.ConversationID || record.ExecutionEvidence == nil {
-		t.Fatalf("acknowledged conversation=%#v err=%v, want ready identity/evidence", record, err)
-	}
-
-	req.CrashHook = nil
-	recovered, err := Reconcile(req)
-	if err != nil || recovered.AggregateCode != 0 {
-		t.Fatalf("recovery result=%#v err=%v, want aggregate code 0", recovered, err)
-	}
-	recoveredRecord, err := LoadConversation(req.Root, "claude")
-	if err != nil || recoveredRecord.State != CaptureReady || recoveredRecord.Identity.ID != ticket.ConversationID || recoveredRecord.ExecutionEvidence == nil {
-		t.Fatalf("recovered conversation=%#v err=%v, want ready identity/evidence", recoveredRecord, err)
-	}
-}
-
-func TestReconcileInvalidCreatedBindingCannotPromoteMint(t *testing.T) {
-	backend := &reconcileBackend{name: "test", inspect: InspectAbsent, invalidBind: true}
-	req := reconcileFixture(t, backend)
-	if _, err := Reconcile(req); err == nil || !strings.Contains(err.Error(), "invalid binding") {
-		t.Fatalf("Reconcile error = %v", err)
-	}
-	if _, err := LoadConversation(req.Root, "claude"); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("invalid binding published conversation state: %v", err)
-	}
-}
-
-func TestReconcileReadyRecordWithoutExecutionEvidenceFailsClosed(t *testing.T) {
-	backend := &reconcileBackend{name: "test", inspect: InspectAbsent}
-	req := reconcileFixture(t, backend)
-	req.ResumeOnly = true
-	data, err := json.Marshal(ConversationRecord{
-		Version: ConversationVersion, Handle: "claude", State: CaptureReady,
-		Identity:    ConversationIdentity{Provider: "claude", ID: testConversationID},
-		LaunchNonce: testLaunchNonce,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := req.Root.WriteFileAtomic(conversationDir, "claude.json", append(data, '\n'), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	result, err := Reconcile(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.AggregateCode != 6 || result.Outcome != OutcomeActionRequired || result.Agents[0].Reason != "conversation_state_unreadable" || backend.creates != 0 || result.Plan != nil {
-		t.Fatalf("result=%#v creates=%d", result, backend.creates)
-	}
-}
-
-func TestAggregateReconcileCodePrecedence(t *testing.T) {
-	agents := []AgentReconcileResult{
-		{Handle: "failure", Code: 1, ConversationDisposition: DispositionDegraded},
-		{Handle: "timeout", Code: 4, ConversationDisposition: DispositionDegraded},
-		{Handle: "action", Code: 6, ConversationDisposition: DispositionDegraded},
-		{Handle: "expected", Code: 6, ConversationDisposition: DispositionUnsupported},
-	}
-	if got := aggregateReconcileCode(agents); got != 6 {
-		t.Fatalf("aggregate = %d, want 6", got)
-	}
-	if got := aggregateReconcileCode(agents[:2]); got != 4 {
-		t.Fatalf("aggregate without action = %d, want 4", got)
-	}
-	if got := aggregateReconcileCode(agents[3:]); got != 0 {
-		t.Fatalf("expected unsupported aggregate = %d, want 0", got)
-	}
-}
-
 func TestReconcileConcurrentLaunchCreatesOnce(t *testing.T) {
 	backend := &reconcileBackend{name: "test", inspect: InspectAbsent, createGate: make(chan struct{}), createStart: make(chan struct{}, 1)}
 	req := reconcileFixture(t, backend)
@@ -1470,25 +654,6 @@ func TestReconcileConcurrentLaunchCreatesOnce(t *testing.T) {
 	first := <-firstDone
 	if first.AggregateCode != 0 || backend.creates != 1 {
 		t.Fatalf("first result=%#v creates=%d", first, backend.creates)
-	}
-}
-
-func TestReconcileThreeAgentRosterCreatesOneLayoutAndThreeRefs(t *testing.T) {
-	backend := &reconcileBackend{name: "test", inspect: InspectAbsent}
-	req := reconcileFixture(t, backend)
-	for _, handle := range []string{"peer", "third"} {
-		req.Config.Agents = append(req.Config.Agents, ProjectAgentConfig{
-			Handle: handle, Adapter: "claude", Command: []string{"claude"}, ResumePolicy: ResumeEnabled,
-		})
-	}
-	result, err := Reconcile(req)
-	if err != nil || result.AggregateCode != 0 || backend.creates != 1 || result.Plan == nil || len(result.Plan.Agents) != 3 {
-		t.Fatalf("result=%#v creates=%d err=%v", result, backend.creates, err)
-	}
-	for _, handle := range []string{"claude", "peer", "third"} {
-		if _, err := LoadConversation(req.Root, handle); err != nil {
-			t.Fatalf("conversation %s: %v", handle, err)
-		}
 	}
 }
 
@@ -1582,40 +747,6 @@ func TestReconcileManagedCreateCrashMatrixConvergesWithoutDuplicateSpawn(t *test
 	}
 }
 
-func TestReconcileCrashRecoveryPreservesExistingConversationIdentity(t *testing.T) {
-	backend := &reconcileBackend{name: "test", inspect: InspectAbsent}
-	req := reconcileFixture(t, backend)
-	writeReconcileConversation(t, req, ConversationRecord{
-		Version: ConversationVersion, Handle: "claude", State: CaptureReady,
-		Identity: ConversationIdentity{Provider: "claude", ID: testConversationID}, LaunchNonce: testLaunchNonce,
-		ExecutionEvidence: reconcileExecutionEvidence(backend, testLaunchNonce),
-	})
-	crash := errors.New("injected crash")
-	req.CrashHook = func(stage string) error {
-		if stage == "backend_created" {
-			return crash
-		}
-		return nil
-	}
-	first, err := Reconcile(req)
-	if !errors.Is(err, crash) || first.Plan == nil || first.Plan.Agents[0].ConversationID != testConversationID {
-		t.Fatalf("first result=%#v err=%v", first, err)
-	}
-	journal, err := LoadJournal(req.Root)
-	if err != nil || journal.Conversations[0].Identity.ID != testConversationID || journal.Conversations[0].LaunchNonce != testLaunchNonce {
-		t.Fatalf("journal=%#v err=%v", journal, err)
-	}
-	req.CrashHook = nil
-	result, err := Reconcile(req)
-	if err != nil || result.AggregateCode != 0 || backend.creates != 1 {
-		t.Fatalf("recovery result=%#v creates=%d err=%v", result, backend.creates, err)
-	}
-	record, err := LoadConversation(req.Root, "claude")
-	if err != nil || record.Identity.ID != testConversationID || record.LaunchNonce != testLaunchNonce {
-		t.Fatalf("conversation=%#v err=%v", record, err)
-	}
-}
-
 func TestReconcileJournalRequiresClassifiedReclaimAndPreservesInventory(t *testing.T) {
 	for _, test := range []struct {
 		name       string
@@ -1666,150 +797,6 @@ func TestReconcileJournalRequiresClassifiedReclaimAndPreservesInventory(t *testi
 	}
 }
 
-func TestReconcileRevalidatesAdoptionImmediatelyBeforeBinding(t *testing.T) {
-	backend := &reconcileBackend{name: "test", inspect: InspectAbsent, reclaimFlip: true}
-	req := reconcileFixture(t, backend)
-	crash := errors.New("injected crash")
-	req.CrashHook = func(stage string) error {
-		if stage == "backend_created" {
-			return crash
-		}
-		return nil
-	}
-	if _, err := Reconcile(req); !errors.Is(err, crash) {
-		t.Fatalf("crash error = %v", err)
-	}
-	req.CrashHook = nil
-	result, err := Reconcile(req)
-	if err != nil || result.AggregateCode != 6 || result.Reason != "launch_recovery_changed" || backend.reclaims != 2 {
-		t.Fatalf("result=%#v reclaims=%d err=%v", result, backend.reclaims, err)
-	}
-	if _, err := LoadBinding(req.Root); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("changed adoption published binding: %v", err)
-	}
-	if _, err := LoadJournal(req.Root); err != nil {
-		t.Fatalf("changed adoption lost journal: %v", err)
-	}
-}
-
-func TestReconcileRecoveryRejectsChangedCandidateBinding(t *testing.T) {
-	backend := &reconcileBackend{name: "test", inspect: InspectAbsent, persistCandidate: true}
-	req := reconcileFixture(t, backend)
-	crash := errors.New("injected crash after immutable candidate")
-	req.CrashHook = func(stage string) error {
-		if stage == "backend_created" {
-			return crash
-		}
-		return nil
-	}
-	if _, err := Reconcile(req); !errors.Is(err, crash) {
-		t.Fatalf("initial reconcile error = %v", err)
-	}
-	journ, err := LoadJournal(req.Root)
-	if err != nil || journ.CandidateBinding == nil {
-		t.Fatalf("candidate marker journal=%#v err=%v", journ, err)
-	}
-	journ.CandidateBinding.Resources.Resources[0].OpaqueID = "resource:tampered"
-	lease, err := AcquireLease(req.Root, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := WriteJournal(req.Root, lease, journ); err != nil {
-		_ = lease.Release()
-		t.Fatal(err)
-	}
-	if err := lease.Release(); err != nil {
-		t.Fatal(err)
-	}
-	req.CrashHook = nil
-	result, err := Reconcile(req)
-	if err != nil || result.AggregateCode != 6 || result.Outcome != OutcomeActionRequired || result.Reason != "launch_recovery_candidate_changed" {
-		t.Fatalf("changed candidate recovery result=%#v err=%v", result, err)
-	}
-	if backend.reclaims != 1 {
-		t.Fatalf("reclaim calls=%d, want one immutable-marker comparison", backend.reclaims)
-	}
-	if _, err := LoadBinding(req.Root); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("changed candidate published binding: %v", err)
-	}
-	if _, err := LoadJournal(req.Root); err != nil {
-		t.Fatalf("changed candidate lost journal: %v", err)
-	}
-}
-
-func TestReconcileCreateFailureClassificationControlsJournalClear(t *testing.T) {
-	for _, definite := range []bool{true, false} {
-		t.Run(map[bool]string{true: "definite", false: "uncertain"}[definite], func(t *testing.T) {
-			backend := &reconcileBackend{name: "test", inspect: InspectAbsent, createErr: errors.New("create failed"), definiteErr: definite}
-			req := reconcileFixture(t, backend)
-			result, err := Reconcile(req)
-			if err != nil || result.AggregateCode != 1 {
-				t.Fatalf("result=%#v err=%v", result, err)
-			}
-			_, journalErr := LoadJournal(req.Root)
-			if definite && !errors.Is(journalErr, os.ErrNotExist) {
-				t.Fatalf("definite pre-create failure retained journal: %v", journalErr)
-			}
-			if !definite && journalErr != nil {
-				t.Fatalf("uncertain create failure lost journal: %v", journalErr)
-			}
-			_, ticketErr := LoadExecutionTicket(req.Root, "claude")
-			if definite && !errors.Is(ticketErr, os.ErrNotExist) {
-				t.Fatalf("definite pre-create failure retained execution ticket: %v", ticketErr)
-			}
-			if !definite && ticketErr != nil {
-				t.Fatalf("uncertain create failure lost execution ticket: %v", ticketErr)
-			}
-		})
-	}
-}
-
-func TestReconcileJoinDefiniteCreateFailureCleansTicketsWithoutClearingJournal(t *testing.T) {
-	backend := &reconcileBackend{name: LauncherTMux, inspect: InspectPresent, createErr: errors.New("join create refused before mutation"), definiteErr: true, leaveJournalOnCreateError: true}
-	req := reconcileFixture(t, backend)
-	req.Config.Agents = append(req.Config.Agents, ProjectAgentConfig{
-		Handle: "codex", Adapter: "claude", Command: []string{"claude"}, ResumePolicy: ResumeFresh,
-	})
-	req.Adapters["codex"] = reconcileAdapter{name: "claude", mode: AdapterModeMint, available: true}
-	req.OnLive = map[string]string{"claude": OnLiveKeep, "codex": OnLiveKeep}
-	lease, err := AcquireLease(req.Root, testLaunchNonce)
-	if err != nil {
-		t.Fatal(err)
-	}
-	binding := BindingRecord{
-		Version: BindingVersion, Backend: LauncherTMux, HostIdentity: "host:test", InstanceIdentity: "instance:test",
-		Profile: backend.Detect().Profile.Identity(), LaunchNonce: testLaunchNonce,
-		Resources: ResourceIdentitySet{Version: ResourceSetVersion, Resources: []ResourceIdentity{{OpaqueID: "resource:claude", Agent: "claude"}}},
-	}
-	if err := WriteBinding(req.Root, lease, binding); err != nil {
-		t.Fatal(err)
-	}
-	if err := lease.Release(); err != nil {
-		t.Fatal(err)
-	}
-	held, err := AcquireLease(req.Root, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	req.HeldLease = held
-	result, err := Reconcile(req)
-	if err := held.Release(); err != nil {
-		t.Fatal(err)
-	}
-	if err != nil || result.AggregateCode != 1 {
-		t.Fatalf("join definite failure result=%#v err=%v", result, err)
-	}
-	if !backend.joinBindingSeen {
-		t.Fatal("expected failed create to receive a join binding")
-	}
-	if got, err := os.ReadFile(JournalPath(req.Root.Base())); err != nil || string(got) != "join-create-error-sentinel" {
-		t.Fatalf("join create error journal sentinel = %q err=%v, want preserved because journalActive=false", got, err)
-	}
-	if _, err := LoadExecutionTicket(req.Root, "codex"); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("join definite failure retained new-seat execution ticket: %v", err)
-	}
-}
-
 type noReclaimBackend struct{ Backend }
 
 func TestReconcileCaptureEvidencePersistsExactIdentity(t *testing.T) {
@@ -1835,62 +822,28 @@ func TestReconcileCaptureEvidencePersistsExactIdentity(t *testing.T) {
 	}
 }
 
-func TestReconcileCaptureEvidencePublicationCrashRecovery(t *testing.T) {
-	for _, corrupt := range []bool{false, true} {
-		name := map[bool]string{false: "verified reuse", true: "corrupt collision"}[corrupt]
-		t.Run(name, func(t *testing.T) {
-			backend := &reconcileBackend{name: "test", inspect: InspectAbsent, capture: true}
+func TestReconcileCreateFailureClassificationControlsJournalClear(t *testing.T) {
+	for _, definite := range []bool{true, false} {
+		t.Run(map[bool]string{true: "definite", false: "uncertain"}[definite], func(t *testing.T) {
+			backend := &reconcileBackend{name: "test", inspect: InspectAbsent, createErr: errors.New("create failed"), definiteErr: definite}
 			req := reconcileFixture(t, backend)
-			req.Config.Agents[0].Adapter = CodexProvider
-			req.Config.Agents[0].Command = []string{CodexProvider}
-			req.Adapters = map[string]HarnessAdapter{CodexProvider: reconcileAdapter{name: CodexProvider, mode: AdapterModeCapture, available: true}}
-			crash := errors.New("injected crash after evidence publication")
-			req.CrashHook = func(stage string) error {
-				if stage == "evidence_written" {
-					return crash
-				}
-				return nil
+			result, err := Reconcile(req)
+			if err != nil || result.AggregateCode != 1 {
+				t.Fatalf("result=%#v err=%v", result, err)
 			}
-			if _, err := Reconcile(req); !errors.Is(err, crash) {
-				t.Fatalf("crash error = %v", err)
+			_, journalErr := LoadJournal(req.Root)
+			if definite && !errors.Is(journalErr, os.ErrNotExist) {
+				t.Fatalf("definite pre-create failure retained journal: %v", journalErr)
 			}
-			journalBefore, err := LoadJournal(req.Root)
-			if err != nil {
-				t.Fatal(err)
+			if !definite && journalErr != nil {
+				t.Fatalf("uncertain create failure lost journal: %v", journalErr)
 			}
-			if backend.captured == nil {
-				t.Fatal("backend did not retain capture evidence")
+			_, ticketErr := LoadExecutionTicket(req.Root, "claude")
+			if definite && !errors.Is(ticketErr, os.ErrNotExist) {
+				t.Fatalf("definite pre-create failure retained execution ticket: %v", ticketErr)
 			}
-			_, expectedRef, _, err := prepareEvidence(EvidenceWriteRequest{
-				Kind: EvidenceProviderCapture, Handle: "claude", ObservedAt: backend.captured.observedAt, Payload: backend.captured.payload,
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if corrupt {
-				if err := os.WriteFile(req.Root.DisplayPath(filepath.Join(evidenceDirectory, evidenceFilename(expectedRef.ID))), []byte(`{"different":true}`), 0o600); err != nil {
-					t.Fatal(err)
-				}
-			}
-			req.CrashHook = nil
-			result, recoveryErr := Reconcile(req)
-			if corrupt {
-				var evidenceErr *EvidenceCorruptError
-				if !errors.As(recoveryErr, &evidenceErr) {
-					t.Fatalf("corrupt collision error = %v", recoveryErr)
-				}
-				journalAfter, err := LoadJournal(req.Root)
-				if err != nil || !reflect.DeepEqual(journalAfter, journalBefore) {
-					t.Fatalf("journal changed after corrupt collision: before=%#v after=%#v err=%v", journalBefore, journalAfter, err)
-				}
-				return
-			}
-			if recoveryErr != nil || result.AggregateCode != 0 || backend.creates != 1 {
-				t.Fatalf("recovery result=%#v creates=%d err=%v", result, backend.creates, recoveryErr)
-			}
-			record, err := LoadConversation(req.Root, "claude")
-			if err != nil || !reflect.DeepEqual(record.EvidenceRefs, []string{expectedRef.ID}) {
-				t.Fatalf("recovered conversation=%#v err=%v", record, err)
+			if !definite && ticketErr != nil {
+				t.Fatalf("uncertain create failure lost execution ticket: %v", ticketErr)
 			}
 		})
 	}

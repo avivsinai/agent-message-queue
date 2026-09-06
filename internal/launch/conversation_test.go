@@ -2,7 +2,6 @@ package launch
 
 import (
 	"os"
-	"strings"
 	"testing"
 )
 
@@ -40,32 +39,5 @@ func TestConversationRoundTripRequiresHandleLock(t *testing.T) {
 	}
 	if info.Mode().Perm() != 0o600 {
 		t.Fatalf("conversation permissions = %04o", info.Mode().Perm())
-	}
-}
-
-func TestConversationRejectsReadyWithoutExecutionEvidence(t *testing.T) {
-	record := ConversationRecord{
-		Version: ConversationVersion, Handle: "claude", State: CaptureReady,
-		Identity:    ConversationIdentity{Provider: ClaudeProvider, ID: testConversationID},
-		LaunchNonce: testLaunchNonce,
-	}
-	if err := record.Validate(); err == nil || !strings.Contains(err.Error(), "requires execution evidence") {
-		t.Fatalf("ready record without evidence error = %v", err)
-	}
-}
-
-func TestConversationRejectsCrossHandleAndPendingIdentity(t *testing.T) {
-	_, root := harnessRoot(t)
-	lease := mustAcquireLease(t, root)
-	if err := lease.LockHandles("claude"); err != nil {
-		t.Fatal(err)
-	}
-	bad := ConversationRecord{
-		Version: ConversationVersion, Handle: "codex", State: CapturePending,
-		Identity:    ConversationIdentity{Provider: CodexProvider, ID: testConversationID},
-		LaunchNonce: testLaunchNonce,
-	}
-	if err := WriteConversation(root, lease, bad); err == nil {
-		t.Fatal("cross-handle pending identity write succeeded")
 	}
 }

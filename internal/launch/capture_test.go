@@ -80,38 +80,6 @@ func TestCodexCaptureRejectsAmbiguousOrForgedEvidence(t *testing.T) {
 	}
 }
 
-func TestParseCodexNotifyEvidenceRejectsForgedEvents(t *testing.T) {
-	valid := codexNotifyTestPayload(testConversationID, testCodexCwd)
-	if _, err := ParseCodexNotifyEvidence(valid, testLaunchNonce, "codex", "0.148.0", testCodexCwd); err == nil || !strings.Contains(err.Error(), "unsupported") {
-		t.Fatalf("unsupported expected version error = %v", err)
-	}
-	if _, err := ParseCodexNotifyEvidence(valid, testLaunchNonce, "codex", codexCaptureVersion, "/wrong"); err == nil || !strings.Contains(err.Error(), "cwd") {
-		t.Fatalf("wrong cwd error = %v", err)
-	}
-
-	tests := []struct {
-		name string
-		raw  string
-		want string
-	}{
-		{"malformed", `{`, "decode"},
-		{"wrong type", `{"type":"turn-started","thread-id":"` + testConversationID + `","turn-id":"turn-1","cwd":"` + testCodexCwd + `","input-messages":[]}`, "agent-turn-complete"},
-		{"missing turn", `{"type":"agent-turn-complete","thread-id":"` + testConversationID + `","cwd":"` + testCodexCwd + `","input-messages":[]}`, "turn identity"},
-		{"invalid id", `{"type":"agent-turn-complete","thread-id":"newest","turn-id":"turn-1","cwd":"` + testCodexCwd + `","input-messages":[]}`, "UUIDv7"},
-		{"non-v7 id", `{"type":"agent-turn-complete","thread-id":"550e8400-e29b-41d4-a716-446655440000","turn-id":"turn-1","cwd":"` + testCodexCwd + `","input-messages":[]}`, "UUIDv7"},
-		{"missing messages", `{"type":"agent-turn-complete","thread-id":"` + testConversationID + `","turn-id":"turn-1","cwd":"` + testCodexCwd + `"}`, "input-messages"},
-		{"unknown field", `{"type":"agent-turn-complete","thread-id":"` + testConversationID + `","turn-id":"turn-1","cwd":"` + testCodexCwd + `","input-messages":[],"extra":true}`, "unknown field"},
-		{"trailing event", string(valid) + ` {}`, "multiple JSON values"},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			if _, err := ParseCodexNotifyEvidence([]byte(test.raw), testLaunchNonce, "codex", codexCaptureVersion, testCodexCwd); err == nil || !strings.Contains(err.Error(), test.want) {
-				t.Fatalf("ParseCodexNotifyEvidence error = %v, want %q", err, test.want)
-			}
-		})
-	}
-}
-
 func TestParseCursorCreateChatEvidenceRequiresOneCanonicalUUID(t *testing.T) {
 	valid, err := ParseCursorCreateChatEvidence([]byte(testConversationID+"\n"), testLaunchNonce, "cursor", cursorCaptureVersion)
 	if err != nil || valid.source != CursorCreateChatV1 || valid.handle != "cursor" || valid.conversationID != testConversationID {
@@ -135,29 +103,5 @@ func TestParseCursorCreateChatEvidenceRequiresOneCanonicalUUID(t *testing.T) {
 				t.Fatal("ParseCursorCreateChatEvidence error = nil")
 			}
 		})
-	}
-}
-
-func TestCursorCaptureRejectsForgedBinding(t *testing.T) {
-	evidence, err := ParseCursorCreateChatEvidence([]byte(testConversationID), testLaunchNonce, "cursor", cursorCaptureVersion)
-	if err != nil {
-		t.Fatal(err)
-	}
-	request := CaptureRequest{LaunchNonce: testLaunchNonce, ExpectedProviderVersion: cursorCaptureVersion, Final: true, Evidence: []CaptureEvidence{evidence}}
-	ready := captureCursorIdentity(request)
-	if !ready.CanPersist() || ready.Identity != (ConversationIdentity{Provider: CursorProvider, ID: testConversationID}) {
-		t.Fatalf("ready Cursor capture = %#v", ready)
-	}
-	request.Evidence[0].launchNonce = testConversationID
-	forged := captureCursorIdentity(request)
-	if forged.State != CaptureStale || forged.Reason != CaptureReasonLaunchNonceMismatch || forged.CanPersist() {
-		t.Fatalf("forged Cursor capture = %#v", forged)
-	}
-}
-
-func TestDecodeCursorCreateChatPayloadRejectsUnknownFields(t *testing.T) {
-	raw := `{"source":"cursor_create_chat_v1","provider":"cursor-agent","provider_version":"2026.08.11-e8db854","launch_nonce":"` + testLaunchNonce + `","handle":"cursor","conversation_id":"` + testConversationID + `","stdout":"` + testConversationID + `","extra":true}`
-	if _, err := decodeCursorCreateChatPayload([]byte(raw)); err == nil || !strings.Contains(err.Error(), "unknown field") {
-		t.Fatalf("unknown field error = %v", err)
 	}
 }

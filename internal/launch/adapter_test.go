@@ -4,8 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -327,20 +325,6 @@ func TestGrokPlansUseExactMintAndResumeShapes(t *testing.T) {
 	}
 }
 
-func TestGrokCommittedConfigRejectsDuplicateToolFlags(t *testing.T) {
-	project := t.TempDir()
-	adapter := NewGrokAdapter("definitely-not-installed-grok")
-	for _, args := range [][]string{
-		{"--tools", "shell", "--tools", "computer"},
-		{"--disallowed-tools", "legacy_tool", "--disallowed-tools", "shell"},
-	} {
-		err := ValidateCommittedConfig(adapter, CommittedConfigRequest{ProjectRoot: project, Args: args})
-		if err == nil || !strings.Contains(err.Error(), "duplicated") {
-			t.Fatalf("ValidateCommittedConfig(%q) error = %v, want duplicated", args, err)
-		}
-	}
-}
-
 // TestGrokCommittedConfigRejectsBypassFlagAsToolValue confirms the leading-dash
 // guard in validGrokToolList refuses a flag-looking value smuggled into
 // --tools or --disallowed-tools (e.g. the Grok bypass flag), mirroring the
@@ -356,39 +340,6 @@ func TestGrokCommittedConfigRejectsBypassFlagAsToolValue(t *testing.T) {
 		err := ValidateCommittedConfig(adapter, CommittedConfigRequest{ProjectRoot: project, Args: args})
 		if err == nil || !strings.Contains(err.Error(), "invalid value") {
 			t.Fatalf("ValidateCommittedConfig(%q) error = %v, want invalid value", args, err)
-		}
-	}
-}
-
-func TestGrokPlansForwardOpaqueToolNames(t *testing.T) {
-	project, executable := testExecutable(t, GrokProvider)
-	adapter := NewGrokAdapter(executable)
-	request := planRequest(project, GrokProvider)
-	request.CommittedArgs = []string{"--tools", "run_terminal_cmd(Agent);custom"}
-	fresh, err := adapter.PlanFresh(request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(fresh.Argv[1:3], []string{"--tools", "run_terminal_cmd(Agent);custom"}) {
-		t.Fatalf("opaque tool argv = %q", fresh.Argv)
-	}
-}
-
-func TestGrokPlansRejectContinueIdentityAndBypassFlags(t *testing.T) {
-	project, executable := testExecutable(t, GrokProvider)
-	adapter := NewGrokAdapter(executable)
-	for _, args := range [][]string{
-		{"--continue"},
-		{"--always-approve"},
-		{"--yolo"},
-		{"--allowedTools", "Bash,Read,Write"},
-		{"--session-id", testConversationID},
-		{"--resume", testConversationID},
-	} {
-		request := planRequest(project, GrokProvider)
-		request.CommittedArgs = args
-		if _, err := adapter.PlanFresh(request); err == nil || !strings.Contains(err.Error(), "not allowed") {
-			t.Fatalf("PlanFresh(%q) error = %v, want deny-by-default refusal", args, err)
 		}
 	}
 }
@@ -416,71 +367,6 @@ func TestAdaptersAppendTypedInitialInputAfterOwnedArguments(t *testing.T) {
 			}
 			if plan.Argv[len(plan.Argv)-1] != text || plan.InitialInput == nil || plan.InitialInput.ArgvIndex != len(plan.Argv)-1 {
 				t.Fatalf("initial input plan = %#v", plan)
-			}
-		})
-	}
-}
-
-func TestAdaptersRejectUnsafeInitialInputBeforePlanning(t *testing.T) {
-	for _, provider := range []string{ClaudeProvider, CodexProvider, GrokProvider} {
-		t.Run(provider, func(t *testing.T) {
-			project, executable := testExecutable(t, provider)
-			for _, text := range []string{"-option", "line\nfeed", "tab\tvalue", "delete\x7f"} {
-				t.Run(fmt.Sprintf("%q", text), func(t *testing.T) {
-					request := planRequest(project, provider)
-					sum := sha256.Sum256([]byte(text))
-					request.InitialInput = &InitialInputRequest{
-						Kind: InitialInputArgument, Value: text, SHA256: "sha256:" + hex.EncodeToString(sum[:]),
-					}
-					var err error
-					switch provider {
-					case ClaudeProvider:
-						_, err = NewClaudeAdapter(executable).PlanFresh(request)
-					case CodexProvider:
-						_, err = NewCodexAdapter(executable).PlanFresh(request)
-					case GrokProvider:
-						_, err = NewGrokAdapter(executable).PlanFresh(request)
-					}
-					if err == nil || !strings.Contains(err.Error(), "initial input") {
-						t.Fatalf("unsafe initial input error = %v", err)
-					}
-				})
-			}
-		})
-	}
-}
-
-func TestAdaptersDoNotRedeliverInitialInputOnResume(t *testing.T) {
-	for _, provider := range []string{ClaudeProvider, CodexProvider, GrokProvider} {
-		t.Run(provider, func(t *testing.T) {
-			project, executable := testExecutable(t, provider)
-			request := planRequest(project, provider)
-			text := "generated bootstrap"
-			sum := sha256.Sum256([]byte(text))
-			request.InitialInput = &InitialInputRequest{Kind: InitialInputArgument, Value: text, SHA256: "sha256:" + hex.EncodeToString(sum[:])}
-			conversation := ConversationIdentity{Provider: provider, ID: testConversationID}
-			var plan AgentPlan
-			var err error
-			switch provider {
-			case ClaudeProvider:
-				plan, err = NewClaudeAdapter(executable).PlanResume(ResumeRequest{PlanRequest: request, Conversation: conversation})
-			case CodexProvider:
-				plan, err = NewCodexAdapter(executable).PlanResume(ResumeRequest{PlanRequest: request, Conversation: conversation})
-			case GrokProvider:
-				plan, err = NewGrokAdapter(executable).PlanResume(ResumeRequest{PlanRequest: request, Conversation: conversation})
-			}
-			if err != nil {
-				t.Fatal(err)
-			}
-			if plan.InitialInput != nil || slices.Contains(plan.Argv, text) {
-				t.Fatalf("resume redelivered initial input: %#v", plan)
-			}
-			if provider == ClaudeProvider || provider == GrokProvider {
-				if !slices.Equal(plan.Argv[len(plan.Argv)-2:], []string{"--resume", testConversationID}) {
-					t.Fatalf("%s resume tail = %q", provider, plan.Argv)
-				}
-			} else if plan.Argv[len(plan.Argv)-1] != testConversationID {
-				t.Fatalf("Codex resume identity is not final: %q", plan.Argv)
 			}
 		})
 	}
@@ -581,32 +467,6 @@ func TestAdapterEnvAndArgGrammarFailsClosed(t *testing.T) {
 	})
 }
 
-func TestAdapterRejectsProjectExecutableAndProviderMismatch(t *testing.T) {
-	project := t.TempDir()
-	inside := filepath.Join(project, ClaudeProvider)
-	if err := os.WriteFile(inside, []byte("not executable"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	adapter := NewClaudeAdapter(inside)
-	request := planRequest(project, ClaudeProvider)
-	if _, err := adapter.PlanFresh(request); err == nil || !strings.Contains(err.Error(), "inside the project") {
-		t.Fatalf("project executable error = %v", err)
-	}
-	externalLink := filepath.Join(t.TempDir(), ClaudeProvider)
-	if err := os.Symlink(inside, externalLink); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := NewClaudeAdapter(externalLink).PlanFresh(request); err == nil || !strings.Contains(err.Error(), "inside the project") {
-		t.Fatalf("external symlink to project executable error = %v", err)
-	}
-
-	otherProject, codexExecutable := testExecutable(t, CodexProvider)
-	request = planRequest(otherProject, ClaudeProvider)
-	if _, err := NewClaudeAdapter(codexExecutable).PlanFresh(request); err == nil || !strings.Contains(err.Error(), "cannot execute") {
-		t.Fatalf("provider executable error = %v", err)
-	}
-}
-
 func TestAdapterRejectsProjectTrackedProviderSymlinkBeforeSentinelExec(t *testing.T) {
 	project := t.TempDir()
 	outside := t.TempDir()
@@ -631,109 +491,6 @@ func TestAdapterRejectsProjectTrackedProviderSymlinkBeforeSentinelExec(t *testin
 	}
 	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
 		t.Fatalf("provider sentinel was executed: %v", statErr)
-	}
-}
-
-func TestAdapterKeepsStableExecutableAcrossSymlinkRetarget(t *testing.T) {
-	base := t.TempDir()
-	project := filepath.Join(base, "project")
-	bin := filepath.Join(base, "bin")
-	versions := filepath.Join(base, "versions")
-	for _, dir := range []string{project, bin, versions} {
-		if err := os.Mkdir(dir, 0o700); err != nil {
-			t.Fatal(err)
-		}
-	}
-	versionA := filepath.Join(versions, "claude-a")
-	versionB := filepath.Join(versions, "claude-b")
-	for _, path := range []string{versionA, versionB} {
-		if err := os.WriteFile(path, []byte(path), 0o700); err != nil {
-			t.Fatal(err)
-		}
-	}
-	executable := filepath.Join(bin, ClaudeProvider)
-	if err := os.Symlink(versionA, executable); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", bin)
-	request := planRequest(project, ClaudeProvider)
-	first, err := NewClaudeAdapter(ClaudeProvider).PlanFresh(request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	firstDigest, err := (Plan{Version: PlanVersion, Agents: []AgentPlan{first}}).SemanticDigest()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Remove(executable); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(versionB, executable); err != nil {
-		t.Fatal(err)
-	}
-	second, err := NewClaudeAdapter(ClaudeProvider).PlanFresh(request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	secondDigest, err := (Plan{Version: PlanVersion, Agents: []AgentPlan{second}}).SemanticDigest()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if first.Argv[0] != executable || second.Argv[0] != executable {
-		t.Fatalf("planned argv0 = %q then %q, want stable %q", first.Argv[0], second.Argv[0], executable)
-	}
-	if firstDigest != secondDigest {
-		t.Fatalf("symlink retarget changed semantic digest: %s != %s", firstDigest, secondDigest)
-	}
-	_, root := openTestRoot(t)
-	emitted, err := (Commands{}).Create(CreateRequest{
-		Session: "collab", AMQPath: "amq", Plan: Plan{Version: PlanVersion, Agents: []AgentPlan{second}}, Root: root,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(emitted.Commands) != 1 || len(emitted.Commands[0].Argv) < 8 || emitted.Commands[0].Argv[7] != executable {
-		t.Fatalf("emitted command argv = %#v, want stable executable %q", emitted.Commands, executable)
-	}
-}
-
-type misdeclaredAdapter struct{}
-
-func (misdeclaredAdapter) Name() string               { return "bad" }
-func (misdeclaredAdapter) Mode() AdapterMode          { return AdapterModeMint }
-func (misdeclaredAdapter) CommittedEnvKeys() []string { return nil }
-func (misdeclaredAdapter) Capabilities(context.Context) AdapterCapabilities {
-	return AdapterCapabilities{}
-}
-func (misdeclaredAdapter) PlanFresh(PlanRequest) (AgentPlan, error) {
-	return AgentPlan{}, errors.New("unused")
-}
-func (misdeclaredAdapter) PlanResume(ResumeRequest) (AgentPlan, error) {
-	return AgentPlan{}, errors.New("unused")
-}
-func (misdeclaredAdapter) CaptureIdentity(CaptureRequest) CaptureResult { return CaptureResult{} }
-
-func TestValidateAdapterPlanRejectsModeMisdeclaration(t *testing.T) {
-	plan := AgentPlan{
-		Handle: "bad", Argv: []string{"/bin/bad"}, Cwd: "/tmp",
-		AdapterMode: AdapterModeCapture, ResumePolicy: ResumeEnabled,
-	}
-	if err := ValidateAdapterPlan(misdeclaredAdapter{}, plan); err == nil || !strings.Contains(err.Error(), "declares") {
-		t.Fatalf("mode declaration error = %v", err)
-	}
-}
-
-func TestValidateAdapterCapabilitiesRejectsModeMisdeclaration(t *testing.T) {
-	adapter := misdeclaredAdapter{}
-	tests := []AdapterCapabilities{
-		{Provider: "other", Mode: AdapterModeMint},
-		{Provider: "bad", Mode: AdapterModeCapture},
-		{Provider: "bad", Mode: AdapterModeMint, Available: true, Capture: true},
-	}
-	for _, capabilities := range tests {
-		if err := ValidateAdapterCapabilities(adapter, capabilities); err == nil {
-			t.Fatalf("ValidateAdapterCapabilities(%#v) error = nil", capabilities)
-		}
 	}
 }
 

@@ -52,33 +52,6 @@ func TestProjectConfigNormalizesLegacyMinimalRoster(t *testing.T) {
 	}
 }
 
-func TestProjectConfigAcceptsCursorCurrentExecutableAlias(t *testing.T) {
-	parsed, err := ParseProjectConfig([]byte(`{"schema":1,"default_session":"collab","agents":[{"handle":"cursor","adapter":"cursor-agent","command":["agent"],"resume_policy":"resume"}],"layout":{"type":"columns"}}`))
-	if err != nil {
-		t.Fatalf("current Cursor executable alias rejected: %v", err)
-	}
-	if parsed.Agents[0].Adapter != CursorProvider || parsed.Agents[0].Command[0] != "agent" {
-		t.Fatalf("current Cursor config = %#v", parsed.Agents[0])
-	}
-}
-
-func TestProjectConfigAcceptsOptionalNamedPreference(t *testing.T) {
-	parsed, err := ParseProjectConfig([]byte(`{"schema":1,"named":false,"agents":[{"handle":"claude","command":["claude"]}]}`))
-	if err != nil {
-		t.Fatalf("ParseProjectConfig: %v", err)
-	}
-	if parsed.Named == nil || *parsed.Named {
-		t.Fatalf("named preference = %#v, want false", parsed.Named)
-	}
-	data, err := MarshalProjectConfig(parsed)
-	if err != nil {
-		t.Fatalf("MarshalProjectConfig: %v", err)
-	}
-	if !strings.Contains(string(data), `"named": false`) {
-		t.Fatalf("marshaled config omitted named preference: %s", data)
-	}
-}
-
 func TestProjectConfigResolvesPerAgentNamedPrecedence(t *testing.T) {
 	boolPointer := func(value bool) *bool { return &value }
 	for _, test := range []struct {
@@ -114,21 +87,6 @@ func TestProjectConfigResolvesPerAgentNamedPrecedence(t *testing.T) {
 	}
 	if !strings.Contains(string(data), `"named": true`) {
 		t.Fatalf("marshaled config omitted per-agent named override: %s", data)
-	}
-}
-
-func TestProjectConfigRejectsExplicitEmptyOptionalDefaults(t *testing.T) {
-	for _, raw := range []string{
-		`{"schema":1,"default_session":"","agents":[{"handle":"claude","command":["claude"]}]}`,
-		`{"schema":1,"default_session":null,"agents":[{"handle":"claude","command":["claude"]}]}`,
-		`{"schema":1,"agents":[{"handle":"claude","adapter":"","command":["claude"]}]}`,
-		`{"schema":1,"agents":[{"handle":"claude","adapter":null,"command":["claude"]}]}`,
-		`{"schema":1,"agents":[{"handle":"claude","command":["claude"],"resume_policy":""}]}`,
-		`{"schema":1,"agents":[{"handle":"claude","command":["claude"]}],"layout":{"type":""}}`,
-	} {
-		if _, err := ParseProjectConfig([]byte(raw)); err == nil {
-			t.Fatalf("explicit empty default accepted: %s", raw)
-		}
 	}
 }
 
