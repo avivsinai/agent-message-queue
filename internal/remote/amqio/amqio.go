@@ -135,8 +135,16 @@ func (c *Carrier) importOne(root *fsq.DeliveryRoot, name string) error {
 	} else {
 		reply, herr = c.ep.Handle(cmd, core.Source{Host: SourceHost(msg.Header), Origin: origin})
 	}
+	var refusal *protocol.Refusal
+	typed := herr == nil || errors.As(herr, &refusal)
 	if herr != nil {
 		detail = "remote command refused: " + herr.Error()
+	}
+	if !typed {
+		// The endpoint could not say whether a record exists. Leave the
+		// message in new so the next import retries it; never drain a
+		// command whose record may not exist.
+		return nil
 	}
 	// request.* replies travel as revisions through Publish; every other op
 	// and every refusal is answered once, here.

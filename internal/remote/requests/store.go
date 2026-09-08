@@ -54,6 +54,11 @@ type Record struct {
 	// most one; the store refuses a second.
 	NativeDispatches int `json:"native_dispatches"`
 
+	// Answered is the interaction ids this endpoint has already delivered an
+	// answer for, with the option sent. It is written before the native call
+	// so a replay after a crash cannot answer the same interaction twice.
+	Answered map[string]string `json:"answered,omitempty"`
+
 	// Tombstone marks a record that exists only to block a later submit or
 	// to remember a compacted result.
 	Tombstone bool `json:"tombstone,omitempty"`
@@ -146,13 +151,23 @@ func Digest(data []byte) string {
 }
 
 func (s *Store) path(k Key) (string, error) {
-	if !hostSegmentRe.MatchString(k.CreatorHost) || !hostSegmentRe.MatchString(k.TargetID) {
+	if !safeSegment(k.CreatorHost) || !safeSegment(k.TargetID) {
 		return "", protocol.Refuse(protocol.CodeInvalid, "record key has an invalid segment")
 	}
 	if _, _, _, err := protocol.DecodeRef(protocol.EncodeRef(k.CreatorHost, k.TargetID, k.RequestID)); err != nil {
 		return "", err
 	}
 	return filepath.Join(s.dir, requestsDir, k.CreatorHost, k.TargetID+"__"+k.RequestID+recordSuffix), nil
+}
+
+// safeSegment reports whether a key segment is a safe single path component.
+// The dot segments are refused here rather than trusting every carrier to
+// prefix its host string.
+func safeSegment(seg string) bool {
+	if seg == "." || seg == ".." {
+		return false
+	}
+	return hostSegmentRe.MatchString(seg)
 }
 
 // Get reads one record. The boolean is false when no record exists.
@@ -397,12 +412,16 @@ func allowed(from, to protocol.State) bool {
 		}
 	case protocol.StateRunning:
 		switch to {
-		case protocol.StateCompleted, protocol.StateFailed, protocol.StateCancelled, protocol.StateUncertain:
+		case protocol.StateCompleted, protocol.StateFailed, protocol.StateCancelled,
+			protocol.StateRejected, protocol.StateUncertain:
 			return true
 		}
 	case protocol.StateUncertain:
+		// Exact native evidence resolves an uncertain record to any outcome,
+		// including a positive refusal that admission never happened.
 		switch to {
-		case protocol.StateRunning, protocol.StateCompleted, protocol.StateFailed, protocol.StateCancelled:
+		case protocol.StateRunning, protocol.StateCompleted, protocol.StateFailed,
+			protocol.StateCancelled, protocol.StateRejected:
 			return true
 		}
 	}

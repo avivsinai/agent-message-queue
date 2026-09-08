@@ -296,6 +296,13 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (any, error) {
 	case adm.Code == protocol.CodeCancelledBeforeAdmission:
 		rec.State = protocol.StateCancelled
 		rec.Code = adm.Code
+		// A cancel that raced this gated admission left the disposition
+		// pending; admission never happened, so confirm it now instead of
+		// persisting cancelled with cancel_requested.
+		if rec.Cancel == nil {
+			rec.Cancel = &protocol.Cancel{RequestedAt: protocol.FormatTime(e.now())}
+		}
+		rec.Cancel.Disposition = protocol.CancelConfirmed
 	default:
 		rec.State = protocol.StateRejected
 		rec.Code = adm.Code
@@ -488,9 +495,43 @@ func (e *Endpoint) respond(cmd *protocol.Command) (any, error) {
 	if t == nil {
 		return nil, protocol.Refuse(protocol.CodeAttachmentLost, "target is not attached")
 	}
+	if _, done := rec.Answered[cmd.InteractionID]; done {
+		// A replay of an answer we already delivered; do not invoke the
+		// attachment a second time.
+		return rec.Snapshot, nil
+	}
 	if rec.Interaction == nil || rec.Interaction.InteractionID != cmd.InteractionID {
 		return nil, protocol.Refuse(protocol.CodeAlreadyResolved, "no such pending interaction")
 	}
+	// Record the answer durably before the native call so a crash-then-replay
+	// cannot answer the same interaction twice.
+	e.mu.Lock()
+	rec, exists, err = e.store.Get(key)
+	if err != nil {
+		e.mu.Unlock()
+		return nil, err
+	}
+	if !exists {
+		e.mu.Unlock()
+		return nil, protocol.Refuse(protocol.CodeNotFound, "no record for request_ref")
+	}
+	if _, done := rec.Answered[cmd.InteractionID]; done {
+		e.mu.Unlock()
+		return rec.Snapshot, nil
+	}
+	rec.Revision++
+	if rec.Answered == nil {
+		rec.Answered = map[string]string{}
+	}
+	rec.Answered[cmd.InteractionID] = cmd.Option
+	rec.ObservedAt = protocol.FormatTime(e.now())
+	if err := e.store.Update(rec); err != nil {
+		e.mu.Unlock()
+		return nil, err
+	}
+	e.notifyLocked(rec)
+	e.mu.Unlock()
+
 	code, err := t.att.Respond(key, cmd.Epoch, cmd.InteractionID, cmd.Option)
 	if err != nil {
 		return nil, err
@@ -622,32 +663,37 @@ func boundResult(r *protocol.Result) *protocol.Result {
 	return &out
 }
 
-// Reconcile runs after Open. It re-examines every non-terminal record against
-// exact native evidence, never re-submits, expires deferred requests whose
-// admission window closed, and republishes unpublished revisions.
+// Reconcile runs after Open and on every Tick. It re-examines every
+// non-terminal record against exact native evidence, never re-submits, expires
+// deferred requests whose window closed, and republishes unpublished
+// revisions. Native attachment calls happen without the endpoint lock held; a
+// single poisoned record is reported, never allowed to abort the whole pass.
 func (e *Endpoint) Reconcile() error {
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	recs, err := e.store.List()
+	e.mu.Unlock()
 	if err != nil {
 		return err
 	}
+	var firstErr error
 	for _, rec := range recs {
+		var rerr error
 		switch rec.State {
 		case protocol.StateDispatching, protocol.StateRunning, protocol.StateUncertain:
-			if err := e.reconcileLiveLocked(rec); err != nil {
-				return err
-			}
+			rerr = e.reconcileLive(rec)
 		case protocol.StateReceived:
-			if err := e.admitDeferredLocked(rec); err != nil {
-				return err
-			}
+			rerr = e.admitDeferred(rec)
 		}
-		if rec.PublishedRevision < rec.Revision {
-			e.publishLocked(rec)
+		if rerr != nil && firstErr == nil {
+			firstErr = rerr
 		}
+		e.mu.Lock()
+		if cur, ok, gerr := e.store.Get(keyOfRecord(rec)); gerr == nil && ok && cur.PublishedRevision < cur.Revision {
+			e.publishLocked(cur)
+		}
+		e.mu.Unlock()
 	}
-	return nil
+	return firstErr
 }
 
 // Tick retries deferred admissions and expiry; carriers call it on a timer
@@ -656,24 +702,43 @@ func (e *Endpoint) Tick() error {
 	return e.Reconcile()
 }
 
-func (e *Endpoint) reconcileLiveLocked(rec *requests.Record) error {
-	key := requests.Key{CreatorHost: rec.CreatorHost, TargetID: rec.TargetID, RequestID: rec.RequestID}
+func keyOfRecord(rec *requests.Record) requests.Key {
+	return requests.Key{CreatorHost: rec.CreatorHost, TargetID: rec.TargetID, RequestID: rec.RequestID}
+}
+
+// reconcileLive resolves one non-terminal record. It calls the attachment
+// without the endpoint lock, then applies the result under the lock.
+func (e *Endpoint) reconcileLive(rec *requests.Record) error {
+	key := keyOfRecord(rec)
+	e.mu.Lock()
 	t, ok := e.targets[rec.TargetID]
+	e.mu.Unlock()
+
 	var ev Evidence
-	var err error
+	var lookupErr error
 	if ok {
-		ev, err = t.att.Lookup(key, rec.Epoch)
+		ev, lookupErr = t.att.Lookup(key, rec.Epoch)
+	}
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	rec, exists, err := e.store.Get(key)
+	if err != nil {
+		return err
+	}
+	if !exists || rec.State.Terminal() {
+		return nil
 	}
 	switch {
-	case !ok || err != nil:
+	case !ok || lookupErr != nil:
 		if rec.State == protocol.StateUncertain {
 			return nil
 		}
 		rec.State = protocol.StateUncertain
 		rec.Code = protocol.CodeAttachmentLost
 	case !ev.Known:
-		// The live attachment retains nothing for this key: nothing was
-		// admitted and nothing will be. Positive evidence, not a guess.
+		// The live attachment retains nothing for this key: admission never
+		// happened and never will. Positive evidence, not a guess.
 		rec.State = protocol.StateRejected
 		rec.Code = protocol.CodeNativeError
 	case ev.Admitted && ev.State.Terminal():
@@ -711,40 +776,60 @@ func (e *Endpoint) reconcileLiveLocked(rec *requests.Record) error {
 	return nil
 }
 
-func (e *Endpoint) admitDeferredLocked(rec *requests.Record) error {
+// admitDeferred admits a received record whose target came back inside its
+// window. The native Submit happens without the endpoint lock.
+func (e *Endpoint) admitDeferred(rec *requests.Record) error {
+	key := keyOfRecord(rec)
+	e.mu.Lock()
 	t, code := e.admissibleLocked(rec.TargetID, rec.Epoch, rec.NotAfter)
 	if code == "" && t == nil {
+		e.mu.Unlock()
 		return nil // still offline, still inside the window
 	}
 	if code != "" {
+		rec, exists, err := e.store.Get(key)
+		if err != nil || !exists || rec.State != protocol.StateReceived {
+			e.mu.Unlock()
+			return err
+		}
 		rec.Revision++
 		rec.State = protocol.StateRejected
 		rec.Code = code
 		rec.ObservedAt = protocol.FormatTime(e.now())
-		if err := e.store.Update(rec); err != nil {
-			return err
+		err = e.store.Update(rec)
+		if err == nil {
+			e.notifyLocked(rec)
 		}
-		e.notifyLocked(rec)
-		return nil
+		e.mu.Unlock()
+		return err
 	}
-	// Target came back inside the window: dispatch now, under the lock,
-	// because reconciliation is not a request path with a waiting client.
+	// Move to dispatching under the lock, then Submit unlocked.
+	rec, exists, err := e.store.Get(key)
+	if err != nil || !exists || rec.State != protocol.StateReceived {
+		e.mu.Unlock()
+		return err
+	}
 	rec.Revision++
 	rec.State = protocol.StateDispatching
 	rec.NativeDispatches = 1
 	rec.ObservedAt = protocol.FormatTime(e.now())
 	if err := e.store.Update(rec); err != nil {
+		e.mu.Unlock()
 		return err
 	}
 	e.notifyLocked(rec)
-	key := requests.Key{CreatorHost: rec.CreatorHost, TargetID: rec.TargetID, RequestID: rec.RequestID}
 	input := protocol.SubmitInput{}
 	if rec.Input != nil {
 		input = *rec.Input
 	}
+	e.mu.Unlock()
+
 	adm, nerr := t.att.Submit(BoundRequest{Key: key, Epoch: rec.Epoch, Input: input, NotAfter: rec.NotAfter})
-	rec, _, err := e.store.Get(key)
-	if err != nil || rec.State != protocol.StateDispatching {
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	rec, exists, err = e.store.Get(key)
+	if err != nil || !exists || rec.State != protocol.StateDispatching {
 		return err
 	}
 	switch {
@@ -754,6 +839,13 @@ func (e *Endpoint) admitDeferredLocked(rec *requests.Record) error {
 		rec.State = protocol.StateRunning
 		run := adm.RunID
 		rec.NativeRun = &run
+	case adm.Code == protocol.CodeCancelledBeforeAdmission:
+		rec.State = protocol.StateCancelled
+		rec.Code = adm.Code
+		if rec.Cancel == nil {
+			rec.Cancel = &protocol.Cancel{RequestedAt: protocol.FormatTime(e.now())}
+		}
+		rec.Cancel.Disposition = protocol.CancelConfirmed
 	default:
 		rec.State, rec.Code = protocol.StateRejected, adm.Code
 		if rec.Code == "" {

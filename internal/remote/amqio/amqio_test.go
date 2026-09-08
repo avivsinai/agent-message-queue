@@ -111,3 +111,67 @@ func TestImportCommandAndPublishResult(t *testing.T) {
 		t.Fatalf("record not completed and published: %+v", rec.Snapshot)
 	}
 }
+
+// TestImportLeavesCommandOnPlainError proves the carrier leaves a command in
+// new (no claim, no drained receipt) when Handle returns a plain, non-Refusal
+// error, so a command whose record may not exist is retried rather than lost.
+func TestImportLeavesCommandOnPlainError(t *testing.T) {
+	root := t.TempDir()
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	for _, h := range []string{"codex", DefaultHandle} {
+		if err := fsq.EnsureAgentDirs(root, h); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stateDir := filepath.Join(root, "extensions", "remote")
+	store, err := requests.Open(stateDir)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	var carrier *Carrier
+	ep := core.New(core.Config{Store: store, Publish: func(s protocol.Snapshot, o map[string]string) error { return carrier.Publish(s, o) }})
+	carrier, err = New(root, DefaultHandle, ep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt := fake.New("fake", "e_1")
+	ep.Register(rt)
+	t.Cleanup(func() { _ = ep.Close() })
+
+	// Deliver a valid submit command by mail.
+	body := `{"schema":"amq.remote.command/1","op":"request.submit","request_id":"11111111-1111-4111-8111-1111111111e1","target_id":"fake","epoch":"e_1","not_after":"` + protocol.FormatTime(time.Now().Add(time.Minute)) + `","input":{"text":"x"}}`
+	now := time.Now()
+	id, _ := format.NewMessageID(now)
+	msg := format.Message{Header: format.Header{Schema: format.CurrentSchema, ID: id, From: "codex", To: []string{DefaultHandle}, Thread: "p2p/codex__remote", Subject: "submit", Created: now.UTC().Format(time.RFC3339Nano), Kind: "todo"}, Body: body}
+	data, _ := msg.Marshal()
+	identity, _ := fsq.SnapshotDeliveryRoot(root)
+	droot, _ := fsq.OpenDeliveryRoot(root, identity)
+	if _, err := fsq.DeliverToInboxes(droot, []string{DefaultHandle}, id+".md", data); err != nil {
+		t.Fatalf("deliver: %v", err)
+	}
+	_ = droot.Close()
+
+	// Corrupt the on-disk record for this exact key so submit's store.Get
+	// fails to decode it and returns a plain (non-Refusal) error, the class
+	// the review found the carrier would wrongly drain.
+	hostDir := filepath.Join(stateDir, "v1", "requests", "amq:codex")
+	if err := os.MkdirAll(hostDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(hostDir, "fake__11111111-1111-4111-8111-1111111111e1.json"), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := carrier.ImportOnce(); err != nil {
+		t.Fatalf("import returned error: %v", err)
+	}
+	// The command must remain in new for retry; no record, no drained receipt.
+	if entries, _ := os.ReadDir(fsq.AgentInboxNew(root, DefaultHandle)); len(entries) != 1 {
+		t.Fatalf("command drained despite a plain store error: new has %d", len(entries))
+	}
+	if entries, _ := os.ReadDir(fsq.AgentReceipts(root, DefaultHandle)); len(entries) != 0 {
+		t.Fatalf("drained receipt emitted despite no record: %d", len(entries))
+	}
+}

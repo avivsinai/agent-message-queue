@@ -38,6 +38,7 @@ type Runtime struct {
 
 	// controls
 	admissionGate        chan struct{}
+	lookupGate           chan struct{}
 	admissionFailsAfter  bool
 	consumerSets         int
 	interactionAnswers   []Answer
@@ -152,6 +153,12 @@ func (r *Runtime) Submit(req core.BoundRequest) (core.Admission, error) {
 // Lookup implements core.Attachment.
 func (r *Runtime) Lookup(key requests.Key, epoch string) (core.Evidence, error) {
 	r.mu.Lock()
+	gate := r.lookupGate
+	r.mu.Unlock()
+	if gate != nil {
+		<-gate
+	}
+	r.mu.Lock()
 	defer r.mu.Unlock()
 	rn, ok := r.runsByKey[key]
 	if !ok || rn.epoch != epoch {
@@ -245,6 +252,25 @@ func (r *Runtime) HoldAdmission() {
 	defer r.mu.Unlock()
 	if r.admissionGate == nil {
 		r.admissionGate = make(chan struct{})
+	}
+}
+
+// HoldLookup makes Lookup block until ReleaseLookup.
+func (r *Runtime) HoldLookup() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.lookupGate == nil {
+		r.lookupGate = make(chan struct{})
+	}
+}
+
+// ReleaseLookup unblocks held Lookups.
+func (r *Runtime) ReleaseLookup() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.lookupGate != nil {
+		close(r.lookupGate)
+		r.lookupGate = nil
 	}
 }
 
