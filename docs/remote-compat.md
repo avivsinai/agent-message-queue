@@ -69,9 +69,9 @@ terminal outcome for that run).
 | --- | --- | --- | --- |
 | Submit entry | `pi.sendUserMessage(text, {deliverAs: "followUp"})` via the AMQ doorbell spool → bridge extension | delivered (queues natively; not itself a receipt) | (source: seats/harness-inject-surfaces.md §C.2; seats/amit-extension-seams.md "Bottom line for the Buzz face" item 2) |
 | Acceptance evidence | None native — `sendUserMessage` returns `void` | delivered only | (source: seats/harness-inject-surfaces.md §C.2 pi API citation "types.d.ts:903-905"; review-verdict.md "Confirmed by verification" bullet) |
-| Native run identity | `unavailable` in stock pi; Amit is extension-only over npm pi with no AgentSession wrapper, so the remote extension itself owns the input boundary: it serializes remote admission (one in flight), treats the synchronous `input` event (`source: "extension"`) as admission, takes the user `AgentMessage` from `message_start` as the run token, and `turn_end`/`agent_end` as completion | admitted (extension-owned boundary), completed (`turn_end`) | (source: seats/amit-attachment-feasibility.md §1, §4) |
+| Native run identity | `unavailable` in stock pi; Amit is extension-only over npm pi with no AgentSession wrapper, and pi queues hold plain text with no ids (`queue_update` is RPC-only, no dequeue primitive), so the remote extension owns the input boundary best-effort: `isIdle()` precheck, serialized remote admission (one in flight), `message_start` user message matched by text, `getEntries()` diff for the persisted entry id | submitted (extension-owned boundary; not the design's admitted), completed (`turn_end`) | (source: seats/amit-attachment-feasibility.md §1) |
 | Completion evidence | `agent_end`/`agent_settled` extension events, or the session JSONL's `message`/`custom` entries | completed (via shim correlation only) | (source: seats/harness-surfaces.md §1.1 event table; seats/amit-extension-seams.md §A.1) |
-| Exact cancellation gate | `ctx.abort()` | completed, but only exact when a shim first confirms the bound run is still current; else `unsupported` | (source: seats/amit-extension-seams.md §C "Abort / interrupt"; amq-remote-design.html Amit adapter card "Cancel: exact only when the shim confirms the bound run is the current one") |
+| Exact cancellation gate | `ctx.abort()` stops the current run only and keeps queued follow-ups; `clearQueue()` is not on the extension context and pi has no dequeue-by-item primitive | completed for the current bound run; `unsupported` for a queued-not-started request | (source: seats/amit-attachment-feasibility.md §2) |
 | Steer | `pi.sendUserMessage(text, {deliverAs: "steer"})`, or the dedicated `steer` RPC command | submitted | (source: seats/harness-surfaces.md §1.1; amq-remote-design.html capability table row "steer") |
 | Approvals/questions | Guardrails' `ctx.ui.select(...)` await, race-able via `pi.events` (`amit:approval-decision`) once guardrails adds a listener — not wired today | submitted, requires an Amit code change | (source: seats/pi-inter-extension-bus.md §2b, "Verdict"; seats/amit-extension-seams.md §A.7 "the one real gap") |
 | Session-switch/reload epoch triggers | `session_before_switch`, `session_before_fork`, `session_before_compact`, `session_shutdown`, `session_before_tree` extension events | delivered | (source: seats/amit-extension-seams.md §A.1 "Lifecycle" row) |
@@ -157,7 +157,7 @@ carries a one-line reason instead of a bare boolean.
   "amit": {
     "inspect": true,
     "submit": true,
-    "cancel_request": false,
+    "cancel_request": true,
     "answer_question": false,
     "approve_tool": false,
     "steer": true,
@@ -186,11 +186,11 @@ amq-remote-design.html §Capability per harness and §c-caps callout):
   §B.3).
 - `codex.terminal`: app-server has no PTY concept in-protocol (source:
   research/r9-cc-codex-attachment.md §B.4 "terminal" row).
-- `amit.cancel_request`: `ctx.abort()` exists but is only an exact cancel
-  when a shim first confirms the bound run is still current; that shim does
-  not exist yet, so this ships `false` until it does (source:
-  seats/amit-extension-seams.md §C; amq-remote-design.html Amit adapter
-  card).
+- `amit.cancel_request` is `true` for the current bound run only:
+  `ctx.abort()` stops that run and keeps queued follow-ups; a queued
+  remote request that has not started cannot be cancelled because pi has no
+  dequeue primitive, and the adapter answers `unsupported` for it (source:
+  seats/amit-attachment-feasibility.md §2).
 - `amit.answer_question` / `amit.approve_tool`: guardrails does not listen
   on `pi.events` today — wiring a remote decision into its
   `ctx.ui.select` await requires an Amit code change that has not landed
@@ -230,8 +230,7 @@ amq-remote-design.html §Capability per harness and §c-caps callout):
    research/p1-codex-probe.md "Confound: account is quota-blocked")
 3. **Amit owning input boundary** — decided in principle, not built. Amit has
    no `AgentSession` wrapper, so the remote extension owns the boundary
-   itself (serialized admission, `input` event as admission, `message_start`
-   user message as run token). Whether `clearQueue()` can remove one queued
-   remote request without dropping the human's follow-ups is the open
-   question for exact cancel of a not-yet-started request; tracked under
-   bead amit-m5pe. (source: seats/amit-attachment-feasibility.md §1, §2, §4)
+   itself (`isIdle()` precheck, serialized admission, `message_start` text
+   match, `getEntries()` entry id). pi has no dequeue-by-item primitive, so a
+   queued-not-started remote request cannot be cancelled and the projection
+   says so; tracked under bead amit-m5pe. (source: seats/amit-attachment-feasibility.md §1, §2, §4)
