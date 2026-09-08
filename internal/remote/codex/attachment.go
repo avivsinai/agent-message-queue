@@ -20,6 +20,12 @@ const ClientName = "amq-remote"
 // Version is stamped by the binary.
 var Version = "dev"
 
+// confirmTimeout bounds how long Submit waits for our own userMessage item to
+// confirm an idle turn/start actually accepted our text. The clientId echo is
+// schema-backed but unverified live (quota-blocked probe), so an unconfirmed
+// turn is refused, never admitted.
+const confirmTimeout = 12 * time.Second
+
 // Approval methods the app-server sends as server requests. Only the
 // command-execution family is answered; the rest stay local-only.
 const (
@@ -39,6 +45,10 @@ type run struct {
 	local        bool
 	interaction  *protocol.Interaction
 	approvalReqs map[string]json.RawMessage
+	// confirmed closes when the userMessage item carrying this run's
+	// clientUserMessageId is observed, proving turn/start accepted our text
+	// rather than joining a turn started in the race window and dropping it.
+	confirmed chan struct{}
 }
 
 // Attachment is one running Codex thread reached through the shared
@@ -184,73 +194,145 @@ func (a *Attachment) Inspect() protocol.Session {
 	}
 }
 
-// Submit implements core.Attachment. The status check and the turn/start
-// happen under one lock so a local turn starting in between is refused as
-// busy instead of silently joining Codex's running turn (measured behavior).
+// Submit implements core.Attachment. It never holds the attachment lock across
+// a network call (that would stall the read loop that delivers the response),
+// and for an idle turn/start it admits only after our own userMessage item
+// confirms the text landed — the measured busy-join drops the caller's text
+// and returns the running turn, which must not become an admitted phantom run.
 func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	if a.offline {
+		a.mu.Unlock()
 		return core.Admission{}, errors.New("app-server connection is closed")
 	}
 	if req.Epoch != a.epoch {
+		a.mu.Unlock()
 		return core.Admission{Code: protocol.CodeStaleEpoch}, nil
 	}
 	if a.cancelIntent[req.Key] {
 		delete(a.cancelIntent, req.Key)
+		a.mu.Unlock()
 		return core.Admission{Code: protocol.CodeCancelledBeforeAdmission}, nil
 	}
 	if existing, ok := a.runs[req.Key]; ok {
-		return core.Admission{Admitted: true, RunID: existing.runID()}, nil
+		id := existing.runID()
+		a.mu.Unlock()
+		return core.Admission{Admitted: true, RunID: id}, nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-	input := []map[string]string{{"type": "text", "text": req.Input.Text}}
-	r := &run{key: req.Key, epoch: req.Epoch, state: protocol.StateRunning, approvalReqs: map[string]json.RawMessage{}}
 	busy := a.status == "busy" || a.activeTurn != ""
+	activeTurn := a.activeTurn
+	a.mu.Unlock()
+
+	input := []map[string]any{{"type": "text", "text": req.Input.Text}}
+
 	switch {
 	case req.Input.Deliver == protocol.DeliverSteer:
+		// Steer interleaves into the running turn; expectedTurnId makes the
+		// app-server reject if the active turn changed under us, so no
+		// separate confirmation is needed.
 		if !busy {
 			return core.Admission{Code: protocol.CodeUnsupported, Message: "steer needs an active turn; use deliver=turn"}, nil
 		}
-		if err := a.client.Call(ctx, "turn/steer", map[string]any{"threadId": a.threadID, "expectedTurnId": a.activeTurn, "input": input, "clientUserMessageId": req.Key.RequestID}, nil); err != nil {
+		if err := a.call("turn/steer", map[string]any{"threadId": a.threadID, "expectedTurnId": activeTurn, "input": input, "clientUserMessageId": req.Key.RequestID}, nil); err != nil {
 			return refusal(err), nil
 		}
-		r.turnID = a.activeTurn
+		r := &run{key: req.Key, epoch: req.Epoch, state: protocol.StateRunning, turnID: activeTurn, approvalReqs: map[string]json.RawMessage{}}
+		a.mu.Lock()
+		a.runs[req.Key] = r
+		a.byClientID[req.Key.RequestID] = r
+		a.byTurn[activeTurn] = r
+		a.mu.Unlock()
+		return core.Admission{Admitted: true, RunID: r.runID()}, nil
+
 	case busy && req.Input.Busy == protocol.BusyQueue:
-		if err := a.client.Call(ctx, "thread/queue/add", map[string]any{"threadId": a.threadID, "clientUserMessageId": req.Key.RequestID, "input": input}, nil); err != nil {
+		// Codex's own FIFO queue primitive; acceptance is Codex-native.
+		if err := a.call("thread/queue/add", map[string]any{"threadId": a.threadID, "clientUserMessageId": req.Key.RequestID, "input": input}, nil); err != nil {
 			return refusal(err), nil
 		}
-		r.queued = true
+		r := &run{key: req.Key, epoch: req.Epoch, state: protocol.StateRunning, queued: true, approvalReqs: map[string]json.RawMessage{}}
+		a.mu.Lock()
+		a.runs[req.Key] = r
+		a.byClientID[req.Key.RequestID] = r
+		a.mu.Unlock()
+		return core.Admission{Admitted: true, RunID: r.runID()}, nil
+
 	case busy:
 		return core.Admission{Code: protocol.CodeBusy, Message: "a turn is active on this thread"}, nil
-	default:
-		var res struct {
-			Turn struct {
-				ID string `json:"id"`
-			} `json:"turn"`
-		}
-		if err := a.client.Call(ctx, "turn/start", map[string]any{"threadId": a.threadID, "input": input, "clientUserMessageId": req.Key.RequestID}, &res); err != nil {
-			return refusal(err), nil
-		}
-		if res.Turn.ID == "" {
-			return core.Admission{Code: protocol.CodeNativeError, Message: "turn/start returned no turn id"}, nil
-		}
-		if a.activeTurn != "" && a.activeTurn != res.Turn.ID {
-			// Codex answered with a turn that is not the one we saw as active;
-			// treat as a fresh turn and let notifications correct us.
-			a.activeTurn = res.Turn.ID
-		}
-		r.turnID = res.Turn.ID
-		a.activeTurn = res.Turn.ID
-		a.status = "busy"
 	}
+
+	// Idle turn/start. Register the run first so onItem can confirm our
+	// userMessage, then call unlocked, then require confirmation.
+	r := &run{key: req.Key, epoch: req.Epoch, state: protocol.StateRunning, approvalReqs: map[string]json.RawMessage{}, confirmed: make(chan struct{})}
+	a.mu.Lock()
 	a.runs[req.Key] = r
 	a.byClientID[req.Key.RequestID] = r
-	if r.turnID != "" {
-		a.byTurn[r.turnID] = r
+	a.mu.Unlock()
+
+	var res struct {
+		Turn struct {
+			ID string `json:"id"`
+		} `json:"turn"`
 	}
-	return core.Admission{Admitted: true, RunID: r.runID()}, nil
+	if err := a.call("turn/start", map[string]any{"threadId": a.threadID, "input": input, "clientUserMessageId": req.Key.RequestID}, &res); err != nil {
+		a.dropRun(req.Key)
+		return refusal(err), nil
+	}
+	if res.Turn.ID == "" {
+		a.dropRun(req.Key)
+		return core.Admission{Code: protocol.CodeNativeError, Message: "turn/start returned no turn id"}, nil
+	}
+	a.mu.Lock()
+	if r.turnID == "" {
+		r.turnID = res.Turn.ID
+		a.byTurn[res.Turn.ID] = r
+	}
+	a.activeTurn = res.Turn.ID
+	a.status = "busy"
+	confirmed := r.confirmed
+	a.mu.Unlock()
+
+	select {
+	case <-confirmed:
+		return core.Admission{Admitted: true, RunID: r.runID()}, nil
+	case <-time.After(confirmTimeout):
+		a.dropRun(req.Key)
+		return core.Admission{Code: protocol.CodeBusy, Message: "turn/start was not confirmed by our own userMessage item; it may have joined an active turn"}, nil
+	case <-a.client.Done():
+		a.dropRun(req.Key)
+		return core.Admission{Code: protocol.CodeAttachmentLost, Message: "app-server closed during turn/start"}, nil
+	}
+}
+
+// call runs one app-server request with a bounded timeout and no lock held.
+func (a *Attachment) call(method string, params, result any) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	return a.client.Call(ctx, method, params, result)
+}
+
+// dropRun removes a run binding when admission failed, so a retry is clean.
+func (a *Attachment) dropRun(key requests.Key) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if r, ok := a.runs[key]; ok {
+		delete(a.byClientID, key.RequestID)
+		if r.turnID != "" {
+			delete(a.byTurn, r.turnID)
+		}
+		delete(a.runs, key)
+	}
+}
+
+// confirmRun closes a run's confirmation channel once. The caller holds a.mu.
+func confirmRun(r *run) {
+	if r.confirmed == nil {
+		return
+	}
+	select {
+	case <-r.confirmed:
+	default:
+		close(r.confirmed)
+	}
 }
 
 func (r *run) runID() string {
@@ -546,6 +628,8 @@ func (a *Attachment) onItem(n Notification) {
 				r.queued = false
 				a.byTurn[p.TurnID] = r
 			}
+			// Our text is confirmed in this turn: admission is real.
+			confirmRun(r)
 			return
 		}
 		// A user message we did not send landed in a turn we own: the human

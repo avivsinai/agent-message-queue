@@ -111,20 +111,35 @@ func TestSubmitBindsTurnAndCompletes(t *testing.T) {
 		t.Fatalf("unexpected session: %+v", s)
 	}
 
+	// Submit blocks until our userMessage item confirms the turn accepted our
+	// text, so run it concurrently and deliver the confirming notification.
 	key := requests.Key{CreatorHost: "local", TargetID: s.TargetID, RequestID: "11111111-1111-4111-8111-111111111501"}
-	adm, err := att.Submit(core.BoundRequest{Key: key, Epoch: s.Epoch, Input: protocol.SubmitInput{Text: "say PONG"}})
-	if err != nil || !adm.Admitted || adm.RunID != "turn:u1" {
-		t.Fatalf("submit: %+v %v", adm, err)
+	type admResult struct {
+		adm core.Admission
+		err error
 	}
+	done := make(chan admResult, 1)
+	go func() {
+		adm, err := att.Submit(core.BoundRequest{Key: key, Epoch: s.Epoch, Input: protocol.SubmitInput{Text: "say PONG"}})
+		done <- admResult{adm, err}
+	}()
 	call := <-srv.calls
 	var params map[string]any
 	_ = json.Unmarshal(call.Params, &params)
 	if call.Method != "turn/start" || params["clientUserMessageId"] != key.RequestID {
 		t.Fatalf("unexpected native call: %s %v", call.Method, params)
 	}
-
 	srv.notify(t, "turn/started", `{"threadId":"t1","turn":{"id":"u1"}}`)
 	srv.notify(t, "item/started", `{"threadId":"t1","turnId":"u1","item":{"type":"userMessage","id":"i1","clientId":"`+key.RequestID+`","content":[]}}`)
+	select {
+	case r := <-done:
+		if r.err != nil || !r.adm.Admitted || r.adm.RunID != "turn:u1" {
+			t.Fatalf("submit: %+v %v", r.adm, r.err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("submit did not admit after userMessage confirmation")
+	}
+
 	srv.notify(t, "item/completed", `{"threadId":"t1","turnId":"u1","completedAtMs":1,"item":{"type":"agentMessage","id":"i2","text":"PONG"}}`)
 	// A second submit while the turn is active is refused as busy, never
 	// joined to the running turn.

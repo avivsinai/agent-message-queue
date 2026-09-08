@@ -25,8 +25,13 @@ type Admission struct {
 }
 
 // Evidence is what Lookup returns about a request the attachment may have
-// seen. Known=false means the attachment retains nothing for the key, which
-// is positive evidence that no admission happened while it was live.
+// seen. Known=false means the attachment retains nothing for the key. For an
+// adapter with a real admission primitive (codex, the fake) that is positive
+// evidence admission never happened. An adapter over an API that cannot report
+// its own rejections (the planned Amit extension, whose sendUserMessage
+// swallows errors) must NOT treat Known=false as proof of non-admission; there
+// a lost submit and a never-submitted key look identical, so such an adapter
+// leaves the record uncertain rather than rejecting it.
 type Evidence struct {
 	Known             bool
 	Admitted          bool
