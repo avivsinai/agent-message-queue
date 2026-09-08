@@ -100,11 +100,16 @@ separate process beside `amq`, as `amq-keepalive` and `amq-bridge` do.
 - Codex is the strongest first adapter: the shared app-server daemon fans
   every notification out to every connection, `turn/start` returns a turn
   id, and `turn/interrupt` works from a second client. `turn/start` on a busy
-  thread returns the running turn and drops the new text, so the adapter
-  checks status inside the admission boundary.
-- Amit attaches through an extension and an owning-boundary shim in the Amit
-  repository. Off-box export of Amit session content is gated by Amit's own
-  privacy ruling.
+  thread silently joins the running turn and drops the new text, so the
+  adapter checks status inside the admission boundary and, for an idle
+  `turn/start`, admits only after our own `userMessage` item (keyed by
+  `clientUserMessageId`) confirms the text landed; an unconfirmed turn is
+  refused, never admitted.
+- Amit attaches through an extension that owns the input boundary in the Amit
+  repository. Because pi's `sendUserMessage` cannot report its own rejection,
+  the Amit adapter's evidence class is `submitted`, never `admitted`, and it
+  leaves a record `uncertain` rather than `rejected` when it retains nothing.
+  Off-box export of Amit session content is gated by Amit's own privacy ruling.
 - Claude Code advertises inspect and a weak-evidence submit only. It has no
   interrupt seam without keystrokes.
 - Terminal viewing (a read-only tmux observer over an iroh stream) and native
