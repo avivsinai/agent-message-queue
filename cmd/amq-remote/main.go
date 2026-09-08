@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/remote/amqio"
+	"github.com/avivsinai/agent-message-queue/internal/remote/codex"
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/fake"
 	"github.com/avivsinai/agent-message-queue/internal/remote/ipc"
@@ -243,6 +244,9 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	c := addCommon(fs)
 	me := fs.String("me", amqio.DefaultHandle, "endpoint mailbox handle in the root")
 	useFake := fs.Bool("fake", false, "register the deterministic fake runtime as target 'fake'")
+	codexSocket := fs.String("codex-socket", "", "unix socket of the running Codex app-server daemon; attaches its loaded threads")
+	codexThread := fs.String("codex-thread", "", "attach only this Codex thread id (with --codex-socket)")
+	codexApprove := fs.Bool("codex-approve", false, "advertise approve_tool for Codex threads (only after approval fanout is verified live)")
 	poll := fs.Duration("poll", 500*time.Millisecond, "AMQ import and reconciliation interval")
 	if err := fs.Parse(args); err != nil {
 		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", err)
@@ -269,6 +273,25 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	}
 	if *useFake {
 		ep.Register(fake.New("fake", "e_1"))
+	}
+	if *codexSocket != "" {
+		codex.Version = version
+		threads := []string{*codexThread}
+		if *codexThread == "" {
+			threads, err = codex.LoadedThreads(*codexSocket)
+			if err != nil {
+				_ = ep.Close()
+				return 0, fmt.Errorf("list codex threads: %w", err)
+			}
+		}
+		for _, id := range threads {
+			att, err := codex.Attach(*codexSocket, id, codex.WithApprovals(*codexApprove))
+			if err != nil {
+				say(stderr, "codex thread %s: %v\n", id, err)
+				continue
+			}
+			ep.Register(att)
+		}
 	}
 	if err := ep.Reconcile(); err != nil {
 		_ = ep.Close()
