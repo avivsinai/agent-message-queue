@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/avivsinai/agent-message-queue/schemas/remote-session-v1.schema.json",
+  "title": "AMQ Remote session projection v1",
+  "description": "One shared, registered runtime as the endpoint currently sees it. Capabilities are observed from the installed attachment, never inferred from the harness name. Weaker capability is refused, not substituted.",
+  "type": "object",
+  "required": ["schema", "target_id", "epoch", "harness", "attachment", "status", "capabilities", "observed_at"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": { "const": "amq.remote.session/1" },
+    "target_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "epoch": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "harness": { "enum": ["codex", "amit", "claude_code", "fake"] },
+    "display_name": { "type": "string", "maxLength": 256 },
+    "host": { "type": "string", "maxLength": 128 },
+    "project": { "type": "string", "maxLength": 1024, "description": "Working directory or project label as the harness reports it." },
+    "attachment": { "enum": ["live", "stale", "offline"] },
+    "status": { "enum": ["idle", "busy", "waiting_input", "offline", "unknown"] },
+    "pending_interaction": { "type": ["string", "null"], "maxLength": 128 },
+    "active_request_ref": { "type": ["string", "null"], "pattern": "^amqr1_[a-z2-7]{16,200}$" },
+    "capabilities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["inspect", "submit", "cancel_request", "answer_question", "approve_tool", "steer", "terminal"],
+      "properties": {
+        "inspect": { "type": "boolean" },
+        "submit": { "type": "boolean" },
+        "cancel_request": { "type": "boolean" },
+        "answer_question": { "type": "boolean" },
+        "approve_tool": { "type": "boolean" },
+        "steer": { "type": "boolean" },
+        "terminal": { "enum": ["unavailable"] , "description": "v1 has no terminal backend; the value is present so a later backend is an additive change." }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "description": "Evidence class the attachment can give for each operation, in wake capability-vector vocabulary plus 'admitted'.",
+      "additionalProperties": false,
+      "properties": {
+        "submit": { "enum": ["delivered", "submitted", "admitted"] },
+        "completion": { "enum": ["none", "session_idle", "run_terminal"] }
+      }
+    },
+    "observed_at": { "type": "string", "format": "date-time" }
+  }
+}

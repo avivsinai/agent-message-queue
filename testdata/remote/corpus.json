@@ -1,0 +1,786 @@
+{
+  "schema": "amq.remote.corpus/1",
+  "description": "Contract corpus for the amq-remote request core. One fixture per scenario. The fake runtime, the endpoint, the CLI and the Buzz edge all consume this file. Steps run in order on a deterministic clock; 'client' steps send a command and check the reply, 'native' steps drive the fake runtime, 'crash' stops the endpoint at a named boundary, 'restart' brings it back and reconciles, 'expect' asserts the durable record.",
+  "defaults": {
+    "target_id": "t_fake1",
+    "epoch": "e_1",
+    "creator_host": "hostA",
+    "not_after": "2026-09-08T10:02:00Z",
+    "now": "2026-09-08T10:00:00Z"
+  },
+  "fixtures": [
+    {
+      "id": "Q01",
+      "title": "Identical submit delivered 100 times dispatches once",
+      "steps": [
+        {
+          "client": {
+            "op": "request.submit",
+            "request_id": "11111111-1111-4111-8111-111111111101",
+            "input": {
+              "text": "say hi"
+            }
+          },
+          "reply": {
+            "state": "running"
+          }
+        },
+        {
+          "repeat": 99,
+          "client": {
+            "op": "request.submit",
+            "request_id": "11111111-1111-4111-8111-111111111101",
+            "input": {
+              "text": "say hi"
+            }
+          },
+          "reply": {
+            "state": "running"
+          }
+        },
+        {
+          "expect": {
+            "request_id": "11111111-1111-4111-8111-111111111101",
+            "native_dispatches": 1
+          }
+        }
+      ]
+    },
+    {
+      "id": "Q02",
+      "title": "Reused id with different bytes is request_conflict",
+      "steps": [
+        {
+          "client": {
+            "op": "request.submit",
+            "request_id": "11111111-1111-4111-8111-111111111102",
+            "input": {
+              "text": "first"
+            }
+          },
+          "reply": {
+            "state": "running"
+          }
+        },
+        {
+          "client": {
+            "op": "request.submit",
+            "request_id": "11111111-1111-4111-8111-111111111102",
+            "input": {
+              "text": "second"
+            }
+          },
+          "reply": {
+            "state": "running",
+            "code": "request_conflict"
+          }
+        },
+        {
+          "expect": {
+            "request_id": "11111111-1111-4111-8111-111111111102",
+            "native_dispatches": 1,
+            "input_text": "first"
+          }
+        }
+      ]
+    },
+    {
+      "id": "Q03",
+      "title": "Cancel reaches the target before submit",
+      "steps": [
+        {
+          "client": {
+            "op": "request.cancel",
+            "request_ref_for": "11111111-1111-4111-8111-111111111103"
+          },
+          "reply": {
+            "state": "cancelled",
+            "code": "cancelled_before_admission"
+          }
+        },
+        {
+          "client": {
+            "op": "request.submit",
+            "request_id": "11111111-1111-4111-8111-111111111103",
+            "input": {
+              "text": "late"
+            }
+          },
+          "reply": {
+            "state": "cancelled",
+            "code": "cancelled_before_admission"
+          }
+        },
+        {
+          "expect": {
+            "request_id": "11111111-1111-4111-8111-111111111103",
+            "native_dispatches": 0
+          }
+        }
+      ]
+    },
+    {
+      "id": "Q04",
+      "title": "Cancel races the native admission boundary",
+      "steps": [
+        {
+          "native": "hold_admission"
+        },
+        {
+          "client": {
+            "op": "request.submit",
+            "request_id": "11111111-1111-4111-8111-111111111104",
+            "input": {
+              "text": "race"
+            }
+          },
+          "async": true
+        },
+        {
+          "client": {
+            "op": "request.cancel",
+            "request_ref_for": "11111111-1111-4111-8111-111111111104"
+          },
+          "reply": {
+            "cancel": {
+              "disposition": "cancel_requested"
+            }
+          }
+        },
+        {
+          "native": "release_admission"
+        },
+        {
+          "expect": {
+            "request_id": "11111111-1111-4111-8111-111111111104",
+            "state_in": [
+              "cancelled"
+            ],
+            "no_orphan_run": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "Q05",
+      "title": "Delayed cancel of A never aborts B",
+      "steps": [
+        {
+          "client": {
+            "op": "request.submit",
+            "request_id": "11111111-1111-4111-8111-111111111105",
+            "input": {
+              "text": "A"
+            }
+          },
+          "reply": {
+            "state": "running"
+          }
+        },
+        {
+          "native": "complete",
+          "request_id": "11111111-1111-4111-8111-111111111105",
+          "text": "A done"
+        },
+        {
+          "client": {
+            "op": "request.submit",
+            "request_id": "11111111-1111-4111-8111-111111111106",
+            "input": {
+              "text": "B"
+            }
+          },
+          "reply": {
+            "state": "running"
+          }
+        },
+        {
+          "client": {
+            "op": "request.cancel",
+            "request_ref_for": "11111111-1111-4111-8111-111111111105"
+          },
+          "reply": {
+            "state": "completed",
+            "cancel": {
+              "disposition": "noop_already_terminal"
+            }
+          }
+        },
+        {
+          "expect": {
+            "request_id": "11111111-1111-4111-8111-111111111106",
+            "state": "running",
+            "native_aborts": 0
+          }
+        }
+      ]
+    },
+    {
+      "id": "Q06",
+      "title": "Global idle is not completion",
+      "steps": [
+        {
+          "native": "idle"
+        },
+        {
+          "client": {
+            "op": "request.submit",
+            "request_id": "11111111-1111-4111-8111-111111111107",
+            "input": {
+              "text": "work"
+            }
+          },
+          "reply": {
+            "state": "running"
+          }
+        },
+        {
+          "native": "idle_blip"
+        },
+        {
+          "client": {
+            "op": "request.get",
+            "request_ref_for": "11111111-1111-4111-8111-111111111107"
+          },
+          "reply": {
+            "state": "running"
+          }
+        }
+      ]
+    },
+    {
+      "id": "Q07",
+      "title": "Wait after completion returns the stored result",
+      "steps": [
+        {
+          "client": {
+            "op": "request.submit",
+            "request_id": "11111111-1111-4111-8111-111111111108",
+            "input": {
+              "text": "quick"
+            }
+          },
+          "reply": {
+            "state": "running"
+          }
+        },
+        {
+          "native": "complete",
+          "request_id": "11111111-1111-4111-8111-111111111108",
+          "text": "done quickly"
+        },
+        {
+          "client": {
+            "op": "request.get",
+            "request_ref_for": "11111111-1111-4111-8111-111111111108"
+          },
+          "reply": {
+            "state": "completed",
+            "result": {
+              "text": "done quickly",
+              "truncated": false
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "Q08",
+      "title": "Interrupting wait does not cancel",
+      "steps": [
+        {
+          "client": {
+            "op": "request.submit",
+            "request_id": "11111111-1111-4111-8111-111111111109",
+            "input": {
+              "text": "long"
+            }
+          },
+          "reply": {
+            "state": "running"
+          }
+        },
+        {
+          "cli": "wait",
+          "request_id": "11111111-1111-4111-8111-111111111109",
+          "interrupt_after": "1s",
+          "exit": 130
+        },
+        {
+          "expect": {
+            "request_id": "11111111-1111-4111-8111-111111111109",
+            "state": "running",
+            "native_aborts": 0
+          }
+        }
+      ]
+    },
+    {
+      "id": "Q09",
+      "title": "Remote submit during a local draft leaves the draft intact",
+      "steps": [
+        {
+          "native": "local_draft",
+          "text": "half-typed local thought"
+        },
+        {
+          "client": {
+            "op": "request.submit",
+            "request_id": "11111111-1111-4111-8111-111111111110",
+            "input": {
+              "text": "remote"
+            }
+          },
+          "reply": {
+            "state": "running"
+          }
+        },
+        {
+          "expect_native": {
+            "draft": "half-typed local thought",
+            "session_id_unchanged": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "Q10",
+      "title": "Human steers a remote run; intervention recorded, no misattribution",
+      "steps": [
+        {
+          "client": {
+            "op": "request.submit",
+            "request_id": "11111111-1111-4111-8111-111111111111",
+            "input": {
+              "text": "remote"
+            }
+          },
+          "reply": {
+            "state": "running"
+          }
+        },
+        {
+          "native": "local_input",
+          "text": "actually do it differently"
+        },
+        {
+          "native": "complete",
+          "request_id": "11111111-1111-4111-8111-111111111111",
+          "text": "joint result"
+        },
+        {
+          "client": {
+            "op": "request.get",
+            "request_ref_for": "11111111-1111-4111-8111-111111111111"
+          },
+          "reply": {
+            "state": "completed",
+            "local_intervention": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "Q11",
+      "title": "Helper returns before native admission fails; no false running",
+      "steps": [
+        {
+          "native": "admission_fails_after_return"
+        },
+        {
+          "client": {
+            "op": "request.submit",
+            "request_id": "11111111-1111-4111-8111-111111111112",
+            "input": {
+              "text": "x"
+            }
+          },
+          "reply": {
+            "state": "rejected",
+            "code": "native_error"
+          }
+        },
+        {
+          "expect": {
+            "request_id": "11111111-1111-4111-8111-111111111112",
+            "never_state": [
+              "running",
+              "completed"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "Q12",
+      "title": "Reload or session switch advances the epoch; old epoch cannot control",
+      "steps": [
+        {
+          "native": "switch_session",
+          "new_epoch": "e_2"
+        },
+        {
+          "client": {
+            "op": "request.submit",
+            "request_id": "11111111-1111-4111-8111-111111111113",
+            "epoch": "e_1",
+            "input": {
+              "text": "stale"
+            }
+          },
+          "reply": {
+            "state": "rejected",
+            "code": "stale_epoch"
+          }
+        },
+        {
+          "client": {
+            "op": "session.inspect"
+          },
+          "reply": {
+            "epoch": "e_2"
+          }
+        },
+        {
+          "expect_native": {
+            "consumer_sets": 1
+          }
+        }
+      ]
+    },
+    {
+      "id": "Q13",
+      "title": "Local and remote both answer one question; second gets already_resolved",
+      "steps": [
+        {
+          "client": {
+            "op": "request.submit",
+            "request_id": "11111111-1111-4111-8111-111111111114",
+            "input": {
+              "text": "ask me"
+            }
+          },
+          "reply": {
+            "state": "running"
+          }
+        },
+        {
+          "native": "question",
+          "request_id": "11111111-1111-4111-8111-111111111114",
+          "interaction_id": "i_1",
+          "options": [
+            "yes",
+            "no"
+          ]
+        },
+        {
+          "native": "local_answer",
+          "interaction_id": "i_1",
+          "option": "yes"
+        },
+        {
+          "client": {
+            "op": "interaction.respond",
+            "request_ref_for": "11111111-1111-4111-8111-111111111114",
+            "interaction_id": "i_1",
+            "option": "no"
+          },
+          "reply": {
+            "code": "already_resolved"
+          }
+        },
+        {
+          "expect_native": {
+            "answers": [
+              {
+                "interaction_id": "i_1",
+                "option": "yes"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "Q14",
+      "title": "Submit expires while the target is offline; never executes later",
+      "steps": [
+        {
+          "native": "offline"
+        },
+        {
+          "client": {
+            "op": "request.submit",
+            "request_id": "11111111-1111-4111-8111-111111111115",
+            "not_after": "2026-09-08T10:01:00Z",
+            "input": {
+              "text": "late"
+            }
+          },
+          "deferred": true
+        },
+        {
+          "clock": "2026-09-08T10:05:00Z"
+        },
+        {
+          "native": "online"
+        },
+        {
+          "client": {
+            "op": "request.get",
+            "request_ref_for": "11111111-1111-4111-8111-111111111115"
+          },
+          "reply": {
+            "state": "rejected",
+            "code": "expired"
+          }
+        },
+        {
+          "expect": {
+            "request_id": "11111111-1111-4111-8111-111111111115",
+            "native_dispatches": 0
+          }
+        }
+      ]
+    },
+    {
+      "id": "Q15",
+      "title": "Replay after result compaction returns result_expired, not a new dispatch",
+      "steps": [
+        {
+          "client": {
+            "op": "request.submit",
+            "request_id": "11111111-1111-4111-8111-111111111116",
+            "input": {
+              "text": "old"
+            }
+          },
+          "reply": {
+            "state": "running"
+          }
+        },
+        {
+          "native": "complete",
+          "request_id": "11111111-1111-4111-8111-111111111116",
+          "text": "old result"
+        },
+        {
+          "endpoint": "compact_results"
+        },
+        {
+          "client": {
+            "op": "request.submit",
+            "request_id": "11111111-1111-4111-8111-111111111116",
+            "input": {
+              "text": "old"
+            }
+          },
+          "reply": {
+            "state": "completed",
+            "code": "result_expired"
+          }
+        },
+        {
+          "expect": {
+            "request_id": "11111111-1111-4111-8111-111111111116",
+            "native_dispatches": 1
+          }
+        }
+      ]
+    },
+    {
+      "id": "Q16",
+      "title": "Durable write failure means no dispatch",
+      "steps": [
+        {
+          "endpoint": "storage_fail_next_write"
+        },
+        {
+          "client": {
+            "op": "request.submit",
+            "request_id": "11111111-1111-4111-8111-111111111117",
+            "input": {
+              "text": "x"
+            }
+          },
+          "reply": {
+            "state": "rejected",
+            "code": "storage_full"
+          }
+        },
+        {
+          "expect": {
+            "request_id": "11111111-1111-4111-8111-111111111117",
+            "native_dispatches": 0
+          }
+        }
+      ]
+    },
+    {
+      "id": "Q17",
+      "title": "Two endpoints on one root: second refuses before importing",
+      "steps": [
+        {
+          "endpoint": "start_second",
+          "expect_exit": 6,
+          "expect_code": "endpoint_already_running"
+        },
+        {
+          "expect": {
+            "native_dispatches": 0
+          }
+        }
+      ]
+    },
+    {
+      "id": "Q18",
+      "title": "Lost publication is republished as the same revision, never rerun",
+      "steps": [
+        {
+          "client": {
+            "op": "request.submit",
+            "request_id": "11111111-1111-4111-8111-111111111118",
+            "input": {
+              "text": "x"
+            }
+          },
+          "reply": {
+            "state": "running"
+          }
+        },
+        {
+          "endpoint": "drop_next_publication"
+        },
+        {
+          "native": "complete",
+          "request_id": "11111111-1111-4111-8111-111111111118",
+          "text": "r"
+        },
+        {
+          "restart": true
+        },
+        {
+          "expect_published": {
+            "request_id": "11111111-1111-4111-8111-111111111118",
+            "terminal_state": "completed",
+            "terminal_count": 1
+          }
+        },
+        {
+          "expect": {
+            "request_id": "11111111-1111-4111-8111-111111111118",
+            "native_dispatches": 1,
+            "state": "completed"
+          }
+        }
+      ]
+    },
+    {
+      "id": "Q19",
+      "title": "Crash at every persistence and native boundary reconciles without redispatch",
+      "boundaries": [
+        "before:received_commit",
+        "after:received_commit",
+        "before:dispatching_commit",
+        "after:dispatching_commit",
+        "before:native_submit",
+        "after:native_submit",
+        "before:result_commit",
+        "after:result_commit",
+        "before:native_ack",
+        "after:native_ack",
+        "before:publish",
+        "after:publish",
+        "before:published_revision_commit"
+      ],
+      "steps": [
+        {
+          "client": {
+            "op": "request.submit",
+            "request_id": "11111111-1111-4111-8111-111111111119",
+            "input": {
+              "text": "x"
+            }
+          },
+          "may_crash": true
+        },
+        {
+          "native": "complete_if_admitted",
+          "request_id": "11111111-1111-4111-8111-111111111119",
+          "text": "r"
+        },
+        {
+          "restart": true
+        },
+        {
+          "native": "complete_if_admitted",
+          "request_id": "11111111-1111-4111-8111-111111111119",
+          "text": "r"
+        },
+        {
+          "restart": true
+        },
+        {
+          "expect": {
+            "request_id": "11111111-1111-4111-8111-111111111119",
+            "native_dispatches_max": 1,
+            "state_in": [
+              "absent",
+              "received",
+              "rejected",
+              "running",
+              "completed",
+              "uncertain"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "Q20",
+      "title": "Another authorized peer uses the original request reference",
+      "steps": [
+        {
+          "client": {
+            "op": "request.submit",
+            "request_id": "11111111-1111-4111-8111-111111111120",
+            "input": {
+              "text": "x"
+            }
+          },
+          "reply": {
+            "state": "running"
+          }
+        },
+        {
+          "client": {
+            "op": "request.get",
+            "request_ref_for": "11111111-1111-4111-8111-111111111120",
+            "creator_host": "hostB"
+          },
+          "reply": {
+            "state": "running",
+            "creator_host": "hostA"
+          }
+        },
+        {
+          "client": {
+            "op": "request.cancel",
+            "request_ref_for": "11111111-1111-4111-8111-111111111120",
+            "creator_host": "hostB"
+          },
+          "reply": {
+            "state": "cancelled"
+          }
+        },
+        {
+          "expect": {
+            "request_id": "11111111-1111-4111-8111-111111111120",
+            "creator_host": "hostA",
+            "records": 1
+          }
+        }
+      ]
+    }
+  ]
+}

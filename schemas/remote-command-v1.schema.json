@@ -1,0 +1,115 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/avivsinai/agent-message-queue/schemas/remote-command-v1.schema.json",
+  "title": "AMQ Remote command v1",
+  "description": "One command from a client to an amq-remote endpoint. Carried as the body of an ordinary AMQ message to the endpoint's handle, over local IPC, or produced by the Buzz DM edge. Discriminated by op. Unknown fields are rejected.",
+  "type": "object",
+  "required": ["schema", "op"],
+  "properties": {
+    "schema": { "const": "amq.remote.command/1" },
+    "op": {
+      "enum": [
+        "request.submit",
+        "request.get",
+        "request.cancel",
+        "session.list",
+        "session.inspect",
+        "session.events",
+        "interaction.respond"
+      ]
+    }
+  },
+  "oneOf": [
+    {
+      "title": "request.submit",
+      "properties": {
+        "op": { "const": "request.submit" },
+        "request_id": { "$ref": "#/$defs/uuid" },
+        "target_id": { "$ref": "#/$defs/opaque" },
+        "epoch": { "$ref": "#/$defs/opaque" },
+        "not_after": { "$ref": "#/$defs/rfc3339" },
+        "input": {
+          "type": "object",
+          "required": ["text"],
+          "properties": {
+            "text": { "type": "string", "minLength": 1, "maxLength": 131072 },
+            "busy": { "enum": ["reject", "queue"], "default": "reject" },
+            "deliver": { "enum": ["turn", "steer"], "default": "turn" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "required": ["schema", "op", "request_id", "target_id", "epoch", "not_after", "input"],
+      "additionalProperties": false
+    },
+    {
+      "title": "request.get",
+      "properties": {
+        "op": { "const": "request.get" },
+        "request_ref": { "$ref": "#/$defs/requestRef" }
+      },
+      "required": ["schema", "op", "request_ref"],
+      "additionalProperties": false
+    },
+    {
+      "title": "request.cancel",
+      "properties": {
+        "op": { "const": "request.cancel" },
+        "request_ref": { "$ref": "#/$defs/requestRef" },
+        "target_id": { "$ref": "#/$defs/opaque" },
+        "epoch": { "$ref": "#/$defs/opaque" },
+        "not_after": { "$ref": "#/$defs/rfc3339" }
+      },
+      "required": ["schema", "op", "request_ref", "target_id", "epoch", "not_after"],
+      "additionalProperties": false
+    },
+    {
+      "title": "session.list",
+      "properties": { "op": { "const": "session.list" } },
+      "required": ["schema", "op"],
+      "additionalProperties": false
+    },
+    {
+      "title": "session.inspect",
+      "properties": {
+        "op": { "const": "session.inspect" },
+        "target_id": { "$ref": "#/$defs/opaque" }
+      },
+      "required": ["schema", "op", "target_id"],
+      "additionalProperties": false
+    },
+    {
+      "title": "session.events",
+      "properties": {
+        "op": { "const": "session.events" },
+        "target_id": { "$ref": "#/$defs/opaque" },
+        "since": { "type": "integer", "minimum": 0, "description": "Event cursor. Omit or 0 for a fresh snapshot." }
+      },
+      "required": ["schema", "op", "target_id"],
+      "additionalProperties": false
+    },
+    {
+      "title": "interaction.respond",
+      "properties": {
+        "op": { "const": "interaction.respond" },
+        "request_ref": { "$ref": "#/$defs/requestRef" },
+        "target_id": { "$ref": "#/$defs/opaque" },
+        "epoch": { "$ref": "#/$defs/opaque" },
+        "interaction_id": { "$ref": "#/$defs/opaque" },
+        "option": { "type": "string", "minLength": 1, "maxLength": 256, "description": "Exactly one option id offered by the pending interaction." }
+      },
+      "required": ["schema", "op", "request_ref", "target_id", "epoch", "interaction_id", "option"],
+      "additionalProperties": false
+    }
+  ],
+  "$defs": {
+    "uuid": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" },
+    "opaque": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9_.:-]+$" },
+    "rfc3339": { "type": "string", "format": "date-time" },
+    "requestRef": {
+      "type": "string",
+      "description": "Opaque versioned reference from a receipt: amqr1_<base32 of creator_host, target_id, request_id>. Clients copy it; they never construct it.",
+      "pattern": "^amqr1_[a-z2-7]{16,200}$"
+    }
+  }
+}

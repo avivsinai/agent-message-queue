@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/avivsinai/agent-message-queue/schemas/remote-request-v1.schema.json",
+  "title": "AMQ Remote request snapshot v1",
+  "description": "The durable record of one remote work request, and the shape of every reply about it. Each published revision is immutable. Clients apply increasing revisions; an equal revision with different content is a protocol error.",
+  "type": "object",
+  "required": ["schema", "request_ref", "request_id", "creator_host", "target_id", "epoch", "revision", "state", "observed_at"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": { "const": "amq.remote.request/1" },
+    "request_ref": { "type": "string", "pattern": "^amqr1_[a-z2-7]{16,200}$" },
+    "request_id": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" },
+    "creator_host": { "type": "string", "minLength": 1, "maxLength": 128, "description": "Authenticated source host of the command, never a claimed handle." },
+    "target_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "epoch": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "revision": { "type": "integer", "minimum": 1 },
+    "state": {
+      "enum": ["received", "dispatching", "running", "completed", "failed", "cancelled", "rejected", "uncertain"]
+    },
+    "code": {
+      "type": "string",
+      "description": "Typed reason for rejected, failed, cancelled, or uncertain.",
+      "enum": [
+        "busy",
+        "expired",
+        "stale_epoch",
+        "unsupported",
+        "unshared",
+        "invalid",
+        "request_conflict",
+        "cancelled_before_admission",
+        "cancelled_by_request",
+        "native_error",
+        "storage_full",
+        "attachment_lost",
+        "result_expired"
+      ]
+    },
+    "input_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$", "description": "Digest of the exact submit payload bytes; a retry with a different digest is request_conflict." },
+    "not_after": { "type": "string", "format": "date-time" },
+    "native_run": { "type": ["string", "null"], "maxLength": 256, "description": "Harness run identity once admission is established." },
+    "local_intervention": { "type": "boolean", "default": false },
+    "cancel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["disposition"],
+      "properties": {
+        "requested_at": { "type": "string", "format": "date-time" },
+        "disposition": { "enum": ["cancel_requested", "cancelled", "noop_already_terminal", "unsupported"] }
+      }
+    },
+    "interaction": {
+      "type": "object",
+      "description": "Pending native question or approval, visible locally as well.",
+      "additionalProperties": false,
+      "required": ["interaction_id", "kind", "options"],
+      "properties": {
+        "interaction_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "kind": { "enum": ["question", "approval"] },
+        "prompt": { "type": "string", "maxLength": 16384 },
+        "options": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1, "maxLength": 256 } },
+        "remote_answer": { "type": "boolean", "description": "Whether the attachment can address this exact interaction from a remote answer." }
+      }
+    },
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["text", "truncated"],
+      "properties": {
+        "text": { "type": "string", "maxLength": 524288 },
+        "truncated": { "type": "boolean" },
+        "stop_reason": { "type": "string", "maxLength": 128 },
+        "error": { "type": "string", "maxLength": 4096 },
+        "native_ref": { "type": "string", "maxLength": 512, "description": "Where the full result lives on the target host; not fetchable remotely." }
+      }
+    },
+    "observed_at": { "type": "string", "format": "date-time", "description": "Time of the underlying evidence, not of the read." }
+  },
+  "allOf": [
+    { "if": { "properties": { "state": { "const": "completed" } } }, "then": { "required": ["result", "native_run"] } },
+    { "if": { "properties": { "state": { "enum": ["rejected", "uncertain", "failed"] } } }, "then": { "required": ["code"] } }
+  ]
+}
