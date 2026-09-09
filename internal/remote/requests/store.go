@@ -83,12 +83,15 @@ type Key struct {
 }
 
 // Store is the single-writer record store. Open acquires the owner lock;
-// Close releases it.
+// Close releases it and marks the store closed so every subsequent mutation
+// refuses. A closed store is not writable even if a stale reference survives
+// after a replacement endpoint has taken ownership.
 type Store struct {
 	dir      string
 	lock     *ownerLock
 	now      func() time.Time
 	readOnly bool
+	closed   bool
 }
 
 // Option configures Open.
@@ -134,8 +137,11 @@ func OpenReadOnly(stateDir string) (*Store, error) {
 	return &Store{dir: dir, now: time.Now, readOnly: true}, nil
 }
 
-// Close releases the owner lock. The records stay on disk.
+// Close releases the owner lock and marks the store closed. Every mutation
+// after Close refuses with store_closed, so a stale reference cannot write
+// once ownership has moved on. The records stay on disk.
 func (s *Store) Close() error {
+	s.closed = true
 	if s.lock == nil {
 		return nil
 	}
@@ -192,6 +198,9 @@ func (s *Store) Get(k Key) (*Record, bool, error) {
 
 // Create writes revision 1 of a new record. It refuses if a record exists.
 func (s *Store) Create(rec *Record) error {
+	if err := s.checkClosed(); err != nil {
+		return err
+	}
 	if rec.Revision != 1 {
 		return protocol.Refuse(protocol.CodeInvalid, "new record must be revision 1")
 	}
@@ -212,6 +221,9 @@ func (s *Store) Create(rec *Record) error {
 // Update writes the next revision of an existing record after checking the
 // state graph, the immutable fields, and the single-dispatch rule.
 func (s *Store) Update(rec *Record) error {
+	if err := s.checkClosed(); err != nil {
+		return err
+	}
 	prev, exists, err := s.Get(keyOf(rec))
 	if err != nil {
 		return err
@@ -241,6 +253,9 @@ func (s *Store) Update(rec *Record) error {
 // the record in place without a revision bump: publication bookkeeping is not
 // new evidence about the request.
 func (s *Store) MarkPublished(k Key, revision int64) error {
+	if err := s.checkClosed(); err != nil {
+		return err
+	}
 	rec, exists, err := s.Get(k)
 	if err != nil {
 		return err
@@ -401,6 +416,9 @@ func normalizeRecord(rec *Record) {
 // digest, epoch and disposition survive, so a replay answers result_expired
 // instead of dispatching again.
 func (s *Store) Compact(before time.Time) (int, error) {
+	if err := s.checkClosed(); err != nil {
+		return 0, err
+	}
 	recs, err := s.List()
 	if err != nil {
 		return 0, err
@@ -430,7 +448,21 @@ func (s *Store) Compact(before time.Time) (int, error) {
 	return n, nil
 }
 
+// checkClosed refuses every mutation on a closed store. Close sets closed
+// before releasing the owner lock, so a stale reference cannot write after a
+// replacement endpoint has taken ownership. Reads (Get/List) are still
+// permitted on a closed store for diagnosis.
+func (s *Store) checkClosed() error {
+	if s.closed {
+		return protocol.Refuse(protocol.CodeStoreClosed, "store is closed")
+	}
+	return nil
+}
+
 func (s *Store) write(rec *Record) error {
+	if s.closed {
+		return protocol.Refuse(protocol.CodeStoreClosed, "store is closed")
+	}
 	if s.readOnly {
 		return protocol.Refuse(protocol.CodeUnsupported, "store opened read-only")
 	}
