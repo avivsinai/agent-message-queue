@@ -207,13 +207,22 @@ func (r *Runtime) Respond(key requests.Key, _ string, interactionID, option stri
 	return "", nil
 }
 
-// AcknowledgeResult implements core.Attachment.
-func (r *Runtime) AcknowledgeResult(key requests.Key, epoch, _ string) {
+// AcknowledgeResult implements core.Attachment. It releases the retained
+// terminal evidence for the key only when the digest names exactly that
+// evidence — the design contract's "stale acknowledgements cannot release a
+// different request's result". An ack with a wrong or empty digest leaves
+// the record retained so the busy wedge stays observable.
+func (r *Runtime) AcknowledgeResult(key requests.Key, epoch, digest string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if rn, ok := r.runsByKey[key]; ok && rn.epoch == epoch && rn.state.Terminal() {
-		rn.acknowledged = true
+	rn, ok := r.runsByKey[key]
+	if !ok || rn.epoch != epoch || !rn.state.Terminal() {
+		return
 	}
+	if digest == "" || digest != protocol.EvidenceDigest(rn.result) {
+		return
+	}
+	rn.acknowledged = true
 }
 
 // Subscribe implements core.Attachment.
@@ -448,4 +457,19 @@ func (r *Runtime) HasRun(requestID string) bool {
 		}
 	}
 	return false
+}
+
+// UnacknowledgedResults counts retained terminal results the endpoint has not
+// acknowledged. While this is nonzero the runtime refuses additional remote
+// work — the B06 busy wedge.
+func (r *Runtime) UnacknowledgedResults() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	n := 0
+	for _, rn := range r.runsByKey {
+		if rn.state.Terminal() && !rn.acknowledged {
+			n++
+		}
+	}
+	return n
 }

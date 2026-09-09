@@ -62,6 +62,16 @@ type Record struct {
 	// so a replay after a crash cannot answer the same interaction twice.
 	Answered map[string]string `json:"answered,omitempty"`
 
+	// AckDigest is the evidence digest of the last acknowledgement sent to the
+	// native attachment for a terminal record, written BEFORE the native
+	// AcknowledgeResult call. It is the digest of the retained evidence being
+	// released (protocol.EvidenceDigest of the bound result), never the input
+	// digest, so a replay after a crash can re-send exactly the matching ack
+	// and the attachment can refuse one that names different evidence.
+	// Empty on non-terminal records and on terminal records whose outcome
+	// retained no evidence (nothing to release).
+	AckDigest string `json:"ack_digest,omitempty"`
+
 	// Tombstone marks a record that exists only to block a later submit or
 	// to remember a compacted result.
 	Tombstone bool `json:"tombstone,omitempty"`
@@ -267,6 +277,20 @@ func (s *Store) MarkPublished(k Key, revision int64) error {
 		return protocol.Refuse(protocol.CodeInvalid, "published revision %d is out of range", revision)
 	}
 	rec.PublishedRevision = revision
+	return s.write(rec)
+}
+
+// writeMemo rewrites one record in place without a revision bump or a state
+// check, after the caller has applied a bookkeeping-only mutation (ack intent).
+// It is the durable-write half of acknowledgement replay: the memo lands
+// before the native AcknowledgeResult call so a crash in between leaves a
+// record Reconcile can replay the ack from. It validates nothing about the
+// record beyond what write already enforces; callers must set the memo field
+// on a freshly read record, never on a stale snapshot.
+func (s *Store) WriteMemo(rec *Record) error {
+	if err := s.checkClosed(); err != nil {
+		return err
+	}
 	return s.write(rec)
 }
 
