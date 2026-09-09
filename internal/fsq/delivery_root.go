@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -49,6 +50,16 @@ type DirectChildExistsError struct {
 
 func (e *DirectChildExistsError) Error() string {
 	return fmt.Sprintf("direct child %q already exists", e.Name)
+}
+
+// SetSyncDirFaultForTest replaces this root's directory-sync implementation
+// with fn (nil restores the platform sync). Existing fsq tests reach the
+// unexported field directly; this exported hook exists for out-of-package
+// regression tests (amqio) that must force a CommittedDurabilityError from a
+// committed delivery. Install it right after OpenDeliveryRoot, before any
+// delivery, and keep it deterministic (no sleeps, no goroutines).
+func (r *DeliveryRoot) SetSyncDirFaultForTest(fn func(dir string) error) {
+	r.syncDirForTest = fn
 }
 
 // beforeCreateDirectChildExclusiveForTest runs after VerifyBase and before
@@ -442,7 +453,7 @@ func (r *DeliveryRoot) EnsureRootDirs() error {
 		return err
 	}
 	for _, dir := range []string{"agents", "threads", "meta"} {
-		if err := r.root.MkdirAll(dir, 0o700); err != nil {
+		if err := r.mkdirAllSynced(dir); err != nil {
 			return err
 		}
 	}
@@ -459,7 +470,7 @@ func (r *DeliveryRoot) EnsureAgentDirs(agent string) error {
 		return err
 	}
 	for _, leaf := range requiredMailboxLeaves {
-		if err := r.root.MkdirAll(MailboxRootRelativePath(agent, leaf), 0o700); err != nil {
+		if err := r.mkdirAllSynced(MailboxRootRelativePath(agent, leaf)); err != nil {
 			return err
 		}
 	}
@@ -479,7 +490,7 @@ func (r *DeliveryRoot) EnsureAgentDir(agent string, leaf MailboxLeaf) error {
 	if err := r.VerifyBase(); err != nil {
 		return err
 	}
-	return r.root.MkdirAll(MailboxRootRelativePath(agent, leaf), 0o700)
+	return r.mkdirAllSynced(MailboxRootRelativePath(agent, leaf))
 }
 
 // LayoutState classifies a pinned root's top-level queue layout.
@@ -571,6 +582,56 @@ func (r *DeliveryRoot) DisplayPath(name string) string {
 func (r *DeliveryRoot) dirExists(name string) bool {
 	info, err := r.root.Stat(name)
 	return err == nil && info.IsDir()
+}
+
+// mkdirAllSynced creates dir and any missing ancestors through the pinned
+// root, then fsyncs every directory level this call created. Delivery writes
+// fsync the message file and its leaf directory; without also syncing the
+// newly created ancestors, a crash right after a first-contact delivery can
+// still lose the whole mailbox tree along with the message it committed.
+// Pre-existing levels are not re-synced: this call introduced nothing below
+// them. A failed ancestor sync is reported as a plain error (nothing has been
+// committed at the leaf yet, so the caller's staging cleanup still applies).
+func (r *DeliveryRoot) mkdirAllSynced(dir string) error {
+	missing, err := r.firstMissingAncestor(dir)
+	if err != nil {
+		return err
+	}
+	if missing == "" {
+		return nil
+	}
+	if err := r.root.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	for d := dir; ; d = filepath.Dir(d) {
+		if err := r.syncDir(d); err != nil {
+			return fmt.Errorf("sync created ancestor %s: %w", d, err)
+		}
+		if d == missing {
+			return nil
+		}
+	}
+}
+
+// firstMissingAncestor walks from dir toward the pinned root and returns the
+// shallowest missing level (the topmost ancestor that does not exist yet), or
+// "" when every level already exists.
+func (r *DeliveryRoot) firstMissingAncestor(dir string) (string, error) {
+	missing := ""
+	current := dir
+	for {
+		if _, err := r.root.Stat(current); err == nil {
+			return missing, nil
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return "", fmt.Errorf("stat %s: %w", current, err)
+		}
+		missing = current
+		parent := filepath.Dir(current)
+		if parent == current {
+			return missing, nil
+		}
+		current = parent
+	}
 }
 
 // CreateExclusiveFile writes a root-relative regular file and refuses if the

@@ -76,6 +76,29 @@ var requiredMailboxLeaves = [...]MailboxLeaf{
 	MailboxReceipts,
 }
 
+// firstMissingAncestorAmbient walks from dir toward the filesystem root and
+// returns the shallowest missing level (the topmost ancestor that does not
+// exist yet), or "" when every level already exists.
+// Companion to DeliveryRoot.firstMissingAncestor for the ambient-path layout
+// helpers that run before a capability is opened.
+func firstMissingAncestorAmbient(dir string) (string, error) {
+	missing := ""
+	current := dir
+	for {
+		if _, err := os.Stat(current); err == nil {
+			return missing, nil
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return "", fmt.Errorf("stat %s: %w", current, err)
+		}
+		missing = current
+		parent := filepath.Dir(current)
+		if parent == current {
+			return missing, nil
+		}
+		current = parent
+	}
+}
+
 // RequiredMailboxLeaves returns the one ordered mailbox-layout contract.
 func RequiredMailboxLeaves() []MailboxLeaf {
 	leaves := make([]MailboxLeaf, len(requiredMailboxLeaves))
@@ -149,8 +172,26 @@ func EnsureAgentDirs(root, agent string) error {
 		return err
 	}
 	for _, leaf := range requiredMailboxLeaves {
-		if err := os.MkdirAll(AgentMailboxPath(root, agent, leaf), 0o700); err != nil {
+		dir := AgentMailboxPath(root, agent, leaf)
+		missing, err := firstMissingAncestorAmbient(dir)
+		if err != nil {
 			return err
+		}
+		if missing == "" {
+			continue
+		}
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return err
+		}
+		// Sync every level this call created so a crash cannot lose the
+		// mailbox tree below a newly provisioned agent directory.
+		for d := dir; ; d = filepath.Dir(d) {
+			if err := SyncDir(d); err != nil {
+				return fmt.Errorf("sync created ancestor %s: %w", d, err)
+			}
+			if d == missing {
+				break
+			}
 		}
 	}
 	return nil
