@@ -108,7 +108,7 @@ func TestReplyShape(t *testing.T) {
 	rep := Reply{
 		Snapshot: Snapshot{
 			Schema: SchemaRequest, RequestRef: "amqr1_" + strings.Repeat("a", 20),
-			RequestID: "11111111-1111-4111-8111-111111111501",
+			RequestID:   "11111111-1111-4111-8111-111111111501",
 			CreatorHost: "hostA", TargetID: "t_fake1", Epoch: "e_1",
 			Revision: 1, State: StateReceived,
 			ObservedAt: "2026-09-08T10:00:00Z",

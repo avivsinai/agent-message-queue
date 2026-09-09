@@ -222,7 +222,7 @@ type Snapshot struct {
 // command rather than regenerating a different one.
 type Outcome struct {
 	Op          Op                `json:"op"`
-	Code        Code              `json:"code,omitempty"`        // request_conflict, already_resolved, "" on plain success
+	Code        Code              `json:"code,omitempty"` // request_conflict, already_resolved, "" on plain success
 	Message     string            `json:"message,omitempty"`
 	Disposition CancelDisposition `json:"disposition,omitempty"` // cancel replies only
 }
@@ -403,10 +403,11 @@ const digestPrefix = "sha256:"
 // client's command.
 //
 // Canonical byte construction (for carriers that build the bytes themselves):
-//   json.Marshal of digestPayload{Schema,Op,RequestID,TargetID,Epoch,NotAfter,Input}
-//   with struct field order fixed (Go json emits in struct order, which is the
-//   canonical order below) and no extra whitespace, then sha256 hex with the
-//   "sha256:" prefix.
+//
+//	json.Marshal of digestPayload{Schema,Op,RequestID,TargetID,Epoch,NotAfter,Input}
+//	with struct field order fixed (Go json emits in struct order, which is the
+//	canonical order below) and no extra whitespace, then sha256 hex with the
+//	"sha256:" prefix.
 func CommandDigest(cmd *Command) string {
 	if cmd == nil || cmd.Op != OpRequestSubmit {
 		return ""
