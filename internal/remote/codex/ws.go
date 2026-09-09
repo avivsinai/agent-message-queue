@@ -82,6 +82,11 @@ func (w *wsConn) handshake() error {
 	return nil
 }
 
+// setWriteDeadline bounds subsequent frame writes; zero clears it.
+func (w *wsConn) setWriteDeadline(t time.Time) {
+	_ = w.conn.SetWriteDeadline(t)
+}
+
 // writeText sends one masked text frame.
 func (w *wsConn) writeText(payload []byte) error {
 	return w.writeFrame(opText, payload)

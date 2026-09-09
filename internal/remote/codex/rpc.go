@@ -141,12 +141,19 @@ func (c *Client) Call(ctx context.Context, method string, params any, result any
 	}
 	c.pending[id] = ch
 	c.mu.Unlock()
+	// Bound the write itself by the context: a blocked socket write must abort
+	// at the deadline, not hang until the connection is closed (Pro B14).
+	if dl, ok := ctx.Deadline(); ok {
+		c.ws.setWriteDeadline(dl)
+	}
 	if err := c.ws.writeText(data); err != nil {
+		c.ws.setWriteDeadline(time.Time{})
 		c.mu.Lock()
 		delete(c.pending, id)
 		c.mu.Unlock()
 		return err
 	}
+	c.ws.setWriteDeadline(time.Time{})
 	select {
 	case resp, ok := <-ch:
 		if !ok {
