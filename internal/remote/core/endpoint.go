@@ -664,18 +664,24 @@ func (e *Endpoint) onNative(targetID string, ev NativeEvent) {
 	e.publishLocked(rec)
 }
 
-// notifyStorageFailureLocked surfaces a visible storage-failure projection when
-// a durable result write fails on an async native-event path, so a request is
-// never silently left "running". No durable write happens (the store write just
-// failed); Reconcile retries the real write. The caller holds e.mu.
+// notifyStorageFailureLocked surfaces a visible failure projection when a
+// durable write fails on an async native-event path, so a request is never
+// silently left "running". No durable write happens (the store write just
+// failed); Reconcile retries the real write. Any write error surfaces, with a
+// storage_full code when that is the cause and native_error otherwise. The
+// caller holds e.mu.
 func (e *Endpoint) notifyStorageFailureLocked(rec *requests.Record, err error) {
-	var r *protocol.Refusal
-	if !errors.As(err, &r) || r.Code != protocol.CodeStorageFull {
+	if err == nil {
 		return
+	}
+	code := protocol.CodeNativeError
+	var r *protocol.Refusal
+	if errors.As(err, &r) && r.Code == protocol.CodeStorageFull {
+		code = protocol.CodeStorageFull
 	}
 	fail := *rec
 	fail.State = protocol.StateUncertain
-	fail.Code = protocol.CodeStorageFull
+	fail.Code = code
 	fail.Result = nil // never advertise a result we could not persist
 	e.notifyLocked(&fail)
 }

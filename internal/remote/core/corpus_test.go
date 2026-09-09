@@ -296,8 +296,12 @@ func toMap(t *testing.T, v any) map[string]any {
 	out, hasOut := m["outcome"].(map[string]any)
 	if hasSnap && hasOut {
 		flat := snap
-		if code, _ := out["code"].(string); code != "" {
-			flat["code"] = code
+		// Prefer the snapshot's durable code; fall back to the outcome code
+		// (e.g. request_conflict on a running record has no snapshot code).
+		if _, hasSnapCode := flat["code"]; !hasSnapCode {
+			if code, _ := out["code"].(string); code != "" {
+				flat["code"] = code
+			}
 		}
 		if disp, _ := out["disposition"].(string); disp != "" {
 			cancel, _ := flat["cancel"].(map[string]any)

@@ -157,11 +157,14 @@ func (c *Carrier) importOne(root *fsq.DeliveryRoot, name string) error {
 		return nil
 	}
 	// Reply once here for: every refusal; every non-request op; and a request
-	// op that carries an op-specific Outcome (request_conflict, already
-	// resolved) which does not travel as a published revision (Pro B09: the
-	// caller must still learn the outcome).
+	// op that carries an op-specific Outcome which does not travel as a
+	// published revision (Pro B09: the caller must still learn the outcome).
+	// The signal is a Code OR a Disposition: a no-op terminal cancel carries a
+	// disposition with an empty code and never publishes a revision, so keying
+	// on Code alone silently dropped its reply.
 	isRequestOp := cmd != nil && (cmd.Op == protocol.OpRequestSubmit || cmd.Op == protocol.OpRequestCancel)
-	if herr != nil || !isRequestOp || outcome.Code != "" {
+	hasOutcomeSignal := outcome.Code != "" || outcome.Disposition != ""
+	if herr != nil || !isRequestOp || hasOutcomeSignal {
 		if err := c.reply(root, origin, "remote reply", reply, herr); err != nil {
 			return err
 		}

@@ -244,3 +244,66 @@ func TestImportConflictRepliesToSender(t *testing.T) {
 		t.Fatalf("conflicting submit did not reply to sender with the outcome (entries %d, baseline %d, sawConflict %v)", len(entries), baseline, sawConflict)
 	}
 }
+
+// TestImportNoopCancelRepliesToSender pins Pro/amit-pi's Q4 finding: a no-op
+// terminal cancel carries an Outcome disposition with an empty Code and never
+// publishes a revision, so the carrier must still reply to the sender.
+func TestImportNoopCancelRepliesToSender(t *testing.T) {
+	root := t.TempDir()
+	_ = fsq.EnsureRootDirs(root)
+	for _, h := range []string{"codex", DefaultHandle} {
+		_ = fsq.EnsureAgentDirs(root, h)
+	}
+	store, err := requests.Open(filepath.Join(root, "extensions", "remote"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var carrier *Carrier
+	ep := core.New(core.Config{Store: store, Publish: func(s protocol.Snapshot, o map[string]string) error { return carrier.Publish(s, o) }})
+	carrier, err = New(root, DefaultHandle, ep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt := fake.New("fake", "e_1")
+	ep.Register(rt)
+	t.Cleanup(func() { _ = ep.Close() })
+
+	id := "11111111-1111-4111-8111-1111111111ca"
+	deliverSubmit(t, root, id, "work")
+	if _, err := carrier.ImportOnce(); err != nil {
+		t.Fatal(err)
+	}
+	rt.Complete(id, "done") // record is now terminal
+	baseline, _ := os.ReadDir(fsq.AgentInboxNew(root, "codex"))
+
+	// Deliver a cancel for the already-terminal record -> noop_already_terminal.
+	ref := protocol.EncodeRef("amq:codex", "fake", id)
+	body := `{"schema":"amq.remote.command/1","op":"request.cancel","request_ref":"` + ref + `","target_id":"fake","epoch":"e_1","not_after":"` + protocol.FormatTime(time.Now().Add(time.Minute)) + `"}`
+	now := time.Now()
+	mid, _ := format.NewMessageID(now)
+	msg := format.Message{Header: format.Header{Schema: format.CurrentSchema, ID: mid, From: "codex", To: []string{DefaultHandle}, Thread: "p2p/codex__remote", Subject: "cancel", Created: now.UTC().Format(time.RFC3339Nano), Kind: "todo"}, Body: body}
+	data, _ := msg.Marshal()
+	identity, _ := fsq.SnapshotDeliveryRoot(root)
+	droot, _ := fsq.OpenDeliveryRoot(root, identity)
+	if _, err := fsq.DeliverToInboxes(droot, []string{DefaultHandle}, mid+".md", data); err != nil {
+		t.Fatal(err)
+	}
+	_ = droot.Close()
+	if _, err := carrier.ImportOnce(); err != nil {
+		t.Fatal(err)
+	}
+	entries, _ := os.ReadDir(fsq.AgentInboxNew(root, "codex"))
+	sawNoop := false
+	for _, e := range entries {
+		m, err := format.ReadMessageFile(filepath.Join(fsq.AgentInboxNew(root, "codex"), e.Name()))
+		if err != nil {
+			continue
+		}
+		if strings.Contains(m.Body, string(protocol.CancelNoopTerminal)) {
+			sawNoop = true
+		}
+	}
+	if len(entries) <= len(baseline) || !sawNoop {
+		t.Fatalf("no-op terminal cancel did not reply to sender (entries %d, baseline %d, sawNoop %v)", len(entries), len(baseline), sawNoop)
+	}
+}

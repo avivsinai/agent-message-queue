@@ -357,6 +357,9 @@ func (a *Attachment) deliverPendingCancel(key requests.Key, turnID string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	if err := a.client.Call(ctx, "turn/interrupt", map[string]any{"threadId": a.threadID, "turnId": turnID}, nil); err != nil {
+		// TODO(B04): a pending cancel that confirmed then raced completion is
+		// lost here with no state mutation; re-record the intent or emit an
+		// uncertain-cancel event so it is not silently dropped.
 		return
 	}
 	// The resulting turn/completed(interrupted) drives the cancelled state.
