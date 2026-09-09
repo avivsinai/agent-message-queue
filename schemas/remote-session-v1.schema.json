@@ -17,7 +17,7 @@
     "attachment": { "enum": ["live", "stale", "offline"] },
     "status": { "enum": ["idle", "busy", "waiting_input", "offline", "unknown"] },
     "pending_interaction": { "type": ["string", "null"], "maxLength": 128 },
-    "active_request_ref": { "type": ["string", "null"], "pattern": "^amqr1_[a-z2-7]{16,200}$" },
+    "active_request_ref": { "type": ["string", "null"], "pattern": "^amqr1_[a-z2-7]{16,512}$" },
     "capabilities": {
       "type": "object",
       "additionalProperties": false,
