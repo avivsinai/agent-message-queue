@@ -176,23 +176,23 @@ func InputDigest(in *protocol.SubmitInput) string {
 	return requests.Digest(data)
 }
 
-func (e *Endpoint) submit(cmd *protocol.Command, src Source) (any, error) {
+func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, error) {
 	key := requests.Key{CreatorHost: src.Host, TargetID: cmd.TargetID, RequestID: cmd.RequestID}
-	digest := InputDigest(cmd.Input)
+	digest := protocol.CommandDigest(cmd)
 
 	e.mu.Lock()
 	rec, exists, err := e.store.Get(key)
 	if err != nil {
 		e.mu.Unlock()
-		return nil, err
+		return protocol.Reply{}, err
 	}
 	if exists {
 		e.mu.Unlock()
-		reply := rec.Snapshot
+		out := protocol.Outcome{Op: protocol.OpRequestSubmit}
 		if rec.InputDigest != "" && rec.InputDigest != digest {
-			reply.Code = protocol.CodeRequestConflict
+			out.Code = protocol.CodeRequestConflict
 		}
-		return reply, nil
+		return protocol.Reply{Snapshot: rec.Snapshot, Outcome: out}, nil
 	}
 	rec = &requests.Record{
 		Snapshot: protocol.Snapshot{
@@ -212,20 +212,20 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (any, error) {
 	}
 	if err := e.crashAt(PointBeforeReceived); err != nil {
 		e.mu.Unlock()
-		return nil, err
+		return protocol.Reply{}, err
 	}
 	if err := e.store.Create(rec); err != nil {
 		e.mu.Unlock()
 		var r *protocol.Refusal
 		if errors.As(err, &r) && r.Code == protocol.CodeStorageFull {
-			return e.unpersisted(rec, protocol.StateRejected, protocol.CodeStorageFull), nil
+			return protocol.Reply{Snapshot: e.unpersisted(rec, protocol.StateRejected, protocol.CodeStorageFull), Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: protocol.CodeStorageFull}}, nil
 		}
-		return nil, err
+		return protocol.Reply{}, err
 	}
 	e.notifyLocked(rec)
 	if err := e.crashAt(PointAfterReceived); err != nil {
 		e.mu.Unlock()
-		return nil, err
+		return protocol.Reply{}, err
 	}
 	t, code := e.admissibleLocked(cmd.TargetID, cmd.Epoch, cmd.NotAfter)
 	if code != "" {
@@ -237,16 +237,16 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (any, error) {
 		e.notifyLocked(rec)
 		e.mu.Unlock()
 		if err != nil {
-			return nil, err
+			return protocol.Reply{}, err
 		}
 		e.publishRevision(rec)
-		return rec.Snapshot, nil
+		return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit}}, nil
 	}
 	if t == nil {
 		// Target registered but offline: keep received and let Tick admit
 		// or expire it later.
 		e.mu.Unlock()
-		return rec.Snapshot, nil
+		return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit}}, nil
 	}
 	rec.Revision++
 	rec.State = protocol.StateDispatching
@@ -254,36 +254,36 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (any, error) {
 	rec.ObservedAt = protocol.FormatTime(e.now())
 	if err := e.crashAt(PointBeforeDispatching); err != nil {
 		e.mu.Unlock()
-		return nil, err
+		return protocol.Reply{}, err
 	}
 	if err := e.store.Update(rec); err != nil {
 		e.mu.Unlock()
-		return nil, err
+		return protocol.Reply{}, err
 	}
 	e.notifyLocked(rec)
 	if err := e.crashAt(PointAfterDispatching); err != nil {
 		e.mu.Unlock()
-		return nil, err
+		return protocol.Reply{}, err
 	}
 	e.mu.Unlock()
 
 	if err := e.crashAt(PointBeforeNative); err != nil {
-		return nil, err
+		return protocol.Reply{}, err
 	}
 	adm, nerr := t.att.Submit(BoundRequest{Key: key, Epoch: cmd.Epoch, Input: *cmd.Input, NotAfter: cmd.NotAfter})
 	if err := e.crashAt(PointAfterNative); err != nil {
-		return nil, err
+		return protocol.Reply{}, err
 	}
 
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	rec, _, err = e.store.Get(key)
 	if err != nil {
-		return nil, err
+		return protocol.Reply{}, err
 	}
 	if rec.State != protocol.StateDispatching {
 		// A fast native event already moved the record; the evidence wins.
-		return rec.Snapshot, nil
+		return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit}}, nil
 	}
 	switch {
 	case nerr != nil:
@@ -313,11 +313,11 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (any, error) {
 	rec.Revision++
 	rec.ObservedAt = protocol.FormatTime(e.now())
 	if err := e.store.Update(rec); err != nil {
-		return nil, err
+		return protocol.Reply{}, err
 	}
 	e.notifyLocked(rec)
 	e.publishLocked(rec)
-	return rec.Snapshot, nil
+	return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit}}, nil
 }
 
 // admissibleLocked checks share, epoch, expiry and capability. It returns the
@@ -353,30 +353,30 @@ func (e *Endpoint) unpersisted(rec *requests.Record, state protocol.State, code 
 	return s
 }
 
-func (e *Endpoint) get(cmd *protocol.Command) (any, error) {
+func (e *Endpoint) get(cmd *protocol.Command) (protocol.Reply, error) {
 	host, targetID, requestID, err := protocol.DecodeRef(cmd.RequestRef)
 	if err != nil {
-		return nil, err
+		return protocol.Reply{}, err
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	rec, ok, err := e.store.Get(requests.Key{CreatorHost: host, TargetID: targetID, RequestID: requestID})
 	if err != nil {
-		return nil, err
+		return protocol.Reply{}, err
 	}
 	if !ok {
-		return nil, protocol.Refuse(protocol.CodeNotFound, "no record for request_ref")
+		return protocol.Reply{}, protocol.Refuse(protocol.CodeNotFound, "no record for request_ref")
 	}
-	return rec.Snapshot, nil
+	return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestGet}}, nil
 }
 
-func (e *Endpoint) cancel(cmd *protocol.Command, src Source) (any, error) {
+func (e *Endpoint) cancel(cmd *protocol.Command, src Source) (protocol.Reply, error) {
 	host, targetID, requestID, err := protocol.DecodeRef(cmd.RequestRef)
 	if err != nil {
-		return nil, err
+		return protocol.Reply{}, err
 	}
 	if targetID != cmd.TargetID {
-		return nil, protocol.Refuse(protocol.CodeInvalid, "request_ref names a different target")
+		return protocol.Reply{}, protocol.Refuse(protocol.CodeInvalid, "request_ref names a different target")
 	}
 	key := requests.Key{CreatorHost: host, TargetID: targetID, RequestID: requestID}
 	now := protocol.FormatTime(e.now())
@@ -385,7 +385,7 @@ func (e *Endpoint) cancel(cmd *protocol.Command, src Source) (any, error) {
 	rec, exists, err := e.store.Get(key)
 	if err != nil {
 		e.mu.Unlock()
-		return nil, err
+		return protocol.Reply{}, err
 	}
 	if !exists {
 		// Cancel arrived before its submit: leave a tombstone that a later
@@ -410,16 +410,14 @@ func (e *Endpoint) cancel(cmd *protocol.Command, src Source) (any, error) {
 		e.notifyLocked(rec)
 		e.mu.Unlock()
 		if err != nil {
-			return nil, err
+			return protocol.Reply{}, err
 		}
 		e.publishRevision(rec)
-		return rec.Snapshot, nil
+		return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestCancel}}, nil
 	}
 	if rec.State.Terminal() {
 		e.mu.Unlock()
-		reply := rec.Snapshot
-		reply.Cancel = &protocol.Cancel{RequestedAt: now, Disposition: protocol.CancelNoopTerminal}
-		return reply, nil
+		return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestCancel, Disposition: protocol.CancelNoopTerminal}}, nil
 	}
 	if rec.State == protocol.StateReceived {
 		rec.Revision++
@@ -431,10 +429,10 @@ func (e *Endpoint) cancel(cmd *protocol.Command, src Source) (any, error) {
 		e.notifyLocked(rec)
 		e.mu.Unlock()
 		if err != nil {
-			return nil, err
+			return protocol.Reply{}, err
 		}
 		e.publishRevision(rec)
-		return rec.Snapshot, nil
+		return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestCancel}}, nil
 	}
 	t := e.targets[targetID]
 	e.mu.Unlock()
@@ -451,12 +449,10 @@ func (e *Endpoint) cancel(cmd *protocol.Command, src Source) (any, error) {
 	defer e.mu.Unlock()
 	rec, _, err = e.store.Get(key)
 	if err != nil {
-		return nil, err
+		return protocol.Reply{}, err
 	}
 	if rec.State.Terminal() {
-		reply := rec.Snapshot
-		reply.Cancel = &protocol.Cancel{RequestedAt: now, Disposition: protocol.CancelNoopTerminal}
-		return reply, nil
+		return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestCancel, Disposition: protocol.CancelNoopTerminal}}, nil
 	}
 	if nerr != nil {
 		ev = CancelEvidence{Disposition: protocol.CancelRequested, Message: nerr.Error()}
@@ -469,17 +465,17 @@ func (e *Endpoint) cancel(cmd *protocol.Command, src Source) (any, error) {
 	}
 	rec.ObservedAt = now
 	if err := e.store.Update(rec); err != nil {
-		return nil, err
+		return protocol.Reply{}, err
 	}
 	e.notifyLocked(rec)
 	e.publishLocked(rec)
-	return rec.Snapshot, nil
+	return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestCancel}}, nil
 }
 
-func (e *Endpoint) respond(cmd *protocol.Command) (any, error) {
+func (e *Endpoint) respond(cmd *protocol.Command) (protocol.Reply, error) {
 	host, targetID, requestID, err := protocol.DecodeRef(cmd.RequestRef)
 	if err != nil {
-		return nil, err
+		return protocol.Reply{}, err
 	}
 	key := requests.Key{CreatorHost: host, TargetID: targetID, RequestID: requestID}
 	e.mu.Lock()
@@ -487,21 +483,21 @@ func (e *Endpoint) respond(cmd *protocol.Command) (any, error) {
 	t := e.targets[targetID]
 	e.mu.Unlock()
 	if err != nil {
-		return nil, err
+		return protocol.Reply{}, err
 	}
 	if !exists {
-		return nil, protocol.Refuse(protocol.CodeNotFound, "no record for request_ref")
+		return protocol.Reply{}, protocol.Refuse(protocol.CodeNotFound, "no record for request_ref")
 	}
 	if t == nil {
-		return nil, protocol.Refuse(protocol.CodeAttachmentLost, "target is not attached")
+		return protocol.Reply{}, protocol.Refuse(protocol.CodeAttachmentLost, "target is not attached")
 	}
 	if _, done := rec.Answered[cmd.InteractionID]; done {
 		// A replay of an answer we already delivered; do not invoke the
 		// attachment a second time.
-		return rec.Snapshot, nil
+		return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpInteractionRespond, Code: protocol.CodeAlreadyResolved}}, nil
 	}
 	if rec.Interaction == nil || rec.Interaction.InteractionID != cmd.InteractionID {
-		return nil, protocol.Refuse(protocol.CodeAlreadyResolved, "no such pending interaction")
+		return protocol.Reply{}, protocol.Refuse(protocol.CodeAlreadyResolved, "no such pending interaction")
 	}
 	// Record the answer durably before the native call so a crash-then-replay
 	// cannot answer the same interaction twice.
@@ -509,15 +505,15 @@ func (e *Endpoint) respond(cmd *protocol.Command) (any, error) {
 	rec, exists, err = e.store.Get(key)
 	if err != nil {
 		e.mu.Unlock()
-		return nil, err
+		return protocol.Reply{}, err
 	}
 	if !exists {
 		e.mu.Unlock()
-		return nil, protocol.Refuse(protocol.CodeNotFound, "no record for request_ref")
+		return protocol.Reply{}, protocol.Refuse(protocol.CodeNotFound, "no record for request_ref")
 	}
 	if _, done := rec.Answered[cmd.InteractionID]; done {
 		e.mu.Unlock()
-		return rec.Snapshot, nil
+		return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpInteractionRespond, Code: protocol.CodeAlreadyResolved}}, nil
 	}
 	rec.Revision++
 	if rec.Answered == nil {
@@ -527,25 +523,25 @@ func (e *Endpoint) respond(cmd *protocol.Command) (any, error) {
 	rec.ObservedAt = protocol.FormatTime(e.now())
 	if err := e.store.Update(rec); err != nil {
 		e.mu.Unlock()
-		return nil, err
+		return protocol.Reply{}, err
 	}
 	e.notifyLocked(rec)
 	e.mu.Unlock()
 
 	code, err := t.att.Respond(key, cmd.Epoch, cmd.InteractionID, cmd.Option)
 	if err != nil {
-		return nil, err
+		return protocol.Reply{}, err
 	}
 	if code != "" {
-		return nil, protocol.Refuse(code, "interaction %s", cmd.InteractionID)
+		return protocol.Reply{}, protocol.Refuse(code, "interaction %s", cmd.InteractionID)
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	rec, _, err = e.store.Get(key)
 	if err != nil {
-		return nil, err
+		return protocol.Reply{}, err
 	}
-	return rec.Snapshot, nil
+	return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpInteractionRespond}}, nil
 }
 
 // Targets returns the registered target ids.

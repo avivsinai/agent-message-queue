@@ -189,6 +189,14 @@ func finish(w io.Writer, out any, asJSON bool, code int, err error) int {
 
 func printHuman(w io.Writer, out any) {
 	switch v := out.(type) {
+	case protocol.Reply:
+		printHuman(w, v.Snapshot)
+		if v.Outcome.Code != "" {
+			say(w, "outcome=%s\n", v.Outcome.Code)
+		}
+		if v.Outcome.Disposition != "" {
+			say(w, "cancel=%s\n", v.Outcome.Disposition)
+		}
 	case protocol.Snapshot:
 		say(w, "%s  %s", v.State, v.RequestRef)
 		if v.Code != "" {
@@ -442,11 +450,11 @@ func submit(args []string, stdin io.Reader) (any, int, error) {
 		NotAfter:  protocol.FormatTime(time.Now().Add(*window)),
 		Input:     &protocol.SubmitInput{Text: body, Busy: protocol.Busy(*busy), Deliver: protocol.Deliver(*deliver)},
 	}
-	snap, err := callSnapshot(stateDir, cmd)
+	rep, err := callReply(stateDir, cmd)
 	if err != nil {
 		return nil, 0, err
 	}
-	return snap, exitForReply(snap, false), nil
+	return rep, exitForOutcome(rep), nil
 }
 
 func inspectTarget(stateDir, target string) (protocol.Session, error) {
@@ -464,19 +472,30 @@ func inspectTarget(stateDir, target string) (protocol.Session, error) {
 	return s, nil
 }
 
-func callSnapshot(stateDir string, cmd *protocol.Command) (protocol.Snapshot, error) {
+func callReply(stateDir string, cmd *protocol.Command) (protocol.Reply, error) {
 	resp, err := ipc.Call(stateDir, ipc.Request{Command: cmd})
 	if err != nil {
-		return protocol.Snapshot{}, err
+		return protocol.Reply{}, err
 	}
 	if err := resp.AsError(); err != nil {
-		return protocol.Snapshot{}, err
+		return protocol.Reply{}, err
 	}
-	var snap protocol.Snapshot
-	if err := json.Unmarshal(resp.Reply, &snap); err != nil {
-		return protocol.Snapshot{}, err
+	var rep protocol.Reply
+	if err := json.Unmarshal(resp.Reply, &rep); err != nil {
+		return protocol.Reply{}, err
 	}
-	return snap, nil
+	return rep, nil
+}
+
+// exitForOutcome maps a request Reply to the exit code. An op-specific
+// Outcome.Code (request_conflict, already_resolved) is action-required and must
+// not exit 0 just because the snapshot state reads running/completed; otherwise
+// the exit follows the recorded state.
+func exitForOutcome(rep protocol.Reply) int {
+	if rep.Outcome.Code != "" {
+		return protocol.ExitCode(&protocol.Refusal{Code: rep.Outcome.Code})
+	}
+	return exitForReply(rep.Snapshot, false)
 }
 
 // exitForReply maps a snapshot to the exit code. submit and status report the
@@ -507,11 +526,11 @@ func status(args []string) (any, int, error) {
 	if err != nil {
 		return nil, protocol.ExitUsage, err
 	}
-	snap, err := callSnapshot(stateDir, &protocol.Command{Schema: protocol.SchemaCommand, Op: protocol.OpRequestGet, RequestRef: pos[0]})
+	rep, err := callReply(stateDir, &protocol.Command{Schema: protocol.SchemaCommand, Op: protocol.OpRequestGet, RequestRef: pos[0]})
 	if err != nil {
 		return nil, 0, err
 	}
-	return snap, exitForReply(snap, false), nil
+	return rep, exitForOutcome(rep), nil
 }
 
 func wait(args []string) (any, int, error) {
@@ -581,7 +600,7 @@ func cancel(args []string) (any, int, error) {
 	if err != nil {
 		return nil, 0, err
 	}
-	snap, err := callSnapshot(stateDir, &protocol.Command{
+	rep, err := callReply(stateDir, &protocol.Command{
 		Schema:     protocol.SchemaCommand,
 		Op:         protocol.OpRequestCancel,
 		RequestRef: ref,
@@ -592,7 +611,7 @@ func cancel(args []string) (any, int, error) {
 	if err != nil {
 		return nil, 0, err
 	}
-	return snap, 0, nil
+	return rep, exitForOutcome(rep), nil
 }
 
 func listRequests(args []string) (any, int, error) {

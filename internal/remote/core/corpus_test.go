@@ -288,6 +288,27 @@ func toMap(t *testing.T, v any) map[string]any {
 		// list replies
 		return map[string]any{"list": string(data)}
 	}
+	// A request reply is a Reply{snapshot, outcome}; flatten it to the flat
+	// shape the fixtures assert. The outcome carries op-specific signals
+	// (request_conflict, already_resolved, a no-op cancel disposition) that
+	// overlay the immutable snapshot without being part of it.
+	snap, hasSnap := m["snapshot"].(map[string]any)
+	out, hasOut := m["outcome"].(map[string]any)
+	if hasSnap && hasOut {
+		flat := snap
+		if code, _ := out["code"].(string); code != "" {
+			flat["code"] = code
+		}
+		if disp, _ := out["disposition"].(string); disp != "" {
+			cancel, _ := flat["cancel"].(map[string]any)
+			if cancel == nil {
+				cancel = map[string]any{}
+			}
+			cancel["disposition"] = disp
+			flat["cancel"] = cancel
+		}
+		return flat
+	}
 	return m
 }
 

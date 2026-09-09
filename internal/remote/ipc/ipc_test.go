@@ -52,18 +52,20 @@ func TestSubmitStatusWaitOverSocket(t *testing.T) {
 	if err != nil || resp.AsError() != nil {
 		t.Fatalf("submit: %v / %v", err, resp.AsError())
 	}
-	var snap protocol.Snapshot
-	if err := json.Unmarshal(resp.Reply, &snap); err != nil {
+	var rep protocol.Reply
+	if err := json.Unmarshal(resp.Reply, &rep); err != nil {
 		t.Fatal(err)
 	}
+	snap := rep.Snapshot
 	if snap.State != protocol.StateRunning || snap.CreatorHost != LocalHost {
-		t.Fatalf("unexpected submit reply: %+v", snap)
+		t.Fatalf("unexpected submit reply: %+v", rep)
 	}
 
 	resp, err = Call(stateDir, Request{Command: &protocol.Command{Schema: protocol.SchemaCommand, Op: protocol.OpRequestGet, RequestRef: snap.RequestRef}})
 	if err != nil || resp.AsError() != nil {
 		t.Fatalf("status: %v / %v", err, resp.AsError())
 	}
+	_ = rep
 
 	go func() {
 		time.Sleep(30 * time.Millisecond)

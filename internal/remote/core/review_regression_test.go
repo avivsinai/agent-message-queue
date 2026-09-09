@@ -1,6 +1,7 @@
 package core_test
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"sync"
@@ -237,5 +238,45 @@ func TestResultWriteFailureIsVisible(t *testing.T) {
 	}
 	if rec.State == protocol.StateCompleted {
 		t.Fatal("record silently completed despite the failed write")
+	}
+}
+
+// TestConflictOutcomeLeavesSnapshotByteIdentical reproduces Pro B11: a
+// conflicting submit must not copy-and-mutate the snapshot's Code; the
+// conflict lives in the reply Outcome while the snapshot stays byte-identical
+// to the stored revision, so equal revisions have equal content.
+func TestConflictOutcomeLeavesSnapshotByteIdentical(t *testing.T) {
+	store, now := openStore(t)
+	ep := core.New(core.Config{Store: store, Now: now})
+	ep.Register(fake.New("fake", "e_1"))
+
+	id := "11111111-1111-4111-8111-1111111111a9"
+	first, err := ep.Handle(submitCmd(id), core.Source{Host: "local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstRep := first.(protocol.Reply)
+	// Same id, different bytes -> request_conflict.
+	conflict := submitCmd(id)
+	conflict.Input = &protocol.SubmitInput{Text: "different bytes"}
+	second, err := ep.Handle(conflict, core.Source{Host: "local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rep := second.(protocol.Reply)
+	if rep.Outcome.Code != protocol.CodeRequestConflict {
+		t.Fatalf("outcome code = %q, want request_conflict", rep.Outcome.Code)
+	}
+	if rep.Snapshot.Code != "" {
+		t.Fatalf("snapshot was mutated with a code %q; conflict belongs in the outcome", rep.Snapshot.Code)
+	}
+	if rep.Snapshot.Revision != firstRep.Snapshot.Revision {
+		t.Fatalf("conflict changed the revision %d -> %d without new content", firstRep.Snapshot.Revision, rep.Snapshot.Revision)
+	}
+	// The two same-revision snapshots must be byte-identical.
+	a, _ := json.Marshal(firstRep.Snapshot)
+	b, _ := json.Marshal(rep.Snapshot)
+	if string(a) != string(b) {
+		t.Fatalf("equal revisions differ:\n %s\n %s", a, b)
 	}
 }
