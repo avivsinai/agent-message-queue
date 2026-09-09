@@ -261,4 +261,3 @@ func TestClosedStoreRejectsEveryMutation(t *testing.T) {
 		t.Fatalf("create after reopen: %v", err)
 	}
 }
-
