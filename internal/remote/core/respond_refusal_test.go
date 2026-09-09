@@ -2,7 +2,6 @@ package core_test
 
 import (
 	"testing"
-	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/fake"
@@ -27,7 +26,6 @@ func TestRefusedAnswerDoesNotPoisonValidAnswer(t *testing.T) {
 		t.Fatal(err)
 	}
 	rt.Question(id, "i_1", []string{"yes", "no"})
-	time.Sleep(50 * time.Millisecond)
 
 	ref := protocol.EncodeRef("local", "fake", id)
 	wrong := &protocol.Command{
