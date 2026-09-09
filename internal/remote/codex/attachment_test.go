@@ -1,0 +1,259 @@
+package codex
+
+import (
+	"encoding/json"
+	"net"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/avivsinai/agent-message-queue/internal/remote/core"
+	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
+	"github.com/avivsinai/agent-message-queue/internal/remote/requests"
+)
+
+// fakeAppServer answers the app-server methods the attachment uses with the
+// shapes recorded from the live probe and the generated schema, and lets the
+// test push notifications.
+type fakeAppServer struct {
+	ws    *wsConn
+	calls chan rpcMessage
+}
+
+func startFakeAppServer(t *testing.T) (string, *fakeAppServer) {
+	dir, err := os.MkdirTemp("", "amqcx")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "d.sock")
+	l, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	srv := &fakeAppServer{calls: make(chan rpcMessage, 16)}
+	ready := make(chan struct{})
+	go func() {
+		conn, err := l.Accept()
+		if err != nil {
+			return
+		}
+		ws, err := acceptServerWS(conn)
+		if err != nil {
+			return
+		}
+		srv.ws = ws
+		close(ready)
+		for {
+			payload, err := ws.readText()
+			if err != nil {
+				return
+			}
+			var msg rpcMessage
+			if json.Unmarshal(payload, &msg) != nil {
+				continue
+			}
+			srv.calls <- msg
+			if msg.ID == nil || msg.Method == "" {
+				continue
+			}
+			switch msg.Method {
+			case "initialize":
+				_ = ws.writeText([]byte(`{"jsonrpc":"2.0","id":` + string(*msg.ID) + `,"result":{"userAgent":"fake"}}`))
+			case "thread/resume":
+				_ = ws.writeText([]byte(`{"jsonrpc":"2.0","id":` + string(*msg.ID) + `,"result":{"thread":{"id":"t1","cwd":"/work","status":{"type":"idle"}}}}`))
+			case "turn/start":
+				_ = ws.writeText([]byte(`{"jsonrpc":"2.0","id":` + string(*msg.ID) + `,"result":{"turn":{"id":"u1","status":"inProgress"}}}`))
+			case "turn/interrupt":
+				_ = ws.writeText([]byte(`{"jsonrpc":"2.0","id":` + string(*msg.ID) + `,"result":{}}`))
+			default:
+				_ = ws.writeText([]byte(`{"jsonrpc":"2.0","id":` + string(*msg.ID) + `,"error":{"code":-32601,"message":"unexpected ` + msg.Method + `"}}`))
+			}
+		}
+	}()
+	t.Cleanup(func() {
+		select {
+		case <-ready:
+		default:
+		}
+	})
+	return sock, srv
+}
+
+func (s *fakeAppServer) notify(t *testing.T, method, params string) {
+	if err := s.ws.writeText([]byte(`{"jsonrpc":"2.0","method":"` + method + `","params":` + params + `}`)); err != nil {
+		t.Fatalf("notify %s: %v", method, err)
+	}
+}
+
+// TestSubmitBindsTurnAndCompletes is the adapter happy path: submit starts a
+// turn with our request id as clientUserMessageId, the user-message item
+// echoes it back, the agent message carries the text, and turn/completed
+// yields a completed run with that text.
+func TestSubmitBindsTurnAndCompletes(t *testing.T) {
+	sock, srv := startFakeAppServer(t)
+	att, err := Attach(sock, "t1")
+	if err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	t.Cleanup(func() { _ = att.Close() })
+	// drain initialize + thread/resume
+	<-srv.calls
+	<-srv.calls
+
+	events := make(chan core.NativeEvent, 8)
+	att.Subscribe(func(ev core.NativeEvent) { events <- ev })
+
+	s := att.Inspect()
+	if s.Harness != "codex" || s.Status != "idle" || s.Project != "/work" || !s.Capabilities.Submit || s.Capabilities.ApproveTool {
+		t.Fatalf("unexpected session: %+v", s)
+	}
+
+	// Submit blocks until our userMessage item confirms the turn accepted our
+	// text, so run it concurrently and deliver the confirming notification.
+	key := requests.Key{CreatorHost: "local", TargetID: s.TargetID, RequestID: "11111111-1111-4111-8111-111111111501"}
+	type admResult struct {
+		adm core.Admission
+		err error
+	}
+	done := make(chan admResult, 1)
+	go func() {
+		adm, err := att.Submit(core.BoundRequest{Key: key, Epoch: s.Epoch, Input: protocol.SubmitInput{Text: "say PONG"}})
+		done <- admResult{adm, err}
+	}()
+	call := <-srv.calls
+	var params map[string]any
+	_ = json.Unmarshal(call.Params, &params)
+	if call.Method != "turn/start" || params["clientUserMessageId"] != key.RequestID {
+		t.Fatalf("unexpected native call: %s %v", call.Method, params)
+	}
+	srv.notify(t, "turn/started", `{"threadId":"t1","turn":{"id":"u1"}}`)
+	srv.notify(t, "item/started", `{"threadId":"t1","turnId":"u1","item":{"type":"userMessage","id":"i1","clientId":"`+key.RequestID+`","content":[]}}`)
+	select {
+	case r := <-done:
+		if r.err != nil || !r.adm.Admitted || r.adm.RunID != "turn:u1" {
+			t.Fatalf("submit: %+v %v", r.adm, r.err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("submit did not admit after userMessage confirmation")
+	}
+
+	srv.notify(t, "item/completed", `{"threadId":"t1","turnId":"u1","completedAtMs":1,"item":{"type":"agentMessage","id":"i2","text":"PONG"}}`)
+	// A second submit while the turn is active is refused as busy, never
+	// joined to the running turn.
+	adm2, _ := att.Submit(core.BoundRequest{Key: requests.Key{CreatorHost: "local", TargetID: s.TargetID, RequestID: "11111111-1111-4111-8111-111111111502"}, Epoch: s.Epoch, Input: protocol.SubmitInput{Text: "again"}})
+	if adm2.Admitted || adm2.Code != protocol.CodeBusy {
+		t.Fatalf("busy submit not refused: %+v", adm2)
+	}
+	srv.notify(t, "turn/completed", `{"threadId":"t1","turn":{"id":"u1","status":"completed"}}`)
+
+	select {
+	case ev := <-events:
+		if ev.Type != core.EventRunCompleted || ev.Key != key || ev.Result == nil || ev.Result.Text != "PONG" {
+			t.Fatalf("unexpected event: %+v", ev)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no completion event")
+	}
+	ev, err := att.Lookup(key, s.Epoch)
+	if err != nil || !ev.Known || ev.State != protocol.StateCompleted || ev.Result.Text != "PONG" {
+		t.Fatalf("lookup: %+v %v", ev, err)
+	}
+	if att.Inspect().Status != "idle" {
+		t.Fatal("thread not idle after completion")
+	}
+}
+
+// TestTentativeRunIsNotOwned reproduces Pro finding B01: while a run is bound
+// but not yet confirmed by its own userMessage item, no consumer may treat it
+// as owned. Lookup must report Tentative (not Admitted), CancelExact must
+// record intent without interrupting a turn we do not own, a foreign turn's
+// completion must not complete our run, and once our userMessage confirms the
+// run the pending cancel is delivered against OUR turn.
+func TestTentativeRunIsNotOwned(t *testing.T) {
+	sock, srv := startFakeAppServer(t)
+	att, err := Attach(sock, "t1")
+	if err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	t.Cleanup(func() { _ = att.Close() })
+	<-srv.calls // initialize
+	<-srv.calls // thread/resume
+
+	key := requests.Key{CreatorHost: "local", TargetID: att.Inspect().TargetID, RequestID: "11111111-1111-4111-8111-111111111701"}
+	epoch := att.Inspect().Epoch
+	done := make(chan core.Admission, 1)
+	go func() {
+		adm, _ := att.Submit(core.BoundRequest{Key: key, Epoch: epoch, Input: protocol.SubmitInput{Text: "do it"}})
+		done <- adm
+	}()
+	call := <-srv.calls // turn/start; server replies turn id "u1"
+	if call.Method != "turn/start" {
+		t.Fatalf("expected turn/start, got %s", call.Method)
+	}
+
+	// Tentative window: the run is bound (byClientID) but not confirmed.
+	ev, err := att.Lookup(key, epoch)
+	if err != nil || ev.Class != core.EvidenceTentative || ev.Admitted {
+		t.Fatalf("tentative Lookup wrong: class=%s admitted=%v err=%v", ev.Class, ev.Admitted, err)
+	}
+	ce, _ := att.CancelExact(key, epoch)
+	if ce.Disposition != protocol.CancelRequested {
+		t.Fatalf("tentative cancel disposition=%s, want cancel_requested", ce.Disposition)
+	}
+	// A foreign turn completing must not complete our run.
+	srv.notify(t, "turn/completed", `{"threadId":"t1","turn":{"id":"uForeign","status":"completed"}}`)
+	time.Sleep(30 * time.Millisecond)
+	if lk, _ := att.Lookup(key, epoch); lk.State == protocol.StateCompleted {
+		t.Fatal("foreign turn/completed wrongly completed our run")
+	}
+	// No turn/interrupt may have been sent yet (we never owned a turn).
+	select {
+	case c := <-srv.calls:
+		if c.Method == "turn/interrupt" {
+			t.Fatal("interrupt sent for an unconfirmed run")
+		}
+	default:
+	}
+
+	// Confirm: our userMessage lands for turn u1. This binds byTurn and must
+	// deliver the pending cancel as an interrupt for OUR turn u1.
+	srv.notify(t, "item/started", `{"threadId":"t1","turnId":"u1","item":{"type":"userMessage","id":"i1","clientId":"`+key.RequestID+`","content":[]}}`)
+	select {
+	case adm := <-done:
+		if !adm.Admitted {
+			t.Fatalf("submit did not admit after confirmation: %+v", adm)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("submit never returned after confirmation")
+	}
+	// The pending cancel now fires turn/interrupt for u1.
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case c := <-srv.calls:
+			if c.Method == "turn/interrupt" {
+				var p map[string]any
+				_ = json.Unmarshal(c.Params, &p)
+				if p["turnId"] != "u1" {
+					t.Fatalf("interrupt hit turn %v, want our turn u1", p["turnId"])
+				}
+				return
+			}
+		case <-deadline:
+			t.Fatal("pending cancel never delivered an interrupt for our turn")
+		}
+	}
+}
+
+// TestTargetIDNoCollision reproduces Pro B03: two distinct thread ids that
+// share a 12-hex prefix must not collapse to one target id.
+func TestTargetIDNoCollision(t *testing.T) {
+	a := TargetID("0123456789ab-cdef-0000-0000-000000000001")
+	b := TargetID("0123456789ab-cdef-0000-0000-000000000002")
+	if a == b {
+		t.Fatalf("distinct threads collapsed to one target: %s", a)
+	}
+}

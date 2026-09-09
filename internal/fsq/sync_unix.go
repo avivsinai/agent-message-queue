@@ -8,8 +8,22 @@ import (
 	"syscall"
 )
 
+// syncDirAmbientForTest swaps the implementation behind the ambient-path
+// SyncDir calls. nil restores the platform sync. It returns the restore func.
+// Existing in-package tests may also reach the variable directly.
+var syncDirAmbientForTest func(dir string) error
+
+func syncDirAmbientSwapForTest(fn func(dir string) error) (restore func()) {
+	prev := syncDirAmbientForTest
+	syncDirAmbientForTest = fn
+	return func() { syncDirAmbientForTest = prev }
+}
+
 // SyncDir fsyncs a directory to ensure directory entries are durable.
 func SyncDir(dir string) error {
+	if syncDirAmbientForTest != nil {
+		return syncDirAmbientForTest(dir)
+	}
 	file, err := os.Open(dir)
 	if err != nil {
 		return err

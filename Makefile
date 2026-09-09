@@ -16,6 +16,7 @@ build:
 	go build -ldflags "-X main.version=$(EMBED_VERSION)" -o amq-keepalive ./cmd/amq-keepalive
 	go build -ldflags "-X main.version=$(EMBED_VERSION)" -o amq-bridge ./cmd/amq-bridge
 	go build -ldflags "-X main.version=$(EMBED_VERSION)" -o amq-acp ./cmd/amq-acp
+	go build -ldflags "-X main.version=$(EMBED_VERSION)" -o amq-remote ./cmd/amq-remote
 
 test:
 	go test ./...
