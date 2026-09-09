@@ -513,8 +513,15 @@ func (e *Endpoint) respond(cmd *protocol.Command) (protocol.Reply, error) {
 	if rec.Interaction == nil || rec.Interaction.InteractionID != cmd.InteractionID {
 		return protocol.Reply{}, protocol.Refuse(protocol.CodeAlreadyResolved, "no such pending interaction")
 	}
-	// Record the answer durably before the native call so a crash-then-replay
-	// cannot answer the same interaction twice.
+	// Answer-INTENT contract (bead 611.22.12): the pending interaction is
+	// revalidated under the lock that owns the persist (changed since the
+	// first read), the offered option is validated against the pending
+	// interaction BEFORE anything durable happens, and only an answer-INTENT
+	// — not a completed answer — is persisted. A positive native refusal
+	// clears the intent, so the refused answer consumes nothing and the
+	// retried valid answer reaches the attachment. The intent still makes a
+	// crash-then-replay idempotent: replay hits Answered and never invokes
+	// the attachment a second time.
 	e.mu.Lock()
 	rec, exists, err = e.store.Get(key)
 	if err != nil {
@@ -529,6 +536,22 @@ func (e *Endpoint) respond(cmd *protocol.Command) (protocol.Reply, error) {
 		e.mu.Unlock()
 		return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpInteractionRespond, Code: protocol.CodeAlreadyResolved}}, nil
 	}
+	if rec.Interaction == nil || rec.Interaction.InteractionID != cmd.InteractionID {
+		// Second read revalidation: the pending interaction changed since the
+		// first read (resolved locally, superseded, or reaped).
+		e.mu.Unlock()
+		return protocol.Reply{}, protocol.Refuse(protocol.CodeAlreadyResolved, "no such pending interaction")
+	}
+	offered := false
+	for _, o := range rec.Interaction.Options {
+		if o == cmd.Option {
+			offered = true
+		}
+	}
+	if !offered {
+		e.mu.Unlock()
+		return protocol.Reply{}, protocol.Refuse(protocol.CodeInvalid, "option %q is not offered by interaction %s", cmd.Option, cmd.InteractionID)
+	}
 	rec.Revision++
 	if rec.Answered == nil {
 		rec.Answered = map[string]string{}
@@ -542,11 +565,36 @@ func (e *Endpoint) respond(cmd *protocol.Command) (protocol.Reply, error) {
 	e.notifyLocked(rec)
 	e.mu.Unlock()
 
-	code, err := t.att.Respond(key, cmd.Epoch, cmd.InteractionID, cmd.Option)
-	if err != nil {
-		return protocol.Reply{}, err
+	code, rerr := t.att.Respond(key, cmd.Epoch, cmd.InteractionID, cmd.Option)
+	if rerr != nil {
+		// The native call itself errored without a disposition: the intent
+		// stays (the answer may have landed), so the replay path — not a
+		// fresh answer — decides. Surface the failure.
+		return protocol.Reply{}, rerr
 	}
 	if code != "" {
+		// A positive native refusal: clear the durable intent so the refused
+		// answer consumes nothing and a later VALID answer can still be
+		// delivered. Persist the clearing before surfacing the refusal.
+		e.mu.Lock()
+		if cur, ok, gerr := e.store.Get(key); gerr == nil && ok {
+			if opt, done := cur.Answered[cmd.InteractionID]; !done || opt == cmd.Option {
+				delete(cur.Answered, cmd.InteractionID)
+				cur.Revision++
+				cur.ObservedAt = protocol.FormatTime(e.now())
+				if uerr := e.store.Update(cur); uerr != nil {
+					// The intent could not be cleared durably. Leave the record
+					// as-is and surface the failure: the replay path, which
+					// revalidates the pending interaction, is the safe
+					// arbiter — never a fresh answer.
+					e.mu.Unlock()
+					return protocol.Reply{}, uerr
+				}
+				rec = cur
+				e.notifyLocked(rec)
+			}
+		}
+		e.mu.Unlock()
 		return protocol.Reply{}, protocol.Refuse(code, "interaction %s", cmd.InteractionID)
 	}
 	e.mu.Lock()

@@ -205,6 +205,18 @@ func (r *Runtime) Respond(key requests.Key, _ string, interactionID, option stri
 		r.mu.Unlock()
 		return protocol.CodeAlreadyResolved, nil
 	}
+	allowed := false
+	if rn.interaction != nil {
+		for _, o := range rn.interaction.Options {
+			if o == option {
+				allowed = true
+			}
+		}
+	}
+	if !allowed {
+		r.mu.Unlock()
+		return protocol.CodeInvalid, nil
+	}
 	r.answeredInteractions[interactionID] = option
 	r.interactionAnswers = append(r.interactionAnswers, Answer{InteractionID: interactionID, Option: option, Source: "remote"})
 	delete(r.runsByInteraction, interactionID)
