@@ -185,12 +185,12 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 	// and a plain retry with reject/turn succeeds. Full model deferred to a
 	// follow-up.
 	if cmd.Input != nil && (cmd.Input.Busy == protocol.BusyQueue || cmd.Input.Deliver == protocol.DeliverSteer) {
-		disabled := "busy"
+		mode, value := "busy", string(cmd.Input.Busy)
 		if cmd.Input.Deliver == protocol.DeliverSteer {
-			disabled = "deliver"
+			mode, value = "deliver", string(cmd.Input.Deliver)
 		}
 		return protocol.Reply{}, protocol.Refuse(protocol.CodeUnsupported,
-			"%s=%s is disabled in v1; full ownership/evidence model deferred — use busy=reject deliver=turn", disabled, cmd.Input.Busy)
+			"%s=%s is disabled in v1; full ownership/evidence model deferred — use busy=reject deliver=turn", mode, value)
 	}
 	key := requests.Key{CreatorHost: src.Host, TargetID: cmd.TargetID, RequestID: cmd.RequestID}
 	digest := protocol.CommandDigest(cmd)

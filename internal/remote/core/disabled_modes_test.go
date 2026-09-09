@@ -1,6 +1,7 @@
 package core_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
@@ -24,9 +25,10 @@ func TestDisabledQueueAndSteerModesAreRefused(t *testing.T) {
 		name  string
 		busy  protocol.Busy
 		deliv protocol.Deliver
+		want  string
 	}{
-		{"busy-queue", protocol.BusyQueue, protocol.DeliverTurn},
-		{"deliver-steer", protocol.BusyReject, protocol.DeliverSteer},
+		{"busy-queue", protocol.BusyQueue, protocol.DeliverTurn, "busy=queue"},
+		{"deliver-steer", protocol.BusyReject, protocol.DeliverSteer, "deliver=steer"},
 	} {
 		id := "11111111-1111-4111-8111-1111111111f1"
 		cmd := submitCmd(id)
@@ -36,6 +38,9 @@ func TestDisabledQueueAndSteerModesAreRefused(t *testing.T) {
 		refusal := protocol.RefusalCode(err)
 		if refusal != protocol.CodeUnsupported {
 			t.Fatalf("%s: err = %v, want unsupported refusal", tc.name, err)
+		}
+		if !strings.Contains(err.Error(), tc.want) {
+			t.Fatalf("%s: refusal %q does not name the disabled mode %q", tc.name, err.Error(), tc.want)
 		}
 		if code := protocol.ExitForCode(refusal); code != 6 {
 			t.Fatalf("%s: exit code = %d, want 6 (action required)", tc.name, code)
