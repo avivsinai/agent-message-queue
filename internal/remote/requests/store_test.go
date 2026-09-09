@@ -210,3 +210,55 @@ func TestNormalizeRecordClearsStaleInteraction(t *testing.T) {
 		t.Fatalf("terminal record kept a stale interaction: %+v", rec.Interaction)
 	}
 }
+
+// TestClosedStoreRejectsEveryMutation pins B13 store half: after Close, every
+// mutation refuses with store_closed, so a stale reference cannot write after a
+// replacement endpoint has taken ownership. Create, Update, MarkPublished, and
+// Compact all go through write() and must refuse. A fresh Open after Close
+// re-acquires the lock and can write again.
+func TestClosedStoreRejectsEveryMutation(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir, WithClock(fixedClock))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	rec := newRecord("11111111-1111-4111-8111-111111111601")
+	if err := s.Create(rec); err != nil {
+		t.Fatalf("create before close: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	// Every mutation must refuse with store_closed, not succeed silently.
+	wantCode := protocol.CodeStoreClosed
+	if got := protocol.ExitCode(s.Create(newRecord("11111111-1111-4111-8111-111111111602"))); got != protocol.ExitActionRequired {
+		t.Fatalf("Create after close: want exit %d, got %d", protocol.ExitActionRequired, got)
+	}
+	if code := protocol.RefusalCode(s.Create(newRecord("11111111-1111-4111-8111-111111111603"))); code != wantCode {
+		t.Fatalf("Create after close: want code %q, got %q", wantCode, code)
+	}
+	upd := *rec
+	upd.Revision = 2
+	upd.State = protocol.StateRunning
+	if code := protocol.RefusalCode(s.Update(&upd)); code != wantCode {
+		t.Fatalf("Update after close: want code %q, got %q", wantCode, code)
+	}
+	if code := protocol.RefusalCode(s.MarkPublished(keyOf(&upd), 1)); code != wantCode {
+		t.Fatalf("MarkPublished after close: want code %q, got %q", wantCode, code)
+	}
+	if n, err := s.Compact(fixedClock()); err == nil {
+		t.Fatalf("Compact after close: want error, got n=%d", n)
+	} else if code := protocol.RefusalCode(err); code != wantCode {
+		t.Fatalf("Compact after close: want code %q, got %q", wantCode, code)
+	}
+	// A fresh Open after Close re-acquires the lock and can write again.
+	s2, err := Open(dir, WithClock(fixedClock))
+	if err != nil {
+		t.Fatalf("reopen after close: %v", err)
+	}
+	defer func() { _ = s2.Close() }()
+	if err := s2.Create(newRecord("11111111-1111-4111-8111-111111111604")); err != nil {
+		t.Fatalf("create after reopen: %v", err)
+	}
+}
+

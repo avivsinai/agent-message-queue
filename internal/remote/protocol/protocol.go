@@ -154,6 +154,7 @@ const (
 	CodeAlreadyResolved          Code = "already_resolved"
 	CodeEndpointAlreadyRunning   Code = "endpoint_already_running"
 	CodeEndpointUnreachable      Code = "endpoint_unreachable"
+	CodeStoreClosed              Code = "store_closed"
 )
 
 // CancelDisposition is the recorded outcome of a cancel command.
@@ -307,18 +308,34 @@ func ExitCode(err error) int {
 	if err == nil {
 		return ExitSuccess
 	}
-	var r *Refusal
-	if !errors.As(err, &r) {
-		return ExitError
+	return ExitForCode(RefusalCode(err))
+}
+
+// RefusalCode extracts the Code from a Refusal error, or "" if the error is not
+// a Refusal. It lets callers branch on the refusal code without repeating the
+// errors.As dance.
+func RefusalCode(err error) Code {
+	if err == nil {
+		return ""
 	}
-	switch r.Code {
+	var r *Refusal
+	if errors.As(err, &r) {
+		return r.Code
+	}
+	return ""
+}
+
+// ExitForCode maps a refusal code to the AMQ exit code contract.
+func ExitForCode(code Code) int {
+	switch code {
 	case CodeInvalid:
 		return ExitUsage
 	case CodeNotFound:
 		return ExitNotFound
 	case CodeBusy, CodeUnsupported, CodeUnshared, CodeExpired, CodeStaleEpoch,
 		CodeRequestConflict, CodeStorageFull, CodeAttachmentLost, CodeResultExpired,
-		CodeAlreadyResolved, CodeEndpointAlreadyRunning, CodeEndpointUnreachable:
+		CodeAlreadyResolved, CodeEndpointAlreadyRunning, CodeEndpointUnreachable,
+		CodeStoreClosed:
 		return ExitActionRequired
 	}
 	return ExitError
