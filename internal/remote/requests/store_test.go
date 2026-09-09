@@ -1,6 +1,8 @@
 package requests
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -109,5 +111,102 @@ func TestStoreRefusesSecondWriterAndBadTransitions(t *testing.T) {
 	}
 	if err := s.Create(rec); protocol.ExitCode(err) != protocol.ExitActionRequired {
 		t.Fatalf("duplicate create: want request_conflict, got %v", err)
+	}
+}
+
+// TestListIsolatesPoisonRecords pins B15: a corrupt record on disk must not
+// abort List (and therefore Reconcile). The bad record is isolated, its
+// dedup identity is recovered from the path, and every healthy record after
+// it is still returned. A poison record also blocks a conflicting re-create
+// (Get surfaces it as an error, not as absent).
+func TestListIsolatesPoisonRecords(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir, WithClock(fixedClock))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	// Two healthy records, one poison in between, one healthy after.
+	good1 := newRecord("11111111-1111-4111-8111-111111111301")
+	if err := s.Create(good1); err != nil {
+		t.Fatalf("create good1: %v", err)
+	}
+	poisonKey := Key{CreatorHost: "hostA", TargetID: "t_fake1", RequestID: "11111111-1111-4111-8111-111111111302"}
+	poisonPath, err := s.path(poisonKey)
+	if err != nil {
+		t.Fatalf("poison path: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(poisonPath), dirMode); err != nil {
+		t.Fatalf("mkdir poison dir: %v", err)
+	}
+	// Write a file that exists but is not a valid record.
+	if err := os.WriteFile(poisonPath, []byte("{not valid json"), fileMode); err != nil {
+		t.Fatalf("write poison: %v", err)
+	}
+	good2 := newRecord("11111111-1111-4111-8111-111111111303")
+	if err := s.Create(good2); err != nil {
+		t.Fatalf("create good2: %v", err)
+	}
+
+	// List must return the two healthy records and NOT abort on the poison one.
+	recs, poison, err := s.ListWithPoison()
+	if err != nil {
+		t.Fatalf("list with poison: %v", err)
+	}
+	if len(recs) != 2 {
+		t.Fatalf("want 2 healthy records, got %d: %+v", len(recs), recs)
+	}
+	if len(poison) != 1 {
+		t.Fatalf("want 1 poison record, got %d: %+v", len(poison), poison)
+	}
+	// The poison record's dedup identity is recovered from the path.
+	p := poison[0]
+	if p.Key != poisonKey {
+		t.Fatalf("poison key: got %+v want %+v", p.Key, poisonKey)
+	}
+	if p.Path != poisonPath || p.Error == "" {
+		t.Fatalf("poison diagnostic incomplete: path=%q err=%q", p.Path, p.Error)
+	}
+
+	// The plain List() returns only healthy records (no abort).
+	recs2, err := s.List()
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(recs2) != 2 {
+		t.Fatalf("List() want 2 healthy records, got %d", len(recs2))
+	}
+
+	// A poison record blocks a conflicting re-create: Get surfaces the error
+	// rather than treating the corrupt file as absent.
+	_, exists, gerr := s.Get(poisonKey)
+	if gerr == nil {
+		t.Fatalf("Get on poison record: want error, got exists=%v nil", exists)
+	}
+	if exists {
+		t.Fatalf("Get on poison record reported exists=true")
+	}
+}
+
+// TestNormalizeRecordClearsStaleInteraction pins the shared state-normalization:
+// a terminal record recovered from disk must not carry a pending interaction
+// left by a crash between setting and clearing it.
+func TestNormalizeRecordClearsStaleInteraction(t *testing.T) {
+	rec := &Record{
+		Snapshot: protocol.Snapshot{
+			Schema:      protocol.SchemaRequest,
+			RequestID:   "11111111-1111-4111-8111-111111111401",
+			CreatorHost: "hostA",
+			TargetID:    "t_fake1",
+			Epoch:       "e_1",
+			Revision:    4,
+			State:       protocol.StateCompleted,
+			Interaction: &protocol.Interaction{InteractionID: "ix1", Kind: "question", Options: []string{"a"}},
+		},
+	}
+	normalizeRecord(rec)
+	if rec.Interaction != nil {
+		t.Fatalf("terminal record kept a stale interaction: %+v", rec.Interaction)
 	}
 }

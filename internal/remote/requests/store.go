@@ -173,24 +173,21 @@ func safeSegment(seg string) bool {
 	return hostSegmentRe.MatchString(seg)
 }
 
-// Get reads one record. The boolean is false when no record exists.
+// Get reads one record. The boolean is false when no record exists. It uses
+// the same read+normalize path as List so a live request and a recovery pass
+// never disagree about a record's state. A present-but-undecodable file is
+// returned as an error (poison), not as absent, so a caller does not create a
+// conflicting revision-1 over a corrupt file.
 func (s *Store) Get(k Key) (*Record, bool, error) {
 	p, err := s.path(k)
 	if err != nil {
 		return nil, false, err
 	}
-	data, err := os.ReadFile(p)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, false, nil
-	}
+	rec, exists, err := s.readRecord(p)
 	if err != nil {
-		return nil, false, fmt.Errorf("read record: %w", err)
+		return nil, false, err
 	}
-	rec, err := decodeRecord(data)
-	if err != nil {
-		return nil, false, fmt.Errorf("record %s: %w", filepath.Base(p), err)
-	}
-	return rec, true, nil
+	return rec, exists, nil
 }
 
 // Create writes revision 1 of a new record. It refuses if a record exists.
@@ -258,33 +255,72 @@ func (s *Store) MarkPublished(k Key, revision int64) error {
 	return s.write(rec)
 }
 
-// List returns every record, oldest key first, for reconciliation.
+// Poison is one undecodable record encountered during List. The key is
+// recovered from the file path so the dedup identity survives even when the
+// JSON does not: a later submit for the same request is still blocked by the
+// on-disk file, and an operator can see which record to repair. List never
+// aborts on a poison record; it isolates it here and continues.
+type Poison struct {
+	Key   Key
+	Path  string
+	Error string
+}
+
+// List returns every decodable record, oldest key first, for reconciliation.
+// A poison (undecodable or invalid) record is isolated and skipped, never
+// allowed to abort the whole pass: Reconcile must reach every healthy record
+// even when one is corrupt. Use ListWithPoison to also collect diagnostics.
 func (s *Store) List() ([]*Record, error) {
+	recs, _, err := s.ListWithPoison()
+	return recs, err
+}
+
+// ListWithPoison returns every decodable record plus a diagnosed poison list.
+// Read and decode errors are isolated per file: a bad record is skipped, its
+// identity is recovered from the path, and the pass continues. The first
+// filesystem error that is not per-record (a host directory that cannot be
+// listed) is still returned, because that affects more than one record.
+func (s *Store) ListWithPoison() ([]*Record, []Poison, error) {
 	var out []*Record
+	var poison []Poison
 	base := filepath.Join(s.dir, requestsDir)
 	hosts, err := os.ReadDir(base)
 	if err != nil {
-		return nil, fmt.Errorf("list hosts: %w", err)
+		return nil, nil, fmt.Errorf("list hosts: %w", err)
 	}
 	for _, h := range hosts {
 		if !h.IsDir() {
 			continue
 		}
-		files, err := os.ReadDir(filepath.Join(base, h.Name()))
+		if !safeSegment(h.Name()) {
+			// A host directory that is not a valid segment cannot hold records
+			// we could round-trip; skip it without aborting the pass.
+			continue
+		}
+		hostDir := filepath.Join(base, h.Name())
+		files, err := os.ReadDir(hostDir)
 		if err != nil {
-			return nil, fmt.Errorf("list %s: %w", h.Name(), err)
+			// A directory listing failure is broader than one record; surface it.
+			return nil, nil, fmt.Errorf("list %s: %w", h.Name(), err)
 		}
 		for _, f := range files {
 			if f.IsDir() || !strings.HasSuffix(f.Name(), recordSuffix) || strings.HasPrefix(f.Name(), ".") {
 				continue
 			}
-			data, err := os.ReadFile(filepath.Join(base, h.Name(), f.Name()))
-			if err != nil {
-				return nil, fmt.Errorf("read %s: %w", f.Name(), err)
+			path := filepath.Join(hostDir, f.Name())
+			rec, exists, perr := s.readRecord(path)
+			if perr != nil {
+				poison = append(poison, Poison{
+					Key:   keyFromPath(h.Name(), f.Name()),
+					Path:  path,
+					Error: perr.Error(),
+				})
+				continue
 			}
-			rec, err := decodeRecord(data)
-			if err != nil {
-				return nil, fmt.Errorf("record %s: %w", f.Name(), err)
+			if !exists {
+				// Race: the file vanished between ReadDir and ReadFile. Skip it;
+				// it is not poison and it is not a record.
+				continue
 			}
 			out = append(out, rec)
 		}
@@ -295,7 +331,69 @@ func (s *Store) List() ([]*Record, error) {
 		}
 		return out[i].RequestRef < out[j].RequestRef
 	})
-	return out, nil
+	return out, poison, nil
+}
+
+// readRecord reads and decodes one record file, applying the shared
+// state-normalization that both the event (Get) and recovery (List) paths
+// use, so a record recovered during Reconcile is never silently stricter or
+// looser than one read by a live request. The boolean is false only when the
+// file does not exist; a present-but-undecodable file returns an error so a
+// caller never mistakes poison for absence.
+func (s *Store) readRecord(path string) (*Record, bool, error) {
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, true, fmt.Errorf("read %s: %w", filepath.Base(path), err)
+	}
+	rec, err := decodeRecord(data)
+	if err != nil {
+		return nil, true, fmt.Errorf("record %s: %w", filepath.Base(path), err)
+	}
+	normalizeRecord(rec)
+	return rec, true, nil
+}
+
+// keyFromPath recovers a record key from its on-disk path segments so a poison
+// record's dedup identity survives even when the JSON does not. The layout is
+// <creatorHost>/<targetID>__<requestID>.json. A malformed name yields an empty
+// key; the poison entry is still reported with the raw path for repair.
+func keyFromPath(host, filename string) Key {
+	name := strings.TrimSuffix(filename, recordSuffix)
+	idx := strings.Index(name, "__")
+	if idx < 0 {
+		return Key{CreatorHost: host}
+	}
+	targetID, requestID := name[:idx], name[idx+2:]
+	if !safeSegment(targetID) || requestID == "" {
+		return Key{CreatorHost: host}
+	}
+	return Key{CreatorHost: host, TargetID: targetID, RequestID: requestID}
+}
+
+// normalizeRecord is the single state-normalization shared by the event and
+// recovery read paths. It clamps a decoded record's fields to the invariants
+// the store guarantees on write, so Reconcile never acts on a looser reading
+// than a live request would. It does not mutate identity (request_ref,
+// request_id, creator_host, target_id, epoch, input_digest) or revision, which
+// are immutable and already validated by decodeRecord.
+func normalizeRecord(rec *Record) {
+	if rec == nil {
+		return
+	}
+	if rec.Schema == "" {
+		rec.Schema = protocol.SchemaRequest
+	}
+	if rec.RequestRef == "" {
+		rec.RequestRef = protocol.EncodeRef(rec.CreatorHost, rec.TargetID, rec.RequestID)
+	}
+	// A terminal record must not carry a pending interaction; clear a stale
+	// one left by a crash between setting and clearing it.
+	if rec.State.Terminal() {
+		rec.Interaction = nil
+	}
 }
 
 // Compact replaces the result and input of terminal records whose evidence
