@@ -247,3 +247,13 @@ func TestTentativeRunIsNotOwned(t *testing.T) {
 		}
 	}
 }
+
+// TestTargetIDNoCollision reproduces Pro B03: two distinct thread ids that
+// share a 12-hex prefix must not collapse to one target id.
+func TestTargetIDNoCollision(t *testing.T) {
+	a := TargetID("0123456789ab-cdef-0000-0000-000000000001")
+	b := TargetID("0123456789ab-cdef-0000-0000-000000000002")
+	if a == b {
+		t.Fatalf("distinct threads collapsed to one target: %s", a)
+	}
+}

@@ -143,11 +143,10 @@ func Attach(socketPath, threadID string, opts ...Option) (*Attachment, error) {
 
 // TargetID derives the stable target id for a thread.
 func TargetID(threadID string) string {
-	id := strings.ReplaceAll(threadID, "-", "")
-	if len(id) > 12 {
-		id = id[:12]
-	}
-	return "codex:" + id
+	// The full de-hyphenated thread id, never truncated: two distinct thread
+	// ids must not collapse to one target (Pro B03). Codex thread ids are
+	// UUIDv7 (32 hex), well within the 128-char target_id bound.
+	return "codex:" + strings.ReplaceAll(threadID, "-", "")
 }
 
 func threadStatus(t string) string {
