@@ -656,8 +656,9 @@ func (e *Endpoint) onNative(targetID string, ev NativeEvent) {
 	}
 	if rec.State.Terminal() {
 		if t, ok := e.targets[targetID]; ok {
-			if e.crashAt(PointBeforeAck) == nil {
-				t.att.AcknowledgeResult(ev.Key, rec.Epoch, rec.InputDigest)
+			digest, fresh := e.memoAckIntentLocked(rec, t)
+			if fresh && digest != "" && e.crashAt(PointBeforeAck) == nil {
+				t.att.AcknowledgeResult(ev.Key, rec.Epoch, digest)
 			}
 		}
 	}
@@ -701,8 +702,12 @@ func boundResult(r *protocol.Result) *protocol.Result {
 // Reconcile runs after Open and on every Tick. It re-examines every
 // non-terminal record against exact native evidence, never re-submits, expires
 // deferred requests whose window closed, and republishes unpublished
-// revisions. Native attachment calls happen without the endpoint lock held; a
-// single poisoned record is reported, never allowed to abort the whole pass.
+// revisions. It also replays native acknowledgements for terminal records:
+// a crash between the terminal commit and the native ack leaves the
+// attachment holding its one unacked-result slot, which would refuse every
+// later submit with busy; replaying the durable ack digest releases it.
+// Native attachment calls happen without the endpoint lock held; a single
+// poisoned record is reported, never allowed to abort the whole pass.
 func (e *Endpoint) Reconcile() error {
 	e.mu.Lock()
 	recs, err := e.store.List()
@@ -717,7 +722,13 @@ func (e *Endpoint) Reconcile() error {
 		case protocol.StateDispatching, protocol.StateRunning, protocol.StateUncertain:
 			rerr = e.reconcileLive(rec)
 		case protocol.StateReceived:
-			rerr = e.admitDeferred(rec)
+			if rerr = e.admitDeferred(rec); rerr == nil {
+				rerr = e.replayTerminalAck(rec)
+			}
+		default:
+			if rec.State.Terminal() {
+				rerr = e.replayTerminalAck(rec)
+			}
 		}
 		if rerr != nil && firstErr == nil {
 			firstErr = rerr
@@ -729,6 +740,49 @@ func (e *Endpoint) Reconcile() error {
 		e.mu.Unlock()
 	}
 	return firstErr
+}
+
+// replayTerminalAck re-releases the retained evidence of one terminal record
+// whose acknowledgement the attachment may not have processed (crash after
+// the durable terminal commit, before or during the native ack). The ack is
+// replayed only when the record carries an ack intent for evidence the
+// attachment still retains: replayTerminalAck asks Lookup first — a terminal
+// record with no retained evidence at the attachment is already released, so
+// re-acking it would be a stale acknowledgement for evidence that no longer
+// exists. A record without an ack intent either never retained evidence
+// (nothing to release) or its ack was durably confirmed; both stay silent.
+// Convergence relies on the AcknowledgeResult contract: once a native ack
+// lands the attachment retains nothing for the key, so Lookup reports
+// EvidenceNone and a later Reconcile/Tick does not re-ack. Only the crash
+// case — intent memoed, ack never landed, evidence still retained — replays.
+func (e *Endpoint) replayTerminalAck(rec *requests.Record) error {
+	if rec.AckDigest == "" {
+		return nil
+	}
+	e.mu.Lock()
+	t, ok := e.targets[rec.TargetID]
+	e.mu.Unlock()
+	if !ok {
+		return nil
+	}
+	ev, err := t.att.Lookup(keyOfRecord(rec), rec.Epoch)
+	if err != nil {
+		return err
+	}
+	if !ev.Known || ev.Class == EvidenceNone {
+		// Nothing retained for this key: the ack already landed before the
+		// crash. Replay would acknowledge evidence the attachment discarded.
+		return nil
+	}
+	if ev.State != rec.State || ev.Result == nil || protocol.EvidenceDigest(ev.Result) != rec.AckDigest {
+		// The retained evidence is not the outcome this record acked (a stale
+		// or foreign ack must never release a different request's result).
+		return nil
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	t.att.AcknowledgeResult(keyOfRecord(rec), rec.Epoch, rec.AckDigest)
+	return nil
 }
 
 // Tick retries deferred admissions and expiry; carriers call it on a timer
@@ -819,7 +873,7 @@ func (e *Endpoint) reconcileLive(rec *requests.Record) error {
 	}
 	e.notifyLocked(rec)
 	if rec.State.Terminal() && ok {
-		t.att.AcknowledgeResult(key, rec.Epoch, rec.InputDigest)
+		e.ackTerminalLocked(rec, t)
 	}
 	return nil
 }
@@ -997,4 +1051,55 @@ func (e *Endpoint) crashAt(point string) error {
 		return fmt.Errorf("%w %s: %w", ErrCrashed, point, err)
 	}
 	return nil
+}
+
+// ackTerminalLocked persists the acknowledgement intent for a terminal record
+// and then releases the attachment's retained evidence. The ack digest is the
+// evidence digest of the outcome being released (not the input digest), and
+// it is durable BEFORE the native call: a crash after the terminal commit but
+// before (or during) the native ack leaves a record that Reconcile can replay
+// the ack from, so the attachment's one unacked-result slot cannot wedge the
+// next submit with busy. A record whose terminal outcome retained no evidence
+// needs no ack and gets none. Native acks are fire-and-forget: a failed store
+// write skips the native call so the retained evidence survives for replay.
+// The ack bookkeeping is a rewrite in place without a revision bump, the same
+// contract as MarkPublished. The caller holds e.mu.
+func (e *Endpoint) ackTerminalLocked(rec *requests.Record, t *target) {
+	digest, fresh := e.memoAckIntentLocked(rec, t)
+	if !fresh {
+		return
+	}
+	t.att.AcknowledgeResult(keyOfRecord(rec), rec.Epoch, digest)
+}
+
+// memoAckIntentLocked computes the evidence digest of a terminal record's
+// outcome and makes the ack intent durable, returning the digest and whether
+// a native ack should now be sent. Writing the memo BEFORE any native call is
+// what makes acknowledgement replayable: the crash gate at PointBeforeAck
+// runs after this memo, so a crash between the terminal commit and the native
+// ack still leaves a record Reconcile can replay the ack from. When the
+// record already carries the matching intent the ack has been sent (or left
+// for replay), so fresh=false suppresses a duplicate native call. The caller
+// holds e.mu.
+func (e *Endpoint) memoAckIntentLocked(rec *requests.Record, t *target) (string, bool) {
+	if t == nil {
+		return "", false
+	}
+	digest := protocol.EvidenceDigest(rec.Result)
+	if digest == "" || rec.AckDigest == digest {
+		return digest, false
+	}
+	key := keyOfRecord(rec)
+	cur, exists, err := e.store.Get(key)
+	if err != nil || !exists {
+		return "", false
+	}
+	if cur.AckDigest != digest {
+		cur.AckDigest = digest
+		if err := e.store.WriteMemo(cur); err != nil {
+			return "", false
+		}
+	}
+	rec.AckDigest = digest
+	return digest, true
 }

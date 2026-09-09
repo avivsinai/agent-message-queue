@@ -446,6 +446,24 @@ func CommandDigest(cmd *Command) string {
 	return digestPrefix + hex.EncodeToString(sum[:])
 }
 
+// EvidenceDigest is the digest of the terminal evidence an acknowledgement
+// releases: canonical JSON of the bound Result the record retained. The
+// attachment contract names the evidence digest (not the input digest) so a
+// stale acknowledgement can never release a different request's retained
+// result: the digest matches only the exact outcome the endpoint persisted.
+// A nil result yields "" — nothing was retained, so there is nothing to ack.
+func EvidenceDigest(r *Result) string {
+	if r == nil {
+		return ""
+	}
+	data, err := json.Marshal(r)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(data)
+	return digestPrefix + hex.EncodeToString(sum[:])
+}
+
 // digestPayload is the stable canonical shape for CommandDigest. Field order
 // is the canonical key order; do not reorder without bumping the schema and
 // migrating records. omitempty is intentionally absent on submit-required

@@ -49,6 +49,7 @@ type Runtime struct {
 	nextRun              int
 	dispatches           int
 	aborts               int
+	ackCalls             int
 	listeners            map[int]func(core.NativeEvent)
 	nextListener         int
 	capabilityOverride   *protocol.Capabilities
@@ -164,6 +165,13 @@ func (r *Runtime) Lookup(key requests.Key, epoch string) (core.Evidence, error) 
 	if !ok || rn.epoch != epoch {
 		return core.Evidence{}, nil
 	}
+	if rn.acknowledged {
+		// AcknowledgeResult released the retained terminal evidence. A real
+		// attachment retains nothing for the key afterwards, so Lookup must
+		// stop offering the result — otherwise replayTerminalAck would see it
+		// on every Reconcile/Tick and re-ack forever.
+		return core.Evidence{Class: core.EvidenceNone, Known: true, Admitted: true, RunID: rn.id, State: rn.state}, nil
+	}
 	return core.Evidence{Class: core.EvidenceConfirmed, Known: true, Admitted: true, RunID: rn.id, State: rn.state, Result: rn.result, LocalIntervention: rn.localIntervention, Interaction: rn.interaction}, nil
 }
 
@@ -207,13 +215,23 @@ func (r *Runtime) Respond(key requests.Key, _ string, interactionID, option stri
 	return "", nil
 }
 
-// AcknowledgeResult implements core.Attachment.
-func (r *Runtime) AcknowledgeResult(key requests.Key, epoch, _ string) {
+// AcknowledgeResult implements core.Attachment. It releases the retained
+// terminal evidence for the key only when the digest names exactly that
+// evidence — the design contract's "stale acknowledgements cannot release a
+// different request's result". An ack with a wrong or empty digest leaves
+// the record retained so the busy wedge stays observable.
+func (r *Runtime) AcknowledgeResult(key requests.Key, epoch, digest string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if rn, ok := r.runsByKey[key]; ok && rn.epoch == epoch && rn.state.Terminal() {
-		rn.acknowledged = true
+	r.ackCalls++
+	rn, ok := r.runsByKey[key]
+	if !ok || rn.epoch != epoch || !rn.state.Terminal() {
+		return
 	}
+	if digest == "" || digest != protocol.EvidenceDigest(rn.result) {
+		return
+	}
+	rn.acknowledged = true
 }
 
 // Subscribe implements core.Attachment.
@@ -448,4 +466,28 @@ func (r *Runtime) HasRun(requestID string) bool {
 		}
 	}
 	return false
+}
+
+// AckCalls counts every AcknowledgeResult invocation (whether or not the
+// digest matched). A converged endpoint acks a terminal result exactly once;
+// a second Reconcile/Tick that re-acks the same result increments this.
+func (r *Runtime) AckCalls() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.ackCalls
+}
+
+// UnacknowledgedResults counts retained terminal results the endpoint has not
+// acknowledged. While this is nonzero the runtime refuses additional remote
+// work — the B06 busy wedge.
+func (r *Runtime) UnacknowledgedResults() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	n := 0
+	for _, rn := range r.runsByKey {
+		if rn.state.Terminal() && !rn.acknowledged {
+			n++
+		}
+	}
+	return n
 }
