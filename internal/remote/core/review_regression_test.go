@@ -280,3 +280,38 @@ func TestConflictOutcomeLeavesSnapshotByteIdentical(t *testing.T) {
 		t.Fatalf("equal revisions differ:\n %s\n %s", a, b)
 	}
 }
+
+// TestCancelWrongEpochDoesNotInterrupt reproduces Pro B04: a cancel command
+// carrying an epoch different from the request's binding must be refused
+// (stale_epoch) without interrupting the current run.
+func TestCancelWrongEpochDoesNotInterrupt(t *testing.T) {
+	store, now := openStore(t)
+	rt := fake.New("fake", "e_1")
+	ep := core.New(core.Config{Store: store, Now: now})
+	ep.Register(rt)
+
+	id := "11111111-1111-4111-8111-1111111111b4"
+	if _, err := ep.Handle(submitCmd(id), core.Source{Host: "local"}); err != nil {
+		t.Fatal(err)
+	}
+	ref := protocol.EncodeRef("local", "fake", id)
+	// Cancel with the WRONG epoch.
+	rep, err := ep.Handle(&protocol.Command{
+		Schema: protocol.SchemaCommand, Op: protocol.OpRequestCancel, RequestRef: ref,
+		TargetID: "fake", Epoch: "e_WRONG", NotAfter: protocol.FormatTime(now().Add(2 * time.Minute)),
+	}, core.Source{Host: "local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := rep.(protocol.Reply)
+	if out.Outcome.Code != protocol.CodeStaleEpoch {
+		t.Fatalf("wrong-epoch cancel outcome = %q, want stale_epoch", out.Outcome.Code)
+	}
+	if rt.Snapshot().Aborts != 0 {
+		t.Fatalf("wrong-epoch cancel interrupted the run (%d aborts)", rt.Snapshot().Aborts)
+	}
+	rec, _, _ := store.Get(requests.Key{CreatorHost: "local", TargetID: "fake", RequestID: id})
+	if rec.State != protocol.StateRunning {
+		t.Fatalf("run no longer running after a refused cancel: %s", rec.State)
+	}
+}
