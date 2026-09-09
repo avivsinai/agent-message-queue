@@ -1,6 +1,8 @@
 package core_test
 
 import (
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -181,5 +183,59 @@ func TestRespondReplayAnswersOnce(t *testing.T) {
 	answers := rt.Snapshot().Answers
 	if len(answers) != 1 || answers[0].InteractionID != "i_1" || answers[0].Option != "yes" {
 		t.Fatalf("interaction answered %d times: %+v", len(answers), answers)
+	}
+}
+
+// TestResultWriteFailureIsVisible reproduces Pro B08's silent-running hole: when
+// the durable write of a terminal result fails, the endpoint must surface a
+// visible storage-failure projection, never leave the request looking running.
+func TestResultWriteFailureIsVisible(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("cannot make a dir unwritable as root")
+	}
+	store, now := openStore(t)
+	rt := fake.New("fake", "e_1")
+	ep := core.New(core.Config{Store: store, Now: now})
+	ep.Register(rt)
+
+	var projections []protocol.State
+	var mu sync.Mutex
+	ep.Observe(func(rec *requests.Record) {
+		mu.Lock()
+		if rec.Code == protocol.CodeStorageFull {
+			projections = append(projections, rec.State)
+		}
+		mu.Unlock()
+	})
+
+	id := "11111111-1111-4111-8111-1111111111f1"
+	if _, err := ep.Handle(submitCmd(id), core.Source{Host: "local"}); err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	// Make the record's host directory unwritable so the terminal Update fails
+	// with a storage-full class error.
+	hostDir := filepath.Join(store.Dir(), "requests", "local")
+	if err := os.Chmod(hostDir, 0o500); err != nil {
+		t.Skipf("cannot chmod host dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(hostDir, 0o700) })
+
+	rt.Complete(id, "the result")
+	time.Sleep(50 * time.Millisecond)
+
+	mu.Lock()
+	gotProjection := len(projections) > 0
+	mu.Unlock()
+	if !gotProjection {
+		t.Fatal("no storage-failure projection surfaced on a failed terminal write")
+	}
+	// The durable record must not have silently advanced to completed.
+	_ = os.Chmod(hostDir, 0o700)
+	rec, _, err := store.Get(requests.Key{CreatorHost: "local", TargetID: "fake", RequestID: id})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.State == protocol.StateCompleted {
+		t.Fatal("record silently completed despite the failed write")
 	}
 }
