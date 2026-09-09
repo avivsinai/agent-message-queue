@@ -51,8 +51,8 @@ terminal outcome for that run).
 
 | Row | Mechanism | Evidence class | Citation |
 | --- | --- | --- | --- |
-| Submit entry | `turn/start` (fresh turn) or `thread/queue/add` (FIFO, applies when the thread goes idle) | admitted (`turn/start` returns `result.turn.id`); submitted (queue) | (source: research/r9-cc-codex-attachment.md §B.4; research/p1-codex-probe.md "Exact request shapes used") |
-| Acceptance evidence | `turn/start` response `result.turn.id` (a `turnId`) | admitted | (source: research/p1-codex-probe.md "Exact request shapes used"; research/r9-cc-codex-attachment.md §B.4) |
+| Submit entry | `turn/start` (fresh turn) or `thread/queue/add` (FIFO, applies when the thread goes idle) | admitted (see acceptance evidence); submitted (queue) | (source: research/r9-cc-codex-attachment.md §B.4; research/p1-codex-probe.md "Exact request shapes used") |
+| Acceptance evidence | The `userMessage` item whose `clientId` matches the submit `clientUserMessageId` — **not** the `turn/start` `result.turn.id`. `turn/start` on a busy thread silently joins the running turn and discards the caller's input, so the returned `turnId` cannot distinguish our-input-admitted from silently-joined; the `userMessage` echo survives reconnect via `thread/read`. | admitted | (source: research/p1-codex-probe.md tight-timing result "B's input never appears as an item"; the confirmation gate, internal/remote/codex/attachment.go) |
 | Native run identity | `turnId` bound to `threadId` | admitted | (source: research/p1-codex-probe.md results table phase 1) |
 | Completion evidence | `turn/completed` notification (`status: completed\|failed\|interrupted`) | completed | (source: research/r6-codex-app-server-events.md §1 "Turn Lifecycle"; research/p1-codex-probe.md results table) |
 | Exact cancellation gate | `turn/interrupt {threadId, turnId}` | completed (drives `turn/completed(interrupted)`) | (source: seats/harness-inject-surfaces.md §B.3 "Queue/steer" list; research/p1-codex-probe.md "Follow-up (`probe_busy.py`)" row — proven from a second, non-owning connection) |
@@ -152,7 +152,7 @@ carries a one-line reason instead of a bare boolean.
     "answer_question": false,
     "approve_tool": false,
     "steer": true,
-    "terminal": false
+    "terminal": "unavailable"
   },
   "amit": {
     "inspect": true,
@@ -161,7 +161,7 @@ carries a one-line reason instead of a bare boolean.
     "answer_question": false,
     "approve_tool": false,
     "steer": true,
-    "terminal": false
+    "terminal": "unavailable"
   },
   "claude_code": {
     "inspect": true,
@@ -170,7 +170,7 @@ carries a one-line reason instead of a bare boolean.
     "answer_question": false,
     "approve_tool": false,
     "steer": false,
-    "terminal": false
+    "terminal": "unavailable"
   }
 }
 ```
