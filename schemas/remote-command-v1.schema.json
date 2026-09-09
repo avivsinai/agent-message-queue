@@ -88,7 +88,7 @@
         "schema": { "const": "amq.remote.command/1" },
         "op": { "const": "session.events" },
         "target_id": { "$ref": "#/$defs/opaque" },
-        "since": { "type": "integer", "minimum": 0, "description": "Event cursor. Omit or 0 for a fresh snapshot." }
+        "since": { "type": "integer", "minimum": 0, "description": "Event cursor: the last event ordinal the caller already holds. Omit or 0 for a fresh snapshot. If the cursor is older than the retained event window, the response marks a gap (the caller must reset to a fresh snapshot)." }
       },
       "required": ["schema", "op", "target_id"],
       "additionalProperties": false
@@ -114,8 +114,8 @@
     "rfc3339": { "type": "string", "format": "date-time" },
     "requestRef": {
       "type": "string",
-      "description": "Opaque versioned reference from a receipt: amqr1_<base32 of creator_host, target_id, request_id>. Clients copy it; they never construct it.",
-      "pattern": "^amqr1_[a-z2-7]{16,200}$"
+      "description": "Opaque versioned reference from a receipt: amqr1_<base32 of creator_host, target_id, request_id>. Clients copy it; they never construct it. Upper bound is derived from the opaque-segment limits (see protocol.MaxRefLen).",
+      "pattern": "^amqr1_[a-z2-7]{16,512}$"
     }
   }
 }

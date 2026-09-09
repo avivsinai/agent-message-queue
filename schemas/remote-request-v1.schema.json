@@ -8,7 +8,7 @@
   "additionalProperties": false,
   "properties": {
     "schema": { "const": "amq.remote.request/1" },
-    "request_ref": { "type": "string", "pattern": "^amqr1_[a-z2-7]{16,200}$" },
+    "request_ref": { "type": "string", "pattern": "^amqr1_[a-z2-7]{16,512}$" },
     "request_id": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" },
     "creator_host": { "type": "string", "minLength": 1, "maxLength": 128, "description": "Authenticated source host of the command, never a claimed handle." },
     "target_id": { "type": "string", "minLength": 1, "maxLength": 128 },

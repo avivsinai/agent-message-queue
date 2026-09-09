@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -337,14 +338,27 @@ func ExitForState(s State) int {
 	return ExitTimeout
 }
 
+// uuidLen is the fixed length of a lowercase UUID request_id.
+const uuidLen = 36
+
 var (
 	uuidRe   = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 	opaqueRe = regexp.MustCompile(`^[A-Za-z0-9_.:-]+$`)
-	refRe    = regexp.MustCompile(`^amqr1_[a-z2-7]{16,200}$`)
 )
 
 // RefPrefix starts every request reference.
 const RefPrefix = "amqr1_"
+
+// MaxRefLen is the maximum length of a request reference. It is derived from
+// the opaque-segment bound (creator_host and target_id, each MaxOpaqueLen) plus
+// the fixed UUID request_id and the two NUL separators, base32-encoded without
+// padding (8 chars per 5 bytes, rounded up), plus the RefPrefix. The regex and
+// the schemas use this as the upper bound so a receipt for a max-size key
+// always round-trips (BK6: the previous 200-char cap rejected valid max-size
+// refs of up to 477 chars).
+const MaxRefLen = len(RefPrefix) + (MaxOpaqueLen*2+uuidLen+2+4)/5*8
+
+var refRe = regexp.MustCompile(`^amqr1_[a-z2-7]{16,` + strconv.Itoa(MaxRefLen) + `}$`)
 
 var refEncoding = base32.StdEncoding.WithPadding(base32.NoPadding)
 
