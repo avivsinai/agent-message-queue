@@ -77,7 +77,8 @@
     "observed_at": { "type": "string", "format": "date-time", "description": "Time of the underlying evidence, not of the read." }
   },
   "allOf": [
-    { "if": { "properties": { "state": { "const": "completed" } } }, "then": { "required": ["result", "native_run"] } },
+    { "if": { "properties": { "state": { "const": "completed" } }, "not": { "required": ["code"] } }, "then": { "required": ["result", "native_run"] } },
+    { "if": { "properties": { "state": { "const": "completed" } }, "required": ["code"] }, "then": { "properties": { "code": { "const": "result_expired" } }, "required": ["code"] } },
     { "if": { "properties": { "state": { "enum": ["rejected", "uncertain", "failed"] } } }, "then": { "required": ["code"] } }
   ]
 }

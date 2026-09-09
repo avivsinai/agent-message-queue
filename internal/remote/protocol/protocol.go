@@ -16,6 +16,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // Schema identifiers. A document with any other value is refused.
@@ -26,13 +27,24 @@ const (
 )
 
 // Reference limits from the design. Bounds are enforced before allocation of
-// anything derived from the payload.
+// anything derived from the payload. The byte budgets are coherent by
+// construction: a record always holds one max-size result plus the retained
+// input and record overhead, so MaxRecordBytes >= MaxResultBytes + MaxInputBytes
+// + headroom. Truncation is UTF-8-rune safe and never drops the native
+// reference, so a truncated answer stays locatable on the target host.
 const (
 	MaxCommandBytes = 256 * 1024
 	MaxInputBytes   = 128 * 1024
 	MaxResultBytes  = 512 * 1024
-	MaxOpaqueLen    = 128
-	MaxOptionLen    = 256
+	// MaxRecordBytes bounds one durable request record on disk and on the wire.
+	// It is the protocol result bound plus the retained input bound plus fixed
+	// headroom for the snapshot, interaction, cancel and bookkeeping fields, so
+	// a record carrying a full-size result never overflows the store. The store
+	// and the IPC layer share this single source of truth.
+	MaxRecordOverhead = 64 * 1024
+	MaxRecordBytes    = MaxResultBytes + MaxInputBytes + MaxRecordOverhead
+	MaxOpaqueLen      = 128
+	MaxOptionLen      = 256
 )
 
 // Op is the command discriminator.
@@ -515,6 +527,27 @@ func forbidFields(c *Command, names ...string) error {
 // ParseTime parses an RFC 3339 timestamp as the protocol requires.
 func ParseTime(s string) (time.Time, error) {
 	return time.Parse(time.RFC3339Nano, s)
+}
+
+// TruncateText bounds text to at most max bytes on a UTF-8 rune boundary, so
+// no multi-byte rune is split. It reports whether truncation happened. A
+// truncated result must keep its native reference so the full text stays
+// locatable on the target host; callers set Result.Truncated and keep
+// Result.NativeRef rather than dropping them.
+func TruncateText(text string, max int) (string, bool) {
+	if len(text) <= max {
+		return text, false
+	}
+	// Step back to the last rune start at or before max bytes.
+	end := max
+	for end > 0 && !utf8.RuneStart(text[end]) {
+		end--
+	}
+	// If the byte at end is not itself a valid rune start, back up until it is.
+	for end > 0 && !utf8.RuneStart(text[end]) {
+		end--
+	}
+	return text[:end], true
 }
 
 // FormatTime renders a timestamp in the one form the protocol emits.
