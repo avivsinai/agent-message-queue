@@ -32,7 +32,32 @@ type Admission struct {
 // swallows errors) must NOT treat Known=false as proof of non-admission; there
 // a lost submit and a never-submitted key look identical, so such an adapter
 // leaves the record uncertain rather than rejecting it.
+// EvidenceClass discriminates what the attachment can prove about a key, so
+// the endpoint never turns "in flight" or "delivered but unknown" into a
+// terminal rejection. See the remote-control ADR (evidence contract).
+type EvidenceClass string
+
+const (
+	// EvidenceNone: the adapter has a real admission primitive and retains
+	// nothing for the key, so admission did not and cannot happen -> reject.
+	EvidenceNone EvidenceClass = "none"
+	// EvidenceUnknown: the operation was delivered but admission cannot be
+	// determined (transport ambiguity, an API that swallows rejections)
+	// -> uncertain, keep correlation.
+	EvidenceUnknown EvidenceClass = "unknown"
+	// EvidenceTentative: submitted and bound, but native ownership is not yet
+	// confirmed -> keep as running/dispatching, do not reject, cancel, or
+	// attribute output until it confirms or times out.
+	EvidenceTentative EvidenceClass = "tentative"
+	// EvidenceConfirmed: native ownership is established -> real admission.
+	EvidenceConfirmed EvidenceClass = "confirmed"
+)
+
 type Evidence struct {
+	// Class is the authoritative discriminator; Known/Admitted are derived
+	// convenience mirrors (Known = Class != None-with-nothing-retained;
+	// Admitted = Class == Confirmed).
+	Class             EvidenceClass
 	Known             bool
 	Admitted          bool
 	RunID             string

@@ -38,17 +38,22 @@ type run struct {
 	key          requests.Key
 	epoch        string
 	turnID       string
-	queued       bool
 	state        protocol.State
 	text         strings.Builder
 	errText      string
 	local        bool
 	interaction  *protocol.Interaction
 	approvalReqs map[string]json.RawMessage
-	// confirmed closes when the userMessage item carrying this run's
-	// clientUserMessageId is observed, proving turn/start accepted our text
-	// rather than joining a turn started in the race window and dropping it.
-	confirmed chan struct{}
+	// confirmed (the bool) is the durable ownership flag every consumer reads:
+	// until the userMessage item carrying this run's clientUserMessageId is
+	// observed, the run is TENTATIVE and must not be cancelled, attributed, or
+	// reported admitted. confirmedCh closes once, to release a waiting Submit.
+	confirmed   bool
+	confirmedCh chan struct{}
+	// cancelPending records a cancel that arrived while tentative, to be
+	// delivered when the run confirms.
+	cancelPending bool
+	queued        bool
 }
 
 // Attachment is one running Codex thread reached through the shared
@@ -236,7 +241,7 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 		if err := a.call("turn/steer", map[string]any{"threadId": a.threadID, "expectedTurnId": activeTurn, "input": input, "clientUserMessageId": req.Key.RequestID}, nil); err != nil {
 			return refusal(err), nil
 		}
-		r := &run{key: req.Key, epoch: req.Epoch, state: protocol.StateRunning, turnID: activeTurn, approvalReqs: map[string]json.RawMessage{}}
+		r := &run{key: req.Key, epoch: req.Epoch, state: protocol.StateRunning, turnID: activeTurn, confirmed: true, approvalReqs: map[string]json.RawMessage{}}
 		a.mu.Lock()
 		a.runs[req.Key] = r
 		a.byClientID[req.Key.RequestID] = r
@@ -262,7 +267,7 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 
 	// Idle turn/start. Register the run first so onItem can confirm our
 	// userMessage, then call unlocked, then require confirmation.
-	r := &run{key: req.Key, epoch: req.Epoch, state: protocol.StateRunning, approvalReqs: map[string]json.RawMessage{}, confirmed: make(chan struct{})}
+	r := &run{key: req.Key, epoch: req.Epoch, state: protocol.StateRunning, approvalReqs: map[string]json.RawMessage{}, confirmedCh: make(chan struct{})}
 	a.mu.Lock()
 	a.runs[req.Key] = r
 	a.byClientID[req.Key.RequestID] = r
@@ -284,15 +289,17 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 	a.mu.Lock()
 	if r.turnID == "" {
 		r.turnID = res.Turn.ID
-		a.byTurn[res.Turn.ID] = r
+		// byTurn is NOT bound here: the returned turn id may belong to a turn
+		// started in the race window that dropped our text. It is bound only
+		// when confirmRun sees our own userMessage item.
 	}
 	a.activeTurn = res.Turn.ID
 	a.status = "busy"
-	confirmed := r.confirmed
+	confirmedCh := r.confirmedCh
 	a.mu.Unlock()
 
 	select {
-	case <-confirmed:
+	case <-confirmedCh:
 		return core.Admission{Admitted: true, RunID: r.runID()}, nil
 	case <-time.After(confirmTimeout):
 		a.dropRun(req.Key)
@@ -323,16 +330,38 @@ func (a *Attachment) dropRun(key requests.Key) {
 	}
 }
 
-// confirmRun closes a run's confirmation channel once. The caller holds a.mu.
-func confirmRun(r *run) {
-	if r.confirmed == nil {
+// confirmRun marks a run's native ownership established, binds byTurn, and
+// releases a waiting Submit. The caller holds a.mu. It returns whether a
+// cancel was pending so the caller can deliver it outside the lock.
+func (a *Attachment) confirmRun(r *run, turnID string) (cancelPending bool) {
+	if r.confirmed {
+		return false
+	}
+	r.confirmed = true
+	if turnID != "" {
+		r.turnID = turnID
+		a.byTurn[turnID] = r
+	}
+	if r.confirmedCh != nil {
+		select {
+		case <-r.confirmedCh:
+		default:
+			close(r.confirmedCh)
+		}
+	}
+	return r.cancelPending
+}
+
+// deliverPendingCancel sends the interrupt for a cancel that arrived while the
+// run was tentative, now that ownership is confirmed. No lock held.
+func (a *Attachment) deliverPendingCancel(key requests.Key, turnID string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if err := a.client.Call(ctx, "turn/interrupt", map[string]any{"threadId": a.threadID, "turnId": turnID}, nil); err != nil {
 		return
 	}
-	select {
-	case <-r.confirmed:
-	default:
-		close(r.confirmed)
-	}
+	// The resulting turn/completed(interrupted) drives the cancelled state.
+	_ = key
 }
 
 func (r *run) runID() string {
@@ -356,9 +385,20 @@ func refusal(err error) core.Admission {
 func (a *Attachment) Lookup(key requests.Key, epoch string) (core.Evidence, error) {
 	a.mu.Lock()
 	if r, ok := a.runs[key]; ok && r.epoch == epoch {
-		ev := core.Evidence{Known: true, Admitted: true, RunID: r.runID(), State: r.state, LocalIntervention: r.local, Interaction: r.interaction}
-		if r.state.Terminal() {
-			ev.Result = r.result()
+		ev := core.Evidence{Known: true, RunID: r.runID(), State: r.state, LocalIntervention: r.local, Interaction: r.interaction}
+		switch {
+		case r.confirmed || r.queued:
+			// A confirmed running turn, or a Codex-native-accepted queue item:
+			// real admission.
+			ev.Class = core.EvidenceConfirmed
+			ev.Admitted = true
+			if r.state.Terminal() {
+				ev.Result = r.result()
+			}
+		default:
+			// Bound but native ownership not yet proven: tentative, never
+			// admitted, so reconcile leaves it running and never rejects it.
+			ev.Class = core.EvidenceTentative
 		}
 		a.mu.Unlock()
 		return ev, nil
@@ -439,6 +479,13 @@ func (a *Attachment) CancelExact(key requests.Key, epoch string) (core.CancelEvi
 	if r.epoch != epoch || r.state.Terminal() {
 		a.mu.Unlock()
 		return core.CancelEvidence{Disposition: protocol.CancelNoopTerminal}, nil
+	}
+	if !r.confirmed && !r.queued {
+		// We do not yet own a turn; interrupting r.turnID could hit a foreign
+		// turn. Record intent; confirmRun delivers it once ownership is proven.
+		r.cancelPending = true
+		a.mu.Unlock()
+		return core.CancelEvidence{Disposition: protocol.CancelRequested, Message: "intent recorded before native ownership"}, nil
 	}
 	turnID, queued := r.turnID, r.queued
 	a.mu.Unlock()
@@ -623,13 +670,13 @@ func (a *Attachment) onItem(n Notification) {
 	switch p.Item.Type {
 	case "userMessage":
 		if r, ok := a.byClientID[p.Item.ClientID]; ok && p.Item.ClientID != "" {
-			if r.turnID == "" {
-				r.turnID = p.TurnID
-				r.queued = false
-				a.byTurn[p.TurnID] = r
+			r.queued = false
+			// Our text is confirmed in this turn: bind byTurn and mark owned.
+			if a.confirmRun(r, p.TurnID) {
+				key := r.key
+				turnID := r.turnID
+				go a.deliverPendingCancel(key, turnID)
 			}
-			// Our text is confirmed in this turn: admission is real.
-			confirmRun(r)
 			return
 		}
 		// A user message we did not send landed in a turn we own: the human

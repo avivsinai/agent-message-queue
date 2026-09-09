@@ -736,9 +736,21 @@ func (e *Endpoint) reconcileLive(rec *requests.Record) error {
 		}
 		rec.State = protocol.StateUncertain
 		rec.Code = protocol.CodeAttachmentLost
-	case !ev.Known:
-		// The live attachment retains nothing for this key: admission never
-		// happened and never will. Positive evidence, not a guess.
+	case ev.Class == EvidenceTentative:
+		// Bound but native ownership not yet proven. Never reject a submission
+		// that is still about to execute; re-check next tick.
+		return nil
+	case ev.Class == EvidenceUnknown:
+		// Delivered but admission-unknown (transport ambiguity, or an API that
+		// cannot report its own rejection). Keep the correlation, stay uncertain.
+		if rec.State == protocol.StateUncertain {
+			return nil
+		}
+		rec.State = protocol.StateUncertain
+		rec.Code = protocol.CodeAttachmentLost
+	case !ev.Known || ev.Class == EvidenceNone:
+		// The adapter has a real admission primitive and retains nothing:
+		// admission did not and cannot happen. Positive evidence, not a guess.
 		rec.State = protocol.StateRejected
 		rec.Code = protocol.CodeNativeError
 	case ev.Admitted && ev.State.Terminal():

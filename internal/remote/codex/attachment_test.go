@@ -165,3 +165,85 @@ func TestSubmitBindsTurnAndCompletes(t *testing.T) {
 		t.Fatal("thread not idle after completion")
 	}
 }
+
+// TestTentativeRunIsNotOwned reproduces Pro finding B01: while a run is bound
+// but not yet confirmed by its own userMessage item, no consumer may treat it
+// as owned. Lookup must report Tentative (not Admitted), CancelExact must
+// record intent without interrupting a turn we do not own, a foreign turn's
+// completion must not complete our run, and once our userMessage confirms the
+// run the pending cancel is delivered against OUR turn.
+func TestTentativeRunIsNotOwned(t *testing.T) {
+	sock, srv := startFakeAppServer(t)
+	att, err := Attach(sock, "t1")
+	if err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	t.Cleanup(func() { _ = att.Close() })
+	<-srv.calls // initialize
+	<-srv.calls // thread/resume
+
+	key := requests.Key{CreatorHost: "local", TargetID: att.Inspect().TargetID, RequestID: "11111111-1111-4111-8111-111111111701"}
+	epoch := att.Inspect().Epoch
+	done := make(chan core.Admission, 1)
+	go func() {
+		adm, _ := att.Submit(core.BoundRequest{Key: key, Epoch: epoch, Input: protocol.SubmitInput{Text: "do it"}})
+		done <- adm
+	}()
+	call := <-srv.calls // turn/start; server replies turn id "u1"
+	if call.Method != "turn/start" {
+		t.Fatalf("expected turn/start, got %s", call.Method)
+	}
+
+	// Tentative window: the run is bound (byClientID) but not confirmed.
+	ev, err := att.Lookup(key, epoch)
+	if err != nil || ev.Class != core.EvidenceTentative || ev.Admitted {
+		t.Fatalf("tentative Lookup wrong: class=%s admitted=%v err=%v", ev.Class, ev.Admitted, err)
+	}
+	ce, _ := att.CancelExact(key, epoch)
+	if ce.Disposition != protocol.CancelRequested {
+		t.Fatalf("tentative cancel disposition=%s, want cancel_requested", ce.Disposition)
+	}
+	// A foreign turn completing must not complete our run.
+	srv.notify(t, "turn/completed", `{"threadId":"t1","turn":{"id":"uForeign","status":"completed"}}`)
+	time.Sleep(30 * time.Millisecond)
+	if lk, _ := att.Lookup(key, epoch); lk.State == protocol.StateCompleted {
+		t.Fatal("foreign turn/completed wrongly completed our run")
+	}
+	// No turn/interrupt may have been sent yet (we never owned a turn).
+	select {
+	case c := <-srv.calls:
+		if c.Method == "turn/interrupt" {
+			t.Fatal("interrupt sent for an unconfirmed run")
+		}
+	default:
+	}
+
+	// Confirm: our userMessage lands for turn u1. This binds byTurn and must
+	// deliver the pending cancel as an interrupt for OUR turn u1.
+	srv.notify(t, "item/started", `{"threadId":"t1","turnId":"u1","item":{"type":"userMessage","id":"i1","clientId":"`+key.RequestID+`","content":[]}}`)
+	select {
+	case adm := <-done:
+		if !adm.Admitted {
+			t.Fatalf("submit did not admit after confirmation: %+v", adm)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("submit never returned after confirmation")
+	}
+	// The pending cancel now fires turn/interrupt for u1.
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case c := <-srv.calls:
+			if c.Method == "turn/interrupt" {
+				var p map[string]any
+				_ = json.Unmarshal(c.Params, &p)
+				if p["turnId"] != "u1" {
+					t.Fatalf("interrupt hit turn %v, want our turn u1", p["turnId"])
+				}
+				return
+			}
+		case <-deadline:
+			t.Fatal("pending cancel never delivered an interrupt for our turn")
+		}
+	}
+}

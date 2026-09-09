@@ -164,7 +164,7 @@ func (r *Runtime) Lookup(key requests.Key, epoch string) (core.Evidence, error) 
 	if !ok || rn.epoch != epoch {
 		return core.Evidence{}, nil
 	}
-	return core.Evidence{Known: true, Admitted: true, RunID: rn.id, State: rn.state, Result: rn.result, LocalIntervention: rn.localIntervention, Interaction: rn.interaction}, nil
+	return core.Evidence{Class: core.EvidenceConfirmed, Known: true, Admitted: true, RunID: rn.id, State: rn.state, Result: rn.result, LocalIntervention: rn.localIntervention, Interaction: rn.interaction}, nil
 }
 
 // CancelExact implements core.Attachment.
