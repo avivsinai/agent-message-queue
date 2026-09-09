@@ -138,7 +138,10 @@ Two-host fleets, alias routing, and the v1 kill-list are
 wire format is [the bridge protocol ADR](docs/adr-bridge-protocol.md); the
 proven hop is `apply-file`, and HTTPS needs an operator-provided rendezvous.
 Wake capability (no silent downgrade) is
-[the wake capability-vector ADR](docs/adr-wake-capability-vector.md). Preview
+[the wake capability-vector ADR](docs/adr-wake-capability-vector.md). Remote
+control of a running harness session is
+[the remote-control ADR](docs/adr-remote-control.md), with installed seams in
+[the compatibility manifest](docs/remote-compat.md). Preview
 ACP v1 is [the amq-acp companion](cmd/amq-acp/README.md).
 
 ## CLI Commands
