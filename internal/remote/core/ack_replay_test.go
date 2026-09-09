@@ -52,7 +52,6 @@ func TestCrashAfterTerminalCommitReplaysAck(t *testing.T) {
 		t.Fatalf("seed submit: %v", err)
 	}
 	rt.Complete(id, "the result")
-	time.Sleep(50 * time.Millisecond)
 
 	key := requests.Key{CreatorHost: "local", TargetID: "fake", RequestID: id}
 	rec, ok, err := store.Get(key)
@@ -150,7 +149,6 @@ func TestAckWithWrongDigestDoesNotReleaseEvidence(t *testing.T) {
 		t.Fatalf("submit: %v", err)
 	}
 	rt.Complete(id, "the result")
-	time.Sleep(50 * time.Millisecond)
 	if err := ep.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
@@ -176,5 +174,45 @@ func TestAckWithWrongDigestDoesNotReleaseEvidence(t *testing.T) {
 	rt.AcknowledgeResult(key, "e_1", rec.AckDigest)
 	if rt.UnacknowledgedResults() != 0 {
 		t.Fatal("the matching-digest ack did not release the retained evidence")
+	}
+}
+
+// TestReconcileConvergesAfterSuccessfulAck reproduces the follow-up defect
+// found reviewing PR #730: replayTerminalAck had no convergence guard, so once
+// a terminal result was acknowledged normally, every later Reconcile/Tick
+// re-fired the native AcknowledgeResult for it — unbounded, for the life of the
+// daemon. A converged endpoint acks a terminal result exactly once: the
+// attachment releases the retained evidence on that ack, so Lookup reports it
+// gone and reconciliation does not re-ack.
+func TestReconcileConvergesAfterSuccessfulAck(t *testing.T) {
+	store, _ := openStore(t)
+	clk := time.Date(2026, 9, 8, 10, 0, 0, 0, time.UTC)
+	now := func() time.Time { return clk }
+	rt := fake.New("fake", "e_1")
+	ep := core.New(core.Config{Store: store, Now: now})
+	ep.Register(rt)
+	t.Cleanup(func() { _ = ep.Close() })
+
+	id := "11111111-1111-4111-8111-1111111111c4"
+	if _, err := ep.Handle(submitCmd(id), core.Source{Host: "local"}); err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	// Normal completion (no crash) drives onNative -> exactly one native ack.
+	rt.Complete(id, "the result")
+	if got := rt.UnacknowledgedResults(); got != 0 {
+		t.Fatalf("completion did not ack the result: %d retained", got)
+	}
+	if got := rt.AckCalls(); got != 1 {
+		t.Fatalf("completion acked %d times, want exactly 1", got)
+	}
+
+	// Every later Reconcile/Tick must find the evidence released and not re-ack.
+	for i := 0; i < 3; i++ {
+		if err := ep.Reconcile(); err != nil {
+			t.Fatalf("reconcile %d: %v", i, err)
+		}
+	}
+	if got := rt.AckCalls(); got != 1 {
+		t.Fatalf("reconcile re-acked the terminal result: %d ack calls, want 1", got)
 	}
 }

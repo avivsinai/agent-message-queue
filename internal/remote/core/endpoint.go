@@ -751,6 +751,10 @@ func (e *Endpoint) Reconcile() error {
 // re-acking it would be a stale acknowledgement for evidence that no longer
 // exists. A record without an ack intent either never retained evidence
 // (nothing to release) or its ack was durably confirmed; both stay silent.
+// Convergence relies on the AcknowledgeResult contract: once a native ack
+// lands the attachment retains nothing for the key, so Lookup reports
+// EvidenceNone and a later Reconcile/Tick does not re-ack. Only the crash
+// case — intent memoed, ack never landed, evidence still retained — replays.
 func (e *Endpoint) replayTerminalAck(rec *requests.Record) error {
 	if rec.AckDigest == "" {
 		return nil

@@ -49,6 +49,7 @@ type Runtime struct {
 	nextRun              int
 	dispatches           int
 	aborts               int
+	ackCalls             int
 	listeners            map[int]func(core.NativeEvent)
 	nextListener         int
 	capabilityOverride   *protocol.Capabilities
@@ -164,6 +165,13 @@ func (r *Runtime) Lookup(key requests.Key, epoch string) (core.Evidence, error) 
 	if !ok || rn.epoch != epoch {
 		return core.Evidence{}, nil
 	}
+	if rn.acknowledged {
+		// AcknowledgeResult released the retained terminal evidence. A real
+		// attachment retains nothing for the key afterwards, so Lookup must
+		// stop offering the result — otherwise replayTerminalAck would see it
+		// on every Reconcile/Tick and re-ack forever.
+		return core.Evidence{Class: core.EvidenceNone, Known: true, Admitted: true, RunID: rn.id, State: rn.state}, nil
+	}
 	return core.Evidence{Class: core.EvidenceConfirmed, Known: true, Admitted: true, RunID: rn.id, State: rn.state, Result: rn.result, LocalIntervention: rn.localIntervention, Interaction: rn.interaction}, nil
 }
 
@@ -215,6 +223,7 @@ func (r *Runtime) Respond(key requests.Key, _ string, interactionID, option stri
 func (r *Runtime) AcknowledgeResult(key requests.Key, epoch, digest string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.ackCalls++
 	rn, ok := r.runsByKey[key]
 	if !ok || rn.epoch != epoch || !rn.state.Terminal() {
 		return
@@ -457,6 +466,15 @@ func (r *Runtime) HasRun(requestID string) bool {
 		}
 	}
 	return false
+}
+
+// AckCalls counts every AcknowledgeResult invocation (whether or not the
+// digest matched). A converged endpoint acks a terminal result exactly once;
+// a second Reconcile/Tick that re-acks the same result increments this.
+func (r *Runtime) AckCalls() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.ackCalls
 }
 
 // UnacknowledgedResults counts retained terminal results the endpoint has not
