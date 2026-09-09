@@ -30,8 +30,8 @@ func compileSchema(t *testing.T, name string) *jsonschema.Schema {
 
 // corpusFixture is the slice of the shared corpus the schema test consumes.
 type corpusFixture struct {
-	ID    string             `json:"id"`
-	Steps []corpusStep       `json:"steps"`
+	ID    string       `json:"id"`
+	Steps []corpusStep `json:"steps"`
 }
 type corpusStep struct {
 	Client map[string]any `json:"client,omitempty"`
@@ -47,8 +47,8 @@ func loadCorpus(t *testing.T) (defaults map[string]string, fixtures []corpusFixt
 		t.Fatalf("read corpus: %v", err)
 	}
 	var c struct {
-		Defaults  map[string]string `json:"defaults"`
-		Fixtures  []corpusFixture   `json:"fixtures"`
+		Defaults map[string]string `json:"defaults"`
+		Fixtures []corpusFixture   `json:"fixtures"`
 	}
 	if err := json.Unmarshal(raw, &c); err != nil {
 		t.Fatalf("parse corpus: %v", err)
@@ -137,7 +137,7 @@ func TestRequestSnapshotsValidateAgainstSchema(t *testing.T) {
 			"schema": SchemaRequest, "request_ref": ref, "request_id": "11111111-1111-4111-8111-111111111101",
 			"creator_host": "hostA", "target_id": "t_fake1", "epoch": "e_1", "revision": 4,
 			"state": "completed", "native_run": "run_1",
-			"result": map[string]any{"text": "hi", "truncated": false},
+			"result":      map[string]any{"text": "hi", "truncated": false},
 			"observed_at": "2026-09-01T00:00:00Z",
 		}},
 		{"completed-compacted", map[string]any{
