@@ -32,9 +32,12 @@ const (
 	dirMode       = 0o700
 )
 
-// MaxRecordBytes bounds one record on disk; the input and result bounds in
-// the protocol keep real records far below it.
-const MaxRecordBytes = 256 * 1024
+// MaxRecordBytes bounds one record on disk. It delegates to the protocol
+// budget so the store, the wire bound, and the result/input limits are one
+// coherent set: a record always holds a full-size result plus input and
+// overhead (see protocol.MaxRecordBytes). It is a var, not a const, only so
+// tests can shrink it; production never reassigns it.
+var MaxRecordBytes = protocol.MaxRecordBytes
 
 var hostSegmentRe = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,128}$`)
 

@@ -23,6 +23,7 @@
     {
       "title": "request.submit",
       "properties": {
+        "schema": { "const": "amq.remote.command/1" },
         "op": { "const": "request.submit" },
         "request_id": { "$ref": "#/$defs/uuid" },
         "target_id": { "$ref": "#/$defs/opaque" },
@@ -45,6 +46,7 @@
     {
       "title": "request.get",
       "properties": {
+        "schema": { "const": "amq.remote.command/1" },
         "op": { "const": "request.get" },
         "request_ref": { "$ref": "#/$defs/requestRef" }
       },
@@ -54,6 +56,7 @@
     {
       "title": "request.cancel",
       "properties": {
+        "schema": { "const": "amq.remote.command/1" },
         "op": { "const": "request.cancel" },
         "request_ref": { "$ref": "#/$defs/requestRef" },
         "target_id": { "$ref": "#/$defs/opaque" },
@@ -65,13 +68,14 @@
     },
     {
       "title": "session.list",
-      "properties": { "op": { "const": "session.list" } },
+      "properties": { "schema": { "const": "amq.remote.command/1" }, "op": { "const": "session.list" } },
       "required": ["schema", "op"],
       "additionalProperties": false
     },
     {
       "title": "session.inspect",
       "properties": {
+        "schema": { "const": "amq.remote.command/1" },
         "op": { "const": "session.inspect" },
         "target_id": { "$ref": "#/$defs/opaque" }
       },
@@ -81,6 +85,7 @@
     {
       "title": "session.events",
       "properties": {
+        "schema": { "const": "amq.remote.command/1" },
         "op": { "const": "session.events" },
         "target_id": { "$ref": "#/$defs/opaque" },
         "since": { "type": "integer", "minimum": 0, "description": "Event cursor. Omit or 0 for a fresh snapshot." }
@@ -91,6 +96,7 @@
     {
       "title": "interaction.respond",
       "properties": {
+        "schema": { "const": "amq.remote.command/1" },
         "op": { "const": "interaction.respond" },
         "request_ref": { "$ref": "#/$defs/requestRef" },
         "target_id": { "$ref": "#/$defs/opaque" },
