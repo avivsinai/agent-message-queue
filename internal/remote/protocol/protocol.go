@@ -8,7 +8,9 @@ package protocol
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/base32"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -210,6 +212,29 @@ type Snapshot struct {
 	ObservedAt        string       `json:"observed_at"`
 }
 
+// Outcome is the per-COMMAND result, distinct from the immutable per-revision
+// Snapshot. It carries the op-specific disposition that does NOT create a new
+// revision: a request_conflict, an already-resolved interaction, or a cancel
+// that hit a terminal record. Pairing the unchanged snapshot with an Outcome
+// (instead of copy-mutating the snapshot's Code/Cancel) keeps the invariant
+// that equal revisions are byte-identical, so retries recover the original
+// command rather than regenerating a different one.
+type Outcome struct {
+	Op          Op                `json:"op"`
+	Code        Code              `json:"code,omitempty"`        // request_conflict, already_resolved, "" on plain success
+	Message     string            `json:"message,omitempty"`
+	Disposition CancelDisposition `json:"disposition,omitempty"` // cancel replies only
+}
+
+// Reply pairs the current immutable record revision with the operation
+// outcome. The Snapshot is byte-identical to a stored revision and is NEVER
+// mutated for op-specific reasons; every op-specific signal lives in Outcome.
+// Carriers and the CLI map exit codes from Outcome.Code.
+type Reply struct {
+	Snapshot Snapshot `json:"snapshot"`
+	Outcome  Outcome  `json:"outcome"`
+}
+
 // Capabilities is the observed capability projection of one attachment.
 type Capabilities struct {
 	Inspect        bool   `json:"inspect"`
@@ -349,6 +374,58 @@ func DecodeRef(ref string) (creatorHost, targetID, requestID string, err error) 
 
 func validOpaque(s string) bool {
 	return s != "" && len(s) <= MaxOpaqueLen && opaqueRe.MatchString(s)
+}
+
+// digestPrefix is the algorithm tag every request input_digest carries.
+const digestPrefix = "sha256:"
+
+// CommandDigest is the digest of the immutable submit command payload, over
+// exactly {schema, op, request_id, target_id, epoch, not_after, input}. It is
+// canonical JSON: object keys sorted, no insignificant whitespace, so every
+// carrier agrees on the bytes. A retry with a changed epoch or not_after (or
+// input) yields a different digest and is request_conflict; a retry that
+// recovers the original command bytes yields the same digest. The digest
+// excludes revision/state/result — those are server-derived, not part of the
+// client's command.
+//
+// Canonical byte construction (for carriers that build the bytes themselves):
+//   json.Marshal of digestPayload{Schema,Op,RequestID,TargetID,Epoch,NotAfter,Input}
+//   with struct field order fixed (Go json emits in struct order, which is the
+//   canonical order below) and no extra whitespace, then sha256 hex with the
+//   "sha256:" prefix.
+func CommandDigest(cmd *Command) string {
+	if cmd == nil || cmd.Op != OpRequestSubmit {
+		return ""
+	}
+	payload := digestPayload{
+		Schema:    cmd.Schema,
+		Op:        cmd.Op,
+		RequestID: cmd.RequestID,
+		TargetID:  cmd.TargetID,
+		Epoch:     cmd.Epoch,
+		NotAfter:  cmd.NotAfter,
+		Input:     cmd.Input,
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(data)
+	return digestPrefix + hex.EncodeToString(sum[:])
+}
+
+// digestPayload is the stable canonical shape for CommandDigest. Field order
+// is the canonical key order; do not reorder without bumping the schema and
+// migrating records. omitempty is intentionally absent on submit-required
+// fields so the canonical shape is identical for every valid submit.
+type digestPayload struct {
+	Schema    string       `json:"schema"`
+	Op        Op           `json:"op"`
+	RequestID string       `json:"request_id"`
+	TargetID  string       `json:"target_id"`
+	Epoch     string       `json:"epoch"`
+	NotAfter  string       `json:"not_after"`
+	Input     *SubmitInput `json:"input"`
 }
 
 // DecodeCommand strictly decodes one command document. It enforces the size
