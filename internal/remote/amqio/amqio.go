@@ -146,9 +146,22 @@ func (c *Carrier) importOne(root *fsq.DeliveryRoot, name string) error {
 		// command whose record may not exist.
 		return nil
 	}
-	// request.* replies travel as revisions through Publish; every other op
-	// and every refusal is answered once, here.
-	if herr != nil || (cmd != nil && cmd.Op != protocol.OpRequestSubmit && cmd.Op != protocol.OpRequestCancel) {
+	// A request-op reply carries an Outcome. A transient storage failure means
+	// the record could not be persisted, so leave the command in new for the
+	// next import rather than draining it without a durable record (Pro B09).
+	var outcome protocol.Outcome
+	if rep, ok := reply.(protocol.Reply); ok {
+		outcome = rep.Outcome
+	}
+	if outcome.Code == protocol.CodeStorageFull {
+		return nil
+	}
+	// Reply once here for: every refusal; every non-request op; and a request
+	// op that carries an op-specific Outcome (request_conflict, already
+	// resolved) which does not travel as a published revision (Pro B09: the
+	// caller must still learn the outcome).
+	isRequestOp := cmd != nil && (cmd.Op == protocol.OpRequestSubmit || cmd.Op == protocol.OpRequestCancel)
+	if herr != nil || !isRequestOp || outcome.Code != "" {
 		if err := c.reply(root, origin, "remote reply", reply, herr); err != nil {
 			return err
 		}

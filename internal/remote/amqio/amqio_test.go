@@ -175,3 +175,72 @@ func TestImportLeavesCommandOnPlainError(t *testing.T) {
 		t.Fatalf("drained receipt emitted despite no record: %d", len(entries))
 	}
 }
+
+// deliverSubmit is a test helper: it delivers a request.submit for id with the
+// given text into the endpoint handle's inbox.
+func deliverSubmit(t *testing.T, root, id, text string) {
+	t.Helper()
+	body := `{"schema":"amq.remote.command/1","op":"request.submit","request_id":"` + id + `","target_id":"fake","epoch":"e_1","not_after":"` + protocol.FormatTime(time.Now().Add(time.Minute)) + `","input":{"text":"` + text + `"}}`
+	now := time.Now()
+	mid, _ := format.NewMessageID(now)
+	msg := format.Message{Header: format.Header{Schema: format.CurrentSchema, ID: mid, From: "codex", To: []string{DefaultHandle}, Thread: "p2p/codex__remote", Subject: "submit", Created: now.UTC().Format(time.RFC3339Nano), Kind: "todo"}, Body: body}
+	data, _ := msg.Marshal()
+	identity, _ := fsq.SnapshotDeliveryRoot(root)
+	droot, _ := fsq.OpenDeliveryRoot(root, identity)
+	if _, err := fsq.DeliverToInboxes(droot, []string{DefaultHandle}, mid+".md", data); err != nil {
+		t.Fatalf("deliver: %v", err)
+	}
+	_ = droot.Close()
+}
+
+// TestImportConflictRepliesToSender reproduces Pro B09's suppressed-reply hole:
+// a request op that yields an op-specific Outcome (request_conflict) does not
+// travel as a published revision, so the carrier must still reply to the sender
+// with that outcome rather than silently claiming the command.
+func TestImportConflictRepliesToSender(t *testing.T) {
+	root := t.TempDir()
+	_ = fsq.EnsureRootDirs(root)
+	for _, h := range []string{"codex", DefaultHandle} {
+		_ = fsq.EnsureAgentDirs(root, h)
+	}
+	store, err := requests.Open(filepath.Join(root, "extensions", "remote"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var carrier *Carrier
+	ep := core.New(core.Config{Store: store, Publish: func(s protocol.Snapshot, o map[string]string) error { return carrier.Publish(s, o) }})
+	carrier, err = New(root, DefaultHandle, ep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ep.Register(fake.New("fake", "e_1"))
+	t.Cleanup(func() { _ = ep.Close() })
+
+	id := "11111111-1111-4111-8111-1111111111c9"
+	deliverSubmit(t, root, id, "first")
+	if _, err := carrier.ImportOnce(); err != nil {
+		t.Fatal(err)
+	}
+	// clear the sender's inbox of the running-revision replies so we isolate the conflict reply
+	firstReplies, _ := os.ReadDir(fsq.AgentInboxNew(root, "codex"))
+	baseline := len(firstReplies)
+
+	deliverSubmit(t, root, id, "different bytes")
+	if _, err := carrier.ImportOnce(); err != nil {
+		t.Fatal(err)
+	}
+	entries, _ := os.ReadDir(fsq.AgentInboxNew(root, "codex"))
+	sawConflict := false
+	for _, e := range entries {
+		m, err := format.ReadMessageFile(filepath.Join(fsq.AgentInboxNew(root, "codex"), e.Name()))
+		if err != nil {
+			continue
+		}
+		if strings.Contains(m.Body, string(protocol.CodeRequestConflict)) {
+			sawConflict = true
+		}
+	}
+	if len(entries) <= baseline || !sawConflict {
+		t.Fatalf("conflicting submit did not reply to sender with the outcome (entries %d, baseline %d, sawConflict %v)", len(entries), baseline, sawConflict)
+	}
+}
