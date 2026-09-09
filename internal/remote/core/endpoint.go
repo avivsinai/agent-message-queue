@@ -177,6 +177,21 @@ func InputDigest(in *protocol.SubmitInput) string {
 }
 
 func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, error) {
+	// D1 (bead 611.22.23): busy=queue and deliver=steer are disabled in v1 —
+	// their ownership+evidence models do not exist yet (steer would overwrite
+	// the running run's byTurn mapping; queue would admit without a NotAfter
+	// check at native admission or a per-runtime reservation). The gate sits
+	// BEFORE any durable write, so a disabled-mode submit consumes nothing
+	// and a plain retry with reject/turn succeeds. Full model deferred to a
+	// follow-up.
+	if cmd.Input != nil && (cmd.Input.Busy == protocol.BusyQueue || cmd.Input.Deliver == protocol.DeliverSteer) {
+		mode, value := "busy", string(cmd.Input.Busy)
+		if cmd.Input.Deliver == protocol.DeliverSteer {
+			mode, value = "deliver", string(cmd.Input.Deliver)
+		}
+		return protocol.Reply{}, protocol.Refuse(protocol.CodeUnsupported,
+			"%s=%s is disabled in v1; full ownership/evidence model deferred — use busy=reject deliver=turn", mode, value)
+	}
 	key := requests.Key{CreatorHost: src.Host, TargetID: cmd.TargetID, RequestID: cmd.RequestID}
 	digest := protocol.CommandDigest(cmd)
 
