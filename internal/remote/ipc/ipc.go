@@ -216,11 +216,28 @@ func readRecord[T any](r io.Reader) (*T, error) {
 	return &v, nil
 }
 
+// rpcWriteDeadline bounds each response write. A client that stops reading
+// must not hold a handler goroutine forever: the write aborts at the
+// deadline, the handler returns, and conn.Close (deferred by handle) releases
+// the connection without needing the blocked writer to progress. Local
+// responses are small; 10s is generous headroom over any sane reader.
+const rpcWriteDeadline = 10 * time.Second
+
+// writeRecord marshals one response and writes it under a write deadline when
+// the connection supports one (Pro B14). A timed-out or failed write is
+// silent from the protocol's point of view: the client sees a closed
+// connection, never a partial record.
 func writeRecord(w io.Writer, v any) {
 	data, err := json.Marshal(v)
 	if err != nil {
 		return
 	}
 	data = append(data, '\n')
+	if d, ok := w.(interface{ SetWriteDeadline(time.Time) error }); ok {
+		if derr := d.SetWriteDeadline(time.Now().Add(rpcWriteDeadline)); derr != nil {
+			return
+		}
+		defer func() { _ = d.SetWriteDeadline(time.Time{}) }()
+	}
 	_, _ = w.Write(data)
 }
