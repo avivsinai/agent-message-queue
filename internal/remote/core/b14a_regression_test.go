@@ -221,4 +221,3 @@ func TestB14aReplayTerminalAckUnderWedgedAttachment(t *testing.T) {
 		t.Fatal("wedged ack never returned after release")
 	}
 }
-
