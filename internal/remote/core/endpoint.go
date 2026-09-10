@@ -994,7 +994,7 @@ func (e *Endpoint) reconcileLive(rec *requests.Record) error {
 	}
 	e.notifyLocked(rec)
 	// B14a: the durable ack memo was written under the lock above
-	// (ackTerminalLocked's memo half), so the replay path stays correct if we
+	// (memoAckIntentLocked), so the replay path stays correct if we
 	// crash before the native call. The native ack itself runs OUTSIDE e.mu —
 	// a wedged attachment ack must not hold the endpoint mutex forever.
 	ackKey, ackEpoch, ackDigest, ackAtt := key, rec.Epoch, "", Attachment(nil)
@@ -1184,25 +1184,6 @@ func (e *Endpoint) crashAt(point string) error {
 		return fmt.Errorf("%w %s: %w", ErrCrashed, point, err)
 	}
 	return nil
-}
-
-// ackTerminalLocked persists the acknowledgement intent for a terminal record
-// and then releases the attachment's retained evidence. The ack digest is the
-// evidence digest of the outcome being released (not the input digest), and
-// it is durable BEFORE the native call: a crash after the terminal commit but
-// before (or during) the native ack leaves a record that Reconcile can replay
-// the ack from, so the attachment's one unacked-result slot cannot wedge the
-// next submit with busy. A record whose terminal outcome retained no evidence
-// needs no ack and gets none. Native acks are fire-and-forget: a failed store
-// write skips the native call so the retained evidence survives for replay.
-// The ack bookkeeping is a rewrite in place without a revision bump, the same
-// contract as MarkPublished. The caller holds e.mu.
-func (e *Endpoint) ackTerminalLocked(rec *requests.Record, t *target) {
-	digest, fresh := e.memoAckIntentLocked(rec, t)
-	if !fresh {
-		return
-	}
-	t.att.AcknowledgeResult(keyOfRecord(rec), rec.Epoch, digest)
 }
 
 // memoAckIntentLocked computes the evidence digest of a terminal record's
