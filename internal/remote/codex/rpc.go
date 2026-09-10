@@ -55,9 +55,30 @@ type Client struct {
 	once    sync.Once
 	readErr error
 
+	// reqQ is the reply-required server-request queue (B14b/B8). Server
+	// requests (approvals, user input) must never be silently dropped: the
+	// app-server waits for a response. The queue is bounded by the liveness
+	// invariant — at most one in-flight approval per live run — and dispatch
+	// to it NEVER blocks the read pump. On the should-be-impossible overflow
+	// the request is failed explicitly (Respond with an error) so the server
+	// never waits silently.
+	reqQ          chan ServerRequest
+	reqWorkerDone chan struct{} // closed by the req worker on exit
+	// reqInFlight counts server-request handlers currently executing, so
+	// Close's bounded drain awaits the executing handler too.
+	reqInFlight atomic.Int64
+	stopOnce    sync.Once
+
 	OnNotification  func(Notification)
 	OnServerRequest func(ServerRequest)
 }
+
+// reqQSlack is the slack above max live runs for the reply-required queue.
+const reqQSlack = 8
+
+// maxLiveRuns bounds the number of concurrent native runs the attachment
+// tracks; approvals are per-run, so this bounds reply-required in-flight.
+const maxLiveRuns = 16
 
 // Dial connects to the app-server unix socket and starts the read loop.
 func Dial(socketPath string) (*Client, error) {
@@ -69,9 +90,83 @@ func Dial(socketPath string) (*Client, error) {
 }
 
 func newClient(ws *wsConn) *Client {
-	c := &Client{ws: ws, pending: map[int64]chan rpcMessage{}, closed: make(chan struct{})}
+	c := &Client{
+		ws:            ws,
+		pending:       map[int64]chan rpcMessage{},
+		closed:        make(chan struct{}),
+		reqQ:          make(chan ServerRequest, maxLiveRuns+reqQSlack),
+		reqWorkerDone: make(chan struct{}),
+	}
 	go c.readLoop()
+	go c.reqWorker()
 	return c
+}
+
+// dispatchServerRequest enqueues a reply-required server request without
+// ever blocking the read pump (B14b/B8). Overflow must not happen — the
+// app-server has at most one in-flight approval per live run — but if it
+// ever does, the request is FAILED EXPLICITLY (Respond with an error) so
+// the app-server never waits for an answer that never comes.
+func (c *Client) dispatchServerRequest(sr ServerRequest) {
+	select {
+	case c.reqQ <- sr:
+		return
+	default:
+	}
+	// Overflow: explicit failure, never a silent drop, never a blocked pump.
+	// The failure write is deadline-bounded: it runs INSIDE the read pump,
+	// so an unbounded write on a wedged socket would stall the pump — the
+	// exact thing B8 exists to prevent, on B8's own overflow path.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	_ = c.respondErrorCtx(ctx, sr.ID, "server request queue overflow: "+sr.Method)
+}
+
+// respondError answers a server request with an error result (JSON-RPC 2.0:
+// error responses carry error, never result — sending both would make the
+// server-side parser pick one arbitrarily).
+func (c *Client) respondErrorCtx(ctx context.Context, id json.RawMessage, msg string) error {
+	errObj := rpcError{Code: -32000, Message: msg}
+	msg2 := rpcMessage{JSONRPC: "2.0", ID: &id, Error: &errObj}
+	data, err := json.Marshal(msg2)
+	if err != nil {
+		return err
+	}
+	return c.ws.writeTextCtx(ctx, data)
+}
+
+// reqWorker drains the reply-required queue. It exits when reqQ is closed.
+func (c *Client) reqWorker() {
+	defer close(c.reqWorkerDone)
+	for sr := range c.reqQ {
+		c.reqInFlight.Add(1)
+		func() {
+			defer func() {
+				_ = recover()
+				c.reqInFlight.Add(-1)
+			}()
+			if c.OnServerRequest != nil {
+				c.OnServerRequest(sr)
+			}
+		}()
+	}
+}
+
+// waitCallbacks drains both queues and waits for the in-flight callbacks,
+// so Close does not return while callbacks still touch app state. Bounded:
+// the deadline keeps Close responsive if a handler is wedged.
+func (c *Client) waitCallbacks() {
+	deadline := time.After(2 * time.Second)
+	for {
+		if len(c.reqQ) == 0 && c.reqInFlight.Load() == 0 {
+			return
+		}
+		select {
+		case <-deadline:
+			return
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
 }
 
 func (c *Client) readLoop() {
@@ -107,10 +202,14 @@ func (c *Client) readLoop() {
 			}
 		case msg.ID != nil:
 			if c.OnServerRequest != nil {
-				c.OnServerRequest(ServerRequest{ID: *msg.ID, Method: msg.Method, Params: msg.Params})
+				c.dispatchServerRequest(ServerRequest{ID: *msg.ID, Method: msg.Method, Params: msg.Params})
 			}
 		case msg.Method != "":
 			if c.OnNotification != nil {
+				// Synchronous, by design (B14b recut): onNative is a bounded
+				// state-apply (B14a moved the native ack outside e.mu), so it
+				// cannot wedge the pump — only reply-required approval
+				// handlers can, and those run off-pump via reqQ.
 				c.OnNotification(Notification{Method: msg.Method, Params: msg.Params})
 			}
 		}
@@ -141,19 +240,16 @@ func (c *Client) Call(ctx context.Context, method string, params any, result any
 	}
 	c.pending[id] = ch
 	c.mu.Unlock()
-	// Bound the write itself by the context: a blocked socket write must abort
-	// at the deadline, not hang until the connection is closed (Pro B14).
-	if dl, ok := ctx.Deadline(); ok {
-		c.ws.setWriteDeadline(dl)
-	}
-	if err := c.ws.writeText(data); err != nil {
-		c.ws.setWriteDeadline(time.Time{})
+	// Bound BOTH phases of the write by the context (B14b/B6): WAITING for
+	// the writer slot is acquired ctx-aware (the old wmu sync.Mutex waited
+	// unboundedly — ctx only bounded the write after acquisition), and the
+	// write itself carries the deadline under the slot.
+	if err := c.ws.writeTextCtx(ctx, data); err != nil {
 		c.mu.Lock()
 		delete(c.pending, id)
 		c.mu.Unlock()
 		return err
 	}
-	c.ws.setWriteDeadline(time.Time{})
 	select {
 	case resp, ok := <-ch:
 		if !ok {
@@ -188,5 +284,52 @@ func (c *Client) Respond(id json.RawMessage, result any) error {
 	return c.ws.writeText(data)
 }
 
-// Close closes the connection.
-func (c *Client) Close() error { return c.ws.close() }
+// Close tears the connection down and stops the callback workers (B14b/B9):
+// the events channel closes (worker exits after the in-flight event; Close
+// waits, bounded), then the conn closes — aborting any blocked read or
+// write immediately. The stop lifecycle is a separate sync.Once from the
+// start Once, so it actually runs: the previous single-once design leaked
+// the worker on every teardown. Safe to call twice.
+func (c *Client) Close() error {
+	// ORDER IS THE BLOCKER FIX: the socket closes FIRST and the read pump is
+	// DRAINED (readLoop closes c.closed on exit) BEFORE reqQ closes. The
+	// previous order (close queues -> drain -> ws.close) left the pump live
+	// during the whole drain window, so an inbound approval frame could send
+	// on a CLOSED reqQ and panic the process. After the pump is dead,
+	// dispatchServerRequest can no longer fire and closing reqQ is safe.
+	//
+	// The whole teardown is BOUNDED (B14 recut L1): the post-stopOnce drain
+	// (reqWorker exit + executing handler) shares ONE total deadline. If a
+	// handler wedges anyway, Close proceeds past it — the conn is already
+	// closed, so a leaked bounded handler is harmless, and Close must never
+	// hang. The production handler is bounded, so this is purely defensive.
+	c.stopOnce.Do(func() {
+		_ = c.ws.close() // aborts any blocked read/write immediately
+		<-c.closed       // readLoop exited: no more reqQ sends
+		close(c.reqQ)    // only Close closes it; pump is gone
+	})
+	// Wait for the req worker to exit AND any executing handler to finish,
+	// within one shared budget. (<-c.reqWorkerDone alone was unbounded: a
+	// wedged handler never closes it, and Close would hang forever.)
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case <-c.reqWorkerDone:
+			return nil
+		case <-deadline:
+			// Bound reached: proceed with teardown. The conn is closed; a
+			// still-running handler finishes against a dead client harmlessly.
+			return nil
+		default:
+		}
+		if c.reqInFlight.Load() == 0 && len(c.reqQ) == 0 {
+			// Queue drained and nothing executing; reqWorker is exiting.
+			select {
+			case <-c.reqWorkerDone:
+			case <-time.After(50 * time.Millisecond):
+			}
+			return nil
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
