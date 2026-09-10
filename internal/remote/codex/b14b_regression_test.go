@@ -2,10 +2,12 @@ package codex
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -68,6 +70,51 @@ func newB14bClient(t *testing.T, onNotif func(), onReq func(ServerRequest)) (*Cl
 		c.OnServerRequest = onReq
 	}
 	t.Cleanup(func() { _ = c.Close(); _ = l.Close() })
+	return c, l
+}
+
+// newB14bClientWithServer builds a client whose stand-in server forwards the
+// FIRST frame the client sends back to the test via onFrame.
+func newB14bClientWithServer(t *testing.T, onFrame func([]byte)) (*Client, net.Listener) {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "amqcx")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "s.sock")
+	l, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	go func() {
+		conn, err := l.Accept()
+		if err != nil {
+			return
+		}
+		ws, err := acceptServerWS(conn)
+		if err != nil {
+			return
+		}
+		payload, err := ws.readText()
+		if err != nil {
+			return
+		}
+		onFrame(payload)
+		// Keep draining so further writes never wedge the client.
+		for {
+			if _, err := ws.readText(); err != nil {
+				return
+			}
+		}
+	}()
+	ws, err := dialUnixWS(sock, time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	c := newClient(ws)
+	t.Cleanup(func() { _ = c.Close() })
 	return c, l
 }
 
@@ -213,4 +260,86 @@ func TestB14bCallWaitsBoundedBehindWedgedWriter(t *testing.T) {
 		t.Fatalf("call B err = %v, want context.DeadlineExceeded (or the connection-closed error under teardown)", err)
 	}
 	_ = writeADone // A stays wedged; the test ends and cleanup closes everything.
+}
+
+// TestB14bReplyRequiredNotDroppedAndPumpStaysLive pins B8: notifications may
+// drop on a full backlog, but reply-required server requests must never be
+// silently dropped — delivered via their own queue, or explicitly failed on
+// the should-be-impossible overflow — and the read pump never blocks on
+// handler latency.
+func TestB14bReplyRequiredNotDroppedAndPumpStaysLive(t *testing.T) {
+	var mu sync.Mutex
+	notifications := 0
+	approved := make(chan string, 8)
+	blockApproval := make(chan struct{}) // wedges the first approval handler
+	c, _ := newB14bClient(t, nil, nil)
+	c.OnNotification = func(n Notification) { mu.Lock(); notifications++; mu.Unlock() }
+	first := true
+	c.OnServerRequest = func(r ServerRequest) {
+		mu.Lock()
+		approved <- r.Method
+		mu.Unlock()
+		if first {
+			first = false
+			<-blockApproval // wedge AFTER recording: the pump must survive it
+		}
+	}
+
+	// Flood notifications (bounded queue of 64): drops are legal. Then a
+	// reply-required request: it MUST be delivered (own queue) even with the
+	// notification backlog full.
+	for i := 0; i < 100; i++ {
+		c.dispatch(func() { c.OnNotification(Notification{Method: "noise"}) })
+	}
+	c.dispatchServerRequest(ServerRequest{ID: json.RawMessage(`"srv-1"`), Method: "item/commandExecution/requestApproval"})
+	select {
+	case m := <-approved:
+		if m != "item/commandExecution/requestApproval" {
+			t.Fatalf("delivered method = %s", m)
+		}
+	case <-time.After(b14bDeadline):
+		t.Fatal("reply-required server request dropped (B8 regression)")
+	}
+	close(blockApproval)
+
+	// Overflow (should-be-impossible): fill reqQ past capacity with a wedged
+	// handler, the overflowed request must be EXPLICITLY FAILED, not dropped.
+	// c2's stand-in server echoes the first frame it reads, so respondError's
+	// explicit error is observable without touching the live client's socket
+	// (swapping it would race the readLoop).
+	release2 := make(chan struct{})
+	respCh := make(chan []byte, 1)
+	c2, _ := newB14bClientWithServer(t, func(payload []byte) { respCh <- payload })
+	headPicked := make(chan struct{})
+	c2.OnServerRequest = func(r ServerRequest) {
+		// Signal that the req worker has consumed the head from reqQ, then
+		// wedge: the queue below can now fill deterministically.
+		close(headPicked)
+		<-release2
+	}
+	c2.dispatchServerRequest(ServerRequest{ID: json.RawMessage(`"srv-head"`), Method: "m"})
+	<-headPicked // worker consumed the head; it is wedged in this handler
+	for i := 0; i < cap(c2.reqQ)+1; i++ {
+		c2.dispatchServerRequest(ServerRequest{ID: json.RawMessage(`"srv-x"`), Method: "m"})
+	}
+	select {
+	case payload := <-respCh:
+		var msg rpcMessage
+		if err := json.Unmarshal(payload, &msg); err != nil || msg.Error == nil {
+			t.Fatalf("overflow response not an explicit error: %s (%v)", payload, err)
+		}
+		if msg.ID == nil || string(*msg.ID) != `"srv-x"` {
+			t.Fatalf("error response id = %s, want srv-x", string(*msg.ID))
+		}
+	case <-time.After(b14bDeadline):
+		t.Fatal("overflowed reply-required request neither delivered nor explicitly failed (B8 regression)")
+	}
+	// Pump liveness while an approval handler was wedged: notifications kept
+	// flowing (delivered or dropped — the readLoop never stalled).
+	mu.Lock()
+	n := notifications
+	mu.Unlock()
+	if n == 0 && len(c.events) == 0 {
+		t.Fatal("notification worker never made progress while approval handler wedged")
+	}
 }

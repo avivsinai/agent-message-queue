@@ -182,14 +182,12 @@ func (c *Client) dispatchServerRequest(sr ServerRequest) {
 	_ = c.respondError(sr.ID, "server request queue overflow: "+sr.Method)
 }
 
-// respondError answers a server request with an error result.
+// respondError answers a server request with an error result (JSON-RPC 2.0:
+// error responses carry error, never result — sending both would make the
+// server-side parser pick one arbitrarily).
 func (c *Client) respondError(id json.RawMessage, msg string) error {
 	errObj := rpcError{Code: -32000, Message: msg}
-	raw, err := json.Marshal(errObj)
-	if err != nil {
-		return err
-	}
-	msg2 := rpcMessage{JSONRPC: "2.0", ID: &id, Error: &errObj, Result: raw}
+	msg2 := rpcMessage{JSONRPC: "2.0", ID: &id, Error: &errObj}
 	data, err := json.Marshal(msg2)
 	if err != nil {
 		return err
