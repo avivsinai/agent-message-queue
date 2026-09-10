@@ -202,12 +202,81 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 		return protocol.Reply{}, err
 	}
 	if exists {
-		e.mu.Unlock()
-		out := protocol.Outcome{Op: protocol.OpRequestSubmit}
-		if rec.InputDigest != "" && rec.InputDigest != digest {
-			out.Code = protocol.CodeRequestConflict
+		// A dedup placeholder from a submit that was refused before any
+		// durable record existed (busy reservation, storage-full without a
+		// write) is not the request itself: the identical resubmit must be
+		// admitted normally, not answered from the placeholder. The
+		// placeholder is recognizable as a non-terminal `received` record
+		// with no dispatch behind it; only a DIFFERENT digest is a conflict.
+		reserved := rec.State == protocol.StateReceived &&
+			rec.NativeDispatches == 0 &&
+			!rec.State.Terminal() &&
+			rec.InputDigest == digest
+		if !reserved {
+			e.mu.Unlock()
+			out := protocol.Outcome{Op: protocol.OpRequestSubmit}
+			if rec.InputDigest != "" && rec.InputDigest != digest {
+				out.Code = protocol.CodeRequestConflict
+			}
+			return protocol.Reply{Snapshot: rec.Snapshot, Outcome: out}, nil
 		}
-		return protocol.Reply{Snapshot: rec.Snapshot, Outcome: out}, nil
+		// Fall through to the normal admission path with the existing
+		// record: the deferred/Tick machinery owns it from here.
+		t, code := e.admissibleLocked(cmd.TargetID, cmd.Epoch, cmd.NotAfter)
+		if code != "" {
+			e.mu.Unlock()
+			return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: code}}, nil
+		}
+		if t == nil {
+			e.mu.Unlock()
+			return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit}}, nil
+		}
+		if e.runtimeInFlightLocked(cmd.TargetID, key) {
+			e.mu.Unlock()
+			return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: protocol.CodeBusy}}, nil
+		}
+		rec.Revision++
+		rec.State = protocol.StateDispatching
+		rec.NativeDispatches = 1
+		rec.ObservedAt = protocol.FormatTime(e.now())
+		if err := e.store.Update(rec); err != nil {
+			e.mu.Unlock()
+			return protocol.Reply{}, err
+		}
+		e.notifyLocked(rec)
+		input := *cmd.Input
+		e.mu.Unlock()
+		adm, nerr := t.att.Submit(BoundRequest{Key: key, Epoch: cmd.Epoch, Input: input, NotAfter: cmd.NotAfter})
+		e.mu.Lock()
+		rec, _, err = e.store.Get(key)
+		if err != nil || !exists || rec.State != protocol.StateDispatching {
+			e.mu.Unlock()
+			return protocol.Reply{}, err
+		}
+		switch {
+		case nerr != nil:
+			rec.State, rec.Code = protocol.StateUncertain, protocol.CodeAttachmentLost
+		case adm.Admitted:
+			rec.State = protocol.StateRunning
+			run := adm.RunID
+			rec.NativeRun = &run
+		default:
+			rec.State, rec.Code = protocol.StateRejected, adm.Code
+			if rec.Code == "" {
+				rec.Code = protocol.CodeNativeError
+			}
+		}
+		rec.Revision++
+		rec.ObservedAt = protocol.FormatTime(e.now())
+		if err := e.store.Update(rec); err != nil {
+			e.mu.Unlock()
+			return protocol.Reply{}, err
+		}
+		e.notifyLocked(rec)
+		snap, origin, snapRev, rkey := rec.Snapshot, rec.Origin, rec.Revision, keyOfRecord(rec)
+		e.mu.Unlock()
+		e.publishOutsideLock(rkey, snap, origin, snapRev)
+		return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit}}, nil
 	}
 	rec = &requests.Record{
 		Snapshot: protocol.Snapshot{
@@ -263,6 +332,16 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 		e.mu.Unlock()
 		return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit}}, nil
 	}
+	// B14 reservation: one in-flight request per runtime, owned by the
+	// endpoint from its own durable state — never two concurrent native
+	// dispatches because an Inspect() race said idle. The refusal is
+	// unpersisted (nothing durable for a submit that never dispatched) and
+	// travels as the outcome, mirroring the attachment's busy admission.
+	if e.runtimeInFlightLocked(cmd.TargetID, key) {
+		rej := e.unpersisted(rec, protocol.StateRejected, protocol.CodeBusy)
+		e.mu.Unlock()
+		return protocol.Reply{Snapshot: rej, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: protocol.CodeBusy}}, nil
+	}
 	rec.Revision++
 	rec.State = protocol.StateDispatching
 	rec.NativeDispatches = 1
@@ -291,13 +370,14 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 	}
 
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	rec, _, err = e.store.Get(key)
 	if err != nil {
+		e.mu.Unlock()
 		return protocol.Reply{}, err
 	}
 	if rec.State != protocol.StateDispatching {
 		// A fast native event already moved the record; the evidence wins.
+		e.mu.Unlock()
 		return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit}}, nil
 	}
 	switch {
@@ -328,11 +408,41 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 	rec.Revision++
 	rec.ObservedAt = protocol.FormatTime(e.now())
 	if err := e.store.Update(rec); err != nil {
+		e.mu.Unlock()
 		return protocol.Reply{}, err
 	}
 	e.notifyLocked(rec)
-	e.publishLocked(rec)
+	snap, origin, snapRev, key := rec.Snapshot, rec.Origin, rec.Revision, keyOfRecord(rec)
+	e.mu.Unlock()
+	e.publishOutsideLock(key, snap, origin, snapRev)
 	return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit}}, nil
+}
+
+// runtimeInFlightLocked reports whether another request for the same target
+// is in flight at the endpoint: any record in dispatching (admission
+// unknown), running (native-owned), or uncertain (outcome unknown) state.
+// This is the B14 per-runtime reservation — the endpoint's own knowledge of
+// what it has outstanding, not the attachment's Inspect() status, which is
+// advisory and racy. Scope note: a terminal record whose ack is pending is
+// NOT reserved here — the attachment owns the native unacked-result slot and
+// the B06 ack-replay machinery recovers it; double-modeling it at the
+// endpoint made the endpoint refuse submits the attachment would accept.
+// The caller holds e.mu.
+func (e *Endpoint) runtimeInFlightLocked(targetID string, exclude requests.Key) bool {
+	recs, err := e.store.List()
+	if err != nil {
+		return false
+	}
+	for _, r := range recs {
+		if r.TargetID != targetID || keyOfRecord(r) == exclude {
+			continue
+		}
+		switch r.State {
+		case protocol.StateDispatching, protocol.StateRunning, protocol.StateUncertain:
+			return true
+		}
+	}
+	return false
 }
 
 // admissibleLocked checks share, epoch, expiry and capability. It returns the
@@ -427,7 +537,8 @@ func (e *Endpoint) cancel(cmd *protocol.Command, src Source) (protocol.Reply, er
 		if err != nil {
 			return protocol.Reply{}, err
 		}
-		e.publishRevision(rec)
+		snap, origin, snapRev, key := rec.Snapshot, rec.Origin, rec.Revision, keyOfRecord(rec)
+		e.publishOutsideLock(key, snap, origin, snapRev)
 		return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestCancel}}, nil
 	}
 	// Validate the cancel command against the original request binding rather
@@ -460,7 +571,8 @@ func (e *Endpoint) cancel(cmd *protocol.Command, src Source) (protocol.Reply, er
 		if err != nil {
 			return protocol.Reply{}, err
 		}
-		e.publishRevision(rec)
+		snap, origin, snapRev, key := rec.Snapshot, rec.Origin, rec.Revision, keyOfRecord(rec)
+		e.publishOutsideLock(key, snap, origin, snapRev)
 		return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestCancel}}, nil
 	}
 	t := e.targets[targetID]
@@ -475,12 +587,13 @@ func (e *Endpoint) cancel(cmd *protocol.Command, src Source) (protocol.Reply, er
 	}
 
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	rec, _, err = e.store.Get(key)
 	if err != nil {
+		e.mu.Unlock()
 		return protocol.Reply{}, err
 	}
 	if rec.State.Terminal() {
+		e.mu.Unlock()
 		return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestCancel, Disposition: protocol.CancelNoopTerminal}}, nil
 	}
 	if nerr != nil {
@@ -494,10 +607,13 @@ func (e *Endpoint) cancel(cmd *protocol.Command, src Source) (protocol.Reply, er
 	}
 	rec.ObservedAt = now
 	if err := e.store.Update(rec); err != nil {
+		e.mu.Unlock()
 		return protocol.Reply{}, err
 	}
 	e.notifyLocked(rec)
-	e.publishLocked(rec)
+	snap, origin, snapRev, key := rec.Snapshot, rec.Origin, rec.Revision, keyOfRecord(rec)
+	e.mu.Unlock()
+	e.publishOutsideLock(key, snap, origin, snapRev)
 	return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestCancel}}, nil
 }
 
@@ -655,18 +771,24 @@ func (e *Endpoint) inspect(targetID string) (any, error) {
 // onNative applies one native observation to the bound record.
 func (e *Endpoint) onNative(targetID string, ev NativeEvent) {
 	e.mu.Lock()
-	defer e.mu.Unlock()
+	// B14: no defer — this path unlocks before its native ack and publish
+	// (the slow, untrusted calls) and re-locks nowhere. Every early return
+	// below must unlock explicitly.
 	if ev.Type == EventEpochChanged || ev.Type == EventStatus {
+		e.mu.Unlock()
 		return
 	}
 	if ev.Key.RequestID == "" {
+		e.mu.Unlock()
 		return
 	}
 	rec, ok, err := e.store.Get(ev.Key)
 	if err != nil || !ok {
+		e.mu.Unlock()
 		return
 	}
 	if rec.State.Terminal() {
+		e.mu.Unlock()
 		return
 	}
 	switch ev.Type {
@@ -675,6 +797,7 @@ func (e *Endpoint) onNative(targetID string, ev NativeEvent) {
 			return
 		}
 		if e.crashAt(PointBeforeResult) != nil {
+			e.mu.Unlock()
 			return
 		}
 		switch ev.Type {
@@ -703,6 +826,7 @@ func (e *Endpoint) onNative(targetID string, ev NativeEvent) {
 	case EventLocalIntervention:
 		rec.LocalIntervention = true
 	default:
+		e.mu.Unlock()
 		return
 	}
 	rec.Revision++
@@ -711,21 +835,39 @@ func (e *Endpoint) onNative(targetID string, ev NativeEvent) {
 		// The durable write failed on an async path with no client waiting.
 		// Surface a visible storage-failure projection; Reconcile retries.
 		e.notifyStorageFailureLocked(rec, err)
+		e.mu.Unlock()
 		return
 	}
 	e.notifyLocked(rec)
 	if e.crashAt(PointAfterResult) != nil {
+		e.mu.Unlock()
 		return
 	}
-	if rec.State.Terminal() {
+	// B14: the native ack and the publication both run WITHOUT e.mu — the
+	// durable ack memo (memoAckIntentLocked) has already made the intent
+	// replayable, so a crash here is recoverable and a slow attachment or
+	// carrier cannot stall command handling. The memo is computed under the
+	// lock; the native call and publish happen outside it.
+	ackKey, ackEpoch := ev.Key, rec.Epoch
+	ackDigest := ""
+	terminal := rec.State.Terminal()
+	if terminal {
 		if t, ok := e.targets[targetID]; ok {
-			digest, fresh := e.memoAckIntentLocked(rec, t)
-			if fresh && digest != "" && e.crashAt(PointBeforeAck) == nil {
-				t.att.AcknowledgeResult(ev.Key, rec.Epoch, digest)
-			}
+			ackDigest, _ = e.memoAckIntentLocked(rec, t)
 		}
 	}
-	e.publishLocked(rec)
+	snap, origin, snapRev, key := rec.Snapshot, rec.Origin, rec.Revision, keyOfRecord(rec)
+	var ackTarget Attachment
+	if terminal && ackDigest != "" {
+		if t, ok := e.targets[targetID]; ok {
+			ackTarget = t.att
+		}
+	}
+	e.mu.Unlock()
+	if ackTarget != nil && e.crashAt(PointBeforeAck) == nil {
+		ackTarget.AcknowledgeResult(ackKey, ackEpoch, ackDigest)
+	}
+	e.publishOutsideLock(key, snap, origin, snapRev)
 }
 
 // notifyStorageFailureLocked surfaces a visible failure projection when a
@@ -798,7 +940,10 @@ func (e *Endpoint) Reconcile() error {
 		}
 		e.mu.Lock()
 		if cur, ok, gerr := e.store.Get(keyOfRecord(rec)); gerr == nil && ok && cur.PublishedRevision < cur.Revision {
-			e.publishLocked(cur)
+			// Releases e.mu for the publish and RE-ACQUIRES it; the deferred
+			// unlock below balances that. Never `continue` here: the loop
+			// would re-lock a lock this path already holds.
+			e.publishOutsideLockSnapshot(cur)
 		}
 		e.mu.Unlock()
 	}
@@ -873,12 +1018,13 @@ func (e *Endpoint) reconcileLive(rec *requests.Record) error {
 	}
 
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	rec, exists, err := e.store.Get(key)
 	if err != nil {
+		e.mu.Unlock()
 		return err
 	}
 	if !exists || rec.State.Terminal() {
+		e.mu.Unlock()
 		return nil
 	}
 	switch {
@@ -891,11 +1037,13 @@ func (e *Endpoint) reconcileLive(rec *requests.Record) error {
 	case ev.Class == EvidenceTentative:
 		// Bound but native ownership not yet proven. Never reject a submission
 		// that is still about to execute; re-check next tick.
+		e.mu.Unlock()
 		return nil
 	case ev.Class == EvidenceUnknown:
 		// Delivered but admission-unknown (transport ambiguity, or an API that
 		// cannot report its own rejection). Keep the correlation, stay uncertain.
 		if rec.State == protocol.StateUncertain {
+			e.mu.Unlock()
 			return nil
 		}
 		rec.State = protocol.StateUncertain
@@ -917,6 +1065,7 @@ func (e *Endpoint) reconcileLive(rec *requests.Record) error {
 		rec.Interaction = nil
 	case ev.Admitted:
 		if rec.State == protocol.StateRunning && rec.NativeRun != nil && *rec.NativeRun == ev.RunID {
+			e.mu.Unlock()
 			return nil
 		}
 		rec.State = protocol.StateRunning
@@ -935,8 +1084,19 @@ func (e *Endpoint) reconcileLive(rec *requests.Record) error {
 		return err
 	}
 	e.notifyLocked(rec)
+	// B14: the native ack runs outside e.mu. The durable ack memo was
+	// written under the lock above (ackTerminalLocked's memo half), so the
+	// replay path stays correct if we crash before the native call.
+	ackKey, ackEpoch, ackDigest, ackAtt := key, rec.Epoch, "", Attachment(nil)
 	if rec.State.Terminal() && ok {
-		e.ackTerminalLocked(rec, t)
+		ackDigest, _ = e.memoAckIntentLocked(rec, t)
+		if ackDigest != "" {
+			ackAtt = t.att
+		}
+	}
+	e.mu.Unlock()
+	if ackAtt != nil && ackDigest != "" {
+		ackAtt.AcknowledgeResult(ackKey, ackEpoch, ackDigest)
 	}
 	return nil
 }
@@ -968,7 +1128,14 @@ func (e *Endpoint) admitDeferred(rec *requests.Record) error {
 		e.mu.Unlock()
 		return err
 	}
-	// Move to dispatching under the lock, then Submit unlocked.
+	// Move to dispatching under the lock, then Submit unlocked. The B14
+	// reservation applies here too: a deferred record whose sibling is still
+	// in flight stays deferred (never dispatched) — Tick retries it after
+	// the in-flight one resolves.
+	if e.runtimeInFlightLocked(rec.TargetID, key) {
+		e.mu.Unlock()
+		return nil // still reserved; retry on the next tick
+	}
 	rec, exists, err := e.store.Get(key)
 	if err != nil || !exists || rec.State != protocol.StateReceived {
 		e.mu.Unlock()
@@ -1082,28 +1249,53 @@ func (e *Endpoint) notifyLocked(rec *requests.Record) {
 	e.changed = make(chan struct{})
 }
 
-// publishLocked publishes the latest revision and records it on success.
-// Failures leave published_revision behind so Reconcile retries.
-func (e *Endpoint) publishLocked(rec *requests.Record) {
+// publishOutsideLock implements the B14 publication boundary: the snapshot is
+// taken under the writer lock (whoever called this held e.mu and passed a
+// consistent snapshot), the publish itself runs WITHOUT the lock so a slow
+// carrier cannot stall command handling, and success is recorded
+// conditionally afterwards — the record may have advanced while we published,
+// and only a revision that is still current gets its PublishedRevision
+// bumped. Failures leave published_revision behind so Reconcile retries.
+// snapRev is the revision the snapshot was taken at.
+func (e *Endpoint) publishOutsideLock(key requests.Key, snap protocol.Snapshot, origin map[string]string, snapRev int64) {
 	if e.crashAt(PointBeforePublish) != nil {
 		return
 	}
-	if err := e.publish(rec.Snapshot, rec.Origin); err != nil {
+	if err := e.publish(snap, origin); err != nil {
 		return
 	}
 	if e.crashAt(PointAfterPublish) != nil || e.crashAt(PointBeforePublished) != nil {
 		return
 	}
-	key := requests.Key{CreatorHost: rec.CreatorHost, TargetID: rec.TargetID, RequestID: rec.RequestID}
-	if err := e.store.MarkPublished(key, rec.Revision); err == nil {
-		rec.PublishedRevision = rec.Revision
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	// Record success only if the record is still at the published revision:
+	// a concurrent advance re-publishes via its own path.
+	if rec, ok, err := e.store.Get(key); err == nil && ok && rec.Revision == snapRev {
+		if err := e.store.MarkPublished(key, snapRev); err == nil {
+			rec.PublishedRevision = snapRev
+		}
 	}
 }
 
+// publishOutsideLockSnapshot publishes rec without ever dropping-and-retaking
+// the caller's lock: the caller holds e.mu, this copies the snapshot, releases
+// the lock, publishes, then re-locks to record success. For Reconcile's loop,
+// which holds e.mu when it discovers unpublished revisions.
+// Caller must hold e.mu. Releases and re-acquires it.
+func (e *Endpoint) publishOutsideLockSnapshot(rec *requests.Record) {
+	snap, origin, snapRev, key := rec.Snapshot, rec.Origin, rec.Revision, keyOfRecord(rec)
+	e.mu.Unlock()
+	e.publishOutsideLock(key, snap, origin, snapRev)
+	e.mu.Lock()
+}
+
+// publishRevision snapshots under the writer lock and publishes outside it.
 func (e *Endpoint) publishRevision(rec *requests.Record) {
 	e.mu.Lock()
-	defer e.mu.Unlock()
-	e.publishLocked(rec)
+	snap, origin, snapRev := rec.Snapshot, rec.Origin, rec.Revision
+	e.mu.Unlock()
+	e.publishOutsideLock(keyOfRecord(rec), snap, origin, snapRev)
 }
 
 func (e *Endpoint) crashAt(point string) error {
