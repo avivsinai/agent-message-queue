@@ -6,6 +6,7 @@ package codex
 
 import (
 	"bufio"
+	"context"
 	"crypto/rand"
 	"crypto/sha1" //nolint:gosec // RFC 6455 mandates SHA-1 for the accept key.
 	"encoding/base64"
@@ -16,7 +17,6 @@ import (
 	"net"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -34,11 +34,38 @@ const (
 )
 
 // wsConn is one client WebSocket over an already-dialed connection.
+// wmu is a cap-1 channel semaphore (B14b/B6): acquisition is a select on
+// send vs ctx.Done(), so WAITING for the writer is context-bounded — the
+// old sync.Mutex acquisition was unbounded, and ctx only bounded the write
+// after it. Release is a receive. Zero extra goroutines, no lost unlocks.
 type wsConn struct {
 	conn net.Conn
 	br   *bufio.Reader
-	wmu  sync.Mutex
+	wmu  chan struct{}
 }
+
+func newWSConn(conn net.Conn, br *bufio.Reader) *wsConn {
+	return &wsConn{conn: conn, br: br, wmu: make(chan struct{}, 1)}
+}
+
+// lockWriteCtx acquires the writer slot or gives up on ctx.
+func (w *wsConn) lockWriteCtx(ctx context.Context) error {
+	select {
+	case w.wmu <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// lockWrite acquires the writer slot without a context (unbounded wait,
+// used only by pings/close-frames which must always land).
+func (w *wsConn) lockWrite() {
+	w.wmu <- struct{}{}
+}
+
+// unlockWrite releases the writer slot.
+func (w *wsConn) unlockWrite() { <-w.wmu }
 
 // dialUnixWS connects to a unix socket and performs the WebSocket upgrade.
 func dialUnixWS(path string, timeout time.Duration) (*wsConn, error) {
@@ -46,7 +73,7 @@ func dialUnixWS(path string, timeout time.Duration) (*wsConn, error) {
 	if err != nil {
 		return nil, err
 	}
-	ws := &wsConn{conn: conn, br: bufio.NewReaderSize(conn, 64*1024)}
+	ws := newWSConn(conn, bufio.NewReaderSize(conn, 64*1024))
 	if err := ws.handshake(); err != nil {
 		_ = conn.Close()
 		return nil, err
@@ -92,9 +119,33 @@ func (w *wsConn) writeText(payload []byte) error {
 	return w.writeFrame(opText, payload)
 }
 
+// writeTextCtx sends one masked text frame bounded by ctx in BOTH phases:
+// acquiring the writer slot (select on ctx.Done) and the write itself
+// (deadline installed+cleared under the slot, so concurrent writers cannot
+// clobber each other's deadline). This is Pro B14 recut #5's
+// deadline-under-mutex discipline with context-bounded acquisition added
+// (B14b/B6).
+func (w *wsConn) writeTextCtx(ctx context.Context, payload []byte) error {
+	if err := w.lockWriteCtx(ctx); err != nil {
+		return err
+	}
+	defer w.unlockWrite()
+	dl, ok := ctx.Deadline()
+	if ok {
+		_ = w.conn.SetWriteDeadline(dl)
+		defer func() { _ = w.conn.SetWriteDeadline(time.Time{}) }()
+	}
+	return w.writeFrameBody(opText, payload)
+}
+
+// writeFrame sends one frame, acquiring the writer slot without a context
+// (pings, pongs, close frames, and Respond must always land).
 func (w *wsConn) writeFrame(opcode byte, payload []byte) error {
-	w.wmu.Lock()
-	defer w.wmu.Unlock()
+	w.lockWrite()
+	defer w.unlockWrite()
+	return w.writeFrameBody(opcode, payload)
+}
+func (w *wsConn) writeFrameBody(opcode byte, payload []byte) error {
 	var mask [4]byte
 	if _, err := rand.Read(mask[:]); err != nil {
 		return err
@@ -196,7 +247,15 @@ func (w *wsConn) readFrame() (byte, []byte, error) {
 }
 
 func (w *wsConn) close() error {
-	_ = w.writeFrame(opClose, nil)
+	// Try to send a close frame without blocking forever behind a wedged
+	// writer: the conn.Close below aborts any in-flight write anyway, and
+	// close must never hang (a blocked close-frame send wedges teardown).
+	select {
+	case w.wmu <- struct{}{}:
+		_ = w.writeFrameBody(opClose, nil)
+		<-w.wmu
+	default:
+	}
 	return w.conn.Close()
 }
 
@@ -218,5 +277,5 @@ func acceptServerWS(conn net.Conn) (*wsConn, error) {
 	if _, err := io.WriteString(conn, resp); err != nil {
 		return nil, err
 	}
-	return &wsConn{conn: conn, br: br}, nil
+	return newWSConn(conn, br), nil
 }

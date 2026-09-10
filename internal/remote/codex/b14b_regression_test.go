@@ -1,6 +1,8 @@
 package codex
 
 import (
+	"context"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -144,4 +146,71 @@ func TestB14bCloseTwiceSafe(t *testing.T) {
 	case <-time.After(b14bDeadline):
 		t.Fatal("second Close deadlocked")
 	}
+}
+
+// TestB14bCallWaitsBoundedBehindWedgedWriter pins B6: ctx must bound WAITING
+// for the writer slot, not just the write. A wedged writer (server never
+// reads) holds the slot; a second Call with a short deadline must return
+// ctx.Err within its deadline instead of blocking behind the wedged writer.
+func TestB14bCallWaitsBoundedBehindWedgedWriter(t *testing.T) {
+	dir, err := os.MkdirTemp("", "amqcx")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "s.sock")
+	l, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	// The server accepts but NEVER reads: the client's first big write wedges.
+	go func() {
+		conn, err := l.Accept()
+		if err != nil {
+			return
+		}
+		_, _ = acceptServerWS(conn)
+		// deliberately never read or write
+	}()
+	ws, err := dialUnixWS(sock, time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	c := newClient(ws)
+	t.Cleanup(func() { _ = c.Close() })
+
+	// Writer A: a large payload wedges in conn.Write (buffer full).
+	writeADone := make(chan error, 1)
+	go func() {
+		big := make([]byte, 512*1024) // exceeds any socket buffer
+		writeADone <- ws.writeText(big)
+	}()
+	// Give A time to acquire the slot and block inside Write.
+	time.Sleep(150 * time.Millisecond)
+
+	// Call B: small payload, 250ms deadline. The slot is held by A's
+	// writeText (uncontested under the old mutex: B waited unboundedly).
+	start := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+	err = c.Call(ctx, "ping", map[string]any{}, nil)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("call B unexpectedly succeeded while writer wedged")
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("call B blocked %v — ctx did not bound WAITING for the writer (B6 regression)", elapsed)
+	}
+	// Under -race scheduling, B's ctx race may lose to the read pump's EOF
+	// (Close tears the conn down when the test ends); the INVARIANT is that
+	// B returned within its deadline with a bounded error, never blocked
+	// behind A. DeadlineExceeded is the expected case on a live connection.
+	c.mu.Lock()
+	readErr := c.readErr
+	c.mu.Unlock()
+	if !errors.Is(err, context.DeadlineExceeded) && (readErr == nil || !errors.Is(err, readErr)) {
+		t.Fatalf("call B err = %v, want context.DeadlineExceeded (or the connection-closed error under teardown)", err)
+	}
+	_ = writeADone // A stays wedged; the test ends and cleanup closes everything.
 }
