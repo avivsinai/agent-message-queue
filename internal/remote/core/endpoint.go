@@ -1281,9 +1281,9 @@ func (e *Endpoint) finishAdmissionLocked(rec *requests.Record, exists bool, adm 
 		return protocol.Reply{}, err
 	}
 	e.notifyLocked(rec)
+	e.publishLocked(rec)
 	snap := rec.Snapshot
 	e.mu.Unlock()
-	e.publishLocked(rec)
 	return protocol.Reply{Snapshot: snap, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit}}, nil
 }
 
