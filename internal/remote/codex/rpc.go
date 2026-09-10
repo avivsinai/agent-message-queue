@@ -37,19 +37,6 @@ type ServerRequest struct {
 	Params json.RawMessage
 }
 
-// event carries one reader callback to the ordered worker. done is closed
-// after run returns, so Close can wait for the in-flight event.
-type event struct {
-	run  func()
-	done chan struct{}
-}
-
-// callbackBacklog bounds the ordered worker's queue. It is comfortably
-// above the notification rate the app-server produces; blocking the read
-// pump is not (a stalled pump starves every pending Call on the
-// connection).
-const callbackBacklog = 64
-
 // Notification is a server-initiated notification.
 type Notification struct {
 	Method string
@@ -68,20 +55,6 @@ type Client struct {
 	once    sync.Once
 	readErr error
 
-	// events is the ordered, bounded callback queue drained by the single
-	// worker goroutine (B14b/B9). Start and stop have SEPARATE lifecycles:
-	// sharing one sync.Once between newClient (start) and Close (stop) meant
-	// close(events) never ran and the worker leaked on every teardown.
-	events        chan event
-	workerStart   sync.Once
-	workerStop    sync.Once
-	workerStarted atomic.Bool
-	workerDone    chan struct{} // closed by the worker on exit (testable teardown)
-	// eventsInFlight counts callbacks currently executing in the worker, so
-	// waitCallbacks can await the in-flight event — len(events) alone
-	// excludes it.
-	eventsInFlight atomic.Int64
-
 	// reqQ is the reply-required server-request queue (B14b/B8). Server
 	// requests (approvals, user input) must never be silently dropped: the
 	// app-server waits for a response. The queue is bounded by the liveness
@@ -90,8 +63,11 @@ type Client struct {
 	// the request is failed explicitly (Respond with an error) so the server
 	// never waits silently.
 	reqQ          chan ServerRequest
-	reqQCapacity  int
 	reqWorkerDone chan struct{} // closed by the req worker on exit
+	// reqInFlight counts server-request handlers currently executing, so
+	// Close's bounded drain awaits the executing handler too.
+	reqInFlight atomic.Int64
+	stopOnce    sync.Once
 
 	OnNotification  func(Notification)
 	OnServerRequest func(ServerRequest)
@@ -118,53 +94,12 @@ func newClient(ws *wsConn) *Client {
 		ws:            ws,
 		pending:       map[int64]chan rpcMessage{},
 		closed:        make(chan struct{}),
-		events:        make(chan event, callbackBacklog),
-		workerDone:    make(chan struct{}),
 		reqQ:          make(chan ServerRequest, maxLiveRuns+reqQSlack),
-		reqQCapacity:  maxLiveRuns + reqQSlack,
 		reqWorkerDone: make(chan struct{}),
 	}
 	go c.readLoop()
 	go c.reqWorker()
-	c.workerStart.Do(func() {
-		c.workerStarted.Store(true)
-		go c.startWorker()
-	})
 	return c
-}
-
-// startWorker runs the single ordered callback worker: events apply strictly
-// in arrival order — Question then QuestionResolved cannot invert — and the
-// read pump never blocks on handler latency. The worker recovers its own
-// panic so a callback bug cannot kill the read pump and every pending call
-// with it. It exits when the events channel is closed, then closes
-// workerDone so tests can observe the exit deterministically.
-func (c *Client) startWorker() {
-	defer close(c.workerDone)
-	for ev := range c.events {
-		c.eventsInFlight.Add(1)
-		func() {
-			defer func() { _ = recover() }()
-			defer close(ev.done)
-			ev.run()
-		}()
-		c.eventsInFlight.Add(-1)
-	}
-}
-
-// dispatch hands one reader callback to the ordered worker with a bounded,
-// non-blocking enqueue. Overflow drops the event rather than wedging the
-// pump (notifications may drop; reply-required frames never reach this path
-// — they go through dispatchServerRequest).
-func (c *Client) dispatch(run func()) {
-	ev := event{run: run, done: make(chan struct{})}
-	select {
-	case c.events <- ev:
-	default:
-		// Backlog full: drop. The endpoint re-derives dropped state via
-		// Reconcile; blocking here would stall the read pump.
-		close(ev.done)
-	}
 }
 
 // dispatchServerRequest enqueues a reply-required server request without
@@ -179,28 +114,37 @@ func (c *Client) dispatchServerRequest(sr ServerRequest) {
 	default:
 	}
 	// Overflow: explicit failure, never a silent drop, never a blocked pump.
-	_ = c.respondError(sr.ID, "server request queue overflow: "+sr.Method)
+	// The failure write is deadline-bounded: it runs INSIDE the read pump,
+	// so an unbounded write on a wedged socket would stall the pump — the
+	// exact thing B8 exists to prevent, on B8's own overflow path.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	_ = c.respondErrorCtx(ctx, sr.ID, "server request queue overflow: "+sr.Method)
 }
 
 // respondError answers a server request with an error result (JSON-RPC 2.0:
 // error responses carry error, never result — sending both would make the
 // server-side parser pick one arbitrarily).
-func (c *Client) respondError(id json.RawMessage, msg string) error {
+func (c *Client) respondErrorCtx(ctx context.Context, id json.RawMessage, msg string) error {
 	errObj := rpcError{Code: -32000, Message: msg}
 	msg2 := rpcMessage{JSONRPC: "2.0", ID: &id, Error: &errObj}
 	data, err := json.Marshal(msg2)
 	if err != nil {
 		return err
 	}
-	return c.ws.writeText(data)
+	return c.ws.writeTextCtx(ctx, data)
 }
 
 // reqWorker drains the reply-required queue. It exits when reqQ is closed.
 func (c *Client) reqWorker() {
 	defer close(c.reqWorkerDone)
 	for sr := range c.reqQ {
+		c.reqInFlight.Add(1)
 		func() {
-			defer func() { _ = recover() }()
+			defer func() {
+				_ = recover()
+				c.reqInFlight.Add(-1)
+			}()
 			if c.OnServerRequest != nil {
 				c.OnServerRequest(sr)
 			}
@@ -214,10 +158,7 @@ func (c *Client) reqWorker() {
 func (c *Client) waitCallbacks() {
 	deadline := time.After(2 * time.Second)
 	for {
-		c.mu.Lock()
-		depth := len(c.events) + len(c.reqQ)
-		c.mu.Unlock()
-		if depth == 0 && c.eventsInFlight.Load() == 0 {
+		if len(c.reqQ) == 0 && c.reqInFlight.Load() == 0 {
 			return
 		}
 		select {
@@ -265,6 +206,10 @@ func (c *Client) readLoop() {
 			}
 		case msg.Method != "":
 			if c.OnNotification != nil {
+				// Synchronous, by design (B14b recut): onNative is a bounded
+				// state-apply (B14a moved the native ack outside e.mu), so it
+				// cannot wedge the pump — only reply-required approval
+				// handlers can, and those run off-pump via reqQ.
 				c.OnNotification(Notification{Method: msg.Method, Params: msg.Params})
 			}
 		}
@@ -346,12 +291,18 @@ func (c *Client) Respond(id json.RawMessage, result any) error {
 // start Once, so it actually runs: the previous single-once design leaked
 // the worker on every teardown. Safe to call twice.
 func (c *Client) Close() error {
-	c.workerStop.Do(func() {
-		if c.workerStarted.Load() {
-			close(c.events)
-		}
-		close(c.reqQ)
+	// ORDER IS THE BLOCKER FIX: the socket closes FIRST and the read pump is
+	// DRAINED (readLoop closes c.closed on exit) BEFORE reqQ closes. The
+	// previous order (close queues -> drain -> ws.close) left the pump live
+	// during the whole drain window, so an inbound approval frame could send
+	// on a CLOSED reqQ and panic the process. After the pump is dead,
+	// dispatchServerRequest can no longer fire and closing reqQ is safe.
+	c.stopOnce.Do(func() {
+		_ = c.ws.close() // aborts any blocked read/write immediately
+		<-c.closed       // readLoop exited: no more reqQ sends
+		close(c.reqQ)    // only Close closes it; pump is gone
 	})
+	<-c.reqWorkerDone
 	c.waitCallbacks()
-	return c.ws.close()
+	return nil
 }

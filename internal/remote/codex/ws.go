@@ -48,6 +48,22 @@ func newWSConn(conn net.Conn, br *bufio.Reader) *wsConn {
 	return &wsConn{conn: conn, br: br, wmu: make(chan struct{}, 1)}
 }
 
+// writePong sends a pong frame with the writer slot acquired under a
+// deadline: both the WAIT for the slot and the write are bounded, so the
+// read pump can never stall on a wedged socket (B14b recut secondary).
+func (w *wsConn) writePong(payload []byte) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := w.lockWriteCtx(ctx); err != nil {
+		return err
+	}
+	defer w.unlockWrite()
+	dl, _ := ctx.Deadline()
+	_ = w.conn.SetWriteDeadline(dl)
+	defer func() { _ = w.conn.SetWriteDeadline(time.Time{}) }()
+	return w.writeFrameBody(opPong, payload)
+}
+
 // lockWriteCtx acquires the writer slot or gives up on ctx.
 func (w *wsConn) lockWriteCtx(ctx context.Context) error {
 	select {
@@ -180,7 +196,10 @@ func (w *wsConn) readText() ([]byte, error) {
 		case opText:
 			return payload, nil
 		case opPing:
-			if err := w.writeFrame(opPong, payload); err != nil {
+			// The pong reply runs INSIDE the read pump, so it is
+			// deadline-bounded: an unbounded write on a wedged socket would
+			// stall the pump (B14b recut secondary finding).
+			if err := w.writePong(payload); err != nil {
 				return nil, err
 			}
 		case opClose:

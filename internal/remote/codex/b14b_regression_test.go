@@ -85,15 +85,22 @@ func newB14bClientWithServer(t *testing.T, onFrame func([]byte)) (*Client, net.L
 		if err != nil {
 			return
 		}
-		payload, err := ws.readText()
-		if err != nil {
-			return
-		}
-		onFrame(payload)
-		// Keep draining so further writes never wedge the client.
+		first := true
 		for {
-			if _, err := ws.readText(); err != nil {
+			payload, err := ws.readText()
+			if err != nil {
 				return
+			}
+			var msg rpcMessage
+			if json.Unmarshal(payload, &msg) == nil && msg.ID != nil && msg.Method != "" {
+				// A Call ("ping"): answer it so pump-liveness assertions can
+				// prove the read pump still moves.
+				_ = ws.writeText([]byte(`{"jsonrpc":"2.0","id":` + string(*msg.ID) + `,"result":{}}`))
+				continue
+			}
+			if first {
+				first = false
+				onFrame(payload)
 			}
 		}
 	}()
@@ -112,60 +119,47 @@ func newB14bClientWithServer(t *testing.T, onFrame func([]byte)) (*Client, net.L
 // Simplest deterministic injection: call the dispatch paths the readLoop
 // would call, since B9/B6/B8 target those paths' lifecycle, not the parse.
 
-// TestB14bCloseRunsWorkerStopAndWorkerExits pins B9: Close must run the
-// STOP lifecycle (previously the shared sync.Once meant close(events) never
-// ran and the worker leaked on every teardown). The worker closes
-// workerDone on exit; the test waits on it with a deadline.
-func TestB14bCloseRunsWorkerStopAndWorkerExits(t *testing.T) {
-	processed := make(chan struct{})
+// TestB14bCloseStopsReqWorker pins B9 (recut: reqWorker is the only worker):
+// Close runs the full teardown — the req worker exits (reqWorkerDone) after
+// the read pump is drained, and the queues close safely.
+func TestB14bCloseStopsReqWorker(t *testing.T) {
 	c, _ := newB14bClient(t, nil, nil)
-	c.OnNotification = func(n Notification) { close(processed) }
-
-	// Queue a callback so the worker is observably running, then Close.
-	c.dispatch(func() { c.OnNotification(Notification{Method: "x"}) })
-	select {
-	case <-processed:
-	case <-time.After(b14bDeadline):
-		t.Fatal("worker never processed the callback")
-	}
 	if err := c.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
-	// Worker must exit: workerDone closed. Regression (leaked worker) FAILS
-	// here by deadline instead of hanging.
 	select {
-	case <-c.workerDone:
+	case <-c.reqWorkerDone:
 	case <-time.After(b14bDeadline):
-		t.Fatal("worker did not exit after Close — close(events) never ran (B9 regression)")
+		t.Fatal("reqWorker did not exit after Close (B9 regression)")
 	}
 }
 
-// TestB14bWaitCallbacksCountsInFlight pins B9's second half: waitCallbacks
-// must await the EXECUTING callback (len(events) excludes it). A callback
-// that blocks is awaited until the deadline, then Close returns anyway.
+// TestB14bWaitCallbacksCountsInFlight pins the drain: waitCallbacks must
+// await the EXECUTING server-request handler (reqInFlight), not just queue
+// depth. Close stays bounded even against a wedged handler.
 func TestB14bWaitCallbacksCountsInFlight(t *testing.T) {
 	release := make(chan struct{})
 	handlerRunning := make(chan struct{})
 	c, _ := newB14bClient(t, nil, nil)
-	c.OnNotification = func(n Notification) {
+	c.OnServerRequest = func(r ServerRequest) {
 		close(handlerRunning)
 		<-release
 	}
-	c.dispatch(func() { c.OnNotification(Notification{Method: "x"}) })
+	c.dispatchServerRequest(ServerRequest{ID: json.RawMessage(`"srv-1"`), Method: "m"})
 	<-handlerRunning
 	done := make(chan struct{})
 	go func() { c.waitCallbacks(); close(done) }()
-	// waitCallbacks must NOT return while the callback is in flight.
+	// waitCallbacks must NOT return while the handler is executing.
 	select {
 	case <-done:
-		t.Fatal("waitCallbacks returned while callback still executing (in-flight not tracked)")
+		t.Fatal("waitCallbacks returned while handler still executing (in-flight not tracked)")
 	case <-time.After(200 * time.Millisecond):
 	}
 	close(release)
 	select {
 	case <-done:
 	case <-time.After(b14bDeadline):
-		t.Fatal("waitCallbacks never returned after in-flight callback finished")
+		t.Fatal("waitCallbacks never returned after in-flight handler finished")
 	}
 }
 
@@ -257,11 +251,9 @@ func TestB14bCallWaitsBoundedBehindWedgedWriter(t *testing.T) {
 // handler latency.
 func TestB14bReplyRequiredNotDroppedAndPumpStaysLive(t *testing.T) {
 	var mu sync.Mutex
-	notifications := 0
 	approved := make(chan string, 8)
 	blockApproval := make(chan struct{}) // wedges the first approval handler
 	c, _ := newB14bClient(t, nil, nil)
-	c.OnNotification = func(n Notification) { mu.Lock(); notifications++; mu.Unlock() }
 	first := true
 	c.OnServerRequest = func(r ServerRequest) {
 		mu.Lock()
@@ -273,12 +265,10 @@ func TestB14bReplyRequiredNotDroppedAndPumpStaysLive(t *testing.T) {
 		}
 	}
 
-	// Flood notifications (bounded queue of 64): drops are legal. Then a
-	// reply-required request: it MUST be delivered (own queue) even with the
-	// notification backlog full.
-	for i := 0; i < 100; i++ {
-		c.dispatch(func() { c.OnNotification(Notification{Method: "noise"}) })
-	}
+	// A reply-required request with a wedged handler: it is still DELIVERED
+	// (queued) and the read pump must stay live — an RPC Call completes even
+	// though the approval handler is stuck (the pump never blocks on handler
+	// latency; notifications run synchronously but are bounded state-applies).
 	c.dispatchServerRequest(ServerRequest{ID: json.RawMessage(`"srv-1"`), Method: "item/commandExecution/requestApproval"})
 	select {
 	case m := <-approved:
@@ -322,12 +312,105 @@ func TestB14bReplyRequiredNotDroppedAndPumpStaysLive(t *testing.T) {
 	case <-time.After(b14bDeadline):
 		t.Fatal("overflowed reply-required request neither delivered nor explicitly failed (B8 regression)")
 	}
-	// Pump liveness while an approval handler was wedged: notifications kept
-	// flowing (delivered or dropped — the readLoop never stalled).
-	mu.Lock()
-	n := notifications
-	mu.Unlock()
-	if n == 0 && len(c.events) == 0 {
-		t.Fatal("notification worker never made progress while approval handler wedged")
+	// Pump liveness with c2's handler STILL wedged (release2 open): a real
+	// RPC must complete — the read pump never blocks on handler latency. c2's
+	// stand-in server replies to the Call, so success proves the pump moved.
+	ctx, cancel := context.WithTimeout(context.Background(), b14bDeadline)
+	defer cancel()
+	var pong struct{}
+	if err := c2.Call(ctx, "ping", map[string]any{}, &pong); err != nil {
+		t.Fatalf("RPC blocked while server-request handler wedged (pump starved): %v", err)
 	}
+	close(release2)
+}
+
+// TestB14bCloseConcurrentWithInboundServerRequest pins the BLOCKER: Close
+// must tear the socket down and DRAIN the read pump BEFORE closing reqQ.
+// The old order (close reqQ -> drain -> ws.close) left the pump live during
+// the drain window: an inbound approval frame then sent on a CLOSED reqQ —
+// send on closed channel, no recover in readLoop, process crash. This test
+// drives frames through the REAL readLoop (not dispatch directly — that was
+// the coverage gap), concurrently with Close.
+func TestB14bCloseConcurrentWithInboundServerRequest(t *testing.T) {
+	dir, err := os.MkdirTemp("", "amqcx")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "s.sock")
+	l, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+
+	// Server: accept in a loop (each Close/redial iteration opens a new
+	// connection), hammering server-request frames so one lands inside the
+	// Close teardown window.
+	stop := make(chan struct{})
+	go func() {
+		frame := []byte(`{"jsonrpc":"2.0","id":"srv-1","method":"item/commandExecution/requestApproval","params":{}}`)
+		for {
+			conn, err := l.Accept()
+			if err != nil {
+				return
+			}
+			ws, err := acceptServerWS(conn)
+			if err != nil {
+				return
+			}
+			go func() {
+				for {
+					select {
+					case <-stop:
+						return
+					default:
+					}
+					if err := ws.writeText(frame); err != nil {
+						return
+					}
+				}
+			}()
+		}
+	}()
+
+	// Handler must be wired BEFORE the readLoop can observe it (readLoop
+	// reads OnServerRequest concurrently — assigning after newClient races).
+	// makeProbeClient constructs the client with the handler pre-set.
+	makeProbeClient := func() *Client {
+		w, err := dialUnixWS(sock, time.Second)
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		c := &Client{
+			ws:              w,
+			pending:         map[int64]chan rpcMessage{},
+			closed:          make(chan struct{}),
+			reqQ:            make(chan ServerRequest, maxLiveRuns+reqQSlack),
+			reqWorkerDone:   make(chan struct{}),
+			OnServerRequest: func(r ServerRequest) {},
+		}
+		go c.readLoop()
+		go c.reqWorker()
+		return c
+	}
+	c := makeProbeClient()
+	for i := 0; i < 30; i++ { // the probe's iteration count
+		// Deliver frames and Close concurrently — the race window.
+		done := make(chan struct{})
+		go func() {
+			_ = c.Close()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(b14bDeadline):
+			t.Fatal("Close deadlocked")
+		}
+		// Recreate the client for the next iteration.
+		c = makeProbeClient()
+	}
+	close(stop)
+	_ = c.Close()
+	// No panic = pass. (A send-on-closed reqQ panics the whole test process.)
 }
