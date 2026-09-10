@@ -107,14 +107,29 @@ func (c *Client) readLoop() {
 			}
 		case msg.ID != nil:
 			if c.OnServerRequest != nil {
-				c.OnServerRequest(ServerRequest{ID: *msg.ID, Method: msg.Method, Params: msg.Params})
+				c.dispatchAsync(func() { c.OnServerRequest(ServerRequest{ID: *msg.ID, Method: msg.Method, Params: msg.Params}) })
 			}
 		case msg.Method != "":
 			if c.OnNotification != nil {
-				c.OnNotification(Notification{Method: msg.Method, Params: msg.Params})
+				c.dispatchAsync(func() { c.OnNotification(Notification{Method: msg.Method, Params: msg.Params}) })
 			}
 		}
 	}
+}
+
+// dispatchAsync runs one reader callback off the read pump (Pro B14): a slow
+// handler must not stall frame reads — a stalled pump deadlocks the
+// connection's pending calls and kills every in-flight request. Events are
+// handed to goroutines as they arrive; the endpoint serializes them itself
+// (it applies each observation under its own lock), so no cross-event
+// ordering guarantee is lost here that the endpoint was relying on. Each
+// dispatch recovers its own panic: a callback bug must not kill the read
+// pump and, with it, every pending call on the connection.
+func (c *Client) dispatchAsync(fn func()) {
+	go func() {
+		defer func() { _ = recover() }()
+		fn()
+	}()
 }
 
 // Done closes when the connection is gone.
