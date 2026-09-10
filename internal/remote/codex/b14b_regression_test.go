@@ -15,18 +15,6 @@ import (
 // b14bDeadline bounds every blocking wait: a regression FAILS, never hangs CI.
 const b14bDeadline = 5 * time.Second
 
-// b14bWait polls cond until true or the deadline passes.
-func b14bWait(cond func() bool) bool {
-	deadline := time.Now().Add(b14bDeadline)
-	for time.Now().Before(deadline) {
-		if cond() {
-			return true
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	return cond()
-}
-
 // newB14bClient dials a stand-in app-server over a unix socket and wires a
 // handler-invocation counter into both callback paths.
 func newB14bClient(t *testing.T, onNotif func(), onReq func(ServerRequest)) (*Client, net.Listener) {
