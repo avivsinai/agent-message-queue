@@ -414,3 +414,33 @@ func TestB14bCloseConcurrentWithInboundServerRequest(t *testing.T) {
 	_ = c.Close()
 	// No panic = pass. (A send-on-closed reqQ panics the whole test process.)
 }
+
+// TestB14bCloseBoundedUnderWedgedHandler pins recut L1: Close must NEVER
+// hang, even against a reqWorker handler that wedges forever. The whole
+// post-stopOnce drain shares one bounded budget — on timeout Close proceeds
+// (the conn is already closed; the leaked handler is harmless).
+func TestB14bCloseBoundedUnderWedgedHandler(t *testing.T) {
+	c, _ := newB14bClient(t, nil, nil)
+	handlerStarted := make(chan struct{})
+	neverRelease := make(chan struct{}) // wedged forever
+	c.OnServerRequest = func(r ServerRequest) {
+		close(handlerStarted)
+		<-neverRelease
+	}
+	c.dispatchServerRequest(ServerRequest{ID: json.RawMessage(`"srv-1"`), Method: "m"})
+	<-handlerStarted // handler executing and wedged
+
+	start := time.Now()
+	done := make(chan struct{})
+	go func() { _ = c.Close(); close(done) }()
+	select {
+	case <-done:
+		if elapsed := time.Since(start); elapsed > 4*time.Second {
+			t.Fatalf("Close took %v — exceeded its bound (L1 regression)", elapsed)
+		}
+	case <-time.After(6 * time.Second):
+		t.Fatal("Close hung on a wedged reqWorker handler — teardown is unbounded (L1 regression)")
+	}
+	// The worker is still wedged (expected); do not release — the test ends
+	// and the process exits; the goroutine leak is confined to the test.
+}

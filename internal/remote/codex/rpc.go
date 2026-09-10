@@ -297,12 +297,39 @@ func (c *Client) Close() error {
 	// during the whole drain window, so an inbound approval frame could send
 	// on a CLOSED reqQ and panic the process. After the pump is dead,
 	// dispatchServerRequest can no longer fire and closing reqQ is safe.
+	//
+	// The whole teardown is BOUNDED (B14 recut L1): the post-stopOnce drain
+	// (reqWorker exit + executing handler) shares ONE total deadline. If a
+	// handler wedges anyway, Close proceeds past it — the conn is already
+	// closed, so a leaked bounded handler is harmless, and Close must never
+	// hang. The production handler is bounded, so this is purely defensive.
 	c.stopOnce.Do(func() {
 		_ = c.ws.close() // aborts any blocked read/write immediately
 		<-c.closed       // readLoop exited: no more reqQ sends
 		close(c.reqQ)    // only Close closes it; pump is gone
 	})
-	<-c.reqWorkerDone
-	c.waitCallbacks()
-	return nil
+	// Wait for the req worker to exit AND any executing handler to finish,
+	// within one shared budget. (<-c.reqWorkerDone alone was unbounded: a
+	// wedged handler never closes it, and Close would hang forever.)
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case <-c.reqWorkerDone:
+			return nil
+		case <-deadline:
+			// Bound reached: proceed with teardown. The conn is closed; a
+			// still-running handler finishes against a dead client harmlessly.
+			return nil
+		default:
+		}
+		if c.reqInFlight.Load() == 0 && len(c.reqQ) == 0 {
+			// Queue drained and nothing executing; reqWorker is exiting.
+			select {
+			case <-c.reqWorkerDone:
+			case <-time.After(50 * time.Millisecond):
+			}
+			return nil
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
