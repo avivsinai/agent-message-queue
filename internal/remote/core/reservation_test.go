@@ -29,10 +29,11 @@ func TestEndpointReservationRefusesSecondConcurrentDispatch(t *testing.T) {
 	}
 	before := rt.Snapshot().Dispatches
 
-	// B: must be refused busy by the endpoint, with no second dispatch. The
-	// refusal travels as an unpersisted outcome — nothing durable for a
-	// submit that never dispatched (the store keeps a `received` dedup
-	// placeholder so a plain retry remains possible).
+	// B: must be refused busy by the endpoint, with no second dispatch. Pro
+	// recut #3: the durable record is TERMINAL rejected+tombstoned — never a
+	// `received` placeholder a later Tick would auto-dispatch (the caller
+	// was told the request was rejected; queue-on-reject is disabled by D1).
+	// The tombstone keeps dedup and makes the identical retry re-admittable.
 	idB := "11111111-1111-4111-8111-1111111111b2"
 	repAny, err := ep.Handle(submitCmd(idB), core.Source{Host: "local"})
 	if err != nil {
@@ -42,8 +43,12 @@ func TestEndpointReservationRefusesSecondConcurrentDispatch(t *testing.T) {
 	if rep.Outcome.Code != protocol.CodeBusy {
 		t.Fatalf("submit B outcome code = %q, want busy", rep.Outcome.Code)
 	}
-	if recB, ok, gerr := store.Get(requests.Key{CreatorHost: "local", TargetID: "fake", RequestID: idB}); gerr == nil && ok && recB.State == protocol.StateRejected {
-		t.Fatal("refused submit persisted a rejected record")
+	recB, ok, gerr := store.Get(requests.Key{CreatorHost: "local", TargetID: "fake", RequestID: idB})
+	if gerr != nil || !ok {
+		t.Fatalf("busy refusal record: ok=%v err=%v", ok, gerr)
+	}
+	if recB.State != protocol.StateRejected || recB.Code != protocol.CodeBusy || !recB.Tombstone {
+		t.Fatalf("busy-refused record = %s/%s tomb=%v, want rejected/busy/tombstoned", recB.State, recB.Code, recB.Tombstone)
 	}
 	if got := rt.Snapshot().Dispatches; got != before {
 		t.Fatalf("second dispatch happened: %d -> %d", before, got)

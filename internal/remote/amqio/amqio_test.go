@@ -85,27 +85,50 @@ func TestImportCommandAndPublishResult(t *testing.T) {
 
 	rt.Complete("11111111-1111-4111-8111-111111111301", "two defects")
 
-	entries, err := os.ReadDir(fsq.AgentInboxNew(root, "codex"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	// B14 recut #9: native-event publications are enqueued on the endpoint's
+	// bounded publisher worker, so the completed revision lands on the wire
+	// asynchronously after Complete returns. Poll briefly for both.
 	states := map[string]bool{}
-	for _, e := range entries {
-		m, err := format.ReadMessageFile(filepath.Join(fsq.AgentInboxNew(root, "codex"), e.Name()))
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		entries, err := os.ReadDir(fsq.AgentInboxNew(root, "codex"))
 		if err != nil {
 			t.Fatal(err)
 		}
-		if m.Header.Thread != "p2p/codex__remote" || !strings.HasPrefix(m.Header.Subject, subjectPrefix) {
-			t.Fatalf("unexpected reply header: %+v", m.Header)
+		states = map[string]bool{}
+		for _, e := range entries {
+			m, err := format.ReadMessageFile(filepath.Join(fsq.AgentInboxNew(root, "codex"), e.Name()))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if m.Header.Thread != "p2p/codex__remote" || !strings.HasPrefix(m.Header.Subject, subjectPrefix) {
+				t.Fatalf("unexpected reply header: %+v", m.Header)
+			}
+			states[strings.TrimPrefix(m.Header.Subject, subjectPrefix)] = true
 		}
-		states[strings.TrimPrefix(m.Header.Subject, subjectPrefix)] = true
+		if states["running"] && states["completed"] {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 	if !states["running"] || !states["completed"] {
 		t.Fatalf("expected running and completed revisions, got %v", states)
 	}
-	rec, ok, err := store.Get(requests.Key{CreatorHost: "amq:codex", TargetID: "fake", RequestID: "11111111-1111-4111-8111-111111111301"})
-	if err != nil || !ok {
-		t.Fatalf("record: ok=%v err=%v", ok, err)
+	// The MarkPublished bookkeeping is also applied by the async publisher
+	// worker; poll for it.
+	var rec *requests.Record
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		var ok bool
+		var err error
+		rec, ok, err = store.Get(requests.Key{CreatorHost: "amq:codex", TargetID: "fake", RequestID: "11111111-1111-4111-8111-111111111301"})
+		if err != nil || !ok {
+			t.Fatalf("record: ok=%v err=%v", ok, err)
+		}
+		if rec.State == protocol.StateCompleted && rec.PublishedRevision == rec.Revision {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 	if rec.State != protocol.StateCompleted || rec.PublishedRevision != rec.Revision {
 		t.Fatalf("record not completed and published: %+v", rec.Snapshot)

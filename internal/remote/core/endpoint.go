@@ -71,6 +71,49 @@ type Endpoint struct {
 	now       func() time.Time
 	observers []func(*requests.Record)
 	changed   chan struct{}
+
+	// pubQ is the bounded publication queue drained by the single
+	// publisher goroutine (Pro recut #9): the control-reply path ENQUEUES
+	// and returns — a wedged carrier can no longer hang a cancel client.
+	// Overflow (backlog full) is retried by Reconcile via published_revision
+	// lag, so a drop is recoverable. Closed by Close; closeWorker drains.
+	pubQ        chan pubJob
+	pubOnce     sync.Once
+	pubStopOnce sync.Once
+}
+
+// pubJob is one pending publication. queued at snapshot time under e.mu.
+type pubJob struct {
+	key     requests.Key
+	snap    protocol.Snapshot
+	origin  map[string]string
+	snapRev int64
+}
+
+// pubBacklog bounds the publication queue. Reconcile re-publishes any
+// revision left behind (published_revision < revision), so overflow drops
+// are safe; the bound just keeps memory finite under a wedged carrier.
+const pubBacklog = 128
+
+// startPublisher runs the single publication worker: drains pubQ in order,
+// publishing each snapshot and conditionally recording success. Exits when
+// pubQ is closed.
+func (e *Endpoint) startPublisher() {
+	for job := range e.pubQ {
+		e.publishOutsideLock(job.key, job.snap, job.origin, job.snapRev)
+	}
+}
+
+// enqueuePublish snapshots the job into the bounded queue. Full queue drops
+// the job — published_revision stays behind and Reconcile retries it.
+func (e *Endpoint) enqueuePublish(key requests.Key, snap protocol.Snapshot, origin map[string]string, snapRev int64) {
+	e.pubOnce.Do(func() { go e.startPublisher() })
+	job := pubJob{key: key, snap: snap, origin: origin, snapRev: snapRev}
+	select {
+	case e.pubQ <- job:
+	default:
+		// Backlog full: drop; Reconcile re-publishes via the revision lag.
+	}
 }
 
 // Config configures New.
@@ -91,6 +134,7 @@ func New(cfg Config) *Endpoint {
 		crash:   cfg.Crash,
 		now:     cfg.Now,
 		changed: make(chan struct{}),
+		pubQ:    make(chan pubJob, pubBacklog),
 	}
 	if e.now == nil {
 		e.now = time.Now
@@ -123,8 +167,23 @@ func (e *Endpoint) Register(att Attachment) {
 	e.targets[s.TargetID] = t
 }
 
-// Close unsubscribes from every attachment and closes the store. Records and
-// the attachments' retained evidence survive for the next endpoint.
+// UnregisterAll unsubscribes every attachment without closing the store:
+// reconcile tests use it to drop a target mid-flight (the restart shape).
+func (e *Endpoint) UnregisterAll() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for id, t := range e.targets {
+		if t.unsubscribe != nil {
+			t.unsubscribe()
+		}
+		delete(e.targets, id)
+	}
+}
+
+// Close unsubscribes from every attachment, drains the bounded publisher
+// (bounded so a wedged carrier cannot hang Close forever), and closes the
+// store. Records and the attachments' retained evidence survive for the
+// next endpoint.
 func (e *Endpoint) Close() error {
 	e.mu.Lock()
 	for id, t := range e.targets {
@@ -134,6 +193,22 @@ func (e *Endpoint) Close() error {
 		delete(e.targets, id)
 	}
 	e.mu.Unlock()
+	e.pubStopOnce.Do(func() { close(e.pubQ) })
+	// Bounded drain: wait for the backlog to empty, but never hang on a
+	// wedged carrier — leftover jobs are simply re-driven by the next
+	// endpoint's Reconcile (published_revision lag).
+	deadline := time.After(2 * time.Second)
+	for {
+		if len(e.pubQ) == 0 {
+			break
+		}
+		select {
+		case <-deadline:
+			goto closed
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+closed:
 	return e.store.Close()
 }
 
@@ -202,15 +277,15 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 		return protocol.Reply{}, err
 	}
 	if exists {
-		// A dedup placeholder from a submit that was refused before any
-		// durable record existed (busy reservation, storage-full without a
-		// write) is not the request itself: the identical resubmit must be
-		// admitted normally, not answered from the placeholder. The
-		// placeholder is recognizable as a non-terminal `received` record
-		// with no dispatch behind it; only a DIFFERENT digest is a conflict.
-		reserved := rec.State == protocol.StateReceived &&
+		// A busy-rejected tombstone from a previous attempt is not the
+		// request itself: the identical resubmit must be admitted normally,
+		// not answered from the tombstone (Pro recut #3). Recognizable as a
+		// tombstoned rejected record with no dispatch behind it and the same
+		// digest; only a DIFFERENT digest is a conflict.
+		reserved := rec.Tombstone &&
+			rec.State == protocol.StateRejected &&
+			rec.Code == protocol.CodeBusy &&
 			rec.NativeDispatches == 0 &&
-			!rec.State.Terminal() &&
 			rec.InputDigest == digest
 		if !reserved {
 			e.mu.Unlock()
@@ -231,8 +306,31 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 			e.mu.Unlock()
 			return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit}}, nil
 		}
-		if e.runtimeInFlightLocked(cmd.TargetID, key) {
+		reserved, rerr := e.runtimeInFlightLocked(cmd.TargetID, key)
+		if rerr != nil {
 			e.mu.Unlock()
+			return protocol.Reply{}, rerr
+		}
+		if reserved {
+			// Pro recut #3: the caller is refused busy, so the record must be
+			// TERMINAL rejected — never a `received` placeholder a later Tick
+			// would auto-dispatch (that reintroduces the queue-on-reject D1
+			// disabled). The placeholder role (dedup + retry) is served by
+			// the tombstone, which Compact recognizes and an identical
+			// resubmit re-admits.
+			rec.Revision++
+			rec.State = protocol.StateRejected
+			rec.Code = protocol.CodeBusy
+			rec.Tombstone = true
+			rec.ObservedAt = protocol.FormatTime(e.now())
+			if err := e.store.Update(rec); err != nil {
+				e.mu.Unlock()
+				return protocol.Reply{}, err
+			}
+			e.notifyLocked(rec)
+			snap, origin, snapRev, rkey := rec.Snapshot, rec.Origin, rec.Revision, keyOfRecord(rec)
+			e.mu.Unlock()
+			e.publishOutsideLock(rkey, snap, origin, snapRev)
 			return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: protocol.CodeBusy}}, nil
 		}
 		rec.Revision++
@@ -248,35 +346,18 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 		e.mu.Unlock()
 		adm, nerr := t.att.Submit(BoundRequest{Key: key, Epoch: cmd.Epoch, Input: input, NotAfter: cmd.NotAfter})
 		e.mu.Lock()
-		rec, _, err = e.store.Get(key)
-		if err != nil || !exists || rec.State != protocol.StateDispatching {
+		rec, exists, err = e.store.Get(key)
+		if err != nil {
 			e.mu.Unlock()
 			return protocol.Reply{}, err
 		}
-		switch {
-		case nerr != nil:
-			rec.State, rec.Code = protocol.StateUncertain, protocol.CodeAttachmentLost
-		case adm.Admitted:
-			rec.State = protocol.StateRunning
-			run := adm.RunID
-			rec.NativeRun = &run
-		default:
-			rec.State, rec.Code = protocol.StateRejected, adm.Code
-			if rec.Code == "" {
-				rec.Code = protocol.CodeNativeError
-			}
-		}
-		rec.Revision++
-		rec.ObservedAt = protocol.FormatTime(e.now())
-		if err := e.store.Update(rec); err != nil {
-			e.mu.Unlock()
-			return protocol.Reply{}, err
-		}
-		e.notifyLocked(rec)
-		snap, origin, snapRev, rkey := rec.Snapshot, rec.Origin, rec.Revision, keyOfRecord(rec)
-		e.mu.Unlock()
-		e.publishOutsideLock(rkey, snap, origin, snapRev)
-		return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit}}, nil
+		// Pro recut #8: share the fresh path's post-admission handling —
+		// native evidence wins over a fast event, a raced cancellation is
+		// confirmed, and the reply always carries the durable snapshot. The
+		// retry path previously returned an empty success when the native
+		// outcome had already landed, dropping result/outcome.
+		rep, rerr := e.finishAdmissionLocked(rec, exists, adm, nerr)
+		return rep, rerr
 	}
 	rec = &requests.Record{
 		Snapshot: protocol.Snapshot{
@@ -334,13 +415,33 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 	}
 	// B14 reservation: one in-flight request per runtime, owned by the
 	// endpoint from its own durable state — never two concurrent native
-	// dispatches because an Inspect() race said idle. The refusal is
-	// unpersisted (nothing durable for a submit that never dispatched) and
-	// travels as the outcome, mirroring the attachment's busy admission.
-	if e.runtimeInFlightLocked(cmd.TargetID, key) {
-		rej := e.unpersisted(rec, protocol.StateRejected, protocol.CodeBusy)
+	// dispatches because an Inspect() race said idle. Pro recut #3: the
+	// caller is refused busy, so the durable record must be TERMINAL
+	// rejected+tombstoned — never left `received` for a later Tick to
+	// auto-dispatch (that reintroduces the queue-on-reject D1 disabled). An
+	// identical resubmit re-admits the tombstone; a different digest is a
+	// conflict.
+	reserved, rerr := e.runtimeInFlightLocked(cmd.TargetID, key)
+	if rerr != nil {
 		e.mu.Unlock()
-		return protocol.Reply{Snapshot: rej, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: protocol.CodeBusy}}, nil
+		return protocol.Reply{}, rerr
+	}
+	if reserved {
+		rec.Revision++
+		rec.State = protocol.StateRejected
+		rec.Code = protocol.CodeBusy
+		rec.Tombstone = true
+		rec.ObservedAt = protocol.FormatTime(e.now())
+		if err := e.store.Update(rec); err != nil {
+			e.notifyStorageFailureLocked(rec, err)
+			e.mu.Unlock()
+			return protocol.Reply{Snapshot: e.unpersisted(rec, protocol.StateRejected, protocol.CodeBusy), Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: protocol.CodeBusy}}, nil
+		}
+		e.notifyLocked(rec)
+		snap, origin, snapRev, rkey := rec.Snapshot, rec.Origin, rec.Revision, keyOfRecord(rec)
+		e.mu.Unlock()
+		e.publishOutsideLock(rkey, snap, origin, snapRev)
+		return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: protocol.CodeBusy}}, nil
 	}
 	rec.Revision++
 	rec.State = protocol.StateDispatching
@@ -370,15 +471,52 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 	}
 
 	e.mu.Lock()
-	rec, _, err = e.store.Get(key)
+	rec, exists, err = e.store.Get(key)
 	if err != nil {
 		e.mu.Unlock()
 		return protocol.Reply{}, err
 	}
-	if rec.State != protocol.StateDispatching {
+	return e.finishAdmissionLocked(rec, exists, adm, nerr)
+}
+
+// finishAdmissionLocked applies one admission outcome to the durable record
+// and publishes the revision, shared by the fresh and retry admission paths
+// (Pro recut #8 — the retry path previously returned an EMPTY success when
+// a fast native event had already moved the record, dropping
+// snapshot/result, and ignored the cancellation admission code). Native
+// evidence wins: a fast native event already moved the record past
+// dispatching, and that evidence is fresher than this Submit return.
+// Caller holds e.mu on entry; the lock is released before publishing.
+func (e *Endpoint) finishAdmissionLocked(rec *requests.Record, exists bool, adm Admission, nerr error) (protocol.Reply, error) {
+	key := keyOfRecord(rec)
+	if !exists || rec.State != protocol.StateDispatching {
 		// A fast native event already moved the record; the evidence wins.
+		// Recut #8: return the DURABLE snapshot, never an empty success —
+		// and confirm a cancellation that raced this admission so the
+		// caller's cancel intent is not left pending.
+		if !exists {
+			e.mu.Unlock()
+			return protocol.Reply{}, protocol.Refuse(protocol.CodeNotFound, "record vanished during dispatch")
+		}
+		if rec.State == protocol.StateCancelled && rec.Cancel != nil && rec.Cancel.Disposition == "" {
+			rec.Cancel.Disposition = protocol.CancelConfirmed
+			rec.Revision++
+			rec.ObservedAt = protocol.FormatTime(e.now())
+			if err := e.store.Update(rec); err != nil {
+				e.notifyStorageFailureLocked(rec, err)
+			} else {
+				e.notifyLocked(rec)
+			}
+		}
+		snap, origin, snapRev := rec.Snapshot, rec.Origin, rec.Revision
+		out := protocol.Outcome{Op: protocol.OpRequestSubmit}
+		if rec.State == protocol.StateCancelled {
+			out.Code = protocol.CodeCancelledBeforeAdmission
+			out.Disposition = rec.Cancel.Disposition
+		}
 		e.mu.Unlock()
-		return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit}}, nil
+		e.publishOutsideLock(key, snap, origin, snapRev)
+		return protocol.Reply{Snapshot: snap, Outcome: out}, nil
 	}
 	switch {
 	case nerr != nil:
@@ -412,10 +550,11 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 		return protocol.Reply{}, err
 	}
 	e.notifyLocked(rec)
-	snap, origin, snapRev, key := rec.Snapshot, rec.Origin, rec.Revision, keyOfRecord(rec)
+	snap, origin, snapRev := rec.Snapshot, rec.Origin, rec.Revision
 	e.mu.Unlock()
 	e.publishOutsideLock(key, snap, origin, snapRev)
-	return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit}}, nil
+	out := protocol.Outcome{Op: protocol.OpRequestSubmit}
+	return protocol.Reply{Snapshot: snap, Outcome: out}, nil
 }
 
 // runtimeInFlightLocked reports whether another request for the same target
@@ -427,11 +566,14 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 // NOT reserved here — the attachment owns the native unacked-result slot and
 // the B06 ack-replay machinery recovers it; double-modeling it at the
 // endpoint made the endpoint refuse submits the attachment would accept.
+// Pro recut #7: an enumeration error is PROPAGATED — "cannot determine
+// reservations" must never be read as "none", or a storage error would
+// authorize exactly the dispatch the reservation exists to prevent.
 // The caller holds e.mu.
-func (e *Endpoint) runtimeInFlightLocked(targetID string, exclude requests.Key) bool {
+func (e *Endpoint) runtimeInFlightLocked(targetID string, exclude requests.Key) (bool, error) {
 	recs, err := e.store.List()
 	if err != nil {
-		return false
+		return false, err
 	}
 	for _, r := range recs {
 		if r.TargetID != targetID || keyOfRecord(r) == exclude {
@@ -439,10 +581,10 @@ func (e *Endpoint) runtimeInFlightLocked(targetID string, exclude requests.Key) 
 		}
 		switch r.State {
 		case protocol.StateDispatching, protocol.StateRunning, protocol.StateUncertain:
-			return true
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
 }
 
 // admissibleLocked checks share, epoch, expiry and capability. It returns the
@@ -538,7 +680,7 @@ func (e *Endpoint) cancel(cmd *protocol.Command, src Source) (protocol.Reply, er
 			return protocol.Reply{}, err
 		}
 		snap, origin, snapRev, key := rec.Snapshot, rec.Origin, rec.Revision, keyOfRecord(rec)
-		e.publishOutsideLock(key, snap, origin, snapRev)
+		e.enqueuePublish(key, snap, origin, snapRev)
 		return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestCancel}}, nil
 	}
 	// Validate the cancel command against the original request binding rather
@@ -572,7 +714,7 @@ func (e *Endpoint) cancel(cmd *protocol.Command, src Source) (protocol.Reply, er
 			return protocol.Reply{}, err
 		}
 		snap, origin, snapRev, key := rec.Snapshot, rec.Origin, rec.Revision, keyOfRecord(rec)
-		e.publishOutsideLock(key, snap, origin, snapRev)
+		e.enqueuePublish(key, snap, origin, snapRev)
 		return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestCancel}}, nil
 	}
 	t := e.targets[targetID]
@@ -613,7 +755,7 @@ func (e *Endpoint) cancel(cmd *protocol.Command, src Source) (protocol.Reply, er
 	e.notifyLocked(rec)
 	snap, origin, snapRev, key := rec.Snapshot, rec.Origin, rec.Revision, keyOfRecord(rec)
 	e.mu.Unlock()
-	e.publishOutsideLock(key, snap, origin, snapRev)
+	e.enqueuePublish(key, snap, origin, snapRev)
 	return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestCancel}}, nil
 }
 
@@ -794,6 +936,7 @@ func (e *Endpoint) onNative(targetID string, ev NativeEvent) {
 	switch ev.Type {
 	case EventRunCompleted, EventRunFailed, EventRunCancelled:
 		if rec.State != protocol.StateRunning && rec.State != protocol.StateDispatching && rec.State != protocol.StateUncertain {
+			e.mu.Unlock()
 			return
 		}
 		if e.crashAt(PointBeforeResult) != nil {
@@ -867,7 +1010,11 @@ func (e *Endpoint) onNative(targetID string, ev NativeEvent) {
 	if ackTarget != nil && e.crashAt(PointBeforeAck) == nil {
 		ackTarget.AcknowledgeResult(ackKey, ackEpoch, ackDigest)
 	}
-	e.publishOutsideLock(key, snap, origin, snapRev)
+	// Pro recut #9: the async native-event path enqueues its publication on
+	// the bounded worker like every other path — a wedged carrier must not
+	// stall a synchronous CancelExact→emit→onNative chain (which blocks a
+	// cancel client), nor any other native event delivery.
+	e.enqueuePublish(key, snap, origin, snapRev)
 }
 
 // notifyStorageFailureLocked surfaces a visible failure projection when a
@@ -987,9 +1134,16 @@ func (e *Endpoint) replayTerminalAck(rec *requests.Record) error {
 		// or foreign ack must never release a different request's result).
 		return nil
 	}
+	// B14 recut (#2): the native ack runs OUTSIDE e.mu like every other
+	// native call — a wedged attachment ack on this recovery path must not
+	// hold the endpoint mutex forever. The ack digest was durably memoed
+	// before it was first sent, so a crash mid-ack is replayable.
+	key := keyOfRecord(rec)
+	epoch, digest := rec.Epoch, rec.AckDigest
 	e.mu.Lock()
-	defer e.mu.Unlock()
-	t.att.AcknowledgeResult(keyOfRecord(rec), rec.Epoch, rec.AckDigest)
+	att := t.att
+	e.mu.Unlock()
+	att.AcknowledgeResult(key, epoch, digest)
 	return nil
 }
 
@@ -1030,6 +1184,7 @@ func (e *Endpoint) reconcileLive(rec *requests.Record) error {
 	switch {
 	case !ok || lookupErr != nil:
 		if rec.State == protocol.StateUncertain {
+			e.mu.Unlock()
 			return nil
 		}
 		rec.State = protocol.StateUncertain
@@ -1081,6 +1236,7 @@ func (e *Endpoint) reconcileLive(rec *requests.Record) error {
 	rec.ObservedAt = protocol.FormatTime(e.now())
 	if err := e.store.Update(rec); err != nil {
 		e.notifyStorageFailureLocked(rec, err)
+		e.mu.Unlock()
 		return err
 	}
 	e.notifyLocked(rec)
@@ -1132,7 +1288,12 @@ func (e *Endpoint) admitDeferred(rec *requests.Record) error {
 	// reservation applies here too: a deferred record whose sibling is still
 	// in flight stays deferred (never dispatched) — Tick retries it after
 	// the in-flight one resolves.
-	if e.runtimeInFlightLocked(rec.TargetID, key) {
+	reserved, rerr := e.runtimeInFlightLocked(rec.TargetID, key)
+	if rerr != nil {
+		e.mu.Unlock()
+		return rerr // recut #7: unknown reservation state never dispatches
+	}
+	if reserved {
 		e.mu.Unlock()
 		return nil // still reserved; retry on the next tick
 	}

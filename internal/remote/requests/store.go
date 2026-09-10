@@ -16,6 +16,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
@@ -101,7 +103,15 @@ type Store struct {
 	lock     *ownerLock
 	now      func() time.Time
 	readOnly bool
-	closed   bool
+
+	// wmu serializes read-modify-write cycles (Update, MarkPublished,
+	// Compact, WriteMemo): the validate step must see the same on-disk
+	// revision the write overwrites, or a concurrent compaction/memo can be
+	// clobbered by a stale in-memory copy (Pro B14 recut #9 made this window
+	// real by moving publication onto an async worker that races operator
+	// compaction).
+	wmu    sync.Mutex
+	closed atomic.Bool
 }
 
 // Option configures Open.
@@ -151,7 +161,7 @@ func OpenReadOnly(stateDir string) (*Store, error) {
 // after Close refuses with store_closed, so a stale reference cannot write
 // once ownership has moved on. The records stay on disk.
 func (s *Store) Close() error {
-	s.closed = true
+	s.closed.Store(true)
 	if s.lock == nil {
 		return nil
 	}
@@ -234,6 +244,8 @@ func (s *Store) Update(rec *Record) error {
 	if err := s.checkClosed(); err != nil {
 		return err
 	}
+	s.wmu.Lock()
+	defer s.wmu.Unlock()
 	prev, exists, err := s.Get(keyOf(rec))
 	if err != nil {
 		return err
@@ -253,6 +265,12 @@ func (s *Store) Update(rec *Record) error {
 	if rec.NativeDispatches > 1 || rec.NativeDispatches < prev.NativeDispatches {
 		return protocol.Refuse(protocol.CodeInvalid, "native dispatch count must be monotonic and at most 1")
 	}
+	if prev.State == protocol.StateRejected && rec.State == protocol.StateDispatching && prev.NativeDispatches != 0 {
+		// Only a never-dispatched busy-rejected tombstone may be re-admitted
+		// by an identical resubmit (Pro B14 recut #3); a dispatch-backed
+		// rejection is final.
+		return protocol.Refuse(protocol.CodeInvalid, "a dispatched rejection is final; retry with a new request id")
+	}
 	if rec.PublishedRevision < prev.PublishedRevision || rec.PublishedRevision > rec.Revision {
 		return protocol.Refuse(protocol.CodeInvalid, "published_revision must be monotonic and not ahead of revision")
 	}
@@ -266,6 +284,12 @@ func (s *Store) MarkPublished(k Key, revision int64) error {
 	if err := s.checkClosed(); err != nil {
 		return err
 	}
+	// wmu spans the Get→write cycle: without it a concurrent Compact (or
+	// another MarkPublished) can advance the on-disk record between the
+	// fresh read and the rewrite, and this function's stale copy would
+	// clobber it (recut #9 race).
+	s.wmu.Lock()
+	defer s.wmu.Unlock()
 	rec, exists, err := s.Get(k)
 	if err != nil {
 		return err
@@ -291,7 +315,26 @@ func (s *Store) WriteMemo(rec *Record) error {
 	if err := s.checkClosed(); err != nil {
 		return err
 	}
-	return s.write(rec)
+	// wmu + fresh read: apply ONLY the caller's bookkeeping (ack digest,
+	// published revision) onto the current on-disk record. Writing the
+	// caller's whole object unconditionally clobbers any concurrent advance
+	// (Compact) that happened after the caller read it (recut #9 race).
+	s.wmu.Lock()
+	defer s.wmu.Unlock()
+	cur, exists, err := s.Get(keyOf(rec))
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return protocol.Refuse(protocol.CodeNotFound, "record does not exist")
+	}
+	if rec.AckDigest != "" {
+		cur.AckDigest = rec.AckDigest
+	}
+	if rec.PublishedRevision > cur.PublishedRevision {
+		cur.PublishedRevision = rec.PublishedRevision
+	}
+	return s.write(cur)
 }
 
 // Poison is one undecodable record encountered during List. The key is
@@ -447,6 +490,8 @@ func (s *Store) Compact(before time.Time) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	s.wmu.Lock()
+	defer s.wmu.Unlock()
 	n := 0
 	for _, rec := range recs {
 		if !rec.State.Terminal() || rec.Tombstone {
@@ -477,14 +522,14 @@ func (s *Store) Compact(before time.Time) (int, error) {
 // replacement endpoint has taken ownership. Reads (Get/List) are still
 // permitted on a closed store for diagnosis.
 func (s *Store) checkClosed() error {
-	if s.closed {
+	if s.closed.Load() {
 		return protocol.Refuse(protocol.CodeStoreClosed, "store is closed")
 	}
 	return nil
 }
 
 func (s *Store) write(rec *Record) error {
-	if s.closed {
+	if s.closed.Load() {
 		return protocol.Refuse(protocol.CodeStoreClosed, "store is closed")
 	}
 	if s.readOnly {
@@ -579,6 +624,16 @@ func allowed(from, to protocol.State) bool {
 		switch to {
 		case protocol.StateRunning, protocol.StateCompleted, protocol.StateFailed,
 			protocol.StateCancelled, protocol.StateRejected:
+			return true
+		}
+	case protocol.StateRejected:
+		// A busy-rejected tombstone (Pro B14 recut #3) may be re-admitted by
+		// an identical resubmit: the caller was told the request was refused,
+		// and the retry is a NEW admission decision, not a resurrection of a
+		// dispatched request. Only reachable for records with
+		// NativeDispatches == 0 (never dispatched) — a dispatch-backed
+		// rejection is final and the caller retries with a NEW request id.
+		if to == protocol.StateDispatching {
 			return true
 		}
 	}

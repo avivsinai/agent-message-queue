@@ -6,6 +6,7 @@ package codex
 
 import (
 	"bufio"
+	"context"
 	"crypto/rand"
 	"crypto/sha1" //nolint:gosec // RFC 6455 mandates SHA-1 for the accept key.
 	"encoding/base64"
@@ -90,9 +91,26 @@ func (w *wsConn) handshake() error {
 	return nil
 }
 
-// setWriteDeadline bounds subsequent frame writes; zero clears it.
-func (w *wsConn) setWriteDeadline(t time.Time) {
-	_ = w.conn.SetWriteDeadline(t)
+// writeTextCtx sends one masked text frame bounded by ctx: the write
+// deadline is installed, the frame written, and the deadline cleared UNDER
+// the writer mutex, so a concurrent writer's deadline can never be
+// clobbered by another caller's (Pro B14 recut #5 — the conn-wide
+// SetWriteDeadline is not per-call state).
+func (w *wsConn) writeTextCtx(ctx context.Context, payload []byte) error {
+	dl, ok := ctx.Deadline()
+	if !ok {
+		return w.writeFrame(opText, payload)
+	}
+	// Own the writer mutex FIRST, then install the deadline: this writer
+	// owns the deadline for the duration of its frame write.
+	w.wmu.Lock()
+	defer w.wmu.Unlock()
+	if w.closed.Load() {
+		return errors.New("websocket closed")
+	}
+	_ = w.conn.SetWriteDeadline(dl)
+	defer func() { _ = w.conn.SetWriteDeadline(time.Time{}) }()
+	return w.writeFrameLocked(opText, payload)
 }
 
 // writeText sends one masked text frame.
@@ -103,6 +121,12 @@ func (w *wsConn) writeText(payload []byte) error {
 func (w *wsConn) writeFrame(opcode byte, payload []byte) error {
 	w.wmu.Lock()
 	defer w.wmu.Unlock()
+	return w.writeFrameLocked(opcode, payload)
+}
+
+// writeFrameLocked writes the frame; the caller owns wmu (and any deadline
+// it installed).
+func (w *wsConn) writeFrameLocked(opcode byte, payload []byte) error {
 	if w.closed.Load() {
 		return errors.New("websocket closed")
 	}

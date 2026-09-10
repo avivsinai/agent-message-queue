@@ -55,6 +55,11 @@ type Client struct {
 	once    sync.Once
 	readErr error
 
+	// events is the ordered, bounded callback queue drained by the single
+	// worker goroutine (Pro B14 recut #4/#6). Closed by Close.
+	events     chan event
+	workerOnce sync.Once
+
 	OnNotification  func(Notification)
 	OnServerRequest func(ServerRequest)
 }
@@ -69,8 +74,9 @@ func Dial(socketPath string) (*Client, error) {
 }
 
 func newClient(ws *wsConn) *Client {
-	c := &Client{ws: ws, pending: map[int64]chan rpcMessage{}, closed: make(chan struct{})}
+	c := &Client{ws: ws, pending: map[int64]chan rpcMessage{}, closed: make(chan struct{}), events: make(chan event, callbackBacklog)}
 	go c.readLoop()
+	c.workerOnce.Do(func() { go c.startWorker() })
 	return c
 }
 
@@ -107,29 +113,83 @@ func (c *Client) readLoop() {
 			}
 		case msg.ID != nil:
 			if c.OnServerRequest != nil {
-				c.dispatchAsync(func() { c.OnServerRequest(ServerRequest{ID: *msg.ID, Method: msg.Method, Params: msg.Params}) })
+				sr := ServerRequest{ID: *msg.ID, Method: msg.Method, Params: msg.Params}
+				c.dispatch(func() { c.OnServerRequest(sr) })
 			}
 		case msg.Method != "":
 			if c.OnNotification != nil {
-				c.dispatchAsync(func() { c.OnNotification(Notification{Method: msg.Method, Params: msg.Params}) })
+				n := Notification{Method: msg.Method, Params: msg.Params}
+				c.dispatch(func() { c.OnNotification(n) })
 			}
 		}
 	}
 }
 
-// dispatchAsync runs one reader callback off the read pump (Pro B14): a slow
-// handler must not stall frame reads — a stalled pump deadlocks the
-// connection's pending calls and kills every in-flight request. Events are
-// handed to goroutines as they arrive; the endpoint serializes them itself
-// (it applies each observation under its own lock), so no cross-event
-// ordering guarantee is lost here that the endpoint was relying on. Each
-// dispatch recovers its own panic: a callback bug must not kill the read
-// pump and, with it, every pending call on the connection.
-func (c *Client) dispatchAsync(fn func()) {
-	go func() {
-		defer func() { _ = recover() }()
-		fn()
-	}()
+// event carries one reader callback to the ordered worker. done is closed
+// after run returns, so Close can wait for the in-flight event.
+type event struct {
+	run  func()
+	done chan struct{}
+}
+
+// callbackBacklog bounds the ordered worker's queue. It is comfortably
+// larger than any real app-server's burst: the reader enqueues only while a
+// callback is mid-flight, and a healthy handler drains far faster than
+// frames arrive. Overflow policy: the read pump DROPS the event — dropping
+// one notification is recoverable (the endpoint's Reconcile/Tick re-derives
+// state from the durable record); blocking the read pump is not (a stalled
+// pump starves every pending Call on the connection).
+const callbackBacklog = 64
+
+// startWorker runs the single ordered callback worker (Pro B14 recut
+// #4/#6): events apply strictly in arrival order — Question then
+// QuestionResolved cannot invert — and the read pump never blocks on
+// handler latency. The worker recovers its own panic so a callback bug
+// cannot kill the read pump and every pending call with it. It exits when
+// the events channel is closed.
+func (c *Client) startWorker() {
+	for ev := range c.events {
+		func() {
+			defer func() { _ = recover() }()
+			defer close(ev.done)
+			ev.run()
+		}()
+	}
+}
+
+// dispatch hands one reader callback to the ordered worker with a bounded,
+// non-blocking enqueue. Overflow drops the event rather than wedging the
+// pump.
+func (c *Client) dispatch(run func()) {
+	ev := event{run: run, done: make(chan struct{})}
+	select {
+	case c.events <- ev:
+	default:
+		// Backlog full: drop. The endpoint re-derives dropped state via
+		// Reconcile; blocking here would stall the read pump.
+		close(ev.done)
+	}
+}
+
+// waitCallbacks drains the ordered worker's backlog and waits for the
+// in-flight event, so Close does not return while callbacks still touch
+// app state. Bounded by one callback duration plus backlog drain time; the
+// deadline below keeps Close responsive if a handler is wedged.
+func (c *Client) waitCallbacks() {
+	deadline := time.After(2 * time.Second)
+	for {
+		c.mu.Lock()
+		depth := len(c.events)
+		c.mu.Unlock()
+		if depth == 0 {
+			return
+		}
+		select {
+		case <-deadline:
+			return
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
 }
 
 // Done closes when the connection is gone.
@@ -156,19 +216,17 @@ func (c *Client) Call(ctx context.Context, method string, params any, result any
 	}
 	c.pending[id] = ch
 	c.mu.Unlock()
-	// Bound the write itself by the context: a blocked socket write must abort
-	// at the deadline, not hang until the connection is closed (Pro B14).
-	if dl, ok := ctx.Deadline(); ok {
-		c.ws.setWriteDeadline(dl)
-	}
-	if err := c.ws.writeText(data); err != nil {
-		c.ws.setWriteDeadline(time.Time{})
+	// Bound the write itself by the context: a blocked socket write must
+	// abort at the deadline, not hang until the connection is closed (Pro
+	// B14). writeTextCtx installs+clears the deadline under the writer
+	// mutex so concurrent writers cannot clobber each other's deadline
+	// (recut #5).
+	if err := c.ws.writeTextCtx(ctx, data); err != nil {
 		c.mu.Lock()
 		delete(c.pending, id)
 		c.mu.Unlock()
 		return err
 	}
-	c.ws.setWriteDeadline(time.Time{})
 	select {
 	case resp, ok := <-ch:
 		if !ok {
@@ -204,4 +262,15 @@ func (c *Client) Respond(id json.RawMessage, result any) error {
 }
 
 // Close closes the connection.
-func (c *Client) Close() error { return c.ws.close() }
+// Close tears the connection down and stops the callback worker: the
+// events channel closes (worker exits after the in-flight event; Close
+// waits, bounded), then the conn closes — aborting any blocked read or
+// write immediately.
+func (c *Client) Close() error {
+	c.workerOnce.Do(func() { close(c.events) })
+	c.waitCallbacks()
+	err := c.ws.close()
+	// Safe double-close of the events channel if Close runs again: the
+	// workerOnce guarantees it happens at most once.
+	return err
+}
