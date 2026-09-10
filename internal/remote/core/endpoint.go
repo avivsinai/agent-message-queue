@@ -751,19 +751,21 @@ func (e *Endpoint) onNative(targetID string, ev NativeEvent) {
 	// wedged attachment ack must not stall command handling, and a crash
 	// mid-ack is recoverable via replayTerminalAck.
 	ackDigest := ""
+	var ackAtt Attachment
 	if rec.State.Terminal() {
 		if t, ok := e.targets[targetID]; ok {
 			ackDigest, _ = e.memoAckIntentLocked(rec, t)
+			ackAtt = t.att
 		}
 	}
 	e.publishLocked(rec)
 	ackKey, ackEpoch := ev.Key, rec.Epoch
 	terminal := rec.State.Terminal()
 	e.mu.Unlock()
-	if terminal && ackDigest != "" && e.crashAt(PointBeforeAck) == nil {
-		if t, ok := e.targets[targetID]; ok {
-			t.att.AcknowledgeResult(ackKey, ackEpoch, ackDigest)
-		}
+	// B14a: use the attachment captured under the lock; never re-read
+	// e.targets after unlocking (a concurrent Register would race the map).
+	if terminal && ackAtt != nil && ackDigest != "" && e.crashAt(PointBeforeAck) == nil {
+		ackAtt.AcknowledgeResult(ackKey, ackEpoch, ackDigest)
 	}
 }
 
