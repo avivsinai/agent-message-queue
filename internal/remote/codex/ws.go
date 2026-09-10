@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -38,6 +39,13 @@ type wsConn struct {
 	conn net.Conn
 	br   *bufio.Reader
 	wmu  sync.Mutex
+	// closed is set once close() has torn the connection down. A writer
+	// wedged inside writeFrame (peer stopped reading) holds wmu forever;
+	// close must not queue behind it (Pro B14: connection close independent
+	// of the blocked writer), so close sets this flag and closes the
+	// underlying conn first — the blocked Write fails immediately, the
+	// wedged writer releases wmu, and close proceeds without it.
+	closed atomic.Bool
 }
 
 // dialUnixWS connects to a unix socket and performs the WebSocket upgrade.
@@ -95,6 +103,9 @@ func (w *wsConn) writeText(payload []byte) error {
 func (w *wsConn) writeFrame(opcode byte, payload []byte) error {
 	w.wmu.Lock()
 	defer w.wmu.Unlock()
+	if w.closed.Load() {
+		return errors.New("websocket closed")
+	}
 	var mask [4]byte
 	if _, err := rand.Read(mask[:]); err != nil {
 		return err
@@ -195,9 +206,27 @@ func (w *wsConn) readFrame() (byte, []byte, error) {
 	return opcode, payload, nil
 }
 
+// close tears the connection down without waiting for any wedged writer:
+// it closes the underlying conn FIRST (aborting a blocked Write and
+// releasing wmu), then best-effort sends the close frame. Taking wmu around
+// the close frame would deadlock behind the very writer we are aborting.
 func (w *wsConn) close() error {
-	_ = w.writeFrame(opClose, nil)
-	return w.conn.Close()
+	w.closed.Store(true)
+	_ = w.conn.Close()
+	// The conn is closed; this write fails fast if wmu is contended, and
+	// otherwise delivers the close frame for a graceful peer handshake.
+	done := make(chan struct{})
+	go func() {
+		_ = w.writeFrame(opClose, nil)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(50 * time.Millisecond):
+		// Close frame could not be delivered (writer still holds wmu or the
+		// conn is gone): the conn is already closed, which is what matters.
+	}
+	return nil
 }
 
 // acceptServerWS performs the server side of the upgrade on an accepted
