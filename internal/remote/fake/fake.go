@@ -39,6 +39,8 @@ type Runtime struct {
 	// controls
 	admissionGate        chan struct{}
 	lookupGate           chan struct{}
+	ackGate              chan struct{}
+	failNextLookup       error
 	admissionFailsAfter  bool
 	consumerSets         int
 	interactionAnswers   []Answer
@@ -155,9 +157,14 @@ func (r *Runtime) Submit(req core.BoundRequest) (core.Admission, error) {
 func (r *Runtime) Lookup(key requests.Key, epoch string) (core.Evidence, error) {
 	r.mu.Lock()
 	gate := r.lookupGate
+	fail := r.failNextLookup
+	r.failNextLookup = nil
 	r.mu.Unlock()
 	if gate != nil {
 		<-gate
+	}
+	if fail != nil {
+		return core.Evidence{}, fail
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -234,8 +241,14 @@ func (r *Runtime) Respond(key requests.Key, _ string, interactionID, option stri
 // the record retained so the busy wedge stays observable.
 func (r *Runtime) AcknowledgeResult(key requests.Key, epoch, digest string) {
 	r.mu.Lock()
+	gate := r.ackGate
+	r.ackCalls++ // count the call BEFORE any gate block: tests observe wedges
+	r.mu.Unlock()
+	if gate != nil {
+		<-gate
+	}
+	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.ackCalls++
 	rn, ok := r.runsByKey[key]
 	if !ok || rn.epoch != epoch || !rn.state.Terminal() {
 		return
@@ -282,6 +295,33 @@ func (r *Runtime) HoldAdmission() {
 	defer r.mu.Unlock()
 	if r.admissionGate == nil {
 		r.admissionGate = make(chan struct{})
+	}
+}
+
+// FailNextLookup makes the NEXT Lookup call return err once (then clear).
+func (r *Runtime) FailNextLookup(err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.failNextLookup = err
+}
+
+// holdAck, when non-nil, blocks AcknowledgeResult until closed.
+// HoldAcknowledge makes AcknowledgeResult block until ReleaseAcknowledge.
+func (r *Runtime) HoldAcknowledge() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.ackGate == nil {
+		r.ackGate = make(chan struct{})
+	}
+}
+
+// ReleaseAcknowledge unblocks held AcknowledgeResults.
+func (r *Runtime) ReleaseAcknowledge() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.ackGate != nil {
+		close(r.ackGate)
+		r.ackGate = nil
 	}
 }
 
