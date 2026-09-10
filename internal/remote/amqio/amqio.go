@@ -19,6 +19,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/receipt"
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
+	"github.com/avivsinai/agent-message-queue/internal/remote/requests"
 )
 
 // DefaultHandle is the endpoint's mailbox handle in the root.
@@ -76,6 +77,14 @@ func SourceHost(h format.Header) string {
 	}, host)
 }
 
+// sourceHostFromOrigin rebuilds the authenticated creator host from the
+// origin map recoverOne saved — the same derivation SourceHost applies to a
+// message header.
+func sourceHostFromOrigin(origin map[string]string) string {
+	h := format.Header{From: origin["from"], FromProject: origin["from_project"]}
+	return SourceHost(h)
+}
+
 // ImportOnce reads every message in the endpoint's inbox/new, hands each
 // command to the endpoint, and only then claims the message into cur with a
 // drained receipt. A message the endpoint refuses is still claimed, with the
@@ -107,7 +116,138 @@ func (c *Carrier) ImportOnce() (int, error) {
 		}
 		n++
 	}
+	// Pro B09 cur recovery: a command claimed into cur that crashed between
+	// the claim and its receipt (or whose receipt write failed) is invisible
+	// to the new-scan above and would otherwise never be heard from again.
+	// Reconcile cur: emit any missing drained receipt, and make sure the
+	// caller learned the command's outcome. The command itself is NEVER
+	// re-executed — the endpoint owns idempotence through its durable record
+	// (an identical resubmit is answered from the record, not re-dispatched),
+	// but the bookkeeping must converge.
+	if err := c.recoverCur(root); err != nil {
+		return n, err
+	}
 	return n, nil
+}
+
+// recoverCur reconciles the endpoint's retained cur bookkeeping: every
+// message in inbox/cur must have a drained receipt, and a command message
+// that never produced a durable outcome reply must get one now. It reads the
+// record the command created (by request_ref from the origin the endpoint
+// persisted) rather than re-running the command.
+func (c *Carrier) recoverCur(root *fsq.DeliveryRoot) error {
+	curDir := filepath.Join("agents", c.me, "inbox", "cur")
+	entries, err := root.ReadDir(curDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".md") && !strings.HasPrefix(e.Name(), ".") {
+			names = append(names, e.Name())
+		}
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if err := c.recoverOne(root, curDir, name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c *Carrier) recoverOne(root *fsq.DeliveryRoot, curDir, name string) error {
+	path := filepath.Join(c.root, curDir, name)
+	msg, err := format.ReadMessageFile(path)
+	if err != nil {
+		// Unreadable cur entry: not ours to fix (amq tooling owns DLQ).
+		return nil
+	}
+	// Receipt by deterministic filename; WriteFileAtomic is idempotent, so
+	// re-emitting an existing receipt is a harmless no-op rewrite.
+	hasReceipt := true
+	if _, err := receipt.ReadDeliveryRoot(root, filepath.Join("agents", c.me, "receipts", fmt.Sprintf("%s__%s__%s.json", msg.Header.ID, c.me, receipt.StageDrained))); err != nil {
+		if !os.IsNotExist(err) {
+			return fmt.Errorf("read receipt for %s: %w", name, err)
+		}
+		hasReceipt = false
+	}
+	cmd, derr := protocol.DecodeCommand([]byte(strings.TrimSpace(msg.Body)))
+	origin := map[string]string{
+		"carrier":       "amq",
+		"from":          msg.Header.From,
+		"thread":        msg.Header.Thread,
+		"msg_id":        msg.Header.ID,
+		"reply_to":      msg.Header.ReplyTo,
+		"reply_project": msg.Header.ReplyProject,
+		"from_project":  msg.Header.FromProject,
+	}
+	if derr != nil {
+		// The claim happened, so the command was handled or refused at the
+		// time; without a decodable body we cannot reconstruct a reply, but
+		// the missing receipt still must be emitted.
+		if !hasReceipt {
+			rc := receipt.New(msg.Header.ID, msg.Header.Thread, msg.Header.From, c.me, receipt.StageDrained, "remote command recovered from cur; body undecodable")
+			return receipt.EmitDeliveryRoot(root, rc)
+		}
+		return nil
+	}
+	// Reconstruct the outcome from the durable record — never re-execute.
+	// The crash gap being closed is between claim and receipt: the record
+	// already reflects the command's outcome, so the reply is a read, not a
+	// second execution.
+	isRequestOp := cmd != nil && (cmd.Op == protocol.OpRequestSubmit || cmd.Op == protocol.OpRequestCancel)
+	// Emit the outcome reply only when no receipt exists: a missing receipt
+	// is the crash signature (everything after the endpoint handled the
+	// command may be missing — receipt AND reply), while an existing receipt
+	// means the original run completed its replies before crashing.
+	if !hasReceipt {
+		if isRequestOp {
+			if err := c.reply(root, origin, "remote reply", c.reconstructReply(cmd, origin), nil); err != nil {
+				return err
+			}
+		}
+		rc := receipt.New(msg.Header.ID, msg.Header.Thread, msg.Header.From, c.me, receipt.StageDrained, "remote command recovered from cur")
+		return receipt.EmitDeliveryRoot(root, rc)
+	}
+	return nil
+}
+
+// reconstructReply rebuilds the caller-facing reply for a claimed command
+// from the durable record. It returns the record's snapshot so the caller
+// learns the outcome, or a typed refusal when no record exists (the command
+// never created one — e.g. it was refused before any persist and the refusal
+// reply itself was lost in the crash).
+func (c *Carrier) reconstructReply(cmd *protocol.Command, origin map[string]string) any {
+	if cmd == nil {
+		return nil
+	}
+	var key requests.Key
+	switch {
+	case cmd.RequestID != "":
+		// Same host derivation as importOne: the authenticated source from
+		// the message header, never a claimed handle.
+		key = requests.Key{CreatorHost: sourceHostFromOrigin(origin), TargetID: cmd.TargetID, RequestID: cmd.RequestID}
+	case cmd.RequestRef != "":
+		host, targetID, requestID, err := protocol.DecodeRef(cmd.RequestRef)
+		if err != nil {
+			return protocol.Refuse(protocol.CodeInvalid, "recovered command has an invalid request_ref")
+		}
+		key = requests.Key{CreatorHost: host, TargetID: targetID, RequestID: requestID}
+	default:
+		return nil
+	}
+	rec, ok, err := c.ep.Store().Get(key)
+	if err != nil {
+		return protocol.Refuse(protocol.CodeNativeError, "recovered record read: %v", err)
+	}
+	if !ok {
+		return protocol.Refuse(protocol.CodeNotFound, "no record for recovered request")
+	}
+	return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.Op(cmd.Op)}}
 }
 
 func (c *Carrier) importOne(root *fsq.DeliveryRoot, name string) error {

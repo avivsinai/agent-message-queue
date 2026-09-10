@@ -632,6 +632,11 @@ func (e *Endpoint) Targets() []string {
 	return out
 }
 
+// Store exposes the record store for carrier-side recovery reads (Pro B09):
+// the AMQ carrier reconciles claimed-but-unreceipted commands by reading the
+// durable record instead of re-executing the command. Read-only use.
+func (e *Endpoint) Store() *requests.Store { return e.store }
+
 func (e *Endpoint) list() []protocol.Session {
 	e.mu.Lock()
 	defer e.mu.Unlock()
