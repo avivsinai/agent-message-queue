@@ -385,6 +385,52 @@ func (r *Runtime) Complete(requestID, text string) bool {
 	return true
 }
 
+// CancelRun cancels the running run for requestID natively and emits
+// EventRunCancelled, as a queued-run deletion or interrupt does in a real
+// attachment. B14c tests use it to drive a cancel event arriving while the
+// endpoint's Submit is still inside the admission gate. It reports whether
+// a running run was found.
+func (r *Runtime) CancelRun(requestID string) bool {
+	r.mu.Lock()
+	var target *run
+	for _, rn := range r.runsByKey {
+		if rn.key.RequestID == requestID && rn.state == protocol.StateRunning {
+			target = rn
+		}
+	}
+	var key requests.Key
+	var runID string
+	if target != nil {
+		target.state = protocol.StateCancelled
+		r.busy = false
+		key, runID = target.key, target.id
+	} else {
+		// No bound run: a native cancel for a request the attachment has not
+		// finished admitting still takes effect — record the intent (a gated
+		// Submit consumes it and returns cancelled_before_admission) and emit
+		// the event against the request's key so the endpoint's durable
+		// record moves to cancelled even before admission resolves. The
+		// creator host is a test-harness constant here ("local"): real
+		// attachments key cancels natively and do not need it.
+		for _, rn := range r.runsByKey {
+			if rn.key.RequestID == requestID {
+				r.cancelIntent[rn.key] = true
+				key, runID = rn.key, rn.id
+			}
+		}
+		if key == (requests.Key{}) {
+			key = requests.Key{CreatorHost: "local", TargetID: r.targetID, RequestID: requestID}
+		}
+	}
+	if key == (requests.Key{}) {
+		r.mu.Unlock()
+		return false
+	}
+	r.mu.Unlock()
+	r.emit(core.NativeEvent{Type: core.EventRunCancelled, Key: key, RunID: runID})
+	return true
+}
+
 // LocalInput records a human steering keystroke during the active run.
 func (r *Runtime) LocalInput(text string) {
 	r.mu.Lock()

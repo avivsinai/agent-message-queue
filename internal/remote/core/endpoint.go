@@ -216,12 +216,92 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 		return protocol.Reply{}, err
 	}
 	if exists {
-		e.mu.Unlock()
-		out := protocol.Outcome{Op: protocol.OpRequestSubmit}
-		if rec.InputDigest != "" && rec.InputDigest != digest {
-			out.Code = protocol.CodeRequestConflict
+		// A busy-rejected tombstone from a previous attempt is not the
+		// request itself: the identical resubmit must be admitted normally,
+		// not answered from the tombstone (B14 minimal tombstone semantics —
+		// full B2/B11 safety/reset belongs to B14d). Recognizable as a
+		// tombstoned rejected record with no dispatch behind it and the same
+		// digest; only a DIFFERENT digest is a conflict.
+		retryable := rec.Tombstone &&
+			rec.State == protocol.StateRejected &&
+			rec.Code == protocol.CodeBusy &&
+			rec.NativeDispatches == 0 &&
+			rec.InputDigest == digest
+		if !retryable {
+			e.mu.Unlock()
+			out := protocol.Outcome{Op: protocol.OpRequestSubmit}
+			if rec.InputDigest != "" && rec.InputDigest != digest {
+				out.Code = protocol.CodeRequestConflict
+			}
+			return protocol.Reply{Snapshot: rec.Snapshot, Outcome: out}, nil
 		}
-		return protocol.Reply{Snapshot: rec.Snapshot, Outcome: out}, nil
+		// Fall through to the normal admission path with the existing
+		// record: the deferred/Tick machinery owns it from here.
+		t, code := e.admissibleLocked(cmd.TargetID, cmd.Epoch, cmd.NotAfter)
+		if code != "" {
+			e.mu.Unlock()
+			return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: code}}, nil
+		}
+		if t == nil {
+			e.mu.Unlock()
+			return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit}}, nil
+		}
+		reserved, rerr := e.runtimeInFlightLocked(cmd.TargetID, key)
+		if rerr != nil {
+			e.mu.Unlock()
+			return protocol.Reply{}, rerr
+		}
+		if reserved {
+			// Still reserved: refresh the terminal busy tombstone and refuse
+			// again — never a Tick-admissible placeholder.
+			rec.Revision++
+			rec.State = protocol.StateRejected
+			rec.Code = protocol.CodeBusy
+			rec.Tombstone = true
+			rec.ObservedAt = protocol.FormatTime(e.now())
+			if err := e.store.Update(rec); err != nil {
+				e.mu.Unlock()
+				return protocol.Reply{}, err
+			}
+			e.notifyLocked(rec)
+			snap := rec.Snapshot
+			e.mu.Unlock()
+			e.publishRevision(rec)
+			return protocol.Reply{Snapshot: snap, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: protocol.CodeBusy}}, nil
+		}
+		rec.Revision++
+		rec.State = protocol.StateDispatching
+		rec.NativeDispatches = 1
+		rec.ObservedAt = protocol.FormatTime(e.now())
+		if err := e.crashAt(PointBeforeDispatching); err != nil {
+			e.mu.Unlock()
+			return protocol.Reply{}, err
+		}
+		if err := e.store.Update(rec); err != nil {
+			e.mu.Unlock()
+			return protocol.Reply{}, err
+		}
+		e.notifyLocked(rec)
+		if err := e.crashAt(PointAfterDispatching); err != nil {
+			e.mu.Unlock()
+			return protocol.Reply{}, err
+		}
+		input := *cmd.Input
+		e.mu.Unlock()
+		if err := e.crashAt(PointBeforeNative); err != nil {
+			return protocol.Reply{}, err
+		}
+		adm, nerr := t.att.Submit(BoundRequest{Key: key, Epoch: cmd.Epoch, Input: input, NotAfter: cmd.NotAfter})
+		if err := e.crashAt(PointAfterNative); err != nil {
+			return protocol.Reply{}, err
+		}
+		e.mu.Lock()
+		rec, exists, err = e.store.Get(key)
+		if err != nil {
+			e.mu.Unlock()
+			return protocol.Reply{}, err
+		}
+		return e.finishAdmissionLocked(rec, exists, adm, nerr)
 	}
 	rec = &requests.Record{
 		Snapshot: protocol.Snapshot{
@@ -277,6 +357,34 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 		e.mu.Unlock()
 		return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit}}, nil
 	}
+	// B14 per-runtime reservation (B10): refuse a second concurrent dispatch
+	// for the same target. Fail-closed — an undeterminable reservation state
+	// never authorizes a dispatch.
+	reserved, rerr := e.runtimeInFlightLocked(cmd.TargetID, key)
+	if rerr != nil {
+		e.mu.Unlock()
+		return protocol.Reply{}, rerr
+	}
+	if reserved {
+		// Persist a TERMINAL rejected+busy tombstone — never a `received`
+		// placeholder a later Tick would auto-dispatch (queue-on-reject is
+		// D1-disabled). The tombstone keeps dedup and makes an identical
+		// resubmit re-admittable.
+		rec.Revision++
+		rec.State = protocol.StateRejected
+		rec.Code = protocol.CodeBusy
+		rec.Tombstone = true
+		rec.ObservedAt = protocol.FormatTime(e.now())
+		if err := e.store.Update(rec); err != nil {
+			e.mu.Unlock()
+			return protocol.Reply{}, err
+		}
+		e.notifyLocked(rec)
+		busySnap := rec.Snapshot
+		e.mu.Unlock()
+		e.publishRevision(rec)
+		return protocol.Reply{Snapshot: busySnap, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: protocol.CodeBusy}}, nil
+	}
 	rec.Revision++
 	rec.State = protocol.StateDispatching
 	rec.NativeDispatches = 1
@@ -304,49 +412,14 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 		return protocol.Reply{}, err
 	}
 
+	// No defer: finishAdmissionLocked unlocks exactly once on every return.
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	rec, _, err = e.store.Get(key)
 	if err != nil {
+		e.mu.Unlock()
 		return protocol.Reply{}, err
 	}
-	if rec.State != protocol.StateDispatching {
-		// A fast native event already moved the record; the evidence wins.
-		return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit}}, nil
-	}
-	switch {
-	case nerr != nil:
-		rec.State = protocol.StateUncertain
-		rec.Code = protocol.CodeAttachmentLost
-	case adm.Admitted:
-		rec.State = protocol.StateRunning
-		run := adm.RunID
-		rec.NativeRun = &run
-	case adm.Code == protocol.CodeCancelledBeforeAdmission:
-		rec.State = protocol.StateCancelled
-		rec.Code = adm.Code
-		// A cancel that raced this gated admission left the disposition
-		// pending; admission never happened, so confirm it now instead of
-		// persisting cancelled with cancel_requested.
-		if rec.Cancel == nil {
-			rec.Cancel = &protocol.Cancel{RequestedAt: protocol.FormatTime(e.now())}
-		}
-		rec.Cancel.Disposition = protocol.CancelConfirmed
-	default:
-		rec.State = protocol.StateRejected
-		rec.Code = adm.Code
-		if rec.Code == "" {
-			rec.Code = protocol.CodeNativeError
-		}
-	}
-	rec.Revision++
-	rec.ObservedAt = protocol.FormatTime(e.now())
-	if err := e.store.Update(rec); err != nil {
-		return protocol.Reply{}, err
-	}
-	e.notifyLocked(rec)
-	e.publishLocked(rec)
-	return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit}}, nil
+	return e.finishAdmissionLocked(rec, true, adm, nerr)
 }
 
 // admissibleLocked checks share, epoch, expiry and capability. It returns the
@@ -906,6 +979,51 @@ func keyOfRecord(rec *requests.Record) requests.Key {
 	return requests.Key{CreatorHost: rec.CreatorHost, TargetID: rec.TargetID, RequestID: rec.RequestID}
 }
 
+// runtimeInFlightLocked reports whether another request for the same target
+// is in flight at the endpoint: any record in dispatching (admission
+// unknown), running (native-owned), or uncertain (outcome unknown) state.
+// This is the B14 per-runtime reservation — the endpoint's own knowledge of
+// what it has outstanding, not the attachment's Inspect() status, which is
+// advisory and racy. Scope note (B10, ratified deviation from the bead's
+// literal wording): a terminal record whose ack is pending is NOT reserved —
+// the attachment owns the native unacked-result slot (its Submit already
+// refuses on one) and the ack-replay machinery recovers it; reserving it at
+// the endpoint too double-counted and made the endpoint refuse submits the
+// attachment would accept.
+// B10 fail-closed: an enumeration error is PROPAGATED, never read as "none"
+// — a storage error must not authorize the dispatch the reservation exists
+// to prevent. A POISON record for the target itself (undecodable file whose
+// identity is recovered from the path) makes the target's reservation state
+// UNDETERMINABLE — also fail-closed. Poison for other targets does not
+// block this target. The caller holds e.mu.
+func (e *Endpoint) runtimeInFlightLocked(targetID string, exclude requests.Key) (bool, error) {
+	recs, poison, err := e.store.ListWithPoison()
+	if err != nil {
+		return false, err
+	}
+	for _, p := range poison {
+		if p.Key.TargetID == targetID {
+			// The target's own record is unreadable: its reservation state
+			// cannot be determined, so treat the target as possibly-busy.
+			return false, fmt.Errorf("target %s has an unreadable record %s: %w", targetID, p.Path, errUndeterminableReservation)
+		}
+	}
+	for _, r := range recs {
+		if r.TargetID != targetID || keyOfRecord(r) == exclude {
+			continue
+		}
+		switch r.State {
+		case protocol.StateDispatching, protocol.StateRunning, protocol.StateUncertain:
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// errUndeterminableReservation marks a reservation check that could not be
+// completed (poison record for the target); the caller refuses to dispatch.
+var errUndeterminableReservation = errors.New("reservation state undeterminable")
+
 // reconcileLive resolves one non-terminal record. It calls the attachment
 // without the endpoint lock, then applies the result under the lock.
 func (e *Endpoint) reconcileLive(rec *requests.Record) error {
@@ -1038,7 +1156,19 @@ func (e *Endpoint) admitDeferred(rec *requests.Record) error {
 		e.mu.Unlock()
 		return err
 	}
-	// Move to dispatching under the lock, then Submit unlocked.
+	// Move to dispatching under the lock, then Submit unlocked. The B14
+	// reservation applies here too: a deferred record whose sibling is still
+	// in flight stays deferred (never dispatched) — Tick retries it after
+	// the in-flight one resolves. Fail-closed on enumeration error.
+	reserved, rerr := e.runtimeInFlightLocked(rec.TargetID, key)
+	if rerr != nil {
+		e.mu.Unlock()
+		return rerr
+	}
+	if reserved {
+		e.mu.Unlock()
+		return nil // still reserved; retry on the next tick
+	}
 	rec, exists, err := e.store.Get(key)
 	if err != nil || !exists || rec.State != protocol.StateReceived {
 		e.mu.Unlock()
@@ -1061,15 +1191,68 @@ func (e *Endpoint) admitDeferred(rec *requests.Record) error {
 
 	adm, nerr := t.att.Submit(BoundRequest{Key: key, Epoch: rec.Epoch, Input: input, NotAfter: rec.NotAfter})
 
+	// No defer: finishAdmissionLocked unlocks exactly once on every return.
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	rec, exists, err = e.store.Get(key)
-	if err != nil || !exists || rec.State != protocol.StateDispatching {
+	if err != nil {
+		e.mu.Unlock()
 		return err
+	}
+	_, ferr := e.finishAdmissionLocked(rec, exists, adm, nerr)
+	return ferr
+}
+
+// finishAdmissionLocked applies one native Submit outcome to the durable
+// record. Shared by the fresh-submit and identical-retry admission paths and
+// by admitDeferred, so all three never disagree about post-admission
+// semantics. The caller holds e.mu and owns unlocking: finishAdmissionLocked
+// unlocks exactly once on every return.
+//
+// B3 (cancel-during-admission): a cancel that raced the gated admission
+// emits EventRunCancelled while Submit is still blocked, so the record is
+// already StateCancelled WITHOUT cancel metadata when Submit returns — the
+// native cancel handler saw terminal and did not create it. Admission never
+// happened (the attachment recorded intent, not a run), so the raced
+// cancellation is CONFIRMED here: create the missing Cancel metadata rather
+// than leaving a cancelled record with no disposition, and carry the
+// cancelled_before_admission outcome to the caller. A cancel for an
+// ALREADY-admitted run is native truth (cancelled_by_request) and is never
+// re-classified here.
+func (e *Endpoint) finishAdmissionLocked(rec *requests.Record, exists bool, adm Admission, nerr error) (protocol.Reply, error) {
+	if !exists || rec.State != protocol.StateDispatching {
+		// A fast native event already moved the record; the evidence wins.
+		// Return the DURABLE snapshot, never an empty success.
+		if !exists {
+			e.mu.Unlock()
+			return protocol.Reply{}, protocol.Refuse(protocol.CodeNotFound, "record vanished during dispatch")
+		}
+		if rec.State == protocol.StateCancelled && rec.Cancel == nil {
+			// B3: cancellation raced admission and never got metadata.
+			rec.Cancel = &protocol.Cancel{RequestedAt: protocol.FormatTime(e.now()), Disposition: protocol.CancelConfirmed}
+			rec.Revision++
+			rec.ObservedAt = protocol.FormatTime(e.now())
+			if err := e.store.Update(rec); err != nil {
+				e.notifyStorageFailureLocked(rec, err)
+			} else {
+				e.notifyLocked(rec)
+			}
+		}
+		snap := rec.Snapshot
+		out := protocol.Outcome{Op: protocol.OpRequestSubmit}
+		if rec.State == protocol.StateCancelled {
+			out.Code = protocol.CodeCancelledBeforeAdmission
+			if rec.Cancel != nil {
+				out.Disposition = rec.Cancel.Disposition
+			}
+		}
+		e.mu.Unlock()
+		e.publishRevision(rec)
+		return protocol.Reply{Snapshot: snap, Outcome: out}, nil
 	}
 	switch {
 	case nerr != nil:
-		rec.State, rec.Code = protocol.StateUncertain, protocol.CodeAttachmentLost
+		rec.State = protocol.StateUncertain
+		rec.Code = protocol.CodeAttachmentLost
 	case adm.Admitted:
 		rec.State = protocol.StateRunning
 		run := adm.RunID
@@ -1077,12 +1260,16 @@ func (e *Endpoint) admitDeferred(rec *requests.Record) error {
 	case adm.Code == protocol.CodeCancelledBeforeAdmission:
 		rec.State = protocol.StateCancelled
 		rec.Code = adm.Code
+		// A cancel that raced this gated admission left the disposition
+		// pending; admission never happened, so confirm it now instead of
+		// persisting cancelled with cancel_requested.
 		if rec.Cancel == nil {
 			rec.Cancel = &protocol.Cancel{RequestedAt: protocol.FormatTime(e.now())}
 		}
 		rec.Cancel.Disposition = protocol.CancelConfirmed
 	default:
-		rec.State, rec.Code = protocol.StateRejected, adm.Code
+		rec.State = protocol.StateRejected
+		rec.Code = adm.Code
 		if rec.Code == "" {
 			rec.Code = protocol.CodeNativeError
 		}
@@ -1090,10 +1277,14 @@ func (e *Endpoint) admitDeferred(rec *requests.Record) error {
 	rec.Revision++
 	rec.ObservedAt = protocol.FormatTime(e.now())
 	if err := e.store.Update(rec); err != nil {
-		return err
+		e.mu.Unlock()
+		return protocol.Reply{}, err
 	}
 	e.notifyLocked(rec)
-	return nil
+	snap := rec.Snapshot
+	e.mu.Unlock()
+	e.publishLocked(rec)
+	return protocol.Reply{Snapshot: snap, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit}}, nil
 }
 
 // Wait blocks until the record for ref reaches a terminal or uncertain state
