@@ -51,11 +51,12 @@ func writePoisonRecord(t *testing.T, store *requests.Store, host, targetID, id s
 	return p
 }
 
-// TestB14cReservationRefusesSecondConcurrentDispatch pins B10: while A is in
-// flight for a target, a second submit is refused busy by the ENDPOINT with
-// a TERMINAL rejected+tombstoned record (never a Tick-admissible received
-// placeholder), no second native dispatch, and an identical resubmit after
-// A resolves is admitted through the tombstone.
+// TestB14cReservationRefusesSecondConcurrentDispatch reproduces
+// agent-message-queue-611.22.15.3 (B14c per-runtime reservation): while A is
+// in flight for a target, a second submit is refused busy by the ENDPOINT
+// with a TERMINAL rejected+tombstoned record (never a Tick-admissible
+// received placeholder), no second native dispatch, and an identical
+// resubmit after A resolves is admitted through the tombstone.
 func TestB14cReservationRefusesSecondConcurrentDispatch(t *testing.T) {
 	ep, rt, store, _ := b14cEndpoint(t)
 
@@ -110,7 +111,8 @@ func TestB14cReservationRefusesSecondConcurrentDispatch(t *testing.T) {
 	}
 }
 
-// TestB14cReservationPoisonFailClosed pins the B10 poison semantics: a
+// TestB14cReservationPoisonFailClosed reproduces the fail-closed poison
+// semantics of agent-message-queue-611.22.15.3 (B14c reservation): a
 // record for the TARGET whose file is unreadable makes the target's
 // reservation state undeterminable, so a new submit is refused — List()
 // alone would have dropped the poison diagnostics and reported idle, which
@@ -159,8 +161,8 @@ func TestB14cReservationPoisonFailClosed(t *testing.T) {
 // fail-closed semantics this chmod test did, without the root-skip and the
 // 0700-vs-0755 cleanup issue. Removed per the test-bar.
 
-// TestB14cCancelRacesAdmission drives the REAL cancel-races-admission
-// interleaving (B3): Submit is blocked inside the native admission gate; a
+// TestB14cCancelRacesAdmission reproduces the cancel-races-admission
+// interleaving of agent-message-queue-611.22.15.3 (B14c B3): Submit is blocked inside the native admission gate; a
 // concurrent cancel records intent (no run exists) and the record stays
 // dispatching; Submit returns cancelled_before_admission; the shared
 // finishAdmissionLocked must create the missing Cancel metadata with a
@@ -210,7 +212,7 @@ func TestB14cCancelRacesAdmission(t *testing.T) {
 		t.Fatalf("state = %s, want cancelled", rec.State)
 	}
 	if rec.Cancel == nil {
-		t.Fatal("cancelled record has NO cancel metadata — B3 nil-deref regression")
+		t.Fatal("cancelled record has NO cancel metadata — nil-deref regression")
 	}
 	if rec.Cancel.Disposition != protocol.CancelConfirmed {
 		t.Fatalf("disposition = %q, want cancelled (confirmed)", rec.Cancel.Disposition)
@@ -223,7 +225,8 @@ func TestB14cCancelRacesAdmission(t *testing.T) {
 	}
 }
 
-// TestB14cCancelEventDuringAdmission drives the OTHER raced shape: the
+// TestB14cCancelEventDuringAdmission reproduces the other raced shape of
+// agent-message-queue-611.22.15.3 (B14c B3): the
 // native cancel handler DOES emit EventRunCancelled while Submit is blocked
 // (a queued run cancelled natively). onNative sets StateCancelled without
 // cancel metadata (none exists); Submit then returns with an admission the
@@ -278,7 +281,7 @@ func TestB14cCancelEventDuringAdmission(t *testing.T) {
 		t.Fatalf("state = %s, want cancelled", rec.State)
 	}
 	if rec.Cancel == nil || rec.Cancel.Disposition != protocol.CancelConfirmed {
-		t.Fatalf("cancel metadata = %+v, want confirmed disposition (B3)", rec.Cancel)
+		t.Fatalf("cancel metadata = %+v, want confirmed disposition", rec.Cancel)
 	}
 	if submitRep.Snapshot.RequestID == "" || submitRep.Snapshot.State != protocol.StateCancelled {
 		t.Fatalf("submit reply snapshot = %+v, want durable cancelled snapshot", submitRep.Snapshot)
@@ -291,7 +294,8 @@ func TestB14cCancelEventDuringAdmission(t *testing.T) {
 	}
 }
 
-// TestB14cAdmitDeferredRacedCancel drives the same B3 shape through the
+// TestB14cAdmitDeferredRacedCancel drives the same
+// agent-message-queue-611.22.15.3 (B14c B3) shape through the
 // deferred admission path: a received record whose target registers later,
 // with a cancel landing between the Tick's dispatching commit and the
 // native admission returning.
@@ -359,15 +363,15 @@ func TestB14cAdmitDeferredRacedCancel(t *testing.T) {
 	if rec.State != protocol.StateCancelled {
 		t.Fatalf("state = %s, want cancelled", rec.State)
 	}
-	// B14c blocker #4: the gated Submit must not admit a run the cancel
-	// already reported as cancelled.
+	// Review finding (Opus B1/Pro #4 on 611.22.15.3): the gated Submit must
+	// not admit a run the cancel already reported as cancelled.
 	if rt.HasRun(id) {
 		t.Fatal("a live native run leaked after a gated deferred cancel")
 	}
 }
 
-// TestB14cAdmitDeferredStaysDeferredWhenReserved pins the reserved branch of
-// admitDeferred (~endpoint.go:1168-1171 "stays deferred"): a received record
+// TestB14cAdmitDeferredStaysDeferredWhenReserved reproduces the reserved
+// branch of admitDeferred in agent-message-queue-611.22.15.3 (B14c: a received record
 // whose sibling is still in flight is NOT dispatched by Tick — it stays
 // received and retries on the next tick after the sibling resolves.
 func TestB14cAdmitDeferredStaysDeferredWhenReserved(t *testing.T) {
