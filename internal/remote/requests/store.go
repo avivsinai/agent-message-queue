@@ -253,10 +253,14 @@ func (s *Store) Update(rec *Record) error {
 	if rec.NativeDispatches > 1 || rec.NativeDispatches < prev.NativeDispatches {
 		return protocol.Refuse(protocol.CodeInvalid, "native dispatch count must be monotonic and at most 1")
 	}
-	if prev.State == protocol.StateRejected && rec.State == protocol.StateDispatching && prev.NativeDispatches != 0 {
-		// A dispatch-backed rejection is final: only a busy tombstone that
-		// never dispatched may be re-admitted by an identical resubmit.
-		return protocol.Refuse(protocol.CodeInvalid, "a dispatched rejection cannot be re-admitted")
+	if prev.State == protocol.StateRejected && rec.State == protocol.StateDispatching {
+		// Only a busy tombstone (Code == busy AND Tombstone) that never
+		// dispatched may be re-admitted by an identical resubmit. Expired,
+		// stale_epoch, unshared, storage_full and dispatch-backed rejections
+		// are final; the caller retries with a NEW request id.
+		if prev.NativeDispatches != 0 || prev.Code != protocol.CodeBusy || !prev.Tombstone {
+			return protocol.Refuse(protocol.CodeInvalid, "only a busy tombstone may be re-admitted")
+		}
 	}
 	if rec.PublishedRevision < prev.PublishedRevision || rec.PublishedRevision > rec.Revision {
 		return protocol.Refuse(protocol.CodeInvalid, "published_revision must be monotonic and not ahead of revision")
@@ -591,9 +595,11 @@ func allowed(from, to protocol.State) bool {
 		// B2/B11 belongs to B14d) may be re-admitted by an identical
 		// resubmit: the caller was told the request was refused, and the
 		// retry is a NEW admission decision, not a resurrection of a
-		// dispatched request. Only reachable for records with
-		// NativeDispatches == 0 (never dispatched) — a dispatch-backed
-		// rejection is final and the caller retries with a NEW request id.
+		// dispatched request. Only re-admission (rejected -> dispatching) is
+		// permitted; the Code/Tombstone identity guard lives in Update, where
+		// the full record is available, so expired/stale_epoch/unshared/
+		// storage_full rejections are never resurrected even at
+		// NativeDispatches == 0.
 		if to == protocol.StateDispatching {
 			return true
 		}

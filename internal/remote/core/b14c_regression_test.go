@@ -1,7 +1,6 @@
 package core_test
 
 import (
-	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -156,53 +155,9 @@ func TestB14cReservationPoisonFailClosed(t *testing.T) {
 	}
 }
 
-// TestB14cReservationErrorPropagated pins recut #7: a store enumeration
-// failure during the reservation check propagates — dispatch must NOT be
-// authorized by an error. The error is injected through the store itself
-// (chmod on the host dir), skipped when running as root where chmod is a
-// no-op (claude's test nit).
-func TestB14cReservationErrorPropagated(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("chmod is a no-op for root; the fail-closed poison test covers the semantics")
-	}
-	now := func() time.Time { return time.Date(2026, 9, 8, 10, 0, 0, 0, time.UTC) }
-	dir := t.TempDir()
-	st, err := requests.Open(dir, requests.WithClock(now))
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	t.Cleanup(func() { _ = st.Close() })
-	rt := fake.New("fake", "e_1")
-	ep := core.New(core.Config{Store: st, Now: now})
-	ep.Register(rt)
-	t.Cleanup(func() { _ = ep.Close() })
-
-	idA := "11111111-1111-4111-8111-1111111111a1"
-	if _, err := ep.Handle(submitCmd(idA), core.Source{Host: "local"}); err != nil {
-		t.Fatal(err)
-	}
-	before := rt.Snapshot().Dispatches
-
-	entries, err := os.ReadDir(filepath.Join(dir, "v1", "requests"))
-	if err != nil || len(entries) == 0 {
-		t.Fatalf("no host directory: %v", err)
-	}
-	hostDir := filepath.Join(dir, "v1", "requests", entries[0].Name())
-	if err := os.Chmod(hostDir, 0o000); err != nil {
-		t.Fatalf("chmod host dir: %v", err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(hostDir, 0o755) })
-	if _, lerr := st.List(); lerr == nil {
-		t.Fatal("expected List to fail after chmod; test precondition broken")
-	}
-	idB := "11111111-1111-4111-8111-1111111111b2"
-	if _, err := ep.Handle(submitCmd(idB), core.Source{Host: "local"}); err == nil {
-		t.Fatal("submit B succeeded despite reservation-check failure — reservation failed OPEN")
-	}
-	if got := rt.Snapshot().Dispatches; got != before {
-		t.Fatalf("dispatch happened on error path: %d -> %d", before, got)
-	}
-}
+// TestB14cReservationPoisonFailClosed (deterministic) covers the same
+// fail-closed semantics this chmod test did, without the root-skip and the
+// 0700-vs-0755 cleanup issue. Removed per the test-bar.
 
 // TestB14cCancelRacesAdmission drives the REAL cancel-races-admission
 // interleaving (B3): Submit is blocked inside the native admission gate; a
@@ -404,5 +359,79 @@ func TestB14cAdmitDeferredRacedCancel(t *testing.T) {
 	if rec.State != protocol.StateCancelled {
 		t.Fatalf("state = %s, want cancelled", rec.State)
 	}
-	_ = errors.New // keep errors imported for future probes
+	// B14c blocker #4: the gated Submit must not admit a run the cancel
+	// already reported as cancelled.
+	if rt.HasRun(id) {
+		t.Fatal("a live native run leaked after a gated deferred cancel")
+	}
+}
+
+// TestB14cAdmitDeferredStaysDeferredWhenReserved pins the reserved branch of
+// admitDeferred (~endpoint.go:1168-1171 "stays deferred"): a received record
+// whose sibling is still in flight is NOT dispatched by Tick — it stays
+// received and retries on the next tick after the sibling resolves.
+func TestB14cAdmitDeferredStaysDeferredWhenReserved(t *testing.T) {
+	store, now := openStore(t)
+	rt := fake.New("fake", "e_1")
+	rt.SetOffline(true)
+	ep := core.New(core.Config{Store: store, Now: now})
+	t.Cleanup(func() { _ = ep.Close() })
+	ep.Register(rt)
+
+	// Sibling A goes in-flight (offline, so it stays received and deferred).
+	idA := "11111111-1111-4111-8111-1111111111da"
+	if _, err := ep.Handle(submitCmd(idA), core.Source{Host: "local"}); err != nil {
+		t.Fatalf("submit A: %v", err)
+	}
+	keyA := requests.Key{CreatorHost: "local", TargetID: "fake", RequestID: idA}
+
+	// B is also deferred while offline.
+	idB := "11111111-1111-4111-8111-1111111111db"
+	if _, err := ep.Handle(submitCmd(idB), core.Source{Host: "local"}); err != nil {
+		t.Fatalf("submit B: %v", err)
+	}
+	keyB := requests.Key{CreatorHost: "local", TargetID: "fake", RequestID: idB}
+
+	// Bring the target online with admission held (A will dispatch and block
+	// in the gate; B must stay deferred because A is in flight).
+	rt.SetOffline(false)
+	rt.HoldAdmission()
+	ep.Register(rt)
+	tickDone := make(chan error, 1)
+	go func() { tickDone <- ep.Tick() }()
+
+	// A reaches dispatching; B stays received.
+	if !b14cWait(func() bool {
+		rec, found, err := store.Get(keyA)
+		return err == nil && found && rec.State == protocol.StateDispatching
+	}) {
+		t.Fatal("deferred A never reached dispatching")
+	}
+	recB, found, err := store.Get(keyB)
+	if err != nil || !found || recB.State != protocol.StateReceived {
+		t.Fatalf("B dispatched while sibling in flight: state=%s found=%v err=%v", recB.State, found, err)
+	}
+
+	// Resolve A; the next Tick admits B.
+	rt.ReleaseAdmission()
+	if err := <-tickDone; err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	rt.Complete(idA, "done-A")
+	if !b14cWait(func() bool {
+		rec, found, err := store.Get(keyA)
+		return err == nil && found && rec.State == protocol.StateCompleted
+	}) {
+		t.Fatal("A never completed")
+	}
+	if err := ep.Tick(); err != nil {
+		t.Fatalf("second tick: %v", err)
+	}
+	if !b14cWait(func() bool {
+		rec, found, err := store.Get(keyB)
+		return err == nil && found && (rec.State == protocol.StateDispatching || rec.State == protocol.StateRunning)
+	}) {
+		rec, _, _ := store.Get(keyB)
+		t.Fatalf("B never admitted after sibling resolved: state=%s", rec.State)
+	}
 }

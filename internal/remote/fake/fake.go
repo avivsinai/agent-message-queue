@@ -421,6 +421,11 @@ func (r *Runtime) CancelRun(requestID string) bool {
 		if key == (requests.Key{}) {
 			key = requests.Key{CreatorHost: "local", TargetID: r.targetID, RequestID: requestID}
 		}
+		// Install the intent for the resolved key so a gated Submit that
+		// wakes after the event consumes it and returns
+		// cancelled_before_admission rather than admitting a run that the
+		// cancel already reported as cancelled.
+		r.cancelIntent[key] = true
 	}
 	if key == (requests.Key{}) {
 		r.mu.Unlock()

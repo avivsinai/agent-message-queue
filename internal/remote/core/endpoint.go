@@ -249,7 +249,7 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 		reserved, rerr := e.runtimeInFlightLocked(cmd.TargetID, key)
 		if rerr != nil {
 			e.mu.Unlock()
-			return protocol.Reply{}, rerr
+			return protocol.Reply{}, protocol.Refuse(protocol.CodeAttachmentLost, "%s", rerr.Error())
 		}
 		if reserved {
 			// Still reserved: refresh the terminal busy tombstone and refuse
@@ -301,7 +301,7 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 			e.mu.Unlock()
 			return protocol.Reply{}, err
 		}
-		return e.finishAdmissionLocked(rec, exists, adm, nerr)
+		return e.finishAdmissionLocked(rec, exists, t, adm, nerr)
 	}
 	rec = &requests.Record{
 		Snapshot: protocol.Snapshot{
@@ -362,8 +362,24 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 	// never authorizes a dispatch.
 	reserved, rerr := e.runtimeInFlightLocked(cmd.TargetID, key)
 	if rerr != nil {
+		// An undeterminable reservation must not leave a Tick-admissible
+		// `received` placeholder: the caller saw a failure, so the record is
+		// terminal rejected (uncertain code) — reconcile re-evaluates. Return
+		// a typed refusal so the caller maps to the right exit, not exit 1.
+		rec.Revision++
+		rec.State = protocol.StateRejected
+		rec.Code = protocol.CodeAttachmentLost
+		rec.ObservedAt = protocol.FormatTime(e.now())
+		uerr := e.store.Update(rec)
+		if uerr == nil {
+			e.notifyLocked(rec)
+			snap := rec.Snapshot
+			e.mu.Unlock()
+			e.publishRevision(rec)
+			return protocol.Reply{Snapshot: snap, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: protocol.CodeAttachmentLost}}, protocol.Refuse(protocol.CodeAttachmentLost, "%s", rerr.Error())
+		}
 		e.mu.Unlock()
-		return protocol.Reply{}, rerr
+		return protocol.Reply{}, protocol.Refuse(protocol.CodeAttachmentLost, "%s", rerr.Error())
 	}
 	if reserved {
 		// Persist a TERMINAL rejected+busy tombstone — never a `received`
@@ -419,7 +435,7 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 		e.mu.Unlock()
 		return protocol.Reply{}, err
 	}
-	return e.finishAdmissionLocked(rec, true, adm, nerr)
+	return e.finishAdmissionLocked(rec, true, t, adm, nerr)
 }
 
 // admissibleLocked checks share, epoch, expiry and capability. It returns the
@@ -1002,9 +1018,11 @@ func (e *Endpoint) runtimeInFlightLocked(targetID string, exclude requests.Key) 
 		return false, err
 	}
 	for _, p := range poison {
-		if p.Key.TargetID == targetID {
-			// The target's own record is unreadable: its reservation state
-			// cannot be determined, so treat the target as possibly-busy.
+		if p.Key.TargetID == "" || p.Key.TargetID == targetID {
+			// The target's own record is unreadable (or its identity could not
+			// be recovered from the path): its reservation state cannot be
+			// determined, so treat the target as possibly-busy. An empty
+			// TargetID is neither "this target" nor "another" — fail closed.
 			return false, fmt.Errorf("target %s has an unreadable record %s: %w", targetID, p.Path, errUndeterminableReservation)
 		}
 	}
@@ -1198,7 +1216,7 @@ func (e *Endpoint) admitDeferred(rec *requests.Record) error {
 		e.mu.Unlock()
 		return err
 	}
-	_, ferr := e.finishAdmissionLocked(rec, exists, adm, nerr)
+	_, ferr := e.finishAdmissionLocked(rec, exists, t, adm, nerr)
 	return ferr
 }
 
@@ -1211,14 +1229,13 @@ func (e *Endpoint) admitDeferred(rec *requests.Record) error {
 // B3 (cancel-during-admission): a cancel that raced the gated admission
 // emits EventRunCancelled while Submit is still blocked, so the record is
 // already StateCancelled WITHOUT cancel metadata when Submit returns — the
-// native cancel handler saw terminal and did not create it. Admission never
-// happened (the attachment recorded intent, not a run), so the raced
-// cancellation is CONFIRMED here: create the missing Cancel metadata rather
-// than leaving a cancelled record with no disposition, and carry the
-// cancelled_before_admission outcome to the caller. A cancel for an
-// ALREADY-admitted run is native truth (cancelled_by_request) and is never
-// re-classified here.
-func (e *Endpoint) finishAdmissionLocked(rec *requests.Record, exists bool, adm Admission, nerr error) (protocol.Reply, error) {
+// native cancel handler saw terminal and did not create it. The raced
+// cancellation is confirmed ONLY when admission did NOT happen: a positive
+// admission (adm.Admitted) means a live run was bound and the native cancel
+// that moved the record is cancelled_by_request — that run must be ABORTED
+// (CancelExact on the bound run), never reported as cancelled_before_admission.
+// A positive admission with nerr != nil is uncertain (the nerr path).
+func (e *Endpoint) finishAdmissionLocked(rec *requests.Record, exists bool, t *target, adm Admission, nerr error) (protocol.Reply, error) {
 	if !exists || rec.State != protocol.StateDispatching {
 		// A fast native event already moved the record; the evidence wins.
 		// Return the DURABLE snapshot, never an empty success.
@@ -1226,21 +1243,60 @@ func (e *Endpoint) finishAdmissionLocked(rec *requests.Record, exists bool, adm 
 			e.mu.Unlock()
 			return protocol.Reply{}, protocol.Refuse(protocol.CodeNotFound, "record vanished during dispatch")
 		}
-		if rec.State == protocol.StateCancelled && rec.Cancel == nil {
-			// B3: cancellation raced admission and never got metadata.
+		// A cancel that raced a POSITIVE admission leaves a live orphan run:
+		// the record shows cancelled but a run is executing. Abort that run
+		// before persisting — never confirm a cancel for work that is running.
+		if adm.Admitted && nerr == nil && rec.State == protocol.StateCancelled {
+			epoch := rec.Epoch
+			key := requests.Key{CreatorHost: rec.CreatorHost, TargetID: rec.TargetID, RequestID: rec.RequestID}
+			e.mu.Unlock()
+			if t != nil {
+				_, _ = t.att.CancelExact(key, epoch) // best-effort abort; evidence already on disk
+			}
+			e.mu.Lock()
+			rec, exists, err := e.store.Get(key)
+			if err != nil || !exists {
+				e.mu.Unlock()
+				return protocol.Reply{}, protocol.Refuse(protocol.CodeNotFound, "record vanished during abort")
+			}
+			if rec.State != protocol.StateCancelled {
+				// The abort or a later native event resolved it; trust disk.
+				snap := rec.Snapshot
+				e.mu.Unlock()
+				return protocol.Reply{Snapshot: snap, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit}}, nil
+			}
+			// Fall through: the record is cancelled_by_request (native truth),
+			// not cancelled_before_admission. Do NOT synthesize a confirmed
+			// Cancel — the run existed.
+			return e.finishCancelledByRequestLocked(rec)
+		}
+		if rec.State == protocol.StateCancelled && !adm.Admitted && nerr == nil {
+			// B3: cancellation raced admission and never got metadata, and the
+			// native outcome positively establishes admission never happened.
 			rec.Cancel = &protocol.Cancel{RequestedAt: protocol.FormatTime(e.now()), Disposition: protocol.CancelConfirmed}
 			rec.Revision++
 			rec.ObservedAt = protocol.FormatTime(e.now())
 			if err := e.store.Update(rec); err != nil {
+				// The repair write failed: never publish or return a mutated
+				// record that did not persist. Propagate so the caller knows
+				// the durable record still holds the un-repaired state; a
+				// reconcile re-drives the repair.
 				e.notifyStorageFailureLocked(rec, err)
-			} else {
-				e.notifyLocked(rec)
+				e.mu.Unlock()
+				return protocol.Reply{}, err
 			}
+			e.notifyLocked(rec)
 		}
 		snap := rec.Snapshot
 		out := protocol.Outcome{Op: protocol.OpRequestSubmit}
 		if rec.State == protocol.StateCancelled {
-			out.Code = protocol.CodeCancelledBeforeAdmission
+			// Emit cancelled_before_admission ONLY when the native outcome
+			// positively established admission never happened. A record whose
+			// own Code is cancelled_by_request (a real run was cancelled)
+			// carries that code, not before-admission.
+			if !adm.Admitted && nerr == nil && (adm.Code == protocol.CodeCancelledBeforeAdmission || rec.Code == "" || rec.Code == protocol.CodeCancelledBeforeAdmission) {
+				out.Code = protocol.CodeCancelledBeforeAdmission
+			}
 			if rec.Cancel != nil {
 				out.Disposition = rec.Cancel.Disposition
 			}
@@ -1257,6 +1313,11 @@ func (e *Endpoint) finishAdmissionLocked(rec *requests.Record, exists bool, adm 
 		rec.State = protocol.StateRunning
 		run := adm.RunID
 		rec.NativeRun = &run
+		// B11: clear the busy-rejection metadata a re-admitted tombstone
+		// carried so a healthy running record advertises no code and is no
+		// longer skip-listed by Compact (Tombstone) once it completes.
+		rec.Code = ""
+		rec.Tombstone = false
 	case adm.Code == protocol.CodeCancelledBeforeAdmission:
 		rec.State = protocol.StateCancelled
 		rec.Code = adm.Code
@@ -1281,10 +1342,36 @@ func (e *Endpoint) finishAdmissionLocked(rec *requests.Record, exists bool, adm 
 		return protocol.Reply{}, err
 	}
 	e.notifyLocked(rec)
-	e.publishLocked(rec)
 	snap := rec.Snapshot
 	e.mu.Unlock()
+	e.publishRevision(rec)
 	return protocol.Reply{Snapshot: snap, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit}}, nil
+}
+
+// finishCancelledByRequestLocked persists a cancelled-by-request outcome for
+// a record whose cancel was native truth (a real run was cancelled), carrying
+// the cancelled_by_request code — never cancelled_before_admission. The caller
+// holds e.mu; this helper unlocks exactly once.
+func (e *Endpoint) finishCancelledByRequestLocked(rec *requests.Record) (protocol.Reply, error) {
+	rec.Code = protocol.CodeCancelledByRequest
+	if rec.Cancel == nil {
+		rec.Cancel = &protocol.Cancel{RequestedAt: protocol.FormatTime(e.now())}
+	}
+	if rec.Cancel.Disposition == "" {
+		rec.Cancel.Disposition = protocol.CancelConfirmed
+	}
+	rec.Revision++
+	rec.ObservedAt = protocol.FormatTime(e.now())
+	if err := e.store.Update(rec); err != nil {
+		e.notifyStorageFailureLocked(rec, err)
+		e.mu.Unlock()
+		return protocol.Reply{}, err
+	}
+	e.notifyLocked(rec)
+	snap := rec.Snapshot
+	e.mu.Unlock()
+	e.publishRevision(rec)
+	return protocol.Reply{Snapshot: snap, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: protocol.CodeCancelledByRequest, Disposition: rec.Cancel.Disposition}}, nil
 }
 
 // Wait blocks until the record for ref reaches a terminal or uncertain state
