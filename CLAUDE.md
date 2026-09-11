@@ -250,8 +250,9 @@ part of `make ci`. Operator commands are in
 
 Two kinds of test exist. One small happy-path test per user-visible behavior
 ships in the same PR as the behavior. A regression test for a defect observed
-in the field or in CI ships in the same PR as the fix and reproduces that
-failure and nothing more; its comment names the issue or CI run it came from.
+in the field, in CI, or by pre-merge review ships in the same PR as the fix and
+reproduces that failure and nothing more; its comment names the bead, review
+finding, or CI run it came from.
 Both are deterministic and fast (under 5 seconds, no child process, no
 network) unless the observed defect lives at exactly that boundary and cannot
 be reproduced without it. Do not add speculative negative cases, mutation
