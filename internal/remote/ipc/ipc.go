@@ -24,6 +24,10 @@ import (
 // protocol, and replies carry at most one bounded result.
 const MaxRecordBytes = 1024 * 1024
 
+// callReadDeadline bounds a client's wait for the endpoint's response. A wait
+// request adds its own server-side timeout on top of this.
+const callReadDeadline = 30 * time.Second
+
 // LocalHost is the authenticated source recorded for commands that arrive
 // over the local socket: the OS user owning the socket.
 const LocalHost = "local"
@@ -135,7 +139,14 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 		wctx, cancel := context.WithTimeout(ctx, timeout)
 		defer cancel()
 		snap, err := s.ep.Wait(wctx, req.Wait.RequestRef)
-		if errors.Is(err, context.DeadlineExceeded) {
+		// Wait never cancels work, so NO context error may be reported as
+		// failure. DeadlineExceeded is the caller's own timeout; Canceled is
+		// the endpoint shutting down underneath a live wait. Both mean "not
+		// observed yet" (exit 4), never "the work failed" (exit 1) — an
+		// orchestrator told its request failed during a routine endpoint
+		// restart would take a destructive recovery path for a request that
+		// is still running (agent-message-queue-611.22.27).
+		if err != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
 			writeRecord(conn, Response{Reply: mustJSON(snap), TimedOut: true})
 			return
 		}
@@ -181,6 +192,15 @@ func Call(stateDir string, req Request) (*Response, error) {
 		return nil, protocol.Refuse(protocol.CodeEndpointUnreachable, "no endpoint at %s; start one with `amq-remote serve`", path)
 	}
 	defer func() { _ = conn.Close() }()
+	// DialTimeout bounds only the connect. Without a read deadline every CLI
+	// verb (submit, status, cancel, sessions, doctor) blocks forever against a
+	// wedged endpoint. A wait carries its own server-side timeout, so allow
+	// for it plus slack rather than cutting a legitimate long wait short.
+	readBound := callReadDeadline
+	if req.Wait != nil && req.Wait.TimeoutMS > 0 {
+		readBound = time.Duration(req.Wait.TimeoutMS)*time.Millisecond + callReadDeadline
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(readBound))
 	writeRecord(conn, req)
 	resp, err := readRecord[Response](conn)
 	if err != nil {
@@ -201,7 +221,12 @@ func (r *Response) AsError() error {
 }
 
 func readRecord[T any](r io.Reader) (*T, error) {
-	br := bufio.NewReaderSize(r, 64*1024)
+	// Cap at the BOUNDARY, not after the fact: ReadBytes grows without limit,
+	// so a peer streaming megabytes with no newline could allocate freely
+	// inside the read deadline before the size check ever ran. One extra byte
+	// is read so an over-long record is still detected rather than silently
+	// truncated into a parse error.
+	br := bufio.NewReaderSize(io.LimitReader(r, MaxRecordBytes+1), 64*1024)
 	line, err := br.ReadBytes('\n')
 	if err != nil && (!errors.Is(err, io.EOF) || len(line) == 0) {
 		return nil, fmt.Errorf("read record: %w", err)
@@ -216,11 +241,23 @@ func readRecord[T any](r io.Reader) (*T, error) {
 	return &v, nil
 }
 
+// writeResponseDeadline bounds one response write. A client that sends its
+// request and then stops reading (a stopped shell, a wedged reader) used to
+// block the handler goroutine forever on a full socket buffer, leaking the
+// goroutine and its fd for the life of the process.
+const writeResponseDeadline = 10 * time.Second
+
 func writeRecord(w io.Writer, v any) {
 	data, err := json.Marshal(v)
 	if err != nil {
 		return
 	}
 	data = append(data, '\n')
+	// Bound the write when the writer is a connection: an unread socket must
+	// not hold a handler (or a CLI) indefinitely.
+	if c, ok := w.(net.Conn); ok {
+		_ = c.SetWriteDeadline(time.Now().Add(writeResponseDeadline))
+		defer func() { _ = c.SetWriteDeadline(time.Time{}) }()
+	}
 	_, _ = w.Write(data)
 }
