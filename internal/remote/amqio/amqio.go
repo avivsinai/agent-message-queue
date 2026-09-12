@@ -101,6 +101,13 @@ func SourceHost(h format.Header) string {
 // command to the endpoint, and only then claims the message into cur with a
 // drained receipt. A message the endpoint refuses is still claimed, with the
 // refusal in the receipt detail and a reply to the sender.
+//
+// D1: a per-message failure is NEVER a loop failure. ImportOnce's job is to
+// make progress on every message independently. One caller's bad header must
+// not stop another caller's work. Each message is classified as (a) handled,
+// (b) transient — leave in new, try next tick (storage refusal), or (c)
+// terminal-for-us — cannot ever be answered by this endpoint, DLQ it. Errors
+// are accumulated, never abort the scan. Returns the count plus a joined error.
 func (c *Carrier) ImportOnce() (int, error) {
 	root, err := fsq.OpenDeliveryRoot(c.root, c.identity)
 	if err != nil {
@@ -122,22 +129,30 @@ func (c *Carrier) ImportOnce() (int, error) {
 	}
 	sort.Strings(names)
 	n := 0
+	var errs []error
 	for _, name := range names {
-		if err := c.importOne(root, name); err != nil {
-			return n, err
+		ok, err := c.importOne(root, name)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", name, err))
 		}
-		n++
+		if ok {
+			n++
+		}
 	}
-	return n, nil
+	return n, errors.Join(errs...)
 }
 
-func (c *Carrier) importOne(root *fsq.DeliveryRoot, name string) error {
+// importOne handles one message from inbox/new. Returns (handled, err):
+// handled=true means the message was claimed into cur (or DLQ'd); handled=false
+// means it was left in new for a retry (transient failure, or unparseable).
+// err is non-nil for errors that should be accumulated (D1: never aborts the scan).
+func (c *Carrier) importOne(root *fsq.DeliveryRoot, name string) (bool, error) {
 	path := filepath.Join(c.root, "agents", c.me, "inbox", "new", name)
 	msg, err := format.ReadMessageFile(path)
 	if err != nil {
 		// Unparseable serialization belongs to the DLQ path owned by amq
 		// read/drain; the endpoint leaves it in new for that tooling.
-		return nil
+		return false, nil
 	}
 	detail := "remote command handled"
 	cmd, derr := protocol.DecodeCommand([]byte(strings.TrimSpace(msg.Body)))
@@ -149,15 +164,24 @@ func (c *Carrier) importOne(root *fsq.DeliveryRoot, name string) error {
 		"reply_to":      msg.Header.ReplyTo,
 		"reply_project": msg.Header.ReplyProject,
 	}
-	// Refuse to EXECUTE work whose answer we could never deliver: a
-	// cross-project command whose reply route does not resolve stays in new,
-	// untouched. Probing here rather than at reply time matters because a
-	// successful submit answers through a published revision, not an inline
-	// reply — by then the command would already be claimed and the caller
-	// would wait forever (agent-message-queue-611.22.30).
-	if strings.TrimSpace(origin["reply_project"]) != "" {
+	// D2: route ONLY when the caller is actually elsewhere. If reply_project
+	// is empty, the caller lives in OUR root — take the pre-existing same-root
+	// path, with the old tolerant handling of a missing or unusable From. Only
+	// a genuinely cross-project caller goes near the ReplyRouter.
+	project := strings.TrimSpace(origin["reply_project"])
+	if project != "" {
+		// D3: an unroutable cross-project caller is a POISON MESSAGE, not a
+		// retry. Leaving it in new means it is re-probed every tick and never
+		// converges (Pro B1). DLQ it so the operator sees it in `amq dlq list`,
+		// `dlq retry` recovers it once the peer is configured, and the loop
+		// converges. D4: before delivering to a peer root, validate the
+		// destination mailbox EXISTS — never create a mailbox in someone else's
+		// root (recreates the black hole this PR closed, just moved one dir over).
 		if _, _, closeProbe, rerr := c.destination(root, origin); rerr != nil {
-			return rerr
+			if _, dlqErr := fsq.MoveToDLQ(root, c.me, name, msg.Header.ID, "unroutable", rerr.Error()); dlqErr != nil {
+				return false, fmt.Errorf("dlq %s: %w (route error: %v)", name, dlqErr, rerr)
+			}
+			return true, nil // DLQ'd — the message is no longer in new
 		} else {
 			closeProbe()
 		}
@@ -178,7 +202,7 @@ func (c *Carrier) importOne(root *fsq.DeliveryRoot, name string) error {
 		// The endpoint could not say whether a record exists. Leave the
 		// message in new so the next import retries it; never drain a
 		// command whose record may not exist.
-		return nil
+		return false, nil
 	}
 	// A typed Refusal is not automatically a DURABLE one. The store refuses
 	// with storage_full (ENOSPC, EPERM, oversize) and store_closed (shutdown),
@@ -195,7 +219,7 @@ func (c *Carrier) importOne(root *fsq.DeliveryRoot, name string) error {
 		outcome = rep.Outcome
 	}
 	if transientRefusal(refusal, outcome.Code) {
-		return nil
+		return false, nil
 	}
 	// Reply once here for: every refusal; every non-request op; and a request
 	// op that carries an op-specific Outcome which does not travel as a
@@ -207,17 +231,24 @@ func (c *Carrier) importOne(root *fsq.DeliveryRoot, name string) error {
 	hasOutcomeSignal := outcome.Code != "" || outcome.Disposition != ""
 	if herr != nil || !isRequestOp || hasOutcomeSignal {
 		if err := c.reply(root, origin, "remote reply", reply, herr); err != nil {
-			return err
+			// D1: a reply-route failure on ONE message must not abort the whole
+			// scan. The message is not claimed (stays in new); accumulate the
+			// error and continue. If this is a cross-project route failure, the
+			// next tick's probe will DLQ it (D3).
+			return false, err
 		}
 	}
 	if err := fsq.MoveNewToCur(root, c.me, name); err != nil {
 		var committed *fsq.CommittedDurabilityError
 		if !errors.As(err, &committed) {
-			return fmt.Errorf("claim %s: %w", name, err)
+			return false, fmt.Errorf("claim %s: %w", name, err)
 		}
 	}
 	rc := receipt.New(msg.Header.ID, msg.Header.Thread, msg.Header.From, c.me, receipt.StageDrained, detail)
-	return receipt.EmitDeliveryRoot(root, rc)
+	if err := receipt.EmitDeliveryRoot(root, rc); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // Publish implements core.Publisher for records that arrived over AMQ. Local
@@ -243,8 +274,12 @@ func (c *Carrier) destination(own *fsq.DeliveryRoot, origin map[string]string) (
 	to := origin["from"]
 	project := strings.TrimSpace(origin["reply_project"])
 	if project == "" {
+		// D2: same-project caller. Restore the pre-fix tolerant handling: a
+		// missing or unusable From is NOT a route error here — the reply
+		// writes to the sender's handle in our own root, and an empty `to`
+		// means no reply (the pre-fix code returned nil, not an error).
 		if to == "" || fsq.ValidateHandle(to) != nil {
-			return nil, "", noop, fmt.Errorf("%w: unusable sender handle %q", errNoReplyRoute, to)
+			return own, "", noop, nil
 		}
 		return own, to, noop, nil
 	}
@@ -265,6 +300,14 @@ func (c *Carrier) destination(own *fsq.DeliveryRoot, origin map[string]string) (
 	peer, err := fsq.OpenDeliveryRoot(rootPath, identity)
 	if err != nil {
 		return nil, "", noop, fmt.Errorf("%w: %v", errNoReplyRoute, err)
+	}
+	// D4: never create a mailbox in someone else's root. A peer root whose
+	// mailbox does not exist is unroutable (D3 applies). Creating it is
+	// exactly the black hole this PR set out to close, just moved one dir over.
+	// Every other cross-root writer gates on ValidateExistingMailboxLayout first.
+	if err := fsq.ValidateExistingMailboxLayout(peer, handle); err != nil {
+		_ = peer.Close()
+		return nil, "", noop, fmt.Errorf("%w: peer mailbox %q does not exist: %v", errNoReplyRoute, handle, err)
 	}
 	return peer, handle, func() { _ = peer.Close() }, nil
 }

@@ -506,7 +506,11 @@ func TestImportCrossProjectRepliesToCallerRoot(t *testing.T) {
 // agent-message-queue-611.22.30: when the reply cannot be routed, the command
 // must stay in new (answerable later) rather than be claimed with its reply
 // delivered into the endpoint's own root.
-func TestImportCrossProjectUnroutableLeavesCommandInNew(t *testing.T) {
+// TestImportCrossProjectUnroutableDoesNotBlockRoutable reproduces Pro B1+B3:
+// an unroutable cross-project command must NOT stop a second, routable command
+// from being handled in the same scan. The unroutable message is DLQ'd (D3),
+// not left in new to wedge the loop. The routable message is handled normally.
+func TestImportCrossProjectUnroutableDoesNotBlockRoutable(t *testing.T) {
 	endpointRoot := t.TempDir()
 	if err := fsq.EnsureRootDirs(endpointRoot); err != nil {
 		t.Fatal(err)
@@ -526,27 +530,23 @@ func TestImportCrossProjectUnroutableLeavesCommandInNew(t *testing.T) {
 	if err != nil {
 		t.Fatalf("carrier: %v", err)
 	}
-	carrier.SetReplyRouter(func(string, string) (string, string, error) {
-		return "", "", errors.New("peer project not in .amqrc")
+	// Router: "gone" is unroutable, "ok" routes to a peer root with a mailbox.
+	peerRoot := t.TempDir()
+	if err := fsq.EnsureRootDirs(peerRoot); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureAgentDirs(peerRoot, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	carrier.SetReplyRouter(func(project, replyTo string) (string, string, error) {
+		if project == "gone" {
+			return "", "", errors.New("peer project not in .amqrc")
+		}
+		return peerRoot, "codex", nil
 	})
 	ep.Register(fake.New("fake", "e_1"))
 	t.Cleanup(func() { _ = ep.Close() })
 
-	body := `{"schema":"amq.remote.command/1","op":"request.submit","request_id":"11111111-1111-4111-8111-111111111331","target_id":"fake","epoch":"e_1","not_after":"` + protocol.FormatTime(time.Now().Add(time.Minute)) + `","input":{"text":"unroutable"}}`
-	now := time.Now()
-	id, err := format.NewMessageID(now)
-	if err != nil {
-		t.Fatal(err)
-	}
-	msg := format.Message{Header: format.Header{
-		Schema: format.CurrentSchema, ID: id, From: "codex", To: []string{DefaultHandle},
-		Thread: "p2p/codex__remote", Subject: "submit", Created: now.UTC().Format(time.RFC3339Nano), Kind: "todo",
-		FromProject: "gone", ReplyTo: "codex@session1", ReplyProject: "gone",
-	}, Body: body}
-	data, err := msg.Marshal()
-	if err != nil {
-		t.Fatal(err)
-	}
 	identity, err := fsq.SnapshotDeliveryRoot(endpointRoot)
 	if err != nil {
 		t.Fatal(err)
@@ -555,16 +555,176 @@ func TestImportCrossProjectUnroutableLeavesCommandInNew(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer func() { _ = droot.Close() }()
+
+	// Message A: unroutable (reply_project "gone"). Use an EARLIER message id
+	// so it sorts first and would block B if the loop aborted on error.
+	now := time.Now()
+	idA, _ := format.NewMessageID(now.Add(-time.Second))
+	bodyA := `{"schema":"amq.remote.command/1","op":"request.submit","request_id":"11111111-1111-4111-8111-111111111331","target_id":"fake","epoch":"e_1","not_after":"` + protocol.FormatTime(time.Now().Add(time.Minute)) + `","input":{"text":"unroutable"}}`
+	msgA := format.Message{Header: format.Header{
+		Schema: format.CurrentSchema, ID: idA, From: "codex", To: []string{DefaultHandle},
+		Thread: "p2p/codex__remote", Subject: "submit", Created: now.UTC().Format(time.RFC3339Nano), Kind: "todo",
+		FromProject: "gone", ReplyTo: "codex@session1", ReplyProject: "gone",
+	}, Body: bodyA}
+	dataA, _ := msgA.Marshal()
+	if _, err := fsq.DeliverToInboxes(droot, []string{DefaultHandle}, idA+".md", dataA); err != nil {
+		t.Fatalf("deliver A: %v", err)
+	}
+
+	// Message B: routable (reply_project "ok", peer root has the mailbox).
+	idB, _ := format.NewMessageID(now)
+	bodyB := `{"schema":"amq.remote.command/1","op":"request.submit","request_id":"11111111-1111-4111-8111-111111111332","target_id":"fake","epoch":"e_1","not_after":"` + protocol.FormatTime(time.Now().Add(time.Minute)) + `","input":{"text":"routable"}}`
+	msgB := format.Message{Header: format.Header{
+		Schema: format.CurrentSchema, ID: idB, From: "codex", To: []string{DefaultHandle},
+		Thread: "p2p/codex__remote", Subject: "submit", Created: now.UTC().Format(time.RFC3339Nano), Kind: "todo",
+		FromProject: "ok", ReplyTo: "codex@session1", ReplyProject: "ok",
+	}, Body: bodyB}
+	dataB, _ := msgB.Marshal()
+	if _, err := fsq.DeliverToInboxes(droot, []string{DefaultHandle}, idB+".md", dataB); err != nil {
+		t.Fatalf("deliver B: %v", err)
+	}
+
+	n, _ := carrier.ImportOnce()
+	// B was handled (claimed into cur). A was DLQ'd. Both are out of new.
+	if entries, _ := os.ReadDir(fsq.AgentInboxNew(endpointRoot, DefaultHandle)); len(entries) != 0 {
+		t.Fatalf("messages left in new: %d (A should be DLQ'd, B should be claimed)", len(entries))
+	}
+	// A is in DLQ.
+	dlqDir := filepath.Join(endpointRoot, "agents", DefaultHandle, "dlq", "new")
+	if entries, _ := os.ReadDir(dlqDir); len(entries) != 1 {
+		t.Fatalf("unroutable A not in DLQ: %d", len(entries))
+	}
+	// B is in cur (claimed).
+	if entries, _ := os.ReadDir(fsq.AgentInboxCur(endpointRoot, DefaultHandle)); len(entries) != 1 {
+		t.Fatalf("routable B not claimed into cur: %d", len(entries))
+	}
+	_ = n // ImportOnce returns count of handled+DLQ'd
+}
+
+// TestImportSameProjectEmptyFromStillWorks reproduces Pro B2: the pre-fix code
+// tolerated a missing or unusable From on a same-project caller; the PR
+// regressed it to an error that propagated through B1 and deadlocked the
+// endpoint. D2 restores the tolerant handling — same-project with from:""
+// is handled normally (no reply written, but the command is claimed).
+func TestImportSameProjectEmptyFromStillWorks(t *testing.T) {
+	endpointRoot := t.TempDir()
+	if err := fsq.EnsureRootDirs(endpointRoot); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureAgentDirs(endpointRoot, DefaultHandle); err != nil {
+		t.Fatal(err)
+	}
+	store, err := requests.Open(filepath.Join(endpointRoot, "extensions", "remote"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	var carrier *Carrier
+	ep := core.New(core.Config{Store: store, Publish: func(s protocol.Snapshot, origin map[string]string) error {
+		return carrier.Publish(s, origin)
+	}})
+	carrier, err = New(endpointRoot, DefaultHandle, ep)
+	if err != nil {
+		t.Fatalf("carrier: %v", err)
+	}
+	// No router — same-project only (D2: empty reply_project never touches it).
+	ep.Register(fake.New("fake", "e_1"))
+	t.Cleanup(func() { _ = ep.Close() })
+
+	// Command with from:"" and no reply_project — same-project, unusable From.
+	body := `{"schema":"amq.remote.command/1","op":"request.submit","request_id":"11111111-1111-4111-8111-111111111341","target_id":"fake","epoch":"e_1","not_after":"` + protocol.FormatTime(time.Now().Add(time.Minute)) + `","input":{"text":"hi"}}`
+	now := time.Now()
+	id, _ := format.NewMessageID(now)
+	msg := format.Message{Header: format.Header{
+		Schema: format.CurrentSchema, ID: id, From: "", To: []string{DefaultHandle},
+		Thread: "p2p/codex__remote", Subject: "submit", Created: now.UTC().Format(time.RFC3339Nano), Kind: "todo",
+	}, Body: body}
+	data, _ := msg.Marshal()
+	identity, _ := fsq.SnapshotDeliveryRoot(endpointRoot)
+	droot, _ := fsq.OpenDeliveryRoot(endpointRoot, identity)
 	if _, err := fsq.DeliverToInboxes(droot, []string{DefaultHandle}, id+".md", data); err != nil {
 		t.Fatalf("deliver: %v", err)
 	}
 	_ = droot.Close()
 
-	_, _ = carrier.ImportOnce()
-	if entries, _ := os.ReadDir(fsq.AgentInboxNew(endpointRoot, DefaultHandle)); len(entries) != 1 {
-		t.Fatalf("unroutable command not left in new: %d", len(entries))
+	n, err := carrier.ImportOnce()
+	if err != nil {
+		t.Fatalf("same-project from:\"\" returned an error (Pro B2 regression): %v", err)
 	}
-	if entries, err := os.ReadDir(fsq.AgentInboxNew(endpointRoot, "codex")); err == nil && len(entries) > 0 {
-		t.Fatalf("reply written into the endpoint's own root: %d", len(entries))
+	if n != 1 {
+		t.Fatalf("same-project from:\"\" not handled: n=%d", n)
+	}
+	// The command was claimed into cur (not left in new).
+	if entries, _ := os.ReadDir(fsq.AgentInboxNew(endpointRoot, DefaultHandle)); len(entries) != 0 {
+		t.Fatalf("command left in new: %d", len(entries))
+	}
+	if entries, _ := os.ReadDir(fsq.AgentInboxCur(endpointRoot, DefaultHandle)); len(entries) != 1 {
+		t.Fatalf("command not claimed into cur: %d", len(entries))
+	}
+}
+
+// TestImportCrossProjectNoPeerMailboxDoesNotCreateIt reproduces Pro B4: the
+// probe never checked the destination mailbox exists, and DeliverToInboxes
+// creates it — recreating the original black hole inside the PEER root. D4:
+// before delivering to a peer root, call ValidateExistingMailboxLayout. A peer
+// root whose mailbox does not exist is unroutable — D3 applies (DLQ).
+func TestImportCrossProjectNoPeerMailboxDoesNotCreateIt(t *testing.T) {
+	endpointRoot := t.TempDir()
+	if err := fsq.EnsureRootDirs(endpointRoot); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureAgentDirs(endpointRoot, DefaultHandle); err != nil {
+		t.Fatal(err)
+	}
+	store, err := requests.Open(filepath.Join(endpointRoot, "extensions", "remote"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	var carrier *Carrier
+	ep := core.New(core.Config{Store: store, Publish: func(s protocol.Snapshot, origin map[string]string) error {
+		return carrier.Publish(s, origin)
+	}})
+	carrier, err = New(endpointRoot, DefaultHandle, ep)
+	if err != nil {
+		t.Fatalf("carrier: %v", err)
+	}
+	// Peer root exists but has NO codex mailbox.
+	peerRoot := t.TempDir()
+	if err := fsq.EnsureRootDirs(peerRoot); err != nil {
+		t.Fatal(err)
+	}
+	// Deliberately do NOT call EnsureAgentDirs(peerRoot, "codex").
+	carrier.SetReplyRouter(func(project, replyTo string) (string, string, error) {
+		return peerRoot, "codex", nil
+	})
+	ep.Register(fake.New("fake", "e_1"))
+	t.Cleanup(func() { _ = ep.Close() })
+
+	body := `{"schema":"amq.remote.command/1","op":"request.submit","request_id":"11111111-1111-4111-8111-111111111351","target_id":"fake","epoch":"e_1","not_after":"` + protocol.FormatTime(time.Now().Add(time.Minute)) + `","input":{"text":"hi"}}`
+	now := time.Now()
+	id, _ := format.NewMessageID(now)
+	msg := format.Message{Header: format.Header{
+		Schema: format.CurrentSchema, ID: id, From: "codex", To: []string{DefaultHandle},
+		Thread: "p2p/codex__remote", Subject: "submit", Created: now.UTC().Format(time.RFC3339Nano), Kind: "todo",
+		FromProject: "peer", ReplyTo: "codex@session1", ReplyProject: "peer",
+	}, Body: body}
+	data, _ := msg.Marshal()
+	identity, _ := fsq.SnapshotDeliveryRoot(endpointRoot)
+	droot, _ := fsq.OpenDeliveryRoot(endpointRoot, identity)
+	if _, err := fsq.DeliverToInboxes(droot, []string{DefaultHandle}, id+".md", data); err != nil {
+		t.Fatalf("deliver: %v", err)
+	}
+	_ = droot.Close()
+
+	carrier.ImportOnce()
+	// The peer root must NOT have a codex mailbox created by us.
+	peerCodexDir := filepath.Join(peerRoot, "agents", "codex")
+	if _, err := os.Stat(peerCodexDir); err == nil {
+		t.Fatal("peer root codex mailbox was created (Pro B4 — black hole moved into peer root)")
+	}
+	// The message is DLQ'd (unroutable — D3 applies).
+	dlqDir := filepath.Join(endpointRoot, "agents", DefaultHandle, "dlq", "new")
+	if entries, _ := os.ReadDir(dlqDir); len(entries) != 1 {
+		t.Fatalf("unroutable (no peer mailbox) not DLQ'd: %d", len(entries))
 	}
 }
