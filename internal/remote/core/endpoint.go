@@ -793,7 +793,9 @@ func (e *Endpoint) onNative(targetID string, ev NativeEvent) {
 		if rec.State.Terminal() {
 			// A run event on an already-terminal record: record the result +
 			// NativeRun without changing State (the cancel stands, the result
-			// is acknowledged).
+			// is acknowledged). runTerminal=true settles a pending cancel — the
+			// run reached terminal, the cancel is resolved.
+			nev.runTerminal = true
 			e.transitionLocked(rec, causeNone, nev)
 		} else if rec.State == protocol.StateRunning || rec.State == protocol.StateDispatching || rec.State == protocol.StateUncertain {
 			switch ev.Type {
@@ -1171,11 +1173,13 @@ func (e *Endpoint) Reconcile() error {
 			}
 		default:
 			if rec.State.Terminal() {
-				// B04 reconcile-cancel-retry: a terminal record with an
-				// inconclusive abort (cancel_requested + NativeRun bound) needs
-				// CancelExact re-driven until the run is confirmed stopped or
-				// found noop_terminal.
-				if rec.Cancel != nil && rec.Cancel.Disposition == protocol.CancelRequested && rec.NativeRun != nil {
+				// Pro #1/#4: the retry selector is needsRuntimeSettlement — a bound
+				// run with no ack is unsettled and must be re-driven. This covers
+				// cancel_requested with no result AND cancelled+confirmed with an
+				// empty AckDigest (the late-output-not-recovered case). Once
+				// terminal+acked, the record is settled — do NOT re-drive it every
+				// tick (Pro #4: revision churn 5->10).
+				if needsRuntimeSettlement(rec) {
 					rerr = e.reconcileCancelRetry(rec)
 				} else {
 					rerr = e.replayTerminalAck(rec)
@@ -1414,10 +1418,10 @@ func (e *Endpoint) reconcileLive(rec *requests.Record) error {
 		}
 		rec.LocalIntervention = rec.LocalIntervention || ev.LocalIntervention
 	case ev.Admitted:
-		// B1: the same-run early return must not bypass a record carrying
-		// cancel_requested. A pending cancel on a running record needs
-		// reconcileCancelRetry, not a noop. Route those to the retry.
-		if rec.Cancel != nil && rec.Cancel.Disposition == protocol.CancelRequested {
+		// Pro #1/#4: the same-run early return must not bypass a record that
+		// needs runtime settlement (bound run, no ack — e.g. a pending cancel).
+		// Route those to reconcileCancelRetry, not a noop.
+		if needsRuntimeSettlement(rec) {
 			e.mu.Unlock()
 			return e.reconcileCancelRetry(rec)
 		}
