@@ -431,7 +431,14 @@ func TestUnconfirmedRunFallsThroughToHistoryAfterTimeout(t *testing.T) {
 	// EvidenceUnknown — but the key assertion is that thread/read WAS called
 	// (the call channel receives it), proving the fall-through.
 	callsBefore := len(srv.calls)
-	att.Lookup(key, s.Epoch)
+	// Lookup falls through to lookupHistory (thread/read RPC). The fake
+	// server returns an error for thread/read, so lookupHistory returns an
+	// error — but the key assertion is that thread/read WAS called, proving
+	// the fall-through. The error is expected, so check the call count, not
+	// the return value.
+	lk, lerr := att.Lookup(key, s.Epoch)
+	_ = lk
+	_ = lerr
 	// Drain the thread/read call (non-blocking — the fake server handles it).
 	time.Sleep(50 * time.Millisecond)
 	callsAfter := len(srv.calls)
