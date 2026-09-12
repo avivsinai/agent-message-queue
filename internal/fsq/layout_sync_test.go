@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 )
@@ -241,5 +242,34 @@ func TestDeliverToInboxesSyncsFirstContactMailboxTree(t *testing.T) {
 	// rename, not by the mailbox creation.
 	if synced[filepath.Join("agents", "newagent", "inbox", "new")] == 0 {
 		t.Fatalf("committed leaf was never synced (all: %v)", synced)
+	}
+}
+
+// An operator's --root can carry a trailing slash. filepath.Dir yields cleaned
+// paths, so an uncleaned stop would never match and the walk would fsync the
+// operator's own directories up to "/". Found while re-reading the round-5 fix
+// for agent-message-queue-611.22.26 (fsq first-contact sync).
+func TestEnsureAgentDirsStopsAtAnUncleanedRoot(t *testing.T) {
+	root := t.TempDir()
+	if err := EnsureRootDirs(root); err != nil {
+		t.Fatalf("EnsureRootDirs: %v", err)
+	}
+	var synced []string
+	restore := syncDirAmbientSwapForTest(func(dir string) error {
+		synced = append(synced, dir)
+		return nil
+	})
+	defer restore()
+
+	if err := EnsureAgentDirs(root+string(filepath.Separator), "agent-b"); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+	for _, dir := range synced {
+		if dir == root {
+			continue
+		}
+		if !strings.HasPrefix(dir, root+string(filepath.Separator)) {
+			t.Fatalf("synced %s, which is outside the queue root %s (all: %v)", dir, root, synced)
+		}
 	}
 }

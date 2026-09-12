@@ -120,6 +120,11 @@ func refuseNonDirectoryAmbient(dir string) error {
 // it is visible to Stat while its entry is not yet on stable storage. Stat
 // proves existence, never durability.
 func ancestorChain(dir, stop string) []string {
+	// The walk compares against stop, and filepath.Dir returns cleaned paths.
+	// An operator's --root may carry a trailing slash, so clean stop too: a
+	// stop that never matches would walk past the queue root and fsync the
+	// operator's own directories up to "/".
+	stop = filepath.Clean(stop)
 	chain := make([]string, 0, 8)
 	for d := filepath.Dir(dir); ; d = filepath.Dir(d) {
 		chain = append(chain, d)
