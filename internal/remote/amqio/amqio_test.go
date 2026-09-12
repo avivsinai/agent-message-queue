@@ -716,7 +716,15 @@ func TestImportCrossProjectNoPeerMailboxDoesNotCreateIt(t *testing.T) {
 	}
 	_ = droot.Close()
 
-	carrier.ImportOnce()
+	// After the fix, an unroutable message is DLQ'd (handled, not left in
+	// new). ImportOnce returns the count of handled+DLQ'd messages. The old
+	// test silenced it with _, which is exactly why the wedge bug satisfied it.
+	// Assert the message was handled (DLQ'd) — the count must be >= 1.
+	n, impErr := carrier.ImportOnce()
+	_ = impErr // a successful DLQ does not propagate the route error
+	if n < 1 {
+		t.Fatalf("ImportOnce handled %d messages (want >=1 — the unroutable message should be DLQ'd)", n)
+	}
 	// The peer root must NOT have a codex mailbox created by us.
 	peerCodexDir := filepath.Join(peerRoot, "agents", "codex")
 	if _, err := os.Stat(peerCodexDir); err == nil {
