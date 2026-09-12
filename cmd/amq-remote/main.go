@@ -18,7 +18,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/avivsinai/agent-message-queue/internal/cli"
+	amqcli "github.com/avivsinai/agent-message-queue/internal/cli"
 	"github.com/avivsinai/agent-message-queue/internal/remote/amqio"
 	"github.com/avivsinai/agent-message-queue/internal/remote/codex"
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
@@ -285,7 +285,7 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	// session layout stay in the package that owns them.
 	root := c.root
 	carrier.SetReplyRouter(func(replyProject, replyTo string) (string, string, error) {
-		return cli.ResolveReplyRoute(root, replyProject, replyTo)
+		return amqcli.ResolveReplyRoute(root, replyProject, replyTo)
 	})
 	if *useFake {
 		ep.Register(fake.New("fake", "e_1"))
