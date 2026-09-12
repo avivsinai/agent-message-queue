@@ -56,6 +56,7 @@ func TestRecordLifecycle(t *testing.T) {
 	rec.Revision, rec.State = 4, protocol.StateCompleted
 	rec.Result = &protocol.Result{Text: "hi"}
 	rec.ObservedAt = "2026-09-01T00:00:00Z"
+	rec.AckDigest = protocol.EvidenceDigest(rec.Result) // settled: ack matches the result
 	if err := s.Update(rec); err != nil {
 		t.Fatalf("completed: %v", err)
 	}
@@ -68,7 +69,7 @@ func TestRecordLifecycle(t *testing.T) {
 		t.Fatalf("unexpected record: %+v", got.Snapshot)
 	}
 
-	n, err := s.Compact(fixedClock())
+	n, err := s.Compact(fixedClock(), 1000)
 	if err != nil || n != 1 {
 		t.Fatalf("compact: n=%d err=%v", n, err)
 	}
@@ -246,7 +247,7 @@ func TestClosedStoreRejectsEveryMutation(t *testing.T) {
 	if code := protocol.RefusalCode(s.MarkPublished(keyOf(&upd), 1)); code != wantCode {
 		t.Fatalf("MarkPublished after close: want code %q, got %q", wantCode, code)
 	}
-	if n, err := s.Compact(fixedClock()); err == nil {
+	if n, err := s.Compact(fixedClock(), 1000); err == nil {
 		t.Fatalf("Compact after close: want error, got n=%d", n)
 	} else if code := protocol.RefusalCode(err); code != wantCode {
 		t.Fatalf("Compact after close: want code %q, got %q", wantCode, code)

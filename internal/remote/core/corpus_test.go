@@ -558,7 +558,7 @@ func (h *harness) cli(where string, step map[string]any) {
 func (h *harness) endpointControl(where string, step map[string]any) {
 	switch step["endpoint"] {
 	case "compact_results":
-		if _, err := h.store.Compact(h.clock.Add(time.Second)); err != nil {
+		if _, err := h.store.Compact(h.clock.Add(time.Second), 1000); err != nil {
 			h.t.Fatalf("%s: compact: %v", where, err)
 		}
 	case "storage_fail_next_write":

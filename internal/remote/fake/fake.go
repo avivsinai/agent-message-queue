@@ -38,9 +38,11 @@ type Runtime struct {
 
 	// controls
 	admissionGate        chan struct{}
+	afterAdmitGate       chan struct{}
 	lookupGate           chan struct{}
 	ackGate              chan struct{}
 	failNextLookup       error
+	failNextCancelExact  error
 	admissionFailsAfter  bool
 	consumerSets         int
 	interactionAnswers   []Answer
@@ -120,29 +122,34 @@ func (r *Runtime) Submit(req core.BoundRequest) (core.Admission, error) {
 	}
 
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	r.dispatches++
 	if r.admissionFailsAfter {
 		r.admissionFailsAfter = false
+		r.mu.Unlock()
 		return core.Admission{Code: protocol.CodeNativeError, Message: "native admission failed after helper returned"}, nil
 	}
 	if req.Epoch != r.epoch {
+		r.mu.Unlock()
 		return core.Admission{Code: protocol.CodeStaleEpoch}, nil
 	}
 	if r.cancelIntent[req.Key] {
 		delete(r.cancelIntent, req.Key)
+		r.mu.Unlock()
 		return core.Admission{Code: protocol.CodeCancelledBeforeAdmission}, nil
 	}
 	if existing, ok := r.runsByKey[req.Key]; ok {
+		r.mu.Unlock()
 		return core.Admission{Admitted: true, RunID: existing.id}, nil
 	}
 	if r.busy {
 		if req.Input.Busy != protocol.BusyQueue {
+			r.mu.Unlock()
 			return core.Admission{Code: protocol.CodeBusy, Message: "a run is active"}, nil
 		}
 	}
 	for _, rn := range r.runsByKey {
 		if rn.state.Terminal() && !rn.acknowledged {
+			r.mu.Unlock()
 			return core.Admission{Code: protocol.CodeBusy, Message: "a completed result awaits acknowledgement"}, nil
 		}
 	}
@@ -150,6 +157,11 @@ func (r *Runtime) Submit(req core.BoundRequest) (core.Admission, error) {
 	rn := &run{id: fmt.Sprintf("run_%d", r.nextRun), key: req.Key, epoch: req.Epoch, state: protocol.StateRunning}
 	r.runsByKey[req.Key] = rn
 	r.busy = true
+	afterGate := r.afterAdmitGate
+	r.mu.Unlock()
+	if afterGate != nil {
+		<-afterGate
+	}
 	return core.Admission{Admitted: true, RunID: rn.id}, nil
 }
 
@@ -185,6 +197,12 @@ func (r *Runtime) Lookup(key requests.Key, epoch string) (core.Evidence, error) 
 // CancelExact implements core.Attachment.
 func (r *Runtime) CancelExact(key requests.Key, epoch string) (core.CancelEvidence, error) {
 	r.mu.Lock()
+	fail := r.failNextCancelExact
+	r.failNextCancelExact = nil
+	if fail != nil {
+		r.mu.Unlock()
+		return core.CancelEvidence{}, fail
+	}
 	rn, ok := r.runsByKey[key]
 	if !ok {
 		r.cancelIntent[key] = true
@@ -305,6 +323,34 @@ func (r *Runtime) FailNextLookup(err error) {
 	r.failNextLookup = err
 }
 
+// FailNextCancelExact makes the NEXT CancelExact call return err once.
+func (r *Runtime) FailNextCancelExact(err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.failNextCancelExact = err
+}
+
+// HoldAfterAdmit blocks Submit AFTER a run is admitted (and the run is
+// recorded) until ReleaseAfterAdmit. Used to race a cancel against a
+// positively-admitted run (the P1 shape).
+func (r *Runtime) HoldAfterAdmit() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.afterAdmitGate == nil {
+		r.afterAdmitGate = make(chan struct{})
+	}
+}
+
+// ReleaseAfterAdmit unblocks a held post-admission Submit.
+func (r *Runtime) ReleaseAfterAdmit() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.afterAdmitGate != nil {
+		close(r.afterAdmitGate)
+		r.afterAdmitGate = nil
+	}
+}
+
 // holdAck, when non-nil, blocks AcknowledgeResult until closed.
 // HoldAcknowledge makes AcknowledgeResult block until ReleaseAcknowledge.
 func (r *Runtime) HoldAcknowledge() {
@@ -382,6 +428,93 @@ func (r *Runtime) Complete(requestID, text string) bool {
 	ev := core.NativeEvent{Type: core.EventRunCompleted, Key: target.key, RunID: target.id, Result: target.result}
 	r.mu.Unlock()
 	r.emit(ev)
+	return true
+}
+
+// CompleteWhileAdmitHeld marks the run for requestID as completed with a
+// result and emits EventRunCompleted, EVEN IF the run was already cancelled
+// natively. This models the P1 Pro #2 shape: Submit is parked in
+// afterAdmitGate, a native cancel moved the record to cancelled AND cancelled
+// the run, then the run finishes (produces output) before Submit returns.
+// The completion event arrives for a terminal (cancelled) record — onNative
+// must record the result, not discard it. Reports whether a run was found.
+func (r *Runtime) CompleteWhileAdmitHeld(requestID, text string) bool {
+	r.mu.Lock()
+	var target *run
+	for _, rn := range r.runsByKey {
+		if rn.key.RequestID == requestID && !rn.state.Terminal() {
+			target = rn
+		}
+	}
+	if target == nil {
+		// Fall back to any non-completed run (e.g. already cancelled).
+		for _, rn := range r.runsByKey {
+			if rn.key.RequestID == requestID && rn.state != protocol.StateCompleted {
+				target = rn
+			}
+		}
+	}
+	if target == nil {
+		r.mu.Unlock()
+		return false
+	}
+	target.state = protocol.StateCompleted
+	target.result = &protocol.Result{Text: text}
+	r.busy = false
+	ev := core.NativeEvent{Type: core.EventRunCompleted, Key: target.key, RunID: target.id, Result: target.result}
+	r.mu.Unlock()
+	r.emit(ev)
+	return true
+}
+
+// CancelRun cancels the running run for requestID natively and emits
+// EventRunCancelled, as a queued-run deletion or interrupt does in a real
+// attachment. B14c tests use it to drive a cancel event arriving while the
+// endpoint's Submit is still inside the admission gate. It reports whether
+// a running run was found.
+func (r *Runtime) CancelRun(requestID string) bool {
+	r.mu.Lock()
+	var target *run
+	for _, rn := range r.runsByKey {
+		if rn.key.RequestID == requestID && rn.state == protocol.StateRunning {
+			target = rn
+		}
+	}
+	var key requests.Key
+	var runID string
+	if target != nil {
+		target.state = protocol.StateCancelled
+		r.busy = false
+		key, runID = target.key, target.id
+	} else {
+		// No bound run: a native cancel for a request the attachment has not
+		// finished admitting still takes effect — record the intent (a gated
+		// Submit consumes it and returns cancelled_before_admission) and emit
+		// the event against the request's key so the endpoint's durable
+		// record moves to cancelled even before admission resolves. The
+		// creator host is a test-harness constant here ("local"): real
+		// attachments key cancels natively and do not need it.
+		for _, rn := range r.runsByKey {
+			if rn.key.RequestID == requestID {
+				r.cancelIntent[rn.key] = true
+				key, runID = rn.key, rn.id
+			}
+		}
+		if key == (requests.Key{}) {
+			key = requests.Key{CreatorHost: "local", TargetID: r.targetID, RequestID: requestID}
+		}
+		// Install the intent for the resolved key so a gated Submit that
+		// wakes after the event consumes it and returns
+		// cancelled_before_admission rather than admitting a run that the
+		// cancel already reported as cancelled.
+		r.cancelIntent[key] = true
+	}
+	if key == (requests.Key{}) {
+		r.mu.Unlock()
+		return false
+	}
+	r.mu.Unlock()
+	r.emit(core.NativeEvent{Type: core.EventRunCancelled, Key: key, RunID: runID})
 	return true
 }
 
