@@ -452,7 +452,8 @@ func (r *DeliveryRoot) EnsureRootDirs() error {
 	if err := r.VerifyBase(); err != nil {
 		return err
 	}
-	return r.mkdirAllSynced("agents", "threads", "meta")
+	// Queue-level provisioning: sync what we create.
+	return r.mkdirAllSynced(syncIfCreated, "agents", "threads", "meta")
 }
 
 // EnsureAgentDirs creates one agent's mailbox layout through the pinned root
@@ -468,7 +469,7 @@ func (r *DeliveryRoot) EnsureAgentDirs(agent string) error {
 	for _, leaf := range requiredMailboxLeaves {
 		dirs = append(dirs, MailboxRootRelativePath(agent, leaf))
 	}
-	return r.mkdirAllSynced(dirs...)
+	return r.mkdirAllSynced(syncIfCreated, dirs...)
 }
 
 // EnsureAgentDir creates exactly one mailbox leaf for an agent through the
@@ -484,7 +485,7 @@ func (r *DeliveryRoot) EnsureAgentDir(agent string, leaf MailboxLeaf) error {
 	if err := r.VerifyBase(); err != nil {
 		return err
 	}
-	return r.mkdirAllSynced(MailboxRootRelativePath(agent, leaf))
+	return r.mkdirAllSynced(syncIfCreated, MailboxRootRelativePath(agent, leaf))
 }
 
 // LayoutState classifies a pinned root's top-level queue layout.
@@ -578,6 +579,29 @@ func (r *DeliveryRoot) dirExists(name string) bool {
 	return err == nil && info.IsDir()
 }
 
+// durability says how hard mkdirAllSynced must work to make a tree durable.
+// The two callers are genuinely different, and collapsing them costs either
+// correctness or a queue-global fsync on a hot path.
+type durability int
+
+const (
+	// syncIfCreated syncs the ancestor chain only when this call actually
+	// created a directory. A routine internal write owes durability for what
+	// it made and nothing more. The notification-attempt ledger appends
+	// through this path thousands of times against a mailbox that already
+	// exists; making it fsync the shared queue root every time would turn a
+	// path designed to not serialize among appenders into a queue-global
+	// barrier.
+	syncIfCreated durability = iota
+	// syncAlways re-syncs the chain on every call, created or not. The caller
+	// is about to ACKNOWLEDGE something to someone else, so it may not assume
+	// an earlier call finished making this tree durable: that call may have
+	// created a level and died before syncing its parent, leaving a directory
+	// that Stat can see and power loss can still take. Stat proves existence,
+	// never durability.
+	syncAlways
+)
+
 // mkdirAllSynced creates every dir (and its missing ancestors) through the
 // pinned root, then makes the resulting tree durable: it fsyncs each directory
 // that owns an entry on the way to a dir, up to and including the pinned root.
@@ -588,14 +612,21 @@ func (r *DeliveryRoot) dirExists(name string) bool {
 // Pass the directories of one logical mailbox together. A failed sync is
 // reported as a plain error: nothing is committed at a leaf yet, so the
 // caller's staging cleanup still applies.
-func (r *DeliveryRoot) mkdirAllSynced(dirs ...string) error {
+func (r *DeliveryRoot) mkdirAllSynced(mode durability, dirs ...string) error {
+	created := false
 	for _, dir := range dirs {
 		if err := r.refuseNonDirectoryAncestor(dir); err != nil {
 			return err
 		}
+		if !r.dirExists(dir) {
+			created = true
+		}
 		if err := r.root.MkdirAll(dir, 0o700); err != nil {
 			return err
 		}
+	}
+	if !created && mode == syncIfCreated {
+		return nil
 	}
 	// Create everything first, then sync each shared ancestor once. Siblings
 	// of one mailbox (inbox/tmp and inbox/new, or all seven leaves) share

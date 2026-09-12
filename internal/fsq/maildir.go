@@ -89,19 +89,35 @@ func DeliverToInboxes(root *DeliveryRoot, recipients []string, filename string, 
 	if err := root.VerifyBase(); err != nil {
 		return nil, err
 	}
+	// First-contact delivery: create every recipient's mailbox tree through
+	// mkdirAllSynced so every ancestor this call creates (agents/<h>, inbox)
+	// is fsynced, not just tmp and new below. A raw MkdirAll left those
+	// directory entries unsynced; power loss after a successful send could
+	// drop the whole mailbox and the committed message with it
+	// (agent-message-queue-611.22.26).
+	//
+	// ALL recipients go in ONE call. Per-recipient calls would fsync the
+	// shared ancestors — "agents" and the pinned root — once per recipient,
+	// so `amq send --to a,b,c` fsynced the queue root three times. The
+	// dedup that makes a shared ancestor cost one fsync only works if the
+	// whole delivery is one call.
+	mailboxDirs := make([]string, 0, len(recipients)*2)
+	for _, recipient := range recipients {
+		mailboxDirs = append(mailboxDirs,
+			filepath.Join("agents", recipient, "inbox", "tmp"),
+			filepath.Join("agents", recipient, "inbox", "new"),
+		)
+	}
+	// syncAlways: this delivery is about to ACKNOWLEDGE a message to its
+	// sender, so it cannot trust that an earlier call finished making this
+	// tree durable.
+	if err := root.mkdirAllSynced(syncAlways, mailboxDirs...); err != nil {
+		return nil, err
+	}
 	stages := make([]stagedDelivery, 0, len(recipients))
 	for _, recipient := range recipients {
 		tmpDir := filepath.Join("agents", recipient, "inbox", "tmp")
 		newDir := filepath.Join("agents", recipient, "inbox", "new")
-		// First-contact delivery: create the mailbox tree through mkdirAllSynced so
-		// every ancestor this call creates (agents/<h>, inbox) is fsynced, not just
-		// tmp and new below. A raw MkdirAll left those directory entries unsynced;
-		// power loss after a successful send could drop the whole mailbox and the
-		// committed message with it (agent-message-queue-611.22.26). tmp and new
-		// go in one call so inbox is synced after BOTH of them exist.
-		if err := root.mkdirAllSynced(tmpDir, newDir); err != nil {
-			return nil, cleanupStagedTmp(root, stages, err)
-		}
 		tmpPath, err := uniqueAttemptTmpPath(tmpDir, filename)
 		if err != nil {
 			return nil, cleanupStagedTmp(root, stages, err)

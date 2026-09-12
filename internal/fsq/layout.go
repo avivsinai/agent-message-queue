@@ -190,6 +190,17 @@ func AgentReceipts(root, agent string) string {
 }
 
 func EnsureRootDirs(root string) error {
+	// os.MkdirAll below creates the queue root itself when it is missing
+	// (`amq init` / `amq session create` on a fresh path). Whoever creates a
+	// directory entry owns the fsync that makes it durable, so note whether
+	// the root was ours to create BEFORE we create it.
+	rootExisted := true
+	if _, err := os.Stat(root); err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("stat queue root %s: %w", root, err)
+		}
+		rootExisted = false
+	}
 	for _, dir := range []string{
 		filepath.Join(root, "agents"),
 		filepath.Join(root, "threads"),
@@ -200,8 +211,23 @@ func EnsureRootDirs(root string) error {
 		}
 	}
 	// The root owns the entries for all three, so one fsync of the root makes
-	// them durable. Above the root is the operator's own path, not ours.
-	return SyncDir(root)
+	// them durable.
+	if err := SyncDir(root); err != nil {
+		return err
+	}
+	if rootExisted {
+		// The parent is the operator's own path and gained nothing from us.
+		return nil
+	}
+	// We created the root's own entry in its parent, and fsync(root) does not
+	// persist that entry. Without this, `amq init` followed by a first-contact
+	// send reports success and power loss takes the whole queue — the exact
+	// loss this file's ancestor syncing exists to prevent, one level up.
+	parent := filepath.Dir(root)
+	if parent == root {
+		return nil
+	}
+	return SyncDir(parent)
 }
 
 func EnsureAgentDirs(root, agent string) error {

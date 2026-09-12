@@ -60,7 +60,7 @@ func TestMkdirAllSyncedCoversEveryOwningDirectoryUpToRoot(t *testing.T) {
 		}
 	}
 
-	if err := root.mkdirAllSynced(filepath.Join("agents", "agent-a", "inbox", "cur")); err != nil {
+	if err := root.mkdirAllSynced(syncAlways, filepath.Join("agents", "agent-a", "inbox", "cur")); err != nil {
 		t.Fatalf("mkdirAllSynced: %v", err)
 	}
 	assertSync("first contact", synced)
@@ -68,7 +68,7 @@ func TestMkdirAllSyncedCoversEveryOwningDirectoryUpToRoot(t *testing.T) {
 	// The same tree already exists. It is still re-synced: Stat proves
 	// existence, not durability.
 	synced = nil
-	if err := root.mkdirAllSynced(filepath.Join("agents", "agent-a", "inbox", "cur")); err != nil {
+	if err := root.mkdirAllSynced(syncAlways, filepath.Join("agents", "agent-a", "inbox", "cur")); err != nil {
 		t.Fatalf("mkdirAllSynced (existing tree): %v", err)
 	}
 	assertSync("existing tree", synced)
@@ -109,7 +109,7 @@ func TestMkdirAllSyncedSyncsSharedAncestorsAfterEverySibling(t *testing.T) {
 		return nil
 	}
 
-	if err := root.mkdirAllSynced(filepath.Join(inbox, "tmp"), filepath.Join(inbox, "new")); err != nil {
+	if err := root.mkdirAllSynced(syncAlways, filepath.Join(inbox, "tmp"), filepath.Join(inbox, "new")); err != nil {
 		t.Fatalf("mkdirAllSynced: %v", err)
 	}
 	if siblingsAtInboxSync != 2 {
@@ -186,7 +186,7 @@ func TestMkdirAllSyncedReportsFailedAncestorSync(t *testing.T) {
 	failure := errors.New("sync ancestor failed")
 	root.syncDirForTest = func(dir string) error { return failure }
 
-	err = root.mkdirAllSynced(filepath.Join("agents", "agent-c", "inbox", "cur"))
+	err = root.mkdirAllSynced(syncAlways, filepath.Join("agents", "agent-c", "inbox", "cur"))
 	if !errors.Is(err, failure) {
 		t.Fatalf("mkdirAllSynced error = %v, want wrapped %v", err, failure)
 	}
@@ -270,6 +270,119 @@ func TestEnsureAgentDirsStopsAtAnUncleanedRoot(t *testing.T) {
 		}
 		if !strings.HasPrefix(dir, root+string(filepath.Separator)) {
 			t.Fatalf("synced %s, which is outside the queue root %s (all: %v)", dir, root, synced)
+		}
+	}
+}
+
+// A delivery to several recipients is ONE call, so the ancestors they share —
+// "agents" and the pinned root — are fsynced once, not once per recipient.
+// Pre-merge review of agent-message-queue-611.22.26 (fsq first-contact sync)
+// measured `send --to a,b,c` fsyncing the queue root three times, because
+// DeliverToInboxes called mkdirAllSynced inside its per-recipient loop and the
+// dedup map is per-call.
+func TestDeliverToInboxesSyncsSharedAncestorsOncePerDelivery(t *testing.T) {
+	base := t.TempDir()
+	identity, err := SnapshotDeliveryRoot(base)
+	if err != nil {
+		t.Fatalf("SnapshotDeliveryRoot: %v", err)
+	}
+	root, err := OpenDeliveryRoot(base, identity)
+	if err != nil {
+		t.Fatalf("OpenDeliveryRoot: %v", err)
+	}
+	defer func() { _ = root.Close() }()
+
+	counts := map[string]int{}
+	root.syncDirForTest = func(dir string) error {
+		rel, relErr := filepath.Rel(base, dir)
+		if relErr != nil {
+			rel = dir
+		}
+		counts[rel]++
+		return nil
+	}
+	if _, err := DeliverToInboxes(root, []string{"a", "b", "c"}, "m.md", []byte("hi")); err != nil {
+		t.Fatalf("DeliverToInboxes: %v", err)
+	}
+	for _, shared := range []string{".", "agents"} {
+		if counts[shared] != 1 {
+			t.Fatalf("%s synced %d times for a 3-recipient delivery, want 1 (all: %v)", shared, counts[shared], counts)
+		}
+	}
+}
+
+// EnsureAgentDir is the routine single-leaf write path (the
+// notification-attempt ledger appends through it against a mailbox that
+// already exists). It must not fsync the shared queue root on every append:
+// pre-merge review measured 3 fsyncs per append where main did 0, turning a
+// path built to not serialize among appenders into a queue-global barrier.
+// Only the acknowledging delivery path re-syncs an existing tree.
+func TestEnsureAgentDirDoesNotSyncAnExistingMailbox(t *testing.T) {
+	base := t.TempDir()
+	identity, err := SnapshotDeliveryRoot(base)
+	if err != nil {
+		t.Fatalf("SnapshotDeliveryRoot: %v", err)
+	}
+	root, err := OpenDeliveryRoot(base, identity)
+	if err != nil {
+		t.Fatalf("OpenDeliveryRoot: %v", err)
+	}
+	defer func() { _ = root.Close() }()
+	if err := root.EnsureAgentDirs("agent-a"); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+
+	var synced []string
+	root.syncDirForTest = func(dir string) error {
+		synced = append(synced, dir)
+		return nil
+	}
+	if err := root.EnsureAgentDir("agent-a", MailboxReceipts); err != nil {
+		t.Fatalf("EnsureAgentDir: %v", err)
+	}
+	if len(synced) != 0 {
+		t.Fatalf("an existing mailbox leaf was re-synced by a routine write: %v", synced)
+	}
+}
+
+// EnsureRootDirs can create the queue ROOT itself (`amq init` or
+// `amq session create` on a fresh path). fsync(root) persists the entries
+// INSIDE root, never root's own entry in its parent, so without syncing the
+// parent a first-contact send reports success and power loss takes the whole
+// queue. Found by pre-merge review of agent-message-queue-611.22.26.
+func TestEnsureRootDirsSyncsTheParentThatOwnsANewRoot(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "fresh-queue")
+
+	var synced []string
+	restore := syncDirAmbientSwapForTest(func(dir string) error {
+		synced = append(synced, dir)
+		return nil
+	})
+	defer restore()
+
+	if err := EnsureRootDirs(root); err != nil {
+		t.Fatalf("EnsureRootDirs: %v", err)
+	}
+	var sawParent bool
+	for _, d := range synced {
+		if d == parent {
+			sawParent = true
+		}
+	}
+	if !sawParent {
+		t.Fatalf("the parent that owns the new root entry was never synced (all: %v)", synced)
+	}
+
+	// A root that already existed gained nothing from us, so its parent is
+	// the operator's own path and is left alone.
+	synced = nil
+	if err := EnsureRootDirs(root); err != nil {
+		t.Fatalf("EnsureRootDirs (existing): %v", err)
+	}
+	for _, d := range synced {
+		if d == parent {
+			t.Fatalf("an existing root's parent must not be synced (all: %v)", synced)
 		}
 	}
 }
