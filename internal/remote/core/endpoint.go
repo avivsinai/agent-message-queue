@@ -517,11 +517,12 @@ func (e *Endpoint) cancel(cmd *protocol.Command, src Source) (protocol.Reply, er
 			Origin:    src.Origin,
 		}
 		err := e.store.Create(rec)
-		e.notifyLocked(rec)
-		e.mu.Unlock()
 		if err != nil {
+			e.mu.Unlock()
 			return protocol.Reply{}, err
 		}
+		e.notifyLocked(rec)
+		e.mu.Unlock()
 		e.publishRevision(rec)
 		return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestCancel}}, nil
 	}
@@ -580,13 +581,16 @@ func (e *Endpoint) cancel(cmd *protocol.Command, src Source) (protocol.Reply, er
 	if ev.Disposition == protocol.CancelConfirmed {
 		e.transitionLocked(rec, causeCancelledByRequest, nativeEvidence{})
 	} else {
-		// cancel_requested (intent recorded, run not stopped) or noop — keep
-		// the disposition without going terminal; reconcile re-drives if a
-		// run is bound.
+		// cancel_requested (intent recorded, run not stopped) or noop_terminal
+		// (run already done, nothing to stop). Keep the disposition without
+		// going terminal; reconcile re-drives if a run is bound.
+		// Pro #5: guard against downgrading a confirmed cancel.
 		if rec.Cancel == nil {
 			rec.Cancel = &protocol.Cancel{RequestedAt: now}
 		}
-		rec.Cancel.Disposition = ev.Disposition
+		if rec.Cancel.Disposition != protocol.CancelConfirmed {
+			rec.Cancel.Disposition = ev.Disposition
+		}
 	}
 	if _, err := e.commitLocked(rec, t); err != nil {
 		return protocol.Reply{}, err
@@ -686,18 +690,12 @@ func (e *Endpoint) respond(cmd *protocol.Command) (protocol.Reply, error) {
 		if cur, ok, gerr := e.store.Get(key); gerr == nil && ok {
 			if opt, done := cur.Answered[cmd.InteractionID]; !done || opt == cmd.Option {
 				delete(cur.Answered, cmd.InteractionID)
-				cur.Revision++
-				cur.ObservedAt = protocol.FormatTime(e.now())
-				if uerr := e.store.Update(cur); uerr != nil {
-					// The intent could not be cleared durably. Leave the record
-					// as-is and surface the failure: the replay path, which
-					// revalidates the pending interaction, is the safe
-					// arbiter — never a fresh answer.
+				// Pro #4: route through commitLocked — single persist path.
+				if _, uerr := e.commitLocked(cur, nil); uerr != nil {
 					e.mu.Unlock()
 					return protocol.Reply{}, uerr
 				}
 				rec = cur
-				e.notifyLocked(rec)
 			}
 		}
 		e.mu.Unlock()
@@ -814,23 +812,25 @@ func (e *Endpoint) onNative(targetID string, ev NativeEvent) {
 		}
 	case EventQuestion:
 		if rec.State.Terminal() {
-			// An interaction on a finished run is meaningless.
 			e.mu.Unlock()
 			return
 		}
-		rec.Interaction = ev.Interaction
+		// Pro #5: route through transitionLocked.
+		e.transitionLocked(rec, causeNone, nativeEvidence{interaction: ev.Interaction})
 	case EventQuestionResolved:
 		if rec.State.Terminal() {
 			e.mu.Unlock()
 			return
 		}
-		rec.Interaction = nil
+		// Pro #5: route through transitionLocked (nil interaction clears).
+		e.transitionLocked(rec, causeNone, nativeEvidence{interaction: ev.Interaction})
 	case EventLocalIntervention:
 		if rec.State.Terminal() {
 			e.mu.Unlock()
 			return
 		}
-		rec.LocalIntervention = true
+		// Pro #5: route through transitionLocked.
+		e.transitionLocked(rec, causeNone, nativeEvidence{localIntervention: true})
 	default:
 		e.mu.Unlock()
 		return
@@ -1062,10 +1062,18 @@ func (e *Endpoint) transitionLocked(rec *requests.Record, c cause, ev nativeEvid
 		// cancelled from a prior native event); NativeRun stays bound so
 		// reconcile re-drives CancelExact. Disposition records that the stop
 		// is pending, not confirmed.
+		//
+		// Pro #3: a confirmed disposition is a promise already kept and is not
+		// rewritable. Guard it like the other two Disposition writers: if the
+		// cancel was already confirmed, a transient CancelExact error must NOT
+		// downgrade it to cancel_requested. A terminal, confirmed promise
+		// only ever moves forward.
 		if rec.Cancel == nil {
 			rec.Cancel = &protocol.Cancel{RequestedAt: protocol.FormatTime(e.now())}
 		}
-		rec.Cancel.Disposition = protocol.CancelRequested
+		if rec.Cancel.Disposition != protocol.CancelConfirmed {
+			rec.Cancel.Disposition = protocol.CancelRequested
+		}
 		if ev.runID != "" {
 			run := ev.runID
 			rec.NativeRun = &run
@@ -1106,24 +1114,32 @@ func (e *Endpoint) transitionLocked(rec *requests.Record, c cause, ev nativeEvid
 	}
 }
 
-// needsRuntimeSettlement is the ONE predicate for outstanding runtime work.
-// A record needs settlement if it has a bound run (NativeRun != nil) whose
-// result has not been acknowledged (AckDigest == ""). This covers:
-//   - a terminal record whose abort was inconclusive (cancel_requested, no result)
-//   - a cancelled record with a bound run but no ack (late output not yet recovered)
-//   - a non-terminal running record with cancel intent (the run needs aborting)
+// owesCancel reports whether we asked the runtime to stop this run and it
+// has not confirmed. This is ONE of two SEPARATE obligations we may owe the
+// runtime — it is about a CANCEL we have not confirmed, nothing else. State
+// is what we promised the CALLER; a cancel we have not confirmed and a result
+// we have not released are two separate things we owe the RUNTIME, and they
+// never share a predicate.
 //
-// Once a record is terminal AND acked (AckDigest != ""), the runtime
-// obligation is settled — the cancel is resolved, the slot is released, and
-// reconcile must NOT re-drive it every tick (Pro #4). The cancel disposition
-// is NOT the signal; the ack is. State is what we promised the caller;
-// disposition is what we owe the runtime — but the SETTLED signal is the ack.
+// Used by reconcileLive's same-run early return and Reconcile's terminal
+// retry selector: only a record that owes a cancel is re-driven.
+func owesCancel(rec *requests.Record) bool {
+	return rec.Cancel != nil &&
+		rec.Cancel.Disposition == protocol.CancelRequested &&
+		rec.NativeRun != nil
+}
+
+// owesAck reports whether the runtime is holding a result for us that we have
+// not released. This is the SECOND obligation — it is about a RESULT we have
+// not acknowledged, nothing else. Result != nil is what makes the digest
+// non-empty (EvidenceDigest(nil) == ""), so a terminal record with no result
+// owes nothing and is never re-driven — that closes the revision-churn bug
+// (Pro #4) BY CONSTRUCTION.
 //
-// Used by Reconcile's terminal branch (retry selector), reconcileLive's
-// same-run early return, and applyCancelOutcomeLocked's confirmed branch.
-// Three checks that kept diverging now ask one question.
-func needsRuntimeSettlement(rec *requests.Record) bool {
-	return rec.NativeRun != nil && rec.AckDigest == ""
+// Used by replayTerminalAck's crash-gap path (when AckDigest is empty but
+// Result is bound, compute the digest from Result).
+func owesAck(rec *requests.Record) bool {
+	return rec.State.Terminal() && rec.Result != nil && rec.AckDigest == ""
 }
 
 // commitLocked is the persist step that pairs with transitionLocked. It
@@ -1172,18 +1188,16 @@ func (e *Endpoint) Reconcile() error {
 				rerr = e.replayTerminalAck(rec)
 			}
 		default:
-			if rec.State.Terminal() {
-				// Pro #1/#4: the retry selector is needsRuntimeSettlement — a bound
-				// run with no ack is unsettled and must be re-driven. This covers
-				// cancel_requested with no result AND cancelled+confirmed with an
-				// empty AckDigest (the late-output-not-recovered case). Once
-				// terminal+acked, the record is settled — do NOT re-drive it every
-				// tick (Pro #4: revision churn 5->10).
-				if needsRuntimeSettlement(rec) {
-					rerr = e.reconcileCancelRetry(rec)
-				} else {
-					rerr = e.replayTerminalAck(rec)
-				}
+			// The retry selector is owesCancel (a cancel we have not
+			// confirmed). If we don't owe a cancel, replay the ack.
+			// replayTerminalAck is idempotent (returns nil if the attachment
+			// already released the result). A terminal record with no result
+			// has an empty digest and replayTerminalAck returns immediately,
+			// so there is no churn (Pro #4).
+			if owesCancel(rec) {
+				rerr = e.reconcileCancelRetry(rec)
+			} else {
+				rerr = e.replayTerminalAck(rec)
 			}
 		}
 		if rerr != nil && firstErr == nil {
@@ -1212,7 +1226,21 @@ func (e *Endpoint) Reconcile() error {
 // EvidenceNone and a later Reconcile/Tick does not re-ack. Only the crash
 // case — intent memoed, ack never landed, evidence still retained — replays.
 func (e *Endpoint) replayTerminalAck(rec *requests.Record) error {
-	if rec.AckDigest == "" {
+	// owesAck (Result != nil, AckDigest == "") describes the crash-gap case
+	// where the ack was never sent. But we also replay when AckDigest IS set
+	// but the ack didn't land (PointBeforeAck crash). So we cannot gate on
+	// owesAck alone — the Lookup below is the real gate (EvidenceNone means
+	// the ack already landed). owesAck is referenced here to document why
+	// computing the digest from Result is safe.
+	_ = owesAck(rec)
+	// The digest to acknowledge: if AckDigest was memo'd, use it. If not
+	// (crash between terminal commit and ack memo, owesAck is true), compute
+	// it from rec.Result — owesAck guarantees Result != nil.
+	digest := rec.AckDigest
+	if digest == "" {
+		digest = protocol.EvidenceDigest(rec.Result)
+	}
+	if digest == "" {
 		return nil
 	}
 	e.mu.Lock()
@@ -1237,7 +1265,7 @@ func (e *Endpoint) replayTerminalAck(rec *requests.Record) error {
 	// gate rejected exactly that: digest matched, states differed, slot
 	// stayed occupied, later submits refused busy forever. The digest already
 	// proves it is THIS result; the run id proves it is THIS run.
-	if !ev.State.Terminal() || ev.Result == nil || protocol.EvidenceDigest(ev.Result) != rec.AckDigest {
+	if !ev.State.Terminal() || ev.Result == nil || protocol.EvidenceDigest(ev.Result) != digest {
 		// The retained evidence is not the outcome this record acked (a stale
 		// or foreign ack must never release a different request's result).
 		return nil
@@ -1255,7 +1283,7 @@ func (e *Endpoint) replayTerminalAck(rec *requests.Record) error {
 	// endpoint mutex forever. The ack digest was durably memoed before it was
 	// first sent, so a crash mid-ack is replayable.
 	key := keyOfRecord(rec)
-	epoch, digest := rec.Epoch, rec.AckDigest
+	epoch := rec.Epoch
 	e.mu.Lock()
 	att := t.att
 	e.mu.Unlock()
@@ -1418,14 +1446,18 @@ func (e *Endpoint) reconcileLive(rec *requests.Record) error {
 		}
 		rec.LocalIntervention = rec.LocalIntervention || ev.LocalIntervention
 	case ev.Admitted:
-		// Pro #1/#4: the same-run early return must not bypass a record that
-		// needs runtime settlement (bound run, no ack — e.g. a pending cancel).
-		// Route those to reconcileCancelRetry, not a noop.
-		if needsRuntimeSettlement(rec) {
-			e.mu.Unlock()
-			return e.reconcileCancelRetry(rec)
-		}
+		// The same-run early return goes FIRST. A healthy running record
+		// matches neither owesCancel nor owesAck and is a noop, as it was
+		// before this PR. Only a record that OWES A CANCEL may route to
+		// reconcileCancelRetry (Pro #1: the old needsRuntimeSettlement fired
+		// on healthy work because NativeRun != nil && AckDigest == "" is
+		// true for a simply-running record, and CancelExact killed every
+		// prompt within one tick).
 		if rec.State == protocol.StateRunning && rec.NativeRun != nil && *rec.NativeRun == ev.RunID {
+			if owesCancel(rec) {
+				e.mu.Unlock()
+				return e.reconcileCancelRetry(rec)
+			}
 			e.mu.Unlock()
 			return nil
 		}

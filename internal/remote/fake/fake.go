@@ -43,6 +43,7 @@ type Runtime struct {
 	ackGate              chan struct{}
 	failNextLookup       error
 	failNextCancelExact  error
+	cancelExactCount     int
 	admissionFailsAfter  bool
 	consumerSets         int
 	interactionAnswers   []Answer
@@ -197,6 +198,7 @@ func (r *Runtime) Lookup(key requests.Key, epoch string) (core.Evidence, error) 
 // CancelExact implements core.Attachment.
 func (r *Runtime) CancelExact(key requests.Key, epoch string) (core.CancelEvidence, error) {
 	r.mu.Lock()
+	r.cancelExactCount++
 	fail := r.failNextCancelExact
 	r.failNextCancelExact = nil
 	if fail != nil {
@@ -328,6 +330,13 @@ func (r *Runtime) FailNextCancelExact(err error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.failNextCancelExact = err
+}
+
+// CancelExactCount returns the number of CancelExact calls made.
+func (r *Runtime) CancelExactCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.cancelExactCount
 }
 
 // HoldAfterAdmit blocks Submit AFTER a run is admitted (and the run is
