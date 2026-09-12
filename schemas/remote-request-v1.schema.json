@@ -36,7 +36,7 @@
         "result_expired"
       ]
     },
-    "input_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$", "description": "Digest of the immutable submit command payload (schema, op, request_id, target_id, epoch, not_after, input) as canonical JSON; a retry with a changed epoch, deadline, or input is request_conflict." },
+    "input_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$", "description": "Digest of the immutable submit command payload (schema, op, request_id, target_id, epoch, not_after, input). The canonical form is EXACTLY what Go's json.Marshal produces for the payload struct (keys in struct declaration order, NOT alphabetical; no insignificant whitespace; Go's standard HTML escaping). Busy and Deliver are resolved to their defaults (reject/turn) BEFORE digesting, so the omitted form and the spelled form produce the same digest. A retry with a changed epoch, deadline, or input is request_conflict." },
     "not_after": { "type": "string", "format": "date-time" },
     "native_run": { "type": ["string", "null"], "maxLength": 256, "description": "Harness run identity once admission is established." },
     "local_intervention": { "type": "boolean", "default": false },

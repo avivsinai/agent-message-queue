@@ -424,13 +424,20 @@ const digestPrefix = "sha256:"
 // excludes revision/state/result — those are server-derived, not part of the
 // client's command.
 //
-// Canonical byte construction (for carriers that build the bytes themselves):
+// Canonical byte construction: the canonical form is EXACTLY what Go's
+// json.Marshal produces for a digestPayload struct with these field values
+// — keys in struct declaration order (NOT alphabetical), no insignificant
+// whitespace, and Go's standard HTML escaping (< > & U+2028/2029). A
+// non-Go carrier MUST replicate json.Marshal's output, not build the bytes
+// by hand, because a hand-built template that omits the escaping computes a
+// different digest for any input containing <, >, or &. The precedent is
+// docs/wake-lifecycle.md:114-120, which binds the canonical form to
+// json.Marshal explicitly. Then sha256 hex with the "sha256:" prefix.
 //
-//	{"schema":…,"op":…,"request_id":…,"target_id":…,"epoch":…,"not_after":…,"input":…}
-//
-// in exactly that key order, omitting no key, with no extra whitespace; then
-// sha256 over those bytes, hex-encoded, with the "sha256:" prefix. Omitted
-// optional fields inside input follow the same rule as the Go struct tags.
+// Omitted optional fields inside input follow Go's struct tags (omitempty);
+// see ResolveDigestDefaults for why Busy and Deliver are resolved to their
+// defaults BEFORE digesting so the omitted form and the spelled form produce
+// the same digest.
 func CommandDigest(cmd *Command) string {
 	if cmd == nil || cmd.Op != OpRequestSubmit {
 		return ""
@@ -442,7 +449,7 @@ func CommandDigest(cmd *Command) string {
 		TargetID:  cmd.TargetID,
 		Epoch:     cmd.Epoch,
 		NotAfter:  cmd.NotAfter,
-		Input:     cmd.Input,
+		Input:     resolveDigestDefaults(cmd.Input),
 	}
 	data, err := json.Marshal(payload)
 	if err != nil {
@@ -450,6 +457,29 @@ func CommandDigest(cmd *Command) string {
 	}
 	sum := sha256.Sum256(data)
 	return digestPrefix + hex.EncodeToString(sum[:])
+}
+
+// resolveDigestDefaults fills Busy and Deliver with their defaults BEFORE
+// digesting, so the omitted form ({"text":"say hi"}) and the spelled form
+// ({"text":"say hi","busy":"reject","deliver":"turn"}) produce the SAME digest.
+// The digest is a function of MEANING, not spelling: two semantically
+// identical commands must not conflict. SubmitInput.Busy and Deliver are
+// omitempty, so without this the CLI (which always spells the defaults) and
+// a mailbox peer (which may omit both) disagree on the digest of the same
+// request. Validate accepts "" for each, so both are legal spellings.
+// Resolving here makes ONE owner of the defaults (not every carrier).
+func resolveDigestDefaults(in *SubmitInput) *SubmitInput {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	if out.Busy == "" {
+		out.Busy = BusyReject
+	}
+	if out.Deliver == "" {
+		out.Deliver = DeliverTurn
+	}
+	return &out
 }
 
 // EvidenceDigest is the digest of the terminal evidence an acknowledgement

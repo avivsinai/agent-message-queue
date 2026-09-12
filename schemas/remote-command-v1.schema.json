@@ -33,7 +33,7 @@
           "type": "object",
           "required": ["text"],
           "properties": {
-            "text": { "type": "string", "minLength": 1, "maxLength": 131072 },
+            "text": { "type": "string", "pattern": "\\S", "minLength": 1, "maxLength": 131072, "description": "The prompt text. Must contain at least one non-whitespace character (whitespace-only is rejected by Validate)." },
             "busy": { "enum": ["reject", "queue"], "default": "reject" },
             "deliver": { "enum": ["turn", "steer"], "default": "turn" }
           },
