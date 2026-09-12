@@ -89,12 +89,12 @@ func WithApprovals(on bool) Option { return func(a *Attachment) { a.approve = on
 // Attach connects to the daemon socket, resumes threadID as a second client,
 // and starts consuming its notifications.
 func Attach(socketPath, threadID string, opts ...Option) (*Attachment, error) {
-	client, err := Dial(socketPath)
-	if err != nil {
-		return nil, err
-	}
+	// The attachment is built BEFORE the connection so its handlers can be
+	// installed as Dial arguments: the read pump starts inside Dial, and
+	// assigning handlers afterwards raced it (and dropped any frame that
+	// arrived first). Neither handler touches a.client, so building in this
+	// order is safe.
 	a := &Attachment{
-		client:       client,
 		threadID:     threadID,
 		targetID:     TargetID(threadID),
 		epoch:        fmt.Sprintf("cx-%d", time.Now().UnixNano()),
@@ -108,8 +108,14 @@ func Attach(socketPath, threadID string, opts ...Option) (*Attachment, error) {
 	for _, o := range opts {
 		o(a)
 	}
-	client.OnNotification = a.onNotification
-	client.OnServerRequest = a.onServerRequest
+	client, err := Dial(socketPath, Handlers{
+		OnNotification:  a.onNotification,
+		OnServerRequest: a.onServerRequest,
+	})
+	if err != nil {
+		return nil, err
+	}
+	a.client = client
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := client.Call(ctx, "initialize", map[string]any{"clientInfo": map[string]string{"name": ClientName, "version": Version, "title": "AMQ Remote"}}, nil); err != nil {
@@ -746,7 +752,8 @@ func (r *run) result() *protocol.Result {
 // LoadedThreads lists the threads the daemon currently has running, so the
 // endpoint can attach to each of them. It opens a short-lived connection.
 func LoadedThreads(socketPath string) ([]string, error) {
-	client, err := Dial(socketPath)
+	// Request-only connection: no notifications are consumed.
+	client, err := Dial(socketPath, Handlers{})
 	if err != nil {
 		return nil, err
 	}

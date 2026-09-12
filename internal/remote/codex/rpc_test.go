@@ -59,13 +59,15 @@ func TestClientRoundTripOverUnixWebSocket(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	c := newClient(ws)
+	h := &swappableHandlers{}
+	c := newClient(ws, h.handlers())
+	attachTestHandlers(c, h)
 	t.Cleanup(func() { _ = c.Close() })
 	notes := make(chan Notification, 4)
-	c.OnNotification = func(n Notification) { notes <- n }
-	c.OnServerRequest = func(r ServerRequest) {
+	handlersOf(c).setNote(func(n Notification) { notes <- n })
+	handlersOf(c).setReq(func(r ServerRequest) {
 		_ = c.Respond(r.ID, map[string]string{"decision": "decline"})
-	}
+	})
 
 	var result struct {
 		Turn struct {
@@ -96,5 +98,50 @@ func TestClientRoundTripOverUnixWebSocket(t *testing.T) {
 		}
 	case <-ctx.Done():
 		t.Fatal("server request never answered")
+	}
+}
+
+// TestHandlersAreInstalledBeforeTheReadPumpStarts reproduces
+// agent-message-queue-611.22.25: newClient started readLoop and reqWorker,
+// both of which read c.OnNotification / c.OnServerRequest, while the caller
+// assigned those exported fields AFTER Dial returned. That is a data race on
+// the fields, and a window in which a frame arriving first found a nil
+// handler and was silently dropped. Handlers are now constructor arguments,
+// so a frame delivered immediately — before the caller could have assigned
+// anything — still reaches its handler.
+func TestHandlersAreInstalledBeforeTheReadPumpStarts(t *testing.T) {
+	sock, srv := startFakeAppServer(t)
+
+	notes := make(chan Notification, 4)
+	reqs := make(chan ServerRequest, 4)
+	c, err := Dial(sock, Handlers{
+		OnNotification:  func(n Notification) { notes <- n },
+		OnServerRequest: func(r ServerRequest) { reqs <- r },
+	})
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+
+	// Barrier: one real call proves the server has accepted the connection
+	// (srv.ws is assigned by the accept goroutine, and the test harness reads
+	// it without synchronisation). The point of this test is what happens
+	// BEFORE any handler could have been assigned post-Dial, and no
+	// assignment happens anywhere in it — the handlers came from Dial.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := c.Call(ctx, "initialize", map[string]any{}, nil); err != nil {
+		t.Fatalf("initialize: %v", err)
+	}
+	<-srv.calls
+
+	srv.notify(t, "turn/started", `{"threadId":"t1","turn":{"id":"u1"}}`)
+	select {
+	case n := <-notes:
+		if n.Method != "turn/started" {
+			t.Fatalf("notification = %q, want turn/started", n.Method)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("notification delivered before any post-Dial assignment was dropped")
 	}
 }
