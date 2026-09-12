@@ -317,6 +317,64 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 		Input:  cmd.Input,
 		Origin: src.Origin,
 	}
+	// Decide admissibility + reservation BEFORE Create: a request we are
+	// about to refuse is never written (no durable placeholder to leak on a
+	// failed rejection write, and nothing for Tick to dispatch). Only Create
+	// when we will dispatch or deliberately defer.
+	t, code := e.admissibleLocked(cmd.TargetID, cmd.Epoch, cmd.NotAfter)
+	if code != "" {
+		// Refused (unshared/expired/stale_epoch): no durable record.
+		e.mu.Unlock()
+		return protocol.Reply{Snapshot: e.unpersisted(rec, protocol.StateRejected, code), Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: code}}, nil
+	}
+	if t == nil {
+		// Target registered but offline: Create received and let Tick admit
+		// or expire it later.
+		if err := e.crashAt(PointBeforeReceived); err != nil {
+			e.mu.Unlock()
+			return protocol.Reply{}, err
+		}
+		if err := e.store.Create(rec); err != nil {
+			e.mu.Unlock()
+			var r *protocol.Refusal
+			if errors.As(err, &r) && r.Code == protocol.CodeStorageFull {
+				return protocol.Reply{Snapshot: e.unpersisted(rec, protocol.StateRejected, protocol.CodeStorageFull), Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: protocol.CodeStorageFull}}, nil
+			}
+			return protocol.Reply{}, err
+		}
+		e.notifyLocked(rec)
+		e.mu.Unlock()
+		return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit}}, nil
+	}
+	// B14 per-runtime reservation (B10): refuse a second concurrent dispatch
+	// for the same target. Fail-closed — an undeterminable reservation state
+	// never authorizes a dispatch.
+	reserved, rerr := e.runtimeInFlightLocked(cmd.TargetID, key)
+	if rerr != nil {
+		// An undeterminable reservation must not leave a Tick-admissible
+		// placeholder. No durable record; return a typed refusal so the caller
+		// maps to the right exit, not exit 1.
+		e.mu.Unlock()
+		return protocol.Reply{Snapshot: e.unpersisted(rec, protocol.StateRejected, protocol.CodeAttachmentLost), Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: protocol.CodeAttachmentLost}}, protocol.Refuse(protocol.CodeAttachmentLost, "%s", rerr.Error())
+	}
+	if reserved {
+		// Persist a TERMINAL rejected+busy tombstone directly (one write, no
+		// received-then-reject window). The tombstone keeps dedup and makes an
+		// identical resubmit re-admittable.
+		e.transitionLocked(rec, causeBusyTombstone, nativeEvidence{})
+		rec.Revision = 1
+		rec.ObservedAt = protocol.FormatTime(e.now())
+		if err := e.store.Create(rec); err != nil {
+			e.mu.Unlock()
+			return protocol.Reply{Snapshot: e.unpersisted(rec, protocol.StateRejected, protocol.CodeBusy), Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: protocol.CodeBusy}}, nil
+		}
+		e.notifyLocked(rec)
+		busySnap := rec.Snapshot
+		e.mu.Unlock()
+		e.publishRevision(rec)
+		return protocol.Reply{Snapshot: busySnap, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: rec.Code}}, nil
+	}
+	// Admissible + not reserved: Create as received, then dispatch.
 	if err := e.crashAt(PointBeforeReceived); err != nil {
 		e.mu.Unlock()
 		return protocol.Reply{}, err
@@ -333,67 +391,6 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 	if err := e.crashAt(PointAfterReceived); err != nil {
 		e.mu.Unlock()
 		return protocol.Reply{}, err
-	}
-	t, code := e.admissibleLocked(cmd.TargetID, cmd.Epoch, cmd.NotAfter)
-	if code != "" {
-		rec.Revision++
-		e.transitionLocked(rec, causeRefused, nativeEvidence{code: code})
-		rec.ObservedAt = protocol.FormatTime(e.now())
-		err := e.store.Update(rec)
-		e.notifyLocked(rec)
-		e.mu.Unlock()
-		if err != nil {
-			return protocol.Reply{}, err
-		}
-		e.publishRevision(rec)
-		return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit}}, nil
-	}
-	if t == nil {
-		// Target registered but offline: keep received and let Tick admit
-		// or expire it later.
-		e.mu.Unlock()
-		return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit}}, nil
-	}
-	// B14 per-runtime reservation (B10): refuse a second concurrent dispatch
-	// for the same target. Fail-closed — an undeterminable reservation state
-	// never authorizes a dispatch.
-	reserved, rerr := e.runtimeInFlightLocked(cmd.TargetID, key)
-	if rerr != nil {
-		// An undeterminable reservation must not leave a Tick-admissible
-		// `received` placeholder: the caller saw a failure, so the record is
-		// terminal rejected (uncertain code) — reconcile re-evaluates. Return
-		// a typed refusal so the caller maps to the right exit, not exit 1.
-		rec.Revision++
-		e.transitionLocked(rec, causeAttachmentLost, nativeEvidence{})
-		rec.ObservedAt = protocol.FormatTime(e.now())
-		uerr := e.store.Update(rec)
-		if uerr == nil {
-			e.notifyLocked(rec)
-			snap := rec.Snapshot
-			e.mu.Unlock()
-			e.publishRevision(rec)
-			return protocol.Reply{Snapshot: snap, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: protocol.CodeAttachmentLost}}, protocol.Refuse(protocol.CodeAttachmentLost, "%s", rerr.Error())
-		}
-		e.mu.Unlock()
-		return protocol.Reply{}, protocol.Refuse(protocol.CodeAttachmentLost, "%s", rerr.Error())
-	}
-	if reserved {
-		// Persist a TERMINAL rejected+busy tombstone — never a `received`
-		// placeholder a later Tick would auto-dispatch (queue-on-reject is
-		// D1-disabled). The tombstone keeps dedup and makes an identical
-		// resubmit re-admittable.
-		rec.Revision++
-		e.transitionLocked(rec, causeBusyTombstone, nativeEvidence{})
-		rec.ObservedAt = protocol.FormatTime(e.now())
-		if err := e.store.Update(rec); err != nil {
-			e.mu.Unlock()
-			return protocol.Reply{}, err
-		}
-		e.notifyLocked(rec)
-		busySnap := rec.Snapshot
-		e.mu.Unlock()
-		e.publishRevision(rec)
-		return protocol.Reply{Snapshot: busySnap, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: rec.Code}}, nil
 	}
 	rec.Revision++
 	rec.NativeDispatches = 1
