@@ -1282,8 +1282,10 @@ func (e *Endpoint) runtimeInFlightLocked(targetID string, exclude requests.Key) 
 // completed (poison record for the target); the caller refuses to dispatch.
 var errUndeterminableReservation = errors.New("reservation state undeterminable")
 
-// reconcileCancelRetry re-drives CancelExact for a terminal record whose abort
-// was inconclusive (cancel_requested + NativeRun bound). Bounded by NotAfter.
+// reconcileCancelRetry re-drives CancelExact for a record carrying outstanding
+// cancel intent (cancel_requested + NativeRun bound). Works for both terminal
+// (the abort was inconclusive) and non-terminal (a cancel raced admission and
+// the record is still running) records. Bounded by NotAfter.
 // This is the B04 reconcile-cancel-retry mechanism, built once here.
 func (e *Endpoint) reconcileCancelRetry(rec *requests.Record) error {
 	key := keyOfRecord(rec)
@@ -1378,6 +1380,13 @@ func (e *Endpoint) reconcileLive(rec *requests.Record) error {
 		}
 		rec.LocalIntervention = rec.LocalIntervention || ev.LocalIntervention
 	case ev.Admitted:
+		// B1: the same-run early return must not bypass a record carrying
+		// cancel_requested. A pending cancel on a running record needs
+		// reconcileCancelRetry, not a noop. Route those to the retry.
+		if rec.Cancel != nil && rec.Cancel.Disposition == protocol.CancelRequested {
+			e.mu.Unlock()
+			return e.reconcileCancelRetry(rec)
+		}
 		if rec.State == protocol.StateRunning && rec.NativeRun != nil && *rec.NativeRun == ev.RunID {
 			e.mu.Unlock()
 			return nil
@@ -1493,6 +1502,13 @@ func (e *Endpoint) finishAdmissionLocked(rec *requests.Record, exists bool, t *t
 		return protocol.Reply{}, protocol.Refuse(protocol.CodeNotFound, "record vanished during dispatch")
 	}
 	if rec.State == protocol.StateDispatching {
+		// B1: if the record carries outstanding cancel intent (a concurrent
+		// cancel got a transient error and persisted cancel_requested while the
+		// record was still dispatching), admission of a live run must abort it,
+		// not persist running. The abort condition is disposition, not state.
+		if adm.Admitted && rec.Cancel != nil && rec.Cancel.Disposition == protocol.CancelRequested {
+			return e.abortAdmittedRacedRun(rec, t, adm)
+		}
 		// The normal path: no native event moved the record while Submit was
 		// in flight. Apply the admission outcome directly.
 		var c cause
@@ -1521,13 +1537,15 @@ func (e *Endpoint) finishAdmissionLocked(rec *requests.Record, exists bool, t *t
 	// The record was moved by a native event while Submit was in flight
 	// (the raced shape). RECONCILE from (adm, nerr, rec.State) — never branch
 	// on assumptions about what happened.
-	if adm.Admitted && rec.State == protocol.StateCancelled {
-		// A positive admission raced a cancel: the run is live and unwanted.
-		// Bind NativeRun first (durable), then abort via CancelExact.
-		return e.abortAdmittedRacedRun(rec, t, adm)
-	}
-	if adm.Admitted && nerr != nil && rec.State == protocol.StateCancelled {
-		// Pro #1 second entrance: nerr must NOT skip the abort logic.
+	// B1: the abort condition is OUTSTANDING CANCEL INTENT, not just State ==
+	// cancelled. A cancel that got a transient CancelExact error persists
+	// Cancel{cancel_requested} while the record is still dispatching/running.
+	// State is what we promised the caller; disposition is what we owe the
+	// runtime.
+	hasCancelIntent := rec.Cancel != nil && rec.Cancel.Disposition == protocol.CancelRequested
+	if adm.Admitted && (rec.State == protocol.StateCancelled || hasCancelIntent) {
+		// A positive admission raced a cancel (or carries cancel intent): the
+		// run is live and unwanted. Bind NativeRun first (durable), then abort.
 		return e.abortAdmittedRacedRun(rec, t, adm)
 	}
 	if adm.Admitted && (rec.State == protocol.StateCompleted || rec.State == protocol.StateFailed) {
