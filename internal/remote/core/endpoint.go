@@ -63,14 +63,16 @@ type target struct {
 
 // Endpoint is the request handler. One Endpoint owns one Store.
 type Endpoint struct {
-	mu        sync.Mutex
-	store     *requests.Store
-	targets   map[string]*target
-	publish   Publisher
-	crash     CrashPoint
-	now       func() time.Time
-	observers []func(*requests.Record)
-	changed   chan struct{}
+	mu             sync.Mutex
+	store          *requests.Store
+	targets        map[string]*target
+	publish        Publisher
+	crash          CrashPoint
+	now            func() time.Time
+	observers      []func(*requests.Record)
+	changed        chan struct{}
+	compactHorizon time.Duration
+	lastCompact    time.Time
 }
 
 // Config configures New.
@@ -79,18 +81,22 @@ type Config struct {
 	Publish Publisher
 	Crash   CrashPoint
 	Now     func() time.Time
+	// CompactHorizon is the age at which terminal, settled records become
+	// eligible for compaction. Zero (default) disables compaction.
+	CompactHorizon time.Duration
 }
 
 // New builds an endpoint over an open store. Attachments register through
 // Register; Reconcile should run before the first command.
 func New(cfg Config) *Endpoint {
 	e := &Endpoint{
-		store:   cfg.Store,
-		targets: map[string]*target{},
-		publish: cfg.Publish,
-		crash:   cfg.Crash,
-		now:     cfg.Now,
-		changed: make(chan struct{}),
+		store:          cfg.Store,
+		targets:        map[string]*target{},
+		publish:        cfg.Publish,
+		crash:          cfg.Crash,
+		now:            cfg.Now,
+		changed:        make(chan struct{}),
+		compactHorizon: cfg.CompactHorizon,
 	}
 	if e.now == nil {
 		e.now = time.Now
@@ -1122,8 +1128,25 @@ func (e *Endpoint) transitionLocked(rec *requests.Record, c cause, ev nativeEvid
 // Used by Reconcile's terminal branch (retry selector), reconcileLive's
 // same-run early return, and applyCancelOutcomeLocked's confirmed branch.
 // Three checks that kept diverging now ask one question.
+// A2: delegates to Record.NeedsRuntimeSettlement (requests package) so the
+// Compact gate (store.go) and the retry selector share ONE definition.
 func needsRuntimeSettlement(rec *requests.Record) bool {
-	return rec.NativeRun != nil && rec.AckDigest == ""
+	return rec.NeedsRuntimeSettlement()
+}
+
+// shouldCompact rate-limits compaction to once per minute. Survives restarts
+// (time-interval, not tick-count). Returns false if compaction is disabled
+// (compactHorizon == 0).
+func (e *Endpoint) shouldCompact() bool {
+	if e.compactHorizon == 0 {
+		return false
+	}
+	now := e.now()
+	if now.Sub(e.lastCompact) < time.Minute {
+		return false
+	}
+	e.lastCompact = now
+	return true
 }
 
 // commitLocked is the persist step that pairs with transitionLocked. It
@@ -1194,6 +1217,24 @@ func (e *Endpoint) Reconcile() error {
 			e.publishLocked(cur)
 		}
 		e.mu.Unlock()
+	}
+	// B14e: bounded compaction. Runs once per minute (shouldCompact rate-
+	// limit), reaps terminal+settled+old records into tombstones. e.mu is
+	// held per-record (CompactOne), never across the sweep (Pro B7).
+	if e.shouldCompact() {
+		cutoff := e.now().Add(-e.compactHorizon)
+		recs2, _ := e.store.List()
+		for i, rec := range recs2 {
+			if i >= 100 {
+				break
+			}
+			if !rec.State.Terminal() || rec.Tombstone {
+				continue
+			}
+			e.mu.Lock()
+			e.store.CompactOne(keyOfRecord(rec), cutoff)
+			e.mu.Unlock()
+		}
 	}
 	return firstErr
 }

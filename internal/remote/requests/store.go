@@ -448,7 +448,19 @@ func normalizeRecord(rec *Record) {
 // is older than before with a deduplication tombstone. The request identity,
 // digest, epoch and disposition survive, so a replay answers result_expired
 // instead of dispatching again.
-func (s *Store) Compact(before time.Time) (int, error) {
+// Compact reaps terminal, settled, old records into tombstones. It lists
+// candidates with NO lock held (safe: store.write commits through
+// fsq.WriteFileAtomic, so a concurrent reader sees the old record or the new
+// one, never a torn one), then re-reads+re-gates+writes each candidate via
+// CompactOne. The caller (the endpoint) holds e.mu per candidate, so a
+// concurrent Handle cannot interleave. limit bounds the sweep so e.mu is
+// held for one record, never across the full list (Pro B7).
+//
+// The tombstone is local dedup state, not a caller-visible revision:
+// Compact does rec.Revision++ and never publishes, so a receiver never
+// learns the record became a tombstone. This is intended — the tombstone
+// exists so an identical resubmit is re-admittable, not so a caller sees it.
+func (s *Store) Compact(before time.Time, limit int) (int, error) {
 	if err := s.checkClosed(); err != nil {
 		return 0, err
 	}
@@ -458,6 +470,9 @@ func (s *Store) Compact(before time.Time) (int, error) {
 	}
 	n := 0
 	for _, rec := range recs {
+		if n >= limit {
+			break
+		}
 		if !rec.State.Terminal() || rec.Tombstone {
 			continue
 		}
@@ -465,20 +480,52 @@ func (s *Store) Compact(before time.Time) (int, error) {
 		if err != nil || !observed.Before(before) {
 			continue
 		}
-		rec.Revision++
-		rec.Result = nil
-		rec.Input = nil
-		rec.Interaction = nil
-		rec.Tombstone = true
-		if rec.State == protocol.StateCompleted {
-			rec.Code = protocol.CodeResultExpired
-		}
-		if err := s.write(rec); err != nil {
+		// CompactOne re-reads under the caller's lock and re-gates — the
+		// List snapshot may be stale (Pro B5).
+		compacted, err := s.CompactOne(Key{CreatorHost: rec.CreatorHost, TargetID: rec.TargetID, RequestID: rec.RequestID}, before)
+		if err != nil {
 			return n, err
 		}
-		n++
+		if compacted {
+			n++
+		}
 	}
 	return n, nil
+}
+
+// CompactOne re-reads a single candidate under the caller's lock, re-gates
+// (terminal + !tombstone + old + !NeedsRuntimeSettlement), and writes the
+// tombstone. Returns true if the record was compacted. The caller MUST hold
+// the endpoint mutex (e.mu) so a concurrent Handle cannot interleave.
+func (s *Store) CompactOne(key Key, before time.Time) (bool, error) {
+	if err := s.checkClosed(); err != nil {
+		return false, err
+	}
+	rec, exists, err := s.Get(key)
+	if err != nil || !exists {
+		return false, err
+	}
+	// A2: the gate includes settlement — never reap a record we still owe the
+	// runtime (bound run, unacked result).
+	if !rec.State.Terminal() || rec.Tombstone || rec.NeedsRuntimeSettlement() {
+		return false, nil
+	}
+	observed, err := protocol.ParseTime(rec.ObservedAt)
+	if err != nil || !observed.Before(before) {
+		return false, nil
+	}
+	rec.Revision++
+	rec.Result = nil
+	rec.Input = nil
+	rec.Interaction = nil
+	rec.Tombstone = true
+	if rec.State == protocol.StateCompleted {
+		rec.Code = protocol.CodeResultExpired
+	}
+	if err := s.write(rec); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // checkClosed refuses every mutation on a closed store. Close sets closed
@@ -605,4 +652,14 @@ func allowed(from, to protocol.State) bool {
 		}
 	}
 	return false
+}
+
+// NeedsRuntimeSettlement reports whether this record has outstanding runtime
+// work: a bound native run (NativeRun != nil) whose result has not been
+// acknowledged (AckDigest == ""). Such records must not be compacted —
+// compacting them would lose NativeRun and wedge the cancel forever. The
+// endpoint's needsRuntimeSettlement delegates to this; 611.22.34 later
+// tightens the gate with AckedDigest.
+func (r *Record) NeedsRuntimeSettlement() bool {
+	return r.NativeRun != nil && r.AckDigest == ""
 }
