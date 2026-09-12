@@ -929,6 +929,7 @@ type nativeEvidence struct {
 	code              protocol.Code    // explicit override for refused/attachment_lost
 	interaction       *protocol.Interaction
 	localIntervention bool
+	runTerminal       bool // the run is definitively finished (noop_terminal) — confirm a pending cancel
 }
 
 // transitionLocked applies one state transition to rec, deriving every field
@@ -959,9 +960,15 @@ func (e *Endpoint) transitionLocked(rec *requests.Record, c cause, ev nativeEvid
 	case causeNone:
 		// Evidence-only update: record Result/NativeRun/Interaction without
 		// changing State. Used by onNative when a completion arrives for an
-		// already-terminal record (the cancel stands, the result is acked).
+		// already-terminal record (the cancel stands, the result is acked),
+		// and by the noop_terminal abort path. If ev.runTerminal is set (the
+		// run is definitively finished — noop_terminal), a pending cancel is
+		// now confirmed (the run stopped, natively).
 		if ev.result != nil {
 			rec.Result = boundResult(ev.result)
+		}
+		if ev.runTerminal && rec.State.Terminal() && rec.Cancel != nil && rec.Cancel.Disposition != protocol.CancelConfirmed {
+			rec.Cancel.Disposition = protocol.CancelConfirmed
 		}
 		if ev.runID != "" {
 			run := ev.runID
@@ -1284,43 +1291,12 @@ func (e *Endpoint) reconcileCancelRetry(rec *requests.Record) error {
 	if err != nil || !exists {
 		return nil
 	}
-	if nerr != nil || ev.Disposition == protocol.CancelRequested {
-		// Still inconclusive; leave as cancel_requested for the next tick.
-		return nil
+	runID := ""
+	if rec.NativeRun != nil {
+		runID = *rec.NativeRun
 	}
-	if ev.Disposition == protocol.CancelNoopTerminal {
-		// The run finished. Lookup the evidence and record it.
-		e.mu.Unlock()
-		lookupEv, _ := t.att.Lookup(key, epoch)
-		e.mu.Lock()
-		rec, exists, err = e.store.Get(key)
-		if err != nil || !exists {
-			return nil
-		}
-		// The record is terminal (cancelled); record the result as evidence
-		// via causeNone so State is unchanged.
-		runID := ""
-		if rec.NativeRun != nil {
-			runID = *rec.NativeRun
-		}
-		if lookupEv.RunID != "" {
-			runID = lookupEv.RunID
-		}
-		e.transitionLocked(rec, causeNone, nativeEvidence{runID: runID, result: lookupEv.Result})
-		// The run is terminal. If a cancel was pending, it is now confirmed
-		// (the run stopped, natively or via the prior abort).
-		if rec.Cancel != nil && rec.Cancel.Disposition != protocol.CancelConfirmed {
-			rec.Cancel.Disposition = protocol.CancelConfirmed
-		}
-		if _, err := e.commitLocked(rec, t); err != nil {
-			return err
-		}
-		return e.replayTerminalAck(rec)
-	}
-	// CancelExact confirmed: the run was stopped.
-	e.transitionLocked(rec, causeCancelledByRequest, nativeEvidence{})
-	if _, err := e.commitLocked(rec, t); err != nil {
-		return err
+	if _, cerr := e.applyCancelOutcomeLocked(rec, t, key, epoch, runID, ev, nerr); cerr != nil {
+		return cerr
 	}
 	return e.replayTerminalAck(rec)
 }
@@ -1379,11 +1355,12 @@ func (e *Endpoint) reconcileLive(rec *requests.Record) error {
 		e.transitionLocked(rec, causeRefused, nativeEvidence{})
 	case ev.Admitted && ev.State.Terminal():
 		nev := nativeEvidence{runID: ev.RunID, result: ev.Result, interaction: ev.Interaction}
-		if ev.State == protocol.StateFailed {
+		switch ev.State {
+		case protocol.StateFailed:
 			e.transitionLocked(rec, causeFailed, nev)
-		} else if ev.State == protocol.StateCancelled {
+		case protocol.StateCancelled:
 			e.transitionLocked(rec, causeCancelledByRequest, nev)
-		} else {
+		default:
 			e.transitionLocked(rec, causeCompleted, nev)
 		}
 		rec.LocalIntervention = rec.LocalIntervention || ev.LocalIntervention
@@ -1584,6 +1561,50 @@ func (e *Endpoint) finishAdmissionLocked(rec *requests.Record, exists bool, t *t
 	return protocol.Reply{Snapshot: snap, Outcome: out}, nil
 }
 
+// applyCancelOutcomeLocked handles the 3-outcome CancelExact fork. The
+// caller holds e.mu on entry with rec freshly re-read from disk. It applies
+// the outcome (cancel_requested / noop_terminal / confirmed), does the
+// unlock-Lookup-relock dance for noop_terminal, persists via commitLocked,
+// and returns the ackDigest (for the caller to send the native ack outside
+// the lock). ONE function for both abortAdmittedRacedRun and
+// reconcileCancelRetry — the scattered-cleanup disease, cured for cancel
+// outcomes too.
+func (e *Endpoint) applyCancelOutcomeLocked(rec *requests.Record, t *target, key requests.Key, epoch, runID string, ev CancelEvidence, nerr error) (string, error) {
+	if nerr != nil || ev.Disposition == protocol.CancelRequested {
+		// Inconclusive abort: the run was NOT confirmed stopped. Keep the
+		// record non-terminal (cancel_requested, NativeRun bound) so reconcile
+		// re-drives CancelExact.
+		e.transitionLocked(rec, causeCancelRequested, nativeEvidence{runID: runID})
+		_, err := e.commitLocked(rec, t)
+		return "", err
+	}
+	if ev.Disposition == protocol.CancelNoopTerminal {
+		// The run already finished. Lookup the retained evidence.
+		e.mu.Unlock()
+		var lookupEv Evidence
+		if t != nil {
+			lookupEv, _ = t.att.Lookup(key, epoch)
+		}
+		e.mu.Lock()
+		var ok bool
+		rec, ok, _ = e.store.Get(key)
+		if !ok {
+			return "", protocol.Refuse(protocol.CodeNotFound, "record vanished during noop-terminal lookup")
+		}
+		lookupRun := runID
+		if lookupEv.RunID != "" {
+			lookupRun = lookupEv.RunID
+		}
+		// causeNone records the result and confirms a pending cancel (folded
+		// into transitionLocked) — no sprinkled force-confirmed after.
+		e.transitionLocked(rec, causeNone, nativeEvidence{runID: lookupRun, result: lookupEv.Result, runTerminal: true})
+		return e.commitLocked(rec, t)
+	}
+	// CancelExact confirmed: the run was stopped. cancelled_by_request.
+	e.transitionLocked(rec, causeCancelledByRequest, nativeEvidence{runID: runID})
+	return e.commitLocked(rec, t)
+}
+
 // abortAdmittedRacedRun handles the P1 shape: Submit admitted a run, but a
 // native cancel moved the record to cancelled before Submit returned. The
 // run is live and unwanted — abort it via CancelExact. The abort's OUTCOME
@@ -1613,71 +1634,28 @@ func (e *Endpoint) abortAdmittedRacedRun(rec *requests.Record, t *target, adm Ad
 		e.mu.Unlock()
 		return protocol.Reply{}, protocol.Refuse(protocol.CodeNotFound, "record vanished during abort")
 	}
-	if nerr != nil || ev.Disposition == protocol.CancelRequested {
-		// Inconclusive abort: the run was NOT confirmed stopped. Keep the
-		// record non-terminal (cancel_requested, NativeRun bound) so
-		// reconcile re-drives CancelExact. State stays as-is (may be
-		// cancelled from the prior native event); the disposition records
-		// that the stop is pending.
-		e.transitionLocked(rec, causeCancelRequested, nativeEvidence{runID: adm.RunID})
-		if _, err := e.commitLocked(rec, t); err != nil {
-			e.notifyStorageFailureLocked(rec, err)
-			e.mu.Unlock()
-			return protocol.Reply{}, err
-		}
-		snap := rec.Snapshot
+	ackDigest, cerr := e.applyCancelOutcomeLocked(rec, t, key, epoch, adm.RunID, ev, nerr)
+	if cerr != nil {
+		e.notifyStorageFailureLocked(rec, cerr)
 		e.mu.Unlock()
-		e.publishRevision(rec)
-		return protocol.Reply{Snapshot: snap, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: rec.Code, Disposition: rec.Cancel.Disposition}}, nil
-	}
-	if ev.Disposition == protocol.CancelNoopTerminal {
-		// The run already finished. Lookup the retained evidence and record it.
-		e.mu.Unlock()
-		var lookupEv Evidence
-		if t != nil {
-			lookupEv, _ = t.att.Lookup(key, epoch)
-		}
-		e.mu.Lock()
-		rec, exists, err = e.store.Get(key)
-		if err != nil || !exists {
-			e.mu.Unlock()
-			return protocol.Reply{}, protocol.Refuse(protocol.CodeNotFound, "record vanished during noop-terminal lookup")
-		}
-		c := causeNone // record stays terminal (cancelled); result is evidence
-		_ = lookupEv.State
-		e.transitionLocked(rec, c, nativeEvidence{runID: adm.RunID, result: lookupEv.Result})
-		// The run is terminal. If a cancel was pending, it is now confirmed.
-		if rec.Cancel != nil && rec.Cancel.Disposition != protocol.CancelConfirmed {
-			rec.Cancel.Disposition = protocol.CancelConfirmed
-		}
-		ackDigest, err := e.commitLocked(rec, t)
-		if err != nil {
-			e.mu.Unlock()
-			return protocol.Reply{}, err
-		}
-		snap := rec.Snapshot
-		var ackAtt Attachment
-		if ackDigest != "" && t != nil {
-			ackAtt = t.att
-		}
-		ackKey, ackEpoch := key, epoch
-		e.mu.Unlock()
-		if ackDigest != "" {
-			ackAtt.AcknowledgeResult(ackKey, ackEpoch, ackDigest)
-		}
-		e.publishRevision(rec)
-		return protocol.Reply{Snapshot: snap, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: rec.Code}}, nil
-	}
-	// CancelExact confirmed: the run was stopped. cancelled_by_request.
-	e.transitionLocked(rec, causeCancelledByRequest, nativeEvidence{runID: adm.RunID})
-	if _, err := e.commitLocked(rec, t); err != nil {
-		e.mu.Unlock()
-		return protocol.Reply{}, err
+		return protocol.Reply{}, cerr
 	}
 	snap := rec.Snapshot
+	var ackAtt Attachment
+	if ackDigest != "" && t != nil {
+		ackAtt = t.att
+	}
+	ackKey, ackEpoch := key, epoch
+	disposition := protocol.CancelDisposition("")
+	if rec.Cancel != nil {
+		disposition = rec.Cancel.Disposition
+	}
 	e.mu.Unlock()
+	if ackDigest != "" {
+		ackAtt.AcknowledgeResult(ackKey, ackEpoch, ackDigest)
+	}
 	e.publishRevision(rec)
-	return protocol.Reply{Snapshot: snap, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: rec.Code, Disposition: rec.Cancel.Disposition}}, nil
+	return protocol.Reply{Snapshot: snap, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: rec.Code, Disposition: disposition}}, nil
 }
 
 // Wait blocks until the record for ref reaches a terminal or uncertain state

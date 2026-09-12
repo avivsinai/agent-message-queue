@@ -127,10 +127,13 @@ func TestB14cAdmittedRacedCancelErrorThenRetryConverges(t *testing.T) {
 	}
 }
 
-// TestB14cAdmittedRacedCancelNoopTerminalRecordsResult: the abort's CancelExact
-// returns noop_terminal (the run already finished). finishAdmission looks up
-// the retained evidence, records any Result, and confirms the cancel so the
-// native slot releases. Pro #2 (evidence not discarded).
+// TestB14cAdmittedRacedCancelNoopTerminalRecordsResult: the P1 Pro #2 shape.
+// Submit admits a run (parked in afterAdmitGate); a native cancel moves the
+// record to cancelled AND cancels the run; the run then finishes (produces a
+// result) before Submit returns. onNative records the result on the terminal
+// record (causeNone). Submit returns Admitted; finishAdmission's abort calls
+// CancelExact which returns noop_terminal; applyCancelOutcomeLocked records
+// the result + confirms the cancel + memos AckDigest. Pins Pro #1+#2+R2.
 func TestB14cAdmittedRacedCancelNoopTerminalRecordsResult(t *testing.T) {
 	ep, rt, store, _ := b14cEndpoint(t)
 
@@ -150,9 +153,18 @@ func TestB14cAdmittedRacedCancelNoopTerminalRecordsResult(t *testing.T) {
 	}) {
 		t.Fatal("record never moved to cancelled")
 	}
-	// The run is already terminal (cancelled), so CancelExact from
-	// finishAdmission returns noop_terminal. The cancel is confirmed and the
-	// disposition converges.
+	// The run finishes (produces a result) AFTER the cancel — the completion
+	// arrives for a terminal (cancelled) record. onNative must record it.
+	rt.CompleteWhileAdmitHeld(id, "out")
+	if !b14cWait(func() bool {
+		k := requests.Key{CreatorHost: "local", TargetID: "fake", RequestID: id}
+		rec, ok, _ := store.Get(k)
+		return ok && rec.Result != nil && rec.Result.Text == "out"
+	}) {
+		t.Fatal("result never recorded on the cancelled record (Pro #2)")
+	}
+	// Submit returns: finishAdmission sees Admitted + cancelled -> abort.
+	// CancelExact returns noop_terminal (run is already terminal).
 	rt.ReleaseAfterAdmit()
 	if err := <-submitDone; err != nil {
 		t.Fatalf("submit: %v", err)
@@ -163,13 +175,33 @@ func TestB14cAdmittedRacedCancelNoopTerminalRecordsResult(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("record: ok=%v err=%v", ok, err)
 	}
-	// Pro #2: the cancel evidence was not discarded — the disposition is
-	// confirmed (the run stopped, natively).
-	if rec.Cancel == nil || rec.Cancel.Disposition != protocol.CancelConfirmed {
-		t.Fatalf("disposition = %v, want confirmed (Pro #2)", rec.Cancel)
+	// Pro #2 + R2: State stays cancelled, Code is cancelled_by_request,
+	// Result recorded, AckDigest memoed.
+	if rec.State != protocol.StateCancelled {
+		t.Fatalf("state = %s, want cancelled (R2: don't flip to completed)", rec.State)
 	}
 	if rec.Code != protocol.CodeCancelledByRequest {
 		t.Fatalf("code = %q, want cancelled_by_request", rec.Code)
+	}
+	if rec.Result == nil || rec.Result.Text != "out" {
+		t.Fatalf("result = %v, want text \"out\" (Pro #2)", rec.Result)
+	}
+	if rec.AckDigest == "" {
+		t.Fatal("AckDigest not memoed after noop_terminal result")
+	}
+	if rec.Cancel == nil || rec.Cancel.Disposition != protocol.CancelConfirmed {
+		t.Fatalf("disposition = %v, want confirmed", rec.Cancel)
+	}
+	// Reconcile to drive the ack replay (releases the native slot).
+	if err := ep.Reconcile(); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if got := rt.UnacknowledgedResults(); got != 0 {
+		t.Fatalf("unacknowledged results = %d, want 0 (native slot released)", got)
+	}
+	// Next submit for the same request is admitted fresh (slot released).
+	if _, err := ep.Handle(submitCmd(id), core.Source{Host: "local"}); err != nil {
+		t.Fatalf("next submit: %v", err)
 	}
 }
 
@@ -320,7 +352,7 @@ func TestB14cSnapshotCodeEqualsOutcomeCodeOnEveryCancel(t *testing.T) {
 	rt3 := fake.New("fake3", "e_1")
 	ep3 := core.New(core.Config{Store: store2, Now: func() time.Time { return time.Now() }})
 	ep3.Register(rt3)
-	defer ep3.Close()
+	defer func() { _ = ep3.Close() }()
 	rt3.HoldAdmission()
 	submitDone := make(chan error, 1)
 	go func() {
