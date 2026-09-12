@@ -103,7 +103,7 @@ func TestImportCommandAndPublishResult(t *testing.T) {
 	if !states["running"] || !states["completed"] {
 		t.Fatalf("expected running and completed revisions, got %v", states)
 	}
-	rec, ok, err := store.Get(requests.Key{CreatorHost: "amq:codex", TargetID: "fake", RequestID: "11111111-1111-4111-8111-111111111301"})
+	rec, ok, err := store.Get(requests.Key{CreatorHost: SourceHost(format.Header{From: "codex"}), TargetID: "fake", RequestID: "11111111-1111-4111-8111-111111111301"})
 	if err != nil || !ok {
 		t.Fatalf("record: ok=%v err=%v", ok, err)
 	}
@@ -156,7 +156,7 @@ func TestImportLeavesCommandOnPlainError(t *testing.T) {
 	// Corrupt the on-disk record for this exact key so submit's store.Get
 	// fails to decode it and returns a plain (non-Refusal) error, the class
 	// the review found the carrier would wrongly drain.
-	hostDir := filepath.Join(stateDir, "v1", "requests", "amq:codex")
+	hostDir := filepath.Join(stateDir, "v1", "requests", SourceHost(format.Header{From: "codex"}))
 	if err := os.MkdirAll(hostDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -277,7 +277,7 @@ func TestImportNoopCancelRepliesToSender(t *testing.T) {
 	baseline, _ := os.ReadDir(fsq.AgentInboxNew(root, "codex"))
 
 	// Deliver a cancel for the already-terminal record -> noop_already_terminal.
-	ref := protocol.EncodeRef("amq:codex", "fake", id)
+	ref := protocol.EncodeRef(SourceHost(format.Header{From: "codex"}), "fake", id)
 	body := `{"schema":"amq.remote.command/1","op":"request.cancel","request_ref":"` + ref + `","target_id":"fake","epoch":"e_1","not_after":"` + protocol.FormatTime(time.Now().Add(time.Minute)) + `"}`
 	now := time.Now()
 	mid, _ := format.NewMessageID(now)
@@ -305,6 +305,55 @@ func TestImportNoopCancelRepliesToSender(t *testing.T) {
 	}
 	if len(entries) <= len(baseline) || !sawNoop {
 		t.Fatalf("no-op terminal cancel did not reply to sender (entries %d, baseline %d, sawNoop %v)", len(entries), len(baseline), sawNoop)
+	}
+}
+
+// TestSourceHostIsInjective reproduces agent-message-queue-611.22.8 (B03
+// identities, host-collapse half): the creator host is part of the request
+// KEY, but it was derived by sanitizing a readable string — every illegal
+// rune mapped to '-', including the '@' that joined handle and project. So
+// From="a" with project "b" and a bare From="a-b" both produced "amq:a-b",
+// and unvalidated project names collapsed the same way ("web app" vs
+// "web-app"). Two distinct callers then shared ONE record: the second submit
+// was answered with the first's snapshot, and a cancel from one terminated
+// the other's run.
+func TestSourceHostIsInjective(t *testing.T) {
+	cases := []format.Header{
+		{From: "a", FromProject: "b"},
+		{From: "a-b"},
+		{From: "a", FromProject: "b-c"},
+		{From: "a-b", FromProject: "c"},
+		{From: "codex", FromProject: "web app"},
+		{From: "codex", FromProject: "web-app"},
+		{From: "codex"},
+		{From: "codex", FromProject: ""},
+	}
+	seen := map[string][]format.Header{}
+	for _, h := range cases {
+		got := SourceHost(h)
+		seen[got] = append(seen[got], h)
+	}
+	for host, headers := range seen {
+		// {From:"codex"} and {From:"codex", FromProject:""} are the SAME
+		// identity, so they may share a host; anything else may not.
+		distinct := map[[2]string]bool{}
+		for _, h := range headers {
+			distinct[[2]string{h.From, h.FromProject}] = true
+		}
+		if len(distinct) > 1 {
+			t.Fatalf("host %q is shared by %d distinct identities: %v", host, len(distinct), headers)
+		}
+	}
+	// The readable prefix must survive for humans and logs.
+	if got := SourceHost(format.Header{From: "codex", FromProject: "amq"}); !strings.HasPrefix(got, "amq:codex.amq.") {
+		t.Fatalf("host %q lost its readable prefix", got)
+	}
+	// And the derived host must still be usable as a path segment.
+	for _, h := range cases {
+		got := SourceHost(h)
+		if strings.ContainsAny(got, "/\\ ") {
+			t.Fatalf("host %q is not path-safe", got)
+		}
 	}
 }
 
