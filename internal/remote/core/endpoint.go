@@ -1582,8 +1582,16 @@ func (e *Endpoint) applyCancelOutcomeLocked(rec *requests.Record, t *target, key
 		// The run already finished. Lookup the retained evidence.
 		e.mu.Unlock()
 		var lookupEv Evidence
+		var lookupErr error
 		if t != nil {
-			lookupEv, _ = t.att.Lookup(key, epoch)
+			lookupEv, lookupErr = t.att.Lookup(key, epoch)
+		}
+		if lookupErr != nil {
+			// B3: a transient Lookup failure must NOT confirm-and-commit with
+			// empty evidence. Leave the disposition unconfirmed so
+			// reconcileCancelRetry re-drives CancelExact on the next tick.
+			e.mu.Lock()
+			return "", lookupErr
 		}
 		e.mu.Lock()
 		// Copy into the caller's *Record instead of rebinding the local param
