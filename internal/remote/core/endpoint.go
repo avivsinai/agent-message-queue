@@ -774,34 +774,65 @@ func (e *Endpoint) onNative(targetID string, ev NativeEvent) {
 		e.mu.Unlock()
 		return
 	}
-	if rec.State.Terminal() {
-		e.mu.Unlock()
-		return
-	}
+	// Native evidence is NEVER discarded. A completion/failure arriving for a
+	// terminal (e.g. cancelled) record is still REAL: the run produced output
+	// that must be acknowledged so the native slot releases. The result is
+	// recorded via causeNone (State unchanged) and AckDigest is memoed.
+	terminal := rec.State.Terminal()
 	switch ev.Type {
 	case EventRunCompleted, EventRunFailed, EventRunCancelled:
-		if rec.State != protocol.StateRunning && rec.State != protocol.StateDispatching && rec.State != protocol.StateUncertain {
+		if terminal {
+			// A run event on an already-terminal record: record the result +
+			// NativeRun without changing State (the cancel stands, the result
+			// is acknowledged). Skip if we already have this RunID's result.
+			if ev.RunID != "" && rec.NativeRun != nil && *rec.NativeRun == ev.RunID && rec.Result != nil {
+				e.mu.Unlock()
+				return
+			}
+			if e.crashAt(PointBeforeResult) != nil {
+				e.mu.Unlock()
+				return
+			}
+			nev := nativeEvidence{runID: ev.RunID, result: ev.Result}
+			e.transitionLocked(rec, causeNone, nev)
+		} else if rec.State != protocol.StateRunning && rec.State != protocol.StateDispatching && rec.State != protocol.StateUncertain {
+			// Non-terminal but not a live-run state (e.g. received): a run event
+			// for a record that was never dispatched is spurious.
 			e.mu.Unlock()
 			return
-		}
-		if e.crashAt(PointBeforeResult) != nil {
-			e.mu.Unlock()
-			return
-		}
-		nev := nativeEvidence{runID: ev.RunID, result: ev.Result}
-		switch ev.Type {
-		case EventRunCompleted:
-			e.transitionLocked(rec, causeCompleted, nev)
-		case EventRunFailed:
-			e.transitionLocked(rec, causeFailed, nev)
-		default:
-			e.transitionLocked(rec, causeCancelledByRequest, nev)
+		} else {
+			if e.crashAt(PointBeforeResult) != nil {
+				e.mu.Unlock()
+				return
+			}
+			nev := nativeEvidence{runID: ev.RunID, result: ev.Result}
+			switch ev.Type {
+			case EventRunCompleted:
+				e.transitionLocked(rec, causeCompleted, nev)
+			case EventRunFailed:
+				e.transitionLocked(rec, causeFailed, nev)
+			default:
+				e.transitionLocked(rec, causeCancelledByRequest, nev)
+			}
 		}
 	case EventQuestion:
+		if terminal {
+			// An interaction on a finished run is meaningless.
+			e.mu.Unlock()
+			return
+		}
 		rec.Interaction = ev.Interaction
 	case EventQuestionResolved:
+		if terminal {
+			e.mu.Unlock()
+			return
+		}
 		rec.Interaction = nil
 	case EventLocalIntervention:
+		if terminal {
+			e.mu.Unlock()
+			return
+		}
 		rec.LocalIntervention = true
 	default:
 		e.mu.Unlock()
@@ -837,7 +868,7 @@ func (e *Endpoint) onNative(targetID string, ev NativeEvent) {
 	}
 	e.publishLocked(rec)
 	ackKey, ackEpoch := ev.Key, rec.Epoch
-	terminal := rec.State.Terminal()
+	terminal = rec.State.Terminal()
 	e.mu.Unlock()
 	// B14a: use the attachment captured under the lock; never re-read
 	// e.targets after unlocking (a concurrent Register would race the map).
