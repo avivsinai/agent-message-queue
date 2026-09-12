@@ -159,3 +159,85 @@ func TestWaitReportsShutdownAsTimedOutNotFailure(t *testing.T) {
 		t.Fatal("wait did not return after endpoint shutdown")
 	}
 }
+
+// A wait with --timeout 0 ("no limit") must not inherit the SHORT-verb client
+// read deadline. Pre-merge review of agent-message-queue-611.22.28 (ipc
+// bounds) reproduced it live: Call bounded every read at callReadDeadline
+// while the server treats TimeoutMS<=0 as 24h, so the default `amq-remote
+// wait` died at 30s with "read endpoint response: i/o timeout" — a plain
+// error, not a refusal, which cmd/amq-remote maps to exit 1 ("work failed or
+// cancelled") for a request that is untouched and still running.
+func TestWaitWithoutTimeoutIgnoresTheShortVerbReadDeadline(t *testing.T) {
+	saved := callReadDeadline
+	callReadDeadline = 150 * time.Millisecond
+	t.Cleanup(func() { callReadDeadline = saved })
+
+	dir, err := os.MkdirTemp("", "amqr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	store, err := requests.Open(dir)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	ep := core.New(core.Config{Store: store})
+	ep.Register(fake.New("fake", "e_1"))
+	ctx, cancel := context.WithCancel(context.Background())
+	srv, err := Listen(dir, ep)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go func() { _ = srv.Serve(ctx) }()
+	t.Cleanup(func() { cancel(); _ = ep.Close() })
+
+	id := "11111111-1111-4111-8111-1111111119b2"
+	submit := &protocol.Command{
+		Schema:    protocol.SchemaCommand,
+		Op:        protocol.OpRequestSubmit,
+		RequestID: id,
+		TargetID:  "fake",
+		Epoch:     "e_1",
+		NotAfter:  protocol.FormatTime(time.Now().Add(time.Minute)),
+		Input:     &protocol.SubmitInput{Text: "work"},
+	}
+	if _, err := Call(dir, Request{Command: submit}); err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	ref := protocol.EncodeRef(LocalHost, "fake", id)
+
+	type result struct {
+		resp *Response
+		err  error
+	}
+	done := make(chan result, 1)
+	go func() {
+		// TimeoutMS 0 is the CLI default: "no limit".
+		resp, err := Call(dir, Request{Wait: &WaitRequest{RequestRef: ref}})
+		done <- result{resp, err}
+	}()
+
+	// Well past the (shortened) short-verb deadline, the wait must still be
+	// waiting rather than have failed with a read timeout.
+	select {
+	case r := <-done:
+		t.Fatalf("wait returned after the short-verb deadline: resp=%+v err=%v", r.resp, r.err)
+	case <-time.After(600 * time.Millisecond):
+	}
+
+	// Shutting the endpoint down releases it, and that is a timeout, never a
+	// failure.
+	cancel()
+	_ = ep.Close()
+	select {
+	case r := <-done:
+		if r.err != nil {
+			t.Fatalf("wait error = %v, want a TimedOut response", r.err)
+		}
+		if !r.resp.TimedOut {
+			t.Fatalf("wait resp = %+v, want TimedOut", r.resp)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("wait did not return after endpoint shutdown")
+	}
+}

@@ -24,9 +24,12 @@ import (
 // protocol, and replies carry at most one bounded result.
 const MaxRecordBytes = 1024 * 1024
 
-// callReadDeadline bounds a client's wait for the endpoint's response. A wait
-// request adds its own server-side timeout on top of this.
-const callReadDeadline = 30 * time.Second
+// callReadDeadline bounds a client's wait for the endpoint's response. It
+// protects the SHORT verbs (submit, status, cancel, sessions, doctor) from a
+// wedged endpoint. A wait request adds its own server-side timeout on top of
+// this, or opts out of a client deadline entirely; see Call.
+// A test shortens it to prove the wait path does not inherit it.
+var callReadDeadline = 30 * time.Second
 
 // LocalHost is the authenticated source recorded for commands that arrive
 // over the local socket: the OS user owning the socket.
@@ -197,10 +200,23 @@ func Call(stateDir string, req Request) (*Response, error) {
 	// wedged endpoint. A wait carries its own server-side timeout, so allow
 	// for it plus slack rather than cutting a legitimate long wait short.
 	readBound := callReadDeadline
-	if req.Wait != nil && req.Wait.TimeoutMS > 0 {
-		readBound = time.Duration(req.Wait.TimeoutMS)*time.Millisecond + callReadDeadline
+	if req.Wait != nil {
+		// A wait is the one verb whose duration the CALLER chose. Bounding it
+		// here at the short-verb deadline would report a request that is still
+		// running as a failed read, and `wait` maps a non-refusal error to
+		// exit 1 ("work failed or cancelled") — so an orchestrator would take
+		// the recovery path for untouched, running work. --timeout 0 means no
+		// limit (cmd/amq-remote: "0 = no limit"), and the server owns that
+		// bound, so the client sets no deadline at all.
+		if req.Wait.TimeoutMS <= 0 {
+			readBound = 0
+		} else {
+			readBound = time.Duration(req.Wait.TimeoutMS)*time.Millisecond + callReadDeadline
+		}
 	}
-	_ = conn.SetReadDeadline(time.Now().Add(readBound))
+	if readBound > 0 {
+		_ = conn.SetReadDeadline(time.Now().Add(readBound))
+	}
 	writeRecord(conn, req)
 	resp, err := readRecord[Response](conn)
 	if err != nil {
