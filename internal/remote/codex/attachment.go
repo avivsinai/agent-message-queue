@@ -92,8 +92,15 @@ func Attach(socketPath, threadID string, opts ...Option) (*Attachment, error) {
 	// The attachment is built BEFORE the connection so its handlers can be
 	// installed as Dial arguments: the read pump starts inside Dial, and
 	// assigning handlers afterwards raced it (and dropped any frame that
-	// arrived first). Neither handler touches a.client, so building in this
-	// order is safe.
+	// arrived first).
+	//
+	// What makes that order safe is NOT that the handlers avoid a.client —
+	// onNotification can reach it through onItem -> deliverPendingCancel.
+	// It is that every path to a.client is reached only through runs,
+	// byTurn, byClientID or listeners, and all four are empty until Submit
+	// or Subscribe, neither of which can run before Attach returns. Keep
+	// that true: a handler that touches a.client outside those maps would
+	// read it before the assignment below.
 	a := &Attachment{
 		threadID:     threadID,
 		targetID:     TargetID(threadID),
@@ -135,8 +142,18 @@ func Attach(socketPath, threadID string, opts ...Option) (*Attachment, error) {
 		_ = client.Close()
 		return nil, fmt.Errorf("thread/resume %s: %w", threadID, err)
 	}
+	// The read pump has been live since Dial, so these fields are already
+	// shared with onNotification: take the lock. And thread/resume answers
+	// with a snapshot taken BEFORE any notification that arrived while the
+	// call was in flight — applying its status unconditionally would undo a
+	// turn/started we have already seen and publish "idle" for a running
+	// thread. A turn we know about wins over the older snapshot.
+	a.mu.Lock()
 	a.cwd = resumed.Thread.Cwd
-	a.status = threadStatus(resumed.Thread.Status.Type)
+	if a.activeTurn == "" {
+		a.status = threadStatus(resumed.Thread.Status.Type)
+	}
+	a.mu.Unlock()
 	go func() {
 		<-client.Done()
 		a.mu.Lock()
