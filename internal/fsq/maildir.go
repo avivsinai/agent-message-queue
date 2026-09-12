@@ -93,10 +93,15 @@ func DeliverToInboxes(root *DeliveryRoot, recipients []string, filename string, 
 	for _, recipient := range recipients {
 		tmpDir := filepath.Join("agents", recipient, "inbox", "tmp")
 		newDir := filepath.Join("agents", recipient, "inbox", "new")
-		if err := root.root.MkdirAll(tmpDir, 0o700); err != nil {
+		// First-contact delivery: create the mailbox tree through mkdirAllSynced so
+		// every ancestor this call creates (agents/<h>, inbox) is fsynced, not just
+		// tmp and new below. A raw MkdirAll left those directory entries unsynced;
+		// power loss after a successful send could drop the whole mailbox and the
+		// committed message with it (agent-message-queue-611.22.26).
+		if err := root.mkdirAllSynced(tmpDir); err != nil {
 			return nil, cleanupStagedTmp(root, stages, err)
 		}
-		if err := root.root.MkdirAll(newDir, 0o700); err != nil {
+		if err := root.mkdirAllSynced(newDir); err != nil {
 			return nil, cleanupStagedTmp(root, stages, err)
 		}
 		tmpPath, err := uniqueAttemptTmpPath(tmpDir, filename)

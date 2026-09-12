@@ -125,3 +125,58 @@ func TestMkdirAllSyncedReportsFailedAncestorSync(t *testing.T) {
 		t.Fatalf("mkdirAllSynced error = %v, want wrapped %v", err, failure)
 	}
 }
+
+// TestDeliverToInboxesSyncsFirstContactMailboxTree reproduces
+// agent-message-queue-611.22.26 (fsq first-contact sync): DeliverToInboxes
+// built agents/<h>/inbox/{tmp,new} with a raw MkdirAll and fsynced only the
+// tmp and new leaves, so the agents/<h> and inbox directory entries were
+// never durable. `amq send --to newagent` is a first-contact delivery (send
+// and reply never provision); power loss after "sent" lost the mailbox and
+// the committed message. Every level this delivery creates must be synced.
+func TestDeliverToInboxesSyncsFirstContactMailboxTree(t *testing.T) {
+	base := t.TempDir()
+	identity, err := SnapshotDeliveryRoot(base)
+	if err != nil {
+		t.Fatalf("SnapshotDeliveryRoot: %v", err)
+	}
+	root, err := OpenDeliveryRoot(base, identity)
+	if err != nil {
+		t.Fatalf("OpenDeliveryRoot: %v", err)
+	}
+	defer func() { _ = root.Close() }()
+
+	synced := map[string]int{}
+	root.syncDirForTest = func(dir string) error {
+		rel, relErr := filepath.Rel(base, dir)
+		if relErr != nil {
+			rel = dir
+		}
+		synced[rel]++
+		return nil
+	}
+
+	if _, err := DeliverToInboxes(root, []string{"newagent"}, "m.md", []byte("hello")); err != nil {
+		t.Fatalf("DeliverToInboxes: %v", err)
+	}
+
+	// The created ancestors — not just the tmp/new leaves — must each be
+	// synced (exactly once by the mkdir path; tmp/new are synced again by the
+	// delivery commit itself, which is fine).
+	for _, dir := range []string{
+		"agents",
+		filepath.Join("agents", "newagent"),
+		filepath.Join("agents", "newagent", "inbox"),
+	} {
+		if synced[dir] != 1 {
+			t.Fatalf("created ancestor %s synced %d times, want exactly 1 (all: %v)", dir, synced[dir], synced)
+		}
+	}
+	for _, leaf := range []string{
+		filepath.Join("agents", "newagent", "inbox", "tmp"),
+		filepath.Join("agents", "newagent", "inbox", "new"),
+	} {
+		if synced[leaf] == 0 {
+			t.Fatalf("leaf %s was never synced (all: %v)", leaf, synced)
+		}
+	}
+}
