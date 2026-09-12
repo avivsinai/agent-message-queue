@@ -210,7 +210,9 @@ func TestB14eCompactBudgetCountsCompactedNotScanned(t *testing.T) {
 	recs, _ := store.List()
 	for _, rec := range recs {
 		if rec.State.Terminal() && !rec.Tombstone {
-			store.CompactOne(requests.Key{CreatorHost: rec.CreatorHost, TargetID: rec.TargetID, RequestID: rec.RequestID}, cutoff)
+			if _, cerr := store.CompactOne(requests.Key{CreatorHost: rec.CreatorHost, TargetID: rec.TargetID, RequestID: rec.RequestID}, cutoff); cerr != nil {
+				t.Fatalf("setup compact: %v", cerr)
+			}
 		}
 	}
 	// Verify we have 110 tombstones.
