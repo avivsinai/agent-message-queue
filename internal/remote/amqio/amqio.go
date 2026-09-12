@@ -173,14 +173,21 @@ func (c *Carrier) importOne(root *fsq.DeliveryRoot, name string) error {
 		// command whose record may not exist.
 		return nil
 	}
-	// A request-op reply carries an Outcome. A transient storage failure means
-	// the record could not be persisted, so leave the command in new for the
-	// next import rather than draining it without a durable record (Pro B09).
+	// A typed Refusal is not automatically a DURABLE one. The store refuses
+	// with storage_full (ENOSPC, EPERM, oversize) and store_closed (shutdown),
+	// and on every op except submit-create those travel as an ERROR from
+	// Handle rather than as an Outcome on a Reply — so checking only
+	// Outcome.Code (the previous guard) missed them, and classifying by TYPE
+	// answered "refused" and CLAIMED the command for a failure that says
+	// nothing about the request. Worst case: a cancel whose tombstone could
+	// not be written was answered as refused and claimed, and the later
+	// submit then EXECUTED the request the caller had cancelled. Classify by
+	// CODE, from either channel (agent-message-queue-611.22.13).
 	var outcome protocol.Outcome
 	if rep, ok := reply.(protocol.Reply); ok {
 		outcome = rep.Outcome
 	}
-	if outcome.Code == protocol.CodeStorageFull {
+	if transientRefusal(refusal, outcome.Code) {
 		return nil
 	}
 	// Reply once here for: every refusal; every non-request op; and a request
@@ -282,6 +289,29 @@ func (c *Carrier) reply(root *fsq.DeliveryRoot, origin map[string]string, subjec
 		return err
 	}
 	return nil
+}
+
+// transientRefusal reports whether a refusal describes the STORE's inability
+// to persist rather than a decision about the request. Such a command must
+// stay in inbox/new: it has no durable record, and claiming it would consume
+// the caller's request with neither an outcome nor a retry. The code can
+// arrive either as a Refusal error (most ops) or as a Reply Outcome
+// (submit-create), so both channels are checked.
+func transientRefusal(refusal *protocol.Refusal, outcome protocol.Code) bool {
+	for _, code := range []protocol.Code{outcome, refusalCode(refusal)} {
+		switch code {
+		case protocol.CodeStorageFull, protocol.CodeStoreClosed:
+			return true
+		}
+	}
+	return false
+}
+
+func refusalCode(r *protocol.Refusal) protocol.Code {
+	if r == nil {
+		return ""
+	}
+	return r.Code
 }
 
 func refsFrom(origin map[string]string) []string {

@@ -356,3 +356,100 @@ func TestSourceHostIsInjective(t *testing.T) {
 		}
 	}
 }
+
+// TestImportStoreRefusalLeavesCommandInNew reproduces the blocker inside
+// agent-message-queue-611.22.13 (B09 carrier): the carrier classified
+// refusals by TYPE (errors.As *protocol.Refusal), but the store itself
+// refuses with storage_full (ENOSPC, EPERM, oversize) and store_closed
+// (shutdown). On every op EXCEPT submit-create those travel as an ERROR from
+// Handle rather than as a Reply Outcome, so the previous Outcome.Code guard
+// never saw them: the command was answered "refused" and CLAIMED. A cancel
+// whose tombstone could not be written was consumed, and the later submit
+// then executed the request the caller had cancelled. A store refusal must
+// leave the command in inbox/new for the next import.
+func TestImportStoreRefusalLeavesCommandInNew(t *testing.T) {
+	root := t.TempDir()
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	for _, h := range []string{"codex", DefaultHandle} {
+		if err := fsq.EnsureAgentDirs(root, h); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store, err := requests.Open(filepath.Join(root, "extensions", "remote"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	var carrier *Carrier
+	ep := core.New(core.Config{Store: store, Publish: func(s protocol.Snapshot, origin map[string]string) error {
+		return carrier.Publish(s, origin)
+	}})
+	carrier, err = New(root, DefaultHandle, ep)
+	if err != nil {
+		t.Fatalf("carrier: %v", err)
+	}
+	ep.Register(fake.New("fake", "e_1"))
+	t.Cleanup(func() { _ = ep.Close() })
+
+	// A cancel for a request that was never submitted: the endpoint answers by
+	// writing a cancel-before-submit tombstone, so the store write IS the
+	// operation, and its refusal arrives as an error from Handle.
+	reqID := "11111111-1111-4111-8111-111111111390"
+	ref := protocol.EncodeRef("amq:codex", "fake", reqID)
+	body := `{"schema":"amq.remote.command/1","op":"request.cancel","request_ref":"` + ref + `","target_id":"fake","epoch":"e_1","not_after":"` + protocol.FormatTime(time.Now().Add(time.Minute)) + `"}`
+	now := time.Now()
+	id, err := format.NewMessageID(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg := format.Message{Header: format.Header{
+		Schema: format.CurrentSchema, ID: id, From: "codex", To: []string{DefaultHandle},
+		Thread: "p2p/codex__remote", Subject: "cancel", Created: now.UTC().Format(time.RFC3339Nano), Kind: "todo",
+	}, Body: body}
+	data, err := msg.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := fsq.SnapshotDeliveryRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	droot, err := fsq.OpenDeliveryRoot(root, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fsq.DeliverToInboxes(droot, []string{DefaultHandle}, id+".md", data); err != nil {
+		t.Fatalf("deliver: %v", err)
+	}
+	_ = droot.Close()
+
+	// Force every store write to refuse with storage_full, exactly as a full
+	// disk does. The refusal is a *protocol.Refusal, so the old type-based
+	// classification accepted it as a durable answer and claimed the command.
+	saved := requests.MaxRecordBytes
+	requests.MaxRecordBytes = 1
+	t.Cleanup(func() { requests.MaxRecordBytes = saved })
+
+	if _, err := carrier.ImportOnce(); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if entries, _ := os.ReadDir(fsq.AgentInboxNew(root, DefaultHandle)); len(entries) != 1 {
+		t.Fatalf("storage-refused cancel not left in new: %d", len(entries))
+	}
+	if entries, _ := os.ReadDir(fsq.AgentInboxCur(root, DefaultHandle)); len(entries) != 0 {
+		t.Fatalf("storage-refused cancel was CLAIMED: %d (the cancelled request would later execute)", len(entries))
+	}
+
+	// With storage restored the retry succeeds and the command is claimed.
+	requests.MaxRecordBytes = saved
+	if _, err := carrier.ImportOnce(); err != nil {
+		t.Fatalf("retry import: %v", err)
+	}
+	if entries, _ := os.ReadDir(fsq.AgentInboxNew(root, DefaultHandle)); len(entries) != 0 {
+		t.Fatalf("cancel still in new after storage recovered: %d", len(entries))
+	}
+	if entries, _ := os.ReadDir(fsq.AgentInboxCur(root, DefaultHandle)); len(entries) != 1 {
+		t.Fatalf("recovered cancel not claimed: %d", len(entries))
+	}
+}
