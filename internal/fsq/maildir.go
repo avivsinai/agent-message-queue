@@ -97,11 +97,9 @@ func DeliverToInboxes(root *DeliveryRoot, recipients []string, filename string, 
 		// every ancestor this call creates (agents/<h>, inbox) is fsynced, not just
 		// tmp and new below. A raw MkdirAll left those directory entries unsynced;
 		// power loss after a successful send could drop the whole mailbox and the
-		// committed message with it (agent-message-queue-611.22.26).
-		if err := root.mkdirAllSynced(tmpDir); err != nil {
-			return nil, cleanupStagedTmp(root, stages, err)
-		}
-		if err := root.mkdirAllSynced(newDir); err != nil {
+		// committed message with it (agent-message-queue-611.22.26). tmp and new
+		// go in one call so inbox is synced after BOTH of them exist.
+		if err := root.mkdirAllSynced(tmpDir, newDir); err != nil {
 			return nil, cleanupStagedTmp(root, stages, err)
 		}
 		tmpPath, err := uniqueAttemptTmpPath(tmpDir, filename)

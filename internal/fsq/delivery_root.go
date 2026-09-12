@@ -452,12 +452,7 @@ func (r *DeliveryRoot) EnsureRootDirs() error {
 	if err := r.VerifyBase(); err != nil {
 		return err
 	}
-	for _, dir := range []string{"agents", "threads", "meta"} {
-		if err := r.mkdirAllSynced(dir); err != nil {
-			return err
-		}
-	}
-	return nil
+	return r.mkdirAllSynced("agents", "threads", "meta")
 }
 
 // EnsureAgentDirs creates one agent's mailbox layout through the pinned root
@@ -469,12 +464,11 @@ func (r *DeliveryRoot) EnsureAgentDirs(agent string) error {
 	if err := r.VerifyBase(); err != nil {
 		return err
 	}
+	dirs := make([]string, 0, len(requiredMailboxLeaves))
 	for _, leaf := range requiredMailboxLeaves {
-		if err := r.mkdirAllSynced(MailboxRootRelativePath(agent, leaf)); err != nil {
-			return err
-		}
+		dirs = append(dirs, MailboxRootRelativePath(agent, leaf))
 	}
-	return nil
+	return r.mkdirAllSynced(dirs...)
 }
 
 // EnsureAgentDir creates exactly one mailbox leaf for an agent through the
@@ -584,59 +578,52 @@ func (r *DeliveryRoot) dirExists(name string) bool {
 	return err == nil && info.IsDir()
 }
 
-// mkdirAllSynced creates dir and any missing ancestors through the pinned
-// root, then fsyncs every directory level this call created. Delivery writes
-// fsync the message file and its leaf directory; without also syncing the
-// newly created ancestors, a crash right after a first-contact delivery can
-// still lose the whole mailbox tree along with the message it committed.
-// Pre-existing levels are not re-synced: this call introduced nothing below
-// them. A failed ancestor sync is reported as a plain error (nothing has been
-// committed at the leaf yet, so the caller's staging cleanup still applies).
-func (r *DeliveryRoot) mkdirAllSynced(dir string) error {
-	missing, err := r.firstMissingAncestor(dir)
-	if err != nil {
-		return err
-	}
-	if missing == "" {
-		// The whole tree already exists. This helper owns TREE durability,
-		// not message durability: the delivery commit path syncs new/tmp
-		// after its rename, which is the sync that makes a message durable.
-		// Re-syncing an established tree here would be redundant on every
-		// delivery and would turn a commit-phase durability fault into a
-		// pre-staging error. An existing tree whose earlier creation crashed
-		// before its sync is repaired by that same commit-phase sync of new
-		// and by doctor --fix-mailboxes; it is not this call's job.
-		return nil
-	}
-	if err := r.root.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
-	// Durability is about directory ENTRIES: fsync(d) persists d's entries,
-	// never d's own entry inside its parent. So the set to sync is every
-	// created level, leaf first, AND the first pre-existing ancestor — its
-	// entry for the new subtree is what changed. Stopping at the shallowest
-	// created level (the earlier version) left that entry unsynced.
-	for d := dir; ; d = filepath.Dir(d) {
-		if err := r.syncDir(d); err != nil {
-			return fmt.Errorf("sync created ancestor %s: %w", d, err)
+// mkdirAllSynced creates every dir (and its missing ancestors) through the
+// pinned root, then makes the resulting tree durable: it fsyncs each directory
+// that owns an entry on the way to a dir, up to and including the pinned root.
+// Delivery writes fsync the message file and its leaf directory; without the
+// ancestor syncs, a crash right after a first-contact delivery can still lose
+// the whole mailbox tree along with the message it committed.
+//
+// Pass the directories of one logical mailbox together. A failed sync is
+// reported as a plain error: nothing is committed at a leaf yet, so the
+// caller's staging cleanup still applies.
+func (r *DeliveryRoot) mkdirAllSynced(dirs ...string) error {
+	for _, dir := range dirs {
+		if err := r.refuseNonDirectoryAncestor(dir); err != nil {
+			return err
 		}
-		if d == missing {
-			parent := filepath.Dir(d)
-			if parent != d && parent != "." && parent != string(filepath.Separator) {
-				if err := r.syncDir(parent); err != nil {
-					return fmt.Errorf("sync parent of created tree %s: %w", parent, err)
-				}
+		if err := r.root.MkdirAll(dir, 0o700); err != nil {
+			return err
+		}
+	}
+	// Create everything first, then sync each shared ancestor once. Siblings
+	// of one mailbox (inbox/tmp and inbox/new, or all seven leaves) share
+	// nearly the whole chain, and a per-directory walk would fsync the same
+	// levels over and over — and would sync a parent while a later sibling
+	// below it still had no durable entry.
+	synced := make(map[string]bool, 8)
+	for _, dir := range dirs {
+		// ancestorChain owns the reasoning: every directory that holds an
+		// entry on the way to dir, up to and including the pinned root, on
+		// every call.
+		for _, d := range ancestorChain(dir, ".") {
+			if synced[d] {
+				continue
 			}
-			return nil
+			if err := r.syncDir(d); err != nil {
+				return fmt.Errorf("sync mailbox ancestor %s: %w", d, err)
+			}
+			synced[d] = true
 		}
 	}
+	return nil
 }
 
-// firstMissingAncestor walks from dir toward the pinned root and returns the
-// shallowest missing level (the topmost ancestor that does not exist yet), or
-// "" when every level already exists.
-func (r *DeliveryRoot) firstMissingAncestor(dir string) (string, error) {
-	missing := ""
+// refuseNonDirectoryAncestor walks from dir toward the pinned root and fails
+// when any existing level is not a directory. Pinned twin of
+// refuseNonDirectoryAmbient.
+func (r *DeliveryRoot) refuseNonDirectoryAncestor(dir string) error {
 	current := dir
 	for {
 		info, err := r.root.Stat(current)
@@ -646,16 +633,15 @@ func (r *DeliveryRoot) firstMissingAncestor(dir string) (string, error) {
 				// corrupt layout, not a missing level. Refuse before staging
 				// anything so a multi-recipient delivery fails whole, never
 				// partially committed.
-				return "", fmt.Errorf("mailbox path %s exists and is not a directory", current)
+				return fmt.Errorf("mailbox path %s exists and is not a directory", current)
 			}
-			return missing, nil
+			return nil
 		} else if !errors.Is(err, fs.ErrNotExist) {
-			return "", fmt.Errorf("stat %s: %w", current, err)
+			return fmt.Errorf("stat %s: %w", current, err)
 		}
-		missing = current
 		parent := filepath.Dir(current)
 		if parent == current {
-			return missing, nil
+			return nil
 		}
 		current = parent
 	}

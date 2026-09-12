@@ -8,13 +8,15 @@ import (
 	"testing"
 )
 
-// mkdirAllSynced and the ambient EnsureAgentDirs helper must sync the leaf of
-// the newly created mailbox tree first and then each remaining created level
-// up to the shallowest missing ancestor. firstMissingAncestor reports the
-// shallowest missing level, so an implementation that walks up from it (or
-// starts there) never reaches the leaf and either loops forever or skips the
-// sync that protects the newly committed message file.
-func TestMkdirAllSyncedCoversEveryCreatedLevelDownToLeaf(t *testing.T) {
+// mkdirAllSynced must fsync every directory that owns an entry on the way to
+// the new mailbox leaf, up to and including the pinned root, and it must do so
+// on every call. An fsync persists a directory's entries and never its own
+// entry in its parent, so stopping short of the root leaves the root's entry
+// for a brand-new agents/ subtree unsynced; and an existing directory is not a
+// durable one, because an earlier call may have created it and then died
+// before syncing the parent. Both were BLOCK findings on
+// agent-message-queue-611.22.26 (fsq first-contact sync).
+func TestMkdirAllSyncedCoversEveryOwningDirectoryUpToRoot(t *testing.T) {
 	base := t.TempDir()
 	identity, err := SnapshotDeliveryRoot(base)
 	if err != nil {
@@ -36,85 +38,104 @@ func TestMkdirAllSyncedCoversEveryCreatedLevelDownToLeaf(t *testing.T) {
 		return nil
 	}
 
-	if err := root.mkdirAllSynced(filepath.Join("agents", "agent-a", "inbox", "cur")); err != nil {
-		t.Fatalf("mkdirAllSynced: %v", err)
-	}
-
-	// Every created level, leaf first, and then the pre-existing parent whose
-	// directory entry changed. fsync(d) persists d's entries, never d's own
-	// entry in its parent — so "sync only what we created" (the earlier
-	// version) left the new subtree's entry in the existing parent unsynced.
-	// Here the root's base dir pre-exists, so the parent of "agents" is the
-	// root and is covered by the base guarantees; the chain is exactly the
-	// four created levels.
+	// The chain: the leaf's parent, then upward, ending at the pinned root.
+	// The leaf itself is absent — it is empty until the delivery commit, which
+	// syncs it after the rename.
 	want := []string{
-		filepath.Join("agents", "agent-a", "inbox", "cur"),
 		filepath.Join("agents", "agent-a", "inbox"),
 		filepath.Join("agents", "agent-a"),
 		"agents",
+		".",
 	}
-	if len(synced) != len(want) {
-		t.Fatalf("synced %v, want %v", synced, want)
-	}
-	for i := range want {
-		if synced[i] != want[i] {
-			t.Fatalf("sync order %v, want %v", synced, want)
+	assertSync := func(label string, got []string) {
+		t.Helper()
+		if len(got) != len(want) {
+			t.Fatalf("%s synced %v, want %v", label, got, want)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("%s sync order %v, want %v", label, got, want)
+			}
 		}
 	}
 
-	// With "agents" pre-existing, a second agent creates 3 levels — and the
-	// existing "agents" directory (which now owns the new entry) MUST be
-	// synced too, even though this call did not create it.
-	synced = nil
-	if err := root.mkdirAllSynced(filepath.Join("agents", "agent-b", "inbox", "cur")); err != nil {
-		t.Fatalf("mkdirAllSynced (second agent): %v", err)
+	if err := root.mkdirAllSynced(filepath.Join("agents", "agent-a", "inbox", "cur")); err != nil {
+		t.Fatalf("mkdirAllSynced: %v", err)
 	}
-	want = []string{
-		filepath.Join("agents", "agent-b", "inbox", "cur"),
-		filepath.Join("agents", "agent-b", "inbox"),
-		filepath.Join("agents", "agent-b"),
-		"agents", // pre-existing parent whose entry changed
-	}
-	if len(synced) != len(want) {
-		t.Fatalf("second agent synced %v, want %v (existing parent must be synced)", synced, want)
-	}
-	for i := range want {
-		if synced[i] != want[i] {
-			t.Fatalf("second agent sync order %v, want %v", synced, want)
-		}
-	}
+	assertSync("first contact", synced)
 
-	// An established tree is not re-synced here: tree durability belongs to
-	// creation, message durability to the delivery commit (which syncs new).
+	// The same tree already exists. It is still re-synced: Stat proves
+	// existence, not durability.
 	synced = nil
-	if err := root.mkdirAllSynced(filepath.Join("agents", "agent-b", "inbox", "cur")); err != nil {
+	if err := root.mkdirAllSynced(filepath.Join("agents", "agent-a", "inbox", "cur")); err != nil {
 		t.Fatalf("mkdirAllSynced (existing tree): %v", err)
 	}
-	if len(synced) != 0 {
-		t.Fatalf("existing tree must not be re-synced by mkdir, got %v", synced)
+	assertSync("existing tree", synced)
+}
+
+// Sibling directories of one mailbox share their ancestors. mkdirAllSynced
+// creates them all before it syncs, so a shared parent is never fsynced while
+// a later sibling below it still has no durable entry — and it is fsynced
+// once, not once per sibling.
+func TestMkdirAllSyncedSyncsSharedAncestorsAfterEverySibling(t *testing.T) {
+	base := t.TempDir()
+	identity, err := SnapshotDeliveryRoot(base)
+	if err != nil {
+		t.Fatalf("SnapshotDeliveryRoot: %v", err)
+	}
+	root, err := OpenDeliveryRoot(base, identity)
+	if err != nil {
+		t.Fatalf("OpenDeliveryRoot: %v", err)
+	}
+	defer func() { _ = root.Close() }()
+
+	inbox := filepath.Join("agents", "agent-a", "inbox")
+	counts := map[string]int{}
+	var siblingsAtInboxSync int
+	root.syncDirForTest = func(dir string) error {
+		rel, relErr := filepath.Rel(base, dir)
+		if relErr != nil {
+			rel = dir
+		}
+		counts[rel]++
+		if rel == inbox {
+			entries, readErr := root.ReadDir(inbox)
+			if readErr != nil {
+				t.Errorf("ReadDir(%s): %v", inbox, readErr)
+			}
+			siblingsAtInboxSync = len(entries)
+		}
+		return nil
+	}
+
+	if err := root.mkdirAllSynced(filepath.Join(inbox, "tmp"), filepath.Join(inbox, "new")); err != nil {
+		t.Fatalf("mkdirAllSynced: %v", err)
+	}
+	if siblingsAtInboxSync != 2 {
+		t.Fatalf("inbox was synced with %d children, want 2 (tmp and new must both exist first)", siblingsAtInboxSync)
+	}
+	if counts[inbox] != 1 {
+		t.Fatalf("inbox synced %d times, want 1 (shared ancestors are synced once)", counts[inbox])
 	}
 }
 
-// The ambient EnsureAgentDirs helper shares firstMissingAncestorAmbient and
-// must terminate: before the descend-from-leaf fix it fsynced up from the
-// shallowest missing level and never broke, hanging any caller.
-func TestEnsureAgentDirsAmbientSyncTerminatesAndCoversCreatedLevels(t *testing.T) {
+// The ambient EnsureAgentDirs twin must terminate (it once fsynced upward from
+// the shallowest missing level and never broke, hanging the caller) and must
+// cover the same owning directories, including the pre-existing agents/ and
+// the queue root that own the new agent's entries.
+func TestEnsureAgentDirsAmbientSyncTerminatesAndCoversOwningDirectories(t *testing.T) {
 	root := t.TempDir()
 	if err := EnsureRootDirs(root); err != nil {
 		t.Fatalf("EnsureRootDirs: %v", err)
 	}
 
 	calls := atomic.Int64{}
-	var syncedAgents atomic.Bool
+	synced := map[string]bool{}
 	restore := syncDirAmbientSwapForTest(func(dir string) error {
-		calls.Add(1)
-		if filepath.Base(dir) == "agents" {
-			syncedAgents.Store(true)
-		}
-		if calls.Load() > 32 {
-			t.Errorf("ambient sync exceeded expected level count (infinite loop?): %d calls", calls.Load())
+		if calls.Add(1) > 64 {
 			return errors.New("sync loop guard")
 		}
+		synced[dir] = true
 		return nil
 	})
 	defer restore()
@@ -122,17 +143,24 @@ func TestEnsureAgentDirsAmbientSyncTerminatesAndCoversCreatedLevels(t *testing.T
 	if err := EnsureAgentDirs(root, "agent-b"); err != nil {
 		t.Fatalf("EnsureAgentDirs: %v", err)
 	}
-	// Every leaf's chain reaches the pre-existing "agents" directory, whose
-	// entry for agent-b changed: it must be synced at least once, and the
-	// call must terminate (before the descend-from-leaf fix it never did).
-	leaves := RequiredMailboxLeaves()
-	if calls.Load() < int64(len(leaves)) {
-		t.Fatalf("ambient sync calls = %d, want at least one per leaf (%d)", calls.Load(), len(leaves))
+
+	agent := AgentBase(root, "agent-b")
+	for _, dir := range []string{
+		filepath.Join(agent, "inbox"),
+		filepath.Join(agent, "outbox"),
+		filepath.Join(agent, "dlq"),
+		agent,
+		filepath.Join(root, "agents"), // pre-existing, but it owns the new agent-b entry
+		root,
+	} {
+		if !synced[dir] {
+			t.Fatalf("owning directory %s was never synced", dir)
+		}
 	}
-	if !syncedAgents.Load() {
-		t.Fatal("pre-existing agents/ directory (owner of the new agent-b entry) was never synced")
+	if got := calls.Load(); got != int64(len(synced)) {
+		t.Fatalf("ambient sync made %d calls for %d directories; shared ancestors must be synced once", got, len(synced))
 	}
-	for _, leaf := range leaves {
+	for _, leaf := range RequiredMailboxLeaves() {
 		info, err := os.Stat(AgentMailboxPath(root, "agent-b", leaf))
 		if err != nil || !info.IsDir() {
 			t.Fatalf("leaf %s not created: info=%v err=%v", leaf, info, err)
@@ -140,8 +168,8 @@ func TestEnsureAgentDirsAmbientSyncTerminatesAndCoversCreatedLevels(t *testing.T
 	}
 }
 
-// A failed sync on a created level is a plain error (nothing committed at the
-// leaf yet), not a swallowed success.
+// A failed sync on an owning directory is a plain error (nothing committed at
+// the leaf yet), not a swallowed success.
 func TestMkdirAllSyncedReportsFailedAncestorSync(t *testing.T) {
 	base := t.TempDir()
 	identity, err := SnapshotDeliveryRoot(base)
@@ -169,7 +197,7 @@ func TestMkdirAllSyncedReportsFailedAncestorSync(t *testing.T) {
 // tmp and new leaves, so the agents/<h> and inbox directory entries were
 // never durable. `amq send --to newagent` is a first-contact delivery (send
 // and reply never provision); power loss after "sent" lost the mailbox and
-// the committed message. Every level this delivery creates must be synced.
+// the committed message.
 func TestDeliverToInboxesSyncsFirstContactMailboxTree(t *testing.T) {
 	base := t.TempDir()
 	identity, err := SnapshotDeliveryRoot(base)
@@ -196,13 +224,11 @@ func TestDeliverToInboxesSyncsFirstContactMailboxTree(t *testing.T) {
 		t.Fatalf("DeliverToInboxes: %v", err)
 	}
 
-	// Every level whose ENTRIES changed must be synced: the created
-	// ancestors AND "agents" (pre-existing, but it now owns the newagent
-	// entry). "inbox" changes twice — once when tmp is created and again when
-	// new is — so it must be synced after the second creation too; asserting
-	// "exactly once" would accept a sync that happened before new existed
-	// (the defect the first version of this test encoded).
+	// Every directory that owns an entry of the new tree: the created
+	// ancestors, plus "agents" and the pinned root, which pre-exist but now
+	// own the newagent entry and the agents entry respectively.
 	for _, dir := range []string{
+		".",
 		"agents",
 		filepath.Join("agents", "newagent"),
 		filepath.Join("agents", "newagent", "inbox"),
@@ -211,15 +237,9 @@ func TestDeliverToInboxesSyncsFirstContactMailboxTree(t *testing.T) {
 			t.Fatalf("mailbox level %s was never synced (all: %v)", dir, synced)
 		}
 	}
-	if synced[filepath.Join("agents", "newagent", "inbox")] < 2 {
-		t.Fatalf("inbox must be synced after each child (tmp, new) is created; got %d (all: %v)", synced[filepath.Join("agents", "newagent", "inbox")], synced)
-	}
-	for _, leaf := range []string{
-		filepath.Join("agents", "newagent", "inbox", "tmp"),
-		filepath.Join("agents", "newagent", "inbox", "new"),
-	} {
-		if synced[leaf] == 0 {
-			t.Fatalf("leaf %s was never synced (all: %v)", leaf, synced)
-		}
+	// The message's own leaf is synced by the delivery commit after the
+	// rename, not by the mailbox creation.
+	if synced[filepath.Join("agents", "newagent", "inbox", "new")] == 0 {
+		t.Fatalf("committed leaf was never synced (all: %v)", synced)
 	}
 }

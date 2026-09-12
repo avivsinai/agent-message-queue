@@ -76,30 +76,56 @@ var requiredMailboxLeaves = [...]MailboxLeaf{
 	MailboxReceipts,
 }
 
-// firstMissingAncestorAmbient walks from dir toward the filesystem root and
-// returns the shallowest missing level (the topmost ancestor that does not
-// exist yet), or "" when every level already exists.
-// Companion to DeliveryRoot.firstMissingAncestor for the ambient-path layout
-// helpers that run before a capability is opened.
-func firstMissingAncestorAmbient(dir string) (string, error) {
-	missing := ""
+// refuseNonDirectoryAmbient walks from dir toward the filesystem root and
+// fails when any existing level is not a directory. A regular file where a
+// mailbox directory must be is a corrupt layout, not a missing level:
+// refusing here means a multi-recipient delivery fails whole instead of
+// creating part of one tree and then erroring. Companion to
+// DeliveryRoot.refuseNonDirectoryAncestor for the ambient-path layout helpers
+// that run before a capability is opened.
+func refuseNonDirectoryAmbient(dir string) error {
 	current := dir
 	for {
 		info, err := os.Stat(current)
 		if err == nil {
 			if !info.IsDir() {
-				return "", fmt.Errorf("mailbox path %s exists and is not a directory", current)
+				return fmt.Errorf("mailbox path %s exists and is not a directory", current)
 			}
-			return missing, nil
+			return nil
 		} else if !errors.Is(err, fs.ErrNotExist) {
-			return "", fmt.Errorf("stat %s: %w", current, err)
+			return fmt.Errorf("stat %s: %w", current, err)
 		}
-		missing = current
 		parent := filepath.Dir(current)
 		if parent == current {
-			return missing, nil
+			return nil
 		}
 		current = parent
+	}
+}
+
+// ancestorChain returns the directories that OWN an entry on the path to dir:
+// dir's parent, that directory's parent, and so on, ending at and INCLUDING
+// stop. Deepest first.
+//
+// This set is the whole durability contract for creating dir. fsync(d)
+// persists d's entries and never d's own entry inside its parent, so dir
+// survives power loss only if every directory down this chain is synced —
+// including stop itself, which owns the entry for the shallowest level of a
+// brand-new subtree. dir is deliberately absent: a directory we just created
+// is empty, and the writer that puts a message in it syncs it at the commit.
+//
+// The chain is walked on every call, not only when this call created
+// something. An existing directory is not a durable directory: an earlier call
+// may have created it and then failed or crashed before syncing its parent, so
+// it is visible to Stat while its entry is not yet on stable storage. Stat
+// proves existence, never durability.
+func ancestorChain(dir, stop string) []string {
+	chain := make([]string, 0, 8)
+	for d := filepath.Dir(dir); ; d = filepath.Dir(d) {
+		chain = append(chain, d)
+		if d == stop || d == "." || d == string(filepath.Separator) || filepath.Dir(d) == d {
+			return chain
+		}
 	}
 }
 
@@ -168,41 +194,37 @@ func EnsureRootDirs(root string) error {
 			return err
 		}
 	}
-	return nil
+	// The root owns the entries for all three, so one fsync of the root makes
+	// them durable. Above the root is the operator's own path, not ours.
+	return SyncDir(root)
 }
 
 func EnsureAgentDirs(root, agent string) error {
 	if err := ValidateHandle(agent); err != nil {
 		return err
 	}
+	// Create the whole mailbox first, then make it durable once. The seven
+	// leaves share almost all of their ancestors, so syncing each leaf's chain
+	// separately would fsync the same six directories thirty-one times.
 	for _, leaf := range requiredMailboxLeaves {
 		dir := AgentMailboxPath(root, agent, leaf)
-		missing, err := firstMissingAncestorAmbient(dir)
-		if err != nil {
+		if err := refuseNonDirectoryAmbient(dir); err != nil {
 			return err
-		}
-		if missing == "" {
-			continue // tree exists; this helper owns tree durability only
 		}
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return err
 		}
-		// Sync every created level, leaf first, AND the first pre-existing
-		// ancestor: fsync(d) persists d's entries, never d's own entry in its
-		// parent, so the existing parent whose entry changed must be synced.
-		for d := dir; ; d = filepath.Dir(d) {
+	}
+	synced := make(map[string]bool, 8)
+	for _, leaf := range requiredMailboxLeaves {
+		for _, d := range ancestorChain(AgentMailboxPath(root, agent, leaf), root) {
+			if synced[d] {
+				continue
+			}
 			if err := SyncDir(d); err != nil {
-				return fmt.Errorf("sync created ancestor %s: %w", d, err)
+				return fmt.Errorf("sync mailbox ancestor %s: %w", d, err)
 			}
-			if d == missing {
-				parent := filepath.Dir(d)
-				if parent != d && parent != "." && parent != string(filepath.Separator) {
-					if err := SyncDir(parent); err != nil {
-						return fmt.Errorf("sync mailbox parent %s: %w", parent, err)
-					}
-				}
-				break
-			}
+			synced[d] = true
 		}
 	}
 	return nil
