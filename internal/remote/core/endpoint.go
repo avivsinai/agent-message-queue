@@ -123,6 +123,20 @@ func (e *Endpoint) Register(att Attachment) {
 	e.targets[s.TargetID] = t
 }
 
+// UnregisterAll unsubscribes every attachment without closing the store:
+// reconcile tests use it to drop a target mid-flight (the restart shape).
+// Part of B14a's small surface, matching the reviewed recut.
+func (e *Endpoint) UnregisterAll() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for id, t := range e.targets {
+		if t.unsubscribe != nil {
+			t.unsubscribe()
+		}
+		delete(e.targets, id)
+	}
+}
+
 // Close unsubscribes from every attachment and closes the store. Records and
 // the attachments' retained evidence survive for the next endpoint.
 func (e *Endpoint) Close() error {
@@ -659,27 +673,37 @@ func (e *Endpoint) inspect(targetID string) (any, error) {
 
 // onNative applies one native observation to the bound record.
 func (e *Endpoint) onNative(targetID string, ev NativeEvent) {
+	// B14a: no defer — every early return below unlocks explicitly, and the
+	// native ack (the slow, untrusted call) runs after the final unlock. The
+	// synchronous publishLocked stays under the lock until B14e reworks
+	// publication bounding; the ack is the unbounded-latency call and moves
+	// out now.
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	if ev.Type == EventEpochChanged || ev.Type == EventStatus {
+		e.mu.Unlock()
 		return
 	}
 	if ev.Key.RequestID == "" {
+		e.mu.Unlock()
 		return
 	}
 	rec, ok, err := e.store.Get(ev.Key)
 	if err != nil || !ok {
+		e.mu.Unlock()
 		return
 	}
 	if rec.State.Terminal() {
+		e.mu.Unlock()
 		return
 	}
 	switch ev.Type {
 	case EventRunCompleted, EventRunFailed, EventRunCancelled:
 		if rec.State != protocol.StateRunning && rec.State != protocol.StateDispatching && rec.State != protocol.StateUncertain {
+			e.mu.Unlock()
 			return
 		}
 		if e.crashAt(PointBeforeResult) != nil {
+			e.mu.Unlock()
 			return
 		}
 		switch ev.Type {
@@ -708,6 +732,7 @@ func (e *Endpoint) onNative(targetID string, ev NativeEvent) {
 	case EventLocalIntervention:
 		rec.LocalIntervention = true
 	default:
+		e.mu.Unlock()
 		return
 	}
 	rec.Revision++
@@ -716,21 +741,37 @@ func (e *Endpoint) onNative(targetID string, ev NativeEvent) {
 		// The durable write failed on an async path with no client waiting.
 		// Surface a visible storage-failure projection; Reconcile retries.
 		e.notifyStorageFailureLocked(rec, err)
+		e.mu.Unlock()
 		return
 	}
 	e.notifyLocked(rec)
 	if e.crashAt(PointAfterResult) != nil {
+		e.mu.Unlock()
 		return
 	}
+	// B14a: publish stays under e.mu (it writes store metadata that Close
+	// serializes against via this mutex); only the native ack — the slow,
+	// untrusted call — moves OUTSIDE e.mu. The durable ack memo
+	// (memoAckIntentLocked) has already made the intent replayable, so a
+	// wedged attachment ack must not stall command handling, and a crash
+	// mid-ack is recoverable via replayTerminalAck.
+	ackDigest := ""
+	var ackAtt Attachment
 	if rec.State.Terminal() {
 		if t, ok := e.targets[targetID]; ok {
-			digest, fresh := e.memoAckIntentLocked(rec, t)
-			if fresh && digest != "" && e.crashAt(PointBeforeAck) == nil {
-				t.att.AcknowledgeResult(ev.Key, rec.Epoch, digest)
-			}
+			ackDigest, _ = e.memoAckIntentLocked(rec, t)
+			ackAtt = t.att
 		}
 	}
 	e.publishLocked(rec)
+	ackKey, ackEpoch := ev.Key, rec.Epoch
+	terminal := rec.State.Terminal()
+	e.mu.Unlock()
+	// B14a: use the attachment captured under the lock; never re-read
+	// e.targets after unlocking (a concurrent Register would race the map).
+	if terminal && ackAtt != nil && ackDigest != "" && e.crashAt(PointBeforeAck) == nil {
+		ackAtt.AcknowledgeResult(ackKey, ackEpoch, ackDigest)
+	}
 }
 
 // notifyStorageFailureLocked surfaces a visible failure projection when a
@@ -847,9 +888,16 @@ func (e *Endpoint) replayTerminalAck(rec *requests.Record) error {
 		// or foreign ack must never release a different request's result).
 		return nil
 	}
+	// B14a: the native ack runs OUTSIDE e.mu like every other native call —
+	// a wedged attachment ack on this recovery path must not hold the
+	// endpoint mutex forever. The ack digest was durably memoed before it was
+	// first sent, so a crash mid-ack is replayable.
+	key := keyOfRecord(rec)
+	epoch, digest := rec.Epoch, rec.AckDigest
 	e.mu.Lock()
-	defer e.mu.Unlock()
-	t.att.AcknowledgeResult(keyOfRecord(rec), rec.Epoch, rec.AckDigest)
+	att := t.att
+	e.mu.Unlock()
+	att.AcknowledgeResult(key, epoch, digest)
 	return nil
 }
 
@@ -877,18 +925,24 @@ func (e *Endpoint) reconcileLive(rec *requests.Record) error {
 		ev, lookupErr = t.att.Lookup(key, rec.Epoch)
 	}
 
+	// B14a: no defer — every early return below unlocks explicitly, and the
+	// native ack (the slow, untrusted call) runs after the final unlock. A
+	// wedged attachment must never hold the endpoint mutex: the whole
+	// endpoint (every Handle/Reconcile/cancel) deadlocks behind it.
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	rec, exists, err := e.store.Get(key)
 	if err != nil {
+		e.mu.Unlock()
 		return err
 	}
 	if !exists || rec.State.Terminal() {
+		e.mu.Unlock()
 		return nil
 	}
 	switch {
 	case !ok || lookupErr != nil:
 		if rec.State == protocol.StateUncertain {
+			e.mu.Unlock()
 			return nil
 		}
 		rec.State = protocol.StateUncertain
@@ -896,11 +950,13 @@ func (e *Endpoint) reconcileLive(rec *requests.Record) error {
 	case ev.Class == EvidenceTentative:
 		// Bound but native ownership not yet proven. Never reject a submission
 		// that is still about to execute; re-check next tick.
+		e.mu.Unlock()
 		return nil
 	case ev.Class == EvidenceUnknown:
 		// Delivered but admission-unknown (transport ambiguity, or an API that
 		// cannot report its own rejection). Keep the correlation, stay uncertain.
 		if rec.State == protocol.StateUncertain {
+			e.mu.Unlock()
 			return nil
 		}
 		rec.State = protocol.StateUncertain
@@ -922,6 +978,7 @@ func (e *Endpoint) reconcileLive(rec *requests.Record) error {
 		rec.Interaction = nil
 	case ev.Admitted:
 		if rec.State == protocol.StateRunning && rec.NativeRun != nil && *rec.NativeRun == ev.RunID {
+			e.mu.Unlock()
 			return nil
 		}
 		rec.State = protocol.StateRunning
@@ -937,11 +994,24 @@ func (e *Endpoint) reconcileLive(rec *requests.Record) error {
 	rec.ObservedAt = protocol.FormatTime(e.now())
 	if err := e.store.Update(rec); err != nil {
 		e.notifyStorageFailureLocked(rec, err)
+		e.mu.Unlock()
 		return err
 	}
 	e.notifyLocked(rec)
+	// B14a: the durable ack memo was written under the lock above
+	// (memoAckIntentLocked), so the replay path stays correct if we
+	// crash before the native call. The native ack itself runs OUTSIDE e.mu —
+	// a wedged attachment ack must not hold the endpoint mutex forever.
+	ackKey, ackEpoch, ackDigest, ackAtt := key, rec.Epoch, "", Attachment(nil)
 	if rec.State.Terminal() && ok {
-		e.ackTerminalLocked(rec, t)
+		ackDigest, _ = e.memoAckIntentLocked(rec, t)
+		if ackDigest != "" {
+			ackAtt = t.att
+		}
+	}
+	e.mu.Unlock()
+	if ackAtt != nil && ackDigest != "" {
+		ackAtt.AcknowledgeResult(ackKey, ackEpoch, ackDigest)
 	}
 	return nil
 }
@@ -1119,25 +1189,6 @@ func (e *Endpoint) crashAt(point string) error {
 		return fmt.Errorf("%w %s: %w", ErrCrashed, point, err)
 	}
 	return nil
-}
-
-// ackTerminalLocked persists the acknowledgement intent for a terminal record
-// and then releases the attachment's retained evidence. The ack digest is the
-// evidence digest of the outcome being released (not the input digest), and
-// it is durable BEFORE the native call: a crash after the terminal commit but
-// before (or during) the native ack leaves a record that Reconcile can replay
-// the ack from, so the attachment's one unacked-result slot cannot wedge the
-// next submit with busy. A record whose terminal outcome retained no evidence
-// needs no ack and gets none. Native acks are fire-and-forget: a failed store
-// write skips the native call so the retained evidence survives for replay.
-// The ack bookkeeping is a rewrite in place without a revision bump, the same
-// contract as MarkPublished. The caller holds e.mu.
-func (e *Endpoint) ackTerminalLocked(rec *requests.Record, t *target) {
-	digest, fresh := e.memoAckIntentLocked(rec, t)
-	if !fresh {
-		return
-	}
-	t.att.AcknowledgeResult(keyOfRecord(rec), rec.Epoch, digest)
 }
 
 // memoAckIntentLocked computes the evidence digest of a terminal record's
