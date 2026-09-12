@@ -257,3 +257,121 @@ func TestTargetIDNoCollision(t *testing.T) {
 		t.Fatalf("distinct threads collapsed to one target: %s", a)
 	}
 }
+
+// TestAcknowledgeResultReleasesRetainedEvidence reproduces
+// agent-message-queue-611.22.24 (codex ack no-op): AcknowledgeResult was an
+// empty function and nothing was ever removed, so the endpoint's convergence
+// precondition — "once a native ack lands the attachment retains nothing and
+// Lookup reports EvidenceNone" — never held for codex. Every terminal record
+// re-asked Lookup on every reconcile tick, forever, and each miss cost a full
+// thread/read of the transcript.
+func TestAcknowledgeResultReleasesRetainedEvidence(t *testing.T) {
+	sock, srv := startFakeAppServer(t)
+	att, err := Attach(sock, "t1")
+	if err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	t.Cleanup(func() { _ = att.Close() })
+	<-srv.calls // initialize
+	<-srv.calls // thread/resume
+
+	s := att.Inspect()
+	key := requests.Key{CreatorHost: "local", TargetID: s.TargetID, RequestID: "11111111-1111-4111-8111-111111111801"}
+	done := make(chan struct{})
+	go func() {
+		_, _ = att.Submit(core.BoundRequest{Key: key, Epoch: s.Epoch, Input: protocol.SubmitInput{Text: "work"}})
+		close(done)
+	}()
+	<-srv.calls // turn/start
+	srv.notify(t, "turn/started", `{"threadId":"t1","turn":{"id":"u1"}}`)
+	srv.notify(t, "item/started", `{"threadId":"t1","turnId":"u1","item":{"type":"userMessage","id":"i1","clientId":"`+key.RequestID+`","content":[]}}`)
+	<-done
+	srv.notify(t, "item/completed", `{"threadId":"t1","turnId":"u1","completedAtMs":1,"item":{"type":"agentMessage","id":"i2","text":"OUT"}}`)
+	srv.notify(t, "turn/completed", `{"threadId":"t1","turn":{"id":"u1","status":"completed"}}`)
+
+	var ev core.Evidence
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		ev, _ = att.Lookup(key, s.Epoch)
+		if ev.State == protocol.StateCompleted {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if ev.State != protocol.StateCompleted || ev.Result == nil || ev.Result.Text != "OUT" {
+		t.Fatalf("terminal evidence not retained before ack: %+v", ev)
+	}
+
+	// A wrong digest must not release a different request's result.
+	att.AcknowledgeResult(key, s.Epoch, protocol.EvidenceDigest(&protocol.Result{Text: "something else"}))
+	if lk, _ := att.Lookup(key, s.Epoch); lk.Class == core.EvidenceNone {
+		t.Fatal("a wrong-digest ack released the retained evidence")
+	}
+
+	// The matching digest releases it, and Lookup must report that nothing is
+	// retained WITHOUT falling through to the thread/read history (whose copy
+	// would look like fresh evidence and restart the ack loop).
+	att.AcknowledgeResult(key, s.Epoch, protocol.EvidenceDigest(ev.Result))
+	drained := len(srv.calls)
+	lk, err := att.Lookup(key, s.Epoch)
+	if err != nil {
+		t.Fatalf("lookup after ack: %v", err)
+	}
+	if lk.Class != core.EvidenceNone || lk.Result != nil {
+		t.Fatalf("ack did not release retained evidence: class=%s result=%+v", lk.Class, lk.Result)
+	}
+	if len(srv.calls) != drained {
+		t.Fatal("Lookup after ack fell through to a thread/read history call")
+	}
+}
+
+// TestUnconfirmedTurnStartIsUncertainNotRejected reproduces
+// agent-message-queue-611.22.31 (codex unconfirmed -> rejected): turn/start
+// had already returned a turn id, so the text may be RUNNING in Codex, but an
+// unconfirmed start returned a REFUSAL code. The endpoint committed a
+// terminal `rejected` record it never reconciles again; the caller retried
+// with a fresh id and the prompt ran twice. Absence of our confirmation is
+// uncertainty, not proof of refusal: report an error (the endpoint's uncertain
+// path) and keep the correlation so the run can still be resolved.
+func TestUnconfirmedTurnStartIsUncertainNotRejected(t *testing.T) {
+	sock, srv := startFakeAppServer(t)
+	att, err := Attach(sock, "t1")
+	if err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	t.Cleanup(func() { _ = att.Close() })
+	<-srv.calls // initialize
+	<-srv.calls // thread/resume
+
+	s := att.Inspect()
+	key := requests.Key{CreatorHost: "local", TargetID: s.TargetID, RequestID: "11111111-1111-4111-8111-111111111802"}
+	type admResult struct {
+		adm core.Admission
+		err error
+	}
+	done := make(chan admResult, 1)
+	go func() {
+		adm, err := att.Submit(core.BoundRequest{Key: key, Epoch: s.Epoch, Input: protocol.SubmitInput{Text: "work"}})
+		done <- admResult{adm, err}
+	}()
+	<-srv.calls // turn/start; the server answers with a turn id
+	srv.notify(t, "turn/started", `{"threadId":"t1","turn":{"id":"u1"}}`)
+	// No userMessage item ever confirms the turn. Close the app-server so the
+	// client.Done() arm fires instead of waiting out the confirm timeout.
+	_ = srv.ws.close()
+
+	select {
+	case r := <-done:
+		if r.err == nil {
+			t.Fatalf("unconfirmed turn/start returned no error: %+v", r.adm)
+		}
+		if r.adm.Code != "" {
+			t.Fatalf("unconfirmed turn/start returned refusal code %q; it must be uncertain, not a refusal", r.adm.Code)
+		}
+		if r.adm.RunID == "" {
+			t.Fatal("unconfirmed turn/start dropped the run id; the correlation must survive so the run can be resolved")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("submit did not return after the app-server closed")
+	}
+}

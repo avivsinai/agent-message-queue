@@ -54,6 +54,11 @@ type run struct {
 	// delivered when the run confirms.
 	cancelPending bool
 	queued        bool
+	// acked records that the endpoint acknowledged this run's terminal
+	// result. The retained payload is released and Lookup reports
+	// EvidenceNone for the key, so reconcile's ack replay converges instead
+	// of re-asking every tick (agent-message-queue-611.22.24).
+	acked bool
 }
 
 // Attachment is one running Codex thread reached through the shared
@@ -301,11 +306,16 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 	case <-confirmedCh:
 		return core.Admission{Admitted: true, RunID: r.runID()}, nil
 	case <-time.After(confirmTimeout):
-		a.dropRun(req.Key)
-		return core.Admission{Code: protocol.CodeBusy, Message: "turn/start was not confirmed by our own userMessage item; it may have joined an active turn"}, nil
+		// turn/start already returned a turn id: the text may be RUNNING in
+		// Codex. Absence of our confirmation is NOT proof of refusal, and a
+		// refusal code would commit a terminal `rejected` record that
+		// reconcile never revisits — the caller retries with a fresh id and
+		// the prompt runs twice. Report an ERROR so the endpoint records
+		// UNCERTAIN, and KEEP the correlation (no dropRun) so Lookup and
+		// lookupHistory can still resolve it (agent-message-queue-611.22.31).
+		return core.Admission{RunID: r.runID()}, fmt.Errorf("turn/start was not confirmed by our own userMessage item within %s; the turn may be running", confirmTimeout)
 	case <-a.client.Done():
-		a.dropRun(req.Key)
-		return core.Admission{Code: protocol.CodeAttachmentLost, Message: "app-server closed during turn/start"}, nil
+		return core.Admission{RunID: r.runID()}, errors.New("app-server closed during turn/start; the turn may be running")
 	}
 }
 
@@ -387,6 +397,15 @@ func refusal(err error) core.Admission {
 func (a *Attachment) Lookup(key requests.Key, epoch string) (core.Evidence, error) {
 	a.mu.Lock()
 	if r, ok := a.runs[key]; ok && r.epoch == epoch {
+		if r.acked {
+			// Released: the endpoint acknowledged this result and holds it
+			// durably. Report that nothing is retained — and do NOT fall
+			// through to the thread/read history, whose copy would look like
+			// fresh evidence and restart the ack loop.
+			ev := core.Evidence{Known: true, Admitted: true, Class: core.EvidenceNone, RunID: r.runID(), State: r.state}
+			a.mu.Unlock()
+			return ev, nil
+		}
 		ev := core.Evidence{Known: true, RunID: r.runID(), State: r.state, LocalIntervention: r.local, Interaction: r.interaction}
 		switch {
 		case r.confirmed || r.queued:
@@ -466,7 +485,14 @@ func (a *Attachment) lookupHistory(key requests.Key) (core.Evidence, error) {
 		}
 		return ev, nil
 	}
-	return core.Evidence{}, nil
+	// No turn carried our clientId. That is NOT positive proof the request was
+	// never admitted: the clientId echo is schema-backed but unverified
+	// against a live app-server, and a single omitted field would otherwise
+	// make the first reconcile after a restart REJECT every in-flight request
+	// while its turns keep running. Absence of correlation is unknown —
+	// uncertain, keep correlation — never EvidenceNone
+	// (agent-message-queue-611.22.31).
+	return core.Evidence{Known: true, Class: core.EvidenceUnknown}, nil
 }
 
 // CancelExact implements core.Attachment.
@@ -545,7 +571,28 @@ func (a *Attachment) Respond(key requests.Key, epoch, interactionID, option stri
 
 // AcknowledgeResult implements core.Attachment. Codex keeps the transcript;
 // nothing is retained here beyond the process.
-func (a *Attachment) AcknowledgeResult(requests.Key, string, string) {}
+// AcknowledgeResult implements core.Attachment: it releases the retained
+// terminal evidence for the key. It was a no-op, so the convergence
+// precondition the endpoint relies on ("once a native ack lands the
+// attachment retains nothing and Lookup reports EvidenceNone") never held for
+// codex: every terminal record re-asked Lookup on every reconcile tick,
+// forever. The digest must name exactly this run's retained result, so a
+// stale or foreign ack can never release a different request's evidence.
+func (a *Attachment) AcknowledgeResult(key requests.Key, epoch, digest string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	r, ok := a.runs[key]
+	if !ok || r.epoch != epoch || !r.state.Terminal() || r.acked {
+		return
+	}
+	if digest == "" || digest != protocol.EvidenceDigest(r.result()) {
+		return
+	}
+	// Release the payload; the endpoint holds it durably now.
+	r.acked = true
+	r.text.Reset()
+	r.errText = ""
+}
 
 // Subscribe implements core.Attachment.
 func (a *Attachment) Subscribe(fn func(core.NativeEvent)) func() {
