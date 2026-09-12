@@ -59,13 +59,15 @@ func TestClientRoundTripOverUnixWebSocket(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	c := newClient(ws)
+	h := &swappableHandlers{}
+	c := newClient(ws, h.handlers())
+	attachTestHandlers(c, h)
 	t.Cleanup(func() { _ = c.Close() })
 	notes := make(chan Notification, 4)
-	c.OnNotification = func(n Notification) { notes <- n }
-	c.OnServerRequest = func(r ServerRequest) {
+	handlersOf(c).setNote(func(n Notification) { notes <- n })
+	handlersOf(c).setReq(func(r ServerRequest) {
 		_ = c.Respond(r.ID, map[string]string{"decision": "decline"})
-	}
+	})
 
 	var result struct {
 		Turn struct {

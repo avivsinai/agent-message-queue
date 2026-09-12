@@ -89,12 +89,19 @@ func WithApprovals(on bool) Option { return func(a *Attachment) { a.approve = on
 // Attach connects to the daemon socket, resumes threadID as a second client,
 // and starts consuming its notifications.
 func Attach(socketPath, threadID string, opts ...Option) (*Attachment, error) {
-	client, err := Dial(socketPath)
-	if err != nil {
-		return nil, err
-	}
+	// The attachment is built BEFORE the connection so its handlers can be
+	// installed as Dial arguments: the read pump starts inside Dial, and
+	// assigning handlers afterwards raced it (and dropped any frame that
+	// arrived first).
+	//
+	// What makes that order safe is NOT that the handlers avoid a.client —
+	// onNotification can reach it through onItem -> deliverPendingCancel.
+	// It is that every path to a.client is reached only through runs,
+	// byTurn, byClientID or listeners, and all four are empty until Submit
+	// or Subscribe, neither of which can run before Attach returns. Keep
+	// that true: a handler that touches a.client outside those maps would
+	// read it before the assignment below.
 	a := &Attachment{
-		client:       client,
 		threadID:     threadID,
 		targetID:     TargetID(threadID),
 		epoch:        fmt.Sprintf("cx-%d", time.Now().UnixNano()),
@@ -108,8 +115,14 @@ func Attach(socketPath, threadID string, opts ...Option) (*Attachment, error) {
 	for _, o := range opts {
 		o(a)
 	}
-	client.OnNotification = a.onNotification
-	client.OnServerRequest = a.onServerRequest
+	client, err := Dial(socketPath, Handlers{
+		OnNotification:  a.onNotification,
+		OnServerRequest: a.onServerRequest,
+	})
+	if err != nil {
+		return nil, err
+	}
+	a.client = client
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := client.Call(ctx, "initialize", map[string]any{"clientInfo": map[string]string{"name": ClientName, "version": Version, "title": "AMQ Remote"}}, nil); err != nil {
@@ -129,8 +142,18 @@ func Attach(socketPath, threadID string, opts ...Option) (*Attachment, error) {
 		_ = client.Close()
 		return nil, fmt.Errorf("thread/resume %s: %w", threadID, err)
 	}
+	// The read pump has been live since Dial, so these fields are already
+	// shared with onNotification: take the lock. And thread/resume answers
+	// with a snapshot taken BEFORE any notification that arrived while the
+	// call was in flight — applying its status unconditionally would undo a
+	// turn/started we have already seen and publish "idle" for a running
+	// thread. A turn we know about wins over the older snapshot.
+	a.mu.Lock()
 	a.cwd = resumed.Thread.Cwd
-	a.status = threadStatus(resumed.Thread.Status.Type)
+	if a.activeTurn == "" {
+		a.status = threadStatus(resumed.Thread.Status.Type)
+	}
+	a.mu.Unlock()
 	go func() {
 		<-client.Done()
 		a.mu.Lock()
@@ -746,7 +769,8 @@ func (r *run) result() *protocol.Result {
 // LoadedThreads lists the threads the daemon currently has running, so the
 // endpoint can attach to each of them. It opens a short-lived connection.
 func LoadedThreads(socketPath string) ([]string, error) {
-	client, err := Dial(socketPath)
+	// Request-only connection: no notifications are consumed.
+	client, err := Dial(socketPath, Handlers{})
 	if err != nil {
 		return nil, err
 	}
