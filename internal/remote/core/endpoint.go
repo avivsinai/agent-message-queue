@@ -1223,17 +1223,35 @@ func (e *Endpoint) Reconcile() error {
 	// held per-record (CompactOne), never across the sweep (Pro B7).
 	if e.shouldCompact() {
 		cutoff := e.now().Add(-e.compactHorizon)
-		recs2, _ := e.store.List()
-		for i, rec := range recs2 {
-			if i >= 100 {
+		recs2, lerr := e.store.List()
+		if lerr != nil && firstErr == nil {
+			firstErr = lerr
+		}
+		compacted := 0
+		for _, rec := range recs2 {
+			// Count only successful compactions toward the limit, not every
+			// record the loop looks at (Pro B1: tombstones sort ahead of
+			// live records would starve forever on the i counter).
+			if compacted >= 100 {
 				break
 			}
 			if !rec.State.Terminal() || rec.Tombstone {
 				continue
 			}
 			e.mu.Lock()
-			e.store.CompactOne(keyOfRecord(rec), cutoff)
+			ok, cerr := e.store.CompactOne(keyOfRecord(rec), cutoff)
 			e.mu.Unlock()
+			if cerr != nil {
+				// Pro B2: feed store-level errors into firstErr and stop the
+				// sweep (store_closed/storage_full will not fix mid-sweep).
+				if firstErr == nil {
+					firstErr = cerr
+				}
+				break
+			}
+			if ok {
+				compacted++
+			}
 		}
 	}
 	return firstErr

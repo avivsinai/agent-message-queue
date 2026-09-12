@@ -190,3 +190,57 @@ func TestB14eCompactBoundedPerRecord(t *testing.T) {
 		t.Fatal("live Handle was not admitted")
 	}
 }
+
+// TestB14eCompactBudgetCountsCompactedNotScanned reproduces Pro B1: the
+// budget counter must count successful compactions, not records scanned.
+// Seed 110 already-tombstoned records (which sort ahead of the live one) plus
+// one live terminal record older than the horizon. With the old i-based
+// counter, the loop scans 100 tombstones, breaks, and the live record is never
+// compacted. With the compacted-counter, the live record IS compacted.
+func TestB14eCompactBudgetCountsCompactedNotScanned(t *testing.T) {
+	store, now := openStore(t)
+	// Seed 110 settled terminal records whose IDs sort ahead of the live one
+	// (prefix "11111111" sorts before "22222222").
+	for i := 0; i < 110; i++ {
+		id := fmt.Sprintf("11111111-1111-4111-8111-%012d", i+1)
+		settledCompletedRecord(t, store, id, "2026-09-01T00:00:00Z")
+	}
+	// Compact them first to produce tombstones.
+	cutoff := now().Add(time.Second)
+	recs, _ := store.List()
+	for _, rec := range recs {
+		if rec.State.Terminal() && !rec.Tombstone {
+			store.CompactOne(requests.Key{CreatorHost: rec.CreatorHost, TargetID: rec.TargetID, RequestID: rec.RequestID}, cutoff)
+		}
+	}
+	// Verify we have 110 tombstones.
+	recs, _ = store.List()
+	tombstoned := 0
+	for _, rec := range recs {
+		if rec.Tombstone {
+			tombstoned++
+		}
+	}
+	if tombstoned < 110 {
+		t.Fatalf("setup: only %d tombstones, want >=110", tombstoned)
+	}
+	// Now add one live terminal record older than the horizon, whose ID
+	// sorts AFTER the tombstones (prefix "22222222").
+	liveID := "22222222-2222-4222-8222-222222222201"
+	liveKey := settledCompletedRecord(t, store, liveID, "2026-09-01T00:00:00Z")
+
+	// Run Compact with limit=100. The old i-based counter would scan 100
+	// tombstones, break, and never reach the live record. The compacted-
+	// counter skips tombstones and compacts the live one.
+	n, err := store.Compact(now().Add(time.Second), 100)
+	if err != nil {
+		t.Fatalf("compact: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("compact: n=%d, want 1 (only the live record; tombstones already compacted) — budget counted scanned records, not compacted (Pro B1)", n)
+	}
+	got, _, _ := store.Get(liveKey)
+	if !got.Tombstone {
+		t.Fatal("live record was not compacted — budget counted scanned records, not compacted (Pro B1)")
+	}
+}
