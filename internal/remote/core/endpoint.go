@@ -774,8 +774,14 @@ func (e *Endpoint) onNative(targetID string, ev NativeEvent) {
 	// Everything else flows — including a completion for a cancelled record.
 	switch ev.Type {
 	case EventRunCompleted, EventRunFailed, EventRunCancelled:
-		if ev.RunID != "" && rec.NativeRun != nil && *rec.NativeRun == ev.RunID && rec.Result != nil {
-			// Already recorded this run's outcome — a duplicate native event.
+		// Pro #2: the duplicate guard must compare EVIDENCE, not just presence.
+		// A late FINAL result F for the same run is NOT a duplicate of partial P
+		// — the digests differ. Dropping F keeps P, memoed AckDigest(P), while
+		// the runtime holds F: digests never match, slot never releases. Drop
+		// only when the digest equals what we already recorded.
+		if ev.RunID != "" && rec.NativeRun != nil && *rec.NativeRun == ev.RunID && rec.Result != nil &&
+			protocol.EvidenceDigest(ev.Result) == protocol.EvidenceDigest(rec.Result) {
+			// Same run, same evidence — a true duplicate native event.
 			e.mu.Unlock()
 			return
 		}
