@@ -1519,7 +1519,6 @@ func (e *Endpoint) finishAdmissionLocked(rec *requests.Record, exists bool, t *t
 	}
 	if adm.Admitted && (rec.State == protocol.StateCompleted || rec.State == protocol.StateFailed) {
 		// The run finished before Submit returned. Record the result.
-		rec.Revision++
 		c := causeCompleted
 		if rec.State == protocol.StateFailed {
 			c = causeFailed
