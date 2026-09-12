@@ -1200,7 +1200,14 @@ func (e *Endpoint) replayTerminalAck(rec *requests.Record) error {
 		// crash. Replay would acknowledge evidence the attachment discarded.
 		return nil
 	}
-	if ev.State != rec.State || ev.Result == nil || protocol.EvidenceDigest(ev.Result) != rec.AckDigest {
+	// B2: validate retained terminal evidence against the bound run + digest,
+	// NOT against the client-facing state. A cancelled record keeps its
+	// promise and never flips to completed (Q2 ruling), so "endpoint cancelled
+	// + native completed" is a SUPPORTED shape. The old ev.State != rec.State
+	// gate rejected exactly that: digest matched, states differed, slot
+	// stayed occupied, later submits refused busy forever. The digest already
+	// proves it is THIS result; the run id proves it is THIS run.
+	if !ev.State.Terminal() || ev.Result == nil || protocol.EvidenceDigest(ev.Result) != rec.AckDigest {
 		// The retained evidence is not the outcome this record acked (a stale
 		// or foreign ack must never release a different request's result).
 		return nil
