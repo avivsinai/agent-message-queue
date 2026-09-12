@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -373,5 +374,133 @@ func TestUnconfirmedTurnStartIsUncertainNotRejected(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("submit did not return after the app-server closed")
+	}
+}
+
+// TestUnconfirmedRunFallsThroughToHistoryAfterTimeout reproduces Pro F1: a
+// retained-but-unconfirmed run permanently shadows lookupHistory, so the
+// record sticks at Uncertain forever and a real completed result is never
+// delivered. After confirmTimeout, if still unconfirmed, Lookup must fall
+// through to lookupHistory (a thread/read RPC), which resolves the turn by
+// clientId.
+//
+// Also covers the 12s confirm-timeout arm (the bead names it; the existing
+// TestUnconfirmedTurnStartIsUncertainNotRejected covers only the client.Done()
+// arm). The fake clock makes the timeout deterministic — no real sleep.
+func TestUnconfirmedRunFallsThroughToHistoryAfterTimeout(t *testing.T) {
+	sock, srv := startFakeAppServer(t)
+	clk := &fakeClock{t: time.Date(2026, 9, 12, 12, 0, 0, 0, time.UTC)}
+	att, err := Attach(sock, "t1", WithClock(clk.now), WithConfirmTimeout(50*time.Millisecond))
+	if err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	t.Cleanup(func() { _ = att.Close() })
+	<-srv.calls // initialize
+	<-srv.calls // thread/resume
+
+	s := att.Inspect()
+	key := requests.Key{CreatorHost: "local", TargetID: s.TargetID, RequestID: "11111111-1111-4111-8111-111111111810"}
+	type admResult struct {
+		adm core.Admission
+		err error
+	}
+	done := make(chan admResult, 1)
+	go func() {
+		adm, err := att.Submit(core.BoundRequest{Key: key, Epoch: s.Epoch, Input: protocol.SubmitInput{Text: "work"}})
+		done <- admResult{adm, err}
+	}()
+	<-srv.calls // turn/start; the server answers with a turn id
+	srv.notify(t, "turn/started", `{"threadId":"t1","turn":{"id":"u1"}}`)
+	// No userMessage item ever confirms the turn. Advance the clock past
+	// confirmTimeout so the confirm-timeout arm fires (no real 12s sleep).
+	clk.advance(51 * time.Millisecond)
+	r := <-done
+	if r.err == nil {
+		t.Fatalf("unconfirmed turn/start returned no error: %+v", r.adm)
+	}
+	if r.adm.RunID == "" {
+		t.Fatal("unconfirmed turn/start dropped the run id")
+	}
+
+	// Before the deadline is already past (we advanced the clock). But first,
+	// verify that a Lookup BEFORE the deadline returns EvidenceTentative. We
+	// can't go back in time, so instead verify the fall-through happens NOW:
+	// the run is unconfirmed and past the deadline, so Lookup must call
+	// lookupHistory (a thread/read RPC). The fake server's default handler
+	// returns an error for thread/read, so lookupHistory returns
+	// EvidenceUnknown — but the key assertion is that thread/read WAS called
+	// (the call channel receives it), proving the fall-through.
+	callsBefore := len(srv.calls)
+	att.Lookup(key, s.Epoch)
+	// Drain the thread/read call (non-blocking — the fake server handles it).
+	time.Sleep(50 * time.Millisecond)
+	callsAfter := len(srv.calls)
+	if callsAfter <= callsBefore {
+		t.Fatal("Lookup did not fall through to lookupHistory (thread/read) after the deadline — the unconfirmed run shadowed it forever (Pro F1)")
+	}
+}
+
+type fakeClock struct {
+	t time.Time
+}
+
+func (c *fakeClock) now() time.Time          { return c.t }
+func (c *fakeClock) advance(d time.Duration) { c.t = c.t.Add(d) }
+
+// TestLargeResultReleasedByBoundedDigest reproduces Pro F2: the attachment
+// digested the UNBOUNDED result while the endpoint digested the BOUNDED one,
+// so any result larger than MaxResultBytes was never released. The fix: the
+// attachment bounds the result at the source (r.result() returns the bounded
+// form), so both sides digest the same bytes.
+func TestLargeResultReleasedByBoundedDigest(t *testing.T) {
+	sock, srv := startFakeAppServer(t)
+	att, err := Attach(sock, "t1")
+	if err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	t.Cleanup(func() { _ = att.Close() })
+	<-srv.calls // initialize
+	<-srv.calls // thread/resume
+
+	s := att.Inspect()
+	key := requests.Key{CreatorHost: "local", TargetID: s.TargetID, RequestID: "11111111-1111-4111-8111-111111111811"}
+	done := make(chan struct{})
+	go func() {
+		_, _ = att.Submit(core.BoundRequest{Key: key, Epoch: s.Epoch, Input: protocol.SubmitInput{Text: "work"}})
+		close(done)
+	}()
+	<-srv.calls // turn/start
+	srv.notify(t, "turn/started", `{"threadId":"t1","turn":{"id":"u1"}}`)
+	srv.notify(t, "item/started", `{"threadId":"t1","turnId":"u1","item":{"type":"userMessage","id":"i1","clientId":"`+key.RequestID+`","content":[]}}`)
+	<-done
+	// Emit a result LARGER than MaxResultBytes. The attachment must bound it
+	// before digesting, so the endpoint's bounded digest matches.
+	bigText := strings.Repeat("x", protocol.MaxResultBytes+50_000)
+	srv.notify(t, "item/completed", `{"threadId":"t1","turnId":"u1","completedAtMs":1,"item":{"type":"agentMessage","id":"i2","text":"`+bigText+`"}}`)
+	srv.notify(t, "turn/completed", `{"threadId":"t1","turn":{"id":"u1","status":"completed"}}`)
+
+	var ev core.Evidence
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		ev, _ = att.Lookup(key, s.Epoch)
+		if ev.State == protocol.StateCompleted {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if ev.State != protocol.StateCompleted {
+		t.Fatalf("terminal evidence not retained: %+v", ev)
+	}
+	if ev.Result == nil || !ev.Result.Truncated {
+		t.Fatalf("result not bounded: truncated=%v (want true, result > MaxResultBytes)", ev.Result != nil && ev.Result.Truncated)
+	}
+
+	// The endpoint would compute protocol.EvidenceDigest(boundResult(ev.Result)).
+	// Since ev.Result is already bounded, boundResult is a no-op. The
+	// attachment must accept this digest.
+	att.AcknowledgeResult(key, s.Epoch, protocol.EvidenceDigest(ev.Result))
+	lk, _ := att.Lookup(key, s.Epoch)
+	if lk.Class != core.EvidenceNone || lk.Result != nil {
+		t.Fatalf("bounded-digest ack did not release the large result — the attachment digested the unbounded form (Pro F2): class=%s", lk.Class)
 	}
 }

@@ -44,6 +44,11 @@ type run struct {
 	local        bool
 	interaction  *protocol.Interaction
 	approvalReqs map[string]json.RawMessage
+	// createdAt is when the run was bound, for the unconfirmed-shadow
+	// deadline (Pro F1): a retained-but-unconfirmed run shadows lookupHistory
+	// in Lookup. After confirmTimeout, if still unconfirmed, the run stops
+	// shadowing so lookupHistory can resolve the turn by clientId.
+	createdAt time.Time
 	// confirmed (the bool) is the durable ownership flag every consumer reads:
 	// until the userMessage item carrying this run's clientUserMessageId is
 	// observed, the run is TENTATIVE and must not be cancelled, attributed, or
@@ -70,6 +75,10 @@ type Attachment struct {
 	epoch    string
 	cwd      string
 	approve  bool
+	now      func() time.Time
+	// confirmTimeout is how long Submit waits for our own userMessage item.
+	// Overridable for tests.
+	confirmTimeout time.Duration
 
 	mu           sync.Mutex
 	status       string
@@ -91,6 +100,12 @@ type Option func(*Attachment)
 // is verified live.
 func WithApprovals(on bool) Option { return func(a *Attachment) { a.approve = on } }
 
+// WithClock overrides the attachment's clock (for tests). Production uses time.Now.
+func WithClock(now func() time.Time) Option { return func(a *Attachment) { a.now = now } }
+
+// WithConfirmTimeout overrides the confirm timeout (for tests).
+func WithConfirmTimeout(d time.Duration) Option { return func(a *Attachment) { a.confirmTimeout = d } }
+
 // Attach connects to the daemon socket, resumes threadID as a second client,
 // and starts consuming its notifications.
 func Attach(socketPath, threadID string, opts ...Option) (*Attachment, error) {
@@ -99,16 +114,18 @@ func Attach(socketPath, threadID string, opts ...Option) (*Attachment, error) {
 		return nil, err
 	}
 	a := &Attachment{
-		client:       client,
-		threadID:     threadID,
-		targetID:     TargetID(threadID),
-		epoch:        fmt.Sprintf("cx-%d", time.Now().UnixNano()),
-		status:       "unknown",
-		runs:         map[requests.Key]*run{},
-		byTurn:       map[string]*run{},
-		byClientID:   map[string]*run{},
-		cancelIntent: map[requests.Key]bool{},
-		listeners:    map[int]func(core.NativeEvent){},
+		client:         client,
+		threadID:       threadID,
+		targetID:       TargetID(threadID),
+		epoch:          fmt.Sprintf("cx-%d", time.Now().UnixNano()),
+		status:         "unknown",
+		runs:           map[requests.Key]*run{},
+		byTurn:         map[string]*run{},
+		byClientID:     map[string]*run{},
+		cancelIntent:   map[requests.Key]bool{},
+		listeners:      map[int]func(core.NativeEvent){},
+		now:            time.Now,
+		confirmTimeout: confirmTimeout,
 	}
 	for _, o := range opts {
 		o(a)
@@ -245,7 +262,7 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 		if err := a.call("turn/steer", map[string]any{"threadId": a.threadID, "expectedTurnId": activeTurn, "input": input, "clientUserMessageId": req.Key.RequestID}, nil); err != nil {
 			return refusal(err), nil
 		}
-		r := &run{key: req.Key, epoch: req.Epoch, state: protocol.StateRunning, turnID: activeTurn, confirmed: true, approvalReqs: map[string]json.RawMessage{}}
+		r := &run{key: req.Key, epoch: req.Epoch, state: protocol.StateRunning, turnID: activeTurn, confirmed: true, approvalReqs: map[string]json.RawMessage{}, createdAt: a.now()}
 		a.mu.Lock()
 		a.runs[req.Key] = r
 		a.byClientID[req.Key.RequestID] = r
@@ -258,7 +275,7 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 		if err := a.call("thread/queue/add", map[string]any{"threadId": a.threadID, "clientUserMessageId": req.Key.RequestID, "input": input}, nil); err != nil {
 			return refusal(err), nil
 		}
-		r := &run{key: req.Key, epoch: req.Epoch, state: protocol.StateRunning, queued: true, approvalReqs: map[string]json.RawMessage{}}
+		r := &run{key: req.Key, epoch: req.Epoch, state: protocol.StateRunning, queued: true, approvalReqs: map[string]json.RawMessage{}, createdAt: a.now()}
 		a.mu.Lock()
 		a.runs[req.Key] = r
 		a.byClientID[req.Key.RequestID] = r
@@ -271,7 +288,7 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 
 	// Idle turn/start. Register the run first so onItem can confirm our
 	// userMessage, then call unlocked, then require confirmation.
-	r := &run{key: req.Key, epoch: req.Epoch, state: protocol.StateRunning, approvalReqs: map[string]json.RawMessage{}, confirmedCh: make(chan struct{})}
+	r := &run{key: req.Key, epoch: req.Epoch, state: protocol.StateRunning, approvalReqs: map[string]json.RawMessage{}, confirmedCh: make(chan struct{}), createdAt: a.now()}
 	a.mu.Lock()
 	a.runs[req.Key] = r
 	a.byClientID[req.Key.RequestID] = r
@@ -305,7 +322,7 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 	select {
 	case <-confirmedCh:
 		return core.Admission{Admitted: true, RunID: r.runID()}, nil
-	case <-time.After(confirmTimeout):
+	case <-time.After(a.confirmTimeout):
 		// turn/start already returned a turn id: the text may be RUNNING in
 		// Codex. Absence of our confirmation is NOT proof of refusal, and a
 		// refusal code would commit a terminal `rejected` record that
@@ -313,9 +330,19 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 		// the prompt runs twice. Report an ERROR so the endpoint records
 		// UNCERTAIN, and KEEP the correlation (no dropRun) so Lookup and
 		// lookupHistory can still resolve it (agent-message-queue-611.22.31).
-		return core.Admission{RunID: r.runID()}, fmt.Errorf("turn/start was not confirmed by our own userMessage item within %s; the turn may be running", confirmTimeout)
+		//
+		// Pro F3: take a.mu for the runID read — confirmRun writes r.turnID
+		// under a.mu from the read-loop goroutine, and this arm has no
+		// channel-close edge to order the write.
+		a.mu.Lock()
+		rid := r.runID()
+		a.mu.Unlock()
+		return core.Admission{RunID: rid}, fmt.Errorf("turn/start was not confirmed by our own userMessage item within %s; the turn may be running", a.confirmTimeout)
 	case <-a.client.Done():
-		return core.Admission{RunID: r.runID()}, errors.New("app-server closed during turn/start; the turn may be running")
+		a.mu.Lock()
+		rid := r.runID()
+		a.mu.Unlock()
+		return core.Admission{RunID: rid}, errors.New("app-server closed during turn/start; the turn may be running")
 	}
 }
 
@@ -419,6 +446,20 @@ func (a *Attachment) Lookup(key requests.Key, epoch string) (core.Evidence, erro
 		default:
 			// Bound but native ownership not yet proven: tentative, never
 			// admitted, so reconcile leaves it running and never rejects it.
+			//
+			// Pro F1: a retained-but-unconfirmed run permanently shadows
+			// lookupHistory, so the record sticks at Uncertain forever and a
+			// real completed result is never delivered. After confirmTimeout,
+			// if still unconfirmed, STOP shadowing — fall through to
+			// lookupHistory, which resolves the turn by clientId == key.RequestID
+			// and can deliver the completed result. The deadline is the same
+			// bound Submit already waited: if our userMessage item never
+			// arrived within confirmTimeout, the race window dropped our text
+			// and the run will never confirm.
+			if a.now().Sub(r.createdAt) >= a.confirmTimeout {
+				a.mu.Unlock()
+				return a.lookupHistory(key)
+			}
 			ev.Class = core.EvidenceTentative
 		}
 		a.mu.Unlock()
@@ -786,8 +827,19 @@ func (a *Attachment) onServerRequest(req ServerRequest) {
 	a.emit(core.NativeEvent{Type: core.EventQuestion, Key: key, RunID: runID, Interaction: inter})
 }
 
+// result returns the BOUNDED terminal evidence. The bound is owned HERE,
+// at the source, so the endpoint's boundResult is a no-op and both sides
+// digest the same bytes (Pro F2: the attachment and the endpoint must
+// compute the ack digest over the same form — if the attachment digests the
+// unbounded result and the endpoint digests the bounded one, any result
+// larger than MaxResultBytes is never released).
 func (r *run) result() *protocol.Result {
-	return &protocol.Result{Text: r.text.String(), Error: r.errText}
+	res := &protocol.Result{Text: r.text.String(), Error: r.errText}
+	if len(res.Text) > protocol.MaxResultBytes {
+		res.Text = res.Text[:protocol.MaxResultBytes]
+		res.Truncated = true
+	}
+	return res
 }
 
 // LoadedThreads lists the threads the daemon currently has running, so the
