@@ -5,6 +5,8 @@
 package amqio
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -63,17 +65,42 @@ func (c *Carrier) Handle() string { return c.me }
 // message header. The handle is attribution inside this root; a cross-project
 // sender keeps its project so two same-named handles never share a key.
 func SourceHost(h format.Header) string {
-	host := "amq:" + h.From
+	// The creator host is part of the request KEY, so it must be injective:
+	// two different senders may never derive the same host. Sanitizing the
+	// readable form alone is not — every illegal rune maps to '-', and the
+	// "@" joining handle and project is itself illegal, so From="a" with
+	// project "b" and a bare From="a-b" both collapsed to "amq:a-b". Two
+	// callers then shared one record: the second submit was answered with the
+	// first's snapshot, and a cancel from one terminated the other's run.
+	// Project names are unvalidated (a config string or a directory basename),
+	// so "web app" and "web-app" collapsed the same way.
+	//
+	// A readable prefix is kept for humans and logs, but identity rests on a
+	// digest of the EXACT (from, project) pair with an unambiguous separator,
+	// so the mapping is injective by construction.
+	readable := sanitizeHostPart(h.From)
 	if h.FromProject != "" {
-		host += "@" + h.FromProject
+		readable += "." + sanitizeHostPart(h.FromProject)
 	}
+	return "amq:" + readable + "." + hostDigest(h.From, h.FromProject)
+}
+
+// hostDigest is a short, collision-resistant tag over the exact identity
+// pair. The length prefix makes the encoding unambiguous: ("ab","c") and
+// ("a","bc") hash differently even though a plain concatenation would not.
+func hostDigest(from, project string) string {
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%d:%s|%d:%s", len(from), from, len(project), project)))
+	return hex.EncodeToString(sum[:])[:8]
+}
+
+func sanitizeHostPart(s string) string {
 	return strings.Map(func(r rune) rune {
 		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_', r == '.', r == ':', r == '-':
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_', r == '-':
 			return r
 		}
 		return '-'
-	}, host)
+	}, s)
 }
 
 // ImportOnce reads every message in the endpoint's inbox/new, hands each
