@@ -1275,10 +1275,8 @@ func (e *Endpoint) reconcileCancelRetry(rec *requests.Record) error {
 		if err != nil || !exists {
 			return nil
 		}
-		c := causeCompleted
-		if lookupEv.State == protocol.StateFailed {
-			c = causeFailed
-		}
+		// The record is terminal (cancelled); record the result as evidence
+		// via causeNone so State is unchanged.
 		runID := ""
 		if rec.NativeRun != nil {
 			runID = *rec.NativeRun
@@ -1287,7 +1285,12 @@ func (e *Endpoint) reconcileCancelRetry(rec *requests.Record) error {
 			runID = lookupEv.RunID
 		}
 		rec.Revision++
-		e.transitionLocked(rec, c, nativeEvidence{runID: runID, result: lookupEv.Result})
+		e.transitionLocked(rec, causeNone, nativeEvidence{runID: runID, result: lookupEv.Result})
+		// The run is terminal. If a cancel was pending, it is now confirmed
+		// (the run stopped, natively or via the prior abort).
+		if rec.Cancel != nil && rec.Cancel.Disposition != protocol.CancelConfirmed {
+			rec.Cancel.Disposition = protocol.CancelConfirmed
+		}
 		rec.ObservedAt = protocol.FormatTime(e.now())
 		if err := e.store.Update(rec); err != nil {
 			return err
@@ -1644,12 +1647,14 @@ func (e *Endpoint) abortAdmittedRacedRun(rec *requests.Record, t *target, adm Ad
 			e.mu.Unlock()
 			return protocol.Reply{}, protocol.Refuse(protocol.CodeNotFound, "record vanished during noop-terminal lookup")
 		}
-		c := causeCompleted
-		if lookupEv.State == protocol.StateFailed {
-			c = causeFailed
-		}
+		c := causeNone // record stays terminal (cancelled); result is evidence
+		_ = lookupEv.State
 		rec.Revision++
 		e.transitionLocked(rec, c, nativeEvidence{runID: adm.RunID, result: lookupEv.Result})
+		// The run is terminal. If a cancel was pending, it is now confirmed.
+		if rec.Cancel != nil && rec.Cancel.Disposition != protocol.CancelConfirmed {
+			rec.Cancel.Disposition = protocol.CancelConfirmed
+		}
 		rec.ObservedAt = protocol.FormatTime(e.now())
 		if err := e.store.Update(rec); err != nil {
 			e.mu.Unlock()

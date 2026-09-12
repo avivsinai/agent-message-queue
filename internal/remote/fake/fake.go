@@ -38,9 +38,11 @@ type Runtime struct {
 
 	// controls
 	admissionGate        chan struct{}
+	afterAdmitGate       chan struct{}
 	lookupGate           chan struct{}
 	ackGate              chan struct{}
 	failNextLookup       error
+	failNextCancelExact  error
 	admissionFailsAfter  bool
 	consumerSets         int
 	interactionAnswers   []Answer
@@ -120,29 +122,34 @@ func (r *Runtime) Submit(req core.BoundRequest) (core.Admission, error) {
 	}
 
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	r.dispatches++
 	if r.admissionFailsAfter {
 		r.admissionFailsAfter = false
+		r.mu.Unlock()
 		return core.Admission{Code: protocol.CodeNativeError, Message: "native admission failed after helper returned"}, nil
 	}
 	if req.Epoch != r.epoch {
+		r.mu.Unlock()
 		return core.Admission{Code: protocol.CodeStaleEpoch}, nil
 	}
 	if r.cancelIntent[req.Key] {
 		delete(r.cancelIntent, req.Key)
+		r.mu.Unlock()
 		return core.Admission{Code: protocol.CodeCancelledBeforeAdmission}, nil
 	}
 	if existing, ok := r.runsByKey[req.Key]; ok {
+		r.mu.Unlock()
 		return core.Admission{Admitted: true, RunID: existing.id}, nil
 	}
 	if r.busy {
 		if req.Input.Busy != protocol.BusyQueue {
+			r.mu.Unlock()
 			return core.Admission{Code: protocol.CodeBusy, Message: "a run is active"}, nil
 		}
 	}
 	for _, rn := range r.runsByKey {
 		if rn.state.Terminal() && !rn.acknowledged {
+			r.mu.Unlock()
 			return core.Admission{Code: protocol.CodeBusy, Message: "a completed result awaits acknowledgement"}, nil
 		}
 	}
@@ -150,6 +157,11 @@ func (r *Runtime) Submit(req core.BoundRequest) (core.Admission, error) {
 	rn := &run{id: fmt.Sprintf("run_%d", r.nextRun), key: req.Key, epoch: req.Epoch, state: protocol.StateRunning}
 	r.runsByKey[req.Key] = rn
 	r.busy = true
+	afterGate := r.afterAdmitGate
+	r.mu.Unlock()
+	if afterGate != nil {
+		<-afterGate
+	}
 	return core.Admission{Admitted: true, RunID: rn.id}, nil
 }
 
@@ -185,6 +197,12 @@ func (r *Runtime) Lookup(key requests.Key, epoch string) (core.Evidence, error) 
 // CancelExact implements core.Attachment.
 func (r *Runtime) CancelExact(key requests.Key, epoch string) (core.CancelEvidence, error) {
 	r.mu.Lock()
+	fail := r.failNextCancelExact
+	r.failNextCancelExact = nil
+	if fail != nil {
+		r.mu.Unlock()
+		return core.CancelEvidence{}, fail
+	}
 	rn, ok := r.runsByKey[key]
 	if !ok {
 		r.cancelIntent[key] = true
@@ -303,6 +321,34 @@ func (r *Runtime) FailNextLookup(err error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.failNextLookup = err
+}
+
+// FailNextCancelExact makes the NEXT CancelExact call return err once.
+func (r *Runtime) FailNextCancelExact(err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.failNextCancelExact = err
+}
+
+// HoldAfterAdmit blocks Submit AFTER a run is admitted (and the run is
+// recorded) until ReleaseAfterAdmit. Used to race a cancel against a
+// positively-admitted run (the P1 shape).
+func (r *Runtime) HoldAfterAdmit() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.afterAdmitGate == nil {
+		r.afterAdmitGate = make(chan struct{})
+	}
+}
+
+// ReleaseAfterAdmit unblocks a held post-admission Submit.
+func (r *Runtime) ReleaseAfterAdmit() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.afterAdmitGate != nil {
+		close(r.afterAdmitGate)
+		r.afterAdmitGate = nil
+	}
 }
 
 // holdAck, when non-nil, blocks AcknowledgeResult until closed.
