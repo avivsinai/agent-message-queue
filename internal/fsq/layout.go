@@ -85,7 +85,11 @@ func firstMissingAncestorAmbient(dir string) (string, error) {
 	missing := ""
 	current := dir
 	for {
-		if _, err := os.Stat(current); err == nil {
+		info, err := os.Stat(current)
+		if err == nil {
+			if !info.IsDir() {
+				return "", fmt.Errorf("mailbox path %s exists and is not a directory", current)
+			}
 			return missing, nil
 		} else if !errors.Is(err, fs.ErrNotExist) {
 			return "", fmt.Errorf("stat %s: %w", current, err)
@@ -178,18 +182,25 @@ func EnsureAgentDirs(root, agent string) error {
 			return err
 		}
 		if missing == "" {
-			continue
+			continue // tree exists; this helper owns tree durability only
 		}
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return err
 		}
-		// Sync every level this call created so a crash cannot lose the
-		// mailbox tree below a newly provisioned agent directory.
+		// Sync every created level, leaf first, AND the first pre-existing
+		// ancestor: fsync(d) persists d's entries, never d's own entry in its
+		// parent, so the existing parent whose entry changed must be synced.
 		for d := dir; ; d = filepath.Dir(d) {
 			if err := SyncDir(d); err != nil {
 				return fmt.Errorf("sync created ancestor %s: %w", d, err)
 			}
 			if d == missing {
+				parent := filepath.Dir(d)
+				if parent != d && parent != "." && parent != string(filepath.Separator) {
+					if err := SyncDir(parent); err != nil {
+						return fmt.Errorf("sync mailbox parent %s: %w", parent, err)
+					}
+				}
 				break
 			}
 		}

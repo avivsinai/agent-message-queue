@@ -598,16 +598,35 @@ func (r *DeliveryRoot) mkdirAllSynced(dir string) error {
 		return err
 	}
 	if missing == "" {
+		// The whole tree already exists. This helper owns TREE durability,
+		// not message durability: the delivery commit path syncs new/tmp
+		// after its rename, which is the sync that makes a message durable.
+		// Re-syncing an established tree here would be redundant on every
+		// delivery and would turn a commit-phase durability fault into a
+		// pre-staging error. An existing tree whose earlier creation crashed
+		// before its sync is repaired by that same commit-phase sync of new
+		// and by doctor --fix-mailboxes; it is not this call's job.
 		return nil
 	}
 	if err := r.root.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
+	// Durability is about directory ENTRIES: fsync(d) persists d's entries,
+	// never d's own entry inside its parent. So the set to sync is every
+	// created level, leaf first, AND the first pre-existing ancestor — its
+	// entry for the new subtree is what changed. Stopping at the shallowest
+	// created level (the earlier version) left that entry unsynced.
 	for d := dir; ; d = filepath.Dir(d) {
 		if err := r.syncDir(d); err != nil {
 			return fmt.Errorf("sync created ancestor %s: %w", d, err)
 		}
 		if d == missing {
+			parent := filepath.Dir(d)
+			if parent != d && parent != "." && parent != string(filepath.Separator) {
+				if err := r.syncDir(parent); err != nil {
+					return fmt.Errorf("sync parent of created tree %s: %w", parent, err)
+				}
+			}
 			return nil
 		}
 	}
@@ -620,7 +639,15 @@ func (r *DeliveryRoot) firstMissingAncestor(dir string) (string, error) {
 	missing := ""
 	current := dir
 	for {
-		if _, err := r.root.Stat(current); err == nil {
+		info, err := r.root.Stat(current)
+		if err == nil {
+			if !info.IsDir() {
+				// A regular file where a mailbox directory must be is a
+				// corrupt layout, not a missing level. Refuse before staging
+				// anything so a multi-recipient delivery fails whole, never
+				// partially committed.
+				return "", fmt.Errorf("mailbox path %s exists and is not a directory", current)
+			}
 			return missing, nil
 		} else if !errors.Is(err, fs.ErrNotExist) {
 			return "", fmt.Errorf("stat %s: %w", current, err)
