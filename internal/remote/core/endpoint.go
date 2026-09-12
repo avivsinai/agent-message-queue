@@ -1098,6 +1098,26 @@ func (e *Endpoint) transitionLocked(rec *requests.Record, c cause, ev nativeEvid
 	}
 }
 
+// needsRuntimeSettlement is the ONE predicate for outstanding runtime work.
+// A record needs settlement if it has a bound run (NativeRun != nil) whose
+// result has not been acknowledged (AckDigest == ""). This covers:
+//   - a terminal record whose abort was inconclusive (cancel_requested, no result)
+//   - a cancelled record with a bound run but no ack (late output not yet recovered)
+//   - a non-terminal running record with cancel intent (the run needs aborting)
+//
+// Once a record is terminal AND acked (AckDigest != ""), the runtime
+// obligation is settled — the cancel is resolved, the slot is released, and
+// reconcile must NOT re-drive it every tick (Pro #4). The cancel disposition
+// is NOT the signal; the ack is. State is what we promised the caller;
+// disposition is what we owe the runtime — but the SETTLED signal is the ack.
+//
+// Used by Reconcile's terminal branch (retry selector), reconcileLive's
+// same-run early return, and applyCancelOutcomeLocked's confirmed branch.
+// Three checks that kept diverging now ask one question.
+func needsRuntimeSettlement(rec *requests.Record) bool {
+	return rec.NativeRun != nil && rec.AckDigest == ""
+}
+
 // commitLocked is the persist step that pairs with transitionLocked. It
 // does Revision++, ObservedAt, store.Update, notify, and memo AckDigest — so
 // no caller can forget notify or the ack memo. Returns the ackDigest + the
@@ -1210,6 +1230,14 @@ func (e *Endpoint) replayTerminalAck(rec *requests.Record) error {
 	if !ev.State.Terminal() || ev.Result == nil || protocol.EvidenceDigest(ev.Result) != rec.AckDigest {
 		// The retained evidence is not the outcome this record acked (a stale
 		// or foreign ack must never release a different request's result).
+		return nil
+	}
+	// Pro #5: identity, not content. Two runs can produce identical output
+	// (same digest). Require the retained evidence's RunID to match the
+	// record's bound NativeRun before acking — otherwise we release another
+	// run's evidence. AcknowledgeResult's arguments carry no run id, so the
+	// attachment cannot catch this either.
+	if rec.NativeRun == nil || ev.RunID != *rec.NativeRun {
 		return nil
 	}
 	// B14a: the native ack runs OUTSIDE e.mu like every other native call —
