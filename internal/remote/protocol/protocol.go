@@ -411,9 +411,14 @@ func validOpaque(s string) bool {
 const digestPrefix = "sha256:"
 
 // CommandDigest is the digest of the immutable submit command payload, over
-// exactly {schema, op, request_id, target_id, epoch, not_after, input}. It is
-// canonical JSON: object keys sorted, no insignificant whitespace, so every
-// carrier agrees on the bytes. A retry with a changed epoch or not_after (or
+// exactly {schema, op, request_id, target_id, epoch, not_after, input}. The
+// canonical form is JSON with the keys in the FIXED ORDER listed below and no
+// insignificant whitespace, so every carrier agrees on the bytes. The order is
+// deliberately NOT alphabetical: it is the declaration order of digestPayload,
+// which is what Go's encoder emits. An earlier version of this comment said
+// "object keys sorted", which the implementation never did — a non-Go carrier
+// that followed it would sort the keys, compute a different digest, and turn
+// every idempotent retry into request_conflict. A retry with a changed epoch or not_after (or
 // input) yields a different digest and is request_conflict; a retry that
 // recovers the original command bytes yields the same digest. The digest
 // excludes revision/state/result — those are server-derived, not part of the
@@ -421,10 +426,11 @@ const digestPrefix = "sha256:"
 //
 // Canonical byte construction (for carriers that build the bytes themselves):
 //
-//	json.Marshal of digestPayload{Schema,Op,RequestID,TargetID,Epoch,NotAfter,Input}
-//	with struct field order fixed (Go json emits in struct order, which is the
-//	canonical order below) and no extra whitespace, then sha256 hex with the
-//	"sha256:" prefix.
+//	{"schema":…,"op":…,"request_id":…,"target_id":…,"epoch":…,"not_after":…,"input":…}
+//
+// in exactly that key order, omitting no key, with no extra whitespace; then
+// sha256 over those bytes, hex-encoded, with the "sha256:" prefix. Omitted
+// optional fields inside input follow the same rule as the Go struct tags.
 func CommandDigest(cmd *Command) string {
 	if cmd == nil || cmd.Op != OpRequestSubmit {
 		return ""
@@ -517,7 +523,10 @@ func (c *Command) Validate() error {
 		if err := forbidFields(c, "request_ref", "since", "interaction_id", "option"); err != nil {
 			return err
 		}
-		if c.Input.Text == "" || len(c.Input.Text) > MaxInputBytes {
+		// TrimSpace: a whitespace-only prompt is empty. The CLI already
+		// refused it, but every other carrier (AMQ mailbox, Buzz DM) went
+		// through Validate alone and would dispatch "   " to a harness.
+		if strings.TrimSpace(c.Input.Text) == "" || len(c.Input.Text) > MaxInputBytes {
 			return Refuse(CodeInvalid, "input.text must be 1..%d bytes", MaxInputBytes)
 		}
 		switch c.Input.Busy {

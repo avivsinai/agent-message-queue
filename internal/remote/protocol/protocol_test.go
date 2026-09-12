@@ -123,3 +123,38 @@ func TestDecodeRefusesDuplicateAndUnknownKeys(t *testing.T) {
 		t.Fatalf("clean document refused: %v", err)
 	}
 }
+
+// TestValidateRejectsWhitespaceOnlyPrompt pins the shared rule for
+// agent-message-queue-611.22.28: a whitespace-only prompt is empty. The CLI
+// refused it, but every other carrier (the AMQ mailbox, a Buzz DM) reaches
+// the harness through Validate alone, and Validate checked only Text == "".
+// A command carrying "   " was dispatched to a real coding session.
+func TestValidateRejectsWhitespaceOnlyPrompt(t *testing.T) {
+	for _, text := range []string{"   ", "\t", "\n", " \t\n "} {
+		cmd := &Command{
+			Schema:    SchemaCommand,
+			Op:        OpRequestSubmit,
+			RequestID: "11111111-1111-4111-8111-111111111502",
+			TargetID:  "t_fake1",
+			Epoch:     "e_1",
+			NotAfter:  "2026-09-08T10:02:00Z",
+			Input:     &SubmitInput{Text: text},
+		}
+		if err := cmd.Validate(); err == nil {
+			t.Fatalf("Validate accepted a whitespace-only prompt %q", text)
+		}
+	}
+	// A prompt with real content and surrounding whitespace is still valid.
+	cmd := &Command{
+		Schema:    SchemaCommand,
+		Op:        OpRequestSubmit,
+		RequestID: "11111111-1111-4111-8111-111111111503",
+		TargetID:  "t_fake1",
+		Epoch:     "e_1",
+		NotAfter:  "2026-09-08T10:02:00Z",
+		Input:     &SubmitInput{Text: "  do the thing  "},
+	}
+	if err := cmd.Validate(); err != nil {
+		t.Fatalf("Validate rejected a padded but non-empty prompt: %v", err)
+	}
+}
