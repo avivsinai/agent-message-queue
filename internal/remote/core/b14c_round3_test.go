@@ -70,9 +70,12 @@ func TestB14cAdmittedRacedCancelConfirmedAbort(t *testing.T) {
 
 // TestB14cAdmittedRacedCancelErrorThenRetryConverges: the abort's CancelExact
 // returns an ERROR (inconclusive). The record stays non-terminal
-// (cancel_requested, NativeRun bound). Reconcile re-drives CancelExact; when
-// it finally returns confirmed, the record converges to cancelled_by_request.
-// Pro #1 (error entrance converges via B04 reconcile-cancel-retry).
+// (cancel_requested, NativeRun bound). Between the failed abort and the
+// retry, the run finishes (noop_terminal). Reconcile re-drives CancelExact,
+// gets noop_terminal, records the result, confirms the cancel, and releases
+// the native slot. Pro #1 (error entrance converges via B04 reconcile-cancel-
+// retry) + Pro #2 (reconcile ack fires — the back door the rec-rebind bug
+// reopened).
 func TestB14cAdmittedRacedCancelErrorThenRetryConverges(t *testing.T) {
 	ep, rt, store, _ := b14cEndpoint(t)
 
@@ -113,8 +116,13 @@ func TestB14cAdmittedRacedCancelErrorThenRetryConverges(t *testing.T) {
 		t.Fatal("NativeRun not bound after inconclusive abort")
 	}
 
-	// Reconcile re-drives CancelExact. The run is still running (the error
-	// did not stop it), so the retry returns confirmed.
+	// Between the failed abort and the retry, the run finishes (produces a
+	// result). The retry's CancelExact returns noop_terminal.
+	rt.CompleteWhileAdmitHeld(id, "converged-out")
+
+	// Reconcile re-drives CancelExact -> noop_terminal -> applyCancelOutcomeLocked
+	// records the result, confirms the cancel, memos AckDigest, and
+	// replayTerminalAck releases the native slot.
 	if err := ep.Reconcile(); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -124,6 +132,14 @@ func TestB14cAdmittedRacedCancelErrorThenRetryConverges(t *testing.T) {
 	}
 	if rec.Cancel.Disposition != protocol.CancelConfirmed {
 		t.Fatalf("after reconcile: disposition = %q, want confirmed", rec.Cancel.Disposition)
+	}
+	if rec.Result == nil || rec.Result.Text != "converged-out" {
+		t.Fatalf("after reconcile: result = %v, want text \"converged-out\" (Pro #2)", rec.Result)
+	}
+	// Pro #2 back-door guard: the reconcile path's ack MUST fire (the rec-rebind
+	// bug would leave AckDigest empty and the slot wedged).
+	if got := rt.UnacknowledgedResults(); got != 0 {
+		t.Fatalf("unacknowledged results = %d, want 0 (reconcile ack fired)", got)
 	}
 }
 

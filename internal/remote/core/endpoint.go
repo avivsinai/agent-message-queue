@@ -254,14 +254,11 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 		if reserved {
 			// Still reserved: refresh the terminal busy tombstone and refuse
 			// again — never a Tick-admissible placeholder.
-			rec.Revision++
 			e.transitionLocked(rec, causeBusyTombstone, nativeEvidence{})
-			rec.ObservedAt = protocol.FormatTime(e.now())
-			if err := e.store.Update(rec); err != nil {
+			if _, err := e.commitLocked(rec, e.targets[rec.TargetID]); err != nil {
 				e.mu.Unlock()
 				return protocol.Reply{}, err
 			}
-			e.notifyLocked(rec)
 			snap := rec.Snapshot
 			e.mu.Unlock()
 			e.publishRevision(rec)
@@ -275,6 +272,8 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 			e.mu.Unlock()
 			return protocol.Reply{}, err
 		}
+		// Cannot use commitLocked: crash-point ordering requires Update between
+		// PointBeforeDispatching and PointAfterDispatching.
 		if err := e.store.Update(rec); err != nil {
 			e.mu.Unlock()
 			return protocol.Reply{}, err
@@ -400,6 +399,8 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 		e.mu.Unlock()
 		return protocol.Reply{}, err
 	}
+	// Cannot use commitLocked: crash-point ordering requires Update between
+	// PointBeforeDispatching and PointAfterDispatching.
 	if err := e.store.Update(rec); err != nil {
 		e.mu.Unlock()
 		return protocol.Reply{}, err
@@ -660,17 +661,14 @@ func (e *Endpoint) respond(cmd *protocol.Command) (protocol.Reply, error) {
 		e.mu.Unlock()
 		return protocol.Reply{}, protocol.Refuse(protocol.CodeInvalid, "option %q is not offered by interaction %s", cmd.Option, cmd.InteractionID)
 	}
-	rec.Revision++
 	if rec.Answered == nil {
 		rec.Answered = map[string]string{}
 	}
 	rec.Answered[cmd.InteractionID] = cmd.Option
-	rec.ObservedAt = protocol.FormatTime(e.now())
-	if err := e.store.Update(rec); err != nil {
+	if _, err := e.commitLocked(rec, e.targets[rec.TargetID]); err != nil {
 		e.mu.Unlock()
 		return protocol.Reply{}, err
 	}
-	e.notifyLocked(rec)
 	e.mu.Unlock()
 
 	code, rerr := t.att.Respond(key, cmd.Epoch, cmd.InteractionID, cmd.Option)
@@ -1286,9 +1284,9 @@ func (e *Endpoint) reconcileCancelRetry(rec *requests.Record) error {
 	}
 	ev, nerr := t.att.CancelExact(key, epoch)
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	rec, exists, err := e.store.Get(key)
 	if err != nil || !exists {
+		e.mu.Unlock()
 		return nil
 	}
 	runID := ""
@@ -1296,8 +1294,10 @@ func (e *Endpoint) reconcileCancelRetry(rec *requests.Record) error {
 		runID = *rec.NativeRun
 	}
 	if _, cerr := e.applyCancelOutcomeLocked(rec, t, key, epoch, runID, ev, nerr); cerr != nil {
+		e.mu.Unlock()
 		return cerr
 	}
+	e.mu.Unlock()
 	return e.replayTerminalAck(rec)
 }
 
@@ -1434,15 +1434,12 @@ func (e *Endpoint) admitDeferred(rec *requests.Record) error {
 		e.mu.Unlock()
 		return err
 	}
-	rec.Revision++
 	rec.NativeDispatches = 1
-	rec.ObservedAt = protocol.FormatTime(e.now())
 	e.transitionLocked(rec, causeDispatching, nativeEvidence{})
-	if err := e.store.Update(rec); err != nil {
+	if _, err := e.commitLocked(rec, e.targets[rec.TargetID]); err != nil {
 		e.mu.Unlock()
 		return err
 	}
-	e.notifyLocked(rec)
 	input := protocol.SubmitInput{}
 	if rec.Input != nil {
 		input = *rec.Input
@@ -1528,12 +1525,10 @@ func (e *Endpoint) finishAdmissionLocked(rec *requests.Record, exists bool, t *t
 			c = causeFailed
 		}
 		e.transitionLocked(rec, c, nativeEvidence{runID: adm.RunID})
-		rec.ObservedAt = protocol.FormatTime(e.now())
-		if err := e.store.Update(rec); err != nil {
+		if _, err := e.commitLocked(rec, t); err != nil {
 			e.mu.Unlock()
 			return protocol.Reply{}, err
 		}
-		e.notifyLocked(rec)
 		snap := rec.Snapshot
 		e.mu.Unlock()
 		e.publishRevision(rec)
@@ -1586,11 +1581,13 @@ func (e *Endpoint) applyCancelOutcomeLocked(rec *requests.Record, t *target, key
 			lookupEv, _ = t.att.Lookup(key, epoch)
 		}
 		e.mu.Lock()
-		var ok bool
-		rec, ok, _ = e.store.Get(key)
+		// Copy into the caller's *Record instead of rebinding the local param
+		// — otherwise the caller reads a stale object (Pro #2/Pro #4 bug).
+		fresh, ok, _ := e.store.Get(key)
 		if !ok {
 			return "", protocol.Refuse(protocol.CodeNotFound, "record vanished during noop-terminal lookup")
 		}
+		*rec = *fresh
 		lookupRun := runID
 		if lookupEv.RunID != "" {
 			lookupRun = lookupEv.RunID
