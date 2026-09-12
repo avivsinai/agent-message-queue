@@ -1030,6 +1030,12 @@ func (e *Endpoint) transitionLocked(rec *requests.Record, c cause, ev nativeEvid
 			run := ev.runID
 			rec.NativeRun = &run
 		}
+		// B4: retain partial output retained at cancellation. A cancelled run may
+		// have produced a result (partial output) — dropping it here means NO
+		// result and NO ack digest, so the native slot is never released.
+		if ev.result != nil {
+			rec.Result = boundResult(ev.result)
+		}
 		if rec.Cancel == nil {
 			rec.Cancel = &protocol.Cancel{RequestedAt: protocol.FormatTime(e.now())}
 		}
