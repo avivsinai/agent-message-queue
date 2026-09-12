@@ -1,6 +1,7 @@
 package amqio
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -179,3 +180,72 @@ func TestCurRecoveryEmitsMissingReceiptAndOutcome(t *testing.T) {
 }
 
 func coreSrc(from string) core.Source { return core.Source{Host: "amq:" + from} }
+
+// deliverOneSubmit seeds one submit command into inbox/new and returns its
+// message id + request id.
+func deliverOneSubmit(t *testing.T, root, reqID string) string {
+	t.Helper()
+	body := `{"schema":"amq.remote.command/1","op":"request.submit","request_id":"` + reqID + `","target_id":"fake","epoch":"e_1","not_after":"` + protocol.FormatTime(time.Now().Add(time.Minute)) + `","input":{"text":"hi"}}`
+	now := time.Now()
+	mid, err := format.NewMessageID(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg := format.Message{Header: format.Header{Schema: format.CurrentSchema, ID: mid, From: "codex", To: []string{DefaultHandle}, Thread: "p2p/codex__remote", Subject: "submit", Created: now.UTC().Format(time.RFC3339Nano), Kind: "todo"}, Body: body}
+	data, err := msg.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := fsq.SnapshotDeliveryRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	droot, err := fsq.OpenDeliveryRoot(root, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fsq.DeliverToInboxes(droot, []string{DefaultHandle}, mid+".md", data); err != nil {
+		t.Fatalf("deliver: %v", err)
+	}
+	_ = droot.Close()
+	return mid
+}
+
+// TestCurRecoverySteadyStateDoesNotRescan asserts that the full cur sweep
+// runs ONCE (on the first ImportOnce) and steady-state ImportOnce calls do
+// NOT re-read every cur entry. The seam is curSweepCount, incremented only by
+// recoverCur (the full sweep). Steady-state reconciliation goes through
+// recoverClaimed, which stats receipts by message ID — no ReadDir of cur.
+func TestCurRecoverySteadyStateDoesNotRescan(t *testing.T) {
+	root, carrier, _, _ := newCarrierEnv(t)
+
+	// Claim 5 commands into cur via ImportOnce (the first call also does the
+	// full recovery sweep — cur is empty, so it's a no-op sweep).
+	for i := 0; i < 5; i++ {
+		deliverOneSubmit(t, root, fmt.Sprintf("11111111-1111-4111-8111-1111111111%02d", i+1))
+	}
+	n, err := carrier.ImportOnce()
+	if err != nil || n != 5 {
+		t.Fatalf("first import: n=%d err=%v (want 5)", n, err)
+	}
+	sweepsAfterFirst := carrier.curSweepCount
+	if sweepsAfterFirst != 1 {
+		t.Fatalf("first import: curSweepCount=%d (want 1 — full sweep on first ImportOnce)", sweepsAfterFirst)
+	}
+	// All 5 are now in cur with receipts.
+	if entries, _ := os.ReadDir(fsq.AgentInboxCur(root, DefaultHandle)); len(entries) != 5 {
+		t.Fatalf("cur entries: %d (want 5)", len(entries))
+	}
+
+	// Second ImportOnce: no new messages, all receipts present. The steady-
+	// state path (recoverClaimed) stats each receipt and drops the entries.
+	// It must NOT call recoverCur (no full ReadDir of cur).
+	n, err = carrier.ImportOnce()
+	if err != nil || n != 0 {
+		t.Fatalf("second import: n=%d err=%v (want 0 — no new messages)", n, err)
+	}
+	sweepsAfterSecond := carrier.curSweepCount
+	if sweepsAfterSecond != 1 {
+		t.Fatalf("second import: curSweepCount=%d (want 1 — steady state must NOT re-scan cur; Pro #752 blocker)", sweepsAfterSecond)
+	}
+}

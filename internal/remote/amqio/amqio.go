@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
@@ -40,6 +41,25 @@ type Carrier struct {
 	identity fsq.DeliveryRootIdentity
 	ep       *core.Endpoint
 	now      func() time.Time
+	// curRecovered is set after the first full cur sweep (the crash-recovery
+	// scan). Steady-state reconciliation tracks only IDs THIS process claimed.
+	curRecovered bool
+	// claimedThisRun tracks cur entries this process claimed but has not yet
+	// confirmed a receipt for. If the process dies, the set is lost; the next
+	// startup's full sweep catches exactly those.
+	claimedThisRun map[string]claimedEntry
+	mu             sync.Mutex
+	// curSweepCount is a test seam: counts full cur sweeps (recoverCur).
+	// Steady-state calls go through recoverClaimed and do NOT increment this.
+	curSweepCount int
+}
+
+// claimedEntry pairs a cur filename with its message ID for steady-state
+// reconciliation: the filename locates the cur entry, the message ID locates
+// the receipt (a stat, not a file read).
+type claimedEntry struct {
+	filename string // cur entry name (same as the new filename)
+	msgID    string // message header ID, for the receipt filename
 }
 
 // New prepares the endpoint mailbox under root and returns the carrier.
@@ -124,8 +144,29 @@ func (c *Carrier) ImportOnce() (int, error) {
 	// re-executed — the endpoint owns idempotence through its durable record
 	// (an identical resubmit is answered from the record, not re-dispatched),
 	// but the bookkeeping must converge.
-	if err := c.recoverCur(root); err != nil {
-		return n, err
+	//
+	// Bounded cost: a FULL sweep runs ONCE on the first ImportOnce (the
+	// crash-recovery scan — recovery is a startup condition, not steady
+	// state). Thereafter, reconcile only what THIS process claimed into cur
+	// during this run. That gives O(cur) once per process and O(claimed-this-
+	// tick) thereafter, with no loss of coverage. If the process dies, the
+	// in-memory set is lost, and the next startup's full sweep catches
+	// exactly those.
+	c.mu.Lock()
+	firstSweep := !c.curRecovered
+	claimed := c.claimedThisRun
+	c.mu.Unlock()
+	if firstSweep {
+		if err := c.recoverCur(root); err != nil {
+			return n, err
+		}
+		c.mu.Lock()
+		c.curRecovered = true
+		c.mu.Unlock()
+	} else if len(claimed) > 0 {
+		if err := c.recoverClaimed(root, claimed); err != nil {
+			return n, err
+		}
 	}
 	return n, nil
 }
@@ -136,6 +177,9 @@ func (c *Carrier) ImportOnce() (int, error) {
 // record the command created (by request_ref from the origin the endpoint
 // persisted) rather than re-running the command.
 func (c *Carrier) recoverCur(root *fsq.DeliveryRoot) error {
+	c.mu.Lock()
+	c.curSweepCount++
+	c.mu.Unlock()
 	curDir := filepath.Join("agents", c.me, "inbox", "cur")
 	entries, err := root.ReadDir(curDir)
 	if err != nil {
@@ -155,6 +199,35 @@ func (c *Carrier) recoverCur(root *fsq.DeliveryRoot) error {
 		if err := c.recoverOne(root, curDir, name); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// recoverClaimed reconciles only the cur entries this process claimed during
+// this run (steady state). For each, it stats the receipt by message ID — a
+// filesystem stat, not a message-file read. If the receipt exists, the claim
+// completed and the entry is dropped from the pending set. If not, the entry
+// is recovered via recoverOne (the crash gap: we claimed but the receipt
+// never landed, likely because of an error between MoveNewToCur and
+// EmitDeliveryRoot in THIS process).
+func (c *Carrier) recoverClaimed(root *fsq.DeliveryRoot, claimed map[string]claimedEntry) error {
+	curDir := filepath.Join("agents", c.me, "inbox", "cur")
+	for id, entry := range claimed {
+		receiptPath := filepath.Join("agents", c.me, "receipts", fmt.Sprintf("%s__%s__%s.json", entry.msgID, c.me, receipt.StageDrained))
+		if _, err := receipt.ReadDeliveryRoot(root, receiptPath); err == nil {
+			// Receipt exists — claim completed. Drop from the pending set.
+			c.mu.Lock()
+			delete(c.claimedThisRun, id)
+			c.mu.Unlock()
+			continue
+		}
+		if err := c.recoverOne(root, curDir, entry.filename); err != nil {
+			return err
+		}
+		// recoverOne emitted the receipt (or confirmed it); drop from the set.
+		c.mu.Lock()
+		delete(c.claimedThisRun, id)
+		c.mu.Unlock()
 	}
 	return nil
 }
@@ -322,8 +395,24 @@ func (c *Carrier) importOne(root *fsq.DeliveryRoot, name string) error {
 			return fmt.Errorf("claim %s: %w", name, err)
 		}
 	}
+	// Track this claim for steady-state cur reconciliation. Dropped after
+	// the receipt is confirmed; if we crash between MoveNewToCur and the
+	// receipt, the next startup's full sweep catches it.
+	c.mu.Lock()
+	if c.claimedThisRun == nil {
+		c.claimedThisRun = map[string]claimedEntry{}
+	}
+	c.claimedThisRun[msg.Header.ID] = claimedEntry{filename: name, msgID: msg.Header.ID}
+	c.mu.Unlock()
 	rc := receipt.New(msg.Header.ID, msg.Header.Thread, msg.Header.From, c.me, receipt.StageDrained, detail)
-	return receipt.EmitDeliveryRoot(root, rc)
+	if err := receipt.EmitDeliveryRoot(root, rc); err != nil {
+		return err
+	}
+	// Receipt confirmed — drop from the pending set.
+	c.mu.Lock()
+	delete(c.claimedThisRun, msg.Header.ID)
+	c.mu.Unlock()
+	return nil
 }
 
 // Publish implements core.Publisher for records that arrived over AMQ. Local
