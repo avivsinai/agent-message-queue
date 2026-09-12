@@ -1669,7 +1669,22 @@ func (e *Endpoint) applyCancelOutcomeLocked(rec *requests.Record, t *target, key
 		e.transitionLocked(rec, causeNone, nativeEvidence{runID: lookupRun, result: lookupEv.Result, runTerminal: true})
 		return e.commitLocked(rec, t)
 	}
-	// CancelExact confirmed: the run was stopped. cancelled_by_request.
+	// CancelExact confirmed: the run was stopped. But disk may have moved under
+	// the unlock — a late completion may have committed `completed` while we
+	// were unlocked. Pro #3: do NOT rewrite the promise unconditionally. If the
+	// record is already terminal and NOT cancelled, settle the runtime
+	// obligation only (the cancel disposition is resolved) and return.
+	if rec.State.Terminal() && rec.State != protocol.StateCancelled {
+		// A late native event resolved the record to a different terminal state.
+		// The cancel is still resolved (the run stopped); just settle the
+		// disposition without rewriting the promise.
+		if rec.Cancel != nil && rec.Cancel.Disposition != protocol.CancelConfirmed {
+			rec.Cancel.Disposition = protocol.CancelConfirmed
+			return e.commitLocked(rec, t)
+		}
+		// Already settled; nothing to persist.
+		return "", nil
+	}
 	e.transitionLocked(rec, causeCancelledByRequest, nativeEvidence{runID: runID})
 	return e.commitLocked(rec, t)
 }
