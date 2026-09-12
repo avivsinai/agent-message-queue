@@ -8,6 +8,23 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.78.0](https://github.com/avivsinai/agent-message-queue/compare/v0.77.3...v0.78.0) (2026-09-12)
+
+
+### Features
+
+* **remote:** request core, endpoint, fake runtime, AMQ carrier and amq-remote CLI ([f7a1a46](https://github.com/avivsinai/agent-message-queue/commit/f7a1a462f0a8b17253a273611c2935e0de091a9f))
+
+
+### Bug Fixes
+
+* **remote/amqio:** a store refusal is not a durable answer ([#745](https://github.com/avivsinai/agent-message-queue/issues/745)) ([2097dcf](https://github.com/avivsinai/agent-message-queue/commit/2097dcf765bef867587b00d683c3a8e502e8b597))
+* **remote/codex:** bound writer + non-lossy reply-required + safe teardown (B14b) ([f530140](https://github.com/avivsinai/agent-message-queue/commit/f530140a30d7f99ff6372d2c0b60c62ac6b01f5f))
+* **remote:** disable busy=queue and deliver=steer in v1 (B05/D1) ([da9d568](https://github.com/avivsinai/agent-message-queue/commit/da9d568f04c834ebfbe4a37a6e84cb03c3c88747))
+* **remote:** interaction respond validates before persisting, refusal clears intent (B07) ([fec0b51](https://github.com/avivsinai/agent-message-queue/commit/fec0b51646a0743c90fa18e05c33f0f268ac9e2d))
+* **remote:** native acks outside e.mu + explicit unlock discipline (B14a) ([f1156a9](https://github.com/avivsinai/agent-message-queue/commit/f1156a9ed658469a006ea8c750d8e7ba506008dc))
+* **remote:** reconcile replays native ack of unacked terminal evidence (B06) ([049c18b](https://github.com/avivsinai/agent-message-queue/commit/049c18bd9df0afa1da1c0bb1e7dcaf99272d6c0d))
+
 ## [0.77.3](https://github.com/avivsinai/agent-message-queue/compare/v0.77.2...v0.77.3) (2026-09-05)
 
 
