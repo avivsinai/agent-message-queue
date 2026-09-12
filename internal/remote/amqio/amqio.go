@@ -39,7 +39,28 @@ type Carrier struct {
 	identity fsq.DeliveryRootIdentity
 	ep       *core.Endpoint
 	now      func() time.Time
+	router   ReplyRouter
 }
+
+// ReplyRouter resolves where a cross-project caller's reply must be written.
+// It takes the reply_project and reply_to headers the caller stamped on its
+// command and returns the delivery root plus the mailbox handle inside it.
+// The carrier deliberately knows nothing about .amqrc, peer maps or session
+// layout: cmd/amq-remote injects cli.ResolveReplyRoute, tests inject a fake.
+// A nil router means this endpoint serves same-project callers only.
+type ReplyRouter func(replyProject, replyTo string) (root, handle string, err error)
+
+// SetReplyRouter installs the cross-project reply resolver. Without it, a
+// command carrying reply_project is refused rather than answered into the
+// endpoint's own root.
+func (c *Carrier) SetReplyRouter(r ReplyRouter) { c.router = r }
+
+// errNoReplyRoute reports that a cross-project reply cannot be routed. The
+// caller's command stays in new so a later pass (with a router configured, or
+// after the peer root is reachable) can still answer it: delivering into our
+// own root would silently swallow the reply, and claiming the command without
+// replying would lose it outright.
+var errNoReplyRoute = errors.New("cross-project reply cannot be routed")
 
 // New prepares the endpoint mailbox under root and returns the carrier.
 func New(root, me string, ep *core.Endpoint) (*Carrier, error) {
@@ -128,6 +149,19 @@ func (c *Carrier) importOne(root *fsq.DeliveryRoot, name string) error {
 		"reply_to":      msg.Header.ReplyTo,
 		"reply_project": msg.Header.ReplyProject,
 	}
+	// Refuse to EXECUTE work whose answer we could never deliver: a
+	// cross-project command whose reply route does not resolve stays in new,
+	// untouched. Probing here rather than at reply time matters because a
+	// successful submit answers through a published revision, not an inline
+	// reply — by then the command would already be claimed and the caller
+	// would wait forever (agent-message-queue-611.22.30).
+	if strings.TrimSpace(origin["reply_project"]) != "" {
+		if _, _, closeProbe, rerr := c.destination(root, origin); rerr != nil {
+			return rerr
+		} else {
+			closeProbe()
+		}
+	}
 	var reply any
 	var herr error
 	if derr != nil {
@@ -193,11 +227,47 @@ func (c *Carrier) Publish(snap protocol.Snapshot, origin map[string]string) erro
 	return c.reply(root, origin, subjectPrefix+string(snap.State), snap, nil)
 }
 
-func (c *Carrier) reply(root *fsq.DeliveryRoot, origin map[string]string, subject string, body any, refusal error) error {
+// destination returns the root the reply must be written to and the handle
+// inside it. A same-project caller is answered in this endpoint's own root; a
+// cross-project caller is answered in ITS root, resolved through the injected
+// router. The returned closer is never nil.
+func (c *Carrier) destination(own *fsq.DeliveryRoot, origin map[string]string) (*fsq.DeliveryRoot, string, func(), error) {
+	noop := func() {}
 	to := origin["from"]
-	if to == "" || fsq.ValidateHandle(to) != nil {
-		return nil
+	project := strings.TrimSpace(origin["reply_project"])
+	if project == "" {
+		if to == "" || fsq.ValidateHandle(to) != nil {
+			return nil, "", noop, fmt.Errorf("%w: unusable sender handle %q", errNoReplyRoute, to)
+		}
+		return own, to, noop, nil
 	}
+	if c.router == nil {
+		return nil, "", noop, fmt.Errorf("%w: no reply router configured for project %q", errNoReplyRoute, project)
+	}
+	rootPath, handle, err := c.router(project, origin["reply_to"])
+	if err != nil {
+		return nil, "", noop, fmt.Errorf("%w: %v", errNoReplyRoute, err)
+	}
+	if fsq.ValidateHandle(handle) != nil {
+		return nil, "", noop, fmt.Errorf("%w: unusable routed handle %q", errNoReplyRoute, handle)
+	}
+	identity, err := fsq.SnapshotDeliveryRoot(rootPath)
+	if err != nil {
+		return nil, "", noop, fmt.Errorf("%w: %v", errNoReplyRoute, err)
+	}
+	peer, err := fsq.OpenDeliveryRoot(rootPath, identity)
+	if err != nil {
+		return nil, "", noop, fmt.Errorf("%w: %v", errNoReplyRoute, err)
+	}
+	return peer, handle, func() { _ = peer.Close() }, nil
+}
+
+func (c *Carrier) reply(root *fsq.DeliveryRoot, origin map[string]string, subject string, body any, refusal error) error {
+	dest, to, closeDest, rerr := c.destination(root, origin)
+	if rerr != nil {
+		return rerr
+	}
+	defer closeDest()
 	now := c.now()
 	id, err := format.NewMessageID(now)
 	if err != nil {
@@ -249,7 +319,7 @@ func (c *Carrier) reply(root *fsq.DeliveryRoot, origin map[string]string, subjec
 	if err != nil {
 		return err
 	}
-	_, err = fsq.DeliverToInboxes(root, []string{to}, id+".md", data)
+	_, err = fsq.DeliverToInboxes(dest, []string{to}, id+".md", data)
 	var committed *fsq.CommittedDurabilityError
 	if err != nil && !errors.As(err, &committed) {
 		return err

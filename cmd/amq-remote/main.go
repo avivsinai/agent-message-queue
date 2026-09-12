@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/cli"
 	"github.com/avivsinai/agent-message-queue/internal/remote/amqio"
 	"github.com/avivsinai/agent-message-queue/internal/remote/codex"
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
@@ -279,6 +280,13 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 		_ = store.Close()
 		return 0, err
 	}
+	// A cross-project caller must be answered in ITS root, not ours. The
+	// carrier holds only the contract; .amqrc discovery, the peer map and
+	// session layout stay in the package that owns them.
+	root := c.root
+	carrier.SetReplyRouter(func(replyProject, replyTo string) (string, string, error) {
+		return cli.ResolveReplyRoute(root, replyProject, replyTo)
+	})
 	if *useFake {
 		ep.Register(fake.New("fake", "e_1"))
 	}

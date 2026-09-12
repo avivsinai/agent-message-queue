@@ -1,6 +1,7 @@
 package amqio
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -305,5 +306,168 @@ func TestImportNoopCancelRepliesToSender(t *testing.T) {
 	}
 	if len(entries) <= len(baseline) || !sawNoop {
 		t.Fatalf("no-op terminal cancel did not reply to sender (entries %d, baseline %d, sawNoop %v)", len(entries), len(baseline), sawNoop)
+	}
+}
+
+// TestImportCrossProjectRepliesToCallerRoot reproduces
+// agent-message-queue-611.22.30 (amqio wrong root): the carrier captured
+// reply_to/reply_project in origin and never used them, delivering the reply
+// and every published revision with fsq.DeliverToInboxes(OUR root, ...). A
+// caller in another project therefore received nothing — its reply landed in
+// a same-named mailbox inside the endpoint's own root (which MkdirAll happily
+// created) while its command was claimed. That is the two-host case the
+// subsystem exists for.
+func TestImportCrossProjectRepliesToCallerRoot(t *testing.T) {
+	endpointRoot := t.TempDir()
+	callerRoot := t.TempDir()
+	for root, handles := range map[string][]string{
+		endpointRoot: {DefaultHandle},
+		callerRoot:   {"codex"},
+	} {
+		if err := fsq.EnsureRootDirs(root); err != nil {
+			t.Fatal(err)
+		}
+		for _, h := range handles {
+			if err := fsq.EnsureAgentDirs(root, h); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	store, err := requests.Open(filepath.Join(endpointRoot, "extensions", "remote"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	var carrier *Carrier
+	ep := core.New(core.Config{Store: store, Publish: func(s protocol.Snapshot, origin map[string]string) error {
+		return carrier.Publish(s, origin)
+	}})
+	carrier, err = New(endpointRoot, DefaultHandle, ep)
+	if err != nil {
+		t.Fatalf("carrier: %v", err)
+	}
+	// The injected contract stands in for cli.ResolveReplyRoute: the carrier
+	// knows nothing about .amqrc or peer maps.
+	var routedProject, routedReplyTo string
+	carrier.SetReplyRouter(func(replyProject, replyTo string) (string, string, error) {
+		routedProject, routedReplyTo = replyProject, replyTo
+		if replyProject != "caller-project" {
+			return "", "", errors.New("unknown peer project " + replyProject)
+		}
+		return callerRoot, "codex", nil
+	})
+	ep.Register(fake.New("fake", "e_1"))
+	t.Cleanup(func() { _ = ep.Close() })
+
+	body := `{"schema":"amq.remote.command/1","op":"request.submit","request_id":"11111111-1111-4111-8111-111111111330","target_id":"fake","epoch":"e_1","not_after":"` + protocol.FormatTime(time.Now().Add(time.Minute)) + `","input":{"text":"cross-project work"}}`
+	now := time.Now()
+	id, err := format.NewMessageID(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg := format.Message{Header: format.Header{
+		Schema: format.CurrentSchema, ID: id, From: "codex", To: []string{DefaultHandle},
+		Thread: "p2p/codex__remote", Subject: "submit", Created: now.UTC().Format(time.RFC3339Nano), Kind: "todo",
+		FromProject: "caller-project", ReplyTo: "codex@session1", ReplyProject: "caller-project",
+	}, Body: body}
+	data, err := msg.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := fsq.SnapshotDeliveryRoot(endpointRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	droot, err := fsq.OpenDeliveryRoot(endpointRoot, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fsq.DeliverToInboxes(droot, []string{DefaultHandle}, id+".md", data); err != nil {
+		t.Fatalf("deliver: %v", err)
+	}
+	_ = droot.Close()
+
+	if _, err := carrier.ImportOnce(); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+
+	if routedProject != "caller-project" || routedReplyTo != "codex@session1" {
+		t.Fatalf("router called with (%q, %q), want (caller-project, codex@session1)", routedProject, routedReplyTo)
+	}
+	// The reply and every published revision must land in the CALLER's root.
+	callerInbox, _ := os.ReadDir(fsq.AgentInboxNew(callerRoot, "codex"))
+	if len(callerInbox) == 0 {
+		t.Fatal("caller received nothing in its own root")
+	}
+	// ...and nothing may be written into a codex mailbox inside OUR root.
+	if entries, err := os.ReadDir(fsq.AgentInboxNew(endpointRoot, "codex")); err == nil && len(entries) > 0 {
+		t.Fatalf("reply written into the endpoint's own root: %d message(s)", len(entries))
+	}
+}
+
+// TestImportCrossProjectUnroutableLeavesCommandInNew pins the refusal half of
+// agent-message-queue-611.22.30: when the reply cannot be routed, the command
+// must stay in new (answerable later) rather than be claimed with its reply
+// delivered into the endpoint's own root.
+func TestImportCrossProjectUnroutableLeavesCommandInNew(t *testing.T) {
+	endpointRoot := t.TempDir()
+	if err := fsq.EnsureRootDirs(endpointRoot); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureAgentDirs(endpointRoot, DefaultHandle); err != nil {
+		t.Fatal(err)
+	}
+	store, err := requests.Open(filepath.Join(endpointRoot, "extensions", "remote"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	var carrier *Carrier
+	ep := core.New(core.Config{Store: store, Publish: func(s protocol.Snapshot, origin map[string]string) error {
+		return carrier.Publish(s, origin)
+	}})
+	carrier, err = New(endpointRoot, DefaultHandle, ep)
+	if err != nil {
+		t.Fatalf("carrier: %v", err)
+	}
+	carrier.SetReplyRouter(func(string, string) (string, string, error) {
+		return "", "", errors.New("peer project not in .amqrc")
+	})
+	ep.Register(fake.New("fake", "e_1"))
+	t.Cleanup(func() { _ = ep.Close() })
+
+	body := `{"schema":"amq.remote.command/1","op":"request.submit","request_id":"11111111-1111-4111-8111-111111111331","target_id":"fake","epoch":"e_1","not_after":"` + protocol.FormatTime(time.Now().Add(time.Minute)) + `","input":{"text":"unroutable"}}`
+	now := time.Now()
+	id, err := format.NewMessageID(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg := format.Message{Header: format.Header{
+		Schema: format.CurrentSchema, ID: id, From: "codex", To: []string{DefaultHandle},
+		Thread: "p2p/codex__remote", Subject: "submit", Created: now.UTC().Format(time.RFC3339Nano), Kind: "todo",
+		FromProject: "gone", ReplyTo: "codex@session1", ReplyProject: "gone",
+	}, Body: body}
+	data, err := msg.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := fsq.SnapshotDeliveryRoot(endpointRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	droot, err := fsq.OpenDeliveryRoot(endpointRoot, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fsq.DeliverToInboxes(droot, []string{DefaultHandle}, id+".md", data); err != nil {
+		t.Fatalf("deliver: %v", err)
+	}
+	_ = droot.Close()
+
+	_, _ = carrier.ImportOnce()
+	if entries, _ := os.ReadDir(fsq.AgentInboxNew(endpointRoot, DefaultHandle)); len(entries) != 1 {
+		t.Fatalf("unroutable command not left in new: %d", len(entries))
+	}
+	if entries, err := os.ReadDir(fsq.AgentInboxNew(endpointRoot, "codex")); err == nil && len(entries) > 0 {
+		t.Fatalf("reply written into the endpoint's own root: %d", len(entries))
 	}
 }
