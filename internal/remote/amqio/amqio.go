@@ -19,6 +19,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/receipt"
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
+	"github.com/avivsinai/agent-message-queue/internal/remote/requests"
 )
 
 // DefaultHandle is the endpoint's mailbox handle in the root.
@@ -40,6 +41,10 @@ type Carrier struct {
 	ep       *core.Endpoint
 	now      func() time.Time
 	router   ReplyRouter
+	// syncDirFaultForTest is a test hook that injects a fault into every
+	// DeliveryRoot the carrier opens, so Publish (which opens its own root)
+	// can be tested for CommittedDurabilityError propagation (B10).
+	syncDirFaultForTest func(dir string) error
 }
 
 // ReplyRouter resolves where a cross-project caller's reply must be written.
@@ -54,6 +59,13 @@ type ReplyRouter func(replyProject, replyTo string) (root, handle string, err er
 // command carrying reply_project is refused rather than answered into the
 // endpoint's own root.
 func (c *Carrier) SetReplyRouter(r ReplyRouter) { c.router = r }
+
+// SetSyncDirFaultForTest installs a fault into every DeliveryRoot the carrier
+// opens. Used by B10 regression tests to force a CommittedDurabilityError
+// through the real Publish path (which opens its own root internally).
+func (c *Carrier) SetSyncDirFaultForTest(fn func(dir string) error) {
+	c.syncDirFaultForTest = fn
+}
 
 // errNoReplyRoute reports that a cross-project reply cannot be routed.
 // The error wraps the specific cause. F5 distinguishes POISON (DLQ) from
@@ -142,6 +154,9 @@ func (c *Carrier) ImportOnce() (int, error) {
 	root, err := fsq.OpenDeliveryRoot(c.root, c.identity)
 	if err != nil {
 		return 0, err
+	}
+	if c.syncDirFaultForTest != nil {
+		root.SetSyncDirFaultForTest(c.syncDirFaultForTest)
 	}
 	defer func() { _ = root.Close() }()
 	entries, err := root.ReadDir(filepath.Join("agents", c.me, "inbox", "new"))
@@ -305,8 +320,11 @@ func (c *Carrier) Publish(snap protocol.Snapshot, origin map[string]string) erro
 	if err != nil {
 		return err
 	}
+	if c.syncDirFaultForTest != nil {
+		root.SetSyncDirFaultForTest(c.syncDirFaultForTest)
+	}
 	defer func() { _ = root.Close() }()
-	return c.reply(root, origin, subjectPrefix+string(snap.State), snap, nil)
+	return c.replyWith(root, origin, subjectPrefix+string(snap.State), snap, nil, durabilityStrict)
 }
 
 // destination returns the root the reply must be written to and the handle
@@ -365,7 +383,41 @@ func (c *Carrier) destination(own *fsq.DeliveryRoot, origin map[string]string) (
 	return peer, handle, func() { _ = peer.Close() }, nil
 }
 
+// durabilityExpectation names the two needs reply() serves. It is an explicit
+// type (not a bool) because the two callers have genuinely different
+// requirements and the distinction is a wire-contract decision, not a flag.
+//
+// B10 (agent-message-queue-611.22.14): a CommittedDurabilityError means the
+// rename was VISIBLE but the durability of that commit is UNKNOWN. "Published"
+// must mean "the receiver can DURABLY see this revision" — a visible-but-
+// unsynced delivery does not meet that bar.
+type durabilityExpectation int
+
+const (
+	// durabilityTolerant: a visible-but-unsynced delivery is treated as
+	// success. Used by the INLINE reply (the immediate answer inside
+	// importOne) because the inline path has no durable retry — making it fail
+	// would leave the command claimed with no answer. The published revision
+	// has a durable retry path (Reconcile republishes), the inline reply does
+	// not, and that is why the two differ.
+	durabilityTolerant durabilityExpectation = iota
+	// durabilityStrict: a CommittedDurabilityError is PROPAGATED. Used by
+	// Publish (revision publication) so publishLocked does not advance
+	// PublishedRevision, and Reconcile republishes the same immutable revision
+	// on the next tick. The republish is idempotent by construction (B1):
+	// the message id is deterministic (publish__<ref>__rev<N>), so
+	// resolvePublishCollision returns nil on a byte-identical collision.
+	durabilityStrict
+)
+
 func (c *Carrier) reply(root *fsq.DeliveryRoot, origin map[string]string, subject string, body any, refusal error) error {
+	return c.replyWith(root, origin, subject, body, refusal, durabilityTolerant)
+}
+
+// replyWith delivers a reply message. The durability expectation controls
+// whether a CommittedDurabilityError (visible rename, unknown fsync) is
+// treated as success (durabilityTolerant) or propagated (durabilityStrict).
+func (c *Carrier) replyWith(root *fsq.DeliveryRoot, origin map[string]string, subject string, body any, refusal error, dur durabilityExpectation) error {
 	dest, to, closeDest, rerr := c.destination(root, origin)
 	if rerr != nil {
 		return rerr
@@ -381,10 +433,9 @@ func (c *Carrier) reply(root *fsq.DeliveryRoot, origin map[string]string, subjec
 		return nil
 	}
 	now := c.now()
-	id, err := format.NewMessageID(now)
-	if err != nil {
-		return err
-	}
+	var id string
+	var created string
+	var err error
 	labels := []string{LabelRemote}
 	context := map[string]any{}
 	var text []byte
@@ -408,6 +459,51 @@ func (c *Carrier) reply(root *fsq.DeliveryRoot, origin map[string]string, subjec
 		}
 		context["remote"] = json.RawMessage(text)
 	}
+	// B1: for durabilityStrict (Publish), use a DETERMINISTIC message id
+	// derived from (request_ref, revision) so a republish of the same
+	// immutable revision resolves to the SAME filename and identical bytes.
+	// resolvePublishCollision returns nil on a byte-identical collision, so
+	// every retry after the first is a genuine no-op — at-least-once delivery
+	// with an idempotent write is exactly-once in effect, and it needs no
+	// cooperation from the receiver. The Created timestamp is also stable
+	// (derived from the revision, not wall-clock) so the bytes never drift.
+	// The inline reply (durabilityTolerant) keeps the fresh id — it has no
+	// retry, so amplification is impossible.
+	if dur == durabilityStrict {
+		if snap, ok := body.(protocol.Snapshot); ok {
+			// B1 + ordering: the id must be deterministic per (request_ref,
+			// revision) AND sort chronologically against ordinary AMQ message
+			// ids (<RFC3339>_pid<N>_<rand>). A bare "publish__" prefix sorts
+			// AFTER every 2026-* message, starving drain --limit 20. Fix:
+			// stable timestamp first (from snap.ObservedAt, not time.Now —
+			// ObservedAt is identical on every retry of that revision, keeping
+			// the write idempotent), then the deterministic part, then a short
+			// digest of the request_ref so the filename stays short.
+			observed, perr := protocol.ParseTime(snap.ObservedAt)
+			if perr != nil {
+				observed = now
+			}
+			stamp := observed.UTC().Format("2006-01-02T15:04:05.000Z")
+			refDigest := requests.Digest([]byte(snap.RequestRef))
+			refDigest = strings.TrimPrefix(refDigest, "sha256:")[:8]
+			id = fmt.Sprintf("%s_publish_rev%d_%s", stamp, snap.Revision, refDigest)
+			created = protocol.FormatTime(observed)
+		} else {
+			var err error
+			id, err = format.NewMessageID(now)
+			if err != nil {
+				return err
+			}
+			created = now.UTC().Format(time.RFC3339Nano)
+		}
+	} else {
+		var err error
+		id, err = format.NewMessageID(now)
+		if err != nil {
+			return err
+		}
+		created = now.UTC().Format(time.RFC3339Nano)
+	}
 	msg := format.Message{
 		Header: format.Header{
 			Schema:  format.CurrentSchema,
@@ -416,7 +512,7 @@ func (c *Carrier) reply(root *fsq.DeliveryRoot, origin map[string]string, subjec
 			To:      []string{to},
 			Thread:  origin["thread"],
 			Subject: subject,
-			Created: now.UTC().Format(time.RFC3339Nano),
+			Created: created,
 			Refs:    refsFrom(origin),
 			Kind:    "status",
 			Labels:  labels,
@@ -433,10 +529,26 @@ func (c *Carrier) reply(root *fsq.DeliveryRoot, origin map[string]string, subjec
 	}
 	_, err = fsq.DeliverToInboxes(dest, []string{to}, id+".md", data)
 	var committed *fsq.CommittedDurabilityError
-	if err != nil && !errors.As(err, &committed) {
-		return err
+	if err != nil && errors.As(err, &committed) {
+		// The rename was visible but fsync durability is unknown. For
+		// durabilityStrict (Publish), PROPAGATE — publishLocked must not
+		// advance PublishedRevision, and Reconcile republishes the same
+		// immutable revision on the next tick (B10). The republish is
+		// idempotent (deterministic message id + resolvePublishCollision).
+		//
+		// For durabilityTolerant (inline reply), treat as success — the
+		// inline path has no retry. The known exposure: a non-request op
+		// (e.g. session.list) whose inline reply is the ONLY answer the
+		// caller ever gets, with the fault on + power loss, loses that
+		// answer with no recovery. cur recovery (agent-message-queue-611.22.4,
+		// PR #752 / feat/b09-cur-recovery) closes this by recovering replies
+		// from cur. The exposure is open until that merges.
+		if dur == durabilityStrict {
+			return err
+		}
+		return nil
 	}
-	return nil
+	return err
 }
 
 // transientRefusal reports whether a refusal describes the STORE's inability
