@@ -351,16 +351,20 @@ func (c *Carrier) recoverOne(root *fsq.DeliveryRoot, curDir, name string) error 
 		// Unreadable cur entry: not ours to fix (amq tooling owns DLQ).
 		return nil
 	}
-	// Receipt by deterministic filename; WriteFileAtomic is idempotent, so
-	// re-emitting an existing receipt is a harmless no-op rewrite.
+	// A receipt we can READ proves the case was closed. A receipt that is
+	// MISSING, or that EXISTS BUT DOES NOT PARSE, proves nothing: an
+	// unparseable receipt cannot tell us the case was closed, and presence is
+	// not proof (same error class as "an existing directory is a durable
+	// directory" from the fsq work). Treat it exactly like a missing one.
+	// recoverOne re-emits the receipt unconditionally (WriteFileAtomic
+	// overwrites, repairing the corruption as a side effect) and sends an
+	// idempotent recovery reply, so recovery is always safe.
 	hasReceipt := true
 	if _, err := receipt.ReadDeliveryRoot(root, filepath.Join("agents", c.me, "receipts", fmt.Sprintf("%s__%s__%s.json", msg.Header.ID, c.me, receipt.StageDrained))); err != nil {
-		if !os.IsNotExist(err) {
-			// P0 #2: a receipt that EXISTS BUT DOES NOT PARSE must not abort the
-			// sweep. The receipt file exists, so the case was closed — skip this
-			// entry and continue. amq tooling owns repairing corrupted receipts.
-			return nil
-		}
+		// Missing OR unparseable: recover. An unparseable receipt cannot prove
+		// the case was closed, and presence is not proof. recoverOne re-emits
+		// the receipt (overwriting any corruption) and sends an idempotent
+		// recovery reply (deterministic message id), so recovery is always safe.
 		hasReceipt = false
 	}
 	cmd, derr := protocol.DecodeCommand([]byte(strings.TrimSpace(msg.Body)))
@@ -376,7 +380,9 @@ func (c *Carrier) recoverOne(root *fsq.DeliveryRoot, curDir, name string) error 
 	if derr != nil {
 		// The claim happened, so the command was handled or refused at the
 		// time; without a decodable body we cannot reconstruct a reply, but
-		// the missing receipt still must be emitted.
+		// the missing/corrupted receipt still must be emitted. The reply is
+		// not possible (no body to reconstruct from), so return after the
+		// receipt — there is nothing to re-send.
 		if !hasReceipt {
 			rc := receipt.New(msg.Header.ID, msg.Header.Thread, msg.Header.From, c.me, receipt.StageDrained, "remote command recovered from cur; body undecodable")
 			return receipt.EmitDeliveryRoot(root, rc)
@@ -388,38 +394,45 @@ func (c *Carrier) recoverOne(root *fsq.DeliveryRoot, curDir, name string) error 
 	// already reflects the command's outcome, so the reply is a read, not a
 	// second execution.
 	//
-	// P0 #1: emit the receipt FIRST, then reply. The receipt is our own
-	// bookkeeping and is idempotent (WriteFileAtomic); the reply is someone
-	// else's mailbox and is not. A persistent receipt-write failure must not
-	// produce an unbounded stream of duplicate replies on every tick.
+	// Receipt-first ordering: emit the receipt before the reply. The receipt
+	// is our own bookkeeping and is idempotent (WriteFileAtomic overwrites).
 	//
-	// P1 #4: for request ops (submit/cancel), the outcome travels via Publish
-	// BEFORE the claim in the real flow. If the record shows PublishedRevision
-	// >= Revision, the caller already got the outcome — do NOT send a
-	// duplicate reply. For non-request ops (request.get, etc.), the reply is
-	// inline and may genuinely be missing, so always reply.
+	// The reply is NOT gated on !hasReceipt. The receipt-first ordering used
+	// to gate the reply inside !hasReceipt, which created a lost-reply window:
+	// if the receipt landed but the reply did not (crash between the two),
+	// the next sweep saw hasReceipt=true and skipped the entry forever — the
+	// caller never got the outcome. The recovery reply is idempotent by
+	// construction (deterministic message id + resolvePublishCollision), so a
+	// duplicate reply is free. ALWAYS attempt the reply, subject only to the
+	// PublishedRevision check (a separate and correct concern: if the outcome
+	// already went out via Publish, there is nothing to re-send).
+	//
+	// The treat-as-missing behaviour for unparseable receipts is retained not
+	// because our fsync can corrupt it (it cannot — writeAndSync writes and
+	// fsyncs the full content before rename), but because presence is not
+	// proof and recovery is free.
 	if !hasReceipt {
 		rc := receipt.New(msg.Header.ID, msg.Header.Thread, msg.Header.From, c.me, receipt.StageDrained, "remote command recovered from cur")
 		if err := receipt.EmitDeliveryRoot(root, rc); err != nil {
 			return err
 		}
-		// Receipt emitted — the case is closed. Now reply, unless the outcome
-		// was already published (request ops only).
-		shouldReply := true
-		if cmd.Op == protocol.OpRequestSubmit || cmd.Op == protocol.OpRequestCancel {
-			// P1 #4: if the outcome was already published (PublishedRevision >=
-			// Revision), the caller got it via Publish before the crash. Do not
-			// send a duplicate reply.
-			if key, ok := recoveredKey(cmd, origin); ok {
-				if rec, found, _ := c.ep.Store().Get(key); found && rec.Revision > 0 && rec.PublishedRevision >= rec.Revision {
-					shouldReply = false
-				}
+	}
+	// Always attempt the recovery reply (idempotent), unless the outcome was
+	// already published via Publish before the crash (request ops only).
+	shouldReply := true
+	if cmd.Op == protocol.OpRequestSubmit || cmd.Op == protocol.OpRequestCancel {
+		// P1 #4: if the outcome was already published (PublishedRevision >=
+		// Revision), the caller got it via Publish before the crash. Do not
+		// send a duplicate reply.
+		if key, ok := recoveredKey(cmd, origin); ok {
+			if rec, found, _ := c.ep.Store().Get(key); found && rec.Revision > 0 && rec.PublishedRevision >= rec.Revision {
+				shouldReply = false
 			}
 		}
-		if shouldReply {
-			if err := c.reply(root, origin, "remote reply", c.reconstructReply(cmd, origin), nil); err != nil {
-				return err
-			}
+	}
+	if shouldReply {
+		if err := c.replyWithRecovery(root, origin, "remote reply", c.reconstructReply(cmd, origin), nil, msg.Header.ID, msg.Header.Created); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -854,6 +867,89 @@ func (c *Carrier) replyWith(root *fsq.DeliveryRoot, origin map[string]string, su
 		}
 		return nil
 	}
+	return err
+}
+
+// replyWithRecovery delivers a recovery reply with a DETERMINISTIC message id
+// derived from the command's message id, so recovering the same command twice
+// produces the IDENTICAL filename and bytes and resolvePublishCollision
+// returns nil on the second pass. The id shape mirrors B10's Publish id
+// (timestamp prefix for drain ordering, then a deterministic body) but uses
+// the command's message id as the digest source. Uses durabilityTolerant
+// (same as the inline reply) — the recovery path has no retry amplification
+// because the id is already idempotent.
+func (c *Carrier) replyWithRecovery(root *fsq.DeliveryRoot, origin map[string]string, subject string, body any, refusal error, cmdMsgID, msgCreated string) error {
+	dest, to, closeDest, rerr := c.destination(root, origin)
+	if rerr != nil {
+		return rerr
+	}
+	defer closeDest()
+	if to == "" {
+		return nil
+	}
+	now := c.now()
+	labels := []string{LabelRemote}
+	context := map[string]any{}
+	var text []byte
+	switch {
+	case refusal != nil:
+		code := protocol.Code("error")
+		var r *protocol.Refusal
+		if errors.As(refusal, &r) {
+			code = r.Code
+		}
+		context["remote_error"] = map[string]string{"code": string(code), "message": refusal.Error()}
+		text, _ = json.MarshalIndent(context["remote_error"], "", "  ")
+		subject = "remote reply refused"
+	default:
+		if snap, ok := body.(protocol.Snapshot); ok {
+			labels = append(labels, labelRefPfx+snap.RequestRef, fmt.Sprintf("%s%d", labelRevPfx, snap.Revision))
+		}
+		text, err := json.MarshalIndent(body, "", "  ")
+		if err != nil {
+			return err
+		}
+		context["remote"] = json.RawMessage(text)
+	}
+	// Deterministic recovery id: timestamp prefix (for drain --limit ordering)
+	// + "recover" + short digest of the command message id. The timestamp is
+	// derived from the ORIGINAL message's Created, not time.Now, so a second
+	// recovery of the same command mints the IDENTICAL id —
+	// resolvePublishCollision returns nil on byte-identical data. A second
+	// recovery is a genuine no-op.
+	msgDigest := requests.Digest([]byte(cmdMsgID))
+	msgDigest = strings.TrimPrefix(msgDigest, "sha256:")[:8]
+	recovered, perr := protocol.ParseTime(msgCreated)
+	if perr != nil {
+		recovered = now
+	}
+	stamp := recovered.UTC().Format("2006-01-02T15:04:05.000Z")
+	id := fmt.Sprintf("%s_recover_%s", stamp, msgDigest)
+	created := recovered.UTC().Format(time.RFC3339Nano)
+	msg := format.Message{
+		Header: format.Header{
+			Schema:  format.CurrentSchema,
+			ID:      id,
+			From:    c.me,
+			To:      []string{to},
+			Thread:  origin["thread"],
+			Subject: subject,
+			Created: created,
+			Refs:    refsFrom(origin),
+			Kind:    "status",
+			Labels:  labels,
+			Context: context,
+		},
+		Body: string(text),
+	}
+	if msg.Header.Thread == "" {
+		msg.Header.Thread = "p2p/" + orderedPair(c.me, to)
+	}
+	data, err := msg.Marshal()
+	if err != nil {
+		return err
+	}
+	_, err = fsq.DeliverToInboxes(dest, []string{to}, id+".md", data)
 	return err
 }
 

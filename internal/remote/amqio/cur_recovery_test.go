@@ -259,3 +259,254 @@ func TestCurRecoverySteadyStateDoesNotRescan(t *testing.T) {
 		t.Fatalf("second import: curSweepCount=%d (want 1 — steady state must NOT re-scan cur; Pro #752 blocker)", sweepsAfterSecond)
 	}
 }
+
+// TestCurRecoveryCorruptedReceiptIsRecovered pins the ruling: a receipt that
+// EXISTS BUT DOES NOT PARSE is not proof the case was closed — the sweep must
+// recover it (rewrite the receipt, send the reply), not skip it. An
+// unparseable receipt cannot tell us anything, and presence is not proof.
+func TestCurRecoveryCorruptedReceiptIsRecovered(t *testing.T) {
+	root, carrier, rt, store := newCarrierEnv(t)
+
+	id := "11111111-1111-4111-8111-1111111111c1"
+	cmd := &protocol.Command{
+		Schema: protocol.SchemaCommand, Op: protocol.OpRequestSubmit,
+		RequestID: id, TargetID: "fake", Epoch: "e_1",
+		NotAfter: protocol.FormatTime(time.Now().Add(time.Minute)),
+		Input:    &protocol.SubmitInput{Text: "corrupted-receipt-test"},
+	}
+	if _, err := carrier.ep.Handle(cmd, coreSrc("codex")); err != nil {
+		t.Fatalf("pre-crash handle: %v", err)
+	}
+
+	body := `{"schema":"amq.remote.command/1","op":"request.submit","request_id":"` + id + `","target_id":"fake","epoch":"e_1","not_after":"` + protocol.FormatTime(time.Now().Add(time.Minute)) + `","input":{"text":"corrupted-receipt-test"}}`
+	simulateCrashBetweenClaimAndReceipt(t, root, id, body)
+
+	// Corrupt the receipt: write garbage at the receipt path so it EXISTS but
+	// does NOT parse. The sweep must treat this like a missing receipt.
+	curEntries, _ := os.ReadDir(fsq.AgentInboxCur(root, DefaultHandle))
+	var msgID string
+	for _, e := range curEntries {
+		if strings.HasSuffix(e.Name(), ".md") {
+			msgID = strings.TrimSuffix(e.Name(), ".md")
+			break
+		}
+	}
+	if msgID == "" {
+		t.Fatal("no cur entry found")
+	}
+	receiptDir := filepath.Join(root, "agents", DefaultHandle, "receipts")
+	if err := os.MkdirAll(receiptDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	receiptPath := filepath.Join(receiptDir, msgID+"__"+DefaultHandle+"__"+receipt.StageDrained+".json")
+	if err := os.WriteFile(receiptPath, []byte("{CORRUPTED"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	before := rt.Snapshot().Dispatches
+
+	n, err := carrier.ImportOnce()
+	if err != nil || n != 0 {
+		t.Fatalf("import over corrupted-receipt fixture: n=%d err=%v", n, err)
+	}
+
+	// 1. The receipt was rewritten and now PARSES.
+	rc, err := receipt.ReadDeliveryRoot(
+		mustOpenDeliveryRoot(t, root),
+		filepath.Join("agents", DefaultHandle, "receipts", msgID+"__"+DefaultHandle+"__"+receipt.StageDrained+".json"),
+	)
+	if err != nil {
+		t.Fatalf("corrupted receipt was not repaired: %v", err)
+	}
+	if rc.MsgID != msgID {
+		t.Fatalf("repaired receipt has wrong MsgID: got %s want %s", rc.MsgID, msgID)
+	}
+
+	// 2. The sender received the reply.
+	entries, _ := os.ReadDir(fsq.AgentInboxNew(root, "codex"))
+	gotReply := false
+	for _, e := range entries {
+		m, err := format.ReadMessageFile(filepath.Join(fsq.AgentInboxNew(root, "codex"), e.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if m.Header.Thread == "p2p/codex__remote" {
+			gotReply = true
+		}
+	}
+	if !gotReply {
+		t.Fatal("no outcome reply for corrupted-receipt recovery")
+	}
+
+	// 3. The command was NOT re-executed.
+	if got := rt.Snapshot().Dispatches; got != before {
+		t.Fatalf("recovery re-executed: %d -> %d", before, got)
+	}
+	_ = store
+}
+
+// TestCurRecoveryIdempotentReply proves the recovery reply is idempotent by
+// construction: recovering the same command twice produces exactly ONE reply
+// file in the caller's inbox, because the deterministic message id makes the
+// second write a byte-identical collision (resolvePublishCollision -> nil).
+//
+// This test does NOT pre-handle the command, so there is no durable record and
+// no PublishedRevision — the recovery reply IS sent (reconstructReply returns
+// a Refuse(CodeNotFound), which is a valid reply). This isolates the recovery
+// reply path from the Publish path.
+func TestCurRecoveryIdempotentReply(t *testing.T) {
+	root, carrier, _, _ := newCarrierEnv(t)
+
+	id := "11111111-1111-4111-8111-1111111111a1"
+	body := `{"schema":"amq.remote.command/1","op":"request.submit","request_id":"` + id + `","target_id":"fake","epoch":"e_1","not_after":"` + protocol.FormatTime(time.Now().Add(time.Minute)) + `","input":{"text":"idempotent-test"}}`
+	simulateCrashBetweenClaimAndReceipt(t, root, id, body)
+
+	// First recovery.
+	if _, err := carrier.ImportOnce(); err != nil {
+		t.Fatalf("first recovery: %v", err)
+	}
+	entries1, _ := os.ReadDir(fsq.AgentInboxNew(root, "codex"))
+	if len(entries1) != 1 {
+		t.Fatalf("expected 1 reply after first recovery, got %d", len(entries1))
+	}
+
+	// Second recovery — must NOT add a second reply file.
+	if _, err := carrier.ImportOnce(); err != nil {
+		t.Fatalf("second recovery: %v", err)
+	}
+	entries2, _ := os.ReadDir(fsq.AgentInboxNew(root, "codex"))
+	if len(entries2) != 1 {
+		t.Fatalf("idempotent recovery failed: expected 1 reply, got %d (duplicate written)", len(entries2))
+	}
+
+	// The filename must be identical (same deterministic id).
+	if entries1[0].Name() != entries2[0].Name() {
+		t.Fatalf("reply filename changed between recoveries: %s -> %s", entries1[0].Name(), entries2[0].Name())
+	}
+
+	// The recovery reply's filename must contain _recover_ (not _publish_rev).
+	if !strings.Contains(entries1[0].Name(), "_recover_") {
+		t.Fatalf("reply filename is not a recovery reply: %s", entries1[0].Name())
+	}
+}
+
+// TestCurRecoveryReplyTimestampPrefix asserts the recovery reply id has the
+// timestamp-first shape (same ordering guarantee as B10's Publish id) so
+// drain --limit 20 does not starve recovery replies.
+//
+// No pre-handle: isolates the recovery reply path from Publish.
+func TestCurRecoveryReplyTimestampPrefix(t *testing.T) {
+	root, carrier, _, _ := newCarrierEnv(t)
+
+	id := "11111111-1111-4111-8111-1111111111b1"
+	body := `{"schema":"amq.remote.command/1","op":"request.submit","request_id":"` + id + `","target_id":"fake","epoch":"e_1","not_after":"` + protocol.FormatTime(time.Now().Add(time.Minute)) + `","input":{"text":"timestamp-test"}}`
+	simulateCrashBetweenClaimAndReceipt(t, root, id, body)
+
+	if _, err := carrier.ImportOnce(); err != nil {
+		t.Fatalf("recovery: %v", err)
+	}
+
+	entries, _ := os.ReadDir(fsq.AgentInboxNew(root, "codex"))
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 reply, got %d", len(entries))
+	}
+	name := entries[0].Name()
+	// Must start with a RFC3339-like timestamp (YYYY-MM-DD...), not "recover_".
+	if !strings.HasPrefix(name, "20") {
+		t.Fatalf("recovery reply filename does not start with a timestamp: %s", name)
+	}
+	if !strings.Contains(name, "_recover_") {
+		t.Fatalf("recovery reply filename missing _recover_ marker: %s", name)
+	}
+}
+
+// mustOpenDeliveryRoot is a test helper that opens a delivery root or fails.
+func mustOpenDeliveryRoot(t *testing.T, root string) *fsq.DeliveryRoot {
+	t.Helper()
+	identity, err := fsq.SnapshotDeliveryRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dr, err := fsq.OpenDeliveryRoot(root, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = dr.Close() })
+	return dr
+}
+
+// TestCurRecoveryLostReplyIsResent proves the reply is not gated on
+// !hasReceipt. Scenario: the receipt was emitted but the reply was lost
+// (crash between receipt and reply). On the next sweep, the receipt EXISTS
+// and PARSES, but the reply is STILL sent — because it is idempotent, a
+// duplicate is free. A third sweep adds nothing.
+//
+// Mutation: re-gate the reply inside !hasReceipt -> this test fails because
+// the caller never receives the reply (hasReceipt=true -> skip).
+func TestCurRecoveryLostReplyIsResent(t *testing.T) {
+	root, carrier, _, store := newCarrierEnv(t)
+
+	id := "11111111-1111-4111-8111-1111111111e1"
+	body := `{"schema":"amq.remote.command/1","op":"request.submit","request_id":"` + id + `","target_id":"fake","epoch":"e_1","not_after":"` + protocol.FormatTime(time.Now().Add(time.Minute)) + `","input":{"text":"lost-reply-test"}}`
+	simulateCrashBetweenClaimAndReceipt(t, root, id, body)
+
+	// First recovery: emits the receipt AND the reply.
+	if _, err := carrier.ImportOnce(); err != nil {
+		t.Fatalf("first recovery: %v", err)
+	}
+	entries1, _ := os.ReadDir(fsq.AgentInboxNew(root, "codex"))
+	if len(entries1) != 1 {
+		t.Fatalf("expected 1 reply after first recovery, got %d", len(entries1))
+	}
+
+	// Simulate the crash gap: the receipt landed, but the reply did not.
+	// Delete the reply file (the caller's inbox lost it).
+	if err := os.Remove(filepath.Join(fsq.AgentInboxNew(root, "codex"), entries1[0].Name())); err != nil {
+		t.Fatal(err)
+	}
+
+	// Second recovery: the receipt EXISTS and PARSES (hasReceipt=true), but
+	// the reply must STILL be sent because it is idempotent and ungated.
+	// Simulate a process restart: new carrier over the same root + store,
+	// so the full cur sweep runs again.
+	carrier2, _ := newCarrierOverExisting(t, root, store)
+	if _, err := carrier2.ImportOnce(); err != nil {
+		t.Fatalf("second recovery: %v", err)
+	}
+	entries2, _ := os.ReadDir(fsq.AgentInboxNew(root, "codex"))
+	if len(entries2) != 1 {
+		t.Fatalf("lost reply was not resent: expected 1 reply, got %d", len(entries2))
+	}
+
+	// The filename must be identical (same deterministic recovery id).
+	if entries1[0].Name() != entries2[0].Name() {
+		t.Fatalf("resent reply has different filename: %s -> %s", entries1[0].Name(), entries2[0].Name())
+	}
+
+	// Third sweep: adds nothing (idempotent collision).
+	if _, err := carrier2.ImportOnce(); err != nil {
+		t.Fatalf("third recovery: %v", err)
+	}
+	entries3, _ := os.ReadDir(fsq.AgentInboxNew(root, "codex"))
+	if len(entries3) != 1 {
+		t.Fatalf("third recovery added a duplicate: expected 1, got %d", len(entries3))
+	}
+}
+
+// newCarrierOverExisting creates a fresh Carrier over an existing root and
+// store, simulating a process restart so the full cur sweep runs again.
+func newCarrierOverExisting(t *testing.T, root string, store *requests.Store) (*Carrier, *fake.Runtime) {
+	t.Helper()
+	var c *Carrier
+	ep := core.New(core.Config{Store: store, Publish: func(s protocol.Snapshot, o map[string]string) error {
+		return c.Publish(s, o)
+	}})
+	c, err := New(root, DefaultHandle, ep)
+	if err != nil {
+		t.Fatalf("carrier: %v", err)
+	}
+	rt := fake.New("fake", "e_1")
+	ep.Register(rt)
+	t.Cleanup(func() { _ = ep.Close() })
+	return c, rt
+}
