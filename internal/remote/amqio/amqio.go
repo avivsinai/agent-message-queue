@@ -41,6 +41,7 @@ type Carrier struct {
 	identity fsq.DeliveryRootIdentity
 	ep       *core.Endpoint
 	now      func() time.Time
+	router   ReplyRouter
 	// curRecovered is set after the first full cur sweep (the crash-recovery
 	// scan). Steady-state reconciliation tracks only IDs THIS process claimed.
 	curRecovered bool
@@ -61,6 +62,26 @@ type claimedEntry struct {
 	filename string // cur entry name (same as the new filename)
 	msgID    string // message header ID, for the receipt filename
 }
+
+// ReplyRouter resolves where a cross-project caller's reply must be written.
+// It takes the reply_project and reply_to headers the caller stamped on its
+// command and returns the delivery root plus the mailbox handle inside it.
+// The carrier deliberately knows nothing about .amqrc, peer maps or session
+// layout: cmd/amq-remote injects cli.ResolveReplyRoute, tests inject a fake.
+// A nil router means this endpoint serves same-project callers only.
+type ReplyRouter func(replyProject, replyTo string) (root, handle string, err error)
+
+// SetReplyRouter installs the cross-project reply resolver. Without it, a
+// command carrying reply_project is refused rather than answered into the
+// endpoint's own root.
+func (c *Carrier) SetReplyRouter(r ReplyRouter) { c.router = r }
+
+// errNoReplyRoute reports that a cross-project reply cannot be routed. The
+// caller's command stays in new so a later pass (with a router configured, or
+// after the peer root is reachable) can still answer it: delivering into our
+// own root would silently swallow the reply, and claiming the command without
+// replying would lose it outright.
+var errNoReplyRoute = errors.New("cross-project reply cannot be routed")
 
 // New prepares the endpoint mailbox under root and returns the carrier.
 func New(root, me string, ep *core.Endpoint) (*Carrier, error) {
@@ -109,6 +130,13 @@ func sourceHostFromOrigin(origin map[string]string) string {
 // command to the endpoint, and only then claims the message into cur with a
 // drained receipt. A message the endpoint refuses is still claimed, with the
 // refusal in the receipt detail and a reply to the sender.
+//
+// D1: a per-message failure is NEVER a loop failure. ImportOnce's job is to
+// make progress on every message independently. One caller's bad header must
+// not stop another caller's work. Each message is classified as (a) handled,
+// (b) transient — leave in new, try next tick (storage refusal), or (c)
+// terminal-for-us — cannot ever be answered by this endpoint, DLQ it. Errors
+// are accumulated, never abort the scan. Returns the count plus a joined error.
 func (c *Carrier) ImportOnce() (int, error) {
 	root, err := fsq.OpenDeliveryRoot(c.root, c.identity)
 	if err != nil {
@@ -130,11 +158,15 @@ func (c *Carrier) ImportOnce() (int, error) {
 	}
 	sort.Strings(names)
 	n := 0
+	var errs []error
 	for _, name := range names {
-		if err := c.importOne(root, name); err != nil {
-			return n, err
+		ok, err := c.importOne(root, name)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", name, err))
 		}
-		n++
+		if ok {
+			n++
+		}
 	}
 	// Pro B09 cur recovery: a command claimed into cur that crashed between
 	// the claim and its receipt (or whose receipt write failed) is invisible
@@ -181,6 +213,15 @@ func (c *Carrier) ImportOnce() (int, error) {
 			} else {
 				err = errors.Join(err, rerr)
 			}
+		}
+	}
+	// Combine the new-scan errors with the cur-recovery errors.
+	scanErr := errors.Join(errs...)
+	if scanErr != nil {
+		if err == nil {
+			err = scanErr
+		} else {
+			err = errors.Join(err, scanErr)
 		}
 	}
 	return n, err
@@ -395,13 +436,17 @@ func (c *Carrier) reconstructReply(cmd *protocol.Command, origin map[string]stri
 	return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.Op(cmd.Op)}}
 }
 
-func (c *Carrier) importOne(root *fsq.DeliveryRoot, name string) error {
+// importOne handles one message from inbox/new. Returns (handled, err):
+// handled=true means the message was claimed into cur (or DLQ'd); handled=false
+// means it was left in new for a retry (transient failure, or unparseable).
+// err is non-nil for errors that should be accumulated (D1: never aborts the scan).
+func (c *Carrier) importOne(root *fsq.DeliveryRoot, name string) (bool, error) {
 	path := filepath.Join(c.root, "agents", c.me, "inbox", "new", name)
 	msg, err := format.ReadMessageFile(path)
 	if err != nil {
 		// Unparseable serialization belongs to the DLQ path owned by amq
 		// read/drain; the endpoint leaves it in new for that tooling.
-		return nil
+		return false, nil
 	}
 	detail := "remote command handled"
 	cmd, derr := protocol.DecodeCommand([]byte(strings.TrimSpace(msg.Body)))
@@ -412,6 +457,28 @@ func (c *Carrier) importOne(root *fsq.DeliveryRoot, name string) error {
 		"msg_id":        msg.Header.ID,
 		"reply_to":      msg.Header.ReplyTo,
 		"reply_project": msg.Header.ReplyProject,
+	}
+	// D2: route ONLY when the caller is actually elsewhere. If reply_project
+	// is empty, the caller lives in OUR root — take the pre-existing same-root
+	// path, with the old tolerant handling of a missing or unusable From. Only
+	// a genuinely cross-project caller goes near the ReplyRouter.
+	project := strings.TrimSpace(origin["reply_project"])
+	if project != "" {
+		// D3: an unroutable cross-project caller is a POISON MESSAGE, not a
+		// retry. Leaving it in new means it is re-probed every tick and never
+		// converges (Pro B1). DLQ it so the operator sees it in `amq dlq list`,
+		// `dlq retry` recovers it once the peer is configured, and the loop
+		// converges. D4: before delivering to a peer root, validate the
+		// destination mailbox EXISTS — never create a mailbox in someone else's
+		// root (recreates the black hole this PR closed, just moved one dir over).
+		if _, _, closeProbe, rerr := c.destination(root, origin); rerr != nil {
+			if _, dlqErr := fsq.MoveToDLQ(root, c.me, name, msg.Header.ID, "unroutable", rerr.Error()); dlqErr != nil {
+				return false, fmt.Errorf("dlq %s: %w (route error: %v)", name, dlqErr, rerr)
+			}
+			return true, nil // DLQ'd — the message is no longer in new
+		} else {
+			closeProbe()
+		}
 	}
 	var reply any
 	var herr error
@@ -429,7 +496,7 @@ func (c *Carrier) importOne(root *fsq.DeliveryRoot, name string) error {
 		// The endpoint could not say whether a record exists. Leave the
 		// message in new so the next import retries it; never drain a
 		// command whose record may not exist.
-		return nil
+		return false, nil
 	}
 	// A typed Refusal is not automatically a DURABLE one. The store refuses
 	// with storage_full (ENOSPC, EPERM, oversize) and store_closed (shutdown),
@@ -446,7 +513,7 @@ func (c *Carrier) importOne(root *fsq.DeliveryRoot, name string) error {
 		outcome = rep.Outcome
 	}
 	if transientRefusal(refusal, outcome.Code) {
-		return nil
+		return false, nil
 	}
 	// Reply once here for: every refusal; every non-request op; and a request
 	// op that carries an op-specific Outcome which does not travel as a
@@ -458,13 +525,17 @@ func (c *Carrier) importOne(root *fsq.DeliveryRoot, name string) error {
 	hasOutcomeSignal := outcome.Code != "" || outcome.Disposition != ""
 	if herr != nil || !isRequestOp || hasOutcomeSignal {
 		if err := c.reply(root, origin, "remote reply", reply, herr); err != nil {
-			return err
+			// D1: a reply-route failure on ONE message must not abort the whole
+			// scan. The message is not claimed (stays in new); accumulate the
+			// error and continue. If this is a cross-project route failure, the
+			// next tick's probe will DLQ it (D3).
+			return false, err
 		}
 	}
 	if err := fsq.MoveNewToCur(root, c.me, name); err != nil {
 		var committed *fsq.CommittedDurabilityError
 		if !errors.As(err, &committed) {
-			return fmt.Errorf("claim %s: %w", name, err)
+			return false, fmt.Errorf("claim %s: %w", name, err)
 		}
 	}
 	// Track this claim for steady-state cur reconciliation. Dropped after
@@ -478,13 +549,13 @@ func (c *Carrier) importOne(root *fsq.DeliveryRoot, name string) error {
 	c.mu.Unlock()
 	rc := receipt.New(msg.Header.ID, msg.Header.Thread, msg.Header.From, c.me, receipt.StageDrained, detail)
 	if err := receipt.EmitDeliveryRoot(root, rc); err != nil {
-		return err
+		return false, err
 	}
 	// Receipt confirmed — drop from the pending set.
 	c.mu.Lock()
 	delete(c.claimedThisRun, msg.Header.ID)
 	c.mu.Unlock()
-	return nil
+	return true, nil
 }
 
 // Publish implements core.Publisher for records that arrived over AMQ. Local
@@ -501,11 +572,59 @@ func (c *Carrier) Publish(snap protocol.Snapshot, origin map[string]string) erro
 	return c.reply(root, origin, subjectPrefix+string(snap.State), snap, nil)
 }
 
-func (c *Carrier) reply(root *fsq.DeliveryRoot, origin map[string]string, subject string, body any, refusal error) error {
+// destination returns the root the reply must be written to and the handle
+// inside it. A same-project caller is answered in this endpoint's own root; a
+// cross-project caller is answered in ITS root, resolved through the injected
+// router. The returned closer is never nil.
+func (c *Carrier) destination(own *fsq.DeliveryRoot, origin map[string]string) (*fsq.DeliveryRoot, string, func(), error) {
+	noop := func() {}
 	to := origin["from"]
-	if to == "" || fsq.ValidateHandle(to) != nil {
-		return nil
+	project := strings.TrimSpace(origin["reply_project"])
+	if project == "" {
+		// D2: same-project caller. Restore the pre-fix tolerant handling: a
+		// missing or unusable From is NOT a route error here — the reply
+		// writes to the sender's handle in our own root, and an empty `to`
+		// means no reply (the pre-fix code returned nil, not an error).
+		if to == "" || fsq.ValidateHandle(to) != nil {
+			return own, "", noop, nil
+		}
+		return own, to, noop, nil
 	}
+	if c.router == nil {
+		return nil, "", noop, fmt.Errorf("%w: no reply router configured for project %q", errNoReplyRoute, project)
+	}
+	rootPath, handle, err := c.router(project, origin["reply_to"])
+	if err != nil {
+		return nil, "", noop, fmt.Errorf("%w: %v", errNoReplyRoute, err)
+	}
+	if fsq.ValidateHandle(handle) != nil {
+		return nil, "", noop, fmt.Errorf("%w: unusable routed handle %q", errNoReplyRoute, handle)
+	}
+	identity, err := fsq.SnapshotDeliveryRoot(rootPath)
+	if err != nil {
+		return nil, "", noop, fmt.Errorf("%w: %v", errNoReplyRoute, err)
+	}
+	peer, err := fsq.OpenDeliveryRoot(rootPath, identity)
+	if err != nil {
+		return nil, "", noop, fmt.Errorf("%w: %v", errNoReplyRoute, err)
+	}
+	// D4: never create a mailbox in someone else's root. A peer root whose
+	// mailbox does not exist is unroutable (D3 applies). Creating it is
+	// exactly the black hole this PR set out to close, just moved one dir over.
+	// Every other cross-root writer gates on ValidateExistingMailboxLayout first.
+	if err := fsq.ValidateExistingMailboxLayout(peer, handle); err != nil {
+		_ = peer.Close()
+		return nil, "", noop, fmt.Errorf("%w: peer mailbox %q does not exist: %v", errNoReplyRoute, handle, err)
+	}
+	return peer, handle, func() { _ = peer.Close() }, nil
+}
+
+func (c *Carrier) reply(root *fsq.DeliveryRoot, origin map[string]string, subject string, body any, refusal error) error {
+	dest, to, closeDest, rerr := c.destination(root, origin)
+	if rerr != nil {
+		return rerr
+	}
+	defer closeDest()
 	now := c.now()
 	id, err := format.NewMessageID(now)
 	if err != nil {
@@ -557,7 +676,7 @@ func (c *Carrier) reply(root *fsq.DeliveryRoot, origin map[string]string, subjec
 	if err != nil {
 		return err
 	}
-	_, err = fsq.DeliverToInboxes(root, []string{to}, id+".md", data)
+	_, err = fsq.DeliverToInboxes(dest, []string{to}, id+".md", data)
 	var committed *fsq.CommittedDurabilityError
 	if err != nil && !errors.As(err, &committed) {
 		return err

@@ -437,3 +437,31 @@ func firstNonEmpty(a, b string) string {
 	}
 	return b
 }
+
+// ResolveReplyRoute resolves where a cross-project reply must be delivered.
+// It is the one exported seam over this package's route planning: the remote
+// endpoint's AMQ carrier must answer a caller in the CALLER's root, but it
+// has no business knowing about .amqrc discovery, peer maps or session
+// layout. cmd/amq-remote injects this function into the carrier, so the
+// carrier depends on a resolution contract rather than on configuration.
+//
+// sourceRoot is the endpoint's own root (where the command arrived).
+// replyProject and replyTo come from the command message's reply_project and
+// reply_to headers, which amq send stamps on every cross-project send.
+// The returned root is where the reply must be written and handle is the
+// mailbox inside it.
+func ResolveReplyRoute(sourceRoot, replyProject, replyTo string) (root, handle string, err error) {
+	project := strings.TrimSpace(replyProject)
+	if project == "" {
+		return "", "", fmt.Errorf("reply_project is empty; not a cross-project reply")
+	}
+	recipient, session, err := parseReplyToRoute(replyTo, true)
+	if err != nil {
+		return "", "", fmt.Errorf("malformed cross-project reply metadata for project %q: %w", project, err)
+	}
+	plan, err := planDeliveryRoute(sourceRoot, project, session, deliveryRouteOptions{})
+	if err != nil {
+		return "", "", err
+	}
+	return plan.DeliveryRoot, recipient, nil
+}
