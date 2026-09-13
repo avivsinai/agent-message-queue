@@ -1,0 +1,119 @@
+{
+  "description": "Golden digest vectors for amq.remote.command/1. Each vector is a complete command and its expected input_digest (sha256 hex with sha256: prefix). A Go test asserts CommandDigest reproduces each; a foreign carrier runs the same vectors to prove it agrees.",
+  "vectors": [
+    {
+      "name": "plain-text",
+      "command": {
+        "schema": "amq.remote.command/1",
+        "op": "request.submit",
+        "request_id": "11111111-1111-4111-8111-111111111d01",
+        "target_id": "t_fake1",
+        "epoch": "e_1",
+        "not_after": "2026-09-08T10:02:00Z",
+        "input": {
+          "text": "say hi"
+        }
+      },
+      "expect_sha256": "sha256:a559be7bd0d1746f960afb4b5cd020339a12c0bcfe1f68ab68195ee0e64b585e",
+      "note": "baseline plain text, Z suffix"
+    },
+    {
+      "name": "html-escaping",
+      "command": {
+        "schema": "amq.remote.command/1",
+        "op": "request.submit",
+        "request_id": "11111111-1111-4111-8111-111111111d02",
+        "target_id": "t_fake1",
+        "epoch": "e_1",
+        "not_after": "2026-09-08T10:02:00Z",
+        "input": {
+          "text": "fix the \u003cdiv\u003e \u0026 ship"
+        }
+      },
+      "expect_sha256": "sha256:80c2890eebf3e2d7593ee12d1f178735c34c947e520a6d02eea5b1a14942d0a2",
+      "note": "text containing \u003c \u003e \u0026 exercises Go json.Marshal HTML escaping"
+    },
+    {
+      "name": "busy-deliver-omitted",
+      "command": {
+        "schema": "amq.remote.command/1",
+        "op": "request.submit",
+        "request_id": "11111111-1111-4111-8111-111111111d03",
+        "target_id": "t_fake1",
+        "epoch": "e_1",
+        "not_after": "2026-09-08T10:02:00Z",
+        "input": {
+          "text": "say hi"
+        }
+      },
+      "expect_sha256": "sha256:f6e921d6fa90dc9387c1ad265086050f2f85c73603fb38c49073487482cf4314",
+      "note": "Busy and Deliver omitted; digest must equal spelled form"
+    },
+    {
+      "name": "busy-deliver-spelled",
+      "command": {
+        "schema": "amq.remote.command/1",
+        "op": "request.submit",
+        "request_id": "11111111-1111-4111-8111-111111111d03",
+        "target_id": "t_fake1",
+        "epoch": "e_1",
+        "not_after": "2026-09-08T10:02:00Z",
+        "input": {
+          "text": "say hi",
+          "busy": "reject",
+          "deliver": "turn"
+        }
+      },
+      "expect_sha256": "sha256:f6e921d6fa90dc9387c1ad265086050f2f85c73603fb38c49073487482cf4314",
+      "note": "Busy and Deliver spelled; digest must equal omitted form"
+    },
+    {
+      "name": "not-after-dot-000Z",
+      "command": {
+        "schema": "amq.remote.command/1",
+        "op": "request.submit",
+        "request_id": "11111111-1111-4111-8111-111111111d04",
+        "target_id": "t_fake1",
+        "epoch": "e_1",
+        "not_after": "2026-09-08T10:02:00.000Z",
+        "input": {
+          "text": "say hi"
+        }
+      },
+      "expect_sha256": "sha256:2fc57f507aa5a194f0e1c613cd47dba334b6bae0c6e2b8d56a53408c1947687c",
+      "note": "not_after with .000Z — same instant as Z, must normalize"
+    },
+    {
+      "name": "not-after-plus-offset",
+      "command": {
+        "schema": "amq.remote.command/1",
+        "op": "request.submit",
+        "request_id": "11111111-1111-4111-8111-111111111d05",
+        "target_id": "t_fake1",
+        "epoch": "e_1",
+        "not_after": "2026-09-08T12:02:00+02:00",
+        "input": {
+          "text": "say hi"
+        }
+      },
+      "expect_sha256": "sha256:f9c6d95f22bf7322cddf24acb12fb0c00c98b97d4881ddeeb21a5756d470e78f",
+      "note": "not_after with +02:00 — same instant as Z, must normalize"
+    },
+    {
+      "name": "not-after-subsecond-trim",
+      "command": {
+        "schema": "amq.remote.command/1",
+        "op": "request.submit",
+        "request_id": "11111111-1111-4111-8111-111111111d06",
+        "target_id": "t_fake1",
+        "epoch": "e_1",
+        "not_after": "2026-09-08T10:02:00.500Z",
+        "input": {
+          "text": "say hi"
+        }
+      },
+      "expect_sha256": "sha256:a782875f76b691be9191161c81d772dca42cb4c450416319e5154509835afc90",
+      "note": "not_after with .500Z — trailing zeros trimmed to .5Z"
+    }
+  ]
+}

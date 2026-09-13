@@ -170,7 +170,7 @@ func TestValidateRejectsWhitespaceOnlyPrompt(t *testing.T) {
 // FIX: resolve defaults BEFORE digesting so both forms produce the same digest.
 func TestCommandDigestResolvesDefaults(t *testing.T) {
 	base := &Command{
-		Schema:    SchemaRequest,
+		Schema:    SchemaCommand,
 		Op:        OpRequestSubmit,
 		RequestID: "11111111-1111-4111-8111-111111111901",
 		TargetID:  "fake",
@@ -203,7 +203,7 @@ func TestCommandDigestResolvesDefaults(t *testing.T) {
 // of MEANING, not spelling.
 func TestCommandDigestNormalizesNotAfter(t *testing.T) {
 	base := &Command{
-		Schema:    SchemaRequest,
+		Schema:    SchemaCommand,
 		Op:        OpRequestSubmit,
 		RequestID: "11111111-1111-4111-8111-1111111119b1",
 		TargetID:  "fake",
@@ -237,7 +237,7 @@ func TestCommandDigestNormalizesNotAfter(t *testing.T) {
 // json.Marshal's output.
 func TestCommandDigestHTMLEscaping(t *testing.T) {
 	cmd := &Command{
-		Schema:    SchemaRequest,
+		Schema:    SchemaCommand,
 		Op:        OpRequestSubmit,
 		RequestID: "11111111-1111-4111-8111-111111111902",
 		TargetID:  "fake",
