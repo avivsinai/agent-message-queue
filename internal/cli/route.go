@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -295,13 +296,22 @@ func planDeliveryRoute(sourceRoot, targetProject, targetSession string, opts del
 	return plan, nil
 }
 
+// ErrPeerRootUnreachable is the sentinel that marks a routing failure as
+// TRANSIENT: the peer root does not exist YET, or is not accessible YET.
+// ResolveReplyRoute wraps these errors in amqio.TransientRouteError so the
+// carrier leaves the message in new for the next tick instead of DLQ'ing it.
+// Unknown-project and malformed-handle errors are NOT wrapped — they are
+// poison.
+var ErrPeerRootUnreachable = errors.New("peer delivery root is not reachable")
+
 func peerDeliveryRootError(plan deliveryRoutePlan, deliveryRoot string, cause error) error {
 	configPath := plan.SourceConfigPath
 	if configPath == "" {
 		configPath = "the selected source .amqrc"
 	}
 	return fmt.Errorf(
-		"cannot access selected peer %q delivery root %s: %w; check that the peer root exists and is accessible; if the peer moved, fix the %q path in the peers map of .amqrc at %s, then retry the command",
+		"%w: cannot access selected peer %q delivery root %s: %v; check that the peer root exists and is accessible; if the peer moved, fix the %q path in the peers map of .amqrc at %s, then retry the command",
+		ErrPeerRootUnreachable,
 		plan.TargetProject,
 		deliveryRoot,
 		cause,
@@ -436,4 +446,41 @@ func firstNonEmpty(a, b string) string {
 		return a
 	}
 	return b
+}
+
+// ResolveReplyRoute resolves where a cross-project reply must be delivered.
+// It is the one exported seam over this package's route planning: the remote
+// endpoint's AMQ carrier must answer a caller in the CALLER's root, but it
+// has no business knowing about .amqrc discovery, peer maps or session
+// layout. cmd/amq-remote injects this function into the carrier, so the
+// carrier depends on a resolution contract rather than on configuration.
+//
+// sourceRoot is the endpoint's own root (where the command arrived).
+// replyProject and replyTo come from the command message's reply_project and
+// reply_to headers, which amq send stamps on every cross-project send.
+// The returned root is where the reply must be written and handle is the
+// mailbox inside it.
+func ResolveReplyRoute(sourceRoot, replyProject, replyTo string) (root, handle string, err error) {
+	project := strings.TrimSpace(replyProject)
+	if project == "" {
+		return "", "", fmt.Errorf("reply_project is empty; not a cross-project reply")
+	}
+	recipient, session, err := parseReplyToRoute(replyTo, true)
+	if err != nil {
+		return "", "", fmt.Errorf("malformed cross-project reply metadata for project %q: %w", project, err)
+	}
+	plan, err := planDeliveryRoute(sourceRoot, project, session, deliveryRouteOptions{})
+	if err != nil {
+		// B1: the router declares whether a failure is transient. The carrier
+		// cannot tell "I do not know this project" from "that project's root is
+		// not there right now", and it should not guess. Only the router knows.
+		// Retryable failures (peer root absent/unreachable) are marked with
+		// ErrPeerRootUnreachable; unknown-project and malformed-handle errors
+		// are not. The ADAPTER in cmd/amq-remote/main.go wraps
+		// ErrPeerRootUnreachable in amqio.TransientRouteError — the translation
+		// between the cli vocabulary and the amqio vocabulary lives in the
+		// adapter, not in this generic layer.
+		return "", "", err
+	}
+	return plan.DeliveryRoot, recipient, nil
 }
