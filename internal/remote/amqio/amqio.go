@@ -152,23 +152,38 @@ func (c *Carrier) ImportOnce() (int, error) {
 	// tick) thereafter, with no loss of coverage. If the process dies, the
 	// in-memory set is lost, and the next startup's full sweep catches
 	// exactly those.
+	// P2 #5: the first sweep runs regardless of the new-scan result. One
+	// persistently failing importOne must NOT defer crash recovery indefinitely.
+	// The sweep is decoupled — it runs after the new-scan, not gated on it.
 	c.mu.Lock()
 	firstSweep := !c.curRecovered
-	claimed := c.claimedThisRun
+	claimed := make(map[string]claimedEntry, len(c.claimedThisRun))
+	for k, v := range c.claimedThisRun {
+		claimed[k] = v
+	}
 	c.mu.Unlock()
 	if firstSweep {
-		if err := c.recoverCur(root); err != nil {
-			return n, err
+		if rerr := c.recoverCur(root); rerr != nil {
+			// Accumulate, don't return — the new-scan results are still valid.
+			if err == nil {
+				err = rerr
+			} else {
+				err = errors.Join(err, rerr)
+			}
 		}
 		c.mu.Lock()
 		c.curRecovered = true
 		c.mu.Unlock()
 	} else if len(claimed) > 0 {
-		if err := c.recoverClaimed(root, claimed); err != nil {
-			return n, err
+		if rerr := c.recoverClaimed(root, claimed); rerr != nil {
+			if err == nil {
+				err = rerr
+			} else {
+				err = errors.Join(err, rerr)
+			}
 		}
 	}
-	return n, nil
+	return n, err
 }
 
 // recoverCur reconciles the endpoint's retained cur bookkeeping: every
@@ -176,6 +191,15 @@ func (c *Carrier) ImportOnce() (int, error) {
 // that never produced a durable outcome reply must get one now. It reads the
 // record the command created (by request_ref from the origin the endpoint
 // persisted) rather than re-running the command.
+// recoverCur reconciles the endpoint's retained cur bookkeeping: every
+// message in inbox/cur must have a drained receipt, and a command message
+// whose receipt is missing is recovered (receipt emitted, outcome reply
+// reconstructed from the durable record — never re-executed).
+//
+// P0 #2 (D1 principle): a per-entry failure is NEVER a loop failure. One
+// unparseable receipt or read error must not abort the sweep, strand every
+// entry sorted after it, and re-run the full O(cur) scan every tick. Skip
+// the entry, accumulate the error, finish the sweep.
 func (c *Carrier) recoverCur(root *fsq.DeliveryRoot) error {
 	c.mu.Lock()
 	c.curSweepCount++
@@ -195,12 +219,13 @@ func (c *Carrier) recoverCur(root *fsq.DeliveryRoot) error {
 		}
 	}
 	sort.Strings(names)
+	var errs []error
 	for _, name := range names {
 		if err := c.recoverOne(root, curDir, name); err != nil {
-			return err
+			errs = append(errs, fmt.Errorf("%s: %w", name, err))
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 // recoverClaimed reconciles only the cur entries this process claimed during
@@ -212,6 +237,7 @@ func (c *Carrier) recoverCur(root *fsq.DeliveryRoot) error {
 // EmitDeliveryRoot in THIS process).
 func (c *Carrier) recoverClaimed(root *fsq.DeliveryRoot, claimed map[string]claimedEntry) error {
 	curDir := filepath.Join("agents", c.me, "inbox", "cur")
+	var errs []error
 	for id, entry := range claimed {
 		receiptPath := filepath.Join("agents", c.me, "receipts", fmt.Sprintf("%s__%s__%s.json", entry.msgID, c.me, receipt.StageDrained))
 		if _, err := receipt.ReadDeliveryRoot(root, receiptPath); err == nil {
@@ -222,14 +248,15 @@ func (c *Carrier) recoverClaimed(root *fsq.DeliveryRoot, claimed map[string]clai
 			continue
 		}
 		if err := c.recoverOne(root, curDir, entry.filename); err != nil {
-			return err
+			errs = append(errs, fmt.Errorf("%s: %w", entry.filename, err))
+			continue
 		}
 		// recoverOne emitted the receipt (or confirmed it); drop from the set.
 		c.mu.Lock()
 		delete(c.claimedThisRun, id)
 		c.mu.Unlock()
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 func (c *Carrier) recoverOne(root *fsq.DeliveryRoot, curDir, name string) error {
@@ -244,7 +271,10 @@ func (c *Carrier) recoverOne(root *fsq.DeliveryRoot, curDir, name string) error 
 	hasReceipt := true
 	if _, err := receipt.ReadDeliveryRoot(root, filepath.Join("agents", c.me, "receipts", fmt.Sprintf("%s__%s__%s.json", msg.Header.ID, c.me, receipt.StageDrained))); err != nil {
 		if !os.IsNotExist(err) {
-			return fmt.Errorf("read receipt for %s: %w", name, err)
+			// P0 #2: a receipt that EXISTS BUT DOES NOT PARSE must not abort the
+			// sweep. The receipt file exists, so the case was closed — skip this
+			// entry and continue. amq tooling owns repairing corrupted receipts.
+			return nil
 		}
 		hasReceipt = false
 	}
@@ -272,19 +302,40 @@ func (c *Carrier) recoverOne(root *fsq.DeliveryRoot, curDir, name string) error 
 	// The crash gap being closed is between claim and receipt: the record
 	// already reflects the command's outcome, so the reply is a read, not a
 	// second execution.
-	isRequestOp := cmd != nil && (cmd.Op == protocol.OpRequestSubmit || cmd.Op == protocol.OpRequestCancel)
-	// Emit the outcome reply only when no receipt exists: a missing receipt
-	// is the crash signature (everything after the endpoint handled the
-	// command may be missing — receipt AND reply), while an existing receipt
-	// means the original run completed its replies before crashing.
+	//
+	// P0 #1: emit the receipt FIRST, then reply. The receipt is our own
+	// bookkeeping and is idempotent (WriteFileAtomic); the reply is someone
+	// else's mailbox and is not. A persistent receipt-write failure must not
+	// produce an unbounded stream of duplicate replies on every tick.
+	//
+	// P1 #4: for request ops (submit/cancel), the outcome travels via Publish
+	// BEFORE the claim in the real flow. If the record shows PublishedRevision
+	// >= Revision, the caller already got the outcome — do NOT send a
+	// duplicate reply. For non-request ops (request.get, etc.), the reply is
+	// inline and may genuinely be missing, so always reply.
 	if !hasReceipt {
-		if isRequestOp {
+		rc := receipt.New(msg.Header.ID, msg.Header.Thread, msg.Header.From, c.me, receipt.StageDrained, "remote command recovered from cur")
+		if err := receipt.EmitDeliveryRoot(root, rc); err != nil {
+			return err
+		}
+		// Receipt emitted — the case is closed. Now reply, unless the outcome
+		// was already published (request ops only).
+		shouldReply := true
+		if cmd.Op == protocol.OpRequestSubmit || cmd.Op == protocol.OpRequestCancel {
+			// P1 #4: if the outcome was already published (PublishedRevision >=
+			// Revision), the caller got it via Publish before the crash. Do not
+			// send a duplicate reply.
+			if key, ok := recoveredKey(cmd, origin); ok {
+				if rec, found, _ := c.ep.Store().Get(key); found && rec.Revision > 0 && rec.PublishedRevision >= rec.Revision {
+					shouldReply = false
+				}
+			}
+		}
+		if shouldReply {
 			if err := c.reply(root, origin, "remote reply", c.reconstructReply(cmd, origin), nil); err != nil {
 				return err
 			}
 		}
-		rc := receipt.New(msg.Header.ID, msg.Header.Thread, msg.Header.From, c.me, receipt.StageDrained, "remote command recovered from cur")
-		return receipt.EmitDeliveryRoot(root, rc)
 	}
 	return nil
 }
@@ -294,6 +345,27 @@ func (c *Carrier) recoverOne(root *fsq.DeliveryRoot, curDir, name string) error 
 // learns the outcome, or a typed refusal when no record exists (the command
 // never created one — e.g. it was refused before any persist and the refusal
 // reply itself was lost in the crash).
+// recoveredKey derives the store key for a recovered command, mirroring
+// reconstructReply's key derivation. Returns ok=false when the command has
+// neither RequestID nor RequestRef.
+func recoveredKey(cmd *protocol.Command, origin map[string]string) (requests.Key, bool) {
+	if cmd == nil {
+		return requests.Key{}, false
+	}
+	switch {
+	case cmd.RequestID != "":
+		return requests.Key{CreatorHost: sourceHostFromOrigin(origin), TargetID: cmd.TargetID, RequestID: cmd.RequestID}, true
+	case cmd.RequestRef != "":
+		host, targetID, requestID, err := protocol.DecodeRef(cmd.RequestRef)
+		if err != nil {
+			return requests.Key{}, false
+		}
+		return requests.Key{CreatorHost: host, TargetID: targetID, RequestID: requestID}, true
+	default:
+		return requests.Key{}, false
+	}
+}
+
 func (c *Carrier) reconstructReply(cmd *protocol.Command, origin map[string]string) any {
 	if cmd == nil {
 		return nil

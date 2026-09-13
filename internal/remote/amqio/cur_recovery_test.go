@@ -179,7 +179,17 @@ func TestCurRecoveryEmitsMissingReceiptAndOutcome(t *testing.T) {
 	}
 }
 
-func coreSrc(from string) core.Source { return core.Source{Host: "amq:" + from} }
+// coreSrc builds the Source the real importOne path passes to ep.Handle:
+// a Host derived from the message header, and an Origin map carrying the
+// carrier routing metadata ("carrier": "amq") so Publish actually delivers.
+// The old coreSrc omitted Origin, which made Publish return early and
+// suppressed the very message the real path sends — hiding double-delivery.
+func coreSrc(from string) core.Source {
+	return core.Source{
+		Host:   "amq:" + from,
+		Origin: map[string]string{"carrier": "amq", "from": from, "thread": "p2p/" + from + "__remote"},
+	}
+}
 
 // deliverOneSubmit seeds one submit command into inbox/new and returns its
 // message id + request id.
