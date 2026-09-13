@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -150,6 +151,19 @@ func TestB10DurablePublishPropagatesCommittedDurabilityError(t *testing.T) {
 		t.Fatalf("(d) after 6 Reconcile ticks with fault on, expected 1 file for %s, got %d (B1 — deterministic id + resolvePublishCollision must make retries no-ops, no amplification)", revLabel, count)
 	}
 
+	// (e) The deterministic id must sort chronologically against ordinary AMQ
+	// message ids. Assert the filename starts with a timestamp (not
+	// "publish__"), so drain --limit 20 does not starve publish replies.
+	for _, fn := range filesForLabel(root, "codex", revLabel) {
+		if strings.HasPrefix(fn, "publish__") {
+			t.Fatalf("(e) publish reply filename %q starts with 'publish__' — it must start with a timestamp so it sorts chronologically against ordinary AMQ ids", fn)
+		}
+		// Must start with a 4-digit year.
+		if len(fn) < 4 || fn[:4] < "2000" {
+			t.Fatalf("(e) publish reply filename %q does not start with a timestamp — it must sort chronologically", fn)
+		}
+	}
+
 	// (c) Clear the fault and Reconcile. The same revision is republished and
 	// PublishedRevision advances.
 	faultActive = false
@@ -169,22 +183,28 @@ func TestB10DurablePublishPropagatesCommittedDurabilityError(t *testing.T) {
 // countFilesWithLabel counts files in an agent's inbox/new whose body contains
 // the given label string.
 func countFilesWithLabel(root, handle, label string) int {
+	return len(filesForLabel(root, handle, label))
+}
+
+// filesForLabel returns filenames in an agent's inbox/new whose body contains
+// the given label string.
+func filesForLabel(root, handle, label string) []string {
 	dir := fsq.AgentInboxNew(root, handle)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return 0
+		return nil
 	}
-	count := 0
+	var out []string
 	for _, e := range entries {
 		data, err := os.ReadFile(filepath.Join(dir, e.Name()))
 		if err != nil {
 			continue
 		}
 		if strings.Contains(string(data), label) {
-			count++
+			out = append(out, e.Name())
 		}
 	}
-	return count
+	return out
 }
 
 // TestB10InlineReplyToleratesCommittedDurabilityError reproduces B3: the
@@ -288,5 +308,46 @@ func TestB10InlineReplyToleratesCommittedDurabilityError(t *testing.T) {
 	// The reply WAS visible (the rename committed despite fsync failure).
 	if entries, _ := os.ReadDir(fsq.AgentInboxNew(root, "codex")); len(entries) == 0 {
 		t.Fatal("B3: no reply visible — the inline reply did not deliver at all")
+	}
+}
+
+// TestB10PublishReplySortsChronologically verifies the second property of the
+// deterministic publish id: it must sort chronologically against ordinary AMQ
+// message ids (<RFC3339>_pid<N>_<rand>). A bare "publish__" prefix sorts
+// AFTER every 2026-* message, starving drain --limit 20. The fix uses a
+// stable timestamp prefix (from snap.ObservedAt) so the publish reply sorts
+// in arrival order.
+func TestB10PublishReplySortsChronologically(t *testing.T) {
+	// Simulate two message ids in the caller's inbox:
+	// 1. An ordinary AMQ message created at 10:00:00.
+	ordinaryID := "2026-09-08T10:00:00.000Z_pid1234_aabbccdd"
+	// 2. A publish reply for a revision observed at 10:00:01 (AFTER).
+	observed := time.Date(2026, 9, 8, 10, 0, 1, 0, time.UTC)
+	stamp := observed.Format("2006-01-02T15:04:05.000Z")
+	refDigest := "deadbeef"
+	publishID := fmt.Sprintf("%s_publish_rev%d_%s", stamp, 4, refDigest)
+
+	names := []string{ordinaryID + ".md", publishID + ".md"}
+	sort.Strings(names)
+
+	// The publish reply (observed AFTER) must sort AFTER the ordinary message.
+	if names[0] != ordinaryID+".md" {
+		t.Fatalf("ordering: publish reply %q sorted BEFORE ordinary %q (must sort chronologically — the timestamp prefix is missing or wrong)", publishID, ordinaryID)
+	}
+	if names[1] != publishID+".md" {
+		t.Fatalf("ordering: publish reply %q did not sort after ordinary %q: got %v", publishID, ordinaryID, names)
+	}
+
+	// Other direction: a publish reply observed BEFORE an ordinary message
+	// must sort BEFORE it.
+	earlyObserved := time.Date(2026, 9, 8, 9, 59, 59, 0, time.UTC)
+	earlyStamp := earlyObserved.Format("2006-01-02T15:04:05.000Z")
+	earlyPublishID := fmt.Sprintf("%s_publish_rev%d_%s", earlyStamp, 3, refDigest)
+
+	names2 := []string{earlyPublishID + ".md", ordinaryID + ".md"}
+	sort.Strings(names2)
+
+	if names2[0] != earlyPublishID+".md" {
+		t.Fatalf("ordering: early publish reply %q did not sort BEFORE ordinary %q (must sort chronologically)", earlyPublishID, ordinaryID)
 	}
 }

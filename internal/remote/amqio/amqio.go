@@ -19,6 +19,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/receipt"
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
+	"github.com/avivsinai/agent-message-queue/internal/remote/requests"
 )
 
 // DefaultHandle is the endpoint's mailbox handle in the root.
@@ -408,8 +409,23 @@ func (c *Carrier) replyWith(root *fsq.DeliveryRoot, origin map[string]string, su
 	// retry, so amplification is impossible.
 	if dur == durabilityStrict {
 		if snap, ok := body.(protocol.Snapshot); ok {
-			id = fmt.Sprintf("publish__%s__rev%d", snap.RequestRef, snap.Revision)
-			created = protocol.FormatTime(time.Unix(0, int64(snap.Revision)).UTC())
+			// B1 + ordering: the id must be deterministic per (request_ref,
+			// revision) AND sort chronologically against ordinary AMQ message
+			// ids (<RFC3339>_pid<N>_<rand>). A bare "publish__" prefix sorts
+			// AFTER every 2026-* message, starving drain --limit 20. Fix:
+			// stable timestamp first (from snap.ObservedAt, not time.Now —
+			// ObservedAt is identical on every retry of that revision, keeping
+			// the write idempotent), then the deterministic part, then a short
+			// digest of the request_ref so the filename stays short.
+			observed, perr := protocol.ParseTime(snap.ObservedAt)
+			if perr != nil {
+				observed = now
+			}
+			stamp := observed.UTC().Format("2006-01-02T15:04:05.000Z")
+			refDigest := requests.Digest([]byte(snap.RequestRef))
+			refDigest = strings.TrimPrefix(refDigest, "sha256:")[:8]
+			id = fmt.Sprintf("%s_publish_rev%d_%s", stamp, snap.Revision, refDigest)
+			created = protocol.FormatTime(observed)
 		} else {
 			var err error
 			id, err = format.NewMessageID(now)
