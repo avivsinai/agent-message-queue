@@ -102,7 +102,7 @@ func TestB10DurablePublishPropagatesCommittedDurabilityError(t *testing.T) {
 		t.Fatalf("import: n=%d err=%v", n, err)
 	}
 
-	key := requests.Key{CreatorHost: "amq:codex", TargetID: "fake", RequestID: "11111111-1111-4111-8111-111111111410"}
+	key := requests.Key{CreatorHost: SourceHost(format.Header{From: "codex"}), TargetID: "fake", RequestID: "11111111-1111-4111-8111-111111111410"}
 	rec, _, _ := store.Get(key)
 	if rec == nil {
 		t.Fatal("record not found after import")

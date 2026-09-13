@@ -156,7 +156,7 @@ func TestCurRecoveryEmitsMissingReceiptAndOutcome(t *testing.T) {
 	if got := rt.Snapshot().Dispatches; got != before {
 		t.Fatalf("recovery re-executed the command: dispatches %d -> %d", before, got)
 	}
-	rec, ok, err := store.Get(requests.Key{CreatorHost: "amq:codex", TargetID: "fake", RequestID: id})
+	rec, ok, err := store.Get(requests.Key{CreatorHost: SourceHost(format.Header{From: "codex"}), TargetID: "fake", RequestID: id})
 	if err != nil || !ok {
 		t.Fatalf("record: ok=%v err=%v", ok, err)
 	}
@@ -186,7 +186,7 @@ func TestCurRecoveryEmitsMissingReceiptAndOutcome(t *testing.T) {
 // suppressed the very message the real path sends — hiding double-delivery.
 func coreSrc(from string) core.Source {
 	return core.Source{
-		Host:   "amq:" + from,
+		Host:   SourceHost(format.Header{From: from}),
 		Origin: map[string]string{"carrier": "amq", "from": from, "thread": "p2p/" + from + "__remote"},
 	}
 }
