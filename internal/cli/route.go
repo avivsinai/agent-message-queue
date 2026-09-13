@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -8,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/remote/amqio"
 )
 
 type routeExplainResult struct {
@@ -295,13 +297,22 @@ func planDeliveryRoute(sourceRoot, targetProject, targetSession string, opts del
 	return plan, nil
 }
 
+// ErrPeerRootUnreachable is the sentinel that marks a routing failure as
+// TRANSIENT: the peer root does not exist YET, or is not accessible YET.
+// ResolveReplyRoute wraps these errors in amqio.TransientRouteError so the
+// carrier leaves the message in new for the next tick instead of DLQ'ing it.
+// Unknown-project and malformed-handle errors are NOT wrapped — they are
+// poison.
+var ErrPeerRootUnreachable = errors.New("peer delivery root is not reachable")
+
 func peerDeliveryRootError(plan deliveryRoutePlan, deliveryRoot string, cause error) error {
 	configPath := plan.SourceConfigPath
 	if configPath == "" {
 		configPath = "the selected source .amqrc"
 	}
 	return fmt.Errorf(
-		"cannot access selected peer %q delivery root %s: %w; check that the peer root exists and is accessible; if the peer moved, fix the %q path in the peers map of .amqrc at %s, then retry the command",
+		"%w: cannot access selected peer %q delivery root %s: %v; check that the peer root exists and is accessible; if the peer moved, fix the %q path in the peers map of .amqrc at %s, then retry the command",
+		ErrPeerRootUnreachable,
 		plan.TargetProject,
 		deliveryRoot,
 		cause,
@@ -461,6 +472,15 @@ func ResolveReplyRoute(sourceRoot, replyProject, replyTo string) (root, handle s
 	}
 	plan, err := planDeliveryRoute(sourceRoot, project, session, deliveryRouteOptions{})
 	if err != nil {
+		// B1: the router declares whether a failure is transient. The carrier
+		// cannot tell "I do not know this project" from "that project's root is
+		// not there right now", and it should not guess. Only the router knows.
+		// Retryable failures (peer root absent/unreachable) are wrapped in
+		// amqio.TransientRouteError; unknown-project and malformed-handle
+		// errors are left as poison.
+		if errors.Is(err, ErrPeerRootUnreachable) {
+			return "", "", amqio.NewTransientRouteError(err)
+		}
 		return "", "", err
 	}
 	return plan.DeliveryRoot, recipient, nil

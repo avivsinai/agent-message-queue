@@ -62,21 +62,33 @@ func (c *Carrier) SetReplyRouter(r ReplyRouter) { c.router = r }
 // world right now (peer root or mailbox not available yet).
 var errNoReplyRoute = errors.New("cross-project reply cannot be routed")
 
-// transientRouteError marks a route error as TRANSIENT (the world is not
-// ready right now: peer root or mailbox not available). isPoisonRoute returns
-// false for these — the message stays in new for the next tick (F5).
-type transientRouteError struct{ err error }
+// TransientRouteError marks a route error as TRANSIENT (the world is not
+// ready right now: peer root or mailbox not available). The carrier leaves
+// the message in new for the next tick. The router (cli.ResolveReplyRoute)
+// wraps its retryable failures in this type; the carrier only reads the
+// declaration via errors.As and stops inferring anything from which function
+// failed.
+type TransientRouteError struct{ err error }
 
-func (e *transientRouteError) Error() string { return e.err.Error() }
-func (e *transientRouteError) Unwrap() error { return e.err }
+// NewTransientRouteError wraps err as a transient route error. Used by the
+// injected ReplyRouter (cli.ResolveReplyRoute) to declare that a routing
+// failure is retryable — the peer root may not exist YET, the mailbox may
+// not be provisioned YET.
+func NewTransientRouteError(err error) error {
+	return &TransientRouteError{err: err}
+}
+
+func (e *TransientRouteError) Error() string { return e.err.Error() }
+func (e *TransientRouteError) Unwrap() error { return e.err }
 
 // isPoisonRoute reports whether a route error is about the MESSAGE (poison,
 // DLQ) rather than the WORLD RIGHT NOW (transient, stays in new).
-// Poison: no router configured, the router returned an error, or the routed
-// handle is unusable. Transient: the peer root does not exist, the mailbox is
-// not provisioned, the volume is unavailable (F5).
+// The router declares transient failures by wrapping them in
+// TransientRouteError; everything else is poison. The carrier does NOT infer
+// from which function failed (B1: that approach missed the real router's
+// errors, which are the only path to peer-root-absent in production).
 func isPoisonRoute(err error) bool {
-	var tre *transientRouteError
+	var tre *TransientRouteError
 	return !errors.As(err, &tre)
 }
 
@@ -320,6 +332,15 @@ func (c *Carrier) destination(own *fsq.DeliveryRoot, origin map[string]string) (
 	}
 	rootPath, handle, err := c.router(project, origin["reply_to"])
 	if err != nil {
+		// B1: the router declares transient failures by wrapping them in
+		// TransientRouteError. We MUST preserve that wrapper — using %v here
+		// would flatten it to a string and isPoisonRoute would never see it.
+		// If the router already returned a TransientRouteError, pass it through;
+		// otherwise wrap in errNoReplyRoute (poison).
+		var tre *TransientRouteError
+		if errors.As(err, &tre) {
+			return nil, "", noop, err
+		}
 		return nil, "", noop, fmt.Errorf("%w: %v", errNoReplyRoute, err)
 	}
 	if fsq.ValidateHandle(handle) != nil {
@@ -327,11 +348,11 @@ func (c *Carrier) destination(own *fsq.DeliveryRoot, origin map[string]string) (
 	}
 	identity, err := fsq.SnapshotDeliveryRoot(rootPath)
 	if err != nil {
-		return nil, "", noop, &transientRouteError{fmt.Errorf("%w: %v", errNoReplyRoute, err)}
+		return nil, "", noop, &TransientRouteError{fmt.Errorf("%w: %v", errNoReplyRoute, err)}
 	}
 	peer, err := fsq.OpenDeliveryRoot(rootPath, identity)
 	if err != nil {
-		return nil, "", noop, &transientRouteError{fmt.Errorf("%w: %v", errNoReplyRoute, err)}
+		return nil, "", noop, &TransientRouteError{fmt.Errorf("%w: %v", errNoReplyRoute, err)}
 	}
 	// D4: never create a mailbox in someone else's root. A peer root whose
 	// mailbox does not exist is unroutable (D3 applies). Creating it is
@@ -339,7 +360,7 @@ func (c *Carrier) destination(own *fsq.DeliveryRoot, origin map[string]string) (
 	// Every other cross-root writer gates on ValidateExistingMailboxLayout first.
 	if err := fsq.ValidateExistingMailboxLayout(peer, handle); err != nil {
 		_ = peer.Close()
-		return nil, "", noop, &transientRouteError{fmt.Errorf("%w: peer mailbox %q does not exist: %v", errNoReplyRoute, handle, err)}
+		return nil, "", noop, &TransientRouteError{fmt.Errorf("%w: peer mailbox %q does not exist: %v", errNoReplyRoute, handle, err)}
 	}
 	return peer, handle, func() { _ = peer.Close() }, nil
 }

@@ -10,6 +10,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/receipt"
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/fake"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
@@ -747,5 +748,77 @@ func TestImportCrossProjectNoPeerMailboxDoesNotCreateIt(t *testing.T) {
 	dlqDir := filepath.Join(endpointRoot, "agents", DefaultHandle, "dlq", "new")
 	if entries, _ := os.ReadDir(dlqDir); len(entries) != 0 {
 		t.Fatalf("transient message was DLQ'd (F5: missing peer mailbox is not poison): %d", len(entries))
+	}
+}
+
+// TestImportCrossProjectPoisonDLQEmitsReceipt reproduces B2: the DLQ-receipt
+// fix was unguarded. After a poison route (unroutable cross-project command),
+// a DLQ receipt must exist for that message id with stage=dlq, so a caller
+// using `send --wait-for drained` does not wait forever on a consumed message.
+// Every other DLQ site in this repo pairs the move with a receipt; the
+// cross-project poison path must too.
+func TestImportCrossProjectPoisonDLQEmitsReceipt(t *testing.T) {
+	endpointRoot := t.TempDir()
+	if err := fsq.EnsureRootDirs(endpointRoot); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureAgentDirs(endpointRoot, DefaultHandle); err != nil {
+		t.Fatal(err)
+	}
+	store, err := requests.Open(filepath.Join(endpointRoot, "extensions", "remote"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	var carrier *Carrier
+	ep := core.New(core.Config{Store: store, Publish: func(s protocol.Snapshot, origin map[string]string) error {
+		return carrier.Publish(s, origin)
+	}})
+	carrier, err = New(endpointRoot, DefaultHandle, ep)
+	if err != nil {
+		t.Fatalf("carrier: %v", err)
+	}
+	// Router that always fails with a POISON error (not transient) — unknown project.
+	carrier.SetReplyRouter(func(project, replyTo string) (string, string, error) {
+		return "", "", errors.New("unknown project \"gone\" in peers map")
+	})
+	ep.Register(fake.New("fake", "e_1"))
+	t.Cleanup(func() { _ = ep.Close() })
+
+	identity, _ := fsq.SnapshotDeliveryRoot(endpointRoot)
+	droot, _ := fsq.OpenDeliveryRoot(endpointRoot, identity)
+	defer func() { _ = droot.Close() }()
+
+	now := time.Now()
+	id, _ := format.NewMessageID(now)
+	body := `{"schema":"amq.remote.command/1","op":"request.submit","request_id":"11111111-1111-4111-8111-111111111371","target_id":"fake","epoch":"e_1","not_after":"` + protocol.FormatTime(time.Now().Add(time.Minute)) + `","input":{"text":"hi"}}`
+	msg := format.Message{Header: format.Header{
+		Schema: format.CurrentSchema, ID: id, From: "codex", To: []string{DefaultHandle},
+		Thread: "p2p/codex__remote", Subject: "submit", Created: now.UTC().Format(time.RFC3339Nano), Kind: "todo",
+		FromProject: "peer", ReplyTo: "codex", ReplyProject: "gone",
+	}, Body: body}
+	data, _ := msg.Marshal()
+	if _, err := fsq.DeliverToInboxes(droot, []string{DefaultHandle}, id+".md", data); err != nil {
+		t.Fatalf("deliver: %v", err)
+	}
+
+	n, _ := carrier.ImportOnce()
+	if n < 1 {
+		t.Fatal("poison command was not DLQ'd")
+	}
+
+	// B2: a DLQ receipt must exist for this message id with stage=dlq.
+	receiptPath := filepath.Join(endpointRoot, "agents", DefaultHandle, "receipts", id+"__remote__dlq.json")
+	if _, err := os.Stat(receiptPath); err != nil {
+		t.Fatalf("DLQ receipt not found at %s (B2 — every DLQ site must emit a receipt so send --wait-for drained does not hang): %v", receiptPath, err)
+	}
+	rc, rerr := receipt.Read(receiptPath)
+	if rerr != nil {
+		t.Fatalf("read DLQ receipt: %v", rerr)
+	}
+	if rc.Stage != receipt.StageDLQ {
+		t.Fatalf("DLQ receipt stage=%q, want %q (B2)", rc.Stage, receipt.StageDLQ)
+	}
+	if rc.MsgID != id {
+		t.Fatalf("DLQ receipt msg_id=%q, want %q (B2)", rc.MsgID, id)
 	}
 }
