@@ -39,15 +39,26 @@ const (
 	MaxCommandBytes = 256 * 1024
 	MaxInputBytes   = 128 * 1024
 	MaxResultBytes  = 512 * 1024
-	// MaxRecordBytes bounds one durable request record on disk and on the wire.
-	// It is the protocol result bound plus the retained input bound plus fixed
-	// headroom for the snapshot, interaction, cancel and bookkeeping fields, so
-	// a record carrying a full-size result never overflows the store. The store
-	// and the IPC layer share this single source of truth.
+	// MaxRecordOverhead is fixed headroom for the snapshot, interaction,
+	// cancel and bookkeeping fields of one record.
 	MaxRecordOverhead = 64 * 1024
-	MaxRecordBytes    = MaxResultBytes + MaxInputBytes + MaxRecordOverhead
-	MaxOpaqueLen      = 128
-	MaxOptionLen      = 256
+	// jsonWorstCaseExpansion is the largest factor by which encoding/json can
+	// grow a Go string. Every byte below 0x20 and every byte of invalid UTF-8
+	// escapes to \u00XX (six bytes); '"' and '\' double. MaxResultBytes and
+	// MaxInputBytes bound RAW text, so without this factor they bound nothing
+	// about the ENCODED record: 512 KiB of newline-heavy log output encodes to
+	// 1.5x, quote-heavy to 2x, control-heavy to 6x, and the store refused all
+	// three as storage_full on a healthy disk (Pro B5, measured).
+	jsonWorstCaseExpansion = 6
+	// MaxRecordBytes bounds one durable request record on disk and on the wire.
+	// It is derived, not tuned: the worst-case encoding of a full-size result
+	// plus the worst-case encoding of the retained input plus the fixed
+	// headroom, so a record carrying ANY result within MaxResultBytes fits by
+	// construction. The store and the IPC layer share this single source of
+	// truth.
+	MaxRecordBytes = jsonWorstCaseExpansion*MaxResultBytes + jsonWorstCaseExpansion*MaxInputBytes + MaxRecordOverhead
+	MaxOpaqueLen   = 128
+	MaxOptionLen   = 256
 )
 
 // Op is the command discriminator.
