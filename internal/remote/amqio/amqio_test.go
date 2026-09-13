@@ -10,6 +10,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/receipt"
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/fake"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
@@ -508,8 +509,13 @@ func TestImportCrossProjectRepliesToCallerRoot(t *testing.T) {
 // delivered into the endpoint's own root.
 // TestImportCrossProjectUnroutableDoesNotBlockRoutable reproduces Pro B1+B3:
 // an unroutable cross-project command must NOT stop a second, routable command
-// from being handled in the same scan. The unroutable message is DLQ'd (D3),
-// not left in new to wedge the loop. The routable message is handled normally.
+// from being handled in the same scan. F2: the test must make importOne return
+// a REAL error (not a DLQ'd true), so errors.Join/never-abort is actually
+// exercised. A poison message is DLQ'd (true, nil) — that does not test D1.
+// Instead, message A is a same-project submit whose reply delivery FAILS
+// (read-only peer inbox), producing (false, err). Message B is a routable
+// same-project submit that sorts after A. If D1 is reverted (return on first
+// error), B is never processed.
 func TestImportCrossProjectUnroutableDoesNotBlockRoutable(t *testing.T) {
 	endpointRoot := t.TempDir()
 	if err := fsq.EnsureRootDirs(endpointRoot); err != nil {
@@ -518,6 +524,17 @@ func TestImportCrossProjectUnroutableDoesNotBlockRoutable(t *testing.T) {
 	if err := fsq.EnsureAgentDirs(endpointRoot, DefaultHandle); err != nil {
 		t.Fatal(err)
 	}
+	// Create a "codex" mailbox, then make it read-only so the reply delivery
+	// fails (a real error, not a DLQ).
+	if err := fsq.EnsureAgentDirs(endpointRoot, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	codexInbox := filepath.Join(endpointRoot, "agents", "codex", "inbox", "new")
+	if err := os.Chmod(codexInbox, 0500); err != nil { // read+execute, no write
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(codexInbox, 0700) })
+
 	store, err := requests.Open(filepath.Join(endpointRoot, "extensions", "remote"))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -530,76 +547,56 @@ func TestImportCrossProjectUnroutableDoesNotBlockRoutable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("carrier: %v", err)
 	}
-	// Router: "gone" is unroutable, "ok" routes to a peer root with a mailbox.
-	peerRoot := t.TempDir()
-	if err := fsq.EnsureRootDirs(peerRoot); err != nil {
-		t.Fatal(err)
-	}
-	if err := fsq.EnsureAgentDirs(peerRoot, "codex"); err != nil {
-		t.Fatal(err)
-	}
-	carrier.SetReplyRouter(func(project, replyTo string) (string, string, error) {
-		if project == "gone" {
-			return "", "", errors.New("peer project not in .amqrc")
-		}
-		return peerRoot, "codex", nil
-	})
 	ep.Register(fake.New("fake", "e_1"))
 	t.Cleanup(func() { _ = ep.Close() })
 
-	identity, err := fsq.SnapshotDeliveryRoot(endpointRoot)
-	if err != nil {
-		t.Fatal(err)
-	}
-	droot, err := fsq.OpenDeliveryRoot(endpointRoot, identity)
-	if err != nil {
-		t.Fatal(err)
-	}
+	identity, _ := fsq.SnapshotDeliveryRoot(endpointRoot)
+	droot, _ := fsq.OpenDeliveryRoot(endpointRoot, identity)
 	defer func() { _ = droot.Close() }()
 
-	// Message A: unroutable (reply_project "gone"). Use an EARLIER message id
-	// so it sorts first and would block B if the loop aborted on error.
+	// Message A: same-project submit (from codex, no reply_project). The reply
+	// delivery to codex/inbox/new fails (read-only). importOne returns
+	// (false, err). Use an EARLIER message id so it sorts first.
 	now := time.Now()
 	idA, _ := format.NewMessageID(now.Add(-time.Second))
-	bodyA := `{"schema":"amq.remote.command/1","op":"request.submit","request_id":"11111111-1111-4111-8111-111111111331","target_id":"fake","epoch":"e_1","not_after":"` + protocol.FormatTime(time.Now().Add(time.Minute)) + `","input":{"text":"unroutable"}}`
+	bodyA := `{"schema":"amq.remote.command/1","op":"request.get","request_id":"11111111-1111-4111-8111-111111111331","target_id":"fake","epoch":"e_1","not_after":"` + protocol.FormatTime(time.Now().Add(time.Minute)) + `"}`
 	msgA := format.Message{Header: format.Header{
 		Schema: format.CurrentSchema, ID: idA, From: "codex", To: []string{DefaultHandle},
 		Thread: "p2p/codex__remote", Subject: "submit", Created: now.UTC().Format(time.RFC3339Nano), Kind: "todo",
-		FromProject: "gone", ReplyTo: "codex@session1", ReplyProject: "gone",
 	}, Body: bodyA}
 	dataA, _ := msgA.Marshal()
 	if _, err := fsq.DeliverToInboxes(droot, []string{DefaultHandle}, idA+".md", dataA); err != nil {
 		t.Fatalf("deliver A: %v", err)
 	}
 
-	// Message B: routable (reply_project "ok", peer root has the mailbox).
+	// Message B: same-project submit (from a DIFFERENT handle whose inbox IS
+	// writable, so its reply succeeds). B sorts after A.
 	idB, _ := format.NewMessageID(now)
-	bodyB := `{"schema":"amq.remote.command/1","op":"request.submit","request_id":"11111111-1111-4111-8111-111111111332","target_id":"fake","epoch":"e_1","not_after":"` + protocol.FormatTime(time.Now().Add(time.Minute)) + `","input":{"text":"routable"}}`
+	if err := fsq.EnsureAgentDirs(endpointRoot, "other"); err != nil {
+		t.Fatal(err)
+	}
+	bodyB := `{"schema":"amq.remote.command/1","op":"request.submit","request_id":"11111111-1111-4111-8111-111111111332","target_id":"fake","epoch":"e_1","not_after":"` + protocol.FormatTime(time.Now().Add(time.Minute)) + `","input":{"text":"B"}}`
 	msgB := format.Message{Header: format.Header{
-		Schema: format.CurrentSchema, ID: idB, From: "codex", To: []string{DefaultHandle},
-		Thread: "p2p/codex__remote", Subject: "submit", Created: now.UTC().Format(time.RFC3339Nano), Kind: "todo",
-		FromProject: "ok", ReplyTo: "codex@session1", ReplyProject: "ok",
+		Schema: format.CurrentSchema, ID: idB, From: "other", To: []string{DefaultHandle},
+		Thread: "p2p/other__remote", Subject: "submit", Created: now.UTC().Format(time.RFC3339Nano), Kind: "todo",
 	}, Body: bodyB}
 	dataB, _ := msgB.Marshal()
 	if _, err := fsq.DeliverToInboxes(droot, []string{DefaultHandle}, idB+".md", dataB); err != nil {
 		t.Fatalf("deliver B: %v", err)
 	}
 
+	// ImportOnce: A's reply fails (real error), but B must still be processed.
+	// If D1 is reverted (return on first error), B is left in new.
 	n, _ := carrier.ImportOnce()
-	// B was handled (claimed into cur). A was DLQ'd. Both are out of new.
-	if entries, _ := os.ReadDir(fsq.AgentInboxNew(endpointRoot, DefaultHandle)); len(entries) != 0 {
-		t.Fatalf("messages left in new: %d (A should be DLQ'd, B should be claimed)", len(entries))
+	_ = n
+	// B was claimed into cur despite A's error.
+	if entries, _ := os.ReadDir(fsq.AgentInboxCur(endpointRoot, DefaultHandle)); len(entries) < 1 {
+		t.Fatalf("routable B not claimed (D1 reverted — loop aborted on A error): %d in cur", len(entries))
 	}
-	// A is in DLQ.
-	dlqDir := filepath.Join(endpointRoot, "agents", DefaultHandle, "dlq", "new")
-	if entries, _ := os.ReadDir(dlqDir); len(entries) != 1 {
-		t.Fatalf("unroutable A not in DLQ: %d", len(entries))
+	// A is still in new (reply failed, not claimed).
+	if entries, _ := os.ReadDir(fsq.AgentInboxNew(endpointRoot, DefaultHandle)); len(entries) < 1 {
+		t.Fatalf("A should still be in new (reply failed): %d", len(entries))
 	}
-	// B is in cur (claimed).
-	if entries, _ := os.ReadDir(fsq.AgentInboxCur(endpointRoot, DefaultHandle)); len(entries) != 1 {
-		t.Fatalf("routable B not claimed into cur: %d", len(entries))
-	}
-	_ = n // ImportOnce returns count of handled+DLQ'd
 }
 
 // TestImportSameProjectEmptyFromStillWorks reproduces Pro B2: the pre-fix code
@@ -628,7 +625,8 @@ func TestImportSameProjectEmptyFromStillWorks(t *testing.T) {
 		t.Fatalf("carrier: %v", err)
 	}
 	// No router — same-project only (D2: empty reply_project never touches it).
-	ep.Register(fake.New("fake", "e_1"))
+	rt := fake.New("fake", "e_1")
+	ep.Register(rt)
 	t.Cleanup(func() { _ = ep.Close() })
 
 	// Command with from:"" and no reply_project — same-project, unusable From.
@@ -660,6 +658,22 @@ func TestImportSameProjectEmptyFromStillWorks(t *testing.T) {
 	}
 	if entries, _ := os.ReadDir(fsq.AgentInboxCur(endpointRoot, DefaultHandle)); len(entries) != 1 {
 		t.Fatalf("command not claimed into cur: %d", len(entries))
+	}
+	// F2: the REAL assertion — published_revision must CONVERGE. With the B2
+	// regression (reply to "" fails, publish error swallowed), the record
+	// churns every tick and published_revision stays 0.
+	k := requests.Key{CreatorHost: "amq:", TargetID: "fake", RequestID: "11111111-1111-4111-8111-111111111341"}
+	// Complete the run so a terminal revision is published.
+	rt.Complete("11111111-1111-4111-8111-111111111341", "done")
+	if err := ep.Tick(); err != nil { // Reconcile republishes
+		t.Fatalf("tick: %v", err)
+	}
+	rec, _, _ := store.Get(k)
+	if rec == nil {
+		t.Fatal("record not found")
+	}
+	if rec.PublishedRevision < rec.Revision {
+		t.Fatalf("published_revision=%d < revision=%d (F1: same-project from:\"\" publish never converges — reply to empty handle fails every tick)", rec.PublishedRevision, rec.Revision)
 	}
 }
 
@@ -716,23 +730,95 @@ func TestImportCrossProjectNoPeerMailboxDoesNotCreateIt(t *testing.T) {
 	}
 	_ = droot.Close()
 
-	// After the fix, an unroutable message is DLQ'd (handled, not left in
-	// new). ImportOnce returns the count of handled+DLQ'd messages. The old
-	// test silenced it with _, which is exactly why the wedge bug satisfied it.
-	// Assert the message was handled (DLQ'd) — the count must be >= 1.
-	n, impErr := carrier.ImportOnce()
-	_ = impErr // a successful DLQ does not propagate the route error
-	if n < 1 {
-		t.Fatalf("ImportOnce handled %d messages (want >=1 — the unroutable message should be DLQ'd)", n)
-	}
+	// F5: a missing peer mailbox is TRANSIENT (the mailbox may be provisioned
+	// a moment later), not poison. The message stays in new for the next tick.
+	// It must NOT be DLQ'd, and it must NOT create the peer mailbox.
+	n, _ := carrier.ImportOnce()
+	_ = n // the message is left in new (transient), so n=0 is expected
 	// The peer root must NOT have a codex mailbox created by us.
 	peerCodexDir := filepath.Join(peerRoot, "agents", "codex")
 	if _, err := os.Stat(peerCodexDir); err == nil {
 		t.Fatal("peer root codex mailbox was created (Pro B4 — black hole moved into peer root)")
 	}
-	// The message is DLQ'd (unroutable — D3 applies).
+	// The message stays in new (transient — not DLQ'd).
+	if entries, _ := os.ReadDir(fsq.AgentInboxNew(endpointRoot, DefaultHandle)); len(entries) != 1 {
+		t.Fatalf("transient (no peer mailbox) message should stay in new: %d entries", len(entries))
+	}
+	// No DLQ entry.
 	dlqDir := filepath.Join(endpointRoot, "agents", DefaultHandle, "dlq", "new")
-	if entries, _ := os.ReadDir(dlqDir); len(entries) != 1 {
-		t.Fatalf("unroutable (no peer mailbox) not DLQ'd: %d", len(entries))
+	if entries, _ := os.ReadDir(dlqDir); len(entries) != 0 {
+		t.Fatalf("transient message was DLQ'd (F5: missing peer mailbox is not poison): %d", len(entries))
+	}
+}
+
+// TestImportCrossProjectPoisonDLQEmitsReceipt reproduces B2: the DLQ-receipt
+// fix was unguarded. After a poison route (unroutable cross-project command),
+// a DLQ receipt must exist for that message id with stage=dlq, so a caller
+// using `send --wait-for drained` does not wait forever on a consumed message.
+// Every other DLQ site in this repo pairs the move with a receipt; the
+// cross-project poison path must too.
+func TestImportCrossProjectPoisonDLQEmitsReceipt(t *testing.T) {
+	endpointRoot := t.TempDir()
+	if err := fsq.EnsureRootDirs(endpointRoot); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureAgentDirs(endpointRoot, DefaultHandle); err != nil {
+		t.Fatal(err)
+	}
+	store, err := requests.Open(filepath.Join(endpointRoot, "extensions", "remote"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	var carrier *Carrier
+	ep := core.New(core.Config{Store: store, Publish: func(s protocol.Snapshot, origin map[string]string) error {
+		return carrier.Publish(s, origin)
+	}})
+	carrier, err = New(endpointRoot, DefaultHandle, ep)
+	if err != nil {
+		t.Fatalf("carrier: %v", err)
+	}
+	// Router that always fails with a POISON error (not transient) — unknown project.
+	carrier.SetReplyRouter(func(project, replyTo string) (string, string, error) {
+		return "", "", errors.New("unknown project \"gone\" in peers map")
+	})
+	ep.Register(fake.New("fake", "e_1"))
+	t.Cleanup(func() { _ = ep.Close() })
+
+	identity, _ := fsq.SnapshotDeliveryRoot(endpointRoot)
+	droot, _ := fsq.OpenDeliveryRoot(endpointRoot, identity)
+	defer func() { _ = droot.Close() }()
+
+	now := time.Now()
+	id, _ := format.NewMessageID(now)
+	body := `{"schema":"amq.remote.command/1","op":"request.submit","request_id":"11111111-1111-4111-8111-111111111371","target_id":"fake","epoch":"e_1","not_after":"` + protocol.FormatTime(time.Now().Add(time.Minute)) + `","input":{"text":"hi"}}`
+	msg := format.Message{Header: format.Header{
+		Schema: format.CurrentSchema, ID: id, From: "codex", To: []string{DefaultHandle},
+		Thread: "p2p/codex__remote", Subject: "submit", Created: now.UTC().Format(time.RFC3339Nano), Kind: "todo",
+		FromProject: "peer", ReplyTo: "codex", ReplyProject: "gone",
+	}, Body: body}
+	data, _ := msg.Marshal()
+	if _, err := fsq.DeliverToInboxes(droot, []string{DefaultHandle}, id+".md", data); err != nil {
+		t.Fatalf("deliver: %v", err)
+	}
+
+	n, _ := carrier.ImportOnce()
+	if n < 1 {
+		t.Fatal("poison command was not DLQ'd")
+	}
+
+	// B2: a DLQ receipt must exist for this message id with stage=dlq.
+	receiptPath := filepath.Join(endpointRoot, "agents", DefaultHandle, "receipts", id+"__remote__dlq.json")
+	if _, err := os.Stat(receiptPath); err != nil {
+		t.Fatalf("DLQ receipt not found at %s (B2 — every DLQ site must emit a receipt so send --wait-for drained does not hang): %v", receiptPath, err)
+	}
+	rc, rerr := receipt.Read(receiptPath)
+	if rerr != nil {
+		t.Fatalf("read DLQ receipt: %v", rerr)
+	}
+	if rc.Stage != receipt.StageDLQ {
+		t.Fatalf("DLQ receipt stage=%q, want %q (B2)", rc.Stage, receipt.StageDLQ)
+	}
+	if rc.MsgID != id {
+		t.Fatalf("DLQ receipt msg_id=%q, want %q (B2)", rc.MsgID, id)
 	}
 }
