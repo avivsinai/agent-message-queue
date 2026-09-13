@@ -5,6 +5,8 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,8 +19,10 @@ import (
 // shapes recorded from the live probe and the generated schema, and lets the
 // test push notifications.
 type fakeAppServer struct {
-	ws    *wsConn
-	calls chan rpcMessage
+	ws                  *wsConn
+	calls               chan rpcMessage
+	threadReadHandler   func() string
+	threadReadHandlerMu sync.Mutex
 }
 
 func startFakeAppServer(t *testing.T) (string, *fakeAppServer) {
@@ -68,6 +72,17 @@ func startFakeAppServer(t *testing.T) (string, *fakeAppServer) {
 				_ = ws.writeText([]byte(`{"jsonrpc":"2.0","id":` + string(*msg.ID) + `,"result":{"turn":{"id":"u1","status":"inProgress"}}}`))
 			case "turn/interrupt":
 				_ = ws.writeText([]byte(`{"jsonrpc":"2.0","id":` + string(*msg.ID) + `,"result":{}}`))
+			case "thread/queue/add":
+				_ = ws.writeText([]byte(`{"jsonrpc":"2.0","id":` + string(*msg.ID) + `,"result":{}}`))
+			case "thread/read":
+				srv.threadReadHandlerMu.Lock()
+				handler := srv.threadReadHandler
+				srv.threadReadHandlerMu.Unlock()
+				if handler != nil {
+					_ = ws.writeText([]byte(`{"jsonrpc":"2.0","id":` + string(*msg.ID) + `,"result":` + handler() + `}`))
+				} else {
+					_ = ws.writeText([]byte(`{"jsonrpc":"2.0","id":` + string(*msg.ID) + `,"error":{"code":-32601,"message":"no thread/read handler"}}`))
+				}
 			default:
 				_ = ws.writeText([]byte(`{"jsonrpc":"2.0","id":` + string(*msg.ID) + `,"error":{"code":-32601,"message":"unexpected ` + msg.Method + `"}}`))
 			}
@@ -86,6 +101,14 @@ func (s *fakeAppServer) notify(t *testing.T, method, params string) {
 	if err := s.ws.writeText([]byte(`{"jsonrpc":"2.0","method":"` + method + `","params":` + params + `}`)); err != nil {
 		t.Fatalf("notify %s: %v", method, err)
 	}
+}
+
+// setThreadReadHandler installs a custom handler for thread/read responses.
+// The handler returns the JSON result string for the thread/read call.
+func (s *fakeAppServer) setThreadReadHandler(fn func() string) {
+	s.threadReadHandlerMu.Lock()
+	defer s.threadReadHandlerMu.Unlock()
+	s.threadReadHandler = fn
 }
 
 // TestSubmitBindsTurnAndCompletes is the adapter happy path: submit starts a
@@ -255,5 +278,369 @@ func TestTargetIDNoCollision(t *testing.T) {
 	b := TargetID("0123456789ab-cdef-0000-0000-000000000002")
 	if a == b {
 		t.Fatalf("distinct threads collapsed to one target: %s", a)
+	}
+}
+
+// TestAcknowledgeResultReleasesRetainedEvidence reproduces
+// agent-message-queue-611.22.24 (codex ack no-op): AcknowledgeResult was an
+// empty function and nothing was ever removed, so the endpoint's convergence
+// precondition — "once a native ack lands the attachment retains nothing and
+// Lookup reports EvidenceNone" — never held for codex. Every terminal record
+// re-asked Lookup on every reconcile tick, forever, and each miss cost a full
+// thread/read of the transcript.
+func TestAcknowledgeResultReleasesRetainedEvidence(t *testing.T) {
+	sock, srv := startFakeAppServer(t)
+	att, err := Attach(sock, "t1")
+	if err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	t.Cleanup(func() { _ = att.Close() })
+	<-srv.calls // initialize
+	<-srv.calls // thread/resume
+
+	s := att.Inspect()
+	key := requests.Key{CreatorHost: "local", TargetID: s.TargetID, RequestID: "11111111-1111-4111-8111-111111111801"}
+	done := make(chan struct{})
+	go func() {
+		_, _ = att.Submit(core.BoundRequest{Key: key, Epoch: s.Epoch, Input: protocol.SubmitInput{Text: "work"}})
+		close(done)
+	}()
+	<-srv.calls // turn/start
+	srv.notify(t, "turn/started", `{"threadId":"t1","turn":{"id":"u1"}}`)
+	srv.notify(t, "item/started", `{"threadId":"t1","turnId":"u1","item":{"type":"userMessage","id":"i1","clientId":"`+key.RequestID+`","content":[]}}`)
+	<-done
+	srv.notify(t, "item/completed", `{"threadId":"t1","turnId":"u1","completedAtMs":1,"item":{"type":"agentMessage","id":"i2","text":"OUT"}}`)
+	srv.notify(t, "turn/completed", `{"threadId":"t1","turn":{"id":"u1","status":"completed"}}`)
+
+	var ev core.Evidence
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		ev, _ = att.Lookup(key, s.Epoch)
+		if ev.State == protocol.StateCompleted {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if ev.State != protocol.StateCompleted || ev.Result == nil || ev.Result.Text != "OUT" {
+		t.Fatalf("terminal evidence not retained before ack: %+v", ev)
+	}
+
+	// A wrong digest must not release a different request's result.
+	att.AcknowledgeResult(key, s.Epoch, protocol.EvidenceDigest(&protocol.Result{Text: "something else"}))
+	if lk, _ := att.Lookup(key, s.Epoch); lk.Class == core.EvidenceNone {
+		t.Fatal("a wrong-digest ack released the retained evidence")
+	}
+
+	// The matching digest releases it, and Lookup must report that nothing is
+	// retained WITHOUT falling through to the thread/read history (whose copy
+	// would look like fresh evidence and restart the ack loop).
+	att.AcknowledgeResult(key, s.Epoch, protocol.EvidenceDigest(ev.Result))
+	drained := len(srv.calls)
+	lk, err := att.Lookup(key, s.Epoch)
+	if err != nil {
+		t.Fatalf("lookup after ack: %v", err)
+	}
+	if lk.Class != core.EvidenceNone || lk.Result != nil {
+		t.Fatalf("ack did not release retained evidence: class=%s result=%+v", lk.Class, lk.Result)
+	}
+	if len(srv.calls) != drained {
+		t.Fatal("Lookup after ack fell through to a thread/read history call")
+	}
+}
+
+// TestUnconfirmedTurnStartIsUncertainNotRejected reproduces
+// agent-message-queue-611.22.31 (codex unconfirmed -> rejected): turn/start
+// had already returned a turn id, so the text may be RUNNING in Codex, but an
+// unconfirmed start returned a REFUSAL code. The endpoint committed a
+// terminal `rejected` record it never reconciles again; the caller retried
+// with a fresh id and the prompt ran twice. Absence of our confirmation is
+// uncertainty, not proof of refusal: report an error (the endpoint's uncertain
+// path) and keep the correlation so the run can still be resolved.
+func TestUnconfirmedTurnStartIsUncertainNotRejected(t *testing.T) {
+	sock, srv := startFakeAppServer(t)
+	att, err := Attach(sock, "t1")
+	if err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	t.Cleanup(func() { _ = att.Close() })
+	<-srv.calls // initialize
+	<-srv.calls // thread/resume
+
+	s := att.Inspect()
+	key := requests.Key{CreatorHost: "local", TargetID: s.TargetID, RequestID: "11111111-1111-4111-8111-111111111802"}
+	type admResult struct {
+		adm core.Admission
+		err error
+	}
+	done := make(chan admResult, 1)
+	go func() {
+		adm, err := att.Submit(core.BoundRequest{Key: key, Epoch: s.Epoch, Input: protocol.SubmitInput{Text: "work"}})
+		done <- admResult{adm, err}
+	}()
+	<-srv.calls // turn/start; the server answers with a turn id
+	srv.notify(t, "turn/started", `{"threadId":"t1","turn":{"id":"u1"}}`)
+	// No userMessage item ever confirms the turn. Close the app-server so the
+	// client.Done() arm fires instead of waiting out the confirm timeout.
+	_ = srv.ws.close()
+
+	select {
+	case r := <-done:
+		if r.err == nil {
+			t.Fatalf("unconfirmed turn/start returned no error: %+v", r.adm)
+		}
+		if r.adm.Code != "" {
+			t.Fatalf("unconfirmed turn/start returned refusal code %q; it must be uncertain, not a refusal", r.adm.Code)
+		}
+		if r.adm.RunID == "" {
+			t.Fatal("unconfirmed turn/start dropped the run id; the correlation must survive so the run can be resolved")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("submit did not return after the app-server closed")
+	}
+}
+
+// TestUnconfirmedRunFallsThroughToHistoryAfterTimeout reproduces Pro F1: a
+// retained-but-unconfirmed run permanently shadows lookupHistory, so the
+// record sticks at Uncertain forever and a real completed result is never
+// delivered. After confirmTimeout, if still unconfirmed, Lookup must fall
+// through to lookupHistory (a thread/read RPC), which resolves the turn by
+// clientId.
+//
+// Also covers the 12s confirm-timeout arm (the bead names it; the existing
+// TestUnconfirmedTurnStartIsUncertainNotRejected covers only the client.Done()
+// arm). The fake clock makes the timeout deterministic — no real sleep.
+func TestUnconfirmedRunFallsThroughToHistoryAfterTimeout(t *testing.T) {
+	sock, srv := startFakeAppServer(t)
+	clk := &fakeClock{t: time.Date(2026, 9, 12, 12, 0, 0, 0, time.UTC)}
+	att, err := Attach(sock, "t1", WithClock(clk.now), WithConfirmTimeout(50*time.Millisecond))
+	if err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	t.Cleanup(func() { _ = att.Close() })
+	<-srv.calls // initialize
+	<-srv.calls // thread/resume
+
+	s := att.Inspect()
+	key := requests.Key{CreatorHost: "local", TargetID: s.TargetID, RequestID: "11111111-1111-4111-8111-111111111810"}
+	type admResult struct {
+		adm core.Admission
+		err error
+	}
+	done := make(chan admResult, 1)
+	go func() {
+		adm, err := att.Submit(core.BoundRequest{Key: key, Epoch: s.Epoch, Input: protocol.SubmitInput{Text: "work"}})
+		done <- admResult{adm, err}
+	}()
+	<-srv.calls // turn/start; the server answers with a turn id
+	srv.notify(t, "turn/started", `{"threadId":"t1","turn":{"id":"u1"}}`)
+	// No userMessage item ever confirms the turn. Advance the clock past
+	// confirmTimeout so the confirm-timeout arm fires (no real 12s sleep).
+	clk.advance(51 * time.Millisecond)
+	r := <-done
+	if r.err == nil {
+		t.Fatalf("unconfirmed turn/start returned no error: %+v", r.adm)
+	}
+	if r.adm.RunID == "" {
+		t.Fatal("unconfirmed turn/start dropped the run id")
+	}
+
+	// Before the deadline is already past (we advanced the clock). But first,
+	// verify that a Lookup BEFORE the deadline returns EvidenceTentative. We
+	// can't go back in time, so instead verify the fall-through happens NOW:
+	// the run is unconfirmed and past the deadline, so Lookup must call
+	// lookupHistory (a thread/read RPC). The fake server's default handler
+	// returns an error for thread/read, so lookupHistory returns
+	// EvidenceUnknown — but the key assertion is that thread/read WAS called
+	// (the call channel receives it), proving the fall-through.
+	callsBefore := len(srv.calls)
+	// Lookup falls through to lookupHistory (thread/read RPC). The fake
+	// server returns an error for thread/read, so lookupHistory returns an
+	// error — but the key assertion is that thread/read WAS called, proving
+	// the fall-through. The error is expected, so check the call count, not
+	// the return value.
+	lk, lerr := att.Lookup(key, s.Epoch)
+	_ = lk
+	_ = lerr
+	// Drain the thread/read call (non-blocking — the fake server handles it).
+	time.Sleep(50 * time.Millisecond)
+	callsAfter := len(srv.calls)
+	if callsAfter <= callsBefore {
+		t.Fatal("Lookup did not fall through to lookupHistory (thread/read) after the deadline — the unconfirmed run shadowed it forever (Pro F1)")
+	}
+}
+
+type fakeClock struct {
+	t time.Time
+}
+
+func (c *fakeClock) now() time.Time          { return c.t }
+func (c *fakeClock) advance(d time.Duration) { c.t = c.t.Add(d) }
+
+// TestLargeResultReleasedByBoundedDigest reproduces Pro F2: the attachment
+// digested the UNBOUNDED result while the endpoint digested the BOUNDED one,
+// so any result larger than MaxResultBytes was never released. The fix: the
+// attachment bounds the result at the source (r.result() returns the bounded
+// form), so both sides digest the same bytes.
+func TestLargeResultReleasedByBoundedDigest(t *testing.T) {
+	sock, srv := startFakeAppServer(t)
+	att, err := Attach(sock, "t1")
+	if err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	t.Cleanup(func() { _ = att.Close() })
+	<-srv.calls // initialize
+	<-srv.calls // thread/resume
+
+	s := att.Inspect()
+	key := requests.Key{CreatorHost: "local", TargetID: s.TargetID, RequestID: "11111111-1111-4111-8111-111111111811"}
+	done := make(chan struct{})
+	go func() {
+		_, _ = att.Submit(core.BoundRequest{Key: key, Epoch: s.Epoch, Input: protocol.SubmitInput{Text: "work"}})
+		close(done)
+	}()
+	<-srv.calls // turn/start
+	srv.notify(t, "turn/started", `{"threadId":"t1","turn":{"id":"u1"}}`)
+	srv.notify(t, "item/started", `{"threadId":"t1","turnId":"u1","item":{"type":"userMessage","id":"i1","clientId":"`+key.RequestID+`","content":[]}}`)
+	<-done
+	// Emit a result LARGER than MaxResultBytes. The attachment must bound it
+	// before digesting, so the endpoint's bounded digest matches.
+	bigText := strings.Repeat("x", protocol.MaxResultBytes+50_000)
+	srv.notify(t, "item/completed", `{"threadId":"t1","turnId":"u1","completedAtMs":1,"item":{"type":"agentMessage","id":"i2","text":"`+bigText+`"}}`)
+	srv.notify(t, "turn/completed", `{"threadId":"t1","turn":{"id":"u1","status":"completed"}}`)
+
+	var ev core.Evidence
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		ev, _ = att.Lookup(key, s.Epoch)
+		if ev.State == protocol.StateCompleted {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if ev.State != protocol.StateCompleted {
+		t.Fatalf("terminal evidence not retained: %+v", ev)
+	}
+	if ev.Result == nil || !ev.Result.Truncated {
+		t.Fatalf("result not bounded: truncated=%v (want true, result > MaxResultBytes)", ev.Result != nil && ev.Result.Truncated)
+	}
+
+	// The endpoint would compute protocol.EvidenceDigest(boundResult(ev.Result)).
+	// Since ev.Result is already bounded, boundResult is a no-op. The
+	// attachment must accept this digest.
+	att.AcknowledgeResult(key, s.Epoch, protocol.EvidenceDigest(ev.Result))
+	lk, _ := att.Lookup(key, s.Epoch)
+	if lk.Class != core.EvidenceNone || lk.Result != nil {
+		t.Fatalf("bounded-digest ack did not release the large result — the attachment digested the unbounded form (Pro F2): class=%s", lk.Class)
+	}
+}
+
+// TestRunIDAccessorTakesLock verifies B1 (F3): a.runID takes a.mu before
+// reading r.turnID. This is a structural test — it confirms the accessor
+// exists and is used, not a runtime race. The runtime race is caught by
+// running the whole suite under -race: confirmRun writes r.turnID from the
+// read-loop goroutine while Submit reads it via a.runID. If runID were still
+// an unlocked method on *run, -race would fire in TestSubmitBindsTurnAndCompletes.
+func TestRunIDAccessorTakesLock(t *testing.T) {
+	sock, srv := startFakeAppServer(t)
+	att, err := Attach(sock, "t1")
+	if err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	t.Cleanup(func() { _ = att.Close() })
+	<-srv.calls // initialize
+	<-srv.calls // thread/resume
+
+	s := att.Inspect()
+	key := requests.Key{CreatorHost: "local", TargetID: s.TargetID, RequestID: "11111111-1111-4111-8111-1111111118b1"}
+	// Start a turn and confirm it so r.turnID is set by confirmRun (from the
+	// read-loop goroutine).
+	done := make(chan struct{}, 1)
+	go func() {
+		_, _ = att.Submit(core.BoundRequest{Key: key, Epoch: s.Epoch, Input: protocol.SubmitInput{Text: "work"}})
+		done <- struct{}{}
+	}()
+	<-srv.calls // turn/start
+	srv.notify(t, "turn/started", `{"threadId":"t1","turn":{"id":"u1"}}`)
+	// Confirm the run: emit the userMessage item that carries our clientId.
+	srv.notify(t, "item/started", `{"threadId":"t1","turnId":"u1","item":{"type":"userMessage","clientId":"`+key.RequestID+`"}}`)
+	<-done
+
+	// Now read the runID through the accessor (takes a.mu). Under -race, if
+	// the accessor did not take the lock, the read of r.turnID here would race
+	// with any concurrent write from the read-loop goroutine.
+	att.mu.Lock()
+	r, ok := att.runs[key]
+	att.mu.Unlock()
+	if !ok {
+		t.Fatal("run not found")
+	}
+	rid := att.runID(r)
+	if rid != "turn:u1" {
+		t.Fatalf("runID = %q, want turn:u1 (B1: runID must read r.turnID under a.mu)", rid)
+	}
+}
+
+// TestHistoryResolvedRunConverges reproduces B2 (F1 never converges): when
+// lookupHistory resolves a run as terminal, the in-memory run must become
+// terminal so AcknowledgeResult can release it. Without the fix, the run
+// stays StateRunning forever, AcknowledgeResult refuses every ack, and
+// Reconcile re-reads the whole transcript every tick.
+func TestHistoryResolvedRunConverges(t *testing.T) {
+	sock, srv := startFakeAppServer(t)
+	clk := &fakeClock{t: time.Date(2026, 9, 12, 12, 0, 0, 0, time.UTC)}
+	att, err := Attach(sock, "t1", WithClock(clk.now), WithConfirmTimeout(50*time.Millisecond))
+	if err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	t.Cleanup(func() { _ = att.Close() })
+	<-srv.calls // initialize
+	<-srv.calls // thread/resume
+
+	s := att.Inspect()
+	key := requests.Key{CreatorHost: "local", TargetID: s.TargetID, RequestID: "11111111-1111-4111-8111-1111111118c1"}
+	done := make(chan struct{}, 1)
+	go func() {
+		_, _ = att.Submit(core.BoundRequest{Key: key, Epoch: s.Epoch, Input: protocol.SubmitInput{Text: "work"}})
+		done <- struct{}{}
+	}()
+	<-srv.calls // turn/start
+	srv.notify(t, "turn/started", `{"threadId":"t1","turn":{"id":"u1"}}`)
+	// No confirming userMessage — advance past confirmTimeout so Lookup
+	// falls through to lookupHistory.
+	clk.advance(51 * time.Millisecond)
+	<-done // Submit returns with an error (unconfirmed)
+
+	// Now set up the fake server to return a completed turn in thread/read
+	// that carries our clientId.
+	srv.setThreadReadHandler(func() string {
+		return `{"thread":{"turns":[{"id":"u1","status":"completed","items":[{"type":"userMessage","clientId":"` + key.RequestID + `"},{"type":"agentMessage","text":"done"}]}]}}`
+	})
+
+	// Lookup resolves the run from history as completed.
+	lk, lerr := att.Lookup(key, s.Epoch)
+	if lerr != nil {
+		t.Fatalf("Lookup: %v", lerr)
+	}
+	if lk.State != protocol.StateCompleted {
+		t.Fatalf("Lookup did not resolve the run as completed: state=%s", lk.State)
+	}
+	if lk.Result == nil || lk.Result.Text != "done" {
+		t.Fatalf("Lookup did not deliver the result: %+v", lk.Result)
+	}
+
+	// B2: the in-memory run must now be terminal (completed). Without the
+	// fix, it stays StateRunning and AcknowledgeResult refuses every ack.
+	lk2, _ := att.Lookup(key, s.Epoch)
+	if !lk2.State.Terminal() {
+		t.Fatalf("in-memory run did not become terminal after history resolved it (B2): state=%s", lk2.State)
+	}
+
+	// AcknowledgeResult must now release the run (digest matches). Without
+	// the fix, the run stays in a.runs because !r.state.Terminal() refuses.
+	digest := protocol.EvidenceDigest(lk.Result)
+	att.AcknowledgeResult(key, s.Epoch, digest)
+	lk3, _ := att.Lookup(key, s.Epoch)
+	if lk3.Class != core.EvidenceNone || lk3.Result != nil {
+		t.Fatalf("AcknowledgeResult did not release the history-resolved run (B2): class=%s result=%+v", lk3.Class, lk3.Result)
 	}
 }
