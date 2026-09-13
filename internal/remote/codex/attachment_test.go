@@ -770,10 +770,11 @@ func TestB3FastCompletionDoesNotWedgeAdapter(t *testing.T) {
 		// The adapter must NOT be left busy — activeTurn should not be set
 		// for a terminal run.
 		att.mu.Lock()
-		if att.activeTurn != "" {
-			t.Fatalf("adapter left busy with activeTurn=%q after fast completion (B3 — would wedge forever)", att.activeTurn)
-		}
+		activeTurn := att.activeTurn
 		att.mu.Unlock()
+		if activeTurn != "" {
+			t.Fatalf("adapter left busy with activeTurn=%q after fast completion (B3 — would wedge forever)", activeTurn)
+		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("submit did not return after fast completion (B3 — adapter wedged)")
 	}

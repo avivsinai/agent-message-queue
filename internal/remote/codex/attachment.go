@@ -357,8 +357,9 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 	// later event to clear it. If the run is already terminal, skip the
 	// activeTurn/status restoration entirely.
 	if r.state.Terminal() {
+		rid := r.runIDLocked()
 		a.mu.Unlock()
-		return core.Admission{Admitted: true, RunID: "turn:" + res.Turn.ID}, nil
+		return core.Admission{Admitted: true, RunID: rid}, nil
 	}
 	if r.turnID == "" {
 		r.turnID = res.Turn.ID
@@ -482,7 +483,7 @@ func (a *Attachment) runID(r *run) string {
 // clientUserMessageId to the server and echoed back in history items; the
 // byClientID map is keyed by it.
 func clientIDFor(key requests.Key) string {
-	return key.CreatorHost + "/" + key.TargetID + "/" + key.RequestID
+	return protocol.EncodeRef(key.CreatorHost, key.TargetID, key.RequestID)
 }
 
 func refusal(err error) core.Admission {
@@ -640,25 +641,32 @@ func (a *Attachment) lookupHistory(key requests.Key) (core.Evidence, error) {
 		r.text.WriteString(text.String())
 		a.mu.Lock()
 		if existing, ok := a.runs[key]; ok {
-			// A run appeared between the unlocked history call and now. Use it.
-			existing.turnID = t.ID
-			existing.state = state
-			existing.errText = errText
-			existing.nativeRef = nativeRef
-			existing.text.Reset()
-			existing.text.WriteString(text.String())
+			// A run appeared between the unlocked history call and now. The
+			// pump is live and owns the run. Evidence only ADVANCES: fill
+			// only what is empty, never overwrite state/text the pump set.
+			if existing.turnID == "" {
+				existing.turnID = t.ID
+			}
 			existing.confirmed = true
+			// If the pump already moved to terminal, keep its state/text.
+			if !existing.state.Terminal() {
+				existing.state = state
+				existing.errText = errText
+				existing.nativeRef = nativeRef
+				existing.text.Reset()
+				existing.text.WriteString(text.String())
+			}
 			r = existing
 		} else {
 			a.runs[key] = r
 			a.byClientID[clientIDFor(key)] = r
 		}
-		if t.ID != "" {
-			a.byTurn[t.ID] = r
+		if t.ID != "" && r.turnID != "" {
+			a.byTurn[r.turnID] = r
 		}
 		a.mu.Unlock()
 		result := r.result()
-		return core.Evidence{Known: true, Admitted: true, RunID: "turn:" + t.ID, State: state, Result: result}, nil
+		return core.Evidence{Known: true, Admitted: true, RunID: r.runIDLocked(), State: r.state, Result: result}, nil
 	}
 	// No turn carried our clientId. That is NOT positive proof the request was
 	// never admitted: the clientId echo is schema-backed but unverified
@@ -979,30 +987,11 @@ func (r *run) result() *protocol.Result {
 	if r.nativeRef != "" {
 		res.NativeRef = r.nativeRef
 	}
-	// B5: bound against the JSON-ENCODED representation, not raw bytes.
-	// The store enforces MaxRecordBytes against the serialized record, so a
-	// raw-byte bound on the result text is incoherent: JSON escaping can
-	// double each special character (\n -> \\n), making a 512KiB raw result
-	// ~768KiB encoded. Truncate the encoded form to MaxResultBytes so the
-	// result alone never exceeds its budget, leaving room for input + overhead.
-	for {
-		b, err := json.Marshal(res)
-		if err != nil {
-			break
-		}
-		if len(b) <= protocol.MaxResultBytes {
-			break
-		}
-		// Truncate by the overshoot plus headroom for the closing quote and
-		// any additional escaping. UTF-8-rune safe: step back to a rune
-		// boundary.
-		overshoot := len(b) - protocol.MaxResultBytes + 256
-		if overshoot >= len(res.Text) {
-			res.Text = ""
-			res.Truncated = true
-			break
-		}
-		n := len(res.Text) - overshoot
+	// Bound the raw text to MaxResultBytes (UTF-8-rune safe). The store's
+	// MaxRecordBytes budget is derived from the worst-case JSON encoding
+	// factor (6x) so a raw-bounded result always fits encoded.
+	if len(res.Text) > protocol.MaxResultBytes {
+		n := protocol.MaxResultBytes
 		for n > 0 && !utf8.RuneStart(res.Text[n]) {
 			n--
 		}
