@@ -155,6 +155,7 @@ const (
 	CodeEndpointAlreadyRunning   Code = "endpoint_already_running"
 	CodeEndpointUnreachable      Code = "endpoint_unreachable"
 	CodeStoreClosed              Code = "store_closed"
+	CodeDraining                 Code = "draining"
 )
 
 // CancelDisposition is the recorded outcome of a cancel command.
@@ -335,7 +336,7 @@ func ExitForCode(code Code) int {
 	case CodeBusy, CodeUnsupported, CodeUnshared, CodeExpired, CodeStaleEpoch,
 		CodeRequestConflict, CodeStorageFull, CodeAttachmentLost, CodeResultExpired,
 		CodeAlreadyResolved, CodeEndpointAlreadyRunning, CodeEndpointUnreachable,
-		CodeStoreClosed:
+		CodeStoreClosed, CodeDraining:
 		return ExitActionRequired
 	}
 	return ExitError

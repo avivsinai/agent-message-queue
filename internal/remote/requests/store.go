@@ -515,6 +515,13 @@ func (s *Store) CompactOne(key Key, before time.Time) (bool, error) {
 		return false, nil
 	}
 	rec.Revision++
+	// Intentional asymmetry: the Revision is bumped but NOT published. A
+	// tombstone is local dedup state, not a caller-visible revision — the
+	// caller already received the terminal outcome before compaction.
+	// Publishing here would flood every caller with tombstone notifications
+	// for records they already have terminal outcomes for (the B10 shape:
+	// a revision change with no corresponding publication is the bug, not
+	// the norm). Reconcile republishes only PublishedRevision < Revision.
 	rec.Result = nil
 	rec.Input = nil
 	rec.Interaction = nil

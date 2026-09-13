@@ -61,6 +61,25 @@ type target struct {
 	unsubscribe func()
 }
 
+// lifecycleState is the endpoint's phase: accepting commands, draining
+// in-flight handlers before Close, or closed. The state is read+written
+// under e.mu; the drain wait uses e.drained (a condition variable) so
+// Close blocks until the last in-flight handler exits.
+type lifecycleState int
+
+const (
+	stateAccepting lifecycleState = iota
+	stateDraining
+	stateClosed
+)
+
+// drainTimeout is the bound on how long Close waits for in-flight handlers.
+// It is generous (30s) because a single handler's worst case is one native
+// RPC (20s timeout in the codex adapter) plus a commit. If a handler has
+// not returned by then, it is wedged and the endpoint closes anyway — the
+// store's closed flag rejects further mutations from the stale handler.
+const drainTimeout = 30 * time.Second
+
 // Endpoint is the request handler. One Endpoint owns one Store.
 type Endpoint struct {
 	mu             sync.Mutex
@@ -73,6 +92,15 @@ type Endpoint struct {
 	changed        chan struct{}
 	compactHorizon time.Duration
 	lastCompact    time.Time
+	// B13 lifecycle: state transitions accepting -> draining -> closed.
+	// inFlight counts handlers between entry (registerInFlight) and exit
+	// (releaseInFlight). drained is a condition variable Close waits on.
+	// The entry check + increment happen in ONE critical section so a
+	// transition to draining cannot slip a handler in after the gate.
+	state    lifecycleState
+	inFlight int
+	drained  *sync.Cond
+	drainTO  time.Duration
 }
 
 // Config configures New.
@@ -84,6 +112,9 @@ type Config struct {
 	// CompactHorizon is the age at which terminal, settled records become
 	// eligible for compaction. Zero (default) disables compaction.
 	CompactHorizon time.Duration
+	// DrainTimeout overrides the default Close drain timeout. Tests use a
+	// short value to prove the bound without sleeping 30s.
+	DrainTimeout time.Duration
 }
 
 // New builds an endpoint over an open store. Attachments register through
@@ -97,7 +128,13 @@ func New(cfg Config) *Endpoint {
 		now:            cfg.Now,
 		changed:        make(chan struct{}),
 		compactHorizon: cfg.CompactHorizon,
+		state:          stateAccepting,
+		drainTO:        drainTimeout,
 	}
+	if cfg.DrainTimeout > 0 {
+		e.drainTO = cfg.DrainTimeout
+	}
+	e.drained = sync.NewCond(&e.mu)
 	if e.now == nil {
 		e.now = time.Now
 	}
@@ -143,10 +180,36 @@ func (e *Endpoint) UnregisterAll() {
 	}
 }
 
-// Close unsubscribes from every attachment and closes the store. Records and
-// the attachments' retained evidence survive for the next endpoint.
+// Close transitions the endpoint to draining, waits for in-flight handlers
+// to finish (bounded by drainTimeout), then unsubscribes attachments and
+// closes the store. A handler that never returns is abandoned: after the
+// timeout, Close proceeds anyway and the store's closed flag rejects any
+// further mutation the stale handler attempts. Returns an error naming how
+// many handlers were still in flight if the bound was exceeded.
 func (e *Endpoint) Close() error {
 	e.mu.Lock()
+	if e.state == stateClosed {
+		e.mu.Unlock()
+		return nil
+	}
+	e.state = stateDraining
+	// Wait for in-flight handlers to drain, bounded by drainTO. The timer
+	// sets a flag and broadcasts so the loop exits even if inFlight > 0.
+	if e.inFlight > 0 {
+		timedOut := false
+		timer := time.AfterFunc(e.drainTO, func() {
+			e.mu.Lock()
+			timedOut = true
+			e.drained.Broadcast()
+			e.mu.Unlock()
+		})
+		defer timer.Stop()
+		for e.inFlight > 0 && !timedOut {
+			e.drained.Wait()
+		}
+	}
+	stale := e.inFlight
+	e.state = stateClosed
 	for id, t := range e.targets {
 		if t.unsubscribe != nil {
 			t.unsubscribe()
@@ -154,7 +217,30 @@ func (e *Endpoint) Close() error {
 		delete(e.targets, id)
 	}
 	e.mu.Unlock()
-	return e.store.Close()
+	err := e.store.Close()
+	if stale > 0 {
+		return fmt.Errorf("endpoint closed with %d handler(s) still in flight after %s drain timeout", stale, e.drainTO)
+	}
+	return err
+}
+
+// releaseInFlight decrements the in-flight count and wakes Close if it was
+// waiting for handlers to drain. Called by Handle's defer.
+func (e *Endpoint) releaseInFlight() {
+	e.mu.Lock()
+	e.inFlight--
+	if e.inFlight == 0 && e.state == stateDraining {
+		e.drained.Broadcast()
+	}
+	e.mu.Unlock()
+}
+
+// InFlight returns the current number of in-flight handlers. Test seam for
+// observing the drain state without a sleep.
+func (e *Endpoint) InFlight() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.inFlight
 }
 
 // Handle runs one validated command from an authenticated source and returns
@@ -167,6 +253,19 @@ func (e *Endpoint) Handle(cmd *protocol.Command, src Source) (any, error) {
 	if src.Host == "" {
 		return nil, protocol.Refuse(protocol.CodeInvalid, "command source host is required")
 	}
+	// B13 lifecycle: check state and register as in-flight in ONE critical
+	// section. A command arriving during draining/closed is refused with an
+	// action-required code (the caller retries) — never a failure code that
+	// would be recorded as the command's outcome.
+	e.mu.Lock()
+	if e.state != stateAccepting {
+		e.mu.Unlock()
+		return nil, protocol.Refuse(protocol.CodeDraining, "endpoint is shutting down; retry the command after restart")
+	}
+	e.inFlight++
+	e.mu.Unlock()
+	defer e.releaseInFlight()
+
 	switch cmd.Op {
 	case protocol.OpRequestSubmit:
 		return e.submit(cmd, src)
@@ -1518,6 +1617,29 @@ func (e *Endpoint) reconcileLive(rec *requests.Record) error {
 // window. The native Submit happens without the endpoint lock.
 func (e *Endpoint) admitDeferred(rec *requests.Record) error {
 	key := keyOfRecord(rec)
+	// W8 (D1 gate): busy=queue and deliver=steer are disabled in v1. The
+	// gate lives in submit() for fresh commands; admitDeferred is the other
+	// entrance to native Submit, so a record stored before D1 with
+	// deliver=steer would be admitted here after an upgrade without this
+	// check. Same gate, same code, same reason.
+	if rec.Input != nil && (rec.Input.Busy == protocol.BusyQueue || rec.Input.Deliver == protocol.DeliverSteer) {
+		mode, value := "busy", string(rec.Input.Busy)
+		if rec.Input.Deliver == protocol.DeliverSteer {
+			mode, value = "deliver", string(rec.Input.Deliver)
+		}
+		e.mu.Lock()
+		cur, exists, err := e.store.Get(key)
+		if err != nil || !exists || cur.State != protocol.StateReceived {
+			e.mu.Unlock()
+			return err
+		}
+		e.transitionLocked(cur, causeRefused, nativeEvidence{code: protocol.CodeUnsupported})
+		_, err = e.commitLocked(cur, nil)
+		e.mu.Unlock()
+		_ = mode
+		_ = value
+		return err
+	}
 	e.mu.Lock()
 	t, code := e.admissibleLocked(rec.TargetID, rec.Epoch, rec.NotAfter)
 	if code == "" && t == nil {
