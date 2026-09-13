@@ -254,7 +254,7 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 	a.mu.Lock()
 	if a.offline {
 		a.mu.Unlock()
-		return core.Admission{}, errors.New("app-server connection is closed")
+		return refusal(fmt.Errorf("%w: app-server connection is closed", ErrNotSent)), nil
 	}
 	if req.Epoch != a.epoch {
 		a.mu.Unlock()

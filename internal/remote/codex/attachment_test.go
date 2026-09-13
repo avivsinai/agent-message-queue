@@ -2,6 +2,7 @@ package codex
 
 import (
 	"encoding/json"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -25,6 +26,8 @@ type fakeAppServer struct {
 	threadReadHandlerMu sync.Mutex
 	turnStartDelayHook  func()
 	turnStartDelayMu    sync.Mutex
+	turnStartResponse   string
+	turnStartResponseMu sync.Mutex
 }
 
 func startFakeAppServer(t *testing.T) (string, *fakeAppServer) {
@@ -77,7 +80,14 @@ func startFakeAppServer(t *testing.T) (string, *fakeAppServer) {
 				if hook != nil {
 					hook()
 				}
-				_ = ws.writeText([]byte(`{"jsonrpc":"2.0","id":` + string(*msg.ID) + `,"result":{"turn":{"id":"u1","status":"inProgress"}}}`))
+				srv.turnStartResponseMu.Lock()
+				customResp := srv.turnStartResponse
+				srv.turnStartResponseMu.Unlock()
+				if customResp != "" {
+					_ = ws.writeText([]byte(fmt.Sprintf(customResp, string(*msg.ID))))
+				} else {
+					_ = ws.writeText([]byte(`{"jsonrpc":"2.0","id":` + string(*msg.ID) + `,"result":{"turn":{"id":"u1","status":"inProgress"}}}`))
+				}
 			case "turn/interrupt":
 				_ = ws.writeText([]byte(`{"jsonrpc":"2.0","id":` + string(*msg.ID) + `,"result":{}}`))
 			case "thread/queue/add":
@@ -127,6 +137,15 @@ func (s *fakeAppServer) setTurnStartDelay(fn func()) {
 	s.turnStartDelayMu.Lock()
 	defer s.turnStartDelayMu.Unlock()
 	s.turnStartDelayHook = fn
+}
+
+// setTurnStartResponse overrides the default turn/start RPC response. The
+// format string must contain %s where the RPC id goes. Used by B1 to send a
+// malformed response that fails to decode.
+func (s *fakeAppServer) setTurnStartResponse(format string) {
+	s.turnStartResponseMu.Lock()
+	defer s.turnStartResponseMu.Unlock()
+	s.turnStartResponse = format
 }
 
 // TestSubmitBindsTurnAndCompletes is the adapter happy path: submit starts a
@@ -663,13 +682,12 @@ func TestHistoryResolvedRunConverges(t *testing.T) {
 	}
 }
 
-// TestB1TransportErrorIsUncertainNotRejected reproduces B1
-// (agent-message-queue-611.22.35): a transport error during turn/start
-// (timeout, connection reset) must NOT produce a definitive refusal. The
-// prompt may be running. The run correlation must survive so Lookup and
-// lookupHistory can resolve it. Only a positive JSON-RPC error response
-// (rpcError) is a definitive refusal.
-func TestB1TransportErrorIsUncertainNotRejected(t *testing.T) {
+// TestB1PreSendFailureIsRefusalNotUncertain reproduces B1 (a)
+// (agent-message-queue-611.22.35): a pre-send failure (connection already
+// closed before the write) is UNAMBIGUOUS — the prompt never left. The
+// adapter must dropRun + refuse (retry is safe, nothing ran). The run must
+// NOT be in a.runs.
+func TestB1PreSendFailureIsRefusalNotUncertain(t *testing.T) {
 	sock, srv := startFakeAppServer(t)
 	att, err := Attach(sock, "t1")
 	if err != nil {
@@ -682,6 +700,12 @@ func TestB1TransportErrorIsUncertainNotRejected(t *testing.T) {
 	s := att.Inspect()
 	key := requests.Key{CreatorHost: "local", TargetID: s.TargetID, RequestID: "11111111-1111-4111-8111-111111111b01"}
 
+	// Close the server BEFORE Submit so the RPC write fails (pre-send).
+	_ = srv.ws.close()
+	// Drain initialize/resume calls that may still be queued.
+	// Give the read pump time to register the closed connection.
+	time.Sleep(50 * time.Millisecond)
+
 	type admResult struct {
 		adm core.Admission
 		err error
@@ -691,28 +715,79 @@ func TestB1TransportErrorIsUncertainNotRejected(t *testing.T) {
 		adm, err := att.Submit(core.BoundRequest{Key: key, Epoch: s.Epoch, Input: protocol.SubmitInput{Text: "say PONG"}})
 		done <- admResult{adm, err}
 	}()
-	<-srv.calls // turn/start arrives
-
-	// Close the server so the RPC response is lost — transport error.
-	_ = srv.ws.close()
 
 	select {
 	case r := <-done:
+		// Pre-send: refusal code, no error (the endpoint commits rejected).
+		if r.err != nil {
+			t.Fatalf("pre-send failure returned error %v (must be refusal, not uncertain) (B1)", r.err)
+		}
+		if r.adm.Code == "" {
+			t.Fatal("pre-send failure returned no refusal code (B1 — the prompt never left, refusal is safe)")
+		}
+		// The run must NOT be in the map (dropRun was called).
+		att.mu.Lock()
+		_, hasRun := att.runs[key]
+		att.mu.Unlock()
+		if hasRun {
+			t.Fatal("pre-send failure left the run in the map (B1 — dropRun must clean up)")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("submit did not return after pre-send failure (B1)")
+	}
+}
+
+// TestB1PostSendFailureIsUncertainNotRefused reproduces B1 (b)
+// (agent-message-message-611.22.35): a post-send failure (the server
+// responded but the result failed to decode) is AMBIGUOUS — the turn may be
+// running. The adapter must keep the run and return a non-nil error (uncertain),
+// not a refusal code.
+func TestB1PostSendFailureIsUncertainNotRefused(t *testing.T) {
+	sock, srv := startFakeAppServer(t)
+	att, err := Attach(sock, "t1")
+	if err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	t.Cleanup(func() { _ = att.Close() })
+	<-srv.calls // initialize
+	<-srv.calls // thread/resume
+
+	s := att.Inspect()
+	key := requests.Key{CreatorHost: "local", TargetID: s.TargetID, RequestID: "11111111-1111-4111-8111-111111111b02"}
+
+	// Install a handler that responds to turn/start with a result that
+	// fails to decode: "turn" should be an object, but we send a string.
+	srv.setTurnStartResponse(`{"jsonrpc":"2.0","id":%s,"result":{"turn":"u1"}}`)
+
+	type admResult struct {
+		adm core.Admission
+		err error
+	}
+	done := make(chan admResult, 1)
+	go func() {
+		adm, err := att.Submit(core.BoundRequest{Key: key, Epoch: s.Epoch, Input: protocol.SubmitInput{Text: "say PONG"}})
+		done <- admResult{adm, err}
+	}()
+	<-srv.calls // turn/start arrives; the malformed response is sent
+
+	select {
+	case r := <-done:
+		// Post-send: non-nil error (uncertain), no refusal code.
 		if r.err == nil {
-			t.Fatal("transport error returned no error (must be uncertain) (B1)")
+			t.Fatal("post-send failure returned no error (must be uncertain) (B1)")
 		}
 		if r.adm.Code != "" {
-			t.Fatalf("transport error returned refusal code %q; must be uncertain, not rejected (B1)", r.adm.Code)
+			t.Fatalf("post-send failure returned refusal code %q (B1 — the turn may be running, must be uncertain)", r.adm.Code)
 		}
-		// The run must still be in the map so Lookup can resolve it.
+		// The run must STILL be in the map (correlation preserved).
 		att.mu.Lock()
 		_, hasRun := att.runs[key]
 		att.mu.Unlock()
 		if !hasRun {
-			t.Fatal("transport error dropped the run; correlation must survive so Lookup can resolve it (B1)")
+			t.Fatal("post-send failure dropped the run (B1 — correlation must survive so Lookup can resolve it)")
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("submit did not return after transport error (B1)")
+		t.Fatal("submit did not return after post-send failure (B1)")
 	}
 }
 
