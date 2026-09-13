@@ -1152,7 +1152,7 @@ func owesCancel(rec *requests.Record) bool {
 // Used by replayTerminalAck's crash-gap path (when AckDigest is empty but
 // Result is bound, compute the digest from Result).
 func owesAck(rec *requests.Record) bool {
-	return rec.State.Terminal() && rec.Result != nil && rec.AckDigest == ""
+	return rec.OwesAck()
 }
 
 // shouldCompact rate-limits compaction to once per minute. Survives restarts
