@@ -411,20 +411,33 @@ func validOpaque(s string) bool {
 const digestPrefix = "sha256:"
 
 // CommandDigest is the digest of the immutable submit command payload, over
-// exactly {schema, op, request_id, target_id, epoch, not_after, input}. It is
-// canonical JSON: object keys sorted, no insignificant whitespace, so every
-// carrier agrees on the bytes. A retry with a changed epoch or not_after (or
+// exactly {schema, op, request_id, target_id, epoch, not_after, input}. The
+// canonical form is JSON with the keys in the FIXED ORDER listed below and no
+// insignificant whitespace, so every carrier agrees on the bytes. The order is
+// deliberately NOT alphabetical: it is the declaration order of digestPayload,
+// which is what Go's encoder emits. An earlier version of this comment said
+// "object keys sorted", which the implementation never did — a non-Go carrier
+// that followed it would sort the keys, compute a different digest, and turn
+// every idempotent retry into request_conflict. A retry with a changed epoch or not_after (or
 // input) yields a different digest and is request_conflict; a retry that
 // recovers the original command bytes yields the same digest. The digest
 // excludes revision/state/result — those are server-derived, not part of the
 // client's command.
 //
-// Canonical byte construction (for carriers that build the bytes themselves):
+// Canonical byte construction: the canonical form is EXACTLY what Go's
+// json.Marshal produces for a digestPayload struct with these field values
+// — keys in struct declaration order (NOT alphabetical), no insignificant
+// whitespace, and Go's standard HTML escaping (< > & U+2028/2029). A
+// non-Go carrier MUST replicate json.Marshal's output, not build the bytes
+// by hand, because a hand-built template that omits the escaping computes a
+// different digest for any input containing <, >, or &. The precedent is
+// docs/wake-lifecycle.md:114-120, which binds the canonical form to
+// json.Marshal explicitly. Then sha256 hex with the "sha256:" prefix.
 //
-//	json.Marshal of digestPayload{Schema,Op,RequestID,TargetID,Epoch,NotAfter,Input}
-//	with struct field order fixed (Go json emits in struct order, which is the
-//	canonical order below) and no extra whitespace, then sha256 hex with the
-//	"sha256:" prefix.
+// Omitted optional fields inside input follow Go's struct tags (omitempty);
+// see resolveDigestDefaults for why Busy and Deliver are resolved to their
+// defaults BEFORE digesting so the omitted form and the spelled form produce
+// the same digest.
 func CommandDigest(cmd *Command) string {
 	if cmd == nil || cmd.Op != OpRequestSubmit {
 		return ""
@@ -435,8 +448,8 @@ func CommandDigest(cmd *Command) string {
 		RequestID: cmd.RequestID,
 		TargetID:  cmd.TargetID,
 		Epoch:     cmd.Epoch,
-		NotAfter:  cmd.NotAfter,
-		Input:     cmd.Input,
+		NotAfter:  normalizeNotAfter(cmd.NotAfter),
+		Input:     resolveDigestDefaults(cmd.Input),
 	}
 	data, err := json.Marshal(payload)
 	if err != nil {
@@ -444,6 +457,47 @@ func CommandDigest(cmd *Command) string {
 	}
 	sum := sha256.Sum256(data)
 	return digestPrefix + hex.EncodeToString(sum[:])
+}
+
+// resolveDigestDefaults fills Busy and Deliver with their defaults BEFORE
+// digesting, so the omitted form ({"text":"say hi"}) and the spelled form
+// ({"text":"say hi","busy":"reject","deliver":"turn"}) produce the SAME digest.
+// The digest is a function of MEANING, not spelling: two semantically
+// identical commands must not conflict. SubmitInput.Busy and Deliver are
+// omitempty, so without this the CLI (which always spells the defaults) and
+// a mailbox peer (which may omit both) disagree on the digest of the same
+// request. Validate accepts "" for each, so both are legal spellings.
+// Resolving here makes ONE owner of the defaults (not every carrier).
+func resolveDigestDefaults(in *SubmitInput) *SubmitInput {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	if out.Busy == "" {
+		out.Busy = BusyReject
+	}
+	if out.Deliver == "" {
+		out.Deliver = DeliverTurn
+	}
+	return &out
+}
+
+// normalizeNotAfter canonicalizes NotAfter before digesting so every
+// legal RFC3339Nano spelling of the same instant produces the SAME digest.
+// A non-Go carrier that parses and re-emits the deadline (Python isoformat()
+// gives +00:00, JS toISOString() gives .000Z) would otherwise diverge from a
+// Go carrier. The digest is a function of MEANING, not spelling — the same
+// rule resolveDigestDefaults applies to Busy and Deliver, applied to the last
+// spelling axis. An empty NotAfter (no deadline) passes through unchanged.
+func normalizeNotAfter(s string) string {
+	if s == "" {
+		return ""
+	}
+	t, err := ParseTime(s)
+	if err != nil {
+		return s // not parseable — Validate rejects it, but don't mutate here
+	}
+	return FormatTime(t)
 }
 
 // EvidenceDigest is the digest of the terminal evidence an acknowledgement
@@ -517,7 +571,10 @@ func (c *Command) Validate() error {
 		if err := forbidFields(c, "request_ref", "since", "interaction_id", "option"); err != nil {
 			return err
 		}
-		if c.Input.Text == "" || len(c.Input.Text) > MaxInputBytes {
+		// TrimSpace: a whitespace-only prompt is empty. The CLI already
+		// refused it, but every other carrier (AMQ mailbox, Buzz DM) went
+		// through Validate alone and would dispatch "   " to a harness.
+		if strings.TrimSpace(c.Input.Text) == "" || len(c.Input.Text) > MaxInputBytes {
 			return Refuse(CodeInvalid, "input.text must be 1..%d bytes", MaxInputBytes)
 		}
 		switch c.Input.Busy {

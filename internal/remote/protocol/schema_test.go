@@ -208,6 +208,46 @@ func TestTruncateTextIsUTF8Safe(t *testing.T) {
 	}
 }
 
+// TestSchemaRejectsWhitespaceOnlyText pins F4's schema half: the published
+// command schema's text field carries "pattern": "\\S", which rejects
+// whitespace-only input (spaces, tabs, newlines). Go's Validate trims and
+// checks emptiness, but without this test, stripping the pattern from the
+// schema file silently regresses and the whole package stays green — the
+// actual F4 defect (whitespace validates clean against the schema) is
+// unguarded. This test compiles the REAL schema file and validates against
+// it, so removing the pattern fails here.
+func TestSchemaRejectsWhitespaceOnlyText(t *testing.T) {
+	sch := compileSchema(t, "remote-command-v1.schema.json")
+	base := map[string]any{
+		"schema": SchemaCommand, "op": "request.submit",
+		"request_id": "11111111-1111-4111-8111-1111111111b3",
+		"target_id":  "t_fake1", "epoch": "e_1",
+		"not_after": "2026-09-01T00:00:00Z",
+		"input":     map[string]any{},
+	}
+	reject := []string{"   ", "\t", "\n", "  \t\n "}
+	for _, bad := range reject {
+		doc := map[string]any{}
+		for k, v := range base {
+			doc[k] = v
+		}
+		doc["input"] = map[string]any{"text": bad}
+		if err := sch.Validate(doc); err == nil {
+			t.Fatalf("whitespace-only text %q was accepted by the schema (F4: pattern \\S missing or broken)", bad)
+		}
+	}
+	// A real prompt with leading/trailing whitespace is accepted (the pattern
+	// only requires at least one non-whitespace character somewhere).
+	ok := map[string]any{}
+	for k, v := range base {
+		ok[k] = v
+	}
+	ok["input"] = map[string]any{"text": "  do the thing  "}
+	if err := sch.Validate(ok); err != nil {
+		t.Fatalf("valid text rejected by schema: %v", err)
+	}
+}
+
 func mustJSON(v any) string {
 	b, _ := json.Marshal(v)
 	return string(b)

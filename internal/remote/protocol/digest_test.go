@@ -1,6 +1,8 @@
 package protocol
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -77,27 +79,34 @@ func TestCommandDigestCanonicalBytes(t *testing.T) {
 		NotAfter:  "2026-09-08T10:02:00Z",
 		Input:     &SubmitInput{Text: "say hi", Busy: BusyQueue, Deliver: DeliverTurn},
 	}
-	// The canonical payload must marshal with keys in the fixed struct order
-	// and no extra whitespace, so re-marshalling is byte-identical.
-	payload := digestPayload{
-		Schema: cmd.Schema, Op: cmd.Op, RequestID: cmd.RequestID,
-		TargetID: cmd.TargetID, Epoch: cmd.Epoch, NotAfter: cmd.NotAfter,
-		Input: cmd.Input,
+	// This test pins the CROSS-CARRIER contract, so it must exercise
+	// CommandDigest itself. The previous version marshalled digestPayload
+	// twice and compared the results: it never called CommandDigest, so
+	// swapping the implementation to sorted keys — the thing the doc
+	// wrongly promised — would have left it green.
+	got := CommandDigest(cmd)
+
+	// A carrier in another language builds these bytes by hand, in exactly
+	// this key order, and must arrive at the same digest.
+	canonical := `{"schema":"` + string(SchemaCommand) + `","op":"` + string(OpRequestSubmit) +
+		`","request_id":"11111111-1111-4111-8111-111111111501","target_id":"t_fake1","epoch":"e_1",` +
+		`"not_after":"2026-09-08T10:02:00Z","input":{"text":"say hi","busy":"queue","deliver":"turn"}}`
+	sum := sha256.Sum256([]byte(canonical))
+	want := digestPrefix + hex.EncodeToString(sum[:])
+	if got != want {
+		t.Fatalf("CommandDigest = %s\nwant       = %s\n(canonical bytes: %s)", got, want, canonical)
 	}
-	b1, _ := json.Marshal(payload)
-	b2, _ := json.Marshal(payload)
-	if string(b1) != string(b2) {
-		t.Fatal("canonical payload marshal not deterministic")
-	}
-	// Keys appear in the canonical order.
-	wantOrder := []string{`"schema"`, `"op"`, `"request_id"`, `"target_id"`, `"epoch"`, `"not_after"`, `"input"`}
-	pos := 0
-	for i, k := range wantOrder {
-		idx := strings.Index(string(b1), k)
-		if idx < pos {
-			t.Fatalf("key %s out of canonical order at step %d (idx=%d pos=%d) in %s", k, i, idx, pos, b1)
-		}
-		pos = idx + len(k)
+
+	// Sorting the keys — what the doc used to claim — must NOT agree, so a
+	// future drift back to that wording is caught here rather than in the
+	// field as request_conflict on every retry.
+	sorted := `{"epoch":"e_1","input":{"busy":"queue","deliver":"turn","text":"say hi"},` +
+		`"not_after":"2026-09-08T10:02:00Z","op":"` + string(OpRequestSubmit) +
+		`","request_id":"11111111-1111-4111-8111-111111111501","schema":"` + string(SchemaCommand) +
+		`","target_id":"t_fake1"}`
+	sortedSum := sha256.Sum256([]byte(sorted))
+	if got == digestPrefix+hex.EncodeToString(sortedSum[:]) {
+		t.Fatal("digest matches the sorted-key form; the canonical order is the struct order, not alphabetical")
 	}
 }
 

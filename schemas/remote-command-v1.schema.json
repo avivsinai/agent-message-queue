@@ -4,9 +4,14 @@
   "title": "AMQ Remote command v1",
   "description": "One command from a client to an amq-remote endpoint. Carried as the body of an ordinary AMQ message to the endpoint's handle, over local IPC, or produced by the Buzz DM edge. Discriminated by op. Unknown fields are rejected.",
   "type": "object",
-  "required": ["schema", "op"],
+  "required": [
+    "schema",
+    "op"
+  ],
   "properties": {
-    "schema": { "const": "amq.remote.command/1" },
+    "schema": {
+      "const": "amq.remote.command/1"
+    },
     "op": {
       "enum": [
         "request.submit",
@@ -23,95 +28,235 @@
     {
       "title": "request.submit",
       "properties": {
-        "schema": { "const": "amq.remote.command/1" },
-        "op": { "const": "request.submit" },
-        "request_id": { "$ref": "#/$defs/uuid" },
-        "target_id": { "$ref": "#/$defs/opaque" },
-        "epoch": { "$ref": "#/$defs/opaque" },
-        "not_after": { "$ref": "#/$defs/rfc3339" },
+        "schema": {
+          "const": "amq.remote.command/1"
+        },
+        "op": {
+          "const": "request.submit"
+        },
+        "request_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "target_id": {
+          "$ref": "#/$defs/opaque"
+        },
+        "epoch": {
+          "$ref": "#/$defs/opaque"
+        },
+        "not_after": {
+          "$ref": "#/$defs/rfc3339"
+        },
         "input": {
           "type": "object",
-          "required": ["text"],
+          "required": [
+            "text"
+          ],
           "properties": {
-            "text": { "type": "string", "minLength": 1, "maxLength": 131072 },
-            "busy": { "enum": ["reject", "queue"], "default": "reject" },
-            "deliver": { "enum": ["turn", "steer"], "default": "turn" }
+            "text": {
+              "type": "string",
+              "pattern": "\\S",
+              "minLength": 1,
+              "maxLength": 131072,
+              "description": "The prompt text. Must contain at least one non-whitespace character (whitespace-only is rejected by Validate)."
+            },
+            "busy": {
+              "enum": [
+                "reject",
+                "queue"
+              ],
+              "default": "reject"
+            },
+            "deliver": {
+              "enum": [
+                "turn",
+                "steer"
+              ],
+              "default": "turn"
+            }
           },
-          "additionalProperties": false
+          "additionalProperties": false,
+          "description": "The submit input. Digest canonical form: the payload is JSON with keys in this FIXED order (NOT alphabetical) and no insignificant whitespace: {\"schema\":\"...\",\"op\":\"request.submit\",\"request_id\":\"...\",\"target_id\":\"...\",\"epoch\":\"...\",\"not_after\":\"...\",\"input\":{\"text\":\"...\",\"busy\":\"reject\",\"deliver\":\"turn\"}}. Inside input, the field order is text, busy, deliver. Busy and Deliver are resolved to their defaults (reject, turn) before digesting, so the omitted form and the spelled form produce the same digest. not_after is normalized before digesting to UTC with a literal Z suffix, fractional seconds truncated to 9 digits with trailing zeros removed, and omitted entirely when zero \u2014 so every legal RFC3339 spelling of the same instant produces the same digest. Text is digested UNTRIMMED (the \\S pattern only validates non-emptiness; leading/trailing whitespace is preserved in the digest). String values use Go's json.Marshal escaping (< > & U+2028 U+2029 plus the ordinary JSON escapes); a non-Go carrier MUST produce byte-identical output. See testdata/remote/corpus.json for golden digest vectors that pin the exact bytes. Then sha256 hex with the \"sha256:\" prefix."
         }
       },
-      "required": ["schema", "op", "request_id", "target_id", "epoch", "not_after", "input"],
+      "required": [
+        "schema",
+        "op",
+        "request_id",
+        "target_id",
+        "epoch",
+        "not_after",
+        "input"
+      ],
       "additionalProperties": false
     },
     {
       "title": "request.get",
       "properties": {
-        "schema": { "const": "amq.remote.command/1" },
-        "op": { "const": "request.get" },
-        "request_ref": { "$ref": "#/$defs/requestRef" }
+        "schema": {
+          "const": "amq.remote.command/1"
+        },
+        "op": {
+          "const": "request.get"
+        },
+        "request_ref": {
+          "$ref": "#/$defs/requestRef"
+        }
       },
-      "required": ["schema", "op", "request_ref"],
+      "required": [
+        "schema",
+        "op",
+        "request_ref"
+      ],
       "additionalProperties": false
     },
     {
       "title": "request.cancel",
       "properties": {
-        "schema": { "const": "amq.remote.command/1" },
-        "op": { "const": "request.cancel" },
-        "request_ref": { "$ref": "#/$defs/requestRef" },
-        "target_id": { "$ref": "#/$defs/opaque" },
-        "epoch": { "$ref": "#/$defs/opaque" },
-        "not_after": { "$ref": "#/$defs/rfc3339" }
+        "schema": {
+          "const": "amq.remote.command/1"
+        },
+        "op": {
+          "const": "request.cancel"
+        },
+        "request_ref": {
+          "$ref": "#/$defs/requestRef"
+        },
+        "target_id": {
+          "$ref": "#/$defs/opaque"
+        },
+        "epoch": {
+          "$ref": "#/$defs/opaque"
+        },
+        "not_after": {
+          "$ref": "#/$defs/rfc3339"
+        }
       },
-      "required": ["schema", "op", "request_ref", "target_id", "epoch", "not_after"],
+      "required": [
+        "schema",
+        "op",
+        "request_ref",
+        "target_id",
+        "epoch",
+        "not_after"
+      ],
       "additionalProperties": false
     },
     {
       "title": "session.list",
-      "properties": { "schema": { "const": "amq.remote.command/1" }, "op": { "const": "session.list" } },
-      "required": ["schema", "op"],
+      "properties": {
+        "schema": {
+          "const": "amq.remote.command/1"
+        },
+        "op": {
+          "const": "session.list"
+        }
+      },
+      "required": [
+        "schema",
+        "op"
+      ],
       "additionalProperties": false
     },
     {
       "title": "session.inspect",
       "properties": {
-        "schema": { "const": "amq.remote.command/1" },
-        "op": { "const": "session.inspect" },
-        "target_id": { "$ref": "#/$defs/opaque" }
+        "schema": {
+          "const": "amq.remote.command/1"
+        },
+        "op": {
+          "const": "session.inspect"
+        },
+        "target_id": {
+          "$ref": "#/$defs/opaque"
+        }
       },
-      "required": ["schema", "op", "target_id"],
+      "required": [
+        "schema",
+        "op",
+        "target_id"
+      ],
       "additionalProperties": false
     },
     {
       "title": "session.events",
       "properties": {
-        "schema": { "const": "amq.remote.command/1" },
-        "op": { "const": "session.events" },
-        "target_id": { "$ref": "#/$defs/opaque" },
-        "since": { "type": "integer", "minimum": 0, "description": "Event cursor: the last event ordinal the caller already holds. Omit or 0 for a fresh snapshot. If the cursor is older than the retained event window, the response marks a gap (the caller must reset to a fresh snapshot)." }
+        "schema": {
+          "const": "amq.remote.command/1"
+        },
+        "op": {
+          "const": "session.events"
+        },
+        "target_id": {
+          "$ref": "#/$defs/opaque"
+        },
+        "since": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Event cursor: the last event ordinal the caller already holds. Omit or 0 for a fresh snapshot. If the cursor is older than the retained event window, the response marks a gap (the caller must reset to a fresh snapshot)."
+        }
       },
-      "required": ["schema", "op", "target_id"],
+      "required": [
+        "schema",
+        "op",
+        "target_id"
+      ],
       "additionalProperties": false
     },
     {
       "title": "interaction.respond",
       "properties": {
-        "schema": { "const": "amq.remote.command/1" },
-        "op": { "const": "interaction.respond" },
-        "request_ref": { "$ref": "#/$defs/requestRef" },
-        "target_id": { "$ref": "#/$defs/opaque" },
-        "epoch": { "$ref": "#/$defs/opaque" },
-        "interaction_id": { "$ref": "#/$defs/opaque" },
-        "option": { "type": "string", "minLength": 1, "maxLength": 256, "description": "Exactly one option id offered by the pending interaction." }
+        "schema": {
+          "const": "amq.remote.command/1"
+        },
+        "op": {
+          "const": "interaction.respond"
+        },
+        "request_ref": {
+          "$ref": "#/$defs/requestRef"
+        },
+        "target_id": {
+          "$ref": "#/$defs/opaque"
+        },
+        "epoch": {
+          "$ref": "#/$defs/opaque"
+        },
+        "interaction_id": {
+          "$ref": "#/$defs/opaque"
+        },
+        "option": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "description": "Exactly one option id offered by the pending interaction."
+        }
       },
-      "required": ["schema", "op", "request_ref", "target_id", "epoch", "interaction_id", "option"],
+      "required": [
+        "schema",
+        "op",
+        "request_ref",
+        "target_id",
+        "epoch",
+        "interaction_id",
+        "option"
+      ],
       "additionalProperties": false
     }
   ],
   "$defs": {
-    "uuid": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" },
-    "opaque": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9_.:-]+$" },
-    "rfc3339": { "type": "string", "format": "date-time" },
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "opaque": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9_.:-]+$"
+    },
+    "rfc3339": {
+      "type": "string",
+      "format": "date-time"
+    },
     "requestRef": {
       "type": "string",
       "description": "Opaque versioned reference from a receipt: amqr1_<base32 of creator_host, target_id, request_id>. Clients copy it; they never construct it. Upper bound is derived from the opaque-segment limits (see protocol.MaxRefLen).",
