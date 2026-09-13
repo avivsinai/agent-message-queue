@@ -124,6 +124,9 @@ func (c *Carrier) ImportOnce() (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	if c.syncDirFaultForTest != nil {
+		root.SetSyncDirFaultForTest(c.syncDirFaultForTest)
+	}
 	defer func() { _ = root.Close() }()
 	entries, err := root.ReadDir(filepath.Join("agents", c.me, "inbox", "new"))
 	if err != nil {
@@ -347,8 +350,9 @@ const (
 	// durabilityStrict: a CommittedDurabilityError is PROPAGATED. Used by
 	// Publish (revision publication) so publishLocked does not advance
 	// PublishedRevision, and Reconcile republishes the same immutable revision
-	// on the next tick. Receivers upsert by (request, revision), so a duplicate
-	// is a no-op — that is why at-least-once is safe here.
+	// on the next tick. The republish is idempotent by construction (B1):
+	// the message id is deterministic (publish__<ref>__rev<N>), so
+	// resolvePublishCollision returns nil on a byte-identical collision.
 	durabilityStrict
 )
 
@@ -366,10 +370,9 @@ func (c *Carrier) replyWith(root *fsq.DeliveryRoot, origin map[string]string, su
 	}
 	defer closeDest()
 	now := c.now()
-	id, err := format.NewMessageID(now)
-	if err != nil {
-		return err
-	}
+	var id string
+	var created string
+	var err error
 	labels := []string{LabelRemote}
 	context := map[string]any{}
 	var text []byte
@@ -393,6 +396,36 @@ func (c *Carrier) replyWith(root *fsq.DeliveryRoot, origin map[string]string, su
 		}
 		context["remote"] = json.RawMessage(text)
 	}
+	// B1: for durabilityStrict (Publish), use a DETERMINISTIC message id
+	// derived from (request_ref, revision) so a republish of the same
+	// immutable revision resolves to the SAME filename and identical bytes.
+	// resolvePublishCollision returns nil on a byte-identical collision, so
+	// every retry after the first is a genuine no-op — at-least-once delivery
+	// with an idempotent write is exactly-once in effect, and it needs no
+	// cooperation from the receiver. The Created timestamp is also stable
+	// (derived from the revision, not wall-clock) so the bytes never drift.
+	// The inline reply (durabilityTolerant) keeps the fresh id — it has no
+	// retry, so amplification is impossible.
+	if dur == durabilityStrict {
+		if snap, ok := body.(protocol.Snapshot); ok {
+			id = fmt.Sprintf("publish__%s__rev%d", snap.RequestRef, snap.Revision)
+			created = protocol.FormatTime(time.Unix(0, int64(snap.Revision)).UTC())
+		} else {
+			var err error
+			id, err = format.NewMessageID(now)
+			if err != nil {
+				return err
+			}
+			created = now.UTC().Format(time.RFC3339Nano)
+		}
+	} else {
+		var err error
+		id, err = format.NewMessageID(now)
+		if err != nil {
+			return err
+		}
+		created = now.UTC().Format(time.RFC3339Nano)
+	}
 	msg := format.Message{
 		Header: format.Header{
 			Schema:  format.CurrentSchema,
@@ -401,7 +434,7 @@ func (c *Carrier) replyWith(root *fsq.DeliveryRoot, origin map[string]string, su
 			To:      []string{to},
 			Thread:  origin["thread"],
 			Subject: subject,
-			Created: now.UTC().Format(time.RFC3339Nano),
+			Created: created,
 			Refs:    refsFrom(origin),
 			Kind:    "status",
 			Labels:  labels,
@@ -422,8 +455,16 @@ func (c *Carrier) replyWith(root *fsq.DeliveryRoot, origin map[string]string, su
 		// The rename was visible but fsync durability is unknown. For
 		// durabilityStrict (Publish), PROPAGATE — publishLocked must not
 		// advance PublishedRevision, and Reconcile republishes the same
-		// immutable revision on the next tick (B10). For durabilityTolerant
-		// (inline reply), treat as success — the inline path has no retry.
+		// immutable revision on the next tick (B10). The republish is
+		// idempotent (deterministic message id + resolvePublishCollision).
+		//
+		// For durabilityTolerant (inline reply), treat as success — the
+		// inline path has no retry. The known exposure: a non-request op
+		// (e.g. session.list) whose inline reply is the ONLY answer the
+		// caller ever gets, with the fault on + power loss, loses that
+		// answer with no recovery. cur recovery (agent-message-queue-611.22.4,
+		// PR #752 / feat/b09-cur-recovery) closes this by recovering replies
+		// from cur. The exposure is open until that merges.
 		if dur == durabilityStrict {
 			return err
 		}
