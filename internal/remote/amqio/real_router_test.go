@@ -2,6 +2,7 @@ package amqio_test
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -66,7 +67,13 @@ func TestImportCrossProjectRealRouterTransientPeerAbsent(t *testing.T) {
 		t.Fatalf("carrier: %v", err)
 	}
 	carrier.SetReplyRouter(func(replyProject, replyTo string) (string, string, error) {
-		return cli.ResolveReplyRoute(endpointRoot, replyProject, replyTo)
+		r, h, err := cli.ResolveReplyRoute(endpointRoot, replyProject, replyTo)
+		// Same adapter as cmd/amq-remote/main.go: translate
+		// ErrPeerRootUnreachable into TransientRouteError.
+		if err != nil && errors.Is(err, cli.ErrPeerRootUnreachable) {
+			return "", "", amqio.NewTransientRouteError(err)
+		}
+		return r, h, err
 	})
 	ep.Register(fake.New("fake", "e_1"))
 	t.Cleanup(func() { _ = ep.Close() })

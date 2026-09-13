@@ -285,7 +285,15 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	// session layout stay in the package that owns them.
 	root := c.root
 	carrier.SetReplyRouter(func(replyProject, replyTo string) (string, string, error) {
-		return amqcli.ResolveReplyRoute(root, replyProject, replyTo)
+		r, h, err := amqcli.ResolveReplyRoute(root, replyProject, replyTo)
+		// B1: the adapter translates between the cli vocabulary
+		// (ErrPeerRootUnreachable) and the amqio vocabulary
+		// (TransientRouteError). The generic cli layer must not import amqio;
+		// this closure is the seam that already imports both sides.
+		if err != nil && errors.Is(err, amqcli.ErrPeerRootUnreachable) {
+			return "", "", amqio.NewTransientRouteError(err)
+		}
+		return r, h, err
 	})
 	if *useFake {
 		ep.Register(fake.New("fake", "e_1"))

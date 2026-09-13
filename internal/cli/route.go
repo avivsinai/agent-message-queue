@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
-	"github.com/avivsinai/agent-message-queue/internal/remote/amqio"
 )
 
 type routeExplainResult struct {
@@ -475,12 +474,12 @@ func ResolveReplyRoute(sourceRoot, replyProject, replyTo string) (root, handle s
 		// B1: the router declares whether a failure is transient. The carrier
 		// cannot tell "I do not know this project" from "that project's root is
 		// not there right now", and it should not guess. Only the router knows.
-		// Retryable failures (peer root absent/unreachable) are wrapped in
-		// amqio.TransientRouteError; unknown-project and malformed-handle
-		// errors are left as poison.
-		if errors.Is(err, ErrPeerRootUnreachable) {
-			return "", "", amqio.NewTransientRouteError(err)
-		}
+		// Retryable failures (peer root absent/unreachable) are marked with
+		// ErrPeerRootUnreachable; unknown-project and malformed-handle errors
+		// are not. The ADAPTER in cmd/amq-remote/main.go wraps
+		// ErrPeerRootUnreachable in amqio.TransientRouteError — the translation
+		// between the cli vocabulary and the amqio vocabulary lives in the
+		// adapter, not in this generic layer.
 		return "", "", err
 	}
 	return plan.DeliveryRoot, recipient, nil
