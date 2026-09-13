@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
@@ -86,7 +87,7 @@ type Attachment struct {
 	activeTurn   string
 	runs         map[requests.Key]*run
 	byTurn       map[string]*run
-	byClientID   map[string]*run
+	byClientID   map[string]*run // keyed by clientIDFor(key), not bare RequestID
 	cancelIntent map[requests.Key]bool
 	listeners    map[int]func(core.NativeEvent)
 	nextListener int
@@ -283,26 +284,26 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 		if !busy {
 			return core.Admission{Code: protocol.CodeUnsupported, Message: "steer needs an active turn; use deliver=turn"}, nil
 		}
-		if err := a.call("turn/steer", map[string]any{"threadId": a.threadID, "expectedTurnId": activeTurn, "input": input, "clientUserMessageId": req.Key.RequestID}, nil); err != nil {
+		if err := a.call("turn/steer", map[string]any{"threadId": a.threadID, "expectedTurnId": activeTurn, "input": input, "clientUserMessageId": clientIDFor(req.Key)}, nil); err != nil {
 			return refusal(err), nil
 		}
 		r := &run{key: req.Key, epoch: req.Epoch, state: protocol.StateRunning, turnID: activeTurn, confirmed: true, approvalReqs: map[string]json.RawMessage{}, createdAt: a.now()}
 		a.mu.Lock()
 		a.runs[req.Key] = r
-		a.byClientID[req.Key.RequestID] = r
+		a.byClientID[clientIDFor(req.Key)] = r
 		a.byTurn[activeTurn] = r
 		a.mu.Unlock()
 		return core.Admission{Admitted: true, RunID: a.runID(r)}, nil
 
 	case busy && req.Input.Busy == protocol.BusyQueue:
 		// Codex's own FIFO queue primitive; acceptance is Codex-native.
-		if err := a.call("thread/queue/add", map[string]any{"threadId": a.threadID, "clientUserMessageId": req.Key.RequestID, "input": input}, nil); err != nil {
+		if err := a.call("thread/queue/add", map[string]any{"threadId": a.threadID, "clientUserMessageId": clientIDFor(req.Key), "input": input}, nil); err != nil {
 			return refusal(err), nil
 		}
 		r := &run{key: req.Key, epoch: req.Epoch, state: protocol.StateRunning, queued: true, approvalReqs: map[string]json.RawMessage{}, createdAt: a.now()}
 		a.mu.Lock()
 		a.runs[req.Key] = r
-		a.byClientID[req.Key.RequestID] = r
+		a.byClientID[clientIDFor(req.Key)] = r
 		a.mu.Unlock()
 		return core.Admission{Admitted: true, RunID: a.runID(r)}, nil
 
@@ -315,7 +316,7 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 	r := &run{key: req.Key, epoch: req.Epoch, state: protocol.StateRunning, approvalReqs: map[string]json.RawMessage{}, confirmedCh: make(chan struct{}), createdAt: a.now()}
 	a.mu.Lock()
 	a.runs[req.Key] = r
-	a.byClientID[req.Key.RequestID] = r
+	a.byClientID[clientIDFor(req.Key)] = r
 	a.mu.Unlock()
 
 	var res struct {
@@ -323,15 +324,42 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 			ID string `json:"id"`
 		} `json:"turn"`
 	}
-	if err := a.call("turn/start", map[string]any{"threadId": a.threadID, "input": input, "clientUserMessageId": req.Key.RequestID}, &res); err != nil {
-		a.dropRun(req.Key)
-		return refusal(err), nil
+	if err := a.call("turn/start", map[string]any{"threadId": a.threadID, "input": input, "clientUserMessageId": clientIDFor(req.Key)}, &res); err != nil {
+		// B1: a transport failure (timeout, connection reset, etc.) does NOT
+		// prove the prompt was refused — the server may have accepted it and
+		// started executing. Only a positive native refusal (an rpcError with
+		// a definitive rejection) is a real refusal. Transport ambiguity must
+		// preserve the correlation and return a non-nil error so the endpoint
+		// records UNCERTAIN, not rejected.
+		var rpc *rpcError
+		if errors.As(err, &rpc) {
+			// The server responded with an error — that is a positive refusal.
+			a.dropRun(req.Key)
+			return refusal(err), nil
+		}
+		// Transport/protocol ambiguity: keep the correlation so Lookup and
+		// history can still resolve it. Return a non-nil error (not a refusal
+		// code) so the endpoint records uncertain.
+		return core.Admission{}, err
 	}
 	if res.Turn.ID == "" {
-		a.dropRun(req.Key)
-		return core.Admission{Code: protocol.CodeNativeError, Message: "turn/start returned no turn id"}, nil
+		// B1: a successful RPC response with no turn id is ambiguous, not a
+		// definitive refusal. The server may have accepted the prompt under a
+		// turn we have not observed yet. Preserve the correlation and return
+		// a non-nil error so the endpoint records uncertain.
+		return core.Admission{}, fmt.Errorf("turn/start returned no turn id")
 	}
 	a.mu.Lock()
+	// B3: the read pump may have already processed the confirming
+	// notification, the completed result, and the final idle-status before
+	// this goroutine resumes. Do not restore an already-finished turn as the
+	// active turn — that would wedge the adapter permanently busy with no
+	// later event to clear it. If the run is already terminal, skip the
+	// activeTurn/status restoration entirely.
+	if r.state.Terminal() {
+		a.mu.Unlock()
+		return core.Admission{Admitted: true, RunID: "turn:" + res.Turn.ID}, nil
+	}
 	if r.turnID == "" {
 		r.turnID = res.Turn.ID
 		// byTurn is NOT bound here: the returned turn id may belong to a turn
@@ -381,7 +409,7 @@ func (a *Attachment) dropRun(key requests.Key) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if r, ok := a.runs[key]; ok {
-		delete(a.byClientID, key.RequestID)
+		delete(a.byClientID, clientIDFor(key))
 		if r.turnID != "" {
 			delete(a.byTurn, r.turnID)
 		}
@@ -444,6 +472,17 @@ func (a *Attachment) runID(r *run) string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return r.runIDLocked()
+}
+
+// clientIDFor returns the native correlation token for a request key. B2:
+// the endpoint's identity is (CreatorHost, TargetID, RequestID), so two
+// creator hosts can legitimately share a UUID. Indexing by bare RequestID
+// would attribute one caller's failed run to another's live request. The
+// composite token preserves the full namespace. This token is sent as
+// clientUserMessageId to the server and echoed back in history items; the
+// byClientID map is keyed by it.
+func clientIDFor(key requests.Key) string {
+	return key.CreatorHost + "/" + key.TargetID + "/" + key.RequestID
 }
 
 func refusal(err error) core.Admission {
@@ -531,7 +570,7 @@ func (a *Attachment) lookupHistory(key requests.Key) (core.Evidence, error) {
 		mine := false
 		var text strings.Builder
 		for _, it := range t.Items {
-			if it.Type == "userMessage" && it.ClientID == key.RequestID {
+			if it.Type == "userMessage" && it.ClientID == clientIDFor(key) {
 				mine = true
 			}
 			if it.Type == "agentMessage" {
@@ -587,8 +626,38 @@ func (a *Attachment) lookupHistory(key requests.Key) (core.Evidence, error) {
 		}
 		// No in-memory run (e.g. after restart) or non-terminal: build the
 		// result through the same helper so the bounding point is one.
-		tmp := &run{text: text, errText: errText, nativeRef: nativeRef}
-		result := tmp.result()
+		// B6: INSTALL a confirmed run entry so CancelExact can act on it.
+		// Without this, a surviving run after restart cannot be cancelled —
+		// the adapter has no entry, so CancelExact records intent only.
+		// Install for BOTH terminal and live results: a terminal run still
+		// needs the entry so AcknowledgeResult can release it.
+		r := &run{
+			key: key, turnID: t.ID, state: state,
+			errText: errText, nativeRef: nativeRef,
+			confirmed: true, createdAt: a.now(),
+			approvalReqs: map[string]json.RawMessage{},
+		}
+		r.text.WriteString(text.String())
+		a.mu.Lock()
+		if existing, ok := a.runs[key]; ok {
+			// A run appeared between the unlocked history call and now. Use it.
+			existing.turnID = t.ID
+			existing.state = state
+			existing.errText = errText
+			existing.nativeRef = nativeRef
+			existing.text.Reset()
+			existing.text.WriteString(text.String())
+			existing.confirmed = true
+			r = existing
+		} else {
+			a.runs[key] = r
+			a.byClientID[clientIDFor(key)] = r
+		}
+		if t.ID != "" {
+			a.byTurn[t.ID] = r
+		}
+		a.mu.Unlock()
+		result := r.result()
 		return core.Evidence{Known: true, Admitted: true, RunID: "turn:" + t.ID, State: state, Result: result}, nil
 	}
 	// No turn carried our clientId. That is NOT positive proof the request was
@@ -626,7 +695,7 @@ func (a *Attachment) CancelExact(key requests.Key, epoch string) (core.CancelEvi
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	if queued && turnID == "" {
-		if err := a.client.Call(ctx, "thread/queue/delete", map[string]any{"threadId": a.threadID, "clientUserMessageId": key.RequestID}, nil); err != nil {
+		if err := a.client.Call(ctx, "thread/queue/delete", map[string]any{"threadId": a.threadID, "clientUserMessageId": clientIDFor(key)}, nil); err != nil {
 			return core.CancelEvidence{Disposition: protocol.CancelUnsupported, Message: err.Error()}, nil
 		}
 		a.mu.Lock()
@@ -910,8 +979,34 @@ func (r *run) result() *protocol.Result {
 	if r.nativeRef != "" {
 		res.NativeRef = r.nativeRef
 	}
-	if len(res.Text) > protocol.MaxResultBytes {
-		res.Text = res.Text[:protocol.MaxResultBytes]
+	// B5: bound against the JSON-ENCODED representation, not raw bytes.
+	// The store enforces MaxRecordBytes against the serialized record, so a
+	// raw-byte bound on the result text is incoherent: JSON escaping can
+	// double each special character (\n -> \\n), making a 512KiB raw result
+	// ~768KiB encoded. Truncate the encoded form to MaxResultBytes so the
+	// result alone never exceeds its budget, leaving room for input + overhead.
+	for {
+		b, err := json.Marshal(res)
+		if err != nil {
+			break
+		}
+		if len(b) <= protocol.MaxResultBytes {
+			break
+		}
+		// Truncate by the overshoot plus headroom for the closing quote and
+		// any additional escaping. UTF-8-rune safe: step back to a rune
+		// boundary.
+		overshoot := len(b) - protocol.MaxResultBytes + 256
+		if overshoot >= len(res.Text) {
+			res.Text = ""
+			res.Truncated = true
+			break
+		}
+		n := len(res.Text) - overshoot
+		for n > 0 && !utf8.RuneStart(res.Text[n]) {
+			n--
+		}
+		res.Text = res.Text[:n]
 		res.Truncated = true
 	}
 	return res

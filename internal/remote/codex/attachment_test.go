@@ -23,6 +23,8 @@ type fakeAppServer struct {
 	calls               chan rpcMessage
 	threadReadHandler   func() string
 	threadReadHandlerMu sync.Mutex
+	turnStartDelayHook  func()
+	turnStartDelayMu    sync.Mutex
 }
 
 func startFakeAppServer(t *testing.T) (string, *fakeAppServer) {
@@ -69,6 +71,12 @@ func startFakeAppServer(t *testing.T) (string, *fakeAppServer) {
 			case "thread/resume":
 				_ = ws.writeText([]byte(`{"jsonrpc":"2.0","id":` + string(*msg.ID) + `,"result":{"thread":{"id":"t1","cwd":"/work","status":{"type":"idle"}}}}`))
 			case "turn/start":
+				srv.turnStartDelayMu.Lock()
+				hook := srv.turnStartDelayHook
+				srv.turnStartDelayMu.Unlock()
+				if hook != nil {
+					hook()
+				}
 				_ = ws.writeText([]byte(`{"jsonrpc":"2.0","id":` + string(*msg.ID) + `,"result":{"turn":{"id":"u1","status":"inProgress"}}}`))
 			case "turn/interrupt":
 				_ = ws.writeText([]byte(`{"jsonrpc":"2.0","id":` + string(*msg.ID) + `,"result":{}}`))
@@ -111,6 +119,16 @@ func (s *fakeAppServer) setThreadReadHandler(fn func() string) {
 	s.threadReadHandler = fn
 }
 
+// setTurnStartDelay installs a hook that fires BEFORE the turn/start RPC
+// response is written. Used by B3 to simulate the race where the read pump
+// processes notifications before the Submit goroutine processes the RPC
+// response.
+func (s *fakeAppServer) setTurnStartDelay(fn func()) {
+	s.turnStartDelayMu.Lock()
+	defer s.turnStartDelayMu.Unlock()
+	s.turnStartDelayHook = fn
+}
+
 // TestSubmitBindsTurnAndCompletes is the adapter happy path: submit starts a
 // turn with our request id as clientUserMessageId, the user-message item
 // echoes it back, the agent message carries the text, and turn/completed
@@ -149,11 +167,11 @@ func TestSubmitBindsTurnAndCompletes(t *testing.T) {
 	call := <-srv.calls
 	var params map[string]any
 	_ = json.Unmarshal(call.Params, &params)
-	if call.Method != "turn/start" || params["clientUserMessageId"] != key.RequestID {
+	if call.Method != "turn/start" || params["clientUserMessageId"] != clientIDFor(key) {
 		t.Fatalf("unexpected native call: %s %v", call.Method, params)
 	}
 	srv.notify(t, "turn/started", `{"threadId":"t1","turn":{"id":"u1"}}`)
-	srv.notify(t, "item/started", `{"threadId":"t1","turnId":"u1","item":{"type":"userMessage","id":"i1","clientId":"`+key.RequestID+`","content":[]}}`)
+	srv.notify(t, "item/started", `{"threadId":"t1","turnId":"u1","item":{"type":"userMessage","id":"i1","clientId":"`+clientIDFor(key)+`","content":[]}}`)
 	select {
 	case r := <-done:
 		if r.err != nil || !r.adm.Admitted || r.adm.RunID != "turn:u1" {
@@ -243,7 +261,7 @@ func TestTentativeRunIsNotOwned(t *testing.T) {
 
 	// Confirm: our userMessage lands for turn u1. This binds byTurn and must
 	// deliver the pending cancel as an interrupt for OUR turn u1.
-	srv.notify(t, "item/started", `{"threadId":"t1","turnId":"u1","item":{"type":"userMessage","id":"i1","clientId":"`+key.RequestID+`","content":[]}}`)
+	srv.notify(t, "item/started", `{"threadId":"t1","turnId":"u1","item":{"type":"userMessage","id":"i1","clientId":"`+clientIDFor(key)+`","content":[]}}`)
 	select {
 	case adm := <-done:
 		if !adm.Admitted {
@@ -307,7 +325,7 @@ func TestAcknowledgeResultReleasesRetainedEvidence(t *testing.T) {
 	}()
 	<-srv.calls // turn/start
 	srv.notify(t, "turn/started", `{"threadId":"t1","turn":{"id":"u1"}}`)
-	srv.notify(t, "item/started", `{"threadId":"t1","turnId":"u1","item":{"type":"userMessage","id":"i1","clientId":"`+key.RequestID+`","content":[]}}`)
+	srv.notify(t, "item/started", `{"threadId":"t1","turnId":"u1","item":{"type":"userMessage","id":"i1","clientId":"`+clientIDFor(key)+`","content":[]}}`)
 	<-done
 	srv.notify(t, "item/completed", `{"threadId":"t1","turnId":"u1","completedAtMs":1,"item":{"type":"agentMessage","id":"i2","text":"OUT"}}`)
 	srv.notify(t, "turn/completed", `{"threadId":"t1","turn":{"id":"u1","status":"completed"}}`)
@@ -500,7 +518,7 @@ func TestLargeResultReleasedByBoundedDigest(t *testing.T) {
 	}()
 	<-srv.calls // turn/start
 	srv.notify(t, "turn/started", `{"threadId":"t1","turn":{"id":"u1"}}`)
-	srv.notify(t, "item/started", `{"threadId":"t1","turnId":"u1","item":{"type":"userMessage","id":"i1","clientId":"`+key.RequestID+`","content":[]}}`)
+	srv.notify(t, "item/started", `{"threadId":"t1","turnId":"u1","item":{"type":"userMessage","id":"i1","clientId":"`+clientIDFor(key)+`","content":[]}}`)
 	<-done
 	// Emit a result LARGER than MaxResultBytes. The attachment must bound it
 	// before digesting, so the endpoint's bounded digest matches.
@@ -562,7 +580,7 @@ func TestRunIDAccessorTakesLock(t *testing.T) {
 	<-srv.calls // turn/start
 	srv.notify(t, "turn/started", `{"threadId":"t1","turn":{"id":"u1"}}`)
 	// Confirm the run: emit the userMessage item that carries our clientId.
-	srv.notify(t, "item/started", `{"threadId":"t1","turnId":"u1","item":{"type":"userMessage","clientId":"`+key.RequestID+`"}}`)
+	srv.notify(t, "item/started", `{"threadId":"t1","turnId":"u1","item":{"type":"userMessage","clientId":"`+clientIDFor(key)+`"}}`)
 	<-done
 
 	// Now read the runID through the accessor (takes a.mu). Under -race, if
@@ -613,7 +631,7 @@ func TestHistoryResolvedRunConverges(t *testing.T) {
 	// Now set up the fake server to return a completed turn in thread/read
 	// that carries our clientId.
 	srv.setThreadReadHandler(func() string {
-		return `{"thread":{"turns":[{"id":"u1","status":"completed","items":[{"type":"userMessage","clientId":"` + key.RequestID + `"},{"type":"agentMessage","text":"done"}]}]}}`
+		return `{"thread":{"turns":[{"id":"u1","status":"completed","items":[{"type":"userMessage","clientId":"` + clientIDFor(key) + `"},{"type":"agentMessage","text":"done"}]}]}}`
 	})
 
 	// Lookup resolves the run from history as completed.
@@ -642,5 +660,186 @@ func TestHistoryResolvedRunConverges(t *testing.T) {
 	lk3, _ := att.Lookup(key, s.Epoch)
 	if lk3.Class != core.EvidenceNone || lk3.Result != nil {
 		t.Fatalf("AcknowledgeResult did not release the history-resolved run (B2): class=%s result=%+v", lk3.Class, lk3.Result)
+	}
+}
+
+// TestB1TransportErrorIsUncertainNotRejected reproduces B1
+// (agent-message-queue-611.22.35): a transport error during turn/start
+// (timeout, connection reset) must NOT produce a definitive refusal. The
+// prompt may be running. The run correlation must survive so Lookup and
+// lookupHistory can resolve it. Only a positive JSON-RPC error response
+// (rpcError) is a definitive refusal.
+func TestB1TransportErrorIsUncertainNotRejected(t *testing.T) {
+	sock, srv := startFakeAppServer(t)
+	att, err := Attach(sock, "t1")
+	if err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	t.Cleanup(func() { _ = att.Close() })
+	<-srv.calls // initialize
+	<-srv.calls // thread/resume
+
+	s := att.Inspect()
+	key := requests.Key{CreatorHost: "local", TargetID: s.TargetID, RequestID: "11111111-1111-4111-8111-111111111b01"}
+
+	type admResult struct {
+		adm core.Admission
+		err error
+	}
+	done := make(chan admResult, 1)
+	go func() {
+		adm, err := att.Submit(core.BoundRequest{Key: key, Epoch: s.Epoch, Input: protocol.SubmitInput{Text: "say PONG"}})
+		done <- admResult{adm, err}
+	}()
+	<-srv.calls // turn/start arrives
+
+	// Close the server so the RPC response is lost — transport error.
+	_ = srv.ws.close()
+
+	select {
+	case r := <-done:
+		if r.err == nil {
+			t.Fatal("transport error returned no error (must be uncertain) (B1)")
+		}
+		if r.adm.Code != "" {
+			t.Fatalf("transport error returned refusal code %q; must be uncertain, not rejected (B1)", r.adm.Code)
+		}
+		// The run must still be in the map so Lookup can resolve it.
+		att.mu.Lock()
+		_, hasRun := att.runs[key]
+		att.mu.Unlock()
+		if !hasRun {
+			t.Fatal("transport error dropped the run; correlation must survive so Lookup can resolve it (B1)")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("submit did not return after transport error (B1)")
+	}
+}
+
+// TestB3FastCompletionDoesNotWedgeAdapter reproduces B3
+// (agent-message-queue-611.22.35): if the read pump processes the
+// confirming notification, the completed result, and the final idle-status
+// before the submitting goroutine resumes from turn/start, the adapter must
+// NOT install activeTurn/status for an already-terminal run — that would
+// wedge it permanently busy with no later event to clear it.
+func TestB3FastCompletionDoesNotWedgeAdapter(t *testing.T) {
+	sock, srv := startFakeAppServer(t)
+	att, err := Attach(sock, "t1")
+	if err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	t.Cleanup(func() { _ = att.Close() })
+	<-srv.calls // initialize
+	<-srv.calls // thread/resume
+
+	s := att.Inspect()
+	key := requests.Key{CreatorHost: "local", TargetID: s.TargetID, RequestID: "11111111-1111-4111-8111-111111111b03"}
+
+	// Install a handler that delays the turn/start RPC response until the
+	// test sends the completion notifications. This simulates the race where
+	// the read pump processes notifications before the Submit goroutine
+	// processes the RPC response.
+	srv.setTurnStartDelay(func() {
+		// Send confirming notification + completion + idle before the RPC
+		// response is written.
+		srv.notify(t, "item/started", `{"threadId":"t1","turnId":"u1","item":{"type":"userMessage","id":"i1","clientId":"`+clientIDFor(key)+`","content":[]}}`)
+		srv.notify(t, "item/completed", `{"threadId":"t1","turnId":"u1","completedAtMs":1,"item":{"type":"agentMessage","id":"i2","text":"done"}}`)
+		srv.notify(t, "turn/completed", `{"threadId":"t1","turn":{"id":"u1","status":"completed"}}`)
+		srv.notify(t, "thread/idle", `{"threadId":"t1","status":"idle"}`)
+	})
+
+	type admResult struct {
+		adm core.Admission
+		err error
+	}
+	done := make(chan admResult, 1)
+	go func() {
+		adm, err := att.Submit(core.BoundRequest{Key: key, Epoch: s.Epoch, Input: protocol.SubmitInput{Text: "say PONG"}})
+		done <- admResult{adm, err}
+	}()
+	<-srv.calls // turn/start arrives; the delay handler fires notifications
+
+	select {
+	case r := <-done:
+		if r.err != nil {
+			t.Fatalf("fast completion returned error: %v (B3)", r.err)
+		}
+		if r.adm.RunID == "" {
+			t.Fatal("fast completion returned no run id (B3)")
+		}
+		// The adapter must NOT be left busy — activeTurn should not be set
+		// for a terminal run.
+		att.mu.Lock()
+		if att.activeTurn != "" {
+			t.Fatalf("adapter left busy with activeTurn=%q after fast completion (B3 — would wedge forever)", att.activeTurn)
+		}
+		att.mu.Unlock()
+	case <-time.After(5 * time.Second):
+		t.Fatal("submit did not return after fast completion (B3 — adapter wedged)")
+	}
+}
+
+// TestB6aHistoryResolvedRunIsCancellable reproduces B6a
+// (agent-message-queue-611.22.35): when lookupHistory resolves a run (live
+// OR terminal), it must install a confirmed run entry so CancelExact can
+// find it. Without this, a surviving run after restart cannot be cancelled.
+func TestB6aHistoryResolvedRunIsCancellable(t *testing.T) {
+	sock, srv := startFakeAppServer(t)
+	att, err := Attach(sock, "t1")
+	if err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	t.Cleanup(func() { _ = att.Close() })
+	<-srv.calls // initialize
+	<-srv.calls // thread/resume
+
+	s := att.Inspect()
+	key := requests.Key{CreatorHost: "local", TargetID: s.TargetID, RequestID: "11111111-1111-4111-8111-111111111b06"}
+
+	type admResult struct {
+		adm core.Admission
+		err error
+	}
+	done := make(chan admResult, 1)
+	go func() {
+		adm, err := att.Submit(core.BoundRequest{Key: key, Epoch: s.Epoch, Input: protocol.SubmitInput{Text: "say PONG"}})
+		done <- admResult{adm, err}
+	}()
+	<-srv.calls // turn/start
+	srv.notify(t, "item/started", `{"threadId":"t1","turnId":"u1","item":{"type":"userMessage","id":"i1","clientId":"`+clientIDFor(key)+`","content":[]}}`)
+	srv.notify(t, "item/started", `{"threadId":"t1","turnId":"u1","item":{"type":"agentMessage","id":"i2","text":"running..."}}`)
+
+	// Simulate restart: clear the in-memory runs map.
+	att.mu.Lock()
+	for k := range att.runs {
+		delete(att.runs, k)
+	}
+	for k := range att.byClientID {
+		delete(att.byClientID, k)
+	}
+	for k := range att.byTurn {
+		delete(att.byTurn, k)
+	}
+	att.mu.Unlock()
+
+	// History resolves the run as live (running).
+	srv.setThreadReadHandler(func() string {
+		return `{"thread":{"turns":[{"id":"u1","status":"running","items":[{"type":"userMessage","clientId":"` + clientIDFor(key) + `"},{"type":"agentMessage","text":"running..."}]}]}}`
+	})
+
+	lk, _ := att.Lookup(key, s.Epoch)
+	if !lk.Known || !lk.Admitted {
+		t.Fatalf("history did not resolve the run as live: %+v (B6a)", lk)
+	}
+
+	// The run must now be in the runs map so CancelExact can find it.
+	att.mu.Lock()
+	r, hasRun := att.runs[key]
+	att.mu.Unlock()
+	if !hasRun {
+		t.Fatal("history resolved the run but did not install a confirmed entry; CancelExact cannot find it (B6a)")
+	}
+	if !r.confirmed {
+		t.Fatal("history-resolved run is not marked confirmed (B6a)")
 	}
 }
