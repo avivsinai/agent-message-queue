@@ -40,6 +40,10 @@ type Carrier struct {
 	ep       *core.Endpoint
 	now      func() time.Time
 	router   ReplyRouter
+	// syncDirFaultForTest is a test hook that injects a fault into every
+	// DeliveryRoot the carrier opens, so Publish (which opens its own root)
+	// can be tested for CommittedDurabilityError propagation (B10).
+	syncDirFaultForTest func(dir string) error
 }
 
 // ReplyRouter resolves where a cross-project caller's reply must be written.
@@ -54,6 +58,13 @@ type ReplyRouter func(replyProject, replyTo string) (root, handle string, err er
 // command carrying reply_project is refused rather than answered into the
 // endpoint's own root.
 func (c *Carrier) SetReplyRouter(r ReplyRouter) { c.router = r }
+
+// SetSyncDirFaultForTest installs a fault into every DeliveryRoot the carrier
+// opens. Used by B10 regression tests to force a CommittedDurabilityError
+// through the real Publish path (which opens its own root internally).
+func (c *Carrier) SetSyncDirFaultForTest(fn func(dir string) error) {
+	c.syncDirFaultForTest = fn
+}
 
 // errNoReplyRoute reports that a cross-project reply cannot be routed. The
 // caller's command stays in new so a later pass (with a router configured, or
@@ -261,8 +272,11 @@ func (c *Carrier) Publish(snap protocol.Snapshot, origin map[string]string) erro
 	if err != nil {
 		return err
 	}
+	if c.syncDirFaultForTest != nil {
+		root.SetSyncDirFaultForTest(c.syncDirFaultForTest)
+	}
 	defer func() { _ = root.Close() }()
-	return c.reply(root, origin, subjectPrefix+string(snap.State), snap, nil)
+	return c.replyWith(root, origin, subjectPrefix+string(snap.State), snap, nil, durabilityStrict)
 }
 
 // destination returns the root the reply must be written to and the handle
@@ -312,7 +326,40 @@ func (c *Carrier) destination(own *fsq.DeliveryRoot, origin map[string]string) (
 	return peer, handle, func() { _ = peer.Close() }, nil
 }
 
+// durabilityExpectation names the two needs reply() serves. It is an explicit
+// type (not a bool) because the two callers have genuinely different
+// requirements and the distinction is a wire-contract decision, not a flag.
+//
+// B10 (agent-message-queue-611.22.14): a CommittedDurabilityError means the
+// rename was VISIBLE but the durability of that commit is UNKNOWN. "Published"
+// must mean "the receiver can DURABLY see this revision" — a visible-but-
+// unsynced delivery does not meet that bar.
+type durabilityExpectation int
+
+const (
+	// durabilityTolerant: a visible-but-unsynced delivery is treated as
+	// success. Used by the INLINE reply (the immediate answer inside
+	// importOne) because the inline path has no durable retry — making it fail
+	// would leave the command claimed with no answer. The published revision
+	// has a durable retry path (Reconcile republishes), the inline reply does
+	// not, and that is why the two differ.
+	durabilityTolerant durabilityExpectation = iota
+	// durabilityStrict: a CommittedDurabilityError is PROPAGATED. Used by
+	// Publish (revision publication) so publishLocked does not advance
+	// PublishedRevision, and Reconcile republishes the same immutable revision
+	// on the next tick. Receivers upsert by (request, revision), so a duplicate
+	// is a no-op — that is why at-least-once is safe here.
+	durabilityStrict
+)
+
 func (c *Carrier) reply(root *fsq.DeliveryRoot, origin map[string]string, subject string, body any, refusal error) error {
+	return c.replyWith(root, origin, subject, body, refusal, durabilityTolerant)
+}
+
+// replyWith delivers a reply message. The durability expectation controls
+// whether a CommittedDurabilityError (visible rename, unknown fsync) is
+// treated as success (durabilityTolerant) or propagated (durabilityStrict).
+func (c *Carrier) replyWith(root *fsq.DeliveryRoot, origin map[string]string, subject string, body any, refusal error, dur durabilityExpectation) error {
 	dest, to, closeDest, rerr := c.destination(root, origin)
 	if rerr != nil {
 		return rerr
@@ -371,10 +418,18 @@ func (c *Carrier) reply(root *fsq.DeliveryRoot, origin map[string]string, subjec
 	}
 	_, err = fsq.DeliverToInboxes(dest, []string{to}, id+".md", data)
 	var committed *fsq.CommittedDurabilityError
-	if err != nil && !errors.As(err, &committed) {
-		return err
+	if err != nil && errors.As(err, &committed) {
+		// The rename was visible but fsync durability is unknown. For
+		// durabilityStrict (Publish), PROPAGATE — publishLocked must not
+		// advance PublishedRevision, and Reconcile republishes the same
+		// immutable revision on the next tick (B10). For durabilityTolerant
+		// (inline reply), treat as success — the inline path has no retry.
+		if dur == durabilityStrict {
+			return err
+		}
+		return nil
 	}
-	return nil
+	return err
 }
 
 // transientRefusal reports whether a refusal describes the STORE's inability
