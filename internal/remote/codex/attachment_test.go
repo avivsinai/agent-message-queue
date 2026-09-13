@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,8 +19,10 @@ import (
 // shapes recorded from the live probe and the generated schema, and lets the
 // test push notifications.
 type fakeAppServer struct {
-	ws    *wsConn
-	calls chan rpcMessage
+	ws                  *wsConn
+	calls               chan rpcMessage
+	threadReadHandler   func() string
+	threadReadHandlerMu sync.Mutex
 }
 
 func startFakeAppServer(t *testing.T) (string, *fakeAppServer) {
@@ -69,6 +72,17 @@ func startFakeAppServer(t *testing.T) (string, *fakeAppServer) {
 				_ = ws.writeText([]byte(`{"jsonrpc":"2.0","id":` + string(*msg.ID) + `,"result":{"turn":{"id":"u1","status":"inProgress"}}}`))
 			case "turn/interrupt":
 				_ = ws.writeText([]byte(`{"jsonrpc":"2.0","id":` + string(*msg.ID) + `,"result":{}}`))
+			case "thread/queue/add":
+				_ = ws.writeText([]byte(`{"jsonrpc":"2.0","id":` + string(*msg.ID) + `,"result":{}}`))
+			case "thread/read":
+				srv.threadReadHandlerMu.Lock()
+				handler := srv.threadReadHandler
+				srv.threadReadHandlerMu.Unlock()
+				if handler != nil {
+					_ = ws.writeText([]byte(`{"jsonrpc":"2.0","id":` + string(*msg.ID) + `,"result":` + handler() + `}`))
+				} else {
+					_ = ws.writeText([]byte(`{"jsonrpc":"2.0","id":` + string(*msg.ID) + `,"error":{"code":-32601,"message":"no thread/read handler"}}`))
+				}
 			default:
 				_ = ws.writeText([]byte(`{"jsonrpc":"2.0","id":` + string(*msg.ID) + `,"error":{"code":-32601,"message":"unexpected ` + msg.Method + `"}}`))
 			}
@@ -87,6 +101,14 @@ func (s *fakeAppServer) notify(t *testing.T, method, params string) {
 	if err := s.ws.writeText([]byte(`{"jsonrpc":"2.0","method":"` + method + `","params":` + params + `}`)); err != nil {
 		t.Fatalf("notify %s: %v", method, err)
 	}
+}
+
+// setThreadReadHandler installs a custom handler for thread/read responses.
+// The handler returns the JSON result string for the thread/read call.
+func (s *fakeAppServer) setThreadReadHandler(fn func() string) {
+	s.threadReadHandlerMu.Lock()
+	defer s.threadReadHandlerMu.Unlock()
+	s.threadReadHandler = fn
 }
 
 // TestSubmitBindsTurnAndCompletes is the adapter happy path: submit starts a
@@ -509,5 +531,116 @@ func TestLargeResultReleasedByBoundedDigest(t *testing.T) {
 	lk, _ := att.Lookup(key, s.Epoch)
 	if lk.Class != core.EvidenceNone || lk.Result != nil {
 		t.Fatalf("bounded-digest ack did not release the large result — the attachment digested the unbounded form (Pro F2): class=%s", lk.Class)
+	}
+}
+
+// TestRunIDAccessorTakesLock verifies B1 (F3): a.runID takes a.mu before
+// reading r.turnID. This is a structural test — it confirms the accessor
+// exists and is used, not a runtime race. The runtime race is caught by
+// running the whole suite under -race: confirmRun writes r.turnID from the
+// read-loop goroutine while Submit reads it via a.runID. If runID were still
+// an unlocked method on *run, -race would fire in TestSubmitBindsTurnAndCompletes.
+func TestRunIDAccessorTakesLock(t *testing.T) {
+	sock, srv := startFakeAppServer(t)
+	att, err := Attach(sock, "t1")
+	if err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	t.Cleanup(func() { _ = att.Close() })
+	<-srv.calls // initialize
+	<-srv.calls // thread/resume
+
+	s := att.Inspect()
+	key := requests.Key{CreatorHost: "local", TargetID: s.TargetID, RequestID: "11111111-1111-4111-8111-1111111118b1"}
+	// Start a turn and confirm it so r.turnID is set by confirmRun (from the
+	// read-loop goroutine).
+	done := make(chan struct{}, 1)
+	go func() {
+		_, _ = att.Submit(core.BoundRequest{Key: key, Epoch: s.Epoch, Input: protocol.SubmitInput{Text: "work"}})
+		done <- struct{}{}
+	}()
+	<-srv.calls // turn/start
+	srv.notify(t, "turn/started", `{"threadId":"t1","turn":{"id":"u1"}}`)
+	// Confirm the run: emit the userMessage item that carries our clientId.
+	srv.notify(t, "item/started", `{"threadId":"t1","turnId":"u1","item":{"type":"userMessage","clientId":"`+key.RequestID+`"}}`)
+	<-done
+
+	// Now read the runID through the accessor (takes a.mu). Under -race, if
+	// the accessor did not take the lock, the read of r.turnID here would race
+	// with any concurrent write from the read-loop goroutine.
+	att.mu.Lock()
+	r, ok := att.runs[key]
+	att.mu.Unlock()
+	if !ok {
+		t.Fatal("run not found")
+	}
+	rid := att.runID(r)
+	if rid != "turn:u1" {
+		t.Fatalf("runID = %q, want turn:u1 (B1: runID must read r.turnID under a.mu)", rid)
+	}
+}
+
+// TestHistoryResolvedRunConverges reproduces B2 (F1 never converges): when
+// lookupHistory resolves a run as terminal, the in-memory run must become
+// terminal so AcknowledgeResult can release it. Without the fix, the run
+// stays StateRunning forever, AcknowledgeResult refuses every ack, and
+// Reconcile re-reads the whole transcript every tick.
+func TestHistoryResolvedRunConverges(t *testing.T) {
+	sock, srv := startFakeAppServer(t)
+	clk := &fakeClock{t: time.Date(2026, 9, 12, 12, 0, 0, 0, time.UTC)}
+	att, err := Attach(sock, "t1", WithClock(clk.now), WithConfirmTimeout(50*time.Millisecond))
+	if err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	t.Cleanup(func() { _ = att.Close() })
+	<-srv.calls // initialize
+	<-srv.calls // thread/resume
+
+	s := att.Inspect()
+	key := requests.Key{CreatorHost: "local", TargetID: s.TargetID, RequestID: "11111111-1111-4111-8111-1111111118c1"}
+	done := make(chan struct{}, 1)
+	go func() {
+		_, _ = att.Submit(core.BoundRequest{Key: key, Epoch: s.Epoch, Input: protocol.SubmitInput{Text: "work"}})
+		done <- struct{}{}
+	}()
+	<-srv.calls // turn/start
+	srv.notify(t, "turn/started", `{"threadId":"t1","turn":{"id":"u1"}}`)
+	// No confirming userMessage — advance past confirmTimeout so Lookup
+	// falls through to lookupHistory.
+	clk.advance(51 * time.Millisecond)
+	<-done // Submit returns with an error (unconfirmed)
+
+	// Now set up the fake server to return a completed turn in thread/read
+	// that carries our clientId.
+	srv.setThreadReadHandler(func() string {
+		return `{"thread":{"turns":[{"id":"u1","status":"completed","items":[{"type":"userMessage","clientId":"` + key.RequestID + `"},{"type":"agentMessage","text":"done"}]}]}}`
+	})
+
+	// Lookup resolves the run from history as completed.
+	lk, lerr := att.Lookup(key, s.Epoch)
+	if lerr != nil {
+		t.Fatalf("Lookup: %v", lerr)
+	}
+	if lk.State != protocol.StateCompleted {
+		t.Fatalf("Lookup did not resolve the run as completed: state=%s", lk.State)
+	}
+	if lk.Result == nil || lk.Result.Text != "done" {
+		t.Fatalf("Lookup did not deliver the result: %+v", lk.Result)
+	}
+
+	// B2: the in-memory run must now be terminal (completed). Without the
+	// fix, it stays StateRunning and AcknowledgeResult refuses every ack.
+	lk2, _ := att.Lookup(key, s.Epoch)
+	if !lk2.State.Terminal() {
+		t.Fatalf("in-memory run did not become terminal after history resolved it (B2): state=%s", lk2.State)
+	}
+
+	// AcknowledgeResult must now release the run (digest matches). Without
+	// the fix, the run stays in a.runs because !r.state.Terminal() refuses.
+	digest := protocol.EvidenceDigest(lk.Result)
+	att.AcknowledgeResult(key, s.Epoch, digest)
+	lk3, _ := att.Lookup(key, s.Epoch)
+	if lk3.Class != core.EvidenceNone || lk3.Result != nil {
+		t.Fatalf("AcknowledgeResult did not release the history-resolved run (B2): class=%s result=%+v", lk3.Class, lk3.Result)
 	}
 }

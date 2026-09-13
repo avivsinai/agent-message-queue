@@ -41,6 +41,7 @@ type run struct {
 	state        protocol.State
 	text         strings.Builder
 	errText      string
+	nativeRef    string
 	local        bool
 	interaction  *protocol.Interaction
 	approvalReqs map[string]json.RawMessage
@@ -241,7 +242,7 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 		return core.Admission{Code: protocol.CodeCancelledBeforeAdmission}, nil
 	}
 	if existing, ok := a.runs[req.Key]; ok {
-		id := existing.runID()
+		id := existing.runIDLocked()
 		a.mu.Unlock()
 		return core.Admission{Admitted: true, RunID: id}, nil
 	}
@@ -268,7 +269,7 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 		a.byClientID[req.Key.RequestID] = r
 		a.byTurn[activeTurn] = r
 		a.mu.Unlock()
-		return core.Admission{Admitted: true, RunID: r.runID()}, nil
+		return core.Admission{Admitted: true, RunID: a.runID(r)}, nil
 
 	case busy && req.Input.Busy == protocol.BusyQueue:
 		// Codex's own FIFO queue primitive; acceptance is Codex-native.
@@ -280,7 +281,7 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 		a.runs[req.Key] = r
 		a.byClientID[req.Key.RequestID] = r
 		a.mu.Unlock()
-		return core.Admission{Admitted: true, RunID: r.runID()}, nil
+		return core.Admission{Admitted: true, RunID: a.runID(r)}, nil
 
 	case busy:
 		return core.Admission{Code: protocol.CodeBusy, Message: "a turn is active on this thread"}, nil
@@ -321,7 +322,7 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 
 	select {
 	case <-confirmedCh:
-		return core.Admission{Admitted: true, RunID: r.runID()}, nil
+		return core.Admission{Admitted: true, RunID: a.runID(r)}, nil
 	case <-time.After(a.confirmTimeout):
 		// turn/start already returned a turn id: the text may be RUNNING in
 		// Codex. Absence of our confirmation is NOT proof of refusal, and a
@@ -330,17 +331,16 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 		// the prompt runs twice. Report an ERROR so the endpoint records
 		// UNCERTAIN, and KEEP the correlation (no dropRun) so Lookup and
 		// lookupHistory can still resolve it (agent-message-queue-611.22.31).
-		//
-		// Pro F3: take a.mu for the runID read — confirmRun writes r.turnID
-		// under a.mu from the read-loop goroutine, and this arm has no
-		// channel-close edge to order the write.
+		// B1 (F3): runIDLocked takes a.mu — confirmRun writes r.turnID from the
+		// read-loop goroutine. Every runID read now goes through the lock-taking
+		// accessor (a.runID) or runIDLocked under a.mu.
 		a.mu.Lock()
-		rid := r.runID()
+		rid := r.runIDLocked()
 		a.mu.Unlock()
 		return core.Admission{RunID: rid}, fmt.Errorf("turn/start was not confirmed by our own userMessage item within %s; the turn may be running", a.confirmTimeout)
 	case <-a.client.Done():
 		a.mu.Lock()
-		rid := r.runID()
+		rid := r.runIDLocked()
 		a.mu.Unlock()
 		return core.Admission{RunID: rid}, errors.New("app-server closed during turn/start; the turn may be running")
 	}
@@ -403,11 +403,24 @@ func (a *Attachment) deliverPendingCancel(key requests.Key, turnID string) {
 	_ = key
 }
 
-func (r *run) runID() string {
+// runIDLocked returns the run's correlation id. The caller MUST hold a.mu:
+// r.turnID is written by confirmRun from the read-loop goroutine. Every
+// external caller goes through a.runID, which takes the lock.
+func (r *run) runIDLocked() string {
 	if r.turnID != "" {
 		return "turn:" + r.turnID
 	}
 	return "queued:" + r.key.RequestID
+}
+
+// runID is the lock-taking accessor for external callers. It is the ONLY
+// way to read a run's runID outside a.mu. B1 (F3): every read of a run's
+// mutable fields (turnID, confirmed, state, text, createdAt) goes through a
+// small accessor that takes a.mu; no caller touches r.<field> directly.
+func (a *Attachment) runID(r *run) string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return r.runIDLocked()
 }
 
 func refusal(err error) core.Admission {
@@ -429,11 +442,11 @@ func (a *Attachment) Lookup(key requests.Key, epoch string) (core.Evidence, erro
 			// durably. Report that nothing is retained — and do NOT fall
 			// through to the thread/read history, whose copy would look like
 			// fresh evidence and restart the ack loop.
-			ev := core.Evidence{Known: true, Admitted: true, Class: core.EvidenceNone, RunID: r.runID(), State: r.state}
+			ev := core.Evidence{Known: true, Admitted: true, Class: core.EvidenceNone, RunID: r.runIDLocked(), State: r.state}
 			a.mu.Unlock()
 			return ev, nil
 		}
-		ev := core.Evidence{Known: true, RunID: r.runID(), State: r.state, LocalIntervention: r.local, Interaction: r.interaction}
+		ev := core.Evidence{Known: true, RunID: r.runIDLocked(), State: r.state, LocalIntervention: r.local, Interaction: r.interaction}
 		switch {
 		case r.confirmed || r.queued:
 			// A confirmed running turn, or a Codex-native-accepted queue item:
@@ -506,25 +519,54 @@ func (a *Attachment) lookupHistory(key requests.Key) (core.Evidence, error) {
 		if !mine {
 			continue
 		}
-		ev := core.Evidence{Known: true, Admitted: true, RunID: "turn:" + t.ID}
+		var state protocol.State
+		var errText string
 		switch t.Status {
 		case "completed":
-			ev.State = protocol.StateCompleted
-			ev.Result = &protocol.Result{Text: text.String(), NativeRef: "codex thread " + a.threadID + " turn " + t.ID}
+			state = protocol.StateCompleted
 		case "failed":
-			ev.State = protocol.StateFailed
-			msg := ""
+			state = protocol.StateFailed
 			if t.Error != nil {
-				msg = t.Error.Message
+				errText = t.Error.Message
 			}
-			ev.Result = &protocol.Result{Text: text.String(), Error: msg}
 		case "interrupted":
-			ev.State = protocol.StateCancelled
-			ev.Result = &protocol.Result{Text: text.String()}
+			state = protocol.StateCancelled
 		default:
-			ev.State = protocol.StateRunning
+			state = protocol.StateRunning
 		}
-		return ev, nil
+		// B2: when history resolves a run as terminal, MAKE THE IN-MEMORY RUN
+		// TERMINAL. Record the turn id so the correlation exists (byTurn), set
+		// the terminal state, and populate the result text so AcknowledgeResult
+		// can match the digest and release it. A run we have proven finished
+		// must not stay "running" in our own map forever, re-reading the whole
+		// transcript every tick (agent-message-queue-611.22.24).
+		//
+		// B3: r.result() is the ONLY place a protocol.Result is constructed in
+		// this package — lookupHistory does not build one directly, so the
+		// bounding point (MaxResultBytes, truncated) applies here too.
+		nativeRef := "codex thread " + a.threadID + " turn " + t.ID
+		if state.Terminal() {
+			a.mu.Lock()
+			if r, ok := a.runs[key]; ok {
+				r.turnID = t.ID
+				a.byTurn[t.ID] = r
+				r.state = state
+				r.errText = errText
+				r.nativeRef = nativeRef
+				r.text.Reset()
+				r.text.WriteString(text.String())
+				r.confirmed = true
+				a.mu.Unlock()
+				result := r.result()
+				return core.Evidence{Known: true, Admitted: true, RunID: "turn:" + t.ID, State: state, Result: result}, nil
+			}
+			a.mu.Unlock()
+		}
+		// No in-memory run (e.g. after restart) or non-terminal: build the
+		// result through the same helper so the bounding point is one.
+		tmp := &run{text: text, errText: errText, nativeRef: nativeRef}
+		result := tmp.result()
+		return core.Evidence{Known: true, Admitted: true, RunID: "turn:" + t.ID, State: state, Result: result}, nil
 	}
 	// No turn carried our clientId. That is NOT positive proof the request was
 	// never admitted: the clientId echo is schema-backed but unverified
@@ -567,7 +609,7 @@ func (a *Attachment) CancelExact(key requests.Key, epoch string) (core.CancelEvi
 		a.mu.Lock()
 		r.state = protocol.StateCancelled
 		a.mu.Unlock()
-		a.emit(core.NativeEvent{Type: core.EventRunCancelled, Key: key, RunID: r.runID()})
+		a.emit(core.NativeEvent{Type: core.EventRunCancelled, Key: key, RunID: a.runID(r)})
 		return core.CancelEvidence{Disposition: protocol.CancelConfirmed}, nil
 	}
 	if err := a.client.Call(ctx, "turn/interrupt", map[string]any{"threadId": a.threadID, "turnId": turnID}, nil); err != nil {
@@ -606,7 +648,7 @@ func (a *Attachment) Respond(key requests.Key, epoch, interactionID, option stri
 	if err := a.client.Respond(reqID, map[string]string{"decision": option}); err != nil {
 		return "", err
 	}
-	a.emit(core.NativeEvent{Type: core.EventQuestionResolved, Key: key, RunID: r.runID()})
+	a.emit(core.NativeEvent{Type: core.EventQuestionResolved, Key: key, RunID: a.runID(r)})
 	return "", nil
 }
 
@@ -707,18 +749,21 @@ func (a *Attachment) onNotification(n Notification) {
 		switch p.Turn.Status {
 		case "completed":
 			r.state = protocol.StateCompleted
+			r.nativeRef = "codex thread " + a.threadID + " turn " + p.Turn.ID
 			ev = core.NativeEvent{Type: core.EventRunCompleted}
 		case "interrupted":
 			r.state = protocol.StateCancelled
+			r.nativeRef = "codex thread " + a.threadID + " turn " + p.Turn.ID
 			ev = core.NativeEvent{Type: core.EventRunCancelled}
 		default:
 			r.state = protocol.StateFailed
+			r.nativeRef = "codex thread " + a.threadID + " turn " + p.Turn.ID
 			if p.Turn.Error != nil {
 				r.errText = p.Turn.Error.Message
 			}
 			ev = core.NativeEvent{Type: core.EventRunFailed}
 		}
-		ev.Key, ev.RunID, ev.Result = r.key, r.runID(), r.result()
+		ev.Key, ev.RunID, ev.Result = r.key, r.runIDLocked(), r.result()
 		r.interaction = nil
 		a.mu.Unlock()
 		a.emit(ev)
@@ -773,7 +818,7 @@ func (a *Attachment) onItem(n Notification) {
 		// steered locally.
 		if r, ok := a.byTurn[p.TurnID]; ok && !r.local && n.Method == "item/started" {
 			r.local = true
-			key, runID := r.key, r.runID()
+			key, runID := r.key, r.runIDLocked()
 			go a.emit(core.NativeEvent{Type: core.EventLocalIntervention, Key: key, RunID: runID})
 		}
 	case "agentMessage":
@@ -822,7 +867,7 @@ func (a *Attachment) onServerRequest(req ServerRequest) {
 	}
 	r.interaction = &protocol.Interaction{InteractionID: id, Kind: "approval", Prompt: prompt, Options: options, RemoteAnswer: true}
 	r.approvalReqs[id] = req.ID
-	key, runID, inter := r.key, r.runID(), r.interaction
+	key, runID, inter := r.key, r.runIDLocked(), r.interaction
 	a.mu.Unlock()
 	a.emit(core.NativeEvent{Type: core.EventQuestion, Key: key, RunID: runID, Interaction: inter})
 }
@@ -833,8 +878,15 @@ func (a *Attachment) onServerRequest(req ServerRequest) {
 // compute the ack digest over the same form — if the attachment digests the
 // unbounded result and the endpoint digests the bounded one, any result
 // larger than MaxResultBytes is never released).
+//
+// B3: this is the ONLY place a protocol.Result is constructed in this
+// package. lookupHistory does not build one directly — it populates the
+// run's fields and calls result(), so the bounding point is one.
 func (r *run) result() *protocol.Result {
 	res := &protocol.Result{Text: r.text.String(), Error: r.errText}
+	if r.nativeRef != "" {
+		res.NativeRef = r.nativeRef
+	}
 	if len(res.Text) > protocol.MaxResultBytes {
 		res.Text = res.Text[:protocol.MaxResultBytes]
 		res.Truncated = true
