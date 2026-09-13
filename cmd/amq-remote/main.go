@@ -606,12 +606,25 @@ func cancel(args []string) (any, int, error) {
 	if err != nil {
 		return nil, 0, err
 	}
+	// B6: use the STORED request's epoch, not the current session epoch.
+	// A fresh attachment generates a fresh epoch; using it to cancel a
+	// request stored under an older epoch is rejected with stale_epoch.
+	// Fetch the stored request to get the original epoch.
+	epoch := session.Epoch
+	getRep, gerr := callReply(stateDir, &protocol.Command{
+		Schema:     protocol.SchemaCommand,
+		Op:         protocol.OpRequestGet,
+		RequestRef: ref,
+	})
+	if gerr == nil && getRep.Snapshot.Epoch != "" {
+		epoch = getRep.Snapshot.Epoch
+	}
 	rep, err := callReply(stateDir, &protocol.Command{
 		Schema:     protocol.SchemaCommand,
 		Op:         protocol.OpRequestCancel,
 		RequestRef: ref,
 		TargetID:   targetID,
-		Epoch:      session.Epoch,
+		Epoch:      epoch,
 		NotAfter:   protocol.FormatTime(time.Now().Add(2 * time.Minute)),
 	})
 	if err != nil {

@@ -5,6 +5,7 @@
 package amqio
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -53,6 +54,13 @@ type Carrier struct {
 	// curSweepCount is a test seam: counts full cur sweeps (recoverCur).
 	// Steady-state calls go through recoverClaimed and do NOT increment this.
 	curSweepCount int
+	// pendingSyncs tracks message IDs whose delivery committed (rename
+	// succeeded) but whose directory fsync is unconfirmed
+	// (CommittedDurabilityError). On the next republish, the carrier checks
+	// if the file is still at its path: if so, retries the fsync only; if
+	// absent (consumed), the recipient's move is their durability — nil.
+	// Never republish. (B12)
+	pendingSyncs map[string]string // key: message ID -> root-rel path
 	// syncDirFaultForTest is a test hook that injects a fault into every
 	// DeliveryRoot the carrier opens, so Publish (which opens its own root)
 	// can be tested for CommittedDurabilityError propagation (B10).
@@ -239,17 +247,23 @@ func (c *Carrier) ImportOnce() (int, error) {
 	}
 	c.mu.Unlock()
 	if firstSweep {
-		if rerr := c.recoverCur(root); rerr != nil {
-			// Accumulate, don't return — the new-scan results are still valid.
+		rerr := c.recoverCur(root)
+		if rerr != nil {
+			// B8: do NOT mark curRecovered = true on failure. The sweep failed —
+			// failed entries are NOT in claimedThisRun and steady state will
+			// not revisit them. Leave curRecovered=false so the next ImportOnce
+			// re-runs the full sweep. Separate "startup enumeration completed"
+			// from "every recovery obligation completed."
 			if err == nil {
 				err = rerr
 			} else {
 				err = errors.Join(err, rerr)
 			}
+		} else {
+			c.mu.Lock()
+			c.curRecovered = true
+			c.mu.Unlock()
 		}
-		c.mu.Lock()
-		c.curRecovered = true
-		c.mu.Unlock()
 	} else if len(claimed) > 0 {
 		if rerr := c.recoverClaimed(root, claimed); rerr != nil {
 			if err == nil {
@@ -326,7 +340,15 @@ func (c *Carrier) recoverClaimed(root *fsq.DeliveryRoot, claimed map[string]clai
 	for id, entry := range claimed {
 		receiptPath := filepath.Join("agents", c.me, "receipts", fmt.Sprintf("%s__%s__%s.json", entry.msgID, c.me, receipt.StageDrained))
 		if _, err := receipt.ReadDeliveryRoot(root, receiptPath); err == nil {
-			// Receipt exists — claim completed. Drop from the pending set.
+			// B8: receipt exists, but the reply may not have been delivered.
+			// recoverOne writes the receipt BEFORE sending the reply, so a
+			// receipt-only state means the reply was lost. Re-run recoverOne
+			// to re-send the idempotent recovery reply. Only delete from the
+			// pending set when recoverOne succeeds (receipt + reply both done).
+			if err := c.recoverOne(root, curDir, entry.filename); err != nil {
+				errs = append(errs, fmt.Errorf("%s: %w", entry.filename, err))
+				continue
+			}
 			c.mu.Lock()
 			delete(c.claimedThisRun, id)
 			c.mu.Unlock()
@@ -652,15 +674,40 @@ func (c *Carrier) destination(own *fsq.DeliveryRoot, origin map[string]string) (
 	noop := func() {}
 	to := origin["from"]
 	project := strings.TrimSpace(origin["reply_project"])
+	replyTo := strings.TrimSpace(origin["reply_to"])
 	if project == "" {
-		// D2: same-project caller. Restore the pre-fix tolerant handling: a
-		// missing or unusable From is NOT a route error here — the reply
-		// writes to the sender's handle in our own root, and an empty `to`
-		// means no reply (the pre-fix code returned nil, not an error).
-		if to == "" || fsq.ValidateHandle(to) != nil {
-			return own, "", noop, nil
+		// B7: an empty reply_project does NOT mean the caller is in our own
+		// root. The caller may be in a DIFFERENT SESSION of the same project.
+		// If reply_to carries a session component (handle@session), route to
+		// that session's root via the router. The router contract (route.go
+		// ResolveReplyRoute) handles empty-project-with-session. If the router
+		// fails, propagate — do not fall back to own-root (that would deliver
+		// the reply to the wrong session).
+		if replyTo == "" || c.router == nil {
+			// D2: same-project caller. A missing or unusable From is NOT a
+			// route error — the reply writes to the sender's handle in our own
+			// root, and an empty `to` means no reply.
+			if to == "" || fsq.ValidateHandle(to) != nil {
+				return own, "", noop, nil
+			}
+			return own, to, noop, nil
 		}
-		return own, to, noop, nil
+		rootPath, handle, err := c.router("", replyTo)
+		if err != nil {
+			return nil, "", noop, fmt.Errorf("%w: cross-session reply to %q: %v", errNoReplyRoute, replyTo, err)
+		}
+		if fsq.ValidateHandle(handle) != nil {
+			return nil, "", noop, fmt.Errorf("%w: unusable routed handle %q", errNoReplyRoute, handle)
+		}
+		identity, err := fsq.SnapshotDeliveryRoot(rootPath)
+		if err != nil {
+			return nil, "", noop, &TransientRouteError{fmt.Errorf("%w: %v", errNoReplyRoute, err)}
+		}
+		peer, err := fsq.OpenDeliveryRoot(rootPath, identity)
+		if err != nil {
+			return nil, "", noop, &TransientRouteError{fmt.Errorf("%w: %v", errNoReplyRoute, err)}
+		}
+		return peer, handle, func() { _ = peer.Close() }, nil
 	}
 	if c.router == nil {
 		return nil, "", noop, fmt.Errorf("%w: no reply router configured for project %q", errNoReplyRoute, project)
@@ -844,9 +891,52 @@ func (c *Carrier) replyWith(root *fsq.DeliveryRoot, origin map[string]string, su
 	if err != nil {
 		return err
 	}
+	// B12: if we have a pending fsync for this message ID, the rename
+	// already succeeded on a prior attempt. Do NOT republish — check if
+	// the file is still at its path. If present, retry the fsync only.
+	// If absent (consumed by the recipient), the recipient's move is
+	// their durability — return nil. Never rewrite.
+	relPath := filepath.Join("agents", to, "inbox", "new", id+".md")
+	c.mu.Lock()
+	_, hasPending := c.pendingSyncs[id]
+	c.mu.Unlock()
+	if hasPending {
+		if existing, rerr := dest.ReadRegularNoFollow(relPath); rerr == nil && bytes.Equal(existing, data) {
+			// File is present and byte-identical — retry the fsync only.
+			// Use dest.SyncDir so fault injection is respected.
+			if syncErr := dest.SyncDir(filepath.Dir(relPath)); syncErr != nil {
+				return &fsq.CommittedDurabilityError{
+					FinalPath: dest.DisplayPath(relPath),
+					Recipient: to,
+					Err:       fmt.Errorf("retry sync new dir: %w", syncErr),
+				}
+			}
+			c.mu.Lock()
+			delete(c.pendingSyncs, id)
+			c.mu.Unlock()
+			return nil
+		}
+		// File absent (consumed) or byte-mismatch — the recipient's move
+		// is their durability.
+		c.mu.Lock()
+		delete(c.pendingSyncs, id)
+		c.mu.Unlock()
+		return nil
+	}
 	_, err = fsq.DeliverToInboxes(dest, []string{to}, id+".md", data)
 	var committed *fsq.CommittedDurabilityError
 	if err != nil && errors.As(err, &committed) {
+		// B12: record the finalPath so the next republish retries the fsync,
+		// not the delivery. The rename succeeded — the message IS in the
+		// mailbox.
+		if dur == durabilityStrict && committed.FinalPath != "" {
+			c.mu.Lock()
+			if c.pendingSyncs == nil {
+				c.pendingSyncs = map[string]string{}
+			}
+			c.pendingSyncs[id] = "" // marker; relPath derived from to+id
+			c.mu.Unlock()
+		}
 		// The rename was visible but fsync durability is unknown. For
 		// durabilityStrict (Publish), PROPAGATE — publishLocked must not
 		// advance PublishedRevision, and Reconcile republishes the same
@@ -922,7 +1012,17 @@ func (c *Carrier) replyWithRecovery(root *fsq.DeliveryRoot, origin map[string]st
 		recovered = now
 	}
 	stamp := recovered.UTC().Format("2006-01-02T15:04:05.000Z")
-	id := fmt.Sprintf("%s_recover_%s", stamp, msgDigest)
+	// B11: include the revision in the recovery reply ID so different
+	// revisions of the same command produce different filenames. Without
+	// this, a recovery that publishes the running snapshot and a later
+	// recovery that publishes the completed snapshot would collide on the
+	// same filename with different bytes — resolvePublishCollision rejects
+	// non-byte-identical collisions and retains a conflict temp file.
+	revSuffix := "noref"
+	if reply, ok := body.(protocol.Reply); ok {
+		revSuffix = fmt.Sprintf("rev%d", reply.Snapshot.Revision)
+	}
+	id := fmt.Sprintf("%s_recover_%s_%s", stamp, msgDigest, revSuffix)
 	created := recovered.UTC().Format(time.RFC3339Nano)
 	msg := format.Message{
 		Header: format.Header{

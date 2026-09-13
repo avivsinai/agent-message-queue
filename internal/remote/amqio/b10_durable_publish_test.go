@@ -61,7 +61,7 @@ func TestB10DurablePublishPropagatesCommittedDurabilityError(t *testing.T) {
 	ep := core.New(core.Config{
 		Store: store,
 		Publish: func(s protocol.Snapshot, origin map[string]string) error {
-			publishErr = carrier.Publish(s, origin)
+			publishErr = carrier.Publish(s, origin); 
 			return publishErr
 		},
 	})

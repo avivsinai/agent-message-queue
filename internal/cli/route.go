@@ -462,12 +462,23 @@ func firstNonEmpty(a, b string) string {
 // mailbox inside it.
 func ResolveReplyRoute(sourceRoot, replyProject, replyTo string) (root, handle string, err error) {
 	project := strings.TrimSpace(replyProject)
-	if project == "" {
-		return "", "", fmt.Errorf("reply_project is empty; not a cross-project reply")
-	}
 	recipient, session, err := parseReplyToRoute(replyTo, true)
 	if err != nil {
-		return "", "", fmt.Errorf("malformed cross-project reply metadata for project %q: %w", project, err)
+		return "", "", fmt.Errorf("malformed reply metadata: %w", err)
+	}
+	if project == "" {
+		// B7: empty reply_project does NOT mean the caller is in our own root.
+		// The caller may be in a DIFFERENT SESSION of the same project. If
+		// reply_to carries a session component (handle@session), route to
+		// that session's root under our base root.
+		if session == "" {
+			return "", "", fmt.Errorf("reply_project is empty and reply_to has no session; not a cross-session reply")
+		}
+		plan, err := planDeliveryRoute(sourceRoot, "", session, deliveryRouteOptions{})
+		if err != nil {
+			return "", "", err
+		}
+		return plan.DeliveryRoot, recipient, nil
 	}
 	plan, err := planDeliveryRoute(sourceRoot, project, session, deliveryRouteOptions{})
 	if err != nil {
