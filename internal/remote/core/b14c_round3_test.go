@@ -107,10 +107,11 @@ func TestB14cAdmittedRacedCancelErrorThenRetryConverges(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("record: ok=%v err=%v", ok, err)
 	}
-	// Pro #1 error entrance: non-terminal cancel_requested, NativeRun bound
-	// so reconcile can re-drive.
-	if rec.Cancel == nil || rec.Cancel.Disposition != protocol.CancelRequested {
-		t.Fatalf("disposition = %v, want cancel_requested", rec.Cancel)
+	// Pro #3: a confirmed cancel is a promise already kept and is not
+	// rewritable. A transient CancelExact error must NOT downgrade it to
+	// cancel_requested. The disposition stays CancelConfirmed.
+	if rec.Cancel == nil || rec.Cancel.Disposition != protocol.CancelConfirmed {
+		t.Fatalf("disposition = %v, want cancel_confirmed (Pro #3: a confirmed cancel is not downgraded by a transient error)", rec.Cancel)
 	}
 	if rec.NativeRun == nil {
 		t.Fatal("NativeRun not bound after inconclusive abort")
@@ -266,8 +267,9 @@ func TestB14cAdmittedRacedCancelWithAttachmentError(t *testing.T) {
 	if rec.NativeRun == nil {
 		t.Fatal("NativeRun not bound after nerr-path inconclusive abort")
 	}
-	if rec.Cancel == nil || rec.Cancel.Disposition != protocol.CancelRequested {
-		t.Fatalf("disposition = %v, want cancel_requested", rec.Cancel)
+	// Pro #3: a confirmed cancel is not downgraded by a transient error.
+	if rec.Cancel == nil || rec.Cancel.Disposition != protocol.CancelConfirmed {
+		t.Fatalf("disposition = %v, want cancel_confirmed (Pro #3: not downgraded by transient error)", rec.Cancel)
 	}
 }
 

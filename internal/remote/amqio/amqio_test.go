@@ -103,7 +103,7 @@ func TestImportCommandAndPublishResult(t *testing.T) {
 	if !states["running"] || !states["completed"] {
 		t.Fatalf("expected running and completed revisions, got %v", states)
 	}
-	rec, ok, err := store.Get(requests.Key{CreatorHost: "amq:codex", TargetID: "fake", RequestID: "11111111-1111-4111-8111-111111111301"})
+	rec, ok, err := store.Get(requests.Key{CreatorHost: SourceHost(format.Header{From: "codex"}), TargetID: "fake", RequestID: "11111111-1111-4111-8111-111111111301"})
 	if err != nil || !ok {
 		t.Fatalf("record: ok=%v err=%v", ok, err)
 	}
@@ -156,7 +156,7 @@ func TestImportLeavesCommandOnPlainError(t *testing.T) {
 	// Corrupt the on-disk record for this exact key so submit's store.Get
 	// fails to decode it and returns a plain (non-Refusal) error, the class
 	// the review found the carrier would wrongly drain.
-	hostDir := filepath.Join(stateDir, "v1", "requests", "amq:codex")
+	hostDir := filepath.Join(stateDir, "v1", "requests", SourceHost(format.Header{From: "codex"}))
 	if err := os.MkdirAll(hostDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -277,7 +277,7 @@ func TestImportNoopCancelRepliesToSender(t *testing.T) {
 	baseline, _ := os.ReadDir(fsq.AgentInboxNew(root, "codex"))
 
 	// Deliver a cancel for the already-terminal record -> noop_already_terminal.
-	ref := protocol.EncodeRef("amq:codex", "fake", id)
+	ref := protocol.EncodeRef(SourceHost(format.Header{From: "codex"}), "fake", id)
 	body := `{"schema":"amq.remote.command/1","op":"request.cancel","request_ref":"` + ref + `","target_id":"fake","epoch":"e_1","not_after":"` + protocol.FormatTime(time.Now().Add(time.Minute)) + `"}`
 	now := time.Now()
 	mid, _ := format.NewMessageID(now)
