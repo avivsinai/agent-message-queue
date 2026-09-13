@@ -702,9 +702,9 @@ func TestB1PreSendFailureIsRefusalNotUncertain(t *testing.T) {
 
 	// Close the server BEFORE Submit so the RPC write fails (pre-send).
 	_ = srv.ws.close()
-	// Drain initialize/resume calls that may still be queued.
-	// Give the read pump time to register the closed connection.
-	time.Sleep(50 * time.Millisecond)
+	// Deterministic: wait for the read pump to register the closed
+	// connection (744.8 — no time.Sleep).
+	<-att.client.Done()
 
 	type admResult struct {
 		adm core.Admission
@@ -738,7 +738,7 @@ func TestB1PreSendFailureIsRefusalNotUncertain(t *testing.T) {
 }
 
 // TestB1PostSendFailureIsUncertainNotRefused reproduces B1 (b)
-// (agent-message-message-611.22.35): a post-send failure (the server
+// (agent-message-queue-611.22.35): a post-send failure (the server
 // responded but the result failed to decode) is AMBIGUOUS — the turn may be
 // running. The adapter must keep the run and return a non-nil error (uncertain),
 // not a refusal code.

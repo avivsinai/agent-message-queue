@@ -325,19 +325,20 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 		} `json:"turn"`
 	}
 	if err := a.call("turn/start", map[string]any{"threadId": a.threadID, "input": input, "clientUserMessageId": clientIDFor(req.Key)}, &res); err != nil {
-		// B1: a transport failure (timeout, connection reset, etc.) does NOT
-		// prove the prompt was refused — the server may have accepted it and
-		// started executing. Only a positive native refusal (an rpcError with
-		// a definitive rejection) is a real refusal. Transport ambiguity must
-		// preserve the correlation and return a non-nil error so the endpoint
-		// records UNCERTAIN, not rejected.
+		// B1 (agent-message-queue-611.22.35): split pre-send vs post-send.
+		// ErrNotSent (marshal error, write error, connection closed before
+		// write) and rpcError (server responded with an error) are both
+		// unambiguous: the prompt either never left or was positively
+		// refused. dropRun + refuse (retry is safe). Post-send failures
+		// (closed before reply, ctx deadline, unmarshal error) are ambiguous:
+		// the turn may be running. Keep the correlation, return a non-nil
+		// error so the endpoint records uncertain.
 		var rpc *rpcError
-		if errors.As(err, &rpc) {
-			// The server responded with an error — that is a positive refusal.
+		if errors.Is(err, ErrNotSent) || errors.As(err, &rpc) {
 			a.dropRun(req.Key)
 			return refusal(err), nil
 		}
-		// Transport/protocol ambiguity: keep the correlation so Lookup and
+		// Post-send ambiguity: keep the correlation so Lookup and
 		// history can still resolve it. Return a non-nil error (not a refusal
 		// code) so the endpoint records uncertain.
 		return core.Admission{}, err
