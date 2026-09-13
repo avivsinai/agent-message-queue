@@ -1142,6 +1142,13 @@ func owesCancel(rec *requests.Record) bool {
 // owes nothing and is never re-driven — that closes the revision-churn bug
 // (Pro #4) BY CONSTRUCTION.
 //
+// owesAck reports whether the runtime is holding a result for us that we have
+// not released. This is the SECOND obligation — it is about a RESULT we have
+// not acknowledged, nothing else. Result != nil is what makes the digest
+// non-empty (EvidenceDigest(nil) == ""), so a terminal record with no result
+// owes nothing and is never re-driven — that closes the revision-churn bug
+// (Pro #4) BY CONSTRUCTION.
+//
 // Used by replayTerminalAck's crash-gap path (when AckDigest is empty but
 // Result is bound, compute the digest from Result).
 func owesAck(rec *requests.Record) bool {
@@ -1700,6 +1707,24 @@ func (e *Endpoint) finishAdmissionLocked(rec *requests.Record, exists bool, t *t
 			e.mu.Unlock()
 			return protocol.Reply{}, err
 		}
+	}
+	// B4: if reconcile moved the record to uncertain while Submit was in
+	// flight, and Submit returned a DEFINITIVE non-admission (a refusal code,
+	// not a transport error), apply that authoritative evidence. The refusal
+	// is real — it came from the native runtime, not from missing history.
+	// Without this, the record stays uncertain and the runtime reservation
+	// blocks every later request for that target forever.
+	if rec.State == protocol.StateUncertain && !adm.Admitted && nerr == nil && adm.Code != "" {
+		e.transitionLocked(rec, causeRefused, nativeEvidence{code: adm.Code})
+		if _, err := e.commitLocked(rec, t); err != nil {
+			e.notifyStorageFailureLocked(rec, err)
+			e.mu.Unlock()
+			return protocol.Reply{}, err
+		}
+		snap := rec.Snapshot
+		e.mu.Unlock()
+		e.publishRevision(rec)
+		return protocol.Reply{Snapshot: snap, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: rec.Code}}, nil
 	}
 	// Default: return the durable snapshot. Outcome.Code is read from rec.Code
 	// so snapshot.Code == outcome.Code always (Pro #4).
