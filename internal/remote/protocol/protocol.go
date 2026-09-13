@@ -459,7 +459,6 @@ func CommandDigest(cmd *Command) string {
 		RequestID: cmd.RequestID,
 		TargetID:  cmd.TargetID,
 		Epoch:     cmd.Epoch,
-		NotAfter:  normalizeNotAfter(cmd.NotAfter),
 		Input:     resolveDigestDefaults(cmd.Input),
 	}
 	data, err := json.Marshal(payload)
@@ -493,24 +492,6 @@ func resolveDigestDefaults(in *SubmitInput) *SubmitInput {
 	return &out
 }
 
-// normalizeNotAfter canonicalizes NotAfter before digesting so every
-// legal RFC3339Nano spelling of the same instant produces the SAME digest.
-// A non-Go carrier that parses and re-emits the deadline (Python isoformat()
-// gives +00:00, JS toISOString() gives .000Z) would otherwise diverge from a
-// Go carrier. The digest is a function of MEANING, not spelling — the same
-// rule resolveDigestDefaults applies to Busy and Deliver, applied to the last
-// spelling axis. An empty NotAfter (no deadline) passes through unchanged.
-func normalizeNotAfter(s string) string {
-	if s == "" {
-		return ""
-	}
-	t, err := ParseTime(s)
-	if err != nil {
-		return s // not parseable — Validate rejects it, but don't mutate here
-	}
-	return FormatTime(t)
-}
-
 // EvidenceDigest is the digest of the terminal evidence an acknowledgement
 // releases: canonical JSON of the bound Result the record retained. The
 // attachment contract names the evidence digest (not the input digest) so a
@@ -533,13 +514,18 @@ func EvidenceDigest(r *Result) string {
 // is the canonical key order; do not reorder without bumping the schema and
 // migrating records. omitempty is intentionally absent on submit-required
 // fields so the canonical shape is identical for every valid submit.
+//
+// B10: NotAfter is NOT in the digest. A deadline is POLICY about the
+// request, not its identity. Including it means a retry with a fresh
+// deadline (the normal case) changes the digest and hits request_conflict.
+// The stored record's NotAfter governs; a retry with any deadline matches
+// and gets the existing snapshot.
 type digestPayload struct {
 	Schema    string       `json:"schema"`
 	Op        Op           `json:"op"`
 	RequestID string       `json:"request_id"`
 	TargetID  string       `json:"target_id"`
 	Epoch     string       `json:"epoch"`
-	NotAfter  string       `json:"not_after"`
 	Input     *SubmitInput `json:"input"`
 }
 

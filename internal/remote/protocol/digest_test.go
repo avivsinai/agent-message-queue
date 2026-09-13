@@ -44,11 +44,12 @@ func TestCommandDigestIsCanonicalAndStable(t *testing.T) {
 	if CommandDigest(&changed) == d {
 		t.Fatal("digest unchanged after epoch change")
 	}
-	// Changing not_after changes the digest.
+	// B10: Changing not_after does NOT change the digest. A deadline is
+	// policy, not identity — a retry with a fresh deadline must match.
 	changed = *base
 	changed.NotAfter = "2026-09-08T11:00:00Z"
-	if CommandDigest(&changed) == d {
-		t.Fatal("digest unchanged after not_after change")
+	if CommandDigest(&changed) != d {
+		t.Fatal("digest changed after not_after change (B10 — deadline must not affect identity digest)")
 	}
 	// Changing target_id changes the digest.
 	changed = *base
@@ -88,9 +89,10 @@ func TestCommandDigestCanonicalBytes(t *testing.T) {
 
 	// A carrier in another language builds these bytes by hand, in exactly
 	// this key order, and must arrive at the same digest.
+	// B10: not_after is NOT in the digest payload.
 	canonical := `{"schema":"` + string(SchemaCommand) + `","op":"` + string(OpRequestSubmit) +
 		`","request_id":"11111111-1111-4111-8111-111111111501","target_id":"t_fake1","epoch":"e_1",` +
-		`"not_after":"2026-09-08T10:02:00Z","input":{"text":"say hi","busy":"queue","deliver":"turn"}}`
+		`"input":{"text":"say hi","busy":"queue","deliver":"turn"}}`
 	sum := sha256.Sum256([]byte(canonical))
 	want := digestPrefix + hex.EncodeToString(sum[:])
 	if got != want {

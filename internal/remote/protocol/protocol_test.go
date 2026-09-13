@@ -193,15 +193,12 @@ func TestCommandDigestResolvesDefaults(t *testing.T) {
 	}
 }
 
-// TestCommandDigestNormalizesNotAfter reproduces B1: the digest was a
-// function of SPELLING, not meaning, for not_after. RFC3339 allows many legal
-// spellings of the same instant (Z, +00:00, .000Z, +02:00), and the RAW STRING
-// went into the digest. A non-Go carrier that parses and re-emits the deadline
-// (Python isoformat() gives +00:00, JS toISOString() gives .000Z) gets
-// request_conflict on an identical retry. FIX: normalize via
-// FormatTime(ParseTime(NotAfter)) before digesting — the digest is a function
-// of MEANING, not spelling.
-func TestCommandDigestNormalizesNotAfter(t *testing.T) {
+// TestCommandDigestExcludesNotAfter reproduces B10: NotAfter is NOT in the
+// digest. A deadline is POLICY about the request, not its identity. A retry
+// with a fresh deadline (the normal case) must not change the digest and hit
+// request_conflict. Including NotAfter meant the digest was a function of
+// the deadline spelling/value — removing it entirely is the correct fix.
+func TestCommandDigestExcludesNotAfter(t *testing.T) {
 	base := &Command{
 		Schema:    SchemaCommand,
 		Op:        OpRequestSubmit,
@@ -210,14 +207,17 @@ func TestCommandDigestNormalizesNotAfter(t *testing.T) {
 		Epoch:     "e_1",
 		Input:     &SubmitInput{Text: "say hi"},
 	}
-	spellings := []string{
+	// Different deadlines, same identity -> same digest.
+	deadlines := []string{
 		"2026-09-08T10:02:00Z",
 		"2026-09-08T10:02:00.000Z",
 		"2026-09-08T10:02:00+00:00",
 		"2026-09-08T12:02:00+02:00",
+		"2026-09-09T00:00:00Z",
+		"", // no deadline at all
 	}
 	digests := make(map[string]struct{})
-	for _, s := range spellings {
+	for _, s := range deadlines {
 		cmd := *base
 		cmd.NotAfter = s
 		d := CommandDigest(&cmd)
@@ -227,7 +227,7 @@ func TestCommandDigestNormalizesNotAfter(t *testing.T) {
 		digests[d] = struct{}{}
 	}
 	if len(digests) != 1 {
-		t.Fatalf("not_after spellings of the same instant produced %d different digests (B1 — the digest is a function of spelling, not meaning): %v", len(digests), digests)
+		t.Fatalf("different deadlines produced %d different digests (B10 — NotAfter must not be in the digest): %v", len(digests), digests)
 	}
 }
 
@@ -247,9 +247,10 @@ func TestCommandDigestHTMLEscaping(t *testing.T) {
 	}
 	got := CommandDigest(cmd)
 	// Build the expected digest from json.Marshal (with resolved defaults).
+	// B10: NotAfter is NOT in the digestPayload.
 	payload := digestPayload{
 		Schema: cmd.Schema, Op: cmd.Op, RequestID: cmd.RequestID,
-		TargetID: cmd.TargetID, Epoch: cmd.Epoch, NotAfter: normalizeNotAfter(cmd.NotAfter),
+		TargetID: cmd.TargetID, Epoch: cmd.Epoch,
 		Input: resolveDigestDefaults(cmd.Input),
 	}
 	data, _ := json.Marshal(payload)
