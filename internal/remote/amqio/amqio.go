@@ -345,8 +345,7 @@ func (c *Carrier) recoverClaimed(root *fsq.DeliveryRoot, claimed map[string]clai
 }
 
 func (c *Carrier) recoverOne(root *fsq.DeliveryRoot, curDir, name string) error {
-	path := filepath.Join(c.root, curDir, name)
-	msg, err := format.ReadMessageFile(path)
+	msg, err := format.ReadMessageFileRoot(root, filepath.Join(curDir, name))
 	if err != nil {
 		// Unreadable cur entry: not ours to fix (amq tooling owns DLQ).
 		return nil
@@ -498,8 +497,7 @@ func (c *Carrier) reconstructReply(cmd *protocol.Command, origin map[string]stri
 // means it was left in new for a retry (transient failure, or unparseable).
 // err is non-nil for errors that should be accumulated (D1: never aborts the scan).
 func (c *Carrier) importOne(root *fsq.DeliveryRoot, name string) (bool, error) {
-	path := filepath.Join(c.root, "agents", c.me, "inbox", "new", name)
-	msg, err := format.ReadMessageFile(path)
+	msg, err := format.ReadMessageFileRoot(root, filepath.Join("agents", c.me, "inbox", "new", name))
 	if err != nil {
 		// Unparseable serialization belongs to the DLQ path owned by amq
 		// read/drain; the endpoint leaves it in new for that tooling.
