@@ -55,12 +55,30 @@ type ReplyRouter func(replyProject, replyTo string) (root, handle string, err er
 // endpoint's own root.
 func (c *Carrier) SetReplyRouter(r ReplyRouter) { c.router = r }
 
-// errNoReplyRoute reports that a cross-project reply cannot be routed. The
-// caller's command stays in new so a later pass (with a router configured, or
-// after the peer root is reachable) can still answer it: delivering into our
-// own root would silently swallow the reply, and claiming the command without
-// replying would lose it outright.
+// errNoReplyRoute reports that a cross-project reply cannot be routed.
+// The error wraps the specific cause. F5 distinguishes POISON (DLQ) from
+// TRANSIENT (stays in new): a poison error is about the message itself (no
+// router configured, unusable handle), while a transient error is about the
+// world right now (peer root or mailbox not available yet).
 var errNoReplyRoute = errors.New("cross-project reply cannot be routed")
+
+// transientRouteError marks a route error as TRANSIENT (the world is not
+// ready right now: peer root or mailbox not available). isPoisonRoute returns
+// false for these — the message stays in new for the next tick (F5).
+type transientRouteError struct{ err error }
+
+func (e *transientRouteError) Error() string { return e.err.Error() }
+func (e *transientRouteError) Unwrap() error { return e.err }
+
+// isPoisonRoute reports whether a route error is about the MESSAGE (poison,
+// DLQ) rather than the WORLD RIGHT NOW (transient, stays in new).
+// Poison: no router configured, the router returned an error, or the routed
+// handle is unusable. Transient: the peer root does not exist, the mailbox is
+// not provisioned, the volume is unavailable (F5).
+func isPoisonRoute(err error) bool {
+	var tre *transientRouteError
+	return !errors.As(err, &tre)
+}
 
 // New prepares the endpoint mailbox under root and returns the carrier.
 func New(root, me string, ep *core.Endpoint) (*Carrier, error) {
@@ -170,21 +188,35 @@ func (c *Carrier) importOne(root *fsq.DeliveryRoot, name string) (bool, error) {
 	// a genuinely cross-project caller goes near the ReplyRouter.
 	project := strings.TrimSpace(origin["reply_project"])
 	if project != "" {
-		// D3: an unroutable cross-project caller is a POISON MESSAGE, not a
-		// retry. Leaving it in new means it is re-probed every tick and never
-		// converges (Pro B1). DLQ it so the operator sees it in `amq dlq list`,
-		// `dlq retry` recovers it once the peer is configured, and the loop
-		// converges. D4: before delivering to a peer root, validate the
-		// destination mailbox EXISTS — never create a mailbox in someone else's
-		// root (recreates the black hole this PR closed, just moved one dir over).
-		if _, _, closeProbe, rerr := c.destination(root, origin); rerr != nil {
-			if _, dlqErr := fsq.MoveToDLQ(root, c.me, name, msg.Header.ID, "unroutable", rerr.Error()); dlqErr != nil {
-				return false, fmt.Errorf("dlq %s: %w (route error: %v)", name, dlqErr, rerr)
+		// F5: POISON vs TRANSIENT. Poison is a statement about the MESSAGE;
+		// transient is a statement about the WORLD RIGHT NOW.
+		//   - Poison (DLQ): the message names a project we do not know, or
+		//     carries a handle that can never be valid. No retry can fix it.
+		//   - Transient (stays in new): the peer root does not exist YET, the
+		//     mailbox is not provisioned YET, the volume is unavailable. The
+		//     next tick may well succeed.
+		// D3 originally said "unroutable is poison" — that was too broad. This
+		// is the correction, and it is consistent with transientRefusal (below).
+		_, _, closeProbe, rerr := c.destination(root, origin)
+		if rerr != nil {
+			if isPoisonRoute(rerr) {
+				// F4: emit a DLQ receipt so a caller using `send --wait-for
+				// drained` does not wait forever on a consumed message. Every
+				// other DLQ site in this repo pairs the move with a receipt.
+				if _, dlqErr := fsq.MoveToDLQ(root, c.me, name, msg.Header.ID, "unroutable", rerr.Error()); dlqErr != nil {
+					return false, fmt.Errorf("dlq %s: %w (route error: %v)", name, dlqErr, rerr)
+				}
+				rc := receipt.New(msg.Header.ID, msg.Header.Thread, msg.Header.From, c.me, receipt.StageDLQ, "unroutable: "+rerr.Error())
+				if rerr2 := receipt.EmitDeliveryRoot(root, rc); rerr2 != nil {
+					return false, fmt.Errorf("dlq receipt %s: %w", name, rerr2)
+				}
+				return true, nil // DLQ'd — the message is no longer in new
 			}
-			return true, nil // DLQ'd — the message is no longer in new
-		} else {
-			closeProbe()
+			// Transient: the peer root or mailbox is not available YET. Leave
+			// the message in new for the next tick.
+			return false, nil
 		}
+		closeProbe()
 	}
 	var reply any
 	var herr error
@@ -295,11 +327,11 @@ func (c *Carrier) destination(own *fsq.DeliveryRoot, origin map[string]string) (
 	}
 	identity, err := fsq.SnapshotDeliveryRoot(rootPath)
 	if err != nil {
-		return nil, "", noop, fmt.Errorf("%w: %v", errNoReplyRoute, err)
+		return nil, "", noop, &transientRouteError{fmt.Errorf("%w: %v", errNoReplyRoute, err)}
 	}
 	peer, err := fsq.OpenDeliveryRoot(rootPath, identity)
 	if err != nil {
-		return nil, "", noop, fmt.Errorf("%w: %v", errNoReplyRoute, err)
+		return nil, "", noop, &transientRouteError{fmt.Errorf("%w: %v", errNoReplyRoute, err)}
 	}
 	// D4: never create a mailbox in someone else's root. A peer root whose
 	// mailbox does not exist is unroutable (D3 applies). Creating it is
@@ -307,7 +339,7 @@ func (c *Carrier) destination(own *fsq.DeliveryRoot, origin map[string]string) (
 	// Every other cross-root writer gates on ValidateExistingMailboxLayout first.
 	if err := fsq.ValidateExistingMailboxLayout(peer, handle); err != nil {
 		_ = peer.Close()
-		return nil, "", noop, fmt.Errorf("%w: peer mailbox %q does not exist: %v", errNoReplyRoute, handle, err)
+		return nil, "", noop, &transientRouteError{fmt.Errorf("%w: peer mailbox %q does not exist: %v", errNoReplyRoute, handle, err)}
 	}
 	return peer, handle, func() { _ = peer.Close() }, nil
 }
@@ -318,6 +350,15 @@ func (c *Carrier) reply(root *fsq.DeliveryRoot, origin map[string]string, subjec
 		return rerr
 	}
 	defer closeDest()
+	// F1: an empty handle means NO REPLY IS OWED — destination() returned
+	// (own, "", noop, nil) for a same-project caller with an unusable From.
+	// This is a SUCCESS, not a delivery to nobody. Without this early return,
+	// DeliverToInboxes(dest, []string{""}, ...) fails ValidateHandle(""),
+	// the publish error is swallowed, and Reconcile republishes every tick
+	// forever.
+	if to == "" {
+		return nil
+	}
 	now := c.now()
 	id, err := format.NewMessageID(now)
 	if err != nil {
