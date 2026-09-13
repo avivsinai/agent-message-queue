@@ -616,7 +616,10 @@ func cancel(args []string) (any, int, error) {
 		Op:         protocol.OpRequestGet,
 		RequestRef: ref,
 	})
-	if gerr == nil && getRep.Snapshot.Epoch != "" {
+	if gerr != nil {
+		return nil, 0, gerr
+	}
+	if getRep.Snapshot.Epoch != "" {
 		epoch = getRep.Snapshot.Epoch
 	}
 	rep, err := callReply(stateDir, &protocol.Command{

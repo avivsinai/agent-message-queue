@@ -474,11 +474,24 @@ func ResolveReplyRoute(sourceRoot, replyProject, replyTo string) (root, handle s
 		if session == "" {
 			return "", "", fmt.Errorf("reply_project is empty and reply_to has no session; not a cross-session reply")
 		}
-		plan, err := planDeliveryRoute(sourceRoot, "", session, deliveryRouteOptions{})
+		// classifyRoot returns "" for a BASE root (common.go:110-139). A
+		// non-session source IS the base. Use it directly so an endpoint at
+		// the base root can route to a session root.
+		base := classifyRoot(sourceRoot)
+		if base == "" {
+			base = sourceRoot
+		}
+		sessionRoot, err := resolveSessionRoot(base, session)
 		if err != nil {
+			// A NotFoundError ("session not found") is retryable — the session
+			// can be created later. Surface it the same way an absent peer root
+			// is surfaced, so the carrier classifies it TransientRouteError.
+			if errors.Is(err, os.ErrNotExist) {
+				return "", "", fmt.Errorf("%w: session %q not found under %s: %v", ErrPeerRootUnreachable, session, base, err)
+			}
 			return "", "", err
 		}
-		return plan.DeliveryRoot, recipient, nil
+		return sessionRoot, recipient, nil
 	}
 	plan, err := planDeliveryRoute(sourceRoot, project, session, deliveryRouteOptions{})
 	if err != nil {

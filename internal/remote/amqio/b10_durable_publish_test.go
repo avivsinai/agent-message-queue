@@ -61,7 +61,7 @@ func TestB10DurablePublishPropagatesCommittedDurabilityError(t *testing.T) {
 	ep := core.New(core.Config{
 		Store: store,
 		Publish: func(s protocol.Snapshot, origin map[string]string) error {
-			publishErr = carrier.Publish(s, origin); 
+			publishErr = carrier.Publish(s, origin)
 			return publishErr
 		},
 	})
@@ -108,9 +108,12 @@ func TestB10DurablePublishPropagatesCommittedDurabilityError(t *testing.T) {
 		t.Fatal("record not found after import")
 	}
 
-	// (a) Activate the fault, then complete the run. The publish that fires
-	// during the transition must FAIL with CommittedDurabilityError, and
-	// PublishedRevision must NOT advance.
+	// (a) B12: Activate the fault, then complete the run. The publish that
+	// fires during the transition hits a CommittedDurabilityError (rename
+	// succeeded, fsync failed). With B12, the carrier retries SyncDir in
+	// place; on persistent failure it returns nil so PublishedRevision
+	// advances — the message IS in the mailbox, re-delivery after
+	// consumption is never idempotent.
 	faultActive = true
 	rt.Complete("11111111-1111-4111-8111-111111111410", "done")
 	if err := ep.Tick(); err != nil {
@@ -121,22 +124,17 @@ func TestB10DurablePublishPropagatesCommittedDurabilityError(t *testing.T) {
 	if rec == nil {
 		t.Fatal("record not found after complete")
 	}
-	if rec.PublishedRevision >= rec.Revision {
-		t.Fatalf("(a) PublishedRevision=%d advanced to Revision=%d while the fault was active (B10)", rec.PublishedRevision, rec.Revision)
+	// B12: PublishedRevision advances even with the fault active — the
+	// message is visible, durability is repaired in place.
+	if rec.PublishedRevision < rec.Revision {
+		t.Fatalf("(a) PublishedRevision=%d did not advance to Revision=%d (B12 — visible means published)", rec.PublishedRevision, rec.Revision)
 	}
 
-	// (b) The publish error IS a CommittedDurabilityError (not a pre-rename
-	// ordinary error). If the fault fired on the pre-rename tmp sync, the
-	// error would be a plain error and the file would NOT be visible.
-	var committed *fsq.CommittedDurabilityError
-	if !errors.As(publishErr, &committed) {
-		t.Fatalf("(b) publish error is %T: %v, want *fsq.CommittedDurabilityError (B2 — the fault must fire on the post-rename sync so the rename is visible but fsync is unknown)", publishErr, publishErr)
-	}
-	// The terminal revision's file IS visible (the rename committed).
+	// (b) The terminal revision's file IS visible (the rename committed).
 	revLabel := fmt.Sprintf("revision:%d", rec.Revision)
 	count := countFilesWithLabel(root, "codex", revLabel)
 	if count != 1 {
-		t.Fatalf("(b) expected 1 visible file for %s, got %d (B2 — the rename must have committed for a CommittedDurabilityError)", revLabel, count)
+		t.Fatalf("(b) expected 1 visible file for %s, got %d (the rename must have committed)", revLabel, count)
 	}
 
 	// (d) No amplification: run Reconcile 5 more times with the fault still
@@ -148,7 +146,7 @@ func TestB10DurablePublishPropagatesCommittedDurabilityError(t *testing.T) {
 	}
 	count = countFilesWithLabel(root, "codex", revLabel)
 	if count != 1 {
-		t.Fatalf("(d) after 6 Reconcile ticks with fault on, expected 1 file for %s, got %d (B1 — deterministic id + resolvePublishCollision must make retries no-ops, no amplification)", revLabel, count)
+		t.Fatalf("(d) after 6 Reconcile ticks with fault on, expected 1 file for %s, got %d (deterministic id + resolvePublishCollision must make retries no-ops, no amplification)", revLabel, count)
 	}
 
 	// (e) The deterministic id must sort chronologically against ordinary AMQ
@@ -164,8 +162,8 @@ func TestB10DurablePublishPropagatesCommittedDurabilityError(t *testing.T) {
 		}
 	}
 
-	// (c) Clear the fault and Reconcile. The same revision is republished and
-	// PublishedRevision advances.
+	// (c) Clear the fault and Reconcile. PublishedRevision already advanced
+	// (B12); the file is already durable after the fault clears.
 	faultActive = false
 	if err := ep.Reconcile(); err != nil {
 		t.Fatalf("(c) Reconcile: %v", err)
@@ -176,7 +174,7 @@ func TestB10DurablePublishPropagatesCommittedDurabilityError(t *testing.T) {
 		t.Fatal("record not found after reconcile")
 	}
 	if rec.PublishedRevision < rec.Revision {
-		t.Fatalf("(c) PublishedRevision=%d did not advance to Revision=%d after the fault cleared (B10)", rec.PublishedRevision, rec.Revision)
+		t.Fatalf("(c) PublishedRevision=%d did not advance to Revision=%d after the fault cleared", rec.PublishedRevision, rec.Revision)
 	}
 }
 
