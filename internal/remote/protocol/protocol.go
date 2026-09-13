@@ -435,7 +435,7 @@ const digestPrefix = "sha256:"
 // json.Marshal explicitly. Then sha256 hex with the "sha256:" prefix.
 //
 // Omitted optional fields inside input follow Go's struct tags (omitempty);
-// see ResolveDigestDefaults for why Busy and Deliver are resolved to their
+// see resolveDigestDefaults for why Busy and Deliver are resolved to their
 // defaults BEFORE digesting so the omitted form and the spelled form produce
 // the same digest.
 func CommandDigest(cmd *Command) string {
@@ -448,7 +448,7 @@ func CommandDigest(cmd *Command) string {
 		RequestID: cmd.RequestID,
 		TargetID:  cmd.TargetID,
 		Epoch:     cmd.Epoch,
-		NotAfter:  cmd.NotAfter,
+		NotAfter:  normalizeNotAfter(cmd.NotAfter),
 		Input:     resolveDigestDefaults(cmd.Input),
 	}
 	data, err := json.Marshal(payload)
@@ -480,6 +480,24 @@ func resolveDigestDefaults(in *SubmitInput) *SubmitInput {
 		out.Deliver = DeliverTurn
 	}
 	return &out
+}
+
+// normalizeNotAfter canonicalizes NotAfter before digesting so every
+// legal RFC3339Nano spelling of the same instant produces the SAME digest.
+// A non-Go carrier that parses and re-emits the deadline (Python isoformat()
+// gives +00:00, JS toISOString() gives .000Z) would otherwise diverge from a
+// Go carrier. The digest is a function of MEANING, not spelling — the same
+// rule resolveDigestDefaults applies to Busy and Deliver, applied to the last
+// spelling axis. An empty NotAfter (no deadline) passes through unchanged.
+func normalizeNotAfter(s string) string {
+	if s == "" {
+		return ""
+	}
+	t, err := ParseTime(s)
+	if err != nil {
+		return s // not parseable — Validate rejects it, but don't mutate here
+	}
+	return FormatTime(t)
 }
 
 // EvidenceDigest is the digest of the terminal evidence an acknowledgement
