@@ -192,14 +192,22 @@ func AgentReceipts(root, agent string) string {
 func EnsureRootDirs(root string) error {
 	// os.MkdirAll below creates the queue root itself when it is missing
 	// (`amq init` / `amq session create` on a fresh path). Whoever creates a
-	// directory entry owns the fsync that makes it durable, so note whether
-	// the root was ours to create BEFORE we create it.
-	rootExisted := true
-	if _, err := os.Stat(root); err != nil {
-		if !errors.Is(err, fs.ErrNotExist) {
-			return fmt.Errorf("stat queue root %s: %w", root, err)
+	// directory entry owns the fsync that makes it durable, so note what was
+	// ours to create BEFORE we create it. `amq init --root a/b/c` can create SEVERAL missing levels at once, and
+	// each one's entry lives in the level above it, so remember the shallowest
+	// level that was missing — the whole created chain needs syncing, not just
+	// the root's immediate parent.
+	firstCreated := ""
+	for d := root; ; d = filepath.Dir(d) {
+		if _, err := os.Stat(d); err == nil {
+			break
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("stat queue root %s: %w", d, err)
 		}
-		rootExisted = false
+		firstCreated = d
+		if parent := filepath.Dir(d); parent == d {
+			break
+		}
 	}
 	for _, dir := range []string{
 		filepath.Join(root, "agents"),
@@ -215,19 +223,24 @@ func EnsureRootDirs(root string) error {
 	if err := SyncDir(root); err != nil {
 		return err
 	}
-	if rootExisted {
-		// The parent is the operator's own path and gained nothing from us.
+	if firstCreated == "" {
+		// Every level already existed; their parents gained nothing from us,
+		// and above the root is the operator's own path.
 		return nil
 	}
-	// We created the root's own entry in its parent, and fsync(root) does not
-	// persist that entry. Without this, `amq init` followed by a first-contact
-	// send reports success and power loss takes the whole queue — the exact
-	// loss this file's ancestor syncing exists to prevent, one level up.
-	parent := filepath.Dir(root)
-	if parent == root {
-		return nil
+	// fsync(d) does not persist d's OWN entry in its parent, so every level we
+	// created needs its parent synced — up to and including the parent of the
+	// shallowest one. Without this, `amq init` followed by a first-contact
+	// send reports success and power loss takes the whole queue: the exact
+	// loss this file's ancestor syncing prevents, one level up. ancestorChain
+	// stops at the first level that already existed, which is the only one
+	// that gained an entry from us but that we did not create.
+	for _, d := range ancestorChain(root, filepath.Dir(firstCreated)) {
+		if err := SyncDir(d); err != nil {
+			return fmt.Errorf("sync created queue root ancestor %s: %w", d, err)
+		}
 	}
-	return SyncDir(parent)
+	return nil
 }
 
 func EnsureAgentDirs(root, agent string) error {

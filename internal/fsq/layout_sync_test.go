@@ -386,3 +386,42 @@ func TestEnsureRootDirsSyncsTheParentThatOwnsANewRoot(t *testing.T) {
 		}
 	}
 }
+
+// `amq init --root a/b/c` can create SEVERAL missing levels in one call, and
+// each level's entry lives in the level above it. Syncing only the root's
+// immediate parent left the shallowest created level's entry unsynced, so
+// power loss after a first-contact send still took the whole queue. Found by
+// pre-merge review of agent-message-queue-611.22.26 (fsq first-contact sync).
+func TestEnsureRootDirsSyncsEveryLevelItCreated(t *testing.T) {
+	outer := t.TempDir()
+	root := filepath.Join(outer, "proj", "nested", ".amq")
+
+	var synced []string
+	restore := syncDirAmbientSwapForTest(func(dir string) error {
+		synced = append(synced, dir)
+		return nil
+	})
+	defer restore()
+
+	if err := EnsureRootDirs(root); err != nil {
+		t.Fatalf("EnsureRootDirs: %v", err)
+	}
+	// Every directory that owns an entry we created, up to and including the
+	// pre-existing directory that owns the shallowest new level.
+	for _, dir := range []string{
+		root,
+		filepath.Join(outer, "proj", "nested"),
+		filepath.Join(outer, "proj"),
+		outer,
+	} {
+		found := false
+		for _, d := range synced {
+			if d == dir {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("level %s owns an entry we created but was never synced (all: %v)", dir, synced)
+		}
+	}
+}
