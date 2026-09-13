@@ -105,7 +105,7 @@ func TestImportCommandAndPublishResult(t *testing.T) {
 	if !states["running"] || !states["completed"] {
 		t.Fatalf("expected running and completed revisions, got %v", states)
 	}
-	rec, ok, err := store.Get(requests.Key{CreatorHost: "amq:codex", TargetID: "fake", RequestID: "11111111-1111-4111-8111-111111111301"})
+	rec, ok, err := store.Get(requests.Key{CreatorHost: SourceHost(format.Header{From: "codex"}), TargetID: "fake", RequestID: "11111111-1111-4111-8111-111111111301"})
 	if err != nil || !ok {
 		t.Fatalf("record: ok=%v err=%v", ok, err)
 	}
@@ -158,7 +158,7 @@ func TestImportLeavesCommandOnPlainError(t *testing.T) {
 	// Corrupt the on-disk record for this exact key so submit's store.Get
 	// fails to decode it and returns a plain (non-Refusal) error, the class
 	// the review found the carrier would wrongly drain.
-	hostDir := filepath.Join(stateDir, "v1", "requests", "amq:codex")
+	hostDir := filepath.Join(stateDir, "v1", "requests", SourceHost(format.Header{From: "codex"}))
 	if err := os.MkdirAll(hostDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -279,7 +279,7 @@ func TestImportNoopCancelRepliesToSender(t *testing.T) {
 	baseline, _ := os.ReadDir(fsq.AgentInboxNew(root, "codex"))
 
 	// Deliver a cancel for the already-terminal record -> noop_already_terminal.
-	ref := protocol.EncodeRef("amq:codex", "fake", id)
+	ref := protocol.EncodeRef(SourceHost(format.Header{From: "codex"}), "fake", id)
 	body := `{"schema":"amq.remote.command/1","op":"request.cancel","request_ref":"` + ref + `","target_id":"fake","epoch":"e_1","not_after":"` + protocol.FormatTime(time.Now().Add(time.Minute)) + `"}`
 	now := time.Now()
 	mid, _ := format.NewMessageID(now)
@@ -349,7 +349,7 @@ func TestImportStoreRefusalLeavesCommandInNew(t *testing.T) {
 	// writing a cancel-before-submit tombstone, so the store write IS the
 	// operation, and its refusal arrives as an error from Handle.
 	reqID := "11111111-1111-4111-8111-111111111390"
-	ref := protocol.EncodeRef("amq:codex", "fake", reqID)
+	ref := protocol.EncodeRef(SourceHost(format.Header{From: "codex"}), "fake", reqID)
 	body := `{"schema":"amq.remote.command/1","op":"request.cancel","request_ref":"` + ref + `","target_id":"fake","epoch":"e_1","not_after":"` + protocol.FormatTime(time.Now().Add(time.Minute)) + `"}`
 	now := time.Now()
 	id, err := format.NewMessageID(now)
@@ -662,7 +662,7 @@ func TestImportSameProjectEmptyFromStillWorks(t *testing.T) {
 	// F2: the REAL assertion — published_revision must CONVERGE. With the B2
 	// regression (reply to "" fails, publish error swallowed), the record
 	// churns every tick and published_revision stays 0.
-	k := requests.Key{CreatorHost: "amq:", TargetID: "fake", RequestID: "11111111-1111-4111-8111-111111111341"}
+	k := requests.Key{CreatorHost: SourceHost(format.Header{}), TargetID: "fake", RequestID: "11111111-1111-4111-8111-111111111341"}
 	// Complete the run so a terminal revision is published.
 	rt.Complete("11111111-1111-4111-8111-111111111341", "done")
 	if err := ep.Tick(); err != nil { // Reconcile republishes
