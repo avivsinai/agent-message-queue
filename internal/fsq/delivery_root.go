@@ -452,12 +452,8 @@ func (r *DeliveryRoot) EnsureRootDirs() error {
 	if err := r.VerifyBase(); err != nil {
 		return err
 	}
-	for _, dir := range []string{"agents", "threads", "meta"} {
-		if err := r.mkdirAllSynced(dir); err != nil {
-			return err
-		}
-	}
-	return nil
+	// Queue-level provisioning: sync what we create.
+	return r.mkdirAllSynced(syncIfCreated, "agents", "threads", "meta")
 }
 
 // EnsureAgentDirs creates one agent's mailbox layout through the pinned root
@@ -469,12 +465,11 @@ func (r *DeliveryRoot) EnsureAgentDirs(agent string) error {
 	if err := r.VerifyBase(); err != nil {
 		return err
 	}
+	dirs := make([]string, 0, len(requiredMailboxLeaves))
 	for _, leaf := range requiredMailboxLeaves {
-		if err := r.mkdirAllSynced(MailboxRootRelativePath(agent, leaf)); err != nil {
-			return err
-		}
+		dirs = append(dirs, MailboxRootRelativePath(agent, leaf))
 	}
-	return nil
+	return r.mkdirAllSynced(syncIfCreated, dirs...)
 }
 
 // EnsureAgentDir creates exactly one mailbox leaf for an agent through the
@@ -490,7 +485,7 @@ func (r *DeliveryRoot) EnsureAgentDir(agent string, leaf MailboxLeaf) error {
 	if err := r.VerifyBase(); err != nil {
 		return err
 	}
-	return r.mkdirAllSynced(MailboxRootRelativePath(agent, leaf))
+	return r.mkdirAllSynced(syncIfCreated, MailboxRootRelativePath(agent, leaf))
 }
 
 // LayoutState classifies a pinned root's top-level queue layout.
@@ -584,51 +579,100 @@ func (r *DeliveryRoot) dirExists(name string) bool {
 	return err == nil && info.IsDir()
 }
 
-// mkdirAllSynced creates dir and any missing ancestors through the pinned
-// root, then fsyncs every directory level this call created. Delivery writes
-// fsync the message file and its leaf directory; without also syncing the
-// newly created ancestors, a crash right after a first-contact delivery can
-// still lose the whole mailbox tree along with the message it committed.
-// Pre-existing levels are not re-synced: this call introduced nothing below
-// them. A failed ancestor sync is reported as a plain error (nothing has been
-// committed at the leaf yet, so the caller's staging cleanup still applies).
-func (r *DeliveryRoot) mkdirAllSynced(dir string) error {
-	missing, err := r.firstMissingAncestor(dir)
-	if err != nil {
-		return err
+// durability says how hard mkdirAllSynced must work to make a tree durable.
+// The two callers are genuinely different, and collapsing them costs either
+// correctness or a queue-global fsync on a hot path.
+type durability int
+
+const (
+	// syncIfCreated syncs the ancestor chain only when this call actually
+	// created a directory. A routine internal write owes durability for what
+	// it made and nothing more. The notification-attempt ledger appends
+	// through this path thousands of times against a mailbox that already
+	// exists; making it fsync the shared queue root every time would turn a
+	// path designed to not serialize among appenders into a queue-global
+	// barrier.
+	syncIfCreated durability = iota
+	// syncAlways re-syncs the chain on every call, created or not. The caller
+	// is about to ACKNOWLEDGE something to someone else, so it may not assume
+	// an earlier call finished making this tree durable: that call may have
+	// created a level and died before syncing its parent, leaving a directory
+	// that Stat can see and power loss can still take. Stat proves existence,
+	// never durability.
+	syncAlways
+)
+
+// mkdirAllSynced creates every dir (and its missing ancestors) through the
+// pinned root, then makes the resulting tree durable: it fsyncs each directory
+// that owns an entry on the way to a dir, up to and including the pinned root.
+// Delivery writes fsync the message file and its leaf directory; without the
+// ancestor syncs, a crash right after a first-contact delivery can still lose
+// the whole mailbox tree along with the message it committed.
+//
+// Pass the directories of one logical mailbox together. A failed sync is
+// reported as a plain error: nothing is committed at a leaf yet, so the
+// caller's staging cleanup still applies.
+func (r *DeliveryRoot) mkdirAllSynced(mode durability, dirs ...string) error {
+	created := false
+	for _, dir := range dirs {
+		if err := r.refuseNonDirectoryAncestor(dir); err != nil {
+			return err
+		}
+		if !r.dirExists(dir) {
+			created = true
+		}
+		if err := r.root.MkdirAll(dir, 0o700); err != nil {
+			return err
+		}
 	}
-	if missing == "" {
+	if !created && mode == syncIfCreated {
 		return nil
 	}
-	if err := r.root.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
-	for d := dir; ; d = filepath.Dir(d) {
-		if err := r.syncDir(d); err != nil {
-			return fmt.Errorf("sync created ancestor %s: %w", d, err)
+	// Create everything first, then sync each shared ancestor once. Siblings
+	// of one mailbox (inbox/tmp and inbox/new, or all seven leaves) share
+	// nearly the whole chain, and a per-directory walk would fsync the same
+	// levels over and over — and would sync a parent while a later sibling
+	// below it still had no durable entry.
+	synced := make(map[string]bool, 8)
+	for _, dir := range dirs {
+		// ancestorChain owns the reasoning: every directory that holds an
+		// entry on the way to dir, up to and including the pinned root, on
+		// every call.
+		for _, d := range ancestorChain(dir, ".") {
+			if synced[d] {
+				continue
+			}
+			if err := r.syncDir(d); err != nil {
+				return fmt.Errorf("sync mailbox ancestor %s: %w", d, err)
+			}
+			synced[d] = true
 		}
-		if d == missing {
-			return nil
-		}
 	}
+	return nil
 }
 
-// firstMissingAncestor walks from dir toward the pinned root and returns the
-// shallowest missing level (the topmost ancestor that does not exist yet), or
-// "" when every level already exists.
-func (r *DeliveryRoot) firstMissingAncestor(dir string) (string, error) {
-	missing := ""
+// refuseNonDirectoryAncestor walks from dir toward the pinned root and fails
+// when any existing level is not a directory. Pinned twin of
+// refuseNonDirectoryAmbient.
+func (r *DeliveryRoot) refuseNonDirectoryAncestor(dir string) error {
 	current := dir
 	for {
-		if _, err := r.root.Stat(current); err == nil {
-			return missing, nil
+		info, err := r.root.Stat(current)
+		if err == nil {
+			if !info.IsDir() {
+				// A regular file where a mailbox directory must be is a
+				// corrupt layout, not a missing level. Refuse before staging
+				// anything so a multi-recipient delivery fails whole, never
+				// partially committed.
+				return fmt.Errorf("mailbox path %s exists and is not a directory", current)
+			}
+			return nil
 		} else if !errors.Is(err, fs.ErrNotExist) {
-			return "", fmt.Errorf("stat %s: %w", current, err)
+			return fmt.Errorf("stat %s: %w", current, err)
 		}
-		missing = current
 		parent := filepath.Dir(current)
 		if parent == current {
-			return missing, nil
+			return nil
 		}
 		current = parent
 	}
