@@ -216,12 +216,89 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 		return protocol.Reply{}, err
 	}
 	if exists {
-		e.mu.Unlock()
-		out := protocol.Outcome{Op: protocol.OpRequestSubmit}
-		if rec.InputDigest != "" && rec.InputDigest != digest {
-			out.Code = protocol.CodeRequestConflict
+		// A busy-rejected tombstone from a previous attempt is not the
+		// request itself: the identical resubmit must be admitted normally,
+		// not answered from the tombstone (B14 minimal tombstone semantics —
+		// full B2/B11 safety/reset belongs to B14d). Recognizable as a
+		// tombstoned rejected record with no dispatch behind it and the same
+		// digest; only a DIFFERENT digest is a conflict.
+		retryable := rec.Tombstone &&
+			rec.State == protocol.StateRejected &&
+			rec.Code == protocol.CodeBusy &&
+			rec.NativeDispatches == 0 &&
+			rec.InputDigest == digest
+		if !retryable {
+			e.mu.Unlock()
+			out := protocol.Outcome{Op: protocol.OpRequestSubmit}
+			if rec.InputDigest != "" && rec.InputDigest != digest {
+				out.Code = protocol.CodeRequestConflict
+			}
+			return protocol.Reply{Snapshot: rec.Snapshot, Outcome: out}, nil
 		}
-		return protocol.Reply{Snapshot: rec.Snapshot, Outcome: out}, nil
+		// Fall through to the normal admission path with the existing
+		// record: the deferred/Tick machinery owns it from here.
+		t, code := e.admissibleLocked(cmd.TargetID, cmd.Epoch, cmd.NotAfter)
+		if code != "" {
+			e.mu.Unlock()
+			return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: code}}, nil
+		}
+		if t == nil {
+			e.mu.Unlock()
+			return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit}}, nil
+		}
+		reserved, rerr := e.runtimeInFlightLocked(cmd.TargetID, key)
+		if rerr != nil {
+			e.mu.Unlock()
+			return protocol.Reply{}, protocol.Refuse(protocol.CodeAttachmentLost, "%s", rerr.Error())
+		}
+		if reserved {
+			// Still reserved: refresh the terminal busy tombstone and refuse
+			// again — never a Tick-admissible placeholder.
+			e.transitionLocked(rec, causeBusyTombstone, nativeEvidence{})
+			if _, err := e.commitLocked(rec, e.targets[rec.TargetID]); err != nil {
+				e.mu.Unlock()
+				return protocol.Reply{}, err
+			}
+			snap := rec.Snapshot
+			e.mu.Unlock()
+			e.publishRevision(rec)
+			return protocol.Reply{Snapshot: snap, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: rec.Code}}, nil
+		}
+		rec.Revision++
+		rec.NativeDispatches = 1
+		rec.ObservedAt = protocol.FormatTime(e.now())
+		e.transitionLocked(rec, causeDispatching, nativeEvidence{})
+		if err := e.crashAt(PointBeforeDispatching); err != nil {
+			e.mu.Unlock()
+			return protocol.Reply{}, err
+		}
+		// Cannot use commitLocked: crash-point ordering requires Update between
+		// PointBeforeDispatching and PointAfterDispatching.
+		if err := e.store.Update(rec); err != nil {
+			e.mu.Unlock()
+			return protocol.Reply{}, err
+		}
+		e.notifyLocked(rec)
+		if err := e.crashAt(PointAfterDispatching); err != nil {
+			e.mu.Unlock()
+			return protocol.Reply{}, err
+		}
+		input := *cmd.Input
+		e.mu.Unlock()
+		if err := e.crashAt(PointBeforeNative); err != nil {
+			return protocol.Reply{}, err
+		}
+		adm, nerr := t.att.Submit(BoundRequest{Key: key, Epoch: cmd.Epoch, Input: input, NotAfter: cmd.NotAfter})
+		if err := e.crashAt(PointAfterNative); err != nil {
+			return protocol.Reply{}, err
+		}
+		e.mu.Lock()
+		rec, exists, err = e.store.Get(key)
+		if err != nil {
+			e.mu.Unlock()
+			return protocol.Reply{}, err
+		}
+		return e.finishAdmissionLocked(rec, exists, t, adm, nerr)
 	}
 	rec = &requests.Record{
 		Snapshot: protocol.Snapshot{
@@ -239,6 +316,64 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 		Input:  cmd.Input,
 		Origin: src.Origin,
 	}
+	// Decide admissibility + reservation BEFORE Create: a request we are
+	// about to refuse is never written (no durable placeholder to leak on a
+	// failed rejection write, and nothing for Tick to dispatch). Only Create
+	// when we will dispatch or deliberately defer.
+	t, code := e.admissibleLocked(cmd.TargetID, cmd.Epoch, cmd.NotAfter)
+	if code != "" {
+		// Refused (unshared/expired/stale_epoch): no durable record.
+		e.mu.Unlock()
+		return protocol.Reply{Snapshot: e.unpersisted(rec, protocol.StateRejected, code), Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: code}}, nil
+	}
+	if t == nil {
+		// Target registered but offline: Create received and let Tick admit
+		// or expire it later.
+		if err := e.crashAt(PointBeforeReceived); err != nil {
+			e.mu.Unlock()
+			return protocol.Reply{}, err
+		}
+		if err := e.store.Create(rec); err != nil {
+			e.mu.Unlock()
+			var r *protocol.Refusal
+			if errors.As(err, &r) && r.Code == protocol.CodeStorageFull {
+				return protocol.Reply{Snapshot: e.unpersisted(rec, protocol.StateRejected, protocol.CodeStorageFull), Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: protocol.CodeStorageFull}}, nil
+			}
+			return protocol.Reply{}, err
+		}
+		e.notifyLocked(rec)
+		e.mu.Unlock()
+		return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit}}, nil
+	}
+	// B14 per-runtime reservation (B10): refuse a second concurrent dispatch
+	// for the same target. Fail-closed — an undeterminable reservation state
+	// never authorizes a dispatch.
+	reserved, rerr := e.runtimeInFlightLocked(cmd.TargetID, key)
+	if rerr != nil {
+		// An undeterminable reservation must not leave a Tick-admissible
+		// placeholder. No durable record; return a typed refusal so the caller
+		// maps to the right exit, not exit 1.
+		e.mu.Unlock()
+		return protocol.Reply{Snapshot: e.unpersisted(rec, protocol.StateRejected, protocol.CodeAttachmentLost), Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: protocol.CodeAttachmentLost}}, protocol.Refuse(protocol.CodeAttachmentLost, "%s", rerr.Error())
+	}
+	if reserved {
+		// Persist a TERMINAL rejected+busy tombstone directly (one write, no
+		// received-then-reject window). The tombstone keeps dedup and makes an
+		// identical resubmit re-admittable.
+		e.transitionLocked(rec, causeBusyTombstone, nativeEvidence{})
+		rec.Revision = 1
+		rec.ObservedAt = protocol.FormatTime(e.now())
+		if err := e.store.Create(rec); err != nil {
+			e.mu.Unlock()
+			return protocol.Reply{Snapshot: e.unpersisted(rec, protocol.StateRejected, protocol.CodeBusy), Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: protocol.CodeBusy}}, nil
+		}
+		e.notifyLocked(rec)
+		busySnap := rec.Snapshot
+		e.mu.Unlock()
+		e.publishRevision(rec)
+		return protocol.Reply{Snapshot: busySnap, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: rec.Code}}, nil
+	}
+	// Admissible + not reserved: Create as received, then dispatch.
 	if err := e.crashAt(PointBeforeReceived); err != nil {
 		e.mu.Unlock()
 		return protocol.Reply{}, err
@@ -256,35 +391,16 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 		e.mu.Unlock()
 		return protocol.Reply{}, err
 	}
-	t, code := e.admissibleLocked(cmd.TargetID, cmd.Epoch, cmd.NotAfter)
-	if code != "" {
-		rec.Revision++
-		rec.State = protocol.StateRejected
-		rec.Code = code
-		rec.ObservedAt = protocol.FormatTime(e.now())
-		err := e.store.Update(rec)
-		e.notifyLocked(rec)
-		e.mu.Unlock()
-		if err != nil {
-			return protocol.Reply{}, err
-		}
-		e.publishRevision(rec)
-		return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit}}, nil
-	}
-	if t == nil {
-		// Target registered but offline: keep received and let Tick admit
-		// or expire it later.
-		e.mu.Unlock()
-		return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit}}, nil
-	}
 	rec.Revision++
-	rec.State = protocol.StateDispatching
 	rec.NativeDispatches = 1
 	rec.ObservedAt = protocol.FormatTime(e.now())
+	e.transitionLocked(rec, causeDispatching, nativeEvidence{})
 	if err := e.crashAt(PointBeforeDispatching); err != nil {
 		e.mu.Unlock()
 		return protocol.Reply{}, err
 	}
+	// Cannot use commitLocked: crash-point ordering requires Update between
+	// PointBeforeDispatching and PointAfterDispatching.
 	if err := e.store.Update(rec); err != nil {
 		e.mu.Unlock()
 		return protocol.Reply{}, err
@@ -304,49 +420,14 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 		return protocol.Reply{}, err
 	}
 
+	// No defer: finishAdmissionLocked unlocks exactly once on every return.
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	rec, _, err = e.store.Get(key)
 	if err != nil {
+		e.mu.Unlock()
 		return protocol.Reply{}, err
 	}
-	if rec.State != protocol.StateDispatching {
-		// A fast native event already moved the record; the evidence wins.
-		return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit}}, nil
-	}
-	switch {
-	case nerr != nil:
-		rec.State = protocol.StateUncertain
-		rec.Code = protocol.CodeAttachmentLost
-	case adm.Admitted:
-		rec.State = protocol.StateRunning
-		run := adm.RunID
-		rec.NativeRun = &run
-	case adm.Code == protocol.CodeCancelledBeforeAdmission:
-		rec.State = protocol.StateCancelled
-		rec.Code = adm.Code
-		// A cancel that raced this gated admission left the disposition
-		// pending; admission never happened, so confirm it now instead of
-		// persisting cancelled with cancel_requested.
-		if rec.Cancel == nil {
-			rec.Cancel = &protocol.Cancel{RequestedAt: protocol.FormatTime(e.now())}
-		}
-		rec.Cancel.Disposition = protocol.CancelConfirmed
-	default:
-		rec.State = protocol.StateRejected
-		rec.Code = adm.Code
-		if rec.Code == "" {
-			rec.Code = protocol.CodeNativeError
-		}
-	}
-	rec.Revision++
-	rec.ObservedAt = protocol.FormatTime(e.now())
-	if err := e.store.Update(rec); err != nil {
-		return protocol.Reply{}, err
-	}
-	e.notifyLocked(rec)
-	e.publishLocked(rec)
-	return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit}}, nil
+	return e.finishAdmissionLocked(rec, true, t, adm, nerr)
 }
 
 // admissibleLocked checks share, epoch, expiry and capability. It returns the
@@ -436,11 +517,12 @@ func (e *Endpoint) cancel(cmd *protocol.Command, src Source) (protocol.Reply, er
 			Origin:    src.Origin,
 		}
 		err := e.store.Create(rec)
-		e.notifyLocked(rec)
-		e.mu.Unlock()
 		if err != nil {
+			e.mu.Unlock()
 			return protocol.Reply{}, err
 		}
+		e.notifyLocked(rec)
+		e.mu.Unlock()
 		e.publishRevision(rec)
 		return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestCancel}}, nil
 	}
@@ -463,19 +545,15 @@ func (e *Endpoint) cancel(cmd *protocol.Command, src Source) (protocol.Reply, er
 		return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestCancel, Disposition: protocol.CancelNoopTerminal}}, nil
 	}
 	if rec.State == protocol.StateReceived {
-		rec.Revision++
-		rec.State = protocol.StateCancelled
-		rec.Code = protocol.CodeCancelledBeforeAdmission
-		rec.Cancel = &protocol.Cancel{RequestedAt: now, Disposition: protocol.CancelConfirmed}
-		rec.ObservedAt = now
-		err := e.store.Update(rec)
-		e.notifyLocked(rec)
-		e.mu.Unlock()
-		if err != nil {
+		e.transitionLocked(rec, causeCancelledBeforeAdmission, nativeEvidence{})
+		if _, err := e.commitLocked(rec, e.targets[targetID]); err != nil {
+			e.mu.Unlock()
 			return protocol.Reply{}, err
 		}
+		snap := rec.Snapshot
+		e.mu.Unlock()
 		e.publishRevision(rec)
-		return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestCancel}}, nil
+		return protocol.Reply{Snapshot: snap, Outcome: protocol.Outcome{Op: protocol.OpRequestCancel, Disposition: protocol.CancelConfirmed}}, nil
 	}
 	t := e.targets[targetID]
 	e.mu.Unlock()
@@ -500,17 +578,23 @@ func (e *Endpoint) cancel(cmd *protocol.Command, src Source) (protocol.Reply, er
 	if nerr != nil {
 		ev = CancelEvidence{Disposition: protocol.CancelRequested, Message: nerr.Error()}
 	}
-	rec.Revision++
-	rec.Cancel = &protocol.Cancel{RequestedAt: now, Disposition: ev.Disposition}
 	if ev.Disposition == protocol.CancelConfirmed {
-		rec.State = protocol.StateCancelled
-		rec.Code = protocol.CodeCancelledByRequest
+		e.transitionLocked(rec, causeCancelledByRequest, nativeEvidence{})
+	} else {
+		// cancel_requested (intent recorded, run not stopped) or noop_terminal
+		// (run already done, nothing to stop). Keep the disposition without
+		// going terminal; reconcile re-drives if a run is bound.
+		// Pro #5: guard against downgrading a confirmed cancel.
+		if rec.Cancel == nil {
+			rec.Cancel = &protocol.Cancel{RequestedAt: now}
+		}
+		if rec.Cancel.Disposition != protocol.CancelConfirmed {
+			rec.Cancel.Disposition = ev.Disposition
+		}
 	}
-	rec.ObservedAt = now
-	if err := e.store.Update(rec); err != nil {
+	if _, err := e.commitLocked(rec, t); err != nil {
 		return protocol.Reply{}, err
 	}
-	e.notifyLocked(rec)
 	e.publishLocked(rec)
 	return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestCancel}}, nil
 }
@@ -581,17 +665,14 @@ func (e *Endpoint) respond(cmd *protocol.Command) (protocol.Reply, error) {
 		e.mu.Unlock()
 		return protocol.Reply{}, protocol.Refuse(protocol.CodeInvalid, "option %q is not offered by interaction %s", cmd.Option, cmd.InteractionID)
 	}
-	rec.Revision++
 	if rec.Answered == nil {
 		rec.Answered = map[string]string{}
 	}
 	rec.Answered[cmd.InteractionID] = cmd.Option
-	rec.ObservedAt = protocol.FormatTime(e.now())
-	if err := e.store.Update(rec); err != nil {
+	if _, err := e.commitLocked(rec, e.targets[rec.TargetID]); err != nil {
 		e.mu.Unlock()
 		return protocol.Reply{}, err
 	}
-	e.notifyLocked(rec)
 	e.mu.Unlock()
 
 	code, rerr := t.att.Respond(key, cmd.Epoch, cmd.InteractionID, cmd.Option)
@@ -609,18 +690,12 @@ func (e *Endpoint) respond(cmd *protocol.Command) (protocol.Reply, error) {
 		if cur, ok, gerr := e.store.Get(key); gerr == nil && ok {
 			if opt, done := cur.Answered[cmd.InteractionID]; !done || opt == cmd.Option {
 				delete(cur.Answered, cmd.InteractionID)
-				cur.Revision++
-				cur.ObservedAt = protocol.FormatTime(e.now())
-				if uerr := e.store.Update(cur); uerr != nil {
-					// The intent could not be cleared durably. Leave the record
-					// as-is and surface the failure: the replay path, which
-					// revalidates the pending interaction, is the safe
-					// arbiter — never a fresh answer.
+				// Pro #4: route through commitLocked — single persist path.
+				if _, uerr := e.commitLocked(cur, nil); uerr != nil {
 					e.mu.Unlock()
 					return protocol.Reply{}, uerr
 				}
 				rec = cur
-				e.notifyLocked(rec)
 			}
 		}
 		e.mu.Unlock()
@@ -687,13 +762,24 @@ func (e *Endpoint) onNative(targetID string, ev NativeEvent) {
 		e.mu.Unlock()
 		return
 	}
-	if rec.State.Terminal() {
-		e.mu.Unlock()
-		return
-	}
+	// Native evidence is NEVER discarded. A completion/failure arriving for a
+	// terminal (e.g. cancelled) record is still REAL: the run produced output
+	// that must be acknowledged so the native slot releases. The result is
+	// recorded via causeNone (State unchanged) and AckDigest is memoed.
+	//
+	// Ruling 4: guard on RunID, not on state. The ONLY event we drop is a
+	// duplicate of a result we already recorded (same RunID, Result present).
+	// Everything else flows — including a completion for a cancelled record.
 	switch ev.Type {
 	case EventRunCompleted, EventRunFailed, EventRunCancelled:
-		if rec.State != protocol.StateRunning && rec.State != protocol.StateDispatching && rec.State != protocol.StateUncertain {
+		// Pro #2: the duplicate guard must compare EVIDENCE, not just presence.
+		// A late FINAL result F for the same run is NOT a duplicate of partial P
+		// — the digests differ. Dropping F keeps P, memoed AckDigest(P), while
+		// the runtime holds F: digests never match, slot never releases. Drop
+		// only when the digest equals what we already recorded.
+		if ev.RunID != "" && rec.NativeRun != nil && *rec.NativeRun == ev.RunID && rec.Result != nil &&
+			protocol.EvidenceDigest(ev.Result) == protocol.EvidenceDigest(rec.Result) {
+			// Same run, same evidence — a true duplicate native event.
 			e.mu.Unlock()
 			return
 		}
@@ -701,45 +787,62 @@ func (e *Endpoint) onNative(targetID string, ev NativeEvent) {
 			e.mu.Unlock()
 			return
 		}
-		switch ev.Type {
-		case EventRunCompleted:
-			rec.State = protocol.StateCompleted
-		case EventRunFailed:
-			rec.State = protocol.StateFailed
-			rec.Code = protocol.CodeNativeError
-		default:
-			rec.State = protocol.StateCancelled
-			rec.Code = protocol.CodeCancelledByRequest
-			if rec.Cancel != nil {
-				rec.Cancel.Disposition = protocol.CancelConfirmed
+		nev := nativeEvidence{runID: ev.RunID, result: ev.Result}
+		if rec.State.Terminal() {
+			// A run event on an already-terminal record: record the result +
+			// NativeRun without changing State (the cancel stands, the result
+			// is acknowledged). runTerminal=true settles a pending cancel — the
+			// run reached terminal, the cancel is resolved.
+			nev.runTerminal = true
+			e.transitionLocked(rec, causeNone, nev)
+		} else if rec.State == protocol.StateRunning || rec.State == protocol.StateDispatching || rec.State == protocol.StateUncertain {
+			switch ev.Type {
+			case EventRunCompleted:
+				e.transitionLocked(rec, causeCompleted, nev)
+			case EventRunFailed:
+				e.transitionLocked(rec, causeFailed, nev)
+			default:
+				e.transitionLocked(rec, causeCancelledByRequest, nev)
 			}
+		} else {
+			// Non-terminal but not a live-run state (e.g. received): a run event
+			// for a record that was never dispatched is spurious.
+			e.mu.Unlock()
+			return
 		}
-		if ev.RunID != "" {
-			run := ev.RunID
-			rec.NativeRun = &run
-		}
-		rec.Result = boundResult(ev.Result)
-		rec.Interaction = nil
 	case EventQuestion:
-		rec.Interaction = ev.Interaction
+		if rec.State.Terminal() {
+			e.mu.Unlock()
+			return
+		}
+		// Pro #5: route through transitionLocked.
+		e.transitionLocked(rec, causeNone, nativeEvidence{interaction: ev.Interaction})
 	case EventQuestionResolved:
-		rec.Interaction = nil
+		if rec.State.Terminal() {
+			e.mu.Unlock()
+			return
+		}
+		// Pro #5: route through transitionLocked (nil interaction clears).
+		e.transitionLocked(rec, causeNone, nativeEvidence{interaction: ev.Interaction})
 	case EventLocalIntervention:
-		rec.LocalIntervention = true
+		if rec.State.Terminal() {
+			e.mu.Unlock()
+			return
+		}
+		// Pro #5: route through transitionLocked.
+		e.transitionLocked(rec, causeNone, nativeEvidence{localIntervention: true})
 	default:
 		e.mu.Unlock()
 		return
 	}
-	rec.Revision++
-	rec.ObservedAt = protocol.FormatTime(e.now())
-	if err := e.store.Update(rec); err != nil {
+	ackDigest, err := e.commitLocked(rec, e.targets[targetID])
+	if err != nil {
 		// The durable write failed on an async path with no client waiting.
 		// Surface a visible storage-failure projection; Reconcile retries.
 		e.notifyStorageFailureLocked(rec, err)
 		e.mu.Unlock()
 		return
 	}
-	e.notifyLocked(rec)
 	if e.crashAt(PointAfterResult) != nil {
 		e.mu.Unlock()
 		return
@@ -747,14 +850,12 @@ func (e *Endpoint) onNative(targetID string, ev NativeEvent) {
 	// B14a: publish stays under e.mu (it writes store metadata that Close
 	// serializes against via this mutex); only the native ack — the slow,
 	// untrusted call — moves OUTSIDE e.mu. The durable ack memo
-	// (memoAckIntentLocked) has already made the intent replayable, so a
-	// wedged attachment ack must not stall command handling, and a crash
-	// mid-ack is recoverable via replayTerminalAck.
-	ackDigest := ""
+	// (commitLocked) has already made the intent replayable, so a wedged
+	// attachment ack must not stall command handling, and a crash mid-ack is
+	// recoverable via replayTerminalAck.
 	var ackAtt Attachment
-	if rec.State.Terminal() {
+	if ackDigest != "" {
 		if t, ok := e.targets[targetID]; ok {
-			ackDigest, _ = e.memoAckIntentLocked(rec, t)
 			ackAtt = t.att
 		}
 	}
@@ -803,6 +904,263 @@ func boundResult(r *protocol.Result) *protocol.Result {
 	return &out
 }
 
+// cause is the single source of truth for why a record transitions. Every
+// call site computes a cause + evidence and hands them to transitionLocked;
+// no caller mutates rec.State/Code/Tombstone/Cancel/Result/NativeRun
+// directly. This makes derived-field hygiene impossible to forget (the root
+// cause of B14c rounds 1-3: 22 scattered sites each missed a cleanup).
+type cause string
+
+const (
+	causeNone                     cause = "" // no state change (evidence-only update)
+	causeDispatching              cause = "dispatching"
+	causeAdmitted                 cause = "admitted" // running, non-terminal
+	causeCompleted                cause = "completed"
+	causeFailed                   cause = "failed"
+	causeCancelledByRequest       cause = "cancelled_by_request"       // a real run was cancelled
+	causeCancelledBeforeAdmission cause = "cancelled_before_admission" // admission never happened
+	causeCancelRequested          cause = "cancel_requested"           // non-terminal: abort inconclusive, reconcile retries
+	causeAttachmentLost           cause = "attachment_lost"            // uncertain
+	causeRefused                  cause = "refused"                    // rejected: unshared/expired/stale_epoch/native_error
+	causeBusyTombstone            cause = "busy_tombstone"             // rejected+busy reservation refusal (dedup + re-admit)
+)
+
+// nativeEvidence carries the evidence a transition derives fields from. Zero
+// values mean "no evidence for that field" — transitionLocked preserves the
+// existing value unless the cause dictates otherwise.
+type nativeEvidence struct {
+	runID             string           // NativeRun ("" = no run)
+	result            *protocol.Result // terminal evidence
+	cancel            *protocol.Cancel // cancel metadata from the command/event path
+	code              protocol.Code    // explicit override for refused/attachment_lost
+	interaction       *protocol.Interaction
+	localIntervention bool
+	runTerminal       bool // the run is definitively finished (noop_terminal) — confirm a pending cancel
+}
+
+// transitionLocked applies one state transition to rec, deriving every field
+// from (cause, ev). It does NOT lock, persist, notify, or publish — the
+// caller owns Revision++/ObservedAt/Update/notify/publishRevision. It NEVER
+// touches fields the cause does not govern (Input, InputDigest, Key,
+// CreatorHost, TargetID, RequestID, Epoch, NotAfter, Origin, Schema).
+//
+// Derivation rules (the ONE truth):
+//  1. rec.State from cause.
+//  2. rec.Code: terminal causes set it from the cause (or ev.code for
+//     refused); non-terminal causes (dispatching/admitted) CLEAR Code and
+//     Tombstone so a re-admitted tombstone advertises no stale busy code.
+//  3. rec.Cancel: created/updated ONLY on cancel causes. cancelled_by_request
+//     sets confirmed (or keeps ev.cancel.Disposition if the abort was
+//     inconclusive — cancel_requested). cancelled_before_admission sets
+//     confirmed. cancel_requested sets the disposition without going terminal.
+//  4. rec.Result: set from ev.result when evidence carries one; a terminal
+//     result arriving on an already-terminal record (onNative no longer
+//     discards) updates Result WITHOUT changing State (the cancel stands, the
+//     result is acknowledged).
+//  5. rec.NativeRun: set from ev.runID whenever evidence carries one. Cleared
+//     only on a fresh causeDispatching with no run, or causeBusyTombstone.
+//  6. memoAckIntentLocked is called by the CALLER (not here) when a terminal
+//     result is retained — transitionLocked only sets the fields.
+func (e *Endpoint) transitionLocked(rec *requests.Record, c cause, ev nativeEvidence) {
+	switch c {
+	case causeNone:
+		// Evidence-only update: record Result/NativeRun/Interaction without
+		// changing State. Used by onNative when a completion arrives for an
+		// already-terminal record (the cancel stands, the result is acked),
+		// and by the noop_terminal abort path. If ev.runTerminal is set (the
+		// run is definitively finished — noop_terminal), a pending cancel is
+		// now confirmed (the run stopped, natively).
+		if ev.result != nil {
+			rec.Result = boundResult(ev.result)
+		}
+		if ev.runTerminal && rec.State.Terminal() && rec.Cancel != nil && rec.Cancel.Disposition != protocol.CancelConfirmed {
+			rec.Cancel.Disposition = protocol.CancelConfirmed
+		}
+		if ev.runID != "" {
+			run := ev.runID
+			rec.NativeRun = &run
+		}
+		if ev.interaction != nil {
+			rec.Interaction = ev.interaction
+		}
+		if ev.localIntervention {
+			rec.LocalIntervention = true
+		}
+		return
+	case causeDispatching:
+		rec.State = protocol.StateDispatching
+		rec.Code = ""
+		rec.Tombstone = false
+		if ev.runID != "" {
+			run := ev.runID
+			rec.NativeRun = &run
+		} else {
+			rec.NativeRun = nil
+		}
+		rec.Interaction = nil
+	case causeAdmitted:
+		rec.State = protocol.StateRunning
+		rec.Code = ""
+		rec.Tombstone = false
+		if ev.runID != "" {
+			run := ev.runID
+			rec.NativeRun = &run
+		}
+		if ev.interaction != nil {
+			rec.Interaction = ev.interaction
+		}
+	case causeCompleted:
+		rec.State = protocol.StateCompleted
+		rec.Code = ""
+		if ev.runID != "" {
+			run := ev.runID
+			rec.NativeRun = &run
+		}
+		if ev.result != nil {
+			rec.Result = boundResult(ev.result)
+		}
+		rec.Interaction = nil
+	case causeFailed:
+		rec.State = protocol.StateFailed
+		rec.Code = protocol.CodeNativeError
+		if ev.runID != "" {
+			run := ev.runID
+			rec.NativeRun = &run
+		}
+		if ev.result != nil {
+			rec.Result = boundResult(ev.result)
+		}
+		rec.Interaction = nil
+	case causeCancelledByRequest:
+		rec.State = protocol.StateCancelled
+		rec.Code = protocol.CodeCancelledByRequest
+		if ev.runID != "" {
+			run := ev.runID
+			rec.NativeRun = &run
+		}
+		// B4: retain partial output retained at cancellation. A cancelled run may
+		// have produced a result (partial output) — dropping it here means NO
+		// result and NO ack digest, so the native slot is never released.
+		if ev.result != nil {
+			rec.Result = boundResult(ev.result)
+		}
+		if rec.Cancel == nil {
+			rec.Cancel = &protocol.Cancel{RequestedAt: protocol.FormatTime(e.now())}
+		}
+		rec.Cancel.Disposition = protocol.CancelConfirmed
+		rec.Interaction = nil
+	case causeCancelledBeforeAdmission:
+		rec.State = protocol.StateCancelled
+		rec.Code = protocol.CodeCancelledBeforeAdmission
+		if rec.Cancel == nil {
+			rec.Cancel = &protocol.Cancel{RequestedAt: protocol.FormatTime(e.now())}
+		}
+		rec.Cancel.Disposition = protocol.CancelConfirmed
+		rec.Interaction = nil
+	case causeCancelRequested:
+		// Non-terminal: the abort was inconclusive. State stays as-is (may be
+		// cancelled from a prior native event); NativeRun stays bound so
+		// reconcile re-drives CancelExact. Disposition records that the stop
+		// is pending, not confirmed.
+		//
+		// Pro #3: a confirmed disposition is a promise already kept and is not
+		// rewritable. Guard it like the other two Disposition writers: if the
+		// cancel was already confirmed, a transient CancelExact error must NOT
+		// downgrade it to cancel_requested. A terminal, confirmed promise
+		// only ever moves forward.
+		if rec.Cancel == nil {
+			rec.Cancel = &protocol.Cancel{RequestedAt: protocol.FormatTime(e.now())}
+		}
+		if rec.Cancel.Disposition != protocol.CancelConfirmed {
+			rec.Cancel.Disposition = protocol.CancelRequested
+		}
+		if ev.runID != "" {
+			run := ev.runID
+			rec.NativeRun = &run
+		}
+	case causeAttachmentLost:
+		rec.State = protocol.StateUncertain
+		rec.Code = protocol.CodeAttachmentLost
+		if ev.runID != "" {
+			run := ev.runID
+			rec.NativeRun = &run
+		}
+	case causeRefused:
+		rec.State = protocol.StateRejected
+		rec.Code = ev.code
+		if rec.Code == "" {
+			rec.Code = protocol.CodeNativeError
+		}
+		rec.Interaction = nil
+	case causeBusyTombstone:
+		rec.State = protocol.StateRejected
+		rec.Code = protocol.CodeBusy
+		rec.Tombstone = true
+		rec.NativeRun = nil
+		rec.Interaction = nil
+	}
+	// Ruling 1 Cancel rule: Cancel is written iff ev.cancel != nil or the
+	// cause is a cancelled_* cause (handled in-case above). Non-cancel causes
+	// that CARRY ev.cancel (e.g. causeAdmitted racing a cancel command) apply
+	// it here — without overriding the in-case disposition for cancelled_*
+	// causes.
+	if ev.cancel != nil && c != causeCancelledByRequest && c != causeCancelledBeforeAdmission && c != causeCancelRequested {
+		if rec.Cancel == nil {
+			rec.Cancel = &protocol.Cancel{RequestedAt: ev.cancel.RequestedAt}
+		}
+		if ev.cancel.Disposition != "" {
+			rec.Cancel.Disposition = ev.cancel.Disposition
+		}
+	}
+}
+
+// owesCancel reports whether we asked the runtime to stop this run and it
+// has not confirmed. This is ONE of two SEPARATE obligations we may owe the
+// runtime — it is about a CANCEL we have not confirmed, nothing else. State
+// is what we promised the CALLER; a cancel we have not confirmed and a result
+// we have not released are two separate things we owe the RUNTIME, and they
+// never share a predicate.
+//
+// Used by reconcileLive's same-run early return and Reconcile's terminal
+// retry selector: only a record that owes a cancel is re-driven.
+func owesCancel(rec *requests.Record) bool {
+	return rec.Cancel != nil &&
+		rec.Cancel.Disposition == protocol.CancelRequested &&
+		rec.NativeRun != nil
+}
+
+// owesAck reports whether the runtime is holding a result for us that we have
+// not released. This is the SECOND obligation — it is about a RESULT we have
+// not acknowledged, nothing else. Result != nil is what makes the digest
+// non-empty (EvidenceDigest(nil) == ""), so a terminal record with no result
+// owes nothing and is never re-driven — that closes the revision-churn bug
+// (Pro #4) BY CONSTRUCTION.
+//
+// Used by replayTerminalAck's crash-gap path (when AckDigest is empty but
+// Result is bound, compute the digest from Result).
+func owesAck(rec *requests.Record) bool {
+	return rec.State.Terminal() && rec.Result != nil && rec.AckDigest == ""
+}
+
+// commitLocked is the persist step that pairs with transitionLocked. It
+// does Revision++, ObservedAt, store.Update, notify, and memo AckDigest — so
+// no caller can forget notify or the ack memo. Returns the ackDigest + the
+// storage error (if any). The caller holds e.mu and owns unlocking + publish.
+// Ruling 3: applyTransition+commitLocked is the ONLY persist path.
+func (e *Endpoint) commitLocked(rec *requests.Record, t *target) (string, error) {
+	rec.Revision++
+	rec.ObservedAt = protocol.FormatTime(e.now())
+	if err := e.store.Update(rec); err != nil {
+		return "", err
+	}
+	e.notifyLocked(rec)
+	ackDigest := ""
+	if rec.State.Terminal() && t != nil {
+		ackDigest, _ = e.memoAckIntentLocked(rec, t)
+	}
+	return ackDigest, nil
+}
+
 // Reconcile runs after Open and on every Tick. It re-examines every
 // non-terminal record against exact native evidence, never re-submits, expires
 // deferred requests whose window closed, and republishes unpublished
@@ -830,7 +1188,15 @@ func (e *Endpoint) Reconcile() error {
 				rerr = e.replayTerminalAck(rec)
 			}
 		default:
-			if rec.State.Terminal() {
+			// The retry selector is owesCancel (a cancel we have not
+			// confirmed). If we don't owe a cancel, replay the ack.
+			// replayTerminalAck is idempotent (returns nil if the attachment
+			// already released the result). A terminal record with no result
+			// has an empty digest and replayTerminalAck returns immediately,
+			// so there is no churn (Pro #4).
+			if owesCancel(rec) {
+				rerr = e.reconcileCancelRetry(rec)
+			} else {
 				rerr = e.replayTerminalAck(rec)
 			}
 		}
@@ -860,7 +1226,21 @@ func (e *Endpoint) Reconcile() error {
 // EvidenceNone and a later Reconcile/Tick does not re-ack. Only the crash
 // case — intent memoed, ack never landed, evidence still retained — replays.
 func (e *Endpoint) replayTerminalAck(rec *requests.Record) error {
-	if rec.AckDigest == "" {
+	// owesAck (Result != nil, AckDigest == "") describes the crash-gap case
+	// where the ack was never sent. But we also replay when AckDigest IS set
+	// but the ack didn't land (PointBeforeAck crash). So we cannot gate on
+	// owesAck alone — the Lookup below is the real gate (EvidenceNone means
+	// the ack already landed). owesAck is referenced here to document why
+	// computing the digest from Result is safe.
+	_ = owesAck(rec)
+	// The digest to acknowledge: if AckDigest was memo'd, use it. If not
+	// (crash between terminal commit and ack memo, owesAck is true), compute
+	// it from rec.Result — owesAck guarantees Result != nil.
+	digest := rec.AckDigest
+	if digest == "" {
+		digest = protocol.EvidenceDigest(rec.Result)
+	}
+	if digest == "" {
 		return nil
 	}
 	e.mu.Lock()
@@ -878,9 +1258,24 @@ func (e *Endpoint) replayTerminalAck(rec *requests.Record) error {
 		// crash. Replay would acknowledge evidence the attachment discarded.
 		return nil
 	}
-	if ev.State != rec.State || ev.Result == nil || protocol.EvidenceDigest(ev.Result) != rec.AckDigest {
+	// B2: validate retained terminal evidence against the bound run + digest,
+	// NOT against the client-facing state. A cancelled record keeps its
+	// promise and never flips to completed (Q2 ruling), so "endpoint cancelled
+	// + native completed" is a SUPPORTED shape. The old ev.State != rec.State
+	// gate rejected exactly that: digest matched, states differed, slot
+	// stayed occupied, later submits refused busy forever. The digest already
+	// proves it is THIS result; the run id proves it is THIS run.
+	if !ev.State.Terminal() || ev.Result == nil || protocol.EvidenceDigest(ev.Result) != digest {
 		// The retained evidence is not the outcome this record acked (a stale
 		// or foreign ack must never release a different request's result).
+		return nil
+	}
+	// Pro #5: identity, not content. Two runs can produce identical output
+	// (same digest). Require the retained evidence's RunID to match the
+	// record's bound NativeRun before acking — otherwise we release another
+	// run's evidence. AcknowledgeResult's arguments carry no run id, so the
+	// attachment cannot catch this either.
+	if rec.NativeRun == nil || ev.RunID != *rec.NativeRun {
 		return nil
 	}
 	// B14a: the native ack runs OUTSIDE e.mu like every other native call —
@@ -888,7 +1283,7 @@ func (e *Endpoint) replayTerminalAck(rec *requests.Record) error {
 	// endpoint mutex forever. The ack digest was durably memoed before it was
 	// first sent, so a crash mid-ack is replayable.
 	key := keyOfRecord(rec)
-	epoch, digest := rec.Epoch, rec.AckDigest
+	epoch := rec.Epoch
 	e.mu.Lock()
 	att := t.att
 	e.mu.Unlock()
@@ -904,6 +1299,87 @@ func (e *Endpoint) Tick() error {
 
 func keyOfRecord(rec *requests.Record) requests.Key {
 	return requests.Key{CreatorHost: rec.CreatorHost, TargetID: rec.TargetID, RequestID: rec.RequestID}
+}
+
+// runtimeInFlightLocked reports whether another request for the same target
+// is in flight at the endpoint: any record in dispatching (admission
+// unknown), running (native-owned), or uncertain (outcome unknown) state.
+// This is the B14 per-runtime reservation — the endpoint's own knowledge of
+// what it has outstanding, not the attachment's Inspect() status, which is
+// advisory and racy. Scope note (B10, ratified deviation from the bead's
+// literal wording): a terminal record whose ack is pending is NOT reserved —
+// the attachment owns the native unacked-result slot (its Submit already
+// refuses on one) and the ack-replay machinery recovers it; reserving it at
+// the endpoint too double-counted and made the endpoint refuse submits the
+// attachment would accept.
+// B10 fail-closed: an enumeration error is PROPAGATED, never read as "none"
+// — a storage error must not authorize the dispatch the reservation exists
+// to prevent. A POISON record for the target itself (undecodable file whose
+// identity is recovered from the path) makes the target's reservation state
+// UNDETERMINABLE — also fail-closed. Poison for other targets does not
+// block this target. The caller holds e.mu.
+func (e *Endpoint) runtimeInFlightLocked(targetID string, exclude requests.Key) (bool, error) {
+	recs, poison, err := e.store.ListWithPoison()
+	if err != nil {
+		return false, err
+	}
+	for _, p := range poison {
+		if p.Key.TargetID == "" || p.Key.TargetID == targetID {
+			// The target's own record is unreadable (or its identity could not
+			// be recovered from the path): its reservation state cannot be
+			// determined, so treat the target as possibly-busy. An empty
+			// TargetID is neither "this target" nor "another" — fail closed.
+			return false, fmt.Errorf("target %s has an unreadable record %s: %w", targetID, p.Path, errUndeterminableReservation)
+		}
+	}
+	for _, r := range recs {
+		if r.TargetID != targetID || keyOfRecord(r) == exclude {
+			continue
+		}
+		switch r.State {
+		case protocol.StateDispatching, protocol.StateRunning, protocol.StateUncertain:
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// errUndeterminableReservation marks a reservation check that could not be
+// completed (poison record for the target); the caller refuses to dispatch.
+var errUndeterminableReservation = errors.New("reservation state undeterminable")
+
+// reconcileCancelRetry re-drives CancelExact for a record carrying outstanding
+// cancel intent (cancel_requested + NativeRun bound). Works for both terminal
+// (the abort was inconclusive) and non-terminal (a cancel raced admission and
+// the record is still running) records. Bounded by NotAfter.
+// This is the B04 reconcile-cancel-retry mechanism, built once here.
+func (e *Endpoint) reconcileCancelRetry(rec *requests.Record) error {
+	key := keyOfRecord(rec)
+	epoch := rec.Epoch
+	targetID := rec.TargetID
+	e.mu.Lock()
+	t, ok := e.targets[targetID]
+	e.mu.Unlock()
+	if !ok || t == nil {
+		return nil // attachment offline; retry next tick
+	}
+	ev, nerr := t.att.CancelExact(key, epoch)
+	e.mu.Lock()
+	rec, exists, err := e.store.Get(key)
+	if err != nil || !exists {
+		e.mu.Unlock()
+		return nil
+	}
+	runID := ""
+	if rec.NativeRun != nil {
+		runID = *rec.NativeRun
+	}
+	if _, cerr := e.applyCancelOutcomeLocked(rec, t, key, epoch, runID, ev, nerr); cerr != nil {
+		e.mu.Unlock()
+		return cerr
+	}
+	e.mu.Unlock()
+	return e.replayTerminalAck(rec)
 }
 
 // reconcileLive resolves one non-terminal record. It calls the attachment
@@ -940,8 +1416,7 @@ func (e *Endpoint) reconcileLive(rec *requests.Record) error {
 			e.mu.Unlock()
 			return nil
 		}
-		rec.State = protocol.StateUncertain
-		rec.Code = protocol.CodeAttachmentLost
+		e.transitionLocked(rec, causeAttachmentLost, nativeEvidence{})
 	case ev.Class == EvidenceTentative:
 		// Bound but native ownership not yet proven. Never reject a submission
 		// that is still about to execute; re-check next tick.
@@ -954,55 +1429,56 @@ func (e *Endpoint) reconcileLive(rec *requests.Record) error {
 			e.mu.Unlock()
 			return nil
 		}
-		rec.State = protocol.StateUncertain
-		rec.Code = protocol.CodeAttachmentLost
+		e.transitionLocked(rec, causeAttachmentLost, nativeEvidence{})
 	case !ev.Known || ev.Class == EvidenceNone:
 		// The adapter has a real admission primitive and retains nothing:
 		// admission did not and cannot happen. Positive evidence, not a guess.
-		rec.State = protocol.StateRejected
-		rec.Code = protocol.CodeNativeError
+		e.transitionLocked(rec, causeRefused, nativeEvidence{})
 	case ev.Admitted && ev.State.Terminal():
-		rec.State = ev.State
-		if ev.State == protocol.StateFailed {
-			rec.Code = protocol.CodeNativeError
+		nev := nativeEvidence{runID: ev.RunID, result: ev.Result, interaction: ev.Interaction}
+		switch ev.State {
+		case protocol.StateFailed:
+			e.transitionLocked(rec, causeFailed, nev)
+		case protocol.StateCancelled:
+			e.transitionLocked(rec, causeCancelledByRequest, nev)
+		default:
+			e.transitionLocked(rec, causeCompleted, nev)
 		}
-		run := ev.RunID
-		rec.NativeRun = &run
-		rec.Result = boundResult(ev.Result)
 		rec.LocalIntervention = rec.LocalIntervention || ev.LocalIntervention
-		rec.Interaction = nil
 	case ev.Admitted:
+		// The same-run early return goes FIRST. A healthy running record
+		// matches neither owesCancel nor owesAck and is a noop, as it was
+		// before this PR. Only a record that OWES A CANCEL may route to
+		// reconcileCancelRetry (Pro #1: the old needsRuntimeSettlement fired
+		// on healthy work because NativeRun != nil && AckDigest == "" is
+		// true for a simply-running record, and CancelExact killed every
+		// prompt within one tick).
 		if rec.State == protocol.StateRunning && rec.NativeRun != nil && *rec.NativeRun == ev.RunID {
+			if owesCancel(rec) {
+				e.mu.Unlock()
+				return e.reconcileCancelRetry(rec)
+			}
 			e.mu.Unlock()
 			return nil
 		}
-		rec.State = protocol.StateRunning
-		rec.Code = ""
-		run := ev.RunID
-		rec.NativeRun = &run
-		rec.Interaction = ev.Interaction
+		e.transitionLocked(rec, causeAdmitted, nativeEvidence{runID: ev.RunID, interaction: ev.Interaction})
 	default:
-		rec.State = protocol.StateRejected
-		rec.Code = protocol.CodeNativeError
+		e.transitionLocked(rec, causeRefused, nativeEvidence{})
 	}
-	rec.Revision++
-	rec.ObservedAt = protocol.FormatTime(e.now())
-	if err := e.store.Update(rec); err != nil {
+	ackDigest, err := e.commitLocked(rec, t)
+	if err != nil {
 		e.notifyStorageFailureLocked(rec, err)
 		e.mu.Unlock()
 		return err
 	}
-	e.notifyLocked(rec)
 	// B14a: the durable ack memo was written under the lock above
-	// (memoAckIntentLocked), so the replay path stays correct if we
-	// crash before the native call. The native ack itself runs OUTSIDE e.mu —
-	// a wedged attachment ack must not hold the endpoint mutex forever.
-	ackKey, ackEpoch, ackDigest, ackAtt := key, rec.Epoch, "", Attachment(nil)
-	if rec.State.Terminal() && ok {
-		ackDigest, _ = e.memoAckIntentLocked(rec, t)
-		if ackDigest != "" {
-			ackAtt = t.att
-		}
+	// (commitLocked), so the replay path stays correct if we crash before
+	// the native call. The native ack itself runs OUTSIDE e.mu — a wedged
+	// attachment ack must not hold the endpoint mutex forever.
+	ackKey, ackEpoch := key, rec.Epoch
+	ackAtt := Attachment(nil)
+	if ackDigest != "" && ok {
+		ackAtt = t.att
 	}
 	e.mu.Unlock()
 	if ackAtt != nil && ackDigest != "" {
@@ -1027,32 +1503,35 @@ func (e *Endpoint) admitDeferred(rec *requests.Record) error {
 			e.mu.Unlock()
 			return err
 		}
-		rec.Revision++
-		rec.State = protocol.StateRejected
-		rec.Code = code
-		rec.ObservedAt = protocol.FormatTime(e.now())
-		err = e.store.Update(rec)
-		if err == nil {
-			e.notifyLocked(rec)
-		}
+		e.transitionLocked(rec, causeRefused, nativeEvidence{code: code})
+		_, err = e.commitLocked(rec, nil)
 		e.mu.Unlock()
 		return err
 	}
-	// Move to dispatching under the lock, then Submit unlocked.
+	// Move to dispatching under the lock, then Submit unlocked. The B14
+	// reservation applies here too: a deferred record whose sibling is still
+	// in flight stays deferred (never dispatched) — Tick retries it after
+	// the in-flight one resolves. Fail-closed on enumeration error.
+	reserved, rerr := e.runtimeInFlightLocked(rec.TargetID, key)
+	if rerr != nil {
+		e.mu.Unlock()
+		return rerr
+	}
+	if reserved {
+		e.mu.Unlock()
+		return nil // still reserved; retry on the next tick
+	}
 	rec, exists, err := e.store.Get(key)
 	if err != nil || !exists || rec.State != protocol.StateReceived {
 		e.mu.Unlock()
 		return err
 	}
-	rec.Revision++
-	rec.State = protocol.StateDispatching
 	rec.NativeDispatches = 1
-	rec.ObservedAt = protocol.FormatTime(e.now())
-	if err := e.store.Update(rec); err != nil {
+	e.transitionLocked(rec, causeDispatching, nativeEvidence{})
+	if _, err := e.commitLocked(rec, e.targets[rec.TargetID]); err != nil {
 		e.mu.Unlock()
 		return err
 	}
-	e.notifyLocked(rec)
 	input := protocol.SubmitInput{}
 	if rec.Input != nil {
 		input = *rec.Input
@@ -1061,39 +1540,242 @@ func (e *Endpoint) admitDeferred(rec *requests.Record) error {
 
 	adm, nerr := t.att.Submit(BoundRequest{Key: key, Epoch: rec.Epoch, Input: input, NotAfter: rec.NotAfter})
 
+	// No defer: finishAdmissionLocked unlocks exactly once on every return.
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	rec, exists, err = e.store.Get(key)
-	if err != nil || !exists || rec.State != protocol.StateDispatching {
+	if err != nil {
+		e.mu.Unlock()
 		return err
 	}
-	switch {
-	case nerr != nil:
-		rec.State, rec.Code = protocol.StateUncertain, protocol.CodeAttachmentLost
-	case adm.Admitted:
-		rec.State = protocol.StateRunning
-		run := adm.RunID
-		rec.NativeRun = &run
-	case adm.Code == protocol.CodeCancelledBeforeAdmission:
-		rec.State = protocol.StateCancelled
-		rec.Code = adm.Code
-		if rec.Cancel == nil {
-			rec.Cancel = &protocol.Cancel{RequestedAt: protocol.FormatTime(e.now())}
+	_, ferr := e.finishAdmissionLocked(rec, exists, t, adm, nerr)
+	return ferr
+}
+
+// finishAdmissionLocked applies one native Submit outcome to the durable
+// record. Shared by the fresh-submit and identical-retry admission paths and
+// by admitDeferred, so all three never disagree about post-admission
+// semantics. The caller holds e.mu and owns unlocking: finishAdmissionLocked
+// unlocks exactly once on every return.
+//
+// B3 (cancel-during-admission): a cancel that raced the gated admission
+// emits EventRunCancelled while Submit is still blocked, so the record is
+// already StateCancelled WITHOUT cancel metadata when Submit returns — the
+// native cancel handler saw terminal and did not create it. The raced
+// cancellation is confirmed ONLY when admission did NOT happen: a positive
+// admission (adm.Admitted) means a live run was bound and the native cancel
+// that moved the record is cancelled_by_request — that run must be ABORTED
+// (CancelExact on the bound run), never reported as cancelled_before_admission.
+// A positive admission with nerr != nil is uncertain (the nerr path).
+func (e *Endpoint) finishAdmissionLocked(rec *requests.Record, exists bool, t *target, adm Admission, nerr error) (protocol.Reply, error) {
+	if !exists {
+		e.mu.Unlock()
+		return protocol.Reply{}, protocol.Refuse(protocol.CodeNotFound, "record vanished during dispatch")
+	}
+	if rec.State == protocol.StateDispatching {
+		// B1: if the record carries outstanding cancel intent (a concurrent
+		// cancel got a transient error and persisted cancel_requested while the
+		// record was still dispatching), admission of a live run must abort it,
+		// not persist running. The abort condition is disposition, not state.
+		if adm.Admitted && rec.Cancel != nil && rec.Cancel.Disposition == protocol.CancelRequested {
+			return e.abortAdmittedRacedRun(rec, t, adm)
 		}
-		rec.Cancel.Disposition = protocol.CancelConfirmed
-	default:
-		rec.State, rec.Code = protocol.StateRejected, adm.Code
-		if rec.Code == "" {
-			rec.Code = protocol.CodeNativeError
+		// The normal path: no native event moved the record while Submit was
+		// in flight. Apply the admission outcome directly.
+		var c cause
+		nev := nativeEvidence{runID: adm.RunID}
+		switch {
+		case nerr != nil:
+			c = causeAttachmentLost
+		case adm.Admitted:
+			c = causeAdmitted
+		case adm.Code == protocol.CodeCancelledBeforeAdmission:
+			c = causeCancelledBeforeAdmission
+		default:
+			c = causeRefused
+			nev.code = adm.Code
+		}
+		e.transitionLocked(rec, c, nev)
+		if _, err := e.commitLocked(rec, t); err != nil {
+			e.mu.Unlock()
+			return protocol.Reply{}, err
+		}
+		snap := rec.Snapshot
+		e.mu.Unlock()
+		e.publishRevision(rec)
+		return protocol.Reply{Snapshot: snap, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: rec.Code}}, nil
+	}
+	// The record was moved by a native event while Submit was in flight
+	// (the raced shape). RECONCILE from (adm, nerr, rec.State) — never branch
+	// on assumptions about what happened.
+	// B1: the abort condition is OUTSTANDING CANCEL INTENT, not just State ==
+	// cancelled. A cancel that got a transient CancelExact error persists
+	// Cancel{cancel_requested} while the record is still dispatching/running.
+	// State is what we promised the caller; disposition is what we owe the
+	// runtime.
+	hasCancelIntent := rec.Cancel != nil && rec.Cancel.Disposition == protocol.CancelRequested
+	if adm.Admitted && (rec.State == protocol.StateCancelled || hasCancelIntent) {
+		// A positive admission raced a cancel (or carries cancel intent): the
+		// run is live and unwanted. Bind NativeRun first (durable), then abort.
+		return e.abortAdmittedRacedRun(rec, t, adm)
+	}
+	if adm.Admitted && (rec.State == protocol.StateCompleted || rec.State == protocol.StateFailed) {
+		// The run finished before Submit returned. Record the result.
+		c := causeCompleted
+		if rec.State == protocol.StateFailed {
+			c = causeFailed
+		}
+		e.transitionLocked(rec, c, nativeEvidence{runID: adm.RunID})
+		if _, err := e.commitLocked(rec, t); err != nil {
+			e.mu.Unlock()
+			return protocol.Reply{}, err
+		}
+		snap := rec.Snapshot
+		e.mu.Unlock()
+		e.publishRevision(rec)
+		return protocol.Reply{Snapshot: snap, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: rec.Code}}, nil
+	}
+	if rec.State == protocol.StateCancelled && !adm.Admitted && nerr == nil {
+		// B3: cancellation raced admission and never got metadata, and the
+		// native outcome positively establishes admission never happened.
+		e.transitionLocked(rec, causeCancelledBeforeAdmission, nativeEvidence{})
+		if _, err := e.commitLocked(rec, t); err != nil {
+			e.notifyStorageFailureLocked(rec, err)
+			e.mu.Unlock()
+			return protocol.Reply{}, err
 		}
 	}
-	rec.Revision++
-	rec.ObservedAt = protocol.FormatTime(e.now())
-	if err := e.store.Update(rec); err != nil {
-		return err
+	// Default: return the durable snapshot. Outcome.Code is read from rec.Code
+	// so snapshot.Code == outcome.Code always (Pro #4).
+	snap := rec.Snapshot
+	out := protocol.Outcome{Op: protocol.OpRequestSubmit, Code: rec.Code}
+	if rec.Cancel != nil {
+		out.Disposition = rec.Cancel.Disposition
 	}
-	e.notifyLocked(rec)
-	return nil
+	e.mu.Unlock()
+	e.publishRevision(rec)
+	return protocol.Reply{Snapshot: snap, Outcome: out}, nil
+}
+
+// applyCancelOutcomeLocked handles the 3-outcome CancelExact fork. The
+// caller holds e.mu on entry with rec freshly re-read from disk. It applies
+// the outcome (cancel_requested / noop_terminal / confirmed), does the
+// unlock-Lookup-relock dance for noop_terminal, persists via commitLocked,
+// and returns the ackDigest (for the caller to send the native ack outside
+// the lock). ONE function for both abortAdmittedRacedRun and
+// reconcileCancelRetry — the scattered-cleanup disease, cured for cancel
+// outcomes too.
+func (e *Endpoint) applyCancelOutcomeLocked(rec *requests.Record, t *target, key requests.Key, epoch, runID string, ev CancelEvidence, nerr error) (string, error) {
+	if nerr != nil || ev.Disposition == protocol.CancelRequested {
+		// Inconclusive abort: the run was NOT confirmed stopped. Keep the
+		// record non-terminal (cancel_requested, NativeRun bound) so reconcile
+		// re-drives CancelExact.
+		e.transitionLocked(rec, causeCancelRequested, nativeEvidence{runID: runID})
+		_, err := e.commitLocked(rec, t)
+		return "", err
+	}
+	if ev.Disposition == protocol.CancelNoopTerminal {
+		// The run already finished. Lookup the retained evidence.
+		e.mu.Unlock()
+		var lookupEv Evidence
+		var lookupErr error
+		if t != nil {
+			lookupEv, lookupErr = t.att.Lookup(key, epoch)
+		}
+		if lookupErr != nil {
+			// B3: a transient Lookup failure must NOT confirm-and-commit with
+			// empty evidence. Leave the disposition unconfirmed so
+			// reconcileCancelRetry re-drives CancelExact on the next tick.
+			e.mu.Lock()
+			return "", lookupErr
+		}
+		e.mu.Lock()
+		// Copy into the caller's *Record instead of rebinding the local param
+		// — otherwise the caller reads a stale object (Pro #2/Pro #4 bug).
+		fresh, ok, _ := e.store.Get(key)
+		if !ok {
+			return "", protocol.Refuse(protocol.CodeNotFound, "record vanished during noop-terminal lookup")
+		}
+		*rec = *fresh
+		lookupRun := runID
+		if lookupEv.RunID != "" {
+			lookupRun = lookupEv.RunID
+		}
+		// causeNone records the result and confirms a pending cancel (folded
+		// into transitionLocked) — no sprinkled force-confirmed after.
+		e.transitionLocked(rec, causeNone, nativeEvidence{runID: lookupRun, result: lookupEv.Result, runTerminal: true})
+		return e.commitLocked(rec, t)
+	}
+	// CancelExact confirmed: the run was stopped. But disk may have moved under
+	// the unlock — a late completion may have committed `completed` while we
+	// were unlocked. Pro #3: do NOT rewrite the promise unconditionally. If the
+	// record is already terminal and NOT cancelled, settle the runtime
+	// obligation only (the cancel disposition is resolved) and return.
+	if rec.State.Terminal() && rec.State != protocol.StateCancelled {
+		// A late native event resolved the record to a different terminal state.
+		// The cancel is still resolved (the run stopped); just settle the
+		// disposition without rewriting the promise.
+		if rec.Cancel != nil && rec.Cancel.Disposition != protocol.CancelConfirmed {
+			rec.Cancel.Disposition = protocol.CancelConfirmed
+			return e.commitLocked(rec, t)
+		}
+		// Already settled; nothing to persist.
+		return "", nil
+	}
+	e.transitionLocked(rec, causeCancelledByRequest, nativeEvidence{runID: runID})
+	return e.commitLocked(rec, t)
+}
+
+// abortAdmittedRacedRun handles the P1 shape: Submit admitted a run, but a
+// native cancel moved the record to cancelled before Submit returned. The
+// run is live and unwanted — abort it via CancelExact. The abort's OUTCOME
+// matters (Pro #1): confirmed -> cancelled_by_request; inconclusive ->
+// non-terminal cancel_requested for reconcile retry; noop_terminal -> the
+// run already finished, Lookup the evidence and record it.
+// The caller holds e.mu; this helper unlocks exactly once.
+func (e *Endpoint) abortAdmittedRacedRun(rec *requests.Record, t *target, adm Admission) (protocol.Reply, error) {
+	key := requests.Key{CreatorHost: rec.CreatorHost, TargetID: rec.TargetID, RequestID: rec.RequestID}
+	epoch := rec.Epoch
+	// Bind NativeRun durably first so reconcile can find the run if the abort
+	// is inconclusive.
+	e.transitionLocked(rec, causeNone, nativeEvidence{runID: adm.RunID})
+	if _, err := e.commitLocked(rec, t); err != nil {
+		e.mu.Unlock()
+		return protocol.Reply{}, err
+	}
+	e.mu.Unlock()
+	var ev CancelEvidence
+	var nerr error
+	if t != nil {
+		ev, nerr = t.att.CancelExact(key, epoch)
+	}
+	e.mu.Lock()
+	rec, exists, err := e.store.Get(key)
+	if err != nil || !exists {
+		e.mu.Unlock()
+		return protocol.Reply{}, protocol.Refuse(protocol.CodeNotFound, "record vanished during abort")
+	}
+	ackDigest, cerr := e.applyCancelOutcomeLocked(rec, t, key, epoch, adm.RunID, ev, nerr)
+	if cerr != nil {
+		e.notifyStorageFailureLocked(rec, cerr)
+		e.mu.Unlock()
+		return protocol.Reply{}, cerr
+	}
+	snap := rec.Snapshot
+	var ackAtt Attachment
+	if ackDigest != "" && t != nil {
+		ackAtt = t.att
+	}
+	ackKey, ackEpoch := key, epoch
+	disposition := protocol.CancelDisposition("")
+	if rec.Cancel != nil {
+		disposition = rec.Cancel.Disposition
+	}
+	e.mu.Unlock()
+	if ackDigest != "" {
+		ackAtt.AcknowledgeResult(ackKey, ackEpoch, ackDigest)
+	}
+	e.publishRevision(rec)
+	return protocol.Reply{Snapshot: snap, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: rec.Code, Disposition: disposition}}, nil
 }
 
 // Wait blocks until the record for ref reaches a terminal or uncertain state
