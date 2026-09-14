@@ -833,7 +833,6 @@ func (c *Carrier) destination(own *fsq.DeliveryRoot, origin map[string]string) (
 	return peer, handle, func() { _ = peer.Close() }, nil
 }
 
-
 // replyWith delivers a reply message. On CommittedDurabilityError (visible
 // rename, unknown fsync), the fsync is retried in place (B12). The message is
 // already in the mailbox; re-delivery after consumption is never idempotent.
