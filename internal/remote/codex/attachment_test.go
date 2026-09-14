@@ -1238,6 +1238,71 @@ func TestB3UnrecognizedTerminalStatusIsMemoized(t *testing.T) {
 	}
 }
 
+// TestB3RPCResponseGuardClosesWindowBeforeLookup pins the RPC-response arm
+// of the B3 fix (packet 10 recut 10c, agent-message-queue-611.22.36): the
+// memo guard exists to close the race window BEFORE any Lookup is made, but
+// the aggregate end-to-end test only checked Inspect AFTER Lookup, so
+// reverting the memo guard alone (or the lookupHistory activeTurn clear
+// alone) still passed. This test drives the same missed-confirmation race
+// and asserts Inspect is not busy and activeTurn is empty with NO Lookup
+// call at all — the exact assertion that fails when any single piece of the
+// fix is reverted.
+func TestB3RPCResponseGuardClosesWindowBeforeLookup(t *testing.T) {
+	sock, srv := startFakeAppServer(t)
+	att, err := Attach(sock, "t1", WithConfirmTimeout(200*time.Millisecond))
+	if err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	t.Cleanup(func() { _ = att.Close() })
+	<-srv.calls // initialize
+	<-srv.calls // thread/resume
+
+	s := att.Inspect()
+	key := requests.Key{CreatorHost: "local", TargetID: s.TargetID, RequestID: "11111111-1111-4111-8111-111111111b3c"}
+	epoch := s.Epoch
+
+	done := make(chan struct {
+		adm core.Admission
+		err error
+	}, 1)
+	// Race window as in the end-to-end test, with a RECOGNIZED status:
+	// this isolates the guard mechanics from the 10a whitelist widening.
+	srv.setTurnStartResponse(`{"jsonrpc":"2.0","id":%s,"result":{"turn":{"id":"turn1","status":"inProgress"}}}`)
+	srv.setTurnStartDelay(func() {
+		srv.notify(t, "turn/started", `{"threadId":"t1","turn":{"id":"turn1"}}`)
+		srv.notify(t, "turn/completed", `{"threadId":"t1","turn":{"id":"turn1","status":"completed"}}`)
+		srv.notify(t, "thread/status/changed", `{"threadId":"t1","status":{"type":"idle"}}`)
+	})
+
+	go func() {
+		adm, err := att.Submit(core.BoundRequest{Key: key, Epoch: epoch, Input: protocol.SubmitInput{Text: "say PONG"}})
+		done <- struct {
+			adm core.Admission
+			err error
+		}{adm, err}
+	}()
+
+	select {
+	case r := <-done:
+		_ = r
+	case <-time.After(10 * time.Second):
+		t.Fatal("submit did not return after missed confirmation (B3)")
+	}
+
+	// NO Lookup, NO thread/read handler installed: if this passes, the
+	// memo guard (not history reconciliation) closed the window.
+	insp := att.Inspect()
+	if insp.Status == "busy" {
+		t.Fatal("Inspect reports busy with NO Lookup called (10c — the RPC-response memo guard did not close the window before Lookup)")
+	}
+	att.mu.Lock()
+	active := att.activeTurn
+	att.mu.Unlock()
+	if active != "" {
+		t.Fatalf("activeTurn = %q, want empty with NO Lookup called (10c — RPC response reinstated a finished turn as active)", active)
+	}
+}
+
 // TestB3MissedConfirmationDoesNotWedgeBusy verifies Pro r2 B3 second half /
 // packet 10 (agent-message-queue-611.22.36): when the confirming userMessage
 // item is missed, turn/completed clears activeTurn but finds no byTurn entry,
