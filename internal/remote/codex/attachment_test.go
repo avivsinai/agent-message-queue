@@ -1082,6 +1082,76 @@ func TestB8aApprovalStateNotTornDownBeforeSend(t *testing.T) {
 	att.mu.Unlock()
 }
 
+// TestB3UnrecognizedTerminalStatusIsMemoized pins the memo guard itself
+// (packet 10 recut 10a, agent-message-queue-611.22.36): the memo's status
+// whitelist was narrower than the terminality the status switch actually
+// implements (completed/interrupted/default->StateFailed), so a turn ending
+// with an unrecognized status was marked terminal by the switch but NOT
+// memoized, and the wedge returned for exactly those statuses. Fix: the
+// turn/completed notification is recorded unconditionally — it means the
+// turn is over. This test drives the same race window with status "error"
+// and asserts, WITHOUT calling Lookup, that the attachment is already idle:
+// the memo guard in Submit's RPC-response arm is what closes the window
+// before any Lookup, and the aggregate end-to-end test never checked that.
+func TestB3UnrecognizedTerminalStatusIsMemoized(t *testing.T) {
+	sock, srv := startFakeAppServer(t)
+	att, err := Attach(sock, "t1", WithConfirmTimeout(200*time.Millisecond))
+	if err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	t.Cleanup(func() { _ = att.Close() })
+	<-srv.calls // initialize
+	<-srv.calls // thread/resume
+
+	s := att.Inspect()
+	key := requests.Key{CreatorHost: "local", TargetID: s.TargetID, RequestID: "11111111-1111-4111-8111-111111111b3a"}
+	epoch := s.Epoch
+
+	done := make(chan struct {
+		adm core.Admission
+		err error
+	}, 1)
+	// Same race window as the end-to-end B3 test, but the completion status
+	// is one the old status whitelist did not know. The notification itself
+	// proves the turn is over — the memo must not re-derive terminality from
+	// the status string.
+	srv.setTurnStartResponse(`{"jsonrpc":"2.0","id":%s,"result":{"turn":{"id":"turn1","status":"inProgress"}}}`)
+	srv.setTurnStartDelay(func() {
+		srv.notify(t, "turn/started", `{"threadId":"t1","turn":{"id":"turn1"}}`)
+		// Confirming userMessage item is MISSED, as in the end-to-end test.
+		srv.notify(t, "turn/completed", `{"threadId":"t1","turn":{"id":"turn1","status":"error"}}`)
+		srv.notify(t, "thread/status/changed", `{"threadId":"t1","status":{"type":"idle"}}`)
+	})
+
+	go func() {
+		adm, err := att.Submit(core.BoundRequest{Key: key, Epoch: epoch, Input: protocol.SubmitInput{Text: "say PONG"}})
+		done <- struct {
+			adm core.Admission
+			err error
+		}{adm, err}
+	}()
+
+	select {
+	case r := <-done:
+		_ = r
+	case <-time.After(10 * time.Second):
+		t.Fatal("submit did not return after missed confirmation (B3)")
+	}
+
+	// NO Lookup here. The memo guard runs in Submit's RPC-response arm
+	// before any Lookup; assert that window directly.
+	insp := att.Inspect()
+	if insp.Status == "busy" {
+		t.Fatal("Inspect reports busy after an unrecognized-status turn/completed with NO Lookup called (10a — memo whitelist narrower than the switch's default terminal arm)")
+	}
+	att.mu.Lock()
+	active := att.activeTurn
+	att.mu.Unlock()
+	if active != "" {
+		t.Fatalf("activeTurn = %q, want empty with NO Lookup called (10a — a turn whose completed notification arrived must never be reinstalled as active)", active)
+	}
+}
+
 // TestB3MissedConfirmationDoesNotWedgeBusy verifies Pro r2 B3 second half /
 // packet 10 (agent-message-queue-611.22.36): when the confirming userMessage
 // item is missed, turn/completed clears activeTurn but finds no byTurn entry,

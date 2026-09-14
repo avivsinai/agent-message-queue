@@ -885,15 +885,18 @@ func (a *Attachment) onNotification(n Notification) {
 		// even when no byTurn entry exists (the confirming userMessage item
 		// was missed). The RPC-response guard consults this memo so a finished
 		// turn is never reinstalled as active.
-		if p.Turn.Status == "completed" || p.Turn.Status == "interrupted" || p.Turn.Status == "failed" {
-			a.terminalTurns[p.Turn.ID] = true
-			// Bound: evict oldest entries if the memo grows beyond a race-window
-			// artefact size.
-			if len(a.terminalTurns) > maxLiveRuns {
-				for k := range a.terminalTurns {
-					delete(a.terminalTurns, k)
-					break
-				}
+		// 10a (packet 10 recut): record UNCONDITIONALLY. The notification means
+		// the turn is over — every arm of the status switch below (including
+		// default -> StateFailed) produces a terminal state, so keeping a
+		// narrower status whitelist here re-derives terminality a second time
+		// and wedges again for any status it fails to enumerate.
+		a.terminalTurns[p.Turn.ID] = true
+		// Bound: evict oldest entries if the memo grows beyond a race-window
+		// artefact size.
+		if len(a.terminalTurns) > maxLiveRuns {
+			for k := range a.terminalTurns {
+				delete(a.terminalTurns, k)
+				break
 			}
 		}
 		r, ok := a.byTurn[p.Turn.ID]
