@@ -250,13 +250,13 @@ func (c *Client) Call(ctx context.Context, method string, params any, result any
 	id := c.nextID.Add(1)
 	raw, err := json.Marshal(params)
 	if err != nil {
-		return fmt.Errorf("%w: marshal params: %v", ErrNotSent, err)
+		return fmt.Errorf("%w: marshal params: %w", ErrNotSent, err)
 	}
 	idRaw := json.RawMessage(fmt.Sprintf("%d", id))
 	msg := rpcMessage{JSONRPC: "2.0", ID: &idRaw, Method: method, Params: raw}
 	data, err := json.Marshal(msg)
 	if err != nil {
-		return fmt.Errorf("%w: marshal message: %v", ErrNotSent, err)
+		return fmt.Errorf("%w: marshal message: %w", ErrNotSent, err)
 	}
 	ch := make(chan rpcMessage, 1)
 	c.mu.Lock()
@@ -274,7 +274,7 @@ func (c *Client) Call(ctx context.Context, method string, params any, result any
 		c.mu.Lock()
 		delete(c.pending, id)
 		c.mu.Unlock()
-		return fmt.Errorf("%w: write: %v", ErrNotSent, err)
+		return fmt.Errorf("%w: write: %w", ErrNotSent, err)
 	}
 	select {
 	case resp, ok := <-ch:
