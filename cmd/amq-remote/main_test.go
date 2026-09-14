@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/amqio"
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/fake"
+	"github.com/avivsinai/agent-message-queue/internal/remote/ipc"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 	"github.com/avivsinai/agent-message-queue/internal/remote/requests"
 )
@@ -265,5 +267,149 @@ func TestReplyRouterForTransientPeerAbsent(t *testing.T) {
 	}
 	if entries, _ := os.ReadDir(fsq.AgentInboxNew(sessionRoot, "codex")); len(entries) == 0 {
 		t.Fatal("TICK2: no reply delivered to caller's codex inbox")
+	}
+}
+
+// TestReplyRouterForSameProjectSessionReply reproduces B7
+// (agent-message-queue-611.22.35): a caller in another SESSION of the same
+// project sets reply_to=<handle>@<session> and no reply_project. The reply
+// must land in that session's root — from an endpoint at the base root and
+// from one inside a session root. While the session does not exist the route
+// is transient (the command stays in new); it is never a silent delivery to
+// the endpoint's own root.
+func TestReplyRouterForSameProjectSessionReply(t *testing.T) {
+	for _, tc := range []struct{ name, endpointRel string }{{"base root", ".agent-mail"}, {"session root", ".agent-mail/s1"}} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("AM_BASE_ROOT", "")
+			t.Setenv("AM_ROOT", "")
+			t.Setenv("AM_SESSION", "")
+			base := t.TempDir()
+			baseRoot := filepath.Join(base, ".agent-mail")
+			endpointRoot := filepath.Join(base, tc.endpointRel)
+			for _, r := range []string{baseRoot, endpointRoot} {
+				if err := fsq.EnsureRootDirs(r); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := fsq.EnsureAgentDirs(endpointRoot, amqio.DefaultHandle); err != nil {
+				t.Fatal(err)
+			}
+			store, err := requests.Open(filepath.Join(endpointRoot, "extensions", "remote"))
+			if err != nil {
+				t.Fatalf("open store: %v", err)
+			}
+			var carrier *amqio.Carrier
+			ep := core.New(core.Config{Store: store, Publish: func(s protocol.Snapshot, origin map[string]string) error {
+				return carrier.Publish(s, origin)
+			}})
+			carrier, err = amqio.New(endpointRoot, amqio.DefaultHandle, ep)
+			if err != nil {
+				t.Fatalf("carrier: %v", err)
+			}
+			carrier.SetReplyRouter(replyRouterFor(endpointRoot))
+			ep.Register(fake.New("fake", "e_1"))
+			t.Cleanup(func() { _ = ep.Close() })
+
+			identity, _ := fsq.SnapshotDeliveryRoot(endpointRoot)
+			droot, _ := fsq.OpenDeliveryRoot(endpointRoot, identity)
+			defer func() { _ = droot.Close() }()
+			now := time.Now()
+			id, _ := format.NewMessageID(now)
+			body := `{"schema":"amq.remote.command/1","op":"request.submit","request_id":"11111111-1111-4111-8111-1111111111b7","target_id":"fake","epoch":"e_1","not_after":"` + protocol.FormatTime(now.Add(time.Minute)) + `","input":{"text":"hi"}}`
+			msg := format.Message{Header: format.Header{
+				Schema: format.CurrentSchema, ID: id, From: "codex", To: []string{amqio.DefaultHandle},
+				Thread: "p2p/codex__remote", Subject: "submit", Created: now.UTC().Format(time.RFC3339Nano), Kind: "todo",
+				ReplyTo: "codex@qa",
+			}, Body: body}
+			data, _ := msg.Marshal()
+			if _, err := fsq.DeliverToInboxes(droot, []string{amqio.DefaultHandle}, id+".md", data); err != nil {
+				t.Fatalf("deliver: %v", err)
+			}
+
+			// TICK 1: session qa does not exist yet. Transient: the command stays in new.
+			if n, _ := carrier.ImportOnce(); n != 0 {
+				t.Fatalf("TICK1: command handled (%d) although the caller session does not exist (B7 — must be transient)", n)
+			}
+			if entries, _ := os.ReadDir(fsq.AgentInboxNew(endpointRoot, amqio.DefaultHandle)); len(entries) != 1 {
+				t.Fatalf("TICK1: command should stay in new, found %d", len(entries))
+			}
+
+			qa := filepath.Join(baseRoot, "qa")
+			if err := fsq.EnsureRootDirs(qa); err != nil {
+				t.Fatal(err)
+			}
+			if err := fsq.EnsureAgentDirs(qa, "codex"); err != nil {
+				t.Fatal(err)
+			}
+			// TICK 2: the session exists. The reply lands in ITS codex inbox.
+			n, err := carrier.ImportOnce()
+			if err != nil || n != 1 {
+				t.Fatalf("TICK2: n=%d err=%v, want the command handled", n, err)
+			}
+			if entries, _ := os.ReadDir(fsq.AgentInboxNew(qa, "codex")); len(entries) == 0 {
+				t.Fatal("TICK2: no reply in the caller session's codex inbox (B7)")
+			}
+			if _, err := os.Stat(filepath.Join(endpointRoot, "agents", "codex")); err == nil {
+				t.Fatal("reply went to a codex mailbox in the endpoint's own root instead of the caller's session (B7)")
+			}
+		})
+	}
+}
+
+// TestCLICancelUsesStoredEpochAfterAttachmentRestart reproduces B6b
+// (agent-message-queue-611.22.35): a fresh attachment mints a fresh epoch,
+// and `cancel` used to send that epoch, so every cancel of a request stored
+// under the old epoch was refused as stale_epoch. cancel now fetches the
+// stored request's epoch first.
+func TestCLICancelUsesStoredEpochAfterAttachmentRestart(t *testing.T) {
+	// Short temp path: the IPC socket lives under root and unix socket paths
+	// are capped at 104 bytes on macOS (same reason startServe uses MkdirTemp).
+	root, err := os.MkdirTemp("", "amqr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	stateDir := filepath.Join(root, stateDirName)
+	store, err := requests.Open(stateDir)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	ep := core.New(core.Config{Store: store})
+	rt := fake.New("fake", "e_1")
+	ep.Register(rt)
+	t.Cleanup(func() { _ = ep.Close() })
+	server, err := ipc.Listen(stateDir, ep)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	ctx, stop := context.WithCancel(context.Background())
+	t.Cleanup(stop)
+	go func() { _ = server.Serve(ctx) }()
+
+	code, out, errOut := cli(t, "", "submit", "fake", "--text", "say hi", "--root", root, "--json")
+	if code != 0 {
+		t.Fatalf("submit exit=%d out=%s err=%s", code, out, errOut)
+	}
+	var rep protocol.Reply
+	if err := json.Unmarshal([]byte(out), &rep); err != nil {
+		t.Fatalf("submit output is not a Reply: %v (%s)", err, out)
+	}
+
+	// The attachment restarts: a new epoch. The stored request keeps e_1.
+	rt.SwitchSession("e_2")
+
+	code, out, errOut = cli(t, "", "cancel", rep.Snapshot.RequestRef, "--root", root, "--json")
+	var crep protocol.Reply
+	if uerr := json.Unmarshal([]byte(out), &crep); uerr != nil {
+		t.Fatalf("cancel exit=%d output is not a Reply: %v (out=%s err=%s)", code, uerr, out, errOut)
+	}
+	if crep.Outcome.Code == protocol.CodeStaleEpoch {
+		t.Fatalf("cancel refused as stale_epoch after an attachment restart (B6b — cancel must use the stored request's epoch): exit=%d out=%s", code, out)
+	}
+	if crep.Snapshot.Cancel == nil && crep.Snapshot.State != protocol.StateCancelled {
+		t.Fatalf("cancel recorded nothing: state=%s outcome=%+v", crep.Snapshot.State, crep.Outcome)
 	}
 }

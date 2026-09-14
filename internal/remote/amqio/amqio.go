@@ -59,6 +59,12 @@ type Carrier struct {
 	// DeliveryRoot the carrier opens, so Publish (which opens its own root)
 	// can be tested for CommittedDurabilityError propagation (B10).
 	syncDirFaultForTest func(dir string) error
+	// Warn is called for non-fatal durability failures (B12). When a
+	// CommittedDurabilityError's SyncDir retry exhausts all attempts, the
+	// message IS in the mailbox (rename committed) but its fsync is
+	// unconfirmed — the carrier returns nil (PublishedRevision advances),
+	// and Warn surfaces the failure so the operator knows. nil = no-op.
+	Warn func(error)
 }
 
 // claimedEntry pairs a cur filename with its message ID for steady-state
@@ -121,6 +127,17 @@ func (e *TransientRouteError) Unwrap() error { return e.err }
 // TransientRouteError; everything else is poison. The carrier does NOT infer
 // from which function failed (B1: that approach missed the real router's
 // errors, which are the only path to peer-root-absent in production).
+// crossRoot reports whether a reply leaves the endpoint's own root: the
+// caller named another project, or another session of this project
+// (reply_to carries a session component, handle@session). The CLI sets a
+// bare-handle reply_to only together with reply_project, so a bare handle
+// with no project is a same-root caller. importOne's route probe and
+// destination() must agree on this, so it is one predicate (B7,
+// agent-message-queue-611.22.35).
+func crossRoot(origin map[string]string) bool {
+	return strings.TrimSpace(origin["reply_project"]) != "" || strings.Contains(strings.TrimSpace(origin["reply_to"]), "@")
+}
+
 func isPoisonRoute(err error) bool {
 	var tre *TransientRouteError
 	return !errors.As(err, &tre)
@@ -529,12 +546,12 @@ func (c *Carrier) importOne(root *fsq.DeliveryRoot, name string) (bool, error) {
 		"reply_to":      msg.Header.ReplyTo,
 		"reply_project": msg.Header.ReplyProject,
 	}
-	// D2: route ONLY when the caller is actually elsewhere. If reply_project
-	// is empty, the caller lives in OUR root — take the pre-existing same-root
-	// path, with the old tolerant handling of a missing or unusable From. Only
-	// a genuinely cross-project caller goes near the ReplyRouter.
-	project := strings.TrimSpace(origin["reply_project"])
-	if project != "" {
+	// D2: probe the route ONLY when the caller is actually elsewhere (another
+	// project, or another session of this project — B7). A same-root caller
+	// takes the pre-existing path with the old tolerant handling of a missing
+	// or unusable From and never goes near the ReplyRouter. Probing BEFORE
+	// Handle means a prompt whose reply can never be delivered is not run.
+	if crossRoot(origin) {
 		// F5: POISON vs TRANSIENT. Poison is a statement about the MESSAGE;
 		// transient is a statement about the WORLD RIGHT NOW.
 		//   - Poison (DLQ): the message names a project we do not know, or
@@ -670,24 +687,29 @@ func (c *Carrier) destination(own *fsq.DeliveryRoot, origin map[string]string) (
 	project := strings.TrimSpace(origin["reply_project"])
 	replyTo := strings.TrimSpace(origin["reply_to"])
 	if project == "" {
-		// B7: an empty reply_project does NOT mean the caller is in our own
-		// root. The caller may be in a DIFFERENT SESSION of the same project.
-		// If reply_to carries a session component (handle@session), route to
-		// that session's root via the router. The router contract (route.go
-		// ResolveReplyRoute) handles empty-project-with-session. If the router
-		// fails, propagate — do not fall back to own-root (that would deliver
-		// the reply to the wrong session).
-		if replyTo == "" || c.router == nil {
-			// D2: same-project caller. A missing or unusable From is NOT a
-			// route error — the reply writes to the sender's handle in our own
-			// root, and an empty `to` means no reply.
+		if !crossRoot(origin) {
+			// Same-root caller: a missing or unusable From is not a route
+			// error; an empty handle means no reply is owed.
 			if to == "" || fsq.ValidateHandle(to) != nil {
 				return own, "", noop, nil
 			}
 			return own, to, noop, nil
 		}
+		// B7: another session of this project. Route through the router; a
+		// failure propagates (transient stays transient), never a silent
+		// fallback to our own root, which would deliver the reply to the
+		// wrong session.
+		if c.router == nil {
+			return nil, "", noop, fmt.Errorf("%w: no reply router configured for cross-session reply to %q", errNoReplyRoute, replyTo)
+		}
 		rootPath, handle, err := c.router("", replyTo)
 		if err != nil {
+			// The router already classified the failure: an absent session root
+			// is transient (it can be created later); anything else is poison.
+			var tre *TransientRouteError
+			if errors.As(err, &tre) {
+				return nil, "", noop, err
+			}
 			return nil, "", noop, fmt.Errorf("%w: cross-session reply to %q: %v", errNoReplyRoute, replyTo, err)
 		}
 		if fsq.ValidateHandle(handle) != nil {
@@ -874,15 +896,18 @@ func (c *Carrier) replyWith(root *fsq.DeliveryRoot, origin map[string]string, su
 		// message IS in the mailbox. Retry dest.SyncDir in place (3
 		// attempts). On success, return nil. On persistent failure, still
 		// return nil so PublishedRevision advances: re-delivery can never be
-		// idempotent after consumption (the path IS the identity), and the
-		// sync failure is surfaced through the storage-failure notification,
-		// not as a retry trigger.
+		// idempotent after consumption (the path IS the identity). The
+		// unconfirmed fsync is surfaced via c.Warn so the operator knows;
+		// it is NOT a retry trigger.
 		relPath := filepath.Join("agents", to, "inbox", "new", id+".md")
 		newDir := filepath.Dir(relPath)
 		for attempt := 0; attempt < 3; attempt++ {
 			if syncErr := dest.SyncDir(newDir); syncErr == nil {
 				return nil
 			}
+		}
+		if c.Warn != nil {
+			c.Warn(fmt.Errorf("%s: unconfirmed fsync for %s after 3 attempts: %w", to, relPath, committed))
 		}
 		return nil
 	}

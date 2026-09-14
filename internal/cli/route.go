@@ -486,7 +486,8 @@ func ResolveReplyRoute(sourceRoot, replyProject, replyTo string) (root, handle s
 			// A NotFoundError ("session not found") is retryable — the session
 			// can be created later. Surface it the same way an absent peer root
 			// is surfaced, so the carrier classifies it TransientRouteError.
-			if errors.Is(err, os.ErrNotExist) {
+			var ecerr *ExitCodeError
+			if errors.As(err, &ecerr) && ecerr.Code == ExitNotFound {
 				return "", "", fmt.Errorf("%w: session %q not found under %s: %v", ErrPeerRootUnreachable, session, base, err)
 			}
 			return "", "", err

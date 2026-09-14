@@ -280,6 +280,9 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 		_ = store.Close()
 		return 0, err
 	}
+	carrier.Warn = func(e error) {
+		fmt.Fprintf(os.Stderr, "amq-remote: durability warning: %v\n", e)
+	}
 	// A cross-project caller must be answered in ITS root, not ours. The
 	// carrier holds only the contract; .amqrc discovery, the peer map and
 	// session layout stay in the package that owns them.
