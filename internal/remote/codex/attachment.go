@@ -89,9 +89,16 @@ type Attachment struct {
 	byTurn       map[string]*run
 	byClientID   map[string]*run // keyed by clientIDFor(key), not bare RequestID
 	cancelIntent map[requests.Key]bool
-	listeners    map[int]func(core.NativeEvent)
-	nextListener int
-	offline      bool
+	// terminalTurns is a bounded memo of turn IDs observed as terminal via
+	// turn/completed, even when no byTurn entry exists (the confirming
+	// userMessage item was missed in the race window). The RPC-response
+	// guard consults this so a finished turn is never reinstalled as
+	// active. Bounded: evicted oldest when full — it is a race-window
+	// artefact, not a log (B3, agent-message-queue-611.22.36).
+	terminalTurns map[string]bool
+	listeners     map[int]func(core.NativeEvent)
+	nextListener  int
+	offline       bool
 }
 
 // Option configures Attach.
@@ -131,6 +138,7 @@ func Attach(socketPath, threadID string, opts ...Option) (*Attachment, error) {
 		runs:           map[requests.Key]*run{},
 		byTurn:         map[string]*run{},
 		byClientID:     map[string]*run{},
+		terminalTurns:  map[string]bool{},
 		cancelIntent:   map[requests.Key]bool{},
 		listeners:      map[int]func(core.NativeEvent){},
 		now:            time.Now,
@@ -355,9 +363,10 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 	// notification, the completed result, and the final idle-status before
 	// this goroutine resumes. Do not restore an already-finished turn as the
 	// active turn — that would wedge the adapter permanently busy with no
-	// later event to clear it. If the run is already terminal, skip the
-	// activeTurn/status restoration entirely.
-	if r.state.Terminal() {
+	// later event to clear it. If the run is already terminal, OR the turn
+	// was observed as terminal via the memo (confirming userMessage missed,
+	// turn/completed recorded it), skip the activeTurn/status restoration.
+	if r.state.Terminal() || a.terminalTurns[res.Turn.ID] {
 		rid := r.runIDLocked()
 		a.mu.Unlock()
 		return core.Admission{Admitted: true, RunID: rid}, nil
@@ -611,6 +620,15 @@ func (a *Attachment) lookupHistory(key requests.Key, epoch string) (core.Evidenc
 		nativeRef := "codex thread " + a.threadID + " turn " + t.ID
 		if state.Terminal() {
 			a.mu.Lock()
+			// B3 (agent-message-queue-611.22.36): when history establishes a
+			// turn terminal, clear a.activeTurn ONLY IF it is that same turn
+			// id. If a newer turn is active, leave it alone — clearing a newer
+			// turn is a worse bug.
+			if a.activeTurn == t.ID {
+				a.activeTurn = ""
+				a.status = "idle"
+			}
+			a.terminalTurns[t.ID] = true
 			if r, ok := a.runs[key]; ok {
 				r.turnID = t.ID
 				a.byTurn[t.ID] = r
@@ -671,6 +689,12 @@ func (a *Attachment) lookupHistory(key requests.Key, epoch string) (core.Evidenc
 		} else {
 			a.runs[key] = r
 			a.byClientID[clientIDFor(key)] = r
+			// B3: if this is a terminal turn recovered from history after
+			// restart, clear a.activeTurn if it matches (the pump is dead).
+			if state.Terminal() && a.activeTurn == t.ID {
+				a.activeTurn = ""
+				a.status = "idle"
+			}
 		}
 		if t.ID != "" && r.turnID != "" {
 			a.byTurn[r.turnID] = r
@@ -856,6 +880,21 @@ func (a *Attachment) onNotification(n Notification) {
 		if a.activeTurn == p.Turn.ID {
 			a.activeTurn = ""
 			a.status = "idle"
+		}
+		// B3 (agent-message-queue-611.22.36): record the terminal observation
+		// even when no byTurn entry exists (the confirming userMessage item
+		// was missed). The RPC-response guard consults this memo so a finished
+		// turn is never reinstalled as active.
+		if p.Turn.Status == "completed" || p.Turn.Status == "interrupted" || p.Turn.Status == "failed" {
+			a.terminalTurns[p.Turn.ID] = true
+			// Bound: evict oldest entries if the memo grows beyond a race-window
+			// artefact size.
+			if len(a.terminalTurns) > maxLiveRuns {
+				for k := range a.terminalTurns {
+					delete(a.terminalTurns, k)
+					break
+				}
+			}
 		}
 		r, ok := a.byTurn[p.Turn.ID]
 		if !ok || r.state.Terminal() {

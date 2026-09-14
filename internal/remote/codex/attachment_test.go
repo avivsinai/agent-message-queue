@@ -1081,3 +1081,90 @@ func TestB8aApprovalStateNotTornDownBeforeSend(t *testing.T) {
 	}
 	att.mu.Unlock()
 }
+
+// TestB3MissedConfirmationDoesNotWedgeBusy verifies Pro r2 B3 second half /
+// packet 10 (agent-message-queue-611.22.36): when the confirming userMessage
+// item is missed, turn/completed clears activeTurn but finds no byTurn entry,
+// so the run is never marked terminal. The RPC response then reinstalls the
+// finished turn as active, wedging the attachment busy forever. The fix:
+// (1) turn/completed records terminal turn IDs in a bounded memo even with no
+// byTurn entry, (2) the RPC-response guard consults the memo, (3) lookupHistory
+// clears activeTurn if it matches the terminal turn.
+func TestB3MissedConfirmationDoesNotWedgeBusy(t *testing.T) {
+	sock, srv := startFakeAppServer(t)
+	att, err := Attach(sock, "t1", WithConfirmTimeout(200*time.Millisecond))
+	if err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	t.Cleanup(func() { _ = att.Close() })
+	<-srv.calls // initialize
+	<-srv.calls // thread/resume
+
+	s := att.Inspect()
+	key := requests.Key{CreatorHost: "local", TargetID: s.TargetID, RequestID: "11111111-1111-4111-8111-111111111b03"}
+	epoch := s.Epoch
+
+	// Submit — it will block on confirmCh. Drive it in a goroutine.
+	done := make(chan struct {
+		adm core.Admission
+		err error
+	}, 1)
+	// Use setTurnStartDelay to send notifications BEFORE the turn/start RPC
+	// response is sent back. This reproduces the race: the read pump processes
+	// the notifications before the Submit goroutine processes the RPC response.
+	// The turn/start response returns turn id "turn1" to match the notifications.
+	srv.setTurnStartResponse(`{"jsonrpc":"2.0","id":%s,"result":{"turn":{"id":"turn1","status":"inProgress"}}}`)
+	srv.setTurnStartDelay(func() {
+		// 1. turn/started(T) — sets activeTurn
+		srv.notify(t, "turn/started", `{"threadId":"t1","turn":{"id":"turn1"}}`)
+		// 2. Our userMessage item is MISSED — do NOT send item/started with
+		//    our clientId. confirmRun never runs, byTurn[turn1] never bound.
+		// 3. turn/completed(T) — clears activeTurn but finds no byTurn entry.
+		//    Without the fix, the terminal observation is lost.
+		srv.notify(t, "turn/completed", `{"threadId":"t1","turn":{"id":"turn1","status":"completed"}}`)
+		// 4. thread/status/changed(idle)
+		srv.notify(t, "thread/status/changed", `{"threadId":"t1","status":{"type":"idle"}}`)
+	})
+
+	go func() {
+		adm, err := att.Submit(core.BoundRequest{Key: key, Epoch: epoch, Input: protocol.SubmitInput{Text: "say PONG"}})
+		done <- struct {
+			adm core.Admission
+			err error
+		}{adm, err}
+	}()
+
+	// Wait for Submit to return (it will timeout on confirmCh — the
+	// confirming userMessage was never sent).
+	select {
+	case r := <-done:
+		// Submit returns uncertain (confirmTimeout). The key assertion is
+		// below: activeTurn must not be turn1.
+		_ = r
+	case <-time.After(10 * time.Second):
+		t.Fatal("submit did not return after missed confirmation (B3)")
+	}
+
+	// Set up thread/read to return the completed turn with our clientId.
+	srv.setThreadReadHandler(func() string {
+		return `{"thread":{"turns":[{"id":"turn1","status":"completed","items":[{"type":"userMessage","id":"i1","clientId":"` + clientIDFor(key) + `","content":[]},{"type":"agentMessage","id":"i2","text":"PONG"}]}]}}`
+	})
+
+	// Lookup resolves the turn via history.
+	_, err = att.Lookup(key, epoch)
+	if err != nil {
+		t.Fatalf("Lookup: %v", err)
+	}
+
+	// The attachment must NOT be busy, and activeTurn must be empty.
+	insp := att.Inspect()
+	if insp.Status == "busy" {
+		t.Fatal("Inspect reports busy after Lookup resolved the terminal turn (B3 — the RPC response reinstated the finished turn as active)")
+	}
+	att.mu.Lock()
+	active := att.activeTurn
+	att.mu.Unlock()
+	if active != "" {
+		t.Fatalf("activeTurn = %q, want empty (B3 — a finished turn must never be reinstalled as active)", active)
+	}
+}
