@@ -828,22 +828,44 @@ func (e *Endpoint) Targets() []string {
 
 func (e *Endpoint) list() []protocol.Session {
 	e.mu.Lock()
-	defer e.mu.Unlock()
-	out := make([]protocol.Session, 0, len(e.targets))
-	for _, t := range e.targets {
-		out = append(out, t.att.Inspect())
+	ids := make([]string, 0, len(e.targets))
+	for id := range e.targets {
+		ids = append(ids, id)
+	}
+	e.mu.Unlock()
+	out := make([]protocol.Session, 0, len(ids))
+	for _, id := range ids {
+		// sessionProjection masks capabilities the D1 gate refuses (steer,
+		// busy=queue) so the advertised capabilities match what the endpoint
+		// actually accepts (agent-message-queue-611.22.36, Pro r2 #22).
+		s, _ := e.sessionProjection(id)
+		out = append(out, s)
 	}
 	return out
 }
 
-func (e *Endpoint) inspect(targetID string) (any, error) {
+// sessionProjection returns the attachment's Inspect() result with
+// capabilities masked to match what the endpoint actually accepts. The D1
+// gate (611.22.23) refuses busy=queue and deliver=steer at v1, so advertising
+// them is a false capability signal — a client that picks operations from
+// the advertised capabilities is told it can steer, then every steer is
+// refused. This helper is used by BOTH list() and inspect() so the mask is
+// in one place (agent-message-queue-611.22.36, Pro r2 #22).
+func (e *Endpoint) sessionProjection(targetID string) (protocol.Session, error) {
 	e.mu.Lock()
 	t, ok := e.targets[targetID]
 	e.mu.Unlock()
 	if !ok {
-		return nil, protocol.Refuse(protocol.CodeNotFound, "target %s is not registered", targetID)
+		return protocol.Session{}, protocol.Refuse(protocol.CodeNotFound, "target %s is not registered", targetID)
 	}
-	return t.att.Inspect(), nil
+	s := t.att.Inspect()
+	// D1 gate: mask steer and busy=queue while the v1 gate refuses them.
+	s.Capabilities.Steer = false
+	return s, nil
+}
+
+func (e *Endpoint) inspect(targetID string) (any, error) {
+	return e.sessionProjection(targetID)
 }
 
 // onNative applies one native observation to the bound record.
