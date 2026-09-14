@@ -1303,6 +1303,97 @@ func TestB3RPCResponseGuardClosesWindowBeforeLookup(t *testing.T) {
 	}
 }
 
+// TestB3LookupHistoryMemoStaysBounded pins the FIFO bound THROUGH the
+// lookupHistory write path (packet 10d, agent-message-queue-611.22.36):
+// lookupHistory recorded turns into the terminalTurns map directly,
+// bypassing the FIFO. Those entries never entered terminalTurnOrder, so the
+// eviction — which tests len(terminalTurnOrder), the SLICE — never noticed
+// the MAP exceeding the bound: every history-recovered terminal turn leaked
+// one memo entry for the life of the attachment. Both memo writers must go
+// through the one owner.
+func TestB3LookupHistoryMemoStaysBounded(t *testing.T) {
+	sock, srv := startFakeAppServer(t)
+	att, err := Attach(sock, "t1")
+	if err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	t.Cleanup(func() { _ = att.Close() })
+	<-srv.calls // initialize
+	<-srv.calls // thread/resume
+	// Drain srv.calls: with more lookups than the channel buffer the fake
+	// server goroutine would block on send and stop answering.
+	go func() {
+		for range srv.calls {
+		}
+	}()
+
+	s := att.Inspect()
+	targetID := s.TargetID
+
+	// thread/read resolves maxLiveRuns DISTINCT completed turns, each with
+	// its own clientId, so each Lookup memoizes a different turn id through
+	// the lookupHistory write path (no in-memory run exists for any key).
+	srv.setThreadReadHandler(func() string {
+		var b strings.Builder
+		b.WriteString(`{"thread":{"turns":[`)
+		for i := 0; i < maxLiveRuns; i++ {
+			if i > 0 {
+				b.WriteString(",")
+			}
+			cid := clientIDFor(requests.Key{CreatorHost: "local", TargetID: targetID, RequestID: fmt.Sprintf("%08x-1111-4111-8111-1111111110b2", i)})
+			b.WriteString(`{"id":"h` + fmt.Sprintf("%03d", i) + `","status":"completed","items":[{"type":"userMessage","id":"i` + fmt.Sprintf("%d", i) + `","clientId":"` + cid + `","content":[]},{"type":"agentMessage","id":"a` + fmt.Sprintf("%d", i) + `","text":"done"}]}`)
+		}
+		b.WriteString(`]}}`)
+		return b.String()
+	})
+
+	for i := 0; i < maxLiveRuns; i++ {
+		key := requests.Key{CreatorHost: "local", TargetID: targetID, RequestID: fmt.Sprintf("%08x-1111-4111-8111-1111111110b2", i)}
+		if _, err := att.Lookup(key, "epoch-1"); err != nil {
+			t.Fatalf("Lookup %d: %v", i, err)
+		}
+	}
+
+	// One more terminal observation through the pump path: this must evict
+	// the OLDEST entry overall — h000, memoized first via lookupHistory.
+	oldest := "h000"
+	att.mu.Lock()
+	wasPresent := att.terminalTurns[oldest]
+	att.mu.Unlock()
+	if !wasPresent {
+		t.Fatalf("oldest history-recovered turn %s was never memoized (lookupHistory path not exercising the memo)", oldest)
+	}
+	srv.notify(t, "turn/completed", `{"threadId":"t1","turn":{"id":"turn-new","status":"completed"}}`)
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		att.mu.Lock()
+		present := att.terminalTurns["turn-new"]
+		att.mu.Unlock()
+		if present {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("turn/completed notification never landed in the memo")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	att.mu.Lock()
+	n := len(att.terminalTurns)
+	order := len(att.terminalTurnOrder)
+	gone := !att.terminalTurns[oldest]
+	att.mu.Unlock()
+	if n != maxLiveRuns {
+		t.Fatalf("terminalTurns has %d entries after maxLiveRuns history recoveries plus one completed, want exactly %d (the lookupHistory write path bypasses the FIFO bound)", n, maxLiveRuns)
+	}
+	if order != n {
+		t.Fatalf("terminalTurnOrder (%d) and terminalTurns (%d) disagree — the memo and its FIFO are out of sync", order, n)
+	}
+	if !gone {
+		t.Fatalf("oldest entry %s (memoized via lookupHistory) survived the eviction for turn-new — the FIFO does not own lookupHistory's entries", oldest)
+	}
+}
+
 // TestB3MissedConfirmationDoesNotWedgeBusy verifies Pro r2 B3 second half /
 // packet 10 (agent-message-queue-611.22.36): when the confirming userMessage
 // item is missed, turn/completed clears activeTurn but finds no byTurn entry,

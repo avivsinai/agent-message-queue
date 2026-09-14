@@ -418,6 +418,27 @@ func (a *Attachment) call(method string, params, result any) error {
 	return a.client.Call(ctx, method, params, result)
 }
 
+// memoTerminal records turnID as an observed-terminal turn and keeps the
+// FIFO bound. Caller holds a.mu.
+func (a *Attachment) memoTerminal(turnID string) {
+	if turnID == "" || a.terminalTurns[turnID] {
+		return
+	}
+	a.terminalTurns[turnID] = true
+	a.terminalTurnOrder = append(a.terminalTurnOrder, turnID)
+	// Bound: evict the OLDEST observed entry when the memo grows beyond a
+	// race-window artefact size. FIFO via terminalTurnOrder: Go map
+	// iteration order is randomized, so walking the map to "evict the
+	// oldest" evicts an arbitrary entry — possibly the turn whose RPC
+	// response is still in flight, reinstating the wedge this memo closes
+	// (10b, packet 10 recut).
+	if len(a.terminalTurnOrder) > maxLiveRuns {
+		oldest := a.terminalTurnOrder[0]
+		a.terminalTurnOrder = a.terminalTurnOrder[1:]
+		delete(a.terminalTurns, oldest)
+	}
+}
+
 // dropRun removes a run binding when admission failed, so a retry is clean.
 func (a *Attachment) dropRun(key requests.Key) {
 	a.mu.Lock()
@@ -631,7 +652,12 @@ func (a *Attachment) lookupHistory(key requests.Key, epoch string) (core.Evidenc
 				a.activeTurn = ""
 				a.status = "idle"
 			}
-			a.terminalTurns[t.ID] = true
+			// 10d (packet 10 recut): record through memoTerminal like every
+			// other memo writer. A bare map write here bypassed the FIFO —
+			// these entries never entered terminalTurnOrder, so eviction
+			// (which measures the SLICE) never removed them and the map grew
+			// without bound, one entry per distinct history-recovered turn.
+			a.memoTerminal(t.ID)
 			if r, ok := a.runs[key]; ok {
 				r.turnID = t.ID
 				a.byTurn[t.ID] = r
@@ -893,21 +919,11 @@ func (a *Attachment) onNotification(n Notification) {
 		// default -> StateFailed) produces a terminal state, so keeping a
 		// narrower status whitelist here re-derives terminality a second time
 		// and wedges again for any status it fails to enumerate.
-		if !a.terminalTurns[p.Turn.ID] {
-			a.terminalTurns[p.Turn.ID] = true
-			a.terminalTurnOrder = append(a.terminalTurnOrder, p.Turn.ID)
-			// Bound: evict the OLDEST observed entry when the memo grows
-			// beyond a race-window artefact size. FIFO via terminalTurnOrder:
-			// Go map iteration order is randomized, so walking the map to
-			// "evict the oldest" evicts an arbitrary entry — possibly the
-			// turn whose RPC response is still in flight, reinstating the
-			// wedge this memo closes (10b, packet 10 recut).
-			if len(a.terminalTurnOrder) > maxLiveRuns {
-				oldest := a.terminalTurnOrder[0]
-				a.terminalTurnOrder = a.terminalTurnOrder[1:]
-				delete(a.terminalTurns, oldest)
-			}
-		}
+		// 10b (packet 10 recut): the bound is owned by memoTerminal (FIFO
+		// via terminalTurnOrder — Go map iteration order is randomized, so
+		// walking the map to "evict the oldest" evicts an arbitrary entry,
+		// possibly the turn whose RPC response is still in flight).
+		a.memoTerminal(p.Turn.ID)
 		r, ok := a.byTurn[p.Turn.ID]
 		if !ok || r.state.Terminal() {
 			a.mu.Unlock()
