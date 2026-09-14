@@ -114,7 +114,10 @@ func TestB14eCompactSkipsUnsettled(t *testing.T) {
 	run := "run_" + id
 	rec.Revision, rec.State = 2, protocol.StateCancelled
 	rec.Code = protocol.CodeCancelledByRequest
-	rec.NativeRun = &run
+	// B9: the run was released (NativeRun nil); the RESULT alone owes the ack.
+	// With NativeRun set, the old NativeRun-based predicate also refused, so
+	// this test only proves B9 when NativeRun is nil.
+	rec.NativeRun = nil
 	rec.Result = &protocol.Result{Text: "cancelled result"}
 	rec.AckDigest = "" // unsettled: result retained, no ack
 	if err := store.Update(rec); err != nil {
@@ -131,7 +134,7 @@ func TestB14eCompactSkipsUnsettled(t *testing.T) {
 		t.Fatal("unsettled record was tombstoned — Result would be lost")
 	}
 	if got.Result == nil || got.Result.Text != "cancelled result" {
-		t.Fatalf("NativeRun lost: %v", got.NativeRun)
+		t.Fatalf("Result lost: %+v", got.Result)
 	}
 }
 
