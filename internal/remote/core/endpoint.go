@@ -7,7 +7,6 @@ package core
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -178,16 +177,6 @@ func (e *Endpoint) Handle(cmd *protocol.Command, src Source) (any, error) {
 		return e.respond(cmd)
 	}
 	return nil, protocol.Refuse(protocol.CodeInvalid, "unknown op")
-}
-
-// InputDigest is the protocol digest of a submit input, computed from its
-// canonical JSON so every carrier agrees on the bytes.
-func InputDigest(in *protocol.SubmitInput) string {
-	data, err := json.Marshal(in)
-	if err != nil {
-		return ""
-	}
-	return requests.Digest(data)
 }
 
 func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, error) {
