@@ -93,12 +93,14 @@ type Attachment struct {
 	// turn/completed, even when no byTurn entry exists (the confirming
 	// userMessage item was missed in the race window). The RPC-response
 	// guard consults this so a finished turn is never reinstalled as
-	// active. Bounded: evicted oldest when full — it is a race-window
-	// artefact, not a log (B3, agent-message-queue-611.22.36).
-	terminalTurns map[string]bool
-	listeners     map[int]func(core.NativeEvent)
-	nextListener  int
-	offline       bool
+	// active. Bounded via terminalTurnOrder (FIFO): when full, the OLDEST
+	// observation is evicted — it is a race-window artefact, not a log
+	// (B3, agent-message-queue-611.22.36).
+	terminalTurns     map[string]bool
+	terminalTurnOrder []string // FIFO of the same turn IDs; drives eviction
+	listeners         map[int]func(core.NativeEvent)
+	nextListener      int
+	offline           bool
 }
 
 // Option configures Attach.
@@ -131,18 +133,19 @@ func Attach(socketPath, threadID string, opts ...Option) (*Attachment, error) {
 	// that true: a handler that touches a.client outside those maps would
 	// read it before the assignment below.
 	a := &Attachment{
-		threadID:       threadID,
-		targetID:       TargetID(threadID),
-		epoch:          fmt.Sprintf("cx-%d", time.Now().UnixNano()),
-		status:         "unknown",
-		runs:           map[requests.Key]*run{},
-		byTurn:         map[string]*run{},
-		byClientID:     map[string]*run{},
-		terminalTurns:  map[string]bool{},
-		cancelIntent:   map[requests.Key]bool{},
-		listeners:      map[int]func(core.NativeEvent){},
-		now:            time.Now,
-		confirmTimeout: confirmTimeout,
+		threadID:          threadID,
+		targetID:          TargetID(threadID),
+		epoch:             fmt.Sprintf("cx-%d", time.Now().UnixNano()),
+		status:            "unknown",
+		runs:              map[requests.Key]*run{},
+		byTurn:            map[string]*run{},
+		byClientID:        map[string]*run{},
+		terminalTurns:     map[string]bool{},
+		terminalTurnOrder: []string{},
+		cancelIntent:      map[requests.Key]bool{},
+		listeners:         map[int]func(core.NativeEvent){},
+		now:               time.Now,
+		confirmTimeout:    confirmTimeout,
 	}
 	for _, o := range opts {
 		o(a)
@@ -890,13 +893,19 @@ func (a *Attachment) onNotification(n Notification) {
 		// default -> StateFailed) produces a terminal state, so keeping a
 		// narrower status whitelist here re-derives terminality a second time
 		// and wedges again for any status it fails to enumerate.
-		a.terminalTurns[p.Turn.ID] = true
-		// Bound: evict oldest entries if the memo grows beyond a race-window
-		// artefact size.
-		if len(a.terminalTurns) > maxLiveRuns {
-			for k := range a.terminalTurns {
-				delete(a.terminalTurns, k)
-				break
+		if !a.terminalTurns[p.Turn.ID] {
+			a.terminalTurns[p.Turn.ID] = true
+			a.terminalTurnOrder = append(a.terminalTurnOrder, p.Turn.ID)
+			// Bound: evict the OLDEST observed entry when the memo grows
+			// beyond a race-window artefact size. FIFO via terminalTurnOrder:
+			// Go map iteration order is randomized, so walking the map to
+			// "evict the oldest" evicts an arbitrary entry — possibly the
+			// turn whose RPC response is still in flight, reinstating the
+			// wedge this memo closes (10b, packet 10 recut).
+			if len(a.terminalTurnOrder) > maxLiveRuns {
+				oldest := a.terminalTurnOrder[0]
+				a.terminalTurnOrder = a.terminalTurnOrder[1:]
+				delete(a.terminalTurns, oldest)
 			}
 		}
 		r, ok := a.byTurn[p.Turn.ID]

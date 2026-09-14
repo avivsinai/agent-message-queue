@@ -1082,6 +1082,92 @@ func TestB8aApprovalStateNotTornDownBeforeSend(t *testing.T) {
 	att.mu.Unlock()
 }
 
+// TestB3TerminalMemoEvictionIsFIFO pins the eviction mechanism (packet 10
+// recut 10b, agent-message-queue-611.22.36): the original eviction walked
+// the map with Go's randomized iteration and deleted the FIRST key it saw
+// while the comment claimed "oldest" — so it could evict the turn whose RPC
+// response is still in flight, reinstating the B3 wedge intermittently.
+// The memo must evict strictly in insertion order (FIFO via
+// terminalTurnOrder): each new entry beyond maxLiveRuns evicts exactly the
+// oldest observation and nothing else.
+func TestB3TerminalMemoEvictionIsFIFO(t *testing.T) {
+	sock, srv := startFakeAppServer(t)
+	att, err := Attach(sock, "t1")
+	if err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	t.Cleanup(func() { _ = att.Close() })
+	<-srv.calls // initialize
+	<-srv.calls // thread/resume
+
+	memoLen := func() int {
+		att.mu.Lock()
+		defer att.mu.Unlock()
+		return len(att.terminalTurns)
+	}
+	waitMemoFor := func(t *testing.T, att *Attachment, id string) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			att.mu.Lock()
+			ok := att.terminalTurns[id]
+			att.mu.Unlock()
+			if ok {
+				return
+			}
+			time.Sleep(2 * time.Millisecond)
+		}
+		t.Fatalf("terminalTurns never recorded %s", id)
+	}
+	waitMemo := func(n int) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			if memoLen() == n {
+				return
+			}
+			time.Sleep(2 * time.Millisecond)
+		}
+		t.Fatalf("terminalTurns never reached %d entries (have %d)", n, memoLen())
+	}
+	notifyCompleted := func(id string) {
+		t.Helper()
+		srv.notify(t, "turn/completed", `{"threadId":"t1","turn":{"id":"`+id+`","status":"completed"}}`)
+	}
+
+	// Prefill the memo to its bound.
+	for i := 0; i < maxLiveRuns; i++ {
+		notifyCompleted(fmt.Sprintf("t%02d", i))
+	}
+	waitMemo(maxLiveRuns)
+
+	// Each further completion must evict exactly the OLDEST entry. With the
+	// randomized-map eviction this fails with probability 16/17 on the first
+	// round already.
+	for n := maxLiveRuns; n < maxLiveRuns+50; n++ {
+		newest := fmt.Sprintf("t%02d", n)
+		oldest := fmt.Sprintf("t%02d", n-maxLiveRuns)
+		notifyCompleted(newest)
+		// Wait until the NEWEST entry has landed (the memo was already full,
+		// so len alone cannot tell us the notification was processed), then
+		// the eviction for it has happened too.
+		waitMemoFor(t, att, newest)
+		att.mu.Lock()
+		if att.terminalTurns[oldest] {
+			att.mu.Unlock()
+			t.Fatalf("round %d: oldest entry %s still memoized after evicting for %s (eviction is not FIFO)", n, oldest, newest)
+		}
+		for i := n - maxLiveRuns + 1; i <= n; i++ {
+			id := fmt.Sprintf("t%02d", i)
+			if !att.terminalTurns[id] {
+				att.mu.Unlock()
+				t.Fatalf("round %d: entry %s was evicted but is not the oldest (random eviction dropped a possibly-live turn)", n, id)
+			}
+		}
+		att.mu.Unlock()
+	}
+}
+
 // TestB3UnrecognizedTerminalStatusIsMemoized pins the memo guard itself
 // (packet 10 recut 10a, agent-message-queue-611.22.36): the memo's status
 // whitelist was narrower than the terminality the status switch actually
