@@ -753,12 +753,18 @@ func (a *Attachment) Respond(key requests.Key, epoch, interactionID, option stri
 		a.mu.Unlock()
 		return protocol.CodeInvalid, nil
 	}
-	delete(r.approvalReqs, interactionID)
-	r.interaction = nil
 	a.mu.Unlock()
 	if err := a.client.Respond(reqID, map[string]string{"decision": option}); err != nil {
 		return "", err
 	}
+	// B8a (agent-message-queue-611.22.36): tear down the approval state ONLY
+	// after Respond succeeds. Previously the delete + nil happened before the
+	// send, so a transport failure left r.interaction == nil and a retry
+	// returned CodeAlreadyResolved while the native question was still open.
+	a.mu.Lock()
+	delete(r.approvalReqs, interactionID)
+	r.interaction = nil
+	a.mu.Unlock()
 	a.emit(core.NativeEvent{Type: core.EventQuestionResolved, Key: key, RunID: a.runID(r)})
 	return "", nil
 }
