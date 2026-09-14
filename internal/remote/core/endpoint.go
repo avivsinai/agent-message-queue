@@ -1142,13 +1142,6 @@ func owesCancel(rec *requests.Record) bool {
 // owes nothing and is never re-driven — that closes the revision-churn bug
 // (Pro #4) BY CONSTRUCTION.
 //
-// owesAck reports whether the runtime is holding a result for us that we have
-// not released. This is the SECOND obligation — it is about a RESULT we have
-// not acknowledged, nothing else. Result != nil is what makes the digest
-// non-empty (EvidenceDigest(nil) == ""), so a terminal record with no result
-// owes nothing and is never re-driven — that closes the revision-churn bug
-// (Pro #4) BY CONSTRUCTION.
-//
 // Used by replayTerminalAck's crash-gap path (when AckDigest is empty but
 // Result is bound, compute the digest from Result).
 func owesAck(rec *requests.Record) bool {
@@ -1615,6 +1608,26 @@ func (e *Endpoint) admitDeferred(rec *requests.Record) error {
 	return ferr
 }
 
+// admissionCause maps Submit's answer to the transition it justifies. It is
+// the ONE reading of (adm, nerr): a transport failure proves nothing
+// (attachment_lost keeps the correlation), admitted binds the run, a
+// cancelled-before-admission code is a positive non-admission, and any other
+// code is a positive refusal.
+func admissionCause(adm Admission, nerr error) (cause, nativeEvidence) {
+	nev := nativeEvidence{runID: adm.RunID}
+	switch {
+	case nerr != nil:
+		return causeAttachmentLost, nev
+	case adm.Admitted:
+		return causeAdmitted, nev
+	case adm.Code == protocol.CodeCancelledBeforeAdmission:
+		return causeCancelledBeforeAdmission, nev
+	default:
+		nev.code = adm.Code
+		return causeRefused, nev
+	}
+}
+
 // finishAdmissionLocked applies one native Submit outcome to the durable
 // record. Shared by the fresh-submit and identical-retry admission paths and
 // by admitDeferred, so all three never disagree about post-admission
@@ -1645,19 +1658,7 @@ func (e *Endpoint) finishAdmissionLocked(rec *requests.Record, exists bool, t *t
 		}
 		// The normal path: no native event moved the record while Submit was
 		// in flight. Apply the admission outcome directly.
-		var c cause
-		nev := nativeEvidence{runID: adm.RunID}
-		switch {
-		case nerr != nil:
-			c = causeAttachmentLost
-		case adm.Admitted:
-			c = causeAdmitted
-		case adm.Code == protocol.CodeCancelledBeforeAdmission:
-			c = causeCancelledBeforeAdmission
-		default:
-			c = causeRefused
-			nev.code = adm.Code
-		}
+		c, nev := admissionCause(adm, nerr)
 		e.transitionLocked(rec, c, nev)
 		if _, err := e.commitLocked(rec, t); err != nil {
 			e.mu.Unlock()
@@ -1708,14 +1709,17 @@ func (e *Endpoint) finishAdmissionLocked(rec *requests.Record, exists bool, t *t
 			return protocol.Reply{}, err
 		}
 	}
-	// B4: if reconcile moved the record to uncertain while Submit was in
-	// flight, and Submit returned a DEFINITIVE non-admission (a refusal code,
-	// not a transport error), apply that authoritative evidence. The refusal
-	// is real — it came from the native runtime, not from missing history.
-	// Without this, the record stays uncertain and the runtime reservation
-	// blocks every later request for that target forever.
-	if rec.State == protocol.StateUncertain && !adm.Admitted && nerr == nil && adm.Code != "" {
-		e.transitionLocked(rec, causeRefused, nativeEvidence{code: adm.Code})
+	// B4: reconcile moved the record to uncertain while Submit was in flight
+	// (attachment lost, history silent). Submit's own answer is exact native
+	// evidence and outranks that uncertainty: admitted binds the run and goes
+	// running; a definitive code goes to its terminal state and releases the
+	// reservation. A transport failure (nerr != nil), or no code at all,
+	// proves nothing and leaves the record uncertain for reconcile. Without
+	// this the record stays uncertain and the reservation blocks every later
+	// request for that target forever.
+	if rec.State == protocol.StateUncertain && nerr == nil && (adm.Admitted || adm.Code != "") {
+		c, nev := admissionCause(adm, nil)
+		e.transitionLocked(rec, c, nev)
 		if _, err := e.commitLocked(rec, t); err != nil {
 			e.notifyStorageFailureLocked(rec, err)
 			e.mu.Unlock()
