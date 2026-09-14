@@ -111,7 +111,6 @@ func TestB14eCompactSkipsUnsettled(t *testing.T) {
 	if err := store.Create(rec); err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	run := "run_" + id
 	rec.Revision, rec.State = 2, protocol.StateCancelled
 	rec.Code = protocol.CodeCancelledByRequest
 	// B9: the run was released (NativeRun nil); the RESULT alone owes the ack.
