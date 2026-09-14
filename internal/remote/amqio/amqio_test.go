@@ -593,9 +593,31 @@ func TestImportCrossProjectUnroutableDoesNotBlockRoutable(t *testing.T) {
 	if entries, _ := os.ReadDir(fsq.AgentInboxCur(endpointRoot, DefaultHandle)); len(entries) < 1 {
 		t.Fatalf("routable B not claimed (D1 reverted — loop aborted on A error): %d in cur", len(entries))
 	}
-	// A is still in new (reply failed, not claimed).
-	if entries, _ := os.ReadDir(fsq.AgentInboxNew(endpointRoot, DefaultHandle)); len(entries) < 1 {
-		t.Fatalf("A should still be in new (reply failed): %d", len(entries))
+	// A is claimed too: the claim and receipt come BEFORE the reply
+	// (agent-message-queue-611.22.37), so a failed delivery leaves a claimed
+	// command whose reply is still owed, not an unclaimed command that would be
+	// re-answered under a fresh id. Nothing reached the read-only inbox.
+	if entries, _ := os.ReadDir(fsq.AgentInboxNew(endpointRoot, DefaultHandle)); len(entries) != 0 {
+		t.Fatalf("A left in new after its claim: %d", len(entries))
+	}
+	if entries, _ := os.ReadDir(codexInbox); len(entries) != 0 {
+		t.Fatalf("reply reached a read-only inbox: %d", len(entries))
+	}
+	carrier.mu.Lock()
+	_, owed := carrier.claimedThisRun[idA]
+	carrier.mu.Unlock()
+	if !owed {
+		t.Fatal("A's reply obligation was dropped from the pending set")
+	}
+	// The inbox becomes writable: the next tick delivers A's reply exactly once.
+	if err := os.Chmod(codexInbox, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := carrier.ImportOnce(); err != nil {
+		t.Fatalf("second tick: %v", err)
+	}
+	if entries, _ := os.ReadDir(codexInbox); len(entries) != 1 {
+		t.Fatalf("A's reply after the inbox recovered: %d files, want 1", len(entries))
 	}
 }
 

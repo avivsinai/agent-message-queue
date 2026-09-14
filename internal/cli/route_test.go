@@ -195,3 +195,40 @@ func TestB7ResolveReplyRouteSessionNotFoundIsRetryable(t *testing.T) {
 		t.Fatalf("missing session error = %v, want ErrPeerRootUnreachable (retryable, not poison)", err)
 	}
 }
+
+// TestResolveReplyRouteCrossProjectMissingSessionIsRetryable reproduces packet 7
+// of agent-message-queue-611.22.36: when the peer BASE root exists but the
+// requested peer SESSION does not yet, the planner returned an unmarked
+// not-found error, the adapter did not classify it transient, and the carrier
+// dead-lettered the command. An absent session is retryable like an absent
+// peer root; an unknown project stays permanent.
+func TestResolveReplyRouteCrossProjectMissingSessionIsRetryable(t *testing.T) {
+	projectDir := filepath.Join(t.TempDir(), "endpoint")
+	sourceRoot := filepath.Join(projectDir, ".agent-mail")
+	ensureRouteAgents(t, sourceRoot, "remote")
+	callerBase := filepath.Join(filepath.Dir(projectDir), "caller", ".agent-mail")
+	ensureRouteAgents(t, callerBase) // base exists, session "qa" does not
+	writeRouteAmqrc(t, projectDir, map[string]any{
+		"root":    ".agent-mail",
+		"project": "endpoint",
+		"peers":   map[string]string{"caller": filepath.Join("..", "caller", ".agent-mail")},
+	})
+	t.Setenv(envRoot, "")
+	t.Setenv(envGlobalRoot, "")
+	t.Chdir(projectDir)
+	resetAmqrcCache()
+	t.Cleanup(resetAmqrcCache)
+
+	_, _, err := ResolveReplyRoute(sourceRoot, "caller", "codex@qa")
+	if err == nil {
+		t.Fatal("expected an error for the missing peer session")
+	}
+	if !errors.Is(err, ErrPeerRootUnreachable) {
+		t.Fatalf("missing peer session = %v, want ErrPeerRootUnreachable (retryable, not poison)", err)
+	}
+	// An unknown project is not a destination that can appear later.
+	_, _, err = ResolveReplyRoute(sourceRoot, "nobody", "codex@qa")
+	if err == nil || errors.Is(err, ErrPeerRootUnreachable) {
+		t.Fatalf("unknown project = %v, want a permanent error", err)
+	}
+}

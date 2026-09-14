@@ -384,8 +384,8 @@ func TestCurRecoveryIdempotentReply(t *testing.T) {
 		t.Fatalf("reply filename changed between recoveries: %s -> %s", entries1[0].Name(), entries2[0].Name())
 	}
 
-	// The recovery reply's filename must contain _recover_ (not _publish_rev).
-	if !strings.Contains(entries1[0].Name(), "_recover_") {
+	// The recovery reply's filename must contain _reply_ (not _publish_rev).
+	if !strings.Contains(entries1[0].Name(), "_reply_") {
 		t.Fatalf("reply filename is not a recovery reply: %s", entries1[0].Name())
 	}
 }
@@ -415,8 +415,8 @@ func TestCurRecoveryReplyTimestampPrefix(t *testing.T) {
 	if !strings.HasPrefix(name, "20") {
 		t.Fatalf("recovery reply filename does not start with a timestamp: %s", name)
 	}
-	if !strings.Contains(name, "_recover_") {
-		t.Fatalf("recovery reply filename missing _recover_ marker: %s", name)
+	if !strings.Contains(name, "_reply_") {
+		t.Fatalf("recovery reply filename missing _reply_ marker: %s", name)
 	}
 }
 

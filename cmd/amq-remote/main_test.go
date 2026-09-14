@@ -413,3 +413,97 @@ func TestCLICancelUsesStoredEpochAfterAttachmentRestart(t *testing.T) {
 		t.Fatalf("cancel recorded nothing: state=%s outcome=%+v", crep.Snapshot.State, crep.Outcome)
 	}
 }
+
+// TestReplyRouterForPeerSessionNotYetCreated reproduces packet 7 of
+// agent-message-queue-611.22.36: a cross-project reply whose peer BASE root
+// exists but whose peer SESSION does not yet exist was classified poison and
+// the command was dead-lettered; creating the session afterwards could not
+// bring it back. An absent peer session is as transient as an absent peer
+// root: the command stays in new and is delivered once the session exists.
+func TestReplyRouterForPeerSessionNotYetCreated(t *testing.T) {
+	t.Setenv("AM_BASE_ROOT", "")
+	t.Setenv("AM_ROOT", "")
+	t.Setenv("AM_SESSION", "")
+	endpointBase := t.TempDir()
+	endpointRoot := filepath.Join(endpointBase, ".agent-mail")
+	if err := fsq.EnsureRootDirs(endpointRoot); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureAgentDirs(endpointRoot, amqio.DefaultHandle); err != nil {
+		t.Fatal(err)
+	}
+	callerRoot := filepath.Join("..", "caller", ".agent-mail")
+	amqrcData, _ := json.Marshal(map[string]any{
+		"project": "endpoint",
+		"root":    ".agent-mail",
+		"peers":   map[string]string{"caller": callerRoot},
+	})
+	if err := os.WriteFile(filepath.Join(endpointBase, ".amqrc"), amqrcData, 0o644); err != nil {
+		t.Fatalf("write .amqrc: %v", err)
+	}
+	// The peer BASE root exists; session "collab" does not.
+	callerAbs := filepath.Join(filepath.Dir(endpointBase), "caller", ".agent-mail")
+	if err := fsq.EnsureRootDirs(callerAbs); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(endpointBase)
+
+	store, err := requests.Open(filepath.Join(endpointRoot, "extensions", "remote"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	var carrier *amqio.Carrier
+	ep := core.New(core.Config{Store: store, Publish: func(s protocol.Snapshot, origin map[string]string) error {
+		return carrier.Publish(s, origin)
+	}})
+	carrier, err = amqio.New(endpointRoot, amqio.DefaultHandle, ep)
+	if err != nil {
+		t.Fatalf("carrier: %v", err)
+	}
+	carrier.SetReplyRouter(replyRouterFor(endpointRoot))
+	ep.Register(fake.New("fake", "e_1"))
+	t.Cleanup(func() { _ = ep.Close() })
+
+	identity, _ := fsq.SnapshotDeliveryRoot(endpointRoot)
+	droot, _ := fsq.OpenDeliveryRoot(endpointRoot, identity)
+	defer func() { _ = droot.Close() }()
+	now := time.Now()
+	id, _ := format.NewMessageID(now)
+	body := `{"schema":"amq.remote.command/1","op":"request.submit","request_id":"11111111-1111-4111-8111-111111111707","target_id":"fake","epoch":"e_1","not_after":"` + protocol.FormatTime(now.Add(time.Minute)) + `","input":{"text":"hi"}}`
+	msg := format.Message{Header: format.Header{
+		Schema: format.CurrentSchema, ID: id, From: "codex", To: []string{amqio.DefaultHandle},
+		Thread: "p2p/codex__remote", Subject: "submit", Created: now.UTC().Format(time.RFC3339Nano), Kind: "todo",
+		FromProject: "caller", ReplyTo: "codex@collab", ReplyProject: "caller",
+	}, Body: body}
+	data, _ := msg.Marshal()
+	if _, err := fsq.DeliverToInboxes(droot, []string{amqio.DefaultHandle}, id+".md", data); err != nil {
+		t.Fatalf("deliver: %v", err)
+	}
+
+	// TICK 1: peer session absent. Transient: stays in new, not DLQ'd.
+	if n, _ := carrier.ImportOnce(); n != 0 {
+		t.Fatalf("TICK1: command handled (%d) although the peer session does not exist (packet 7)", n)
+	}
+	if entries, _ := os.ReadDir(fsq.AgentInboxNew(endpointRoot, amqio.DefaultHandle)); len(entries) != 1 {
+		t.Fatalf("TICK1: command should stay in new, found %d", len(entries))
+	}
+	if entries, _ := os.ReadDir(filepath.Join(endpointRoot, "agents", amqio.DefaultHandle, "dlq", "new")); len(entries) != 0 {
+		t.Fatalf("TICK1: command was dead-lettered (packet 7 — an absent peer session is not poison): %d", len(entries))
+	}
+
+	// The session is created. TICK 2 delivers into it.
+	sessionRoot := filepath.Join(callerAbs, "collab")
+	if err := fsq.EnsureRootDirs(sessionRoot); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsq.EnsureAgentDirs(sessionRoot, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	n, err := carrier.ImportOnce()
+	if err != nil || n != 1 {
+		t.Fatalf("TICK2: n=%d err=%v, want the command handled", n, err)
+	}
+	if entries, _ := os.ReadDir(fsq.AgentInboxNew(sessionRoot, "codex")); len(entries) == 0 {
+		t.Fatal("TICK2: no reply in the caller session's codex inbox")
+	}
+}

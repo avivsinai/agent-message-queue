@@ -448,6 +448,22 @@ func firstNonEmpty(a, b string) string {
 	return b
 }
 
+// retryableRouteError marks a destination that does not exist YET as
+// ErrPeerRootUnreachable, so the carrier retries instead of dead-lettering.
+// resolveSessionRoot and the peer planner report absence as ExitNotFound;
+// malformed names and unknown projects are other error kinds and stay
+// permanent.
+func retryableRouteError(err error) error {
+	if errors.Is(err, ErrPeerRootUnreachable) {
+		return err
+	}
+	var ecerr *ExitCodeError
+	if errors.As(err, &ecerr) && ecerr.Code == ExitNotFound {
+		return fmt.Errorf("%w: %v", ErrPeerRootUnreachable, err)
+	}
+	return err
+}
+
 // ResolveReplyRoute resolves where a cross-project reply must be delivered.
 // It is the one exported seam over this package's route planning: the remote
 // endpoint's AMQ carrier must answer a caller in the CALLER's root, but it
@@ -483,29 +499,18 @@ func ResolveReplyRoute(sourceRoot, replyProject, replyTo string) (root, handle s
 		}
 		sessionRoot, err := resolveSessionRoot(base, session)
 		if err != nil {
-			// A NotFoundError ("session not found") is retryable — the session
-			// can be created later. Surface it the same way an absent peer root
-			// is surfaced, so the carrier classifies it TransientRouteError.
-			var ecerr *ExitCodeError
-			if errors.As(err, &ecerr) && ecerr.Code == ExitNotFound {
-				return "", "", fmt.Errorf("%w: session %q not found under %s: %v", ErrPeerRootUnreachable, session, base, err)
-			}
-			return "", "", err
+			return "", "", retryableRouteError(err)
 		}
 		return sessionRoot, recipient, nil
 	}
 	plan, err := planDeliveryRoute(sourceRoot, project, session, deliveryRouteOptions{})
 	if err != nil {
-		// B1: the router declares whether a failure is transient. The carrier
-		// cannot tell "I do not know this project" from "that project's root is
-		// not there right now", and it should not guess. Only the router knows.
-		// Retryable failures (peer root absent/unreachable) are marked with
-		// ErrPeerRootUnreachable; unknown-project and malformed-handle errors
-		// are not. The ADAPTER in cmd/amq-remote/main.go wraps
-		// ErrPeerRootUnreachable in amqio.TransientRouteError — the translation
-		// between the cli vocabulary and the amqio vocabulary lives in the
-		// adapter, not in this generic layer.
-		return "", "", err
+		// The router declares whether a failure is transient; the adapter in
+		// cmd/amq-remote/main.go turns ErrPeerRootUnreachable into
+		// amqio.TransientRouteError. A peer session that does not exist YET is
+		// as retryable as a peer base root that does not exist yet; the planner
+		// marks only the latter (agent-message-queue-611.22.36 packet 7).
+		return "", "", retryableRouteError(err)
 	}
 	return plan.DeliveryRoot, recipient, nil
 }
