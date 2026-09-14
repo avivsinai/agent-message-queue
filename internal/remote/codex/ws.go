@@ -17,6 +17,8 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -42,6 +44,27 @@ type wsConn struct {
 	conn net.Conn
 	br   *bufio.Reader
 	wmu  chan struct{}
+	// poisoned is set when a frame write fails part-way through. net.Conn
+	// obeys the io.Writer contract: a non-nil error means n < len(p), so a
+	// PARTIAL frame reached the peer. The peer is still waiting for the rest
+	// of the payload length it was promised, and the next frame we write
+	// would be consumed as that payload — silently corrupting every
+	// subsequent request on this connection. A partial frame is
+	// unrecoverable, so the connection is closed and every later write fails
+	// fast instead (agent-message-queue-611.22.38).
+	poisoned  atomic.Bool
+	closeOnce sync.Once
+}
+
+// errStreamPoisoned is returned by every write after a partial frame write
+// killed the connection. It is a pre-send failure: nothing reached the wire,
+// so rpc.Call's ErrNotSent wrap over it is accurate.
+var errStreamPoisoned = errors.New("websocket stream is poisoned by an earlier partial frame write")
+
+// poison marks the stream unusable and closes the connection exactly once.
+func (w *wsConn) poison() {
+	w.poisoned.Store(true)
+	w.closeOnce.Do(func() { _ = w.conn.Close() })
 }
 
 func newWSConn(conn net.Conn, br *bufio.Reader) *wsConn {
@@ -157,6 +180,9 @@ func (w *wsConn) writeFrame(opcode byte, payload []byte) error {
 	return w.writeFrameBody(opcode, payload)
 }
 func (w *wsConn) writeFrameBody(opcode byte, payload []byte) error {
+	if w.poisoned.Load() {
+		return errStreamPoisoned
+	}
 	var mask [4]byte
 	if _, err := rand.Read(mask[:]); err != nil {
 		return err
@@ -179,6 +205,9 @@ func (w *wsConn) writeFrameBody(opcode byte, payload []byte) error {
 		masked[i] = b ^ mask[i%4]
 	}
 	if _, err := w.conn.Write(append(header, masked...)); err != nil {
+		// A write error means the frame went out truncated. Do NOT keep the
+		// connection: the next frame would be read as the tail of this one.
+		w.poison()
 		return err
 	}
 	return nil
@@ -270,7 +299,10 @@ func (w *wsConn) close() error {
 		<-w.wmu
 	default:
 	}
-	return w.conn.Close()
+	w.poisoned.Store(true)
+	var err error
+	w.closeOnce.Do(func() { err = w.conn.Close() })
+	return err
 }
 
 // acceptServerWS performs the server side of the upgrade on an accepted
