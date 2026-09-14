@@ -835,10 +835,13 @@ func (e *Endpoint) list() []protocol.Session {
 	e.mu.Unlock()
 	out := make([]protocol.Session, 0, len(ids))
 	for _, id := range ids {
-		// sessionProjection masks capabilities the D1 gate refuses (steer,
-		// busy=queue) so the advertised capabilities match what the endpoint
-		// actually accepts (agent-message-queue-611.22.36, Pro r2 #22).
-		s, _ := e.sessionProjection(id)
+		// sessionProjection masks the steer capability the D1 gate refuses
+		// so the advertised capabilities match what the endpoint actually
+		// accepts (agent-message-queue-611.22.36, Pro r2 #22).
+		s, err := e.sessionProjection(id)
+		if err != nil {
+			continue
+		}
 		out = append(out, s)
 	}
 	return out
@@ -846,9 +849,9 @@ func (e *Endpoint) list() []protocol.Session {
 
 // sessionProjection returns the attachment's Inspect() result with
 // capabilities masked to match what the endpoint actually accepts. The D1
-// gate (611.22.23) refuses busy=queue and deliver=steer at v1, so advertising
-// them is a false capability signal — a client that picks operations from
-// the advertised capabilities is told it can steer, then every steer is
+// gate (611.22.23) refuses deliver=steer at v1, so advertising Steer is a
+// false capability signal — a client that picks operations from the
+// advertised capabilities is told it can steer, then every steer is
 // refused. This helper is used by BOTH list() and inspect() so the mask is
 // in one place (agent-message-queue-611.22.36, Pro r2 #22).
 func (e *Endpoint) sessionProjection(targetID string) (protocol.Session, error) {
@@ -859,7 +862,7 @@ func (e *Endpoint) sessionProjection(targetID string) (protocol.Session, error) 
 		return protocol.Session{}, protocol.Refuse(protocol.CodeNotFound, "target %s is not registered", targetID)
 	}
 	s := t.att.Inspect()
-	// D1 gate: mask steer and busy=queue while the v1 gate refuses them.
+	// D1 gate: mask steer while the v1 gate refuses deliver=steer.
 	s.Capabilities.Steer = false
 	return s, nil
 }
