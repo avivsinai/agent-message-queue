@@ -935,6 +935,7 @@ func (c *Carrier) replyWithRecovery(root *fsq.DeliveryRoot, origin map[string]st
 	labels := []string{LabelRemote}
 	context := map[string]any{}
 	var text []byte
+	var err error
 	switch {
 	case refusal != nil:
 		code := protocol.Code("error")
@@ -949,7 +950,7 @@ func (c *Carrier) replyWithRecovery(root *fsq.DeliveryRoot, origin map[string]st
 		if snap, ok := body.(protocol.Snapshot); ok {
 			labels = append(labels, labelRefPfx+snap.RequestRef, fmt.Sprintf("%s%d", labelRevPfx, snap.Revision))
 		}
-		text, err := json.MarshalIndent(body, "", "  ")
+		text, err = json.MarshalIndent(body, "", "  ")
 		if err != nil {
 			return err
 		}

@@ -1,6 +1,7 @@
 package amqio
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -615,5 +616,85 @@ func TestB8CurRecoveredNotSetOnFailure(t *testing.T) {
 	carrier.mu.Unlock()
 	if sweeps2 != sweeps+1 {
 		t.Fatalf("second ImportOnce ran %d sweep(s), want 1 (B8 — a failed sweep must be retried)", sweeps2-sweeps)
+	}
+}
+
+// TestB17RecoveryReplyBodyIsNotEmpty verifies the #17 fix
+// (agent-message-queue-611.22.35): replyWithRecovery must populate Body with
+// the JSON-encoded response, not "". The bug was a `text, err :=` shadowing
+// the outer `var text []byte` — the outer text stayed nil, Body was "".
+// The JSON survived only in Context["remote"].
+func TestB17RecoveryReplyBodyIsNotEmpty(t *testing.T) {
+	root := t.TempDir()
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatalf("EnsureRootDirs: %v", err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+	if err := fsq.EnsureAgentDirs(root, "alice"); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+	identity, _ := fsq.SnapshotDeliveryRoot(root)
+	dest, _ := fsq.OpenDeliveryRoot(root, identity)
+
+	carrier := &Carrier{me: "alice", now: time.Now}
+	origin := map[string]string{"from": "codex", "thread": "p2p/alice__codex"}
+	cmdMsgID := "2026-09-14T11-00-00.000000Z_pid1_b17cmd"
+	msgCreated := "2026-09-14T11:00:00.000000Z"
+
+	snap := protocol.Snapshot{
+		State:      protocol.StateCompleted,
+		Epoch:      "ep-b17",
+		Revision:   1,
+		RequestRef: "ref-b17",
+		ObservedAt: time.Now().UTC().Format(time.RFC3339Nano),
+	}
+
+	if err := carrier.replyWithRecovery(dest, origin, "recover", snap, nil, cmdMsgID, msgCreated); err != nil {
+		t.Fatalf("replyWithRecovery: %v", err)
+	}
+
+	// Read the delivered file and verify Body is not empty and decodes to
+	// the expected snapshot.
+	newDir := filepath.Join(root, "agents", "codex", "inbox", "new")
+	entries, err := os.ReadDir(newDir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 file in inbox/new, got %d", len(entries))
+	}
+	data, err := os.ReadFile(filepath.Join(newDir, entries[0].Name()))
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	msg, err := format.ParseMessage(data)
+	if err != nil {
+		t.Fatalf("ParseMessage: %v", err)
+	}
+	if msg.Body == "" {
+		t.Fatal("Body is empty (B17 — shadowed text var left Body=\"\")")
+	}
+	// Body must decode to a protocol.Snapshot matching the input.
+	var bodySnap protocol.Snapshot
+	if err := json.Unmarshal([]byte(msg.Body), &bodySnap); err != nil {
+		t.Fatalf("Body does not decode to Snapshot: %v (body=%q)", err, msg.Body)
+	}
+	if bodySnap.Revision != 1 || bodySnap.RequestRef != "ref-b17" {
+		t.Fatalf("Body snapshot mismatch: %+v", bodySnap)
+	}
+	// Body must agree with Context["remote"].
+	ctxRemote, ok := msg.Header.Context["remote"]
+	if !ok {
+		t.Fatal("Context[\"remote\"] is absent")
+	}
+	var ctxSnap protocol.Snapshot
+	ctxBytes, _ := json.Marshal(ctxRemote)
+	if err := json.Unmarshal(ctxBytes, &ctxSnap); err != nil {
+		t.Fatalf("Context[\"remote\"] does not decode to Snapshot: %v", err)
+	}
+	if ctxSnap.Revision != bodySnap.Revision || ctxSnap.RequestRef != bodySnap.RequestRef || ctxSnap.State != bodySnap.State {
+		t.Fatalf("Body (%+v) does not agree with Context[\"remote\"] (%+v)", bodySnap, ctxSnap)
 	}
 }
