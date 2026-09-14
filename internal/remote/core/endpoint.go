@@ -92,6 +92,14 @@ type Endpoint struct {
 	changed        chan struct{}
 	compactHorizon time.Duration
 	lastCompact    time.Time
+
+	// visible records revisions the publisher has already delivered whose
+	// published_revision marker did not commit. Reconcile then retries the
+	// MARKER, never the delivery: the message is in the caller's mailbox and
+	// re-delivery after consumption is a duplicate (Pro r2 #13 / packet 4a,
+	// agent-message-queue-611.22.36). In memory only: a process crash in
+	// that window re-delivers, the documented exception.
+	visible map[requests.Key]int64
 	// B13 lifecycle: state transitions accepting -> draining -> closed.
 	// inFlight counts handlers between entry (registerInFlight) and exit
 	// (releaseInFlight). drained is a condition variable Close waits on.
@@ -128,6 +136,7 @@ func New(cfg Config) *Endpoint {
 		now:            cfg.Now,
 		changed:        make(chan struct{}),
 		compactHorizon: cfg.CompactHorizon,
+		visible:        map[requests.Key]int64{},
 		state:          stateAccepting,
 		drainTO:        drainTimeout,
 	}
@@ -1253,6 +1262,47 @@ func (e *Endpoint) transitionLocked(rec *requests.Record, c cause, ev nativeEvid
 //
 // Used by reconcileLive's same-run early return and Reconcile's terminal
 // retry selector: only a record that owes a cancel is re-driven.
+// owesResult reports the THIRD obligation: the record is closed with a run
+// bound but no result persisted. That is what a late result whose write
+// failed looks like (onNative discards the attempted update), and neither
+// owesCancel nor OwesAck describes it — replayTerminalAck returned before
+// ever asking the attachment, so the retained result was never fetched or
+// acknowledged (Pro r2 #15 / packet 4c, agent-message-queue-611.22.36).
+// A tombstone owes nothing: compaction erased its result on purpose.
+func owesResult(rec *requests.Record) bool {
+	return rec.State.Terminal() && !rec.Tombstone && rec.NativeRun != nil && rec.Result == nil
+}
+
+// recoverTerminalResult asks the attachment for the result a terminal record
+// is missing and applies it through the ordinary native-event path, so the
+// commit, publication and acknowledgement happen exactly as they would have
+// had the original write succeeded. It stops asking once the attachment
+// retains nothing for the key: then there is nothing to recover.
+func (e *Endpoint) recoverTerminalResult(rec *requests.Record) error {
+	e.mu.Lock()
+	t, ok := e.targets[rec.TargetID]
+	e.mu.Unlock()
+	if !ok {
+		return nil
+	}
+	ev, err := t.att.Lookup(keyOfRecord(rec), rec.Epoch)
+	if err != nil {
+		return err
+	}
+	if !ev.Known || ev.Class == EvidenceNone || !ev.State.Terminal() || ev.Result == nil {
+		return nil
+	}
+	typ := EventRunCompleted
+	switch ev.State {
+	case protocol.StateFailed:
+		typ = EventRunFailed
+	case protocol.StateCancelled:
+		typ = EventRunCancelled
+	}
+	e.onNative(rec.TargetID, NativeEvent{Type: typ, Key: keyOfRecord(rec), RunID: ev.RunID, Result: ev.Result})
+	return nil
+}
+
 func owesCancel(rec *requests.Record) bool {
 	return rec.Cancel != nil &&
 		rec.Cancel.Disposition == protocol.CancelRequested &&
@@ -1339,9 +1389,14 @@ func (e *Endpoint) Reconcile() error {
 			// already released the result). A terminal record with no result
 			// has an empty digest and replayTerminalAck returns immediately,
 			// so there is no churn (Pro #4).
-			if owesCancel(rec) {
+			switch {
+			case owesCancel(rec):
 				rerr = e.reconcileCancelRetry(rec)
-			} else {
+			case owesResult(rec):
+				// A closed record with a bound run and no result: a late result
+				// whose write failed (packet 4c). Ask the attachment.
+				rerr = e.recoverTerminalResult(rec)
+			default:
 				rerr = e.replayTerminalAck(rec)
 			}
 		}
@@ -2070,18 +2125,35 @@ func (e *Endpoint) notifyLocked(rec *requests.Record) {
 // publishLocked publishes the latest revision and records it on success.
 // Failures leave published_revision behind so Reconcile retries.
 func (e *Endpoint) publishLocked(rec *requests.Record) {
-	if e.crashAt(PointBeforePublish) != nil {
+	key := keyOfRecord(rec)
+	// Fresh state under the lock: the caller's record may be stale, and a
+	// concurrent reconcile may already have published and marked this
+	// revision. Publishing from a stale record is the double delivery of
+	// Pro r2 #13 (packet 4a, agent-message-queue-611.22.36).
+	cur, ok, err := e.store.Get(key)
+	if err != nil || !ok {
 		return
 	}
-	if err := e.publish(rec.Snapshot, rec.Origin); err != nil {
+	if cur.PublishedRevision >= rec.Revision {
+		rec.PublishedRevision = cur.PublishedRevision
 		return
+	}
+	if e.visible[key] < rec.Revision {
+		if e.crashAt(PointBeforePublish) != nil {
+			return
+		}
+		if err := e.publish(rec.Snapshot, rec.Origin); err != nil {
+			return
+		}
+		// Delivered. From here on only the marker is owed.
+		e.visible[key] = rec.Revision
 	}
 	if e.crashAt(PointAfterPublish) != nil || e.crashAt(PointBeforePublished) != nil {
 		return
 	}
-	key := requests.Key{CreatorHost: rec.CreatorHost, TargetID: rec.TargetID, RequestID: rec.RequestID}
 	if err := e.store.MarkPublished(key, rec.Revision); err == nil {
 		rec.PublishedRevision = rec.Revision
+		delete(e.visible, key)
 	}
 }
 

@@ -507,7 +507,12 @@ func (s *Store) CompactOne(key Key, before time.Time) (bool, error) {
 	}
 	// A2: the gate includes settlement — never reap a record we still owe the
 	// runtime (bound run, unacked result).
-	if !rec.State.Terminal() || rec.Tombstone || rec.OwesAck() {
+	// Two obligations gate compaction and they are different: OwesAck is
+	// what we owe the RUNTIME (release its retained result); an unpublished
+	// revision is what we owe the CALLER. Compaction erases the only retained
+	// result, so a revision the caller has not received yet must survive it
+	// (Pro r2 #14 / packet 4b, agent-message-queue-611.22.36).
+	if !rec.State.Terminal() || rec.Tombstone || rec.OwesAck() || rec.PublishedRevision < rec.Revision {
 		return false, nil
 	}
 	observed, err := protocol.ParseTime(rec.ObservedAt)

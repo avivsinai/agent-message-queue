@@ -476,6 +476,29 @@ func (r *Runtime) CompleteWhileAdmitHeld(requestID, text string) bool {
 	return true
 }
 
+// CompleteCancelled attaches a late result to a run that was already
+// cancelled — Codex does exactly this when a turn is interrupted and the
+// partial text arrives with turn/completed afterwards. The run stays
+// cancelled; only the result and its event are new.
+func (r *Runtime) CompleteCancelled(requestID, text string) bool {
+	r.mu.Lock()
+	var target *run
+	for _, rn := range r.runsByKey {
+		if rn.key.RequestID == requestID && rn.state == protocol.StateCancelled {
+			target = rn
+		}
+	}
+	if target == nil {
+		r.mu.Unlock()
+		return false
+	}
+	target.result = &protocol.Result{Text: text}
+	ev := core.NativeEvent{Type: core.EventRunCancelled, Key: target.key, RunID: target.id, Result: target.result}
+	r.mu.Unlock()
+	r.emit(ev)
+	return true
+}
+
 // CancelRun cancels the running run for requestID natively and emits
 // EventRunCancelled, as a queued-run deletion or interrupt does in a real
 // attachment. B14c tests use it to drive a cancel event arriving while the
