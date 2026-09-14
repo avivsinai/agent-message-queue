@@ -85,9 +85,11 @@ func TestB14eCompactRereadsUnderLock(t *testing.T) {
 	}
 }
 
-// TestB14eCompactSkipsUnsettled reproduces Pro B5+A2: a terminal record with
-// a bound run and no ack (NeedsRuntimeSettlement) must NOT be compacted —
-// compacting it would lose NativeRun and wedge the cancel forever.
+// TestB14eCompactSkipsUnsettled reproduces B9: a terminal record with a
+// retained result and no ack (OwesAck) must NOT be compacted —
+// compacting it would lose the result and wedge the ack replay forever.
+// B9 ruling: Terminal && Result != nil && AckDigest == "" refuses,
+// REGARDLESS of NativeRun.
 func TestB14eCompactSkipsUnsettled(t *testing.T) {
 	store, now := openStore(t)
 	id := "11111111-1111-4111-8111-1111111111e2"
@@ -109,26 +111,29 @@ func TestB14eCompactSkipsUnsettled(t *testing.T) {
 	if err := store.Create(rec); err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	run := "run_" + id
 	rec.Revision, rec.State = 2, protocol.StateCancelled
 	rec.Code = protocol.CodeCancelledByRequest
-	rec.NativeRun = &run
-	rec.AckDigest = "" // unsettled: bound run, no ack
+	// B9: the run was released (NativeRun nil); the RESULT alone owes the ack.
+	// With NativeRun set, the old NativeRun-based predicate also refused, so
+	// this test only proves B9 when NativeRun is nil.
+	rec.NativeRun = nil
+	rec.Result = &protocol.Result{Text: "cancelled result"}
+	rec.AckDigest = "" // unsettled: result retained, no ack
 	if err := store.Update(rec); err != nil {
 		t.Fatalf("update: %v", err)
 	}
 
-	// Compact must skip this record — it needs runtime settlement.
+	// Compact must skip this record — it owes an ack (B9).
 	n, err := store.Compact(now().Add(time.Second), 1000)
 	if err != nil || n != 0 {
-		t.Fatalf("compact: n=%d err=%v (want 0 — record is unsettled)", n, err)
+		t.Fatalf("compact: n=%d err=%v (want 0 — record owes ack)", n, err)
 	}
 	got, _, _ := store.Get(k)
 	if got.Tombstone {
-		t.Fatal("unsettled record was tombstoned — NativeRun would be lost")
+		t.Fatal("unsettled record was tombstoned — Result would be lost")
 	}
-	if got.NativeRun == nil || *got.NativeRun != run {
-		t.Fatalf("NativeRun lost: %v", got.NativeRun)
+	if got.Result == nil || got.Result.Text != "cancelled result" {
+		t.Fatalf("Result lost: %+v", got.Result)
 	}
 }
 

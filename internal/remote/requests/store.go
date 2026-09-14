@@ -494,7 +494,7 @@ func (s *Store) Compact(before time.Time, limit int) (int, error) {
 }
 
 // CompactOne re-reads a single candidate under the caller's lock, re-gates
-// (terminal + !tombstone + old + !NeedsRuntimeSettlement), and writes the
+// (terminal + !tombstone + old + !OwesAck), and writes the
 // tombstone. Returns true if the record was compacted. The caller MUST hold
 // the endpoint mutex (e.mu) so a concurrent Handle cannot interleave.
 func (s *Store) CompactOne(key Key, before time.Time) (bool, error) {
@@ -507,7 +507,7 @@ func (s *Store) CompactOne(key Key, before time.Time) (bool, error) {
 	}
 	// A2: the gate includes settlement — never reap a record we still owe the
 	// runtime (bound run, unacked result).
-	if !rec.State.Terminal() || rec.Tombstone || rec.NeedsRuntimeSettlement() {
+	if !rec.State.Terminal() || rec.Tombstone || rec.OwesAck() {
 		return false, nil
 	}
 	observed, err := protocol.ParseTime(rec.ObservedAt)
@@ -661,12 +661,11 @@ func allowed(from, to protocol.State) bool {
 	return false
 }
 
-// NeedsRuntimeSettlement reports whether this record has outstanding runtime
-// work: a bound native run (NativeRun != nil) whose result has not been
-// acknowledged (AckDigest == ""). Such records must not be compacted —
-// compacting them would lose NativeRun and wedge the cancel forever. The
-// endpoint's needsRuntimeSettlement delegates to this; 611.22.34 later
-// tightens the gate with AckedDigest.
-func (r *Record) NeedsRuntimeSettlement() bool {
-	return r.NativeRun != nil && r.AckDigest == ""
+// OwesAck reports whether this record has a result we have not released.
+// B9 ruling (agent-message-queue-611.22.35): do not erase a result we have
+// not acknowledged. Terminal && Result != nil && AckDigest == "" refuses
+// compaction, REGARDLESS of NativeRun. The endpoint's owesAck delegates
+// to this — one predicate, one place.
+func (r *Record) OwesAck() bool {
+	return r.State.Terminal() && r.Result != nil && r.AckDigest == ""
 }
