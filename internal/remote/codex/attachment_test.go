@@ -919,3 +919,82 @@ func TestB6aHistoryResolvedRunIsCancellable(t *testing.T) {
 		t.Fatal("history-resolved run is not marked confirmed (B6a)")
 	}
 }
+
+// TestB6HistoryRecoveredRunHasEpochForCancel verifies Pro r2 B6 / packet 9
+// (agent-message-queue-611.22.36): after a restart, a run recovered through
+// lookupHistory must carry the requested epoch so CancelExact issues the
+// interrupt instead of returning noop_already_terminal for a LIVE run.
+//
+// Scenario: the attachment has NO in-memory run (restart). thread/read returns
+// a turn with our clientId in running state. Lookup installs the run. Then
+// CancelExact(key, epoch) must find the run, match the epoch, and issue
+// turn/interrupt — NOT return CancelNoopTerminal.
+func TestB6HistoryRecoveredRunHasEpochForCancel(t *testing.T) {
+	sock, srv := startFakeAppServer(t)
+	att, err := Attach(sock, "t1")
+	if err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	t.Cleanup(func() { _ = att.Close() })
+	<-srv.calls // initialize
+	<-srv.calls // thread/resume
+
+	s := att.Inspect()
+	key := requests.Key{CreatorHost: "local", TargetID: s.TargetID, RequestID: "11111111-1111-4111-8111-111111111b06"}
+	epoch := s.Epoch
+
+	// Set up thread/read to return a running turn with our clientId.
+	srv.setThreadReadHandler(func() string {
+		return `{"thread":{"turns":[{"id":"turn-running","status":"inProgress","items":[{"type":"userMessage","id":"i1","clientId":"` + clientIDFor(key) + `","content":[]}]}]}}`
+	})
+
+	// Lookup: no in-memory run, falls through to lookupHistory, installs the
+	// recovered run. The run MUST carry the requested epoch.
+	ev, err := att.Lookup(key, epoch)
+	if err != nil {
+		t.Fatalf("Lookup: %v", err)
+	}
+	if !ev.Known {
+		t.Fatal("Lookup returned unknown evidence")
+	}
+
+	// Verify the run has the epoch set.
+	att.mu.Lock()
+	r, ok := att.runs[key]
+	att.mu.Unlock()
+	if !ok {
+		t.Fatal("Lookup did not install a run")
+	}
+	if r.epoch != epoch {
+		t.Fatalf("recovered run epoch = %q, want %q (B6 — history must stamp the requested epoch)", r.epoch, epoch)
+	}
+
+	// CancelExact must issue the interrupt, not return noop_already_terminal.
+	ce, err := att.CancelExact(key, epoch)
+	if err != nil {
+		t.Fatalf("CancelExact: %v", err)
+	}
+	if ce.Disposition == protocol.CancelNoopTerminal {
+		t.Fatal("CancelExact returned noop_already_terminal for a LIVE run (B6 — epoch mismatch disarmed cancellation)")
+	}
+	if ce.Disposition != protocol.CancelRequested {
+		t.Fatalf("CancelExact disposition = %v, want CancelRequested (interrupt sent)", ce.Disposition)
+	}
+
+	// Verify turn/interrupt was actually called.
+	interruptSeen := false
+	for {
+		select {
+		case c := <-srv.calls:
+			if c.Method == "turn/interrupt" {
+				interruptSeen = true
+			}
+		default:
+			goto done
+		}
+	}
+done:
+	if !interruptSeen {
+		t.Fatal("turn/interrupt was never sent (B6 — CancelExact must issue the interrupt for a live recovered run)")
+	}
+}

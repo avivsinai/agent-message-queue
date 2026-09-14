@@ -535,7 +535,7 @@ func (a *Attachment) Lookup(key requests.Key, epoch string) (core.Evidence, erro
 			// and the run will never confirm.
 			if a.now().Sub(r.createdAt) >= a.confirmTimeout {
 				a.mu.Unlock()
-				return a.lookupHistory(key)
+				return a.lookupHistory(key, epoch)
 			}
 			ev.Class = core.EvidenceTentative
 		}
@@ -543,10 +543,10 @@ func (a *Attachment) Lookup(key requests.Key, epoch string) (core.Evidence, erro
 		return ev, nil
 	}
 	a.mu.Unlock()
-	return a.lookupHistory(key)
+	return a.lookupHistory(key, epoch)
 }
 
-func (a *Attachment) lookupHistory(key requests.Key) (core.Evidence, error) {
+func (a *Attachment) lookupHistory(key requests.Key, epoch string) (core.Evidence, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	var res struct {
@@ -635,6 +635,7 @@ func (a *Attachment) lookupHistory(key requests.Key) (core.Evidence, error) {
 		// needs the entry so AcknowledgeResult can release it.
 		r := &run{
 			key: key, turnID: t.ID, state: state,
+			epoch:   epoch,
 			errText: errText, nativeRef: nativeRef,
 			confirmed: true, createdAt: a.now(),
 			approvalReqs: map[string]json.RawMessage{},
@@ -642,11 +643,20 @@ func (a *Attachment) lookupHistory(key requests.Key) (core.Evidence, error) {
 		r.text.WriteString(text.String())
 		a.mu.Lock()
 		if existing, ok := a.runs[key]; ok {
-			// A run appeared between the unlocked history call and now. The
-			// pump is live and owns the run. Evidence only ADVANCES: fill
-			// only what is empty, never overwrite state/text the pump set.
+			// Evidence only ADVANCES: fill only what is empty, never
+			// overwrite state/text the pump set.
 			if existing.turnID == "" {
 				existing.turnID = t.ID
+			}
+			// B6 (agent-message-queue-611.22.36): a run installed by the
+			// submit path always has an epoch, but a run recovered by an
+			// earlier lookupHistory (before this fix) or by a concurrent
+			// history call that lost the race may have an empty epoch.
+			// Fill it from the requested epoch — history has proven this
+			// is the same native turn, so the entry answers for the epoch
+			// the endpoint holds.
+			if existing.epoch == "" {
+				existing.epoch = epoch
 			}
 			existing.confirmed = true
 			// If the pump already moved to terminal, keep its state/text.
