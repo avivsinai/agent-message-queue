@@ -230,11 +230,24 @@ func (a *Attachment) Inspect() protocol.Session {
 	if a.offline {
 		att, status = "offline", "offline"
 	}
+	// yl0 (agent-message-queue-yl0; Inspect half of 611.22.51): ranging over
+	// the runs map and keeping the last interaction picked whichever run the
+	// randomizer visited last, so the published PendingInteraction flapped
+	// between Inspect calls with no state change. The operator should answer
+	// the interaction that has been waiting the longest: pick the OLDEST
+	// interaction by run createdAt, ties broken by interaction id for full
+	// determinism.
 	var pending *string
+	var pendingAt time.Time
 	for _, r := range a.runs {
-		if r.interaction != nil {
-			id := r.interaction.InteractionID
+		if r.interaction == nil {
+			continue
+		}
+		id := r.interaction.InteractionID
+		if pending == nil || r.createdAt.Before(pendingAt) ||
+			(r.createdAt.Equal(pendingAt) && id < *pending) {
 			pending = &id
+			pendingAt = r.createdAt
 		}
 	}
 	return protocol.Session{
