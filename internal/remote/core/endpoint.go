@@ -961,8 +961,10 @@ func (e *Endpoint) onNative(targetID string, ev NativeEvent) {
 			e.mu.Unlock()
 			return
 		}
-		// Pro #5: route through transitionLocked (nil interaction clears).
-		e.transitionLocked(rec, causeNone, nativeEvidence{interaction: ev.Interaction})
+		// Pro #5: route through transitionLocked. Pro round 2 #21: the
+		// resolution carries no interaction, and causeNone treats a nil
+		// interaction as "unchanged", so the clear is an explicit flag.
+		e.transitionLocked(rec, causeNone, nativeEvidence{clearInteraction: true})
 	case EventLocalIntervention:
 		if rec.State.Terminal() {
 			e.mu.Unlock()
@@ -1073,6 +1075,7 @@ type nativeEvidence struct {
 	cancel            *protocol.Cancel // cancel metadata from the command/event path
 	code              protocol.Code    // explicit override for refused/attachment_lost
 	interaction       *protocol.Interaction
+	clearInteraction  bool // the pending interaction is resolved natively; clear it (nil interaction means unchanged)
 	localIntervention bool
 	runTerminal       bool // the run is definitively finished (noop_terminal) — confirm a pending cancel
 }
@@ -1119,7 +1122,9 @@ func (e *Endpoint) transitionLocked(rec *requests.Record, c cause, ev nativeEvid
 			run := ev.runID
 			rec.NativeRun = &run
 		}
-		if ev.interaction != nil {
+		if ev.clearInteraction {
+			rec.Interaction = nil
+		} else if ev.interaction != nil {
 			rec.Interaction = ev.interaction
 		}
 		if ev.localIntervention {
