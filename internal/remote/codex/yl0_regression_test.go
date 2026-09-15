@@ -1,6 +1,7 @@
 package codex
 
 import (
+	"sync"
 	"testing"
 	"time"
 
@@ -23,8 +24,24 @@ import (
 // approval/question the harness raised is the one blocking its turn, and
 // every later interaction sits behind it.
 func TestYl0PendingInteractionIsDeterministicOldest(t *testing.T) {
+	// 611.22.33 test-bar: a step clock replaces the 5ms sleeps between the
+	// two submits. The old sleeps existed only to make run.createdAt
+	// strictly monotonic — wall-clock dependent, and a coarsely-ticked
+	// clock (or a loaded runner) could give both runs the same createdAt,
+	// silently changing the tie-break path the test exercises. With a
+	// stepped fake clock every run gets a strictly later timestamp
+	// deterministically, and the tie-break branch below is still
+	// exercised by the explicit createdAt tie-break assertion.
+	step := time.Date(2026, 9, 15, 12, 0, 0, 0, time.UTC)
+	clockMu := new(sync.Mutex)
+	clock := func() time.Time {
+		clockMu.Lock()
+		defer clockMu.Unlock()
+		step = step.Add(time.Second)
+		return step
+	}
 	sock, srv := startFakeAppServer(t)
-	att, err := Attach(sock, "t1", WithConfirmTimeout(200*time.Millisecond), WithApprovals(true))
+	att, err := Attach(sock, "t1", WithConfirmTimeout(200*time.Millisecond), WithApprovals(true), WithClock(clock))
 	if err != nil {
 		t.Fatalf("attach: %v", err)
 	}
@@ -91,8 +108,8 @@ func TestYl0PendingInteractionIsDeterministicOldest(t *testing.T) {
 		if !registered {
 			t.Fatalf("interaction %d never registered (byTurn not bound — setup bug, 7xl/yl0)", i)
 		}
-		// Ensure distinct createdAt monotonic ordering.
-		time.Sleep(5 * time.Millisecond)
+		// createdAt ordering is now guaranteed by the stepped fake clock —
+		// no wall-clock sleep needed.
 	}
 
 	att.mu.Lock()

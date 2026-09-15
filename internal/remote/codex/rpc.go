@@ -84,6 +84,25 @@ type Client struct {
 	// an early frame found a nil handler and was dropped.
 	onNotification  func(Notification)
 	onServerRequest func(ServerRequest)
+
+	// closeDrainBudget bounds Close's wait for the req worker and any
+	// executing handler (B14b L1). Production uses closeDrainBudgetDefault
+	// (2s). Test hook (611.22.33 test-bar): the wedged-handler test
+	// otherwise burns the FULL budget — a real 4s of wall clock per run —
+	// to verify a bound whose value is irrelevant to the invariant (Close
+	// must return, not hang). The test sets this to milliseconds and still
+	// proves the same thing, deterministically and fast.
+	closeDrainBudget atomic.Value // time.Duration
+}
+
+// closeDrainBudgetDefault is Close's production handler-drain budget.
+const closeDrainBudgetDefault = 2 * time.Second
+
+func (c *Client) drainBudget() time.Duration {
+	if v, ok := c.closeDrainBudget.Load().(time.Duration); ok && v > 0 {
+		return v
+	}
+	return closeDrainBudgetDefault
 }
 
 // Handlers are the callbacks a client delivers. They are constructor
@@ -372,7 +391,7 @@ func (c *Client) Close() error {
 	// Wait for the req worker to exit AND any executing handler to finish,
 	// within one shared budget. (<-c.reqWorkerDone alone was unbounded: a
 	// wedged handler never closes it, and Close would hang forever.)
-	deadline := time.After(2 * time.Second)
+	deadline := time.After(c.drainBudget())
 	for {
 		select {
 		case <-c.reqWorkerDone:
