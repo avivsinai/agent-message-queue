@@ -406,15 +406,23 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 	// may still be running server-side, so Lookup/history stay able to
 	// resolve it) and report uncertain, exactly like the post-send
 	// ambiguity path below.
-	if genBefore != a.lostStateGen {
-		rid := r.runIDLocked()
-		a.mu.Unlock()
-		return core.Admission{RunID: rid}, fmt.Errorf("thread state was lost (notLoaded/systemError) while turn/start was in flight; not restoring activeTurn for turn %s", res.Turn.ID)
-	}
+	// BEAD e5q: the terminal check runs BEFORE the generation check. A
+	// terminal state (r.state.Terminal() or a.terminalTurns hit) is a
+	// POSITIVE fact that restores nothing — it only reports what already
+	// happened — so a notLoaded/systemError in flight cannot invalidate it.
+	// Ordered the other way, a lost-state notification that arrives while
+	// the RPC is in flight downgrades a known-good completed outcome to
+	// uncertain, and the endpoint then re-records evidence for a run that
+	// was already proven finished.
 	if r.state.Terminal() || a.terminalTurns[res.Turn.ID] {
 		rid := r.runIDLocked()
 		a.mu.Unlock()
 		return core.Admission{Admitted: true, RunID: rid}, nil
+	}
+	if genBefore != a.lostStateGen {
+		rid := r.runIDLocked()
+		a.mu.Unlock()
+		return core.Admission{RunID: rid}, fmt.Errorf("thread state was lost (notLoaded/systemError) while turn/start was in flight; not restoring activeTurn for turn %s", res.Turn.ID)
 	}
 	if r.turnID == "" {
 		r.turnID = res.Turn.ID
