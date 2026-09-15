@@ -1,0 +1,175 @@
+{
+  "description": "Golden digest vectors for amq.remote.command/1. Each vector is a complete command and its expected input_digest (sha256 hex with sha256: prefix). Vectors sharing an equivalence_group MUST produce the same digest \u2014 they differ only in a spelling axis that the digest must normalize. A Go test asserts CommandDigest reproduces each; a foreign carrier runs the same vectors to prove it agrees. B10: not_after is NOT in the digest (a deadline is policy, not identity); the not-after group now asserts that different deadlines produce the same digest.",
+  "vectors": [
+    {
+      "name": "plain-text",
+      "command": {
+        "schema": "amq.remote.command/1",
+        "op": "request.submit",
+        "request_id": "11111111-1111-4111-8111-111111111d01",
+        "target_id": "t_fake1",
+        "epoch": "e_1",
+        "not_after": "2026-09-08T10:02:00Z",
+        "input": {
+          "text": "say hi"
+        }
+      },
+      "expect_sha256": "sha256:ffd4ffc2828b163a89726f19bd04b947b10bb9fce3d617010fa105b93c3d096c",
+      "note": "baseline plain text, Z suffix"
+    },
+    {
+      "name": "html-escaping",
+      "command": {
+        "schema": "amq.remote.command/1",
+        "op": "request.submit",
+        "request_id": "11111111-1111-4111-8111-111111111d02",
+        "target_id": "t_fake1",
+        "epoch": "e_1",
+        "not_after": "2026-09-08T10:02:00Z",
+        "input": {
+          "text": "fix the <div> & ship"
+        }
+      },
+      "expect_sha256": "sha256:82cf3d23b302d6701d7fab1b596908170ad7d22f33d13ee42dbd113baf8eb961",
+      "note": "text containing < > & exercises Go json.Marshal HTML escaping"
+    },
+    {
+      "name": "busy-deliver-omitted",
+      "command": {
+        "schema": "amq.remote.command/1",
+        "op": "request.submit",
+        "request_id": "11111111-1111-4111-8111-111111111d03",
+        "target_id": "t_fake1",
+        "epoch": "e_1",
+        "not_after": "2026-09-08T10:02:00Z",
+        "input": {
+          "text": "say hi"
+        }
+      },
+      "expect_sha256": "sha256:5ffe591f397e9ace2f600c9bef5b0152dcf9473a7ba94be6c395bd9f24683c14",
+      "note": "Busy and Deliver omitted; digest must equal spelled form",
+      "equivalence_group": "busy-deliver"
+    },
+    {
+      "name": "busy-deliver-spelled",
+      "command": {
+        "schema": "amq.remote.command/1",
+        "op": "request.submit",
+        "request_id": "11111111-1111-4111-8111-111111111d03",
+        "target_id": "t_fake1",
+        "epoch": "e_1",
+        "not_after": "2026-09-08T10:02:00Z",
+        "input": {
+          "text": "say hi",
+          "busy": "reject",
+          "deliver": "turn"
+        }
+      },
+      "expect_sha256": "sha256:5ffe591f397e9ace2f600c9bef5b0152dcf9473a7ba94be6c395bd9f24683c14",
+      "note": "Busy and Deliver spelled; digest must equal omitted form",
+      "equivalence_group": "busy-deliver"
+    },
+    {
+      "name": "not-after-z",
+      "command": {
+        "schema": "amq.remote.command/1",
+        "op": "request.submit",
+        "request_id": "11111111-1111-4111-8111-111111111d04",
+        "target_id": "t_fake1",
+        "epoch": "e_1",
+        "not_after": "2026-09-08T10:02:00Z",
+        "input": {
+          "text": "say hi"
+        }
+      },
+      "expect_sha256": "sha256:ca5791b4cea589818909085275cbdd5672ae7b6f148aa0f04ce7cb6f338cc252",
+      "note": "B10: not_after is excluded from the digest. Different deadlines of the same command produce the same digest.",
+      "equivalence_group": "not-after-zero"
+    },
+    {
+      "name": "not-after-dot-000Z",
+      "command": {
+        "schema": "amq.remote.command/1",
+        "op": "request.submit",
+        "request_id": "11111111-1111-4111-8111-111111111d04",
+        "target_id": "t_fake1",
+        "epoch": "e_1",
+        "not_after": "2026-09-08T10:02:00.000Z",
+        "input": {
+          "text": "say hi"
+        }
+      },
+      "expect_sha256": "sha256:ca5791b4cea589818909085275cbdd5672ae7b6f148aa0f04ce7cb6f338cc252",
+      "note": "B10: not_after excluded \u2014 same digest as not-after-z despite different deadline spelling.",
+      "equivalence_group": "not-after-zero"
+    },
+    {
+      "name": "not-after-plus-offset",
+      "command": {
+        "schema": "amq.remote.command/1",
+        "op": "request.submit",
+        "request_id": "11111111-1111-4111-8111-111111111d04",
+        "target_id": "t_fake1",
+        "epoch": "e_1",
+        "not_after": "2026-09-08T12:02:00+02:00",
+        "input": {
+          "text": "say hi"
+        }
+      },
+      "expect_sha256": "sha256:ca5791b4cea589818909085275cbdd5672ae7b6f148aa0f04ce7cb6f338cc252",
+      "note": "B10: not_after excluded \u2014 same digest as not-after-z despite different deadline spelling.",
+      "equivalence_group": "not-after-zero"
+    },
+    {
+      "name": "not-after-minus-zero",
+      "command": {
+        "schema": "amq.remote.command/1",
+        "op": "request.submit",
+        "request_id": "11111111-1111-4111-8111-111111111d04",
+        "target_id": "t_fake1",
+        "epoch": "e_1",
+        "not_after": "2026-09-08T10:02:00-00:00",
+        "input": {
+          "text": "say hi"
+        }
+      },
+      "expect_sha256": "sha256:ca5791b4cea589818909085275cbdd5672ae7b6f148aa0f04ce7cb6f338cc252",
+      "note": "B10: not_after excluded \u2014 same digest as not-after-z despite different deadline spelling.",
+      "equivalence_group": "not-after-zero"
+    },
+    {
+      "name": "subsecond-500ms-long",
+      "command": {
+        "schema": "amq.remote.command/1",
+        "op": "request.submit",
+        "request_id": "11111111-1111-4111-8111-111111111d05",
+        "target_id": "t_fake1",
+        "epoch": "e_1",
+        "not_after": "2026-09-08T10:02:00.500Z",
+        "input": {
+          "text": "say hi"
+        }
+      },
+      "expect_sha256": "sha256:9e2982a758e37b5abe27172c6122a14828a056fdc858bc1ca62cf85a924f7399",
+      "note": "not_after with .500Z",
+      "equivalence_group": "subsecond-500ms"
+    },
+    {
+      "name": "subsecond-500ms-short",
+      "command": {
+        "schema": "amq.remote.command/1",
+        "op": "request.submit",
+        "request_id": "11111111-1111-4111-8111-111111111d05",
+        "target_id": "t_fake1",
+        "epoch": "e_1",
+        "not_after": "2026-09-08T10:02:00.5Z",
+        "input": {
+          "text": "say hi"
+        }
+      },
+      "expect_sha256": "sha256:9e2982a758e37b5abe27172c6122a14828a056fdc858bc1ca62cf85a924f7399",
+      "note": "not_after with .5Z \u2014 trailing zeros trimmed",
+      "equivalence_group": "subsecond-500ms"
+    }
+  ]
+}
