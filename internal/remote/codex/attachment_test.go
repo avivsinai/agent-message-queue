@@ -22,12 +22,75 @@ import (
 type fakeAppServer struct {
 	ws                  *wsConn
 	calls               chan rpcMessage
+	callsMu             sync.Mutex
 	threadReadHandler   func() string
 	threadReadHandlerMu sync.Mutex
 	turnStartDelayHook  func()
 	turnStartDelayMu    sync.Mutex
 	turnStartResponse   string
 	turnStartResponseMu sync.Mutex
+}
+
+// waitMemoForID waits until the terminal memo records id (deterministic sync
+// point replacing sleep-based assertions; 7xl agent-message-queue-7xl).
+func waitMemoForID(t *testing.T, att *Attachment, id string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		att.mu.Lock()
+		ok := att.terminalTurns[id]
+		att.mu.Unlock()
+		if ok {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("terminal memo never recorded %s", id)
+}
+
+// waitForCall waits until the fake server has received an RPC with the given
+// method (deterministic sync point replacing sleep-then-count; 7xl).
+func waitForCall(t *testing.T, srv *fakeAppServer, method string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		srv.callsMu.Lock()
+		n := len(srv.calls)
+		srv.callsMu.Unlock()
+		if n > 0 {
+			// The channel buffer holds every call; scan a snapshot.
+			for done := false; !done; {
+				select {
+				case c := <-srv.calls:
+					if c.Method == method {
+						return
+					}
+				default:
+					done = true
+				}
+			}
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("fake server never received %s", method)
+}
+
+// waitInteraction waits until the run for key carries a registered
+// interaction (deterministic sync point replacing sleep; 7xl).
+func waitInteraction(t *testing.T, att *Attachment, key requests.Key) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		att.mu.Lock()
+		r, ok := att.runs[key]
+		set := ok && r.interaction != nil
+		att.mu.Unlock()
+		if set {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatal("interaction never registered for run")
 }
 
 func startFakeAppServer(t *testing.T) (string, *fakeAppServer) {
@@ -273,7 +336,11 @@ func TestTentativeRunIsNotOwned(t *testing.T) {
 	}
 	// A foreign turn completing must not complete our run.
 	srv.notify(t, "turn/completed", `{"threadId":"t1","turn":{"id":"uForeign","status":"completed"}}`)
-	time.Sleep(30 * time.Millisecond)
+	// 7xl: was a 30ms sleep (negative assertion, proves nothing and fails
+	// under load). Deterministic sync point: wait until the pump has actually
+	// processed the foreign completion (memo records it unconditionally,
+	// agent-message-queue-611.22.36 10a), then assert our run was untouched.
+	waitMemoForID(t, att, "uForeign")
 	if lk, _ := att.Lookup(key, epoch); lk.State == protocol.StateCompleted {
 		t.Fatal("foreign turn/completed wrongly completed our run")
 	}
@@ -357,15 +424,10 @@ func TestAcknowledgeResultReleasesRetainedEvidence(t *testing.T) {
 	srv.notify(t, "item/completed", `{"threadId":"t1","turnId":"u1","completedAtMs":1,"item":{"type":"agentMessage","id":"i2","text":"OUT"}}`)
 	srv.notify(t, "turn/completed", `{"threadId":"t1","turn":{"id":"u1","status":"completed"}}`)
 
-	var ev core.Evidence
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		ev, _ = att.Lookup(key, s.Epoch)
-		if ev.State == protocol.StateCompleted {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	// 7xl: was a 10ms-sleep poll loop. Deterministic: wait for the terminal
+	// observation to reach the memo, then a single Lookup must be terminal.
+	waitMemoForID(t, att, "u1")
+	ev, _ := att.Lookup(key, s.Epoch)
 	if ev.State != protocol.StateCompleted || ev.Result == nil || ev.Result.Text != "OUT" {
 		t.Fatalf("terminal evidence not retained before ack: %+v", ev)
 	}
@@ -497,7 +559,6 @@ func TestUnconfirmedRunFallsThroughToHistoryAfterTimeout(t *testing.T) {
 	// returns an error for thread/read, so lookupHistory returns
 	// EvidenceUnknown — but the key assertion is that thread/read WAS called
 	// (the call channel receives it), proving the fall-through.
-	callsBefore := len(srv.calls)
 	// Lookup falls through to lookupHistory (thread/read RPC). The fake
 	// server returns an error for thread/read, so lookupHistory returns an
 	// error — but the key assertion is that thread/read WAS called, proving
@@ -506,12 +567,10 @@ func TestUnconfirmedRunFallsThroughToHistoryAfterTimeout(t *testing.T) {
 	lk, lerr := att.Lookup(key, s.Epoch)
 	_ = lk
 	_ = lerr
-	// Drain the thread/read call (non-blocking — the fake server handles it).
-	time.Sleep(50 * time.Millisecond)
-	callsAfter := len(srv.calls)
-	if callsAfter <= callsBefore {
-		t.Fatal("Lookup did not fall through to lookupHistory (thread/read) after the deadline — the unconfirmed run shadowed it forever (Pro F1)")
-	}
+	// 7xl: was a 50ms sleep then a count. Deterministic: the fake server
+	// forwards every RPC to srv.calls; wait for the thread/read call to
+	// actually arrive — its presence IS the fall-through proof.
+	waitForCall(t, srv, "thread/read")
 }
 
 type fakeClock struct {
@@ -553,15 +612,9 @@ func TestLargeResultReleasedByBoundedDigest(t *testing.T) {
 	srv.notify(t, "item/completed", `{"threadId":"t1","turnId":"u1","completedAtMs":1,"item":{"type":"agentMessage","id":"i2","text":"`+bigText+`"}}`)
 	srv.notify(t, "turn/completed", `{"threadId":"t1","turn":{"id":"u1","status":"completed"}}`)
 
-	var ev core.Evidence
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		ev, _ = att.Lookup(key, s.Epoch)
-		if ev.State == protocol.StateCompleted {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	// 7xl: was a 10ms-sleep poll loop (same shape as above).
+	waitMemoForID(t, att, "u1")
+	ev, _ := att.Lookup(key, s.Epoch)
 	if ev.State != protocol.StateCompleted {
 		t.Fatalf("terminal evidence not retained: %+v", ev)
 	}
@@ -1042,8 +1095,9 @@ func TestB8aApprovalStateNotTornDownBeforeSend(t *testing.T) {
 	// (has ID + method), not a notification.
 	srv.sendServerRequest(t, "1", "item/commandExecution/requestApproval", `{"threadId":"t1","turnId":"u1","itemId":"tool1","command":{"prompt":"approve?"},"availableDecisions":["accept","decline"]}`)
 
-	// Give the read pump a moment to process the server request.
-	time.Sleep(50 * time.Millisecond)
+	// 7xl: was a 50ms sleep. Deterministic: wait until the req worker has
+	// processed the approval and registered the interaction.
+	waitInteraction(t, att, key)
 
 	// Verify the interaction is set.
 	att.mu.Lock()
@@ -1364,19 +1418,9 @@ func TestB3LookupHistoryMemoStaysBounded(t *testing.T) {
 		t.Fatalf("oldest history-recovered turn %s was never memoized (lookupHistory path not exercising the memo)", oldest)
 	}
 	srv.notify(t, "turn/completed", `{"threadId":"t1","turn":{"id":"turn-new","status":"completed"}}`)
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		att.mu.Lock()
-		present := att.terminalTurns["turn-new"]
-		att.mu.Unlock()
-		if present {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("turn/completed notification never landed in the memo")
-		}
-		time.Sleep(2 * time.Millisecond)
-	}
+	// 7xl: was an inline 2ms-sleep poll; waitMemoForID is the same wait,
+	// shared and deadline-bounded.
+	waitMemoForID(t, att, "turn-new")
 
 	att.mu.Lock()
 	n := len(att.terminalTurns)
