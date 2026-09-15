@@ -39,15 +39,26 @@ const (
 	MaxCommandBytes = 256 * 1024
 	MaxInputBytes   = 128 * 1024
 	MaxResultBytes  = 512 * 1024
-	// MaxRecordBytes bounds one durable request record on disk and on the wire.
-	// It is the protocol result bound plus the retained input bound plus fixed
-	// headroom for the snapshot, interaction, cancel and bookkeeping fields, so
-	// a record carrying a full-size result never overflows the store. The store
-	// and the IPC layer share this single source of truth.
+	// MaxRecordOverhead is fixed headroom for the snapshot, interaction,
+	// cancel and bookkeeping fields of one record.
 	MaxRecordOverhead = 64 * 1024
-	MaxRecordBytes    = MaxResultBytes + MaxInputBytes + MaxRecordOverhead
-	MaxOpaqueLen      = 128
-	MaxOptionLen      = 256
+	// jsonWorstCaseExpansion is the largest factor by which encoding/json can
+	// grow a Go string. Every byte below 0x20 and every byte of invalid UTF-8
+	// escapes to \u00XX (six bytes); '"' and '\' double. MaxResultBytes and
+	// MaxInputBytes bound RAW text, so without this factor they bound nothing
+	// about the ENCODED record: 512 KiB of newline-heavy log output encodes to
+	// 1.5x, quote-heavy to 2x, control-heavy to 6x, and the store refused all
+	// three as storage_full on a healthy disk (Pro B5, measured).
+	jsonWorstCaseExpansion = 6
+	// MaxRecordBytes bounds one durable request record on disk and on the wire.
+	// It is derived, not tuned: the worst-case encoding of a full-size result
+	// plus the worst-case encoding of the retained input plus the fixed
+	// headroom, so a record carrying ANY result within MaxResultBytes fits by
+	// construction. The store and the IPC layer share this single source of
+	// truth.
+	MaxRecordBytes = jsonWorstCaseExpansion*MaxResultBytes + jsonWorstCaseExpansion*MaxInputBytes + MaxRecordOverhead
+	MaxOpaqueLen   = 128
+	MaxOptionLen   = 256
 )
 
 // Op is the command discriminator.
@@ -412,20 +423,33 @@ func validOpaque(s string) bool {
 const digestPrefix = "sha256:"
 
 // CommandDigest is the digest of the immutable submit command payload, over
-// exactly {schema, op, request_id, target_id, epoch, not_after, input}. It is
-// canonical JSON: object keys sorted, no insignificant whitespace, so every
-// carrier agrees on the bytes. A retry with a changed epoch or not_after (or
+// exactly {schema, op, request_id, target_id, epoch, not_after, input}. The
+// canonical form is JSON with the keys in the FIXED ORDER listed below and no
+// insignificant whitespace, so every carrier agrees on the bytes. The order is
+// deliberately NOT alphabetical: it is the declaration order of digestPayload,
+// which is what Go's encoder emits. An earlier version of this comment said
+// "object keys sorted", which the implementation never did — a non-Go carrier
+// that followed it would sort the keys, compute a different digest, and turn
+// every idempotent retry into request_conflict. A retry with a changed epoch or not_after (or
 // input) yields a different digest and is request_conflict; a retry that
 // recovers the original command bytes yields the same digest. The digest
 // excludes revision/state/result — those are server-derived, not part of the
 // client's command.
 //
-// Canonical byte construction (for carriers that build the bytes themselves):
+// Canonical byte construction: the canonical form is EXACTLY what Go's
+// json.Marshal produces for a digestPayload struct with these field values
+// — keys in struct declaration order (NOT alphabetical), no insignificant
+// whitespace, and Go's standard HTML escaping (< > & U+2028/2029). A
+// non-Go carrier MUST replicate json.Marshal's output, not build the bytes
+// by hand, because a hand-built template that omits the escaping computes a
+// different digest for any input containing <, >, or &. The precedent is
+// docs/wake-lifecycle.md:114-120, which binds the canonical form to
+// json.Marshal explicitly. Then sha256 hex with the "sha256:" prefix.
 //
-//	json.Marshal of digestPayload{Schema,Op,RequestID,TargetID,Epoch,NotAfter,Input}
-//	with struct field order fixed (Go json emits in struct order, which is the
-//	canonical order below) and no extra whitespace, then sha256 hex with the
-//	"sha256:" prefix.
+// Omitted optional fields inside input follow Go's struct tags (omitempty);
+// see resolveDigestDefaults for why Busy and Deliver are resolved to their
+// defaults BEFORE digesting so the omitted form and the spelled form produce
+// the same digest.
 func CommandDigest(cmd *Command) string {
 	if cmd == nil || cmd.Op != OpRequestSubmit {
 		return ""
@@ -436,8 +460,7 @@ func CommandDigest(cmd *Command) string {
 		RequestID: cmd.RequestID,
 		TargetID:  cmd.TargetID,
 		Epoch:     cmd.Epoch,
-		NotAfter:  cmd.NotAfter,
-		Input:     cmd.Input,
+		Input:     resolveDigestDefaults(cmd.Input),
 	}
 	data, err := json.Marshal(payload)
 	if err != nil {
@@ -445,6 +468,29 @@ func CommandDigest(cmd *Command) string {
 	}
 	sum := sha256.Sum256(data)
 	return digestPrefix + hex.EncodeToString(sum[:])
+}
+
+// resolveDigestDefaults fills Busy and Deliver with their defaults BEFORE
+// digesting, so the omitted form ({"text":"say hi"}) and the spelled form
+// ({"text":"say hi","busy":"reject","deliver":"turn"}) produce the SAME digest.
+// The digest is a function of MEANING, not spelling: two semantically
+// identical commands must not conflict. SubmitInput.Busy and Deliver are
+// omitempty, so without this the CLI (which always spells the defaults) and
+// a mailbox peer (which may omit both) disagree on the digest of the same
+// request. Validate accepts "" for each, so both are legal spellings.
+// Resolving here makes ONE owner of the defaults (not every carrier).
+func resolveDigestDefaults(in *SubmitInput) *SubmitInput {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	if out.Busy == "" {
+		out.Busy = BusyReject
+	}
+	if out.Deliver == "" {
+		out.Deliver = DeliverTurn
+	}
+	return &out
 }
 
 // EvidenceDigest is the digest of the terminal evidence an acknowledgement
@@ -469,13 +515,18 @@ func EvidenceDigest(r *Result) string {
 // is the canonical key order; do not reorder without bumping the schema and
 // migrating records. omitempty is intentionally absent on submit-required
 // fields so the canonical shape is identical for every valid submit.
+//
+// B10: NotAfter is NOT in the digest. A deadline is POLICY about the
+// request, not its identity. Including it means a retry with a fresh
+// deadline (the normal case) changes the digest and hits request_conflict.
+// The stored record's NotAfter governs; a retry with any deadline matches
+// and gets the existing snapshot.
 type digestPayload struct {
 	Schema    string       `json:"schema"`
 	Op        Op           `json:"op"`
 	RequestID string       `json:"request_id"`
 	TargetID  string       `json:"target_id"`
 	Epoch     string       `json:"epoch"`
-	NotAfter  string       `json:"not_after"`
 	Input     *SubmitInput `json:"input"`
 }
 
@@ -518,7 +569,10 @@ func (c *Command) Validate() error {
 		if err := forbidFields(c, "request_ref", "since", "interaction_id", "option"); err != nil {
 			return err
 		}
-		if c.Input.Text == "" || len(c.Input.Text) > MaxInputBytes {
+		// TrimSpace: a whitespace-only prompt is empty. The CLI already
+		// refused it, but every other carrier (AMQ mailbox, Buzz DM) went
+		// through Validate alone and would dispatch "   " to a harness.
+		if strings.TrimSpace(c.Input.Text) == "" || len(c.Input.Text) > MaxInputBytes {
 			return Refuse(CodeInvalid, "input.text must be 1..%d bytes", MaxInputBytes)
 		}
 		switch c.Input.Busy {

@@ -50,13 +50,15 @@ func newB14bClient(t *testing.T, onNotif func(), onReq func(ServerRequest)) (*Cl
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	c := newClient(ws)
+	h := &swappableHandlers{}
 	if onNotif != nil {
-		c.OnNotification = func(n Notification) { onNotif() }
+		h.setNote(func(n Notification) { onNotif() })
 	}
 	if onReq != nil {
-		c.OnServerRequest = onReq
+		h.setReq(onReq)
 	}
+	c := newClient(ws, h.handlers())
+	attachTestHandlers(c, h)
 	t.Cleanup(func() { _ = c.Close(); _ = l.Close() })
 	return c, l
 }
@@ -108,7 +110,9 @@ func newB14bClientWithServer(t *testing.T, onFrame func([]byte)) (*Client, net.L
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	c := newClient(ws)
+	h := &swappableHandlers{}
+	c := newClient(ws, h.handlers())
+	attachTestHandlers(c, h)
 	t.Cleanup(func() { _ = c.Close() })
 	return c, l
 }
@@ -141,10 +145,10 @@ func TestB14bWaitCallbacksCountsInFlight(t *testing.T) {
 	release := make(chan struct{})
 	handlerRunning := make(chan struct{})
 	c, _ := newB14bClient(t, nil, nil)
-	c.OnServerRequest = func(r ServerRequest) {
+	handlersOf(c).setReq(func(r ServerRequest) {
 		close(handlerRunning)
 		<-release
-	}
+	})
 	c.dispatchServerRequest(ServerRequest{ID: json.RawMessage(`"srv-1"`), Method: "m"})
 	<-handlerRunning
 	done := make(chan struct{})
@@ -206,7 +210,7 @@ func TestB14bCallWaitsBoundedBehindWedgedWriter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	c := newClient(ws)
+	c := newClient(ws, Handlers{})
 	t.Cleanup(func() { _ = c.Close() })
 
 	// Writer A: a large payload wedges in conn.Write (buffer full).
@@ -255,7 +259,7 @@ func TestB14bReplyRequiredNotDroppedAndPumpStaysLive(t *testing.T) {
 	blockApproval := make(chan struct{}) // wedges the first approval handler
 	c, _ := newB14bClient(t, nil, nil)
 	first := true
-	c.OnServerRequest = func(r ServerRequest) {
+	handlersOf(c).setReq(func(r ServerRequest) {
 		mu.Lock()
 		approved <- r.Method
 		mu.Unlock()
@@ -263,7 +267,7 @@ func TestB14bReplyRequiredNotDroppedAndPumpStaysLive(t *testing.T) {
 			first = false
 			<-blockApproval // wedge AFTER recording: the pump must survive it
 		}
-	}
+	})
 
 	// A reply-required request with a wedged handler: it is still DELIVERED
 	// (queued) and the read pump must stay live — an RPC Call completes even
@@ -289,12 +293,12 @@ func TestB14bReplyRequiredNotDroppedAndPumpStaysLive(t *testing.T) {
 	respCh := make(chan []byte, 1)
 	c2, _ := newB14bClientWithServer(t, func(payload []byte) { respCh <- payload })
 	headPicked := make(chan struct{})
-	c2.OnServerRequest = func(r ServerRequest) {
+	handlersOf(c2).setReq(func(r ServerRequest) {
 		// Signal that the req worker has consumed the head from reqQ, then
 		// wedge: the queue below can now fill deterministically.
 		close(headPicked)
 		<-release2
-	}
+	})
 	c2.dispatchServerRequest(ServerRequest{ID: json.RawMessage(`"srv-head"`), Method: "m"})
 	<-headPicked // worker consumed the head; it is wedged in this handler
 	for i := 0; i < cap(c2.reqQ)+1; i++ {
@@ -388,7 +392,7 @@ func TestB14bCloseConcurrentWithInboundServerRequest(t *testing.T) {
 			closed:          make(chan struct{}),
 			reqQ:            make(chan ServerRequest, maxLiveRuns+reqQSlack),
 			reqWorkerDone:   make(chan struct{}),
-			OnServerRequest: func(r ServerRequest) {},
+			onServerRequest: func(r ServerRequest) {},
 		}
 		go c.readLoop()
 		go c.reqWorker()
@@ -423,10 +427,10 @@ func TestB14bCloseBoundedUnderWedgedHandler(t *testing.T) {
 	c, _ := newB14bClient(t, nil, nil)
 	handlerStarted := make(chan struct{})
 	neverRelease := make(chan struct{}) // wedged forever
-	c.OnServerRequest = func(r ServerRequest) {
+	handlersOf(c).setReq(func(r ServerRequest) {
 		close(handlerStarted)
 		<-neverRelease
-	}
+	})
 	c.dispatchServerRequest(ServerRequest{ID: json.RawMessage(`"srv-1"`), Method: "m"})
 	<-handlerStarted // handler executing and wedged
 
