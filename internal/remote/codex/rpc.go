@@ -307,7 +307,11 @@ func (c *Client) Respond(id json.RawMessage, result any) error {
 	if err != nil {
 		return err
 	}
-	return c.ws.writeText(data)
+	// 611.22.40: this was the one write left unbounded (writeText acquires
+	// the writer slot and writes with no ctx/deadline). A wedged peer could
+	// stall the approval worker forever. Bound it like every other frame:
+	// slot acquisition + write under a 3s deadline.
+	return c.ws.writeTextBounded(data)
 }
 
 // Close tears the connection down and stops the callback workers (B14b/B9):
