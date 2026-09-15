@@ -72,6 +72,19 @@ type Record struct {
 	// retained no evidence (nothing to release).
 	AckDigest string `json:"ack_digest,omitempty"`
 
+	// Acknowledged records that the native AcknowledgeResult call for this
+	// record DELIVERED (returned without error), written AFTER the call —
+	// the durable half of ack replay convergence. AckDigest alone means
+	// "intent memoed"; Acknowledged means "delivered". Bookkeeping-only,
+	// written in place with no revision bump (mirrors PublishedRevision),
+	// so replayTerminalAck short-circuits already-acked terminal records
+	// instead of re-Lookuping them every tick forever (agent-message-queue-
+	// 611.22.34). Zero-value false for pre-upgrade stores: the first
+	// post-upgrade Reconcile replays each terminal record once (Lookup
+	// reports EvidenceNone after #744's release-on-ack, the replay returns
+	// nil, MarkAcknowledged fires) and then converges permanently.
+	Acknowledged bool `json:"acknowledged,omitempty"`
+
 	// Tombstone marks a record that exists only to block a later submit or
 	// to remember a compacted result.
 	Tombstone bool `json:"tombstone,omitempty"`
@@ -286,6 +299,27 @@ func (s *Store) MarkPublished(k Key, revision int64) error {
 		return protocol.Refuse(protocol.CodeInvalid, "published revision %d is out of range", revision)
 	}
 	rec.PublishedRevision = revision
+	return s.write(rec)
+}
+
+// MarkAcknowledged records that the native AcknowledgeResult call DELIVERED
+// for this record. It rewrites the record in place without a revision bump:
+// ack-delivered bookkeeping is not new evidence about the request (mirrors
+// MarkPublished). Callers invoke it only after AcknowledgeResult returns
+// with no error, and only for records whose ack digest is non-empty
+// (agent-message-queue-611.22.34).
+func (s *Store) MarkAcknowledged(k Key) error {
+	if err := s.checkClosed(); err != nil {
+		return err
+	}
+	rec, exists, err := s.Get(k)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return protocol.Refuse(protocol.CodeNotFound, "record does not exist")
+	}
+	rec.Acknowledged = true
 	return s.write(rec)
 }
 
