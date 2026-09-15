@@ -310,6 +310,55 @@ func TestImportNoopCancelRepliesToSender(t *testing.T) {
 	}
 }
 
+// TestSourceHostIsInjective reproduces agent-message-queue-611.22.8 (B03
+// identities, host-collapse half): the creator host is part of the request
+// KEY, but it was derived by sanitizing a readable string — every illegal
+// rune mapped to '-', including the '@' that joined handle and project. So
+// From="a" with project "b" and a bare From="a-b" both produced "amq:a-b",
+// and unvalidated project names collapsed the same way ("web app" vs
+// "web-app"). Two distinct callers then shared ONE record: the second submit
+// was answered with the first's snapshot, and a cancel from one terminated
+// the other's run.
+func TestSourceHostIsInjective(t *testing.T) {
+	cases := []format.Header{
+		{From: "a", FromProject: "b"},
+		{From: "a-b"},
+		{From: "a", FromProject: "b-c"},
+		{From: "a-b", FromProject: "c"},
+		{From: "codex", FromProject: "web app"},
+		{From: "codex", FromProject: "web-app"},
+		{From: "codex"},
+		{From: "codex", FromProject: ""},
+	}
+	seen := map[string][]format.Header{}
+	for _, h := range cases {
+		got := SourceHost(h)
+		seen[got] = append(seen[got], h)
+	}
+	for host, headers := range seen {
+		// {From:"codex"} and {From:"codex", FromProject:""} are the SAME
+		// identity, so they may share a host; anything else may not.
+		distinct := map[[2]string]bool{}
+		for _, h := range headers {
+			distinct[[2]string{h.From, h.FromProject}] = true
+		}
+		if len(distinct) > 1 {
+			t.Fatalf("host %q is shared by %d distinct identities: %v", host, len(distinct), headers)
+		}
+	}
+	// The readable prefix must survive for humans and logs.
+	if got := SourceHost(format.Header{From: "codex", FromProject: "amq"}); !strings.HasPrefix(got, "amq:codex.amq.") {
+		t.Fatalf("host %q lost its readable prefix", got)
+	}
+	// And the derived host must still be usable as a path segment.
+	for _, h := range cases {
+		got := SourceHost(h)
+		if strings.ContainsAny(got, "/\\ ") {
+			t.Fatalf("host %q is not path-safe", got)
+		}
+	}
+}
+
 // TestImportStoreRefusalLeavesCommandInNew reproduces the blocker inside
 // agent-message-queue-611.22.13 (B09 carrier): the carrier classified
 // refusals by TYPE (errors.As *protocol.Refusal), but the store itself
