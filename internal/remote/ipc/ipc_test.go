@@ -168,10 +168,6 @@ func TestWaitReportsShutdownAsTimedOutNotFailure(t *testing.T) {
 // error, not a refusal, which cmd/amq-remote maps to exit 1 ("work failed or
 // cancelled") for a request that is untouched and still running.
 func TestWaitWithoutTimeoutIgnoresTheShortVerbReadDeadline(t *testing.T) {
-	saved := callReadDeadline
-	callReadDeadline = 150 * time.Millisecond
-	t.Cleanup(func() { callReadDeadline = saved })
-
 	dir, err := os.MkdirTemp("", "amqr")
 	if err != nil {
 		t.Fatal(err)
@@ -205,6 +201,14 @@ func TestWaitWithoutTimeoutIgnoresTheShortVerbReadDeadline(t *testing.T) {
 		t.Fatalf("submit: %v", err)
 	}
 	ref := protocol.EncodeRef(LocalHost, "fake", id)
+
+	// Shorten the short-verb deadline only for the wait under test. Setting it
+	// before the setup submit made THAT read time out on a loaded CI runner
+	// (agent-message-queue-khg: PR #752 run 34956096321, PR #755 run
+	// 34956140979), which is not the behaviour this test pins.
+	saved := callReadDeadline
+	callReadDeadline = 150 * time.Millisecond
+	t.Cleanup(func() { callReadDeadline = saved })
 
 	type result struct {
 		resp *Response
