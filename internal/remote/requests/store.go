@@ -16,6 +16,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
@@ -110,11 +111,14 @@ type Key struct {
 // refuses. A closed store is not writable even if a stale reference survives
 // after a replacement endpoint has taken ownership.
 type Store struct {
-	dir      string
-	lock     *ownerLock
-	now      func() time.Time
+	dir  string
+	lock *ownerLock
+	now  func() time.Time
+	// closed is atomic: Close may run on any goroutine (endpoint shutdown)
+	// while bookkeeping writes such as MarkAcknowledged (611.22.34) may run
+	// on an async native-event goroutine. A plain bool tore under -race.
+	closed   atomic.Bool
 	readOnly bool
-	closed   bool
 }
 
 // Option configures Open.
@@ -164,7 +168,7 @@ func OpenReadOnly(stateDir string) (*Store, error) {
 // after Close refuses with store_closed, so a stale reference cannot write
 // once ownership has moved on. The records stay on disk.
 func (s *Store) Close() error {
-	s.closed = true
+	s.closed.Store(true)
 	if s.lock == nil {
 		return nil
 	}
@@ -579,14 +583,14 @@ func (s *Store) CompactOne(key Key, before time.Time) (bool, error) {
 // replacement endpoint has taken ownership. Reads (Get/List) are still
 // permitted on a closed store for diagnosis.
 func (s *Store) checkClosed() error {
-	if s.closed {
+	if s.closed.Load() {
 		return protocol.Refuse(protocol.CodeStoreClosed, "store is closed")
 	}
 	return nil
 }
 
 func (s *Store) write(rec *Record) error {
-	if s.closed {
+	if s.closed.Load() {
 		return protocol.Refuse(protocol.CodeStoreClosed, "store is closed")
 	}
 	if s.readOnly {
