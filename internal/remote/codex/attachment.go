@@ -106,9 +106,9 @@ type Attachment struct {
 	// turn whose observing source is gone — the exact wedge the lost-state
 	// handler just cleared. Stale continuations drop the restore instead.
 	lostStateGen uint64
-	listeners         map[int]func(core.NativeEvent)
-	nextListener      int
-	offline           bool
+	listeners    map[int]func(core.NativeEvent)
+	nextListener int
+	offline      bool
 }
 
 // Option configures Attach.
