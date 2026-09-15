@@ -416,3 +416,136 @@ func TestPointBeforeAckCrashStillReplays(t *testing.T) {
 		t.Fatal("record not marked Acknowledged after the PointBeforeAck replay (611.22.34)")
 	}
 }
+
+// historyShapeAttachment returns the LITERAL codex lookupHistory shape for a
+// terminal history turn (attachment.go:745, post-611.22.34-B2 with Class set):
+// Known, Admitted, Class=HistoryTerminated, RunID "turn:<id>", terminal state,
+// result carrying the NativeRef suffix the live event did not have. This is
+// what a RESTARTED codex attachment returns for a pre-upgrade record — NOT
+// the fake.Runtime EvidenceNone-after-release shortcut, which outran
+// production and hid this path (verifier round 1, B2).
+type historyShapeAttachment struct {
+	core.Attachment
+	lookups int
+	acks    int
+	mu      sync.Mutex
+}
+
+func (h *historyShapeAttachment) Lookup(key requests.Key, epoch string) (core.Evidence, error) {
+	h.mu.Lock()
+	h.lookups++
+	h.mu.Unlock()
+	return core.Evidence{
+		Known:    true,
+		Admitted: true,
+		Class:    core.EvidenceHistoryTerminated,
+		RunID:    "turn:turnHistory1",
+		State:    protocol.StateCompleted,
+		Result: &protocol.Result{
+			Text:      "the result",
+			NativeRef: "codex thread thr_1 turn turnHistory1",
+		},
+	}, nil
+}
+
+func (h *historyShapeAttachment) AcknowledgeResult(key requests.Key, epoch, digest string) {
+	h.mu.Lock()
+	h.acks++
+	h.mu.Unlock()
+	h.Attachment.AcknowledgeResult(key, epoch, digest)
+}
+
+// TestPreUpgradeRecordConvergesOnHistoryShape pins the B2 recut: a terminal
+// record already on disk from a SHIPPED build (Acknowledged=false, AckDigest
+// memoed from the live NativeRef-free result) meets a RESTARTED attachment
+// whose Lookup returns history evidence. The replay must converge: the
+// NativeRef-asymmetric digest must not block the ack, the record must be
+// marked Acknowledged, and subsequent reconciles must not re-Lookup it.
+// Before the recut this looped forever: Class unset -> the in-memory
+// EvidenceNone shortcut unreachable -> digest compare failed on the NativeRef
+// suffix -> 3 reconciles, 3 lookups, never acknowledged (verifier probe).
+func TestPreUpgradeRecordConvergesOnHistoryShape(t *testing.T) {
+	dir := t.TempDir()
+	clk := time.Date(2026, 9, 8, 10, 0, 0, 0, time.UTC)
+	now := func() time.Time { return clk }
+	store, err := requests.Open(dir, requests.WithClock(now))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	rt := fake.New("fake", "e_1")
+	stub := &historyShapeAttachment{Attachment: rt}
+
+	// Seed the durable record DIRECTLY in the pre-upgrade shape: terminal,
+	// ack digest memoed from the live result (no NativeRef), Acknowledged
+	// false (zero value — every shipped record looks like this). WriteMemo
+	// writes raw with no state-graph validation, exactly how a shipped
+	// build's bytes look after an upgrade.
+	id := "11111111-1111-4111-8111-1111111111b2"
+	liveResult := &protocol.Result{Text: "the result"} // live event: no NativeRef
+	run := "turn:turnHistory1"
+	seed := &requests.Record{
+		Snapshot: protocol.Snapshot{
+			Schema:      protocol.SchemaRequest,
+			RequestID:   id,
+			CreatorHost: "local",
+			TargetID:    "fake",
+			Epoch:       "e_1",
+			Revision:    3,
+			State:       protocol.StateCompleted,
+			InputDigest: requests.Digest([]byte("hi")),
+			Result:      liveResult,
+			NativeRun:   &run,
+			ObservedAt:  "2026-09-08T09:00:00Z",
+		},
+		Input:     &protocol.SubmitInput{Text: "hi"},
+		AckDigest: protocol.EvidenceDigest(liveResult), // memoed from the LIVE result
+	}
+	if err := store.Create(&requests.Record{Snapshot: protocol.Snapshot{
+		Schema:      protocol.SchemaRequest,
+		RequestID:   id,
+		CreatorHost: "local",
+		TargetID:    "fake",
+		Epoch:       "e_1",
+		Revision:    1,
+		State:       protocol.StateReceived,
+		InputDigest: requests.Digest([]byte("hi")),
+		ObservedAt:  "2026-09-08T09:00:00Z",
+	}, Input: &protocol.SubmitInput{Text: "hi"}}); err != nil {
+		t.Fatalf("seed create: %v", err)
+	}
+	if err := store.WriteMemo(seed); err != nil {
+		t.Fatalf("seed write: %v", err)
+	}
+
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store2, err := requests.Open(dir, requests.WithClock(now))
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	t.Cleanup(func() { _ = store2.Close() })
+	ep := core.New(core.Config{Store: store2, Now: now})
+	ep.Register(stub)
+	for i := 0; i < 3; i++ {
+		if err := ep.Reconcile(); err != nil {
+			t.Fatalf("reconcile %d: %v", i+1, err)
+		}
+	}
+	rec, ok, err := store2.Get(requests.Key{CreatorHost: "local", TargetID: "fake", RequestID: id})
+	if err != nil || !ok {
+		t.Fatalf("get: %v (ok=%v)", err, ok)
+	}
+	stub.mu.Lock()
+	defer stub.mu.Unlock()
+	if !rec.Acknowledged {
+		t.Fatalf("NO CONVERGENCE: pre-upgrade record still Acknowledged=false after 3 reconciles; the restarted attachment was Lookuped %d time(s) (one full thread/read each) and will be re-Lookuped every tick forever (agent-message-queue-611.22.34 B2)", stub.lookups)
+	}
+	if stub.lookups != 1 {
+		t.Fatalf("history lookup ran %d time(s), want 1 (converge after the first proof)", stub.lookups)
+	}
+	if stub.acks != 1 {
+		t.Fatalf("history ack ran %d time(s), want 1", stub.acks)
+	}
+}

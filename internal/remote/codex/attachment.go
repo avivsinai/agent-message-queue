@@ -682,7 +682,11 @@ func (a *Attachment) lookupHistory(key requests.Key, epoch string) (core.Evidenc
 				r.confirmed = true
 				a.mu.Unlock()
 				result := r.result()
-				return core.Evidence{Known: true, Admitted: true, RunID: "turn:" + t.ID, State: state, Result: result}, nil
+				// 611.22.34 B2: this is HISTORY-proven terminal evidence — a
+				// restarted attachment retains nothing in memory, so this
+				// class tells the endpoint the outcome is the run's final
+				// one and the ack replay may converge on it.
+				return core.Evidence{Known: true, Admitted: true, Class: core.EvidenceHistoryTerminated, RunID: "turn:" + t.ID, State: state, Result: result}, nil
 			}
 			a.mu.Unlock()
 		}
@@ -743,7 +747,12 @@ func (a *Attachment) lookupHistory(key requests.Key, epoch string) (core.Evidenc
 		}
 		a.mu.Unlock()
 		result := r.result()
-		return core.Evidence{Known: true, Admitted: true, RunID: r.runIDLocked(), State: r.state, Result: result}, nil
+		ev := core.Evidence{Known: true, Admitted: true, RunID: r.runIDLocked(), State: r.state, Result: result}
+		if r.state.Terminal() {
+			// 611.22.34 B2: same as above — history-proven terminal.
+			ev.Class = core.EvidenceHistoryTerminated
+		}
+		return ev, nil
 	}
 	// No turn carried our clientId. That is NOT positive proof the request was
 	// never admitted: the clientId echo is schema-backed but unverified
