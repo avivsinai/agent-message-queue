@@ -474,12 +474,11 @@ func TestB14bCloseConcurrentWithInboundServerRequest(t *testing.T) {
 	var gateEnteredOnce sync.Once
 	gateReleased := make(chan struct{})
 	var gateReleaseOnce sync.Once
-	prevGate := testDispatchGate
-	testDispatchGate = func(sr ServerRequest) {
+	prevGate := setTestDispatchGate(func(sr ServerRequest) {
 		gateEnteredOnce.Do(func() { close(gateEntered) })
 		<-gateReleased // parked: post-decode, pre-send
-	}
-	t.Cleanup(func() { testDispatchGate = prevGate })
+	})
+	t.Cleanup(func() { setTestDispatchGate(prevGate) })
 
 	// Start the hammer: the pump decodes a frame and parks in the gate.
 	close(hammerGo)
