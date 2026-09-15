@@ -8,6 +8,16 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.78.2](https://github.com/avivsinai/agent-message-queue/compare/v0.78.1...v0.78.2) (2026-09-15)
+
+
+### Bug Fixes
+
+* **cli:** register amit as a coop-named argv harness ([#762](https://github.com/avivsinai/agent-message-queue/issues/762)) ([491e02a](https://github.com/avivsinai/agent-message-queue/commit/491e02a0417e804414745b37f9ee4f671312f108))
+* **remote/codex:** lost-state generation guard on the turn/start restoration path (611.22.39-r2) ([#764](https://github.com/avivsinai/agent-message-queue/issues/764)) ([661a9fb](https://github.com/avivsinai/agent-message-queue/commit/661a9fbcc156a833c959f35345beee79f7547518))
+* **remote/core:** durable ack-confirmed flag so ack replay converges across restarts (611.22.34) ([#767](https://github.com/avivsinai/agent-message-queue/issues/767)) ([879914e](https://github.com/avivsinai/agent-message-queue/commit/879914ee942e881b886c76d81b6af92e64d4468e))
+* **remote/requests:** CompactOne marks the tombstone published so Reconcile does not republish it (611.22.41) ([#766](https://github.com/avivsinai/agent-message-queue/issues/766)) ([054dd62](https://github.com/avivsinai/agent-message-queue/commit/054dd62b4670dcc5635e50bc4d2dc0d049b6e677))
+
 ## [0.78.1](https://github.com/avivsinai/agent-message-queue/compare/v0.78.0...v0.78.1) (2026-09-15)
 
 
