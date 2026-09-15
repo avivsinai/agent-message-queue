@@ -230,11 +230,24 @@ func (a *Attachment) Inspect() protocol.Session {
 	if a.offline {
 		att, status = "offline", "offline"
 	}
+	// yl0 (agent-message-queue-yl0; Inspect half of 611.22.51): ranging over
+	// the runs map and keeping the last interaction picked whichever run the
+	// randomizer visited last, so the published PendingInteraction flapped
+	// between Inspect calls with no state change. The operator should answer
+	// the interaction that has been waiting the longest: pick the OLDEST
+	// interaction by run createdAt, ties broken by interaction id for full
+	// determinism.
 	var pending *string
+	var pendingAt time.Time
 	for _, r := range a.runs {
-		if r.interaction != nil {
-			id := r.interaction.InteractionID
+		if r.interaction == nil {
+			continue
+		}
+		id := r.interaction.InteractionID
+		if pending == nil || r.createdAt.Before(pendingAt) ||
+			(r.createdAt.Equal(pendingAt) && id < *pending) {
 			pending = &id
+			pendingAt = r.createdAt
 		}
 	}
 	return protocol.Session{
@@ -963,7 +976,19 @@ func (a *Attachment) onNotification(n Notification) {
 		}
 		a.mu.Lock()
 		a.status = threadStatus(p.Status.Type)
-		if a.status == "idle" {
+		// 611.22.39: notLoaded/systemError mean the app-server lost track of
+		// any turn we previously observed (process restart, transcript not
+		// loaded). No turn/completed will follow for that turn, and the
+		// terminal memo is written only by turn/completed and lookupHistory —
+		// so keeping the stale activeTurn wedged Submit busy for the life of
+		// the process. The observing status source is gone; drop it.
+		// Gate on the RAW status type, NOT the mapped a.status: threadStatus
+		// maps every unrecognised status to "unknown", and a future Codex
+		// status meaning "still running" would then clear a LIVE turn's
+		// activeTurn and Submit would issue turn/start into it (verifier
+		// round-1 blocker). Only the enumerated lost-track statuses clear;
+		// unrecognised statuses are left untouched.
+		if p.Status.Type == "notLoaded" || p.Status.Type == "systemError" || p.Status.Type == "idle" {
 			a.activeTurn = ""
 		}
 		a.mu.Unlock()
