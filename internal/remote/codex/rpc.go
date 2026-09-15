@@ -10,6 +10,14 @@ import (
 	"time"
 )
 
+// ErrNotSent wraps pre-send failures (marshal error, write error, connection
+// already closed before the write). A pre-send failure is UNAMBIGUOUS: the
+// prompt never left, so the adapter can safely dropRun + refuse (retry is
+// safe, nothing ran). Post-send failures (closed before reply, ctx deadline,
+// unmarshal error) are AMBIGUOUS: the turn may be running, so the adapter
+// keeps the run and returns an uncertain error.
+var ErrNotSent = errors.New("not sent")
+
 // rpcMessage is one JSON-RPC 2.0 message in either direction. The app-server
 // omits "jsonrpc" on some notifications, so it is optional on decode.
 type rpcMessage struct {
@@ -69,6 +77,19 @@ type Client struct {
 	reqInFlight atomic.Int64
 	stopOnce    sync.Once
 
+	// Handlers are set once, before the read pump starts, and never written
+	// again: readLoop and reqWorker read them without synchronisation. They
+	// used to be exported fields assigned AFTER Dial returned, while both
+	// goroutines were already running — a data race, and a window in which
+	// an early frame found a nil handler and was dropped.
+	onNotification  func(Notification)
+	onServerRequest func(ServerRequest)
+}
+
+// Handlers are the callbacks a client delivers. They are constructor
+// arguments rather than assignable fields so there is no window between
+// starting the read pump and installing them.
+type Handlers struct {
 	OnNotification  func(Notification)
 	OnServerRequest func(ServerRequest)
 }
@@ -80,23 +101,28 @@ const reqQSlack = 8
 // tracks; approvals are per-run, so this bounds reply-required in-flight.
 const maxLiveRuns = 16
 
-// Dial connects to the app-server unix socket and starts the read loop.
-func Dial(socketPath string) (*Client, error) {
+// Dial connects to the app-server unix socket and starts the read loop with
+// the given handlers already installed. A caller that only issues requests
+// (and consumes no notifications) passes the zero Handlers.
+func Dial(socketPath string, h Handlers) (*Client, error) {
 	ws, err := dialUnixWS(socketPath, 3*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("dial app-server %s: %w", socketPath, err)
 	}
-	return newClient(ws), nil
+	return newClient(ws, h), nil
 }
 
-func newClient(ws *wsConn) *Client {
+func newClient(ws *wsConn, h Handlers) *Client {
 	c := &Client{
-		ws:            ws,
-		pending:       map[int64]chan rpcMessage{},
-		closed:        make(chan struct{}),
-		reqQ:          make(chan ServerRequest, maxLiveRuns+reqQSlack),
-		reqWorkerDone: make(chan struct{}),
+		ws:              ws,
+		pending:         map[int64]chan rpcMessage{},
+		closed:          make(chan struct{}),
+		reqQ:            make(chan ServerRequest, maxLiveRuns+reqQSlack),
+		reqWorkerDone:   make(chan struct{}),
+		onNotification:  h.OnNotification,
+		onServerRequest: h.OnServerRequest,
 	}
+	// Handlers are in place before either goroutine can observe them.
 	go c.readLoop()
 	go c.reqWorker()
 	return c
@@ -145,8 +171,8 @@ func (c *Client) reqWorker() {
 				_ = recover()
 				c.reqInFlight.Add(-1)
 			}()
-			if c.OnServerRequest != nil {
-				c.OnServerRequest(sr)
+			if c.onServerRequest != nil {
+				c.onServerRequest(sr)
 			}
 		}()
 	}
@@ -201,16 +227,16 @@ func (c *Client) readLoop() {
 				ch <- msg
 			}
 		case msg.ID != nil:
-			if c.OnServerRequest != nil {
+			if c.onServerRequest != nil {
 				c.dispatchServerRequest(ServerRequest{ID: *msg.ID, Method: msg.Method, Params: msg.Params})
 			}
 		case msg.Method != "":
-			if c.OnNotification != nil {
+			if c.onNotification != nil {
 				// Synchronous, by design (B14b recut): onNative is a bounded
 				// state-apply (B14a moved the native ack outside e.mu), so it
 				// cannot wedge the pump — only reply-required approval
 				// handlers can, and those run off-pump via reqQ.
-				c.OnNotification(Notification{Method: msg.Method, Params: msg.Params})
+				c.onNotification(Notification{Method: msg.Method, Params: msg.Params})
 			}
 		}
 	}
@@ -224,19 +250,19 @@ func (c *Client) Call(ctx context.Context, method string, params any, result any
 	id := c.nextID.Add(1)
 	raw, err := json.Marshal(params)
 	if err != nil {
-		return err
+		return fmt.Errorf("%w: marshal params: %w", ErrNotSent, err)
 	}
 	idRaw := json.RawMessage(fmt.Sprintf("%d", id))
 	msg := rpcMessage{JSONRPC: "2.0", ID: &idRaw, Method: method, Params: raw}
 	data, err := json.Marshal(msg)
 	if err != nil {
-		return err
+		return fmt.Errorf("%w: marshal message: %w", ErrNotSent, err)
 	}
 	ch := make(chan rpcMessage, 1)
 	c.mu.Lock()
 	if c.readErr != nil {
 		c.mu.Unlock()
-		return fmt.Errorf("app-server connection closed: %w", c.readErr)
+		return fmt.Errorf("%w: app-server connection closed: %w", ErrNotSent, c.readErr)
 	}
 	c.pending[id] = ch
 	c.mu.Unlock()
@@ -248,7 +274,7 @@ func (c *Client) Call(ctx context.Context, method string, params any, result any
 		c.mu.Lock()
 		delete(c.pending, id)
 		c.mu.Unlock()
-		return err
+		return fmt.Errorf("%w: write: %w", ErrNotSent, err)
 	}
 	select {
 	case resp, ok := <-ch:
