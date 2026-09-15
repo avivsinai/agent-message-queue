@@ -1032,6 +1032,18 @@ func (e *Endpoint) onNative(targetID string, ev NativeEvent) {
 	// e.targets after unlocking (a concurrent Register would race the map).
 	if terminal && ackAtt != nil && ackDigest != "" && e.crashAt(PointBeforeAck) == nil {
 		ackAtt.AcknowledgeResult(ackKey, ackEpoch, ackDigest)
+		// 611.22.34 crash window: the ack landed but the durable flag did
+		// not. The replay path self-heals (Lookup → EvidenceNone → Mark).
+		if e.crashAt(PointAfterAck) != nil {
+			return
+		}
+		// 611.22.34: the ack DELIVERED — record it durably so the restart
+		// replay converges instead of re-Lookuping this record every tick
+		// (history digests never match: NativeRef suffix asymmetry). A
+		// MarkAcknowledged failure is ignored, same shape as MarkPublished:
+		// the record stays !Acknowledged and the next replay re-Lookups
+		// (EvidenceNone after release-on-ack) then re-Marks. Self-healing.
+		_ = e.store.MarkAcknowledged(ackKey)
 	}
 }
 
@@ -1491,6 +1503,17 @@ func (e *Endpoint) Reconcile() error {
 // EvidenceNone and a later Reconcile/Tick does not re-ack. Only the crash
 // case — intent memoed, ack never landed, evidence still retained — replays.
 func (e *Endpoint) replayTerminalAck(rec *requests.Record) error {
+	// 611.22.34: the ack was already DELIVERED (durable confirmation) — no
+	// replay, no Lookup. This is the convergence fix: without this gate the
+	// restart case re-examines every terminal record every tick forever,
+	// because history results carry the NativeRef suffix ("codex thread
+	// turn ") the live path does not, so EvidenceDigest(ev.Result) never
+	// equals the memoed AckDigest. Gate ONLY records with a memoed digest:
+	// AckDigest == "" (crash between terminal commit and ack memo) still
+	// needs the intent memo + ack below.
+	if rec.AckDigest != "" && rec.Acknowledged {
+		return nil
+	}
 	// owesAck (Result != nil, AckDigest == "") describes the crash-gap case
 	// where the ack was never sent. But we also replay when AckDigest IS set
 	// but the ack didn't land (PointBeforeAck crash). So we cannot gate on
@@ -1521,6 +1544,38 @@ func (e *Endpoint) replayTerminalAck(rec *requests.Record) error {
 	if !ev.Known || ev.Class == EvidenceNone {
 		// Nothing retained for this key: the ack already landed before the
 		// crash. Replay would acknowledge evidence the attachment discarded.
+		// 611.22.34: the delivered ack is now provable — record it durably
+		// so this record never re-enters the replay path (convergence).
+		_ = e.store.MarkAcknowledged(keyOfRecord(rec))
+		return nil
+	}
+	// 611.22.34 B2 (recut): HISTORY-terminated evidence. A restarted
+	// attachment retains nothing in memory by construction, so history
+	// evidence IS proof the run terminated — this is the pre-upgrade
+	// convergence path (Acknowledged=false on every shipped record).
+	// The history result carries the NativeRef ("codex thread <id> turn
+	// <id>") the live result did not, so the compare uses the
+	// NativeRef-stable digest on the evidence side; the memoed AckDigest
+	// was bound from the live (NativeRef-free) result, which is already the
+	// stable shape — both sides now compute the same bounded form.
+	if ev.Class == EvidenceHistoryTerminated && ev.State.Terminal() && ev.Result != nil {
+		if protocol.EvidenceDigestStable(ev.Result) != digest {
+			// The history outcome is not the outcome this record acked; a
+			// stale or foreign ack must never release different evidence.
+			return nil
+		}
+		if rec.NativeRun != nil && ev.RunID != *rec.NativeRun {
+			return nil
+		}
+		key := keyOfRecord(rec)
+		epoch := rec.Epoch
+		e.mu.Lock()
+		att := t.att
+		e.mu.Unlock()
+		att.AcknowledgeResult(key, epoch, digest)
+		// 611.22.34: delivered — record it (MarkPublished failure shape:
+		// self-healing on the next replay).
+		_ = e.store.MarkAcknowledged(key)
 		return nil
 	}
 	// B2: validate retained terminal evidence against the bound run + digest,
@@ -1553,6 +1608,10 @@ func (e *Endpoint) replayTerminalAck(rec *requests.Record) error {
 	att := t.att
 	e.mu.Unlock()
 	att.AcknowledgeResult(key, epoch, digest)
+	// 611.22.34: delivered — record it. A MarkAcknowledged failure is
+	// ignored (MarkPublished shape): the next replay re-Lookups, gets
+	// EvidenceNone, and re-Marks. Self-healing.
+	_ = e.store.MarkAcknowledged(key)
 	return nil
 }
 
@@ -1748,6 +1807,10 @@ func (e *Endpoint) reconcileLive(rec *requests.Record) error {
 	e.mu.Unlock()
 	if ackAtt != nil && ackDigest != "" {
 		ackAtt.AcknowledgeResult(ackKey, ackEpoch, ackDigest)
+		// 611.22.34: delivered — record it durably (digest verified
+		// non-empty above). MarkAcknowledged failure ignored (MarkPublished
+		// shape): the next replay re-Lookups and re-Marks. Self-healing.
+		_ = e.store.MarkAcknowledged(ackKey)
 	}
 	return nil
 }
@@ -2090,6 +2153,10 @@ func (e *Endpoint) abortAdmittedRacedRun(rec *requests.Record, t *target, adm Ad
 	e.mu.Unlock()
 	if ackDigest != "" {
 		ackAtt.AcknowledgeResult(ackKey, ackEpoch, ackDigest)
+		// 611.22.34: delivered — record it durably (digest verified
+		// non-empty above). MarkAcknowledged failure ignored (MarkPublished
+		// shape): the next replay re-Lookups and re-Marks. Self-healing.
+		_ = e.store.MarkAcknowledged(ackKey)
 	}
 	e.publishRevision(rec)
 	return protocol.Reply{Snapshot: snap, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: rec.Code, Disposition: disposition}}, nil

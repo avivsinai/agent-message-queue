@@ -51,6 +51,14 @@ const (
 	EvidenceTentative EvidenceClass = "tentative"
 	// EvidenceConfirmed: native ownership is established -> real admission.
 	EvidenceConfirmed EvidenceClass = "confirmed"
+	// EvidenceHistoryTerminated: the run is proven terminal FROM DURABLE
+	// HISTORY. A restarted attachment retains nothing in memory by
+	// construction, so history evidence here is proof of termination, not
+	// retained evidence: the endpoint's ack replay may treat the result as
+	// the run's final outcome and acknowledge it (agent-message-queue-
+	// 611.22.34 B2). Distinct from EvidenceNone ("nothing retained, cannot
+	// have happened") and EvidenceUnknown ("cannot determine").
+	EvidenceHistoryTerminated EvidenceClass = "history-terminated"
 )
 
 type Evidence struct {

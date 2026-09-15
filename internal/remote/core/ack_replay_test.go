@@ -2,6 +2,7 @@ package core_test
 
 import (
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -214,5 +215,337 @@ func TestReconcileConvergesAfterSuccessfulAck(t *testing.T) {
 	}
 	if got := rt.AckCalls(); got != 1 {
 		t.Fatalf("reconcile re-acked the terminal result: %d ack calls, want 1", got)
+	}
+}
+
+// countingAttachment wraps an Attachment and counts Lookup + AcknowledgeResult
+// calls, so the 611.22.34 regression can prove the replay path short-circuits
+// already-acked records.
+type countingAttachment struct {
+	core.Attachment
+	lookups    int
+	acks       int
+	lastAckKey requests.Key
+	lastAckDig string
+	mu         sync.Mutex
+}
+
+func (c *countingAttachment) Lookup(key requests.Key, epoch string) (core.Evidence, error) {
+	c.mu.Lock()
+	c.lookups++
+	c.mu.Unlock()
+	return c.Attachment.Lookup(key, epoch)
+}
+
+func (c *countingAttachment) AcknowledgeResult(key requests.Key, epoch, digest string) {
+	c.mu.Lock()
+	c.acks++
+	c.lastAckKey, c.lastAckDig = key, digest
+	c.mu.Unlock()
+	c.Attachment.AcknowledgeResult(key, epoch, digest)
+}
+
+// TestCrashAfterAckDeliveredConvergesWithoutRelookup pins the 611.22.34 fix:
+// crash at PointAfterAck — the native ack DELIVERED but the durable flag was
+// not written. After restart, Reconcile must converge: the record is marked
+// Acknowledged and NO further attachment Lookup or AcknowledgeResult happens
+// for it on subsequent ticks. Without the fix (or without the flag), the
+// record is re-examined every tick forever: history results carry the
+// NativeRef suffix ("codex thread turn ") the live path does not, so
+// EvidenceDigest(ev.Result) never equals the memoed AckDigest.
+func TestCrashAfterAckDeliveredConvergesWithoutRelookup(t *testing.T) {
+	dir := t.TempDir()
+	clk := time.Date(2026, 9, 8, 10, 0, 0, 0, time.UTC)
+	now := func() time.Time { return clk }
+	store, err := requests.Open(dir, requests.WithClock(now))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	rt := fake.New("fake", "e_1")
+	counting := &countingAttachment{Attachment: rt}
+
+	// Crash at after:native_ack: the ack went out, MarkAcknowledged never ran.
+	crashArmed := true
+	ep := core.New(core.Config{
+		Store: store,
+		Now:   func() time.Time { return clk },
+		Crash: func(point string) error {
+			if crashArmed && point == core.PointAfterAck {
+				crashArmed = false
+				return errors.New("simulated crash after native ack")
+			}
+			return nil
+		},
+	})
+	ep.Register(counting)
+
+	id := "11111111-1111-4111-8111-1111111111d3"
+	if _, err := ep.Handle(submitCmd(id), core.Source{Host: "local"}); err != nil {
+		t.Fatalf("seed submit: %v", err)
+	}
+	rt.Complete(id, "the result")
+
+	key := requests.Key{CreatorHost: "local", TargetID: "fake", RequestID: id}
+	rec, ok, err := store.Get(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || rec.State != protocol.StateCompleted {
+		t.Fatalf("terminal record not durable after crash: state=%v ok=%v", recState(rec, ok), ok)
+	}
+	// PointAfterAck crash: the native ack already DELIVERED, so the runtime
+	// retains nothing — but the durable flag was never written. Exactly the
+	// window 611.22.34 exists for.
+	if rt.UnacknowledgedResults() != 0 {
+		t.Fatal("precondition: after the PointAfterAck crash the runtime should retain nothing (the ack landed)")
+	}
+
+	// Restart over the same directory: the ack must be replayed exactly once
+	// (the crash window: delivered natively, not durably marked), then the
+	// record converges.
+	if err := ep.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	store2, err := requests.Open(dir, requests.WithClock(now))
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	t.Cleanup(func() { _ = store2.Close() })
+	ep2 := core.New(core.Config{Store: store2, Now: now})
+	ep2.Register(counting)
+	if err := ep2.Reconcile(); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	// Nothing to replay: the ack already landed pre-crash. Reconcile just
+	// needs to observe the durable-flag absence via one Lookup, get
+	// EvidenceNone, and mark Acknowledged — WITHOUT re-acking.
+	rec, _, err = store2.Get(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rec.Acknowledged {
+		t.Fatal("record not marked Acknowledged after the replay reconciliation (611.22.34)")
+	}
+
+	// Convergence: two more Reconciles must perform ZERO Lookups and ZERO
+	// additional acks for the record. Before the fix this looped forever.
+	counting.mu.Lock()
+	lookupsAfterFirst := counting.lookups
+	acksAfterFirst := counting.acks
+	counting.mu.Unlock()
+	for i := 0; i < 2; i++ {
+		if err := ep2.Reconcile(); err != nil {
+			t.Fatalf("reconcile %d: %v", i+2, err)
+		}
+	}
+	counting.mu.Lock()
+	defer counting.mu.Unlock()
+	if counting.lookups != lookupsAfterFirst {
+		t.Fatalf("already-acked record was re-Lookuped %d extra time(s) across 2 reconciles — replay does not converge (agent-message-queue-611.22.34)", counting.lookups-lookupsAfterFirst)
+	}
+	if counting.acks != acksAfterFirst {
+		t.Fatalf("already-acked record was re-acked %d extra time(s) across 2 reconciles (agent-message-queue-611.22.34)", counting.acks-acksAfterFirst)
+	}
+}
+
+// TestPointBeforeAckCrashStillReplays pins the crash-gap correctness the flag
+// must NOT break: PointBeforeAck crash → AckDigest memoed, ack never sent,
+// Acknowledged false → the restart replay MUST still fire (intent set +
+// !Acknowledged = replayable, unchanged from pre-611.22.34 rules).
+func TestPointBeforeAckCrashStillReplays(t *testing.T) {
+	dir := t.TempDir()
+	clk := time.Date(2026, 9, 8, 10, 0, 0, 0, time.UTC)
+	now := func() time.Time { return clk }
+	store, err := requests.Open(dir, requests.WithClock(now))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	rt := fake.New("fake", "e_1")
+	counting := &countingAttachment{Attachment: rt}
+
+	crashArmed := true
+	ep := core.New(core.Config{
+		Store: store,
+		Now:   func() time.Time { return clk },
+		Crash: func(point string) error {
+			if crashArmed && point == core.PointBeforeAck {
+				crashArmed = false
+				return errors.New("simulated crash before native ack")
+			}
+			return nil
+		},
+	})
+	ep.Register(counting)
+
+	id := "11111111-1111-4111-8111-1111111111e3"
+	if _, err := ep.Handle(submitCmd(id), core.Source{Host: "local"}); err != nil {
+		t.Fatalf("seed submit: %v", err)
+	}
+	rt.Complete(id, "the result")
+
+	if err := ep.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	store2, err := requests.Open(dir, requests.WithClock(now))
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	t.Cleanup(func() { _ = store2.Close() })
+	ep2 := core.New(core.Config{Store: store2, Now: now})
+	ep2.Register(counting)
+	if err := ep2.Reconcile(); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	// The replay MUST have fired: exactly one ack delivered by the restart.
+	counting.mu.Lock()
+	acks := counting.acks
+	counting.mu.Unlock()
+	if acks != 1 {
+		t.Fatalf("PointBeforeAck crash + restart: replay ack count = %d, want 1 (crash-gap correctness broken by the flag)", acks)
+	}
+	if got := rt.UnacknowledgedResults(); got != 0 {
+		t.Fatalf("replay did not release the retained result: %d unacked", got)
+	}
+	rec, _, err := store2.Get(requests.Key{CreatorHost: "local", TargetID: "fake", RequestID: id})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rec.Acknowledged {
+		t.Fatal("record not marked Acknowledged after the PointBeforeAck replay (611.22.34)")
+	}
+}
+
+// historyShapeAttachment returns the LITERAL codex lookupHistory shape for a
+// terminal history turn (attachment.go:745, post-611.22.34-B2 with Class set):
+// Known, Admitted, Class=HistoryTerminated, RunID "turn:<id>", terminal state,
+// result carrying the NativeRef suffix the live event did not have. This is
+// what a RESTARTED codex attachment returns for a pre-upgrade record — NOT
+// the fake.Runtime EvidenceNone-after-release shortcut, which outran
+// production and hid this path (verifier round 1, B2).
+type historyShapeAttachment struct {
+	core.Attachment
+	lookups int
+	acks    int
+	mu      sync.Mutex
+}
+
+func (h *historyShapeAttachment) Lookup(key requests.Key, epoch string) (core.Evidence, error) {
+	h.mu.Lock()
+	h.lookups++
+	h.mu.Unlock()
+	return core.Evidence{
+		Known:    true,
+		Admitted: true,
+		Class:    core.EvidenceHistoryTerminated,
+		RunID:    "turn:turnHistory1",
+		State:    protocol.StateCompleted,
+		Result: &protocol.Result{
+			Text:      "the result",
+			NativeRef: "codex thread thr_1 turn turnHistory1",
+		},
+	}, nil
+}
+
+func (h *historyShapeAttachment) AcknowledgeResult(key requests.Key, epoch, digest string) {
+	h.mu.Lock()
+	h.acks++
+	h.mu.Unlock()
+	h.Attachment.AcknowledgeResult(key, epoch, digest)
+}
+
+// TestPreUpgradeRecordConvergesOnHistoryShape pins the B2 recut: a terminal
+// record already on disk from a SHIPPED build (Acknowledged=false, AckDigest
+// memoed from the live NativeRef-free result) meets a RESTARTED attachment
+// whose Lookup returns history evidence. The replay must converge: the
+// NativeRef-asymmetric digest must not block the ack, the record must be
+// marked Acknowledged, and subsequent reconciles must not re-Lookup it.
+// Before the recut this looped forever: Class unset -> the in-memory
+// EvidenceNone shortcut unreachable -> digest compare failed on the NativeRef
+// suffix -> 3 reconciles, 3 lookups, never acknowledged (verifier probe).
+func TestPreUpgradeRecordConvergesOnHistoryShape(t *testing.T) {
+	dir := t.TempDir()
+	clk := time.Date(2026, 9, 8, 10, 0, 0, 0, time.UTC)
+	now := func() time.Time { return clk }
+	store, err := requests.Open(dir, requests.WithClock(now))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	rt := fake.New("fake", "e_1")
+	stub := &historyShapeAttachment{Attachment: rt}
+
+	// Seed the durable record DIRECTLY in the pre-upgrade shape: terminal,
+	// ack digest memoed from the live result (no NativeRef), Acknowledged
+	// false (zero value — every shipped record looks like this). WriteMemo
+	// writes raw with no state-graph validation, exactly how a shipped
+	// build's bytes look after an upgrade.
+	id := "11111111-1111-4111-8111-1111111111b2"
+	liveResult := &protocol.Result{Text: "the result"} // live event: no NativeRef
+	run := "turn:turnHistory1"
+	seed := &requests.Record{
+		Snapshot: protocol.Snapshot{
+			Schema:      protocol.SchemaRequest,
+			RequestID:   id,
+			CreatorHost: "local",
+			TargetID:    "fake",
+			Epoch:       "e_1",
+			Revision:    3,
+			State:       protocol.StateCompleted,
+			InputDigest: requests.Digest([]byte("hi")),
+			Result:      liveResult,
+			NativeRun:   &run,
+			ObservedAt:  "2026-09-08T09:00:00Z",
+		},
+		Input:     &protocol.SubmitInput{Text: "hi"},
+		AckDigest: protocol.EvidenceDigest(liveResult), // memoed from the LIVE result
+	}
+	if err := store.Create(&requests.Record{Snapshot: protocol.Snapshot{
+		Schema:      protocol.SchemaRequest,
+		RequestID:   id,
+		CreatorHost: "local",
+		TargetID:    "fake",
+		Epoch:       "e_1",
+		Revision:    1,
+		State:       protocol.StateReceived,
+		InputDigest: requests.Digest([]byte("hi")),
+		ObservedAt:  "2026-09-08T09:00:00Z",
+	}, Input: &protocol.SubmitInput{Text: "hi"}}); err != nil {
+		t.Fatalf("seed create: %v", err)
+	}
+	if err := store.WriteMemo(seed); err != nil {
+		t.Fatalf("seed write: %v", err)
+	}
+
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store2, err := requests.Open(dir, requests.WithClock(now))
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	t.Cleanup(func() { _ = store2.Close() })
+	ep := core.New(core.Config{Store: store2, Now: now})
+	ep.Register(stub)
+	for i := 0; i < 3; i++ {
+		if err := ep.Reconcile(); err != nil {
+			t.Fatalf("reconcile %d: %v", i+1, err)
+		}
+	}
+	rec, ok, err := store2.Get(requests.Key{CreatorHost: "local", TargetID: "fake", RequestID: id})
+	if err != nil || !ok {
+		t.Fatalf("get: %v (ok=%v)", err, ok)
+	}
+	stub.mu.Lock()
+	defer stub.mu.Unlock()
+	if !rec.Acknowledged {
+		t.Fatalf("NO CONVERGENCE: pre-upgrade record still Acknowledged=false after 3 reconciles; the restarted attachment was Lookuped %d time(s) (one full thread/read each) and will be re-Lookuped every tick forever (agent-message-queue-611.22.34 B2)", stub.lookups)
+	}
+	if stub.lookups != 1 {
+		t.Fatalf("history lookup ran %d time(s), want 1 (converge after the first proof)", stub.lookups)
+	}
+	if stub.acks != 1 {
+		t.Fatalf("history ack ran %d time(s), want 1", stub.acks)
 	}
 }

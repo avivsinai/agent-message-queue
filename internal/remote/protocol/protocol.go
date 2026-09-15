@@ -499,6 +499,26 @@ func resolveDigestDefaults(in *SubmitInput) *SubmitInput {
 // stale acknowledgement can never release a different request's retained
 // result: the digest matches only the exact outcome the endpoint persisted.
 // A nil result yields "" — nothing was retained, so there is nothing to ack.
+// EvidenceDigestStable is EvidenceDigest computed over a NativeRef-stripped
+// copy of the result. The live event path constructs results without a
+// NativeRef, while the history path ("codex thread <id> turn <id>") carries
+// one — the same outcome digests differently across a restart. Both sides of
+// the ack-digest comparison must compute the digest over the same bounded
+// shape: call sites that compare a memoed ack digest (bound from the live
+// result) against re-read evidence digest that evidence through this helper
+// (agent-message-queue-611.22.34 B2, digest instability root cause).
+func EvidenceDigestStable(r *Result) string {
+	if r == nil {
+		return ""
+	}
+	if r.NativeRef == "" {
+		return EvidenceDigest(r)
+	}
+	shallow := *r
+	shallow.NativeRef = ""
+	return EvidenceDigest(&shallow)
+}
+
 func EvidenceDigest(r *Result) string {
 	if r == nil {
 		return ""

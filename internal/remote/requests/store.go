@@ -16,6 +16,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
@@ -72,6 +74,19 @@ type Record struct {
 	// retained no evidence (nothing to release).
 	AckDigest string `json:"ack_digest,omitempty"`
 
+	// Acknowledged records that the native AcknowledgeResult call for this
+	// record DELIVERED (returned without error), written AFTER the call —
+	// the durable half of ack replay convergence. AckDigest alone means
+	// "intent memoed"; Acknowledged means "delivered". Bookkeeping-only,
+	// written in place with no revision bump (mirrors PublishedRevision),
+	// so replayTerminalAck short-circuits already-acked terminal records
+	// instead of re-Lookuping them every tick forever (agent-message-queue-
+	// 611.22.34). Zero-value false for pre-upgrade stores: the first
+	// post-upgrade Reconcile replays each terminal record once (Lookup
+	// reports EvidenceNone after #744's release-on-ack, the replay returns
+	// nil, MarkAcknowledged fires) and then converges permanently.
+	Acknowledged bool `json:"acknowledged,omitempty"`
+
 	// Tombstone marks a record that exists only to block a later submit or
 	// to remember a compacted result.
 	Tombstone bool `json:"tombstone,omitempty"`
@@ -97,11 +112,23 @@ type Key struct {
 // refuses. A closed store is not writable even if a stale reference survives
 // after a replacement endpoint has taken ownership.
 type Store struct {
-	dir      string
-	lock     *ownerLock
-	now      func() time.Time
+	dir  string
+	lock *ownerLock
+	now  func() time.Time
+	// closed is atomic: Close may run on any goroutine (endpoint shutdown)
+	// while bookkeeping writes such as MarkAcknowledged (611.22.34) may run
+	// on an async native-event goroutine. A plain bool tore under -race.
+	closed atomic.Bool
+	// mu serializes every durable mutation (Create/Update/WriteMemo/
+	// writeMarker). Before 611.22.34 the endpoint's e.mu serialized all
+	// writers; the async ack markers broke that assumption. The B3 lost-
+	// update probe (MarkAcknowledged vs MarkPublished, 200/200 losses with
+	// raw Get->mutate->write) is the regression for this lock. Revision CAS
+	// alone cannot close marker-vs-marker races: markers do not bump the
+	// revision, so two same-revision marker writes are indistinguishable
+	// under compare-and-retry — only mutual exclusion closes it.
+	mu       sync.Mutex
 	readOnly bool
-	closed   bool
 }
 
 // Option configures Open.
@@ -151,7 +178,7 @@ func OpenReadOnly(stateDir string) (*Store, error) {
 // after Close refuses with store_closed, so a stale reference cannot write
 // once ownership has moved on. The records stay on disk.
 func (s *Store) Close() error {
-	s.closed = true
+	s.closed.Store(true)
 	if s.lock == nil {
 		return nil
 	}
@@ -208,6 +235,9 @@ func (s *Store) Get(k Key) (*Record, bool, error) {
 
 // Create writes revision 1 of a new record. It refuses if a record exists.
 func (s *Store) Create(rec *Record) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	if err := s.checkClosed(); err != nil {
 		return err
 	}
@@ -231,6 +261,9 @@ func (s *Store) Create(rec *Record) error {
 // Update writes the next revision of an existing record after checking the
 // state graph, the immutable fields, and the single-dispatch rule.
 func (s *Store) Update(rec *Record) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	if err := s.checkClosed(); err != nil {
 		return err
 	}
@@ -275,6 +308,15 @@ func (s *Store) MarkPublished(k Key, revision int64) error {
 	if err := s.checkClosed(); err != nil {
 		return err
 	}
+	// 611.22.34 B3: the whole read-mutate-write runs under s.mu. The publish
+	// arm runs under e.mu today, but the ack markers now run from async
+	// goroutines — a raw Get->mutate->write here could revert a just-written
+	// Acknowledged flag. The field-level merge (fresh Get inside the lock,
+	// set only PublishedRevision, write) is what makes the update safe; a
+	// revision CAS alone cannot (markers do not bump the revision, so two
+	// same-revision marker writes are indistinguishable).
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	rec, exists, err := s.Get(k)
 	if err != nil {
 		return err
@@ -285,7 +327,44 @@ func (s *Store) MarkPublished(k Key, revision int64) error {
 	if revision > rec.Revision || revision < rec.PublishedRevision {
 		return protocol.Refuse(protocol.CodeInvalid, "published revision %d is out of range", revision)
 	}
+	if rec.PublishedRevision == revision {
+		return nil // already marked; nothing to write
+	}
 	rec.PublishedRevision = revision
+	return s.write(rec)
+}
+
+// MarkAcknowledged records that the native AcknowledgeResult call RETURNED
+// for this record (the adapter contract: AcknowledgeResult has no return
+// value, so "returned" is all the flag can prove — an earlier comment said
+// "delivered", which over-claimed). It rewrites the record in place without
+// a revision bump: ack bookkeeping is not new evidence about the request
+// (mirrors MarkPublished). Callers invoke it only after the call returned,
+// and only for records whose ack digest is non-empty
+// (agent-message-queue-611.22.34). The write is a revision-CAS (writeMarker):
+// a concurrent marker writer or commitLocked can advance the revision
+// between Get and write; losing that race REFUSES instead of silently
+// reverting the other writer's field, and this caller re-reads and retries.
+func (s *Store) MarkAcknowledged(k Key) error {
+	if err := s.checkClosed(); err != nil {
+		return err
+	}
+	// 611.22.34 B3: the whole read-mutate-write runs under s.mu, setting
+	// ONLY Acknowledged on a FRESH read — see MarkPublished for why a
+	// revision CAS alone cannot close marker-vs-marker races.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rec, exists, err := s.Get(k)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return protocol.Refuse(protocol.CodeNotFound, "record does not exist")
+	}
+	if rec.Acknowledged {
+		return nil // already marked; nothing to write
+	}
+	rec.Acknowledged = true
 	return s.write(rec)
 }
 
@@ -297,6 +376,9 @@ func (s *Store) MarkPublished(k Key, revision int64) error {
 // record beyond what write already enforces; callers must set the memo field
 // on a freshly read record, never on a stale snapshot.
 func (s *Store) WriteMemo(rec *Record) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	if err := s.checkClosed(); err != nil {
 		return err
 	}
@@ -552,14 +634,14 @@ func (s *Store) CompactOne(key Key, before time.Time) (bool, error) {
 // replacement endpoint has taken ownership. Reads (Get/List) are still
 // permitted on a closed store for diagnosis.
 func (s *Store) checkClosed() error {
-	if s.closed {
+	if s.closed.Load() {
 		return protocol.Refuse(protocol.CodeStoreClosed, "store is closed")
 	}
 	return nil
 }
 
 func (s *Store) write(rec *Record) error {
-	if s.closed {
+	if s.closed.Load() {
 		return protocol.Refuse(protocol.CodeStoreClosed, "store is closed")
 	}
 	if s.readOnly {
