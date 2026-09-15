@@ -87,6 +87,30 @@ func (w *wsConn) writePong(payload []byte) error {
 	return w.writeFrameBody(opPong, payload)
 }
 
+// writeCloseReply answers a peer close frame with the writer slot acquired
+// under a deadline, same discipline as writePong (B14b recut): an unbounded
+// close reply on a wedged socket stalled the read pump — Done() never fired
+// and the attachment never reported offline (611.22.40). On timeout the
+// stream is poisoned and the pump still exits; a missed close reply is
+// harmless because the peer initiated the close.
+func (w *wsConn) writeCloseReply() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := w.lockWriteCtx(ctx); err != nil {
+		w.poison()
+		return err
+	}
+	defer w.unlockWrite()
+	dl, _ := ctx.Deadline()
+	_ = w.conn.SetWriteDeadline(dl)
+	err := w.writeFrameBody(opClose, nil)
+	if err != nil {
+		w.poison()
+	}
+	defer func() { _ = w.conn.SetWriteDeadline(time.Time{}) }()
+	return err
+}
+
 // lockWriteCtx acquires the writer slot or gives up on ctx.
 func (w *wsConn) lockWriteCtx(ctx context.Context) error {
 	select {
@@ -148,6 +172,22 @@ func (w *wsConn) handshake() error {
 	return nil
 }
 
+// writeTextBounded sends one masked text frame bounded by a 3s deadline in
+// both phases (slot wait + write), same discipline as writePong/writeCloseReply
+// (611.22.40). Used by Client.Respond — the last unbounded frame write.
+func (w *wsConn) writeTextBounded(payload []byte) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := w.lockWriteCtx(ctx); err != nil {
+		return err
+	}
+	defer w.unlockWrite()
+	dl, _ := ctx.Deadline()
+	_ = w.conn.SetWriteDeadline(dl)
+	defer func() { _ = w.conn.SetWriteDeadline(time.Time{}) }()
+	return w.writeFrameBody(opText, payload)
+}
+
 // writeText sends one masked text frame.
 func (w *wsConn) writeText(payload []byte) error {
 	return w.writeFrame(opText, payload)
@@ -172,8 +212,10 @@ func (w *wsConn) writeTextCtx(ctx context.Context, payload []byte) error {
 	return w.writeFrameBody(opText, payload)
 }
 
-// writeFrame sends one frame, acquiring the writer slot without a context
-// (pings, pongs, close frames, and Respond must always land).
+// writeFrame sends one frame, acquiring the writer slot without a context.
+// 611.22.40 verifier note: writeFrame/lockWrite have zero production
+// callers since every production frame path (pong, close reply, Respond)
+// went through a bounded variant — keep for tests only.
 func (w *wsConn) writeFrame(opcode byte, payload []byte) error {
 	w.lockWrite()
 	defer w.unlockWrite()
@@ -232,7 +274,7 @@ func (w *wsConn) readText() ([]byte, error) {
 				return nil, err
 			}
 		case opClose:
-			_ = w.writeFrame(opClose, nil)
+			_ = w.writeCloseReply()
 			return nil, io.EOF
 		case opPong:
 		default:

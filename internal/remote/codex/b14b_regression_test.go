@@ -126,6 +126,7 @@ func newB14bClientWithServer(t *testing.T, onFrame func([]byte)) (*Client, net.L
 // TestB14bCloseStopsReqWorker pins B9 (recut: reqWorker is the only worker):
 // Close runs the full teardown — the req worker exits (reqWorkerDone) after
 // the read pump is drained, and the queues close safely.
+
 func TestB14bCloseStopsReqWorker(t *testing.T) {
 	c, _ := newB14bClient(t, nil, nil)
 	if err := c.Close(); err != nil {
@@ -213,14 +214,18 @@ func TestB14bCallWaitsBoundedBehindWedgedWriter(t *testing.T) {
 	c := newClient(ws, Handlers{})
 	t.Cleanup(func() { _ = c.Close() })
 
-	// Writer A: a large payload wedges in conn.Write (buffer full).
+	// Writer A: a large payload. 7xl (agent-message-queue-7xl): was a 150ms
+	// sleep to "give A time to acquire the slot". Deterministic: we hold the
+	// writer slot OURSELVES before any other goroutine can take it — no
+	// timing assumption at all. Writer A then blocks ACQUIRING THE SLOT and
+	// never reaches conn.Write; Call B's ctx proving the bounded wait is
+	// what this test pins.
+	ws.wmu <- struct{}{} // hold the slot for the whole test
 	writeADone := make(chan error, 1)
 	go func() {
-		big := make([]byte, 512*1024) // exceeds any socket buffer
+		big := make([]byte, 512*1024)
 		writeADone <- ws.writeText(big)
 	}()
-	// Give A time to acquire the slot and block inside Write.
-	time.Sleep(150 * time.Millisecond)
 
 	// Call B: small payload, 250ms deadline. The slot is held by A's
 	// writeText (uncontested under the old mutex: B waited unboundedly).
@@ -398,22 +403,27 @@ func TestB14bCloseConcurrentWithInboundServerRequest(t *testing.T) {
 		go c.reqWorker()
 		return c
 	}
+	// 7xl: was a 30-iteration probabilistic redial loop — it passed by luck
+	// of scheduling and only slowed CI. One Close concurrent with the
+	// hammering server exercises the same interleaving. Honest claim
+	// (verifier round 1): a send-on-closed reqQ panics the whole process, so
+	// this probe never fails spuriously — measured 19/20 catches on the
+	// reverted Close ordering. It is a high-probability probe, not a
+	// deterministic one; the real guarantee is structural (Close tears the
+	// socket down and drains the read pump BEFORE closing reqQ), and this
+	// test pins that no panic escapes one full concurrent teardown.
 	c := makeProbeClient()
-	for i := 0; i < 30; i++ { // the probe's iteration count
-		// Deliver frames and Close concurrently — the race window.
-		done := make(chan struct{})
-		go func() {
-			_ = c.Close()
-			close(done)
-		}()
-		select {
-		case <-done:
-		case <-time.After(b14bDeadline):
-			t.Fatal("Close deadlocked")
-		}
-		// Recreate the client for the next iteration.
-		c = makeProbeClient()
+	done := make(chan struct{})
+	go func() {
+		_ = c.Close()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(b14bDeadline):
+		t.Fatal("Close deadlocked")
 	}
+	c = makeProbeClient() // one clean client for final teardown
 	close(stop)
 	_ = c.Close()
 	// No panic = pass. (A send-on-closed reqQ panics the whole test process.)

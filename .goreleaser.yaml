@@ -72,6 +72,23 @@ builds:
       post:
         - sh -ceu 'if [ "$2" = darwin ]; then codesign --force --sign - --identifier io.github.avivsinai.amq-acp "$1"; fi' _ "{{ .Path }}" "{{ .Os }}"
 
+  - id: amq-remote
+    main: ./cmd/amq-remote
+    binary: amq-remote
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    hooks:
+      post:
+        - sh -ceu 'if [ "$2" = darwin ]; then codesign --force --sign - --identifier io.github.avivsinai.amq-remote "$1"; fi' _ "{{ .Path }}" "{{ .Os }}"
+
 archives:
   - id: amq
     ids: [amq]
@@ -98,6 +115,11 @@ archives:
     ids: [amq-acp]
     formats: [tar.gz]
     name_template: "amq-acp_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+  - id: amq-remote
+    ids: [amq-remote]
+    formats: [tar.gz]
+    name_template: "amq-remote_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
 
 checksum:
   name_template: "checksums.txt"
