@@ -422,6 +422,23 @@ func (c *Carrier) recoverOne(root *fsq.DeliveryRoot, curDir, name string) error 
 		"reply_project": msg.Header.ReplyProject,
 		"from_project":  msg.Header.FromProject,
 	}
+	// Receipt first, before the ledger. The claim happened, so the command was
+	// handled or refused at the time and the drained receipt is owed whatever
+	// the ledger says. The ledger arms below return without reaching the
+	// later emit, and every claimed command has a ledger entry, so emitting
+	// here is the only place that closes the claim-to-receipt crash gap
+	// (gate finding on agent-message-queue-611.22.36, union 42d923a4). The
+	// receipt is idempotent: WriteFileAtomic overwrites.
+	if !hasReceipt {
+		detail := "remote command recovered from cur"
+		if derr != nil {
+			detail += "; body undecodable"
+		}
+		rc := receipt.New(msg.Header.ID, msg.Header.Thread, msg.Header.From, c.me, receipt.StageDrained, detail)
+		if err := receipt.EmitDeliveryRoot(root, rc); err != nil {
+			return err
+		}
+	}
 	// The per-command reply ledger is the authority on what this command was
 	// answered with (a refusal for an undecodable body included) and whether
 	// that answer became visible. It is written
@@ -436,15 +453,8 @@ func (c *Carrier) recoverOne(root *fsq.DeliveryRoot, curDir, name string) error 
 		return c.deliverLedgered(root, origin, msg.Header.ID, led)
 	}
 	if derr != nil {
-		// The claim happened, so the command was handled or refused at the
-		// time; without a decodable body we cannot reconstruct a reply, but
-		// the missing/corrupted receipt still must be emitted. The reply is
-		// not possible (no body to reconstruct from), so return after the
-		// receipt — there is nothing to re-send.
-		if !hasReceipt {
-			rc := receipt.New(msg.Header.ID, msg.Header.Thread, msg.Header.From, c.me, receipt.StageDrained, "remote command recovered from cur; body undecodable")
-			return receipt.EmitDeliveryRoot(root, rc)
-		}
+		// Without a decodable body there is no reply to reconstruct; the
+		// receipt above is all that was owed.
 		return nil
 	}
 	// Reconstruct the outcome from the durable record — never re-execute.
@@ -452,8 +462,7 @@ func (c *Carrier) recoverOne(root *fsq.DeliveryRoot, curDir, name string) error 
 	// already reflects the command's outcome, so the reply is a read, not a
 	// second execution.
 	//
-	// Receipt-first ordering: emit the receipt before the reply. The receipt
-	// is our own bookkeeping and is idempotent (WriteFileAtomic overwrites).
+	// The receipt was emitted above, before the ledger and the reply.
 	//
 	// The reply is NOT gated on !hasReceipt. The receipt-first ordering used
 	// to gate the reply inside !hasReceipt, which created a lost-reply window:
@@ -469,12 +478,6 @@ func (c *Carrier) recoverOne(root *fsq.DeliveryRoot, curDir, name string) error 
 	// because our fsync can corrupt it (it cannot — writeAndSync writes and
 	// fsyncs the full content before rename), but because presence is not
 	// proof and recovery is free.
-	if !hasReceipt {
-		rc := receipt.New(msg.Header.ID, msg.Header.Thread, msg.Header.From, c.me, receipt.StageDrained, "remote command recovered from cur")
-		if err := receipt.EmitDeliveryRoot(root, rc); err != nil {
-			return err
-		}
-	}
 	// Always attempt the recovery reply (idempotent), unless the outcome was
 	// already published via Publish before the crash (request ops only).
 	if cmd.Op != protocol.OpRequestSubmit && cmd.Op != protocol.OpRequestCancel {
