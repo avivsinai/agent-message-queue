@@ -10,6 +10,14 @@ import (
 	"time"
 )
 
+// ErrNotSent wraps pre-send failures (marshal error, write error, connection
+// already closed before the write). A pre-send failure is UNAMBIGUOUS: the
+// prompt never left, so the adapter can safely dropRun + refuse (retry is
+// safe, nothing ran). Post-send failures (closed before reply, ctx deadline,
+// unmarshal error) are AMBIGUOUS: the turn may be running, so the adapter
+// keeps the run and returns an uncertain error.
+var ErrNotSent = errors.New("not sent")
+
 // rpcMessage is one JSON-RPC 2.0 message in either direction. The app-server
 // omits "jsonrpc" on some notifications, so it is optional on decode.
 type rpcMessage struct {
@@ -242,19 +250,19 @@ func (c *Client) Call(ctx context.Context, method string, params any, result any
 	id := c.nextID.Add(1)
 	raw, err := json.Marshal(params)
 	if err != nil {
-		return err
+		return fmt.Errorf("%w: marshal params: %w", ErrNotSent, err)
 	}
 	idRaw := json.RawMessage(fmt.Sprintf("%d", id))
 	msg := rpcMessage{JSONRPC: "2.0", ID: &idRaw, Method: method, Params: raw}
 	data, err := json.Marshal(msg)
 	if err != nil {
-		return err
+		return fmt.Errorf("%w: marshal message: %w", ErrNotSent, err)
 	}
 	ch := make(chan rpcMessage, 1)
 	c.mu.Lock()
 	if c.readErr != nil {
 		c.mu.Unlock()
-		return fmt.Errorf("app-server connection closed: %w", c.readErr)
+		return fmt.Errorf("%w: app-server connection closed: %w", ErrNotSent, c.readErr)
 	}
 	c.pending[id] = ch
 	c.mu.Unlock()
@@ -266,7 +274,7 @@ func (c *Client) Call(ctx context.Context, method string, params any, result any
 		c.mu.Lock()
 		delete(c.pending, id)
 		c.mu.Unlock()
-		return err
+		return fmt.Errorf("%w: write: %w", ErrNotSent, err)
 	}
 	select {
 	case resp, ok := <-ch:

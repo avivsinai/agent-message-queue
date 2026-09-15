@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
@@ -41,9 +42,15 @@ type run struct {
 	state        protocol.State
 	text         strings.Builder
 	errText      string
+	nativeRef    string
 	local        bool
 	interaction  *protocol.Interaction
 	approvalReqs map[string]json.RawMessage
+	// createdAt is when the run was bound, for the unconfirmed-shadow
+	// deadline (Pro F1): a retained-but-unconfirmed run shadows lookupHistory
+	// in Lookup. After confirmTimeout, if still unconfirmed, the run stops
+	// shadowing so lookupHistory can resolve the turn by clientId.
+	createdAt time.Time
 	// confirmed (the bool) is the durable ownership flag every consumer reads:
 	// until the userMessage item carrying this run's clientUserMessageId is
 	// observed, the run is TENTATIVE and must not be cancelled, attributed, or
@@ -54,6 +61,11 @@ type run struct {
 	// delivered when the run confirms.
 	cancelPending bool
 	queued        bool
+	// acked records that the endpoint acknowledged this run's terminal
+	// result. The retained payload is released and Lookup reports
+	// EvidenceNone for the key, so reconcile's ack replay converges instead
+	// of re-asking every tick (agent-message-queue-611.22.24).
+	acked bool
 }
 
 // Attachment is one running Codex thread reached through the shared
@@ -65,17 +77,30 @@ type Attachment struct {
 	epoch    string
 	cwd      string
 	approve  bool
+	now      func() time.Time
+	// confirmTimeout is how long Submit waits for our own userMessage item.
+	// Overridable for tests.
+	confirmTimeout time.Duration
 
 	mu           sync.Mutex
 	status       string
 	activeTurn   string
 	runs         map[requests.Key]*run
 	byTurn       map[string]*run
-	byClientID   map[string]*run
+	byClientID   map[string]*run // keyed by clientIDFor(key), not bare RequestID
 	cancelIntent map[requests.Key]bool
-	listeners    map[int]func(core.NativeEvent)
-	nextListener int
-	offline      bool
+	// terminalTurns is a bounded memo of turn IDs observed as terminal via
+	// turn/completed, even when no byTurn entry exists (the confirming
+	// userMessage item was missed in the race window). The RPC-response
+	// guard consults this so a finished turn is never reinstalled as
+	// active. Bounded via terminalTurnOrder (FIFO): when full, the OLDEST
+	// observation is evicted — it is a race-window artefact, not a log
+	// (B3, agent-message-queue-611.22.36).
+	terminalTurns     map[string]bool
+	terminalTurnOrder []string // FIFO of the same turn IDs; drives eviction
+	listeners         map[int]func(core.NativeEvent)
+	nextListener      int
+	offline           bool
 }
 
 // Option configures Attach.
@@ -85,6 +110,12 @@ type Option func(*Attachment)
 // remote decisions. Off until fanout of approval requests to a second client
 // is verified live.
 func WithApprovals(on bool) Option { return func(a *Attachment) { a.approve = on } }
+
+// WithClock overrides the attachment's clock (for tests). Production uses time.Now.
+func WithClock(now func() time.Time) Option { return func(a *Attachment) { a.now = now } }
+
+// WithConfirmTimeout overrides the confirm timeout (for tests).
+func WithConfirmTimeout(d time.Duration) Option { return func(a *Attachment) { a.confirmTimeout = d } }
 
 // Attach connects to the daemon socket, resumes threadID as a second client,
 // and starts consuming its notifications.
@@ -102,15 +133,19 @@ func Attach(socketPath, threadID string, opts ...Option) (*Attachment, error) {
 	// that true: a handler that touches a.client outside those maps would
 	// read it before the assignment below.
 	a := &Attachment{
-		threadID:     threadID,
-		targetID:     TargetID(threadID),
-		epoch:        fmt.Sprintf("cx-%d", time.Now().UnixNano()),
-		status:       "unknown",
-		runs:         map[requests.Key]*run{},
-		byTurn:       map[string]*run{},
-		byClientID:   map[string]*run{},
-		cancelIntent: map[requests.Key]bool{},
-		listeners:    map[int]func(core.NativeEvent){},
+		threadID:          threadID,
+		targetID:          TargetID(threadID),
+		epoch:             fmt.Sprintf("cx-%d", time.Now().UnixNano()),
+		status:            "unknown",
+		runs:              map[requests.Key]*run{},
+		byTurn:            map[string]*run{},
+		byClientID:        map[string]*run{},
+		terminalTurns:     map[string]bool{},
+		terminalTurnOrder: []string{},
+		cancelIntent:      map[requests.Key]bool{},
+		listeners:         map[int]func(core.NativeEvent){},
+		now:               time.Now,
+		confirmTimeout:    confirmTimeout,
 	}
 	for _, o := range opts {
 		o(a)
@@ -230,7 +265,7 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 	a.mu.Lock()
 	if a.offline {
 		a.mu.Unlock()
-		return core.Admission{}, errors.New("app-server connection is closed")
+		return refusal(fmt.Errorf("%w: app-server connection is closed", ErrNotSent)), nil
 	}
 	if req.Epoch != a.epoch {
 		a.mu.Unlock()
@@ -242,7 +277,7 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 		return core.Admission{Code: protocol.CodeCancelledBeforeAdmission}, nil
 	}
 	if existing, ok := a.runs[req.Key]; ok {
-		id := existing.runID()
+		id := existing.runIDLocked()
 		a.mu.Unlock()
 		return core.Admission{Admitted: true, RunID: id}, nil
 	}
@@ -260,28 +295,28 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 		if !busy {
 			return core.Admission{Code: protocol.CodeUnsupported, Message: "steer needs an active turn; use deliver=turn"}, nil
 		}
-		if err := a.call("turn/steer", map[string]any{"threadId": a.threadID, "expectedTurnId": activeTurn, "input": input, "clientUserMessageId": req.Key.RequestID}, nil); err != nil {
+		if err := a.call("turn/steer", map[string]any{"threadId": a.threadID, "expectedTurnId": activeTurn, "input": input, "clientUserMessageId": clientIDFor(req.Key)}, nil); err != nil {
 			return refusal(err), nil
 		}
-		r := &run{key: req.Key, epoch: req.Epoch, state: protocol.StateRunning, turnID: activeTurn, confirmed: true, approvalReqs: map[string]json.RawMessage{}}
+		r := &run{key: req.Key, epoch: req.Epoch, state: protocol.StateRunning, turnID: activeTurn, confirmed: true, approvalReqs: map[string]json.RawMessage{}, createdAt: a.now()}
 		a.mu.Lock()
 		a.runs[req.Key] = r
-		a.byClientID[req.Key.RequestID] = r
+		a.byClientID[clientIDFor(req.Key)] = r
 		a.byTurn[activeTurn] = r
 		a.mu.Unlock()
-		return core.Admission{Admitted: true, RunID: r.runID()}, nil
+		return core.Admission{Admitted: true, RunID: a.runID(r)}, nil
 
 	case busy && req.Input.Busy == protocol.BusyQueue:
 		// Codex's own FIFO queue primitive; acceptance is Codex-native.
-		if err := a.call("thread/queue/add", map[string]any{"threadId": a.threadID, "clientUserMessageId": req.Key.RequestID, "input": input}, nil); err != nil {
+		if err := a.call("thread/queue/add", map[string]any{"threadId": a.threadID, "clientUserMessageId": clientIDFor(req.Key), "input": input}, nil); err != nil {
 			return refusal(err), nil
 		}
-		r := &run{key: req.Key, epoch: req.Epoch, state: protocol.StateRunning, queued: true, approvalReqs: map[string]json.RawMessage{}}
+		r := &run{key: req.Key, epoch: req.Epoch, state: protocol.StateRunning, queued: true, approvalReqs: map[string]json.RawMessage{}, createdAt: a.now()}
 		a.mu.Lock()
 		a.runs[req.Key] = r
-		a.byClientID[req.Key.RequestID] = r
+		a.byClientID[clientIDFor(req.Key)] = r
 		a.mu.Unlock()
-		return core.Admission{Admitted: true, RunID: r.runID()}, nil
+		return core.Admission{Admitted: true, RunID: a.runID(r)}, nil
 
 	case busy:
 		return core.Admission{Code: protocol.CodeBusy, Message: "a turn is active on this thread"}, nil
@@ -289,10 +324,10 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 
 	// Idle turn/start. Register the run first so onItem can confirm our
 	// userMessage, then call unlocked, then require confirmation.
-	r := &run{key: req.Key, epoch: req.Epoch, state: protocol.StateRunning, approvalReqs: map[string]json.RawMessage{}, confirmedCh: make(chan struct{})}
+	r := &run{key: req.Key, epoch: req.Epoch, state: protocol.StateRunning, approvalReqs: map[string]json.RawMessage{}, confirmedCh: make(chan struct{}), createdAt: a.now()}
 	a.mu.Lock()
 	a.runs[req.Key] = r
-	a.byClientID[req.Key.RequestID] = r
+	a.byClientID[clientIDFor(req.Key)] = r
 	a.mu.Unlock()
 
 	var res struct {
@@ -300,15 +335,45 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 			ID string `json:"id"`
 		} `json:"turn"`
 	}
-	if err := a.call("turn/start", map[string]any{"threadId": a.threadID, "input": input, "clientUserMessageId": req.Key.RequestID}, &res); err != nil {
-		a.dropRun(req.Key)
-		return refusal(err), nil
+	if err := a.call("turn/start", map[string]any{"threadId": a.threadID, "input": input, "clientUserMessageId": clientIDFor(req.Key)}, &res); err != nil {
+		// B1 (agent-message-queue-611.22.35): split pre-send vs post-send.
+		// ErrNotSent (marshal error, write error, connection closed before
+		// write) and rpcError (server responded with an error) are both
+		// unambiguous: the prompt either never left or was positively
+		// refused. dropRun + refuse (retry is safe). Post-send failures
+		// (closed before reply, ctx deadline, unmarshal error) are ambiguous:
+		// the turn may be running. Keep the correlation, return a non-nil
+		// error so the endpoint records uncertain.
+		var rpc *rpcError
+		if errors.Is(err, ErrNotSent) || errors.As(err, &rpc) {
+			a.dropRun(req.Key)
+			return refusal(err), nil
+		}
+		// Post-send ambiguity: keep the correlation so Lookup and
+		// history can still resolve it. Return a non-nil error (not a refusal
+		// code) so the endpoint records uncertain.
+		return core.Admission{}, err
 	}
 	if res.Turn.ID == "" {
-		a.dropRun(req.Key)
-		return core.Admission{Code: protocol.CodeNativeError, Message: "turn/start returned no turn id"}, nil
+		// B1: a successful RPC response with no turn id is ambiguous, not a
+		// definitive refusal. The server may have accepted the prompt under a
+		// turn we have not observed yet. Preserve the correlation and return
+		// a non-nil error so the endpoint records uncertain.
+		return core.Admission{}, fmt.Errorf("turn/start returned no turn id")
 	}
 	a.mu.Lock()
+	// B3: the read pump may have already processed the confirming
+	// notification, the completed result, and the final idle-status before
+	// this goroutine resumes. Do not restore an already-finished turn as the
+	// active turn — that would wedge the adapter permanently busy with no
+	// later event to clear it. If the run is already terminal, OR the turn
+	// was observed as terminal via the memo (confirming userMessage missed,
+	// turn/completed recorded it), skip the activeTurn/status restoration.
+	if r.state.Terminal() || a.terminalTurns[res.Turn.ID] {
+		rid := r.runIDLocked()
+		a.mu.Unlock()
+		return core.Admission{Admitted: true, RunID: rid}, nil
+	}
 	if r.turnID == "" {
 		r.turnID = res.Turn.ID
 		// byTurn is NOT bound here: the returned turn id may belong to a turn
@@ -322,13 +387,27 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 
 	select {
 	case <-confirmedCh:
-		return core.Admission{Admitted: true, RunID: r.runID()}, nil
-	case <-time.After(confirmTimeout):
-		a.dropRun(req.Key)
-		return core.Admission{Code: protocol.CodeBusy, Message: "turn/start was not confirmed by our own userMessage item; it may have joined an active turn"}, nil
+		return core.Admission{Admitted: true, RunID: a.runID(r)}, nil
+	case <-time.After(a.confirmTimeout):
+		// turn/start already returned a turn id: the text may be RUNNING in
+		// Codex. Absence of our confirmation is NOT proof of refusal, and a
+		// refusal code would commit a terminal `rejected` record that
+		// reconcile never revisits — the caller retries with a fresh id and
+		// the prompt runs twice. Report an ERROR so the endpoint records
+		// UNCERTAIN, and KEEP the correlation (no dropRun) so Lookup and
+		// lookupHistory can still resolve it (agent-message-queue-611.22.31).
+		// B1 (F3): runIDLocked takes a.mu — confirmRun writes r.turnID from the
+		// read-loop goroutine. Every runID read now goes through the lock-taking
+		// accessor (a.runID) or runIDLocked under a.mu.
+		a.mu.Lock()
+		rid := r.runIDLocked()
+		a.mu.Unlock()
+		return core.Admission{RunID: rid}, fmt.Errorf("turn/start was not confirmed by our own userMessage item within %s; the turn may be running", a.confirmTimeout)
 	case <-a.client.Done():
-		a.dropRun(req.Key)
-		return core.Admission{Code: protocol.CodeAttachmentLost, Message: "app-server closed during turn/start"}, nil
+		a.mu.Lock()
+		rid := r.runIDLocked()
+		a.mu.Unlock()
+		return core.Admission{RunID: rid}, errors.New("app-server closed during turn/start; the turn may be running")
 	}
 }
 
@@ -339,12 +418,33 @@ func (a *Attachment) call(method string, params, result any) error {
 	return a.client.Call(ctx, method, params, result)
 }
 
+// memoTerminal records turnID as an observed-terminal turn and keeps the
+// FIFO bound. Caller holds a.mu.
+func (a *Attachment) memoTerminal(turnID string) {
+	if turnID == "" || a.terminalTurns[turnID] {
+		return
+	}
+	a.terminalTurns[turnID] = true
+	a.terminalTurnOrder = append(a.terminalTurnOrder, turnID)
+	// Bound: evict the OLDEST observed entry when the memo grows beyond a
+	// race-window artefact size. FIFO via terminalTurnOrder: Go map
+	// iteration order is randomized, so walking the map to "evict the
+	// oldest" evicts an arbitrary entry — possibly the turn whose RPC
+	// response is still in flight, reinstating the wedge this memo closes
+	// (10b, packet 10 recut).
+	if len(a.terminalTurnOrder) > maxLiveRuns {
+		oldest := a.terminalTurnOrder[0]
+		a.terminalTurnOrder = a.terminalTurnOrder[1:]
+		delete(a.terminalTurns, oldest)
+	}
+}
+
 // dropRun removes a run binding when admission failed, so a retry is clean.
 func (a *Attachment) dropRun(key requests.Key) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if r, ok := a.runs[key]; ok {
-		delete(a.byClientID, key.RequestID)
+		delete(a.byClientID, clientIDFor(key))
 		if r.turnID != "" {
 			delete(a.byTurn, r.turnID)
 		}
@@ -389,11 +489,35 @@ func (a *Attachment) deliverPendingCancel(key requests.Key, turnID string) {
 	_ = key
 }
 
-func (r *run) runID() string {
+// runIDLocked returns the run's correlation id. The caller MUST hold a.mu:
+// r.turnID is written by confirmRun from the read-loop goroutine. Every
+// external caller goes through a.runID, which takes the lock.
+func (r *run) runIDLocked() string {
 	if r.turnID != "" {
 		return "turn:" + r.turnID
 	}
 	return "queued:" + r.key.RequestID
+}
+
+// runID is the lock-taking accessor for external callers. It is the ONLY
+// way to read a run's runID outside a.mu. B1 (F3): every read of a run's
+// mutable fields (turnID, confirmed, state, text, createdAt) goes through a
+// small accessor that takes a.mu; no caller touches r.<field> directly.
+func (a *Attachment) runID(r *run) string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return r.runIDLocked()
+}
+
+// clientIDFor returns the native correlation token for a request key. B2:
+// the endpoint's identity is (CreatorHost, TargetID, RequestID), so two
+// creator hosts can legitimately share a UUID. Indexing by bare RequestID
+// would attribute one caller's failed run to another's live request. The
+// composite token preserves the full namespace. This token is sent as
+// clientUserMessageId to the server and echoed back in history items; the
+// byClientID map is keyed by it.
+func clientIDFor(key requests.Key) string {
+	return protocol.EncodeRef(key.CreatorHost, key.TargetID, key.RequestID)
 }
 
 func refusal(err error) core.Admission {
@@ -410,7 +534,16 @@ func refusal(err error) core.Admission {
 func (a *Attachment) Lookup(key requests.Key, epoch string) (core.Evidence, error) {
 	a.mu.Lock()
 	if r, ok := a.runs[key]; ok && r.epoch == epoch {
-		ev := core.Evidence{Known: true, RunID: r.runID(), State: r.state, LocalIntervention: r.local, Interaction: r.interaction}
+		if r.acked {
+			// Released: the endpoint acknowledged this result and holds it
+			// durably. Report that nothing is retained — and do NOT fall
+			// through to the thread/read history, whose copy would look like
+			// fresh evidence and restart the ack loop.
+			ev := core.Evidence{Known: true, Admitted: true, Class: core.EvidenceNone, RunID: r.runIDLocked(), State: r.state}
+			a.mu.Unlock()
+			return ev, nil
+		}
+		ev := core.Evidence{Known: true, RunID: r.runIDLocked(), State: r.state, LocalIntervention: r.local, Interaction: r.interaction}
 		switch {
 		case r.confirmed || r.queued:
 			// A confirmed running turn, or a Codex-native-accepted queue item:
@@ -423,16 +556,30 @@ func (a *Attachment) Lookup(key requests.Key, epoch string) (core.Evidence, erro
 		default:
 			// Bound but native ownership not yet proven: tentative, never
 			// admitted, so reconcile leaves it running and never rejects it.
+			//
+			// Pro F1: a retained-but-unconfirmed run permanently shadows
+			// lookupHistory, so the record sticks at Uncertain forever and a
+			// real completed result is never delivered. After confirmTimeout,
+			// if still unconfirmed, STOP shadowing — fall through to
+			// lookupHistory, which resolves the turn by clientId == key.RequestID
+			// and can deliver the completed result. The deadline is the same
+			// bound Submit already waited: if our userMessage item never
+			// arrived within confirmTimeout, the race window dropped our text
+			// and the run will never confirm.
+			if a.now().Sub(r.createdAt) >= a.confirmTimeout {
+				a.mu.Unlock()
+				return a.lookupHistory(key, epoch)
+			}
 			ev.Class = core.EvidenceTentative
 		}
 		a.mu.Unlock()
 		return ev, nil
 	}
 	a.mu.Unlock()
-	return a.lookupHistory(key)
+	return a.lookupHistory(key, epoch)
 }
 
-func (a *Attachment) lookupHistory(key requests.Key) (core.Evidence, error) {
+func (a *Attachment) lookupHistory(key requests.Key, epoch string) (core.Evidence, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	var res struct {
@@ -458,7 +605,7 @@ func (a *Attachment) lookupHistory(key requests.Key) (core.Evidence, error) {
 		mine := false
 		var text strings.Builder
 		for _, it := range t.Items {
-			if it.Type == "userMessage" && it.ClientID == key.RequestID {
+			if it.Type == "userMessage" && it.ClientID == clientIDFor(key) {
 				mine = true
 			}
 			if it.Type == "agentMessage" {
@@ -469,27 +616,130 @@ func (a *Attachment) lookupHistory(key requests.Key) (core.Evidence, error) {
 		if !mine {
 			continue
 		}
-		ev := core.Evidence{Known: true, Admitted: true, RunID: "turn:" + t.ID}
+		var state protocol.State
+		var errText string
 		switch t.Status {
 		case "completed":
-			ev.State = protocol.StateCompleted
-			ev.Result = &protocol.Result{Text: text.String(), NativeRef: "codex thread " + a.threadID + " turn " + t.ID}
+			state = protocol.StateCompleted
 		case "failed":
-			ev.State = protocol.StateFailed
-			msg := ""
+			state = protocol.StateFailed
 			if t.Error != nil {
-				msg = t.Error.Message
+				errText = t.Error.Message
 			}
-			ev.Result = &protocol.Result{Text: text.String(), Error: msg}
 		case "interrupted":
-			ev.State = protocol.StateCancelled
-			ev.Result = &protocol.Result{Text: text.String()}
+			state = protocol.StateCancelled
 		default:
-			ev.State = protocol.StateRunning
+			state = protocol.StateRunning
 		}
-		return ev, nil
+		// B2: when history resolves a run as terminal, MAKE THE IN-MEMORY RUN
+		// TERMINAL. Record the turn id so the correlation exists (byTurn), set
+		// the terminal state, and populate the result text so AcknowledgeResult
+		// can match the digest and release it. A run we have proven finished
+		// must not stay "running" in our own map forever, re-reading the whole
+		// transcript every tick (agent-message-queue-611.22.24).
+		//
+		// B3: r.result() is the ONLY place a protocol.Result is constructed in
+		// this package — lookupHistory does not build one directly, so the
+		// bounding point (MaxResultBytes, truncated) applies here too.
+		nativeRef := "codex thread " + a.threadID + " turn " + t.ID
+		if state.Terminal() {
+			a.mu.Lock()
+			// B3 (agent-message-queue-611.22.36): when history establishes a
+			// turn terminal, clear a.activeTurn ONLY IF it is that same turn
+			// id. If a newer turn is active, leave it alone — clearing a newer
+			// turn is a worse bug.
+			if a.activeTurn == t.ID {
+				a.activeTurn = ""
+				a.status = "idle"
+			}
+			// 10d (packet 10 recut): record through memoTerminal like every
+			// other memo writer. A bare map write here bypassed the FIFO —
+			// these entries never entered terminalTurnOrder, so eviction
+			// (which measures the SLICE) never removed them and the map grew
+			// without bound, one entry per distinct history-recovered turn.
+			a.memoTerminal(t.ID)
+			if r, ok := a.runs[key]; ok {
+				r.turnID = t.ID
+				a.byTurn[t.ID] = r
+				r.state = state
+				r.errText = errText
+				r.nativeRef = nativeRef
+				r.text.Reset()
+				r.text.WriteString(text.String())
+				r.confirmed = true
+				a.mu.Unlock()
+				result := r.result()
+				return core.Evidence{Known: true, Admitted: true, RunID: "turn:" + t.ID, State: state, Result: result}, nil
+			}
+			a.mu.Unlock()
+		}
+		// No in-memory run (e.g. after restart) or non-terminal: build the
+		// result through the same helper so the bounding point is one.
+		// B6: INSTALL a confirmed run entry so CancelExact can act on it.
+		// Without this, a surviving run after restart cannot be cancelled —
+		// the adapter has no entry, so CancelExact records intent only.
+		// Install for BOTH terminal and live results: a terminal run still
+		// needs the entry so AcknowledgeResult can release it.
+		r := &run{
+			key: key, turnID: t.ID, state: state,
+			epoch:   epoch,
+			errText: errText, nativeRef: nativeRef,
+			confirmed: true, createdAt: a.now(),
+			approvalReqs: map[string]json.RawMessage{},
+		}
+		r.text.WriteString(text.String())
+		a.mu.Lock()
+		if existing, ok := a.runs[key]; ok {
+			// Evidence only ADVANCES: fill only what is empty, never
+			// overwrite state/text the pump set.
+			if existing.turnID == "" {
+				existing.turnID = t.ID
+			}
+			// B6 (agent-message-queue-611.22.36): a run installed by the
+			// submit path always has an epoch, but a run recovered by an
+			// earlier lookupHistory (before this fix) or by a concurrent
+			// history call that lost the race may have an empty epoch.
+			// Fill it from the requested epoch — history has proven this
+			// is the same native turn, so the entry answers for the epoch
+			// the endpoint holds.
+			if existing.epoch == "" {
+				existing.epoch = epoch
+			}
+			existing.confirmed = true
+			// If the pump already moved to terminal, keep its state/text.
+			if !existing.state.Terminal() {
+				existing.state = state
+				existing.errText = errText
+				existing.nativeRef = nativeRef
+				existing.text.Reset()
+				existing.text.WriteString(text.String())
+			}
+			r = existing
+		} else {
+			a.runs[key] = r
+			a.byClientID[clientIDFor(key)] = r
+			// B3: if this is a terminal turn recovered from history after
+			// restart, clear a.activeTurn if it matches (the pump is dead).
+			if state.Terminal() && a.activeTurn == t.ID {
+				a.activeTurn = ""
+				a.status = "idle"
+			}
+		}
+		if t.ID != "" && r.turnID != "" {
+			a.byTurn[r.turnID] = r
+		}
+		a.mu.Unlock()
+		result := r.result()
+		return core.Evidence{Known: true, Admitted: true, RunID: r.runIDLocked(), State: r.state, Result: result}, nil
 	}
-	return core.Evidence{}, nil
+	// No turn carried our clientId. That is NOT positive proof the request was
+	// never admitted: the clientId echo is schema-backed but unverified
+	// against a live app-server, and a single omitted field would otherwise
+	// make the first reconcile after a restart REJECT every in-flight request
+	// while its turns keep running. Absence of correlation is unknown —
+	// uncertain, keep correlation — never EvidenceNone
+	// (agent-message-queue-611.22.31).
+	return core.Evidence{Known: true, Class: core.EvidenceUnknown}, nil
 }
 
 // CancelExact implements core.Attachment.
@@ -517,13 +767,13 @@ func (a *Attachment) CancelExact(key requests.Key, epoch string) (core.CancelEvi
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	if queued && turnID == "" {
-		if err := a.client.Call(ctx, "thread/queue/delete", map[string]any{"threadId": a.threadID, "clientUserMessageId": key.RequestID}, nil); err != nil {
+		if err := a.client.Call(ctx, "thread/queue/delete", map[string]any{"threadId": a.threadID, "clientUserMessageId": clientIDFor(key)}, nil); err != nil {
 			return core.CancelEvidence{Disposition: protocol.CancelUnsupported, Message: err.Error()}, nil
 		}
 		a.mu.Lock()
 		r.state = protocol.StateCancelled
 		a.mu.Unlock()
-		a.emit(core.NativeEvent{Type: core.EventRunCancelled, Key: key, RunID: r.runID()})
+		a.emit(core.NativeEvent{Type: core.EventRunCancelled, Key: key, RunID: a.runID(r)})
 		return core.CancelEvidence{Disposition: protocol.CancelConfirmed}, nil
 	}
 	if err := a.client.Call(ctx, "turn/interrupt", map[string]any{"threadId": a.threadID, "turnId": turnID}, nil); err != nil {
@@ -556,19 +806,46 @@ func (a *Attachment) Respond(key requests.Key, epoch, interactionID, option stri
 		a.mu.Unlock()
 		return protocol.CodeInvalid, nil
 	}
-	delete(r.approvalReqs, interactionID)
-	r.interaction = nil
 	a.mu.Unlock()
 	if err := a.client.Respond(reqID, map[string]string{"decision": option}); err != nil {
 		return "", err
 	}
-	a.emit(core.NativeEvent{Type: core.EventQuestionResolved, Key: key, RunID: r.runID()})
+	// B8a (agent-message-queue-611.22.36): tear down the approval state ONLY
+	// after Respond succeeds. Previously the delete + nil happened before the
+	// send, so a transport failure left r.interaction == nil and a retry
+	// returned CodeAlreadyResolved while the native question was still open.
+	a.mu.Lock()
+	delete(r.approvalReqs, interactionID)
+	r.interaction = nil
+	a.mu.Unlock()
+	a.emit(core.NativeEvent{Type: core.EventQuestionResolved, Key: key, RunID: a.runID(r)})
 	return "", nil
 }
 
 // AcknowledgeResult implements core.Attachment. Codex keeps the transcript;
 // nothing is retained here beyond the process.
-func (a *Attachment) AcknowledgeResult(requests.Key, string, string) {}
+// AcknowledgeResult implements core.Attachment: it releases the retained
+// terminal evidence for the key. It was a no-op, so the convergence
+// precondition the endpoint relies on ("once a native ack lands the
+// attachment retains nothing and Lookup reports EvidenceNone") never held for
+// codex: every terminal record re-asked Lookup on every reconcile tick,
+// forever. The digest must name exactly this run's retained result, so a
+// stale or foreign ack can never release a different request's evidence.
+func (a *Attachment) AcknowledgeResult(key requests.Key, epoch, digest string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	r, ok := a.runs[key]
+	if !ok || r.epoch != epoch || !r.state.Terminal() || r.acked {
+		return
+	}
+	if digest == "" || digest != protocol.EvidenceDigest(r.result()) {
+		return
+	}
+	// Release the payload; the endpoint holds it durably now.
+	r.acked = true
+	r.text.Reset()
+	r.errText = ""
+}
 
 // Subscribe implements core.Attachment.
 func (a *Attachment) Subscribe(fn func(core.NativeEvent)) func() {
@@ -633,6 +910,20 @@ func (a *Attachment) onNotification(n Notification) {
 			a.activeTurn = ""
 			a.status = "idle"
 		}
+		// B3 (agent-message-queue-611.22.36): record the terminal observation
+		// even when no byTurn entry exists (the confirming userMessage item
+		// was missed). The RPC-response guard consults this memo so a finished
+		// turn is never reinstalled as active.
+		// 10a (packet 10 recut): record UNCONDITIONALLY. The notification means
+		// the turn is over — every arm of the status switch below (including
+		// default -> StateFailed) produces a terminal state, so keeping a
+		// narrower status whitelist here re-derives terminality a second time
+		// and wedges again for any status it fails to enumerate.
+		// 10b (packet 10 recut): the bound is owned by memoTerminal (FIFO
+		// via terminalTurnOrder — Go map iteration order is randomized, so
+		// walking the map to "evict the oldest" evicts an arbitrary entry,
+		// possibly the turn whose RPC response is still in flight).
+		a.memoTerminal(p.Turn.ID)
 		r, ok := a.byTurn[p.Turn.ID]
 		if !ok || r.state.Terminal() {
 			a.mu.Unlock()
@@ -642,18 +933,21 @@ func (a *Attachment) onNotification(n Notification) {
 		switch p.Turn.Status {
 		case "completed":
 			r.state = protocol.StateCompleted
+			r.nativeRef = "codex thread " + a.threadID + " turn " + p.Turn.ID
 			ev = core.NativeEvent{Type: core.EventRunCompleted}
 		case "interrupted":
 			r.state = protocol.StateCancelled
+			r.nativeRef = "codex thread " + a.threadID + " turn " + p.Turn.ID
 			ev = core.NativeEvent{Type: core.EventRunCancelled}
 		default:
 			r.state = protocol.StateFailed
+			r.nativeRef = "codex thread " + a.threadID + " turn " + p.Turn.ID
 			if p.Turn.Error != nil {
 				r.errText = p.Turn.Error.Message
 			}
 			ev = core.NativeEvent{Type: core.EventRunFailed}
 		}
-		ev.Key, ev.RunID, ev.Result = r.key, r.runID(), r.result()
+		ev.Key, ev.RunID, ev.Result = r.key, r.runIDLocked(), r.result()
 		r.interaction = nil
 		a.mu.Unlock()
 		a.emit(ev)
@@ -708,7 +1002,7 @@ func (a *Attachment) onItem(n Notification) {
 		// steered locally.
 		if r, ok := a.byTurn[p.TurnID]; ok && !r.local && n.Method == "item/started" {
 			r.local = true
-			key, runID := r.key, r.runID()
+			key, runID := r.key, r.runIDLocked()
 			go a.emit(core.NativeEvent{Type: core.EventLocalIntervention, Key: key, RunID: runID})
 		}
 	case "agentMessage":
@@ -757,13 +1051,38 @@ func (a *Attachment) onServerRequest(req ServerRequest) {
 	}
 	r.interaction = &protocol.Interaction{InteractionID: id, Kind: "approval", Prompt: prompt, Options: options, RemoteAnswer: true}
 	r.approvalReqs[id] = req.ID
-	key, runID, inter := r.key, r.runID(), r.interaction
+	key, runID, inter := r.key, r.runIDLocked(), r.interaction
 	a.mu.Unlock()
 	a.emit(core.NativeEvent{Type: core.EventQuestion, Key: key, RunID: runID, Interaction: inter})
 }
 
+// result returns the BOUNDED terminal evidence. The bound is owned HERE,
+// at the source, so the endpoint's boundResult is a no-op and both sides
+// digest the same bytes (Pro F2: the attachment and the endpoint must
+// compute the ack digest over the same form — if the attachment digests the
+// unbounded result and the endpoint digests the bounded one, any result
+// larger than MaxResultBytes is never released).
+//
+// B3: this is the ONLY place a protocol.Result is constructed in this
+// package. lookupHistory does not build one directly — it populates the
+// run's fields and calls result(), so the bounding point is one.
 func (r *run) result() *protocol.Result {
-	return &protocol.Result{Text: r.text.String(), Error: r.errText}
+	res := &protocol.Result{Text: r.text.String(), Error: r.errText}
+	if r.nativeRef != "" {
+		res.NativeRef = r.nativeRef
+	}
+	// Bound the raw text to MaxResultBytes (UTF-8-rune safe). The store's
+	// MaxRecordBytes budget is derived from the worst-case JSON encoding
+	// factor (6x) so a raw-bounded result always fits encoded.
+	if len(res.Text) > protocol.MaxResultBytes {
+		n := protocol.MaxResultBytes
+		for n > 0 && !utf8.RuneStart(res.Text[n]) {
+			n--
+		}
+		res.Text = res.Text[:n]
+		res.Truncated = true
+	}
+	return res
 }
 
 // LoadedThreads lists the threads the daemon currently has running, so the
