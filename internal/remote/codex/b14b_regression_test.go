@@ -532,6 +532,15 @@ func TestB14bCloseConcurrentWithInboundServerRequest(t *testing.T) {
 // (the conn is already closed; the leaked handler is harmless).
 func TestB14bCloseBoundedUnderWedgedHandler(t *testing.T) {
 	c, _ := newB14bClient(t, nil, nil)
+	// 611.22.33 test-bar: shrink the drain budget for this test. The old
+	// shape burned Close's FULL 2s production budget — a real 4s of wall
+	// clock per run — to prove a bound whose VALUE is irrelevant: the
+	// invariant is that Close returns instead of hanging on a wedged
+	// handler. With a 50ms budget the same wedged-handler scenario is
+	// exercised deterministically in milliseconds, and the asserts below
+	// scale with it.
+	const budget = 50 * time.Millisecond
+	c.closeDrainBudget.Store(budget)
 	handlerStarted := make(chan struct{})
 	neverRelease := make(chan struct{}) // wedged forever
 	handlersOf(c).setReq(func(r ServerRequest) {
@@ -544,12 +553,14 @@ func TestB14bCloseBoundedUnderWedgedHandler(t *testing.T) {
 	start := time.Now()
 	done := make(chan struct{})
 	go func() { _ = c.Close(); close(done) }()
+	// Upper bound: the budget plus generous scheduling headroom — Close
+	// must NEVER wait for the never-releasing handler itself.
 	select {
 	case <-done:
-		if elapsed := time.Since(start); elapsed > 4*time.Second {
-			t.Fatalf("Close took %v — exceeded its bound (L1 regression)", elapsed)
+		if elapsed := time.Since(start); elapsed > 10*budget {
+			t.Fatalf("Close took %v — exceeded its %v bound (L1 regression)", elapsed, budget)
 		}
-	case <-time.After(6 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("Close hung on a wedged reqWorker handler — teardown is unbounded (L1 regression)")
 	}
 	// The worker is still wedged (expected); do not release — the test ends

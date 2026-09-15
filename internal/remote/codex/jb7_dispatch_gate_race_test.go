@@ -3,7 +3,6 @@ package codex
 import (
 	"sync"
 	"testing"
-	"time"
 )
 
 // Regression for BEAD jb7 (lead dispatch post-#767): testDispatchGate is
@@ -21,10 +20,20 @@ func TestDispatchGateConcurrentAccessIsSynchronised(t *testing.T) {
 
 	// Writer: arm/clear cycles — the exact shape test setup + Cleanup do.
 	wg.Add(1)
+	writerDone := make(chan struct{})
 	go func() {
 		defer wg.Done()
+		defer close(writerDone)
 		fn := func(sr ServerRequest) {}
-		for {
+		// 611.22.33 test-bar: a FIXED NUMBER of arm/clear cycles, not a
+		// wall-clock burn. The old 150ms sleep made the race coverage a
+		// function of machine speed and added a flat 150ms to every run;
+		// now the burn is exactly 20k cycles and ends when the work ends.
+		// 20k unsynchronized write/read pairs saturate the race detector's
+		// shadow memory many times over — on the reverted plain-var shape
+		// this fires DATA RACE warnings deterministically (witnessed 4
+		// warnings on the reverted shape with the cycle-count burn).
+		for i := 0; i < 20000; i++ {
 			select {
 			case <-stop:
 				return
@@ -54,9 +63,9 @@ func TestDispatchGateConcurrentAccessIsSynchronised(t *testing.T) {
 		}()
 	}
 
-	// Bounded burn: long enough for the race detector to see the unsynchronized
-	// pair many times over on the reverted shape.
-	time.Sleep(150 * time.Millisecond)
+	// The burn ends when the writer finishes its fixed cycle count — no
+	// wall-clock wait, no premature or stretched coverage.
+	<-writerDone
 	close(stop)
 	wg.Wait()
 
