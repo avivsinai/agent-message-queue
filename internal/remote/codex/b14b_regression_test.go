@@ -214,21 +214,23 @@ func TestB14bCallWaitsBoundedBehindWedgedWriter(t *testing.T) {
 	c := newClient(ws, Handlers{})
 	t.Cleanup(func() { _ = c.Close() })
 
-	// Writer A: a large payload. 7xl (agent-message-queue-7xl): was a 150ms
-	// sleep to "give A time to acquire the slot". Deterministic: we hold the
-	// writer slot OURSELVES before any other goroutine can take it — no
-	// timing assumption at all. Writer A then blocks ACQUIRING THE SLOT and
-	// never reaches conn.Write; Call B's ctx proving the bounded wait is
-	// what this test pins.
+	// 7xl-r2 (F761-1, yoetz round): NO second writer. An earlier draft kept
+	// a "Writer A" goroutine alongside the test-held slot; it blocked in
+	// lockWrite's unconditional channel send forever (socket close does not
+	// unblock a channel send) — a permanently leaked goroutine, confirmed
+	// empirically by the lead's goroutine-leak probe (2 before, 3 after).
+	// The test-owned slot already establishes the exact contention Call B
+	// contends on; a second writer adds nothing and leaks.
+	//
+	// 7xl (agent-message-queue-7xl): was a 150ms sleep to "give the writer
+	// time to acquire the slot". Deterministic: we hold the writer slot
+	// OURSELVES before any other goroutine can take it — no timing
+	// assumption at all. Call B's ctx proving the bounded wait is what this
+	// test pins.
 	ws.wmu <- struct{}{} // hold the slot for the whole test
-	writeADone := make(chan error, 1)
-	go func() {
-		big := make([]byte, 512*1024)
-		writeADone <- ws.writeText(big)
-	}()
 
-	// Call B: small payload, 250ms deadline. The slot is held by A's
-	// writeText (uncontested under the old mutex: B waited unboundedly).
+	// Call B: small payload, 250ms deadline. The slot is held by the test
+	// (uncontested under the old mutex: B waited unboundedly).
 	start := time.Now()
 	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
 	defer cancel()
@@ -250,7 +252,6 @@ func TestB14bCallWaitsBoundedBehindWedgedWriter(t *testing.T) {
 	if !errors.Is(err, context.DeadlineExceeded) && (readErr == nil || !errors.Is(err, readErr)) {
 		t.Fatalf("call B err = %v, want context.DeadlineExceeded (or the connection-closed error under teardown)", err)
 	}
-	_ = writeADone // A stays wedged; the test ends and cleanup closes everything.
 }
 
 // TestB14bReplyRequiredNotDroppedAndPumpStaysLive pins B8: notifications may
@@ -337,9 +338,30 @@ func TestB14bReplyRequiredNotDroppedAndPumpStaysLive(t *testing.T) {
 // must tear the socket down and DRAIN the read pump BEFORE closing reqQ.
 // The old order (close reqQ -> drain -> ws.close) left the pump live during
 // the drain window: an inbound approval frame then sent on a CLOSED reqQ —
-// send on closed channel, no recover in readLoop, process crash. This test
-// drives frames through the REAL readLoop (not dispatch directly — that was
-// the coverage gap), concurrently with Close.
+// send on closed channel, no recover in readLoop, process crash.
+//
+// 7xl-r3 (F761-2/F761-3, yoetz recut): the r2 "barrier" was an observation,
+// not a barrier — receiving the overflow frame proves an overflow happened
+// EARLIER, not that the pump is still inside dispatchServerRequest when
+// Close fires; and the direct c.dispatchServerRequest(wedge) could itself
+// take the overflow path if the pump filled reqQ first (false barrier),
+// while the N unconditional fill sends could block forever on a stolen
+// slot (F761-3 hang). The r3 recut is a TWO-WAY barrier on the pump path:
+//
+//  1. Setup determinism: no hammer server exists during setup; the wedge
+//     handler signals "parked" through a channel the test waits on; every
+//     queue send is select+timeout bounded, so a competing producer can
+//     never hang the test.
+//  2. The pump is PARKED inside dispatchServerRequest AFTER decode and
+//     BEFORE its reqQ send (testDispatchGate), with reqQ holding one
+//     reserved free slot for the parked send.
+//  3. Close() starts; the PEER observes socket closure (read EOF) —
+//     proof ws.close() ran.
+//  4. The pump is released. Correct ordering: reqQ is still open when the
+//     parked pump completes its send → no panic. Reverted ordering
+//     (queue closed before the pump is drained): the released pump sends
+//     on the closed queue → DETERMINISTIC panic. The ordering is tested
+//     directly, not by scheduling luck.
 func TestB14bCloseConcurrentWithInboundServerRequest(t *testing.T) {
 	dir, err := os.MkdirTemp("", "amqcx")
 	if err != nil {
@@ -353,79 +375,155 @@ func TestB14bCloseConcurrentWithInboundServerRequest(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = l.Close() })
 
-	// Server: accept in a loop (each Close/redial iteration opens a new
-	// connection), hammering server-request frames so one lands inside the
-	// Close teardown window.
+	// No hammer DURING setup (r3 spec 1): the connection is accepted and
+	// the websocket handshake completes immediately (dial needs it), but
+	// the frame writer only starts on hammerGo — during setup the server
+	// sends nothing, so no frame can compete with initialization.
 	stop := make(chan struct{})
+	t.Cleanup(func() { close(stop) })
+	peerSawClose := make(chan struct{})
+	var peerSawCloseOnce sync.Once
+	hammerGo := make(chan struct{})
 	go func() {
-		frame := []byte(`{"jsonrpc":"2.0","id":"srv-1","method":"item/commandExecution/requestApproval","params":{}}`)
-		for {
-			conn, err := l.Accept()
-			if err != nil {
-				return
-			}
-			ws, err := acceptServerWS(conn)
-			if err != nil {
-				return
-			}
-			go func() {
-				for {
-					select {
-					case <-stop:
-						return
-					default:
-					}
-					if err := ws.writeText(frame); err != nil {
-						return
-					}
+		conn, err := l.Accept()
+		if err != nil {
+			return
+		}
+		ws, err := acceptServerWS(conn)
+		if err != nil {
+			return
+		}
+		go func() {
+			<-hammerGo // frames only after the barrier is armed
+			frame := []byte(`{"jsonrpc":"2.0","id":"srv-1","method":"item/commandExecution/requestApproval","params":{}}`)
+			for {
+				select {
+				case <-stop:
+					return
+				default:
 				}
-			}()
+				if err := ws.writeText(frame); err != nil {
+					return
+				}
+			}
+		}()
+		for {
+			if _, err := ws.readText(); err != nil {
+				peerSawCloseOnce.Do(func() { close(peerSawClose) })
+				return // client closed — correct ordering tears the socket down
+			}
 		}
 	}()
 
-	// Handler must be wired BEFORE the readLoop can observe it (readLoop
-	// reads OnServerRequest concurrently — assigning after newClient races).
-	// makeProbeClient constructs the client with the handler pre-set.
-	makeProbeClient := func() *Client {
-		w, err := dialUnixWS(sock, time.Second)
-		if err != nil {
-			t.Fatalf("dial: %v", err)
-		}
-		c := &Client{
-			ws:              w,
-			pending:         map[int64]chan rpcMessage{},
-			closed:          make(chan struct{}),
-			reqQ:            make(chan ServerRequest, maxLiveRuns+reqQSlack),
-			reqWorkerDone:   make(chan struct{}),
-			onServerRequest: func(r ServerRequest) {},
-		}
-		go c.readLoop()
-		go c.reqWorker()
-		return c
+	// Wedge-parked handshake (r3 spec 1): the worker parks inside the wedge
+	// handler and signals parked; the test waits for the handshake before
+	// filling, so the fill loop can never race the worker. The worker
+	// stays parked until releaseWorker, so reqQ retains whatever the fill
+	// puts in.
+	parked := make(chan struct{})
+	var parkedOnce sync.Once
+	workerReleased := make(chan struct{})
+	var workerReleaseOnce sync.Once
+	releaseWorker := func() { workerReleaseOnce.Do(func() { close(workerReleased) }) }
+	t.Cleanup(releaseWorker)
+	w, err := dialUnixWS(sock, time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
 	}
-	// 7xl: was a 30-iteration probabilistic redial loop — it passed by luck
-	// of scheduling and only slowed CI. One Close concurrent with the
-	// hammering server exercises the same interleaving. Honest claim
-	// (verifier round 1): a send-on-closed reqQ panics the whole process, so
-	// this probe never fails spuriously — measured 19/20 catches on the
-	// reverted Close ordering. It is a high-probability probe, not a
-	// deterministic one; the real guarantee is structural (Close tears the
-	// socket down and drains the read pump BEFORE closing reqQ), and this
-	// test pins that no panic escapes one full concurrent teardown.
-	c := makeProbeClient()
-	done := make(chan struct{})
+	c := &Client{
+		ws:            w,
+		pending:       map[int64]chan rpcMessage{},
+		closed:        make(chan struct{}),
+		reqQ:          make(chan ServerRequest, maxLiveRuns+reqQSlack),
+		reqWorkerDone: make(chan struct{}),
+		onServerRequest: func(r ServerRequest) {
+			if r.Method == "wedge" {
+				parkedOnce.Do(func() { close(parked) })
+				<-workerReleased // park: no consumer drains reqQ past here
+			}
+		},
+	}
+	go c.readLoop()
+	go c.reqWorker()
+
+	// Park the worker: one bounded send, then the handshake.
+	select {
+	case c.reqQ <- ServerRequest{ID: json.RawMessage(`"wedge"`), Method: "wedge"}:
+	case <-time.After(b14bDeadline):
+		t.Fatal("wedge send blocked (F761-3 guard)")
+	}
+	select {
+	case <-parked:
+	case <-time.After(b14bDeadline):
+		t.Fatal("worker never parked (handshake broken)")
+	}
+
+	// Fill reqQ to ONE free slot (bounded sends, F761-3): that slot is
+	// reserved for the parked pump's dispatch, which the gate holds.
+	for i := 0; i < maxLiveRuns+reqQSlack-1; i++ {
+		select {
+		case c.reqQ <- ServerRequest{ID: json.RawMessage(`"fill"`), Method: "fill"}:
+		case <-time.After(b14bDeadline):
+			t.Fatalf("fill send %d blocked (F761-3 guard)", i)
+		}
+	}
+
+	// Arm the two-way barrier: the NEXT server request decoded by the pump
+	// parks inside testDispatchGate, before its reqQ send.
+	gateEntered := make(chan struct{})
+	var gateEnteredOnce sync.Once
+	gateReleased := make(chan struct{})
+	var gateReleaseOnce sync.Once
+	prevGate := testDispatchGate
+	testDispatchGate = func(sr ServerRequest) {
+		gateEnteredOnce.Do(func() { close(gateEntered) })
+		<-gateReleased // parked: post-decode, pre-send
+	}
+	t.Cleanup(func() { testDispatchGate = prevGate })
+
+	// Start the hammer: the pump decodes a frame and parks in the gate.
+	close(hammerGo)
+	select {
+	case <-gateEntered:
+	case <-time.After(b14bDeadline):
+		t.Fatal("pump never reached the dispatch gate (barrier broken)")
+	}
+
+	// Un-wedge the worker BEFORE Close: the worker park existed only to
+	// keep reqQ deterministic during the fill; Close's drain must be able
+	// to complete. The pump stays parked at the gate regardless — that is
+	// the barrier Close must respect.
+	releaseWorker()
+
+	// Start Close while the pump is parked inside dispatchServerRequest.
+	closeDone := make(chan struct{})
 	go func() {
 		_ = c.Close()
-		close(done)
+		close(closeDone)
 	}()
+
+	// Peer-side proof (r3 spec): ws.close() ran — the server's read gets
+	// EOF while the pump is still parked at the gate and reqQ is OPEN.
 	select {
-	case <-done:
+	case <-peerSawClose:
 	case <-time.After(b14bDeadline):
-		t.Fatal("Close deadlocked")
+		t.Fatal("peer never observed socket closure (ws.close did not run first)")
 	}
-	c = makeProbeClient() // one clean client for final teardown
-	close(stop)
-	_ = c.Close()
+
+	// Release the pump. Correct ordering: reqQ is still open (Close closes
+	// it only after <-c.closed, i.e. after the pump exits), so the parked
+	// send completes into the reserved slot and the pump exits — Close then
+	// finishes. Reverted ordering: reqQ was closed BEFORE the pump drained;
+	// the released pump's send panics deterministically.
+	gateReleaseOnce.Do(func() { close(gateReleased) })
+
+	// Close must now complete: pump exited, drain bounded, reqQ closed last.
+	select {
+	case <-closeDone:
+	case <-time.After(b14bDeadline):
+		t.Fatal("Close deadlocked after gate release")
+	}
+
 	// No panic = pass. (A send-on-closed reqQ panics the whole test process.)
 }
 

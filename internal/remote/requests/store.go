@@ -507,7 +507,12 @@ func (s *Store) CompactOne(key Key, before time.Time) (bool, error) {
 	}
 	// A2: the gate includes settlement — never reap a record we still owe the
 	// runtime (bound run, unacked result).
-	if !rec.State.Terminal() || rec.Tombstone || rec.OwesAck() {
+	// Two obligations gate compaction and they are different: OwesAck is
+	// what we owe the RUNTIME (release its retained result); an unpublished
+	// revision is what we owe the CALLER. Compaction erases the only retained
+	// result, so a revision the caller has not received yet must survive it
+	// (Pro r2 #14 / packet 4b, agent-message-queue-611.22.36).
+	if !rec.State.Terminal() || rec.Tombstone || rec.OwesAck() || rec.PublishedRevision < rec.Revision {
 		return false, nil
 	}
 	observed, err := protocol.ParseTime(rec.ObservedAt)
@@ -515,14 +520,19 @@ func (s *Store) CompactOne(key Key, before time.Time) (bool, error) {
 		return false, nil
 	}
 	rec.Revision++
-	// 611.22.41: mark the tombstone as already published. The Reconcile
-	// publish arm republishes whenever PublishedRevision < Revision; a
-	// compaction that bumped Revision without advancing PublishedRevision
-	// made the NEXT Reconcile republish the tombstone (repro: publication
-	// state=completed code=result_expired result=nil after the record was
-	// already delivered). The tombstone is the record's final published
-	// state — compaction itself is the publication of the retraction — so
-	// it must not re-enter the publish queue.
+	// 611.22.41: mark the tombstone as published. A compacted revision is
+	// not a new publication — the tombstone is the record's final published
+	// state (repro before the fix: publication state=completed
+	// code=result_expired result=nil republished by the next Reconcile).
+	// This assignment is safe only because of the compaction gate above:
+	// it refuses PublishedRevision < Revision, so every terminal result has
+	// already reached the caller before compaction runs and the assignment
+	// cannot bury an unpublished one. On a base without that gate it could.
+	// (Replaces main's "Intentional asymmetry" comment, which described the
+	// opposite behavior from the code it sat on: with PublishedRevision left
+	// behind, the publish arm's PublishedRevision < Revision test fires and
+	// republishes the tombstone — the exact flooding that comment claimed
+	// the asymmetry avoided.)
 	rec.PublishedRevision = rec.Revision
 	rec.Result = nil
 	rec.Input = nil

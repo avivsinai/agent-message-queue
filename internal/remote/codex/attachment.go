@@ -98,9 +98,17 @@ type Attachment struct {
 	// (B3, agent-message-queue-611.22.36).
 	terminalTurns     map[string]bool
 	terminalTurnOrder []string // FIFO of the same turn IDs; drives eviction
-	listeners         map[int]func(core.NativeEvent)
-	nextListener      int
-	offline           bool
+	// lostStateGen is bumped every time a notLoaded/systemError notification
+	// tells us the app-server lost track of any previously-observed turn
+	// (611.22.39-r2 F758-1). A turn/start RPC continuation captured the
+	// generation BEFORE its call; if the generation advanced by the time the
+	// continuation restores activeTurn/status, the restore would resurrect a
+	// turn whose observing source is gone — the exact wedge the lost-state
+	// handler just cleared. Stale continuations drop the restore instead.
+	lostStateGen uint64
+	listeners    map[int]func(core.NativeEvent)
+	nextListener int
+	offline      bool
 }
 
 // Option configures Attach.
@@ -348,6 +356,13 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 			ID string `json:"id"`
 		} `json:"turn"`
 	}
+	// 611.22.39-r2 F758-1: capture the lost-state generation before the RPC.
+	// A notLoaded/systemError notification processed by the read pump while
+	// this call is in flight means the app-server lost track of the turn we
+	// are about to restore — the continuation must not resurrect it.
+	a.mu.Lock()
+	genBefore := a.lostStateGen
+	a.mu.Unlock()
 	if err := a.call("turn/start", map[string]any{"threadId": a.threadID, "input": input, "clientUserMessageId": clientIDFor(req.Key)}, &res); err != nil {
 		// B1 (agent-message-queue-611.22.35): split pre-send vs post-send.
 		// ErrNotSent (marshal error, write error, connection closed before
@@ -382,6 +397,20 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 	// later event to clear it. If the run is already terminal, OR the turn
 	// was observed as terminal via the memo (confirming userMessage missed,
 	// turn/completed recorded it), skip the activeTurn/status restoration.
+	// 611.22.39-r2 F758-1: a notLoaded/systemError notification processed
+	// while the RPC was in flight invalidated the state this continuation is
+	// about to restore. The run is NOT terminal and the turn is NOT in the
+	// memo (the lost-state notification does not make either true), so the
+	// B3 guard above does not fire — the generation check is the only
+	// defense. Stale = drop the restore; keep the run correlation (the text
+	// may still be running server-side, so Lookup/history stay able to
+	// resolve it) and report uncertain, exactly like the post-send
+	// ambiguity path below.
+	if genBefore != a.lostStateGen {
+		rid := r.runIDLocked()
+		a.mu.Unlock()
+		return core.Admission{RunID: rid}, fmt.Errorf("thread state was lost (notLoaded/systemError) while turn/start was in flight; not restoring activeTurn for turn %s", res.Turn.ID)
+	}
 	if r.state.Terminal() || a.terminalTurns[res.Turn.ID] {
 		rid := r.runIDLocked()
 		a.mu.Unlock()
@@ -988,7 +1017,11 @@ func (a *Attachment) onNotification(n Notification) {
 		// activeTurn and Submit would issue turn/start into it (verifier
 		// round-1 blocker). Only the enumerated lost-track statuses clear;
 		// unrecognised statuses are left untouched.
-		if p.Status.Type == "notLoaded" || p.Status.Type == "systemError" || p.Status.Type == "idle" {
+		switch p.Status.Type {
+		case "notLoaded", "systemError":
+			a.activeTurn = ""
+			a.lostStateGen++
+		case "idle":
 			a.activeTurn = ""
 		}
 		a.mu.Unlock()

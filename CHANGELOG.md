@@ -8,6 +8,32 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.78.1](https://github.com/avivsinai/agent-message-queue/compare/v0.78.0...v0.78.1) (2026-09-15)
+
+
+### Bug Fixes
+
+* **codex/ws:** bound the close-frame reply and Client.Respond write (611.22.40) ([#759](https://github.com/avivsinai/agent-message-queue/issues/759)) ([f0e98ad](https://github.com/avivsinai/agent-message-queue/commit/f0e98ad702a360d5e8670a7224c3f578c3c4f0ed))
+* **codex:** drop stale activeTurn on notLoaded/systemError status (611.22.39) ([#758](https://github.com/avivsinai/agent-message-queue/issues/758)) ([7e8e0e4](https://github.com/avivsinai/agent-message-queue/commit/7e8e0e44b726615abd6c20b00bcd46268757ab26))
+* **codex:** Inspect picks PendingInteraction deterministically — oldest first (yl0) ([#760](https://github.com/avivsinai/agent-message-queue/issues/760)) ([144a76d](https://github.com/avivsinai/agent-message-queue/commit/144a76ddd5b83160b13b9bc4cc63ca13f943b8a9))
+* **fsq:** sync every mailbox level a first-contact delivery creates ([#742](https://github.com/avivsinai/agent-message-queue/issues/742)) ([2087569](https://github.com/avivsinai/agent-message-queue/commit/2087569e982cbd95507e34c3956d3c8af6027ec9))
+* **remote/amqio:** a visible-but-unsynced publish is not a durable publish ([#754](https://github.com/avivsinai/agent-message-queue/issues/754)) ([9d968cd](https://github.com/avivsinai/agent-message-queue/commit/9d968cdfdef5f33f17343bfe1edb20446181f0da))
+* **remote/amqio:** answer a cross-project caller in ITS root, not ours ([#743](https://github.com/avivsinai/agent-message-queue/issues/743)) ([5befa1e](https://github.com/avivsinai/agent-message-queue/commit/5befa1eb47651a3d8f1008310a251b8b29645884))
+* **remote/amqio:** make the creator host injective ([#747](https://github.com/avivsinai/agent-message-queue/issues/747)) ([a6641e0](https://github.com/avivsinai/agent-message-queue/commit/a6641e081a64369350c016ca9863718bf484b576))
+* **remote/amqio:** reconcile claimed-but-unreceipted commands in cur ([#752](https://github.com/avivsinai/agent-message-queue/issues/752)) ([2ab67bb](https://github.com/avivsinai/agent-message-queue/commit/2ab67bb87efff2a90543b56e9265bf542420df45))
+* **remote/codex:** install handlers before the read pump starts ([#751](https://github.com/avivsinai/agent-message-queue/issues/751)) ([eb0efa9](https://github.com/avivsinai/agent-message-queue/commit/eb0efa93eb606f61efa98ab5146cda2f216f84de))
+* **remote/codex:** release acked evidence; never treat absence as refusal ([#744](https://github.com/avivsinai/agent-message-queue/issues/744)) ([d6c19be](https://github.com/avivsinai/agent-message-queue/commit/d6c19be7b45b527cc868460aeac1cae3a74664d3))
+* **remote/core:** B14e — bounded compaction with per-record re-read + settlement gate ([#753](https://github.com/avivsinai/agent-message-queue/issues/753)) ([d57b0e0](https://github.com/avivsinai/agent-message-queue/commit/d57b0e04ba53762fcc599e06fdf5d0733e96e34d))
+* **remote/core:** endpoint lifecycle accepting/draining/closed; D1 gate at admitDeferred ([#755](https://github.com/avivsinai/agent-message-queue/issues/755)) ([5b7f200](https://github.com/avivsinai/agent-message-queue/commit/5b7f20037b4ee06411a4e1f4ccbd6e2e18710b60))
+* **remote/core:** per-runtime reservation fail-closed + raced-cancel confirmation (B14c) ([#739](https://github.com/avivsinai/agent-message-queue/issues/739)) ([250c642](https://github.com/avivsinai/agent-message-queue/commit/250c642b1ca6a6753d89b914fb673d7dfaad4a4b))
+* **remote/ipc:** bound every I/O boundary; a ctx error is not a failure ([#746](https://github.com/avivsinai/agent-message-queue/issues/746)) ([3961080](https://github.com/avivsinai/agent-message-queue/commit/39610809d2155f6b9fdd7f09115d75b08771410e))
+* **remote/protocol:** the digest doc contradicted the digest ([#748](https://github.com/avivsinai/agent-message-queue/issues/748)) ([85d124a](https://github.com/avivsinai/agent-message-queue/commit/85d124af3fd6ea2780d92049f2c63a32ff87794a))
+
+
+### Dependencies
+
+* bump golang.org/x/sys from 0.47.0 to 0.48.0 ([#740](https://github.com/avivsinai/agent-message-queue/issues/740)) ([418d3a7](https://github.com/avivsinai/agent-message-queue/commit/418d3a759faf24ac14f1427b948d260320f89646))
+
 ## [0.78.0](https://github.com/avivsinai/agent-message-queue/compare/v0.77.3...v0.78.0) (2026-09-12)
 
 

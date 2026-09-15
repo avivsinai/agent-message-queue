@@ -60,6 +60,25 @@ type target struct {
 	unsubscribe func()
 }
 
+// lifecycleState is the endpoint's phase: accepting commands, draining
+// in-flight handlers before Close, or closed. The state is read+written
+// under e.mu; the drain wait uses e.drained (a condition variable) so
+// Close blocks until the last in-flight handler exits.
+type lifecycleState int
+
+const (
+	stateAccepting lifecycleState = iota
+	stateDraining
+	stateClosed
+)
+
+// drainTimeout is the bound on how long Close waits for in-flight handlers.
+// It is generous (30s) because a single handler's worst case is one native
+// RPC (20s timeout in the codex adapter) plus a commit. If a handler has
+// not returned by then, it is wedged and the endpoint closes anyway — the
+// store's closed flag rejects further mutations from the stale handler.
+const drainTimeout = 30 * time.Second
+
 // Endpoint is the request handler. One Endpoint owns one Store.
 type Endpoint struct {
 	mu             sync.Mutex
@@ -72,6 +91,23 @@ type Endpoint struct {
 	changed        chan struct{}
 	compactHorizon time.Duration
 	lastCompact    time.Time
+
+	// visible records revisions the publisher has already delivered whose
+	// published_revision marker did not commit. Reconcile then retries the
+	// MARKER, never the delivery: the message is in the caller's mailbox and
+	// re-delivery after consumption is a duplicate (Pro r2 #13 / packet 4a,
+	// agent-message-queue-611.22.36). In memory only: a process crash in
+	// that window re-delivers, the documented exception.
+	visible map[requests.Key]int64
+	// B13 lifecycle: state transitions accepting -> draining -> closed.
+	// inFlight counts handlers between entry (registerInFlight) and exit
+	// (releaseInFlight). drained is a condition variable Close waits on.
+	// The entry check + increment happen in ONE critical section so a
+	// transition to draining cannot slip a handler in after the gate.
+	state    lifecycleState
+	inFlight int
+	drained  *sync.Cond
+	drainTO  time.Duration
 }
 
 // Config configures New.
@@ -83,6 +119,9 @@ type Config struct {
 	// CompactHorizon is the age at which terminal, settled records become
 	// eligible for compaction. Zero (default) disables compaction.
 	CompactHorizon time.Duration
+	// DrainTimeout overrides the default Close drain timeout. Tests use a
+	// short value to prove the bound without sleeping 30s.
+	DrainTimeout time.Duration
 }
 
 // New builds an endpoint over an open store. Attachments register through
@@ -96,7 +135,14 @@ func New(cfg Config) *Endpoint {
 		now:            cfg.Now,
 		changed:        make(chan struct{}),
 		compactHorizon: cfg.CompactHorizon,
+		visible:        map[requests.Key]int64{},
+		state:          stateAccepting,
+		drainTO:        drainTimeout,
 	}
+	if cfg.DrainTimeout > 0 {
+		e.drainTO = cfg.DrainTimeout
+	}
+	e.drained = sync.NewCond(&e.mu)
 	if e.now == nil {
 		e.now = time.Now
 	}
@@ -142,10 +188,36 @@ func (e *Endpoint) UnregisterAll() {
 	}
 }
 
-// Close unsubscribes from every attachment and closes the store. Records and
-// the attachments' retained evidence survive for the next endpoint.
+// Close transitions the endpoint to draining, waits for in-flight handlers
+// to finish (bounded by drainTimeout), then unsubscribes attachments and
+// closes the store. A handler that never returns is abandoned: after the
+// timeout, Close proceeds anyway and the store's closed flag rejects any
+// further mutation the stale handler attempts. Returns an error naming how
+// many handlers were still in flight if the bound was exceeded.
 func (e *Endpoint) Close() error {
 	e.mu.Lock()
+	if e.state == stateClosed {
+		e.mu.Unlock()
+		return nil
+	}
+	e.state = stateDraining
+	// Wait for in-flight handlers to drain, bounded by drainTO. The timer
+	// sets a flag and broadcasts so the loop exits even if inFlight > 0.
+	if e.inFlight > 0 {
+		timedOut := false
+		timer := time.AfterFunc(e.drainTO, func() {
+			e.mu.Lock()
+			timedOut = true
+			e.drained.Broadcast()
+			e.mu.Unlock()
+		})
+		defer timer.Stop()
+		for e.inFlight > 0 && !timedOut {
+			e.drained.Wait()
+		}
+	}
+	stale := e.inFlight
+	e.state = stateClosed
 	for id, t := range e.targets {
 		if t.unsubscribe != nil {
 			t.unsubscribe()
@@ -153,7 +225,30 @@ func (e *Endpoint) Close() error {
 		delete(e.targets, id)
 	}
 	e.mu.Unlock()
-	return e.store.Close()
+	err := e.store.Close()
+	if stale > 0 {
+		return fmt.Errorf("endpoint closed with %d handler(s) still in flight after %s drain timeout", stale, e.drainTO)
+	}
+	return err
+}
+
+// releaseInFlight decrements the in-flight count and wakes Close if it was
+// waiting for handlers to drain. Called by Handle's defer.
+func (e *Endpoint) releaseInFlight() {
+	e.mu.Lock()
+	e.inFlight--
+	if e.inFlight == 0 && e.state == stateDraining {
+		e.drained.Broadcast()
+	}
+	e.mu.Unlock()
+}
+
+// InFlight returns the current number of in-flight handlers. Test seam for
+// observing the drain state without a sleep.
+func (e *Endpoint) InFlight() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.inFlight
 }
 
 // Handle runs one validated command from an authenticated source and returns
@@ -166,6 +261,19 @@ func (e *Endpoint) Handle(cmd *protocol.Command, src Source) (any, error) {
 	if src.Host == "" {
 		return nil, protocol.Refuse(protocol.CodeInvalid, "command source host is required")
 	}
+	// B13 lifecycle: check state and register as in-flight in ONE critical
+	// section. A command arriving during draining/closed is refused with an
+	// action-required code (the caller retries) — never a failure code that
+	// would be recorded as the command's outcome.
+	e.mu.Lock()
+	if e.state != stateAccepting {
+		e.mu.Unlock()
+		return nil, protocol.Refuse(protocol.CodeDraining, "endpoint is shutting down; retry the command after restart")
+	}
+	e.inFlight++
+	e.mu.Unlock()
+	defer e.releaseInFlight()
+
 	switch cmd.Op {
 	case protocol.OpRequestSubmit:
 		return e.submit(cmd, src)
@@ -614,9 +722,19 @@ func (e *Endpoint) respond(cmd *protocol.Command) (protocol.Reply, error) {
 		return protocol.Reply{}, protocol.Refuse(protocol.CodeAttachmentLost, "target is not attached")
 	}
 	if _, done := rec.Answered[cmd.InteractionID]; done {
-		// A replay of an answer we already delivered; do not invoke the
-		// attachment a second time.
-		return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpInteractionRespond, Code: protocol.CodeAlreadyResolved}}, nil
+		// A recorded intent is not a delivered answer. If the runtime still
+		// holds the question, the earlier native call failed before the
+		// answer landed and this is the replay that must re-send it; only a
+		// settled answer short-circuits (gate finding on
+		// agent-message-queue-611.22.36, union 42d923a4, reopening #20 at
+		// the endpoint).
+		settled, lerr := e.answerSettled(rec, t, key, cmd)
+		if lerr != nil {
+			return protocol.Reply{}, lerr
+		}
+		if settled {
+			return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpInteractionRespond, Code: protocol.CodeAlreadyResolved}}, nil
+		}
 	}
 	if rec.Interaction == nil || rec.Interaction.InteractionID != cmd.InteractionID {
 		return protocol.Reply{}, protocol.Refuse(protocol.CodeAlreadyResolved, "no such pending interaction")
@@ -640,7 +758,10 @@ func (e *Endpoint) respond(cmd *protocol.Command) (protocol.Reply, error) {
 		e.mu.Unlock()
 		return protocol.Reply{}, protocol.Refuse(protocol.CodeNotFound, "no record for request_ref")
 	}
-	if _, done := rec.Answered[cmd.InteractionID]; done {
+	if _, done := rec.Answered[cmd.InteractionID]; done && (rec.Interaction == nil || rec.Interaction.InteractionID != cmd.InteractionID) {
+		// Settled since the first read: the resolution arrived. An intent
+		// whose interaction is still pending falls through and re-sends;
+		// the unlocked Lookup above established the runtime still holds it.
 		e.mu.Unlock()
 		return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpInteractionRespond, Code: protocol.CodeAlreadyResolved}}, nil
 	}
@@ -705,6 +826,23 @@ func (e *Endpoint) respond(cmd *protocol.Command) (protocol.Reply, error) {
 	return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpInteractionRespond}}, nil
 }
 
+// answerSettled reports whether a recorded answer intent for cmd.InteractionID
+// is settled: the record no longer shows that interaction pending, or the
+// runtime no longer holds it. A pending interaction on both sides means the
+// earlier native call did not land and the caller's replay must re-send. The
+// Lookup runs without e.mu; a Lookup error is surfaced so the caller retries
+// instead of being told the answer was delivered.
+func (e *Endpoint) answerSettled(rec *requests.Record, t *target, key requests.Key, cmd *protocol.Command) (bool, error) {
+	if rec.Interaction == nil || rec.Interaction.InteractionID != cmd.InteractionID {
+		return true, nil
+	}
+	ev, err := t.att.Lookup(key, cmd.Epoch)
+	if err != nil {
+		return false, err
+	}
+	return ev.Interaction == nil || ev.Interaction.InteractionID != cmd.InteractionID, nil
+}
+
 // Targets returns the registered target ids.
 func (e *Endpoint) Targets() []string {
 	e.mu.Lock()
@@ -716,24 +854,54 @@ func (e *Endpoint) Targets() []string {
 	return out
 }
 
+// Store exposes the record store for carrier-side recovery reads (Pro B09):
+// the AMQ carrier reconciles claimed-but-unreceipted commands by reading the
+// durable record instead of re-executing the command. Read-only use.
+func (e *Endpoint) Store() *requests.Store { return e.store }
+
 func (e *Endpoint) list() []protocol.Session {
 	e.mu.Lock()
-	defer e.mu.Unlock()
-	out := make([]protocol.Session, 0, len(e.targets))
-	for _, t := range e.targets {
-		out = append(out, t.att.Inspect())
+	ids := make([]string, 0, len(e.targets))
+	for id := range e.targets {
+		ids = append(ids, id)
+	}
+	e.mu.Unlock()
+	out := make([]protocol.Session, 0, len(ids))
+	for _, id := range ids {
+		// sessionProjection masks the steer capability the D1 gate refuses
+		// so the advertised capabilities match what the endpoint actually
+		// accepts (agent-message-queue-611.22.36, Pro r2 #22).
+		s, err := e.sessionProjection(id)
+		if err != nil {
+			continue
+		}
+		out = append(out, s)
 	}
 	return out
 }
 
-func (e *Endpoint) inspect(targetID string) (any, error) {
+// sessionProjection returns the attachment's Inspect() result with
+// capabilities masked to match what the endpoint actually accepts. The D1
+// gate (611.22.23) refuses deliver=steer at v1, so advertising Steer is a
+// false capability signal — a client that picks operations from the
+// advertised capabilities is told it can steer, then every steer is
+// refused. This helper is used by BOTH list() and inspect() so the mask is
+// in one place (agent-message-queue-611.22.36, Pro r2 #22).
+func (e *Endpoint) sessionProjection(targetID string) (protocol.Session, error) {
 	e.mu.Lock()
 	t, ok := e.targets[targetID]
 	e.mu.Unlock()
 	if !ok {
-		return nil, protocol.Refuse(protocol.CodeNotFound, "target %s is not registered", targetID)
+		return protocol.Session{}, protocol.Refuse(protocol.CodeNotFound, "target %s is not registered", targetID)
 	}
-	return t.att.Inspect(), nil
+	s := t.att.Inspect()
+	// D1 gate: mask steer while the v1 gate refuses deliver=steer.
+	s.Capabilities.Steer = false
+	return s, nil
+}
+
+func (e *Endpoint) inspect(targetID string) (any, error) {
+	return e.sessionProjection(targetID)
 }
 
 // onNative applies one native observation to the bound record.
@@ -817,8 +985,10 @@ func (e *Endpoint) onNative(targetID string, ev NativeEvent) {
 			e.mu.Unlock()
 			return
 		}
-		// Pro #5: route through transitionLocked (nil interaction clears).
-		e.transitionLocked(rec, causeNone, nativeEvidence{interaction: ev.Interaction})
+		// Pro #5: route through transitionLocked. Pro round 2 #21: the
+		// resolution carries no interaction, and causeNone treats a nil
+		// interaction as "unchanged", so the clear is an explicit flag.
+		e.transitionLocked(rec, causeNone, nativeEvidence{clearInteraction: true})
 	case EventLocalIntervention:
 		if rec.State.Terminal() {
 			e.mu.Unlock()
@@ -929,6 +1099,7 @@ type nativeEvidence struct {
 	cancel            *protocol.Cancel // cancel metadata from the command/event path
 	code              protocol.Code    // explicit override for refused/attachment_lost
 	interaction       *protocol.Interaction
+	clearInteraction  bool // the pending interaction is resolved natively; clear it (nil interaction means unchanged)
 	localIntervention bool
 	runTerminal       bool // the run is definitively finished (noop_terminal) — confirm a pending cancel
 }
@@ -975,7 +1146,9 @@ func (e *Endpoint) transitionLocked(rec *requests.Record, c cause, ev nativeEvid
 			run := ev.runID
 			rec.NativeRun = &run
 		}
-		if ev.interaction != nil {
+		if ev.clearInteraction {
+			rec.Interaction = nil
+		} else if ev.interaction != nil {
 			rec.Interaction = ev.interaction
 		}
 		if ev.localIntervention {
@@ -1118,6 +1291,47 @@ func (e *Endpoint) transitionLocked(rec *requests.Record, c cause, ev nativeEvid
 //
 // Used by reconcileLive's same-run early return and Reconcile's terminal
 // retry selector: only a record that owes a cancel is re-driven.
+// owesResult reports the THIRD obligation: the record is closed with a run
+// bound but no result persisted. That is what a late result whose write
+// failed looks like (onNative discards the attempted update), and neither
+// owesCancel nor OwesAck describes it — replayTerminalAck returned before
+// ever asking the attachment, so the retained result was never fetched or
+// acknowledged (Pro r2 #15 / packet 4c, agent-message-queue-611.22.36).
+// A tombstone owes nothing: compaction erased its result on purpose.
+func owesResult(rec *requests.Record) bool {
+	return rec.State.Terminal() && !rec.Tombstone && rec.NativeRun != nil && rec.Result == nil
+}
+
+// recoverTerminalResult asks the attachment for the result a terminal record
+// is missing and applies it through the ordinary native-event path, so the
+// commit, publication and acknowledgement happen exactly as they would have
+// had the original write succeeded. It stops asking once the attachment
+// retains nothing for the key: then there is nothing to recover.
+func (e *Endpoint) recoverTerminalResult(rec *requests.Record) error {
+	e.mu.Lock()
+	t, ok := e.targets[rec.TargetID]
+	e.mu.Unlock()
+	if !ok {
+		return nil
+	}
+	ev, err := t.att.Lookup(keyOfRecord(rec), rec.Epoch)
+	if err != nil {
+		return err
+	}
+	if !ev.Known || ev.Class == EvidenceNone || !ev.State.Terminal() || ev.Result == nil {
+		return nil
+	}
+	typ := EventRunCompleted
+	switch ev.State {
+	case protocol.StateFailed:
+		typ = EventRunFailed
+	case protocol.StateCancelled:
+		typ = EventRunCancelled
+	}
+	e.onNative(rec.TargetID, NativeEvent{Type: typ, Key: keyOfRecord(rec), RunID: ev.RunID, Result: ev.Result})
+	return nil
+}
+
 func owesCancel(rec *requests.Record) bool {
 	return rec.Cancel != nil &&
 		rec.Cancel.Disposition == protocol.CancelRequested &&
@@ -1204,9 +1418,14 @@ func (e *Endpoint) Reconcile() error {
 			// already released the result). A terminal record with no result
 			// has an empty digest and replayTerminalAck returns immediately,
 			// so there is no churn (Pro #4).
-			if owesCancel(rec) {
+			switch {
+			case owesCancel(rec):
 				rerr = e.reconcileCancelRetry(rec)
-			} else {
+			case owesResult(rec):
+				// A closed record with a bound run and no result: a late result
+				// whose write failed (packet 4c). Ask the attachment.
+				rerr = e.recoverTerminalResult(rec)
+			default:
 				rerr = e.replayTerminalAck(rec)
 			}
 		}
@@ -1537,6 +1756,29 @@ func (e *Endpoint) reconcileLive(rec *requests.Record) error {
 // window. The native Submit happens without the endpoint lock.
 func (e *Endpoint) admitDeferred(rec *requests.Record) error {
 	key := keyOfRecord(rec)
+	// W8 (D1 gate): busy=queue and deliver=steer are disabled in v1. The
+	// gate lives in submit() for fresh commands; admitDeferred is the other
+	// entrance to native Submit, so a record stored before D1 with
+	// deliver=steer would be admitted here after an upgrade without this
+	// check. Same gate, same code, same reason.
+	if rec.Input != nil && (rec.Input.Busy == protocol.BusyQueue || rec.Input.Deliver == protocol.DeliverSteer) {
+		mode, value := "busy", string(rec.Input.Busy)
+		if rec.Input.Deliver == protocol.DeliverSteer {
+			mode, value = "deliver", string(rec.Input.Deliver)
+		}
+		e.mu.Lock()
+		cur, exists, err := e.store.Get(key)
+		if err != nil || !exists || cur.State != protocol.StateReceived {
+			e.mu.Unlock()
+			return err
+		}
+		e.transitionLocked(cur, causeRefused, nativeEvidence{code: protocol.CodeUnsupported})
+		_, err = e.commitLocked(cur, nil)
+		e.mu.Unlock()
+		_ = mode
+		_ = value
+		return err
+	}
 	e.mu.Lock()
 	t, code := e.admissibleLocked(rec.TargetID, rec.Epoch, rec.NotAfter)
 	if code == "" && t == nil {
@@ -1912,18 +2154,35 @@ func (e *Endpoint) notifyLocked(rec *requests.Record) {
 // publishLocked publishes the latest revision and records it on success.
 // Failures leave published_revision behind so Reconcile retries.
 func (e *Endpoint) publishLocked(rec *requests.Record) {
-	if e.crashAt(PointBeforePublish) != nil {
+	key := keyOfRecord(rec)
+	// Fresh state under the lock: the caller's record may be stale, and a
+	// concurrent reconcile may already have published and marked this
+	// revision. Publishing from a stale record is the double delivery of
+	// Pro r2 #13 (packet 4a, agent-message-queue-611.22.36).
+	cur, ok, err := e.store.Get(key)
+	if err != nil || !ok {
 		return
 	}
-	if err := e.publish(rec.Snapshot, rec.Origin); err != nil {
+	if cur.PublishedRevision >= rec.Revision {
+		rec.PublishedRevision = cur.PublishedRevision
 		return
+	}
+	if e.visible[key] < rec.Revision {
+		if e.crashAt(PointBeforePublish) != nil {
+			return
+		}
+		if err := e.publish(rec.Snapshot, rec.Origin); err != nil {
+			return
+		}
+		// Delivered. From here on only the marker is owed.
+		e.visible[key] = rec.Revision
 	}
 	if e.crashAt(PointAfterPublish) != nil || e.crashAt(PointBeforePublished) != nil {
 		return
 	}
-	key := requests.Key{CreatorHost: rec.CreatorHost, TargetID: rec.TargetID, RequestID: rec.RequestID}
 	if err := e.store.MarkPublished(key, rec.Revision); err == nil {
 		rec.PublishedRevision = rec.Revision
+		delete(e.visible, key)
 	}
 }
 

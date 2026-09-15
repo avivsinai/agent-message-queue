@@ -49,6 +49,10 @@ func settledCompletedRecord(t *testing.T, store *requests.Store, id, obs string)
 	if err := store.Update(rec); err != nil {
 		t.Fatalf("completed: %v", err)
 	}
+	// Published: the caller received the terminal outcome (4b gates compaction on it).
+	if err := store.MarkPublished(k, rec.Revision); err != nil {
+		t.Fatalf("mark published: %v", err)
+	}
 	return k
 }
 

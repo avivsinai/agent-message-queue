@@ -197,6 +197,26 @@ func ReadMessageFile(path string) (Message, error) {
 	return ParseMessage(data)
 }
 
+// ReadMessageFileRoot reads a root-relative message file through the pinned
+// DeliveryRoot (VerifyBase + os.SameFile), refusing symlinks and detecting
+// replacement during open. Use this instead of ReadMessageFile when a pinned
+// root is available, so reads stay attached to the authorized physical root.
+func ReadMessageFileRoot(root *fsq.DeliveryRoot, name string) (Message, error) {
+	file, info, err := root.OpenRegularNoFollow(name)
+	if err != nil {
+		return Message{}, err
+	}
+	defer func() { _ = file.Close() }()
+	if info.Size() > MaxMessageSize {
+		return Message{}, fmt.Errorf("%w: %d bytes", ErrMessageTooLarge, info.Size())
+	}
+	data, err := io.ReadAll(io.LimitReader(file, MaxMessageSize+1))
+	if err != nil {
+		return Message{}, err
+	}
+	return ParseMessage(data)
+}
+
 func ReadHeaderFile(path string) (Header, error) {
 	file, _, err := fsq.OpenRegularNoFollow(path)
 	if err != nil {
