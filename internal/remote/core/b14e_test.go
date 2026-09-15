@@ -2,6 +2,7 @@ package core_test
 
 import (
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -253,5 +254,127 @@ func TestB14eCompactBudgetCountsCompactedNotScanned(t *testing.T) {
 	got, _, _ := store.Get(liveKey)
 	if !got.Tombstone {
 		t.Fatal("live record was not compacted — budget counted scanned records, not compacted (Pro B1)")
+	}
+}
+
+// TestB14eCompactDoesNotRepublishTombstone pins agent-message-queue-611.22.41:
+// CompactOne bumps Revision; the Reconcile publish arm republishes whenever
+// PublishedRevision < Revision — so a compaction that left PublishedRevision
+// behind made the NEXT Reconcile republish the tombstone (gate repro: a
+// publication state=completed code=result_expired result=nil revision=5 for
+// an already-delivered result). The tombstone is the record's final published
+// state; compaction itself is the publication of the retraction.
+func TestB14eCompactDoesNotRepublishTombstone(t *testing.T) {
+	store, now := openStore(t)
+	id := "11111111-1111-4111-8111-111111111141"
+	k := settledCompletedRecord(t, store, id, "2026-09-08T09:00:00Z")
+
+	// Store-level invariant: after compaction the tombstone must already
+	// count as published (PublishedRevision == Revision), so the Reconcile
+	// publish arm has nothing to do.
+	if _, ok, err := store.Get(k); err != nil || !ok {
+		t.Fatalf("get before compact: %v (ok=%v)", err, ok)
+	}
+	compacted, err := store.CompactOne(k, now().Add(time.Minute))
+	if err != nil || !compacted {
+		t.Fatalf("compact: %v (compacted=%v)", err, compacted)
+	}
+	after, ok, err := store.Get(k)
+	if err != nil || !ok {
+		t.Fatalf("get after compact: %v (ok=%v)", err, ok)
+	}
+	if !after.Tombstone {
+		t.Fatal("record was not tombstoned")
+	}
+	if after.PublishedRevision != after.Revision {
+		t.Fatalf("compacted tombstone PublishedRevision=%d Revision=%d — Reconcile will republish the tombstone (agent-message-queue-611.22.41)", after.PublishedRevision, after.Revision)
+	}
+
+	// Endpoint-level: the compaction sweep + a follow-up Reconcile must not
+	// emit a second publication for the record. The first publication (the
+	// completed result) happens on the initial Reconcile; compaction runs
+	// on a later one (shouldCompact rate-limit advances with the clock).
+	dir := t.TempDir()
+	clk := time.Date(2026, 9, 8, 10, 0, 0, 0, time.UTC)
+	var pubMu sync.Mutex
+	var published []protocol.Snapshot
+	epStore, err := requests.Open(dir, requests.WithClock(func() time.Time { return clk }))
+	if err != nil {
+		t.Fatalf("open ep store: %v", err)
+	}
+	t.Cleanup(func() { _ = epStore.Close() })
+	if err := epStore.Create(&requests.Record{
+		Snapshot: protocol.Snapshot{
+			Schema:      protocol.SchemaRequest,
+			RequestID:   "22222222-2222-4222-8222-222222222241",
+			CreatorHost: "local",
+			TargetID:    "fake",
+			Epoch:       "e_1",
+			Revision:    1,
+			State:       protocol.StateReceived,
+			InputDigest: requests.Digest([]byte("hi")),
+		},
+		Input: &protocol.SubmitInput{Text: "hi"},
+	}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	rec, ok, err := epStore.Get(requests.Key{CreatorHost: "local", TargetID: "fake", RequestID: "22222222-2222-4222-8222-222222222241"})
+	if err != nil || !ok {
+		t.Fatalf("get: %v (ok=%v)", err, ok)
+	}
+	rec.Revision, rec.State = 2, protocol.StateDispatching
+	rec.ObservedAt = "2026-09-08T09:00:00Z"
+	if err := epStore.Update(rec); err != nil {
+		t.Fatalf("dispatching: %v", err)
+	}
+	rec.Revision, rec.State = 3, protocol.StateCompleted
+	rec.Result = &protocol.Result{Text: "done"}
+	rec.AckDigest = protocol.EvidenceDigest(rec.Result) // settled
+	if err := epStore.Update(rec); err != nil {
+		t.Fatalf("completed: %v", err)
+	}
+	ep := core.New(core.Config{
+		Store: epStore,
+		Now:   func() time.Time { return clk },
+		Publish: func(s protocol.Snapshot, _ map[string]string) error {
+			pubMu.Lock()
+			defer pubMu.Unlock()
+			published = append(published, s)
+			return nil
+		},
+		CompactHorizon: time.Minute,
+	})
+	// Reconcile #1: publishes the completed result.
+	if err := ep.Reconcile(); err != nil {
+		t.Fatalf("reconcile 1: %v", err)
+	}
+	pubMu.Lock()
+	n1 := len(published)
+	pubMu.Unlock()
+	if n1 == 0 {
+		t.Fatal("setup: first reconcile published nothing")
+	}
+	// Advance past the compaction horizon AND the shouldCompact rate limit,
+	// compact via the sweep, then reconcile again: the tombstone must not
+	// be republished.
+	clk = clk.Add(3 * time.Minute)
+	if err := ep.Reconcile(); err != nil {
+		t.Fatalf("reconcile 2 (compact): %v", err)
+	}
+	got, ok, err := epStore.Get(requests.Key{CreatorHost: "local", TargetID: "fake", RequestID: "22222222-2222-4222-8222-222222222241"})
+	if err != nil || !ok {
+		t.Fatalf("get after sweep: %v (ok=%v)", err, ok)
+	}
+	if !got.Tombstone {
+		t.Fatalf("setup: sweep did not compact (state=%s tombstone=%v)", got.State, got.Tombstone)
+	}
+	clk = clk.Add(time.Minute) // next shouldCompact window
+	if err := ep.Reconcile(); err != nil {
+		t.Fatalf("reconcile 3 (post-compact): %v", err)
+	}
+	pubMu.Lock()
+	defer pubMu.Unlock()
+	if len(published) != n1 {
+		t.Fatalf("tombstone republished: %d publications after compaction (want %d) — agent-message-queue-611.22.41", len(published), n1)
 	}
 }
