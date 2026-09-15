@@ -83,8 +83,18 @@ func TestGateR2LostStateDuringTurnStartDoesNotRestore(t *testing.T) {
 	case err := <-admCh:
 		t.Logf("submit returned: %v", err)
 	case <-time.After(10 * time.Second):
+		// t2 (yoetz r2 note): snapshot under the lock, unlock, THEN fail —
+		// t.Fatalf while holding att.mu poisons any later assertion in this
+		// test (and goroutine dumps) with a deadlocked lookup.
 		att.mu.Lock()
-		t.Fatalf("submit did not return (gen=%d activeTurn=%q status=%q runs=%d)", att.lostStateGen, att.activeTurn, att.status, len(att.runs))
+		snap := struct {
+			gen  uint64
+			turn string
+			st   string
+			runs int
+		}{att.lostStateGen, att.activeTurn, att.status, len(att.runs)}
+		att.mu.Unlock()
+		t.Fatalf("submit did not return (gen=%d activeTurn=%q status=%q runs=%d)", snap.gen, snap.turn, snap.st, snap.runs)
 	}
 
 	// The stale restore must not have happened.
@@ -98,15 +108,23 @@ func TestGateR2LostStateDuringTurnStartDoesNotRestore(t *testing.T) {
 		t.Fatalf("status = busy restored by stale continuation (F758-1); want idle/unknown")
 	}
 
-	// And a fresh distinct-key request must not be refused busy.
+	// And a fresh distinct-key request must not be refused busy (t1, yoetz
+	// r2 note): capture the returned Admission and explicitly reject
+	// CodeBusy — accepting any return would let a busy-refusal pass
+	// silently, so "not refused busy" would not be independently proven.
+	var adm2 core.Admission
 	key2 := requests.Key{CreatorHost: "local", TargetID: s.TargetID, RequestID: "22222222-2222-4222-8222-222222222r21"}
 	done := make(chan error, 1)
 	go func() {
-		_, err := att.Submit(core.BoundRequest{Key: key2, Epoch: epoch, Input: protocol.SubmitInput{Text: "again"}})
+		a, err := att.Submit(core.BoundRequest{Key: key2, Epoch: epoch, Input: protocol.SubmitInput{Text: "again"}})
+		adm2 = a
 		done <- err
 	}()
 	select {
 	case <-done:
+		if adm2.Code == protocol.CodeBusy {
+			t.Fatalf("fresh distinct-key submit refused busy (F758-1 aftermath): the stale continuation wedged the thread state")
+		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("fresh submit after lost-state + stale continuation did not return (wedge)")
 	}
