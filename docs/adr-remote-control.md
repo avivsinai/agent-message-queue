@@ -67,6 +67,40 @@ invariants.
    mismatch, `6` action required (busy, unsupported, unshared, expired, or
    uncertain), `130` reader interrupted. JSON output never changes a code.
 
+### Open questions settled by review
+
+These five were left open when the ADR was first written and were settled in
+the design review that followed. They are recorded here because each one is a
+contract another adapter has to honour, not an implementation detail.
+
+- **A submit window is explicit and enforced natively.** `not_after` defaults
+  to two minutes and is checked at the native admission boundary, not only on
+  arrival. A request whose window closed while it waited is `expired`, which
+  is action-required, never a silent dispatch.
+- **Steering is influence, not ownership.** Remote steering is a separate
+  operation that names the target request's ref and the turn it expects to
+  be running. It never takes ownership of another caller's run and never
+  rebinds that run's identity; if the expected turn is no longer current the
+  operation is refused. `deliver=steer` stays disabled in v1 (below) until
+  that ownership model is implemented.
+- **`capabilities.submit` stays boolean.** Per-mode differences are published
+  as a typed evidence projection rather than by splintering the capability
+  into one flag per mode, and a caller states the minimum evidence class it
+  will accept. A caller that needs `admitted` is refused by an adapter that
+  can only prove `submitted`, instead of being silently given the weaker
+  guarantee — the same "weaker capability is refused, not substituted" rule
+  as invariant 5.
+- **`busy=queue` is refused in v1.** Queuing needs a per-runtime reservation
+  covering dispatching, unresolved and unacknowledged work, plus a
+  `not_after` check at native admission for the queued item. Until both
+  exist, a busy target is refused with `busy` (action-required) rather than
+  admitting work whose ordering and expiry we cannot honour.
+- **Activity divergence is acceptable for a cache, never for execution
+  truth.** The live activity projection may lag or differ from the harness's
+  own view; it is a convenience. Admission, cancellation and completion are
+  decided from native evidence and the durable record alone, and a
+  divergence in the projection never authorises a dispatch or a cancel.
+
 ### Cross-host delivery
 
 `amq-bridge` gains a courier class, `buzz-relay`. The existing signed

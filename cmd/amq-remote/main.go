@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	amqcli "github.com/avivsinai/agent-message-queue/internal/cli"
 	"github.com/avivsinai/agent-message-queue/internal/remote/amqio"
 	"github.com/avivsinai/agent-message-queue/internal/remote/codex"
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
@@ -279,6 +280,11 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 		_ = store.Close()
 		return 0, err
 	}
+	// A cross-project caller must be answered in ITS root, not ours. The
+	// carrier holds only the contract; .amqrc discovery, the peer map and
+	// session layout stay in the package that owns them.
+	root := c.root
+	carrier.SetReplyRouter(replyRouterFor(root))
 	if *useFake {
 		ep.Register(fake.New("fake", "e_1"))
 	}
@@ -695,4 +701,24 @@ func newUUID() (string, error) {
 	b[6] = (b[6] & 0x0f) | 0x40
 	b[8] = (b[8] & 0x3f) | 0x80
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]), nil
+}
+
+// replyRouterFor returns the ReplyRouter the endpoint uses: cli resolves the
+// route, and this adapter translates cli's vocabulary into the carrier's.
+// It is a named function, not an inline closure, so a test can exercise the
+// SHIPPED translation rather than reimplementing it (B1: deleting the
+// ErrPeerRootUnreachable -> TransientRouteError translation from this
+// function must fail TestImportCrossProjectRealRouterTransientPeerAbsent).
+func replyRouterFor(root string) amqio.ReplyRouter {
+	return func(replyProject, replyTo string) (string, string, error) {
+		r, h, err := amqcli.ResolveReplyRoute(root, replyProject, replyTo)
+		// B1: the adapter translates between the cli vocabulary
+		// (ErrPeerRootUnreachable) and the amqio vocabulary
+		// (TransientRouteError). The generic cli layer must not import amqio;
+		// this named function is the seam that already imports both sides.
+		if err != nil && errors.Is(err, amqcli.ErrPeerRootUnreachable) {
+			return "", "", amqio.NewTransientRouteError(err)
+		}
+		return r, h, err
+	}
 }
