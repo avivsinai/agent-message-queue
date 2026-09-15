@@ -963,7 +963,19 @@ func (a *Attachment) onNotification(n Notification) {
 		}
 		a.mu.Lock()
 		a.status = threadStatus(p.Status.Type)
-		if a.status == "idle" {
+		// 611.22.39: notLoaded/systemError mean the app-server lost track of
+		// any turn we previously observed (process restart, transcript not
+		// loaded). No turn/completed will follow for that turn, and the
+		// terminal memo is written only by turn/completed and lookupHistory —
+		// so keeping the stale activeTurn wedged Submit busy for the life of
+		// the process. The observing status source is gone; drop it.
+		// Gate on the RAW status type, NOT the mapped a.status: threadStatus
+		// maps every unrecognised status to "unknown", and a future Codex
+		// status meaning "still running" would then clear a LIVE turn's
+		// activeTurn and Submit would issue turn/start into it (verifier
+		// round-1 blocker). Only the enumerated lost-track statuses clear;
+		// unrecognised statuses are left untouched.
+		if p.Status.Type == "notLoaded" || p.Status.Type == "systemError" || p.Status.Type == "idle" {
 			a.activeTurn = ""
 		}
 		a.mu.Unlock()
