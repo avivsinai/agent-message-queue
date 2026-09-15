@@ -62,14 +62,16 @@ type target struct {
 
 // Endpoint is the request handler. One Endpoint owns one Store.
 type Endpoint struct {
-	mu        sync.Mutex
-	store     *requests.Store
-	targets   map[string]*target
-	publish   Publisher
-	crash     CrashPoint
-	now       func() time.Time
-	observers []func(*requests.Record)
-	changed   chan struct{}
+	mu             sync.Mutex
+	store          *requests.Store
+	targets        map[string]*target
+	publish        Publisher
+	crash          CrashPoint
+	now            func() time.Time
+	observers      []func(*requests.Record)
+	changed        chan struct{}
+	compactHorizon time.Duration
+	lastCompact    time.Time
 }
 
 // Config configures New.
@@ -78,18 +80,22 @@ type Config struct {
 	Publish Publisher
 	Crash   CrashPoint
 	Now     func() time.Time
+	// CompactHorizon is the age at which terminal, settled records become
+	// eligible for compaction. Zero (default) disables compaction.
+	CompactHorizon time.Duration
 }
 
 // New builds an endpoint over an open store. Attachments register through
 // Register; Reconcile should run before the first command.
 func New(cfg Config) *Endpoint {
 	e := &Endpoint{
-		store:   cfg.Store,
-		targets: map[string]*target{},
-		publish: cfg.Publish,
-		crash:   cfg.Crash,
-		now:     cfg.Now,
-		changed: make(chan struct{}),
+		store:          cfg.Store,
+		targets:        map[string]*target{},
+		publish:        cfg.Publish,
+		crash:          cfg.Crash,
+		now:            cfg.Now,
+		changed:        make(chan struct{}),
+		compactHorizon: cfg.CompactHorizon,
 	}
 	if e.now == nil {
 		e.now = time.Now
@@ -1128,7 +1134,22 @@ func owesCancel(rec *requests.Record) bool {
 // Used by replayTerminalAck's crash-gap path (when AckDigest is empty but
 // Result is bound, compute the digest from Result).
 func owesAck(rec *requests.Record) bool {
-	return rec.State.Terminal() && rec.Result != nil && rec.AckDigest == ""
+	return rec.OwesAck()
+}
+
+// shouldCompact rate-limits compaction to once per minute. Survives restarts
+// (time-interval, not tick-count). Returns false if compaction is disabled
+// (compactHorizon == 0).
+func (e *Endpoint) shouldCompact() bool {
+	if e.compactHorizon == 0 {
+		return false
+	}
+	now := e.now()
+	if now.Sub(e.lastCompact) < time.Minute {
+		return false
+	}
+	e.lastCompact = now
+	return true
 }
 
 // commitLocked is the persist step that pairs with transitionLocked. It
@@ -1197,6 +1218,42 @@ func (e *Endpoint) Reconcile() error {
 			e.publishLocked(cur)
 		}
 		e.mu.Unlock()
+	}
+	// B14e: bounded compaction. Runs once per minute (shouldCompact rate-
+	// limit), reaps terminal+settled+old records into tombstones. e.mu is
+	// held per-record (CompactOne), never across the sweep (Pro B7).
+	if e.shouldCompact() {
+		cutoff := e.now().Add(-e.compactHorizon)
+		recs2, lerr := e.store.List()
+		if lerr != nil && firstErr == nil {
+			firstErr = lerr
+		}
+		compacted := 0
+		for _, rec := range recs2 {
+			// Count only successful compactions toward the limit, not every
+			// record the loop looks at (Pro B1: tombstones sort ahead of
+			// live records would starve forever on the i counter).
+			if compacted >= 100 {
+				break
+			}
+			if !rec.State.Terminal() || rec.Tombstone {
+				continue
+			}
+			e.mu.Lock()
+			ok, cerr := e.store.CompactOne(keyOfRecord(rec), cutoff)
+			e.mu.Unlock()
+			if cerr != nil {
+				// Pro B2: feed store-level errors into firstErr and stop the
+				// sweep (store_closed/storage_full will not fix mid-sweep).
+				if firstErr == nil {
+					firstErr = cerr
+				}
+				break
+			}
+			if ok {
+				compacted++
+			}
+		}
 	}
 	return firstErr
 }
