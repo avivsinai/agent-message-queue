@@ -133,7 +133,18 @@ func newClient(ws *wsConn, h Handlers) *Client {
 // app-server has at most one in-flight approval per live run — but if it
 // ever does, the request is FAILED EXPLICITLY (Respond with an error) so
 // the app-server never waits for an answer that never comes.
+// testDispatchGate, when non-nil (tests only), is invoked inside
+// dispatchServerRequest BEFORE the reqQ send attempt. Production leaves it
+// nil; the call is a single predictable branch, never on the hot-path cost
+// that matters. It exists so a test can park the read pump at the exact
+// decode-vs-enqueue boundary (F761-2 r3 spec: a two-way barrier, not an
+// observation).
+var testDispatchGate func(sr ServerRequest)
+
 func (c *Client) dispatchServerRequest(sr ServerRequest) {
+	if testDispatchGate != nil {
+		testDispatchGate(sr) // test-only park point, pre-send (F761-2 r3)
+	}
 	select {
 	case c.reqQ <- sr:
 		return
