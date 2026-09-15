@@ -515,6 +515,15 @@ func (s *Store) CompactOne(key Key, before time.Time) (bool, error) {
 		return false, nil
 	}
 	rec.Revision++
+	// 611.22.41: mark the tombstone as already published. The Reconcile
+	// publish arm republishes whenever PublishedRevision < Revision; a
+	// compaction that bumped Revision without advancing PublishedRevision
+	// made the NEXT Reconcile republish the tombstone (repro: publication
+	// state=completed code=result_expired result=nil after the record was
+	// already delivered). The tombstone is the record's final published
+	// state — compaction itself is the publication of the retraction — so
+	// it must not re-enter the publish queue.
+	rec.PublishedRevision = rec.Revision
 	rec.Result = nil
 	rec.Input = nil
 	rec.Interaction = nil
