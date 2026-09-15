@@ -63,3 +63,54 @@ func TestDisabledQueueAndSteerModesAreRefused(t *testing.T) {
 		t.Fatalf("reject/turn submit did not dispatch: state=%s", rec.State)
 	}
 }
+
+// TestSteerCapabilityMaskedInSessionProjection verifies Pro r2 #22
+// (agent-message-queue-611.22.36): the D1 gate refuses every deliver=steer
+// submit, but the attachment advertises Steer:true. session.inspect and
+// session.list must mask Steer out of the advertised capabilities so a client
+// that picks operations from the advertised capabilities is not given a false
+// signal.
+func TestSteerCapabilityMaskedInSessionProjection(t *testing.T) {
+	store, now := openStore(t)
+	rt := fake.New("fake", "e_1")
+	ep := core.New(core.Config{Store: store, Now: now})
+	ep.Register(rt)
+
+	// session.inspect
+	inspectCmd := &protocol.Command{
+		Schema:   protocol.SchemaCommand,
+		Op:       protocol.OpSessionInspect,
+		TargetID: "fake",
+	}
+	rep, err := ep.Handle(inspectCmd, core.Source{Host: "local"})
+	if err != nil {
+		t.Fatalf("session.inspect: %v", err)
+	}
+	insp, ok := rep.(protocol.Session)
+	if !ok {
+		t.Fatalf("session.inspect returned %T, want protocol.Session", rep)
+	}
+	if insp.Capabilities.Steer {
+		t.Fatal("session.inspect advertises Steer:true (D1 gate refuses it — must be masked)")
+	}
+
+	// session.list
+	listCmd := &protocol.Command{
+		Schema: protocol.SchemaCommand,
+		Op:     protocol.OpSessionList,
+	}
+	rep2, err := ep.Handle(listCmd, core.Source{Host: "local"})
+	if err != nil {
+		t.Fatalf("session.list: %v", err)
+	}
+	sessions, ok := rep2.([]protocol.Session)
+	if !ok {
+		t.Fatalf("session.list returned %T, want []protocol.Session", rep2)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("session.list returned %d sessions, want 1", len(sessions))
+	}
+	if sessions[0].Capabilities.Steer {
+		t.Fatal("session.list advertises Steer:true (D1 gate refuses it — must be masked)")
+	}
+}

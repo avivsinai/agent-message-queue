@@ -507,7 +507,12 @@ func (s *Store) CompactOne(key Key, before time.Time) (bool, error) {
 	}
 	// A2: the gate includes settlement — never reap a record we still owe the
 	// runtime (bound run, unacked result).
-	if !rec.State.Terminal() || rec.Tombstone || rec.OwesAck() {
+	// Two obligations gate compaction and they are different: OwesAck is
+	// what we owe the RUNTIME (release its retained result); an unpublished
+	// revision is what we owe the CALLER. Compaction erases the only retained
+	// result, so a revision the caller has not received yet must survive it
+	// (Pro r2 #14 / packet 4b, agent-message-queue-611.22.36).
+	if !rec.State.Terminal() || rec.Tombstone || rec.OwesAck() || rec.PublishedRevision < rec.Revision {
 		return false, nil
 	}
 	observed, err := protocol.ParseTime(rec.ObservedAt)
@@ -515,6 +520,13 @@ func (s *Store) CompactOne(key Key, before time.Time) (bool, error) {
 		return false, nil
 	}
 	rec.Revision++
+	// Intentional asymmetry: the Revision is bumped but NOT published. A
+	// tombstone is local dedup state, not a caller-visible revision — the
+	// caller already received the terminal outcome before compaction.
+	// Publishing here would flood every caller with tombstone notifications
+	// for records they already have terminal outcomes for (the B10 shape:
+	// a revision change with no corresponding publication is the bug, not
+	// the norm). Reconcile republishes only PublishedRevision < Revision.
 	rec.Result = nil
 	rec.Input = nil
 	rec.Interaction = nil

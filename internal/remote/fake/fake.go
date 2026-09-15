@@ -41,6 +41,7 @@ type Runtime struct {
 	afterAdmitGate       chan struct{}
 	lookupGate           chan struct{}
 	ackGate              chan struct{}
+	failNextRespond      error
 	failNextLookup       error
 	failNextCancelExact  error
 	cancelExactCount     int
@@ -227,6 +228,13 @@ func (r *Runtime) CancelExact(key requests.Key, epoch string) (core.CancelEviden
 // Respond implements core.Attachment.
 func (r *Runtime) Respond(key requests.Key, _ string, interactionID, option string) (protocol.Code, error) {
 	r.mu.Lock()
+	if fail := r.failNextRespond; fail != nil {
+		// A transport failure before the answer reached the runtime: the
+		// question stays pending, nothing is recorded.
+		r.failNextRespond = nil
+		r.mu.Unlock()
+		return "", fail
+	}
 	rn, ok := r.runsByInteraction[interactionID]
 	if !ok || rn.key != key {
 		r.mu.Unlock()
@@ -316,6 +324,14 @@ func (r *Runtime) HoldAdmission() {
 	if r.admissionGate == nil {
 		r.admissionGate = make(chan struct{})
 	}
+}
+
+// FailNextRespond makes the next Respond fail with err before it touches the
+// run, as a transport error would.
+func (r *Runtime) FailNextRespond(err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.failNextRespond = err
 }
 
 // FailNextLookup makes the NEXT Lookup call return err once (then clear).
@@ -471,6 +487,29 @@ func (r *Runtime) CompleteWhileAdmitHeld(requestID, text string) bool {
 	target.result = &protocol.Result{Text: text}
 	r.busy = false
 	ev := core.NativeEvent{Type: core.EventRunCompleted, Key: target.key, RunID: target.id, Result: target.result}
+	r.mu.Unlock()
+	r.emit(ev)
+	return true
+}
+
+// CompleteCancelled attaches a late result to a run that was already
+// cancelled — Codex does exactly this when a turn is interrupted and the
+// partial text arrives with turn/completed afterwards. The run stays
+// cancelled; only the result and its event are new.
+func (r *Runtime) CompleteCancelled(requestID, text string) bool {
+	r.mu.Lock()
+	var target *run
+	for _, rn := range r.runsByKey {
+		if rn.key.RequestID == requestID && rn.state == protocol.StateCancelled {
+			target = rn
+		}
+	}
+	if target == nil {
+		r.mu.Unlock()
+		return false
+	}
+	target.result = &protocol.Result{Text: text}
+	ev := core.NativeEvent{Type: core.EventRunCancelled, Key: target.key, RunID: target.id, Result: target.result}
 	r.mu.Unlock()
 	r.emit(ev)
 	return true

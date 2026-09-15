@@ -60,6 +60,9 @@ func TestRecordLifecycle(t *testing.T) {
 	if err := s.Update(rec); err != nil {
 		t.Fatalf("completed: %v", err)
 	}
+	if err := s.MarkPublished(Key{"hostA", "t_fake1", rec.RequestID}, 4); err != nil {
+		t.Fatalf("mark published: %v", err)
+	}
 
 	got, ok, err := s.Get(Key{"hostA", "t_fake1", rec.RequestID})
 	if err != nil || !ok {
