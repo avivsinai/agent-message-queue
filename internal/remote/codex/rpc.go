@@ -139,11 +139,31 @@ func newClient(ws *wsConn, h Handlers) *Client {
 // that matters. It exists so a test can park the read pump at the exact
 // decode-vs-enqueue boundary (F761-2 r3 spec: a two-way barrier, not an
 // observation).
-var testDispatchGate func(sr ServerRequest)
+//
+// BEAD jb7: held in an atomic.Pointer. This is package-level state written
+// by tests and read by the read pump on every server request — as a plain
+// package var it was synchronisation-free (safe only while no parallel
+// test touched it), and -race fires on any concurrent writer. The
+// setTestDispatchGate helper is the single write path.
+var testDispatchGate atomic.Pointer[func(sr ServerRequest)]
+
+// setTestDispatchGate installs (or, with nil, clears) the test-only park
+// point. Tests save the previous pointer and restore it via Cleanup.
+func setTestDispatchGate(fn func(sr ServerRequest)) (prev func(sr ServerRequest)) {
+	if p := testDispatchGate.Load(); p != nil {
+		prev = *p
+	}
+	if fn == nil {
+		testDispatchGate.Store(nil)
+		return prev
+	}
+	testDispatchGate.Store(&fn)
+	return prev
+}
 
 func (c *Client) dispatchServerRequest(sr ServerRequest) {
-	if testDispatchGate != nil {
-		testDispatchGate(sr) // test-only park point, pre-send (F761-2 r3)
+	if gate := testDispatchGate.Load(); gate != nil {
+		(*gate)(sr) // test-only park point, pre-send (F761-2 r3)
 	}
 	select {
 	case c.reqQ <- sr:
