@@ -41,6 +41,7 @@ type Runtime struct {
 	afterAdmitGate       chan struct{}
 	lookupGate           chan struct{}
 	ackGate              chan struct{}
+	failNextRespond      error
 	failNextLookup       error
 	failNextCancelExact  error
 	cancelExactCount     int
@@ -227,6 +228,13 @@ func (r *Runtime) CancelExact(key requests.Key, epoch string) (core.CancelEviden
 // Respond implements core.Attachment.
 func (r *Runtime) Respond(key requests.Key, _ string, interactionID, option string) (protocol.Code, error) {
 	r.mu.Lock()
+	if fail := r.failNextRespond; fail != nil {
+		// A transport failure before the answer reached the runtime: the
+		// question stays pending, nothing is recorded.
+		r.failNextRespond = nil
+		r.mu.Unlock()
+		return "", fail
+	}
 	rn, ok := r.runsByInteraction[interactionID]
 	if !ok || rn.key != key {
 		r.mu.Unlock()
@@ -316,6 +324,14 @@ func (r *Runtime) HoldAdmission() {
 	if r.admissionGate == nil {
 		r.admissionGate = make(chan struct{})
 	}
+}
+
+// FailNextRespond makes the next Respond fail with err before it touches the
+// run, as a transport error would.
+func (r *Runtime) FailNextRespond(err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.failNextRespond = err
 }
 
 // FailNextLookup makes the NEXT Lookup call return err once (then clear).

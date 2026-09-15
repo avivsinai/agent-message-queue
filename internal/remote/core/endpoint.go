@@ -733,9 +733,19 @@ func (e *Endpoint) respond(cmd *protocol.Command) (protocol.Reply, error) {
 		return protocol.Reply{}, protocol.Refuse(protocol.CodeAttachmentLost, "target is not attached")
 	}
 	if _, done := rec.Answered[cmd.InteractionID]; done {
-		// A replay of an answer we already delivered; do not invoke the
-		// attachment a second time.
-		return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpInteractionRespond, Code: protocol.CodeAlreadyResolved}}, nil
+		// A recorded intent is not a delivered answer. If the runtime still
+		// holds the question, the earlier native call failed before the
+		// answer landed and this is the replay that must re-send it; only a
+		// settled answer short-circuits (gate finding on
+		// agent-message-queue-611.22.36, union 42d923a4, reopening #20 at
+		// the endpoint).
+		settled, lerr := e.answerSettled(rec, t, key, cmd)
+		if lerr != nil {
+			return protocol.Reply{}, lerr
+		}
+		if settled {
+			return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpInteractionRespond, Code: protocol.CodeAlreadyResolved}}, nil
+		}
 	}
 	if rec.Interaction == nil || rec.Interaction.InteractionID != cmd.InteractionID {
 		return protocol.Reply{}, protocol.Refuse(protocol.CodeAlreadyResolved, "no such pending interaction")
@@ -759,7 +769,10 @@ func (e *Endpoint) respond(cmd *protocol.Command) (protocol.Reply, error) {
 		e.mu.Unlock()
 		return protocol.Reply{}, protocol.Refuse(protocol.CodeNotFound, "no record for request_ref")
 	}
-	if _, done := rec.Answered[cmd.InteractionID]; done {
+	if _, done := rec.Answered[cmd.InteractionID]; done && (rec.Interaction == nil || rec.Interaction.InteractionID != cmd.InteractionID) {
+		// Settled since the first read: the resolution arrived. An intent
+		// whose interaction is still pending falls through and re-sends;
+		// the unlocked Lookup above established the runtime still holds it.
 		e.mu.Unlock()
 		return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpInteractionRespond, Code: protocol.CodeAlreadyResolved}}, nil
 	}
@@ -822,6 +835,23 @@ func (e *Endpoint) respond(cmd *protocol.Command) (protocol.Reply, error) {
 		return protocol.Reply{}, err
 	}
 	return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpInteractionRespond}}, nil
+}
+
+// answerSettled reports whether a recorded answer intent for cmd.InteractionID
+// is settled: the record no longer shows that interaction pending, or the
+// runtime no longer holds it. A pending interaction on both sides means the
+// earlier native call did not land and the caller's replay must re-send. The
+// Lookup runs without e.mu; a Lookup error is surfaced so the caller retries
+// instead of being told the answer was delivered.
+func (e *Endpoint) answerSettled(rec *requests.Record, t *target, key requests.Key, cmd *protocol.Command) (bool, error) {
+	if rec.Interaction == nil || rec.Interaction.InteractionID != cmd.InteractionID {
+		return true, nil
+	}
+	ev, err := t.att.Lookup(key, cmd.Epoch)
+	if err != nil {
+		return false, err
+	}
+	return ev.Interaction == nil || ev.Interaction.InteractionID != cmd.InteractionID, nil
 }
 
 // Targets returns the registered target ids.
