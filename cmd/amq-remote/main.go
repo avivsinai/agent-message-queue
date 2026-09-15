@@ -280,6 +280,9 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 		_ = store.Close()
 		return 0, err
 	}
+	carrier.Warn = func(e error) {
+		fmt.Fprintf(os.Stderr, "amq-remote: durability warning: %v\n", e)
+	}
 	// A cross-project caller must be answered in ITS root, not ours. The
 	// carrier holds only the contract; .amqrc discovery, the peer map and
 	// session layout stay in the package that owns them.
@@ -606,12 +609,28 @@ func cancel(args []string) (any, int, error) {
 	if err != nil {
 		return nil, 0, err
 	}
+	// B6: use the STORED request's epoch, not the current session epoch.
+	// A fresh attachment generates a fresh epoch; using it to cancel a
+	// request stored under an older epoch is rejected with stale_epoch.
+	// Fetch the stored request to get the original epoch.
+	epoch := session.Epoch
+	getRep, gerr := callReply(stateDir, &protocol.Command{
+		Schema:     protocol.SchemaCommand,
+		Op:         protocol.OpRequestGet,
+		RequestRef: ref,
+	})
+	if gerr != nil {
+		return nil, 0, gerr
+	}
+	if getRep.Snapshot.Epoch != "" {
+		epoch = getRep.Snapshot.Epoch
+	}
 	rep, err := callReply(stateDir, &protocol.Command{
 		Schema:     protocol.SchemaCommand,
 		Op:         protocol.OpRequestCancel,
 		RequestRef: ref,
 		TargetID:   targetID,
-		Epoch:      session.Epoch,
+		Epoch:      epoch,
 		NotAfter:   protocol.FormatTime(time.Now().Add(2 * time.Minute)),
 	})
 	if err != nil {

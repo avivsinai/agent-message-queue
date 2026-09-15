@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -129,5 +130,105 @@ func expectStringSlice(t *testing.T, got, want []string) {
 		if got[i] != want[i] {
 			t.Fatalf("slice[%d] = %q, want %q; got %v", i, got[i], want[i], got)
 		}
+	}
+}
+
+// TestB7ResolveReplyRouteSessionRootSource covers the case where the source
+// endpoint is running inside a session root (.agent-mail/s1). A reply to
+// handle@qa must resolve to the qa session root under the same base.
+func TestB7ResolveReplyRouteSessionRootSource(t *testing.T) {
+	baseRoot := filepath.Join(t.TempDir(), ".agent-mail")
+	// source session s1
+	sourceRoot := filepath.Join(baseRoot, "s1")
+	ensureRouteAgents(t, sourceRoot, "alice")
+	// destination session qa
+	destRoot := filepath.Join(baseRoot, "qa")
+	ensureRouteAgents(t, destRoot, "bob")
+
+	// replyTo: bob@qa, no project (same project, different session)
+	root, handle, err := ResolveReplyRoute(sourceRoot, "", "bob@qa")
+	if err != nil {
+		t.Fatalf("ResolveReplyRoute: %v", err)
+	}
+	if handle != "bob" {
+		t.Errorf("handle = %q, want bob", handle)
+	}
+	expectSamePath(t, root, destRoot)
+}
+
+// TestB7ResolveReplyRouteBaseRootSource covers the addendum: an endpoint
+// running at the BASE root (.agent-mail, not a session root) replying to a
+// caller in session qa of the same project. classifyRoot returns "" for a
+// base root; the fix uses sourceRoot as the base directly.
+func TestB7ResolveReplyRouteBaseRootSource(t *testing.T) {
+	baseRoot := filepath.Join(t.TempDir(), ".agent-mail")
+	// base root has agents directly
+	ensureRouteAgents(t, baseRoot, "alice")
+	// destination session qa
+	destRoot := filepath.Join(baseRoot, "qa")
+	ensureRouteAgents(t, destRoot, "bob")
+
+	// replyTo: bob@qa, no project. sourceRoot is the BASE root.
+	root, handle, err := ResolveReplyRoute(baseRoot, "", "bob@qa")
+	if err != nil {
+		t.Fatalf("ResolveReplyRoute (base root): %v", err)
+	}
+	if handle != "bob" {
+		t.Errorf("handle = %q, want bob", handle)
+	}
+	expectSamePath(t, root, destRoot)
+}
+
+// TestB7ResolveReplyRouteSessionNotFoundIsRetryable verifies that a missing
+// session returns a retryable error (ErrPeerRootUnreachable), not a poison.
+func TestB7ResolveReplyRouteSessionNotFoundIsRetryable(t *testing.T) {
+	baseRoot := filepath.Join(t.TempDir(), ".agent-mail")
+	sourceRoot := filepath.Join(baseRoot, "s1")
+	ensureRouteAgents(t, sourceRoot, "alice")
+	// qa session does NOT exist
+
+	_, _, err := ResolveReplyRoute(sourceRoot, "", "bob@qa")
+	if err == nil {
+		t.Fatal("expected error for missing session, got nil")
+	}
+	if !errors.Is(err, ErrPeerRootUnreachable) {
+		t.Fatalf("missing session error = %v, want ErrPeerRootUnreachable (retryable, not poison)", err)
+	}
+}
+
+// TestResolveReplyRouteCrossProjectMissingSessionIsRetryable reproduces packet 7
+// of agent-message-queue-611.22.36: when the peer BASE root exists but the
+// requested peer SESSION does not yet, the planner returned an unmarked
+// not-found error, the adapter did not classify it transient, and the carrier
+// dead-lettered the command. An absent session is retryable like an absent
+// peer root; an unknown project stays permanent.
+func TestResolveReplyRouteCrossProjectMissingSessionIsRetryable(t *testing.T) {
+	projectDir := filepath.Join(t.TempDir(), "endpoint")
+	sourceRoot := filepath.Join(projectDir, ".agent-mail")
+	ensureRouteAgents(t, sourceRoot, "remote")
+	callerBase := filepath.Join(filepath.Dir(projectDir), "caller", ".agent-mail")
+	ensureRouteAgents(t, callerBase) // base exists, session "qa" does not
+	writeRouteAmqrc(t, projectDir, map[string]any{
+		"root":    ".agent-mail",
+		"project": "endpoint",
+		"peers":   map[string]string{"caller": filepath.Join("..", "caller", ".agent-mail")},
+	})
+	t.Setenv(envRoot, "")
+	t.Setenv(envGlobalRoot, "")
+	t.Chdir(projectDir)
+	resetAmqrcCache()
+	t.Cleanup(resetAmqrcCache)
+
+	_, _, err := ResolveReplyRoute(sourceRoot, "caller", "codex@qa")
+	if err == nil {
+		t.Fatal("expected an error for the missing peer session")
+	}
+	if !errors.Is(err, ErrPeerRootUnreachable) {
+		t.Fatalf("missing peer session = %v, want ErrPeerRootUnreachable (retryable, not poison)", err)
+	}
+	// An unknown project is not a destination that can appear later.
+	_, _, err = ResolveReplyRoute(sourceRoot, "nobody", "codex@qa")
+	if err == nil || errors.Is(err, ErrPeerRootUnreachable) {
+		t.Fatalf("unknown project = %v, want a permanent error", err)
 	}
 }
