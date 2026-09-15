@@ -8,6 +8,14 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.78.3](https://github.com/avivsinai/agent-message-queue/compare/v0.78.2...v0.78.3) (2026-09-15)
+
+
+### Bug Fixes
+
+* **remote/codex:** check terminal before the lostStateGen guard in the turn/start continuation (e5q) ([#769](https://github.com/avivsinai/agent-message-queue/issues/769)) ([1a4c831](https://github.com/avivsinai/agent-message-queue/commit/1a4c831380c5d83c88a67be83cf5ddad87f995e8))
+* **remote/codex:** testDispatchGate becomes atomic.Pointer with a single write path (jb7) ([#770](https://github.com/avivsinai/agent-message-queue/issues/770)) ([37d2a08](https://github.com/avivsinai/agent-message-queue/commit/37d2a086d1c7bc6a7fcfbdd7b5f4eacbd84d156d))
+
 ## [0.78.2](https://github.com/avivsinai/agent-message-queue/compare/v0.78.1...v0.78.2) (2026-09-15)
 
 
