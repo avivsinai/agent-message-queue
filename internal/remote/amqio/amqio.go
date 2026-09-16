@@ -37,6 +37,20 @@ const (
 	subjectPrefix = "remote request "
 )
 
+// curFailureCap is the consecutive identical-failure count after which a cur
+// entry is skipped on subsequent full sweeps (611.22.46). A persistently
+// unreadable entry (EACCES/EIO that never clears) is quarantined from the
+// sweep so it stops forcing a full O(cur) rescan every tick. A DIFFERENT
+// error resets the counter, so a transient EAGAIN that later changes still
+// retries. amq tooling owns the actual DLQ; this only stops the rescan churn.
+const curFailureCap = 3
+
+// curFailure records the consecutive identical read failures of one cur entry.
+type curFailure struct {
+	count   int
+	lastErr string // errors.err.Error() compared as a string for "identical"
+}
+
 // Carrier binds one endpoint to one AMQ root and handle.
 type Carrier struct {
 	root     string
@@ -48,6 +62,24 @@ type Carrier struct {
 	// curRecovered is set after the first full cur sweep (the crash-recovery
 	// scan). Steady-state reconciliation tracks only IDs THIS process claimed.
 	curRecovered bool
+	// curFailures tracks consecutive identical read failures per cur entry
+	// (611.22.46). A persistently unreadable entry (EACCES/EIO that never
+	// clears) previously kept curRecovered false forever, forcing a full
+	// O(cur) sweep every tick. Once an entry fails identically curFailureCap
+	// times, it is skipped on subsequent sweeps (quarantined from the sweep,
+	// not from correctness — amq tooling owns DLQ). A DIFFERENT error resets
+	// the count so a transient EAGAIN that later changes still retries.
+	curFailures map[string]curFailure
+	// pendingRecovery tracks cur entries quarantined by the cap that still
+	// owe recovery work (receipt/ledger/reply). Membership is SEPARATE from
+	// the curFailures counter (611.22.46 3rd NO-GO): a changed probe error
+	// resets the count to 1, which must NOT drop the entry from the retry
+	// set, and a successful source probe must NOT remove membership before
+	// recoverOne completes (a downstream receipt/ledger/reply failure would
+	// otherwise lose the entry forever — curRecovered blocks the startup
+	// sweep). An entry enters when first capped; it leaves ONLY on complete
+	// recoverOne success or a defined terminal disposition.
+	pendingRecovery map[string]bool
 	// claimedThisRun tracks cur entries this process claimed but has not yet
 	// confirmed a receipt for. If the process dies, the set is lost; the next
 	// startup's full sweep catches exactly those.
@@ -316,6 +348,21 @@ func (c *Carrier) ImportOnce() (int, error) {
 			}
 		}
 	}
+	// 611.22.46 NO-GO re-fix: after curRecovered=true, recoverCur no longer
+	// runs, so capped (quarantined) startup entries would never be re-probed —
+	// a repaired source is silently dropped. recoverCappedCur retries ONLY the
+	// capped entries (bounded, not an O(cur) resweep) every tick. A still-
+	// unreadable entry stays capped; a repaired entry clears the cap and runs
+	// the full recoverOne (pending reply delivered).
+	if !firstSweep {
+		if rerr := c.recoverCappedCur(root); rerr != nil {
+			if err == nil {
+				err = rerr
+			} else {
+				err = errors.Join(err, rerr)
+			}
+		}
+	}
 	// Combine the new-scan errors with the cur-recovery errors.
 	scanErr := errors.Join(errs...)
 	if scanErr != nil {
@@ -363,11 +410,98 @@ func (c *Carrier) recoverCur(root *fsq.DeliveryRoot) error {
 	sort.Strings(names)
 	var errs []error
 	for _, name := range names {
+		// 611.22.46: a cur entry whose source read has failed identically
+		// curFailureCap times is quarantined from the FULL recoverOne pass
+		// (receipt/ledger/reply work), so one permanently unreadable entry
+		// stops forcing the full O(cur) rescan's per-entry cost every tick.
+		// But the cap must NOT permanently suppress a repaired entry: each
+		// tick we re-probe the source read (cheap). If it now succeeds, the
+		// cap is cleared and the full recovery runs this tick. If it still
+		// fails identically, the entry stays capped (no expensive work).
+		if c.curFailureCapped(name) {
+			if _, perr := format.ReadMessageFileRoot(root, filepath.Join(curDir, name)); perr == nil {
+				// The source is readable again: clear the cap and fall through to
+				// the full recoverOne below so the pending reply is delivered.
+				c.clearCurFailure(name)
+			} else {
+				// Still unreadable: skip the expensive recovery, but record the
+				// continued failure so the count stays current (a later change
+				// in error character resets it).
+				c.recordCurFailure(name, &errCurSourceReadFailed{err: perr})
+				continue
+			}
+		}
 		if err := c.recoverOne(root, curDir, name); err != nil {
+			// Cap ONLY source-read failures (errCurSourceReadFailed). Receipt,
+			// ledger, and reply-routing failures owe recovery work that must
+			// stay eligible every tick until it converges — capping them would
+			// convert a performance fix into lost recovery.
+			var srcErr *errCurSourceReadFailed
+			if errors.As(err, &srcErr) {
+				c.recordCurFailure(name, srcErr)
+			}
 			errs = append(errs, fmt.Errorf("%s: %w", name, err))
+		} else {
+			c.clearCurFailure(name)
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// curFailureCapped reports whether a cur entry has failed identically at least
+// curFailureCap times and should be skipped on this sweep (611.22.46). Caller
+// holds c.mu is NOT required — this method locks.
+func (c *Carrier) curFailureCapped(name string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	f, ok := c.curFailures[name]
+	return ok && f.count >= curFailureCap
+}
+
+// recordCurFailure increments the consecutive identical-failure count for a
+// cur entry. A DIFFERENT error resets the count to 1 and records the new error
+// string, so a transient EAGAIN that later changes still retries (611.22.46).
+// When the count reaches curFailureCap, the entry is also registered in
+// pendingRecovery — membership is separate from the counter (3rd NO-GO): a
+// later changed probe error resets the count but must NOT drop the entry
+// from the retry set.
+func (c *Carrier) recordCurFailure(name string, err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.curFailures == nil {
+		c.curFailures = make(map[string]curFailure)
+	}
+	msg := err.Error()
+	f := c.curFailures[name]
+	if f.lastErr == msg {
+		f.count++
+	} else {
+		f = curFailure{count: 1, lastErr: msg}
+	}
+	c.curFailures[name] = f
+	// Register pending-recovery membership when first capped. Membership is
+	// sticky: it survives counter resets and a successful source probe, and
+	// is removed ONLY by complete recoverOne success (recoverCappedCur).
+	if f.count >= curFailureCap {
+		if c.pendingRecovery == nil {
+			c.pendingRecovery = make(map[string]bool)
+		}
+		c.pendingRecovery[name] = true
+	}
+}
+
+// clearCurFailure resets the failure count for a cur entry that succeeded on
+// this sweep (611.22.46). A transient fault that clears resumes normal
+// scanning immediately. clearCurFailure also drops pendingRecovery
+// membership — this is the complete-success path (recoverOne succeeded),
+// the ONLY place membership is removed (3rd NO-GO).
+func (c *Carrier) clearCurFailure(name string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.curFailures, name)
+	if c.pendingRecovery != nil {
+		delete(c.pendingRecovery, name)
+	}
 }
 
 // recoverClaimed reconciles only the cur entries this process claimed during
@@ -409,6 +543,81 @@ func (c *Carrier) recoverClaimed(root *fsq.DeliveryRoot, claimed map[string]clai
 	return errors.Join(errs...)
 }
 
+// recoverCappedCur retries ONLY the cur entries that were capped (quarantined
+// from the full sweep) during the startup scan. It runs every tick AFTER
+// curRecovered=true, because once the first full sweep ends, recoverCur no
+// longer runs and the capped entries' re-probe (the curFailureCapped check
+// inside recoverCur) would never execute — silently dropping a repaired entry
+// (611.22.46 NO-GO re-fix).
+//
+// Bounded cost: this iterates at most len(curFailures) entries (the capped
+// set), NOT the full O(cur) directory. A capped entry whose source is still
+// unreadable stays capped (one cheap read probe); a capped entry whose source
+// is readable again clears the cap and runs the full recoverOne (emitting the
+// pending drained receipt + outcome reply). This is the bounded pending-entry
+// recovery path codex required: no full resweep, individual retry.
+func (c *Carrier) recoverCappedCur(root *fsq.DeliveryRoot) error {
+	c.mu.Lock()
+	if len(c.pendingRecovery) == 0 {
+		c.mu.Unlock()
+		return nil
+	}
+	// Snapshot the pending-recovery membership under the lock. Membership is
+	// SEPARATE from the curFailures counter (3rd NO-GO): a changed probe error
+	// resets the count to 1 but must NOT drop the entry from the retry set, so
+	// selection iterates pendingRecovery, not count>=cap.
+	pending := make([]string, 0, len(c.pendingRecovery))
+	for name := range c.pendingRecovery {
+		pending = append(pending, name)
+	}
+	c.mu.Unlock()
+	if len(pending) == 0 {
+		return nil
+	}
+	sort.Strings(pending)
+	curDir := filepath.Join("agents", c.me, "inbox", "cur")
+	var errs []error
+	for _, name := range pending {
+		// Re-probe the source read (cheap). If still unreadable, record the
+		// continued failure (counter only) and skip the expensive recovery.
+		// Membership is NOT cleared — the entry stays pending.
+		//
+		// 611.22.46 (4th NO-GO): preserve recoverOne's terminal disposition
+		// for absent/malformed sources. A removed or malformed entry is NOT a
+		// source-read failure (readFailed is false) — it owes nothing and must
+		// leave pendingRecovery, not stay forever. Only an actual read failure
+		// (readFailed) keeps the entry pending.
+		if _, perr := format.ReadMessageFileRoot(root, filepath.Join(curDir, name)); perr != nil {
+			if !readFailed(perr) {
+				// Absent or malformed: terminal disposition — drop membership and
+				// the counter, skip (matches recoverOne's !readFailed return nil).
+				c.clearCurFailure(name)
+				continue
+			}
+			c.recordCurFailure(name, &errCurSourceReadFailed{err: perr})
+			continue
+		}
+		// The source is readable. Run the full recoverOne (pending drained
+		// receipt + outcome reply). Do NOT clear membership beforehand (3rd
+		// NO-GO): if recoverOne fails downstream (receipt/ledger/reply), the
+		// entry must stay pending for the next tick.
+		if err := c.recoverOne(root, curDir, name); err != nil {
+			var srcErr *errCurSourceReadFailed
+			if errors.As(err, &srcErr) {
+				c.recordCurFailure(name, srcErr)
+			}
+			errs = append(errs, fmt.Errorf("%s: %w", name, err))
+			continue
+		}
+		// Complete success: explicitly drop both the counter and the
+		// pendingRecovery membership. recoverOne does NOT call clearCurFailure
+		// (4th NO-GO: the prior comment claiming it did was wrong); without
+		// this, the entry stays pending and repeats full recovery every tick.
+		c.clearCurFailure(name)
+	}
+	return errors.Join(errs...)
+}
+
 func (c *Carrier) recoverOne(root *fsq.DeliveryRoot, curDir, name string) error {
 	msg, err := format.ReadMessageFileRoot(root, filepath.Join(curDir, name))
 	if err != nil {
@@ -419,7 +628,10 @@ func (c *Carrier) recoverOne(root *fsq.DeliveryRoot, curDir, name string) error 
 		if !readFailed(err) {
 			return nil
 		}
-		return err
+		// 611.22.46: wrap as a source-read failure so recoverCur's cap applies
+		// ONLY here — not to receipt/ledger/reply failures below, which owe
+		// recovery work that must stay eligible every tick.
+		return &errCurSourceReadFailed{err: err}
 	}
 	// A receipt we can READ proves the case was closed. A receipt that is
 	// MISSING, or that EXISTS BUT DOES NOT PARSE, proves nothing: an
@@ -1139,6 +1351,17 @@ func (c *Carrier) finalizeDelivery(dest *fsq.DeliveryRoot, to, id string, data [
 
 // readFailed distinguishes a read that FAILED (the world is unavailable:
 // retry) from an entry that is absent or malformed (nothing to retry).
+// errCurSourceReadFailed wraps a failure to read a cur entry's source
+// message file (format.ReadMessageFileRoot). It is the ONLY failure class
+// the 611.22.46 sweep cap suppresses: the file is present on disk but cannot
+// be read (EACCES/EIO/ESTALE). Receipt writes, ledger reads, and reply
+// routing/delivery failures are NOT source-read failures — they owe
+// recovery work that must stay eligible every tick until it converges.
+type errCurSourceReadFailed struct{ err error }
+
+func (e *errCurSourceReadFailed) Error() string { return e.err.Error() }
+func (e *errCurSourceReadFailed) Unwrap() error { return e.err }
+
 func readFailed(err error) bool {
 	if err == nil || errors.Is(err, fs.ErrNotExist) || errors.Is(err, format.ErrMessageTooLarge) {
 		return false
