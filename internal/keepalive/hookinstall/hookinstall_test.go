@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -377,7 +378,7 @@ printf '%s\n' "$1" >> "$AMQ_KEEPALIVE_SLEEP_LOG"
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	runHookScriptBounded(t, cmd, nil, 30*time.Second)
+	runHookScriptBounded(t, cmd, nil, 10*time.Second)
 	if got := stdout.String(); got != "{}\n" {
 		t.Fatalf("stdout = %q, want empty hook response", got)
 	}
@@ -425,7 +426,7 @@ printf '%s\n' "$1" >> "$AMQ_KEEPALIVE_SLEEP_LOG"
 	)
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
-	runHookScriptBounded(t, cmd, nil, 30*time.Second)
+	runHookScriptBounded(t, cmd, nil, 10*time.Second)
 	if got := stdout.String(); got != "{}\n" {
 		t.Fatalf("stdout = %q, want empty hook response", got)
 	}
@@ -454,8 +455,9 @@ func TestSessionStartScriptDoesNotBlockOnOpenStdin(t *testing.T) {
 	// 9xv: no wall-clock context deadline. The script self-terminates via its
 	// internal stdin timeout (~1s). runHookScriptBounded guarantees child
 	// cleanup if the watchdog regresses; it does not select behavior. The
-	// stdin writer is closed after Start so the pipe does not hold the script
-	// open past its self-termination.
+	// stdin writer is kept open until the script completes (so the test
+	// exercises open-stdin behavior, not EOF) and closed only during failure
+	// cleanup.
 	cmd := exec.Command("bash", scriptPath)
 	reader, writer, err := os.Pipe()
 	if err != nil {
@@ -474,7 +476,7 @@ func TestSessionStartScriptDoesNotBlockOnOpenStdin(t *testing.T) {
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	runHookScriptBounded(t, cmd, writer, 30*time.Second)
+	runHookScriptBounded(t, cmd, writer, 10*time.Second)
 	if got := stdout.String(); got != "{}\n" {
 		t.Fatalf("stdout = %q, want empty hook response", got)
 	}
@@ -1002,32 +1004,41 @@ func writeExecutableBody(t *testing.T, path string, body string) string {
 // deterministic completion mechanism; the failureBound only guarantees
 // cleanup if the script's watchdog regresses. Unlike context.WithTimeout on
 // cmd.Run, the failure bound does not select the behavior under test — it
-// kills the process and fails the test only if the script does not
-// self-terminate. Stdin writers are closed before Wait to avoid holding the
-// pipe open past script exit.
+// kills the process group and fails the test only if the script does not
+// self-terminate. The stdin writer is kept open until the script completes
+// (so the test exercises open-stdin behavior, not EOF) and closed only
+// during failure cleanup.
 func runHookScriptBounded(t *testing.T, cmd *exec.Cmd, stdinWriter *os.File, failureBound time.Duration) {
 	t.Helper()
+	// Put the script in its own process group so we can kill descendants.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
 		if stdinWriter != nil {
 			_ = stdinWriter.Close()
 		}
 		t.Fatalf("start hook script: %v", err)
 	}
-	// Close stdin writer immediately after Start so the script's stdin read
-	// unblocks — the script's internal timeout is the completion mechanism.
-	if stdinWriter != nil {
-		_ = stdinWriter.Close()
-	}
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
 	select {
 	case err := <-done:
+		if stdinWriter != nil {
+			_ = stdinWriter.Close()
+		}
 		if err != nil {
 			t.Fatalf("hook script exited with error: %v", err)
 		}
 	case <-time.After(failureBound):
-		_ = cmd.Process.Kill()
-		<-done // reap
+		// Kill the entire process group (script + descendants) so no child
+		// retains stdout/stderr pipes and blocks Wait.
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		if stdinWriter != nil {
+			_ = stdinWriter.Close()
+		}
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+		}
 		t.Fatalf("hook script did not self-terminate within %v failure bound", failureBound)
 	}
 }
