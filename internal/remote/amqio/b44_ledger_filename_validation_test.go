@@ -9,11 +9,15 @@ import (
 // Regression for agent-message-queue-611.22.44: the reply ledger had two
 // filename-validation holes.
 //
-//  1. readLedger validated msgID+".md" (the wrong suffix — the file read is
-//     msgID+".json") and, on ANY validation failure, returned (nil, nil).
+//  1. readLedger ran the id through fsq.ValidateMessageFilename(msgID+".md")
+//     — a filename validator that requires a .md suffix — purely as a way to
+//     check id safety, NOT to select the read path (the file read is
+//     msgID+".json"). On ANY validation failure it returned (nil, nil).
 //     Callers treat (nil, nil) as "no ledger exists," so a malformed id
 //     silently dropped a ledger that should have been re-delivered, and a
-//     fresh one was written over the (now-invisible) existing reply.
+//     fresh one was written over the (now-invisible) existing reply. The
+//     real defect was suppressing the validation error, not the synthetic
+//     suffix.
 //
 //  2. writeLedger had NO filename validation at all. The ledger file is built
 //     as <msgID>.json under ledgerDir, so an id carrying a path separator or
@@ -39,9 +43,13 @@ func TestB44WriteLedgerRejectsPathTraversal(t *testing.T) {
 	if err == nil {
 		t.Fatal("writeLedger accepted a path-traversal id (611.22.44 — must reject before touching the filesystem)")
 	}
-	// Nothing may have been written outside the ledger dir.
-	if _, err := os.Stat(filepath.Join(endpointRoot, "evil.json")); err == nil {
-		t.Fatal("path-traversal write escaped the ledger dir (611.22.44 — ../../evil.json landed at root)")
+	// Nothing may have been written outside the ledger dir. The traversal id
+	// ../../evil resolves relative to ledgerDir =
+	// <root>/agents/<me>/extensions/remote/replies, so the escaped target is
+	// <root>/agents/<me>/extensions/evil.json (two levels up from replies).
+	escaped := filepath.Join(endpointRoot, "agents", DefaultHandle, "extensions", "evil.json")
+	if _, err := os.Stat(escaped); err == nil {
+		t.Fatalf("path-traversal write escaped the ledger dir to %s (611.22.44 — ../../evil.json from .../replies)", escaped)
 	}
 }
 
