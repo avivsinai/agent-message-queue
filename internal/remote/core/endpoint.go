@@ -2293,9 +2293,8 @@ func (e *Endpoint) publishLocked(rec *requests.Record) {
 	if e.visible[key] < rec.Revision {
 		// Serialize per-key publication: if another caller is already
 		// publishing this key, leave the work pending for the next
-		// Reconcile/Tick. This prevents two concurrent publishes for the same
-		// key (different revisions included) without holding the global
-		// endpoint mutex (611.22.48 P1-2).
+		// Reconcile/Tick. Per-key serialization prevents two concurrent
+		// publishes for the same key without holding the global endpoint mutex.
 		if e.publishing[key] {
 			return
 		}
@@ -2306,14 +2305,11 @@ func (e *Endpoint) publishLocked(rec *requests.Record) {
 		// success or failure), so a concurrent caller's reservation is never
 		// clobbered. visible is advanced ONLY on a successful publish.
 		e.publishing[key] = true
-		// 611.22.48 (2nd NO-GO): account for the accepted publication work in
-		// the bounded shutdown drain. The publish runs OUTSIDE e.mu (the
-		// expensive maildir open + fsync must not block other keys), but Close
-		// must not observe zero handlers, close the store, and return while
-		// publication is still running — a successful publish could not then
-		// MarkPublished (store closed), leaving a duplicate on restart.
-		// Incrementing inFlight here makes Close's drain wait for the publish
-		// window, preserving the unlocked publisher.
+		// Account for the accepted publication work in the bounded shutdown
+		// drain: the publish runs OUTSIDE e.mu (the expensive maildir open +
+		// fsync must not block other keys), but inFlight makes Close's drain
+		// wait for the publish window so a successful publish can always reach
+		// MarkPublished (store not closed mid-publish).
 		e.inFlight++
 		snap := rec.Snapshot
 		origin := rec.Origin
@@ -2331,7 +2327,7 @@ func (e *Endpoint) publishLocked(rec *requests.Record) {
 		}
 		// Clear only OUR in-flight claim. We are the sole owner of this entry
 		// (publishing serialized per key), so a concurrent caller's reservation
-		// is never clobbered (611.22.48 P1-2: cleanup affects only its owner).
+		// is never clobbered.
 		delete(e.publishing, key)
 		if pubErr != nil {
 			// Publication failed: do NOT advance visible/PublishedRevision. The
