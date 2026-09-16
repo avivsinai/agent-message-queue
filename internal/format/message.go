@@ -202,19 +202,33 @@ func ReadMessageFile(path string) (Message, error) {
 // replacement during open. Use this instead of ReadMessageFile when a pinned
 // root is available, so reads stay attached to the authorized physical root.
 func ReadMessageFileRoot(root *fsq.DeliveryRoot, name string) (Message, error) {
+	msg, _, err := ReadMessageFileRootBytes(root, name)
+	return msg, err
+}
+
+// ReadMessageFileRootBytes reads a root-relative message file through the
+// pinned DeliveryRoot and returns both the parsed message and the raw file
+// bytes. The raw bytes are the already-read content a caller can hand to a
+// DLQ envelope without re-reading (and re-Lstat-ing) the source after a
+// claim failure (agent-message-queue-611.22.42, Pro B776-1).
+func ReadMessageFileRootBytes(root *fsq.DeliveryRoot, name string) (Message, []byte, error) {
 	file, info, err := root.OpenRegularNoFollow(name)
 	if err != nil {
-		return Message{}, err
+		return Message{}, nil, err
 	}
 	defer func() { _ = file.Close() }()
 	if info.Size() > MaxMessageSize {
-		return Message{}, fmt.Errorf("%w: %d bytes", ErrMessageTooLarge, info.Size())
+		return Message{}, nil, fmt.Errorf("%w: %d bytes", ErrMessageTooLarge, info.Size())
 	}
 	data, err := io.ReadAll(io.LimitReader(file, MaxMessageSize+1))
 	if err != nil {
-		return Message{}, err
+		return Message{}, nil, err
 	}
-	return ParseMessage(data)
+	msg, perr := ParseMessage(data)
+	if perr != nil {
+		return Message{}, nil, perr
+	}
+	return msg, data, nil
 }
 
 func ReadHeaderFile(path string) (Header, error) {

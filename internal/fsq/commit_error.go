@@ -39,3 +39,24 @@ func (e *DLQTransitionError) Error() string {
 func (e *DLQTransitionError) Unwrap() error {
 	return e.Err
 }
+
+// IndeterminateQuarantineError means a permanent-claim failure could not be
+// safely resolved into a completed quarantine: the exclusive ownership rename
+// of the source (inbox/new → quarantine staging) failed for a reason that is
+// neither a clean loss (ENOENT) nor a committed move. The message is NOT
+// confirmed removed and NOT confirmed retained in a reconcilable state, so
+// the carrier must NOT report the message as consumed or permanently
+// classified (agent-message-queue-611.22.42, Pro B776-1). The source may still
+// be in inbox/new; the next tick re-evaluates it.
+type IndeterminateQuarantineError struct {
+	SourcePath string
+	Err        error
+}
+
+func (e *IndeterminateQuarantineError) Error() string {
+	return fmt.Sprintf("quarantine of %s could not be completed safely: %v; source state is indeterminate — do not report as consumed", e.SourcePath, e.Err)
+}
+
+func (e *IndeterminateQuarantineError) Unwrap() error {
+	return e.Err
+}

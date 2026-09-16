@@ -71,6 +71,13 @@ type Carrier struct {
 	// recoverDLQReceipts rebuilds it from the DLQ entries after a restart
 	// (agent-message-queue-611.22.36 packet 5b).
 	owedReceipts map[string]receipt.Receipt
+	// owedReplies are ledgered replies for DLQ'd commands whose delivery
+	// failed after the source was quarantined (611.22.42, Pro B776-3). The
+	// ledger entry (Sent:false) is the durable authority; this map is the
+	// in-session retry set, flushed at the top of every ImportOnce.
+	// recoverDLQLedgeredReplies rebuilds it from DLQ entries + the ledger
+	// after a restart, because recoverClaimed scans cur, not dlq.
+	owedReplies map[string]owedReply
 	// Warn is called for non-fatal durability failures (B12). When a
 	// CommittedDurabilityError's SyncDir retry exhausts all attempts, the
 	// message IS in the mailbox (rename committed) but its fsync is
@@ -85,6 +92,15 @@ type Carrier struct {
 type claimedEntry struct {
 	filename string // cur entry name (same as the new filename)
 	msgID    string // message header ID, for the receipt filename
+}
+
+// owedReply carries a DLQ'd command's reply origin so the ledgered reply can
+// be re-attempted (611.22.42, Pro B776-3). The ledger record itself (with
+// Sent:false and the exact reply bytes) is the durable authority; this struct
+// only captures the routing origin needed to re-resolve the destination.
+type owedReply struct {
+	cmdMsgID string
+	origin   map[string]string
 }
 
 // ReplyRouter resolves where a cross-project caller's reply must be written.
@@ -255,6 +271,12 @@ func (c *Carrier) ImportOnce() (int, error) {
 	}
 	defer func() { _ = root.Close() }()
 	err = c.flushOwedReceipts(root)
+	// B776-3: retry DLQ'd commands' ledgered replies whose delivery failed
+	// after the source was quarantined. The ledger is the durable authority;
+	// this is the in-session fast retry.
+	if rerr := c.flushOwedReplies(root); rerr != nil && err == nil {
+		err = rerr
+	}
 	// The startup sweep runs BEFORE the new scan: otherwise the first tick
 	// sweeps the very entries it just claimed and answers them twice
 	// (agent-message-queue-611.22.36 packet 6b). Steady state reconciles
@@ -263,7 +285,7 @@ func (c *Carrier) ImportOnce() (int, error) {
 	firstSweep := !c.curRecovered
 	c.mu.Unlock()
 	if firstSweep {
-		rerr := errors.Join(c.recoverCur(root), c.recoverDLQReceipts(root))
+		rerr := errors.Join(c.recoverCur(root), c.recoverQuarantineStaging(root), c.recoverDLQReceipts(root), c.recoverDLQLedgeredReplies(root))
 		if rerr != nil {
 			err = errors.Join(err, rerr)
 		} else {
@@ -620,7 +642,10 @@ func (c *Carrier) reconstructReply(cmd *protocol.Command, origin map[string]stri
 // means it was left in new for a retry (transient failure, or unparseable).
 // err is non-nil for errors that should be accumulated (D1: never aborts the scan).
 func (c *Carrier) importOne(root *fsq.DeliveryRoot, name string) (bool, error) {
-	msg, err := format.ReadMessageFileRoot(root, filepath.Join("agents", c.me, "inbox", "new", name))
+	// Read the message AND its raw bytes once: the bytes are handed to the
+	// permanent-claim DLQ envelope without re-reading (re-Lstat-ing) the
+	// source after a claim failure (agent-message-queue-611.22.42, Pro B776-1).
+	msg, rawBytes, err := format.ReadMessageFileRootBytes(root, filepath.Join("agents", c.me, "inbox", "new", name))
 	if err != nil {
 		// Unparseable serialization belongs to the DLQ path owned by amq
 		// read/drain; the endpoint leaves it in new for that tooling.
@@ -745,22 +770,120 @@ func (c *Carrier) importOne(root *fsq.DeliveryRoot, name string) (bool, error) {
 			// leaving it in new to loop forever. A clean loss (ENOENT) and
 			// a recoverable collision (ClaimCollisionError) are NOT
 			// permanent and stay on their existing paths.
+			//
+			// The quarantine transition (QuarantineClaimToDLQ) addresses the
+			// five Pro P1 blockers on the prior MoveNewToDLQ path:
+			//   - P1-1: the source is claimed into a discoverable
+			//     inbox/quarantine leaf (recovered by recoverQuarantineStaging);
+			//     all changed dirs (quarantine, new, dlq/new) are synced.
+			//   - P1-2: the claim uses claimRename (the SAME exclusive primitive
+			//     as MoveNewToCur — Windows hard-link+disposition, NOT
+			//     os.Root.Rename #485).
+			//   - B776-1: the envelope is built from the already-read rawBytes,
+			//     not a re-Lstat of the source; if the claim cannot complete,
+			//     IndeterminateQuarantineError leaves the message in new (NOT
+			//     silently "consumed").
+			//   - B776-3 (P1-4): the pending ledgered reply is registered as an
+			//     owed obligation BEFORE the fallible receipt/reply ops, and
+			//     cleared only on success — a receipt failure cannot strand it.
+			//   - B776-4 (P1-3): the transition's actual postcondition is
+			//     branched on — DLQTransitionError (SourceRetained) is checked
+			//     BEFORE CommittedDurabilityError (errors.As walks chains); a
+			//     committed move owes a receipt, a source-retained partial does
+			//     not report consumed.
 			var permanent *fsq.PermanentClaimError
 			if errors.As(err, &permanent) {
-				if _, dlqErr := fsq.MoveNewToDLQ(root, c.me, name, msg.Header.ID, "permanent claim failure", err.Error()); dlqErr != nil {
+				dlqPath, dlqErr := fsq.QuarantineClaimToDLQ(root, c.me, name, msg.Header.ID, "permanent claim failure", err.Error(), rawBytes)
+
+				// B776-1: indeterminate quarantine — the source could not be
+				// safely claimed. Do NOT report consumed; the message stays in
+				// new for the next tick to re-evaluate.
+				var indeterminate *fsq.IndeterminateQuarantineError
+				if errors.As(dlqErr, &indeterminate) {
+					return false, fmt.Errorf("quarantine %s: %w (claim error: %v)", name, dlqErr, err)
+				}
+
+				// QuarantineClaimToDLQ returns ("", nil) for a clean loss
+				// (another actor consumed the source). Nothing to receipt.
+				if dlqErr == nil && dlqPath == "" {
+					return true, nil
+				}
+
+				// P1-3 (B776-4): branch on the ACTUAL transition state, checking
+				// DLQTransitionError (SourceRetained) FIRST. errors.As walks the
+				// error chain, and a DLQTransitionError WRAPS a
+				// CommittedDurabilityError in its Err when a dlq/new sync fails —
+				// checking CommittedDurabilityError first would match that inner
+				// error and wrongly treat a source-retained partial as committed.
+				// A source-retained partial must NOT emit a terminal receipt or
+				// return nil.
+				var sourceRetained *fsq.DLQTransitionError
+				if errors.As(dlqErr, &sourceRetained) {
+					// The quarantined source is retained at the stable
+					// inbox/quarantine path; the envelope may be visible
+					// (dlqPath). Do NOT report consumed. P1-4: register BOTH the
+					// owed receipt and the owed reply atomically BEFORE any
+					// fallible operation so a later failure cannot strand either.
+					c.registerPermanentClaimObligations(msg, origin, owesReply)
 					return false, fmt.Errorf("dlq %s: %w (claim error: %v)", name, dlqErr, err)
 				}
+
+				// P1-3: a committed move (CommittedDurabilityError — envelope
+				// visible, source gone) means the transition completed; the
+				// receipt + reply ARE owed. But durability is indeterminate, so
+				// the carrier must NOT return nil (which would drop the
+				// obligations). Register both obligations before any fallible
+				// op; the receipt/reply may already be deliverable on a retry.
+				var committedMove *fsq.CommittedDurabilityError
+				if errors.As(dlqErr, &committedMove) {
+					c.registerPermanentClaimObligations(msg, origin, owesReply)
+					return false, fmt.Errorf("dlq %s: %w (claim error: %v)", name, dlqErr, err)
+				}
+
+				// Full success (dlqErr == nil, dlqPath != ""): the envelope is
+				// durable and the source is gone. P1-4: register BOTH obligations
+				// atomically BEFORE the fallible receipt emit and reply
+				// delivery; clear each ONLY when it completes, so a receipt-emit
+				// failure cannot make the reply unreachable (B776-3).
+				c.registerPermanentClaimObligations(msg, origin, owesReply)
 				rc := receipt.New(msg.Header.ID, msg.Header.Thread, msg.Header.From, c.me, receipt.StageDLQ, "permanent claim failure: "+err.Error())
 				if rerr := receipt.EmitDeliveryRoot(root, rc); rerr != nil {
-					c.mu.Lock()
-					if c.owedReceipts == nil {
-						c.owedReceipts = map[string]receipt.Receipt{}
-					}
-					c.owedReceipts[msg.Header.ID] = rc
-					c.mu.Unlock()
+					// Receipt failed; the owed reply is ALREADY registered above,
+					// so this failure does not strand it. The owed receipt stays
+					// registered (registered in registerPermanentClaimObligations)
+					// for the next tick's flushOwedReceipts. Return error so this
+					// tick retries (the message is consumed into DLQ; the next
+					// tick reconciles the owed obligations).
 					return false, fmt.Errorf("dlq receipt %s: %w", name, rerr)
 				}
-				return true, nil // DLQ'd — the message is no longer in new
+				// Receipt succeeded: clear the owed-receipt obligation.
+				c.mu.Lock()
+				delete(c.owedReceipts, msg.Header.ID)
+				c.mu.Unlock()
+
+				// B776-3: deliver the pending ledgered reply. The owed reply is
+				// already registered (above); clear it ONLY on success so a
+				// ledger-read or delivery failure retains it for the in-session
+				// retry (flushOwedReplies) and startup recovery.
+				if owesReply {
+					led, lerr := c.readLedger(msg.Header.ID)
+					if lerr != nil {
+						// Ledger read failed: the owed reply is retained (will
+						// retry). Return error so this tick retries rather than
+						// silently dropping (P1-5 sibling).
+						return false, fmt.Errorf("dlq reply %s: %w", name, lerr)
+					}
+					if led != nil && !led.Sent {
+						if derr := c.deliverLedgered(root, origin, msg.Header.ID, led); derr != nil {
+							return false, fmt.Errorf("dlq reply %s: %w", name, derr)
+						}
+					}
+					// Success (delivered or already sent): clear the owed reply.
+					c.mu.Lock()
+					delete(c.owedReplies, msg.Header.ID)
+					c.mu.Unlock()
+				}
+				return true, nil
 			}
 			return false, fmt.Errorf("claim %s: %w", name, err)
 		}
@@ -1419,6 +1542,114 @@ func (c *Carrier) flushOwedReceipts(root *fsq.DeliveryRoot) error {
 	return errors.Join(errs...)
 }
 
+// recoverQuarantineStaging completes the DLQ transition for messages that
+// were claimed into the discoverable inbox/quarantine leaf but not yet
+// enveloped/removed (611.22.42, Pro P1-1). A process exit after the exclusive
+// claim but before envelope completion used to strand the source at a random
+// .quarantine-<rand> name with no recovery. Now the source lives at the
+// stable inbox/quarantine/<filename> path and this startup sweep resumes it:
+// read the quarantined bytes, reconcile or create the DLQ envelope, remove the
+// quarantined source, sync all changed dirs, and register the owed receipt +
+// reply so the next tick delivers them. An entry whose read still fails is
+// left in quarantine for the next sweep (discoverable, not stranded).
+func (c *Carrier) recoverQuarantineStaging(root *fsq.DeliveryRoot) error {
+	quarantineDir := filepath.Join("agents", c.me, "inbox", "quarantine")
+	entries, err := root.ReadDir(quarantineDir)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	var errs []error
+	for _, e := range entries {
+		if e.IsDir() || strings.HasPrefix(e.Name(), ".") {
+			continue
+		}
+		filename := e.Name()
+		if err := fsq.ValidateMessageFilename(filename); err != nil {
+			continue
+		}
+		qPath := filepath.Join(quarantineDir, filename)
+		// Read the quarantined source bytes. A persistent metadata failure
+		// leaves the entry in quarantine for the next sweep (P1-1: do not
+		// strand — it is discoverable).
+		content, rerr := root.ReadRegularNoFollow(qPath)
+		if rerr != nil {
+			errs = append(errs, fmt.Errorf("recover quarantine %s: %w", filename, rerr))
+			continue
+		}
+		msg, perr := format.ParseMessage(content)
+		if perr != nil {
+			errs = append(errs, fmt.Errorf("recover quarantine %s: parse: %w", filename, perr))
+			continue
+		}
+		originalID := msg.Header.ID
+		// Reconcile or create the DLQ envelope.
+		existingPath, ferr := fsq.FindExistingDLQEnvelopeForRecovery(root, c.me, originalID)
+		if ferr != nil {
+			errs = append(errs, fmt.Errorf("recover quarantine %s: scan dlq: %w", filename, ferr))
+			continue
+		}
+		if existingPath == "" {
+			dlqID, gerr := fsq.GenerateDLQID()
+			if gerr != nil {
+				errs = append(errs, fmt.Errorf("recover quarantine %s: dlq id: %w", filename, gerr))
+				continue
+			}
+			envelope := fsq.DLQEnvelope{
+				Schema:        fsq.DLQSchemaVersion,
+				ID:            dlqID,
+				OriginalID:    originalID,
+				OriginalFile:  filename,
+				FailureReason: "permanent claim failure",
+				FailureDetail: "recovered from inbox/quarantine staging after restart",
+				FailureTime:   time.Now().UTC().Format(time.RFC3339),
+				RetryCount:    0,
+				SourceDir:     fsq.BoxNew,
+			}
+			data, serr := fsq.SerializeDLQMessage(envelope, content)
+			if serr != nil {
+				errs = append(errs, fmt.Errorf("recover quarantine %s: serialize: %w", filename, serr))
+				continue
+			}
+			if _, derr := fsq.DeliverToDLQ(root, c.me, envelope.ID+".md", data); derr != nil {
+				errs = append(errs, fmt.Errorf("recover quarantine %s: deliver: %w", filename, derr))
+				continue
+			}
+		}
+		// Remove the quarantined source now that the envelope is durable.
+		if rerr := fsq.RemoveQuarantineSource(root, qPath); rerr != nil && !errors.Is(rerr, fs.ErrNotExist) {
+			errs = append(errs, fmt.Errorf("recover quarantine %s: remove: %w", filename, rerr))
+			continue
+		}
+		// Sync all changed dirs (quarantine, new, dlq/new). Failures are
+		// durability concerns, not transition failures — accumulate.
+		for _, dir := range []string{
+			quarantineDir,
+			filepath.Join("agents", c.me, "inbox", "new"),
+			filepath.Join("agents", c.me, "dlq", "new"),
+		} {
+			if serr := root.SyncDir(dir); serr != nil {
+				errs = append(errs, fmt.Errorf("recover quarantine %s: sync %s: %w", filename, dir, serr))
+			}
+		}
+		// Register the owed receipt + reply for the next tick (the message is
+		// consumed into DLQ; flushOwedReceipts/flushOwedReplies deliver).
+		origin := map[string]string{
+			"carrier":       "amq",
+			"from":          msg.Header.From,
+			"thread":        msg.Header.Thread,
+			"msg_id":        msg.Header.ID,
+			"reply_to":      msg.Header.ReplyTo,
+			"reply_project": msg.Header.ReplyProject,
+			"from_project":  msg.Header.FromProject,
+		}
+		c.registerPermanentClaimObligations(msg, origin, msg.Header.ReplyTo != "")
+	}
+	return errors.Join(errs...)
+}
+
 // recoverDLQReceipts rebuilds missing DLQ receipts from the DLQ entries
 // themselves after a restart: the entry is durable and carries the original
 // message, so a DLQ entry with no receipt is a receipt we still owe.
@@ -1457,6 +1688,155 @@ func (c *Carrier) recoverDLQReceipts(root *fsq.DeliveryRoot) error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// registerPermanentClaimObligations records the DLQ receipt + ledgered reply a
+// permanent-claim quarantine owes, for the in-session retry sets, when the
+// quarantine transition could not fully complete (source-retained partial) or
+// the reply delivery failed (611.22.42, Pro B776-3/B776-4). The DLQ receipt is
+// owed because the envelope is visible; the reply is owed because the ledger
+// is Sent:false and the source is in DLQ (not cur, so recoverClaimed will not
+// re-send it).
+func (c *Carrier) registerPermanentClaimObligations(msg format.Message, origin map[string]string, owesReply bool) {
+	rc := receipt.New(msg.Header.ID, msg.Header.Thread, msg.Header.From, c.me, receipt.StageDLQ, "permanent claim failure")
+	c.mu.Lock()
+	if c.owedReceipts == nil {
+		c.owedReceipts = map[string]receipt.Receipt{}
+	}
+	c.owedReceipts[msg.Header.ID] = rc
+	if owesReply {
+		if c.owedReplies == nil {
+			c.owedReplies = map[string]owedReply{}
+		}
+		c.owedReplies[msg.Header.ID] = owedReply{cmdMsgID: msg.Header.ID, origin: cloneOrigin(origin)}
+	}
+	c.mu.Unlock()
+}
+
+// flushOwedReplies retries ledgered replies for DLQ'd commands whose delivery
+// failed after the source was quarantined (611.22.42, Pro B776-3). The ledger
+// is the durable authority (Sent:false + exact bytes); this is the in-session
+// retry.
+func (c *Carrier) flushOwedReplies(root *fsq.DeliveryRoot) error {
+	c.mu.Lock()
+	owed := make(map[string]owedReply, len(c.owedReplies))
+	for k, v := range c.owedReplies {
+		owed[k] = v
+	}
+	c.mu.Unlock()
+	var errs []error
+	for id, or := range owed {
+		led, lerr := c.readLedger(id)
+		if lerr != nil {
+			errs = append(errs, fmt.Errorf("owed dlq reply %s: %w", id, lerr))
+			continue
+		}
+		if led == nil || led.Sent {
+			c.mu.Lock()
+			delete(c.owedReplies, id)
+			c.mu.Unlock()
+			continue
+		}
+		if derr := c.deliverLedgered(root, or.origin, id, led); derr != nil {
+			errs = append(errs, fmt.Errorf("owed dlq reply %s: %w", id, derr))
+			continue
+		}
+		c.mu.Lock()
+		delete(c.owedReplies, id)
+		c.mu.Unlock()
+	}
+	return errors.Join(errs...)
+}
+
+// recoverDLQLedgeredReplies rebuilds the owedReplies retry set after a restart
+// by scanning DLQ entries and reading each command's ledger (611.22.42, Pro
+// B776-3). recoverClaimed scans cur, not dlq, so a DLQ'd command whose reply
+// was never delivered would otherwise be stranded forever. The ledger is the
+// authority; this only populates the in-session retry set, then flushOwedReplies
+// delivers.
+//
+// P1-5 (Pro round-2): a readLedger failure used to be silently dropped
+// (continue + return nil), so ImportOnce set curRecovered=true and the
+// temporarily-unreadable Sent:false ledger was never retried during that
+// process. Now a readLedger failure retains the ID into owedReplies (with the
+// origin reconstructed from the DLQ envelope, so flushOwedReplies can retry)
+// AND accumulates an error so the startup sweep is NOT marked complete.
+func (c *Carrier) recoverDLQLedgeredReplies(root *fsq.DeliveryRoot) error {
+	var errs []error
+	for _, box := range []string{fsq.BoxNew, fsq.BoxCur} {
+		dir := filepath.Join("agents", c.me, "dlq", box)
+		entries, err := root.ReadDir(dir)
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
+			return err
+		}
+		for _, e := range entries {
+			if e.IsDir() || strings.HasPrefix(e.Name(), ".") {
+				continue
+			}
+			env, original, rerr := fsq.ReadDLQEnvelope(root, filepath.Join(dir, e.Name()))
+			if rerr != nil || env == nil || env.OriginalID == "" {
+				continue
+			}
+			// Reconstruct the reply origin from the DLQ envelope's preserved
+			// original command bytes, so flushOwedReplies can deliver even
+			// when the ledger read later fails.
+			var origin map[string]string
+			if om, perr := format.ParseMessage(original); perr == nil {
+				origin = map[string]string{
+					"carrier":       "amq",
+					"from":          om.Header.From,
+					"thread":        om.Header.Thread,
+					"msg_id":        om.Header.ID,
+					"reply_to":      om.Header.ReplyTo,
+					"reply_project": om.Header.ReplyProject,
+					"from_project":  om.Header.FromProject,
+				}
+			}
+			led, lerr := c.readLedger(env.OriginalID)
+			if lerr != nil {
+				// P1-5: retain the failed ID for retry. Register into owedReplies
+				// (with the reconstructed origin) so flushOwedReplies retries the
+				// readLedger; accumulate an error so ImportOnce does NOT mark
+				// curRecovered=true (the sweep is retried next tick).
+				c.mu.Lock()
+				if c.owedReplies == nil {
+					c.owedReplies = map[string]owedReply{}
+				}
+				if _, exists := c.owedReplies[env.OriginalID]; !exists {
+					c.owedReplies[env.OriginalID] = owedReply{cmdMsgID: env.OriginalID, origin: origin}
+				}
+				c.mu.Unlock()
+				errs = append(errs, fmt.Errorf("recover dlq ledgered reply %s: %w", env.OriginalID, lerr))
+				continue
+			}
+			if led == nil || led.Sent {
+				continue
+			}
+			c.mu.Lock()
+				if c.owedReplies == nil {
+					c.owedReplies = map[string]owedReply{}
+				}
+				if _, exists := c.owedReplies[env.OriginalID]; !exists {
+					c.owedReplies[env.OriginalID] = owedReply{cmdMsgID: env.OriginalID, origin: origin}
+				}
+				c.mu.Unlock()
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func cloneOrigin(o map[string]string) map[string]string {
+	if o == nil {
+		return nil
+	}
+	c := make(map[string]string, len(o))
+	for k, v := range o {
+		c[k] = v
+	}
+	return c
 }
 
 func refsFrom(origin map[string]string) []string {

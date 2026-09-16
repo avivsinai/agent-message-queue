@@ -923,7 +923,12 @@ func (r *DeliveryRoot) OpenRegularNoFollow(name string) (*os.File, os.FileInfo, 
 	if err := r.VerifyBase(); err != nil {
 		return nil, nil, err
 	}
-	before, err := r.root.Lstat(name)
+	// 611.22.42 (Pro B776-1): route the initial metadata inspection through
+	// r.lstat so a persistent source-metadata fault (installed on the root) is
+	// observed here, not bypassed. The command read happens through this path;
+	// a regression that faults subsequent inspection must fault the actual
+	// read boundary, not an unprotected Lstat.
+	before, err := r.lstat(name)
 	if err != nil {
 		return nil, nil, err
 	}
