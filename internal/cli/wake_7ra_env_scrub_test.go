@@ -29,6 +29,9 @@ func Test7raWakeChildEnvScrubbed(t *testing.T) {
 	parent := []string{
 		"PATH=/usr/bin:/bin",
 		"HOME=/tmp/fake-home",
+		"XDG_STATE_HOME=/tmp/xdg-state",
+		"TERM_PROGRAM=ghostty",
+		"CMUX_SURFACE_ID=abc123",
 		"SECRET_TOKEN=super-secret-value",
 		"AWS_SECRET_ACCESS_KEY=leak-me-not",
 		"SHLVL=2",
@@ -56,7 +59,7 @@ func Test7raWakeChildEnvScrubbed(t *testing.T) {
 		}
 	}
 	// Required OS vars + AMQ-internal vars must survive.
-	for _, keep := range []string{"PATH", "HOME", "AM_ROOT", "AM_ME", "AMQ_WAKE_OWNER", "AMQ_GLOBAL_ROOT"} {
+	for _, keep := range []string{"PATH", "HOME", "XDG_STATE_HOME", "TERM_PROGRAM", "CMUX_SURFACE_ID", "AM_ROOT", "AM_ME", "AMQ_WAKE_OWNER", "AMQ_GLOBAL_ROOT"} {
 		if _, ok := scrubbedMap[keep]; !ok {
 			t.Fatalf("scrubWakeChildEnv dropped required env var %s (7ra): must be retained on the allowlist", keep)
 		}

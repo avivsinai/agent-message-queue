@@ -4290,16 +4290,22 @@ func observeLiveWakeOwner(owner wakeOwner, context string) (wakeOwnerObservation
 // the parent shell env (secrets, tokens, shell-specific vars) is dropped so a
 // compromised or buggy injector child cannot exfiltrate it.
 //
-// PATH and HOME are required OS vars: PATH for exec.LookPath (self-upgrade,
-// restart preflight, recursive amq spawn) and HOME for os.UserHomeDir config
-// resolution. All AMQ-internal vars are matched by the AMQ_ / AM_ prefixes
+// Required OS vars: PATH for exec.LookPath (self-upgrade, restart preflight,
+// recursive amq spawn), HOME for os.UserHomeDir config resolution,
+// XDG_STATE_HOME for launch state directory resolution (wake-stages,
+// self-upgrade staging), TERM_PROGRAM for terminal detection (wake injection),
+// and CMUX_SURFACE_ID for cmux surface detection (launch backend).
+// All AMQ-internal vars are matched by the AMQ_ / AM_ prefixes
 // (session/identity/state, no-update-check, test re-exec helpers) so future
 // AMQ vars are covered without enumerating each one.
 var wakeChildEnvAllowlistPrefixes = []string{"AMQ_", "AM_"}
 
 var wakeChildEnvAllowlist = map[string]bool{
-	"PATH": true,
-	"HOME": true,
+	"PATH":            true,
+	"HOME":            true,
+	"XDG_STATE_HOME":  true,
+	"TERM_PROGRAM":    true,
+	"CMUX_SURFACE_ID": true,
 }
 
 // scrubWakeChildEnv filters a parent env slice to the wake-child allowlist
