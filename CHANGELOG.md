@@ -8,6 +8,15 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.78.7](https://github.com/avivsinai/agent-message-queue/compare/v0.78.6...v0.78.7) (2026-09-16)
+
+
+### Bug Fixes
+
+* **amqio:** curtail full cur resweep on persistent read failures (611.22.46) ([#783](https://github.com/avivsinai/agent-message-queue/issues/783)) ([92b711c](https://github.com/avivsinai/agent-message-queue/commit/92b711cda8edadf919188bcec16d1628f24679d8))
+* **core:** gate Reconcile/Tick on lifecycle state (611.22.47) ([#782](https://github.com/avivsinai/agent-message-queue/issues/782)) ([86ee4b9](https://github.com/avivsinai/agent-message-queue/commit/86ee4b99f17e61f4a8d439c2e3315556310b0fcb))
+* **core:** move carrier.Publish outside e.mu (611.22.48) ([#784](https://github.com/avivsinai/agent-message-queue/issues/784)) ([2a5e583](https://github.com/avivsinai/agent-message-queue/commit/2a5e58363df20b87925e9765d5be8dee94236703))
+
 ## [0.78.6](https://github.com/avivsinai/agent-message-queue/compare/v0.78.5...v0.78.6) (2026-09-16)
 
 
