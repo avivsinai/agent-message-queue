@@ -26,6 +26,7 @@ type wakeConfig struct {
 	injectArgs                    []string
 	wakeOwner                     *wakeOwner
 	injectTimeout                 time.Duration
+	injectViaHook                 func(text string) (stderr string, runErr error) // test-only: deterministic inject bypass
 	bell                          bool
 	debounce                      time.Duration
 	previewLen                    int
@@ -1616,7 +1617,7 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 	// Provider busy/transition is AMQ_INJECT_PROGRESS=deferred; post-dispatch
 	// ambiguity is AMQ_INJECT_PROGRESS=uncertain. Neither may replay the
 	// payload.
-	if cfg.injectVia != "" {
+	if cfg.injectVia != "" || cfg.injectViaHook != nil {
 		if cfg.skipExternalInjector {
 			return deliverWakeAttentionOnly(cfg, notice.output)
 		}
@@ -2410,6 +2411,41 @@ func waitForInputQueueDrain(
 func injectVia(cfg *wakeConfig, text string) error {
 	if cfg.debug {
 		_ = writeWakeDiagnostic(cfg, "amq wake [debug]: inject-via mode, running: %s %s <text>\n", cfg.injectVia, strings.Join(cfg.injectArgs, " "))
+	}
+
+	// Test-only deterministic hook: bypasses subprocess exec and timeout so
+	// the observed behavior (progress classification, attention fallback) is
+	// verified without a wall-clock deadline selecting the outcome.
+	if cfg.injectViaHook != nil {
+		stderr, runErr := cfg.injectViaHook(text)
+		progress := parseWakeInjectorProgress(stderr)
+		if runErr != nil {
+			if progress == wakeInjectorProgressUncertain {
+				return &wakeTerminalProgressUncertainError{err: runErr}
+			}
+			if progress == wakeInjectorProgressDeferred {
+				return &wakeInjectorDeferredError{err: runErr}
+			}
+			return runErr
+		}
+		switch progress {
+		case wakeInjectorProgressAccepted:
+			return nil
+		case wakeInjectorProgressUncertain:
+			return &wakeTerminalProgressUncertainError{
+				err: errors.New("inject-via declared uncertain progress"),
+			}
+		case wakeInjectorProgressDeferred:
+			return &wakeTerminalProgressUncertainError{
+				err: errors.New("inject-via declared deferred progress with exit status 0"),
+			}
+		default:
+			return &wakeInjectorLegacyError{
+				err: &wakeTerminalProgressUncertainError{
+					err: errors.New("inject-via exited 0 without AMQ_INJECT_PROGRESS=accepted"),
+				},
+			}
+		}
 	}
 
 	executable := strings.TrimSpace(cfg.injectVia)
