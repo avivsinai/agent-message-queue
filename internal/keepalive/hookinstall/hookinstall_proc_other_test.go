@@ -27,3 +27,7 @@ func killReattachGroup(pid int) error {
 	}
 	return p.Kill()
 }
+
+// killOrphanedReattach is a no-op on non-Unix platforms; Windows does not
+// have process groups and exec.CommandContext handles tree cleanup.
+func killOrphanedReattach(_ int) {}

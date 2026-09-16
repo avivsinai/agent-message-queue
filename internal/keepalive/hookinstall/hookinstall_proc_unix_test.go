@@ -3,7 +3,10 @@
 package hookinstall
 
 import (
+	"fmt"
 	"os/exec"
+	"strconv"
+	"strings"
 	"syscall"
 )
 
@@ -25,4 +28,24 @@ func killProcessGroup(pid int) error {
 // This is a bounded single-syscall operation — no recursive scanner.
 func killReattachGroup(pid int) error {
 	return syscall.Kill(-pid, syscall.SIGKILL)
+}
+
+// killOrphanedReattach is a last-resort fallback for the window where the
+// reattach subshell has started (set -m gave it its own group) but the
+// fixture binary hasn't published its PID yet. It runs a single-level
+// (non-recursive) pgrep -P for direct children of the outer bash PID and
+// kills each child's process group. This is bounded: one exec.Command, no
+// recursion, and only runs on the failure path when fixture-owned identity
+// is unavailable.
+func killOrphanedReattach(outerPid int) {
+	out, err := exec.Command("pgrep", "-P", strconv.Itoa(outerPid)).Output()
+	if err != nil {
+		return
+	}
+	for _, line := range strings.Fields(string(out)) {
+		var pid int
+		if _, err := fmt.Sscanf(line, "%d", &pid); err == nil && pid > 0 {
+			_ = syscall.Kill(-pid, syscall.SIGKILL)
+		}
+	}
 }
