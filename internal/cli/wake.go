@@ -77,6 +77,13 @@ type wakeConfig struct {
 	onPrepared                    func(wakeAdmissionWatcher) error
 	retainedAgent                 wakeRetainedAgent
 	retainedInbox                 wakeInboxReader
+	// retainedInboxRebindable marks whether cfg.retainedInbox is the
+	// ordinary-recoverable inbox (the loop can rearm it via rebindWatcher
+	// after a remove/recreate) or a caller-provided retained inbox that
+	// cannot be rebound. notifyNewMessages uses this to route canonical
+	// authority loss: rebindable -> ordinary scan retry (rebindWatcher
+	// rearms); !rebindable -> fatal ownership-loss exit (codex #788).
+	retainedInboxRebindable       bool
 	touchPresence                 func() error
 	maintenanceTicks              <-chan time.Time
 	maintenanceOutputs            []*os.File
@@ -185,6 +192,23 @@ func (err *wakeInboxScanError) Error() string {
 
 func (err *wakeInboxScanError) Unwrap() error {
 	return err.err
+}
+
+// wakeOwnershipLossError signals the retained wake inbox/agent directory no
+// longer matches the canonical namespace (a directory swap detached it).
+// classifyWakeFailure routes it as wakeFailureFatal so the caller exits /
+// re-admits instead of looping in ordinary scan retry. Defined here
+// (platform-agnostic) so notifyNewMessages can return it on every GOOS.
+type wakeOwnershipLossError struct {
+	reason string
+}
+
+func (err *wakeOwnershipLossError) Error() string {
+	return err.reason
+}
+
+func newWakeOwnershipLoss(reason string) error {
+	return &wakeOwnershipLossError{reason: reason}
 }
 
 type wakeTerminalPartialProgressError struct {
@@ -465,14 +489,34 @@ func notifyNewMessages(cfg *wakeConfig) error {
 	// byc: before any authoritative read from the retained inbox, revalidate
 	// it is still the canonical namespace. A directory swap after admission
 	// leaves the retained FD pointing at the detached OLD directory; reading
-	// it would silently miss messages that land in the canonical inbox. Refuse
-	// rather than continuing on a detached namespace (the caller re-admits).
+	// it would silently miss messages that land in the canonical inbox.
+	//
+	// codex #788: route canonical-authority-loss by rebindability.
+	// - Rebindable (ordinary-recoverable inbox): the loop can rearm it via
+	//   rebindWatcher after a remove/recreate. Return wakeInboxScanError so
+	//   the caller's ordinary scan-retry runs and rebindWatcher rearms the
+	//   watcher on the new canonical inbox. Do NOT fatal-exit — a legitimate
+	//   remove/recreate is a rearm, not a fatal swap.
+	// - !Rebindable (caller-provided retained inbox that cannot be rebound):
+	//   return a FATAL ownership-loss error (NOT wakeInboxScanError) so the
+	//   caller's errors.As(scanErr) check does NOT match and it falls through
+	//   to classifyWakeFailure -> wakeFailureFatal (terminal exit), mirroring
+	//   rebindWatcher's handling. Otherwise the caller would loop forever on
+	//   the same detached inbox.
+	// Ordinary transient read failures (EIO/ESTALE on ReadDir below) always
+	// remain wakeInboxScanError and retry.
 	if cfg.retainedInbox != nil {
 		if validator, ok := cfg.retainedInbox.(interface{ ValidateCanonical() error }); ok {
 			if err := validator.ValidateCanonical(); err != nil {
-				return &wakeInboxScanError{
-					err: fmt.Errorf("wake inbox %s no longer matches retained authority: %w", inboxNew, err),
+				if cfg.retainedInboxRebindable {
+					return &wakeInboxScanError{
+						err: fmt.Errorf("wake inbox %s no longer matches retained authority: %w", inboxNew, err),
+					}
 				}
+				return newWakeOwnershipLoss(fmt.Sprintf(
+					"wake inbox %s no longer matches retained authority: %v",
+					inboxNew, err,
+				))
 			}
 		}
 	}

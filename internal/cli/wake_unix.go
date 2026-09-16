@@ -3034,10 +3034,6 @@ const (
 	wakeFailureFatal
 )
 
-type wakeOwnershipLossError struct {
-	reason string
-}
-
 type wakeUnreadableGenerationNoticeState struct {
 	consecutiveFailures uint
 	statusActive        bool
@@ -3051,14 +3047,6 @@ func (state *wakeUnreadableGenerationNoticeState) resetWithoutStatusWrite() {
 		return
 	}
 	*state = wakeUnreadableGenerationNoticeState{}
-}
-
-func (err *wakeOwnershipLossError) Error() string {
-	return err.reason
-}
-
-func newWakeOwnershipLoss(reason string) error {
-	return &wakeOwnershipLossError{reason: reason}
 }
 
 func classifyWakeFailure(err error) wakeFailureDisposition {
@@ -3319,6 +3307,7 @@ func runWakeLoop(cfg wakeConfig) error {
 			ordinaryInboxDir = inboxDir
 			watcher = nextWatcher
 			cfg.retainedInbox = inboxDir
+			cfg.retainedInboxRebindable = true
 			return nil
 		}
 		if retained, ok := cfg.retainedInbox.(*wakeInboxDir); ok {
@@ -3464,6 +3453,7 @@ func runWakeLoop(cfg wakeConfig) error {
 				_ = ordinaryInboxDir.Close()
 				ordinaryInboxDir = nil
 				cfg.retainedInbox = nil
+				cfg.retainedInboxRebindable = false
 			}
 			_ = writeWakeDiagnostic(
 				&cfg,
@@ -3637,6 +3627,7 @@ func runWakeLoop(cfg wakeConfig) error {
 			_ = ordinaryInboxDir.Close()
 			ordinaryInboxDir = nil
 			cfg.retainedInbox = nil
+			cfg.retainedInboxRebindable = false
 		}
 		pendingNotify = true
 		clearTerminalAuthorityRetry()
@@ -3684,6 +3675,7 @@ func runWakeLoop(cfg wakeConfig) error {
 			ordinaryInboxDir = inboxDir
 			watcher = nextWatcher
 			cfg.retainedInbox = inboxDir
+			cfg.retainedInboxRebindable = true
 			return true, nil
 		}
 

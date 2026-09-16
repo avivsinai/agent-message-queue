@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -44,9 +45,10 @@ func TestBycNotifyNewMessagesRefusesDetachedInbox(t *testing.T) {
 	defer func() { _ = inboxDir.Close() }()
 
 	cfg := &wakeConfig{
-		root:          root,
-		me:            "codex",
-		retainedInbox: inboxDir,
+		root:                    root,
+		me:                      "codex",
+		retainedInbox:           inboxDir,
+		retainedInboxRebindable: false,
 	}
 
 	// Sanity: before the swap, notifyNewMessages reads the canonical inbox
@@ -69,8 +71,33 @@ func TestBycNotifyNewMessagesRefusesDetachedInbox(t *testing.T) {
 
 	// notifyNewMessages must REFUSE: the retained inbox no longer matches the
 	// canonical namespace. It must NOT silently read the detached OLD inbox.
+	//
+	// codex #788: the refusal must route through the CALLER correctly. The
+	// caller (wake_unix.go runWakeLoop) checks errors.As(err, &scanErr) FIRST:
+	// if the swap error is a *wakeInboxScanError, the caller schedules an
+	// ordinary scan retry and returns nil — looping forever on the same
+	// detached inbox. The swap error must NOT be a *wakeInboxScanError, so it
+	// falls through to classifyWakeFailure, which must return wakeFailureFatal
+	// (terminal exit / re-admission), mirroring rebindWatcher's handling of
+	// retained authority loss. Exercise the caller's actual routing, not just
+	// that notifyNewMessages returned non-nil.
 	err = notifyNewMessages(cfg)
 	if err == nil {
 		t.Fatal("notifyNewMessages read the detached inbox without error (byc: must revalidate canonical identity before ReadDir and refuse on a swap)")
+	}
+	// (1) Must NOT match *wakeInboxScanError — otherwise the caller's ordinary
+	// scan-retry loop keeps re-validating the same detached inbox forever.
+	var scanErr *wakeInboxScanError
+	if errors.As(err, &scanErr) {
+		t.Fatalf("notifyNewMessages swap error must NOT be *wakeInboxScanError (codex #788): the caller would route it to ordinary scan retry and loop on the detached inbox; got %T: %v", err, err)
+	}
+	// (2) Must be a fatal ownership-loss error so classifyWakeFailure routes
+	// it to terminal exit, not ordinary retry.
+	var ownershipLoss *wakeOwnershipLossError
+	if !errors.As(err, &ownershipLoss) {
+		t.Fatalf("notifyNewMessages swap error must wrap *wakeOwnershipLossError (fatal) so the caller exits instead of ordinary scan-retry; got %T: %v", err, err)
+	}
+	if got := classifyWakeFailure(err); got != wakeFailureFatal {
+		t.Fatalf("classifyWakeFailure(swap error) = %v, want wakeFailureFatal (byc: canonical authority loss must terminate, not loop in ordinary scan retry)", got)
 	}
 }
