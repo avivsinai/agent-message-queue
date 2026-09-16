@@ -309,7 +309,12 @@ func resolveSessionRoot(base, session string) (string, error) {
 		if os.IsNotExist(err) {
 			return "", NotFoundError("session %q not found at %s", session, target)
 		}
-		return "", ContextMismatchError("cannot inspect session %q: %v", session, err)
+		// 611.22.42: a non-ENOENT Lstat on the session directory (EACCES/EIO/ESTALE)
+		// is transient, not a permanent context mismatch. Classify it as
+		// ErrPeerRootUnreachable so retryableRouteError rescues it and the carrier
+		// retries instead of DLQing the command. Actual symlink, non-directory, and
+		// containment violations (below) remain ContextMismatchError.
+		return "", fmt.Errorf("%w: cannot inspect session %q: %v", ErrPeerRootUnreachable, session, err)
 	}
 	if !entry.IsDir() || entry.Mode()&os.ModeSymlink != 0 {
 		return "", ContextMismatchError("session %q is not a direct directory under base", session)
