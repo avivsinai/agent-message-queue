@@ -243,6 +243,25 @@ func (e *Endpoint) releaseInFlight() {
 	e.mu.Unlock()
 }
 
+// beginReconcile gates Reconcile/Tick on the lifecycle state and registers the
+// sweep as in-flight in ONE critical section, mirroring Handle's entry gate
+// (611.22.47). Without this, a Tick racing Close could start new native work
+// (admitDeferred -> att.Submit, reconcileCancelRetry -> att.CancelExact,
+// ack replay -> att.AcknowledgeResult) after the endpoint began draining:
+// Close waited only on Handle's inFlight, so shutdown began work it would not
+// finish. Now Tick refuses to start once draining has begun, and when it does
+// start it is counted in inFlight so Close's drain wait bounds it. The caller
+// MUST defer releaseInFlight when ok is true.
+func (e *Endpoint) beginReconcile() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.state != stateAccepting {
+		return false
+	}
+	e.inFlight++
+	return true
+}
+
 // InFlight returns the current number of in-flight handlers. Test seam for
 // observing the drain state without a sleep.
 func (e *Endpoint) InFlight() int {
@@ -1407,6 +1426,13 @@ func (e *Endpoint) commitLocked(rec *requests.Record, t *target) (string, error)
 // Native attachment calls happen without the endpoint lock held; a single
 // poisoned record is reported, never allowed to abort the whole pass.
 func (e *Endpoint) Reconcile() error {
+	// 611.22.47: gate Reconcile/Tick on lifecycle state and register the
+	// sweep as in-flight so Close's drain wait bounds it. A Tick that arrives
+	// once draining has begun is skipped (no new native work during shutdown).
+	if !e.beginReconcile() {
+		return nil
+	}
+	defer e.releaseInFlight()
 	e.mu.Lock()
 	recs, err := e.store.List()
 	e.mu.Unlock()
