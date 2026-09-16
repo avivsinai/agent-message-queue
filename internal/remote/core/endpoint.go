@@ -1051,12 +1051,13 @@ func (e *Endpoint) onNative(targetID string, ev NativeEvent) {
 		e.mu.Unlock()
 		return
 	}
-	// B14a: publish stays under e.mu (it writes store metadata that Close
-	// serializes against via this mutex); only the native ack — the slow,
-	// untrusted call — moves OUTSIDE e.mu. The durable ack memo
-	// (commitLocked) has already made the intent replayable, so a wedged
-	// attachment ack must not stall command handling, and a crash mid-ack is
-	// recoverable via replayTerminalAck.
+	// The native ack (slow, untrusted call) runs OUTSIDE e.mu. The durable
+	// ack memo (commitLocked) has already made the intent replayable, so a
+	// wedged attachment ack must not stall command handling, and a crash
+	// mid-ack is recoverable via replayTerminalAck. Publication itself also
+	// runs outside e.mu (611.22.48): publishLocked claims the visible-revision
+	// slot under the lock, snapshots, releases e.mu for the carrier publish
+	// (maildir open + fsync), then re-acquires for MarkPublished.
 	var ackAtt Attachment
 	if ackDigest != "" {
 		if t, ok := e.targets[targetID]; ok {
