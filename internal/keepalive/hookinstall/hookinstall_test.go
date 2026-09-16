@@ -348,28 +348,39 @@ func TestEmbeddedScriptMatchesRepositoryHook(t *testing.T) {
 	}
 }
 
+// Narrowed scope (bead 9xv): the one test with an observed failure signature
+// ('signal: killed', reproduced 2026-09-06 at b4f3897) no longer runs the
+// reattach/watchdog lifecycle. It now exercises production normalization on the
+// no-target early-return path (hookinstall.go exits before set -m creates the
+// reattach process group). This reduces the test's lifecycle surface; it does
+// not establish that the original failure was spawn-latency-driven or that any
+// failure is now impossible. End-to-end timeout termination remains covered by
+// TestSessionStartWatchdogSleepsNormalizedTimeout and
+// TestSessionStartTimeoutKillsReattachProcessGroup.
 func TestSessionStartScriptNormalizesInvalidTimeoutAndReturns(t *testing.T) {
 	dir := t.TempDir()
 	scriptPath := writeSessionStartScript(t, dir)
-	sleepLog := filepath.Join(dir, "sleep.log")
-	sleepPath := writeExecutableBody(t, filepath.Join(dir, "sleep"), `#!/bin/sh
-printf '%s\n' "$1" >> "$AMQ_KEEPALIVE_SLEEP_LOG"
-`)
-	binaryPath := writeExecutableBody(t, filepath.Join(dir, "amq-keepalive"), "#!/bin/sh\nsleep 30\n")
 	logPath := filepath.Join(dir, "session-start.log")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "bash", scriptPath)
-	cmd.Env = append(os.Environ(),
-		"AMQ_KEEPALIVE_BIN="+binaryPath,
+	// Clear every variable that could inject a target or disable the hook, and
+	// pin the adapter to ghostty so the cmux surface defaulting at
+	// hookinstall.go (CMUX_SURFACE_ID) cannot resurrect a target.
+	cmd.Env = append(withoutEnv(os.Environ(),
+		"AMQ_KEEPALIVE_TARGET",
+		"AMQ_KEEPALIVE_ADAPTER",
+		"AMQ_KEEPALIVE_DISABLED",
+		"CMUX_SURFACE_ID",
+	),
+		"AMQ_KEEPALIVE_ADAPTER=ghostty",
+		"AMQ_KEEPALIVE_DISABLED=0",
 		"AMQ_KEEPALIVE_LOG="+logPath,
-		"AMQ_KEEPALIVE_TARGET=ghostty:terminal:BEDE3893-CE56-4309-8AEC-3D930F11225D",
 		"AMQ_KEEPALIVE_TIMEOUT_SECONDS=0",
 		"AMQ_KEEPALIVE_DEFAULT_TIMEOUT_SECONDS=1",
 		"AMQ_KEEPALIVE_STDIN_TIMEOUT_SECONDS=1",
-		"AMQ_KEEPALIVE_SLEEP="+sleepPath,
-		"AMQ_KEEPALIVE_SLEEP_LOG="+sleepLog,
+		"AMQ_KEEPALIVE_WAKE_TIMEOUT_MILLISECONDS=1000",
 	)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -390,15 +401,13 @@ printf '%s\n' "$1" >> "$AMQ_KEEPALIVE_SLEEP_LOG"
 	if !strings.Contains(logText, "invalid timeout 0; using 1s") {
 		t.Fatalf("log missing invalid timeout normalization:\n%s", logText)
 	}
-	if !strings.Contains(logText, "reattach timed out after 1s") {
-		t.Fatalf("log missing timeout:\n%s", logText)
+	// The clamp proves the normalized outer timeout (1000ms) is consumed by the
+	// wake-timeout derivation, not just printed.
+	if !strings.Contains(logText, "wake timeout 1000ms must be shorter than outer 1000ms; using 500ms") {
+		t.Fatalf("log missing wake timeout clamp against normalized outer:\n%s", logText)
 	}
-	sleepData, err := os.ReadFile(sleepLog)
-	if err != nil {
-		t.Fatalf("read sleep log: %v", err)
-	}
-	if got := strings.Split(strings.TrimSpace(string(sleepData)), "\n")[0]; got != "1" {
-		t.Fatalf("watchdog sleep arg = %q, want normalized 1s", sleepData)
+	if !strings.Contains(logText, "skip: no exact terminal target adapter=ghostty") {
+		t.Fatalf("log missing no-target skip:\n%s", logText)
 	}
 }
 
