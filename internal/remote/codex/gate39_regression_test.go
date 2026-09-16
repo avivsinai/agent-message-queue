@@ -22,7 +22,11 @@ import (
 // via the status) so the thread is usable again.
 func TestGate3NotLoadedLeavesActiveTurnWedged(t *testing.T) {
 	sock, srv := startFakeAppServer(t)
-	att, err := Attach(sock, "t1", WithConfirmTimeout(200*time.Millisecond))
+	// No shortened confirm timeout: every submit below is confirmed
+	// explicitly, so nothing depends on the wall clock
+	// (agent-message-queue-611.22.53: the 200ms budget failed on a loaded
+	// macOS runner, ci run 35011905230).
+	att, err := Attach(sock, "t1")
 	if err != nil {
 		t.Fatalf("attach: %v", err)
 	}
@@ -34,17 +38,24 @@ func TestGate3NotLoadedLeavesActiveTurnWedged(t *testing.T) {
 	key := requests.Key{CreatorHost: "local", TargetID: s.TargetID, RequestID: "11111111-1111-4111-8111-111111111g39"}
 	epoch := s.Epoch
 
-	// Start a turn so the attachment holds an activeTurn + busy status.
+	// Start a turn so the attachment holds an activeTurn + busy status. The
+	// turn is confirmed by our own userMessage item, as the real app-server
+	// would confirm it.
 	srv.setTurnStartDelay(func() {
 		srv.notify(t, "turn/started", `{"threadId":"t1","turn":{"id":"turnA"}}`)
+		srv.notify(t, "item/started", `{"threadId":"t1","turnId":"turnA","item":{"type":"userMessage","id":"iA","clientId":"`+clientIDFor(key)+`","content":[]}}`)
 	})
 	admCh := make(chan error, 1)
 	go func() {
 		_, err := att.Submit(core.BoundRequest{Key: key, Epoch: epoch, Input: protocol.SubmitInput{Text: "say PONG"}})
 		admCh <- err
 	}()
+	<-srv.calls // turn/start for key; drained so the later read is key2's
 	select {
-	case <-admCh:
+	case err := <-admCh:
+		if err != nil {
+			t.Fatalf("first submit: %v", err)
+		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("first submit did not return")
 	}
@@ -113,7 +124,9 @@ func TestGate3NotLoadedLeavesActiveTurnWedged(t *testing.T) {
 // not make Submit issue turn/start into a live turn.
 func TestGate3UnrecognisedStatusKeepsActiveTurn(t *testing.T) {
 	sock, srv := startFakeAppServer(t)
-	att, err := Attach(sock, "t1", WithConfirmTimeout(200*time.Millisecond))
+	// Confirmed explicitly below; no wall-clock confirm budget
+	// (agent-message-queue-611.22.53).
+	att, err := Attach(sock, "t1")
 	if err != nil {
 		t.Fatalf("attach: %v", err)
 	}
@@ -127,14 +140,19 @@ func TestGate3UnrecognisedStatusKeepsActiveTurn(t *testing.T) {
 
 	srv.setTurnStartDelay(func() {
 		srv.notify(t, "turn/started", `{"threadId":"t1","turn":{"id":"turnLIVE"}}`)
+		srv.notify(t, "item/started", `{"threadId":"t1","turnId":"turnLIVE","item":{"type":"userMessage","id":"iL","clientId":"`+clientIDFor(key)+`","content":[]}}`)
 	})
 	admCh := make(chan error, 1)
 	go func() {
 		_, err := att.Submit(core.BoundRequest{Key: key, Epoch: epoch, Input: protocol.SubmitInput{Text: "work"}})
 		admCh <- err
 	}()
+	<-srv.calls // turn/start for key
 	select {
-	case <-admCh:
+	case err := <-admCh:
+		if err != nil {
+			t.Fatalf("submit: %v", err)
+		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("submit did not return")
 	}
