@@ -63,6 +63,12 @@ type ErrorBody struct {
 	Message string `json:"message"`
 }
 
+// ErrSocketPathTooLong is returned by Listen when the computed socket path
+// would exceed the Unix sun_path limit, which would cause bind to fail with
+// a bare EINVAL (611.23). The limit is platform-specific:// maxUnixSocketPathLen
+// (108 on Linux, 104 on macOS) is defined in platform-tagged files.
+var ErrSocketPathTooLong = errors.New("socket path exceeds unix sun_path limit")
+
 // SocketPath returns the endpoint socket for a state directory. Unix socket
 // paths are short-lived and length-limited, so the socket lives beside the
 // state directory's lock rather than deep inside a mailbox tree.
@@ -81,6 +87,11 @@ type Server struct {
 // from a dead endpoint is removed only after a connect attempt fails.
 func Listen(stateDir string, ep *core.Endpoint) (*Server, error) {
 	path := SocketPath(stateDir)
+	if len(path) >= maxUnixSocketPathLen {
+		usable := maxUnixSocketPathLen - 1 // NUL terminator
+		return nil, fmt.Errorf("%w: path is %d bytes, max usable is %d (suffix \"endpoint.sock\" is %d bytes); use a shorter --root (or AM_ROOT) so the state directory is closer to the filesystem root",
+			ErrSocketPathTooLong, len(path), usable, len("endpoint.sock"))
+	}
 	if _, err := os.Stat(path); err == nil {
 		conn, err := net.DialTimeout("unix", path, 200*time.Millisecond)
 		if err == nil {
