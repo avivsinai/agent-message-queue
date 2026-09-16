@@ -642,14 +642,7 @@ func removeAuthoritativeWakeClaimAt(
 	}
 	if detachedValidationErr == nil {
 		if err := reclaimWakeRestartStateForLockRemovalAt(dirfd, agentDir, current); err != nil {
-			// pgn: a changed restart-stage identity is a fail-closed guard,
-			// but it must not dead-end the operator who already consented to
-			// clearing the wake. The stage is preserved (not deleted) and the
-			// lock release continues, matching the stale-lock path in
-			// wake_restart_stage_reclaim_unix.go. Other errors still refuse.
-			if !preserveChangedWakeRestartStage(err) {
-				return fmt.Errorf("reconcile wake restart ownership before authoritative lock release: %w", err)
-			}
+			return fmt.Errorf("reconcile wake restart ownership before authoritative lock release: %w", err)
 		}
 	}
 

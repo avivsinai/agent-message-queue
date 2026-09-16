@@ -75,4 +75,9 @@ func TestPgnChangedStageDoesNotDeadEndLockRemoval(t *testing.T) {
 		t.Fatalf("release with changed stage: %v, want nil (stage preserved, lock released)", err)
 	}
 	fixture.assertReleasedClaimMissing(t)
+
+	// The restart record must be quarantined (not left active) after lock removal.
+	if _, err := os.Lstat(filepath.Join(fixture.agentDir.path, wakeRestartFileName)); !os.IsNotExist(err) {
+		t.Fatalf("restart record still present after release, want quarantined")
+	}
 }

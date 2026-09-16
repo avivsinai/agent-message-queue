@@ -51,13 +51,13 @@ func reclaimWakeRestartStateForLockRemovalAt(
 			)
 		}
 		if err := reclaimWakeRestartStageForStaleLock(record); err != nil &&
-			(lock.Status != wakeLockStale || !preserveChangedWakeRestartStage(err)) {
+			!preserveChangedWakeRestartStage(err) {
 			return fmt.Errorf("reclaim persisted wake restart stage: %w", err)
 		}
 		quarantine = &snapshot
 	}
 	if err := reclaimWakeRestartRunningImagePlatform(lock.Lock); err != nil &&
-		(lock.Status != wakeLockStale || !preserveChangedWakeRestartStage(err)) {
+		!preserveChangedWakeRestartStage(err) {
 		return fmt.Errorf("reclaim wake running stage before lock removal: %w", err)
 	}
 	if quarantine != nil {
