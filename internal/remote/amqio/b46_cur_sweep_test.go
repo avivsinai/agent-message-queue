@@ -3,6 +3,7 @@ package amqio
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -61,6 +62,9 @@ func makeCurEntry(t *testing.T, root, handle string) (path, id string) {
 func TestB46UnreadableSourceStopsResweeping(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root bypasses filesystem permissions; EACCES cannot be simulated")
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows chmod does not enforce read denial; EACCES cannot be simulated")
 	}
 	root := t.TempDir()
 	if err := fsq.EnsureRootDirs(root); err != nil {
@@ -161,12 +165,20 @@ func TestB46ReplyRouteFailureIsNotSuppressed(t *testing.T) {
 // failure; once the file is readable, the entry is no longer failing, so the
 // cap must not prevent the now-succeeding recovery from running.
 //
-// Mutation RED: if the cap permanently skipped the entry even after the file
-// is repaired (no way to observe recovery), the pending reply would never be
-// delivered and the assertion fails.
+// Codex P2 spec: leave the source unreadable through tick 4 (the capped
+// branch skips it and returns nil, so ImportOnce sets curRecovered=true);
+// repair afterward; use a separately prepared t.TempDir caller mailbox;
+// check ImportOnce errors; assert the actual reply arrives.
+//
+// Mutation RED: without the recoverCappedCur path (the 611.22.46 NO-GO
+// re-fix), once curRecovered=true the capped entry is never re-probed and the
+// reply never arrives — the assertion on the reply file fails.
 func TestB46SourceReadFailsThenRouteRecoversDeliversReply(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root bypasses filesystem permissions; EACCES cannot be simulated")
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows chmod does not enforce read denial; EACCES cannot be simulated")
 	}
 	root := t.TempDir()
 	if err := fsq.EnsureRootDirs(root); err != nil {
@@ -179,6 +191,7 @@ func TestB46SourceReadFailsThenRouteRecoversDeliversReply(t *testing.T) {
 	if err := os.Chmod(path, 0o000); err != nil {
 		t.Fatalf("chmod: %v", err)
 	}
+	t.Cleanup(func() { _ = os.Chmod(path, 0o600) })
 
 	store, err := requests.Open(filepath.Join(root, "extensions", "remote"))
 	if err != nil {
@@ -191,46 +204,58 @@ func TestB46SourceReadFailsThenRouteRecoversDeliversReply(t *testing.T) {
 		t.Fatalf("carrier: %v", err)
 	}
 
-	// Track whether the reply route is reached (recovery proceeded past the
-	// source read) and succeeds.
-	routeReached := false
+	// A separately prepared caller mailbox: the router resolves the cross-
+	// session reply to THIS root + handle, so the reply is actually written
+	// (not filepath.Dir(root), which is not a prepared AMQ root).
+	callerRoot := t.TempDir()
+	if err := fsq.EnsureRootDirs(callerRoot); err != nil {
+		t.Fatalf("EnsureRootDirs caller: %v", err)
+	}
+	if err := fsq.EnsureAgentDirs(callerRoot, "codex"); err != nil {
+		t.Fatalf("EnsureAgentDirs caller: %v", err)
+	}
+	callerNewDir := filepath.Join(callerRoot, "agents", "codex", "inbox", "new")
+
 	carrier.SetReplyRouter(func(project, replyTo string) (string, string, error) {
-		routeReached = true
-		return filepath.Dir(root), "codex", nil
+		return callerRoot, "codex", nil
 	})
 
-	// Ticks 1..curFailureCap: source read fails (EACCES). No reply yet.
+	// Ticks 1..curFailureCap (3): source read fails (EACCES). recoverCur runs
+	// (firstSweep) and reports the error; curRecovered stays false.
 	for i := 1; i <= curFailureCap; i++ {
-		_, _ = carrier.ImportOnce()
-		if routeReached {
-			t.Fatalf("tick %d: route reached before file repaired", i)
+		if _, err := carrier.ImportOnce(); err == nil {
+			t.Fatalf("tick %d: expected source-read error, got nil (611.22.46)", i)
 		}
 	}
+	// Tick 4: the entry is now capped (count >= curFailureCap). The capped
+	// branch skips it and returns nil, so ImportOnce sets curRecovered=true.
+	if _, err := carrier.ImportOnce(); err != nil {
+		t.Fatalf("tick 4: expected capped entry to be skipped (nil error), got: %v (611.22.46)", err)
+	}
+	if !carrier.curRecovered {
+		t.Fatal("tick 4: curRecovered should be true after the capped pass")
+	}
 
-	// Repair the source file: the entry is now readable.
+	// Repair the source file AFTER the silent capped pass.
 	if err := os.Chmod(path, 0o600); err != nil {
 		t.Fatalf("chmod restore: %v", err)
 	}
 
-	// The entry was capped on the previous tick. The cap must not permanently
-	// suppress a now-readable entry: clearCurFailure fires on a successful
-	// read, so the recovery must proceed and deliver the pending reply.
-	//
-	// NOTE: the cap skips the entry via curFailureCapped BEFORE recoverOne. To
-	// observe recovery, the cap must be cleared when the underlying condition
-	// changes. clearCurFailure is called on success, but a capped entry is
-	// skipped before recoverOne runs — so the cap must be reset to let the
-	// repaired entry be re-examined. The repair itself (chmod) is an external
-	// state change the sweep cannot detect without re-reading. We re-run a few
-	// ticks; the implementation must clear the cap so the entry is retried.
-	for i := 1; i <= 2; i++ {
-		_, _ = carrier.ImportOnce()
-		if routeReached {
-			break
-		}
+	// Tick 5: curRecovered=true, so recoverCur no longer runs. recoverCappedCur
+	// (the 611.22.46 NO-GO re-fix) re-probes the capped entry, finds it
+	// readable, clears the cap, and runs the full recoverOne — delivering the
+	// pending reply. Check the error and assert the reply actually arrives.
+	if _, err := carrier.ImportOnce(); err != nil {
+		t.Fatalf("tick 5: expected recovery to succeed after repair, got: %v (611.22.46: capped entry must be retried once the source read succeeds)", err)
 	}
-	if !routeReached {
-		t.Fatal("pending reply was never delivered after the source file was repaired (611.22.46: a capped entry must be retried once the source read succeeds, not permanently suppressed)")
+
+	// Assert the actual reply landed in the prepared caller mailbox.
+	replies, err := os.ReadDir(callerNewDir)
+	if err != nil {
+		t.Fatalf("read caller inbox/new: %v", err)
+	}
+	if len(replies) == 0 {
+		t.Fatal("no reply delivered to the caller mailbox after recovery (611.22.46: a capped entry whose source is repaired must deliver its pending reply)")
 	}
 }
 

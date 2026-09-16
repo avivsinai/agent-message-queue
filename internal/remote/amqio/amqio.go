@@ -338,6 +338,21 @@ func (c *Carrier) ImportOnce() (int, error) {
 			}
 		}
 	}
+	// 611.22.46 NO-GO re-fix: after curRecovered=true, recoverCur no longer
+	// runs, so capped (quarantined) startup entries would never be re-probed —
+	// a repaired source is silently dropped. recoverCappedCur retries ONLY the
+	// capped entries (bounded, not an O(cur) resweep) every tick. A still-
+	// unreadable entry stays capped; a repaired entry clears the cap and runs
+	// the full recoverOne (pending reply delivered).
+	if !firstSweep {
+		if rerr := c.recoverCappedCur(root); rerr != nil {
+			if err == nil {
+				err = rerr
+			} else {
+				err = errors.Join(err, rerr)
+			}
+		}
+	}
 	// Combine the new-scan errors with the cur-recovery errors.
 	scanErr := errors.Join(errs...)
 	if scanErr != nil {
@@ -496,6 +511,61 @@ func (c *Carrier) recoverClaimed(root *fsq.DeliveryRoot, claimed map[string]clai
 		c.mu.Lock()
 		delete(c.claimedThisRun, id)
 		c.mu.Unlock()
+	}
+	return errors.Join(errs...)
+}
+
+// recoverCappedCur retries ONLY the cur entries that were capped (quarantined
+// from the full sweep) during the startup scan. It runs every tick AFTER
+// curRecovered=true, because once the first full sweep ends, recoverCur no
+// longer runs and the capped entries' re-probe (the curFailureCapped check
+// inside recoverCur) would never execute — silently dropping a repaired entry
+// (611.22.46 NO-GO re-fix).
+//
+// Bounded cost: this iterates at most len(curFailures) entries (the capped
+// set), NOT the full O(cur) directory. A capped entry whose source is still
+// unreadable stays capped (one cheap read probe); a capped entry whose source
+// is readable again clears the cap and runs the full recoverOne (emitting the
+// pending drained receipt + outcome reply). This is the bounded pending-entry
+// recovery path codex required: no full resweep, individual retry.
+func (c *Carrier) recoverCappedCur(root *fsq.DeliveryRoot) error {
+	c.mu.Lock()
+	if len(c.curFailures) == 0 {
+		c.mu.Unlock()
+		return nil
+	}
+	// Snapshot the capped entry names under the lock; the retry work runs
+	// outside (recoverOne opens files + writes receipts).
+	capped := make([]string, 0, len(c.curFailures))
+	for name, f := range c.curFailures {
+		if f.count >= curFailureCap {
+			capped = append(capped, name)
+		}
+	}
+	c.mu.Unlock()
+	if len(capped) == 0 {
+		return nil
+	}
+	sort.Strings(capped)
+	curDir := filepath.Join("agents", c.me, "inbox", "cur")
+	var errs []error
+	for _, name := range capped {
+		// Re-probe the source read (cheap). If still unreadable, record the
+		// continued failure and skip the expensive recovery (stays capped).
+		if _, perr := format.ReadMessageFileRoot(root, filepath.Join(curDir, name)); perr != nil {
+			c.recordCurFailure(name, &errCurSourceReadFailed{err: perr})
+			continue
+		}
+		// The source is readable again: clear the cap and run the full
+		// recoverOne so the pending drained receipt + outcome reply land.
+		c.clearCurFailure(name)
+		if err := c.recoverOne(root, curDir, name); err != nil {
+			var srcErr *errCurSourceReadFailed
+			if errors.As(err, &srcErr) {
+				c.recordCurFailure(name, srcErr)
+			}
+			errs = append(errs, fmt.Errorf("%s: %w", name, err))
+		}
 	}
 	return errors.Join(errs...)
 }
