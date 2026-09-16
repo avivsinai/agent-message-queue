@@ -4285,8 +4285,63 @@ func observeLiveWakeOwner(owner wakeOwner, context string) (wakeOwnerObservation
 	return observation, nil
 }
 
+// wakeChildEnvAllowlist is the set of environment variables the amq wake
+// child process is permitted to inherit from its parent. Everything else in
+// the parent shell env (secrets, tokens, shell-specific vars) is dropped so a
+// compromised or buggy injector child cannot exfiltrate it.
+//
+// PATH and HOME are required OS vars: PATH for exec.LookPath (self-upgrade,
+// restart preflight, recursive amq spawn) and HOME for os.UserHomeDir config
+// resolution. All AMQ-internal vars are matched by the AMQ_ / AM_ prefixes
+// (session/identity/state, no-update-check, test re-exec helpers) so future
+// AMQ vars are covered without enumerating each one.
+var wakeChildEnvAllowlistPrefixes = []string{"AMQ_", "AM_"}
+
+var wakeChildEnvAllowlist = map[string]bool{
+	"PATH":     true,
+	"HOME":     true,
+	"TMPDIR":   true,
+	"USER":     true,
+	"LOGNAME":  true,
+	"SHELL":    true,
+	"LANG":     true,
+	"LC_ALL":   true,
+	"LC_CTYPE": true,
+	"TZ":       true,
+}
+
+// scrubWakeChildEnv filters a parent env slice to the wake-child allowlist
+// (7ra). Non-allowlisted vars are dropped before the child is spawned so the
+// injector child never sees unrelated parent-shell secrets/tokens. The
+// allowlist is matched by key: AMQ_/AM_ prefix OR an explicit allowlist entry
+// (PATH, HOME). Callers still set/override specific AMQ vars after.
+func scrubWakeChildEnv(env []string) []string {
+	if len(env) == 0 {
+		return nil
+	}
+	scrubbed := make([]string, 0, len(env))
+	for _, kv := range env {
+		key, _, ok := strings.Cut(kv, "=")
+		if !ok {
+			continue // malformed entry; drop
+		}
+		if wakeChildEnvAllowlist[key] {
+			scrubbed = append(scrubbed, kv)
+			continue
+		}
+		for _, p := range wakeChildEnvAllowlistPrefixes {
+			if strings.HasPrefix(key, p) {
+				scrubbed = append(scrubbed, kv)
+				break
+			}
+		}
+	}
+	return scrubbed
+}
+
 func wakeCommandEnv(base []string, root string, owner *wakeOwner) ([]string, error) {
-	env := setEnvVar(base, envRoot, root)
+	env := scrubWakeChildEnv(base)
+	env = setEnvVar(env, envRoot, root)
 	env = unsetEnvVar(env, envWakeOwner)
 	if owner == nil {
 		return env, nil
