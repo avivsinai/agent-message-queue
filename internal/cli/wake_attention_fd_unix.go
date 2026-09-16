@@ -28,7 +28,10 @@ func attachWakeAttentionFD(cmd *exec.Cmd, attention *os.File) error {
 	childFD := 3 + len(cmd.ExtraFiles)
 	cmd.ExtraFiles = append(cmd.ExtraFiles, attention)
 	if cmd.Env == nil {
-		cmd.Env = os.Environ()
+		// 7ra: never pass the full parent env to the injector child. Scrub to
+		// the wake-child allowlist (AM_*/AMQ_* + PATH/HOME) so unrelated
+		// parent-shell secrets/tokens are not inherited.
+		cmd.Env = scrubWakeChildEnv(os.Environ())
 	}
 	cmd.Env = setEnvVar(
 		unsetEnvVar(cmd.Env, envWakeAttentionFD),
