@@ -8,6 +8,13 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.78.6](https://github.com/avivsinai/agent-message-queue/compare/v0.78.5...v0.78.6) (2026-09-16)
+
+
+### Bug Fixes
+
+* **cli:** classify non-ENOENT session Lstat as ErrPeerRootUnreachable (611.22.42) ([#780](https://github.com/avivsinai/agent-message-queue/issues/780)) ([8766aee](https://github.com/avivsinai/agent-message-queue/commit/8766aeefcaf19a57219228847dac67f6c24edc0d))
+
 ## [0.78.5](https://github.com/avivsinai/agent-message-queue/compare/v0.78.4...v0.78.5) (2026-09-16)
 
 
