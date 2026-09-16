@@ -188,8 +188,19 @@ func TestB48PendingPublishNotMarkedDelivered(t *testing.T) {
 
 	// A concurrent Reconcile for the same key/revision must NOT advance
 	// PublishedRevision while the publish is in-flight (the revision is not
-	// confirmed delivered yet). It must leave the work pending.
-	_ = ep.Reconcile()
+	// confirmed delivered yet). It must leave the work pending. Reconcile runs
+	// in a goroutine with a BOUNDED join (codex round-3 P2): with the held
+	// publish, a regression that re-publishes inside Reconcile would block it
+	// on releasePub forever — the test must fail on timeout, not hang the
+	// suite.
+	reconcileDone := make(chan struct{})
+	go func() { defer close(reconcileDone); _ = ep.Reconcile() }()
+	select {
+	case <-reconcileDone:
+	case <-time.After(b48Timeout):
+		close(releasePub)
+		t.Fatal("reconcile did not return while publish is in-flight (it must leave the work pending, not block behind the held publisher)")
+	}
 	k := requests.Key{CreatorHost: "local", TargetID: "fake", RequestID: id}
 	rec, _, _ := store.Get(k)
 	if rec.PublishedRevision >= rec.Revision {
@@ -210,6 +221,14 @@ func TestB48PendingPublishNotMarkedDelivered(t *testing.T) {
 	rec, _, _ = store.Get(k)
 	if rec.PublishedRevision < rec.Revision {
 		t.Fatalf("after publish completed, PublishedRevision=%d want >= %d (611.22.48)", rec.PublishedRevision, rec.Revision)
+	}
+	// Duplicate-delivery check AFTER completion (codex round-3 P2): the
+	// post-release assertions must verify the revision was delivered exactly
+	// once in total, not just that the marker advanced. A regression that
+	// re-publishes r after the original r succeeds (same-revision chain)
+	// shows up as calls=2 here.
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("after completion, publish calls=%d, want exactly 1 (revision %d delivered more than once)", got, rec.Revision)
 	}
 }
 

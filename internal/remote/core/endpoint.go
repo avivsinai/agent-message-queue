@@ -38,6 +38,14 @@ type CrashPoint func(point string) error
 // ErrCrashed is returned by Handle when the crash hook fired.
 var ErrCrashed = errors.New("endpoint crashed at boundary")
 
+// ErrDrainIncomplete is returned by Close when the bounded shutdown drain
+// ended with publication obligations it could not discharge: a chained
+// revision was skipped (its attempt failed or the store was closed before it
+// could be adopted) or handlers were still in flight at the drain timeout.
+// The durable unpublished state is preserved for Reconcile recovery on the
+// next start; Close does NOT report the shutdown as clean.
+var ErrDrainIncomplete = errors.New("drain incomplete")
+
 // Crash boundary names, in the order the design lists them.
 const (
 	PointBeforeReceived    = "before:received_commit"
@@ -127,6 +135,12 @@ type Endpoint struct {
 	inFlight int
 	drained  *sync.Cond
 	drainTO  time.Duration
+	// drainIncomplete records, under e.mu, that the drain could not discharge
+	// every accepted publication obligation (a chained revision was skipped:
+	// its attempt failed, the store read failed, or the endpoint closed
+	// before it could be adopted). Close folds this into its returned error
+	// instead of silently reporting a complete drain (codex round-3 P1).
+	drainIncomplete bool
 }
 
 // Config configures New.
@@ -245,10 +259,21 @@ func (e *Endpoint) Close() error {
 		}
 		delete(e.targets, id)
 	}
+	// Report an undischarged publication obligation ONCE, then clear the
+	// flag: Close is terminal, so the durable unpublished state is left for
+	// Reconcile recovery on the next start regardless.
+	skipped := e.drainIncomplete
+	e.drainIncomplete = false
 	e.mu.Unlock()
 	err := e.store.Close()
 	if stale > 0 {
 		return fmt.Errorf("endpoint closed with %d handler(s) still in flight after %s drain timeout", stale, e.drainTO)
+	}
+	if skipped {
+		if err != nil {
+			return fmt.Errorf("%w (store close error: %v)", ErrDrainIncomplete, err)
+		}
+		return fmt.Errorf("%w: accepted revision(s) left unpublished (durable state preserved for Reconcile recovery)", ErrDrainIncomplete)
 	}
 	return err
 }
@@ -2336,7 +2361,6 @@ func (e *Endpoint) publishLocked(rec *requests.Record) {
 		return
 	}
 	// Serialize per-key publication: if another caller is already
-	// Serialize per-key publication: if another caller is already
 	// publishing this key, coalesce this caller's revision into the
 	// pending obligation set (max-revision semantics, not a call count)
 	// and return. This prevents two concurrent publishes for the same
@@ -2396,29 +2420,51 @@ func (e *Endpoint) publishLocked(rec *requests.Record) {
 			e.visible[key] = attemptRev
 		}
 		// Select the next obligation: the highest revision coalesced by
-		// concurrent callers while we owned this key. A failed attempt
-		// ends the chain WITHOUT spinning a retry of the same revision
-		// here — Reconcile/Tick owns the retry (beginReconcile still
-		// refuses during drain, so the durable unpublished state simply
-		// persists for recovery after close).
+		// concurrent callers while we owned this key. A FAILED attempt does
+		// not retry the same revision (no spin loop) but still adopts a
+		// strictly NEWER accepted revision under the same owner: dropping the
+		// r+1 obligation because r failed would leave r+1 uncovered by any
+		// drain count and let Close return nil with it unpublished (codex
+		// round-3 P1). Reconcile/Tick owns retrying the failed revision
+		// itself (beginReconcile still refuses during drain, so the durable
+		// unpublished state simply persists for recovery after close).
 		pendingRev := e.pubPending[key]
 		delete(e.pubPending, key)
 		var next *requests.Record
-		if pendingRev > attemptRev && pubErr == nil && e.state != stateClosed {
-			// Re-read the newest durable record. A store read failure
-			// must not silently discard the continuation: treat it like
-			// a failed attempt (keep the durable unpublished state;
-			// Reconcile owns recovery outside the drain).
+		if pendingRev > attemptRev && e.state != stateClosed {
+			// Re-read the newest durable record. A store read failure leaves
+			// next nil; the exit path reports the skipped obligation via
+			// drainIncomplete so Close does not return a clean nil.
 			e.mu.Unlock()
 			if cur, ok, gerr := e.store.Get(key); gerr == nil && ok {
 				next = cur
 			}
 			e.mu.Lock()
+			// Close may have exhausted its drain timeout and set stateClosed
+			// WHILE we were unlocked for the read: do not start a new chained
+			// attempt against a closed store (codex round-3 P2). An already
+			// running publisher is never cancelled; only a NEW attempt is
+			// suppressed here.
+			if e.state == stateClosed {
+				next = nil
+			}
 		}
 		if next == nil {
-			// Chain complete (nothing pending beyond this attempt, prior
-			// attempt failed, or the store lost the record): release the
-			// drain obligation and per-key ownership, wake Close, return.
+			// Chain complete (nothing pending beyond this attempt, the store
+			// lost the record, or the endpoint closed): release the drain
+			// obligation and per-key ownership, wake Close, return. If a
+			// coalesced NEWER revision was NOT discharged (strictly greater
+			// than attemptRev: its continuation read failed or the endpoint
+			// closed before adoption), record it so Close reports an
+			// incomplete drain instead of silently returning nil (codex
+			// round-3 P1). A failed attempt of attemptRev ITSELF is NOT an
+			// undischarged obligation: the attempt ran and was counted; the
+			// durable unpublished state persists for Reconcile recovery (the
+			// contract-corpus Q18 restart flow relies on Close returning nil
+			// there).
+			if pendingRev > attemptRev {
+				e.drainIncomplete = true
+			}
 			e.inFlight--
 			if e.inFlight == 0 && e.state == stateDraining {
 				e.drained.Broadcast()
@@ -2444,8 +2490,8 @@ func (e *Endpoint) publishLocked(rec *requests.Record) {
 			}
 			return
 		}
-		// Adopt the pending revision and publish it while STILL holding
-		// the inFlight obligation and publishing[key] ownership.
+		// Adopt the pending revision and publish it while STILL holding the
+		// inFlight obligation and publishing[key] ownership.
 		attemptRev = next.Revision
 		snap = next.Snapshot
 		origin = next.Origin
