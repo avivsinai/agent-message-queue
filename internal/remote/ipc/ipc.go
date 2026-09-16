@@ -88,7 +88,8 @@ type Server struct {
 func Listen(stateDir string, ep *core.Endpoint) (*Server, error) {
 	path := SocketPath(stateDir)
 	if len(path) >= maxUnixSocketPathLen {
-		return nil, fmt.Errorf("%w: %s (%d >= %d)", ErrSocketPathTooLong, path, len(path), maxUnixSocketPathLen)
+		usable := maxUnixSocketPathLen - 1 // NUL terminator
+		return nil, fmt.Errorf("%w: path is %d bytes, max usable is %d — move the state directory closer to the filesystem root", ErrSocketPathTooLong, len(path), usable)
 	}
 	if _, err := os.Stat(path); err == nil {
 		conn, err := net.DialTimeout("unix", path, 200*time.Millisecond)
