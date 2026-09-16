@@ -2110,10 +2110,10 @@ exit 1
 `, logPath))
 	attentionWrites := 0
 	cfg := &wakeConfig{
-		me:             "codex",
-		wakeOwner:      &wakeOwner{},
-		injectMode:     wakeInjectModePaste,
-		injectVia:      injector,
+		me:         "codex",
+		wakeOwner:  &wakeOwner{},
+		injectMode: wakeInjectModePaste,
+		injectVia:  injector,
 		// fdf: generous timeout so the fast-exiting test injector never hits the
 		// inject-via timeout branch under CI/machine load (was 1s, flaked at
 		// exactly 1.00s).
@@ -2286,11 +2286,11 @@ func TestRawTIOCSTIRecordsWrittenWithoutAcceptanceClaim(t *testing.T) {
 func protocolWakeConfigForTest(t *testing.T, root, injector string, attentionWrites *int) *wakeConfig {
 	t.Helper()
 	return &wakeConfig{
-		me:             "codex",
-		root:           root,
-		wakeOwner:      &wakeOwner{},
-		injectMode:     wakeInjectModePaste,
-		injectVia:      injector,
+		me:         "codex",
+		root:       root,
+		wakeOwner:  &wakeOwner{},
+		injectMode: wakeInjectModePaste,
+		injectVia:  injector,
 		// fdf: generous timeout so the fast-exiting test injectors never hit the
 		// inject-via timeout branch under CI/machine load (was 1s, flaked at
 		// exactly 1.00s). Test injectors exit deterministically; the timeout is

@@ -4298,16 +4298,8 @@ func observeLiveWakeOwner(owner wakeOwner, context string) (wakeOwnerObservation
 var wakeChildEnvAllowlistPrefixes = []string{"AMQ_", "AM_"}
 
 var wakeChildEnvAllowlist = map[string]bool{
-	"PATH":     true,
-	"HOME":     true,
-	"TMPDIR":   true,
-	"USER":     true,
-	"LOGNAME":  true,
-	"SHELL":    true,
-	"LANG":     true,
-	"LC_ALL":   true,
-	"LC_CTYPE": true,
-	"TZ":       true,
+	"PATH": true,
+	"HOME": true,
 }
 
 // scrubWakeChildEnv filters a parent env slice to the wake-child allowlist
