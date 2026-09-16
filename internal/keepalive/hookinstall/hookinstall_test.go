@@ -1490,14 +1490,13 @@ func runHookScriptBounded(t *testing.T, cmd *exec.Cmd, stdinWriter *os.File, rea
 	}
 
 	// Read the reattach PID from the fixture-owned file. The binary writes
-	// its PPID (the reattach group leader) before sleeping. Poll for the
-	// full failureBound so the reader doesn't miss startup under load.
-	// The goroutine exits when the PID is found or when pidStop is closed.
-	reattachPid := 0
-	pidDone := make(chan struct{})
+	// its PPID (the reattach group leader) before sleeping. The reader sends
+	// the PID on pidCh; there is no shared mutable state. On the failure path
+	// we do a bounded receive from pidCh so cleanup is synchronized, not
+	// racing on a shared variable.
+	pidCh := make(chan int, 1)
 	pidStop := make(chan struct{})
 	go func() {
-		defer close(pidDone)
 		for {
 			select {
 			case <-pidStop:
@@ -1506,7 +1505,7 @@ func runHookScriptBounded(t *testing.T, cmd *exec.Cmd, stdinWriter *os.File, rea
 			}
 			if data, err := os.ReadFile(reattachPidFile); err == nil {
 				if pid, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil && pid > 0 {
-					reattachPid = pid
+					pidCh <- pid
 					return
 				}
 			}
@@ -1523,7 +1522,6 @@ func runHookScriptBounded(t *testing.T, cmd *exec.Cmd, stdinWriter *os.File, rea
 	select {
 	case err := <-done:
 		close(pidStop)
-		<-pidDone
 		if stdinWriter != nil {
 			_ = stdinWriter.Close()
 		}
@@ -1531,35 +1529,19 @@ func runHookScriptBounded(t *testing.T, cmd *exec.Cmd, stdinWriter *os.File, rea
 			t.Fatalf("hook script error: %v", err)
 		}
 	case <-timer.C:
-		// Failure path: stop the PID reader, then kill both groups.
+		// Failure path: stop the reader, then kill both groups.
 		close(pidStop)
-		// Wait for the reader to finish (bounded). If the reattach group
-		// started but the PID file hasn't been read yet, give the reader
-		// a short grace period to report it so cleanup doesn't skip the
-		// surviving group.
+		// Bounded receive of the reattach PID from the reader. If the PID
+		// was already reported, kill that group. If not, the reattach job
+		// hasn't started (no PID file = no process), so there is nothing
+		// to kill — no grace period or polling window needed.
 		select {
-		case <-pidDone:
+		case pid := <-pidCh:
+			_ = killReattachGroup(pid)
 		case <-time.After(500 * time.Millisecond):
 		}
 		if cmd.Process != nil {
 			_ = killProcessGroup(cmd.Process.Pid)
-		}
-		if reattachPid > 0 {
-			_ = killReattachGroup(reattachPid)
-		} else {
-			// The reattach group may have started but the PID file wasn't
-			// read before we stopped the reader. The fixture binary is
-			// orphaned but still alive in its own group; poll once more
-			// (bounded) and kill the group if the PID file appears.
-			for i := 0; i < 50; i++ {
-				if data, err := os.ReadFile(reattachPidFile); err == nil {
-					if pid, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil && pid > 0 {
-						_ = killReattachGroup(pid)
-						break
-					}
-				}
-				time.Sleep(10 * time.Millisecond)
-			}
 		}
 		if stdinWriter != nil {
 			_ = stdinWriter.Close()
