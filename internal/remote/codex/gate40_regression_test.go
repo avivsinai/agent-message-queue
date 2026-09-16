@@ -57,7 +57,18 @@ func TestGate1ClosePumpStallsOnWedgedWriter(t *testing.T) {
 		t.Fatalf("dial: %v", err)
 	}
 	c := newClient(ws, Handlers{})
-	t.Cleanup(func() { _ = c.Close() })
+	// sqs: bound the test cleanup so a reverted production fix produces a clean
+	// deterministic FAIL (test timeout) instead of wedging the whole test run.
+	t.Cleanup(func() {
+		done := make(chan struct{})
+		go func() { _ = c.Close(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			// Close did not return within 5s; the production fix may be wedged.
+			// Don't hang the test runner — let the test fail on its own merits.
+		}
+	})
 
 	// Wedge the writer deterministically (verifier round-1 recut): hold the
 	// writer slot in the test itself. The 512KB-socket-fill approach depended
@@ -116,7 +127,18 @@ func TestGate1RespondBoundedBehindHeldSlot(t *testing.T) {
 		t.Fatalf("dial: %v", err)
 	}
 	c := newClient(ws, Handlers{})
-	t.Cleanup(func() { _ = c.Close() })
+	// sqs: bound the test cleanup so a reverted production fix produces a clean
+	// deterministic FAIL (test timeout) instead of wedging the whole test run.
+	t.Cleanup(func() {
+		done := make(chan struct{})
+		go func() { _ = c.Close(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			// Close did not return within 5s; the production fix may be wedged.
+			// Don't hang the test runner — let the test fail on its own merits.
+		}
+	})
 
 	ws.wmu <- struct{}{} // hold the writer slot for the whole test
 
