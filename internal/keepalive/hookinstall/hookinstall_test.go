@@ -1546,6 +1546,20 @@ func runHookScriptBounded(t *testing.T, cmd *exec.Cmd, stdinWriter *os.File, rea
 		}
 		if reattachPid > 0 {
 			_ = killReattachGroup(reattachPid)
+		} else {
+			// The reattach group may have started but the PID file wasn't
+			// read before we stopped the reader. The fixture binary is
+			// orphaned but still alive in its own group; poll once more
+			// (bounded) and kill the group if the PID file appears.
+			for i := 0; i < 50; i++ {
+				if data, err := os.ReadFile(reattachPidFile); err == nil {
+					if pid, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil && pid > 0 {
+						_ = killReattachGroup(pid)
+						break
+					}
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
 		}
 		if stdinWriter != nil {
 			_ = stdinWriter.Close()
