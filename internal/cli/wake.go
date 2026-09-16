@@ -77,6 +77,13 @@ type wakeConfig struct {
 	onPrepared                    func(wakeAdmissionWatcher) error
 	retainedAgent                 wakeRetainedAgent
 	retainedInbox                 wakeInboxReader
+	// retainedInboxRebindable marks whether cfg.retainedInbox is the
+	// ordinary-recoverable inbox (the loop can rearm it via rebindWatcher
+	// after a remove/recreate) or a caller-provided retained inbox that
+	// cannot be rebound. notifyNewMessages uses this to route canonical
+	// authority loss: rebindable -> ordinary scan retry (rebindWatcher
+	// rearms); !rebindable -> fatal ownership-loss exit (codex #788).
+	retainedInboxRebindable       bool
 	touchPresence                 func() error
 	maintenanceTicks              <-chan time.Time
 	maintenanceOutputs            []*os.File
@@ -185,6 +192,82 @@ func (err *wakeInboxScanError) Error() string {
 
 func (err *wakeInboxScanError) Unwrap() error {
 	return err.err
+}
+
+// wakeOwnershipLossError signals the retained wake inbox/agent directory no
+// longer matches the canonical namespace (a directory swap detached it).
+// classifyWakeFailure routes it as wakeFailureFatal so the caller exits /
+// re-admits instead of looping in ordinary scan retry. Defined here
+// (platform-agnostic) so notifyNewMessages can return it on every GOOS.
+type wakeOwnershipLossError struct {
+	reason string
+}
+
+func (err *wakeOwnershipLossError) Error() string {
+	return err.reason
+}
+
+func newWakeOwnershipLoss(reason string) error {
+	return &wakeOwnershipLossError{reason: reason}
+}
+
+// wakeInboxCanonicalMismatchError signals the retained wake inbox no longer
+// matches the canonical namespace (a directory swap detached it). It is
+// DISTINCT from wakeInboxScanError: the caller (runWakeLoop) checks
+// errors.As(scanErr) FIRST and routes wakeInboxScanError to ordinary scan
+// retry (looping on the same detached inbox). wakeInboxCanonicalMismatchError
+// must NOT match *wakeInboxScanError so the caller falls through to
+// classifyWakeFailure, which returns wakeFailureFatal — terminal exit /
+// re-admission, not ordinary retry (codex #788).
+type wakeInboxCanonicalMismatchError struct {
+	detachedPath string
+	cause        error
+}
+
+func (err *wakeInboxCanonicalMismatchError) Error() string {
+	if err.cause != nil {
+		return fmt.Sprintf("wake inbox %s no longer matches retained authority: %v", err.detachedPath, err.cause)
+	}
+	return fmt.Sprintf("wake inbox %s no longer matches retained authority", err.detachedPath)
+}
+
+func (err *wakeInboxCanonicalMismatchError) Unwrap() error { return err.cause }
+
+// canonicalMismatchDisposition describes how the caller (attemptNotification)
+// routes a wakeInboxCanonicalMismatchError detected by notifyNewMessages.
+type canonicalMismatchDisposition int
+
+const (
+	canonicalMismatchNone canonicalMismatchDisposition = iota
+	// canonicalMismatchRebindableRearm: the retained inbox is rebindable
+	// (ordinary-recoverable). Invalidate the watcher + retained inbox so
+	// rebindWatcher re-arms from the canonical path on the next inbox-scan-
+	// retry tick, then ordinary scan retry. A legitimate remove/recreate is a
+	// rearm, not a fatal swap.
+	canonicalMismatchRebindableRearm
+	// canonicalMismatchFatal: the retained inbox cannot be rebound. Terminal
+	// exit (mirrors rebindWatcher's retained-authority handling).
+	canonicalMismatchFatal
+)
+
+// classifyCanonicalMismatch decides how the caller routes a canonical inbox
+// mismatch (codex #788). err must be (or wrap) *wakeInboxCanonicalMismatchError;
+// if not, returns canonicalMismatchNone. rebindable reflects whether the
+// retained inbox can be re-armed by rebindWatcher (ordinary-recoverable) or is
+// a caller-provided retained inbox that cannot be rebound.
+//
+// This is the testable core of the routing decision extracted from
+// attemptNotification (a closure); the full loop applies the watcher
+// invalidation/rearm side effects based on this disposition.
+func classifyCanonicalMismatch(err error, rebindable bool) canonicalMismatchDisposition {
+	var mismatch *wakeInboxCanonicalMismatchError
+	if !errors.As(err, &mismatch) {
+		return canonicalMismatchNone
+	}
+	if rebindable {
+		return canonicalMismatchRebindableRearm
+	}
+	return canonicalMismatchFatal
 }
 
 type wakeTerminalPartialProgressError struct {
@@ -461,6 +544,35 @@ func shouldDeferBeforeInject(cfg *wakeConfig, deferForInput bool) bool {
 
 func notifyNewMessages(cfg *wakeConfig) error {
 	inboxNew := fsq.AgentInboxNew(cfg.root, cfg.me)
+
+	// byc: before any authoritative read from the retained inbox, revalidate
+	// it is still the canonical namespace. A directory swap after admission
+	// leaves the retained FD pointing at the detached OLD directory; reading
+	// it would silently miss messages that land in the canonical inbox.
+	//
+	// codex #788: return a DEDICATED wakeInboxCanonicalMismatchError (distinct
+	// from wakeInboxScanError) for canonical authority loss, for BOTH the
+	// rebindable (ordinary-recoverable) and !rebindable (caller-provided
+	// retained) cases. The error type signals WHAT happened; the CALLER
+	// (attemptNotification) decides what to do based on rebindability:
+	//   - Rebindable: nil the watcher + ordinaryInboxDir + cfg.retainedInbox so
+	//     rebindWatcher re-arms on the next inbox-scan-retry tick from the
+	//     canonical path, then schedule ordinary scan retry. Do NOT fatal-exit
+	//     — a legitimate remove/recreate is a rearm.
+	//   - !Rebindable: classifyWakeFailure -> wakeFailureFatal (terminal exit),
+	//     mirroring rebindWatcher's handling of retained authority loss.
+	// The dedicated type (not wakeInboxScanError) is essential: the caller's
+	// errors.As(scanErr) check would otherwise route it to ordinary scan retry
+	// WITHOUT invalidating the watcher — looping on the same detached inbox.
+	// Ordinary transient read failures (EIO/ESTALE on ReadDir below) remain
+	// wakeInboxScanError and retry WITHOUT watcher invalidation.
+	if cfg.retainedInbox != nil {
+		if validator, ok := cfg.retainedInbox.(interface{ ValidateCanonical() error }); ok {
+			if err := validator.ValidateCanonical(); err != nil {
+				return &wakeInboxCanonicalMismatchError{detachedPath: inboxNew, cause: err}
+			}
+		}
+	}
 
 	var entries []os.DirEntry
 	var err error

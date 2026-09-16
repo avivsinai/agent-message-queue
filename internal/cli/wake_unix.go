@@ -453,6 +453,12 @@ func acquireWakeLockWithOptionsInDir(
 					return err
 				}
 			} else {
+				// byc: revalidate canonical identity before the targetless blind-unlink.
+				// A directory swap leaves the retained dirfd pointing at the detached
+				// OLD directory; unlinking there misses the canonical namespace. Refuse.
+				if err := validateWakeStateAgentDirAt(dirfd, agentDir); err != nil {
+					return err
+				}
 				_, targetExists, err := readWakeTargetAt(dirfd, agentDir, root, me)
 				if err != nil {
 					return fmt.Errorf("orphan wake target is unverified before targetless acquisition: %w", err)
@@ -646,6 +652,12 @@ func cleanupGenericWakeRepairFloorAt(
 	}
 	floor, exists, err := readWakeRepairFloorAt(dirfd, agentDir)
 	if err != nil || !exists || floor.Generation != created.Lock.Generation {
+		return err
+	}
+	// byc: revalidate canonical identity before the blind floor removal. A
+	// directory swap leaves the retained dirfd pointing at the detached OLD
+	// directory; removing there misses the canonical namespace. Refuse.
+	if err := validateWakeStateAgentDirAt(dirfd, agentDir); err != nil {
 		return err
 	}
 	return removeWakeRepairFloorGuardedAt(dirfd, agentDir)
@@ -3022,10 +3034,6 @@ const (
 	wakeFailureFatal
 )
 
-type wakeOwnershipLossError struct {
-	reason string
-}
-
 type wakeUnreadableGenerationNoticeState struct {
 	consecutiveFailures uint
 	statusActive        bool
@@ -3041,20 +3049,14 @@ func (state *wakeUnreadableGenerationNoticeState) resetWithoutStatusWrite() {
 	*state = wakeUnreadableGenerationNoticeState{}
 }
 
-func (err *wakeOwnershipLossError) Error() string {
-	return err.reason
-}
-
-func newWakeOwnershipLoss(reason string) error {
-	return &wakeOwnershipLossError{reason: reason}
-}
-
 func classifyWakeFailure(err error) wakeFailureDisposition {
 	if err == nil {
 		return wakeFailureRetry
 	}
 	var ownershipLoss *wakeOwnershipLossError
+	var canonicalMismatch *wakeInboxCanonicalMismatchError
 	if errors.As(err, &ownershipLoss) ||
+		errors.As(err, &canonicalMismatch) ||
 		(isWakeTerminalAuthorityLoss(err) &&
 			!isWakeTerminalForegroundPGRPChanged(err) &&
 			!isWakeTerminalControlStopped(err)) {
@@ -3307,6 +3309,7 @@ func runWakeLoop(cfg wakeConfig) error {
 			ordinaryInboxDir = inboxDir
 			watcher = nextWatcher
 			cfg.retainedInbox = inboxDir
+			cfg.retainedInboxRebindable = true
 			return nil
 		}
 		if retained, ok := cfg.retainedInbox.(*wakeInboxDir); ok {
@@ -3452,6 +3455,7 @@ func runWakeLoop(cfg wakeConfig) error {
 				_ = ordinaryInboxDir.Close()
 				ordinaryInboxDir = nil
 				cfg.retainedInbox = nil
+				cfg.retainedInboxRebindable = false
 			}
 			_ = writeWakeDiagnostic(
 				&cfg,
@@ -3625,6 +3629,7 @@ func runWakeLoop(cfg wakeConfig) error {
 			_ = ordinaryInboxDir.Close()
 			ordinaryInboxDir = nil
 			cfg.retainedInbox = nil
+			cfg.retainedInboxRebindable = false
 		}
 		pendingNotify = true
 		clearTerminalAuthorityRetry()
@@ -3672,6 +3677,7 @@ func runWakeLoop(cfg wakeConfig) error {
 			ordinaryInboxDir = inboxDir
 			watcher = nextWatcher
 			cfg.retainedInbox = inboxDir
+			cfg.retainedInboxRebindable = true
 			return true, nil
 		}
 
@@ -3731,6 +3737,44 @@ func runWakeLoop(cfg wakeConfig) error {
 			return nil
 		}
 		err := notifyNewMessages(&cfg)
+		// codex #788: canonical mismatch is a DEDICATED type (distinct from
+		// wakeInboxScanError). Handle it BEFORE the ordinary scan-retry path so
+		// the watcher is invalidated and rebindWatcher re-arms from the
+		// canonical path on the next inbox-scan-retry tick — otherwise the
+		// loop keeps reading the same detached inbox (rebindWatcher returns
+		// immediately when watcher != nil).
+		var canonicalMismatch *wakeInboxCanonicalMismatchError
+		if errors.As(err, &canonicalMismatch) {
+			switch classifyCanonicalMismatch(err, cfg.retainedInboxRebindable) {
+			case canonicalMismatchRebindableRearm:
+				// Rebindable (ordinary-recoverable): nil the watcher + inbox so
+				// rebindWatcher re-arms on the new canonical inbox. A legitimate
+				// remove/recreate is a rearm, not a fatal swap.
+				if watcher != nil {
+					_ = watcher.Close()
+					watcher = nil
+				}
+				if ordinaryInboxDir != nil {
+					_ = ordinaryInboxDir.Close()
+					ordinaryInboxDir = nil
+				}
+				cfg.retainedInbox = nil
+				cfg.retainedInboxRebindable = false
+				pendingNotify = true
+				clearTerminalAuthorityRetry()
+				inboxScanFailures++
+				scheduleInboxScanRetry(wakeInboxScanRetryBackoff(inboxScanFailures))
+				clearDoorbellDeadline()
+				_ = writeWakeDiagnostic(&cfg, "amq wake: canonical inbox mismatch (rebindable): rearming watcher: %v\n", err)
+				return nil
+			case canonicalMismatchFatal:
+				// !Rebindable: terminal exit (mirrors rebindWatcher's retained-
+				// authority handling). classifyWakeFailure also returns fatal.
+				clearInboxScanRetry()
+				inboxScanFailures = 0
+				return err
+			}
+		}
 		var scanErr *wakeInboxScanError
 		if errors.As(err, &scanErr) {
 			pendingNotify = true
