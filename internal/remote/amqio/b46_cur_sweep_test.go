@@ -364,6 +364,103 @@ func TestB46LateRepairDownstreamReplyFailureStaysPending(t *testing.T) {
 	}
 }
 
+// TestB46LateRepairSuccessClearsMembership is the 4th-NO-GO regression: after
+// a capped entry is repaired and recoverOne SUCCEEDS, the entry must leave
+// pendingRecovery — not repeat full recovery every tick. Codex found that
+// recoverCappedCur claimed recoverOne cleared membership on success, but
+// recoverOne has no such call; the entry stayed pending and re-ran full
+// recovery (re-emitting the reply) every tick after delivery.
+//
+// Mutation RED: remove the clearCurFailure(name) after successful recoverOne
+// in recoverCappedCur -> the entry stays pending; the next tick re-runs
+// recoverOne and emits a SECOND reply; the duplicate-reply assertion fails.
+func TestB46LateRepairSuccessClearsMembership(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses filesystem permissions; EACCES cannot be simulated")
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows chmod does not enforce read denial; EACCES cannot be simulated")
+	}
+	root := t.TempDir()
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatalf("EnsureRootDirs: %v", err)
+	}
+	if err := fsq.EnsureAgentDirs(root, DefaultHandle); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+	path, _ := makeCurEntry(t, root, DefaultHandle)
+	if err := os.Chmod(path, 0o000); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(path, 0o600) })
+
+	store, err := requests.Open(filepath.Join(root, "extensions", "remote"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	ep := core.New(core.Config{Store: store})
+	carrier, err := New(root, DefaultHandle, ep)
+	if err != nil {
+		t.Fatalf("carrier: %v", err)
+	}
+
+	callerRoot := t.TempDir()
+	if err := fsq.EnsureRootDirs(callerRoot); err != nil {
+		t.Fatalf("EnsureRootDirs caller: %v", err)
+	}
+	if err := fsq.EnsureAgentDirs(callerRoot, "codex"); err != nil {
+		t.Fatalf("EnsureAgentDirs caller: %v", err)
+	}
+	callerNewDir := filepath.Join(callerRoot, "agents", "codex", "inbox", "new")
+	var routeCalls int32
+	carrier.SetReplyRouter(func(project, replyTo string) (string, string, error) {
+		atomic.AddInt32(&routeCalls, 1)
+		return callerRoot, "codex", nil
+	})
+
+	// Cap the entry (ticks 1..curFailureCap), then tick 4 sets curRecovered.
+	for i := 1; i <= curFailureCap; i++ {
+		_, _ = carrier.ImportOnce()
+	}
+	if _, err := carrier.ImportOnce(); err != nil {
+		t.Fatalf("tick 4: expected capped skip (nil), got: %v", err)
+	}
+	if !carrier.curRecovered {
+		t.Fatal("curRecovered should be true")
+	}
+
+	// Repair the source.
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatalf("chmod restore: %v", err)
+	}
+
+	// Tick 5: recoverCappedCur retries, recoverOne succeeds, reply lands,
+	// membership cleared.
+	if _, err := carrier.ImportOnce(); err != nil {
+		t.Fatalf("tick 5: expected recovery success, got: %v", err)
+	}
+	replies, err := os.ReadDir(callerNewDir)
+	if err != nil {
+		t.Fatalf("read caller inbox/new: %v", err)
+	}
+	if len(replies) != 1 {
+		t.Fatalf("tick 5: expected exactly 1 reply, got %d", len(replies))
+	}
+	routeAfterSuccess := atomic.LoadInt32(&routeCalls)
+
+	// Tick 6: the entry is no longer pending, so recoverCappedCur must NOT
+	// re-run recoverOne — the router is not called again. (4th NO-GO: without
+	// the clearCurFailure on success, the entry stays pending and recoverOne
+	// re-runs, calling the router again.)
+	if _, err := carrier.ImportOnce(); err != nil {
+		t.Fatalf("tick 6: expected nil, got: %v", err)
+	}
+	if got := atomic.LoadInt32(&routeCalls); got != routeAfterSuccess {
+		t.Fatalf("tick 6: router called again after successful recovery (routeCalls %d -> %d) (611.22.46 4th NO-GO: successful recovery must clear pendingRecovery membership so recovery does not repeat)", routeAfterSuccess, got)
+	}
+}
+
 var errNoRouteForTest = errRoute("no route (test)")
 
 type errRoute string

@@ -581,16 +581,26 @@ func (c *Carrier) recoverCappedCur(root *fsq.DeliveryRoot) error {
 		// Re-probe the source read (cheap). If still unreadable, record the
 		// continued failure (counter only) and skip the expensive recovery.
 		// Membership is NOT cleared — the entry stays pending.
+		//
+		// 611.22.46 (4th NO-GO): preserve recoverOne's terminal disposition
+		// for absent/malformed sources. A removed or malformed entry is NOT a
+		// source-read failure (readFailed is false) — it owes nothing and must
+		// leave pendingRecovery, not stay forever. Only an actual read failure
+		// (readFailed) keeps the entry pending.
 		if _, perr := format.ReadMessageFileRoot(root, filepath.Join(curDir, name)); perr != nil {
+			if !readFailed(perr) {
+				// Absent or malformed: terminal disposition — drop membership and
+				// the counter, skip (matches recoverOne's !readFailed return nil).
+				c.clearCurFailure(name)
+				continue
+			}
 			c.recordCurFailure(name, &errCurSourceReadFailed{err: perr})
 			continue
 		}
 		// The source is readable. Run the full recoverOne (pending drained
 		// receipt + outcome reply). Do NOT clear membership beforehand (3rd
 		// NO-GO): if recoverOne fails downstream (receipt/ledger/reply), the
-		// entry must stay pending for the next tick. clearCurFailure (called
-		// inside recoverOne's success path) removes membership ONLY on
-		// complete success.
+		// entry must stay pending for the next tick.
 		if err := c.recoverOne(root, curDir, name); err != nil {
 			var srcErr *errCurSourceReadFailed
 			if errors.As(err, &srcErr) {
@@ -599,8 +609,11 @@ func (c *Carrier) recoverCappedCur(root *fsq.DeliveryRoot) error {
 			errs = append(errs, fmt.Errorf("%s: %w", name, err))
 			continue
 		}
-		// Complete success: recoverOne's clearCurFailure already dropped both
-		// the counter and the pendingRecovery membership.
+		// Complete success: explicitly drop both the counter and the
+		// pendingRecovery membership. recoverOne does NOT call clearCurFailure
+		// (4th NO-GO: the prior comment claiming it did was wrong); without
+		// this, the entry stays pending and repeats full recovery every tick.
+		c.clearCurFailure(name)
 	}
 	return errors.Join(errs...)
 }
