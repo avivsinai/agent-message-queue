@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -256,6 +257,110 @@ func TestB46SourceReadFailsThenRouteRecoversDeliversReply(t *testing.T) {
 	}
 	if len(replies) == 0 {
 		t.Fatal("no reply delivered to the caller mailbox after recovery (611.22.46: a capped entry whose source is repaired must deliver its pending reply)")
+	}
+}
+
+// TestB46LateRepairDownstreamReplyFailureStaysPending is the 3rd-NO-GO
+// regression: during late repair (after curRecovered=true), if the source is
+// readable but a DOWNSTREAM step (receipt/ledger/reply routing) fails, the
+// entry must STAY pending — not be dropped because clearCurFailure ran before
+// recoverOne completed. The next tick (route restored) must deliver the reply.
+//
+// Mutation RED: clear pendingRecovery before recoverOne (the 3rd-NO-GO bug)
+// -> the downstream failure drops the entry; the restored route never gets a
+// retry; the reply never arrives and the assertion fails.
+func TestB46LateRepairDownstreamReplyFailureStaysPending(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses filesystem permissions; EACCES cannot be simulated")
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows chmod does not enforce read denial; EACCES cannot be simulated")
+	}
+	root := t.TempDir()
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatalf("EnsureRootDirs: %v", err)
+	}
+	if err := fsq.EnsureAgentDirs(root, DefaultHandle); err != nil {
+		t.Fatalf("EnsureAgentDirs: %v", err)
+	}
+	path, _ := makeCurEntry(t, root, DefaultHandle)
+	if err := os.Chmod(path, 0o000); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(path, 0o600) })
+
+	store, err := requests.Open(filepath.Join(root, "extensions", "remote"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	ep := core.New(core.Config{Store: store})
+	carrier, err := New(root, DefaultHandle, ep)
+	if err != nil {
+		t.Fatalf("carrier: %v", err)
+	}
+
+	callerRoot := t.TempDir()
+	if err := fsq.EnsureRootDirs(callerRoot); err != nil {
+		t.Fatalf("EnsureRootDirs caller: %v", err)
+	}
+	if err := fsq.EnsureAgentDirs(callerRoot, "codex"); err != nil {
+		t.Fatalf("EnsureAgentDirs caller: %v", err)
+	}
+	callerNewDir := filepath.Join(callerRoot, "agents", "codex", "inbox", "new")
+
+	// Phase 1: route fails (downstream reply-routing failure). Phase 2: route
+	// restored. routeFailures counts downstream failures; once >0, route
+	// succeeds.
+	var routeFailures int32
+	carrier.SetReplyRouter(func(project, replyTo string) (string, string, error) {
+		if atomic.LoadInt32(&routeFailures) == 0 {
+			atomic.AddInt32(&routeFailures, 1)
+			return "", "", errNoRouteForTest
+		}
+		return callerRoot, "codex", nil
+	})
+
+	// Ticks 1..curFailureCap: source unreadable (EACCES). Entry caps.
+	for i := 1; i <= curFailureCap; i++ {
+		if _, err := carrier.ImportOnce(); err == nil {
+			t.Fatalf("tick %d: expected source-read error", i)
+		}
+	}
+	// Tick 4: capped, skipped, curRecovered=true.
+	if _, err := carrier.ImportOnce(); err != nil {
+		t.Fatalf("tick 4: expected capped skip (nil), got: %v", err)
+	}
+	if !carrier.curRecovered {
+		t.Fatal("curRecovered should be true")
+	}
+
+	// Repair the source. Now readable, but the route STILL fails (phase 1).
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatalf("chmod restore: %v", err)
+	}
+
+	// Tick 5: recoverCappedCur re-probes (readable), runs recoverOne, but the
+	// route fails (downstream). The entry MUST stay pending (not dropped).
+	if _, err := carrier.ImportOnce(); err == nil {
+		t.Fatal("tick 5: expected downstream reply-routing failure, got nil")
+	}
+	// No reply yet.
+	if replies, _ := os.ReadDir(callerNewDir); len(replies) > 0 {
+		t.Fatal("tick 5: reply delivered despite route failure")
+	}
+
+	// Tick 6: route now restored (phase 2). The entry is still pending, so
+	// recoverCappedCur retries and the reply lands.
+	if _, err := carrier.ImportOnce(); err != nil {
+		t.Fatalf("tick 6: expected recovery to succeed after route restore, got: %v", err)
+	}
+	replies, err := os.ReadDir(callerNewDir)
+	if err != nil {
+		t.Fatalf("read caller inbox/new: %v", err)
+	}
+	if len(replies) == 0 {
+		t.Fatal("no reply delivered after route restore (611.22.46 3rd NO-GO: downstream failure must keep the entry pending for the next tick)")
 	}
 }
 
