@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -13,6 +14,18 @@ import (
 // ContextMismatchError (permanent, DLQs the command).
 // Bead agent-message-queue-611.22.42.
 func TestB42NonEnoentSessionLstatIsTransient(t *testing.T) {
+	// chmod(000) is the mechanism to produce a non-ENOENT Lstat failure
+	// (EACCES). It cannot revoke directory traversal on Windows (Chmod only
+	// toggles the read-only attribute) and is bypassed by privileged POSIX
+	// execution (root). Skip on those environments; keep active on normal
+	// Linux/macOS CI where the denial is enforceable.
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod cannot revoke directory traversal on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses filesystem permission denials")
+	}
+
 	base := t.TempDir()
 	session := "victim"
 
