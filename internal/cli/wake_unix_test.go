@@ -2041,6 +2041,7 @@ exit 1
 		wakeOwner:      &wakeOwner{},
 		injectMode:     wakeInjectModePaste,
 		injectVia:      injector,
+		injectTimeout:  30 * time.Second, // fdf: failure bound only; behavior verified via log + attention count
 		attentionIsTTY: func() bool { return false },
 		attentionWrite: func(data []byte) (int, error) {
 			attentionWrites++
@@ -2105,6 +2106,7 @@ exit 1
 		wakeOwner:      &wakeOwner{},
 		injectMode:     wakeInjectModePaste,
 		injectVia:      injector,
+		injectTimeout:  30 * time.Second, // fdf: failure bound only; behavior verified via log + attention count
 		attentionIsTTY: func() bool { return false },
 		attentionWrite: func(data []byte) (int, error) {
 			attentionWrites++
@@ -2278,6 +2280,7 @@ func protocolWakeConfigForTest(t *testing.T, root, injector string, attentionWri
 		wakeOwner:      &wakeOwner{},
 		injectMode:     wakeInjectModePaste,
 		injectVia:      injector,
+		injectTimeout:  30 * time.Second, // fdf: failure bound only; behavior verified via log + attention count
 		attentionIsTTY: func() bool { return false },
 		attentionWrite: func(data []byte) (int, error) {
 			if attentionWrites != nil {
