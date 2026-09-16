@@ -821,6 +821,17 @@ func (c *Carrier) destination(own *fsq.DeliveryRoot, origin map[string]string) (
 		if err != nil {
 			return nil, "", noop, &TransientRouteError{fmt.Errorf("%w: %v", errNoReplyRoute, err)}
 		}
+		// D4 (agent-message-queue-611.22.43): the cross-project arm below gates
+		// on ValidateExistingMailboxLayout so a peer root whose mailbox does
+		// not exist is never written into (no black-hole creation in someone
+		// else's root). The cross-session arm must do the same — a routed
+		// session root with a missing mailbox is unroutable, not a write
+		// target. Without this gate, a cross-session reply silently created
+		// the mailbox in the peer root, the very hole D4 closed one dir over.
+		if err := fsq.ValidateExistingMailboxLayout(peer, handle); err != nil {
+			_ = peer.Close()
+			return nil, "", noop, &TransientRouteError{fmt.Errorf("%w: peer mailbox %q does not exist: %v", errNoReplyRoute, handle, err)}
+		}
 		return peer, handle, func() { _ = peer.Close() }, nil
 	}
 	if c.router == nil {
