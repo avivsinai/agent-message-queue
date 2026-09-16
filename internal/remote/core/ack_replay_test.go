@@ -482,7 +482,12 @@ func TestPreUpgradeRecordConvergesOnHistoryShape(t *testing.T) {
 	// writes raw with no state-graph validation, exactly how a shipped
 	// build's bytes look after an upgrade.
 	id := "11111111-1111-4111-8111-1111111111b2"
-	liveResult := &protocol.Result{Text: "the result"} // live event: no NativeRef
+	// The live turn/completed result carries the NativeRef too: codex sets
+	// r.nativeRef before result() copies it (codex/attachment.go turn/completed
+	// arm). Seeding it NativeRef-free was the fake's shape, not codex's, and
+	// hid the digest asymmetry (agent-message-queue-611.22.34, post-merge
+	// verification of #767).
+	liveResult := &protocol.Result{Text: "the result", NativeRef: "codex thread thr_1 turn turnHistory1"}
 	run := "turn:turnHistory1"
 	seed := &requests.Record{
 		Snapshot: protocol.Snapshot{
