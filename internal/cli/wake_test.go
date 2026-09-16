@@ -378,21 +378,11 @@ func TestInjectNotificationUnsupportedDegradesOnceAndPersistsReason(t *testing.T
 	if writes != 1 {
 		t.Fatalf("terminal writes = %d, want 1", writes)
 	}
-	if len(statuses) < 1 ||
+	if len(statuses) != 1 ||
 		statuses[0].status != wakeInjectorUnsupportedStatus ||
 		statuses[0].mode != wakeInjectModeRaw ||
 		!strings.Contains(statuses[0].reason, "--inject-via") {
-		t.Fatalf("first recorded status = %#v", statuses[0])
-	}
-	// t64: the attention-only fallback now persists a "degraded" status so
-	// `amq doctor --ops` can report the downgrade. The first inject attempt
-	// records both: the injector_unsupported status (from the failed TIOCSTI)
-	// and the degraded status (from the attention-only fallback).
-	if len(statuses) < 2 ||
-		statuses[1].status != "degraded" ||
-		statuses[1].mode != wakeInjectModeNone ||
-		statuses[1].reason != "attention-only fallback" {
-		t.Fatalf("second recorded status = %#v, want degraded/none/attention-only fallback", statuses)
+		t.Fatalf("recorded statuses = %#v", statuses)
 	}
 	if count := strings.Count(first, "warning:"); count != 1 {
 		t.Fatalf("first warning count = %d, want 1:\n%s", count, first)
