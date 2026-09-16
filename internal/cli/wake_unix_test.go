@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -2030,18 +2031,18 @@ func TestRunWakeWithLoopRejectsUnsafeInjectViaBeforeLoop(t *testing.T) {
 func TestDeliverNewMessageNotificationInjectViaUncertainDoesNotReplay(t *testing.T) {
 	current := wakeDoorbellTestFiles(t, "pending.md")
 	logPath := filepath.Join(secureTempDirForTest(t), "inject.log")
-	injector := writeExecutableScriptForTest(t, "uncertain-injector", fmt.Sprintf(`#!/bin/sh
-printf '%%s\n' "$1" >> %q
-echo AMQ_INJECT_PROGRESS=uncertain >&2
-exit 1
-`, logPath))
 	attentionWrites := 0
 	cfg := &wakeConfig{
-		me:             "codex",
-		wakeOwner:      &wakeOwner{},
-		injectMode:     wakeInjectModePaste,
-		injectVia:      injector,
-		injectTimeout:  time.Second,
+		me:         "codex",
+		wakeOwner:  &wakeOwner{},
+		injectMode: wakeInjectModePaste,
+		injectVia:  "test-hook", // non-empty so the inject-via path is taken; hook intercepts before exec
+		injectViaHook: func(text string) (string, error) {
+			if err := os.WriteFile(logPath, []byte(text+"\n"), 0o600); err != nil {
+				t.Fatalf("write inject log: %v", err)
+			}
+			return "AMQ_INJECT_PROGRESS=uncertain\n", errors.New("exit status 1")
+		},
 		attentionIsTTY: func() bool { return false },
 		attentionWrite: func(data []byte) (int, error) {
 			attentionWrites++
@@ -2095,18 +2096,18 @@ exit 1
 func TestDeliverNewMessageNotificationInjectViaOrdinaryFailureFallsBack(t *testing.T) {
 	current := wakeDoorbellTestFiles(t, "pending.md")
 	logPath := filepath.Join(secureTempDirForTest(t), "inject.log")
-	injector := writeExecutableScriptForTest(t, "ordinary-fail-injector", fmt.Sprintf(`#!/bin/sh
-printf '%%s\n' "$1" >> %q
-echo failed >&2
-exit 1
-`, logPath))
 	attentionWrites := 0
 	cfg := &wakeConfig{
-		me:             "codex",
-		wakeOwner:      &wakeOwner{},
-		injectMode:     wakeInjectModePaste,
-		injectVia:      injector,
-		injectTimeout:  time.Second,
+		me:         "codex",
+		wakeOwner:  &wakeOwner{},
+		injectMode: wakeInjectModePaste,
+		injectVia:  "test-hook", // non-empty so the inject-via path is taken; hook intercepts before exec
+		injectViaHook: func(text string) (string, error) {
+			if err := os.WriteFile(logPath, []byte(text+"\n"), 0o600); err != nil {
+				t.Fatalf("write inject log: %v", err)
+			}
+			return "failed\n", errors.New("exit status 1")
+		},
 		attentionIsTTY: func() bool { return false },
 		attentionWrite: func(data []byte) (int, error) {
 			attentionWrites++
@@ -2140,20 +2141,19 @@ func TestInjectViaDeferredThenAcceptedUsesOneAttemptAndNoDuplicate(t *testing.T)
 		t.Fatalf("EnsureRootDirs: %v", err)
 	}
 	countPath := filepath.Join(secureTempDirForTest(t), "inject-count")
-	injector := writeExecutableScriptForTest(t, "deferred-then-accepted", fmt.Sprintf(`#!/bin/sh
-count=0
-if [ -f %q ]; then count=$(cat %q); fi
-count=$((count + 1))
-printf '%%s' "$count" > %q
-if [ "$count" -eq 1 ]; then
-  echo AMQ_INJECT_PROGRESS=deferred >&2
-  exit 1
-fi
-echo AMQ_INJECT_PROGRESS=accepted >&2
-exit 0
-`, countPath, countPath, countPath))
+	callCount := 0
+	injectHook := func(text string) (string, error) {
+		callCount++
+		if err := os.WriteFile(countPath, []byte(strconv.Itoa(callCount)), 0o600); err != nil {
+			t.Fatalf("write inject count: %v", err)
+		}
+		if callCount == 1 {
+			return "AMQ_INJECT_PROGRESS=deferred\n", errors.New("exit status 1")
+		}
+		return "AMQ_INJECT_PROGRESS=accepted\n", nil
+	}
 	attentionWrites := 0
-	cfg := protocolWakeConfigForTest(t, root, injector, &attentionWrites)
+	cfg := protocolWakeConfigForTest(t, root, injectHook, &attentionWrites)
 	cfg.retryUntil = wakeRetryUntilInjected
 	current := wakeDoorbellTestFiles(t, "pending.md")
 	messageIDs := []string{"msg-deferred-accepted"}
@@ -2206,15 +2206,16 @@ func TestInjectViaLegacyExitZeroIsWrittenButNotAccepted(t *testing.T) {
 		t.Fatalf("EnsureRootDirs: %v", err)
 	}
 	countPath := filepath.Join(secureTempDirForTest(t), "inject-count")
-	injector := writeExecutableScriptForTest(t, "legacy-injector", fmt.Sprintf(`#!/bin/sh
-count=0
-if [ -f %q ]; then count=$(cat %q); fi
-count=$((count + 1))
-printf '%%s' "$count" > %q
-exit 0
-`, countPath, countPath, countPath))
+	callCount := 0
+	injectHook := func(text string) (string, error) {
+		callCount++
+		if err := os.WriteFile(countPath, []byte(strconv.Itoa(callCount)), 0o600); err != nil {
+			t.Fatalf("write inject count: %v", err)
+		}
+		return "", nil // exit 0, no AMQ_INJECT_PROGRESS marker → legacy
+	}
 	attentionWrites := 0
-	cfg := protocolWakeConfigForTest(t, root, injector, &attentionWrites)
+	cfg := protocolWakeConfigForTest(t, root, injectHook, &attentionWrites)
 	cfg.retryUntil = wakeRetryUntilInjected
 	current := wakeDoorbellTestFiles(t, "pending.md")
 
@@ -2272,15 +2273,15 @@ func TestRawTIOCSTIRecordsWrittenWithoutAcceptanceClaim(t *testing.T) {
 	}
 }
 
-func protocolWakeConfigForTest(t *testing.T, root, injector string, attentionWrites *int) *wakeConfig {
+func protocolWakeConfigForTest(t *testing.T, root string, injectHook func(text string) (stderr string, runErr error), attentionWrites *int) *wakeConfig {
 	t.Helper()
 	return &wakeConfig{
 		me:             "codex",
 		root:           root,
 		wakeOwner:      &wakeOwner{},
 		injectMode:     wakeInjectModePaste,
-		injectVia:      injector,
-		injectTimeout:  time.Second,
+		injectVia:      "test-hook", // non-empty so the inject-via path is taken; hook intercepts before exec
+		injectViaHook:  injectHook,
 		attentionIsTTY: func() bool { return false },
 		attentionWrite: func(data []byte) (int, error) {
 			if attentionWrites != nil {

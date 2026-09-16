@@ -26,6 +26,7 @@ type wakeConfig struct {
 	injectArgs                    []string
 	wakeOwner                     *wakeOwner
 	injectTimeout                 time.Duration
+	injectViaHook                 func(text string) (stderr string, runErr error) // test-only: deterministic inject bypass
 	bell                          bool
 	debounce                      time.Duration
 	previewLen                    int
@@ -1616,7 +1617,7 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 	// Provider busy/transition is AMQ_INJECT_PROGRESS=deferred; post-dispatch
 	// ambiguity is AMQ_INJECT_PROGRESS=uncertain. Neither may replay the
 	// payload.
-	if cfg.injectVia != "" {
+	if cfg.injectVia != "" || cfg.injectViaHook != nil {
 		if cfg.skipExternalInjector {
 			return deliverWakeAttentionOnly(cfg, notice.output)
 		}
@@ -2412,6 +2413,17 @@ func injectVia(cfg *wakeConfig, text string) error {
 		_ = writeWakeDiagnostic(cfg, "amq wake [debug]: inject-via mode, running: %s %s <text>\n", cfg.injectVia, strings.Join(cfg.injectArgs, " "))
 	}
 
+	// Test-only deterministic hook: bypasses subprocess exec and timeout so
+	// the observed behavior (progress classification, attention fallback) is
+	// verified without a wall-clock deadline selecting the outcome.
+	if cfg.injectViaHook != nil {
+		stderr, runErr := cfg.injectViaHook(text)
+		if cfg.debug {
+			_ = writeWakeDiagnostic(cfg, "amq wake [debug]: inject-via hook stderr=%q err=%v\n", stderr, runErr)
+		}
+		return classifyInjectViaResult(stderr, runErr)
+	}
+
 	executable := strings.TrimSpace(cfg.injectVia)
 	if executable == "" {
 		return fmt.Errorf("inject-via command is blank")
@@ -2450,11 +2462,20 @@ func injectVia(cfg *wakeConfig, text string) error {
 		}
 		return fmt.Errorf("inject-via timed out after %s", timeout)
 	}
-	progress := parseWakeInjectorProgress(stderr.String())
+	if cfg.debug && runErr != nil {
+		_ = writeWakeDiagnostic(cfg, "amq wake [debug]: inject-via failed: %v (%s)\n", runErr, output)
+	}
+	return classifyInjectViaResult(stderr.String(), runErr)
+}
+
+// classifyInjectViaResult maps the stderr output and exit error of an
+// inject-via process (real or hooked) to the typed injector errors that
+// deliverWakeNotification routes on. Both the subprocess and test-hook paths
+// use this single classifier so the behavior under test is the production
+// classification, not a duplicate.
+func classifyInjectViaResult(stderr string, runErr error) error {
+	progress := parseWakeInjectorProgress(stderr)
 	if runErr != nil {
-		if cfg.debug {
-			_ = writeWakeDiagnostic(cfg, "amq wake [debug]: inject-via failed: %v (%s)\n", runErr, output)
-		}
 		if progress == wakeInjectorProgressUncertain {
 			return &wakeTerminalProgressUncertainError{err: runErr}
 		}
@@ -2463,7 +2484,6 @@ func injectVia(cfg *wakeConfig, text string) error {
 		}
 		return runErr
 	}
-
 	switch progress {
 	case wakeInjectorProgressAccepted:
 		return nil
