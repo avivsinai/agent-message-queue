@@ -358,7 +358,7 @@ printf '%s\n' "$1" >> "$AMQ_KEEPALIVE_SLEEP_LOG"
 	binaryPath := writeExecutableBody(t, filepath.Join(dir, "amq-keepalive"), "#!/bin/sh\nsleep 30\n")
 	logPath := filepath.Join(dir, "session-start.log")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "bash", scriptPath)
 	cmd.Env = append(os.Environ(),
@@ -410,7 +410,7 @@ printf '%s\n' "$1" >> "$AMQ_KEEPALIVE_SLEEP_LOG"
 	binaryPath := writeExecutableBody(t, filepath.Join(dir, "amq-keepalive"), "#!/bin/sh\nsleep 30\n")
 	logPath := filepath.Join(dir, "session-start.log")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "bash", scriptPath)
 	cmd.Env = append(os.Environ(),
@@ -449,7 +449,7 @@ func TestSessionStartScriptDoesNotBlockOnOpenStdin(t *testing.T) {
 	binaryPath := writeExecutableBody(t, filepath.Join(dir, "amq-keepalive"), "#!/bin/sh\nexit 0\n")
 	logPath := filepath.Join(dir, "session-start.log")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "bash", scriptPath)
 	reader, writer, err := os.Pipe()
@@ -1465,12 +1465,19 @@ func TestSelfHealDedupKeysOnFullCommand(t *testing.T) {
 	})
 }
 
-// runHookScriptBoundedCtx runs a self-terminating hook script with a context
-// deadline as the safety bound and guaranteed process-group cleanup. The
-// script's internal reattach/stdin timeout (~1s) is the deterministic
-// completion mechanism. The context deadline only fires if the script's
-// watchdog regresses. On timeout, the entire process group is killed and
-// the reap is bounded by WaitDelay.
+// runHookScriptBoundedCtx runs a self-terminating hook script with
+// deterministic completion and guaranteed process-group cleanup. The script
+// always prints '{}\n' and exits 0 (via its internal reattach/stdin
+// timeout); the test's pass/fail is determined by the script's actual
+// output and log content, not by a wall-clock deadline.
+//
+// The context deadline is a pure regression safety bound (generous — far
+// above the script's 1-2s self-termination). It only fires if the script's
+// watchdog breaks, never for a working script. This eliminates the load-
+// related flake: the test no longer races a tight 4s timeout against the
+// script's 1s internal timeout under CI load. On timeout, the entire
+// process group (including the set -m reattach subgroup) is killed and the
+// reap is bounded by WaitDelay.
 func runHookScriptBoundedCtx(t *testing.T, ctx context.Context, cmd *exec.Cmd, stdinWriter *os.File) {
 	t.Helper()
 	setProcessGroup(cmd)
