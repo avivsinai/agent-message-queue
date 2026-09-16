@@ -355,15 +355,15 @@ func TestSessionStartScriptNormalizesInvalidTimeoutAndReturns(t *testing.T) {
 	sleepPath := writeExecutableBody(t, filepath.Join(dir, "sleep"), `#!/bin/sh
 printf '%s\n' "$1" >> "$AMQ_KEEPALIVE_SLEEP_LOG"
 `)
-	binaryPath := writeExecutableBody(t, filepath.Join(dir, "amq-keepalive"), "#!/bin/sh\nsleep 30\n")
+	binaryPath := writeExecutableBody(t, filepath.Join(dir, "amq-keepalive"), "#!/bin/sh\necho $$ > \"$AMQ_KEEPALIVE_PID_FILE\"\nsleep 30\n")
 	logPath := filepath.Join(dir, "session-start.log")
+	pidFile := filepath.Join(dir, "reattach.pid")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "bash", scriptPath)
+	cmd := exec.Command("bash", scriptPath)
 	cmd.Env = append(os.Environ(),
 		"AMQ_KEEPALIVE_BIN="+binaryPath,
 		"AMQ_KEEPALIVE_LOG="+logPath,
+		"AMQ_KEEPALIVE_PID_FILE="+pidFile,
 		"AMQ_KEEPALIVE_TARGET=ghostty:terminal:BEDE3893-CE56-4309-8AEC-3D930F11225D",
 		"AMQ_KEEPALIVE_TIMEOUT_SECONDS=0",
 		"AMQ_KEEPALIVE_DEFAULT_TIMEOUT_SECONDS=1",
@@ -376,7 +376,7 @@ printf '%s\n' "$1" >> "$AMQ_KEEPALIVE_SLEEP_LOG"
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	runHookScriptBoundedCtx(t, ctx, cmd, nil)
+	runHookScriptBounded(t, cmd, nil, pidFile, 4*time.Second)
 	if got := stdout.String(); got != "{}\n" {
 		t.Fatalf("stdout = %q, want empty hook response", got)
 	}
@@ -407,15 +407,15 @@ func TestSessionStartWatchdogSleepsNormalizedTimeout(t *testing.T) {
 	sleepPath := writeExecutableBody(t, filepath.Join(dir, "sleep"), `#!/bin/sh
 printf '%s\n' "$1" >> "$AMQ_KEEPALIVE_SLEEP_LOG"
 `)
-	binaryPath := writeExecutableBody(t, filepath.Join(dir, "amq-keepalive"), "#!/bin/sh\nsleep 30\n")
+	binaryPath := writeExecutableBody(t, filepath.Join(dir, "amq-keepalive"), "#!/bin/sh\necho $$ > \"$AMQ_KEEPALIVE_PID_FILE\"\nsleep 30\n")
 	logPath := filepath.Join(dir, "session-start.log")
+	pidFile := filepath.Join(dir, "reattach.pid")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "bash", scriptPath)
+	cmd := exec.Command("bash", scriptPath)
 	cmd.Env = append(os.Environ(),
 		"AMQ_KEEPALIVE_BIN="+binaryPath,
 		"AMQ_KEEPALIVE_LOG="+logPath,
+		"AMQ_KEEPALIVE_PID_FILE="+pidFile,
 		"AMQ_KEEPALIVE_TARGET=ghostty:terminal:BEDE3893-CE56-4309-8AEC-3D930F11225D",
 		"AMQ_KEEPALIVE_TIMEOUT_SECONDS=2",
 		"AMQ_KEEPALIVE_SLEEP="+sleepPath,
@@ -423,7 +423,7 @@ printf '%s\n' "$1" >> "$AMQ_KEEPALIVE_SLEEP_LOG"
 	)
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
-	runHookScriptBoundedCtx(t, ctx, cmd, nil)
+	runHookScriptBounded(t, cmd, nil, pidFile, 4*time.Second)
 	if got := stdout.String(); got != "{}\n" {
 		t.Fatalf("stdout = %q, want empty hook response", got)
 	}
@@ -446,12 +446,11 @@ printf '%s\n' "$1" >> "$AMQ_KEEPALIVE_SLEEP_LOG"
 func TestSessionStartScriptDoesNotBlockOnOpenStdin(t *testing.T) {
 	dir := t.TempDir()
 	scriptPath := writeSessionStartScript(t, dir)
-	binaryPath := writeExecutableBody(t, filepath.Join(dir, "amq-keepalive"), "#!/bin/sh\nexit 0\n")
+	binaryPath := writeExecutableBody(t, filepath.Join(dir, "amq-keepalive"), "#!/bin/sh\necho $$ > \"$AMQ_KEEPALIVE_PID_FILE\"\nexit 0\n")
 	logPath := filepath.Join(dir, "session-start.log")
+	pidFile := filepath.Join(dir, "reattach.pid")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "bash", scriptPath)
+	cmd := exec.Command("bash", scriptPath)
 	reader, writer, err := os.Pipe()
 	if err != nil {
 		t.Fatalf("Pipe() error = %v", err)
@@ -461,6 +460,7 @@ func TestSessionStartScriptDoesNotBlockOnOpenStdin(t *testing.T) {
 	cmd.Env = append(os.Environ(),
 		"AMQ_KEEPALIVE_BIN="+binaryPath,
 		"AMQ_KEEPALIVE_LOG="+logPath,
+		"AMQ_KEEPALIVE_PID_FILE="+pidFile,
 		"AMQ_KEEPALIVE_TIMEOUT_SECONDS=2",
 		"AMQ_KEEPALIVE_STDIN_TIMEOUT_SECONDS=1",
 	)
@@ -469,7 +469,7 @@ func TestSessionStartScriptDoesNotBlockOnOpenStdin(t *testing.T) {
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	runHookScriptBoundedCtx(t, ctx, cmd, writer)
+	runHookScriptBounded(t, cmd, writer, pidFile, 4*time.Second)
 	if got := stdout.String(); got != "{}\n" {
 		t.Fatalf("stdout = %q, want empty hook response", got)
 	}
@@ -1465,47 +1465,78 @@ func TestSelfHealDedupKeysOnFullCommand(t *testing.T) {
 	})
 }
 
-// runHookScriptBoundedCtx runs a self-terminating hook script with
-// deterministic completion and guaranteed process-group cleanup. The script
-// always prints '{}\n' and exits 0 (via its internal reattach/stdin
-// timeout); the test's pass/fail is determined by the script's actual
-// output and log content, not by a wall-clock deadline.
+// runHookScriptBounded runs a self-terminating hook script with a failure
+// bound that starts AFTER process Start. This eliminates the startup race
+// where a context deadline (created before Start) can expire before the
+// process begins under CI load.
 //
-// The context deadline is a pure regression safety bound (generous — far
-// above the script's 1-2s self-termination). It only fires if the script's
-// watchdog breaks, never for a working script. This eliminates the load-
-// related flake: the test no longer races a tight 4s timeout against the
-// script's 1s internal timeout under CI load. On timeout, the entire
-// process group (including the set -m reattach subgroup) is killed and the
-// reap is bounded by WaitDelay.
-func runHookScriptBoundedCtx(t *testing.T, ctx context.Context, cmd *exec.Cmd, stdinWriter *os.File) {
+// Completion mechanism: the script self-terminates via its internal
+// reattach/stdin timeout (~1s). The failure bound only fires if the
+// script's watchdog regresses.
+//
+// Cleanup: reattachPidFile is a path the test binary writes its PID to
+// before sleeping. This gives us the reattach job's process group leader
+// (created by set -m) as a fixture-owned identity. On failure, we kill
+// the outer group AND the specific reattach group — both bounded
+// single-syscall operations, no recursive process scanner.
+func runHookScriptBounded(t *testing.T, cmd *exec.Cmd, stdinWriter *os.File, reattachPidFile string, failureBound time.Duration) {
 	t.Helper()
 	setProcessGroup(cmd)
-	cmd.Cancel = func() error {
-		if cmd.Process != nil {
-			return killProcessGroup(cmd.Process.Pid)
-		}
-		return os.ErrProcessDone
-	}
-	cmd.WaitDelay = 2 * time.Second
 	if err := cmd.Start(); err != nil {
 		if stdinWriter != nil {
 			_ = stdinWriter.Close()
 		}
 		t.Fatalf("start hook script: %v", err)
 	}
-	// Keep stdin writer open until the script completes so the test
-	// exercises open-stdin behavior, not EOF.
-	if err := cmd.Wait(); err != nil {
+
+	// Read the reattach PID from the fixture-owned file. The binary writes
+	// its PID before sleeping. Poll briefly; bounded by failureBound.
+	reattachPid := 0
+	pidDone := make(chan struct{})
+	go func() {
+		defer close(pidDone)
+		for i := 0; i < 100; i++ {
+			if data, err := os.ReadFile(reattachPidFile); err == nil {
+				if pid, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil && pid > 0 {
+					reattachPid = pid
+					return
+				}
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}()
+
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+
+	timer := time.NewTimer(failureBound)
+	defer timer.Stop()
+
+	select {
+	case err := <-done:
 		if stdinWriter != nil {
 			_ = stdinWriter.Close()
 		}
-		if ctx.Err() != nil {
-			t.Fatalf("hook script did not self-terminate within safety bound: %v", ctx.Err())
+		if err != nil {
+			t.Fatalf("hook script error: %v", err)
 		}
-		t.Fatalf("hook script error: %v", err)
-	}
-	if stdinWriter != nil {
-		_ = stdinWriter.Close()
+	case <-timer.C:
+		// Failure path: ensure PID reader stopped, then kill both groups.
+		<-pidDone
+		if cmd.Process != nil {
+			_ = killProcessGroup(cmd.Process.Pid)
+		}
+		if reattachPid > 0 {
+			_ = killReattachGroup(reattachPid)
+		}
+		if stdinWriter != nil {
+			_ = stdinWriter.Close()
+		}
+		// Bounded reap.
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+		}
+		t.Fatalf("hook script did not self-terminate within %v failure bound", failureBound)
 	}
 }
