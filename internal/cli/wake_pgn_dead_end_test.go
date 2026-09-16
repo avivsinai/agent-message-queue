@@ -80,4 +80,30 @@ func TestPgnChangedStageDoesNotDeadEndLockRemoval(t *testing.T) {
 	if _, err := os.Lstat(filepath.Join(fixture.agentDir.path, wakeRestartFileName)); !os.IsNotExist(err) {
 		t.Fatalf("restart record still present after release, want quarantined")
 	}
+
+	// A fresh wake claim must be acquirable after the changed-stage release —
+	// the preserved stage must not leave the wake state in a dead-end that
+	// blocks a new owner from taking over.
+	freshLock, err := newWakeLock(fixture.root, fixture.me, wakeLockAcquireOptions{
+		target:   &fixture.target,
+		wakeMode: wakeTargetInjectVia,
+	})
+	if err != nil {
+		t.Fatalf("fresh acquire after changed-stage release: %v", err)
+	}
+	if err := withWakeMutationScopeInDir(fixture.agentDir, func(scope *wakeMutationScope) error {
+		return publishAuthoritativeWakeClaimAt(scope, fixture.root, fixture.me, fixture.target, freshLock)
+	}); err != nil {
+		t.Fatalf("publish fresh wake claim after changed-stage release: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = withWakeMutationScopeInDir(fixture.agentDir, func(scope *wakeMutationScope) error {
+			freshInspection := inspectWakeLock(fixture.root, fixture.me)
+			return removeAuthoritativeWakeClaimAt(scope, freshInspection, &fixture.target)
+		})
+	})
+	freshInspection := inspectWakeLock(fixture.root, fixture.me)
+	if classifyPersistedWakeClaim(freshInspection) != wakeClaimAuthoritative {
+		t.Fatalf("fresh wake claim = %#v, want authoritative", freshInspection)
+	}
 }
