@@ -2418,34 +2418,10 @@ func injectVia(cfg *wakeConfig, text string) error {
 	// verified without a wall-clock deadline selecting the outcome.
 	if cfg.injectViaHook != nil {
 		stderr, runErr := cfg.injectViaHook(text)
-		progress := parseWakeInjectorProgress(stderr)
-		if runErr != nil {
-			if progress == wakeInjectorProgressUncertain {
-				return &wakeTerminalProgressUncertainError{err: runErr}
-			}
-			if progress == wakeInjectorProgressDeferred {
-				return &wakeInjectorDeferredError{err: runErr}
-			}
-			return runErr
+		if cfg.debug {
+			_ = writeWakeDiagnostic(cfg, "amq wake [debug]: inject-via hook stderr=%q err=%v\n", stderr, runErr)
 		}
-		switch progress {
-		case wakeInjectorProgressAccepted:
-			return nil
-		case wakeInjectorProgressUncertain:
-			return &wakeTerminalProgressUncertainError{
-				err: errors.New("inject-via declared uncertain progress"),
-			}
-		case wakeInjectorProgressDeferred:
-			return &wakeTerminalProgressUncertainError{
-				err: errors.New("inject-via declared deferred progress with exit status 0"),
-			}
-		default:
-			return &wakeInjectorLegacyError{
-				err: &wakeTerminalProgressUncertainError{
-					err: errors.New("inject-via exited 0 without AMQ_INJECT_PROGRESS=accepted"),
-				},
-			}
-		}
+		return classifyInjectViaResult(stderr, runErr)
 	}
 
 	executable := strings.TrimSpace(cfg.injectVia)
@@ -2486,11 +2462,20 @@ func injectVia(cfg *wakeConfig, text string) error {
 		}
 		return fmt.Errorf("inject-via timed out after %s", timeout)
 	}
-	progress := parseWakeInjectorProgress(stderr.String())
+	if cfg.debug && runErr != nil {
+		_ = writeWakeDiagnostic(cfg, "amq wake [debug]: inject-via failed: %v (%s)\n", runErr, output)
+	}
+	return classifyInjectViaResult(stderr.String(), runErr)
+}
+
+// classifyInjectViaResult maps the stderr output and exit error of an
+// inject-via process (real or hooked) to the typed injector errors that
+// deliverWakeNotification routes on. Both the subprocess and test-hook paths
+// use this single classifier so the behavior under test is the production
+// classification, not a duplicate.
+func classifyInjectViaResult(stderr string, runErr error) error {
+	progress := parseWakeInjectorProgress(stderr)
 	if runErr != nil {
-		if cfg.debug {
-			_ = writeWakeDiagnostic(cfg, "amq wake [debug]: inject-via failed: %v (%s)\n", runErr, output)
-		}
 		if progress == wakeInjectorProgressUncertain {
 			return &wakeTerminalProgressUncertainError{err: runErr}
 		}
@@ -2499,7 +2484,6 @@ func injectVia(cfg *wakeConfig, text string) error {
 		}
 		return runErr
 	}
-
 	switch progress {
 	case wakeInjectorProgressAccepted:
 		return nil
