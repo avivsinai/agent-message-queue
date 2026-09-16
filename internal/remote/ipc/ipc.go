@@ -63,17 +63,10 @@ type ErrorBody struct {
 	Message string `json:"message"`
 }
 
-// maxUnixSocketPathLen is the conservative maximum length for a Unix domain
-// socket path. Linux sun_path is 108 bytes; macOS is 104. We use 104 as the
-// safe upper bound so the same check works on both. A path at or beyond this
-// length fails bind with a bare EINVAL on Unix, which is hard to diagnose
-// (611.23). The typed error lets the caller produce a helpful message or
-// fall back to a shorter path.
-const maxUnixSocketPathLen = 104
-
 // ErrSocketPathTooLong is returned by Listen when the computed socket path
 // would exceed the Unix sun_path limit, which would cause bind to fail with
-// a bare EINVAL (611.23).
+// a bare EINVAL (611.23). The limit is platform-specific:// maxUnixSocketPathLen
+// (108 on Linux, 104 on macOS) is defined in platform-tagged files.
 var ErrSocketPathTooLong = errors.New("socket path exceeds unix sun_path limit")
 
 // SocketPath returns the endpoint socket for a state directory. Unix socket

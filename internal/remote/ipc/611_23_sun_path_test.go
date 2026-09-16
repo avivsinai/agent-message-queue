@@ -30,6 +30,7 @@ func Test61123SocketPathTooLong(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
+	t.Cleanup(func() { _ = store.Close() })
 	ep := core.New(core.Config{Store: store})
 	_, err = Listen(longDir, ep)
 	if !errors.Is(err, ErrSocketPathTooLong) {
@@ -50,6 +51,7 @@ func Test61123ShortPathStillBinds(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
+	t.Cleanup(func() { _ = store.Close() })
 	ep := core.New(core.Config{Store: store})
 	srv, err := Listen(dir, ep)
 	if err != nil {
