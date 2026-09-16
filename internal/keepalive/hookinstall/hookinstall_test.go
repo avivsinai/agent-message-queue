@@ -355,7 +355,7 @@ func TestSessionStartScriptNormalizesInvalidTimeoutAndReturns(t *testing.T) {
 	sleepPath := writeExecutableBody(t, filepath.Join(dir, "sleep"), `#!/bin/sh
 printf '%s\n' "$1" >> "$AMQ_KEEPALIVE_SLEEP_LOG"
 `)
-	binaryPath := writeExecutableBody(t, filepath.Join(dir, "amq-keepalive"), "#!/bin/sh\necho $$ > \"$AMQ_KEEPALIVE_PID_FILE\"\nsleep 30\n")
+	binaryPath := writeExecutableBody(t, filepath.Join(dir, "amq-keepalive"), "#!/bin/sh\necho $PPID > \"$AMQ_KEEPALIVE_PID_FILE\"\nsleep 30\n")
 	logPath := filepath.Join(dir, "session-start.log")
 	pidFile := filepath.Join(dir, "reattach.pid")
 
@@ -407,7 +407,7 @@ func TestSessionStartWatchdogSleepsNormalizedTimeout(t *testing.T) {
 	sleepPath := writeExecutableBody(t, filepath.Join(dir, "sleep"), `#!/bin/sh
 printf '%s\n' "$1" >> "$AMQ_KEEPALIVE_SLEEP_LOG"
 `)
-	binaryPath := writeExecutableBody(t, filepath.Join(dir, "amq-keepalive"), "#!/bin/sh\necho $$ > \"$AMQ_KEEPALIVE_PID_FILE\"\nsleep 30\n")
+	binaryPath := writeExecutableBody(t, filepath.Join(dir, "amq-keepalive"), "#!/bin/sh\necho $PPID > \"$AMQ_KEEPALIVE_PID_FILE\"\nsleep 30\n")
 	logPath := filepath.Join(dir, "session-start.log")
 	pidFile := filepath.Join(dir, "reattach.pid")
 
@@ -446,7 +446,7 @@ printf '%s\n' "$1" >> "$AMQ_KEEPALIVE_SLEEP_LOG"
 func TestSessionStartScriptDoesNotBlockOnOpenStdin(t *testing.T) {
 	dir := t.TempDir()
 	scriptPath := writeSessionStartScript(t, dir)
-	binaryPath := writeExecutableBody(t, filepath.Join(dir, "amq-keepalive"), "#!/bin/sh\necho $$ > \"$AMQ_KEEPALIVE_PID_FILE\"\nexit 0\n")
+	binaryPath := writeExecutableBody(t, filepath.Join(dir, "amq-keepalive"), "#!/bin/sh\necho $PPID > \"$AMQ_KEEPALIVE_PID_FILE\"\nexit 0\n")
 	logPath := filepath.Join(dir, "session-start.log")
 	pidFile := filepath.Join(dir, "reattach.pid")
 
@@ -1490,12 +1490,20 @@ func runHookScriptBounded(t *testing.T, cmd *exec.Cmd, stdinWriter *os.File, rea
 	}
 
 	// Read the reattach PID from the fixture-owned file. The binary writes
-	// its PID before sleeping. Poll briefly; bounded by failureBound.
+	// its PPID (the reattach group leader) before sleeping. Poll for the
+	// full failureBound so the reader doesn't miss startup under load.
+	// The goroutine exits when the PID is found or when pidStop is closed.
 	reattachPid := 0
 	pidDone := make(chan struct{})
+	pidStop := make(chan struct{})
 	go func() {
 		defer close(pidDone)
-		for i := 0; i < 100; i++ {
+		for {
+			select {
+			case <-pidStop:
+				return
+			default:
+			}
 			if data, err := os.ReadFile(reattachPidFile); err == nil {
 				if pid, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil && pid > 0 {
 					reattachPid = pid
@@ -1514,6 +1522,8 @@ func runHookScriptBounded(t *testing.T, cmd *exec.Cmd, stdinWriter *os.File, rea
 
 	select {
 	case err := <-done:
+		close(pidStop)
+		<-pidDone
 		if stdinWriter != nil {
 			_ = stdinWriter.Close()
 		}
@@ -1521,7 +1531,8 @@ func runHookScriptBounded(t *testing.T, cmd *exec.Cmd, stdinWriter *os.File, rea
 			t.Fatalf("hook script error: %v", err)
 		}
 	case <-timer.C:
-		// Failure path: ensure PID reader stopped, then kill both groups.
+		// Failure path: stop the PID reader, then kill both groups.
+		close(pidStop)
 		<-pidDone
 		if cmd.Process != nil {
 			_ = killProcessGroup(cmd.Process.Pid)
