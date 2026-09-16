@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -147,244 +148,6 @@ func MoveToDLQ(root *DeliveryRoot, agent, filename, originalID, failureReason, f
 		failureDetail,
 		claimErr,
 	)
-}
-
-// MoveNewToDLQ moves an inbox/new message directly to dlq/new WITHOUT first
-// claiming it to cur. Used when the claim itself failed permanently
-// (PermanentClaimError, agent-message-queue-611.22.42): the message is still
-// in new and the claim's Lstat-of-source is unusable, so re-claiming via
-// MoveToDLQ would re-fault. This reads new directly and envelopes it.
-//
-// Deprecated: this helper re-reads the source from disk (re-Lstat) and
-// removes it without an ownership acquisition, so a persistent source-
-// metadata failure fails both the claim and the DLQ read, and a competing
-// claimer can be declared quarantined by the losing actor (Pro B776-1/B776-2
-// on agent-message-queue-611.22.42). New callers should use
-// QuarantineClaimNewToDLQ, which takes the already-read content and performs
-// an exclusive ownership rename before enveloping. Retained for existing
-// call sites that do not yet carry in-memory content.
-func MoveNewToDLQ(root *DeliveryRoot, agent, filename, originalID, failureReason, failureDetail string) (string, error) {
-	return moveInboxMessageToDLQ(root, agent, BoxNew, BoxNew, filename, originalID, failureReason, failureDetail)
-}
-
-// QuarantineClaimToDLQ moves an inbox/new message to dlq/new for a
-// permanent-claim failure (agent-message-queue-611.22.42, Pro round-2 recut).
-// It addresses the five P1 blockers on the prior quarantine path:
-//
-//   - P1-1 (staging never recovered + inbox/new unsynced): the source is
-//     claimed into a DEDICATED, DISCOVERABLE mailbox leaf
-//     `inbox/quarantine/<filename>` — a stable path recoverQuarantineStaging
-//     scans at startup. Every changed directory (inbox/quarantine, inbox/new,
-//     dlq/new) is synced.
-//   - P1-2 (Windows quarantine not exclusive): the claim uses `claimRename`,
-//     the SAME exclusive primitive MoveNewToCur uses — Windows hard-link +
-//     POSIX disposition, NOT os.Root.Rename (#485). Exactly one concurrent
-//     claimer wins; losers observe ENOENT.
-//   - B776-1 (re-faulting inspection): the envelope is built from `content`,
-//     the bytes the caller already read, so no source re-Lstat occurs.
-//   - B776-4 (transition postconditions): the error contract distinguishes a
-//     committed move (CommittedDurabilityError — envelope visible, source
-//     gone) from a source-retained partial (DLQTransitionError — envelope may
-//     be visible, source retained at the stable quarantine path; reconcile,
-//     do not duplicate).
-//
-// `content` is the already-read original message bytes (the carrier read them
-// at the top of importOne; re-reading would re-fault — B776-1).
-func QuarantineClaimToDLQ(root *DeliveryRoot, agent, filename, originalID, failureReason, failureDetail string, content []byte) (string, error) {
-	if err := ValidateHandle(agent); err != nil {
-		return "", err
-	}
-	if err := ValidateMessageFilename(filename); err != nil {
-		return "", err
-	}
-	if err := root.VerifyBase(); err != nil {
-		return "", err
-	}
-	newDir := filepath.Join("agents", agent, "inbox", "new")
-	srcPath := filepath.Join(newDir, filename)
-	quarantineDir := filepath.Join("agents", agent, "inbox", "quarantine")
-	quarantinePath := filepath.Join(quarantineDir, filename)
-
-	// P1-1: ensure the discoverable quarantine leaf exists.
-	if err := root.root.MkdirAll(quarantineDir, 0o700); err != nil {
-		return "", fmt.Errorf("prepare inbox/quarantine leaf: %w", err)
-	}
-
-	// P1-2: acquire ownership of the source via the SAME exclusive-claim
-	// primitive MoveNewToCur uses (claimRename — Windows hard-link + POSIX
-	// disposition, not os.Root.Rename). A competing claimer that already moved
-	// the source into cur observes ENOENT here (a clean loss); this caller
-	// never removes a pathname another actor owns.
-	claimErr := claimRename(root, srcPath, quarantinePath)
-	if claimErr != nil {
-		var permanent *PermanentClaimError
-		if errors.As(claimErr, &permanent) {
-			// B776-1: the source metadata is unreadable even for the claim. Do
-			// NOT report the message as consumed or removed — return an
-			// indeterminate outcome so the carrier leaves it in new for the
-			// next tick.
-			return "", &IndeterminateQuarantineError{
-				SourcePath: root.displayPath(srcPath),
-				Err:        fmt.Errorf("exclusive quarantine claim: %w", claimErr),
-			}
-		}
-		if errors.Is(claimErr, os.ErrNotExist) {
-			// Clean loss: another actor consumed the source. Not an error,
-			// and not a quarantine this caller performed.
-			return "", nil
-		}
-		var committed *claimCommittedResidueError
-		if errors.As(claimErr, &committed) {
-			// The quarantine destination exists and this caller owns the claim;
-			// the leftover source name is reconciled by a later claimer. Treat
-		// the quarantine as acquired (source is at quarantinePath) and proceed
-		// to envelope — the residue is a durability concern reported at sync.
-			} else {
-				// A genuine claim failure (collision, permission, etc.). The
-				// source is NOT owned; report indeterminate.
-				return "", &IndeterminateQuarantineError{
-					SourcePath: root.displayPath(srcPath),
-					Err:        fmt.Errorf("exclusive quarantine claim: %w", claimErr),
-				}
-			}
-	}
-
-	// From here the source is owned at quarantinePath. Every failure below
-	// must report a reconcilable postcondition (DLQTransitionError with the
-	// stable quarantine SourcePath), not a silent "nothing done."
-
-	// B776-4 (source-retained idempotency): before generating a new DLQ id,
-	// reconcile an existing envelope for this originalID so a retry of a
-	// source-retained partial does not publish duplicate envelopes.
-	existingPath, err := findExistingDLQEnvelope(root, agent, originalID)
-	if err != nil {
-		return "", &DLQTransitionError{
-			EnvelopePath:   "",
-			SourcePath:     root.displayPath(quarantinePath),
-			SourceRetained: true,
-			Err:            fmt.Errorf("scan existing dlq for %s: %w", originalID, err),
-		}
-	}
-	dlqPath := ""
-	if existingPath == "" {
-		// Build the envelope from the in-memory content (B776-1: no re-read).
-		dlqID, err := GenerateDLQID()
-		if err != nil {
-			return "", &DLQTransitionError{
-				EnvelopePath:   "",
-				SourcePath:     root.displayPath(quarantinePath),
-				SourceRetained: true,
-				Err:            fmt.Errorf("generate dlq id: %w", err),
-			}
-		}
-		envelope := DLQEnvelope{
-			Schema:        DLQSchemaVersion,
-			ID:            dlqID,
-			OriginalID:    originalID,
-			OriginalFile:  filename,
-			FailureReason: failureReason,
-			FailureDetail: failureDetail,
-			FailureTime:   time.Now().UTC().Format(time.RFC3339),
-			RetryCount:    0,
-			SourceDir:     BoxNew,
-		}
-		data, err := serializeDLQMessage(envelope, content)
-		if err != nil {
-			return "", &DLQTransitionError{
-				EnvelopePath:   "",
-				SourcePath:     root.displayPath(quarantinePath),
-				SourceRetained: true,
-				Err:            fmt.Errorf("serialize dlq: %w", err),
-			}
-		}
-		dlqFilename := envelope.ID + ".md"
-		dlqPath, err = deliverToDLQ(root, agent, dlqFilename, data)
-		if err != nil {
-			var committed *CommittedDurabilityError
-			if errors.As(err, &committed) {
-				return dlqPath, &DLQTransitionError{
-					EnvelopePath:   dlqPath,
-					SourcePath:     root.displayPath(quarantinePath),
-					SourceRetained: true,
-					Err:            err,
-				}
-			}
-			return "", &DLQTransitionError{
-				EnvelopePath:   dlqPath,
-				SourcePath:     root.displayPath(quarantinePath),
-				SourceRetained: true,
-				Err:            fmt.Errorf("deliver to dlq: %w", err),
-			}
-		}
-	} else {
-		dlqPath = existingPath
-	}
-
-	// Remove the quarantined source now that the envelope is durable.
-	if err := removeDLQSource(root, quarantinePath); err != nil && !os.IsNotExist(err) {
-		return dlqPath, &DLQTransitionError{
-			EnvelopePath:   dlqPath,
-			SourcePath:     root.displayPath(quarantinePath),
-			SourceRetained: true,
-			Err:            fmt.Errorf("remove quarantined source: %w", err),
-		}
-	}
-	// P1-1: sync ALL changed directories — inbox/quarantine (removal),
-	// inbox/new (the source dir, unlike round-2 which skipped it), and
-	// dlq/new (the envelope). Any failure here is a committed move with
-	// indeterminate durability (envelope visible, source gone), NOT a
-	// source-retained partial.
-	var durabilityErr error
-	if err := root.syncDir(quarantineDir); err != nil {
-		durabilityErr = errors.Join(durabilityErr, fmt.Errorf("sync inbox/quarantine dir: %w", err))
-	}
-	if err := root.syncDir(newDir); err != nil {
-		durabilityErr = errors.Join(durabilityErr, fmt.Errorf("sync inbox/new dir: %w", err))
-	}
-	if err := root.syncDir(filepath.Join("agents", agent, "dlq", "new")); err != nil {
-		durabilityErr = errors.Join(durabilityErr, fmt.Errorf("sync dlq/new dir: %w", err))
-	}
-	if durabilityErr != nil {
-		return dlqPath, &CommittedDurabilityError{
-			FinalPath: dlqPath,
-			Recipient: agent,
-			Err:       durabilityErr,
-		}
-	}
-	return dlqPath, nil
-}
-
-// findExistingDLQEnvelope scans dlq/new and dlq/cur for an envelope whose
-// OriginalID matches, returning its root-relative path (or ""). Used by
-// QuarantineClaimNewToDLQ to reconcile a source-retained partial transition
-// instead of publishing a duplicate envelope (Pro B776-4).
-func findExistingDLQEnvelope(root *DeliveryRoot, agent, originalID string) (string, error) {
-	if originalID == "" {
-		return "", nil
-	}
-	for _, box := range []string{BoxNew, BoxCur} {
-		dir := filepath.Join("agents", agent, "dlq", box)
-		entries, err := root.ReadDir(dir)
-		if err != nil {
-			if os.IsNotExist(err) {
-				continue
-			}
-			return "", err
-		}
-		for _, e := range entries {
-			if e.IsDir() || strings.HasPrefix(e.Name(), ".") {
-				continue
-			}
-			env, _, rerr := ReadDLQEnvelope(root, filepath.Join(dir, e.Name()))
-			if rerr != nil || env == nil {
-				continue
-			}
-			if env.OriginalID == originalID {
-				return filepath.Join(dir, e.Name()), nil
-			}
-		}
-	}
-	return "", nil
 }
 
 // MoveCurToDLQ moves an already-claimed inbox/cur message to dlq/new.
@@ -631,31 +394,207 @@ func deliverToDLQ(root *DeliveryRoot, agent, filename string, data []byte) (stri
 	return committedPath, nil
 }
 
-// DeliverToDLQ is the exported wrapper around deliverToDLQ for recovery paths
-// (recoverQuarantineStaging) that complete a DLQ transition outside the
-// permanent-claim carrier branch (611.22.42, Pro P1-1).
-func DeliverToDLQ(root *DeliveryRoot, agent, filename string, data []byte) (string, error) {
-	return deliverToDLQ(root, agent, filename, data)
+// findExistingDLQEnvelope scans dlq/new and dlq/cur for an envelope whose
+// OriginalID matches originalID, returning its root-relative path (or "" if
+// none). Malformed entries are skipped — a corrupt envelope must not abort the
+// dedup scan. Used by QuarantinePermanentClaimToDLQ (dedup before acquiring the
+// source) and by carrier recovery.
+func findExistingDLQEnvelope(root *DeliveryRoot, agent, originalID string) (string, error) {
+	if err := ValidateHandle(agent); err != nil {
+		return "", err
+	}
+	if err := root.VerifyBase(); err != nil {
+		return "", err
+	}
+	for _, box := range []string{BoxNew, BoxCur} {
+		dir := filepath.Join("agents", agent, "dlq", box)
+		entries, err := root.ReadDir(dir)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return "", fmt.Errorf("scan dlq %s: %w", box, err)
+		}
+		for _, e := range entries {
+			if e.IsDir() || strings.HasPrefix(e.Name(), ".") {
+				continue
+			}
+			path := filepath.Join(dir, e.Name())
+			env, _, perr := ReadDLQEnvelope(root, path)
+			if perr != nil || env == nil {
+				continue
+			}
+			if env.OriginalID == originalID {
+				return path, nil
+			}
+		}
+	}
+	return "", nil
 }
 
-// SerializeDLQMessage is the exported wrapper around serializeDLQMessage for
-// recovery paths (611.22.42, Pro P1-1).
-func SerializeDLQMessage(env DLQEnvelope, originalContent []byte) ([]byte, error) {
-	return serializeDLQMessage(env, originalContent)
-}
-
-// FindExistingDLQEnvelopeForRecovery is the exported wrapper around
-// findExistingDLQEnvelope for recovery paths (611.22.42, Pro P1-1).
+// FindExistingDLQEnvelopeForRecovery is the exported wrapper for carrier-side
+// recovery that must not duplicate the filesystem transition
+// (agent-message-queue-611.22.42, Pro P1-5).
 func FindExistingDLQEnvelopeForRecovery(root *DeliveryRoot, agent, originalID string) (string, error) {
 	return findExistingDLQEnvelope(root, agent, originalID)
 }
 
-// RemoveQuarantineSource removes a quarantined source at a root-relative path
-// for recovery paths (611.22.42, Pro P1-1). It uses the same removal primitive
-// as the quarantine transition (removeDLQSource) so the ownership contract is
-// preserved.
-func RemoveQuarantineSource(root *DeliveryRoot, path string) error {
-	return removeDLQSource(root, path)
+// SerializeDLQMessage is the exported wrapper for tests and recovery tooling
+// that must build a DLQ envelope without going through the full transition
+// (agent-message-queue-611.22.42).
+func SerializeDLQMessage(env DLQEnvelope, originalContent []byte) ([]byte, error) {
+	return serializeDLQMessage(env, originalContent)
+}
+
+// DeliverToDLQ is the exported wrapper around the internal maildir delivery
+// (tmp → new) for tests and recovery tooling
+// (agent-message-queue-611.22.42).
+func DeliverToDLQ(root *DeliveryRoot, agent, filename string, data []byte) (string, error) {
+	return deliverToDLQ(root, agent, filename, data)
+}
+
+// QuarantinePermanentClaimToDLQ is the ONE shared-ownership quarantine
+// transition for a permanent claim failure (agent-message-queue-611.22.42).
+// The source in inbox/new is acquired EXCLUSIVELY by disposal — the same
+// removal the normal claim performs after linking new→cur — NOT by a second
+// link into a quarantine destination (round-3's P1-3 fatal flaw, where two
+// concurrent link insertions could both succeed before either removed new).
+// The envelope is built from the in-memory content the caller already holds
+// (B776-1: no re-Lstat of the poison source), and durability is confirmed
+// BEFORE the source is considered gone (P1-5).
+//
+// Returns (dlqPath, nil) on success; ("", nil) for a clean loss (another
+// claimer already removed the source and no prior envelope exists); an error
+// otherwise (IndeterminateQuarantineError, DLQTransitionError, or
+// CommittedDurabilityError) — the caller must fail closed (P1-2).
+func QuarantinePermanentClaimToDLQ(root *DeliveryRoot, agent, filename, originalID, failureReason, failureDetail string, content []byte) (string, error) {
+	if err := ValidateHandle(agent); err != nil {
+		return "", err
+	}
+	if err := ValidateMessageFilename(filename); err != nil {
+		return "", err
+	}
+	if err := root.VerifyBase(); err != nil {
+		return "", err
+	}
+	srcPath := filepath.Join("agents", agent, "inbox", "new", filename)
+	newDir := filepath.Join("agents", agent, "inbox", "new")
+
+	// Dedup: if a durable envelope for this originalID already exists (a prior
+	// partial or a concurrent quarantine), do not write a second one.
+	existingPath, err := findExistingDLQEnvelope(root, agent, originalID)
+	if err != nil {
+		return "", &DLQTransitionError{SourceRetained: true, SourcePath: root.displayPath(srcPath), Err: err}
+	}
+
+	// THE shared-ownership decision (P1-3): acquire the source exclusively by
+	// disposal. Exactly one concurrent actor wins; losers observe a clean loss.
+	acquired, aerr := removeSourceExclusively(root, srcPath)
+	if aerr != nil {
+		var residue *claimCommittedResidueError
+		if errors.As(aerr, &residue) {
+			if existingPath != "" {
+				// Source removal is indeterminate but a durable envelope exists:
+			// the logical transition is complete; only the source cleanup is
+			// pending. ReconcileQuarantinedSource will finish it.
+				return existingPath, &DLQTransitionError{SourceRetained: true, EnvelopePath: existingPath, SourcePath: root.displayPath(srcPath), Err: aerr}
+			}
+			return "", &IndeterminateQuarantineError{SourcePath: root.displayPath(srcPath), Err: aerr}
+		}
+		return "", &IndeterminateQuarantineError{SourcePath: root.displayPath(srcPath), Err: aerr}
+	}
+	if !acquired {
+		// Clean loss: another claimer removed the source. If a prior envelope
+		// exists it is authoritative; otherwise nothing to quarantine.
+		return existingPath, nil
+	}
+
+	// Source is gone. Publish the envelope from the in-memory content.
+	dlqPath := existingPath
+	if dlqPath == "" {
+		dlqID, gerr := GenerateDLQID()
+		if gerr != nil {
+			return "", &IndeterminateQuarantineError{SourcePath: root.displayPath(srcPath), Err: fmt.Errorf("generate dlq id: %w", gerr)}
+		}
+		envelope := DLQEnvelope{
+			Schema:         DLQSchemaVersion,
+			ID:             dlqID,
+			OriginalID:     originalID,
+			OriginalFile:   filename,
+			FailureReason:  failureReason,
+			FailureDetail:  failureDetail,
+			FailureTime:    time.Now().UTC().Format(time.RFC3339),
+			RetryCount:     0,
+			SourceDir:      BoxNew,
+		}
+		data, serr := serializeDLQMessage(envelope, content)
+		if serr != nil {
+			return "", &IndeterminateQuarantineError{SourcePath: root.displayPath(srcPath), Err: fmt.Errorf("serialize dlq envelope: %w", serr)}
+		}
+		path, derr := deliverToDLQ(root, agent, envelope.ID+".md", data)
+		if derr != nil {
+			var committed *CommittedDurabilityError
+			if errors.As(derr, &committed) {
+				return committed.FinalPath, committed
+			}
+			return "", &DLQTransitionError{SourceRetained: false, SourcePath: root.displayPath(srcPath), Err: derr}
+		}
+		dlqPath = path
+	}
+
+	// Confirm durability of the source directory (the source is gone) and the
+	// DLQ new directory (the envelope is visible). A failure here is a
+	// committed move: the transition is logically complete but durability is
+	// indeterminate.
+	if err := root.syncDir(newDir); err != nil {
+		return dlqPath, &CommittedDurabilityError{FinalPath: dlqPath, Recipient: agent, Err: fmt.Errorf("sync inbox new dir after quarantine: %w", err)}
+	}
+	dlqNewDir := filepath.Join("agents", agent, "dlq", "new")
+	if err := root.syncDir(dlqNewDir); err != nil {
+		return dlqPath, &CommittedDurabilityError{FinalPath: dlqPath, Recipient: agent, Err: fmt.Errorf("sync dlq new dir: %w", err)}
+	}
+	return dlqPath, nil
+}
+
+// ReconcileQuarantinedSource is the ONE recovery transition for a partial
+// quarantine (agent-message-queue-611.22.42, Pro P1-1/P1-5): the source is
+// still present in inbox/new AND a durable DLQ envelope already exists (the
+// crash happened mid-transition, after the envelope was published but before
+// the source was removed). Recovery completes the transition by removing the
+// source — it does NOT re-publish the envelope (P1-5: the carrier does not
+// duplicate the FS transition). Returns (dlqPath, nil) on completion;
+// ("", nil) if this is not a partial (no source or no envelope).
+func ReconcileQuarantinedSource(root *DeliveryRoot, agent, filename, originalID string) (string, error) {
+	if err := ValidateHandle(agent); err != nil {
+		return "", err
+	}
+	if err := ValidateMessageFilename(filename); err != nil {
+		return "", err
+	}
+	if err := root.VerifyBase(); err != nil {
+		return "", err
+	}
+	srcPath := filepath.Join("agents", agent, "inbox", "new", filename)
+	newDir := filepath.Join("agents", agent, "inbox", "new")
+
+	existingPath, err := findExistingDLQEnvelope(root, agent, originalID)
+	if err != nil {
+		return "", err
+	}
+	if existingPath == "" {
+		return "", nil // not a partial: no durable envelope
+	}
+	if err := root.root.Remove(srcPath); err != nil && !errors.Is(err, fs.ErrNotExist) && !os.IsNotExist(err) {
+		return existingPath, &DLQTransitionError{SourceRetained: true, EnvelopePath: existingPath, SourcePath: root.displayPath(srcPath), Err: err}
+	}
+	if err := root.syncDir(newDir); err != nil {
+		return existingPath, &CommittedDurabilityError{FinalPath: existingPath, Recipient: agent, Err: fmt.Errorf("sync inbox new dir after reconcile: %w", err)}
+	}
+	dlqNewDir := filepath.Join("agents", agent, "dlq", "new")
+	if err := root.syncDir(dlqNewDir); err != nil {
+		return existingPath, &CommittedDurabilityError{FinalPath: existingPath, Recipient: agent, Err: fmt.Errorf("sync dlq new dir after reconcile: %w", err)}
+	}
+	return existingPath, nil
 }
 
 // ReadDLQEnvelope reads and parses a DLQ message.

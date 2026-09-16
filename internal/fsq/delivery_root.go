@@ -35,8 +35,8 @@ type DeliveryRoot struct {
 	batchLease *pinnedBatchLease
 	borrowed   bool
 
-	syncDirForTest    func(string) error
-	lstatFaultForTest func(name string) error
+	syncDirForTest     func(string) error
+	lstatFaultForTest func(string) error
 }
 
 type pinnedBatchLease struct {
@@ -63,17 +63,19 @@ func (r *DeliveryRoot) SetSyncDirFaultForTest(fn func(dir string) error) {
 	r.syncDirForTest = fn
 }
 
-// SetLstatFaultForTest replaces this root's Lstat with fn (nil restores the
-// platform Lstat). Used by the 611.22.42 regression to force a non-ENOENT
-// Lstat failure on the claim source after a rename collision, so the carrier
-// classifies the claim as permanent (PermanentClaimError) and DLQs the message
-// instead of looping in new forever. Install right after OpenDeliveryRoot,
-// before any delivery; keep it deterministic.
-func (r *DeliveryRoot) SetLstatFaultForTest(fn func(name string) error) {
+// SetLstatFaultForTest installs a hook that r.lstat consults before delegating
+// to os.Root.Lstat. A non-nil fault lets tests simulate a poisoned source
+// whose metadata cannot be inspected (EACCES/EIO/ESTALE) without removing the
+// bytes — the permanent-claim-failure scenario (agent-message-queue-611.22.42).
+// Install right after OpenDeliveryRoot and keep it deterministic.
+func (r *DeliveryRoot) SetLstatFaultForTest(fn func(path string) error) {
 	r.lstatFaultForTest = fn
 }
 
-// lstat stats name through the root, honoring the test fault hook.
+// lstat is the B776-1 read hook: the single inspection point through which the
+// claim path and the command reader observe source metadata. If a fault is
+// installed it overrides the physical Lstat so a poisoned source is reported
+// exactly where the claim decision needs it.
 func (r *DeliveryRoot) lstat(name string) (os.FileInfo, error) {
 	if r.lstatFaultForTest != nil {
 		if err := r.lstatFaultForTest(name); err != nil {
@@ -923,11 +925,6 @@ func (r *DeliveryRoot) OpenRegularNoFollow(name string) (*os.File, os.FileInfo, 
 	if err := r.VerifyBase(); err != nil {
 		return nil, nil, err
 	}
-	// 611.22.42 (Pro B776-1): route the initial metadata inspection through
-	// r.lstat so a persistent source-metadata fault (installed on the root) is
-	// observed here, not bypassed. The command read happens through this path;
-	// a regression that faults subsequent inspection must fault the actual
-	// read boundary, not an unprotected Lstat.
 	before, err := r.lstat(name)
 	if err != nil {
 		return nil, nil, err

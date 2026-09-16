@@ -55,11 +55,10 @@ func validateLegacyInspectableHandle(agent string) error {
 type MailboxLeaf string
 
 const (
-	MailboxInboxTmp        MailboxLeaf = "inbox/tmp"
-	MailboxInboxNew        MailboxLeaf = "inbox/new"
-	MailboxInboxCur        MailboxLeaf = "inbox/cur"
-	MailboxInboxQuarantine MailboxLeaf = "inbox/quarantine"
-	MailboxOutboxSent      MailboxLeaf = "outbox/sent"
+	MailboxInboxTmp   MailboxLeaf = "inbox/tmp"
+	MailboxInboxNew   MailboxLeaf = "inbox/new"
+	MailboxInboxCur   MailboxLeaf = "inbox/cur"
+	MailboxOutboxSent MailboxLeaf = "outbox/sent"
 	MailboxDLQTmp     MailboxLeaf = "dlq/tmp"
 	MailboxDLQNew     MailboxLeaf = "dlq/new"
 	MailboxDLQCur     MailboxLeaf = "dlq/cur"
@@ -70,7 +69,6 @@ var requiredMailboxLeaves = [...]MailboxLeaf{
 	MailboxInboxTmp,
 	MailboxInboxNew,
 	MailboxInboxCur,
-	MailboxInboxQuarantine,
 	MailboxOutboxSent,
 	MailboxDLQTmp,
 	MailboxDLQNew,

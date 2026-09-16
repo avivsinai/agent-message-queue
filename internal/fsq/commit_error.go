@@ -1,6 +1,9 @@
 package fsq
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
 
 // CommittedDurabilityError means the visible rename succeeded, but the
 // affected directory metadata could not be fully synced. Retrying with a new
@@ -40,21 +43,42 @@ func (e *DLQTransitionError) Unwrap() error {
 	return e.Err
 }
 
-// IndeterminateQuarantineError means a permanent-claim failure could not be
-// safely resolved into a completed quarantine: the exclusive ownership rename
-// of the source (inbox/new → quarantine staging) failed for a reason that is
-// neither a clean loss (ENOENT) nor a committed move. The message is NOT
-// confirmed removed and NOT confirmed retained in a reconcilable state, so
-// the carrier must NOT report the message as consumed or permanently
-// classified (agent-message-queue-611.22.42, Pro B776-1). The source may still
-// be in inbox/new; the next tick re-evaluates it.
+// PermanentClaimError means the claim of a new source failed because a
+// collision target already owns cur AND the post-collision inspection of the
+// new source returned a non-ENOENT error (EACCES/EIO/ESTALE) — the source is
+// present but its metadata cannot be read. This is not retryable: the normal
+// claim cannot proceed (cur is taken) and the source is not cleanly lost, so
+// the message must be quarantined to the DLQ from the in-memory content the
+// caller already holds (agent-message-queue-611.22.42).
+type PermanentClaimError struct {
+	Err error
+}
+
+func (e *PermanentClaimError) Error() string {
+	return fmt.Sprintf("permanent claim failure: inspect claim source after collision: %v; quarantine to DLQ", e.Err)
+}
+
+func (e *PermanentClaimError) Unwrap() error {
+	return e.Err
+}
+
+// IsPermanentClaimError reports whether err is a *PermanentClaimError.
+func IsPermanentClaimError(err error) bool {
+	var p *PermanentClaimError
+	return errors.As(err, &p)
+}
+
+// IndeterminateQuarantineError means the quarantine could not exclusively
+// acquire the source (and no prior durable envelope exists), so ownership is
+// unknown. The caller must fail closed — the message is neither consumed nor
+// durably quarantined (agent-message-queue-611.22.42, Pro P1-2).
 type IndeterminateQuarantineError struct {
 	SourcePath string
 	Err        error
 }
 
 func (e *IndeterminateQuarantineError) Error() string {
-	return fmt.Sprintf("quarantine of %s could not be completed safely: %v; source state is indeterminate — do not report as consumed", e.SourcePath, e.Err)
+	return fmt.Sprintf("indeterminate quarantine for %s: %v; fail closed", e.SourcePath, e.Err)
 }
 
 func (e *IndeterminateQuarantineError) Unwrap() error {

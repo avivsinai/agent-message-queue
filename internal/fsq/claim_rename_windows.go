@@ -92,10 +92,6 @@ func claimRename(root *DeliveryRoot, newPath, curPath string) error {
 		}
 		return &PermanentClaimError{Err: fmt.Errorf("inspect claim source after collision: %w", statErr)}
 	}
-	// 611.22.42: a non-ENOENT Lstat after a collision is not retryable and
-	// not a recoverable collision — the next tick re-claims the same bytes
-	// and fails the same way. Classify as permanent so the carrier DLQs the
-	// message (parity with the POSIX claim path).
 	curInfo, statErr := root.lstat(curPath)
 	if statErr != nil {
 		return fmt.Errorf("inspect claim destination after collision: %w", statErr)

@@ -29,10 +29,6 @@ func claimRename(root *DeliveryRoot, newPath, curPath string) error {
 		if os.IsNotExist(statErr) {
 			return os.ErrNotExist
 		}
-		// 611.22.42: a non-ENOENT Lstat (EACCES, EIO, ESTALE) is not a clean
-		// loss and not a recoverable collision — the next tick re-claims the
-		// same bytes and fails the same way. Classify as permanent so the
-		// carrier DLQs the message instead of looping in new forever.
 		return &PermanentClaimError{Err: fmt.Errorf("inspect claim source after collision: %w", statErr)}
 	}
 	return &ClaimCollisionError{
