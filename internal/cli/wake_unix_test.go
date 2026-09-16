@@ -2037,19 +2037,11 @@ exit 1
 `, logPath))
 	attentionWrites := 0
 	cfg := &wakeConfig{
-		me:         "codex",
-		wakeOwner:  &wakeOwner{},
-		injectMode: wakeInjectModePaste,
-		injectVia:  injector,
-		// fdf: the injector exits 1 with AMQ_INJECT_PROGRESS=uncertain
-		// deterministically and quickly. A tight 1s injectTimeout races that
-		// fast exit under CI/machine load: if process spawn+wait exceeds 1s,
-		// injectVia returns "timed out" instead of the uncertain-progress path,
-		// flaking at exactly 1.00s. Use a generous timeout so the timeout
-		// branch never fires for this fast-exiting injector; the uncertain
-		// path is detected from the injector's stderr progress line, not from
-		// wall-clock timing.
-		injectTimeout:  30 * time.Second,
+		me:             "codex",
+		wakeOwner:      &wakeOwner{},
+		injectMode:     wakeInjectModePaste,
+		injectVia:      injector,
+		injectTimeout:  time.Second,
 		attentionIsTTY: func() bool { return false },
 		attentionWrite: func(data []byte) (int, error) {
 			attentionWrites++
@@ -2110,14 +2102,11 @@ exit 1
 `, logPath))
 	attentionWrites := 0
 	cfg := &wakeConfig{
-		me:         "codex",
-		wakeOwner:  &wakeOwner{},
-		injectMode: wakeInjectModePaste,
-		injectVia:  injector,
-		// fdf: generous timeout so the fast-exiting test injector never hits the
-		// inject-via timeout branch under CI/machine load (was 1s, flaked at
-		// exactly 1.00s).
-		injectTimeout:  30 * time.Second,
+		me:             "codex",
+		wakeOwner:      &wakeOwner{},
+		injectMode:     wakeInjectModePaste,
+		injectVia:      injector,
+		injectTimeout:  time.Second,
 		attentionIsTTY: func() bool { return false },
 		attentionWrite: func(data []byte) (int, error) {
 			attentionWrites++
@@ -2286,16 +2275,12 @@ func TestRawTIOCSTIRecordsWrittenWithoutAcceptanceClaim(t *testing.T) {
 func protocolWakeConfigForTest(t *testing.T, root, injector string, attentionWrites *int) *wakeConfig {
 	t.Helper()
 	return &wakeConfig{
-		me:         "codex",
-		root:       root,
-		wakeOwner:  &wakeOwner{},
-		injectMode: wakeInjectModePaste,
-		injectVia:  injector,
-		// fdf: generous timeout so the fast-exiting test injectors never hit the
-		// inject-via timeout branch under CI/machine load (was 1s, flaked at
-		// exactly 1.00s). Test injectors exit deterministically; the timeout is
-		// incidental, not the behavior under test.
-		injectTimeout:  30 * time.Second,
+		me:             "codex",
+		root:           root,
+		wakeOwner:      &wakeOwner{},
+		injectMode:     wakeInjectModePaste,
+		injectVia:      injector,
+		injectTimeout:  time.Second,
 		attentionIsTTY: func() bool { return false },
 		attentionWrite: func(data []byte) (int, error) {
 			if attentionWrites != nil {
