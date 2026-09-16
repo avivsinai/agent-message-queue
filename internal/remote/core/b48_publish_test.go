@@ -1,7 +1,6 @@
 package core_test
 
 import (
-	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -40,7 +39,13 @@ func TestB48PublishDoesNotBlockConcurrentHandles(t *testing.T) {
 	releaseFirst := make(chan struct{})
 	// Unconditional safe release: if a fatal assertion strands the held
 	// publisher, t.Cleanup releases it so the suite does not hang (P2).
-	t.Cleanup(func() { select { case <-releaseFirst: default: close(releaseFirst) } })
+	t.Cleanup(func() {
+		select {
+		case <-releaseFirst:
+		default:
+			close(releaseFirst)
+		}
+	})
 	var firstMu sync.Mutex
 	firstKey := "11111111-1111-4111-8111-111111111481"
 	var pubCalls int32
@@ -106,9 +111,15 @@ func TestB48PublishDoesNotBlockConcurrentHandles(t *testing.T) {
 		t.Fatal("second Handle did not reach publication while first was held (publish under e.mu)")
 	}
 
-	// Release the first so it can finish and both goroutines join.
+	// Release the first so it can finish and both goroutines join (bounded).
 	close(releaseFirst)
-	wg.Wait()
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(b48Timeout):
+		t.Fatal("handles did not join after release (hang)")
+	}
 
 	if got := atomic.LoadInt32(&pubCalls); got != 2 {
 		t.Fatalf("expected 2 publish calls, got %d", got)
@@ -132,7 +143,13 @@ func TestB48PendingPublishNotMarkedDelivered(t *testing.T) {
 
 	pubStarted := make(chan struct{})
 	releasePub := make(chan struct{})
-	t.Cleanup(func() { select { case <-releasePub: default: close(releasePub) } })
+	t.Cleanup(func() {
+		select {
+		case <-releasePub:
+		default:
+			close(releasePub)
+		}
+	})
 	var calls int32
 	heldPublish := func(s protocol.Snapshot, origin map[string]string) error {
 		atomic.AddInt32(&calls, 1)
@@ -277,7 +294,13 @@ func TestB48CloseDrainsAsyncNativePublication(t *testing.T) {
 
 	pubStarted := make(chan struct{})
 	releasePub := make(chan struct{})
-	t.Cleanup(func() { select { case <-releasePub: default: close(releasePub) } })
+	t.Cleanup(func() {
+		select {
+		case <-releasePub:
+		default:
+			close(releasePub)
+		}
+	})
 	var pubCalls int32
 	heldPublish := func(s protocol.Snapshot, origin map[string]string) error {
 		atomic.AddInt32(&pubCalls, 1)
@@ -322,11 +345,17 @@ func TestB48CloseDrainsAsyncNativePublication(t *testing.T) {
 	// waits. closeDone must stay blocked until releasePub.
 	closeDone := make(chan error, 1)
 	go func() { closeDone <- ep.Close() }()
+	// Synchronize on the ACTUAL draining state (not a 100ms absence check):
+	// poll IsDraining() until Close has transitioned to draining. This proves
+	// Close entered the drain wait while the publish is still in-flight, so
+	// the lifecycle accounting is exercised regardless of scheduling.
+	waitForDraining48(t, ep)
+	// Close must still be blocked (the held publish keeps inFlight > 0).
 	select {
 	case err := <-closeDone:
 		close(releasePub)
 		t.Fatalf("close returned before publication completed (611.22.48 2nd NO-GO: Close must drain accepted publication work): %v", err)
-	case <-time.After(100 * time.Millisecond):
+	default:
 		// expected: Close is blocked in the drain wait.
 	}
 
@@ -357,5 +386,17 @@ func TestB48CloseDrainsAsyncNativePublication(t *testing.T) {
 
 var errPublishFailed48 = protocol.Refuse(protocol.CodeNativeError, "publish failed for test")
 
-// keep errors import used unconditionally (no trim-build surprise).
-var _ = errors.As
+// waitForDraining48 polls IsDraining() until the endpoint has begun shutdown.
+// Replaces an elapsed-time absence check with synchronization on the actual
+// lifecycle transition (611.22.48 P2).
+func waitForDraining48(t *testing.T, ep *core.Endpoint) {
+	t.Helper()
+	deadline := time.Now().Add(b48Timeout)
+	for time.Now().Before(deadline) {
+		if ep.IsDraining() {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("timed out waiting for endpoint to enter draining")
+}
