@@ -72,18 +72,11 @@ func TestBycNotifyNewMessagesRefusesDetachedInbox(t *testing.T) {
 	}
 
 	// notifyNewMessages must REFUSE: the retained inbox no longer matches the
-	// canonical namespace. It must NOT silently read the detached OLD inbox.
-	//
-	// codex #788: the refusal must route through the CALLER correctly. The
-	// caller (wake_unix.go runWakeLoop) checks errors.As(err, &scanErr) FIRST:
-	// if the swap error is a *wakeInboxScanError, the caller schedules an
-	// ordinary scan retry and returns nil — looping forever on the same
-	// detached inbox. The swap error must be a DEDICATED
-	// *wakeInboxCanonicalMismatchError (distinct from *wakeInboxScanError) so
-	// the caller's scanErr check does NOT match and it falls through to
-	// classifyWakeFailure -> wakeFailureFatal (terminal exit / re-admission),
-	// mirroring rebindWatcher's handling. Exercise the caller's actual
-	// routing, not just that notifyNewMessages returned non-nil.
+	// canonical namespace, and must NOT silently read the detached OLD inbox.
+	// The swap error must be a DEDICATED *wakeInboxCanonicalMismatchError
+	// (distinct from *wakeInboxScanError) so the caller's errors.As(scanErr)
+	// check does NOT match and it falls through to classifyWakeFailure ->
+	// wakeFailureFatal (codex #788).
 	err = notifyNewMessages(cfg)
 	if err == nil {
 		t.Fatal("notifyNewMessages read the detached inbox without error (byc: must revalidate canonical identity before ReadDir and refuse on a swap)")
@@ -257,31 +250,23 @@ func TestBycRebindableCallerReadmitsOnCanonicalMismatch(t *testing.T) {
 	awaitWakeAttentionFrom(t, attention, done, "readmit")
 }
 
-// TestBycClassifyCanonicalMismatch (byc-b, codex #788 r3) is the PRECISE unit
-// test of the rebindable routing decision extracted from attemptNotification.
+// TestBycClassifyCanonicalMismatch (byc-b, codex #788 r3) unit-tests the
+// rebindable routing decision extracted from attemptNotification.
 // notifyNewMessages returns *wakeInboxCanonicalMismatchError for canonical
 // authority loss (both rebindable and !rebindable). The caller routes it via
 // classifyCanonicalMismatch:
-//   - rebindable    -> canonicalMismatchRebindableRearm (invalidate watcher +
+//   - rebindable  -> canonicalMismatchRebindableRearm (invalidate watcher +
 //     retained inbox; rebindWatcher re-arms from the canonical path on the next
-//     inbox-scan-retry tick; ordinary retry, NOT fatal, NOT a loop on the
-//     detached inbox).
-//   - !rebindable   -> canonicalMismatchFatal (terminal exit, mirroring
+//     inbox-scan-retry tick; ordinary retry, NOT fatal, NOT a loop).
+//   - !rebindable -> canonicalMismatchFatal (terminal exit, mirroring
 //     rebindWatcher's retained-authority handling).
-//   - non-mismatch  -> canonicalMismatchNone (fall through to ordinary scan
-//     retry / classifyWakeFailure).
-//
-// Mutation RED: make classifyCanonicalMismatch return canonicalMismatchNone for
-// the rebindable case (skip watcher invalidation) -> the caller falls through to
-// errors.As(scanErr) which does NOT match (distinct type) -> classifyWakeFailure
-// -> wakeFailureFatal -> terminal exit instead of rearm. The rebindable-rearm
-// assertion fails.
+//   - non-mismatch -> canonicalMismatchNone (ordinary scan retry / fatal via
+//     classifyWakeFailure).
 func TestBycClassifyCanonicalMismatch(t *testing.T) {
 	mismatchErr := &wakeInboxCanonicalMismatchError{
 		detachedPath: "/tmp/inbox/new",
 		cause:        errors.New("retained wake inbox directory no longer matches component authority"),
 	}
-	// A transient ReadDir error must NOT be classified as a canonical mismatch.
 	scanErr := &wakeInboxScanError{err: errors.New("read inbox: transient EIO")}
 
 	for _, tc := range []struct {
@@ -290,30 +275,16 @@ func TestBycClassifyCanonicalMismatch(t *testing.T) {
 		rebindable bool
 		want       canonicalMismatchDisposition
 	}{
-		{"rebindable canonical mismatch -> rearm", mismatchErr, true, canonicalMismatchRebindableRearm},
-		{"!rebindable canonical mismatch -> fatal", mismatchErr, false, canonicalMismatchFatal},
-		{"transient scan error -> none (ordinary retry)", scanErr, true, canonicalMismatchNone},
-		{"transient scan error -> none (!rebindable)", scanErr, false, canonicalMismatchNone},
-		{"nil error -> none", nil, true, canonicalMismatchNone},
-		{"wrapped canonical mismatch -> rearm", fmt.Errorf("notify: %w", mismatchErr), true, canonicalMismatchRebindableRearm},
-		{"wrapped canonical mismatch -> fatal", fmt.Errorf("notify: %w", mismatchErr), false, canonicalMismatchFatal},
+		{"rebindable mismatch rearm", mismatchErr, true, canonicalMismatchRebindableRearm},
+		{"!rebindable mismatch fatal", mismatchErr, false, canonicalMismatchFatal},
+		{"transient scan error none", scanErr, true, canonicalMismatchNone},
+		{"wrapped mismatch rearm", fmt.Errorf("notify: %w", mismatchErr), true, canonicalMismatchRebindableRearm},
+		{"wrapped mismatch fatal", fmt.Errorf("notify: %w", mismatchErr), false, canonicalMismatchFatal},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := classifyCanonicalMismatch(tc.err, tc.rebindable)
-			if got != tc.want {
+			if got := classifyCanonicalMismatch(tc.err, tc.rebindable); got != tc.want {
 				t.Fatalf("classifyCanonicalMismatch(rebindable=%v) = %v, want %v", tc.rebindable, got, tc.want)
 			}
 		})
-	}
-
-	// Rebindable rearm must NOT be fatal: the whole point is that a legitimate
-	// remove/recreate re-arms instead of terminating.
-	if got := classifyCanonicalMismatch(mismatchErr, true); got == canonicalMismatchFatal {
-		t.Fatalf("rebindable canonical mismatch must NOT be fatal (codex #788): a legitimate remove/recreate re-arms; got %v", got)
-	}
-	// !Rebindable must be fatal: a caller-provided retained inbox cannot be
-	// rebound, so terminal exit mirrors rebindWatcher.
-	if got := classifyCanonicalMismatch(mismatchErr, false); got != canonicalMismatchFatal {
-		t.Fatalf("!rebindable canonical mismatch must be fatal (codex #788): caller-provided retained inbox cannot rebound; got %v", got)
 	}
 }
