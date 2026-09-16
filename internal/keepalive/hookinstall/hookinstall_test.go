@@ -358,9 +358,10 @@ printf '%s\n' "$1" >> "$AMQ_KEEPALIVE_SLEEP_LOG"
 	binaryPath := writeExecutableBody(t, filepath.Join(dir, "amq-keepalive"), "#!/bin/sh\nsleep 30\n")
 	logPath := filepath.Join(dir, "session-start.log")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "bash", scriptPath)
+	// 9xv: no wall-clock context deadline. The script self-terminates via its
+	// internal reattach/stdin timeout (~1s); cmd.Run() returns on exit. The
+	// go test -timeout flag is the failure bound if the script regresses.
+	cmd := exec.Command("bash", scriptPath)
 	cmd.Env = append(os.Environ(),
 		"AMQ_KEEPALIVE_BIN="+binaryPath,
 		"AMQ_KEEPALIVE_LOG="+logPath,
@@ -412,9 +413,10 @@ printf '%s\n' "$1" >> "$AMQ_KEEPALIVE_SLEEP_LOG"
 	binaryPath := writeExecutableBody(t, filepath.Join(dir, "amq-keepalive"), "#!/bin/sh\nsleep 30\n")
 	logPath := filepath.Join(dir, "session-start.log")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "bash", scriptPath)
+	// 9xv: no wall-clock context deadline. The script self-terminates via its
+	// internal reattach/stdin timeout (~1s); cmd.Run() returns on exit. The
+	// go test -timeout flag is the failure bound if the script regresses.
+	cmd := exec.Command("bash", scriptPath)
 	cmd.Env = append(os.Environ(),
 		"AMQ_KEEPALIVE_BIN="+binaryPath,
 		"AMQ_KEEPALIVE_LOG="+logPath,
@@ -453,9 +455,10 @@ func TestSessionStartScriptDoesNotBlockOnOpenStdin(t *testing.T) {
 	binaryPath := writeExecutableBody(t, filepath.Join(dir, "amq-keepalive"), "#!/bin/sh\nexit 0\n")
 	logPath := filepath.Join(dir, "session-start.log")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "bash", scriptPath)
+	// 9xv: no wall-clock context deadline. The script self-terminates via its
+	// internal reattach/stdin timeout (~1s); cmd.Run() returns on exit. The
+	// go test -timeout flag is the failure bound if the script regresses.
+	cmd := exec.Command("bash", scriptPath)
 	reader, writer, err := os.Pipe()
 	if err != nil {
 		t.Fatalf("Pipe() error = %v", err)
