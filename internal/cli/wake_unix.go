@@ -453,6 +453,12 @@ func acquireWakeLockWithOptionsInDir(
 					return err
 				}
 			} else {
+				// byc: revalidate canonical identity before the targetless blind-unlink.
+				// A directory swap leaves the retained dirfd pointing at the detached
+				// OLD directory; unlinking there misses the canonical namespace. Refuse.
+				if err := validateWakeStateAgentDirAt(dirfd, agentDir); err != nil {
+					return err
+				}
 				_, targetExists, err := readWakeTargetAt(dirfd, agentDir, root, me)
 				if err != nil {
 					return fmt.Errorf("orphan wake target is unverified before targetless acquisition: %w", err)
@@ -646,6 +652,12 @@ func cleanupGenericWakeRepairFloorAt(
 	}
 	floor, exists, err := readWakeRepairFloorAt(dirfd, agentDir)
 	if err != nil || !exists || floor.Generation != created.Lock.Generation {
+		return err
+	}
+	// byc: revalidate canonical identity before the blind floor removal. A
+	// directory swap leaves the retained dirfd pointing at the detached OLD
+	// directory; removing there misses the canonical namespace. Refuse.
+	if err := validateWakeStateAgentDirAt(dirfd, agentDir); err != nil {
 		return err
 	}
 	return removeWakeRepairFloorGuardedAt(dirfd, agentDir)

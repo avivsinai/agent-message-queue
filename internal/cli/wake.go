@@ -462,6 +462,21 @@ func shouldDeferBeforeInject(cfg *wakeConfig, deferForInput bool) bool {
 func notifyNewMessages(cfg *wakeConfig) error {
 	inboxNew := fsq.AgentInboxNew(cfg.root, cfg.me)
 
+	// byc: before any authoritative read from the retained inbox, revalidate
+	// it is still the canonical namespace. A directory swap after admission
+	// leaves the retained FD pointing at the detached OLD directory; reading
+	// it would silently miss messages that land in the canonical inbox. Refuse
+	// rather than continuing on a detached namespace (the caller re-admits).
+	if cfg.retainedInbox != nil {
+		if validator, ok := cfg.retainedInbox.(interface{ ValidateCanonical() error }); ok {
+			if err := validator.ValidateCanonical(); err != nil {
+				return &wakeInboxScanError{
+					err: fmt.Errorf("wake inbox %s no longer matches retained authority: %w", inboxNew, err),
+				}
+			}
+		}
+	}
+
 	var entries []os.DirEntry
 	var err error
 	if cfg.retainedInbox != nil {
