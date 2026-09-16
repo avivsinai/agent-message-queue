@@ -980,14 +980,19 @@ func withoutEnv(env []string, keys ...string) []string {
 func writeSessionStartScript(t *testing.T, dir string) string {
 	t.Helper()
 	path := filepath.Join(dir, "hook.sh")
-	// Inject a PID file write after the reattach job is backgrounded.
-	// The script sets reattach_pid=$! immediately, so the PID is available
-	// before the binary starts. This gives the test a fixture-owned
-	// identity for the reattach process group at the earliest possible
-	// point — a proper ownership handshake, not a polling window.
+	// Inject a PID file write as the FIRST line inside the reattach
+	// subshell (before run_reattach). The subshell is the process-group
+	// leader (created by set -m), so $$ is the group leader PID. Writing
+	// it from inside the child — not from the parent after $! — is a
+	// proper ownership handshake:
+	//   - PID file exists → child group exists, we know its leader → kill it.
+	//   - PID file absent → child subshell hasn't started executing → no
+	//     group to kill.
+	// The parent's reattach_pid=$! assignment races with the child's
+	// first instruction; writing from the child eliminates that race.
 	body := strings.Replace(SessionStartScript,
-		"reattach_pid=$!\n",
-		"reattach_pid=$!\nif [ -n \"${AMQ_KEEPALIVE_PID_FILE:-}\" ]; then echo \"$reattach_pid\" > \"$AMQ_KEEPALIVE_PID_FILE\" 2>/dev/null || true; fi\n",
+		"    trap 'exit 143' TERM\n    run_reattach\n",
+		"    trap 'exit 143' TERM\n    if [ -n \"${AMQ_KEEPALIVE_PID_FILE:-}\" ]; then echo \"$$\" > \"$AMQ_KEEPALIVE_PID_FILE\" 2>/dev/null || true; fi\n    run_reattach\n",
 		1)
 	return writeExecutableBody(t, path, body)
 }
@@ -1483,10 +1488,14 @@ func TestSelfHealDedupKeysOnFullCommand(t *testing.T) {
 // reattach/stdin timeout (~1s). The failure bound only fires if the
 // script's watchdog regresses.
 //
-// Cleanup: reattachPidFile is a path the SCRIPT writes the reattach
-// group leader PID to (injected into the test copy of SessionStartScript
-// via writeSessionStartScript). The PID is written immediately after
-// reattach_pid=$!, before the binary starts — a proper ownership handshake.
+// Cleanup: reattachPidFile is a path the reattach subshell writes its
+// own PID ($$) to as its first instruction (injected into the test copy of
+// SessionStartScript via writeSessionStartScript). The subshell is the
+// process-group leader (created by set -m). Writing from inside the child —
+// not from the parent after $! — is a proper ownership handshake:
+//   - PID file exists → child group exists, we know its leader → kill it.
+//   - PID file absent → child subshell hasn't started executing → no group.
+//
 // On failure, we kill the outer group AND the specific reattach group —
 // both bounded single-syscall operations, no recursive process scanner.
 func runHookScriptBounded(t *testing.T, cmd *exec.Cmd, stdinWriter *os.File, reattachPidFile string, failureBound time.Duration) {
@@ -1499,9 +1508,10 @@ func runHookScriptBounded(t *testing.T, cmd *exec.Cmd, stdinWriter *os.File, rea
 		t.Fatalf("start hook script: %v", err)
 	}
 
-	// Read the reattach PID from the fixture-owned file. The script writes
-	// reattach_pid immediately after backgrounding, before the binary starts.
-	// The reader sends the PID on pidCh; there is no shared mutable state.
+	// Read the reattach PID from the child-written file. The subshell writes
+	// $$ (its own PID = group leader) as its first instruction, before
+	// run_reattach. The reader sends the PID on pidCh; there is no shared
+	// mutable state.
 	pidCh := make(chan int, 1)
 	pidStop := make(chan struct{})
 	go func() {
@@ -1538,12 +1548,11 @@ func runHookScriptBounded(t *testing.T, cmd *exec.Cmd, stdinWriter *os.File, rea
 		}
 	case <-timer.C:
 		// Failure path: receive the reattach PID from the reader (bounded).
-		// The script writes reattach_pid to the PID file immediately after $!,
-		// before the binary starts. If the PID is not available within the
-		// receive window, the script has not reached "reattach_pid=$!" yet,
-		// meaning the reattach group has not been created — there is genuinely
-		// nothing to kill. This is a proper ownership handshake, not an
-		// inference from an empty channel.
+		// The subshell writes $$ as its first instruction. If the PID is not
+		// available within the receive window, the subshell hasn't started
+		// executing yet — its process group doesn't exist, so there is
+		// genuinely nothing to kill. This is a proper ownership handshake,
+		// not an inference from an empty channel.
 		var reattachPid int
 		select {
 		case reattachPid = <-pidCh:
