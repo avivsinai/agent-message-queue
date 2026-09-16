@@ -215,13 +215,27 @@ func TargetID(threadID string) string {
 	return "codex:" + strings.ReplaceAll(threadID, "-", "")
 }
 
+// isLostStateStatus reports whether a raw codex thread status indicates
+// lost track state (the thread is not loaded or in a system error). Shared
+// between threadStatus (for the Inspect mapping) and the lost-state gate
+// (for clearing activeTurn + bumping the generation). Keep this as the
+// single source of truth so a new lost-track status is added once (2pt).
+func isLostStateStatus(status string) bool {
+	switch status {
+	case "notLoaded", "systemError":
+		return true
+	}
+	return false
+}
+
 func threadStatus(t string) string {
 	switch t {
 	case "idle":
 		return "idle"
 	case "active":
 		return "busy"
-	case "notLoaded", "systemError":
+	}
+	if isLostStateStatus(t) {
 		return "unknown"
 	}
 	return "unknown"
@@ -1033,12 +1047,14 @@ func (a *Attachment) onNotification(n Notification) {
 		// status meaning "still running" would then clear a LIVE turn's
 		// activeTurn and Submit would issue turn/start into it (verifier
 		// round-1 blocker). Only the enumerated lost-track statuses clear;
-		// unrecognised statuses are left untouched.
-		switch p.Status.Type {
-		case "notLoaded", "systemError":
+		// unrecognised statuses are left untouched. isLostStateStatus is the
+		// shared source of truth (2pt): threadStatus and this gate use the
+		// same helper, so a new lost-track status is added once.
+		status := p.Status.Type
+		if isLostStateStatus(status) {
 			a.activeTurn = ""
 			a.lostStateGen++
-		case "idle":
+		} else if status == "idle" {
 			a.activeTurn = ""
 		}
 		a.mu.Unlock()
