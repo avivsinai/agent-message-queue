@@ -1533,7 +1533,14 @@ func runHookScriptBounded(t *testing.T, cmd *exec.Cmd, stdinWriter *os.File, rea
 	case <-timer.C:
 		// Failure path: stop the PID reader, then kill both groups.
 		close(pidStop)
-		<-pidDone
+		// Wait for the reader to finish (bounded). If the reattach group
+		// started but the PID file hasn't been read yet, give the reader
+		// a short grace period to report it so cleanup doesn't skip the
+		// surviving group.
+		select {
+		case <-pidDone:
+		case <-time.After(500 * time.Millisecond):
+		}
 		if cmd.Process != nil {
 			_ = killProcessGroup(cmd.Process.Pid)
 		}
