@@ -385,14 +385,36 @@ func (c *Carrier) recoverCur(root *fsq.DeliveryRoot) error {
 	sort.Strings(names)
 	var errs []error
 	for _, name := range names {
-		// 611.22.46: skip entries quarantined by identical repeated failures so
-		// one permanently unreadable cur entry stops forcing a full O(cur)
-		// rescan every tick. The entry stays on disk; amq tooling owns DLQ.
+		// 611.22.46: a cur entry whose source read has failed identically
+		// curFailureCap times is quarantined from the FULL recoverOne pass
+		// (receipt/ledger/reply work), so one permanently unreadable entry
+		// stops forcing the full O(cur) rescan's per-entry cost every tick.
+		// But the cap must NOT permanently suppress a repaired entry: each
+		// tick we re-probe the source read (cheap). If it now succeeds, the
+		// cap is cleared and the full recovery runs this tick. If it still
+		// fails identically, the entry stays capped (no expensive work).
 		if c.curFailureCapped(name) {
-			continue
+			if _, perr := format.ReadMessageFileRoot(root, filepath.Join(curDir, name)); perr == nil {
+				// The source is readable again: clear the cap and fall through to
+				// the full recoverOne below so the pending reply is delivered.
+				c.clearCurFailure(name)
+			} else {
+				// Still unreadable: skip the expensive recovery, but record the
+				// continued failure so the count stays current (a later change
+				// in error character resets it).
+				c.recordCurFailure(name, &errCurSourceReadFailed{err: perr})
+				continue
+			}
 		}
 		if err := c.recoverOne(root, curDir, name); err != nil {
-			c.recordCurFailure(name, err)
+			// Cap ONLY source-read failures (errCurSourceReadFailed). Receipt,
+			// ledger, and reply-routing failures owe recovery work that must
+			// stay eligible every tick until it converges — capping them would
+			// convert a performance fix into lost recovery.
+			var srcErr *errCurSourceReadFailed
+			if errors.As(err, &srcErr) {
+				c.recordCurFailure(name, srcErr)
+			}
 			errs = append(errs, fmt.Errorf("%s: %w", name, err))
 		} else {
 			c.clearCurFailure(name)
@@ -488,7 +510,10 @@ func (c *Carrier) recoverOne(root *fsq.DeliveryRoot, curDir, name string) error 
 		if !readFailed(err) {
 			return nil
 		}
-		return err
+		// 611.22.46: wrap as a source-read failure so recoverCur's cap applies
+		// ONLY here — not to receipt/ledger/reply failures below, which owe
+		// recovery work that must stay eligible every tick.
+		return &errCurSourceReadFailed{err: err}
 	}
 	// A receipt we can READ proves the case was closed. A receipt that is
 	// MISSING, or that EXISTS BUT DOES NOT PARSE, proves nothing: an
@@ -1208,6 +1233,17 @@ func (c *Carrier) finalizeDelivery(dest *fsq.DeliveryRoot, to, id string, data [
 
 // readFailed distinguishes a read that FAILED (the world is unavailable:
 // retry) from an entry that is absent or malformed (nothing to retry).
+// errCurSourceReadFailed wraps a failure to read a cur entry's source
+// message file (format.ReadMessageFileRoot). It is the ONLY failure class
+// the 611.22.46 sweep cap suppresses: the file is present on disk but cannot
+// be read (EACCES/EIO/ESTALE). Receipt writes, ledger reads, and reply
+// routing/delivery failures are NOT source-read failures — they owe
+// recovery work that must stay eligible every tick until it converges.
+type errCurSourceReadFailed struct{ err error }
+
+func (e *errCurSourceReadFailed) Error() string { return e.err.Error() }
+func (e *errCurSourceReadFailed) Unwrap() error { return e.err }
+
 func readFailed(err error) bool {
 	if err == nil || errors.Is(err, fs.ErrNotExist) || errors.Is(err, format.ErrMessageTooLarge) {
 		return false
