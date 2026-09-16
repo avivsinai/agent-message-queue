@@ -1055,9 +1055,10 @@ func (e *Endpoint) onNative(targetID string, ev NativeEvent) {
 	// ack memo (commitLocked) has already made the intent replayable, so a
 	// wedged attachment ack must not stall command handling, and a crash
 	// mid-ack is recoverable via replayTerminalAck. Publication itself also
-	// runs outside e.mu (611.22.48): publishLocked claims the visible-revision
-	// slot under the lock, snapshots, releases e.mu for the carrier publish
-	// (maildir open + fsync), then re-acquires for MarkPublished.
+	// runs outside e.mu (611.22.48): publishLocked claims the publishing slot
+	// under the lock, snapshots, releases e.mu for the carrier publish
+	// (maildir open + fsync), then re-acquires for MarkPublished. visible
+	// advances only after successful delivery.
 	var ackAtt Attachment
 	if ackDigest != "" {
 		if t, ok := e.targets[targetID]; ok {
