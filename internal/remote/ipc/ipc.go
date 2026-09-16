@@ -63,6 +63,19 @@ type ErrorBody struct {
 	Message string `json:"message"`
 }
 
+// maxUnixSocketPathLen is the conservative maximum length for a Unix domain
+// socket path. Linux sun_path is 108 bytes; macOS is 104. We use 104 as the
+// safe upper bound so the same check works on both. A path at or beyond this
+// length fails bind with a bare EINVAL on Unix, which is hard to diagnose
+// (611.23). The typed error lets the caller produce a helpful message or
+// fall back to a shorter path.
+const maxUnixSocketPathLen = 104
+
+// ErrSocketPathTooLong is returned by Listen when the computed socket path
+// would exceed the Unix sun_path limit, which would cause bind to fail with
+// a bare EINVAL (611.23).
+var ErrSocketPathTooLong = errors.New("socket path exceeds unix sun_path limit")
+
 // SocketPath returns the endpoint socket for a state directory. Unix socket
 // paths are short-lived and length-limited, so the socket lives beside the
 // state directory's lock rather than deep inside a mailbox tree.
@@ -81,6 +94,9 @@ type Server struct {
 // from a dead endpoint is removed only after a connect attempt fails.
 func Listen(stateDir string, ep *core.Endpoint) (*Server, error) {
 	path := SocketPath(stateDir)
+	if len(path) >= maxUnixSocketPathLen {
+		return nil, fmt.Errorf("%w: %s (%d >= %d)", ErrSocketPathTooLong, path, len(path), maxUnixSocketPathLen)
+	}
 	if _, err := os.Stat(path); err == nil {
 		conn, err := net.DialTimeout("unix", path, 200*time.Millisecond)
 		if err == nil {
