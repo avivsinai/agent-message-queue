@@ -8,6 +8,17 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.78.9](https://github.com/avivsinai/agent-message-queue/compare/v0.78.8...v0.78.9) (2026-09-16)
+
+
+### Bug Fixes
+
+* **611.23:** pre-bind sun_path length check with typed error ([#792](https://github.com/avivsinai/agent-message-queue/issues/792)) ([c20cac3](https://github.com/avivsinai/agent-message-queue/commit/c20cac399b20fd3f3b92883afe042875e7f605c8))
+* **7ra:** scrub parent environment before spawning wake child process ([#790](https://github.com/avivsinai/agent-message-queue/issues/790)) ([92efbb3](https://github.com/avivsinai/agent-message-queue/commit/92efbb39f78a0dfb38843a5da93a6cdac97f88ce))
+* **fdf:** widen inject timeout from 1s to 5s in wall-clock-sensitive wake tests ([#794](https://github.com/avivsinai/agent-message-queue/issues/794)) ([2095868](https://github.com/avivsinai/agent-message-queue/commit/20958682e8c4977cae71af70a46876dc0d5e7aca))
+* **pgn:** guide user to recovery when wake cleanup hits changed-stage refusal ([#797](https://github.com/avivsinai/agent-message-queue/issues/797)) ([0351e24](https://github.com/avivsinai/agent-message-queue/commit/0351e24c1a3efd564b50965f87229f7b007649ca))
+* **t64:** persist degraded notifier status on attention-only fallback ([#796](https://github.com/avivsinai/agent-message-queue/issues/796)) ([c65d3df](https://github.com/avivsinai/agent-message-queue/commit/c65d3df8e395bd9d9ee51fd9738494e828c90489))
+
 ## [0.78.8](https://github.com/avivsinai/agent-message-queue/compare/v0.78.7...v0.78.8) (2026-09-16)
 
 
