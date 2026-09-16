@@ -1553,13 +1553,15 @@ func (e *Endpoint) replayTerminalAck(rec *requests.Record) error {
 	// attachment retains nothing in memory by construction, so history
 	// evidence IS proof the run terminated — this is the pre-upgrade
 	// convergence path (Acknowledged=false on every shipped record).
-	// The history result carries the NativeRef ("codex thread <id> turn
-	// <id>") the live result did not, so the compare uses the
-	// NativeRef-stable digest on the evidence side; the memoed AckDigest
-	// was bound from the live (NativeRef-free) result, which is already the
-	// stable shape — both sides now compute the same bounded form.
+	// The memoed AckDigest is the FULL digest of the live result, and codex
+	// sets NativeRef on the live turn/completed result too, so the memo may
+	// or may not carry a NativeRef while the history result always does.
+	// Compare both sides in the NativeRef-stable form, recomputed from the
+	// record's own stored result; the full digest is still what the
+	// attachment is asked to release, because its own compare is full-shape
+	// (post-merge verification of #767, agent-message-queue-611.22.34).
 	if ev.Class == EvidenceHistoryTerminated && ev.State.Terminal() && ev.Result != nil {
-		if protocol.EvidenceDigestStable(ev.Result) != digest {
+		if rec.Result == nil || protocol.EvidenceDigestStable(ev.Result) != protocol.EvidenceDigestStable(rec.Result) {
 			// The history outcome is not the outcome this record acked; a
 			// stale or foreign ack must never release different evidence.
 			return nil
