@@ -151,9 +151,15 @@ func TestB48PendingPublishNotMarkedDelivered(t *testing.T) {
 		}
 	})
 	var calls int32
+	var pubStartedOnce sync.Once
 	heldPublish := func(s protocol.Snapshot, origin map[string]string) error {
 		atomic.AddInt32(&calls, 1)
-		close(pubStarted)
+		// B784-1 fix: the finishing publisher now chains skipped revisions
+		// (a second publishRevision for the same key), so the held publish
+		// can run more than once. close() must be once-only; every entry
+		// holds until releasePub (drain is serialized per key, so holders
+		// queue and all complete when it closes).
+		pubStartedOnce.Do(func() { close(pubStarted) })
 		<-releasePub
 		return nil
 	}

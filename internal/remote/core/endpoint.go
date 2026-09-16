@@ -109,6 +109,14 @@ type Endpoint struct {
 	// it here and leave the work pending for the next Reconcile/Tick. The
 	// owner clears only its own entry on completion (611.22.48).
 	publishing map[requests.Key]bool
+	// pubPending counts accepted-but-skipped publication obligations: a
+	// publishLocked caller that hit publishing[key] left a NEWER revision
+	// unpublished. Each such caller registers one obligation here; the
+	// finishing publisher of that key adopts (decrements and republishes)
+	// them, so every accepted revision is covered by exactly one obligation —
+	// its own in-flight attempt or a chained one — and Close's drain waits
+	// for the total (Astra B784-1, 611.22.48 follow-up).
+	pubPending map[requests.Key]int
 	// B13 lifecycle: state transitions accepting -> draining -> closed.
 	// inFlight counts handlers between entry (registerInFlight) and exit
 	// (releaseInFlight). drained is a condition variable Close waits on.
@@ -147,6 +155,7 @@ func New(cfg Config) *Endpoint {
 		compactHorizon: cfg.CompactHorizon,
 		visible:        map[requests.Key]int64{},
 		publishing:     map[requests.Key]bool{},
+		pubPending:     map[requests.Key]int{},
 		state:          stateAccepting,
 		drainTO:        drainTimeout,
 	}
@@ -2311,10 +2320,18 @@ func (e *Endpoint) publishLocked(rec *requests.Record) {
 	// count as delivered.
 	if e.visible[key] < rec.Revision {
 		// Serialize per-key publication: if another caller is already
-		// publishing this key, leave the work pending for the next
-		// Reconcile/Tick. Per-key serialization prevents two concurrent
-		// publishes for the same key without holding the global endpoint mutex.
+		// publishing this key, register a pending obligation for this NEWER
+		// revision so the finishing publisher chains it. This prevents two
+		// concurrent publishes for the same key (different revisions
+		// included) without holding the global endpoint mutex (611.22.48
+		// P1-2) while guaranteeing the skipped revision is still covered by
+		// exactly one drain obligation (Astra B784-1): the finishing
+		// publisher adopts it and republishes before Close's drain can
+		// complete. Outside a shutdown drain the next Tick/Reconcile would
+		// also retry it, but registering the obligation uniformly keeps the
+		// invariant in every state.
 		if e.publishing[key] {
+			e.pubPending[key]++
 			return
 		}
 		if e.crashAt(PointBeforePublish) != nil {
@@ -2348,6 +2365,27 @@ func (e *Endpoint) publishLocked(rec *requests.Record) {
 		// (publishing serialized per key), so a concurrent caller's reservation
 		// is never clobbered.
 		delete(e.publishing, key)
+		// Adopt skipped newer revisions for this key (Astra B784-1): while we
+		// published, later revisions were accepted and registered pubPending
+		// obligations. Chain them via a fresh publishRevision cycle (its own
+		// inFlight++/-- keeps the drain count balanced) until the newest
+		// revision is published.
+		pending := e.pubPending[key]
+		delete(e.pubPending, key)
+		if pending > 0 && pubErr == nil && e.state != stateClosed {
+			// Chain the skipped revisions: republish the newest durable
+			// revision for this key via a fresh publishRevision cycle (its
+			// own inFlight++/-- keeps the drain count balanced; it runs the
+			// publish outside e.mu exactly like this attempt). The record is
+			// re-read from the store so the newest accepted revision is
+			// what publishes. publishLocked's visible guard prevents double
+			// delivery. publishRevision re-locks, so drop e.mu first.
+			e.mu.Unlock()
+			if cur, ok, gerr := e.store.Get(key); gerr == nil && ok {
+				e.publishRevision(cur)
+			}
+			e.mu.Lock()
+		}
 		if pubErr != nil {
 			// Publication failed: do NOT advance visible/PublishedRevision. The
 			// next Reconcile retries the delivery (visible[key] was never set,
