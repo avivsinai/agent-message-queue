@@ -1164,9 +1164,44 @@ func (c *Carrier) ledgerDir() string {
 	return filepath.Join(c.root, "agents", c.me, "extensions", "remote", "replies")
 }
 
+// validateLedgerID guards the reply ledger against a malformed message id:
+// the ledger file is built as <msgID>.json under ledgerDir, so an id carrying
+// a path separator, a dotfile prefix, "..", a NUL byte, or an absolute path
+// would escape the ledger directory (path traversal) or collide with the
+// wrong file. readLedger and writeLedger MUST both call this — writeLedger
+// had no validation at all, and readLedger returned (nil, nil) on an invalid
+// id, silently dropping a ledger that should have been re-delivered
+// (agent-message-queue-611.22.44). The id is the base name only; the .json
+// suffix is constructed internally and never taken from the caller.
+func validateLedgerID(msgID string) error {
+	if msgID == "" {
+		return fmt.Errorf("empty ledger id")
+	}
+	if strings.HasPrefix(msgID, ".") {
+		return fmt.Errorf("dotfile ledger id is not allowed")
+	}
+	if filepath.IsAbs(msgID) {
+		return fmt.Errorf("absolute ledger id is not allowed")
+	}
+	if strings.Contains(msgID, "/") || strings.Contains(msgID, "\\") {
+		return fmt.Errorf("path separators are not allowed in ledger id")
+	}
+	if strings.Contains(msgID, "\x00") {
+		return fmt.Errorf("NUL byte is not allowed in ledger id")
+	}
+	if msgID == "." || msgID == ".." {
+		return fmt.Errorf("path traversal is not allowed in ledger id")
+	}
+	return nil
+}
+
 func (c *Carrier) readLedger(msgID string) (*replyRecord, error) {
-	if err := fsq.ValidateMessageFilename(msgID + ".md"); err != nil {
-		return nil, nil
+	if err := validateLedgerID(msgID); err != nil {
+		// 611.22.44: do NOT return (nil, nil) — that silently dropped a
+		// ledger lookup for a malformed id, so a reply that should have
+		// been re-delivered was treated as "no ledger" and a fresh one
+		// written over it. Surface the error so the caller can decide.
+		return nil, fmt.Errorf("reply ledger id: %w", err)
 	}
 	data, err := os.ReadFile(filepath.Join(c.ledgerDir(), msgID+".json"))
 	if err != nil {
@@ -1183,6 +1218,12 @@ func (c *Carrier) readLedger(msgID string) (*replyRecord, error) {
 }
 
 func (c *Carrier) writeLedger(msgID string, rec *replyRecord) error {
+	if err := validateLedgerID(msgID); err != nil {
+		// 611.22.44: writeLedger had NO filename validation — an id carrying
+		// a path separator or ".." would write outside ledgerDir (path
+		// traversal). Reject before touching the filesystem.
+		return fmt.Errorf("reply ledger id: %w", err)
+	}
 	if err := os.MkdirAll(c.ledgerDir(), 0o700); err != nil {
 		return fmt.Errorf("reply ledger: %w", err)
 	}
