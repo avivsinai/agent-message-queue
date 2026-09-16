@@ -8,6 +8,14 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.78.8](https://github.com/avivsinai/agent-message-queue/compare/v0.78.7...v0.78.8) (2026-09-16)
+
+
+### Bug Fixes
+
+* **65s:** bind Darwin control listener under lifecycle guard + revalidate ([#787](https://github.com/avivsinai/agent-message-queue/issues/787)) ([a6e0c25](https://github.com/avivsinai/agent-message-queue/commit/a6e0c25e53b488818e05483a1c62700d84fda30f))
+* **byc:** revalidate canonical wake namespace before authoritative reads + blind-unlinks ([#788](https://github.com/avivsinai/agent-message-queue/issues/788)) ([57eeb40](https://github.com/avivsinai/agent-message-queue/commit/57eeb401c9cd7855dd4335278626668f2d213dfc))
+
 ## [0.78.7](https://github.com/avivsinai/agent-message-queue/compare/v0.78.6...v0.78.7) (2026-09-16)
 
 
