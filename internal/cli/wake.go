@@ -211,6 +211,28 @@ func newWakeOwnershipLoss(reason string) error {
 	return &wakeOwnershipLossError{reason: reason}
 }
 
+// wakeInboxCanonicalMismatchError signals the retained wake inbox no longer
+// matches the canonical namespace (a directory swap detached it). It is
+// DISTINCT from wakeInboxScanError: the caller (runWakeLoop) checks
+// errors.As(scanErr) FIRST and routes wakeInboxScanError to ordinary scan
+// retry (looping on the same detached inbox). wakeInboxCanonicalMismatchError
+// must NOT match *wakeInboxScanError so the caller falls through to
+// classifyWakeFailure, which returns wakeFailureFatal — terminal exit /
+// re-admission, not ordinary retry (codex #788).
+type wakeInboxCanonicalMismatchError struct {
+	detachedPath string
+	cause        error
+}
+
+func (err *wakeInboxCanonicalMismatchError) Error() string {
+	if err.cause != nil {
+		return fmt.Sprintf("wake inbox %s no longer matches retained authority: %v", err.detachedPath, err.cause)
+	}
+	return fmt.Sprintf("wake inbox %s no longer matches retained authority", err.detachedPath)
+}
+
+func (err *wakeInboxCanonicalMismatchError) Unwrap() error { return err.cause }
+
 type wakeTerminalPartialProgressError struct {
 	err error
 }
@@ -513,10 +535,12 @@ func notifyNewMessages(cfg *wakeConfig) error {
 						err: fmt.Errorf("wake inbox %s no longer matches retained authority: %w", inboxNew, err),
 					}
 				}
-				return newWakeOwnershipLoss(fmt.Sprintf(
-					"wake inbox %s no longer matches retained authority: %v",
-					inboxNew, err,
-				))
+				// codex #788: !rebindable retained inbox cannot be rebound. Return a
+				// dedicated wakeInboxCanonicalMismatchError (NOT wakeInboxScanError)
+				// so the caller's errors.As(scanErr) check does NOT match and it
+				// falls through to classifyWakeFailure -> wakeFailureFatal
+				// (terminal exit), mirroring rebindWatcher's handling.
+				return &wakeInboxCanonicalMismatchError{detachedPath: inboxNew, cause: err}
 			}
 		}
 	}
