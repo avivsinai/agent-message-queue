@@ -149,6 +149,15 @@ func MoveToDLQ(root *DeliveryRoot, agent, filename, originalID, failureReason, f
 	)
 }
 
+// MoveNewToDLQ moves an inbox/new message directly to dlq/new WITHOUT first
+// claiming it to cur. Used when the claim itself failed permanently
+// (PermanentClaimError, agent-message-queue-611.22.42): the message is still
+// in new and the claim's Lstat-of-source is unusable, so re-claiming via
+// MoveToDLQ would re-fault. This reads new directly and envelopes it.
+func MoveNewToDLQ(root *DeliveryRoot, agent, filename, originalID, failureReason, failureDetail string) (string, error) {
+	return moveInboxMessageToDLQ(root, agent, BoxNew, BoxNew, filename, originalID, failureReason, failureDetail)
+}
+
 // MoveCurToDLQ moves an already-claimed inbox/cur message to dlq/new.
 func MoveCurToDLQ(root *DeliveryRoot, agent, filename, originalID, failureReason, failureDetail string) (string, error) {
 	return moveInboxMessageToDLQ(root, agent, BoxCur, BoxCur, filename, originalID, failureReason, failureDetail)

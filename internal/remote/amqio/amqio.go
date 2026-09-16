@@ -60,6 +60,10 @@ type Carrier struct {
 	// DeliveryRoot the carrier opens, so Publish (which opens its own root)
 	// can be tested for CommittedDurabilityError propagation (B10).
 	syncDirFaultForTest func(dir string) error
+	// lstatFaultForTest is a test hook that injects a fault into every
+	// DeliveryRoot the carrier opens' Lstat, so the claim path can be tested
+	// for PermanentClaimError → DLQ (611.22.42).
+	lstatFaultForTest func(name string) error
 
 	// owedReceipts are DLQ receipts whose message already left inbox/new but
 	// whose receipt write failed. Nothing revisits a DLQ'd command, so the
@@ -101,6 +105,14 @@ func (c *Carrier) SetReplyRouter(r ReplyRouter) { c.router = r }
 // through the real Publish path (which opens its own root internally).
 func (c *Carrier) SetSyncDirFaultForTest(fn func(dir string) error) {
 	c.syncDirFaultForTest = fn
+}
+
+// SetLstatFaultForTest installs an Lstat fault into every DeliveryRoot the
+// carrier opens. Used by the 611.22.42 regression to force a non-ENOENT Lstat
+// failure on the claim source after a rename collision, so the carrier
+// classifies the claim as permanent and DLQs the message.
+func (c *Carrier) SetLstatFaultForTest(fn func(name string) error) {
+	c.lstatFaultForTest = fn
 }
 
 // errNoReplyRoute reports that a cross-project reply cannot be routed.
@@ -237,6 +249,9 @@ func (c *Carrier) ImportOnce() (int, error) {
 	}
 	if c.syncDirFaultForTest != nil {
 		root.SetSyncDirFaultForTest(c.syncDirFaultForTest)
+	}
+	if c.lstatFaultForTest != nil {
+		root.SetLstatFaultForTest(c.lstatFaultForTest)
 	}
 	defer func() { _ = root.Close() }()
 	err = c.flushOwedReceipts(root)
@@ -723,6 +738,30 @@ func (c *Carrier) importOne(root *fsq.DeliveryRoot, name string) (bool, error) {
 	if err := fsq.MoveNewToCur(root, c.me, name); err != nil {
 		var committed *fsq.CommittedDurabilityError
 		if !errors.As(err, &committed) {
+			// 611.22.42: a PermanentClaimError (non-ENOENT Lstat after a
+			// collision — EACCES, EIO, ESTALE) is not retryable: the next
+			// tick re-claims the same bytes and fails the same way. DLQ the
+			// message (with a receipt, same as a poison route) instead of
+			// leaving it in new to loop forever. A clean loss (ENOENT) and
+			// a recoverable collision (ClaimCollisionError) are NOT
+			// permanent and stay on their existing paths.
+			var permanent *fsq.PermanentClaimError
+			if errors.As(err, &permanent) {
+				if _, dlqErr := fsq.MoveNewToDLQ(root, c.me, name, msg.Header.ID, "permanent claim failure", err.Error()); dlqErr != nil {
+					return false, fmt.Errorf("dlq %s: %w (claim error: %v)", name, dlqErr, err)
+				}
+				rc := receipt.New(msg.Header.ID, msg.Header.Thread, msg.Header.From, c.me, receipt.StageDLQ, "permanent claim failure: "+err.Error())
+				if rerr := receipt.EmitDeliveryRoot(root, rc); rerr != nil {
+					c.mu.Lock()
+					if c.owedReceipts == nil {
+						c.owedReceipts = map[string]receipt.Receipt{}
+					}
+					c.owedReceipts[msg.Header.ID] = rc
+					c.mu.Unlock()
+					return false, fmt.Errorf("dlq receipt %s: %w", name, rerr)
+				}
+				return true, nil // DLQ'd — the message is no longer in new
+			}
 			return false, fmt.Errorf("claim %s: %w", name, err)
 		}
 	}
@@ -770,6 +809,9 @@ func (c *Carrier) Publish(snap protocol.Snapshot, origin map[string]string) erro
 	}
 	if c.syncDirFaultForTest != nil {
 		root.SetSyncDirFaultForTest(c.syncDirFaultForTest)
+	}
+	if c.lstatFaultForTest != nil {
+		root.SetLstatFaultForTest(c.lstatFaultForTest)
 	}
 	defer func() { _ = root.Close() }()
 	return c.replyWith(root, origin, subjectPrefix+string(snap.State), snap, nil)

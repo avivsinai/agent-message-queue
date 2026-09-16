@@ -77,7 +77,7 @@ func claimRename(root *DeliveryRoot, newPath, curPath string) error {
 		return nil
 	}
 
-	newInfo, statErr := root.root.Lstat(newPath)
+	newInfo, statErr := root.lstat(newPath)
 	if statErr != nil {
 		if os.IsNotExist(statErr) {
 			return os.ErrNotExist
@@ -90,9 +90,13 @@ func claimRename(root *DeliveryRoot, newPath, curPath string) error {
 				return os.ErrNotExist
 			}
 		}
-		return fmt.Errorf("inspect claim source after collision: %w", statErr)
+		return &PermanentClaimError{Err: fmt.Errorf("inspect claim source after collision: %w", statErr)}
 	}
-	curInfo, statErr := root.root.Lstat(curPath)
+	// 611.22.42: a non-ENOENT Lstat after a collision is not retryable and
+	// not a recoverable collision — the next tick re-claims the same bytes
+	// and fails the same way. Classify as permanent so the carrier DLQs the
+	// message (parity with the POSIX claim path).
+	curInfo, statErr := root.lstat(curPath)
 	if statErr != nil {
 		return fmt.Errorf("inspect claim destination after collision: %w", statErr)
 	}
@@ -195,7 +199,7 @@ func setClaimSourceDisposition(source windows.Handle) error {
 // failure keeps the loud error, with the inspection error returned so callers
 // can join both causes.
 func claimSourceNameGone(root *DeliveryRoot, newPath string) (bool, error) {
-	_, err := root.root.Lstat(newPath)
+	_, err := root.lstat(newPath)
 	if err == nil {
 		return false, nil
 	}

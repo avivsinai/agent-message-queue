@@ -2,6 +2,25 @@ package fsq
 
 import "fmt"
 
+// PermanentClaimError is returned when an exclusive claim cannot succeed for a
+// reason that is NOT a clean loss (ENOENT) and NOT a recoverable collision
+// (ClaimCollisionError): the source became unreadable mid-claim (EACCES,
+// EIO, ESTALE on the Lstat that follows a collision). Such a claim is not
+// retryable on the next tick — the same bytes will fail the same way — so the
+// carrier must classify it as poison and DLQ the message rather than leave it
+// in new to be re-claimed forever (agent-message-queue-611.22.42). Defined in
+// this build-tag-neutral file so both the POSIX and Windows claim paths can
+// return it and amqio's cross-platform build sees the symbol on every GOOS.
+type PermanentClaimError struct {
+	Err error
+}
+
+func (e *PermanentClaimError) Error() string {
+	return fmt.Sprintf("permanent claim failure: %v", e.Err)
+}
+
+func (e *PermanentClaimError) Unwrap() error { return e.Err }
+
 // ClaimCollisionError reports a claim rename that found the destination name
 // already present. Normal AMQ flows never hold the same filename in both
 // inbox/new and inbox/cur — a committed claim removes new, and DLQ retry

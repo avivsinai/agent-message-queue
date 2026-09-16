@@ -25,11 +25,15 @@ func claimRename(root *DeliveryRoot, newPath, curPath string) error {
 	if !errors.Is(err, os.ErrExist) {
 		return err
 	}
-	if _, statErr := root.root.Lstat(newPath); statErr != nil {
+	if _, statErr := root.lstat(newPath); statErr != nil {
 		if os.IsNotExist(statErr) {
 			return os.ErrNotExist
 		}
-		return fmt.Errorf("inspect claim source after collision: %w", statErr)
+		// 611.22.42: a non-ENOENT Lstat (EACCES, EIO, ESTALE) is not a clean
+		// loss and not a recoverable collision — the next tick re-claims the
+		// same bytes and fails the same way. Classify as permanent so the
+		// carrier DLQs the message instead of looping in new forever.
+		return &PermanentClaimError{Err: fmt.Errorf("inspect claim source after collision: %w", statErr)}
 	}
 	return &ClaimCollisionError{
 		NewPath: root.displayPath(newPath),

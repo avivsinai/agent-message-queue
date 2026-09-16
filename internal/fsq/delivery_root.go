@@ -35,7 +35,8 @@ type DeliveryRoot struct {
 	batchLease *pinnedBatchLease
 	borrowed   bool
 
-	syncDirForTest func(string) error
+	syncDirForTest    func(string) error
+	lstatFaultForTest func(name string) error
 }
 
 type pinnedBatchLease struct {
@@ -60,6 +61,26 @@ func (e *DirectChildExistsError) Error() string {
 // delivery, and keep it deterministic (no sleeps, no goroutines).
 func (r *DeliveryRoot) SetSyncDirFaultForTest(fn func(dir string) error) {
 	r.syncDirForTest = fn
+}
+
+// SetLstatFaultForTest replaces this root's Lstat with fn (nil restores the
+// platform Lstat). Used by the 611.22.42 regression to force a non-ENOENT
+// Lstat failure on the claim source after a rename collision, so the carrier
+// classifies the claim as permanent (PermanentClaimError) and DLQs the message
+// instead of looping in new forever. Install right after OpenDeliveryRoot,
+// before any delivery; keep it deterministic.
+func (r *DeliveryRoot) SetLstatFaultForTest(fn func(name string) error) {
+	r.lstatFaultForTest = fn
+}
+
+// lstat stats name through the root, honoring the test fault hook.
+func (r *DeliveryRoot) lstat(name string) (os.FileInfo, error) {
+	if r.lstatFaultForTest != nil {
+		if err := r.lstatFaultForTest(name); err != nil {
+			return nil, err
+		}
+	}
+	return r.root.Lstat(name)
 }
 
 // beforeCreateDirectChildExclusiveForTest runs after VerifyBase and before
