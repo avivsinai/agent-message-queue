@@ -1852,6 +1852,12 @@ func deliverWakeAttentionOnly(cfg *wakeConfig, payload wakePayload) error {
 		return err
 	}
 	cfg.lastAttemptAttention = true
+	// t64: persist degraded status so `amq doctor --ops` can distinguish a
+	// fully-injecting wake from one that fell back to attention-only. Without
+	// this, doctor reports healthy while the operator only gets a stderr BEL.
+	if err := persistWakeNotifierStatus(cfg, "degraded", effectiveInjectMode(cfg), "attention-only fallback"); err != nil {
+		_ = writeWakeDiagnostic(cfg, "amq wake: record attention-only degraded status: %v\n", err)
+	}
 	return nil
 }
 
