@@ -1,6 +1,7 @@
 package core_test
 
 import (
+	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -11,6 +12,11 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 	"github.com/avivsinai/agent-message-queue/internal/remote/requests"
 )
+
+// b48Timeout is the bound on every channel wait in these tests. A correct
+// implementation never hits it; a regression (hang) fails the test instead of
+// stranding the suite (611.22.48 P2).
+const b48Timeout = 10 * time.Second
 
 // TestB48PublishDoesNotBlockConcurrentHandles reproduces
 // agent-message-queue-611.22.48: carrier.Publish (the maildir open + fsync)
@@ -32,6 +38,9 @@ func TestB48PublishDoesNotBlockConcurrentHandles(t *testing.T) {
 	// Hold the first publisher on a channel; the second proceeds independently.
 	firstStarted := make(chan struct{})
 	releaseFirst := make(chan struct{})
+	// Unconditional safe release: if a fatal assertion strands the held
+	// publisher, t.Cleanup releases it so the suite does not hang (P2).
+	t.Cleanup(func() { select { case <-releaseFirst: default: close(releaseFirst) } })
 	var firstMu sync.Mutex
 	firstKey := "11111111-1111-4111-8111-111111111481"
 	var pubCalls int32
@@ -69,8 +78,13 @@ func TestB48PublishDoesNotBlockConcurrentHandles(t *testing.T) {
 	wg.Add(2)
 	go func() { defer wg.Done(); _, _ = ep.Handle(mkCmd(firstKey, "t1"), core.Source{Host: "local"}) }()
 
-	// Wait until the first publisher is blocked inside the slow publish.
-	<-firstStarted
+	// Wait (bounded) until the first publisher is blocked inside the slow publish.
+	select {
+	case <-firstStarted:
+	case <-time.After(b48Timeout):
+		close(releaseFirst)
+		t.Fatal("first publisher never started")
+	}
 
 	// Start the second Handle on a DIFFERENT key/target. It must reach
 	// publication while the first is still held (publish outside e.mu).
@@ -84,7 +98,13 @@ func TestB48PublishDoesNotBlockConcurrentHandles(t *testing.T) {
 	// The second Handle must reach publication (and complete) while the first
 	// is still held. If publish is under e.mu, the second blocks behind the
 	// first and secondReached never fires before releaseFirst.
-	<-secondReached
+	select {
+	case <-secondReached:
+		// expected: the second Handle completed while the first was held.
+	case <-time.After(b48Timeout):
+		close(releaseFirst)
+		t.Fatal("second Handle did not reach publication while first was held (publish under e.mu)")
+	}
 
 	// Release the first so it can finish and both goroutines join.
 	close(releaseFirst)
@@ -112,6 +132,7 @@ func TestB48PendingPublishNotMarkedDelivered(t *testing.T) {
 
 	pubStarted := make(chan struct{})
 	releasePub := make(chan struct{})
+	t.Cleanup(func() { select { case <-releasePub: default: close(releasePub) } })
 	var calls int32
 	heldPublish := func(s protocol.Snapshot, origin map[string]string) error {
 		atomic.AddInt32(&calls, 1)
@@ -134,7 +155,13 @@ func TestB48PendingPublishNotMarkedDelivered(t *testing.T) {
 	// Start the Handle; it blocks inside the held publish (in-flight).
 	handleDone := make(chan struct{})
 	go func() { defer close(handleDone); _, _ = ep.Handle(cmd, core.Source{Host: "local"}) }()
-	<-pubStarted // the publish is now in-flight
+	// Wait (bounded) for the publish to be in-flight.
+	select {
+	case <-pubStarted:
+	case <-time.After(b48Timeout):
+		close(releasePub)
+		t.Fatal("publish never started")
+	}
 
 	// A concurrent Reconcile for the same key/revision must NOT advance
 	// PublishedRevision while the publish is in-flight (the revision is not
@@ -152,7 +179,11 @@ func TestB48PendingPublishNotMarkedDelivered(t *testing.T) {
 	// Release the held publish so the Handle completes and the revision is
 	// confirmed delivered.
 	close(releasePub)
-	<-handleDone
+	select {
+	case <-handleDone:
+	case <-time.After(b48Timeout):
+		t.Fatal("handle did not return after publish released")
+	}
 	rec, _, _ = store.Get(k)
 	if rec.PublishedRevision < rec.Revision {
 		t.Fatalf("after publish completed, PublishedRevision=%d want >= %d (611.22.48)", rec.PublishedRevision, rec.Revision)
@@ -220,4 +251,111 @@ func TestB48FailedPublishDoesNotCorruptBookkeeping(t *testing.T) {
 	}
 }
 
+// TestB48CloseDrainsAsyncNativePublication is codex's 2nd-NO-GO regression:
+// the onNative callback path (EventRunCompleted -> publishLocked) is not a
+// Handle, so it was not counted in inFlight. While its publish now runs
+// outside e.mu, Close could observe zero handlers, close the store, and
+// return before publication finished — a successful publish could not then
+// MarkPublished (store closed), leaving a duplicate on restart or exiting
+// with publication still running.
+//
+// The fix accounts for the accepted publication work in the bounded shutdown
+// drain: publishLocked increments inFlight before releasing e.mu for the
+// publish and decrements after re-acquiring, so Close's drain waits for the
+// publication window (preserving the unlocked publisher).
+//
+// This test holds an async native-event publication on a channel while Close
+// runs. Close must NOT return before the publish completes and MarkPublished
+// lands. No timing/sleep assertions.
+//
+// Mutation RED: remove the inFlight++/drain accounting in publishLocked ->
+// Close observes inFlight==0, closes the store, and returns before the
+// publish completes; MarkPublished fails (store closed) and the assertion
+// fails.
+func TestB48CloseDrainsAsyncNativePublication(t *testing.T) {
+	store, now := openStoreNoCleanup(t)
+
+	pubStarted := make(chan struct{})
+	releasePub := make(chan struct{})
+	t.Cleanup(func() { select { case <-releasePub: default: close(releasePub) } })
+	var pubCalls int32
+	heldPublish := func(s protocol.Snapshot, origin map[string]string) error {
+		atomic.AddInt32(&pubCalls, 1)
+		// Only hold the COMPLETION publication (the async native-event path via
+		// onNative). Submit-time publications (Received/Dispatching) must not be
+		// held or the Handle itself deadlocks.
+		if s.State == protocol.StateCompleted {
+			close(pubStarted)
+			<-releasePub
+		}
+		return nil
+	}
+	ep := core.New(core.Config{Store: store, Publish: heldPublish, Now: now})
+	rt := fake.New("fake", "e_1")
+	ep.Register(rt)
+
+	id := "11111111-1111-4111-8111-111111111485"
+	if _, err := ep.Handle(submitCmd(id), core.Source{Host: "local"}); err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	if !b14cWait(func() bool { return rt.HasRun(id) }) {
+		t.Fatal("never admitted")
+	}
+
+	// rt.Complete emits EventRunCompleted -> onNative -> publishLocked, which
+	// blocks inside the held publish (async native-event publication). Run it
+	// in a goroutine so the test can observe Close draining while it is held.
+	completeDone := make(chan struct{})
+	go func() {
+		defer close(completeDone)
+		rt.Complete(id, "done")
+	}()
+	select {
+	case <-pubStarted:
+	case <-time.After(b48Timeout):
+		close(releasePub)
+		t.Fatal("async native publication never started")
+	}
+
+	// Run Close concurrently. It must NOT return before the held publish
+	// completes: the publication work is counted in inFlight, so Close's drain
+	// waits. closeDone must stay blocked until releasePub.
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- ep.Close() }()
+	select {
+	case err := <-closeDone:
+		close(releasePub)
+		t.Fatalf("close returned before publication completed (611.22.48 2nd NO-GO: Close must drain accepted publication work): %v", err)
+	case <-time.After(100 * time.Millisecond):
+		// expected: Close is blocked in the drain wait.
+	}
+
+	// Release the held publish. Close can now drain and return.
+	close(releasePub)
+	select {
+	case <-completeDone:
+	case <-time.After(b48Timeout):
+		t.Fatal("rt.Complete did not return after publish released")
+	}
+	select {
+	case err := <-closeDone:
+		if err != nil {
+			t.Fatalf("close returned error: %v", err)
+		}
+	case <-time.After(b48Timeout):
+		t.Fatal("close did not return after publication completed")
+	}
+
+	// The publish completed BEFORE Close closed the store (Close waited), so
+	// MarkPublished landed: PublishedRevision advanced to Revision.
+	k := requests.Key{CreatorHost: "local", TargetID: "fake", RequestID: id}
+	rec, _, _ := store.Get(k)
+	if rec.PublishedRevision < rec.Revision {
+		t.Fatalf("PublishedRevision=%d want >= %d (611.22.48 2nd NO-GO: Close must not close the store before MarkPublished lands)", rec.PublishedRevision, rec.Revision)
+	}
+}
+
 var errPublishFailed48 = protocol.Refuse(protocol.CodeNativeError, "publish failed for test")
+
+// keep errors import used unconditionally (no trim-build surprise).
+var _ = errors.As

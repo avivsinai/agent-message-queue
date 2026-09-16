@@ -2269,6 +2269,15 @@ func (e *Endpoint) publishLocked(rec *requests.Record) {
 		// success or failure), so a concurrent caller's reservation is never
 		// clobbered. visible is advanced ONLY on a successful publish.
 		e.publishing[key] = true
+		// 611.22.48 (2nd NO-GO): account for the accepted publication work in
+		// the bounded shutdown drain. The publish runs OUTSIDE e.mu (the
+		// expensive maildir open + fsync must not block other keys), but Close
+		// must not observe zero handlers, close the store, and return while
+		// publication is still running — a successful publish could not then
+		// MarkPublished (store closed), leaving a duplicate on restart.
+		// Incrementing inFlight here makes Close's drain wait for the publish
+		// window, preserving the unlocked publisher.
+		e.inFlight++
 		snap := rec.Snapshot
 		origin := rec.Origin
 		attemptRev := rec.Revision
@@ -2277,6 +2286,12 @@ func (e *Endpoint) publishLocked(rec *requests.Record) {
 		pubErr := e.publish(snap, origin)
 
 		e.mu.Lock()
+		// Release the publication in-flight count (wake Close if it was the
+		// last entry draining).
+		e.inFlight--
+		if e.inFlight == 0 && e.state == stateDraining {
+			e.drained.Broadcast()
+		}
 		// Clear only OUR in-flight claim. We are the sole owner of this entry
 		// (publishing serialized per key), so a concurrent caller's reservation
 		// is never clobbered (611.22.48 P1-2: cleanup affects only its owner).
