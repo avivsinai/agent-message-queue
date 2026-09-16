@@ -3737,6 +3737,44 @@ func runWakeLoop(cfg wakeConfig) error {
 			return nil
 		}
 		err := notifyNewMessages(&cfg)
+		// codex #788: canonical mismatch is a DEDICATED type (distinct from
+		// wakeInboxScanError). Handle it BEFORE the ordinary scan-retry path so
+		// the watcher is invalidated and rebindWatcher re-arms from the
+		// canonical path on the next inbox-scan-retry tick — otherwise the
+		// loop keeps reading the same detached inbox (rebindWatcher returns
+		// immediately when watcher != nil).
+		var canonicalMismatch *wakeInboxCanonicalMismatchError
+		if errors.As(err, &canonicalMismatch) {
+			switch classifyCanonicalMismatch(err, cfg.retainedInboxRebindable) {
+			case canonicalMismatchRebindableRearm:
+				// Rebindable (ordinary-recoverable): nil the watcher + inbox so
+				// rebindWatcher re-arms on the new canonical inbox. A legitimate
+				// remove/recreate is a rearm, not a fatal swap.
+				if watcher != nil {
+					_ = watcher.Close()
+					watcher = nil
+				}
+				if ordinaryInboxDir != nil {
+					_ = ordinaryInboxDir.Close()
+					ordinaryInboxDir = nil
+				}
+				cfg.retainedInbox = nil
+				cfg.retainedInboxRebindable = false
+				pendingNotify = true
+				clearTerminalAuthorityRetry()
+				inboxScanFailures++
+				scheduleInboxScanRetry(wakeInboxScanRetryBackoff(inboxScanFailures))
+				clearDoorbellDeadline()
+				_ = writeWakeDiagnostic(&cfg, "amq wake: canonical inbox mismatch (rebindable): rearming watcher: %v\n", err)
+				return nil
+			case canonicalMismatchFatal:
+				// !Rebindable: terminal exit (mirrors rebindWatcher's retained-
+				// authority handling). classifyWakeFailure also returns fatal.
+				clearInboxScanRetry()
+				inboxScanFailures = 0
+				return err
+			}
+		}
 		var scanErr *wakeInboxScanError
 		if errors.As(err, &scanErr) {
 			pendingNotify = true

@@ -233,6 +233,43 @@ func (err *wakeInboxCanonicalMismatchError) Error() string {
 
 func (err *wakeInboxCanonicalMismatchError) Unwrap() error { return err.cause }
 
+// canonicalMismatchDisposition describes how the caller (attemptNotification)
+// routes a wakeInboxCanonicalMismatchError detected by notifyNewMessages.
+type canonicalMismatchDisposition int
+
+const (
+	canonicalMismatchNone canonicalMismatchDisposition = iota
+	// canonicalMismatchRebindableRearm: the retained inbox is rebindable
+	// (ordinary-recoverable). Invalidate the watcher + retained inbox so
+	// rebindWatcher re-arms from the canonical path on the next inbox-scan-
+	// retry tick, then ordinary scan retry. A legitimate remove/recreate is a
+	// rearm, not a fatal swap.
+	canonicalMismatchRebindableRearm
+	// canonicalMismatchFatal: the retained inbox cannot be rebound. Terminal
+	// exit (mirrors rebindWatcher's retained-authority handling).
+	canonicalMismatchFatal
+)
+
+// classifyCanonicalMismatch decides how the caller routes a canonical inbox
+// mismatch (codex #788). err must be (or wrap) *wakeInboxCanonicalMismatchError;
+// if not, returns canonicalMismatchNone. rebindable reflects whether the
+// retained inbox can be re-armed by rebindWatcher (ordinary-recoverable) or is
+// a caller-provided retained inbox that cannot be rebound.
+//
+// This is the testable core of the routing decision extracted from
+// attemptNotification (a closure); the full loop applies the watcher
+// invalidation/rearm side effects based on this disposition.
+func classifyCanonicalMismatch(err error, rebindable bool) canonicalMismatchDisposition {
+	var mismatch *wakeInboxCanonicalMismatchError
+	if !errors.As(err, &mismatch) {
+		return canonicalMismatchNone
+	}
+	if rebindable {
+		return canonicalMismatchRebindableRearm
+	}
+	return canonicalMismatchFatal
+}
+
 type wakeTerminalPartialProgressError struct {
 	err error
 }
@@ -513,33 +550,25 @@ func notifyNewMessages(cfg *wakeConfig) error {
 	// leaves the retained FD pointing at the detached OLD directory; reading
 	// it would silently miss messages that land in the canonical inbox.
 	//
-	// codex #788: route canonical-authority-loss by rebindability.
-	// - Rebindable (ordinary-recoverable inbox): the loop can rearm it via
-	//   rebindWatcher after a remove/recreate. Return wakeInboxScanError so
-	//   the caller's ordinary scan-retry runs and rebindWatcher rearms the
-	//   watcher on the new canonical inbox. Do NOT fatal-exit — a legitimate
-	//   remove/recreate is a rearm, not a fatal swap.
-	// - !Rebindable (caller-provided retained inbox that cannot be rebound):
-	//   return a FATAL ownership-loss error (NOT wakeInboxScanError) so the
-	//   caller's errors.As(scanErr) check does NOT match and it falls through
-	//   to classifyWakeFailure -> wakeFailureFatal (terminal exit), mirroring
-	//   rebindWatcher's handling. Otherwise the caller would loop forever on
-	//   the same detached inbox.
-	// Ordinary transient read failures (EIO/ESTALE on ReadDir below) always
-	// remain wakeInboxScanError and retry.
+	// codex #788: return a DEDICATED wakeInboxCanonicalMismatchError (distinct
+	// from wakeInboxScanError) for canonical authority loss, for BOTH the
+	// rebindable (ordinary-recoverable) and !rebindable (caller-provided
+	// retained) cases. The error type signals WHAT happened; the CALLER
+	// (attemptNotification) decides what to do based on rebindability:
+	//   - Rebindable: nil the watcher + ordinaryInboxDir + cfg.retainedInbox so
+	//     rebindWatcher re-arms on the next inbox-scan-retry tick from the
+	//     canonical path, then schedule ordinary scan retry. Do NOT fatal-exit
+	//     — a legitimate remove/recreate is a rearm.
+	//   - !Rebindable: classifyWakeFailure -> wakeFailureFatal (terminal exit),
+	//     mirroring rebindWatcher's handling of retained authority loss.
+	// The dedicated type (not wakeInboxScanError) is essential: the caller's
+	// errors.As(scanErr) check would otherwise route it to ordinary scan retry
+	// WITHOUT invalidating the watcher — looping on the same detached inbox.
+	// Ordinary transient read failures (EIO/ESTALE on ReadDir below) remain
+	// wakeInboxScanError and retry WITHOUT watcher invalidation.
 	if cfg.retainedInbox != nil {
 		if validator, ok := cfg.retainedInbox.(interface{ ValidateCanonical() error }); ok {
 			if err := validator.ValidateCanonical(); err != nil {
-				if cfg.retainedInboxRebindable {
-					return &wakeInboxScanError{
-						err: fmt.Errorf("wake inbox %s no longer matches retained authority: %w", inboxNew, err),
-					}
-				}
-				// codex #788: !rebindable retained inbox cannot be rebound. Return a
-				// dedicated wakeInboxCanonicalMismatchError (NOT wakeInboxScanError)
-				// so the caller's errors.As(scanErr) check does NOT match and it
-				// falls through to classifyWakeFailure -> wakeFailureFatal
-				// (terminal exit), mirroring rebindWatcher's handling.
 				return &wakeInboxCanonicalMismatchError{detachedPath: inboxNew, cause: err}
 			}
 		}
