@@ -37,6 +37,20 @@ const (
 	subjectPrefix = "remote request "
 )
 
+// curFailureCap is the consecutive identical-failure count after which a cur
+// entry is skipped on subsequent full sweeps (611.22.46). A persistently
+// unreadable entry (EACCES/EIO that never clears) is quarantined from the
+// sweep so it stops forcing a full O(cur) rescan every tick. A DIFFERENT
+// error resets the counter, so a transient EAGAIN that later changes still
+// retries. amq tooling owns the actual DLQ; this only stops the rescan churn.
+const curFailureCap = 3
+
+// curFailure records the consecutive identical read failures of one cur entry.
+type curFailure struct {
+	count   int
+	lastErr string // errors.err.Error() compared as a string for "identical"
+}
+
 // Carrier binds one endpoint to one AMQ root and handle.
 type Carrier struct {
 	root     string
@@ -48,6 +62,14 @@ type Carrier struct {
 	// curRecovered is set after the first full cur sweep (the crash-recovery
 	// scan). Steady-state reconciliation tracks only IDs THIS process claimed.
 	curRecovered bool
+	// curFailures tracks consecutive identical read failures per cur entry
+	// (611.22.46). A persistently unreadable entry (EACCES/EIO that never
+	// clears) previously kept curRecovered false forever, forcing a full
+	// O(cur) sweep every tick. Once an entry fails identically curFailureCap
+	// times, it is skipped on subsequent sweeps (quarantined from the sweep,
+	// not from correctness — amq tooling owns DLQ). A DIFFERENT error resets
+	// the count so a transient EAGAIN that later changes still retries.
+	curFailures map[string]curFailure
 	// claimedThisRun tracks cur entries this process claimed but has not yet
 	// confirmed a receipt for. If the process dies, the set is lost; the next
 	// startup's full sweep catches exactly those.
@@ -363,11 +385,58 @@ func (c *Carrier) recoverCur(root *fsq.DeliveryRoot) error {
 	sort.Strings(names)
 	var errs []error
 	for _, name := range names {
+		// 611.22.46: skip entries quarantined by identical repeated failures so
+		// one permanently unreadable cur entry stops forcing a full O(cur)
+		// rescan every tick. The entry stays on disk; amq tooling owns DLQ.
+		if c.curFailureCapped(name) {
+			continue
+		}
 		if err := c.recoverOne(root, curDir, name); err != nil {
+			c.recordCurFailure(name, err)
 			errs = append(errs, fmt.Errorf("%s: %w", name, err))
+		} else {
+			c.clearCurFailure(name)
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// curFailureCapped reports whether a cur entry has failed identically at least
+// curFailureCap times and should be skipped on this sweep (611.22.46). Caller
+// holds c.mu is NOT required — this method locks.
+func (c *Carrier) curFailureCapped(name string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	f, ok := c.curFailures[name]
+	return ok && f.count >= curFailureCap
+}
+
+// recordCurFailure increments the consecutive identical-failure count for a
+// cur entry. A DIFFERENT error resets the count to 1 and records the new error
+// string, so a transient EAGAIN that later changes still retries (611.22.46).
+func (c *Carrier) recordCurFailure(name string, err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.curFailures == nil {
+		c.curFailures = make(map[string]curFailure)
+	}
+	msg := err.Error()
+	f := c.curFailures[name]
+	if f.lastErr == msg {
+		f.count++
+	} else {
+		f = curFailure{count: 1, lastErr: msg}
+	}
+	c.curFailures[name] = f
+}
+
+// clearCurFailure resets the failure count for a cur entry that succeeded on
+// this sweep (611.22.46). A transient fault that clears resumes normal
+// scanning immediately.
+func (c *Carrier) clearCurFailure(name string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.curFailures, name)
 }
 
 // recoverClaimed reconciles only the cur entries this process claimed during
