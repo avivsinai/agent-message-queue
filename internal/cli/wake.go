@@ -68,6 +68,7 @@ type wakeConfig struct {
 	lastAttemptTransientAttention bool
 	lastInjectorOutcome           wakeInjectorOutcome
 	lastInjectorDetail            string
+	lastPersistedNotifierStatus   string
 	skipExternalInjector          bool
 	terminalInjectorCohort        []string
 	terminalInjectorMode          string
@@ -1301,6 +1302,7 @@ func persistWakeNotifierStatus(cfg *wakeConfig, status, mode, reason string) err
 		return err
 	}
 	cfg.pendingNotifierStatus = nil
+	cfg.lastPersistedNotifierStatus = status
 	return nil
 }
 
@@ -1310,6 +1312,22 @@ func retryPendingWakeNotifierStatus(cfg *wakeConfig) error {
 	}
 	pending := cfg.pendingNotifierStatus
 	return persistWakeNotifierStatus(cfg, pending.status, pending.mode, pending.reason)
+}
+
+// clearDegradedWakeNotifierStatus clears a fallback-only "degraded" status
+// after successful injection resumes (t64). Checks both the last persisted
+// status and any pending (failed-write) degraded status, so a failed degraded
+// persistence is not written after recovery.
+func clearDegradedWakeNotifierStatus(cfg *wakeConfig) {
+	if cfg == nil {
+		return
+	}
+	if cfg.lastPersistedNotifierStatus == "degraded" ||
+		(cfg.pendingNotifierStatus != nil && cfg.pendingNotifierStatus.status == "degraded") {
+		if err := persistWakeNotifierStatus(cfg, "", effectiveInjectMode(cfg), ""); err != nil {
+			_ = writeWakeDiagnostic(cfg, "amq wake: clear degraded status after successful inject: %v\n", err)
+		}
+	}
 }
 
 func persistWakeDoorbellStatusBestEffort(cfg *wakeConfig) {
@@ -1650,6 +1668,8 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 				// exit-zero command is a successful transport result. The
 				// lifecycle ledger records it as written/uncertain, while the
 				// wake loop keeps its existing retry-until policy.
+				// t64: clear fallback-only degradation after successful injection resumes.
+				clearDegradedWakeNotifierStatus(cfg)
 				return nil
 			case wakeInjectorOutcomeUncertain:
 				var uncertain *wakeTerminalProgressUncertainError
@@ -1674,6 +1694,8 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 			return deliverWakeAttentionOnly(cfg, notice.output)
 		}
 		cfg.lastInjectorOutcome = wakeInjectorOutcomeAccepted
+		// t64: clear fallback-only degradation after successful injection resumes.
+		clearDegradedWakeNotifierStatus(cfg)
 		return nil
 	}
 
@@ -1802,6 +1824,8 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 		return deliverWakeAttentionOnly(cfg, notice.output)
 	}
 
+	// t64: clear fallback-only degradation after successful native injection.
+	clearDegradedWakeNotifierStatus(cfg)
 	return nil
 }
 
@@ -1853,6 +1877,25 @@ func deliverWakeAttentionOnly(cfg *wakeConfig, payload wakePayload) error {
 		return err
 	}
 	cfg.lastAttemptAttention = true
+	// t64: persist degraded status so `amq doctor --ops` can distinguish a
+	// fully-injecting wake from one that fell back to attention-only. Without
+	// this, doctor reports healthy while the operator only gets a stderr BEL.
+	// But don't overwrite a more specific failure status (e.g.
+	// injector_unsupported) that was already recorded this cycle — the
+	// specific status is more actionable than generic "degraded". Check both
+	// the last persisted status and any pending (failed-write) status.
+	specificStatus := cfg.lastPersistedNotifierStatus
+	if cfg.pendingNotifierStatus != nil &&
+		(cfg.pendingNotifierStatus.status == wakeInjectorUnsupportedStatus ||
+			cfg.pendingNotifierStatus.status == wakeInputRecoveryRequiredStatus) {
+		specificStatus = cfg.pendingNotifierStatus.status
+	}
+	if specificStatus != wakeInjectorUnsupportedStatus &&
+		specificStatus != wakeInputRecoveryRequiredStatus {
+		if err := persistWakeNotifierStatus(cfg, "degraded", effectiveInjectMode(cfg), "attention-only fallback"); err != nil {
+			_ = writeWakeDiagnostic(cfg, "amq wake: record attention-only degraded status: %v\n", err)
+		}
+	}
 	return nil
 }
 
