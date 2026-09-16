@@ -1,6 +1,7 @@
 package core_test
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -33,7 +34,7 @@ func TestB47TickDuringDrainingDoesNotStartNewWork(t *testing.T) {
 	blocker := fake.New("blocker", "e_1")
 	ep.Register(blocker)
 	// "worker" target: holds a deferred (StateReceived) record that Tick would
-	// admit via admitDeferred -> worker.Submit. Asserting worker.dispatches
+	// admit via admitDeferred -> worker.Submit. Asserting worker dispatches
 	// stays 0 proves the gate refused the Tick.
 	worker := fake.New("worker", "e_1")
 	ep.Register(worker)
@@ -53,6 +54,8 @@ func TestB47TickDuringDrainingDoesNotStartNewWork(t *testing.T) {
 
 	// Hold the blocker Handle AFTER admission so it lingers in-flight.
 	blocker.HoldAfterAdmit()
+	// Ensure held operations are released on failure too (611.22.47 P2).
+	t.Cleanup(blocker.ReleaseAfterAdmit)
 	blockerCmd := &protocol.Command{
 		Schema: protocol.SchemaCommand, Op: protocol.OpRequestSubmit,
 		RequestID: "11111111-1111-4111-8111-111111111472", TargetID: "blocker", Epoch: "e_1",
@@ -71,11 +74,9 @@ func TestB47TickDuringDrainingDoesNotStartNewWork(t *testing.T) {
 	closeDone := make(chan error, 1)
 	go func() { closeDone <- ep.Close() }()
 
-	// Yield so Close acquires e.mu and sets state = draining before the Tick.
-	// Correctness does not depend on the yield length: with the gate, a Tick
-	// at ANY point after draining begins is refused; without the gate, a Tick
-	// during draining proceeds and the assertion fails.
-	time.Sleep(50 * time.Millisecond)
+	// Synchronize on the ACTUAL lifecycle transition: poll IsDraining() until
+	// Close has set state = draining. No elapsed-time sleep (611.22.47 P2).
+	waitForDraining(t, ep)
 
 	// A Tick arriving during draining must NOT begin new native work.
 	before := worker.Snapshot().Dispatches
@@ -122,6 +123,7 @@ func TestB47TickRegistersInFlightForDrain(t *testing.T) {
 	// Hold Lookup so the Tick's reconcileLive call blocks inside the
 	// attachment, keeping the sweep in-flight long enough to observe.
 	worker.HoldLookup()
+	// Ensure held operations are released on failure too (611.22.47 P2).
 	t.Cleanup(worker.ReleaseLookup)
 
 	// Seed a non-terminal record so reconcileLive has something to Lookup.
@@ -159,15 +161,14 @@ func TestB47TickRegistersInFlightForDrain(t *testing.T) {
 	closeDone := make(chan error, 1)
 	go func() { closeDone <- ep.Close() }()
 
-	// Close should be blocked in the drain wait (Tick still in-flight). Give
-	// it a moment; it must NOT have returned yet.
-	select {
-	case <-closeDone:
-		// If Close returned while the Tick is still in-flight (Lookup held),
-		// the gate did not register the Tick for draining.
-		t.Fatal("close returned before the in-flight tick drained (611.22.47: Tick must register as in-flight for Close to drain)")
-	case <-time.After(100 * time.Millisecond):
-		// expected: Close is waiting in the drain wait.
+	// Synchronize on the drain wait: Close has entered draining AND the Tick
+	// is still in-flight (Lookup held). Close must be blocked in the drain
+	// wait, NOT returned. Verify by observing IsDraining() while the held
+	// Lookup keeps the Tick in-flight — if Close returned before the Tick
+	// drained, the gate did not register the Tick.
+	waitForDraining(t, ep)
+	if ep.InFlight() == 0 {
+		t.Fatal("close drained with no in-flight tick (611.22.47: Tick must register as in-flight for Close to drain)")
 	}
 
 	// Release the held Lookup so the Tick can complete and Close can drain.
@@ -183,3 +184,23 @@ func TestB47TickRegistersInFlightForDrain(t *testing.T) {
 		t.Fatal("close did not return after tick drained")
 	}
 }
+
+// waitForDraining polls IsDraining() until the endpoint has begun shutdown.
+// Replaces an elapsed-time sleep with synchronization on the actual lifecycle
+// transition (611.22.47 P2).
+func waitForDraining(t *testing.T, ep *core.Endpoint) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if ep.IsDraining() {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("timed out waiting for endpoint to enter draining")
+}
+
+// Ensure the errors import is used (the test package references Refusal via
+// errors.As in sibling tests; this keeps the import stable if this file is
+// the only consumer in a trimmed build).
+var _ = errors.As

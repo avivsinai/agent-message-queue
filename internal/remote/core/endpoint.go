@@ -270,6 +270,15 @@ func (e *Endpoint) InFlight() int {
 	return e.inFlight
 }
 
+// IsDraining reports whether the endpoint has begun shutdown (state is
+// draining or closed). Test seam for synchronizing tests on the actual
+// lifecycle transition instead of an elapsed-time sleep (611.22.47).
+func (e *Endpoint) IsDraining() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.state != stateAccepting
+}
+
 // Handle runs one validated command from an authenticated source and returns
 // the reply document: a Snapshot for request.* and interaction.respond, a
 // Session or []Session for session.*.
