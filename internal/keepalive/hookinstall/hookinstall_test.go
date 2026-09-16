@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 )
@@ -359,10 +358,9 @@ printf '%s\n' "$1" >> "$AMQ_KEEPALIVE_SLEEP_LOG"
 	binaryPath := writeExecutableBody(t, filepath.Join(dir, "amq-keepalive"), "#!/bin/sh\nsleep 30\n")
 	logPath := filepath.Join(dir, "session-start.log")
 
-	// 9xv: no wall-clock context deadline. The script self-terminates via its
-	// internal reattach/stdin timeout (~1s). runHookScriptBounded guarantees
-	// child cleanup if the watchdog regresses; it does not select behavior.
-	cmd := exec.Command("bash", scriptPath)
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "bash", scriptPath)
 	cmd.Env = append(os.Environ(),
 		"AMQ_KEEPALIVE_BIN="+binaryPath,
 		"AMQ_KEEPALIVE_LOG="+logPath,
@@ -378,7 +376,7 @@ printf '%s\n' "$1" >> "$AMQ_KEEPALIVE_SLEEP_LOG"
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	runHookScriptBounded(t, cmd, nil, 10*time.Second)
+	runHookScriptBoundedCtx(t, ctx, cmd, nil)
 	if got := stdout.String(); got != "{}\n" {
 		t.Fatalf("stdout = %q, want empty hook response", got)
 	}
@@ -412,10 +410,9 @@ printf '%s\n' "$1" >> "$AMQ_KEEPALIVE_SLEEP_LOG"
 	binaryPath := writeExecutableBody(t, filepath.Join(dir, "amq-keepalive"), "#!/bin/sh\nsleep 30\n")
 	logPath := filepath.Join(dir, "session-start.log")
 
-	// 9xv: no wall-clock context deadline. The script self-terminates via its
-	// internal reattach/stdin timeout (~2s). runHookScriptBounded guarantees
-	// child cleanup if the watchdog regresses; it does not select behavior.
-	cmd := exec.Command("bash", scriptPath)
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "bash", scriptPath)
 	cmd.Env = append(os.Environ(),
 		"AMQ_KEEPALIVE_BIN="+binaryPath,
 		"AMQ_KEEPALIVE_LOG="+logPath,
@@ -426,7 +423,7 @@ printf '%s\n' "$1" >> "$AMQ_KEEPALIVE_SLEEP_LOG"
 	)
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
-	runHookScriptBounded(t, cmd, nil, 10*time.Second)
+	runHookScriptBoundedCtx(t, ctx, cmd, nil)
 	if got := stdout.String(); got != "{}\n" {
 		t.Fatalf("stdout = %q, want empty hook response", got)
 	}
@@ -452,13 +449,9 @@ func TestSessionStartScriptDoesNotBlockOnOpenStdin(t *testing.T) {
 	binaryPath := writeExecutableBody(t, filepath.Join(dir, "amq-keepalive"), "#!/bin/sh\nexit 0\n")
 	logPath := filepath.Join(dir, "session-start.log")
 
-	// 9xv: no wall-clock context deadline. The script self-terminates via its
-	// internal stdin timeout (~1s). runHookScriptBounded guarantees child
-	// cleanup if the watchdog regresses; it does not select behavior. The
-	// stdin writer is kept open until the script completes (so the test
-	// exercises open-stdin behavior, not EOF) and closed only during failure
-	// cleanup.
-	cmd := exec.Command("bash", scriptPath)
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "bash", scriptPath)
 	reader, writer, err := os.Pipe()
 	if err != nil {
 		t.Fatalf("Pipe() error = %v", err)
@@ -476,7 +469,7 @@ func TestSessionStartScriptDoesNotBlockOnOpenStdin(t *testing.T) {
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	runHookScriptBounded(t, cmd, writer, 10*time.Second)
+	runHookScriptBoundedCtx(t, ctx, cmd, writer)
 	if got := stdout.String(); got != "{}\n" {
 		t.Fatalf("stdout = %q, want empty hook response", got)
 	}
@@ -999,50 +992,6 @@ func writeExecutableBody(t *testing.T, path string, body string) string {
 	return path
 }
 
-// runHookScriptBounded runs a self-terminating hook script with guaranteed
-// child cleanup. The script's internal reattach/stdin timeout is the
-// deterministic completion mechanism; the failureBound only guarantees
-// cleanup if the script's watchdog regresses. Unlike context.WithTimeout on
-// cmd.Run, the failure bound does not select the behavior under test — it
-// kills the process group and fails the test only if the script does not
-// self-terminate. The stdin writer is kept open until the script completes
-// (so the test exercises open-stdin behavior, not EOF) and closed only
-// during failure cleanup.
-func runHookScriptBounded(t *testing.T, cmd *exec.Cmd, stdinWriter *os.File, failureBound time.Duration) {
-	t.Helper()
-	// Put the script in its own process group so we can kill descendants.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	if err := cmd.Start(); err != nil {
-		if stdinWriter != nil {
-			_ = stdinWriter.Close()
-		}
-		t.Fatalf("start hook script: %v", err)
-	}
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
-	select {
-	case err := <-done:
-		if stdinWriter != nil {
-			_ = stdinWriter.Close()
-		}
-		if err != nil {
-			t.Fatalf("hook script exited with error: %v", err)
-		}
-	case <-time.After(failureBound):
-		// Kill the entire process group (script + descendants) so no child
-		// retains stdout/stderr pipes and blocks Wait.
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		if stdinWriter != nil {
-			_ = stdinWriter.Close()
-		}
-		select {
-		case <-done:
-		case <-time.After(5 * time.Second):
-		}
-		t.Fatalf("hook script did not self-terminate within %v failure bound", failureBound)
-	}
-}
-
 func mustWrite(t *testing.T, path string, data []byte) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
@@ -1514,4 +1463,42 @@ func TestSelfHealDedupKeysOnFullCommand(t *testing.T) {
 			t.Fatalf("timeout-2 live hook not preserved exactly once:\n%s", mustMarshal(t, doc))
 		}
 	})
+}
+
+// runHookScriptBoundedCtx runs a self-terminating hook script with a context
+// deadline as the safety bound and guaranteed process-group cleanup. The
+// script's internal reattach/stdin timeout (~1s) is the deterministic
+// completion mechanism. The context deadline only fires if the script's
+// watchdog regresses. On timeout, the entire process group is killed and
+// the reap is bounded by WaitDelay.
+func runHookScriptBoundedCtx(t *testing.T, ctx context.Context, cmd *exec.Cmd, stdinWriter *os.File) {
+	t.Helper()
+	setProcessGroup(cmd)
+	cmd.Cancel = func() error {
+		if cmd.Process != nil {
+			return killProcessGroup(cmd.Process.Pid)
+		}
+		return os.ErrProcessDone
+	}
+	cmd.WaitDelay = 2 * time.Second
+	if err := cmd.Start(); err != nil {
+		if stdinWriter != nil {
+			_ = stdinWriter.Close()
+		}
+		t.Fatalf("start hook script: %v", err)
+	}
+	// Keep stdin writer open until the script completes so the test
+	// exercises open-stdin behavior, not EOF.
+	if err := cmd.Wait(); err != nil {
+		if stdinWriter != nil {
+			_ = stdinWriter.Close()
+		}
+		if ctx.Err() != nil {
+			t.Fatalf("hook script did not self-terminate within safety bound: %v", ctx.Err())
+		}
+		t.Fatalf("hook script error: %v", err)
+	}
+	if stdinWriter != nil {
+		_ = stdinWriter.Close()
+	}
 }
