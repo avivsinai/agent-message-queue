@@ -89,7 +89,7 @@ func Listen(stateDir string, ep *core.Endpoint) (*Server, error) {
 	path := SocketPath(stateDir)
 	if len(path) >= maxUnixSocketPathLen {
 		usable := maxUnixSocketPathLen - 1 // NUL terminator
-		return nil, fmt.Errorf("%w: path is %d bytes, max usable is %d (suffix \"endpoint.sock\" is %d bytes); use a shorter state directory (e.g. --root /tmp/amq or set AMQ_STATE_DIR)",
+		return nil, fmt.Errorf("%w: path is %d bytes, max usable is %d (suffix \"endpoint.sock\" is %d bytes); use a shorter --root (or AM_ROOT) so the state directory is closer to the filesystem root",
 			ErrSocketPathTooLong, len(path), usable, len("endpoint.sock"))
 	}
 	if _, err := os.Stat(path); err == nil {
