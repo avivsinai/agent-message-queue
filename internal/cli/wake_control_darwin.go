@@ -707,6 +707,11 @@ func startWakeControlListenerInDirWithRestart(
 
 type darwinWakeControlTestHooks struct {
 	afterLoopStopped func()
+	// beforeBindRevalidate runs inside the lifecycle guard immediately before
+	// the canonical revalidation that precedes bind. Test seam for 65s: inject
+	// a directory swap here to prove the revalidation REFUSES rather than
+	// binding a detached directory.
+	beforeBindRevalidate func(agentDir *wakeAgentDir)
 }
 
 func startWakeControlListenerInDirOwned(
@@ -746,6 +751,7 @@ func startWakeControlListenerInDirOwnedWithRestart(
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	var boundListener *net.UnixListener
 	if err := withWakeLifecycleGuardInDir(agentDir, func(dirfd int) error {
 		if err := validateWakeStateAgentDirAt(dirfd, agentDir); err != nil {
 			return err
@@ -754,21 +760,41 @@ func startWakeControlListenerInDirOwnedWithRestart(
 		if !current.Exists || current.Lock.Generation != lock.Generation || current.Lock.ControlSocket != path {
 			return fmt.Errorf("wake control metadata changed before listener start")
 		}
-		return removeStaleDarwinControlSocketsAt(dirfd)
+		if err := removeStaleDarwinControlSocketsAt(dirfd); err != nil {
+			return err
+		}
+		// 65s: bind and secure UNDER the lifecycle guard so a directory swap
+		// cannot detach the listener between validation and bind. Revalidate
+		// the canonical identity immediately before bind and REFUSE rather
+		// than binding a detached directory. validateWakeStateAgentDirAt opens
+		// the canonical PATH and confirms it is still the same inode as the
+		// retained dirfd — a swap renames the old directory away and replaces
+		// it, so SameFile fails and we refuse.
+		if testHooks != nil && testHooks.beforeBindRevalidate != nil {
+			testHooks.beforeBindRevalidate(agentDir)
+		}
+		if err := validateWakeStateAgentDirAt(dirfd, agentDir); err != nil {
+			return err
+		}
+		recheck := inspectWakeLockAt(dirfd, agentDir, root, me)
+		if !recheck.Exists || recheck.Lock.Generation != lock.Generation || recheck.Lock.ControlSocket != path {
+			return fmt.Errorf("wake control metadata changed during listener start")
+		}
+		listener, err := listenDarwinUnixAt(agentDir, name)
+		if err != nil {
+			return err
+		}
+		if err := secureDarwinControlSocketAt(dirfd, name, path); err != nil {
+			_ = listener.Close()
+			_ = removeDarwinControlSocketAt(dirfd, name)
+			return err
+		}
+		boundListener = listener
+		return nil
 	}); err != nil {
 		return nil, nil, nil, err
 	}
-	listener, err := listenDarwinUnixAt(agentDir, name)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	if err := agentDir.withFD(func(dirfd int) error {
-		return secureDarwinControlSocketAt(dirfd, name, path)
-	}); err != nil {
-		_ = listener.Close()
-		_ = agentDir.withFD(func(dirfd int) error { return removeDarwinControlSocketAt(dirfd, name) })
-		return nil, nil, nil, err
-	}
+	listener := boundListener
 	stopRequest := make(chan struct{}, 1)
 	loopStopped := make(chan struct{})
 	var loopStoppedOnce sync.Once
