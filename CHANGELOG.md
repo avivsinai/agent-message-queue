@@ -8,6 +8,14 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.78.5](https://github.com/avivsinai/agent-message-queue/compare/v0.78.4...v0.78.5) (2026-09-16)
+
+
+### Bug Fixes
+
+* **amqio:** gate cross-session reply on ValidateExistingMailboxLayout (611.22.43) ([#777](https://github.com/avivsinai/agent-message-queue/issues/777)) ([db7c7dd](https://github.com/avivsinai/agent-message-queue/commit/db7c7dd244e8775cfc50bad5224da779c6959092))
+* **amqio:** validate reply-ledger id in read+write (bead 611.22.44) ([#778](https://github.com/avivsinai/agent-message-queue/issues/778)) ([bc49e24](https://github.com/avivsinai/agent-message-queue/commit/bc49e24efa8b66897cca47123c22f677d288554f))
+
 ## [0.78.4](https://github.com/avivsinai/agent-message-queue/compare/v0.78.3...v0.78.4) (2026-09-16)
 
 
