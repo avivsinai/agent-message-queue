@@ -109,14 +109,15 @@ type Endpoint struct {
 	// it here and leave the work pending for the next Reconcile/Tick. The
 	// owner clears only its own entry on completion (611.22.48).
 	publishing map[requests.Key]bool
-	// pubPending counts accepted-but-skipped publication obligations: a
-	// publishLocked caller that hit publishing[key] left a NEWER revision
-	// unpublished. Each such caller registers one obligation here; the
-	// finishing publisher of that key adopts (decrements and republishes)
-	// them, so every accepted revision is covered by exactly one obligation —
-	// its own in-flight attempt or a chained one — and Close's drain waits
-	// for the total (Astra B784-1, 611.22.48 follow-up).
-	pubPending map[requests.Key]int
+	// pubPending records accepted-but-skipped publication requests per key:
+	// a publishLocked caller that hit publishing[key] coalesces its revision
+	// here (highest requested revision wins). The finishing publisher of that
+	// key — the single per-key owner — adopts the pending revision and
+	// republishes it BEFORE releasing its drain obligation, so every accepted
+	// revision is covered by exactly one obligation (its own in-flight
+	// attempt or the owner's chained attempt) and Close's drain waits for the
+	// whole chain (Astra B784-1, 611.22.48 follow-up round 2).
+	pubPending map[requests.Key]int64
 	// B13 lifecycle: state transitions accepting -> draining -> closed.
 	// inFlight counts handlers between entry (registerInFlight) and exit
 	// (releaseInFlight). drained is a condition variable Close waits on.
@@ -155,7 +156,7 @@ func New(cfg Config) *Endpoint {
 		compactHorizon: cfg.CompactHorizon,
 		visible:        map[requests.Key]int64{},
 		publishing:     map[requests.Key]bool{},
-		pubPending:     map[requests.Key]int{},
+		pubPending:     map[requests.Key]int64{},
 		state:          stateAccepting,
 		drainTO:        drainTimeout,
 	}
@@ -2318,99 +2319,137 @@ func (e *Endpoint) publishLocked(rec *requests.Record) {
 	// MarkPublished below — the marker may need retrying (Pro r2 #13). An
 	// IN-FLIGHT attempt is tracked separately in `publishing`; it does NOT
 	// count as delivered.
-	if e.visible[key] < rec.Revision {
-		// Serialize per-key publication: if another caller is already
-		// publishing this key, register a pending obligation for this NEWER
-		// revision so the finishing publisher chains it. This prevents two
-		// concurrent publishes for the same key (different revisions
-		// included) without holding the global endpoint mutex (611.22.48
-		// P1-2) while guaranteeing the skipped revision is still covered by
-		// exactly one drain obligation (Astra B784-1): the finishing
-		// publisher adopts it and republishes before Close's drain can
-		// complete. Outside a shutdown drain the next Tick/Reconcile would
-		// also retry it, but registering the obligation uniformly keeps the
-		// invariant in every state.
-		if e.publishing[key] {
-			e.pubPending[key]++
+	if e.visible[key] >= rec.Revision {
+		// Marker retry path (Pro r2 #13): this revision was already delivered
+		// (confirmed, awaiting its marker). Skip the DELIVERY (no double
+		// delivery) and retry only the marker, honoring the crash points so
+		// a lost marker stays lost within one simulated crash.
+		if e.crashAt(PointAfterPublish) != nil || e.crashAt(PointBeforePublished) != nil {
 			return
 		}
-		if e.crashAt(PointBeforePublish) != nil {
-			return
+		if err := e.store.MarkPublished(key, rec.Revision); err == nil {
+			rec.PublishedRevision = rec.Revision
+			if e.visible[key] == rec.Revision {
+				delete(e.visible, key)
+			}
 		}
-		// Claim the in-flight slot for THIS key. Only the owner clears it (on
-		// success or failure), so a concurrent caller's reservation is never
-		// clobbered. visible is advanced ONLY on a successful publish.
-		e.publishing[key] = true
-		// Account for the accepted publication work in the bounded shutdown
-		// drain: the publish runs OUTSIDE e.mu (the expensive maildir open +
-		// fsync must not block other keys), but inFlight makes Close's drain
-		// wait for the publish window so a successful publish can always reach
-		// MarkPublished (store not closed mid-publish).
-		e.inFlight++
-		snap := rec.Snapshot
-		origin := rec.Origin
-		attemptRev := rec.Revision
-		e.mu.Unlock()
+		return
+	}
+	// Serialize per-key publication: if another caller is already
+	// Serialize per-key publication: if another caller is already
+	// publishing this key, coalesce this caller's revision into the
+	// pending obligation set (max-revision semantics, not a call count)
+	// and return. This prevents two concurrent publishes for the same
+	// key without holding the global endpoint mutex (611.22.48 P1-2)
+	// while guaranteeing the skipped revision is still covered by
+	// exactly one drain obligation (Astra B784-1): the finishing
+	// publisher — the single per-key owner — adopts the pending set and
+	// republishes before its drain obligation is released. Outside a
+	// shutdown drain the next Tick/Reconcile would also retry it, but
+	// registering the obligation uniformly keeps the invariant in every
+	// state. Coalescing by highest requested revision avoids duplicate
+	// same-revision deliveries (Astra round-2 P1-2).
+	if e.publishing[key] {
+		if rec.Revision > e.pubPending[key] {
+			e.pubPending[key] = rec.Revision
+		}
+		return
+	}
+	if e.crashAt(PointBeforePublish) != nil {
+		return
+	}
+	// Claim the in-flight slot for THIS key. Only the owner clears it (on
+	// success or failure), so a concurrent caller's reservation is never
+	// clobbered. visible is advanced ONLY on a successful publish.
+	e.publishing[key] = true
+	// 611.22.48 (2nd NO-GO): account for the accepted publication work in
+	// the bounded shutdown drain. The publish runs OUTSIDE e.mu (the
+	// expensive maildir open + fsync must not block other keys), but Close
+	// must not observe zero handlers, close the store, and return while
+	// publication is still running — a successful publish could not then
+	// MarkPublished (store closed), leaving a duplicate on restart.
+	// Incrementing inFlight here makes Close's drain wait for the publish
+	// window, preserving the unlocked publisher.
+	e.inFlight++
+	snap := rec.Snapshot
+	origin := rec.Origin
+	attemptRev := rec.Revision
+	e.mu.Unlock()
 
+	// publish ONE revision outside e.mu, then loop while skipped newer
+	// revisions exist. The drain obligation (inFlight) and the per-key
+	// publishing ownership are held CONTINUOUSLY across the whole chain —
+	// there is no unlock gap with zero drain count in which Close could
+	// observe "nothing in flight" and close the store (Astra round-2
+	// P1-1). Single iterative owner, no recursive re-entry (Astra
+	// round-2 P1-2).
+	for {
 		pubErr := e.publish(snap, origin)
 
 		e.mu.Lock()
-		// Release the publication in-flight count (wake Close if it was the
-		// last entry draining).
-		e.inFlight--
-		if e.inFlight == 0 && e.state == stateDraining {
-			e.drained.Broadcast()
+		// Success bookkeeping for THIS attempt BEFORE selecting the next
+		// obligation, so the coalescing check below sees the delivery
+		// state (Astra round-2 P1-2). A failed attempt does NOT advance
+		// visible/PublishedRevision; the durable unpublished state is
+		// preserved for Reconcile recovery (Astra round-2 answer 3).
+		if pubErr == nil && e.visible[key] < attemptRev {
+			e.visible[key] = attemptRev
 		}
-		// Clear only OUR in-flight claim. We are the sole owner of this entry
-		// (publishing serialized per key), so a concurrent caller's reservation
-		// is never clobbered.
-		delete(e.publishing, key)
-		// Adopt skipped newer revisions for this key (Astra B784-1): while we
-		// published, later revisions were accepted and registered pubPending
-		// obligations. Chain them via a fresh publishRevision cycle (its own
-		// inFlight++/-- keeps the drain count balanced) until the newest
-		// revision is published.
-		pending := e.pubPending[key]
+		// Select the next obligation: the highest revision coalesced by
+		// concurrent callers while we owned this key. A failed attempt
+		// ends the chain WITHOUT spinning a retry of the same revision
+		// here — Reconcile/Tick owns the retry (beginReconcile still
+		// refuses during drain, so the durable unpublished state simply
+		// persists for recovery after close).
+		pendingRev := e.pubPending[key]
 		delete(e.pubPending, key)
-		if pending > 0 && pubErr == nil && e.state != stateClosed {
-			// Chain the skipped revisions: republish the newest durable
-			// revision for this key via a fresh publishRevision cycle (its
-			// own inFlight++/-- keeps the drain count balanced; it runs the
-			// publish outside e.mu exactly like this attempt). The record is
-			// re-read from the store so the newest accepted revision is
-			// what publishes. publishLocked's visible guard prevents double
-			// delivery. publishRevision re-locks, so drop e.mu first.
+		var next *requests.Record
+		if pendingRev > attemptRev && pubErr == nil && e.state != stateClosed {
+			// Re-read the newest durable record. A store read failure
+			// must not silently discard the continuation: treat it like
+			// a failed attempt (keep the durable unpublished state;
+			// Reconcile owns recovery outside the drain).
 			e.mu.Unlock()
 			if cur, ok, gerr := e.store.Get(key); gerr == nil && ok {
-				e.publishRevision(cur)
+				next = cur
 			}
 			e.mu.Lock()
 		}
-		if pubErr != nil {
-			// Publication failed: do NOT advance visible/PublishedRevision. The
-			// next Reconcile retries the delivery (visible[key] was never set,
-			// so the revision is still owed). No double-delivery risk on retry.
+		if next == nil {
+			// Chain complete (nothing pending beyond this attempt, prior
+			// attempt failed, or the store lost the record): release the
+			// drain obligation and per-key ownership, wake Close, return.
+			e.inFlight--
+			if e.inFlight == 0 && e.state == stateDraining {
+				e.drained.Broadcast()
+			}
+			delete(e.publishing, key)
+			// publishLocked returns HOLDING e.mu (its callers rely on
+			// that), so no unlock here.
+			// Marker for the LAST attempted revision (chained revisions
+			// included): MarkPublished is a high-water mark, so marking
+			// attemptRev covers every earlier revision in the chain and
+			// advances PublishedRevision past rec.Revision. Only on
+			// SUCCESS: a failed attempt must not advance the marker (the
+			// durable unpublished state stays for Reconcile recovery).
+			if pubErr == nil && e.crashAt(PointAfterPublish) == nil && e.crashAt(PointBeforePublished) == nil {
+				if err := e.store.MarkPublished(key, attemptRev); err == nil {
+					if rec.PublishedRevision < attemptRev {
+						rec.PublishedRevision = attemptRev
+					}
+					if e.visible[key] == attemptRev {
+						delete(e.visible, key)
+					}
+				}
+			}
 			return
 		}
-		// Confirmed delivery. Advance visible to our attempt revision (a
-		// concurrent successful publish for a later revision is impossible
-		// here — publishing serialized per key).
-		if e.visible[key] < attemptRev {
-			e.visible[key] = attemptRev
-		}
-	}
-	// Marker retry path (Pro r2 #13): whether this call just delivered the
-	// revision or a prior call did (visible[key] >= rec.Revision), the marker
-	// may still be owed. Re-delivery is prevented by the visible guard above;
-	// only the MarkPublished is retried here.
-	if e.crashAt(PointAfterPublish) != nil || e.crashAt(PointBeforePublished) != nil {
-		return
-	}
-	if err := e.store.MarkPublished(key, rec.Revision); err == nil {
-		rec.PublishedRevision = rec.Revision
-		if e.visible[key] == rec.Revision {
-			delete(e.visible, key)
-		}
+		// Adopt the pending revision and publish it while STILL holding
+		// the inFlight obligation and publishing[key] ownership.
+		attemptRev = next.Revision
+		snap = next.Snapshot
+		origin = next.Origin
+		e.mu.Unlock()
 	}
 }
 
