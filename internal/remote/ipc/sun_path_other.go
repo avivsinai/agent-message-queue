@@ -2,8 +2,8 @@
 
 package ipc
 
-// maxUnixSocketPathLen is the conservative maximum length for a Unix domain
-// socket path on platforms without a specific limit (Windows, FreeBSD, etc.).
-// Unix domain sockets are not typically used on Windows, but the constant
-// must be defined for compilation. 104 is the most restrictive common limit.
-const maxUnixSocketPathLen = 104
+// maxUnixSocketPathLen is the maximum usable length for a Unix domain socket
+// path on platforms without a specific limit. Go's RawSockaddrUnix on Windows
+// uses UNIX_PATH_MAX=108 (syscall/types_windows.go), matching Linux. FreeBSD
+// and other BSDs also use 104–108 bytes; 108 is the safe upper bound.
+const maxUnixSocketPathLen = 108
