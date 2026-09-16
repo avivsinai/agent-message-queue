@@ -98,7 +98,17 @@ type Endpoint struct {
 	// re-delivery after consumption is a duplicate (Pro r2 #13 / packet 4a,
 	// agent-message-queue-611.22.36). In memory only: a process crash in
 	// that window re-delivers, the documented exception.
+	//
+	// 611.22.48: visible means CONFIRMED DELIVERY awaiting its marker, NOT an
+	// in-flight attempt. A separate `publishing` set owns in-flight attempts
+	// so a failed publish cannot be mistaken for a delivered revision, and a
+	// concurrent caller cannot clear a reservation it does not own.
 	visible map[requests.Key]int64
+	// publishing records keys with an in-flight publish attempt. Only one
+	// publish per key runs at a time; concurrent callers for the same key see
+	// it here and leave the work pending for the next Reconcile/Tick. The
+	// owner clears only its own entry on completion (611.22.48).
+	publishing map[requests.Key]bool
 	// B13 lifecycle: state transitions accepting -> draining -> closed.
 	// inFlight counts handlers between entry (registerInFlight) and exit
 	// (releaseInFlight). drained is a condition variable Close waits on.
@@ -136,6 +146,7 @@ func New(cfg Config) *Endpoint {
 		changed:        make(chan struct{}),
 		compactHorizon: cfg.CompactHorizon,
 		visible:        map[requests.Key]int64{},
+		publishing:     map[requests.Key]bool{},
 		state:          stateAccepting,
 		drainTO:        drainTimeout,
 	}
@@ -2236,35 +2247,65 @@ func (e *Endpoint) publishLocked(rec *requests.Record) {
 		rec.PublishedRevision = cur.PublishedRevision
 		return
 	}
+	// 611.22.48: visible means CONFIRMED DELIVERY awaiting its marker. If a
+	// confirmed delivery for this revision is already pending its marker,
+	// skip the DELIVERY (no double delivery) but still fall through to
+	// MarkPublished below — the marker may need retrying (Pro r2 #13). An
+	// IN-FLIGHT attempt is tracked separately in `publishing`; it does NOT
+	// count as delivered.
 	if e.visible[key] < rec.Revision {
+		// Serialize per-key publication: if another caller is already
+		// publishing this key, leave the work pending for the next
+		// Reconcile/Tick. This prevents two concurrent publishes for the same
+		// key (different revisions included) without holding the global
+		// endpoint mutex (611.22.48 P1-2).
+		if e.publishing[key] {
+			return
+		}
 		if e.crashAt(PointBeforePublish) != nil {
 			return
 		}
-		// 611.22.48: claim the publish slot under the lock BEFORE releasing,
-		// so a concurrent publisher for the same key+revision sees
-		// e.visible[key] >= rec.Revision and skips (no double delivery). The
-		// expensive publication (maildir open + fsync) runs OUTSIDE e.mu so a
-		// slow publisher does not block other Handles on different records.
-		e.visible[key] = rec.Revision
+		// Claim the in-flight slot for THIS key. Only the owner clears it (on
+		// success or failure), so a concurrent caller's reservation is never
+		// clobbered. visible is advanced ONLY on a successful publish.
+		e.publishing[key] = true
 		snap := rec.Snapshot
 		origin := rec.Origin
+		attemptRev := rec.Revision
 		e.mu.Unlock()
+
 		pubErr := e.publish(snap, origin)
+
 		e.mu.Lock()
+		// Clear only OUR in-flight claim. We are the sole owner of this entry
+		// (publishing serialized per key), so a concurrent caller's reservation
+		// is never clobbered (611.22.48 P1-2: cleanup affects only its owner).
+		delete(e.publishing, key)
 		if pubErr != nil {
-			// Publication failed: release the claim so the next reconcile can
-			// retry. The visible-revision bookkeeping stays consistent — no
-			// marker was written, so no double delivery risk on retry.
-			delete(e.visible, key)
+			// Publication failed: do NOT advance visible/PublishedRevision. The
+			// next Reconcile retries the delivery (visible[key] was never set,
+			// so the revision is still owed). No double-delivery risk on retry.
 			return
 		}
+		// Confirmed delivery. Advance visible to our attempt revision (a
+		// concurrent successful publish for a later revision is impossible
+		// here — publishing serialized per key).
+		if e.visible[key] < attemptRev {
+			e.visible[key] = attemptRev
+		}
 	}
+	// Marker retry path (Pro r2 #13): whether this call just delivered the
+	// revision or a prior call did (visible[key] >= rec.Revision), the marker
+	// may still be owed. Re-delivery is prevented by the visible guard above;
+	// only the MarkPublished is retried here.
 	if e.crashAt(PointAfterPublish) != nil || e.crashAt(PointBeforePublished) != nil {
 		return
 	}
 	if err := e.store.MarkPublished(key, rec.Revision); err == nil {
 		rec.PublishedRevision = rec.Revision
-		delete(e.visible, key)
+		if e.visible[key] == rec.Revision {
+			delete(e.visible, key)
+		}
 	}
 }
 

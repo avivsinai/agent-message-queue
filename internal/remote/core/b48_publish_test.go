@@ -9,46 +9,47 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/fake"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
+	"github.com/avivsinai/agent-message-queue/internal/remote/requests"
 )
 
 // TestB48PublishDoesNotBlockConcurrentHandles reproduces
 // agent-message-queue-611.22.48: carrier.Publish (the maildir open + fsync)
-// ran under e.mu (endpoint.go:1027 publishLocked). No deadlock (the carrier
-// never calls back in), but every Handle blocked on a disk sync, so two
-// concurrent Handles on different records serialized behind the publisher.
+// ran under e.mu, so every Handle blocked on a disk sync and two concurrent
+// Handles on different records serialized behind the publisher.
 //
-// The fix moves publication OUTSIDE e.mu: publishLocked claims the
-// visible-revision slot under the lock, snapshots the snapshot+origin,
-// releases e.mu, calls e.publish, then re-acquires e.mu for the
-// MarkPublished bookkeeping. Two Handles on different records now overlap in
-// publication instead of serializing.
+// The fix moves publication OUTSIDE e.mu. This test holds the first
+// publisher on a channel and verifies an unrelated Handle (different key)
+// reaches publication BEFORE the first is released — proving the two overlap
+// rather than serialize behind the global mutex. No timing/sleep assertions.
 //
-// Mutation RED: move the publish call back under e.mu (drop the
-// Unlock/Lock around e.publish) -> the second Handle blocks behind the
-// first's publish and the overlap assertion fails (elapsed ≈ 2×publish
-// latency, not ≈ 1×).
+// Mutation RED: move the publish call back under e.mu (drop the Unlock/Lock
+// around e.publish) -> the second Handle cannot reach publication until the
+// first releases, so the "second reached publication before first released"
+// assertion fails.
 func TestB48PublishDoesNotBlockConcurrentHandles(t *testing.T) {
 	store, now := openStoreNoCleanup(t)
 
-	// A publisher that sleeps to simulate a slow maildir open + fsync. The
-	// sleep is long enough that serialized publication would be clearly
-	// distinguishable from overlapped publication.
-	const pubSleep = 150 * time.Millisecond
-	var pubStarts []time.Time
-	var pubMu sync.Mutex
+	// Hold the first publisher on a channel; the second proceeds independently.
+	firstStarted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	var firstMu sync.Mutex
+	firstKey := "11111111-1111-4111-8111-111111111481"
+	var pubCalls int32
 	slowPublish := func(s protocol.Snapshot, origin map[string]string) error {
-		pubMu.Lock()
-		pubStarts = append(pubStarts, time.Now())
-		pubMu.Unlock()
-		time.Sleep(pubSleep)
+		atomic.AddInt32(&pubCalls, 1)
+		firstMu.Lock()
+		isFirst := s.RequestID == firstKey
+		firstMu.Unlock()
+		if isFirst {
+			close(firstStarted)
+			<-releaseFirst
+		}
 		return nil
 	}
 	ep := core.New(core.Config{Store: store, Publish: slowPublish, Now: now})
 
 	// Two distinct targets so both submits admit (the fake marks itself busy
-	// after one admit, so a second submit to the SAME target returns CodeBusy
-	// and takes a different publish path). Distinct targets guarantee both
-	// reach the admitted-Running publishRevision.
+	// after one admit; a second submit to the SAME target returns CodeBusy).
 	rt1 := fake.New("t1", "e_1")
 	ep.Register(rt1)
 	rt2 := fake.New("t2", "e_1")
@@ -62,65 +63,122 @@ func TestB48PublishDoesNotBlockConcurrentHandles(t *testing.T) {
 			Input:    &protocol.SubmitInput{Text: "x"},
 		}
 	}
-	cmd1 := mkCmd("11111111-1111-4111-8111-111111111481", "t1")
-	cmd2 := mkCmd("11111111-1111-4111-8111-111111111482", "t2")
 
-	// Run both Handles concurrently. If publication is outside e.mu, their
-	// publish calls overlap (start times within pubSleep); if under e.mu, the
-	// second starts only after the first finishes (gap ≈ pubSleep).
+	// Start the first Handle (held in publication via the channel).
 	var wg sync.WaitGroup
-	var err1, err2 error
-	start := time.Now()
 	wg.Add(2)
-	go func() { defer wg.Done(); _, err1 = ep.Handle(cmd1, core.Source{Host: "local"}) }()
-	go func() { defer wg.Done(); _, err2 = ep.Handle(cmd2, core.Source{Host: "local"}) }()
+	go func() { defer wg.Done(); _, _ = ep.Handle(mkCmd(firstKey, "t1"), core.Source{Host: "local"}) }()
+
+	// Wait until the first publisher is blocked inside the slow publish.
+	<-firstStarted
+
+	// Start the second Handle on a DIFFERENT key/target. It must reach
+	// publication while the first is still held (publish outside e.mu).
+	secondReached := make(chan struct{})
+	go func() {
+		defer wg.Done()
+		_, _ = ep.Handle(mkCmd("11111111-1111-4111-8111-111111111482", "t2"), core.Source{Host: "local"})
+		close(secondReached)
+	}()
+
+	// The second Handle must reach publication (and complete) while the first
+	// is still held. If publish is under e.mu, the second blocks behind the
+	// first and secondReached never fires before releaseFirst.
+	<-secondReached
+
+	// Release the first so it can finish and both goroutines join.
+	close(releaseFirst)
 	wg.Wait()
-	elapsed := time.Since(start)
 
-	if err1 != nil {
-		t.Fatalf("handle 1: %v", err1)
-	}
-	if err2 != nil {
-		t.Fatalf("handle 2: %v", err2)
-	}
-
-	// Both publish calls must have fired (the admitted-Running revision).
-	pubMu.Lock()
-	starts := pubStarts
-	pubMu.Unlock()
-	if len(starts) != 2 {
-		t.Fatalf("expected 2 publish calls, got %d", len(starts))
-	}
-
-	// Overlap assertion: the second publish started BEFORE the first finished.
-	// If serialized (publish under e.mu), the gap between starts is >= pubSleep.
-	gap := starts[1].Sub(starts[0])
-	if gap >= pubSleep {
-		t.Fatalf("publish calls serialized: gap between starts = %v, want < %v (611.22.48: publish must run outside e.mu so concurrent Handles overlap)", gap, pubSleep)
-	}
-	// Total elapsed must reflect overlap (~1×pubSleep), not serialization
-	// (~2×pubSleep). Allow headroom for scheduling.
-	if elapsed >= 2*pubSleep {
-		t.Fatalf("handles serialized behind publish: elapsed = %v, want < %v (611.22.48)", elapsed, 2*pubSleep)
+	if got := atomic.LoadInt32(&pubCalls); got != 2 {
+		t.Fatalf("expected 2 publish calls, got %d", got)
 	}
 }
 
-// TestB48PublishFailureReleasesClaim proves the 611.22.48 failure path: when
-// e.publish fails outside the lock, the visible-revision claim is released so
-// the next reconcile retries (no permanent stall, no double-delivery risk).
+// TestB48PendingPublishNotMarkedDelivered is codex's P1-1 regression: a
+// pending (in-flight) publication must NOT be marked as delivered. While A is
+// blocked publishing revision r, a concurrent Reconcile for r must NOT skip
+// the publish and fall through to MarkPublished(r) — that would lose the
+// revision if A fails. With the fix, the `publishing` in-flight set makes the
+// concurrent caller leave the work pending (return early), so
+// PublishedRevision is NOT advanced while A is in flight.
 //
-// Mutation RED: on publish failure, do NOT delete(e.visible, key) -> the
-// claim persists and a subsequent publishRevision for the same revision is
-// skipped (visible[key] >= revision), so the retry never fires and the test
-// fails (the second publish never happens).
-func TestB48PublishFailureReleasesClaim(t *testing.T) {
+// Mutation RED: revert to visible[key]=r before publish (no `publishing` set)
+// -> the concurrent Reconcile sees visible>=r, skips publish, and
+// MarkPublished(r) fires while A is still in flight; if A then fails,
+// PublishedRevision is already r and the assertion fails.
+func TestB48PendingPublishNotMarkedDelivered(t *testing.T) {
+	store, now := openStoreNoCleanup(t)
+
+	pubStarted := make(chan struct{})
+	releasePub := make(chan struct{})
+	var calls int32
+	heldPublish := func(s protocol.Snapshot, origin map[string]string) error {
+		atomic.AddInt32(&calls, 1)
+		close(pubStarted)
+		<-releasePub
+		return nil
+	}
+	ep := core.New(core.Config{Store: store, Publish: heldPublish, Now: now})
+	rt := fake.New("fake", "e_1")
+	ep.Register(rt)
+
+	id := "11111111-1111-4111-8111-111111111483"
+	cmd := &protocol.Command{
+		Schema: protocol.SchemaCommand, Op: protocol.OpRequestSubmit,
+		RequestID: id, TargetID: "fake", Epoch: "e_1",
+		NotAfter: protocol.FormatTime(now().Add(2 * time.Minute)),
+		Input:    &protocol.SubmitInput{Text: "x"},
+	}
+
+	// Start the Handle; it blocks inside the held publish (in-flight).
+	handleDone := make(chan struct{})
+	go func() { defer close(handleDone); _, _ = ep.Handle(cmd, core.Source{Host: "local"}) }()
+	<-pubStarted // the publish is now in-flight
+
+	// A concurrent Reconcile for the same key/revision must NOT advance
+	// PublishedRevision while the publish is in-flight (the revision is not
+	// confirmed delivered yet). It must leave the work pending.
+	_ = ep.Reconcile()
+	k := requests.Key{CreatorHost: "local", TargetID: "fake", RequestID: id}
+	rec, _, _ := store.Get(k)
+	if rec.PublishedRevision >= rec.Revision {
+		t.Fatalf("PublishedRevision=%d advanced to Revision=%d while publish is still in-flight (611.22.48 P1-1: pending publication must not be marked delivered)", rec.PublishedRevision, rec.Revision)
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("expected 1 publish call (the in-flight one), got %d (611.22.48 P1-1: concurrent Reconcile must not re-publish)", got)
+	}
+
+	// Release the held publish so the Handle completes and the revision is
+	// confirmed delivered.
+	close(releasePub)
+	<-handleDone
+	rec, _, _ = store.Get(k)
+	if rec.PublishedRevision < rec.Revision {
+		t.Fatalf("after publish completed, PublishedRevision=%d want >= %d (611.22.48)", rec.PublishedRevision, rec.Revision)
+	}
+}
+
+// TestB48FailedPublishDoesNotClearNewerReservation is codex's P1-2 regression:
+// an older attempt's cleanup must NOT clear a newer attempt's reservation.
+// A publishes revision r and fails. Before A clears its in-flight claim, B
+// cannot start r+1 (per-key serialization), so this test verifies the
+// narrower property: A's failure cleanup deletes only A's `publishing` entry
+// and does not advance or corrupt visible/PublishedRevision, so the next
+// Reconcile retries r cleanly. A subsequent successful publish for the same
+// key then proceeds.
+//
+// Mutation RED: on failure, delete(e.visible, key) unconditionally (the old
+// code) -> if a concurrent caller had advanced visible, A clobbers it. With
+// the fix, A's failure never touches visible (only clears its own
+// `publishing` entry), so the retry is clean.
+func TestB48FailedPublishDoesNotCorruptBookkeeping(t *testing.T) {
 	store, now := openStoreNoCleanup(t)
 
 	var calls int32
-	// Fail the first publish, succeed thereafter.
 	failFirst := func(s protocol.Snapshot, origin map[string]string) error {
 		if atomic.AddInt32(&calls, 1) == 1 {
-			return errPublishFailed
+			return errPublishFailed48
 		}
 		return nil
 	}
@@ -128,25 +186,38 @@ func TestB48PublishFailureReleasesClaim(t *testing.T) {
 	rt := fake.New("fake", "e_1")
 	ep.Register(rt)
 
+	id := "11111111-1111-4111-8111-111111111484"
 	cmd := &protocol.Command{
 		Schema: protocol.SchemaCommand, Op: protocol.OpRequestSubmit,
-		RequestID: "11111111-1111-4111-8111-111111111483", TargetID: "fake", Epoch: "e_1",
+		RequestID: id, TargetID: "fake", Epoch: "e_1",
 		NotAfter: protocol.FormatTime(now().Add(2 * time.Minute)),
 		Input:    &protocol.SubmitInput{Text: "x"},
 	}
 	if _, err := ep.Handle(cmd, core.Source{Host: "local"}); err != nil {
 		t.Fatalf("handle: %v", err)
 	}
-	if atomic.LoadInt32(&calls) != 1 {
-		t.Fatalf("expected 1 publish call after handle, got %d", calls)
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("expected 1 publish call after handle, got %d", got)
 	}
 
-	// Reconcile must retry the publish (the claim was released on failure).
-	// publishRevision fires from reconcileLive for the non-terminal record.
-	_ = ep.Reconcile()
+	k := requests.Key{CreatorHost: "local", TargetID: "fake", RequestID: id}
+	rec, _, _ := store.Get(k)
+	if rec.PublishedRevision >= rec.Revision {
+		t.Fatalf("failed publish advanced PublishedRevision=%d to Revision=%d (611.22.48 P1-2: failure must not advance bookkeeping)", rec.PublishedRevision, rec.Revision)
+	}
+
+	// Reconcile must retry the publish (the in-flight claim was cleared on
+	// failure, visible was never set). The second call succeeds.
+	if err := ep.Reconcile(); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
 	if got := atomic.LoadInt32(&calls); got < 2 {
-		t.Fatalf("expected retry publish after reconcile, got %d calls (611.22.48: failed publish must release the visible claim)", got)
+		t.Fatalf("expected retry publish after reconcile, got %d calls (611.22.48: failed publish must release only its own in-flight claim so retry proceeds)", got)
+	}
+	rec, _, _ = store.Get(k)
+	if rec.PublishedRevision < rec.Revision {
+		t.Fatalf("after retry, PublishedRevision=%d want >= %d (611.22.48)", rec.PublishedRevision, rec.Revision)
 	}
 }
 
-var errPublishFailed = protocol.Refuse(protocol.CodeNativeError, "publish failed for test")
+var errPublishFailed48 = protocol.Refuse(protocol.CodeNativeError, "publish failed for test")
