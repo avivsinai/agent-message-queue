@@ -2240,11 +2240,24 @@ func (e *Endpoint) publishLocked(rec *requests.Record) {
 		if e.crashAt(PointBeforePublish) != nil {
 			return
 		}
-		if err := e.publish(rec.Snapshot, rec.Origin); err != nil {
+		// 611.22.48: claim the publish slot under the lock BEFORE releasing,
+		// so a concurrent publisher for the same key+revision sees
+		// e.visible[key] >= rec.Revision and skips (no double delivery). The
+		// expensive publication (maildir open + fsync) runs OUTSIDE e.mu so a
+		// slow publisher does not block other Handles on different records.
+		e.visible[key] = rec.Revision
+		snap := rec.Snapshot
+		origin := rec.Origin
+		e.mu.Unlock()
+		pubErr := e.publish(snap, origin)
+		e.mu.Lock()
+		if pubErr != nil {
+			// Publication failed: release the claim so the next reconcile can
+			// retry. The visible-revision bookkeeping stays consistent — no
+			// marker was written, so no double delivery risk on retry.
+			delete(e.visible, key)
 			return
 		}
-		// Delivered. From here on only the marker is owed.
-		e.visible[key] = rec.Revision
 	}
 	if e.crashAt(PointAfterPublish) != nil || e.crashAt(PointBeforePublished) != nil {
 		return
