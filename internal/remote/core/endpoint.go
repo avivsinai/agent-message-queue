@@ -379,7 +379,7 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 		}
 		// Fall through to the normal admission path with the existing
 		// record: the deferred/Tick machinery owns it from here.
-		t, code := e.admissibleLocked(cmd.TargetID, cmd.Epoch, cmd.NotAfter)
+		t, code := e.admissibleLocked(cmd.TargetID, cmd.Epoch, cmd.NotAfter, cmd.Input.MinEvidence)
 		if code != "" {
 			e.mu.Unlock()
 			return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: code}}, nil
@@ -462,7 +462,7 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 	// about to refuse is never written (no durable placeholder to leak on a
 	// failed rejection write, and nothing for Tick to dispatch). Only Create
 	// when we will dispatch or deliberately defer.
-	t, code := e.admissibleLocked(cmd.TargetID, cmd.Epoch, cmd.NotAfter)
+	t, code := e.admissibleLocked(cmd.TargetID, cmd.Epoch, cmd.NotAfter, cmd.Input.MinEvidence)
 	if code != "" {
 		// Refused (unshared/expired/stale_epoch): no durable record.
 		e.mu.Unlock()
@@ -572,10 +572,13 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 	return e.finishAdmissionLocked(rec, true, t, adm, nerr)
 }
 
-// admissibleLocked checks share, epoch, expiry and capability. It returns the
-// live target, or nil with an empty code when the target is registered but
-// offline, or nil with a refusal code.
-func (e *Endpoint) admissibleLocked(targetID, epoch, notAfter string) (*target, protocol.Code) {
+// admissibleLocked checks share, epoch, expiry, capability and the caller's
+// minimum evidence floor. It returns the live target, or nil with an empty
+// code when the target is registered but offline, or nil with a refusal code.
+// The evidence floor (MinEvidence) is checked here, BEFORE any side effect: an
+// attachment whose strongest submit evidence is weaker than the floor is
+// refused (weaker capability is refused, not substituted — ADR invariant 5).
+func (e *Endpoint) admissibleLocked(targetID, epoch, notAfter, minEvidence string) (*target, protocol.Code) {
 	t, ok := e.targets[targetID]
 	if !ok {
 		return nil, protocol.CodeUnshared
@@ -590,6 +593,18 @@ func (e *Endpoint) admissibleLocked(targetID, epoch, notAfter string) (*target, 
 	}
 	if !s.Capabilities.Submit {
 		return nil, protocol.CodeUnsupported
+	}
+	// Evidence floor: an omitted floor preserves legacy semantics (any
+	// evidence is admitted). A supplied floor is checked before dispatch so a
+	// caller that needs `admitted` is refused by an adapter that can only
+	// prove `submitted`, instead of being silently given the weaker guarantee.
+	// A nil evidence projection is class "" (proves nothing), so it is refused
+	// by any non-empty floor — fail closed, never dispatch under a floor the
+	// attachment cannot meet.
+	if minEvidence != "" {
+		if s.Evidence == nil || !protocol.EvidenceClassMeets(s.Evidence.Submit, minEvidence) {
+			return nil, protocol.CodeUnsupported
+		}
 	}
 	if s.Attachment == "offline" {
 		return nil, ""
@@ -1893,7 +1908,11 @@ func (e *Endpoint) admitDeferred(rec *requests.Record) error {
 		return err
 	}
 	e.mu.Lock()
-	t, code := e.admissibleLocked(rec.TargetID, rec.Epoch, rec.NotAfter)
+	var minEvidence string
+	if rec.Input != nil {
+		minEvidence = rec.Input.MinEvidence
+	}
+	t, code := e.admissibleLocked(rec.TargetID, rec.Epoch, rec.NotAfter, minEvidence)
 	if code == "" && t == nil {
 		e.mu.Unlock()
 		return nil // still offline, still inside the window

@@ -144,3 +144,106 @@ func TestReplyShape(t *testing.T) {
 		t.Fatalf("success outcome should omit code/message: %s", s)
 	}
 }
+
+// TestCommandDigestMinEvidenceIsIdentity pins the MinEvidence contract: the
+// caller-stated evidence floor is part of the durable input digest, so it
+// cannot be stripped for a retry against an older endpoint. An omitted floor
+// (legacy) and a spelled floor are semantically DIFFERENT requests — one
+// requires a guarantee the other does not — so they MUST digest differently.
+// This is the protocol half of the Wave A.4 MinEvidence floor.
+func TestCommandDigestMinEvidenceIsIdentity(t *testing.T) {
+	base := &Command{
+		Schema:    SchemaCommand,
+		Op:        OpRequestSubmit,
+		RequestID: "11111111-1111-4111-8111-111111111501",
+		TargetID:  "t_fake1",
+		Epoch:     "e_1",
+		NotAfter:  "2026-09-08T10:02:00Z",
+		Input:     &SubmitInput{Text: "say hi", Busy: BusyReject, Deliver: DeliverTurn},
+	}
+	baseDigest := CommandDigest(base) // no min_evidence: legacy
+
+	// A spelled floor changes the digest: it cannot be stripped for retry.
+	withFloor := *base
+	withFloor.Input = &SubmitInput{Text: "say hi", Busy: BusyReject, Deliver: DeliverTurn, MinEvidence: EvidenceAdmitted}
+	if CommandDigest(&withFloor) == baseDigest {
+		t.Fatal("digest unchanged after adding min_evidence=admitted; the floor must be part of identity")
+	}
+
+	// Two different floors digest differently (admitted vs submitted).
+	submitted := *base
+	submitted.Input = &SubmitInput{Text: "say hi", Busy: BusyReject, Deliver: DeliverTurn, MinEvidence: EvidenceSubmitted}
+	if CommandDigest(&submitted) == CommandDigest(&withFloor) {
+		t.Fatal("admitted and submitted floors produce the same digest")
+	}
+
+	// The floor is stable: the same floor reproduces the same digest.
+	again := withFloor
+	if CommandDigest(&again) != CommandDigest(&withFloor) {
+		t.Fatal("min_evidence digest not stable")
+	}
+}
+
+// TestMinEvidenceValidation pins that Validate accepts the known classes and
+// rejects an unknown floor clearly (a strict v1 peer fails instead of
+// silently admitting work it cannot prove).
+func TestMinEvidenceValidation(t *testing.T) {
+	base := &Command{
+		Schema:    SchemaCommand,
+		Op:        OpRequestSubmit,
+		RequestID: "11111111-1111-4111-8111-111111111501",
+		TargetID:  "t_fake1",
+		Epoch:     "e_1",
+		NotAfter:  "2026-09-08T10:02:00Z",
+		Input:     &SubmitInput{Text: "say hi"},
+	}
+	// Omitted (legacy) is valid.
+	if err := base.Validate(); err != nil {
+		t.Fatalf("omitted min_evidence rejected: %v", err)
+	}
+	for _, floor := range []string{EvidenceSubmitted, EvidenceAdmitted} {
+		cmd := *base
+		cmd.Input = &SubmitInput{Text: "say hi", MinEvidence: floor}
+		if err := cmd.Validate(); err != nil {
+			t.Fatalf("min_evidence=%s rejected: %v", floor, err)
+		}
+	}
+	// Unknown floor is rejected.
+	cmd := *base
+	cmd.Input = &SubmitInput{Text: "say hi", MinEvidence: "guaranteed"}
+	if err := cmd.Validate(); err == nil {
+		t.Fatal("unknown min_evidence accepted; want invalid")
+	}
+}
+
+// TestEvidenceClassMeets pins the within-kind ordering: admitted outranks
+// submitted; an empty floor always passes (legacy); an unknown value never
+// meets a non-empty floor (fail closed). The ranks are NOT comparable across
+// evidence kinds.
+func TestEvidenceClassMeets(t *testing.T) {
+	cases := []struct {
+		have, want string
+		wantOK     bool
+	}{
+		// Empty floor: legacy, any evidence admitted.
+		{have: "", want: "", wantOK: true},
+		{have: EvidenceSubmitted, want: "", wantOK: true},
+		{have: EvidenceAdmitted, want: "", wantOK: true},
+		// Admitted meets submitted and admitted.
+		{have: EvidenceAdmitted, want: EvidenceSubmitted, wantOK: true},
+		{have: EvidenceAdmitted, want: EvidenceAdmitted, wantOK: true},
+		// Submitted meets submitted but NOT admitted (weaker refused, not
+		// substituted).
+		{have: EvidenceSubmitted, want: EvidenceSubmitted, wantOK: true},
+		{have: EvidenceSubmitted, want: EvidenceAdmitted, wantOK: false},
+		// Unknown/empty evidence never meets a non-empty floor (fail closed).
+		{have: "", want: EvidenceSubmitted, wantOK: false},
+		{have: "guaranteed", want: EvidenceSubmitted, wantOK: false},
+		{have: EvidenceSubmitted, want: "guaranteed", wantOK: false},
+	}
+	for _, c := range cases {
+		if got := EvidenceClassMeets(c.have, c.want); got != c.wantOK {
+			t.Fatalf("EvidenceClassMeets(have=%q, want=%q) = %v, want %v", c.have, c.want, got, c.wantOK)
+		}
+	}
+}

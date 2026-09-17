@@ -72,10 +72,17 @@
                 "steer"
               ],
               "default": "turn"
+            },
+            "min_evidence": {
+              "enum": [
+                "submitted",
+                "admitted"
+              ],
+              "description": "Caller-stated minimum submit evidence class. Omitted = legacy semantics (any evidence admitted). Supplied, the attachment's strongest submit evidence must meet or exceed this floor or the submit is refused (weaker capability is refused, not substituted). Part of the durable input digest: cannot be stripped for a retry. Cancellation requires exact native ownership independently of this floor."
             }
           },
           "additionalProperties": false,
-          "description": "The submit input. Digest canonical form: the payload is JSON with keys in this FIXED order (NOT alphabetical) and no insignificant whitespace: {\"schema\":\"...\",\"op\":\"request.submit\",\"request_id\":\"...\",\"target_id\":\"...\",\"epoch\":\"...\",\"input\":{\"text\":\"...\",\"busy\":\"reject\",\"deliver\":\"turn\"}}. Inside input, the field order is text, busy, deliver. Busy and Deliver are resolved to their defaults (reject, turn) before digesting, so the omitted form and the spelled form produce the same digest. B10: not_after is NOT in the digest (a deadline is policy, not identity). Text is digested UNTRIMMED (the \\S pattern only validates non-emptiness; leading/trailing whitespace is preserved in the digest). String values use Go's json.Marshal escaping (< > & U+2028 U+2029 plus the ordinary JSON escapes); a non-Go carrier MUST produce byte-identical output. See testdata/remote/digest_vectors.json for golden digest vectors that pin the exact bytes. Then sha256 hex with the \"sha256:\" prefix."
+          "description": "The submit input. Digest canonical form: the payload is JSON with keys in this FIXED order (NOT alphabetical) and no insignificant whitespace: {\"schema\":\"...\",\"op\":\"request.submit\",\"request_id\":\"...\",\"target_id\":\"...\",\"epoch\":\"...\",\"input\":{\"text\":\"...\",\"busy\":\"reject\",\"deliver\":\"turn\"}}. Inside input, the field order is text, busy, deliver, min_evidence. Busy and Deliver are resolved to their defaults (reject, turn) before digesting, so the omitted form and the spelled form produce the same digest. min_evidence is NOT default-resolved: an omitted floor (legacy) and a spelled floor are semantically DIFFERENT requests (one requires a guarantee the other does not), so they MUST digest differently. B10: not_after is NOT in the digest (a deadline is policy, not identity). Text is digested UNTRIMMED (the \\S pattern only validates non-emptiness; leading/trailing whitespace is preserved in the digest). String values use Go's json.Marshal escaping (< > & U+2028 U+2029 plus the ordinary JSON escapes); a non-Go carrier MUST produce byte-identical output. See testdata/remote/digest_vectors.json for golden digest vectors that pin the exact bytes. Then sha256 hex with the \"sha256:\" prefix."
         }
       },
       "required": [

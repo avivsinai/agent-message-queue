@@ -100,6 +100,68 @@ type SubmitInput struct {
 	Text    string  `json:"text"`
 	Busy    Busy    `json:"busy,omitempty"`
 	Deliver Deliver `json:"deliver,omitempty"`
+	// MinEvidence is the caller-stated minimum submit evidence class the
+	// caller will accept. Omitted preserves legacy semantics (any evidence
+	// class is admitted). Supplied, it is checked BEFORE side effects: an
+	// attachment whose strongest submit evidence is weaker than the floor is
+	// refused (weaker capability is refused, not substituted — ADR invariant
+	// 5), never silently given the weaker guarantee. It is part of the durable
+	// input digest, so it cannot be stripped for a retry against an older
+	// endpoint. Cancellation requires exact native ownership independently of
+	// this floor; it does not weaken cancel semantics.
+	//
+	// The ordering is WITHIN the submit evidence kind only: admitted outranks
+	// submitted. It is not a global numeric ordering across unrelated evidence
+	// kinds (completion, approval). Use EvidenceClassMeets to compare.
+	MinEvidence string `json:"min_evidence,omitempty"`
+}
+
+// EvidenceClass values are the typed submit evidence classes an attachment
+// can prove. They are ordered WITHIN the submit kind: a higher class means a
+// stronger guarantee. The ordering is explicit and local to submit evidence;
+// it does not rank unrelated evidence kinds (completion/approval).
+const (
+	// EvidenceSubmitted: the adapter delivered the prompt to the harness's
+	// input boundary but cannot prove the harness admitted it to a run. Amit's
+	// evidence class (its sendUserMessage cannot report its own rejection).
+	EvidenceSubmitted = "submitted"
+	// EvidenceAdmitted: the adapter proved the harness admitted the prompt to a
+	// bound run (a native turn/run id confirms the text landed). Codex and the
+	// fake runtime prove this.
+	EvidenceAdmitted = "admitted"
+)
+
+// EvidenceClassMeets reports whether the attachment's strongest submit
+// evidence (have) meets or exceeds the caller's stated floor (want). An empty
+// floor always passes (legacy: any evidence is admitted). The comparison is
+// within the submit evidence kind only; have and want must both be one of the
+// EvidenceClass values above. An unknown value never meets a non-empty floor
+// (fail closed).
+func EvidenceClassMeets(have, want string) bool {
+	if want == "" {
+		return true
+	}
+	// Fail closed: an unknown floor (want) is never met. Validate rejects
+	// unknown floors, but this guard keeps the comparison safe if a caller
+	// bypasses validation or a future class is added without updating ranks.
+	if evidenceRank(want) == 0 {
+		return false
+	}
+	return evidenceRank(have) >= evidenceRank(want)
+}
+
+// evidenceRank returns the strength of a submit evidence class. Unknown and
+// empty values are rank 0 (weakest); this makes EvidenceClassMeets fail
+// closed for an unknown floor or an attachment that publishes none. The ranks
+// are NOT comparable across evidence kinds.
+func evidenceRank(s string) int {
+	switch s {
+	case EvidenceAdmitted:
+		return 2
+	case EvidenceSubmitted:
+		return 1
+	}
+	return 0
 }
 
 // Command is the decoded client command. Fields not used by an op are empty.
@@ -604,6 +666,15 @@ func (c *Command) Validate() error {
 		case "", DeliverTurn, DeliverSteer:
 		default:
 			return Refuse(CodeInvalid, "input.deliver must be turn or steer")
+		}
+		// MinEvidence is optional (omitted = legacy semantics). Supplied, it
+		// must be a known submit evidence class so a strict v1 peer fails
+		// clearly instead of silently admitting work it cannot prove. An
+		// unknown value is rejected here, before any side effect.
+		switch c.Input.MinEvidence {
+		case "", EvidenceSubmitted, EvidenceAdmitted:
+		default:
+			return Refuse(CodeInvalid, "input.min_evidence must be %q or %q", EvidenceSubmitted, EvidenceAdmitted)
 		}
 	case OpRequestGet:
 		if err := requireFields(c, "request_ref"); err != nil {
