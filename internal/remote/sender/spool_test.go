@@ -451,10 +451,16 @@ func TestSenderB2RefusalClassification(t *testing.T) {
 	}
 }
 
-// TestSenderB2BusySettlesAsRefusal (round-3 item 4): busy=reject must NOT be
-// transient. The ADR expressly refuses busy=queue in v1. A busy refusal
-// settles as failed, not pending-for-replay.
-func TestSenderB2BusySettlesAsRefusal(t *testing.T) {
+// TestSenderB2BusyStaysPendingForRetry (round-4) pins the busy semantics
+// Claude ruled: busy IS transient. A target busy ONCE is not a permanent
+// failure of the caller's command. The envelope stays pending (MarkAttempt),
+// retrying next tick, bounded by NotAfter — only expiry ends it. This
+// preserves the spool's purpose: an offline-enqueued submit that meets one
+// busy tick must not die as failed.
+//
+// RED when CodeBusy is removed from isTransientCode (busy settles as
+// failed/refusal instead of pending+retry).
+func TestSenderB2BusyStaysPendingForRetry(t *testing.T) {
 	now := time.Now()
 	clock := func() time.Time { return now }
 	spool := newTestSpool(t, clock)
@@ -481,11 +487,14 @@ func TestSenderB2BusySettlesAsRefusal(t *testing.T) {
 		t.Fatalf("drained n=%d, want 1", n)
 	}
 	got, _, _ := spool.Get("local", cmd.RequestID)
-	if got.State != StateFailed {
-		t.Fatalf("busy: state=%s, want failed (busy must settle as refusal, not queue)", got.State)
+	if got.State != StatePending {
+		t.Fatalf("busy: state=%s, want pending (busy must stay pending for next-tick retry, not settle as failed)", got.State)
 	}
 	if got.LastError != string(protocol.CodeBusy) {
 		t.Fatalf("busy: last_error=%s, want %s", got.LastError, protocol.CodeBusy)
+	}
+	if got.Attempt != 1 {
+		t.Fatalf("busy: attempt=%d, want 1 (MarkAttempt should record the transient failure)", got.Attempt)
 	}
 }
 

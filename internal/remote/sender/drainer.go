@@ -134,11 +134,16 @@ func classifyReply(reply any, herr error) protocol.Code {
 }
 
 // isTransientCode reports whether a dispatch outcome code is worth retrying.
-// Busy is NOT transient (round-3 item 4): busy=reject settles as a refusal
-// per the ADR; replay only via explicit user resubmit, never automatic.
+// Busy IS transient (Claude round-4 ruling): busy=queue in v1 was rejected,
+// but busy=permanent-failure is also wrong — a target busy ONCE is not a
+// permanent failure of the caller's command. The envelope stays pending,
+// retrying next tick, bounded by NotAfter (only expiry ends it). This
+// preserves the spool's purpose: an offline-enqueued submit that meets one
+// busy tick must not die as failed.
 func isTransientCode(code protocol.Code) bool {
 	switch code {
-	case protocol.CodeDraining,
+	case protocol.CodeBusy,
+		protocol.CodeDraining,
 		protocol.CodeEndpointUnreachable,
 		protocol.CodeStorageFull:
 		return true
