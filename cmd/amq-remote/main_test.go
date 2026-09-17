@@ -834,7 +834,14 @@ func TestCLIB6RequestsListsFailedEnvelopes(t *testing.T) {
 		NotAfter: protocol.FormatTime(now.Add(2 * time.Minute)),
 		Input:    &protocol.SubmitInput{Text: "failed"},
 	}
-	for _, cmd := range []*protocol.Command{pendingCmd, failedCmd} {
+	expiredCmd := &protocol.Command{
+		Schema: protocol.SchemaCommand, Op: protocol.OpRequestSubmit,
+		RequestID: "11111111-1111-4111-8111-11111111b603",
+		TargetID:  "fake", Epoch: "e_1",
+		NotAfter: protocol.FormatTime(now.Add(-1 * time.Minute)), // window already closed
+		Input:    &protocol.SubmitInput{Text: "expired"},
+	}
+	for _, cmd := range []*protocol.Command{pendingCmd, failedCmd, expiredCmd} {
 		env := &sender.Envelope{
 			RequestID: cmd.RequestID, CreatorHost: "local", TargetID: "fake",
 			Epoch: cmd.Epoch, NotAfter: cmd.NotAfter, Command: cmd,
@@ -848,8 +855,12 @@ func TestCLIB6RequestsListsFailedEnvelopes(t *testing.T) {
 	if err := spool.MarkFailed(sender.Key{CreatorHost: "local", RequestID: failedCmd.RequestID}, string(protocol.CodeStaleEpoch)); err != nil {
 		t.Fatalf("mark failed: %v", err)
 	}
+	// Expire the third envelope (its window already closed).
+	if _, err := spool.Expire(sender.Key{CreatorHost: "local", RequestID: expiredCmd.RequestID}, now); err != nil {
+		t.Fatalf("expire: %v", err)
+	}
 
-	// requests (no serve running) must list BOTH the pending and the failed.
+	// requests (no serve running) must list ALL THREE: pending, failed, expired.
 	code, out, _ := cli(t, "", "requests", "--root", root, "--json")
 	if code != 0 {
 		t.Fatalf("requests exit=%d out=%s", code, out)
@@ -862,6 +873,16 @@ func TestCLIB6RequestsListsFailedEnvelopes(t *testing.T) {
 	}
 	if !strings.Contains(out, string(protocol.CodeStaleEpoch)) {
 		t.Fatalf("requests did not include last_error for failed envelope: %s", out)
+	}
+	// B6 round-5 gap 1: expired envelope must be listed as expired, not received.
+	if !strings.Contains(out, expiredCmd.RequestID) {
+		t.Fatalf("requests did not list expired envelope: %s", out)
+	}
+	if !strings.Contains(out, string(protocol.StateRejected)) {
+		t.Fatalf("requests did not map expired to state rejected: %s", out)
+	}
+	if !strings.Contains(out, string(protocol.CodeExpired)) {
+		t.Fatalf("requests did not include code expired for expired envelope: %s", out)
 	}
 }
 
@@ -910,6 +931,33 @@ func TestCLIB6StatusFailedEnvelopeExitsOne(t *testing.T) {
 	}
 	if !strings.Contains(out, string(protocol.CodeStaleEpoch)) {
 		t.Fatalf("status did not print last_error: %s", out)
+	}
+
+	// B6 round-5 gap 2: expired envelope must also exit 1 (not 0).
+	expiredCmd := &protocol.Command{
+		Schema: protocol.SchemaCommand, Op: protocol.OpRequestSubmit,
+		RequestID: "11111111-1111-4111-8111-11111111b611",
+		TargetID:  "fake", Epoch: "e_1",
+		NotAfter: protocol.FormatTime(now.Add(-1 * time.Minute)), // window already closed
+		Input:    &protocol.SubmitInput{Text: "expired"},
+	}
+	expiredEnv := &sender.Envelope{
+		RequestID: expiredCmd.RequestID, CreatorHost: "local", TargetID: "fake",
+		Epoch: expiredCmd.Epoch, NotAfter: expiredCmd.NotAfter, Command: expiredCmd,
+		Destination: "ipc:/tmp/state",
+	}
+	if err := spool.Create(expiredEnv); err != nil {
+		t.Fatalf("create expired: %v", err)
+	}
+	if _, err := spool.Expire(sender.Key{CreatorHost: "local", RequestID: expiredCmd.RequestID}, now); err != nil {
+		t.Fatalf("expire: %v", err)
+	}
+	code2, out2, _ := cli(t, "", "status", expiredCmd.RequestID, "--root", root, "--json")
+	if code2 != protocol.ExitError {
+		t.Fatalf("status expired envelope exit=%d, want %d (ExitError) out=%s", code2, protocol.ExitError, out2)
+	}
+	if !strings.Contains(out2, string(protocol.CodeExpired)) {
+		t.Fatalf("status did not print code expired for expired envelope: %s", out2)
 	}
 }
 
@@ -1091,3 +1139,51 @@ func TestCLISubmitMinEvidenceUnsupportedExits6(t *testing.T) {
 }
 
 // TestCLISubmitPrintsAchievedEvidence pins the architect-review invariant:
+
+// TestCLIB6StatusByRequestIdWhileServeUp (round-5 gap 3) pins that `status`
+// with a bare request ID works WHILE SERVE IS UP. A running endpoint refuses
+// a bare id as invalid; the spool must be consulted first so the surface that
+// reports a drain failure is reachable at exactly the moment the failure
+// exists. Asserts state failed + last_error + exit 1.
+//
+// RED when the spool-first resolution is removed (status sends the bare id to
+// the live endpoint, which refuses it as invalid, and the invalid fallback is
+// absent): exit 2, no last_error.
+func TestCLIB6StatusByRequestIdWhileServeUp(t *testing.T) {
+	root := startServe(t)
+	stateDir := filepath.Join(root, "extensions", "remote")
+	spool, err := sender.Open(stateDir)
+	if err != nil {
+		t.Fatalf("sender open: %v", err)
+	}
+	now := time.Now()
+	cmd := &protocol.Command{
+		Schema: protocol.SchemaCommand, Op: protocol.OpRequestSubmit,
+		RequestID: "11111111-1111-4111-8111-11111111b620",
+		TargetID:  "fake", Epoch: "e_1",
+		NotAfter: protocol.FormatTime(now.Add(2 * time.Minute)),
+		Input:    &protocol.SubmitInput{Text: "stale-while-up"},
+	}
+	env := &sender.Envelope{
+		RequestID: cmd.RequestID, CreatorHost: ipc.LocalHost, TargetID: "fake",
+		Epoch: cmd.Epoch, NotAfter: cmd.NotAfter, Command: cmd,
+		Destination: "ipc:" + stateDir,
+	}
+	if err := spool.Create(env); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := spool.MarkFailed(sender.Key{CreatorHost: ipc.LocalHost, RequestID: cmd.RequestID}, string(protocol.CodeStaleEpoch)); err != nil {
+		t.Fatalf("mark failed: %v", err)
+	}
+
+	// status with a bare request ID while serve is up: the endpoint would
+	// refuse a bare id as invalid, but the spool-first resolution returns the
+	// failed envelope directly. Exit 1, last_error present.
+	code, out, _ := cli(t, "", "status", cmd.RequestID, "--root", root, "--json")
+	if code != protocol.ExitError {
+		t.Fatalf("status by request-id while serve up exit=%d, want %d (ExitError) out=%s", code, protocol.ExitError, out)
+	}
+	if !strings.Contains(out, string(protocol.CodeStaleEpoch)) {
+		t.Fatalf("status did not print last_error for failed envelope: %s", out)
+	}
+}
