@@ -121,8 +121,8 @@ type SubmitInput struct {
 // stronger guarantee. The ordering is explicit and local to submit evidence;
 // it does not rank unrelated evidence kinds (completion/approval).
 const (
-	// EvidenceSubmitted: the adapter delivered the prompt to the harness''s
-	// input boundary but cannot prove the harness admitted it to a run. Amit''s
+	// EvidenceSubmitted: the adapter delivered the prompt to the harness's
+	// input boundary but cannot prove the harness admitted it to a run. Amit's
 	// evidence class (its sendUserMessage cannot report its own rejection).
 	EvidenceSubmitted = "submitted"
 	// EvidenceAdmitted: the adapter proved the harness admitted the prompt to a
@@ -131,8 +131,8 @@ const (
 	EvidenceAdmitted = "admitted"
 )
 
-// EvidenceClassMeets reports whether the attachment'"'"'s strongest submit
-// evidence (have) meets or exceeds the caller'"'"'s stated floor (want). An empty
+// EvidenceClassMeets reports whether the attachment's strongest submit
+// evidence (have) meets or exceeds the caller's stated floor (want). An empty
 // floor always passes (legacy: any evidence is admitted). The comparison is
 // within the submit evidence kind only; have and want must both be one of the
 // EvidenceClass values above. An unknown value never meets a non-empty floor

@@ -284,12 +284,12 @@ func utf8ValidString(s string) bool {
 	return true
 }
 
-// TestMinEvidenceSubmitRoundTrip is the Wave A.4 corpus extension: a submit
-// command carrying min_evidence validates against the schema, and the decoded
-// command survives a serialize→decode round-trip with its floor intact (the
-// semantic-JSON-equality contract from the accepted plan: the decoded command
-// must not lose the field). This is NOT a test-only PR: it extends the
-// existing happy-path schema coverage with the new behavior.
+// TestMinEvidenceSubmitRoundTrip verifies that a submit command carrying
+// min_evidence validates against the schema and survives a
+// serialize→decode round-trip with its floor intact. The corpus now carries
+// a min_evidence fixture (Q01 step 1), so the fillCommand round-trip
+// contract in TestDecodeCorpusCommands exercises the new field; this test
+// covers the field directly with explicit values.
 func TestMinEvidenceSubmitRoundTrip(t *testing.T) {
 	sch := compileSchema(t, "remote-command-v1.schema.json")
 	doc := map[string]any{

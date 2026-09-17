@@ -60,6 +60,7 @@ type Runtime struct {
 	nextListener         int
 	capabilityOverride   *protocol.Capabilities
 	evidenceOverride     *protocol.Evidence
+	evidenceSet          bool // true when WithEvidence was called (even with nil)
 }
 
 // Answer records who answered which interaction.
@@ -87,8 +88,13 @@ func New(targetID, epoch string) *Runtime {
 // WithEvidence overrides the session evidence projection (default: submit=
 // admitted). Tests use it to simulate a weaker-evidence adapter (e.g. Amit's
 // submit=submitted) so the endpoint's MinEvidence floor can be exercised.
+// Passing nil explicitly sets the projection to nil (an adapter that publishes
+// no evidence), distinguishable from never calling WithEvidence at all.
 func (r *Runtime) WithEvidence(ev *protocol.Evidence) *Runtime {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.evidenceOverride = ev
+	r.evidenceSet = true
 	return r
 }
 
@@ -108,8 +114,8 @@ func (r *Runtime) Inspect() protocol.Session {
 		caps = *r.capabilityOverride
 	}
 	ev := &protocol.Evidence{Submit: "admitted", Completion: "run_terminal"}
-	if r.evidenceOverride != nil {
-		ev = r.evidenceOverride
+	if r.evidenceSet {
+		ev = r.evidenceOverride // may be nil
 	}
 	return protocol.Session{
 		Schema:       protocol.SchemaSession,

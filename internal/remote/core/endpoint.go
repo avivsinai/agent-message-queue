@@ -598,8 +598,11 @@ func (e *Endpoint) admissibleLocked(targetID, epoch, notAfter, minEvidence strin
 	// evidence is admitted). A supplied floor is checked before dispatch so a
 	// caller that needs `admitted` is refused by an adapter that can only
 	// prove `submitted`, instead of being silently given the weaker guarantee.
-	if minEvidence != "" && s.Evidence != nil {
-		if !protocol.EvidenceClassMeets(s.Evidence.Submit, minEvidence) {
+	// A nil evidence projection is class "" (proves nothing), so it is refused
+	// by any non-empty floor — fail closed, never dispatch under a floor the
+	// attachment cannot meet.
+	if minEvidence != "" {
+		if s.Evidence == nil || !protocol.EvidenceClassMeets(s.Evidence.Submit, minEvidence) {
 			return nil, protocol.CodeUnsupported
 		}
 	}
@@ -1905,7 +1908,11 @@ func (e *Endpoint) admitDeferred(rec *requests.Record) error {
 		return err
 	}
 	e.mu.Lock()
-	t, code := e.admissibleLocked(rec.TargetID, rec.Epoch, rec.NotAfter, rec.Input.MinEvidence)
+	var minEvidence string
+	if rec.Input != nil {
+		minEvidence = rec.Input.MinEvidence
+	}
+	t, code := e.admissibleLocked(rec.TargetID, rec.Epoch, rec.NotAfter, minEvidence)
 	if code == "" && t == nil {
 		e.mu.Unlock()
 		return nil // still offline, still inside the window
