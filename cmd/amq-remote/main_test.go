@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -773,5 +774,193 @@ func TestCLISubmitMinEvidenceUnsupportedExits6(t *testing.T) {
 	// Pin the exit-code mapping directly: unsupported is action-required (6).
 	if got := protocol.ExitForCode(protocol.CodeUnsupported); got != protocol.ExitActionRequired {
 		t.Fatalf("ExitForCode(unsupported)=%d, want %d", got, protocol.ExitActionRequired)
+	}
+}
+
+// TestBK4P0RunningStaysRunningAfterReconcile (round-5) is the first P0
+// regression probe. A running record (simulating a restart mid-run) bound to
+// a fake attachment whose Lookup reports running MUST stay running after the
+// startup Reconcile — NOT get marked attachment_lost/uncertain.
+//
+// The test mirrors serve's exact sequence: openServeStore → SetPublish →
+// Register(fake) → Reconcile. The fake is registered BEFORE Reconcile so
+// reconcileLive's Lookup finds the attachment and confirms the run.
+//
+// RED when Reconcile is moved back before Register (the P0 bug): with no
+// attachment registered, reconcileLive's `!ok` branch marks the record
+// StateUncertain + CodeAttachmentLost.
+func TestBK4P0RunningStaysRunningAfterReconcile(t *testing.T) {
+	root, err := os.MkdirTemp("", "amqbk4p0a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	stateDir := filepath.Join(root, "extensions", "remote")
+
+	// Seed a running record directly in the store (restart mid-run).
+	now := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	seedStore, err := requests.Open(stateDir,
+		requests.WithMaxStoreBytes(protocol.DefaultMaxStoreBytes),
+		requests.WithClock(func() time.Time { return now }),
+	)
+	if err != nil {
+		t.Fatalf("seed open: %v", err)
+	}
+	rt := fake.New("fake", "e_1")
+	rec := &requests.Record{
+		Snapshot: protocol.Snapshot{
+			Schema:      protocol.SchemaRequest,
+			RequestID:   "11111111-1111-4111-8111-11111111p001",
+			CreatorHost: "hostA",
+			TargetID:    "fake",
+			RequestRef:  protocol.EncodeRef("hostA", "fake", "11111111-1111-4111-8111-11111111p001"),
+			Epoch:       "e_1",
+			Revision:    1,
+			State:       protocol.StateReceived,
+			InputDigest: requests.Digest([]byte("run")),
+		},
+		Input: &protocol.SubmitInput{Text: "run"},
+	}
+	k := requests.Key{CreatorHost: rec.CreatorHost, TargetID: rec.TargetID, RequestID: rec.RequestID}
+	if err := seedStore.Create(rec); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	// Dispatch through the fake so a run is bound (Lookup will confirm running).
+	admission, err := rt.Submit(core.BoundRequest{Key: k, Epoch: "e_1", Input: *rec.Input})
+	if err != nil {
+		t.Fatalf("fake submit: %v", err)
+	}
+	rec.Revision = 2
+	rec.State = protocol.StateRunning
+	rec.NativeRun = &admission.RunID
+	if err := seedStore.Update(rec); err != nil {
+		t.Fatalf("running: %v", err)
+	}
+	if err := seedStore.Close(); err != nil {
+		t.Fatalf("seed close: %v", err)
+	}
+
+	// serve sequence: openServeStore → SetPublish → Register → Reconcile
+	store, ep, err := openServeStore(stateDir, func() time.Time { return now })
+	if err != nil {
+		t.Fatalf("openServeStore: %v", err)
+	}
+	defer func() { _ = ep.Close() }()
+	ep.SetPublish(func(protocol.Snapshot, map[string]string) error { return nil })
+	ep.Register(rt)
+	if err := ep.Reconcile(); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	got, exists, err := store.Get(k)
+	if err != nil || !exists {
+		t.Fatalf("record missing: exists=%v err=%v", exists, err)
+	}
+	if got.State == protocol.StateUncertain && got.Code == protocol.CodeAttachmentLost {
+		t.Fatal("P0: running record marked attachment_lost after reconcile (Reconcile ran before Register — the P0 bug)")
+	}
+	if got.State != protocol.StateRunning {
+		t.Fatalf("P0: running record state=%s code=%s, want running (Reconcile before Register marks it attachment_lost)", got.State, got.Code)
+	}
+}
+
+// TestBK4P0FirstRevisionReachesPublisher (round-5) is the second P0
+// regression probe. The first Reconcile revision of a running record must
+// reach the real publisher (SetPublish), not a no-op. When Reconcile runs
+// before SetPublish (the P0 bug), the published snapshot's revision is lost
+// to a nil publisher callback.
+//
+// The test seeds a running record, wires a publisher that records the
+// snapshot it receives, registers the fake, then calls Reconcile. The
+// publisher must see the record's revision.
+//
+// RED when Reconcile is moved before SetPublish: the publisher is nil, so
+// no snapshot is recorded.
+func TestBK4P0FirstRevisionReachesPublisher(t *testing.T) {
+	root, err := os.MkdirTemp("", "amqbk4p0b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	stateDir := filepath.Join(root, "extensions", "remote")
+
+	now := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	seedStore, err := requests.Open(stateDir,
+		requests.WithMaxStoreBytes(protocol.DefaultMaxStoreBytes),
+		requests.WithClock(func() time.Time { return now }),
+	)
+	if err != nil {
+		t.Fatalf("seed open: %v", err)
+	}
+	rt := fake.New("fake", "e_1")
+	rec := &requests.Record{
+		Snapshot: protocol.Snapshot{
+			Schema:      protocol.SchemaRequest,
+			RequestID:   "11111111-1111-4111-8111-11111111p002",
+			CreatorHost: "hostA",
+			TargetID:    "fake",
+			RequestRef:  protocol.EncodeRef("hostA", "fake", "11111111-1111-4111-8111-11111111p002"),
+			Epoch:       "e_1",
+			Revision:    1,
+			State:       protocol.StateReceived,
+			InputDigest: requests.Digest([]byte("pub")),
+		},
+		Input: &protocol.SubmitInput{Text: "pub"},
+	}
+	k := requests.Key{CreatorHost: rec.CreatorHost, TargetID: rec.TargetID, RequestID: rec.RequestID}
+	if err := seedStore.Create(rec); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	admission, err := rt.Submit(core.BoundRequest{Key: k, Epoch: "e_1", Input: *rec.Input})
+	if err != nil {
+		t.Fatalf("fake submit: %v", err)
+	}
+	rec.Revision = 2
+	rec.State = protocol.StateRunning
+	rec.NativeRun = &admission.RunID
+	if err := seedStore.Update(rec); err != nil {
+		t.Fatalf("running: %v", err)
+	}
+	if err := seedStore.Close(); err != nil {
+		t.Fatalf("seed close: %v", err)
+	}
+
+	store, ep, err := openServeStore(stateDir, func() time.Time { return now })
+	if err != nil {
+		t.Fatalf("openServeStore: %v", err)
+	}
+	defer func() { _ = ep.Close() }()
+	_ = store
+
+	var publishedRev int64
+	var pubMu sync.Mutex
+	var pubCalled bool
+	ep.SetPublish(func(s protocol.Snapshot, origin map[string]string) error {
+		pubMu.Lock()
+		pubCalled = true
+		publishedRev = s.Revision
+		pubMu.Unlock()
+		return nil
+	})
+	ep.Register(rt)
+	if err := ep.Reconcile(); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	pubMu.Lock()
+	called := pubCalled
+	rev := publishedRev
+	pubMu.Unlock()
+	if !called {
+		t.Fatal("P0: publisher was never called (Reconcile ran before SetPublish — the first revision was lost to a no-op publisher)")
+	}
+	if rev < 2 {
+		t.Fatalf("P0: published revision=%d, want >=2 (the running record's revision)", rev)
 	}
 }
