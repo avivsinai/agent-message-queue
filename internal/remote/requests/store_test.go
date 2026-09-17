@@ -540,8 +540,6 @@ func TestBK4B3ReservationIsReal(t *testing.T) {
 	}
 }
 
-
-
 // TestBK4B3RestartReseedReservation (round-2 B3 restart variant) proves Open
 // reseeds reserved for non-terminal records with no result. After a restart,
 // running records hold nothing in memory; without reseeding, fresh submits
