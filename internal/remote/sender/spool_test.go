@@ -584,3 +584,70 @@ func (c *checkingDispatcher) Handle(cmd *protocol.Command, src core.Source) (any
 		},
 	}, nil
 }
+
+// TestSenderB2BusyThenDispatchesNextTick (round-4 N2) is the verifier's busy
+// probe: an offline-enqueued envelope (2-min window) meets a busy target on
+// tick 1, the target is freed+idle on tick 2, and the command dispatches on
+// tick 2. After tick 1 the envelope is pending (not failed); after tick 2 it
+// is dispatched; the native dispatch count is exactly ONE (tick 1's busy
+// refusal did not execute work).
+//
+// RED when busy is classified terminal (CodeBusy removed from
+// isTransientCode): tick 1 settles the envelope as failed, so tick 2 never
+// dispatches it.
+func TestSenderB2BusyThenDispatchesNextTick(t *testing.T) {
+	t0 := time.Now()
+	clock := func() time.Time { return t0 }
+	spool := newTestSpool(t, clock)
+	cmd := testCommand(validUUID(0), "fake", "e_1", protocol.FormatTime(t0.Add(2*time.Minute)))
+	env := &Envelope{
+		RequestID:   cmd.RequestID,
+		CreatorHost: "local",
+		TargetID:    "fake",
+		Epoch:       cmd.Epoch,
+		NotAfter:    cmd.NotAfter,
+		Command:     cmd,
+		Destination: "ipc:/tmp/state",
+	}
+	if err := spool.Create(env); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// Tick 1: target is busy.
+	fd := &fakeDispatcher{refuseCode: protocol.CodeBusy}
+	d := NewDrainer(spool, fd, clock)
+	n, err := d.Drain(context.Background())
+	if err != nil {
+		t.Fatalf("drain tick 1: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("tick 1: drained n=%d, want 1", n)
+	}
+	got, _, _ := spool.Get("local", cmd.RequestID)
+	if got.State != StatePending {
+		t.Fatalf("tick 1: state=%s, want pending (busy must not settle as failed)", got.State)
+	}
+	if got.Attempt != 1 {
+		t.Fatalf("tick 1: attempt=%d, want 1", got.Attempt)
+	}
+
+	// Tick 2: target is freed + idle. The same envelope dispatches.
+	fd.refuseCode = ""
+	n2, err := d.Drain(context.Background())
+	if err != nil {
+		t.Fatalf("drain tick 2: %v", err)
+	}
+	if n2 != 1 {
+		t.Fatalf("tick 2: drained n=%d, want 1", n2)
+	}
+	got2, _, _ := spool.Get("local", cmd.RequestID)
+	if got2.State != StateDispatched {
+		t.Fatalf("tick 2: state=%s, want dispatched (busy-then-idle must dispatch on tick 2)", got2.State)
+	}
+	// Exactly ONE native dispatch: tick 1's busy refusal did not execute work.
+	if fd.calls != 2 {
+		t.Fatalf("dispatch count: fakeDispatcher.Handle called %d times, want 2 (1 busy refusal + 1 dispatch)", fd.calls)
+	}
+	// The first call was a busy refusal (no work), the second was a dispatch.
+	// A dispatch sets MarkDispatched, so the envelope is settled after tick 2.
+}

@@ -134,12 +134,12 @@ func classifyReply(reply any, herr error) protocol.Code {
 }
 
 // isTransientCode reports whether a dispatch outcome code is worth retrying.
-// Busy IS transient (Claude round-4 ruling): busy=queue in v1 was rejected,
-// but busy=permanent-failure is also wrong — a target busy ONCE is not a
-// permanent failure of the caller's command. The envelope stays pending,
-// retrying next tick, bounded by NotAfter (only expiry ends it). This
-// preserves the spool's purpose: an offline-enqueued submit that meets one
-// busy tick must not die as failed.
+// Busy IS transient: a target busy ONCE is not a permanent failure of the
+// caller's command. The envelope stays pending, retrying next tick, bounded
+// by NotAfter (only expiry ends it). The spool exists for the caller who is
+// not there to retry; abandoning an accepted envelope on one busy tick would
+// defeat its purpose. The live CLI submit still returns busy to the present
+// caller with exit 6 — that half is right.
 func isTransientCode(code protocol.Code) bool {
 	switch code {
 	case protocol.CodeBusy,

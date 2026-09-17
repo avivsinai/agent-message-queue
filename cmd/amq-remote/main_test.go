@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -909,4 +911,121 @@ func TestCLIB6StatusFailedEnvelopeExitsOne(t *testing.T) {
 	if !strings.Contains(out, string(protocol.CodeStaleEpoch)) {
 		t.Fatalf("status did not print last_error: %s", out)
 	}
+}
+
+// recordingFake wraps fake.Runtime and records whether the envelope file
+// existed on disk at the moment Submit (Handle) was called. It is used by
+// TestCLIB7PersistBeforeDispatchViaSubmit to prove the CLI submit path
+// persists the envelope BEFORE dispatching it to the endpoint.
+type recordingFake struct {
+	*fake.Runtime
+	stateDir    string
+	fileExisted atomic.Bool
+}
+
+func (r *recordingFake) Submit(req core.BoundRequest) (core.Admission, error) {
+	// Check if the envelope file exists at Handle time.
+	path := filepath.Join(r.stateDir, "sender", req.Key.CreatorHost+"__"+req.Key.RequestID+".json")
+	if _, err := os.Stat(path); err == nil {
+		r.fileExisted.Store(true)
+	}
+	return r.Runtime.Submit(req)
+}
+
+// TestCLIB7PersistBeforeDispatchViaSubmit (round-4) drives the REAL CLI
+// submit path and proves the envelope is durable on disk BEFORE the
+// endpoint's Handle (Submit) is called. A recording fake wraps fake.Runtime;
+// its Submit checks whether the envelope file exists at Handle time.
+//
+// RED on both inversions:
+//   - Create moved after callReply: file does not exist at Handle time.
+//   - Create deleted entirely: file does not exist at Handle time.
+//
+// This replaces the round-3 TestSenderB7PersistBeforeDispatch which drove the
+// drainer directly (the file exists by construction when the drainer reads
+// it) and whose RED was produced by commenting out the test's own Create.
+func TestCLIB7PersistBeforeDispatchViaSubmit(t *testing.T) {
+	root, err := os.MkdirTemp("", "amqb7")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	stateDir := filepath.Join(root, "extensions", "remote")
+
+	// Start serve with the recording fake instead of the standard --fake.
+	rf := &recordingFake{Runtime: fake.New("fake", "e_1"), stateDir: stateDir}
+	done := make(chan int, 1)
+	go func() {
+		var out, errBuf bytes.Buffer
+		done <- runWithRecordingFake(root, rf, &out, &errBuf)
+	}()
+	t.Cleanup(func() {
+		select {
+		case <-done:
+		default:
+		}
+	})
+
+	// Wait for the socket to accept.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		var out, errBuf bytes.Buffer
+		if run([]string{"sessions", "--root", root, "--json"}, strings.NewReader(""), &out, &errBuf) == 0 {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if time.Now().After(deadline) {
+		t.Fatal("endpoint did not start serving within 5s")
+	}
+
+	// Submit via the CLI. The submit function persists the envelope BEFORE
+	// calling callReply (IPC → Handle → fake.Submit). The recording fake
+	// checks the file exists at Submit time.
+	requestID := "11111111-1111-4111-8111-11111111b701"
+	code, out, _ := cli(t, "", "submit", "fake", "--root", root,
+		"--text", "b7 probe", "--request-id", requestID, "--epoch", "e_1")
+	if code != 0 {
+		t.Fatalf("submit exit=%d out=%s", code, out)
+	}
+
+	if !rf.fileExisted.Load() {
+		t.Fatal("B7: envelope file did NOT exist at Handle time (persist-after-dispatch or deleted Create)")
+	}
+}
+
+// runWithRecordingFake starts serve with a recording fake attachment instead
+// of the standard --fake. It mirrors serve() but registers rf directly. It
+// blocks until the test process exits.
+func runWithRecordingFake(root string, rf *recordingFake, stdout, stderr io.Writer) int {
+	stateDir := filepath.Join(root, "extensions", "remote")
+	store, err := requests.Open(stateDir)
+	if err != nil {
+		return 0
+	}
+	ep := core.New(core.Config{Store: store, Publish: func(protocol.Snapshot, map[string]string) error { return nil }})
+	carrier, err := amqio.New(root, amqio.DefaultHandle, ep)
+	if err != nil {
+		_ = store.Close()
+		return 0
+	}
+	carrier.SetReplyRouter(replyRouterFor(root))
+	ep.Register(rf)
+	if err := ep.Reconcile(); err != nil {
+		_ = ep.Close()
+		return 0
+	}
+	server, err := ipc.Listen(stateDir, ep)
+	if err != nil {
+		_ = ep.Close()
+		return 0
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = server.Serve(ctx) }()
+	// Block until the test process exits.
+	select {}
 }

@@ -646,13 +646,32 @@ func status(args []string) (any, int, error) {
 	if err != nil {
 		return nil, protocol.ExitUsage, err
 	}
-	rep, err := callReply(stateDir, &protocol.Command{Schema: protocol.SchemaCommand, Op: protocol.OpRequestGet, RequestRef: pos[0]})
+	// Round-4 B6 gap 3: if the positional is a bare request ID (not a ref),
+	// resolve the sender spool FIRST. A running endpoint refuses a bare id
+	// as invalid, so the spool surface that reports drain failures is
+	// unreachable at exactly the moment the failure exists. When the spool
+	// has the envelope, use its stored identity; if the spool's envelope is
+	// terminal (failed/expired), return it directly without hitting the
+	// endpoint. For a real ref, call the endpoint as before.
+	refOrID := pos[0]
+	if !strings.HasPrefix(refOrID, protocol.RefPrefix) {
+		if spoolReceipt, ok := lookupSpoolStatus(stateDir, refOrID); ok {
+			if spoolReceipt.State == sender.StateFailed || spoolReceipt.State == sender.StateExpired {
+				return spoolReceipt, exitForSpoolReceipt(spoolReceipt), nil
+			}
+			// Pending/dispatched: use the spool's stored identity for the
+			// live endpoint call so the caller sees the endpoint's current
+			// state, not just the spool's snapshot.
+			refOrID = protocol.EncodeRef(spoolReceipt.CreatorHost, spoolReceipt.TargetID, spoolReceipt.RequestID)
+		}
+	}
+	rep, err := callReply(stateDir, &protocol.Command{Schema: protocol.SchemaCommand, Op: protocol.OpRequestGet, RequestRef: refOrID})
 	if err != nil {
 		// B6: if the endpoint is unreachable or the record is not found,
 		// consult the sender spool. A submit persisted while the companion
 		// was down has no request-store record; status must still tell the
 		// caller the truth (pending/dispatched/expired/failed).
-		if isEndpointUnreachable(err) || isNotFound(err) {
+		if isEndpointUnreachable(err) || isNotFound(err) || isInvalid(err) {
 			if spoolReceipt, ok := lookupSpoolStatus(stateDir, pos[0]); ok {
 				return spoolReceipt, exitForSpoolReceipt(spoolReceipt), nil
 			}
@@ -807,6 +826,8 @@ func listRequests(args []string) (any, int, error) {
 					state = protocol.StateFailed
 				case sender.StateDispatched:
 					state = protocol.StateDispatching
+				case sender.StateExpired:
+					state = protocol.StateRejected
 				}
 				snap := protocol.Snapshot{
 					Schema:      "sender_submitted",
@@ -821,6 +842,9 @@ func listRequests(args []string) (any, int, error) {
 				}
 				if env.LastError != "" {
 					snap.Code = protocol.Code(env.LastError)
+				}
+				if env.State == sender.StateExpired && snap.Code == "" {
+					snap.Code = protocol.CodeExpired
 				}
 				out = append(out, snap)
 			}
@@ -926,11 +950,20 @@ func isNotFound(err error) bool {
 	return errors.As(err, &r) && r.Code == protocol.CodeNotFound
 }
 
+// isInvalid reports whether the endpoint refused the request as invalid
+// (e.g. a bare request ID passed where a ref is required). Round-4 B6 gap 3:
+// status falls back to the spool on invalid too, so a bare request ID is
+// resolved from the sender spool even while the companion is up.
+func isInvalid(err error) bool {
+	var r *protocol.Refusal
+	return errors.As(err, &r) && r.Code == protocol.CodeInvalid
+}
+
 // lookupSpoolStatus checks the sender spool for a request ref OR a raw
 // request ID and returns a SpoolReceipt describing the envelope's state.
-// B6 (round-3): status accepts the envelope id directly (--request-id or
-// positional) because B3 stopped minting refs for spooled submits. Returns
-// (zero, false) when no envelope matches.
+// B6 (round-4): status accepts the envelope id directly as a positional
+// argument (no --request-id flag) because B3 stopped minting refs for
+// spooled submits. Returns (zero, false) when no envelope matches.
 func lookupSpoolStatus(stateDir, refOrID string) (sender.SpoolReceipt, bool) {
 	var creatorHost, requestID string
 	if h, _, id, err := protocol.DecodeRef(refOrID); err == nil {
@@ -965,11 +998,12 @@ func lookupSpoolStatus(stateDir, refOrID string) (sender.SpoolReceipt, bool) {
 
 // exitForSpoolReceipt maps a spool envelope state to an exit code. A
 // pending/dispatched envelope is success (the work is in flight). A
-// failed/expired envelope is ExitError: native work did not happen and the
-// caller takes the failure path (round-3 B6).
+// failed/expired envelope is ExitError: native work did not happen (or its
+// window closed) and the caller takes the failure path (round-4 B6: expired
+// now exits 1, not 0).
 func exitForSpoolReceipt(r sender.SpoolReceipt) int {
 	switch r.State {
-	case sender.StateFailed:
+	case sender.StateFailed, sender.StateExpired:
 		return protocol.ExitError
 	}
 	return protocol.ExitSuccess
