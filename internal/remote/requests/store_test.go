@@ -265,3 +265,82 @@ func TestClosedStoreRejectsEveryMutation(t *testing.T) {
 		t.Fatalf("create after reopen: %v", err)
 	}
 }
+
+// TestBK4AggregateQuotaRefusesBeforeWrite is the 611.22.19 BK4 happy path for
+// the aggregate quota: a store at quota refuses a new record with storage_full
+// BEFORE the write lands, leaves the existing record intact, and never evicts
+// a dedup tombstone to make space. Reserve fails closed the same way.
+func TestBK4AggregateQuotaRefusesBeforeWrite(t *testing.T) {
+	// One small record fits; the quota is tight enough that a second cannot.
+	// 600 bytes accommodates one ~530-byte record but refuses a second.
+	s, err := Open(t.TempDir(), WithClock(fixedClock), WithMaxStoreBytes(600))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	first := newRecord("11111111-1111-4111-8111-111111111701")
+	if err := s.Create(first); err != nil {
+		t.Fatalf("create first: %v", err)
+	}
+
+	// Reserve for a worst-case record must refuse now that the quota is full.
+	if err := s.Reserve(protocol.MaxRecordBytes); err == nil {
+		t.Fatalf("Reserve at quota: want storage_full, got nil")
+	} else if code := protocol.RefusalCode(err); code != protocol.CodeStorageFull {
+		t.Fatalf("Reserve at quota: want storage_full, got %q", code)
+	}
+
+	// A second record is refused with storage_full and does NOT land.
+	second := newRecord("11111111-1111-4111-8111-111111111702")
+	if err := s.Create(second); err == nil {
+		t.Fatal("create second at quota: want storage_full, got nil")
+	} else if code := protocol.RefusalCode(err); code != protocol.CodeStorageFull {
+		t.Fatalf("create second at quota: want storage_full, got %q", code)
+	}
+
+	// The first record is intact: its dedup identity survives (no eviction).
+	got, ok, err := s.Get(Key{first.CreatorHost, first.TargetID, first.RequestID})
+	if err != nil || !ok {
+		t.Fatalf("first record lost after quota refusal: ok=%v err=%v", ok, err)
+	}
+	if got.RequestID != first.RequestID {
+		t.Fatalf("first record identity changed: %q", got.RequestID)
+	}
+	// The refused second record left no file.
+	if _, ok, err := s.Get(Key{second.CreatorHost, second.TargetID, second.RequestID}); err != nil || ok {
+		t.Fatalf("refused second record landed on disk: ok=%v err=%v", ok, err)
+	}
+}
+
+// TestBK4QuotaDisabledByDefault pins that a store without WithMaxStoreBytes
+// enforces no aggregate quota: records accumulate up to the per-record cap
+// only. Production sets the quota via serve; tests that shrink it use
+// WithMaxStoreBytes explicitly.
+func TestBK4QuotaDisabledByDefault(t *testing.T) {
+	s, err := Open(t.TempDir(), WithClock(fixedClock))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	// Reserve never refuses when the quota is disabled.
+	if err := s.Reserve(protocol.MaxRecordBytes); err != nil {
+		t.Fatalf("Reserve with quota disabled: want nil, got %v", err)
+	}
+	for i := 0; i < 5; i++ {
+		rec := newRecord(fmtID(i))
+		if err := s.Create(rec); err != nil {
+			t.Fatalf("create %d with quota disabled: %v", i, err)
+		}
+	}
+}
+
+// fmtID builds a valid UUIDv4-ish id distinct per index.
+func fmtID(i int) string {
+	base := "11111111-1111-4111-8111-11111111170"
+	if i < 10 {
+		return base + string(rune('0'+i))
+	}
+	return base + "a"
+}

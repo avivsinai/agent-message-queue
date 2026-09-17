@@ -1524,3 +1524,75 @@ func TestB3MissedConfirmationDoesNotWedgeBusy(t *testing.T) {
 		t.Fatalf("activeTurn = %q, want empty (B3 — a finished turn must never be reinstalled as active)", active)
 	}
 }
+
+// TestBK4AckedRunsAreBounded is the 611.22.19 BK4 happy path for the codex
+// attachment's in-memory maps: terminal+acknowledged runs are pruned from
+// runs/byClientID/byTurn once the acked FIFO exceeds maxLiveRuns, so the
+// correlation maps cannot grow without bound. The durable store remains the
+// source of truth; a dropped acked run Lookup returns EvidenceNone exactly as
+// a compacted tombstone would.
+func TestBK4AckedRunsAreBounded(t *testing.T) {
+	sock, srv := startFakeAppServer(t)
+	att, err := Attach(sock, "t1")
+	if err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	t.Cleanup(func() { _ = att.Close() })
+	<-srv.calls // initialize
+	<-srv.calls // thread/resume
+
+	s := att.Inspect()
+
+	// Drive maxLiveRuns+1 distinct runs to terminal+acked.
+	for i := 0; i < maxLiveRuns+1; i++ {
+		key := requests.Key{CreatorHost: "local", TargetID: s.TargetID, RequestID: fmt.Sprintf("11111111-1111-4111-8111-11111111%04d", i)}
+		turnID := fmt.Sprintf("bk%04d", i)
+		srv.setTurnStartResponse(`{"jsonrpc":"2.0","id":%s,"result":{"turn":{"id":"` + turnID + `","status":"inProgress"}}}`)
+		done := make(chan struct{})
+		go func() {
+			_, _ = att.Submit(core.BoundRequest{Key: key, Epoch: s.Epoch, Input: protocol.SubmitInput{Text: "work"}})
+			close(done)
+		}()
+		<-srv.calls // turn/start
+		srv.notify(t, "turn/started", `{"threadId":"t1","turn":{"id":"`+turnID+`"}}`)
+		srv.notify(t, "item/started", `{"threadId":"t1","turnId":"`+turnID+`","item":{"type":"userMessage","id":"i`+turnID+`","clientId":"`+clientIDFor(key)+`","content":[]}}`)
+		<-done
+		srv.notify(t, "item/completed", `{"threadId":"t1","turnId":"`+turnID+`","completedAtMs":1,"item":{"type":"agentMessage","id":"o`+turnID+`","text":"OUT"}}`)
+		srv.notify(t, "turn/completed", `{"threadId":"t1","turn":{"id":"`+turnID+`","status":"completed"}}`)
+		waitMemoForID(t, att, turnID)
+
+		ev, _ := att.Lookup(key, s.Epoch)
+		if ev.State != protocol.StateCompleted || ev.Result == nil {
+			t.Fatalf("run %d not terminal before ack: %+v", i, ev)
+		}
+		att.AcknowledgeResult(key, s.Epoch, protocol.EvidenceDigest(ev.Result))
+	}
+
+	att.mu.Lock()
+	got := len(att.runs)
+	att.mu.Unlock()
+
+	// The FIFO cap drops the oldest acked run; the maps never exceed
+	// maxLiveRuns. Without the BK4 prune, all maxLiveRuns+1 entries would
+	// persist forever.
+	if got != maxLiveRuns {
+		t.Fatalf("runs map unbounded after ack: want %d, got %d", maxLiveRuns, got)
+	}
+
+	// The oldest acked run is gone from the maps; its Lookup still returns
+	// EvidenceNone (acked semantics), not an error.
+	oldest := requests.Key{CreatorHost: "local", TargetID: s.TargetID, RequestID: "11111111-1111-4111-8111-111111110000"}
+	att.mu.Lock()
+	_, oldestPresent := att.runs[oldest]
+	att.mu.Unlock()
+	if oldestPresent {
+		t.Fatal("oldest acked run was not pruned from runs map")
+	}
+	lk, err := att.Lookup(oldest, s.Epoch)
+	if err != nil {
+		t.Fatalf("lookup of pruned acked run: %v", err)
+	}
+	if lk.Class != core.EvidenceNone {
+		t.Fatalf("pruned acked run Lookup: want EvidenceNone, got class=%s", lk.Class)
+	}
+}

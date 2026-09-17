@@ -129,6 +129,18 @@ type Store struct {
 	// under compare-and-retry — only mutual exclusion closes it.
 	mu       sync.Mutex
 	readOnly bool
+	// maxStoreBytes is the aggregate quota across every record in this store
+	// (611.22.19 BK4). Zero disables the aggregate quota; production sets it
+	// via WithMaxStoreBytes. used is the sum of record file sizes on disk,
+	// computed once at Open and maintained on every write/compact. A write
+	// that would exceed the quota refuses storage_full BEFORE dispatch; local
+	// native harness work never reaches this store, so quota pressure cannot
+	// stop it. Tombstones for active epochs are never deleted to make space:
+	// the quota refuses rather than evicting dedup identity, and compaction
+	// (which shrinks records to tombstones) frees space without losing the
+	// identity for an active epoch.
+	maxStoreBytes int64
+	used          int64
 }
 
 // Option configures Open.
@@ -137,6 +149,17 @@ type Option func(*Store)
 // WithClock injects the clock used for UpdatedAt. Tests pass a fixed clock.
 func WithClock(now func() time.Time) Option {
 	return func(s *Store) { s.now = now }
+}
+
+// WithMaxStoreBytes sets the aggregate quota across every record in this
+// store (611.22.19 BK4). Zero disables the aggregate quota. Production sets
+// protocol.DefaultMaxStoreBytes; tests shrink it. The quota is enforced on
+// every write and reservation: a write that would exceed it refuses
+// storage_full before dispatch, while local native work (which does not pass
+// through this store) is unaffected. Tombstones for active epochs are never
+// deleted to make space.
+func WithMaxStoreBytes(n int64) Option {
+	return func(s *Store) { s.maxStoreBytes = n }
 }
 
 // Open prepares <stateDir>/v1 and takes the owner lock. A second opener on the
@@ -157,6 +180,15 @@ func Open(stateDir string, opts ...Option) (*Store, error) {
 	s := &Store{dir: dir, lock: lock, now: time.Now}
 	for _, o := range opts {
 		o(s)
+	}
+	// 611.22.19 BK4: seed the aggregate-quota usage from existing records so
+	// a restarted companion knows what it already owes before admitting new
+	// work. A failure to sum is non-fatal: the quota stays enforced per-write
+	// via the size-aware accounting in write; only the seed is approximate.
+	if s.maxStoreBytes > 0 {
+		if used, err := s.sumUsed(); err == nil {
+			s.used = used
+		}
 	}
 	return s, nil
 }
@@ -671,11 +703,90 @@ func (s *Store) write(rec *Record) error {
 	if len(data) > MaxRecordBytes {
 		return protocol.Refuse(protocol.CodeStorageFull, "record exceeds %d bytes", MaxRecordBytes)
 	}
+	// 611.22.19 BK4: enforce the aggregate quota BEFORE the atomic write. The
+	// delta is new size minus the previous on-disk size (zero for a new
+	// record). A refusal here is storage_full and leaves the prior file intact,
+	// so a failed reservation or oversized write cannot corrupt accounting.
+	// Tombstones for active epochs are never deleted to make space: this is a
+	// refuse-before-write gate, not an eviction. Local native harness work
+	// does not reach this store, so quota pressure cannot stop it.
+	if s.maxStoreBytes > 0 {
+		prevSize := int64(0)
+		if fi, err := os.Stat(p); err == nil {
+			prevSize = fi.Size()
+		}
+		delta := int64(len(data)) - prevSize
+		if delta > 0 && s.used+delta > s.maxStoreBytes {
+			return protocol.Refuse(protocol.CodeStorageFull,
+				"store at quota: %d bytes used, %d requested, limit %d",
+				s.used, delta, s.maxStoreBytes)
+		}
+		if _, err := fsq.WriteFileAtomic(filepath.Dir(p), filepath.Base(p), data, fileMode); err != nil {
+			if errors.Is(err, os.ErrPermission) || isNoSpace(err) {
+				return protocol.Refuse(protocol.CodeStorageFull, "cannot persist record: %v", err)
+			}
+			return fmt.Errorf("persist record: %w", err)
+		}
+		// Account for the actual delta only after a successful write. A
+		// compaction that shrank the record (prevSize > new) reduces used.
+		s.used += delta
+		return nil
+	}
 	if _, err := fsq.WriteFileAtomic(filepath.Dir(p), filepath.Base(p), data, fileMode); err != nil {
 		if errors.Is(err, os.ErrPermission) || isNoSpace(err) {
 			return protocol.Refuse(protocol.CodeStorageFull, "cannot persist record: %v", err)
 		}
 		return fmt.Errorf("persist record: %w", err)
+	}
+	return nil
+}
+
+// sumUsed walks the record tree and returns the total bytes of all record
+// files. It is the seed for the aggregate-quota accounting at Open (611.22.19
+// BK4); per-write deltas keep it current afterward. Read errors on individual
+// files are skipped (a vanished file contributes zero), mirroring List's
+// poison isolation.
+func (s *Store) sumUsed() (int64, error) {
+	var total int64
+	base := filepath.Join(s.dir, requestsDir)
+	err := filepath.Walk(base, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return err
+		}
+		if info.IsDir() || !strings.HasSuffix(path, recordSuffix) {
+			return nil
+		}
+		total += info.Size()
+		return nil
+	})
+	if err != nil && !os.IsNotExist(err) {
+		return 0, err
+	}
+	return total, nil
+}
+
+// Reserve checks whether bytes of new store capacity can be committed without
+// exceeding the aggregate quota, without writing anything (611.22.19 BK4). The
+// endpoint calls it before dispatch to fail closed with storage_full when the
+// bounded result plus accepted work cannot fit, rather than wedging mid-flight.
+// A zero maxStoreBytes store (quota disabled) always reserves. Reserve does
+// not durably hold space: the subsequent write re-checks under s.mu, so a
+// concurrent writer that consumed the room between Reserve and write still
+// refuses safely. Callers hold no lock; Reserve takes s.mu to read a stable
+// used value.
+func (s *Store) Reserve(bytes int64) error {
+	if s.maxStoreBytes <= 0 || bytes <= 0 {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.used+bytes > s.maxStoreBytes {
+		return protocol.Refuse(protocol.CodeStorageFull,
+			"store at quota: %d bytes used, %d requested, limit %d",
+			s.used, bytes, s.maxStoreBytes)
 	}
 	return nil
 }

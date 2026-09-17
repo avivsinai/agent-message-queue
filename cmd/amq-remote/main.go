@@ -273,12 +273,12 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	} else if added {
 		say(stderr, "registered handle %q in %s\n", *me, filepath.Join(c.root, "meta", "config.json"))
 	}
-	store, err := requests.Open(stateDir)
+	store, err := requests.Open(stateDir, requests.WithMaxStoreBytes(protocol.DefaultMaxStoreBytes))
 	if err != nil {
 		return 0, err
 	}
 	var carrier *amqio.Carrier
-	ep := core.New(core.Config{Store: store, Publish: func(s protocol.Snapshot, origin map[string]string) error {
+	ep := core.New(core.Config{Store: store, CompactHorizon: protocol.DefaultCompactHorizon, Publish: func(s protocol.Snapshot, origin map[string]string) error {
 		if carrier == nil {
 			return nil
 		}

@@ -109,6 +109,25 @@ type Attachment struct {
 	listeners    map[int]func(core.NativeEvent)
 	nextListener int
 	offline      bool
+	// ackedOrder is a FIFO of keys whose runs are terminal and acknowledged:
+	// their retained payload is released and Lookup reports EvidenceNone, so
+	// the runs/byClientID/byTurn entries exist only for stale correlation. To
+	// bound memory (611.22.19 BK4), once the FIFO exceeds maxLiveRuns the
+	// oldest acked run is fully dropped from all three maps. A later
+	// Lookup/Cancel for it returns EvidenceNone/unknown exactly as a
+	// compacted tombstone would; the durable store remains the source of
+	// truth for the request's disposition.
+	ackedOrder []requests.Key
+	// ackedKeyOrder drives eviction of ackedKeys, the longer-lived memo that
+	// lets a pruned run short-circuit Lookup. It outlives ackedOrder so a
+	// compacted tombstone still converges (611.22.19 BK4).
+	ackedKeyOrder []requests.Key
+	// ackedKeys remembers which keys have been acknowledged, so a run pruned
+	// from the bounded runs map (above) still short-circuits Lookup to
+	// EvidenceNone instead of falling through to lookupHistory, whose copy
+	// would look like fresh evidence and restart the ack loop. Bounded by the
+	// same FIFO eviction as ackedOrder (611.22.19 BK4).
+	ackedKeys map[requests.Key]bool
 }
 
 // Option configures Attach.
@@ -152,6 +171,8 @@ func Attach(socketPath, threadID string, opts ...Option) (*Attachment, error) {
 		terminalTurnOrder: []string{},
 		cancelIntent:      map[requests.Key]bool{},
 		listeners:         map[int]func(core.NativeEvent){},
+		ackedKeys:         map[requests.Key]bool{},
+		ackedKeyOrder:     []requests.Key{},
 		now:               time.Now,
 		confirmTimeout:    confirmTimeout,
 	}
@@ -625,6 +646,15 @@ func (a *Attachment) Lookup(key requests.Key, epoch string) (core.Evidence, erro
 		a.mu.Unlock()
 		return ev, nil
 	}
+	// 611.22.19 BK4: a run pruned from the bounded runs map after ack still
+	// short-circuits to EvidenceNone here, so it never falls through to
+	// lookupHistory (whose copy would look like fresh evidence and restart
+	// the ack loop). The durable store is the source of truth for the
+	// disposition.
+	if a.ackedKeys[key] {
+		a.mu.Unlock()
+		return core.Evidence{Known: true, Admitted: true, Class: core.EvidenceNone, State: protocol.StateCompleted}, nil
+	}
 	a.mu.Unlock()
 	return a.lookupHistory(key, epoch)
 }
@@ -904,6 +934,36 @@ func (a *Attachment) AcknowledgeResult(key requests.Key, epoch, digest string) {
 	r.acked = true
 	r.text.Reset()
 	r.errText = ""
+	// 611.22.19 BK4: bound the in-memory correlation maps. A terminal+acked
+	// run is fully resolved; keep it only as long as the FIFO cap allows, then
+	// drop it from runs/byClientID/byTurn. The durable store retains the
+	// disposition; a later Lookup returns EvidenceNone (the run is acked) and
+	// a later Cancel returns unknown, matching a compacted tombstone.
+	//
+	// ackedKeys is a longer-lived memo than the run structs: it lets a pruned
+	// run short-circuit Lookup to EvidenceNone without hitting lookupHistory.
+	// It is bounded separately (ackedKeyOrder) so it cannot grow without
+	// limit, but outlives the run struct long enough for a reconcile tick to
+	// converge on a compacted tombstone.
+	a.ackedKeys[key] = true
+	a.ackedKeyOrder = append(a.ackedKeyOrder, key)
+	for len(a.ackedKeyOrder) > ackedKeyMemoCap {
+		oldestKey := a.ackedKeyOrder[0]
+		a.ackedKeyOrder = a.ackedKeyOrder[1:]
+		delete(a.ackedKeys, oldestKey)
+	}
+	a.ackedOrder = append(a.ackedOrder, key)
+	for len(a.ackedOrder) > maxLiveRuns {
+		oldest := a.ackedOrder[0]
+		a.ackedOrder = a.ackedOrder[1:]
+		if old, ok := a.runs[oldest]; ok {
+			delete(a.byClientID, clientIDFor(oldest))
+			if old.turnID != "" {
+				delete(a.byTurn, old.turnID)
+			}
+			delete(a.runs, oldest)
+		}
+	}
 }
 
 // Subscribe implements core.Attachment.

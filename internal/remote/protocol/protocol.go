@@ -59,6 +59,26 @@ const (
 	MaxRecordBytes = jsonWorstCaseExpansion*MaxResultBytes + jsonWorstCaseExpansion*MaxInputBytes + MaxRecordOverhead
 	MaxOpaqueLen   = 128
 	MaxOptionLen   = 256
+
+	// DefaultCompactHorizon is the production retention policy for terminal,
+	// settled remote request records: the age past which they become eligible
+	// for compaction to a dedup tombstone. A tombstone retains the request
+	// identity, digest, epoch and disposition so an identical resubmit is
+	// re-admitted (busy) or answered result_expired rather than redispatched.
+	// The horizon bounds total store growth without deleting dedup state for
+	// active epochs — compaction never reaps a record that still owes an ack
+	// or an unpublished revision (611.22.19 BK4).
+	DefaultCompactHorizon = 6 * time.Hour
+
+	// DefaultMaxStoreBytes is the production aggregate quota across every
+	// durable request record in one companion store (all creator hosts and
+	// targets). It is the total-state bound that complements the per-record
+	// MaxRecordBytes size limit: a store at quota refuses new records with
+	// storage_full before dispatch, while local native harness work is
+	// unaffected because it does not pass through this store (611.22.19 BK4).
+	// Tombstones for active epochs are never deleted to make space; the
+	// quota refuses rather than evicting dedup identity.
+	DefaultMaxStoreBytes int64 = 64 * 1024 * 1024
 )
 
 // Op is the command discriminator.
