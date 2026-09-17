@@ -276,17 +276,45 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	} else if added {
 		say(stderr, "registered handle %q in %s\n", *me, filepath.Join(c.root, "meta", "config.json"))
 	}
-	store, ep, err := openServeStore(stateDir, nil)
-	if err != nil {
-		return 0, err
-	}
+	// The carrier publish callback is declared before startupSequence so the
+	// closure can reference it; the closure is nil-safe until amqio.New assigns
+	// the carrier below.
 	var carrier *amqio.Carrier
-	ep.SetPublish(func(s protocol.Snapshot, origin map[string]string) error {
+	carrierPublish := func(s protocol.Snapshot, origin map[string]string) error {
 		if carrier == nil {
 			return nil
 		}
 		return carrier.Publish(s, origin)
-	})
+	}
+	// Gather attachments BEFORE the startup sequence: Reconcile runs inside it
+	// and must see every target (611.22.19 round-4 P0 — a reconcile sweep over
+	// an empty target map marks running records attachment_lost).
+	var attachments []core.Attachment
+	if *useFake {
+		attachments = append(attachments, fake.New("fake", "e_1"))
+	}
+	if *codexSocket != "" {
+		codex.Version = version
+		threads := []string{*codexThread}
+		if *codexThread == "" {
+			threads, err = codex.LoadedThreads(*codexSocket)
+			if err != nil {
+				return 0, fmt.Errorf("list codex threads: %w", err)
+			}
+		}
+		for _, id := range threads {
+			att, err := codex.Attach(*codexSocket, id, codex.WithApprovals(*codexApprove))
+			if err != nil {
+				say(stderr, "codex thread %s: %v\n", id, err)
+				continue
+			}
+			attachments = append(attachments, att)
+		}
+	}
+	store, ep, err := startupSequence(stateDir, nil, carrierPublish, attachments...)
+	if err != nil {
+		return 0, err
+	}
 	carrier, err = amqio.New(c.root, *me, ep)
 	if err != nil {
 		_ = store.Close()
@@ -300,34 +328,6 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	// session layout stay in the package that owns them.
 	root := c.root
 	carrier.SetReplyRouter(replyRouterFor(root))
-	if *useFake {
-		ep.Register(fake.New("fake", "e_1"))
-	}
-	if *codexSocket != "" {
-		codex.Version = version
-		threads := []string{*codexThread}
-		if *codexThread == "" {
-			threads, err = codex.LoadedThreads(*codexSocket)
-			if err != nil {
-				_ = ep.Close()
-				return 0, fmt.Errorf("list codex threads: %w", err)
-			}
-		}
-		for _, id := range threads {
-			att, err := codex.Attach(*codexSocket, id, codex.WithApprovals(*codexApprove))
-			if err != nil {
-				say(stderr, "codex thread %s: %v\n", id, err)
-				continue
-			}
-			ep.Register(att)
-		}
-	}
-	// Reconcile AFTER SetPublish + Register + attachments are wired.
-	// The startup sweep sees the live target map and real publisher.
-	if err := ep.Reconcile(); err != nil {
-		_ = ep.Close()
-		return 0, fmt.Errorf("reconcile: %w", err)
-	}
 	server, err := ipc.Listen(stateDir, ep)
 	if err != nil {
 		_ = ep.Close()
@@ -777,11 +777,30 @@ func openServeStore(stateDir string, now func() time.Time) (*requests.Store, *co
 		cfg.Now = now
 	}
 	ep := core.New(cfg)
-	// NOTE: Reconcile is NOT called here. It runs in serve AFTER
-	// SetPublish + Register + attachments are wired, so the startup
-	// sweep sees the live target map and real publisher. Calling it
-	// here (before SetPublish/carrier) marks every running record
-	// attachment_lost and loses the first reconcile revision to a
-	// no-op publisher (611.22.19 round-4 P0).
+	return store, ep, nil
+}
+
+// startupSequence is the construction-plus-reconcile order serve runs, as
+// ONE callable sequence so tests can pin it (611.22.19 round-4 P0): open
+// store, SetPublish, carrier publish callback, Register attachments, and
+// ONLY THEN Reconcile. Moving Reconcile before SetPublish/Register marks
+// every running record attachment_lost and loses the first reconcile
+// revision to a no-op publisher — both round-5 P0 regressions in main_test.go
+// go red on exactly that inversion. serve passes its carrier publish func
+// (nil-safe) and its attachments; the returned store is closed by the
+// caller on error via ep.Close (the endpoint owns draining).
+func startupSequence(stateDir string, now func() time.Time, publish core.Publisher, attachments ...core.Attachment) (*requests.Store, *core.Endpoint, error) {
+	store, ep, err := openServeStore(stateDir, now)
+	if err != nil {
+		return nil, nil, err
+	}
+	ep.SetPublish(publish)
+	for _, att := range attachments {
+		ep.Register(att)
+	}
+	if err := ep.Reconcile(); err != nil {
+		_ = ep.Close()
+		return store, nil, fmt.Errorf("reconcile: %w", err)
+	}
 	return store, ep, nil
 }

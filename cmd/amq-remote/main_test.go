@@ -782,9 +782,9 @@ func TestCLISubmitMinEvidenceUnsupportedExits6(t *testing.T) {
 // a fake attachment whose Lookup reports running MUST stay running after the
 // startup Reconcile — NOT get marked attachment_lost/uncertain.
 //
-// The test mirrors serve's exact sequence: openServeStore → SetPublish →
-// Register(fake) → Reconcile. The fake is registered BEFORE Reconcile so
-// reconcileLive's Lookup finds the attachment and confirms the run.
+// The test runs startupSequence — the ONE construction-plus-reconcile
+// function serve calls (open store → SetPublish → Register → Reconcile) —
+// with the fake attachment, so reconcileLive's Lookup finds the target.
 //
 // RED when Reconcile is moved back before Register (the P0 bug): with no
 // attachment registered, reconcileLive's `!ok` branch marks the record
@@ -813,10 +813,10 @@ func TestBK4P0RunningStaysRunningAfterReconcile(t *testing.T) {
 	rec := &requests.Record{
 		Snapshot: protocol.Snapshot{
 			Schema:      protocol.SchemaRequest,
-			RequestID:   "11111111-1111-4111-8111-11111111p001",
+			RequestID:   "11111111-1111-4111-8111-111111110011",
 			CreatorHost: "hostA",
 			TargetID:    "fake",
-			RequestRef:  protocol.EncodeRef("hostA", "fake", "11111111-1111-4111-8111-11111111p001"),
+			RequestRef:  protocol.EncodeRef("hostA", "fake", "11111111-1111-4111-8111-111111110011"),
 			Epoch:       "e_1",
 			Revision:    1,
 			State:       protocol.StateReceived,
@@ -834,6 +834,11 @@ func TestBK4P0RunningStaysRunningAfterReconcile(t *testing.T) {
 		t.Fatalf("fake submit: %v", err)
 	}
 	rec.Revision = 2
+	rec.State = protocol.StateDispatching
+	if err := seedStore.Update(rec); err != nil {
+		t.Fatalf("dispatching: %v", err)
+	}
+	rec.Revision = 3
 	rec.State = protocol.StateRunning
 	rec.NativeRun = &admission.RunID
 	if err := seedStore.Update(rec); err != nil {
@@ -843,17 +848,15 @@ func TestBK4P0RunningStaysRunningAfterReconcile(t *testing.T) {
 		t.Fatalf("seed close: %v", err)
 	}
 
-	// serve sequence: openServeStore → SetPublish → Register → Reconcile
-	store, ep, err := openServeStore(stateDir, func() time.Time { return now })
+	// serve sequence via ONE shared function: startupSequence (open store →
+	// SetPublish → Register → Reconcile). The fake is registered BEFORE
+	// Reconcile so the sweep sees the live target (the P0 bug did not).
+	store, ep, err := startupSequence(stateDir, func() time.Time { return now },
+		func(protocol.Snapshot, map[string]string) error { return nil }, rt)
 	if err != nil {
-		t.Fatalf("openServeStore: %v", err)
+		t.Fatalf("startupSequence: %v", err)
 	}
 	defer func() { _ = ep.Close() }()
-	ep.SetPublish(func(protocol.Snapshot, map[string]string) error { return nil })
-	ep.Register(rt)
-	if err := ep.Reconcile(); err != nil {
-		t.Fatalf("reconcile: %v", err)
-	}
 
 	got, exists, err := store.Get(k)
 	if err != nil || !exists {
@@ -902,10 +905,10 @@ func TestBK4P0FirstRevisionReachesPublisher(t *testing.T) {
 	rec := &requests.Record{
 		Snapshot: protocol.Snapshot{
 			Schema:      protocol.SchemaRequest,
-			RequestID:   "11111111-1111-4111-8111-11111111p002",
+			RequestID:   "11111111-1111-4111-8111-111111110022",
 			CreatorHost: "hostA",
 			TargetID:    "fake",
-			RequestRef:  protocol.EncodeRef("hostA", "fake", "11111111-1111-4111-8111-11111111p002"),
+			RequestRef:  protocol.EncodeRef("hostA", "fake", "11111111-1111-4111-8111-111111110022"),
 			Epoch:       "e_1",
 			Revision:    1,
 			State:       protocol.StateReceived,
@@ -922,6 +925,11 @@ func TestBK4P0FirstRevisionReachesPublisher(t *testing.T) {
 		t.Fatalf("fake submit: %v", err)
 	}
 	rec.Revision = 2
+	rec.State = protocol.StateDispatching
+	if err := seedStore.Update(rec); err != nil {
+		t.Fatalf("dispatching: %v", err)
+	}
+	rec.Revision = 3
 	rec.State = protocol.StateRunning
 	rec.NativeRun = &admission.RunID
 	if err := seedStore.Update(rec); err != nil {
@@ -931,27 +939,24 @@ func TestBK4P0FirstRevisionReachesPublisher(t *testing.T) {
 		t.Fatalf("seed close: %v", err)
 	}
 
-	store, ep, err := openServeStore(stateDir, func() time.Time { return now })
-	if err != nil {
-		t.Fatalf("openServeStore: %v", err)
-	}
-	defer func() { _ = ep.Close() }()
-	_ = store
-
 	var publishedRev int64
 	var pubMu sync.Mutex
 	var pubCalled bool
-	ep.SetPublish(func(s protocol.Snapshot, origin map[string]string) error {
+	publish := func(s protocol.Snapshot, origin map[string]string) error {
 		pubMu.Lock()
 		pubCalled = true
 		publishedRev = s.Revision
 		pubMu.Unlock()
 		return nil
-	})
-	ep.Register(rt)
-	if err := ep.Reconcile(); err != nil {
-		t.Fatalf("reconcile: %v", err)
 	}
+	// serve sequence via ONE shared function: startupSequence (open store →
+	// SetPublish → Register → Reconcile). RED when Reconcile is moved before
+	// SetPublish inside startupSequence: the nil publisher records nothing.
+	_, ep, err := startupSequence(stateDir, func() time.Time { return now }, publish, rt)
+	if err != nil {
+		t.Fatalf("startupSequence: %v", err)
+	}
+	defer func() { _ = ep.Close() }()
 
 	pubMu.Lock()
 	called := pubCalled

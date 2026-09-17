@@ -352,11 +352,13 @@ func fmtID(i int) string {
 // concurrently. Before the fix, CompactOne ran with no store lock while
 // MarkAcknowledged held it; a lost += drifted the quota counter. This test
 // is semantic (round-4): it collides CompactOne and MarkAcknowledged on the
-// SAME key for 200 rounds (modeled on lost_update_regression_test.go:18) and
+// SAME key for 20 rounds (modeled on lost_update_regression_test.go:18) and
 // asserts used equals a fresh recomputation of the on-disk sum. It catches
-// the lost update WITHOUT -race and stays under 5s.
+// the lost update WITHOUT -race: 5/5 red on the reverted lock in ~50ms per
+// run (round-5 cut from 200 rounds, which cost 10.7-21s), so it stays well
+// under the 5s bar while remaining deterministic.
 func TestBK4B1RaceCompactVsAck(t *testing.T) {
-	const rounds = 200
+	const rounds = 20
 	for round := 0; round < rounds; round++ {
 		s, err := Open(t.TempDir(), WithClock(fixedClock), WithMaxStoreBytes(64*1024*1024))
 		if err != nil {
