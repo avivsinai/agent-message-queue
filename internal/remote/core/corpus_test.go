@@ -240,11 +240,21 @@ func (h *harness) client(where string, step map[string]any) {
 		h.mu.Lock()
 		h.pending[cmd.RequestID] = ch
 		h.mu.Unlock()
+		// 611.22.8: deterministic readiness. Wait for the submit to reach the
+		// held admission gate (or begin admission) via the fake's signal
+		// instead of a wall-clock sleep. No timeout increase; the signal fires
+		// exactly when the submit is parked where the step expects it. The
+		// result channel is a fallback so a path that rejects before dispatch
+		// (never reaching Submit) still unblocks instead of hanging.
+		ready := h.fake.NotifySubmitReady()
 		go func() {
 			reply, err := h.ep.Handle(cmd, src)
 			ch <- result{reply, err}
 		}()
-		time.Sleep(20 * time.Millisecond) // let the submit reach the held admission gate
+		select {
+		case <-ready:
+		case <-ch:
+		}
 		return
 	}
 	reply, err := h.ep.Handle(cmd, src)

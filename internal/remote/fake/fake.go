@@ -37,10 +37,17 @@ type Runtime struct {
 	draft      string
 
 	// controls
-	admissionGate        chan struct{}
-	afterAdmitGate       chan struct{}
-	lookupGate           chan struct{}
-	ackGate              chan struct{}
+	admissionGate  chan struct{}
+	afterAdmitGate chan struct{}
+	lookupGate     chan struct{}
+	ackGate        chan struct{}
+	// submitReady is closed the instant Submit reaches its gate-block point
+	// (or, with no gate held, the instant it begins admission). It is the
+	// deterministic readiness signal that replaces a wall-clock sleep for
+	// async corpus steps: the harness waits on it to know the submit has
+	// reached the held admission gate (611.22.8). Per-call: set via
+	// NotifySubmitReady before the async Handle.
+	submitReady          chan struct{}
 	failNextRespond      error
 	failNextLookup       error
 	failNextCancelExact  error
@@ -118,7 +125,12 @@ func (r *Runtime) Inspect() protocol.Session {
 func (r *Runtime) Submit(req core.BoundRequest) (core.Admission, error) {
 	r.mu.Lock()
 	gate := r.admissionGate
+	ready := r.submitReady
+	r.submitReady = nil
 	r.mu.Unlock()
+	if ready != nil {
+		close(ready)
+	}
 	if gate != nil {
 		<-gate
 	}
@@ -324,6 +336,19 @@ func (r *Runtime) HoldAdmission() {
 	if r.admissionGate == nil {
 		r.admissionGate = make(chan struct{})
 	}
+}
+
+// NotifySubmitReady installs a readiness signal closed the instant the next
+// Submit reaches its gate-block point (or begins admission with no gate
+// held). It replaces the corpus harness's wall-clock sleep for async steps
+// (611.22.8): the harness waits on the returned channel to know the submit
+// has reached the held admission gate, deterministically.
+func (r *Runtime) NotifySubmitReady() <-chan struct{} {
+	ch := make(chan struct{})
+	r.mu.Lock()
+	r.submitReady = ch
+	r.mu.Unlock()
+	return ch
 }
 
 // FailNextRespond makes the next Respond fail with err before it touches the
