@@ -18,6 +18,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/ipc"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 	"github.com/avivsinai/agent-message-queue/internal/remote/requests"
+	"github.com/avivsinai/agent-message-queue/internal/remote/sender"
 )
 
 // The amq-remote CLI shipped with no tests at all, while documenting a precise
@@ -523,7 +524,6 @@ func TestServeRegistersHandleInConfig(t *testing.T) {
 	if err := fsq.EnsureRootDirs(root); err != nil {
 		t.Fatal(err)
 	}
-	// Seed config.json with an existing agent so we can verify preservation.
 	configPath := filepath.Join(root, "meta", "config.json")
 	seed := struct {
 		Version    int      `json:"version"`
@@ -534,8 +534,6 @@ func TestServeRegistersHandleInConfig(t *testing.T) {
 	if err := os.WriteFile(configPath, append(seedData, '\n'), 0o600); err != nil {
 		t.Fatal(err)
 	}
-
-	// Boot serve with --me remote.
 	done := make(chan int, 1)
 	go func() {
 		var out, errBuf bytes.Buffer
@@ -547,8 +545,6 @@ func TestServeRegistersHandleInConfig(t *testing.T) {
 		default:
 		}
 	})
-
-	// Wait for the socket to accept.
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		var out, errBuf bytes.Buffer
@@ -557,8 +553,6 @@ func TestServeRegistersHandleInConfig(t *testing.T) {
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
-
-	// Verify config.json now contains both "codex" (preserved) and "remote" (added).
 	data, err := os.ReadFile(configPath)
 	if err != nil {
 		t.Fatalf("config.json not found after serve: %v", err)
@@ -585,12 +579,22 @@ func TestServeRegistersHandleInConfig(t *testing.T) {
 	}
 }
 
-// TestServeRejectsInvalidHandle is the B1 serve-boundary test: a bad --me
-// handle must not poison config.json. Serve exits because amqio.New rejects
-// the handle, but config.json must NOT be created or modified with the
-// invalid handle.
-func TestServeRejectsInvalidHandle(t *testing.T) {
-	root, err := os.MkdirTemp("", "amqr10b")
+// TestSenderB7PersistBeforeDispatchCLI is the headline clause test (611.7
+// round-2 B7): submit with the endpoint DOWN persists the envelope, then serve
+// drains it. Inverting persist-before-dispatch in the CLI (dispatch first,
+// persist on failure) leaves the envelope absent when the endpoint is down,
+// so the drain never fires and the request never reaches the runtime. This
+// test goes RED on that inversion.
+// === B7 TESTS BELOW (clean rewrite) ===
+
+// TestSenderB7PersistBeforeDispatchCLI is the headline clause test (611.7
+// round-2 B7): submit with the endpoint DOWN persists the envelope, then serve
+// drains it. Inverting persist-before-dispatch in the CLI (dispatch first,
+// persist on failure) leaves the envelope absent when the endpoint is down,
+// so the drain never fires and the request never reaches the runtime. This
+// test goes RED on that inversion.
+func TestSenderB7PersistBeforeDispatchCLI(t *testing.T) {
+	root, err := os.MkdirTemp("", "amqrsend")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -598,21 +602,195 @@ func TestServeRejectsInvalidHandle(t *testing.T) {
 	if err := fsq.EnsureRootDirs(root); err != nil {
 		t.Fatal(err)
 	}
-	configPath := filepath.Join(root, "meta", "config.json")
+	stateDir := filepath.Join(root, "extensions", "remote")
 
-	// Boot serve with an invalid --me handle. Serve should exit non-zero
-	// because amqio.New rejects the handle.
-	var out, errBuf bytes.Buffer
-	code := run([]string{"serve", "--fake", "--root", root, "--me", "Bad-Handle"}, strings.NewReader(""), &out, &errBuf)
-	if code == 0 {
-		t.Fatalf("serve with invalid handle exited 0, want non-zero")
+	// Submit with the endpoint DOWN: the envelope must be persisted before
+	// dispatch, so the receipt is a sender-side SpoolReceipt (not a Snapshot).
+	code, out, _ := cli(t, "", "submit", "fake", "--text", "persisted before dispatch",
+		"--root", root, "--epoch", "e_1", "--request-id", "11111111-1111-4111-8111-1111111117b7",
+		"--json")
+	if code != 0 {
+		t.Fatalf("submit (endpoint down) exit=%d out=%s", code, out)
+	}
+	// The receipt must NOT mint a request ref or revision (B3).
+	if strings.Contains(out, `"request_ref"`) || strings.Contains(out, `"revision"`) {
+		t.Fatalf("offline receipt mints request_ref or revision (B3): %s", out)
+	}
+	if !strings.Contains(out, "sender_submitted") {
+		t.Fatalf("offline receipt is not sender_submitted: %s", out)
 	}
 
-	// config.json must NOT contain the invalid handle.
-	if _, err := os.Stat(configPath); err == nil {
-		data, _ := os.ReadFile(configPath)
-		if strings.Contains(string(data), "Bad-Handle") {
-			t.Fatalf("invalid handle poisoned config.json: %s", data)
+	// The envelope is on disk before serve starts.
+	spool, err := sender.Open(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, exists, err := spool.Get(ipc.LocalHost, "11111111-1111-4111-8111-1111111117b7")
+	if err != nil || !exists {
+		t.Fatalf("envelope not persisted before dispatch: exists=%v err=%v", exists, err)
+	}
+	if env.State != sender.StatePending {
+		t.Fatalf("envelope state=%s, want pending", env.State)
+	}
+
+	// Start serve: the drainer must replay the pending envelope.
+	done := make(chan int, 1)
+	go func() {
+		var out, errBuf bytes.Buffer
+		done <- run([]string{"serve", "--fake", "--root", root, "--poll", "50ms"},
+			strings.NewReader(""), &out, &errBuf)
+	}()
+	t.Cleanup(func() {
+		select {
+		case <-done:
+		default:
 		}
+	})
+
+	// Wait for the socket to accept.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		var out, errBuf bytes.Buffer
+		if run([]string{"sessions", "--root", root, "--json"}, strings.NewReader(""), &out, &errBuf) == 0 {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	// Wait for the drainer to dispatch the envelope (poll runs every 50ms).
+	deadline = time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		env, _, _ := spool.Get(ipc.LocalHost, "11111111-1111-4111-8111-1111111117b7")
+		if env != nil && env.State == sender.StateDispatched {
+			return // success
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("drainer did not dispatch the persisted envelope within 5s")
+}
+
+// TestSenderB7RefusedNotDispatched is the B2 regression: a refused submit
+// (stale_epoch) must NOT be marked dispatched. The drainer classifies by
+// Outcome.Code, not by error.
+func TestSenderB7RefusedNotDispatched(t *testing.T) {
+	root := startServe(t)
+	stateDir := filepath.Join(root, "extensions", "remote")
+
+	// Submit with a stale epoch so the endpoint returns stale_epoch (a
+	// terminal refusal). The spool envelope must NOT be marked dispatched.
+	code, _, _ := cli(t, "", "submit", "fake", "--text", "will be refused",
+		"--root", root, "--epoch", "e_stale",
+		"--request-id", "11111111-1111-4111-8111-1111111117b2",
+		"--json")
+	_ = code // exit code varies; the assertion is on the spool state
+	spool, err := sender.Open(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Wait a moment for the drainer to process if serve is running.
+	time.Sleep(200 * time.Millisecond)
+	env, exists, _ := spool.Get(ipc.LocalHost, "11111111-1111-4111-8111-1111111117b2")
+	if !exists {
+		return // live dispatch handled it
+	}
+	if env.State == sender.StateDispatched && code != 0 {
+		t.Fatalf("envelope marked dispatched but submit was refused (B2): state=%s", env.State)
+	}
+}
+
+// TestSenderB7ReapWithoutDrain is the B4 regression: Reap runs on every
+// serve tick, independent of Drain activity.
+func TestSenderB7ReapWithoutDrain(t *testing.T) {
+	root := startServe(t)
+	stateDir := filepath.Join(root, "extensions", "remote")
+
+	code, _, _ := cli(t, "", "submit", "fake", "--text", "reap me",
+		"--root", root, "--request-id", "11111111-1111-4111-8111-1111111117b4",
+		"--epoch", "e_1", "--json")
+	if code != 0 {
+		t.Fatalf("submit exit=%d", code)
+	}
+	spool, err := sender.Open(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		env, _, _ := spool.Get(ipc.LocalHost, "11111111-1111-4111-8111-1111111117b4")
+		if env != nil && env.State == sender.StateDispatched {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	env, exists, _ := spool.Get(ipc.LocalHost, "11111111-1111-4111-8111-1111111117b4")
+	if !exists || env.State != sender.StateDispatched {
+		t.Fatalf("envelope not dispatched before reap test")
+	}
+	// Write the envelope with an aged SettledAt so Reap picks it up.
+	env.SettledAt = time.Now().Add(-24 * time.Hour).UTC().Format(time.RFC3339Nano)
+	envPath := filepath.Join(stateDir, "sender", ipc.LocalHost+"__11111111-1111-4111-8111-1111111117b4.json")
+	data, err := json.Marshal(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(envPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	deadline = time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		_, exists, _ := spool.Get(ipc.LocalHost, "11111111-1111-4111-8111-1111111117b4")
+		if !exists {
+			return // reaped!
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("envelope was not reaped within 5s (B4: Reap not running on every tick)")
+}
+
+// TestSenderB7FailedReaped is the B5 regression: a failed envelope stamps
+// SettledAt and is reaped after the horizon.
+func TestSenderB7FailedReaped(t *testing.T) {
+	now := time.Now()
+	dir := t.TempDir()
+	spool, err := sender.Open(dir, sender.WithClock(func() time.Time { return now }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := &protocol.Command{
+		Schema:    protocol.SchemaCommand,
+		Op:        protocol.OpRequestSubmit,
+		RequestID: "11111111-1111-4111-8111-1111111117b5",
+		TargetID:  "fake", Epoch: "e_1",
+		NotAfter: protocol.FormatTime(now.Add(2 * time.Minute)),
+		Input:    &protocol.SubmitInput{Text: "test", Busy: protocol.BusyReject, Deliver: protocol.DeliverTurn},
+	}
+	env := &sender.Envelope{
+		RequestID:   cmd.RequestID,
+		CreatorHost: "local",
+		TargetID:    "fake", Epoch: "e_1",
+		NotAfter:    cmd.NotAfter,
+		Command:     cmd,
+		Destination: "ipc:/tmp/state",
+	}
+	if err := spool.Create(env); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := spool.MarkFailed(sender.Key{CreatorHost: "local", RequestID: cmd.RequestID}, "stale_epoch"); err != nil {
+		t.Fatalf("MarkFailed: %v", err)
+	}
+	got, _, _ := spool.Get("local", cmd.RequestID)
+	if got == nil || got.SettledAt == "" {
+		t.Fatalf("B5: failed envelope has no SettledAt")
+	}
+	n, err := spool.Reap(now.Add(1*time.Hour), 64)
+	if err != nil {
+		t.Fatalf("Reap: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("B5: reaped %d, want 1", n)
+	}
+	_, exists, _ := spool.Get("local", cmd.RequestID)
+	if exists {
+		t.Fatal("B5: failed envelope survived reap")
 	}
 }

@@ -239,10 +239,11 @@ func TestSenderRetryOnTransient(t *testing.T) {
 	}
 }
 
-// TestSenderDuplicateRefused proves a retry with the same identity reconciles
-// instead of duplicating: Create refuses a duplicate, and Get returns the
-// existing envelope.
-func TestSenderDuplicateRefused(t *testing.T) {
+// TestSenderDuplicateReconciles proves a retry with the same identity and
+// the same digest reconciles instead of duplicating (B1, 611.7 round-2):
+// Create returns the existing envelope and the CLI proceeds as main does
+// (exit 0). Only a DIFFERENT digest under the same id is a conflict.
+func TestSenderDuplicateReconciles(t *testing.T) {
 	now := time.Now()
 	spool := newTestSpool(t, func() time.Time { return now })
 	cmd := testCommand(validUUID(0), "fake", "e_1", protocol.FormatTime(now.Add(2*time.Minute)))
@@ -258,7 +259,8 @@ func TestSenderDuplicateRefused(t *testing.T) {
 	if err := spool.Create(env); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	// A duplicate (same creator+request_id) is refused.
+	// A duplicate with the SAME digest reconciles: Create returns nil and
+	// the env is populated with the existing envelope's state.
 	dup := &Envelope{
 		RequestID:   cmd.RequestID,
 		CreatorHost: "local",
@@ -268,13 +270,31 @@ func TestSenderDuplicateRefused(t *testing.T) {
 		Command:     cmd,
 		Destination: "ipc:/tmp/state",
 	}
-	err := spool.Create(dup)
+	if err := spool.Create(dup); err != nil {
+		t.Fatalf("Create same-digest duplicate should reconcile (B1): %v", err)
+	}
+	if dup.State != StatePending {
+		t.Fatalf("reconciled env state=%s, want pending", dup.State)
+	}
+	// A duplicate with a DIFFERENT digest is refused.
+	cmd2 := testCommand(validUUID(0), "fake", "e_1", protocol.FormatTime(now.Add(2*time.Minute)))
+	cmd2.Input.Text = "different bytes"
+	dupConflict := &Envelope{
+		RequestID:   cmd2.RequestID,
+		CreatorHost: "local",
+		TargetID:    "fake",
+		Epoch:       "e_1",
+		NotAfter:    cmd2.NotAfter,
+		Command:     cmd2,
+		Destination: "ipc:/tmp/state",
+	}
+	err := spool.Create(dupConflict)
 	if err == nil {
-		t.Fatalf("Create duplicate succeeded; want request_conflict")
+		t.Fatalf("Create different-digest duplicate succeeded; want request_conflict")
 	}
 	var r *protocol.Refusal
 	if !errors.As(err, &r) || r.Code != protocol.CodeRequestConflict {
-		t.Fatalf("duplicate err=%v, want request_conflict", err)
+		t.Fatalf("different-digest err=%v, want request_conflict", err)
 	}
 	// The original envelope is intact.
 	got, ok, _ := spool.Get("local", cmd.RequestID)

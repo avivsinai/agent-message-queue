@@ -179,9 +179,12 @@ func Open(stateDir string, opts ...Option) (*Spool, error) {
 // Dir is the spool directory.
 func (s *Spool) Dir() string { return s.dir }
 
-// Create persists one envelope atomically BEFORE returning. It refuses a
-// duplicate (same creator host + request id); a retry reconciles by reading
-// the existing envelope via Get. The envelope starts in StatePending.
+// Create persists one envelope atomically BEFORE returning. A duplicate
+// (same creator host + request id) reconciles: if the existing envelope has
+// the same digest, Create returns it as-is so the CLI proceeds exactly as
+// main does (exit 0, existing record). Only a DIFFERENT digest under the
+// same id is a conflict (the caller changed the command bytes). The
+// envelope starts in StatePending.
 //
 // The caller MUST have already validated the command (protocol.DecodeCommand
 // or protocol.Validate) and resolved target+epoch (from a live inspect or an
@@ -194,10 +197,19 @@ func (s *Spool) Create(env *Envelope) error {
 	if err := validateEnvelope(env); err != nil {
 		return err
 	}
-	if _, exists, err := s.get(env.key()); err != nil {
+	existing, exists, err := s.get(env.key())
+	if err != nil {
 		return err
-	} else if exists {
-		return protocol.Refuse(protocol.CodeRequestConflict, "envelope already exists for request %s", env.RequestID)
+	}
+	if exists {
+		// B1: a retry with the same identity and the same digest reconciles
+		// to the existing envelope — the caller proceeds as main does (exit
+		// 0). Only a different digest under the same id is a conflict.
+		if existing.InputDigest == env.InputDigest {
+			*env = *existing
+			return nil
+		}
+		return protocol.Refuse(protocol.CodeRequestConflict, "request %s already has a different digest", env.RequestID)
 	}
 	env.State = StatePending
 	if env.CreatedAt == "" {
@@ -275,6 +287,7 @@ func (s *Spool) MarkDispatched(k Key) error {
 	}
 	env.State = StateDispatched
 	env.DispatchedAt = protocol.FormatTime(s.now())
+	env.SettledAt = env.DispatchedAt // B5: every terminal state stamps settle time.
 	env.LastError = ""
 	env.Attempt++
 	return s.write(env)
@@ -298,6 +311,7 @@ func (s *Spool) MarkFailed(k Key, errMsg string) error {
 	env.State = StateFailed
 	env.LastError = errMsg
 	env.Attempt++
+	env.SettledAt = protocol.FormatTime(s.now()) // B5: every terminal state stamps settle time.
 	return s.write(env)
 }
 
@@ -513,4 +527,49 @@ func validateEnvelope(env *Envelope) error {
 		return err
 	}
 	return nil
+}
+
+// SpoolReceipt is the SENDER-side `submitted` receipt returned when the
+// endpoint could not be reached (or returned a duplicate). It is NOT a
+// Snapshot: it never mints a request ref or a revision the endpoint did not
+// assign. The receipt carries the envelope identity, the resolved target/
+// epoch/expiry, the destination, and the spool state (pending). If the
+// envelope carried a --min-evidence floor, the receipt says it is unevaluated
+// until the drainer dispatches (the endpoint evaluates at drain, not at
+// persist). This is distinct from the target-side received/running state the
+// endpoint owns.
+type SpoolReceipt struct {
+	Schema       string `json:"schema"`         // "sender_submitted"
+	RequestID    string `json:"request_id"`     // caller-generated UUID
+	CreatorHost  string `json:"creator_host"`   // authenticated source host
+	TargetID     string `json:"target_id"`      // resolved target
+	Epoch        string `json:"epoch"`          // resolved/verified epoch
+	NotAfter     string `json:"not_after"`      // admission deadline
+	Destination  string `json:"destination"`    // resolved routing (ipc:<dir>)
+	State        State  `json:"state"`          // pending (not received/running)
+	InputDigest  string `json:"input_digest"`   // command digest for dedup
+	MinEvidence  string `json:"min_evidence,omitempty"` // floor, unevaluated until drain
+	Reason       string `json:"reason"`         // "endpoint_unreachable" or "duplicate_conflict"
+	CreatedAt    string `json:"created_at"`     // persist time
+}
+
+// Receipt builds a SpoolReceipt from an envelope. The state is always pending:
+// the intent is durable and the drainer will dispatch it when the companion
+// runs. The reason explains why the receipt was issued instead of a live
+// reply.
+func (env *Envelope) Receipt(reason string) SpoolReceipt {
+	r := SpoolReceipt{
+		Schema:      "sender_submitted",
+		RequestID:   env.RequestID,
+		CreatorHost: env.CreatorHost,
+		TargetID:    env.TargetID,
+		Epoch:       env.Epoch,
+		NotAfter:    env.NotAfter,
+		Destination: env.Destination,
+		State:       env.State,
+		InputDigest: env.InputDigest,
+		CreatedAt:   env.CreatedAt,
+		Reason:      reason,
+	}
+	return r
 }

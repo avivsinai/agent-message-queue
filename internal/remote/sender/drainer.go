@@ -79,41 +79,61 @@ func (d *Drainer) Drain(_ context.Context) (int, error) {
 		}
 		n++
 		reply, herr := d.ep.Handle(env.Command, core.Source{Host: env.CreatorHost, Origin: env.Origin})
-		if herr == nil {
-			// The endpoint accepted the command and owns the record now.
-			_ = reply
+		// B2: classify by Outcome.Code, NOT by error. The endpoint returns
+		// busy, request_conflict, expired, stale_epoch, unshared, invalid and
+		// unsupported as a Reply with Outcome.Code and a nil error. Checking
+		// herr == nil alone marks refused envelopes as dispatched.
+		code := classifyReply(reply, herr)
+		switch {
+		case code == "":
+			// No code = the endpoint accepted the command and owns the record.
 			if err := d.spool.MarkDispatched(k); err != nil {
 				errs = append(errs, err)
 			}
-			continue
-		}
-		if isTransient(herr) {
-			// Endpoint unreachable / draining / storage_full: retry next tick.
-			if err := d.spool.MarkAttempt(k, herr.Error()); err != nil {
+		case isTransientCode(code):
+			// Busy / draining / unreachable / storage_full: retry next tick.
+			if err := d.spool.MarkAttempt(k, string(code)); err != nil {
 				errs = append(errs, err)
 			}
-			continue
-		}
-		// Terminal refusal (invalid, request_conflict, unsupported, etc.):
-		// no retry will succeed. Record the failure for the caller.
-		if err := d.spool.MarkFailed(k, herr.Error()); err != nil {
-			errs = append(errs, err)
+		default:
+			// Terminal refusal (expired, stale_epoch, unshared,
+			// request_conflict, invalid, unsupported): no retry will succeed.
+			if err := d.spool.MarkFailed(k, string(code)); err != nil {
+				errs = append(errs, err)
+			}
 		}
 	}
 	return n, errors.Join(errs...)
 }
 
-// isTransient reports whether a dispatch error is worth retrying. A draining
-// or unreachable endpoint, or a transient route error, is retried; a typed
-// protocol refusal (invalid, request_conflict, unsupported, stale_epoch,
-// expired, unshared) is terminal for this envelope.
-func isTransient(err error) bool {
-	var r *protocol.Refusal
-	if !errors.As(err, &r) {
-		// Not a protocol refusal (network/IPC error): retry.
-		return true
+// classifyReply extracts the Outcome.Code from the endpoint's reply. The
+// endpoint returns refusals as (Reply, nil) with Outcome.Code set; a nil
+// error with no code means success. A non-nil error that is not a typed
+// protocol refusal is a transient IPC/network failure (retry). A typed
+// refusal error (from a path that returns (nil, error)) is mapped to its
+// code.
+func classifyReply(reply any, herr error) protocol.Code {
+	if herr != nil {
+		var r *protocol.Refusal
+		if errors.As(herr, &r) {
+			return r.Code
+		}
+		// Not a protocol refusal (network/IPC error): transient.
+		return protocol.CodeEndpointUnreachable
 	}
-	switch r.Code {
+	if reply == nil {
+		return ""
+	}
+	// The endpoint returns a *protocol.Reply; extract its Outcome.Code.
+	if rep, ok := reply.(*protocol.Reply); ok && rep != nil {
+		return rep.Outcome.Code
+	}
+	return ""
+}
+
+// isTransientCode reports whether a dispatch outcome code is worth retrying.
+func isTransientCode(code protocol.Code) bool {
+	switch code {
 	case protocol.CodeDraining,
 		protocol.CodeEndpointUnreachable,
 		protocol.CodeStorageFull,
