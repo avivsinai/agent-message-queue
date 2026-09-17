@@ -612,6 +612,22 @@ func (e *Endpoint) admissibleLocked(targetID, epoch, notAfter, minEvidence strin
 	return t, ""
 }
 
+// achievedEvidence returns the live session's submit evidence class for a
+// target, for the human projection on a submit reply (the machine contract
+// floor lives on SubmitInput). Empty when the target is nil or the session
+// carries no evidence projection (legacy/unknown adapter). Callers must NOT
+// hold e.mu when calling Inspect (it may lock the adapter).
+func achievedEvidence(t *target) string {
+	if t == nil {
+		return ""
+	}
+	s := t.att.Inspect()
+	if s.Evidence == nil {
+		return ""
+	}
+	return s.Evidence.Submit
+}
+
 func (e *Endpoint) unpersisted(rec *requests.Record, state protocol.State, code protocol.Code) protocol.Snapshot {
 	s := rec.Snapshot
 	s.RequestRef = protocol.EncodeRef(rec.CreatorHost, rec.TargetID, rec.RequestID)
@@ -2029,8 +2045,9 @@ func (e *Endpoint) finishAdmissionLocked(rec *requests.Record, exists bool, t *t
 		}
 		snap := rec.Snapshot
 		e.mu.Unlock()
+		ev := achievedEvidence(t)
 		e.publishRevision(rec)
-		return protocol.Reply{Snapshot: snap, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: rec.Code}}, nil
+		return protocol.Reply{Snapshot: snap, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: rec.Code, Evidence: ev}}, nil
 	}
 	// The record was moved by a native event while Submit was in flight
 	// (the raced shape). RECONCILE from (adm, nerr, rec.State) — never branch
@@ -2059,8 +2076,9 @@ func (e *Endpoint) finishAdmissionLocked(rec *requests.Record, exists bool, t *t
 		}
 		snap := rec.Snapshot
 		e.mu.Unlock()
+		ev := achievedEvidence(t)
 		e.publishRevision(rec)
-		return protocol.Reply{Snapshot: snap, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: rec.Code}}, nil
+		return protocol.Reply{Snapshot: snap, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: rec.Code, Evidence: ev}}, nil
 	}
 	if rec.State == protocol.StateCancelled && !adm.Admitted && nerr == nil {
 		// B3: cancellation raced admission and never got metadata, and the
@@ -2090,8 +2108,9 @@ func (e *Endpoint) finishAdmissionLocked(rec *requests.Record, exists bool, t *t
 		}
 		snap := rec.Snapshot
 		e.mu.Unlock()
+		ev := achievedEvidence(t)
 		e.publishRevision(rec)
-		return protocol.Reply{Snapshot: snap, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: rec.Code}}, nil
+		return protocol.Reply{Snapshot: snap, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: rec.Code, Evidence: ev}}, nil
 	}
 	// Default: return the durable snapshot. Outcome.Code is read from rec.Code
 	// so snapshot.Code == outcome.Code always (Pro #4).
