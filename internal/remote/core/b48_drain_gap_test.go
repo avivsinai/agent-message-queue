@@ -157,6 +157,16 @@ func TestB48CloseDrainsSkippedSameKeyRevision(t *testing.T) {
 		t.Fatal("close did not return after publications released")
 	}
 
+	// Bound the question goroutine: after Close drains and returns, the held
+	// publish has been released, so rt.Question must return. A leak here means
+	// a goroutine is still parked inside the publisher (a deadlock the test
+	// must surface, not silently leak).
+	select {
+	case <-questionDone:
+	case <-time.After(b48Timeout):
+		t.Fatal("rt.Question goroutine did not return after Close (leaked)")
+	}
+
 	// THE assertion, BY REVISION (codex round-3 P2): the newest revision must
 	// be published exactly once and the intermediate one exactly once. RED
 	// on 2a5e583: the skipped r+2 never publishes, so its count is 0.

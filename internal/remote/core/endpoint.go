@@ -2343,6 +2343,21 @@ func (e *Endpoint) notifyLocked(rec *requests.Record) {
 	e.changed = make(chan struct{})
 }
 
+// retireObligationLocked clears any undischarged drain obligation for key
+// whose recorded revision is <= publishedRev. MarkPublished is a high-water
+// mark, so confirming publishedRev covers every earlier pending revision too.
+// Called on EVERY path that confirms the durable publication high-water mark:
+// the fresh-delivery exit, the marker-only retry path, and the already-published
+// branch (codex round-5 P2: marker-only recovery must retire the obligation,
+// else Close reports ErrDrainIncomplete for a record that is fully published).
+// The caller holds e.mu. Never clears an unrelated key or a strictly higher
+// revision (a higher pending obligation survives a lower confirmed publish).
+func (e *Endpoint) retireObligationLocked(key requests.Key, publishedRev int64) {
+	if ob, ok := e.drainObligations[key]; ok && ob <= publishedRev {
+		delete(e.drainObligations, key)
+	}
+}
+
 // publishLocked publishes the latest revision and records it on success.
 // Failures leave published_revision behind so Reconcile retries.
 func (e *Endpoint) publishLocked(rec *requests.Record) {
@@ -2357,6 +2372,13 @@ func (e *Endpoint) publishLocked(rec *requests.Record) {
 	}
 	if cur.PublishedRevision >= rec.Revision {
 		rec.PublishedRevision = cur.PublishedRevision
+		// codex round-5 P2: a prior successful publication already discharged
+		// this revision (or a strictly newer one). Retire any obligation for
+		// this key that the durable high-water mark has covered, so a later
+		// Close does not report ErrDrainIncomplete for a fully-published
+		// record (the obligation was recorded when an earlier chained attempt
+		// skipped, then Reconcile published it via a different caller).
+		e.retireObligationLocked(key, cur.PublishedRevision)
 		return
 	}
 	// 611.22.48: visible means CONFIRMED DELIVERY awaiting its marker. If a
@@ -2378,6 +2400,11 @@ func (e *Endpoint) publishLocked(rec *requests.Record) {
 			if e.visible[key] == rec.Revision {
 				delete(e.visible, key)
 			}
+			// codex round-5 P2: marker-only recovery (a prior delivery's marker
+			// write failed, Reconcile retries only the marker) must also retire
+			// the obligation. Without this, Close reports ErrDrainIncomplete
+			// although the durable record is now fully published.
+			e.retireObligationLocked(key, rec.Revision)
 		}
 		return
 	}
@@ -2524,9 +2551,7 @@ func (e *Endpoint) publishLocked(rec *requests.Record) {
 					// pending revision too (codex round-4 P2-1: a later
 					// successful publish must clear a previously-recorded
 					// skipped obligation rather than leave a stale latch).
-					if ob, ok := e.drainObligations[key]; ok && ob <= attemptRev {
-						delete(e.drainObligations, key)
-					}
+					e.retireObligationLocked(key, attemptRev)
 				}
 			}
 			return
