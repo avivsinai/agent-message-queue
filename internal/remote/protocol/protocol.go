@@ -320,6 +320,14 @@ type Outcome struct {
 	Code        Code              `json:"code,omitempty"` // request_conflict, already_resolved, "" on plain success
 	Message     string            `json:"message,omitempty"`
 	Disposition CancelDisposition `json:"disposition,omitempty"` // cancel replies only
+	// Evidence is the achieved submit evidence class for this request's
+	// target on a submit reply (the human projection: `submitted` or
+	// `admitted`). It is the LIVE session's evidence, not the caller's floor
+	// (the floor is the machine contract, carried on SubmitInput). Omitted on
+	// non-submit replies and when no live target was inspected (offline
+	// enqueue, refusal before inspection). The CLI prints it so a human sees
+	// what guarantee the adapter actually proved.
+	Evidence string `json:"evidence,omitempty"`
 }
 
 // Reply pairs the current immutable record revision with the operation
