@@ -151,9 +151,15 @@ func TestB48PendingPublishNotMarkedDelivered(t *testing.T) {
 		}
 	})
 	var calls int32
+	var pubStartedOnce sync.Once
 	heldPublish := func(s protocol.Snapshot, origin map[string]string) error {
 		atomic.AddInt32(&calls, 1)
-		close(pubStarted)
+		// B784-1 fix: the finishing publisher now chains skipped revisions
+		// (a second publishRevision for the same key), so the held publish
+		// can run more than once. close() must be once-only; every entry
+		// holds until releasePub (drain is serialized per key, so holders
+		// queue and all complete when it closes).
+		pubStartedOnce.Do(func() { close(pubStarted) })
 		<-releasePub
 		return nil
 	}
@@ -182,8 +188,19 @@ func TestB48PendingPublishNotMarkedDelivered(t *testing.T) {
 
 	// A concurrent Reconcile for the same key/revision must NOT advance
 	// PublishedRevision while the publish is in-flight (the revision is not
-	// confirmed delivered yet). It must leave the work pending.
-	_ = ep.Reconcile()
+	// confirmed delivered yet). It must leave the work pending. Reconcile runs
+	// in a goroutine with a BOUNDED join (codex round-3 P2): with the held
+	// publish, a regression that re-publishes inside Reconcile would block it
+	// on releasePub forever — the test must fail on timeout, not hang the
+	// suite.
+	reconcileDone := make(chan struct{})
+	go func() { defer close(reconcileDone); _ = ep.Reconcile() }()
+	select {
+	case <-reconcileDone:
+	case <-time.After(b48Timeout):
+		close(releasePub)
+		t.Fatal("reconcile did not return while publish is in-flight (it must leave the work pending, not block behind the held publisher)")
+	}
 	k := requests.Key{CreatorHost: "local", TargetID: "fake", RequestID: id}
 	rec, _, _ := store.Get(k)
 	if rec.PublishedRevision >= rec.Revision {
@@ -204,6 +221,14 @@ func TestB48PendingPublishNotMarkedDelivered(t *testing.T) {
 	rec, _, _ = store.Get(k)
 	if rec.PublishedRevision < rec.Revision {
 		t.Fatalf("after publish completed, PublishedRevision=%d want >= %d (611.22.48)", rec.PublishedRevision, rec.Revision)
+	}
+	// Duplicate-delivery check AFTER completion (codex round-3 P2): the
+	// post-release assertions must verify the revision was delivered exactly
+	// once in total, not just that the marker advanced. A regression that
+	// re-publishes r after the original r succeeds (same-revision chain)
+	// shows up as calls=2 here.
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("after completion, publish calls=%d, want exactly 1 (revision %d delivered more than once)", got, rec.Revision)
 	}
 }
 
@@ -345,10 +370,13 @@ func TestB48CloseDrainsAsyncNativePublication(t *testing.T) {
 	// waits. closeDone must stay blocked until releasePub.
 	closeDone := make(chan error, 1)
 	go func() { closeDone <- ep.Close() }()
-	// Synchronize on the ACTUAL draining state (not a 100ms absence check):
-	// poll IsDraining() until Close has transitioned to draining. This proves
+	// Synchronize on the ACTUAL draining state (not a 100ms absence check,
+	// and not IsDraining which conflates draining+closed): poll
+	// IsDrainingState() until Close has transitioned to draining. This proves
 	// Close entered the drain wait while the publish is still in-flight, so
-	// the lifecycle accounting is exercised regardless of scheduling.
+	// the lifecycle accounting is exercised regardless of scheduling. If
+	// Close reached stateClosed here, it raced past the drain without waiting
+	// (611.22.48 P2 false-pass).
 	waitForDraining48(t, ep)
 	// Close must still be blocked (the held publish keeps inFlight > 0).
 	select {
@@ -386,17 +414,250 @@ func TestB48CloseDrainsAsyncNativePublication(t *testing.T) {
 
 var errPublishFailed48 = protocol.Refuse(protocol.CodeNativeError, "publish failed for test")
 
-// waitForDraining48 polls IsDraining() until the endpoint has begun shutdown.
-// Replaces an elapsed-time absence check with synchronization on the actual
-// lifecycle transition (611.22.48 P2).
+// waitForDraining48 polls IsDrainingState() until the endpoint has entered
+// the DRAINING state specifically (not closed). This is the 611.22.48 P2
+// close-wait ordering fix: IsDraining() conflates draining and closed, so a
+// test that released a held publish after observing IsDraining()==true could
+// be observing stateClosed — Close raced past the drain wait without actually
+// waiting. IsDrainingState() fails if Close reached stateClosed before the
+// publish was released, proving Close is genuinely in the drain wait.
 func waitForDraining48(t *testing.T, ep *core.Endpoint) {
 	t.Helper()
 	deadline := time.Now().Add(b48Timeout)
 	for time.Now().Before(deadline) {
-		if ep.IsDraining() {
+		if ep.IsDrainingState() {
 			return
 		}
 		time.Sleep(time.Millisecond)
 	}
-	t.Fatal("timed out waiting for endpoint to enter draining")
+	t.Fatal("timed out waiting for endpoint to enter draining state (not closed)")
+}
+
+// TestB48CloseWaitsFailedPublishReturnsNil is the codex round-4 P2 regression
+// for the failure branch in the close-wait ordering. A held publish FAILS;
+// Close must enter the DRAINING state (not race to stateClosed) while the
+// publish is in flight, then return nil because a failed attempt of the
+// published revision is NOT an undischarged obligation (the attempt ran and
+// was counted; the durable unpublished state persists for Reconcile recovery).
+// ErrDrainIncomplete would arise only if a coalesced NEWER r+1 was dropped.
+// This exercises the failed-r path in the close-wait regression (the previous
+// close-wait test's publisher always returned nil).
+func TestB48CloseWaitsFailedPublishReturnsNil(t *testing.T) {
+	store, now := openStoreNoCleanup(t)
+
+	pubStarted := make(chan struct{})
+	releasePub := make(chan struct{})
+	t.Cleanup(func() {
+		select {
+		case <-releasePub:
+		default:
+			close(releasePub)
+		}
+	})
+	// The gate arms ONLY after the submit Handle has returned: every
+	// publication before that (the running snapshot inside Handle) passes
+	// unheld, and the first publication after arming — the completed snapshot
+	// from the EventRunCompleted native path — is the held one that fails.
+	var gateArmed atomic.Bool
+	var heldOnce atomic.Bool
+	heldPublish := func(s protocol.Snapshot, origin map[string]string) error {
+		if gateArmed.Load() && heldOnce.CompareAndSwap(false, true) {
+			close(pubStarted)
+			<-releasePub
+			return errPublishFailed48
+		}
+		return nil
+	}
+	ep := core.New(core.Config{Store: store, Publish: heldPublish, Now: now})
+	rt := fake.New("fake", "e_1")
+	ep.Register(rt)
+
+	id := "11111111-1111-4111-8111-111111111488"
+	if _, err := ep.Handle(submitCmd(id), core.Source{Host: "local"}); err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	if !b14cWait(func() bool { return rt.HasRun(id) }) {
+		t.Fatal("never admitted")
+	}
+	// Arm the gate AFTER Handle returned and the run is admitted: the next
+	// publication (the completed snapshot from rt.Complete's native event) is
+	// the held one that fails.
+	gateArmed.Store(true)
+
+	completeDone := make(chan struct{})
+	go func() {
+		defer close(completeDone)
+		rt.Complete(id, "done")
+	}()
+	select {
+	case <-pubStarted:
+	case <-time.After(b48Timeout):
+		close(releasePub)
+		t.Fatal("failed-r publication never started")
+	}
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- ep.Close() }()
+	// Close must enter DRAINING (not stateClosed) while the publish is held.
+	// IsDrainingState() fails if Close raced to stateClosed (round-4 P2
+	// false-pass: IsDraining conflates draining+closed).
+	waitForDraining48(t, ep)
+	select {
+	case err := <-closeDone:
+		close(releasePub)
+		t.Fatalf("close returned before failed publication completed: %v", err)
+	default:
+	}
+
+	// Release the held publish; it fails. Close drains and returns nil:
+	// a failed attempt of attemptRev itself is NOT an undischarged
+	// obligation (the attempt ran and was counted; the durable unpublished
+	// state persists for Reconcile recovery — the contract-corpus Q18
+	// restart flow relies on Close returning nil here). ErrDrainIncomplete
+	// would arise only if a coalesced NEWER r+1 was dropped, which this
+	// schedule does not produce.
+	close(releasePub)
+	select {
+	case <-completeDone:
+	case <-time.After(b48Timeout):
+		t.Fatal("rt.Complete did not return after publish released")
+	}
+	select {
+	case err := <-closeDone:
+		if err != nil {
+			t.Fatalf("close returned error after failed publication; want nil (failed attempt is not an undischarged obligation): %v", err)
+		}
+	case <-time.After(b48Timeout):
+		t.Fatal("close did not return after failed publication completed")
+	}
+
+	// The failed publish did NOT advance PublishedRevision (failure must not
+	// mark); the durable unpublished state persists for Reconcile recovery.
+	k := requests.Key{CreatorHost: "local", TargetID: "fake", RequestID: id}
+	rec, _, _ := store.Get(k)
+	if rec.PublishedRevision >= rec.Revision {
+		t.Fatalf("failed publish advanced PublishedRevision=%d to Revision=%d", rec.PublishedRevision, rec.Revision)
+	}
+}
+
+// TestB48CloseFailedRHoldsCoalescedRPlus1 is the codex round-5 P3 regression:
+// hold revision r (the question publication), coalesce r+1 (the resolution)
+// while r is held, then FAIL r. Close must attempt r+1 (the coalesced newer
+// revision) and mark it published before returning nil. This proves the
+// drain does not skip a coalesced newer revision when the held older one
+// fails — the obligation for r+1 is discharged by the retry, not lost.
+func TestB48CloseFailedRHoldsCoalescedRPlus1(t *testing.T) {
+	store, now := openStoreNoCleanup(t)
+
+	pubStarted := make(chan struct{})
+	releasePub := make(chan struct{})
+	t.Cleanup(func() {
+		select {
+		case <-releasePub:
+		default:
+			close(releasePub)
+		}
+	})
+
+	// Track publication attempts per revision.
+	var pubMu sync.Mutex
+	perRevision := make(map[int64]int)
+	// The gate arms ONLY after the submit Handle has returned: the running
+	// snapshot inside Handle publishes unheld, and the first publication
+	// after arming (the question event) is the held one that fails.
+	var gateArmed atomic.Bool
+	var heldOnce atomic.Bool
+	heldPublish := func(s protocol.Snapshot, origin map[string]string) error {
+		pubMu.Lock()
+		perRevision[s.Revision]++
+		pubMu.Unlock()
+		if gateArmed.Load() && heldOnce.CompareAndSwap(false, true) {
+			close(pubStarted)
+			<-releasePub
+			return errPublishFailed48
+		}
+		return nil
+	}
+	ep := core.New(core.Config{Store: store, Publish: heldPublish, Now: now})
+	rt := fake.New("fake", "e_1")
+	ep.Register(rt)
+
+	id := "11111111-1111-4111-8111-111111111489"
+	if _, err := ep.Handle(submitCmd(id), core.Source{Host: "local"}); err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	if !b14cWait(func() bool { return rt.HasRun(id) }) {
+		t.Fatal("never admitted")
+	}
+
+	// Arm the gate: the next publication (the question event) is the held
+	// one that fails.
+	gateArmed.Store(true)
+
+	questionDone := make(chan struct{})
+	go func() {
+		defer close(questionDone)
+		rt.Question(id, "i_1", []string{"yes", "no"})
+	}()
+	select {
+	case <-pubStarted:
+	case <-time.After(b48Timeout):
+		close(releasePub)
+		t.Fatal("question publication (r) never started")
+	}
+
+	// While r is held, coalesce r+1: the resolution event arrives and
+	// publishLocked early-returns into the coalescing set (the held publish
+	// is still in flight). This creates an undischarged obligation for r+1.
+	resolvedDone := make(chan struct{})
+	go func() {
+		defer close(resolvedDone)
+		rt.LocalAnswer("i_1", "yes")
+	}()
+	select {
+	case <-resolvedDone:
+	case <-time.After(b48Timeout):
+		t.Fatal("resolution handler did not return")
+	}
+
+	// Close must drain both the in-flight r and the coalesced r+1.
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- ep.Close() }()
+	waitForDraining48(t, ep)
+
+	// Release the held publish; it fails (r). Close must then attempt r+1
+	// (the coalesced newer revision) and mark it published before returning.
+	close(releasePub)
+
+	select {
+	case err := <-closeDone:
+		if err != nil {
+			t.Fatalf("close returned error after failed r + coalesced r+1; want nil (r+1 should have been published): %v", err)
+		}
+	case <-time.After(b48Timeout):
+		t.Fatal("close did not return after publications released")
+	}
+
+	// Bound the question goroutine.
+	select {
+	case <-questionDone:
+	case <-time.After(b48Timeout):
+		t.Fatal("rt.Question goroutine did not return after Close (leaked)")
+	}
+
+	// r+1 (the resolution revision) must have been attempted at least once
+	// and PublishedRevision must have advanced to Revision.
+	pubMu.Lock()
+	revs := make([]int64, 0, len(perRevision))
+	for r := range perRevision {
+		revs = append(revs, r)
+	}
+	pubMu.Unlock()
+
+	k := requests.Key{CreatorHost: "local", TargetID: "fake", RequestID: id}
+	rec, _, _ := store.Get(k)
+	if rec.PublishedRevision < rec.Revision {
+		t.Fatalf("coalesced r+1 was not published: PublishedRevision=%d Revision=%d (attempts: %v)",
+			rec.PublishedRevision, rec.Revision, revs)
+	}
 }

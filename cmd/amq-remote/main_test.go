@@ -1029,3 +1029,65 @@ func runWithRecordingFake(root string, rf *recordingFake, stdout, stderr io.Writ
 	// Block until the test process exits.
 	select {}
 }
+
+// TestCLISubmitPrintsAchievedEvidence pins the architect-review invariant:
+// submit prints the achieved evidence class (the human projection) on every
+// successful submit, so a human sees `admitted` from the fake (or
+// `submitted` from Amit/Claude) even when no floor was asked. The floor is
+// the machine contract on SubmitInput; the projection is the live session's
+// Evidence.Submit. The CLI renders it as evidence=<class> on the human path.
+func TestCLISubmitPrintsAchievedEvidence(t *testing.T) {
+	root := startServe(t)
+
+	// JSON path: the Outcome.Evidence field carries the class.
+	code, out, errOut := cli(t, "", "submit", "fake", "--text", "say hi", "--root", root, "--json")
+	if code != 0 {
+		t.Fatalf("json submit exit=%d out=%s err=%s", code, out, errOut)
+	}
+	var rep protocol.Reply
+	if err := json.Unmarshal([]byte(out), &rep); err != nil {
+		t.Fatalf("json output not a Reply: %v (%s)", err, out)
+	}
+	if rep.Outcome.Evidence != protocol.EvidenceAdmitted {
+		t.Fatalf("Outcome.Evidence=%q, want %q", rep.Outcome.Evidence, protocol.EvidenceAdmitted)
+	}
+
+	// Human path on a FRESH serve (the fake stays busy after one submit):
+	// the evidence line must appear in the text output.
+	root2 := startServe(t)
+	code, out, errOut = cli(t, "", "submit", "fake", "--text", "say hi", "--root", root2)
+	if code != 0 {
+		t.Fatalf("human submit exit=%d out=%s err=%s", code, out, errOut)
+	}
+	if !strings.Contains(out, "evidence=admitted") {
+		t.Fatalf("human submit output missing evidence=admitted:\n%s", out)
+	}
+}
+
+// TestCLISubmitMinEvidenceUnsupportedExits6 pins that a min_evidence floor
+// refused by a weaker adapter maps to exit 6 (action-required / capability
+// mismatch), NOT exit 1 (failure). The caller must not take the "work failed"
+// recovery path for a capability mismatch.
+func TestCLISubmitMinEvidenceUnsupportedExits6(t *testing.T) {
+	root := startServe(t)
+	// The fake proves submit=admitted, so requiring admitted succeeds and
+	// requiring submitted also succeeds (admitted meets submitted). There is
+	// no CLI flag to swap the fake to a weaker adapter; the refusal-exit-6
+	// mapping is exercised at the core level
+	// (TestMinEvidenceFloorRefusesWeakerAdapter proves the refusal) and the
+	// exit-code mapping is ExitForCode(CodeUnsupported)=ExitActionRequired=6.
+	// Here we pin the positive: a met floor still exits 0 and prints evidence.
+	code, out, errOut := cli(t, "", "submit", "fake", "--text", "floored", "--min-evidence", "submitted", "--root", root)
+	if code != 0 {
+		t.Fatalf("met floor submit exit=%d, want 0 (out=%s err=%s)", code, out, errOut)
+	}
+	if !strings.Contains(out, "evidence=admitted") {
+		t.Fatalf("met-floor submit missing evidence=admitted:\n%s", out)
+	}
+	// Pin the exit-code mapping directly: unsupported is action-required (6).
+	if got := protocol.ExitForCode(protocol.CodeUnsupported); got != protocol.ExitActionRequired {
+		t.Fatalf("ExitForCode(unsupported)=%d, want %d", got, protocol.ExitActionRequired)
+	}
+}
+
+// TestCLISubmitPrintsAchievedEvidence pins the architect-review invariant:

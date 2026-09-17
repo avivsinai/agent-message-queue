@@ -38,6 +38,14 @@ type CrashPoint func(point string) error
 // ErrCrashed is returned by Handle when the crash hook fired.
 var ErrCrashed = errors.New("endpoint crashed at boundary")
 
+// ErrDrainIncomplete is returned by Close when the bounded shutdown drain
+// ended with publication obligations it could not discharge: a chained
+// revision was skipped (its attempt failed or the store was closed before it
+// could be adopted) or handlers were still in flight at the drain timeout.
+// The durable unpublished state is preserved for Reconcile recovery on the
+// next start; Close does NOT report the shutdown as clean.
+var ErrDrainIncomplete = errors.New("drain incomplete")
+
 // Crash boundary names, in the order the design lists them.
 const (
 	PointBeforeReceived    = "before:received_commit"
@@ -109,6 +117,15 @@ type Endpoint struct {
 	// it here and leave the work pending for the next Reconcile/Tick. The
 	// owner clears only its own entry on completion (611.22.48).
 	publishing map[requests.Key]bool
+	// pubPending records accepted-but-skipped publication requests per key:
+	// a publishLocked caller that hit publishing[key] coalesces its revision
+	// here (highest requested revision wins). The finishing publisher of that
+	// key — the single per-key owner — adopts the pending revision and
+	// republishes it BEFORE releasing its drain obligation, so every accepted
+	// revision is covered by exactly one obligation (its own in-flight
+	// attempt or the owner's chained attempt) and Close's drain waits for the
+	// whole chain (Astra B784-1, 611.22.48 follow-up round 2).
+	pubPending map[requests.Key]int64
 	// B13 lifecycle: state transitions accepting -> draining -> closed.
 	// inFlight counts handlers between entry (registerInFlight) and exit
 	// (releaseInFlight). drained is a condition variable Close waits on.
@@ -118,6 +135,16 @@ type Endpoint struct {
 	inFlight int
 	drained  *sync.Cond
 	drainTO  time.Duration
+	// drainObligations records, under e.mu, the highest undischarged pending
+	// publication revision for a key whose chained attempt was skipped (its
+	// continuation read failed, or the endpoint closed before adoption). It is
+	// per-key/per-revision, not a global latch: a later successful publication
+	// of that revision (or a strictly newer one) retires the entry, so Close
+	// reports an incomplete drain ONLY for obligations genuinely left
+	// unpublished (codex round-4 P2-1). A failed attempt of attemptRev itself
+	// is NOT an obligation: the attempt ran and was counted; the durable
+	// unpublished state persists for Reconcile recovery.
+	drainObligations map[requests.Key]int64
 }
 
 // Config configures New.
@@ -138,17 +165,19 @@ type Config struct {
 // Register; Reconcile should run before the first command.
 func New(cfg Config) *Endpoint {
 	e := &Endpoint{
-		store:          cfg.Store,
-		targets:        map[string]*target{},
-		publish:        cfg.Publish,
-		crash:          cfg.Crash,
-		now:            cfg.Now,
-		changed:        make(chan struct{}),
-		compactHorizon: cfg.CompactHorizon,
-		visible:        map[requests.Key]int64{},
-		publishing:     map[requests.Key]bool{},
-		state:          stateAccepting,
-		drainTO:        drainTimeout,
+		store:            cfg.Store,
+		targets:          map[string]*target{},
+		publish:          cfg.Publish,
+		crash:            cfg.Crash,
+		now:              cfg.Now,
+		changed:          make(chan struct{}),
+		compactHorizon:   cfg.CompactHorizon,
+		visible:          map[requests.Key]int64{},
+		publishing:       map[requests.Key]bool{},
+		pubPending:       map[requests.Key]int64{},
+		drainObligations: map[requests.Key]int64{},
+		state:            stateAccepting,
+		drainTO:          drainTimeout,
 	}
 	if cfg.DrainTimeout > 0 {
 		e.drainTO = cfg.DrainTimeout
@@ -235,10 +264,24 @@ func (e *Endpoint) Close() error {
 		}
 		delete(e.targets, id)
 	}
+	// Report undischarged publication obligations ONCE, then clear them:
+	// Close is terminal, so the durable unpublished state is left for
+	// Reconcile recovery on the next start regardless. The map is per-key so
+	// a later successful publication (this Close path or a concurrent
+	// Reconcile) that already retired an entry does not get re-reported
+	// (codex round-4 P2-1).
+	skipped := len(e.drainObligations)
+	e.drainObligations = map[requests.Key]int64{}
 	e.mu.Unlock()
 	err := e.store.Close()
 	if stale > 0 {
 		return fmt.Errorf("endpoint closed with %d handler(s) still in flight after %s drain timeout", stale, e.drainTO)
+	}
+	if skipped > 0 {
+		if err != nil {
+			return fmt.Errorf("%w (store close error: %v)", ErrDrainIncomplete, err)
+		}
+		return fmt.Errorf("%w: accepted revision(s) left unpublished (durable state preserved for Reconcile recovery)", ErrDrainIncomplete)
 	}
 	return err
 }
@@ -288,6 +331,19 @@ func (e *Endpoint) IsDraining() bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.state != stateAccepting
+}
+
+// IsDrainingState reports whether the endpoint is in the DRAINING state
+// specifically (not closed). This distinguishes 'Close is waiting on
+// in-flight handlers' from 'Close already set stateClosed and is past the
+// drain wait', which IsDraining conflates. Test seam for the 611.22.48
+// close-wait ordering regression: a test that releases a held publish after
+// observing IsDraining()==true must fail if what it actually observed was
+// stateClosed (Close raced past the drain without waiting).
+func (e *Endpoint) IsDrainingState() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.state == stateDraining
 }
 
 // Handle runs one validated command from an authenticated source and returns
@@ -610,6 +666,22 @@ func (e *Endpoint) admissibleLocked(targetID, epoch, notAfter, minEvidence strin
 		return nil, ""
 	}
 	return t, ""
+}
+
+// achievedEvidence returns the live session's submit evidence class for a
+// target, for the human projection on a submit reply (the machine contract
+// floor lives on SubmitInput). Empty when the target is nil or the session
+// carries no evidence projection (legacy/unknown adapter). Callers must NOT
+// hold e.mu when calling Inspect (it may lock the adapter).
+func achievedEvidence(t *target) string {
+	if t == nil {
+		return ""
+	}
+	s := t.att.Inspect()
+	if s.Evidence == nil {
+		return ""
+	}
+	return s.Evidence.Submit
 }
 
 func (e *Endpoint) unpersisted(rec *requests.Record, state protocol.State, code protocol.Code) protocol.Snapshot {
@@ -2029,8 +2101,9 @@ func (e *Endpoint) finishAdmissionLocked(rec *requests.Record, exists bool, t *t
 		}
 		snap := rec.Snapshot
 		e.mu.Unlock()
+		ev := achievedEvidence(t)
 		e.publishRevision(rec)
-		return protocol.Reply{Snapshot: snap, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: rec.Code}}, nil
+		return protocol.Reply{Snapshot: snap, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: rec.Code, Evidence: ev}}, nil
 	}
 	// The record was moved by a native event while Submit was in flight
 	// (the raced shape). RECONCILE from (adm, nerr, rec.State) — never branch
@@ -2059,8 +2132,9 @@ func (e *Endpoint) finishAdmissionLocked(rec *requests.Record, exists bool, t *t
 		}
 		snap := rec.Snapshot
 		e.mu.Unlock()
+		ev := achievedEvidence(t)
 		e.publishRevision(rec)
-		return protocol.Reply{Snapshot: snap, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: rec.Code}}, nil
+		return protocol.Reply{Snapshot: snap, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: rec.Code, Evidence: ev}}, nil
 	}
 	if rec.State == protocol.StateCancelled && !adm.Admitted && nerr == nil {
 		// B3: cancellation raced admission and never got metadata, and the
@@ -2090,8 +2164,9 @@ func (e *Endpoint) finishAdmissionLocked(rec *requests.Record, exists bool, t *t
 		}
 		snap := rec.Snapshot
 		e.mu.Unlock()
+		ev := achievedEvidence(t)
 		e.publishRevision(rec)
-		return protocol.Reply{Snapshot: snap, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: rec.Code}}, nil
+		return protocol.Reply{Snapshot: snap, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: rec.Code, Evidence: ev}}, nil
 	}
 	// Default: return the durable snapshot. Outcome.Code is read from rec.Code
 	// so snapshot.Code == outcome.Code always (Pro #4).
@@ -2287,6 +2362,21 @@ func (e *Endpoint) notifyLocked(rec *requests.Record) {
 	e.changed = make(chan struct{})
 }
 
+// retireObligationLocked clears any undischarged drain obligation for key
+// whose recorded revision is <= publishedRev. MarkPublished is a high-water
+// mark, so confirming publishedRev covers every earlier pending revision too.
+// Called on EVERY path that confirms the durable publication high-water mark:
+// the fresh-delivery exit, the marker-only retry path, and the already-published
+// branch (codex round-5 P2: marker-only recovery must retire the obligation,
+// else Close reports ErrDrainIncomplete for a record that is fully published).
+// The caller holds e.mu. Never clears an unrelated key or a strictly higher
+// revision (a higher pending obligation survives a lower confirmed publish).
+func (e *Endpoint) retireObligationLocked(key requests.Key, publishedRev int64) {
+	if ob, ok := e.drainObligations[key]; ok && ob <= publishedRev {
+		delete(e.drainObligations, key)
+	}
+}
+
 // publishLocked publishes the latest revision and records it on success.
 // Failures leave published_revision behind so Reconcile retries.
 func (e *Endpoint) publishLocked(rec *requests.Record) {
@@ -2301,6 +2391,13 @@ func (e *Endpoint) publishLocked(rec *requests.Record) {
 	}
 	if cur.PublishedRevision >= rec.Revision {
 		rec.PublishedRevision = cur.PublishedRevision
+		// codex round-5 P2: a prior successful publication already discharged
+		// this revision (or a strictly newer one). Retire any obligation for
+		// this key that the durable high-water mark has covered, so a later
+		// Close does not report ErrDrainIncomplete for a fully-published
+		// record (the obligation was recorded when an earlier chained attempt
+		// skipped, then Reconcile published it via a different caller).
+		e.retireObligationLocked(key, cur.PublishedRevision)
 		return
 	}
 	// 611.22.48: visible means CONFIRMED DELIVERY awaiting its marker. If a
@@ -2309,70 +2406,181 @@ func (e *Endpoint) publishLocked(rec *requests.Record) {
 	// MarkPublished below — the marker may need retrying (Pro r2 #13). An
 	// IN-FLIGHT attempt is tracked separately in `publishing`; it does NOT
 	// count as delivered.
-	if e.visible[key] < rec.Revision {
-		// Serialize per-key publication: if another caller is already
-		// publishing this key, leave the work pending for the next
-		// Reconcile/Tick. Per-key serialization prevents two concurrent
-		// publishes for the same key without holding the global endpoint mutex.
-		if e.publishing[key] {
+	if e.visible[key] >= rec.Revision {
+		// Marker retry path (Pro r2 #13): this revision was already delivered
+		// (confirmed, awaiting its marker). Skip the DELIVERY (no double
+		// delivery) and retry only the marker, honoring the crash points so
+		// a lost marker stays lost within one simulated crash.
+		if e.crashAt(PointAfterPublish) != nil || e.crashAt(PointBeforePublished) != nil {
 			return
 		}
-		if e.crashAt(PointBeforePublish) != nil {
-			return
+		if err := e.store.MarkPublished(key, rec.Revision); err == nil {
+			rec.PublishedRevision = rec.Revision
+			if e.visible[key] == rec.Revision {
+				delete(e.visible, key)
+			}
+			// codex round-5 P2: marker-only recovery (a prior delivery's marker
+			// write failed, Reconcile retries only the marker) must also retire
+			// the obligation. Without this, Close reports ErrDrainIncomplete
+			// although the durable record is now fully published.
+			e.retireObligationLocked(key, rec.Revision)
 		}
-		// Claim the in-flight slot for THIS key. Only the owner clears it (on
-		// success or failure), so a concurrent caller's reservation is never
-		// clobbered. visible is advanced ONLY on a successful publish.
-		e.publishing[key] = true
-		// Account for the accepted publication work in the bounded shutdown
-		// drain: the publish runs OUTSIDE e.mu (the expensive maildir open +
-		// fsync must not block other keys), but inFlight makes Close's drain
-		// wait for the publish window so a successful publish can always reach
-		// MarkPublished (store not closed mid-publish).
-		e.inFlight++
-		snap := rec.Snapshot
-		origin := rec.Origin
-		attemptRev := rec.Revision
-		e.mu.Unlock()
+		return
+	}
+	// Serialize per-key publication: if another caller is already
+	// publishing this key, coalesce this caller's revision into the
+	// pending obligation set (max-revision semantics, not a call count)
+	// and return. This prevents two concurrent publishes for the same
+	// key without holding the global endpoint mutex (611.22.48 P1-2)
+	// while guaranteeing the skipped revision is still covered by
+	// exactly one drain obligation (Astra B784-1): the finishing
+	// publisher — the single per-key owner — adopts the pending set and
+	// republishes before its drain obligation is released. Outside a
+	// shutdown drain the next Tick/Reconcile would also retry it, but
+	// registering the obligation uniformly keeps the invariant in every
+	// state. Coalescing by highest requested revision avoids duplicate
+	// same-revision deliveries (Astra round-2 P1-2).
+	if e.publishing[key] {
+		if rec.Revision > e.pubPending[key] {
+			e.pubPending[key] = rec.Revision
+		}
+		return
+	}
+	if e.crashAt(PointBeforePublish) != nil {
+		return
+	}
+	// Claim the in-flight slot for THIS key. Only the owner clears it (on
+	// success or failure), so a concurrent caller's reservation is never
+	// clobbered. visible is advanced ONLY on a successful publish.
+	e.publishing[key] = true
+	// 611.22.48 (2nd NO-GO): account for the accepted publication work in
+	// the bounded shutdown drain. The publish runs OUTSIDE e.mu (the
+	// expensive maildir open + fsync must not block other keys), but Close
+	// must not observe zero handlers, close the store, and return while
+	// publication is still running — a successful publish could not then
+	// MarkPublished (store closed), leaving a duplicate on restart.
+	// Incrementing inFlight here makes Close's drain wait for the publish
+	// window, preserving the unlocked publisher.
+	e.inFlight++
+	snap := rec.Snapshot
+	origin := rec.Origin
+	attemptRev := rec.Revision
+	e.mu.Unlock()
 
+	// publish ONE revision outside e.mu, then loop while skipped newer
+	// revisions exist. The drain obligation (inFlight) and the per-key
+	// publishing ownership are held CONTINUOUSLY across the whole chain —
+	// there is no unlock gap with zero drain count in which Close could
+	// observe "nothing in flight" and close the store (Astra round-2
+	// P1-1). Single iterative owner, no recursive re-entry (Astra
+	// round-2 P1-2).
+	for {
 		pubErr := e.publish(snap, origin)
 
 		e.mu.Lock()
-		// Release the publication in-flight count (wake Close if it was the
-		// last entry draining).
-		e.inFlight--
-		if e.inFlight == 0 && e.state == stateDraining {
-			e.drained.Broadcast()
-		}
-		// Clear only OUR in-flight claim. We are the sole owner of this entry
-		// (publishing serialized per key), so a concurrent caller's reservation
-		// is never clobbered.
-		delete(e.publishing, key)
-		if pubErr != nil {
-			// Publication failed: do NOT advance visible/PublishedRevision. The
-			// next Reconcile retries the delivery (visible[key] was never set,
-			// so the revision is still owed). No double-delivery risk on retry.
-			return
-		}
-		// Confirmed delivery. Advance visible to our attempt revision (a
-		// concurrent successful publish for a later revision is impossible
-		// here — publishing serialized per key).
-		if e.visible[key] < attemptRev {
+		// Success bookkeeping for THIS attempt BEFORE selecting the next
+		// obligation, so the coalescing check below sees the delivery
+		// state (Astra round-2 P1-2). A failed attempt does NOT advance
+		// visible/PublishedRevision; the durable unpublished state is
+		// preserved for Reconcile recovery (Astra round-2 answer 3).
+		if pubErr == nil && e.visible[key] < attemptRev {
 			e.visible[key] = attemptRev
 		}
-	}
-	// Marker retry path (Pro r2 #13): whether this call just delivered the
-	// revision or a prior call did (visible[key] >= rec.Revision), the marker
-	// may still be owed. Re-delivery is prevented by the visible guard above;
-	// only the MarkPublished is retried here.
-	if e.crashAt(PointAfterPublish) != nil || e.crashAt(PointBeforePublished) != nil {
-		return
-	}
-	if err := e.store.MarkPublished(key, rec.Revision); err == nil {
-		rec.PublishedRevision = rec.Revision
-		if e.visible[key] == rec.Revision {
-			delete(e.visible, key)
+		// Select the next obligation: the highest revision coalesced by
+		// concurrent callers while we owned this key. A FAILED attempt does
+		// not retry the same revision (no spin loop) but still adopts a
+		// strictly NEWER accepted revision under the same owner: dropping the
+		// r+1 obligation because r failed would leave r+1 uncovered by any
+		// drain count and let Close return nil with it unpublished (codex
+		// round-3 P1). Reconcile/Tick owns retrying the failed revision
+		// itself (beginReconcile still refuses during drain, so the durable
+		// unpublished state simply persists for recovery after close).
+		pendingRev := e.pubPending[key]
+		delete(e.pubPending, key)
+		var next *requests.Record
+		if pendingRev > attemptRev && e.state != stateClosed {
+			// Re-read the newest durable record. A store read failure leaves
+			// next nil; the exit path reports the skipped obligation via
+			// drainIncomplete so Close does not return a clean nil.
+			e.mu.Unlock()
+			if cur, ok, gerr := e.store.Get(key); gerr == nil && ok {
+				next = cur
+			}
+			e.mu.Lock()
+			// Close may have exhausted its drain timeout and set stateClosed
+			// WHILE we were unlocked for the read: do not start a new chained
+			// attempt against a closed store (codex round-3 P2). An already
+			// running publisher is never cancelled; only a NEW attempt is
+			// suppressed here.
+			if e.state == stateClosed {
+				next = nil
+			}
 		}
+		if next == nil {
+			// Chain complete (nothing pending beyond this attempt, the store
+			// lost the record, or the endpoint closed): release the drain
+			// obligation and per-key ownership, wake Close, return. If a
+			// coalesced NEWER revision was NOT discharged (strictly greater
+			// than attemptRev: its continuation read failed or the endpoint
+			// closed before adoption), record it so Close reports an
+			// incomplete drain instead of silently returning nil (codex
+			// round-3 P1). A failed attempt of attemptRev ITSELF is NOT an
+			// undischarged obligation: the attempt ran and was counted; the
+			// durable unpublished state persists for Reconcile recovery (the
+			// contract-corpus Q18 restart flow relies on Close returning nil
+			// there).
+			if pendingRev > attemptRev {
+				// Record the highest undischarged pending revision for this
+				// key. A later successful publication of pendingRev (or a
+				// strictly newer revision) retires this entry in the
+				// MarkPublished success path below or in a later Reconcile,
+				// so Close reports incomplete ONLY if it remains genuinely
+				// unpublished (codex round-4 P2-1: the previous global
+				// drainIncomplete latch could be set while stateAccepting
+				// and never cleared by a later successful publish).
+				if e.drainObligations[key] < pendingRev {
+					e.drainObligations[key] = pendingRev
+				}
+			}
+			e.inFlight--
+			if e.inFlight == 0 && e.state == stateDraining {
+				e.drained.Broadcast()
+			}
+			delete(e.publishing, key)
+			// publishLocked returns HOLDING e.mu (its callers rely on
+			// that), so no unlock here.
+			// Marker for the LAST attempted revision (chained revisions
+			// included): MarkPublished is a high-water mark, so marking
+			// attemptRev covers every earlier revision in the chain and
+			// advances PublishedRevision past rec.Revision. Only on
+			// SUCCESS: a failed attempt must not advance the marker (the
+			// durable unpublished state stays for Reconcile recovery).
+			if pubErr == nil && e.crashAt(PointAfterPublish) == nil && e.crashAt(PointBeforePublished) == nil {
+				if err := e.store.MarkPublished(key, attemptRev); err == nil {
+					if rec.PublishedRevision < attemptRev {
+						rec.PublishedRevision = attemptRev
+					}
+					if e.visible[key] == attemptRev {
+						delete(e.visible, key)
+					}
+					// Retire any undischarged obligation for this key that
+					// this successful publication (or a strictly newer
+					// chained attempt) has now discharged. MarkPublished is
+					// a high-water mark, so attemptRev covers every earlier
+					// pending revision too (codex round-4 P2-1: a later
+					// successful publish must clear a previously-recorded
+					// skipped obligation rather than leave a stale latch).
+					e.retireObligationLocked(key, attemptRev)
+				}
+			}
+			return
+		}
+		// Adopt the pending revision and publish it while STILL holding the
+		// inFlight obligation and publishing[key] ownership.
+		attemptRev = next.Revision
+		snap = next.Snapshot
+		origin = next.Origin
+		e.mu.Unlock()
 	}
 }
 
