@@ -551,6 +551,7 @@ type SpoolReceipt struct {
 	MinEvidence string `json:"min_evidence,omitempty"` // floor, unevaluated until drain
 	Reason      string `json:"reason"`                 // "endpoint_unreachable" or "duplicate_conflict"
 	CreatedAt   string `json:"created_at"`             // persist time
+	LastError   string `json:"last_error,omitempty"`   // round-3 B6: refusal code for failed envelopes
 }
 
 // Receipt builds a SpoolReceipt from an envelope. The state is always pending:
@@ -570,6 +571,7 @@ func (env *Envelope) Receipt(reason string) SpoolReceipt {
 		InputDigest: env.InputDigest,
 		CreatedAt:   env.CreatedAt,
 		Reason:      reason,
+		LastError:   env.LastError,
 	}
 	return r
 }

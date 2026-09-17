@@ -654,7 +654,7 @@ func status(args []string) (any, int, error) {
 		// caller the truth (pending/dispatched/expired/failed).
 		if isEndpointUnreachable(err) || isNotFound(err) {
 			if spoolReceipt, ok := lookupSpoolStatus(stateDir, pos[0]); ok {
-				return spoolReceipt, protocol.ExitSuccess, nil
+				return spoolReceipt, exitForSpoolReceipt(spoolReceipt), nil
 			}
 		}
 		return nil, 0, err
@@ -786,25 +786,43 @@ func listRequests(args []string) (any, int, error) {
 	for _, r := range recs {
 		out = append(out, r.Snapshot)
 	}
-	// B6: include pending spool envelopes that have no request-store record
-	// yet (submit persisted while the companion was down). These show as
-	// sender-side SpoolReceipts so the caller sees the truth.
+	// B6: include ALL spool envelopes (pending, failed, expired, dispatched)
+	// that have no request-store record yet, with their actual terminal state
+	// and last_error. Submit persisted while the companion was down; the
+	// caller must see failures, not just pending. Dedup against existing
+	// records so the same request doesn't appear twice.
 	if spool, err := sender.Open(stateDir); err == nil {
 		if envs, err := spool.List(); err == nil {
+			seen := make(map[string]bool, len(recs))
+			for _, r := range recs {
+				seen[r.RequestID] = true
+			}
 			for _, env := range envs {
-				if env.State == sender.StatePending {
-					out = append(out, protocol.Snapshot{
-						Schema:      "sender_submitted",
-						RequestID:   env.RequestID,
-						CreatorHost: env.CreatorHost,
-						TargetID:    env.TargetID,
-						Epoch:       env.Epoch,
-						State:       protocol.StateReceived, // pending in spool
-						InputDigest: env.InputDigest,
-						NotAfter:    env.NotAfter,
-						ObservedAt:  env.CreatedAt,
-					})
+				if seen[env.RequestID] {
+					continue
 				}
+				state := protocol.StateReceived
+				switch env.State {
+				case sender.StateFailed:
+					state = protocol.StateFailed
+				case sender.StateDispatched:
+					state = protocol.StateDispatching
+				}
+				snap := protocol.Snapshot{
+					Schema:      "sender_submitted",
+					RequestID:   env.RequestID,
+					CreatorHost: env.CreatorHost,
+					TargetID:    env.TargetID,
+					Epoch:       env.Epoch,
+					State:       state,
+					InputDigest: env.InputDigest,
+					NotAfter:    env.NotAfter,
+					ObservedAt:  env.CreatedAt,
+				}
+				if env.LastError != "" {
+					snap.Code = protocol.Code(env.LastError)
+				}
+				out = append(out, snap)
 			}
 		}
 	}
@@ -908,24 +926,53 @@ func isNotFound(err error) bool {
 	return errors.As(err, &r) && r.Code == protocol.CodeNotFound
 }
 
-// lookupSpoolStatus checks the sender spool for a request ref and returns a
-// SpoolReceipt describing the envelope's state. Returns (zero, false) when
-// no envelope matches. B6: status and requests consult the spool when no
-// record exists in the request store.
-func lookupSpoolStatus(stateDir, ref string) (sender.SpoolReceipt, bool) {
-	creatorHost, _, requestID, err := protocol.DecodeRef(ref)
-	if err != nil {
-		return sender.SpoolReceipt{}, false
+// lookupSpoolStatus checks the sender spool for a request ref OR a raw
+// request ID and returns a SpoolReceipt describing the envelope's state.
+// B6 (round-3): status accepts the envelope id directly (--request-id or
+// positional) because B3 stopped minting refs for spooled submits. Returns
+// (zero, false) when no envelope matches.
+func lookupSpoolStatus(stateDir, refOrID string) (sender.SpoolReceipt, bool) {
+	var creatorHost, requestID string
+	if h, _, id, err := protocol.DecodeRef(refOrID); err == nil {
+		creatorHost, requestID = h, id
+	} else {
+		// Not a ref — treat as a raw request ID and scan the spool.
+		requestID = refOrID
 	}
 	spool, err := sender.Open(stateDir)
 	if err != nil {
 		return sender.SpoolReceipt{}, false
 	}
-	env, exists, err := spool.Get(creatorHost, requestID)
-	if err != nil || !exists {
+	if creatorHost != "" {
+		env, exists, err := spool.Get(creatorHost, requestID)
+		if err != nil || !exists {
+			return sender.SpoolReceipt{}, false
+		}
+		return env.Receipt("spool_lookup"), true
+	}
+	// No creator host: scan all envelopes for the request ID.
+	envs, err := spool.List()
+	if err != nil {
 		return sender.SpoolReceipt{}, false
 	}
-	return env.Receipt("spool_lookup"), true
+	for _, env := range envs {
+		if env.RequestID == requestID {
+			return env.Receipt("spool_lookup"), true
+		}
+	}
+	return sender.SpoolReceipt{}, false
+}
+
+// exitForSpoolReceipt maps a spool envelope state to an exit code. A
+// pending/dispatched envelope is success (the work is in flight). A
+// failed/expired envelope is ExitError: native work did not happen and the
+// caller takes the failure path (round-3 B6).
+func exitForSpoolReceipt(r sender.SpoolReceipt) int {
+	switch r.State {
+	case sender.StateFailed:
+		return protocol.ExitError
+	}
+	return protocol.ExitSuccess
 }
 
 // exitForState maps a spool-side state to the exit code for a `submitted`

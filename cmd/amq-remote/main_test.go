@@ -794,3 +794,119 @@ func TestSenderB7FailedReaped(t *testing.T) {
 		t.Fatal("B5: failed envelope survived reap")
 	}
 }
+
+// TestCLIB6RequestsListsFailedEnvelopes (round-3) pins B6: `requests` must
+// list ALL spool envelope states (pending + failed), not just pending. A
+// failure is invisible in the old code. RED when the StatePending filter is
+// restored.
+func TestCLIB6RequestsListsFailedEnvelopes(t *testing.T) {
+	root, err := os.MkdirTemp("", "amqb6")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	stateDir := filepath.Join(root, "extensions", "remote")
+	// Create the request store directory so OpenReadOnly succeeds.
+	if err := os.MkdirAll(filepath.Join(stateDir, "v1", "requests"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	spool, err := sender.Open(stateDir)
+	if err != nil {
+		t.Fatalf("sender open: %v", err)
+	}
+	now := time.Now()
+	pendingCmd := &protocol.Command{
+		Schema: protocol.SchemaCommand, Op: protocol.OpRequestSubmit,
+		RequestID: "11111111-1111-4111-8111-11111111b601",
+		TargetID:  "fake", Epoch: "e_1",
+		NotAfter: protocol.FormatTime(now.Add(2 * time.Minute)),
+		Input:    &protocol.SubmitInput{Text: "pending"},
+	}
+	failedCmd := &protocol.Command{
+		Schema: protocol.SchemaCommand, Op: protocol.OpRequestSubmit,
+		RequestID: "11111111-1111-4111-8111-11111111b602",
+		TargetID:  "fake", Epoch: "e_1",
+		NotAfter: protocol.FormatTime(now.Add(2 * time.Minute)),
+		Input:    &protocol.SubmitInput{Text: "failed"},
+	}
+	for _, cmd := range []*protocol.Command{pendingCmd, failedCmd} {
+		env := &sender.Envelope{
+			RequestID: cmd.RequestID, CreatorHost: "local", TargetID: "fake",
+			Epoch: cmd.Epoch, NotAfter: cmd.NotAfter, Command: cmd,
+			Destination: "ipc:/tmp/state",
+		}
+		if err := spool.Create(env); err != nil {
+			t.Fatalf("create %s: %v", cmd.RequestID, err)
+		}
+	}
+	// Mark the second envelope as failed.
+	if err := spool.MarkFailed(sender.Key{CreatorHost: "local", RequestID: failedCmd.RequestID}, string(protocol.CodeStaleEpoch)); err != nil {
+		t.Fatalf("mark failed: %v", err)
+	}
+
+	// requests (no serve running) must list BOTH the pending and the failed.
+	code, out, _ := cli(t, "", "requests", "--root", root, "--json")
+	if code != 0 {
+		t.Fatalf("requests exit=%d out=%s", code, out)
+	}
+	if !strings.Contains(out, pendingCmd.RequestID) {
+		t.Fatalf("requests did not list pending envelope: %s", out)
+	}
+	if !strings.Contains(out, failedCmd.RequestID) {
+		t.Fatalf("requests did not list failed envelope (B6: only pending listed): %s", out)
+	}
+	if !strings.Contains(out, string(protocol.CodeStaleEpoch)) {
+		t.Fatalf("requests did not include last_error for failed envelope: %s", out)
+	}
+}
+
+// TestCLIB6StatusFailedEnvelopeExitsOne (round-3) pins B6: `status` on a
+// failed spool envelope must print last_error and exit 1 (ExitError), not 0.
+// It accepts a raw request ID (no ref — B3 stopped minting refs). RED when
+// exitForSpoolReceipt is removed (always ExitSuccess).
+func TestCLIB6StatusFailedEnvelopeExitsOne(t *testing.T) {
+	root, err := os.MkdirTemp("", "amqb6s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	stateDir := filepath.Join(root, "extensions", "remote")
+	spool, err := sender.Open(stateDir)
+	if err != nil {
+		t.Fatalf("sender open: %v", err)
+	}
+	now := time.Now()
+	cmd := &protocol.Command{
+		Schema: protocol.SchemaCommand, Op: protocol.OpRequestSubmit,
+		RequestID: "11111111-1111-4111-8111-11111111b610",
+		TargetID:  "fake", Epoch: "e_1",
+		NotAfter: protocol.FormatTime(now.Add(2 * time.Minute)),
+		Input:    &protocol.SubmitInput{Text: "stale"},
+	}
+	env := &sender.Envelope{
+		RequestID: cmd.RequestID, CreatorHost: "local", TargetID: "fake",
+		Epoch: cmd.Epoch, NotAfter: cmd.NotAfter, Command: cmd,
+		Destination: "ipc:/tmp/state",
+	}
+	if err := spool.Create(env); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := spool.MarkFailed(sender.Key{CreatorHost: "local", RequestID: cmd.RequestID}, string(protocol.CodeStaleEpoch)); err != nil {
+		t.Fatalf("mark failed: %v", err)
+	}
+
+	// status with raw request ID (no ref): exit 1, last_error present.
+	code, out, _ := cli(t, "", "status", cmd.RequestID, "--root", root, "--json")
+	if code != protocol.ExitError {
+		t.Fatalf("status failed envelope exit=%d, want %d (ExitError) out=%s", code, protocol.ExitError, out)
+	}
+	if !strings.Contains(out, string(protocol.CodeStaleEpoch)) {
+		t.Fatalf("status did not print last_error: %s", out)
+	}
+}
