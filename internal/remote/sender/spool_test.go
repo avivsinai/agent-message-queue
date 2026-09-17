@@ -488,3 +488,90 @@ func TestSenderB2BusySettlesAsRefusal(t *testing.T) {
 		t.Fatalf("busy: last_error=%s, want %s", got.LastError, protocol.CodeBusy)
 	}
 }
+
+// TestSenderB7PersistBeforeDispatch (round-3) proves the envelope is durable
+// on disk BEFORE the endpoint's Handle is called. The CLI test observes the
+// spool after submit returns, so ordering is invisible; round 1's exact
+// inversion (persist after dispatch via a deferred create) and a second
+// literal reorder both left the suite green.
+//
+// FIX: a test dispatcher that records whether the envelope file existed at
+// Handle call time. RED on a deferred-create inversion (Create moved after
+// the Handle call).
+func TestSenderB7PersistBeforeDispatch(t *testing.T) {
+	now := time.Now()
+	clock := func() time.Time { return now }
+	spool := newTestSpool(t, clock)
+	cmd := testCommand(validUUID(0), "fake", "e_1", protocol.FormatTime(now.Add(2*time.Minute)))
+	env := &Envelope{
+		RequestID:   cmd.RequestID,
+		CreatorHost: "local",
+		TargetID:    "fake",
+		Epoch:       cmd.Epoch,
+		NotAfter:    cmd.NotAfter,
+		Command:     cmd,
+		Destination: "ipc:/tmp/state",
+	}
+
+	// dispatchCheck records whether the envelope file existed when Handle
+	// was called.
+	type dispatchCheck struct {
+		existedAtHandle bool
+		checked         bool
+	}
+	dc := &dispatchCheck{}
+	fd := &checkingDispatcher{
+		check: func() {
+			dc.checked = true
+			path := filepath.Join(spool.Dir(), env.CreatorHost+"__"+env.RequestID+".json")
+			if _, err := os.Stat(path); err == nil {
+				dc.existedAtHandle = true
+			}
+		},
+	}
+
+	// Persist, then drain. The drainer calls Handle; the dispatcher checks
+	// the file exists at that moment.
+	if err := spool.Create(env); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	d := NewDrainer(spool, fd, clock)
+	n, err := d.Drain(context.Background())
+	if err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("drained n=%d, want 1", n)
+	}
+	if !dc.checked {
+		t.Fatal("dispatcher was never called")
+	}
+	if !dc.existedAtHandle {
+		t.Fatal("B7: envelope file did NOT exist at Handle call time (persist-after-dispatch inversion)")
+	}
+}
+
+// checkingDispatcher wraps a callback that fires before Handle returns a
+// success reply. It lets a test observe state at the dispatch boundary.
+type checkingDispatcher struct {
+	check func()
+}
+
+func (c *checkingDispatcher) Handle(cmd *protocol.Command, src core.Source) (any, error) {
+	c.check()
+	return protocol.Reply{
+		Snapshot: protocol.Snapshot{
+			Schema:      protocol.SchemaRequest,
+			RequestRef:  protocol.EncodeRef(src.Host, cmd.TargetID, cmd.RequestID),
+			RequestID:   cmd.RequestID,
+			CreatorHost: src.Host,
+			TargetID:    cmd.TargetID,
+			Epoch:       cmd.Epoch,
+			Revision:    1,
+			State:       protocol.StateDispatching,
+			InputDigest: protocol.CommandDigest(cmd),
+			NotAfter:    cmd.NotAfter,
+			ObservedAt:  protocol.FormatTime(time.Now()),
+		},
+	}, nil
+}
