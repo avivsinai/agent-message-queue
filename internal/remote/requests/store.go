@@ -161,6 +161,14 @@ func WithClock(now func() time.Time) Option {
 	return func(s *Store) { s.now = now }
 }
 
+// MaxStoreBytes returns the aggregate quota in bytes (0 = unbounded).
+// Tests use this to assert that openServeStore wired DefaultMaxStoreBytes.
+func (s *Store) MaxStoreBytes() int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.maxStoreBytes
+}
+
 // WithMaxStoreBytes sets the aggregate quota across every record in this
 // store (611.22.19 BK4). Zero disables the aggregate quota. Production sets
 // protocol.DefaultMaxStoreBytes; tests shrink it. The quota is enforced on
@@ -196,15 +204,14 @@ func Open(stateDir string, opts ...Option) (*Store, error) {
 	// work. A failure to sum is non-fatal: the quota stays enforced per-write
 	// via the size-aware accounting in write; only the seed is approximate.
 	if s.maxStoreBytes > 0 {
-		if used, err := s.sumUsed(); err == nil {
+		// Round-4 fold: one walk sums used AND reseeds reservations for
+		// non-terminal records with no result (received, dispatching,
+		// running). After a restart, running records hold nothing in memory;
+		// without reseeding, fresh submits are admitted into their room and
+		// their results are refused after the work ran.
+		if used, err := s.sumUsed(true); err == nil {
 			s.used = used
 		}
-		// Round-2 B3 (restart): reseed reserved for every non-terminal record
-		// that has no result yet (received, dispatching, running). After a
-		// restart, running records hold nothing in memory; without reseeding,
-		// fresh submits are admitted into their room and their results are
-		// refused after the work ran.
-		s.reseedReservations()
 	}
 	return s, nil
 }
@@ -851,11 +858,16 @@ func (s *Store) releaseReservationLocked(key Key) {
 }
 
 // sumUsed walks the record tree and returns the total bytes of all record
-// files. It is the seed for the aggregate-quota accounting at Open (611.22.19
-// BK4); per-write deltas keep it current afterward. Read errors on individual
-// files are skipped (a vanished file contributes zero), mirroring List's
-// poison isolation.
-func (s *Store) sumUsed() (int64, error) {
+// files. It is the seed for the aggregate-quota accounting at Open
+// (611.22.19 BK4); per-write deltas keep it current afterward. Read errors
+// on individual files are skipped (a vanished file contributes zero),
+// mirroring List's poison isolation.
+//
+// Round-4 fold: reseedReservations is folded into this walk so Open does ONE
+// filepath.Walk + JSON-decode pass, not two. When reseed is true, every
+// non-terminal record with no result reserves MaxRecordBytes.
+func (s *Store) sumUsed(reseed ...bool) (int64, error) {
+	doReseed := len(reseed) > 0 && reseed[0]
 	var total int64
 	base := filepath.Join(s.dir, requestsDir)
 	err := filepath.Walk(base, func(path string, info os.FileInfo, err error) error {
@@ -869,47 +881,25 @@ func (s *Store) sumUsed() (int64, error) {
 			return nil
 		}
 		total += info.Size()
+		if doReseed {
+			rec, _, rErr := s.readRecord(path)
+			if rErr != nil || rec == nil {
+				return nil // skip poison records
+			}
+			if !rec.State.Terminal() && rec.Result == nil {
+				k := Key{CreatorHost: rec.CreatorHost, TargetID: rec.TargetID, RequestID: rec.RequestID}
+				if _, exists := s.reservedKeys[k]; !exists {
+					s.reserved += int64(MaxRecordBytes)
+					s.reservedKeys[k] = int64(MaxRecordBytes)
+				}
+			}
+		}
 		return nil
 	})
 	if err != nil && !os.IsNotExist(err) {
 		return 0, err
 	}
 	return total, nil
-}
-
-// reseedReservations (round-2 B3 restart) walks every record and reserves
-// MaxRecordBytes for each non-terminal record that has no result yet
-// (received, dispatching, running). After a restart, running records hold
-// nothing in memory; without reseeding, fresh submits are admitted into
-// their room and their results are refused after the work ran. This is
-// called from Open inside the same walk sumUsed already does.
-func (s *Store) reseedReservations() {
-	base := filepath.Join(s.dir, requestsDir)
-	_ = filepath.Walk(base, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			if os.IsNotExist(err) {
-				return nil
-			}
-			return nil // non-fatal: a poison record is skipped
-		}
-		if info.IsDir() || !strings.HasSuffix(path, recordSuffix) {
-			return nil
-		}
-		rec, _, rErr := s.readRecord(path)
-		if rErr != nil || rec == nil {
-			return nil // skip poison records
-		}
-		// Reserve for non-terminal records with no result: the work is in
-		// flight and its result write will need room.
-		if !rec.State.Terminal() && rec.Result == nil {
-			k := Key{CreatorHost: rec.CreatorHost, TargetID: rec.TargetID, RequestID: rec.RequestID}
-			if _, exists := s.reservedKeys[k]; !exists {
-				s.reserved += int64(MaxRecordBytes)
-				s.reservedKeys[k] = int64(MaxRecordBytes)
-			}
-		}
-		return nil
-	})
 }
 
 // Reserve reserves bytes of store capacity for key before dispatch

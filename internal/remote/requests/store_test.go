@@ -348,43 +348,38 @@ func fmtID(i int) string {
 }
 
 // TestBK4B1RaceCompactVsAck exercises the race the round-1 review confirmed
-// (611.22.19 BK4 round-2 B1): CompactOne and MarkAcknowledged mutate s.used
+// (611.22.19 BK4 B1): CompactOne and MarkAcknowledged mutate s.used
 // concurrently. Before the fix, CompactOne ran with no store lock while
 // MarkAcknowledged held it; a lost += drifted the quota counter. This test
-// is semantic (NEW 2, round-3): it runs N concurrent CompactOne vs
-// MarkAcknowledged rounds and asserts used equals a fresh recomputation of
-// the on-disk sum. It catches the lost update WITHOUT -race and stays under
-// 5s (modeled on requests/lost_update_regression_test.go).
+// is semantic (round-4): it collides CompactOne and MarkAcknowledged on the
+// SAME key for 200 rounds (modeled on lost_update_regression_test.go:18) and
+// asserts used equals a fresh recomputation of the on-disk sum. It catches
+// the lost update WITHOUT -race and stays under 5s.
 func TestBK4B1RaceCompactVsAck(t *testing.T) {
-	s, err := Open(t.TempDir(), WithClock(fixedClock), WithMaxStoreBytes(64*1024*1024))
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	defer func() { _ = s.Close() }()
-
-	const rounds = 20
-	for r := 0; r < rounds; r++ {
-		compactKey := Key{"hostA", "t_fake1", fmt.Sprintf("11111111-1111-4111-8111-11111111%04d", r*2+10)}
-		ackKey := Key{"hostA", "t_fake1", fmt.Sprintf("11111111-1111-4111-8111-11111111%04d", r*2+11)}
-		for _, k := range []Key{compactKey, ackKey} {
-			rec := newRecord(k.RequestID)
-			if err := s.Create(rec); err != nil {
-				t.Fatalf("create %s: %v", k.RequestID, err)
-			}
-			rec.Revision, rec.State = 2, protocol.StateDispatching
-			if err := s.Update(rec); err != nil {
-				t.Fatalf("dispatching %s: %v", k.RequestID, err)
-			}
-			rec.Revision, rec.State = 3, protocol.StateCompleted
-			rec.Result = &protocol.Result{Text: "done"}
-			rec.ObservedAt = "2026-09-01T00:00:00Z"
-			rec.AckDigest = protocol.EvidenceDigest(rec.Result)
-			if err := s.Update(rec); err != nil {
-				t.Fatalf("completed %s: %v", k.RequestID, err)
-			}
-			if err := s.MarkPublished(k, 3); err != nil {
-				t.Fatalf("mark published %s: %v", k.RequestID, err)
-			}
+	const rounds = 200
+	for round := 0; round < rounds; round++ {
+		s, err := Open(t.TempDir(), WithClock(fixedClock), WithMaxStoreBytes(64*1024*1024))
+		if err != nil {
+			t.Fatalf("round %d: open: %v", round, err)
+		}
+		k := Key{"hostA", "t_fake1", fmt.Sprintf("11111111-1111-4111-8111-11111111%04d", round)}
+		rec := newRecord(k.RequestID)
+		if err := s.Create(rec); err != nil {
+			t.Fatalf("round %d: create: %v", round, err)
+		}
+		rec.Revision, rec.State = 2, protocol.StateDispatching
+		if err := s.Update(rec); err != nil {
+			t.Fatalf("round %d: dispatching: %v", round, err)
+		}
+		rec.Revision, rec.State = 3, protocol.StateCompleted
+		rec.Result = &protocol.Result{Text: "done"}
+		rec.ObservedAt = "2026-09-01T00:00:00Z"
+		rec.AckDigest = protocol.EvidenceDigest(rec.Result)
+		if err := s.Update(rec); err != nil {
+			t.Fatalf("round %d: completed: %v", round, err)
+		}
+		if err := s.MarkPublished(k, 3); err != nil {
+			t.Fatalf("round %d: mark published: %v", round, err)
 		}
 
 		cutoff := fixedClock()
@@ -392,26 +387,26 @@ func TestBK4B1RaceCompactVsAck(t *testing.T) {
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
-			if _, err := s.CompactOne(compactKey, cutoff); err != nil {
-				t.Errorf("CompactOne: %v", err)
+			if _, err := s.CompactOne(k, cutoff); err != nil {
+				t.Errorf("round %d: CompactOne: %v", round, err)
 			}
 		}()
 		go func() {
 			defer wg.Done()
-			if err := s.MarkAcknowledged(ackKey); err != nil {
-				t.Errorf("MarkAcknowledged: %v", err)
+			if err := s.MarkAcknowledged(k); err != nil {
+				t.Errorf("round %d: MarkAcknowledged: %v", round, err)
 			}
 		}()
 		wg.Wait()
-	}
 
-	// used must be stable and correct: after N concurrent rounds, the in-memory
-	// counter must equal a fresh recomputation of the on-disk sum. A lost
-	// update (CompactOne without s.mu) drifts this counter. This assertion is
-	// semantic — it catches the bug WITHOUT -race.
-	want, _ := s.sumUsed()
-	if got := s.used; got != want {
-		t.Fatalf("used drifted after %d rounds: got %d want %d (race lost an update)", rounds, got, want)
+		// used must be correct after each round: the in-memory counter must
+		// equal a fresh recomputation of the on-disk sum. A lost update
+		// (CompactOne without s.mu) drifts this counter.
+		want, _ := s.sumUsed()
+		if got := s.used; got != want {
+			t.Fatalf("round %d: used drifted: got %d want %d (race lost an update)", round, got, want)
+		}
+		_ = s.Close()
 	}
 }
 

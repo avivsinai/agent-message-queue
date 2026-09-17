@@ -319,6 +319,12 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 			ep.Register(att)
 		}
 	}
+	// Reconcile AFTER SetPublish + Register + attachments are wired.
+	// The startup sweep sees the live target map and real publisher.
+	if err := ep.Reconcile(); err != nil {
+		_ = ep.Close()
+		return 0, fmt.Errorf("reconcile: %w", err)
+	}
 	server, err := ipc.Listen(stateDir, ep)
 	if err != nil {
 		_ = ep.Close()
@@ -749,11 +755,12 @@ func replyRouterFor(root string) amqio.ReplyRouter {
 }
 
 // openServeStore builds the store and endpoint with exactly the defaults
-// serve uses (DefaultMaxStoreBytes, DefaultCompactHorizon) and runs
-// Reconcile. It is extracted from serve so a test can exercise the SHIPPED
-// wiring (NEW 1, round-3): deleting the quota or horizon wiring from this
-// function must fail TestBK4ServeWiringCompactionNonVacuous. The publish
-// callback is nil; serve calls ep.SetPublish after creating the carrier.
+// serve uses (DefaultMaxStoreBytes, DefaultCompactHorizon). It is extracted
+// from serve so a test can exercise the SHIPPED wiring (round-3 NEW 1):
+// deleting the quota or horizon wiring from this function must fail
+// TestBK4ServeWiringCompactionNonVacuous. Reconcile is NOT called here;
+// serve calls it after SetPublish + Register + attachments are wired
+// (round-4 P0: running it here marks every running record attachment_lost).
 func openServeStore(stateDir string, now func() time.Time) (*requests.Store, *core.Endpoint, error) {
 	store, err := requests.Open(stateDir, requests.WithMaxStoreBytes(protocol.DefaultMaxStoreBytes))
 	if err != nil {
@@ -767,9 +774,11 @@ func openServeStore(stateDir string, now func() time.Time) (*requests.Store, *co
 		cfg.Now = now
 	}
 	ep := core.New(cfg)
-	if err := ep.Reconcile(); err != nil {
-		_ = store.Close()
-		return nil, nil, fmt.Errorf("reconcile: %w", err)
-	}
+	// NOTE: Reconcile is NOT called here. It runs in serve AFTER
+	// SetPublish + Register + attachments are wired, so the startup
+	// sweep sees the live target map and real publisher. Calling it
+	// here (before SetPublish/carrier) marks every running record
+	// attachment_lost and loses the first reconcile revision to a
+	// no-op publisher (611.22.19 round-4 P0).
 	return store, ep, nil
 }

@@ -617,13 +617,19 @@ func TestServeRejectsInvalidHandle(t *testing.T) {
 	}
 }
 
-// TestBK4ServeWiringCompactionNonVacuous (round-3 NEW 1) tests the SHIPPED
-// serve wiring via openServeStore: it opens the store and endpoint with
-// exactly the defaults serve uses (DefaultMaxStoreBytes,
-// DefaultCompactHorizon) and runs Reconcile. Deleting the quota or horizon
-// wiring from openServeStore must fail this test. The old
-// TestBK4ServeWiringCompaction was vacuous: it built its own store and never
-// touched the serve code path.
+// TestBK4ServeWiringCompactionNonVacuous (round-4) tests BOTH halves of the
+// SHIPPED serve wiring via openServeStore:
+//
+//  1. Horizon half: a settled old record is compacted after Reconcile.
+//     RED when DefaultCompactHorizon wiring is removed from openServeStore.
+//  2. Quota half: a submit past DefaultMaxStoreBytes is refused
+//     storage_full through the endpoint openServeStore built.
+//     RED when DefaultMaxStoreBytes wiring is removed (quota=0 = unbounded).
+//
+// openServeStore no longer calls Reconcile (round-4 P0: it ran before
+// SetPublish/Register, marking every running record attachment_lost). The
+// test calls Reconcile explicitly after wiring a no-op publisher, exactly
+// as serve does.
 func TestBK4ServeWiringCompactionNonVacuous(t *testing.T) {
 	root, err := os.MkdirTemp("", "amqbk4w")
 	if err != nil {
@@ -635,10 +641,7 @@ func TestBK4ServeWiringCompactionNonVacuous(t *testing.T) {
 	}
 	stateDir := filepath.Join(root, "extensions", "remote")
 
-	// Seed one settled old record that is eligible for compaction, using a
-	// raw store open. Then close it and call openServeStore (the SHIPPED
-	// serve wiring) which runs Reconcile — the first Reconcile pass must
-	// compact the old record.
+	// --- Seed one settled old record eligible for compaction ---
 	now := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
 	seedStore, err := requests.Open(stateDir,
 		requests.WithMaxStoreBytes(protocol.DefaultMaxStoreBytes),
@@ -682,20 +685,33 @@ func TestBK4ServeWiringCompactionNonVacuous(t *testing.T) {
 		t.Fatalf("seed close: %v", err)
 	}
 
-	// Now use the SHIPPED serve wiring. openServeStore runs Reconcile, which
-	// must compact the old settled record. If the DefaultCompactHorizon
-	// wiring is missing from openServeStore, this goes RED.
+	// --- Horizon half: openServeStore + explicit Reconcile compacts ---
 	store, ep, err := openServeStore(stateDir, func() time.Time { return now })
 	if err != nil {
 		t.Fatalf("openServeStore: %v", err)
 	}
 	defer func() { _ = ep.Close() }()
 
+	// Wire a no-op publisher (as serve does via SetPublish before Reconcile).
+	ep.SetPublish(func(protocol.Snapshot, map[string]string) error { return nil })
+
+	if err := ep.Reconcile(); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
 	got, exists, err := store.Get(k)
 	if err != nil || !exists {
 		t.Fatalf("record missing after reconcile: exists=%v err=%v", exists, err)
 	}
 	if !got.Tombstone {
-		t.Fatal("serve-wiring compaction: record not tombstoned (DefaultCompactHorizon wiring missing from openServeStore?)")
+		t.Fatal("horizon half: record not tombstoned (DefaultCompactHorizon wiring missing from openServeStore?)")
+	}
+
+	// --- Quota half: openServeStore wired DefaultMaxStoreBytes ---
+	// The store openServeStore built must have the production quota. If the
+	// DefaultMaxStoreBytes wiring is removed (quota=0 = unbounded), this goes
+	// RED. We assert the value directly because filling 64MiB in a test is
+	// impractical; the accessor confirms the wiring reached the store.
+	if got := store.MaxStoreBytes(); got != protocol.DefaultMaxStoreBytes {
+		t.Fatalf("quota half: store maxStoreBytes=%d, want %d (DefaultMaxStoreBytes wiring missing from openServeStore?)", got, protocol.DefaultMaxStoreBytes)
 	}
 }

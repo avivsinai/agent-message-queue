@@ -2390,9 +2390,10 @@ func (e *Endpoint) publishLocked(rec *requests.Record) {
 		snap := rec.Snapshot
 		origin := rec.Origin
 		attemptRev := rec.Revision
+		pub := e.publish // read under e.mu (SetPublish writes under it)
 		e.mu.Unlock()
 
-		pubErr := e.publish(snap, origin)
+		pubErr := pub(snap, origin)
 
 		e.mu.Lock()
 		// Release the publication in-flight count (wake Close if it was the
