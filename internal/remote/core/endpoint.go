@@ -163,6 +163,19 @@ func New(cfg Config) *Endpoint {
 	return e
 }
 
+// SetPublish replaces the publisher after construction. Serve uses this
+// to break the circular dependency between the carrier and the endpoint:
+// openServeStore creates the endpoint with a nil publish, then serve wires
+// the carrier in once it exists.
+func (e *Endpoint) SetPublish(p Publisher) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if p == nil {
+		p = func(protocol.Snapshot, map[string]string) error { return nil }
+	}
+	e.publish = p
+}
+
 // Observe registers a callback for every record write. Tests use it to
 // collect state history; production uses it for the activity ring.
 func (e *Endpoint) Observe(fn func(*requests.Record)) {

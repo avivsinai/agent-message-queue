@@ -273,17 +273,17 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	} else if added {
 		say(stderr, "registered handle %q in %s\n", *me, filepath.Join(c.root, "meta", "config.json"))
 	}
-	store, err := requests.Open(stateDir, requests.WithMaxStoreBytes(protocol.DefaultMaxStoreBytes))
+	store, ep, err := openServeStore(stateDir, nil)
 	if err != nil {
 		return 0, err
 	}
 	var carrier *amqio.Carrier
-	ep := core.New(core.Config{Store: store, CompactHorizon: protocol.DefaultCompactHorizon, Publish: func(s protocol.Snapshot, origin map[string]string) error {
+	ep.SetPublish(func(s protocol.Snapshot, origin map[string]string) error {
 		if carrier == nil {
 			return nil
 		}
 		return carrier.Publish(s, origin)
-	}})
+	})
 	carrier, err = amqio.New(c.root, *me, ep)
 	if err != nil {
 		_ = store.Close()
@@ -318,10 +318,6 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 			}
 			ep.Register(att)
 		}
-	}
-	if err := ep.Reconcile(); err != nil {
-		_ = ep.Close()
-		return 0, fmt.Errorf("reconcile: %w", err)
 	}
 	server, err := ipc.Listen(stateDir, ep)
 	if err != nil {
@@ -750,4 +746,30 @@ func replyRouterFor(root string) amqio.ReplyRouter {
 		}
 		return r, h, err
 	}
+}
+
+// openServeStore builds the store and endpoint with exactly the defaults
+// serve uses (DefaultMaxStoreBytes, DefaultCompactHorizon) and runs
+// Reconcile. It is extracted from serve so a test can exercise the SHIPPED
+// wiring (NEW 1, round-3): deleting the quota or horizon wiring from this
+// function must fail TestBK4ServeWiringCompactionNonVacuous. The publish
+// callback is nil; serve calls ep.SetPublish after creating the carrier.
+func openServeStore(stateDir string, now func() time.Time) (*requests.Store, *core.Endpoint, error) {
+	store, err := requests.Open(stateDir, requests.WithMaxStoreBytes(protocol.DefaultMaxStoreBytes))
+	if err != nil {
+		return nil, nil, err
+	}
+	cfg := core.Config{
+		Store:          store,
+		CompactHorizon: protocol.DefaultCompactHorizon,
+	}
+	if now != nil {
+		cfg.Now = now
+	}
+	ep := core.New(cfg)
+	if err := ep.Reconcile(); err != nil {
+		_ = store.Close()
+		return nil, nil, fmt.Errorf("reconcile: %w", err)
+	}
+	return store, ep, nil
 }

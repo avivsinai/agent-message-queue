@@ -199,6 +199,12 @@ func Open(stateDir string, opts ...Option) (*Store, error) {
 		if used, err := s.sumUsed(); err == nil {
 			s.used = used
 		}
+		// Round-2 B3 (restart): reseed reserved for every non-terminal record
+		// that has no result yet (received, dispatching, running). After a
+		// restart, running records hold nothing in memory; without reseeding,
+		// fresh submits are admitted into their room and their results are
+		// refused after the work ran.
+		s.reseedReservations()
 	}
 	return s, nil
 }
@@ -869,6 +875,41 @@ func (s *Store) sumUsed() (int64, error) {
 		return 0, err
 	}
 	return total, nil
+}
+
+// reseedReservations (round-2 B3 restart) walks every record and reserves
+// MaxRecordBytes for each non-terminal record that has no result yet
+// (received, dispatching, running). After a restart, running records hold
+// nothing in memory; without reseeding, fresh submits are admitted into
+// their room and their results are refused after the work ran. This is
+// called from Open inside the same walk sumUsed already does.
+func (s *Store) reseedReservations() {
+	base := filepath.Join(s.dir, requestsDir)
+	_ = filepath.Walk(base, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return nil // non-fatal: a poison record is skipped
+		}
+		if info.IsDir() || !strings.HasSuffix(path, recordSuffix) {
+			return nil
+		}
+		rec, _, rErr := s.readRecord(path)
+		if rErr != nil || rec == nil {
+			return nil // skip poison records
+		}
+		// Reserve for non-terminal records with no result: the work is in
+		// flight and its result write will need room.
+		if !rec.State.Terminal() && rec.Result == nil {
+			k := Key{CreatorHost: rec.CreatorHost, TargetID: rec.TargetID, RequestID: rec.RequestID}
+			if _, exists := s.reservedKeys[k]; !exists {
+				s.reserved += int64(MaxRecordBytes)
+				s.reservedKeys[k] = int64(MaxRecordBytes)
+			}
+		}
+		return nil
+	})
 }
 
 // Reserve reserves bytes of store capacity for key before dispatch

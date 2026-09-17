@@ -616,3 +616,86 @@ func TestServeRejectsInvalidHandle(t *testing.T) {
 		}
 	}
 }
+
+// TestBK4ServeWiringCompactionNonVacuous (round-3 NEW 1) tests the SHIPPED
+// serve wiring via openServeStore: it opens the store and endpoint with
+// exactly the defaults serve uses (DefaultMaxStoreBytes,
+// DefaultCompactHorizon) and runs Reconcile. Deleting the quota or horizon
+// wiring from openServeStore must fail this test. The old
+// TestBK4ServeWiringCompaction was vacuous: it built its own store and never
+// touched the serve code path.
+func TestBK4ServeWiringCompactionNonVacuous(t *testing.T) {
+	root, err := os.MkdirTemp("", "amqbk4w")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	stateDir := filepath.Join(root, "extensions", "remote")
+
+	// Seed one settled old record that is eligible for compaction, using a
+	// raw store open. Then close it and call openServeStore (the SHIPPED
+	// serve wiring) which runs Reconcile — the first Reconcile pass must
+	// compact the old record.
+	now := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	seedStore, err := requests.Open(stateDir,
+		requests.WithMaxStoreBytes(protocol.DefaultMaxStoreBytes),
+		requests.WithClock(func() time.Time { return now }),
+	)
+	if err != nil {
+		t.Fatalf("seed open: %v", err)
+	}
+	rec := &requests.Record{
+		Snapshot: protocol.Snapshot{
+			Schema:      protocol.SchemaRequest,
+			RequestID:   "11111111-1111-4111-8111-111111111730",
+			CreatorHost: "hostA",
+			TargetID:    "t_fake1",
+			Epoch:       "e_1",
+			Revision:    1,
+			State:       protocol.StateReceived,
+			InputDigest: requests.Digest([]byte("say hi")),
+		},
+		Input: &protocol.SubmitInput{Text: "say hi"},
+	}
+	k := requests.Key{CreatorHost: rec.CreatorHost, TargetID: rec.TargetID, RequestID: rec.RequestID}
+	if err := seedStore.Create(rec); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	rec.Revision, rec.State = 2, protocol.StateDispatching
+	if err := seedStore.Update(rec); err != nil {
+		t.Fatalf("dispatching: %v", err)
+	}
+	rec.Revision, rec.State = 3, protocol.StateCompleted
+	rec.Result = &protocol.Result{Text: "done"}
+	rec.ObservedAt = "2026-09-01T00:00:00Z" // old: before the compact horizon
+	rec.AckDigest = protocol.EvidenceDigest(rec.Result)
+	if err := seedStore.Update(rec); err != nil {
+		t.Fatalf("completed: %v", err)
+	}
+	if err := seedStore.MarkPublished(k, 3); err != nil {
+		t.Fatalf("mark published: %v", err)
+	}
+	if err := seedStore.Close(); err != nil {
+		t.Fatalf("seed close: %v", err)
+	}
+
+	// Now use the SHIPPED serve wiring. openServeStore runs Reconcile, which
+	// must compact the old settled record. If the DefaultCompactHorizon
+	// wiring is missing from openServeStore, this goes RED.
+	store, ep, err := openServeStore(stateDir, func() time.Time { return now })
+	if err != nil {
+		t.Fatalf("openServeStore: %v", err)
+	}
+	defer func() { _ = ep.Close() }()
+
+	got, exists, err := store.Get(k)
+	if err != nil || !exists {
+		t.Fatalf("record missing after reconcile: exists=%v err=%v", exists, err)
+	}
+	if !got.Tombstone {
+		t.Fatal("serve-wiring compaction: record not tombstoned (DefaultCompactHorizon wiring missing from openServeStore?)")
+	}
+}

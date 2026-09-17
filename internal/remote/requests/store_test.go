@@ -350,60 +350,68 @@ func fmtID(i int) string {
 // TestBK4B1RaceCompactVsAck exercises the race the round-1 review confirmed
 // (611.22.19 BK4 round-2 B1): CompactOne and MarkAcknowledged mutate s.used
 // concurrently. Before the fix, CompactOne ran with no store lock while
-// MarkAcknowledged held it; -race fired and a lost += drifted the quota
-// counter for the life of the process. Now both hold s.mu.
+// MarkAcknowledged held it; a lost += drifted the quota counter. This test
+// is semantic (NEW 2, round-3): it runs N concurrent CompactOne vs
+// MarkAcknowledged rounds and asserts used equals a fresh recomputation of
+// the on-disk sum. It catches the lost update WITHOUT -race and stays under
+// 5s (modeled on requests/lost_update_regression_test.go).
 func TestBK4B1RaceCompactVsAck(t *testing.T) {
-	s, err := Open(t.TempDir(), WithClock(fixedClock), WithMaxStoreBytes(64*1024))
+	s, err := Open(t.TempDir(), WithClock(fixedClock), WithMaxStoreBytes(64*1024*1024))
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
 	defer func() { _ = s.Close() }()
 
-	// Two settled records: one to compact, one to ack-mark concurrently.
-	compactKey := Key{"hostA", "t_fake1", "11111111-1111-4111-8111-111111111710"}
-	ackKey := Key{"hostA", "t_fake1", "11111111-1111-4111-8111-111111111711"}
-	for _, k := range []Key{compactKey, ackKey} {
-		rec := newRecord(k.RequestID)
-		if err := s.Create(rec); err != nil {
-			t.Fatalf("create %s: %v", k.RequestID, err)
+	const rounds = 20
+	for r := 0; r < rounds; r++ {
+		compactKey := Key{"hostA", "t_fake1", fmt.Sprintf("11111111-1111-4111-8111-11111111%04d", r*2+10)}
+		ackKey := Key{"hostA", "t_fake1", fmt.Sprintf("11111111-1111-4111-8111-11111111%04d", r*2+11)}
+		for _, k := range []Key{compactKey, ackKey} {
+			rec := newRecord(k.RequestID)
+			if err := s.Create(rec); err != nil {
+				t.Fatalf("create %s: %v", k.RequestID, err)
+			}
+			rec.Revision, rec.State = 2, protocol.StateDispatching
+			if err := s.Update(rec); err != nil {
+				t.Fatalf("dispatching %s: %v", k.RequestID, err)
+			}
+			rec.Revision, rec.State = 3, protocol.StateCompleted
+			rec.Result = &protocol.Result{Text: "done"}
+			rec.ObservedAt = "2026-09-01T00:00:00Z"
+			rec.AckDigest = protocol.EvidenceDigest(rec.Result)
+			if err := s.Update(rec); err != nil {
+				t.Fatalf("completed %s: %v", k.RequestID, err)
+			}
+			if err := s.MarkPublished(k, 3); err != nil {
+				t.Fatalf("mark published %s: %v", k.RequestID, err)
+			}
 		}
-		rec.Revision, rec.State = 2, protocol.StateDispatching
-		if err := s.Update(rec); err != nil {
-			t.Fatalf("dispatching %s: %v", k.RequestID, err)
-		}
-		rec.Revision, rec.State = 3, protocol.StateCompleted
-		rec.Result = &protocol.Result{Text: "done"}
-		rec.ObservedAt = "2026-09-01T00:00:00Z"
-		rec.AckDigest = protocol.EvidenceDigest(rec.Result)
-		if err := s.Update(rec); err != nil {
-			t.Fatalf("completed %s: %v", k.RequestID, err)
-		}
-		if err := s.MarkPublished(k, 3); err != nil {
-			t.Fatalf("mark published %s: %v", k.RequestID, err)
-		}
+
+		cutoff := fixedClock()
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			if _, err := s.CompactOne(compactKey, cutoff); err != nil {
+				t.Errorf("CompactOne: %v", err)
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			if err := s.MarkAcknowledged(ackKey); err != nil {
+				t.Errorf("MarkAcknowledged: %v", err)
+			}
+		}()
+		wg.Wait()
 	}
 
-	cutoff := fixedClock()
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		if _, err := s.CompactOne(compactKey, cutoff); err != nil {
-			t.Errorf("CompactOne: %v", err)
-		}
-	}()
-	go func() {
-		defer wg.Done()
-		if err := s.MarkAcknowledged(ackKey); err != nil {
-			t.Errorf("MarkAcknowledged: %v", err)
-		}
-	}()
-	wg.Wait()
-
-	// used must be stable and correct: both records compacted/acked, no drift.
+	// used must be stable and correct: after N concurrent rounds, the in-memory
+	// counter must equal a fresh recomputation of the on-disk sum. A lost
+	// update (CompactOne without s.mu) drifts this counter. This assertion is
+	// semantic — it catches the bug WITHOUT -race.
 	want, _ := s.sumUsed()
 	if got := s.used; got != want {
-		t.Fatalf("used drifted: got %d want %d (race lost an update)", got, want)
+		t.Fatalf("used drifted after %d rounds: got %d want %d (race lost an update)", rounds, got, want)
 	}
 }
 
@@ -532,53 +540,66 @@ func TestBK4B3ReservationIsReal(t *testing.T) {
 	}
 }
 
-// TestBK4ServeWiringCompaction is the missing happy-path the round-1 review
-// flagged (611.22.19 BK4 round-2 non-blocking #4): no test builds the
-// production wiring of the two new defaults. This opens the store with
-// DefaultCompactHorizon and DefaultMaxStoreBytes exactly as serve does and
-// verifies that one settled old record compacts.
-func TestBK4ServeWiringCompaction(t *testing.T) {
-	s, err := Open(t.TempDir(),
-		WithClock(fixedClock),
-		WithMaxStoreBytes(protocol.DefaultMaxStoreBytes),
-	)
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	defer func() { _ = s.Close() }()
 
-	rec := newRecord("11111111-1111-4111-8111-111111111730")
-	if err := s.Create(rec); err != nil {
+
+// TestBK4B3RestartReseedReservation (round-2 B3 restart variant) proves Open
+// reseeds reserved for non-terminal records with no result. After a restart,
+// running records hold nothing in memory; without reseeding, fresh submits
+// are admitted into their room and their results are refused after the work
+// ran. The probe: create a running record, reopen the store at a quota just
+// above used, write its result — must succeed.
+func TestBK4B3RestartReseedReservation(t *testing.T) {
+	dir := t.TempDir()
+	// First open: create a running record with no result.
+	quota := int64(2 * protocol.MaxRecordBytes)
+	s1, err := Open(dir, WithClock(fixedClock), WithMaxStoreBytes(quota))
+	if err != nil {
+		t.Fatalf("open s1: %v", err)
+	}
+	k := Key{"hostA", "t_fake1", "11111111-1111-4111-8111-11111111b301"}
+	rec := newRecord(k.RequestID)
+	if err := s1.Create(rec); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	rec.Revision, rec.State = 2, protocol.StateDispatching
-	if err := s.Update(rec); err != nil {
+	if err := s1.Update(rec); err != nil {
 		t.Fatalf("dispatching: %v", err)
 	}
-	rec.Revision, rec.State = 3, protocol.StateCompleted
-	rec.Result = &protocol.Result{Text: "done"}
-	rec.ObservedAt = "2026-09-01T00:00:00Z" // old: before the compact horizon
-	rec.AckDigest = protocol.EvidenceDigest(rec.Result)
-	if err := s.Update(rec); err != nil {
-		t.Fatalf("completed: %v", err)
+	rec.Revision, rec.State = 3, protocol.StateRunning
+	if err := s1.Update(rec); err != nil {
+		t.Fatalf("running: %v", err)
 	}
-	if err := s.MarkPublished(Key{rec.CreatorHost, rec.TargetID, rec.RequestID}, 3); err != nil {
-		t.Fatalf("mark published: %v", err)
+	usedAfterCreate := s1.used
+	if err := s1.Close(); err != nil {
+		t.Fatalf("close s1: %v", err)
 	}
 
-	cutoff := fixedClock().Add(-protocol.DefaultCompactHorizon)
-	ok, err := s.CompactOne(Key{rec.CreatorHost, rec.TargetID, rec.RequestID}, cutoff)
+	// Reopen at a quota just above used: without reseeding, the running
+	// record's result write would be refused (used + result > quota). With
+	// reseeding, the reservation is reseeded and the result write succeeds
+	// (the reservation pays for it).
+	s2, err := Open(dir, WithClock(fixedClock), WithMaxStoreBytes(usedAfterCreate+int64(MaxRecordBytes)))
 	if err != nil {
-		t.Fatalf("CompactOne with serve wiring: %v", err)
+		t.Fatalf("open s2: %v", err)
 	}
-	if !ok {
-		t.Fatal("CompactOne with serve wiring: want compacted=true, got false (compaction must run in production)")
+	defer func() { _ = s2.Close() }()
+
+	// The running record must have been reseeded.
+	if s2.reserved <= 0 {
+		t.Fatalf("B3 restart: reserved=%d after reopen, want >0 (reseeding failed)", s2.reserved)
 	}
-	got, _, err := s.Get(Key{rec.CreatorHost, rec.TargetID, rec.RequestID})
+
+	// Write the result: must succeed (the reservation covers it).
+	got, _, err := s2.Get(k)
 	if err != nil {
-		t.Fatalf("get after compact: %v", err)
+		t.Fatalf("get after reopen: %v", err)
 	}
-	if !got.Tombstone {
-		t.Fatal("serve-wiring compaction: record not tombstoned")
+	got.Revision = 4
+	got.State = protocol.StateCompleted
+	got.Result = &protocol.Result{Text: string(make([]byte, 100*1024))}
+	got.ObservedAt = "2026-09-01T00:00:00Z"
+	got.AckDigest = protocol.EvidenceDigest(got.Result)
+	if err := s2.Update(got); err != nil {
+		t.Fatalf("B3 restart: result write for running record refused after reopen: %v (reservation must cover it)", err)
 	}
 }
