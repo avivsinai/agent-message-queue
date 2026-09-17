@@ -2044,8 +2044,8 @@ func (e *Endpoint) finishAdmissionLocked(rec *requests.Record, exists bool, t *t
 			return protocol.Reply{}, err
 		}
 		snap := rec.Snapshot
-		ev := achievedEvidence(t)
 		e.mu.Unlock()
+		ev := achievedEvidence(t)
 		e.publishRevision(rec)
 		return protocol.Reply{Snapshot: snap, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: rec.Code, Evidence: ev}}, nil
 	}
@@ -2075,8 +2075,8 @@ func (e *Endpoint) finishAdmissionLocked(rec *requests.Record, exists bool, t *t
 			return protocol.Reply{}, err
 		}
 		snap := rec.Snapshot
-		ev := achievedEvidence(t)
 		e.mu.Unlock()
+		ev := achievedEvidence(t)
 		e.publishRevision(rec)
 		return protocol.Reply{Snapshot: snap, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: rec.Code, Evidence: ev}}, nil
 	}
@@ -2107,8 +2107,8 @@ func (e *Endpoint) finishAdmissionLocked(rec *requests.Record, exists bool, t *t
 			return protocol.Reply{}, err
 		}
 		snap := rec.Snapshot
-		ev := achievedEvidence(t)
 		e.mu.Unlock()
+		ev := achievedEvidence(t)
 		e.publishRevision(rec)
 		return protocol.Reply{Snapshot: snap, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: rec.Code, Evidence: ev}}, nil
 	}
