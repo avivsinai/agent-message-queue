@@ -196,6 +196,9 @@ func printHuman(w io.Writer, out any) {
 		if v.Outcome.Code != "" {
 			say(w, "outcome=%s\n", v.Outcome.Code)
 		}
+		if v.Outcome.Evidence != "" {
+			say(w, "evidence=%s\n", v.Outcome.Evidence)
+		}
 		if v.Outcome.Disposition != "" {
 			say(w, "cancel=%s\n", v.Outcome.Disposition)
 		}
