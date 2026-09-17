@@ -13,17 +13,30 @@ import (
 )
 
 // fakeDispatcher is a test Dispatcher that records Handle calls and can be
-// toggled between unreachable (returns CodeEndpointUnreachable) and accepting
-// (returns a running snapshot). It does NOT exercise the real endpoint.
+// toggled between unreachable (returns CodeEndpointUnreachable), accepting
+// (returns a running snapshot), and refusing (returns a Reply with a
+// refusal Outcome.Code and nil error, exactly as the real endpoint does).
+// It returns protocol.Reply VALUES, not pointers — matching the real
+// Endpoint.Handle return type, which the pointer assertion in classifyReply
+// never matched (round-3 B2 dead code).
 type fakeDispatcher struct {
-	calls   int
-	failing bool
+	calls      int
+	failing    bool
+	refuseCode protocol.Code // if non-empty, return a refusal Reply with this code
 }
 
 func (f *fakeDispatcher) Handle(cmd *protocol.Command, src core.Source) (any, error) {
 	f.calls++
 	if f.failing {
 		return nil, protocol.Refuse(protocol.CodeEndpointUnreachable, "no endpoint")
+	}
+	if f.refuseCode != "" {
+		return protocol.Reply{
+			Outcome: protocol.Outcome{
+				Op:   protocol.OpRequestSubmit,
+				Code: f.refuseCode,
+			},
+		}, nil
 	}
 	return protocol.Reply{
 		Snapshot: protocol.Snapshot{
@@ -377,5 +390,101 @@ func TestSenderOfflineEnqueueNoRetarget(t *testing.T) {
 	}
 	if _, err := os.Stat(name); err != nil {
 		t.Fatalf("envelope file not on disk: %v", err)
+	}
+}
+
+// TestSenderB2RefusalClassification (round-3) is the core B2 regression: the
+// drainer must classify refusals by Outcome.Code from a protocol.Reply VALUE
+// (not a pointer assertion). Before the fix, classifyReply used
+// reply.(*protocol.Reply) which never matched — every refusal became
+// MarkDispatched. This test goes RED when the value-type assertion is
+// reverted to a pointer assertion.
+//
+// Three cases in one test:
+//  1. stale_epoch: drains to failed/stale_epoch (not dispatched)
+//  2. unsupported: --min-evidence floor at drain → failed/unsupported
+//  3. expired: expiry straddle → failed/expired with zero records
+func TestSenderB2RefusalClassification(t *testing.T) {
+	cases := []struct {
+		name string
+		code protocol.Code
+	}{
+		{"stale_epoch", protocol.CodeStaleEpoch},
+		{"unsupported", protocol.CodeUnsupported},
+		{"expired", protocol.CodeExpired},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			now := time.Now()
+			clock := func() time.Time { return now }
+			spool := newTestSpool(t, clock)
+			cmd := testCommand(validUUID(0), "fake", "e_stale", protocol.FormatTime(now.Add(2*time.Minute)))
+			env := &Envelope{
+				RequestID:   cmd.RequestID,
+				CreatorHost: "local",
+				TargetID:    "fake",
+				Epoch:       cmd.Epoch,
+				NotAfter:    cmd.NotAfter,
+				Command:     cmd,
+				Destination: "ipc:/tmp/state",
+			}
+			if err := spool.Create(env); err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			fd := &fakeDispatcher{refuseCode: tc.code}
+			d := NewDrainer(spool, fd, clock)
+			n, err := d.Drain(context.Background())
+			if err != nil {
+				t.Fatalf("Drain: %v", err)
+			}
+			if n != 1 {
+				t.Fatalf("drained n=%d, want 1", n)
+			}
+			got, _, _ := spool.Get("local", cmd.RequestID)
+			if got.State != StateFailed {
+				t.Fatalf("%s: state=%s, want failed (refusal classified as success — B2 dead code)", tc.name, got.State)
+			}
+			if got.LastError != string(tc.code) {
+				t.Fatalf("%s: last_error=%s, want %s", tc.name, got.LastError, tc.code)
+			}
+		})
+	}
+}
+
+// TestSenderB2BusySettlesAsRefusal (round-3 item 4): busy=reject must NOT be
+// transient. The ADR expressly refuses busy=queue in v1. A busy refusal
+// settles as failed, not pending-for-replay.
+func TestSenderB2BusySettlesAsRefusal(t *testing.T) {
+	now := time.Now()
+	clock := func() time.Time { return now }
+	spool := newTestSpool(t, clock)
+	cmd := testCommand(validUUID(0), "fake", "e_1", protocol.FormatTime(now.Add(2*time.Minute)))
+	env := &Envelope{
+		RequestID:   cmd.RequestID,
+		CreatorHost: "local",
+		TargetID:    "fake",
+		Epoch:       cmd.Epoch,
+		NotAfter:    cmd.NotAfter,
+		Command:     cmd,
+		Destination: "ipc:/tmp/state",
+	}
+	if err := spool.Create(env); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	fd := &fakeDispatcher{refuseCode: protocol.CodeBusy}
+	d := NewDrainer(spool, fd, clock)
+	n, err := d.Drain(context.Background())
+	if err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("drained n=%d, want 1", n)
+	}
+	got, _, _ := spool.Get("local", cmd.RequestID)
+	if got.State != StateFailed {
+		t.Fatalf("busy: state=%s, want failed (busy must settle as refusal, not queue)", got.State)
+	}
+	if got.LastError != string(protocol.CodeBusy) {
+		t.Fatalf("busy: last_error=%s, want %s", got.LastError, protocol.CodeBusy)
 	}
 }

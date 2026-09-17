@@ -124,20 +124,23 @@ func classifyReply(reply any, herr error) protocol.Code {
 	if reply == nil {
 		return ""
 	}
-	// The endpoint returns a *protocol.Reply; extract its Outcome.Code.
-	if rep, ok := reply.(*protocol.Reply); ok && rep != nil {
+	// The endpoint returns a protocol.Reply VALUE (not a pointer);
+	// extract its Outcome.Code. A pointer assertion never matches
+	// (round-3 B2: dead code — every refusal became MarkDispatched).
+	if rep, ok := reply.(protocol.Reply); ok {
 		return rep.Outcome.Code
 	}
 	return ""
 }
 
 // isTransientCode reports whether a dispatch outcome code is worth retrying.
+// Busy is NOT transient (round-3 item 4): busy=reject settles as a refusal
+// per the ADR; replay only via explicit user resubmit, never automatic.
 func isTransientCode(code protocol.Code) bool {
 	switch code {
 	case protocol.CodeDraining,
 		protocol.CodeEndpointUnreachable,
-		protocol.CodeStorageFull,
-		protocol.CodeBusy:
+		protocol.CodeStorageFull:
 		return true
 	}
 	return false
