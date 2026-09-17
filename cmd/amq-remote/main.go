@@ -549,7 +549,7 @@ func submit(args []string, stdin io.Reader) (any, int, error) {
 		}
 		if isEndpointUnreachable(derr) {
 			// The intent is persisted; the caller is told `submitted`, not
-		// an error. The drainer replays after restart. B3: the receipt is a
+			// an error. The drainer replays after restart. B3: the receipt is a
 			// sender-side SpoolReceipt, not a fabricated Snapshot.
 			return env.Receipt("endpoint_unreachable"), protocol.ExitSuccess, nil
 		}

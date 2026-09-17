@@ -539,18 +539,18 @@ func validateEnvelope(env *Envelope) error {
 // persist). This is distinct from the target-side received/running state the
 // endpoint owns.
 type SpoolReceipt struct {
-	Schema       string `json:"schema"`         // "sender_submitted"
-	RequestID    string `json:"request_id"`     // caller-generated UUID
-	CreatorHost  string `json:"creator_host"`   // authenticated source host
-	TargetID     string `json:"target_id"`      // resolved target
-	Epoch        string `json:"epoch"`          // resolved/verified epoch
-	NotAfter     string `json:"not_after"`      // admission deadline
-	Destination  string `json:"destination"`    // resolved routing (ipc:<dir>)
-	State        State  `json:"state"`          // pending (not received/running)
-	InputDigest  string `json:"input_digest"`   // command digest for dedup
-	MinEvidence  string `json:"min_evidence,omitempty"` // floor, unevaluated until drain
-	Reason       string `json:"reason"`         // "endpoint_unreachable" or "duplicate_conflict"
-	CreatedAt    string `json:"created_at"`     // persist time
+	Schema      string `json:"schema"`                 // "sender_submitted"
+	RequestID   string `json:"request_id"`             // caller-generated UUID
+	CreatorHost string `json:"creator_host"`           // authenticated source host
+	TargetID    string `json:"target_id"`              // resolved target
+	Epoch       string `json:"epoch"`                  // resolved/verified epoch
+	NotAfter    string `json:"not_after"`              // admission deadline
+	Destination string `json:"destination"`            // resolved routing (ipc:<dir>)
+	State       State  `json:"state"`                  // pending (not received/running)
+	InputDigest string `json:"input_digest"`           // command digest for dedup
+	MinEvidence string `json:"min_evidence,omitempty"` // floor, unevaluated until drain
+	Reason      string `json:"reason"`                 // "endpoint_unreachable" or "duplicate_conflict"
+	CreatedAt   string `json:"created_at"`             // persist time
 }
 
 // Receipt builds a SpoolReceipt from an envelope. The state is always pending:
