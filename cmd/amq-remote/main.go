@@ -19,6 +19,7 @@ import (
 	"time"
 
 	amqcli "github.com/avivsinai/agent-message-queue/internal/cli"
+	"github.com/avivsinai/agent-message-queue/internal/config"
 	"github.com/avivsinai/agent-message-queue/internal/remote/amqio"
 	"github.com/avivsinai/agent-message-queue/internal/remote/codex"
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
@@ -263,6 +264,16 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	stateDir, err := c.stateDir()
 	if err != nil {
 		return protocol.ExitUsage, err
+	}
+	// .10: register the endpoint's mailbox handle in config.json so other
+	// agents in the root can route to it. This preserves every other agent's
+	// config; amqio.New stays free of configuration side effects. `up` invokes
+	// this same serve entry point, so the registration is not serve-only.
+	configPath := filepath.Join(c.root, "meta", "config.json")
+	if added, cerr := config.EnsureAgent(configPath, *me); cerr != nil {
+		say(stderr, "warning: could not register handle %q in config.json: %v\n", *me, cerr)
+	} else if added {
+		say(stderr, "registered handle %q in %s\n", *me, configPath)
 	}
 	store, err := requests.Open(stateDir)
 	if err != nil {
