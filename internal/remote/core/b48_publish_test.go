@@ -370,10 +370,13 @@ func TestB48CloseDrainsAsyncNativePublication(t *testing.T) {
 	// waits. closeDone must stay blocked until releasePub.
 	closeDone := make(chan error, 1)
 	go func() { closeDone <- ep.Close() }()
-	// Synchronize on the ACTUAL draining state (not a 100ms absence check):
-	// poll IsDraining() until Close has transitioned to draining. This proves
+	// Synchronize on the ACTUAL draining state (not a 100ms absence check,
+	// and not IsDraining which conflates draining+closed): poll
+	// IsDrainingState() until Close has transitioned to draining. This proves
 	// Close entered the drain wait while the publish is still in-flight, so
-	// the lifecycle accounting is exercised regardless of scheduling.
+	// the lifecycle accounting is exercised regardless of scheduling. If
+	// Close reached stateClosed here, it raced past the drain without waiting
+	// (611.22.48 P2 false-pass).
 	waitForDraining48(t, ep)
 	// Close must still be blocked (the held publish keeps inFlight > 0).
 	select {
@@ -411,17 +414,126 @@ func TestB48CloseDrainsAsyncNativePublication(t *testing.T) {
 
 var errPublishFailed48 = protocol.Refuse(protocol.CodeNativeError, "publish failed for test")
 
-// waitForDraining48 polls IsDraining() until the endpoint has begun shutdown.
-// Replaces an elapsed-time absence check with synchronization on the actual
-// lifecycle transition (611.22.48 P2).
+// waitForDraining48 polls IsDrainingState() until the endpoint has entered
+// the DRAINING state specifically (not closed). This is the 611.22.48 P2
+// close-wait ordering fix: IsDraining() conflates draining and closed, so a
+// test that released a held publish after observing IsDraining()==true could
+// be observing stateClosed — Close raced past the drain wait without actually
+// waiting. IsDrainingState() fails if Close reached stateClosed before the
+// publish was released, proving Close is genuinely in the drain wait.
 func waitForDraining48(t *testing.T, ep *core.Endpoint) {
 	t.Helper()
 	deadline := time.Now().Add(b48Timeout)
 	for time.Now().Before(deadline) {
-		if ep.IsDraining() {
+		if ep.IsDrainingState() {
 			return
 		}
 		time.Sleep(time.Millisecond)
 	}
-	t.Fatal("timed out waiting for endpoint to enter draining")
+	t.Fatal("timed out waiting for endpoint to enter draining state (not closed)")
+}
+
+// TestB48CloseWaitsFailedPublishThenReportsIncomplete is the codex round-4 P2
+// regression for the failure branch in the close-wait ordering. A held
+// publish FAILS; Close must enter the DRAINING state (not race to stateClosed)
+// while the publish is in flight, then return ErrDrainIncomplete because the
+// failed revision left an undischarged obligation (no newer r+1 was coalesced
+// to adopt). This exercises the failed-r path in the close-wait regression
+// (the previous close-wait test's publisher always returned nil).
+func TestB48CloseWaitsFailedPublishThenReportsIncomplete(t *testing.T) {
+	store, now := openStoreNoCleanup(t)
+
+	pubStarted := make(chan struct{})
+	releasePub := make(chan struct{})
+	t.Cleanup(func() {
+		select {
+		case <-releasePub:
+		default:
+			close(releasePub)
+		}
+	})
+	// The gate arms ONLY after the submit Handle has returned: every
+	// publication before that (the running snapshot inside Handle) passes
+	// unheld, and the first publication after arming — the completed snapshot
+	// from the EventRunCompleted native path — is the held one that fails.
+	var gateArmed atomic.Bool
+	var heldOnce atomic.Bool
+	heldPublish := func(s protocol.Snapshot, origin map[string]string) error {
+		if gateArmed.Load() && heldOnce.CompareAndSwap(false, true) {
+			close(pubStarted)
+			<-releasePub
+			return errPublishFailed48
+		}
+		return nil
+	}
+	ep := core.New(core.Config{Store: store, Publish: heldPublish, Now: now})
+	rt := fake.New("fake", "e_1")
+	ep.Register(rt)
+
+	id := "11111111-1111-4111-8111-111111111488"
+	if _, err := ep.Handle(submitCmd(id), core.Source{Host: "local"}); err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	if !b14cWait(func() bool { return rt.HasRun(id) }) {
+		t.Fatal("never admitted")
+	}
+	// Arm the gate AFTER Handle returned and the run is admitted: the next
+	// publication (the completed snapshot from rt.Complete's native event) is
+	// the held one that fails.
+	gateArmed.Store(true)
+
+	completeDone := make(chan struct{})
+	go func() {
+		defer close(completeDone)
+		rt.Complete(id, "done")
+	}()
+	select {
+	case <-pubStarted:
+	case <-time.After(b48Timeout):
+		close(releasePub)
+		t.Fatal("failed-r publication never started")
+	}
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- ep.Close() }()
+	// Close must enter DRAINING (not stateClosed) while the publish is held.
+	// IsDrainingState() fails if Close raced to stateClosed (round-4 P2
+	// false-pass: IsDraining conflates draining+closed).
+	waitForDraining48(t, ep)
+	select {
+	case err := <-closeDone:
+		close(releasePub)
+		t.Fatalf("close returned before failed publication completed: %v", err)
+	default:
+	}
+
+	// Release the held publish; it fails. Close drains and returns nil:
+	// a failed attempt of attemptRev itself is NOT an undischarged
+	// obligation (the attempt ran and was counted; the durable unpublished
+	// state persists for Reconcile recovery — the contract-corpus Q18
+	// restart flow relies on Close returning nil here). ErrDrainIncomplete
+	// would arise only if a coalesced NEWER r+1 was dropped, which this
+	// schedule does not produce.
+	close(releasePub)
+	select {
+	case <-completeDone:
+	case <-time.After(b48Timeout):
+		t.Fatal("rt.Complete did not return after publish released")
+	}
+	select {
+	case err := <-closeDone:
+		if err != nil {
+			t.Fatalf("close returned error after failed publication; want nil (failed attempt is not an undischarged obligation): %v", err)
+		}
+	case <-time.After(b48Timeout):
+		t.Fatal("close did not return after failed publication completed")
+	}
+
+	// The failed publish did NOT advance PublishedRevision (failure must not
+	// mark); the durable unpublished state persists for Reconcile recovery.
+	k := requests.Key{CreatorHost: "local", TargetID: "fake", RequestID: id}
+	rec, _, _ := store.Get(k)
+	if rec.PublishedRevision >= rec.Revision {
+		t.Fatalf("failed publish advanced PublishedRevision=%d to Revision=%d", rec.PublishedRevision, rec.Revision)
+	}
 }

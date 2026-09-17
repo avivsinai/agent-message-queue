@@ -165,19 +165,19 @@ type Config struct {
 // Register; Reconcile should run before the first command.
 func New(cfg Config) *Endpoint {
 	e := &Endpoint{
-		store:          cfg.Store,
-		targets:        map[string]*target{},
-		publish:        cfg.Publish,
-		crash:          cfg.Crash,
-		now:            cfg.Now,
-		changed:        make(chan struct{}),
-		compactHorizon: cfg.CompactHorizon,
-		visible:        map[requests.Key]int64{},
-		publishing:     map[requests.Key]bool{},
-		pubPending:     map[requests.Key]int64{},
+		store:            cfg.Store,
+		targets:          map[string]*target{},
+		publish:          cfg.Publish,
+		crash:            cfg.Crash,
+		now:              cfg.Now,
+		changed:          make(chan struct{}),
+		compactHorizon:   cfg.CompactHorizon,
+		visible:          map[requests.Key]int64{},
+		publishing:       map[requests.Key]bool{},
+		pubPending:       map[requests.Key]int64{},
 		drainObligations: map[requests.Key]int64{},
-		state:          stateAccepting,
-		drainTO:        drainTimeout,
+		state:            stateAccepting,
+		drainTO:          drainTimeout,
 	}
 	if cfg.DrainTimeout > 0 {
 		e.drainTO = cfg.DrainTimeout
@@ -331,6 +331,19 @@ func (e *Endpoint) IsDraining() bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.state != stateAccepting
+}
+
+// IsDrainingState reports whether the endpoint is in the DRAINING state
+// specifically (not closed). This distinguishes 'Close is waiting on
+// in-flight handlers' from 'Close already set stateClosed and is past the
+// drain wait', which IsDraining conflates. Test seam for the 611.22.48
+// close-wait ordering regression: a test that releases a held publish after
+// observing IsDraining()==true must fail if what it actually observed was
+// stateClosed (Close raced past the drain without waiting).
+func (e *Endpoint) IsDrainingState() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.state == stateDraining
 }
 
 // Handle runs one validated command from an authenticated source and returns
