@@ -27,6 +27,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/ipc"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 	"github.com/avivsinai/agent-message-queue/internal/remote/requests"
+	"github.com/avivsinai/agent-message-queue/internal/remote/sender"
 )
 
 var version = "dev"
@@ -34,6 +35,11 @@ var version = "dev"
 // stateDirName is the extension directory under the AMQ root that the
 // endpoint owns. amq cleanup never touches extension data.
 const stateDirName = "extensions/remote"
+
+// spoolReapHorizon is the age at which settled sender envelopes are reaped.
+// Dispatched/expired/failed entries are removed once the caller has had a
+// chance to observe the outcome, bounding the spool's growth.
+const spoolReapHorizon = 6 * time.Hour
 
 const usageText = `Usage: amq-remote <command> [options]
 
@@ -191,6 +197,14 @@ func finish(w io.Writer, out any, asJSON bool, code int, err error) int {
 
 func printHuman(w io.Writer, out any) {
 	switch v := out.(type) {
+	case sender.SpoolReceipt:
+		// B3: the sender-side receipt is NOT a Snapshot — it has no request
+		// ref or revision. Print it as its own shape.
+		say(w, "submitted  %s  (pending, %s)", v.RequestID, v.Reason)
+		if v.TargetID != "" {
+			say(w, "  target=%s", v.TargetID)
+		}
+		say(w, "\n")
 	case protocol.Reply:
 		printHuman(w, v.Snapshot)
 		if v.Outcome.Code != "" {
@@ -300,6 +314,17 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	// session layout stay in the package that owns them.
 	root := c.root
 	carrier.SetReplyRouter(replyRouterFor(root))
+	// Durable sender (.7): open the outgoing spool and a drainer. The drainer
+	// replays pending envelopes (CLI submits that were persisted while the
+	// companion was down) through the endpoint on each tick, then reaps
+	// settled entries. The spool is separate durable storage from the request
+	// store: up supervises this companion but does not own the stored data.
+	spool, err := sender.Open(stateDir)
+	if err != nil {
+		_ = ep.Close()
+		return 0, err
+	}
+	drainer := sender.NewDrainer(spool, ep, nil)
 	if *useFake {
 		ep.Register(fake.New("fake", "e_1"))
 	}
@@ -348,6 +373,15 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 				if err := ep.Tick(); err != nil {
 					say(stderr, "tick: %v\n", err)
 				}
+				// Replay durable sender envelopes (CLI submits persisted while the
+				// companion was down), then reap settled ones older than the reap
+				// horizon so the spool is bounded. B4: Reap on every tick,
+				// independent of Drain activity — a live submit settles its own
+				// envelope so Drain returns zero forever, and Reap must still run.
+				if _, derr := drainer.Drain(ctx); derr != nil {
+					say(stderr, "drain: %v\n", derr)
+				}
+				_, _ = spool.Reap(time.Now().Add(-spoolReapHorizon), 64)
 			}
 		}
 	}()
@@ -410,6 +444,7 @@ func submit(args []string, stdin io.Reader) (any, int, error) {
 	requestID := fs.String("request-id", "", "caller-supplied UUID so a retry reconciles instead of resubmitting")
 	window := fs.Duration("admit-within", 2*time.Minute, "latest admission time relative to now (max 24h)")
 	minEvidence := fs.String("min-evidence", "", "minimum submit evidence class to require (admitted or submitted; omitted = legacy)")
+	epochFlag := fs.String("epoch", "", "registration epoch (offline enqueue: previously-verified epoch; skips live inspect)")
 	pos, err := parseInterleaved(fs, args)
 	if err != nil {
 		return nil, protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", err)
@@ -452,9 +487,18 @@ func submit(args []string, stdin io.Reader) (any, int, error) {
 		return nil, protocol.ExitUsage, err
 	}
 	target := pos[0]
-	session, err := inspectTarget(stateDir, target)
-	if err != nil {
-		return nil, 0, err
+	// Resolve target+epoch. A live inspect is the default; --epoch supplies a
+	// previously-verified epoch for offline enqueue (the companion is not
+	// running, or the target was inspected earlier). The spool never
+	// retargets: it stores exactly the epoch the caller supplied, so an
+	// offline enqueue cannot silently bind to a different session.
+	epoch := *epochFlag
+	if epoch == "" {
+		session, err := inspectTarget(stateDir, target)
+		if err != nil {
+			return nil, 0, err
+		}
+		epoch = session.Epoch
 	}
 	id := *requestID
 	if id == "" {
@@ -468,14 +512,71 @@ func submit(args []string, stdin io.Reader) (any, int, error) {
 		Op:        protocol.OpRequestSubmit,
 		RequestID: id,
 		TargetID:  target,
-		Epoch:     session.Epoch,
+		Epoch:     epoch,
 		NotAfter:  protocol.FormatTime(time.Now().Add(*window)),
 		Input:     &protocol.SubmitInput{Text: body, Busy: protocol.Busy(*busy), Deliver: protocol.Deliver(*deliver), MinEvidence: *minEvidence},
 	}
-	rep, err := callReply(stateDir, cmd)
+	// Durable sender (.7): persist the exact command, identity, destination,
+	// target, epoch and expiry atomically BEFORE returning submitted. If the
+	// endpoint is unreachable or crashes mid-dispatch, the companion's drainer
+	// replays this envelope after restart with the same identity and bytes.
+	spool, err := sender.Open(stateDir)
 	if err != nil {
 		return nil, 0, err
 	}
+	env := &sender.Envelope{
+		RequestID:   id,
+		CreatorHost: ipc.LocalHost,
+		TargetID:    target,
+		Epoch:       epoch,
+		NotAfter:    cmd.NotAfter,
+		Command:     cmd,
+		Destination: "ipc:" + stateDir,
+	}
+	if err := spool.Create(env); err != nil {
+		return nil, 0, err
+	}
+	// Attempt live dispatch. If the endpoint is up, return its reply and mark
+	// the envelope dispatched. If it is unreachable, return a `submitted`
+	// receipt from the spool: the intent is durable and the drainer will
+	// dispatch it when the companion runs.
+	rep, derr := callReply(stateDir, cmd)
+	if derr != nil {
+		// A duplicate (request_conflict) means a prior submit for this id
+		// already reached the endpoint; surface the stored reply instead of
+		// a spool receipt.
+		if isDuplicateConflict(derr) {
+			// B3: the receipt is NOT a Snapshot — it never mints a request ref
+			// or revision the endpoint did not assign.
+			return env.Receipt("duplicate_conflict"), exitForState(protocol.StateDispatching), nil
+		}
+		if isEndpointUnreachable(derr) {
+			// The intent is persisted; the caller is told `submitted`, not
+			// an error. The drainer replays after restart. B3: the receipt is a
+			// sender-side SpoolReceipt, not a fabricated Snapshot.
+			return env.Receipt("endpoint_unreachable"), protocol.ExitSuccess, nil
+		}
+		return nil, 0, derr
+	}
+	// B2: the endpoint returns refusals (stale_epoch, expired, unsupported,
+	// etc.) as a Reply with Outcome.Code and nil error. A non-empty code
+	// means the endpoint REFUSED the command — the envelope must NOT be
+	// marked dispatched. Mark it failed (terminal) so the caller learns the
+	// truth via status; a transient code (busy) is left pending for the
+	// drainer to retry.
+	if rep.Outcome.Code != "" {
+		code := rep.Outcome.Code
+		switch code {
+		case protocol.CodeBusy, protocol.CodeDraining, protocol.CodeStorageFull:
+			// Transient: leave pending, drainer retries next tick.
+			_ = spool.MarkAttempt(sender.Key{CreatorHost: ipc.LocalHost, RequestID: id}, string(code))
+		default:
+			// Terminal refusal: mark failed with the code.
+			_ = spool.MarkFailed(sender.Key{CreatorHost: ipc.LocalHost, RequestID: id}, string(code))
+		}
+		return rep, exitForOutcome(rep), nil
+	}
+	_ = spool.MarkDispatched(sender.Key{CreatorHost: ipc.LocalHost, RequestID: id})
 	return rep, exitForOutcome(rep), nil
 }
 
@@ -548,8 +649,36 @@ func status(args []string) (any, int, error) {
 	if err != nil {
 		return nil, protocol.ExitUsage, err
 	}
-	rep, err := callReply(stateDir, &protocol.Command{Schema: protocol.SchemaCommand, Op: protocol.OpRequestGet, RequestRef: pos[0]})
+	// Round-4 B6 gap 3: if the positional is a bare request ID (not a ref),
+	// resolve the sender spool FIRST. A running endpoint refuses a bare id
+	// as invalid, so the spool surface that reports drain failures is
+	// unreachable at exactly the moment the failure exists. When the spool
+	// has the envelope, use its stored identity; if the spool's envelope is
+	// terminal (failed/expired), return it directly without hitting the
+	// endpoint. For a real ref, call the endpoint as before.
+	refOrID := pos[0]
+	if !strings.HasPrefix(refOrID, protocol.RefPrefix) {
+		if spoolReceipt, ok := lookupSpoolStatus(stateDir, refOrID); ok {
+			if spoolReceipt.State == sender.StateFailed || spoolReceipt.State == sender.StateExpired {
+				return spoolReceipt, exitForSpoolReceipt(spoolReceipt), nil
+			}
+			// Pending/dispatched: use the spool's stored identity for the
+			// live endpoint call so the caller sees the endpoint's current
+			// state, not just the spool's snapshot.
+			refOrID = protocol.EncodeRef(spoolReceipt.CreatorHost, spoolReceipt.TargetID, spoolReceipt.RequestID)
+		}
+	}
+	rep, err := callReply(stateDir, &protocol.Command{Schema: protocol.SchemaCommand, Op: protocol.OpRequestGet, RequestRef: refOrID})
 	if err != nil {
+		// B6: if the endpoint is unreachable or the record is not found,
+		// consult the sender spool. A submit persisted while the companion
+		// was down has no request-store record; status must still tell the
+		// caller the truth (pending/dispatched/expired/failed).
+		if isEndpointUnreachable(err) || isNotFound(err) || isInvalid(err) {
+			if spoolReceipt, ok := lookupSpoolStatus(stateDir, pos[0]); ok {
+				return spoolReceipt, exitForSpoolReceipt(spoolReceipt), nil
+			}
+		}
 		return nil, 0, err
 	}
 	return rep, exitForOutcome(rep), nil
@@ -679,6 +808,51 @@ func listRequests(args []string) (any, int, error) {
 	for _, r := range recs {
 		out = append(out, r.Snapshot)
 	}
+	// B6: include ALL spool envelopes (pending, failed, expired, dispatched)
+	// that have no request-store record yet, with their actual terminal state
+	// and last_error. Submit persisted while the companion was down; the
+	// caller must see failures, not just pending. Dedup against existing
+	// records so the same request doesn't appear twice.
+	if spool, err := sender.Open(stateDir); err == nil {
+		if envs, err := spool.List(); err == nil {
+			seen := make(map[string]bool, len(recs))
+			for _, r := range recs {
+				seen[r.RequestID] = true
+			}
+			for _, env := range envs {
+				if seen[env.RequestID] {
+					continue
+				}
+				state := protocol.StateReceived
+				switch env.State {
+				case sender.StateFailed:
+					state = protocol.StateFailed
+				case sender.StateDispatched:
+					state = protocol.StateDispatching
+				case sender.StateExpired:
+					state = protocol.StateRejected
+				}
+				snap := protocol.Snapshot{
+					Schema:      "sender_submitted",
+					RequestID:   env.RequestID,
+					CreatorHost: env.CreatorHost,
+					TargetID:    env.TargetID,
+					Epoch:       env.Epoch,
+					State:       state,
+					InputDigest: env.InputDigest,
+					NotAfter:    env.NotAfter,
+					ObservedAt:  env.CreatedAt,
+				}
+				if env.LastError != "" {
+					snap.Code = protocol.Code(env.LastError)
+				}
+				if env.State == sender.StateExpired && snap.Code == "" {
+					snap.Code = protocol.CodeExpired
+				}
+				out = append(out, snap)
+			}
+		}
+	}
 	return out, 0, nil
 }
 
@@ -753,4 +927,99 @@ func replyRouterFor(root string) amqio.ReplyRouter {
 		}
 		return r, h, err
 	}
+}
+
+// isDuplicateConflict reports whether err is a request_conflict: a prior
+// submit for this request id already reached the endpoint.
+func isDuplicateConflict(err error) bool {
+	var r *protocol.Refusal
+	return errors.As(err, &r) && r.Code == protocol.CodeRequestConflict
+}
+
+// isEndpointUnreachable reports whether the endpoint is not running (the IPC
+// socket is absent or the connection refused). The intent is persisted; the
+// drainer replays after restart. ipc.Call returns a typed refusal with
+// CodeEndpointUnreachable for a dial failure.
+func isEndpointUnreachable(err error) bool {
+	var r *protocol.Refusal
+	return errors.As(err, &r) && r.Code == protocol.CodeEndpointUnreachable
+}
+
+// isNotFound reports whether the endpoint returned not_found for a request
+// ref — the record does not exist in the request store (the submit may be
+// spooled but not yet dispatched).
+func isNotFound(err error) bool {
+	var r *protocol.Refusal
+	return errors.As(err, &r) && r.Code == protocol.CodeNotFound
+}
+
+// isInvalid reports whether the endpoint refused the request as invalid
+// (e.g. a bare request ID passed where a ref is required). Round-4 B6 gap 3:
+// status falls back to the spool on invalid too, so a bare request ID is
+// resolved from the sender spool even while the companion is up.
+func isInvalid(err error) bool {
+	var r *protocol.Refusal
+	return errors.As(err, &r) && r.Code == protocol.CodeInvalid
+}
+
+// lookupSpoolStatus checks the sender spool for a request ref OR a raw
+// request ID and returns a SpoolReceipt describing the envelope's state.
+// B6 (round-4): status accepts the envelope id directly as a positional
+// argument (no --request-id flag) because B3 stopped minting refs for
+// spooled submits. Returns (zero, false) when no envelope matches.
+func lookupSpoolStatus(stateDir, refOrID string) (sender.SpoolReceipt, bool) {
+	var creatorHost, requestID string
+	if h, _, id, err := protocol.DecodeRef(refOrID); err == nil {
+		creatorHost, requestID = h, id
+	} else {
+		// Not a ref — treat as a raw request ID and scan the spool.
+		requestID = refOrID
+	}
+	spool, err := sender.Open(stateDir)
+	if err != nil {
+		return sender.SpoolReceipt{}, false
+	}
+	if creatorHost != "" {
+		env, exists, err := spool.Get(creatorHost, requestID)
+		if err != nil || !exists {
+			return sender.SpoolReceipt{}, false
+		}
+		return env.Receipt("spool_lookup"), true
+	}
+	// No creator host: scan all envelopes for the request ID.
+	envs, err := spool.List()
+	if err != nil {
+		return sender.SpoolReceipt{}, false
+	}
+	for _, env := range envs {
+		if env.RequestID == requestID {
+			return env.Receipt("spool_lookup"), true
+		}
+	}
+	return sender.SpoolReceipt{}, false
+}
+
+// exitForSpoolReceipt maps a spool envelope state to an exit code. A
+// pending/dispatched envelope is success (the work is in flight). A
+// failed/expired envelope is ExitError: native work did not happen (or its
+// window closed) and the caller takes the failure path (round-4 B6: expired
+// now exits 1, not 0).
+func exitForSpoolReceipt(r sender.SpoolReceipt) int {
+	switch r.State {
+	case sender.StateFailed, sender.StateExpired:
+		return protocol.ExitError
+	}
+	return protocol.ExitSuccess
+}
+
+// exitForState maps a spool-side state to the exit code for a `submitted`
+// receipt. A pending/dispatching request is success for submit.
+func exitForState(s protocol.State) int {
+	switch s {
+	case protocol.StateRejected, protocol.StateUncertain:
+		return protocol.ExitActionRequired
+	case protocol.StateFailed, protocol.StateCancelled:
+		return protocol.ExitError
+	}
+	return protocol.ExitSuccess
 }
