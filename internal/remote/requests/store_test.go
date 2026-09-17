@@ -1,8 +1,10 @@
 package requests
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -285,7 +287,7 @@ func TestBK4AggregateQuotaRefusesBeforeWrite(t *testing.T) {
 	}
 
 	// Reserve for a worst-case record must refuse now that the quota is full.
-	if err := s.Reserve(protocol.MaxRecordBytes); err == nil {
+	if err := s.Reserve(Key{"host", "target", "reserved"}, protocol.MaxRecordBytes); err == nil {
 		t.Fatalf("Reserve at quota: want storage_full, got nil")
 	} else if code := protocol.RefusalCode(err); code != protocol.CodeStorageFull {
 		t.Fatalf("Reserve at quota: want storage_full, got %q", code)
@@ -325,7 +327,7 @@ func TestBK4QuotaDisabledByDefault(t *testing.T) {
 	defer func() { _ = s.Close() }()
 
 	// Reserve never refuses when the quota is disabled.
-	if err := s.Reserve(protocol.MaxRecordBytes); err != nil {
+	if err := s.Reserve(Key{"host", "target", "reserved"}, protocol.MaxRecordBytes); err != nil {
 		t.Fatalf("Reserve with quota disabled: want nil, got %v", err)
 	}
 	for i := 0; i < 5; i++ {
@@ -343,4 +345,240 @@ func fmtID(i int) string {
 		return base + string(rune('0'+i))
 	}
 	return base + "a"
+}
+
+// TestBK4B1RaceCompactVsAck exercises the race the round-1 review confirmed
+// (611.22.19 BK4 round-2 B1): CompactOne and MarkAcknowledged mutate s.used
+// concurrently. Before the fix, CompactOne ran with no store lock while
+// MarkAcknowledged held it; -race fired and a lost += drifted the quota
+// counter for the life of the process. Now both hold s.mu.
+func TestBK4B1RaceCompactVsAck(t *testing.T) {
+	s, err := Open(t.TempDir(), WithClock(fixedClock), WithMaxStoreBytes(64*1024))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	// Two settled records: one to compact, one to ack-mark concurrently.
+	compactKey := Key{"hostA", "t_fake1", "11111111-1111-4111-8111-111111111710"}
+	ackKey := Key{"hostA", "t_fake1", "11111111-1111-4111-8111-111111111711"}
+	for _, k := range []Key{compactKey, ackKey} {
+		rec := newRecord(k.RequestID)
+		if err := s.Create(rec); err != nil {
+			t.Fatalf("create %s: %v", k.RequestID, err)
+		}
+		rec.Revision, rec.State = 2, protocol.StateDispatching
+		if err := s.Update(rec); err != nil {
+			t.Fatalf("dispatching %s: %v", k.RequestID, err)
+		}
+		rec.Revision, rec.State = 3, protocol.StateCompleted
+		rec.Result = &protocol.Result{Text: "done"}
+		rec.ObservedAt = "2026-09-01T00:00:00Z"
+		rec.AckDigest = protocol.EvidenceDigest(rec.Result)
+		if err := s.Update(rec); err != nil {
+			t.Fatalf("completed %s: %v", k.RequestID, err)
+		}
+		if err := s.MarkPublished(k, 3); err != nil {
+			t.Fatalf("mark published %s: %v", k.RequestID, err)
+		}
+	}
+
+	cutoff := fixedClock()
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		if _, err := s.CompactOne(compactKey, cutoff); err != nil {
+			t.Errorf("CompactOne: %v", err)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		if err := s.MarkAcknowledged(ackKey); err != nil {
+			t.Errorf("MarkAcknowledged: %v", err)
+		}
+	}()
+	wg.Wait()
+
+	// used must be stable and correct: both records compacted/acked, no drift.
+	want, _ := s.sumUsed()
+	if got := s.used; got != want {
+		t.Fatalf("used drifted: got %d want %d (race lost an update)", got, want)
+	}
+}
+
+// TestBK4B2TombstoneAtQuotaDoesNotBreakSweep reproduces the round-1 review
+// blocker B2 (611.22.19 BK4 round-2): a terminal record with no result GROWS
+// on compaction (tombstone flag + revision bump). Before the fix, CompactOne
+// at quota returned storage_full and Reconcile broke the whole sweep. Now
+// settlement writes are quota-exempt, so CompactOne succeeds at quota and the
+// sweep continues.
+func TestBK4B2TombstoneAtQuotaDoesNotBreakSweep(t *testing.T) {
+	// Tight quota: a minimal cancelled record (no Input, no Result) is ~505
+	// bytes on disk, and compaction GROWS it to ~522 (tombstone flag +
+	// revision bump + code). Quota 510 lets the record fit but would refuse
+	// the tombstone write — before the fix, CompactOne returned storage_full
+	// and Reconcile broke the whole sweep (key-ordered List stops every later
+	// compaction too). Now settlement writes are quota-exempt.
+	s, err := Open(t.TempDir(), WithClock(fixedClock), WithMaxStoreBytes(510))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	// A terminal record with NO result and NO input (cancelled before
+	// dispatch) — compaction adds the tombstone flag and bumps the revision,
+	// so the record GROWS.
+	rec := &Record{
+		Snapshot: protocol.Snapshot{
+			Schema:      protocol.SchemaRequest,
+			RequestID:   "11111111-1111-4111-8111-111111111720",
+			CreatorHost: "hostA",
+			TargetID:    "t_fake1",
+			Epoch:       "e_1",
+			Revision:    1,
+			State:       protocol.StateReceived,
+			InputDigest: Digest([]byte("x")),
+		},
+	}
+	if err := s.Create(rec); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	rec.Revision = 2
+	rec.State = protocol.StateCancelled
+	rec.ObservedAt = "2026-09-01T00:00:00Z"
+	if err := s.Update(rec); err != nil {
+		t.Fatalf("update to cancelled: %v", err)
+	}
+	if err := s.MarkPublished(Key{rec.CreatorHost, rec.TargetID, rec.RequestID}, 2); err != nil {
+		t.Fatalf("mark published: %v", err)
+	}
+
+	cutoff := fixedClock()
+	ok, err := s.CompactOne(Key{rec.CreatorHost, rec.TargetID, rec.RequestID}, cutoff)
+	if err != nil {
+		t.Fatalf("CompactOne at quota: settlement write must be quota-exempt, got %v", err)
+	}
+	if !ok {
+		t.Fatal("CompactOne at quota: want compacted=true, got false")
+	}
+}
+
+// TestBK4B3ReservationIsReal reproduces the round-1 review blocker B3
+// (611.22.19 BK4 round-2): Reserve was a point-in-time check, not a
+// reservation. quota = 3*MaxRecordBytes admitted six submits, then refused
+// three results — records stuck in running forever. Now Reserve increments a
+// reserved total; used+reserved <= quota is the invariant; a result write for
+// an admitted record is never quota-refused.
+func TestBK4B3ReservationIsReal(t *testing.T) {
+	// quota = 4 * MaxRecordBytes: at most 3 worst-case records can be
+	// admitted simultaneously (3 reservations + their Create overhead fit,
+	// the 4th reservation does not). Before the fix, Reserve was a
+	// point-in-time check and all 6 were admitted.
+	quota := int64(4 * protocol.MaxRecordBytes)
+	s, err := Open(t.TempDir(), WithClock(fixedClock), WithMaxStoreBytes(quota))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	admitted := 0
+	refused := 0
+	var admittedKeys []Key
+	for i := 0; i < 6; i++ {
+		k := Key{"hostA", "t_fake1", fmt.Sprintf("11111111-1111-4111-8111-11111111%04d", i+20)}
+		// Reserve before Create (as the endpoint does before dispatch). All six
+		// reservations are held simultaneously — the invariant is
+		// used+reserved <= quota, so only 3 worst-case records fit.
+		if err := s.Reserve(k, protocol.MaxRecordBytes); err != nil {
+			refused++
+			continue
+		}
+		rec := newRecord(k.RequestID)
+		if err := s.Create(rec); err != nil {
+			// Create should never refuse for a reserved key (reservation paid).
+			t.Fatalf("Create for reserved key %s: %v", k.RequestID, err)
+		}
+		admitted++
+		admittedKeys = append(admittedKeys, k)
+	}
+	if admitted != 3 {
+		t.Fatalf("admitted: want 3 (quota = 3*MaxRecordBytes), got %d (refused %d)", admitted, refused)
+	}
+	if refused != 3 {
+		t.Fatalf("refused: want 3, got %d", refused)
+	}
+
+	// Now land results for the admitted records: a result write for an
+	// admitted record must NEVER be quota-refused (the reservation paid).
+	for _, k := range admittedKeys {
+		rec, _, err := s.Get(k)
+		if err != nil {
+			t.Fatalf("get admitted key %s: %v", k.RequestID, err)
+		}
+		rec.Revision = 2
+		rec.State = protocol.StateDispatching
+		if err := s.Update(rec); err != nil {
+			t.Fatalf("dispatching Update for admitted key %s: %v", k.RequestID, err)
+		}
+		rec.Revision = 3
+		rec.State = protocol.StateCompleted
+		rec.Result = &protocol.Result{Text: string(make([]byte, 100*1024))}
+		rec.ObservedAt = "2026-09-01T00:00:00Z"
+		rec.AckDigest = protocol.EvidenceDigest(rec.Result)
+		if err := s.Update(rec); err != nil {
+			t.Fatalf("result Update for admitted key %s refused: %v (reservation must cover it)", k.RequestID, err)
+		}
+	}
+}
+
+// TestBK4ServeWiringCompaction is the missing happy-path the round-1 review
+// flagged (611.22.19 BK4 round-2 non-blocking #4): no test builds the
+// production wiring of the two new defaults. This opens the store with
+// DefaultCompactHorizon and DefaultMaxStoreBytes exactly as serve does and
+// verifies that one settled old record compacts.
+func TestBK4ServeWiringCompaction(t *testing.T) {
+	s, err := Open(t.TempDir(),
+		WithClock(fixedClock),
+		WithMaxStoreBytes(protocol.DefaultMaxStoreBytes),
+	)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	rec := newRecord("11111111-1111-4111-8111-111111111730")
+	if err := s.Create(rec); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	rec.Revision, rec.State = 2, protocol.StateDispatching
+	if err := s.Update(rec); err != nil {
+		t.Fatalf("dispatching: %v", err)
+	}
+	rec.Revision, rec.State = 3, protocol.StateCompleted
+	rec.Result = &protocol.Result{Text: "done"}
+	rec.ObservedAt = "2026-09-01T00:00:00Z" // old: before the compact horizon
+	rec.AckDigest = protocol.EvidenceDigest(rec.Result)
+	if err := s.Update(rec); err != nil {
+		t.Fatalf("completed: %v", err)
+	}
+	if err := s.MarkPublished(Key{rec.CreatorHost, rec.TargetID, rec.RequestID}, 3); err != nil {
+		t.Fatalf("mark published: %v", err)
+	}
+
+	cutoff := fixedClock().Add(-protocol.DefaultCompactHorizon)
+	ok, err := s.CompactOne(Key{rec.CreatorHost, rec.TargetID, rec.RequestID}, cutoff)
+	if err != nil {
+		t.Fatalf("CompactOne with serve wiring: %v", err)
+	}
+	if !ok {
+		t.Fatal("CompactOne with serve wiring: want compacted=true, got false (compaction must run in production)")
+	}
+	got, _, err := s.Get(Key{rec.CreatorHost, rec.TargetID, rec.RequestID})
+	if err != nil {
+		t.Fatalf("get after compact: %v", err)
+	}
+	if !got.Tombstone {
+		t.Fatal("serve-wiring compaction: record not tombstoned")
+	}
 }

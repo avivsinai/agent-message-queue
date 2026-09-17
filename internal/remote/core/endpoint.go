@@ -523,7 +523,7 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 	// and overhead); the actual write re-checks under the store lock. Local
 	// native harness work never reaches this store, so quota pressure cannot
 	// stop it. A disabled quota (zero) reserves nothing.
-	if err := e.store.Reserve(protocol.MaxRecordBytes); err != nil {
+	if err := e.store.Reserve(key, protocol.MaxRecordBytes); err != nil {
 		var r *protocol.Refusal
 		if errors.As(err, &r) && r.Code == protocol.CodeStorageFull {
 			e.mu.Unlock()
@@ -538,6 +538,7 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 		return protocol.Reply{}, err
 	}
 	if err := e.store.Create(rec); err != nil {
+		e.store.ReleaseReservation(key)
 		e.mu.Unlock()
 		var r *protocol.Refusal
 		if errors.As(err, &r) && r.Code == protocol.CodeStorageFull {
@@ -1556,8 +1557,20 @@ func (e *Endpoint) Reconcile() error {
 			ok, cerr := e.store.CompactOne(keyOfRecord(rec), cutoff)
 			e.mu.Unlock()
 			if cerr != nil {
-				// Pro B2: feed store-level errors into firstErr and stop the
-				// sweep (store_closed/storage_full will not fix mid-sweep).
+				var rf *protocol.Refusal
+				if errors.As(cerr, &rf) && rf.Code == protocol.CodeStorageFull {
+					// 611.22.19 BK4 round-2 B2: a per-record storage_full must
+					// NOT abort the sweep. CompactOne is a settlement write
+					// (quota-exempt), so this should not fire, but a true
+					// disk-full still records the error and continues so bounded
+					// work per tick stays true (a refused record does not stop
+					// later compactions that might free space).
+					if firstErr == nil {
+						firstErr = cerr
+					}
+					continue
+				}
+				// store_closed or a non-quota error: stop the sweep.
 				if firstErr == nil {
 					firstErr = cerr
 				}
@@ -1964,12 +1977,16 @@ func (e *Endpoint) admitDeferred(rec *requests.Record) error {
 	// refuse storage_full before dispatch rather than wedging or evicting a
 	// dedup tombstone. A deferred record already occupies space; reserving the
 	// bounded result headroom keeps the quota honest under retry.
-	if err := e.store.Reserve(protocol.MaxRecordBytes); err != nil {
+	if err := e.store.Reserve(key, protocol.MaxRecordBytes); err != nil {
 		e.mu.Unlock()
 		return err
 	}
 	rec, exists, err := e.store.Get(key)
 	if err != nil || !exists || rec.State != protocol.StateReceived {
+		// The record is not awaiting admission here (vanished, already
+		// admitted, or already terminal). Release this attempt's
+		// reservation; a later retry re-reserves idempotently.
+		e.store.ReleaseReservation(key)
 		e.mu.Unlock()
 		return err
 	}
