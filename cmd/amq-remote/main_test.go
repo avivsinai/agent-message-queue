@@ -507,3 +507,112 @@ func TestReplyRouterForPeerSessionNotYetCreated(t *testing.T) {
 		t.Fatal("TICK2: no reply in the caller session's codex inbox")
 	}
 }
+
+// TestServeRegistersHandleInConfig is the round-1 review blocker B3 test
+// (611.22.19 round-2): the .10 registration feature was completely untested
+// at the serve boundary. This test boots a real serve with --me remote and
+// verifies that config.json exists and contains the "remote" handle. It also
+// verifies that an existing agent ("codex") is preserved — the core
+// invariant of EnsureAgent.
+func TestServeRegistersHandleInConfig(t *testing.T) {
+	root, err := os.MkdirTemp("", "amqr10")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	// Seed config.json with an existing agent so we can verify preservation.
+	configPath := filepath.Join(root, "meta", "config.json")
+	seed := struct {
+		Version    int      `json:"version"`
+		CreatedUTC string   `json:"created_utc"`
+		Agents     []string `json:"agents"`
+	}{Version: 1, CreatedUTC: "2026-01-01T00:00:00Z", Agents: []string{"codex"}}
+	seedData, _ := json.MarshalIndent(seed, "", "  ")
+	if err := os.WriteFile(configPath, append(seedData, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Boot serve with --me remote.
+	done := make(chan int, 1)
+	go func() {
+		var out, errBuf bytes.Buffer
+		done <- run([]string{"serve", "--fake", "--root", root, "--me", "remote"}, strings.NewReader(""), &out, &errBuf)
+	}()
+	t.Cleanup(func() {
+		select {
+		case <-done:
+		default:
+		}
+	})
+
+	// Wait for the socket to accept.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		var out, errBuf bytes.Buffer
+		if run([]string{"sessions", "--root", root, "--json"}, strings.NewReader(""), &out, &errBuf) == 0 {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	// Verify config.json now contains both "codex" (preserved) and "remote" (added).
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("config.json not found after serve: %v", err)
+	}
+	var cfg struct {
+		Agents []string `json:"agents"`
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("config.json is not valid JSON: %v", err)
+	}
+	has := func(h string) bool {
+		for _, a := range cfg.Agents {
+			if a == h {
+				return true
+			}
+		}
+		return false
+	}
+	if !has("codex") {
+		t.Fatalf("serve lost existing agent 'codex': %v", cfg.Agents)
+	}
+	if !has("remote") {
+		t.Fatalf("serve did not register handle 'remote': %v", cfg.Agents)
+	}
+}
+
+// TestServeRejectsInvalidHandle is the B1 serve-boundary test: a bad --me
+// handle must not poison config.json. Serve exits because amqio.New rejects
+// the handle, but config.json must NOT be created or modified with the
+// invalid handle.
+func TestServeRejectsInvalidHandle(t *testing.T) {
+	root, err := os.MkdirTemp("", "amqr10b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(root, "meta", "config.json")
+
+	// Boot serve with an invalid --me handle. Serve should exit non-zero
+	// because amqio.New rejects the handle.
+	var out, errBuf bytes.Buffer
+	code := run([]string{"serve", "--fake", "--root", root, "--me", "Bad-Handle"}, strings.NewReader(""), &out, &errBuf)
+	if code == 0 {
+		t.Fatalf("serve with invalid handle exited 0, want non-zero")
+	}
+
+	// config.json must NOT contain the invalid handle.
+	if _, err := os.Stat(configPath); err == nil {
+		data, _ := os.ReadFile(configPath)
+		if strings.Contains(string(data), "Bad-Handle") {
+			t.Fatalf("invalid handle poisoned config.json: %s", data)
+		}
+	}
+}

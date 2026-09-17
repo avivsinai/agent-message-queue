@@ -267,13 +267,11 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	}
 	// .10: register the endpoint's mailbox handle in config.json so other
 	// agents in the root can route to it. This preserves every other agent's
-	// config; amqio.New stays free of configuration side effects. `up` invokes
-	// this same serve entry point, so the registration is not serve-only.
-	configPath := filepath.Join(c.root, "meta", "config.json")
-	if added, cerr := config.EnsureAgent(configPath, *me); cerr != nil {
+	// config; amqio.New stays free of configuration side effects.
+	if added, cerr := config.EnsureAgent(c.root, *me); cerr != nil {
 		say(stderr, "warning: could not register handle %q in config.json: %v\n", *me, cerr)
 	} else if added {
-		say(stderr, "registered handle %q in %s\n", *me, configPath)
+		say(stderr, "registered handle %q in %s\n", *me, filepath.Join(c.root, "meta", "config.json"))
 	}
 	store, err := requests.Open(stateDir)
 	if err != nil {
