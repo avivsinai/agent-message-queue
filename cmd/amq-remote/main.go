@@ -397,6 +397,7 @@ func submit(args []string, stdin io.Reader) (any, int, error) {
 	deliver := fs.String("deliver", string(protocol.DeliverTurn), "turn or steer")
 	requestID := fs.String("request-id", "", "caller-supplied UUID so a retry reconciles instead of resubmitting")
 	window := fs.Duration("admit-within", 2*time.Minute, "latest admission time relative to now (max 24h)")
+	minEvidence := fs.String("min-evidence", "", "minimum submit evidence class to require (admitted or submitted; omitted = legacy)")
 	pos, err := parseInterleaved(fs, args)
 	if err != nil {
 		return nil, protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", err)
@@ -457,7 +458,7 @@ func submit(args []string, stdin io.Reader) (any, int, error) {
 		TargetID:  target,
 		Epoch:     session.Epoch,
 		NotAfter:  protocol.FormatTime(time.Now().Add(*window)),
-		Input:     &protocol.SubmitInput{Text: body, Busy: protocol.Busy(*busy), Deliver: protocol.Deliver(*deliver)},
+		Input:     &protocol.SubmitInput{Text: body, Busy: protocol.Busy(*busy), Deliver: protocol.Deliver(*deliver), MinEvidence: *minEvidence},
 	}
 	rep, err := callReply(stateDir, cmd)
 	if err != nil {

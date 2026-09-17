@@ -59,6 +59,7 @@ type Runtime struct {
 	listeners            map[int]func(core.NativeEvent)
 	nextListener         int
 	capabilityOverride   *protocol.Capabilities
+	evidenceOverride     *protocol.Evidence
 }
 
 // Answer records who answered which interaction.
@@ -83,6 +84,14 @@ func New(targetID, epoch string) *Runtime {
 	}
 }
 
+// WithEvidence overrides the session evidence projection (default: submit=
+// admitted). Tests use it to simulate a weaker-evidence adapter (e.g. Amit's
+// submit=submitted) so the endpoint's MinEvidence floor can be exercised.
+func (r *Runtime) WithEvidence(ev *protocol.Evidence) *Runtime {
+	r.evidenceOverride = ev
+	return r
+}
+
 // Inspect implements core.Attachment.
 func (r *Runtime) Inspect() protocol.Session {
 	r.mu.Lock()
@@ -98,6 +107,10 @@ func (r *Runtime) Inspect() protocol.Session {
 	if r.capabilityOverride != nil {
 		caps = *r.capabilityOverride
 	}
+	ev := &protocol.Evidence{Submit: "admitted", Completion: "run_terminal"}
+	if r.evidenceOverride != nil {
+		ev = r.evidenceOverride
+	}
 	return protocol.Session{
 		Schema:       protocol.SchemaSession,
 		TargetID:     r.targetID,
@@ -107,7 +120,7 @@ func (r *Runtime) Inspect() protocol.Session {
 		Attachment:   r.attachment,
 		Status:       status,
 		Capabilities: caps,
-		Evidence:     &protocol.Evidence{Submit: "admitted", Completion: "run_terminal"},
+		Evidence:     ev,
 		ObservedAt:   "2026-09-08T10:00:00Z",
 	}
 }

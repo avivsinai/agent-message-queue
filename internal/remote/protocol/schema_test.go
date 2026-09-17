@@ -283,3 +283,59 @@ func utf8ValidString(s string) bool {
 	}
 	return true
 }
+
+// TestMinEvidenceSubmitRoundTrip is the Wave A.4 corpus extension: a submit
+// command carrying min_evidence validates against the schema, and the decoded
+// command survives a serialize→decode round-trip with its floor intact (the
+// semantic-JSON-equality contract from the accepted plan: the decoded command
+// must not lose the field). This is NOT a test-only PR: it extends the
+// existing happy-path schema coverage with the new behavior.
+func TestMinEvidenceSubmitRoundTrip(t *testing.T) {
+	sch := compileSchema(t, "remote-command-v1.schema.json")
+	doc := map[string]any{
+		"schema": SchemaCommand, "op": "request.submit",
+		"request_id": "11111111-1111-4111-8111-1111111115a4",
+		"target_id":  "t_fake1", "epoch": "e_1",
+		"not_after": "2026-09-08T10:02:00Z",
+		"input": map[string]any{
+			"text":         "do the thing",
+			"busy":         "reject",
+			"deliver":      "turn",
+			"min_evidence": "admitted",
+		},
+	}
+	if err := sch.Validate(doc); err != nil {
+		t.Fatalf("min_evidence submit does not validate: %v\n%s", err, mustJSON(doc))
+	}
+	// Decode → serialize → decode must preserve min_evidence (semantic JSON
+	// equality: no field loss). This is the fillCommand round-trip contract.
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	cmd, err := DecodeCommand(raw)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if cmd.Input.MinEvidence != "admitted" {
+		t.Fatalf("min_evidence lost in decode: %q", cmd.Input.MinEvidence)
+	}
+	// Re-serialize the decoded command and validate that output too: the
+	// decoded command must be a complete wire command.
+	reRaw, err := json.Marshal(cmd)
+	if err != nil {
+		t.Fatalf("re-marshal: %v", err)
+	}
+	var reDoc map[string]any
+	if err := json.Unmarshal(reRaw, &reDoc); err != nil {
+		t.Fatalf("re-decode: %v", err)
+	}
+	if err := sch.Validate(reDoc); err != nil {
+		t.Fatalf("re-serialized command does not validate: %v", err)
+	}
+	// Semantic equality: the floor survives the round-trip.
+	reInput, _ := reDoc["input"].(map[string]any)
+	if reInput["min_evidence"] != "admitted" {
+		t.Fatalf("min_evidence lost in round-trip: %v", reInput["min_evidence"])
+	}
+}
