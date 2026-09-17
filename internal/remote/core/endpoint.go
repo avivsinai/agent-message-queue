@@ -135,12 +135,16 @@ type Endpoint struct {
 	inFlight int
 	drained  *sync.Cond
 	drainTO  time.Duration
-	// drainIncomplete records, under e.mu, that the drain could not discharge
-	// every accepted publication obligation (a chained revision was skipped:
-	// its attempt failed, the store read failed, or the endpoint closed
-	// before it could be adopted). Close folds this into its returned error
-	// instead of silently reporting a complete drain (codex round-3 P1).
-	drainIncomplete bool
+	// drainObligations records, under e.mu, the highest undischarged pending
+	// publication revision for a key whose chained attempt was skipped (its
+	// continuation read failed, or the endpoint closed before adoption). It is
+	// per-key/per-revision, not a global latch: a later successful publication
+	// of that revision (or a strictly newer one) retires the entry, so Close
+	// reports an incomplete drain ONLY for obligations genuinely left
+	// unpublished (codex round-4 P2-1). A failed attempt of attemptRev itself
+	// is NOT an obligation: the attempt ran and was counted; the durable
+	// unpublished state persists for Reconcile recovery.
+	drainObligations map[requests.Key]int64
 }
 
 // Config configures New.
@@ -171,6 +175,7 @@ func New(cfg Config) *Endpoint {
 		visible:        map[requests.Key]int64{},
 		publishing:     map[requests.Key]bool{},
 		pubPending:     map[requests.Key]int64{},
+		drainObligations: map[requests.Key]int64{},
 		state:          stateAccepting,
 		drainTO:        drainTimeout,
 	}
@@ -259,17 +264,20 @@ func (e *Endpoint) Close() error {
 		}
 		delete(e.targets, id)
 	}
-	// Report an undischarged publication obligation ONCE, then clear the
-	// flag: Close is terminal, so the durable unpublished state is left for
-	// Reconcile recovery on the next start regardless.
-	skipped := e.drainIncomplete
-	e.drainIncomplete = false
+	// Report undischarged publication obligations ONCE, then clear them:
+	// Close is terminal, so the durable unpublished state is left for
+	// Reconcile recovery on the next start regardless. The map is per-key so
+	// a later successful publication (this Close path or a concurrent
+	// Reconcile) that already retired an entry does not get re-reported
+	// (codex round-4 P2-1).
+	skipped := len(e.drainObligations)
+	e.drainObligations = map[requests.Key]int64{}
 	e.mu.Unlock()
 	err := e.store.Close()
 	if stale > 0 {
 		return fmt.Errorf("endpoint closed with %d handler(s) still in flight after %s drain timeout", stale, e.drainTO)
 	}
-	if skipped {
+	if skipped > 0 {
 		if err != nil {
 			return fmt.Errorf("%w (store close error: %v)", ErrDrainIncomplete, err)
 		}
@@ -2463,7 +2471,17 @@ func (e *Endpoint) publishLocked(rec *requests.Record) {
 			// contract-corpus Q18 restart flow relies on Close returning nil
 			// there).
 			if pendingRev > attemptRev {
-				e.drainIncomplete = true
+				// Record the highest undischarged pending revision for this
+				// key. A later successful publication of pendingRev (or a
+				// strictly newer revision) retires this entry in the
+				// MarkPublished success path below or in a later Reconcile,
+				// so Close reports incomplete ONLY if it remains genuinely
+				// unpublished (codex round-4 P2-1: the previous global
+				// drainIncomplete latch could be set while stateAccepting
+				// and never cleared by a later successful publish).
+				if e.drainObligations[key] < pendingRev {
+					e.drainObligations[key] = pendingRev
+				}
 			}
 			e.inFlight--
 			if e.inFlight == 0 && e.state == stateDraining {
@@ -2485,6 +2503,16 @@ func (e *Endpoint) publishLocked(rec *requests.Record) {
 					}
 					if e.visible[key] == attemptRev {
 						delete(e.visible, key)
+					}
+					// Retire any undischarged obligation for this key that
+					// this successful publication (or a strictly newer
+					// chained attempt) has now discharged. MarkPublished is
+					// a high-water mark, so attemptRev covers every earlier
+					// pending revision too (codex round-4 P2-1: a later
+					// successful publish must clear a previously-recorded
+					// skipped obligation rather than leave a stale latch).
+					if ob, ok := e.drainObligations[key]; ok && ob <= attemptRev {
+						delete(e.drainObligations, key)
 					}
 				}
 			}
