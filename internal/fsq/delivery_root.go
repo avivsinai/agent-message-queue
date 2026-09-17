@@ -884,6 +884,29 @@ func (r *DeliveryRoot) WithDLQEnvelopeLock(agent, filename string, fn func(*Deli
 	})
 }
 
+// WithConfigLock runs fn while holding an exclusive advisory lock on the
+// root's config lock file. The lock file is retained deliberately: its flock
+// is released by the kernel on close or process crash, so no stale sentinel
+// can block a later registration. This is the mutual-exclusion seam for
+// config.json mutations (611.22.19 round-2 B2): EnsureAgent uses it to make
+// its read-modify-write atomic against concurrent registrations.
+func (r *DeliveryRoot) WithConfigLock(fn func(*DeliveryRoot) error) error {
+	if fn == nil {
+		return fmt.Errorf("config lock callback is nil")
+	}
+	lockFile, err := r.OpenLockFile("meta", "config.lock", 0o600)
+	if err != nil {
+		return fmt.Errorf("open config lock: %w", err)
+	}
+	defer func() { _ = lockFile.Close() }()
+	return withExclusiveDLQEnvelopeLock(lockFile, func() error {
+		if err := r.VerifyBase(); err != nil {
+			return err
+		}
+		return fn(r)
+	})
+}
+
 // ReadRegularNoFollow reads a root-relative regular file while refusing an
 // initially symlinked artifact and detecting replacement between lstat/open.
 func (r *DeliveryRoot) ReadRegularNoFollow(name string) ([]byte, error) {
