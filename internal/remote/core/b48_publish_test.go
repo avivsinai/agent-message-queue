@@ -661,3 +661,122 @@ func TestB48CloseFailedRHoldsCoalescedRPlus1(t *testing.T) {
 			rec.PublishedRevision, rec.Revision, revs)
 	}
 }
+
+// TestB48MarkerOnlyRetryRetiresObligationNoSecondDelivery (round-6, codex
+// 12:07 REQUEST-CHANGES): the focused regression for the marker-only retry
+// path. Schedule:
+//  1. obligation q: a question is published (delivery succeeds, visible set).
+//  2. MarkPublished fails (PointBeforePublished fires once): the marker
+//     write is skipped, leaving the record with visible set but
+//     PublishedRevision < Revision.
+//  3. Reconcile retries: the marker-only path fires (visible >= revision),
+//     MarkPublished succeeds, the obligation is retired.
+//  4. Close returns nil (no undischarged obligation).
+//  5. No second delivery: the publish callback is NOT called during the
+//     marker-only retry (the delivery is skipped, only the marker runs).
+//
+// The existing marker-failure test (TestB48CloseWaitsFailedPublishReturnsNil)
+// creates no drain obligation and ignores Close's return value; this test
+// directly asserts both the nil return and the publication count for the
+// latest revision.
+func TestB48MarkerOnlyRetryRetiresObligationNoSecondDelivery(t *testing.T) {
+	store, now := openStoreNoCleanup(t)
+
+	// Count publish calls per revision to assert no second delivery.
+	var pubMu sync.Mutex
+	pubCount := make(map[int64]int)
+
+	// failMarker gates PointBeforePublished: fail the marker for the QUESTION
+	// revision (the highest revision before Close), then succeed on retry.
+	// Earlier revisions (received, dispatching, running) pass through
+	// unharmed because the gate is not yet armed.
+	var gateArmed atomic.Bool
+	var markerFailed atomic.Bool
+	crash := func(point string) error {
+		if point == core.PointBeforePublished && gateArmed.Load() && markerFailed.CompareAndSwap(false, true) {
+			return errPublishFailed48 // first marker fails
+		}
+		return nil
+	}
+
+	pub := func(s protocol.Snapshot, origin map[string]string) error {
+		pubMu.Lock()
+		pubCount[s.Revision]++
+		pubMu.Unlock()
+		return nil // delivery always succeeds
+	}
+
+	ep := core.New(core.Config{Store: store, Publish: pub, Crash: crash, Now: now})
+	rt := fake.New("fake", "e_1")
+	ep.Register(rt)
+
+	id := "11111111-1111-4111-8111-111111111490"
+	if _, err := ep.Handle(submitCmd(id), core.Source{Host: "local"}); err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	if !b14cWait(func() bool { return rt.HasRun(id) }) {
+		t.Fatal("never admitted")
+	}
+
+	// Arm the gate: the NEXT marker write (the question revision's marker)
+	// will fail. All earlier markers have already committed.
+	gateArmed.Store(true)
+
+	// Arm the question event: this creates a publication (delivery succeeds,
+	// visible is set) but the marker fails (PointBeforePublished fires once).
+	rt.Question(id, "i_1", []string{"yes", "no"})
+
+	// Wait for the question revision to be delivered and the marker to fail.
+	if !b14cWait(func() bool {
+		return markerFailed.Load()
+	}) {
+		t.Fatal("question marker never failed")
+	}
+
+	// Snapshot the publication count for the question revision BEFORE the
+	// marker retry.
+	pubMu.Lock()
+	latestRev := int64(0)
+	for rev := range pubCount {
+		if rev > latestRev {
+			latestRev = rev
+		}
+	}
+	deliveriesBeforeRetry := pubCount[latestRev]
+	pubMu.Unlock()
+
+	// Verify the marker DID fail: PublishedRevision < Revision.
+	k := requests.Key{CreatorHost: "local", TargetID: "fake", RequestID: id}
+	rec, _, _ := store.Get(k)
+	if rec.PublishedRevision >= rec.Revision {
+		t.Fatalf("marker did not fail: PublishedRevision=%d >= Revision=%d", rec.PublishedRevision, rec.Revision)
+	}
+
+	// Reconcile: marker-only retry. visible[key] >= Revision, so the
+	// delivery is SKIPPED and only MarkPublished runs. The marker succeeds
+	// (markerFailed is already true, crash returns nil).
+	if err := ep.Reconcile(); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	// Verify the marker succeeded: PublishedRevision == Revision.
+	rec, _, _ = store.Get(k)
+	if rec.PublishedRevision < rec.Revision {
+		t.Fatalf("marker-only retry did not advance PublishedRevision: %d < %d", rec.PublishedRevision, rec.Revision)
+	}
+
+	// No second delivery: the publish callback count for the question
+	// revision must NOT have increased during the marker-only retry.
+	pubMu.Lock()
+	deliveriesAfterRetry := pubCount[latestRev]
+	pubMu.Unlock()
+	if deliveriesAfterRetry != deliveriesBeforeRetry {
+		t.Fatalf("marker-only retry caused a second delivery: before=%d after=%d", deliveriesBeforeRetry, deliveriesAfterRetry)
+	}
+
+	// Close must return nil: the obligation was retired by the marker-only
+	// retry (codex round-5 P2 + round-6 assertion).
+	if err := ep.Close(); err != nil {
+		t.Fatalf("close returned error after marker-only retry; want nil (obligation retired): %v", err)
+	}
+}
