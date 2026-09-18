@@ -129,6 +129,28 @@ type Store struct {
 	// under compare-and-retry — only mutual exclusion closes it.
 	mu       sync.Mutex
 	readOnly bool
+	// maxStoreBytes is the aggregate quota across every record in this store
+	// (611.22.19 BK4). Zero disables the aggregate quota; production sets it
+	// via WithMaxStoreBytes. used is the sum of record file sizes on disk,
+	// computed once at Open and maintained on every write/compact. A write
+	// that would exceed the quota refuses storage_full BEFORE dispatch; local
+	// native harness work never reaches this store, so quota pressure cannot
+	// stop it. Tombstones for active epochs are never deleted to make space:
+	// the quota refuses rather than evicting dedup identity, and compaction
+	// (which shrinks records to tombstones) frees space without losing the
+	// identity for an active epoch.
+	maxStoreBytes int64
+	used          int64
+	// reserved (611.22.19 BK4 round-2 B3) is the sum of MaxRecordBytes
+	// reservations held for admitted-but-not-yet-terminal records. A real
+	// reservation, not a point-in-time check: Reserve increments it and
+	// tracks the per-key amount; Create/Update convert or release it when the
+	// record reaches a terminal state. The quota invariant is
+	// used+reserved <= maxStoreBytes, so a result write for an admitted
+	// record is never quota-refused — the reservation already paid for it.
+	// Fail closed at the door, never after the work ran.
+	reserved     int64
+	reservedKeys map[Key]int64
 }
 
 // Option configures Open.
@@ -137,6 +159,25 @@ type Option func(*Store)
 // WithClock injects the clock used for UpdatedAt. Tests pass a fixed clock.
 func WithClock(now func() time.Time) Option {
 	return func(s *Store) { s.now = now }
+}
+
+// MaxStoreBytes returns the aggregate quota in bytes (0 = unbounded).
+// Tests use this to assert that openServeStore wired DefaultMaxStoreBytes.
+func (s *Store) MaxStoreBytes() int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.maxStoreBytes
+}
+
+// WithMaxStoreBytes sets the aggregate quota across every record in this
+// store (611.22.19 BK4). Zero disables the aggregate quota. Production sets
+// protocol.DefaultMaxStoreBytes; tests shrink it. The quota is enforced on
+// every write and reservation: a write that would exceed it refuses
+// storage_full before dispatch, while local native work (which does not pass
+// through this store) is unaffected. Tombstones for active epochs are never
+// deleted to make space.
+func WithMaxStoreBytes(n int64) Option {
+	return func(s *Store) { s.maxStoreBytes = n }
 }
 
 // Open prepares <stateDir>/v1 and takes the owner lock. A second opener on the
@@ -154,9 +195,23 @@ func Open(stateDir string, opts ...Option) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Store{dir: dir, lock: lock, now: time.Now}
+	s := &Store{dir: dir, lock: lock, now: time.Now, reservedKeys: map[Key]int64{}}
 	for _, o := range opts {
 		o(s)
+	}
+	// 611.22.19 BK4: seed the aggregate-quota usage from existing records so
+	// a restarted companion knows what it already owes before admitting new
+	// work. A failure to sum is non-fatal: the quota stays enforced per-write
+	// via the size-aware accounting in write; only the seed is approximate.
+	if s.maxStoreBytes > 0 {
+		// Round-4 fold: one walk sums used AND reseeds reservations for
+		// non-terminal records with no result (received, dispatching,
+		// running). After a restart, running records hold nothing in memory;
+		// without reseeding, fresh submits are admitted into their room and
+		// their results are refused after the work ran.
+		if used, err := s.sumUsed(true); err == nil {
+			s.used = used
+		}
 	}
 	return s, nil
 }
@@ -171,7 +226,7 @@ func OpenReadOnly(stateDir string) (*Store, error) {
 	if _, err := os.Stat(filepath.Join(dir, requestsDir)); err != nil {
 		return nil, protocol.Refuse(protocol.CodeNotFound, "no request store at %s", dir)
 	}
-	return &Store{dir: dir, now: time.Now, readOnly: true}, nil
+	return &Store{dir: dir, now: time.Now, readOnly: true, reservedKeys: map[Key]int64{}}, nil
 }
 
 // Close releases the owner lock and marks the store closed. Every mutation
@@ -331,7 +386,7 @@ func (s *Store) MarkPublished(k Key, revision int64) error {
 		return nil // already marked; nothing to write
 	}
 	rec.PublishedRevision = revision
-	return s.write(rec)
+	return s.writeSettlement(rec)
 }
 
 // MarkAcknowledged records that the native AcknowledgeResult call RETURNED
@@ -365,7 +420,7 @@ func (s *Store) MarkAcknowledged(k Key) error {
 		return nil // already marked; nothing to write
 	}
 	rec.Acknowledged = true
-	return s.write(rec)
+	return s.writeSettlement(rec)
 }
 
 // writeMemo rewrites one record in place without a revision bump or a state
@@ -382,7 +437,7 @@ func (s *Store) WriteMemo(rec *Record) error {
 	if err := s.checkClosed(); err != nil {
 		return err
 	}
-	return s.write(rec)
+	return s.writeSettlement(rec)
 }
 
 // Poison is one undecodable record encountered during List. The key is
@@ -575,14 +630,28 @@ func (s *Store) Compact(before time.Time, limit int) (int, error) {
 	return n, nil
 }
 
-// CompactOne re-reads a single candidate under the caller's lock, re-gates
+// CompactOne re-reads a single candidate under s.mu, re-gates
 // (terminal + !tombstone + old + !OwesAck), and writes the
-// tombstone. Returns true if the record was compacted. The caller MUST hold
-// the endpoint mutex (e.mu) so a concurrent Handle cannot interleave.
+// tombstone. Returns true if the record was compacted.
+//
+// 611.22.19 BK4 round-2 B1: the whole read-mutate-write runs under s.mu.
+// The previous doc claimed the caller holds the endpoint mutex (e.mu),
+// but e.mu does not serialize CompactOne against the async ack markers
+// (endpoint.go calls MarkAcknowledged after e.mu.Unlock on the native-event
+// goroutine). A lost += on s.used drifted the quota counter for the life of
+// the process. CompactOne now takes s.mu like every other writer.
+//
+// 611.22.19 BK4 round-2 B2: the tombstone write is a settlement write, not
+// new work, so it is quota-exempt (writeSettlement). A terminal record with
+// no result GROWS on compaction (tombstone flag + revision bump); refusing
+// that growth at quota would deadlock the sweep forever, since key-ordered
+// List means one refused record stops every later compaction too.
 func (s *Store) CompactOne(key Key, before time.Time) (bool, error) {
 	if err := s.checkClosed(); err != nil {
 		return false, err
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	rec, exists, err := s.Get(key)
 	if err != nil || !exists {
 		return false, err
@@ -623,7 +692,7 @@ func (s *Store) CompactOne(key Key, before time.Time) (bool, error) {
 	if rec.State == protocol.StateCompleted {
 		rec.Code = protocol.CodeResultExpired
 	}
-	if err := s.write(rec); err != nil {
+	if err := s.writeSettlement(rec); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -671,6 +740,48 @@ func (s *Store) write(rec *Record) error {
 	if len(data) > MaxRecordBytes {
 		return protocol.Refuse(protocol.CodeStorageFull, "record exceeds %d bytes", MaxRecordBytes)
 	}
+	key := keyOf(rec)
+	// 611.22.19 BK4 round-2 B3: a real reservation, not a point-in-time check.
+	// A key with a reservation (admitted via Reserve before dispatch) may
+	// grow up to MaxRecordBytes without a quota check — the reservation
+	// already paid for the accepted work AND its bounded result. A result
+	// write for an admitted record is never quota-refused. A key WITHOUT a
+	// reservation (a deferred Create that was not preceded by Reserve) is
+	// fail-closed: used+reserved+delta must fit, or the write refuses
+	// storage_full before the work is admitted. Tombstones for active epochs
+	// are never deleted to make space: this is a refuse-before-write gate,
+	// not an eviction. Local native harness work does not reach this store.
+	if s.maxStoreBytes > 0 {
+		prevSize := int64(0)
+		if fi, err := os.Stat(p); err == nil {
+			prevSize = fi.Size()
+		}
+		delta := int64(len(data)) - prevSize
+		_, hasRes := s.reservedKeys[key]
+		if delta > 0 && !hasRes && s.used+s.reserved+delta > s.maxStoreBytes {
+			return protocol.Refuse(protocol.CodeStorageFull,
+				"store at quota: %d bytes used, %d reserved, %d requested, limit %d",
+				s.used, s.reserved, delta, s.maxStoreBytes)
+		}
+		if _, err := fsq.WriteFileAtomic(filepath.Dir(p), filepath.Base(p), data, fileMode); err != nil {
+			if errors.Is(err, os.ErrPermission) || isNoSpace(err) {
+				return protocol.Refuse(protocol.CodeStorageFull, "cannot persist record: %v", err)
+			}
+			return fmt.Errorf("persist record: %w", err)
+		}
+		// Account for the actual delta only after a successful write. A
+		// compaction that shrank the record (prevSize > new) reduces used.
+		s.used += delta
+		// B3: release the reservation when the record reaches a terminal
+		// state — the result has landed, the bounded space is now consumed
+		// by the actual record, and the reservation has served its purpose.
+		// Non-terminal updates (received->dispatching->running) keep the
+		// reservation: the result is still pending.
+		if rec.State.Terminal() {
+			s.releaseReservationLocked(key)
+		}
+		return nil
+	}
 	if _, err := fsq.WriteFileAtomic(filepath.Dir(p), filepath.Base(p), data, fileMode); err != nil {
 		if errors.Is(err, os.ErrPermission) || isNoSpace(err) {
 			return protocol.Refuse(protocol.CodeStorageFull, "cannot persist record: %v", err)
@@ -678,6 +789,159 @@ func (s *Store) write(rec *Record) error {
 		return fmt.Errorf("persist record: %w", err)
 	}
 	return nil
+}
+
+// writeSettlement persists a settlement write (CompactOne, MarkPublished,
+// MarkAcknowledged, WriteMemo) that is exempt from the aggregate quota
+// (611.22.19 BK4 round-2 B2). Settlement writes never admit new work: a
+// tombstone grows a terminal record, a marker confirms delivery, a memo
+// annotates. Refusing them at quota would deadlock the sweep — a terminal
+// record with no result GROWS on compaction, and key-ordered List means one
+// refused record stops every later compaction too, so the quota can never
+// be released. Settlement writes also never touch the reservation: the
+// reservation is released on the terminal Update that precedes compaction.
+func (s *Store) writeSettlement(rec *Record) error {
+	if s.closed.Load() {
+		return protocol.Refuse(protocol.CodeStoreClosed, "store is closed")
+	}
+	if s.readOnly {
+		return protocol.Refuse(protocol.CodeUnsupported, "store opened read-only")
+	}
+	if rec.Schema == "" {
+		rec.Schema = protocol.SchemaRequest
+	}
+	if rec.Schema != protocol.SchemaRequest {
+		return protocol.Refuse(protocol.CodeInvalid, "record schema must be %s", protocol.SchemaRequest)
+	}
+	if rec.RequestRef == "" {
+		rec.RequestRef = protocol.EncodeRef(rec.CreatorHost, rec.TargetID, rec.RequestID)
+	}
+	if rec.ObservedAt == "" {
+		rec.ObservedAt = protocol.FormatTime(s.now())
+	}
+	rec.UpdatedAt = protocol.FormatTime(s.now())
+	p, err := s.path(keyOf(rec))
+	if err != nil {
+		return err
+	}
+	data, err := json.Marshal(rec)
+	if err != nil {
+		return fmt.Errorf("encode record: %w", err)
+	}
+	if len(data) > MaxRecordBytes {
+		return protocol.Refuse(protocol.CodeStorageFull, "record exceeds %d bytes", MaxRecordBytes)
+	}
+	prevSize := int64(0)
+	if fi, err := os.Stat(p); err == nil {
+		prevSize = fi.Size()
+	}
+	delta := int64(len(data)) - prevSize
+	if _, err := fsq.WriteFileAtomic(filepath.Dir(p), filepath.Base(p), data, fileMode); err != nil {
+		if errors.Is(err, os.ErrPermission) || isNoSpace(err) {
+			return protocol.Refuse(protocol.CodeStorageFull, "cannot persist record: %v", err)
+		}
+		return fmt.Errorf("persist record: %w", err)
+	}
+	// Account for the actual delta after a successful write. Settlement
+	// writes are quota-exempt but still keep used honest.
+	s.used += delta
+	return nil
+}
+
+// releaseReservationLocked releases the reservation for key, if any. The
+// caller holds s.mu.
+func (s *Store) releaseReservationLocked(key Key) {
+	if amt, ok := s.reservedKeys[key]; ok {
+		s.reserved -= amt
+		delete(s.reservedKeys, key)
+	}
+}
+
+// sumUsed walks the record tree and returns the total bytes of all record
+// files. It is the seed for the aggregate-quota accounting at Open
+// (611.22.19 BK4); per-write deltas keep it current afterward. Read errors
+// on individual files are skipped (a vanished file contributes zero),
+// mirroring List's poison isolation.
+//
+// Round-4 fold: reseedReservations is folded into this walk so Open does ONE
+// filepath.Walk + JSON-decode pass, not two. When reseed is true, every
+// non-terminal record with no result reserves MaxRecordBytes.
+func (s *Store) sumUsed(reseed ...bool) (int64, error) {
+	doReseed := len(reseed) > 0 && reseed[0]
+	var total int64
+	base := filepath.Join(s.dir, requestsDir)
+	err := filepath.Walk(base, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return err
+		}
+		if info.IsDir() || !strings.HasSuffix(path, recordSuffix) {
+			return nil
+		}
+		total += info.Size()
+		if doReseed {
+			rec, _, rErr := s.readRecord(path)
+			if rErr != nil || rec == nil {
+				return nil // skip poison records
+			}
+			if !rec.State.Terminal() && rec.Result == nil {
+				k := Key{CreatorHost: rec.CreatorHost, TargetID: rec.TargetID, RequestID: rec.RequestID}
+				if _, exists := s.reservedKeys[k]; !exists {
+					s.reserved += int64(MaxRecordBytes)
+					s.reservedKeys[k] = int64(MaxRecordBytes)
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil && !os.IsNotExist(err) {
+		return 0, err
+	}
+	return total, nil
+}
+
+// Reserve reserves bytes of store capacity for key before dispatch
+// (611.22.19 BK4). This is a REAL reservation, not a point-in-time check
+// (round-2 B3): it increments s.reserved and tracks the per-key amount so
+// the result write for an admitted record is never quota-refused — the
+// reservation already paid for the accepted work AND its bounded result.
+// The quota invariant used+reserved <= maxStoreBytes is maintained. A zero
+// maxStoreBytes store (quota disabled) always succeeds. Callers hold no
+// lock; Reserve takes s.mu. The reservation is released automatically when
+// the record reaches a terminal state via write, or explicitly via
+// ReleaseReservation if the dispatch is abandoned before a write.
+func (s *Store) Reserve(key Key, bytes int64) error {
+	if s.maxStoreBytes <= 0 || bytes <= 0 {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// Idempotent: a re-Reserve for an already-reserved key (a retry that
+	// re-enters the dispatch path) does not double-count.
+	if _, ok := s.reservedKeys[key]; ok {
+		return nil
+	}
+	if s.used+s.reserved+bytes > s.maxStoreBytes {
+		return protocol.Refuse(protocol.CodeStorageFull,
+			"store at quota: %d bytes used, %d reserved, %d requested, limit %d",
+			s.used, s.reserved, bytes, s.maxStoreBytes)
+	}
+	s.reserved += bytes
+	s.reservedKeys[key] = bytes
+	return nil
+}
+
+// ReleaseReservation releases the reservation for key, if any. The endpoint
+// calls it when a dispatch is abandoned before a terminal write (e.g. a
+// crash-point refusal or a pre-dispatch rejection after Reserve succeeded).
+// A terminal write releases the reservation automatically via write, so this
+// is only for the gap between Reserve and the first write that does not land.
+func (s *Store) ReleaseReservation(key Key) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.releaseReservationLocked(key)
 }
 
 func decodeRecord(data []byte) (*Record, error) {

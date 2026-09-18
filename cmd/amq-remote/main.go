@@ -290,20 +290,45 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	} else if added {
 		say(stderr, "registered handle %q in %s\n", *me, filepath.Join(c.root, "meta", "config.json"))
 	}
-	store, err := requests.Open(stateDir)
-	if err != nil {
-		return 0, err
-	}
+	// Carrier publish callback: nil-safe until startupSequence assigns the
+	// carrier. SetPublish runs inside startupSequence; this closure forwards
+	// to the carrier once it exists.
 	var carrier *amqio.Carrier
-	ep := core.New(core.Config{Store: store, Publish: func(s protocol.Snapshot, origin map[string]string) error {
+	carrierPublish := func(s protocol.Snapshot, origin map[string]string) error {
 		if carrier == nil {
 			return nil
 		}
 		return carrier.Publish(s, origin)
-	}})
-	carrier, err = amqio.New(c.root, *me, ep)
+	}
+	// Gather attachments BEFORE the startup sequence: Reconcile runs inside it
+	// and must see every target (611.22.19 round-4 P0 — a reconcile sweep over
+	// an empty target map marks running records attachment_lost). The carrier
+	// is constructed INSIDE startupSequence (round-6: store, SetPublish,
+	// carrier, Register, Reconcile) so the startup revision reaches it.
+	var attachments []core.Attachment
+	if *useFake {
+		attachments = append(attachments, fake.New("fake", "e_1"))
+	}
+	if *codexSocket != "" {
+		codex.Version = version
+		threads := []string{*codexThread}
+		if *codexThread == "" {
+			threads, err = codex.LoadedThreads(*codexSocket)
+			if err != nil {
+				return 0, fmt.Errorf("list codex threads: %w", err)
+			}
+		}
+		for _, id := range threads {
+			att, err := codex.Attach(*codexSocket, id, codex.WithApprovals(*codexApprove))
+			if err != nil {
+				say(stderr, "codex thread %s: %v\n", id, err)
+				continue
+			}
+			attachments = append(attachments, att)
+		}
+	}
+	_, ep, carrier, err := startupSequence(stateDir, c.root, *me, nil, carrierPublish, &carrier, attachments...)
 	if err != nil {
-		_ = store.Close()
 		return 0, err
 	}
 	carrier.Warn = func(e error) {
@@ -325,32 +350,6 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 		return 0, err
 	}
 	drainer := sender.NewDrainer(spool, ep, nil)
-	if *useFake {
-		ep.Register(fake.New("fake", "e_1"))
-	}
-	if *codexSocket != "" {
-		codex.Version = version
-		threads := []string{*codexThread}
-		if *codexThread == "" {
-			threads, err = codex.LoadedThreads(*codexSocket)
-			if err != nil {
-				_ = ep.Close()
-				return 0, fmt.Errorf("list codex threads: %w", err)
-			}
-		}
-		for _, id := range threads {
-			att, err := codex.Attach(*codexSocket, id, codex.WithApprovals(*codexApprove))
-			if err != nil {
-				say(stderr, "codex thread %s: %v\n", id, err)
-				continue
-			}
-			ep.Register(att)
-		}
-	}
-	if err := ep.Reconcile(); err != nil {
-		_ = ep.Close()
-		return 0, fmt.Errorf("reconcile: %w", err)
-	}
 	server, err := ipc.Listen(stateDir, ep)
 	if err != nil {
 		_ = ep.Close()
@@ -927,6 +926,73 @@ func replyRouterFor(root string) amqio.ReplyRouter {
 		}
 		return r, h, err
 	}
+}
+
+// openServeStore builds the store and endpoint with exactly the defaults
+// serve uses (DefaultMaxStoreBytes, DefaultCompactHorizon). It is extracted
+// from serve so a test can exercise the SHIPPED wiring (round-3 NEW 1):
+// deleting the quota or horizon wiring from this function must fail
+// TestBK4ServeWiringCompactionNonVacuous. Reconcile is NOT called here;
+// serve calls it after SetPublish + Register + attachments are wired
+// (round-4 P0: running it here marks every running record attachment_lost).
+func openServeStore(stateDir string, now func() time.Time) (*requests.Store, *core.Endpoint, error) {
+	store, err := requests.Open(stateDir, requests.WithMaxStoreBytes(protocol.DefaultMaxStoreBytes))
+	if err != nil {
+		return nil, nil, err
+	}
+	cfg := core.Config{
+		Store:          store,
+		CompactHorizon: protocol.DefaultCompactHorizon,
+	}
+	if now != nil {
+		cfg.Now = now
+	}
+	ep := core.New(cfg)
+	return store, ep, nil
+}
+
+// startupSequence is the construction-plus-reconcile order serve runs, as
+// ONE callable sequence so tests can pin it (611.22.19 round-4 P0): open
+// store, SetPublish, carrier publish callback, Register attachments, and
+// ONLY THEN Reconcile. Moving Reconcile before SetPublish/Register marks
+// every running record attachment_lost and loses the first reconcile
+// revision to a no-op publisher — both round-5 P0 regressions in main_test.go
+// go red on exactly that inversion. The carrier is constructed INSIDE this
+// sequence (round-6: store, SetPublish, carrier, Register, Reconcile) so the
+// carrier is assigned before Reconcile runs — the startup revision reaches
+// the carrier, not a no-op publisher. The carrierOut parameter (if non-nil)
+// is assigned the carrier before Reconcile, so the caller's publish closure
+// (which captures the same carrier pointer) sees it during Reconcile. serve
+// passes its attachments; the returned store is closed by the caller on error.
+func startupSequence(stateDir, root, handle string, now func() time.Time, publish core.Publisher, carrierOut **amqio.Carrier, attachments ...core.Attachment) (*requests.Store, *core.Endpoint, *amqio.Carrier, error) {
+	store, ep, err := openServeStore(stateDir, now)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	// SetPublish wires the endpoint's publisher. In serve, this forwards to
+	// the carrier; in tests, a custom publish tracks calls. The carrier is
+	// assigned next so Reconcile's publish calls reach it.
+	ep.SetPublish(publish)
+	// Carrier construction (round-6: inside startupSequence, between SetPublish
+	// and Register). The carrier is assigned before Reconcile so the startup
+	// revision reaches it, not a no-op publisher. carrierOut lets the caller's
+	// publish closure see the carrier during Reconcile.
+	carrier, err := amqio.New(root, handle, ep)
+	if err != nil {
+		_ = ep.Close()
+		return store, nil, nil, err
+	}
+	if carrierOut != nil {
+		*carrierOut = carrier
+	}
+	for _, att := range attachments {
+		ep.Register(att)
+	}
+	if err := ep.Reconcile(); err != nil {
+		_ = ep.Close()
+		return store, nil, nil, fmt.Errorf("reconcile: %w", err)
+	}
+	return store, ep, carrier, nil
 }
 
 // isDuplicateConflict reports whether err is a request_conflict: a prior

@@ -120,6 +120,14 @@ const reqQSlack = 8
 // tracks; approvals are per-run, so this bounds reply-required in-flight.
 const maxLiveRuns = 16
 
+// ackedKeyMemoCap bounds the ackedKeys memo (611.22.19 BK4): the set of keys
+// whose terminal results were acknowledged and whose run structs may already
+// have been pruned from the bounded runs map. It outlives maxLiveRuns so a
+// compacted tombstone still short-circuits Lookup to EvidenceNone across a
+// reconcile tick, but it cannot grow without limit. 4x live runs covers a
+// full compaction sweep window without unbounded retention.
+const ackedKeyMemoCap = 4 * maxLiveRuns
+
 // Dial connects to the app-server unix socket and starts the read loop with
 // the given handlers already installed. A caller that only issues requests
 // (and consumes no notifications) passes the zero Handlers.

@@ -192,6 +192,19 @@ func New(cfg Config) *Endpoint {
 	return e
 }
 
+// SetPublish replaces the publisher after construction. Serve uses this
+// to break the circular dependency between the carrier and the endpoint:
+// openServeStore creates the endpoint with a nil publish, then serve wires
+// the carrier in once it exists.
+func (e *Endpoint) SetPublish(p Publisher) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if p == nil {
+		p = func(protocol.Snapshot, map[string]string) error { return nil }
+	}
+	e.publish = p
+}
+
 // Observe registers a callback for every record write. Tests use it to
 // collect state history; production uses it for the activity ring.
 func (e *Endpoint) Observe(fn func(*requests.Record)) {
@@ -571,12 +584,30 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 		e.publishRevision(rec)
 		return protocol.Reply{Snapshot: busySnap, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: rec.Code}}, nil
 	}
+	// 611.22.19 BK4: reserve room for the accepted work plus its bounded
+	// result BEFORE dispatch, so storage pressure fails closed with
+	// storage_full here rather than wedging mid-flight or silently evicting
+	// a dedup tombstone for an active epoch. The reservation is for one
+	// worst-case record (MaxRecordBytes covers a full-size result plus input
+	// and overhead); the actual write re-checks under the store lock. Local
+	// native harness work never reaches this store, so quota pressure cannot
+	// stop it. A disabled quota (zero) reserves nothing.
+	if err := e.store.Reserve(key, protocol.MaxRecordBytes); err != nil {
+		var r *protocol.Refusal
+		if errors.As(err, &r) && r.Code == protocol.CodeStorageFull {
+			e.mu.Unlock()
+			return protocol.Reply{Snapshot: e.unpersisted(rec, protocol.StateRejected, protocol.CodeStorageFull), Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: protocol.CodeStorageFull}}, nil
+		}
+		e.mu.Unlock()
+		return protocol.Reply{}, err
+	}
 	// Admissible + not reserved: Create as received, then dispatch.
 	if err := e.crashAt(PointBeforeReceived); err != nil {
 		e.mu.Unlock()
 		return protocol.Reply{}, err
 	}
 	if err := e.store.Create(rec); err != nil {
+		e.store.ReleaseReservation(key)
 		e.mu.Unlock()
 		var r *protocol.Refusal
 		if errors.As(err, &r) && r.Code == protocol.CodeStorageFull {
@@ -1588,14 +1619,16 @@ func (e *Endpoint) Reconcile() error {
 	// B14e: bounded compaction. Runs once per minute (shouldCompact rate-
 	// limit), reaps terminal+settled+old records into tombstones. e.mu is
 	// held per-record (CompactOne), never across the sweep (Pro B7).
+	// 611.22.19 BK4: reuse the recs snapshot already fetched for the
+	// reconcile pass — CompactOne re-reads each candidate under the store
+	// lock and re-gates (terminal + !tombstone + old + !OwesAck + published),
+	// so a stale snapshot entry is harmless and a whole second history scan
+	// is avoided. This is the bounded incremental work the BK4 finding asked
+	// for: one List per tick, not two.
 	if e.shouldCompact() {
 		cutoff := e.now().Add(-e.compactHorizon)
-		recs2, lerr := e.store.List()
-		if lerr != nil && firstErr == nil {
-			firstErr = lerr
-		}
 		compacted := 0
-		for _, rec := range recs2 {
+		for _, rec := range recs {
 			// Count only successful compactions toward the limit, not every
 			// record the loop looks at (Pro B1: tombstones sort ahead of
 			// live records would starve forever on the i counter).
@@ -1609,8 +1642,20 @@ func (e *Endpoint) Reconcile() error {
 			ok, cerr := e.store.CompactOne(keyOfRecord(rec), cutoff)
 			e.mu.Unlock()
 			if cerr != nil {
-				// Pro B2: feed store-level errors into firstErr and stop the
-				// sweep (store_closed/storage_full will not fix mid-sweep).
+				var rf *protocol.Refusal
+				if errors.As(cerr, &rf) && rf.Code == protocol.CodeStorageFull {
+					// 611.22.19 BK4 round-2 B2: a per-record storage_full must
+					// NOT abort the sweep. CompactOne is a settlement write
+					// (quota-exempt), so this should not fire, but a true
+					// disk-full still records the error and continues so bounded
+					// work per tick stays true (a refused record does not stop
+					// later compactions that might free space).
+					if firstErr == nil {
+						firstErr = cerr
+					}
+					continue
+				}
+				// store_closed or a non-quota error: stop the sweep.
 				if firstErr == nil {
 					firstErr = cerr
 				}
@@ -2013,8 +2058,20 @@ func (e *Endpoint) admitDeferred(rec *requests.Record) error {
 		e.mu.Unlock()
 		return nil // still reserved; retry on the next tick
 	}
+	// 611.22.19 BK4: same fail-closed reservation as the live submit path —
+	// refuse storage_full before dispatch rather than wedging or evicting a
+	// dedup tombstone. A deferred record already occupies space; reserving the
+	// bounded result headroom keeps the quota honest under retry.
+	if err := e.store.Reserve(key, protocol.MaxRecordBytes); err != nil {
+		e.mu.Unlock()
+		return err
+	}
 	rec, exists, err := e.store.Get(key)
 	if err != nil || !exists || rec.State != protocol.StateReceived {
+		// The record is not awaiting admission here (vanished, already
+		// admitted, or already terminal). Release this attempt's
+		// reservation; a later retry re-reserves idempotently.
+		e.store.ReleaseReservation(key)
 		e.mu.Unlock()
 		return err
 	}
@@ -2465,6 +2522,7 @@ func (e *Endpoint) publishLocked(rec *requests.Record) {
 	snap := rec.Snapshot
 	origin := rec.Origin
 	attemptRev := rec.Revision
+	pub := e.publish // read under e.mu (SetPublish writes under it) — round-4 fix carried over #806
 	e.mu.Unlock()
 
 	// publish ONE revision outside e.mu, then loop while skipped newer
@@ -2475,7 +2533,7 @@ func (e *Endpoint) publishLocked(rec *requests.Record) {
 	// P1-1). Single iterative owner, no recursive re-entry (Astra
 	// round-2 P1-2).
 	for {
-		pubErr := e.publish(snap, origin)
+		pubErr := pub(snap, origin)
 
 		e.mu.Lock()
 		// Success bookkeeping for THIS attempt BEFORE selecting the next

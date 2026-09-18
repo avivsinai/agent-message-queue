@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1078,6 +1079,105 @@ func runWithRecordingFake(root string, rf *recordingFake, stdout, stderr io.Writ
 	select {}
 }
 
+// TestBK4ServeWiringCompactionNonVacuous (round-4) tests BOTH halves of the
+// SHIPPED serve wiring via openServeStore:
+//
+//  1. Horizon half: a settled old record is compacted after Reconcile.
+//     RED when DefaultCompactHorizon wiring is removed from openServeStore.
+//  2. Quota half: a submit past DefaultMaxStoreBytes is refused
+//     storage_full through the endpoint openServeStore built.
+//     RED when DefaultMaxStoreBytes wiring is removed (quota=0 = unbounded).
+//
+// openServeStore no longer calls Reconcile (round-4 P0: it ran before
+// SetPublish/Register, marking every running record attachment_lost). The
+// test calls Reconcile explicitly after wiring a no-op publisher, exactly
+// as serve does.
+func TestBK4ServeWiringCompactionNonVacuous(t *testing.T) {
+	root, err := os.MkdirTemp("", "amqbk4w")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	stateDir := filepath.Join(root, "extensions", "remote")
+
+	// --- Seed one settled old record eligible for compaction ---
+	now := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	seedStore, err := requests.Open(stateDir,
+		requests.WithMaxStoreBytes(protocol.DefaultMaxStoreBytes),
+		requests.WithClock(func() time.Time { return now }),
+	)
+	if err != nil {
+		t.Fatalf("seed open: %v", err)
+	}
+	rec := &requests.Record{
+		Snapshot: protocol.Snapshot{
+			Schema:      protocol.SchemaRequest,
+			RequestID:   "11111111-1111-4111-8111-111111111730",
+			CreatorHost: "hostA",
+			TargetID:    "t_fake1",
+			Epoch:       "e_1",
+			Revision:    1,
+			State:       protocol.StateReceived,
+			InputDigest: requests.Digest([]byte("say hi")),
+		},
+		Input: &protocol.SubmitInput{Text: "say hi"},
+	}
+	k := requests.Key{CreatorHost: rec.CreatorHost, TargetID: rec.TargetID, RequestID: rec.RequestID}
+	if err := seedStore.Create(rec); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	rec.Revision, rec.State = 2, protocol.StateDispatching
+	if err := seedStore.Update(rec); err != nil {
+		t.Fatalf("dispatching: %v", err)
+	}
+	rec.Revision, rec.State = 3, protocol.StateCompleted
+	rec.Result = &protocol.Result{Text: "done"}
+	rec.ObservedAt = "2026-09-01T00:00:00Z" // old: before the compact horizon
+	rec.AckDigest = protocol.EvidenceDigest(rec.Result)
+	if err := seedStore.Update(rec); err != nil {
+		t.Fatalf("completed: %v", err)
+	}
+	if err := seedStore.MarkPublished(k, 3); err != nil {
+		t.Fatalf("mark published: %v", err)
+	}
+	if err := seedStore.Close(); err != nil {
+		t.Fatalf("seed close: %v", err)
+	}
+
+	// --- Horizon half: openServeStore + explicit Reconcile compacts ---
+	store, ep, err := openServeStore(stateDir, func() time.Time { return now })
+	if err != nil {
+		t.Fatalf("openServeStore: %v", err)
+	}
+	defer func() { _ = ep.Close() }()
+
+	// Wire a no-op publisher (as serve does via SetPublish before Reconcile).
+	ep.SetPublish(func(protocol.Snapshot, map[string]string) error { return nil })
+
+	if err := ep.Reconcile(); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	got, exists, err := store.Get(k)
+	if err != nil || !exists {
+		t.Fatalf("record missing after reconcile: exists=%v err=%v", exists, err)
+	}
+	if !got.Tombstone {
+		t.Fatal("horizon half: record not tombstoned (DefaultCompactHorizon wiring missing from openServeStore?)")
+	}
+
+	// --- Quota half: openServeStore wired DefaultMaxStoreBytes ---
+	// The store openServeStore built must have the production quota. If the
+	// DefaultMaxStoreBytes wiring is removed (quota=0 = unbounded), this goes
+	// RED. We assert the value directly because filling 64MiB in a test is
+	// impractical; the accessor confirms the wiring reached the store.
+	if got := store.MaxStoreBytes(); got != protocol.DefaultMaxStoreBytes {
+		t.Fatalf("quota half: store maxStoreBytes=%d, want %d (DefaultMaxStoreBytes wiring missing from openServeStore?)", got, protocol.DefaultMaxStoreBytes)
+	}
+}
+
 // TestCLISubmitPrintsAchievedEvidence pins the architect-review invariant:
 // submit prints the achieved evidence class (the human projection) on every
 // successful submit, so a human sees `admitted` from the fake (or
@@ -1138,7 +1238,198 @@ func TestCLISubmitMinEvidenceUnsupportedExits6(t *testing.T) {
 	}
 }
 
-// TestCLISubmitPrintsAchievedEvidence pins the architect-review invariant:
+// TestBK4P0RunningStaysRunningAfterReconcile (round-5) is the first P0
+// regression probe. A running record (simulating a restart mid-run) bound to
+// a fake attachment whose Lookup reports running MUST stay running after the
+// startup Reconcile — NOT get marked attachment_lost/uncertain.
+//
+// The test runs startupSequence — the ONE construction-plus-reconcile
+// function serve calls (open store → SetPublish → Register → Reconcile) —
+// with the fake attachment, so reconcileLive's Lookup finds the target.
+//
+// RED when Reconcile is moved back before Register (the P0 bug): with no
+// attachment registered, reconcileLive's `!ok` branch marks the record
+// StateUncertain + CodeAttachmentLost.
+func TestBK4P0RunningStaysRunningAfterReconcile(t *testing.T) {
+	root, err := os.MkdirTemp("", "amqbk4p0a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	stateDir := filepath.Join(root, "extensions", "remote")
+
+	// Seed a running record directly in the store (restart mid-run).
+	now := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	seedStore, err := requests.Open(stateDir,
+		requests.WithMaxStoreBytes(protocol.DefaultMaxStoreBytes),
+		requests.WithClock(func() time.Time { return now }),
+	)
+	if err != nil {
+		t.Fatalf("seed open: %v", err)
+	}
+	rt := fake.New("fake", "e_1")
+	rec := &requests.Record{
+		Snapshot: protocol.Snapshot{
+			Schema:      protocol.SchemaRequest,
+			RequestID:   "11111111-1111-4111-8111-111111110011",
+			CreatorHost: "hostA",
+			TargetID:    "fake",
+			RequestRef:  protocol.EncodeRef("hostA", "fake", "11111111-1111-4111-8111-111111110011"),
+			Epoch:       "e_1",
+			Revision:    1,
+			State:       protocol.StateReceived,
+			InputDigest: requests.Digest([]byte("run")),
+		},
+		Input: &protocol.SubmitInput{Text: "run"},
+	}
+	k := requests.Key{CreatorHost: rec.CreatorHost, TargetID: rec.TargetID, RequestID: rec.RequestID}
+	if err := seedStore.Create(rec); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	// Dispatch through the fake so a run is bound (Lookup will confirm running).
+	admission, err := rt.Submit(core.BoundRequest{Key: k, Epoch: "e_1", Input: *rec.Input})
+	if err != nil {
+		t.Fatalf("fake submit: %v", err)
+	}
+	rec.Revision = 2
+	rec.State = protocol.StateDispatching
+	if err := seedStore.Update(rec); err != nil {
+		t.Fatalf("dispatching: %v", err)
+	}
+	rec.Revision = 3
+	rec.State = protocol.StateRunning
+	rec.NativeRun = &admission.RunID
+	if err := seedStore.Update(rec); err != nil {
+		t.Fatalf("running: %v", err)
+	}
+	if err := seedStore.Close(); err != nil {
+		t.Fatalf("seed close: %v", err)
+	}
+
+	// serve sequence via ONE shared function: startupSequence (open store →
+	// SetPublish → Register → Reconcile). The fake is registered BEFORE
+	// Reconcile so the sweep sees the live target (the P0 bug did not).
+	store, ep, _, err := startupSequence(stateDir, root, amqio.DefaultHandle, func() time.Time { return now },
+		func(protocol.Snapshot, map[string]string) error { return nil }, nil, rt)
+	if err != nil {
+		t.Fatalf("startupSequence: %v", err)
+	}
+	defer func() { _ = ep.Close() }()
+
+	got, exists, err := store.Get(k)
+	if err != nil || !exists {
+		t.Fatalf("record missing: exists=%v err=%v", exists, err)
+	}
+	if got.State == protocol.StateUncertain && got.Code == protocol.CodeAttachmentLost {
+		t.Fatal("P0: running record marked attachment_lost after reconcile (Reconcile ran before Register — the P0 bug)")
+	}
+	if got.State != protocol.StateRunning {
+		t.Fatalf("P0: running record state=%s code=%s, want running (Reconcile before Register marks it attachment_lost)", got.State, got.Code)
+	}
+}
+
+// TestBK4P0FirstRevisionReachesPublisher (round-5) is the second P0
+// regression probe. The first Reconcile revision of a running record must
+// reach the real publisher (SetPublish), not a no-op. When Reconcile runs
+// before SetPublish (the P0 bug), the published snapshot's revision is lost
+// to a nil publisher callback.
+//
+// The test seeds a running record, wires a publisher that records the
+// snapshot it receives, registers the fake, then calls Reconcile. The
+// publisher must see the record's revision.
+//
+// RED when Reconcile is moved before SetPublish: the publisher is nil, so
+// no snapshot is recorded.
+func TestBK4P0FirstRevisionReachesPublisher(t *testing.T) {
+	root, err := os.MkdirTemp("", "amqbk4p0b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	stateDir := filepath.Join(root, "extensions", "remote")
+
+	now := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	seedStore, err := requests.Open(stateDir,
+		requests.WithMaxStoreBytes(protocol.DefaultMaxStoreBytes),
+		requests.WithClock(func() time.Time { return now }),
+	)
+	if err != nil {
+		t.Fatalf("seed open: %v", err)
+	}
+	rt := fake.New("fake", "e_1")
+	rec := &requests.Record{
+		Snapshot: protocol.Snapshot{
+			Schema:      protocol.SchemaRequest,
+			RequestID:   "11111111-1111-4111-8111-111111110022",
+			CreatorHost: "hostA",
+			TargetID:    "fake",
+			RequestRef:  protocol.EncodeRef("hostA", "fake", "11111111-1111-4111-8111-111111110022"),
+			Epoch:       "e_1",
+			Revision:    1,
+			State:       protocol.StateReceived,
+			InputDigest: requests.Digest([]byte("pub")),
+		},
+		Input: &protocol.SubmitInput{Text: "pub"},
+	}
+	k := requests.Key{CreatorHost: rec.CreatorHost, TargetID: rec.TargetID, RequestID: rec.RequestID}
+	if err := seedStore.Create(rec); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	admission, err := rt.Submit(core.BoundRequest{Key: k, Epoch: "e_1", Input: *rec.Input})
+	if err != nil {
+		t.Fatalf("fake submit: %v", err)
+	}
+	rec.Revision = 2
+	rec.State = protocol.StateDispatching
+	if err := seedStore.Update(rec); err != nil {
+		t.Fatalf("dispatching: %v", err)
+	}
+	rec.Revision = 3
+	rec.State = protocol.StateRunning
+	rec.NativeRun = &admission.RunID
+	if err := seedStore.Update(rec); err != nil {
+		t.Fatalf("running: %v", err)
+	}
+	if err := seedStore.Close(); err != nil {
+		t.Fatalf("seed close: %v", err)
+	}
+
+	var publishedRev int64
+	var pubMu sync.Mutex
+	var pubCalled bool
+	publish := func(s protocol.Snapshot, origin map[string]string) error {
+		pubMu.Lock()
+		pubCalled = true
+		publishedRev = s.Revision
+		pubMu.Unlock()
+		return nil
+	}
+	// serve sequence via ONE shared function: startupSequence (open store →
+	// SetPublish → Register → Reconcile). RED when Reconcile is moved before
+	// SetPublish inside startupSequence: the nil publisher records nothing.
+	_, ep, _, err := startupSequence(stateDir, root, amqio.DefaultHandle, func() time.Time { return now }, publish, nil, rt)
+	if err != nil {
+		t.Fatalf("startupSequence: %v", err)
+	}
+	defer func() { _ = ep.Close() }()
+
+	pubMu.Lock()
+	called := pubCalled
+	rev := publishedRev
+	pubMu.Unlock()
+	if !called {
+		t.Fatal("P0: publisher was never called (Reconcile ran before SetPublish — the first revision was lost to a no-op publisher)")
+	}
+	if rev < 2 {
+		t.Fatalf("P0: published revision=%d, want >=2 (the running record's revision)", rev)
+	}
+}
 
 // TestCLIB6StatusByRequestIdWhileServeUp (round-5 gap 3) pins that `status`
 // with a bare request ID works WHILE SERVE IS UP. A running endpoint refuses
@@ -1185,5 +1476,105 @@ func TestCLIB6StatusByRequestIdWhileServeUp(t *testing.T) {
 	}
 	if !strings.Contains(out, string(protocol.CodeStaleEpoch)) {
 		t.Fatalf("status did not print last_error for failed envelope: %s", out)
+	}
+}
+
+// TestBK4R6CarrierConstructedInsideStartupSequence (round-6) pins that the
+// carrier is constructed INSIDE startupSequence, before Reconcile. The
+// startup reconcile revision must reach the carrier, not a no-op publisher.
+// The test seeds a running record, calls startupSequence with a publish
+// callback that captures the carrier variable, and asserts: (1) the carrier
+// is non-nil when the publish callback is invoked during Reconcile (proving
+// the carrier was constructed before Reconcile ran); (2) the carrier is
+// non-nil when startupSequence returns.
+//
+// RED when carrier construction is moved after startupSequence returns: the
+// carrierPublish closure sees carrier==nil during Reconcile and returns nil
+// (no-op), so the startup revision is lost to a no-op publisher.
+func TestBK4R6CarrierConstructedInsideStartupSequence(t *testing.T) {
+	root, err := os.MkdirTemp("", "amqbk4r6a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	stateDir := filepath.Join(root, "extensions", "remote")
+	now := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+
+	// Seed a running record directly in the store (restart mid-run).
+	seedStore, err := requests.Open(stateDir, requests.WithMaxStoreBytes(protocol.DefaultMaxStoreBytes))
+	if err != nil {
+		t.Fatalf("seed open: %v", err)
+	}
+	rt := fake.New("fake", "e_1")
+	id := "22222222-2222-4222-8222-2222222260a1"
+	rec := &requests.Record{
+		Snapshot: protocol.Snapshot{
+			Schema:      protocol.SchemaRequest,
+			RequestID:   id,
+			CreatorHost: "hostA",
+			TargetID:    "fake",
+			RequestRef:  protocol.EncodeRef("hostA", "fake", id),
+			Epoch:       "e_1",
+			State:       protocol.StateReceived,
+			Revision:    1,
+		},
+		Input: &protocol.SubmitInput{Text: "r6 probe"},
+	}
+	if err := seedStore.Create(rec); err != nil {
+		t.Fatalf("seed create: %v", err)
+	}
+	// Dispatch through the fake so a run is bound (Lookup will confirm running).
+	k := requests.Key{CreatorHost: rec.CreatorHost, TargetID: rec.TargetID, RequestID: rec.RequestID}
+	admission, err := rt.Submit(core.BoundRequest{Key: k, Epoch: "e_1", Input: *rec.Input})
+	if err != nil {
+		t.Fatalf("fake submit: %v", err)
+	}
+	rec.Revision = 2
+	rec.State = protocol.StateDispatching
+	if err := seedStore.Update(rec); err != nil {
+		t.Fatalf("dispatching: %v", err)
+	}
+	rec.Revision = 3
+	rec.State = protocol.StateRunning
+	rec.NativeRun = &admission.RunID
+	if err := seedStore.Update(rec); err != nil {
+		t.Fatalf("running: %v", err)
+	}
+	if err := seedStore.Close(); err != nil {
+		t.Fatalf("seed close: %v", err)
+	}
+
+	// The publish callback mirrors serve's carrierPublish closure: it forwards
+	// to the carrier variable, which is assigned inside startupSequence. If
+	// the carrier is constructed AFTER Reconcile (revert), the closure sees
+	// carrier==nil during Reconcile and the startup revision is lost.
+	var carrier *amqio.Carrier
+	var carrierNilDuringPublish atomic.Bool
+	publish := func(s protocol.Snapshot, origin map[string]string) error {
+		if carrier == nil {
+			carrierNilDuringPublish.Store(true)
+			return nil
+		}
+		return carrier.Publish(s, origin)
+	}
+
+	_, ep, carrier, err := startupSequence(stateDir, root, amqio.DefaultHandle, func() time.Time { return now }, publish, &carrier, rt)
+	if err != nil {
+		t.Fatalf("startupSequence: %v", err)
+	}
+	defer func() { _ = ep.Close() }()
+
+	// (1) The carrier must be non-nil: constructed INSIDE startupSequence.
+	if carrier == nil {
+		t.Fatal("R6: carrier is nil after startupSequence (not constructed inside)")
+	}
+	// (2) The carrier was non-nil when the publish callback was invoked during
+	// Reconcile. If the carrier were constructed after startupSequence, the
+	// closure would see carrier==nil and the startup revision would be lost.
+	if carrierNilDuringPublish.Load() {
+		t.Fatal("R6: carrier was nil when publish was called during Reconcile (carrier constructed after Reconcile, not inside startupSequence)")
 	}
 }
