@@ -137,10 +137,10 @@ type ValidationError interface {
 	validationError()
 }
 
-func (*ErrDuplicateTarget) validationError()   {}
-func (*ErrEpochOnNonFake) validationError()    {}
-func (*ErrWrongLayer) validationError()        {}
-func (*ErrMissingField) validationError()      {}
+func (*ErrDuplicateTarget) validationError() {}
+func (*ErrEpochOnNonFake) validationError()  {}
+func (*ErrWrongLayer) validationError()      {}
+func (*ErrMissingField) validationError()    {}
 
 // IsValidation reports whether err is a manifest validation failure as
 // opposed to a filesystem or parse failure. Validation failures are usage
