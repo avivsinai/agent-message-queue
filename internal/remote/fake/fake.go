@@ -116,7 +116,7 @@ func (r *Runtime) Inspect() protocol.Session {
 	case r.busy:
 		status = "busy"
 	}
-	caps := protocol.Capabilities{Inspect: true, Submit: true, CancelRequest: true, AnswerQuestion: true, ApproveTool: true, Steer: true, Terminal: "unavailable"}
+	caps := protocol.Capabilities{Inspect: true, Submit: true, CancelRequest: true, AnswerQuestion: true, ApproveTool: true, Steer: false, Terminal: "unavailable"}
 	if r.capabilityOverride != nil {
 		caps = *r.capabilityOverride
 	}

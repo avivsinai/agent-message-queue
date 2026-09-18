@@ -16,11 +16,13 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/remote/amqio"
+	_ "github.com/avivsinai/agent-message-queue/internal/remote/claude" // registers claude stub factory for TestBuildPartialFailureFakeAndClaude
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/fake"
 	"github.com/avivsinai/agent-message-queue/internal/remote/ipc"
 	"github.com/avivsinai/agent-message-queue/internal/remote/manifest"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
+	"github.com/avivsinai/agent-message-queue/internal/remote/registry"
 	"github.com/avivsinai/agent-message-queue/internal/remote/requests"
 	"github.com/avivsinai/agent-message-queue/internal/remote/sender"
 )
@@ -1580,13 +1582,14 @@ func TestBK4R6CarrierConstructedInsideStartupSequence(t *testing.T) {
 	}
 }
 
-// TestServeReadsManifest (611.13) pins that serve reads the adapter manifest
-// at extensions/remote/manifest.json and builds attachments via the registry.
-// A manifest with one fake entry yields serve with one target, asserted via
-// `sessions --json`. This extends the startup-construction assertion: the
-// manifest path feeds registry.Build, which feeds startupSequence.
-func TestServeReadsManifest(t *testing.T) {
-	root, err := os.MkdirTemp("", "amqrmanifest")
+// TestStartupSequenceWithManifest (611.13 r1) extends the round-6
+// startup-construction assertion: a manifest entry feeds registry.Build,
+// which feeds startupSequence. The carrier is constructed inside
+// startupSequence with the manifest's fake adapter registered, so the
+// startup revision reaches the carrier. This replaces the deleted
+// sleep-based integration test (TestServeReadsManifest).
+func TestStartupSequenceWithManifest(t *testing.T) {
+	root, err := os.MkdirTemp("", "amqrmanifestseq")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1601,6 +1604,7 @@ func TestServeReadsManifest(t *testing.T) {
 	// Write a manifest with one fake adapter.
 	mf := manifest.File{
 		SchemaVersion: manifest.SchemaVersion,
+		Layer:         manifest.Layer,
 		Adapters: []manifest.Adapter{
 			{Kind: "fake", Target: "fake", Epoch: "e_1"},
 		},
@@ -1609,30 +1613,82 @@ func TestServeReadsManifest(t *testing.T) {
 	if err := os.WriteFile(manifest.DefaultPath(stateDir), data, 0644); err != nil {
 		t.Fatal(err)
 	}
-
-	done := make(chan int, 1)
-	go func() {
-		var out, errBuf bytes.Buffer
-		// No --fake flag: the manifest is the sole source.
-		done <- run([]string{"serve", "--root", root}, strings.NewReader(""), &out, &errBuf)
-	}()
-	t.Cleanup(func() {
-		select {
-		case <-done:
-		default:
-		}
-	})
-
-	// Wait for the socket; sessions must show the fake target.
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		var out, errBuf bytes.Buffer
-		if run([]string{"sessions", "--root", root, "--json"}, strings.NewReader(""), &out, &errBuf) == 0 {
-			if strings.Contains(out.String(), "\"fake\"") {
-				return // pass: the manifest's fake adapter is live
-			}
-		}
-		time.Sleep(25 * time.Millisecond)
+	// Load + Build via the registry (the same path serve takes).
+	loaded, err := manifest.Load(manifest.DefaultPath(stateDir))
+	if err != nil {
+		t.Fatalf("manifest load: %v", err)
 	}
-	t.Fatal("serve did not surface the manifest's fake target in sessions within 5s")
+	outcomes := registry.Build(context.Background(), root, stateDir, loaded)
+	if len(outcomes) != 1 {
+		t.Fatalf("got %d outcomes, want 1", len(outcomes))
+	}
+	if outcomes[0].Attachment == nil {
+		t.Fatalf("outcome[0] attachment is nil, refusal=%v", outcomes[0].Refusal)
+	}
+	atts := []core.Attachment{outcomes[0].Attachment}
+	// startupSequence constructs the carrier inside, before Reconcile.
+	var carrier *amqio.Carrier
+	carrierPublish := func(s protocol.Snapshot, origin map[string]string) error {
+		if carrier == nil {
+			return nil
+		}
+		return carrier.Publish(s, origin)
+	}
+	_, ep, carrier, err := startupSequence(stateDir, root, amqio.DefaultHandle, nil, carrierPublish, &carrier, atts...)
+	if err != nil {
+		t.Fatalf("startupSequence: %v", err)
+	}
+	defer func() { _ = ep.Close() }()
+	if carrier == nil {
+		t.Fatal("carrier is nil after startupSequence (not constructed inside)")
+	}
+	// The fake target must be registered (Reconcile saw it).
+	if len(ep.Targets()) == 0 {
+		t.Fatal("no targets registered (manifest's fake adapter not built into startupSequence)")
+	}
+}
+
+// TestBuildPartialFailureFakeAndClaude (611.13 r1) pins the partial-failure
+// happy path: a manifest with [fake, claude] yields one attachment (fake)
+// and one typed refusal (claude stub). serve registers what built and
+// persists the refusal; one bad adapter never takes down serve.
+func TestBuildPartialFailureFakeAndClaude(t *testing.T) {
+	root, err := os.MkdirTemp("", "amqrpartial")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	stateDir := filepath.Join(root, "extensions", "remote")
+	if err := os.MkdirAll(stateDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	// A manifest with a fake (OK) and a claude (stub refusal).
+	mf := manifest.File{
+		SchemaVersion: manifest.SchemaVersion,
+		Adapters: []manifest.Adapter{
+			{Kind: "fake", Target: "fake", Epoch: "e_1"},
+			{Kind: "claude", Target: "cc-1"},
+		},
+	}
+	outcomes := registry.Build(context.Background(), root, stateDir, mf)
+	if len(outcomes) != 2 {
+		t.Fatalf("got %d outcomes, want 2", len(outcomes))
+	}
+	// fake succeeds.
+	if outcomes[0].Attachment == nil {
+		t.Fatalf("outcome[0] (fake): expected attachment, got refusal=%v", outcomes[0].Refusal)
+	}
+	if outcomes[0].Attachment.Inspect().TargetID != "fake" {
+		t.Fatalf("outcome[0] target=%q, want fake", outcomes[0].Attachment.Inspect().TargetID)
+	}
+	// claude refuses (stub).
+	if outcomes[1].Attachment != nil {
+		t.Fatal("outcome[1] (claude): expected refusal, got attachment")
+	}
+	if outcomes[1].Refusal == nil {
+		t.Fatal("outcome[1] (claude): expected refusal, got nil")
+	}
+	if outcomes[1].Refusal.Error() != "claude adapter not yet authorized (gated on 611.2 wire-capture probe)" {
+		t.Fatalf("outcome[1] refusal=%q, want claude ErrNotAuthorized", outcomes[1].Refusal.Error())
+	}
 }

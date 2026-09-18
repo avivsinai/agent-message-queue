@@ -99,19 +99,38 @@ func (e *ErrUnknownKind) Error() string {
 	return fmt.Sprintf("adapter %q: unknown kind %q (no factory registered)", e.Target, e.Kind)
 }
 
-// Build materializes attachments from a manifest. Flags append to the
-// manifest set (callers merge before Build). A target present in both is a
-// usage error caught by manifest.Validate. Unknown kinds yield a refusal
-// (the claude stub registers a factory that returns an error at attach time;
-// a truly unregistered kind is an error here).
-func Build(ctx context.Context, root, stateDir string, f manifest.File) ([]core.Attachment, error) {
-	atts := make([]core.Attachment, 0, len(f.Adapters))
+// Outcome is the per-adapter result of Build: either an Attachment or a
+// typed Refusal (the factory returned an error). serve registers what built
+// and persists refusals as typed data doctor prints. One bad adapter (an
+// unreachable Codex thread, a claude stub refusal) never takes down serve.
+type Outcome struct {
+	// Manifest is the adapter entry this outcome is for.
+	Manifest manifest.Adapter
+	// Attachment is non-nil when the factory succeeded.
+	Attachment core.Attachment
+	// Refusal is non-nil when the factory returned an error. It is the typed
+	// error the doctor prints; serve continues without this adapter.
+	Refusal error
+}
+
+// Build materializes attachments from a manifest, returning per-adapter
+// outcomes. Flags append to the manifest set (callers merge before Build).
+// A target present in both is a usage error caught by manifest.Validate.
+// Build never fails on a single adapter: a factory error becomes a typed
+// refusal in the Outcome, not a fatal return. An unknown kind is also a
+// refusal (not a fatal error), so serve can persist it and continue.
+func Build(ctx context.Context, root, stateDir string, f manifest.File) []Outcome {
+	outcomes := make([]Outcome, 0, len(f.Adapters))
 	for _, a := range f.Adapters {
 		mu.RLock()
 		fac, ok := factors[a.Kind]
 		mu.RUnlock()
 		if !ok {
-			return nil, &ErrUnknownKind{Kind: a.Kind, Target: a.Target}
+			outcomes = append(outcomes, Outcome{
+				Manifest: a,
+				Refusal:  &ErrUnknownKind{Kind: a.Kind, Target: a.Target},
+			})
+			continue
 		}
 		att, err := fac(ctx, FactoryConfig{
 			Root:     root,
@@ -121,11 +140,12 @@ func Build(ctx context.Context, root, stateDir string, f manifest.File) ([]core.
 			Config:   a.Config,
 		})
 		if err != nil {
-			return nil, fmt.Errorf("adapter %q (kind %q): %w", a.Target, a.Kind, err)
+			outcomes = append(outcomes, Outcome{Manifest: a, Refusal: err})
+			continue
 		}
-		atts = append(atts, att)
+		outcomes = append(outcomes, Outcome{Manifest: a, Attachment: att})
 	}
-	return atts, nil
+	return outcomes
 }
 
 // Discover lists candidates from all registered discoverers. serve --discover

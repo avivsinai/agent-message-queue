@@ -33,7 +33,15 @@ func Factory(ctx context.Context, cfg registry.FactoryConfig) (core.Attachment, 
 	if c.Thread == "" {
 		return nil, fmt.Errorf("codex config: thread is required")
 	}
-	att, err := Attach(c.Socket, c.Thread, WithApprovals(c.Approve))
+	// .13: the manifest target is the identity the endpoint addresses this
+	// adapter under ("sales" is addressed as "sales", not codex:<thread>). The
+	// native thread id stays with the daemon protocol; only the advertised
+	// target id changes. cfg.Target empty = legacy derived identity.
+	opts := []Option{WithApprovals(c.Approve)}
+	if cfg.Target != "" {
+		opts = append(opts, WithTarget(cfg.Target))
+	}
+	att, err := Attach(c.Socket, c.Thread, opts...)
 	if err != nil {
 		return nil, err
 	}

@@ -23,6 +23,7 @@ func TestLoadAbsentFileYieldsZeroAdapters(t *testing.T) {
 func TestValidateRejectsDuplicateTarget(t *testing.T) {
 	f := File{
 		SchemaVersion: SchemaVersion,
+		Layer:         Layer,
 		Adapters: []Adapter{
 			{Kind: "fake", Target: "dup", Epoch: "e_1"},
 			{Kind: "fake", Target: "dup", Epoch: "e_2"},
@@ -44,6 +45,7 @@ func TestValidateRejectsDuplicateTarget(t *testing.T) {
 func TestValidateRejectsEpochOnNonFake(t *testing.T) {
 	f := File{
 		SchemaVersion: SchemaVersion,
+		Layer:         Layer,
 		Adapters: []Adapter{
 			{Kind: "codex", Target: "cx-1", Epoch: "cx-123"},
 		},
@@ -67,6 +69,7 @@ func TestLoadValidManifest(t *testing.T) {
 	cfg, _ := json.Marshal(map[string]string{"socket": "/tmp/x", "thread": "t1"})
 	doc := File{
 		SchemaVersion: SchemaVersion,
+		Layer:         Layer,
 		Adapters: []Adapter{
 			{Kind: "fake", Target: "fake", Epoch: "e_1"},
 			{Kind: "codex", Target: "cx-1", Config: cfg},

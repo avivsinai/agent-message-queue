@@ -18,17 +18,26 @@ package manifest
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 )
 
 // SchemaVersion is the manifest format version.
 const SchemaVersion = 1
 
+// Layer is the companion's extension-layer name. The companion owns
+// extensions/remote, so the manifest at extensions/remote/manifest.json is a
+// passive extension manifest with layer "remote" (the ADR layer contract that
+// `amq doctor` validates).
+const Layer = "remote"
+
 // File is the top-level manifest document.
 type File struct {
 	SchemaVersion int       `json:"schema_version"`
+	Layer         string    `json:"layer"`
 	Adapters      []Adapter `json:"adapters"`
 }
 
@@ -56,7 +65,7 @@ func Load(path string) (File, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return File{SchemaVersion: SchemaVersion}, nil
+			return File{SchemaVersion: SchemaVersion, Layer: Layer}, nil
 		}
 		return File{}, fmt.Errorf("read manifest %s: %w", path, err)
 	}
@@ -95,23 +104,79 @@ func (e *ErrEpochOnNonFake) Error() string {
 	return fmt.Sprintf("adapter %q (kind %q): epoch is test-only for fake and rejected for other kinds", e.Target, e.Kind)
 }
 
-// Validate checks the manifest: no duplicate targets, epoch only on fake.
+// ErrMissingLayer is returned when the passive-manifest layer field is
+// absent. A remote manifest without layer cannot be diagnosed by `amq
+// doctor`'s extension scan.
+type ErrMissingLayer struct{}
+
+func (e *ErrMissingLayer) Error() string {
+	return "manifest: layer field is required (passive extension-manifest contract)"
+}
+
+// ErrMissingField is returned when an adapter entry lacks its target or kind.
+type ErrMissingField struct {
+	Field   string
+	Context string
+}
+
+func (e *ErrMissingField) Error() string { return e.Field + " is required (" + e.Context + ")" }
+
+// IsValidation reports whether err is a manifest validation failure as
+// opposed to a filesystem or parse failure. Validation failures are usage
+// errors (exit 2); I/O and parse failures are not.
+func IsValidation(err error) bool {
+	var dup *ErrDuplicateTarget
+	var epoch *ErrEpochOnNonFake
+	var missing *ErrMissingLayer
+	var field *ErrMissingField
+	return errors.Is(err, dup) || errors.Is(err, epoch) || errors.Is(err, missing) || errors.Is(err, field)
+}
+
+// Validate checks the manifest: layer present, no duplicate targets, target
+// and kind required, epoch only on fake.
 func Validate(f File) error {
+	if f.Layer == "" {
+		return &ErrMissingLayer{}
+	}
 	seen := make(map[string]bool, len(f.Adapters))
 	for _, a := range f.Adapters {
 		if a.Target == "" {
-			return fmt.Errorf("adapter kind %q: target is required", a.Kind)
+			return &ErrMissingField{Field: "target", Context: "adapter kind " + strconv.Quote(a.Kind)}
 		}
 		if seen[a.Target] {
 			return &ErrDuplicateTarget{Target: a.Target}
 		}
 		seen[a.Target] = true
 		if a.Kind == "" {
-			return fmt.Errorf("adapter target %q: kind is required", a.Target)
+			return &ErrMissingField{Field: "kind", Context: "adapter target " + strconv.Quote(a.Target)}
 		}
 		if a.Epoch != "" && a.Kind != "fake" {
 			return &ErrEpochOnNonFake{Target: a.Target, Kind: a.Kind}
 		}
+	}
+	return nil
+}
+
+// Write persists the manifest, filling the passive-manifest layer field
+// ("remote", per the extensions/remote ownership) when unset. It creates the
+// parent directory. serve writes the merged (file + flag) set here so the
+// manifest is the single source of truth and `amq doctor` can diagnose it.
+func Write(path string, f File) error {
+	if f.SchemaVersion == 0 {
+		f.SchemaVersion = SchemaVersion
+	}
+	if f.Layer == "" {
+		f.Layer = Layer
+	}
+	data, err := json.MarshalIndent(f, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode manifest: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return fmt.Errorf("create manifest dir: %w", err)
+	}
+	if err := os.WriteFile(path, append(data, '\n'), 0644); err != nil {
+		return fmt.Errorf("write manifest %s: %w", path, err)
 	}
 	return nil
 }

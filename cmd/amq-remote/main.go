@@ -21,7 +21,6 @@ import (
 	amqcli "github.com/avivsinai/agent-message-queue/internal/cli"
 	"github.com/avivsinai/agent-message-queue/internal/config"
 	"github.com/avivsinai/agent-message-queue/internal/remote/amqio"
-	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
 	"github.com/avivsinai/agent-message-queue/internal/remote/codex"
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	_ "github.com/avivsinai/agent-message-queue/internal/remote/fake" // registers fake factory
@@ -358,17 +357,26 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 		}
 		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", verr)
 	}
-	// Build attachments from the merged manifest via the registry.
+	// Build attachments from the merged manifest via the registry. Build
+	// returns per-adapter outcomes: a factory error (unreachable Codex
+	// thread, claude stub refusal) becomes a typed refusal, not a fatal exit.
+	// serve registers what built and persists refusals as typed data doctor
+	// prints. One bad adapter never takes down serve.
 	var attachments []core.Attachment
+	var refusals []registry.Outcome
 	if len(mf.Adapters) > 0 {
-		attachments, err = registry.Build(context.Background(), c.root, stateDir, mf)
-		if err != nil {
-			// A claude stub refusal is doctor-visible; log and continue without it.
-			if errors.Is(err, claude.ErrNotAuthorized) {
-				say(stderr, "warning: %v\n", err)
-				attachments = nil
+		for _, oc := range registry.Build(context.Background(), c.root, stateDir, mf) {
+			if oc.Attachment != nil {
+				attachments = append(attachments, oc.Attachment)
 			} else {
-				return 0, err
+				refusals = append(refusals, oc)
+				say(stderr, "warning: adapter %q (kind %q) refused: %v\n", oc.Manifest.Target, oc.Manifest.Kind, oc.Refusal)
+			}
+		}
+		// Persist refusals as typed data in the state dir so doctor can print them.
+		if len(refusals) > 0 {
+			if perr := persistRefusals(stateDir, refusals); perr != nil {
+				say(stderr, "warning: could not persist adapter refusals: %v\n", perr)
 			}
 		}
 	}
@@ -951,6 +959,30 @@ func newUUID() (string, error) {
 	b[6] = (b[6] & 0x0f) | 0x40
 	b[8] = (b[8] & 0x3f) | 0x80
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]), nil
+}
+
+// persistRefusals writes adapter refusals as typed JSON data in the state
+// dir so `amq-remote doctor` can print them. The file is advisory: serve
+// continues without the refused adapters; the refusals are not fatal.
+func persistRefusals(stateDir string, refusals []registry.Outcome) error {
+	type refusalEntry struct {
+		Kind   string `json:"kind"`
+		Target string `json:"target"`
+		Error  string `json:"error"`
+	}
+	entries := make([]refusalEntry, 0, len(refusals))
+	for _, r := range refusals {
+		entries = append(entries, refusalEntry{
+			Kind:   r.Manifest.Kind,
+			Target: r.Manifest.Target,
+			Error:  r.Refusal.Error(),
+		})
+	}
+	data, err := json.MarshalIndent(entries, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(stateDir, "refusals.json"), data, 0600)
 }
 
 // replyRouterFor returns the ReplyRouter the endpoint uses: cli resolves the
