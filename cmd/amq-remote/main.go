@@ -112,6 +112,9 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	case "serve":
 		code, err = serve(rest, stdout, stderr)
 		return finish(stderr, nil, false, code, err)
+	case "up":
+		code, err = up(rest, stdout, stderr)
+		return finish(stderr, nil, false, code, err)
 	case "sessions":
 		out, code, err = clientSimple(rest, protocol.OpSessionList, "")
 	case "inspect":

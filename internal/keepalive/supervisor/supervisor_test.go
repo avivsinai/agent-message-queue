@@ -228,16 +228,16 @@ func TestDefaultFailureBackoffAndExponentialCap(t *testing.T) {
 		Wake:       wake,
 		Adapter:    probeAdapter{},
 		Now:        func() time.Time { return now },
-		BackoffMax: 8 * defaultFailureBackoffBase,
+		BackoffMax: 8 * DefaultFailureBackoffBase,
 		Jitter:     func(delay time.Duration) time.Duration { return delay },
 	}
 	entry := testEntry()
 
 	for i, want := range []time.Duration{
-		defaultFailureBackoffBase,
-		2 * defaultFailureBackoffBase,
-		4 * defaultFailureBackoffBase,
-		8 * defaultFailureBackoffBase,
+		DefaultFailureBackoffBase,
+		2 * DefaultFailureBackoffBase,
+		4 * DefaultFailureBackoffBase,
+		8 * DefaultFailureBackoffBase,
 	} {
 		var result Result
 		entry, result = reconciler.Reconcile(context.Background(), entry)
