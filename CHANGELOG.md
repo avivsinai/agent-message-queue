@@ -8,6 +8,22 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.79.0](https://github.com/avivsinai/agent-message-queue/compare/v0.78.9...v0.79.0) (2026-09-18)
+
+
+### Features
+
+* **remote:** durable outgoing sender spool + .7 CLI integration ([#802](https://github.com/avivsinai/agent-message-queue/issues/802)) ([cc13d31](https://github.com/avivsinai/agent-message-queue/commit/cc13d3151ee5dffa2012d884ae1fbf054702d91c))
+* **remote:** optional MinEvidence submit-input floor (Wave A.4) ([#803](https://github.com/avivsinai/agent-message-queue/issues/803)) ([38f8fda](https://github.com/avivsinai/agent-message-queue/commit/38f8fdaefc5d1f7035feef0f34fba7b2600c8db5))
+* **remote:** print achieved evidence class on submit ([#803](https://github.com/avivsinai/agent-message-queue/issues/803) follow-up) ([#807](https://github.com/avivsinai/agent-message-queue/issues/807)) ([2ae43c9](https://github.com/avivsinai/agent-message-queue/commit/2ae43c99f236668e176d78817c4b936ee537e381))
+* **remote:** register mailbox handle in config.json on serve startup (.10) ([#804](https://github.com/avivsinai/agent-message-queue/issues/804)) ([fe17f43](https://github.com/avivsinai/agent-message-queue/commit/fe17f439f1f9f5b5275d13906b1ab7cec527c88b))
+
+
+### Bug Fixes
+
+* **core:** per-key drain obligations + marker-only retry retirement (611.22.48) ([#806](https://github.com/avivsinai/agent-message-queue/issues/806)) ([ecf4c78](https://github.com/avivsinai/agent-message-queue/commit/ecf4c782153d50240ffc9c704fe4e38d11e2e68b))
+* **remote:** bounded retention + aggregate quota (BK4 611.22.19) ([#800](https://github.com/avivsinai/agent-message-queue/issues/800)) ([83108cd](https://github.com/avivsinai/agent-message-queue/commit/83108cdc24d044f36707dc829c1b8c6fb68c4c56))
+
 ## [0.78.9](https://github.com/avivsinai/agent-message-queue/compare/v0.78.8...v0.78.9) (2026-09-16)
 
 
