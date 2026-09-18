@@ -79,6 +79,11 @@ func Load(path string) (File, error) {
 	if f.SchemaVersion != SchemaVersion {
 		return File{}, fmt.Errorf("manifest schema_version %d, want %d", f.SchemaVersion, SchemaVersion)
 	}
+	// Layer defaults to "remote" in memory when absent. A non-empty layer
+	// other than "remote" is a validation error (caught by Validate).
+	if f.Layer == "" {
+		f.Layer = Layer
+	}
 	if err := Validate(f); err != nil {
 		return File{}, err
 	}
@@ -104,13 +109,16 @@ func (e *ErrEpochOnNonFake) Error() string {
 	return fmt.Sprintf("adapter %q (kind %q): epoch is test-only for fake and rejected for other kinds", e.Target, e.Kind)
 }
 
-// ErrMissingLayer is returned when the passive-manifest layer field is
-// absent. A remote manifest without layer cannot be diagnosed by `amq
-// doctor`'s extension scan.
-type ErrMissingLayer struct{}
+// ErrWrongLayer is returned when the manifest's layer field is present but
+// not "remote". A manifest without a layer field is valid (defaults to
+// "remote" in memory); a layer field with any other value is a validation
+// error.
+type ErrWrongLayer struct {
+	Layer string
+}
 
-func (e *ErrMissingLayer) Error() string {
-	return "manifest: layer field is required (passive extension-manifest contract)"
+func (e *ErrWrongLayer) Error() string {
+	return "manifest: layer field must be \"remote\" or absent, got " + strconv.Quote(e.Layer)
 }
 
 // ErrMissingField is returned when an adapter entry lacks its target or kind.
@@ -121,22 +129,34 @@ type ErrMissingField struct {
 
 func (e *ErrMissingField) Error() string { return e.Field + " is required (" + e.Context + ")" }
 
+// ValidationError is implemented by every manifest validation error so
+// IsValidation can use a single errors.As check (the errors.Is version was
+// always false against typed-nil pointers).
+type ValidationError interface {
+	error
+	validationError()
+}
+
+func (*ErrDuplicateTarget) validationError()   {}
+func (*ErrEpochOnNonFake) validationError()    {}
+func (*ErrWrongLayer) validationError()        {}
+func (*ErrMissingField) validationError()      {}
+
 // IsValidation reports whether err is a manifest validation failure as
 // opposed to a filesystem or parse failure. Validation failures are usage
 // errors (exit 2); I/O and parse failures are not.
 func IsValidation(err error) bool {
-	var dup *ErrDuplicateTarget
-	var epoch *ErrEpochOnNonFake
-	var missing *ErrMissingLayer
-	var field *ErrMissingField
-	return errors.Is(err, dup) || errors.Is(err, epoch) || errors.Is(err, missing) || errors.Is(err, field)
+	var ve ValidationError
+	return errors.As(err, &ve)
 }
 
-// Validate checks the manifest: layer present, no duplicate targets, target
-// and kind required, epoch only on fake.
+// Validate checks the manifest: layer defaults to "remote" when absent (a
+// user-authored manifest without layer is valid); a non-empty layer other
+// than "remote" is a validation error. No duplicate targets; target and kind
+// required; epoch only on fake.
 func Validate(f File) error {
-	if f.Layer == "" {
-		return &ErrMissingLayer{}
+	if f.Layer != "" && f.Layer != Layer {
+		return &ErrWrongLayer{Layer: f.Layer}
 	}
 	seen := make(map[string]bool, len(f.Adapters))
 	for _, a := range f.Adapters {

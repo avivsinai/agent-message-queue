@@ -23,7 +23,6 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/amqio"
 	"github.com/avivsinai/agent-message-queue/internal/remote/codex"
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
-	_ "github.com/avivsinai/agent-message-queue/internal/remote/fake" // registers fake factory
 	"github.com/avivsinai/agent-message-queue/internal/remote/ipc"
 	"github.com/avivsinai/agent-message-queue/internal/remote/manifest"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
@@ -361,11 +360,6 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 		}
 		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", verr)
 	}
-	// Write the merged manifest to disk (fills layer=remote) so the passive-
-	// manifest scan doesn't flag the generated one for a missing layer.
-	if werr := manifest.Write(manifestFile, mf); werr != nil {
-		say(stderr, "warning: could not write merged manifest: %v\n", werr)
-	}
 	// Build attachments from the merged manifest via the registry. Build
 	// returns per-adapter outcomes: a factory error (unreachable Codex
 	// thread, claude stub refusal) becomes a typed refusal, not a fatal exit.
@@ -382,12 +376,17 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 				say(stderr, "warning: adapter %q (kind %q) refused: %v\n", oc.Manifest.Target, oc.Manifest.Kind, oc.Refusal)
 			}
 		}
-		// Persist refusals as typed data in the state dir so doctor can print them.
-		if len(refusals) > 0 {
-			if perr := persistRefusals(stateDir, refusals); perr != nil {
-				say(stderr, "warning: could not persist adapter refusals: %v\n", perr)
-			}
-		}
+	}
+	// Refusals are rewritten EVERY start, including empty — a removed adapter
+	// must not persist as 'refused' forever. An empty list clears the file.
+	if perr := persistRefusals(stateDir, refusals); perr != nil {
+		say(stderr, "warning: could not persist adapter refusals: %v\n", perr)
+	}
+	// Write the effective adapter set (attached + refused) as generated state
+	// NEXT TO refusals.json — never into the user's manifest file. Flags are
+	// sugar; sugar is never persisted to the user's path.
+	if werr := writeEffectiveAdapters(stateDir, mf, attachments, refusals); werr != nil {
+		say(stderr, "warning: could not write effective adapters: %v\n", werr)
 	}
 	_, ep, carrier, err := startupSequence(stateDir, c.root, *me, nil, carrierPublish, &carrier, attachments...)
 	if err != nil {
@@ -983,7 +982,8 @@ type refusalEntry struct {
 }
 
 // persistRefusals writes adapter refusals as typed JSON data in the state
-// dir so `amq-remote doctor` can print them. The file is advisory: serve
+// dir so `amq-remote doctor` can print them. Rewritten EVERY start, including
+// an empty list (clears stale refusals). The file is advisory: serve
 // continues without the refused adapters; the refusals are not fatal.
 func persistRefusals(stateDir string, refusals []registry.Outcome) error {
 	entries := make([]refusalEntry, 0, len(refusals))
@@ -999,6 +999,38 @@ func persistRefusals(stateDir string, refusals []registry.Outcome) error {
 		return err
 	}
 	return os.WriteFile(filepath.Join(stateDir, "refusals.json"), data, 0600)
+}
+
+// writeEffectiveAdapters writes the effective adapter set (attached + refused)
+// as generated state next to refusals.json. This is NOT the user's manifest —
+// it is rewritten each start and never touches the operator's file.
+func writeEffectiveAdapters(stateDir string, mf manifest.File, attached []core.Attachment, refusals []registry.Outcome) error {
+	type effEntry struct {
+		Kind   string `json:"kind"`
+		Target string `json:"target"`
+		State  string `json:"state"`
+		Error  string `json:"error,omitempty"`
+	}
+	entries := make([]effEntry, 0, len(mf.Adapters))
+	for _, att := range attached {
+		entries = append(entries, effEntry{
+			Target: att.Inspect().TargetID,
+			State:  "attached",
+		})
+	}
+	for _, r := range refusals {
+		entries = append(entries, effEntry{
+			Kind:   r.Manifest.Kind,
+			Target: r.Manifest.Target,
+			State:  "refused",
+			Error:  r.Refusal.Error(),
+		})
+	}
+	data, err := json.MarshalIndent(entries, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(stateDir, "adapters.json"), data, 0600)
 }
 
 // loadRefusals reads persisted adapter refusals for doctor to print.

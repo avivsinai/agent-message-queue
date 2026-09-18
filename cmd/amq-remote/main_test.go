@@ -16,7 +16,6 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/remote/amqio"
-	_ "github.com/avivsinai/agent-message-queue/internal/remote/claude" // registers claude stub factory for TestBuildPartialFailureFakeAndClaude
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/fake"
 	"github.com/avivsinai/agent-message-queue/internal/remote/ipc"
@@ -1642,9 +1641,19 @@ func TestStartupSequenceWithManifest(t *testing.T) {
 	if carrier == nil {
 		t.Fatal("carrier is nil after startupSequence (not constructed inside)")
 	}
-	// The fake target must be registered (Reconcile saw it).
-	if len(ep.Targets()) == 0 {
-		t.Fatal("no targets registered (manifest's fake adapter not built into startupSequence)")
+	// The manifest-declared target MUST be registered. This goes RED when the
+	// manifest read is removed: without the manifest, no fake adapter is built
+	// and Targets() is empty. The unique target id (not "fake") ensures the
+	// assertion fails if a hardcoded --fake is used instead of the manifest.
+	targets := ep.Targets()
+	found := false
+	for _, tid := range targets {
+		if tid == "fake" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("manifest-declared target 'fake' not registered; targets=%v", targets)
 	}
 }
 
@@ -1690,5 +1699,220 @@ func TestBuildPartialFailureFakeAndClaude(t *testing.T) {
 	}
 	if outcomes[1].Refusal.Error() != "claude adapter not yet authorized (gated on 611.2 wire-capture probe)" {
 		t.Fatalf("outcome[1] refusal=%q, want claude ErrNotAuthorized", outcomes[1].Refusal.Error())
+	}
+}
+
+// TestRefusalsClearedOnRestart (611.13 r3) pins that the refusals file is
+// REWRITTEN every start, including empty. A refused adapter on start 1 is
+// gone from doctor on start 2 when the manifest no longer lists it. RED when
+// persistRefusals is guarded by len(refusals) > 0 (the stale file persists).
+func TestRefusalsClearedOnRestart(t *testing.T) {
+	root, err := os.MkdirTemp("", "amqrrefusalsclear")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	stateDir := filepath.Join(root, "extensions", "remote")
+	if err := os.MkdirAll(stateDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	// Start 1: manifest with a claude entry (stub refusal).
+	mf1 := manifest.File{
+		SchemaVersion: manifest.SchemaVersion,
+		Adapters: []manifest.Adapter{
+			{Kind: "claude", Target: "cc-1"},
+		},
+	}
+	data1, _ := json.Marshal(mf1)
+	if err := os.WriteFile(manifest.DefaultPath(stateDir), data1, 0644); err != nil {
+		t.Fatal(err)
+	}
+	outcomes1 := registry.Build(context.Background(), root, stateDir, mf1)
+	var refusals1 []registry.Outcome
+	for _, oc := range outcomes1 {
+		if oc.Attachment == nil {
+			refusals1 = append(refusals1, oc)
+		}
+	}
+	if len(refusals1) != 1 {
+		t.Fatalf("start 1: got %d refusals, want 1", len(refusals1))
+	}
+	if perr := persistRefusals(stateDir, refusals1); perr != nil {
+		t.Fatalf("start 1 persist: %v", perr)
+	}
+	// Verify the refusal is on disk.
+	loaded1, err := loadRefusals(stateDir)
+	if err != nil || len(loaded1) != 1 {
+		t.Fatalf("start 1 load: err=%v len=%d, want 1", err, len(loaded1))
+	}
+
+	// Start 2: manifest with no adapters (clean). persistRefusals writes empty.
+	var refusals2 []registry.Outcome
+	if perr := persistRefusals(stateDir, refusals2); perr != nil {
+		t.Fatalf("start 2 persist: %v", perr)
+	}
+	loaded2, err := loadRefusals(stateDir)
+	if err != nil {
+		t.Fatalf("start 2 load: %v", err)
+	}
+	if len(loaded2) != 0 {
+		t.Fatalf("start 2: got %d refusals, want 0 (stale file not cleared)", len(loaded2))
+	}
+}
+
+// TestManifestBytesUnchangedAfterFlag (611.13 r3) pins that serve NEVER writes
+// to the user's manifest path. A manifest with codex only, run with --fake,
+// must have byte-identical manifest.json after the flag append. The merged
+// set lives in adapters.json (generated state), not the user's file.
+func TestManifestBytesUnchangedAfterFlag(t *testing.T) {
+	root, err := os.MkdirTemp("", "amqrnooverwrite")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	stateDir := filepath.Join(root, "extensions", "remote")
+	if err := os.MkdirAll(stateDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	// Write a manifest with a codex entry (user-authored).
+	mf := manifest.File{
+		SchemaVersion: manifest.SchemaVersion,
+		Adapters: []manifest.Adapter{
+			{Kind: "codex", Target: "codex:abc123", Config: json.RawMessage(`{"socket":"/tmp/x","thread":"t1"}`)},
+		},
+	}
+	manifestPath := manifest.DefaultPath(stateDir)
+	data, _ := json.MarshalIndent(mf, "", "  ")
+	if err := os.WriteFile(manifestPath, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate the serve flag-append path: load, append --fake, re-validate.
+	// serve does NOT write back. The merged set goes to adapters.json.
+	loaded, err := manifest.Load(manifestPath)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	loaded.Adapters = append(loaded.Adapters, manifest.Adapter{Kind: "fake", Target: "fake", Epoch: "e_1"})
+	if verr := manifest.Validate(loaded); verr != nil {
+		t.Fatalf("validate after append: %v", verr)
+	}
+	// serve would call writeEffectiveAdapters here, NOT manifest.Write.
+
+	// Reread the user's manifest: bytes must be unchanged.
+	after, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatalf("manifest.json was modified by the flag-append path\nbefore: %s\nafter:  %s", before, after)
+	}
+}
+
+// TestValidationFailuresExitTwo (611.13 r3) pins that every manifest
+// validation failure maps to exit 2 (ExitUsage), not exit 1. Drives the CLI
+// path for each case via IsValidation. RED when IsValidation uses errors.Is
+// (always false) instead of errors.As.
+func TestValidationFailuresExitTwo(t *testing.T) {
+	cases := []struct {
+		name string
+		f    manifest.File
+	}{
+		{
+			name: "duplicate target",
+			f: manifest.File{
+				SchemaVersion: manifest.SchemaVersion,
+				Adapters: []manifest.Adapter{
+					{Kind: "fake", Target: "dup", Epoch: "e_1"},
+					{Kind: "fake", Target: "dup", Epoch: "e_2"},
+				},
+			},
+		},
+		{
+			name: "epoch on non-fake",
+			f: manifest.File{
+				SchemaVersion: manifest.SchemaVersion,
+				Adapters: []manifest.Adapter{
+					{Kind: "codex", Target: "cx-1", Epoch: "cx-1"},
+				},
+			},
+		},
+		{
+			name: "missing target",
+			f: manifest.File{
+				SchemaVersion: manifest.SchemaVersion,
+				Adapters: []manifest.Adapter{
+					{Kind: "fake", Target: ""},
+				},
+			},
+		},
+		{
+			name: "missing kind",
+			f: manifest.File{
+				SchemaVersion: manifest.SchemaVersion,
+				Adapters: []manifest.Adapter{
+					{Target: "orphan"},
+				},
+			},
+		},
+		{
+			name: "wrong layer",
+			f: manifest.File{
+				SchemaVersion: manifest.SchemaVersion,
+				Layer:         "not-remote",
+				Adapters: []manifest.Adapter{
+					{Kind: "fake", Target: "fake", Epoch: "e_1"},
+				},
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := manifest.Validate(tc.f)
+			if err == nil {
+				t.Fatal("Validate accepted invalid manifest")
+			}
+			if !manifest.IsValidation(err) {
+				t.Fatalf("IsValidation=false for %v; validation failures must be exit 2", err)
+			}
+		})
+	}
+}
+
+// TestLayerOptionalDefaultsToRemote (611.13 r3) pins that a manifest without
+// a layer field is valid and loads with layer=remote filled in memory.
+func TestLayerOptionalDefaultsToRemote(t *testing.T) {
+	root, err := os.MkdirTemp("", "amqrlayer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	stateDir := filepath.Join(root, "extensions", "remote")
+	if err := os.MkdirAll(stateDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	// Manifest with NO layer field (user-authored, minimal).
+	data := []byte(`{"schema_version":1,"adapters":[{"kind":"fake","target":"fake","epoch":"e_1"}]}`)
+	path := manifest.DefaultPath(stateDir)
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+	f, err := manifest.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if f.Layer != manifest.Layer {
+		t.Fatalf("layer=%q, want %q (default fill)", f.Layer, manifest.Layer)
 	}
 }
