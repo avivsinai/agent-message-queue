@@ -154,8 +154,11 @@ Sources for this re-pin (2026-09-18):
 - `claude_code.submit: unverified`: every Claude Code capability beyond
   `inspect` is unverified until the 611.2 authorized wire-capture probe
   settles the actual CC attachment surface. `submit` flips to `unverified`
-  because `sendUserMessage` returns `void` and swallows rejections — a lost
-  submit is indistinguishable from a never-submitted key without the probe.
+  because the cross-session messaging socket delivers text into an idle or
+  busy session with no admission receipt (ADR consequences, research r9 A) —
+  a delivered submit is not an admitted one, so a lost submit is
+  indistinguishable from a never-submitted key without the probe. (Note: the
+  void-returning `sendUserMessage` seam is pi's/Amit's, not Claude Code's.)
   Cites 611.2 as the settling capture.
 
 ```json
