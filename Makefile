@@ -1,6 +1,6 @@
 .PHONY: build test fmt fmt-check vet lint ci smoke contract-check check-skills hook-env-check
 
-GO_FILES := $(shell find . -name '*.go' -not -path './vendor/*')
+GO_FILES := $(shell find . -name '*.go' -not -path './vendor/*' -not -path './.worktrees/*' -not -path './.agent-mail/*')
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 # GoReleaser {{.Version}} is bare semver; strip one leading v from VERSION.
 EMBED_VERSION := $(patsubst v%,%,$(VERSION))
