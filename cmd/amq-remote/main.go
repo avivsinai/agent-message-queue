@@ -315,6 +315,10 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	}
 	mf, err := manifest.Load(manifestFile)
 	if err != nil {
+		// Validation failures are usage errors (exit 2); I/O and parse failures are not.
+		if manifest.IsValidation(err) {
+			return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", err)
+		}
 		return 0, err
 	}
 	// --discover lists candidates from registered discoverers and exits.
@@ -347,7 +351,7 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 				Thread  string `json:"thread"`
 				Approve bool   `json:"approve"`
 			}{Socket: *codexSocket, Thread: id, Approve: *codexApprove})
-			mf.Adapters = append(mf.Adapters, manifest.Adapter{Kind: "codex", Target: id, Config: cfg})
+			mf.Adapters = append(mf.Adapters, manifest.Adapter{Kind: "codex", Target: codex.TargetID(id), Config: cfg})
 		}
 	}
 	// Re-validate after flag append: a target present in both is exit 2.
@@ -356,6 +360,11 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 			return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "duplicate target %q: flags and manifest must not share a target id", dup.Target)
 		}
 		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", verr)
+	}
+	// Write the merged manifest to disk (fills layer=remote) so the passive-
+	// manifest scan doesn't flag the generated one for a missing layer.
+	if werr := manifest.Write(manifestFile, mf); werr != nil {
+		say(stderr, "warning: could not write merged manifest: %v\n", werr)
 	}
 	// Build attachments from the merged manifest via the registry. Build
 	// returns per-adapter outcomes: a factory error (unreachable Codex
@@ -948,6 +957,10 @@ func doctor(args []string) (any, int, error) {
 			report["records"] = counts
 		}
 	}
+	// Print adapter refusals persisted by serve (gap 2: doctor-visible).
+	if refusals, err := loadRefusals(stateDir); err == nil && len(refusals) > 0 {
+		report["refusals"] = refusals
+	}
 	return report, code, nil
 }
 
@@ -961,15 +974,18 @@ func newUUID() (string, error) {
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]), nil
 }
 
+// refusalEntry is the JSON shape of a persisted adapter refusal, shared by
+// persistRefusals (write) and loadRefusals (read) and printed by doctor.
+type refusalEntry struct {
+	Kind   string `json:"kind"`
+	Target string `json:"target"`
+	Error  string `json:"error"`
+}
+
 // persistRefusals writes adapter refusals as typed JSON data in the state
 // dir so `amq-remote doctor` can print them. The file is advisory: serve
 // continues without the refused adapters; the refusals are not fatal.
 func persistRefusals(stateDir string, refusals []registry.Outcome) error {
-	type refusalEntry struct {
-		Kind   string `json:"kind"`
-		Target string `json:"target"`
-		Error  string `json:"error"`
-	}
 	entries := make([]refusalEntry, 0, len(refusals))
 	for _, r := range refusals {
 		entries = append(entries, refusalEntry{
@@ -983,6 +999,19 @@ func persistRefusals(stateDir string, refusals []registry.Outcome) error {
 		return err
 	}
 	return os.WriteFile(filepath.Join(stateDir, "refusals.json"), data, 0600)
+}
+
+// loadRefusals reads persisted adapter refusals for doctor to print.
+func loadRefusals(stateDir string) ([]refusalEntry, error) {
+	data, err := os.ReadFile(filepath.Join(stateDir, "refusals.json"))
+	if err != nil {
+		return nil, err
+	}
+	var entries []refusalEntry
+	if err := json.Unmarshal(data, &entries); err != nil {
+		return nil, err
+	}
+	return entries, nil
 }
 
 // replyRouterFor returns the ReplyRouter the endpoint uses: cli resolves the
