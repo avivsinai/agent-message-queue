@@ -24,14 +24,14 @@ capability's truth value; only a re-run probe does.
 | --- | --- | --- |
 | `amq` | 0.77.3 | `amq --version` |
 | `amit` (pi core) | 0.1.23 (pi 0.85.1 @ d981de1229ef) | `amit --version` |
-| `codex` | codex-cli 0.153.4 | `codex --version` |
-| `claude` | 2.1.263 (Claude Code) | `claude --version` |
+| `codex` | codex-cli 0.154.0 | `codex --version` |
+| `claude` | 2.1.273 (Claude Code) | `claude --version` |
 | `tmux` | 3.7c | `tmux -V` |
 | macOS | 26.5.2 | `sw_vers -productVersion` |
 | `go` | go1.27.1 darwin/arm64 | `go version` |
 
 The design's own capability table pins slightly older point releases (Codex
-0.153, Amit 0.1.x/pi 0.80, Claude Code 2.1) (source: amq-remote-design.html
+0.154, Amit 0.1.x/pi 0.80, Claude Code 2.1) (source: amq-remote-design.html
 §Capability per harness). The seams below were verified against the amit-pi
 and probe reports' checkout versions, not necessarily this machine's current
 `amit --version`/pi 0.85.1 — re-run the Amit seam checks (§3.2) if the pi
@@ -142,6 +142,22 @@ Fields: `inspect`, `submit`, `cancel_request`, `answer_question`,
 (source: amq-remote-design.html §Capability per harness); every `false` below
 carries a one-line reason instead of a bare boolean.
 
+Sources for this re-pin (2026-09-18):
+- codex-cli 0.154.0, Claude Code 2.1.273: binary probes (`codex --version`,
+  `claude --version`).
+- `steer: false` for codex and amit: the codex attachment declares `Steer:
+  true` (internal/remote/codex/attachment.go:293) but the endpoint's
+  `sessionProjection` masks it to false at the D1 gate
+  (internal/remote/core/endpoint.go:1055-1056). No adapter advertises Steer
+  in v1; the D1 gate refuses `deliver=steer` and the endpoint mask stays as
+  the belt.
+- `claude_code.submit: unverified`: every Claude Code capability beyond
+  `inspect` is unverified until the 611.2 authorized wire-capture probe
+  settles the actual CC attachment surface. `submit` flips to `unverified`
+  because `sendUserMessage` returns `void` and swallows rejections — a lost
+  submit is indistinguishable from a never-submitted key without the probe.
+  Cites 611.2 as the settling capture.
+
 ```json
 {
   "schema": "amq.remote.session/1",
@@ -151,7 +167,7 @@ carries a one-line reason instead of a bare boolean.
     "cancel_request": true,
     "answer_question": false,
     "approve_tool": false,
-    "steer": true,
+    "steer": false,
     "terminal": "unavailable"
   },
   "amit": {
@@ -160,12 +176,12 @@ carries a one-line reason instead of a bare boolean.
     "cancel_request": true,
     "answer_question": false,
     "approve_tool": false,
-    "steer": true,
+    "steer": false,
     "terminal": "unavailable"
   },
   "claude_code": {
     "inspect": true,
-    "submit": true,
+    "submit": "unverified (gated on 611.2 wire-capture probe)",
     "cancel_request": false,
     "answer_question": false,
     "approve_tool": false,
