@@ -19,6 +19,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/fake"
 	"github.com/avivsinai/agent-message-queue/internal/remote/ipc"
+	"github.com/avivsinai/agent-message-queue/internal/remote/manifest"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 	"github.com/avivsinai/agent-message-queue/internal/remote/requests"
 	"github.com/avivsinai/agent-message-queue/internal/remote/sender"
@@ -1577,4 +1578,61 @@ func TestBK4R6CarrierConstructedInsideStartupSequence(t *testing.T) {
 	if carrierNilDuringPublish.Load() {
 		t.Fatal("R6: carrier was nil when publish was called during Reconcile (carrier constructed after Reconcile, not inside startupSequence)")
 	}
+}
+
+// TestServeReadsManifest (611.13) pins that serve reads the adapter manifest
+// at extensions/remote/manifest.json and builds attachments via the registry.
+// A manifest with one fake entry yields serve with one target, asserted via
+// `sessions --json`. This extends the startup-construction assertion: the
+// manifest path feeds registry.Build, which feeds startupSequence.
+func TestServeReadsManifest(t *testing.T) {
+	root, err := os.MkdirTemp("", "amqrmanifest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	stateDir := filepath.Join(root, "extensions", "remote")
+	if err := os.MkdirAll(stateDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	// Write a manifest with one fake adapter.
+	mf := manifest.File{
+		SchemaVersion: manifest.SchemaVersion,
+		Adapters: []manifest.Adapter{
+			{Kind: "fake", Target: "fake", Epoch: "e_1"},
+		},
+	}
+	data, _ := json.Marshal(mf)
+	if err := os.WriteFile(manifest.DefaultPath(stateDir), data, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan int, 1)
+	go func() {
+		var out, errBuf bytes.Buffer
+		// No --fake flag: the manifest is the sole source.
+		done <- run([]string{"serve", "--root", root}, strings.NewReader(""), &out, &errBuf)
+	}()
+	t.Cleanup(func() {
+		select {
+		case <-done:
+		default:
+		}
+	})
+
+	// Wait for the socket; sessions must show the fake target.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		var out, errBuf bytes.Buffer
+		if run([]string{"sessions", "--root", root, "--json"}, strings.NewReader(""), &out, &errBuf) == 0 {
+			if strings.Contains(out.String(), "\"fake\"") {
+				return // pass: the manifest's fake adapter is live
+			}
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatal("serve did not surface the manifest's fake target in sessions within 5s")
 }

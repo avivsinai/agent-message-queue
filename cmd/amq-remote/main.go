@@ -21,11 +21,14 @@ import (
 	amqcli "github.com/avivsinai/agent-message-queue/internal/cli"
 	"github.com/avivsinai/agent-message-queue/internal/config"
 	"github.com/avivsinai/agent-message-queue/internal/remote/amqio"
+	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
 	"github.com/avivsinai/agent-message-queue/internal/remote/codex"
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
-	"github.com/avivsinai/agent-message-queue/internal/remote/fake"
+	_ "github.com/avivsinai/agent-message-queue/internal/remote/fake" // registers fake factory
 	"github.com/avivsinai/agent-message-queue/internal/remote/ipc"
+	"github.com/avivsinai/agent-message-queue/internal/remote/manifest"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
+	"github.com/avivsinai/agent-message-queue/internal/remote/registry"
 	"github.com/avivsinai/agent-message-queue/internal/remote/requests"
 	"github.com/avivsinai/agent-message-queue/internal/remote/sender"
 )
@@ -270,10 +273,12 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	fs.SetOutput(stderr)
 	c := addCommon(fs)
 	me := fs.String("me", amqio.DefaultHandle, "endpoint mailbox handle in the root")
-	useFake := fs.Bool("fake", false, "register the deterministic fake runtime as target 'fake'")
-	codexSocket := fs.String("codex-socket", "", "unix socket of the running Codex app-server daemon; attaches its loaded threads")
+	useFake := fs.Bool("fake", false, "register the deterministic fake runtime as target 'fake' (sugar: appends to manifest)")
+	codexSocket := fs.String("codex-socket", "", "unix socket of the running Codex app-server daemon; attaches its loaded threads (sugar: appends to manifest)")
 	codexThread := fs.String("codex-thread", "", "attach only this Codex thread id (with --codex-socket)")
 	codexApprove := fs.Bool("codex-approve", false, "advertise approve_tool for Codex threads (only after approval fanout is verified live)")
+	manifestPath := fs.String("manifest", "", "path to the adapter manifest (default: <stateDir>/manifest.json)")
+	discover := fs.Bool("discover", false, "list discovered adapter candidates and exit (attaches nothing)")
 	poll := fs.Duration("poll", 500*time.Millisecond, "AMQ import and reconciliation interval")
 	if err := fs.Parse(args); err != nil {
 		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", err)
@@ -300,14 +305,33 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 		}
 		return carrier.Publish(s, origin)
 	}
-	// Gather attachments BEFORE the startup sequence: Reconcile runs inside it
-	// and must see every target (611.22.19 round-4 P0 — a reconcile sweep over
-	// an empty target map marks running records attachment_lost). The carrier
-	// is constructed INSIDE startupSequence (round-6: store, SetPublish,
-	// carrier, Register, Reconcile) so the startup revision reaches it.
-	var attachments []core.Attachment
+	// .13: load the adapter manifest (extensions/remote/manifest.json) and
+	// build attachments via the capability-driven registry. Flags (--fake,
+	// --codex-socket) APPEND to the manifest set; a duplicate target is exit 2.
+	// The manifest is the single source of truth for what runs; serve is never
+	// edited for a new adapter (registry.Register in init).
+	manifestFile := manifest.DefaultPath(stateDir)
+	if *manifestPath != "" {
+		manifestFile = *manifestPath
+	}
+	mf, err := manifest.Load(manifestFile)
+	if err != nil {
+		return 0, err
+	}
+	// --discover lists candidates from registered discoverers and exits.
+	if *discover {
+		cands, derr := registry.Discover(context.Background(), c.root, stateDir)
+		if derr != nil {
+			return 0, derr
+		}
+		for _, cand := range cands {
+			say(stdout, "%-12s %s\n", cand.Kind, cand.Target)
+		}
+		return 0, nil
+	}
+	// Flags append to the manifest set (sugar, back-compat).
 	if *useFake {
-		attachments = append(attachments, fake.New("fake", "e_1"))
+		mf.Adapters = append(mf.Adapters, manifest.Adapter{Kind: "fake", Target: "fake", Epoch: "e_1"})
 	}
 	if *codexSocket != "" {
 		codex.Version = version
@@ -319,12 +343,33 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 			}
 		}
 		for _, id := range threads {
-			att, err := codex.Attach(*codexSocket, id, codex.WithApprovals(*codexApprove))
-			if err != nil {
-				say(stderr, "codex thread %s: %v\n", id, err)
-				continue
+			cfg, _ := json.Marshal(struct {
+				Socket  string `json:"socket"`
+				Thread  string `json:"thread"`
+				Approve bool   `json:"approve"`
+			}{Socket: *codexSocket, Thread: id, Approve: *codexApprove})
+			mf.Adapters = append(mf.Adapters, manifest.Adapter{Kind: "codex", Target: id, Config: cfg})
+		}
+	}
+	// Re-validate after flag append: a target present in both is exit 2.
+	if verr := manifest.Validate(mf); verr != nil {
+		if dup, ok := verr.(*manifest.ErrDuplicateTarget); ok {
+			return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "duplicate target %q: flags and manifest must not share a target id", dup.Target)
+		}
+		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", verr)
+	}
+	// Build attachments from the merged manifest via the registry.
+	var attachments []core.Attachment
+	if len(mf.Adapters) > 0 {
+		attachments, err = registry.Build(context.Background(), c.root, stateDir, mf)
+		if err != nil {
+			// A claude stub refusal is doctor-visible; log and continue without it.
+			if errors.Is(err, claude.ErrNotAuthorized) {
+				say(stderr, "warning: %v\n", err)
+				attachments = nil
+			} else {
+				return 0, err
 			}
-			attachments = append(attachments, att)
 		}
 	}
 	_, ep, carrier, err := startupSequence(stateDir, c.root, *me, nil, carrierPublish, &carrier, attachments...)
