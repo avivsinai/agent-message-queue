@@ -47,12 +47,12 @@ func observeAuthoritativeWakeOwnerPlatform(owner wakeOwner) (wakeOwnerObservatio
 	if drainErr != nil {
 		closeErr := capability.close()
 		return wakeOwnerObservation{
-			State:  wakeOwnerUnknown,
-			Reason: fmt.Sprintf("owner process kqueue drain failed: %v", drainErr),
-		}, errors.Join(
-			fmt.Errorf("drain owner process %d kqueue before observation: %w", owner.PID, drainErr),
-			closeErr,
-		)
+				State:  wakeOwnerUnknown,
+				Reason: fmt.Sprintf("owner process kqueue drain failed: %v", drainErr),
+			}, errors.Join(
+				fmt.Errorf("drain owner process %d kqueue before observation: %w", owner.PID, drainErr),
+				closeErr,
+			)
 	}
 	if exited || state == wakeOwnerDead {
 		closeErr := capability.close()
