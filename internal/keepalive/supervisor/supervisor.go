@@ -22,8 +22,8 @@ const (
 	defaultActiveCheckInterval = 5 * time.Minute
 	defaultDetachedBackoffBase = 5 * time.Minute
 	defaultDetachedBackoffMax  = time.Hour
-	defaultFailureBackoffBase  = time.Minute
-	defaultFailureBackoffMax   = 15 * time.Minute
+	DefaultFailureBackoffBase  = time.Minute
+	DefaultFailureBackoffMax   = 15 * time.Minute
 )
 
 type Adapter interface {
@@ -183,11 +183,11 @@ func (r Reconciler) now() time.Time {
 func (r Reconciler) backoff(failureCount int) time.Duration {
 	base := r.BackoffBase
 	if base <= 0 {
-		base = defaultFailureBackoffBase
+		base = DefaultFailureBackoffBase
 	}
 	maxDelay := r.BackoffMax
 	if maxDelay <= 0 {
-		maxDelay = defaultFailureBackoffMax
+		maxDelay = DefaultFailureBackoffMax
 	}
 	return r.exponentialBackoff(failureCount, base, maxDelay)
 }
