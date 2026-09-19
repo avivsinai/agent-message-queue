@@ -509,6 +509,15 @@ func validOpaque(s string) bool {
 	return s != "" && len(s) <= MaxOpaqueLen && opaqueRe.MatchString(s)
 }
 
+// ValidTargetID reports whether s is a protocol-valid target id: non-empty,
+// at most MaxOpaqueLen bytes, opaque grammar (letters, digits, _ . : -).
+// Manifest validation uses it so an accepted entry can always be addressed.
+func ValidTargetID(s string) bool { return validOpaque(s) }
+
+// ValidEpoch reports whether s is a protocol-valid epoch: non-empty, at most
+// MaxOpaqueLen bytes, opaque grammar.
+func ValidEpoch(s string) bool { return validOpaque(s) }
+
 // digestPrefix is the algorithm tag every request input_digest carries.
 const digestPrefix = "sha256:"
 

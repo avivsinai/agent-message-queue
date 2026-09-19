@@ -231,6 +231,12 @@ func readPassiveExtensionManifest(root, layer, manifestPath string) (doctorExten
 			Message: fmt.Sprintf("unsupported manifest schema_version %d", manifest.SchemaVersion),
 		}, false
 	}
+	if manifest.Layer == "" {
+		// A manifest without a layer field is valid: the layer defaults to the
+		// directory that owns the file (in memory only — the operator's file is
+		// never rewritten). The companion's remote manifest relies on this.
+		manifest.Layer = layer
+	}
 	if !isValidExtensionLayerName(manifest.Layer) {
 		return doctorExtensionManifest{}, &doctorExtensionDiagnostic{
 			Scope:   "root",

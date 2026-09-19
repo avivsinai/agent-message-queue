@@ -23,9 +23,10 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/amqio"
 	"github.com/avivsinai/agent-message-queue/internal/remote/codex"
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
-	"github.com/avivsinai/agent-message-queue/internal/remote/fake"
 	"github.com/avivsinai/agent-message-queue/internal/remote/ipc"
+	"github.com/avivsinai/agent-message-queue/internal/remote/manifest"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
+	"github.com/avivsinai/agent-message-queue/internal/remote/registry"
 	"github.com/avivsinai/agent-message-queue/internal/remote/requests"
 	"github.com/avivsinai/agent-message-queue/internal/remote/sender"
 )
@@ -270,10 +271,12 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	fs.SetOutput(stderr)
 	c := addCommon(fs)
 	me := fs.String("me", amqio.DefaultHandle, "endpoint mailbox handle in the root")
-	useFake := fs.Bool("fake", false, "register the deterministic fake runtime as target 'fake'")
-	codexSocket := fs.String("codex-socket", "", "unix socket of the running Codex app-server daemon; attaches its loaded threads")
+	useFake := fs.Bool("fake", false, "register the deterministic fake runtime as target 'fake' (sugar: appends to manifest)")
+	codexSocket := fs.String("codex-socket", "", "unix socket of the running Codex app-server daemon; attaches its loaded threads (sugar: appends to manifest)")
 	codexThread := fs.String("codex-thread", "", "attach only this Codex thread id (with --codex-socket)")
 	codexApprove := fs.Bool("codex-approve", false, "advertise approve_tool for Codex threads (only after approval fanout is verified live)")
+	manifestPath := fs.String("manifest", "", "path to the adapter manifest (default: <stateDir>/manifest.json)")
+	discover := fs.Bool("discover", false, "list discovered adapter candidates and exit (attaches nothing)")
 	poll := fs.Duration("poll", 500*time.Millisecond, "AMQ import and reconciliation interval")
 	if err := fs.Parse(args); err != nil {
 		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", err)
@@ -300,14 +303,46 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 		}
 		return carrier.Publish(s, origin)
 	}
-	// Gather attachments BEFORE the startup sequence: Reconcile runs inside it
-	// and must see every target (611.22.19 round-4 P0 — a reconcile sweep over
-	// an empty target map marks running records attachment_lost). The carrier
-	// is constructed INSIDE startupSequence (round-6: store, SetPublish,
-	// carrier, Register, Reconcile) so the startup revision reaches it.
-	var attachments []core.Attachment
+	// .13: the manifest load, flag-sugar append (--fake, --codex-socket),
+	// validation and owned startup are ONE production path, serveStartup —
+	// shared verbatim by the focused regressions (611.13 r4). Flag sugar is
+	// built here (it needs LoadedThreads/flags) and handed in as entries; a
+	// duplicate target is exit 2 via the typed validation error. serveStartup
+	// returns Load/Validate failures classified: validation -> exit 2, I/O or
+	// parse -> runtime error.
+	manifestFile := manifest.DefaultPath(stateDir)
+	if *manifestPath != "" {
+		manifestFile = *manifestPath
+	}
+	var sugar []manifest.Adapter
+	if *discover {
+		// --discover lists candidates from registered discoverers and exits
+		// before any startup side effect. The manifest must classify exactly
+		// like the serve path: validation failures are usage errors (exit 2),
+		// I/O and parse failures are not (observed regression: discover
+		// exited 1 where serve exited 2 on the same invalid manifest).
+		mf, lerr := manifest.Load(manifestFile)
+		if lerr != nil {
+			if manifest.IsValidation(lerr) {
+				return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", lerr)
+			}
+			return 0, lerr
+		}
+		if verr := manifest.Validate(mf); verr != nil {
+			return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", verr)
+		}
+		cands, derr := registry.Discover(context.Background(), c.root, stateDir)
+		if derr != nil {
+			return 0, derr
+		}
+		for _, cand := range cands {
+			say(stdout, "%-12s %s\n", cand.Kind, cand.Target)
+		}
+		_ = mf
+		return 0, nil
+	}
 	if *useFake {
-		attachments = append(attachments, fake.New("fake", "e_1"))
+		sugar = append(sugar, manifest.Adapter{Kind: "fake", Target: "fake", Epoch: "e_1"})
 	}
 	if *codexSocket != "" {
 		codex.Version = version
@@ -319,16 +354,22 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 			}
 		}
 		for _, id := range threads {
-			att, err := codex.Attach(*codexSocket, id, codex.WithApprovals(*codexApprove))
-			if err != nil {
-				say(stderr, "codex thread %s: %v\n", id, err)
-				continue
-			}
-			attachments = append(attachments, att)
+			cfg, _ := json.Marshal(struct {
+				Socket  string `json:"socket"`
+				Thread  string `json:"thread"`
+				Approve bool   `json:"approve"`
+			}{Socket: *codexSocket, Thread: id, Approve: *codexApprove})
+			sugar = append(sugar, manifest.Adapter{Kind: "codex", Target: codex.TargetID(id), Config: cfg})
 		}
 	}
-	_, ep, carrier, err := startupSequence(stateDir, c.root, *me, nil, carrierPublish, &carrier, attachments...)
+	_, ep, carrier, _, err := serveStartup(stateDir, c.root, *me, manifestFile, sugar, carrierPublish, &carrier, stderr)
 	if err != nil {
+		if manifest.IsValidation(err) {
+			if dup, ok := err.(*manifest.ErrDuplicateTarget); ok {
+				return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "duplicate target %q: flags and manifest must not share a target id", dup.Target)
+			}
+			return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", err)
+		}
 		return 0, err
 	}
 	carrier.Warn = func(e error) {
@@ -895,6 +936,10 @@ func doctor(args []string) (any, int, error) {
 			report["records"] = counts
 		}
 	}
+	// Print adapter refusals persisted by serve (gap 2: doctor-visible).
+	if refusals, err := loadRefusals(stateDir); err == nil && len(refusals) > 0 {
+		report["refusals"] = refusals
+	}
 	return report, code, nil
 }
 
@@ -906,6 +951,79 @@ func newUUID() (string, error) {
 	b[6] = (b[6] & 0x0f) | 0x40
 	b[8] = (b[8] & 0x3f) | 0x80
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]), nil
+}
+
+// refusalEntry is the JSON shape of a persisted adapter refusal, shared by
+// persistRefusals (write) and loadRefusals (read) and printed by doctor.
+type refusalEntry struct {
+	Kind   string `json:"kind"`
+	Target string `json:"target"`
+	Error  string `json:"error"`
+}
+
+// persistRefusals writes adapter refusals as typed JSON data in the state
+// dir so `amq-remote doctor` can print them. Rewritten EVERY start, including
+// an empty list (clears stale refusals). The file is advisory: serve
+// continues without the refused adapters; the refusals are not fatal.
+func persistRefusals(stateDir string, refusals []registry.Outcome) error {
+	entries := make([]refusalEntry, 0, len(refusals))
+	for _, r := range refusals {
+		entries = append(entries, refusalEntry{
+			Kind:   r.Manifest.Kind,
+			Target: r.Manifest.Target,
+			Error:  r.Refusal.Error(),
+		})
+	}
+	data, err := json.MarshalIndent(entries, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(stateDir, "refusals.json"), data, 0600)
+}
+
+// writeEffectiveAdapters writes the effective adapter set (attached + refused)
+// as generated state next to refusals.json. This is NOT the user's manifest —
+// it is rewritten each start and never touches the operator's file.
+func writeEffectiveAdapters(stateDir string, mf manifest.File, attached []core.Attachment, refusals []registry.Outcome) error {
+	type effEntry struct {
+		Kind   string `json:"kind"`
+		Target string `json:"target"`
+		State  string `json:"state"`
+		Error  string `json:"error,omitempty"`
+	}
+	entries := make([]effEntry, 0, len(mf.Adapters))
+	for _, att := range attached {
+		entries = append(entries, effEntry{
+			Target: att.Inspect().TargetID,
+			State:  "attached",
+		})
+	}
+	for _, r := range refusals {
+		entries = append(entries, effEntry{
+			Kind:   r.Manifest.Kind,
+			Target: r.Manifest.Target,
+			State:  "refused",
+			Error:  r.Refusal.Error(),
+		})
+	}
+	data, err := json.MarshalIndent(entries, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(stateDir, "adapters.json"), data, 0600)
+}
+
+// loadRefusals reads persisted adapter refusals for doctor to print.
+func loadRefusals(stateDir string) ([]refusalEntry, error) {
+	data, err := os.ReadFile(filepath.Join(stateDir, "refusals.json"))
+	if err != nil {
+		return nil, err
+	}
+	var entries []refusalEntry
+	if err := json.Unmarshal(data, &entries); err != nil {
+		return nil, err
+	}
+	return entries, nil
 }
 
 // replyRouterFor returns the ReplyRouter the endpoint uses: cli resolves the
@@ -964,6 +1082,62 @@ func openServeStore(stateDir string, now func() time.Time) (*requests.Store, *co
 // is assigned the carrier before Reconcile, so the caller's publish closure
 // (which captures the same carrier pointer) sees it during Reconcile. serve
 // passes its attachments; the returned store is closed by the caller on error.
+// serveStartup is the ONE production startup path serve runs, and the one
+// the focused regressions call (611.22.19 round-4 P0 made startup one
+// callable sequence; 611.13 r4 extends the same rule to the whole
+// manifest->validate->Build->persist->sequence chain): it loads the manifest
+// from manifestFile, appends the caller's flag-sugar entries, validates, and
+// owns the startup. Validation failures come back typed so serve maps them
+// to exit 2; the tests assert them through this same path.
+//
+// Order matters: Build runs BEFORE startupSequence, so a refusing adapter is
+// a typed outcome, not a lost start; generated diagnostics (refusals.json,
+// adapters.json) are published only AFTER startupSequence returns — the
+// store open inside it creates the state directory and acquires the owner
+// lock, so a losing starter never overwrites the live owner's files and a
+// fresh directory cannot break the write (611.13 r4 item 1). Publish
+// failures are warnings on the warn writer: doctor reads what exists, and
+// losing startup keeps its own exit code. Refusals are rewritten EVERY owned
+// start, including empty — a removed adapter must not persist as 'refused'
+// forever. The caller owns the returned endpoint: Close it when done, even
+// on test assertion failure (the lock and listener must not outlive the
+// caller).
+func serveStartup(stateDir, root, handle, manifestFile string, sugar []manifest.Adapter, publish core.Publisher, carrierOut **amqio.Carrier, warn io.Writer) (*requests.Store, *core.Endpoint, *amqio.Carrier, []registry.Outcome, error) {
+	mf, err := manifest.Load(manifestFile)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+	mf.Adapters = append(mf.Adapters, sugar...)
+	if verr := manifest.Validate(mf); verr != nil {
+		return nil, nil, nil, nil, verr
+	}
+	var attachments []core.Attachment
+	var refusals []registry.Outcome
+	if len(mf.Adapters) > 0 {
+		for _, oc := range registry.Build(context.Background(), root, stateDir, mf) {
+			if oc.Attachment != nil {
+				attachments = append(attachments, oc.Attachment)
+			} else {
+				refusals = append(refusals, oc)
+				if warn != nil {
+					say(warn, "warning: adapter %q (kind %q) refused: %v\n", oc.Manifest.Target, oc.Manifest.Kind, oc.Refusal)
+				}
+			}
+		}
+	}
+	store, ep, carrier, err := startupSequence(stateDir, root, handle, nil, publish, carrierOut, attachments...)
+	if err != nil {
+		return store, ep, carrier, refusals, err
+	}
+	if perr := persistRefusals(stateDir, refusals); perr != nil && warn != nil {
+		say(warn, "warning: could not persist adapter refusals: %v\n", perr)
+	}
+	if werr := writeEffectiveAdapters(stateDir, mf, attachments, refusals); werr != nil && warn != nil {
+		say(warn, "warning: could not write effective adapters: %v\n", werr)
+	}
+	return store, ep, carrier, refusals, nil
+}
+
 func startupSequence(stateDir, root, handle string, now func() time.Time, publish core.Publisher, carrierOut **amqio.Carrier, attachments ...core.Attachment) (*requests.Store, *core.Endpoint, *amqio.Carrier, error) {
 	store, ep, err := openServeStore(stateDir, now)
 	if err != nil {

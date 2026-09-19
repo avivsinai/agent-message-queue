@@ -83,6 +83,14 @@ type Server struct {
 	path     string
 }
 
+// Close stops the listener and removes the socket file. Tests and callers
+// that drive startup without Serve(ctx) use it so the bound socket does not
+// outlive the endpoint's owner.
+func (s *Server) Close() error {
+	_ = s.listener.Close()
+	return os.Remove(s.path)
+}
+
 // Listen binds the socket with owner-only permissions. A stale socket file
 // from a dead endpoint is removed only after a connect attempt fails.
 func Listen(stateDir string, ep *core.Endpoint) (*Server, error) {

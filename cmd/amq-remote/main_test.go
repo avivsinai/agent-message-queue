@@ -19,7 +19,9 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/fake"
 	"github.com/avivsinai/agent-message-queue/internal/remote/ipc"
+	"github.com/avivsinai/agent-message-queue/internal/remote/manifest"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
+	"github.com/avivsinai/agent-message-queue/internal/remote/registry"
 	"github.com/avivsinai/agent-message-queue/internal/remote/requests"
 	"github.com/avivsinai/agent-message-queue/internal/remote/sender"
 )
@@ -1576,5 +1578,567 @@ func TestBK4R6CarrierConstructedInsideStartupSequence(t *testing.T) {
 	// closure would see carrier==nil and the startup revision would be lost.
 	if carrierNilDuringPublish.Load() {
 		t.Fatal("R6: carrier was nil when publish was called during Reconcile (carrier constructed after Reconcile, not inside startupSequence)")
+	}
+}
+
+// TestStartupSequenceWithManifest (611.13 r1) extends the round-6
+// startup-construction assertion: a manifest entry feeds registry.Build,
+// which feeds startupSequence. The carrier is constructed inside
+// startupSequence with the manifest's fake adapter registered, so the
+// startup revision reaches the carrier. This replaces the deleted
+// sleep-based integration test (TestServeReadsManifest).
+func TestStartupSequenceWithManifest(t *testing.T) {
+	root, err := os.MkdirTemp("", "amqrmseq")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	stateDir := filepath.Join(root, "extensions", "remote")
+	if err := os.MkdirAll(stateDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	// Write a manifest with one fake adapter under the target id 'fake' —
+	// deliberately NOT --fake sugar: the production path must read THIS
+	// manifest file. This goes RED when the manifest read is removed from
+	// serveStartup: no manifest, no adapter, no target (611.13 r4 item 2).
+	mf := manifest.File{
+		SchemaVersion: manifest.SchemaVersion,
+		Layer:         manifest.Layer,
+		Adapters: []manifest.Adapter{
+			{Kind: "fake", Target: "fake", Epoch: "e_1"},
+		},
+	}
+	data, _ := json.Marshal(mf)
+	manifestFile := manifest.DefaultPath(stateDir)
+	if err := os.WriteFile(manifestFile, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+	// Bounded production startup: serveStartup is the ONE path serve runs
+	// (manifest load -> validate -> Build -> owned sequence -> diagnostics).
+	// No perpetual server goroutine: the endpoint is Closed even on failure,
+	// so the owner lock and store never outlive the test (611.13 r5).
+	var carrier *amqio.Carrier
+	carrierPublish := func(s protocol.Snapshot, origin map[string]string) error {
+		if carrier == nil {
+			return nil
+		}
+		return carrier.Publish(s, origin)
+	}
+	_, ep, carrier, _, err := serveStartup(stateDir, root, amqio.DefaultHandle, manifestFile, nil, carrierPublish, &carrier, io.Discard)
+	if err != nil {
+		t.Fatalf("serveStartup: %v", err)
+	}
+	success := false
+	defer func() {
+		_ = ep.Close()
+		if success {
+			return
+		}
+	}()
+	if carrier == nil {
+		t.Fatal("carrier is nil after serveStartup (not constructed inside)")
+	}
+	// The manifest-declared target MUST be registered by the production path.
+	found := false
+	for _, tid := range ep.Targets() {
+		if tid == "fake" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("manifest-declared target 'fake' not registered; targets=%v", ep.Targets())
+	}
+	// The bounded IPC surface a client uses: Listen on the owned endpoint
+	// answers a real sessions call, then Close removes the socket.
+	server, err := ipc.Listen(stateDir, ep)
+	if err != nil {
+		t.Fatalf("ipc listen: %v", err)
+	}
+	ipcCtx, cancel := context.WithCancel(context.Background())
+	served := make(chan struct{})
+	go func() {
+		_ = server.Serve(ipcCtx)
+		close(served)
+	}()
+	defer func() {
+		cancel()
+		_ = server.Close()
+		<-served
+	}()
+	resp, err := ipc.Call(stateDir, ipc.Request{Command: &protocol.Command{Schema: protocol.SchemaCommand, Op: protocol.OpSessionList}})
+	if err != nil {
+		t.Fatalf("sessions over ipc: %v", err)
+	}
+	var sessions []protocol.Session
+	if err := json.Unmarshal(resp.Reply, &sessions); err != nil {
+		t.Fatalf("sessions reply: %v", err)
+	}
+	found = false
+	for _, s := range sessions {
+		if s.TargetID == "fake" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("manifest-declared target 'fake' not serving; sessions reply had %d entries", len(sessions))
+	}
+	success = true
+	// serveStartup is the one production path serve runs; diagnostics must
+	// exist for the owned startup. Generated state, next to refusals.json.
+	adaptersData, err := os.ReadFile(filepath.Join(stateDir, "adapters.json"))
+	if err != nil {
+		t.Fatalf("adapters.json not published by the owned startup: %v", err)
+	}
+	if !strings.Contains(string(adaptersData), "fake") {
+		t.Fatalf("adapters.json missing the manifest target: %s", adaptersData)
+	}
+}
+
+// TestBuildPartialFailureFakeAndClaude (611.13 r1) pins the partial-failure
+// happy path: a manifest with [fake, claude] yields one attachment (fake)
+// and one typed refusal (claude stub). serve registers what built and
+// persists the refusal; one bad adapter never takes down serve.
+func TestBuildPartialFailureFakeAndClaude(t *testing.T) {
+	root, err := os.MkdirTemp("", "amqrpartial")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	stateDir := filepath.Join(root, "extensions", "remote")
+	if err := os.MkdirAll(stateDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	// A manifest with a fake (OK) and a claude (stub refusal).
+	mf := manifest.File{
+		SchemaVersion: manifest.SchemaVersion,
+		Adapters: []manifest.Adapter{
+			{Kind: "fake", Target: "fake", Epoch: "e_1"},
+			{Kind: "claude", Target: "cc-1"},
+		},
+	}
+	outcomes := registry.Build(context.Background(), root, stateDir, mf)
+	if len(outcomes) != 2 {
+		t.Fatalf("got %d outcomes, want 2", len(outcomes))
+	}
+	// fake succeeds.
+	if outcomes[0].Attachment == nil {
+		t.Fatalf("outcome[0] (fake): expected attachment, got refusal=%v", outcomes[0].Refusal)
+	}
+	if outcomes[0].Attachment.Inspect().TargetID != "fake" {
+		t.Fatalf("outcome[0] target=%q, want fake", outcomes[0].Attachment.Inspect().TargetID)
+	}
+	// claude refuses (stub).
+	if outcomes[1].Attachment != nil {
+		t.Fatal("outcome[1] (claude): expected refusal, got attachment")
+	}
+	if outcomes[1].Refusal == nil {
+		t.Fatal("outcome[1] (claude): expected refusal, got nil")
+	}
+	if outcomes[1].Refusal.Error() != "claude adapter not yet authorized (gated on 611.2 wire-capture probe)" {
+		t.Fatalf("outcome[1] refusal=%q, want claude ErrNotAuthorized", outcomes[1].Refusal.Error())
+	}
+}
+
+// TestRefusalsClearedOnRestart (611.13 r3, r4 rewrite) pins the ownership
+// boundary through the production path: two real serve starts on one root.
+// Start 1 owns the store, runs with a claude manifest (stub refusal), and
+// persists that refusal. Start 2 has an empty manifest, loses the lock, and
+// exits 6 — it must NOT overwrite the live owner's refusals.json (611.13 r4
+// item 1: diagnostics publish moved after the owned startup). RED when
+// persistRefusals is guarded by len(refusals)>0 (the stale file persists)
+// or when diagnostics write before the lock (the loser clobbers the owner).
+func TestRefusalsClearedOnRestart(t *testing.T) {
+	root, err := os.MkdirTemp("", "amqrrclr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	stateDir := filepath.Join(root, "extensions", "remote")
+	manifestPath := manifest.DefaultPath(stateDir)
+	if err := os.MkdirAll(stateDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	// Start 1: manifest with a claude entry (stub refusal). Bounded owned
+	// startup via serveStartup (the ONE production path serve runs) + the
+	// bounded IPC server; both are Closed so the lock/listener never outlive
+	// the test (611.13 r5).
+	mf1 := manifest.File{
+		SchemaVersion: manifest.SchemaVersion,
+		Adapters: []manifest.Adapter{
+			{Kind: "claude", Target: "cc-1"},
+		},
+	}
+	data1, _ := json.Marshal(mf1)
+	if err := os.WriteFile(manifestPath, data1, 0644); err != nil {
+		t.Fatal(err)
+	}
+	var carrier1 *amqio.Carrier
+	carrierPublish1 := func(s protocol.Snapshot, origin map[string]string) error {
+		if carrier1 == nil {
+			return nil
+		}
+		return carrier1.Publish(s, origin)
+	}
+	ep1, server1 := ownedStartup(t, stateDir, root, manifestPath, nil, carrierPublish1, &carrier1)
+	defer func() {
+		_ = server1.Close()
+		_ = ep1.Close()
+	}()
+	refusals1, err := loadRefusals(stateDir)
+	if err != nil {
+		t.Fatalf("start 1 load refusals: %v", err)
+	}
+	if len(refusals1) != 1 {
+		t.Fatalf("start 1: got %d refusals, want 1", len(refusals1))
+	}
+	// The owner must be reachable: the real serve path owns the lock while
+	// the losing start-2 runs against it.
+	resp, err := ipc.Call(stateDir, ipc.Request{Command: &protocol.Command{Schema: protocol.SchemaCommand, Op: protocol.OpSessionList}})
+	if err != nil {
+		t.Fatalf("owner not reachable over ipc: %v", err)
+	}
+	_ = resp
+
+	// Start 2: empty manifest, same root. The store lock is held by start 1;
+	// the real serve error return is exit 6 (endpoint_already_running). This
+	// is the one real-CLI invocation in the test: a full run(serve) against
+	// the LIVE owner, the exact observed defect boundary (611.13 r4 item 1).
+	emptyPath := filepath.Join(stateDir, "manifest-empty.json")
+	if err := os.WriteFile(emptyPath, []byte("{}"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	var out2, errBuf2 bytes.Buffer
+	code2 := run([]string{"serve", "--root", root, "--manifest", emptyPath}, strings.NewReader(""), &out2, &errBuf2)
+	if code2 != protocol.ExitForCode(protocol.CodeEndpointAlreadyRunning) {
+		t.Fatalf("start 2: exit=%d, want %d (endpoint_already_running)\nstderr=%s", code2, protocol.ExitForCode(protocol.CodeEndpointAlreadyRunning), errBuf2.String())
+	}
+	// The losing start must not touch the owner's diagnostics.
+	refusals2, err := loadRefusals(stateDir)
+	if err != nil {
+		t.Fatalf("post-start-2 load refusals: %v", err)
+	}
+	if len(refusals2) != 1 {
+		t.Fatalf("start 2 (loser) overwrote the owner's refusals: got %d refusals, want 1", len(refusals2))
+	}
+
+	// Same production path, sequential owned starts on a fresh root: a
+	// claude refusal on start 1 is GONE after an owned start 2 with an empty
+	// manifest. RED when persistRefusals is guarded by len(refusals)>0.
+	root2, err := os.MkdirTemp("", "amqrrclr2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root2) })
+	stateDir2 := filepath.Join(root2, "extensions", "remote")
+	var carrier2 *amqio.Carrier
+	carrierPublish2 := func(s protocol.Snapshot, origin map[string]string) error {
+		if carrier2 == nil {
+			return nil
+		}
+		return carrier2.Publish(s, origin)
+	}
+	// Sequential owned starts through the shared production path, fresh
+	// roots, nothing perpetual: each endpoint is Closed before the next
+	// start, releasing the lock (611.13 r5 lifecycle).
+	_, ep1, _, refusalsA, err := serveStartup(stateDir2, root2, amqio.DefaultHandle, manifestPath, nil, carrierPublish2, &carrier2, io.Discard)
+	if err != nil {
+		t.Fatalf("owned start 1: %v", err)
+	}
+	if len(refusalsA) != 1 {
+		t.Fatalf("owned start 1: got %d refusals, want 1", len(refusalsA))
+	}
+	if err := ep1.Close(); err != nil {
+		t.Fatalf("owned start 1 close: %v", err)
+	}
+	emptyFile := filepath.Join(stateDir2, "manifest-empty.json")
+	if err := os.WriteFile(emptyFile, []byte("{}"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	_, ep2, _, refusalsB, err := serveStartup(stateDir2, root2, amqio.DefaultHandle, emptyFile, nil, carrierPublish2, &carrier2, io.Discard)
+	if err != nil {
+		t.Fatalf("owned start 2: %v", err)
+	}
+	defer func() { _ = ep2.Close() }()
+	if len(refusalsB) != 0 {
+		t.Fatalf("owned start 2: got %d refusals, want 0 (stale file not cleared)", len(refusalsB))
+	}
+	cleared, err := loadRefusals(stateDir2)
+	if err != nil {
+		t.Fatalf("owned start 2 load: %v", err)
+	}
+	if len(cleared) != 0 {
+		t.Fatalf("owned start 2: refusals file still has %d entries, want 0", len(cleared))
+	}
+}
+
+// ownedStartup runs the ONE production startup path (serveStartup: manifest
+// load -> validate -> Build -> owned sequence -> diagnostics publish) plus
+// the bounded IPC server, and registers t.Cleanup that closes both EVEN ON
+// assertion failure. Nothing perpetual: the owner lock and listener are
+// released before RemoveAll (611.13 r5 lifecycle rule).
+func ownedStartup(t *testing.T, stateDir, root, manifestFile string, sugar []manifest.Adapter, publish core.Publisher, carrierOut **amqio.Carrier) (*core.Endpoint, *ipc.Server) {
+	t.Helper()
+	_, ep, _, _, err := serveStartup(stateDir, root, amqio.DefaultHandle, manifestFile, sugar, publish, carrierOut, io.Discard)
+	if err != nil {
+		t.Fatalf("serveStartup: %v", err)
+	}
+	server, err := ipc.Listen(stateDir, ep)
+	if err != nil {
+		_ = ep.Close()
+		t.Fatalf("ipc listen: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	served := make(chan struct{})
+	go func() {
+		_ = server.Serve(ctx)
+		close(served)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		_ = server.Close()
+		_ = ep.Close()
+		<-served
+	})
+	return ep, server
+}
+
+// TestManifestBytesUnchangedAfterFlag (611.13 r3, r4/r5 rewrite) pins through
+// the production startup path that serve NEVER writes to the user's manifest
+// path. A codex-only manifest, started with --fake sugar, must have
+// byte-identical manifest.json after the flag append; the merged set lives in
+// adapters.json (generated state). RED if the production path ever calls
+// manifest.Write.
+func TestManifestBytesUnchangedAfterFlag(t *testing.T) {
+	root, err := os.MkdirTemp("", "amqrnowr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	stateDir := filepath.Join(root, "extensions", "remote")
+	if err := os.MkdirAll(stateDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	// A codex entry is user-authored: Validate accepts it, the factory
+	// refuses (guaranteed-absent socket inside THIS test's root), and the
+	// owned startup persists anyway.
+	absentSocket := filepath.Join(root, "absent.sock")
+	mf := manifest.File{
+		SchemaVersion: manifest.SchemaVersion,
+		Adapters: []manifest.Adapter{
+			{Kind: "codex", Target: "codex-abc123", Config: json.RawMessage(`{"socket":"` + absentSocket + `","thread":"t1"}`)},
+		},
+	}
+	manifestPath := manifest.DefaultPath(stateDir)
+	data, _ := json.MarshalIndent(mf, "", "  ")
+	if err := os.WriteFile(manifestPath, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Bounded production startup with --fake sugar (the flag-append path).
+	var carrier *amqio.Carrier
+	carrierPublish := func(s protocol.Snapshot, origin map[string]string) error {
+		if carrier == nil {
+			return nil
+		}
+		return carrier.Publish(s, origin)
+	}
+	ep, server := ownedStartup(t, stateDir, root, manifestPath, []manifest.Adapter{{Kind: "fake", Target: "fake", Epoch: "e_1"}}, carrierPublish, &carrier)
+	_ = ep
+	_ = server
+
+	// Reread the user's manifest: bytes must be unchanged.
+	after, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatalf("manifest.json was modified by the flag-append path\nbefore: %s\nafter:  %s", before, after)
+	}
+	// The merged set (file + flag sugar) is generated state: both targets in
+	// adapters.json, never in the user's file.
+	adaptersData, err := os.ReadFile(filepath.Join(stateDir, "adapters.json"))
+	if err != nil {
+		t.Fatalf("adapters.json not published: %v", err)
+	}
+	if !strings.Contains(string(adaptersData), "codex-abc123") || !strings.Contains(string(adaptersData), "fake") {
+		t.Fatalf("adapters.json missing merged set (codex-abc123 + fake): %s", adaptersData)
+	}
+}
+
+// TestValidationFailuresExitTwo (611.13 r3, r4 rewrite) pins through the
+// REAL serve error return that every manifest validation failure maps to
+// exit 2 (ExitUsage), not exit 1. RED when IsValidation uses errors.Is
+// (always false) instead of errors.As, and when a serve path skips Validate.
+func TestValidationFailuresExitTwo(t *testing.T) {
+	cases := []struct {
+		name     string
+		f        manifest.File
+		discover bool
+	}{
+		{
+			name: "duplicate target",
+			f: manifest.File{
+				SchemaVersion: manifest.SchemaVersion,
+				Adapters: []manifest.Adapter{
+					{Kind: "fake", Target: "dup", Epoch: "e_1"},
+					{Kind: "fake", Target: "dup", Epoch: "e_2"},
+				},
+			},
+		},
+		{
+			name: "epoch on non-fake",
+			f: manifest.File{
+				SchemaVersion: manifest.SchemaVersion,
+				Adapters: []manifest.Adapter{
+					{Kind: "codex", Target: "cx-1", Epoch: "cx-1"},
+				},
+			},
+		},
+		{
+			name: "missing target",
+			f: manifest.File{
+				SchemaVersion: manifest.SchemaVersion,
+				Adapters: []manifest.Adapter{
+					{Kind: "fake", Target: ""},
+				},
+			},
+		},
+		{
+			name: "missing kind",
+			f: manifest.File{
+				SchemaVersion: manifest.SchemaVersion,
+				Adapters: []manifest.Adapter{
+					{Target: "orphan"},
+				},
+			},
+		},
+		{
+			name: "wrong layer",
+			f: manifest.File{
+				SchemaVersion: manifest.SchemaVersion,
+				Layer:         "not-remote",
+				Adapters: []manifest.Adapter{
+					{Kind: "fake", Target: "fake", Epoch: "e_1"},
+				},
+			},
+		},
+		{
+			// 611.13 r4: a target with characters outside the opaque grammar
+			// is rejected before registration — the observed defect was an
+			// accepted "sales team" target every CLI submit then refused.
+			name: "invalid target grammar",
+			f: manifest.File{
+				SchemaVersion: manifest.SchemaVersion,
+				Adapters: []manifest.Adapter{
+					{Kind: "fake", Target: "sales team", Epoch: "e_1"},
+				},
+			},
+		},
+		{
+			// 611.13 r4: a fake entry without an epoch is rejected — the fake
+			// requires an epoch at submit; an accepted empty epoch produced an
+			// unusable session.
+			name: "fake missing epoch",
+			f: manifest.File{
+				SchemaVersion: manifest.SchemaVersion,
+				Adapters: []manifest.Adapter{
+					{Kind: "fake", Target: "plain"},
+				},
+			},
+		},
+		{
+			// 611.13 r5 regression observed by codex review: --discover must
+			// classify a validation failure exactly like serve — the same
+			// invalid manifest exited 1 under --discover and 2 under serve.
+			name: "discover invalid target exits two",
+			f: manifest.File{
+				SchemaVersion: manifest.SchemaVersion,
+				Adapters: []manifest.Adapter{
+					{Kind: "fake", Target: "sales team", Epoch: "e_1"},
+				},
+			},
+			discover: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Unit level: typed validation failure.
+			err := manifest.Validate(tc.f)
+			if err == nil {
+				t.Fatal("Validate accepted invalid manifest")
+			}
+			if !manifest.IsValidation(err) {
+				t.Fatalf("IsValidation=false for %v; validation failures must be exit 2", err)
+			}
+			// Production level: the real serve error return is exit 2. Serve
+			// refuses before any startup side effect.
+			root, err := os.MkdirTemp("", "amqrvexit")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.RemoveAll(root) })
+			stateDir := filepath.Join(root, "extensions", "remote")
+			if err := os.MkdirAll(stateDir, 0700); err != nil {
+				t.Fatal(err)
+			}
+			data, _ := json.Marshal(tc.f)
+			manifestPath := manifest.DefaultPath(stateDir)
+			if err := os.WriteFile(manifestPath, data, 0644); err != nil {
+				t.Fatal(err)
+			}
+			var out, errBuf bytes.Buffer
+			var code int
+			if tc.discover {
+				// --discover must classify the same manifest exactly like
+				// serve (observed r5 regression: discover exited 1).
+				code = run([]string{"serve", "--discover", "--root", root, "--manifest", manifestPath}, strings.NewReader(""), &out, &errBuf)
+			} else {
+				code = run([]string{"serve", "--root", root, "--manifest", manifestPath}, strings.NewReader(""), &out, &errBuf)
+			}
+			if code != protocol.ExitUsage {
+				t.Fatalf("serve exit=%d, want %d (ExitUsage)\nstderr=%s", code, protocol.ExitUsage, errBuf.String())
+			}
+		})
+	}
+}
+
+// TestLayerOptionalDefaultsToRemote (611.13 r3) pins that a manifest without
+// a layer field is valid and loads with layer=remote filled in memory.
+func TestLayerOptionalDefaultsToRemote(t *testing.T) {
+	root, err := os.MkdirTemp("", "amqrlayer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	stateDir := filepath.Join(root, "extensions", "remote")
+	if err := os.MkdirAll(stateDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	// Manifest with NO layer field (user-authored, minimal).
+	data := []byte(`{"schema_version":1,"adapters":[{"kind":"fake","target":"fake","epoch":"e_1"}]}`)
+	path := manifest.DefaultPath(stateDir)
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+	f, err := manifest.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if f.Layer != manifest.Layer {
+		t.Fatalf("layer=%q, want %q (default fill)", f.Layer, manifest.Layer)
 	}
 }

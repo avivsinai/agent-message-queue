@@ -138,6 +138,19 @@ type Option func(*Attachment)
 // is verified live.
 func WithApprovals(on bool) Option { return func(a *Attachment) { a.approve = on } }
 
+// WithTarget overrides the target id the endpoint addresses this attachment
+// under (.13: the manifest target is the address). The native codex thread id
+// is kept separately and is still used for the daemon protocol; only the
+// advertised identity changes. Without it, the legacy codex:<thread> id is
+// derived from the thread, preserving every existing --codex-socket user.
+func WithTarget(targetID string) Option {
+	return func(a *Attachment) {
+		if targetID != "" {
+			a.targetID = targetID
+		}
+	}
+}
+
 // WithClock overrides the attachment's clock (for tests). Production uses time.Now.
 func WithClock(now func() time.Time) Option { return func(a *Attachment) { a.now = now } }
 
@@ -290,7 +303,7 @@ func (a *Attachment) Inspect() protocol.Session {
 		Status:             status,
 		PendingInteraction: pending,
 		Capabilities: protocol.Capabilities{
-			Inspect: true, Submit: true, CancelRequest: true, Steer: true,
+			Inspect: true, Submit: true, CancelRequest: true, Steer: false,
 			ApproveTool: a.approve, AnswerQuestion: false, Terminal: "unavailable",
 		},
 		Evidence:   &protocol.Evidence{Submit: "admitted", Completion: "run_terminal"},

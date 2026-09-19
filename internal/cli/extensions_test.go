@@ -146,6 +146,47 @@ func TestReadPassiveExtensionManifestRejectsSymlink(t *testing.T) {
 	}
 }
 
+// TestReadPassiveExtensionManifestDefaultsMissingLayer (611.13 r4) pins the
+// passive-reader contract for the valid optional-layer form: a manifest
+// without a layer field (exactly what the companion's serve writes at
+// extensions/remote/manifest.json) is read by doctor with the layer defaulted
+// to the owning directory — no warn diagnostic, and the operator's file is
+// never rewritten. RED when isValidExtensionLayerName rejects the empty
+// layer (the observed amq 0.79.0 defect).
+func TestReadPassiveExtensionManifestDefaultsMissingLayer(t *testing.T) {
+	root := t.TempDir()
+	layer := "remote"
+	layerDir := filepath.Join(root, "extensions", layer)
+	if err := os.MkdirAll(layerDir, 0o700); err != nil {
+		t.Fatalf("mkdir layer dir: %v", err)
+	}
+	manifestPath := filepath.Join(layerDir, "manifest.json")
+	// No layer field, adapters present — the companion's on-disk form.
+	data := []byte(`{"schema_version":1,"adapters":[{"kind":"fake","target":"fake","epoch":"e_1"}]}`)
+	if err := os.WriteFile(manifestPath, data, 0o600); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+
+	got, diag, ok := readPassiveExtensionManifest(root, layer, manifestPath)
+	if !ok {
+		t.Fatalf("layerless manifest rejected: diag=%+v", diag)
+	}
+	if diag != nil {
+		t.Fatalf("layerless manifest produced a diagnostic: %+v", diag)
+	}
+	if got.Layer != layer {
+		t.Fatalf("manifest layer = %q, want %q (defaulted from owning directory)", got.Layer, layer)
+	}
+	// The reader is passive: the operator's file must keep the layerless form.
+	after, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(data) {
+		t.Fatalf("operator manifest was rewritten\nbefore: %s\nafter:  %s", data, after)
+	}
+}
+
 func hasExtensionDiagnostic(diagnostics []doctorExtensionDiagnostic, scope, agent, layer, messagePrefix string) bool {
 	for _, diag := range diagnostics {
 		if diag.Scope != scope || diag.Agent != agent || diag.Layer != layer {
