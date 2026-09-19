@@ -432,7 +432,7 @@ func runSendWithAfterBodyRead(args []string, afterBodyRead func()) error {
 		return UsageError("--kind must be one of: %s", format.ValidKindsList())
 	}
 	if kind != "" && priority == "" {
-		priority = format.PriorityNormal
+		priority = format.DefaultPriority(kind)
 	}
 
 	labels := splitList(*labelsFlag)
