@@ -792,6 +792,38 @@ func (r *DeliveryRoot) ReadDir(name string) ([]os.DirEntry, error) {
 	return file.ReadDir(-1)
 }
 
+// AppendLedgerLine appends one already-serialized line to a durable ledger
+// file under dir, creating the file (0600) on first append. The append and
+// its fsync are one unit: the record is durable when this returns nil. The
+// ledger file is never replaced or truncated — appends only. Callers that
+// need per-key serialization must hold their own advisory lock (see
+// OpenLockFile) across read-modify-append sequences.
+func (r *DeliveryRoot) AppendLedgerLine(dir, filename string, data []byte) error {
+	if err := r.VerifyBase(); err != nil {
+		return err
+	}
+	if err := r.root.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	if len(data) == 0 || data[len(data)-1] != '\n' {
+		return fmt.Errorf("ledger line must end with a newline")
+	}
+	name := filepath.Join(dir, filename)
+	file, err := r.root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = file.Close() }()
+	info, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("ledger file %s is not a regular file", r.displayPath(name))
+	}
+	return writeAllAndSync(file, data)
+}
+
 // Stat stats a root-relative path through the pinned capability.
 func (r *DeliveryRoot) Stat(name string) (os.FileInfo, error) {
 	if err := r.VerifyBase(); err != nil {

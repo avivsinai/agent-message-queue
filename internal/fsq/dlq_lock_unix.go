@@ -16,3 +16,12 @@ func withExclusiveDLQEnvelopeLock(file *os.File, fn func() error) error {
 	defer func() { _ = unix.Flock(int(file.Fd()), unix.LOCK_UN) }()
 	return fn()
 }
+
+// WithExclusiveFileLock holds an exclusive advisory lock on file for the
+// duration of fn. The file must have been created via OpenLockFile (stable
+// name, never replaced, so flock serializes on one inode across processes).
+// The lock is kernel-released on close or process crash; there is no stale
+// sentinel to clean up.
+func WithExclusiveFileLock(file *os.File, fn func() error) error {
+	return withExclusiveDLQEnvelopeLock(file, fn)
+}

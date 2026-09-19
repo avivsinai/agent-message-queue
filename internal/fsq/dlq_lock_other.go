@@ -10,3 +10,8 @@ import (
 func withExclusiveDLQEnvelopeLock(_ *os.File, _ func() error) error {
 	return fmt.Errorf("DLQ envelope locking is unsupported on this platform")
 }
+
+// WithExclusiveFileLock is unsupported on platforms without advisory locking.
+func WithExclusiveFileLock(_ *os.File, _ func() error) error {
+	return fmt.Errorf("advisory file locking is unsupported on this platform")
+}

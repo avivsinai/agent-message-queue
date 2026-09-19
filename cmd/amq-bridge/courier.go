@@ -445,6 +445,11 @@ func (c *Courier) PollOnce(ctx context.Context) (PollResult, error) {
 	}
 	defer func() { _ = root.Close() }()
 
+	ledger, err := bridge.NewTransferLedger(root, c.receiveAlias)
+	if err != nil {
+		return result, fmt.Errorf("open transfer ledger: %w", err)
+	}
+
 	for _, env := range envelopes {
 		if env.DestAlias != c.receiveAlias {
 			return result, fmt.Errorf("inbound destination alias %q does not match configured receiver %q", env.DestAlias, c.receiveAlias)
@@ -462,16 +467,26 @@ func (c *Courier) PollOnce(ctx context.Context) (PollResult, error) {
 		if err := bridge.VerifyEnvelope(env, pub, generation); err != nil {
 			return result, fmt.Errorf("authenticate transfer %s: %w", env.TransferID, err)
 		}
-		applyResult, err := bridge.ApplyEnvelope(root, c.localHost, c.localAgent, env)
+		applyOutcome, err := bridge.ApplyWithLedger(ledger, root, c.localHost, c.localAgent, env)
 		if err != nil {
 			return result, fmt.Errorf("apply transfer %s: %w", env.TransferID, err)
+		}
+		if applyOutcome.State == bridge.LedgerUncertain {
+			// Unknown history: refuse both outcomes. Do not ACK (the
+			// rendezvous will redeliver; the receiver's ledger still refuses
+			// while history is unknown), and do not emit a destination
+			// receipt. Surface it for status/doctor.
+			return result, fmt.Errorf("transfer %s is uncertain in the transfer ledger: %s", env.TransferID, applyOutcome.Evidence)
+		}
+		if applyOutcome.State != bridge.LedgerCommitted {
+			return result, fmt.Errorf("transfer %s ended in ledger state %q (reason %q)", env.TransferID, applyOutcome.State, applyOutcome.Reason)
 		}
 		receipt := Receipt{
 			Stage:           ReceiptDestinationMaildirCommit,
 			TransferID:      env.TransferID,
 			PayloadSHA256:   env.PayloadSHA256,
-			Replayed:        applyResult.Replayed,
-			CommittedPath:   applyResult.Path,
+			Replayed:        applyOutcome.Replayed,
+			CommittedPath:   applyOutcome.Path,
 			SourceMessageID: env.SourceMessageID,
 			EmittedAt:       time.Now().UTC().Format(time.RFC3339Nano),
 		}
