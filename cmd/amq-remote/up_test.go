@@ -239,13 +239,15 @@ func (p *blockingProc) Signal(os.Signal) error { return nil }
 
 // upEntryFakeSpawner adapts the spawner hook to run the REAL up() entry point
 // without a real serve child: it records the forwarded args and blocks in
-// Wait until the test releases it.
+// Wait until the test releases it. Release is idempotent (safe from both the
+// test body and cleanup).
 type upEntryFakeSpawner struct {
-	mu       sync.Mutex
-	args     []string
-	proc     *blockingProc
-	spawned  chan struct{}
-	released chan struct{}
+	mu         sync.Mutex
+	args       []string
+	proc       *blockingProc
+	releaseOne sync.Once
+	spawned    chan struct{}
+	released   chan struct{}
 }
 
 func newUpEntryFakeSpawner(exitCode int) *upEntryFakeSpawner {
@@ -268,6 +270,12 @@ func (s *upEntryFakeSpawner) forwardedArgs() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.args
+}
+
+// releaseProc unblocks the serve child exactly once; calling it again (test
+// body after cleanup, or double cleanup) is a no-op.
+func (s *upEntryFakeSpawner) releaseProc() {
+	s.releaseOne.Do(func() { close(s.proc.release) })
 }
 
 // TestUpFreshRootStableIdentityRealEntryPath reproduces the observed defect
@@ -300,7 +308,6 @@ func TestUpFreshRootStableIdentityRealEntryPath(t *testing.T) {
 	sp := newUpEntryFakeSpawner(0)
 	prevFactory := upSpawnerFactory
 	upSpawnerFactory = func(self string) spawner { return sp }
-	t.Cleanup(func() { upSpawnerFactory = prevFactory })
 
 	firstDone := make(chan error, 1)
 	go func() {
@@ -317,9 +324,50 @@ func TestUpFreshRootStableIdentityRealEntryPath(t *testing.T) {
 		firstDone <- err
 	}()
 
-	// Wait until the first up spawned serve, then prove the root now exists
-	// and the persisted entry identity matches its canonical spelling.
-	<-sp.spawned
+	// Idempotent release-and-join BEFORE any assertion (codex r4): an
+	// assertion failure between spawn and the clean-stop section used to
+	// leave the first up blocked in Wait, holding its lifetime lock and
+	// registry entry while temp-root cleanup ran. The cleanup releases the
+	// child and joins the goroutine (bounded); joinOnce makes the join a
+	// no-op when the test body already consumed the result.
+	var joinOnce sync.Once
+	var joinMu sync.Mutex
+	var joinSet bool
+	var joinRes error
+	join := func(fail string) error {
+		joinOnce.Do(func() {
+			select {
+			case err := <-firstDone:
+				joinMu.Lock()
+				joinSet, joinRes = true, err
+				joinMu.Unlock()
+			case <-time.After(5 * time.Second):
+				t.Error(fail)
+			}
+		})
+		joinMu.Lock()
+		defer joinMu.Unlock()
+		if joinSet {
+			return joinRes
+		}
+		return fmt.Errorf("up goroutine result unknown (join not completed)")
+	}
+	t.Cleanup(func() {
+		upSpawnerFactory = prevFactory
+		sp.releaseProc()
+		_ = join("first up goroutine did not exit within 5s of release")
+	})
+
+	// Wait for the spawn OR an early up failure — an unconditional <-sp.spawned
+	// never observed an early error and hung the test until package timeout
+	// (codex r4).
+	select {
+	case <-sp.spawned:
+	case err := <-firstDone:
+		t.Fatalf("first up exited before spawning: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for first up to spawn serve")
+	}
 	if _, err := os.Stat(root); err != nil {
 		t.Fatalf("up did not prepare fresh root: %v", err)
 	}
@@ -359,9 +407,10 @@ func TestUpFreshRootStableIdentityRealEntryPath(t *testing.T) {
 	}
 
 	// Clean stop of the first up must remove its registration — and a
-	// cleanup failure must not be silent.
-	close(sp.proc.release)
-	if err := <-firstDone; err != nil {
+	// cleanup failure must not be silent. Bounded join: the child returns
+	// once released, so a hang here is a defect, not patience (codex r4).
+	sp.releaseProc()
+	if err := join("timed out waiting for first up to exit after release"); err != nil {
 		t.Fatalf("first up did not exit cleanly: %v", err)
 	}
 	after, err := registry.New(regPath).LoadSnapshot()
@@ -391,7 +440,6 @@ func TestUpForwardedServeArgsThroughRealEntryPoint(t *testing.T) {
 	sp := newUpEntryFakeSpawner(0)
 	prevFactory := upSpawnerFactory
 	upSpawnerFactory = func(self string) spawner { return sp }
-	t.Cleanup(func() { upSpawnerFactory = prevFactory })
 
 	done := make(chan error, 1)
 	go func() {
@@ -408,9 +456,48 @@ func TestUpForwardedServeArgsThroughRealEntryPoint(t *testing.T) {
 		}
 		done <- err
 	}()
-	<-sp.spawned
-	close(sp.proc.release)
-	if err := <-done; err != nil {
+
+	// Idempotent release-and-join cleanup before assertions (codex r4),
+	// same contract as the fresh-root test above; joinOnce makes the join a
+	// no-op when the body already consumed the result.
+	var joinOnce sync.Once
+	var joinMu sync.Mutex
+	var joinSet bool
+	var joinRes error
+	join := func(fail string) error {
+		joinOnce.Do(func() {
+			select {
+			case err := <-done:
+				joinMu.Lock()
+				joinSet, joinRes = true, err
+				joinMu.Unlock()
+			case <-time.After(5 * time.Second):
+				t.Error(fail)
+			}
+		})
+		joinMu.Lock()
+		defer joinMu.Unlock()
+		if joinSet {
+			return joinRes
+		}
+		return fmt.Errorf("up goroutine result unknown (join not completed)")
+	}
+	t.Cleanup(func() {
+		upSpawnerFactory = prevFactory
+		sp.releaseProc()
+		_ = join("up goroutine did not exit within 5s of release")
+	})
+
+	// Spawn OR early failure, never an unconditional wait (codex r4).
+	select {
+	case <-sp.spawned:
+	case err := <-done:
+		t.Fatalf("up exited before spawning: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for up to spawn serve")
+	}
+	sp.releaseProc()
+	if err := join("timed out waiting for up to exit after release"); err != nil {
 		t.Fatalf("up did not exit cleanly: %v", err)
 	}
 
