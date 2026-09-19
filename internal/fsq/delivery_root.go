@@ -800,10 +800,13 @@ func (r *DeliveryRoot) ReadDir(name string) ([]os.DirEntry, error) {
 // need per-key serialization must hold their own advisory lock (see
 // OpenLockFile) across read-modify-append sequences.
 //
-// Returns createdAt=true when this call created the ledger file (the file
-// did not exist before the open), so the caller can sync the directory
-// chain to make the new file NAME durable as well. On any error the return
-// value is unspecified.
+// Directory durability: whenever this call is the first durable line of the
+// file — because it created the file, because the file existed only as an
+// empty crash orphan (created by an earlier O_EXCL open that crashed before
+// its write/sync), or because an earlier creation never got its directory
+// sync — the whole ancestor directory chain is fsynced before returning, so
+// the file NAME is as durable as the record. See ensureLedgerDirDurability.
+// On any error the return value is unspecified.
 func (r *DeliveryRoot) AppendLedgerLine(dir, filename string, data []byte) (created bool, err error) {
 	if err := r.VerifyBase(); err != nil {
 		return false, err
@@ -815,67 +818,105 @@ func (r *DeliveryRoot) AppendLedgerLine(dir, filename string, data []byte) (crea
 		return false, err
 	}
 	name := filepath.Join(dir, filename)
-	// Creation path first: create exclusively if absent, sync the directory
-	// chain when we actually created it, then reopen for append. The
-	// O_EXCL pre-pass avoids racing the file-existence check with appends.
+	// Creation path first: create exclusively if absent, then write+sync the
+	// data. The O_EXCL pre-pass avoids racing the file-existence check with
+	// appends.
 	_, statErr := r.root.Stat(name)
 	switch {
 	case errors.Is(statErr, os.ErrNotExist):
 		file, createErr := r.root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-		if errors.Is(createErr, os.ErrExist) {
-			// Lost a creation race; fall through to append.
-			break
-		}
 		if createErr != nil {
+			// Fail closed on a lost creation race (os.ErrExist) too: a bare
+			// `break` here would skip the record write and still report a
+			// successful append (review r5 P2). Callers serialize with the
+			// per-transfer lock, so an ErrExist here is unexpected; surface it.
 			return false, createErr
 		}
+		created = true
 		if err := writeAllAndSync(file, data); err != nil {
 			_ = file.Close()
-			return true, err
+			return created, err
 		}
 		if err := file.Close(); err != nil {
-			return true, err
+			return created, err
 		}
-		return true, r.syncDirChain(dir)
 	case statErr != nil:
 		return false, statErr
+	default:
+		// Regular append path: file exists (including an empty crash orphan
+		// from an earlier O_EXCL create that died before write+sync).
+		file, openErr := r.root.OpenFile(name, os.O_WRONLY|os.O_APPEND, 0o600)
+		if openErr != nil {
+			return false, openErr
+		}
+		info, infoErr := file.Stat()
+		if infoErr != nil {
+			_ = file.Close()
+			return false, infoErr
+		}
+		if !info.Mode().IsRegular() {
+			_ = file.Close()
+			return false, fmt.Errorf("ledger file %s is not a regular file", r.displayPath(name))
+		}
+		if info.Size() == 0 {
+			// The file's on-disk name was never anchored by a synced record;
+			// this append is its first durable line.
+			created = true
+		}
+		err = writeAllAndSync(file, data)
+		closeErr := file.Close()
+		if err != nil {
+			return created, err
+		}
+		if closeErr != nil {
+			return created, closeErr
+		}
 	}
-	// Regular append path: file exists.
-	file, err := r.root.OpenFile(name, os.O_WRONLY|os.O_APPEND, 0o600)
-	if err != nil {
-		return false, err
+	// Directory durability, unconditionally: after the data sync, sync the
+	// containing directory and every ancestor through root-relative dot.
+	// This runs on EVERY successful append — created, empty orphan, and
+	// existing nonempty files alike — so a name left undurable by an earlier
+	// crash or a failed sync is repaired before this call returns. Durable
+	// names are never inferred from file existence, size, or created flags.
+	if err := r.ensureLedgerDirDurability(dir); err != nil {
+		return created, err
 	}
-	defer func() { _ = file.Close() }()
-	info, err := file.Stat()
-	if err != nil {
-		return false, err
-	}
-	if !info.Mode().IsRegular() {
-		return false, fmt.Errorf("ledger file %s is not a regular file", r.displayPath(name))
-	}
-	return false, writeAllAndSync(file, data)
+	return created, nil
 }
 
-// syncDirChain fsyncs every newly created ancestor of dir, oldest first, so
-// the whole path from root to the new file's directory is durable. Existing
-// directories re-sync harmlessly (idempotent).
+// ensureLedgerDirDurability fsyncs the directory holding dir and then every
+// ancestor down through root-relative dot, oldest first, so the ledger file's
+// NAME is as durable as its synced record. The dot entry is included: a newly
+// created subdirectory persists only when its PARENT directory entry is
+// synced, so the chain ends at "." (the delivery root itself), not at the
+// topmost named ancestor. Existing directories re-sync harmlessly, making
+// this also the recovery path for an earlier failed or skipped sync. Call
+// after the ledger record's data fsync so the name never outlives the
+// content it anchors.
+func (r *DeliveryRoot) ensureLedgerDirDurability(dir string) error {
+	return r.syncDirChain(dir)
+}
+
+// syncDirChain fsyncs dir itself, then every ancestor down through
+// root-relative dot, oldest first (dot last). Existing directories re-sync
+// harmlessly (idempotent).
 func (r *DeliveryRoot) syncDirChain(dir string) error {
-	parts := strings.Split(filepath.ToSlash(dir), "/")
-	rel := ""
-	for _, part := range parts {
-		if part == "" || part == "." {
-			continue
-		}
-		if rel == "" {
-			rel = part
-		} else {
-			rel = filepath.Join(rel, part)
+	if err := r.syncDir(dir); err != nil {
+		return err
+	}
+	parts := strings.Split(filepath.ToSlash(filepath.Clean(dir)), "/")
+	// Walk from the deepest parent up to dot: "bridge/transfer-ledger/x"
+	// syncs "bridge/transfer-ledger", then "bridge", then ".".
+	for i := len(parts) - 1; i >= 1; i-- {
+		rel := filepath.Join(parts[:i]...)
+		if rel == "." || rel == "" {
+			rel = "."
 		}
 		if err := r.syncDir(rel); err != nil {
 			return err
 		}
 	}
-	return r.syncDir(dir)
+	return r.syncDir(".")
 }
 
 // Stat stats a root-relative path through the pinned capability.

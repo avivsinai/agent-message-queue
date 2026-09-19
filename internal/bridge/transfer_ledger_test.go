@@ -4,9 +4,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
@@ -342,6 +344,279 @@ func TestApplyWithLedgerTornRecordIsUncertainNotAbsent(t *testing.T) {
 	newPath := filepath.Join(fsq.AgentInboxNew(base, "claude"), TransferFilename(env.SourceHost, env.TransferID))
 	if _, err := os.Stat(newPath); !os.IsNotExist(err) {
 		t.Fatalf("torn-state transfer was applied: %v", err)
+	}
+}
+
+func TestApplyWithLedgerPreLedgerCurArtifactIsBoundNotReapplied(t *testing.T) {
+	root, ledger := newLedgerTestRoot(t)
+	base := rootRootDir(t, root)
+	env := testEnvelope([]byte("hello"))
+
+	// Pre-ledger crash history: A was applied and drained new->cur BEFORE any
+	// ledger existed, so there is no record for the key. A replay must NOT
+	// re-apply (which would duplicate into new), and the replay itself is the
+	// evidence inspection that binds and commits the key.
+	curPath := filepath.Join(fsq.AgentInboxCur(base, "claude"), TransferFilename(env.SourceHost, env.TransferID))
+	if err := os.WriteFile(curPath, env.Payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	outcome, err := ApplyWithLedger(ledger, root, "mac", "claude", env)
+	if err != nil {
+		t.Fatalf("replay of pre-ledger drained transfer: %v", err)
+	}
+	if outcome.State != LedgerCommitted || !outcome.Replayed {
+		t.Fatalf("state = %q replayed=%v, want committed replayed via retained cur evidence", outcome.State, outcome.Replayed)
+	}
+	// No new copy was published into inbox/new.
+	newPath := filepath.Join(fsq.AgentInboxNew(base, "claude"), TransferFilename(env.SourceHost, env.TransferID))
+	if _, err := os.Stat(newPath); !os.IsNotExist(err) {
+		t.Fatalf("pre-ledger replay re-published into new: %v", err)
+	}
+	// The binding is now durable and correct (A's digest, not something else).
+	rec, torn, err := ledger.effectiveRecord(env.SourceHost, env.TransferID)
+	if err != nil || torn || rec == nil || rec.State != LedgerCommitted || rec.PayloadSHA256 != env.PayloadSHA256 {
+		t.Fatalf("post-replay record = %+v torn=%v err=%v, want committed with A's digest", rec, torn, err)
+	}
+}
+
+func TestApplyWithLedgerPreLedgerDrainedReplayDoesNotBindConflictingArrivalAway(t *testing.T) {
+	root, ledger := newLedgerTestRoot(t)
+	base := rootRootDir(t, root)
+	env := testEnvelope([]byte("hello"))
+
+	// Pre-ledger drained artifact (cur) for A; then B (different digest)
+	// arrives FIRST with no ledger history. B must not bind the key away
+	// from the legitimate winner's retained evidence: B is refused, A's
+	// binding/evidence stays recoverable.
+	curPath := filepath.Join(fsq.AgentInboxCur(base, "claude"), TransferFilename(env.SourceHost, env.TransferID))
+	if err := os.WriteFile(curPath, env.Payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	other := []byte("different payload")
+	sumBytes := sha256.Sum256(other)
+	conflict := env
+	conflict.Payload = other
+	conflict.PayloadSHA256 = hex.EncodeToString(sumBytes[:])
+
+	outcome, err := ApplyWithLedger(ledger, root, "mac", "claude", conflict)
+	if err != nil {
+		t.Fatalf("conflicting first arrival over retained evidence: %v", err)
+	}
+	if outcome.State != LedgerRejected || outcome.Reason != "transfer_conflict" {
+		t.Fatalf("conflict outcome = %+v, want rejected transfer_conflict (loser reported unambiguously)", outcome)
+	}
+	// B was not applied into new.
+	newPath := filepath.Join(fsq.AgentInboxNew(base, "claude"), TransferFilename(env.SourceHost, env.TransferID))
+	if _, err := os.Stat(newPath); !os.IsNotExist(err) {
+		t.Fatalf("conflicting payload applied: %v", err)
+	}
+	// No ledger record was created for the key (the winner's evidence was
+	// never poisoned by a B binding).
+	rec, torn, err := ledger.effectiveRecord(env.SourceHost, env.TransferID)
+	if err != nil || torn {
+		t.Fatalf("winner-key ledger state corrupted: rec=%+v torn=%v err=%v", rec, torn, err)
+	}
+
+	// A's own replay still recovers to committed via the retained cur copy.
+	recovered, err := ApplyWithLedger(ledger, root, "mac", "claude", env)
+	if err != nil {
+		t.Fatalf("A recovery after B conflict: %v", err)
+	}
+	if recovered.State != LedgerCommitted || !recovered.Replayed {
+		t.Fatalf("A recovery = %+v, want committed replayed", recovered)
+	}
+}
+
+func TestApplyWithLedgerPreLedgerDLQArtifactIsBoundNotReapplied(t *testing.T) {
+	root, ledger := newLedgerTestRoot(t)
+	base := rootRootDir(t, root)
+	env := testEnvelope([]byte("hello"))
+
+	// Pre-ledger DLQ history: A was DLQ'd (wrapped under a new id/filename)
+	// before any ledger existed. A replay must bind+commit from the DLQ
+	// original-content evidence, never re-apply.
+	dlqEnv := fsq.DLQEnvelope{
+		Schema:       fsq.DLQSchemaVersion,
+		ID:           "dlqlegacy01",
+		OriginalID:   "orig",
+		OriginalFile: TransferFilename(env.SourceHost, env.TransferID),
+		SourceDir:    "inbox/new",
+	}
+	header, err := json.MarshalIndent(dlqEnv, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := append([]byte("---\n"), header...)
+	data = append(data, []byte("\n---\n")...)
+	data = append(data, env.Payload...)
+	dlqDir := fsq.AgentDLQNew(base, "claude")
+	if err := os.MkdirAll(dlqDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dlqDir, "dlqlegacy01.md"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	outcome, err := ApplyWithLedger(ledger, root, "mac", "claude", env)
+	if err != nil {
+		t.Fatalf("replay of pre-ledger DLQ'd transfer: %v", err)
+	}
+	if outcome.State != LedgerCommitted || !outcome.Replayed {
+		t.Fatalf("state = %q replayed=%v, want committed replayed via DLQ evidence", outcome.State, outcome.Replayed)
+	}
+	newPath := filepath.Join(fsq.AgentInboxNew(base, "claude"), TransferFilename(env.SourceHost, env.TransferID))
+	if _, err := os.Stat(newPath); !os.IsNotExist(err) {
+		t.Fatalf("pre-ledger DLQ replay re-published into new: %v", err)
+	}
+}
+
+func TestAppendLedgerLineDirectoryDurabilityForEmptyOrphan(t *testing.T) {
+	root, ledger := newLedgerTestRoot(t)
+	base := rootRootDir(t, root)
+	env := testEnvelope([]byte("hello"))
+
+	ledgerDir := filepath.Join(base, "bridge", "transfer-ledger", "mac_claude")
+	if err := os.MkdirAll(ledgerDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	name := ledgerRecordName(env.SourceHost, env.TransferID)
+
+	// Observed crash sequence: an earlier O_EXCL create produced an EMPTY
+	// ledger file and the process died before write+sync (readRecords treats
+	// the empty file as absent, so a fresh prepared would take the existing-
+	// file append path and, without this fix, skip directory sync).
+	if err := os.WriteFile(filepath.Join(ledgerDir, name), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Track that directory-chain durability actually runs for the ledger
+	// file on this append (fsq's platform sync is stubbed here via the
+	// exported test hook, so observe through it deterministically).
+	var mu sync.Mutex
+	var synced []string
+	root.SetSyncDirFaultForTest(func(dir string) error {
+		mu.Lock()
+		synced = append(synced, dir)
+		mu.Unlock()
+		return nil
+	})
+	t.Cleanup(func() { root.SetSyncDirFaultForTest(nil) })
+
+	if err := ledger.appendRecordFirstWrite(ledgerRecord{
+		Version:       ledgerSchemaVersion,
+		State:         LedgerPrepared,
+		SourceHost:    env.SourceHost,
+		TransferID:    env.TransferID,
+		PayloadSHA256: env.PayloadSHA256,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	wantLedgerDir := filepath.Join("bridge", "transfer-ledger", "mac_claude")
+	var sawChain, sawDot bool
+	for _, dir := range synced {
+		if dir == wantLedgerDir {
+			sawChain = true
+		}
+		if dir == "." {
+			sawDot = true
+		}
+	}
+	if !sawChain || !sawDot {
+		t.Fatalf("directory durability not established on empty-orphan append: synced=%v (sawChain=%v sawDot=%v)", synced, sawChain, sawDot)
+	}
+	// The record is readable through the ledger (the append landed).
+	records, torn, err := ledger.readRecords(env.SourceHost, env.TransferID)
+	if err != nil || torn || len(records) != 1 || records[0].State != LedgerPrepared {
+		t.Fatalf("records = %+v torn=%v err=%v, want one prepared record", records, torn, err)
+	}
+}
+
+func TestAppendLedgerLineRepairsFailedDirectorySyncOnRetry(t *testing.T) {
+	root, ledger := newLedgerTestRoot(t)
+	base := rootRootDir(t, root)
+	env := testEnvelope([]byte("hello"))
+
+	ledgerDir := filepath.Join(base, "bridge", "transfer-ledger", "mac_claude")
+	if err := os.MkdirAll(ledgerDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// Observed failure mode (verifier r4 P1): a first append writes+fsyncs a
+	// complete NONEMPTY prepared record, then the directory sync fails. The
+	// file's name is on disk but NOT durable. A later append must repair the
+	// guarantee — regardless of the file's size or the created flag — before
+	// recovery can trust the binding.
+	var mu sync.Mutex
+	failLedgerDirSync := true
+	var synced []string
+	root.SetSyncDirFaultForTest(func(dir string) error {
+		mu.Lock()
+		defer mu.Unlock()
+		wantLedgerDir := filepath.Join("bridge", "transfer-ledger", "mac_claude")
+		if failLedgerDirSync && dir == wantLedgerDir {
+			return errors.New("injected: directory sync failed")
+		}
+		synced = append(synced, dir)
+		return nil
+	})
+	t.Cleanup(func() { root.SetSyncDirFaultForTest(nil) })
+
+	firstErr := ledger.appendRecordFirstWrite(ledgerRecord{
+		Version:       ledgerSchemaVersion,
+		State:         LedgerPrepared,
+		SourceHost:    env.SourceHost,
+		TransferID:    env.TransferID,
+		PayloadSHA256: env.PayloadSHA256,
+	})
+	if firstErr == nil {
+		t.Fatalf("append with injected dir-sync failure: want error, got nil")
+	}
+
+	// Retry: the failure injection is lifted. The append must (re)establish
+	// the full chain — the ledger dir, every ancestor, AND root-relative
+	// dot — even though the file already exists and is nonempty.
+	mu.Lock()
+	failLedgerDirSync = false
+	synced = nil
+	mu.Unlock()
+	if err := ledger.appendRecordFirstWrite(ledgerRecord{
+		Version:       ledgerSchemaVersion,
+		State:         LedgerUncertain,
+		SourceHost:    env.SourceHost,
+		TransferID:    env.TransferID,
+		PayloadSHA256: env.PayloadSHA256,
+		Reason:        "retried after failed dir sync",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	wantLedgerDir := filepath.Join("bridge", "transfer-ledger", "mac_claude")
+	var sawSelf, sawBridge, sawBridgeParent, sawDot bool
+	for _, dir := range synced {
+		switch dir {
+		case wantLedgerDir:
+			sawSelf = true
+		case filepath.Join("bridge", "transfer-ledger"):
+			sawBridgeParent = true
+		case "bridge":
+			sawBridge = true
+		case ".":
+			sawDot = true
+		}
+	}
+	if !sawSelf || !sawBridgeParent || !sawBridge || !sawDot {
+		t.Fatalf("retry after failed dir sync did not repair the full directory chain: synced=%v (self=%v ledgerParent=%v bridge=%v dot=%v)", synced, sawSelf, sawBridgeParent, sawBridge, sawDot)
+	}
+	// Both records survived: the prepared intent and the retry.
+	records, torn, err := ledger.readRecords(env.SourceHost, env.TransferID)
+	if err != nil || torn || len(records) != 2 || records[0].State != LedgerPrepared || records[1].State != LedgerUncertain {
+		t.Fatalf("records = %+v torn=%v err=%v, want prepared then uncertain", records, torn, err)
 	}
 }
 

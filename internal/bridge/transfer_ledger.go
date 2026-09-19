@@ -196,31 +196,19 @@ func ledgerLine(rec ledgerRecord) ([]byte, error) {
 	return append(data, '\n'), nil
 }
 
-// appendRecordFirstWrite appends a record and, if this append created the
-// ledger file, syncs every newly created ancestor directory so the file NAME
-// is durable before the caller proceeds. Errors propagate.
+// appendRecordFirstWrite appends a record and guarantees the ledger file's
+// directory chain is durable before returning: AppendLedgerLine owns the
+// guarantee (it syncs on file creation, on an empty crash orphan, and on a
+// recovered earlier failed sync — see ensureLedgerDirDurability). This kept
+// name is what the prepared-intent recovery depends on after a machine
+// crash (section 7.5 directory-sync requirement).
 func (l *TransferLedger) appendRecordFirstWrite(rec ledgerRecord) error {
 	data, err := ledgerLine(rec)
 	if err != nil {
 		return err
 	}
-	created, err := l.root.AppendLedgerLine(l.dir, ledgerRecordName(rec.SourceHost, rec.TransferID), data)
-	if err != nil {
-		return err
-	}
-	if !created {
-		return nil
-	}
-	if err := l.root.SyncDir("bridge"); err != nil {
-		return fmt.Errorf("sync ledger parent dirs: %w", err)
-	}
-	if err := l.root.SyncDir(filepath.Join("bridge", "transfer-ledger")); err != nil {
-		return fmt.Errorf("sync ledger parent dirs: %w", err)
-	}
-	if err := l.root.SyncDir(l.dir); err != nil {
-		return fmt.Errorf("sync ledger dir: %w", err)
-	}
-	return nil
+	_, err = l.root.AppendLedgerLine(l.dir, ledgerRecordName(rec.SourceHost, rec.TransferID), data)
+	return err
 }
 
 // readRecords parses the record file for one transfer key. It returns every
@@ -326,6 +314,57 @@ func scanDLQForOriginal(root *fsq.DeliveryRoot, agent, filename, wantDigest stri
 	return false, false
 }
 
+// scanDLQForOriginalFile reports whether any DLQ envelope wraps an original
+// named filename, regardless of content digest (the digest-agnostic twin of
+// scanDLQForOriginal, used to detect that a transfer key's filename slot is
+// occupied by SOME payload before binding a fresh arrival).
+func scanDLQForOriginalFile(root *fsq.DeliveryRoot, agent, filename string) (found bool, evidenceErr bool) {
+	for _, box := range []string{"new", "cur"} {
+		dir := filepath.Join("agents", agent, "dlq", box)
+		entries, err := root.ReadDir(dir)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return false, true
+		}
+		for _, entry := range entries {
+			if entry.IsDir() {
+				continue
+			}
+			envelope, _, err := fsq.ReadDLQEnvelope(root, filepath.Join(dir, entry.Name()))
+			if err != nil {
+				return false, true
+			}
+			if envelope.OriginalFile == filename {
+				return true, false
+			}
+		}
+	}
+	return false, false
+}
+
+// filenameSlotOccupied reports whether the deterministic transfer filename
+// is currently retained anywhere in the publication surface — inbox/new,
+// inbox/cur, or as a DLQ original — regardless of which payload's bytes it
+// holds. Digest-specific delivery proof is publicationEvidence's job; this
+// occupancy check is what keeps a fresh arrival from binding a key whose
+// filename slot already belongs to a different (possibly pre-ledger)
+// payload.
+func filenameSlotOccupied(root *fsq.DeliveryRoot, localAgent, sourceHost, transferID string) (occupied bool, evidenceErr bool) {
+	filename := TransferFilename(sourceHost, transferID)
+	for _, box := range []string{"new", "cur"} {
+		present, errFlag := lookupInBox(root, localAgent, box, filename)
+		if errFlag {
+			return false, true
+		}
+		if present {
+			return true, false
+		}
+	}
+	return scanDLQForOriginalFile(root, localAgent, filename)
+}
+
 // publicationEvidence implements the crash-history A/B recovery rule:
 // consult durable publication evidence independent of inbox/new. Evidence is
 // conditional and fails closed:
@@ -419,6 +458,63 @@ func ApplyWithLedger(ledger *TransferLedger, root *fsq.DeliveryRoot, localHost, 
 
 		switch {
 		case rec == nil:
+			// No ledger history for this key. Durable publication evidence may
+			// still exist from BEFORE the ledger did (pre-ledger artifact in
+			// new, a consumer-drained cur copy, or a DLQ envelope wrapping the
+			// original bytes). Inspect it BEFORE binding the first digest and
+			// before applying: without this, a replay of a drained pre-ledger
+			// transfer re-applies (duplicate), and a conflicting first arrival
+			// would bind the key away from the legitimate winner's evidence.
+			found, evidenceErr := publicationEvidence(root, localAgent, env.SourceHost, env.TransferID, env.PayloadSHA256)
+			if evidenceErr {
+				outcome = ApplyOutcome{
+					State:    LedgerUncertain,
+					Evidence: "publication evidence unreadable",
+				}
+				return nil
+			}
+			if found {
+				// The artifact is already delivered (retained new/cur or DLQ
+				// evidence for exactly these bytes). Bind and commit without
+				// re-applying; the retained artifact is the delivery.
+				if err := ledger.appendPrepared(env); err != nil {
+					return err
+				}
+				if err := ledger.appendRecord(ledgerRecord{
+					Version:       ledgerSchemaVersion,
+					State:         LedgerCommitted,
+					SourceHost:    env.SourceHost,
+					TransferID:    env.TransferID,
+					PayloadSHA256: env.PayloadSHA256,
+				}); err != nil {
+					return fmt.Errorf("record committed: %w", err)
+				}
+				outcome = ApplyOutcome{State: LedgerCommitted, Replayed: true}
+				return nil
+			}
+			// No delivery evidence for THIS payload — but the key's filename
+			// slot may still be occupied by a DIFFERENT payload (a pre-ledger
+			// winner in new/cur/DLQ). Occupancy beats binding: the first
+			// digest bound to the key must be the winner's, so refuse this
+			// losing copy unambiguously without binding it, applying it, or
+			// touching the winner's evidence. The key stays unbound so the
+			// legitimate payload's own replay still recovers.
+			occupied, occErr := filenameSlotOccupied(root, localAgent, env.SourceHost, env.TransferID)
+			if occErr {
+				outcome = ApplyOutcome{
+					State:    LedgerUncertain,
+					Evidence: "publication evidence unreadable",
+				}
+				return nil
+			}
+			if occupied {
+				outcome = ApplyOutcome{
+					State:    LedgerRejected,
+					Reason:   ledgerReasonConflict,
+					Evidence: "retained artifact for this transfer key belongs to a different payload",
+				}
+				return nil
+			}
 			// Fresh transfer: append the intent record durably (file AND
 			// directory chain) before applying. The intent binds the FIRST
 			// digest seen for this key; that binding is immutable for the
@@ -433,10 +529,12 @@ func ApplyWithLedger(ledger *TransferLedger, root *fsq.DeliveryRoot, localHost, 
 			// digest is idempotent. A different digest under the same key
 			// is a conflict for THAT received copy: the committed result of
 			// the original binding is immutable and must not be replaced.
-			// The conflict is observable in the outcome only; nothing is
-			// appended that could retire the winner.
+			// The stored winner stays committed; the received loser is
+			// reported unambiguously as rejected with the conflict reason
+			// (callers check Reason after State, but the loser must not be
+			// readable as a success state with a hidden refusal flag).
 			if !strings.EqualFold(rec.PayloadSHA256, env.PayloadSHA256) {
-				outcome = ApplyOutcome{State: LedgerCommitted, Replayed: true, Path: rec.CommittedPath, Reason: ledgerReasonConflict}
+				outcome = ApplyOutcome{State: LedgerRejected, Replayed: true, Path: rec.CommittedPath, Reason: ledgerReasonConflict}
 				return nil
 			}
 			outcome = ApplyOutcome{State: LedgerCommitted, Replayed: true, Path: rec.CommittedPath}
