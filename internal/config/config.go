@@ -96,8 +96,14 @@ func EnsureAgent(rootDir, handle string) (bool, error) {
 
 // ensureAgentLocked does the read-modify-write of config.json under the
 // config lock. It reads via the DeliveryRoot (regular-file, no-follow),
-// preserves Version/CreatedUTC, adds the handle if missing, and writes
-// atomically through the root.
+// preserves Version/CreatedUTC AND every unmodelled key (611.22.55: the
+// Config struct models version/created_utc/agents only; re-marshalling the
+// bare struct dropped any other key an operator hand-added or a newer
+// writer emitted - probe names default_agent, project, wake, extensions,
+// routing). The read decodes the file into a raw key map, the known fields
+// are overlaid, agents is mutated, and the full map is re-marshalled
+// (keys sorted by encoding/json - deterministic). Unknown keys survive the
+// rewrite byte-for-byte as raw JSON. Creates the config when absent.
 func ensureAgentLocked(root *fsq.DeliveryRoot, handle string) (bool, error) {
 	data, err := root.ReadFile("meta/config.json")
 	if err != nil {
@@ -125,7 +131,7 @@ func ensureAgentLocked(root *fsq.DeliveryRoot, handle string) (bool, error) {
 		}
 	}
 	cfg.Agents = append(cfg.Agents, handle)
-	out, mErr := json.MarshalIndent(cfg, "", "  ")
+	out, mErr := marshalConfigPreservingUnknowns(data, cfg)
 	if mErr != nil {
 		return false, mErr
 	}
@@ -133,6 +139,34 @@ func ensureAgentLocked(root *fsq.DeliveryRoot, handle string) (bool, error) {
 		return false, wErr
 	}
 	return true, nil
+}
+
+// marshalConfigPreservingUnknowns re-marshals cfg together with every key
+// present in the original raw document but not modelled by Config
+// (611.22.55). Known keys always take the struct's values; unknown keys are
+// re-emitted as their original raw JSON. Keys come out sorted (map
+// marshalling), which is deterministic across writers.
+func marshalConfigPreservingUnknowns(original []byte, cfg Config) ([]byte, error) {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(original, &raw); err != nil {
+		return nil, fmt.Errorf("parse config: %w", err)
+	}
+	known, err := json.Marshal(cfg)
+	if err != nil {
+		return nil, err
+	}
+	var modelled map[string]json.RawMessage
+	if err := json.Unmarshal(known, &modelled); err != nil {
+		return nil, err
+	}
+	for k, v := range modelled {
+		raw[k] = v
+	}
+	out, err := json.MarshalIndent(raw, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // nowUTC returns the current time in RFC 3339 UTC, for CreatedUTC.
