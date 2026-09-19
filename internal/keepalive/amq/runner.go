@@ -651,42 +651,12 @@ func (capture *wakeStartupStderr) Close() {
 	}
 	path := capture.file.Name()
 	diagnosticPath := capture.diagnosticFile.Name()
-	// Test-only evidence retention (review ruling 19:57:44Z): in production
-	// AMQ_KEEPALIVE_RETAINED_CAPTURES is unset and this is a no-op. In the
-	// detached-launcher test the helper's deferred Close unlinks both capture
-	// files before the launcher returns, so the failure diagnostics could
-	// never recover them. When the env var names a test-owned directory,
-	// copy the still-open capture files there first so the bounded report can
-	// read them after the unlink. Retention failures are silently ignored:
-	// this path must never affect wake lifecycle or Close semantics.
-	if retainedDir := os.Getenv("AMQ_KEEPALIVE_RETAINED_CAPTURES"); retainedDir != "" {
-		retainWakeStderrCapture(retainedDir, "capture", capture.file)
-		retainWakeStderrCapture(retainedDir, "diagnostic", capture.diagnosticFile)
-	}
 	_ = capture.file.Close()
 	_ = os.Remove(path)
 	_ = capture.diagnosticFile.Close()
 	_ = os.Remove(diagnosticPath)
 	capture.file = nil
 	capture.diagnosticFile = nil
-}
-
-// retainWakeStderrCapture copies one still-open capture file into the
-// test-owned retention directory (test-only, see Close). Best-effort: any
-// error is swallowed because retention must never alter Close behavior.
-func retainWakeStderrCapture(retainedDir, label string, file *os.File) {
-	if file == nil {
-		return
-	}
-	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		return
-	}
-	retained, err := os.CreateTemp(retainedDir, label+"-*")
-	if err != nil {
-		return
-	}
-	_, _ = io.Copy(retained, io.LimitReader(file, 64*1024))
-	_ = retained.Close()
 }
 
 func wakeStartupStderrDetail(capture *wakeStartupStderr, drainErr error) string {
