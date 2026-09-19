@@ -572,7 +572,8 @@ func writeApplySessionConfig(root *fsq.DeliveryRoot, lease *Lease, createdUTC st
 	// used to re-marshal a bare struct and wipe default_agent/project/
 	// routing etc. from a live root. Overlay the modelled keys onto the raw
 	// existing document instead (config.MarshalPreservingUnknowns); a
-	// missing file marshals the bare struct.
+	// missing file yields an empty raw map, so the output is the modelled
+	// struct alone in the same sorted-map form.
 	cfg := struct {
 		Version    int      `json:"version"`
 		CreatedUTC string   `json:"created_utc"`
