@@ -103,7 +103,7 @@ func appendEvents(t *testing.T, dir, ref string, lines ...string) {
 	if err != nil {
 		t.Fatalf("open events: %v", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	for _, l := range lines {
 		if _, err := fmt.Fprintln(f, l); err != nil {
 			t.Fatalf("append event: %v", err)
@@ -654,16 +654,16 @@ func TestCancelUnsupported(t *testing.T) {
 // TestFactoryRequiresHandleAndDir pins the factory contract: config.handle
 // is required, validated, and the extension directory must exist.
 func TestFactoryRequiresHandleAndDir(t *testing.T) {
-	if _, err := Factory(nil, registry.FactoryConfig{Target: "amit"}); err == nil || !strings.Contains(err.Error(), "handle is required") {
+	if _, err := Factory(t.Context(), registry.FactoryConfig{Target: "amit"}); err == nil || !strings.Contains(err.Error(), "handle is required") {
 		t.Fatalf("err = %v, want handle-required refusal", err)
 	}
 	root := t.TempDir()
-	if _, err := Factory(nil, registry.FactoryConfig{Target: "amit", Root: root, Config: []byte(`{"handle":"agent1"}`)}); err == nil || !strings.Contains(err.Error(), "not found") {
+	if _, err := Factory(t.Context(), registry.FactoryConfig{Target: "amit", Root: root, Config: []byte(`{"handle":"agent1"}`)}); err == nil || !strings.Contains(err.Error(), "not found") {
 		t.Fatalf("err = %v, want extension-dir-not-found refusal", err)
 	}
 	// Happy path over a real dir.
 	newExtDirAt(t, filepath.Join(root, "agents", "agent1", "extensions", "amit-remote"))
-	att, err := Factory(nil, registry.FactoryConfig{Target: "amit", Root: root, Config: []byte(`{"handle":"agent1"}`)})
+	att, err := Factory(t.Context(), registry.FactoryConfig{Target: "amit", Root: root, Config: []byte(`{"handle":"agent1"}`)})
 	if err != nil || att == nil {
 		t.Fatalf("Factory = %v, %v; want attachment", att, err)
 	}

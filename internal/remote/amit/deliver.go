@@ -170,11 +170,11 @@ func writeAtomicNew(path string, payload []byte) error {
 		}
 	}()
 	if _, err := tmp.Write(payload); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return fmt.Errorf("amit: temp write: %v", err)
 	}
 	if err := tmp.Sync(); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return fmt.Errorf("amit: temp sync: %v", err)
 	}
 	if err := tmp.Close(); err != nil {
