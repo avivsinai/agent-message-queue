@@ -3,12 +3,14 @@ package amq
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -490,7 +492,69 @@ while [ ! -f "$AMQ_KEEPALIVE_RELEASE" ]; do sleep 0.01; done
 	if err := os.WriteFile(trigger, nil, 0o600); err != nil {
 		t.Fatalf("trigger post-launch stderr: %v", err)
 	}
-	waitForFile(t, survived, 3*time.Second)
+	waitForFileWithDiagnostics(t, survived, 3*time.Second, dir)
+}
+
+// waitForFileWithDiagnostics is waitForFile with a bounded failure report at
+// the observed CI-failure boundary (review ruling 19:47:51Z): when the
+// marker does not appear, dump the test dir tree, the wake's recorded PID
+// and its liveness, and any leftover wake-stderr capture/diagnostic files.
+// Diagnostic only - no behavior change, no timeout tuning.
+func waitForFileWithDiagnostics(t *testing.T, path string, timeout time.Duration, dir string) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	var report strings.Builder
+	fmt.Fprintf(&report, "file %q did not appear within %s\n", path, timeout)
+	entries, _ := os.ReadDir(dir)
+	report.WriteString("test dir:\n")
+	for _, entry := range entries {
+		info, err := entry.Info()
+		if err != nil {
+			fmt.Fprintf(&report, "  %s (stat error: %v)\n", entry.Name(), err)
+			continue
+		}
+		fmt.Fprintf(&report, "  %s size=%d\n", entry.Name(), info.Size())
+		if data, err := os.ReadFile(filepath.Join(dir, entry.Name())); err == nil && len(data) <= 4096 {
+			fmt.Fprintf(&report, "    content: %q\n", string(data))
+		}
+	}
+	if pidData, err := os.ReadFile(filepath.Join(dir, "pid")); err == nil {
+		fmt.Fprintf(&report, "wake pid file: %q\n", string(pidData))
+		var pid int
+		if _, err := fmt.Sscanf(strings.TrimSpace(string(pidData)), "%d", &pid); err == nil {
+			if proc, err := os.FindProcess(pid); err == nil {
+				if err := proc.Signal(syscall.Signal(0)); err == nil {
+					fmt.Fprintf(&report, "wake pid %d: ALIVE\n", pid)
+				} else {
+					fmt.Fprintf(&report, "wake pid %d: not signaling (%v)\n", pid, err)
+				}
+			}
+		}
+	}
+	cacheDir := filepath.Join(dir, "cache")
+	if cacheEntries, err := os.ReadDir(cacheDir); err == nil {
+		report.WriteString("cache dir:\n")
+		for _, entry := range cacheEntries {
+			info, err := entry.Info()
+			if err != nil {
+				fmt.Fprintf(&report, "  %s (stat error: %v)\n", entry.Name(), err)
+				continue
+			}
+			fmt.Fprintf(&report, "  %s size=%d\n", entry.Name(), info.Size())
+			if strings.HasPrefix(entry.Name(), "wake-stderr") {
+				if data, err := os.ReadFile(filepath.Join(cacheDir, entry.Name())); err == nil && len(data) > 0 {
+					fmt.Fprintf(&report, "    content: %q\n", string(data[:min(len(data), 2048)]))
+				}
+			}
+		}
+	}
+	t.Fatalf("%s", report.String())
 }
 
 func TestStartWakeDetachedLauncherHelper(t *testing.T) {
