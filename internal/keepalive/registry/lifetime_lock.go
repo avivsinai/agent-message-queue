@@ -46,7 +46,7 @@ func ProbeLifetimeLock(regPath, entryID string) (bool, error) {
 		}
 		return false, errors.Join(errLockProbeFailed, err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	// Non-blocking probe: EWOULDBLOCK/EAGAIN = held by a live process.
 	err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
 	if err == nil {

@@ -267,7 +267,7 @@ func TestReclaimPhantomCompanionRow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer lockFile.Close()
+	defer func() { _ = lockFile.Close() }()
 	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		t.Fatal(err)
 	}
@@ -315,7 +315,7 @@ func TestProbeLifetimeLockOutcomes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		t.Fatal(err)
 	}
