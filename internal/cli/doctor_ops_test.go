@@ -337,8 +337,27 @@ func TestRunOpsChecks_ReportsRemoteCompanion(t *testing.T) {
 		t.Fatalf("companions = %#v, want exactly this root's remote entry", companions)
 	}
 	c := companions[0]
-	if c.Agent != "amq-remote" || c.Adapter != "remote" || c.Root != root || c.State != "attached" {
-		t.Fatalf("companion = %#v, want amq-remote/remote/%s/active", c, root)
+	if c.Agent != "amq-remote" || c.Adapter != "remote" || c.Root != root {
+		t.Fatalf("companion = %#v, want amq-remote/remote/%s", c, root)
+	}
+	// The test's registry row holds no lifetime lock (no companion process
+	// exists here). On flock platforms the P1-1 projection reports the
+	// truth: stale + not-held, never a phantom "active". On platforms
+	// without a lock probe the contract is fail-closed: the recorded state
+	// is kept verbatim with lock "unknown" (review 19:21Z: do not weaken
+	// the Unix assertion, do not fake a verdict anywhere).
+	switch runtime.GOOS {
+	case "windows", "plan9", "js":
+		if c.Lock != "unknown" {
+			t.Fatalf("companion lock = %q, want unknown on a probe-less platform", c.Lock)
+		}
+		if c.ProbeError == "" {
+			t.Fatalf("companion probe_error empty on a probe-less platform; the failure must be surfaced")
+		}
+	default:
+		if c.State != "stale" || c.Lock != "not-held" {
+			t.Fatalf("companion = state %q lock %q, want stale/not-held (lockless row)", c.State, c.Lock)
+		}
 	}
 }
 

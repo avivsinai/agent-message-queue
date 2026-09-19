@@ -26,10 +26,18 @@ type fakeProc struct {
 	code    int
 	delay   time.Duration
 	started chan struct{}
+	// onWait, when set, runs at Wait() time INSTEAD of sleeping. Tests use
+	// it to advance an injected clock (611.13.2 review P2-2) so uptime
+	// scenarios are instant.
+	onWait func()
 }
 
 func (p *fakeProc) Wait() (int, error) {
-	time.Sleep(p.delay)
+	if p.onWait != nil {
+		p.onWait()
+	} else {
+		time.Sleep(p.delay)
+	}
 	return p.code, nil
 }
 func (p *fakeProc) Signal(os.Signal) error { return nil }

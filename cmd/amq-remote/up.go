@@ -58,8 +58,18 @@ func (p *execProcess) Signal(sig os.Signal) error {
 }
 
 // execSpawner launches the amq-remote binary as a serve child.
+//
+// B4 (611.13.2): waitDelay bounds how long os/exec waits after the context
+// is cancelled (SIGTERM delivered) before killing the child with SIGKILL.
+// Without it, a serve that ignores SIGTERM keeps the up process alive for
+// an unbounded time - observed 10s+ and still counting. The delay is the
+// shutdown bound the supervisor contract promises: SIGTERM, then a grace
+// period, then the kernel takes the child and up exits.
 type execSpawner struct {
-	binary string
+	binary    string
+	waitDelay time.Duration
+	// env, when non-nil, replaces the child's environment. nil inherits.
+	env []string
 }
 
 func (s *execSpawner) Spawn(ctx context.Context, args []string) (process, error) {
@@ -67,6 +77,12 @@ func (s *execSpawner) Spawn(ctx context.Context, args []string) (process, error)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Stdin = os.Stdin
+	if s.env != nil {
+		cmd.Env = s.env
+	}
+	if s.waitDelay > 0 {
+		cmd.WaitDelay = s.waitDelay
+	}
 	cmd.Cancel = func() error {
 		return cmd.Process.Signal(syscall.SIGTERM)
 	}
@@ -190,6 +206,20 @@ func up(args []string, stdout, stderr io.Writer) (int, error) {
 	defer func() { _ = lifetime.Close() }()
 
 	store := registry.New(regPath)
+	// D (611.13.2): reclaim phantom companion rows before registering. A
+	// kill -9 on up skips its deferred Forget, leaving a row that supervise
+	// skips, GC keeps as not-detached, and doctor reports active forever -
+	// and whose target ownership BLOCKS the fresh up at Upsert. A row whose
+	// lifetime lock is NOT held has no living supervisor; reclaim it under
+	// the registration lock. Probe errors fail closed (the row stays and
+	// the error surfaces; never a silent removal).
+	reclaimed, rerr := reclaimPhantomCompanions(store, regPath, entryID)
+	if rerr != nil {
+		return 0, fmt.Errorf("reclaim phantom companion rows: %w", rerr)
+	}
+	for _, id := range reclaimed {
+		say(stderr, "amq-remote up: reclaimed stale companion row %s (lifetime lock not held)\n", id)
+	}
 	entry := registry.Entry{
 		ID:      entryID,
 		Root:    c.root,
@@ -235,8 +265,11 @@ func up(args []string, stdout, stderr io.Writer) (int, error) {
 }
 
 // upSpawnerFactory lets tests override the spawner used by the real up
-// entry point (default: an execSpawner running the --self binary).
-var upSpawnerFactory = func(self string) spawner { return &execSpawner{binary: self} }
+// entry point (default: an execSpawner running the --self binary with the
+// default SIGTERM grace, B4 611.13.2).
+var upSpawnerFactory = func(self string) spawner {
+	return &execSpawner{binary: self, waitDelay: upWaitDelay}
+}
 
 func newUpSpawner() spawner { return upSpawnerFactory(*selfFlag) }
 
@@ -290,11 +323,66 @@ func acquireLifetimeLock(regPath, entryID string) (*os.File, error) {
 	return f, nil
 }
 
-// lockFilePath derives the per-entry lifetime lock path from the registry
-// path so tests and production share one derivation.
-func lockFilePath(regPath, entryID string) string {
-	return regPath + ".up-" + entryID + ".lock"
+// reclaimPhantomCompanions removes companion (adapter "remote") rows whose
+// process-lifetime lock is no longer held (611.13.2 D): the owning up died
+// hard - kill -9 - and its deferred Forget never ran. Rows are reclaimed
+// under the registration lock; the caller's own row and any row whose lock
+// IS held (a live companion) are untouched. A probe error fails closed: the
+// row survives and the error surfaces to the caller.
+func reclaimPhantomCompanions(store *registry.Store, regPath, ownEntryID string) ([]string, error) {
+	var reclaimed []string
+	err := store.WithRegistrationLock(func() error {
+		file, err := store.Load()
+		if err != nil {
+			return err
+		}
+		var stale []string
+		for _, e := range file.Entries {
+			if e.Adapter != "remote" || e.ID == ownEntryID {
+				continue
+			}
+			held, err := registry.ProbeLifetimeLock(regPath, e.ID)
+			if err != nil {
+				// Fail closed: an unprobeable row is not provably dead.
+				return fmt.Errorf("probe lifetime lock for %s: %w", e.ID, err)
+			}
+			if !held {
+				stale = append(stale, e.ID)
+			}
+		}
+		if len(stale) == 0 {
+			return nil
+		}
+		reclaimed = stale
+		_, err = store.ForgetMany(stale)
+		return err
+	})
+	return reclaimed, err
 }
+
+// lockFilePath derives the per-entry lifetime lock path from the registry
+// path so tests and production share one derivation. Delegates to the
+// registry package so doctor --ops probes the same file (611.13.2 D).
+func lockFilePath(regPath, entryID string) string {
+	return registry.LifetimeLockPath(regPath, entryID)
+}
+
+// upWaitDelay is the default SIGTERM grace before SIGKILL for a real serve
+// child (B4, 611.13.2). Serve's own shutdown is fast when it cooperates;
+// the delay only binds when it ignores SIGTERM.
+const upWaitDelay = 10 * time.Second
+
+// upUsageExitCode is the exit class that terminates supervision: serve
+// refused its own arguments (B6, 611.13.2). Respawning a usage error loops
+// forever - observed 'respawning in 1m0s' for a child exiting 2.
+const upUsageExitCode = 2
+
+// upHealthyUptime is the runtime after which a child counts as having run
+// healthily (B5, 611.13.2): the failure counter resets so the next crash
+// waits the base backoff again, not an escalated step. Two times the base
+// keeps the bar low in tests (inject a tiny base) while staying meaningful
+// in production (a healthy serve runs far longer than two base steps).
+func upHealthyUptime(base time.Duration) time.Duration { return 2 * base }
 
 // upConfig holds the parameters for the supervision loop, separated so tests
 // can inject a fake spawner and short backoff without real processes.
@@ -306,14 +394,28 @@ type upConfig struct {
 	backoffBase  time.Duration
 	backoffMax   time.Duration
 	serveArgs    []string
+	// now returns the current time for uptime measurement; nil means
+	// time.Now. Injected by tests so the healthy-uptime logic is instant
+	// (611.13.2 review P2-2) instead of wall-clock.
+	now func() time.Time
 }
 
 // runUpLoop is the supervision loop: spawn, respawn on non-zero exit with
 // exponential backoff (reusing keepalive's constants), stop on clean exit 0.
 // The spawner interface lets tests inject a fake (no real process).
 func runUpLoop(ctx context.Context, cfg upConfig, sp spawner) (int, error) {
+	now := cfg.now
+	if now == nil {
+		now = time.Now
+	}
+	// restart is the BACKOFF index: it resets on healthy uptime so the next
+	// crash waits the base step again. budget is the LIFETIME respawn count
+	// --max-restarts bounds (611.13.2 review P1-2): one counter, two
+	// obligations made the cap forgettable after any healthy-lived child.
 	restart := 0
+	budget := 0
 	for {
+		start := now()
 		proc, err := sp.Spawn(ctx, cfg.serveArgs)
 		if err != nil {
 			say(os.Stderr, "amq-remote up: spawn failed: %v\n", err)
@@ -332,15 +434,33 @@ func runUpLoop(ctx context.Context, cfg upConfig, sp spawner) (int, error) {
 				say(os.Stderr, "amq-remote up: serve exited cleanly (0)\n")
 				return 0, nil
 			}
-			say(os.Stderr, "amq-remote up: serve exited %d\n", code)
+			if code == upUsageExitCode {
+				// B6 (611.13.2): serve refused its arguments. Respawning
+				// replays the same refusal forever - observed 'respawning in
+				// 1m0s' for a child exiting 2. Propagate the code; up ends.
+				say(os.Stderr, "amq-remote up: serve exited %d (usage error); not respawning\n", code)
+				return code, nil
+			}
+			uptime := now().Sub(start)
+			say(os.Stderr, "amq-remote up: serve exited %d (ran %s)\n", code, uptime.Round(time.Millisecond))
+			// B5 (611.13.2): a child that ran healthy-long did not fail
+			// immediately - the crash it just suffered starts a fresh failure
+			// series, so the counter resets and the next wait is the base
+			// step, not an escalated one.
+			if uptime >= upHealthyUptime(cfg.backoffBase) {
+				say(os.Stderr, "amq-remote up: healthy uptime %s; resetting backoff series\n", uptime.Round(time.Second))
+				restart = 0
+			}
 		}
 		restart++
-		if cfg.maxRestarts > 0 && restart > cfg.maxRestarts {
+		budget++
+		if cfg.maxRestarts > 0 && budget > cfg.maxRestarts {
 			say(os.Stderr, "amq-remote up: max-restarts (%d) exceeded\n", cfg.maxRestarts)
 			return 1, fmt.Errorf("max-restarts exceeded")
 		}
 		// Backoff: reuse keepalive's failure-backoff constants (exponential,
-		// capped). Do not invent a second table.
+		// capped). Do not invent a second table. The index (restart), not
+		// the budget, drives escalation.
 		delay := backoff(restart, cfg.backoffBase, cfg.backoffMax)
 		say(os.Stderr, "amq-remote up: respawning in %s (attempt %d)\n", delay, restart)
 		select {
