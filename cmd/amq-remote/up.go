@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/keepalive/registry"
 	"github.com/avivsinai/agent-message-queue/internal/keepalive/supervisor"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
@@ -146,6 +147,29 @@ func up(args []string, stdout, stderr io.Writer) (int, error) {
 			return 0, fmt.Errorf("registry path: %w", err)
 		}
 	}
+	// Stable identity before any derivation or persistence (codex r3 P1):
+	// deriving the registry/lifetime identity from a NOT-YET-EXISTING root
+	// canonicalizes lexically (macOS: /tmp/...), but once serve creates the
+	// root the same path resolves through its symlink (/private/tmp/...) and
+	// the persisted entry ID no longer matches its identity — a second up
+	// then hit "registry file is corrupt" instead of the ownership refusal.
+	// Create the root layout first and canonicalize ONCE; every identity
+	// derivation, the registry row, and the serve child all use the same
+	// resolved path afterwards.
+	if c.root == "" {
+		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "up: --root or AM_ROOT is required")
+	}
+	if !filepath.IsAbs(c.root) {
+		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "up: --root must be absolute")
+	}
+	if err := fsq.EnsureRootDirs(c.root); err != nil {
+		return 0, fmt.Errorf("prepare root %s: %w", c.root, err)
+	}
+	canonical, err := registry.CanonicalRoot(c.root)
+	if err != nil {
+		return 0, fmt.Errorf("canonicalize root %s: %w", c.root, err)
+	}
+	c.root = canonical
 	entryID := registry.EntryID(c.root, *me, "remote", c.root)
 
 	// Process-lifetime ownership before anything is spawned or written.
@@ -180,8 +204,12 @@ func up(args []string, stdout, stderr io.Writer) (int, error) {
 	defer func() {
 		// Only the lifetime owner reaches this Forget: the lock above is
 		// released after the registration is removed, so a racing second up
-		// can claim the slot only after it is actually empty.
-		_, _ = store.Forget(entryID)
+		// can claim the slot only after it is actually empty. A cleanup
+		// failure is never silent (codex r3): a leftover row would present a
+		// dead endpoint as active to every registry consumer.
+		if _, ferr := store.Forget(entryID); ferr != nil {
+			say(stderr, "amq-remote up: WARNING: could not remove registration %s from %s: %v\n", entryID, regPath, ferr)
+		}
 	}()
 	say(stderr, "amq-remote up: supervising serve for root %s (registry %s)\n", c.root, regPath)
 

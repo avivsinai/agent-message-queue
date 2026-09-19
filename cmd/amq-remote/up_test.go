@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/keepalive/registry"
+	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 )
 
 type stdFlag = flag.Flag
@@ -220,5 +222,205 @@ func TestUpLifetimeLockCreatesMissingRegistryDir(t *testing.T) {
 
 	if _, err := os.Stat(filepath.Join(root, "fresh-dir")); err != nil {
 		t.Fatalf("parent dir not created: %v", err)
+	}
+}
+
+// blockingProc blocks in Wait until released, then exits with its code.
+type blockingProc struct {
+	release chan struct{}
+	code    int
+}
+
+func (p *blockingProc) Wait() (int, error) {
+	<-p.release
+	return p.code, nil
+}
+func (p *blockingProc) Signal(os.Signal) error { return nil }
+
+// upEntryFakeSpawner adapts the spawner hook to run the REAL up() entry point
+// without a real serve child: it records the forwarded args and blocks in
+// Wait until the test releases it.
+type upEntryFakeSpawner struct {
+	mu       sync.Mutex
+	args     []string
+	proc     *blockingProc
+	spawned  chan struct{}
+	released chan struct{}
+}
+
+func newUpEntryFakeSpawner(exitCode int) *upEntryFakeSpawner {
+	return &upEntryFakeSpawner{
+		spawned:  make(chan struct{}),
+		released: make(chan struct{}),
+		proc:     &blockingProc{release: make(chan struct{}), code: exitCode},
+	}
+}
+
+func (s *upEntryFakeSpawner) Spawn(ctx context.Context, args []string) (process, error) {
+	s.mu.Lock()
+	s.args = append([]string(nil), args...)
+	s.mu.Unlock()
+	close(s.spawned)
+	return s.proc, nil
+}
+
+func (s *upEntryFakeSpawner) forwardedArgs() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.args
+}
+
+// TestUpFreshRootStableIdentityRealEntryPath reproduces the observed defect
+// (codex #815 r3 P1): up derived and persisted the registry identity from a
+// NOT-YET-EXISTING root, which canonicalizes lexically (/tmp/...); once the
+// supervised serve created the root, the same path resolved through its
+// symlink (/private/tmp/... on macOS) and the persisted entry ID no longer
+// matched its identity — a second identical up exited 1 "registry file is
+// corrupt / entry id does not match identity" instead of the ownership
+// refusal. The fix prepares + canonicalizes the root BEFORE deriving the
+// lifetime key or persisting the entry. The regression drives the REAL up()
+// with the spawner hook (no real child process).
+func TestUpFreshRootStableIdentityRealEntryPath(t *testing.T) {
+	base := t.TempDir()
+	// A symlinked fresh path makes the lexical/canonical divergence
+	// deterministic on every platform (on macOS any /tmp path diverges the
+	// same way via /private/tmp): the fresh root is reached through a
+	// symlink, so before up creates it the only possible spelling is the
+	// lexical one, and after creation CanonicalRoot resolves the link.
+	if err := os.Mkdir(filepath.Join(base, "real"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(base, "real"), filepath.Join(base, "link")); err != nil {
+		t.Fatal(err)
+	}
+	// Deliberately NOT created: up must prepare the root itself.
+	root := filepath.Join(base, "link", "fresh-root")
+	regPath := filepath.Join(base, "fresh-registry", "registry.json")
+
+	sp := newUpEntryFakeSpawner(0)
+	prevFactory := upSpawnerFactory
+	upSpawnerFactory = func(self string) spawner { return sp }
+	t.Cleanup(func() { upSpawnerFactory = prevFactory })
+
+	firstDone := make(chan error, 1)
+	go func() {
+		code, err := up([]string{
+			"--root", root,
+			"--registry", regPath,
+			"--fake",
+			"--self", "unused-by-fake-spawner",
+		}, io.Discard, io.Discard)
+		if code != 0 {
+			firstDone <- fmt.Errorf("first up: code %d err %v", code, err)
+			return
+		}
+		firstDone <- err
+	}()
+
+	// Wait until the first up spawned serve, then prove the root now exists
+	// and the persisted entry identity matches its canonical spelling.
+	<-sp.spawned
+	if _, err := os.Stat(root); err != nil {
+		t.Fatalf("up did not prepare fresh root: %v", err)
+	}
+	stored, err := registry.New(regPath).LoadSnapshot()
+	if err != nil {
+		t.Fatalf("load registry after first up spawn: %v", err)
+	}
+	if len(stored.Entries) != 1 {
+		t.Fatalf("entries=%d, want exactly the first up's companion", len(stored.Entries))
+	}
+	entry := stored.Entries[0]
+	canonical, err := registry.CanonicalRoot(root)
+	if err != nil {
+		t.Fatalf("canonicalize root now that it exists: %v", err)
+	}
+	if entry.Root != canonical {
+		t.Fatalf("persisted root %q != canonical %q — identity derived from the lexical fresh path", entry.Root, canonical)
+	}
+	if entry.ID != registry.EntryID(canonical, "remote", "remote", canonical) {
+		t.Fatalf("persisted entry id %q does not match canonical identity — second up would see corrupt registry", entry.ID)
+	}
+
+	// The persisted identity stays valid while the first up lives: a second
+	// identical up must refuse with the ownership code, never a corrupt-
+	// registry error.
+	secondCode, secondErr := up([]string{
+		"--root", root,
+		"--registry", regPath,
+		"--fake",
+		"--self", "unused-by-fake-spawner",
+	}, io.Discard, io.Discard)
+	if secondCode != protocol.ExitActionRequired {
+		t.Fatalf("second up: code %d err %v, want %d (endpoint_already_running)", secondCode, secondErr, protocol.ExitActionRequired)
+	}
+	if protocol.RefusalCode(secondErr) != protocol.CodeEndpointAlreadyRunning {
+		t.Fatalf("second up err = %v, want endpoint_already_running refusal", secondErr)
+	}
+
+	// Clean stop of the first up must remove its registration — and a
+	// cleanup failure must not be silent.
+	close(sp.proc.release)
+	if err := <-firstDone; err != nil {
+		t.Fatalf("first up did not exit cleanly: %v", err)
+	}
+	after, err := registry.New(regPath).LoadSnapshot()
+	if err != nil {
+		t.Fatalf("load registry after clean stop: %v", err)
+	}
+	for _, e := range after.Entries {
+		if e.ID == entry.ID {
+			t.Fatalf("registration %s survived clean stop of its owner", e.ID)
+		}
+	}
+}
+
+// TestUpForwardedServeArgsThroughRealEntryPoint pins the forwarded serve
+// arguments as observed at the spawner boundary of the REAL up() entry point
+// (the spawner hook was previously unused by any test — codex r3 note): the
+// supervision loop must receive serve + root + me + the user's flags with
+// parsed values preserved.
+func TestUpForwardedServeArgsThroughRealEntryPoint(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "args-root")
+	regPath := filepath.Join(base, "args-registry", "registry.json")
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatalf("ensure root: %v", err)
+	}
+
+	sp := newUpEntryFakeSpawner(0)
+	prevFactory := upSpawnerFactory
+	upSpawnerFactory = func(self string) spawner { return sp }
+	t.Cleanup(func() { upSpawnerFactory = prevFactory })
+
+	done := make(chan error, 1)
+	go func() {
+		code, err := up([]string{
+			"--root", root,
+			"--registry", regPath,
+			"--fake=false",
+			"--poll", "2s",
+			"--self", "unused-by-fake-spawner",
+		}, io.Discard, io.Discard)
+		if code != 0 {
+			done <- fmt.Errorf("up: code %d err %v", code, err)
+			return
+		}
+		done <- err
+	}()
+	<-sp.spawned
+	close(sp.proc.release)
+	if err := <-done; err != nil {
+		t.Fatalf("up did not exit cleanly: %v", err)
+	}
+
+	canonical, err := registry.CanonicalRoot(root)
+	if err != nil {
+		t.Fatalf("canonicalize root: %v", err)
+	}
+	got := sp.forwardedArgs()
+	want := []string{"serve", "--root", canonical, "--me", "remote", "--fake=false", "--poll=2s"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("serve args = %v, want %v (canonical root, verbatim values)", got, want)
 	}
 }
