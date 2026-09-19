@@ -10,6 +10,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/config"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/keepalive/registry"
 	"github.com/avivsinai/agent-message-queue/internal/notificationattempt"
 	"github.com/avivsinai/agent-message-queue/internal/presence"
 )
@@ -298,5 +299,44 @@ func establishDoctorWakeLifecycleGuardForTest(t *testing.T, root, agent string) 
 	t.Helper()
 	if err := withWakeLifecycleGuard(root, agent, func() error { return nil }); err != nil {
 		t.Fatalf("establish wake lifecycle guard: %v", err)
+	}
+}
+
+// TestRunOpsChecks_ReportsRemoteCompanion pins the observed gap (codex P2):
+// correction 4 promised doctor --ops visibility of companion-supervised
+// amq-remote up registrations, but nothing read the keepalive registry.
+// The doctor must project adapter "remote" entries for the inspected root.
+func TestRunOpsChecks_ReportsRemoteCompanion(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatalf("ensure root dirs: %v", err)
+	}
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	regPath := filepath.Join(home, ".amq-keepalive", "registry.json")
+	if err := os.MkdirAll(filepath.Dir(regPath), 0o700); err != nil {
+		t.Fatalf("mkdir registry dir: %v", err)
+	}
+	if _, err := registry.New(regPath).Upsert(registry.Entry{
+		Root: root, Agent: "amq-remote", Adapter: "remote", Target: root,
+	}); err != nil {
+		t.Fatalf("Upsert companion entry: %v", err)
+	}
+	// A different root's companion must not leak into this root's report.
+	if _, err := registry.New(regPath).Upsert(registry.Entry{
+		Root: "/tmp/other-root", Agent: "amq-remote", Adapter: "remote", Target: "/tmp/other-root",
+	}); err != nil {
+		t.Fatalf("Upsert other-root companion: %v", err)
+	}
+
+	result := runOpsChecks(root, "test_source", false)
+	companions := result.Companions
+	if len(companions) != 1 {
+		t.Fatalf("companions = %#v, want exactly this root's remote entry", companions)
+	}
+	c := companions[0]
+	if c.Agent != "amq-remote" || c.Adapter != "remote" || c.Root != root || c.State != "attached" {
+		t.Fatalf("companion = %#v, want amq-remote/remote/%s/active", c, root)
 	}
 }

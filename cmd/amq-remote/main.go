@@ -49,6 +49,7 @@ identity and a result; every reply is a snapshot of that request.
 
 Commands:
   serve                    Run the endpoint for this root (foreground)
+  up                       Supervise serve: respawn on crash with backoff
   sessions                 List shared runtimes and their capabilities
   inspect TARGET           Current state of one runtime
   submit TARGET            Submit one work request; prints its receipt
@@ -111,6 +112,9 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	switch cmd {
 	case "serve":
 		code, err = serve(rest, stdout, stderr)
+		return finish(stderr, nil, false, code, err)
+	case "up":
+		code, err = up(rest, stdout, stderr)
 		return finish(stderr, nil, false, code, err)
 	case "sessions":
 		out, code, err = clientSimple(rest, protocol.OpSessionList, "")

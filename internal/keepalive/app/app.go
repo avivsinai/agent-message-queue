@@ -46,6 +46,11 @@ var beforeGCRegistryLoadForTest func()
 
 const adapterLogInterval = 5 * time.Minute
 
+// companionSupervisedAdapter is the registry adapter name used by
+// amq-remote up: entries with it are supervised by their own companion
+// process and are skipped by reconcile (see superviseOnce).
+const companionSupervisedAdapter = "remote"
+
 type adapterLogState struct {
 	mu   sync.Mutex
 	last map[string]time.Time
@@ -828,6 +833,17 @@ func (a App) superviseOnce(ctx context.Context, registryPath string, wake superv
 		results = make([]supervisor.Result, 0, len(file.Entries))
 		updates := make([]registry.EntryUpdate, 0, len(file.Entries))
 		for _, entry := range file.Entries {
+			// Companion-supervised entries (adapter "remote", registered by
+			// amq-remote up) own their own supervision loop: up respawns serve
+			// with keepalive's backoff constants and forgets its registration
+			// on exit. Reconciling them here would probe an adapter this
+			// process has no wake adapter for and mark a healthy, live
+			// companion as backoff. Skip them; doctor --ops reads them
+			// directly as companion visibility.
+			if entry.Adapter == companionSupervisedAdapter {
+				results = append(results, supervisor.Result{Action: supervisor.ActionDeferred})
+				continue
+			}
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				results = append(results, supervisor.Result{Action: supervisor.ActionDeferred, Error: ctxErr})
 				continue

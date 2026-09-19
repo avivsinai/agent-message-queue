@@ -308,6 +308,21 @@ func runDoctor(args []string) error {
 		if err := writeStdoutLine(quarantineLine); err != nil {
 			return err
 		}
+		for _, companion := range result.Ops.Companions {
+			line := fmt.Sprintf(
+				"  companion %s supervised by amq-remote up: adapter=%s target=%s state=%s",
+				companion.Agent,
+				companion.Adapter,
+				companion.Target,
+				companion.State,
+			)
+			if companion.LastSeen != "" {
+				line += " last_seen=" + companion.LastSeen
+			}
+			if err := writeStdoutLine(line); err != nil {
+				return err
+			}
+		}
 		for _, wl := range result.Ops.WakeLocks {
 			if wl.Status == string(wakeLockValid) {
 				tty := wl.TTY
