@@ -8,6 +8,19 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.80.0](https://github.com/avivsinai/agent-message-queue/compare/v0.79.0...v0.80.0) (2026-09-19)
+
+
+### Features
+
+* **remote:** .13 up command — lifetime ownership, flag forwarding, wake decoupling, doctor companions (611.13 PR2/3) ([#815](https://github.com/avivsinai/agent-message-queue/issues/815)) ([3245400](https://github.com/avivsinai/agent-message-queue/commit/3245400343cca4b9de30172b1e033eb0b5315878))
+* **remote:** manifest + registry + serve + codex/fake/claude factories (611.13 PR1/3) ([#809](https://github.com/avivsinai/agent-message-queue/issues/809)) ([03f3a4c](https://github.com/avivsinai/agent-message-queue/commit/03f3a4cd8c08f59a13db2565b04f4d8fcd6c7a61))
+
+
+### Dependencies
+
+* bump golang.org/x/term from 0.45.0 to 0.46.0 ([#808](https://github.com/avivsinai/agent-message-queue/issues/808)) ([59bc740](https://github.com/avivsinai/agent-message-queue/commit/59bc740fd4eb735e6b501b1e3dbf95499a6ecf43))
+
 ## [0.79.0](https://github.com/avivsinai/agent-message-queue/compare/v0.78.9...v0.79.0) (2026-09-18)
 
 
