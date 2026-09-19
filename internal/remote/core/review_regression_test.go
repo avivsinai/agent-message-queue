@@ -94,7 +94,9 @@ func TestReconcileDoesNotHoldLockAcrossNativeCalls(t *testing.T) {
 	rt.HoldLookup()
 	reconcileDone := make(chan error, 1)
 	go func() { reconcileDone <- ep.Reconcile() }()
-	time.Sleep(20 * time.Millisecond) // let Reconcile reach the blocked Lookup
+	// Deterministic readiness (611.22.54): wait until Reconcile's Lookup has
+	// actually reached the held lookup gate instead of sleeping.
+	<-rt.NotifyLookupReady()
 
 	handled := make(chan error, 1)
 	go func() {
@@ -129,7 +131,9 @@ func TestCancelBeforeAdmissionConfirmsDisposition(t *testing.T) {
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() { defer wg.Done(); _, _ = ep.Handle(submitCmd(id), core.Source{Host: "local"}) }()
-	time.Sleep(20 * time.Millisecond) // submit reaches the held admission gate
+	// Deterministic readiness (611.22.54): wait until the submit has reached
+	// the held admission gate instead of sleeping.
+	<-rt.NotifySubmitReady()
 
 	ref := protocol.EncodeRef("local", "fake", id)
 	if _, err := ep.Handle(&protocol.Command{

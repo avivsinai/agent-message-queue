@@ -47,7 +47,11 @@ type Runtime struct {
 	// async corpus steps: the harness waits on it to know the submit has
 	// reached the held admission gate (611.22.8). Per-call: set via
 	// NotifySubmitReady before the async Handle.
-	submitReady          chan struct{}
+	submitReady chan struct{}
+	// lookupReady is the Lookup analog of submitReady (611.22.54): closed
+	// the instant the next Lookup reaches its gate-block point (or begins
+	// its body with no gate held). Set via NotifyLookupReady.
+	lookupReady          chan struct{}
 	failNextRespond      error
 	failNextLookup       error
 	failNextCancelExact  error
@@ -202,9 +206,14 @@ func (r *Runtime) Submit(req core.BoundRequest) (core.Admission, error) {
 func (r *Runtime) Lookup(key requests.Key, epoch string) (core.Evidence, error) {
 	r.mu.Lock()
 	gate := r.lookupGate
+	ready := r.lookupReady
+	r.lookupReady = nil
 	fail := r.failNextLookup
 	r.failNextLookup = nil
 	r.mu.Unlock()
+	if ready != nil {
+		close(ready)
+	}
 	if gate != nil {
 		<-gate
 	}
@@ -362,10 +371,34 @@ func (r *Runtime) HoldAdmission() {
 // held). It replaces the corpus harness's wall-clock sleep for async steps
 // (611.22.8): the harness waits on the returned channel to know the submit
 // has reached the held admission gate, deterministically.
+// Calling it twice with no intervening Submit panics: the first signal
+// would be orphaned forever, a latent hang for a fixture with back-to-back
+// async steps (611.22.54).
 func (r *Runtime) NotifySubmitReady() <-chan struct{} {
 	ch := make(chan struct{})
 	r.mu.Lock()
+	if r.submitReady != nil {
+		r.mu.Unlock()
+		panic("fake: NotifySubmitReady called twice with no intervening Submit; the first signal would be orphaned (611.22.54)")
+	}
 	r.submitReady = ch
+	r.mu.Unlock()
+	return ch
+}
+
+// NotifyLookupReady is the Lookup analog of NotifySubmitReady (611.22.54):
+// it installs a one-shot readiness signal closed the instant the next
+// Lookup reaches its gate-block point (or begins its body with no gate
+// held). It replaces the wall-clock sleep that waited for a Reconcile to
+// reach a held lookup gate, deterministically.
+func (r *Runtime) NotifyLookupReady() <-chan struct{} {
+	ch := make(chan struct{})
+	r.mu.Lock()
+	if r.lookupReady != nil {
+		r.mu.Unlock()
+		panic("fake: NotifyLookupReady called twice with no intervening Lookup; the first signal would be orphaned (611.22.54)")
+	}
+	r.lookupReady = ch
 	r.mu.Unlock()
 	return ch
 }
