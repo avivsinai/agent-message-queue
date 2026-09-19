@@ -1985,8 +1985,9 @@ func TestManifestBytesUnchangedAfterFlag(t *testing.T) {
 // (always false) instead of errors.As, and when a serve path skips Validate.
 func TestValidationFailuresExitTwo(t *testing.T) {
 	cases := []struct {
-		name string
-		f    manifest.File
+		name     string
+		f        manifest.File
+		discover bool
 	}{
 		{
 			name: "duplicate target",
@@ -2059,6 +2060,19 @@ func TestValidationFailuresExitTwo(t *testing.T) {
 				},
 			},
 		},
+		{
+			// 611.13 r5 regression observed by codex review: --discover must
+			// classify a validation failure exactly like serve — the same
+			// invalid manifest exited 1 under --discover and 2 under serve.
+			name: "discover invalid target exits two",
+			f: manifest.File{
+				SchemaVersion: manifest.SchemaVersion,
+				Adapters: []manifest.Adapter{
+					{Kind: "fake", Target: "sales team", Epoch: "e_1"},
+				},
+			},
+			discover: true,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2087,7 +2101,14 @@ func TestValidationFailuresExitTwo(t *testing.T) {
 				t.Fatal(err)
 			}
 			var out, errBuf bytes.Buffer
-			code := run([]string{"serve", "--root", root, "--manifest", manifestPath}, strings.NewReader(""), &out, &errBuf)
+			var code int
+			if tc.discover {
+				// --discover must classify the same manifest exactly like
+				// serve (observed r5 regression: discover exited 1).
+				code = run([]string{"serve", "--discover", "--root", root, "--manifest", manifestPath}, strings.NewReader(""), &out, &errBuf)
+			} else {
+				code = run([]string{"serve", "--root", root, "--manifest", manifestPath}, strings.NewReader(""), &out, &errBuf)
+			}
 			if code != protocol.ExitUsage {
 				t.Fatalf("serve exit=%d, want %d (ExitUsage)\nstderr=%s", code, protocol.ExitUsage, errBuf.String())
 			}

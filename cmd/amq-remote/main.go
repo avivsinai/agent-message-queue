@@ -317,10 +317,19 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	var sugar []manifest.Adapter
 	if *discover {
 		// --discover lists candidates from registered discoverers and exits
-		// before any startup side effect; validation still gates it.
+		// before any startup side effect. The manifest must classify exactly
+		// like the serve path: validation failures are usage errors (exit 2),
+		// I/O and parse failures are not (observed regression: discover
+		// exited 1 where serve exited 2 on the same invalid manifest).
 		mf, lerr := manifest.Load(manifestFile)
 		if lerr != nil {
+			if manifest.IsValidation(lerr) {
+				return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", lerr)
+			}
 			return 0, lerr
+		}
+		if verr := manifest.Validate(mf); verr != nil {
+			return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", verr)
 		}
 		cands, derr := registry.Discover(context.Background(), c.root, stateDir)
 		if derr != nil {
