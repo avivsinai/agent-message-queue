@@ -127,8 +127,8 @@ func TestUpSecondProcessRefusedWhileFirstHoldsLifetimeLock(t *testing.T) {
 		_ = second.Close()
 		t.Fatal("second acquireLifetimeLock succeeded, want refusal while first holds the lock")
 	}
-	if !errors.Is(lockErr, errLifetimeOwned) {
-		t.Fatalf("second lock error = %v, want errLifetimeOwned", lockErr)
+	if !errors.Is(lockErr, errLifetimeHeld) {
+		t.Fatalf("second lock error = %v, want errLifetimeHeld", lockErr)
 	}
 
 	// The first owner can still re-acquire its own lock file handle (idempotent

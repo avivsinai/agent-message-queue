@@ -16,9 +16,7 @@ func flockLifetime(f *os.File) error {
 		return nil
 	}
 	if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
-		return errLifetimeOwned
+		return errLifetimeHeld
 	}
 	return err
 }
-
-var errLifetimeOwned = errors.New("lifetime lock already held by another up process")

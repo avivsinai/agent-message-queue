@@ -3,7 +3,6 @@
 package main
 
 import (
-	"errors"
 	"os"
 )
 
@@ -12,5 +11,5 @@ import (
 // not refused (registry writes still serialize). Swarm interop targets
 // macOS/Linux; keep the other builds compiling.
 func flockLifetime(*os.File) error {
-	return errors.New("lifetime locking is unsupported on this platform")
+	return errLifetimeHeld
 }
