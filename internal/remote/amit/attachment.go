@@ -2,6 +2,7 @@ package amit
 
 import (
 	"fmt"
+	"strings"
 	"unicode/utf8"
 
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
@@ -30,11 +31,40 @@ func (a *Attachment) consume() {
 	for ; a.entryTail < len(entries); a.entryTail++ {
 		e := entries[a.entryTail]
 		switch e.Kind {
+		case "status":
+			// A per-request refusal from the extension is POSITIVE evidence
+			// (the extension read the request and declined it) — unlike the
+			// absent user_message entry, which is only uncertainty. Steer is
+			// disabled in v1 (ADR); the extension answers deliver=steer with
+			// {kind:"status",client_ref,status:"refused",reason:...} and the
+			// endpoint must record a terminal rejection, never confirmation.
+			if !strings.HasPrefix(e.Status, "refused") || e.ClientRef == "" {
+				continue
+			}
+			for _, r := range a.runs {
+				if clientRef(r.key) == e.ClientRef && !r.seenTurn && !r.state.Terminal() {
+					r.state = protocol.StateRejected
+					r.errText = "amit extension refused the request: " + e.Status
+					a.emitLocked(core.NativeEvent{
+						Type:   core.EventRunFailed,
+						Key:    r.key,
+						RunID:  r.runID,
+						Result: r.result(),
+					})
+					break
+				}
+			}
 		case "user_message":
 			if e.ClientRef == "" {
 				continue
 			}
 			for _, r := range a.runs {
+				// A terminal run (e.g. refused by the extension) is final: a
+				// late user_message must never resurrect it into a
+				// confirmation.
+				if r.state.Terminal() {
+					continue
+				}
 				if clientRef(r.key) == e.ClientRef && !r.seenTurn {
 					r.seenTurn = true
 					// The user-message entry is the confirmation the send
@@ -128,7 +158,7 @@ func (a *Attachment) Inspect() protocol.Session {
 		Status:             status,
 		PendingInteraction: nil,
 		Capabilities: protocol.Capabilities{
-			Inspect: true, Submit: true, CancelRequest: false, Steer: true,
+			Inspect: true, Submit: true, CancelRequest: false, Steer: false,
 			ApproveTool: false, AnswerQuestion: false, Terminal: "unavailable",
 		},
 		Evidence:   &protocol.Evidence{Submit: "submitted", Completion: "session_diff"},

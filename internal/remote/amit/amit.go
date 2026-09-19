@@ -75,13 +75,18 @@ type ExtEvent struct {
 
 // ExtEntry is one session entry observed by the extension.
 type ExtEntry struct {
-	// Kind is the entry kind: "user_message" or "agent_message".
+	// Kind is the entry kind: "user_message", "agent_message", or a
+	// per-request refusal "status" line (only those carry a ClientRef).
 	Kind string
 	// ClientRef is protocol.EncodeRef of the correlated request when the
-	// extension tagged the entry (user messages carry the ref).
+	// extension tagged the entry (user messages and per-request refusals
+	// carry the ref).
 	ClientRef string
 	// Text is the entry text.
 	Text string
+	// Status is the refusal/status value for per-request status entries
+	// (e.g. "refused_busy", "refused" with a steer_disabled_v1 reason).
+	Status string
 }
 
 // run is one bound request in flight.

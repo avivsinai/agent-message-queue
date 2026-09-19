@@ -38,6 +38,16 @@ func (f *fileSource) Entries() []ExtEntry {
 		if err := json.Unmarshal([]byte(line), &ev); err != nil {
 			continue
 		}
+		// Per-request refusal status lines carry a ClientRef and are the
+		// extension's positive refusal evidence (e.g. steer disabled in v1);
+		// global status lines (no ClientRef) stay the Status() seam only.
+		if ev.Kind == "status" {
+			if ev.ClientRef == "" || ev.Status == "" {
+				continue
+			}
+			out = append(out, ExtEntry{Kind: ev.Kind, ClientRef: ev.ClientRef, Status: ev.Status})
+			continue
+		}
 		if ev.Kind != "user_message" && ev.Kind != "agent_message" {
 			continue
 		}

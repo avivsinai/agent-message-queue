@@ -214,7 +214,8 @@ func TestCancelUnsupported(t *testing.T) {
 }
 
 // TestInspectProjectsAmitCapabilities pins the Inspect projection: harness
-// amit, submit+steer true, cancel/approve/question false, terminal
+// amit, submit true, steer FALSE in v1 (ADR: deliver=steer disabled; the
+// extension refuses with a refused status line), cancel/approve/question false, terminal
 // unavailable, evidence submit=submitted.
 func TestInspectProjectsAmitCapabilities(t *testing.T) {
 	src := &fakeSource{}
@@ -224,8 +225,11 @@ func TestInspectProjectsAmitCapabilities(t *testing.T) {
 		t.Fatalf("session = %+v, want amit/ep1 projection", s)
 	}
 	c := s.Capabilities
-	if !c.Inspect || !c.Submit || !c.Steer {
-		t.Fatalf("capabilities = %+v, want inspect+submit+steer true", c)
+	if !c.Inspect || !c.Submit {
+		t.Fatalf("capabilities = %+v, want inspect+submit true", c)
+	}
+	if c.Steer {
+		t.Fatalf("capabilities = %+v, want Steer false in v1 (deliver=steer disabled)", c)
 	}
 	if c.CancelRequest || c.ApproveTool || c.AnswerQuestion {
 		t.Fatalf("capabilities = %+v, want cancel/approve/question false", c)
@@ -241,18 +245,46 @@ func TestInspectProjectsAmitCapabilities(t *testing.T) {
 // TestSteerDeliversThroughInbox pins steer: a deliver=steer submit goes
 // through the same inbox with deliver_as=steer (pi's deliverAs follow-up vs
 // steer), admitted by the same user_message confirmation.
-func TestSteerDeliversThroughInbox(t *testing.T) {
+// TestSteerRefusedStatusLineRejectsNeverConfirms pins the v1 steer contract
+// (ADR: deliver=steer disabled): the extension answers the inbox request with
+// {kind:"status",client_ref,status:"refused",...}; that positive refusal must
+// record the run terminal-rejected (EventRunFailed) — never confirmed by a
+// later user_message, never left uncertain forever.
+func TestSteerRefusedStatusLineRejectsNeverConfirms(t *testing.T) {
 	src := &fakeSource{}
 	a := newTestAttachment(t, src)
 	a.deliverDir = t.TempDir()
 	key := testKey("r6")
-	src.add(ExtEntry{Kind: "user_message", ClientRef: clientRef(key), Text: "redirect"})
-	admission, err := a.Submit(core.BoundRequest{Key: key, Epoch: "ep1", Input: protocol.SubmitInput{Text: "redirect", Deliver: protocol.DeliverSteer}})
-	if err != nil {
-		t.Fatalf("Submit steer: %v", err)
+	// Real-world order: Submit delivers to the inbox (run bound, uncertain —
+	// pi's send primitive gives no evidence), the extension then reads the
+	// request and refuses it, and the refusal line lands in the log where a
+	// later consume() correlates it to the bound run.
+	if _, err := a.Submit(core.BoundRequest{Key: key, Epoch: "ep1", Input: protocol.SubmitInput{Text: "redirect", Deliver: protocol.DeliverSteer}}); err == nil {
+		t.Fatal("Submit steer without confirming entry must return uncertain error, want non-nil")
 	}
-	if !admission.Admitted {
-		t.Fatalf("steer admission = %+v, want admitted", admission)
+	src.add(ExtEntry{Kind: "status", ClientRef: clientRef(key), Status: "refused"})
+	a.consume()
+	// The run must be terminal-rejected, observable via Lookup.
+	ev, err := a.Lookup(key, "ep1")
+	if err != nil {
+		t.Fatalf("Lookup after refusal: %v", err)
+	}
+	if ev.State != protocol.StateRejected {
+		t.Fatalf("evidence = %+v state=%s, want rejected (refusal recorded, action required)", ev.Class, ev.State)
+	}
+	if ev.Class == core.EvidenceNone {
+		t.Fatalf("evidence class = none, want retained evidence of the refusal")
+	}
+	// A late user_message carrying the same ref must NOT resurrect the
+	// refused run into a confirmation.
+	src.add(ExtEntry{Kind: "user_message", ClientRef: clientRef(key), Text: "redirect"})
+	a.consume()
+	ev, err = a.Lookup(key, "ep1")
+	if err != nil {
+		t.Fatalf("Lookup after late user_message: %v", err)
+	}
+	if ev.State != protocol.StateRejected {
+		t.Fatalf("Lookup state after late user_message = %v, want still rejected", ev.State)
 	}
 }
 
