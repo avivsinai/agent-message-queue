@@ -1932,8 +1932,6 @@ func (e *Endpoint) reconcileLive(rec *requests.Record) error {
 		e.transitionLocked(rec, causeRefused, nativeEvidence{runID: ev.RunID, code: ev.RefusalCode})
 	case ev.Class == EvidenceTentative:
 		// Bound but native ownership not yet proven. Never reject a submission
-	case ev.Class == EvidenceTentative:
-		// Bound but native ownership not yet proven. Never reject a submission
 		// that is still about to execute; re-check next tick.
 		e.mu.Unlock()
 		return nil

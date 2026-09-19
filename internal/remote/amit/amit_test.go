@@ -82,6 +82,20 @@ func stampLiveness(t *testing.T, dir string, at time.Time) {
 	}
 }
 
+// stampLivenessWithProtocol writes a bridge.liveness with a custom protocol
+// string (the §9 test seam).
+func stampLivenessWithProtocol(t *testing.T, dir string, at time.Time, proto string) {
+	t.Helper()
+	rec := fmt.Sprintf(`{"protocol":%q,"live":true,"at":%q,"pid":%d,"surface":"app"}`,
+		proto, at.UTC().Format(time.RFC3339Nano), os.Getpid())
+	if err := os.WriteFile(filepath.Join(dir, "bridge.liveness"), []byte(rec), 0o600); err != nil {
+		t.Fatalf("write liveness: %v", err)
+	}
+	if err := os.Chtimes(filepath.Join(dir, "bridge.liveness"), at, at); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+}
+
 // writeReceipt / writeEvents / writeRequest lay down extension-side files.
 func writeReceipt(t *testing.T, dir, ref, gen string, at time.Time) {
 	t.Helper()
@@ -628,6 +642,43 @@ func TestForeignProtocolReceiptRefused(t *testing.T) {
 	ev, err := a.Lookup(key, SentinelUnpinned)
 	if err == nil || ev.Class == core.EvidenceConfirmed {
 		t.Fatalf("evidence = %+v, %v; want refusal (unknown protocol)", ev, err)
+	}
+}
+
+// TestForeignProtocolLivenessNotLive pins §9 on the write path: a
+// bridge.liveness carrying an unknown protocol string is NOT a live bridge —
+// the pre-gate refuses with attachment_lost and NO request file is written
+// into the foreign seam.
+func TestForeignProtocolLivenessNotLive(t *testing.T) {
+	a, dir := newTestAttachment(t)
+	stampLivenessWithProtocol(t, dir, fixedNow, "amit:amq-remote:v9")
+	adm, err := a.Submit(submitReq(testKey("fp9"), "hello"))
+	if err != nil || adm.Admitted || adm.Code != protocol.CodeAttachmentLost {
+		t.Fatalf("Submit = %+v, %v; want positive attachment_lost refusal (foreign protocol)", adm, err)
+	}
+	entries, rerr := os.ReadDir(filepath.Join(dir, "requests"))
+	if rerr != nil || len(entries) != 0 {
+		t.Fatalf("requests dir = %v (%d entries), want empty (no write into a foreign seam)", rerr, len(entries))
+	}
+}
+
+// TestForeignProtocolEventsRefused pins §9/P2: with a v1 receipt and a
+// v2-only event stream the stream is REFUSED (an error), never read as "no
+// events" — recovery row 3 must not map a hidden terminal to
+// confirmed-running.
+func TestForeignProtocolEventsRefused(t *testing.T) {
+	a, dir := newTestAttachment(t)
+	key := testKey("fpe")
+	ref := clientRef(key)
+	seedRequest(t, dir, ref, "")
+	writeReceipt(t, dir, ref, "gen-1", fixedNow)
+	appendEvents(t, dir, ref, fmt.Sprintf(`{"protocol":"amit:amq-remote:v2","event":"completed","ref":%q,"text":"done"}`, ref))
+	ev, err := a.Lookup(key, "gen-1")
+	if err == nil {
+		t.Fatalf("evidence = %+v, nil error; want refusal (foreign-protocol event stream)", ev)
+	}
+	if ev.Class == core.EvidenceConfirmed || ev.Class == core.EvidenceHistoryTerminated {
+		t.Fatalf("evidence = %+v; foreign-protocol stream must not become evidence", ev)
 	}
 }
 

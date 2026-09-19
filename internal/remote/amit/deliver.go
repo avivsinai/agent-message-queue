@@ -260,7 +260,11 @@ func (b bridgeDir) readEvents(ref string) ([]event, error) {
 		}
 		if ev.Protocol != "" && ev.Protocol != ProtocolV1 {
 			// §9: refuse an unknown protocol string rather than guessing.
-			continue
+			// A v1 receipt + v2-only event stream must NOT read as "no
+			// events" (recovery row 3 would map that to confirmed-running,
+			// hiding a terminal state); the whole stream is refused so the
+			// run keeps its current state and surfaces the error.
+			return nil, fmt.Errorf("amit: events %s: unknown protocol %q (want %q)", ref, ev.Protocol, ProtocolV1)
 		}
 		out = append(out, ev)
 	}
@@ -293,6 +297,12 @@ func (b bridgeDir) liveness(now time.Time) livenessState {
 	var rec livenessRecord
 	if err := json.Unmarshal(data, &rec); err != nil {
 		return livenessState{age: age, reason: "malformed"}
+	}
+	if rec.Protocol != "" && rec.Protocol != ProtocolV1 {
+		// §9: a foreign-protocol bridge is not OUR bridge. Treating it as
+		// live would let the adapter write requests into a seam owned by a
+		// different protocol — refuse the pre-gate.
+		return livenessState{age: age, reason: "foreign protocol " + rec.Protocol}
 	}
 	if !rec.Live || rec.PID <= 0 {
 		return livenessState{age: age, reason: "malformed"}

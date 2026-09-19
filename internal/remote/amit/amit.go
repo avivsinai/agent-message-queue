@@ -75,6 +75,10 @@ type run struct {
 	terminal  bool  // first terminal event consumed (first-terminal-wins, §3)
 	acked     bool  // endpoint acknowledged the retained result
 	notFound  error // last seam error that blocks evidence (never guessed around)
+	// eventsRefused is a §9 refusal of the event stream (foreign protocol).
+	// Unlike an A2 unreadable log it is surfaced by Lookup: a refused stream
+	// is never "no events" (never confirmed-running).
+	eventsRefused error
 }
 
 // Attachment implements core.Attachment over the amit-remote file seam. It
@@ -135,7 +139,7 @@ func New(target, handle string, dir bridgeDir) (*Attachment, error) {
 	// seam BEFORE any endpoint call. A recovered attachment never
 	// redispatches: an existing request file plus any receipt/event answers
 	// from history (§5).
-	a.recoverLocked()
+	a.recover()
 	return a, nil
 }
 
@@ -171,50 +175,100 @@ func clientRef(key requests.Key) string {
 	return protocol.EncodeRef(key.CreatorHost, key.TargetID, key.RequestID)
 }
 
-// recoverLocked rebuilds runs from receipts/ + events/ (§5). Receipts are
+// recover rebuilds runs from receipts/ + events/ (§5). Receipts are
 // iterated oldest-first so the pinned epoch ends at the newest receipt's
-// generation (the freshest receipt-proven observation). Junk files
+// generation (the freshest receipt-proven observation). 9a: the seam reads
+// happen without the lock; the bind+apply section takes it. Junk files
 // (unparseable, foreign protocol, undecodable ref) are skipped, never
 // guessed into evidence.
-func (a *Attachment) recoverLocked() {
+func (a *Attachment) recover() {
+	// 9a: all seam reads (listReceipts + per-ref event logs) happen BEFORE
+	// the lock; recovery then binds and applies under a.mu.
+	type seeded struct {
+		key    requests.Key
+		rc     receipt
+		events []event
+		evErr  error
+	}
+	var seeds []seeded
 	for _, rc := range a.dir.listReceipts() {
 		creatorHost, targetID, requestID, derr := protocol.DecodeRef(rc.Ref)
 		if derr != nil {
 			continue
 		}
 		key := requests.Key{CreatorHost: creatorHost, TargetID: targetID, RequestID: requestID}
-		if _, ok := a.runs[key]; ok {
+		events, evErr := a.dir.readEvents(rc.Ref)
+		seeds = append(seeds, seeded{key: key, rc: rc, events: events, evErr: evErr})
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, sd := range seeds {
+		if _, ok := a.runs[sd.key]; ok {
 			continue
 		}
-		r := a.bindRunLocked(key, "") // recovered history: epoch wildcard
+		rc := sd.rc
+		r := a.bindRunLocked(sd.key, "") // recovered history: epoch wildcard
 		r.confirmed = true
 		a.observeGenerationLocked(rc.SessionGeneration)
-		a.applyEventsLocked(r)
+		if sd.evErr != nil {
+			// §9: a refused event stream (foreign protocol) is never "no
+			// events" — bind with the refusal so Lookup surfaces it.
+			r.eventsRefused = sd.evErr
+		} else {
+			a.applyEventsLocked(r, sd.events)
+		}
 	}
 }
 
-// lateBindLocked runs the recovery scan for one unseen key: a receipt for a
+// lateBind runs the recovery scan for one unseen key WITHOUT the lock (9a:
+// the seam reads happen outside a.mu), then binds under it. A receipt for a
 // ref whose run is not yet in the map (published by a prior process, or
 // seeded/published between calls) binds a wildcard-epoch run with the
-// receipt-proven state. Called under a.mu from the read paths before they
-// decide "not found", so history never hides behind an in-memory miss (§5).
-func (a *Attachment) lateBindLocked(key requests.Key) {
+// receipt-proven state — history never hides behind an in-memory miss (§5).
+func (a *Attachment) lateBind(key requests.Key) {
+	a.mu.Lock()
+	_, ok := a.runs[key]
+	a.mu.Unlock()
+	if ok {
+		return
+	}
+	// FS reads, no lock.
+	rc, rcErr := a.dir.readReceipt(clientRef(key))
+	var events []event
+	var evErr error
+	if rc != nil {
+		events, evErr = a.dir.readEvents(rc.Ref)
+	}
+	// Bind+apply under the lock.
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.lateBindLocked(key, rc, rcErr, events, evErr)
+}
+
+// lateBindLocked binds one unseen key from an already-read observation.
+// Called under a.mu.
+func (a *Attachment) lateBindLocked(key requests.Key, rc *receipt, rcErr error, events []event, evErr error) {
 	if _, ok := a.runs[key]; ok {
 		return
 	}
-	rc, err := a.dir.readReceipt(clientRef(key))
 	switch {
-	case err == nil && rc != nil:
+	case rc != nil:
 		r := a.bindRunLocked(key, "") // recovered history: epoch wildcard
 		r.confirmed = true
 		a.observeGenerationLocked(rc.SessionGeneration)
-		a.applyEventsLocked(r)
-	case err != nil:
+		if evErr != nil {
+			// §9: a refused event stream (foreign protocol) is never "no
+			// events" — bind with the refusal so Lookup surfaces it.
+			r.eventsRefused = evErr
+		} else {
+			a.applyEventsLocked(r, events)
+		}
+	case rcErr != nil:
 		// Unreadable or foreign-protocol receipt (§9): bind unconfirmed with
 		// the seam error so Lookup surfaces it instead of guessing it into
 		// evidence — or silently ignoring a record the endpoint still holds.
 		r := a.bindRunLocked(key, "")
-		r.notFound = err
+		r.notFound = rcErr
 	}
 	// Absent receipt (nil, nil): leave unbound; Lookup answers unknown.
 }
@@ -245,42 +299,100 @@ func (a *Attachment) observeGenerationLocked(gen string) {
 	}
 }
 
-// consumeLocked refreshes every retained run from the durable seam. Called
-// under a.mu by Inspect, Lookup, CancelExact, AcknowledgeResult, and the
-// Submit poll — the seam is pull-based; there is no background reader and
-// no path that touches the run map outside a.mu.
-func (a *Attachment) consumeLocked() {
+// seamObservation is one run's freshly read durable evidence (9a: the FILE
+// I/O happens outside a.mu; only this immutable snapshot crosses the lock).
+type seamObservation struct {
+	ref      string
+	receipt  *receipt // nil = absent or already confirmed
+	rcErr    error    // unreadable/foreign-protocol receipt (never guessed around)
+	events   []event
+	evErr    error // unreadable/foreign-protocol event stream (A2 vs §9)
+	readEvts bool  // events were read (skip when terminal already known)
+}
+
+// consume refreshes every retained run from the durable seam WITHOUT the
+// lock (9a: no filesystem call under a.mu). It snapshots which refs need
+// reading, does the reads, then takes the lock once to apply. The seam is
+// pull-based; there is no background reader.
+func (a *Attachment) consume() {
+	a.mu.Lock()
+	type pending struct {
+		r      *run
+		readEv bool
+		readRc bool
+	}
+	var queue []pending
 	for _, k := range a.order {
-		if r, ok := a.runs[k]; ok {
-			a.refreshRunLocked(r)
+		r, ok := a.runs[k]
+		if !ok || r.acked {
+			continue
 		}
+		readRc := !r.confirmed
+		readEv := !r.terminal
+		if readRc || readEv {
+			queue = append(queue, pending{r: r, readRc: readRc, readEv: readEv})
+		}
+	}
+	a.mu.Unlock()
+
+	if len(queue) == 0 {
+		return
+	}
+	obs := make(map[string]*seamObservation, len(queue))
+	for _, p := range queue {
+		o := &seamObservation{ref: p.r.ref}
+		if p.readRc {
+			rc, err := a.dir.readReceipt(p.r.ref)
+			o.receipt, o.rcErr = rc, err
+		}
+		if p.readEv {
+			evs, err := a.dir.readEvents(p.r.ref)
+			o.events, o.evErr, o.readEvts = evs, err, true
+		}
+		obs[p.r.ref] = o
+	}
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, p := range queue {
+		r, ok := a.runs[p.r.key]
+		if !ok || r.acked {
+			continue // pruned or acked while we read
+		}
+		a.applyObservationLocked(r, obs[p.r.ref])
 	}
 }
 
-// refreshRunLocked re-reads the durable evidence for one run: the receipt
-// (admission) and the event stream (terminals). Errors from the seam are
-// never guessed around: a run whose receipt cannot be read stays unconfirmed
-// (uncertain), a run whose events cannot be read keeps its current state.
-func (a *Attachment) refreshRunLocked(r *run) {
+// applyObservationLocked applies a seam observation to a run under a.mu.
+func (a *Attachment) applyObservationLocked(r *run, o *seamObservation) {
 	if r.acked {
 		return
 	}
-	if !r.confirmed {
-		rc, err := a.dir.readReceipt(r.ref)
+	if o == nil || o.ref != r.ref {
+		return
+	}
+	if o.receipt != nil || o.rcErr != nil {
 		switch {
-		case err == nil && rc != nil:
+		case o.receipt != nil:
 			r.confirmed = true
 			r.notFound = nil
-			a.observeGenerationLocked(rc.SessionGeneration)
-		case err == nil:
-			// Absent: no new information.
-		default:
+			a.observeGenerationLocked(o.receipt.SessionGeneration)
+		case o.rcErr != nil:
 			// Unreadable or foreign-protocol: never consume it as evidence.
-			r.notFound = err
+			r.notFound = o.rcErr
 		}
 	}
-	if !r.terminal {
-		a.applyEventsLocked(r)
+	if o.readEvts {
+		if o.evErr != nil {
+			// §9/A2 split: a rotated or temporarily unreadable log is
+			// tolerated (A2 — keep state, retry next refresh), but a
+			// foreign-protocol stream is REFUSED, never read as "no events"
+			// (recovery row 3 would map that to confirmed-running, hiding a
+			// terminal state).
+			r.eventsRefused = o.evErr
+		} else {
+			a.applyEventsLocked(r, o.events)
+		}
 	}
 }
 
@@ -290,13 +402,7 @@ func (a *Attachment) refreshRunLocked(r *run) {
 // with a receipt present → expired (A3: the receipt STAYS — admission
 // happened, execution was refused), generation mismatch → stale_epoch,
 // busy → busy, anything else → native_error.
-func (a *Attachment) applyEventsLocked(r *run) {
-	events, err := a.dir.readEvents(r.ref)
-	if err != nil {
-		// A2: a rotated or temporarily unreadable log is tolerated — the
-		// run keeps its current state and the next refresh retries.
-		return
-	}
+func (a *Attachment) applyEventsLocked(r *run, events []event) {
 	for _, ev := range events {
 		if ev.Ref != "" && ev.Ref != r.ref {
 			continue
@@ -423,16 +529,16 @@ func (r *run) result() *protocol.Result {
 // generation, or the `unpinned` sentinel before the first receipt (§4/A4 —
 // an empty epoch would defeat stale-epoch protection because "" == "").
 func (a *Attachment) Inspect() protocol.Session {
+	a.consume() // 9a: seam reads outside a.mu; apply under it
 	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.consumeLocked()
-	att, status := "live", "idle"
-	if live := a.dir.liveness(a.now()); !live.live {
-		att, status = "offline", "offline"
-	}
 	epoch := a.epoch
 	if epoch == "" {
 		epoch = SentinelUnpinned
+	}
+	a.mu.Unlock()
+	att, status := "live", "idle"
+	if live := a.dir.liveness(a.now()); !live.live { // 9a: FS read, no lock
+		att, status = "offline", "offline"
 	}
 	// No interaction surface is wired (Respond is already_resolved), so
 	// PendingInteraction is always nil.
@@ -473,6 +579,9 @@ func (a *Attachment) Inspect() protocol.Session {
 // submit the liveness gate runs BEFORE the request file is written, so a
 // dead bridge never leaves a file behind.
 func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
+	// 9a: the existing-run seam re-read happens WITHOUT the lock first.
+	a.consume()
+
 	a.mu.Lock()
 	// §4/A4 epoch gate: while unpinned (a.epoch == "") the caller's epoch is
 	// the sentinel (it read Inspect), and the submit goes out with an EMPTY
@@ -487,20 +596,23 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 	}
 	if r, ok := a.runs[req.Key]; ok {
 		// Retry of an already-published submit (endpoint retries carry the
-		// same ref). Re-read the seam: the receipt may have landed since.
-		// NEVER return Admitted without a receipt (9b).
-		a.refreshRunLocked(r)
+		// same ref); consume() above already re-read the seam so the
+		// receipt may have landed since. NEVER return Admitted without a
+		// receipt (9b).
 		rid := r.runID
 		if r.confirmed {
 			a.mu.Unlock()
 			return core.Admission{Admitted: true, RunID: rid}, nil
 		}
-		live := a.dir.liveness(a.now())
 		a.mu.Unlock()
+		// 9a: liveness is a filesystem read — take it without the lock.
+		live := a.dir.liveness(a.now())
 		if !live.live {
-			// §2: no receipt + stale/absent liveness → FAILED. The request
-			// file stays for a later bridge (the adapter owns it and never
-			// deletes); the refusal is positive and terminal.
+			// §2: no receipt + stale/absent liveness. The request file
+			// stays for a later bridge (the adapter owns it and never
+			// deletes); delivery is still possible, so this is an
+			// UNCERTAIN-shaped refusal — the endpoint keeps the correlation
+			// (admissionCause maps any native error to attachment_lost).
 			return core.Admission{}, protocol.Refuse(protocol.CodeAttachmentLost,
 				"no live amit-remote bridge for handle %q (bridge.liveness %s); request %s stays for a later bridge", a.handle, live.reason, r.ref)
 		}
@@ -514,11 +626,13 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 		return core.Admission{Code: protocol.CodeUnsupported, Message: "deliver=steer is disabled in v1 (amit advertises no Steer); use deliver=turn"}, nil
 	}
 	// Fresh submit: the liveness gate is PRE-SIDE-EFFECT — nobody listening
-	// means nothing is written and the refusal is positive (§2).
+	// means nothing is written and the refusal is positive (§2). 9a: the
+	// filesystem read happens without the lock.
+	a.mu.Unlock()
 	if live := a.dir.liveness(a.now()); !live.live {
-		a.mu.Unlock()
 		return core.Admission{Code: protocol.CodeAttachmentLost, Message: fmt.Sprintf("no live amit-remote bridge for handle %q (bridge.liveness %s)", a.handle, live.reason)}, nil
 	}
+	a.mu.Lock()
 	epochHint := a.epoch // §4: pinned generation as hint; "" (unpinned) = first contact, no check
 	a.mu.Unlock()
 
@@ -542,27 +656,34 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 	if !ok {
 		r = a.bindRunLocked(req.Key, req.Epoch)
 	}
+	rid := r.runID
+	refOfRun := r.ref
+	a.mu.Unlock()
 	if err != nil {
 		if errors.Is(err, ErrAlreadyDelivered) {
 			// The request file already exists (a previous process published
 			// it and crashed before binding, or a duplicate raced the
 			// reservation). The ref was already delivered: bind, never
 			// rewrite (O_EXCL, §1), classify from the durable seam.
-			a.refreshRunLocked(r)
+			o := a.readSeamFor(refOfRun) // 9a: FS reads without the lock
+			a.mu.Lock()
+			a.applyObservationLocked(r, o)
 			rid := r.runID
 			if r.confirmed {
 				a.mu.Unlock()
 				return core.Admission{Admitted: true, RunID: rid}, nil
 			}
-			live := a.dir.liveness(a.now())
 			a.mu.Unlock()
+			live := a.dir.liveness(a.now())
 			if !live.live {
+				// UNCERTAIN-shaped: the file is already published, a later
+				// bridge can still deliver; admissionCause keeps the
+				// correlation (never a terminal rejected record).
 				return core.Admission{}, protocol.Refuse(protocol.CodeAttachmentLost,
-					"no live amit-remote bridge for handle %q (bridge.liveness %s); request %s stays for a later bridge", a.handle, live.reason, r.ref)
+					"no live amit-remote bridge for handle %q (bridge.liveness %s); request %s stays for a later bridge", a.handle, live.reason, refOfRun)
 			}
-			return core.Admission{RunID: rid}, fmt.Errorf("amit: receipt for %s not yet observed; submission uncertain", r.ref)
+			return core.Admission{RunID: rid}, fmt.Errorf("amit: receipt for %s not yet observed; submission uncertain", refOfRun)
 		}
-		a.mu.Unlock()
 		// Pre-send/ambiguous seam failure: nothing provably reached the
 		// extension. Return the error so the endpoint records uncertain —
 		// the send primitive cannot report WHY, so a refusal here would
@@ -573,32 +694,44 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 	// Receipt poll: the extension writes the receipt when it delivers (§2).
 	// The window is REAL wall time (how long this call may block the
 	// endpoint), deliberately not the frozen test clock — a.now stays for
-	// timestamps and liveness freshness.
+	// timestamps and liveness freshness. 9a: each poll step reads the seam
+	// WITHOUT the lock, then re-locks to apply.
 	deadline := time.Now().Add(a.submitWait)
+	confirmed := false
 	for {
-		a.refreshRunLocked(r)
-		if r.confirmed {
-			rid := r.runID
-			a.mu.Unlock()
+		o := a.readSeamFor(refOfRun)
+		a.mu.Lock()
+		a.applyObservationLocked(r, o)
+		confirmed = r.confirmed
+		a.mu.Unlock()
+		if confirmed {
 			return core.Admission{Admitted: true, RunID: rid}, nil
 		}
 		if !time.Now().Before(deadline) {
 			break
 		}
-		a.mu.Unlock()
 		time.Sleep(submitPollStep)
-		a.mu.Lock()
 	}
-	rid := r.runID
 	live := a.dir.liveness(a.now())
-	a.mu.Unlock()
 	if !live.live {
 		// The bridge died mid-window (the file is already published; §2's
-		// in-flight row: the file stays for a later bridge).
+		// in-flight row: the file stays for a later bridge). Delivery is
+		// still possible from a later bridge scan, so the refusal is
+		// UNCERTAIN-shaped (admissionCause keeps the correlation).
 		return core.Admission{}, protocol.Refuse(protocol.CodeAttachmentLost,
-			"no live amit-remote bridge for handle %q (bridge.liveness %s); request %s stays for a later bridge", a.handle, live.reason, r.ref)
+			"no live amit-remote bridge for handle %q (bridge.liveness %s); request %s stays for a later bridge", a.handle, live.reason, refOfRun)
 	}
-	return core.Admission{RunID: rid}, fmt.Errorf("amit: receipt for %s not yet observed; submission uncertain", r.ref)
+	return core.Admission{RunID: rid}, fmt.Errorf("amit: receipt for %s not yet observed; submission uncertain", refOfRun)
+}
+
+// readSeamFor reads one run's durable evidence by ref WITHOUT the lock
+// (9a): a single-run observation for the Submit poll and retry paths.
+func (a *Attachment) readSeamFor(ref string) *seamObservation {
+	o := &seamObservation{ref: ref}
+	o.receipt, o.rcErr = a.dir.readReceipt(ref)
+	evs, evErr := a.dir.readEvents(ref)
+	o.events, o.evErr, o.readEvts = evs, evErr, true
+	return o
 }
 
 // Lookup implements core.Attachment. Recovery already bound every
@@ -607,14 +740,11 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 // lost submit and a never-submitted key look identical (never EvidenceNone
 // for an unretained key).
 func (a *Attachment) Lookup(key requests.Key, epoch string) (core.Evidence, error) {
+	a.consume()     // 9a: seam reads outside a.mu; apply under it
+	a.lateBind(key) // 9a: same, for a key not yet bound
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.consumeLocked()
 	r, ok := a.runs[key]
-	if !ok {
-		a.lateBindLocked(key)
-		r, ok = a.runs[key]
-	}
 	if !ok {
 		return core.Evidence{Known: true, Class: core.EvidenceUnknown}, nil
 	}
@@ -627,6 +757,11 @@ func (a *Attachment) Lookup(key requests.Key, epoch string) (core.Evidence, erro
 		// The seam is unreadable (not merely absent): report the error so
 		// the endpoint keeps the record uncertain instead of guessing.
 		return core.Evidence{}, r.notFound
+	}
+	if r.eventsRefused != nil {
+		// §9: the event stream was refused (foreign protocol). Surface the
+		// refusal — it must never silently read as "no events".
+		return core.Evidence{}, r.eventsRefused
 	}
 	ev := core.Evidence{Known: true, RunID: r.runID, State: r.state}
 	if r.acked {
@@ -672,14 +807,11 @@ func (a *Attachment) Lookup(key requests.Key, epoch string) (core.Evidence, erro
 // (keystrokes are forbidden, §7): a cancel is intent only and resolved when
 // the run is already terminal.
 func (a *Attachment) CancelExact(key requests.Key, epoch string) (core.CancelEvidence, error) {
+	a.consume()     // 9a: seam reads outside a.mu; apply under it
+	a.lateBind(key) // 9a: same, for a key not yet bound
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.consumeLocked()
 	r, ok := a.runs[key]
-	if !ok {
-		a.lateBindLocked(key)
-		r, ok = a.runs[key]
-	}
 	if !ok {
 		return core.CancelEvidence{Disposition: protocol.CancelUnsupported, Message: "amit adapter has no native cancel seam"}, nil
 	}
@@ -701,14 +833,11 @@ func (a *Attachment) Respond(key requests.Key, epoch, interactionID, option stri
 // AcknowledgeResult implements core.Attachment: releases the retained
 // terminal evidence for the key once the digest matches exactly.
 func (a *Attachment) AcknowledgeResult(key requests.Key, epoch, digest string) {
+	a.consume()     // 9a: seam reads outside a.mu; apply under it
+	a.lateBind(key) // 9a: same, for a key not yet bound
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.consumeLocked()
 	r, ok := a.runs[key]
-	if !ok {
-		a.lateBindLocked(key)
-		r, ok = a.runs[key]
-	}
 	if !ok || (r.epoch != "" && r.epoch != epoch) || !r.state.Terminal() || r.acked {
 		return
 	}
