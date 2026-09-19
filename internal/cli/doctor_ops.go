@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"net"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/config"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/keepalive/registry"
 	"github.com/avivsinai/agent-message-queue/internal/notificationattempt"
 	"github.com/avivsinai/agent-message-queue/internal/presence"
 )
@@ -22,7 +24,24 @@ type doctorOpsResult struct {
 	OperatorGate   *opsOperatorGate  `json:"operator_gate,omitempty"`
 	WakeLocks      []opsWakeLock     `json:"wake_locks,omitempty"`
 	WakeQuarantine opsWakeQuarantine `json:"wake_quarantine"`
+	Companions     []opsCompanion    `json:"companions,omitempty"`
 	Hints          []opsHint         `json:"hints"`
+}
+
+// companionSupervisedAdapter is the keepalive-registry adapter name used by
+// amq-remote up (mirrors internal/keepalive/app's constant; cli does not
+// import the keepalive app).
+const companionSupervisedAdapter = "remote"
+
+// opsCompanion is the doctor's projection of one companion-supervised
+// registry entry (adapter "remote", registered by amq-remote up).
+type opsCompanion struct {
+	Root     string `json:"root"`
+	Agent    string `json:"agent"`
+	Adapter  string `json:"adapter"`
+	Target   string `json:"target"`
+	State    string `json:"state"`
+	LastSeen string `json:"last_seen,omitempty"`
 }
 
 type opsWakeQuarantine struct {
@@ -181,6 +200,9 @@ func runOpsChecksWithSchema(
 		})
 	}
 	result.OperatorGate = checkOperatorGate(root, now)
+	companions, companionHints := checkCompanions(root, now)
+	result.Companions = companions
+	result.Hints = append(result.Hints, companionHints...)
 	result.Hints = append(result.Hints, checkLinkedWorktreeLocalHint(root, rootSource)...)
 
 	// Load the active root's config, falling back to the base config for normal
@@ -490,6 +512,59 @@ func checkBaseBacklogHints(root string, agents []string) []opsHint {
 		})
 	}
 	return hints
+}
+
+// checkCompanions reads the keepalive companion registry and projects the
+// companion-supervised entries (adapter "remote", registered by amq-remote
+// up) for this root. A registry read error is surfaced as a hint, never a
+// doctor failure: companion visibility is diagnostic, not a gate.
+func checkCompanions(root string, now time.Time) ([]opsCompanion, []opsHint) {
+	regPath, err := registry.DefaultPath()
+	if err != nil || regPath == "" {
+		return nil, nil
+	}
+	// LoadSnapshot is genuinely read-only: a passive diagnostic must not
+	// create the registry directory or lock (codex P2). A missing file is an
+	// empty registry; other read errors are surfaced as a hint instead of
+	// being silently treated as "no companions".
+	file, err := registry.New(regPath).LoadSnapshot()
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		// A read error must not masquerade as "no companions" (codex P2):
+		// surface it as a warn hint; companion visibility is diagnostic,
+		// never a doctor failure.
+		return nil, []opsHint{{
+			Code:    "companion_registry_unreadable",
+			Status:  "warn",
+			Message: fmt.Sprintf("Cannot read companion registry: %v", err),
+		}}
+	}
+	canonical, err := registry.CanonicalRoot(root)
+	if err != nil {
+		canonical = root
+	}
+	var out []opsCompanion
+	for _, entry := range file.Entries {
+		if entry.Adapter != companionSupervisedAdapter || entry.Root != canonical {
+			continue
+		}
+		companion := opsCompanion{
+			Root:    entry.Root,
+			Agent:   entry.Agent,
+			Adapter: entry.Adapter,
+			Target:  entry.Target,
+			State:   string(entry.State),
+		}
+		if !entry.LastSeenBySupervisor.IsZero() {
+			companion.LastSeen = entry.LastSeenBySupervisor.UTC().Format(time.RFC3339)
+		} else if !entry.LastAttach.IsZero() {
+			companion.LastSeen = entry.LastAttach.UTC().Format(time.RFC3339)
+		}
+		out = append(out, companion)
+	}
+	return out, nil
 }
 
 func checkOperatorGate(root string, now time.Time) *opsOperatorGate {

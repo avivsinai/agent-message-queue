@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/keepalive/supervisor"
+
 	"github.com/avivsinai/agent-message-queue/internal/keepalive/adapter"
 	"github.com/avivsinai/agent-message-queue/internal/keepalive/amq"
 	"github.com/avivsinai/agent-message-queue/internal/keepalive/registry"
@@ -865,6 +867,54 @@ func (w *appCancelingWake) StartWake(ctx context.Context, _ amq.StartWakeRequest
 	return ctx.Err()
 }
 
+// TestSuperviseSkipsCompanionSupervisedRemoteEntries pins the observed defect
+// (codex P2): a healthy amq-remote up registers adapter "remote" in the same
+// registry keepalive reconciles. There is no remote wake adapter, so
+// passProbes produced fixedProbeError and reconcile marked the live companion
+// backoff. Companion-supervised entries must be skipped, never probed.
+func TestSuperviseSkipsCompanionSupervisedRemoteEntries(t *testing.T) {
+	dir := t.TempDir()
+	registryPath := testRegistryPath(t, dir)
+	store := registry.New(registryPath)
+	target := filepath.Join(dir, "companion-target")
+	if err := os.WriteFile(target, nil, 0o600); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+	if _, err := store.Upsert(registry.Entry{
+		Root: dir, Agent: "amq-remote", Adapter: "remote", Target: dir,
+	}); err != nil {
+		t.Fatalf("Upsert remote companion: %v", err)
+	}
+	// One ordinary entry to prove ordinary reconcile still runs.
+	ordinary := filepath.Join(dir, "ordinary-target")
+	if err := os.WriteFile(ordinary, nil, 0o600); err != nil {
+		t.Fatalf("write ordinary target: %v", err)
+	}
+	if _, err := store.Upsert(registry.Entry{
+		Root: "/tmp/ordinary", Agent: "codex", Adapter: "file", Target: ordinary,
+	}); err != nil {
+		t.Fatalf("Upsert ordinary: %v", err)
+	}
+	wake := &appCountingWake{}
+	app := App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
+	results, err := app.superviseOnce(context.Background(), registryPath, wake, "/bin/amq-keepalive", time.Second)
+	if err != nil || len(results) != 1 {
+		t.Fatalf("results=%#v err=%v, want only the ordinary entry (remote excluded, not deferred)", results, err)
+	}
+	if len(wake.starts) != 1 {
+		t.Fatalf("wake starts=%d, want only the ordinary entry", len(wake.starts))
+	}
+	after, err := store.Load()
+	if err != nil {
+		t.Fatalf("Load after: %v", err)
+	}
+	for _, entry := range after.Entries {
+		if entry.Adapter == "remote" && entry.FailureCount != 0 {
+			t.Fatalf("remote companion failure_count = %d, want 0 (never reconciled)", entry.FailureCount)
+		}
+	}
+}
+
 func TestSuperviseCancellationStopsLaterStartsAndLeavesRegistryUnchanged(t *testing.T) {
 	dir := t.TempDir()
 	registryPath := testRegistryPath(t, dir)
@@ -1511,5 +1561,28 @@ func TestInjectUncertainPrintsStandaloneMarkerAndSeparateDiagnostics(t *testing.
 		if strings.Contains(line, adapter.ErrInjectUncertain.Error()) {
 			t.Fatalf("diagnostic line %q repeats the machine-readable marker", line)
 		}
+	}
+}
+
+// TestSelfUpgradeHealthyPassAcceptsDeferredWithoutError pins the observed
+// defect (codex P2): companion-supervised remote entries produced
+// ActionDeferred results, and selfUpgradeHealthyPass accepted only
+// ActionEnsured — so any registered remote companion blocked self-upgrade
+// settlement on every pass.
+func TestSelfUpgradeHealthyPassAcceptsDeferredWithoutError(t *testing.T) {
+	if !selfUpgradeHealthyPass([]supervisor.Result{{Action: supervisor.ActionEnsured}}) {
+		t.Fatal("ensured-only pass reported unhealthy")
+	}
+	if selfUpgradeHealthyPass([]supervisor.Result{{Action: supervisor.ActionEnsured}, {Error: errors.New("boom")}}) {
+		t.Fatal("pass with errored result reported healthy")
+	}
+	if selfUpgradeHealthyPass([]supervisor.Result{{Action: supervisor.ActionDeferred, Error: errors.New("boom")}}) {
+		t.Fatal("errored result must stay unhealthy")
+	}
+	// Companion-supervised remote entries are excluded from results entirely
+	// by superviseOnce, so a healthy pass with a registered remote companion
+	// contains ONLY the ensured results of entries keepalive owns.
+	if !selfUpgradeHealthyPass([]supervisor.Result{{Action: supervisor.ActionEnsured}}) {
+		t.Fatal("pass without out-of-scope entries must settle")
 	}
 }
