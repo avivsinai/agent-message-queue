@@ -2102,11 +2102,13 @@ func TestValidationFailuresExitTwo(t *testing.T) {
 			}
 			var out, errBuf bytes.Buffer
 			var code int
-			// 611.13.4-3: bound the in-process serve. For a VALID manifest a
-			// mutation could leave serve running forever and stall the whole
-			// package for the full go-test timeout. Serve must refuse an
-			// invalid manifest before startup; 30s is generous even under
-			// heavy CI load.
+			// 611.13.4-3: bound the test wait on the in-process serve. For a
+			// VALID manifest a mutation could leave serve running forever
+			// and stall the whole package for the full go-test timeout.
+			// Serve must refuse an invalid manifest before startup; 30s is
+			// generous even under heavy CI load. The deadline bounds this
+			// test's wait, NOT the serve goroutine (which keeps running in
+			// the mutation case and still owns out/errBuf).
 			type serveResult struct{ code int }
 			done := make(chan serveResult, 1)
 			go func() {
@@ -2122,7 +2124,11 @@ func TestValidationFailuresExitTwo(t *testing.T) {
 			case r := <-done:
 				code = r.code
 			case <-time.After(30 * time.Second):
-				t.Fatalf("serve did not refuse the invalid manifest within 30s (mutation bound; it must exit before any startup side effect)\nstderr=%s", errBuf.String())
+				// Review ruling 20:56:30Z: the serve goroutine still owns
+				// out/errBuf, so reading them here races with its writes
+				// (the same failure-path race fixed in #820). Report
+				// without touching the live buffers.
+				t.Fatalf("serve did not refuse the invalid manifest within 30s (mutation bound; it must exit before any startup side effect); serve goroutine still running and owns the capture buffers")
 			}
 			if code != protocol.ExitUsage {
 				t.Fatalf("serve exit=%d, want %d (ExitUsage)\nstderr=%s", code, protocol.ExitUsage, errBuf.String())
