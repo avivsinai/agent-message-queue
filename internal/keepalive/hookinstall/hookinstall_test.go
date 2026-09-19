@@ -357,6 +357,21 @@ func TestEmbeddedScriptMatchesRepositoryHook(t *testing.T) {
 // failure is now impossible. End-to-end timeout termination remains covered by
 // TestSessionStartWatchdogSleepsNormalizedTimeout and
 // TestSessionStartTimeoutKillsReattachProcessGroup.
+// requireHookScriptLane gates the tests that run the real SessionStart bash
+// script. They exercise the shell boundary itself, so a child process is the
+// only honest form, but that makes them wall-clock sensitive: inside the
+// parallel `go test ./...` lane under full-suite load they failed on a
+// different test each run (bead agent-message-queue-9xv; pre-push make ci
+// 2026-09-19 x3). They run serially in their own CI job with
+// AMQ_HOOK_SCRIPT_TESTS=1, the same opt-in shape the live proofs use, and
+// skip everywhere else.
+func requireHookScriptLane(t *testing.T) {
+	t.Helper()
+	if os.Getenv("AMQ_HOOK_SCRIPT_TESTS") != "1" {
+		t.Skip("hook script lane: set AMQ_HOOK_SCRIPT_TESTS=1 and run this package with -p 1")
+	}
+}
+
 // hookHangGuard bounds a SessionStart hook run against a genuine hang. It is
 // NOT a timing assertion: none of these tests measure how long the script
 // takes, and the fake SLEEP_CMD returns at once, so a passing run is spawn
@@ -369,6 +384,7 @@ func TestEmbeddedScriptMatchesRepositoryHook(t *testing.T) {
 const hookHangGuard = 60 * time.Second
 
 func TestSessionStartScriptNormalizesInvalidTimeoutAndReturns(t *testing.T) {
+	requireHookScriptLane(t)
 	dir := t.TempDir()
 	scriptPath := writeSessionStartScript(t, dir)
 	logPath := filepath.Join(dir, "session-start.log")
@@ -423,6 +439,7 @@ func TestSessionStartScriptNormalizesInvalidTimeoutAndReturns(t *testing.T) {
 }
 
 func TestSessionStartWatchdogSleepsNormalizedTimeout(t *testing.T) {
+	requireHookScriptLane(t)
 	dir := t.TempDir()
 	scriptPath := writeSessionStartScript(t, dir)
 	sleepLog := filepath.Join(dir, "sleep.log")
@@ -468,6 +485,7 @@ printf '%s\n' "$1" >> "$AMQ_KEEPALIVE_SLEEP_LOG"
 }
 
 func TestSessionStartScriptDoesNotBlockOnOpenStdin(t *testing.T) {
+	requireHookScriptLane(t)
 	dir := t.TempDir()
 	scriptPath := writeSessionStartScript(t, dir)
 	binaryPath := writeExecutableBody(t, filepath.Join(dir, "amq-keepalive"), "#!/bin/sh\nexit 0\n")
@@ -506,6 +524,7 @@ func TestSessionStartScriptDoesNotBlockOnOpenStdin(t *testing.T) {
 }
 
 func TestSessionStartScriptAutoSelectsExactCmuxSurfaceAndLogsFailure(t *testing.T) {
+	requireHookScriptLane(t)
 	dir := t.TempDir()
 	scriptPath := writeSessionStartScript(t, dir)
 	argsPath := filepath.Join(dir, "args.log")
@@ -566,6 +585,7 @@ exit 7
 }
 
 func TestSessionStartScriptSkipsTargetlessGhostty(t *testing.T) {
+	requireHookScriptLane(t)
 	dir := t.TempDir()
 	scriptPath := writeSessionStartScript(t, dir)
 	argsPath := filepath.Join(dir, "args.log")
@@ -601,6 +621,7 @@ printf '%s\n' "$@" > "$AMQ_KEEPALIVE_CAPTURE"
 }
 
 func TestSessionStartScriptSkipsClearAndCompactSources(t *testing.T) {
+	requireHookScriptLane(t)
 	for _, source := range []string{"clear", "compact"} {
 		t.Run(source, func(t *testing.T) {
 			dir := t.TempDir()
@@ -637,6 +658,7 @@ printf '%s\n' "$@" > "$AMQ_KEEPALIVE_CAPTURE"
 }
 
 func TestSessionStartScriptUsesExplicitGhosttyTarget(t *testing.T) {
+	requireHookScriptLane(t)
 	dir := t.TempDir()
 	scriptPath := writeSessionStartScript(t, dir)
 	argsPath := filepath.Join(dir, "args.log")
@@ -673,6 +695,7 @@ printf '%s\n' "$@" > "$AMQ_KEEPALIVE_CAPTURE"
 }
 
 func TestSessionStartScriptClampsInnerWakeTimeoutBelowOuterWatchdog(t *testing.T) {
+	requireHookScriptLane(t)
 	dir := t.TempDir()
 	scriptPath := writeSessionStartScript(t, dir)
 	argsPath := filepath.Join(dir, "args.log")
@@ -711,6 +734,7 @@ printf '%s\n' "$@" > "$AMQ_KEEPALIVE_CAPTURE"
 }
 
 func TestSessionStartTimeoutMarkerDoesNotFollowPIDSymlink(t *testing.T) {
+	requireHookScriptLane(t)
 	dir := t.TempDir()
 	tmpdir := t.TempDir()
 	scriptPath := writeSessionStartScript(t, dir)
@@ -784,6 +808,7 @@ sleep 30
 }
 
 func TestSessionStartTimeoutKillsReattachProcessGroup(t *testing.T) {
+	requireHookScriptLane(t)
 	dir := t.TempDir()
 	scriptPath := writeSessionStartScript(t, dir)
 	grandchildPidPath := filepath.Join(dir, "grandchild.pid")
@@ -870,6 +895,7 @@ wait "$grandchild_pid"
 }
 
 func TestSessionStartSuccessDoesNotKillReadyWake(t *testing.T) {
+	requireHookScriptLane(t)
 	dir := t.TempDir()
 	scriptPath := writeSessionStartScript(t, dir)
 	wakePidPath := filepath.Join(dir, "wake.pid")
