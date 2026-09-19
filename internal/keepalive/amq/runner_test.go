@@ -465,12 +465,17 @@ done
 umask 077
 printf '%s\n' '{"schema":1,"generation":"test-generation","target_digest":"test-digest"}' > "$ready"
 while [ ! -f "$AMQ_KEEPALIVE_TRIGGER" ]; do sleep 0.01; done
-# Phase markers (review 19:57:44Z, corrected 20:02:35Z): a failed stderr
-# write must FAIL this regression, not pass it. dd failure records the
-# marker and exits nonzero before survived; the success marker exists only
-# after a successful write.
+# Phase markers (review 19:57:44Z, corrected 20:10:22Z): a failed stderr
+# write must FAIL this regression, not pass it. dd's exit code is recorded
+# and, if nonzero, the script exits with that code BEFORE either success
+# marker (phase-dd-ok / survived) is written.
 : > "$AMQ_KEEPALIVE_PHASE_BEFORE"
 dd if=/dev/zero bs=65536 count=4 >&2 2>/dev/null
+dd_exit=$?
+if [ "$dd_exit" -ne 0 ]; then
+  : > "$AMQ_KEEPALIVE_PHASE_DD_FAIL"
+  exit "$dd_exit"
+fi
 : > "$AMQ_KEEPALIVE_PHASE_DD_OK"
 : > "$AMQ_KEEPALIVE_SURVIVED"
 while [ ! -f "$AMQ_KEEPALIVE_RELEASE" ]; do sleep 0.01; done
@@ -482,6 +487,7 @@ while [ ! -f "$AMQ_KEEPALIVE_RELEASE" ]; do sleep 0.01; done
 	t.Setenv("AMQ_KEEPALIVE_CACHE_DIR", filepath.Join(dir, "cache"))
 	phaseBefore := filepath.Join(dir, "phase-before-stderr")
 	phaseDDOK := filepath.Join(dir, "phase-dd-ok")
+	phaseDDFail := filepath.Join(dir, "phase-dd-fail")
 	retained := filepath.Join(dir, "retained-captures")
 	if err := os.MkdirAll(retained, 0o700); err != nil {
 		t.Fatal(err)
@@ -492,6 +498,7 @@ while [ ! -f "$AMQ_KEEPALIVE_RELEASE" ]; do sleep 0.01; done
 	t.Setenv("AMQ_KEEPALIVE_PID", pidFile)
 	t.Setenv("AMQ_KEEPALIVE_PHASE_BEFORE", phaseBefore)
 	t.Setenv("AMQ_KEEPALIVE_PHASE_DD_OK", phaseDDOK)
+	t.Setenv("AMQ_KEEPALIVE_PHASE_DD_FAIL", phaseDDFail)
 	t.Setenv("AMQ_KEEPALIVE_RETAINED_CAPTURES", retained)
 	launcher, err := os.Executable()
 	if err != nil {
@@ -528,7 +535,7 @@ func waitForFileWithDiagnostics(t *testing.T, path string, timeout time.Duration
 	var report strings.Builder
 	fmt.Fprintf(&report, "file %q did not appear within %s\n", path, timeout)
 	// Phase markers (review 19:57:44Z): state machine of the fake wake.
-	for _, name := range []string{"phase-before-stderr", "phase-dd-ok"} {
+	for _, name := range []string{"phase-before-stderr", "phase-dd-ok", "phase-dd-fail"} {
 		data, err := os.ReadFile(filepath.Join(dir, name))
 		if err != nil {
 			fmt.Fprintf(&report, "phase %s: absent\n", name)
@@ -641,7 +648,12 @@ func retainCapturedWakeStderr(t *testing.T) {
 				if file == nil {
 					return
 				}
-				_ = os.Link(file.Name(), filepath.Join(retainedDir, label+"-"+filepath.Base(file.Name())))
+				if err := os.Link(file.Name(), filepath.Join(retainedDir, label+"-"+filepath.Base(file.Name()))); err != nil {
+					// Surface, never swallow: a missing retained diagnostic
+					// must not look like a retained one. Bounded to the test
+					// temp dir; the wake itself is unaffected.
+					fmt.Fprintf(os.Stderr, "retain %s capture %s: %v\n", label, file.Name(), err)
+				}
 			}
 			link(capture.file, "capture")
 			link(capture.diagnosticFile, "diagnostic")
