@@ -269,19 +269,54 @@ func printSession(w io.Writer, s protocol.Session) {
 	say(w, "%-24s %-8s %-8s %-8s epoch=%s caps=%s\n", s.TargetID, s.Harness, s.Attachment, s.Status, s.Epoch, strings.Join(caps, ","))
 }
 
+// serveFlags holds pointers to the flags serve defines beyond the common
+// root/json pair. defineServeFlags is the single registration site: serve()
+// reads them to run, and up()'s FlagSet registers the same set so serve's
+// options can be forwarded by value (codex P1: two registration sites
+// panicked with "flag redefined" on every up invocation).
+type serveFlags struct {
+	me           *string
+	useFake      *bool
+	codexSocket  *string
+	codexThread  *string
+	codexApprove *bool
+	manifestPath *string
+	discover     *bool
+	poll         *time.Duration
+}
+
+// serveFlagNames is the set of flag names defineServeFlags registers (plus
+// the common root/json). up validates forwarded flags against it.
+var serveFlagNames = map[string]bool{
+	"root": true, "json": true, "me": true, "fake": true,
+	"codex-socket": true, "codex-thread": true, "codex-approve": true,
+	"manifest": true, "discover": true, "poll": true,
+}
+
+// defineServeFlags registers serve's flags on fs exactly once and returns
+// their pointers. meDefault differs per command: serve defaults the endpoint
+// handle to amqio.DefaultHandle, up to its own supervisor default.
+func defineServeFlags(fs *flag.FlagSet, meDefault string) serveFlags {
+	return serveFlags{
+		me:           fs.String("me", meDefault, "endpoint mailbox handle in the root"),
+		useFake:      fs.Bool("fake", false, "register the deterministic fake runtime as target 'fake' (sugar: appends to manifest)"),
+		codexSocket:  fs.String("codex-socket", "", "unix socket of the running Codex app-server daemon; attaches its loaded threads (sugar: appends to manifest)"),
+		codexThread:  fs.String("codex-thread", "", "attach only this Codex thread id (with --codex-socket)"),
+		codexApprove: fs.Bool("codex-approve", false, "advertise approve_tool for Codex threads (only after approval fanout is verified live)"),
+		manifestPath: fs.String("manifest", "", "path to the adapter manifest (default: <stateDir>/manifest.json)"),
+		discover:     fs.Bool("discover", false, "list discovered adapter candidates and exit (attaches nothing)"),
+		poll:         fs.Duration("poll", 500*time.Millisecond, "AMQ import and reconciliation interval"),
+	}
+}
+
 // serve runs the endpoint: store, attachments, IPC socket, AMQ import loop.
 func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	c := addCommon(fs)
-	me := fs.String("me", amqio.DefaultHandle, "endpoint mailbox handle in the root")
-	useFake := fs.Bool("fake", false, "register the deterministic fake runtime as target 'fake' (sugar: appends to manifest)")
-	codexSocket := fs.String("codex-socket", "", "unix socket of the running Codex app-server daemon; attaches its loaded threads (sugar: appends to manifest)")
-	codexThread := fs.String("codex-thread", "", "attach only this Codex thread id (with --codex-socket)")
-	codexApprove := fs.Bool("codex-approve", false, "advertise approve_tool for Codex threads (only after approval fanout is verified live)")
-	manifestPath := fs.String("manifest", "", "path to the adapter manifest (default: <stateDir>/manifest.json)")
-	discover := fs.Bool("discover", false, "list discovered adapter candidates and exit (attaches nothing)")
-	poll := fs.Duration("poll", 500*time.Millisecond, "AMQ import and reconciliation interval")
+	sf := defineServeFlags(fs, amqio.DefaultHandle)
+	me, useFake, codexSocket, codexThread := sf.me, sf.useFake, sf.codexSocket, sf.codexThread
+	codexApprove, manifestPath, discover, poll := sf.codexApprove, sf.manifestPath, sf.discover, sf.poll
 	if err := fs.Parse(args); err != nil {
 		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", err)
 	}

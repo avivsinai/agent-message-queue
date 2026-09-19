@@ -138,18 +138,29 @@ func TestUpSecondProcessRefusedWhileFirstHoldsLifetimeLock(t *testing.T) {
 	}
 }
 
-// TestUpForwardsServeFlagsAndRejectsUnknown pins the observed defect
-// (codex P2): up's FlagSet lacked serve's flags, so `up --fake` failed
-// before buildServeArgs, and an unknown flag would be silently dropped.
+// TestUpForwardsServeFlagsAndRejectsUnknown pins the observed defects
+// (codex P1+P2): the complete FlagSet must parse without redefinition
+// panics, accept serve's flags, reject unknown flags as usage errors, and
+// forward values verbatim.
 func TestUpForwardsServeFlagsAndRejectsUnknown(t *testing.T) {
+	// The REAL entry-point shape: one FlagSet, addCommon + defineServeFlags +
+	// up-specific flags, exactly as up() builds it. Reproducing the
+	// construction here is what catches "flag redefined" panics that
+	// helper-only tests miss (codex reproduced the panic with the binary).
+	fs := flag.NewFlagSet("up", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	addCommon(fs)
+	defineServeFlags(fs, "remote")
+	fs.String("registry", "", "")
+	fs.Int("max-restarts", 0, "")
+	fs.String("self", "", "")
 	args := []string{"--root", "/tmp/r", "--fake", "--poll", "250ms", "--me", "amq-remote"}
-	fs := newUpFlagSet(io.Discard)
 	if err := fs.Parse(args); err != nil {
 		t.Fatalf("parse: %v", err)
 	}
 	var unknown []string
 	fs.Visit(func(f *stdFlag) {
-		if !serveFlags[f.Name] && f.Name != "self" && f.Name != "registry" && f.Name != "max-restarts" {
+		if !serveFlagNames[f.Name] && f.Name != "self" && f.Name != "registry" && f.Name != "max-restarts" {
 			unknown = append(unknown, "--"+f.Name)
 		}
 	})
@@ -157,32 +168,57 @@ func TestUpForwardsServeFlagsAndRejectsUnknown(t *testing.T) {
 		t.Fatalf("serve flags rejected as unknown: %v", unknown)
 	}
 	got := buildServeArgs(fs, "/tmp/r", "amq-remote")
-	want := []string{"serve", "--root", "/tmp/r", "--me", "amq-remote", "--fake", "--poll", "250ms"}
+	want := []string{"serve", "--root", "/tmp/r", "--me", "amq-remote", "--fake=true", "--poll=250ms"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("buildServeArgs = %v, want %v", got, want)
 	}
 
 	// A flag serve does not define is a parse-time usage error (ContinueOnError
 	// refuses "flag provided but not defined"), never forwarded or dropped.
-	fs2 := newUpFlagSet(io.Discard)
+	fs2 := flag.NewFlagSet("up", flag.ContinueOnError)
+	fs2.SetOutput(io.Discard)
+	addCommon(fs2)
+	defineServeFlags(fs2, "remote")
 	if err := fs2.Parse([]string{"--no-such-flag"}); err == nil {
 		t.Fatal("parse of unknown flag succeeded, want usage error")
 	}
 }
 
-// TestUpBooleanFlagsForwardedBare pins that boolean serve flags (--fake,
-// --discover, --codex-approve) are forwarded without a "=false"-style value,
-// which serve's flag parser would misread.
-func TestUpBooleanFlagsForwardedBare(t *testing.T) {
-	fs := newUpFlagSet(io.Discard)
-	if err := fs.Parse([]string{"--root", "/tmp/r", "--fake", "--discover"}); err != nil {
+// TestUpBooleanValuesPreserved pins the observed defect (codex P1): explicit
+// boolean values were dropped and the flag sent bare, so --fake=false turned
+// INTO --fake and --codex-approve=false silently opted INTO approval. Go's
+// flag package accepts --flag=false, so values must be forwarded verbatim.
+func TestUpBooleanValuesPreserved(t *testing.T) {
+	fs := flag.NewFlagSet("up", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	addCommon(fs)
+	defineServeFlags(fs, "remote")
+	if err := fs.Parse([]string{"--root", "/tmp/r", "--fake=false", "--discover=false", "--codex-approve=false"}); err != nil {
 		t.Fatalf("parse: %v", err)
 	}
 	got := buildServeArgs(fs, "/tmp/r", "amq-remote")
-	// fs.Visit walks flags lexicographically, so forwarded flags arrive in
-	// sorted order; flag parsing is order-independent.
-	want := []string{"serve", "--root", "/tmp/r", "--me", "amq-remote", "--discover", "--fake"}
+	want := []string{"serve", "--root", "/tmp/r", "--me", "amq-remote", "--codex-approve=false", "--discover=false", "--fake=false"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("buildServeArgs = %v, want %v", got, want)
+	}
+}
+
+// TestUpLifetimeLockCreatesMissingRegistryDir pins the observed defect
+// (codex P2): the lifetime-lock file was opened before the registry created
+// its parent directory, so a first use pointed at a fresh directory failed
+// with ENOENT reported as "another up already supervises".
+func TestUpLifetimeLockCreatesMissingRegistryDir(t *testing.T) {
+	root := t.TempDir()
+	regPath := filepath.Join(root, "fresh-dir", "registry.json")
+	entryID := registry.EntryID(root, "amq-remote", "remote", root)
+
+	f, err := acquireLifetimeLock(regPath, entryID)
+	if err != nil {
+		t.Fatalf("acquireLifetimeLock on missing parent dir: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	if _, err := os.Stat(filepath.Join(root, "fresh-dir")); err != nil {
+		t.Fatalf("parent dir not created: %v", err)
 	}
 }

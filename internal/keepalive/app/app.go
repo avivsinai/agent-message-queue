@@ -808,7 +808,16 @@ func (a App) supervise(ctx context.Context, args []string) error {
 
 func selfUpgradeHealthyPass(results []supervisor.Result) bool {
 	for _, result := range results {
-		if result.Error != nil || result.Action != supervisor.ActionEnsured {
+		if result.Error != nil {
+			return false
+		}
+		// Companion-supervised remote entries are EXCLUDED from results by
+		// superviseOnce below — they are out of scope for wake health, and a
+		// fabricated placeholder would let one silent entry swing settlement
+		// in either direction (codex P2). Everything left in results is an
+		// entry keepalive owns: only a confirmed ensured pass settles the
+		// self-upgrade.
+		if result.Action != supervisor.ActionEnsured {
 			return false
 		}
 	}
@@ -838,10 +847,12 @@ func (a App) superviseOnce(ctx context.Context, registryPath string, wake superv
 			// with keepalive's backoff constants and forgets its registration
 			// on exit. Reconciling them here would probe an adapter this
 			// process has no wake adapter for and mark a healthy, live
-			// companion as backoff. Skip them; doctor --ops reads them
-			// directly as companion visibility.
+			// companion as backoff. They are excluded from results entirely,
+			// not deferred placeholders (codex P2): selfUpgradeHealthyPass
+			// settles only on ensured results, so a fabricated deferred entry
+			// blocked upgrade settlement on every pass whenever a remote
+			// companion was registered. Doctor --ops reads them directly.
 			if entry.Adapter == companionSupervisedAdapter {
-				results = append(results, supervisor.Result{Action: supervisor.ActionDeferred})
 				continue
 			}
 			if ctxErr := ctx.Err(); ctxErr != nil {

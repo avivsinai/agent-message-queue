@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/keepalive/supervisor"
+
 	"github.com/avivsinai/agent-message-queue/internal/keepalive/adapter"
 	"github.com/avivsinai/agent-message-queue/internal/keepalive/amq"
 	"github.com/avivsinai/agent-message-queue/internal/keepalive/registry"
@@ -896,8 +898,8 @@ func TestSuperviseSkipsCompanionSupervisedRemoteEntries(t *testing.T) {
 	wake := &appCountingWake{}
 	app := App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
 	results, err := app.superviseOnce(context.Background(), registryPath, wake, "/bin/amq-keepalive", time.Second)
-	if err != nil || len(results) != 2 {
-		t.Fatalf("results=%#v err=%v", results, err)
+	if err != nil || len(results) != 1 {
+		t.Fatalf("results=%#v err=%v, want only the ordinary entry (remote excluded, not deferred)", results, err)
 	}
 	if len(wake.starts) != 1 {
 		t.Fatalf("wake starts=%d, want only the ordinary entry", len(wake.starts))
@@ -1559,5 +1561,28 @@ func TestInjectUncertainPrintsStandaloneMarkerAndSeparateDiagnostics(t *testing.
 		if strings.Contains(line, adapter.ErrInjectUncertain.Error()) {
 			t.Fatalf("diagnostic line %q repeats the machine-readable marker", line)
 		}
+	}
+}
+
+// TestSelfUpgradeHealthyPassAcceptsDeferredWithoutError pins the observed
+// defect (codex P2): companion-supervised remote entries produced
+// ActionDeferred results, and selfUpgradeHealthyPass accepted only
+// ActionEnsured — so any registered remote companion blocked self-upgrade
+// settlement on every pass.
+func TestSelfUpgradeHealthyPassAcceptsDeferredWithoutError(t *testing.T) {
+	if !selfUpgradeHealthyPass([]supervisor.Result{{Action: supervisor.ActionEnsured}}) {
+		t.Fatal("ensured-only pass reported unhealthy")
+	}
+	if selfUpgradeHealthyPass([]supervisor.Result{{Action: supervisor.ActionEnsured}, {Error: errors.New("boom")}}) {
+		t.Fatal("pass with errored result reported healthy")
+	}
+	if selfUpgradeHealthyPass([]supervisor.Result{{Action: supervisor.ActionDeferred, Error: errors.New("boom")}}) {
+		t.Fatal("errored result must stay unhealthy")
+	}
+	// Companion-supervised remote entries are excluded from results entirely
+	// by superviseOnce, so a healthy pass with a registered remote companion
+	// contains ONLY the ensured results of entries keepalive owns.
+	if !selfUpgradeHealthyPass([]supervisor.Result{{Action: supervisor.ActionEnsured}}) {
+		t.Fatal("pass without out-of-scope entries must settle")
 	}
 }

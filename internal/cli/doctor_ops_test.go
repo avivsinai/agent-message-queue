@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -338,5 +339,48 @@ func TestRunOpsChecks_ReportsRemoteCompanion(t *testing.T) {
 	c := companions[0]
 	if c.Agent != "amq-remote" || c.Adapter != "remote" || c.Root != root || c.State != "attached" {
 		t.Fatalf("companion = %#v, want amq-remote/remote/%s/active", c, root)
+	}
+}
+
+// TestRunOpsChecks_CompanionRegistryAbsentCreatesNothingAndUnreadableWarns
+// pins the observed defect (codex P2): doctor used Store.Load, whose withLock
+// creates the home registry directory and its lock file and chmods the lock —
+// a passive diagnostic must not create files. Absence must be an empty
+// companion list; a corrupt registry must surface as a hint, never silently
+// read as "no companions".
+func TestRunOpsChecks_CompanionRegistryAbsentCreatesNothingAndUnreadableWarns(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatalf("ensure root dirs: %v", err)
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	regDir := filepath.Join(home, ".amq-keepalive")
+
+	// Absent registry: no files created, no companions projected.
+	result := runOpsChecks(root, "test_source", false)
+	if len(result.Companions) != 0 {
+		t.Fatalf("companions for absent registry = %#v, want none", result.Companions)
+	}
+	if _, err := os.Stat(regDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("doctor created %s: stat err=%v, want absent", regDir, err)
+	}
+
+	// Corrupt registry: surfaced as a warn hint, not silent emptiness.
+	if err := os.MkdirAll(regDir, 0o700); err != nil {
+		t.Fatalf("mkdir registry dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(regDir, "registry.json"), []byte("{not json"), 0o600); err != nil {
+		t.Fatalf("write corrupt registry: %v", err)
+	}
+	result = runOpsChecks(root, "test_source", false)
+	var warned bool
+	for _, hint := range result.Hints {
+		if hint.Code == "companion_registry_unreadable" && hint.Status == "warn" {
+			warned = true
+		}
+	}
+	if !warned {
+		t.Fatalf("corrupt companion registry produced no companion_registry_unreadable hint; hints=%#v", result.Hints)
 	}
 }

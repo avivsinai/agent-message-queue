@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"net"
@@ -199,7 +200,9 @@ func runOpsChecksWithSchema(
 		})
 	}
 	result.OperatorGate = checkOperatorGate(root, now)
-	result.Companions = checkCompanions(root, now)
+	companions, companionHints := checkCompanions(root, now)
+	result.Companions = companions
+	result.Hints = append(result.Hints, companionHints...)
 	result.Hints = append(result.Hints, checkLinkedWorktreeLocalHint(root, rootSource)...)
 
 	// Load the active root's config, falling back to the base config for normal
@@ -515,14 +518,28 @@ func checkBaseBacklogHints(root string, agents []string) []opsHint {
 // companion-supervised entries (adapter "remote", registered by amq-remote
 // up) for this root. A registry read error is surfaced as a hint, never a
 // doctor failure: companion visibility is diagnostic, not a gate.
-func checkCompanions(root string, now time.Time) []opsCompanion {
+func checkCompanions(root string, now time.Time) ([]opsCompanion, []opsHint) {
 	regPath, err := registry.DefaultPath()
 	if err != nil || regPath == "" {
-		return nil
+		return nil, nil
 	}
-	file, err := registry.New(regPath).Load()
+	// LoadSnapshot is genuinely read-only: a passive diagnostic must not
+	// create the registry directory or lock (codex P2). A missing file is an
+	// empty registry; other read errors are surfaced as a hint instead of
+	// being silently treated as "no companions".
+	file, err := registry.New(regPath).LoadSnapshot()
 	if err != nil {
-		return nil
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		// A read error must not masquerade as "no companions" (codex P2):
+		// surface it as a warn hint; companion visibility is diagnostic,
+		// never a doctor failure.
+		return nil, []opsHint{{
+			Code:    "companion_registry_unreadable",
+			Status:  "warn",
+			Message: fmt.Sprintf("Cannot read companion registry: %v", err),
+		}}
 	}
 	canonical, err := registry.CanonicalRoot(root)
 	if err != nil {
@@ -547,7 +564,7 @@ func checkCompanions(root string, now time.Time) []opsCompanion {
 		}
 		out = append(out, companion)
 	}
-	return out
+	return out, nil
 }
 
 func checkOperatorGate(root string, now time.Time) *opsOperatorGate {

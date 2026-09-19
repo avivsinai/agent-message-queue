@@ -165,6 +165,18 @@ func (s *Store) Load() (File, error) {
 	return file, err
 }
 
+// LoadSnapshot reads the registry WITHOUT taking the write lock or creating
+// any file or directory (codex P2: a passive diagnostic such as doctor must
+// not create the home registry or its lock; absence of the file is an empty
+// registry, other read errors are reported). It is a point-in-time snapshot
+// suitable for diagnostics only — writers must use Load/WithRegistrationLock.
+func (s *Store) LoadSnapshot() (File, error) {
+	if s.Path == "" {
+		return File{}, errors.New("registry path is required")
+	}
+	return s.loadUnlocked()
+}
+
 // WithRegistrationLock serializes the complete attach/reattach transaction
 // across processes without blocking ordinary registry readers. Callers hold
 // this lease from their fresh target inventory and ownership preflight through
