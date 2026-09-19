@@ -102,8 +102,13 @@ func EnsureAgent(rootDir, handle string) (bool, error) {
 // writer emitted - probe names default_agent, project, wake, extensions,
 // routing). The read decodes the file into a raw key map, the known fields
 // are overlaid, agents is mutated, and the full map is re-marshalled
-// (keys sorted by encoding/json - deterministic). Unknown keys survive the
-// rewrite byte-for-byte as raw JSON. Creates the config when absent.
+// (keys sorted by encoding/json - deterministic). Unknown keys are
+// preserved SEMANTICALLY: their values round-trip intact as opaque raw
+// JSON, but the whole file is re-serialized (sorted keys, 2-space
+// indentation). Scope: this property is EnsureAgent's only - the other
+// config.json writers (amq setup, launch apply) still rewrite the bare
+// struct (review-821-r1 P1-b; tracked in a follow-up bead). Creates the
+// config when absent.
 func ensureAgentLocked(root *fsq.DeliveryRoot, handle string) (bool, error) {
 	data, err := root.ReadFile("meta/config.json")
 	if err != nil {
@@ -150,6 +155,13 @@ func marshalConfigPreservingUnknowns(original []byte, cfg Config) ([]byte, error
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(original, &raw); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
+	}
+	// A literal JSON `null` unmarshals into a nil map with no error; treat
+	// it like an empty document instead of panicking on the overlay
+	// (review-821-r1 P1-a; a panic here would kill amq-remote serve, whose
+	// caller degrades registration errors to warnings by design).
+	if raw == nil {
+		raw = make(map[string]json.RawMessage)
 	}
 	known, err := json.Marshal(cfg)
 	if err != nil {
