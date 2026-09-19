@@ -34,10 +34,10 @@
     },
     "evidence": {
       "type": "object",
-      "description": "Evidence class the attachment can give for each operation, in wake capability-vector vocabulary plus 'admitted'.",
+      "description": "Evidence class the attachment can give for each operation. Submit classes are exactly the protocol's named evidence constants (protocol.EvidenceSubmitted / EvidenceAdmitted) - 611.22.56 removed 'delivered', a wake-vocabulary value Go never names (it ranked like garbage, could never be a MinEvidence floor, and a peer publishing it read as no evidence).",
       "additionalProperties": false,
       "properties": {
-        "submit": { "enum": ["delivered", "submitted", "admitted"] },
+        "submit": { "enum": ["submitted", "admitted"] },
         "completion": { "enum": ["none", "session_idle", "run_terminal"] }
       }
     },
