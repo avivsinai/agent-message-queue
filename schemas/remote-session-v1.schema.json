@@ -34,10 +34,10 @@
     },
     "evidence": {
       "type": "object",
-      "description": "Evidence class the attachment can give for each operation, in wake capability-vector vocabulary plus 'admitted'.",
+      "description": "Evidence classes available for each operation. Submit evidence is submitted or admitted.",
       "additionalProperties": false,
       "properties": {
-        "submit": { "enum": ["delivered", "submitted", "admitted"] },
+        "submit": { "enum": ["submitted", "admitted"] },
         "completion": { "enum": ["none", "session_idle", "run_terminal"] }
       }
     },
