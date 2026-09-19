@@ -1,4 +1,4 @@
-.PHONY: build test fmt fmt-check vet lint ci smoke contract-check check-skills hook-env-check
+.PHONY: build test fmt fmt-check vet lint ci smoke contract-check check-skills check-docs-cli docs-cli hook-env-check
 
 GO_FILES := $(shell find . -name '*.go' -not -path './vendor/*' -not -path './.worktrees/*' -not -path './.agent-mail/*')
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
@@ -51,7 +51,7 @@ smoke:
 	AMQ_WAKE_OWNER=smoke-inherited-wake-owner \
 	./scripts/smoke-test.sh
 
-ci: check-skills fmt-check vet lint test smoke contract-check hook-env-check
+ci: check-skills check-docs-cli fmt-check vet lint test smoke contract-check hook-env-check
 
 hook-env-check:
 	@sh scripts/test_pre_push_hook_env.sh
@@ -69,3 +69,20 @@ contract-check:
 check-skills:
 	@bash scripts/test_check_skills.sh
 	@bash scripts/check-skills.sh
+
+# Generate the human-facing command reference from the real CLI help output.
+docs-cli:
+	@set -eu; \
+		tmp_dir="$$(mktemp -d "$${TMPDIR:-/tmp}/amq-cli-docs.XXXXXX")"; \
+		trap 'rm -rf "$$tmp_dir"' EXIT; \
+		go build -o "$$tmp_dir/amq" ./cmd/amq; \
+		python3 scripts/generate-cli-docs.py --binary "$$tmp_dir/amq" --output docs/cli.md
+
+# Check generated CLI docs without modifying the worktree.
+check-docs-cli:
+	@set -eu; \
+		tmp_dir="$$(mktemp -d "$${TMPDIR:-/tmp}/amq-cli-docs.XXXXXX")"; \
+		trap 'rm -rf "$$tmp_dir"' EXIT; \
+		go build -o "$$tmp_dir/amq" ./cmd/amq; \
+		python3 scripts/generate-cli-docs.py --binary "$$tmp_dir/amq" --output "$$tmp_dir/cli.md"; \
+		cmp -s docs/cli.md "$$tmp_dir/cli.md" || { echo "docs/cli.md is stale; run make docs-cli" >&2; exit 1; }
