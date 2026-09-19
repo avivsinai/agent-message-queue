@@ -357,12 +357,23 @@ func TestEmbeddedScriptMatchesRepositoryHook(t *testing.T) {
 // failure is now impossible. End-to-end timeout termination remains covered by
 // TestSessionStartWatchdogSleepsNormalizedTimeout and
 // TestSessionStartTimeoutKillsReattachProcessGroup.
+// hookHangGuard bounds a SessionStart hook run against a genuine hang. It is
+// NOT a timing assertion: none of these tests measure how long the script
+// takes, and the fake SLEEP_CMD returns at once, so a passing run is spawn
+// latency only. A 4s guard was sized like a timing assertion and killed
+// healthy runs under full-suite load ("signal: killed" at 4.2-4.3s on the
+// no-target path, which spawns no reattach child at all): CI 2026-09-15 run
+// 34952xxx and the pre-push make ci on 2026-09-19. Bead
+// agent-message-queue-9xv. One order of magnitude above any observed healthy
+// run; a real hang still fails well inside the package deadline.
+const hookHangGuard = 60 * time.Second
+
 func TestSessionStartScriptNormalizesInvalidTimeoutAndReturns(t *testing.T) {
 	dir := t.TempDir()
 	scriptPath := writeSessionStartScript(t, dir)
 	logPath := filepath.Join(dir, "session-start.log")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), hookHangGuard)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "bash", scriptPath)
 	// Clear every variable that could inject a target or disable the hook, and
@@ -421,7 +432,7 @@ printf '%s\n' "$1" >> "$AMQ_KEEPALIVE_SLEEP_LOG"
 	binaryPath := writeExecutableBody(t, filepath.Join(dir, "amq-keepalive"), "#!/bin/sh\nsleep 30\n")
 	logPath := filepath.Join(dir, "session-start.log")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), hookHangGuard)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "bash", scriptPath)
 	cmd.Env = append(os.Environ(),
@@ -462,7 +473,7 @@ func TestSessionStartScriptDoesNotBlockOnOpenStdin(t *testing.T) {
 	binaryPath := writeExecutableBody(t, filepath.Join(dir, "amq-keepalive"), "#!/bin/sh\nexit 0\n")
 	logPath := filepath.Join(dir, "session-start.log")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), hookHangGuard)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "bash", scriptPath)
 	reader, writer, err := os.Pipe()
