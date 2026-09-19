@@ -394,15 +394,28 @@ type upConfig struct {
 	backoffBase  time.Duration
 	backoffMax   time.Duration
 	serveArgs    []string
+	// now returns the current time for uptime measurement; nil means
+	// time.Now. Injected by tests so the healthy-uptime logic is instant
+	// (611.13.2 review P2-2) instead of wall-clock.
+	now func() time.Time
 }
 
 // runUpLoop is the supervision loop: spawn, respawn on non-zero exit with
 // exponential backoff (reusing keepalive's constants), stop on clean exit 0.
 // The spawner interface lets tests inject a fake (no real process).
 func runUpLoop(ctx context.Context, cfg upConfig, sp spawner) (int, error) {
+	now := cfg.now
+	if now == nil {
+		now = time.Now
+	}
+	// restart is the BACKOFF index: it resets on healthy uptime so the next
+	// crash waits the base step again. budget is the LIFETIME respawn count
+	// --max-restarts bounds (611.13.2 review P1-2): one counter, two
+	// obligations made the cap forgettable after any healthy-lived child.
 	restart := 0
+	budget := 0
 	for {
-		start := time.Now()
+		start := now()
 		proc, err := sp.Spawn(ctx, cfg.serveArgs)
 		if err != nil {
 			say(os.Stderr, "amq-remote up: spawn failed: %v\n", err)
@@ -428,7 +441,7 @@ func runUpLoop(ctx context.Context, cfg upConfig, sp spawner) (int, error) {
 				say(os.Stderr, "amq-remote up: serve exited %d (usage error); not respawning\n", code)
 				return code, nil
 			}
-			uptime := time.Since(start)
+			uptime := now().Sub(start)
 			say(os.Stderr, "amq-remote up: serve exited %d (ran %s)\n", code, uptime.Round(time.Millisecond))
 			// B5 (611.13.2): a child that ran healthy-long did not fail
 			// immediately - the crash it just suffered starts a fresh failure
@@ -440,12 +453,14 @@ func runUpLoop(ctx context.Context, cfg upConfig, sp spawner) (int, error) {
 			}
 		}
 		restart++
-		if cfg.maxRestarts > 0 && restart > cfg.maxRestarts {
+		budget++
+		if cfg.maxRestarts > 0 && budget > cfg.maxRestarts {
 			say(os.Stderr, "amq-remote up: max-restarts (%d) exceeded\n", cfg.maxRestarts)
 			return 1, fmt.Errorf("max-restarts exceeded")
 		}
 		// Backoff: reuse keepalive's failure-backoff constants (exponential,
-		// capped). Do not invent a second table.
+		// capped). Do not invent a second table. The index (restart), not
+		// the budget, drives escalation.
 		delay := backoff(restart, cfg.backoffBase, cfg.backoffMax)
 		say(os.Stderr, "amq-remote up: respawning in %s (attempt %d)\n", delay, restart)
 		select {

@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -79,8 +80,9 @@ func TestUpWaitDelayKillsSigtermIgnoringChild(t *testing.T) {
 
 	// The child ignores SIGTERM, so the kill lands only via WaitDelay's
 	// SIGKILL. The pre-B4 failure mode was 10s+ and still counting; the
-	// bound is delay + generous CI slack.
-	if elapsed > delay+5*time.Second {
+	// bound is delay + modest slack (611.13.2 review P2-1: the helper only
+	// sleeps 3s, so a broken build fails fast instead of burning 30s).
+	if elapsed > delay+2*time.Second {
 		t.Fatalf("up waited %s for a SIGTERM-ignoring child; WaitDelay=%s not enforced", elapsed.Round(time.Millisecond), delay)
 	}
 }
@@ -98,13 +100,18 @@ func TestHelperSigtermIgnoringChild(t *testing.T) {
 			// Ignore: the whole point.
 		}
 	}()
-	time.Sleep(30 * time.Second)
+	// 3s: comfortably longer than the parent's 500ms trap-install wait plus
+	// the 400ms WaitDelay, but bounded so a broken parent build fails fast
+	// instead of burning 30s of CI (611.13.2 review P2-1).
+	time.Sleep(3 * time.Second)
 }
 
 // TestUpBackoffResetsAfterHealthyUptime (611.13.2 b, B5): a child that ran
 // longer than the healthy-uptime threshold did not fail immediately — the
 // next wait must be the BASE backoff step, not an escalated one. Asserted on
-// the supervisor's own log lines for determinism.
+// the supervisor's own log lines for determinism. Time is injected
+// (611.13.2 review P2-2): the first child's Wait advances the fake clock by
+// a healthy-lived span, so the scenario is instant and wall-clock-free.
 func TestUpBackoffResetsAfterHealthyUptime(t *testing.T) {
 	root, err := os.MkdirTemp("", "amqup-b5")
 	if err != nil {
@@ -115,11 +122,26 @@ func TestUpBackoffResetsAfterHealthyUptime(t *testing.T) {
 		t.Fatal(err)
 	}
 	const base = 200 * time.Millisecond
+	const healthyRun = 500 * time.Millisecond // >= upHealthyUptime(base) = 400ms
+	var mu sync.Mutex
+	clock := time.Unix(0, 0)
+	now := func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		return clock
+	}
+	advance := func(d time.Duration) func() {
+		return func() {
+			mu.Lock()
+			defer mu.Unlock()
+			clock = clock.Add(d)
+		}
+	}
 	sp := &fakeSpawner{
 		procs: []fakeProc{
-			{code: 1, delay: 500 * time.Millisecond}, // >= upHealthyUptime(base)
-			{code: 1, delay: 5 * time.Millisecond},
-			{code: 0, delay: 5 * time.Millisecond},
+			{code: 1, onWait: advance(healthyRun)}, // healthy-lived crash
+			{code: 1},                              // immediate crash, no advance
+			{code: 0},                              // clean exit ends supervision
 		},
 	}
 	cfg := upConfig{
@@ -130,6 +152,7 @@ func TestUpBackoffResetsAfterHealthyUptime(t *testing.T) {
 		backoffBase:  base,
 		backoffMax:   2 * time.Second,
 		serveArgs:    []string{"serve"},
+		now:          now,
 	}
 	var code int
 	out := captureStderr(t, func() {
@@ -147,6 +170,71 @@ func TestUpBackoffResetsAfterHealthyUptime(t *testing.T) {
 	}
 	if !strings.Contains(out, "respawning in "+base.String()) {
 		t.Fatalf("expected the first respawn after the healthy run to be the base step %s, got:\n%s", base, out)
+	}
+}
+
+// TestUpMaxRestartsBoundsLifetimeAcrossHealthyResets pins review-b8 P1-2
+// (611.13.2): --max-restarts bounds the LIFETIME respawn budget, not the
+// current backoff series. Eight children each live healthy-long (the fake
+// clock advances past the healthy threshold on every Wait) then exit 1;
+// with cap 2 supervision must stop at the cap, even though the backoff
+// index resets on every healthy run. Before the recut this loop never
+// ended (spawns=9, "max-restarts exceeded" never printed).
+func TestUpMaxRestartsBoundsLifetimeAcrossHealthyResets(t *testing.T) {
+	root, err := os.MkdirTemp("", "amqup-budget")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	clock := time.Unix(0, 0)
+	now := func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		return clock
+	}
+	// Every child lives healthy-long: Wait advances the clock past
+	// upHealthyUptime(base) = 2 * 20ms, then the child exits 1.
+	advance := func() {
+		mu.Lock()
+		defer mu.Unlock()
+		clock = clock.Add(50 * time.Millisecond)
+	}
+	procs := make([]fakeProc, 8)
+	for i := range procs {
+		procs[i] = fakeProc{code: 1, onWait: advance}
+	}
+	sp := &fakeSpawner{procs: procs}
+	cfg := upConfig{
+		root:         root,
+		me:           "amq-remote",
+		registryPath: filepath.Join(root, "registry.json"),
+		maxRestarts:  2,
+		backoffBase:  20 * time.Millisecond,
+		backoffMax:   100 * time.Millisecond,
+		serveArgs:    []string{"serve"},
+		now:          now,
+	}
+	var code int
+	out := captureStderr(t, func() {
+		var lerr error
+		code, lerr = runUpLoop(context.Background(), cfg, sp)
+		if lerr == nil {
+			t.Errorf("runUpLoop: want max-restarts error, got nil")
+		}
+	})
+	if code != 1 {
+		t.Fatalf("up exited %d, want 1", code)
+	}
+	if !strings.Contains(out, "max-restarts (2) exceeded") {
+		t.Fatalf("expected the max-restarts announcement, got:\n%s", out)
+	}
+	// 1 initial spawn + 2 budgeted respawns = 3 spawns, no more.
+	if sp.spawns != 3 {
+		t.Fatalf("spawns = %d, want 3 (cap 2 bounds lifetime respawns)", sp.spawns)
 	}
 }
 
