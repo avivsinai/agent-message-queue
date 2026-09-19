@@ -37,7 +37,7 @@ func runSendWithAfterBodyRead(args []string, afterBodyRead func()) error {
 	waitTimeoutFlag := fs.Duration("wait-timeout", 120*time.Second, "Timeout for --wait-for (0 = wait forever)")
 
 	// Co-op mode flags
-	priorityFlag := fs.String("priority", "", "Message priority: urgent, normal, low (default: normal if kind set)")
+	priorityFlag := fs.String("priority", "", "Message priority: urgent, normal, low (default when --kind is set: low for status, normal otherwise)")
 	kindFlag := fs.String("kind", "", "Message kind: "+format.ValidKindsList())
 	labelsFlag := fs.String("labels", "", "Comma-separated labels/tags")
 	contextFlag := fs.String("context", "", "JSON context object or @file.json")

@@ -108,7 +108,6 @@ func ValidKindsList() string {
 	return strings.Join(ValidKinds(), ", ")
 }
 
-// IsValidPriority returns true if the priority is valid or empty.
 // DefaultPriority is the priority a message of the given kind carries when
 // the sender names none. status is low: progress reports must not compete
 // with review requests, questions and decisions in a peer's inbox. Every
@@ -124,6 +123,7 @@ func DefaultPriority(kind string) string {
 	}
 }
 
+// IsValidPriority returns true if the priority is valid or empty.
 func IsValidPriority(p string) bool {
 	if p == "" {
 		return true
