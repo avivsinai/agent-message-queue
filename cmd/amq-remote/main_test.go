@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -704,11 +705,33 @@ func TestSenderB7RefusedNotDispatched(t *testing.T) {
 	}
 }
 
+// syncBuffer is a mutex-guarded bytes.Buffer (review ruling 20:43:46Z): the
+// serve tick loop writes diagnostics while the failure report reads them, and
+// a raw bytes.Buffer shared between goroutines is a data race.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func newSyncBuffer() *syncBuffer { return &syncBuffer{} }
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
 // startServeCaptured is startServe with the serve goroutine's stdout/stderr
 // retained (review ruling 19:53Z: the reap diagnosis needs the tick loop's
 // own reports - drain/import/tick errors - at failure time). Test-local to
 // this regression; other tests keep startServe.
-func startServeCaptured(t *testing.T) (string, *bytes.Buffer, *bytes.Buffer) {
+func startServeCaptured(t *testing.T) (string, *syncBuffer, *syncBuffer) {
 	t.Helper()
 	root, err := os.MkdirTemp("", "amqr")
 	if err != nil {
@@ -718,7 +741,7 @@ func startServeCaptured(t *testing.T) (string, *bytes.Buffer, *bytes.Buffer) {
 	if err := fsq.EnsureRootDirs(root); err != nil {
 		t.Fatal(err)
 	}
-	out, errBuf := &bytes.Buffer{}, &bytes.Buffer{}
+	out, errBuf := newSyncBuffer(), newSyncBuffer()
 	done := make(chan int, 1)
 	go func() {
 		done <- run([]string{"serve", "--fake", "--root", root}, strings.NewReader(""), out, errBuf)
@@ -783,8 +806,14 @@ func TestSenderB7ReapWithoutDrain(t *testing.T) {
 	// on-disk SettledAt is not aged here, the write raced a serve-side
 	// rewrite - that is a different failure than Reap not running.
 	back, err := os.ReadFile(envPath)
+	if errors.Is(err, os.ErrNotExist) {
+		// Review ruling 20:43:46Z: a successful Reap may remove the file
+		// between aging and this read-back. Absence here IS successful
+		// reaping, not a broken diagnostic.
+		return
+	}
 	if err != nil {
-		t.Fatalf("aged envelope write did not land: %v", err)
+		t.Fatalf("aged envelope read-back failed: %v", err)
 	}
 	var backEnv sender.Envelope
 	if err := json.Unmarshal(back, &backEnv); err != nil {
