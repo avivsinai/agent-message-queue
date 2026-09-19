@@ -1588,7 +1588,7 @@ func TestBK4R6CarrierConstructedInsideStartupSequence(t *testing.T) {
 // startup revision reaches the carrier. This replaces the deleted
 // sleep-based integration test (TestServeReadsManifest).
 func TestStartupSequenceWithManifest(t *testing.T) {
-	root, err := os.MkdirTemp("", "amqrmanifestseq")
+	root, err := os.MkdirTemp("", "amqrmseq")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1600,7 +1600,11 @@ func TestStartupSequenceWithManifest(t *testing.T) {
 	if err := os.MkdirAll(stateDir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	// Write a manifest with one fake adapter.
+	// Write a manifest with one fake adapter under the target id 'fake' —
+	// deliberately NOT --fake sugar: serve must read THIS manifest file. This
+	// goes RED when the manifest read is removed from the production path
+	// (serve or serveStartup): no manifest, no adapter, no target (611.13 r4
+	// item 2).
 	mf := manifest.File{
 		SchemaVersion: manifest.SchemaVersion,
 		Layer:         manifest.Layer,
@@ -1612,48 +1616,56 @@ func TestStartupSequenceWithManifest(t *testing.T) {
 	if err := os.WriteFile(manifest.DefaultPath(stateDir), data, 0644); err != nil {
 		t.Fatal(err)
 	}
-	// Load + Build via the registry (the same path serve takes).
-	loaded, err := manifest.Load(manifest.DefaultPath(stateDir))
-	if err != nil {
-		t.Fatalf("manifest load: %v", err)
-	}
-	outcomes := registry.Build(context.Background(), root, stateDir, loaded)
-	if len(outcomes) != 1 {
-		t.Fatalf("got %d outcomes, want 1", len(outcomes))
-	}
-	if outcomes[0].Attachment == nil {
-		t.Fatalf("outcome[0] attachment is nil, refusal=%v", outcomes[0].Refusal)
-	}
-	atts := []core.Attachment{outcomes[0].Attachment}
-	// startupSequence constructs the carrier inside, before Reconcile.
-	var carrier *amqio.Carrier
-	carrierPublish := func(s protocol.Snapshot, origin map[string]string) error {
-		if carrier == nil {
-			return nil
+	// Drive the production serve path end to end: run serve (which loads
+	// this manifest, builds, owns the store, publishes diagnostics), then
+	// assert on the live endpoint via the IPC surface a client uses.
+	done := make(chan int, 1)
+	var serveErrBuf, serveOutBuf bytes.Buffer
+	go func() {
+		done <- run([]string{"serve", "--root", root, "--manifest", manifest.DefaultPath(stateDir)}, strings.NewReader(""), &serveOutBuf, &serveErrBuf)
+	}()
+	t.Cleanup(func() {
+		select {
+		case <-done:
+		default:
 		}
-		return carrier.Publish(s, origin)
+	})
+	// Wait for the socket to accept: `sessions` succeeds only once serving.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		var out, errBuf bytes.Buffer
+		if run([]string{"sessions", "--root", root, "--json"}, strings.NewReader(""), &out, &errBuf) == 0 {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
 	}
-	_, ep, carrier, err := startupSequence(stateDir, root, amqio.DefaultHandle, nil, carrierPublish, &carrier, atts...)
-	if err != nil {
-		t.Fatalf("startupSequence: %v", err)
+	var out, errBuf bytes.Buffer
+	if code := run([]string{"sessions", "--root", root, "--json"}, strings.NewReader(""), &out, &errBuf); code != 0 {
+		t.Fatalf("endpoint did not start serving within 5s; sessions exit=%d stderr=%s", code, errBuf.String())
 	}
-	defer func() { _ = ep.Close() }()
-	if carrier == nil {
-		t.Fatal("carrier is nil after startupSequence (not constructed inside)")
+	// The manifest-declared target MUST be reachable through the running
+	// endpoint. Assert on the session surface, not an in-memory shortcut.
+	var sessions []protocol.Session
+	if err := json.Unmarshal(out.Bytes(), &sessions); err != nil {
+		t.Fatalf("sessions reply: %v\nstderr=%s", err, errBuf.String())
 	}
-	// The manifest-declared target MUST be registered. This goes RED when the
-	// manifest read is removed: without the manifest, no fake adapter is built
-	// and Targets() is empty. The unique target id (not "fake") ensures the
-	// assertion fails if a hardcoded --fake is used instead of the manifest.
-	targets := ep.Targets()
 	found := false
-	for _, tid := range targets {
-		if tid == "fake" {
+	for _, s := range sessions {
+		if s.TargetID == "fake" {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatalf("manifest-declared target 'fake' not registered; targets=%v", targets)
+		t.Fatalf("manifest-declared target 'fake' not serving; sessions=%s", out.String())
+	}
+	// serveStartup is the one production path serve runs; diagnostics must
+	// exist for the owned startup. Generated state, next to refusals.json.
+	adaptersData, err := os.ReadFile(filepath.Join(stateDir, "adapters.json"))
+	if err != nil {
+		t.Fatalf("adapters.json not published by the owned startup: %v", err)
+	}
+	if !strings.Contains(string(adaptersData), "fake") {
+		t.Fatalf("adapters.json missing the manifest target: %s", adaptersData)
 	}
 }
 
@@ -1702,12 +1714,16 @@ func TestBuildPartialFailureFakeAndClaude(t *testing.T) {
 	}
 }
 
-// TestRefusalsClearedOnRestart (611.13 r3) pins that the refusals file is
-// REWRITTEN every start, including empty. A refused adapter on start 1 is
-// gone from doctor on start 2 when the manifest no longer lists it. RED when
-// persistRefusals is guarded by len(refusals) > 0 (the stale file persists).
+// TestRefusalsClearedOnRestart (611.13 r3, r4 rewrite) pins the ownership
+// boundary through the production path: two real serve starts on one root.
+// Start 1 owns the store, runs with a claude manifest (stub refusal), and
+// persists that refusal. Start 2 has an empty manifest, loses the lock, and
+// exits 6 — it must NOT overwrite the live owner's refusals.json (611.13 r4
+// item 1: diagnostics publish moved after the owned startup). RED when
+// persistRefusals is guarded by len(refusals)>0 (the stale file persists)
+// or when diagnostics write before the lock (the loser clobbers the owner).
 func TestRefusalsClearedOnRestart(t *testing.T) {
-	root, err := os.MkdirTemp("", "amqrrefusalsclear")
+	root, err := os.MkdirTemp("", "amqrrclr")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1716,11 +1732,13 @@ func TestRefusalsClearedOnRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	stateDir := filepath.Join(root, "extensions", "remote")
+	manifestPath := manifest.DefaultPath(stateDir)
 	if err := os.MkdirAll(stateDir, 0700); err != nil {
 		t.Fatal(err)
 	}
 
-	// Start 1: manifest with a claude entry (stub refusal).
+	// Start 1: manifest with a claude entry (stub refusal). Real serve, real
+	// manifest read, owned startup; the refusal persists as typed data.
 	mf1 := manifest.File{
 		SchemaVersion: manifest.SchemaVersion,
 		Adapters: []manifest.Adapter{
@@ -1728,48 +1746,110 @@ func TestRefusalsClearedOnRestart(t *testing.T) {
 		},
 	}
 	data1, _ := json.Marshal(mf1)
-	if err := os.WriteFile(manifest.DefaultPath(stateDir), data1, 0644); err != nil {
+	if err := os.WriteFile(manifestPath, data1, 0644); err != nil {
 		t.Fatal(err)
 	}
-	outcomes1 := registry.Build(context.Background(), root, stateDir, mf1)
-	var refusals1 []registry.Outcome
-	for _, oc := range outcomes1 {
-		if oc.Attachment == nil {
-			refusals1 = append(refusals1, oc)
+	done := make(chan int, 1)
+	go func() {
+		var out, errBuf bytes.Buffer
+		done <- run([]string{"serve", "--root", root, "--manifest", manifestPath}, strings.NewReader(""), &out, &errBuf)
+	}()
+	t.Cleanup(func() {
+		select {
+		case <-done:
+		default:
 		}
+	})
+	deadline := time.Now().Add(5 * time.Second)
+	ready := false
+	for time.Now().Before(deadline) {
+		var o, e bytes.Buffer
+		if run([]string{"sessions", "--root", root, "--json"}, strings.NewReader(""), &o, &e) == 0 {
+			ready = true
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if !ready {
+		t.Fatal("endpoint 1 did not start serving within 5s")
+	}
+	refusals1, err := loadRefusals(stateDir)
+	if err != nil {
+		t.Fatalf("start 1 load refusals: %v", err)
 	}
 	if len(refusals1) != 1 {
 		t.Fatalf("start 1: got %d refusals, want 1", len(refusals1))
 	}
-	if perr := persistRefusals(stateDir, refusals1); perr != nil {
-		t.Fatalf("start 1 persist: %v", perr)
+
+	// Start 2: empty manifest, same root. The store lock is held by start 1;
+	// the real serve error return is exit 6 (endpoint_already_running).
+	if err := os.WriteFile(manifestPath, []byte("{}"), 0644); err != nil {
+		t.Fatal(err)
 	}
-	// Verify the refusal is on disk.
-	loaded1, err := loadRefusals(stateDir)
-	if err != nil || len(loaded1) != 1 {
-		t.Fatalf("start 1 load: err=%v len=%d, want 1", err, len(loaded1))
+	var out2, errBuf2 bytes.Buffer
+	code2 := run([]string{"serve", "--root", root, "--manifest", manifestPath}, strings.NewReader(""), &out2, &errBuf2)
+	if code2 != protocol.ExitForCode(protocol.CodeEndpointAlreadyRunning) {
+		t.Fatalf("start 2: exit=%d, want %d (endpoint_already_running)\nstderr=%s", code2, protocol.ExitForCode(protocol.CodeEndpointAlreadyRunning), errBuf2.String())
+	}
+	// The losing start must not touch the owner's diagnostics.
+	refusals2, err := loadRefusals(stateDir)
+	if err != nil {
+		t.Fatalf("post-start-2 load refusals: %v", err)
+	}
+	if len(refusals2) != 1 {
+		t.Fatalf("start 2 (loser) overwrote the owner's refusals: got %d refusals, want 1", len(refusals2))
 	}
 
-	// Start 2: manifest with no adapters (clean). persistRefusals writes empty.
-	var refusals2 []registry.Outcome
-	if perr := persistRefusals(stateDir, refusals2); perr != nil {
-		t.Fatalf("start 2 persist: %v", perr)
-	}
-	loaded2, err := loadRefusals(stateDir)
+	// Same production path, sequential owned starts on a fresh root: a
+	// claude refusal on start 1 is GONE after an owned start 2 with an empty
+	// manifest. RED when persistRefusals is guarded by len(refusals)>0.
+	root2, err := os.MkdirTemp("", "amqrrclr2")
 	if err != nil {
-		t.Fatalf("start 2 load: %v", err)
+		t.Fatal(err)
 	}
-	if len(loaded2) != 0 {
-		t.Fatalf("start 2: got %d refusals, want 0 (stale file not cleared)", len(loaded2))
+	t.Cleanup(func() { _ = os.RemoveAll(root2) })
+	stateDir2 := filepath.Join(root2, "extensions", "remote")
+	var carrier2 *amqio.Carrier
+	carrierPublish2 := func(s protocol.Snapshot, origin map[string]string) error {
+		if carrier2 == nil {
+			return nil
+		}
+		return carrier2.Publish(s, origin)
+	}
+	_, ep1, _, refusalsA, err := serveStartup(stateDir2, root2, amqio.DefaultHandle, mf1, carrierPublish2, &carrier2, io.Discard)
+	if err != nil {
+		t.Fatalf("owned start 1: %v", err)
+	}
+	if len(refusalsA) != 1 {
+		t.Fatalf("owned start 1: got %d refusals, want 1", len(refusalsA))
+	}
+	if err := ep1.Close(); err != nil {
+		t.Fatalf("owned start 1 close: %v", err)
+	}
+	_, ep2, _, refusalsB, err := serveStartup(stateDir2, root2, amqio.DefaultHandle, manifest.File{SchemaVersion: manifest.SchemaVersion}, carrierPublish2, &carrier2, io.Discard)
+	if err != nil {
+		t.Fatalf("owned start 2: %v", err)
+	}
+	defer func() { _ = ep2.Close() }()
+	if len(refusalsB) != 0 {
+		t.Fatalf("owned start 2: got %d refusals, want 0 (stale file not cleared)", len(refusalsB))
+	}
+	cleared, err := loadRefusals(stateDir2)
+	if err != nil {
+		t.Fatalf("owned start 2 load: %v", err)
+	}
+	if len(cleared) != 0 {
+		t.Fatalf("owned start 2: refusals file still has %d entries, want 0", len(cleared))
 	}
 }
 
-// TestManifestBytesUnchangedAfterFlag (611.13 r3) pins that serve NEVER writes
-// to the user's manifest path. A manifest with codex only, run with --fake,
-// must have byte-identical manifest.json after the flag append. The merged
-// set lives in adapters.json (generated state), not the user's file.
+// TestManifestBytesUnchangedAfterFlag (611.13 r3, r4 rewrite) pins through
+// the production serve path that serve NEVER writes to the user's manifest
+// path. A codex-only manifest, served with --fake, must have byte-identical
+// manifest.json after the flag append; the merged set lives in adapters.json
+// (generated state). RED if serve ever calls manifest.Write.
 func TestManifestBytesUnchangedAfterFlag(t *testing.T) {
-	root, err := os.MkdirTemp("", "amqrnooverwrite")
+	root, err := os.MkdirTemp("", "amqrnowr")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1781,11 +1861,12 @@ func TestManifestBytesUnchangedAfterFlag(t *testing.T) {
 	if err := os.MkdirAll(stateDir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	// Write a manifest with a codex entry (user-authored).
+	// A codex entry is user-authored: Validate accepts it, the factory
+	// refuses (no daemon in the test), and serve still owns the store.
 	mf := manifest.File{
 		SchemaVersion: manifest.SchemaVersion,
 		Adapters: []manifest.Adapter{
-			{Kind: "codex", Target: "codex:abc123", Config: json.RawMessage(`{"socket":"/tmp/x","thread":"t1"}`)},
+			{Kind: "codex", Target: "codex-abc123", Config: json.RawMessage(`{"socket":"/tmp/x","thread":"t1"}`)},
 		},
 	}
 	manifestPath := manifest.DefaultPath(stateDir)
@@ -1798,17 +1879,31 @@ func TestManifestBytesUnchangedAfterFlag(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Simulate the serve flag-append path: load, append --fake, re-validate.
-	// serve does NOT write back. The merged set goes to adapters.json.
-	loaded, err := manifest.Load(manifestPath)
-	if err != nil {
-		t.Fatalf("load: %v", err)
+	// Real serve with --fake: the production flag-append path.
+	done := make(chan int, 1)
+	var serveOut, serveErr bytes.Buffer
+	go func() {
+		done <- run([]string{"serve", "--root", root, "--manifest", manifestPath, "--fake"}, strings.NewReader(""), &serveOut, &serveErr)
+	}()
+	t.Cleanup(func() {
+		select {
+		case <-done:
+		default:
+		}
+	})
+	deadline := time.Now().Add(5 * time.Second)
+	ready := false
+	for time.Now().Before(deadline) {
+		var o, e bytes.Buffer
+		if run([]string{"sessions", "--root", root, "--json"}, strings.NewReader(""), &o, &e) == 0 {
+			ready = true
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
 	}
-	loaded.Adapters = append(loaded.Adapters, manifest.Adapter{Kind: "fake", Target: "fake", Epoch: "e_1"})
-	if verr := manifest.Validate(loaded); verr != nil {
-		t.Fatalf("validate after append: %v", verr)
+	if !ready {
+		t.Fatalf("endpoint did not start serving within 5s; serve stderr=%s", serveErr.String())
 	}
-	// serve would call writeEffectiveAdapters here, NOT manifest.Write.
 
 	// Reread the user's manifest: bytes must be unchanged.
 	after, err := os.ReadFile(manifestPath)
@@ -1818,12 +1913,21 @@ func TestManifestBytesUnchangedAfterFlag(t *testing.T) {
 	if !bytes.Equal(before, after) {
 		t.Fatalf("manifest.json was modified by the flag-append path\nbefore: %s\nafter:  %s", before, after)
 	}
+	// The merged set (file + flag sugar) is generated state: both targets in
+	// adapters.json, never in the user's file.
+	adaptersData, err := os.ReadFile(filepath.Join(stateDir, "adapters.json"))
+	if err != nil {
+		t.Fatalf("adapters.json not published: %v", err)
+	}
+	if !strings.Contains(string(adaptersData), "codex-abc123") || !strings.Contains(string(adaptersData), "fake") {
+		t.Fatalf("adapters.json missing merged set (codex-abc123 + fake): %s", adaptersData)
+	}
 }
 
-// TestValidationFailuresExitTwo (611.13 r3) pins that every manifest
-// validation failure maps to exit 2 (ExitUsage), not exit 1. Drives the CLI
-// path for each case via IsValidation. RED when IsValidation uses errors.Is
-// (always false) instead of errors.As.
+// TestValidationFailuresExitTwo (611.13 r3, r4 rewrite) pins through the
+// REAL serve error return that every manifest validation failure maps to
+// exit 2 (ExitUsage), not exit 1. RED when IsValidation uses errors.Is
+// (always false) instead of errors.As, and when a serve path skips Validate.
 func TestValidationFailuresExitTwo(t *testing.T) {
 	cases := []struct {
 		name string
@@ -1876,15 +1980,61 @@ func TestValidationFailuresExitTwo(t *testing.T) {
 				},
 			},
 		},
+		{
+			// 611.13 r4: a target with characters outside the opaque grammar
+			// is rejected before registration — the observed defect was an
+			// accepted "sales team" target every CLI submit then refused.
+			name: "invalid target grammar",
+			f: manifest.File{
+				SchemaVersion: manifest.SchemaVersion,
+				Adapters: []manifest.Adapter{
+					{Kind: "fake", Target: "sales team", Epoch: "e_1"},
+				},
+			},
+		},
+		{
+			// 611.13 r4: a fake entry without an epoch is rejected — the fake
+			// requires an epoch at submit; an accepted empty epoch produced an
+			// unusable session.
+			name: "fake missing epoch",
+			f: manifest.File{
+				SchemaVersion: manifest.SchemaVersion,
+				Adapters: []manifest.Adapter{
+					{Kind: "fake", Target: "plain"},
+				},
+			},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			// Unit level: typed validation failure.
 			err := manifest.Validate(tc.f)
 			if err == nil {
 				t.Fatal("Validate accepted invalid manifest")
 			}
 			if !manifest.IsValidation(err) {
 				t.Fatalf("IsValidation=false for %v; validation failures must be exit 2", err)
+			}
+			// Production level: the real serve error return is exit 2. Serve
+			// refuses before any startup side effect.
+			root, err := os.MkdirTemp("", "amqrvexit")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.RemoveAll(root) })
+			stateDir := filepath.Join(root, "extensions", "remote")
+			if err := os.MkdirAll(stateDir, 0700); err != nil {
+				t.Fatal(err)
+			}
+			data, _ := json.Marshal(tc.f)
+			manifestPath := manifest.DefaultPath(stateDir)
+			if err := os.WriteFile(manifestPath, data, 0644); err != nil {
+				t.Fatal(err)
+			}
+			var out, errBuf bytes.Buffer
+			code := run([]string{"serve", "--root", root, "--manifest", manifestPath}, strings.NewReader(""), &out, &errBuf)
+			if code != protocol.ExitUsage {
+				t.Fatalf("serve exit=%d, want %d (ExitUsage)\nstderr=%s", code, protocol.ExitUsage, errBuf.String())
 			}
 		})
 	}

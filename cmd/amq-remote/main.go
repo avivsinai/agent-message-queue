@@ -360,35 +360,7 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 		}
 		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", verr)
 	}
-	// Build attachments from the merged manifest via the registry. Build
-	// returns per-adapter outcomes: a factory error (unreachable Codex
-	// thread, claude stub refusal) becomes a typed refusal, not a fatal exit.
-	// serve registers what built and persists refusals as typed data doctor
-	// prints. One bad adapter never takes down serve.
-	var attachments []core.Attachment
-	var refusals []registry.Outcome
-	if len(mf.Adapters) > 0 {
-		for _, oc := range registry.Build(context.Background(), c.root, stateDir, mf) {
-			if oc.Attachment != nil {
-				attachments = append(attachments, oc.Attachment)
-			} else {
-				refusals = append(refusals, oc)
-				say(stderr, "warning: adapter %q (kind %q) refused: %v\n", oc.Manifest.Target, oc.Manifest.Kind, oc.Refusal)
-			}
-		}
-	}
-	// Refusals are rewritten EVERY start, including empty — a removed adapter
-	// must not persist as 'refused' forever. An empty list clears the file.
-	if perr := persistRefusals(stateDir, refusals); perr != nil {
-		say(stderr, "warning: could not persist adapter refusals: %v\n", perr)
-	}
-	// Write the effective adapter set (attached + refused) as generated state
-	// NEXT TO refusals.json — never into the user's manifest file. Flags are
-	// sugar; sugar is never persisted to the user's path.
-	if werr := writeEffectiveAdapters(stateDir, mf, attachments, refusals); werr != nil {
-		say(stderr, "warning: could not write effective adapters: %v\n", werr)
-	}
-	_, ep, carrier, err := startupSequence(stateDir, c.root, *me, nil, carrierPublish, &carrier, attachments...)
+	_, ep, carrier, _, err := serveStartup(stateDir, c.root, *me, mf, carrierPublish, &carrier, stderr)
 	if err != nil {
 		return 0, err
 	}
@@ -1102,6 +1074,50 @@ func openServeStore(stateDir string, now func() time.Time) (*requests.Store, *co
 // is assigned the carrier before Reconcile, so the caller's publish closure
 // (which captures the same carrier pointer) sees it during Reconcile. serve
 // passes its attachments; the returned store is closed by the caller on error.
+// serveStartup is the ONE production startup path serve runs after manifest
+// validation, and the one the focused r3/r4 regressions call (611.22.19
+// round-4 P0 made startup one callable sequence; 611.13 r4 extends the same
+// rule to the manifest->Build->persist->sequence chain): load nothing here —
+// the caller hands the merged manifest (file + flag sugar, already
+// Validate()d; a caller reading only the file passes what it loaded).
+//
+// Order matters: Build runs BEFORE startupSequence, so a refusing adapter is
+// a typed outcome, not a lost start; generated diagnostics (refusals.json,
+// adapters.json) are published only AFTER startupSequence returns — the
+// store open inside it creates the state directory and acquires the owner
+// lock, so a losing starter never overwrites the live owner's files and a
+// fresh directory cannot break the write (611.13 r4 item 1). Publish
+// failures are warnings on stderr: doctor reads what exists, and losing
+// startup keeps its own exit code. Refusals are rewritten EVERY owned start,
+// including empty — a removed adapter must not persist as 'refused' forever.
+func serveStartup(stateDir, root, handle string, mf manifest.File, publish core.Publisher, carrierOut **amqio.Carrier, warn io.Writer) (*requests.Store, *core.Endpoint, *amqio.Carrier, []registry.Outcome, error) {
+	var attachments []core.Attachment
+	var refusals []registry.Outcome
+	if len(mf.Adapters) > 0 {
+		for _, oc := range registry.Build(context.Background(), root, stateDir, mf) {
+			if oc.Attachment != nil {
+				attachments = append(attachments, oc.Attachment)
+			} else {
+				refusals = append(refusals, oc)
+				if warn != nil {
+					say(warn, "warning: adapter %q (kind %q) refused: %v\n", oc.Manifest.Target, oc.Manifest.Kind, oc.Refusal)
+				}
+			}
+		}
+	}
+	store, ep, carrier, err := startupSequence(stateDir, root, handle, nil, publish, carrierOut, attachments...)
+	if err != nil {
+		return store, ep, carrier, refusals, err
+	}
+	if perr := persistRefusals(stateDir, refusals); perr != nil && warn != nil {
+		say(warn, "warning: could not persist adapter refusals: %v\n", perr)
+	}
+	if werr := writeEffectiveAdapters(stateDir, mf, attachments, refusals); werr != nil && warn != nil {
+		say(warn, "warning: could not write effective adapters: %v\n", werr)
+	}
+	return store, ep, carrier, refusals, nil
+}
+
 func startupSequence(stateDir, root, handle string, now func() time.Time, publish core.Publisher, carrierOut **amqio.Carrier, attachments ...core.Attachment) (*requests.Store, *core.Endpoint, *amqio.Carrier, error) {
 	store, ep, err := openServeStore(stateDir, now)
 	if err != nil {

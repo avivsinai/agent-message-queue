@@ -23,6 +23,8 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+
+	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 )
 
 // SchemaVersion is the manifest format version.
@@ -129,6 +131,31 @@ type ErrMissingField struct {
 
 func (e *ErrMissingField) Error() string { return e.Field + " is required (" + e.Context + ")" }
 
+// ErrInvalidTarget is returned when a manifest target id is not a
+// protocol-valid opaque id. An entry Validate accepts must be addressable:
+// the endpoint registers it and every CLI submit is checked against the same
+// rule (protocol.validOpaque). Accepting "sales team" here produced a
+// session no client could reach (611.13 r4).
+type ErrInvalidTarget struct {
+	Target string
+}
+
+func (e *ErrInvalidTarget) Error() string {
+	return "manifest: target " + strconv.Quote(e.Target) + " is not a valid target id (must be non-empty, at most " + strconv.Itoa(protocol.MaxOpaqueLen) + " bytes, characters [A-Za-z0-9_.:-])"
+}
+
+// ErrInvalidEpoch is returned when a fake adapter's test-only epoch is not a
+// protocol-valid opaque epoch. The fake requires an epoch at submit time; an
+// accepted empty-epoch entry produced an unusable session (611.13 r4).
+type ErrInvalidEpoch struct {
+	Target string
+	Epoch  string
+}
+
+func (e *ErrInvalidEpoch) Error() string {
+	return "manifest: fake adapter " + strconv.Quote(e.Target) + " epoch " + strconv.Quote(e.Epoch) + " is not a valid epoch (must be non-empty, at most " + strconv.Itoa(protocol.MaxOpaqueLen) + " bytes, characters [A-Za-z0-9_.:-])"
+}
+
 // ValidationError is implemented by every manifest validation error so
 // IsValidation can use a single errors.As check (the errors.Is version was
 // always false against typed-nil pointers).
@@ -141,6 +168,8 @@ func (*ErrDuplicateTarget) validationError() {}
 func (*ErrEpochOnNonFake) validationError()  {}
 func (*ErrWrongLayer) validationError()      {}
 func (*ErrMissingField) validationError()    {}
+func (*ErrInvalidTarget) validationError()   {}
+func (*ErrInvalidEpoch) validationError()    {}
 
 // IsValidation reports whether err is a manifest validation failure as
 // opposed to a filesystem or parse failure. Validation failures are usage
@@ -154,6 +183,11 @@ func IsValidation(err error) bool {
 // user-authored manifest without layer is valid); a non-empty layer other
 // than "remote" is a validation error. No duplicate targets; target and kind
 // required; epoch only on fake.
+// Validate checks the manifest: layer defaults to "remote" when absent (a
+// user-authored manifest without layer is valid); a non-empty layer other
+// than "remote" is a validation error. No duplicate targets; target and kind
+// required and protocol-valid (opaque grammar); fake requires a valid epoch;
+// epoch only on fake.
 func Validate(f File) error {
 	if f.Layer != "" && f.Layer != Layer {
 		return &ErrWrongLayer{Layer: f.Layer}
@@ -163,6 +197,9 @@ func Validate(f File) error {
 		if a.Target == "" {
 			return &ErrMissingField{Field: "target", Context: "adapter kind " + strconv.Quote(a.Kind)}
 		}
+		if !protocol.ValidTargetID(a.Target) {
+			return &ErrInvalidTarget{Target: a.Target}
+		}
 		if seen[a.Target] {
 			return &ErrDuplicateTarget{Target: a.Target}
 		}
@@ -170,7 +207,11 @@ func Validate(f File) error {
 		if a.Kind == "" {
 			return &ErrMissingField{Field: "kind", Context: "adapter target " + strconv.Quote(a.Target)}
 		}
-		if a.Epoch != "" && a.Kind != "fake" {
+		if a.Kind == "fake" {
+			if !protocol.ValidEpoch(a.Epoch) {
+				return &ErrInvalidEpoch{Target: a.Target, Epoch: a.Epoch}
+			}
+		} else if a.Epoch != "" {
 			return &ErrEpochOnNonFake{Target: a.Target, Kind: a.Kind}
 		}
 	}
