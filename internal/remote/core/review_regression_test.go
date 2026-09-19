@@ -92,11 +92,19 @@ func TestReconcileDoesNotHoldLockAcrossNativeCalls(t *testing.T) {
 	}
 
 	rt.HoldLookup()
+	// Deterministic readiness (611.22.54, review-819-r1 P1-1): install the
+	// signal BEFORE the goroutine - installing after the `go` races the
+	// native call past the close point and orphans the channel forever -
+	// and bound the receive so an unexpected path fails the test instead of
+	// hanging it.
+	lookupReady := rt.NotifyLookupReady()
 	reconcileDone := make(chan error, 1)
 	go func() { reconcileDone <- ep.Reconcile() }()
-	// Deterministic readiness (611.22.54): wait until Reconcile's Lookup has
-	// actually reached the held lookup gate instead of sleeping.
-	<-rt.NotifyLookupReady()
+	select {
+	case <-lookupReady:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Reconcile never reached the held lookup gate")
+	}
 
 	handled := make(chan error, 1)
 	go func() {
@@ -128,12 +136,17 @@ func TestCancelBeforeAdmissionConfirmsDisposition(t *testing.T) {
 
 	rt.HoldAdmission()
 	id := "11111111-1111-4111-8111-1111111111c1"
+	// Same ordering rule (review-819-r1 P1-1): install before `go`, receive
+	// with a deadline.
+	submitReady := rt.NotifySubmitReady()
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() { defer wg.Done(); _, _ = ep.Handle(submitCmd(id), core.Source{Host: "local"}) }()
-	// Deterministic readiness (611.22.54): wait until the submit has reached
-	// the held admission gate instead of sleeping.
-	<-rt.NotifySubmitReady()
+	select {
+	case <-submitReady:
+	case <-time.After(2 * time.Second):
+		t.Fatal("submit never reached the held admission gate")
+	}
 
 	ref := protocol.EncodeRef("local", "fake", id)
 	if _, err := ep.Handle(&protocol.Command{
@@ -226,11 +239,19 @@ func TestResultWriteFailureIsVisible(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chmod(hostDir, 0o700) })
 
 	rt.Complete(id, "the result")
-	time.Sleep(50 * time.Millisecond)
-
-	mu.Lock()
-	gotProjection := len(projections) > 0
-	mu.Unlock()
+	// Bounded wait-for-condition (review-819-r1 P2-1): the projection is
+	// delivered asynchronously; poll for it instead of guessing a delay.
+	deadline := time.Now().Add(2 * time.Second)
+	gotProjection := false
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		gotProjection = len(projections) > 0
+		mu.Unlock()
+		if gotProjection {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 	if !gotProjection {
 		t.Fatal("no storage-failure projection surfaced on a failed terminal write")
 	}

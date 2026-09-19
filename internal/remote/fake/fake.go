@@ -370,17 +370,13 @@ func (r *Runtime) HoldAdmission() {
 // Submit reaches its gate-block point (or begins admission with no gate
 // held). It replaces the corpus harness's wall-clock sleep for async steps
 // (611.22.8): the harness waits on the returned channel to know the submit
-// has reached the held admission gate, deterministically.
-// Calling it twice with no intervening Submit panics: the first signal
-// would be orphaned forever, a latent hang for a fixture with back-to-back
-// async steps (611.22.54).
+// has reached the held admission gate, deterministically. A call with no
+// intervening Submit overwrites the previous, still-unconsumed signal - the
+// corpus harness's early-result fallback relies on that being benign
+// (review-819-r1 P2-2: no observed defect justifies a refusal).
 func (r *Runtime) NotifySubmitReady() <-chan struct{} {
 	ch := make(chan struct{})
 	r.mu.Lock()
-	if r.submitReady != nil {
-		r.mu.Unlock()
-		panic("fake: NotifySubmitReady called twice with no intervening Submit; the first signal would be orphaned (611.22.54)")
-	}
 	r.submitReady = ch
 	r.mu.Unlock()
 	return ch
@@ -390,14 +386,11 @@ func (r *Runtime) NotifySubmitReady() <-chan struct{} {
 // it installs a one-shot readiness signal closed the instant the next
 // Lookup reaches its gate-block point (or begins its body with no gate
 // held). It replaces the wall-clock sleep that waited for a Reconcile to
-// reach a held lookup gate, deterministically.
+// reach a held lookup gate, deterministically. Overwrite semantics match
+// NotifySubmitReady.
 func (r *Runtime) NotifyLookupReady() <-chan struct{} {
 	ch := make(chan struct{})
 	r.mu.Lock()
-	if r.lookupReady != nil {
-		r.mu.Unlock()
-		panic("fake: NotifyLookupReady called twice with no intervening Lookup; the first signal would be orphaned (611.22.54)")
-	}
 	r.lookupReady = ch
 	r.mu.Unlock()
 	return ch
