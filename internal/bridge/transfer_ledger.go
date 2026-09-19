@@ -16,18 +16,35 @@ import (
 )
 
 // ledgerSessionName maps a receive alias (host/agent) onto one path-safe
-// ledger directory name: both components are validated bridge identifiers
-// joined with a single underscore, so the session directory stays inside
-// bridge/transfer-ledger/ with no traversal.
+// ledger directory name without narrowing the wire alias contract: each
+// validated component is percent-escaped for the characters that are not
+// path-safe, then joined with a single underscore. Both components are
+// already constrained by ParseAlias (lowercase/digits/underscore/dash, up to
+// 63 bytes each), so the encoding is identity for all currently valid
+// aliases and can only ever grow bounded (max 2*63*3+1 bytes).
 func ledgerSessionName(receiveAlias string) (string, error) {
 	host, agent, err := ParseAlias(receiveAlias)
 	if err != nil {
 		return "", err
 	}
-	if len(host)+len(agent)+1 > bridgeIdentifierMaxBytes {
-		return "", fmt.Errorf("ledger session name exceeds %d bytes", bridgeIdentifierMaxBytes)
+	return escapeLedgerComponent(host) + "_" + escapeLedgerComponent(agent), nil
+}
+
+// escapeLedgerComponent percent-escapes any byte outside the bridge
+// identifier alphabet (lowercase, digits, '_', '-'), which ParseAlias
+// already enforces; this keeps the on-disk name stable and path-safe even
+// if the alias grammar ever widens.
+func escapeLedgerComponent(component string) string {
+	var b strings.Builder
+	for i := 0; i < len(component); i++ {
+		c := component[i]
+		if isLowerASCII(c) || isASCIIDigit(c) || c == '_' || c == '-' {
+			b.WriteByte(c)
+			continue
+		}
+		fmt.Fprintf(&b, "%%%02X", c)
 	}
-	return host + "_" + agent, nil
+	return b.String()
 }
 
 // TransferLedger is the owning-layer durability primitive for bridge apply
@@ -101,9 +118,11 @@ type LedgerRecord struct {
 const (
 	ledgerSchemaVersion = 1
 	ledgerReasonNone    = ""
-	// ReasonConflict marks a rejected record produced by ApplyEnvelope's
-	// os.ErrExist-with-different-digest translation.
-	ledgerReasonConflict = "transfer_conflict"
+	// LedgerReasonConflict marks a conflict: a same-key arrival whose
+	// digest differs from the key's immutable binding.
+	LedgerReasonConflict = "transfer_conflict"
+	// ledgerReasonConflict is the internal alias.
+	ledgerReasonConflict = LedgerReasonConflict
 )
 
 func ledgerRelDir(session string) string {
@@ -152,17 +171,56 @@ func (l *TransferLedger) withTransferLock(sourceHost, transferID string, fn func
 
 // appendRecord writes one JSON line, fsynced, under the caller-held lock.
 // The ledger file is opened for append (create if missing) through the pinned
-// capability; the write and its durability sync are one unit.
+// capability; the write and its durability sync are one unit. On first
+// creation of the ledger file its directory chain is synced too (fix: a
+// machine crash must not preserve the message while losing the ledger name —
+// see section 7.5's directory-sync requirement).
 func (l *TransferLedger) appendRecord(rec ledgerRecord) error {
+	data, err := ledgerLine(rec)
+	if err != nil {
+		return err
+	}
+	_, err = l.root.AppendLedgerLine(l.dir, ledgerRecordName(rec.SourceHost, rec.TransferID), data)
+	return err
+}
+
+// ledgerLine serializes one record as a newline-terminated JSON line.
+func ledgerLine(rec ledgerRecord) ([]byte, error) {
 	if rec.RecordedAt == "" {
 		rec.RecordedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	}
 	data, err := json.Marshal(rec)
 	if err != nil {
+		return nil, err
+	}
+	return append(data, '\n'), nil
+}
+
+// appendRecordFirstWrite appends a record and, if this append created the
+// ledger file, syncs every newly created ancestor directory so the file NAME
+// is durable before the caller proceeds. Errors propagate.
+func (l *TransferLedger) appendRecordFirstWrite(rec ledgerRecord) error {
+	data, err := ledgerLine(rec)
+	if err != nil {
 		return err
 	}
-	data = append(data, '\n')
-	return l.root.AppendLedgerLine(l.dir, ledgerRecordName(rec.SourceHost, rec.TransferID), data)
+	created, err := l.root.AppendLedgerLine(l.dir, ledgerRecordName(rec.SourceHost, rec.TransferID), data)
+	if err != nil {
+		return err
+	}
+	if !created {
+		return nil
+	}
+	if err := l.root.SyncDir("bridge"); err != nil {
+		return fmt.Errorf("sync ledger parent dirs: %w", err)
+	}
+	if err := l.root.SyncDir(filepath.Join("bridge", "transfer-ledger")); err != nil {
+		return fmt.Errorf("sync ledger parent dirs: %w", err)
+	}
+	if err := l.root.SyncDir(l.dir); err != nil {
+		return fmt.Errorf("sync ledger dir: %w", err)
+	}
+	return nil
 }
 
 // readRecords parses the record file for one transfer key. It returns every
@@ -361,31 +419,33 @@ func ApplyWithLedger(ledger *TransferLedger, root *fsq.DeliveryRoot, localHost, 
 
 		switch {
 		case rec == nil:
-			// Fresh transfer: append the intent record, then apply.
-			if err := ledger.appendRecord(ledgerRecord{
-				Version:       ledgerSchemaVersion,
-				State:         LedgerPrepared,
-				SourceHost:    env.SourceHost,
-				TransferID:    env.TransferID,
-				PayloadSHA256: env.PayloadSHA256,
-			}); err != nil {
-				return fmt.Errorf("record prepared: %w", err)
+			// Fresh transfer: append the intent record durably (file AND
+			// directory chain) before applying. The intent binds the FIRST
+			// digest seen for this key; that binding is immutable for the
+			// life of the key.
+			if err := ledger.appendPrepared(env); err != nil {
+				return err
 			}
 			return ledger.applyAfterPrepared(root, localAgent, env, &outcome)
 
 		case rec.State == LedgerCommitted:
 			// Verified commit already recorded. A replay with the same
-			// digest is idempotent; a different digest under the same key
-			// is a conflict.
+			// digest is idempotent. A different digest under the same key
+			// is a conflict for THAT received copy: the committed result of
+			// the original binding is immutable and must not be replaced.
+			// The conflict is observable in the outcome only; nothing is
+			// appended that could retire the winner.
 			if !strings.EqualFold(rec.PayloadSHA256, env.PayloadSHA256) {
-				return ledger.rejectConflict(env, &outcome)
+				outcome = ApplyOutcome{State: LedgerCommitted, Replayed: true, Path: rec.CommittedPath, Reason: ledgerReasonConflict}
+				return nil
 			}
 			outcome = ApplyOutcome{State: LedgerCommitted, Replayed: true, Path: rec.CommittedPath}
 			return nil
 
 		case rec.State == LedgerRejected:
-			// Terminal. Same digest replays the rejection; different digest
-			// is still a conflict for that key.
+			// Terminal for the bound digest. A different digest under the
+			// same key is a conflict observed in the outcome; the terminal
+			// rejection of the original binding is immutable.
 			outcome = ApplyOutcome{State: LedgerRejected, Reason: rec.Reason}
 			if !strings.EqualFold(rec.PayloadSHA256, env.PayloadSHA256) {
 				outcome.Reason = ledgerReasonConflict
@@ -394,8 +454,15 @@ func ApplyWithLedger(ledger *TransferLedger, root *fsq.DeliveryRoot, localHost, 
 
 		case rec.State == LedgerPrepared:
 			// Crash history A or B: the intent exists but the commit record
-			// does not. Consult publication evidence.
-			found, evidenceErr := publicationEvidence(root, localAgent, env.SourceHost, env.TransferID, env.PayloadSHA256)
+			// does not. The PREPARED digest governs recovery; the key's
+			// binding is immutable. An arrival with a different digest is a
+			// conflict observed in the outcome; it never replaces the
+			// binding and never blocks the original transfer's recovery.
+			if !strings.EqualFold(rec.PayloadSHA256, env.PayloadSHA256) {
+				outcome = ApplyOutcome{State: LedgerUncertain, Reason: ledgerReasonConflict, Evidence: "prepared digest binding differs from arrival"}
+				return nil
+			}
+			found, evidenceErr := publicationEvidence(root, localAgent, env.SourceHost, env.TransferID, rec.PayloadSHA256)
 			if evidenceErr {
 				outcome = ApplyOutcome{
 					State:    LedgerUncertain,
@@ -404,16 +471,13 @@ func ApplyWithLedger(ledger *TransferLedger, root *fsq.DeliveryRoot, localHost, 
 				return nil
 			}
 			if found {
-				if !strings.EqualFold(rec.PayloadSHA256, env.PayloadSHA256) {
-					return ledger.rejectConflict(env, &outcome)
-				}
 				// Promote on verified evidence.
 				if err := ledger.appendRecord(ledgerRecord{
 					Version:       ledgerSchemaVersion,
 					State:         LedgerCommitted,
 					SourceHost:    env.SourceHost,
 					TransferID:    env.TransferID,
-					PayloadSHA256: env.PayloadSHA256,
+					PayloadSHA256: rec.PayloadSHA256,
 				}); err != nil {
 					return fmt.Errorf("record committed: %w", err)
 				}
@@ -422,14 +486,14 @@ func ApplyWithLedger(ledger *TransferLedger, root *fsq.DeliveryRoot, localHost, 
 			}
 			// No evidence: the prepared intent may or may not have been
 			// applied and drained. Unknown history. Refuse — and record the
-			// refusal durably so status/doctor surfaces it and later calls
-			// see the same disposition (append-only: history is preserved).
+			// refusal durably so the diagnostic surface reports it and later
+			// calls see the same disposition (append-only: history preserved).
 			if err := ledger.appendRecord(ledgerRecord{
 				Version:       ledgerSchemaVersion,
 				State:         LedgerUncertain,
 				SourceHost:    env.SourceHost,
 				TransferID:    env.TransferID,
-				PayloadSHA256: env.PayloadSHA256,
+				PayloadSHA256: rec.PayloadSHA256,
 				Reason:        "prepared without publication evidence",
 			}); err != nil {
 				return fmt.Errorf("record uncertain: %w", err)
@@ -455,7 +519,7 @@ func ApplyWithLedger(ledger *TransferLedger, root *fsq.DeliveryRoot, localHost, 
 					State:         LedgerCommitted,
 					SourceHost:    env.SourceHost,
 					TransferID:    env.TransferID,
-					PayloadSHA256: env.PayloadSHA256,
+					PayloadSHA256: rec.PayloadSHA256,
 				}); err != nil {
 					return fmt.Errorf("record committed: %w", err)
 				}
@@ -477,14 +541,18 @@ func ApplyWithLedger(ledger *TransferLedger, root *fsq.DeliveryRoot, localHost, 
 }
 
 // applyAfterPrepared runs ApplyEnvelope for a fresh prepared record and
-// records the terminal state. ApplyEnvelope's own idempotency (same-digest
-// replay returns Replayed=true) and conflict translation (os.ErrExist,
-// different digest) drive committed vs rejected.
+// records the terminal state. The prepared digest binding governs: on
+// success the committed record carries that digest. os.ErrExist on a fresh
+// key means a same-name artifact with different bytes exists — a conflict
+// observed in the outcome (Reason=transfer_conflict); NOTHING is appended,
+// because the key has no terminal disposition of its own yet and the
+// arriving copy must not overwrite whatever winning artifact exists.
 func (l *TransferLedger) applyAfterPrepared(root *fsq.DeliveryRoot, localAgent string, env Envelope, outcome *ApplyOutcome) error {
 	applyResult, err := ApplyEnvelope(root, hostOfAlias(env.DestAlias), localAgent, env)
 	if err != nil {
 		if errors.Is(err, os.ErrExist) {
-			return l.rejectConflict(env, outcome)
+			*outcome = ApplyOutcome{State: LedgerRejected, Reason: ledgerReasonConflict}
+			return nil
 		}
 		return err
 	}
@@ -502,24 +570,28 @@ func (l *TransferLedger) applyAfterPrepared(root *fsq.DeliveryRoot, localAgent s
 	return nil
 }
 
-func (l *TransferLedger) rejectConflict(env Envelope, outcome *ApplyOutcome) error {
-	if err := l.appendRecord(ledgerRecord{
+// appendPrepared durably appends the intent record, syncing the file's
+// directory chain on first creation so the prepared name survives a machine
+// crash even if the later message publication also survives (fix: intent
+// must be durable before apply — section 7.5 directory-sync requirement).
+func (l *TransferLedger) appendPrepared(env Envelope) error {
+	if err := l.appendRecordFirstWrite(ledgerRecord{
 		Version:       ledgerSchemaVersion,
-		State:         LedgerRejected,
+		State:         LedgerPrepared,
 		SourceHost:    env.SourceHost,
 		TransferID:    env.TransferID,
 		PayloadSHA256: env.PayloadSHA256,
-		Reason:        ledgerReasonConflict,
 	}); err != nil {
-		return fmt.Errorf("record rejected: %w", err)
+		return fmt.Errorf("record prepared: %w", err)
 	}
-	*outcome = ApplyOutcome{State: LedgerRejected, Reason: ledgerReasonConflict}
 	return nil
 }
 
-// UncertainTransfers lists every ledger record currently in the uncertain
-// state (with its evidence note) so status/doctor can surface them.
-func (l *TransferLedger) UncertainTransfers() ([]LedgerRecord, error) {
+// UnresolvedTransfers lists every ledger key whose latest durable disposition
+// is not terminal (committed or rejected): prepared, uncertain, and torn
+// records. This is the production diagnostic surface for status/doctor to
+// report unknown-history transfers; courier integration wires it in.
+func (l *TransferLedger) UnresolvedTransfers() ([]LedgerRecord, error) {
 	entries, err := l.root.ReadDir(l.dir)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
@@ -552,7 +624,7 @@ func (l *TransferLedger) UncertainTransfers() ([]LedgerRecord, error) {
 				TransferID: id,
 				Reason:     "torn ledger state preserved",
 			})
-		case rec != nil && rec.State == LedgerUncertain:
+		case rec != nil && (rec.State == LedgerUncertain || rec.State == LedgerPrepared):
 			out = append(out, LedgerRecord{
 				State:         rec.State,
 				SourceHost:    rec.SourceHost,
@@ -564,6 +636,12 @@ func (l *TransferLedger) UncertainTransfers() ([]LedgerRecord, error) {
 		}
 	}
 	return out, nil
+}
+
+// UncertainTransfers is the legacy name of UnresolvedTransfers. It lists
+// prepared, uncertain, and torn entries alike.
+func (l *TransferLedger) UncertainTransfers() ([]LedgerRecord, error) {
+	return l.UnresolvedTransfers()
 }
 
 func splitLedgerName(name string) (sourceHost, transferID string, ok bool) {

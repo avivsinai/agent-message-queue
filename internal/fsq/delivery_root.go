@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"time"
 )
@@ -798,30 +799,83 @@ func (r *DeliveryRoot) ReadDir(name string) ([]os.DirEntry, error) {
 // ledger file is never replaced or truncated — appends only. Callers that
 // need per-key serialization must hold their own advisory lock (see
 // OpenLockFile) across read-modify-append sequences.
-func (r *DeliveryRoot) AppendLedgerLine(dir, filename string, data []byte) error {
+//
+// Returns createdAt=true when this call created the ledger file (the file
+// did not exist before the open), so the caller can sync the directory
+// chain to make the new file NAME durable as well. On any error the return
+// value is unspecified.
+func (r *DeliveryRoot) AppendLedgerLine(dir, filename string, data []byte) (created bool, err error) {
 	if err := r.VerifyBase(); err != nil {
-		return err
-	}
-	if err := r.root.MkdirAll(dir, 0o700); err != nil {
-		return err
+		return false, err
 	}
 	if len(data) == 0 || data[len(data)-1] != '\n' {
-		return fmt.Errorf("ledger line must end with a newline")
+		return false, fmt.Errorf("ledger line must end with a newline")
+	}
+	if err := r.root.MkdirAll(dir, 0o700); err != nil {
+		return false, err
 	}
 	name := filepath.Join(dir, filename)
-	file, err := r.root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
+	// Creation path first: create exclusively if absent, sync the directory
+	// chain when we actually created it, then reopen for append. The
+	// O_EXCL pre-pass avoids racing the file-existence check with appends.
+	_, statErr := r.root.Stat(name)
+	switch {
+	case errors.Is(statErr, os.ErrNotExist):
+		file, createErr := r.root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if errors.Is(createErr, os.ErrExist) {
+			// Lost a creation race; fall through to append.
+			break
+		}
+		if createErr != nil {
+			return false, createErr
+		}
+		if err := writeAllAndSync(file, data); err != nil {
+			_ = file.Close()
+			return true, err
+		}
+		if err := file.Close(); err != nil {
+			return true, err
+		}
+		return true, r.syncDirChain(dir)
+	case statErr != nil:
+		return false, statErr
+	}
+	// Regular append path: file exists.
+	file, err := r.root.OpenFile(name, os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer func() { _ = file.Close() }()
 	info, err := file.Stat()
 	if err != nil {
-		return err
+		return false, err
 	}
 	if !info.Mode().IsRegular() {
-		return fmt.Errorf("ledger file %s is not a regular file", r.displayPath(name))
+		return false, fmt.Errorf("ledger file %s is not a regular file", r.displayPath(name))
 	}
-	return writeAllAndSync(file, data)
+	return false, writeAllAndSync(file, data)
+}
+
+// syncDirChain fsyncs every newly created ancestor of dir, oldest first, so
+// the whole path from root to the new file's directory is durable. Existing
+// directories re-sync harmlessly (idempotent).
+func (r *DeliveryRoot) syncDirChain(dir string) error {
+	parts := strings.Split(filepath.ToSlash(dir), "/")
+	rel := ""
+	for _, part := range parts {
+		if part == "" || part == "." {
+			continue
+		}
+		if rel == "" {
+			rel = part
+		} else {
+			rel = filepath.Join(rel, part)
+		}
+		if err := r.syncDir(rel); err != nil {
+			return err
+		}
+	}
+	return r.syncDir(dir)
 }
 
 // Stat stats a root-relative path through the pinned capability.

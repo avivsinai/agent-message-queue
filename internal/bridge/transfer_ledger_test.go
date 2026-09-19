@@ -218,15 +218,18 @@ func TestApplyWithLedgerPreparedWithDLQEvidenceCommits(t *testing.T) {
 	}
 }
 
-func TestApplyWithLedgerConflictIsTerminalRejected(t *testing.T) {
+func TestApplyWithLedgerConflictDoesNotOverwriteWinner(t *testing.T) {
 	root, ledger := newLedgerTestRoot(t)
+	base := rootRootDir(t, root)
 	env := testEnvelope([]byte("hello"))
 
-	if _, err := ApplyWithLedger(ledger, root, "mac", "claude", env); err != nil {
+	_, err := ApplyWithLedger(ledger, root, "mac", "claude", env)
+	if err != nil {
 		t.Fatalf("apply: %v", err)
 	}
 
-	// Same transfer key, different digest: conflict.
+	// Same transfer key, different digest: conflict observed in the outcome
+	// only; the committed winner must remain the effective record.
 	conflict := env
 	other := []byte("different payload")
 	sumBytes := sha256.Sum256(other)
@@ -238,16 +241,75 @@ func TestApplyWithLedgerConflictIsTerminalRejected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("conflict apply: %v", err)
 	}
-	if outcome.State != LedgerRejected || outcome.Reason != "transfer_conflict" {
-		t.Fatalf("state = %q reason=%q, want rejected/transfer_conflict", outcome.State, outcome.Reason)
+	if outcome.Reason != "transfer_conflict" {
+		t.Fatalf("conflict outcome reason = %q, want transfer_conflict", outcome.Reason)
 	}
-	// Replays of the conflicting digest remain rejected.
-	outcome, err = ApplyWithLedger(ledger, root, "mac", "claude", conflict)
+	// The original A replay is STILL committed with its own digest: the
+	// conflicting B arrival never retired the winner.
+	replay, err := ApplyWithLedger(ledger, root, "mac", "claude", env)
 	if err != nil {
-		t.Fatalf("conflict replay: %v", err)
+		t.Fatalf("original replay after conflict: %v", err)
 	}
-	if outcome.State != LedgerRejected {
-		t.Fatalf("conflict replay state = %q, want rejected", outcome.State)
+	if replay.State != LedgerCommitted || !replay.Replayed || replay.Reason == "transfer_conflict" {
+		t.Fatalf("original replay = %+v, want committed replayed without conflict", replay)
+	}
+	// Exactly one artifact remains in inbox/new with A's bytes.
+	artifact := filepath.Join(fsq.AgentInboxNew(base, "claude"), TransferFilename(env.SourceHost, env.TransferID))
+	data, err := os.ReadFile(artifact)
+	if err != nil {
+		t.Fatalf("winner artifact missing: %v", err)
+	}
+	if string(data) != string(env.Payload) {
+		t.Fatal("winner artifact bytes were replaced by the conflicting payload")
+	}
+}
+
+func TestApplyWithLedgerPreparedBindingImmutableAgainstConflictingArrival(t *testing.T) {
+	root, ledger := newLedgerTestRoot(t)
+	base := rootRootDir(t, root)
+	env := testEnvelope([]byte("hello"))
+
+	// Crash history: prepared A, no evidence. Then B arrives under the same
+	// key with a different digest.
+	if err := ledger.appendRecord(ledgerRecord{
+		Version:       ledgerSchemaVersion,
+		State:         LedgerPrepared,
+		SourceHost:    env.SourceHost,
+		TransferID:    env.TransferID,
+		PayloadSHA256: env.PayloadSHA256,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	conflict := env
+	other := []byte("different payload")
+	sumBytes := sha256.Sum256(other)
+	conflict.Payload = other
+	conflict.PayloadSHA256 = hex.EncodeToString(sumBytes[:])
+
+	outcome, err := ApplyWithLedger(ledger, root, "mac", "claude", conflict)
+	if err != nil {
+		t.Fatalf("conflicting arrival: %v", err)
+	}
+	if outcome.Reason != "transfer_conflict" {
+		t.Fatalf("conflict outcome reason = %q, want transfer_conflict", outcome.Reason)
+	}
+	// Nothing from B was applied or recorded as the key's state.
+	newPath := filepath.Join(fsq.AgentInboxNew(base, "claude"), TransferFilename(env.SourceHost, env.TransferID))
+	if _, err := os.Stat(newPath); !os.IsNotExist(err) {
+		t.Fatalf("conflicting payload applied: %v", err)
+	}
+
+	// A's own recovery is unblocked: A with evidence in DLQ/cur commits.
+	curPath := filepath.Join(fsq.AgentInboxCur(base, "claude"), TransferFilename(env.SourceHost, env.TransferID))
+	if err := os.WriteFile(curPath, env.Payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := ApplyWithLedger(ledger, root, "mac", "claude", env)
+	if err != nil {
+		t.Fatalf("A recovery after conflict: %v", err)
+	}
+	if recovered.State != LedgerCommitted || !recovered.Replayed {
+		t.Fatalf("A recovery = %+v, want committed replayed", recovered)
 	}
 }
 

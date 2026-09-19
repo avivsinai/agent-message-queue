@@ -481,6 +481,11 @@ func (c *Courier) PollOnce(ctx context.Context) (PollResult, error) {
 		if applyOutcome.State != bridge.LedgerCommitted {
 			return result, fmt.Errorf("transfer %s ended in ledger state %q (reason %q)", env.TransferID, applyOutcome.State, applyOutcome.Reason)
 		}
+		if applyOutcome.Reason == bridge.LedgerReasonConflict {
+			// A same-key/different-digest arrival: the committed winner is
+			// immutable and this copy is refused without a receipt or ACK.
+			return result, fmt.Errorf("transfer %s refused: transfer_conflict (committed result for this key belongs to a different payload)", env.TransferID)
+		}
 		receipt := Receipt{
 			Stage:           ReceiptDestinationMaildirCommit,
 			TransferID:      env.TransferID,

@@ -4,7 +4,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -68,8 +67,10 @@ func TestApplyFileReplayAndConflictPreserveMaildirAndReceipt(t *testing.T) {
 	}
 	writeApplyFileEnvelope(t, root, "envelope.json", conflict)
 	err = runApplyFile([]string{"--root", root, "--file", path})
-	if !errors.Is(err, os.ErrExist) {
-		t.Fatalf("conflict error = %v, want EEXIST", err)
+	// The ledgered apply path reports the conflict in the error text (the
+	// committed winner is immutable; the conflicting copy is refused).
+	if err == nil || !strings.Contains(err.Error(), "transfer_conflict") {
+		t.Fatalf("conflict error = %v, want transfer_conflict refusal", err)
 	}
 	got, err := os.ReadFile(filepath.Join(root, "agents", "claude", "inbox", "new", bridge.TransferFilename(env.SourceHost, env.TransferID)))
 	if err != nil || string(got) != "first" {
