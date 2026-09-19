@@ -364,6 +364,14 @@ func TestUpFreshRootStableIdentityRealEntryPath(t *testing.T) {
 	select {
 	case <-sp.spawned:
 	case err := <-firstDone:
+		// Record the consumed result in the SAME idempotent join state
+		// before failing, so cleanup's join sees it instead of reporting a
+		// false 5s join timeout for an up that already returned (codex r5).
+		joinOnce.Do(func() {
+			joinMu.Lock()
+			joinSet, joinRes = true, err
+			joinMu.Unlock()
+		})
 		t.Fatalf("first up exited before spawning: %v", err)
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for first up to spawn serve")
@@ -492,6 +500,14 @@ func TestUpForwardedServeArgsThroughRealEntryPoint(t *testing.T) {
 	select {
 	case <-sp.spawned:
 	case err := <-done:
+		// Record the consumed result in the SAME idempotent join state
+		// before failing, so cleanup's join sees it instead of reporting a
+		// false 5s join timeout for an up that already returned (codex r5).
+		joinOnce.Do(func() {
+			joinMu.Lock()
+			joinSet, joinRes = true, err
+			joinMu.Unlock()
+		})
 		t.Fatalf("up exited before spawning: %v", err)
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for up to spawn serve")
