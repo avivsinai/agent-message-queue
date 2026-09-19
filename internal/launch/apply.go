@@ -13,6 +13,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/config"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
@@ -566,12 +567,22 @@ func writeApplySessionConfig(root *fsq.DeliveryRoot, lease *Lease, createdUTC st
 	if createdUTC == "" {
 		createdUTC = time.Now().UTC().Format(time.RFC3339)
 	}
-	config := struct {
+	// Preserve unmodelled keys from the existing config.json (611.22.57,
+	// the setup/apply half of review-821-r1 P1-b): the apply roster write
+	// used to re-marshal a bare struct and wipe default_agent/project/
+	// routing etc. from a live root. Overlay the modelled keys onto the raw
+	// existing document instead (config.MarshalPreservingUnknowns); a
+	// missing file marshals the bare struct.
+	cfg := struct {
 		Version    int      `json:"version"`
 		CreatedUTC string   `json:"created_utc"`
 		Agents     []string `json:"agents"`
 	}{Version: 1, CreatedUTC: createdUTC, Agents: slices.Clone(handles)}
-	data, err := json.MarshalIndent(config, "", "  ")
+	existing, readErr := root.ReadFile("meta/config.json")
+	if readErr != nil && !os.IsNotExist(readErr) {
+		return fmt.Errorf("read config for key preservation: %w", readErr)
+	}
+	data, err := config.MarshalPreservingUnknowns(existing, cfg)
 	if err != nil {
 		return err
 	}

@@ -376,13 +376,13 @@ func buildSetupState(options setupOptions) (setupState, error) {
 	if err != nil {
 		return setupState{}, err
 	}
-	baseConfigData, err := marshalSetupBaseConfig(baseConfig)
+	baseConfigData, err := marshalSetupBaseConfig(baseConfig, currentBaseData)
 	if err != nil {
 		return setupState{}, err
 	}
 	unionConfig := baseConfig
 	unionConfig.Agents = sortedUnion(currentAgents, handles)
-	unionConfigData, err := marshalSetupBaseConfig(unionConfig)
+	unionConfigData, err := marshalSetupBaseConfig(unionConfig, currentBaseData)
 	if err != nil {
 		return setupState{}, err
 	}
@@ -913,8 +913,13 @@ func setupBaseConfig(root string, agents []string) (config.Config, []byte, []str
 	return cfg, data, current, nil
 }
 
-func marshalSetupBaseConfig(cfg config.Config) ([]byte, error) {
-	data, err := json.MarshalIndent(cfg, "", "  ")
+// marshalSetupBaseConfig serializes the setup config while preserving every
+// unmodelled key already present in the on-disk config.json (611.22.57, the
+// setup/apply half of review-821-r1 P1-b: `amq setup` wiped default_agent/
+// project/routing from a live root). original carries the raw existing
+// document (empty when the file does not exist yet).
+func marshalSetupBaseConfig(cfg config.Config, original []byte) ([]byte, error) {
+	data, err := config.MarshalPreservingUnknowns(original, cfg)
 	if err != nil {
 		return nil, err
 	}

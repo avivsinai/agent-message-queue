@@ -146,6 +146,18 @@ func ensureAgentLocked(root *fsq.DeliveryRoot, handle string) (bool, error) {
 	return true, nil
 }
 
+// MarshalPreservingUnknowns re-marshals cfg together with every key present
+// in the original raw document but not modelled by Config (611.22.55,
+// extended to all config.json writers in 611.22.57). Known keys always take
+// the struct's values; unknown keys are re-emitted as their original raw
+// JSON. Keys come out sorted (map marshalling), which is deterministic
+// across writers — including a nil/empty original, so a fresh write and a
+// re-read rewrite are byte-stable (breaking that stability made a matching
+// `amq setup` rerun report a roster update).
+func MarshalPreservingUnknowns(original []byte, cfg Config) ([]byte, error) {
+	return marshalConfigPreservingUnknowns(original, cfg)
+}
+
 // marshalConfigPreservingUnknowns re-marshals cfg together with every key
 // present in the original raw document but not modelled by Config
 // (611.22.55). Known keys always take the struct's values; unknown keys are
@@ -153,8 +165,10 @@ func ensureAgentLocked(root *fsq.DeliveryRoot, handle string) (bool, error) {
 // marshalling), which is deterministic across writers.
 func marshalConfigPreservingUnknowns(original []byte, cfg Config) ([]byte, error) {
 	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(original, &raw); err != nil {
-		return nil, fmt.Errorf("parse config: %w", err)
+	if len(original) > 0 {
+		if err := json.Unmarshal(original, &raw); err != nil {
+			return nil, fmt.Errorf("parse config: %w", err)
+		}
 	}
 	// A literal JSON `null` unmarshals into a nil map with no error; treat
 	// it like an empty document instead of panicking on the overlay
