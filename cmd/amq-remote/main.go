@@ -20,6 +20,7 @@ import (
 
 	amqcli "github.com/avivsinai/agent-message-queue/internal/cli"
 	"github.com/avivsinai/agent-message-queue/internal/config"
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/remote/amqio"
 	"github.com/avivsinai/agent-message-queue/internal/remote/codex"
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
@@ -405,7 +406,36 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	if err != nil {
 		if manifest.IsValidation(err) {
 			if dup, ok := err.(*manifest.ErrDuplicateTarget); ok {
-				return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "duplicate target %q: flags and manifest must not share a target id", dup.Target)
+				// 611.13.4-5: name the actual sources. The old message
+				// blamed "flags and manifest" even when the duplicate was
+				// two identical manifest entries and no flag was passed.
+				inFlags := false
+				for _, adapter := range sugar {
+					if adapter.Target == dup.Target {
+						inFlags = true
+						break
+					}
+				}
+				inManifest := false
+				var mfBody manifest.File
+				if body, readErr := os.ReadFile(manifestFile); readErr == nil {
+					if json.Unmarshal(body, &mfBody) == nil {
+						for _, adapter := range mfBody.Adapters {
+							if adapter.Target == dup.Target {
+								inManifest = true
+								break
+							}
+						}
+					}
+				}
+				switch {
+				case inFlags && inManifest:
+					return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "duplicate target %q: flags and manifest must not share a target id", dup.Target)
+				case inManifest:
+					return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "duplicate target %q: manifest declares the same target id more than once", dup.Target)
+				default:
+					return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "duplicate target %q: the same target id was passed more than once", dup.Target)
+				}
 			}
 			return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", err)
 		}
@@ -976,8 +1006,14 @@ func doctor(args []string) (any, int, error) {
 		}
 	}
 	// Print adapter refusals persisted by serve (gap 2: doctor-visible).
-	if refusals, err := loadRefusals(stateDir); err == nil && len(refusals) > 0 {
+	refusals, loadErr := loadRefusals(stateDir)
+	switch {
+	case loadErr == nil && len(refusals) > 0:
 		report["refusals"] = refusals
+	case loadErr != nil && !errors.Is(loadErr, os.ErrNotExist):
+		// 611.13.4-1: a truncated/unreadable refusals.json used to be
+		// dropped silently and doctor exited 0 with no hint.
+		report["refusals_error"] = loadErr.Error()
 	}
 	return report, code, nil
 }
@@ -1017,7 +1053,11 @@ func persistRefusals(stateDir string, refusals []registry.Outcome) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(stateDir, "refusals.json"), data, 0600)
+	// Atomic (611.13.4-1): a truncated refusals.json made doctor silently
+	// drop the refusal and exit 0. Same durability as every other
+	// generated-state file.
+	_, err = fsq.WriteFileAtomic(stateDir, "refusals.json", data, 0600)
+	return err
 }
 
 // writeEffectiveAdapters writes the effective adapter set (attached + refused)
@@ -1031,9 +1071,18 @@ func writeEffectiveAdapters(stateDir string, mf manifest.File, attached []core.A
 		Error  string `json:"error,omitempty"`
 	}
 	entries := make([]effEntry, 0, len(mf.Adapters))
+	// Kind per attached target from the manifest (611.13.4-2): attached
+	// entries used to carry an empty kind; the manifest is the authority
+	// that published the attachment.
+	kinds := make(map[string]string, len(mf.Adapters))
+	for _, adapter := range mf.Adapters {
+		kinds[adapter.Target] = adapter.Kind
+	}
 	for _, att := range attached {
+		target := att.Inspect().TargetID
 		entries = append(entries, effEntry{
-			Target: att.Inspect().TargetID,
+			Kind:   kinds[target],
+			Target: target,
 			State:  "attached",
 		})
 	}
@@ -1049,7 +1098,8 @@ func writeEffectiveAdapters(stateDir string, mf manifest.File, attached []core.A
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(stateDir, "adapters.json"), data, 0600)
+	_, err = fsq.WriteFileAtomic(stateDir, "adapters.json", data, 0600)
+	return err
 }
 
 // loadRefusals reads persisted adapter refusals for doctor to print.

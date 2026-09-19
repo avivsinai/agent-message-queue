@@ -2102,12 +2102,27 @@ func TestValidationFailuresExitTwo(t *testing.T) {
 			}
 			var out, errBuf bytes.Buffer
 			var code int
-			if tc.discover {
-				// --discover must classify the same manifest exactly like
-				// serve (observed r5 regression: discover exited 1).
-				code = run([]string{"serve", "--discover", "--root", root, "--manifest", manifestPath}, strings.NewReader(""), &out, &errBuf)
-			} else {
-				code = run([]string{"serve", "--root", root, "--manifest", manifestPath}, strings.NewReader(""), &out, &errBuf)
+			// 611.13.4-3: bound the in-process serve. For a VALID manifest a
+			// mutation could leave serve running forever and stall the whole
+			// package for the full go-test timeout. Serve must refuse an
+			// invalid manifest before startup; 30s is generous even under
+			// heavy CI load.
+			type serveResult struct{ code int }
+			done := make(chan serveResult, 1)
+			go func() {
+				if tc.discover {
+					code := run([]string{"serve", "--discover", "--root", root, "--manifest", manifestPath}, strings.NewReader(""), &out, &errBuf)
+					done <- serveResult{code}
+					return
+				}
+				code := run([]string{"serve", "--root", root, "--manifest", manifestPath}, strings.NewReader(""), &out, &errBuf)
+				done <- serveResult{code}
+			}()
+			select {
+			case r := <-done:
+				code = r.code
+			case <-time.After(30 * time.Second):
+				t.Fatalf("serve did not refuse the invalid manifest within 30s (mutation bound; it must exit before any startup side effect)\nstderr=%s", errBuf.String())
 			}
 			if code != protocol.ExitUsage {
 				t.Fatalf("serve exit=%d, want %d (ExitUsage)\nstderr=%s", code, protocol.ExitUsage, errBuf.String())

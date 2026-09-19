@@ -88,7 +88,13 @@ type Server struct {
 // outlive the endpoint's owner.
 func (s *Server) Close() error {
 	_ = s.listener.Close()
-	return os.Remove(s.path)
+	// 611.13.4-4: Go unlinks the socket file as part of listener.Close() on
+	// Unix, so the explicit Remove usually loses with ENOENT. That is the
+	// expected end state, not an error.
+	if err := os.Remove(s.path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
 }
 
 // Listen binds the socket with owner-only permissions. A stale socket file
