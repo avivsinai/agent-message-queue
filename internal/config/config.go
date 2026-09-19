@@ -105,9 +105,10 @@ func EnsureAgent(rootDir, handle string) (bool, error) {
 // (keys sorted by encoding/json - deterministic). Unknown keys are
 // preserved SEMANTICALLY: their values round-trip intact as opaque raw
 // JSON, but the whole file is re-serialized (sorted keys, 2-space
-// indentation). Since 611.22.57 the same preservation is shared by all
-// config.json writers (amq setup and launch apply overlay through the
-// exported MarshalPreservingUnknowns). Creates the
+// indentation). Since 611.22.57 the same preservation is shared by the
+// EnsureAgent/setup/apply writers (amq setup and launch apply overlay
+// through the exported MarshalPreservingUnknowns; a forced initialization
+// still intentionally replaces the whole file). Creates the
 // config when absent.
 func ensureAgentLocked(root *fsq.DeliveryRoot, handle string) (bool, error) {
 	data, err := root.ReadFile("meta/config.json")
