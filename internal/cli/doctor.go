@@ -323,7 +323,7 @@ func runDoctor(args []string) error {
 				line += " lock=" + companion.Lock
 			}
 			if companion.ProbeError != "" {
-				line += " probe_error=" + companion.ProbeError
+				line += " probe_error=" + strings.ReplaceAll(companion.ProbeError, "\n", "; ")
 			}
 			if err := writeStdoutLine(line); err != nil {
 				return err

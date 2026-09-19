@@ -33,8 +33,11 @@ func ProbeLifetimeLock(regPath, entryID string) (bool, error) {
 		return false, errors.Join(errLockProbeFailed, err)
 	}
 	defer func() { _ = f.Close() }()
-	// Non-blocking probe: EWOULDBLOCK/EAGAIN = held by a live process.
-	err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+	// Non-blocking SHARED probe: EWOULDBLOCK/EAGAIN = held by a live owner
+	// (an EX holder). Probers take SH too, so concurrent probes never
+	// collide — with LOCK_EX here, a second prober made a dead row read as
+	// live (review r3 P2-1, e.g. up's reclaim racing a doctor run).
+	err = syscall.Flock(int(f.Fd()), syscall.LOCK_SH|syscall.LOCK_NB)
 	if err == nil {
 		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 		return false, nil

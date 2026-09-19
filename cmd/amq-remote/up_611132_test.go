@@ -79,10 +79,11 @@ func TestUpWaitDelayKillsSigtermIgnoringChild(t *testing.T) {
 	elapsed := time.Since(start)
 
 	// The child ignores SIGTERM, so the kill lands only via WaitDelay's
-	// SIGKILL. The pre-B4 failure mode was 10s+ and still counting; the
-	// bound is delay + modest slack (611.13.2 review P2-1: the helper only
-	// sleeps 3s, so a broken build fails fast instead of burning 30s).
-	if elapsed > delay+2*time.Second {
+	// SIGKILL. The pre-B4 failure mode was 10s+ and still counting. Bound =
+	// delay + 1s (review r3 P2-2): the broken build fails at ~2.5s, so the
+	// red margin must stay well clear of it — with delay+2s a parent trap
+	// wait that overruns ~130ms on a loaded runner let the mutation pass.
+	if elapsed > delay+time.Second {
 		t.Fatalf("up waited %s for a SIGTERM-ignoring child; WaitDelay=%s not enforced", elapsed.Round(time.Millisecond), delay)
 	}
 }
@@ -139,8 +140,9 @@ func TestUpBackoffResetsAfterHealthyUptime(t *testing.T) {
 	}
 	sp := &fakeSpawner{
 		procs: []fakeProc{
-			{code: 1, onWait: advance(healthyRun)}, // healthy-lived crash
-			{code: 1},                              // immediate crash, no advance
+			{code: 1},                              // immediate crash: escalates restart to 1
+			{code: 1},                              // immediate crash: escalates restart to 2
+			{code: 1, onWait: advance(healthyRun)}, // healthy-lived crash AFTER escalation
 			{code: 0},                              // clean exit ends supervision
 		},
 	}
@@ -168,8 +170,22 @@ func TestUpBackoffResetsAfterHealthyUptime(t *testing.T) {
 	if !strings.Contains(out, "resetting backoff series") {
 		t.Fatalf("expected healthy-uptime reset announcement, got:\n%s", out)
 	}
-	if !strings.Contains(out, "respawning in "+base.String()) {
-		t.Fatalf("expected the first respawn after the healthy run to be the base step %s, got:\n%s", base, out)
+	// Pin the RESET, not just the announcement: the healthy run happens only
+	// after two escalated crashes (restart=2, next wait would be 2*base), so
+	// without the reset assignment the respawn following the reset
+	// escalates further (verifier r3 P1: with the healthy child first,
+	// `restart = 0` was a no-op and this test passed with the fix removed).
+	// Assert ORDER: the base-step respawn must come AFTER the reset
+	// announcement (the pre-reset respawns include base too, so a bare
+	// Contains would pass even with the reset deleted).
+	escalated := 2 * base
+	resetIdx := strings.Index(out, "resetting backoff series")
+	postReset := out[resetIdx:]
+	if !strings.Contains(out, "respawning in "+escalated.String()) {
+		t.Fatalf("expected the escalated wait %s before the healthy run, got:\n%s", escalated, out)
+	}
+	if !strings.Contains(postReset, "respawning in "+base.String()) {
+		t.Fatalf("expected the respawn after the healthy run to be the base step %s, got:\n%s", base, postReset)
 	}
 }
 

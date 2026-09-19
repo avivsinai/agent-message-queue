@@ -345,9 +345,14 @@ func TestRunOpsChecks_ReportsRemoteCompanion(t *testing.T) {
 	// truth: stale + not-held, never a phantom "active". On platforms
 	// without a lock probe the contract is fail-closed: the recorded state
 	// is kept verbatim with lock "unknown" (review 19:21Z: do not weaken
-	// the Unix assertion, do not fake a verdict anywhere).
+	// the Unix assertion, do not fake a verdict anywhere). The State field
+	// is asserted too (review r3 P2-4); CI runs this branch compile-only on
+	// windows-latest, so its value there is compile-time.
 	switch runtime.GOOS {
 	case "windows", "plan9", "js":
+		if c.State != "active" {
+			t.Fatalf("companion state = %q, want the recorded state kept verbatim on a probe-less platform", c.State)
+		}
 		if c.Lock != "unknown" {
 			t.Fatalf("companion lock = %q, want unknown on a probe-less platform", c.Lock)
 		}
