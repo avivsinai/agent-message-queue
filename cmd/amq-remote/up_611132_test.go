@@ -147,14 +147,11 @@ func TestUpBackoffResetsAfterHealthyUptime(t *testing.T) {
 		},
 	}
 	cfg := upConfig{
-		root:         root,
-		me:           "amq-remote",
-		registryPath: filepath.Join(root, "registry.json"),
-		maxRestarts:  5,
-		backoffBase:  base,
-		backoffMax:   2 * time.Second,
-		serveArgs:    []string{"serve"},
-		now:          now,
+		maxRestarts: 5,
+		backoffBase: base,
+		backoffMax:  2 * time.Second,
+		serveArgs:   []string{"serve"},
+		now:         now,
 	}
 	var code int
 	out := captureStderr(t, func() {
@@ -225,14 +222,11 @@ func TestUpMaxRestartsBoundsLifetimeAcrossHealthyResets(t *testing.T) {
 	}
 	sp := &fakeSpawner{procs: procs}
 	cfg := upConfig{
-		root:         root,
-		me:           "amq-remote",
-		registryPath: filepath.Join(root, "registry.json"),
-		maxRestarts:  2,
-		backoffBase:  20 * time.Millisecond,
-		backoffMax:   100 * time.Millisecond,
-		serveArgs:    []string{"serve"},
-		now:          now,
+		maxRestarts: 2,
+		backoffBase: 20 * time.Millisecond,
+		backoffMax:  100 * time.Millisecond,
+		serveArgs:   []string{"serve"},
+		now:         now,
 	}
 	var code int
 	out := captureStderr(t, func() {
@@ -269,13 +263,10 @@ func TestUpUsageErrorIsTerminal(t *testing.T) {
 		procs: []fakeProc{{code: 2, delay: 5 * time.Millisecond}},
 	}
 	cfg := upConfig{
-		root:         root,
-		me:           "amq-remote",
-		registryPath: filepath.Join(root, "registry.json"),
-		maxRestarts:  5,
-		backoffBase:  time.Millisecond,
-		backoffMax:   10 * time.Millisecond,
-		serveArgs:    []string{"serve"},
+		maxRestarts: 5,
+		backoffBase: time.Millisecond,
+		backoffMax:  10 * time.Millisecond,
+		serveArgs:   []string{"serve"},
 	}
 	code, err := runUpLoop(context.Background(), cfg, sp)
 	if err != nil {
@@ -307,13 +298,10 @@ func TestUpExitOneStillRespawns(t *testing.T) {
 		},
 	}
 	cfg := upConfig{
-		root:         root,
-		me:           "amq-remote",
-		registryPath: filepath.Join(root, "registry.json"),
-		maxRestarts:  5,
-		backoffBase:  time.Millisecond,
-		backoffMax:   10 * time.Millisecond,
-		serveArgs:    []string{"serve"},
+		maxRestarts: 5,
+		backoffBase: time.Millisecond,
+		backoffMax:  10 * time.Millisecond,
+		serveArgs:   []string{"serve"},
 	}
 	code, err := runUpLoop(context.Background(), cfg, sp)
 	if err != nil {
