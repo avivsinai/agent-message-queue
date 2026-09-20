@@ -3,12 +3,14 @@ package amq
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -463,8 +465,18 @@ done
 umask 077
 printf '%s\n' '{"schema":1,"generation":"test-generation","target_digest":"test-digest"}' > "$ready"
 while [ ! -f "$AMQ_KEEPALIVE_TRIGGER" ]; do sleep 0.01; done
-set -e
+# Phase markers (review 19:57:44Z, corrected 20:10:22Z): a failed stderr
+# write must FAIL this regression, not pass it. dd's exit code is recorded
+# and, if nonzero, the script exits with that code BEFORE either success
+# marker (phase-dd-ok / survived) is written.
+: > "$AMQ_KEEPALIVE_PHASE_BEFORE"
 dd if=/dev/zero bs=65536 count=4 >&2 2>/dev/null
+dd_exit=$?
+if [ "$dd_exit" -ne 0 ]; then
+  : > "$AMQ_KEEPALIVE_PHASE_DD_FAIL"
+  exit "$dd_exit"
+fi
+: > "$AMQ_KEEPALIVE_PHASE_DD_OK"
 : > "$AMQ_KEEPALIVE_SURVIVED"
 while [ ! -f "$AMQ_KEEPALIVE_RELEASE" ]; do sleep 0.01; done
 `)
@@ -473,10 +485,21 @@ while [ ! -f "$AMQ_KEEPALIVE_RELEASE" ]; do sleep 0.01; done
 	t.Setenv("AMQ_KEEPALIVE_TEST_LAUNCHER_HELPER", "1")
 	t.Setenv("AMQ_KEEPALIVE_TEST_FAKE_AMQ", fakeAMQ)
 	t.Setenv("AMQ_KEEPALIVE_CACHE_DIR", filepath.Join(dir, "cache"))
+	phaseBefore := filepath.Join(dir, "phase-before-stderr")
+	phaseDDOK := filepath.Join(dir, "phase-dd-ok")
+	phaseDDFail := filepath.Join(dir, "phase-dd-fail")
+	retained := filepath.Join(dir, "retained-captures")
+	if err := os.MkdirAll(retained, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("AMQ_KEEPALIVE_TRIGGER", trigger)
 	t.Setenv("AMQ_KEEPALIVE_SURVIVED", survived)
 	t.Setenv("AMQ_KEEPALIVE_RELEASE", release)
 	t.Setenv("AMQ_KEEPALIVE_PID", pidFile)
+	t.Setenv("AMQ_KEEPALIVE_PHASE_BEFORE", phaseBefore)
+	t.Setenv("AMQ_KEEPALIVE_PHASE_DD_OK", phaseDDOK)
+	t.Setenv("AMQ_KEEPALIVE_PHASE_DD_FAIL", phaseDDFail)
+	t.Setenv("AMQ_KEEPALIVE_RETAINED_CAPTURES", retained)
 	launcher, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
@@ -490,13 +513,161 @@ while [ ! -f "$AMQ_KEEPALIVE_RELEASE" ]; do sleep 0.01; done
 	if err := os.WriteFile(trigger, nil, 0o600); err != nil {
 		t.Fatalf("trigger post-launch stderr: %v", err)
 	}
-	waitForFile(t, survived, 3*time.Second)
+	waitForFileWithDiagnostics(t, survived, 3*time.Second, dir)
+}
+
+// waitForFileWithDiagnostics is waitForFile with a bounded failure report at
+// the observed CI-failure boundary (review ruling 19:47:51Z): when the
+// marker does not appear, dump the test dir tree, the wake's recorded PID
+// and its liveness, and any leftover wake-stderr capture/diagnostic files.
+// Diagnostic only - no behavior change, no timeout tuning.
+func retainedDirPath(dir string) string { return filepath.Join(dir, "retained-captures") }
+
+func waitForFileWithDiagnostics(t *testing.T, path string, timeout time.Duration, dir string) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	var report strings.Builder
+	fmt.Fprintf(&report, "file %q did not appear within %s\n", path, timeout)
+	// Phase markers (review 19:57:44Z): state machine of the fake wake.
+	for _, name := range []string{"phase-before-stderr", "phase-dd-ok", "phase-dd-fail"} {
+		data, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			fmt.Fprintf(&report, "phase %s: absent\n", name)
+			continue
+		}
+		fmt.Fprintf(&report, "phase %s: present %q\n", name, string(data))
+	}
+	entries, _ := os.ReadDir(dir)
+	report.WriteString("test dir:\n")
+	for _, entry := range entries {
+		info, err := entry.Info()
+		if err != nil {
+			fmt.Fprintf(&report, "  %s (stat error: %v)\n", entry.Name(), err)
+			continue
+		}
+		fmt.Fprintf(&report, "  %s size=%d\n", entry.Name(), info.Size())
+		if data, err := os.ReadFile(filepath.Join(dir, entry.Name())); err == nil && len(data) <= 4096 {
+			fmt.Fprintf(&report, "    content: %q\n", string(data))
+		}
+	}
+	// Retained captures: the launcher helper copies the wake-stderr capture
+	// and diagnostic files to a test-owned directory before StartWake's
+	// deferred Close unlinks them (review 19:57:44Z: the later scan cannot
+	// recover them from cache/amq-keepalive/readiness once unlinked).
+	if retainedEntries, err := os.ReadDir(filepath.Join(dir, "retained-captures")); err == nil {
+		report.WriteString("retained captures:\n")
+		for _, entry := range retainedEntries {
+			info, err := entry.Info()
+			if err != nil {
+				fmt.Fprintf(&report, "  %s (stat error: %v)\n", entry.Name(), err)
+				continue
+			}
+			fmt.Fprintf(&report, "  %s size=%d\n", entry.Name(), info.Size())
+			if data, err := os.ReadFile(filepath.Join(retainedDirPath(dir), entry.Name())); err == nil && len(data) > 0 {
+				head := data
+				if len(head) > 2048 {
+					head = head[:2048]
+				}
+				fmt.Fprintf(&report, "    head: %q\n", string(head))
+			}
+		}
+	}
+	// Readiness dir leftovers: on the happy path StartWake's deferred Close
+	// unlinks wake-stderr-*; anything left is abnormal-path evidence.
+	readiness := filepath.Join(dir, "cache", "amq-keepalive", "readiness")
+	if readinessEntries, err := os.ReadDir(readiness); err == nil {
+		report.WriteString("readiness dir leftovers:\n")
+		for _, entry := range readinessEntries {
+			info, err := entry.Info()
+			if err != nil {
+				fmt.Fprintf(&report, "  %s (stat error: %v)\n", entry.Name(), err)
+				continue
+			}
+			fmt.Fprintf(&report, "  %s size=%d\n", entry.Name(), info.Size())
+		}
+	}
+	if pidData, err := os.ReadFile(filepath.Join(dir, "pid")); err == nil {
+		fmt.Fprintf(&report, "wake pid file: %q\n", string(pidData))
+		var pid int
+		if _, err := fmt.Sscanf(strings.TrimSpace(string(pidData)), "%d", &pid); err == nil {
+			if proc, err := os.FindProcess(pid); err == nil {
+				if err := proc.Signal(syscall.Signal(0)); err == nil {
+					fmt.Fprintf(&report, "wake pid %d: ALIVE\n", pid)
+				} else {
+					fmt.Fprintf(&report, "wake pid %d: not signaling (%v)\n", pid, err)
+				}
+			}
+		}
+	}
+	cacheDir := filepath.Join(dir, "cache")
+	if cacheEntries, err := os.ReadDir(cacheDir); err == nil {
+		report.WriteString("cache dir:\n")
+		for _, entry := range cacheEntries {
+			info, err := entry.Info()
+			if err != nil {
+				fmt.Fprintf(&report, "  %s (stat error: %v)\n", entry.Name(), err)
+				continue
+			}
+			fmt.Fprintf(&report, "  %s size=%d\n", entry.Name(), info.Size())
+			if strings.HasPrefix(entry.Name(), "wake-stderr") {
+				if data, err := os.ReadFile(filepath.Join(cacheDir, entry.Name())); err == nil && len(data) > 0 {
+					fmt.Fprintf(&report, "    content: %q\n", string(data[:min(len(data), 2048)]))
+				}
+			}
+		}
+	}
+	t.Fatalf("%s", report.String())
+}
+
+// retainCapturedWakeStderr installs a test-only replacement of
+// newWakeStartupStderrForStart (review ruling 20:02:35Z): the production
+// deferred Close unlinks the capture and diagnostic files before the launcher
+// helper returns, destroying the failure evidence. The wrapper hardlinks the
+// two still-open files into the test-owned AMQ_KEEPALIVE_RETAINED_CAPTURES
+// directory immediately after creation, so the unlink leaves the test's own
+// links intact. No shared file description is read, seeked, or copied: the
+// drain writer's offset is untouched. Production is unaffected - the seam is
+// swapped only inside this test helper process.
+func retainCapturedWakeStderr(t *testing.T) {
+	t.Helper()
+	base := newWakeStartupStderrForStart
+	retainedDir := os.Getenv("AMQ_KEEPALIVE_RETAINED_CAPTURES")
+	newWakeStartupStderrForStart = func(dir string) (*wakeStartupStderr, error) {
+		capture, err := base(dir)
+		if err != nil {
+			return nil, err
+		}
+		if retainedDir != "" {
+			link := func(file *os.File, label string) {
+				if file == nil {
+					return
+				}
+				if err := os.Link(file.Name(), filepath.Join(retainedDir, label+"-"+filepath.Base(file.Name()))); err != nil {
+					// Surface, never swallow: a missing retained diagnostic
+					// must not look like a retained one. Bounded to the test
+					// temp dir; the wake itself is unaffected.
+					fmt.Fprintf(os.Stderr, "retain %s capture %s: %v\n", label, file.Name(), err)
+				}
+			}
+			link(capture.file, "capture")
+			link(capture.diagnosticFile, "diagnostic")
+		}
+		return capture, nil
+	}
+	t.Cleanup(func() { newWakeStartupStderrForStart = base })
 }
 
 func TestStartWakeDetachedLauncherHelper(t *testing.T) {
 	if os.Getenv("AMQ_KEEPALIVE_TEST_LAUNCHER_HELPER") != "1" {
 		t.Skip("subprocess helper")
 	}
+	retainCapturedWakeStderr(t)
 	err := NewCLI(os.Getenv("AMQ_KEEPALIVE_TEST_FAKE_AMQ")).StartWake(
 		context.Background(),
 		StartWakeRequest{

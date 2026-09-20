@@ -42,6 +42,14 @@ type opsCompanion struct {
 	Target   string `json:"target"`
 	State    string `json:"state"`
 	LastSeen string `json:"last_seen,omitempty"`
+	// Lock is the lifetime-lock probe result for the entry: "held" (a live
+	// companion), "not-held" (no process holds it - the row is stale), or
+	// "unknown" (the probe failed; see ProbeError). 611.13.2 review P1-1:
+	// the registry state alone says "active" for a kill -9ed companion;
+	// only the lock tells the truth. One mechanism, both doctor faces.
+	Lock string `json:"lock,omitempty"`
+	// ProbeError carries the probe failure when Lock is "unknown".
+	ProbeError string `json:"probe_error,omitempty"`
 }
 
 type opsWakeQuarantine struct {
@@ -556,6 +564,24 @@ func checkCompanions(root string, now time.Time) ([]opsCompanion, []opsHint) {
 			Adapter: entry.Adapter,
 			Target:  entry.Target,
 			State:   string(entry.State),
+		}
+		// P1-1 (611.13.2 review): probe the entry's process-lifetime lock.
+		// A registry row is only as alive as the lock its supervisor holds;
+		// a kill -9ed up leaves an "active" row behind. A not-held lock
+		// downgrades the projected state to stale - the same classification
+		// amq-keepalive doctor --ops prints, so the two faces of doctor
+		// agree. A probe error never invents a verdict: the state stays as
+		// recorded and the failure is surfaced as unknown.
+		held, probeErr := registry.ProbeLifetimeLock(regPath, entry.ID)
+		switch {
+		case probeErr != nil:
+			companion.Lock = "unknown"
+			companion.ProbeError = probeErr.Error()
+		case held:
+			companion.Lock = "held"
+		default:
+			companion.Lock = "not-held"
+			companion.State = "stale"
 		}
 		if !entry.LastSeenBySupervisor.IsZero() {
 			companion.LastSeen = entry.LastSeenBySupervisor.UTC().Format(time.RFC3339)

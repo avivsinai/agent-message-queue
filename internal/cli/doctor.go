@@ -319,6 +319,12 @@ func runDoctor(args []string) error {
 			if companion.LastSeen != "" {
 				line += " last_seen=" + companion.LastSeen
 			}
+			if companion.Lock != "" {
+				line += " lock=" + companion.Lock
+			}
+			if companion.ProbeError != "" {
+				line += " probe_error=" + strings.ReplaceAll(companion.ProbeError, "\n", "; ")
+			}
 			if err := writeStdoutLine(line); err != nil {
 				return err
 			}
