@@ -13,7 +13,8 @@ Use the Go toolchain in `go.mod`. `make lint` requires the version of
 `golangci-lint` pinned in the Makefile. Documentation generation uses Python 3.
 
 Start by installing the git hooks so every push runs the full CI gate
-locally:
+locally. Run this in your primary clone before creating worktrees, so the
+hook lands in the shared `.git/hooks` path that all worktrees use:
 
 ```bash
 ./scripts/install-hooks.sh
