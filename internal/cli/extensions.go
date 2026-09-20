@@ -228,8 +228,12 @@ func readPassiveExtensionManifest(root, layer, manifestPath string) (doctorExten
 	// 611.13.4-6: align with the companion, which defaults a missing
 	// schema_version to 1 (manifest.Parse) - the same direction the late
 	// commit took for layer. A MISSING field is accepted; an EXPLICIT
-	// incompatible value still warns.
-	if manifest.SchemaVersion != nil && *manifest.SchemaVersion != 1 {
+	// incompatible value still warns. Review-824-r1 P2-1: the companion
+	// cannot distinguish a missing field from an explicit 0 (both unmarshal
+	// to 0 and Parse defaults 0 to 1), so an explicit 0 is accepted here
+	// too — one file must not serve targets=1 and draw a doctor warning
+	// simultaneously.
+	if manifest.SchemaVersion != nil && *manifest.SchemaVersion != 0 && *manifest.SchemaVersion != 1 {
 		return doctorExtensionManifest{}, &doctorExtensionDiagnostic{
 			Scope:   "root",
 			Layer:   layer,

@@ -1695,6 +1695,11 @@ func TestStartupSequenceWithManifest(t *testing.T) {
 	if !strings.Contains(string(adaptersData), "fake") {
 		t.Fatalf("adapters.json missing the manifest target: %s", adaptersData)
 	}
+	// review-824-r1 P1-2: an attached entry must advertise the manifest
+	// target as its kind (an empty "kind": "" was the review-b7 defect).
+	if !strings.Contains(string(adaptersData), "\"kind\":\"fake\"") && !strings.Contains(string(adaptersData), "\"kind\": \"fake\"") {
+		t.Fatalf("attached adapters.json entry missing kind=fake: %s", adaptersData)
+	}
 }
 
 // TestBuildPartialFailureFakeAndClaude (611.13 r1) pins the partial-failure
@@ -1988,6 +1993,10 @@ func TestValidationFailuresExitTwo(t *testing.T) {
 		name     string
 		f        manifest.File
 		discover bool
+		// wantErr (review-824-r1 P1-3) pins the diagnostic wording on the
+		// manifest-internal duplicate case: the blame must name the
+		// MANIFEST, not the flags.
+		wantErr string
 	}{
 		{
 			name: "duplicate target",
@@ -1998,6 +2007,7 @@ func TestValidationFailuresExitTwo(t *testing.T) {
 					{Kind: "fake", Target: "dup", Epoch: "e_2"},
 				},
 			},
+			wantErr: "manifest declares the same target id more than once",
 		},
 		{
 			name: "epoch on non-fake",
@@ -2074,6 +2084,10 @@ func TestValidationFailuresExitTwo(t *testing.T) {
 			discover: true,
 		},
 	}
+	// review-824-r1 P2-3: ONE deadline for the whole table. Serve refuses
+	// in well under a second for a correct build; a regression that leaves
+	// serve running must fail the table fast, not burn 8x30s of CI.
+	tableDeadline := time.Now().Add(30 * time.Second)
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			// Unit level: typed validation failure.
@@ -2102,6 +2116,29 @@ func TestValidationFailuresExitTwo(t *testing.T) {
 			}
 			var out, errBuf bytes.Buffer
 			var code int
+			// finish() prints Refusal diagnostics to os.Stderr directly
+			// (not the injected writer), so wantErr assertions capture the
+			// process stderr via a pipe (review-824-r1 P1-3).
+			var stderrCapture chan []byte
+			var wPipe *os.File
+			if tc.wantErr != "" {
+				var r *os.File
+				var pipeErr error
+				r, wPipe, pipeErr = os.Pipe()
+				if pipeErr != nil {
+					t.Fatal(pipeErr)
+				}
+				saved := os.Stderr
+				os.Stderr = wPipe
+				stderrCapture = make(chan []byte, 1)
+				go func() {
+					data, _ := io.ReadAll(r)
+					stderrCapture <- data
+				}()
+				defer func() {
+					os.Stderr = saved
+				}()
+			}
 			// 611.13.4-3: bound the test wait on the in-process serve. For a
 			// VALID manifest a mutation could leave serve running forever
 			// and stall the whole package for the full go-test timeout.
@@ -2123,15 +2160,26 @@ func TestValidationFailuresExitTwo(t *testing.T) {
 			select {
 			case r := <-done:
 				code = r.code
-			case <-time.After(30 * time.Second):
+			case <-time.After(time.Until(tableDeadline)):
 				// Review ruling 20:56:30Z: the serve goroutine still owns
 				// out/errBuf, so reading them here races with its writes
 				// (the same failure-path race fixed in #820). Report
-				// without touching the live buffers.
-				t.Fatalf("serve did not refuse the invalid manifest within 30s (mutation bound; it must exit before any startup side effect); serve goroutine still running and owns the capture buffers")
+				// without touching the live buffers. The deadline is shared
+				// across the table (review-824-r1 P2-3): a validation
+				// regression costs one bound, not one per subtest.
+				t.Fatalf("serve did not refuse the invalid manifest within the shared 30s table deadline (mutation bound; it must exit before any startup side effect); serve goroutine still running and owns the capture buffers")
 			}
 			if code != protocol.ExitUsage {
 				t.Fatalf("serve exit=%d, want %d (ExitUsage)\nstderr=%s", code, protocol.ExitUsage, errBuf.String())
+			}
+			if tc.wantErr != "" {
+				// Stop capturing before reading: the pipe reader only
+				// returns once the write end is closed.
+				_ = wPipe.Close()
+				captured := <-stderrCapture
+				if !strings.Contains(string(captured), tc.wantErr) {
+					t.Fatalf("os.Stderr %q missing expected diagnostic %q", string(captured), tc.wantErr)
+				}
 			}
 		})
 	}
@@ -2161,5 +2209,48 @@ func TestLayerOptionalDefaultsToRemote(t *testing.T) {
 	}
 	if f.Layer != manifest.Layer {
 		t.Fatalf("layer=%q, want %q (default fill)", f.Layer, manifest.Layer)
+	}
+}
+
+// TestDoctorRefusalsErrorSurfaced (review-824-r1 P1-1): a truncated
+// refusals.json must surface refusals_error in the doctor report (the
+// review-b7 defect was a silent erase and exit 0 with no hint); an absent
+// refusals.json must NOT set the key (fresh root before first serve).
+func TestDoctorRefusalsErrorSurfaced(t *testing.T) {
+	root, err := os.MkdirTemp("", "amqrdoc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	stateDir := filepath.Join(root, "extensions", "remote")
+	if err := os.MkdirAll(stateDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	// Absent file: no refusals_error key.
+	report, _, err := doctor([]string{"--root", root})
+	if err != nil {
+		t.Fatalf("doctor on fresh state dir: %v", err)
+	}
+	if _, has := report.(map[string]any)["refusals_error"]; has {
+		t.Fatalf("refusals_error set for an absent refusals.json: %v", report)
+	}
+
+	// Truncated file: the key appears and carries the load error.
+	if err := os.WriteFile(filepath.Join(stateDir, "refusals.json"), []byte(`[
+  {
+    "kind": "cla`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	report, _, err = doctor([]string{"--root", root})
+	if err != nil {
+		t.Fatalf("doctor on truncated refusals.json: %v", err)
+	}
+	refErr, has := report.(map[string]any)["refusals_error"]
+	if !has {
+		t.Fatalf("refusals_error missing for a truncated refusals.json: %v", report)
+	}
+	if refErr == "" {
+		t.Fatalf("refusals_error empty for a truncated refusals.json")
 	}
 }

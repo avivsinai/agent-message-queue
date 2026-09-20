@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -243,5 +244,36 @@ func TestWaitWithoutTimeoutIgnoresTheShortVerbReadDeadline(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("wait did not return after endpoint shutdown")
+	}
+}
+
+func TestServerCloseIsIdempotentOnSocketAlreadyGone(t *testing.T) {
+	// review-824-r1 P1-4: Close() must report success when the socket file
+	// is already unlinked (Go removes it as part of listener.Close on
+	// Unix); the pre-fix code returned ENOENT on the success path.
+	stateDir, err := os.MkdirTemp("", "amqr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(stateDir) })
+
+	store, err := requests.Open(stateDir)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	ep := core.New(core.Config{Store: store})
+	ep.Register(fake.New("fake", "e_1"))
+	server, err := Listen(stateDir, ep)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	if err := server.Close(); err != nil {
+		t.Fatalf("first Close: %v", err)
+	}
+	if err := server.Close(); err != nil {
+		t.Fatalf("second Close (socket already gone): %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(stateDir, "endpoint.sock")); !os.IsNotExist(err) {
+		t.Fatalf("socket file survived Close: %v", err)
 	}
 }
