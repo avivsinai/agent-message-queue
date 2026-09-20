@@ -198,8 +198,12 @@ func up(args []string, stdout, stderr io.Writer) (int, error) {
 	lifetime, err := acquireLifetimeLock(regPath, entryID)
 	if err != nil {
 		if errors.Is(err, errLifetimeHeld) {
+			// N3 (review-b5): name the running owner so the operator has
+			// something to inspect or kill — the lock holder's pid when the
+			// kernel can discover it, 0 meaning unknown, plus the entry id.
 			return protocol.ExitActionRequired, protocol.Refuse(protocol.CodeEndpointAlreadyRunning,
-				"up: another up already supervises root %s (registry %s)", c.root, regPath)
+				"up: another up already supervises root %s (registry %s, owner pid %d, entry %s)",
+				c.root, regPath, lifetimeOwnerPid(regPath, entryID), entryID)
 		}
 		return 0, fmt.Errorf("acquire lifetime lock: %w", err)
 	}
@@ -229,6 +233,16 @@ func up(args []string, stdout, stderr io.Writer) (int, error) {
 		State:   registry.StateActive,
 	}
 	if _, err := store.Upsert(entry); err != nil {
+		// N2 (review-b5): a target owned by ANOTHER up refuses this up —
+		// the same "one up per root" condition the lifetime flock enforces,
+		// so it gets the same positive refusal shape (exit 6,
+		// endpoint_already_running), not an untyped exit-1 error surface
+		// that scripts reading exit 6 miss. The registry error text carries
+		// the existing_owner/existing_id detail.
+		if errors.Is(err, registry.ErrTargetOwned) {
+			return protocol.ExitActionRequired, protocol.Refuse(protocol.CodeEndpointAlreadyRunning,
+				"up: another up already owns root %s (registry %s): %v", c.root, regPath, err)
+		}
 		return 0, fmt.Errorf("register companion in keepalive registry: %w", err)
 	}
 	defer func() {
@@ -253,13 +267,10 @@ func up(args []string, stdout, stderr io.Writer) (int, error) {
 	defer cancel()
 
 	cfg := upConfig{
-		root:         c.root,
-		me:           *me,
-		registryPath: regPath,
-		maxRestarts:  *maxRestarts,
-		backoffBase:  supervisor.DefaultFailureBackoffBase,
-		backoffMax:   supervisor.DefaultFailureBackoffMax,
-		serveArgs:    serveArgs,
+		maxRestarts: *maxRestarts,
+		backoffBase: supervisor.DefaultFailureBackoffBase,
+		backoffMax:  supervisor.DefaultFailureBackoffMax,
+		serveArgs:   serveArgs,
 	}
 	return runUpLoop(ctx, cfg, sp)
 }
@@ -277,9 +288,11 @@ func newUpSpawner() spawner { return upSpawnerFactory(*selfFlag) }
 // read it without threading a parameter through every call site.
 var selfFlag *string
 
-// prepareSecureDir creates dir (and parents) with 0700, matching the
-// registry's ensureRegistryDir contract, so lock/registry creation never
-// races a missing parent.
+// prepareSecureDir creates dir (and parents) with 0700 and tightens an
+// EXISTING directory to 0700 as well (N6, review-b5): the creation-only
+// chmod left a pre-existing 0755 ~/.amq-keepalive loose, and the later
+// registry refusal pointed at the registry instead of the directory the
+// caller must fix.
 func prepareSecureDir(dir string) error {
 	info, err := os.Lstat(dir)
 	if errors.Is(err, os.ErrNotExist) {
@@ -294,7 +307,16 @@ func prepareSecureDir(dir string) error {
 	if !info.IsDir() {
 		return fmt.Errorf("%s is not a directory", dir)
 	}
-	return nil
+	// Existing directory: enforce the same 0700 guarantee the name promises.
+	return os.Chmod(dir, 0o700)
+}
+
+// lifetimeOwnerPid reports the pid of the process holding the entry's
+// lifetime flock, when the kernel can discover it (N3, review-b5: the
+// exit-6 refusal must name the owner). 0 means unknown; never an error
+// source — the refusal goes out with whatever is discoverable.
+func lifetimeOwnerPid(regPath, entryID string) int {
+	return lifetimeOwnerPidOS(regPath, entryID)
 }
 
 // acquireLifetimeLock takes an exclusive non-blocking flock on a dedicated
@@ -387,13 +409,10 @@ func upHealthyUptime(base time.Duration) time.Duration { return 2 * base }
 // upConfig holds the parameters for the supervision loop, separated so tests
 // can inject a fake spawner and short backoff without real processes.
 type upConfig struct {
-	root         string
-	me           string
-	registryPath string
-	maxRestarts  int
-	backoffBase  time.Duration
-	backoffMax   time.Duration
-	serveArgs    []string
+	maxRestarts int
+	backoffBase time.Duration
+	backoffMax  time.Duration
+	serveArgs   []string
 	// now returns the current time for uptime measurement; nil means
 	// time.Now. Injected by tests so the healthy-uptime logic is instant
 	// (611.13.2 review P2-2) instead of wall-clock.
