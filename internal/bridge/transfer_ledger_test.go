@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,16 +20,12 @@ import (
 // the capability and compare against candidate dirs.
 func rootRootDir(t *testing.T, root *fsq.DeliveryRoot) string {
 	t.Helper()
-	return ledgerTestBase
+	return root.Base()
 }
-
-var ledgerTestBase string
 
 func newLedgerTestRoot(t *testing.T) (*fsq.DeliveryRoot, *TransferLedger) {
 	t.Helper()
 	base := t.TempDir()
-	ledgerTestBase = base
-	t.Cleanup(func() { ledgerTestBase = "" })
 	if err := fsq.EnsureAgentDirs(base, "claude"); err != nil {
 		t.Fatal(err)
 	}
@@ -764,7 +761,7 @@ func TestAppendLedgerLineDirectoryDurabilityForEmptyOrphan(t *testing.T) {
 	})
 	t.Cleanup(func() { root.SetSyncDirFaultForTest(nil) })
 
-	if err := ledger.appendRecordFirstWrite(ledgerRecord{
+	if err := ledger.appendRecord(ledgerRecord{
 		Version:       ledgerSchemaVersion,
 		State:         LedgerPrepared,
 		SourceHost:    env.SourceHost,
@@ -825,7 +822,7 @@ func TestAppendLedgerLineRepairsFailedDirectorySyncOnRetry(t *testing.T) {
 	})
 	t.Cleanup(func() { root.SetSyncDirFaultForTest(nil) })
 
-	firstErr := ledger.appendRecordFirstWrite(ledgerRecord{
+	firstErr := ledger.appendRecord(ledgerRecord{
 		Version:       ledgerSchemaVersion,
 		State:         LedgerPrepared,
 		SourceHost:    env.SourceHost,
@@ -843,7 +840,7 @@ func TestAppendLedgerLineRepairsFailedDirectorySyncOnRetry(t *testing.T) {
 	failLedgerDirSync = false
 	synced = nil
 	mu.Unlock()
-	if err := ledger.appendRecordFirstWrite(ledgerRecord{
+	if err := ledger.appendRecord(ledgerRecord{
 		Version:       ledgerSchemaVersion,
 		State:         LedgerUncertain,
 		SourceHost:    env.SourceHost,
@@ -946,5 +943,632 @@ func TestApplyWithLedgerRejectsBadSession(t *testing.T) {
 	}
 	if _, err := NewTransferLedger(root, ""); err == nil {
 		t.Fatal("expected empty session rejection")
+	}
+}
+
+// TestApplyWithLedgerCommittedDurabilityErrorIsCommittedNotRetryable
+// (review-827-r2 P0): DeliverToExistingInbox returning
+// *fsq.CommittedDurabilityError means the rename into inbox/new SUCCEEDED —
+// the message IS delivered. The ledger must record committed (with the
+// error's FinalPath), and a later same-digest apply must be an idempotent
+// replay — never a retryable rejection whose re-apply duplicates the
+// delivery into new AND cur.
+func TestApplyWithLedgerCommittedDurabilityErrorIsCommittedNotRetryable(t *testing.T) {
+	root, ledger := newLedgerTestRoot(t)
+	base := rootRootDir(t, root)
+	env := testEnvelope([]byte("cde-payload"))
+
+	root.SetSyncDirFaultForTest(func(dir string) error {
+		if strings.HasSuffix(dir, filepath.Join("inbox", "new")) {
+			return fmt.Errorf("injected EIO")
+		}
+		return nil
+	})
+
+	outcome, err := ApplyWithLedger(ledger, root, "mac", "claude", env)
+	if err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	// Codex r2-r2 finding 1: published but durability UNKNOWN — a distinct
+	// state, NOT durable success. No receipt/ACK flows for it (courier maps
+	// it to a refusal), and the ledger never forgets the publication fact.
+	if outcome.State != LedgerPublishedDurabilityUnknown {
+		t.Fatalf("state = %q (%s), want published_durability_unknown", outcome.State, outcome.Reason)
+	}
+	if outcome.Path == "" {
+		t.Fatalf("published outcome lost FinalPath")
+	}
+	// The artifact IS visible in new (publication happened).
+	entries, err := os.ReadDir(fsq.AgentInboxNew(base, "claude"))
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("new entries = %d err=%v, want 1 (published)", len(entries), err)
+	}
+	// While the sync fault persists, a retry must NOT re-apply (no duplicate)
+	// and must stay in the withheld state.
+	outcomeAgain, err := ApplyWithLedger(ledger, root, "mac", "claude", env)
+	if err != nil {
+		t.Fatalf("re-apply under fault: %v", err)
+	}
+	if outcomeAgain.State != LedgerPublishedDurabilityUnknown || !outcomeAgain.Replayed {
+		t.Fatalf("re-apply under fault: state=%q replayed=%v, want published_durability_unknown replayed (no re-apply)", outcomeAgain.State, outcomeAgain.Replayed)
+	}
+	newEntries, _ := os.ReadDir(fsq.AgentInboxNew(base, "claude"))
+	if len(newEntries) != 1 {
+		t.Fatalf("DUPLICATE under fault: new=%d, want 1", len(newEntries))
+	}
+	// Repair the destination sync, then re-verify: promotes to committed
+	// WITHOUT re-applying (drain the artifact first to prove no re-apply).
+	root.SetSyncDirFaultForTest(nil)
+	src := filepath.Join(fsq.AgentInboxNew(base, "claude"), newEntries[0].Name())
+	dst := filepath.Join(fsq.AgentInboxCur(base, "claude"), newEntries[0].Name())
+	if err := os.Rename(src, dst); err != nil {
+		t.Fatal(err)
+	}
+	outcome2, err := ApplyWithLedger(ledger, root, "mac", "claude", env)
+	if err != nil {
+		t.Fatalf("post-repair: %v", err)
+	}
+	if outcome2.State != LedgerCommitted || !outcome2.Replayed {
+		t.Fatalf("post-repair state = %q replayed=%v, want committed replay (durability verified, no re-apply)", outcome2.State, outcome2.Replayed)
+	}
+	// No duplicate: still one artifact (now in cur).
+	newEntries2, _ := os.ReadDir(fsq.AgentInboxNew(base, "claude"))
+	curEntries, _ := os.ReadDir(fsq.AgentInboxCur(base, "claude"))
+	if len(newEntries2)+len(curEntries) != 1 {
+		t.Fatalf("DUPLICATE DELIVERY: new=%d cur=%d, want 1 total", len(newEntries2), len(curEntries))
+	}
+}
+
+// TestApplyWithLedgerRetryableRejectedResolvesViaEvidence (review-827-r2 P0,
+// retry arm): a rejected(retryable) record whose delivery evidence appeared
+// in cur (consumer drain / operator repair) must promote via evidence, not
+// re-apply and duplicate.
+func TestApplyWithLedgerRetryableRejectedResolvesViaEvidence(t *testing.T) {
+	root, ledger := newLedgerTestRoot(t)
+	base := rootRootDir(t, root)
+	env := testEnvelope([]byte("retry-evidence"))
+
+	if err := ledger.appendRecord(ledgerRecord{
+		Version:       ledgerSchemaVersion,
+		State:         LedgerRejected,
+		SourceHost:    env.SourceHost,
+		TransferID:    env.TransferID,
+		PayloadSHA256: env.PayloadSHA256,
+		Retryable:     true,
+		Reason:        "apply failed (retryable): injected",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Evidence appears in cur.
+	curPath := filepath.Join(fsq.AgentInboxCur(base, "claude"), TransferFilename(env.SourceHost, env.TransferID))
+	if err := os.WriteFile(curPath, env.Payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	outcome, err := ApplyWithLedger(ledger, root, "mac", "claude", env)
+	if err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	if outcome.State != LedgerCommitted || !outcome.Replayed {
+		t.Fatalf("state = %q replayed=%v, want evidence-promoted committed replay", outcome.State, outcome.Replayed)
+	}
+	// No re-apply: still exactly the one retained artifact.
+	newEntries, _ := os.ReadDir(fsq.AgentInboxNew(base, "claude"))
+	curEntries, _ := os.ReadDir(fsq.AgentInboxCur(base, "claude"))
+	if len(newEntries)+len(curEntries) != 1 {
+		t.Fatalf("DUPLICATE: new=%d cur=%d, want 1 total", len(newEntries), len(curEntries))
+	}
+}
+
+// TestApplyWithLedgerRetryReArmsPreparedIntent (codex batch finding 2,
+// review-827-r2): an authorized retry must append a FRESH durable prepared
+// intent before applying, so a crash between retry-success and the commit
+// append resolves via the prepared binding + publication evidence instead of
+// reading terminal-rejected while the delivery may be live.
+func TestApplyWithLedgerRetryReArmsPreparedIntent(t *testing.T) {
+	root, ledger := newLedgerTestRoot(t)
+	base := rootRootDir(t, root)
+	env := testEnvelope([]byte("rearm-payload"))
+
+	if err := ledger.appendRecord(ledgerRecord{
+		Version:       ledgerSchemaVersion,
+		State:         LedgerRejected,
+		SourceHost:    env.SourceHost,
+		TransferID:    env.TransferID,
+		PayloadSHA256: env.PayloadSHA256,
+		Retryable:     true,
+		Reason:        "apply failed (retryable): injected",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	outcome, err := ApplyWithLedger(ledger, root, "mac", "claude", env)
+	if err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	if outcome.State != LedgerCommitted {
+		t.Fatalf("state = %q (%s), want committed", outcome.State, outcome.Reason)
+	}
+	// The ledger history must now contain prepared ... rejected ... prepared
+	// ... committed: the retry re-armed the intent. Read the raw file.
+	data, err := os.ReadFile(filepath.Join(base, "bridge", "transfer-ledger", "mac_claude", ledgerRecordName(env.SourceHost, env.TransferID)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	states := ledgerStatesIn(string(data))
+	if len(states) != 3 || states[0] != "rejected" || states[1] != "prepared" || states[2] != "committed" {
+		t.Fatalf("ledger states = %v, want [rejected prepared committed] (retry re-armed a prepared intent before applying)", states)
+	}
+}
+
+// ledgerStatesIn extracts the state field of every valid JSON line.
+func ledgerStatesIn(s string) []string {
+	var states []string
+	for _, line := range strings.Split(strings.TrimSpace(s), "\n") {
+		var rec struct {
+			State string `json:"state"`
+		}
+		if json.Unmarshal([]byte(line), &rec) == nil && rec.State != "" {
+			states = append(states, rec.State)
+		}
+	}
+	return states
+}
+
+// TestApplyWithLedgerTornTailPromotionIsSeparatelyReadable (codex batch
+// finding 3, review-827-r2): a committed promotion over a torn tail must be
+// framed so it is READABLE on the next reread — appending JSON directly into
+// the unterminated fragment concatenates lines and the reader discards the
+// promotion with the artifact.
+func TestApplyWithLedgerTornTailPromotionIsSeparatelyReadable(t *testing.T) {
+	root, ledger := newLedgerTestRoot(t)
+	base := rootRootDir(t, root)
+	env := testEnvelope([]byte("torn-promote"))
+
+	dir := filepath.Join(base, "bridge", "transfer-ledger", "mac_claude")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	line, err := ledgerLine(ledgerRecord{
+		Version:       ledgerSchemaVersion,
+		State:         LedgerPrepared,
+		SourceHost:    env.SourceHost,
+		TransferID:    env.TransferID,
+		PayloadSHA256: env.PayloadSHA256,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fileData := append([]byte{}, line...)
+	fileData = append(fileData, []byte("{\"version\":1,\"state\":\"comm")...) // torn tail
+	ledgerPath := filepath.Join(dir, ledgerRecordName(env.SourceHost, env.TransferID))
+	if err := os.WriteFile(ledgerPath, fileData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Digest-matching artifact retained in new.
+	newPath := filepath.Join(fsq.AgentInboxNew(base, "claude"), TransferFilename(env.SourceHost, env.TransferID))
+	if err := os.WriteFile(newPath, env.Payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	outcome, err := ApplyWithLedger(ledger, root, "mac", "claude", env)
+	if err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if outcome.State != LedgerCommitted || !outcome.Replayed {
+		t.Fatalf("state = %q replayed=%v, want committed replay via evidence", outcome.State, outcome.Replayed)
+	}
+	// THE PIN: re-apply. The promotion must still be readable — the replay
+	// resolves committed from the ledger record, not by re-deriving from
+	// the artifact, and the artifact count stays 1 even if the artifact is
+	// removed after this point.
+	data, err := os.ReadFile(ledgerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	states := ledgerStatesIn(string(data))
+	if len(states) < 2 || states[len(states)-1] != "committed" {
+		t.Fatalf("reread ledger states = %v, want a readable terminal committed record after the torn tail", states)
+	}
+	if err := os.Remove(newPath); err != nil {
+		t.Fatal(err)
+	}
+	outcome2, err := ApplyWithLedger(ledger, root, "mac", "claude", env)
+	if err != nil {
+		t.Fatalf("replay after artifact removal: %v", err)
+	}
+	if outcome2.State != LedgerCommitted || !outcome2.Replayed {
+		t.Fatalf("post-removal state = %q replayed=%v, want committed replay from the framed ledger record", outcome2.State, outcome2.Replayed)
+	}
+}
+
+// TestApplyWithLedgerUnprovenCollisionIsUncertainNotConflict (codex r2-r2
+// finding 2): an os.ErrExist whose existing bytes cannot be READ is neither a
+// proven non-delivery nor a proven conflict — the ledger records uncertain,
+// never terminal transfer_conflict and never a retryable re-apply.
+func TestApplyWithLedgerUnprovenCollisionIsUncertainNotConflict(t *testing.T) {
+	root, ledger := newLedgerTestRoot(t)
+	base := rootRootDir(t, root)
+	env := testEnvelope([]byte("collision-unproven"))
+
+	// Seed a retryable rejection so the retry branch runs (it skips the
+	// occupancy pre-check and reaches the apply), pre-place a same-name
+	// artifact with DIFFERENT readable bytes (so the evidence scan passes
+	// without finding this digest — it is not evidence), then force the
+	// apply-time collision READ to fail: the bytes are unprovable at the
+	// collision site. This is the exact classifier path codex r2-r3 finding 2
+	// required: ErrCollisionUnproven checked independently of os.ErrExist.
+	if err := ledger.appendRecord(ledgerRecord{
+		Version:       ledgerSchemaVersion,
+		State:         LedgerRejected,
+		SourceHost:    env.SourceHost,
+		TransferID:    env.TransferID,
+		PayloadSHA256: env.PayloadSHA256,
+		Retryable:     true,
+		Reason:        "apply failed (retryable): injected",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	slot := filepath.Join(fsq.AgentInboxNew(base, "claude"), TransferFilename(env.SourceHost, env.TransferID))
+	if err := os.WriteFile(slot, []byte("different bytes entirely"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	targetReads := 0
+	var hook func(string) ([]byte, error)
+	hook = func(name string) ([]byte, error) {
+		if strings.HasSuffix(name, TransferFilename(env.SourceHost, env.TransferID)) {
+			// First read is the pre-apply evidence scan (must see the
+			// different bytes and pass on); the SECOND is the apply-time
+			// collision read — force it to fail there.
+			targetReads++
+			if targetReads >= 2 {
+				return nil, fmt.Errorf("forced unreadable collision")
+			}
+		}
+		// Bypass the hook for non-target reads (single-threaded test: safe).
+		root.SetReadRegularNoFollowFaultForTest(nil)
+		defer root.SetReadRegularNoFollowFaultForTest(hook)
+		return root.ReadRegularNoFollow(name)
+	}
+	root.SetReadRegularNoFollowFaultForTest(hook)
+	t.Cleanup(func() { root.SetReadRegularNoFollowFaultForTest(nil) })
+
+	outcome, err := ApplyWithLedger(ledger, root, "mac", "claude", env)
+	if err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if outcome.State != LedgerUncertain {
+		t.Fatalf("state = %q (%s), want uncertain (unprovable collision)", outcome.State, outcome.Evidence)
+	}
+	// The durable record proves the CLASSIFIER fired (uncertain with the
+	// collision reason), not the occupied-slot refusal (that would be
+	// terminal rejected) and not the evidence path (that records nothing).
+	recs, _, err := ledger.readRecords(env.SourceHost, env.TransferID)
+	if err != nil || len(recs) == 0 {
+		t.Fatalf("records = %v err=%v, want the classifier's uncertain record", recs, err)
+	}
+	last := recs[len(recs)-1]
+	if last.State != LedgerUncertain || last.Retryable || !strings.Contains(last.Reason, "collision bytes unreadable") {
+		t.Fatalf("last record = %+v, want uncertain non-retryable from the collision classifier", last)
+	}
+	// Nothing was applied: the unreadable slot artifact blocks delivery.
+	newEntries, _ := os.ReadDir(fsq.AgentInboxNew(base, "claude"))
+	if len(newEntries) != 1 {
+		t.Fatalf("new entries = %d, want just the pre-existing slot artifact", len(newEntries))
+	}
+	if outcome2, err := ApplyWithLedger(ledger, root, "mac", "claude", env); err != nil || outcome2.State != LedgerUncertain {
+		t.Fatalf("retry = %q err=%v, want stable uncertain", outcome2.State, err)
+	}
+}
+
+// TestApplyWithLedgerTornTailOverRetryableRejectedNeverApplies (codex r2-r2
+// finding 3): a rejected(Retryable=true) prefix followed by a torn tail is
+// NOT terminal history. Without publication evidence the transfer must stay
+// uncertain — never re-apply from ambiguous torn history.
+func TestApplyWithLedgerTornTailOverRetryableRejectedNeverApplies(t *testing.T) {
+	root, ledger := newLedgerTestRoot(t)
+	base := rootRootDir(t, root)
+	env := testEnvelope([]byte("torn-retryable"))
+
+	if err := ledger.appendRecord(ledgerRecord{
+		Version:       ledgerSchemaVersion,
+		State:         LedgerRejected,
+		SourceHost:    env.SourceHost,
+		TransferID:    env.TransferID,
+		PayloadSHA256: env.PayloadSHA256,
+		Retryable:     true,
+		Reason:        "apply failed (retryable): injected",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Tear the tail: partial garbage line appended after the valid record.
+	recPath := filepath.Join(base, "bridge", "transfer-ledger", "mac_claude", ledgerRecordName(env.SourceHost, env.TransferID))
+	f, err := os.OpenFile(recPath, os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(`{"version":2,"state":"comm`); err != nil {
+		t.Fatal(err)
+	}
+	_ = f.Close()
+
+	outcome, err := ApplyWithLedger(ledger, root, "mac", "claude", env)
+	if err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if outcome.State != LedgerUncertain {
+		t.Fatalf("state = %q (%s), want uncertain (torn tail over retryable rejection, no evidence)", outcome.State, outcome.Evidence)
+	}
+	// Nothing was applied: no artifact in new or cur.
+	newEntries, _ := os.ReadDir(fsq.AgentInboxNew(base, "claude"))
+	curEntries, _ := os.ReadDir(fsq.AgentInboxCur(base, "claude"))
+	if len(newEntries)+len(curEntries) != 0 {
+		t.Fatalf("APPLIED FROM TORN HISTORY: new=%d cur=%d, want 0", len(newEntries), len(curEntries))
+	}
+	// WITH evidence, the torn history still resolves cleanly via the framed
+	// promotion: durable committed, no re-apply.
+	curPath := filepath.Join(fsq.AgentInboxCur(base, "claude"), TransferFilename(env.SourceHost, env.TransferID))
+	if err := os.WriteFile(curPath, env.Payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	outcome2, err := ApplyWithLedger(ledger, root, "mac", "claude", env)
+	if err != nil {
+		t.Fatalf("evidence apply: %v", err)
+	}
+	if outcome2.State != LedgerCommitted || !outcome2.Replayed {
+		t.Fatalf("state = %q replayed=%v, want evidence-promoted committed replay from torn history", outcome2.State, outcome2.Replayed)
+	}
+	// The promotion is separately readable after the torn line.
+	recs, _, err := ledger.readRecords(env.SourceHost, env.TransferID)
+	if err != nil {
+		t.Fatalf("reread: %v", err)
+	}
+	if len(recs) == 0 || recs[len(recs)-1].State != LedgerCommitted {
+		t.Fatalf("last record = %+v, want committed readable after torn prefix", recs)
+	}
+}
+
+// TestApplyWithLedgerTornRecoveryPromotionRespectsCarrierSyncFault (codex
+// r2-r3 follow-up, the concrete blocker): torn nonterminal recovery over a
+// prepared prefix must go through the shared evidence-promotion path — if
+// the evidence carrier's sync still faults, the recovery must yield
+// published_durability_unknown (receipt/ACK withheld), never a torn-framed
+// committed record over an unsynced carrier.
+func TestApplyWithLedgerTornRecoveryPromotionRespectsCarrierSyncFault(t *testing.T) {
+	root, ledger := newLedgerTestRoot(t)
+	base := rootRootDir(t, root)
+	env := testEnvelope([]byte("torn-carrier-fault"))
+
+	if err := ledger.appendRecord(ledgerRecord{
+		Version:       ledgerSchemaVersion,
+		State:         LedgerPrepared,
+		SourceHost:    env.SourceHost,
+		TransferID:    env.TransferID,
+		PayloadSHA256: env.PayloadSHA256,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Tear the tail over the prepared prefix.
+	recPath := filepath.Join(base, "bridge", "transfer-ledger", "mac_claude", ledgerRecordName(env.SourceHost, env.TransferID))
+	f, err := os.OpenFile(recPath, os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(`{"version":2,"state":"comm`); err != nil {
+		t.Fatal(err)
+	}
+	_ = f.Close()
+	// Consumer drained the artifact to cur (digest-verified evidence).
+	curPath := filepath.Join(fsq.AgentInboxCur(base, "claude"), TransferFilename(env.SourceHost, env.TransferID))
+	if err := os.WriteFile(curPath, env.Payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The cur carrier's sync still faults (the ongoing durability problem).
+	faults := 0
+	root.SetSyncDirFaultForTest(func(dir string) error {
+		if strings.HasSuffix(dir, filepath.Join("inbox", "cur")) {
+			faults++
+			return fmt.Errorf("injected EIO on cur")
+		}
+		return nil
+	})
+	t.Cleanup(func() { root.SetSyncDirFaultForTest(nil) })
+
+	outcome, err := ApplyWithLedger(ledger, root, "mac", "claude", env)
+	if err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if outcome.State != LedgerPublishedDurabilityUnknown || faults == 0 {
+		t.Fatalf("state = %q faults=%d, want published_durability_unknown via a faulted carrier sync (no torn committed over unsynced carrier)", outcome.State, faults)
+	}
+	// No committed record readable (torn or otherwise).
+	recs, _, err := ledger.readRecords(env.SourceHost, env.TransferID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range recs {
+		if r.State == LedgerCommitted {
+			t.Fatalf("committed record recorded over a faulted carrier: %+v", r)
+		}
+	}
+	// Repair the sync: promotion succeeds, framed and separately readable.
+	root.SetSyncDirFaultForTest(nil)
+	outcome2, err := ApplyWithLedger(ledger, root, "mac", "claude", env)
+	if err != nil || outcome2.State != LedgerCommitted || !outcome2.Replayed {
+		t.Fatalf("post-repair = %q err=%v replayed=%v, want framed committed promotion", outcome2.State, err, outcome2.Replayed)
+	}
+	recs2, _, err := ledger.readRecords(env.SourceHost, env.TransferID)
+	if err != nil || len(recs2) == 0 || recs2[len(recs2)-1].State != LedgerCommitted {
+		t.Fatalf("post-repair records = %v err=%v, want last record committed", recs2, err)
+	}
+}
+
+// TestApplyWithLedgerCarrierSyncFailureRevokesRetryPermission: publication
+// observed but the carrier directory cannot be verified durable. The ledger
+// must durably record published_durability_unknown BEFORE the outcome
+// returns — a returned struct is not persistent state — so a later call
+// after the retained artifact is consumed re-enters at published-unknown
+// (which never re-applies) instead of reading the stale retryable-rejected
+// record and duplicating the delivery.
+func TestApplyWithLedgerCarrierSyncFailureRevokesRetryPermission(t *testing.T) {
+	root, ledger := newLedgerTestRoot(t)
+	base := rootRootDir(t, root)
+	env := testEnvelope([]byte("revoke-retry-payload"))
+
+	// Start from a retryable-rejected state whose delivery later shows up in
+	// cur (consumer drain / operator repair of the earlier failure).
+	if err := ledger.appendRecord(ledgerRecord{
+		Version:       ledgerSchemaVersion,
+		State:         LedgerRejected,
+		SourceHost:    env.SourceHost,
+		TransferID:    env.TransferID,
+		PayloadSHA256: env.PayloadSHA256,
+		Retryable:     true,
+		Reason:        "apply failed (retryable): injected",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	curPath := filepath.Join(fsq.AgentInboxCur(base, "claude"), TransferFilename(env.SourceHost, env.TransferID))
+	if err := os.WriteFile(curPath, env.Payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Carrier sync fails only on the evidence carrier (inbox/cur): the
+	// ledger appends themselves must succeed so the durable revocation can
+	// land — the sequence under test is a failing CARRIER, not a failing
+	// ledger file.
+	carrierRel := filepath.Join("agents", "claude", "inbox", "cur")
+	root.SetSyncDirFaultForTest(func(dir string) error {
+		if dir == carrierRel || strings.HasPrefix(filepath.ToSlash(filepath.Clean(dir)), filepath.ToSlash(carrierRel)+"/") {
+			return errors.New("injected: carrier sync failed")
+		}
+		return nil
+	})
+	t.Cleanup(func() { root.SetSyncDirFaultForTest(nil) })
+
+	outcome, err := ApplyWithLedger(ledger, root, "mac", "claude", env)
+	if err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if outcome.State != LedgerPublishedDurabilityUnknown {
+		t.Fatalf("state = %q, want published_durability_unknown", outcome.State)
+	}
+	root.SetSyncDirFaultForTest(nil)
+
+	// The durable ledger (not the returned struct) must now carry the
+	// published-unknown transition: read the raw file.
+	data, err := os.ReadFile(filepath.Join(base, "bridge", "transfer-ledger", "mac_claude", ledgerRecordName(env.SourceHost, env.TransferID)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	states := ledgerStatesIn(string(data))
+	sawPublishedUnknown := false
+	for _, st := range states {
+		if st == "published_durability_unknown" {
+			sawPublishedUnknown = true
+		}
+	}
+	if !sawPublishedUnknown {
+		t.Fatalf("ledger states = %v, want a durable published_durability_unknown record revoking retry permission", states)
+	}
+
+	// The consumer drains the retained artifact (removes the evidence), then
+	// the delivery is retried. The next call must NOT re-apply over the
+	// stale retryable-rejected record: published-unknown without retained
+	// evidence stays uncertain, never re-applies.
+	if err := os.Remove(curPath); err != nil {
+		t.Fatal(err)
+	}
+	outcome2, err := ApplyWithLedger(ledger, root, "mac", "claude", env)
+	if err != nil {
+		t.Fatalf("post-drain apply: %v", err)
+	}
+	if outcome2.State != LedgerUncertain {
+		t.Fatalf("post-drain state = %q, want uncertain (no re-apply over proven publication)", outcome2.State)
+	}
+	newEntries, _ := os.ReadDir(fsq.AgentInboxNew(base, "claude"))
+	curEntries, _ := os.ReadDir(fsq.AgentInboxCur(base, "claude"))
+	if len(newEntries)+len(curEntries) != 0 {
+		t.Fatalf("DUPLICATE: a re-apply published the payload again: new=%d cur=%d, want 0", len(newEntries), len(curEntries))
+	}
+}
+
+// TestApplyWithLedgerRetryReArmsPreparedBeforeEvidenceLookup: the retry arm
+// must durably append the fresh prepared intent BEFORE inspecting evidence.
+// Observed ordering defect (review-827-r4): with evidence lookup first, a
+// carrier-sync success followed by a failed/crashed commit append leaves the
+// old rejected(retryable) record as the effective durable state — a later
+// invocation after the artifact is consumed then re-applies. With re-arm
+// first, the same crash leaves prepared, which never re-applies without
+// evidence. Simulated here by re-arming against a ledger file whose appends
+// fail: the invocation must do no recovery/apply work and must leave the
+// last durable state as the original rejected record (not prepared, not
+// committed), reporting the refusal.
+func TestApplyWithLedgerRetryReArmsPreparedBeforeEvidenceLookup(t *testing.T) {
+	root, ledger := newLedgerTestRoot(t)
+	base := rootRootDir(t, root)
+	env := testEnvelope([]byte("rearm-before-evidence"))
+
+	if err := ledger.appendRecord(ledgerRecord{
+		Version:       ledgerSchemaVersion,
+		State:         LedgerRejected,
+		SourceHost:    env.SourceHost,
+		TransferID:    env.TransferID,
+		PayloadSHA256: env.PayloadSHA256,
+		Retryable:     true,
+		Reason:        "apply failed (retryable): injected",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The delivery has been retained (consumer drain): evidence exists.
+	curPath := filepath.Join(fsq.AgentInboxCur(base, "claude"), TransferFilename(env.SourceHost, env.TransferID))
+	if err := os.WriteFile(curPath, env.Payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Re-arm append fails (append-failure/crash simulation): the invocation
+	// must stop before any evidence inspection or apply. With the defective
+	// (evidence-first) ordering this invocation instead promotes via the
+	// retained evidence and only fails when the commit append fails —
+	// leaving rejected(retryable) as the last durable state, so a later
+	// invocation after the artifact is consumed re-applies.
+	root.SetAppendFaultForTest(func(dir, filename string, data []byte) (bool, error) {
+		return false, errors.New("injected: ledger append failed")
+	})
+	t.Cleanup(func() { root.SetAppendFaultForTest(nil) })
+
+	outcome, err := ApplyWithLedger(ledger, root, "mac", "claude", env)
+	if err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if outcome.State != LedgerRejected || !strings.Contains(outcome.Reason, "re-arming prepared intent failed") {
+		t.Fatalf("state = %q reason = %q, want the re-arm-failure refusal", outcome.State, outcome.Reason)
+	}
+
+	// The last durable record is still the original rejected(retryable):
+	// nothing was applied, nothing was promoted.
+	root.SetAppendFaultForTest(nil)
+	data, err := os.ReadFile(filepath.Join(base, "bridge", "transfer-ledger", "mac_claude", ledgerRecordName(env.SourceHost, env.TransferID)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	states := ledgerStatesIn(string(data))
+	if len(states) != 1 || states[0] != "rejected" {
+		t.Fatalf("ledger states = %v, want only the original rejected record (no partial re-arm, no apply)", states)
+	}
+	newEntries, _ := os.ReadDir(fsq.AgentInboxNew(base, "claude"))
+	if len(newEntries) != 0 {
+		t.Fatalf("applied during a failed re-arm: %d artifacts in new, want 0", len(newEntries))
+	}
+
+	// Recovery after the append heals: the retry now re-arms prepared first
+	// and resolves through the standard prepared path.
+	outcome2, err := ApplyWithLedger(ledger, root, "mac", "claude", env)
+	if err != nil {
+		t.Fatalf("retry after repair: %v", err)
+	}
+	if outcome2.State != LedgerCommitted {
+		t.Fatalf("state after repair = %q (%s), want committed", outcome2.State, outcome2.Reason)
 	}
 }

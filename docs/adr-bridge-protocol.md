@@ -102,7 +102,7 @@ Keep three layers distinct:
 | --- | --- |
 | `transport_accepted` | The destination durably renamed the exact envelope bytes into `rx/<peer>/new/<object_sha256>.envelope`. It does not retire the source `tx` object. |
 | `destination_maildir_committed` | `ApplyEnvelope` committed `xfer-<source_host>-<transfer_id>.md` into the destination Maildir. |
-| `destination_rejected` | The authenticated destination emitted a terminal rejection, such as `alias_not_accepted` or `transfer_conflict`. |
+| `destination_rejected` | Named for outcome-table completeness only: NOT emitted by this protocol version. A terminal destination refusal (e.g. `transfer_conflict`) is reported to the operator via `PollResult.Refused` on every poll; recovery is a rendezvous-operator action (see Addendum 4's conflicted-transfer retirement). |
 | consumer-local drain/start/complete | Optional; may stay on the consuming host. |
 
 The source retires `tx/<peer>/new` only after a verified signed
@@ -248,33 +248,70 @@ evidence: a digest-matching artifact retained in `inbox/new`, `inbox/cur`, or
 a DLQ envelope wrapping the original bytes promotes the record to `committed`
 (replayed) without re-applying.
 
-**Proven non-delivery is retryable (review-827-r1 P0).** An in-process apply
-failure — in the same process that just wrote `prepared` — is a proven
-non-delivery: `ApplyEnvelope` is all-or-nothing (temp file + rename), so a
-returned error means nothing was published. It is recorded as a retryable
-`rejected` record naming the failure (`apply failed (retryable): ...`), and a
-retry with the same digest re-applies from that state. A known non-delivery
-is never reclassified as `uncertain`; only unknown history (no evidence, no
-in-process knowledge) is `uncertain`, and `uncertain` refuses both the
-destination receipt and the ACK.
+**Proven non-delivery is retryable (review-827-r1 P0, amended per
+review-827-r2 P0).** An in-process apply failure — in the same process that
+just wrote `prepared` — is recorded as a retryable `rejected` record (typed
+`retryable` flag) naming the failure (`apply failed (retryable): ...`).
+ApplyEnvelope is NOT all-or-nothing: a `*fsq.CommittedDurabilityError` means
+the rename into `inbox/new` SUCCEEDED but the destination directory sync
+failed — the publication is a FACT, yet its durability is UNPROVEN (a crash
+can lose the unsynced rename). The ledger records the distinct
+`published_durability_unknown` state with the error's `FinalPath`: never
+re-applied (that would duplicate once the consumer drains new → cur), and
+the destination receipt and ACK are WITHHELD until a later call verifies
+digest-matching evidence AND the durability of that evidence's actual
+carrier directory. Two further non-delivery classes are explicit:
+an `os.ErrExist` whose existing bytes cannot be read is post-publication
+ambiguity (`uncertain`, never retryable, never a definitive conflict), and a
+collision whose destination PROVABLY already holds matching bytes is a
+committed delivery even when the tmp cleanup fails (classified as
+`CommittedDurabilityError` at the fsq boundary). Every other in-process
+failure is, in this process's knowledge, a pre-publication proven
+non-delivery. A retry of a retryable
+record first consults durable publication evidence (new/cur/DLQ, same rule
+as crash recovery) and promotes on a match; only with no evidence does it
+re-arm a fresh durable `prepared` intent and re-apply — so a crash during the
+retry resolves exactly like the first attempt, and a retry whose intent
+append fails does not apply at all. A known non-delivery is never
+reclassified as `uncertain`; only unknown history (no evidence, no in-process
+knowledge) is `uncertain`, and `uncertain` refuses both the destination
+receipt and the ACK.
 
 **Terminal rejection is one answer.** `os.ErrExist` on a fresh key
 (same-name artifact with different bytes) records a terminal `rejected`
 (`transfer_conflict`) on the first refusal and reports the same terminal
 outcome on every later attempt.
 
-**Torn tail (review-827-r1 P1c).** An unparseable tail line of the ledger
-file is a torn append over an intact prefix: the last valid record governs
-the disposition, and a torn tail after a terminal record cannot un-terminal
-it. A torn read with no valid record (or a conflicting digest over a
-non-terminal prefix) remains fail-closed `uncertain`.
+**Torn tail (review-827-r1 P1c, amended per review-827-r2).** An unparseable
+tail line of the ledger file is a torn append over an intact prefix: the last
+valid record governs the disposition, and a torn tail after a terminal record
+cannot un-terminal it. A torn read with no valid record (or a conflicting
+digest over a non-terminal prefix) remains fail-closed `uncertain`. When
+crash recovery promotes a committed record over a torn tail, the promotion is
+framed durably: a bare newline first terminates the torn fragment, then the
+committed record lands on its own parseable line — appended JSON fused into
+an unterminated fragment would be discarded by the reader with the artifact
+it names.
 
-**Courier batching (review-827-r1 P1b).** A refused transfer — `uncertain`
-history, terminal rejection, or conflict — is skipped, not batch-fatal: the
-poll loop continues, envelopes behind it still apply and ACK, and the refusal
-is reported in `PollResult.Refused`. A refused envelope is never ACKed, so
-the rendezvous redelivers it; a retryable rejection clears when its condition
-clears.
+**Courier batching (review-827-r1 P1b, amended per review-827-r2 P1).** A
+refused transfer — `uncertain` history, terminal rejection, or conflict — is
+skipped, not batch-fatal: the poll loop continues, envelopes behind it still
+apply and ACK, and the refusal is reported in `PollResult.Refused`, which the
+CLI serializes to the operator on every run alongside the ledger's
+unresolved-transfer diagnostics.
+
+**Conflicted-transfer retirement (review-827-r2 P1, corrected per codex
+r2-r2 finding 4).** The `destination_rejected` row in the outcome table names
+a stage this protocol does NOT implement: no receiver code emits it and no
+source code consumes it, and a receiver-side redelivery loop cannot be
+closed from the wire alone. The refused envelope STAYS in the receiver's
+rendezvous queue and is re-reported on every poll (steady-state signal, not
+an error). Removing the local source-side spool copy does NOT retire the
+posted remote item — this protocol has no source-deletion notification. The
+recovery is a rendezvous-operator action (clearing the conflicting envelope
+from the rendezvous queue, or replacing it with a corrected payload), which
+this wave does not automate and does not provide a command for; that is the
+actual operator-managed recovery limit of this protocol version.
 
 **Recovered receipts.** Evidence-promoted commits carry the retained
 artifact's path as `committed_path` (a replayed receipt for a consumer-drained

@@ -37,6 +37,12 @@ type DeliveryRoot struct {
 	borrowed   bool
 
 	syncDirForTest func(string) error
+	// readRegularNoFollowForTest, when set, intercepts ReadRegularNoFollow.
+	readRegularNoFollowForTest func(name string) ([]byte, error)
+	// appendLedgerLineForTest, when set, intercepts AppendLedgerLine
+	// (fault-injection hook for out-of-package regression tests that must
+	// fail a ledger append deterministically; nil is the normal path).
+	appendLedgerLineForTest func(dir, filename string, data []byte) (bool, error)
 }
 
 type pinnedBatchLease struct {
@@ -61,6 +67,28 @@ func (e *DirectChildExistsError) Error() string {
 // delivery, and keep it deterministic (no sleeps, no goroutines).
 func (r *DeliveryRoot) SetSyncDirFaultForTest(fn func(dir string) error) {
 	r.syncDirForTest = fn
+}
+
+// SetAppendFaultForTest intercepts AppendLedgerLine on this root (fault
+// injection for out-of-package regression tests; nil restores the normal
+// path).
+func (r *DeliveryRoot) SetAppendFaultForTest(fn func(dir, filename string, data []byte) (bool, error)) {
+	r.appendLedgerLineForTest = fn
+}
+
+// SetReadRegularNoFollowFaultForTest intercepts ReadRegularNoFollow on this
+// root (fault-injection hook for out-of-package regression tests that must
+// force a read failure deterministically; nil restores the normal path).
+func (r *DeliveryRoot) SetReadRegularNoFollowFaultForTest(fn func(name string) ([]byte, error)) {
+	r.readRegularNoFollowForTest = fn
+}
+
+// SetPackageSyncDirFaultForTest installs a process-wide directory-sync fault
+// that applies to EVERY DeliveryRoot in this process, including handles the
+// test does not own (a courier opens its own root per cycle). Restore with a
+// nil fn in t.Cleanup.
+func SetPackageSyncDirFaultForTest(fn func(dir string) error) {
+	packageSyncDirFaultForTest = fn
 }
 
 // beforeCreateDirectChildExclusiveForTest runs after VerifyBase and before
@@ -808,6 +836,9 @@ func (r *DeliveryRoot) ReadDir(name string) ([]os.DirEntry, error) {
 // the file NAME is as durable as the record. See ensureLedgerDirDurability.
 // On any error the return value is unspecified.
 func (r *DeliveryRoot) AppendLedgerLine(dir, filename string, data []byte) (created bool, err error) {
+	if r.appendLedgerLineForTest != nil {
+		return r.appendLedgerLineForTest(dir, filename, data)
+	}
 	if err := r.VerifyBase(); err != nil {
 		return false, err
 	}
@@ -1037,6 +1068,9 @@ func (r *DeliveryRoot) WithConfigLock(fn func(*DeliveryRoot) error) error {
 // ReadRegularNoFollow reads a root-relative regular file while refusing an
 // initially symlinked artifact and detecting replacement between lstat/open.
 func (r *DeliveryRoot) ReadRegularNoFollow(name string) ([]byte, error) {
+	if r.readRegularNoFollowForTest != nil {
+		return r.readRegularNoFollowForTest(name)
+	}
 	file, _, err := r.OpenRegularNoFollow(name)
 	if err != nil {
 		return nil, err

@@ -88,6 +88,17 @@ const (
 	LedgerCommitted LedgerState = "committed"
 	LedgerRejected  LedgerState = "rejected"
 	LedgerUncertain LedgerState = "uncertain"
+	// LedgerPublishedDurabilityUnknown records the post-publication
+	// uncertainty class (codex r2-r2 finding 1): the rename into inbox/new
+	// SUCCEEDED (the artifact is visible) but the destination directory
+	// sync failed — CommittedDurabilityError. The publication is a fact and
+	// must never be re-applied (that duplicates); the DURABILITY of that
+	// publication is unproven, so the success receipt and the ACK are
+	// withheld until the destination directory sync is verified repaired.
+	// This is a distinct third class: not a proven non-delivery (retryable),
+	// not durable completion (committed), and not unknown history
+	// (uncertain) — the artifact's location is KNOWN.
+	LedgerPublishedDurabilityUnknown LedgerState = "published_durability_unknown"
 )
 
 // ledgerRecord is the on-disk JSON record. Appends are one JSON object per
@@ -99,9 +110,14 @@ type ledgerRecord struct {
 	SourceHost    string      `json:"source_host"`
 	TransferID    string      `json:"transfer_id"`
 	PayloadSHA256 string      `json:"payload_sha256"`
-	Reason        string      `json:"reason,omitempty"`
-	CommittedPath string      `json:"committed_path,omitempty"`
-	RecordedAt    string      `json:"recorded_at"`
+	// Retryable marks a rejected record whose rejection is a PROVEN
+	// non-delivery that a same-digest retry may re-apply (review-827-r2
+	// P2-1: a discriminator that gates re-delivery is a typed field, not a
+	// free-text reason prefix a future error-message edit could break).
+	Retryable     bool   `json:"retryable,omitempty"`
+	Reason        string `json:"reason,omitempty"`
+	CommittedPath string `json:"committed_path,omitempty"`
+	RecordedAt    string `json:"recorded_at"`
 }
 
 // LedgerRecord is the caller-facing view of one transfer's ledger entry.
@@ -110,6 +126,7 @@ type LedgerRecord struct {
 	SourceHost    string
 	TransferID    string
 	PayloadSHA256 string
+	Retryable     bool
 	Reason        string
 	CommittedPath string
 	RecordedAt    string
@@ -171,10 +188,11 @@ func (l *TransferLedger) withTransferLock(sourceHost, transferID string, fn func
 
 // appendRecord writes one JSON line, fsynced, under the caller-held lock.
 // The ledger file is opened for append (create if missing) through the pinned
-// capability; the write and its durability sync are one unit. On first
-// creation of the ledger file its directory chain is synced too (fix: a
-// machine crash must not preserve the message while losing the ledger name —
-// see section 7.5's directory-sync requirement).
+// capability; the write and its durability sync are one unit —
+// AppendLedgerLine syncs on file creation, on an empty crash orphan, and on a
+// recovered earlier failed sync (ensureLedgerDirDurability), so durability is
+// never inferred from the created flag (review-827-r2 P2-4: this one helper
+// used to exist twice under two names claiming different guarantees).
 func (l *TransferLedger) appendRecord(rec ledgerRecord) error {
 	data, err := ledgerLine(rec)
 	if err != nil {
@@ -182,6 +200,20 @@ func (l *TransferLedger) appendRecord(rec ledgerRecord) error {
 	}
 	_, err = l.root.AppendLedgerLine(l.dir, ledgerRecordName(rec.SourceHost, rec.TransferID), data)
 	return err
+}
+
+// appendRecordFramed writes a recovered record after a torn read: it first
+// appends a bare newline to TERMINATE whatever torn tail line precedes it,
+// then the record on its own line (codex batch finding 3, review-827-r2).
+// Appending JSON directly after a partial tail yields one concatenated line
+// that readRecords discards wholesale — the promotion would be unreadable on
+// the next reread. Each append is its own fsynced unit; the torn prefix stays
+// torn and surfaces via the torn flag.
+func (l *TransferLedger) appendRecordFramed(rec ledgerRecord) error {
+	if _, err := l.root.AppendLedgerLine(l.dir, ledgerRecordName(rec.SourceHost, rec.TransferID), []byte("\n")); err != nil {
+		return fmt.Errorf("frame torn tail: %w", err)
+	}
+	return l.appendRecord(rec)
 }
 
 // ledgerLine serializes one record as a newline-terminated JSON line.
@@ -194,21 +226,6 @@ func ledgerLine(rec ledgerRecord) ([]byte, error) {
 		return nil, err
 	}
 	return append(data, '\n'), nil
-}
-
-// appendRecordFirstWrite appends a record and guarantees the ledger file's
-// directory chain is durable before returning: AppendLedgerLine owns the
-// guarantee (it syncs on file creation, on an empty crash orphan, and on a
-// recovered earlier failed sync — see ensureLedgerDirDurability). This kept
-// name is what the prepared-intent recovery depends on after a machine
-// crash (section 7.5 directory-sync requirement).
-func (l *TransferLedger) appendRecordFirstWrite(rec ledgerRecord) error {
-	data, err := ledgerLine(rec)
-	if err != nil {
-		return err
-	}
-	_, err = l.root.AppendLedgerLine(l.dir, ledgerRecordName(rec.SourceHost, rec.TransferID), data)
-	return err
 }
 
 // readRecords parses the record file for one transfer key. It returns every
@@ -370,16 +387,6 @@ func filenameSlotOccupied(root *fsq.DeliveryRoot, localAgent, sourceHost, transf
 	return scanDLQForOriginalFile(root, localAgent, filename)
 }
 
-// publicationEvidence implements the crash-history A/B recovery rule:
-// consult durable publication evidence independent of inbox/new. Evidence is
-// conditional and fails closed:
-//
-//   - inbox/new and inbox/cur: deterministic transfer filename
-//     (TransferFilename) looked up directly; a claim never replaces a
-//     retained cur copy.
-//   - DLQ: envelopes wrap the original bytes under a new id/filename, so
-//     match on OriginalFile + original-content digest.
-//
 // publicationEvidencePath consults durable publication evidence independent
 // of inbox/new. Evidence is conditional and fails closed:
 //
@@ -423,6 +430,76 @@ func publicationEvidencePath(root *fsq.DeliveryRoot, localAgent, sourceHost, tra
 		return false, "", true
 	}
 	return found, dlqPath, false
+}
+
+// promoteViaEvidence is the single shared evidence-promotion path: every
+// branch that turns retained publication evidence into a committed record
+// goes through here. Its two operations, in order:
+//
+//  1. Carrier durability: the evidence's carrier directory is fsynced
+//     before any record is written — a directory entry the carrier never
+//     fsynced can vanish in a machine crash, so a commit recorded over an
+//     unsynced carrier is a receipt for a delivery that may not survive.
+//
+//  2. Publication observed: when publication is observed but durability
+//     cannot be verified, a durable published_durability_unknown record is
+//     appended before the outcome returns. If that record itself fails to
+//     land, the error is returned and no receipt or ACK flows; the last
+//     durable state is whatever preceded this call — prepared (the retry
+//     arm re-arms before promoting) or another non-retryable recovery
+//     state, both of which recover without blind re-apply. If the record
+//     lands, later calls re-enter at the published-unknown state, which
+//     promotes only from digest-verified, durability-verified evidence —
+//     never re-applies. A returned outcome struct is not persistent
+//     state; only the ledger is.
+//
+// The torn flag selects framed appends: after a torn read every record
+// written here must be separately readable (appendRecordFramed terminates
+// the torn tail first).
+func (l *TransferLedger) promoteViaEvidence(root *fsq.DeliveryRoot, sourceHost, transferID, payloadSHA256, evidencePath string, torn bool, outcome *ApplyOutcome) error {
+	writeRec := func(rec ledgerRecord) error {
+		if torn {
+			return l.appendRecordFramed(rec)
+		}
+		return l.appendRecord(rec)
+	}
+	if syncErr := root.SyncDir(filepath.Dir(evidencePath)); syncErr != nil {
+		if recErr := writeRec(ledgerRecord{
+			Version:       ledgerSchemaVersion,
+			State:         LedgerPublishedDurabilityUnknown,
+			SourceHost:    sourceHost,
+			TransferID:    transferID,
+			PayloadSHA256: payloadSHA256,
+			CommittedPath: evidencePath,
+			Reason:        "evidence present but carrier durability unverified: " + syncErr.Error(),
+		}); recErr != nil {
+			// The durable record failed to land; fail closed — no receipt or
+			// ACK flows. The state left behind is the caller's pre-call
+			// recovery state (prepared, via re-arm-first), which recovers
+			// without blind re-apply.
+			return fmt.Errorf("record published_durability_unknown: %w", recErr)
+		}
+		*outcome = ApplyOutcome{
+			State:    LedgerPublishedDurabilityUnknown,
+			Replayed: true,
+			Path:     evidencePath,
+			Evidence: "evidence present but carrier durability unverified: " + syncErr.Error(),
+		}
+		return nil
+	}
+	rec := ledgerRecord{
+		Version:       ledgerSchemaVersion,
+		State:         LedgerCommitted,
+		SourceHost:    sourceHost,
+		TransferID:    transferID,
+		PayloadSHA256: payloadSHA256,
+		CommittedPath: evidencePath,
+	}
+	if err := writeRec(rec); err != nil {
+		return fmt.Errorf("record committed: %w", err)
+	}
+	*outcome = ApplyOutcome{State: LedgerCommitted, Replayed: true, Path: evidencePath}
+	return nil
 }
 
 // ApplyOutcome is the caller-facing result of one ledgered apply attempt.
@@ -478,8 +555,14 @@ func ApplyWithLedger(ledger *TransferLedger, root *fsq.DeliveryRoot, localHost, 
 			// NO valid record, or with a torn MIDDLE line (recorded by
 			// readRecords as torn regardless of position), is ambiguous
 			// state: refuse rather than guess. When the last valid record is
-			// itself terminal (committed/rejected), it governs — a torn tail
-			// after a terminal record cannot un-terminal it.
+			// itself terminal (committed, or a NON-retryable proven
+			// non-delivery/conflict), it governs — a torn tail after a terminal
+			// record cannot un-terminal it. Retryable rejections and
+			// published_durability_unknown are NOT terminal (codex r2-r2
+			// finding 3): the torn tail could have been the commit that
+			// resolved them, so they resolve only from verified evidence or
+			// stay uncertain — an apply is never authorized from ambiguous
+			// torn history.
 			if rec == nil {
 				outcome = ApplyOutcome{
 					State:    LedgerUncertain,
@@ -487,13 +570,15 @@ func ApplyWithLedger(ledger *TransferLedger, root *fsq.DeliveryRoot, localHost, 
 				}
 				return nil
 			}
-			if rec.State != LedgerCommitted && rec.State != LedgerRejected {
-				// Non-terminal prefix (prepared/uncertain) + torn tail: the
-				// prefix may predate the torn append, but the torn tail could
-				// have been a terminal record. Fail closed on the tail while
-				// keeping the digest binding: a same-digest arrival still
-				// resolves via publication evidence below; a conflicting
-				// digest is refused here.
+			terminal := rec.State == LedgerCommitted || rec.State == LedgerPublishedDurabilityUnknown ||
+				(rec.State == LedgerRejected && !rec.Retryable)
+			if !terminal {
+				// Non-terminal prefix (prepared/uncertain/retryable-rejected)
+				// + torn tail: the prefix may predate the torn append, but the
+				// torn tail could have been a terminal record. Fail closed on
+				// the tail while keeping the digest binding: a same-digest
+				// arrival still resolves via publication evidence below; a
+				// conflicting digest is refused here.
 				if !strings.EqualFold(rec.PayloadSHA256, env.PayloadSHA256) {
 					outcome = ApplyOutcome{
 						State:    LedgerUncertain,
@@ -510,18 +595,11 @@ func ApplyWithLedger(ledger *TransferLedger, root *fsq.DeliveryRoot, localHost, 
 					return nil
 				}
 				if found {
-					if err := ledger.appendRecord(ledgerRecord{
-						Version:       ledgerSchemaVersion,
-						State:         LedgerCommitted,
-						SourceHost:    env.SourceHost,
-						TransferID:    env.TransferID,
-						PayloadSHA256: rec.PayloadSHA256,
-						CommittedPath: evidencePath,
-					}); err != nil {
-						return fmt.Errorf("record committed: %w", err)
-					}
-					outcome = ApplyOutcome{State: LedgerCommitted, Replayed: true, Path: evidencePath}
-					return nil
+					// Shared promotion path (codex r3 finding): verify the
+					// evidence carrier's durability before the commit append,
+					// and append the record FRAMED so it is separately
+					// readable after the torn tail it recovers over.
+					return ledger.promoteViaEvidence(root, env.SourceHost, env.TransferID, rec.PayloadSHA256, evidencePath, true, &outcome)
 				}
 				outcome = ApplyOutcome{
 					State:    LedgerUncertain,
@@ -553,22 +631,13 @@ func ApplyWithLedger(ledger *TransferLedger, root *fsq.DeliveryRoot, localHost, 
 			if found {
 				// The artifact is already delivered (retained new/cur or DLQ
 				// evidence for exactly these bytes). Bind and commit without
-				// re-applying; the retained artifact is the delivery.
+				// re-applying; the retained artifact is the delivery. Shared
+				// promotion path (codex r3 finding): carrier durability is
+				// verified before the commit record is appended.
 				if err := ledger.appendPrepared(env); err != nil {
 					return err
 				}
-				if err := ledger.appendRecord(ledgerRecord{
-					Version:       ledgerSchemaVersion,
-					State:         LedgerCommitted,
-					SourceHost:    env.SourceHost,
-					TransferID:    env.TransferID,
-					PayloadSHA256: env.PayloadSHA256,
-					CommittedPath: evidencePath,
-				}); err != nil {
-					return fmt.Errorf("record committed: %w", err)
-				}
-				outcome = ApplyOutcome{State: LedgerCommitted, Replayed: true, Path: evidencePath}
-				return nil
+				return ledger.promoteViaEvidence(root, env.SourceHost, env.TransferID, env.PayloadSHA256, evidencePath, false, &outcome)
 			}
 			// No delivery evidence for THIS payload — but the key's filename
 			// slot may still be occupied by a DIFFERENT payload (a pre-ledger
@@ -602,6 +671,39 @@ func ApplyWithLedger(ledger *TransferLedger, root *fsq.DeliveryRoot, localHost, 
 			}
 			return ledger.applyAfterPrepared(root, localAgent, env, &outcome)
 
+		case rec.State == LedgerRejected && rec.Retryable && strings.EqualFold(rec.PayloadSHA256, env.PayloadSHA256):
+			// Retry arm. Order is the invariant: under the held per-transfer
+			// lock, a fresh durable prepared intent is appended before any
+			// evidence lookup or promotion. The old rejected(retryable) record
+			// must not remain the effective state while this invocation
+			// inspects the world — if a later append fails or the process
+			// crashes, the ledger's last durable state is prepared, which
+			// recovers without blind re-apply. If the intent append fails, no
+			// recovery or apply work happens this invocation.
+			if err := ledger.appendPrepared(env); err != nil {
+				outcome = ApplyOutcome{
+					State:  LedgerRejected,
+					Reason: "apply failed (retryable): re-arming prepared intent failed: " + err.Error(),
+				}
+				return nil
+			}
+			// The intent is durable. Evidence may have appeared since the
+			// failure (consumer drain, operator repair): a digest match
+			// promotes without re-applying; absence authorizes the apply via
+			// the standard prepared→terminal path.
+			found, evidencePath, evidenceErr := publicationEvidencePath(root, localAgent, env.SourceHost, env.TransferID, rec.PayloadSHA256)
+			if evidenceErr {
+				outcome = ApplyOutcome{State: LedgerUncertain, Evidence: "publication evidence unreadable"}
+				return nil
+			}
+			if found {
+				// Shared promotion path: verifies the carrier's durability
+				// before committing — an unsynced directory entry is not a
+				// delivery the ledger may call committed.
+				return ledger.promoteViaEvidence(root, env.SourceHost, env.TransferID, rec.PayloadSHA256, evidencePath, torn, &outcome)
+			}
+			return ledger.applyAfterPrepared(root, localAgent, env, &outcome)
+
 		case rec.State == LedgerCommitted:
 			// Verified commit already recorded. A replay with the same
 			// digest is idempotent. A different digest under the same key
@@ -619,13 +721,6 @@ func ApplyWithLedger(ledger *TransferLedger, root *fsq.DeliveryRoot, localHost, 
 			return nil
 
 		case rec.State == LedgerRejected:
-			if strings.EqualFold(rec.PayloadSHA256, env.PayloadSHA256) && strings.HasPrefix(rec.Reason, "apply failed (retryable)") {
-				// A proven NON-delivery (the apply failed in-process; the
-				// record names the failure — review-827-r1 P0). The transfer
-				// is still owed to its recipient: retry the apply. The
-				// ledger's binding is unchanged, and history stays intact.
-				return ledger.applyAfterPrepared(root, localAgent, env, &outcome)
-			}
 			// Terminal for the bound digest. A different digest under the
 			// same key is a conflict observed in the outcome; the terminal
 			// rejection of the original binding is immutable.
@@ -654,19 +749,12 @@ func ApplyWithLedger(ledger *TransferLedger, root *fsq.DeliveryRoot, localHost, 
 				return nil
 			}
 			if found {
-				// Promote on verified evidence.
-				if err := ledger.appendRecord(ledgerRecord{
-					Version:       ledgerSchemaVersion,
-					State:         LedgerCommitted,
-					SourceHost:    env.SourceHost,
-					TransferID:    env.TransferID,
-					PayloadSHA256: rec.PayloadSHA256,
-					CommittedPath: evidencePath,
-				}); err != nil {
-					return fmt.Errorf("record committed: %w", err)
-				}
-				outcome = ApplyOutcome{State: LedgerCommitted, Replayed: true, Path: evidencePath}
-				return nil
+				// Promote on verified evidence via the shared promotion path
+				// — it verifies the durability of the evidence's actual
+				// carrier (codex r2-r3 finding 1) before the commit append:
+				// a crash after publication but before the commit append must
+				// not promote from an unsynced directory entry.
+				return ledger.promoteViaEvidence(root, env.SourceHost, env.TransferID, rec.PayloadSHA256, evidencePath, torn, &outcome)
 			}
 			// No evidence: the prepared intent may or may not have been
 			// applied and drained. Unknown history. Refuse — and record the
@@ -688,6 +776,42 @@ func ApplyWithLedger(ledger *TransferLedger, root *fsq.DeliveryRoot, localHost, 
 			}
 			return nil
 
+		case rec.State == LedgerPublishedDurabilityUnknown:
+			// Codex r2-r2 finding 1, tightened per codex r2-r3 finding 1: the
+			// artifact WAS published at rec.CommittedPath, but its durability
+			// is unproven — a machine crash can lose the unsynced rename, and
+			// fsyncing an empty inbox/new proves nothing about a carrier the
+			// consumer already moved. Promotion therefore requires
+			// digest-VERIFIED evidence (the artifact actually present with
+			// exactly the prepared digest) and verifies the durability of
+			// that evidence's actual carrier directory — never a blanket
+			// inbox/new sync, never the recorded path alone. Without
+			// evidence the publication's survival is unprovable: stay
+			// uncertain (never re-apply an ambiguous publication). The
+			// rendezvous redelivers either way; no re-apply happens here.
+			if !strings.EqualFold(rec.PayloadSHA256, env.PayloadSHA256) {
+				outcome = ApplyOutcome{State: LedgerUncertain, Reason: ledgerReasonConflict, Evidence: "published digest binding differs from arrival"}
+				return nil
+			}
+			found, evidencePath, evidenceErr := publicationEvidencePath(root, localAgent, env.SourceHost, env.TransferID, rec.PayloadSHA256)
+			if evidenceErr {
+				outcome = ApplyOutcome{State: LedgerUncertain, Evidence: "publication evidence unreadable"}
+				return nil
+			}
+			if !found {
+				outcome = ApplyOutcome{
+					State:    LedgerUncertain,
+					Evidence: "published but no retained evidence; delivery survival unprovable after crash",
+				}
+				return nil
+			}
+			// Shared promotion path, reuse not reimplementation: same carrier
+			// verification, same durable publication-observed record, same
+			// commit append as every other evidence promotion. The published
+			// state can be torn (its append may be the torn tail), so torn is
+			// forwarded for framing.
+			return ledger.promoteViaEvidence(root, env.SourceHost, env.TransferID, rec.PayloadSHA256, evidencePath, torn, &outcome)
+
 		case rec.State == LedgerUncertain:
 			// Re-check evidence: it may have appeared since (e.g. the
 			// consumer moved the artifact, or an operator DLQ'd a parse
@@ -698,18 +822,10 @@ func ApplyWithLedger(ledger *TransferLedger, root *fsq.DeliveryRoot, localHost, 
 				return nil
 			}
 			if found && strings.EqualFold(rec.PayloadSHA256, env.PayloadSHA256) {
-				if err := ledger.appendRecord(ledgerRecord{
-					Version:       ledgerSchemaVersion,
-					State:         LedgerCommitted,
-					SourceHost:    env.SourceHost,
-					TransferID:    env.TransferID,
-					PayloadSHA256: rec.PayloadSHA256,
-					CommittedPath: evidencePath,
-				}); err != nil {
-					return fmt.Errorf("record committed: %w", err)
-				}
-				outcome = ApplyOutcome{State: LedgerCommitted, Replayed: true, Path: evidencePath}
-				return nil
+				// Shared promotion path (codex r3 finding): verify the
+				// carrier's durability before the commit append; the uncertain
+				// state may itself be torn, so frame the append when torn.
+				return ledger.promoteViaEvidence(root, env.SourceHost, env.TransferID, rec.PayloadSHA256, evidencePath, torn, &outcome)
 			}
 			outcome = ApplyOutcome{State: LedgerUncertain, Evidence: rec.Reason}
 			if outcome.Evidence == "" {
@@ -729,26 +845,87 @@ func ApplyWithLedger(ledger *TransferLedger, root *fsq.DeliveryRoot, localHost, 
 // records the terminal state. The prepared digest binding governs: on
 // success the committed record carries that digest.
 //
-// Outcome recording (review-827-r1 P0):
+// Outcome recording (review-827-r1 P0, amended per review-827-r2 P0):
 //   - os.ErrExist on a fresh key means a same-name artifact with different
 //     bytes exists — a conflict observed in the outcome. The arrival is a
 //     proven NON-delivery, so it is recorded as terminal rejected
 //     (Reason=transfer_conflict) — not left as a bare prepared that a later
 //     reader must re-derive (previously: rejected once, then uncertain on
 //     every retry — two answers for one set of facts).
-//   - Any other in-process apply failure happens in the same process that
-//     just wrote the prepared record, and ApplyEnvelope is all-or-nothing
-//     (temp file + rename): a returned error is a PROVEN non-delivery. It
-//     is recorded as a retryable rejected record carrying the failure
-//     reason, so the message stays recoverable (a later retry re-applies
-//     from the rejected-with-matching-digest branch) and the diagnostic
-//     surface names the failure — instead of the previous behaviour that
-//     left a bare prepared and let the next attempt reclassify a known
-//     non-delivery as uncertain, permanently wedging the transfer.
+//   - *fsq.CommittedDurabilityError means the rename into inbox/new
+//     SUCCEEDED and only the destination directory sync failed: the
+//     publication is a FACT and is never re-applied (re-applying would
+//     duplicate once the consumer drains new → cur), but its durability is
+//     UNPROVEN — the ledger append below syncs bridge/transfer-ledger
+//     ancestors, NOT agents/<agent>/inbox/new, so it does not repair the
+//     destination. It is recorded as published_durability_unknown with the
+//     error's FinalPath: the success receipt and the ACK are WITHHELD and
+//     the transfer is surfaced via UnresolvedTransfers until a later call
+//     verifies the destination directory sync (DeliverToExistingInbox
+//     returning success or a digest-matching artifact with a clean sync).
+//   - os.ErrExist on a fresh key is a same-name artifact whose bytes could
+//     not be PROVEN different here: resolvePublishCollision wraps the
+//     collision ErrExist when the destination read fails, and a proven-
+//     different read is a conflict. A proven-different read records
+//     terminal rejected (transfer_conflict); an UNPROVEN collision (read
+//     failure under ErrExist) is post-publication ambiguity — recorded as
+//     uncertain, never as retryable (re-apply could duplicate the visible
+//     artifact) and never as a definitive conflict.
+//   - Any other in-process apply failure is a PRE-publication failure: the
+//     staging/temp-file path failed before any rename (the only
+//     publish-then-error mode is CommittedDurabilityError, handled above).
+//     It is recorded as a retryable rejected record (typed Retryable=true)
+//     carrying the failure reason, so the message stays recoverable and the
+//     retry branch consults publication evidence before re-applying (below)
+//     — the same failsafe every other recovery branch uses.
 func (l *TransferLedger) applyAfterPrepared(root *fsq.DeliveryRoot, localAgent string, env Envelope, outcome *ApplyOutcome) error {
 	applyResult, err := ApplyEnvelope(root, hostOfAlias(env.DestAlias), localAgent, env)
 	if err != nil {
+		var committed *fsq.CommittedDurabilityError
+		if errors.As(err, &committed) {
+			// Published but durability unknown: a distinct persistent class.
+			// The courier withholds the receipt and the ACK for this state;
+			// the next apply re-verifies destination durability and promotes
+			// to committed WITHOUT re-applying.
+			if recErr := l.appendRecord(ledgerRecord{
+				Version:       ledgerSchemaVersion,
+				State:         LedgerPublishedDurabilityUnknown,
+				SourceHost:    env.SourceHost,
+				TransferID:    env.TransferID,
+				PayloadSHA256: env.PayloadSHA256,
+				CommittedPath: committed.FinalPath,
+				Reason:        "published at " + committed.FinalPath + "; destination durability unverified: " + committed.Err.Error(),
+			}); recErr != nil {
+				return fmt.Errorf("record published_durability_unknown: %w", recErr)
+			}
+			*outcome = ApplyOutcome{State: LedgerPublishedDurabilityUnknown, Path: committed.FinalPath}
+			return nil
+		}
+		if errors.Is(err, ErrCollisionUnproven) {
+			// Codex r2-r3 finding 2: check the sentinel INDEPENDENTLY of
+			// os.ErrExist — the wrap nests it under the collision error, and
+			// classification must not depend on the outer type surviving.
+			// Collision bytes unreadable: neither proven absent nor proven
+			// conflict. Post-publication ambiguity → uncertain. A later
+			// retry re-checks evidence and the collision read before any
+			// re-apply.
+			if recErr := l.appendRecord(ledgerRecord{
+				Version:       ledgerSchemaVersion,
+				State:         LedgerUncertain,
+				SourceHost:    env.SourceHost,
+				TransferID:    env.TransferID,
+				PayloadSHA256: env.PayloadSHA256,
+				Reason:        "collision bytes unreadable: " + err.Error(),
+			}); recErr != nil {
+				return fmt.Errorf("record uncertain: %w", recErr)
+			}
+			*outcome = ApplyOutcome{State: LedgerUncertain, Evidence: "collision bytes unreadable; conflict unproven"}
+			return nil
+		}
 		if errors.Is(err, os.ErrExist) {
+			// Proven different bytes on a fresh key: a conflict observed in
+			// the outcome. The arrival is a proven NON-delivery, recorded as
+			// terminal rejected (Reason=transfer_conflict).
 			if recErr := l.appendRecord(ledgerRecord{
 				Version:       ledgerSchemaVersion,
 				State:         LedgerRejected,
@@ -762,20 +939,42 @@ func (l *TransferLedger) applyAfterPrepared(root *fsq.DeliveryRoot, localAgent s
 			*outcome = ApplyOutcome{State: LedgerRejected, Reason: ledgerReasonConflict}
 			return nil
 		}
-		// Proven non-delivery: record it as retryable rejected. A retry with
-		// the same digest re-applies (see the rejected branch in
-		// ApplyWithLedger); the ledger keeps the full history.
+		// Proven non-delivery: record it as retryable rejected (typed flag).
+		// A retry with the same digest consults publication evidence FIRST
+		// (review-827-r2 P0) — the consumer may have drained the artifact
+		// between the failure and the retry — then re-applies only if no
+		// evidence exists. The ledger keeps the full history.
 		if recErr := l.appendRecord(ledgerRecord{
 			Version:       ledgerSchemaVersion,
 			State:         LedgerRejected,
 			SourceHost:    env.SourceHost,
 			TransferID:    env.TransferID,
 			PayloadSHA256: env.PayloadSHA256,
+			Retryable:     true,
 			Reason:        "apply failed (retryable): " + err.Error(),
 		}); recErr != nil {
 			return fmt.Errorf("record rejected: %w", recErr)
 		}
 		*outcome = ApplyOutcome{State: LedgerRejected, Reason: "apply failed (retryable): " + err.Error()}
+		return nil
+	}
+	if applyResult.DurabilityIndeterminate {
+		// ApplyEnvelope already converted CommittedDurabilityError into a
+		// committed-but-unverified result (its repo-wide contract). The
+		// ledger records the distinct published_durability_unknown class:
+		// published, receipt/ACK withheld until durability re-verified.
+		if recErr := l.appendRecord(ledgerRecord{
+			Version:       ledgerSchemaVersion,
+			State:         LedgerPublishedDurabilityUnknown,
+			SourceHost:    env.SourceHost,
+			TransferID:    env.TransferID,
+			PayloadSHA256: env.PayloadSHA256,
+			CommittedPath: applyResult.Path,
+			Reason:        "published at " + applyResult.Path + "; destination durability unverified",
+		}); recErr != nil {
+			return fmt.Errorf("record published_durability_unknown: %w", recErr)
+		}
+		*outcome = ApplyOutcome{State: LedgerPublishedDurabilityUnknown, Path: applyResult.Path}
 		return nil
 	}
 	if err := l.appendRecord(ledgerRecord{
@@ -797,7 +996,7 @@ func (l *TransferLedger) applyAfterPrepared(root *fsq.DeliveryRoot, localAgent s
 // crash even if the later message publication also survives (fix: intent
 // must be durable before apply — section 7.5 directory-sync requirement).
 func (l *TransferLedger) appendPrepared(env Envelope) error {
-	if err := l.appendRecordFirstWrite(ledgerRecord{
+	if err := l.appendRecord(ledgerRecord{
 		Version:       ledgerSchemaVersion,
 		State:         LedgerPrepared,
 		SourceHost:    env.SourceHost,
@@ -810,9 +1009,12 @@ func (l *TransferLedger) appendPrepared(env Envelope) error {
 }
 
 // UnresolvedTransfers lists every ledger key whose latest durable disposition
-// is not terminal (committed or rejected): prepared, uncertain, and torn
-// records. This is the production diagnostic surface for status/doctor to
-// report unknown-history transfers; courier integration wires it in.
+// still owes action: prepared, uncertain, torn records, AND rejected records
+// with the typed Retryable flag (review-827-r2 P2-2 — a stuck retryable
+// transfer is a message still owed to its recipient, waiting for someone to
+// retry; it must not read as terminal). This is the production diagnostic
+// surface; the courier's run result wires it into operator-visible output
+// (cmd/amq-bridge/main.go RunResult.Diagnostics).
 func (l *TransferLedger) UnresolvedTransfers() ([]LedgerRecord, error) {
 	entries, err := l.root.ReadDir(l.dir)
 	if errors.Is(err, os.ErrNotExist) {
@@ -846,12 +1048,13 @@ func (l *TransferLedger) UnresolvedTransfers() ([]LedgerRecord, error) {
 				TransferID: id,
 				Reason:     "torn ledger state preserved",
 			})
-		case rec != nil && (rec.State == LedgerUncertain || rec.State == LedgerPrepared):
+		case rec != nil && (rec.State == LedgerUncertain || rec.State == LedgerPrepared || rec.State == LedgerPublishedDurabilityUnknown || (rec.State == LedgerRejected && rec.Retryable)):
 			out = append(out, LedgerRecord{
 				State:         rec.State,
 				SourceHost:    rec.SourceHost,
 				TransferID:    rec.TransferID,
 				PayloadSHA256: rec.PayloadSHA256,
+				Retryable:     rec.Retryable,
 				Reason:        rec.Reason,
 				RecordedAt:    rec.RecordedAt,
 			})

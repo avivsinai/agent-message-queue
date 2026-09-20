@@ -208,5 +208,19 @@ func writeRunResult(result RunResult) error {
 			return err
 		}
 	}
+	// review-827-r2 P2-3: refused transfers and unresolved ledger state are
+	// operator-facing diagnostics; emit them after the receipts so a silent
+	// PollResult.Refused or a stuck retryable transfer is visible on every
+	// run.
+	if len(result.Poll.Refused) > 0 {
+		if err := encoder.Encode(map[string]any{"refused": result.Poll.Refused}); err != nil {
+			return err
+		}
+	}
+	for _, diag := range result.Diagnostics {
+		if err := encoder.Encode(diag); err != nil {
+			return err
+		}
+	}
 	return nil
 }
