@@ -60,19 +60,7 @@ func TestGateR2LostStateDuringTurnStartDoesNotRestore(t *testing.T) {
 	srv.notify(t, "thread/status/changed", `{"threadId":"t1","status":{"type":"notLoaded"}}`)
 	// Deterministic sync (7xl rule): bounded wait until the read pump has
 	// processed the lost-state notification (gen bump is the fingerprint).
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		att.mu.Lock()
-		cleared := att.lostStateGen == uint64(1)
-		att.mu.Unlock()
-		if cleared {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("lost-state notification never processed by the read pump")
-		}
-		time.Sleep(2 * time.Millisecond)
-	}
+	waitLostStateGen(t, att, 1)
 
 	// Release the RPC response: the Submit continuation resumes and, without
 	// the generation guard, restores activeTurn="u1" + status=busy — the

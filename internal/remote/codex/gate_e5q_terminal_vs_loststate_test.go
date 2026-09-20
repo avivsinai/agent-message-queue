@@ -66,37 +66,12 @@ func TestTerminalOutcomeSurvivesLostStateDuringTurnStart(t *testing.T) {
 	// exactly the missed-confirmation shape the terminalTurns memo exists
 	// for. The continuation's terminal check consults this memo.
 	srv.notify(t, "turn/completed", `{"threadId":"t1","turn":{"id":"u1","status":"completed"}}`)
-	deadline := time.Now().Add(5 * time.Second)
-	terminal := false
-	for {
-		att.mu.Lock()
-		terminal = att.terminalTurns["u1"]
-		att.mu.Unlock()
-		if terminal {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("run never became terminal from the idle notification; test preconditions not met")
-		}
-		time.Sleep(2 * time.Millisecond)
-	}
+	waitMemoForID(t, att, "u1")
 
 	// 2. While the continuation is still parked, the app-server reports lost
 	// state. The read pump bumps lostStateGen.
 	srv.notify(t, "thread/status/changed", `{"threadId":"t1","status":{"type":"notLoaded"}}`)
-	deadline = time.Now().Add(5 * time.Second)
-	for {
-		att.mu.Lock()
-		bumped := att.lostStateGen == uint64(1)
-		att.mu.Unlock()
-		if bumped {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("lost-state notification never processed by the read pump")
-		}
-		time.Sleep(2 * time.Millisecond)
-	}
+	waitLostStateGen(t, att, 1)
 
 	// 3. Release the RPC response. With the bead's ordering (terminal check
 	// first) the continuation returns Admitted=true. With the pre-bead
