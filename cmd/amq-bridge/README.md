@@ -16,8 +16,9 @@ sending envelopes. The root contains:
 
 - `bridge/host-id` (mode `0600`), the local host alias;
 - `bridge/identity` (mode `0600`), the active generation and private seed; and
-- `bridge/trusted/<source_host>/<generation>` (mode `0600`), the trusted
-  peer's public key for the named generation.
+- `bridge/trusted/<source_host>` (mode `0600`), the trusted peer's public
+  key for its active generation (a single file, not a per-generation
+  directory — the reader is `bridge.TrustedPath`).
 
 `scripts/amq-host-bootstrap.sh` writes `host-id`. Then initialize and export
 the public record:
