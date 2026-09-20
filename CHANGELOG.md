@@ -8,6 +8,13 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.80.1](https://github.com/avivsinai/agent-message-queue/compare/v0.80.0...v0.80.1) (2026-09-20)
+
+
+### Bug Fixes
+
+* **amq-remote:** up residue — one refusal shape for one-up-per-root, owner in the refusal, secure existing registry dir (611.13.3) ([#832](https://github.com/avivsinai/agent-message-queue/issues/832)) ([eab8533](https://github.com/avivsinai/agent-message-queue/commit/eab853388169556b09778a21bab2feb82a273b7b))
+
 ## [0.80.0](https://github.com/avivsinai/agent-message-queue/compare/v0.79.0...v0.80.0) (2026-09-20)
 
 
