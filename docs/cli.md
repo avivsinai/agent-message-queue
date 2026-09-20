@@ -145,11 +145,11 @@ Usage:
 
 Options:
   -agents string
-    	Comma-separated agent handles (required)
+        Comma-separated agent handles (required)
   -force
-    	Overwrite existing config.json if present
+        Overwrite existing config.json if present
   -root string
-    	Root directory for the queue (default ".agent-mail")
+        Root directory for the queue (default ".agent-mail")
 ```
 
 ## amq setup
@@ -165,26 +165,26 @@ Launcher detection is probe-only; setup never calls a launcher backend.
 
 Options:
   -agents string
-    	Comma-separated detected agent adapters
+        Comma-separated detected agent adapters
   -apply string
-    	Apply only when the recomputed preview matches this digest
+        Apply only when the recomputed preview matches this digest
   -default-session string
-    	Default session name
+        Default session name
   -json
-    	Emit JSON output
+        Emit JSON output
   -launcher-preference string
-    	Comma-separated launcher preference
+        Comma-separated launcher preference
   -layout string
-    	Advisory layout intent (default "columns")
+        Advisory layout intent (default "columns")
   -no-gitignore
-    	Do not modify .gitignore
+        Do not modify .gitignore
   -preview
-    	Preview changes without writing
+        Preview changes without writing
   -project-root string
-    	Directory treated as the project root (writes .amqrc, .amq, and .gitignore there)
+        Directory treated as the project root (writes .amqrc, .amq, and .gitignore there)
   -root string
-    	Queue root written to .amqrc (default ".agent-mail")
-  -y	Accept the preview without prompting
+        Queue root written to .amqrc (default ".agent-mail")
+  -y    Accept the preview without prompting
 ```
 
 ## amq launch
@@ -199,35 +199,35 @@ Unknown sessions are never created. Non-interactive trust, stale identity, and I
 
 Options:
   -allow-fresh-fallback
-    	Allow fresh conversations when saved identities are stale
+        Allow fresh conversations when saved identities are stale
   -apply string
-    	Public ApplyRequestV1 file, or - for stdin (requires --json)
+        Public ApplyRequestV1 file, or - for stdin (requires --json)
   -fresh
-    	Start fresh conversations for this launch
+        Start fresh conversations for this launch
   -json
-    	Emit JSON output
+        Emit JSON output
   -launcher string
-    	Launcher backend (auto or commands) (default "auto")
+        Launcher backend (auto or commands) (default "auto")
   -me string
-    	Agent handle (or AM_ME)
+        Agent handle (or AM_ME)
   -placement string
-    	Public PlacementV1 JSON object (with --plan)
+        Public PlacementV1 JSON object (with --plan)
   -plan string
-    	Public LaunchIntentV1 file, or - for stdin
+        Public LaunchIntentV1 file, or - for stdin
   -prepare
-    	Prepare the public launch intent without mutation (requires --plan and --json)
+        Prepare the public launch intent without mutation (requires --plan and --json)
   -rebind
-    	Confirm a deliberate launcher binding change
+        Confirm a deliberate launcher binding change
   -request string
-    	Public PrepareRequestV1 file, or - for stdin (requires --json)
+        Public PrepareRequestV1 file, or - for stdin (requires --json)
   -require-agent
-    	Require at least one agent to launch or attach
+        Require at least one agent to launch or attach
   -root string
-    	Root directory for the queue (default ".agent-mail")
+        Root directory for the queue (default ".agent-mail")
   -session string
-    	Named session to launch or resume
+        Named session to launch or resume
   -strict
-    	Error on unknown handles (default: warn)
+        Error on unknown handles (default: warn)
 ```
 
 ## amq send
@@ -251,47 +251,47 @@ Cross-project examples:
 
 Options:
   -allow-empty
-    	Allow sending a blank body (otherwise an empty body is rejected)
+        Allow sending a blank body (otherwise an empty body is rejected)
   -allow-self
-    	Allow an intentional same-root send to the sender's own handle
+        Allow an intentional same-root send to the sender's own handle
   -body string
-    	Body string, @file, or - / empty to read stdin
+        Body string, @file, or - / empty to read stdin
   -context string
-    	JSON context object or @file.json
+        JSON context object or @file.json
   -from-session string
-    	Source session for setup-terminal cross-session sends
+        Source session for setup-terminal cross-session sends
   -ignore-session-pin
-    	With explicit --root, ignore a conflicting AM_SESSION source pin
+        With explicit --root, ignore a conflicting AM_SESSION source pin
   -json
-    	Emit JSON output
+        Emit JSON output
   -kind string
-    	Message kind: brainstorm, review_request, review_response, question, answer, decision, status, todo
+        Message kind: brainstorm, review_request, review_response, question, answer, decision, status, todo
   -labels string
-    	Comma-separated labels/tags
+        Comma-separated labels/tags
   -me string
-    	Agent handle (or AM_ME)
+        Agent handle (or AM_ME)
   -priority string
-    	Message priority: urgent, normal, low (default: normal if kind set)
+        Message priority: urgent, normal, low (default: normal if kind set)
   -project string
-    	Target peer project name (delivers to a peer project's inbox)
+        Target peer project name (delivers to a peer project's inbox)
   -refs string
-    	Comma-separated related message ids
+        Comma-separated related message ids
   -root string
-    	Root directory for the queue (default ".agent-mail")
+        Root directory for the queue (default ".agent-mail")
   -session string
-    	Target session (delivers to a different session's inbox)
+        Target session (delivers to a different session's inbox)
   -strict
-    	Error on unknown handles (default: warn)
+        Error on unknown handles (default: warn)
   -subject string
-    	Message subject
+        Message subject
   -thread string
-    	Thread id (required for multiple recipients; default p2p/<a>__<b> for single-recipient sends)
+        Thread id (required for multiple recipients; default p2p/<a>__<b> for single-recipient sends)
   -to string
-    	Receiver handle (comma-separated)
+        Receiver handle (comma-separated)
   -wait-for string
-    	Wait for receipt stage after send (drained, dlq)
+        Wait for receipt stage after send (drained, dlq)
   -wait-timeout duration
-    	Timeout for --wait-for (0 = wait forever) (default 2m0s)
+        Timeout for --wait-for (0 = wait forever) (default 2m0s)
 ```
 
 ## amq list
@@ -303,31 +303,31 @@ Usage:
 
 Options:
   -cur
-    	List messages in inbox/cur
+        List messages in inbox/cur
   -from string
-    	Filter by sender handle
+        Filter by sender handle
   -json
-    	Emit JSON output
+        Emit JSON output
   -kind string
-    	Filter by message kind
+        Filter by message kind
   -label value
-    	Filter by label (can be repeated)
+        Filter by label (can be repeated)
   -limit int
-    	Limit number of messages (0 = no limit)
+        Limit number of messages (0 = no limit)
   -me string
-    	Agent handle (or AM_ME)
+        Agent handle (or AM_ME)
   -new
-    	List messages in inbox/new
+        List messages in inbox/new
   -offset int
-    	Offset into sorted results (0 = start)
+        Offset into sorted results (0 = start)
   -priority string
-    	Filter by priority (urgent, normal, low)
+        Filter by priority (urgent, normal, low)
   -root string
-    	Root directory for the queue (default ".agent-mail")
+        Root directory for the queue (default ".agent-mail")
   -session string
-    	Target session under the resolved base root
+        Target session under the resolved base root
   -strict
-    	Error on unknown handles (default: warn)
+        Error on unknown handles (default: warn)
 ```
 
 ## amq read
@@ -344,19 +344,19 @@ If the message in inbox/new is corrupt or malformed, AMQ moves it to DLQ and emi
 
 Options:
   -id string
-    	Message id
+        Message id
   -ignore-session-pin
-    	With explicit --root, ignore a conflicting AM_SESSION pin
+        With explicit --root, ignore a conflicting AM_SESSION pin
   -json
-    	Emit JSON output
+        Emit JSON output
   -me string
-    	Agent handle (or AM_ME)
+        Agent handle (or AM_ME)
   -root string
-    	Root directory for the queue (default ".agent-mail")
+        Root directory for the queue (default ".agent-mail")
   -session string
-    	Target session under the resolved base root
+        Target session under the resolved base root
   -strict
-    	Error on unknown handles (default: warn)
+        Error on unknown handles (default: warn)
 ```
 
 ## amq thread
@@ -368,21 +368,21 @@ Usage:
 
 Options:
   -agents string
-    	Comma-separated agent handles (optional)
+        Comma-separated agent handles (optional)
   -id string
-    	Thread id
+        Thread id
   -include-body
-    	Include body in output
+        Include body in output
   -json
-    	Emit JSON output
+        Emit JSON output
   -limit int
-    	Limit number of messages (0 = no limit)
+        Limit number of messages (0 = no limit)
   -me string
-    	Agent handle (or AM_ME)
+        Agent handle (or AM_ME)
   -root string
-    	Root directory for the queue (default ".agent-mail")
+        Root directory for the queue (default ".agent-mail")
   -strict
-    	Error on unknown handles (default: warn)
+        Error on unknown handles (default: warn)
 ```
 
 ## amq trace
@@ -400,9 +400,9 @@ Notification evidence never proves that a TUI or person saw, displayed, or submi
 
 Options:
   -json
-    	Emit JSON output
+        Emit JSON output
   -root string
-    	Root directory for the queue (default ".agent-mail")
+        Root directory for the queue (default ".agent-mail")
 ```
 
 ## amq presence
@@ -433,23 +433,23 @@ Usage:
 
 Options:
   -dry-run
-    	Show what would be removed without deleting
+        Show what would be removed without deleting
   -json
-    	Emit JSON output
+        Emit JSON output
   -launch-journal
-    	Remove one exact stuck managed-launch recovery journal
+        Remove one exact stuck managed-launch recovery journal
   -me string
-    	Agent handle (or AM_ME)
+        Agent handle (or AM_ME)
   -root string
-    	Root directory for the queue (default ".agent-mail")
+        Root directory for the queue (default ".agent-mail")
   -strict
-    	Error on unknown handles (default: warn)
+        Error on unknown handles (default: warn)
   -tmp-older-than string
-    	Duration (e.g. 36h)
+        Duration (e.g. 36h)
   -wake-quarantine-older-than string
-    	Remove preserved wake quarantine artifacts older than this duration
+        Remove preserved wake quarantine artifacts older than this duration
   -yes
-    	Skip confirmation prompt
+        Skip confirmation prompt
 ```
 
 ## amq watch
@@ -461,21 +461,21 @@ Usage:
 
 Options:
   -ignore-session-pin
-    	With explicit --root, ignore a conflicting AM_SESSION pin
+        With explicit --root, ignore a conflicting AM_SESSION pin
   -json
-    	Emit JSON output
+        Emit JSON output
   -me string
-    	Agent handle (or AM_ME)
+        Agent handle (or AM_ME)
   -poll
-    	Use polling fallback instead of fsnotify (for network filesystems)
+        Use polling fallback instead of fsnotify (for network filesystems)
   -root string
-    	Root directory for the queue (default ".agent-mail")
+        Root directory for the queue (default ".agent-mail")
   -session string
-    	Target session under the resolved base root
+        Target session under the resolved base root
   -strict
-    	Error on unknown handles (default: warn)
+        Error on unknown handles (default: warn)
   -timeout duration
-    	Maximum time to wait for messages (0 = wait forever) (default 1m0s)
+        Maximum time to wait for messages (0 = wait forever) (default 1m0s)
 ```
 
 ## amq drain
@@ -490,21 +490,21 @@ Designed for hook/script integration. Quiet when empty.
 
 Options:
   -ignore-session-pin
-    	With explicit --root, ignore a conflicting AM_SESSION pin
+        With explicit --root, ignore a conflicting AM_SESSION pin
   -include-body
-    	Include message body in output
+        Include message body in output
   -json
-    	Emit JSON output
+        Emit JSON output
   -limit int
-    	Max messages to drain (0 = no limit) (default 20)
+        Max messages to drain (0 = no limit) (default 20)
   -me string
-    	Agent handle (or AM_ME)
+        Agent handle (or AM_ME)
   -root string
-    	Root directory for the queue (default ".agent-mail")
+        Root directory for the queue (default ".agent-mail")
   -session string
-    	Target session under the resolved base root
+        Target session under the resolved base root
   -strict
-    	Error on unknown handles (default: warn)
+        Error on unknown handles (default: warn)
 ```
 
 ## amq monitor
@@ -520,27 +520,27 @@ Ideal for co-op mode background watchers in Claude Code or Codex.
 
 Options:
   -ignore-session-pin
-    	With explicit --root, ignore a conflicting AM_SESSION pin
+        With explicit --root, ignore a conflicting AM_SESSION pin
   -include-body
-    	Include message body in output
+        Include message body in output
   -json
-    	Emit JSON output
+        Emit JSON output
   -limit int
-    	Max messages to drain (0 = no limit) (default 20)
+        Max messages to drain (0 = no limit) (default 20)
   -me string
-    	Agent handle (or AM_ME)
+        Agent handle (or AM_ME)
   -peek
-    	Peek without moving messages to cur
+        Peek without moving messages to cur
   -poll
-    	Use polling fallback instead of fsnotify
+        Use polling fallback instead of fsnotify
   -root string
-    	Root directory for the queue (default ".agent-mail")
+        Root directory for the queue (default ".agent-mail")
   -session string
-    	Target session under the resolved base root
+        Target session under the resolved base root
   -strict
-    	Error on unknown handles (default: warn)
+        Error on unknown handles (default: warn)
   -timeout duration
-    	Max time to wait for messages (0 = wait forever) (default 1m0s)
+        Max time to wait for messages (0 = wait forever) (default 1m0s)
 ```
 
 ## amq reply
@@ -559,35 +559,35 @@ mirroring amq send --wait-for.
 
 Options:
   -allow-empty
-    	Allow sending a blank body (otherwise an empty body is rejected)
+        Allow sending a blank body (otherwise an empty body is rejected)
   -body string
-    	Body string, @file, or - / empty to read stdin
+        Body string, @file, or - / empty to read stdin
   -context string
-    	JSON context object or @file.json
+        JSON context object or @file.json
   -id string
-    	Message ID to reply to
+        Message ID to reply to
   -ignore-session-pin
-    	With explicit --root, ignore a conflicting AM_SESSION source pin
+        With explicit --root, ignore a conflicting AM_SESSION source pin
   -json
-    	Emit JSON output
+        Emit JSON output
   -kind string
-    	Message kind: brainstorm, review_request, review_response, question, answer, decision, status, todo (default: same as original, review_response for review_request, answer for question)
+        Message kind: brainstorm, review_request, review_response, question, answer, decision, status, todo (default: same as original, review_response for review_request, answer for question)
   -labels string
-    	Comma-separated labels/tags
+        Comma-separated labels/tags
   -me string
-    	Agent handle (or AM_ME)
+        Agent handle (or AM_ME)
   -priority string
-    	Message priority: urgent, normal, low
+        Message priority: urgent, normal, low
   -root string
-    	Root directory for the queue (default ".agent-mail")
+        Root directory for the queue (default ".agent-mail")
   -strict
-    	Error on unknown handles (default: warn)
+        Error on unknown handles (default: warn)
   -subject string
-    	Override subject (default: Re: <original>)
+        Override subject (default: Re: <original>)
   -wait-for string
-    	Wait for receipt stage after reply (e.g., drained)
+        Wait for receipt stage after reply (e.g., drained)
   -wait-timeout duration
-    	Timeout for --wait-for (default 2m0s)
+        Timeout for --wait-for (default 2m0s)
 ```
 
 ## amq dlq
@@ -671,57 +671,57 @@ EXPERIMENTAL: Uses TIOCSTI ioctl (macOS/Linux). May not work on all systems.
 
 Options:
   -baseline-existing
-    	Ignore messages already waiting when this wake starts
+        Ignore messages already waiting when this wake starts
   -bell
-    	Ring terminal bell on new messages
+        Ring terminal bell on new messages
   -debounce duration
-    	Debounce window for batching messages (default 250ms)
+        Debounce window for batching messages (default 250ms)
   -debug
-    	Log injection diagnostics to stderr
+        Log injection diagnostics to stderr
   -defer-while-input
-    	Best-effort: defer non-interrupt injection while terminal input appears active (default true)
+        Best-effort: defer non-interrupt injection while terminal input appears active (default true)
   -inject-arg value
-    	Argument for --inject-via before the payload (repeatable)
+        Argument for --inject-via before the payload (repeatable)
   -inject-cmd string
-    	Command to inject (power user mode)
+        Command to inject (power user mode)
   -inject-mode string
-    	Injection mode: auto, raw, paste, none (auto detects CLI type) (default "auto")
+        Injection mode: auto, raw, paste, none (auto detects CLI type) (default "auto")
   -inject-timeout duration
-    	Timeout for one --inject-via command (default 5s)
+        Timeout for one --inject-via command (default 5s)
   -inject-via string
-    	External executable for injection (payload appended as last arg, bypasses TTY requirement)
+        External executable for injection (payload appended as last arg, bypasses TTY requirement)
   -input-max-hold duration
-    	Maximum time to defer one wake injection (0 = no hold) (default 15s)
+        Maximum time to defer one wake injection (0 = no hold) (default 15s)
   -input-poll-interval duration
-    	Polling interval while waiting for quiet terminal input (default 200ms)
+        Polling interval while waiting for quiet terminal input (default 200ms)
   -input-quiet-for duration
-    	Quiet window before deferred injection (advisory only on Linux; tty atime granularity is ~8s) (default 1.2s)
+        Quiet window before deferred injection (advisory only on Linux; tty atime granularity is ~8s) (default 1.2s)
   -interrupt
-    	Enable interrupt injection for urgent interrupt messages (default true)
+        Enable interrupt injection for urgent interrupt messages (default true)
   -interrupt-cmd string
-    	Interrupt command to inject: none (default) or ctrl-c (sends real SIGINT to the foreground process group and can interrupt or crash the agent) (default "none")
+        Interrupt command to inject: none (default) or ctrl-c (sends real SIGINT to the foreground process group and can interrupt or crash the agent) (default "none")
   -interrupt-cooldown duration
-    	Minimum time between interrupts (default 7s)
+        Minimum time between interrupts (default 7s)
   -interrupt-label string
-    	Label required to trigger interrupt (default "interrupt")
+        Label required to trigger interrupt (default "interrupt")
   -interrupt-notice string
-    	Custom interrupt notice (default: auto)
+        Custom interrupt notice (default: auto)
   -interrupt-priority string
-    	Priority required to trigger interrupt (default "urgent")
+        Priority required to trigger interrupt (default "urgent")
   -json
-    	Emit JSON output
+        Emit JSON output
   -me string
-    	Agent handle (or AM_ME)
+        Agent handle (or AM_ME)
   -no-self-upgrade
-    	Disable automatic replacement by a newer installed AMQ image
+        Disable automatic replacement by a newer installed AMQ image
   -preview-len int
-    	Max subject preview length (default 48)
+        Max subject preview length (default 48)
   -retry-until string
-    	Doorbell acknowledgement: drained or injected (default "drained")
+        Doorbell acknowledgement: drained or injected (default "drained")
   -root string
-    	Root directory for the queue (default ".agent-mail")
+        Root directory for the queue (default ".agent-mail")
   -strict
-    	Error on unknown handles (default: warn)
+        Error on unknown handles (default: warn)
 ```
 
 ## amq upgrade
@@ -739,8 +739,8 @@ If wake check reports binary_dir_gone, run amq doctor --ops --fix-wake-locks.
 
 Options:
   -all
-    	Also upgrade present companion binaries (amq-keepalive, amq-bridge, amq-acp)
-  -y	Run the package-manager delegate without an AMQ confirmation; the manager may still prompt
+        Also upgrade present companion binaries (amq-keepalive, amq-bridge, amq-acp)
+  -y    Run the package-manager delegate without an AMQ confirmation; the manager may still prompt
 ```
 
 ## amq env
@@ -772,21 +772,21 @@ Examples:
 
 Options:
   -export
-    	Also print a note confirming the resolved terminal pin
+        Also print a note confirming the resolved terminal pin
   -json
-    	Output as JSON (for scripts)
+        Output as JSON (for scripts)
   -me string
-    	Agent handle (overrides AM_ME)
+        Agent handle (overrides AM_ME)
   -root string
-    	Root directory (overrides .amqrc and AM_ROOT)
+        Root directory (overrides .amqrc and AM_ROOT)
   -session string
-    	Session name (shorthand for --root .agent-mail/<name>)
+        Session name (shorthand for --root .agent-mail/<name>)
   -session-name
-    	Print current session name (for statusline integration)
+        Print current session name (for statusline integration)
   -shell string
-    	Shell format: sh, bash, zsh, fish (default "sh")
+        Shell format: sh, bash, zsh, fish (default "sh")
   -wake
-    	Include amq wake & in output
+        Include amq wake & in output
 ```
 
 ## amq coop
@@ -902,13 +902,13 @@ Shows active/stale status and whether activity comes from a verified notifier or
 
 Options:
   -json
-    	Emit JSON output
+        Emit JSON output
   -me string
-    	Agent handle (or AM_ME)
+        Agent handle (or AM_ME)
   -root string
-    	Root directory for the queue (default ".agent-mail")
+        Root directory for the queue (default ".agent-mail")
   -strict
-    	Error on unknown handles (default: warn)
+        Error on unknown handles (default: warn)
 ```
 
 ## amq route
@@ -954,21 +954,21 @@ With --ops, also checks runtime health:
 
 Options:
   -base-root string
-    	Config-authority root for an explicit session --root
+        Config-authority root for an explicit session --root
   -fix-mailboxes
-    	Create missing required directories for configured mailboxes
+        Create missing required directories for configured mailboxes
   -fix-wake-locks
-    	With --ops, remove stale wake lock files
+        With --ops, remove stale wake lock files
   -ignore-session-pin
-    	With explicit --root, allow repair outside the pinned session context
+        With explicit --root, allow repair outside the pinned session context
   -json
-    	Output as JSON
+        Output as JSON
   -json-schema int
-    	JSON schema version: 1 or 2 (requires --json) (default 1)
+        JSON schema version: 1 or 2 (requires --json) (default 1)
   -ops
-    	Include runtime operational checks
+        Include runtime operational checks
   -root string
-    	Exact AMQ root to inspect or repair
+        Exact AMQ root to inspect or repair
 ```
 
 ## amq shell-setup
@@ -998,13 +998,13 @@ Examples after setup:
 
 Options:
   -claude-alias string
-    	Function name for Claude Code shortcut (default "amc")
+        Function name for Claude Code shortcut (default "amc")
   -codex-alias string
-    	Function name for Codex CLI shortcut (default "amx")
+        Function name for Codex CLI shortcut (default "amx")
   -grok-alias string
-    	Function name for Grok CLI shortcut (default "amg")
+        Function name for Grok CLI shortcut (default "amg")
   -shell string
-    	Shell format: bash, zsh, fish (default "bash")
+        Shell format: bash, zsh, fish (default "bash")
 ```
 
 ## amq completion
@@ -1031,17 +1031,17 @@ Usage:
 
 Options:
   -json
-    	Emit JSON output
+        Emit JSON output
   -me string
-    	Agent handle (or AM_ME)
+        Agent handle (or AM_ME)
   -note string
-    	Optional note
+        Optional note
   -root string
-    	Root directory for the queue (default ".agent-mail")
+        Root directory for the queue (default ".agent-mail")
   -status string
-    	Status string
+        Status string
   -strict
-    	Error on unknown handles (default: warn)
+        Error on unknown handles (default: warn)
 ```
 
 ## amq presence list
@@ -1053,13 +1053,13 @@ Usage:
 
 Options:
   -json
-    	Emit JSON output
+        Emit JSON output
   -me string
-    	Agent handle (or AM_ME)
+        Agent handle (or AM_ME)
   -root string
-    	Root directory for the queue (default ".agent-mail")
+        Root directory for the queue (default ".agent-mail")
   -strict
-    	Error on unknown handles (default: warn)
+        Error on unknown handles (default: warn)
 ```
 
 ## amq dlq list
@@ -1071,21 +1071,21 @@ Usage:
 
 Options:
   -cur
-    	List only inspected DLQ messages (dlq/cur)
+        List only inspected DLQ messages (dlq/cur)
   -ignore-session-pin
-    	With explicit --root, ignore a conflicting AM_SESSION pin
+        With explicit --root, ignore a conflicting AM_SESSION pin
   -json
-    	Emit JSON output
+        Emit JSON output
   -me string
-    	Agent handle (or AM_ME)
+        Agent handle (or AM_ME)
   -new
-    	List only unread DLQ messages (dlq/new)
+        List only unread DLQ messages (dlq/new)
   -root string
-    	Root directory for the queue (default ".agent-mail")
+        Root directory for the queue (default ".agent-mail")
   -session string
-    	Target session under the resolved base root
+        Target session under the resolved base root
   -strict
-    	Error on unknown handles (default: warn)
+        Error on unknown handles (default: warn)
 ```
 
 ## amq dlq read
@@ -1097,19 +1097,19 @@ Usage:
 
 Options:
   -id string
-    	DLQ message ID to read
+        DLQ message ID to read
   -ignore-session-pin
-    	With explicit --root, ignore a conflicting AM_SESSION pin
+        With explicit --root, ignore a conflicting AM_SESSION pin
   -json
-    	Emit JSON output
+        Emit JSON output
   -me string
-    	Agent handle (or AM_ME)
+        Agent handle (or AM_ME)
   -root string
-    	Root directory for the queue (default ".agent-mail")
+        Root directory for the queue (default ".agent-mail")
   -session string
-    	Target session under the resolved base root
+        Target session under the resolved base root
   -strict
-    	Error on unknown handles (default: warn)
+        Error on unknown handles (default: warn)
 ```
 
 ## amq dlq retry
@@ -1123,23 +1123,23 @@ Or: amq dlq retry --me <agent> --all [--session <name>] [--force]
 
 Options:
   -all
-    	Retry all DLQ messages
+        Retry all DLQ messages
   -force
-    	Force retry even if max retries exceeded
+        Force retry even if max retries exceeded
   -id string
-    	DLQ message ID to retry
+        DLQ message ID to retry
   -ignore-session-pin
-    	With explicit --root, ignore a conflicting AM_SESSION pin
+        With explicit --root, ignore a conflicting AM_SESSION pin
   -json
-    	Emit JSON output
+        Emit JSON output
   -me string
-    	Agent handle (or AM_ME)
+        Agent handle (or AM_ME)
   -root string
-    	Root directory for the queue (default ".agent-mail")
+        Root directory for the queue (default ".agent-mail")
   -session string
-    	Target session under the resolved base root
+        Target session under the resolved base root
   -strict
-    	Error on unknown handles (default: warn)
+        Error on unknown handles (default: warn)
 ```
 
 ## amq dlq purge
@@ -1151,23 +1151,23 @@ Usage:
 
 Options:
   -dry-run
-    	Show what would be removed without deleting
+        Show what would be removed without deleting
   -ignore-session-pin
-    	With explicit --root, ignore a conflicting AM_SESSION pin
+        With explicit --root, ignore a conflicting AM_SESSION pin
   -json
-    	Emit JSON output
+        Emit JSON output
   -me string
-    	Agent handle (or AM_ME)
+        Agent handle (or AM_ME)
   -older-than string
-    	Duration (e.g. 24h) - only purge messages older than this
+        Duration (e.g. 24h) - only purge messages older than this
   -root string
-    	Root directory for the queue (default ".agent-mail")
+        Root directory for the queue (default ".agent-mail")
   -session string
-    	Target session under the resolved base root
+        Target session under the resolved base root
   -strict
-    	Error on unknown handles (default: warn)
+        Error on unknown handles (default: warn)
   -yes
-    	Skip confirmation prompt
+        Skip confirmation prompt
 ```
 
 ## amq wake check
@@ -1187,15 +1187,15 @@ Only restart_capability=agent_safe authorizes an agent-side action.
 
 Options:
   -json
-    	Emit JSON output
+        Emit JSON output
   -json-schema int
-    	JSON schema version: 1 or 2 (requires --json) (default 1)
+        JSON schema version: 1 or 2 (requires --json) (default 1)
   -me string
-    	Agent handle (or AM_ME)
+        Agent handle (or AM_ME)
   -root string
-    	Root directory for the queue (default ".agent-mail")
+        Root directory for the queue (default ".agent-mail")
   -strict
-    	Error on unknown handles (default: warn)
+        Error on unknown handles (default: warn)
 ```
 
 ## amq wake repair
@@ -1213,13 +1213,13 @@ This command only uses .wake.target files created for --inject-via wakes.
 
 Options:
   -json
-    	Emit JSON output
+        Emit JSON output
   -me string
-    	Agent handle (or AM_ME)
+        Agent handle (or AM_ME)
   -root string
-    	Root directory for the queue (default ".agent-mail")
+        Root directory for the queue (default ".agent-mail")
   -strict
-    	Error on unknown handles (default: warn)
+        Error on unknown handles (default: warn)
 ```
 
 ## amq wake restart
@@ -1236,13 +1236,13 @@ then execs that image only from a quiescent delivery boundary.
 
 Options:
   -json
-    	Emit JSON output
+        Emit JSON output
   -me string
-    	Agent handle (or AM_ME)
+        Agent handle (or AM_ME)
   -root string
-    	Root directory for the queue (default ".agent-mail")
+        Root directory for the queue (default ".agent-mail")
   -strict
-    	Error on unknown handles (default: warn)
+        Error on unknown handles (default: warn)
 ```
 
 ## amq wake recover-owner
@@ -1259,13 +1259,13 @@ current OS session to match the persisted owner. There is no force mode.
 
 Options:
   -json
-    	Emit JSON output
+        Emit JSON output
   -me string
-    	Agent handle (or AM_ME)
+        Agent handle (or AM_ME)
   -root string
-    	Root directory for the queue (default ".agent-mail")
+        Root directory for the queue (default ".agent-mail")
   -strict
-    	Error on unknown handles (default: warn)
+        Error on unknown handles (default: warn)
 ```
 
 ## amq wake retire
@@ -1283,21 +1283,21 @@ Retirement preserves the mailbox, removes the exact saved target and coupled sta
 
 Options:
   -if-generation string
-    	Retire only if the current lock generation still matches this exact value
+        Retire only if the current lock generation still matches this exact value
   -inject-arg value
-    	Expected fixed injection argument (repeatable)
+        Expected fixed injection argument (repeatable)
   -inject-via string
-    	Expected external injection executable
+        Expected external injection executable
   -json
-    	Emit JSON output
+        Emit JSON output
   -me string
-    	Agent handle (or AM_ME)
+        Agent handle (or AM_ME)
   -retry-until string
-    	Expected doorbell acknowledgement: drained or injected (default "drained")
+        Expected doorbell acknowledgement: drained or injected (default "drained")
   -root string
-    	Root directory for the queue (default ".agent-mail")
+        Root directory for the queue (default ".agent-mail")
   -strict
-    	Error on unknown handles (default: warn)
+        Error on unknown handles (default: warn)
 ```
 
 ## amq coop init
@@ -1322,15 +1322,15 @@ Explicit three-engine example (not a default):
 
 Options:
   -agents string
-    	Comma-separated agent handles (default "claude,codex,user")
+        Comma-separated agent handles (default "claude,codex,user")
   -force
-    	Overwrite existing config if present
+        Overwrite existing config if present
   -json
-    	Output as JSON
+        Output as JSON
   -no-gitignore
-    	Do not modify .gitignore
+        Do not modify .gitignore
   -root string
-    	Root directory for the queue (default ".agent-mail")
+        Root directory for the queue (default ".agent-mail")
 ```
 
 ## amq coop exec
@@ -1368,34 +1368,34 @@ Wake readiness:
 
 Options:
   -managed-no-wake-reason string
-    	
+
   -managed-symphony-event value
-    	
+
   -managed-symphony-workspace-key string
-    	
+
   -me string
-    	Agent handle (override auto-derivation from command name)
+        Agent handle (override auto-derivation from command name)
   -named
-    	Stamp the session and AM_ME onto the spawned CLI session name (default true)
+        Stamp the session and AM_ME onto the spawned CLI session name (default true)
   -no-gitignore
-    	When auto-initializing, do not modify .gitignore
+        When auto-initializing, do not modify .gitignore
   -no-init
-    	Don't auto-initialize if .amqrc is missing
+        Don't auto-initialize if .amqrc is missing
   -no-wake
-    	Don't start amq wake in background
+        Don't start amq wake in background
   -require-wake
-    	Fail if amq wake cannot start and acquire its lock
+        Fail if amq wake cannot start and acquire its lock
   -root string
-    	Root directory (override auto-detection)
+        Root directory (override auto-detection)
   -session string
-    	Session name (shorthand for --root .agent-mail/<name>)
+        Session name (shorthand for --root .agent-mail/<name>)
   -wake-inject-arg value
-    	Fixed argument for wake --inject-via before the payload (repeatable)
+        Fixed argument for wake --inject-via before the payload (repeatable)
   -wake-inject-mode string
-    	Wake injection mode: auto, raw, paste, none (default "auto")
+        Wake injection mode: auto, raw, paste, none (default "auto")
   -wake-inject-via string
-    	Start wake with this absolute --inject-via executable, enabling later amq wake repair
-  -y	Skip confirmation prompts (including clearing a blocking wake)
+        Start wake with this absolute --inject-via executable, enabling later amq wake repair
+  -y    Skip confirmation prompts (including clearing a blocking wake)
 ```
 
 ## amq swarm list
@@ -1411,7 +1411,7 @@ Scans ~/.claude/teams/ for team configurations.
 
 Options:
   -json
-    	Emit JSON output
+        Emit JSON output
 ```
 
 ## amq swarm join
@@ -1428,15 +1428,15 @@ This makes the agent discoverable by the team lead and other teammates.
 
 Options:
   -agent-id string
-    	Agent ID (auto-generated if empty)
+        Agent ID (auto-generated if empty)
   -json
-    	Emit JSON output
+        Emit JSON output
   -me string
-    	Agent handle (e.g., codex)
+        Agent handle (e.g., codex)
   -team string
-    	Team name (required)
+        Team name (required)
   -type string
-    	Agent type (external, codex, claude-code) (default "external")
+        Agent type (external, codex, claude-code) (default "external")
 ```
 
 ## amq swarm leave
@@ -1450,11 +1450,11 @@ Deregister an agent from a Claude Code Agent Team.
 
 Options:
   -agent-id string
-    	Agent ID to remove (required)
+        Agent ID to remove (required)
   -json
-    	Emit JSON output
+        Emit JSON output
   -team string
-    	Team name (required)
+        Team name (required)
 ```
 
 ## amq swarm tasks
@@ -1470,11 +1470,11 @@ Tasks are stored at ~/.claude/tasks/{team-name}/.
 
 Options:
   -json
-    	Emit JSON output
+        Emit JSON output
   -status string
-    	Filter by status: pending, in_progress, completed, failed, blocked
+        Filter by status: pending, in_progress, completed, failed, blocked
   -team string
-    	Team name (required)
+        Team name (required)
 ```
 
 ## amq swarm claim
@@ -1491,15 +1491,15 @@ Uses agent_id from the team config as assigned_to for CC interop.
 
 Options:
   -agent-id string
-    	Agent ID to use as assigned_to (auto-detect from team config)
+        Agent ID to use as assigned_to (auto-detect from team config)
   -json
-    	Emit JSON output
+        Emit JSON output
   -me string
-    	Agent handle
+        Agent handle
   -task string
-    	Task ID to claim (required)
+        Task ID to claim (required)
   -team string
-    	Team name (required)
+        Team name (required)
 ```
 
 ## amq swarm complete
@@ -1515,17 +1515,17 @@ Optionally attach structured proof-of-work via --evidence.
 
 Options:
   -agent-id string
-    	Agent ID (auto-detect from team config)
+        Agent ID (auto-detect from team config)
   -evidence string
-    	Evidence JSON object or @file.json
+        Evidence JSON object or @file.json
   -json
-    	Emit JSON output
+        Emit JSON output
   -me string
-    	Agent handle
+        Agent handle
   -task string
-    	Task ID to complete (required)
+        Task ID to complete (required)
   -team string
-    	Team name (required)
+        Team name (required)
 ```
 
 ## amq swarm fail
@@ -1541,17 +1541,17 @@ Only the current assignee can fail an in-progress task.
 
 Options:
   -agent-id string
-    	Agent ID (auto-detect from team config)
+        Agent ID (auto-detect from team config)
   -json
-    	Emit JSON output
+        Emit JSON output
   -me string
-    	Agent handle
+        Agent handle
   -reason string
-    	Failure reason
+        Failure reason
   -task string
-    	Task ID to fail (required)
+        Task ID to fail (required)
   -team string
-    	Team name (required)
+        Team name (required)
 ```
 
 ## amq swarm block
@@ -1567,17 +1567,17 @@ Only the current assignee can block an in-progress task.
 
 Options:
   -agent-id string
-    	Agent ID (auto-detect from team config)
+        Agent ID (auto-detect from team config)
   -json
-    	Emit JSON output
+        Emit JSON output
   -me string
-    	Agent handle
+        Agent handle
   -reason string
-    	Blocking reason
+        Blocking reason
   -task string
-    	Task ID to block (required)
+        Task ID to block (required)
   -team string
-    	Team name (required)
+        Team name (required)
 ```
 
 ## amq swarm bridge
@@ -1600,21 +1600,21 @@ Run this alongside the Codex agent session. Press Ctrl+C to stop.
 
 Options:
   -agent-id string
-    	Agent Teams agent_id (auto-detect from team config)
+        Agent Teams agent_id (auto-detect from team config)
   -json
-    	Emit JSON output
+        Emit JSON output
   -me string
-    	Agent handle (or AM_ME)
+        Agent handle (or AM_ME)
   -poll
-    	Use polling instead of fsnotify
+        Use polling instead of fsnotify
   -poll-interval duration
-    	Poll interval for task changes (polling mode) (default 3s)
+        Poll interval for task changes (polling mode) (default 3s)
   -root string
-    	Root directory for the queue (default ".agent-mail")
+        Root directory for the queue (default ".agent-mail")
   -strict
-    	Error on unknown handles (default: warn)
+        Error on unknown handles (default: warn)
   -team string
-    	Team name (required)
+        Team name (required)
 ```
 
 ## amq integration symphony
@@ -1664,17 +1664,17 @@ Usage:
 
 Options:
   -json
-    	Emit JSON output
+        Emit JSON output
   -me string
-    	Agent handle (or AM_ME)
+        Agent handle (or AM_ME)
   -msg-id string
-    	Filter by message ID
+        Filter by message ID
   -root string
-    	Root directory for the queue (default ".agent-mail")
+        Root directory for the queue (default ".agent-mail")
   -stage string
-    	Filter by stage (drained, dlq)
+        Filter by stage (drained, dlq)
   -strict
-    	Error on unknown handles (default: warn)
+        Error on unknown handles (default: warn)
 ```
 
 ## amq receipts wait
@@ -1686,21 +1686,21 @@ Usage:
 
 Options:
   -json
-    	Emit JSON output
+        Emit JSON output
   -me string
-    	Agent handle (or AM_ME)
+        Agent handle (or AM_ME)
   -msg-id string
-    	Message ID to wait for (required)
+        Message ID to wait for (required)
   -poll-interval duration
-    	Polling interval (default 1s)
+        Polling interval (default 1s)
   -root string
-    	Root directory for the queue (default ".agent-mail")
+        Root directory for the queue (default ".agent-mail")
   -stage string
-    	Stage to wait for (drained, dlq) (default "drained")
+        Stage to wait for (drained, dlq) (default "drained")
   -strict
-    	Error on unknown handles (default: warn)
+        Error on unknown handles (default: warn)
   -timeout duration
-    	Maximum time to wait (0 = wait forever) (default 1m0s)
+        Maximum time to wait (0 = wait forever) (default 1m0s)
 ```
 
 ## amq session create
@@ -1715,13 +1715,13 @@ Canonical names only ([a-z0-9_-]+). Existing sessions fail loudly; create is nev
 
 Options:
   -json
-    	Emit JSON output
+        Emit JSON output
   -me string
-    	Agent handle (or AM_ME)
+        Agent handle (or AM_ME)
   -root string
-    	Root directory for the queue (default ".agent-mail")
+        Root directory for the queue (default ".agent-mail")
   -strict
-    	Error on unknown handles (default: warn)
+        Error on unknown handles (default: warn)
 ```
 
 ## amq session list
@@ -1736,13 +1736,13 @@ Canonical sessions are listed normally. Safe legacy roots are marked legacy_name
 
 Options:
   -json
-    	Emit JSON output
+        Emit JSON output
   -me string
-    	Agent handle (or AM_ME)
+        Agent handle (or AM_ME)
   -root string
-    	Root directory for the queue (default ".agent-mail")
+        Root directory for the queue (default ".agent-mail")
   -strict
-    	Error on unknown handles (default: warn)
+        Error on unknown handles (default: warn)
 ```
 
 ## amq session resume
@@ -1757,35 +1757,35 @@ Unknown sessions are never created. Non-interactive trust, stale identity, and I
 
 Options:
   -allow-fresh-fallback
-    	Allow fresh conversations when saved identities are stale
+        Allow fresh conversations when saved identities are stale
   -apply string
-    	Public ApplyRequestV1 file, or - for stdin (requires --json)
+        Public ApplyRequestV1 file, or - for stdin (requires --json)
   -fresh
-    	Start fresh conversations for this launch
+        Start fresh conversations for this launch
   -json
-    	Emit JSON output
+        Emit JSON output
   -launcher string
-    	Launcher backend (auto or commands) (default "auto")
+        Launcher backend (auto or commands) (default "auto")
   -me string
-    	Agent handle (or AM_ME)
+        Agent handle (or AM_ME)
   -placement string
-    	Public PlacementV1 JSON object (with --plan)
+        Public PlacementV1 JSON object (with --plan)
   -plan string
-    	Public LaunchIntentV1 file, or - for stdin
+        Public LaunchIntentV1 file, or - for stdin
   -prepare
-    	Prepare the public launch intent without mutation (requires --plan and --json)
+        Prepare the public launch intent without mutation (requires --plan and --json)
   -rebind
-    	Confirm a deliberate launcher binding change
+        Confirm a deliberate launcher binding change
   -request string
-    	Public PrepareRequestV1 file, or - for stdin (requires --json)
+        Public PrepareRequestV1 file, or - for stdin (requires --json)
   -require-agent
-    	Require at least one agent to launch or attach
+        Require at least one agent to launch or attach
   -root string
-    	Root directory for the queue (default ".agent-mail")
+        Root directory for the queue (default ".agent-mail")
   -session string
-    	Named session to launch or resume
+        Named session to launch or resume
   -strict
-    	Error on unknown handles (default: warn)
+        Error on unknown handles (default: warn)
 ```
 
 ## amq route explain
@@ -1803,21 +1803,21 @@ Examples:
 
 Options:
   -from-cwd string
-    	Working directory to resolve .amqrc and auto-detection from
+        Working directory to resolve .amqrc and auto-detection from
   -from-root string
-    	Source AMQ root to explain from
+        Source AMQ root to explain from
   -json
-    	Emit JSON output
+        Emit JSON output
   -me string
-    	Sender handle (or AM_ME)
+        Sender handle (or AM_ME)
   -project string
-    	Target peer project name
+        Target peer project name
   -root string
-    	Source AMQ root to explain from (alias for --from-root)
+        Source AMQ root to explain from (alias for --from-root)
   -session string
-    	Target session
+        Target session
   -to string
-    	Receiver handle
+        Receiver handle
 ```
 
 ## amq integration symphony init
@@ -1841,17 +1841,17 @@ Running init twice is idempotent (no duplication).
 
 Options:
   -check
-    	Inspect without writing
+        Inspect without writing
   -force
-    	Rewrite even if fragment exists
+        Rewrite even if fragment exists
   -json
-    	Emit JSON output
+        Emit JSON output
   -me string
-    	Agent handle (or AM_ME)
+        Agent handle (or AM_ME)
   -root string
-    	Root directory for the queue (pinned in hooks) (default ".agent-mail")
+        Root directory for the queue (pinned in hooks) (default ".agent-mail")
   -workflow string
-    	Path to WORKFLOW.md (default "WORKFLOW.md")
+        Path to WORKFLOW.md (default "WORKFLOW.md")
 ```
 
 ## amq integration symphony emit
@@ -1869,17 +1869,17 @@ Events: after_create, before_run, after_run, before_remove
 
 Options:
   -event string
-    	Lifecycle event: after_create, before_run, after_run, before_remove (required)
+        Lifecycle event: after_create, before_run, after_run, before_remove (required)
   -identifier string
-    	Workspace key (default: basename of workspace)
+        Workspace key (default: basename of workspace)
   -json
-    	Emit JSON output
+        Emit JSON output
   -me string
-    	Agent handle (or AM_ME)
+        Agent handle (or AM_ME)
   -root string
-    	Root directory for the queue (default ".agent-mail")
+        Root directory for the queue (default ".agent-mail")
   -workspace string
-    	Workspace path (default: current directory)
+        Workspace path (default: current directory)
 ```
 
 ## amq integration kanban bridge
@@ -1900,15 +1900,15 @@ The bridge emits lifecycle/handoff notifications for task session changes.
 
 Options:
   -json
-    	Emit JSON startup info
+        Emit JSON startup info
   -me string
-    	Agent handle (or AM_ME)
+        Agent handle (or AM_ME)
   -reconnect duration
-    	Reconnect delay after websocket disconnect (default 3s)
+        Reconnect delay after websocket disconnect (default 3s)
   -root string
-    	Root directory for the queue (default ".agent-mail")
+        Root directory for the queue (default ".agent-mail")
   -url string
-    	Kanban runtime websocket URL (default "ws://127.0.0.1:3484/api/runtime/ws")
+        Kanban runtime websocket URL (default "ws://127.0.0.1:3484/api/runtime/ws")
   -workspace-id string
-    	Workspace ID (appended as ?workspaceId=<id> query param)
+        Workspace ID (appended as ?workspaceId=<id> query param)
 ```

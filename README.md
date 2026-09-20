@@ -120,7 +120,7 @@ inbox, and writes receipts. The output includes the sender and message body.
 To reply in the same thread, use the ID from that output:
 
 ```bash
-amq reply --id <message-id> --body "Yes, I can see it."
+amq reply --id "<message-id>" --body "Yes, I can see it."
 ```
 
 The launched agents already have their identity and session set. You do not

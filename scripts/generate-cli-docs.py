@@ -71,7 +71,7 @@ def command_help(binary: Path, command: tuple[str, ...], home: Path) -> str:
     if str(home) in result.stdout:
         rendered = " ".join(argv)
         raise RuntimeError(f"{rendered} leaked the generator temp path into help output")
-    return result.stdout.rstrip()
+    return "\n".join(line.rstrip() for line in result.stdout.expandtabs(8).splitlines()).rstrip()
 
 
 def collect(binary: Path) -> list[tuple[tuple[str, ...], str]]:
