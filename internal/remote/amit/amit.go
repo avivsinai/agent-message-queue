@@ -289,10 +289,13 @@ func (a *Attachment) bindRunLocked(key requests.Key, epoch string) *run {
 	return r
 }
 
-// observeGenerationLocked applies §4's epoch rule: only receipts pin. The
-// pinned generation is the newest receipt-proven observation; a later
-// receipt with a different generation means the session regenerated and the
-// published epoch follows it. An invalid generation string is never pinned.
+// observeGenerationLocked applies §4's epoch rule: only receipts pin. Any
+// valid, different generation replaces the current pin — the code does NOT
+// order observations by receipt time (P2-A, review 816-r3): with two
+// concurrent readers, a stale read can momentarily regress the pin. The
+// regression is self-healing: the extension answers a stale hint with
+// refused(generation), which unpins to the sentinel and lets the next
+// receipt re-pin. An invalid generation string is never pinned.
 func (a *Attachment) observeGenerationLocked(gen string) {
 	if gen != "" && protocol.ValidEpoch(gen) && gen != a.epoch {
 		a.epoch = gen
@@ -376,9 +379,15 @@ func (a *Attachment) applyObservationLocked(r *run, o *seamObservation) {
 		case o.receipt != nil:
 			r.confirmed = true
 			r.notFound = nil
+			r.eventsRefused = nil
 			a.observeGenerationLocked(o.receipt.SessionGeneration)
-		case o.rcErr != nil:
+		case o.rcErr != nil && !r.confirmed:
 			// Unreadable or foreign-protocol: never consume it as evidence.
+			// Only an unconfirmed run records the error (review 816-r3
+			// P2-B): a stale failed read landing after a successful receipt
+			// must not resurrect notFound — consume() never re-reads a
+			// confirmed run's receipt, so that would wedge the run into
+			// permanent uncertainty.
 			r.notFound = o.rcErr
 		}
 	}
@@ -391,6 +400,10 @@ func (a *Attachment) applyObservationLocked(r *run, o *seamObservation) {
 			// terminal state).
 			r.eventsRefused = o.evErr
 		} else {
+			// P2-C (review 816-r3): the refusal clears when the stream
+			// reads clean again (a later rotation can remove the foreign
+			// line), matching notFound's success-path reset.
+			r.eventsRefused = nil
 			a.applyEventsLocked(r, o.events)
 		}
 	}
@@ -594,6 +607,13 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 		a.mu.Unlock()
 		return core.Admission{Code: protocol.CodeStaleEpoch, Message: "epoch does not match the pinned session generation; re-inspect"}, nil
 	}
+	epochHint := a.epoch // §4: pinned generation as hint; "" (unpinned) = first contact, no check
+	// The hint is captured in the SAME critical section as the §4 gate
+	// above (review 816-r3 P1): re-reading it after the lock-free liveness
+	// check let a concurrent re-pin/refuse publish a generation the gate
+	// never validated — or omit the hint entirely on a refused(generation),
+	// which the extension defines as "no check" on a just-proven-stale
+	// request.
 	if r, ok := a.runs[req.Key]; ok {
 		// Retry of an already-published submit (endpoint retries carry the
 		// same ref); consume() above already re-read the seam so the
@@ -632,11 +652,7 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 	if live := a.dir.liveness(a.now()); !live.live {
 		return core.Admission{Code: protocol.CodeAttachmentLost, Message: fmt.Sprintf("no live amit-remote bridge for handle %q (bridge.liveness %s)", a.handle, live.reason)}, nil
 	}
-	a.mu.Lock()
-	epochHint := a.epoch // §4: pinned generation as hint; "" (unpinned) = first contact, no check
-	a.mu.Unlock()
-
-	// File I/O outside a.mu: the mutex guards correlation state, not the
+	// File I/O outside a.mu:
 	// seam. A concurrent same-key submit cannot happen (the endpoint's
 	// per-runtime reservation serializes dispatches), and a bind after the
 	// write below re-checks the map under the lock.

@@ -310,13 +310,11 @@ func (b bridgeDir) liveness(now time.Time) livenessState {
 	return livenessState{live: true, age: age}
 }
 
-// listReceipts returns the ref of every parseable receipt file, oldest
-// first (name order = mtime-independent stable order; §5 recovery only
-// needs a deterministic sweep). Unparseable refs (junk files) are skipped.
 // listReceipts returns every parseable receipt, ordered oldest-first by
-// file mtime then name (deterministic; the pinned epoch ends at the newest
-// receipt-proven generation, §4/§5). Junk files are skipped, never guessed
-// into evidence.
+// file mtime then name (deterministic; §5 recovery only needs a
+// deterministic sweep and the pinned epoch ends at the last receipt
+// applied). Unparseable/junk files are skipped, never guessed into
+// evidence.
 func (b bridgeDir) listReceipts() []receipt {
 	entries, err := os.ReadDir(filepath.Join(b.dir, "receipts"))
 	if err != nil {
