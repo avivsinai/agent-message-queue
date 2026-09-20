@@ -77,8 +77,6 @@ func TestUpRespawnsOnceAfterNonZeroExit(t *testing.T) {
 	if err := fsq.EnsureRootDirs(root); err != nil {
 		t.Fatal(err)
 	}
-	// Use a temp registry so we don't touch the real keepalive registry.
-	regPath := filepath.Join(root, "registry.json")
 
 	// Injected spawner: first serve exits 1 (crash), second exits 0 (clean).
 	sp := &fakeSpawner{
@@ -94,13 +92,10 @@ func TestUpRespawnsOnceAfterNonZeroExit(t *testing.T) {
 	defer cancel()
 
 	upCfg := upConfig{
-		root:         root,
-		me:           "amq-remote",
-		registryPath: regPath,
-		maxRestarts:  5,
-		backoffBase:  time.Millisecond, // short for the test
-		backoffMax:   10 * time.Millisecond,
-		serveArgs:    []string{"serve", "--root", root},
+		maxRestarts: 5,
+		backoffBase: time.Millisecond, // short for the test
+		backoffMax:  10 * time.Millisecond,
+		serveArgs:   []string{"serve", "--root", root},
 	}
 	code, err := runUpLoop(ctx, upCfg, sp)
 	if err != nil {
@@ -534,4 +529,155 @@ func TestUpForwardedServeArgsThroughRealEntryPoint(t *testing.T) {
 	if !slices.Equal(got, want) {
 		t.Fatalf("serve args = %v, want %v (canonical root, verbatim values)", got, want)
 	}
+}
+
+// TestPrepareSecureDirTightensExistingDirectory pins review-b5 N6 (611.13.3):
+// the chmod ran only on the creation branch, so a pre-existing 0755
+// ~/.amq-keepalive stayed loose and the later registry refusal pointed at
+// the registry instead of the directory the caller must fix.
+func TestPrepareSecureDirTightensExistingDirectory(t *testing.T) {
+	dir := t.TempDir()
+	loose := filepath.Join(dir, "keepalive")
+	if err := os.MkdirAll(loose, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepareSecureDir(loose); err != nil {
+		t.Fatalf("prepareSecureDir(existing): %v", err)
+	}
+	info, err := os.Lstat(loose)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o700 {
+		t.Fatalf("existing dir mode = %v, want 0700 (N6)", perm)
+	}
+	// The creation branch still tightens too.
+	created := filepath.Join(dir, "created")
+	if err := prepareSecureDir(created); err != nil {
+		t.Fatalf("prepareSecureDir(creation): %v", err)
+	}
+	info, err = os.Lstat(created)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o700 {
+		t.Fatalf("created dir mode = %v, want 0700", perm)
+	}
+	// A file where the directory belongs is refused, never chmod'ed.
+	filePath := filepath.Join(dir, "notadir")
+	if err := os.WriteFile(filePath, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepareSecureDir(filePath); err == nil {
+		t.Fatal("prepareSecureDir(file) succeeded, want a not-a-directory refusal")
+	}
+}
+
+// TestLifetimeOwnerPidReportsZeroWithoutHolder pins N3's honest-discovery
+// rule: with no lock holder the fcntl probe reports 0 (unknown), never a
+// guessed pid, and never an error.
+func TestLifetimeOwnerPidReportsZeroWithoutHolder(t *testing.T) {
+	root := t.TempDir()
+	regPath := filepath.Join(root, "registry.json")
+	entryID := registry.EntryID(root, "amq-remote", "remote", root)
+	if pid := lifetimeOwnerPid(regPath, entryID); pid != 0 {
+		t.Fatalf("lifetimeOwnerPid without holder = %d, want 0 (unknown)", pid)
+	}
+	// With THIS process holding the flock, discovery is best-effort: the
+	// kernel records fcntl-lock owners, but flock(2) holders may not be
+	// reported. Assert only the contract: no error, non-negative.
+	first, err := acquireLifetimeLock(regPath, entryID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = first.Close() }()
+	if pid := lifetimeOwnerPid(regPath, entryID); pid < 0 {
+		t.Fatalf("lifetimeOwnerPid with holder = %d, want >= 0", pid)
+	}
+}
+
+// TestUpTargetOwnedByAnotherRegistryEntryExitsActionRequired pins review-b5
+// N2 (611.13.3): a target owned by ANOTHER registry entry is the same
+// one-up-per-root condition the lifetime flock enforces, so the refusal
+// must carry the same positive shape — exit 6 / endpoint_already_running —
+// not an untyped exit-1 error surface that scripts reading exit 6 miss.
+func TestUpTargetOwnedByAnotherRegistryEntryExitsActionRequired(t *testing.T) {
+	base, err0 := secureTestDir(t)
+	if err0 != nil {
+		t.Fatal(err0)
+	}
+	root := filepath.Join(base, "real-root")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := registry.CanonicalRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	regPath := filepath.Join(base, "registry.json")
+
+	// Pre-register the target owned by a DIFFERENT entry id whose lifetime
+	// lock IS held (a live other supervisor), so up's phantom reclaim
+	// correctly leaves the row alone and Upsert hits ErrTargetOwned.
+	otherID := registry.EntryID(canonical, "other-agent", "remote", canonical)
+	if _, err := registry.New(regPath).Upsert(registry.Entry{
+		ID:      otherID,
+		Root:    canonical,
+		Agent:   "other-agent",
+		Adapter: "remote",
+		Target:  canonical,
+		State:   registry.StateActive,
+	}); err != nil {
+		t.Fatalf("seed conflicting owner row: %v", err)
+	}
+	otherLock, err := acquireLifetimeLock(regPath, otherID)
+	if err != nil {
+		t.Fatalf("hold other row lifetime lock: %v", err)
+	}
+	defer func() { _ = otherLock.Close() }()
+
+	sp := newUpEntryFakeSpawner(0)
+	prevFactory := upSpawnerFactory
+	upSpawnerFactory = func(self string) spawner { return sp }
+	t.Cleanup(func() { upSpawnerFactory = prevFactory })
+
+	code, upErr := up([]string{
+		"--root", root,
+		"--registry", regPath,
+		"--fake",
+		"--self", "unused-by-fake-spawner",
+	}, io.Discard, io.Discard)
+	if code != protocol.ExitActionRequired {
+		t.Fatalf("target-owned up: code %d err %v, want %d (N2: same refusal shape as the lifetime path)", code, upErr, protocol.ExitActionRequired)
+	}
+	if protocol.RefusalCode(upErr) != protocol.CodeEndpointAlreadyRunning {
+		t.Fatalf("target-owned up err = %v, want endpoint_already_running refusal", upErr)
+	}
+	if len(sp.forwardedArgs()) != 0 && sp.wasSpawned() {
+		t.Fatalf("spawned with args %v — a refused up must not spawn serve", sp.forwardedArgs())
+	}
+}
+
+// wasSpawned reports whether the fake spawner ever spawned (non-blocking).
+func (s *upEntryFakeSpawner) wasSpawned() bool {
+	select {
+	case <-s.spawned:
+		return true
+	default:
+		return false
+	}
+}
+
+// secureTestDir returns a mode-0700 temp directory the registry accepts.
+func secureTestDir(t *testing.T) (string, error) {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "amqup-secure-")
+	if err != nil {
+		return "", err
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return "", err
+	}
+	return dir, nil
 }
