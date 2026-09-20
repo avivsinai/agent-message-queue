@@ -247,13 +247,16 @@ func (l *TransferLedger) readRecords(sourceHost, transferID string) (records []l
 
 func (l *TransferLedger) effectiveRecord(sourceHost, transferID string) (rec *ledgerRecord, torn bool, err error) {
 	records, torn, err := l.readRecords(sourceHost, transferID)
-	if err != nil || torn {
+	if err != nil {
 		return nil, torn, err
 	}
 	if len(records) == 0 {
-		return nil, false, nil
+		return nil, torn, nil
 	}
-	return &records[len(records)-1], false, nil
+	// The last valid record survives a torn tail: the intact prefix stays
+	// authoritative (review-827-r1 P1c — an unparseable tail is a torn
+	// append over usable history, not a poison of it).
+	return &records[len(records)-1], torn, nil
 }
 
 // Digest computes the payload digest the ledger binds into every record.
@@ -276,13 +279,15 @@ func lookupInBox(root *fsq.DeliveryRoot, agent, box, filename string) (present b
 	return false, true
 }
 
-// scanDLQForOriginal scans dlq/new and dlq/cur for envelopes whose
+// scanDLQForOriginalPath scans dlq/new and dlq/cur for envelopes whose
 // OriginalFile equals the transfer filename and whose ORIGINAL body bytes
-// (returned by ReadDLQEnvelope — never the wrapper) hash to wantDigest.
+// (returned by ReadDLQEnvelope — never the wrapper) hash to wantDigest. It
+// also reports the root-relative path of the matching DLQ envelope (the
+// delivery carrier for an evidence promotion).
 // DLQ delivery creates a new id/filename and wraps the original bytes
 // (internal/fsq/dlq.go moveInboxMessageToDLQ), so the transfer filename is
 // never the DLQ filename.
-func scanDLQForOriginal(root *fsq.DeliveryRoot, agent, filename, wantDigest string) (found bool, evidenceErr bool) {
+func scanDLQForOriginalPath(root *fsq.DeliveryRoot, agent, filename, wantDigest string) (found bool, path string, evidenceErr bool) {
 	for _, box := range []string{"new", "cur"} {
 		dir := filepath.Join("agents", agent, "dlq", box)
 		entries, err := root.ReadDir(dir)
@@ -290,7 +295,7 @@ func scanDLQForOriginal(root *fsq.DeliveryRoot, agent, filename, wantDigest stri
 			continue
 		}
 		if err != nil {
-			return false, true
+			return false, "", true
 		}
 		for _, entry := range entries {
 			if entry.IsDir() {
@@ -301,17 +306,17 @@ func scanDLQForOriginal(root *fsq.DeliveryRoot, agent, filename, wantDigest stri
 			if err != nil {
 				// One unreadable DLQ envelope is not proof of absence;
 				// treat as evidence failure and fail closed.
-				return false, true
+				return false, "", true
 			}
 			if envelope.OriginalFile != filename {
 				continue
 			}
 			if Digest(original) == wantDigest {
-				return true, false
+				return true, path, false
 			}
 		}
 	}
-	return false, false
+	return false, "", false
 }
 
 // scanDLQForOriginalFile reports whether any DLQ envelope wraps an original
@@ -375,32 +380,49 @@ func filenameSlotOccupied(root *fsq.DeliveryRoot, localAgent, sourceHost, transf
 //   - DLQ: envelopes wrap the original bytes under a new id/filename, so
 //     match on OriginalFile + original-content digest.
 //
+// publicationEvidencePath consults durable publication evidence independent
+// of inbox/new. Evidence is conditional and fails closed:
+//
+//   - inbox/new and inbox/cur: deterministic transfer filename
+//     (TransferFilename) looked up directly; a claim never replaces a
+//     retained cur copy.
+//   - DLQ: envelopes wrap the original bytes under a new id/filename, so
+//     match on OriginalFile + original-content digest.
+//
 // Any read/stat error is treated as absence of proof (evidenceErr), never
-// proof of absence.
-func publicationEvidence(root *fsq.DeliveryRoot, localAgent, sourceHost, transferID, wantDigest string) (found bool, evidenceErr bool) {
+// proof of absence. The returned path is the root-relative path of the
+// artifact that carried the evidence, so the promoted committed record (and
+// its receipt) can name the retained delivery (review-827-r1 P2-2:
+// evidence-promoted commits must not lose committed_path).
+func publicationEvidencePath(root *fsq.DeliveryRoot, localAgent, sourceHost, transferID, wantDigest string) (found bool, path string, evidenceErr bool) {
 	filename := TransferFilename(sourceHost, transferID)
 	for _, box := range []string{"new", "cur"} {
+		rel := filepath.Join("agents", localAgent, "inbox", box, filename)
 		present, errFlag := lookupInBox(root, localAgent, box, filename)
 		if errFlag {
-			return false, true
+			return false, "", true
 		}
 		if present {
 			// The retained artifact is the delivery evidence. Its bytes were
 			// verified digest-matching at apply time; a present same-name
 			// artifact with unknown bytes cannot be distinguished here, so
 			// read and compare to fail closed rather than trust the name.
-			data, err := root.ReadRegularNoFollow(filepath.Join("agents", localAgent, "inbox", box, filename))
+			data, err := root.ReadRegularNoFollow(rel)
 			if err != nil {
-				return false, true
+				return false, "", true
 			}
 			if Digest(data) == wantDigest {
-				return true, false
+				return true, rel, false
 			}
 			// Same name, different bytes: not evidence of THIS transfer.
 			continue
 		}
 	}
-	return scanDLQForOriginal(root, localAgent, filename, wantDigest)
+	found, dlqPath, errFlag := scanDLQForOriginalPath(root, localAgent, filename, wantDigest)
+	if errFlag {
+		return false, "", true
+	}
+	return found, dlqPath, false
 }
 
 // ApplyOutcome is the caller-facing result of one ledgered apply attempt.
@@ -449,11 +471,66 @@ func ApplyWithLedger(ledger *TransferLedger, root *fsq.DeliveryRoot, localHost, 
 			return err
 		}
 		if torn {
-			outcome = ApplyOutcome{
-				State:    LedgerUncertain,
-				Evidence: "torn ledger state preserved",
+			// Torn ledger read (review-827-r1 P1c). The append-only contract
+			// tolerates a torn TAIL: an unparseable line after intact records
+			// is a crash-truncated append, and the intact prefix stays
+			// authoritative — rec is the last valid record. A torn read with
+			// NO valid record, or with a torn MIDDLE line (recorded by
+			// readRecords as torn regardless of position), is ambiguous
+			// state: refuse rather than guess. When the last valid record is
+			// itself terminal (committed/rejected), it governs — a torn tail
+			// after a terminal record cannot un-terminal it.
+			if rec == nil {
+				outcome = ApplyOutcome{
+					State:    LedgerUncertain,
+					Evidence: "torn ledger state preserved",
+				}
+				return nil
 			}
-			return nil
+			if rec.State != LedgerCommitted && rec.State != LedgerRejected {
+				// Non-terminal prefix (prepared/uncertain) + torn tail: the
+				// prefix may predate the torn append, but the torn tail could
+				// have been a terminal record. Fail closed on the tail while
+				// keeping the digest binding: a same-digest arrival still
+				// resolves via publication evidence below; a conflicting
+				// digest is refused here.
+				if !strings.EqualFold(rec.PayloadSHA256, env.PayloadSHA256) {
+					outcome = ApplyOutcome{
+						State:    LedgerUncertain,
+						Evidence: "torn ledger state preserved",
+					}
+					return nil
+				}
+				found, evidencePath, evidenceErr := publicationEvidencePath(root, localAgent, env.SourceHost, env.TransferID, rec.PayloadSHA256)
+				if evidenceErr {
+					outcome = ApplyOutcome{
+						State:    LedgerUncertain,
+						Evidence: "publication evidence unreadable",
+					}
+					return nil
+				}
+				if found {
+					if err := ledger.appendRecord(ledgerRecord{
+						Version:       ledgerSchemaVersion,
+						State:         LedgerCommitted,
+						SourceHost:    env.SourceHost,
+						TransferID:    env.TransferID,
+						PayloadSHA256: rec.PayloadSHA256,
+						CommittedPath: evidencePath,
+					}); err != nil {
+						return fmt.Errorf("record committed: %w", err)
+					}
+					outcome = ApplyOutcome{State: LedgerCommitted, Replayed: true, Path: evidencePath}
+					return nil
+				}
+				outcome = ApplyOutcome{
+					State:    LedgerUncertain,
+					Evidence: "torn ledger tail over non-terminal record; no publication evidence",
+				}
+				return nil
+			}
+			// Terminal prefix governs (torn tail ignored for disposition,
+			// surfaced via UnresolvedTransfers torn flag).
 		}
 
 		switch {
@@ -465,7 +542,7 @@ func ApplyWithLedger(ledger *TransferLedger, root *fsq.DeliveryRoot, localHost, 
 			// before applying: without this, a replay of a drained pre-ledger
 			// transfer re-applies (duplicate), and a conflicting first arrival
 			// would bind the key away from the legitimate winner's evidence.
-			found, evidenceErr := publicationEvidence(root, localAgent, env.SourceHost, env.TransferID, env.PayloadSHA256)
+			found, evidencePath, evidenceErr := publicationEvidencePath(root, localAgent, env.SourceHost, env.TransferID, env.PayloadSHA256)
 			if evidenceErr {
 				outcome = ApplyOutcome{
 					State:    LedgerUncertain,
@@ -486,10 +563,11 @@ func ApplyWithLedger(ledger *TransferLedger, root *fsq.DeliveryRoot, localHost, 
 					SourceHost:    env.SourceHost,
 					TransferID:    env.TransferID,
 					PayloadSHA256: env.PayloadSHA256,
+					CommittedPath: evidencePath,
 				}); err != nil {
 					return fmt.Errorf("record committed: %w", err)
 				}
-				outcome = ApplyOutcome{State: LedgerCommitted, Replayed: true}
+				outcome = ApplyOutcome{State: LedgerCommitted, Replayed: true, Path: evidencePath}
 				return nil
 			}
 			// No delivery evidence for THIS payload — but the key's filename
@@ -541,6 +619,13 @@ func ApplyWithLedger(ledger *TransferLedger, root *fsq.DeliveryRoot, localHost, 
 			return nil
 
 		case rec.State == LedgerRejected:
+			if strings.EqualFold(rec.PayloadSHA256, env.PayloadSHA256) && strings.HasPrefix(rec.Reason, "apply failed (retryable)") {
+				// A proven NON-delivery (the apply failed in-process; the
+				// record names the failure — review-827-r1 P0). The transfer
+				// is still owed to its recipient: retry the apply. The
+				// ledger's binding is unchanged, and history stays intact.
+				return ledger.applyAfterPrepared(root, localAgent, env, &outcome)
+			}
 			// Terminal for the bound digest. A different digest under the
 			// same key is a conflict observed in the outcome; the terminal
 			// rejection of the original binding is immutable.
@@ -560,7 +645,7 @@ func ApplyWithLedger(ledger *TransferLedger, root *fsq.DeliveryRoot, localHost, 
 				outcome = ApplyOutcome{State: LedgerUncertain, Reason: ledgerReasonConflict, Evidence: "prepared digest binding differs from arrival"}
 				return nil
 			}
-			found, evidenceErr := publicationEvidence(root, localAgent, env.SourceHost, env.TransferID, rec.PayloadSHA256)
+			found, evidencePath, evidenceErr := publicationEvidencePath(root, localAgent, env.SourceHost, env.TransferID, rec.PayloadSHA256)
 			if evidenceErr {
 				outcome = ApplyOutcome{
 					State:    LedgerUncertain,
@@ -576,10 +661,11 @@ func ApplyWithLedger(ledger *TransferLedger, root *fsq.DeliveryRoot, localHost, 
 					SourceHost:    env.SourceHost,
 					TransferID:    env.TransferID,
 					PayloadSHA256: rec.PayloadSHA256,
+					CommittedPath: evidencePath,
 				}); err != nil {
 					return fmt.Errorf("record committed: %w", err)
 				}
-				outcome = ApplyOutcome{State: LedgerCommitted, Replayed: true}
+				outcome = ApplyOutcome{State: LedgerCommitted, Replayed: true, Path: evidencePath}
 				return nil
 			}
 			// No evidence: the prepared intent may or may not have been
@@ -606,7 +692,7 @@ func ApplyWithLedger(ledger *TransferLedger, root *fsq.DeliveryRoot, localHost, 
 			// Re-check evidence: it may have appeared since (e.g. the
 			// consumer moved the artifact, or an operator DLQ'd a parse
 			// failure). Otherwise remain refused.
-			found, evidenceErr := publicationEvidence(root, localAgent, env.SourceHost, env.TransferID, env.PayloadSHA256)
+			found, evidencePath, evidenceErr := publicationEvidencePath(root, localAgent, env.SourceHost, env.TransferID, env.PayloadSHA256)
 			if evidenceErr {
 				outcome = ApplyOutcome{State: LedgerUncertain, Evidence: "publication evidence unreadable"}
 				return nil
@@ -618,10 +704,11 @@ func ApplyWithLedger(ledger *TransferLedger, root *fsq.DeliveryRoot, localHost, 
 					SourceHost:    env.SourceHost,
 					TransferID:    env.TransferID,
 					PayloadSHA256: rec.PayloadSHA256,
+					CommittedPath: evidencePath,
 				}); err != nil {
 					return fmt.Errorf("record committed: %w", err)
 				}
-				outcome = ApplyOutcome{State: LedgerCommitted, Replayed: true}
+				outcome = ApplyOutcome{State: LedgerCommitted, Replayed: true, Path: evidencePath}
 				return nil
 			}
 			outcome = ApplyOutcome{State: LedgerUncertain, Evidence: rec.Reason}
@@ -640,19 +727,56 @@ func ApplyWithLedger(ledger *TransferLedger, root *fsq.DeliveryRoot, localHost, 
 
 // applyAfterPrepared runs ApplyEnvelope for a fresh prepared record and
 // records the terminal state. The prepared digest binding governs: on
-// success the committed record carries that digest. os.ErrExist on a fresh
-// key means a same-name artifact with different bytes exists — a conflict
-// observed in the outcome (Reason=transfer_conflict); NOTHING is appended,
-// because the key has no terminal disposition of its own yet and the
-// arriving copy must not overwrite whatever winning artifact exists.
+// success the committed record carries that digest.
+//
+// Outcome recording (review-827-r1 P0):
+//   - os.ErrExist on a fresh key means a same-name artifact with different
+//     bytes exists — a conflict observed in the outcome. The arrival is a
+//     proven NON-delivery, so it is recorded as terminal rejected
+//     (Reason=transfer_conflict) — not left as a bare prepared that a later
+//     reader must re-derive (previously: rejected once, then uncertain on
+//     every retry — two answers for one set of facts).
+//   - Any other in-process apply failure happens in the same process that
+//     just wrote the prepared record, and ApplyEnvelope is all-or-nothing
+//     (temp file + rename): a returned error is a PROVEN non-delivery. It
+//     is recorded as a retryable rejected record carrying the failure
+//     reason, so the message stays recoverable (a later retry re-applies
+//     from the rejected-with-matching-digest branch) and the diagnostic
+//     surface names the failure — instead of the previous behaviour that
+//     left a bare prepared and let the next attempt reclassify a known
+//     non-delivery as uncertain, permanently wedging the transfer.
 func (l *TransferLedger) applyAfterPrepared(root *fsq.DeliveryRoot, localAgent string, env Envelope, outcome *ApplyOutcome) error {
 	applyResult, err := ApplyEnvelope(root, hostOfAlias(env.DestAlias), localAgent, env)
 	if err != nil {
 		if errors.Is(err, os.ErrExist) {
+			if recErr := l.appendRecord(ledgerRecord{
+				Version:       ledgerSchemaVersion,
+				State:         LedgerRejected,
+				SourceHost:    env.SourceHost,
+				TransferID:    env.TransferID,
+				PayloadSHA256: env.PayloadSHA256,
+				Reason:        ledgerReasonConflict,
+			}); recErr != nil {
+				return fmt.Errorf("record rejected: %w", recErr)
+			}
 			*outcome = ApplyOutcome{State: LedgerRejected, Reason: ledgerReasonConflict}
 			return nil
 		}
-		return err
+		// Proven non-delivery: record it as retryable rejected. A retry with
+		// the same digest re-applies (see the rejected branch in
+		// ApplyWithLedger); the ledger keeps the full history.
+		if recErr := l.appendRecord(ledgerRecord{
+			Version:       ledgerSchemaVersion,
+			State:         LedgerRejected,
+			SourceHost:    env.SourceHost,
+			TransferID:    env.TransferID,
+			PayloadSHA256: env.PayloadSHA256,
+			Reason:        "apply failed (retryable): " + err.Error(),
+		}); recErr != nil {
+			return fmt.Errorf("record rejected: %w", recErr)
+		}
+		*outcome = ApplyOutcome{State: LedgerRejected, Reason: "apply failed (retryable): " + err.Error()}
+		return nil
 	}
 	if err := l.appendRecord(ledgerRecord{
 		Version:       ledgerSchemaVersion,
@@ -734,12 +858,6 @@ func (l *TransferLedger) UnresolvedTransfers() ([]LedgerRecord, error) {
 		}
 	}
 	return out, nil
-}
-
-// UncertainTransfers is the legacy name of UnresolvedTransfers. It lists
-// prepared, uncertain, and torn entries alike.
-func (l *TransferLedger) UncertainTransfers() ([]LedgerRecord, error) {
-	return l.UnresolvedTransfers()
 }
 
 func splitLedgerName(name string) (sourceHost, transferID string, ok bool) {

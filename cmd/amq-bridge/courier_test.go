@@ -27,6 +27,7 @@ type fakeRendezvous struct {
 	accepted       map[string]bridge.Envelope
 	postCount      int
 	ackCount       int
+	ackIDs         []string
 	dropFirstAck   bool
 	wrongPostStage bool
 	seenRaw        [][]byte
@@ -128,6 +129,7 @@ func (f *fakeRendezvous) handleAck(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.ackCount++
+	f.ackIDs = append(f.ackIDs, request.Receipt.TransferID)
 	env, ok := f.accepted[request.Receipt.TransferID]
 	if !ok || !strings.EqualFold(env.PayloadSHA256, request.Receipt.PayloadSHA256) {
 		http.Error(w, "ack conflict", http.StatusConflict)
@@ -422,6 +424,159 @@ func TestPushRefusesRedirectWithoutDrainingSpool(t *testing.T) {
 	}
 }
 
+func TestPollOneBadTransferDoesNotWedgeTheBatch(t *testing.T) {
+	// review-827-r1 P1b: an uncertain ledger history for one transfer must
+	// not abort the poll batch. The bad envelope stays un-ACKed (rendezvous
+	// redelivers); the envelope behind it applies and ACKs normally.
+	fake, server := newFakeRendezvous(t)
+	receiverRoot := newBridgeRoot(t, "claude")
+
+	bad := testSignedEnvelope(t, "msg-bad", "thread-bad", "poison payload A")
+	good := testSignedEnvelope(t, "msg-good", "thread-good", "healthy payload B")
+	fake.mu.Lock()
+	fake.queue = append(fake.queue, bad, good)
+	fake.accepted[bad.TransferID] = bad
+	fake.accepted[good.TransferID] = good
+	fake.mu.Unlock()
+
+	// Pre-seed a torn ledger for the bad transfer key: unparseable-only file
+	// -> torn with no valid record -> the fail-closed uncertain refusal.
+	ledgerDir := filepath.Join(receiverRoot, "bridge", "transfer-ledger", "mac_claude")
+	if err := os.MkdirAll(ledgerDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	tornName := bad.SourceHost + "-" + bad.TransferID + ".jsonl"
+	if err := os.WriteFile(filepath.Join(ledgerDir, tornName), []byte("{\"version\":1,\"sta"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	receiver := testCourier(t, Config{
+		Root: receiverRoot, RendezvousURL: server.URL, DestAlias: "mac/claude",
+		AllowedDestAliases: []string{"mac/claude"}, AllowedSourceHosts: []string{"grok-host"},
+	})
+	poll, err := receiver.PollOnce(context.Background())
+	if err != nil {
+		t.Fatalf("PollOnce must not abort the batch on a refused transfer: %v", err)
+	}
+	if len(poll.Refused) != 1 || !poll.Refused[0].Uncertain || poll.Refused[0].TransferID != bad.TransferID {
+		t.Fatalf("refused = %#v, want the bad transfer as uncertain", poll.Refused)
+	}
+	if len(poll.Receipts) != 1 || poll.Receipts[0].TransferID != good.TransferID {
+		t.Fatalf("receipts = %#v, want exactly the good transfer committed", poll.Receipts)
+	}
+	// The good envelope was ACKed; the bad one was not.
+	fake.mu.Lock()
+	ackIDs := append([]string(nil), fake.ackIDs...)
+	fake.mu.Unlock()
+	if len(ackIDs) != 1 || ackIDs[0] != good.TransferID {
+		t.Fatalf("acks = %v, want only the good transfer ACKed", ackIDs)
+	}
+	// The good transfer is in the Maildir; the bad one is not.
+	newDir := filepath.Join(receiverRoot, "agents", "claude", "inbox", "new")
+	entries, err := os.ReadDir(newDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantGood := bridge.TransferFilename(good.SourceHost, good.TransferID)
+	if len(entries) != 1 || entries[0].Name() != wantGood {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Fatalf("inbox entries = %v, want only %s", names, wantGood)
+	}
+}
+
+func TestPollConflictSkipsWithoutReceiptOrAck(t *testing.T) {
+	// review-827-r1 P1b, conflict branch: a same-key/different-digest
+	// arrival is skipped (refused list), no receipt, no ACK — the winner's
+	// state is untouched and the batch behind it proceeds.
+	fake, server := newFakeRendezvous(t)
+	receiverRoot := newBridgeRoot(t, "claude")
+
+	winner := testSignedEnvelope(t, "msg-winner", "thread-w", "winner payload")
+	loser := winner
+	loser.Payload = []byte("losing payload")
+	sum := sha256.Sum256(loser.Payload)
+	loser.PayloadSHA256 = hex.EncodeToString(sum[:])
+	loser.TransferID = winner.TransferID // same key, different digest
+	if err := bridge.SignEnvelope(&loser, testHostKey("grok-host", "1")); err != nil {
+		t.Fatal(err)
+	}
+	after := testSignedEnvelope(t, "msg-after", "thread-a", "after payload")
+	fake.mu.Lock()
+	fake.queue = append(fake.queue, winner, loser, after)
+	fake.accepted[winner.TransferID] = winner
+	fake.accepted[after.TransferID] = after
+	fake.mu.Unlock()
+
+	receiver := testCourier(t, Config{
+		Root: receiverRoot, RendezvousURL: server.URL, DestAlias: "mac/claude",
+		AllowedDestAliases: []string{"mac/claude"}, AllowedSourceHosts: []string{"grok-host"},
+	})
+	poll, err := receiver.PollOnce(context.Background())
+	if err != nil {
+		t.Fatalf("PollOnce: %v", err)
+	}
+	if len(poll.Receipts) != 2 {
+		t.Fatalf("receipts = %d, want 2 (winner + after)", len(poll.Receipts))
+	}
+	if len(poll.Refused) != 1 || !poll.Refused[0].Conflict || poll.Refused[0].TransferID != loser.TransferID {
+		t.Fatalf("refused = %#v, want the loser as conflict", poll.Refused)
+	}
+	// Winner's artifact holds the winner's bytes (immutable).
+	winnerPath := filepath.Join(receiverRoot, "agents", "claude", "inbox", "new", bridge.TransferFilename(winner.SourceHost, winner.TransferID))
+	data, err := os.ReadFile(winnerPath)
+	if err != nil || string(data) != "winner payload" {
+		t.Fatalf("winner artifact = %q err=%v, want winner payload untouched", data, err)
+	}
+}
+
+func TestPollRetryableRejectedIsRefusedListedNotFatal(t *testing.T) {
+	// review-827-r1 P1b, non-committed branch: a retryable-rejected outcome
+	// (e.g. unwritable inbox/tmp) is refused-and-listed, the poll does not
+	// error, and the envelope is not ACKed (rendezvous redelivers after the
+	// condition clears).
+	fake, server := newFakeRendezvous(t)
+	receiverRoot := newBridgeRoot(t, "claude")
+
+	bad := testSignedEnvelope(t, "msg-retryable", "thread-r", "blocked payload")
+	fake.mu.Lock()
+	fake.queue = append(fake.queue, bad)
+	fake.accepted[bad.TransferID] = bad
+	fake.mu.Unlock()
+
+	tmpDir := filepath.Join(receiverRoot, "agents", "claude", "inbox", "tmp")
+	if err := os.MkdirAll(tmpDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(tmpDir, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(tmpDir, 0o700) })
+
+	receiver := testCourier(t, Config{
+		Root: receiverRoot, RendezvousURL: server.URL, DestAlias: "mac/claude",
+		AllowedDestAliases: []string{"mac/claude"}, AllowedSourceHosts: []string{"grok-host"},
+	})
+	poll, err := receiver.PollOnce(context.Background())
+	if err != nil {
+		t.Fatalf("PollOnce must surface the refusal in the result, not the error: %v", err)
+	}
+	if len(poll.Refused) != 1 || poll.Refused[0].TransferID != bad.TransferID {
+		t.Fatalf("refused = %#v, want the blocked transfer", poll.Refused)
+	}
+	if len(poll.Receipts) != 0 {
+		t.Fatalf("receipts = %d, want none for a refused-only poll", len(poll.Receipts))
+	}
+	fake.mu.Lock()
+	ackCount := fake.ackCount
+	fake.mu.Unlock()
+	if ackCount != 0 {
+		t.Fatalf("acks = %d, want 0 (refused transfer is not ACKed)", ackCount)
+	}
+}
+
 func TestPollRefusesRedirectOnAckWithoutFollowing(t *testing.T) {
 	env := testEnvelope(t, "ack-redirect")
 	raw, err := bridge.MarshalEnvelope(env)
@@ -655,6 +810,29 @@ func testMessage(t *testing.T, id, thread, from, body string) []byte {
 		t.Fatal(err)
 	}
 	return data
+}
+
+// testSignedEnvelope builds a valid, signed envelope with a custom payload
+// and distinct message/thread ids (helper for multi-envelope poll tests).
+func testSignedEnvelope(t *testing.T, id, thread, body string) bridge.Envelope {
+	t.Helper()
+	digest := sha256.Sum256([]byte(body))
+	env := bridge.Envelope{
+		Version:         bridge.EnvelopeVersion,
+		SourceHost:      "grok-host",
+		SourceHandle:    "codex",
+		DestAlias:       "mac/claude",
+		SourceMessageID: id,
+		ThreadID:        thread,
+		PayloadSHA256:   hex.EncodeToString(digest[:]),
+		KeyGeneration:   "1",
+		Payload:         []byte(body),
+	}
+	env.TransferID = bridge.DeriveTransferID(env.SourceHost, env.SourceHandle, env.SourceMessageID, env.DestAlias)
+	if err := bridge.SignEnvelope(&env, testHostKey("grok-host", "1")); err != nil {
+		t.Fatal(err)
+	}
+	return env
 }
 
 func testEnvelope(t *testing.T, transferID string) bridge.Envelope {

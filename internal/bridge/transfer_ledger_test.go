@@ -134,7 +134,7 @@ func TestApplyWithLedgerPreparedWithoutEvidenceIsUncertain(t *testing.T) {
 		t.Fatalf("uncertain transfer was re-applied: %v", err)
 	}
 	// Uncertain is listed for status/doctor.
-	uncertain, err := ledger.UncertainTransfers()
+	uncertain, err := ledger.UnresolvedTransfers()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -312,6 +312,266 @@ func TestApplyWithLedgerPreparedBindingImmutableAgainstConflictingArrival(t *tes
 	}
 	if recovered.State != LedgerCommitted || !recovered.Replayed {
 		t.Fatalf("A recovery = %+v, want committed replayed", recovered)
+	}
+}
+
+func TestApplyWithLedgerSameNameDifferentBytesDoesNotPromote(t *testing.T) {
+	// review-827-r1 P1a (mutation M3): the inbox evidence digest comparison
+	// (:357) is load-bearing. A crash leaves a prepared record; a same-name
+	// artifact holding DIFFERENT bytes sits in inbox/new (the reachable
+	// pre-ledger case named at apply_file.go:96-98). The digest guard must
+	// refuse promotion — the record stays prepared/uncertain, no receipt.
+	root, ledger := newLedgerTestRoot(t)
+	base := rootRootDir(t, root)
+	env := testEnvelope([]byte("hello"))
+
+	if err := ledger.appendRecord(ledgerRecord{
+		Version:       ledgerSchemaVersion,
+		State:         LedgerPrepared,
+		SourceHost:    env.SourceHost,
+		TransferID:    env.TransferID,
+		PayloadSHA256: env.PayloadSHA256,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Same filename, different bytes.
+	newPath := filepath.Join(fsq.AgentInboxNew(base, "claude"), TransferFilename(env.SourceHost, env.TransferID))
+	if err := os.WriteFile(newPath, []byte("tampered"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	outcome, err := ApplyWithLedger(ledger, root, "mac", "claude", env)
+	if err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if outcome.State == LedgerCommitted {
+		t.Fatalf("same-name/different-bytes artifact promoted prepared to committed — evidence digest guard missing")
+	}
+	// Nothing was re-applied either (no second artifact, no overwrite).
+	data, err := os.ReadFile(newPath)
+	if err != nil || string(data) != "tampered" {
+		t.Fatalf("inbox artifact changed: %v", err)
+	}
+}
+
+func TestApplyWithLedgerDLQOriginalContentDigestGuardsPromotion(t *testing.T) {
+	// review-827-r1 P1a (mutation M4): the DLQ original-content digest
+	// comparison (:321) is load-bearing. A DLQ envelope wrapping DIFFERENT
+	// original bytes under the transfer filename must not promote a
+	// prepared record to committed.
+	root, ledger := newLedgerTestRoot(t)
+	base := rootRootDir(t, root)
+	env := testEnvelope([]byte("hello"))
+
+	if err := ledger.appendRecord(ledgerRecord{
+		Version:       ledgerSchemaVersion,
+		State:         LedgerPrepared,
+		SourceHost:    env.SourceHost,
+		TransferID:    env.TransferID,
+		PayloadSHA256: env.PayloadSHA256,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	dlqEnv := fsq.DLQEnvelope{
+		Schema:       fsq.DLQSchemaVersion,
+		ID:           "dlq-poison01",
+		OriginalID:   "orig",
+		OriginalFile: TransferFilename(env.SourceHost, env.TransferID),
+		SourceDir:    "inbox/new",
+	}
+	header, err := json.MarshalIndent(dlqEnv, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := append([]byte("---\n"), header...)
+	data = append(data, []byte("\n---\n")...)
+	data = append(data, []byte("different original bytes")...) // NOT env.Payload
+	dlqDir := fsq.AgentDLQNew(base, "claude")
+	if err := os.MkdirAll(dlqDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dlqDir, "dlq-poison01.md"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	outcome, err := ApplyWithLedger(ledger, root, "mac", "claude", env)
+	if err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if outcome.State == LedgerCommitted {
+		t.Fatalf("DLQ envelope with different original content promoted prepared to committed — original-content digest guard missing")
+	}
+}
+
+func TestApplyWithLedgerRetryableRejectedReappliesAndCommits(t *testing.T) {
+	// review-827-r1 P0: an in-process apply failure is a PROVEN
+	// non-delivery. It must be recorded as a retryable rejected outcome —
+	// never left as a bare prepared that a later attempt reclassifies as
+	// uncertain, permanently wedging the transfer. After the condition
+	// clears, the retry must DELIVER (main's behaviour), not refuse.
+	root, ledger := newLedgerTestRoot(t)
+	base := rootRootDir(t, root)
+	env := testEnvelope([]byte("hello"))
+
+	// Make the apply fail: an unwritable inbox/tmp blocks the publication.
+	tmpDir := filepath.Join(base, "agents", "claude", "inbox", "tmp")
+	if err := os.MkdirAll(tmpDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(tmpDir, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(tmpDir, 0o700) })
+
+	outcome, err := ApplyWithLedger(ledger, root, "mac", "claude", env)
+	if err != nil {
+		t.Fatalf("first apply (expected clean refusal, not error): %v", err)
+	}
+	if outcome.State != LedgerRejected {
+		t.Fatalf("state = %q, want rejected with retryable reason on proven non-delivery", outcome.State)
+	}
+	if !strings.Contains(outcome.Reason, "apply failed (retryable)") {
+		t.Fatalf("reason = %q, want a retryable apply-failure reason", outcome.Reason)
+	}
+	// The failure is durably recorded.
+	records, torn, err := ledger.readRecords(env.SourceHost, env.TransferID)
+	if err != nil || torn || len(records) < 2 || records[len(records)-1].State != LedgerRejected {
+		t.Fatalf("records = %+v torn=%v err=%v, want prepared + retryable rejected", records, torn, err)
+	}
+
+	// Repair the condition and retry: the transfer must now deliver.
+	if err := os.Chmod(tmpDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := ApplyWithLedger(ledger, root, "mac", "claude", env)
+	if err != nil {
+		t.Fatalf("retry after repair: %v", err)
+	}
+	if recovered.State != LedgerCommitted {
+		t.Fatalf("retry state = %q, want committed (proven non-delivery must stay recoverable)", recovered.State)
+	}
+	newPath := filepath.Join(fsq.AgentInboxNew(base, "claude"), TransferFilename(env.SourceHost, env.TransferID))
+	if _, err := os.Stat(newPath); err != nil {
+		t.Fatalf("retry did not deliver the transfer: %v", err)
+	}
+}
+
+func TestApplyWithLedgerErrExistFreshKeyIsTerminalRejected(t *testing.T) {
+	// review-827-r1 P2-3: a fresh-key ErrExist must give ONE answer — a
+	// durable terminal rejected record — not rejected-once then uncertain
+	// forever from the leftover bare prepared.
+	root, ledger := newLedgerTestRoot(t)
+	base := rootRootDir(t, root)
+	env := testEnvelope([]byte("hello"))
+
+	// A same-name artifact with different bytes already occupies the slot.
+	newPath := filepath.Join(fsq.AgentInboxNew(base, "claude"), TransferFilename(env.SourceHost, env.TransferID))
+	if err := os.WriteFile(newPath, []byte("winner"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	outcome, err := ApplyWithLedger(ledger, root, "mac", "claude", env)
+	if err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if outcome.State != LedgerRejected {
+		t.Fatalf("state = %q, want rejected", outcome.State)
+	}
+	// Second attempt: SAME terminal answer, not uncertain.
+	again, err := ApplyWithLedger(ledger, root, "mac", "claude", env)
+	if err != nil {
+		t.Fatalf("second apply: %v", err)
+	}
+	if again.State != LedgerRejected || again.Reason != outcome.Reason {
+		t.Fatalf("second state = %q reason %q, want the same terminal rejection (got %q/%q first)", again.State, again.Reason, outcome.State, outcome.Reason)
+	}
+}
+
+func TestApplyWithLedgerTornTailOverPreparedResolvesViaEvidence(t *testing.T) {
+	// review-827-r1 P1c: a torn tail must not discard the intact prefix.
+	// prepared record + torn append + digest-matching artifact in new =
+	// resolvable; the refusal must not poison a recoverable transfer.
+	root, ledger := newLedgerTestRoot(t)
+	base := rootRootDir(t, root)
+	env := testEnvelope([]byte("hello"))
+
+	dir := filepath.Join(base, "bridge", "transfer-ledger", "mac_claude")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	line, err := ledgerLine(ledgerRecord{
+		Version:       ledgerSchemaVersion,
+		State:         LedgerPrepared,
+		SourceHost:    env.SourceHost,
+		TransferID:    env.TransferID,
+		PayloadSHA256: env.PayloadSHA256,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fileData := append([]byte{}, line...)
+	fileData = append(fileData, []byte("{\"version\":1,\"state\":\"comm")...) // torn tail
+	if err := os.WriteFile(filepath.Join(dir, ledgerRecordName(env.SourceHost, env.TransferID)), fileData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Digest-matching artifact retained in new.
+	newPath := filepath.Join(fsq.AgentInboxNew(base, "claude"), TransferFilename(env.SourceHost, env.TransferID))
+	if err := os.WriteFile(newPath, env.Payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	outcome, err := ApplyWithLedger(ledger, root, "mac", "claude", env)
+	if err != nil {
+		t.Fatalf("apply on torn tail: %v", err)
+	}
+	if outcome.State != LedgerCommitted || !outcome.Replayed {
+		t.Fatalf("state = %q replayed=%v, want committed replayed via evidence over torn tail", outcome.State, outcome.Replayed)
+	}
+	// Exactly one artifact (no duplicate).
+	entries, err := os.ReadDir(fsq.AgentInboxNew(base, "claude"))
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("new entries = %d err=%v, want exactly 1", len(entries), err)
+	}
+}
+
+func TestApplyWithLedgerTornTailAfterTerminalRecordGoverns(t *testing.T) {
+	// review-827-r1 P1c, terminal case: a torn tail after a committed
+	// record cannot un-terminal the commit — the intact prefix governs.
+	root, ledger := newLedgerTestRoot(t)
+	base := rootRootDir(t, root)
+	env := testEnvelope([]byte("hello"))
+
+	dir := filepath.Join(base, "bridge", "transfer-ledger", "mac_claude")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	prepLine, err := ledgerLine(ledgerRecord{
+		Version: ledgerSchemaVersion, State: LedgerPrepared,
+		SourceHost: env.SourceHost, TransferID: env.TransferID, PayloadSHA256: env.PayloadSHA256,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	commitLine, err := ledgerLine(ledgerRecord{
+		Version: ledgerSchemaVersion, State: LedgerCommitted,
+		SourceHost: env.SourceHost, TransferID: env.TransferID, PayloadSHA256: env.PayloadSHA256,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fileData := append([]byte{}, prepLine...)
+	fileData = append(fileData, commitLine...)
+	fileData = append(fileData, []byte("{\"version\":1,\"sta")...) // torn tail
+	if err := os.WriteFile(filepath.Join(dir, ledgerRecordName(env.SourceHost, env.TransferID)), fileData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	outcome, err := ApplyWithLedger(ledger, root, "mac", "claude", env)
+	if err != nil {
+		t.Fatalf("apply on committed + torn tail: %v", err)
+	}
+	if outcome.State != LedgerCommitted || !outcome.Replayed {
+		t.Fatalf("state = %q replayed=%v, want committed replayed (terminal prefix governs torn tail)", outcome.State, outcome.Replayed)
 	}
 }
 

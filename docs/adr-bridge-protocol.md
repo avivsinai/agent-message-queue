@@ -225,3 +225,58 @@ principal until a live test proves isolation.
   ship a hosted relay as Core.
 - G is a normal AMQ install. Pin `AM_ROOT` in operator config, never in Bot
   chat. Durable state belongs under a path that survives Bot client close.
+
+### Addendum 4 — transfer ledger (611.14, amended per review-827-r1)
+
+Applies to the destination-apply path (courier `PollOnce` and
+`amq-bridge apply-file`). Where Addendum 3 names an apply-lock path, this
+addendum supersedes it: the per-transfer lock lives at
+`bridge/transfer-ledger/<session>/locks/<source>-<transfer>.lock` (a `flock`
+on Unix, `LockFileEx` over byte range [0,1) on Windows — blocking, exclusive,
+both twins from the same helper), scoped by the destination-alias session
+both callers derive identically.
+
+**Ledger.** For each `(source_host, transfer_id)` an append-only JSONL file
+`bridge/transfer-ledger/<session>/<source>-<transfer>.jsonl` (mode 0600)
+records states `prepared` → `committed` | `rejected`, plus `uncertain`. The
+first `prepared` record binds the transfer's payload digest immutably; a
+different digest under the same key is `transfer_conflict` observed in the
+outcome and never overwrites the binding or a committed winner. The intent
+(`prepared`) is durable — file and directory chain — before `ApplyEnvelope`
+runs. A crash before the `committed` append recovers from durable publication
+evidence: a digest-matching artifact retained in `inbox/new`, `inbox/cur`, or
+a DLQ envelope wrapping the original bytes promotes the record to `committed`
+(replayed) without re-applying.
+
+**Proven non-delivery is retryable (review-827-r1 P0).** An in-process apply
+failure — in the same process that just wrote `prepared` — is a proven
+non-delivery: `ApplyEnvelope` is all-or-nothing (temp file + rename), so a
+returned error means nothing was published. It is recorded as a retryable
+`rejected` record naming the failure (`apply failed (retryable): ...`), and a
+retry with the same digest re-applies from that state. A known non-delivery
+is never reclassified as `uncertain`; only unknown history (no evidence, no
+in-process knowledge) is `uncertain`, and `uncertain` refuses both the
+destination receipt and the ACK.
+
+**Terminal rejection is one answer.** `os.ErrExist` on a fresh key
+(same-name artifact with different bytes) records a terminal `rejected`
+(`transfer_conflict`) on the first refusal and reports the same terminal
+outcome on every later attempt.
+
+**Torn tail (review-827-r1 P1c).** An unparseable tail line of the ledger
+file is a torn append over an intact prefix: the last valid record governs
+the disposition, and a torn tail after a terminal record cannot un-terminal
+it. A torn read with no valid record (or a conflicting digest over a
+non-terminal prefix) remains fail-closed `uncertain`.
+
+**Courier batching (review-827-r1 P1b).** A refused transfer — `uncertain`
+history, terminal rejection, or conflict — is skipped, not batch-fatal: the
+poll loop continues, envelopes behind it still apply and ACK, and the refusal
+is reported in `PollResult.Refused`. A refused envelope is never ACKed, so
+the rendezvous redelivers it; a retryable rejection clears when its condition
+clears.
+
+**Recovered receipts.** Evidence-promoted commits carry the retained
+artifact's path as `committed_path` (a replayed receipt for a consumer-drained
+transfer reports the drain surface — new/cur/DLQ — where the delivery was
+verified).

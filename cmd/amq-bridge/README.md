@@ -53,10 +53,14 @@ The command reads only that regular, non-symlink file. It loads the local
 `bridge/host-id` and the trusted public key at
 `trusted/<source_host>/<key_generation>`, verifies the v2 Ed25519 signature
 and payload digest, requires the `dest_alias` host to match the local host-id,
-and then calls the same `ApplyEnvelope` Maildir path as the courier. It prints
-and durably records a `destination_maildir_committed` receipt under
+and then routes through the transfer ledger (docs/adr-bridge-protocol.md,
+Addendum 4) into the same `ApplyEnvelope` Maildir path the courier uses. It
+prints and durably records a `destination_maildir_committed` receipt under
 `<AMQ root>/bridge/receipts/`. Repeating the same file is an idempotent
-replay; the same transfer key with a different payload is a conflict.
+replay; the same transfer key with a different payload is a conflict
+(`transfer %s refused: transfer_conflict (committed result for this key
+belongs to a different payload)`); a transfer with unknown ledger history is
+refused as `uncertain` without a receipt.
 The command consumes only files directly under `bridge/drop/new/`.
 `bridge/drop/tmp/`, `*.part` files, symlinks, unsigned or forged envelopes,
 foreign destinations, and files outside `bridge/drop/new/` are rejected. The

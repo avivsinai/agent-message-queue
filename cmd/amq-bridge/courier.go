@@ -119,6 +119,23 @@ type PushResult struct {
 
 type PollResult struct {
 	Receipts []Receipt `json:"receipts,omitempty"`
+	// Refused lists transfers this poll skipped instead of applying: an
+	// uncertain ledger history (fail-closed, no receipt, no ACK — the
+	// rendezvous redelivers) or a terminal conflict (committed winner
+	// immutable, this copy refused without receipt or ACK — the source
+	// retires it via the destination_rejected outcome, ADR-bridge-protocol
+	// §105). One refused transfer must not wedge the batch: envelopes
+	// behind it still apply and ACK (review-827-r1 P1b).
+	Refused []RefusedTransfer `json:"refused,omitempty"`
+}
+
+// RefusedTransfer records one envelope the courier skipped, with the
+// refusal class and the human-readable reason.
+type RefusedTransfer struct {
+	TransferID string `json:"transfer_id"`
+	Reason     string `json:"reason"`
+	Uncertain  bool   `json:"uncertain"`
+	Conflict   bool   `json:"conflict"`
 }
 
 type RunResult struct {
@@ -471,20 +488,35 @@ func (c *Courier) PollOnce(ctx context.Context) (PollResult, error) {
 		if err != nil {
 			return result, fmt.Errorf("apply transfer %s: %w", env.TransferID, err)
 		}
+		// Refused transfers are SKIPPED, not batch-fatal (review-827-r1
+		// P1b): the loop continues so envelopes behind a bad transfer still
+		// apply and ACK, and the refusal is reported in PollResult.Refused
+		// (surfaced via status/doctor in the courier wave).
 		if applyOutcome.State == bridge.LedgerUncertain {
-			// Unknown history: refuse both outcomes. Do not ACK (the
-			// rendezvous will redeliver; the receiver's ledger still refuses
-			// while history is unknown), and do not emit a destination
-			// receipt. Surface it for status/doctor.
-			return result, fmt.Errorf("transfer %s is uncertain in the transfer ledger: %s", env.TransferID, applyOutcome.Evidence)
+			// Unknown history: fail closed. Do not ACK (the rendezvous will
+			// redeliver; the receiver's ledger still refuses while history
+			// is unknown), and do not emit a destination receipt.
+			result.Refused = append(result.Refused, RefusedTransfer{
+				TransferID: env.TransferID,
+				Reason:     applyOutcome.Evidence,
+				Uncertain:  true,
+			})
+			continue
 		}
 		if applyOutcome.State != bridge.LedgerCommitted {
-			return result, fmt.Errorf("transfer %s ended in ledger state %q (reason %q)", env.TransferID, applyOutcome.State, applyOutcome.Reason)
-		}
-		if applyOutcome.Reason == bridge.LedgerReasonConflict {
-			// A same-key/different-digest arrival: the committed winner is
-			// immutable and this copy is refused without a receipt or ACK.
-			return result, fmt.Errorf("transfer %s refused: transfer_conflict (committed result for this key belongs to a different payload)", env.TransferID)
+			// Terminal non-commit (rejected: conflict or proven non-delivery
+			// retryable). A rejected outcome is terminal for THIS copy: no
+			// receipt, no ACK for the envelope itself — the source retires
+			// the transfer via the destination_rejected outcome contract
+			// (docs/adr-bridge-protocol.md:105), and the retryable-rejected
+			// class is redelivered by the rendezvous until the condition
+			// clears. Skipping keeps the batch moving either way.
+			result.Refused = append(result.Refused, RefusedTransfer{
+				TransferID: env.TransferID,
+				Reason:     applyOutcome.Reason,
+				Conflict:   applyOutcome.Reason == bridge.LedgerReasonConflict,
+			})
+			continue
 		}
 		receipt := Receipt{
 			Stage:           ReceiptDestinationMaildirCommit,
