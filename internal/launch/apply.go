@@ -463,12 +463,15 @@ func initializeApplySession(root *fsq.DeliveryRoot, handles []string) error {
 	if err := root.EnsureRootDirs(); err != nil {
 		return err
 	}
-	config := struct {
-		Version    int      `json:"version"`
-		CreatedUTC string   `json:"created_utc"`
-		Agents     []string `json:"agents"`
-	}{Version: 1, CreatedUTC: time.Now().UTC().Format(time.RFC3339), Agents: slices.Clone(handles)}
-	data, err := json.MarshalIndent(config, "", "  ")
+	// Review-823-r1 P2-1: route through the shared preserving encoder so the
+	// initializing write emits the same sorted layout every other config.json
+	// writer uses (this path only ever runs inside
+	// PublishInitializedDirectChildExclusive, which refuses an existing name,
+	// so there is nothing to preserve — the empty original yields sorted
+	// struct keys, matching WriteConfig and the create arms).
+	data, err := config.MarshalPreservingUnknowns(nil, config.Config{
+		Version: 1, CreatedUTC: time.Now().UTC().Format(time.RFC3339), Agents: slices.Clone(handles),
+	})
 	if err != nil {
 		return err
 	}
