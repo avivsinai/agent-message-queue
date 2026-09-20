@@ -265,10 +265,20 @@ func TestSubmitAdmittedOnlyWithReceipt(t *testing.T) {
 	a, dir := newTestAttachment(t)
 	key := testKey("u1")
 	ref := clientRef(key)
-	go func() {
-		time.Sleep(10 * time.Millisecond)
-		writeReceipt(t, dir, ref, "gen-1", fixedNow)
-	}()
+	// Deterministic fixture (not live extension proof): the receipt is
+	// written by the publish hook — after the REAL publishRequest succeeds,
+	// before Submit's first poll step — instead of a sleeping producer
+	// racing the poll window. Scoped to u1's ref only: u2's submit must
+	// still find no receipt and exercise the uncertain path.
+	a.dir.publish = func(req deliverRequest) error {
+		if err := (bridgeDir{dir: dir}).publishRequest(req); err != nil {
+			return err
+		}
+		if req.Ref == ref {
+			writeReceipt(t, dir, ref, "gen-1", fixedNow)
+		}
+		return nil
+	}
 	adm, err := a.Submit(submitReq(key, "hello"))
 	if err != nil || !adm.Admitted || adm.RunID == "" {
 		t.Fatalf("Submit with receipt = %+v, %v; want admitted with run id", adm, err)

@@ -334,7 +334,19 @@ func (r *DeliveryRoot) resolvePublishCollision(tmpPath, newPath string, data []b
 	}
 	if bytes.Equal(existing, data) {
 		if removeErr := r.root.Remove(tmpPath); removeErr != nil && !os.IsNotExist(removeErr) {
-			return fmt.Errorf("remove idempotent tmp after collision: %w", removeErr)
+			// review-827-r3 (codex r2-r3 finding 2): the destination was
+			// PROVEN to already hold exactly these bytes — the publication
+			// succeeded. A failed tmp cleanup must not be reported as a
+			// proven non-delivery (callers would classify it retryable and
+			// re-apply). Classify explicitly as a committed-with-indeterminate
+			// durability delivery: the rename+match are facts; the dest dir
+			// sync never ran because this error short-circuits it. Callers
+			// (the repo-wide CommittedDurabilityError contract) treat this as
+			// delivered and let the owning layer re-verify durability.
+			return &CommittedDurabilityError{
+				FinalPath: r.displayPath(newPath),
+				Err:       fmt.Errorf("destination already held matching bytes; tmp cleanup failed: %w", removeErr),
+			}
 		}
 		return nil
 	}

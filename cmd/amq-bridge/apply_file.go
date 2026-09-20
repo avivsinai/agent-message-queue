@@ -90,17 +90,39 @@ func runApplyFile(args []string) error {
 	if err := bridge.VerifyEnvelope(env, public, generation); err != nil {
 		return fmt.Errorf("authenticate transfer %s: %w", env.TransferID, err)
 	}
-	applyResult, err := bridge.ApplyEnvelope(root, localHost, destAgent, env)
+	// Route through the owning-layer transfer ledger — the same mechanism the
+	// courier uses — so apply-file and ledgered courier applies serialize per
+	// (source_host, transfer_id) and a drained artifact is never duplicated.
+	// The session directory is keyed by the destination alias, matching the
+	// courier's receiver session. NOTE: this covers ledgers written since the
+	// ledger existed; a pre-ledger delivery whose artifacts were cleaned up
+	// cannot be reconstructed and a redelivery of it is treated as fresh.
+	ledger, err := bridge.NewTransferLedger(root, env.DestAlias)
+	if err != nil {
+		return fmt.Errorf("open transfer ledger: %w", err)
+	}
+	applyOutcome, err := bridge.ApplyWithLedger(ledger, root, localHost, destAgent, env)
 	if err != nil {
 		return fmt.Errorf("apply transfer %s: %w", env.TransferID, err)
+	}
+	if applyOutcome.State == bridge.LedgerUncertain {
+		return fmt.Errorf("transfer %s is uncertain in the transfer ledger: %s", env.TransferID, applyOutcome.Evidence)
+	}
+	if applyOutcome.State != bridge.LedgerCommitted {
+		return fmt.Errorf("transfer %s ended in ledger state %q (reason %q)", env.TransferID, applyOutcome.State, applyOutcome.Reason)
+	}
+	if applyOutcome.Reason == bridge.LedgerReasonConflict {
+		// A same-key/different-digest arrival: the committed winner is
+		// immutable and this copy is refused without touching receipts.
+		return fmt.Errorf("transfer %s refused: transfer_conflict (committed result for this key belongs to a different payload)", env.TransferID)
 	}
 	receipt := Receipt{
 		Stage:           ReceiptDestinationMaildirCommit,
 		TransferID:      env.TransferID,
 		PayloadSHA256:   env.PayloadSHA256,
-		Replayed:        applyResult.Replayed,
+		Replayed:        applyOutcome.Replayed,
 		SourceMessageID: env.SourceMessageID,
-		CommittedPath:   applyResult.Path,
+		CommittedPath:   applyOutcome.Path,
 		EmittedAt:       time.Now().UTC().Format(time.RFC3339Nano),
 	}
 	if err := writeBridgeReceipt(root, applyReceiptRelDir, receipt); err != nil {

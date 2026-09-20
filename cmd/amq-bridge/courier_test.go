@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -27,6 +29,7 @@ type fakeRendezvous struct {
 	accepted       map[string]bridge.Envelope
 	postCount      int
 	ackCount       int
+	ackIDs         []string
 	dropFirstAck   bool
 	wrongPostStage bool
 	seenRaw        [][]byte
@@ -128,6 +131,7 @@ func (f *fakeRendezvous) handleAck(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.ackCount++
+	f.ackIDs = append(f.ackIDs, request.Receipt.TransferID)
 	env, ok := f.accepted[request.Receipt.TransferID]
 	if !ok || !strings.EqualFold(env.PayloadSHA256, request.Receipt.PayloadSHA256) {
 		http.Error(w, "ack conflict", http.StatusConflict)
@@ -422,6 +426,159 @@ func TestPushRefusesRedirectWithoutDrainingSpool(t *testing.T) {
 	}
 }
 
+func TestPollOneBadTransferDoesNotWedgeTheBatch(t *testing.T) {
+	// review-827-r1 P1b: an uncertain ledger history for one transfer must
+	// not abort the poll batch. The bad envelope stays un-ACKed (rendezvous
+	// redelivers); the envelope behind it applies and ACKs normally.
+	fake, server := newFakeRendezvous(t)
+	receiverRoot := newBridgeRoot(t, "claude")
+
+	bad := testSignedEnvelope(t, "msg-bad", "thread-bad", "poison payload A")
+	good := testSignedEnvelope(t, "msg-good", "thread-good", "healthy payload B")
+	fake.mu.Lock()
+	fake.queue = append(fake.queue, bad, good)
+	fake.accepted[bad.TransferID] = bad
+	fake.accepted[good.TransferID] = good
+	fake.mu.Unlock()
+
+	// Pre-seed a torn ledger for the bad transfer key: unparseable-only file
+	// -> torn with no valid record -> the fail-closed uncertain refusal.
+	ledgerDir := filepath.Join(receiverRoot, "bridge", "transfer-ledger", "mac_claude")
+	if err := os.MkdirAll(ledgerDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	tornName := bad.SourceHost + "-" + bad.TransferID + ".jsonl"
+	if err := os.WriteFile(filepath.Join(ledgerDir, tornName), []byte("{\"version\":1,\"sta"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	receiver := testCourier(t, Config{
+		Root: receiverRoot, RendezvousURL: server.URL, DestAlias: "mac/claude",
+		AllowedDestAliases: []string{"mac/claude"}, AllowedSourceHosts: []string{"grok-host"},
+	})
+	poll, err := receiver.PollOnce(context.Background())
+	if err != nil {
+		t.Fatalf("PollOnce must not abort the batch on a refused transfer: %v", err)
+	}
+	if len(poll.Refused) != 1 || !poll.Refused[0].Uncertain || poll.Refused[0].TransferID != bad.TransferID {
+		t.Fatalf("refused = %#v, want the bad transfer as uncertain", poll.Refused)
+	}
+	if len(poll.Receipts) != 1 || poll.Receipts[0].TransferID != good.TransferID {
+		t.Fatalf("receipts = %#v, want exactly the good transfer committed", poll.Receipts)
+	}
+	// The good envelope was ACKed; the bad one was not.
+	fake.mu.Lock()
+	ackIDs := append([]string(nil), fake.ackIDs...)
+	fake.mu.Unlock()
+	if len(ackIDs) != 1 || ackIDs[0] != good.TransferID {
+		t.Fatalf("acks = %v, want only the good transfer ACKed", ackIDs)
+	}
+	// The good transfer is in the Maildir; the bad one is not.
+	newDir := filepath.Join(receiverRoot, "agents", "claude", "inbox", "new")
+	entries, err := os.ReadDir(newDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantGood := bridge.TransferFilename(good.SourceHost, good.TransferID)
+	if len(entries) != 1 || entries[0].Name() != wantGood {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Fatalf("inbox entries = %v, want only %s", names, wantGood)
+	}
+}
+
+func TestPollConflictSkipsWithoutReceiptOrAck(t *testing.T) {
+	// review-827-r1 P1b, conflict branch: a same-key/different-digest
+	// arrival is skipped (refused list), no receipt, no ACK — the winner's
+	// state is untouched and the batch behind it proceeds.
+	fake, server := newFakeRendezvous(t)
+	receiverRoot := newBridgeRoot(t, "claude")
+
+	winner := testSignedEnvelope(t, "msg-winner", "thread-w", "winner payload")
+	loser := winner
+	loser.Payload = []byte("losing payload")
+	sum := sha256.Sum256(loser.Payload)
+	loser.PayloadSHA256 = hex.EncodeToString(sum[:])
+	loser.TransferID = winner.TransferID // same key, different digest
+	if err := bridge.SignEnvelope(&loser, testHostKey("grok-host", "1")); err != nil {
+		t.Fatal(err)
+	}
+	after := testSignedEnvelope(t, "msg-after", "thread-a", "after payload")
+	fake.mu.Lock()
+	fake.queue = append(fake.queue, winner, loser, after)
+	fake.accepted[winner.TransferID] = winner
+	fake.accepted[after.TransferID] = after
+	fake.mu.Unlock()
+
+	receiver := testCourier(t, Config{
+		Root: receiverRoot, RendezvousURL: server.URL, DestAlias: "mac/claude",
+		AllowedDestAliases: []string{"mac/claude"}, AllowedSourceHosts: []string{"grok-host"},
+	})
+	poll, err := receiver.PollOnce(context.Background())
+	if err != nil {
+		t.Fatalf("PollOnce: %v", err)
+	}
+	if len(poll.Receipts) != 2 {
+		t.Fatalf("receipts = %d, want 2 (winner + after)", len(poll.Receipts))
+	}
+	if len(poll.Refused) != 1 || !poll.Refused[0].Conflict || poll.Refused[0].TransferID != loser.TransferID {
+		t.Fatalf("refused = %#v, want the loser as conflict", poll.Refused)
+	}
+	// Winner's artifact holds the winner's bytes (immutable).
+	winnerPath := filepath.Join(receiverRoot, "agents", "claude", "inbox", "new", bridge.TransferFilename(winner.SourceHost, winner.TransferID))
+	data, err := os.ReadFile(winnerPath)
+	if err != nil || string(data) != "winner payload" {
+		t.Fatalf("winner artifact = %q err=%v, want winner payload untouched", data, err)
+	}
+}
+
+func TestPollRetryableRejectedIsRefusedListedNotFatal(t *testing.T) {
+	// review-827-r1 P1b, non-committed branch: a retryable-rejected outcome
+	// (e.g. unwritable inbox/tmp) is refused-and-listed, the poll does not
+	// error, and the envelope is not ACKed (rendezvous redelivers after the
+	// condition clears).
+	fake, server := newFakeRendezvous(t)
+	receiverRoot := newBridgeRoot(t, "claude")
+
+	bad := testSignedEnvelope(t, "msg-retryable", "thread-r", "blocked payload")
+	fake.mu.Lock()
+	fake.queue = append(fake.queue, bad)
+	fake.accepted[bad.TransferID] = bad
+	fake.mu.Unlock()
+
+	tmpDir := filepath.Join(receiverRoot, "agents", "claude", "inbox", "tmp")
+	if err := os.MkdirAll(tmpDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(tmpDir, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(tmpDir, 0o700) })
+
+	receiver := testCourier(t, Config{
+		Root: receiverRoot, RendezvousURL: server.URL, DestAlias: "mac/claude",
+		AllowedDestAliases: []string{"mac/claude"}, AllowedSourceHosts: []string{"grok-host"},
+	})
+	poll, err := receiver.PollOnce(context.Background())
+	if err != nil {
+		t.Fatalf("PollOnce must surface the refusal in the result, not the error: %v", err)
+	}
+	if len(poll.Refused) != 1 || poll.Refused[0].TransferID != bad.TransferID {
+		t.Fatalf("refused = %#v, want the blocked transfer", poll.Refused)
+	}
+	if len(poll.Receipts) != 0 {
+		t.Fatalf("receipts = %d, want none for a refused-only poll", len(poll.Receipts))
+	}
+	fake.mu.Lock()
+	ackCount := fake.ackCount
+	fake.mu.Unlock()
+	if ackCount != 0 {
+		t.Fatalf("acks = %d, want 0 (refused transfer is not ACKed)", ackCount)
+	}
+}
+
 func TestPollRefusesRedirectOnAckWithoutFollowing(t *testing.T) {
 	env := testEnvelope(t, "ack-redirect")
 	raw, err := bridge.MarshalEnvelope(env)
@@ -657,6 +814,29 @@ func testMessage(t *testing.T, id, thread, from, body string) []byte {
 	return data
 }
 
+// testSignedEnvelope builds a valid, signed envelope with a custom payload
+// and distinct message/thread ids (helper for multi-envelope poll tests).
+func testSignedEnvelope(t *testing.T, id, thread, body string) bridge.Envelope {
+	t.Helper()
+	digest := sha256.Sum256([]byte(body))
+	env := bridge.Envelope{
+		Version:         bridge.EnvelopeVersion,
+		SourceHost:      "grok-host",
+		SourceHandle:    "codex",
+		DestAlias:       "mac/claude",
+		SourceMessageID: id,
+		ThreadID:        thread,
+		PayloadSHA256:   hex.EncodeToString(digest[:]),
+		KeyGeneration:   "1",
+		Payload:         []byte(body),
+	}
+	env.TransferID = bridge.DeriveTransferID(env.SourceHost, env.SourceHandle, env.SourceMessageID, env.DestAlias)
+	if err := bridge.SignEnvelope(&env, testHostKey("grok-host", "1")); err != nil {
+		t.Fatal(err)
+	}
+	return env
+}
+
 func testEnvelope(t *testing.T, transferID string) bridge.Envelope {
 	t.Helper()
 	payload := []byte("poll payload")
@@ -888,4 +1068,121 @@ func mustOpenRoot(t *testing.T, path string) *fsq.DeliveryRoot {
 	}
 	t.Cleanup(func() { _ = root.Close() })
 	return root
+}
+
+// TestRunOnceSurfacesDiagnosticsAndRefused (review-827-r2 P2-3 + r1 CLI gap):
+// writeRunResult must emit refused transfers and unresolved ledger state —
+// previously PollResult.Refused was serialized by nothing and
+// UnresolvedTransfers had no production caller, so a stuck retryable
+// transfer was invisible on the CLI.
+func TestRunOnceSurfacesDiagnosticsAndRefused(t *testing.T) {
+	// Unit-level: writeRunResult serialization.
+	var buf bytes.Buffer
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := os.Stdout
+	os.Stdout = w
+	writeErr := make(chan error, 1)
+	go func() {
+		writeErr <- writeRunResult(RunResult{
+			Poll: PollResult{Refused: []RefusedTransfer{{TransferID: "tid", Reason: "conflict", Conflict: true}}},
+			Diagnostics: []LedgerDiagnostic{
+				{TransferID: "tid2", State: string(bridge.LedgerRejected), Retryable: true, Reason: "apply failed (retryable): x"},
+			},
+		})
+		_ = w.Close()
+	}()
+	if err := <-writeErr; err != nil {
+		os.Stdout = old
+		t.Fatalf("writeRunResult: %v", err)
+	}
+	os.Stdout = old
+	out, _ := io.ReadAll(r)
+	_ = buf
+	if !strings.Contains(string(out), `"refused"`) || !strings.Contains(string(out), `"tid"`) {
+		t.Fatalf("writeRunResult output missing refused transfers: %s", out)
+	}
+	if !strings.Contains(string(out), `"retryable":true`) || !strings.Contains(string(out), "tid2") {
+		t.Fatalf("writeRunResult output missing ledger diagnostics: %s", out)
+	}
+}
+
+// TestPollPublishedDurabilityUnknownWithholdsReceiptAndAck (codex r2-r2
+// finding 1): a delivery whose destination directory sync fails is PUBLISHED
+// but not durably committed. The poll must NOT emit a success receipt and
+// must NOT ACK — the transfer is refused-listed, and a repaired re-poll
+// promotes to committed with a receipt and ACK without duplicating.
+func TestPollPublishedDurabilityUnknownWithholdsReceiptAndAck(t *testing.T) {
+	fake, server := newFakeRendezvous(t)
+	receiverRoot := newBridgeRoot(t, "claude")
+
+	env := testSignedEnvelope(t, "msg-cde", "thread-cde", "cde payload")
+	fake.mu.Lock()
+	fake.queue = append(fake.queue, env)
+	fake.accepted[env.TransferID] = env
+	fake.mu.Unlock()
+
+	receiver := testCourier(t, Config{
+		Root: receiverRoot, RendezvousURL: server.URL, DestAlias: "mac/claude",
+		AllowedDestAliases: []string{"mac/claude"}, AllowedSourceHosts: []string{"grok-host"},
+	})
+	fsq.SetPackageSyncDirFaultForTest(func(dir string) error {
+		if strings.HasSuffix(dir, filepath.Join("inbox", "new")) {
+			return fmt.Errorf("injected EIO")
+		}
+		return nil
+	})
+	t.Cleanup(func() { fsq.SetPackageSyncDirFaultForTest(nil) })
+
+	poll, err := receiver.PollOnce(context.Background())
+	if err != nil {
+		t.Fatalf("PollOnce: %v", err)
+	}
+	if len(poll.Receipts) != 0 {
+		t.Fatalf("receipts = %d, want 0 (publication is not durable completion)", len(poll.Receipts))
+	}
+	if len(poll.Refused) != 1 || !poll.Refused[0].Uncertain || poll.Refused[0].TransferID != env.TransferID {
+		t.Fatalf("refused = %#v, want the published-but-unverified transfer", poll.Refused)
+	}
+	fake.mu.Lock()
+	ackCount := fake.ackCount
+	fake.mu.Unlock()
+	if ackCount != 0 {
+		t.Fatalf("acks = %d, want 0 (durability unverified)", ackCount)
+	}
+	// The artifact IS visible in new (publication fact).
+	newDir := filepath.Join(receiverRoot, "agents", "claude", "inbox", "new")
+	entries, err := os.ReadDir(newDir)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("new entries = %d err=%v, want 1 (published)", len(entries), err)
+	}
+
+	// Repair the sync and re-poll (rendezvous redelivers; the ledger
+	// re-verifies durability WITHOUT re-applying): committed + receipt + ACK.
+	fsq.SetPackageSyncDirFaultForTest(nil)
+	poll2, err := receiver.PollOnce(context.Background())
+	if err != nil {
+		t.Fatalf("re-poll: %v", err)
+	}
+	if len(poll2.Receipts) != 1 || poll2.Receipts[0].TransferID != env.TransferID {
+		t.Fatalf("receipts = %#v, want the promoted committed receipt", poll2.Receipts)
+	}
+	if len(poll2.Refused) != 0 {
+		t.Fatalf("refused = %#v, want none after durability verified", poll2.Refused)
+	}
+	fake.mu.Lock()
+	ackCount2 := fake.ackCount
+	fake.mu.Unlock()
+	if ackCount2 != 1 {
+		t.Fatalf("acks = %d, want 1 after promotion", ackCount2)
+	}
+	// No duplicate delivery.
+	newEntries2, _ := os.ReadDir(newDir)
+	curDir := filepath.Join(receiverRoot, "agents", "claude", "inbox", "cur")
+	curEntries2, _ := os.ReadDir(curDir)
+	if len(newEntries2)+len(curEntries2) != 1 {
+		t.Fatalf("DUPLICATE: new=%d cur=%d, want 1 total", len(newEntries2), len(curEntries2))
+	}
 }
