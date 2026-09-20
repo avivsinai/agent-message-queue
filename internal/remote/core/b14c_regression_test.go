@@ -174,6 +174,11 @@ func TestB14cCancelRacesAdmission(t *testing.T) {
 	ep, rt, store, now := b14cEndpoint(t)
 
 	rt.HoldAdmission()
+
+	// Bead 7eu: an early t.Fatal between Hold and the explicit release must
+	// not leave the gate held (goroutine leak under -race). Idempotent:
+	// release no-ops once the gate channel is closed.
+	t.Cleanup(rt.ReleaseAdmission)
 	id := "11111111-1111-4111-8111-1111111111c4"
 	submitDone := make(chan error, 1)
 	go func() { _, err := ep.Handle(submitCmd(id), core.Source{Host: "local"}); submitDone <- err }()
@@ -237,6 +242,11 @@ func TestB14cCancelEventDuringAdmission(t *testing.T) {
 	ep, rt, store, _ := b14cEndpoint(t)
 
 	rt.HoldAdmission()
+
+	// Bead 7eu: an early t.Fatal between Hold and the explicit release must
+	// not leave the gate held (goroutine leak under -race). Idempotent:
+	// release no-ops once the gate channel is closed.
+	t.Cleanup(rt.ReleaseAdmission)
 	id := "11111111-1111-4111-8111-1111111111c5"
 	var submitRep protocol.Reply
 	submitDone := make(chan error, 1)
@@ -323,6 +333,11 @@ func TestB14cAdmitDeferredRacedCancel(t *testing.T) {
 	// record into the held gate.
 	rt.SetOffline(false)
 	rt.HoldAdmission()
+
+	// Bead 7eu: an early t.Fatal between Hold and the explicit release must
+	// not leave the gate held (goroutine leak under -race). Idempotent:
+	// release no-ops once the gate channel is closed.
+	t.Cleanup(rt.ReleaseAdmission)
 	ep.Register(rt)
 	tickDone := make(chan error, 1)
 	go func() { tickDone <- ep.Tick() }()
@@ -400,6 +415,11 @@ func TestB14cAdmitDeferredStaysDeferredWhenReserved(t *testing.T) {
 	// in the gate; B must stay deferred because A is in flight).
 	rt.SetOffline(false)
 	rt.HoldAdmission()
+
+	// Bead 7eu: an early t.Fatal between Hold and the explicit release must
+	// not leave the gate held (goroutine leak under -race). Idempotent:
+	// release no-ops once the gate channel is closed.
+	t.Cleanup(rt.ReleaseAdmission)
 	ep.Register(rt)
 	tickDone := make(chan error, 1)
 	go func() { tickDone <- ep.Tick() }()

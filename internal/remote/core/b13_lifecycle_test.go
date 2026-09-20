@@ -30,6 +30,10 @@ func TestB13HandleBlockedConcurrentCloseCommits(t *testing.T) {
 	// Hold the native Submit so Handle blocks after registering in-flight.
 	rt.HoldAdmission()
 
+	// Bead 7eu: an early t.Fatal between Hold and the explicit release must
+	// not leave the gate held (goroutine leak under -race). Idempotent:
+	// release no-ops once the gate channel is closed.
+	t.Cleanup(rt.ReleaseAdmission)
 	handleDone := make(chan struct{})
 	var reply any
 	var handleErr error
@@ -99,6 +103,11 @@ func TestB13HandleDuringDrainingRefusedWithActionRequiredCode(t *testing.T) {
 
 	// Hold one handler so Close enters the drain wait (in-flight > 0).
 	rt.HoldAdmission()
+
+	// Bead 7eu: an early t.Fatal between Hold and the explicit release must
+	// not leave the gate held (goroutine leak under -race). Idempotent:
+	// release no-ops once the gate channel is closed.
+	t.Cleanup(rt.ReleaseAdmission)
 	blockerDone := make(chan struct{})
 	go func() {
 		defer close(blockerDone)
@@ -168,6 +177,11 @@ func TestB13CloseBoundedWithWedgedHandler(t *testing.T) {
 	// Hold the handler forever (never release during the test). Clean up
 	// after Close returns so the goroutine does not leak.
 	rt.HoldAdmission()
+
+	// Bead 7eu: an early t.Fatal between Hold and the explicit release must
+	// not leave the gate held (goroutine leak under -race). Idempotent:
+	// release no-ops once the gate channel is closed.
+	t.Cleanup(rt.ReleaseAdmission)
 	go func() {
 		_, _ = ep.Handle(cmd, core.Source{Host: "local"})
 	}()
