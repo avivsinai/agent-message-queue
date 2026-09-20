@@ -36,10 +36,11 @@ const SentinelUnpinned = "unpinned"
 var ErrAlreadyDelivered = errors.New("amit: request already delivered")
 
 // ErrForeignEventStream marks the §9 refusal of an event stream carrying a
-// foreign protocol string. It is typed so applyObservationLocked can tell
-// proof of foreignness (never cleared: the seam stays refused even after
-// the log rotates away — review 816-r4 P1) from a transient A2 read error
-// (cleared by a later successful read).
+// foreign protocol string. It is typed so tests and callers can recognise
+// the refusal via errors.Is (review 816-r4 P1). Lifting rules live in
+// applyObservationLocked and are protocol-uniform: the refusal survives an
+// absent-or-unreadable log (rotation, truncation) and lifts only when a
+// present stream validates as v1 end to end.
 var ErrForeignEventStream = errors.New("amit: foreign-protocol event stream")
 
 // deliverRequest is the §1 request JSON contract.

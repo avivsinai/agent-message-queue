@@ -379,7 +379,11 @@ func (a *Attachment) applyObservationLocked(r *run, o *seamObservation) {
 		case o.receipt != nil:
 			r.confirmed = true
 			r.notFound = nil
-			r.eventsRefused = nil
+			// NOT cleared here (review 816-r5 P1): the receipt and the event
+			// log are different files — reading one proves nothing about the
+			// other's protocol. A §9 refusal recorded before the receipt
+			// landed (events-first ordering) must survive the receipt: only
+			// a present, validated stream (the events branch below) lifts it.
 			a.observeGenerationLocked(o.receipt.SessionGeneration)
 		case o.rcErr != nil && !r.confirmed:
 			// Unreadable or foreign-protocol: never consume it as evidence.

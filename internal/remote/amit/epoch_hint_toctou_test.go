@@ -245,7 +245,7 @@ func TestForeignStreamRefusalSurvivesRotation(t *testing.T) {
 	// Step 3: a present, protocol-validated v1 stream lifts the refusal —
 	// the seam proved itself clean again.
 	appendEvents(t, dir, ref, fmt.Sprintf(`{"protocol":%q,"event":"started","ref":%q,"text":"go"}`, ProtocolV1, ref))
-	ev, err = a.Lookup(key, "gen-1")
+	ev, err = a.Lookup(key, SentinelUnpinned)
 	if err != nil {
 		t.Fatalf("step 3: err = %v; want the refusal lifted by a validated v1 stream", err)
 	}
@@ -278,10 +278,12 @@ func TestStaleReceiptReadErrorCannotWedgeConfirmedRun(t *testing.T) {
 		t.Fatalf("corrupt receipt: %v", wErr)
 	}
 
-	// consume() skips the receipt read for a confirmed run (readRc :=
-	// !r.confirmed), so the stale error cannot arrive through the normal
-	// pull. Apply it the way a racing reader (recover/lateBind shape)
-	// would: one stale observation carrying rcErr onto the confirmed run.
+	// consume() snapshots which runs need reads (readRc := !r.confirmed)
+	// under the lock, drops the lock for the filesystem reads, and
+	// re-locks to apply — so a concurrent Submit poll (readSeamFor always
+	// reads the receipt) can set r.confirmed inside that window and the
+	// stale rcErr lands on a now-confirmed run. Apply exactly that stale
+	// observation the way the apply loop would.
 	// The !r.confirmed guard must drop it — a confirmed run's evidence is
 	// never downgraded by an older failed read.
 	stale := &seamObservation{
@@ -313,5 +315,69 @@ func TestStaleReceiptReadErrorCannotWedgeConfirmedRun(t *testing.T) {
 	}
 	if ev.Class != core.EvidenceConfirmed {
 		t.Fatalf("evidence = %+v; want confirmed to survive a stale receipt read error", ev)
+	}
+}
+
+// TestReceiptDoesNotLiftForeignStreamRefusal pins review 816-r5's P1 (the
+// events-first ordering): a §9 refusal recorded while the run is still
+// unconfirmed (a v2 event log visible, no receipt yet) must SURVIVE the
+// v1 receipt landing afterwards. The receipt and the event log are
+// different files — reading one proves nothing about the other's protocol,
+// so only a present, validated stream lifts the refusal. Without the fix,
+// the receipt branch cleared the refusal and the run read as
+// confirmed + Admitted:true with the rotated terminal event hidden.
+func TestReceiptDoesNotLiftForeignStreamRefusal(t *testing.T) {
+	a, dir := newTestAttachment(t)
+	key := testKey("evfirst")
+	ref := clientRef(key)
+	seedRequest(t, dir, ref, "")
+
+	// Step 1: a foreign v2 event stream is visible and no receipt exists.
+	// A Submit binds the run unconfirmed (the bridge does not answer inside
+	// the poll window) and the poll's readSeamFor carries the stream
+	// refusal, which applyObservationLocked records.
+	appendEvents(t, dir, ref, fmt.Sprintf(`{"protocol":"amit:amq-remote:v2","event":"completed","ref":%q,"text":"done"}`, ref))
+	stampLiveness(t, dir, fixedNow)
+	if _, serr := a.Submit(submitReq(key, "hello")); serr == nil {
+		t.Fatalf("step 1: Submit err = nil; want the uncertain no-receipt error")
+	}
+	a.mu.Lock()
+	r, ok := a.runs[key]
+	refused := ok && r.eventsRefused != nil && errors.Is(r.eventsRefused, ErrForeignEventStream)
+	a.mu.Unlock()
+	if !ok {
+		t.Fatalf("step 1: run not bound by Submit")
+	}
+	if !refused {
+		t.Fatalf("step 1: §9 refusal not recorded on the unconfirmed run")
+	}
+	if _, err := a.Lookup(key, SentinelUnpinned); err == nil || !errors.Is(err, ErrForeignEventStream) {
+		t.Fatalf("step 1: Lookup err = %v, want the refusal surfaced", err)
+	}
+	var ev core.Evidence
+	var err error
+
+	// Step 2: the v1 receipt lands and the v2 log rotates away. The
+	// receipt confirms the run but must NOT clear the stream refusal.
+	writeReceipt(t, dir, ref, "gen-1", fixedNow)
+	if rmErr := os.Remove(filepath.Join(dir, "events", refSanitize(ref)+".jsonl")); rmErr != nil {
+		t.Fatalf("remove events log: %v", rmErr)
+	}
+	ev, err = a.Lookup(key, SentinelUnpinned)
+	if err == nil || !errors.Is(err, ErrForeignEventStream) {
+		t.Fatalf("P1: receipt lifted a proven event-stream refusal — err = %v, evidence = %+v; want the refusal to survive", err, ev)
+	}
+	if ev.Class == core.EvidenceConfirmed {
+		t.Fatalf("P1: evidence = %+v; a refused stream must never read as confirmed + Admitted", ev)
+	}
+
+	// Step 3: a present, validated v1 stream lifts the refusal (designed).
+	appendEvents(t, dir, ref, fmt.Sprintf(`{"protocol":%q,"event":"started","ref":%q,"text":"go"}`, ProtocolV1, ref))
+	ev, err = a.Lookup(key, SentinelUnpinned)
+	if err != nil {
+		t.Fatalf("step 3: err = %v; want the refusal lifted by a validated v1 stream", err)
+	}
+	if ev.Class != core.EvidenceConfirmed {
+		t.Fatalf("step 3: evidence = %+v; want confirmed after the seam reads clean", ev)
 	}
 }
