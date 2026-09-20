@@ -1,6 +1,7 @@
 package codex
 
 import (
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -103,7 +104,7 @@ func TestYl0PendingInteractionIsDeterministicOldest(t *testing.T) {
 				registered = true
 				break
 			}
-			time.Sleep(2 * time.Millisecond)
+			runtime.Gosched()
 		}
 		if !registered {
 			t.Fatalf("interaction %d never registered (byTurn not bound — setup bug, 7xl/yl0)", i)

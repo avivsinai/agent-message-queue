@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -43,7 +44,7 @@ func waitMemoForID(t *testing.T, att *Attachment, id string) {
 		if ok {
 			return
 		}
-		time.Sleep(2 * time.Millisecond)
+		runtime.Gosched()
 	}
 	t.Fatalf("terminal memo never recorded %s", id)
 }
@@ -70,9 +71,29 @@ func waitForCall(t *testing.T, srv *fakeAppServer, method string) {
 				}
 			}
 		}
-		time.Sleep(2 * time.Millisecond)
+		runtime.Gosched()
 	}
 	t.Fatalf("fake server never received %s", method)
+}
+
+// waitLostStateGen waits until the read pump has processed a lost-state
+// notification (the gen bump is the fingerprint). It is a deterministic
+// sync point: srv.notify writes the frame, the read pump applies it
+// asynchronously, and the gen counter is the observable barrier. Replaces
+// poll-sleep loops; 7xl.
+func waitLostStateGen(t *testing.T, att *Attachment, want uint64) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		att.mu.Lock()
+		gen := att.lostStateGen
+		att.mu.Unlock()
+		if gen >= want {
+			return
+		}
+		runtime.Gosched()
+	}
+	t.Fatalf("lostStateGen never reached %d", want)
 }
 
 // waitInteraction waits until the run for key carries a registered
@@ -88,7 +109,7 @@ func waitInteraction(t *testing.T, att *Attachment, key requests.Key) {
 		if set {
 			return
 		}
-		time.Sleep(2 * time.Millisecond)
+		runtime.Gosched()
 	}
 	t.Fatal("interaction never registered for run")
 }
@@ -1169,7 +1190,7 @@ func TestB3TerminalMemoEvictionIsFIFO(t *testing.T) {
 			if ok {
 				return
 			}
-			time.Sleep(2 * time.Millisecond)
+			runtime.Gosched()
 		}
 		t.Fatalf("terminalTurns never recorded %s", id)
 	}
@@ -1180,7 +1201,7 @@ func TestB3TerminalMemoEvictionIsFIFO(t *testing.T) {
 			if memoLen() == n {
 				return
 			}
-			time.Sleep(2 * time.Millisecond)
+			runtime.Gosched()
 		}
 		t.Fatalf("terminalTurns never reached %d entries (have %d)", n, memoLen())
 	}

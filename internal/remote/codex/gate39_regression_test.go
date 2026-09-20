@@ -1,6 +1,7 @@
 package codex
 
 import (
+	"runtime"
 	"testing"
 	"time"
 
@@ -79,7 +80,7 @@ func TestGate3NotLoadedLeavesActiveTurnWedged(t *testing.T) {
 			if cond() {
 				return
 			}
-			time.Sleep(10 * time.Millisecond)
+			runtime.Gosched()
 		}
 		t.Fatal(msg)
 	}
@@ -169,16 +170,10 @@ func TestGate3UnrecognisedStatusKeepsActiveTurn(t *testing.T) {
 	// plausibly "still running" in a future Codex release — must not clear
 	// the live turn.
 	srv.notify(t, "thread/status/changed", `{"threadId":"t1","status":{"type":"definitelyRunning"}}`)
-	deadline := time.Now().Add(500 * time.Millisecond)
-	for time.Now().Before(deadline) {
-		att.mu.Lock()
-		cleared := att.activeTurn == ""
-		att.mu.Unlock()
-		if cleared {
-			t.Fatal("unrecognised status cleared a live activeTurn (611.22.39 recut)")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	// Negative assertion: an unrecognised status must NOT clear a live
+	// activeTurn. The wait window is the assertion (500ms), not a poll;
+	// time.After fires exactly once.
+	<-time.After(500 * time.Millisecond)
 	att.mu.Lock()
 	if att.activeTurn != liveTurn {
 		att.mu.Unlock()
