@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -341,6 +342,18 @@ func acquireLifetimeLock(regPath, entryID string) (*os.File, error) {
 	if err := flockLifetime(f); err != nil {
 		_ = f.Close()
 		return nil, err
+	}
+	// review-828-r1 P1: BSD flock does not record a pid — the previous
+	// F_GETLK probe could never see this flock(2) holder (different lock
+	// namespaces; it reported pid 0 live on darwin and by documented
+	// semantics on Linux). So the holder self-registers: the pid is written
+	// into the lock file body immediately after the flock succeeds. The
+	// flock, not the content, stays the ownership authority — a stale pid
+	// from a hard kill is harmless advisory text, and the write failing is
+	// too: the refusal then reads "owner pid 0" (unknown), never fakes a
+	// verdict.
+	if _, werr := f.WriteString(strconv.Itoa(os.Getpid()) + "\n"); werr != nil {
+		_ = werr // advisory only; unknown is an honest refusal value
 	}
 	return f, nil
 }

@@ -573,26 +573,35 @@ func TestPrepareSecureDirTightensExistingDirectory(t *testing.T) {
 	}
 }
 
-// TestLifetimeOwnerPidReportsZeroWithoutHolder pins N3's honest-discovery
-// rule: with no lock holder the fcntl probe reports 0 (unknown), never a
-// guessed pid, and never an error.
-func TestLifetimeOwnerPidReportsZeroWithoutHolder(t *testing.T) {
+// TestLifetimeOwnerPidReadsSelfRegisteredPid pins review-828-r1 P1: the
+// lifetime flock holder self-registers its pid in the lock file body
+// (kernel discovery is impossible — flock and fcntl are separate lock
+// namespaces), and lifetimeOwnerPid reads it back. With no recorded pid
+// the answer is 0 (unknown), never a guess, never an error. Mutation
+// (delete the Fprintf self-registration in acquireLifetimeLock) makes
+// this RED: the held case then reports 0.
+func TestLifetimeOwnerPidReadsSelfRegisteredPid(t *testing.T) {
 	root := t.TempDir()
 	regPath := filepath.Join(root, "registry.json")
 	entryID := registry.EntryID(root, "amq-remote", "remote", root)
 	if pid := lifetimeOwnerPid(regPath, entryID); pid != 0 {
-		t.Fatalf("lifetimeOwnerPid without holder = %d, want 0 (unknown)", pid)
+		t.Fatalf("lifetimeOwnerPid without lock file = %d, want 0 (unknown)", pid)
 	}
-	// With THIS process holding the flock, discovery is best-effort: the
-	// kernel records fcntl-lock owners, but flock(2) holders may not be
-	// reported. Assert only the contract: no error, non-negative.
 	first, err := acquireLifetimeLock(regPath, entryID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = first.Close() }()
-	if pid := lifetimeOwnerPid(regPath, entryID); pid < 0 {
-		t.Fatalf("lifetimeOwnerPid with holder = %d, want >= 0", pid)
+	if pid := lifetimeOwnerPid(regPath, entryID); pid != os.Getpid() {
+		t.Fatalf("lifetimeOwnerPid with live holder = %d, want self-registered pid %d", pid, os.Getpid())
+	}
+	// A garbage body stays unknown, never an error or a guess.
+	lockPath := lockFilePath(regPath, entryID)
+	if err := os.WriteFile(lockPath, []byte("not-a-pid\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if pid := lifetimeOwnerPid(regPath, entryID); pid != 0 {
+		t.Fatalf("lifetimeOwnerPid with garbage body = %d, want 0 (unknown)", pid)
 	}
 }
 
