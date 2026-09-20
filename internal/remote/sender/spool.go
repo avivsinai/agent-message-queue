@@ -40,10 +40,11 @@ import (
 
 // Layout under the companion state directory.
 const (
-	spoolDir    = "sender"
-	spoolSuffix = ".json"
-	fileMode    = 0o600
-	dirMode     = 0o700
+	spoolDir      = "sender"
+	spoolSuffix   = ".json"
+	spoolLockName = ".lock"
+	fileMode      = 0o600
+	dirMode       = 0o700
 )
 
 // MaxEnvelopeBytes bounds one spool envelope on disk. It is the wire-bound
@@ -141,9 +142,10 @@ func (s State) Terminal() bool {
 // concurrent writers safe: two writers for the same key reconcile to one
 // file (Create refuses a duplicate; a retry reads the existing envelope).
 type Spool struct {
-	dir string
-	now func() time.Time
-	mu  sync.Mutex
+	dir      string
+	lockPath string
+	now      func() time.Time
+	mu       sync.Mutex
 }
 
 // Option configures Open.
@@ -161,6 +163,13 @@ var (
 
 // Open prepares <stateDir>/sender and returns a spool. The directory is
 // created if missing; existing envelopes are recovered by List.
+//
+// Round-4: a stable spool-level lock file (<dir>/.lock) is created here. Every
+// filesystem transaction (Create, RMW, reap) acquires a blocking exclusive
+// flock on it via withLock, serializing concurrent Open instances/processes.
+// On unsupported platforms (non-unix) Open refuses CodeUnsupported before
+// accepting durable intent — the spool cannot guarantee safe cross-process
+// writes without a flock.
 func Open(stateDir string, opts ...Option) (*Spool, error) {
 	if stateDir == "" {
 		return nil, protocol.Refuse(protocol.CodeInvalid, "state directory is required")
@@ -169,7 +178,19 @@ func Open(stateDir string, opts ...Option) (*Spool, error) {
 	if err := os.MkdirAll(dir, dirMode); err != nil {
 		return nil, fmt.Errorf("create sender spool: %w", err)
 	}
-	s := &Spool{dir: dir, now: time.Now}
+	lockPath := filepath.Join(dir, spoolLockName)
+	// Probe the lock on supported platforms: if we cannot acquire it, the
+	// platform is unsupported or the directory is not writable. We acquire
+	// and immediately release so Open succeeds and the lock is only held
+	// per-transaction.
+	probe, err := acquireSpoolLock(lockPath)
+	if err != nil {
+		return nil, err
+	}
+	if err := probe.release(); err != nil {
+		return nil, fmt.Errorf("release spool lock probe: %w", err)
+	}
+	s := &Spool{dir: dir, lockPath: lockPath, now: time.Now}
 	for _, o := range opts {
 		o(s)
 	}
@@ -194,35 +215,44 @@ func (s *Spool) Create(env *Envelope) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if err := validateEnvelope(env); err != nil {
-		return err
-	}
-	existing, exists, err := s.get(env.key())
-	if err != nil {
-		return err
-	}
-	if exists {
-		// B1: a retry with the same identity and the same digest reconciles
-		// to the existing envelope — the caller proceeds as main does (exit
-		// 0). Only a different digest under the same id is a conflict.
-		if existing.InputDigest == env.InputDigest {
-			*env = *existing
-			return nil
+	return s.withLock(func() error {
+		if err := validateEnvelope(env); err != nil {
+			return err
 		}
-		return protocol.Refuse(protocol.CodeRequestConflict, "request %s already has a different digest", env.RequestID)
-	}
-	env.State = StatePending
-	if env.CreatedAt == "" {
-		env.CreatedAt = protocol.FormatTime(s.now())
-	}
-	return s.write(env)
+		existing, exists, err := s.get(env.key())
+		if err != nil {
+			return err
+		}
+		if exists {
+			// B1: a retry with the same identity and the same digest reconciles
+			// to the existing envelope — the caller proceeds as main does (exit
+			// 0). Only a different digest under the same id is a conflict.
+			if existing.InputDigest == env.InputDigest {
+				*env = *existing
+				return nil
+			}
+			return protocol.Refuse(protocol.CodeRequestConflict, "request %s already has a different digest", env.RequestID)
+		}
+		env.State = StatePending
+		if env.CreatedAt == "" {
+			env.CreatedAt = protocol.FormatTime(s.now())
+		}
+		return s.write(env)
+	})
 }
 
 // Get reads one envelope. The boolean is false when no envelope exists.
 func (s *Spool) Get(creatorHost, requestID string) (*Envelope, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.get(Key{CreatorHost: creatorHost, RequestID: requestID})
+	var env *Envelope
+	var exists bool
+	err := s.withLock(func() error {
+		var e error
+		env, exists, e = s.get(Key{CreatorHost: creatorHost, RequestID: requestID})
+		return e
+	})
+	return env, exists, err
 }
 
 // List returns every envelope, oldest first. Pending entries are returned
@@ -231,25 +261,31 @@ func (s *Spool) List() ([]*Envelope, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	entries, err := os.ReadDir(s.dir)
-	if err != nil {
-		return nil, fmt.Errorf("list sender spool: %w", err)
-	}
 	var out []*Envelope
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), spoolSuffix) || strings.HasPrefix(e.Name(), ".") {
-			continue
-		}
-		env, exists, err := s.read(filepath.Join(s.dir, e.Name()))
+	err := s.withLock(func() error {
+		entries, err := os.ReadDir(s.dir)
 		if err != nil {
-			// A poison envelope is skipped, not fatal: the drainer must
-			// reach every healthy envelope. An operator can inspect the file.
-			continue
+			return fmt.Errorf("list sender spool: %w", err)
 		}
-		if !exists {
-			continue
+		for _, e := range entries {
+			if e.IsDir() || !strings.HasSuffix(e.Name(), spoolSuffix) || strings.HasPrefix(e.Name(), ".") {
+				continue
+			}
+			env, exists, err := s.read(filepath.Join(s.dir, e.Name()))
+			if err != nil {
+				// A poison envelope is skipped, not fatal: the drainer must
+				// reach every healthy envelope. An operator can inspect the file.
+				continue
+			}
+			if !exists {
+				continue
+			}
+			out = append(out, env)
 		}
-		out = append(out, env)
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].CreatedAt != out[j].CreatedAt {
@@ -275,6 +311,10 @@ func (s *Spool) List() ([]*Envelope, error) {
 func (s *Spool) MarkDispatched(k Key) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.withLock(func() error { return s.markDispatchedLocked(k) })
+}
+
+func (s *Spool) markDispatchedLocked(k Key) error {
 	env, exists, err := s.get(k)
 	if err != nil {
 		return err
@@ -298,6 +338,10 @@ func (s *Spool) MarkDispatched(k Key) error {
 func (s *Spool) MarkFailed(k Key, errMsg string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.withLock(func() error { return s.markFailedLocked(k, errMsg) })
+}
+
+func (s *Spool) markFailedLocked(k Key, errMsg string) error {
 	env, exists, err := s.get(k)
 	if err != nil {
 		return err
@@ -320,6 +364,10 @@ func (s *Spool) MarkFailed(k Key, errMsg string) error {
 func (s *Spool) MarkAttempt(k Key, errMsg string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.withLock(func() error { return s.markAttemptLocked(k, errMsg) })
+}
+
+func (s *Spool) markAttemptLocked(k Key, errMsg string) error {
 	env, exists, err := s.get(k)
 	if err != nil {
 		return err
@@ -341,6 +389,16 @@ func (s *Spool) MarkAttempt(k Key, errMsg string) error {
 func (s *Spool) Expire(k Key, now time.Time) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	var expired bool
+	err := s.withLock(func() error {
+		var e error
+		expired, e = s.expireLocked(k, now)
+		return e
+	})
+	return expired, err
+}
+
+func (s *Spool) expireLocked(k Key, now time.Time) (bool, error) {
 	env, exists, err := s.get(k)
 	if err != nil {
 		return false, err
@@ -370,7 +428,16 @@ func (s *Spool) Expire(k Key, now time.Time) (bool, error) {
 func (s *Spool) Reap(before time.Time, limit int) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	var n int
+	err := s.withLock(func() error {
+		var e error
+		n, e = s.reapLocked(before, limit)
+		return e
+	})
+	return n, err
+}
 
+func (s *Spool) reapLocked(before time.Time, limit int) (int, error) {
 	entries, err := os.ReadDir(s.dir)
 	if err != nil {
 		return 0, fmt.Errorf("reap sender spool: %w", err)
