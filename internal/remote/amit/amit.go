@@ -392,18 +392,27 @@ func (a *Attachment) applyObservationLocked(r *run, o *seamObservation) {
 		}
 	}
 	if o.readEvts {
-		if o.evErr != nil {
+		switch {
+		case o.evErr != nil:
 			// §9/A2 split: a rotated or temporarily unreadable log is
 			// tolerated (A2 — keep state, retry next refresh), but a
 			// foreign-protocol stream is REFUSED, never read as "no events"
 			// (recovery row 3 would map that to confirmed-running, hiding a
 			// terminal state).
 			r.eventsRefused = o.evErr
-		} else {
-			// P2-C (review 816-r3): the refusal clears when the stream
-			// reads clean again (a later rotation can remove the foreign
-			// line), matching notFound's success-path reset.
+		case len(o.events) > 0:
+			// A present, protocol-validated stream clears a previous
+			// transient refusal (review 816-r3 P2-C). Only this case
+			// clears: an ABSENT log (rotation, truncation — readEvents
+			// returns no error and no events) must never unmask a proven
+			// foreign seam as "no events" → confirmed-running
+			// (review 816-r4 P1), and a proven-foreign refusal therefore
+			// needs a present v1 stream to lift.
 			r.eventsRefused = nil
+			a.applyEventsLocked(r, o.events)
+		default:
+			// Absent-or-empty log: keep state and any prior refusal
+			// exactly as they are (A2), never clear, never re-apply.
 			a.applyEventsLocked(r, o.events)
 		}
 	}
@@ -652,7 +661,7 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 	if live := a.dir.liveness(a.now()); !live.live {
 		return core.Admission{Code: protocol.CodeAttachmentLost, Message: fmt.Sprintf("no live amit-remote bridge for handle %q (bridge.liveness %s)", a.handle, live.reason)}, nil
 	}
-	// File I/O outside a.mu:
+	// File I/O outside a.mu: the mutex guards correlation state, not the
 	// seam. A concurrent same-key submit cannot happen (the endpoint's
 	// per-runtime reservation serializes dispatches), and a bind after the
 	// write below re-checks the map under the lock.

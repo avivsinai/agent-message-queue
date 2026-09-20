@@ -1,6 +1,10 @@
 package amit
 
 import (
+	"errors"
+
+	"fmt"
+	core "github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"os"
 	"path/filepath"
 	"strings"
@@ -195,4 +199,119 @@ func TestSubmitEpochHintNotOmittedByUnpin(t *testing.T) {
 
 func contains(s, sub string) bool {
 	return strings.Contains(s, sub)
+}
+
+// TestForeignStreamRefusalSurvivesRotation pins review 816-r4's P1: a §9
+// refusal of a foreign-protocol event stream is proof about the SEAM, not
+// about one file. When the v2 log later rotates away, readEvents returns
+// (nil, nil) — and that must NOT clear the refusal: a v1 receipt plus an
+// invisible v2 stream would otherwise read as "no events" →
+// confirmed-running with Admitted:true, hiding the rotated terminal state.
+// Only a present, protocol-validated stream lifts the refusal
+// (review 816-r3's P2-C transient case is a clean read of a present log).
+func TestForeignStreamRefusalSurvivesRotation(t *testing.T) {
+	a, dir := newTestAttachment(t)
+	key := testKey("rot")
+	ref := clientRef(key)
+	seedRequest(t, dir, ref, "")
+	writeReceipt(t, dir, ref, "gen-1", fixedNow)
+	appendEvents(t, dir, ref, fmt.Sprintf(`{"protocol":"amit:amq-remote:v2","event":"completed","ref":%q,"text":"done"}`, ref))
+
+	// Step 1: the foreign line is visible — the stream is refused.
+	ev, err := a.Lookup(key, "gen-1")
+	if err == nil {
+		t.Fatalf("step 1: evidence = %+v, nil error; want refusal (foreign-protocol event stream)", ev)
+	}
+	if !errors.Is(err, ErrForeignEventStream) {
+		t.Fatalf("step 1: err = %v; want ErrForeignEventStream", err)
+	}
+
+	// Step 2: the log rotates away — the refusal must SURVIVE (fail-closed),
+	// never collapse to confirmed + Admitted.
+	if rmErr := os.Remove(filepath.Join(dir, "events", refSanitize(ref)+".jsonl")); rmErr != nil {
+		t.Fatalf("remove events log: %v", rmErr)
+	}
+	ev, err = a.Lookup(key, "gen-1")
+	if err == nil {
+		t.Fatalf("P2-C: rotation unmasked a foreign seam — evidence = %+v, nil error; want the refusal to survive", ev)
+	}
+	if !errors.Is(err, ErrForeignEventStream) {
+		t.Fatalf("step 2: err = %v; want the ErrForeignEventStream refusal to survive rotation", err)
+	}
+	if ev.Class == core.EvidenceConfirmed || ev.Class == core.EvidenceHistoryTerminated {
+		t.Fatalf("step 2: evidence = %+v; a refused stream must never become evidence", ev)
+	}
+
+	// Step 3: a present, protocol-validated v1 stream lifts the refusal —
+	// the seam proved itself clean again.
+	appendEvents(t, dir, ref, fmt.Sprintf(`{"protocol":%q,"event":"started","ref":%q,"text":"go"}`, ProtocolV1, ref))
+	ev, err = a.Lookup(key, "gen-1")
+	if err != nil {
+		t.Fatalf("step 3: err = %v; want the refusal lifted by a validated v1 stream", err)
+	}
+	if ev.Class != core.EvidenceConfirmed {
+		t.Fatalf("step 3: evidence = %+v; want confirmed after the seam reads clean", ev)
+	}
+}
+
+// TestStaleReceiptReadErrorCannotWedgeConfirmedRun pins review 816-r3's
+// P2-B: a failed (or foreign-protocol) receipt read landing AFTER a run is
+// confirmed must not resurrect notFound — consume() never re-reads a
+// confirmed run's receipt, so the stale error would wedge the run into
+// permanent uncertainty. Only an unconfirmed run records the error.
+func TestStaleReceiptReadErrorCannotWedgeConfirmedRun(t *testing.T) {
+	a, dir := newTestAttachment(t)
+	key := testKey("wedge")
+	ref := clientRef(key)
+	seedRequest(t, dir, ref, "")
+	writeReceipt(t, dir, ref, "gen-1", fixedNow)
+
+	// Confirm the run from the real receipt.
+	if _, err := a.Lookup(key, "gen-1"); err != nil {
+		t.Fatalf("lookup: %v", err)
+	}
+
+	// Corrupt the receipt on disk: a stale transient read error from a
+	// non-atomic writer, arriving after the run is already confirmed.
+	name := filepath.Join(dir, "receipts", refSanitize(ref)+".json")
+	if wErr := os.WriteFile(name, []byte("{not json"), 0o600); wErr != nil {
+		t.Fatalf("corrupt receipt: %v", wErr)
+	}
+
+	// consume() skips the receipt read for a confirmed run (readRc :=
+	// !r.confirmed), so the stale error cannot arrive through the normal
+	// pull. Apply it the way a racing reader (recover/lateBind shape)
+	// would: one stale observation carrying rcErr onto the confirmed run.
+	// The !r.confirmed guard must drop it — a confirmed run's evidence is
+	// never downgraded by an older failed read.
+	stale := &seamObservation{
+		ref:   ref,
+		rcErr: errors.New("stale unreadable receipt"),
+	}
+	a.mu.Lock()
+	if r, ok := a.runs[key]; ok {
+		a.applyObservationLocked(r, stale)
+		if r.notFound != nil {
+			a.mu.Unlock()
+			t.Fatalf("P2-B: stale receipt error resurrected notFound on a confirmed run: %v", r.notFound)
+		}
+		if !r.confirmed {
+			a.mu.Unlock()
+			t.Fatalf("P2-B: confirmed dropped by a stale observation")
+		}
+	} else {
+		a.mu.Unlock()
+		t.Fatalf("run %s not bound", ref)
+	}
+	a.mu.Unlock()
+
+	// And the public surface stays confirmed, never wedged into permanent
+	// uncertainty.
+	ev, err := a.Lookup(key, "gen-1")
+	if err != nil {
+		t.Fatalf("P2-B: stale receipt error wedged a confirmed run: %v", err)
+	}
+	if ev.Class != core.EvidenceConfirmed {
+		t.Fatalf("evidence = %+v; want confirmed to survive a stale receipt read error", ev)
+	}
 }

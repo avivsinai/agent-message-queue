@@ -35,6 +35,13 @@ const SentinelUnpinned = "unpinned"
 // rewritten or re-sent.
 var ErrAlreadyDelivered = errors.New("amit: request already delivered")
 
+// ErrForeignEventStream marks the §9 refusal of an event stream carrying a
+// foreign protocol string. It is typed so applyObservationLocked can tell
+// proof of foreignness (never cleared: the seam stays refused even after
+// the log rotates away — review 816-r4 P1) from a transient A2 read error
+// (cleared by a later successful read).
+var ErrForeignEventStream = errors.New("amit: foreign-protocol event stream")
+
 // deliverRequest is the §1 request JSON contract.
 type deliverRequest struct {
 	Ref       string `json:"ref"`
@@ -264,7 +271,7 @@ func (b bridgeDir) readEvents(ref string) ([]event, error) {
 			// events" (recovery row 3 would map that to confirmed-running,
 			// hiding a terminal state); the whole stream is refused so the
 			// run keeps its current state and surfaces the error.
-			return nil, fmt.Errorf("amit: events %s: unknown protocol %q (want %q)", ref, ev.Protocol, ProtocolV1)
+			return nil, fmt.Errorf("%w: %s: unknown protocol %q (want %q)", ErrForeignEventStream, ref, ev.Protocol, ProtocolV1)
 		}
 		out = append(out, ev)
 	}
