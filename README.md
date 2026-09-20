@@ -164,6 +164,8 @@ built on these primitives.
 ## Contributing
 
 See the [contribution guide](CONTRIBUTING.md) for development and review.
+Contributor clones should install the git hooks
+(`./scripts/install-hooks.sh`) so pushes run the CI gate locally.
 Use [GitHub issues](https://github.com/avivsinai/agent-message-queue/issues)
 for questions and bug reports. Follow the [code of conduct](CODE_OF_CONDUCT.md)
 and report security issues through the [security policy](SECURITY.md).
