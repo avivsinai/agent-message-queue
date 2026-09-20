@@ -12,6 +12,18 @@ AMQ accepts focused fixes, features, and documentation improvements.
 Use the Go toolchain in `go.mod`. `make lint` requires the version of
 `golangci-lint` pinned in the Makefile. Documentation generation uses Python 3.
 
+Start by installing the git hooks so every push runs the full CI gate
+locally:
+
+```bash
+./scripts/install-hooks.sh
+```
+
+The pre-push hook runs `make ci`; if it fails, fix the issues before pushing
+and never bypass it with `--no-verify`.
+
+Then build and test:
+
 ```bash
 make build
 make fmt
