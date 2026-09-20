@@ -8,6 +8,31 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.80.0](https://github.com/avivsinai/agent-message-queue/compare/v0.79.0...v0.80.0) (2026-09-20)
+
+
+### Features
+
+* **remote:** .13 up command — lifetime ownership, flag forwarding, wake decoupling, doctor companions (611.13 PR2/3) ([#815](https://github.com/avivsinai/agent-message-queue/issues/815)) ([3245400](https://github.com/avivsinai/agent-message-queue/commit/3245400343cca4b9de30172b1e033eb0b5315878))
+* **remote:** amit factory — extension-only adapter over the amq-bridge event log (611.13 PR3/3) ([#816](https://github.com/avivsinai/agent-message-queue/issues/816)) ([93b451a](https://github.com/avivsinai/agent-message-queue/commit/93b451a106251f9ba798a0e827f416fa22d5970c))
+* **remote:** manifest + registry + serve + codex/fake/claude factories (611.13 PR1/3) ([#809](https://github.com/avivsinai/agent-message-queue/issues/809)) ([03f3a4c](https://github.com/avivsinai/agent-message-queue/commit/03f3a4cd8c08f59a13db2565b04f4d8fcd6c7a61))
+
+
+### Bug Fixes
+
+* **amq-remote:** bound up shutdown, stop respawn loops, reclaim phantom companions (611.13.2) ([#817](https://github.com/avivsinai/agent-message-queue/issues/817)) ([e53c701](https://github.com/avivsinai/agent-message-queue/commit/e53c70163ba1f21244fd3a70856f19d519fbbe32))
+* **bridge:** transfer-ledger apply state machine + round-4 review fixes (611.14) ([#827](https://github.com/avivsinai/agent-message-queue/issues/827)) ([a97788a](https://github.com/avivsinai/agent-message-queue/commit/a97788a8ff7cdbd4913ff287e4ba72b78ee9c342))
+* **cli:** a status message defaults to low priority, as the message-kinds table promises ([#820](https://github.com/avivsinai/agent-message-queue/issues/820)) ([e4f3b87](https://github.com/avivsinai/agent-message-queue/commit/e4f3b87e934bdd07225ab1d2a378fd517e82661e))
+* **config:** EnsureAgent round-trips unmodelled config.json keys (611.22.55) ([#821](https://github.com/avivsinai/agent-message-queue/issues/821)) ([26a818b](https://github.com/avivsinai/agent-message-queue/commit/26a818b0fd66afb2ad5dc45d44a3697b7aa735d0))
+* **config:** preserve unknown keys in setup and launch ([#823](https://github.com/avivsinai/agent-message-queue/issues/823)) ([357b1a0](https://github.com/avivsinai/agent-message-queue/commit/357b1a009fa150c22dce00f7e1afa67adcf17e57))
+* **remote:** serve and doctor audit residue (611.13.4) ([#824](https://github.com/avivsinai/agent-message-queue/issues/824)) ([929f363](https://github.com/avivsinai/agent-message-queue/commit/929f363f933153833a92633fc199127fc6325527))
+* **schemas:** remote-session submit evidence enum names only Go's classes (611.22.56) ([#822](https://github.com/avivsinai/agent-message-queue/issues/822)) ([f8b1f0f](https://github.com/avivsinai/agent-message-queue/commit/f8b1f0fe498bc15cf339b41a323daca52138f54d))
+
+
+### Dependencies
+
+* bump golang.org/x/term from 0.45.0 to 0.46.0 ([#808](https://github.com/avivsinai/agent-message-queue/issues/808)) ([59bc740](https://github.com/avivsinai/agent-message-queue/commit/59bc740fd4eb735e6b501b1e3dbf95499a6ecf43))
+
 ## [0.79.0](https://github.com/avivsinai/agent-message-queue/compare/v0.78.9...v0.79.0) (2026-09-18)
 
 
