@@ -17,11 +17,14 @@ import (
 // on Linux the two namespaces are independent by documented design). So
 // discovery is cooperative: acquireLifetimeLock writes its pid into the
 // lock file body right after the flock succeeds, and this function reads
-// it back. The flock, not the content, is the ownership authority — a
-// stale pid from a hard kill is harmless advisory text (the new up
+// it back. The recorded pid is best-effort text, NOT verified process
+// identity: a failed truncate can leave old numeric text and a partial
+// write can parse as a number, so it must never be used as authority to
+// kill a process. The flock, not the content, is the ownership authority —
+// a stale pid from a hard kill is harmless advisory text (the new up
 // reclaims the phantom and truncates-rewrites the body on its own
 // acquire). A missing, empty, or unparseable body reports 0 (unknown):
-// best-effort, never an error source.
+// never an error source.
 func lifetimeOwnerPidOS(regPath, entryID string) int {
 	lockPath := lockFilePath(regPath, entryID)
 	body, err := os.ReadFile(lockPath)

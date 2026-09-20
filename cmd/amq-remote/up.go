@@ -312,10 +312,11 @@ func prepareSecureDir(dir string) error {
 	return os.Chmod(dir, 0o700)
 }
 
-// lifetimeOwnerPid reports the pid of the process holding the entry's
-// lifetime flock, when the kernel can discover it (N3, review-b5: the
-// exit-6 refusal must name the owner). 0 means unknown; never an error
-// source — the refusal goes out with whatever is discoverable.
+// lifetimeOwnerPid reports the pid recorded by the entry's lifetime lock
+// holder (N3, review-b5: the exit-6 refusal must name the owner). This is
+// a best-effort recorded pid, not verified process identity — never an
+// authority to kill a process, and the flock stays the only ownership
+// authority. 0 means unknown; never an error source.
 func lifetimeOwnerPid(regPath, entryID string) int {
 	return lifetimeOwnerPidOS(regPath, entryID)
 }
@@ -351,11 +352,12 @@ func acquireLifetimeLock(regPath, entryID string) (*os.File, error) {
 	// record) and write the complete pid. Truncation matters: WriteString
 	// alone leaves a suffix when a shorter pid replaces a longer one
 	// ("123456\n" then "123\n" reads back "123\n56\n" → unknown), so the
-	// refusal would print 0 for a real holder (codex review). The flock,
-	// not the content, stays the ownership authority — a stale pid from a
-	// hard kill is harmless advisory text, and the write failing is too:
-	// the refusal then reads "owner pid 0" (unknown), never fakes a
-	// verdict.
+	// refusal would print 0 for a real holder (codex review). The pid is
+	// best-effort recorded text, NOT verified process identity — a failed
+	// truncate can leave old numeric text and a partial write can parse as
+	// a number — so it must never be used as authority to kill a process.
+	// The flock, not the content, stays the only ownership authority: a
+	// stale pid from a hard kill is harmless advisory text.
 	if werr := f.Truncate(0); werr == nil {
 		if _, werr := f.WriteString(strconv.Itoa(os.Getpid()) + "\n"); werr != nil {
 			_ = werr // advisory only; unknown is an honest refusal value
