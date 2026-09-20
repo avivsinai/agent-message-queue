@@ -414,14 +414,14 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 		// Post-send ambiguity: keep the correlation so Lookup and
 		// history can still resolve it. Return a non-nil error (not a refusal
 		// code) so the endpoint records uncertain.
-		return core.Admission{}, err
+		return core.Admission{RunID: a.runID(r)}, err
 	}
 	if res.Turn.ID == "" {
 		// B1: a successful RPC response with no turn id is ambiguous, not a
 		// definitive refusal. The server may have accepted the prompt under a
 		// turn we have not observed yet. Preserve the correlation and return
 		// a non-nil error so the endpoint records uncertain.
-		return core.Admission{}, fmt.Errorf("turn/start returned no turn id")
+		return core.Admission{RunID: a.runID(r)}, fmt.Errorf("turn/start returned no turn id")
 	}
 	a.mu.Lock()
 	// B3: the read pump may have already processed the confirming
