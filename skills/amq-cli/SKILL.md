@@ -29,6 +29,22 @@ context as one terminal bound to one session. Use `--session` or `--project` for
 deliberate routing; do not point a participating command at another queue with a
 raw `--root`.
 
+## Receive under a live wake
+
+If session-start context says `wake=live(...)`, or
+`amq wake check --me <handle> --json` reports `live_wake: true` with an
+injection mode other than `none`, the wake delivers a doorbell for you.
+Run `amq drain --include-body` when it fires, then act on the messages.
+
+Do not run `amq watch`, `amq monitor`, sleep-poll, or start another inbox
+watcher under that live wake. A blocking wait holds your turn while the
+doorbell queues behind it. When your work is done, finish the turn; do not
+keep a tool running or send idle check-ins just to wait for mail.
+
+Without an injecting wake, use the receive methods in the operations guide.
+A notify-only wake (`--inject-mode none`) paired with a supervisor `monitor`
+service is a separate supported setup.
+
 ## Route the task
 
 | Need | Read or run |
