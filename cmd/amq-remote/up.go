@@ -346,14 +346,20 @@ func acquireLifetimeLock(regPath, entryID string) (*os.File, error) {
 	// review-828-r1 P1: BSD flock does not record a pid — the previous
 	// F_GETLK probe could never see this flock(2) holder (different lock
 	// namespaces; it reported pid 0 live on darwin and by documented
-	// semantics on Linux). So the holder self-registers: the pid is written
-	// into the lock file body immediately after the flock succeeds. The
-	// flock, not the content, stays the ownership authority — a stale pid
-	// from a hard kill is harmless advisory text, and the write failing is
-	// too: the refusal then reads "owner pid 0" (unknown), never fakes a
+	// semantics on Linux). So the holder self-registers: truncate the body
+	// (AFTER the flock — never on open, that would erase a live holder's
+	// record) and write the complete pid. Truncation matters: WriteString
+	// alone leaves a suffix when a shorter pid replaces a longer one
+	// ("123456\n" then "123\n" reads back "123\n56\n" → unknown), so the
+	// refusal would print 0 for a real holder (codex review). The flock,
+	// not the content, stays the ownership authority — a stale pid from a
+	// hard kill is harmless advisory text, and the write failing is too:
+	// the refusal then reads "owner pid 0" (unknown), never fakes a
 	// verdict.
-	if _, werr := f.WriteString(strconv.Itoa(os.Getpid()) + "\n"); werr != nil {
-		_ = werr // advisory only; unknown is an honest refusal value
+	if werr := f.Truncate(0); werr == nil {
+		if _, werr := f.WriteString(strconv.Itoa(os.Getpid()) + "\n"); werr != nil {
+			_ = werr // advisory only; unknown is an honest refusal value
+		}
 	}
 	return f, nil
 }

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -591,9 +592,14 @@ func TestLifetimeOwnerPidReadsSelfRegisteredPid(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = first.Close() }()
 	if pid := lifetimeOwnerPid(regPath, entryID); pid != os.Getpid() {
+		_ = first.Close()
 		t.Fatalf("lifetimeOwnerPid with live holder = %d, want self-registered pid %d", pid, os.Getpid())
+	}
+	// Release before the reused-file scenario: flock is per open-file-
+	// description, so a second acquire while first is held would refuse.
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
 	}
 	// A garbage body stays unknown, never an error or a guess.
 	lockPath := lockFilePath(regPath, entryID)
@@ -602,6 +608,25 @@ func TestLifetimeOwnerPidReadsSelfRegisteredPid(t *testing.T) {
 	}
 	if pid := lifetimeOwnerPid(regPath, entryID); pid != 0 {
 		t.Fatalf("lifetimeOwnerPid with garbage body = %d, want 0 (unknown)", pid)
+	}
+	// Reused-file case (codex review of 8efabf4): a REUSED lock file whose
+	// body holds a longer pid from a previous run must not leave a suffix —
+	// a fresh holder re-acquires and its shorter pid must read back exactly,
+	// not "123\n56\n" → unknown.
+	if err := os.WriteFile(lockPath, []byte("123456\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	second, err := acquireLifetimeLock(regPath, entryID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = second.Close() }()
+	body, err := os.ReadFile(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(body), strconv.Itoa(os.Getpid())+"\n"; got != want {
+		t.Fatalf("lock body after re-acquire = %q, want exactly %q (no stale suffix)", got, want)
 	}
 }
 
