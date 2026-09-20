@@ -3,8 +3,10 @@ package sender
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -650,4 +652,95 @@ func TestSenderB2BusyThenDispatchesNextTick(t *testing.T) {
 	}
 	// The first call was a busy refusal (no work), the second was a dispatch.
 	// A dispatch sets MarkDispatched, so the envelope is settled after tick 2.
+}
+
+// TestASDConcurrentDifferentDigestNoOverwrite (bead asd, #802 round-3) is the
+// overwrite probe: two INDEPENDENT Spool instances over one state dir —
+// simulating two CLI processes, where the per-instance mutex cannot
+// serialize them — create different-digest envelopes for the same key
+// concurrently. The per-key flock in Create serializes the
+// read-absence-then-write, so exactly ONE create wins and the loser gets
+// request_conflict; the winner's bytes are never silently overwritten. RED
+// without the flock: both creates pass the absence check and the second
+// rename clobbers the first (last-writer-wins, no error).
+func TestASDConcurrentDifferentDigestNoOverwrite(t *testing.T) {
+	now := time.Now()
+	stateDir := t.TempDir()
+	spoolA, err := Open(stateDir, WithClock(func() time.Time { return now }))
+	if err != nil {
+		t.Fatalf("Open A: %v", err)
+	}
+	spoolB, err := Open(stateDir, WithClock(func() time.Time { return now }))
+	if err != nil {
+		t.Fatalf("Open B: %v", err)
+	}
+
+	notAfter := protocol.FormatTime(now.Add(2 * time.Minute))
+	mk := func(id int, text string) *Envelope {
+		cmd := testCommand(validUUID(0), "fake", "e_1", notAfter)
+		cmd.Input.Text = text
+		return &Envelope{
+			RequestID:   cmd.RequestID,
+			CreatorHost: "local",
+			TargetID:    "fake",
+			Epoch:       "e_1",
+			NotAfter:    notAfter,
+			Command:     cmd,
+			Destination: "ipc:/tmp/state",
+		}
+	}
+
+	const attempts = 24
+	errs := make([]error, attempts)
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < attempts; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			s := spoolA
+			if i%2 == 1 {
+				s = spoolB
+			}
+			<-start // release all goroutines at once for maximal contention
+			text := fmt.Sprintf("payload-%d", i)
+			errs[i] = s.Create(mk(i, text))
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	var accepted int
+	for i, err := range errs {
+		if err == nil {
+			accepted++
+			continue
+		}
+		var r *protocol.Refusal
+		if !errors.As(err, &r) || r.Code != protocol.CodeRequestConflict {
+			t.Fatalf("attempt %d: unexpected error %v", i, err)
+		}
+	}
+	if accepted != 1 {
+		t.Fatalf("accepted=%d creates, want exactly 1 (winner); errs=%v", accepted, errs)
+	}
+
+	// The surviving envelope is intact and readable through a third instance.
+	spoolC, err := Open(stateDir, WithClock(func() time.Time { return now }))
+	if err != nil {
+		t.Fatalf("Open C: %v", err)
+	}
+	got, ok, err := spoolC.Get("local", validUUID(0))
+	if err != nil || !ok {
+		t.Fatalf("winner envelope unreadable: ok=%v err=%v", ok, err)
+	}
+	// Its digest must match one of the attempted payloads exactly — no
+	// torn or merged bytes.
+	want := map[string]bool{}
+	for i := 0; i < attempts; i++ {
+		want[fmt.Sprintf("payload-%d", i)] = true
+	}
+	if !want[got.Command.Input.Text] {
+		t.Fatalf("surviving envelope text=%q not among attempted payloads", got.Command.Input.Text)
+	}
 }
