@@ -44,6 +44,7 @@ Release assets and `checksums.txt` are published on the
 | Linux x86_64 | `amq_*_linux_amd64.tar.gz` |
 | Linux ARM64 | `amq_*_linux_arm64.tar.gz` |
 | Native Windows x86_64 | `amq_*_windows_amd64.zip` |
+| Native Windows ARM64 | `amq_*_windows_arm64.zip` |
 | WSL x86_64 | `amq_*_linux_amd64.tar.gz` |
 
 Verify the selected asset against `checksums.txt` before extracting it. Replace
