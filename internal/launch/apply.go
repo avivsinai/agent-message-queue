@@ -13,6 +13,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/config"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
@@ -462,12 +463,15 @@ func initializeApplySession(root *fsq.DeliveryRoot, handles []string) error {
 	if err := root.EnsureRootDirs(); err != nil {
 		return err
 	}
-	config := struct {
-		Version    int      `json:"version"`
-		CreatedUTC string   `json:"created_utc"`
-		Agents     []string `json:"agents"`
-	}{Version: 1, CreatedUTC: time.Now().UTC().Format(time.RFC3339), Agents: slices.Clone(handles)}
-	data, err := json.MarshalIndent(config, "", "  ")
+	// Review-823-r1 P2-1: route through the shared preserving encoder so the
+	// initializing write emits the same sorted layout every other config.json
+	// writer uses (this path only ever runs inside
+	// PublishInitializedDirectChildExclusive, which refuses an existing name,
+	// so there is nothing to preserve — the empty original yields sorted
+	// struct keys, matching WriteConfig and the create arms).
+	data, err := config.MarshalPreservingUnknowns(nil, config.Config{
+		Version: 1, CreatedUTC: time.Now().UTC().Format(time.RFC3339), Agents: slices.Clone(handles),
+	})
 	if err != nil {
 		return err
 	}
@@ -566,12 +570,23 @@ func writeApplySessionConfig(root *fsq.DeliveryRoot, lease *Lease, createdUTC st
 	if createdUTC == "" {
 		createdUTC = time.Now().UTC().Format(time.RFC3339)
 	}
-	config := struct {
+	// Preserve unmodelled keys from the existing config.json (611.22.57,
+	// the setup/apply half of review-821-r1 P1-b): the apply roster write
+	// used to re-marshal a bare struct and wipe default_agent/project/
+	// routing etc. from a live root. Overlay the modelled keys onto the raw
+	// existing document instead (config.MarshalPreservingUnknowns); a
+	// missing file yields an empty raw map, so the output is the modelled
+	// struct alone in the same sorted-map form.
+	cfg := struct {
 		Version    int      `json:"version"`
 		CreatedUTC string   `json:"created_utc"`
 		Agents     []string `json:"agents"`
 	}{Version: 1, CreatedUTC: createdUTC, Agents: slices.Clone(handles)}
-	data, err := json.MarshalIndent(config, "", "  ")
+	existing, readErr := root.ReadFile("meta/config.json")
+	if readErr != nil && !os.IsNotExist(readErr) {
+		return fmt.Errorf("read config for key preservation: %w", readErr)
+	}
+	data, err := config.MarshalPreservingUnknowns(existing, cfg)
 	if err != nil {
 		return err
 	}

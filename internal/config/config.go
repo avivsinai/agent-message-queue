@@ -23,7 +23,11 @@ func WriteConfig(path string, cfg Config, force bool) error {
 			return fmt.Errorf("config already exists at %s (use --force to overwrite)", path)
 		}
 	}
-	data, err := json.MarshalIndent(cfg, "", "  ")
+	// Review-823-r1 P2-1: every config.json writer emits the SAME layout
+	// (sorted keys via MarshalPreservingUnknowns with an empty original),
+	// so `amq init` then `amq setup` is not a phantom roster change from
+	// struct-order vs sorted-order bytes alone.
+	data, err := MarshalPreservingUnknowns(nil, cfg)
 	if err != nil {
 		return err
 	}
@@ -105,9 +109,12 @@ func EnsureAgent(rootDir, handle string) (bool, error) {
 // (keys sorted by encoding/json - deterministic). Unknown keys are
 // preserved SEMANTICALLY: their values round-trip intact as opaque raw
 // JSON, but the whole file is re-serialized (sorted keys, 2-space
-// indentation). Scope: this property is EnsureAgent's only - the other
-// config.json writers (amq setup, launch apply) still rewrite the bare
-// struct (review-821-r1 P1-b; tracked in a follow-up bead). Creates the
+// indentation; the compaction pass applies encoding/json's default HTML
+// escaping, so an unknown string value containing <, > or & changes bytes on
+// the first rewrite — JSON-semantically identical, stable thereafter).
+// Since 611.22.57 the same preservation is shared by ALL config.json
+// writers (EnsureAgent/setup/apply overlay and the initializing writers,
+// through MarshalPreservingUnknowns). Creates the
 // config when absent.
 func ensureAgentLocked(root *fsq.DeliveryRoot, handle string) (bool, error) {
 	data, err := root.ReadFile("meta/config.json")
@@ -115,9 +122,12 @@ func ensureAgentLocked(root *fsq.DeliveryRoot, handle string) (bool, error) {
 		if !os.IsNotExist(err) {
 			return false, fmt.Errorf("read config: %w", err)
 		}
-		// No config: create one with this handle.
+		// No config: create one with this handle. Review-823-r1 P2-1: the
+		// create arm emits the same sorted layout as every other writer
+		// (empty original = struct keys in sorted order), keeping setup's
+		// byte comparison free of phantom roster changes.
 		cfg := Config{Version: 1, CreatedUTC: nowUTC(), Agents: []string{handle}}
-		out, mErr := json.MarshalIndent(cfg, "", "  ")
+		out, mErr := MarshalPreservingUnknowns(nil, cfg)
 		if mErr != nil {
 			return false, mErr
 		}
@@ -146,6 +156,20 @@ func ensureAgentLocked(root *fsq.DeliveryRoot, handle string) (bool, error) {
 	return true, nil
 }
 
+// MarshalPreservingUnknowns re-marshals cfg together with every key present
+// in the original raw document but not modelled by Config (611.22.55,
+// extended to all config.json writers in 611.22.57). Known keys always take
+// the struct's values; unknown keys are re-emitted as their original raw
+// JSON. Keys come out sorted (map marshalling). Review-823-r1 P2-1: EVERY
+// config.json writer now routes through this encoder — WriteConfig, the
+// ensureAgentLocked create arm, initializeApplySession, setup, and the apply
+// roster write — so a fresh write and a re-read rewrite are byte-stable
+// across writers, and `amq init` followed by `amq setup` reports no phantom
+// roster change from key order alone.
+func MarshalPreservingUnknowns(original []byte, cfg Config) ([]byte, error) {
+	return marshalConfigPreservingUnknowns(original, cfg)
+}
+
 // marshalConfigPreservingUnknowns re-marshals cfg together with every key
 // present in the original raw document but not modelled by Config
 // (611.22.55). Known keys always take the struct's values; unknown keys are
@@ -153,8 +177,10 @@ func ensureAgentLocked(root *fsq.DeliveryRoot, handle string) (bool, error) {
 // marshalling), which is deterministic across writers.
 func marshalConfigPreservingUnknowns(original []byte, cfg Config) ([]byte, error) {
 	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(original, &raw); err != nil {
-		return nil, fmt.Errorf("parse config: %w", err)
+	if len(original) > 0 {
+		if err := json.Unmarshal(original, &raw); err != nil {
+			return nil, fmt.Errorf("parse config: %w", err)
+		}
 	}
 	// A literal JSON `null` unmarshals into a nil map with no error; treat
 	// it like an empty document instead of panicking on the overlay
