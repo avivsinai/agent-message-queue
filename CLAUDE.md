@@ -1,7 +1,7 @@
 # CLAUDE.md
 
-This is the repository instruction file for Claude Code and Codex. `AGENTS.md`
-is a Codex compatibility shim and contains no duplicate project guidance.
+This is the repository instruction file for agents. `AGENTS.md` is a symlink
+to this file so harnesses that select either name load the same guidance.
 
 ## Project Overview
 
