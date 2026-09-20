@@ -271,7 +271,7 @@ Options:
   -me string
         Agent handle (or AM_ME)
   -priority string
-        Message priority: urgent, normal, low (default: normal if kind set)
+        Message priority: urgent, normal, low (default when --kind is set: low for status, normal otherwise)
   -project string
         Target peer project name (delivers to a peer project's inbox)
   -refs string
