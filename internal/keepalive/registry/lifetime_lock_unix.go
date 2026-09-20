@@ -18,7 +18,7 @@ import (
 //   - held=false, err: the probe itself failed (permissions, I/O). Callers
 //     must treat this as NOT reclaimable - fail closed, keep the row.
 //
-// The probe takes a non-blocking exclusive flock on the lock file and
+// The probe takes a non-blocking SHARED flock on the lock file and
 // releases it immediately; it never blocks and never creates the file if
 // it does not exist.
 func ProbeLifetimeLock(regPath, entryID string) (bool, error) {

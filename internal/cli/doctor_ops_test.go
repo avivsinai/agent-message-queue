@@ -350,7 +350,11 @@ func TestRunOpsChecks_ReportsRemoteCompanion(t *testing.T) {
 	// windows-latest, so its value there is compile-time.
 	switch runtime.GOOS {
 	case "windows", "plan9", "js":
-		if c.State != "active" {
+		// prepareEntry defaults an empty State to "attached" (store.go), and
+		// the row below sets none — verbatim here means "attached". The unix
+		// branch never sees this value: its probe downgrades the state to
+		// "stale".
+		if c.State != "attached" {
 			t.Fatalf("companion state = %q, want the recorded state kept verbatim on a probe-less platform", c.State)
 		}
 		if c.Lock != "unknown" {
