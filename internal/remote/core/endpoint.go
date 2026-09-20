@@ -1923,6 +1923,13 @@ func (e *Endpoint) reconcileLive(rec *requests.Record) error {
 			return nil
 		}
 		e.transitionLocked(rec, causeAttachmentLost, nativeEvidence{})
+	case ev.RefusalCode != "" && ev.Admitted && ev.State == protocol.StateRejected:
+		// Amit-remote contract section 6/A3: a DEFINITIVE native refusal over
+		// PROVEN admission (the receipt stays across a fire-time refusal).
+		// Map the typed refusal code onto the durable record — rejected+code,
+		// action-required — never a silent dispatch and never evidence of
+		// non-admission.
+		e.transitionLocked(rec, causeRefused, nativeEvidence{runID: ev.RunID, code: ev.RefusalCode})
 	case ev.Class == EvidenceTentative:
 		// Bound but native ownership not yet proven. Never reject a submission
 		// that is still about to execute; re-check next tick.
