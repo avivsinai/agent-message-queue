@@ -1500,7 +1500,7 @@ func TestBK4P0RunningStaysRunningAfterReconcile(t *testing.T) {
 	// SetPublish → Register → Reconcile). The fake is registered BEFORE
 	// Reconcile so the sweep sees the live target (the P0 bug did not).
 	store, ep, _, err := startupSequence(stateDir, root, amqio.DefaultHandle, func() time.Time { return now },
-		func(protocol.Snapshot, map[string]string) error { return nil }, nil, rt)
+		func(protocol.Snapshot, map[string]string) error { return nil }, nil, nil, rt)
 	if err != nil {
 		t.Fatalf("startupSequence: %v", err)
 	}
@@ -1600,7 +1600,7 @@ func TestBK4P0FirstRevisionReachesPublisher(t *testing.T) {
 	// serve sequence via ONE shared function: startupSequence (open store →
 	// SetPublish → Register → Reconcile). RED when Reconcile is moved before
 	// SetPublish inside startupSequence: the nil publisher records nothing.
-	_, ep, _, err := startupSequence(stateDir, root, amqio.DefaultHandle, func() time.Time { return now }, publish, nil, rt)
+	_, ep, _, err := startupSequence(stateDir, root, amqio.DefaultHandle, func() time.Time { return now }, publish, nil, nil, rt)
 	if err != nil {
 		t.Fatalf("startupSequence: %v", err)
 	}
@@ -1748,7 +1748,7 @@ func TestBK4R6CarrierConstructedInsideStartupSequence(t *testing.T) {
 		return carrier.Publish(s, origin)
 	}
 
-	_, ep, carrier, err := startupSequence(stateDir, root, amqio.DefaultHandle, func() time.Time { return now }, publish, &carrier, rt)
+	_, ep, carrier, err := startupSequence(stateDir, root, amqio.DefaultHandle, func() time.Time { return now }, publish, &carrier, nil, rt)
 	if err != nil {
 		t.Fatalf("startupSequence: %v", err)
 	}
@@ -1812,7 +1812,7 @@ func TestStartupSequenceWithManifest(t *testing.T) {
 		}
 		return carrier.Publish(s, origin)
 	}
-	_, ep, carrier, _, err := serveStartup(stateDir, root, amqio.DefaultHandle, manifestFile, nil, carrierPublish, &carrier, io.Discard)
+	_, ep, carrier, _, err := serveStartup(stateDir, root, amqio.DefaultHandle, manifestFile, nil, carrierPublish, &carrier, io.Discard, nil)
 	if err != nil {
 		t.Fatalf("serveStartup: %v", err)
 	}
@@ -2037,7 +2037,7 @@ func TestRefusalsClearedOnRestart(t *testing.T) {
 	// Sequential owned starts through the shared production path, fresh
 	// roots, nothing perpetual: each endpoint is Closed before the next
 	// start, releasing the lock (611.13 r5 lifecycle).
-	_, ep1, _, refusalsA, err := serveStartup(stateDir2, root2, amqio.DefaultHandle, manifestPath, nil, carrierPublish2, &carrier2, io.Discard)
+	_, ep1, _, refusalsA, err := serveStartup(stateDir2, root2, amqio.DefaultHandle, manifestPath, nil, carrierPublish2, &carrier2, io.Discard, nil)
 	if err != nil {
 		t.Fatalf("owned start 1: %v", err)
 	}
@@ -2051,7 +2051,7 @@ func TestRefusalsClearedOnRestart(t *testing.T) {
 	if err := os.WriteFile(emptyFile, []byte("{}"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	_, ep2, _, refusalsB, err := serveStartup(stateDir2, root2, amqio.DefaultHandle, emptyFile, nil, carrierPublish2, &carrier2, io.Discard)
+	_, ep2, _, refusalsB, err := serveStartup(stateDir2, root2, amqio.DefaultHandle, emptyFile, nil, carrierPublish2, &carrier2, io.Discard, nil)
 	if err != nil {
 		t.Fatalf("owned start 2: %v", err)
 	}
@@ -2075,7 +2075,7 @@ func TestRefusalsClearedOnRestart(t *testing.T) {
 // released before RemoveAll (611.13 r5 lifecycle rule).
 func ownedStartup(t *testing.T, stateDir, root, manifestFile string, sugar []manifest.Adapter, publish core.Publisher, carrierOut **amqio.Carrier) (*core.Endpoint, *ipc.Server) {
 	t.Helper()
-	_, ep, _, _, err := serveStartup(stateDir, root, amqio.DefaultHandle, manifestFile, sugar, publish, carrierOut, io.Discard)
+	_, ep, _, _, err := serveStartup(stateDir, root, amqio.DefaultHandle, manifestFile, sugar, publish, carrierOut, io.Discard, nil)
 	if err != nil {
 		t.Fatalf("serveStartup: %v", err)
 	}
@@ -2437,5 +2437,97 @@ func TestDoctorRefusalsErrorSurfaced(t *testing.T) {
 	}
 	if refErr == "" {
 		t.Fatalf("refusals_error empty for a truncated refusals.json")
+	}
+}
+
+// TestW4XCarrierWiredBeforeReconcile (bead w4x, review-a13 ordering parity)
+// proves the shipped warn handler and reply router are installed on the
+// carrier BEFORE Reconcile publishes the startup revision: the wire closure
+// runs inside startupSequence between amqio.New and Reconcile, so a warning
+// or a routed reply during the startup revision already sees the shipped
+// handlers. RED if the wiring is moved back after serveStartup returns.
+func TestW4XCarrierWiredBeforeReconcile(t *testing.T) {
+	root, err := os.MkdirTemp("", "amqw4x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	stateDir := filepath.Join(root, "extensions", "remote")
+	manifestFile := filepath.Join(stateDir, "manifest.json")
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// schema_version 0 defaults to SchemaVersion in Load; adapters empty.
+	body := []byte(`{"schema_version":1,"adapters":[]}`)
+	if err := os.WriteFile(manifestFile, body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Seed a record with an unpublished revision so Reconcile's startup
+	// sweep has something to publish — otherwise the store is empty and
+	// Reconcile publishes nothing (the test would be vacuous).
+	seed, err := requests.Open(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := &requests.Record{Snapshot: protocol.Snapshot{
+		Schema:      protocol.SchemaRequest,
+		RequestID:   "11111111-1111-4111-8111-111111117502",
+		CreatorHost: "hostA",
+		TargetID:    "fake",
+		Epoch:       "e_1",
+		Revision:    1,
+		State:       protocol.StateReceived,
+		InputDigest: requests.Digest([]byte("w4x probe")),
+	}}
+	if err := seed.Create(rec); err != nil {
+		_ = seed.Close()
+		t.Fatalf("seed create: %v", err)
+	}
+	// Advance to revision 2 with PublishedRevision left at 1 so Reconcile's
+	// sweep has a pending publication obligation for the seeded record.
+	rec.Revision, rec.State = 2, protocol.StateDispatching
+	if err := seed.Update(rec); err != nil {
+		_ = seed.Close()
+		t.Fatalf("seed update: %v", err)
+	}
+	if err := seed.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Prove ordering: the wire closure must run BEFORE the first publish
+	// (Reconcile's startup sweep publishing the seeded revision). The wire
+	// closure records the fact; the publish closure records the first
+	// publish. RED if the wiring moves back after serveStartup returns.
+	var wireRan, published, misordered atomic.Bool
+	wire := func(c *amqio.Carrier) {
+		wireRan.Store(true)
+		if published.Load() {
+			misordered.Store(true)
+		}
+	}
+	publish := func(protocol.Snapshot, map[string]string) error {
+		if !wireRan.Load() {
+			misordered.Store(true)
+		}
+		published.Store(true)
+		return nil
+	}
+
+	_, _, _, _, err = serveStartup(stateDir, root, amqio.DefaultHandle, manifestFile, nil, publish, nil, io.Discard, wire)
+	if err != nil {
+		t.Fatalf("serveStartup: %v", err)
+	}
+	if !wireRan.Load() {
+		t.Fatal("wire closure never ran inside startupSequence")
+	}
+	if !published.Load() {
+		t.Fatal("Reconcile never published the seeded revision; test is vacuous")
+	}
+	if misordered.Load() {
+		t.Fatal("carrier wiring and Reconcile's startup publish ran out of order")
 	}
 }

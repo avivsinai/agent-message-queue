@@ -402,7 +402,7 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 			sugar = append(sugar, manifest.Adapter{Kind: "codex", Target: codex.TargetID(id), Config: cfg})
 		}
 	}
-	_, ep, carrier, _, err := serveStartup(stateDir, c.root, *me, manifestFile, sugar, carrierPublish, &carrier, stderr)
+	_, ep, carrier, _, err := serveStartup(stateDir, c.root, *me, manifestFile, sugar, carrierPublish, &carrier, stderr, wireCarrier(c.root, stderr))
 	if err != nil {
 		if manifest.IsValidation(err) {
 			if dup, ok := err.(*manifest.ErrDuplicateTarget); ok {
@@ -441,14 +441,10 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 		}
 		return 0, err
 	}
-	carrier.Warn = func(e error) {
-		fmt.Fprintf(os.Stderr, "amq-remote: durability warning: %v\n", e)
-	}
-	// A cross-project caller must be answered in ITS root, not ours. The
-	// carrier holds only the contract; .amqrc discovery, the peer map and
-	// session layout stay in the package that owns them.
-	root := c.root
-	carrier.SetReplyRouter(replyRouterFor(root))
+	// w4x: carrier.Warn and the cross-project reply router are installed
+	// inside startupSequence (wireCarrier) BEFORE Reconcile, so the startup
+	// revision already publishes through the shipped handlers. The post-hoc
+	// assignment that used to live here ran after Reconcile and is gone.
 	// Durable sender (.7): open the outgoing spool and a drainer. The drainer
 	// replays pending envelopes (CLI submits that were persisted while the
 	// companion was down) through the endpoint on each tick, then reaps
@@ -1115,6 +1111,23 @@ func loadRefusals(stateDir string) ([]refusalEntry, error) {
 	return entries, nil
 }
 
+// wireCarrier installs the shipped durability-warning handler and the
+// cross-project reply router on the carrier. serveStartup calls it inside
+// startupSequence, between amqio.New and Reconcile, so the startup revision
+// publishes through the fully-configured carrier (w4x, review-a13 parity).
+func wireCarrier(root string, warn io.Writer) func(*amqio.Carrier) {
+	return func(c *amqio.Carrier) {
+		if warn != nil {
+			c.Warn = func(e error) {
+				// Best-effort operator surface: a failed warning write must
+				// never take down the endpoint that is already degrading.
+				_, _ = fmt.Fprintf(warn, "amq-remote: durability warning: %v\n", e)
+			}
+		}
+		c.SetReplyRouter(replyRouterFor(root))
+	}
+}
+
 // replyRouterFor returns the ReplyRouter the endpoint uses: cli resolves the
 // route, and this adapter translates cli's vocabulary into the carrier's.
 // It is a named function, not an inline closure, so a test can exercise the
@@ -1191,7 +1204,7 @@ func openServeStore(stateDir string, now func() time.Time) (*requests.Store, *co
 // forever. The caller owns the returned endpoint: Close it when done, even
 // on test assertion failure (the lock and listener must not outlive the
 // caller).
-func serveStartup(stateDir, root, handle, manifestFile string, sugar []manifest.Adapter, publish core.Publisher, carrierOut **amqio.Carrier, warn io.Writer) (*requests.Store, *core.Endpoint, *amqio.Carrier, []registry.Outcome, error) {
+func serveStartup(stateDir, root, handle, manifestFile string, sugar []manifest.Adapter, publish core.Publisher, carrierOut **amqio.Carrier, warn io.Writer, wire func(*amqio.Carrier)) (*requests.Store, *core.Endpoint, *amqio.Carrier, []registry.Outcome, error) {
 	mf, err := manifest.Load(manifestFile)
 	if err != nil {
 		return nil, nil, nil, nil, err
@@ -1214,7 +1227,16 @@ func serveStartup(stateDir, root, handle, manifestFile string, sugar []manifest.
 			}
 		}
 	}
-	store, ep, carrier, err := startupSequence(stateDir, root, handle, nil, publish, carrierOut, attachments...)
+	// w4x (review-a13 parity): the durability-warning handler and the
+	// cross-project reply router must be installed on the carrier BEFORE
+	// Reconcile runs, not after serveStartup returns. Reconcile publishes
+	// through the carrier, so a warning or a reply routed during the
+	// startup revision must already see the shipped handlers. serve passes
+	// its wireCarrier closure in; tests pass nil (or a recorder) directly.
+	if wire == nil {
+		wire = wireCarrier(root, warn)
+	}
+	store, ep, carrier, err := startupSequence(stateDir, root, handle, nil, publish, carrierOut, wire, attachments...)
 	if err != nil {
 		return store, ep, carrier, refusals, err
 	}
@@ -1227,7 +1249,7 @@ func serveStartup(stateDir, root, handle, manifestFile string, sugar []manifest.
 	return store, ep, carrier, refusals, nil
 }
 
-func startupSequence(stateDir, root, handle string, now func() time.Time, publish core.Publisher, carrierOut **amqio.Carrier, attachments ...core.Attachment) (*requests.Store, *core.Endpoint, *amqio.Carrier, error) {
+func startupSequence(stateDir, root, handle string, now func() time.Time, publish core.Publisher, carrierOut **amqio.Carrier, wire func(*amqio.Carrier), attachments ...core.Attachment) (*requests.Store, *core.Endpoint, *amqio.Carrier, error) {
 	store, ep, err := openServeStore(stateDir, now)
 	if err != nil {
 		return nil, nil, nil, err
@@ -1244,6 +1266,12 @@ func startupSequence(stateDir, root, handle string, now func() time.Time, publis
 	if err != nil {
 		_ = ep.Close()
 		return store, nil, nil, err
+	}
+	// w4x: wire the shipped warn handler + reply router BEFORE Reconcile so
+	// the startup revision already publishes through the fully-configured
+	// carrier (ordering parity with pre-#800 main).
+	if wire != nil {
+		wire(carrier)
 	}
 	if carrierOut != nil {
 		*carrierOut = carrier
