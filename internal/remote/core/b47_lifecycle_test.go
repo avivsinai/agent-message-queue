@@ -123,6 +123,11 @@ func TestB47TickRegistersInFlightForDrain(t *testing.T) {
 	// Hold Lookup so the Tick's reconcileLive call blocks inside the
 	// attachment, keeping the sweep in-flight long enough to observe.
 	worker.HoldLookup()
+
+	// Bead 7eu: an early t.Fatal between Hold and the explicit release must
+	// not leave the gate held (goroutine leak under -race). Idempotent:
+	// release no-ops once the gate channel is closed.
+	t.Cleanup(worker.ReleaseLookup)
 	// Ensure held operations are released on failure too (611.22.47 P2).
 	t.Cleanup(worker.ReleaseLookup)
 

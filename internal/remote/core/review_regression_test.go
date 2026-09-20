@@ -92,6 +92,11 @@ func TestReconcileDoesNotHoldLockAcrossNativeCalls(t *testing.T) {
 	}
 
 	rt.HoldLookup()
+
+	// Bead 7eu: an early t.Fatal between Hold and the explicit release must
+	// not leave the gate held (goroutine leak under -race). Idempotent:
+	// release no-ops once the gate channel is closed.
+	t.Cleanup(rt.ReleaseLookup)
 	// Deterministic readiness (611.22.54, review-819-r1 P1-1): install the
 	// signal BEFORE the goroutine - installing after the `go` races the
 	// native call past the close point and orphans the channel forever -
@@ -135,6 +140,11 @@ func TestCancelBeforeAdmissionConfirmsDisposition(t *testing.T) {
 	ep.Register(rt)
 
 	rt.HoldAdmission()
+
+	// Bead 7eu: an early t.Fatal between Hold and the explicit release must
+	// not leave the gate held (goroutine leak under -race). Idempotent:
+	// release no-ops once the gate channel is closed.
+	t.Cleanup(rt.ReleaseAdmission)
 	id := "11111111-1111-4111-8111-1111111111c1"
 	// Same ordering rule (review-819-r1 P1-1): install before `go`, receive
 	// with a deadline.

@@ -18,6 +18,11 @@ func b4UncertainInFlight(t *testing.T, ep *core.Endpoint, rt *fake.Runtime, stor
 	t.Helper()
 	k := requests.Key{CreatorHost: "local", TargetID: "fake", RequestID: id}
 	rt.HoldAdmission()
+
+	// Bead 7eu: an early t.Fatal between Hold and the explicit release must
+	// not leave the gate held (goroutine leak under -race). Idempotent:
+	// release no-ops once the gate channel is closed.
+	t.Cleanup(rt.ReleaseAdmission)
 	type outcome struct {
 		rep protocol.Reply
 		err error
