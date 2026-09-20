@@ -791,3 +791,65 @@ func TestSubscribeDeliversNativeEvents(t *testing.T) {
 		t.Fatal("no native event delivered to subscriber")
 	}
 }
+
+// TestE3BRefusalLiftsAfterSeamRewrite (bead e3b, review-816-r6 P2-1): a
+// foreign-protocol refusal recorded on an ALREADY-TERMINAL run must NOT be
+// permanent. The refusal reaches a terminal run only through the Submit
+// poll path (readSeamFor), which can observe a foreign line appearing in
+// the stream mid-window after a clean terminal event was applied. Pre-fix,
+// consume() gated event reads on !r.terminal, so nothing ever re-read the
+// stream and the single clear in applyObservationLocked was unreachable —
+// the refusal stuck across five Lookups on a v1-clean seam (the r6 probe).
+// With the fix (readEv := !r.terminal || r.eventsRefused != nil), consume
+// keeps reading while a refusal is held, so when the seam is genuinely
+// clean v1 again the next Lookup releases the terminal result.
+func TestE3BRefusalLiftsAfterSeamRewrite(t *testing.T) {
+	a, dir := newTestAttachment(t)
+	key := testKey("e3b")
+	ref := clientRef(key)
+	seedRequest(t, dir, ref, "")
+	writeReceipt(t, dir, ref, "gen-1", fixedNow)
+
+	// Phase 1: clean v1 stream — the run goes terminal (completed).
+	appendEvents(t, dir, ref,
+		fmt.Sprintf(`{"protocol":%q,"event":"started","ref":%q}`, ProtocolV1, ref),
+		fmt.Sprintf(`{"protocol":%q,"event":"completed","ref":%q,"text":"done"}`, ProtocolV1, ref))
+	ev, err := a.Lookup(key, "gen-1")
+	if err != nil || ev.State != protocol.StateCompleted {
+		t.Fatalf("phase 1: evidence = %+v, %v; want terminal completed", ev, err)
+	}
+
+	// Phase 2 (the r6 probe step 2): apply a foreign-protocol observation
+	// to the terminal run. This is the Submit-poll path: readSeamFor reads
+	// whatever is on disk. A foreign line landed in the stream mid-window.
+	appendEvents(t, dir, ref, fmt.Sprintf(`{"protocol":"amit:amq-remote:v2","event":"completed","ref":%q,"text":"forged"}`, ref))
+	o := a.readSeamFor(ref)
+	a.mu.Lock()
+	r := a.runs[key]
+	a.applyObservationLocked(r, o)
+	a.mu.Unlock()
+	if r.eventsRefused == nil {
+		t.Fatal("phase 2 setup: refusal was not recorded on the terminal run")
+	}
+
+	// Phase 3 (probe step 3): the operator rewrites the seam as all-valid
+	// v1 lines, then Lookups five times — exactly the r6 probe.
+	name := filepath.Join(dir, "events", refSanitize(ref)+".jsonl")
+	clean := fmt.Sprintf(`{"protocol":%q,"event":"started","ref":%q}`+"\n"+
+		fmt.Sprintf(`{"protocol":%q,"event":"completed","ref":%q,"text":"done"}`, ProtocolV1, ref), ProtocolV1)
+	if err := os.WriteFile(name, []byte(clean), 0o600); err != nil {
+		t.Fatalf("rewrite events: %v", err)
+	}
+	for i := 0; i < 5; i++ {
+		ev, err = a.Lookup(key, "gen-1")
+		if err != nil {
+			t.Fatalf("Lookup %d after seam rewrite: %v; want refusal lifted (r6 probe: stuck forever)", i, err)
+		}
+	}
+	if ev.Class != core.EvidenceConfirmed && ev.Class != core.EvidenceHistoryTerminated {
+		t.Fatalf("evidence = %+v; want the terminal result released", ev)
+	}
+	if ev.State != protocol.StateCompleted {
+		t.Fatalf("evidence state = %s; want completed", ev.State)
+	}
+}

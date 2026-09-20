@@ -331,7 +331,15 @@ func (a *Attachment) consume() {
 			continue
 		}
 		readRc := !r.confirmed
-		readEv := !r.terminal
+		// e3b (review-816-r6 P2-1): a run whose stream was REFUSED (§9
+		// foreign protocol) must keep re-reading the events file even after
+		// the run went terminal — otherwise an operator rewriting the seam
+		// as clean v1 lines can never lift the refusal and every Lookup on
+		// the run returns the refusal error instead of the terminal result.
+		// Once a refusal is proven, only a PRESENT, protocol-validated
+		// stream lifts it (applyObservationLocked keeps that gate); until
+		// then a terminal run with eventsRefused stays in the read set.
+		readEv := !r.terminal || r.eventsRefused != nil
 		if readRc || readEv {
 			queue = append(queue, pending{r: r, readRc: readRc, readEv: readEv})
 		}
