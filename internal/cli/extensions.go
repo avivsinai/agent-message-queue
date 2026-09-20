@@ -29,7 +29,10 @@ type doctorExtensionDiagnostic struct {
 }
 
 type passiveExtensionManifest struct {
-	SchemaVersion int      `json:"schema_version"`
+	// Pointer so a missing schema_version (accepted, defaults to 1 like the
+	// companion's manifest.Parse - 611.13.4-6) is distinguishable from an
+	// explicit incompatible value (warned).
+	SchemaVersion *int     `json:"schema_version"`
 	Layer         string   `json:"layer"`
 	Version       string   `json:"version"`
 	Owns          []string `json:"owns"`
@@ -222,13 +225,21 @@ func readPassiveExtensionManifest(root, layer, manifestPath string) (doctorExten
 			Message: fmt.Sprintf("malformed manifest: %v", err),
 		}, false
 	}
-	if manifest.SchemaVersion != 1 {
+	// 611.13.4-6: align with the companion, which defaults a missing
+	// schema_version to 1 (manifest.Parse) - the same direction the late
+	// commit took for layer. A MISSING field is accepted; an EXPLICIT
+	// incompatible value still warns. Review-824-r1 P2-1: the companion
+	// cannot distinguish a missing field from an explicit 0 (both unmarshal
+	// to 0 and Parse defaults 0 to 1), so an explicit 0 is accepted here
+	// too — one file must not serve targets=1 and draw a doctor warning
+	// simultaneously.
+	if manifest.SchemaVersion != nil && *manifest.SchemaVersion != 0 && *manifest.SchemaVersion != 1 {
 		return doctorExtensionManifest{}, &doctorExtensionDiagnostic{
 			Scope:   "root",
 			Layer:   layer,
 			Path:    rootRelativePath(root, manifestPath),
 			Status:  "warn",
-			Message: fmt.Sprintf("unsupported manifest schema_version %d", manifest.SchemaVersion),
+			Message: fmt.Sprintf("unsupported manifest schema_version %d", *manifest.SchemaVersion),
 		}, false
 	}
 	if manifest.Layer == "" {
@@ -259,11 +270,15 @@ func readPassiveExtensionManifest(root, layer, manifestPath string) (doctorExten
 		manifest.Owns = []string{}
 	}
 
+	reportedSchemaVersion := 1
+	if manifest.SchemaVersion != nil {
+		reportedSchemaVersion = *manifest.SchemaVersion
+	}
 	return doctorExtensionManifest{
 		Scope:         "root",
 		Layer:         manifest.Layer,
 		Path:          rootRelativePath(root, manifestPath),
-		SchemaVersion: manifest.SchemaVersion,
+		SchemaVersion: reportedSchemaVersion,
 		Version:       manifest.Version,
 		Owns:          manifest.Owns,
 	}, nil, true

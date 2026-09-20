@@ -187,6 +187,47 @@ func TestReadPassiveExtensionManifestDefaultsMissingLayer(t *testing.T) {
 	}
 }
 
+// TestReadPassiveExtensionManifestAcceptsMissingAndZeroSchemaVersion
+// (review-824-r1 P1-5 + P2-1): a manifest with the schema_version field
+// OMITTED (the review-b7 gap, now accepted) and one with an EXPLICIT 0 (the
+// companion defaults 0 to 1 and cannot tell the two apart) both read with
+// one manifest and zero diagnostics — the same file must not serve
+// targets=1 and draw a doctor warning simultaneously.
+func TestReadPassiveExtensionManifestAcceptsMissingAndZeroSchemaVersion(t *testing.T) {
+	root := t.TempDir()
+	layer := "remote"
+	layerDir := filepath.Join(root, "extensions", layer)
+	if err := os.MkdirAll(layerDir, 0o700); err != nil {
+		t.Fatalf("mkdir layer dir: %v", err)
+	}
+	manifestPath := filepath.Join(layerDir, "manifest.json")
+
+	cases := []struct {
+		name string
+		data string
+	}{
+		{"missing schema_version", `{"adapters":[{"kind":"fake","target":"fake","epoch":"e_1"}]}`},
+		{"explicit zero schema_version", `{"schema_version":0,"adapters":[{"kind":"fake","target":"fake","epoch":"e_1"}]}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.WriteFile(manifestPath, []byte(tc.data), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			got, diag, ok := readPassiveExtensionManifest(root, layer, manifestPath)
+			if !ok {
+				t.Fatalf("manifest rejected: diag=%+v", diag)
+			}
+			if diag != nil {
+				t.Fatalf("manifest produced a diagnostic: %+v", diag)
+			}
+			if got.Layer != layer {
+				t.Fatalf("manifest layer = %q, want %q", got.Layer, layer)
+			}
+		})
+	}
+}
+
 func hasExtensionDiagnostic(diagnostics []doctorExtensionDiagnostic, scope, agent, layer, messagePrefix string) bool {
 	for _, diag := range diagnostics {
 		if diag.Scope != scope || diag.Agent != agent || diag.Layer != layer {
