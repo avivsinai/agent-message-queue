@@ -329,7 +329,7 @@ func runReply(args []string) error {
 		}
 	}
 	if kind != "" && priority == "" {
-		priority = format.PriorityNormal
+		priority = format.DefaultPriority(kind)
 	}
 
 	now := time.Now()

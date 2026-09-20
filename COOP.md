@@ -548,11 +548,11 @@ the [platform capability matrix](INSTALL.md#platform-capability-matrix).
 | `question` | `answer` | normal |
 | `decision` | — | normal |
 | `todo` | — | normal |
-| `status` | — | normal |
+| `status` | — | low |
 | `brainstorm` | — | normal |
 
 When `--kind` is set but `--priority` is omitted, the CLI defaults priority to
-`normal`.
+`low` for `status` and `normal` for every other kind.
 
 ## Spec Workflow
 

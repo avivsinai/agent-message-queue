@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -37,6 +39,46 @@ import (
 // startServe boots a real endpoint with the fake runtime in the background and
 // returns its state directory. Socket paths must stay short, so the state dir
 // lives directly under the system temp root.
+// weakFakeFactory registers a test-local registry kind "weak-fake" backed by
+// the fake Runtime with its evidence projection weakened to submit=submitted
+// (weaker than the fake's default admitted). This exercises the endpoint's
+// MinEvidence floor refusal end-to-end WITHOUT adding a shipped config
+// setting to the fake: the seam is the existing registry, used only from
+// this test file.
+func init() {
+	registry.Register("weak-fake", func(ctx context.Context, cfg registry.FactoryConfig) (core.Attachment, error) {
+		r := fake.New(cfg.Target, "e_1")
+		r.WithEvidence(&protocol.Evidence{Submit: "submitted", Completion: "run_terminal"})
+		return r, nil
+	})
+}
+
+// startServeWithArgs starts serve with explicit arguments and the same
+// readiness probe + cleanup contract as startServe.
+func startServeWithArgs(t *testing.T, args []string, root string) {
+	t.Helper()
+	done := make(chan int, 1)
+	go func() {
+		var out, errBuf bytes.Buffer
+		done <- run(args, strings.NewReader(""), &out, &errBuf)
+	}()
+	t.Cleanup(func() {
+		select {
+		case <-done:
+		default:
+		}
+	})
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		var probeOut, probeErr bytes.Buffer
+		if run([]string{"sessions", "--root", root, "--json"}, strings.NewReader(""), &probeOut, &probeErr) == 0 {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatal("endpoint did not start serving within 5s")
+}
+
 func startServe(t *testing.T) string {
 	t.Helper()
 	root, err := os.MkdirTemp("", "amqr")
@@ -703,10 +745,69 @@ func TestSenderB7RefusedNotDispatched(t *testing.T) {
 	}
 }
 
+// syncBuffer is a mutex-guarded bytes.Buffer (review ruling 20:43:46Z): the
+// serve tick loop writes diagnostics while the failure report reads them, and
+// a raw bytes.Buffer shared between goroutines is a data race.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func newSyncBuffer() *syncBuffer { return &syncBuffer{} }
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// startServeCaptured is startServe with the serve goroutine's stdout/stderr
+// retained (review ruling 19:53Z: the reap diagnosis needs the tick loop's
+// own reports - drain/import/tick errors - at failure time). Test-local to
+// this regression; other tests keep startServe.
+func startServeCaptured(t *testing.T) (string, *syncBuffer, *syncBuffer) {
+	t.Helper()
+	root, err := os.MkdirTemp("", "amqr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	out, errBuf := newSyncBuffer(), newSyncBuffer()
+	done := make(chan int, 1)
+	go func() {
+		done <- run([]string{"serve", "--fake", "--root", root}, strings.NewReader(""), out, errBuf)
+	}()
+	t.Cleanup(func() {
+		select {
+		case <-done:
+		default:
+		}
+	})
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		var probeOut, probeErr bytes.Buffer
+		if run([]string{"sessions", "--root", root, "--json"}, strings.NewReader(""), &probeOut, &probeErr) == 0 {
+			return root, out, errBuf
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatal("endpoint did not start serving within 5s")
+	return "", nil, nil
+}
+
 // TestSenderB7ReapWithoutDrain is the B4 regression: Reap runs on every
 // serve tick, independent of Drain activity.
 func TestSenderB7ReapWithoutDrain(t *testing.T) {
-	root := startServe(t)
+	root, serveOut, serveErr := startServeCaptured(t)
 	stateDir := filepath.Join(root, "extensions", "remote")
 
 	code, _, _ := cli(t, "", "submit", "fake", "--text", "reap me",
@@ -741,6 +842,26 @@ func TestSenderB7ReapWithoutDrain(t *testing.T) {
 	if err := os.WriteFile(envPath, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// Read-back the aged write immediately (review ruling 19:53Z): if the
+	// on-disk SettledAt is not aged here, the write raced a serve-side
+	// rewrite - that is a different failure than Reap not running.
+	back, err := os.ReadFile(envPath)
+	if errors.Is(err, os.ErrNotExist) {
+		// Review ruling 20:43:46Z: a successful Reap may remove the file
+		// between aging and this read-back. Absence here IS successful
+		// reaping, not a broken diagnostic.
+		return
+	}
+	if err != nil {
+		t.Fatalf("aged envelope read-back failed: %v", err)
+	}
+	var backEnv sender.Envelope
+	if err := json.Unmarshal(back, &backEnv); err != nil {
+		t.Fatalf("aged envelope read-back is not valid JSON: %v\n%s", err, back)
+	}
+	if backEnv.SettledAt != env.SettledAt {
+		t.Fatalf("aged SettledAt clobbered immediately after write: wrote %q, on disk %q (state=%s)", env.SettledAt, backEnv.SettledAt, backEnv.State)
+	}
 	deadline = time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		_, exists, _ := spool.Get(ipc.LocalHost, "11111111-1111-4111-8111-1111111117b4")
@@ -749,7 +870,30 @@ func TestSenderB7ReapWithoutDrain(t *testing.T) {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	t.Fatalf("envelope was not reaped within 5s (B4: Reap not running on every tick)")
+	// Bounded failure evidence (review ruling 19:53Z): final envelope
+	// state/SettledAt from disk, state dir listing, and the serve loop's own
+	// stderr/stdout (tick/import/drain errors). No retries, no loop.
+	after, _ := os.ReadFile(envPath)
+	var report strings.Builder
+	report.WriteString("envelope was not reaped within 5s (B4: Reap not running on every tick)\n")
+	if len(after) > 0 {
+		var fin sender.Envelope
+		if err := json.Unmarshal(after, &fin); err == nil {
+			fmt.Fprintf(&report, "final envelope: state=%s settledAt=%q dispatchedAt=%q lastError=%q\n", fin.State, fin.SettledAt, fin.DispatchedAt, fin.LastError)
+		} else {
+			fmt.Fprintf(&report, "final envelope unreadable: %v\n", err)
+		}
+	} else {
+		report.WriteString("final envelope: file absent at failure time\n")
+	}
+	entries, _ := os.ReadDir(stateDir)
+	report.WriteString("state dir:\n")
+	for _, entry := range entries {
+		fmt.Fprintf(&report, "  %s\n", entry.Name())
+	}
+	fmt.Fprintf(&report, "serve stderr:\n%s\n", serveErr.String())
+	fmt.Fprintf(&report, "serve stdout:\n%s\n", serveOut.String())
+	t.Fatalf("%s", report.String())
 }
 
 // TestSenderB7FailedReaped is the B5 regression: a failed envelope stamps
@@ -1214,25 +1358,66 @@ func TestCLISubmitPrintsAchievedEvidence(t *testing.T) {
 	}
 }
 
-// TestCLISubmitMinEvidenceUnsupportedExits6 pins that a min_evidence floor
-// refused by a weaker adapter maps to exit 6 (action-required / capability
-// mismatch), NOT exit 1 (failure). The caller must not take the "work failed"
-// recovery path for a capability mismatch.
+// TestCLISubmitMinEvidenceUnsupportedExits6 drives an ACTUAL unsupported
+// outcome through the CLI (bead ccw: the landed version was a tautology that
+// never produced an unsupported outcome). A manifest-configured fake adapter
+// simulates a weaker evidence projection (submit=submitted); a submit with
+// --min-evidence admitted is then refused CodeUnsupported by the endpoint's
+// floor check and must map to exit 6 (action-required / capability mismatch),
+// NOT exit 1 (failure) - the caller must not take the "work failed" recovery
+// path for a capability mismatch.
 func TestCLISubmitMinEvidenceUnsupportedExits6(t *testing.T) {
-	root := startServe(t)
-	// The fake proves submit=admitted, so requiring admitted succeeds and
-	// requiring submitted also succeeds (admitted meets submitted). There is
-	// no CLI flag to swap the fake to a weaker adapter; the refusal-exit-6
-	// mapping is exercised at the core level
-	// (TestMinEvidenceFloorRefusesWeakerAdapter proves the refusal) and the
-	// exit-code mapping is ExitForCode(CodeUnsupported)=ExitActionRequired=6.
-	// Here we pin the positive: a met floor still exits 0 and prints evidence.
-	code, out, errOut := cli(t, "", "submit", "fake", "--text", "floored", "--min-evidence", "submitted", "--root", root)
+	root, err := os.MkdirTemp("", "amqrex6")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	// Weak fake: manifest config overrides the simulated evidence to
+	// submit=submitted (weaker than admitted). The manifest must exist
+	// BEFORE serve starts - the registry is constructed at startup.
+	stateDir := filepath.Join(root, "extensions", "remote")
+	manifestPath := manifest.DefaultPath(stateDir)
+	mf := manifest.File{
+		SchemaVersion: manifest.SchemaVersion,
+		Adapters: []manifest.Adapter{{
+			Kind:   "weak-fake",
+			Target: "weak-fake",
+		}},
+	}
+	data, mErr := json.Marshal(mf)
+	if mErr != nil {
+		t.Fatal(mErr)
+	}
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manifestPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	startServeWithArgs(t, []string{"serve", "--root", root, "--manifest", manifestPath}, root)
+
+	// The floor the weak fake cannot meet: requiring admitted is refused
+	// before any dispatch, and the CLI maps it to exit 6.
+	code, out, errOut := cli(t, "", "submit", "weak-fake", "--text", "floored", "--min-evidence", "admitted", "--root", root)
+	if code != protocol.ExitActionRequired {
+		t.Fatalf("unmet floor submit exit=%d, want %d (ExitActionRequired)\nout=%s\nerr=%s", code, protocol.ExitActionRequired, out, errOut)
+	}
+	// The refusal names the capability mismatch, not a generic failure.
+	if !strings.Contains(out+errOut, "unsupported") && !strings.Contains(out+errOut, "min_evidence") && !strings.Contains(out+errOut, "evidence") {
+		t.Fatalf("exit-6 refusal does not name the evidence mismatch:\nout=%s\nerr=%s", out, errOut)
+	}
+
+	// Control: the same weak fake meets the submitted floor - exits 0 and
+	// prints the weaker evidence class actually proven.
+	code, out, errOut = cli(t, "", "submit", "weak-fake", "--text", "floored", "--min-evidence", "submitted", "--root", root)
 	if code != 0 {
 		t.Fatalf("met floor submit exit=%d, want 0 (out=%s err=%s)", code, out, errOut)
 	}
-	if !strings.Contains(out, "evidence=admitted") {
-		t.Fatalf("met-floor submit missing evidence=admitted:\n%s", out)
+	if !strings.Contains(out, "evidence=submitted") {
+		t.Fatalf("met-floor submit missing evidence=submitted:\n%s", out)
 	}
 	// Pin the exit-code mapping directly: unsupported is action-required (6).
 	if got := protocol.ExitForCode(protocol.CodeUnsupported); got != protocol.ExitActionRequired {

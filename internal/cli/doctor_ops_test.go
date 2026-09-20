@@ -337,8 +337,36 @@ func TestRunOpsChecks_ReportsRemoteCompanion(t *testing.T) {
 		t.Fatalf("companions = %#v, want exactly this root's remote entry", companions)
 	}
 	c := companions[0]
-	if c.Agent != "amq-remote" || c.Adapter != "remote" || c.Root != root || c.State != "attached" {
-		t.Fatalf("companion = %#v, want amq-remote/remote/%s/active", c, root)
+	if c.Agent != "amq-remote" || c.Adapter != "remote" || c.Root != root {
+		t.Fatalf("companion = %#v, want amq-remote/remote/%s", c, root)
+	}
+	// The test's registry row holds no lifetime lock (no companion process
+	// exists here). On flock platforms the P1-1 projection reports the
+	// truth: stale + not-held, never a phantom "active". On platforms
+	// without a lock probe the contract is fail-closed: the recorded state
+	// is kept verbatim with lock "unknown" (review 19:21Z: do not weaken
+	// the Unix assertion, do not fake a verdict anywhere). The State field
+	// is asserted too (review r3 P2-4); CI runs this branch compile-only on
+	// windows-latest, so its value there is compile-time.
+	switch runtime.GOOS {
+	case "windows", "plan9", "js":
+		// prepareEntry defaults an empty State to "attached" (store.go), and
+		// the row below sets none — verbatim here means "attached". The unix
+		// branch never sees this value: its probe downgrades the state to
+		// "stale".
+		if c.State != "attached" {
+			t.Fatalf("companion state = %q, want the recorded state kept verbatim on a probe-less platform", c.State)
+		}
+		if c.Lock != "unknown" {
+			t.Fatalf("companion lock = %q, want unknown on a probe-less platform", c.Lock)
+		}
+		if c.ProbeError == "" {
+			t.Fatalf("companion probe_error empty on a probe-less platform; the failure must be surfaced")
+		}
+	default:
+		if c.State != "stale" || c.Lock != "not-held" {
+			t.Fatalf("companion = state %q lock %q, want stale/not-held (lockless row)", c.State, c.Lock)
+		}
 	}
 }
 

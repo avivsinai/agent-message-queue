@@ -202,7 +202,6 @@ func TestB14aReplayTerminalAckUnderWedgedAttachment(t *testing.T) {
 	if !b14aWait(func() bool { return rt.AckCalls() >= 1 }) {
 		t.Fatal("ack never reached the fake")
 	}
-	time.Sleep(50 * time.Millisecond)
 	// While the ack is wedged, the endpoint must still serve commands.
 	repAny, err := ep.Handle(cancelCmd(id), core.Source{Host: "local"})
 	if err != nil {
