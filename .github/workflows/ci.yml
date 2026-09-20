@@ -45,6 +45,8 @@ jobs:
           go-version-file: go.mod
       - name: Check skills sync
         run: make check-skills
+      - name: Check CLI docs freshness
+        run: make check-docs-cli
       - name: Format check
         run: make fmt-check
       - name: Vet

@@ -1,223 +1,57 @@
-# Installation
+# Installation and distribution
 
-## Quick Install
+The [README getting started guide](README.md#getting-started) is the canonical
+first-run path. This page covers alternative binary installs, skill installs,
+companions, upgrades, and platform limits.
 
-### 1. Binary
+## Binary installation
 
-**macOS (Homebrew — recommended):**
-```bash
+### Homebrew (macOS)
+
+```sh
 brew install avivsinai/tap/amq
 ```
 
-**macOS/Linux (script):**
-```bash
+### Installer script (macOS and Linux)
+
+```sh
 curl -fsSL https://raw.githubusercontent.com/avivsinai/agent-message-queue/main/scripts/install.sh | bash
 ```
 
-Installs to user-local directory (no sudo required):
-- `$GOBIN` if set
-- `~/.local/bin` if exists
-- `~/go/bin` if exists
-- `~/.local/bin` (created if needed)
-The installer requires a readable `checksums.txt` with exactly one valid entry for the selected asset. It uses `sha256sum` or `shasum` and stops before extraction if verification cannot be completed.
+The script installs without sudo to `$GOBIN`, an existing `~/.local/bin` or
+`~/go/bin`, or a newly created `~/.local/bin`. Review a downloaded script before
+running it. It requires exactly one valid checksum entry for the selected asset
+and verifies that checksum before extraction.
 
-### 2. Skill
+To select a release explicitly:
 
-Install the skill to enable co-op mode guidance in Claude Code or Codex.
-
-#### Method 1: skills (Recommended)
-
-Using [Vercel's skills CLI](https://github.com/vercel-labs/add-skill):
-
-```bash
-npx skills add avivsinai/agent-message-queue -g -y
+```sh
+curl -fsSL https://raw.githubusercontent.com/avivsinai/agent-message-queue/main/scripts/install.sh | VERSION=vX.Y.Z bash
 ```
 
-#### Method 2: skild
+Set `INSTALL_DIR` to choose another destination. The installer refuses Windows;
+use the native ZIP or WSL with the Linux asset.
 
-Using [skild registry](https://skild.sh):
+### Manual release download
 
-```bash
-# For Claude Code
-npx skild install @avivsinai/amq-cli -t claude -y
+Release assets and `checksums.txt` are published on the
+[Releases page](https://github.com/avivsinai/agent-message-queue/releases).
 
-# For Codex CLI
-npx skild install @avivsinai/amq-cli -t codex -y
-```
+| Platform | Core asset |
+| --- | --- |
+| macOS Apple Silicon | `amq_*_darwin_arm64.tar.gz` |
+| macOS Intel | `amq_*_darwin_amd64.tar.gz` |
+| Linux x86_64 | `amq_*_linux_amd64.tar.gz` |
+| Linux ARM64 | `amq_*_linux_arm64.tar.gz` |
+| Native Windows x86_64 | `amq_*_windows_amd64.zip` |
+| Native Windows ARM64 | `amq_*_windows_arm64.zip` |
+| WSL x86_64 | `amq_*_linux_amd64.tar.gz` |
 
-Or directly from GitHub:
+Verify the selected asset against `checksums.txt` before extracting it. Replace
+the placeholder tag, asset, and target directory in the advanced example below.
 
-```bash
-npx skild install avivsinai/agent-message-queue -t claude -y
-npx skild install avivsinai/agent-message-queue -t codex -y
-```
-
-#### Method 3: Skills Marketplace
-
-> **Known Issue**: Claude Code uses SSH to clone marketplace repos, which fails without SSH keys configured. See [issue #14485](https://github.com/anthropics/claude-code/issues/14485). Use Method 1 or 2 instead.
-
-**Claude Code:**
-```
-/plugin marketplace add avivsinai/skills-marketplace
-/plugin install amq-cli@avivsinai-marketplace
-```
-
-**Codex CLI** (Codex chat command; not a shell command):
-```
-$skill-installer install https://github.com/avivsinai/agent-message-queue/tree/main/skills/amq-cli
-```
-
-#### Method 4: Manual (Always Works)
-
-If npm tools fail (network issues, corporate firewalls, etc.):
-
-**Claude Code:**
-```bash
-git clone https://github.com/avivsinai/agent-message-queue.git /tmp/amq
-mkdir -p ~/.claude/skills
-cp -r /tmp/amq/.claude/skills/amq-cli ~/.claude/skills/
-rm -rf /tmp/amq
-```
-
-**Codex CLI:**
-```bash
-git clone https://github.com/avivsinai/agent-message-queue.git /tmp/amq
-mkdir -p ~/.codex/skills
-cp -r /tmp/amq/.agents/skills/amq-cli ~/.codex/skills/
-rm -rf /tmp/amq
-```
-
-**Grok CLI** (optional peer; same skill contents, Grok's own discovery path):
-```bash
-git clone https://github.com/avivsinai/agent-message-queue.git /tmp/amq
-mkdir -p ~/.grok/skills
-cp -r /tmp/amq/.agents/skills/amq-cli ~/.grok/skills/
-rm -rf /tmp/amq
-```
-This repository ships `.grok/skills/amq-cli` as a symlink to the canonical skill, so Grok Build loads it without copying. Grok also discovers `.agents/skills` and `.claude/skills`. See the [xAI skill discovery docs](https://docs.x.ai/build/features/skills-plugins-marketplaces) for the authoritative list of paths Grok CLI checks.
-
-Restart your agent after installing.
-
----
-
-## Alternative Methods
-
-### Binary: Manual Download
-
-Download from [Releases](https://github.com/avivsinai/agent-message-queue/releases):
-
-| Platform | Asset |
-|----------|-------|
-| macOS (Apple Silicon) | `amq_*_darwin_arm64.tar.gz` |
-| macOS (Intel) | `amq_*_darwin_amd64.tar.gz` |
-| Linux (x86_64) | `amq_*_linux_amd64.tar.gz` |
-| Linux (ARM64) | `amq_*_linux_arm64.tar.gz` |
-| Native Windows (x86_64) | `amq_*_windows_amd64.zip` |
-| WSL (x86_64) | `amq_*_linux_amd64.tar.gz` |
-
-The optional keepalive companion is published separately as
-`amq-keepalive_*_darwin_arm64.tar.gz`,
-`amq-keepalive_*_darwin_amd64.tar.gz`, or
-`amq-keepalive_*_windows_{amd64,arm64}.zip`. It is intentionally not installed by
-the Homebrew formula. AMQ saves the resolved injector executable as part of a
-wake's identity; a versioned Homebrew Cellar path can disappear during cleanup
-and prevent an exact retirement. Install the companion as a regular executable
-at a stable path instead:
-
-```bash
-# Replace X.Y.Z and darwin_arm64 for the release and this Mac.
-(
-set -e
-TAG=vX.Y.Z
-VERSION=X.Y.Z
-PLATFORM=darwin_arm64
-ASSET="amq-keepalive_${VERSION}_${PLATFORM}.tar.gz"
-WORK_DIR="$(mktemp -d)"
-trap 'rm -rf "$WORK_DIR"' EXIT
-curl -fsSL "https://github.com/avivsinai/agent-message-queue/releases/download/${TAG}/${ASSET}" -o "$WORK_DIR/$ASSET"
-curl -fsSL "https://github.com/avivsinai/agent-message-queue/releases/download/${TAG}/checksums.txt" -o "$WORK_DIR/checksums.txt"
-CHECKSUM_LINE="$(awk -v asset="$ASSET" '
-  { candidate = $2; sub(/^\*/, "", candidate) }
-  candidate == asset { count++; line = $0 }
-  END { if (count != 1) exit 1; print line }
-' "$WORK_DIR/checksums.txt")"
-(cd "$WORK_DIR" && printf '%s\n' "$CHECKSUM_LINE" | shasum -a 256 -c -)
-tar -xzf "$WORK_DIR/$ASSET" -C "$WORK_DIR"
-mkdir -p "$HOME/.local/bin"
-install -m 0755 "$WORK_DIR/amq-keepalive" "$HOME/.local/bin/.amq-keepalive.new"
-mv -f "$HOME/.local/bin/.amq-keepalive.new" "$HOME/.local/bin/amq-keepalive"
-"$HOME/.local/bin/amq-keepalive" --version
-)
-```
-
-Use that same path for `attach`, `install-launchd`, and `install-hook`. Upgrades
-and rollbacks replace the file at the stable path. A running supervisor picks
-up a strictly newer image on its next supervise pass (self-upgrade); it does
-not pick up an older rollback or an equal-version replacement. Restart a
-supervisor through its service manager for those cases, or when it was started
-with `--no-self-upgrade`. On macOS use `amq-keepalive install-launchd`; on
-Linux restart the service unit, for example
-`systemctl --user restart amq-keepalive.service`. The registry is retained; do
-not move the executable while registered wakes still identify it.
-
-The optional cross-host courier is published separately as
-`amq-bridge_*_{linux,darwin}_{amd64,arm64}.tar.gz`. Homebrew does not install
-it. Install it next to `amq` at a stable path using the same checksum dance
-as keepalive, substituting the `amq-bridge` asset name and the host's
-platform (`linux_amd64` on Grok computer, `darwin_arm64` on Apple Silicon).
-See [amq-bridge](cmd/amq-bridge/README.md). The preview ACP v1 companion is
-published as `amq-acp_*_{linux,darwin}_{amd64,arm64}.tar.gz`. Homebrew does
-not install it. Install it the same way, then see
-[amq-acp](cmd/amq-acp/README.md).
-
-Once the companions sit in the raw or resolved executable directory of a
-direct-install `amq`, or in `~/.local/bin`,
-`amq upgrade --all` plans one verified target per companion, unique across all
-companions, before any companion replacement. It verifies each target's Go
-build identity, uses the same release tag with checksum verification, and
-skips any absent companion with a line. Cross-companion aliases, wrong builds,
-and multiple distinct targets refuse the companion upgrade and give a repair
-action. Same-name symlink aliases to one canonical target are accepted;
-same-name hardlinks refuse. A running
-`amq-keepalive` is never killed: the atomic rename swaps the path while the
-running process keeps the old image, and a running supervisor picks up a
-strictly newer image on its next supervise pass (self-upgrade). A supervisor started with
-`--no-self-upgrade` must be restarted through its service manager; on macOS
-use `amq-keepalive install-launchd`, and on Linux restart the service unit, for
-example `systemctl --user restart amq-keepalive.service`.
-`amq upgrade` itself detects a Homebrew or Scoop install of `amq` and delegates
-to the matched package-manager executable (`brew update && brew upgrade amq` /
-`scoop update amq` for user scope / `scoop update -g amq` for global scope;
-`-y` runs the delegate without an AMQ prompt, while the package manager may
-still prompt) instead of overwriting it, so companions upgrade through
-`--all` only from a direct `amq` install. Scoop user scope comes from `$SCOOP`
-or the default `%USERPROFILE%\scoop`; global scope comes from
-`$SCOOP_GLOBAL` or `C:\ProgramData\scoop`. The version cache is refreshed
-after an authoritative direct check confirms the latest version (already
-current, or after a successful immediate replacement). A scheduled replacement
-is refreshed on the next successful check (best-effort). On Windows, `--all`
-upgrades a directly installed `amq-keepalive.exe` and skips `amq-bridge` and
-`amq-acp`, which are not published there. Companion links are revalidated by their primary path; a
-secondary same-name alias repointed during download is not detected.
-
-### Platform capability matrix
-
-| Platform | Core queue (`send`, `drain`, `read`, threads) | `coop init` | `coop exec` | `wake` notifications | Installer script |
-|----------|------------------------------------------------|-------------|-------------|----------------------|------------------|
-| macOS | Supported | Supported | Supported | Supported | Supported |
-| Linux | Supported | Supported | Supported | Supported; raw TTY injection may be disabled by kernel hardening | Supported |
-| WSL | Supported via the Linux binary | Supported | Supported | Same constraints as Linux | Supported |
-| Native Windows | Supported via the Windows ZIP | Supported | **Not supported natively** | **Not supported natively** | Rejects Windows; install the ZIP manually |
-
-WSL is a Linux environment: install a Linux asset there, not the Windows ZIP.
-On native Windows, `doctor --ops` can report wake lock files but cannot verify
-live wake process identity or auto-fix `unverified` locks.
-The separately published native `amq-keepalive.exe` supports direct
-`inject codex-queue` and `inject claude-print`; that submitted-message path is
-not an implementation of `amq wake`, `coop exec`, or terminal supervision.
-The native Windows launch API advertises only `launch_intent_v1` and
-`plan_only_commands_v1`; managed Prepare/Apply, lifecycle, and tmux features
-are omitted and fail negotiation.
+<details>
+<summary>Advanced checksum-verified manual install</summary>
 
 For manual installs, verify the selected asset against `checksums.txt` before extracting it:
 
@@ -397,11 +231,13 @@ STAGE_DIR=""
 # AMQ_MANUAL_INSTALL_END
 ```
 
-### Binary: Build from Source
+</details>
 
-Requires Go 1.25+:
+### Build from source
 
-```bash
+Requires Go 1.25 or newer:
+
+```sh
 git clone https://github.com/avivsinai/agent-message-queue.git
 cd agent-message-queue
 make build
@@ -409,50 +245,143 @@ mkdir -p ~/.local/bin
 mv amq ~/.local/bin/
 ```
 
-### Binary: Install Script Options
+## Skills
 
-If the installer cannot query GitHub's latest-release API, choose a tag from
-the [Releases page](https://github.com/avivsinai/agent-message-queue/releases)
-and rerun with `VERSION=`:
+Install the AMQ skill for Claude Code or Codex:
 
-```bash
-# Specific version (replace vX.Y.Z)
-curl -fsSL https://raw.githubusercontent.com/avivsinai/agent-message-queue/main/scripts/install.sh | VERSION=vX.Y.Z bash
-
-# Custom directory
-curl -fsSL .../install.sh | INSTALL_DIR=~/bin bash
+```sh
+npx skills add avivsinai/agent-message-queue -g -y
 ```
 
----
+If npm-based tooling is unavailable, clone into a private temporary directory
+and copy the canonical skill directory. The example refuses an existing target;
+choose a new destination or remove the old skill intentionally before retrying:
 
-## Verify
+```sh
+(
+set -eu
+skill_tmp=$(mktemp -d "${TMPDIR:-/tmp}/amq-skills.XXXXXX")
+trap 'rm -rf "$skill_tmp"' EXIT
+git clone https://github.com/avivsinai/agent-message-queue.git "$skill_tmp/repo"
+mkdir -p ~/.claude/skills ~/.codex/skills
+for target in ~/.claude/skills/amq-cli ~/.codex/skills/amq-cli; do
+  if [ -e "$target" ] || [ -L "$target" ]; then
+    echo "Skill target already exists: $target" >&2
+    exit 1
+  fi
+done
+cp -R "$skill_tmp/repo/skills/amq-cli" ~/.claude/skills/amq-cli
+cp -R "$skill_tmp/repo/skills/amq-cli" ~/.codex/skills/amq-cli
+)
+```
 
-```bash
+Restart the agent after installing a skill. Other skill distribution methods are
+not required for the AMQ onboarding path.
+
+## Companion binaries
+
+The optional companions are separate release assets and are not installed by
+Homebrew:
+
+- `amq-keepalive_*_darwin_{amd64,arm64}.tar.gz` and
+  `amq-keepalive_*_windows_{amd64,arm64}.zip` provide the keepalive companion.
+  On macOS, it can attach and supervise registered wake targets. On native
+  Windows, use its direct `inject` adapters only; `attach`, `reattach`, and
+  `supervise` are not supported. Install it at a stable executable path; do not
+  use a versioned package-manager path for a registered macOS wake.
+- `amq-bridge_*_{linux,darwin}_{amd64,arm64}.tar.gz` is the signed cross-host
+  courier. See [amq-bridge](cmd/amq-bridge/README.md).
+- `amq-acp_*_{linux,darwin}_{amd64,arm64}.tar.gz` is the preview ACP v1 stdio
+  companion. See [amq-acp](cmd/amq-acp/README.md).
+- `amq-remote_*_{linux,darwin}_{amd64,arm64}.tar.gz` is the remote-session
+  companion. See the [remote design](docs/adr-remote-control.md) and
+  [capability reference](docs/remote-compat.md); use `amq-remote --help` for commands.
+
+Use the same release tag and checksum verification for each companion. A stable
+path matters because wake identity includes the resolved injector executable.
+Replacing that file is atomic; a running supervisor keeps its current image and
+can adopt a strictly newer image on its next supervise pass. An older rollback,
+an equal-version replacement, or a supervisor started with `--no-self-upgrade`
+requires a service-manager restart. The registry is retained; do not move the
+executable while registered wakes identify it.
+
+For Unix companions, download the matching archive and checksum file, verify
+the one selected entry, then install the extracted executable at a stable path:
+
+```sh
+(
+set -eu
+COMPANION=amq-keepalive
+VERSION=X.Y.Z
+PLATFORM=darwin_arm64
+TAG=v$VERSION
+ASSET="${COMPANION}_${VERSION}_${PLATFORM}.tar.gz"
+WORK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/amq-companion.XXXXXX")
+companion_stage=""
+trap 'rm -rf "$WORK_DIR"; if [ -n "$companion_stage" ]; then rm -rf "$companion_stage"; fi' EXIT
+curl -fsSL "https://github.com/avivsinai/agent-message-queue/releases/download/$TAG/$ASSET" -o "$WORK_DIR/$ASSET"
+curl -fsSL "https://github.com/avivsinai/agent-message-queue/releases/download/$TAG/checksums.txt" -o "$WORK_DIR/checksums.txt"
+awk -v asset="$ASSET" '$2 == asset { print; count++ } END { if (count != 1) exit 1 }' "$WORK_DIR/checksums.txt" >"$WORK_DIR/selected.sha256"
+if command -v sha256sum >/dev/null 2>&1; then
+  (cd "$WORK_DIR" && sha256sum -c selected.sha256)
+else
+  (cd "$WORK_DIR" && shasum -a 256 -c selected.sha256)
+fi
+tar -xzf "$WORK_DIR/$ASSET" -C "$WORK_DIR"
+mkdir -p "$HOME/.local/bin"
+companion_stage=$(mktemp -d "$HOME/.local/bin/.amq-companion.XXXXXX")
+install -m 0755 "$WORK_DIR/$COMPANION" "$companion_stage/$COMPANION"
+mv -f "$companion_stage/$COMPANION" "$HOME/.local/bin/$COMPANION"
+"$HOME/.local/bin/$COMPANION" --version
+)
+```
+
+Bridge, ACP, and Remote also have `linux_amd64` and `linux_arm64` assets. For
+Windows, extract the ZIP and place `amq-keepalive.exe` at a stable path; only
+the direct `inject` adapters are supported there.
+
+`amq upgrade --all` upgrades directly installed `amq-keepalive`, `amq-bridge`,
+and `amq-acp` when their targets are unambiguous and match the release build
+identity. Update `amq-remote` from its release asset separately. Package-managed core
+installs are delegated to their package manager; companions remain direct
+installs. On Windows, `--all` can upgrade `amq-keepalive.exe`; bridge and ACP
+are not published for Windows.
+
+## Platform capability matrix
+
+| Platform | Core queue (`send`, `drain`, `read`, threads) | `coop init` | `coop exec` | Wake notifications | Installer script |
+| --- | --- | --- | --- | --- | --- |
+| macOS | Supported | Supported | Supported | Supported | Supported |
+| Linux | Supported | Supported | Supported | Supported; raw TTY injection may be disabled by kernel hardening | Supported |
+| WSL | Supported via Linux binary | Supported | Supported | Same constraints as Linux | Supported |
+| Native Windows | Supported via Windows ZIP | Supported | Not supported natively | Not supported natively | Use the ZIP; the script rejects Windows |
+
+Native Windows supports core queue commands and direct submitted injection via
+`amq-keepalive.exe`, but not `amq wake`, `coop exec`, or terminal supervision.
+Use WSL with a Linux asset for the complete co-op workflow. `amq-bridge` and
+`amq-acp` are published for Linux and macOS, not Windows.
+
+## Verify and upgrade
+
+```sh
 amq --version
 ```
 
-## Upgrading
+Homebrew:
 
-**Homebrew:**
-```bash
+```sh
 brew upgrade amq
 ```
 
-**Other installs:**
-```bash
+Other direct installs:
+
+```sh
 amq upgrade
 ```
 
-Or re-run the install script:
+Upgrade notifications can be disabled for one command or the environment:
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/avivsinai/agent-message-queue/main/scripts/install.sh | bash
-```
-
-### Disabling Update Notifications
-
-For CI or offline environments:
-```bash
-amq --no-update-check ...      # Per-command
-export AMQ_NO_UPDATE_CHECK=1   # Global
+```sh
+amq --no-update-check ...
+export AMQ_NO_UPDATE_CHECK=1
 ```
