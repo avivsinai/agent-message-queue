@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -39,6 +40,9 @@ const (
 	MaxCommandBytes = 256 * 1024
 	MaxInputBytes   = 128 * 1024
 	MaxResultBytes  = 512 * 1024
+	// MaxReasonBytes bounds an adapter refusal string on a rejected snapshot.
+	// The text can carry a file path; control characters are stripped first.
+	MaxReasonBytes = 1024
 	// MaxRecordOverhead is fixed headroom for the snapshot, interaction,
 	// cancel and bookkeeping fields of one record.
 	MaxRecordOverhead = 64 * 1024
@@ -298,6 +302,7 @@ type Snapshot struct {
 	Revision          int64        `json:"revision"`
 	State             State        `json:"state"`
 	Code              Code         `json:"code,omitempty"`
+	Reason            string       `json:"reason,omitempty"`
 	InputDigest       string       `json:"input_digest,omitempty"`
 	NotAfter          string       `json:"not_after,omitempty"`
 	NativeRun         *string      `json:"native_run"`
@@ -849,6 +854,29 @@ func forbidFields(c *Command, names ...string) error {
 // ParseTime parses an RFC 3339 timestamp as the protocol requires.
 func ParseTime(s string) (time.Time, error) {
 	return time.Parse(time.RFC3339Nano, s)
+}
+
+// BoundReason strips control characters, trims space, and caps the adapter
+// refusal text at MaxReasonBytes on a UTF-8 boundary. An empty result means
+// the refusal has no printable message.
+func BoundReason(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		if unicode.IsControl(r) {
+			continue
+		}
+		b.WriteRune(r)
+	}
+	out := strings.TrimSpace(b.String())
+	if len(out) <= MaxReasonBytes {
+		return out
+	}
+	out = out[:MaxReasonBytes]
+	for !utf8.ValidString(out) {
+		out = out[:len(out)-1]
+	}
+	return out
 }
 
 // TruncateText bounds text to at most max bytes on a UTF-8 rune boundary, so

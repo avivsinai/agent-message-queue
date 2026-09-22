@@ -233,6 +233,9 @@ func printHuman(w io.Writer, out any) {
 		if v.Code != "" {
 			say(w, "  code=%s", v.Code)
 		}
+		if v.Reason != "" {
+			say(w, "  %s", v.Reason)
+		}
 		if v.NativeRun != nil {
 			say(w, "  run=%s", *v.NativeRun)
 		}

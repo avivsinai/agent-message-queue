@@ -1269,6 +1269,7 @@ type nativeEvidence struct {
 	result            *protocol.Result // terminal evidence
 	cancel            *protocol.Cancel // cancel metadata from the command/event path
 	code              protocol.Code    // explicit override for refused/attachment_lost
+	reason            string           // adapter refusal text; causeRefused copies it onto the snapshot
 	interaction       *protocol.Interaction
 	clearInteraction  bool // the pending interaction is resolved natively; clear it (nil interaction means unchanged)
 	localIntervention bool
@@ -1329,6 +1330,7 @@ func (e *Endpoint) transitionLocked(rec *requests.Record, c cause, ev nativeEvid
 	case causeDispatching:
 		rec.State = protocol.StateDispatching
 		rec.Code = ""
+		rec.Reason = ""
 		rec.Tombstone = false
 		if ev.runID != "" {
 			run := ev.runID
@@ -1340,6 +1342,7 @@ func (e *Endpoint) transitionLocked(rec *requests.Record, c cause, ev nativeEvid
 	case causeAdmitted:
 		rec.State = protocol.StateRunning
 		rec.Code = ""
+		rec.Reason = ""
 		rec.Tombstone = false
 		if ev.runID != "" {
 			run := ev.runID
@@ -1351,6 +1354,7 @@ func (e *Endpoint) transitionLocked(rec *requests.Record, c cause, ev nativeEvid
 	case causeCompleted:
 		rec.State = protocol.StateCompleted
 		rec.Code = ""
+		rec.Reason = ""
 		if ev.runID != "" {
 			run := ev.runID
 			rec.NativeRun = &run
@@ -1362,6 +1366,7 @@ func (e *Endpoint) transitionLocked(rec *requests.Record, c cause, ev nativeEvid
 	case causeFailed:
 		rec.State = protocol.StateFailed
 		rec.Code = protocol.CodeNativeError
+		rec.Reason = ""
 		if ev.runID != "" {
 			run := ev.runID
 			rec.NativeRun = &run
@@ -1373,6 +1378,7 @@ func (e *Endpoint) transitionLocked(rec *requests.Record, c cause, ev nativeEvid
 	case causeCancelledByRequest:
 		rec.State = protocol.StateCancelled
 		rec.Code = protocol.CodeCancelledByRequest
+		rec.Reason = ""
 		if ev.runID != "" {
 			run := ev.runID
 			rec.NativeRun = &run
@@ -1391,6 +1397,7 @@ func (e *Endpoint) transitionLocked(rec *requests.Record, c cause, ev nativeEvid
 	case causeCancelledBeforeAdmission:
 		rec.State = protocol.StateCancelled
 		rec.Code = protocol.CodeCancelledBeforeAdmission
+		rec.Reason = ""
 		if rec.Cancel == nil {
 			rec.Cancel = &protocol.Cancel{RequestedAt: protocol.FormatTime(e.now())}
 		}
@@ -1420,6 +1427,7 @@ func (e *Endpoint) transitionLocked(rec *requests.Record, c cause, ev nativeEvid
 	case causeAttachmentLost:
 		rec.State = protocol.StateUncertain
 		rec.Code = protocol.CodeAttachmentLost
+		rec.Reason = ""
 		if ev.runID != "" {
 			run := ev.runID
 			rec.NativeRun = &run
@@ -1430,10 +1438,12 @@ func (e *Endpoint) transitionLocked(rec *requests.Record, c cause, ev nativeEvid
 		if rec.Code == "" {
 			rec.Code = protocol.CodeNativeError
 		}
+		rec.Reason = protocol.BoundReason(ev.reason)
 		rec.Interaction = nil
 	case causeBusyTombstone:
 		rec.State = protocol.StateRejected
 		rec.Code = protocol.CodeBusy
+		rec.Reason = ""
 		rec.Tombstone = true
 		rec.NativeRun = nil
 		rec.Interaction = nil
@@ -2123,6 +2133,7 @@ func admissionCause(adm Admission, nerr error) (cause, nativeEvidence) {
 		return causeCancelledBeforeAdmission, nev
 	default:
 		nev.code = adm.Code
+		nev.reason = adm.Message
 		return causeRefused, nev
 	}
 }
