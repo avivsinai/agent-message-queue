@@ -7,31 +7,48 @@ Authorized probe of Claude Code v2.1.278's cross-session messaging socket, perfo
 (peer-token key file). Findings were confirmed end-to-end: a hand-crafted frame was
 delivered and rendered in the target session as `› Message from @amq-probe: …`.
 
+**Evidence conventions used below:** `[binary]` = fact derived from static analysis of
+the v2.1.278 binary (strings/symbol evidence); `[live]` = observed against the probe
+target during this capture; `[unverified]` = inferred, not yet exercised.
+
 ## 1. Transport
 
 - **Unix domain socket** at `<messagingSocketPath>` (e.g. `/tmp/cc-socks/<pid>.sock`).
-  Registry key: `messagingSocketPath` in `~/.claude/sessions/<pid>.json`.
-- **Line-delimited JSON.** One frame per line, terminated by `\n`.
+  Registry key: `messagingSocketPath` in `~/.claude/sessions/<pid>.json`. `[binary]`
+- **Line-delimited JSON.** One frame per line, terminated by `\n`. `[binary]`
 - **Size cap:** 1 MiB per serialized frame (`Kht = 1048576`), measured as
-  `authOverhead + jsonLen + 1`; over-cap throws `message_too_large`.
+  `authOverhead + jsonLen + 1`; over-cap throws `message_too_large`. `[binary]`
 - Socket connect uses a 5s timeout; **no per-frame ack is written back** on the
   happy path (client sends and closes / awaits nothing; receipt tracking is
-  internal via `msg_id`).
+  internal via `msg_id`). `[binary]` + `[live]` (recv blocked until timeout; empty
+  close, while the target transcript showed delivery)
 
-## 2. Auth handshake (first line, optional on macOS/Linux)
+## 2. Auth handshake (first line, optional on macOS/Linux) `[binary]`
 
 `Gar(token)` = `JSON.stringify({"type":"auth","token":<token>}) + "\n"`.
 
-- The token is the **target's** `peerToken`, not the sender's.
+- The token is the **target's** `peerToken`, not the sender's. It is a **bearer
+  credential**: possession alone authorizes delivery (no per-connection secret, no
+  challenge/response). Treat any read access to `~/.claude/sessions/*.key` as send
+  access to the matching session. `[security]`
 - Sender resolves it from `~/.claude/sessions/<targetPid>.<sha256(canonical socket
   path)>.key`, a JSON file `{"peerToken":"<32 hex>","pidDomain":…,…}`.
-  Canonical path = `path.resolve()` (macOS `/private/tmp` vs `/tmp` both work via
-  realpath canonicalization; key hash is over the resolved path).
+  The hash is over Node `path.resolve()` of the socket path — absolute + normalized,
+  **without** symlink resolution (`[live]` verified: `/tmp/cc-socks/N.sock` hashes to
+  the key filename; `/private/tmp/...` does **not**, so the `/tmp` and `/private/tmp`
+  spellings are distinct keys).
 - Without a resolvable key the sender fails closed (`no_live_inbox` /
-  "unvouched pipe") — the receiver, not the sender, gates this.
-- Token regex: `[0-9a-f]{32}` (exactly 16 random bytes, `$g=16`).
+  "unvouched pipe") — the receiver, not the sender, gates this. `[binary]`
+- Token regex: `[0-9a-f]{32}` (exactly 16 random bytes, `$g=16`). `[binary]`
+- Auth acceptance matrix `[binary]`:
+  | first line | receiver behavior |
+  |---|---|
+  | none | accepted on macOS/Linux where `authRequired=false`; refused on Windows (authRequired) |
+  | valid target token | accepted |
+  | wrong/unknown token | refused ("an unparseable line" / auth failure path) |
+  | blank line before any auth | refused when `authRequired` |
 
-## 3. Peer message frame (the deliverable)
+## 3. Peer message frame (the deliverable) `[binary]`
 
 Built by the send path (binary fn `Jht`, log tag `[uds-client] Sending`):
 
@@ -49,12 +66,14 @@ Built by the send path (binary fn `Jht`, log tag `[uds-client] Sending`):
 
 - `msgV` is the envelope version (`n=1` in `J$()`); `msg_id` is a fresh UUID per send.
 - `from` is the sender's address (e.g. its own socket path or `uds:…` form). The
-  receiver keys rate-limit/dedup state on it. We sent without `from` and delivery
-  still succeeded — it is not required by the receiver's parse path, but a real
-  client always sets it.
-- Control frames use the same `{type:"control", action:…, …J$()}` shape.
+  receiver keys rate-limit/dedup state on it. `[live]` a frame without `from` was
+  still delivered — it is optional in the receiver's parse path — but a real client
+  always sets it. **Note `from` is unauthenticated and attacker-controlled**; a
+  malicious sender can spoof any `from`/`from-name` to make drops, banners, or
+  attribution look like they came from another session. `[security]`
+- Control frames use the same `{type:"control", action:…, …J$()}` shape. `[binary]`
 
-### 3.1 XML envelope (content wrapper, `pQe` / parse `TG`)
+### 3.1 XML envelope (content wrapper, `pQe` / parse `TG`) `[binary]`
 
 ```
 <cross-session-message from="…" from-session="…" hop-chain="…" from-name="…" from-mode="…">
@@ -77,11 +96,18 @@ Built by the send path (binary fn `Jht`, log tag `[uds-client] Sending`):
 
 ## 4. Minimal working probe (verified delivered)
 
-```python
-import socket, json, uuid
+Token value redacted — the live token used during the capture belonged to the
+disposable probe session (pid 83401), whose socket and `.key` file were removed at
+teardown; it is dead and must not be republished. Resolve the target's token at
+runtime as shown in §2.
 
-SOCK  = "/tmp/cc-socks/83401.sock"
-TOKEN = "REDACTED-DEAD-PROBE-TOKEN"   # target's peerToken from its .key file
+```python
+import socket, json, uuid, glob, os, hashlib
+
+SOCK = "/tmp/cc-socks/<pid>.sock"
+key = glob.glob(os.path.expanduser(
+    f"~/.claude/sessions/<pid>.{hashlib.sha256(os.path.abspath(SOCK).encode()).hexdigest()}.key"))
+TOKEN = json.load(open(key[0]))["peerToken"]     # bearer credential — handle as a secret
 
 body = "CAPTURE-PROBE-611.2 ping"
 env  = ('<cross-session-message from="amq-probe-6112" from-session="amq-probe-sender"'
@@ -98,26 +124,28 @@ line = json.dumps(frame, separators=(",", ":"))
 s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); s.settimeout(6)
 s.connect(SOCK)
 s.sendall((auth + "\n" + line + "\n").encode())
-# expect: no bytes back; message appears in target session as
+data = s.recv(4096)   # fire-and-forget: recv stays empty until timeout/close
+s.close()
+# success signal is on the TARGET side: the target session's transcript shows
 # `› Message from @amq-probe: CAPTURE-PROBE-611.2 ping`
 ```
 
-Observed result: socket returns `b''` (recv timeout / clean close), and the target
-session's transcript log shows the inbound message banner and the model reasoning
+`[live]` The socket returned no bytes (recv timeout / clean close), and the target
+session's transcript log showed the inbound message banner and the model reasoning
 about the ping. Earlier "empty response" probes (bare `sendUserMessage`, bare
 `type:"user"` without the XML envelope, Content-Length framing) were correctly
 rejected silently — the receiver drops malformed frames without an error frame.
 
-## 5. Ingress guards (receiver side, `Sr.admit` / `peer-guard`) — verified live
+## 5. Ingress guards (receiver side, `Sr.admit` / `peer-guard`)
 
-Defaults (`tzt`): `bucketCapacity:30, refillPerSecond:0.5, dedupWindowMs:30000,
-maxSelfHops:10, maxChainLength:28, maxTrackedSenders:256, maxQueuedPeerMessages:50`.
-Drop reasons: `rate-limited`, `duplicate`, `hop-loop`, `hop-runaway`, `queue-full`.
-Dedup keys on `(sender, identical body within 30s)`. Batch-drop receipts are
-coalesced (500ms trail, 5s max) and reported as
-`Dropped a peer message from <addr> (@name): <reason>`.
+Defaults (`tzt`) `[binary]`: `bucketCapacity:30, refillPerSecond:0.5,
+dedupWindowMs:30000, maxSelfHops:10, maxChainLength:28, maxTrackedSenders:256,
+maxQueuedPeerMessages:50`. Drop reasons `[binary]`: `rate-limited`, `duplicate`,
+`hop-loop`, `hop-runaway`, `queue-full`. Dedup keys on `(sender, identical body
+within 30s)` `[binary]`. Batch-drop receipts are coalesced (500ms trail, 5s max) and
+reported as `Dropped a peer message from <addr> (@name): <reason>` `[binary]`.
 
-Live verification against the idle→busy→idle target:
+Live-verified behaviors `[live]` (idle→busy→idle target):
 
 - **Idle target:** frame delivered instantly; message banner appears in the
   target UI (`› Message from @amq-probe: <body> (ctrl+o to expand)`) and a new
@@ -125,42 +153,89 @@ Live verification against the idle→busy→idle target:
 - **Busy target:** frames sent while the target was mid-turn were **parked and
   queued**, not dropped. All queued banners rendered together at the next turn
   boundary and were processed in one batched turn (both replies produced in a
-  single 9s turn). Queue cap is 50 (`maxQueuedPeerMessages`); beyond it the
-  `queue-full` drop reason applies.
+  single 9s turn).
 - **Dedup:** an identical body re-sent 1s later was dropped with a visible
   in-session notice: `⏺ Dropped a peer message from @amq-probe (unknown):
   identical to the previous message from this sender.` — i.e. duplicate drops
   are surfaced to the target user/model, not silent.
 
-## 5a. Inbound gate — no `crossSessionInbound` setting exists
+Binary-derived but not live-exercised `[unverified]`: the exact rate-limit refill
+behavior, the 50-message queue cap overflowing to `queue-full`, hop-loop/hop-runaway
+triggers, and the `maxTrackedSenders` eviction.
 
-There is **no user-level `crossSessionInbound` (or equivalent) setting** in
-v2.1.278; no such key appears anywhere in the binary. Inbound acceptance is
-gated in code by `As()`:
+## 5a. Inbound policy — the `crossSessionInbound` setting `[binary]`
 
-- env override `CLAUDE_CODE_HARBOR_KITE` (checked first), else GrowthBook
-  feature flag `tengu_harbor_kite`, **default: on** (`!0`). Windows additionally
-  checks `tengu_harbor_kite_win` (default on).
-- A second default-on gate `tengu_cuddly_willow` exists alongside; when either
-  gate is off the listener logs `[uds-messaging] Skipped: cross-session
-  messaging gate off` and never binds, and parked messages are dropped with
-  "parked peer message(s) (cross-session messaging disabled)".
-- Sockets dir vetting failures also refuse to bind (fail-closed, message
-  "cross-session messaging is OFF for this session").
+Inbound delivery is governed by a per-settings-file enum key:
 
-**Required user-level value: none.** With defaults (gate on), any local process
-that can read the target's key file and connect to the socket can deliver
-inbound messages; there is no opt-in to flip. AMQ's adapter can rely on the
-default and surface the `CLAUDE_CODE_HARBOR_KITE=0` case as "messaging
-disabled". (Discovery artifact: `Ubt = "Cross-session messaging is not
-available in this session."` shown in sessions where the gate is off.)
+```json
+{ "crossSessionInbound": "accept" | "hold" | "refuse" }
+```
+
+(zod schema: `"Inbound cross-session peer messages (SendMessage from your other
+sessions): 'accept' delivers them, 'hold' parks them for your review without letting
+Claude act, 'refuse' opts t…"`, plus a `default` UI value that clears the key).
+
+- **Default: `accept`** — with no setting anywhere, inbound peer messages are
+  delivered (`f[e ?? "accept"]` resolution). `[live]` confirms: our probe target had
+  no such setting and messages were delivered.
+- **Precedence:** policy (managed) settings > user settings > repo/local settings,
+  and repo/local may only **tighten** (`restrictive:["refuse","hold"]`) — a repo
+  cannot loosen a user's or admin's `hold`/`refuse`, and its own `accept` cannot
+  override managed policy. User-facing copy: "your own 'accept' cannot override
+  managed policy" / "(a repo may only tighten, so your own 'accept' cannot override
+  it)". An **invalid value** fails closed to `hold` (`invalid-setting`) with a
+  settings-validation warning.
+- **`hold` behavior:** messages are parked for user review, "without letting Claude
+  act"; held items can later be released when the cause clears
+  (`mode-changed` → "permissions are prompting again", `policy-accepts` →
+  "crossSessionInbound now accepts", `approved` → "you approved it").
+- **`refuse` behavior:** messages refused at the gate (`peer_inbound_gate`,
+  `crossSessionInbound=refuse`), sender receipt `refused`;
+  `notify_when_idle` subscriptions to this session fail with
+  `requester-refuses-inbound`.
+- **Bypass/mode-parity holds (independent of the setting):** messages are held for
+  review when the sender's permission-mode class doesn't match the receiver's
+  (`mode-mismatch`), or the sender asserted no mode while the receiver bypasses
+  prompts (`no-mode-asserted`), or the receiver bypasses prompts by default
+  (`bypass-default`).
+- The listener itself must also be up: env override `CLAUDE_CODE_HARBOR_KITE`
+  (checked first), else GrowthBook flag `tengu_harbor_kite`, default **on**;
+  a second default-on gate `tengu_cuddly_willow`; sockets-dir vetting failures
+  refuse to bind (fail-closed). When messaging is off, parked messages drop with
+  "parked peer message(s) (cross-session messaging disabled)". `[binary]`
+  (Note: this capture ran **before** the version bump to 2.1.273 documented in the
+  manifest; all `[binary]` statements here are against the exact 2.1.278 build.)
+
+**Required user-level value for AMQ: none** — defaults deliver. Operators who want
+supervision can set `crossSessionInbound: "hold"` (user or managed scope); AMQ's
+adapter should surface `hold`/`refuse`/mode-parity holds as non-delivery, not
+failure.
+
+## 5b. Security assessment `[security]`
+
+- **Bearer-token model:** the target's `peerToken` is the only credential; whoever
+  can read the `.key` file (same user by default; scope depends on
+  `~/.claude/sessions` permissions) can send. No sender authentication, no
+  challenge — do not treat `from`/`from-name` as identity.
+- **`from` is attacker-controlled:** rate-limit bucket, dedup keying, banner
+  attribution ("Message from @…"), and drop notices all key on the spoofable
+  `from` string.
+- **Inbound text is model input:** a delivered peer message becomes a user-turn
+  message to the target's model, i.e. a prompt-injection surface. A local attacker
+  who can read the key file can steer the target session's tool use. Mitigations
+  observed in the binary: permission-mode parity holds (§5a) and the `hold`
+  setting; on-disk mitigations (0700 sockets dir, dir vetting, `sticky` checks)
+  gate the listener, not the credential.
+- **Recommendation for AMQ:** run the adapter as the same user, treat captured
+  tokens as secrets (never log/commit), and prefer `hold`-mode supervision in
+  unattended deployments.
 
 ## 6. Implications for the AMQ adapter (`internal/remote/claude`)
 
 1. `factory.go` stub can be replaced with a real client: connect → optional auth
    line → one JSON line → close. No reply to parse on the happy path.
 2. Sender must read the target's `.key` file to obtain `peerToken`; the key-file
-   name is derivable (`<pid>.<sha256(resolve(sockPath))>.key`), so no registry
+   name is derivable (`<pid>.<sha256(path.resolve(sockPath))>.key`), so no registry
    scraping beyond `~/.claude/sessions/*.json` for `messagingSocketPath`.
 3. The XML envelope must be built exactly as §3.1; recommend a single
    `buildCrossSessionEnvelope(from, fromSession, fromName, body, hopChain, mode)`
@@ -169,3 +244,6 @@ available in this session."` shown in sessions where the gate is off.)
    `artifact_yield`) in the registry pid-file can gate capability negotiation.
 5. `CLAUDE_CODE_MESSAGING_SOCKET` env override exists; feature flag
    `tengu_session_stable_address` switches addressing to `sid:<sessionId>` form.
+6. Probe the `crossSessionInbound: hold` path before shipping unattended sends:
+   hold is the fail-closed state for invalid settings and mode mismatches, so an
+   AMQ send can silently park rather than deliver or error.
