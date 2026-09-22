@@ -766,7 +766,7 @@ func (r *DeliveryRoot) WriteFileAtomic(dir, filename string, data []byte, perm o
 	if err := r.syncDir(dir); err != nil {
 		return "", r.cleanupTemp(tmpPath, err)
 	}
-	if err := r.publishReplaceDurable(tmpPath, finalPath); err != nil {
+	if err := r.root.Rename(tmpPath, finalPath); err != nil {
 		return "", r.cleanupTemp(tmpPath, err)
 	}
 	committedPath := r.displayPath(finalPath)
