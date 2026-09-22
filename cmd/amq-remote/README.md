@@ -197,9 +197,8 @@ still in the sender spool.
 
 ## Exit codes
 
-The usage banner names `0`, `1`, `2`, `3`, `4`, `5`, `6`, and `130`. The
-mapper in `internal/remote/protocol` returns the codes below. It does not
-return 5; the banner's "context mismatch" line is not a path in that mapper.
+The usage banner names `0`, `1`, `2`, `3`, `4`, `6`, and `130`. The mapper
+in `internal/remote/protocol` returns those codes. It does not return 5.
 
 | Exit | Meaning |
 | --- | --- |
