@@ -20,8 +20,8 @@ Do not override `--me` or reconstruct the root. Outside it, resolve and export t
 complete context before reading or sending:
 
 ```bash
-eval "$(amq env --me <handle> --export)"
-amq drain --include-body
+amq_context="$(amq env --me "<handle>" --export)" && eval "$amq_context" &&
+  amq drain --include-body
 ```
 
 For a named session, add `--session <name>` to `amq env`. Treat the evaluated
@@ -69,7 +69,7 @@ canonical setup path.
 - Preserve the existing thread when replying. Drain again after a doorbell;
   the newest complete message body is authoritative.
 - Cleanup is explicit through `amq cleanup`. Do not add automatic deletion.
-- Before any wake mutation, run `amq wake check --me <handle> --json`. Act only
+- Before any wake mutation, run `amq wake check --me "<handle>" --json`. Act only
   when `restart_capability=agent_safe`; otherwise preserve state and report the
   required operator action.
 - Keep cross-host payloads outside privileged inboxes until the configured
