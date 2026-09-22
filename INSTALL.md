@@ -294,8 +294,10 @@ Homebrew:
 - `amq-acp_*_{linux,darwin}_{amd64,arm64}.tar.gz` is the preview ACP v1 stdio
   companion. See [amq-acp](cmd/amq-acp/README.md).
 - `amq-remote_*_{linux,darwin}_{amd64,arm64}.tar.gz` is the remote-session
-  companion. See the [remote design](docs/adr-remote-control.md) and
-  [capability reference](docs/remote-compat.md); use `amq-remote --help` for commands.
+  companion. See [amq-remote](cmd/amq-remote/README.md) for commands, flags,
+  and exit codes. Design and pinned seams stay in the
+  [remote design](docs/adr-remote-control.md) and
+  [capability reference](docs/remote-compat.md).
 
 Use the same release tag and checksum verification for each companion. A stable
 path matters because wake identity includes the resolved injector executable.

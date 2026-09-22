@@ -153,6 +153,18 @@ Use `watch` only when no live wake is delivering notifications:
 amq watch --timeout 60s
 ```
 
+## Remote endpoint
+
+A remote endpoint is optional. It does not replace co-op messaging.
+
+1. Install `amq-remote` from its release asset. The Homebrew `amq` formula does not include it. See [INSTALL.md](INSTALL.md).
+2. Declare harness targets in `<AM_ROOT>/extensions/remote/manifest.json`. Kinds are `claude`, `codex`, `amit`, and `fake`.
+3. Run `amq-remote up --root <absolute-root>`. That supervises `serve`. One `up` owns a root; a second `up` for the same root refuses.
+4. Use `submit`, `status`, `wait`, and `cancel` against that endpoint. `doctor` reports whether the endpoint is reachable.
+5. `share --session <id>` mints the session body key the owner signs. It does not start the endpoint.
+
+Flags and exit codes: [amq-remote](cmd/amq-remote/README.md). The design is [the remote-control ADR](docs/adr-remote-control.md). Pinned harness seams are [the compatibility manifest](docs/remote-compat.md).
+
 ## Wake command (optional)
 
 Co-op works without wake. Before replacing or repairing one, inspect it:
