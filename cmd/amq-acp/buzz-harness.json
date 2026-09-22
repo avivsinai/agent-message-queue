@@ -1,6 +1,6 @@
 {
   "id": "amq_acp",
-  "label": "AMQ ACP v1",
+  "label": "AMQ ACP v2",
   "command": "amq-acp",
   "args": [],
   "installInstructionsUrl": "https://github.com/avivsinai/agent-message-queue/blob/main/cmd/amq-acp/README.md",

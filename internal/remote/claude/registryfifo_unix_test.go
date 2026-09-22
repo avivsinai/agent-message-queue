@@ -4,9 +4,11 @@ package claude
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
 // testRegistryFIFO probes a FIFO at the session-registry leaf: refused
@@ -25,5 +27,40 @@ func testRegistryFIFO(t *testing.T, home, regPath string) {
 		t.Fatal("accepted a FIFO at the session-registry path")
 	} else if !strings.Contains(err.Error(), "not a regular file") {
 		t.Fatalf("refusal does not name the file-type rule: %v", err)
+	}
+}
+
+// codex #855 r1 items 8 and receiver boundary: a FIFO at the peer-key leaf
+// or at the Stop-marker leaf is refused without blocking.
+func TestFIFOLeavesNeverBlock(t *testing.T) {
+	home := tempHome(t, 9, &sessionRegistry{Pid: 9, SessionID: "s9", Kind: "interactive"})
+	sock := "/tmp/cc-socks/9.sock"
+	key, err := peerKeyFile(home, 9, sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mkfifo(key, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	marker := stopMarkerPath(home, "s9")
+	if err := os.MkdirAll(filepath.Dir(marker), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mkfifo(marker, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := readPeerToken(home, 9, sock)
+		RunStopHookReceiver(home, strings.NewReader(`{"session_id":"s9"}`), os.Stderr)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("readPeerToken accepted a FIFO key file")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("a FIFO leaf blocked the key read or the receiver")
 	}
 }
