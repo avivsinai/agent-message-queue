@@ -14,6 +14,9 @@ import (
 // CockpitPromptSubject labels prompts delivered on the durable cockpit thread.
 const CockpitPromptSubject = "ACP cockpit prompt"
 
+// CockpitSteeringSubject labels steering delivered on the cockpit thread.
+const CockpitSteeringSubject = "ACP steering"
+
 // Delivery is the durable outcome of one prompt turn. The message is queued in
 // the recipient's inbox; nothing here proves the recipient consumed it.
 type Delivery struct {
@@ -35,10 +38,22 @@ type Delivery struct {
 // live ACP bridge. The returned creation time is the lower bound for reply
 // polling, so an older message on the same thread cannot answer this turn.
 func DeliverCockpitPrompt(cfg Config, body, thread, eventID string) (Delivery, error) {
-	return deliver(cfg, body, thread, CockpitPromptSubject, []string{"acp", "cockpit"}, eventID)
+	return deliver(cfg, body, thread, CockpitPromptSubject, format.PriorityNormal, []string{"acp", "cockpit"}, nil, eventID)
 }
 
-func deliver(cfg Config, body, thread, subject string, labels []string, eventID string) (Delivery, error) {
+// DeliverSteering sends steering on the session's cockpit thread. During an
+// in-flight turn (turnPrompt set) it is urgent with the buzz-steer label,
+// AMQ's native interrupt signal, and refs the turn's prompt, so a peer's
+// reply to the steer still answers that turn; while idle it is an ordinary
+// normal-priority message.
+func DeliverSteering(cfg Config, body, thread, turnPrompt, eventID string) (Delivery, error) {
+	if turnPrompt == "" {
+		return deliver(cfg, body, thread, CockpitSteeringSubject, format.PriorityNormal, []string{"acp"}, nil, eventID)
+	}
+	return deliver(cfg, body, thread, CockpitSteeringSubject, format.PriorityUrgent, []string{"acp", "buzz-steer"}, []string{turnPrompt}, eventID)
+}
+
+func deliver(cfg Config, body, thread, subject, priority string, labels, refs []string, eventID string) (Delivery, error) {
 	body = strings.TrimRight(body, "\n")
 	if strings.TrimSpace(body) == "" {
 		return Delivery{}, fmt.Errorf("prompt contains no text content")
@@ -76,14 +91,16 @@ func deliver(cfg Config, body, thread, subject string, labels []string, eventID 
 	}
 	message := format.Message{
 		Header: format.Header{
-			Schema:  format.CurrentSchema,
-			ID:      id,
-			From:    cfg.Me,
-			To:      []string{cfg.To},
-			Thread:  thread,
-			Subject: subject,
-			Created: now.UTC().Format(time.RFC3339Nano),
-			Labels:  labels,
+			Schema:   format.CurrentSchema,
+			ID:       id,
+			From:     cfg.Me,
+			To:       []string{cfg.To},
+			Thread:   thread,
+			Subject:  subject,
+			Created:  now.UTC().Format(time.RFC3339Nano),
+			Priority: priority,
+			Labels:   labels,
+			Refs:     refs,
 		},
 		Body: body,
 	}

@@ -1016,6 +1016,10 @@ func (e *Endpoint) Targets() []string {
 // durable record instead of re-executing the command. Read-only use.
 func (e *Endpoint) Store() *requests.Store { return e.store }
 
+// Sessions is the attached-target projection session.list returns, for the
+// serving process to print after attachment (611.13).
+func (e *Endpoint) Sessions() []protocol.Session { return e.list() }
+
 func (e *Endpoint) list() []protocol.Session {
 	e.mu.Lock()
 	ids := make([]string, 0, len(e.targets))

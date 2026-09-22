@@ -17,6 +17,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/keepalive/registry"
 	"github.com/avivsinai/agent-message-queue/internal/keepalive/supervisor"
+	"github.com/avivsinai/agent-message-queue/internal/remote/manifest"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 )
 
@@ -155,6 +156,20 @@ func up(args []string, stdout, stderr io.Writer) (int, error) {
 	})
 	if len(unknown) > 0 {
 		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v: %v", errUpUnsupportedFlag, unknown)
+	}
+	if *sf.discover {
+		// Discovery never supervises: it returns before the registry dir,
+		// the lifetime lock and phantom reclaim, so it works while another
+		// up owns this root (codex 611.13 consult, requirement 1).
+		stateDir, err := c.stateDir()
+		if err != nil {
+			return protocol.ExitUsage, err
+		}
+		manifestFile := manifest.DefaultPath(stateDir)
+		if *sf.manifestPath != "" {
+			manifestFile = *sf.manifestPath
+		}
+		return discoverAndPrint(c.root, stateDir, manifestFile, *sf.codexSocket, stdout, stderr)
 	}
 	regPath := *registryPath
 	var err error

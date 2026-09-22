@@ -70,7 +70,7 @@ Each adapter has a unique `target` (the id you pass to `inspect` and
 
 | Kind | Required `config` | What `inspect` advertises on this tree |
 | --- | --- | --- |
-| `claude` | `pid` (Claude Code process id). Optional `home` overrides the Claude home directory. | `Inspect` only. `Submit` and `CancelRequest` are false. |
+| `claude` | `pid` (Claude Code process id). Optional `home` overrides the Claude home directory. | `Inspect` and `Submit` over the session's cross-session socket. `CancelRequest` and `Steer` are false. Unsupported on Windows. See [Claude Code](#claude-code). |
 | `codex` | `socket` and `thread`. Optional `approve` advertises `ApproveTool`. | `Inspect`, `Submit`, and `CancelRequest`. `Steer` is false. |
 | `amit` | `handle`. The Amit extension directory for that handle must already exist under the root. | `Inspect` and `Submit`. `CancelRequest` is false. Submit evidence is `submitted`. |
 | `fake` | none | Test double. `epoch` is accepted only for this kind. |
@@ -110,8 +110,25 @@ Those sugar targets look like `codex:` plus the thread id with hyphens
 removed. `--codex-approve` sets `approve` on those sugar entries. A target
 id that appears both in the file and in the flags is exit 2.
 
-`--discover` lists discovered candidates as `<kind> <target>` and exits
-before attaching anything.
+`serve --discover` and `up --discover` list running sessions and exit. They
+attach nothing and write nothing, so they work while an endpoint already
+owns the root. Each line is the kind, the target, a display name, and a
+manifest entry to paste:
+
+```text
+claude   claude:12345                             main                 {"config":{"pid":12345},"kind":"claude","target":"claude:12345"}
+codex    codex:0198a1b2c3d47e5f8a9b0c1d2e3f4a5b   -                    {"config":{"socket":"...","thread":"0198a1b2-..."},"kind":"codex","target":"codex:0198a1b2c3d47e5f8a9b0c1d2e3f4a5b"}
+```
+
+Claude sessions come from `~/.claude/sessions`: interactive, with a live
+pid and a messaging socket. Codex threads come from the app-server daemon at
+`~/.codex/app-server-control/app-server-control.sock`, or from
+`--codex-socket` when set. A discovered session is shared only after you
+paste its entry into the manifest: discovery is never consent.
+
+When `serve` starts, it prints one line per attached target with its
+capabilities and `observed_at`. Under `up`, those lines come from the child
+`up` started.
 
 ## Flags
 
@@ -217,3 +234,23 @@ socket path, whether the endpoint answered `session.list`, record counts by
 state, and any persisted adapter refusals. No state directory yet means the
 endpoint has never been started: the report says to run `amq-remote serve`
 once. `amq-remote up` starts that same `serve` child.
+
+## Claude Code
+
+Submit writes one frame to the target session's cross-session socket. The
+socket answers nothing, so the ladder comes from the session's transcript:
+the entry that delivers the frame is `submitted`, the next assistant entry
+in that turn is admitted, and a Stop event ends the run with the turn's last
+assistant text as the result. The Stop event needs the hook:
+
+```text
+amq-remote claude install-stop-hook     # adds a Stop hook to ~/.claude/settings.json
+amq-remote claude uninstall-stop-hook   # removes only that hook
+```
+
+Without the hook a request is admitted but never completes. Install edits
+`~/.claude/settings.json` in place and keeps every other byte. Uninstall
+removes only the AMQ hook and leaves any empty `Stop` or `hooks` container
+behind. The hook command itself always exits 0, so a broken bridge never
+blocks Claude Code. After an endpoint restart, a request that was in flight
+reads `uncertain`.

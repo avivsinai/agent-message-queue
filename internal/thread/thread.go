@@ -13,17 +13,21 @@ import (
 
 // Entry is a thread message entry.
 type Entry struct {
-	ID       string    `json:"id"`
-	From     string    `json:"from"`
-	To       []string  `json:"to"`
-	Thread   string    `json:"thread"`
-	Subject  string    `json:"subject"`
-	Created  string    `json:"created"`
-	Body     string    `json:"body,omitempty"`
-	Priority string    `json:"priority,omitempty"`
-	Kind     string    `json:"kind,omitempty"`
-	Labels   []string  `json:"labels,omitempty"`
-	RawTime  time.Time `json:"-"`
+	ID       string   `json:"id"`
+	From     string   `json:"from"`
+	To       []string `json:"to"`
+	Thread   string   `json:"thread"`
+	Subject  string   `json:"subject"`
+	Created  string   `json:"created"`
+	Body     string   `json:"body,omitempty"`
+	Priority string   `json:"priority,omitempty"`
+	Kind     string   `json:"kind,omitempty"`
+	Labels   []string `json:"labels,omitempty"`
+	// Refs are the message's reply references (the ids it answers). Not
+	// part of the JSON output; consumers such as the ACP bridge correlate on
+	// them.
+	Refs    []string  `json:"-"`
+	RawTime time.Time `json:"-"`
 }
 
 func (e Entry) GetCreated() string {
@@ -86,6 +90,7 @@ func Collect(root, threadID string, agents []string, includeBody bool, onError f
 					seen[msg.Header.ID] = struct{}{}
 					entry := Entry{
 						ID:       msg.Header.ID,
+						Refs:     msg.Header.Refs,
 						From:     msg.Header.From,
 						To:       msg.Header.To,
 						Thread:   msg.Header.Thread,
