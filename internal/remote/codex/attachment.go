@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -71,7 +72,7 @@ type run struct {
 // Attachment is one running Codex thread reached through the shared
 // app-server daemon. It implements core.Attachment.
 type Attachment struct {
-	client   *Client
+	client   atomic.Pointer[Client] // BK5: set before Attach returns, read by read-loop-spawned paths
 	threadID string
 	targetID string
 	epoch    string
@@ -199,7 +200,7 @@ func Attach(socketPath, threadID string, opts ...Option) (*Attachment, error) {
 	if err != nil {
 		return nil, err
 	}
-	a.client = client
+	a.client.Store(client)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := client.Call(ctx, "initialize", map[string]any{"clientInfo": map[string]string{"name": ClientName, "version": Version, "title": "AMQ Remote"}}, nil); err != nil {
@@ -225,6 +226,16 @@ func Attach(socketPath, threadID string, opts ...Option) (*Attachment, error) {
 	// call was in flight — applying its status unconditionally would undo a
 	// turn/started we have already seen and publish "idle" for a running
 	// thread. A turn we know about wins over the older snapshot.
+	//
+	// BK5 (agent-message-queue-611.22.20): the client handle is published
+	// through an atomic.Pointer, not a plain field — a read-loop-spawned
+	// goroutine (deliverPendingCancel) can be scheduled in the window
+	// between Dial returning and this store; the pointer publication is
+	// synchronized, and the spawned path nil-checks, so no read observes a
+	// partially constructed attachment. The maps-empty invariant below
+	// (Submit/Subscribe cannot run before Attach returns) still holds and
+	// remains the guard for every other a.client read: those are all
+	// post-Attach, where the store is already visible.
 	a.mu.Lock()
 	a.cwd = resumed.Thread.Cwd
 	if a.activeTurn == "" {
@@ -262,7 +273,7 @@ func threadStatus(t string) string {
 }
 
 // Close drops the connection. The thread keeps running in Codex.
-func (a *Attachment) Close() error { return a.client.Close() }
+func (a *Attachment) Close() error { return a.client.Load().Close() }
 
 // Inspect implements core.Attachment.
 func (a *Attachment) Inspect() protocol.Session {
@@ -487,7 +498,7 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 		rid := r.runIDLocked()
 		a.mu.Unlock()
 		return core.Admission{RunID: rid}, fmt.Errorf("turn/start was not confirmed by our own userMessage item within %s; the turn may be running", a.confirmTimeout)
-	case <-a.client.Done():
+	case <-a.client.Load().Done():
 		a.mu.Lock()
 		rid := r.runIDLocked()
 		a.mu.Unlock()
@@ -499,7 +510,7 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 func (a *Attachment) call(method string, params, result any) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	return a.client.Call(ctx, method, params, result)
+	return a.client.Load().Call(ctx, method, params, result)
 }
 
 // memoTerminal records turnID as an observed-terminal turn and keeps the
@@ -560,10 +571,21 @@ func (a *Attachment) confirmRun(r *run, turnID string) (cancelPending bool) {
 
 // deliverPendingCancel sends the interrupt for a cancel that arrived while the
 // run was tentative, now that ownership is confirmed. No lock held.
+//
+// BK5 (agent-message-queue-611.22.20): this runs on a goroutine spawned from
+// the read loop, so it can be scheduled before Attach finishes publishing
+// a.client (the store happens after Dial returns, while the pump is already
+// live). The nil check makes that ordering harmless — a pre-publication
+// spawn gives up the interrupt (same failure shape as the transport error
+// below; TODO(B04) covers the lost intent) instead of racing the store.
 func (a *Attachment) deliverPendingCancel(key requests.Key, turnID string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	if err := a.client.Call(ctx, "turn/interrupt", map[string]any{"threadId": a.threadID, "turnId": turnID}, nil); err != nil {
+	client := a.client.Load()
+	if client == nil {
+		return
+	}
+	if err := client.Call(ctx, "turn/interrupt", map[string]any{"threadId": a.threadID, "turnId": turnID}, nil); err != nil {
 		// TODO(B04): a pending cancel that confirmed then raced completion is
 		// lost here with no state mutation; re-record the intent or emit an
 		// uncertain-cancel event so it is not silently dropped.
@@ -691,7 +713,7 @@ func (a *Attachment) lookupHistory(key requests.Key, epoch string) (core.Evidenc
 			} `json:"turns"`
 		} `json:"thread"`
 	}
-	if err := a.client.Call(ctx, "thread/read", map[string]any{"threadId": a.threadID, "includeTurns": true}, &res); err != nil {
+	if err := a.client.Load().Call(ctx, "thread/read", map[string]any{"threadId": a.threadID, "includeTurns": true}, &res); err != nil {
 		return core.Evidence{}, err
 	}
 	for _, t := range res.Thread.Turns {
@@ -869,7 +891,7 @@ func (a *Attachment) CancelExact(key requests.Key, epoch string) (core.CancelEvi
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	if queued && turnID == "" {
-		if err := a.client.Call(ctx, "thread/queue/delete", map[string]any{"threadId": a.threadID, "clientUserMessageId": clientIDFor(key)}, nil); err != nil {
+		if err := a.client.Load().Call(ctx, "thread/queue/delete", map[string]any{"threadId": a.threadID, "clientUserMessageId": clientIDFor(key)}, nil); err != nil {
 			return core.CancelEvidence{Disposition: protocol.CancelUnsupported, Message: err.Error()}, nil
 		}
 		a.mu.Lock()
@@ -878,7 +900,7 @@ func (a *Attachment) CancelExact(key requests.Key, epoch string) (core.CancelEvi
 		a.emit(core.NativeEvent{Type: core.EventRunCancelled, Key: key, RunID: a.runID(r)})
 		return core.CancelEvidence{Disposition: protocol.CancelConfirmed}, nil
 	}
-	if err := a.client.Call(ctx, "turn/interrupt", map[string]any{"threadId": a.threadID, "turnId": turnID}, nil); err != nil {
+	if err := a.client.Load().Call(ctx, "turn/interrupt", map[string]any{"threadId": a.threadID, "turnId": turnID}, nil); err != nil {
 		return core.CancelEvidence{Disposition: protocol.CancelRequested, Message: err.Error()}, nil
 	}
 	// Confirmation arrives as turn/completed with status interrupted.
@@ -909,7 +931,7 @@ func (a *Attachment) Respond(key requests.Key, epoch, interactionID, option stri
 		return protocol.CodeInvalid, nil
 	}
 	a.mu.Unlock()
-	if err := a.client.Respond(reqID, map[string]string{"decision": option}); err != nil {
+	if err := a.client.Load().Respond(reqID, map[string]string{"decision": option}); err != nil {
 		return "", err
 	}
 	// B8a (agent-message-queue-611.22.36): tear down the approval state ONLY
