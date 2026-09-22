@@ -28,10 +28,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
@@ -73,11 +73,6 @@ type sessionRegistry struct {
 	Status              string   `json:"status"`
 	UpdatedAt           int64    `json:"updatedAt"` // unix millis
 }
-
-// ErrSubmitUnwired is the refusal Submit returns in PR1: the pinned 611.2
-// wire is merged (17bff18) but not yet wired (PR2). The refusal is the
-// honest projection — no capability is implied, no side effect occurs.
-var ErrSubmitUnwired = errors.New("claude submit is not wired until 611.12 PR2 (socket delivery over the 611.2 pinned wire); this refusal is the capability projection, not a transient error")
 
 // maxRegistryBytes bounds the session-registry read: a real entry is well
 // under 1 KiB; anything larger on a local-process-writable path is refused
@@ -144,9 +139,12 @@ func Attach(cfg config) (*Attachment, error) {
 		return nil, fmt.Errorf("claude adapter: derived target id %q is not protocol-addressable (opaque grammar); set an explicit target in the manifest", target)
 	}
 	return &Attachment{
-		target: target,
-		cfg:    cfg,
-		home:   home,
+		target:       target,
+		cfg:          cfg,
+		home:         home,
+		runs:         map[requests.Key]*runRecord{},
+		cancelIntent: map[requests.Key]bool{},
+		ctx:          context.Background(),
 	}, nil
 }
 
@@ -167,44 +165,19 @@ func claudeSessionsDir(home string) string {
 //
 // Trust boundary (r3 P2-1): this is a Claude-internal registry file on a
 // local-process-writable path, not an AMQ state leaf — so it does NOT get
-// the state-leaf lstat refusal. Instead the read is itself bounded and
-// hardened: lstat gate (regular file only), O_NOFOLLOW (where available)
-// so the lstat-open race cannot swap in a FIFO, and an io.LimitReader
-// capped at maxRegistryBytes+1 so a file that grows between the lstat and
-// the read cannot bypass the size bound and balloon RSS under the
-// endpoint mutex (r3 P1).
+// the state-leaf lstat refusal. Instead the read goes through
+// readRegularBounded (safeopen.go): lstat gate, size bound before open,
+// no-follow non-blocking open, fstat recheck, and a LimitReader, so neither
+// a FIFO nor a growing file can stall or bloat a read under the endpoint
+// mutex (r2 P1-1, r3 P1).
 func readSessionRegistry(home string, pid int) (*sessionRegistry, error) {
 	path := filepath.Join(claudeSessionsDir(home), strconv.Itoa(pid)+".json")
-	// Lstat gate: anything but a regular file is refused. os.ReadFile on a
-	// FIFO blocks unbounded until a writer appears, and this read runs
-	// under the endpoint's mutex (r2 P1-1).
-	fi, err := os.Lstat(path)
+	raw, err := readRegularBounded(path, maxRegistryBytes)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil // no registry entry yet: not an error
 		}
 		return nil, fmt.Errorf("session registry %s: %w", path, err)
-	}
-	if !fi.Mode().IsRegular() {
-		return nil, fmt.Errorf("session registry %s: not a regular file (mode %s); refusing", path, fi.Mode())
-	}
-	// Size bound BEFORE opening (r3 P1): fi.Size() from the lstat above is
-	// the admission check; the LimitReader below is the defense in depth
-	// for a file that grows between lstat and read (r3 P2-2 TOCTOU).
-	if fi.Size() > maxRegistryBytes {
-		return nil, fmt.Errorf("session registry %s: %d bytes exceeds %d; refusing", path, fi.Size(), maxRegistryBytes)
-	}
-	f, err := os.OpenFile(path, os.O_RDONLY|registryNoFollow, 0)
-	if err != nil {
-		return nil, fmt.Errorf("session registry %s: %w", path, err)
-	}
-	defer func() { _ = f.Close() }()
-	raw, err := io.ReadAll(io.LimitReader(f, maxRegistryBytes+1))
-	if err != nil {
-		return nil, fmt.Errorf("session registry %s: %w", path, err)
-	}
-	if int64(len(raw)) > maxRegistryBytes {
-		return nil, fmt.Errorf("session registry %s: larger than %d bytes after read; refusing", path, maxRegistryBytes)
 	}
 	var reg sessionRegistry
 	if err := json.Unmarshal(raw, &reg); err != nil {
@@ -227,16 +200,39 @@ type Attachment struct {
 	target string
 	cfg    config
 	home   string
+
+	// PR2 evidence path (submit.go): retained runs, cancel intent, the
+	// native-event sink, and the confirmation poller's cancel. ctx is the
+	// attachment lifetime; the poller is never on the request path.
+	mu            sync.Mutex
+	runs          map[requests.Key]*runRecord
+	cancelIntent  map[requests.Key]bool
+	eventSink     func(core.NativeEvent)
+	confirmCancel func()
+	// stopConsumed is the byte offset in the session's Stop-marker file up
+	// to which marker lines are settled (matched to a run or dropped as
+	// orphans). Lines past it are preserved for the next poll.
+	stopConsumed int64
+	// cur is the poller's transcript position; owner is the run that owns
+	// the turn the cursor is inside, nil for a foreign or unknown turn.
+	cur   transcriptCursor
+	owner *runRecord
+	// closed: the endpoint unsubscribed. The poller is stopped and never
+	// restarted; the attachment is being replaced or shut down.
+	closed bool
+	ctx    context.Context
 }
 
 // Inspect implements core.Attachment: the honest projection. Status is
 // the registry file's own status field, normalized to the projection
 // vocabulary {idle,busy,unknown,offline} (P2-1, mirroring codex
 // threadStatus); the pid is liveness-checked (P2-4 — a stale registry
-// left by a crashed session must not read "live" forever). Capabilities
-// are the design-permitted set with submit FALSE until PR2. Evidence is
-// nil — PR1 issues no submit evidence class at all, and a nil projection
-// fails closed under any caller floor (endpoint gate).
+// left by a crashed session must not read "live" forever). PR2: submit
+// is advertised TRUE — the pinned 611.2 socket wire is wired (submit.go);
+// the interrupt-family seams remain false (no keystroke seam,
+// docs/remote-compat.md §3). Evidence is nil on the projection: per-run
+// evidence is carried by Lookup, and the projection fails closed under
+// any caller floor.
 func (a *Attachment) Inspect() protocol.Session {
 	status := a.observeStatus()
 	att := "live"
@@ -251,16 +247,14 @@ func (a *Attachment) Inspect() protocol.Session {
 		DisplayName: "claude " + a.target,
 		Attachment:  att,
 		Status:      status,
-		// Honest projection (ruling 10:59Z): cancel_request/approve_tool/
-		// answer_question/steer are false — no interrupt seam exists without
-		// keystrokes (docs/remote-compat.md §3 rows) — and submit is false
-		// until PR2 wires the pinned socket delivery.
+		// PR2: submit true over the pinned socket wire; the rest stay
+		// false — no interrupt seam without keystrokes.
 		Capabilities: protocol.Capabilities{
-			Inspect: true, Submit: false, CancelRequest: false,
+			Inspect: true, Submit: true, CancelRequest: false,
 			ApproveTool: false, AnswerQuestion: false, Steer: false,
 			Terminal: "unavailable",
 		},
-		Evidence:   nil, // nothing provable until PR2; fails closed under a floor
+		Evidence:   nil, // per-run evidence is Lookup's answer; fails closed under a floor
 		ObservedAt: protocol.FormatTime(a.now()),
 	}
 }
@@ -308,22 +302,9 @@ func (a *Attachment) now() time.Time { return time.Now() }
 // the endpoint gates on Capabilities.Submit=false before dispatch reaches
 // the adapter (internal/remote/core/endpoint.go), so this is the second,
 // adapter-side gate — fail closed twice rather than once.
-func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
-	return core.Admission{
-		Code:    protocol.CodeUnsupported,
-		Message: ErrSubmitUnwired.Error(),
-	}, nil
-}
+// PR2: implemented in submit.go over the pinned 611.2 wire.
 
-// Lookup implements core.Attachment. PR1 has no submit path, so the
-// adapter never created a run: there is nothing the adapter can speak for.
-// Following the amit posture for a key the adapter retains nothing about:
-// Known=true with class EvidenceUnknown — never EvidenceNone (which would
-// claim a real admission primitive proved non-admission) and never a
-// guessed class.
-func (a *Attachment) Lookup(key requests.Key, _ string) (core.Evidence, error) {
-	return core.Evidence{Known: true, Class: core.EvidenceUnknown}, nil
-}
+// Lookup is implemented in submit.go over the retained run map.
 
 // CancelExact implements core.Attachment: typed refusal, never a zero
 // value (P2-3 — an empty Disposition would persist as a fake outcome).
@@ -347,12 +328,37 @@ func (a *Attachment) Respond(_ requests.Key, _, _, _ string) (protocol.Code, err
 
 // AcknowledgeResult implements core.Attachment: nothing is retained, so
 // the release is a no-op.
-func (a *Attachment) AcknowledgeResult(_ requests.Key, _, _ string) {}
+// AcknowledgeResult releases the retained terminal evidence for the key
+// (mirrors codex): once the endpoint has persisted the outcome the
+// adapter drops its record, so a restarted attachment's Unknown is honest.
+func (a *Attachment) AcknowledgeResult(key requests.Key, _, _ string) {
+	a.mu.Lock()
+	delete(a.runs, key)
+	a.mu.Unlock()
+}
 
-// Subscribe implements core.Attachment: PR1 has no native event stream to
-// forward (the Stop hook posts into PR2's evidence path, not a stream).
-func (a *Attachment) Subscribe(_ func(core.NativeEvent)) func() {
-	return func() {}
+// Subscribe registers the native-event sink (the confirmation poller
+// emits status events; the Stop-hook receiver posts terminal events
+// through the same sink). Returns the unsubscribe function.
+//
+// Unsubscribe is the attachment's end of life: the endpoint calls it when
+// the target is replaced, unregistered or shut down, so it also stops the
+// confirmation poller for good (codex #855 r2 item 6).
+func (a *Attachment) Subscribe(cb func(core.NativeEvent)) func() {
+	a.mu.Lock()
+	a.eventSink = cb
+	a.mu.Unlock()
+	return func() {
+		a.mu.Lock()
+		a.eventSink = nil
+		a.closed = true
+		stop := a.confirmCancel
+		a.confirmCancel = nil
+		a.mu.Unlock()
+		if stop != nil {
+			stop()
+		}
+	}
 }
 
 func init() {
