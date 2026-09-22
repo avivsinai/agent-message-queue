@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
@@ -225,7 +226,26 @@ func LoadTrustedFromDeliveryRoot(root *fsq.DeliveryRoot, host string) (ed25519.P
 	return ed25519.PublicKey(pub), fields["generation"], nil
 }
 
+// WriteTrusted provisions (or, with ReplaceTrusted, rotates) a source
+// host's trusted key record. The create-new path never overwrites: a
+// rotation must go through ReplaceTrusted, which refuses a generation
+// downgrade and lands the new body via tmp+rename.
 func WriteTrusted(root, host string, pub ed25519.PublicKey, generation string) error {
+	return writeTrusted(root, host, pub, generation, false)
+}
+
+// ReplaceTrusted atomically overwrites a source host's trusted record with
+// a NEWER generation (rotation). It refuses a downgrade — an operator who
+// re-provisions an older key is almost certainly undoing a rotation by
+// mistake — and it never leaves a partial file: the new body is written to
+// a temp file in the trusted directory and renamed over the target
+// (review-845-r1 P1-1: writePrivateFile's O_EXCL made rotation a raw
+// "file exists" error with the only remedy a hand-delete).
+func ReplaceTrusted(root, host string, pub ed25519.PublicKey, generation string) error {
+	return writeTrusted(root, host, pub, generation, true)
+}
+
+func writeTrusted(root, host string, pub ed25519.PublicKey, generation string, replace bool) error {
 	if err := validateBridgeIdentifier("trusted source host", host); err != nil {
 		return fmt.Errorf("trusted source host: %w", err)
 	}
@@ -235,11 +255,51 @@ func WriteTrusted(root, host string, pub ed25519.PublicKey, generation string) e
 	if len(pub) != ed25519.PublicKeySize {
 		return fmt.Errorf("trusted host public key must be %d bytes", ed25519.PublicKeySize)
 	}
-	if err := os.MkdirAll(filepath.Join(root, "bridge", TrustedDirName), 0o700); err != nil {
+	dir := filepath.Join(root, "bridge", TrustedDirName)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("create trusted directory: %w", err)
 	}
-	body := fmt.Sprintf("generation %s\npublic %s\n", generation, hex.EncodeToString(pub))
-	return writePrivateFile(TrustedPath(root, host), []byte(body))
+	path := TrustedPath(root, host)
+	if !replace {
+		return writePrivateFile(path, []byte(trustedBody(pub, generation)))
+	}
+	if _, current, lerr := LoadTrusted(root, host); lerr == nil && generation < current {
+		return fmt.Errorf("trusted host %s: refusing to rotate generation %q back to %q", host, current, generation)
+	}
+	body := []byte(trustedBody(pub, generation))
+	tmp, err := os.CreateTemp(dir, ".trusted-*")
+	if err != nil {
+		return fmt.Errorf("create trusted temp file: %w", err)
+	}
+	tmpName := tmp.Name()
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("chmod trusted temp file: %w", err)
+	}
+	if _, err := tmp.Write(body); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("write trusted temp file: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("sync trusted temp file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("close trusted temp file: %w", err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("replace trusted host %s: %w", host, err)
+	}
+	return nil
+}
+
+func trustedBody(pub ed25519.PublicKey, generation string) string {
+	return fmt.Sprintf("generation %s\npublic %s\n", generation, hex.EncodeToString(pub))
 }
 
 func readKeyFields(path, secretField string) (map[string]string, error) {
@@ -345,20 +405,41 @@ func writePrivateFile(path string, data []byte) error {
 	return nil
 }
 
-// ParsePublicIdentity decodes the public half of a bridge identity from the
-// two shapes an operator actually has in hand (bead
-// agent-message-queue-ug3): the one line `amq-bridge identity public`
-// prints ("host=<h> generation=<g> public=<hex>") or the two-line key-file
-// record the loader itself accepts ("generation <g>" + "public <hex>").
-// The hex public key must decode to an Ed25519 public key. Generation
-// validity is enforced with the same identifier rules the loader applies,
-// so a record accepted here is never rejected later by LoadTrusted.
-func ParsePublicIdentity(data []byte) (generation string, pub ed25519.PublicKey, err error) {
+// ParsePublicIdentity decodes a bridge identity's public half from the two
+// shapes an operator actually has in hand (bead agent-message-queue-ug3):
+// the one line `amq-bridge identity public` prints ("host=<h>
+// generation=<g> public=<hex>") or the two-line key-file record the loader
+// itself accepts ("generation <g>" + "public <hex>"). The returned host is
+// empty for the two-line shape, which carries none. The hex public key
+// must decode to an Ed25519 public key. Both shapes are normalised before
+// WriteTrusted re-validates host, generation and key size and emits the
+// canonical two-line body, so whatever is accepted here round-trips
+// through LoadTrusted (review-845-r1 P2-2: the safety property is that
+// normalisation, not literal parser sharing).
+func ParsePublicIdentity(data []byte) (host, generation string, pub ed25519.PublicKey, err error) {
 	fields, perr := parseKeyFields("identity record", data, "public")
 	if perr == nil {
-		return decodePublicIdentity(fields)
+		pub, err = decodePublicIdentity(fields)
+		return "", fields["generation"], pub, err
 	}
-	// One-line shape: host=<h> generation=<g> public=<hex>.
+	// Shape disambiguation first (review-845-r1 P2-3): the two-line shape
+	// contains no '='-keyed fields, so if the input is not one-line-shaped
+	// the honest error is the parser's, never a synthesized "line 1 is
+	// invalid". Empty input is the no-input case.
+	first := ""
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.TrimSpace(line) != "" {
+			first = strings.TrimSpace(line)
+			break
+		}
+	}
+	if first == "" || !strings.Contains(first, "=") {
+		return "", "", nil, perr
+	}
+	// One-line shape: host=<h> generation=<g> public=<hex>. Unknown fields
+	// are refused with the same strictness parseKeyFields applies to the
+	// two-line shape (P2-2) — a future protocol field must be an explicit
+	// refusal, never a silent drop.
 	one := map[string]string{}
 	for i, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
 		if strings.TrimSpace(line) == "" {
@@ -367,33 +448,41 @@ func ParsePublicIdentity(data []byte) (generation string, pub ed25519.PublicKey,
 		for _, part := range strings.Fields(line) {
 			key, value, ok := strings.Cut(part, "=")
 			if !ok || key == "" || value == "" {
-				return "", nil, fmt.Errorf("identity record line %d is invalid", i+1)
+				return "", "", nil, fmt.Errorf("identity record line %d is invalid", i+1)
 			}
 			if _, exists := one[key]; exists {
-				return "", nil, fmt.Errorf("identity record repeats field %q", key)
+				return "", "", nil, fmt.Errorf("identity record repeats field %q", key)
 			}
 			one[key] = value
 		}
 	}
 	if _, ok := one["host"]; !ok {
-		return "", nil, fmt.Errorf("identity record: %w", perr)
+		return "", "", nil, fmt.Errorf("identity record: %w", perr)
+	}
+	extra := make([]string, 0, len(one))
+	for k := range one {
+		if k != "host" && k != "generation" && k != "public" {
+			extra = append(extra, k)
+		}
+	}
+	if len(extra) > 0 {
+		sort.Strings(extra)
+		return "", "", nil, fmt.Errorf("identity record has unknown fields: %s", strings.Join(extra, ", "))
 	}
 	if err := validateBridgeIdentifier("generation", one["generation"]); err != nil {
-		return "", nil, fmt.Errorf("identity record generation is invalid")
+		return "", "", nil, fmt.Errorf("identity record generation is invalid")
 	}
-	return decodePublicIdentity(map[string]string{
-		"generation": one["generation"],
-		"public":     one["public"],
-	})
+	pub, err = decodePublicIdentity(map[string]string{"public": one["public"]})
+	return one["host"], one["generation"], pub, err
 }
 
-func decodePublicIdentity(fields map[string]string) (string, ed25519.PublicKey, error) {
+func decodePublicIdentity(fields map[string]string) (ed25519.PublicKey, error) {
 	raw, err := hex.DecodeString(fields["public"])
 	if err != nil {
-		return "", nil, fmt.Errorf("identity record public key: %w", err)
+		return nil, fmt.Errorf("identity record public key: %w", err)
 	}
 	if len(raw) != ed25519.PublicKeySize {
-		return "", nil, fmt.Errorf("identity record public key must be %d bytes", ed25519.PublicKeySize)
+		return nil, fmt.Errorf("identity record public key must be %d bytes", ed25519.PublicKeySize)
 	}
-	return fields["generation"], ed25519.PublicKey(raw), nil
+	return ed25519.PublicKey(raw), nil
 }

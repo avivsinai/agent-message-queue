@@ -13,11 +13,11 @@ import (
 
 // TestTrustAddProvisionsFromIdentityPublicOutput is the ug3 happy path:
 // given a fresh destination root, the operator runs `identity public` on the
-// source, pipes that output to `trust add --host <h>` on the destination,
-// and the written trusted file authenticates under LoadTrusted with no
-// hand-written file. Before the fix, the one-line identity-public output was
-// rejected by the trusted-file parser ("line 1 is invalid") and WriteTrusted
-// had no production caller.
+// source, pipes that output to `trust add` on the destination, and the
+// written trusted file authenticates under LoadTrusted with no hand-written
+// file. Reverting ParsePublicIdentity to the pre-fix two-line-only parser
+// reproduces the bead's observed symptom here ("identity record line 1 is
+// invalid"); removing the production WriteTrusted call fails the round-trip.
 func TestTrustAddProvisionsFromIdentityPublicOutput(t *testing.T) {
 	// Source: a real identity, and the exact bytes `identity public` prints.
 	srcRoot := newBridgeRoot(t, "claude")
@@ -28,10 +28,12 @@ func TestTrustAddProvisionsFromIdentityPublicOutput(t *testing.T) {
 	}
 	publicOutput := fmt.Sprintf("host=src-mac generation=%s public=%x\n", srcKey.Generation, srcKey.Public())
 
-	// Destination: fresh root, pipe the record through trust add.
+	// Destination: fresh root, pipe the record through trust add. No
+	// --host: the record's host field is authoritative (review-845-r1
+	// P2-1) because apply-file looks the trust file up by it.
 	dstRoot := newBridgeRoot(t, "claude")
 	ensureHostID(t, dstRoot, "dst-mac")
-	if err := runTrustAdd([]string{"--root", dstRoot, "--host", "src-mac"}, strings.NewReader(publicOutput)); err != nil {
+	if err := runTrustAdd([]string{"--root", dstRoot}, strings.NewReader(publicOutput)); err != nil {
 		t.Fatalf("runTrustAdd: %v", err)
 	}
 
@@ -57,7 +59,8 @@ func TestTrustAddProvisionsFromIdentityPublicOutput(t *testing.T) {
 
 // TestTrustAddAcceptsKeyFileForm pins that the two-line record the loader
 // itself accepts ("generation <g>" / "public <hex>") provisions too — the
-// same command must take either shape.
+// same command must take either shape. This shape carries no host field,
+// so --host is required and used.
 func TestTrustAddAcceptsKeyFileForm(t *testing.T) {
 	key := testHostKey("src-two", "g9")
 	record := fmt.Sprintf("generation %s\npublic %x\n", key.Generation, key.Public())
@@ -75,33 +78,107 @@ func TestTrustAddAcceptsKeyFileForm(t *testing.T) {
 	}
 }
 
-// TestTrustAddFromFileAndRejections covers the --from path and the refusal
-// shapes: a bad host alias, a malformed record, and a short public key must
-// all refuse without writing a trusted file.
-func TestTrustAddFromFileAndRejections(t *testing.T) {
+// TestTrustAddHostParity pins review-845-r1 P2-1: an explicit --host that
+// disagrees with the record's host= field is refused (before the fix it
+// wrote a dead trust record under the wrong name and exited 0), and the
+// --from file path provisions with the record's own host.
+func TestTrustAddHostParity(t *testing.T) {
 	key := testHostKey("src-file", "g1")
+	record := fmt.Sprintf("host=src-file generation=%s public=%x\n", key.Generation, key.Public())
 	from := filepath.Join(t.TempDir(), "identity.txt")
-	if err := os.WriteFile(from, []byte(fmt.Sprintf("host=src-file generation=%s public=%x\n", key.Generation, key.Public())), 0o600); err != nil {
+	if err := os.WriteFile(from, []byte(record), 0o600); err != nil {
 		t.Fatal(err)
 	}
+
+	// --from file, no --host: provisions under the record's host.
 	dstRoot := newBridgeRoot(t, "claude")
 	ensureHostID(t, dstRoot, "dst-mac")
-	if err := runTrustAdd([]string{"--root", dstRoot, "--host", "src-file", "--from", from}, nil); err != nil {
+	if err := runTrustAdd([]string{"--root", dstRoot, "--from", from}, nil); err != nil {
 		t.Fatalf("runTrustAdd --from: %v", err)
 	}
 	if _, _, err := bridge.LoadTrusted(dstRoot, "src-file"); err != nil {
 		t.Fatalf("LoadTrusted: %v", err)
 	}
 
-	// Refusals leave no trusted file behind.
+	// Matching --host is accepted; disagreeing --host is refused and
+	// writes nothing.
+	dstRoot2 := newBridgeRoot(t, "claude")
+	ensureHostID(t, dstRoot2, "dst-mac")
+	if err := runTrustAdd([]string{"--root", dstRoot2, "--host", "src-file"}, strings.NewReader(record)); err != nil {
+		t.Fatalf("runTrustAdd matching host: %v", err)
+	}
+	root3 := newBridgeRoot(t, "claude")
+	ensureHostID(t, root3, "dst-mac")
+	if err := runTrustAdd([]string{"--root", root3, "--host", "peer-mac"}, strings.NewReader(record)); err == nil {
+		t.Fatal("runTrustAdd with disagreeing --host = nil, want refusal")
+	}
+	if _, err := os.Lstat(bridge.TrustedPath(root3, "peer-mac")); !os.IsNotExist(err) {
+		t.Fatalf("dead trust record written under wrong name: %v", err)
+	}
+}
+
+// TestTrustAddRotateReplacesAtomicallyNoDowngrade pins review-845-r1 P1-1:
+// rotation goes through --replace, lands atomically (the file is replaced
+// in place, no partial body), and refuses a generation downgrade. Without
+// --replace, re-provisioning an existing host fails with a clear error.
+func TestTrustAddRotateReplacesAtomicallyNoDowngrade(t *testing.T) {
+	key1 := testHostKey("src-rot", "g1")
+	dstRoot := newBridgeRoot(t, "claude")
+	ensureHostID(t, dstRoot, "dst-mac")
+	record1 := fmt.Sprintf("host=src-rot generation=%s public=%x\n", key1.Generation, key1.Public())
+	if err := runTrustAdd([]string{"--root", dstRoot}, strings.NewReader(record1)); err != nil {
+		t.Fatalf("initial runTrustAdd: %v", err)
+	}
+
+	// No --replace: refused, original record untouched.
+	if err := runTrustAdd([]string{"--root", dstRoot}, strings.NewReader(record1)); err == nil {
+		t.Fatal("re-provision without --replace = nil, want refusal")
+	}
+	got, generation, err := bridge.LoadTrusted(dstRoot, "src-rot")
+	if err != nil || string(got) != string(key1.Public()) || generation != "g1" {
+		t.Fatalf("original record disturbed by refused re-provision: (%x, %s, %v)", got, generation, err)
+	}
+
+	// --replace with a NEWER generation: rotated in place.
+	key2 := testHostKey("src-rot", "g2")
+	record2 := fmt.Sprintf("host=src-rot generation=%s public=%x\n", key2.Generation, key2.Public())
+	if err := runTrustAdd([]string{"--root", dstRoot, "--replace"}, strings.NewReader(record2)); err != nil {
+		t.Fatalf("runTrustAdd --replace: %v", err)
+	}
+	got, generation, err = bridge.LoadTrusted(dstRoot, "src-rot")
+	if err != nil || string(got) != string(key2.Public()) || generation != "g2" {
+		t.Fatalf("rotation did not land: (%x, %s, %v)", got, generation, err)
+	}
+	info, err := os.Lstat(bridge.TrustedPath(dstRoot, "src-rot"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Fatalf("rotated file mode = %o, want 600", perm)
+	}
+
+	// --replace with an OLDER generation: refused, g2 stays.
+	if err := runTrustAdd([]string{"--root", dstRoot, "--replace"}, strings.NewReader(record1)); err == nil {
+		t.Fatal("downgrade --replace = nil, want refusal")
+	}
+	if _, generation, err = bridge.LoadTrusted(dstRoot, "src-rot"); err != nil || generation != "g2" {
+		t.Fatalf("downgrade disturbed the active generation: (%s, %v)", generation, err)
+	}
+}
+
+// TestTrustAddRejectsUnparseableRecord reproduces the bead's observed
+// defect class: a record the trusted-file parser rejects ("line 1 is
+// invalid") must be refused by trust add too, with the parser's honest
+// error — never accepted, and never a file written. `bad-host` stays to
+// pin the traversal boundary: the host value becomes a file name under
+// bridge/trusted/.
+func TestTrustAddRejectsUnparseableRecord(t *testing.T) {
 	for name, tc := range map[string]struct {
 		host string
 		data string
 	}{
-		"bad-host":    {host: "Bad Host", data: fmt.Sprintf("host=x generation=%s public=%x\n", key.Generation, key.Public())},
-		"bad-record":  {host: "src-x", data: "not a record at all\n"},
-		"short-pub":   {host: "src-x", data: fmt.Sprintf("host=x generation=%s public=%x\n", key.Generation, []byte("short"))},
-		"missing-pub": {host: "src-x", data: "host=x\n"},
+		"bad-record": {host: "src-x", data: "not a record at all\n"},
+		"bad-host":   {host: "Bad Host", data: "host=x generation=1\npublic=00\n"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			root := newBridgeRoot(t, "claude")
