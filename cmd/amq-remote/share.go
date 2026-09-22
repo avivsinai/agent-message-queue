@@ -677,8 +677,10 @@ func removeEmptyDir(path string) error {
 // stagedName is the accumulation file for signed-but-unpublished tags.
 const stagedName = "share.staged.json"
 
-// reconcileStagedState heals or refuses leftovers, on every command that
-// touches share state (verifier r3 P2-3/P2-4):
+// reconcileStagedState heals or refuses leftovers, inside share, enroll
+// and renew — explicit operator actions on exactly that state (architect
+// ruling 10:09Z on r4 P2-3: doctor is REPORT-ONLY; it never deletes or
+// rewrites anything, per CLAUDE.md's "cleanup is explicit" constraint):
 //   - a complete new generation with pending/staged still on disk (crash
 //     between publication and cleanup) is reconciled by removing them —
 //     the publication is already the committed state;
@@ -686,6 +688,8 @@ const stagedName = "share.staged.json"
 //     window (superseded by a later --renew) are dropped;
 //   - a corrupt staged file is refused with the file named and the
 //     remedy (remove it, re-sign) instead of an unrecoverable error.
+//
+// Doctor uses reportStagedState below: same detection, zero mutation.
 func reconcileStagedState(keyDir string, gen *enrolledGeneration, pending []shareTagFile, pendingErr error) error {
 	// Verifier r4 P1-1: reconcile READS and WRITES state leaves, so the
 	// leaf-confinement rule applies here too — doctor reaches this helper
@@ -694,10 +698,79 @@ func reconcileStagedState(keyDir string, gen *enrolledGeneration, pending []shar
 	if err := refuseSymlinkedState(keyDir); err != nil {
 		return err
 	}
+	return reconcileStagedStateMutating(keyDir, gen, pending, pendingErr)
+}
+
+// reportStagedState is doctor's read-only view of the same leftovers:
+// it detects what reconcileStagedState would heal or refuse and returns
+// the row text, but NEVER writes, deletes or renames anything (architect
+// ruling 10:09Z: doctor reports the leftover with the remedy "run
+// amq-remote share to reconcile").
+func reportStagedState(keyDir string, gen *enrolledGeneration, pending []shareTagFile, pendingErr error) string {
 	if pendingErr != nil && !errors.Is(pendingErr, os.ErrNotExist) {
-		return pendingErr // malformed pending: refuse everywhere
+		return "pending state invalid: " + pendingErr.Error()
 	}
-	genCoversPending := pendingErr == nil && gen != nil && len(gen.Tags) > 0 &&
+	stagedPath := filepath.Join(keyDir, stagedName)
+	if err := lstatStateLeaf(stagedPath); err != nil {
+		// Symlinked or non-regular staged leaf: report, never act.
+		return "remedy: run `amq-remote share --session ...` to reconcile (" + doctorNamedLeafError(keyDir, err) + ")"
+	}
+	raw, readErr := os.ReadFile(stagedPath)
+	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+		return "remedy: run `amq-remote share --session ...` to reconcile (reading " + stagedName + ": " + readErr.Error() + ")"
+	}
+	if readErr == nil {
+		var tags []shareTagFile
+		if err := json.Unmarshal(raw, &tags); err != nil {
+			return "staged state at " + stagedPath + " is invalid (" + err.Error() + "); remedy: remove " + stagedPath + " and re-sign the pending preimages (`amq-remote share --session ...` reprints them)"
+		}
+	}
+	if genCoversPendingWindow(gen, pending, pendingErr) {
+		leftover := readErr == nil
+		pendingPath, _ := sharePaths(keyDir)
+		if pendingExists(pendingPath) {
+			leftover = true
+		}
+		if leftover {
+			return "published generation already covers the pending window; stale pending/staged leftovers remain; remedy: run `amq-remote share --session ...` to reconcile"
+		}
+		return ""
+	}
+	// Window in progress: report superseded staged entries if any.
+	if readErr == nil {
+		var tags []shareTagFile
+		_ = json.Unmarshal(raw, &tags)
+		conds := map[uint16]string{}
+		for _, p := range pending {
+			conds[p.Kind] = p.Conditions
+		}
+		stale := 0
+		for _, t := range tags {
+			if conds[t.Kind] != t.Conditions {
+				stale++
+			}
+		}
+		if stale > 0 {
+			return fmt.Sprintf("%d staged entr%s superseded by the current window; remedy: run `amq-remote share --session ...` to reconcile", stale, pluralYIes(stale))
+		}
+	}
+	return ""
+}
+
+func pluralYIes(n int) string {
+	if n == 1 {
+		return "y"
+	}
+	return "ies"
+}
+
+func pendingExists(path string) bool {
+	_, err := os.Lstat(path)
+	return err == nil
+}
+
+func genCoversPendingWindow(gen *enrolledGeneration, pending []shareTagFile, pendingErr error) bool {
+	return pendingErr == nil && gen != nil && len(gen.Tags) > 0 &&
 		func() bool {
 			byKind := map[uint16]string{}
 			for _, t := range gen.Tags {
@@ -713,6 +786,13 @@ func reconcileStagedState(keyDir string, gen *enrolledGeneration, pending []shar
 			}
 			return true
 		}()
+}
+
+func reconcileStagedStateMutating(keyDir string, gen *enrolledGeneration, pending []shareTagFile, pendingErr error) error {
+	if pendingErr != nil && !errors.Is(pendingErr, os.ErrNotExist) {
+		return pendingErr // malformed pending: refuse everywhere
+	}
+	genCoversPending := genCoversPendingWindow(gen, pending, pendingErr)
 	stagedPath := filepath.Join(keyDir, stagedName)
 	raw, readErr := os.ReadFile(stagedPath)
 	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
@@ -1049,15 +1129,12 @@ func doctorShareInspection(root string) map[string]any {
 			out[e.Name()] = info
 			continue
 		}
-		// Reconcile crash leftovers so doctor reports the true state
-		// (verifier r3 P2-3); a corrupt staged file is surfaced with its
-		// remedy, not a dead end (verifier r3 P2-4).
-		if rerr := reconcileStagedState(keyDir, gen, pendingTags, pendingErr); rerr != nil {
-			if refusal, ok := rerr.(*protocol.Refusal); ok {
-				info["staged_error"] = refusal.Message
-			} else {
-				info["staged_error"] = rerr.Error()
-			}
+		// Architect ruling 10:09Z (r4 P2-3): doctor is REPORT-ONLY — a
+		// diagnostic never deletes or rewrites state (CLAUDE.md: cleanup is
+		// explicit). Leftovers are reported as a row with the reconcile
+		// remedy; the deletion runs only inside share/enroll/renew.
+		if row := reportStagedState(keyDir, gen, pendingTags, pendingErr); row != "" {
+			info["staged_error"] = row
 			out[e.Name()] = info
 			continue
 		}

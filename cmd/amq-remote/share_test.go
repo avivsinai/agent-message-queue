@@ -1493,3 +1493,81 @@ func TestCleanupFailureAfterPublicationPropagates(t *testing.T) {
 		enrollOne(t, root, "cf1", kind, tags[i].Conditions)
 	}
 }
+
+// TestDoctorIsReportOnly pins the architect ruling of 10:09Z (r4 P2-3):
+// doctor never deletes or rewrites state. Over crash leftovers it reports
+// the leftover with the reconcile remedy and leaves every file untouched;
+// plain share (an explicit operator action) is the command that heals.
+func TestDoctorIsReportOnly(t *testing.T) {
+	root := t.TempDir()
+	runShare(t, "--root", root, "--session", "ro1")
+	enrollAllPending(t, root, "ro1")
+	out, _, code := runShare(t, "--root", root, "--session", "ro1", "--renew")
+	if code != 0 {
+		t.Fatal("renew refused")
+	}
+	condsByKind := pendingConditions(t, out)
+	for _, kind := range bodykey.ShareKinds {
+		enrollOne(t, root, "ro1", kind, condsByKind[kind])
+	}
+	keyDir := filepath.Join(root, "extensions", "remote", "keys", "ro1")
+	// Plant the crash leftovers (published generation + pending + staged).
+	pendingTags2 := make([]map[string]any, 0, len(bodykey.ShareKinds))
+	for _, kind := range bodykey.ShareKinds {
+		pendingTags2 = append(pendingTags2, map[string]any{"kind": kind, "owner_pubkey": "o", "conditions": condsByKind[kind], "sig": "s"})
+	}
+	rawP, _ := json.Marshal(map[string]any{"tags": pendingTags2, "not_after": time.Now().Add(24 * time.Hour).Unix()})
+	if err := os.WriteFile(filepath.Join(keyDir, "share.pending.json"), rawP, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stagedRaw, _ := json.Marshal([]map[string]any{{"kind": 20003, "owner_pubkey": "o", "conditions": condsByKind[20003], "sig": "s"}})
+	if err := os.WriteFile(filepath.Join(keyDir, stagedName), stagedRaw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Snapshot every file's bytes before doctor.
+	snap := map[string]string{}
+	for _, name := range []string{"share.json", "share.pending.json", stagedName} {
+		raw, err := os.ReadFile(filepath.Join(keyDir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		snap[name] = string(raw)
+	}
+	entriesBefore, err := os.ReadDir(keyDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Doctor runs: must REPORT, not heal.
+	info := doctorShareInspection(root)["ro1"].(map[string]any)
+	row, has := info["staged_error"].(string)
+	if !has {
+		t.Fatalf("doctor did not report the leftovers: %v", info)
+	}
+	if !strings.Contains(row, "reconcile") {
+		t.Fatalf("doctor's leftover row carries no reconcile remedy: %q", row)
+	}
+	// Every file byte-identical; no file added or removed.
+	for name, before := range snap {
+		raw, err := os.ReadFile(filepath.Join(keyDir, name))
+		if err != nil {
+			t.Fatalf("doctor removed or broke %s: %v", name, err)
+		}
+		if string(raw) != before {
+			t.Fatalf("doctor rewrote %s", name)
+		}
+	}
+	entriesAfter, err := os.ReadDir(keyDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entriesAfter) != len(entriesBefore) {
+		t.Fatalf("doctor changed the key dir contents: %d -> %d entries", len(entriesBefore), len(entriesAfter))
+	}
+	// Plain share (explicit operator action) is what heals.
+	if _, _, code := runShare(t, "--root", root, "--session", "ro1"); code != 0 {
+		t.Fatal("plain share refused over crash leftovers")
+	}
+	if _, err := os.Stat(filepath.Join(keyDir, stagedName)); !os.IsNotExist(err) {
+		t.Fatalf("plain share did not reconcile: %v", err)
+	}
+}
