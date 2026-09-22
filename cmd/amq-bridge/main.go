@@ -54,6 +54,19 @@ func main() {
 		}
 		return
 	}
+	if len(args) > 0 && args[0] == "trust" {
+		if err := runTrust(args[1:]); err != nil {
+			if errors.Is(err, flag.ErrHelp) {
+				return
+			}
+			fmt.Fprintln(os.Stderr, "amq-bridge trust:", err)
+			if isUsageError(err) {
+				os.Exit(2)
+			}
+			os.Exit(1)
+		}
+		return
+	}
 	if len(args) > 0 && args[0] == "apply-file" {
 		if err := runApplyFile(args[1:]); err != nil {
 			if errors.Is(err, flag.ErrHelp) {

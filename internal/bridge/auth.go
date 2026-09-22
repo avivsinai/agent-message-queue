@@ -344,3 +344,56 @@ func writePrivateFile(path string, data []byte) error {
 	}
 	return nil
 }
+
+// ParsePublicIdentity decodes the public half of a bridge identity from the
+// two shapes an operator actually has in hand (bead
+// agent-message-queue-ug3): the one line `amq-bridge identity public`
+// prints ("host=<h> generation=<g> public=<hex>") or the two-line key-file
+// record the loader itself accepts ("generation <g>" + "public <hex>").
+// The hex public key must decode to an Ed25519 public key. Generation
+// validity is enforced with the same identifier rules the loader applies,
+// so a record accepted here is never rejected later by LoadTrusted.
+func ParsePublicIdentity(data []byte) (generation string, pub ed25519.PublicKey, err error) {
+	fields, perr := parseKeyFields("identity record", data, "public")
+	if perr == nil {
+		return decodePublicIdentity(fields)
+	}
+	// One-line shape: host=<h> generation=<g> public=<hex>.
+	one := map[string]string{}
+	for i, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		for _, part := range strings.Fields(line) {
+			key, value, ok := strings.Cut(part, "=")
+			if !ok || key == "" || value == "" {
+				return "", nil, fmt.Errorf("identity record line %d is invalid", i+1)
+			}
+			if _, exists := one[key]; exists {
+				return "", nil, fmt.Errorf("identity record repeats field %q", key)
+			}
+			one[key] = value
+		}
+	}
+	if _, ok := one["host"]; !ok {
+		return "", nil, fmt.Errorf("identity record: %w", perr)
+	}
+	if err := validateBridgeIdentifier("generation", one["generation"]); err != nil {
+		return "", nil, fmt.Errorf("identity record generation is invalid")
+	}
+	return decodePublicIdentity(map[string]string{
+		"generation": one["generation"],
+		"public":     one["public"],
+	})
+}
+
+func decodePublicIdentity(fields map[string]string) (string, ed25519.PublicKey, error) {
+	raw, err := hex.DecodeString(fields["public"])
+	if err != nil {
+		return "", nil, fmt.Errorf("identity record public key: %w", err)
+	}
+	if len(raw) != ed25519.PublicKeySize {
+		return "", nil, fmt.Errorf("identity record public key must be %d bytes", ed25519.PublicKeySize)
+	}
+	return fields["generation"], ed25519.PublicKey(raw), nil
+}
