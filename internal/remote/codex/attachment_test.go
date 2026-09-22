@@ -786,7 +786,7 @@ func TestB1PreSendFailureIsRefusalNotUncertain(t *testing.T) {
 	_ = srv.ws.close()
 	// Deterministic: wait for the read pump to register the closed
 	// connection (744.8 — no time.Sleep).
-	<-att.client.Done()
+	<-att.client.Load().Done()
 
 	type admResult struct {
 		adm core.Admission
@@ -1132,7 +1132,7 @@ func TestB8aApprovalStateNotTornDownBeforeSend(t *testing.T) {
 
 	// Close the connection so Respond fails (write to closed conn).
 	_ = srv.ws.close()
-	<-att.client.Done()
+	<-att.client.Load().Done()
 
 	// Respond must fail (connection is closed). The specific error/code
 	// depends on the transport; the key assertion is below: state must be
