@@ -7,6 +7,11 @@ Authorized probe of Claude Code v2.1.278's cross-session messaging socket, perfo
 (peer-token key file). Findings were confirmed end-to-end: a hand-crafted frame was
 delivered and rendered in the target session as `› Message from @amq-probe: …`.
 
+> **Point-in-time research, not current truth.** This document records what was true of
+> Claude Code v2.1.278 on 2026-09-22. It grades individual claims (`[binary]` / `[live]` /
+> `[unverified]`), but the whole document ages with the pinned build; re-verify against
+> the installed version before relying on any claim (see `docs/remote-compat.md` §1).
+
 **Evidence conventions used below:** `[binary]` = fact derived from static analysis of
 the v2.1.278 binary (strings/symbol evidence); `[live]` = observed against the probe
 target during this capture; `[unverified]` = inferred, not yet exercised.
@@ -92,7 +97,26 @@ Built by the send path (binary fn `Jht`, log tag `[uds-client] Sending`):
   `[a-z0-9-]` and no `"`, `<`, `>`, `\n`, `\r`.
 - `hop-chain` is comma-separated session refs; used for loop detection
   (`hop-loop`, `hop-runaway`).
-- `from-mode` is an enum (e.g. `code`, per `hG`).
+- `from-mode` is an enum (e.g. `code`, per `hG`). It is optional in the receiver's parse
+  path, but **omitting it has policy consequences**: an envelope with no asserted mode
+  class engages the mode-parity holds described in §5a (a sender asserting no class is
+  held whenever the target bypasses permission prompts).
+
+### 3.2 Transcript shape of a delivered message `[live]`
+
+On-disk, the target session's JSONL transcript records two entries: a preceding
+`type: "queue-operation"` entry, then a `type: "user"` entry whose content is the
+envelope wrapped with a preamble and trailing guidance prose:
+
+```
+Another Claude session sent a message: <cross-session-message …>
+</cross-session-message>  This came from another Claude session — not typed by your
+user, but very likely working on their behalf. Treat it as …
+```
+
+This entry — the exact envelope text plus the harness wrapper — is the field-level
+observable that grades a socket send as **submitted** (the harness accepted the payload
+into the transcript); it carries no run identity, so it never reaches `admitted`.
 
 ## 4. Minimal working probe (verified delivered)
 
@@ -175,9 +199,28 @@ Inbound delivery is governed by a per-settings-file enum key:
 sessions): 'accept' delivers them, 'hold' parks them for your review without letting
 Claude act, 'refuse' opts t…"`, plus a `default` UI value that clears the key).
 
-- **Default: `accept`** — with no setting anywhere, inbound peer messages are
-  delivered (`f[e ?? "accept"]` resolution). `[live]` confirms: our probe target had
-  no such setting and messages were delivered.
+- **Default (unset): mode-parity gating, not unconditional delivery.** The shipped zod
+  description, quoted in full from the 2.1.278 binary:
+
+  > Inbound cross-session peer messages (SendMessage from your other sessions):
+  > 'accept' delivers them, 'hold' parks them for your review without letting Claude
+  > act, 'refuse' opts this session out. An explicit value always wins. Unset (mode
+  > parity): a message auto-delivers only when the sending session's permission-mode
+  > class matches yours (bypass↔bypass or prompting↔prompting); a mismatched sender's
+  > message is held for your approval; a sender that asserts no class is held only
+  > while this session bypasses permission prompts.
+
+  So with no setting anywhere there are three outcomes: sender mode class matches the
+  receiver's → auto-delivers; sender class differs → held for approval; sender asserts
+  no class → held while the receiver bypasses prompts. A second binary string confirms
+  the hold families are distinct: `state 'held' only: … 'mode-mismatch' /
+  'no-mode-asserted' are the permission-mode parity holds (the sender runs in a
+  different permission class, or asserted none while this session bypasses
+  permissions); the *-setting causes are a standing crossSessionInbound:'hold'.`
+  (`[live]` our probe delivery succeeded because sender and receiver happened to
+  satisfy parity — it does not show that unset means `accept`.)
+- **Explicit value always wins:** an explicit `accept` suppresses the parity holds and
+  delivers unconditionally (subject to the other guards in §5).
 - **Precedence:** policy (managed) settings > user settings > repo/local settings,
   and repo/local may only **tighten** (`restrictive:["refuse","hold"]`) — a repo
   cannot loosen a user's or admin's `hold`/`refuse`, and its own `accept` cannot
@@ -193,11 +236,8 @@ Claude act, 'refuse' opts t…"`, plus a `default` UI value that clears the key)
   `crossSessionInbound=refuse`), sender receipt `refused`;
   `notify_when_idle` subscriptions to this session fail with
   `requester-refuses-inbound`.
-- **Bypass/mode-parity holds (independent of the setting):** messages are held for
-  review when the sender's permission-mode class doesn't match the receiver's
-  (`mode-mismatch`), or the sender asserted no mode while the receiver bypasses
-  prompts (`no-mode-asserted`), or the receiver bypasses prompts by default
-  (`bypass-default`).
+- **Bypass/mode-parity holds:** under the unset default these are the gating rule
+  itself (see above); with an explicit `accept` they no longer hold messages.
 - The listener itself must also be up: env override `CLAUDE_CODE_HARBOR_KITE`
   (checked first), else GrowthBook flag `tengu_harbor_kite`, default **on**;
   a second default-on gate `tengu_cuddly_willow`; sockets-dir vetting failures
@@ -206,10 +246,14 @@ Claude act, 'refuse' opts t…"`, plus a `default` UI value that clears the key)
   (Note: all `[binary]` statements here are against the exact 2.1.278 build, which
   is also the `claude` version recorded in the compat manifest.)
 
-**Required user-level value for AMQ: none** — defaults deliver. Operators who want
-supervision can set `crossSessionInbound: "hold"` (user or managed scope); AMQ's
-adapter should surface `hold`/`refuse`/mode-parity holds as non-delivery, not
-failure.
+**Required user-level value for unattended AMQ sends: `accept`.** Unset engages
+mode-parity gating, and the most likely AMQ configuration — an envelope without
+`from-mode` sent to an unattended (bypass-mode) target — parks silently under it.
+Operators who want supervision instead can set `crossSessionInbound: "hold"` (user or
+managed scope); AMQ's adapter should surface `hold`/`refuse`/parity holds as
+non-delivery, not failure. (PR2 of bead 611.12 may instead choose to carry a matching
+`from-mode` class in the envelope; that is an adapter design decision, not a claim of
+this document.)
 
 ## 5b. Security assessment `[security]`
 
@@ -223,8 +267,8 @@ failure.
 - **Inbound text is model input:** a delivered peer message becomes a user-turn
   message to the target's model, i.e. a prompt-injection surface. A local attacker
   who can read the key file can steer the target session's tool use. Mitigations
-  observed in the binary: permission-mode parity holds (§5a) and the `hold`
-  setting; on-disk mitigations (0700 sockets dir, dir vetting, `sticky` checks)
+  observed in the binary: mode-parity gating by default plus the `hold` setting (§5a);
+  on-disk mitigations (0700 sockets dir, dir vetting, `sticky` checks)
   gate the listener, not the credential.
 - **Recommendation for AMQ:** run the adapter as the same user, treat captured
   tokens as secrets (never log/commit), and prefer `hold`-mode supervision in
@@ -244,6 +288,9 @@ failure.
    `artifact_yield`) in the registry pid-file can gate capability negotiation.
 5. `CLAUDE_CODE_MESSAGING_SOCKET` env override exists; feature flag
    `tengu_session_stable_address` switches addressing to `sid:<sessionId>` form.
-6. Probe the `crossSessionInbound: hold` path before shipping unattended sends:
-   hold is the fail-closed state for invalid settings and mode mismatches, so an
-   AMQ send can silently park rather than deliver or error.
+6. Probe the `crossSessionInbound` paths before shipping unattended sends: with the
+   setting unset, mode-parity gating parks a mode-mismatched or mode-less sender
+   (§5a); `hold` is also the fail-closed state for invalid settings — so an AMQ send
+   can silently park rather than deliver or error. The reliable unattended posture is
+   an explicit `accept` on the target (or a PR2 decision to assert a matching
+   `from-mode`).

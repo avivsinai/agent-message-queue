@@ -41,6 +41,8 @@ syntax comes from the [generated CLI reference](cli.md).
 - **Remote sessions:** [remote-control design](adr-remote-control.md) and
   [compatibility evidence](remote-compat.md). A design describes the contract;
   a capability requires the evidence stated in the compatibility reference.
+  Point-in-time research records live under [research/](research/); they grade
+  the evidence behind a row and are not current-truth statements.
 
 ## Contribute or configure an agent
 
