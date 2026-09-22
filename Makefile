@@ -51,7 +51,10 @@ smoke:
 	AMQ_WAKE_OWNER=smoke-inherited-wake-owner \
 	./scripts/smoke-test.sh
 
-ci: check-skills check-docs-cli fmt-check vet lint test smoke contract-check hook-env-check
+ci: check-skills check-docs-cli mod-tidy-check fmt-check vet lint test smoke contract-check hook-env-check
+
+mod-tidy-check:
+	@go mod tidy -diff
 
 hook-env-check:
 	@sh scripts/test_pre_push_hook_env.sh

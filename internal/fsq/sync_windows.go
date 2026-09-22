@@ -7,6 +7,13 @@ package fsq
 // on a FILE_FLAG_BACKUP_SEMANTICS directory handle, not a no-op).
 var syncDirAmbientForTest func(dir string) error
 
+// SyncDirAmbientSwapForTest swaps the implementation behind the ambient
+// SyncDir path for callers outside the package (fault-injection tests).
+// It returns the restore func.
+func SyncDirAmbientSwapForTest(fn func(dir string) error) (restore func()) {
+	return syncDirAmbientSwapForTest(fn)
+}
+
 func syncDirAmbientSwapForTest(fn func(dir string) error) (restore func()) {
 	prev := syncDirAmbientForTest
 	syncDirAmbientForTest = fn

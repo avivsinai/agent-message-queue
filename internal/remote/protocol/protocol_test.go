@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -286,3 +287,87 @@ func TestCommandDigestHTMLEscaping(t *testing.T) {
 		t.Fatalf("marshalled data does not contain HTML-escaped sequences: %s", data)
 	}
 }
+
+// TestRefuseWrapUnwrapContract pins verifier r6 P2-4: RefuseWrap produces a
+// *Refusal whose Error() text and Code are unchanged from a plain Refuse of
+// the same format, and whose Unwrap yields the wrapped cause so
+// errors.As/errors.Is can traverse the typed error beneath the protocol
+// wrapper. A plain Refuse carries cause == nil and Unwrap() == nil, so
+// traversal stops exactly where it stopped before the API existed.
+type wrappedLeafErr struct{ path string }
+
+func (e *wrappedLeafErr) Error() string { return "state file " + e.path + ": symlinked; refusing" }
+
+func TestRefuseWrapUnwrapContract(t *testing.T) {
+	cause := &wrappedLeafErr{path: "/k/body.pub"}
+	wrapped := RefuseWrap(CodeInvalid, cause, "%s", cause)
+	r, ok := wrapped.(*Refusal)
+	if !ok {
+		t.Fatalf("RefuseWrap returned %T, want *Refusal", wrapped)
+	}
+	if r.Code != CodeInvalid {
+		t.Fatalf("code = %q, want invalid", r.Code)
+	}
+	// Error() must match a plain Refuse of the same format (the cause is
+	// the chain, not the text; the printed text is "<code>: <message>").
+	plainSame := Refuse(CodeInvalid, "%s", cause).(*Refusal)
+	if r.Error() != plainSame.Error() {
+		t.Fatalf("Error() text changed by wrapping: %q vs %q", r.Error(), plainSame.Error())
+	}
+	// errors.As traverses the chain to the typed cause.
+	var leaf *wrappedLeafErr
+	if !errors.As(wrapped, &leaf) || leaf.path != "/k/body.pub" {
+		t.Fatalf("errors.As did not reach the wrapped cause: %+v", leaf)
+	}
+	// A plain Refuse has no cause: Unwrap is nil and traversal stops.
+	plain := Refuse(CodeInvalid, "%s", cause).(*Refusal)
+	if plain.Unwrap() != nil {
+		t.Fatalf("plain Refuse.Unwrap() = %v, want nil", plain.Unwrap())
+	}
+	if errors.As(plain, &leaf) {
+		t.Fatal("errors.As traversed a plain refusal without a cause")
+	}
+	// The unexported cause field must not leak into any JSON encoding: the
+	// marshalled form carries only the exported code + message (the path in
+	// the message is the operator-facing text, not the cause field).
+	blob, err := json.Marshal(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var keys map[string]json.RawMessage
+	if err := json.Unmarshal(blob, &keys); err != nil {
+		t.Fatal(err)
+	}
+	for k := range keys {
+		if k != "Code" && k != "Message" {
+			t.Fatalf("unexpected field %q in the marshalled refusal (cause must not marshal): %s", k, blob)
+		}
+	}
+}
+
+// TestRefusalUnwrapThroughRefuseWrap pins verifier r6 P2-4: the
+// errors.As/errors.Is chain crosses a RefuseWrap'd Refusal to reach the
+// underlying typed error, and a plain Refuse's Unwrap is nil so traversal
+// stops exactly where it stopped before.
+func TestRefusalUnwrapThroughRefuseWrap(t *testing.T) {
+	base := errors.New("base typed cause")
+	wrapped := RefuseWrap(CodeInvalid, base, "wrapped: %s", "detail")
+	if !errors.Is(wrapped, base) {
+		t.Fatal("errors.Is does not traverse a RefuseWrap'd refusal (r6 P2-4)")
+	}
+	var asBase = &testSentinel{}
+	other := RefuseWrap(CodeInvalid, asBase, "other")
+	if !errors.As(other, &asBase) {
+		t.Fatal("errors.As does not traverse a RefuseWrap'd refusal (r6 P2-4)")
+	}
+	plain := Refuse(CodeInvalid, "plain refusal")
+	var unwrapper interface{ Unwrap() error }
+	if !errors.As(error(plain), &unwrapper) || unwrapper.Unwrap() != nil {
+		t.Fatal("plain Refuse must carry no cause: Unwrap() != nil")
+	}
+	if errors.Is(plain, base) {
+		t.Fatal("plain Refuse must not adopt an unrelated cause")
+	}
+}
+
+type testSentinel struct{ error }
