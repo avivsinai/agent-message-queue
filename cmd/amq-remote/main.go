@@ -352,12 +352,14 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	// carrier. SetPublish runs inside startupSequence; this closure forwards
 	// to the carrier once it exists.
 	var carrier *amqio.Carrier
-	carrierPublish := func(s protocol.Snapshot, origin map[string]string) error {
-		if carrier == nil {
-			return nil
-		}
-		return carrier.Publish(s, origin)
-	}
+	carrierPublish := publishRouter(map[string]publishFunc{
+		"amq": func(s protocol.Snapshot, origin map[string]string) error {
+			if carrier == nil {
+				return errCarrierUnavailable
+			}
+			return carrier.Publish(s, origin)
+		},
+	})
 	// .13: the manifest load, flag-sugar append (--fake, --codex-socket),
 	// validation and owned startup are ONE production path, serveStartup —
 	// shared verbatim by the focused regressions (611.13 r4). Flag sugar is
