@@ -224,7 +224,7 @@ func TestShareConditionsAndRenew(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	oldTag, err := SignAuthTag(owner, k.PublicKeyHex(), ShareConditions(1713957000))
+	oldTag, err := SignAuthTag(owner, k.PublicKeyHex(), ShareConditions(20003, 1713957000))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -238,7 +238,7 @@ func TestShareConditionsAndRenew(t *testing.T) {
 		t.Fatal("kind=1 accepted; share tag does not authorize it")
 	}
 	// Renewal re-prints the preimage with a later bound.
-	newTag, err := SignAuthTag(owner, k.PublicKeyHex(), ShareConditions(1713999999))
+	newTag, err := SignAuthTag(owner, k.PublicKeyHex(), ShareConditions(24200, 1713999999))
 	if err != nil {
 		t.Fatal(err)
 	}

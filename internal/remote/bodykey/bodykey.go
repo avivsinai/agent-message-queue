@@ -34,6 +34,12 @@ import (
 	"github.com/btcsuite/btcd/btcec/v2/schnorr"
 )
 
+// curveOrder is the secp256k1 group order N; a BIP340 scalar must lie in
+// [1, N−1]. PrivKeyFromBytes REDUCES values mod N instead of rejecting
+// them, so an out-of-range raw scalar would silently alias to a different
+// key — every scalar crossing this package is range-checked explicitly.
+var curveOrder = btcec.S256().N
+
 // AuthPreimagePrefix is the exact NIP-OA domain separator.
 const AuthPreimagePrefix = "nostr:agent-auth:"
 
@@ -100,11 +106,8 @@ func parse(content string) (*BodyKey, error) {
 			if err != nil {
 				return nil, fmt.Errorf("%w: secret is not hex: %v", ErrWrongFormat, err)
 			}
-			// btcec rejects scalar ≥ n; a BIP340 scalar ∈ [1, n−1] is exactly
-			// a valid secp256k1 private key, so zero must be rejected here
-			// (PrivKeyFromBytes maps zero to the canonical invalid scalar).
-			if allZero(raw) {
-				return nil, fmt.Errorf("%w: secret scalar out of range", ErrWrongFormat)
+			if err := validateScalar(raw); err != nil {
+				return nil, fmt.Errorf("%w: %v", ErrWrongFormat, err)
 			}
 			// PrivKeyFromBytes also returns the derived pubkey, which the
 			// optional `public` line must match.
@@ -160,6 +163,20 @@ func Mint(dir string) (*BodyKey, error) {
 		return nil, err
 	}
 	return k, nil
+}
+
+// validateScalar enforces scalar ∈ [1, N−1] on the raw 32-byte value.
+// PrivKeyFromBytes reduces mod N, so both 0 and ≥ N would otherwise be
+// silently accepted (0 maps to the identity-equivalent invalid key; ≥ N
+// aliases to a different key than the file's bytes claim).
+func validateScalar(raw []byte) error {
+	if allZero(raw) {
+		return errors.New("secret scalar is zero")
+	}
+	if new(big.Int).SetBytes(raw).Cmp(curveOrder) >= 0 {
+		return errors.New("secret scalar >= curve order")
+	}
+	return nil
 }
 
 func allZero(b []byte) bool {
@@ -220,6 +237,9 @@ func (t AuthTag) Preimage(bodyPubKeyHex string) []byte {
 // for convenience — ParseConditions validates any string before it becomes
 // part of a tag, and mintShareConditions produces the canonical share tag.
 func SignAuthTag(ownerSecret [32]byte, bodyPubKeyHex, conditions string) (*AuthTag, error) {
+	if err := validateScalar(ownerSecret[:]); err != nil {
+		return nil, err
+	}
 	if len(bodyPubKeyHex) != hexPubkeyLen {
 		return nil, fmt.Errorf("body pubkey must be %d hex chars", hexPubkeyLen)
 	}
@@ -237,21 +257,61 @@ func SignAuthTag(ownerSecret [32]byte, bodyPubKeyHex, conditions string) (*AuthT
 	return t, nil
 }
 
-// Verify checks the tag's owner signature over the preimage for the given
-// body pubkey and that the owner key differs from the body key
-// (self-attestation is invalid per the NIP).
-func (t AuthTag) Verify(bodyPubKeyHex string) error {
-	if len(t.OwnerPubKey) != hexPubkeyLen {
-		return fmt.Errorf("owner pubkey must be %d hex chars", hexPubkeyLen)
+// parseSigHex decodes a 128-char lowercase hex BIP340 signature with the
+// same canonical-encoding rules as parsePubKeyHex.
+func parseSigHex(s string) ([]byte, error) {
+	if len(s) != hexSigLen {
+		return nil, fmt.Errorf("sig must be %d hex chars", hexSigLen)
 	}
-	if t.OwnerPubKey == bodyPubKeyHex {
+	if strings.ToLower(s) != s {
+		return nil, errors.New("sig hex must be lowercase")
+	}
+	raw, err := hex.DecodeString(s)
+	if err != nil {
+		return nil, fmt.Errorf("sig is not hex: %v", err)
+	}
+	return raw, nil
+}
+
+// parsePubKeyHex decodes a 64-char hex pubkey, rejecting non-canonical
+// encodings: wrong length, non-hex, or uppercase (the NIP fixes lowercase
+// hex; an uppercase owner string would pass a text inequality check while
+// decoding to the same key — the self-attestation bypass codex flagged).
+func parsePubKeyHex(s string) ([]byte, error) {
+	if len(s) != hexPubkeyLen {
+		return nil, fmt.Errorf("pubkey must be %d hex chars", hexPubkeyLen)
+	}
+	if strings.ToLower(s) != s {
+		return nil, errors.New("pubkey hex must be lowercase")
+	}
+	raw, err := hex.DecodeString(s)
+	if err != nil {
+		return nil, fmt.Errorf("pubkey is not hex: %v", err)
+	}
+	return raw, nil
+}
+
+// Verify checks the tag's owner signature over the preimage for the given
+// body pubkey, that the owner key differs from the body key (decoded
+// identity, not text — self-attestation is invalid per the NIP), and that
+// the conditions string is grammatically valid (a valid signature over
+// malformed conditions must never be storable).
+func (t AuthTag) Verify(bodyPubKeyHex string) error {
+	if _, err := ParseConditions(t.Conditions); err != nil {
+		return fmt.Errorf("conditions invalid: %v", err)
+	}
+	ownerRaw, err := parsePubKeyHex(t.OwnerPubKey)
+	if err != nil {
+		return err
+	}
+	bodyRaw, err := parsePubKeyHex(bodyPubKeyHex)
+	if err != nil {
+		return err
+	}
+	if string(ownerRaw) == string(bodyRaw) {
 		return errors.New("self-attestation invalid: owner pubkey equals body pubkey")
 	}
-	ownerXOnly, err := hex.DecodeString(t.OwnerPubKey)
-	if err != nil || len(ownerXOnly) != 32 {
-		return fmt.Errorf("owner pubkey is not hex: %v", err)
-	}
-	owner, err := schnorr.ParsePubKey(ownerXOnly)
+	owner, err := schnorr.ParsePubKey(ownerRaw)
 	if err != nil {
 		return fmt.Errorf("owner pubkey is not a valid BIP340 x-only key: %v", err)
 	}
@@ -265,7 +325,8 @@ func (t AuthTag) Verify(bodyPubKeyHex string) error {
 	return nil
 }
 
-// ParseAuthTag parses the four-element tag array.
+// ParseAuthTag parses the four-element tag array. Owner pubkey and sig
+// must be lowercase hex (canonical NIP-OA encoding).
 func ParseAuthTag(tag []string) (*AuthTag, error) {
 	if len(tag) != 4 {
 		return nil, fmt.Errorf("auth tag must have exactly 4 elements, has %d", len(tag))
@@ -273,20 +334,30 @@ func ParseAuthTag(tag []string) (*AuthTag, error) {
 	if tag[0] != "auth" {
 		return nil, fmt.Errorf("tag name %q is not \"auth\"", tag[0])
 	}
-	sig, err := hex.DecodeString(strings.ToLower(tag[3]))
-	if err != nil || len(sig) != 64 {
-		return nil, fmt.Errorf("auth tag sig must be 128 hex chars")
+	if _, err := parsePubKeyHex(tag[1]); err != nil {
+		return nil, fmt.Errorf("auth tag owner pubkey: %v", err)
 	}
-	t := &AuthTag{OwnerPubKey: strings.ToLower(tag[1]), Conditions: tag[2]}
+	sig, err := parseSigHex(tag[3])
+	if err != nil {
+		return nil, fmt.Errorf("auth tag sig: %v", err)
+	}
+	t := &AuthTag{OwnerPubKey: tag[1], Conditions: tag[2]}
 	copy(t.Sig[:], sig)
 	return t, nil
 }
 
-// ShareConditions is the canonical conditions string for a share: the body
-// may publish kind 20003/1059 (courier), 24200 (observer frame), 44200
-// (turn metrics), 10100 (liveness) events within the validity window.
-func ShareConditions(notAfter int64) string {
-	return fmt.Sprintf("kind=20003&kind=1059&kind=24200&kind=44200&kind=10100&created_at<%d", notAfter)
+// ShareKinds lists the event kinds a shared-session body may publish; the
+// owner signs one NIP-OA condition string per kind (architect ruling
+// 2026-09-22: NIP-OA condition strings are conjunctive — every clause must
+// hold and `kind=<n>` holds iff event.kind = n — so a multi-kind string is
+// satisfiable by no event. One string per kind, all under the one body
+// keypair; each event carries the tag naming its own kind).
+var ShareKinds = []uint16{20003, 1059, 24200, 44200, 10100}
+
+// ShareConditions is the canonical per-kind conditions string for a share:
+// the body may publish exactly kind within the validity window.
+func ShareConditions(kind uint16, notAfter int64) string {
+	return fmt.Sprintf("kind=%d&created_at<%d", kind, notAfter)
 }
 
 // Condition is one parsed clause.
@@ -372,23 +443,22 @@ func parseCanonicalUint(s string, max uint64) (uint64, error) {
 }
 
 // Satisfies evaluates the tag's conditions against an event's kind and
-// created_at, per the NIP's evaluation rules. Every clause must hold. Kind
-// clauses authorize by ANY-match (a share tag names several authorized
-// kinds — the body may publish any one of them), while the created_at
-// window clauses all bind. This mirrors NIP-26 semantics, which NIP-OA
-// names as its prior art for the credential format.
+// created_at, exactly as NIP-OA states: every clause must hold, `kind=<n>`
+// holds iff event.kind = n, `created_at<t>` iff event.created_at < t.
+// Any false clause rejects. (The share credential is one condition string
+// per kind — see ShareConditions — so a tag authorizes exactly one kind.)
 func (t AuthTag) Satisfies(kind uint16, createdAt int64) error {
 	conds, err := ParseConditions(t.Conditions)
 	if err != nil {
 		return err
 	}
-	kindClauses := 0
+	sawKind := false
 	for _, c := range conds {
 		switch {
 		case c.Kind != nil:
-			kindClauses++
-			if *c.Kind == kind {
-				kindClauses = -1000 // sentinel: authorized by a kind clause
+			sawKind = true
+			if *c.Kind != kind {
+				return fmt.Errorf("kind %d not authorized (clause kind=%d)", kind, *c.Kind)
 			}
 		case c.CreatedLt != nil:
 			if createdAt >= int64(*c.CreatedLt) {
@@ -400,8 +470,8 @@ func (t AuthTag) Satisfies(kind uint16, createdAt int64) error {
 			}
 		}
 	}
-	if kindClauses > 0 {
-		return fmt.Errorf("kind %d matches none of the %d authorized kind clauses", kind, kindClauses)
+	if !sawKind {
+		return errors.New("conditions carry no kind clause: a credential must name its kind")
 	}
 	return nil
 }
