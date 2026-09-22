@@ -14,6 +14,5 @@ func (r *DeliveryRoot) syncDir(dir string) error {
 	return r.syncDirPlatform(dir)
 }
 
-func (r *DeliveryRoot) syncDirPlatform(_ string) error {
-	return nil
-}
+// syncDirPlatform is implemented in sync_windows_impl.go (bead u35:
+// FlushFileBuffers on a FILE_FLAG_BACKUP_SEMANTICS directory handle).
