@@ -132,49 +132,6 @@ func TestSubmitRefusesWithoutSideEffect(t *testing.T) {
 	}
 }
 
-func TestTranscriptTailReadsLastLinesAndDropsPartial(t *testing.T) {
-	home := tempHome(t, 11, &sessionRegistry{Pid: 11, SessionID: "sid", Kind: "interactive", Cwd: "/tmp/p"})
-	dir := filepath.Join(home, ".claude", "projects", slugifyCwd("/tmp/p"))
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	content := "{\"type\":\"user\",\"promptId\":\"p1\"}\n" +
-		"{\"type\":\"user\",\"promptId\":\"p2\"}\n" +
-		"{\"type\":\"assistant\"}\n" +
-		"{\"type\":\"assistant\",\"trunc"
-	if err := os.WriteFile(filepath.Join(dir, "sid.jsonl"), []byte(content), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	lines, err := transcriptTail(home, "/tmp/p", "sid", 10)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(lines) != 3 { // user, user, assistant; the partial 4th line is dropped
-		t.Fatalf("tail lines = %d, want 3 (partial trailing line dropped)", len(lines))
-	}
-	if lines[len(lines)-1].Type != "assistant" {
-		t.Fatalf("last line type = %q, want assistant", lines[len(lines)-1].Type)
-	}
-	// Missing transcript is an empty tail, not an error.
-	lines, err = transcriptTail(home, "/tmp/other", "sid", 10)
-	if err != nil || lines != nil {
-		t.Fatalf("missing transcript: lines=%v err=%v, want nil,nil", lines, err)
-	}
-}
-
-func TestSlugifyCwd(t *testing.T) {
-	got := slugifyCwd("/Users/aviv.s/workspace/agent-message-queue")
-	want := "-Users-aviv-s-workspace-agent-message-queue"
-	if got != want {
-		t.Fatalf("slug = %q, want %q", got, want)
-	}
-	// P2-2: the observed rule maps EVERY non-alphanumeric character
-	// (ground truth: "Application Support" → "Application-Support").
-	if got := slugifyCwd("/Users/x/Library/Application Support/ClaudeProbe"); got != "-Users-x-Library-Application-Support-ClaudeProbe" {
-		t.Fatalf("slug with space = %q, want dashes for every non-alnum char", got)
-	}
-}
-
 func TestDeriveTargetValidatesAndFallsBack(t *testing.T) {
 	// A protocol-invalid registry name falls back to the pid form (P0-3:
 	// the published id must always be addressable — ValidTargetID).
@@ -230,4 +187,32 @@ func TestRegistryLeafMustBeRegularFile(t *testing.T) {
 		t.Fatalf("refusal does not name the file-type rule: %v", err)
 	}
 	testRegistryFIFO(t, home, regPath)
+}
+
+// TestRegistryOversizedRefusedBeforeRead pins verifier r3 P1: a registry
+// file over the 64 KiB bound is refused on fi.Size() BEFORE any read —
+// no os.ReadFile of a multi-GB file under the endpoint mutex — and the
+// LimitReader caps the lstat-to-read growth window (r3 P2-2).
+func TestRegistryOversizedRefusedBeforeRead(t *testing.T) {
+	home := tempHome(t, 42, &sessionRegistry{Pid: 42, SessionID: "s42", Kind: "interactive"})
+	regPath := filepath.Join(claudeSessionsDir(home), "42.json")
+	if err := os.Truncate(regPath, maxRegistryBytes+1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readSessionRegistry(home, 42); err == nil {
+		t.Fatal("accepted an oversized session registry (r3 P1)")
+	} else if !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("refusal does not state the size bound: %v", err)
+	}
+	// Just under the bound parses fine.
+	if err := os.Truncate(regPath, maxRegistryBytes-1); err != nil {
+		t.Fatal(err)
+	}
+	// Truncated to a non-JSON blob is a parse error, NOT a size refusal —
+	// proving the read path runs for in-bound files.
+	if _, err := readSessionRegistry(home, 42); err == nil {
+		t.Fatal("expected a JSON parse error for the truncated blob")
+	} else if strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("in-bound file was size-refused: %v", err)
+	}
 }

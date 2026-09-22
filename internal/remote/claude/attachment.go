@@ -28,10 +28,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
@@ -126,6 +126,13 @@ func Attach(cfg config) (*Attachment, error) {
 	if err != nil {
 		return nil, fmt.Errorf("claude adapter: %w", err)
 	}
+	if reg == nil {
+		// No registry entry for the pid: a claude session we cannot identify
+		// is never attached (a missing registry file is "unknown session",
+		// not "no registry kind") (r3: readSessionRegistry now returns
+		// nil,nil on absence; Attach refuses it).
+		return nil, fmt.Errorf("claude adapter: pid %d has no session registry entry; refusing", cfg.Pid)
+	}
 	if reg.Kind != "" && reg.Kind != "interactive" {
 		return nil, fmt.Errorf("claude adapter: pid %d is kind %q; only interactive sessions attach", cfg.Pid, reg.Kind)
 	}
@@ -156,32 +163,48 @@ func claudeSessionsDir(home string) string {
 	return filepath.Join(home, ".claude", "sessions")
 }
 
-// readSessionRegistry reads ~/.claude/sessions/<pid>.json. The file is
-// read through os.ReadFile: it is a Claude-internal registry file, not an
-// AMQ state leaf, so the state-leaf lstat rule does not apply to this
-// read.
+// readSessionRegistry reads ~/.claude/sessions/<pid>.json.
+//
+// Trust boundary (r3 P2-1): this is a Claude-internal registry file on a
+// local-process-writable path, not an AMQ state leaf — so it does NOT get
+// the state-leaf lstat refusal. Instead the read is itself bounded and
+// hardened: lstat gate (regular file only), O_NOFOLLOW (where available)
+// so the lstat-open race cannot swap in a FIFO, and an io.LimitReader
+// capped at maxRegistryBytes+1 so a file that grows between the lstat and
+// the read cannot bypass the size bound and balloon RSS under the
+// endpoint mutex (r3 P1).
 func readSessionRegistry(home string, pid int) (*sessionRegistry, error) {
 	path := filepath.Join(claudeSessionsDir(home), strconv.Itoa(pid)+".json")
-	// The registry path is local-process-writable (trust boundary stated
-	// above): lstat before opening — anything but a regular file is
-	// refused. os.ReadFile on a FIFO blocks unbounded until a writer
-	// appears, and this read runs under the endpoint's mutex (r2 P1-1).
-	if fi, err := os.Lstat(path); err == nil {
-		if !fi.Mode().IsRegular() {
-			return nil, fmt.Errorf("session registry %s: not a regular file (mode %s); refusing", path, fi.Mode())
+	// Lstat gate: anything but a regular file is refused. os.ReadFile on a
+	// FIFO blocks unbounded until a writer appears, and this read runs
+	// under the endpoint's mutex (r2 P1-1).
+	fi, err := os.Lstat(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil // no registry entry yet: not an error
 		}
-	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("session registry %s: %w", path, err)
 	}
-	raw, err := os.ReadFile(path)
+	if !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("session registry %s: not a regular file (mode %s); refusing", path, fi.Mode())
+	}
+	// Size bound BEFORE opening (r3 P1): fi.Size() from the lstat above is
+	// the admission check; the LimitReader below is the defense in depth
+	// for a file that grows between lstat and read (r3 P2-2 TOCTOU).
+	if fi.Size() > maxRegistryBytes {
+		return nil, fmt.Errorf("session registry %s: %d bytes exceeds %d; refusing", path, fi.Size(), maxRegistryBytes)
+	}
+	f, err := os.OpenFile(path, os.O_RDONLY|registryNoFollow, 0)
 	if err != nil {
 		return nil, fmt.Errorf("session registry %s: %w", path, err)
 	}
-	// Bound the read size: a regular file is still local-process-writable,
-	// and an unbounded read of a huge file under the endpoint mutex is the
-	// same freeze shape (r2 P1-1). A real registry entry is < 1 KiB.
-	if len(raw) > maxRegistryBytes {
-		return nil, fmt.Errorf("session registry %s: %d bytes exceeds %d; refusing", path, len(raw), maxRegistryBytes)
+	defer func() { _ = f.Close() }()
+	raw, err := io.ReadAll(io.LimitReader(f, maxRegistryBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("session registry %s: %w", path, err)
+	}
+	if int64(len(raw)) > maxRegistryBytes {
+		return nil, fmt.Errorf("session registry %s: larger than %d bytes after read; refusing", path, maxRegistryBytes)
 	}
 	var reg sessionRegistry
 	if err := json.Unmarshal(raw, &reg); err != nil {
@@ -191,26 +214,6 @@ func readSessionRegistry(home string, pid int) (*sessionRegistry, error) {
 		return nil, fmt.Errorf("session registry %s: sessionId is empty", path)
 	}
 	return &reg, nil
-}
-
-// transcriptPath maps cwd+sessionId to ~/.claude/projects/<slug>/<sessionId>.jsonl
-// (slug = cwd with every non-alphanumeric character replaced by '-' — the
-// observed rule on this machine, e.g. "Application Support" →
-// "Application-Support"; review-852-r1 P2-2).
-func transcriptPath(home, cwd, sessionID string) string {
-	return filepath.Join(home, ".claude", "projects", slugifyCwd(cwd), sessionID+".jsonl")
-}
-
-func slugifyCwd(cwd string) string {
-	var b strings.Builder
-	for _, r := range cwd {
-		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
-			b.WriteRune(r)
-			continue
-		}
-		b.WriteByte('-')
-	}
-	return b.String()
 }
 
 // Attachment implements core.Attachment over the Claude Code surfaces.
@@ -282,6 +285,10 @@ func normalizeStatus(s string) string {
 func (a *Attachment) observeStatus() string {
 	reg, err := readSessionRegistry(a.home, a.cfg.Pid)
 	if err != nil {
+		return "offline"
+	}
+	if reg == nil {
+		// No registry entry (r3: missing-file path) — offline.
 		return "offline"
 	}
 	if alive, err := pidAlive(a.cfg.Pid); err != nil || !alive {
