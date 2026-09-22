@@ -129,17 +129,24 @@ Each queue root has these bridge identity files:
   poll.
 - `<root>/bridge/identity` (mode `0600`): the local key generation and
   Ed25519 private seed.
-- `<root>/bridge/trusted/<source_host>/<generation>` (mode `0600`): the
-  trusted peer's Ed25519 public key for the named generation.
+- `<root>/bridge/trusted/<source_host>` (mode `0600`): the trusted peer's
+  Ed25519 public key for its single active generation (one flat file per
+  source host; the reader is `bridge.TrustedPath`).
 
 Bootstrap writes `host-id`. `amq-bridge identity init` then writes `identity`
-for that host. Copy only the public key record to the peer's
-`trusted/<source_host>/<generation>` path; never copy a private seed. During
-rotation, keep the current and immediately previous generations as a bounded
-two-generation overlap. Verify the generation named in each envelope. Remove
-an old generation only after doctor reports zero in-flight objects naming it.
-Do not accept a third generation as an implicit overlap or use a flat
-`trusted/<source_host>` path for v2.
+for that host. Provision the peer's trust with
+`amq-bridge trust add --host <source_host>` on the destination, fed the
+peer's public key record (never a private seed). Rotation re-runs the same
+command with `--replace`, which renames the new record over the file
+atomically and refuses a generation downgrade. Generations are unsigned
+decimal integers as `identity init` mints them and are compared
+numerically (9 → 10 accepted, 10 → 9 refused); non-decimal labels have no
+defined order and `--replace` refuses them rather than guessing. The file
+holds one active
+generation; envelopes naming an older generation are refused once it is
+replaced. Verify the generation named in each envelope.
+Do not use a per-generation `trusted/<source_host>/<generation>` directory
+layout for v2.
 
 ### Peer exchange layout and stages
 

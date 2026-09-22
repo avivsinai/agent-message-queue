@@ -28,11 +28,44 @@ amq-bridge identity init --root "$AM_ROOT"
 amq-bridge identity public --root "$AM_ROOT"
 ```
 
-Copy only that public identity record to the peer's
-`<root>/bridge/trusted/<source_host>/<generation>` path. Never copy the
-private seed. Keep the current and immediately previous trusted generations
-during rotation; remove an old generation only after no in-flight object names
-it. The overlap is bounded to two generations.
+Copy only that public identity record to the peer — or, better, let the
+provisioning command do it. On the destination root, pipe the source's
+public record into:
+
+```sh
+amq-bridge trust add --root "$AM_ROOT" [--host <source_host>]
+```
+
+It accepts the one-line `identity public` output (piped or pasted), the
+same record saved to a file via `--from <file>`, or the two-line
+`generation <g>` / `public <hex>` key-file form. When the record carries a
+`host=` field (the one-line form), the trust file is written under that
+name — the same `bridge/host-id` value `apply-file` looks the record up by
+— and an explicit `--host` that disagrees is refused; for the two-line
+form `--host` is required. `trust add` never overwrites: provisioning an
+existing host fails with a clear error.
+
+To rotate a peer's key, re-run with `--replace` once the new generation's
+record is in hand:
+
+```sh
+amq-bridge trust add --root "$AM_ROOT" --replace --from <new-record>
+```
+
+`--replace` writes the new record to a temp file and renames it over the
+target atomically, and refuses a generation downgrade (rotating back to
+an older key is almost always a mistake). Generations are unsigned
+decimal integers as `identity init` mints them; the downgrade guard
+compares them numerically, so the tenth rotation (9 → 10) is accepted
+while a 10 → 9 rollback is refused. Non-decimal generation labels have no
+defined order and `--replace` refuses them rather than guessing. A crash
+between the temp write and the rename can leave a `.trusted-*` file that
+no lookup ever reads (every lookup is by exact host name); it is inert
+and can be deleted. The trusted file holds ONE active
+generation per source host (a single file, not a per-generation directory
+— the reader is `bridge.TrustedPath`); envelopes naming an older
+generation are refused once the file is replaced. Never copy the private
+seed.
 `--allow-source-host` is only an exact routing allowlist and does not
 authenticate the peer. The receiver verifies the Ed25519 signature before
 applying an envelope.
@@ -52,7 +85,9 @@ amq-bridge apply-file \
 
 The command reads only that regular, non-symlink file. It loads the local
 `bridge/host-id` and the trusted public key at
-`trusted/<source_host>/<key_generation>`, verifies the v2 Ed25519 signature
+`trusted/<source_host>` (the generation is taken from the envelope's
+`key_generation` field and must match the trusted record), verifies the v2
+Ed25519 signature
 and payload digest, requires the `dest_alias` host to match the local host-id,
 and then routes through the transfer ledger (docs/adr-bridge-protocol.md,
 Addendum 4) into the same `ApplyEnvelope` Maildir path the courier uses. It
