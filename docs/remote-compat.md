@@ -4,21 +4,17 @@
 
 This is the compatibility manifest and seam register for the `amq-remote`
 companion described in [the remote-control ADR](adr-remote-control.md). It
-pins the exact tool versions the design was verified against and the exact
-symbol, RPC method, or CLI command each harness seam depends on, so a version
-bump or a harness upgrade has a single place to re-check. Every row cites the
-verification report it came from. The reports (`seats/*.md`, `research/*.md`,
-`review-verdict.md`, `amq-remote-design.html`) are the 2026-09-08 review
-bundle kept outside this repository; a re-verification replaces the citation
-with the new report's name.
+records pinned compatibility evidence and the exact symbol, RPC method, or
+CLI command each harness seam depends on. The pinned evidence is not a claim
+about current support on an unverified installation. Re-run the relevant
+compatibility checks after upgrading a harness or runtime; a version bump
+alone does not change a capability's truth value.
 
-**How to update**: re-verify every row in §2 whenever a pinned tool version
-changes (a `brew upgrade`/release of Codex, Claude Code, Amit/pi, tmux,
-macOS, or Go), and re-run the affected probe in `research/` before touching
-the capability projection in §5. A version bump alone does not change a
-capability's truth value; only a re-run probe does.
+Citation paths in the seam tables refer to a point-in-time research bundle
+that is not included in this repository. They identify the evidence behind a
+row; they are not required files for ordinary onboarding.
 
-## 2. Pinned versions
+## 2. Pinned compatibility evidence
 
 | Tool | Version | Source of truth |
 | --- | --- | --- |
@@ -30,14 +26,11 @@ capability's truth value; only a re-run probe does.
 | macOS | 26.5.2 | `sw_vers -productVersion` |
 | `go` | go1.27.1 darwin/arm64 | `go version` |
 
-The design's own capability table pins slightly older point releases (Codex
-0.154, Amit 0.1.x/pi 0.80, Claude Code 2.1) (source: amq-remote-design.html
-§Capability per harness). The seams below were verified against the amit-pi
-and probe reports' checkout versions, not necessarily this machine's current
-`amit --version`/pi 0.85.1 — re-run the Amit seam checks (§3.2) if the pi
-minor version changes materially, since `pi-inter-extension-bus.md` and
-`amit-extension-seams.md` cite exact `types.ts` line numbers that shift
-across pi releases.
+These rows are pinned evidence, not a support matrix for whatever versions
+are installed today. The design's capability table used slightly older point
+releases (Codex 0.154, Amit 0.1.x/pi 0.80, Claude Code 2.1). Re-run the Amit
+seam checks if the pi minor version changes materially because the cited
+extension symbols can move between releases.
 
 ## 3. Seam register
 
@@ -57,7 +50,7 @@ terminal outcome for that run).
 | Completion evidence | `turn/completed` notification (`status: completed\|failed\|interrupted`) | completed | (source: research/r6-codex-app-server-events.md §1 "Turn Lifecycle"; research/p1-codex-probe.md results table) |
 | Exact cancellation gate | `turn/interrupt {threadId, turnId}` | completed (drives `turn/completed(interrupted)`) | (source: seats/harness-inject-surfaces.md §B.3 "Queue/steer" list; research/p1-codex-probe.md "Follow-up (`probe_busy.py`)" row — proven from a second, non-owning connection) |
 | Steer | `turn/steer` | submitted | (source: seats/harness-inject-surfaces.md §B.3 "Queue/steer" list; research/r6-codex-app-server-events.md §3) |
-| Approvals/questions | `ExecCommandApproval`, `ApplyPatchApproval`, `FileChangeRequestApproval`, `CommandExecutionRequestApproval`, `PermissionsRequestApproval`, `ToolRequestUserInput`, `McpServerElicitationRequest` (server-initiated JSON-RPC requests) | submitted (request), answered by client | (source: research/r6-codex-app-server-events.md §2; research/r9-cc-codex-attachment.md §B.3) — fanout to a non-owning client is **unverified**: the quota-blocked probe never triggered a real approval request (source: research/p1-codex-probe.md "Confound: account is quota-blocked") |
+| Approvals/questions | `ExecCommandApproval`, `ApplyPatchApproval`, `FileChangeRequestApproval`, `CommandExecutionRequestApproval`, `PermissionsRequestApproval`, `ToolRequestUserInput`, `McpServerElicitationRequest` (server-initiated JSON-RPC requests) | submitted (request), answered by client | (source: research/r6-codex-app-server-events.md §2; research/r9-cc-codex-attachment.md §B.3) — fanout to a non-owning client is **unverified** |
 | Session-switch/reload epoch triggers | `thread/resume` (rehydrates full history), `thread/started`/`thread/status/changed` notifications | delivered | (source: research/p1-codex-probe.md results table phases 1-2; research/r6-codex-app-server-events.md §1) |
 | Local draft access (must not submit) | `unavailable` — no draft/compose concept in the schema; the only staging primitive is `thread/queue/add`, which is a real queued submission, not a draft | n/a | (source: seats/harness-inject-surfaces.md §B.3; research/r6-codex-app-server-events.md §3 — no draft-shaped method found in the 155 `ClientRequest` methods) |
 | Inspect/roster | `thread/read` (`includeTurns`), `thread/items/list`, `thread/turns/list`, `codex agents` | delivered (polling), strong typed schema | (source: research/r9-cc-codex-attachment.md §B.4; seats/harness-inject-surfaces.md §B.3) |
@@ -95,114 +88,60 @@ terminal outcome for that run).
 | Inspect/roster | `claude agents --json` (`status`, `waitingFor`, `state`, `kind`, `pid`) | delivered, session-level polling only | (source: seats/harness-inject-surfaces.md §A.1 `claude agents --help`; research/r9-cc-codex-attachment.md §A.3) |
 | Observation | Transcript JSONL tail (`~/.claude/projects/<slug>/<uuid>.jsonl`) plus `~/.claude/sessions/<pid>.json` process metadata (`messagingSocketPath`, `peerProtocol`, `peerFeatures`) | delivered | (source: seats/harness-surfaces.md §2.1, §2.2) |
 
-## 4. Measured behaviors that constrain the adapters
+## 4. Measured adapter constraints
 
-- **Codex busy semantics (measured, not assumed)**: `turn/start` on a thread
-  with an active turn does not error and does not queue a second turn — it
-  returns the existing in-progress `Turn` object, and the second caller's own
-  input text is silently discarded, never appearing as a thread item. An
-  adapter must check thread status inside its admission boundary before
-  calling `turn/start` blind, or use `thread/queue/add` when the caller opts
-  into queueing. (source: research/p1-codex-probe.md "Conclusion" item 3)
-- **Codex fanout (measured)**: every `ServerNotification` observed
-  (`thread/started`, `thread/status/changed`, `turn/started`, `item/started`,
-  `item/completed`, `account/rateLimits/updated`, `error`, `turn/completed`)
-  reached both connected clients in real time, unconditionally — the
-  app-server broadcasts to every attached control-socket client with no
-  per-connection subscription gate. `turn/interrupt` from a non-owning client
-  also succeeded and both clients received the resulting
-  `turn/completed(interrupted)`. Approval-request fanout specifically was
-  **not** exercised (the test account is quota-blocked, so no shell command
-  ever ran and no `item/commandExecution/requestApproval` was ever sent).
-  (source: research/p1-codex-probe.md "Conclusion" items 1, 2, 4)
-- **Codex framing (measured)**: the unix-socket transport is a WebSocket
-  control socket (HTTP/1.1 `Upgrade: websocket` handshake, RFC 6455), not raw
-  newline-delimited JSON-RPC; only `--stdio`/`stdio://` is plain framing. The
-  socket must bind under `$HOME` — binding under `/tmp` or `/private/tmp`
-  failed even with the sandbox disabled. (source: research/p1-codex-probe.md
-  "Setup facts discovered mid-probe" items 1-2)
-- **Claude Code queue-at-tool-boundary (documented, not independently
-  captured on the wire)**: a message delivered while the target session is
-  busy is "read... between tool calls during an active turn, so a running
-  tool is never interrupted." (source: research/r9-cc-codex-attachment.md
-  §A.1, quoting code.claude.com/docs/en/cross-session-messaging)
-- **Claude Code idle starts a turn (documented)**: "When the receiving
-  session is idle, Claude Code starts a new turn with the message."
-  (source: research/r9-cc-codex-attachment.md §A.1, same doc)
-- **Claude Code has no interrupt (documented + corroborated)**: no
-  documented interrupt/cancel RPC exists over the messaging socket, no hook
-  aborts a running turn — "there is no user-level way to interrupt a running
-  foreground turn without keystrokes." (source: research/r9-cc-codex-attachment.md
-  §A.4 "cancelExact" row; review-verdict.md "Confirmed by verification")
+These observations constrain the adapters and remain part of the compatibility
+contract:
+
+- **Codex busy admission:** `turn/start` on an active thread returns the
+  existing turn and silently discards the new caller input. The adapter must
+  check status inside its admission boundary or use `thread/queue/add` when
+  queueing is explicitly requested. A returned `turnId` alone is not proof
+  that the caller's input was admitted; the matching `userMessage` item is.
+  (source: research/p1-codex-probe.md; internal/remote/codex/attachment.go)
+- **Codex transport and fanout:** the Unix socket is a WebSocket control
+  socket; only `--stdio`/`stdio://` uses plain framing. The socket was
+  observed to require a path under `$HOME`; treat that as pinned evidence to
+  re-check on upgrades, not as a timeless platform rule. Server notifications
+  and non-owning `turn/interrupt` were observed to fan out to connected
+  clients, while approval-request fanout remains unverified.
+  (source: research/p1-codex-probe.md)
+- **Claude Code delivery:** a message delivered to a busy session is read at
+  a tool boundary and does not interrupt a running tool; an idle session
+  starts a new turn. No documented user-level interrupt exists over the
+  messaging socket, so delivery is not steering or exact cancellation.
+  (source: research/r9-cc-codex-attachment.md §A.1, §A.4)
 
 ## 5. Capability projection per harness (schema `amq.remote.session/1`)
 
 Fields: `inspect`, `submit`, `cancel_request`, `answer_question`,
 `approve_tool`, `steer`, `terminal`. Matches the design's capability table
-(source: amq-remote-design.html §Capability per harness); every `false` below
-carries a one-line reason instead of a bare boolean.
+(source: amq-remote-design.html §Capability per harness); each non-true value
+has a reason in the seam rows below. The runtime schema uses Boolean negotiated
+capabilities, with `terminal` as its fixed v1 `unavailable` enum. `unverified`
+is a documentary evidence label and is not a schema value; `unavailable` is a
+valid value for the runtime `terminal` enum.
 
-Sources for this re-pin (2026-09-18):
-- codex-cli 0.154.0, Claude Code 2.1.273: binary probes (`codex --version`,
-  `claude --version`).
-- `steer: false` for codex and amit: the codex attachment declares `Steer:
-  true` (internal/remote/codex/attachment.go:293) but the endpoint's
-  `sessionProjection` masks it to false at the D1 gate
-  (internal/remote/core/endpoint.go:1055-1056). No adapter advertises Steer
-  in v1; the D1 gate refuses `deliver=steer` and the endpoint mask stays as
-  the belt.
-- `claude_code.submit: unverified`: every Claude Code capability beyond
-  `inspect` is unverified until the 611.2 authorized wire-capture probe
-  settles the actual CC attachment surface. `submit` flips to `unverified`
-  because the cross-session messaging socket delivers text into an idle or
-  busy session with no admission receipt (ADR consequences, research r9 A) —
-  a delivered submit is not an admitted one, so a lost submit is
-  indistinguishable from a never-submitted key without the probe. (Note: the
-  void-returning `sendUserMessage` seam is pi's/Amit's, not Claude Code's.)
-  Cites 611.2 as the settling capture.
+| Harness | inspect | submit | cancel_request | answer_question | approve_tool | steer | terminal |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Codex | true | true | true | false | false | false | unavailable |
+| Amit/pi | true | true | true (current bound run only) | false | false | false | unavailable |
+| Claude Code | true | unverified | false | false | false | false | unavailable |
 
-```json
-{
-  "schema": "amq.remote.session/1",
-  "codex": {
-    "inspect": true,
-    "submit": true,
-    "cancel_request": true,
-    "answer_question": false,
-    "approve_tool": false,
-    "steer": false,
-    "terminal": "unavailable"
-  },
-  "amit": {
-    "inspect": true,
-    "submit": true,
-    "cancel_request": true,
-    "answer_question": false,
-    "approve_tool": false,
-    "steer": false,
-    "terminal": "unavailable"
-  },
-  "claude_code": {
-    "inspect": true,
-    "submit": "unverified (gated on 611.2 wire-capture probe)",
-    "cancel_request": false,
-    "answer_question": false,
-    "approve_tool": false,
-    "steer": false,
-    "terminal": "unavailable"
-  }
-}
-```
+The v1 endpoint masks `steer` to false at the D1 gate even where an
+attachment declares it (`internal/remote/codex/attachment.go:293`,
+`internal/remote/core/endpoint.go:1055-1056`). Claude Code `submit` remains
+unverified because its cross-session socket has no admission receipt
+(verification reference: `agent-message-queue-611.2`); a delivered submit is
+not an admitted one. The void-returning
+`sendUserMessage` seam is pi/Amit's, not Claude Code's.
 
 Reasons for every `false` (source: as cited per row in §3, plus
-amq-remote-design.html §Capability per harness and §c-caps callout):
+amq-remote-design.html §Capability per harness):
 
 - `codex.answer_question` / `codex.approve_tool`: the approval RPCs exist and
-  are typed, but which connected client receives them when more than one is
-  attached is unverified — the live probe's account is quota-blocked, so no
-  approval request was ever emitted (source: research/p1-codex-probe.md
-  "Confound: account is quota-blocked"; research/r9-cc-codex-attachment.md
-  §B.3).
+  are typed, but fanout to a non-owning client is unverified (source:
+  research/r9-cc-codex-attachment.md §B.3).
 - `codex.terminal`: app-server has no PTY concept in-protocol (source:
   research/r9-cc-codex-attachment.md §B.4 "terminal" row).
 - `amit.cancel_request` is `true` for the current bound run only:
@@ -210,20 +149,15 @@ amq-remote-design.html §Capability per harness and §c-caps callout):
   remote request that has not started cannot be cancelled because pi has no
   dequeue primitive, and the adapter answers `unsupported` for it (source:
   seats/amit-attachment-feasibility.md §2).
-- `amit.answer_question` / `amit.approve_tool`: guardrails does not listen
-  on `pi.events` today — wiring a remote decision into its
-  `ctx.ui.select` await requires an Amit code change that has not landed
-  (source: seats/pi-inter-extension-bus.md §1 "the gap is not the bus — it's
-  that guardrails does not currently listen on it"; §2b).
-- `amit.terminal`: no tmux server runs on this machine and no harness runs
-  under tmux (source: review-verdict.md A5).
+- `amit.answer_question` / `amit.approve_tool`: the extension contract has no
+  external decision seam for the `ctx.ui.select` await (source:
+  seats/pi-inter-extension-bus.md §1; §2b).
+- `amit.terminal`: no terminal binding is part of this adapter contract.
 - `claude_code.cancel_request`: no user-level interrupt exists at all
   (source: research/r9-cc-codex-attachment.md §A.4 "cancelExact" row).
 - `claude_code.answer_question` / `claude_code.approve_tool`: no documented
   way to answer a specific pending permission/question prompt from outside
-  the session; approvals are local-terminal-only outside the policy-disabled
-  Remote Control (source: research/r9-cc-codex-attachment.md §C "Claude
-  Code").
+  the session (source: research/r9-cc-codex-attachment.md §C "Claude Code").
 - `claude_code.steer`: "arrives between tool calls" is delivery timing, not
   steering semantics — nothing mid-turn exists beyond that (source:
   research/r9-cc-codex-attachment.md §C).
@@ -231,25 +165,3 @@ amq-remote-design.html §Capability per harness and §c-caps callout):
   which is a different kind of session than the one the user is typing into;
   no PTY/tmux binding is part of this feature (source:
   research/r9-cc-codex-attachment.md §A.4 "terminal" row / §C).
-
-## 6. Open verifications
-
-1. **Claude Code cross-session socket wire capture** — blocked. The probe
-   session's own permission classifier denied inspecting the installed CLI
-   binary and spawning a `claude --bg` target session, so no raw
-   request/response bytes were captured; this needs a plain terminal outside
-   that classifier. (source: research/p2-cc-socket-probe.md "Status: BLOCKED
-   mid-task"; tracked as bead agent-message-queue-611.2, per
-   amq-remote-design.html R0-03 row)
-2. **Codex approval fanout** — quota-blocked. The test account's spend cap
-   prevented the model from ever running a tool call, so no
-   `item/commandExecution/requestApproval` was ever emitted in either probe
-   pass; whether a non-owning connection receives (or can answer) another
-   connection's approval request is unresolved. (source:
-   research/p1-codex-probe.md "Confound: account is quota-blocked")
-3. **Amit owning input boundary** — decided in principle, not built. Amit has
-   no `AgentSession` wrapper, so the remote extension owns the boundary
-   itself (`isIdle()` precheck, serialized admission, `message_start` text
-   match, `getEntries()` entry id). pi has no dequeue-by-item primitive, so a
-   queued-not-started remote request cannot be cancelled and the projection
-   says so; tracked under bead amit-m5pe. (source: seats/amit-attachment-feasibility.md §1, §2, §4)

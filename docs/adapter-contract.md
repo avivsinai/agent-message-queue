@@ -94,7 +94,8 @@ Adapter messages should remain filterable with generic AMQ primitives. Built-in 
 
 ## Threading and Delivery
 
-Built-in adapters currently use **self-delivery** (`from=<me>`, `to=<me>`) so the receiving agent can process adapter events from its own inbox.
+Built-in adapters use **self-delivery** (`from=<me>`, `to=<me>`) so the
+receiving agent can process adapter events from its own inbox.
 
 Threading rules:
 

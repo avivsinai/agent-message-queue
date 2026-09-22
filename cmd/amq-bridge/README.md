@@ -39,8 +39,8 @@ applying an envelope.
 
 ## Manual file apply (recovery)
 
-This is a manual/recovery path, not the live G-Mac peer-exchange class. There
-is no public locker. Publish one complete JSON `internal/bridge.Envelope` as a
+This is a manual/recovery path, not the peer-exchange class. There is no public
+locker. Publish one complete JSON `internal/bridge.Envelope` as a
 hash-named regular file under the ignored local queue path
 `<AMQ root>/bridge/drop/new/<object_sha256>.envelope`, then run:
 
@@ -70,13 +70,11 @@ same recovery command can run on either host. Run
 `AMQ_BOT_ENVELOPE_HOP_THREAD` when the payload must keep an existing opaque
 thread id.
 
-## G-initiated peer exchange
+## Peer exchange
 
-For G-Mac traffic, this is the live courier class. Host G is the only dialer:
-it starts a fixed, config-pinned `amq-bridge peer-stdio` session and the Mac
-helper responds. The session is duplex, so G-to-Mac envelopes and
-Mac-to-G outcomes can move in one session, but the Mac does not initiate the
-class. `amq` itself remains local and daemon-free.
+The peer-stdio courier is a config-pinned, duplex session between two hosts.
+The configured initiator dials; the peer responds. `amq` itself remains local
+and daemon-free.
 
 Envelope v2 is the emitted peer-exchange format. The exchange moves exact,
 hash-named object files, not re-serialized AMQ messages:
@@ -102,10 +100,21 @@ uses `sent/`; that directory remains HTTPS-only.
 `apply-journal/`. `STORED` means that the kind-specific destination sink is
 durable; it is not apply, source archive, or consumer drain.
 
+For a config-only peer submit, enqueue one AMQ message on stdin:
+
+```sh
+amq-bridge enqueue --config FILE --dest-alias host-b/agent
+```
+
+The signer emits Envelope v2 from the config intent. It does not create a
+`.dest` sidecar or use the HTTPS spool. Prompt-driven callers must not pass
+`--root`, `--rendezvous`, `--me`, `--spool`, or any extra argument. Use
+[`scripts/amq-bridge-bot-enqueue.sh`](../../scripts/amq-bridge-bot-enqueue.sh)
+for a fixed-argv wrapper; it reads `AMQ_BRIDGE_ENQUEUE_CONFIG` and refuses a
+missing, symlinked, or non-0600 config before reading stdin.
+
 ## Optional HTTPS courier
 
-When an operator provisions a rendezvous, this implemented optional courier
-class can dial out. It is not the live G-Mac hop or the live architecture.
 AMQ does not ship a hosted relay. Its outbound spool is:
 
 ```
@@ -125,14 +134,15 @@ One bounded bidirectional cycle on a host uses a **local** receive alias and
 a **remote** send alias. Do not poll a foreign dest alias into this root:
 
 ```sh
+# `relay.example` is an operator-provided placeholder rendezvous URL.
 amq-bridge --root "$AM_ROOT" \
   --rendezvous https://relay.example \
-  --source-host mac \
+  --source-host host-a \
   --source-handle codex \
-  --dest-alias grok/claude \
-  --receive-alias mac/codex \
-  --allow-dest grok/claude,mac/codex \
-  --allow-source-host grok \
+  --dest-alias host-b/claude \
+  --receive-alias host-a/codex \
+  --allow-dest host-b/claude,host-a/codex \
+  --allow-source-host host-b \
   --mode both --once
 ```
 
@@ -148,35 +158,3 @@ The receiver allowlist is exact. A polled envelope for another alias, an
 unknown envelope field, a digest conflict, or an ACK before local Maildir
 commit is rejected. Until a rendezvous exists, use peer exchange or
 apply-file; do not treat this optional HTTPS loop as the live hop.
-
-## Host G (Grok computer)
-
-Install AMQ and `amq-bridge` on G the same way as on the Mac. G is a normal
-Linux AMQ host: its own root, its own agents, no inbound SSH. Durable queue
-state belongs under a path that survives Bot client close (`/workspace` is
-the proven layout). G update/reset and a second Bot seat on the same VM
-remain untested.
-
-1. Pin `AM_ROOT` / `AM_ME` in operator config, never in Bot chat.
-2. Set `bridge/host-id` to the G host alias. It must match the local source
-   host and the host component of any receiver-owned alias. Copy G's public
-   identity record to the Mac's `bridge/trusted/grok/<generation>` path, and
-   copy the Mac's public identity record to G's
-   `bridge/trusted/mac/<generation>` path.
-3. Start the G-initiated peer-stdio exchange with the fixed Mac helper. G is
-   the dialer and the Mac is the responder; the session transfers both
-   directions' envelopes and outcomes. Apply inbound envelopes locally after
-   they reach `rx/<peer>/new`. G does not listen.
-4. Live peer exchange uses one config-only submit-intent record per AMQ
-   message (`amq-bridge enqueue --config FILE --dest-alias host/agent`, stdin
-   = one AMQ message). The signer emits Envelope v2 from that intent; it does
-   not create a sibling `.dest` sidecar or use the HTTPS spool. `.dest`
-   sidecars are HTTPS-only. Prompt/chat must not pass `--root`, `--rendezvous`,
-   `--me`, or `--spool` to `enqueue`.
-5. Bot chat must invoke the fixed wrapper
-   [`scripts/amq-bridge-bot-enqueue.sh`](../../scripts/amq-bridge-bot-enqueue.sh)
-   instead of `amq-bridge enqueue` directly. Its argv is exactly
-   `--dest-alias host/agent`; prompt content cannot add `--root`,
-   `--rendezvous`, `--me`, `--spool`, or any extra argument. It reads the
-   config path from `AMQ_BRIDGE_ENQUEUE_CONFIG` and refuses a missing,
-   symlinked, or non-0600 config before stdin is ever read.

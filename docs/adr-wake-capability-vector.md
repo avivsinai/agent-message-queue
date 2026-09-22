@@ -4,21 +4,17 @@
 
 Accepted.
 
-## Date
-
-2026-08-20
-
 ## Context
 
-AMQ wake today is TTY inject. GUI seats (Hermes Desktop, Claude Desktop/Code,
-ChatGPT.app) are real agents. Pretending they are a pty, or silently substituting
-notify/prefill for inject, lies about delivery.
+Wake targets are not interchangeable. A TTY injector, a GUI deep link, and a
+native provider queue expose different activation, delivery, session, and
+evidence guarantees. Treating a GUI seat as a pty, or silently substituting
+notification or prefill for injection, lies about delivery.
 
-TTY inject remains defined by [wake operations](wake-operations.md). This ADR
-does not change that path. Raw TIOCSTI proves only that AMQ accepted terminal
-bytes; it does not prove provider presentation, submission, or consumption.
-The raw path therefore records `written` evidence and never claims provider
-acceptance.
+TTY injection remains defined by [wake operations](wake-operations.md). Raw
+TIOCSTI proves only that AMQ wrote terminal bytes; it does not prove provider
+presentation, submission, or consumption. The raw path therefore records
+`written` evidence and never claims provider acceptance.
 
 ## Decision
 
@@ -33,130 +29,77 @@ Each seat advertises a vector:
 | `evidence` | `notifier_live` vs stronger (never `drained`) |
 
 Callers request a minimum. Weaker capability is refused, not substituted. No
-inject→notify, submit→prefill, or `existing-exact`→`new` downgrade.
+inject-to-notify, submit-to-prefill, or existing-exact-to-new downgrade is
+allowed. Unknown apps fail closed, and prompt text must not drive generic GUI
+automation.
 
 App adapters pin bundle ID, Team ID, resolved executable, adapter version,
-session id, process generation, and endpoint identity. Mismatch fails closed.
-Unknown apps fail closed. Prompt text must not drive generic `osascript`.
-
-App repair/restart is `operator_only` until identity and generation checks
-match the TTY contract. `notifier_live` is not consumption.
+session ID, process generation, and endpoint identity. A mismatch fails closed.
+The stateless deep-link exception is defined below. Repair or
+restart remains `operator_only` until the identity and generation checks match
+the TTY contract. `notifier_live` is not consumption.
 
 An external `--inject-via` provider must use the AMQ transport protocol. Exit
 zero is accepted only with the exact stderr marker
-`AMQ_INJECT_PROGRESS=accepted`. `AMQ_INJECT_PROGRESS=deferred` means
-pre-dispatch busy/transition and keeps the same unread cohort on the wake retry
-ladder. `AMQ_INJECT_PROGRESS=uncertain` wins over every other marker and enters
-recovery. Other nonzero exits and timeouts are terminal `failed` outcomes for
-the current AttemptID and are not silently replayed. A bare legacy exit zero is
-`written`/uncertain evidence, never an accepted provider dispatch. This
-transport gap is a documented raw-mode limitation
-([#703](https://github.com/avivsinai/agent-message-queue/issues/703)); the
-`--inject-via` acceptance protocol is the proof-capable path.
+`AMQ_INJECT_PROGRESS=accepted`. `deferred` means pre-dispatch busy or
+transition and keeps the same unread cohort on the retry ladder. `uncertain`
+wins over every other marker and enters recovery. Other nonzero exits and
+timeouts are terminal `failed` outcomes for the current AttemptID and are not
+silently replayed. A bare legacy exit zero is `written`/uncertain evidence,
+never accepted provider dispatch. See the [wake doorbell acknowledgement
+policy](wake-doorbell-acknowledgement.md).
 
-## v1 seats (docs + local inspect, 2026-08-20)
+## Implemented adapter constraints
 
-| Seat | Vector AMQ may claim | Ship v1 adapter? |
-| --- | --- | --- |
-| TTY inject | current fail-closed inject | yes (existing) |
-| Hermes Desktop | `submitted` + `existing-exact` only after live attach to the Desktop-owned gateway | **no** until spike |
-| Claude Desktop Code | `prefilled` + `new` + `requires_human` (`claude://code/new`). Does not send. No existing-Code inject. **Shipped** behind the registration capability gate (`internal/keepalive/adapter/claudedesktop.go`): registered in `DefaultRegistry`, reachable only when the caller explicitly accepts a requires-human seat (`--accept-requires-human`) with delivery/session minima at or below prefilled/new; refused under the default zero-value minimum. Identity pins the `claude://` scheme owner (bundle `com.anthropic.claudefordesktop`) and revalidates before the `open` write. | yes (gated) |
-| ChatGPT.app (Codex app) | `execute javascript` is DEAD (issue #640: `-1723`, `AllowJavaScriptAppleEvents` pref compiled out) — kill for inject. But the `codex://` deep-link is a live prefill seat: `codex://threads/new?prompt=` prefills a NEW thread; `codex://threads/<uuid>?prompt=` opens the EXACT EXISTING conversation and prefills it. Neither auto-submits. **Shipped** behind the registration capability gate (`internal/keepalive/adapter/codexapp.go`): registered in `DefaultRegistry`, two targets (`codex-app:new` → SessionNew, `codex-app:thread:<uuid>` → SessionExistingExact) declared via `TargetCapabilityDeclarer`; reachable only when the caller explicitly accepts a requires-human seat with delivery/session minima at or below prefilled/new-or-existing-exact; refused under the default zero-value minimum. Identity pins the `codex://` scheme owner (bundle `com.openai.codex`) and revalidates before the `open` write. Dispatch caveat: `open` exiting 0 proves DISPATCH only, not delivery — the app can refuse a deep-link with no adapter-visible signal (e.g. a thread with an ACTIVE WRITER shows an error toast and leaves the composer empty), so the thread target must name an IDLE conversation; the app is AX-opaque so the adapter cannot observe the refusal. | yes (gated, deep-link only) |
-| Codex CLI queue (`codex-queue`) | `activation=none` + `delivery=submitted` + `session=existing-exact` + `requires_human=false`. Target grammar is only `codex-queue:thread:<uuid>` (no `:new`: queue cannot create a thread). **Shipped** in `internal/keepalive/adapter/codexqueue.go`, registered in `DefaultRegistry`. Probe resolves and validates the `codex` executable (basename, regular+exec, `queue --help` contract) and executes the resolved path; no inode/hash/codesign pin. (verified on Homebrew `codex-cli 0.149.1`; PATH `~/.local/bin/codex` 0.145.0 lacks the subcommand and fails closed with a PATH remedy). Thread existence is exactly one `sessions/YYYY/MM/DD/rollout-*-<uuid>.jsonl`. The active-writer gate inspects `<CODEX_HOME>/thread-writer-locks/<uuid>.lock` without acquiring it: on Darwin, F_GETLK (live 2026-08-26 a GUI-held flock is `Type=F_WRLCK`, `Pid=-1`; idle is `F_UNLCK`); on Linux, `/proc/locks` `FLOCK ADVISORY WRITE` matching the file's `maj:min:ino` (`%02x:%02x:%lu` hex major/minor, decimal inode) because flock and fcntl do not interoperate. On overlayfs (containers) `st_dev` can differ from the superblock device `/proc/locks` reports, so a held lock can look idle and the seat refuses (fail closed, no false submit). `CODEX_HOME` is ambient and not part of the injector identity (docs/wake-lifecycle.md §9.4): repointing it requires a wake restart. No holder is `ErrTargetDegraded` and names `codex resume <uuid>` / open in the app. Inject is argv-only `codex queue --thread <uuid> --message <payload>` (app-server JSON-RPC `thread/queue/add`). Live success line: `Queued message <id> for thread <uuid>.` Caveat: exit 0 proves enqueue to the writer, not that the turn finished. Idle-thread deferred delivery and response readback are out of scope. | yes |
-| Claude Code print (`claude-print`) | `activation=none` + `delivery=submitted` + `session=existing-exact` + `requires_human=false`. Target grammar is only `claude-print:session:<uuid>` (no `:new`). **Shipped** in `internal/keepalive/adapter/claudeprint.go`, registered in `DefaultRegistry` and `DefaultRegistryWithLogf`. Probe resolves `claude` (LookPath → basename via `launch.ProviderForExecutable` → EvalSymlinks → regular+exec → `--help` contains `--resume`, `--output-format`, `--replay-user-messages`) and executes the resolved path. Session jsonl is exactly one `~/.claude/projects/*/<uuid>.jsonl` (scan, not decoded escaped names; slash-to-dash is lossy). Child cwd is the **last** jsonl `cwd` field; missing directory refuses. Owner gate: readable well-formed `~/.claude/sessions/<pid>.json` with matching `sessionId` and a live filename pid (`kill(pid,0)`; ESRCH = stale, never deleted) is `ErrTargetDegraded`; unreadable, malformed, non-positive pid, or pid-mismatched records fail closed. Concurrent AMQ injects take `flock LOCK_EX|LOCK_NB` on `<statedir>/claude-print/<uuid>/inject.lock` before that scan. Claude CLI itself does not refuse dual writers. Inject spawns Setsid process group, stdin one stream-json user line then close (payload never argv), stdout+stderr to `<statedir>/claude-print/<uuid>/<utc-ts>.stream.jsonl` (0600). **Submitted** = the post-init `type=user` `isReplay=true` echo of this child's stdin line (not turn finished; `result` is the child's). Live 2.1.246 `--replay-user-messages` does not echo historical user turns. Fixed permission argv: `--permission-mode auto --allowedTools 'Bash(amq *)'` (dontAsk denies Bash). `CLAUDE_CONFIG_DIR` is ambient (§9.4). Desktop sees the turn only if that same child enabled `--remote-control` (not in the default argv). | yes |
-| Grok Bot.app | none | **not a wake seat** (Mac operator UI for host G) |
+The capability vector is enforced at registration. An adapter that does not
+declare capability is treated as weakest on ordered axes and as
+`requires_human`; it cannot masquerade as an unattended full-strength seat.
+The gate runs after target resolution and before any registry write or
+injection. Discovery may run a read-only identity probe.
 
-### Native Windows submitted adapters (2026-08-30)
+The Go `Capability` type in `internal/keepalive/adapter/capability.go` models
+`activation`, `delivery`, `session`, and `requires_human`. Evidence is a
+separate contract, not a fifth ordered Go axis; receipts and wake inspection
+define its meaning.
 
-The `codex-queue` and `claude-print` capability vectors above are also
-implemented for native Windows direct injection. This is not a native port of
-the TTY wake lifecycle.
+The native Windows companion supports direct submitted adapters only. It does
+not provide the Unix TTY lifecycle, `amq wake`, `coop exec`, attach, reattach,
+or terminal supervision. These limitations are part of the public contract.
 
-- Executable probes resolve `codex.exe` and `claude.exe`, not shell-only
-  `.cmd` shims. A regular Windows executable does not need Unix execute bits.
-- Codex writer activity is tested by attempting a non-blocking exclusive
-  `LockFileEx` across the lock file. `ERROR_LOCK_VIOLATION` means held; a
-  successful temporary lock is immediately released and means idle. This was
-  live-verified against Codex Desktop on 2026-08-30.
-- Claude owner liveness uses `OpenProcess(SYNCHRONIZE)` and a zero-time
-  `WaitForSingleObject`. Concurrent injects use `LockFileEx` on the adapter's
-  `inject.lock`.
-- The resumed Claude process is assigned to a Windows Job Object before its
-  stdin payload is released. Timeout cleanup terminates the job, not only the
-  parent PID. Claude Code 2.1.251 live-verified the post-init `isReplay:true`
-  echo and result on 2026-08-30.
+- `codex-queue` accepts only `codex-queue:thread:<uuid>`, never `:new`.
+  It requires an active writer for that exact thread; an idle lock file is
+  not sufficient. Successful `codex queue` execution proves enqueue to the
+  writer, not turn completion. Changing ambient `CODEX_HOME` requires a wake
+  restart.
+- `claude-print` accepts only `claude-print:session:<uuid>`, never `:new`.
+  It refuses a session with a live owner or uncertain owner evidence and
+  serializes AMQ injections with an exclusive lock. The child uses fixed
+  `--permission-mode auto --allowedTools 'Bash(amq *)'` arguments. Submitted
+  evidence is the matching post-init `isReplay` echo of this child's input,
+  not a historical message or a completed turn. `CLAUDE_CONFIG_DIR` is
+  ambient; a change requires a wake restart.
+- Claude Desktop and Codex app deep links require explicit acceptance of a
+  human-required seat with compatible prefill and session minima. A successful
+  `open` command proves dispatch only: the app can reject a link without an
+  adapter-visible error. Codex exact-thread links must name an idle thread.
+  Neither deep-link adapter automatically submits text or proves consumption.
+  JavaScript and Accessibility injection are not supported alternatives.
 
-The released Windows `amq-keepalive.exe` exposes this through direct
-`inject`. `amq wake`, `coop exec`, `attach`, `reattach`, and `supervise` remain
-unsupported natively, so none of those Unix terminal guarantees are implied.
+GUI wake does not inherit TTY repair.
 
-Hermes HTTP `/v1/runs` and `hermes acp` stdio are other processes, not the GUI
-seat. `claude-cli://` is the terminal handler, not GUI wake. This Mac's
-ChatGPT.app is `com.openai.codex` / `codex://`; Computer Use cannot automate
-ChatGPT or terminals.
+### Deep-link identity exception
 
-Identity pins: Hermes `com.nousresearch.hermes` (not `.setup`); Claude Desktop
-`com.anthropic.claudefordesktop` (Team `Q6L2SF6YDW`); ChatGPT
-`com.openai.codex` (Team `2DC432GLL2`). Ad-hoc/unsigned Hermes Team IDs fail
-closed.
-
-### Local inspect (this Mac, 2026-08-20)
-
-| App | Bundle / Team | Version | URL schemes | Notes |
-| --- | --- | --- | --- | --- |
-| Claude.app | `com.anthropic.claudefordesktop` / `Q6L2SF6YDW` | 1.32352.1 | `claude`, `msauth.com.anthropic.claudefordesktop` | Electron helpers share `com.anthropic.claudefordesktop.helper`. Nested `Claude iOS Sim.app` is `com.anthropic.claude.ios-sim`, not the Code seat. Separate `claude` CLI on PATH is TTY, not this GUI. |
-| ChatGPT.app | `com.openai.codex` / `2DC432GLL2` | 26.814.41407 | `codex`, `http`, `https` | No `chatgpt://`. Nested Codex framework is `com.openai.codex.framework`. Kill for inject. |
-| Hermes.app | — | — | — | Not in `/Applications`, not in `~/Applications`, not on PATH. Live Desktop gateway attach remains unproven. |
-| Grok Bot.app | `com.anysphere.sand` / `DCNK4UB866` | 0.20.0 (CFBundleVersion 0.20.0) | `grokbot`, `sand` | Electron Mac client (Anysphere lineage). Not host G and not a GUI-inject seat. |
-
-Do not write GUI wake adapters from this table beyond the implemented Claude Desktop prefill seat. Hermes stays refused until a live Desktop-owned gateway attach; the Claude Desktop prefill seat is implemented in `internal/keepalive/adapter/claudedesktop.go` behind the registration capability gate; ChatGPT stays kill.
-
-## Implementation note
-
-The Go `Capability` type (`internal/keepalive/adapter/capability.go`) covers
-`activation`, `delivery`, `session`, and `requires_human` — the four axes a
-seat advertises and a caller's minimum is checked against via `Satisfies`
-(refusal over substitution). The `evidence` dimension from the vector table
-above is deliberately **not** a Go axis: it is a prose-level contract whose
-semantics (`notifier_live` vs stronger, never `drained`) live elsewhere in AMQ
-(receipts, wake-lock inspection). Omitting it from the type is intentional, not
-an oversight — a speculative axis would invite half-implemented strength
-claims. Adapters declare a `Capability` via the `CapabilityDeclarer` interface;
-an adapter that does not implement it is treated as `UnknownCapability()` —
-weakest on every ordered axis and most-restrictive on the tolerance axis
-(`requires_human` true) — so it is refused unless the caller explicitly
-tolerates a human-required seat, never masquerading as an unattended
-full-strength seat. The capability gate runs at
-registration (`internal/keepalive/app/app.go`), after target resolution
-(discovery when no explicit target was given, then normalization) and before
-any write — a refusal mutates no registry state and performs no injection.
-(Discovery may run a read-only identity probe when no explicit target was
-given, since the adapter must prove its identity before naming a seat; this
-probe is not a write.)
-
-### Identity-pin exception for the deep-link prefill seats
-
-This launch-type prefill seat applies to both the Claude Desktop seat
-(`claude://`, bundle `com.anthropic.claudefordesktop`) and the Codex app seat
-(`codex://`, bundle `com.openai.codex`). Each pins the `codex://`/`claude://`
-scheme-owner bundle id only, and revalidates it before the `open` write. The
-ADR's full identity pin set (Team ID, resolved executable, adapter version,
-session id, process generation, endpoint identity) is deliberately deferred
-for these seats: they have no persistent process to pin a generation on (a
-deep-link launch is stateless), and the remaining pins are same-machine-
-attacker hardening deferred under the personal single-user tool policy. The
-Team-ID codesign pin in particular is tracked as a named backlog follow-up,
-not implemented in v1. This exception is recorded here so a reader knows the
-narrower pin is intentional, not an omission. (Note: the Codex app also
-registers `http`/`https`; only the `codex` scheme is pinned.)
+The Claude Desktop (`claude://`) and Codex app (`codex://`) prefill seats are
+stateless launches, so they pin and revalidate the scheme-owner bundle rather
+than a persistent process generation. They do not claim the full identity-pin
+set or an acceptance receipt. This is a deliberate narrow capability, not a
+silent downgrade.
 
 ## Consequences
 
-- `amq-64q.2` local inspect is complete. Hermes Desktop is not installed here,
-  so Hermes stays refused until a live Desktop-owned gateway attach.
-- The Claude Desktop prefill seat is shipped behind the registration
-  capability gate (`internal/keepalive/adapter/claudedesktop.go`): registered
-  in `DefaultRegistry`, reachable only when the caller explicitly accepts a
-  requires-human seat with delivery/session minima at or below prefilled/new,
-  and refused under the default zero-value minimum. TTY inject is unchanged.
-  ChatGPT stays out. GUI wake does not inherit TTY repair.
+- A caller can compare seats by declared capability and evidence instead of
+  guessing from product names.
+- A refusal is explicit when the requested guarantee is unavailable.
+- Native Windows support does not imply Unix terminal lifecycle support.
+- No GUI path claims consumption, and no raw terminal path claims provider
+  acceptance.

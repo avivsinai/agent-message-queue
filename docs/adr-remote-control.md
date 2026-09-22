@@ -2,12 +2,7 @@
 
 ## Status
 
-Accepted (sponsor direction, 2026-09-08). Implementation is tracked under
-bead `agent-message-queue-611`.
-
-## Date
-
-2026-09-08
+Accepted.
 
 ## Context
 
@@ -67,11 +62,7 @@ invariants.
    mismatch, `6` action required (busy, unsupported, unshared, expired, or
    uncertain), `130` reader interrupted. JSON output never changes a code.
 
-### Open questions settled by review
-
-These five were left open when the ADR was first written and were settled in
-the design review that followed. They are recorded here because each one is a
-contract another adapter has to honour, not an implementation detail.
+### Settled contract details
 
 - **A submit window is explicit and enforced natively.** `not_after` defaults
   to two minutes and is checked at the native admission boundary, not only on
@@ -144,11 +135,12 @@ separate process beside `amq`, as `amq-keepalive` and `amq-bridge` do.
   the Amit adapter's evidence class is `submitted`, never `admitted`, and it
   leaves a record `uncertain` rather than `rejected` when it retains nothing.
   Off-box export of Amit session content is gated by Amit's own privacy ruling.
-- Claude Code advertises inspect and a weak-evidence submit only. It has no
-  interrupt seam without keystrokes.
+- The design permits Claude Code inspect and weak-evidence submit only. This
+  is design intent, not a verified submit capability; see the
+  [compatibility manifest](remote-compat.md). It has no interrupt seam without
+  keystrokes.
 - Terminal viewing (a read-only tmux observer over an iroh stream) and native
   Buzz Desktop panels are deferred; the request contract does not depend on
   them.
 - Known limitation: the Claude Code cross-session socket wire format is not
-  published; the adapter pins what the installed binary accepts
-  (`agent-message-queue-611.2`).
+  published.

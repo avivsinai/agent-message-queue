@@ -1,19 +1,17 @@
 # Wake lifecycle state document
 
-Status: W3 P2a implemented; W3.5/P2b binding contract under review.
-W3.2 through W3.4 implement the legacy-authoritative `.wake.state`
-projection described here. This document additionally defines the W3.5/P2b
-binding contract implemented by the candidate under review; that is not a
-claim that the candidate is merged, released, or deployed, and it does not
-add migration. Legacy authority continues through P2a for existing unbound
-claims, which are never rewritten.
+Wake state has two compatibility modes. An unbound claim uses the
+legacy-authoritative P2a rules and `.wake.state` is a projection. A bound claim
+uses the P2b lock reference and fails closed when the state binding is
+inconclusive. Existing unbound claims are never rewritten merely by reading
+them; a new bound claim is published only by the authorized acquisition path.
 
 The normative words MUST, MUST NOT, SHOULD, and MAY describe the contract that
 the W3 implementation and its tests must preserve.
 
 ## 1. Scope and exclusions
 
-W3 v1 adds one retained document at
+The v1 lifecycle adds one retained document at
 `agents/<agent>/.wake.state`. It is a validated projection of two existing
 artifacts:
 
@@ -355,7 +353,7 @@ the projection unusable, but it cannot make a torn legacy operation look safe.
 The seven existing contract-net cases are the acceptance floor. The new state
 document adds observations but does not weaken any existing required result.
 
-| Case | W3 geometry | Required observation | Mutation prohibition |
+| Case | Publication geometry | Required observation | Mutation prohibition |
 | --- | --- | --- | --- |
 | Target commits before lock | `.wake.target` and possibly its target section are installed before `.wake.lock` links. | No authoritative lock exists. The target remains preserved state; target alone never implies ownership. A targetless acquisition may quarantine its exact inode/bytes only when conclusively ownerless, then must fresh-inspect before superseding matching projection state or publishing a lock. A clean owner-bearing target requires dead-owner recovery. | Do not create ownership from the shadow, remove it by pathname, or clean a different generation. |
 | Lock replacement during a reader | A reader may observe the lock, state, target, prepared marker, or their digest, then a replacement may occur before the final comparison. | Re-open and compare file identity/raw bytes. A legacy-artifact replacement is `wakeSnapshotReadChangedError`-family inconclusive evidence and must classify as unverified/retry-only. For a P2a shadow-document replacement or torn read, section 6.3 resolves the observation as silent legacy fallback; document retry-only classification applies only after P2b binding. | Do not use the old snapshot for cleanup, readiness, repair, or ownership. Preserve the replacement. |
@@ -447,7 +445,7 @@ lock as authority.
 - The prepared section self-binds independently by
   `generation + target_digest`. It is deliberately not covered by the lock's
   state digest because the legacy prepared marker is published after lock
-  acquisition and W3.3 refreshes the state document when that marker changes.
+  acquisition and refreshes the state document when that marker changes.
 - A lock may be unbound during the explicit pre-P2b or pre-preparation
   transition. It is not ready and cannot pass a P2b state-bound mutation gate.
   Once P2b publication binds a lock, later prepared-section publication may
@@ -542,15 +540,9 @@ publication, or other mutation through the detached descriptor. An absent or
 unopenable canonical path, or any failure to compare both identities, is
 inconclusive: preserve the residue and fail closed.
 
-The lock's exact-key ABI golden test MUST be updated in the same PR as the new
-fields, migration, state binding, and acceptance tests. P2b is held until
-W3.2 (inert state primitives), W3.3 (dual-write), and W3.4 (dual-read) have
-soaked on main and the exact mixed-version/crash matrix is green.
-
-Per the finishing-review constraint, W3.5/P2b is one coherent external-review
-PR: the migration, lock binding, ABI golden update, and acceptance-document
-lockstep are self-contained and readable together. It is not split into
-independent public PRs that hide the point-of-no-return contract.
+The lock ABI fields, state binding, dual-read/write behavior, and mixed-version
+rules are one contract. Implementations must preserve the exact-key ABI and
+the crash matrix when changing that contract.
 
 ## 8. Mixed-version matrix
 
@@ -570,11 +562,9 @@ the authority; “unbound” is not a successful P2b state.
 | New CLI with lock/state generation or digest mismatch | For a legacy-only/unbound P2a claim, use self-consistent legacy fallback. For a bound P2b claim, classify as typed inconclusive/unverified and retry-only. Do not choose whichever side is newer. | No cleanup, readiness, repair, owner transition, or state rewrite from the mismatched observation. |
 | Any reader with newer document or section schema | In P2a, treat the shadow document as a read failure and silently use legacy. For a bound P2b claim, fail closed as unverified/retry-only; do not guess fields or downgrade the schema. | No mutation. Preserve the artifacts for a compatible reader or explicit operator handling. |
 
-The existing `wake_owner_mixed_version_test.go` is the pattern for proving that
-an older binary preserves a newer owner-bound claim. W3 extends that matrix to
-state-document absence, stale legacy digests, unbound transitions, and the
-P2b lock-reference ABI. A green matrix proves compatibility behavior only; it
-does not itself authorize landing, migration activation, release, or deploy.
+The existing mixed-version behavior preserves newer owner-bound claims when an
+older binary encounters them. The matrix covers state-document absence, stale
+legacy digests, unbound transitions, and the P2b lock-reference ABI.
 
 ## 9. Operational surfaces outside the state document
 
