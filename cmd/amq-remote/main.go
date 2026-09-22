@@ -70,8 +70,8 @@ Common options:
   --json        Machine-readable output on stdout; diagnostics on stderr
 
 Exit codes: 0 ok · 1 work failed or cancelled · 2 usage · 3 not found ·
-4 timeout · 5 context mismatch · 6 action required (busy, unsupported,
-unshared, expired, uncertain) · 130 interrupted
+4 timeout · 6 action required (busy, unsupported, unshared, expired,
+uncertain) · 130 interrupted
 `
 
 func main() {
@@ -543,8 +543,8 @@ func submit(args []string, stdin io.Reader) (any, int, error) {
 	text := fs.String("text", "", "prompt text")
 	textFile := fs.String("text-file", "", "read prompt text from a file")
 	useStdin := fs.Bool("stdin", false, "read prompt text from stdin")
-	busy := fs.String("busy", string(protocol.BusyReject), "reject or queue when the runtime is busy")
-	deliver := fs.String("deliver", string(protocol.DeliverTurn), "turn or steer")
+	busy := fs.String("busy", string(protocol.BusyReject), "when the runtime is busy: reject (queue is refused in v1)")
+	deliver := fs.String("deliver", string(protocol.DeliverTurn), "turn (steer is refused in v1)")
 	requestID := fs.String("request-id", "", "caller-supplied UUID so a retry reconciles instead of resubmitting")
 	window := fs.Duration("admit-within", 2*time.Minute, "latest admission time relative to now (max 24h)")
 	minEvidence := fs.String("min-evidence", "", "minimum submit evidence class to require (admitted or submitted; omitted = legacy)")
