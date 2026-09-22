@@ -264,7 +264,11 @@ func TestShareRejectsUppercaseOwnerEncoding(t *testing.T) {
 	}
 	// Read the pending conditions for one kind and sign with the BODY key
 	// (self-attestation), then present the owner field uppercase.
-	tags, _, err := readSharePending(keyDir)
+	st, err := loadShareState(keyDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tags := st.Pending.Tags
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -282,7 +286,7 @@ func TestShareRejectsUppercaseOwnerEncoding(t *testing.T) {
 		t.Fatal("uppercase-encoded self-attested tag enrolled; want refusal")
 	}
 	// No share.json was written — a failed enrollment preserves state.
-	if gen, err := readEnrolledState(keyDir); err != nil || gen != nil {
+	if stChk, err := loadShareState(keyDir); err != nil || stChk.Enrolled.Gen != nil {
 		t.Fatal("failed enrollment mutated enrolled state")
 	}
 }
@@ -340,10 +344,11 @@ func TestShareRenewReprintsAllKinds(t *testing.T) {
 	// Doctor expiry warning derived from signed conditions: enroll only
 	// SOME kinds → incomplete warning; backdate via a renewed pending with
 	// a near bound and enroll all → expiry warning.
-	tags, _, err := readSharePending(filepath.Join(root, "extensions", "remote", "keys", "r1"))
+	stR1, err := loadShareState(filepath.Join(root, "extensions", "remote", "keys", "r1"))
 	if err != nil {
 		t.Fatal(err)
 	}
+	tags := stR1.Pending.Tags
 	k, _ := bodykey.Load(filepath.Join(root, "extensions", "remote", "keys", "r1", "body.key"))
 	for _, tag := range tags {
 		tagPath := filepath.Join(t.TempDir(), "tag.json")
@@ -395,7 +400,11 @@ func TestShareRejectsSelfAttestation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tags, _, err := readSharePending(keyDir)
+	st, err := loadShareState(keyDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tags := st.Pending.Tags
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -414,7 +423,11 @@ func TestShareRejectsSelfAttestation(t *testing.T) {
 func enrollAllPending(t *testing.T, root, session string) {
 	t.Helper()
 	keyDir := filepath.Join(root, "extensions", "remote", "keys", session)
-	tags, _, err := readSharePending(keyDir)
+	st, err := loadShareState(keyDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tags := st.Pending.Tags
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -515,7 +528,8 @@ func enrollRemaining(t *testing.T, root, session string, condsByKind map[uint16]
 
 func readEnrolledTagsForTest(t *testing.T, keyDir string) []shareTagFile {
 	t.Helper()
-	gen, err := readEnrolledState(keyDir)
+	stGen, err := loadShareState(keyDir)
+	gen := stGen.Enrolled.Gen
 	if err != nil || gen == nil {
 		t.Fatalf("enrolled state missing/invalid: %v", err)
 	}
@@ -577,7 +591,11 @@ func TestShareRejectsUppercaseSignature(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tags, _, err := readSharePending(keyDir)
+	st, err := loadShareState(keyDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tags := st.Pending.Tags
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -590,7 +608,7 @@ func TestShareRejectsUppercaseSignature(t *testing.T) {
 	if code, _ := share([]string{"--root", root, "--session", "u2", "--tag-file", tagPath}, &bytes.Buffer{}, &stderr); code == 0 {
 		t.Fatal("uppercase signature accepted")
 	}
-	if gen, err := readEnrolledState(keyDir); err != nil || gen != nil {
+	if stChk, err := loadShareState(keyDir); err != nil || stChk.Enrolled.Gen != nil {
 		t.Fatal("refused tag mutated enrolled state")
 	}
 }
@@ -668,7 +686,8 @@ func TestPlainShareReprintsOutstanding(t *testing.T) {
 	// another renew. The one kind already enrolled (done) must not be
 	// re-enrolled.
 	enrollRemaining(t, root, "o1", condsByKind, doneKind)
-	gen, gerr := readEnrolledState(keyDir)
+	stGen, gerr := loadShareState(keyDir)
+	gen := stGen.Enrolled.Gen
 	if gerr != nil {
 		t.Fatal(gerr)
 	}
@@ -762,7 +781,8 @@ func TestDryRunPrintsPendingPreimages(t *testing.T) {
 	root := t.TempDir()
 	runShare(t, "--root", root, "--session", "d3")
 	keyDir := filepath.Join(root, "extensions", "remote", "keys", "d3")
-	pendingTags, _, err := readSharePending(keyDir)
+	stpendingTags, _ := loadShareState(keyDir)
+	pendingTags, _, err := stpendingTags.Pending.Tags, stpendingTags.Pending.NotAfter, stpendingTags.Pending.Err
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -809,7 +829,8 @@ func TestActiveGenerationStaysUntilComplete(t *testing.T) {
 	// Completing the generation publishes the new one atomically and drops
 	// the staged doc.
 	enrollRemaining(t, root, "st1", pending, 20003)
-	gen, err := readEnrolledState(keyDir)
+	stGen, err := loadShareState(keyDir)
+	gen := stGen.Enrolled.Gen
 	if err != nil || gen == nil {
 		t.Fatalf("published generation missing: %v", err)
 	}
@@ -1062,7 +1083,11 @@ func TestShareLeafConfinementPreMintAndEnrolled(t *testing.T) {
 	if err := os.Symlink(victim2, filepath.Join(keyDir, "share.json")); err != nil {
 		t.Skipf("cannot symlink in this environment: %v", err)
 	}
-	tags, _, err := readSharePending(keyDir)
+	st, err := loadShareState(keyDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tags := st.Pending.Tags
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1155,7 +1180,11 @@ func TestAtomicStateWritesFaulted(t *testing.T) {
 	root := t.TempDir()
 	runShare(t, "--root", root, "--session", "af1")
 	keyDir := filepath.Join(root, "extensions", "remote", "keys", "af1")
-	tags, _, err := readSharePending(keyDir)
+	st, err := loadShareState(keyDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tags := st.Pending.Tags
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1265,7 +1294,11 @@ func TestCorruptStagedRemedy(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(keyDir, stagedName), []byte("broken"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	tags, _, err := readSharePending(keyDir)
+	st, err := loadShareState(keyDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tags := st.Pending.Tags
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1555,7 +1588,8 @@ func TestExpiryRowSurvivesLeftoverRow(t *testing.T) {
 	// Plant crash leftovers (a stale pending window + staged entry) whose
 	// conditions match the CURRENT generation — the state reportStagedState
 	// treats as "published generation already covers the pending window".
-	gen, _ := readEnrolledState(keyDir)
+	stGen, _ := loadShareState(keyDir)
+	gen := stGen.Enrolled.Gen
 	pendingTags := make([]shareTagFile, 0, len(gen.Tags))
 	for _, g := range gen.Tags {
 		pendingTags = append(pendingTags, shareTagFile{Kind: g.Kind, OwnerPubKey: "o", Conditions: g.Conditions, Sig: "s"})
@@ -1738,8 +1772,13 @@ func TestDoctorUnknownProgressOverCorruptStaged(t *testing.T) {
 	if !strings.Contains(prog, "unknown") {
 		t.Fatalf("doctor progress = %q, want the unknown-progress row (r7 P1)", prog)
 	}
-	if _, has := info["warning"]; has {
-		t.Fatalf("renewal-in-progress warning printed over unreadable state: %v", info["warning"])
+	// r8 P1-3: the renewal-in-progress warning SURVIVES unreadable staged
+	// state (the pending window alone proves the renewal is in progress);
+	// only a fabricated count is forbidden.
+	if warn, has := info["warning"].(string); !has || !strings.Contains(warn, "do NOT renew") {
+		t.Fatalf("renewal-in-progress warning missing over unreadable state: %v", info)
+	} else if strings.Contains(warn, "of 5") {
+		t.Fatalf("warning fabricated a signed count over unreadable state: %q", warn)
 	}
 	if _, has := info["staged_error"]; !has {
 		t.Fatalf("staged_error row missing: %v", info)

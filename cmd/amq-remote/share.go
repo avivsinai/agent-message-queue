@@ -147,10 +147,16 @@ func share(args []string, stdout, stderr io.Writer) (int, error) {
 	// body.key before returning).
 	keyPath := filepath.Join(keyDir, "body.key")
 	k, loadErr := bodykey.Load(keyPath)
+	// Round-9: ONE loader reads all five state leaves once. Confinement,
+	// dry-run validation, mint/renew/enroll and doctor all branch on the
+	// typed outcomes; nothing below re-reads the state files.
+	st, err := loadShareState(keyDir)
+	if err != nil {
+		return protocol.ExitActionRequired, err
+	}
 	// State-leaf confinement runs BEFORE anything else — dry-run, mint,
-	// renew (codex r3 #4: the pre-mint refusal must not mint body.key/
-	// body.pub first).
-	if err := refuseSymlinkedState(keyDir); err != nil {
+	// renew (codex r3 #4) — and refuses on every leaf, every command.
+	if err := st.refuseIfConfined(); err != nil {
 		return protocol.ExitActionRequired, err
 	}
 	if *dryRun {
@@ -164,8 +170,22 @@ func share(args []string, stdout, stderr io.Writer) (int, error) {
 			}
 			return protocol.ExitActionRequired, fmt.Errorf("body key at %s: %w", keyPath, loadErr)
 		}
-		if _, gerr := readEnrolledState(keyDir); gerr != nil {
-			return protocol.ExitActionRequired, gerr
+		// The preview validates EVERY present-but-unreadable leaf —
+		// enrolled, pending AND staged — regardless of whether a pending
+		// window exists (r8 P1-1: without a pending window the staged leaf
+		// was skipped, and dry-run exited 0 with signing data where the
+		// real run refuses via reconcile). The staged refusal is the same
+		// text the real reconcile refusal prints (r8 P2).
+		// Refuse on the FIRST unreadable leaf; the staged leaf gets the
+		// shared reconcile refusal text (r8 P2), anything else its own
+		// loader error.
+		leaves := st.unreadableLeaves()
+		if len(leaves) > 0 {
+			l := leaves[0]
+			if l.Path == filepath.Join(keyDir, stagedName) {
+				return protocol.ExitActionRequired, stagedCorruptRefusal(*session, l)
+			}
+			return protocol.ExitActionRequired, l.Err
 		}
 		// Ruling (claude 08:29Z): owners sign ONLY preimages printed from a
 		// PERSISTED pending window. With a pending window, dry-run prints
@@ -174,29 +194,14 @@ func share(args []string, stdout, stderr io.Writer) (int, error) {
 		// enrollable — the bound is fixed when the real --renew persists
 		// the window; sharing the calculation cannot share the instant
 		// (codex r3 #1). With none, the illustration is likewise labeled.
-		pendingTags, _, perr := readSharePending(keyDir)
-		if perr != nil && !errors.Is(perr, os.ErrNotExist) {
-			return protocol.ExitActionRequired, perr
-		}
-		// r7 P2: the dry-run previously skipped the STAGED leaf — a valid
-		// pending window plus a corrupt share.staged.json exited 0 and
-		// printed signing data while the real run refused. The preview
-		// validates every state leaf read-only before choosing output:
-		// when staged is unreadable the real command would refuse with
-		// doctor's reconcile remedy, so the preview refuses with the
-		// same refusal instead of printing.
-		if len(pendingTags) > 0 {
-			if _, serr := readShareStaged(keyDir); serr != nil && !errors.Is(serr, os.ErrNotExist) {
-				return protocol.ExitActionRequired, serr
-			}
-		}
+		pendingTags := st.Pending.Tags
 		if *renew {
 			if len(pendingTags) > 0 {
 				printSharePending(stdout, *session, k, pendingTags, time.Time{})
 				say(stdout, "(dry-run: the CURRENT pending window, still enrollable; a real --renew would replace it with a later bound)")
 				return 0, nil
 			}
-			preview, err := renewalWindow(keyDir, *days, daysSet)
+			preview, err := renewalWindow(st, *days, daysSet)
 			if err != nil {
 				return protocol.ExitActionRequired, err
 			}
@@ -226,58 +231,50 @@ func share(args []string, stdout, stderr io.Writer) (int, error) {
 	}
 
 	if *tagFile != "" {
-		return enrollTag(*session, keyDir, *tagFile, k)
+		return enrollTag(*session, keyDir, *tagFile, k, st)
 	}
 
 	// Mint or renew: persist one pending window per kind so doctor can warn
 	// before expiry, and print the preimages for the owner to sign. The
 	// window arithmetic lives in ONE place (renewalWindow) so --dry-run
 	// previews exactly what a real run mints (codex re-review P2).
-	window, err := renewalWindow(keyDir, *days, daysSet)
+	window, err := renewalWindow(st, *days, daysSet)
 	if err != nil {
 		return protocol.ExitActionRequired, err
 	}
 	notAfter, pending := window.notAfter, window.tags
-	gen, gerr := readEnrolledState(keyDir)
-	if gerr != nil {
-		// Corrupt/unreadable enrolled state is NOT absence: refuse and
-		// let the operator inspect it (verifier P0-1).
-		return protocol.ExitActionRequired, gerr
-	}
-	pendingTags, _, pendingReadErr := readSharePending(keyDir)
-	if pendingReadErr != nil && !errors.Is(pendingReadErr, os.ErrNotExist) {
-		// Malformed pending state is NOT absence (codex r3 #2): never
-		// silently replace an existing window the owner may be
-		// signing against.
-		return protocol.ExitActionRequired, pendingReadErr
-	}
-	if rerr := reconcileStagedState(*session, keyDir, gen, pendingTags, pendingReadErr); rerr != nil {
+	if rerr := reconcileStagedState(*session, keyDir, st); rerr != nil {
 		return protocol.ExitActionRequired, rerr
 	}
-	// Re-read after reconciliation: stale leftovers may be gone.
-	pendingTags, _, pendingReadErr = readSharePending(keyDir)
-	if pendingReadErr != nil && !errors.Is(pendingReadErr, os.ErrNotExist) {
-		return protocol.ExitActionRequired, pendingReadErr
+	// Re-load after reconciliation: stale leftovers may be gone. The loader
+	// is the only reader, so a fresh snapshot is a fresh call.
+	st2, err := loadShareState(keyDir)
+	if err != nil {
+		return protocol.ExitActionRequired, err
 	}
+	if err := st2.refuseIfConfined(); err != nil {
+		return protocol.ExitActionRequired, err
+	}
+	pendingTags := st2.Pending.Tags
+	pendingGone := st2.Pending.State == leafAbsent
 	if !*renew {
-		if pendingReadErr == nil && len(pendingTags) > 0 {
+		if !pendingGone && len(pendingTags) > 0 {
 			// An enrollment is incomplete: reprint the OUTSTANDING pending
 			// preimages (verifier P0-1: the owner signs one kind at a time
 			// offline and must be able to recover the preimage list without
 			// rotating the window). Enrolled credentials are untouched.
-			staged, serr := readShareStaged(keyDir)
-			if serr != nil {
-				return protocol.ExitActionRequired, serr
+			if st2.Staged.Err != nil {
+				return protocol.ExitActionRequired, stagedCorruptRefusal(*session, st2.Staged.leafRead)
 			}
-			outstanding := outstandingPending(pendingTags, staged, gen)
-			printShareOutstanding(stdout, *session, k, outstanding, staged, pendingTags, gen)
+			outstanding := outstandingPending(pendingTags, st2.Staged.Tags, st2.Enrolled.Gen)
+			printShareOutstanding(stdout, *session, k, outstanding, st2.Staged.Tags, pendingTags, st2.Enrolled.Gen)
 			return 0, nil
 		}
-		if gen != nil && len(gen.Tags) > 0 {
+		if st2.Enrolled.Gen != nil && len(st2.Enrolled.Gen.Tags) > 0 {
 			// Fully enrolled; plain `share` does not disturb the state.
 			// Print the ENROLLED state (expiry derived from the signed
 			// conditions).
-			printShareEnrolled(stdout, *session, k, gen.Tags)
+			printShareEnrolled(stdout, *session, k, st2.Enrolled.Gen.Tags)
 			return 0, nil
 		}
 	}
@@ -299,34 +296,26 @@ type shareWindow struct {
 }
 
 // renewalWindow computes the attestation window a real `share`/`share
-// --renew` run would persist. For a renewal it bumps the bound past any
-// existing pending/enrolled conditions so a renewal is a NEW generation
-// even in the same second (generation identity comes from the signed
-// conditions). For a plain mint it is now+days.
-func renewalWindow(keyDir string, days int, daysExplicit bool) (shareWindow, error) {
+// --renew` run would persist. It consumes the loader snapshot (r9): no
+// re-reads, and the confinement check already ran in the caller.
+func renewalWindow(st *shareState, days int, daysExplicit bool) (shareWindow, error) {
 	notAfter := time.Now().Add(time.Duration(days) * 24 * time.Hour)
-	// State-leaf confinement (codex re-review P1): the pending and enrolled
-	// files are read/written by these commands; a symlinked leaf must be
-	// refused before anything follows it.
-	if err := refuseSymlinkedState(keyDir); err != nil {
-		return shareWindow{}, err
+	// Unreadable state is NOT absence (verifier r2 P1-2): a renewal over
+	// torn state would mint a window no tag can ever be enrolled into.
+	// Fail closed like every other path.
+	if st.Pending.Err != nil {
+		return shareWindow{}, st.Pending.Err
 	}
-	prev, _, pendingErr := readSharePending(keyDir)
-	if pendingErr != nil && !errors.Is(pendingErr, os.ErrNotExist) {
-		return shareWindow{}, pendingErr
+	if st.Enrolled.Err != nil {
+		return shareWindow{}, st.Enrolled.Err
 	}
 	var maxPending int64
-	if pendingErr == nil && len(prev) > 0 {
-		maxPending = maxPendingBound(prev)
+	if len(st.Pending.Tags) > 0 {
+		maxPending = maxPendingBound(st.Pending.Tags)
 	}
 	var maxEnrolled int64
-	if gen, gerr := readEnrolledState(keyDir); gerr != nil {
-		// Corrupt/unreadable enrolled state is NOT absence (verifier r2
-		// P1-2): a renewal over torn state would mint a window no tag can
-		// ever be enrolled into. Fail closed like every other path.
-		return shareWindow{}, gerr
-	} else if gen != nil {
-		maxEnrolled = maxEnrolledBound(gen.Tags)
+	if st.Enrolled.Gen != nil {
+		maxEnrolled = maxEnrolledBound(st.Enrolled.Gen.Tags)
 	}
 	// Ruling (claude 08:27Z #1): an EXPLICIT --days is never silently
 	// overridden by the bump. If the requested window would not clear the
@@ -355,26 +344,9 @@ func renewalWindow(keyDir string, days int, daysExplicit bool) (shareWindow, err
 	return shareWindow{notAfter: notAfter, tags: tags}, nil
 }
 
-// refuseSymlinkedState Lstats every state leaf; a symlinked or non-regular
-// pending/staged/enrolled state file is refused (verifier r2 P1-4: --renew
-// followed a share.pending.json symlink and rewrote an out-of-root file —
-// also true of plain share and of share.json itself).
-func refuseSymlinkedState(keyDir string) error {
-	pendingPath, enrolledPath := sharePaths(keyDir)
-	// Verifier r6 P2-3: body.pub is a state leaf too — the categorical
-	// rule (every state leaf, on every command, through the one lstat
-	// helper) applies to all five leaves, and once body.key exists no
-	// other code path ever looks at body.pub again.
-	for _, p := range []string{pendingPath, filepath.Join(keyDir, stagedName), enrolledPath, filepath.Join(keyDir, "body.pub")} {
-		if err := lstatStateLeaf(p); err != nil {
-			// The typed stateLeafError already renders "state file <p>: …",
-			// so the wrapper must not duplicate the path; RefuseWrap keeps the
-			// errors.As chain to the typed error (r5 review P2-2).
-			return protocol.RefuseWrap(protocol.CodeInvalid, err, "%s", err)
-		}
-	}
-	return nil
-}
+// refuseSymlinkedState was folded into loadShareState (r9): the loader
+// lstats all five leaves once and refuseIfConfined renders the same
+// refusal from the typed outcomes.
 
 // lstatStateLeaf is the confinement rule for one state-file leaf: absent is
 // fine; a symlink is refused outright (rename-onto would replace the link,
@@ -415,12 +387,8 @@ func (e *stateLeafError) Error() string {
 // and the pending window for its kind, then persists it. An invalid tag
 // leaves any existing good enrollment untouched (codex P1: validation must
 // run on the real enrollment path, never silently skipped).
-func enrollTag(session, keyDir, tagPath string, k *bodykey.BodyKey) (int, error) {
-	// State-leaf confinement applies to enrollment too: the pending read
-	// and the staged/published writes below must never follow a symlink.
-	if err := refuseSymlinkedState(keyDir); err != nil {
-		return protocol.ExitActionRequired, err
-	}
+func enrollTag(session, keyDir, tagPath string, k *bodykey.BodyKey, st *shareState) (int, error) {
+	// State-leaf confinement already ran in share() via refuseIfConfined.
 	raw, err := os.ReadFile(tagPath)
 	if err != nil {
 		return protocol.ExitUsage, fmt.Errorf("--tag-file: %w", err)
@@ -432,27 +400,33 @@ func enrollTag(session, keyDir, tagPath string, k *bodykey.BodyKey) (int, error)
 	// The kind must be one the share credential set defines, and the
 	// conditions string must be exactly the canonical per-kind string for
 	// the pending (or current) window — no free-form conditions.
-	pending, _, perr := readSharePending(keyDir)
-	if perr != nil {
-		if errors.Is(perr, os.ErrNotExist) {
-			return protocol.ExitActionRequired, fmt.Errorf("no pending window: run `amq-remote share --session %s --renew` first", session)
-		}
-		return protocol.ExitActionRequired, perr
+	if st.Pending.State == leafAbsent {
+		return protocol.ExitActionRequired, fmt.Errorf("no pending window: run `amq-remote share --session %s --renew` first", session)
+	}
+	if st.Pending.Err != nil {
+		return protocol.ExitActionRequired, st.Pending.Err
 	}
 	// Reconcile crash leftovers before matching (verifier r3 P2-3): a
 	// complete published generation with stale pending/staged heals here
 	// so the owner is never asked to sign against a consumed window.
-	gen0, _ := readEnrolledState(keyDir)
-	if rerr := reconcileStagedState(session, keyDir, gen0, pending, nil); rerr != nil {
+	if rerr := reconcileStagedState(session, keyDir, st); rerr != nil {
 		return protocol.ExitActionRequired, rerr
 	}
-	pending, _, perr = readSharePending(keyDir)
-	if perr != nil {
-		if errors.Is(perr, os.ErrNotExist) {
-			return protocol.ExitActionRequired, fmt.Errorf("no pending window: the current generation already covers it; run `amq-remote share --session %s` for the enrolled state", session)
-		}
-		return protocol.ExitActionRequired, perr
+	// Re-load after reconciliation; the loader is the only reader.
+	st2, err := loadShareState(keyDir)
+	if err != nil {
+		return protocol.ExitActionRequired, err
 	}
+	if err := st2.refuseIfConfined(); err != nil {
+		return protocol.ExitActionRequired, err
+	}
+	if st2.Pending.State == leafAbsent {
+		return protocol.ExitActionRequired, fmt.Errorf("no pending window: the current generation already covers it; run `amq-remote share --session %s` for the enrolled state", session)
+	}
+	if st2.Pending.Err != nil {
+		return protocol.ExitActionRequired, st2.Pending.Err
+	}
+	pending := st2.Pending.Tags
 	var match *shareTagFile
 	for i := range pending {
 		if pending[i].Kind == tf.Kind {
@@ -478,7 +452,7 @@ func enrollTag(session, keyDir, tagPath string, k *bodykey.BodyKey) (int, error)
 	if err := tag.Satisfies(tf.Kind, time.Now().Add(time.Minute).Unix()); err != nil {
 		return protocol.ExitActionRequired, fmt.Errorf("owner tag conditions rejected for kind %d: %v", tf.Kind, err)
 	}
-	if err := writeShareTag(session, keyDir, pending, &tf); err != nil {
+	if err := writeShareTag(session, keyDir, &tf); err != nil {
 		return protocol.ExitActionRequired, err
 	}
 	return 0, nil
@@ -488,29 +462,212 @@ func sharePaths(keyDir string) (pending, enrolled string) {
 	return filepath.Join(keyDir, "share.pending.json"), filepath.Join(keyDir, "share.json")
 }
 
-// readSharePending returns the pending per-kind windows and the recorded
-// not_after. Missing or corrupt pending is an error — callers must not
-// silently bypass the pending constraint (codex P1 finding 7).
-func readSharePending(keyDir string) ([]shareTagFile, time.Time, error) {
-	p, _ := sharePaths(keyDir)
-	if err := lstatStateLeaf(p); err != nil {
-		return nil, time.Time{}, err
+// ---------- Round-9 state loader: the ONLY reader of the state leaves ----------
+//
+// The r8 ruling: there was no read-validated state struct — the three read
+// helpers were called directly from fourteen sites, each guarded by a
+// different condition, so every output branch read a different subset of
+// state (dry-run printing signing data the real run refuses; doctor rows
+// derived from different subsets than the mutating path refuses on). One
+// loader, one snapshot, typed per-leaf outcomes; consumers branch on the
+// outcome, never re-read.
+
+// leafState is the typed outcome class for one state leaf.
+type leafState int
+
+const (
+	leafAbsent     leafState = iota // leaf does not exist
+	leafOK                          // present and successfully read/parsed
+	leafUnreadable                  // present but read or parse failed (Err)
+	leafConfined                    // symlinked or non-regular (see Path, leaf.Confinement below)
+)
+
+// leafRead is one leaf's typed outcome: absent / ok(value) / unreadable(reason) /
+// confined(path). Confinement carries the typed *stateLeafError so every
+// remedy string can derive from the outcome instead of prose matching.
+type leafRead struct {
+	State       leafState
+	Path        string
+	Err         error           // leafUnreadable: the read/parse failure
+	Confinement *stateLeafError // leafConfined: the typed leaf refusal
+}
+
+// readable reports whether the leaf's VALUE may be consumed.
+func (l *leafRead) readable() bool { return l.State == leafOK }
+
+// confinedErr renders the leaf's confinement as the refusal the mutating
+// path prints (the same refusal refuseSymlinkedState produced).
+func (l *leafRead) confinedErr() error {
+	return protocol.RefuseWrap(protocol.CodeInvalid, l.Confinement, "%s", l.Confinement)
+}
+
+// shareState is the read-validated snapshot of all five state leaves.
+type shareState struct {
+	KeyDir  string
+	BodyKey leafRead
+	BodyPub leafRead
+	Pending struct {
+		leafRead
+		Tags     []shareTagFile
+		NotAfter time.Time
 	}
-	raw, err := os.ReadFile(p)
-	if err != nil {
-		return nil, time.Time{}, err
+	Enrolled struct {
+		leafRead
+		Gen *enrolledGeneration
 	}
-	var doc struct {
-		Tags     []shareTagFile `json:"tags"`
-		NotAfter int64          `json:"not_after"`
+	Staged struct {
+		leafRead
+		Tags map[uint16]shareTagFile
 	}
-	if err := json.Unmarshal(raw, &doc); err != nil {
-		return nil, time.Time{}, fmt.Errorf("pending state at share.pending.json is invalid: %w", err)
+}
+
+// confinedLeaves returns every leaf the loader found confined, in a fixed
+// order, so one refusal can name them all.
+func (st *shareState) confinedLeaves() []leafRead {
+	var out []leafRead
+	for _, l := range []leafRead{st.Pending.leafRead, st.Enrolled.leafRead, st.Staged.leafRead, st.BodyPub, st.BodyKey} {
+		if l.State == leafConfined {
+			out = append(out, l)
+		}
 	}
-	if len(doc.Tags) == 0 {
-		return nil, time.Time{}, errors.New("pending window carries no tags")
+	return out
+}
+
+// refuseIfConfined is the single confinement gate every command path runs
+// immediately after loadShareState: the categorical rule (every state
+// leaf, on every command) in one place.
+func (st *shareState) refuseIfConfined() error {
+	for _, l := range st.confinedLeaves() {
+		return l.confinedErr()
 	}
-	return doc.Tags, time.Unix(doc.NotAfter, 0), nil
+	return nil
+}
+
+// unreadableLeaves returns every state leaf that is present but unreadable
+// (read or parse failure) — the dry-run and doctor surfaces walk this to
+// refuse or report exactly where the real mutating path would refuse.
+func (st *shareState) unreadableLeaves() []leafRead {
+	var out []leafRead
+	for _, l := range []leafRead{st.Pending.leafRead, st.Enrolled.leafRead, st.Staged.leafRead} {
+		if l.State == leafUnreadable {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
+// loadShareState lstat-checks all five state leaves (pending, enrolled,
+// staged, body.pub, body.key), reads enrolled, pending and staged ONCE
+// each, and returns the typed snapshot. It never writes and never follows
+// a confined leaf. This function is the ONLY caller of the three read
+// helpers below; every consumer — share, dry-run, renew preview,
+// enrollment, publication, doctor — takes the snapshot.
+func loadShareState(keyDir string) (*shareState, error) {
+	pendingPath, enrolledPath := sharePaths(keyDir)
+	stagedPath := filepath.Join(keyDir, stagedName)
+	st := &shareState{KeyDir: keyDir}
+	leaves := []struct {
+		path string
+		out  *leafRead
+	}{
+		{pendingPath, &st.Pending.leafRead},
+		{enrolledPath, &st.Enrolled.leafRead},
+		{stagedPath, &st.Staged.leafRead},
+		{filepath.Join(keyDir, "body.pub"), &st.BodyPub},
+		{filepath.Join(keyDir, "body.key"), &st.BodyKey},
+	}
+	for _, leaf := range leaves {
+		leaf.out.Path = leaf.path
+		err := lstatStateLeaf(leaf.path)
+		switch {
+		case err == nil:
+			leaf.out.State = leafOK
+		case errors.Is(err, os.ErrNotExist):
+			leaf.out.State = leafAbsent
+		default:
+			var lerr *stateLeafError
+			if !errors.As(err, &lerr) {
+				return nil, err // unexpected lstat failure: propagate
+			}
+			leaf.out.State = leafConfined
+			leaf.out.Confinement = lerr
+		}
+	}
+	// The three reads, once each. Absence is a state, not an error; a
+	// read/parse failure downgrades the leaf to leafUnreadable with the
+	// SAME message text the direct helpers produced.
+	if st.Pending.readable() {
+		raw, err := os.ReadFile(pendingPath)
+		switch {
+		case err == nil:
+			var doc struct {
+				Tags     []shareTagFile `json:"tags"`
+				NotAfter int64          `json:"not_after"`
+			}
+			if jerr := json.Unmarshal(raw, &doc); jerr != nil {
+				st.Pending.State = leafUnreadable
+				st.Pending.Err = fmt.Errorf("pending state at share.pending.json is invalid: %w", jerr)
+			} else if len(doc.Tags) == 0 {
+				st.Pending.State = leafUnreadable
+				st.Pending.Err = errors.New("pending window carries no tags")
+			} else {
+				st.Pending.Tags = doc.Tags
+				st.Pending.NotAfter = time.Unix(doc.NotAfter, 0)
+			}
+		case errors.Is(err, os.ErrNotExist):
+			st.Pending.State = leafAbsent // vanished between lstat and read
+		default:
+			st.Pending.State, st.Pending.Err = leafUnreadable, err
+		}
+	}
+	if st.Enrolled.readable() {
+		raw, err := os.ReadFile(enrolledPath)
+		switch {
+		case errors.Is(err, os.ErrNotExist):
+			st.Enrolled.State = leafAbsent
+		case err != nil:
+			st.Enrolled.State, st.Enrolled.Err = leafUnreadable, err
+		default:
+			var gen enrolledGeneration
+			if jerr := json.Unmarshal(raw, &gen); jerr != nil {
+				st.Enrolled.State = leafUnreadable
+				st.Enrolled.Err = fmt.Errorf("enrolled state at share.json is invalid: %w", jerr)
+			} else {
+				st.Enrolled.Gen = &gen
+			}
+		}
+	}
+	if st.Staged.readable() {
+		raw, err := os.ReadFile(stagedPath)
+		switch {
+		case errors.Is(err, os.ErrNotExist):
+			st.Staged.State = leafAbsent
+		case err != nil:
+			st.Staged.State, st.Staged.Err = leafUnreadable, err
+		default:
+			var tags []shareTagFile
+			if jerr := json.Unmarshal(raw, &tags); jerr != nil {
+				st.Staged.State = leafUnreadable
+				st.Staged.Err = fmt.Errorf("staged state at %s is invalid: %w", stagedName, jerr)
+			} else {
+				m := make(map[uint16]shareTagFile, len(tags))
+				for _, t := range tags {
+					m[t.Kind] = t
+				}
+				st.Staged.Tags = m
+			}
+		}
+	}
+	return st, nil
+}
+
+// stagedCorruptRefusal is the ONE refusal text for a corrupt staged leaf,
+// shared by the real reconcile path and the dry-run preview so the preview
+// refuses with exactly the refusal its comment claims (r8 P2).
+func stagedCorruptRefusal(session string, l leafRead) error {
+	return protocol.Refuse(protocol.CodeInvalid,
+		"staged state at %s is invalid (%v); remedy: remove %s and re-sign the pending preimages (`amq-remote share --session %s` reprints them)",
+		l.Path, l.Err, l.Path, session)
 }
 
 // enrolledGeneration records the signed tags enrolled for the pending
@@ -523,27 +680,9 @@ type enrolledGeneration struct {
 	Tags []shareTagFile `json:"tags"`
 }
 
-// readEnrolledState distinguishes absence (nil, nil) from an unreadable or
-// invalid enrolled doc (nil, err). A corrupt share.json is never treated
-// as a fresh enrollment and never silently overwritten (codex P2).
-func readEnrolledState(keyDir string) (*enrolledGeneration, error) {
-	_, enrolled := sharePaths(keyDir)
-	if err := lstatStateLeaf(enrolled); err != nil {
-		return nil, err
-	}
-	raw, err := os.ReadFile(enrolled)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	var gen enrolledGeneration
-	if err := json.Unmarshal(raw, &gen); err != nil {
-		return nil, fmt.Errorf("enrolled state at share.json is invalid: %w", err)
-	}
-	return &gen, nil
-}
+// The enrolled read was folded into loadShareState (r9): enrolled is read
+// once by the loader; a corrupt share.json is never treated as a fresh
+// enrollment and never silently overwritten (codex P2).
 
 func writeSharePending(keyDir string, tags []shareTagFile, notAfter time.Time) error {
 	p, _ := sharePaths(keyDir)
@@ -558,7 +697,7 @@ func writeSharePending(keyDir string, tags []shareTagFile, notAfter time.Time) e
 	return writeStateFile(p, raw)
 }
 
-func writeShareTag(session, keyDir string, pending []shareTagFile, tf *shareTagFile) error {
+func writeShareTag(session, keyDir string, tf *shareTagFile) error {
 	// Staged publication (codex re-review P1): signed tags accumulate in
 	// share.staged.json; the ACTIVE generation in share.json is untouched
 	// until the pending generation is complete for every kind. Only then
@@ -566,24 +705,36 @@ func writeShareTag(session, keyDir string, pending []shareTagFile, tf *shareTagF
 	// pending window consumed. An interrupted enrollment therefore leaves
 	// the previous generation fully intact, and no write ever truncates a
 	// published file in place.
-	if _, err := readEnrolledState(keyDir); err != nil {
-		return err // corrupt/unreadable enrolled state is never overwritten
+	//
+	// Round-9: the loader is the only reader. The state may have changed
+	// since the caller loaded (enrollment is offline-paced), so this path
+	// loads its own snapshot and refuses on confinement or unreadable
+	// leaves — corrupt/unreadable enrolled state is never overwritten.
+	st, err := loadShareState(keyDir)
+	if err != nil {
+		return err
 	}
-	// Reconcile crash leftovers before reading staged state (verifier r3
-	// P2-3): a complete published generation with stale pending/staged is
-	// healed here so the enrollment targets the live window, not stale
-	// leftovers. (writeShareTag is called after enrollTag has already
-	// reconciled, so this only fires when state changed in between.)
-	pendingTags, _, pendingReadErr := readSharePending(keyDir)
-	if pendingReadErr == nil {
-		gen0, _ := readEnrolledState(keyDir)
-		if rerr := reconcileStagedState(session, keyDir, gen0, pendingTags, pendingReadErr); rerr != nil {
-			return rerr
-		}
+	if err := st.refuseIfConfined(); err != nil {
+		return err
 	}
-	staged, serr := readShareStaged(keyDir)
-	if serr != nil {
-		return serr
+	if st.Enrolled.Err != nil {
+		return st.Enrolled.Err
+	}
+	var pending []shareTagFile
+	if st.Pending.readable() {
+		pending = st.Pending.Tags
+	} else if st.Pending.Err != nil {
+		return st.Pending.Err // malformed pending: never publish over it
+	}
+	if rerr := reconcileStagedState(session, keyDir, st); rerr != nil {
+		return rerr
+	}
+	if st.Staged.Err != nil {
+		return stagedCorruptRefusal(session, st.Staged.leafRead)
+	}
+	staged := st.Staged.Tags
+	if staged == nil {
+		staged = map[uint16]shareTagFile{} // absent staged leaf: start the doc
 	}
 	// The staged doc is keyed by kind; a re-enrollment of the same kind in
 	// the same window replaces that staged entry.
@@ -696,45 +847,30 @@ const stagedName = "share.staged.json"
 //     remedy (remove it, re-sign) instead of an unrecoverable error.
 //
 // Doctor uses reportStagedState below: same detection, zero mutation.
-func reconcileStagedState(session, keyDir string, gen *enrolledGeneration, pending []shareTagFile, pendingErr error) error {
-	// Verifier r4 P1-1: reconcile READS and WRITES state leaves, so the
-	// leaf-confinement rule applies here too — doctor reaches this helper
-	// without any other guard, and a symlinked staged file was previously
-	// read through the link, used, and silently replaced.
-	if err := refuseSymlinkedState(keyDir); err != nil {
-		return err
-	}
-	return reconcileStagedStateMutating(session, keyDir, gen, pending, pendingErr)
+func reconcileStagedState(session, keyDir string, st *shareState) error {
+	return reconcileStagedStateMutating(session, keyDir, st)
 }
 
 // reportStagedState is doctor's read-only view of the same leftovers:
 // it detects what reconcileStagedState would heal or refuse and returns
 // the row text ("" when nothing is stale), but NEVER writes, deletes or
 // renames anything (architect ruling 10:09Z: doctor reports the leftover
-// with the remedy "run amq-remote share to reconcile").
-func reportStagedState(session, keyDir string, gen *enrolledGeneration, pending []shareTagFile, pendingErr error) string {
-	// Verifier r6 P2-5: the malformed-pending branch is unreachable — its
-	// only caller (doctor) refuses malformed pending before reaching
-	// reportStagedState, so it is simply deleted.
+// with the remedy "run amq-remote share to reconcile"). Round-9: it
+// consumes the loader snapshot; the staged outcome is typed, never
+// substring-matched from prose (r8 P2).
+func reportStagedState(session, keyDir string, st *shareState) string {
 	stagedPath := filepath.Join(keyDir, stagedName)
-	if err := lstatStateLeaf(stagedPath); err != nil {
-		// Verifier r6 P2-1: the remedy must be EXECUTABLE — plain share
-		// refuses a symlinked leaf, so the remedy is to remove the link by
-		// hand and then run share. The refusal is stated first, not buried.
-		return doctorNamedLeafError(keyDir, err) + "; remedy: remove the symlink at " + stagedPath + ", then run `amq-remote share --session " + session + "` to reconcile"
+	switch st.Staged.State {
+	case leafConfined:
+		// Verifier r6 P2-1: the remedy must be EXECUTABLE and derives from
+		// the typed outcome, not a hardcoded shape (r8 P2).
+		return st.Staged.Confinement.Error() + "; " + confinedLeafRemedy(st.Staged.leafRead) + ", then run `amq-remote share --session " + session + "` to reconcile"
+	case leafUnreadable:
+		return "staged state at " + stagedPath + " is invalid (" + st.Staged.Err.Error() + "); remedy: remove " + stagedPath + " and re-sign the pending preimages (`amq-remote share --session " + session + "` reprints them)"
 	}
-	raw, readErr := os.ReadFile(stagedPath)
-	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
-		return "reading " + stagedName + ": " + readErr.Error() + "; remedy: run `amq-remote share --session " + session + "` to reconcile"
-	}
-	if readErr == nil {
-		var tags []shareTagFile
-		if err := json.Unmarshal(raw, &tags); err != nil {
-			return "staged state at " + stagedPath + " is invalid (" + err.Error() + "); remedy: remove " + stagedPath + " and re-sign the pending preimages (`amq-remote share --session " + session + "` reprints them)"
-		}
-	}
-	if genCoversPendingWindow(gen, pending, pendingErr) {
-		leftover := readErr == nil
+	raw := stagedTags(st)
+	if st.Enrolled.Gen != nil && st.Pending.readable() && genCoversPendingWindow(st.Enrolled.Gen, st.Pending.Tags, nil) {
+		leftover := st.Staged.State == leafOK
 		pendingPath, _ := sharePaths(keyDir)
 		if pendingExists(pendingPath) {
 			leftover = true
@@ -745,15 +881,13 @@ func reportStagedState(session, keyDir string, gen *enrolledGeneration, pending 
 		return ""
 	}
 	// Window in progress: report superseded staged entries if any.
-	if readErr == nil {
-		var tags []shareTagFile
-		_ = json.Unmarshal(raw, &tags)
+	if st.Staged.State == leafOK && st.Pending.readable() {
 		conds := map[uint16]string{}
-		for _, p := range pending {
+		for _, p := range st.Pending.Tags {
 			conds[p.Kind] = p.Conditions
 		}
 		stale := 0
-		for _, t := range tags {
+		for _, t := range raw {
 			if conds[t.Kind] != t.Conditions {
 				stale++
 			}
@@ -763,6 +897,35 @@ func reportStagedState(session, keyDir string, gen *enrolledGeneration, pending 
 		}
 	}
 	return ""
+}
+
+// confinedLeafRemedy derives the removal remedy from the leaf's SHAPE as
+// the typed error recorded it (r8 P2: a symlink and a FIFO need different
+// words; a directory a third).
+func confinedLeafRemedy(l leafRead) string {
+	switch {
+	case l.Confinement != nil && strings.Contains(l.Confinement.Reason, "symlink"):
+		return "remove the symlink at " + l.Path
+	case l.Confinement != nil && strings.Contains(l.Confinement.Reason, "not a regular file"):
+		return "remove " + l.Path + " (it is not a regular file)"
+	default:
+		return "remove " + l.Path
+	}
+}
+
+// stagedTags returns the staged tags as a slice (loader snapshot; empty
+// when the leaf is absent or unreadable — callers gate on the outcome).
+func stagedTags(st *shareState) []shareTagFile {
+	if st.Staged.State != leafOK {
+		return nil
+	}
+	out := make([]shareTagFile, 0, len(st.Staged.Tags))
+	for _, kind := range bodykey.ShareKinds {
+		if t, ok := st.Staged.Tags[kind]; ok {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 func pluralYIes(n int) string {
@@ -796,23 +959,22 @@ func genCoversPendingWindow(gen *enrolledGeneration, pending []shareTagFile, pen
 		}()
 }
 
-func reconcileStagedStateMutating(session, keyDir string, gen *enrolledGeneration, pending []shareTagFile, pendingErr error) error {
-	if pendingErr != nil && !errors.Is(pendingErr, os.ErrNotExist) {
-		return pendingErr // malformed pending: refuse everywhere
+func reconcileStagedStateMutating(session, keyDir string, st *shareState) error {
+	if st.Pending.Err != nil {
+		return st.Pending.Err // malformed pending: refuse everywhere
 	}
-	genCoversPending := genCoversPendingWindow(gen, pending, pendingErr)
+	var pending []shareTagFile
+	if st.Pending.readable() {
+		pending = st.Pending.Tags
+	}
+	gen := st.Enrolled.Gen
+	genCoversPending := st.Pending.readable() && genCoversPendingWindow(gen, pending, nil)
 	stagedPath := filepath.Join(keyDir, stagedName)
-	raw, readErr := os.ReadFile(stagedPath)
-	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
-		return readErr
+	if st.Staged.Err != nil {
+		return stagedCorruptRefusal(session, st.Staged.leafRead)
 	}
-	if readErr == nil {
-		var tags []shareTagFile
-		if err := json.Unmarshal(raw, &tags); err != nil {
-			return protocol.Refuse(protocol.CodeInvalid,
-				"staged state at %s is invalid (%v); remedy: remove %s and re-sign the pending preimages (`amq-remote share --session %s` reprints them)",
-				stagedPath, err, stagedPath, session)
-		}
+	if st.Staged.State == leafOK {
+		tags := stagedTags(st)
 		if genCoversPending {
 			// Crash leftovers after publication: pending and staged are
 			// both stale; the published generation is the authority. The
@@ -855,18 +1017,6 @@ func reconcileStagedStateMutating(session, keyDir string, gen *enrolledGeneratio
 	return nil
 }
 
-// doctorNamedLeafError names the state file in a leaf-confinement error so
-// the operator knows which file to inspect (verifier r3 P2-7).
-func doctorNamedLeafError(_ string, err error) string {
-	// Verifier r4 P1-2: leaf-confinement refusals are typed and carry
-	// their path; match with errors.As, never substrings.
-	var leaf *stateLeafError
-	if errors.As(err, &leaf) {
-		return leaf.Error()
-	}
-	return err.Error()
-}
-
 // byKind converts a tag slice to the staged map shape.
 func byKind(tags []shareTagFile) map[uint16]shareTagFile {
 	m := make(map[uint16]shareTagFile, len(tags))
@@ -876,31 +1026,9 @@ func byKind(tags []shareTagFile) map[uint16]shareTagFile {
 	return m
 }
 
-// readShareStaged returns the staged tags keyed by kind (empty map when no
-// staged doc exists). A staged doc is advisory state; a corrupt one is
-// refused, not silently discarded.
-func readShareStaged(keyDir string) (map[uint16]shareTagFile, error) {
-	stagedPath := filepath.Join(keyDir, stagedName)
-	if err := lstatStateLeaf(stagedPath); err != nil {
-		return nil, err
-	}
-	raw, err := os.ReadFile(stagedPath)
-	if errors.Is(err, os.ErrNotExist) {
-		return map[uint16]shareTagFile{}, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	var tags []shareTagFile
-	if err := json.Unmarshal(raw, &tags); err != nil {
-		return nil, fmt.Errorf("staged state at %s is invalid: %w", stagedName, err)
-	}
-	m := make(map[uint16]shareTagFile, len(tags))
-	for _, t := range tags {
-		m[t.Kind] = t
-	}
-	return m, nil
-}
+// The staged read was folded into loadShareState (r9): staged is read
+// once by the loader; a corrupt staged doc is refused, not discarded
+// (the typed refusal is stagedCorruptRefusal).
 
 func writeShareStaged(keyDir string, staged map[uint16]shareTagFile) error {
 	tags := make([]shareTagFile, 0, len(staged))
@@ -1098,62 +1226,101 @@ func doctorShareInspection(root string) map[string]any {
 		}
 		keyDir := filepath.Join(keysRoot, e.Name())
 		info := map[string]any{}
-		if k, err := bodykey.Load(filepath.Join(keyDir, "body.key")); err == nil {
-			info["body_pubkey"] = k.PublicKeyHex()
-		} else {
-			if errors.Is(err, os.ErrNotExist) {
-				info["key_error"] = err.Error()
-				info["remedy"] = "run `amq-remote share --session " + e.Name() + "` to mint one"
+		// Round-9: ONE loader snapshot per session; every row derives from
+		// its typed outcomes.
+		st, lerr := loadShareState(keyDir)
+		if lerr != nil {
+			info["attestation_error"] = lerr.Error()
+			out[e.Name()] = info
+			continue
+		}
+		// Confined state leaves (enrolled/pending/staged) surface as the
+		// attestation_error row: the typed refusal names the leaf (the
+		// r4 P1-2 pin: doctor reports a symlinked state leaf by name).
+		// body.pub stays its own body_pub_error row below.
+		confined, progressKnownLater := false, true
+		for _, l := range st.confinedLeaves() {
+			if strings.HasSuffix(l.Path, "body.pub") {
+				continue // its own body_pub_error row below
+			}
+			if strings.HasSuffix(l.Path, stagedName) {
+				// Staged confinement keeps its own row + executable remedy
+				// (the r6 P2-1 pin) and still completes the diagnostic.
+				info["staged_error"] = l.Confinement.Error() + "; " + confinedLeafRemedy(l) + ", then run `amq-remote share --session " + e.Name() + "` to reconcile"
+				progressKnownLater = false
+				continue
+			}
+			info["attestation_error"] = l.Confinement.Error()
+			out[e.Name()] = info
+			confined = true
+			break
+		}
+		if confined {
+			out[e.Name()] = info
+			continue
+		}
+		// r8 P1-2: the body.pub check runs BEFORE the key-presence branch —
+		// it was unreachable whenever body.key was absent, so the mint
+		// remedy (follow the leaf, exit 6) survived. The remedy derives
+		// from the leaf SHAPE (r8 P2); when the key is absent the mint step
+		// is named only AFTER the leaf is repaired.
+		if st.BodyPub.State == leafConfined {
+			info["body_pub_error"] = st.BodyPub.Confinement.Error()
+			info["remedy"] = confinedLeafRemedy(st.BodyPub) + ", then re-run share/renew"
+		}
+		k, kerr := bodykey.Load(filepath.Join(keyDir, "body.key"))
+		if kerr != nil {
+			if errors.Is(kerr, os.ErrNotExist) {
+				info["key_error"] = kerr.Error()
+				if _, confined := info["body_pub_error"]; confined {
+					// Mint would refuse (exit 6) until the leaf is repaired:
+					// keep the remedy executable.
+					info["remedy"] = confinedLeafRemedy(st.BodyPub) + ", then run `amq-remote share --session " + e.Name() + "` to mint the key"
+				} else {
+					info["remedy"] = "run `amq-remote share --session " + e.Name() + "` to mint one"
+				}
 			} else {
 				// Corrupt/unusable key: never point at --renew — a new
 				// window signed under a replacement key would not match
 				// the enrolled credentials. Operator inspection first.
-				info["key_error"] = err.Error()
+				info["key_error"] = kerr.Error()
 				info["remedy"] = "inspect the key directory by hand; do NOT renew over a broken key"
 			}
 			out[e.Name()] = info
 			continue
 		}
-		gen, gerr := readEnrolledState(keyDir)
-		if gerr != nil {
-			// Name the file in leaf-confinement errors (verifier r3 P2-7).
-			info["attestation_error"] = doctorNamedLeafError(keyDir, gerr)
+		info["body_pubkey"] = k.PublicKeyHex()
+		if st.Enrolled.Err != nil {
+			// Name the file in leaf errors (verifier r3 P2-7) — typed, from
+			// the loader outcome.
+			info["attestation_error"] = st.Enrolled.Err.Error()
 			out[e.Name()] = info
 			continue
 		}
-		// Round-6 order (folded into r7): doctor reports a symlinked (or
-		// otherwise non-regular) body.pub leaf too — doctor is read-only so
-		// it lstats the leaf additively instead of refusing, but the row
-		// names the leaf and the same remedy share prints, so the
-		// operator sees the confinement problem before the next real
-		// command refuses.
-		if err := lstatStateLeaf(filepath.Join(keyDir, "body.pub")); err != nil {
-			info["body_pub_error"] = doctorNamedLeafError(keyDir, err)
-			info["remedy"] = "remove the symlink at " + filepath.Join(keyDir, "body.pub") + " and re-run share/renew"
-		}
+		gen := st.Enrolled.Gen
 		// Outstanding pending preimages are visible in BOTH branches: a
 		// half-finished renewal keeps every old tag, so the enrolled tag
 		// count alone cannot distinguish it from a healthy enrollment
 		// (verifier r2 P1-3). While unsigned preimages remain, the remedy
 		// is always plain `share`, never `--renew` — renewing rotates the
 		// window and strands preimages the owner may already be signing.
-		pendingTags, _, pendingErr := readSharePending(keyDir)
+		if st.Pending.Err != nil {
+			// Malformed pending state is surfaced, never treated as absence
+			// (codex r3 #2: doctor must not report a healthy state over a
+			// corrupt window).
+			info["attestation_error"] = st.Pending.Err.Error()
+			out[e.Name()] = info
+			continue
+		}
+		pendingTags := st.Pending.Tags
 		outstanding := 0
 		// progressKnown is the r7 P1 tri-state: progress over the staged
 		// leaf is only reported when the leaf was actually read. An
-		// unreadable staged leaf (corrupt or symlinked) sets it false —
+		// unreadable staged leaf (corrupt or confined) sets it false —
 		// doctor then reports "progress unknown" and never a signed count
 		// it did not read, and the renewal-in-progress warning/attestation
 		// paths that a zero default would fabricate are suppressed.
 		progressKnown := true
-		if pendingErr != nil && !errors.Is(pendingErr, os.ErrNotExist) {
-			// Malformed pending state is surfaced, never treated as absence
-			// (codex r3 #2: doctor must not report a healthy state over a
-			// corrupt window).
-			info["attestation_error"] = doctorNamedLeafError(keyDir, pendingErr)
-			out[e.Name()] = info
-			continue
-		}
 		// Architect ruling 10:09Z (r4 P2-3): doctor is REPORT-ONLY — a
 		// diagnostic never deletes or rewrites state (CLAUDE.md: cleanup is
 		// explicit). Leftovers are reported as a row with the reconcile
@@ -1163,10 +1330,10 @@ func doctorShareInspection(root string) map[string]any {
 		// emitted (an expired generation with leftovers must still say
 		// expired). Only a genuine corrupt-staged refusal continues early,
 		// and even that keeps the rows computed so far.
-		leftoverRow := reportStagedState(e.Name(), keyDir, gen, pendingTags, pendingErr)
-		stagedUnusable := strings.Contains(leftoverRow, "is invalid") || strings.Contains(leftoverRow, "symlink")
+		leftoverRow := reportStagedState(e.Name(), keyDir, st)
+		stagedUnusable := st.Staged.State == leafUnreadable || st.Staged.State == leafConfined || !progressKnownLater
 		if stagedUnusable {
-			// Corrupt or symlinked staged: surface the refusal and still
+			// Corrupt or confined staged: surface the refusal and still
 			// complete the diagnostic (attestation/expiry below). Progress
 			// over unreadable state is UNKNOWN (r7 P1): no signed count is
 			// printed and the renew remedy is suppressed — an unreadable
@@ -1176,19 +1343,8 @@ func doctorShareInspection(root string) map[string]any {
 		} else if leftoverRow != "" {
 			info["leftover"] = leftoverRow
 		}
-		if pendingErr == nil && !stagedUnusable {
-			staged, serr := readShareStaged(keyDir)
-			if serr != nil {
-				// Verifier r6 P1-1: the refusal is ADDITIVE — it joins the
-				// report (attestation/expiry/per-kind are still emitted
-				// below). Progress over unreadable state is UNKNOWN: the
-				// count is skipped and no signed fraction is printed (r7 P1:
-				// the zero default fabricated "5 of 5 signed").
-				info["staged_error"] = doctorNamedLeafError(keyDir, serr)
-				progressKnown = false
-			} else {
-				outstanding = len(outstandingPending(pendingTags, staged, gen))
-			}
+		if progressKnown {
+			outstanding = len(outstandingPending(pendingTags, st.Staged.Tags, gen))
 		}
 		if gen != nil && len(gen.Tags) > 0 {
 			perKind := map[string]any{}
@@ -1204,19 +1360,22 @@ func doctorShareInspection(root string) map[string]any {
 					earliest = exp
 				}
 			}
-			if pendingErr == nil && progressKnown && outstanding > 0 {
+			renewalInProgress := len(pendingTags) > 0
+			if renewalInProgress && progressKnown && outstanding > 0 {
 				info["attestation"] = fmt.Sprintf("enrolled, renewal in progress: %d of %d kinds signed (staged)", len(bodykey.ShareKinds)-outstanding, len(bodykey.ShareKinds))
 				info["warning"] = fmt.Sprintf("renewal in progress: %d preimage(s) still unsigned; run `amq-remote share --session %s` to reprint them (do NOT renew: renewing rotates the window and the still-unsigned preimages)", outstanding, e.Name())
-			} else if !progressKnown {
-				// r7 P1: progress unknown — say so, never a count we did not
-				// read, and never the plain-`share`-to-complete remedy (it
-				// presumes known progress).
+			} else if renewalInProgress && !progressKnown {
+				// r8 P1-3: whether a renewal is in progress is knowable from
+				// the pending window ALONE; only the COUNT needs the staged
+				// leaf. The known fact stays; the unknown count is never
+				// fabricated, and the do-NOT-renew warning survives.
 				info["attestation"] = "enrolled"
 				info["progress"] = "unknown: staged state unreadable (see staged_error)"
+				info["warning"] = "renewal in progress: preimage count unknown (staged state unreadable); run `amq-remote share --session " + e.Name() + "` to reprint the preimages (do NOT renew: renewing rotates the window and the still-unsigned preimages)"
 			} else {
 				info["attestation"] = "enrolled"
 			}
-			renewalOutstanding := pendingErr == nil && outstanding > 0
+			renewalOutstanding := renewalInProgress && (progressKnown && outstanding > 0 || !progressKnown)
 			info["kinds"] = perKind
 			if !earliest.IsZero() {
 				// Verifier r3 P1-1: the expiry FACT is always emitted — an
@@ -1247,12 +1406,18 @@ func doctorShareInspection(root string) map[string]any {
 			out[e.Name()] = info
 			continue
 		}
-		if pendingErr == nil && progressKnown {
+		if st.Pending.readable() && progressKnown {
 			info["attestation"] = fmt.Sprintf("pending: %d of %d kinds signed (staged)", len(bodykey.ShareKinds)-outstanding, len(bodykey.ShareKinds))
-		} else if pendingErr == nil && !progressKnown {
+		} else if st.Pending.readable() && !progressKnown {
 			// r7 P1: progress over unreadable staged state is UNKNOWN —
 			// "pending: 5 of 5" over a corrupt leaf fabricated completion.
 			info["attestation"] = "pending: progress unknown (staged state unreadable: see staged_error)"
+			// r8 P1-3: a pending window alone proves a renewal is in
+			// progress — the warning survives even when the count is
+			// unknown; only a fabricated count is forbidden.
+			if len(pendingTags) > 0 {
+				info["warning"] = "renewal in progress: preimage count unknown (staged state unreadable); run `amq-remote share --session " + e.Name() + "` to reprint the preimages (do NOT renew: renewing rotates the window and the still-unsigned preimages)"
+			}
 		} else {
 			info["attestation"] = "missing: run `amq-remote share --session " + e.Name() + "`"
 		}
