@@ -94,8 +94,12 @@ func TestShareMintPrintEnrollFullLifecycle(t *testing.T) {
 		}
 	}
 
-	// Enroll each kind. Until all kinds are enrolled, pending stays.
-	for kind, conds := range condsByKind {
+	// Enroll each kind in DECLARED order (verifier r2 P1-1: ranging a map
+	// randomized the order and the pending guard raced the completion).
+	// Until all kinds are enrolled, pending stays.
+	enrolled := 0
+	for _, kind := range bodykey.ShareKinds {
+		conds := condsByKind[kind]
 		tagPath := filepath.Join(t.TempDir(), "tag.json")
 		doc := `{"kind":` + jsonNumber(int(kind)) + `,"owner_pubkey":"` + ownerPubHex + `","conditions":"` + conds + `","sig":"` + ownerSignFor(t, k.PublicKeyHex(), conds) + `"}`
 		if err := os.WriteFile(tagPath, []byte(doc), 0o600); err != nil {
@@ -104,7 +108,8 @@ func TestShareMintPrintEnrollFullLifecycle(t *testing.T) {
 		if _, _, code := runShare(t, "--root", root, "--session", "s1", "--tag-file", tagPath); code != 0 {
 			t.Fatalf("enroll kind %d failed", kind)
 		}
-		if kind == condsByKindFirst(condsByKind) {
+		enrolled++
+		if enrolled < len(condsByKind) {
 			if _, err := os.Stat(filepath.Join(keyDir, "share.pending.json")); err != nil {
 				t.Fatal("pending window consumed before all kinds enrolled")
 			}
@@ -124,13 +129,6 @@ func TestShareMintPrintEnrollFullLifecycle(t *testing.T) {
 	if strings.Contains(out2, "preimage") {
 		t.Fatalf("plain share must not mint a new window over an enrolled one:\n%s", out2)
 	}
-}
-
-func condsByKindFirst(m map[uint16]string) uint16 {
-	for k := range m {
-		return k
-	}
-	return 0
 }
 
 func jsonNumber(i int) string {
@@ -319,7 +317,7 @@ func TestShareRenewReprintsAllKinds(t *testing.T) {
 	// Doctor: pending attestation reported (owner has not signed yet).
 	inspect := doctorShareInspection(root)
 	info := inspect["r1"].(map[string]any)
-	if info["attestation"] != "pending: owner has not returned signed tags yet" {
+	if info["attestation"] != "pending: 0 of 5 kinds signed (staged)" {
 		t.Fatalf("doctor attestation = %v", info["attestation"])
 	}
 	// Doctor expiry warning derived from signed conditions: enroll only
@@ -399,24 +397,12 @@ func TestShareRejectsSelfAttestation(t *testing.T) {
 func enrollAllPending(t *testing.T, root, session string) {
 	t.Helper()
 	keyDir := filepath.Join(root, "extensions", "remote", "keys", session)
-	k, err := bodykey.Load(filepath.Join(keyDir, "body.key"))
-	if err != nil {
-		t.Fatal(err)
-	}
 	tags, _, err := readSharePending(keyDir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, tag := range tags {
-		tagPath := filepath.Join(t.TempDir(), "tag.json")
-		doc := `{"kind":` + jsonNumber(int(tag.Kind)) + `,"owner_pubkey":"` + ownerPubHex + `","conditions":"` + tag.Conditions + `","sig":"` + ownerSignFor(t, k.PublicKeyHex(), tag.Conditions) + `"}`
-		if err := os.WriteFile(tagPath, []byte(doc), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		var stderr bytes.Buffer
-		if code, _ := share([]string{"--root", root, "--session", session, "--tag-file", tagPath}, &bytes.Buffer{}, &stderr); code != 0 {
-			t.Fatalf("enroll kind %d refused: %s", tag.Kind, stderr.String())
-		}
+		enrollOne(t, root, session, tag.Kind, tag.Conditions)
 	}
 }
 
@@ -443,18 +429,8 @@ func TestFullEnrollRenewEnrollAllKinds(t *testing.T) {
 	condsByKind := pendingConditions(t, out)
 	// Enroll ONE kind of the new generation: pending must NOT be consumed
 	// (the old five-tag enrollment must not count toward completion).
-	one := condsByKindFirst(condsByKind)
-	conds := condsByKind[one]
-	k, err := bodykey.Load(filepath.Join(keyDir, "body.key"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	tagPath := filepath.Join(t.TempDir(), "tag.json")
-	doc := `{"kind":` + jsonNumber(int(one)) + `,"owner_pubkey":"` + ownerPubHex + `","conditions":"` + conds + `","sig":"` + ownerSignFor(t, k.PublicKeyHex(), conds) + `"}`
-	_ = os.WriteFile(tagPath, []byte(doc), 0o600)
-	if _, _, code := runShare(t, "--root", root, "--session", "g1", "--tag-file", tagPath); code != 0 {
-		t.Fatalf("first renewal enrollment refused")
-	}
+	one := bodykey.ShareKinds[0]
+	enrollOne(t, root, "g1", one, condsByKind[one])
 	if _, err := os.Stat(filepath.Join(keyDir, "share.pending.json")); err != nil {
 		t.Fatal("pending consumed after ONE renewal enrollment — old generation counted toward completion")
 	}
@@ -512,21 +488,11 @@ func enrollOne(t *testing.T, root, session string, kind uint16, conds string) {
 
 func enrollRemaining(t *testing.T, root, session string, condsByKind map[uint16]string, done uint16) {
 	t.Helper()
-	keyDir := filepath.Join(root, "extensions", "remote", "keys", session)
-	k, err := bodykey.Load(filepath.Join(keyDir, "body.key"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for kind, conds := range condsByKind {
+	for _, kind := range bodykey.ShareKinds {
 		if kind == done {
 			continue
 		}
-		tagPath := filepath.Join(t.TempDir(), "tag.json")
-		doc := `{"kind":` + jsonNumber(int(kind)) + `,"owner_pubkey":"` + ownerPubHex + `","conditions":"` + conds + `","sig":"` + ownerSignFor(t, k.PublicKeyHex(), conds) + `"}`
-		if err := os.WriteFile(tagPath, []byte(doc), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		enrollOne(t, root, session, kind, conds)
+		enrollOne(t, root, session, kind, condsByKind[kind])
 	}
 }
 
@@ -619,8 +585,7 @@ func TestBodyKeySymlinkLeafRefused(t *testing.T) {
 	root := t.TempDir()
 	// Foreign valid key outside the root.
 	foreignDir := t.TempDir()
-	foreign, err := bodykey.LoadOrMint(foreignDir)
-	if err != nil {
+	if _, err := bodykey.LoadOrMint(foreignDir); err != nil {
 		t.Fatal(err)
 	}
 	runShare(t, "--root", root, "--session", "sl1")
@@ -644,7 +609,6 @@ func TestBodyKeySymlinkLeafRefused(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(keyDir, "share.pending.json")); err == nil {
 		t.Fatal("pending window minted for the symlinked foreign key")
 	}
-	_ = foreign
 }
 
 // TestPlainShareReprintsOutstanding pins verifier P0-1's flow fix: mid-renewal
@@ -695,9 +659,6 @@ func TestPlainShareReprintsOutstanding(t *testing.T) {
 	for _, tf := range gen.Tags {
 		enrolledConds[tf.Kind] = tf.Conditions
 	}
-	if !gen.Complete {
-		t.Fatalf("renewed generation not complete: %+v", gen)
-	}
 	if _, err := os.Stat(filepath.Join(keyDir, "share.pending.json")); !os.IsNotExist(err) {
 		t.Fatalf("pending not consumed after completing the renewal: %v", err)
 	}
@@ -728,4 +689,289 @@ func TestDryRunPrintsPendingPreimages(t *testing.T) {
 			t.Fatalf("dry-run output missing enrollable preimage for kind %d:\n%s", pt.Kind, out)
 		}
 	}
+}
+
+// TestActiveGenerationStaysUntilComplete pins codex re-review P1 #1: the
+// ACTIVE enrolled generation must not change until the pending generation
+// is complete. A single new-generation enrollment stages the tag; share.json
+// still holds the old signed tag for that kind.
+func TestActiveGenerationStaysUntilComplete(t *testing.T) {
+	root := t.TempDir()
+	runShare(t, "--root", root, "--session", "st1")
+	enrollAllPending(t, root, "st1")
+	keyDir := filepath.Join(root, "extensions", "remote", "keys", "st1")
+	before := readEnrolledTagsForTest(t, keyDir)
+	out, _, code := runShare(t, "--root", root, "--session", "st1", "--renew")
+	if code != 0 {
+		t.Fatal("renew refused")
+	}
+	pending := pendingConditions(t, out)
+	enrollOne(t, root, "st1", 20003, pending[20003])
+	after := readEnrolledTagsForTest(t, keyDir)
+	for _, old := range before {
+		for _, current := range after {
+			if old.Kind == current.Kind && old != current {
+				t.Fatalf("active kind %d changed before pending generation completed", old.Kind)
+			}
+		}
+	}
+	// Completing the generation publishes the new one atomically and drops
+	// the staged doc.
+	enrollRemaining(t, root, "st1", pending, 20003)
+	gen, err := readEnrolledState(keyDir)
+	if err != nil || gen == nil {
+		t.Fatalf("published generation missing: %v", err)
+	}
+	if len(gen.Tags) != len(bodykey.ShareKinds) {
+		t.Fatalf("published generation incomplete: %+v", gen)
+	}
+	published := map[uint16]string{}
+	for _, tf := range gen.Tags {
+		published[tf.Kind] = tf.Conditions
+	}
+	for kind, conds := range pending {
+		if published[kind] != conds {
+			t.Fatalf("published kind %d has %q, want new-window %q", kind, published[kind], conds)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(keyDir, stagedName)); !os.IsNotExist(err) {
+		t.Fatalf("staged doc not consumed after completion: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(keyDir, "share.pending.json")); !os.IsNotExist(err) {
+		t.Fatalf("pending not consumed after completion: %v", err)
+	}
+}
+
+// TestPendingStateSymlinkRefused pins codex re-review P1 #2: a symlinked
+// share.pending.json (or share.json) is refused; renew must not follow it
+// and rewrite an out-of-root file.
+func TestPendingStateSymlinkRefused(t *testing.T) {
+	root := t.TempDir()
+	runShare(t, "--root", root, "--session", "sl2")
+	keyDir := filepath.Join(root, "extensions", "remote", "keys", "sl2")
+	pendingPath := filepath.Join(keyDir, "share.pending.json")
+	raw, err := os.ReadFile(pendingPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(t.TempDir(), "outside.json")
+	if err := os.WriteFile(target, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(pendingPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, pendingPath); err != nil {
+		t.Skipf("cannot symlink in this environment: %v", err)
+	}
+	if code, _ := share([]string{"--root", root, "--session", "sl2", "--renew"}, &bytes.Buffer{}, &bytes.Buffer{}); code == 0 {
+		t.Fatal("renew followed a symlinked pending state file")
+	}
+	after, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(raw, after) {
+		t.Fatal("renew rewrote the out-of-root target through the pending symlink")
+	}
+	// The enrolled leaf is equally confined.
+	if err := os.Remove(pendingPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pendingPath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	enrolledPath := filepath.Join(keyDir, "share.json")
+	if err := os.Symlink(target, enrolledPath); err != nil {
+		t.Skipf("cannot symlink in this environment: %v", err)
+	}
+	if code, _ := share([]string{"--root", root, "--session", "sl2", "--renew"}, &bytes.Buffer{}, &bytes.Buffer{}); code == 0 {
+		t.Fatal("renew followed a symlinked enrolled state file")
+	}
+}
+
+// TestRenewDryRunMatchesRenew pins codex re-review P2 #3: `share --renew
+// --dry-run` previews EXACTLY the window a real renew mints (same bump
+// arithmetic) — the owner can sign the previewed preimages and enroll them.
+func TestRenewDryRunMatchesRenew(t *testing.T) {
+	root := t.TempDir()
+	runShare(t, "--root", root, "--session", "dr1")
+	enrollAllPending(t, root, "dr1")
+	preview, _, code := runShare(t, "--root", root, "--session", "dr1", "--renew", "--dry-run")
+	if code != 0 {
+		t.Fatal("renew dry-run refused")
+	}
+	if !strings.Contains(preview, "dry-run") {
+		t.Fatalf("renew dry-run not labeled as dry-run:\n%s", preview)
+	}
+	previewConds := pendingConditions(t, preview)
+	// The preview must be a NEW generation relative to the enrolled one
+	// (bumped past it), not the stale window.
+	keyDir := filepath.Join(root, "extensions", "remote", "keys", "dr1")
+	for _, old := range readEnrolledTagsForTest(t, keyDir) {
+		if previewConds[old.Kind] == old.Conditions {
+			t.Fatalf("renew dry-run previewed the STALE window for kind %d", old.Kind)
+		}
+	}
+	// The preview must equal the real renewal's minted window.
+	actual, _, code := runShare(t, "--root", root, "--session", "dr1", "--renew")
+	if code != 0 {
+		t.Fatal("renew refused")
+	}
+	actualConds := pendingConditions(t, actual)
+	for kind, conds := range previewConds {
+		if actualConds[kind] != conds {
+			t.Fatalf("renew dry-run drifted from real renew for kind %d: preview=%s actual=%s", kind, conds, actualConds[kind])
+		}
+	}
+}
+
+// TestShareDryRunNoPendingLabelsIllustrative pins codex re-review P2 #3
+// (second half): a dry-run with no pending window prints a fresh-bound
+// window clearly labeled as not-enrollable.
+func TestShareDryRunNoPendingLabelsIllustrative(t *testing.T) {
+	root := t.TempDir()
+	out, _, code := runShare(t, "--root", root, "--session", "dr2", "--dry-run")
+	if code != 0 {
+		t.Fatal("dry-run refused")
+	}
+	if !strings.Contains(out, "dry-run") {
+		t.Fatalf("dry-run output not labeled:\n%s", out)
+	}
+	// Nothing was written.
+	if _, err := os.Stat(filepath.Join(root, "extensions", "remote", "keys", "dr2", "body.key")); !os.IsNotExist(err) {
+		t.Fatal("dry-run minted a body key")
+	}
+}
+
+// TestRenewFailsClosedOnCorruptEnrolledState pins verifier r2 P1-2: --renew
+// must refuse on a torn/corrupt share.json like every other path — it must
+// not exit 0 minting a window no tag can ever be enrolled into.
+func TestRenewFailsClosedOnCorruptEnrolledState(t *testing.T) {
+	root := t.TempDir()
+	runShare(t, "--root", root, "--session", "cr1")
+	enrollAllPending(t, root, "cr1")
+	keyDir := filepath.Join(root, "extensions", "remote", "keys", "cr1")
+	if err := os.WriteFile(filepath.Join(keyDir, "share.json"), []byte("{torn"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code, _ := share([]string{"--root", root, "--session", "cr1", "--renew"}, &bytes.Buffer{}, &bytes.Buffer{}); code == 0 {
+		t.Fatal("--renew exited 0 over corrupt enrolled state")
+	}
+	// The corrupt file is untouched (never silently overwritten).
+	if got, _ := os.ReadFile(filepath.Join(keyDir, "share.json")); string(got) != "{torn" {
+		t.Fatal("corrupt enrolled state was overwritten by --renew")
+	}
+	// The dry-run renewal preview fails closed on the same input.
+	if code, _ := share([]string{"--root", root, "--session", "cr1", "--renew", "--dry-run"}, &bytes.Buffer{}, &bytes.Buffer{}); code == 0 {
+		t.Fatal("--renew --dry-run exited 0 over corrupt enrolled state")
+	}
+}
+
+// TestDoctorSeesRenewalInProgress pins verifier r2 P1-3: during a
+// half-finished renewal the doctor reports the outstanding preimages and
+// its remedy is plain `share`, never `--renew` — the enrolled tag count
+// alone cannot distinguish a half renewal from a healthy enrollment.
+func TestDoctorSeesRenewalInProgress(t *testing.T) {
+	root := t.TempDir()
+	runShare(t, "--root", root, "--session", "dc1")
+	enrollAllPending(t, root, "dc1")
+	out, _, code := runShare(t, "--root", root, "--session", "dc1", "--renew")
+	if code != 0 {
+		t.Fatal("renew refused")
+	}
+	condsByKind := pendingConditions(t, out)
+	enrollOne(t, root, "dc1", 20003, condsByKind[20003])
+	inspect := doctorShareInspection(root)
+	info := inspect["dc1"].(map[string]any)
+	if info["attestation"] != "enrolled, renewal in progress: 1 of 5 kinds signed (staged)" {
+		t.Fatalf("doctor missed the half-finished renewal: %v", info["attestation"])
+	}
+	warn, _ := info["warning"].(string)
+	if !strings.Contains(warn, "do NOT renew") {
+		t.Fatalf("doctor warning missing the do-not-renew remedy: %v", warn)
+	}
+	if _, has := info["expiry_warning"]; has {
+		t.Fatalf("expiry remedy pointed at --renew while preimages are outstanding: %v", info["expiry_warning"])
+	}
+	// Completing the renewal clears the warning.
+	enrollRemaining(t, root, "dc1", condsByKind, 20003)
+	inspect2 := doctorShareInspection(root)
+	info2 := inspect2["dc1"].(map[string]any)
+	if info2["attestation"] != "enrolled" {
+		t.Fatalf("completed renewal still flagged: %v", info2["attestation"])
+	}
+}
+
+// TestShareLeafConfinementPreMintAndEnrolled pins verifier r2 P1-4's wider
+// findings: a pending symlink planted before the FIRST share is refused
+// (no --renew needed), and a symlinked share.json is refused on enrollment.
+func TestShareLeafConfinementPreMintAndEnrolled(t *testing.T) {
+	// Case 1: symlink before first mint — plain share must refuse.
+	root := t.TempDir()
+	keysRoot := filepath.Join(root, "extensions", "remote", "keys", "pf1")
+	if err := os.MkdirAll(keysRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	victim := filepath.Join(t.TempDir(), "victim.txt")
+	if err := os.WriteFile(victim, []byte("PRECIOUS OPERATOR FILE\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, filepath.Join(keysRoot, "share.pending.json")); err != nil {
+		t.Skipf("cannot symlink in this environment: %v", err)
+	}
+	if code, _ := share([]string{"--root", root, "--session", "pf1"}, &bytes.Buffer{}, &bytes.Buffer{}); code == 0 {
+		t.Fatal("plain share followed a symlinked pending leaf pre-mint")
+	}
+	after, err := os.ReadFile(victim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != "PRECIOUS OPERATOR FILE\n" {
+		t.Fatal("victim clobbered through the pre-mint pending symlink")
+	}
+
+	// Case 2: symlinked share.json before an enrollment.
+	root2 := t.TempDir()
+	runShare(t, "--root", root2, "--session", "pf2")
+	keyDir := filepath.Join(root2, "extensions", "remote", "keys", "pf2")
+	if err := os.Remove(filepath.Join(keyDir, "share.json")); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	victim2 := filepath.Join(t.TempDir(), "victim2.json")
+	if err := os.WriteFile(victim2, []byte(`{"tags":[],"note":"operator file that happens to be JSON"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim2, filepath.Join(keyDir, "share.json")); err != nil {
+		t.Skipf("cannot symlink in this environment: %v", err)
+	}
+	tags, _, err := readSharePending(keyDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, _ := share([]string{"--root", root2, "--session", "pf2", "--tag-file", writeTagFile(t, keyDir, tags[0])}, &bytes.Buffer{}, &bytes.Buffer{}); code == 0 {
+		t.Fatal("enrollment followed a symlinked share.json leaf")
+	}
+	vAfter, err := os.ReadFile(victim2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(vAfter) != `{"tags":[],"note":"operator file that happens to be JSON"}` {
+		t.Fatal("victim2 clobbered through the share.json symlink")
+	}
+}
+
+// writeTagFile signs one pending tag into a temp tag file.
+func writeTagFile(t *testing.T, keyDir string, tag shareTagFile) string {
+	t.Helper()
+	k, err := bodykey.Load(filepath.Join(keyDir, "body.key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tagPath := filepath.Join(t.TempDir(), "tag.json")
+	doc := `{"kind":` + jsonNumber(int(tag.Kind)) + `,"owner_pubkey":"` + ownerPubHex + `","conditions":"` + tag.Conditions + `","sig":"` + ownerSignFor(t, k.PublicKeyHex(), tag.Conditions) + `"}`
+	if err := os.WriteFile(tagPath, []byte(doc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return tagPath
 }

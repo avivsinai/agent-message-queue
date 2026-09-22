@@ -140,12 +140,20 @@ func share(args []string, stdout, stderr io.Writer) (int, error) {
 			return 0, nil
 		}
 		// Dry-run must print exactly what a real run would enroll
-		// (verifier P1-3): when a pending window exists, print ITS
-		// preimages, not a recomputed fresh bound.
-		if pendingTags, _, perr := readSharePending(keyDir); perr == nil && len(pendingTags) > 0 {
-			if _, gerr := readEnrolledState(keyDir); gerr != nil {
-				return protocol.ExitActionRequired, gerr
+		// (verifier P1-3, r2 P1-5): with --renew, the preview is the window
+		// a real renew would mint (same bump arithmetic, same corrupt-state
+		// refusal); with a plain pending window, its own enrollable
+		// preimages; otherwise an explicitly non-enrollable illustration.
+		if *renew {
+			preview, err := renewalWindow(keyDir, *days)
+			if err != nil {
+				return protocol.ExitActionRequired, err
 			}
+			printSharePending(stdout, *session, k, preview.tags, preview.notAfter)
+			say(stdout, "(dry-run: no state written; these preimages match the next real `share --renew`)")
+			return 0, nil
+		}
+		if pendingTags, _, perr := readSharePending(keyDir); perr == nil && len(pendingTags) > 0 {
 			printSharePending(stdout, *session, k, pendingTags, time.Time{})
 			return 0, nil
 		}
@@ -169,24 +177,14 @@ func share(args []string, stdout, stderr io.Writer) (int, error) {
 	}
 
 	// Mint or renew: persist one pending window per kind so doctor can warn
-	// before expiry, and print the preimages for the owner to sign.
-	notAfter := time.Now().Add(time.Duration(*days) * 24 * time.Hour)
-	if *renew {
-		// A renewal is a NEW generation even in the same second as the old
-		// window: bump the bound past any existing pending/enrolled
-		// conditions so the signed preimages (and generation identity)
-		// actually change.
-		if prev, _, perr := readSharePending(keyDir); perr == nil && len(prev) > 0 {
-			if maxOld := maxPendingBound(prev); notAfter.Unix() <= maxOld {
-				notAfter = time.Unix(maxOld+1, 0)
-			}
-		}
-		if gen, gerr := readEnrolledState(keyDir); gerr == nil && gen != nil {
-			if maxEnrolled := maxEnrolledBound(gen.Tags); notAfter.Unix() <= maxEnrolled {
-				notAfter = time.Unix(maxEnrolled+1, 0)
-			}
-		}
+	// before expiry, and print the preimages for the owner to sign. The
+	// window arithmetic lives in ONE place (renewalWindow) so --dry-run
+	// previews exactly what a real run mints (codex re-review P2).
+	window, err := renewalWindow(keyDir, *days)
+	if err != nil {
+		return protocol.ExitActionRequired, err
 	}
+	notAfter, pending := window.notAfter, window.tags
 	if !*renew {
 		gen, gerr := readEnrolledState(keyDir)
 		if gerr != nil {
@@ -199,8 +197,12 @@ func share(args []string, stdout, stderr io.Writer) (int, error) {
 			// preimages (verifier P0-1: the owner signs one kind at a time
 			// offline and must be able to recover the preimage list without
 			// rotating the window). Enrolled credentials are untouched.
-			outstanding := outstandingPending(keyDir, pendingTags, gen)
-			printShareOutstanding(stdout, *session, k, outstanding, gen)
+			staged, serr := readShareStaged(keyDir)
+			if serr != nil {
+				return protocol.ExitActionRequired, serr
+			}
+			outstanding := outstandingPending(pendingTags, staged, gen)
+			printShareOutstanding(stdout, *session, k, outstanding, staged, gen)
 			return 0, nil
 		}
 		if gen != nil && len(gen.Tags) > 0 {
@@ -211,10 +213,6 @@ func share(args []string, stdout, stderr io.Writer) (int, error) {
 			return 0, nil
 		}
 	}
-	pending := make([]shareTagFile, 0, len(bodykey.ShareKinds))
-	for _, kind := range bodykey.ShareKinds {
-		pending = append(pending, shareTagFile{Kind: kind, Conditions: bodykey.ShareConditions(kind, notAfter.Unix())})
-	}
 	if err := writeSharePending(keyDir, pending, notAfter); err != nil {
 		return protocol.ExitActionRequired, err
 	}
@@ -223,11 +221,95 @@ func share(args []string, stdout, stderr io.Writer) (int, error) {
 	return 0, nil
 }
 
+// shareWindow is one computed attestation window: the per-kind condition
+// strings plus the window's not-after bound. Computed by renewalWindow for
+// BOTH real runs and --dry-run previews so the preview cannot drift from
+// what a real run mints.
+type shareWindow struct {
+	notAfter time.Time
+	tags     []shareTagFile
+}
+
+// renewalWindow computes the attestation window a real `share`/`share
+// --renew` run would persist. For a renewal it bumps the bound past any
+// existing pending/enrolled conditions so a renewal is a NEW generation
+// even in the same second (generation identity comes from the signed
+// conditions). For a plain mint it is now+days.
+func renewalWindow(keyDir string, days int) (shareWindow, error) {
+	notAfter := time.Now().Add(time.Duration(days) * 24 * time.Hour)
+	// State-leaf confinement (codex re-review P1): the pending and enrolled
+	// files are read/written by these commands; a symlinked leaf must be
+	// refused before anything follows it.
+	if err := refuseSymlinkedState(keyDir); err != nil {
+		return shareWindow{}, err
+	}
+	if prev, _, perr := readSharePending(keyDir); perr == nil && len(prev) > 0 {
+		if maxOld := maxPendingBound(prev); notAfter.Unix() <= maxOld {
+			notAfter = time.Unix(maxOld+1, 0)
+		}
+	}
+	if gen, gerr := readEnrolledState(keyDir); gerr != nil {
+		// Corrupt/unreadable enrolled state is NOT absence (verifier r2
+		// P1-2): a renewal over torn state would mint a window no tag can
+		// ever be enrolled into. Fail closed like every other path.
+		return shareWindow{}, gerr
+	} else if gen != nil {
+		if maxEnrolled := maxEnrolledBound(gen.Tags); notAfter.Unix() <= maxEnrolled {
+			notAfter = time.Unix(maxEnrolled+1, 0)
+		}
+	}
+	tags := make([]shareTagFile, 0, len(bodykey.ShareKinds))
+	for _, kind := range bodykey.ShareKinds {
+		tags = append(tags, shareTagFile{Kind: kind, Conditions: bodykey.ShareConditions(kind, notAfter.Unix())})
+	}
+	return shareWindow{notAfter: notAfter, tags: tags}, nil
+}
+
+// refuseSymlinkedState Lstats every state leaf; a symlinked or non-regular
+// pending/staged/enrolled state file is refused (verifier r2 P1-4: --renew
+// followed a share.pending.json symlink and rewrote an out-of-root file —
+// also true of plain share and of share.json itself).
+func refuseSymlinkedState(keyDir string) error {
+	pendingPath, enrolledPath := sharePaths(keyDir)
+	for _, p := range []string{pendingPath, filepath.Join(keyDir, stagedName), enrolledPath} {
+		if err := lstatStateLeaf(p); err != nil {
+			return protocol.Refuse(protocol.CodeInvalid, "state file %s: %v", p, err)
+		}
+	}
+	return nil
+}
+
+// lstatStateLeaf is the confinement rule for one state-file leaf: absent is
+// fine; a symlink is refused outright (rename-onto would replace the link,
+// but reads would follow it); anything not a regular file (FIFO, directory)
+// is refused.
+func lstatStateLeaf(path string) error {
+	fi, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return errors.New("symlinked; refusing")
+	}
+	if !fi.Mode().IsRegular() {
+		return errors.New("not a regular file; refusing")
+	}
+	return nil
+}
+
 // enrollTag validates one owner-signed tag against this session's body key
 // and the pending window for its kind, then persists it. An invalid tag
 // leaves any existing good enrollment untouched (codex P1: validation must
 // run on the real enrollment path, never silently skipped).
 func enrollTag(keyDir, tagPath string, k *bodykey.BodyKey) (int, error) {
+	// State-leaf confinement applies to enrollment too: the pending read
+	// and the staged/published writes below must never follow a symlink.
+	if err := refuseSymlinkedState(keyDir); err != nil {
+		return protocol.ExitActionRequired, err
+	}
 	raw, err := os.ReadFile(tagPath)
 	if err != nil {
 		return protocol.ExitUsage, fmt.Errorf("--tag-file: %w", err)
@@ -283,6 +365,9 @@ func sharePaths(keyDir string) (pending, enrolled string) {
 // silently bypass the pending constraint (codex P1 finding 7).
 func readSharePending(keyDir string) ([]shareTagFile, time.Time, error) {
 	p, _ := sharePaths(keyDir)
+	if err := lstatStateLeaf(p); err != nil {
+		return nil, time.Time{}, err
+	}
 	raw, err := os.ReadFile(p)
 	if err != nil {
 		return nil, time.Time{}, err
@@ -307,8 +392,7 @@ func readSharePending(keyDir string) ([]shareTagFile, time.Time, error) {
 // its kind (codex P1: counting five tags old-plus-new wrongly completed a
 // renewal after its first enrollment).
 type enrolledGeneration struct {
-	Tags     []shareTagFile `json:"tags"`
-	Complete bool           `json:"complete"`
+	Tags []shareTagFile `json:"tags"`
 }
 
 // readEnrolledState distinguishes absence (nil, nil) from an unreadable or
@@ -316,6 +400,9 @@ type enrolledGeneration struct {
 // as a fresh enrollment and never silently overwritten (codex P2).
 func readEnrolledState(keyDir string) (*enrolledGeneration, error) {
 	_, enrolled := sharePaths(keyDir)
+	if err := lstatStateLeaf(enrolled); err != nil {
+		return nil, err
+	}
 	raw, err := os.ReadFile(enrolled)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
@@ -340,72 +427,143 @@ func writeSharePending(keyDir string, tags []shareTagFile, notAfter time.Time) e
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(p, raw, 0o600)
+	return writeFileAtomic(p, raw)
 }
 
 func writeShareTag(keyDir string, pending []shareTagFile, tf *shareTagFile) error {
-	// Retention is make-before-break (verifier P0-1): the enrolled doc keeps
-	// every still-valid credential — previous-generation tags stay until
-	// their own signed created_at< bound passes or a newer tag for the same
-	// kind supersedes them. COMPLETION, by contrast, is keyed on the pending
-	// generation only: one enrolled tag per pending kind, matched by signed
-	// conditions. The two obligations are separate; the earlier fix
-	// conflated them by deleting the old generation.
-	gen, err := readEnrolledState(keyDir)
-	if err != nil {
+	// Staged publication (codex re-review P1): signed tags accumulate in
+	// share.staged.json; the ACTIVE generation in share.json is untouched
+	// until the pending generation is complete for every kind. Only then
+	// is the new generation published atomically (tmp+rename) and the
+	// pending window consumed. An interrupted enrollment therefore leaves
+	// the previous generation fully intact, and no write ever truncates a
+	// published file in place.
+	if _, err := readEnrolledState(keyDir); err != nil {
 		return err // corrupt/unreadable enrolled state is never overwritten
 	}
-	now := time.Now()
-	retained := map[uint16]shareTagFile{}
-	if gen != nil {
-		for _, t := range gen.Tags {
-			// A tag for the kind being enrolled right now is superseded by
-			// the fresh one; every OTHER still-valid tag is retained, even
-			// from a previous generation (its own signed bound governs
-			// its lifetime, not the pending window).
-			if t.Kind == tf.Kind {
-				continue
-			}
-			exp, expErr := enrolledExpiry(t)
-			if expErr != nil || !exp.After(now) {
-				continue // expired or unreadable: drop
-			}
-			retained[t.Kind] = t
+	staged, serr := readShareStaged(keyDir)
+	if serr != nil {
+		return serr
+	}
+	// The staged doc is keyed by kind; a re-enrollment of the same kind in
+	// the same window replaces that staged entry.
+	staged[tf.Kind] = *tf
+
+	// Completion: one STAGED tag per pending kind whose conditions match
+	// the pending window for that kind.
+	complete := len(staged) == len(pending)
+	for kind, t := range staged {
+		p := pendingTagForKind(pending, kind)
+		if p == nil || p.Conditions != t.Conditions {
+			complete = false
+			break
 		}
 	}
-	// The freshly enrolled tag supersedes any retained tag for its kind.
-	retained[tf.Kind] = *tf
-
-	// Completion: one enrolled tag whose conditions match each pending kind.
-	newGen := map[uint16]shareTagFile{}
-	for kind, t := range retained {
-		if p := pendingTagForKind(pending, kind); p != nil && p.Conditions == t.Conditions {
-			newGen[kind] = t
-		}
+	if !complete {
+		return writeShareStaged(keyDir, staged)
 	}
-	complete := len(newGen) == len(pending)
 
+	// Publish: the new generation is the staged tags; still-valid tags of
+	// the previous generation for kinds the new generation covers are
+	// superseded. The pending set covers every ShareKinds kind, so every
+	// prior tag's kind is superseded by its staged replacement — the
+	// retained set is exactly the staged generation.
 	doc := struct {
-		Tags     []shareTagFile `json:"tags"`
-		Complete bool           `json:"complete"`
-	}{make([]shareTagFile, 0, len(retained)), complete}
-	for _, t := range retained {
-		doc.Tags = append(doc.Tags, t)
+		Tags []shareTagFile `json:"tags"`
+	}{make([]shareTagFile, 0, len(staged))}
+	for _, kind := range bodykey.ShareKinds {
+		if t, ok := staged[kind]; ok {
+			doc.Tags = append(doc.Tags, t)
+		}
 	}
 	raw, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
 		return err
 	}
 	_, enrolledPath := sharePaths(keyDir)
-	if err := os.WriteFile(enrolledPath, raw, 0o600); err != nil {
+	if err := writeFileAtomic(enrolledPath, raw); err != nil {
 		return err
 	}
-	if complete {
-		// The pending generation is fully enrolled: the previous generation
-		// is superseded for every kind and its windows are consumed. The
-		// swap is atomic in effect: one write carried both.
-		p, _ := sharePaths(keyDir)
-		_ = os.Remove(p)
+	p, _ := sharePaths(keyDir)
+	_ = os.Remove(p)
+	_ = os.Remove(filepath.Join(keyDir, stagedName))
+	return nil
+}
+
+// stagedName is the accumulation file for signed-but-unpublished tags.
+const stagedName = "share.staged.json"
+
+// readShareStaged returns the staged tags keyed by kind (empty map when no
+// staged doc exists). A staged doc is advisory state; a corrupt one is
+// refused, not silently discarded.
+func readShareStaged(keyDir string) (map[uint16]shareTagFile, error) {
+	stagedPath := filepath.Join(keyDir, stagedName)
+	if err := lstatStateLeaf(stagedPath); err != nil {
+		return nil, err
+	}
+	raw, err := os.ReadFile(stagedPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return map[uint16]shareTagFile{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var tags []shareTagFile
+	if err := json.Unmarshal(raw, &tags); err != nil {
+		return nil, fmt.Errorf("staged state at %s is invalid: %w", stagedName, err)
+	}
+	m := make(map[uint16]shareTagFile, len(tags))
+	for _, t := range tags {
+		m[t.Kind] = t
+	}
+	return m, nil
+}
+
+func writeShareStaged(keyDir string, staged map[uint16]shareTagFile) error {
+	tags := make([]shareTagFile, 0, len(staged))
+	for _, kind := range bodykey.ShareKinds {
+		if t, ok := staged[kind]; ok {
+			tags = append(tags, t)
+		}
+	}
+	raw, err := json.MarshalIndent(tags, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := writeFileAtomic(filepath.Join(keyDir, stagedName), raw); err != nil {
+		return err
+	}
+	return nil
+}
+
+// writeFileAtomic writes via a same-directory temp file and rename: a
+// reader never sees a partial file and a crash never truncates the target
+// (codex re-review P1: os.WriteFile truncates in place).
+func writeFileAtomic(path string, raw []byte) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".share-*")
+	if err != nil {
+		return fmt.Errorf("create temp state file: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer func() {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+	}()
+	if err := tmp.Chmod(0o600); err != nil {
+		return fmt.Errorf("chmod temp state file: %w", err)
+	}
+	if _, err := tmp.Write(raw); err != nil {
+		return fmt.Errorf("write temp state file: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		return fmt.Errorf("sync temp state file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close temp state file: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("atomic rename: %w", err)
 	}
 	return nil
 }
@@ -416,8 +574,13 @@ func pendingKey(kind uint16, conditions string) string {
 
 // outstandingPending returns the pending tags not yet enrolled for the
 // current generation — the preimages the owner still has to sign.
-func outstandingPending(keyDir string, pending []shareTagFile, gen *enrolledGeneration) []shareTagFile {
+func outstandingPending(pending []shareTagFile, staged map[uint16]shareTagFile, gen *enrolledGeneration) []shareTagFile {
 	enrolledConds := map[string]bool{}
+	// Staged tags count as signed progress: the owner does not re-sign a
+	// tag the CLI already holds for this window.
+	for _, t := range staged {
+		enrolledConds[pendingKey(t.Kind, t.Conditions)] = true
+	}
 	if gen != nil {
 		for _, t := range gen.Tags {
 			enrolledConds[pendingKey(t.Kind, t.Conditions)] = true
@@ -481,8 +644,10 @@ func printSharePending(w io.Writer, session string, k *bodykey.BodyKey, tags []s
 	say(w, "body-pubkey: %s", k.PublicKeyHex())
 	if !notAfter.IsZero() {
 		say(w, "expires:     %s", notAfter.UTC().Format(time.RFC3339))
-	} else if exp, err := enrolledExpiry(tags[0]); err == nil {
-		say(w, "expires:     %s (pending window)", exp.UTC().Format(time.RFC3339))
+	} else if len(tags) > 0 {
+		if exp, err := enrolledExpiry(tags[0]); err == nil {
+			say(w, "expires:     %s (pending window)", exp.UTC().Format(time.RFC3339))
+		}
 	}
 	for _, t := range tags {
 		say(w, "kind %d preimage: %s", t.Kind, k.PreimageHex(t.Conditions))
@@ -492,7 +657,7 @@ func printSharePending(w io.Writer, session string, k *bodykey.BodyKey, tags []s
 
 // printShareOutstanding prints the still-outstanding preimages of the
 // current pending generation plus the state of what is already enrolled.
-func printShareOutstanding(w io.Writer, session string, k *bodykey.BodyKey, outstanding []shareTagFile, gen *enrolledGeneration) {
+func printShareOutstanding(w io.Writer, session string, k *bodykey.BodyKey, outstanding []shareTagFile, staged map[uint16]shareTagFile, gen *enrolledGeneration) {
 	say(w, "session:     %s", session)
 	say(w, "body-pubkey: %s", k.PublicKeyHex())
 	if gen != nil {
@@ -501,6 +666,9 @@ func printShareOutstanding(w io.Writer, session string, k *bodykey.BodyKey, outs
 				say(w, "kind %d: enrolled, expires %s", t.Kind, exp.UTC().Format(time.RFC3339))
 			}
 		}
+	}
+	for kind := range staged {
+		say(w, "kind %d: signed, staged until the generation completes", kind)
 	}
 	if len(outstanding) == 0 {
 		return
@@ -529,9 +697,11 @@ func printShareDryRun(w io.Writer, session string, k *bodykey.BodyKey, days int)
 	notAfter := time.Now().Add(time.Duration(days) * 24 * time.Hour)
 	say(w, "session:     %s (dry-run)", session)
 	say(w, "body-pubkey: %s", k.PublicKeyHex())
+	say(w, "(illustrative fresh %d-day window; nothing was written and these preimages are NOT enrollable — run a real share to mint the window)", days)
 	for _, kind := range bodykey.ShareKinds {
 		conds := bodykey.ShareConditions(kind, notAfter.Unix())
 		say(w, "kind %d preimage: %s", kind, k.PreimageHex(conds))
+		say(w, "kind %d conditions: %s", kind, conds)
 	}
 }
 
@@ -567,6 +737,23 @@ func doctorShareInspection(root string) map[string]any {
 			out[e.Name()] = info
 			continue
 		}
+		// Outstanding pending preimages are visible in BOTH branches: a
+		// half-finished renewal keeps every old tag, so the enrolled tag
+		// count alone cannot distinguish it from a healthy enrollment
+		// (verifier r2 P1-3). While unsigned preimages remain, the remedy
+		// is always plain `share`, never `--renew` — renewing rotates the
+		// window and strands preimages the owner may already be signing.
+		pendingTags, _, pendingErr := readSharePending(keyDir)
+		outstanding := 0
+		if pendingErr == nil {
+			staged, serr := readShareStaged(keyDir)
+			if serr != nil {
+				info["staged_error"] = serr.Error()
+				out[e.Name()] = info
+				continue
+			}
+			outstanding = len(outstandingPending(pendingTags, staged, gen))
+		}
 		if gen != nil && len(gen.Tags) > 0 {
 			perKind := map[string]any{}
 			earliest := time.Time{}
@@ -581,12 +768,16 @@ func doctorShareInspection(root string) map[string]any {
 					earliest = exp
 				}
 			}
-			info["attestation"] = "enrolled"
-			info["kinds"] = perKind
-			if len(perKind) < len(bodykey.ShareKinds) {
-				info["warning"] = fmt.Sprintf("incomplete enrollment: %d of %d kinds enrolled; run `amq-remote share --session %s` to reprint the outstanding preimages (do not renew: renewing rotates the window and the still-unsigned preimages)", len(perKind), len(bodykey.ShareKinds), e.Name())
+			if pendingErr == nil && outstanding > 0 {
+				info["attestation"] = fmt.Sprintf("enrolled, renewal in progress: %d of %d kinds signed (staged)", len(bodykey.ShareKinds)-outstanding, len(bodykey.ShareKinds))
+				info["warning"] = fmt.Sprintf("renewal in progress: %d preimage(s) still unsigned; run `amq-remote share --session %s` to reprint them (do NOT renew: renewing rotates the window and the still-unsigned preimages)", outstanding, e.Name())
+			} else {
+				info["attestation"] = "enrolled"
 			}
-			if !earliest.IsZero() {
+			info["kinds"] = perKind
+			renewalOutstanding := pendingErr == nil && outstanding > 0
+			if !earliest.IsZero() && !renewalOutstanding {
+				// The --renew remedy is safe only when nothing is pending.
 				remaining := time.Until(earliest)
 				switch {
 				case remaining <= 0:
@@ -598,8 +789,8 @@ func doctorShareInspection(root string) map[string]any {
 			out[e.Name()] = info
 			continue
 		}
-		if _, _, err := readSharePending(keyDir); err == nil {
-			info["attestation"] = "pending: owner has not returned signed tags yet"
+		if pendingErr == nil {
+			info["attestation"] = fmt.Sprintf("pending: %d of %d kinds signed (staged)", len(bodykey.ShareKinds)-outstanding, len(bodykey.ShareKinds))
 		} else {
 			info["attestation"] = "missing: run `amq-remote share --session " + e.Name() + "`"
 		}
