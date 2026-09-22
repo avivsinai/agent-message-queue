@@ -80,7 +80,7 @@ var ErrWrongFormat = errors.New("not a body key file")
 // at the owned path inside the root, never behind a link that can point
 // outside it (verifier P1-1: Load/Stat follow symlinks and would adopt an
 // out-of-root key silently).
-var errSymlinkedKey = errors.New("body key path is a symlink; refusing")
+var errSymlinkedKey = errors.New("state leaf is a symlink; refusing")
 
 // lstatKeyLeaf Lstats the key path: it must be a regular file (or absent).
 func lstatKeyLeaf(path string) error {
@@ -95,7 +95,7 @@ func lstatKeyLeaf(path string) error {
 		return fmt.Errorf("%w: %s", errSymlinkedKey, path)
 	}
 	if !fi.Mode().IsRegular() {
-		return fmt.Errorf("body key path %s is not a regular file", path)
+		return fmt.Errorf("state leaf %s is not a regular file; refusing", path)
 	}
 	return nil
 }
@@ -191,17 +191,20 @@ func Mint(dir string) (*BodyKey, error) {
 	k := &BodyKey{pub: *sk.PubKey()}
 	raw := sk.Serialize()
 	copy(k.secret[:], raw)
-	if werr := writeSecretFile(keyPath, k.secret[:]); werr != nil {
-		return nil, werr
-	}
 	pubPath := filepath.Join(dir, "body.pub")
-	// Same leaf-confinement rule as body.key (r5 review P1-2): a symlink at
-	// body.pub would otherwise be followed and an out-of-root file truncated
-	// silently. Nothing guards this write before Mint's first call, so the
-	// check must live here, not only in Load.
+	// Verifier r6 P2-3: body.pub is lstat'd BEFORE the body.key write — a
+	// check placed after it leaves a half-minted key directory whose
+	// symlinked body.pub is never re-checked (the next run Loads body.key
+	// successfully and never reaches Mint again).
 	if err := lstatKeyLeaf(pubPath); err != nil {
 		return nil, err
 	}
+	if werr := writeSecretFile(keyPath, k.secret[:]); werr != nil {
+		return nil, werr
+	}
+	// Same leaf-confinement rule as body.key (r5 review P1-2): a symlink at
+	// body.pub would otherwise be followed and an out-of-root file truncated
+	// silently.
 	if err := os.WriteFile(pubPath, []byte(k.PublicKeyHex()+"\n"), 0o644); err != nil {
 		return nil, err
 	}

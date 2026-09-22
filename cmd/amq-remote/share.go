@@ -207,12 +207,14 @@ func share(args []string, stdout, stderr io.Writer) (int, error) {
 			return protocol.ExitActionRequired, fmt.Errorf("body key at %s: %w", keyPath, loadErr)
 		}
 		if k, err = bodykey.Mint(keyDir); err != nil {
-			return protocol.ExitActionRequired, fmt.Errorf("body key at %s: %w", keyPath, err)
+			// Verifier r6 P3: name the offending leaf, not body.key — Mint
+			// can refuse over body.pub too (body.pub is checked first now).
+			return protocol.ExitActionRequired, fmt.Errorf("mint body keypair in %s: %w", keyDir, err)
 		}
 	}
 
 	if *tagFile != "" {
-		return enrollTag(keyDir, *tagFile, k)
+		return enrollTag(*session, keyDir, *tagFile, k)
 	}
 
 	// Mint or renew: persist one pending window per kind so doctor can warn
@@ -237,7 +239,7 @@ func share(args []string, stdout, stderr io.Writer) (int, error) {
 		// signing against.
 		return protocol.ExitActionRequired, pendingReadErr
 	}
-	if rerr := reconcileStagedState(keyDir, gen, pendingTags, pendingReadErr); rerr != nil {
+	if rerr := reconcileStagedState(*session, keyDir, gen, pendingTags, pendingReadErr); rerr != nil {
 		return protocol.ExitActionRequired, rerr
 	}
 	// Re-read after reconciliation: stale leftovers may be gone.
@@ -347,7 +349,11 @@ func renewalWindow(keyDir string, days int, daysExplicit bool) (shareWindow, err
 // also true of plain share and of share.json itself).
 func refuseSymlinkedState(keyDir string) error {
 	pendingPath, enrolledPath := sharePaths(keyDir)
-	for _, p := range []string{pendingPath, filepath.Join(keyDir, stagedName), enrolledPath} {
+	// Verifier r6 P2-3: body.pub is a state leaf too — the categorical
+	// rule (every state leaf, on every command, through the one lstat
+	// helper) applies to all five leaves, and once body.key exists no
+	// other code path ever looks at body.pub again.
+	for _, p := range []string{pendingPath, filepath.Join(keyDir, stagedName), enrolledPath, filepath.Join(keyDir, "body.pub")} {
 		if err := lstatStateLeaf(p); err != nil {
 			// The typed stateLeafError already renders "state file <p>: …",
 			// so the wrapper must not duplicate the path; RefuseWrap keeps the
@@ -397,7 +403,7 @@ func (e *stateLeafError) Error() string {
 // and the pending window for its kind, then persists it. An invalid tag
 // leaves any existing good enrollment untouched (codex P1: validation must
 // run on the real enrollment path, never silently skipped).
-func enrollTag(keyDir, tagPath string, k *bodykey.BodyKey) (int, error) {
+func enrollTag(session, keyDir, tagPath string, k *bodykey.BodyKey) (int, error) {
 	// State-leaf confinement applies to enrollment too: the pending read
 	// and the staged/published writes below must never follow a symlink.
 	if err := refuseSymlinkedState(keyDir); err != nil {
@@ -417,7 +423,7 @@ func enrollTag(keyDir, tagPath string, k *bodykey.BodyKey) (int, error) {
 	pending, _, perr := readSharePending(keyDir)
 	if perr != nil {
 		if errors.Is(perr, os.ErrNotExist) {
-			return protocol.ExitActionRequired, fmt.Errorf("no pending window: run `amq-remote share --session ... --renew` first")
+			return protocol.ExitActionRequired, fmt.Errorf("no pending window: run `amq-remote share --session %s --renew` first", session)
 		}
 		return protocol.ExitActionRequired, perr
 	}
@@ -425,13 +431,13 @@ func enrollTag(keyDir, tagPath string, k *bodykey.BodyKey) (int, error) {
 	// complete published generation with stale pending/staged heals here
 	// so the owner is never asked to sign against a consumed window.
 	gen0, _ := readEnrolledState(keyDir)
-	if rerr := reconcileStagedState(keyDir, gen0, pending, nil); rerr != nil {
+	if rerr := reconcileStagedState(session, keyDir, gen0, pending, nil); rerr != nil {
 		return protocol.ExitActionRequired, rerr
 	}
 	pending, _, perr = readSharePending(keyDir)
 	if perr != nil {
 		if errors.Is(perr, os.ErrNotExist) {
-			return protocol.ExitActionRequired, fmt.Errorf("no pending window: the current generation already covers it; run `amq-remote share --session ...` for the enrolled state")
+			return protocol.ExitActionRequired, fmt.Errorf("no pending window: the current generation already covers it; run `amq-remote share --session %s` for the enrolled state", session)
 		}
 		return protocol.ExitActionRequired, perr
 	}
@@ -460,7 +466,7 @@ func enrollTag(keyDir, tagPath string, k *bodykey.BodyKey) (int, error) {
 	if err := tag.Satisfies(tf.Kind, time.Now().Add(time.Minute).Unix()); err != nil {
 		return protocol.ExitActionRequired, fmt.Errorf("owner tag conditions rejected for kind %d: %v", tf.Kind, err)
 	}
-	if err := writeShareTag(keyDir, pending, &tf); err != nil {
+	if err := writeShareTag(session, keyDir, pending, &tf); err != nil {
 		return protocol.ExitActionRequired, err
 	}
 	return 0, nil
@@ -540,7 +546,7 @@ func writeSharePending(keyDir string, tags []shareTagFile, notAfter time.Time) e
 	return writeStateFile(p, raw)
 }
 
-func writeShareTag(keyDir string, pending []shareTagFile, tf *shareTagFile) error {
+func writeShareTag(session, keyDir string, pending []shareTagFile, tf *shareTagFile) error {
 	// Staged publication (codex re-review P1): signed tags accumulate in
 	// share.staged.json; the ACTIVE generation in share.json is untouched
 	// until the pending generation is complete for every kind. Only then
@@ -559,7 +565,7 @@ func writeShareTag(keyDir string, pending []shareTagFile, tf *shareTagFile) erro
 	pendingTags, _, pendingReadErr := readSharePending(keyDir)
 	if pendingReadErr == nil {
 		gen0, _ := readEnrolledState(keyDir)
-		if rerr := reconcileStagedState(keyDir, gen0, pendingTags, pendingReadErr); rerr != nil {
+		if rerr := reconcileStagedState(session, keyDir, gen0, pendingTags, pendingReadErr); rerr != nil {
 			return rerr
 		}
 	}
@@ -607,8 +613,8 @@ func writeShareTag(keyDir string, pending []shareTagFile, tf *shareTagFile) erro
 				}
 			}
 			return protocol.Refuse(protocol.CodeInvalid,
-				"pending window at share.pending.json does not cover every kind in ShareKinds (missing %v); publication is refused because it would drop still-valid tags — remedy: remove share.pending.json and run `amq-remote share --session ... --renew` for a fresh full window",
-				missing)
+				"pending window at share.pending.json does not cover every kind in ShareKinds (missing %v); publication is refused because it would drop still-valid tags — remedy: remove share.pending.json and run `amq-remote share --session %s --renew` for a fresh full window",
+				missing, session)
 		}
 		return writeShareStaged(keyDir, staged)
 	}
@@ -678,7 +684,7 @@ const stagedName = "share.staged.json"
 //     remedy (remove it, re-sign) instead of an unrecoverable error.
 //
 // Doctor uses reportStagedState below: same detection, zero mutation.
-func reconcileStagedState(keyDir string, gen *enrolledGeneration, pending []shareTagFile, pendingErr error) error {
+func reconcileStagedState(session, keyDir string, gen *enrolledGeneration, pending []shareTagFile, pendingErr error) error {
 	// Verifier r4 P1-1: reconcile READS and WRITES state leaves, so the
 	// leaf-confinement rule applies here too — doctor reaches this helper
 	// without any other guard, and a symlinked staged file was previously
@@ -686,31 +692,33 @@ func reconcileStagedState(keyDir string, gen *enrolledGeneration, pending []shar
 	if err := refuseSymlinkedState(keyDir); err != nil {
 		return err
 	}
-	return reconcileStagedStateMutating(keyDir, gen, pending, pendingErr)
+	return reconcileStagedStateMutating(session, keyDir, gen, pending, pendingErr)
 }
 
 // reportStagedState is doctor's read-only view of the same leftovers:
 // it detects what reconcileStagedState would heal or refuse and returns
-// the row text, but NEVER writes, deletes or renames anything (architect
-// ruling 10:09Z: doctor reports the leftover with the remedy "run
-// amq-remote share to reconcile").
-func reportStagedState(keyDir string, gen *enrolledGeneration, pending []shareTagFile, pendingErr error) string {
-	if pendingErr != nil && !errors.Is(pendingErr, os.ErrNotExist) {
-		return "pending state invalid: " + pendingErr.Error()
-	}
+// the row text ("" when nothing is stale), but NEVER writes, deletes or
+// renames anything (architect ruling 10:09Z: doctor reports the leftover
+// with the remedy "run amq-remote share to reconcile").
+func reportStagedState(session, keyDir string, gen *enrolledGeneration, pending []shareTagFile, pendingErr error) string {
+	// Verifier r6 P2-5: the malformed-pending branch is unreachable — its
+	// only caller (doctor) refuses malformed pending before reaching
+	// reportStagedState, so it is simply deleted.
 	stagedPath := filepath.Join(keyDir, stagedName)
 	if err := lstatStateLeaf(stagedPath); err != nil {
-		// Symlinked or non-regular staged leaf: report, never act.
-		return "remedy: run `amq-remote share --session ...` to reconcile (" + doctorNamedLeafError(keyDir, err) + ")"
+		// Verifier r6 P2-1: the remedy must be EXECUTABLE — plain share
+		// refuses a symlinked leaf, so the remedy is to remove the link by
+		// hand and then run share. The refusal is stated first, not buried.
+		return doctorNamedLeafError(keyDir, err) + "; remedy: remove the symlink at " + stagedPath + ", then run `amq-remote share --session " + session + "` to reconcile"
 	}
 	raw, readErr := os.ReadFile(stagedPath)
 	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
-		return "remedy: run `amq-remote share --session ...` to reconcile (reading " + stagedName + ": " + readErr.Error() + ")"
+		return "reading " + stagedName + ": " + readErr.Error() + "; remedy: run `amq-remote share --session " + session + "` to reconcile"
 	}
 	if readErr == nil {
 		var tags []shareTagFile
 		if err := json.Unmarshal(raw, &tags); err != nil {
-			return "staged state at " + stagedPath + " is invalid (" + err.Error() + "); remedy: remove " + stagedPath + " and re-sign the pending preimages (`amq-remote share --session ...` reprints them)"
+			return "staged state at " + stagedPath + " is invalid (" + err.Error() + "); remedy: remove " + stagedPath + " and re-sign the pending preimages (`amq-remote share --session " + session + "` reprints them)"
 		}
 	}
 	if genCoversPendingWindow(gen, pending, pendingErr) {
@@ -720,7 +728,7 @@ func reportStagedState(keyDir string, gen *enrolledGeneration, pending []shareTa
 			leftover = true
 		}
 		if leftover {
-			return "published generation already covers the pending window; stale pending/staged leftovers remain; remedy: run `amq-remote share --session ...` to reconcile"
+			return "published generation already covers the pending window; stale pending/staged leftovers remain; remedy: run `amq-remote share --session " + session + "` to reconcile"
 		}
 		return ""
 	}
@@ -739,7 +747,7 @@ func reportStagedState(keyDir string, gen *enrolledGeneration, pending []shareTa
 			}
 		}
 		if stale > 0 {
-			return fmt.Sprintf("%d staged entr%s superseded by the current window; remedy: run `amq-remote share --session ...` to reconcile", stale, pluralYIes(stale))
+			return fmt.Sprintf("%d staged entr%s superseded by the current window; remedy: run `amq-remote share --session %s` to reconcile", stale, pluralYIes(stale), session)
 		}
 	}
 	return ""
@@ -776,7 +784,7 @@ func genCoversPendingWindow(gen *enrolledGeneration, pending []shareTagFile, pen
 		}()
 }
 
-func reconcileStagedStateMutating(keyDir string, gen *enrolledGeneration, pending []shareTagFile, pendingErr error) error {
+func reconcileStagedStateMutating(session, keyDir string, gen *enrolledGeneration, pending []shareTagFile, pendingErr error) error {
 	if pendingErr != nil && !errors.Is(pendingErr, os.ErrNotExist) {
 		return pendingErr // malformed pending: refuse everywhere
 	}
@@ -790,8 +798,8 @@ func reconcileStagedStateMutating(keyDir string, gen *enrolledGeneration, pendin
 		var tags []shareTagFile
 		if err := json.Unmarshal(raw, &tags); err != nil {
 			return protocol.Refuse(protocol.CodeInvalid,
-				"staged state at %s is invalid (%v); remedy: remove %s and re-sign the pending preimages (`amq-remote share --session ...` reprints them)",
-				stagedPath, err, stagedPath)
+				"staged state at %s is invalid (%v); remedy: remove %s and re-sign the pending preimages (`amq-remote share --session %s` reprints them)",
+				stagedPath, err, stagedPath, session)
 		}
 		if genCoversPending {
 			// Crash leftovers after publication: pending and staged are
@@ -1121,20 +1129,32 @@ func doctorShareInspection(root string) map[string]any {
 		// diagnostic never deletes or rewrites state (CLAUDE.md: cleanup is
 		// explicit). Leftovers are reported as a row with the reconcile
 		// remedy; the deletion runs only inside share/enroll/renew.
-		if row := reportStagedState(keyDir, gen, pendingTags, pendingErr); row != "" {
-			info["staged_error"] = row
-			out[e.Name()] = info
-			continue
+		// Verifier r6 P1-1: the leftover row is ADDITIVE — it joins the
+		// report and the attestation/expiry/per-kind rows are still
+		// emitted (an expired generation with leftovers must still say
+		// expired). Only a genuine corrupt-staged refusal continues early,
+		// and even that keeps the rows computed so far.
+		leftoverRow := reportStagedState(e.Name(), keyDir, gen, pendingTags, pendingErr)
+		stagedUnusable := strings.Contains(leftoverRow, "is invalid") || strings.Contains(leftoverRow, "symlink")
+		if stagedUnusable {
+			// Corrupt or symlinked staged: surface the refusal and still
+			// complete the diagnostic (attestation/expiry below).
+			info["staged_error"] = leftoverRow
+		} else if leftoverRow != "" {
+			info["leftover"] = leftoverRow
 		}
-		pendingTags, _, pendingErr = readSharePending(keyDir)
-		if pendingErr == nil {
+		if pendingErr == nil && !stagedUnusable {
 			staged, serr := readShareStaged(keyDir)
 			if serr != nil {
-				info["staged_error"] = serr.Error()
-				out[e.Name()] = info
-				continue
+				// Verifier r6 P1-1: the refusal is ADDITIVE — it joins the
+				// report (attestation/expiry/per-kind are still emitted
+				// below) and never replaces the whole diagnostic. Only the
+				// outstanding count is skipped: there is nothing trustworthy
+				// to count over a corrupt staged leaf.
+				info["staged_error"] = doctorNamedLeafError(keyDir, serr)
+			} else {
+				outstanding = len(outstandingPending(pendingTags, staged, gen))
 			}
-			outstanding = len(outstandingPending(pendingTags, staged, gen))
 		}
 		if gen != nil && len(gen.Tags) > 0 {
 			perKind := map[string]any{}
@@ -1186,6 +1206,10 @@ func doctorShareInspection(root string) map[string]any {
 		} else {
 			info["attestation"] = "missing: run `amq-remote share --session " + e.Name() + "`"
 		}
+		// A refusal at the staged leaf (corrupt or symlinked) is an ERROR
+		// row, not an attestation state — it must never overwrite the
+		// attestation line computed above (verifier r6 P1-1: rows are
+		// additive; only the attestation FACT itself may occupy "attestation").
 		out[e.Name()] = info
 	}
 	if len(out) == 0 {

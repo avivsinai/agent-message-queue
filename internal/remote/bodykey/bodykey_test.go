@@ -2,6 +2,7 @@ package bodykey
 
 import (
 	"encoding/hex"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -310,6 +311,12 @@ func TestMintRefusesSymlinkedBodyPub(t *testing.T) {
 	}
 	if _, err := Mint(dir); err == nil {
 		t.Fatal("Mint accepted a symlinked body.pub (r5 P1-2: would truncate the target)")
+	}
+	// Verifier r6 P1 (second half): the refusal must come BEFORE the
+	// body.key write — no half-minted key directory whose symlinked pub
+	// leaf is never re-checked on a later run.
+	if _, err := os.Lstat(filepath.Join(dir, "body.key")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("body.key exists after the refused mint (half-minted key dir): %v", err)
 	}
 	raw, err := os.ReadFile(outside)
 	if err != nil {

@@ -1492,12 +1492,20 @@ func TestDoctorIsReportOnly(t *testing.T) {
 	}
 	// Doctor runs: must REPORT, not heal.
 	info := doctorShareInspection(root)["ro1"].(map[string]any)
-	row, has := info["staged_error"].(string)
+	row, has := info["leftover"].(string)
 	if !has {
 		t.Fatalf("doctor did not report the leftovers: %v", info)
 	}
 	if !strings.Contains(row, "reconcile") {
 		t.Fatalf("doctor's leftover row carries no reconcile remedy: %q", row)
+	}
+	// Verifier r6 P1-1: the leftover row is additive — the attestation
+	// and per-kind rows are still emitted.
+	if info["attestation"] != "enrolled" {
+		t.Fatalf("leftover row suppressed the attestation row (r6 P1-1): %v", info)
+	}
+	if _, ok := info["kinds"]; !ok {
+		t.Fatalf("leftover row suppressed the per-kind table (r6 P1-1): %v", info)
 	}
 	// Every file byte-identical; no file added or removed.
 	for name, before := range snap {
@@ -1522,5 +1530,155 @@ func TestDoctorIsReportOnly(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(keyDir, stagedName)); !os.IsNotExist(err) {
 		t.Fatalf("plain share did not reconcile: %v", err)
+	}
+}
+
+// TestExpiryRowSurvivesLeftoverRow pins verifier r6 P1-1: the leftover row
+// is ADDITIVE. An expired generation with crash leftovers still reports
+// expiry_warning, attestation and the per-kind table — the leftover row
+// joins the diagnostic, never replaces it. (Shape from the verifier's
+// overlay probe, RED at 2793bd9.)
+func TestExpiryRowSurvivesLeftoverRow(t *testing.T) {
+	root := t.TempDir()
+	runShare(t, "--root", root, "--session", "el1")
+	enrollAllPending(t, root, "el1")
+	// Force the active generation to be already expired.
+	keyDir := filepath.Join(root, "extensions", "remote", "keys", "el1")
+	tags := readEnrolledTagsForTest(t, keyDir)
+	for i := range tags {
+		tags[i].Conditions = rewriteBoundToPast(tags[i].Conditions)
+	}
+	if err := writeEnrolledTagsForTest(t, keyDir, tags); err != nil {
+		t.Fatal(err)
+	}
+	// Plant crash leftovers (a stale pending window + staged entry) whose
+	// conditions match the CURRENT generation — the state reportStagedState
+	// treats as "published generation already covers the pending window".
+	gen, _ := readEnrolledState(keyDir)
+	pendingTags := make([]shareTagFile, 0, len(gen.Tags))
+	for _, g := range gen.Tags {
+		pendingTags = append(pendingTags, shareTagFile{Kind: g.Kind, OwnerPubKey: "o", Conditions: g.Conditions, Sig: "s"})
+	}
+	pendingRaw, _ := json.Marshal(map[string]any{"tags": pendingTags, "not_after": time.Now().Add(24 * time.Hour).Unix()})
+	if err := os.WriteFile(filepath.Join(keyDir, "share.pending.json"), pendingRaw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stagedRaw, _ := json.Marshal(pendingTags)
+	if err := os.WriteFile(filepath.Join(keyDir, stagedName), stagedRaw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	info := doctorShareInspection(root)["el1"].(map[string]any)
+	exp, has := info["expiry_warning"].(string)
+	if !has {
+		t.Fatalf("the leftover row SUPPRESSED the expiry warning (r6 P1-1): %v", info)
+	}
+	if !strings.Contains(exp, "expired") {
+		t.Fatalf("expiry_warning did not report the lapse: %q", exp)
+	}
+	if _, ok := info["leftover"]; !ok {
+		t.Fatalf("the leftover row is missing alongside the expiry row: %v", info)
+	}
+	if info["attestation"] != "enrolled" {
+		t.Fatalf("attestation suppressed alongside the leftover row: %v", info)
+	}
+}
+
+// TestDoctorRemedyForSymlinkedStagedIsExecutable pins verifier r6 P2-1:
+// the symlinked-staged remedy names the removal of the link itself (plain
+// share refuses that state, so pointing at share alone is bad advice).
+func TestDoctorRemedyForSymlinkedStagedIsExecutable(t *testing.T) {
+	root := t.TempDir()
+	runShare(t, "--root", root, "--session", "sr1")
+	keyDir := filepath.Join(root, "extensions", "remote", "keys", "sr1")
+	outside := filepath.Join(t.TempDir(), "outside.json")
+	if err := os.WriteFile(outside, []byte("[]"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stagedPath := filepath.Join(keyDir, stagedName)
+	if err := os.Remove(stagedPath); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, stagedPath); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	info := doctorShareInspection(root)["sr1"].(map[string]any)
+	row, ok := info["staged_error"].(string)
+	if !ok {
+		t.Fatalf("no staged_error row over a symlinked staged leaf: %v", info)
+	}
+	if !strings.Contains(row, "remove the symlink at "+stagedPath) {
+		t.Fatalf("symlinked-staged remedy is not executable (r6 P2-1): %q", row)
+	}
+}
+
+// TestBodyPubLeafConfinementEveryCommand pins verifier r6 P2-3: a
+// symlinked body.pub is refused by share, renew and dry-run even when
+// body.key already exists, and the half-minted key directory is never
+// created (body.pub is lstat'd before the body.key write).
+func TestBodyPubLeafConfinementEveryCommand(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"mint", []string{"--root", "%ROOT%", "--session", "bp1"}},
+		{"dry-run", []string{"--root", "%ROOT%", "--session", "bp1", "--dry-run"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			keyDir := filepath.Join(root, "extensions", "remote", "keys", "bp1")
+			if err := os.MkdirAll(keyDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			outside := filepath.Join(t.TempDir(), "victim.txt")
+			if err := os.WriteFile(outside, []byte("IMPORTANT USER FILE"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(outside, filepath.Join(keyDir, "body.pub")); err != nil {
+				t.Skipf("symlinks unavailable: %v", err)
+			}
+			args := make([]string, 0, len(tc.args)+1)
+			for _, a := range tc.args {
+				args = append(args, strings.ReplaceAll(a, "%ROOT%", root))
+			}
+			_, _, code := runShareLoose(args...)
+			if code == 0 {
+				t.Fatalf("%s accepted a symlinked body.pub (r6 P2-3)", tc.name)
+			}
+			// The victim file is untouched.
+			raw, err := os.ReadFile(outside)
+			if err != nil || string(raw) != "IMPORTANT USER FILE" {
+				t.Fatalf("out-of-root body.pub target damaged: %v", err)
+			}
+			if tc.name == "mint" {
+				// Half-minted key dir: body.key must be ABSENT after the
+				// refusal (body.pub is checked before the key write).
+				if _, err := os.Stat(filepath.Join(keyDir, "body.key")); !os.IsNotExist(err) {
+					t.Fatalf("body.key written despite the body.pub refusal (r6 P2-3): %v", err)
+				}
+			}
+		})
+	}
+	// With body.key present, plain share must still refuse the symlinked
+	// body.pub (the leaf set covers it on every command).
+	root := t.TempDir()
+	runShare(t, "--root", root, "--session", "bp2")
+	keyDir := filepath.Join(root, "extensions", "remote", "keys", "bp2")
+	outside := filepath.Join(t.TempDir(), "victim2.txt")
+	if err := os.WriteFile(outside, []byte("IMPORTANT"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pubPath := filepath.Join(keyDir, "body.pub")
+	if err := os.Remove(pubPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, pubPath); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	_, stderr, code := runShareLoose("--root", root, "--session", "bp2")
+	if code == 0 {
+		t.Fatal("plain share accepted a symlinked body.pub with body.key present (r6 P2-3)")
+	}
+	if !strings.Contains(stderr, "body.pub") {
+		t.Fatalf("body.pub refusal does not name the leaf (r6 P3): %s", stderr)
 	}
 }
