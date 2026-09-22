@@ -38,9 +38,16 @@ func TestSyncDirPlatformFlushesRealDirectory(t *testing.T) {
 	if err := r.syncDirPlatform("bridge"); err != nil {
 		t.Fatalf("syncDirPlatform single component: %v", err)
 	}
-	// A missing directory is a no-op, not an error.
-	if err := r.syncDirPlatform(filepath.Join("bridge", "does-not-exist")); err != nil {
-		t.Fatalf("syncDirPlatform on a missing directory: %v", err)
+	// A missing directory propagates the open error (Unix twin; no no-op —
+	// ruling 10:05Z: a flush that reports durable for a chain that does not
+	// exist would falsify Addendum 4).
+	if err := r.syncDirPlatform(filepath.Join("bridge", "does-not-exist")); err == nil {
+		t.Fatal("syncDirPlatform accepted a missing directory")
+	}
+	// The root directory itself syncs through the pinned-handle chain, not
+	// an ambient open.
+	if err := r.syncDirPlatform("."); err != nil {
+		t.Fatalf("syncDirPlatform on the pinned root: %v", err)
 	}
 	// An escaping path is refused, never resolved.
 	if err := r.syncDirPlatform(filepath.Join("..", "outside")); err == nil {

@@ -102,33 +102,39 @@ func flushDirHandle(handle windows.Handle, name string) error {
 func (r *DeliveryRoot) syncDirPlatform(dir string) error {
 	clean := filepath.ToSlash(filepath.Clean(dir))
 	if clean == "." || clean == "/" || clean == "" {
-		// The root itself: opened read-only by Go (GENERIC_READ), which is
-		// not flushable; open "." for write via the NtCreateFile form
-		// relative to the root handle itself is impossible without the
-		// root's own handle. Use the ambient absolute path of the verified
-		// root instead — the root is pinned and VerifyBase guards identity.
-		return syncDirPlatformAmbient(r.root.Name())
+		// The root itself: Go's os.Root opens "." read-only (GENERIC_READ)
+		// and FlushFileBuffers requires GENERIC_WRITE, so obtain a writable
+		// handle by reopening "." with FILE_GENERIC_WRITE relative to the
+		// root's own handle. No ambient path is involved. If the kernel
+		// refuses the relative reopen, surface the NTSTATUS text and errno
+		// rather than falling back to an ambient open silently.
+		self, err := r.root.Open(".")
+		if err != nil {
+			return fmt.Errorf("open pinned root for sync: %w", err)
+		}
+		defer func() { _ = self.Close() }()
+		handle, ntErr := ntOpenDirectoryIn(windows.Handle(self.Fd()), ".")
+		if ntErr != nil {
+			return fmt.Errorf("reopen pinned root \".\" for sync: %w (%v)", ntErr, windowsClaimError(ntErr))
+		}
+		return flushDirHandle(handle, "root")
 	}
 	if strings.HasPrefix(clean, "../") || clean == ".." {
 		return fmt.Errorf("dir sync %s escapes the pinned root", dir)
 	}
 	parent, err := r.root.Open(filepath.Dir(clean))
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil // nothing to sync
-		}
 		return fmt.Errorf("open parent of %s for sync: %w", dir, err)
 	}
 	defer func() { _ = parent.Close() }()
 	handle, ntErr := ntOpenDirectoryIn(windows.Handle(parent.Fd()), filepath.Base(clean))
 	if ntErr != nil {
-		// NtCreateFile returns NTSTATUS values; map them through
-		// windowsClaimError so ENOENT-style statuses check as
-		// os.IsNotExist (the claim paths use the same mapping).
-		if os.IsNotExist(windowsClaimError(ntErr)) {
-			return nil // nothing to sync
-		}
-		return fmt.Errorf("open dir %s relative to root for sync: %w", dir, ntErr)
+		// No missing-directory no-op: the Unix twin propagates the open
+		// error, and a flush that reports durable for a chain that does
+		// not exist would falsify ADR Addendum 4 on exactly the path it
+		// protects (ruling 10:05Z). Map NTSTATUS through windowsClaimError
+		// for a readable errno in the message.
+		return fmt.Errorf("open dir %s relative to root for sync: %w (%v)", dir, ntErr, windowsClaimError(ntErr))
 	}
 	return flushDirHandle(handle, dir)
 }
