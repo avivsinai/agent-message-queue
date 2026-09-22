@@ -12,7 +12,11 @@ import (
 )
 
 const (
-	cliHelperEnv                 = "AMQ_TEST_CLI_HELPER"
+	cliHelperEnv = "AMQ_TEST_CLI_HELPER"
+	// cliTestWalkCeilingEnv carries the isolated home's walk ceiling from the
+	// parent test process into helper subprocesses (os.Args[0] re-execs),
+	// which start with walkCeilingForTests empty (codex #853 r2).
+	cliTestWalkCeilingEnv        = "AMQ_TEST_WALK_CEILING"
 	wakeRestartPTYOwnerHelperEnv = "AMQ_TEST_WAKE_RESTART_PTY_OWNER"
 )
 
@@ -49,6 +53,21 @@ func cliTestRepoRoot() (string, error) {
 func TestMain(m *testing.M) {
 	readTIOCSTILegacySysctl = func() ([]byte, error) {
 		return nil, os.ErrNotExist
+	}
+	// Helper subprocesses re-exec this binary and never reach the parent's
+	// isolation setup below; they inherit its HOME/TMPDIR through the
+	// environment, and take the walk ceiling from it too, before anything
+	// resolves a root (codex #853 r2: explicit --root still evaluates
+	// defaultRoot during flag registration). A helper without the ceiling
+	// refuses to run rather than walk unbounded toward the real home.
+	isHelper := os.Getenv(cliHelperEnv) == "1" || os.Getenv(injectViaHelperEnv) == "1" ||
+		os.Getenv(wakeRestartPTYOwnerHelperEnv) == "1" || os.Getenv("AMQ_TEST_WAKE_RESTART_BOUND_EXEC") != ""
+	if isHelper {
+		walkCeilingForTests = os.Getenv(cliTestWalkCeilingEnv)
+		if walkCeilingForTests == "" {
+			_, _ = fmt.Fprintln(os.Stderr, "cli test helper: "+cliTestWalkCeilingEnv+" is unset; refusing to run without the isolated walk ceiling")
+			os.Exit(1)
+		}
 	}
 	if os.Getenv(cliHelperEnv) == "1" {
 		if err := Run(os.Args[1:], "test"); err != nil {
@@ -174,6 +193,11 @@ func TestMain(m *testing.M) {
 	// ~/.amqrc / ~/.agent-mail. Production never sets walkCeilingForTests, so
 	// live resolution is unchanged.
 	walkCeilingForTests = home
+	if err := os.Setenv(cliTestWalkCeilingEnv, home); err != nil {
+		_ = os.RemoveAll(fakeHome)
+		_, _ = fmt.Fprintf(os.Stderr, "export test walk ceiling: %v\n", err)
+		os.Exit(1)
+	}
 	tempRoot, err := os.MkdirTemp(home, ".amq-cli-test-")
 	if err != nil {
 		_ = os.RemoveAll(fakeHome)

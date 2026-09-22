@@ -8,9 +8,10 @@ import (
 
 // TestMain isolates the wake-readiness cache dir (issue #988, rev-853 P1).
 // newWakeReadyPath (internal/keepalive/amq/runner.go) falls back to
-// update.DefaultCacheDir(), which calls os.UserCacheDir directly and
-// ignores HOME on darwin; without an override every app-package run created
-// ~/Library/Caches/amq-keepalive/readiness in the operator's home. The
+// update.DefaultCacheDir(), i.e. os.UserCacheDir, which derives from HOME
+// ($HOME/Library/Caches on darwin). This package has no HOME seam, so every
+// app-package run created ~/Library/Caches/amq-keepalive/readiness in the
+// operator's home. The
 // package's own override is AMQ_KEEPALIVE_CACHE_DIR (runner.go), already
 // used by the amq package's tests; point it at a disposable dir here so no
 // test in this package can write the real cache path. The env override is
