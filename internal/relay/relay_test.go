@@ -64,3 +64,59 @@ func TestClientAuthenticatesPublishesAndReconnects(t *testing.T) {
 		t.Fatalf("publish after reconnect: %v", err)
 	}
 }
+
+// 611.16 slice 4 transport: a subscription receives stored matching events
+// then EOSE, then live ones; an event whose signature does not verify is
+// never delivered.
+func TestSubscribeDeliversVerifiedMatchingEvents(t *testing.T) {
+	body, tag := testIdentity(t)
+	lr, srv, url := relaytest.Start(body.PublicKeyHex(), tag)
+	defer srv.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	conn, err := relay.Connect(ctx, relay.Config{URL: url, Secret: body.Secret(), AuthTag: tag})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	sign := func(kind nostr.Kind, content string) nostr.Event {
+		evt := nostr.Event{CreatedAt: nostr.Now(), Kind: kind, Content: content}
+		if err := evt.Sign(body.Secret()); err != nil {
+			t.Fatal(err)
+		}
+		return evt
+	}
+	if err := conn.Publish(ctx, sign(9, "stored")); err != nil {
+		t.Fatal(err)
+	}
+	sub, err := conn.Subscribe(ctx, "dm", nostr.Filter{Kinds: []nostr.Kind{9}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := func() nostr.Event {
+		select {
+		case evt := <-sub.Events:
+			return evt
+		case <-ctx.Done():
+			t.Fatal("no event")
+		}
+		return nostr.Event{}
+	}
+	if got := next(); got.Content != "stored" {
+		t.Fatalf("first event = %q, want stored", got.Content)
+	}
+	select {
+	case <-sub.EOSE:
+	case <-ctx.Done():
+		t.Fatal("no EOSE")
+	}
+	forged := sign(9, "forged")
+	forged.Content = "tampered" // signature no longer matches
+	lr.Inject(forged)
+	if err := conn.Publish(ctx, sign(9, "live")); err != nil {
+		t.Fatal(err)
+	}
+	if got := next(); got.Content != "live" {
+		t.Fatalf("next event = %q, want live (the forged event must be dropped)", got.Content)
+	}
+}
