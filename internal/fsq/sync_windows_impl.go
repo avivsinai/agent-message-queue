@@ -122,7 +122,10 @@ func (r *DeliveryRoot) syncDirPlatform(dir string) error {
 	defer func() { _ = parent.Close() }()
 	handle, ntErr := ntOpenDirectoryIn(windows.Handle(parent.Fd()), filepath.Base(clean))
 	if ntErr != nil {
-		if os.IsNotExist(ntErr) {
+		// NtCreateFile returns NTSTATUS values; map them through
+		// windowsClaimError so ENOENT-style statuses check as
+		// os.IsNotExist (the claim paths use the same mapping).
+		if os.IsNotExist(windowsClaimError(ntErr)) {
 			return nil // nothing to sync
 		}
 		return fmt.Errorf("open dir %s relative to root for sync: %w", dir, ntErr)
