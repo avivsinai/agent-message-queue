@@ -352,12 +352,22 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	// carrier. SetPublish runs inside startupSequence; this closure forwards
 	// to the carrier once it exists.
 	var carrier *amqio.Carrier
+	// Buzz DM carriers (611.16) are built below, once the manifest path is
+	// known and before startup reconciliation.
+	var relayCfg *manifest.Relay
+	var edges *dmEdges
 	carrierPublish := publishRouter(map[string]publishFunc{
 		"amq": func(s protocol.Snapshot, origin map[string]string) error {
 			if carrier == nil {
 				return errCarrierUnavailable
 			}
 			return carrier.Publish(s, origin)
+		},
+		"buzz": func(s protocol.Snapshot, origin map[string]string) error {
+			if edges == nil {
+				return errCarrierUnavailable
+			}
+			return edges.publish(s, origin)
 		},
 	})
 	// .13: the manifest load, flag-sugar append (--fake, --codex-socket),
@@ -419,6 +429,12 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 			sugar = append(sugar, manifest.Adapter{Kind: "codex", Target: codex.TargetID(id), Config: cfg})
 		}
 	}
+	// Buzz DM carriers exist before startup reconciliation, so a Buzz record
+	// owed from before a restart publishes during reconcile.
+	if mfRelay, rerr := manifest.Load(manifestFile); rerr == nil {
+		relayCfg = mfRelay.Relay
+	}
+	edges = buildDMEdges(c.root, stateDir, relayCfg, stderr)
 	_, ep, carrier, _, err := serveStartup(stateDir, c.root, *me, manifestFile, sugar, carrierPublish, &carrier, stderr, wireCarrier(c.root, stderr))
 	if err != nil {
 		if manifest.IsValidation(err) {
@@ -484,9 +500,12 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	// Relay surface (611.15): one authenticated client per share. The
 	// manifest was already loaded and validated by serveStartup.
 	var relays *sync.WaitGroup
-	if mfRelay, rerr := manifest.Load(manifestFile); rerr == nil && mfRelay.Relay != nil {
-		relays = startRelays(ctx, c.root, stateDir, mfRelay.Relay, stderr)
-		say(stdout, "relay %s: %d shared session(s)", mfRelay.Relay.URL, len(mfRelay.Relay.Shares))
+	if relayCfg != nil {
+		// Fresh remote commands are admitted only now, after attachment and
+		// startup reconciliation.
+		edges.bind(ep.Handle)
+		relays = startRelays(ctx, c.root, stateDir, relayCfg, edges, stderr)
+		say(stdout, "relay %s: %d shared session(s)", relayCfg.URL, len(relayCfg.Shares))
 	}
 	go func() {
 		t := time.NewTicker(*poll)

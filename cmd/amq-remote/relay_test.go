@@ -54,7 +54,7 @@ func TestRelayShareAuthenticatesFromEnrolledCredentials(t *testing.T) {
 	}
 	stateDir := filepath.Join(root, "extensions", "remote")
 	ctx, cancel := context.WithCancel(context.Background())
-	wg := startRelays(ctx, root, stateDir, mf.Relay, io.Discard)
+	wg := startRelays(ctx, root, stateDir, mf.Relay, nil, io.Discard)
 	defer func() { cancel(); wg.Wait() }()
 
 	deadline := time.Now().Add(4 * time.Second)

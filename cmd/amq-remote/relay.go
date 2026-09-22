@@ -32,6 +32,10 @@ type relayShareStatus struct {
 	State   string `json:"state"`
 	Error   string `json:"error,omitempty"`
 	Since   string `json:"since"`
+	// Commands is the owner-DM surface's state for a commands share:
+	// configured, closed (membership unverified), subscription_active,
+	// publish_pending, or refused.
+	Commands string `json:"commands,omitempty"`
 }
 
 type relayStatusDoc struct {
@@ -67,7 +71,7 @@ func relayConfigFor(root, url string, sh manifest.Share) relay.ConfigFunc {
 // startRelays runs one authenticated relay client per share until ctx ends,
 // and keeps relay-status.json current. A relay that is down or refusing
 // leaves local IPC and AMQ operation untouched.
-func startRelays(ctx context.Context, root, stateDir string, r *manifest.Relay, stderr io.Writer) *sync.WaitGroup {
+func startRelays(ctx context.Context, root, stateDir string, r *manifest.Relay, edges *dmEdges, stderr io.Writer) *sync.WaitGroup {
 	var wg sync.WaitGroup
 	if r == nil {
 		return &wg
@@ -79,6 +83,13 @@ func startRelays(ctx context.Context, root, stateDir string, r *manifest.Relay, 
 	entries := make([]entry, 0, len(r.Shares))
 	for _, sh := range r.Shares {
 		c := relay.NewClient(relayConfigFor(root, r.URL, sh))
+		if edges != nil && sh.Commands {
+			if creds, err := sharestate.Load(root, sh.Session); err == nil {
+				if ds := edges.forBody(creds.Body.PublicKeyHex()); ds != nil {
+					c.OnConnect = func(ctx context.Context, conn *relay.Conn) { ds.runDM(ctx, conn, edges, stderr) }
+				}
+			}
+		}
 		entries = append(entries, entry{sh, c})
 		wg.Add(1)
 		go func() {
@@ -96,10 +107,14 @@ func startRelays(ctx context.Context, root, stateDir string, r *manifest.Relay, 
 			doc := relayStatusDoc{URL: r.URL}
 			for _, e := range entries {
 				st := e.client.Status()
-				doc.Shares = append(doc.Shares, relayShareStatus{
+				row := relayShareStatus{
 					Session: e.share.Session, Target: e.share.Target, State: string(st.State),
 					Error: st.Err, Since: st.Since.UTC().Format(time.RFC3339),
-				})
+				}
+				if edges != nil && e.share.Commands {
+					row.Commands = edges.stateOf(e.share.Session)
+				}
+				doc.Shares = append(doc.Shares, row)
 			}
 			sort.Slice(doc.Shares, func(i, j int) bool { return doc.Shares[i].Session < doc.Shares[j].Session })
 			raw, _ := json.MarshalIndent(doc, "", "  ")

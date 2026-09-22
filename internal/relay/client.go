@@ -38,6 +38,10 @@ type ConfigFunc func() (Config, error)
 // waiter or authenticated flag crosses a reconnect.
 type Client struct {
 	config ConfigFunc
+	// OnConnect, if set, runs for each authenticated connection in its own
+	// goroutine; its context ends when that connection does. Subscriptions
+	// and outbox flushing live here, so nothing crosses a reconnect.
+	OnConnect func(ctx context.Context, conn *Conn)
 
 	mu     sync.Mutex
 	status Status
@@ -101,11 +105,25 @@ func (c *Client) Run(ctx context.Context) error {
 			c.set(StateUnavailable, err, nil)
 		} else {
 			c.set(StateAuthenticated, nil, conn)
+			connCtx, connCancel := context.WithCancel(ctx)
+			hookDone := make(chan struct{})
+			if c.OnConnect != nil {
+				go func() {
+					defer close(hookDone)
+					c.OnConnect(connCtx, conn)
+				}()
+			} else {
+				close(hookDone)
+			}
 			select {
 			case <-conn.Done():
 				c.set(StateUnavailable, conn.Err(), nil)
 			case <-ctx.Done():
 				conn.Close()
+			}
+			connCancel()
+			<-hookDone
+			if ctx.Err() != nil {
 				c.set(StateUnavailable, nil, nil)
 				return nil
 			}

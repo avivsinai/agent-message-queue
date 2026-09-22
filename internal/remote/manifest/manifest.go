@@ -68,6 +68,9 @@ type Share struct {
 	Target      string `json:"target"`
 	Session     string `json:"session"`
 	OwnerPubKey string `json:"owner_pubkey"`
+	// DMChannelID is the owner's one-to-one private Buzz channel, bound
+	// explicitly by the operator. Commands require it.
+	DMChannelID string `json:"dm_channel_id,omitempty"`
 	Commands    bool   `json:"commands,omitempty"`
 	Activity    bool   `json:"activity,omitempty"`
 }
@@ -279,8 +282,8 @@ func validateRelay(f File, targets map[string]bool) error {
 			return &ErrInvalidRelay{Reason: fmt.Sprintf("session %q is shared twice", sh.Session)}
 		case !validHex64(sh.OwnerPubKey):
 			return &ErrInvalidRelay{Reason: fmt.Sprintf("share %q owner_pubkey must be 64 lowercase hex", sh.Session)}
-		case sh.Commands:
-			return &ErrInvalidRelay{Reason: fmt.Sprintf("share %q: commands are not supported by this binary", sh.Session)}
+		case sh.Commands && sh.DMChannelID == "":
+			return &ErrInvalidRelay{Reason: fmt.Sprintf("share %q: commands need dm_channel_id, the owner's private DM channel", sh.Session)}
 		case sh.Activity:
 			return &ErrInvalidRelay{Reason: fmt.Sprintf("share %q: activity is not supported by this binary", sh.Session)}
 		}
