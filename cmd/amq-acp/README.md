@@ -17,7 +17,8 @@ Implemented methods:
 | `initialize` | Answers `protocolVersion: 2` and the minimum honest capability set. Unknown top-level params are rejected. |
 | `session/new` | Returns a `sessionId` and `_meta.thread`, the durable AMQ cockpit thread for the session's channel. Requires a completed `initialize`. |
 | `session/prompt` | Delivers the prompt text to `AMQ_ACP_TO` on the session's cockpit thread, then holds the turn open. The client receives `session/update` notifications as the turn progresses and the reply text as an `agent_message_chunk`; the final result is `stopReason: "end_turn"` with the reply in `_meta.amq`, or the typed refusal `stopReason: "refusal"` with `_meta.amq.state: "no_reply"` when the bounded wait expires. |
-| `session/cancel` | Acknowledged. Mid-turn steering and cancellation teardown land in the next increment. |
+| `_session/steering` | Delivers owner steering on the session's cockpit thread, framed as untrusted task guidance. During an in-flight prompt it is AMQ `urgent` with the `buzz-steer` label and returns `outcome: "injected"`; while idle it is `normal` priority and returns `outcome: "startedNewTurn"`. The outcome names the delivery mode only: `_meta.amq` reports the prompt committed to the inbox, not drained or started, so neither outcome proves the peer acted. An in-turn steer refs the turn's prompt. A Nostr event id in `_meta` makes a redelivered steer idempotent. `initialize` advertises it as `_meta.steering.supported: true`. |
+| `session/cancel` | Ends the session's in-flight prompt turn: that `session/prompt` returns `stopReason: "cancelled"` with `_meta.amq.state: "cancelled"` and `reason: "session_cancelled"`. The queued AMQ prompt is not retracted and the peer is not notified; a later reply on the thread cannot answer a new prompt. With no turn in flight it is a no-op. |
 
 Everything else returns JSON-RPC `-32601`. There is no `session/load`, no
 `fs/*`, no `terminal/*`, and no tool calling. The v2 baseline block types are
@@ -29,8 +30,12 @@ than silently dropped.
 ## Live turns, threads, and honesty
 
 - A prompt turn is **correlated, not fire-and-forget**. Only a message from the
-  configured peer, on the prompt's thread, created after the prompt itself, can
-  answer the turn. A stale reply on the thread is never picked up.
+  configured peer, on the prompt's thread, created after the prompt, whose
+  `refs` name the prompt can answer the turn. `amq reply --id <prompt id>` sets
+  those refs, and so does a reply to an in-turn steer. A stale reply, or a late
+  answer to a cancelled prompt, never answers a later turn.
+- A turn settles **once**: the first of reply, `session/cancel`, stream close
+  and timeout decides it, and the others cannot overturn it.
 - The turn is **bounded**. If no fresh reply arrives within
   `AMQ_ACP_TURN_TIMEOUT`, the result is the typed refusal
   `stopReason: "refusal"` with `_meta.amq.state: "no_reply"` and
