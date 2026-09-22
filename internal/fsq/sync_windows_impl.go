@@ -146,8 +146,8 @@ func (r *DeliveryRoot) syncDirPlatform(dir string) error {
 }
 
 // syncDirPlatformAmbient is the ambient-path form used by the package-level
-// WriteFileAtomic (which holds no DeliveryRoot) and for the root directory
-// itself; it opens by absolute path — the only form available there.
+// WriteFileAtomic (which holds no DeliveryRoot); it opens by absolute path —
+// the only form available there. No DeliveryRoot path reaches it.
 func syncDirPlatformAmbient(dir string) error {
 	namePtr, err := windows.UTF16PtrFromString(dir)
 	if err != nil {
