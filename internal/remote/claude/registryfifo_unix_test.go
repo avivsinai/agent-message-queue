@@ -3,12 +3,15 @@
 package claude
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/avivsinai/agent-message-queue/internal/remote/registry"
 )
 
 // testRegistryFIFO probes a FIFO at the session-registry leaf: refused
@@ -62,5 +65,30 @@ func TestFIFOLeavesNeverBlock(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("a FIFO leaf blocked the key read or the receiver")
+	}
+}
+
+// codex #858 r2: a FIFO at ~/.claude/sessions blocked discovery waiting for
+// a writer. It is now refused at open, without blocking.
+func TestDiscoverRefusesFIFOSessionsDir(t *testing.T) {
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mkfifo(claudeSessionsDir(home), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := discoverer{home: home}.Discover(context.Background(), registry.DiscoverRequest{})
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("discovery accepted a FIFO as the sessions directory")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("discovery blocked on a FIFO sessions directory")
 	}
 }

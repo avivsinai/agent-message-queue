@@ -10,6 +10,8 @@ package registry
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"sync"
@@ -38,14 +40,29 @@ type Factory func(ctx context.Context, cfg FactoryConfig) (core.Attachment, erro
 
 // Candidate is a discovered adapter that could be attached.
 type Candidate struct {
-	Kind   string
+	Kind string
+	// Target is unique and protocol-valid; it is the manifest target id.
 	Target string
+	// Display is human text (a session name); never an identity.
+	Display string
+	// Config is the adapter config block a manifest entry for this
+	// candidate needs, so discovery output can be pasted into the manifest.
+	// Discovery never attaches: registration stays an explicit manifest edit.
+	Config json.RawMessage
 }
 
 // Discoverer optionally lists attachable adapters without attaching. .11's
 // Codex socket discovery plugs in here so serve is never edited for discovery.
 type Discoverer interface {
-	Discover(ctx context.Context, root, stateDir string) ([]Candidate, error)
+	Discover(ctx context.Context, req DiscoverRequest) ([]Candidate, error)
+}
+
+// DiscoverRequest carries what a discoverer may use. Hints holds operator
+// flags a kind honors in place of its default location, e.g. "codex.socket"
+// from serve's --codex-socket.
+type DiscoverRequest struct {
+	Root, StateDir string
+	Hints          map[string]string
 }
 
 var (
@@ -148,9 +165,26 @@ func Build(ctx context.Context, root, stateDir string, f manifest.File) []Outcom
 	return outcomes
 }
 
+// ErrIncomplete marks a discoverer that returned some candidates but could
+// not examine everything (a bounded scan hit its limit). Its candidates are
+// still valid.
+var ErrIncomplete = errors.New("discovery incomplete")
+
+// ErrBadHint marks an explicitly supplied hint (such as --codex-socket) that
+// does not name a usable target. The caller refuses it as a usage error.
+var ErrBadHint = errors.New("discovery hint is unusable")
+
+// Diagnostic is one discoverer's failure or incompleteness.
+type Diagnostic struct {
+	Kind string
+	Err  error
+}
+
 // Discover lists candidates from all registered discoverers. serve --discover
-// calls this and attaches nothing.
-func Discover(ctx context.Context, root, stateDir string) ([]Candidate, error) {
+// calls this and attaches nothing. Discoverers are independent: one that
+// fails or is incomplete becomes a Diagnostic and never discards another's
+// candidates (codex #858).
+func Discover(ctx context.Context, req DiscoverRequest) ([]Candidate, []Diagnostic) {
 	factMu.RLock()
 	kinds := make([]string, 0, len(discs))
 	for k := range discs {
@@ -159,15 +193,16 @@ func Discover(ctx context.Context, root, stateDir string) ([]Candidate, error) {
 	factMu.RUnlock()
 	sort.Strings(kinds)
 	var out []Candidate
+	var diags []Diagnostic
 	for _, k := range kinds {
 		factMu.RLock()
 		d := discs[k]
 		factMu.RUnlock()
-		cands, err := d.Discover(ctx, root, stateDir)
-		if err != nil {
-			return nil, fmt.Errorf("discover %s: %w", k, err)
-		}
+		cands, err := d.Discover(ctx, req)
 		out = append(out, cands...)
+		if err != nil {
+			diags = append(diags, Diagnostic{Kind: k, Err: err})
+		}
 	}
-	return out, nil
+	return out, diags
 }
