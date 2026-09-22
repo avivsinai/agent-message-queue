@@ -349,7 +349,6 @@ func renewalWindow(st *shareState, days int, daysExplicit bool) (shareWindow, er
 // lstats all five leaves once and refuseIfConfined renders the same
 // refusal from the typed outcomes.
 
-
 // leafConfinementReason classifies a non-regular lstat result (r10-P2).
 func leafConfinementReason(fi os.FileInfo) string {
 	if fi.Mode()&os.ModeSymlink != 0 {
