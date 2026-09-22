@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/avivsinai/agent-message-queue/internal/update"
@@ -62,23 +63,80 @@ func TestMain(m *testing.M) {
 		_ = os.Unsetenv(k)
 	}
 
+	fakeHome, err := os.MkdirTemp("", "amq-cli-test-home-")
+	if err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "create isolated test home: %v\n", err)
+		os.Exit(1)
+	}
+	if err := os.Chmod(fakeHome, 0o700); err != nil {
+		_ = os.RemoveAll(fakeHome)
+		_, _ = fmt.Fprintf(os.Stderr, "secure isolated test home: %v\n", err)
+		os.Exit(1)
+	}
+	// Pin the Go toolchain caches to the real home's locations BEFORE the home
+	// override: GOPATH/GOCACHE default under $HOME, and a module cache inside
+	// the disposable test home both slows the run (re-downloads) and breaks
+	// cleanup (mod cache files are read-only). Env-set values win unchanged.
+	realHome, realHomeErr := os.UserHomeDir()
+	realGopath := os.Getenv("GOPATH")
+	if realGopath == "" && realHomeErr == nil && realHome != "" {
+		realGopath = filepath.Join(realHome, "go")
+	}
+	realGomodcache := os.Getenv("GOMODCACHE")
+	if realGomodcache == "" && realGopath != "" {
+		realGomodcache = filepath.Join(realGopath, "pkg", "mod")
+	}
+	realGocache := os.Getenv("GOCACHE")
+	if realGocache == "" && realHomeErr == nil && realHome != "" {
+		if userCache, uerr := os.UserCacheDir(); uerr == nil {
+			realGocache = filepath.Join(userCache, "go-build")
+		}
+	}
+	// Override every variable os.UserHomeDir (and the tools it fronts) consults
+	// so tests can never read or write the operator's real home: ~/.amqrc must
+	// not leak authority into root resolution (issue #988: with a live ~/.amqrc
+	// pointing at ~/.agent-mail, TestSetup*/TestRunEnvJSON*/TestCoopExec*/
+	// TestEnvAndBareSend* failed identically on main), and nothing may write
+	// through to the live ~/.agent-mail. Per-test t.Setenv("HOME", ...) keeps
+	// working: it overrides and restores around this baseline. HOMEDRIVE and
+	// HOMEPATH are set for Windows callers and tools that resolve the home from
+	// the drive-letter pair rather than USERPROFILE.
+	for _, env := range []struct{ key, value string }{
+		{"HOME", fakeHome},
+		{"USERPROFILE", fakeHome},
+		{"HOMEDRIVE", filepath.VolumeName(fakeHome)},
+		{"HOMEPATH", strings.TrimPrefix(fakeHome, filepath.VolumeName(fakeHome))},
+		{"GOPATH", realGopath},
+		{"GOMODCACHE", realGomodcache},
+		{"GOCACHE", realGocache},
+	} {
+		if err := os.Setenv(env.key, env.value); err != nil {
+			_ = os.RemoveAll(fakeHome)
+			_, _ = fmt.Fprintf(os.Stderr, "set %s for tests: %v\n", env.key, err)
+			os.Exit(1)
+		}
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
+		_ = os.RemoveAll(fakeHome)
 		_, _ = fmt.Fprintf(os.Stderr, "resolve test home directory: %v\n", err)
 		os.Exit(1)
 	}
 	home, err = filepath.EvalSymlinks(home)
 	if err != nil {
+		_ = os.RemoveAll(fakeHome)
 		_, _ = fmt.Fprintf(os.Stderr, "resolve test home directory symlinks: %v\n", err)
 		os.Exit(1)
 	}
 	tempRoot, err := os.MkdirTemp(home, ".amq-cli-test-")
 	if err != nil {
+		_ = os.RemoveAll(fakeHome)
 		_, _ = fmt.Fprintf(os.Stderr, "create secure test temp root: %v\n", err)
 		os.Exit(1)
 	}
 	if err := os.Chmod(tempRoot, 0o700); err != nil {
 		_ = os.RemoveAll(tempRoot)
+		_ = os.RemoveAll(fakeHome)
 		_, _ = fmt.Fprintf(os.Stderr, "secure test temp root: %v\n", err)
 		os.Exit(1)
 	}
@@ -86,8 +144,9 @@ func TestMain(m *testing.M) {
 	cliSecureTempRoot = tempRoot
 	workingDir, err := os.Getwd()
 	if err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "resolve test working directory: %v\n", err)
 		_ = os.RemoveAll(tempRoot)
+		_ = os.RemoveAll(fakeHome)
+		_, _ = fmt.Fprintf(os.Stderr, "resolve test working directory: %v\n", err)
 		os.Exit(1)
 	}
 	// Run every test from the secure temp root, not the package directory.
@@ -96,15 +155,14 @@ func TestMain(m *testing.M) {
 	// queue, and every test that pins a temp root then fails with "active
 	// root ... conflicts with initialized repo-local root ... detected from
 	// cwd" (issue #707). CI never sees this because its checkout has no queue.
-	// The temp root sits directly under HOME, which the walk treats as global
-	// state rather than repo-local evidence, unless HOME is itself a Git
-	// worktree (dotfiles kept as a repo in HOME): then the walk's ceiling is
-	// HOME, ~/.amqrc becomes worktree-local authority, and the same refusal
-	// returns. TestProcessWorkingDirectoryIsIsolatedFromRepoLocalQueue names
-	// that state instead of letting pinned tests fail one by one.
+	// The temp root sits directly under the FAKE home, which the walk treats as
+	// global state rather than repo-local evidence; a developer whose real HOME
+	// is a Git worktree (dotfiles kept as a repo in HOME) is therefore also
+	// covered, because tests never see the real home at all.
 	if err := os.Chdir(tempRoot); err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "isolate test working directory: %v\n", err)
 		_ = os.RemoveAll(tempRoot)
+		_ = os.RemoveAll(fakeHome)
 		os.Exit(1)
 	}
 
@@ -126,6 +184,8 @@ func TestMain(m *testing.M) {
 		{key: "XDG_CACHE_HOME", value: testCacheDir},
 	} {
 		if err := os.Setenv(env.key, env.value); err != nil {
+			_ = os.RemoveAll(tempRoot)
+			_ = os.RemoveAll(fakeHome)
 			_, _ = fmt.Fprintf(os.Stderr, "set %s for tests: %v\n", env.key, err)
 			os.Exit(1)
 		}
@@ -139,6 +199,10 @@ func TestMain(m *testing.M) {
 	cliSecureTempRoot = ""
 	if err := os.RemoveAll(tempRoot); err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "remove secure test temp root: %v\n", err)
+		exitCode = 1
+	}
+	if err := os.RemoveAll(fakeHome); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "remove isolated test home: %v\n", err)
 		exitCode = 1
 	}
 	os.Exit(exitCode)
