@@ -18,6 +18,10 @@ const (
 
 var cliSecureTempRoot string
 
+// testRealHome is the operator's real home as resolved by TestMain before
+// the override; the home-isolation regression test compares against it.
+var testRealHome string
+
 // cliTestPackageDir is this package's source directory, resolved from the
 // test source file itself rather than from cwd. TestMain moves the process cwd
 // to the secure temp root (issue #707), so tests that need the repository
@@ -63,7 +67,20 @@ func TestMain(m *testing.M) {
 		_ = os.Unsetenv(k)
 	}
 
-	fakeHome, err := os.MkdirTemp("", "amq-cli-test-home-")
+	realHome, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(realHome) == "" {
+		_, _ = fmt.Fprintf(os.Stderr, "resolve real home directory for test isolation: %v\n", err)
+		os.Exit(1)
+	}
+	testRealHome = realHome
+	// Create the isolated home under the real home, NOT under os.TempDir():
+	// the --inject-via ancestor check refuses group/world-writable ancestors
+	// and os.TempDir() is /tmp (mode 1777) on Linux CI runners, so a home
+	// under it fails every wake-target test there (issue #988, first CI red).
+	// The real home is the established placement for secure test roots (see
+	// keepalive's secureAMQTestRoot); detectAgentMailDir stops at HOME via
+	// isHomeConfigDir, so the real home's own queue is never inspected.
+	fakeHome, err := os.MkdirTemp(realHome, ".amq-cli-test-home-")
 	if err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "create isolated test home: %v\n", err)
 		os.Exit(1)
@@ -77,9 +94,8 @@ func TestMain(m *testing.M) {
 	// override: GOPATH/GOCACHE default under $HOME, and a module cache inside
 	// the disposable test home both slows the run (re-downloads) and breaks
 	// cleanup (mod cache files are read-only). Env-set values win unchanged.
-	realHome, realHomeErr := os.UserHomeDir()
 	realGopath := os.Getenv("GOPATH")
-	if realGopath == "" && realHomeErr == nil && realHome != "" {
+	if realGopath == "" {
 		realGopath = filepath.Join(realHome, "go")
 	}
 	realGomodcache := os.Getenv("GOMODCACHE")
@@ -87,7 +103,7 @@ func TestMain(m *testing.M) {
 		realGomodcache = filepath.Join(realGopath, "pkg", "mod")
 	}
 	realGocache := os.Getenv("GOCACHE")
-	if realGocache == "" && realHomeErr == nil && realHome != "" {
+	if realGocache == "" {
 		if userCache, uerr := os.UserCacheDir(); uerr == nil {
 			realGocache = filepath.Join(userCache, "go-build")
 		}
