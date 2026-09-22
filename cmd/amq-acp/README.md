@@ -45,7 +45,8 @@ session, or an identity token that no longer names the same physical directory
 all refuse with exit code 5 before any message is written.
 
 ```sh
-AM_ROOT="$AM_ROOT" AM_ME=cursor AMQ_ACP_TO=codex amq-acp
+# Replace the placeholder root with the absolute queue root on this machine.
+AM_ROOT=/absolute/path/to/.agent-mail/collab AM_ME=cursor AMQ_ACP_TO=codex amq-acp
 ```
 
 Pin those values in operator config or in a local Buzz harness copy. Chat and
@@ -56,7 +57,7 @@ release asset; Homebrew does not install it. See [INSTALL.md](../../INSTALL.md).
 
 ## Buzz BYOH
 
-This is a Tier-3 custom harness, not a Buzz preset. Copy
+This is a custom harness, not a Buzz preset. Copy
 [`buzz-harness.json`](buzz-harness.json) to Buzz Desktop
 `custom_harnesses/amq_acp.json`. Then add `env` on **that machine copy** with
 `AM_ROOT`, `AM_ME`, and `AMQ_ACP_TO`. The committed example has empty `args` and
@@ -67,9 +68,8 @@ no env: Buzz's default `BUZZ_ACP_AGENT_ARGS=acp` would be extra argv and
   `inbox/new`. A separate Edge owner drains with `amq drain`.
 - `amq-acp` refuses `BUZZ_ACP_AGENTS` other than `1` and `BUZZ_ACP_RESPOND_TO`
   other than `owner-only`, then unsets every `BUZZ_*` variable so a leaked
-  nsec cannot enter AMQ messages. A lease-based gate that would relax this
-  refusal is tracked in bead `agent-message-queue-1xl`; upstream Buzz has no
-  deployment lease profile today.
+  nsec cannot enter AMQ messages. These variables are policy inputs, not a
+  replacement for AMQ recipient configuration.
 - When `_meta.nostr.eventId` (or `_meta.triggeringEventIds`) names one 64-hex
   Nostr event, that id is the idempotency key. A second prompt with the same
   id is a no-op. Two ids in one prompt are refused: one event, one AMQ job.

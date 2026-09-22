@@ -168,39 +168,6 @@ ahead of `ghostty`; otherwise `TERM_PROGRAM=ghostty` prepends `ghostty`.
 Selection still requires Detect Available. Cmux Create uses `--focus false`
 and restores prior selection; see [Managed launch recovery](launch-recovery.md).
 
-The tier-1 provider smokes are opt-in and skip unless the env is `1`. The Codex
-smoke first proves that an unused launch stays pending and returns AMQ's typed
-stale-conversation action. It then sends one fixed prompt through the managed
-pane, waits for notify-backed identity publication, and performs one exact
-headless resume:
-
-```bash
-AMQ_CLAUDE_LIVE=1 go test ./internal/launch -run TestClaudeLiveManagedMintResumeAndCrashReuse -count=1 -v
-AMQ_CODEX_LIVE=1 go test ./internal/launch -run TestCodexLiveManagedAcquireResumeAndCrashReuse -count=1 -v
-AMQ_CURSOR_LIVE=1 go test ./internal/launch -run TestCursorLiveResumeManagedExecutionAndCrashReuse -count=1 -v
-AMQ_GROK_LIVE=1 go test ./internal/launch -run TestGrokLiveMintExitAndExactResume -count=1 -v
-```
-
-Managed launcher live proofs skip unless the env is `1`. Run them from a shell
-inside the matching surface:
-
-```bash
-AMQ_CMUX_LIVE=1 go test ./internal/launch -run TestCmuxLive -count=1 -v
-AMQ_GHOSTTY_LIVE=1 go test ./internal/launch -run TestGhosttyLive -count=1 -v
-```
-
-The smoke harness disables Claude tools with the CLI-equivalent single argument
-`--tools=` and uses
-`--permission-mode plan`; it runs Codex with `--sandbox read-only`. These are
-harness controls, not additions to the adapter's committed option contract.
-The smokes record the exact managed process arguments and provider IDs, require
-headless resume to return the requested ID, and stop at the first failure.
-Claude persists a minted `--session-id` only after its first turn. The live
-smoke proves that an unused mint returns AMQ's typed stale-conversation action,
-then bootstraps the same ID with a no-tools turn before it proves exact resume.
-It uses an already-trusted checkout as the Claude cwd and keeps its AMQ session
-root in a temporary directory; it never changes Claude trust state.
-
 Pi remains direct-only because it has no launch API adapter; Gemini CLI and
 OpenCode also remain outside this adapter set. In committed
 `.amq/launch.json`, `agents[].named` overrides the top-level `named` setting,
@@ -247,16 +214,17 @@ evidence, but never the plan or trust digest. Apply echoes the request map.
 Inspect, Focus, and Close load it from the proven-owned binding; lifecycle
 requests cannot replace it.
 
-amq-squad compiles only its public request: it sends `target.base_root` as the
-one profile child of the `.amqrc` root; sends `on_live: keep` only for a seat
-it already knows to be proven live; maps placement spellings `current-window` to
-`current_window`, `vertical` to `columns`, and `horizontal` to `rows`; and sends
-the generated bootstrap prompt through `initial_input`. Those are compiler
-mappings, not contract aliases. The public decoder accepts only the underscore
-target enum and the `columns|rows|tiled` layout enum. One refused seat
-cohort-blocks creation of every missing seat. When a wrapper is present, stdin
-initial input is delivered to the wrapper, which owns forwarding it to the
-provider.
+The public decoder accepts only the underscore target enum and the
+`columns|rows|tiled` layout enum. One refused seat cohort-blocks creation of
+every missing seat. The `argument` carrier is the only currently advertised
+initial-input carrier; `stdin` and `file` remain typed refusals, including when
+a wrapper is present.
+
+Clients must translate their own placement vocabulary before preparing a
+request: for example, `current-window` to `current_window`, `vertical` to
+`columns`, and `horizontal` to `rows`. These are client mappings, not decoder
+aliases. Bootstrap text belongs in `initial_input`, not in a reconstructed
+provider command.
 
 ```go
 request := launchapi.PrepareRequestV1{
@@ -307,8 +275,6 @@ New Prepare calls use subject schema `2`. Apply input serialized by a `0.61.0`
 caller has no `subject_schema`; `0.61.1` interprets that omission as schema `1`
 and reports `reprepare_recommended` in the result hints. A new caller must copy
 the returned schema. It must not omit the field to select legacy behavior.
-
-Apply with schema 1 remains compatible for participant-only requests; if any participant is runnable, it returns `action_required` with `reason_code` `reprepare_required` and performs no launch mutation, so the caller must re-Prepare and Apply with schema 2.
 
 `reviewedChoiceFor` is intentionally caller-owned. AMQ does not choose trust,
 stale-conversation, rebind, or degraded-capability decisions for the caller.

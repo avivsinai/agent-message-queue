@@ -62,8 +62,7 @@ preserve both copies and return a collision. Claiming `new -> cur` also refuses
 to replace a retained same-name message.
 
 `send --from-session` is deliberately double-explicit and resolves its source
-from the supplied raw base; callers must verify that base. See
-[issue #104](https://github.com/avivsinai/agent-message-queue/issues/104).
+from the supplied raw base; callers must verify that base before sending.
 
 ## Environment replacement
 

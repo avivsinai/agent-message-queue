@@ -4,25 +4,17 @@
 
 Accepted.
 
-## Date
-
-2026-08-20
-
 ## Context
 
 AMQ is a daemon-free, file-based message bus. Each queue root is local.
 Maildir-style `tmp -> new -> cur` delivery is crash-safe without a database or
 server. Agents drain their own mailboxes. Receipts are consumer-local.
 
-Two machines run agents that need to converse:
+Two hosts run agents that need to converse. Each host runs AMQ with its own
+agents, roots, mailbox layout, and receipts.
 
-- Host M (Mac) runs AMQ with its own agents and its own roots.
-- Host G (Grok Bot computer) runs AMQ with its own agents and its own roots.
-
-Grok Bot is the operator on host G. It is not a remote Mac root and not an
-AMQ access-control principal. A handle on G is not the same agent as the
-same handle string on M. The Mac `Grok Bot.app` is that operator's local UI;
-it is not host G and not an AMQ host principal.
+An operator UI is not a remote queue root or an AMQ access-control principal.
+A handle on one host is not the same agent as the same handle on another host.
 
 The product boundary stays the same as the rest of AMQ: the message is
 canonical. [Adapters](adapter-contract.md) emit ordinary messages; they are
@@ -36,8 +28,8 @@ kill-list. It does not specify wake adapters or the `amq-bridge` wire protocol.
 
 ### Two local fleets
 
-Host M and host G each run AMQ locally. Each host owns its agents, mailbox
-layout, receipts, and queue roots.
+Each host runs AMQ locally and owns its agents, mailbox layout, receipts, and
+queue roots.
 
 AMQ Core remains local and daemon-free on each host. The `amq` binary does
 not listen on sockets and does not grow AMQ Core listeners.
@@ -59,18 +51,18 @@ Bidirectional exchange means all of:
 3. **Reply on the same opaque thread ID** — the reply uses that thread ID
    as an opaque correlation key, not as routing authority.
 
-For the peer-exchange courier, host G is the only dialer. G starts a fixed,
-config-pinned `amq-bridge` peer-stdio session and the Mac helper responds.
-The session is duplex, so mail and signed outcomes can move in both
-directions; the Mac does not initiate this class. Host G accepts no inbound
-SSH. Reachability is operator-provided. The signed envelope and local apply
-path are frozen in [the companion bridge protocol ADR](adr-bridge-protocol.md).
+For the peer-exchange courier, the initiator host is the only dialer. It starts
+a fixed, config-pinned `amq-bridge` peer-stdio session and the responder
+answers. The session is duplex, so mail and signed outcomes can move in both
+directions; the responder does not initiate this class. The peer courier does
+not require inbound SSH to the initiator. Reachability is operator-provided. The signed envelope and
+local apply path are frozen in [the companion bridge protocol ADR](adr-bridge-protocol.md).
 The manually operated `amq-bridge apply-file` path remains available for
 recovery and file-based exchange.
 
 HTTPS store-and-forward remains implemented as an optional courier class for
-an operator-provided rendezvous. It is not the live G-Mac hop or the live
-architecture. Git is not the default cross-host transport. Core has no
+an operator-provided rendezvous. It is not the live peer-exchange hop or the
+live architecture. Git is not the default cross-host transport. Core has no
 sockets.
 
 ### Routing aliases
@@ -93,16 +85,17 @@ These are never authority:
 - labels
 - remote paths
 - prompt text
-- Grok Bot product identity
+- operator-product identity
 
-Grok Bot identity is not an AMQ ACL. Handles on G are attribution, not extra
-principals.
+An operator-product identity is not an AMQ ACL. Handles on one host are
+attribution, not extra principals.
 
 Prompt text cannot select `--root`, argv, env, or executable.
 
-The Grok VM is one trust domain. Durable workspace state is distinct from
-replaceable packages and processes. Package installs and live process
-identities are not a second trust boundary.
+Each host is one trust domain unless a separately verified host identity is
+provided. Durable workspace state is distinct from replaceable packages and
+processes. Package installs and live process identities are not a second trust
+boundary.
 
 ### Receipts stay typed
 
@@ -139,23 +132,18 @@ v1 does not:
 - sync Maildirs across hosts
 - remotely drain a foreign mailbox
 - put sockets or listeners in the `amq` binary
-- put Mac mailbox files on the Bot VM
+- put one host's mailbox files on another host
 - use git as the relay by fiat (git is not the default cross-host transport)
 - collapse receipt states
-- treat Grok Bot identity as an AMQ ACL
+- treat an operator-product identity as an AMQ ACL
 - treat claimed agent names, labels, or remote paths as authority
 - let prompt text select `--root`, argv, env, or executable
 - put OAuth MCP inside `amq`
 - claim ACP v2
 - put `--always-approve` in committed launch plans
-- hold a Buzz nsec inside AMQ
-  - The `amq-acp` companion instead hard-refuses `BUZZ_ACP_AGENTS` other than
-    `1` and `BUZZ_ACP_RESPOND_TO` other than `owner-only`. A lease-based gate
-    that would relax this refusal is tracked in bead
-    `agent-message-queue-1xl`; upstream Buzz has no deployment lease profile
-    today (NIP-PL kind 30350 is a mobile push lease).
-  - A companion may hold a per-session or per-host body key that the human
-    owner attests (NIP-OA); see [the remote-control ADR](adr-remote-control.md).
+- hold a human owner's private messaging key inside AMQ
+- let a companion hold a per-session or per-host body key unless the owner
+  explicitly attests that key; see [the remote-control ADR](adr-remote-control.md)
 - silently downgrade inject→notify or submit→prefill
 - scrape ChatGPT through Accessibility
 - run generic `osascript` from prompt text
@@ -173,7 +161,8 @@ v1 does not:
   `destination_maildir_committed`, not for `transport_accepted`.
 - Adapters continue to emit local messages. They do not become a remote
   workflow engine or a foreign-host drain.
-- Inbound SSH to G, git-by-default, and sockets in Core stay out.
+- Inbound SSH to the initiator, git-by-default, and sockets in Core stay out
+  of the courier design.
 - Wake adapters, when specified elsewhere, advertise real capability. They
   do not substitute a weaker path and do not drive GUI automation from prompt
   text.

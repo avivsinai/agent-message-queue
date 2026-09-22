@@ -4,21 +4,15 @@
 
 Accepted.
 
-## Date
-
-2026-08-20
-
 ## Context
 
-[Two-host fleets](adr-two-host-fleets.md) freeze identity: host M and host G
-each run local AMQ; cross-host mail is a companion, not Core. This ADR freezes
+[Two-host fleets](adr-two-host-fleets.md) define identity: each host runs local
+AMQ; cross-host mail is a companion, not Core. This ADR defines
 the `amq-bridge` wire, transport, and threat model.
 
-Host G is a live Linux AMQ host. Durable queue state lives under a path that
-survives Bot client close (`/workspace` is the proven layout). Hosted MCP to
-localhost is rejected, so the Bot client is a fixed local CLI wrapper, not a
-remote plugin. Git, inbound SSH, and process supervision are still not
-transport.
+Each participating host keeps its queue state in a durable local path. A
+companion or client wrapper is not a hosted plugin and must not turn Git,
+inbound SSH, or process supervision into transport.
 
 ## Decision
 
@@ -33,11 +27,12 @@ existing Maildir `publishTmpNoReplace` on a stable transfer filename.
 The wire unit is the signed envelope below. Local apply is the same
 `ApplyEnvelope` path in every hop.
 
-The supported G-Mac courier class is **G-initiated peer exchange**. Host G is
-the only dialer: it starts a fixed, config-pinned peer-stdio session and the
-Mac helper is the responder. The session is duplex, so envelopes and signed
-outcomes can move in both directions, but the Mac does not initiate this
-class. `amq` Core remains local and daemon-free; no socket is added to it.
+The supported peer courier class is **initiator-driven peer exchange**. The
+initiator is the only dialer: it starts a fixed, config-pinned peer-stdio
+session and the responder answers. The session is duplex, so envelopes and
+signed outcomes can move in both directions, but the responder does not
+initiate this class. `amq` Core remains local and daemon-free; no socket is
+added to it.
 
 The initiator offers objects from `tx/<peer>/new` and
 `status-tx/<peer>/new`. A receiver writes exact object bytes to a private
@@ -54,13 +49,13 @@ file published under `drop/new/` and uses the same local apply and receipt
 rules; it is not a remote drain or a Maildir synchronizer.
 
 HTTPS store-and-forward remains implemented as an optional courier class for
-an operator-provided rendezvous. It is not the live G-Mac hop or the live
-architecture. The rendezvous is an opaque blob store with lease, retry,
+an operator-provided rendezvous. It is not the peer-stdio architecture. The
+rendezvous is an opaque blob store with lease, retry,
 backoff, and bounded batches; it never reads AMQ handles or Maildir state.
 AMQ does not ship a hosted relay, and operators must not treat HTTPS
 poll/push as the active peer exchange.
 
-Not v1: git, Maildir sync, reverse tunnels, inbound SSH to G, remote drain,
+Not v1: git, Maildir sync, reverse tunnels, inbound SSH to the initiator, remote drain,
 or sockets inside `amq`.
 
 ### Envelope
@@ -82,7 +77,7 @@ The wire unit is a versioned envelope. Required fields:
 Unknown fields and the following names are rejected: paths, roots, argv, env,
 executable names, endpoints, and remote session selectors.
 
-The G-initiated peer exchange emits **Envelope v2**: one compact JSON object,
+The peer exchange emits **Envelope v2**: one compact JSON object,
 fixed key order, unknown fields refused, and `payload_b64` decoded with raw
 standard base64 (no padding or whitespace). The signature preimage is the
 length-prefixed v2 field contract, not a re-serialized payload. The receiver
@@ -124,8 +119,8 @@ not authentication. For peer exchange, the fixed helper configuration and
 the Ed25519 signature provide the host binding. The receiving host verifies
 the signature against its local trusted generation, then maps `dest_alias`
 through its allowlist. Claimed handle, labels, prompt text, and remote paths
-are not authority. All Grok Bots on G are one host principal until a live test
-proves otherwise.
+are not authority. Multiple seats on one host are one host principal until a
+separate verified identity boundary proves otherwise.
 
 Each queue root has these bridge identity files:
 
@@ -146,7 +141,7 @@ an old generation only after doctor reports zero in-flight objects naming it.
 Do not accept a third generation as an implicit overlap or use a flat
 `trusted/<source_host>` path for v2.
 
-### G-initiated exchange layout and stages
+### Peer exchange layout and stages
 
 The peer-exchange WAL is separate from the HTTPS spool:
 
@@ -158,16 +153,15 @@ status-rx/<peer>/{tmp,new,done,quarantine}
 drop/{tmp,new}
 ```
 
-The G initiator and Mac responder exchange only hash-named envelope and
-outcome objects. `OFFER`/`WANT` inventory is limited to those courier trees;
+The initiator and responder exchange only hash-named envelope and outcome
+objects. `OFFER`/`WANT` inventory is limited to those courier trees;
 the courier never reads Maildir, `applied/`, or `apply-journal/`. `STORED`
 means that the kind-specific `rx` or `status-rx` sink is durable. It does not
 mean apply, source archive, or consumer drain.
 
-### Implementer contract: amq-ad6 addenda
+### Wire and implementation constraints
 
-These eight addenda are normative and override older wording in this ADR or
-the design source:
+The following constraints are normative:
 
 1. **Hash-named publish.** Create with `O_EXCL` in `tmp`, write, fsync, hash
    with SHA-256, and no-replace rename to `<64hex>.<kind>`, then fsync the
@@ -189,42 +183,32 @@ the design source:
 7. **Signer binding.** The local `source_host` signs. Bind From, Id, and
    Thread (and To when present) from the AMQ payload. Resume the same digest;
    a different digest is `submit/failed`.
-8. **Driver boundary.** There is no signed-bundle PR. PR 10 is SSH
-   forced-command plus local-exec only. `drop/` uses hash-named publication
+8. **Driver boundary.** There is no signed-bundle transport. A forced-command
+   driver, when used, is local-exec only. `drop/` uses hash-named publication
    into `drop/new/`.
 
-### Bot client on G
+### Local client wrapper
 
-v1 Bot→AMQ is a fixed, audited local CLI wrapper. Not a general plugin. Not
-hosted remote MCP (that requires a public URL and cannot target localhost).
+v1 client-to-AMQ access is a fixed, audited local CLI wrapper. It is not a
+general plugin or hosted remote MCP.
 The wrapper must not take prompt-controlled roots, argv, env, or endpoints.
 
-Mac `Grok Bot.app` is the operator UI, not host G:
-
-- Bundle `com.anysphere.sand`, Team `DCNK4UB866`, Electron 0.20.0
-- URL schemes `grokbot` and `sand`
-- ATS allows localhost plus arbitrary loads; that is the Mac client talking
-  outbound/local, not inbound SSH to G
-- A `local-exec-daemon` process is part of the Mac app, not AMQ on G
-- Support files include an encrypted gateway descriptor; do not treat that
-  blob as a rendezvous URL or as proof of the cloud computer layout
-
-The Mac app being open does not make this machine host G. G update/reset and
-a second Bot seat on the same VM remain untested; treat G as one host
-principal until a live test proves isolation.
+An operator UI on one host is not the peer host and does not become an AMQ
+host principal merely because it is open. Multiple seats on one host remain
+one host principal unless a separate, verified identity boundary is provided.
 
 ## Consequences
 
-- Courier code implements this envelope and G-initiated peer-stdio exchange;
+- Courier code implements this envelope and initiator-driven peer-stdio exchange;
   HTTPS poll/push remains optional. It does not add listeners to `amq`.
 - `amq-bridge apply-file` is the manual/recovery path: it uses the same
   envelope and local apply rules without a public locker, but it is not the
-  live G-Mac peer-exchange class.
-- G is the only peer-exchange dialer, and destination apply remains the
+  live peer-exchange class.
+- The configured initiator is the only peer-exchange dialer, and destination apply remains the
   commit. Operators may provision a public HTTPS rendezvous, but AMQ does not
   ship a hosted relay as Core.
-- G is a normal AMQ install. Pin `AM_ROOT` in operator config, never in Bot
-  chat. Durable state belongs under a path that survives Bot client close.
+- Each peer is a normal AMQ install. Pin `AM_ROOT` in operator config, never in
+  prompt text. Durable state belongs under a path that survives client close.
 
 ### Addendum 4 — transfer ledger (611.14, amended per review-827-r1)
 

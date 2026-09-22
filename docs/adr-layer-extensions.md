@@ -4,10 +4,6 @@
 
 Accepted (implemented).
 
-## Date
-
-2026-04-27
-
 ## Context
 
 AMQ is the local message transport for agent sessions. Higher-level tools such
@@ -354,13 +350,3 @@ evolve the mailbox.
   AMQ layout or route inference code.
 - `amq doctor --json` can report passive extension metadata without executing
   layer code.
-
-## Implementation
-
-Implemented across #101-#104:
-
-- #101 added the `amq env --json` v1 fields and stability documentation.
-- #102 reserved extension metadata directories and reports passive manifests in
-  diagnostics.
-- #103 added `amq route explain --json` with canonical `argv` output.
-- #104 added `amq send --from-session` for pre-boot cross-session sends.

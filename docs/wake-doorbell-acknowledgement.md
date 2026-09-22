@@ -1,6 +1,6 @@
 # Wake doorbell acknowledgement policy
 
-Status: binding contract for owner-bound wake input retries.
+This is the binding contract for owner-bound wake input retries.
 
 The normative words MUST, MUST NOT, SHOULD, and MAY describe the behavior
 implemented by `amq wake`.

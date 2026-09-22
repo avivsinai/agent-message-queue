@@ -146,8 +146,8 @@ ACP v1 is [the amq-acp companion](cmd/amq-acp/README.md).
 
 ## CLI Commands
 
-Use `amq <command> --help` for exact flags. This table defines the owning
-workflow for each surface.
+Use the [generated CLI reference](docs/cli.md) or `amq <command> --help` for
+exact flags. This table defines the owning workflow for each surface.
 
 | Area | Commands | Contract |
 | --- | --- | --- |
@@ -244,9 +244,13 @@ make check-skills
 ```
 
 Opt-in live proofs (`AMQ_CMUX_LIVE`, `AMQ_GHOSTTY_LIVE`, `AMQ_CLAUDE_LIVE`,
-`AMQ_CODEX_LIVE`, `AMQ_CURSOR_LIVE`) skip unless the env is `1`. They are not
-part of `make ci`. Operator commands are in
-[the public launch API guide](docs/launch-api.md).
+`AMQ_CODEX_LIVE`) skip unless the env is `1`. They are not
+part of `make ci`. Commands are in
+[Contributing: live proofs](CONTRIBUTING.md#live-proofs-opt-in).
+
+SessionStart hook-script tests in `internal/keepalive/hookinstall` run the real
+Bash script and skip unless `AMQ_HOOK_SCRIPT_TESTS=1`. Linux and macOS CI run
+them with `-p 1` in a separate serial step, outside the parallel package suite.
 
 Two kinds of test exist. One small happy-path test per user-visible behavior
 ships in the same PR as the behavior. A regression test for a defect observed
