@@ -160,25 +160,11 @@ func share(args []string, stdout, stderr io.Writer) (int, error) {
 		return protocol.ExitActionRequired, err
 	}
 	if *dryRun {
-		// Preview and apply run the SAME read-only validation (codex r3 #3):
-		// a dry-run must never offer signing data that a real run would
-		// refuse, and it must not mask key-load errors as "no body key".
-		if loadErr != nil {
-			if errors.Is(loadErr, os.ErrNotExist) {
-				say(stdout, "dry-run: no body key at %s — a real run would mint one", keyPath)
-				return 0, nil
-			}
-			return protocol.ExitActionRequired, fmt.Errorf("body key at %s: %w", keyPath, loadErr)
-		}
-		// The preview validates EVERY present-but-unreadable leaf —
-		// enrolled, pending AND staged — regardless of whether a pending
-		// window exists (r8 P1-1: without a pending window the staged leaf
-		// was skipped, and dry-run exited 0 with signing data where the
-		// real run refuses via reconcile). The staged refusal is the same
-		// text the real reconcile refusal prints (r8 P2).
-		// Refuse on the FIRST unreadable leaf; the staged leaf gets the
-		// shared reconcile refusal text (r8 P2), anything else its own
-		// loader error.
+		// Preview and apply run the SAME read-only validation (codex r3 #3,
+		// re-ruled r10-P1): a dry-run must never offer signing data that a
+		// real run would refuse, and the validation runs BEFORE the
+		// missing-key early return — with no body.key and a corrupt staged
+		// leaf the preview refuses, it does not say "would mint".
 		leaves := st.unreadableLeaves()
 		if len(leaves) > 0 {
 			l := leaves[0]
@@ -187,20 +173,22 @@ func share(args []string, stdout, stderr io.Writer) (int, error) {
 			}
 			return protocol.ExitActionRequired, l.Err
 		}
-		// Ruling (claude 08:29Z): owners sign ONLY preimages printed from a
-		// PERSISTED pending window. With a pending window, dry-run prints
-		// exactly those (byte-identical, enrollable). A renewal preview
-		// computes its bound at the preview instant and is explicitly NOT
-		// enrollable — the bound is fixed when the real --renew persists
-		// the window; sharing the calculation cannot share the instant
-		// (codex r3 #1). With none, the illustration is likewise labeled.
-		pendingTags := st.Pending.Tags
-		if *renew {
-			if len(pendingTags) > 0 {
-				printSharePending(stdout, *session, k, pendingTags, time.Time{})
-				say(stdout, "(dry-run: the CURRENT pending window, still enrollable; a real --renew would replace it with a later bound)")
+		if loadErr != nil {
+			if errors.Is(loadErr, os.ErrNotExist) {
+				say(stdout, "dry-run: no body key at %s — a real run would mint one", keyPath)
 				return 0, nil
 			}
+			return protocol.ExitActionRequired, fmt.Errorf("body key at %s: %w", keyPath, loadErr)
+		}
+		// Ruling (claude 08:29Z, re-ruled r10-P3): owners sign ONLY
+		// preimages printed from a PERSISTED pending window. A renewal
+		// preview ALWAYS validates and calculates the REQUESTED renewal —
+		// including the explicit --days bounds — whether or not a window
+		// exists; it is labelled non-enrollable and the current window is
+		// never substituted for it (with --renew --days 1 over a --days 90
+		// window the preview refuses exactly where the real run refuses).
+		pendingTags := st.Pending.Tags
+		if *renew {
 			preview, err := renewalWindow(st, *days, daysSet)
 			if err != nil {
 				return protocol.ExitActionRequired, err
@@ -215,6 +203,19 @@ func share(args []string, stdout, stderr io.Writer) (int, error) {
 		}
 		printShareDryRun(stdout, *session, k, *days)
 		return 0, nil
+	}
+
+	// r10-P1: the real run validates the loaded snapshot BEFORE minting
+	// or reconciling anything — mint must not create body.key/body.pub
+	// next to state it is about to refuse (with no body.key and a corrupt
+	// staged leaf the run exits 6 WITHOUT minting).
+	leaves := st.unreadableLeaves()
+	if len(leaves) > 0 {
+		l := leaves[0]
+		if l.Path == filepath.Join(keyDir, stagedName) {
+			return protocol.ExitActionRequired, stagedCorruptRefusal(*session, l)
+		}
+		return protocol.ExitActionRequired, l.Err
 	}
 
 	// Load-or-mint the body keypair. Mint is refused if a key already
@@ -348,28 +349,13 @@ func renewalWindow(st *shareState, days int, daysExplicit bool) (shareWindow, er
 // lstats all five leaves once and refuseIfConfined renders the same
 // refusal from the typed outcomes.
 
-// lstatStateLeaf is the confinement rule for one state-file leaf: absent is
-// fine; a symlink is refused outright (rename-onto would replace the link,
-// but reads would follow it); anything not a regular file (FIFO, directory)
-// is refused.
-func lstatStateLeaf(path string) error {
-	fi, err := os.Lstat(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
+
+// leafConfinementReason classifies a non-regular lstat result (r10-P2).
+func leafConfinementReason(fi os.FileInfo) string {
 	if fi.Mode()&os.ModeSymlink != 0 {
-		// Verifier r4 P1-2: the path travels with the error (typed), so
-		// doctor and every other surface can name the refused file without
-		// substring matching.
-		return &stateLeafError{Path: path, Reason: "symlinked"}
+		return "symlinked"
 	}
-	if !fi.Mode().IsRegular() {
-		return &stateLeafError{Path: path, Reason: "not a regular file"}
-	}
-	return nil
+	return "not a regular file"
 }
 
 // stateLeafError is the typed leaf-confinement refusal: it names the state
@@ -578,19 +564,22 @@ func loadShareState(keyDir string) (*shareState, error) {
 	}
 	for _, leaf := range leaves {
 		leaf.out.Path = leaf.path
-		err := lstatStateLeaf(leaf.path)
+		// r10-P2: lstatStateLeaf returns nil for a MISSING leaf (absence is
+		// not a confinement), so the loader must classify absence itself —
+		// otherwise an empty directory's body.key/body.pub read as leafOK
+		// and no consumer ever corrects them (the key leaves are never
+		// re-read). All five leaves get a true state here.
+		fi, err := os.Lstat(leaf.path)
 		switch {
-		case err == nil:
-			leaf.out.State = leafOK
 		case errors.Is(err, os.ErrNotExist):
 			leaf.out.State = leafAbsent
-		default:
-			var lerr *stateLeafError
-			if !errors.As(err, &lerr) {
-				return nil, err // unexpected lstat failure: propagate
-			}
+		case err != nil:
+			return nil, err // unexpected lstat failure: propagate
+		case fi.Mode()&os.ModeSymlink != 0 || !fi.Mode().IsRegular():
 			leaf.out.State = leafConfined
-			leaf.out.Confinement = lerr
+			leaf.out.Confinement = &stateLeafError{Path: leaf.path, Reason: leafConfinementReason(fi)}
+		default:
+			leaf.out.State = leafOK
 		}
 	}
 	// The three reads, once each. Absence is a state, not an error; a

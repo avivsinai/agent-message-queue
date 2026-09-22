@@ -1825,3 +1825,66 @@ func TestDryRunRefusesCorruptStaged(t *testing.T) {
 		t.Fatalf("dry-run refusal does not name the corrupt leaf: %s", stderr)
 	}
 }
+
+// r10-P1a: with NO body.key and a CORRUPT staged leaf, the preview must
+// refuse — not say "would mint" — and the real run must refuse WITHOUT
+// minting body.key/body.pub next to state it cannot read.
+func TestDryRunRefusesStagedCorruptionBeforeMintAnnouncement(t *testing.T) {
+	root := t.TempDir()
+	keyDir := filepath.Join(root, "extensions", "remote", "keys", "r10a")
+	if err := os.MkdirAll(keyDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(keyDir, stagedName), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, errOut, code := runShareLoose("--root", root, "--session", "r10a", "--dry-run")
+	if code == 0 || !strings.Contains(out+errOut, "is invalid") {
+		t.Fatalf("dry-run = code %d out %q; want the staged refusal before the mint notice", code, out)
+	}
+	// The real run refuses WITHOUT minting: no key files appear.
+	_, _, code = runShareLoose("--root", root, "--session", "r10a")
+	if code == 0 {
+		t.Fatal("real run minted/ran over a corrupt staged leaf")
+	}
+	if _, err := os.Stat(filepath.Join(keyDir, "body.key")); !os.IsNotExist(err) {
+		t.Fatalf("mint ran before the staged refusal: body.key exists (%v)", err)
+	}
+}
+
+// r10-P2: an empty key directory reads as leafAbsent for ALL five leaves —
+// the loader classifies absence itself and the snapshot is the truth every
+// consumer sees.
+func TestLoaderAbsentLeavesForEmptyKeyDir(t *testing.T) {
+	st, err := loadShareState(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, l := range []leafRead{st.BodyKey, st.BodyPub, st.Pending.leafRead, st.Enrolled.leafRead, st.Staged.leafRead} {
+		if l.State != leafAbsent {
+			t.Fatalf("leaf %s = %v, want leafAbsent in an empty key dir", l.Path, l.State)
+		}
+	}
+}
+
+// r10-P3: a renewal preview over an existing window validates the
+// REQUESTED renewal (--days 1 against a --days 90 window) and refuses
+// exactly where the real run refuses — the current window is never
+// substituted for the requested one.
+func TestRenewPreviewValidatesRequestedDays(t *testing.T) {
+	root := t.TempDir()
+	_, _, _ = runShare(t, "--root", root, "--session", "r10c", "--days", "90")
+	_, _, code := runShareLoose("--root", root, "--session", "r10c", "--renew", "--days", "1", "--dry-run")
+	if code == 0 {
+		t.Fatal("renewal preview accepted --days 1 against a 90-day window; it must validate the REQUESTED renewal")
+	}
+	// The persisted window is untouched (still the 90-day one).
+	pendingPath, _ := sharePaths(filepath.Join(root, "extensions", "remote", "keys", "r10c"))
+	raw, err := os.ReadFile(pendingPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "not_after") {
+		t.Fatalf("pending window unreadable after preview: %q", raw)
+	}
+}
