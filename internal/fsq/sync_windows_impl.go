@@ -44,10 +44,17 @@ func isDirSyncUnsupported(err error) bool {
 // GENERIC_WRITE (MSDN); FILE_DIRECTORY_FILE|FILE_OPEN_FOR_BACKUP_INTENT|
 // FILE_SYNCHRONOUS_IO_NONALERT make it a proper directory open.
 func ntOpenDirectoryIn(parent windows.Handle, leafName string) (windows.Handle, error) {
-	objectName, err := windows.NewNTUnicodeString(leafName)
-	if err != nil {
-		return 0, fmt.Errorf("dir sync name %s: %w", leafName, err)
+	var objectName *windows.NTUnicodeString
+	if leafName != "" {
+		var err error
+		objectName, err = windows.NewNTUnicodeString(leafName)
+		if err != nil {
+			return 0, fmt.Errorf("dir sync name %s: %w", leafName, err)
+		}
 	}
+	// An empty ObjectName with a RootDirectory refers to the directory
+	// object itself (the root case); otherwise leafName resolves relative
+	// to the parent.
 	attributes := &windows.OBJECT_ATTRIBUTES{
 		Length:        uint32(unsafe.Sizeof(windows.OBJECT_ATTRIBUTES{})),
 		RootDirectory: parent,
@@ -113,9 +120,9 @@ func (r *DeliveryRoot) syncDirPlatform(dir string) error {
 			return fmt.Errorf("open pinned root for sync: %w", err)
 		}
 		defer func() { _ = self.Close() }()
-		handle, ntErr := ntOpenDirectoryIn(windows.Handle(self.Fd()), ".")
+		handle, ntErr := ntOpenDirectoryIn(windows.Handle(self.Fd()), "")
 		if ntErr != nil {
-			return fmt.Errorf("reopen pinned root \".\" for sync: %w (%v)", ntErr, windowsClaimError(ntErr))
+			return fmt.Errorf("reopen pinned root for sync: %w (%v)", ntErr, windowsClaimError(ntErr))
 		}
 		return flushDirHandle(handle, "root")
 	}
