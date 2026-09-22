@@ -434,3 +434,27 @@ func TestLookupRecoversRunAfterRestart(t *testing.T) {
 		t.Fatalf("released key recovered again: %+v", ev)
 	}
 }
+
+// Live 2026-09-22 on Claude Code v2.1.280: the delivered user entry carries
+// isMeta:true, the Stop hook fired, and the run stayed running because the
+// ladder skipped meta entries.
+func TestMetaFlaggedDeliveryStillClimbsTheLadder(t *testing.T) {
+	ft := newFakeTarget(t, 4242, nil)
+	att := ft.attach(t)
+	admission, err := att.Submit(pr2BoundRequest("meta-probe"))
+	if err != nil || !admission.Admitted {
+		t.Fatalf("submit: %+v %v", admission, err)
+	}
+	key := pr2Key()
+	line, _ := json.Marshal(map[string]any{
+		"type": "user", "isMeta": true, "timestamp": time.Now().UTC().Format(time.RFC3339Nano),
+		"message": map[string]any{"role": "user", "content": harnessUserText(frameEnvelope(t, ft))},
+		"origin":  map[string]any{"kind": "peer", "from": "unknown", "msg_id": admission.RunID},
+	})
+	appendTranscript(t, ft.home, string(line), transcriptLine(t, "assistant", "pong"))
+	appendStopMarker(t, ft.home, time.Now().UnixMilli()+1)
+	att.pollConfirmations()
+	if ev, _ := att.Lookup(key, ""); ev.State != protocol.StateCompleted || ev.Result == nil || ev.Result.Text != "pong" {
+		t.Fatalf("meta-flagged delivery: %+v, want completed with pong", ev)
+	}
+}

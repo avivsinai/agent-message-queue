@@ -135,7 +135,8 @@ type transcriptEntry struct {
 	// opposed to a user entry that starts a new turn.
 	Absorbed bool
 	// Meta marks harness-injected user entries (isMeta: caveats, command
-	// output). They are not prompts and never start or end a turn.
+	// output). They are not prompts and never start or end a turn. A peer
+	// delivery (MsgID set) is never Meta.
 	Meta bool
 	// Text is the content string, or the joined text blocks of a block
 	// array; for an absorbed frame, the queued prompt. Tool results decode
@@ -188,6 +189,10 @@ func parseTranscriptLine(line string) (transcriptEntry, bool) {
 	}
 	if origin != nil && origin.Kind == "peer" {
 		e.MsgID = origin.MsgID
+		// A peer delivery is input, whatever its meta flag: v2.1.280 marks
+		// the delivered user entry isMeta:true (observed live 2026-09-22),
+		// which v2.1.278 did not, and the ladder skips meta entries.
+		e.Meta = false
 	}
 	if ts, err := time.Parse(time.RFC3339Nano, raw.Timestamp); err == nil {
 		e.TS = ts.UnixMilli()
