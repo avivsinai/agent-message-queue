@@ -17,6 +17,7 @@
 package manifest
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -115,10 +116,34 @@ func Load(path string) (File, error) {
 	if f.Layer == "" {
 		f.Layer = Layer
 	}
+	if f.Relay != nil {
+		if err := strictRelay(data); err != nil {
+			return File{}, err
+		}
+	}
 	if err := Validate(f); err != nil {
 		return File{}, err
 	}
 	return f, nil
+}
+
+// strictRelay re-decodes the relay object refusing unknown fields: a typo
+// in a v2 relay or share field must be a usage error, never a silently
+// ignored setting (codex slice 1 review #8).
+func strictRelay(data []byte) error {
+	var top struct {
+		Relay json.RawMessage `json:"relay"`
+	}
+	if err := json.Unmarshal(data, &top); err != nil {
+		return err
+	}
+	dec := json.NewDecoder(bytes.NewReader(top.Relay))
+	dec.DisallowUnknownFields()
+	var r Relay
+	if err := dec.Decode(&r); err != nil {
+		return &ErrInvalidRelay{Reason: err.Error()}
+	}
+	return nil
 }
 
 // ErrDuplicateTarget is returned when two adapters share a target id.
@@ -251,6 +276,9 @@ func Validate(f File) error {
 type ErrInvalidRelay struct{ Reason string }
 
 func (e *ErrInvalidRelay) Error() string { return "manifest relay: " + e.Reason }
+
+// ErrInvalidRelay is a usage error like the other validation failures.
+func (*ErrInvalidRelay) validationError() {}
 
 func validateRelay(f File, targets map[string]bool) error {
 	r := f.Relay

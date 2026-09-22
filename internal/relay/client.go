@@ -2,7 +2,9 @@ package relay
 
 import (
 	"context"
+	"errors"
 	"math/rand/v2"
+	"strings"
 	"sync"
 	"time"
 )
@@ -76,9 +78,83 @@ func (c *Client) set(state State, err error, conn *Conn) {
 	defer c.mu.Unlock()
 	c.status = Status{State: state, Since: time.Now()}
 	if err != nil {
-		c.status.Err = err.Error()
+		c.status.Err = Category(err)
 	}
 	c.conn = conn
+}
+
+// identityCheck is how often a live connection's enrolled identity is
+// re-validated (codex slice 1 review #2).
+var identityCheck = time.Minute
+
+// errIdentityChanged ends a connection whose enrolled grant expired, was
+// removed, or changed; the reconnect re-authenticates under the current
+// one, or fails.
+var errIdentityChanged = errors.New("enrolled identity changed")
+
+// hold keeps an authenticated connection until it ends, ctx ends, or the
+// enrolled identity stops matching the one it authenticated with. It
+// reports whether ctx ended.
+func (c *Client) hold(ctx context.Context, conn *Conn, authed Config) bool {
+	t := time.NewTicker(identityCheck)
+	defer t.Stop()
+	for {
+		select {
+		case <-conn.Done():
+			c.set(StateUnavailable, conn.Err(), nil)
+			return false
+		case <-ctx.Done():
+			conn.Close()
+			return true
+		case <-t.C:
+			cur, err := c.config()
+			if err != nil || !sameIdentity(authed, cur) {
+				conn.Close()
+				if err == nil {
+					err = errIdentityChanged
+				}
+				c.set(StateUnavailable, err, nil)
+				return false
+			}
+		}
+	}
+}
+
+func sameIdentity(a, b Config) bool {
+	if a.URL != b.URL || a.Secret != b.Secret || len(a.AuthTag) != len(b.AuthTag) {
+		return false
+	}
+	for i := range a.AuthTag {
+		if a.AuthTag[i] != b.AuthTag[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// Category maps an error to a fixed, AMQ-worded category for status files:
+// relay-controlled text (OK reasons, close reasons) never reaches them
+// (codex slice 1 review #9). Local configuration errors keep their text.
+func Category(err error) string {
+	var remote *RemoteError
+	switch {
+	case err == nil:
+		return ""
+	case errors.As(err, &remote):
+		return remote.Kind.Error()
+	case errors.Is(err, errIdentityChanged):
+		return "enrolled identity changed; re-authenticating"
+	case errors.Is(err, ErrUnknownDelivery):
+		return ErrUnknownDelivery.Error()
+	case errors.Is(err, context.DeadlineExceeded):
+		return "relay timed out"
+	case strings.HasPrefix(err.Error(), "relay dial"):
+		return "relay unreachable"
+	case strings.HasPrefix(err.Error(), "share "), strings.HasPrefix(err.Error(), "relay: an enrolled"):
+		return err.Error() // local configuration text, not relay-controlled
+	default:
+		return "relay connection lost"
+	}
 }
 
 // Run connects and stays connected until ctx ends. It returns nil on
@@ -101,11 +177,7 @@ func (c *Client) Run(ctx context.Context) error {
 			c.set(StateUnavailable, err, nil)
 		} else {
 			c.set(StateAuthenticated, nil, conn)
-			select {
-			case <-conn.Done():
-				c.set(StateUnavailable, conn.Err(), nil)
-			case <-ctx.Done():
-				conn.Close()
+			if ended := c.hold(ctx, conn, cfg); ended {
 				c.set(StateUnavailable, nil, nil)
 				return nil
 			}
