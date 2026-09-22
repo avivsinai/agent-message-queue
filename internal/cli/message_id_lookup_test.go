@@ -108,3 +108,84 @@ func TestReadByHeaderIDClaimsStorageFilename(t *testing.T) {
 		t.Fatalf("incorrect receipt: %s, err=%v", data, err)
 	}
 }
+
+// PR #849 review F1/F2: unrelated corrupt entries or directories must not
+// prevent a valid bridged message from being replied to and claimed by ID.
+func TestHeaderIDLookupWithUnrelatedEntries(t *testing.T) {
+	for _, scenario := range []struct {
+		name string
+		box  string
+		dir  bool
+	}{
+		{name: "corrupt-inbox", box: "inbox/new"},
+		{name: "corrupt-sent", box: "outbox/sent"},
+		{name: "directory", box: "inbox/new", dir: true},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			root := initializedSendMailboxRoot(t, "alice", "host-bob")
+			const id = "valid-header-id"
+			deliverRenamedMessage(t, root, "xfer-host-valid.md", id)
+			unrelated := filepath.Join(root, "agents", "alice", scenario.box, "zzz-unrelated.md")
+			var err error
+			if scenario.dir {
+				err = os.Mkdir(unrelated, 0o700)
+			} else {
+				err = os.WriteFile(unrelated, []byte("not a message"), 0o600)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, _, err = captureEnvOutput(t, func() error {
+				return runReply([]string{"--root", root, "--me", "alice", "--id", id, "--body", "Checked.", "--json"})
+			})
+			if err != nil {
+				t.Fatalf("reply blocked by unrelated entry: %v", err)
+			}
+			out, _, err := captureEnvOutput(t, func() error {
+				return runRead([]string{"--root", root, "--me", "alice", "--id", id, "--json"})
+			})
+			if err != nil {
+				t.Fatalf("read blocked by unrelated entry: %v", err)
+			}
+			var result struct {
+				Header format.Header `json:"header"`
+				Body   string        `json:"body"`
+			}
+			if err := json.Unmarshal([]byte(out), &result); err != nil {
+				t.Fatal(err)
+			}
+			if result.Header.ID != id || result.Body != "Check the latest commit.\n" {
+				t.Fatalf("wrong message read: %#v", result)
+			}
+			if _, err := os.Stat(unrelated); err != nil {
+				t.Fatalf("lookup changed unrelated entry: %v", err)
+			}
+		})
+	}
+}
+
+// PR #849 review F3: replay the ReadDir -> drain -> open ordering without a
+// timing-dependent goroutine. The stale entry must not stop the cur lookup.
+func TestLookupHeaderIDAfterDrainMovesEntry(t *testing.T) {
+	root := initializedSendMailboxRoot(t, "alice", "host-bob")
+	const id = "moved-header-id"
+	const filename = "xfer-host-moved.md"
+	deliverRenamedMessage(t, root, filename, id)
+	deliveryRoot := openDeliveryRootForCLITest(t, root)
+	newDir := filepath.Join("agents", "alice", "inbox", "new")
+	entries, err := deliveryRoot.ReadDir(newDir)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("snapshot inbox: entries=%v err=%v", entries, err)
+	}
+	if err := claimInboxNewToCur(deliveryRoot, "alice", filename); err != nil {
+		t.Fatal(err)
+	}
+	headerID, err := readLookupHeaderID(deliveryRoot, filepath.Join(newDir, entries[0].Name()))
+	if err != nil || headerID != "" {
+		t.Fatalf("stale entry must be skipped: ID=%q err=%v", headerID, err)
+	}
+	path, box, err := findMessageDeliveryRoot(deliveryRoot, "alice", id+".md", false)
+	if err != nil || box != fsq.BoxCur || path != filepath.Join("agents", "alice", "inbox", "cur", filename) {
+		t.Fatalf("moved message lookup: path=%q box=%q err=%v", path, box, err)
+	}
+}

@@ -76,15 +76,15 @@ func findMessageDeliveryRoot(root *fsq.DeliveryRoot, agent, filename string, inc
 			return "", "", fmt.Errorf("scan messages in %s: %w", dir, err)
 		}
 		for _, entry := range entries {
-			if !strings.HasSuffix(entry.Name(), ".md") || strings.HasPrefix(entry.Name(), ".") {
+			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".md") || strings.HasPrefix(entry.Name(), ".") {
 				continue
 			}
 			path := filepath.Join(dir, entry.Name())
-			msg, err := readMessageDeliveryRoot(root, path)
+			headerID, err := readLookupHeaderID(root, path)
 			if err != nil {
 				return "", "", fmt.Errorf("look up message ID in %s: %w", path, err)
 			}
-			if msg.Header.ID != id {
+			if headerID != id {
 				continue
 			}
 			if matchedPath != "" {
@@ -97,6 +97,32 @@ func findMessageDeliveryRoot(root *fsq.DeliveryRoot, agent, filename string, inc
 		return matchedPath, matchedBox, nil
 	}
 	return "", "", errMessageNotFound
+}
+
+// A malformed header has no lookup identity; leave it for the normal DLQ path.
+// Only read headers here so unrelated message bodies do not affect lookup.
+func readLookupHeaderID(root *fsq.DeliveryRoot, path string) (string, error) {
+	file, _, err := root.OpenRegularNoFollow(path)
+	if os.IsNotExist(err) {
+		// A drain may move this entry from new to cur after ReadDir.
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	header, readErr := format.ReadHeader(file)
+	closeErr := file.Close()
+	// ReadHeader wraps errors from this os.File. Preserve filesystem failures
+	// separately from malformed message data; neither open nor close errors
+	// are parse failures that can be ignored.
+	var pathErr *os.PathError
+	if errors.As(readErr, &pathErr) || closeErr != nil {
+		return "", errors.Join(readErr, closeErr)
+	}
+	if readErr != nil {
+		return "", nil
+	}
+	return header.ID, nil
 }
 
 func readMessageDeliveryRoot(root *fsq.DeliveryRoot, path string) (format.Message, error) {
