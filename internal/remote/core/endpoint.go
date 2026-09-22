@@ -443,6 +443,10 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 			out := protocol.Outcome{Op: protocol.OpRequestSubmit}
 			if rec.InputDigest != "" && rec.InputDigest != digest {
 				out.Code = protocol.CodeRequestConflict
+			} else if rec.State == protocol.StateRejected {
+				// Same-digest retry of a rejected submit. status/get already
+				// returns the stored adapter text; the duplicate submit must too.
+				out.Message = rec.RefusalReason
 			}
 			return protocol.Reply{Snapshot: rec.Snapshot, Outcome: out}, nil
 		}

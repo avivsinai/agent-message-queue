@@ -60,4 +60,15 @@ func TestRefusalReasonRoundTripsToSnapshot(t *testing.T) {
 	if !ok || status.Outcome.Message != want {
 		t.Fatalf("status outcome = %#v", got)
 	}
+
+	// Codex #857 r2: a same-digest resubmit of the rejected record returns
+	// the stored refusal on Outcome.Message, the same as status/get.
+	again, err := ep.Handle(submitCmd(id), core.Source{Host: "local"})
+	if err != nil {
+		t.Fatalf("resubmit: %v", err)
+	}
+	retry, ok := again.(protocol.Reply)
+	if !ok || retry.Outcome.Message != want || retry.Snapshot.State != protocol.StateRejected {
+		t.Fatalf("resubmit outcome = %#v", again)
+	}
 }
