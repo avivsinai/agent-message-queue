@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/remote/bodykey"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 )
@@ -102,23 +103,29 @@ func share(args []string, stdout, stderr io.Writer) (int, error) {
 	root := fs.String("root", os.Getenv("AM_ROOT"), "AMQ root directory (default AM_ROOT)")
 	session := fs.String("session", "", "shared session id (required)")
 	renew := fs.Bool("renew", false, "re-print preimages for a fresh attestation window (all kinds)")
-	days := fs.Int("days", 0, "attestation window in days (default 30; 1..90)")
+	days := fs.Int("days", 0, "attestation window in days (default 30; 1..90; on renew, an explicit --days that cannot exceed the current bounds is REFUSED, not silently bumped)")
 	tagFile := fs.String("tag-file", "", "JSON file with one owner-signed tag {kind,owner_pubkey,conditions,sig}")
 	dryRun := fs.Bool("dry-run", false, "print preimages without writing or changing anything")
 	if err := fs.Parse(args); err != nil {
 		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", err)
 	}
+	daysSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "days" {
+			daysSet = true
+		}
+	})
 	if *root == "" {
 		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "--root or AM_ROOT is required")
 	}
 	if !filepath.IsAbs(*root) {
 		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "--root must be absolute")
 	}
-	if *days < 0 || *days > 90 {
-		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "--days must be 1..90 (NIP-OA window bounds)")
-	}
 	if *days == 0 {
-		*days = shareDefaultDays
+		*days = shareDefaultDays // unset flag: the documented default
+	}
+	if *days < 1 || *days > 90 {
+		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "--days must be 1..90 (NIP-OA window bounds), got %d", *days)
 	}
 
 	keyDir, err := shareKeyDir(*root, *session)
@@ -134,26 +141,52 @@ func share(args []string, stdout, stderr io.Writer) (int, error) {
 	// body.key before returning).
 	keyPath := filepath.Join(keyDir, "body.key")
 	k, loadErr := bodykey.Load(keyPath)
+	// State-leaf confinement runs BEFORE anything else — dry-run, mint,
+	// renew (codex r3 #4: the pre-mint refusal must not mint body.key/
+	// body.pub first).
+	if err := refuseSymlinkedState(keyDir); err != nil {
+		return protocol.ExitActionRequired, err
+	}
 	if *dryRun {
+		// Preview and apply run the SAME read-only validation (codex r3 #3):
+		// a dry-run must never offer signing data that a real run would
+		// refuse, and it must not mask key-load errors as "no body key".
 		if loadErr != nil {
-			say(stdout, "dry-run: no body key at %s — a real run would mint one", keyPath)
-			return 0, nil
+			if errors.Is(loadErr, os.ErrNotExist) {
+				say(stdout, "dry-run: no body key at %s — a real run would mint one", keyPath)
+				return 0, nil
+			}
+			return protocol.ExitActionRequired, fmt.Errorf("body key at %s: %w", keyPath, loadErr)
 		}
-		// Dry-run must print exactly what a real run would enroll
-		// (verifier P1-3, r2 P1-5): with --renew, the preview is the window
-		// a real renew would mint (same bump arithmetic, same corrupt-state
-		// refusal); with a plain pending window, its own enrollable
-		// preimages; otherwise an explicitly non-enrollable illustration.
+		if _, gerr := readEnrolledState(keyDir); gerr != nil {
+			return protocol.ExitActionRequired, gerr
+		}
+		// Ruling (claude 08:29Z): owners sign ONLY preimages printed from a
+		// PERSISTED pending window. With a pending window, dry-run prints
+		// exactly those (byte-identical, enrollable). A renewal preview
+		// computes its bound at the preview instant and is explicitly NOT
+		// enrollable — the bound is fixed when the real --renew persists
+		// the window; sharing the calculation cannot share the instant
+		// (codex r3 #1). With none, the illustration is likewise labeled.
+		pendingTags, _, perr := readSharePending(keyDir)
+		if perr != nil && !errors.Is(perr, os.ErrNotExist) {
+			return protocol.ExitActionRequired, perr
+		}
 		if *renew {
-			preview, err := renewalWindow(keyDir, *days)
+			if len(pendingTags) > 0 {
+				printSharePending(stdout, *session, k, pendingTags, time.Time{})
+				say(stdout, "(dry-run: the CURRENT pending window, still enrollable; a real --renew would replace it with a later bound)")
+				return 0, nil
+			}
+			preview, err := renewalWindow(keyDir, *days, daysSet)
 			if err != nil {
 				return protocol.ExitActionRequired, err
 			}
 			printSharePending(stdout, *session, k, preview.tags, preview.notAfter)
-			say(stdout, "(dry-run: no state written; these preimages match the next real `share --renew`)")
+			say(stdout, "(dry-run preview only: no state written; bound is fixed when --renew runs — sign the preimages that plain share prints afterwards)")
 			return 0, nil
 		}
-		if pendingTags, _, perr := readSharePending(keyDir); perr == nil && len(pendingTags) > 0 {
+		if len(pendingTags) > 0 {
 			printSharePending(stdout, *session, k, pendingTags, time.Time{})
 			return 0, nil
 		}
@@ -180,7 +213,7 @@ func share(args []string, stdout, stderr io.Writer) (int, error) {
 	// before expiry, and print the preimages for the owner to sign. The
 	// window arithmetic lives in ONE place (renewalWindow) so --dry-run
 	// previews exactly what a real run mints (codex re-review P2).
-	window, err := renewalWindow(keyDir, *days)
+	window, err := renewalWindow(keyDir, *days, daysSet)
 	if err != nil {
 		return protocol.ExitActionRequired, err
 	}
@@ -192,7 +225,14 @@ func share(args []string, stdout, stderr io.Writer) (int, error) {
 			// let the operator inspect it (verifier P0-1).
 			return protocol.ExitActionRequired, gerr
 		}
-		if pendingTags, _, perr := readSharePending(keyDir); perr == nil && len(pendingTags) > 0 {
+		pendingTags, _, pendingReadErr := readSharePending(keyDir)
+		if pendingReadErr != nil && !errors.Is(pendingReadErr, os.ErrNotExist) {
+			// Malformed pending state is NOT absence (codex r3 #2): never
+			// silently replace an existing window the owner may be
+			// signing against.
+			return protocol.ExitActionRequired, pendingReadErr
+		}
+		if pendingReadErr == nil && len(pendingTags) > 0 {
 			// An enrollment is incomplete: reprint the OUTSTANDING pending
 			// preimages (verifier P0-1: the owner signs one kind at a time
 			// offline and must be able to recover the preimage list without
@@ -235,7 +275,7 @@ type shareWindow struct {
 // existing pending/enrolled conditions so a renewal is a NEW generation
 // even in the same second (generation identity comes from the signed
 // conditions). For a plain mint it is now+days.
-func renewalWindow(keyDir string, days int) (shareWindow, error) {
+func renewalWindow(keyDir string, days int, daysExplicit bool) (shareWindow, error) {
 	notAfter := time.Now().Add(time.Duration(days) * 24 * time.Hour)
 	// State-leaf confinement (codex re-review P1): the pending and enrolled
 	// files are read/written by these commands; a symlinked leaf must be
@@ -243,20 +283,42 @@ func renewalWindow(keyDir string, days int) (shareWindow, error) {
 	if err := refuseSymlinkedState(keyDir); err != nil {
 		return shareWindow{}, err
 	}
-	if prev, _, perr := readSharePending(keyDir); perr == nil && len(prev) > 0 {
-		if maxOld := maxPendingBound(prev); notAfter.Unix() <= maxOld {
-			notAfter = time.Unix(maxOld+1, 0)
-		}
+	prev, _, pendingErr := readSharePending(keyDir)
+	if pendingErr != nil && !errors.Is(pendingErr, os.ErrNotExist) {
+		return shareWindow{}, pendingErr
 	}
+	var maxPending int64
+	if pendingErr == nil && len(prev) > 0 {
+		maxPending = maxPendingBound(prev)
+	}
+	var maxEnrolled int64
 	if gen, gerr := readEnrolledState(keyDir); gerr != nil {
 		// Corrupt/unreadable enrolled state is NOT absence (verifier r2
 		// P1-2): a renewal over torn state would mint a window no tag can
 		// ever be enrolled into. Fail closed like every other path.
 		return shareWindow{}, gerr
 	} else if gen != nil {
-		if maxEnrolled := maxEnrolledBound(gen.Tags); notAfter.Unix() <= maxEnrolled {
-			notAfter = time.Unix(maxEnrolled+1, 0)
+		maxEnrolled = maxEnrolledBound(gen.Tags)
+	}
+	// Ruling (claude 08:27Z #1): an EXPLICIT --days is never silently
+	// overridden by the bump. If the requested window would not clear the
+	// bounds the renewal must exceed, REFUSE with the minimum that would
+	// work — shortening the horizon has no silent path. The default (no
+	// --days) keeps the bump so plain renewals never fail.
+	minDays := max(maxPending, maxEnrolled)
+	if minDays > 0 && notAfter.Unix() <= minDays {
+		if daysExplicit {
+			need := int(time.Until(time.Unix(minDays, 0)).Hours()/24) + 1
+			if need < 1 {
+				need = 1
+			}
+			if need > 90 {
+				need = 90 // never exceed the NIP-OA bound in the message
+			}
+			return shareWindow{}, protocol.Refuse(protocol.CodeInvalid,
+				"--days %d would not exceed the current window bounds; a renewal must set a later bound. Minimum --days that works: %d", days, need)
 		}
+		notAfter = time.Unix(minDays+1, 0)
 	}
 	tags := make([]shareTagFile, 0, len(bodykey.ShareKinds))
 	for _, kind := range bodykey.ShareKinds {
@@ -323,7 +385,10 @@ func enrollTag(keyDir, tagPath string, k *bodykey.BodyKey) (int, error) {
 	// the pending (or current) window — no free-form conditions.
 	pending, _, perr := readSharePending(keyDir)
 	if perr != nil {
-		return protocol.ExitActionRequired, fmt.Errorf("no pending window: run `amq-remote share --session ... --renew` first: %v", perr)
+		if errors.Is(perr, os.ErrNotExist) {
+			return protocol.ExitActionRequired, fmt.Errorf("no pending window: run `amq-remote share --session ... --renew` first")
+		}
+		return protocol.ExitActionRequired, perr
 	}
 	var match *shareTagFile
 	for i := range pending {
@@ -377,7 +442,7 @@ func readSharePending(keyDir string) ([]shareTagFile, time.Time, error) {
 		NotAfter int64          `json:"not_after"`
 	}
 	if err := json.Unmarshal(raw, &doc); err != nil {
-		return nil, time.Time{}, err
+		return nil, time.Time{}, fmt.Errorf("pending state at share.pending.json is invalid: %w", err)
 	}
 	if len(doc.Tags) == 0 {
 		return nil, time.Time{}, errors.New("pending window carries no tags")
@@ -427,7 +492,7 @@ func writeSharePending(keyDir string, tags []shareTagFile, notAfter time.Time) e
 	if err != nil {
 		return err
 	}
-	return writeFileAtomic(p, raw)
+	return writeStateFile(p, raw)
 }
 
 func writeShareTag(keyDir string, pending []shareTagFile, tf *shareTagFile) error {
@@ -481,7 +546,7 @@ func writeShareTag(keyDir string, pending []shareTagFile, tf *shareTagFile) erro
 		return err
 	}
 	_, enrolledPath := sharePaths(keyDir)
-	if err := writeFileAtomic(enrolledPath, raw); err != nil {
+	if err := writeStateFile(enrolledPath, raw); err != nil {
 		return err
 	}
 	p, _ := sharePaths(keyDir)
@@ -530,40 +595,22 @@ func writeShareStaged(keyDir string, staged map[uint16]shareTagFile) error {
 	if err != nil {
 		return err
 	}
-	if err := writeFileAtomic(filepath.Join(keyDir, stagedName), raw); err != nil {
+	if err := writeStateFile(filepath.Join(keyDir, stagedName), raw); err != nil {
 		return err
 	}
 	return nil
 }
 
-// writeFileAtomic writes via a same-directory temp file and rename: a
-// reader never sees a partial file and a crash never truncates the target
-// (codex re-review P1: os.WriteFile truncates in place).
-func writeFileAtomic(path string, raw []byte) error {
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, ".share-*")
-	if err != nil {
-		return fmt.Errorf("create temp state file: %w", err)
-	}
-	tmpPath := tmp.Name()
-	defer func() {
-		_ = tmp.Close()
-		_ = os.Remove(tmpPath)
-	}()
-	if err := tmp.Chmod(0o600); err != nil {
-		return fmt.Errorf("chmod temp state file: %w", err)
-	}
-	if _, err := tmp.Write(raw); err != nil {
-		return fmt.Errorf("write temp state file: %w", err)
-	}
-	if err := tmp.Sync(); err != nil {
-		return fmt.Errorf("sync temp state file: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("close temp state file: %w", err)
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		return fmt.Errorf("atomic rename: %w", err)
+// writeStateFile publishes one state file through
+// internal/fsq.WriteFileAtomic: tmp + fsync + directory sync around the
+// rename, so a crash never truncates the target and the publication is
+// durable, not merely atomically visible (codex r3: the local helper only
+// synced the temp file; the parent directory was never synced, so cleanup
+// could remove recovery state before the publication was durably named).
+func writeStateFile(path string, raw []byte) error {
+	dir, name := filepath.Dir(path), filepath.Base(path)
+	if _, err := fsq.WriteFileAtomic(dir, name, raw, 0o600); err != nil {
+		return fmt.Errorf("atomic write %s: %w", path, err)
 	}
 	return nil
 }
@@ -727,7 +774,16 @@ func doctorShareInspection(root string) map[string]any {
 		if k, err := bodykey.Load(filepath.Join(keyDir, "body.key")); err == nil {
 			info["body_pubkey"] = k.PublicKeyHex()
 		} else {
-			info["key_error"] = err.Error()
+			if errors.Is(err, os.ErrNotExist) {
+				info["key_error"] = err.Error()
+				info["remedy"] = "run `amq-remote share --session " + e.Name() + "` to mint one"
+			} else {
+				// Corrupt/unusable key: never point at --renew — a new
+				// window signed under a replacement key would not match
+				// the enrolled credentials. Operator inspection first.
+				info["key_error"] = err.Error()
+				info["remedy"] = "inspect the key directory by hand; do NOT renew over a broken key"
+			}
 			out[e.Name()] = info
 			continue
 		}
@@ -745,6 +801,14 @@ func doctorShareInspection(root string) map[string]any {
 		// window and strands preimages the owner may already be signing.
 		pendingTags, _, pendingErr := readSharePending(keyDir)
 		outstanding := 0
+		if pendingErr != nil && !errors.Is(pendingErr, os.ErrNotExist) {
+			// Malformed pending state is surfaced, never treated as absence
+			// (codex r3 #2: doctor must not report a healthy state over a
+			// corrupt window).
+			info["attestation_error"] = pendingErr.Error()
+			out[e.Name()] = info
+			continue
+		}
 		if pendingErr == nil {
 			staged, serr := readShareStaged(keyDir)
 			if serr != nil {

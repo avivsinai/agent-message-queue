@@ -13,6 +13,19 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/bodykey"
 )
 
+// runShareLoose runs share without failing on non-zero exits; returns
+// stdout, stderr, exit code.
+func runShareLoose(args ...string) (string, string, int) {
+	var stdout, stderr bytes.Buffer
+	code, err := share(args, &stdout, &stderr)
+	if err != nil {
+		// Refusals surface on stderr in-process the same way finish()
+		// prints them for the CLI.
+		stderr.WriteString(err.Error())
+	}
+	return stdout.String(), stderr.String(), code
+}
+
 func runShare(t *testing.T, args ...string) (string, string, int) {
 	t.Helper()
 	var stdout, stderr bytes.Buffer
@@ -790,39 +803,65 @@ func TestPendingStateSymlinkRefused(t *testing.T) {
 	}
 }
 
-// TestRenewDryRunMatchesRenew pins codex re-review P2 #3: `share --renew
-// --dry-run` previews EXACTLY the window a real renew mints (same bump
-// arithmetic) — the owner can sign the previewed preimages and enroll them.
-func TestRenewDryRunMatchesRenew(t *testing.T) {
+// TestRenewDryRunPreviewNotEnrollable pins the round-3 ruling (claude
+// 08:29Z): --renew --dry-run is a NON-enrollable preview — the bound is
+// fixed only when the real --renew persists the window, so the preview
+// must say so explicitly and no signature is accepted against its bound.
+func TestRenewDryRunPreviewNotEnrollable(t *testing.T) {
 	root := t.TempDir()
 	runShare(t, "--root", root, "--session", "dr1")
 	enrollAllPending(t, root, "dr1")
-	preview, _, code := runShare(t, "--root", root, "--session", "dr1", "--renew", "--dry-run")
+	preview, stderrL, code := runShareLoose("--root", root, "--session", "dr1", "--renew", "--dry-run")
 	if code != 0 {
-		t.Fatal("renew dry-run refused")
+		t.Fatalf("renew dry-run refused (code=%d): %s", code, stderrL)
 	}
-	if !strings.Contains(preview, "dry-run") {
-		t.Fatalf("renew dry-run not labeled as dry-run:\n%s", preview)
+	if !strings.Contains(preview, "bound is fixed when --renew runs") {
+		t.Fatalf("renew dry-run preview not labeled non-enrollable:\n%s", preview)
 	}
-	previewConds := pendingConditions(t, preview)
-	// The preview must be a NEW generation relative to the enrolled one
-	// (bumped past it), not the stale window.
 	keyDir := filepath.Join(root, "extensions", "remote", "keys", "dr1")
+	previewConds := pendingConditions(t, preview)
+	// The preview bound is computed past the enrolled generation, but that
+	// is NOT a persisted window: no share.pending.json exists yet and a
+	// tag signed over the preview bound is refused.
+	if _, err := os.Stat(filepath.Join(keyDir, "share.pending.json")); !os.IsNotExist(err) {
+		t.Fatalf("renew dry-run persisted a window: %v", err)
+	}
 	for _, old := range readEnrolledTagsForTest(t, keyDir) {
 		if previewConds[old.Kind] == old.Conditions {
 			t.Fatalf("renew dry-run previewed the STALE window for kind %d", old.Kind)
 		}
 	}
-	// The preview must equal the real renewal's minted window.
+	// The real renew persists its own bound, which need not equal the
+	// preview's (time passed between the two instants).
 	actual, _, code := runShare(t, "--root", root, "--session", "dr1", "--renew")
 	if code != 0 {
 		t.Fatal("renew refused")
 	}
-	actualConds := pendingConditions(t, actual)
-	for kind, conds := range previewConds {
-		if actualConds[kind] != conds {
-			t.Fatalf("renew dry-run drifted from real renew for kind %d: preview=%s actual=%s", kind, conds, actualConds[kind])
-		}
+	if len(pendingConditions(t, actual)) != len(previewConds) {
+		t.Fatal("real renew printed a different number of kinds than the preview")
+	}
+}
+
+// TestExplicitDaysShorteningRefused pins the round-3 ruling (claude
+// 08:27Z #1): an explicit --days that cannot exceed the current bounds is
+// REFUSED with a message naming the minimum — never silently bumped.
+func TestExplicitDaysShorteningRefused(t *testing.T) {
+	root := t.TempDir()
+	_, stderr, code := runShareLoose("--root", root, "--session", "sd1", "--days", "60")
+	if code != 0 {
+		t.Fatalf("initial mint refused: %s", stderr)
+	}
+	_, stderr, code = runShareLoose("--root", root, "--session", "sd1", "--renew", "--days", "1")
+	if code == 0 {
+		t.Fatal("renew --days 1 over a 60-day bound was silently bumped")
+	}
+	if !strings.Contains(stderr, "Minimum --days that works") {
+		t.Fatalf("refusal does not name the minimum:\n%s", stderr)
+	}
+	// A --days large enough to clear the bound is accepted.
+	_, stderr, code = runShareLoose("--root", root, "--session", "sd1", "--renew", "--days", "90")
+	if code != 0 {
+		t.Fatalf("renew --days 90 refused:\n%s", stderr)
 	}
 }
 
@@ -974,4 +1013,56 @@ func writeTagFile(t *testing.T, keyDir string, tag shareTagFile) string {
 		t.Fatal(err)
 	}
 	return tagPath
+}
+
+// TestMalformedPendingNeverReplaced pins codex r3 #2: malformed pending
+// JSON is an error on every path — plain share, renew, dry-run, doctor —
+// never silently reset to a fresh window.
+func TestMalformedPendingNeverReplaced(t *testing.T) {
+	root := t.TempDir()
+	runShare(t, "--root", root, "--session", "mp1")
+	keyDir := filepath.Join(root, "extensions", "remote", "keys", "mp1")
+	pendingPath := filepath.Join(keyDir, "share.pending.json")
+	if err := os.WriteFile(pendingPath, []byte("broken JSON"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range [][]string{
+		{"--root", root, "--session", "mp1"},
+		{"--root", root, "--session", "mp1", "--renew"},
+		{"--root", root, "--session", "mp1", "--renew", "--dry-run"},
+		{"--root", root, "--session", "mp1", "--dry-run"},
+	} {
+		if code, _ := share(tc, &bytes.Buffer{}, &bytes.Buffer{}); code == 0 {
+			t.Fatalf("%v exited 0 over malformed pending state", tc)
+		}
+	}
+	after, err := os.ReadFile(pendingPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != "broken JSON" {
+		t.Fatal("malformed pending state was modified")
+	}
+	if inspect := doctorShareInspection(root); inspect["mp1"] == nil {
+		t.Fatal("doctor produced no row for the malformed-pending session")
+	} else if _, hasErr := inspect["mp1"].(map[string]any)["attestation_error"]; !hasErr {
+		t.Fatalf("doctor did not surface the malformed pending state: %v", inspect["mp1"])
+	}
+}
+
+// TestDoctorCorruptKeyRemedyInspectionOnly pins the round-3 text ruling:
+// a corrupt body key's remedy is operator inspection, never --renew.
+func TestDoctorCorruptKeyRemedyInspectionOnly(t *testing.T) {
+	root := t.TempDir()
+	runShare(t, "--root", root, "--session", "ck1")
+	keyDir := filepath.Join(root, "extensions", "remote", "keys", "ck1")
+	if err := os.WriteFile(filepath.Join(keyDir, "body.key"), []byte("garbage"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	inspect := doctorShareInspection(root)
+	info := inspect["ck1"].(map[string]any)
+	remedy, _ := info["remedy"].(string)
+	if !strings.Contains(remedy, "do NOT renew") {
+		t.Fatalf("corrupt-key remedy points at renew: %v", remedy)
+	}
 }
