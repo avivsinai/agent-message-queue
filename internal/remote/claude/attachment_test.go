@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -34,22 +35,10 @@ func tempHome(t *testing.T, pid int, reg *sessionRegistry) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, itoa(pid)+".json"), raw, 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, strconv.Itoa(pid)+".json"), raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	return home
-}
-
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	var b []byte
-	for n > 0 {
-		b = append([]byte{byte('0' + n%10)}, b...)
-		n /= 10
-	}
-	return string(b)
 }
 
 func TestAttachResolvesRegistryAndTarget(t *testing.T) {
@@ -57,7 +46,10 @@ func TestAttachResolvesRegistryAndTarget(t *testing.T) {
 		Pid: 4242, SessionID: "abc-123", Cwd: "/tmp/proj", Kind: "interactive",
 		MessagingSocketPath: "/tmp/cc-socks/4242.sock", Name: "sess/claude",
 	})
-	att, err := Attach(config{Pid: 4242, Home: home})
+	// cfg.Target wins (P0-3): the manifest target is the identity the
+	// endpoint addresses the adapter under; the registry name crosses a
+	// trust boundary (local-process-writable file) and is only a fallback.
+	att, err := Attach(config{Pid: 4242, Home: home, Target: "cc-1"})
 	if err != nil {
 		t.Fatalf("Attach refused a registered interactive session: %v", err)
 	}
@@ -65,8 +57,8 @@ func TestAttachResolvesRegistryAndTarget(t *testing.T) {
 	if s.Harness != "claude_code" {
 		t.Fatalf("harness = %q, want claude_code (schema enum)", s.Harness)
 	}
-	if s.TargetID != "sess/claude" {
-		t.Fatalf("target = %q, want the registry name", s.TargetID)
+	if s.TargetID != "cc-1" {
+		t.Fatalf("target = %q, want the manifest target cc-1 (P0-3)", s.TargetID)
 	}
 	if s.Epoch != SentinelUnpinned {
 		t.Fatalf("epoch = %q, want the unpinned sentinel (PR1 binds nothing)", s.Epoch)
@@ -176,4 +168,66 @@ func TestSlugifyCwd(t *testing.T) {
 	if got != want {
 		t.Fatalf("slug = %q, want %q", got, want)
 	}
+	// P2-2: the observed rule maps EVERY non-alphanumeric character
+	// (ground truth: "Application Support" → "Application-Support").
+	if got := slugifyCwd("/Users/x/Library/Application Support/ClaudeProbe"); got != "-Users-x-Library-Application-Support-ClaudeProbe" {
+		t.Fatalf("slug with space = %q, want dashes for every non-alnum char", got)
+	}
+}
+
+func TestDeriveTargetValidatesAndFallsBack(t *testing.T) {
+	// A protocol-invalid registry name falls back to the pid form (P0-3:
+	// the published id must always be addressable — ValidTargetID).
+	got := deriveTarget(4242, &sessionRegistry{Name: "sess/claude"})
+	if got != "claude:4242" {
+		t.Fatalf("deriveTarget with invalid name = %q, want claude:4242", got)
+	}
+	if got := deriveTarget(4242, &sessionRegistry{Name: "cc-1"}); got != "cc-1" {
+		t.Fatalf("deriveTarget with valid name = %q, want cc-1", got)
+	}
+	// Attach refuses an unvalidatable derived target rather than publishing it.
+	home := tempHome(t, 5, &sessionRegistry{Pid: 5, SessionID: "s5", Kind: "interactive"})
+	// "claude:5" is protocol-valid (letters, digits, ':' allowed), so a
+	// plain pid fallback must attach and publish the pid form.
+	att, err := Attach(config{Pid: 5, Home: home})
+	if err != nil {
+		t.Fatalf("Attach refused the pid-form fallback: %v", err)
+	}
+	if s := att.Inspect(); s.TargetID != "claude:5" {
+		t.Fatalf("target = %q, want claude:5", s.TargetID)
+	}
+}
+
+func TestNormalizeStatusProjectionVocabulary(t *testing.T) {
+	// P2-1: the registry's foreign vocabulary is never published raw.
+	for _, tc := range []struct{ in, want string }{
+		{"idle", "idle"}, {"busy", "busy"}, {"shell", "busy"}, {"tool", "busy"},
+		{"waitingForUserInput", "unknown"}, {"", "unknown"}, {"hostile:value", "unknown"},
+	} {
+		if got := normalizeStatus(tc.in); got != tc.want {
+			t.Fatalf("normalizeStatus(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestRegistryLeafMustBeRegularFile pins r2 P1-1: the session-registry path
+// is local-process-writable; a non-regular file there (FIFO, directory) is
+// refused by lstat BEFORE any read — os.ReadFile on a FIFO blocks
+// unbounded, and this read runs under the endpoint's mutex.
+func TestRegistryLeafMustBeRegularFile(t *testing.T) {
+	home := tempHome(t, 77, &sessionRegistry{Pid: 77, SessionID: "s77", Kind: "interactive"})
+	regPath := filepath.Join(claudeSessionsDir(home), "77.json")
+	// Directory at the leaf: refused, never read.
+	if err := os.Remove(regPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(regPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readSessionRegistry(home, 77); err == nil {
+		t.Fatal("accepted a directory at the session-registry path")
+	} else if !strings.Contains(err.Error(), "not a regular file") {
+		t.Fatalf("refusal does not name the file-type rule: %v", err)
+	}
+	testRegistryFIFO(t, home, regPath)
 }

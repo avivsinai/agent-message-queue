@@ -1,22 +1,26 @@
 // Package claude is the Claude Code adapter factory (bead 611.12, PR1).
 // It registers the kind:"claude" factory so a manifest entry
-// `{"kind":"claude","target":"<pid>","config":{...}}` builds a
+// `{"kind":"claude","target":"<name>","config":{...}}` builds a
 // claudeAttachment without editing serve.
 //
-// PR1 scope (architect ruling 10:59Z, binding): the adapter skeleton,
-// inspect via `claude agents --json` plus the transcript tail reader, the
-// opt-in user-level Stop-hook installer, and an HONEST capability
-// projection — submit is advertised false and refusal-only until PR2 wires
-// the pinned 611.2 wire (docs/research/r0-03-cc-socket-wire-capture.md,
-// merged at 17bff18). No keystrokes, no print child, no `claude -p`
-// fallback, no process ownership (ADR invariant 1).
+// PR1 scope (architect ruling 10:59Z, recut per review-852-r1): the
+// adapter skeleton, file-only inspect (session registry + transcript
+// tail — NO child process is ever spawned from Inspect), and an HONEST
+// capability projection — submit is advertised false and refusal-only
+// until PR2 wires the pinned 611.2 wire
+// (docs/research/r0-03-cc-socket-wire-capture.md, merged at 17bff18).
+// No keystrokes, no print child, no `claude -p` fallback, no process
+// ownership (ADR invariant 1). The Stop-hook installer is DEFERRED to
+// PR2 together with its receiver subcommand (review-852-r1 P1-3: an
+// installed hook whose command does not exist would exit 2, Claude
+// Code's blocking-error code — the opposite of failing open).
 //
-// Evidence vocabulary (architect ruling 10:59Z; "delivered" does not exist
-// in the schema — #822 removed it): a socket ack alone is TENTATIVE
-// (bound, ownership not proven); the transcript user line is SUBMITTED;
-// the assistant turn starting (Stop-hook post or transcript assistant
-// line) is ADMITTED. PR1 issues none of these over a wire: submit refuses
-// before any side effect.
+// Evidence vocabulary (architect ruling 10:59Z; "delivered" does not
+// exist in the schema — #822 removed it): a socket ack alone is
+// TENTATIVE (bound, ownership not proven); the transcript user line is
+// SUBMITTED; the assistant turn starting (Stop-hook post or transcript
+// assistant line) is ADMITTED. PR1 issues none of these over a wire:
+// submit refuses before any side effect.
 package claude
 
 import (
@@ -46,16 +50,12 @@ type config struct {
 	// session registry file (~/.claude/sessions/<pid>.json) from it; the
 	// pid also keys the transcript under ~/.claude/projects via sessionId.
 	Pid int `json:"pid"`
+	// Target overrides the published target id (the manifest's declared
+	// identity, the same rule as codex/amit). Empty = the registry name,
+	// validated, else "claude:<pid>".
+	Target string `json:"target,omitempty"`
 	// Home overrides the Claude home for tests; empty = os.UserHomeDir().
 	Home string `json:"home,omitempty"`
-	// ClaudeBin is the CLI binary for roster polling; empty = "claude".
-	ClaudeBin string `json:"claude_bin,omitempty"`
-	// StopHook opts in to the user-level Stop-hook installer at attach time.
-	// Installation is idempotent and never touches other hooks; Uninstall
-	// restores the prior settings byte-for-byte. Never invoked without the
-	// explicit operator opt-in (architect ruling 10:59Z: ~/.claude is shared
-	// by every agent on the machine).
-	StopHook bool `json:"stop_hook,omitempty"`
 }
 
 // sessionRegistry is the subset of ~/.claude/sessions/<pid>.json the
@@ -70,32 +70,19 @@ type sessionRegistry struct {
 	Kind                string   `json:"kind"`
 	MessagingSocketPath string   `json:"messagingSocketPath"`
 	Name                string   `json:"name"`
-}
-
-// rosterEntry is the subset of `claude agents --json` the adapter reads.
-type rosterEntry struct {
-	Pid       int    `json:"pid"`
-	Cwd       string `json:"cwd"`
-	Kind      string `json:"kind"`
-	SessionID string `json:"sessionId"`
-	Name      string `json:"name"`
-	Status    string `json:"status"`
-}
-
-// Attachment implements core.Attachment over the Claude Code surfaces.
-// It never injects keystrokes, never spawns a print child, and owns no
-// process (ADR invariant 1). PR1 tracks no runs (submit refuses before
-// any side effect); PR2 adds the run table alongside the socket client.
-type Attachment struct {
-	target string
-	cfg    config
-	home   string
+	Status              string   `json:"status"`
+	UpdatedAt           int64    `json:"updatedAt"` // unix millis
 }
 
 // ErrSubmitUnwired is the refusal Submit returns in PR1: the pinned 611.2
 // wire is merged (17bff18) but not yet wired (PR2). The refusal is the
 // honest projection — no capability is implied, no side effect occurs.
 var ErrSubmitUnwired = errors.New("claude submit is not wired until 611.12 PR2 (socket delivery over the 611.2 pinned wire); this refusal is the capability projection, not a transient error")
+
+// maxRegistryBytes bounds the session-registry read: a real entry is well
+// under 1 KiB; anything larger on a local-process-writable path is refused
+// before it can stall a read under the endpoint mutex (r2 P1-1).
+const maxRegistryBytes = 64 << 10
 
 // Factory builds a claude Attachment from a registry.FactoryConfig.
 func Factory(_ context.Context, cfg registry.FactoryConfig) (core.Attachment, error) {
@@ -107,6 +94,13 @@ func Factory(_ context.Context, cfg registry.FactoryConfig) (core.Attachment, er
 	}
 	if c.Pid <= 0 {
 		return nil, fmt.Errorf("claude config: pid is required (the target Claude Code process id)")
+	}
+	// The manifest target is the identity the endpoint addresses this
+	// adapter under (codex factory comment, ".13"); cfg.Target wins over
+	// any registry-derived name, which crosses a trust boundary (the
+	// registry file is local-process-writable).
+	if cfg.Target != "" {
+		c.Target = cfg.Target
 	}
 	att, err := Attach(c)
 	if err != nil {
@@ -135,7 +129,13 @@ func Attach(cfg config) (*Attachment, error) {
 	if reg.Kind != "" && reg.Kind != "interactive" {
 		return nil, fmt.Errorf("claude adapter: pid %d is kind %q; only interactive sessions attach", cfg.Pid, reg.Kind)
 	}
-	target := cfgTarget(cfg.Pid, reg)
+	target := cfg.Target
+	if target == "" {
+		target = deriveTarget(cfg.Pid, reg)
+	}
+	if !protocol.ValidTargetID(target) {
+		return nil, fmt.Errorf("claude adapter: derived target id %q is not protocol-addressable (opaque grammar); set an explicit target in the manifest", target)
+	}
 	return &Attachment{
 		target: target,
 		cfg:    cfg,
@@ -143,8 +143,10 @@ func Attach(cfg config) (*Attachment, error) {
 	}, nil
 }
 
-func cfgTarget(pid int, reg *sessionRegistry) string {
-	if reg != nil && reg.Name != "" {
+// deriveTarget prefers the registry name when it is protocol-valid; the
+// pid form is the fallback. The caller validates the result.
+func deriveTarget(pid int, reg *sessionRegistry) string {
+	if reg != nil && reg.Name != "" && protocol.ValidTargetID(reg.Name) {
 		return reg.Name
 	}
 	return "claude:" + strconv.Itoa(pid)
@@ -156,12 +158,30 @@ func claudeSessionsDir(home string) string {
 
 // readSessionRegistry reads ~/.claude/sessions/<pid>.json. The file is
 // read through os.ReadFile: it is a Claude-internal registry file, not an
-// AMQ state leaf, so the state-leaf lstat rule does not apply here.
+// AMQ state leaf, so the state-leaf lstat rule does not apply to this
+// read.
 func readSessionRegistry(home string, pid int) (*sessionRegistry, error) {
 	path := filepath.Join(claudeSessionsDir(home), strconv.Itoa(pid)+".json")
+	// The registry path is local-process-writable (trust boundary stated
+	// above): lstat before opening — anything but a regular file is
+	// refused. os.ReadFile on a FIFO blocks unbounded until a writer
+	// appears, and this read runs under the endpoint's mutex (r2 P1-1).
+	if fi, err := os.Lstat(path); err == nil {
+		if !fi.Mode().IsRegular() {
+			return nil, fmt.Errorf("session registry %s: not a regular file (mode %s); refusing", path, fi.Mode())
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("session registry %s: %w", path, err)
+	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("session registry %s: %w", path, err)
+	}
+	// Bound the read size: a regular file is still local-process-writable,
+	// and an unbounded read of a huge file under the endpoint mutex is the
+	// same freeze shape (r2 P1-1). A real registry entry is < 1 KiB.
+	if len(raw) > maxRegistryBytes {
+		return nil, fmt.Errorf("session registry %s: %d bytes exceeds %d; refusing", path, len(raw), maxRegistryBytes)
 	}
 	var reg sessionRegistry
 	if err := json.Unmarshal(raw, &reg); err != nil {
@@ -174,23 +194,46 @@ func readSessionRegistry(home string, pid int) (*sessionRegistry, error) {
 }
 
 // transcriptPath maps cwd+sessionId to ~/.claude/projects/<slug>/<sessionId>.jsonl
-// (slug = cwd with '/' and non-allowed chars replaced by '-'; observed rule
-// in docs/research/r0-03 and seats/harness-surfaces.md §2.1).
+// (slug = cwd with every non-alphanumeric character replaced by '-' — the
+// observed rule on this machine, e.g. "Application Support" →
+// "Application-Support"; review-852-r1 P2-2).
 func transcriptPath(home, cwd, sessionID string) string {
 	return filepath.Join(home, ".claude", "projects", slugifyCwd(cwd), sessionID+".jsonl")
 }
 
 func slugifyCwd(cwd string) string {
-	replacer := strings.NewReplacer("/", "-", ".", "-", "_", "-")
-	return replacer.Replace(cwd)
+	var b strings.Builder
+	for _, r := range cwd {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			continue
+		}
+		b.WriteByte('-')
+	}
+	return b.String()
 }
 
-// Inspect implements core.Attachment: the honest projection. Status comes
-// from the roster poll; capabilities are the design-permitted set with
-// submit FALSE until PR2 (architect ruling 10:59Z: stated as refusal-only
-// in the PR body). Evidence is nil — PR1 issues no submit evidence class
-// at all, and a nil projection fails closed under any caller floor
-// (endpoint gate, internal/remote/core/endpoint.go).
+// Attachment implements core.Attachment over the Claude Code surfaces.
+// It never injects keystrokes, never spawns a print child, and owns no
+// process (ADR invariant 1). Inspect performs NO child-process spawn: it
+// reads the session registry file only (review-852-r1 P0-1 — a spawn
+// under the endpoint mutex froze every target for the life of a hung
+// child; the roster poller moves to PR2 with the socket client, on a
+// ticker into a cached value).
+type Attachment struct {
+	target string
+	cfg    config
+	home   string
+}
+
+// Inspect implements core.Attachment: the honest projection. Status is
+// the registry file's own status field, normalized to the projection
+// vocabulary {idle,busy,unknown,offline} (P2-1, mirroring codex
+// threadStatus); the pid is liveness-checked (P2-4 — a stale registry
+// left by a crashed session must not read "live" forever). Capabilities
+// are the design-permitted set with submit FALSE until PR2. Evidence is
+// nil — PR1 issues no submit evidence class at all, and a nil projection
+// fails closed under any caller floor (endpoint gate).
 func (a *Attachment) Inspect() protocol.Session {
 	status := a.observeStatus()
 	att := "live"
@@ -219,31 +262,40 @@ func (a *Attachment) Inspect() protocol.Session {
 	}
 }
 
-func (a *Attachment) now() time.Time { return time.Now() }
-
-// observeStatus polls `claude agents --json` for the target pid; the
-// session registry is the fallback when the roster does not list it (e.g.
-// a --bg session owned by a different CLI version). A failed poll is
-// status "unknown" with attachment "live" only when the registry file
-// still exists — never a guessed "idle".
-func (a *Attachment) observeStatus() string {
-	entries, err := agentRoster(a.cfg.ClaudeBin)
-	if err == nil {
-		for _, e := range entries {
-			if e.Pid == a.cfg.Pid {
-				if e.Status == "" {
-					return "unknown"
-				}
-				return e.Status
-			}
-		}
-	}
-	// Roster miss: fall back to liveness of the registry file.
-	if _, err := readSessionRegistry(a.home, a.cfg.Pid); err != nil {
-		return "offline"
+// normalizeStatus maps the registry's status vocabulary onto the
+// projection's {idle,busy,unknown,offline}. Unknown values — including a
+// hostile or future-vocabulary value from the local-process-writable
+// registry — map to "unknown", never published raw (P2-1).
+func normalizeStatus(s string) string {
+	switch s {
+	case "idle":
+		return "idle"
+	case "busy", "shell", "tool":
+		return "busy"
 	}
 	return "unknown"
 }
+
+// observeStatus is a pure filesystem read: the registry file's status
+// field plus a pid liveness check. No child process, no bound that can
+// silently exceed its timeout (P0-1).
+func (a *Attachment) observeStatus() string {
+	reg, err := readSessionRegistry(a.home, a.cfg.Pid)
+	if err != nil {
+		return "offline"
+	}
+	if alive, err := pidAlive(a.cfg.Pid); err != nil || !alive {
+		return "offline"
+	}
+	// A registry status the process does not update any more is still
+	// "unknown" in the projection, never a guessed idle.
+	if reg.Status == "" {
+		return "unknown"
+	}
+	return normalizeStatus(reg.Status)
+}
+
+func (a *Attachment) now() time.Time { return time.Now() }
 
 // Submit implements core.Attachment. PR1 refuses before ANY side effect:
 // the endpoint gates on Capabilities.Submit=false before dispatch reaches
@@ -266,19 +318,24 @@ func (a *Attachment) Lookup(key requests.Key, _ string) (core.Evidence, error) {
 	return core.Evidence{Known: true, Class: core.EvidenceUnknown}, nil
 }
 
-// CancelExact implements core.Attachment: refusal-only in PR1. Claude Code
-// has no user-level interrupt without keystrokes (pinned evidence,
-// docs/remote-compat.md §3), so cancellation is unsupported even in PR2.
+// CancelExact implements core.Attachment: typed refusal, never a zero
+// value (P2-3 — an empty Disposition would persist as a fake outcome).
+// Claude Code has no user-level interrupt without keystrokes (pinned
+// evidence, docs/remote-compat.md §3), so cancellation is unsupported
+// even in PR2.
 func (a *Attachment) CancelExact(key requests.Key, _ string) (core.CancelEvidence, error) {
-	return core.CancelEvidence{}, nil
+	return core.CancelEvidence{
+		Disposition: protocol.CancelUnsupported,
+		Message:     "claude_code has no interrupt seam without keystrokes (docs/remote-compat.md §3); cancellation is unsupported",
+	}, nil
 }
 
 // Respond implements core.Attachment: no approval/question seam exists
 // (docs/remote-compat.md §3; Remote Control is policy-disabled). The
-// endpoint translates a false AnswerQuestion capability into
-// already_resolved before this is reached.
+// typed already_resolved code (P2-3 — an empty code reads as success at
+// the endpoint) mirrors amit.
 func (a *Attachment) Respond(_ requests.Key, _, _, _ string) (protocol.Code, error) {
-	return "", nil
+	return protocol.CodeAlreadyResolved, nil
 }
 
 // AcknowledgeResult implements core.Attachment: nothing is retained, so

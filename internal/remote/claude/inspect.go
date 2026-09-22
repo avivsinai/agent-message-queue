@@ -2,38 +2,10 @@ package claude
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
-	"time"
 )
-
-// agentRoster runs `claude agents --json` and parses the roster. The
-// command is read-only (a roster listing); there is no prompt, no
-// keystroke, and no print child — the binary runs with no arguments beyond
-// the fixed `agents --json` and no stdin.
-func agentRoster(claudeBin string) ([]rosterEntry, error) {
-	if claudeBin == "" {
-		claudeBin = "claude"
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), rosterTimeout)
-	defer cancel()
-	out, err := exec.CommandContext(ctx, claudeBin, "agents", "--json").Output()
-	if err != nil {
-		return nil, fmt.Errorf("claude agents --json: %w", err)
-	}
-	var entries []rosterEntry
-	if err := json.Unmarshal(out, &entries); err != nil {
-		return nil, fmt.Errorf("claude agents --json: parse roster: %w", err)
-	}
-	return entries, nil
-}
-
-// rosterTimeout bounds the roster poll so Inspect can never hang the
-// endpoint's projection loop.
-const rosterTimeout = 10 * time.Second
 
 // transcriptTailLine is one decoded transcript JSONL line, reduced to the
 // fields PR1/PR2 read. Unknown fields are ignored.
