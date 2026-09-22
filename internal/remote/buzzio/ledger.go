@@ -1,0 +1,291 @@
+// Package buzzio is the Buzz DM edge of the remote endpoint (bead 611.16,
+// relay design §4). This file is its durable ledger: ingress claims written
+// before any command reaches the endpoint, prepared signed output written
+// before any transmission, and the request-to-row receipt mapping. Every
+// record is created once and then read back verbatim, so a restart,
+// redelivery or duplicate subscription replays the same decision and the
+// same signed bytes instead of making new ones.
+package buzzio
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
+)
+
+// maxRecordBytes bounds one ledger file (a claim or a prepared event).
+const maxRecordBytes = 128 << 10
+
+// Ledger is the edge's on-disk state under <stateDir>/buzz. The endpoint's
+// single-writer lock owns the directory; the ledger adds no lock of its own.
+type Ledger struct {
+	dir string
+}
+
+// OpenLedger creates or opens <stateDir>/buzz/{ingress,outbox,receipts}.
+func OpenLedger(stateDir string) (*Ledger, error) {
+	l := &Ledger{dir: filepath.Join(stateDir, "buzz")}
+	for _, sub := range []string{"ingress", "outbox", "receipts"} {
+		if err := os.MkdirAll(filepath.Join(l.dir, sub), 0o700); err != nil {
+			return nil, err
+		}
+	}
+	return l, nil
+}
+
+// Claim is one owner command, fixed when first seen. RequestID is derived
+// from the signed event, so a retried import can only ever address the same
+// request.
+type Claim struct {
+	EventID   string          `json:"event_id"`
+	Owner     string          `json:"owner"`
+	Channel   string          `json:"channel"`
+	Op        string          `json:"op"`
+	RequestID string          `json:"request_id,omitempty"`
+	Target    string          `json:"target"`
+	Epoch     string          `json:"epoch,omitempty"`
+	NotAfter  string          `json:"not_after,omitempty"`
+	Command   json.RawMessage `json:"command"`
+	CreatedAt int64           `json:"created_at"`
+}
+
+// Claim records c if its event id is new, and returns the stored claim and
+// whether this call created it. An existing claim is returned verbatim: a
+// changed manifest, epoch or clock never retargets it.
+func (l *Ledger) Claim(c Claim) (Claim, bool, error) {
+	if !validHexID(c.EventID) {
+		return Claim{}, false, fmt.Errorf("claim: event id %q is not 64 lowercase hex", c.EventID)
+	}
+	raw, err := json.Marshal(c)
+	if err != nil {
+		return Claim{}, false, err
+	}
+	stored, created, err := createOnce(filepath.Join(l.dir, "ingress"), c.EventID+".json", raw)
+	if err != nil {
+		return Claim{}, false, err
+	}
+	var out Claim
+	if err := json.Unmarshal(stored, &out); err != nil {
+		return Claim{}, false, fmt.Errorf("claim %s is unreadable: %w", c.EventID, err)
+	}
+	return out, created, nil
+}
+
+// Outbound is one prepared output: exact signed event bytes owed to the
+// relay, keyed by the obligation it satisfies (a direct answer to an
+// ingress event, or a request's result row revision).
+type Outbound struct {
+	Key      string          `json:"key"`
+	Event    json.RawMessage `json:"event"`
+	Accepted bool            `json:"accepted"`
+}
+
+// Prepare records the signed event bytes for key before transmission and
+// returns what is stored. If key was prepared before, the stored bytes win
+// and are returned unchanged: a retry resends the same event id, never a
+// re-signed one.
+func (l *Ledger) Prepare(key string, event json.RawMessage) (Outbound, error) {
+	o := Outbound{Key: key, Event: event}
+	raw, err := json.Marshal(o)
+	if err != nil {
+		return Outbound{}, err
+	}
+	stored, _, err := createOnce(filepath.Join(l.dir, "outbox"), keyFile(key), raw)
+	if err != nil {
+		return Outbound{}, err
+	}
+	return l.readOutbound(stored)
+}
+
+// MarkAccepted records the relay's matching positive OK for key.
+func (l *Ledger) MarkAccepted(key string) error {
+	dir := filepath.Join(l.dir, "outbox")
+	stored, err := readBounded(filepath.Join(dir, keyFile(key)))
+	if err != nil {
+		return err
+	}
+	o, err := l.readOutbound(stored)
+	if err != nil {
+		return err
+	}
+	if o.Accepted {
+		return nil
+	}
+	o.Accepted = true
+	raw, err := json.Marshal(o)
+	if err != nil {
+		return err
+	}
+	_, err = fsq.WriteFileAtomic(dir, keyFile(key), raw, 0o600)
+	return err
+}
+
+// Pending returns prepared outputs not yet accepted, in key order.
+func (l *Ledger) Pending() ([]Outbound, error) {
+	dir := filepath.Join(l.dir, "outbox")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	var out []Outbound
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") || strings.HasPrefix(e.Name(), ".") {
+			continue
+		}
+		raw, err := readBounded(filepath.Join(dir, e.Name()))
+		if err != nil {
+			return nil, err
+		}
+		o, err := l.readOutbound(raw)
+		if err != nil {
+			return nil, err
+		}
+		if !o.Accepted {
+			out = append(out, o)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
+	return out, nil
+}
+
+func (l *Ledger) readOutbound(raw []byte) (Outbound, error) {
+	var o Outbound
+	if err := json.Unmarshal(raw, &o); err != nil {
+		return Outbound{}, fmt.Errorf("outbox record is unreadable: %w", err)
+	}
+	return o, nil
+}
+
+// Receipt maps a request to its one result row in the owner DM: the row's
+// original event id, and the newest second an edit of it was dated, so the
+// next edit is always strictly newer (Buzz orders edits by seconds).
+type Receipt struct {
+	RequestRef  string `json:"request_ref"`
+	RootEventID string `json:"root_event_id"`
+	LastEditAt  int64  `json:"last_edit_at"`
+	Revision    int    `json:"revision"`
+}
+
+// PutReceipt writes a request's receipt (created on first root publish,
+// updated as edits are prepared).
+func (l *Ledger) PutReceipt(r Receipt) error {
+	raw, err := json.Marshal(r)
+	if err != nil {
+		return err
+	}
+	_, err = fsq.WriteFileAtomic(filepath.Join(l.dir, "receipts"), keyFile("ref/"+r.RequestRef), raw, 0o600)
+	return err
+}
+
+// ReceiptFor returns the receipt for a request, if one exists.
+func (l *Ledger) ReceiptFor(requestRef string) (Receipt, bool, error) {
+	raw, err := readBounded(filepath.Join(l.dir, "receipts", keyFile("ref/"+requestRef)))
+	if errors.Is(err, os.ErrNotExist) {
+		return Receipt{}, false, nil
+	}
+	if err != nil {
+		return Receipt{}, false, err
+	}
+	var r Receipt
+	if err := json.Unmarshal(raw, &r); err != nil {
+		return Receipt{}, false, fmt.Errorf("receipt %s is unreadable: %w", requestRef, err)
+	}
+	return r, true, nil
+}
+
+// createOnce writes data as dir/name only if name does not exist, and
+// returns the file's contents and whether this call created it. The data is
+// written to a synced temp file and hard-linked into place, so the create is
+// atomic and a concurrent or earlier writer always wins verbatim.
+func createOnce(dir, name string, data []byte) ([]byte, bool, error) {
+	if len(data) > maxRecordBytes {
+		return nil, false, fmt.Errorf("ledger record %s is %d bytes, over %d", name, len(data), maxRecordBytes)
+	}
+	final := filepath.Join(dir, name)
+	if existing, err := readBounded(final); err == nil {
+		return existing, false, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, false, err
+	}
+	tmp := filepath.Join(dir, fmt.Sprintf(".%s.tmp-%d", name, time.Now().UnixNano()))
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return nil, false, err
+	}
+	_, werr := f.Write(data)
+	if werr == nil {
+		werr = f.Sync()
+	}
+	if cerr := f.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr != nil {
+		_ = os.Remove(tmp)
+		return nil, false, werr
+	}
+	lerr := os.Link(tmp, final)
+	_ = os.Remove(tmp)
+	if lerr != nil && !errors.Is(lerr, os.ErrExist) {
+		return nil, false, lerr
+	}
+	if err := fsq.SyncDir(dir); err != nil {
+		return nil, false, err
+	}
+	stored, err := readBounded(final)
+	if err != nil {
+		return nil, false, err
+	}
+	return stored, lerr == nil, nil
+}
+
+func readBounded(path string) ([]byte, error) {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", path)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	raw, err := io.ReadAll(io.LimitReader(f, maxRecordBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) > maxRecordBytes {
+		return nil, fmt.Errorf("%s is over %d bytes", path, maxRecordBytes)
+	}
+	return raw, nil
+}
+
+// keyFile names a record by the hash of its key, so no key text chooses a
+// file path.
+func keyFile(key string) string {
+	sum := sha256.Sum256([]byte(key))
+	return hex.EncodeToString(sum[:]) + ".json"
+}
+
+func validHexID(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for _, c := range s {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
