@@ -11,3 +11,7 @@ import "syscall"
 // hold the endpoint mutex until a writer appeared — codex #855 r1 item 9).
 // Regular files ignore O_NONBLOCK, so reads are unaffected.
 const openNoFollowFlag = syscall.O_NOFOLLOW | syscall.O_NONBLOCK
+
+// noFollowSupported gates every local-writable file operation; unix has
+// O_NOFOLLOW|O_NONBLOCK.
+const noFollowSupported = true

@@ -1,10 +1,15 @@
 package claude
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
 )
+
+// errUnsupportedPlatform is the typed refusal on a platform without a
+// no-follow, non-blocking open (Windows).
+var errUnsupportedPlatform = errors.New("claude adapter: unsupported on this platform (no no-follow file open)")
 
 // openRegular opens a local-writable path for reading with the package's
 // fail-closed rules, shared by every reader of a file the target harness
@@ -20,15 +25,17 @@ import (
 //     symlink swapped in after the gate is refused and a FIFO swapped in
 //     after the gate cannot block the open (codex #855 r1 item 9).
 //  4. Same-file check: the opened description must be a regular file AND
-//     the very file the lstat gate saw (os.SameFile). This is the guard
-//     that holds on every platform: whatever was swapped in between lstat
-//     and open, the reader either holds the file it vetted or refuses. On
-//     Windows, where the open flags are 0 and a followed symlink's target
-//     would pass a plain mode check, this is what refuses it (codex #855
-//     r2 item 5).
+//     the very file the lstat gate saw (os.SameFile), defense in depth
+//     behind the no-follow open.
+//
+// Windows has no such open, so openRegular refuses there outright with
+// errUnsupportedPlatform (codex #855 r3 item 2).
 //
 // The caller owns the returned file.
 func openRegular(path string, maxBytes int64) (*os.File, os.FileInfo, error) {
+	if !noFollowSupported {
+		return nil, nil, errUnsupportedPlatform
+	}
 	fi, err := os.Lstat(path)
 	if err != nil {
 		return nil, nil, err

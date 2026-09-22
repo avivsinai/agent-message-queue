@@ -322,6 +322,14 @@ func (a *Attachment) pollConfirmations() {
 	from := a.stopConsumed
 	a.mu.Unlock()
 
+	// Stop markers are read BEFORE the transcript and bound only once the
+	// cursor has reached the end of the file it read (codex #855 r3 item
+	// 1). The harness writes a turn's entries before the Stop hook runs, so
+	// every marker read here names a turn whose entries all precede the
+	// transcript read. Binding while the cursor lags would publish a result
+	// taken from a partial turn and miss a later turn boundary.
+	stops := readStopMarkers(stopMarkerPath(a.home, reg.SessionID), from)
+
 	if cur.off < 0 {
 		// No run knows where its delivery starts: begin at the last chunk,
 		// discarding the partial first line.
@@ -335,12 +343,13 @@ func (a *Attachment) pollConfirmations() {
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return
 	}
+	caughtUp := err == nil && !rd.skipping && rd.next >= rd.size
 	if err == nil && rd.size < cur.off {
-		// Truncated or replaced in place: restart from the top next tick.
-		rd = transcriptRead{next: 0}
+		// Truncated or replaced in place: restart from the top next tick,
+		// and bind nothing until that re-read has caught up.
+		rd, caughtUp = transcriptRead{next: 0}, false
 	}
 	cur.off, cur.skipping = rd.next, rd.skipping
-	stops := readStopMarkers(stopMarkerPath(a.home, reg.SessionID), from)
 
 	var events []core.NativeEvent
 	a.mu.Lock()
@@ -350,7 +359,9 @@ func (a *Attachment) pollConfirmations() {
 		}
 	}
 	a.cur = cur
-	events = a.bindStopsLocked(stops, events)
+	if caughtUp {
+		events = a.bindStopsLocked(stops, events)
+	}
 	sink := a.eventSink
 	a.mu.Unlock()
 

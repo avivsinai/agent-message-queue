@@ -523,6 +523,9 @@ var sessionIDRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
 func RunStopHookReceiver(home string, stdin io.Reader, stdout io.Writer) int {
 	defer func() { _ = recover() }() // fail-open, unconditionally
 	_ = stdout
+	if !noFollowSupported {
+		return 0 // no safe create on this platform (codex #855 r3 item 2)
+	}
 	var payload StopHookPayload
 	raw, err := io.ReadAll(io.LimitReader(stdin, 1<<20))
 	if err != nil {
@@ -551,7 +554,7 @@ func RunStopHookReceiver(home string, stdin io.Reader, stdout io.Writer) int {
 		return 0
 	}
 	defer func() { _ = f.Close() }()
-	// Same-file check before writing (all platforms): the description must
+	// Same-file check before writing, behind the no-follow open: the description must
 	// be the regular file the path names without following a link — the
 	// one lstat saw, or, when the file was just created, the one a fresh
 	// lstat sees now.

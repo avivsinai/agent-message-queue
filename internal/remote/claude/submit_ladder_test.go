@@ -365,3 +365,35 @@ func TestPollerStopsOnUnsubscribeAndWhenIdle(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 }
+
+// codex #855 r3 item 1 (reproduced by the reviewer): the Stop marker was
+// bound while the bounded cursor still lagged several MiB behind, so the
+// run completed with "working" and the final answer was never applied.
+// Stops now bind only once the cursor has caught up.
+func TestStopWaitsForTranscriptCatchUp(t *testing.T) {
+	ft := newFakeTarget(t, 4242, nil)
+	att := ft.attach(t)
+	admission, err := att.Submit(pr2BoundRequest("catchup-probe"))
+	if err != nil || !admission.Admitted {
+		t.Fatalf("submit: %+v %v", admission, err)
+	}
+	key := pr2Key()
+	appendTranscript(t, ft.home,
+		deliveredLine(t, admission.RunID, frameEnvelope(t, ft)),
+		transcriptLine(t, "assistant", "working"))
+	progress, _ := json.Marshal(map[string]any{"type": "progress", "data": strings.Repeat("x", 1<<20)})
+	for i := 0; i < 5; i++ {
+		appendTranscript(t, ft.home, string(progress))
+	}
+	appendTranscript(t, ft.home, transcriptLine(t, "assistant", "final answer"))
+	appendStopMarker(t, ft.home, time.Now().UnixMilli()+1)
+	for i := 0; i < 4 && !att.runs[key].terminal; i++ {
+		att.pollConfirmations()
+		if rec := att.runs[key]; rec.terminal && rec.result.Text != "final answer" {
+			t.Fatalf("completed before the cursor caught up: result=%q cursor=%d", rec.result.Text, att.cur.off)
+		}
+	}
+	if rec := att.runs[key]; !rec.terminal || rec.result.Text != "final answer" {
+		t.Fatalf("terminal=%v result=%+v, want completed with the final answer", rec.terminal, rec.result)
+	}
+}
