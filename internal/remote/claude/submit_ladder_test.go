@@ -397,3 +397,40 @@ func TestStopWaitsForTranscriptCatchUp(t *testing.T) {
 		t.Fatalf("terminal=%v result=%+v, want completed with the final answer", rec.terminal, rec.result)
 	}
 }
+
+// 611.25 (observed live 2026-09-22: request 27179a41 went uncertain at an
+// endpoint restart and the target stayed busy). A fresh attachment, as
+// after a restart, holds no record of the key; Lookup finds the delivery by
+// the key-derived msg_id, and the poller carries the run to completed,
+// including a Stop recorded while the endpoint was down.
+func TestLookupRecoversRunAfterRestart(t *testing.T) {
+	ft := newFakeTarget(t, 4242, nil)
+	before := ft.attach(t)
+	admission, err := before.Submit(pr2BoundRequest("restart-probe"))
+	if err != nil || !admission.Admitted {
+		t.Fatalf("submit: %+v %v", admission, err)
+	}
+	key := pr2Key()
+	if admission.RunID != frameMsgID(key) {
+		t.Fatalf("run id %s is not the key-derived msg_id %s", admission.RunID, frameMsgID(key))
+	}
+	appendTranscript(t, ft.home,
+		deliveredLine(t, admission.RunID, frameEnvelope(t, ft)),
+		transcriptLine(t, "assistant", "answered while the endpoint was down"))
+	appendStopMarker(t, ft.home, time.Now().UnixMilli()+1)
+
+	after := ft.attach(t) // the restarted endpoint's attachment
+	ev, err := after.Lookup(key, "")
+	if err != nil || ev.Class != core.EvidenceTentative || ev.RunID != admission.RunID {
+		t.Fatalf("recovery lookup = %+v %v, want tentative on run %s", ev, err, admission.RunID)
+	}
+	after.pollConfirmations()
+	ev, _ = after.Lookup(key, "")
+	if !ev.Admitted || ev.State != protocol.StateCompleted || ev.Result == nil || ev.Result.Text != "answered while the endpoint was down" {
+		t.Fatalf("after replay: %+v, want completed with the turn's answer", ev)
+	}
+	after.AcknowledgeResult(key, "", "")
+	if ev, _ := after.Lookup(key, ""); ev.Class != core.EvidenceUnknown {
+		t.Fatalf("released key recovered again: %+v", ev)
+	}
+}

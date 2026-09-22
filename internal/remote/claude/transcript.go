@@ -39,6 +39,8 @@ const transcriptChunkBytes = 4 << 20
 // byte offset.
 type transcriptRead struct {
 	lines []string
+	// starts[i] is the byte offset where lines[i] begins.
+	starts []int64
 	// next is the offset just past the last consumed byte: the end of the
 	// last complete line, or of a discarded over-long line segment.
 	next int64
@@ -100,10 +102,13 @@ func readTranscriptFrom(path string, off int64, skipping bool) (transcriptRead, 
 		return out, nil
 	}
 	end := pos + last
+	start := pos
 	for _, line := range bytes.Split(buf[pos:end], []byte{'\n'}) {
 		if len(line) > 0 {
 			out.lines = append(out.lines, string(line))
+			out.starts = append(out.starts, off+int64(start))
 		}
+		start += len(line) + 1
 	}
 	out.next = off + int64(end) + 1
 	return out, nil

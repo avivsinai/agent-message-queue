@@ -144,6 +144,8 @@ func Attach(cfg config) (*Attachment, error) {
 		home:         home,
 		runs:         map[requests.Key]*runRecord{},
 		cancelIntent: map[requests.Key]bool{},
+		recoverFrom:  map[requests.Key]int64{},
+		released:     map[requests.Key]struct{}{},
 		ctx:          context.Background(),
 	}, nil
 }
@@ -217,6 +219,18 @@ type Attachment struct {
 	// the turn the cursor is inside, nil for a foreign or unknown turn.
 	cur   transcriptCursor
 	owner *runRecord
+	// curGen increments whenever the cursor is reset outside the poller (a
+	// recovered run needs a replay from its delivery offset); a poll that
+	// started under an older generation does not write its cursor back.
+	curGen uint64
+	// recoverFrom[key] is how far a restart-recovery scan has read for a
+	// key it has not found yet, so an uncertain record costs only the new
+	// transcript bytes on each reconcile tick (611.25).
+	recoverFrom map[requests.Key]int64
+	// released holds keys whose result the endpoint acknowledged: their
+	// delivery is still in the transcript, and recovery must never bring
+	// them back as a phantom running run. Bounded by maxReleased.
+	released map[requests.Key]struct{}
 	// closed: the endpoint unsubscribed. The poller is stopped and never
 	// restarted; the attachment is being replaced or shut down.
 	closed bool
@@ -334,8 +348,20 @@ func (a *Attachment) Respond(_ requests.Key, _, _, _ string) (protocol.Code, err
 func (a *Attachment) AcknowledgeResult(key requests.Key, _, _ string) {
 	a.mu.Lock()
 	delete(a.runs, key)
+	delete(a.recoverFrom, key)
+	if len(a.released) >= maxReleased {
+		for k := range a.released { // drop an arbitrary old entry
+			delete(a.released, k)
+			break
+		}
+	}
+	a.released[key] = struct{}{}
 	a.mu.Unlock()
 }
+
+// maxReleased bounds the released-key set; the endpoint acknowledges each
+// key once and never looks a released key up again in normal operation.
+const maxReleased = 4096
 
 // Subscribe registers the native-event sink (the confirmation poller
 // emits status events; the Stop-hook receiver posts terminal events

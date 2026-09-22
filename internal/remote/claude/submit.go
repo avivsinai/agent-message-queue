@@ -3,6 +3,7 @@ package claude
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -116,6 +117,11 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 	if err != nil {
 		return refusal(fmt.Errorf("%w: %v", ErrNotSent, err)), nil
 	}
+	// The frame's msg_id is derived from the request key, not random, so a
+	// restarted endpoint can find this delivery in the transcript by key
+	// alone (611.25). The same key always yields the same id, which also
+	// lets the receiver's msg_id dedup absorb a retried send.
+	frame.MsgID = frameMsgID(req.Key)
 	wire, err := EncodeFrames(token, frame)
 	if err != nil {
 		return refusal(fmt.Errorf("%w: %v", ErrNotSent, err)), nil
@@ -212,11 +218,19 @@ func evidenceFor(rec *runRecord) core.Evidence {
 // read as EvidenceNone.
 func (a *Attachment) Lookup(key requests.Key, _ string) (core.Evidence, error) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	if rec, ok := a.runs[key]; ok {
-		return evidenceFor(rec), nil
+		ev := evidenceFor(rec)
+		a.mu.Unlock()
+		return ev, nil
 	}
-	return core.Evidence{Known: true, Class: core.EvidenceUnknown}, nil
+	_, released := a.released[key]
+	a.mu.Unlock()
+	if released {
+		// Acknowledged: the endpoint holds the outcome and nothing is
+		// retained here. Never recover it from the transcript.
+		return core.Evidence{Known: true, Class: core.EvidenceUnknown}, nil
+	}
+	return a.recoverRun(key), nil
 }
 
 // kickConfirmations starts the transcript confirmation poller if it is not
@@ -307,6 +321,7 @@ func (a *Attachment) pollConfirmations() {
 
 	a.mu.Lock()
 	cur := a.cur
+	gen := a.curGen
 	fresh := cur.path != path
 	if fresh {
 		// New or switched transcript: start at the earliest submit-time
@@ -358,7 +373,9 @@ func (a *Attachment) pollConfirmations() {
 			events = a.applyEntryLocked(e, events)
 		}
 	}
-	a.cur = cur
+	if a.curGen == gen {
+		a.cur = cur
+	}
 	if caughtUp {
 		events = a.bindStopsLocked(stops, events)
 	}
@@ -564,4 +581,108 @@ func readStopMarkers(path string, from int64) stopMarkers {
 		out.lines = append(out.lines, stopObs{ts: m.TS, end: end})
 	}
 	return out
+}
+
+// frameMsgID derives the frame msg_id from the request key: the first 16
+// bytes of SHA-256 over a domain tag and the key's three parts, formatted
+// as an RFC 4122 version-5-style UUID. Distinct keys give distinct ids.
+func frameMsgID(key requests.Key) string {
+	sum := sha256.Sum256([]byte("amq-remote/claude/msg_id\x00" + key.CreatorHost + "\x00" + key.TargetID + "\x00" + key.RequestID))
+	u := sum[:16]
+	u[6] = (u[6] & 0x0f) | 0x50
+	u[8] = (u[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%x-%x-%x-%x-%x", u[0:4], u[4:6], u[6:8], u[8:10], u[10:16])
+}
+
+// recoverScanBytes bounds how far back the first recovery scan for a key
+// reads; later scans for the same key read only what was appended since.
+const recoverScanBytes = 16 << 20
+
+// recoverRun answers Lookup for a key this attachment holds no record of,
+// which after an endpoint restart is every key that was in flight (611.25).
+// It scans the transcript for the entry that delivered the key's frame
+// (origin.msg_id == frameMsgID(key)). Found: the run is rebuilt as
+// submitted, with its delivery offset and timestamp, the poller cursor is
+// reset so the turn state machine replays from that entry, and the answer
+// is Tentative; admission and completion follow from the poller exactly as
+// for a live run, including a Stop recorded while the endpoint was down.
+// Not found: Unknown, as before, and the scan offset is kept so the next
+// tick reads only new bytes. File I/O runs without a.mu.
+func (a *Attachment) recoverRun(key requests.Key) core.Evidence {
+	unknown := core.Evidence{Known: true, Class: core.EvidenceUnknown}
+	reg, err := readSessionRegistry(a.home, a.cfg.Pid)
+	if err != nil || reg == nil || reg.SessionID == "" {
+		return unknown
+	}
+	path := transcriptPath(a.home, reg.Cwd, reg.SessionID)
+	msgID := frameMsgID(key)
+
+	a.mu.Lock()
+	from, seen := a.recoverFrom[key]
+	a.mu.Unlock()
+	skipping := false
+	if !seen {
+		size := transcriptSize(path)
+		if size < 0 {
+			return unknown
+		}
+		if size > recoverScanBytes {
+			from, skipping = size-recoverScanBytes, true
+		}
+	}
+	off, ts, found, next := scanForDelivery(path, from, skipping, msgID)
+
+	a.mu.Lock()
+	if rec, ok := a.runs[key]; ok { // a concurrent Lookup won the race
+		ev := evidenceFor(rec)
+		a.mu.Unlock()
+		return ev
+	}
+	if !found {
+		a.recoverFrom[key] = next
+		a.mu.Unlock()
+		return unknown
+	}
+	delete(a.recoverFrom, key)
+	rec := &runRecord{
+		key:       key,
+		msgID:     msgID,
+		state:     protocol.StateRunning,
+		submitted: true,
+		userTS:    ts,
+		fromOff:   off,
+		createdAt: a.now(),
+	}
+	a.runs[key] = rec
+	a.cur = transcriptCursor{}
+	a.owner = nil
+	a.curGen++
+	ev := evidenceFor(rec)
+	a.mu.Unlock()
+	a.kickConfirmations()
+	return ev
+}
+
+// scanForDelivery reads the transcript from off to its current end looking
+// for the entry that delivered msgID. It returns that entry's byte offset
+// and timestamp when found, and in every case the offset it read up to.
+func scanForDelivery(path string, off int64, skipping bool, msgID string) (int64, int64, bool, int64) {
+	for {
+		rd, err := readTranscriptFrom(path, off, skipping)
+		if err != nil {
+			return 0, 0, false, off
+		}
+		for i, line := range rd.lines {
+			if e, ok := parseTranscriptLine(line); ok && e.Type == "user" && e.MsgID == msgID {
+				return rd.starts[i], e.TS, true, rd.next
+			}
+		}
+		if rd.next == off && !rd.skipping {
+			return 0, 0, false, off
+		}
+		off, skipping = rd.next, rd.skipping
+		if off >= rd.size && !skipping {
+			return 0, 0, false, off
+		}
+	}
 }
