@@ -6,7 +6,6 @@ import (
 	"errors"
 	"path/filepath"
 	"testing"
-	"time"
 )
 
 // TestT64AttentionOnlyFallbackPersistsDegraded verifies that when the wake
@@ -51,17 +50,19 @@ func TestT64AttentionOnlyFallbackPersistsDegraded(t *testing.T) {
 // TestT64SuccessfulInjectDoesNotPersistDegraded verifies the negative: when
 // injection succeeds, degraded status is NOT persisted (the naive fix that
 // marks everything degraded would pass the test above but break this).
+// Bead agent-message-queue-oug: injectViaHook is the same legacy exit-zero
+// result as the old shell injector, without a 5s process timeout.
 func TestT64SuccessfulInjectDoesNotPersistDegraded(t *testing.T) {
-	injector := writeExecutableScriptForTest(t, "success-injector", "#!/bin/sh\nexit 0\n")
-
 	var recordedStatus string
 	cfg := &wakeConfig{
-		me:             "codex",
-		root:           filepath.Join(secureTempDirForTest(t), "amq-root"),
-		wakeOwner:      &wakeOwner{},
-		injectMode:     wakeInjectModePaste,
-		injectVia:      injector,
-		injectTimeout:  5 * time.Second,
+		me:         "codex",
+		root:       filepath.Join(secureTempDirForTest(t), "amq-root"),
+		wakeOwner:  &wakeOwner{},
+		injectMode: wakeInjectModePaste,
+		injectVia:  "test-hook",
+		injectViaHook: func(string) (string, error) {
+			return "", nil
+		},
 		attentionIsTTY: func() bool { return false },
 		attentionWrite: func(data []byte) (int, error) { return len(data), nil },
 		recordNotifierStatus: func(status, mode, reason string) error {
@@ -114,11 +115,13 @@ func TestT64SuccessfulInjectClearsDegradedAfterFallback(t *testing.T) {
 		t.Fatalf("after fallback: status = %q, want \"degraded\"", cfg.lastPersistedNotifierStatus)
 	}
 
-	// Second delivery: switch to a successful injector
-	injector := writeExecutableScriptForTest(t, "success-injector", "#!/bin/sh\nexit 0\n")
+	// Second delivery: legacy exit-zero inject, through the test hook so the
+	// clear does not wait on a subprocess (bead agent-message-queue-oug).
 	cfg.injectMode = wakeInjectModePaste
-	cfg.injectVia = injector
-	cfg.injectTimeout = 5 * time.Second
+	cfg.injectVia = "test-hook"
+	cfg.injectViaHook = func(string) (string, error) {
+		return "", nil
+	}
 
 	// Fresh pending files so the doorbell plan attempts delivery again
 	current2 := wakeDoorbellTestFiles(t, "pending2.md")
