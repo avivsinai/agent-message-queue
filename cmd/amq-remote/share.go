@@ -13,12 +13,6 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 )
 
-// shareNotAfterDefault is the attestation window when --days is not given:
-// the design bounds NIP-OA lifetime between 1 hour and 90 days; 30 days is
-// the working default, renewed by `share --renew` before expiry (doctor
-// warns 7 days ahead).
-const shareNotAfterDefault = 30 * 24 * time.Hour
-
 // shareTagFile stores the owner-signed NIP-OA tag next to the body key so
 // serve can present it on NIP-42 AUTH. Shape:
 //

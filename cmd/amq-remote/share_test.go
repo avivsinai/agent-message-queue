@@ -21,17 +21,6 @@ func runShare(t *testing.T, args ...string) (string, string, int) {
 	return stdout.String(), stderr.String(), code
 }
 
-// ownerSign produces the owner-signed tag file for the given conditions.
-func ownerSign(t *testing.T, dir, conditions string) string {
-	t.Helper()
-	owner := [32]byte{1}
-	tag, err := bodykey.SignAuthTag(owner, "", conditions)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return tag.SigHex()
-}
-
 // TestShareMintPreimageEnroll walks the acceptance path: share mints a 0600
 // body key, prints the NIP-OA preimage; enrolling the owner-signed tag via
 // --tag-file persists share.json and consumes the pending window.
@@ -171,7 +160,7 @@ func TestShareRejectsWrongOwnerTag(t *testing.T) {
 		t.Fatal(err)
 	}
 	var stderr bytes.Buffer
-	code, err := share([]string{"--root", root, "--session", "s3", "--tag-file", tagPath}, &bytes.Buffer{}, &stderr)
+	code, _ := share([]string{"--root", root, "--session", "s3", "--tag-file", tagPath}, &bytes.Buffer{}, &stderr)
 	if code == 0 {
 		t.Fatal("self-attested tag enrolled; want refusal")
 	}

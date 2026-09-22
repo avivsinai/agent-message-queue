@@ -176,7 +176,9 @@ func writeSecretFile(path string, secret []byte) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() {
+		_ = f.Close()
+	}()
 	if _, err := fmt.Fprintf(f, "secret %s\n", hex.EncodeToString(secret)); err != nil {
 		return err
 	}
@@ -233,11 +235,6 @@ func SignAuthTag(ownerSecret [32]byte, bodyPubKeyHex, conditions string) (*AuthT
 	}
 	copy(t.Sig[:], sig.Serialize())
 	return t, nil
-}
-
-func ownerPubKeyHexFor(secret [32]byte) string {
-	_, pub := btcec.PrivKeyFromBytes(secret[:])
-	return hex.EncodeToString(schnorr.SerializePubKey(pub))
 }
 
 // Verify checks the tag's owner signature over the preimage for the given
