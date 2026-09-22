@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -148,30 +147,37 @@ func EncodeFrames(token string, f *Frame) ([]byte, error) {
 }
 
 // peerKeyFile resolves the target's key-file name (capture §2):
-// <pid>.<sha256(resolve(sockPath))>.key under ~/.claude/sessions.
+// <pid>.<sha256(path.resolve(sockPath))>.key under ~/.claude/sessions.
+//
+// Node's path.resolve is LEXICAL: absolute + normalized, with no symlink
+// resolution (docs/research/r0-03-cc-socket-wire-capture.md:41, live
+// verified). filepath.Abs is the same operation. EvalSymlinks must never
+// be applied here: on macOS /tmp is a symlink to /private/tmp, so a
+// resolved hash names a key file the target never minted and every real
+// target reads as "no inbound" (codex #855 r1 item 1; reproduced live
+// against pid 52416 on 2026-09-22).
 func peerKeyFile(home string, pid int, sockPath string) (string, error) {
-	// path.resolve = absolute + symlink-cleaned (EvalSymlinks after Abs).
 	abs, err := filepath.Abs(sockPath)
 	if err != nil {
 		return "", err
 	}
-	resolved, err := filepath.EvalSymlinks(abs)
-	if err != nil {
-		// The socket may not exist yet at resolution time; hash the
-		// cleaned absolute path (Clean, not EvalSymlinks) as the fallback
-		// the capture's realpath canonicalization reduces to on plain paths.
-		resolved = filepath.Clean(abs)
-	}
-	h := sha256Hex([]byte(resolved))
+	h := sha256Hex([]byte(abs))
 	return filepath.Join(claudeSessionsDir(home), fmt.Sprintf("%d.%s.key", pid, h)), nil
 }
+
+// maxPeerKeyBytes bounds the key-file read: the real file is a one-line
+// JSON object well under 1 KiB.
+const maxPeerKeyBytes = 8 << 10
 
 func readPeerToken(home string, pid int, sockPath string) (string, error) {
 	p, err := peerKeyFile(home, pid, sockPath)
 	if err != nil {
 		return "", err
 	}
-	raw, err := os.ReadFile(p)
+	// Bounded, no-follow, non-blocking read (codex #855 r1 item 8): the key
+	// file lives in a directory the target harness owns; a FIFO or a huge
+	// file there must not stall or bloat Submit.
+	raw, err := readRegularBounded(p, maxPeerKeyBytes)
 	if err != nil {
 		return "", fmt.Errorf("peer key %s: %w", p, err)
 	}

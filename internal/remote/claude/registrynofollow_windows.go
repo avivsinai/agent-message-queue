@@ -2,14 +2,11 @@
 
 package claude
 
-// openNoFollowFlag: Windows os.OpenFile has no O_NOFOLLOW equivalent; the
-// open-then-fstat recheck in readTranscriptTail carries the guarantee
-// (a symlink swapped in after the lstat is caught by the f.Stat mode
-// check on the open description — Windows symlinks resolve at open, and
-// the recheck refuses non-regular results).
+// Windows has no O_NOFOLLOW or O_NONBLOCK on os.OpenFile. The lstat gate
+// and the post-open Fstat recheck in openRegular are the only guards here:
+// they DETECT a symlink or named pipe swapped in between lstat and open
+// (the opened description is checked and refused) but cannot PREVENT the
+// open itself from blocking on a pipe with no writer. The Claude Code
+// messaging socket this adapter drives is a unix-domain socket, and the
+// adapter has only been exercised live on macOS.
 const openNoFollowFlag = 0
-
-// registryNoFollow: no O_NOFOLLOW on Windows; the open-then-fstat recheck
-// in the readers carries the no-symlink-follow guarantee (a swapped
-// symlink resolves at open and is refused by the mode recheck).
-const registryNoFollow = 0

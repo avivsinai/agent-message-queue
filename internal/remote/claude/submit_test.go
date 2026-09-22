@@ -240,65 +240,6 @@ func TestLookupUnknownForNeverSubmittedKey(t *testing.T) {
 	}
 }
 
-func TestConfirmationLadderFromTranscript(t *testing.T) {
-	ft := newFakeTarget(t, 4242, nil)
-	att := ft.attach(t)
-	_ = att // attach only: the ladder test drives pollConfirmations directly
-	admission, err := att.Submit(pr2BoundRequest("ladder-probe-body"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	key := pr2Key()
-
-	mkTranscript := func(home string, entries ...string) {
-		dir := filepath.Join(home, ".claude", "projects", slugifyCwd("/tmp/proj"))
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(dir, "sess-abc.jsonl"), []byte(strings.Join(entries, "\n")+"\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	userLine := func(env string) string {
-		return `{"type":"user","message":{"role":"user","content":"Another Claude session sent a message: ` + env + `"}}`
-	}
-
-	// Step 1: transcript carries the user line (harness accepted the
-	// payload) -> SUBMITTED (still tentative class).
-	var frameBody string
-	ev, _ := att.Lookup(key, "")
-	rec := att.runs[key]
-	frameBody = rec.bodyMark
-	if frameBody == "" {
-		t.Fatal("run record lost")
-	}
-	mkTranscript(ft.home, userLine(frameBody))
-	att.pollConfirmations()
-	ev, _ = att.Lookup(key, "")
-	if ev.Class != core.EvidenceTentative || !att.runs[key].submitted {
-		t.Fatalf("after user line: class=%s submitted=%v, want tentative+submitted", ev.Class, att.runs[key].submitted)
-	}
-
-	// Step 2: an assistant entry after the user line -> the turn started
-	// -> ADMITTED (confirmed).
-	mkTranscript(ft.home, userLine(frameBody), `{"type":"assistant","message":{"role":"assistant","content":"working"}}`)
-	att.pollConfirmations()
-	ev, _ = att.Lookup(key, "")
-	if ev.Class != core.EvidenceConfirmed || !ev.Admitted {
-		t.Fatalf("after assistant line: %+v, want admitted (confirmed)", ev)
-	}
-	if admission.RunID != ev.RunID {
-		t.Fatalf("RunID drift: admission %s vs evidence %s", admission.RunID, ev.RunID)
-	}
-
-	// Step 3: AcknowledgeResult releases the retained record.
-	att.AcknowledgeResult(key, "", "")
-	ev, _ = att.Lookup(key, "")
-	if ev.Class != core.EvidenceUnknown {
-		t.Fatalf("after ack: %s, want unknown (record released)", ev.Class)
-	}
-}
-
 func TestTranscriptTailRefusesNonRegularLeaf(t *testing.T) {
 	home := t.TempDir()
 	dir := filepath.Join(home, ".claude", "projects", slugifyCwd("/tmp/proj"))

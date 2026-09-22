@@ -28,7 +28,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -166,44 +165,19 @@ func claudeSessionsDir(home string) string {
 //
 // Trust boundary (r3 P2-1): this is a Claude-internal registry file on a
 // local-process-writable path, not an AMQ state leaf — so it does NOT get
-// the state-leaf lstat refusal. Instead the read is itself bounded and
-// hardened: lstat gate (regular file only), O_NOFOLLOW (where available)
-// so the lstat-open race cannot swap in a FIFO, and an io.LimitReader
-// capped at maxRegistryBytes+1 so a file that grows between the lstat and
-// the read cannot bypass the size bound and balloon RSS under the
-// endpoint mutex (r3 P1).
+// the state-leaf lstat refusal. Instead the read goes through
+// readRegularBounded (safeopen.go): lstat gate, size bound before open,
+// no-follow non-blocking open, fstat recheck, and a LimitReader, so neither
+// a FIFO nor a growing file can stall or bloat a read under the endpoint
+// mutex (r2 P1-1, r3 P1).
 func readSessionRegistry(home string, pid int) (*sessionRegistry, error) {
 	path := filepath.Join(claudeSessionsDir(home), strconv.Itoa(pid)+".json")
-	// Lstat gate: anything but a regular file is refused. os.ReadFile on a
-	// FIFO blocks unbounded until a writer appears, and this read runs
-	// under the endpoint's mutex (r2 P1-1).
-	fi, err := os.Lstat(path)
+	raw, err := readRegularBounded(path, maxRegistryBytes)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil // no registry entry yet: not an error
 		}
 		return nil, fmt.Errorf("session registry %s: %w", path, err)
-	}
-	if !fi.Mode().IsRegular() {
-		return nil, fmt.Errorf("session registry %s: not a regular file (mode %s); refusing", path, fi.Mode())
-	}
-	// Size bound BEFORE opening (r3 P1): fi.Size() from the lstat above is
-	// the admission check; the LimitReader below is the defense in depth
-	// for a file that grows between lstat and read (r3 P2-2 TOCTOU).
-	if fi.Size() > maxRegistryBytes {
-		return nil, fmt.Errorf("session registry %s: %d bytes exceeds %d; refusing", path, fi.Size(), maxRegistryBytes)
-	}
-	f, err := os.OpenFile(path, os.O_RDONLY|registryNoFollow, 0)
-	if err != nil {
-		return nil, fmt.Errorf("session registry %s: %w", path, err)
-	}
-	defer func() { _ = f.Close() }()
-	raw, err := io.ReadAll(io.LimitReader(f, maxRegistryBytes+1))
-	if err != nil {
-		return nil, fmt.Errorf("session registry %s: %w", path, err)
-	}
-	if int64(len(raw)) > maxRegistryBytes {
-		return nil, fmt.Errorf("session registry %s: larger than %d bytes after read; refusing", path, maxRegistryBytes)
 	}
 	var reg sessionRegistry
 	if err := json.Unmarshal(raw, &reg); err != nil {
@@ -235,8 +209,11 @@ type Attachment struct {
 	cancelIntent  map[requests.Key]bool
 	eventSink     func(core.NativeEvent)
 	confirmCancel func()
-	stopSeen      int64
-	ctx           context.Context
+	// stopConsumed is the byte offset in the session's Stop-marker file up
+	// to which marker lines are settled (matched to a run or dropped as
+	// orphans). Lines past it are preserved for the next poll.
+	stopConsumed int64
+	ctx          context.Context
 }
 
 // Inspect implements core.Attachment: the honest projection. Status is
