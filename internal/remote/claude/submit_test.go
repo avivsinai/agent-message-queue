@@ -88,7 +88,7 @@ func newFakeTarget(t *testing.T, pid int, features []string) *fakeTarget {
 	if err := os.MkdirAll(filepath.Dir(kf), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	key, _ := json.Marshal(map[string]string{"peerToken": "0123456789abcdef0123456789abcdef"})
+	key, _ := json.Marshal(map[string]string{"peerToken": "00000000000000000000000000000000"})
 	if err := os.WriteFile(kf, key, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -155,7 +155,7 @@ func TestSubmitDeliversPinnedWireOverSocket(t *testing.T) {
 	if err := json.Unmarshal([]byte(lines[0]), &auth); err != nil {
 		t.Fatalf("auth line: %v", err)
 	}
-	if auth.Type != "auth" || auth.Token != "0123456789abcdef0123456789abcdef" {
+	if auth.Type != "auth" || auth.Token != "00000000000000000000000000000000" {
 		t.Fatalf("auth line wrong: %+v", auth)
 	}
 	// Line 2: the user frame with the envelope, from-mode set.

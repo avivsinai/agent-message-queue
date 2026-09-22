@@ -68,7 +68,7 @@ func TestEncodeFramesAuthAndCompact(t *testing.T) {
 	if !idRe.MatchString(f.MsgID) {
 		t.Fatalf("msg_id is not a v4 UUID: %q", f.MsgID)
 	}
-	raw, err := EncodeFrames("fixture-peer-token-not-a-secret", f)
+	raw, err := EncodeFrames("00000000000000000000000000000000", f)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,11 +102,11 @@ func TestReadPeerToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(name, []byte(`{"peerToken":"fixture-peer-token-not-a-secret","pidDomain":"darwin"}`), 0o600); err != nil {
+	if err := os.WriteFile(name, []byte(`{"peerToken":"00000000000000000000000000000000","pidDomain":"darwin"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	tok, err := readPeerToken(home, 31, sock)
-	if err != nil || tok != "fixture-peer-token-not-a-secret" {
+	if err != nil || tok != "00000000000000000000000000000000" {
 		t.Fatalf("token=%q err=%v", tok, err)
 	}
 	// Missing key fails closed.
