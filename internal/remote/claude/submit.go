@@ -52,9 +52,20 @@ type runRecord struct {
 	// terminal: the turn ended (Stop hook or transcript evidence).
 	terminal bool
 	result   *protocol.Result
-	// userTS is the transcript timestamp (unix ms) of the user line that
-	// carries our msg_id; 0 until observed or when the entry has none.
-	userTS    int64
+	// userTS is the transcript timestamp (unix ms) of the entry that
+	// delivered our msg_id; 0 until observed or when the entry has none.
+	userTS int64
+	// fromOff is the transcript size just before the frame was written:
+	// the delivery entry can only appear at or after it, so the cursor
+	// starts there and never needs a window that could scroll past it
+	// (codex #855 r2 item 1). -1 when the size could not be read.
+	fromOff int64
+	// turnEnded/turnEndTS: a later prompt started a new turn, so no Stop
+	// after turnEndTS belongs to this run (codex #855 r2 item 2).
+	turnEnded bool
+	turnEndTS int64
+	// lastText is the newest non-empty assistant text of this run's turn.
+	lastText  string
 	createdAt time.Time
 }
 
@@ -110,6 +121,7 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 		return refusal(fmt.Errorf("%w: %v", ErrNotSent, err)), nil
 	}
 
+	fromOff := transcriptSize(transcriptPath(a.home, reg.Cwd, reg.SessionID))
 	if err := a.sendFrame(reg.MessagingSocketPath, wire); err != nil {
 		return refusal(err), nil
 	}
@@ -119,6 +131,7 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 		epoch:     req.Epoch,
 		msgID:     frame.MsgID,
 		state:     protocol.StateRunning,
+		fromOff:   fromOff,
 		createdAt: a.now(),
 	}
 	a.mu.Lock()
@@ -206,23 +219,25 @@ func (a *Attachment) Lookup(key requests.Key, _ string) (core.Evidence, error) {
 	return core.Evidence{Known: true, Class: core.EvidenceUnknown}, nil
 }
 
-// kickConfirmations starts the transcript confirmation poller once. The
-// poller is NOT on the request path (no child process either): it reads
-// the target transcript on a ticker and upgrades evidence
-// tentative→submitted→admitted→terminal per the ladder.
+// kickConfirmations starts the transcript confirmation poller if it is not
+// running. The poller is NOT on the request path (no child process either):
+// it follows the target transcript on a ticker and upgrades evidence
+// tentative→submitted→admitted→terminal per the ladder. It stops by itself
+// when no run is left to confirm, and for good when the endpoint
+// unsubscribes (codex #855 r2 item 6: it used to run forever).
 func (a *Attachment) kickConfirmations() {
 	a.mu.Lock()
-	if a.confirmCancel != nil {
-		a.mu.Unlock()
+	defer a.mu.Unlock()
+	if a.closed || a.confirmCancel != nil {
 		return
 	}
 	ctx, cancel := context.WithCancel(a.ctx)
 	a.confirmCancel = cancel
-	a.mu.Unlock()
-	go a.confirmLoop(ctx)
+	go a.confirmLoop(ctx, cancel)
 }
 
-func (a *Attachment) confirmLoop(ctx context.Context) {
+func (a *Attachment) confirmLoop(ctx context.Context, cancel context.CancelFunc) {
+	defer cancel()
 	t := time.NewTicker(500 * time.Millisecond)
 	defer t.Stop()
 	for {
@@ -231,80 +246,111 @@ func (a *Attachment) confirmLoop(ctx context.Context) {
 			return
 		case <-t.C:
 			a.pollConfirmations()
+			if a.idleStop() {
+				return
+			}
 		}
 	}
 }
 
-// pollConfirmations upgrades every non-terminal run from one read of the
-// target transcript and the session's Stop-marker file. Read errors are
-// swallowed (the transcript may not exist yet); the evidence ladder only
-// ever moves forward.
-//
-// Correlation is on DECODED transcript entries (codex #855 r1 item 2), and
-// every native event is emitted after a.mu is released (item 6): the
-// endpoint's completion handler calls AcknowledgeResult synchronously,
-// which reacquires a.mu, so a callback under the lock deadlocks the run
-// exactly when confirmation works.
+// idleStop ends the poller when no run is left to confirm. The check and
+// the reset happen under a.mu, and Submit records its run under a.mu before
+// kicking, so a run added concurrently either keeps this loop alive or
+// starts a fresh one. The cursor is reset so the next run seeds it from its
+// own submit-time offset instead of replaying the idle gap.
+func (a *Attachment) idleStop() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, rec := range a.runs {
+		if !rec.terminal {
+			return false
+		}
+	}
+	a.confirmCancel = nil
+	a.cur = transcriptCursor{}
+	a.owner = nil
+	return true
+}
+
+// transcriptCursor is the poller's position in one transcript file.
+type transcriptCursor struct {
+	path     string
+	off      int64
+	skipping bool
+}
+
+// transcriptSize is the size of a regular transcript file, 0 when it does
+// not exist yet (the delivery will create it), -1 when it cannot be read.
+func transcriptSize(path string) int64 {
+	fi, err := os.Lstat(path)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return 0
+	case err != nil || !fi.Mode().IsRegular():
+		return -1
+	}
+	return fi.Size()
+}
+
+// pollConfirmations advances the cursor over the transcript lines appended
+// since the last tick, applies them in file order to the turn state
+// machine, then binds Stop markers to turns. File I/O happens outside a.mu
+// (the poller is the only writer of the cursor), and every native event is
+// emitted after a.mu is released: the endpoint's completion handler calls
+// AcknowledgeResult synchronously, which takes a.mu (codex #855 r1 item 6).
 func (a *Attachment) pollConfirmations() {
 	reg, err := readSessionRegistry(a.home, a.cfg.Pid)
 	if err != nil || reg == nil || reg.SessionID == "" {
 		return
 	}
-	entries := parseTranscriptTail(readTranscriptTail(a.home, reg.Cwd, reg.SessionID))
+	path := transcriptPath(a.home, reg.Cwd, reg.SessionID)
 
 	a.mu.Lock()
+	cur := a.cur
+	fresh := cur.path != path
+	if fresh {
+		// New or switched transcript: start at the earliest submit-time
+		// offset of a run still waiting for its delivery entry.
+		cur = transcriptCursor{path: path, off: -1}
+		for _, rec := range a.runs {
+			if !rec.terminal && rec.fromOff >= 0 && (cur.off < 0 || rec.fromOff < cur.off) {
+				cur.off = rec.fromOff
+			}
+		}
+		a.owner = nil
+	}
 	from := a.stopConsumed
 	a.mu.Unlock()
-	// The poller is the single consumer of stopConsumed; reading the file
-	// outside the lock is safe and keeps file I/O off the mutex.
+
+	if cur.off < 0 {
+		// No run knows where its delivery starts: begin at the last chunk,
+		// discarding the partial first line.
+		size := transcriptSize(path)
+		if size < 0 {
+			return
+		}
+		cur.off, cur.skipping = transcriptStartOffset(size)
+	}
+	rd, err := readTranscriptFrom(path, cur.off, cur.skipping)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return
+	}
+	if err == nil && rd.size < cur.off {
+		// Truncated or replaced in place: restart from the top next tick.
+		rd = transcriptRead{next: 0}
+	}
+	cur.off, cur.skipping = rd.next, rd.skipping
 	stops := readStopMarkers(stopMarkerPath(a.home, reg.SessionID), from)
 
 	var events []core.NativeEvent
 	a.mu.Lock()
-	for _, rec := range a.runs {
-		if rec.terminal {
-			continue
-		}
-		ui := userIndex(entries, rec.msgID)
-		if ui < 0 {
-			continue
-		}
-		rec.submitted = true
-		if rec.userTS == 0 {
-			rec.userTS = entries[ui].TS
-		}
-		if !rec.admitted && assistantAfter(entries, ui) {
-			rec.admitted = true
-			rec.state = protocol.StateRunning
-			events = append(events, core.NativeEvent{Type: core.EventStatus, Status: "busy", Attachment: "claude"})
+	for _, line := range rd.lines {
+		if e, ok := parseTranscriptLine(line); ok {
+			events = a.applyEntryLocked(e, events)
 		}
 	}
-	// Stop binding (item 7): a marker completes the oldest admitted run
-	// whose transcript user line is at or before the marker. The target
-	// delivers our frame only at a turn boundary, so the Stop of a turn
-	// that was already running when we submitted predates our user line
-	// and never completes our run. A marker no run can claim is dropped; a
-	// marker that a not-yet-admitted run could still claim is PRESERVED
-	// (the transcript read may lag the hook by a tick) — the consumed
-	// offset stops there.
-	if stops.truncated {
-		a.stopConsumed = 0
-	}
-	for _, s := range stops.lines {
-		if rec := a.oldestAdmittedAtOrBefore(s.ts); rec != nil {
-			rec.terminal = true
-			rec.state = protocol.StateCompleted
-			res := &protocol.Result{Text: lastAssistantAfter(entries, userIndex(entries, rec.msgID)), NativeRef: rec.msgID}
-			rec.result = res
-			events = append(events, core.NativeEvent{Type: core.EventRunCompleted, Key: rec.key, RunID: rec.msgID, Result: res})
-			a.stopConsumed = s.end
-			continue
-		}
-		if a.pendingCouldClaim(s.ts) {
-			break
-		}
-		a.stopConsumed = s.end
-	}
+	a.cur = cur
+	events = a.bindStopsLocked(stops, events)
 	sink := a.eventSink
 	a.mu.Unlock()
 
@@ -315,43 +361,131 @@ func (a *Attachment) pollConfirmations() {
 	}
 }
 
-// oldestAdmittedAtOrBefore returns the admitted, non-terminal run with the
-// earliest user line whose transcript timestamp is <= ts (unix ms), or
-// nil. A run whose user line carried no timestamp binds on createdAt, the
-// weaker lower bound. Caller holds a.mu.
-func (a *Attachment) oldestAdmittedAtOrBefore(ts int64) *runRecord {
-	var best *runRecord
-	for _, rec := range a.runs {
-		if rec.terminal || !rec.admitted || rec.bindTS() > ts {
-			continue
+// applyEntryLocked feeds one transcript entry to the turn state machine.
+//
+//   - A prompt carrying our msg_id (a new user entry, or a frame absorbed
+//     into the running turn) marks that run submitted and makes it the
+//     owner of the current turn. msg_id proves delivery ownership only.
+//   - Any other non-meta prompt that starts a new turn (not absorbed) ends
+//     the current owner's turn and clears the owner: what follows answers
+//     someone else (codex #855 r2 item 2).
+//   - An assistant entry while a run owns the turn admits it and records
+//     the turn's newest text as the result.
+//
+// Caller holds a.mu.
+func (a *Attachment) applyEntryLocked(e transcriptEntry, events []core.NativeEvent) []core.NativeEvent {
+	switch {
+	case e.Type == "user" && !e.Meta && e.Text != "":
+		if rec := a.runByMsgIDLocked(e.MsgID); rec != nil {
+			if !rec.submitted {
+				rec.submitted, rec.userTS = true, e.TS
+			}
+			if !e.Absorbed && a.owner != nil && a.owner != rec {
+				a.owner.endTurn(e.TS)
+			}
+			a.owner = rec
+			return events
 		}
-		if best == nil || rec.createdAt.Before(best.createdAt) {
-			best = rec
+		if !e.Absorbed {
+			if a.owner != nil {
+				a.owner.endTurn(e.TS)
+			}
+			a.owner = nil
+		}
+	case e.Type == "assistant" && a.owner != nil && !a.owner.terminal:
+		rec := a.owner
+		if !rec.admitted {
+			rec.admitted = true
+			rec.state = protocol.StateRunning
+			events = append(events, core.NativeEvent{Type: core.EventStatus, Status: "busy", Attachment: "claude"})
+		}
+		if e.Text != "" {
+			rec.lastText = e.Text
 		}
 	}
-	return best
+	return events
 }
 
-// pendingCouldClaim reports whether a non-terminal run that is not yet
-// admitted could still own a marker at ts: its admission evidence may
-// arrive on a later tick, so the marker must not be dropped yet. Caller
-// holds a.mu.
-func (a *Attachment) pendingCouldClaim(ts int64) bool {
+// runByMsgIDLocked returns the non-terminal run whose frame carried msgID.
+func (a *Attachment) runByMsgIDLocked(msgID string) *runRecord {
+	if msgID == "" {
+		return nil
+	}
 	for _, rec := range a.runs {
-		if !rec.terminal && !rec.admitted && rec.bindTS() <= ts {
-			return true
+		if !rec.terminal && rec.msgID == msgID {
+			return rec
 		}
 	}
-	return false
+	return nil
 }
 
-// bindTS is the earliest time a Stop for this run can carry: its
-// transcript user line when observed, else its submit time.
+// endTurn records that a later prompt started a new turn at ts.
+func (rec *runRecord) endTurn(ts int64) {
+	if !rec.turnEnded {
+		rec.turnEnded, rec.turnEndTS = true, ts
+	}
+}
+
+// claims reports whether a Stop at ts can belong to this run's turn: at or
+// after the delivery, and not after a later prompt ended the turn. A turn
+// that ended at an unknown time (no timestamp on the next prompt) claims
+// nothing.
+func (rec *runRecord) claims(ts int64) bool {
+	if rec.terminal || rec.bindTS() > ts {
+		return false
+	}
+	return !rec.turnEnded || (rec.turnEndTS > 0 && ts <= rec.turnEndTS)
+}
+
+// bindTS is the earliest time a Stop for this run can carry: its delivery
+// entry's timestamp when observed, else its submit time.
 func (rec *runRecord) bindTS() int64 {
 	if rec.userTS > 0 {
 		return rec.userTS
 	}
 	return rec.createdAt.UnixMilli()
+}
+
+// bindStopsLocked settles Stop markers in file order. A marker completes
+// the oldest admitted run whose turn claims it, with that turn's newest
+// assistant text as the result. A marker no run can claim is dropped; a
+// marker that a not-yet-admitted run could still claim is PRESERVED (the
+// transcript may lag the hook by a tick) and the consumed offset stops
+// there. Caller holds a.mu.
+func (a *Attachment) bindStopsLocked(stops stopMarkers, events []core.NativeEvent) []core.NativeEvent {
+	if stops.truncated {
+		a.stopConsumed = 0
+	}
+	for _, s := range stops.lines {
+		var done, pending *runRecord
+		for _, rec := range a.runs {
+			if !rec.claims(s.ts) {
+				continue
+			}
+			if rec.admitted {
+				if done == nil || rec.createdAt.Before(done.createdAt) {
+					done = rec
+				}
+			} else {
+				pending = rec
+			}
+		}
+		if done == nil && pending != nil {
+			break
+		}
+		a.stopConsumed = s.end
+		if done == nil {
+			continue
+		}
+		done.terminal = true
+		done.state = protocol.StateCompleted
+		done.result = &protocol.Result{Text: done.lastText, NativeRef: done.msgID}
+		if a.owner == done {
+			a.owner = nil
+		}
+		events = append(events, core.NativeEvent{Type: core.EventRunCompleted, Key: done.key, RunID: done.msgID, Result: done.result})
+	}
+	return events
 }
 
 // stopObs is one decoded Stop-marker line: the receiver's wall-clock
@@ -419,51 +553,4 @@ func readStopMarkers(path string, from int64) stopMarkers {
 		out.lines = append(out.lines, stopObs{ts: m.TS, end: end})
 	}
 	return out
-}
-
-// userIndex returns the index of the delivered entry whose origin.msg_id
-// is our frame's msg_id, or -1. The msg_id is generated fresh per frame,
-// so a match is exact ownership, never a text coincidence.
-func userIndex(entries []transcriptEntry, msgID string) int {
-	if msgID == "" {
-		return -1
-	}
-	for i := len(entries) - 1; i >= 0; i-- {
-		if entries[i].Type == "user" && entries[i].MsgID == msgID {
-			return i
-		}
-	}
-	return -1
-}
-
-// assistantAfter reports whether an assistant entry follows index ui —
-// the transcript-side signal that the model turn began (the Stop hook is
-// the turn END).
-func assistantAfter(entries []transcriptEntry, ui int) bool {
-	for i := ui + 1; i < len(entries); i++ {
-		if entries[i].Type == "assistant" {
-			return true
-		}
-	}
-	return false
-}
-
-// lastAssistantAfter returns the newest non-empty assistant text of the
-// turn that follows index ui: entries after ui up to the next real user
-// prompt (a user entry with text; tool results decode to ""). Best-effort
-// attribution: "" when the tail holds none.
-func lastAssistantAfter(entries []transcriptEntry, ui int) string {
-	end := len(entries)
-	for i := ui + 1; i < len(entries); i++ {
-		if entries[i].Type == "user" && entries[i].Text != "" {
-			end = i
-			break
-		}
-	}
-	for i := end - 1; i > ui; i-- {
-		if entries[i].Type == "assistant" && entries[i].Text != "" {
-			return entries[i].Text
-		}
-	}
-	return ""
 }

@@ -213,7 +213,14 @@ type Attachment struct {
 	// to which marker lines are settled (matched to a run or dropped as
 	// orphans). Lines past it are preserved for the next poll.
 	stopConsumed int64
-	ctx          context.Context
+	// cur is the poller's transcript position; owner is the run that owns
+	// the turn the cursor is inside, nil for a foreign or unknown turn.
+	cur   transcriptCursor
+	owner *runRecord
+	// closed: the endpoint unsubscribed. The poller is stopped and never
+	// restarted; the attachment is being replaced or shut down.
+	closed bool
+	ctx    context.Context
 }
 
 // Inspect implements core.Attachment: the honest projection. Status is
@@ -333,6 +340,10 @@ func (a *Attachment) AcknowledgeResult(key requests.Key, _, _ string) {
 // Subscribe registers the native-event sink (the confirmation poller
 // emits status events; the Stop-hook receiver posts terminal events
 // through the same sink). Returns the unsubscribe function.
+//
+// Unsubscribe is the attachment's end of life: the endpoint calls it when
+// the target is replaced, unregistered or shut down, so it also stops the
+// confirmation poller for good (codex #855 r2 item 6).
 func (a *Attachment) Subscribe(cb func(core.NativeEvent)) func() {
 	a.mu.Lock()
 	a.eventSink = cb
@@ -340,7 +351,13 @@ func (a *Attachment) Subscribe(cb func(core.NativeEvent)) func() {
 	return func() {
 		a.mu.Lock()
 		a.eventSink = nil
+		a.closed = true
+		stop := a.confirmCancel
+		a.confirmCancel = nil
 		a.mu.Unlock()
+		if stop != nil {
+			stop()
+		}
 	}
 }
 

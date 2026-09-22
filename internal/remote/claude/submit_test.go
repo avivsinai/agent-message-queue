@@ -252,14 +252,17 @@ func TestTranscriptTailRefusesNonRegularLeaf(t *testing.T) {
 	if err := os.Mkdir(fifo, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	done := make(chan string, 1)
-	go func() { done <- readTranscriptTail(home, "/tmp/proj", "sess-abc") }()
+	done := make(chan error, 1)
+	go func() {
+		_, err := readTranscriptFrom(transcriptPath(home, "/tmp/proj", "sess-abc"), 0, false)
+		done <- err
+	}()
 	select {
-	case got := <-done:
-		if got != "" {
-			t.Fatalf("fifo read as %q, want empty", got)
+	case err := <-done:
+		if err == nil {
+			t.Fatal("a directory at the transcript leaf was read")
 		}
 	case <-time.After(3 * time.Second):
-		t.Fatal("readTranscriptTail blocked on a FIFO leaf — the lstat guard failed")
+		t.Fatal("readTranscriptFrom blocked on a non-regular leaf — the lstat guard failed")
 	}
 }

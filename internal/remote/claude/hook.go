@@ -44,12 +44,13 @@ const maxSettingsBytes = 4 << 20
 // promise. The decoder is used only to LOCATE byte ranges; the ranges are
 // cut from the raw file.
 //
-// Install always inserts at the FIRST position of the target container
-// with a tight trailing comma when the container is non-empty, and
-// uninstall removes exactly that element plus that comma, then the
-// `"Stop":[]` and `"hooks":{}` members when they are empty in the tight
-// form install creates. That symmetry is what makes install+uninstall a
-// byte-for-byte identity on the original file.
+// Install always inserts at the FIRST position of the target container,
+// with a tight trailing comma when the container is non-empty; uninstall
+// removes exactly our hook plus that comma. Uninstall never removes a
+// container: formatting cannot prove who created an empty "Stop" array or
+// "hooks" object, so an operator's containers are preserved and ours may be
+// left behind empty, which Claude Code treats as no hooks (codex #855 r2
+// item 3). A file that already had a Stop array round-trips byte for byte.
 
 // InstallStopHook adds the fail-open receiver to the Stop hook chain in
 // home/.claude/settings.json. Idempotent: when an entry carrying the
@@ -273,32 +274,11 @@ func locateSettings(raw []byte) (settingsLoc, error) {
 	return loc, nil
 }
 
-// ownedGroup reports whether a Stop array element is a matcher group this
-// installer wrote: an object whose nested hooks all carry the marker. A
-// group mixing our hook with foreign ones is left alone (the installer
-// never writes one; removing part of it would edit content we do not own).
-func ownedGroup(el []byte) bool {
-	var g struct {
-		Hooks []struct {
-			Command string `json:"command"`
-		} `json:"hooks"`
-	}
-	if err := json.Unmarshal(el, &g); err != nil || len(g.Hooks) == 0 {
-		return false
-	}
-	for _, h := range g.Hooks {
-		if !strings.HasPrefix(h.Command, stopHookMarker) {
-			return false
-		}
-	}
-	return true
-}
-
-// stopElements returns the byte spans [start,end) of each element of the
-// Stop array. Leading whitespace and separating commas are skipped so a
-// span is exactly the element's bytes.
-func stopElements(raw []byte, stop jsonSpan) ([][2]int, error) {
-	seg := raw[stop.open : stop.close+1]
+// arrayElements returns the byte spans [start,end) of each element of the
+// array at span arr. Leading whitespace and separating commas are skipped
+// so a span is exactly the element's bytes.
+func arrayElements(raw []byte, arr jsonSpan) ([][2]int, error) {
+	seg := raw[arr.open : arr.close+1]
 	dec := json.NewDecoder(bytes.NewReader(seg))
 	dec.UseNumber()
 	if _, err := dec.Token(); err != nil { // '['
@@ -314,9 +294,67 @@ func stopElements(raw []byte, stop jsonSpan) ([][2]int, error) {
 		if err := dec.Decode(&el); err != nil {
 			return nil, fmt.Errorf("parse settings hook entry: %w", err)
 		}
-		out = append(out, [2]int{stop.open + s, stop.open + int(dec.InputOffset())})
+		out = append(out, [2]int{arr.open + s, arr.open + int(dec.InputOffset())})
 	}
 	return out, nil
+}
+
+// groupHooksArray returns the span of the "hooks" array member of the
+// matcher-group object at raw[obj[0]:obj[1]], or false when it has none.
+func groupHooksArray(raw []byte, obj [2]int) (jsonSpan, bool) {
+	seg := raw[obj[0]:obj[1]]
+	dec := json.NewDecoder(bytes.NewReader(seg))
+	dec.UseNumber()
+	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
+		return jsonSpan{}, false
+	}
+	for dec.More() {
+		k, err := dec.Token()
+		if err != nil {
+			return jsonSpan{}, false
+		}
+		start := int(dec.InputOffset())
+		var v json.RawMessage
+		if err := dec.Decode(&v); err != nil {
+			return jsonSpan{}, false
+		}
+		if k != "hooks" {
+			continue
+		}
+		for start < len(seg) && (isJSONSpace(seg[start]) || seg[start] == ':') {
+			start++
+		}
+		end := int(dec.InputOffset())
+		if start >= end || seg[start] != '[' {
+			return jsonSpan{}, false
+		}
+		return jsonSpan{keyStart: -1, open: obj[0] + start, close: obj[0] + end - 1, empty: len(bytes.TrimSpace(v[1:len(v)-1])) == 0}, true
+	}
+	return jsonSpan{}, false
+}
+
+// isOurHook reports whether one inner hook object carries the marker.
+func isOurHook(el []byte) bool {
+	var h struct {
+		Command string `json:"command"`
+	}
+	return json.Unmarshal(el, &h) == nil && strings.HasPrefix(h.Command, stopHookMarker)
+}
+
+// groupHasOurHook reports whether a matcher group holds any marked hook.
+func groupHasOurHook(el []byte) bool {
+	var g struct {
+		Hooks []json.RawMessage `json:"hooks"`
+	}
+	if json.Unmarshal(el, &g) != nil {
+		return false
+	}
+	for _, h := range g.Hooks {
+		if isOurHook(h) {
+			return true
+		}
+	}
+	return false
 }
 
 func isJSONSpace(c byte) bool { return c == ' ' || c == '\t' || c == '\n' || c == '\r' }
@@ -372,12 +410,12 @@ func rawInsertStopEntry(raw, entry []byte) ([]byte, error) {
 	}
 	switch {
 	case loc.stop != nil:
-		els, err := stopElements(raw, *loc.stop)
+		els, err := arrayElements(raw, *loc.stop)
 		if err != nil {
 			return nil, err
 		}
 		for _, e := range els {
-			if ownedGroup(raw[e[0]:e[1]]) {
+			if groupHasOurHook(raw[e[0]:e[1]]) {
 				return nil, nil // already installed
 			}
 		}
@@ -391,10 +429,13 @@ func rawInsertStopEntry(raw, entry []byte) ([]byte, error) {
 	}
 }
 
-// rawRemoveStopEntries removes owned groups from the Stop chain by byte
-// surgery, then the Stop member and the hooks member when they are left
-// empty in the tight form install writes. No owned group -> nil,nil (no
-// write).
+// rawRemoveStopEntries removes every marked hook from the Stop chain by byte
+// surgery, one cut per pass: a matcher group whose hooks are all ours is
+// cut whole; in a group that also holds foreign hooks only our inner hook
+// is cut and the foreign hooks stay (codex #855 r2 item 4 — the previous
+// version skipped mixed groups and reported success with our hook still
+// installed). Containers are never removed (see the header). No marked
+// hook -> nil,nil (no write).
 func rawRemoveStopEntries(raw []byte) ([]byte, error) {
 	removed := false
 	for {
@@ -405,45 +446,57 @@ func rawRemoveStopEntries(raw []byte) ([]byte, error) {
 		if loc.stop == nil {
 			break
 		}
-		els, err := stopElements(raw, *loc.stop)
+		next, cut, err := cutOneMarkedHook(raw, *loc.stop)
 		if err != nil {
 			return nil, err
-		}
-		cut := false
-		for _, e := range els {
-			if ownedGroup(raw[e[0]:e[1]]) {
-				raw, cut, removed = cutItem(raw, e[0], e[1]), true, true
-				break
-			}
 		}
 		if !cut {
 			break
 		}
+		raw, removed = next, true
 	}
 	if !removed {
 		return nil, nil
 	}
-	// Drop the members install created, only in their exact tight form so
-	// a member the operator wrote (e.g. `"Stop": []` with a space) stays.
-	type emptyMember struct {
-		tight string
-		pick  func(settingsLoc) *jsonSpan
-	}
-	for _, m := range []emptyMember{
-		{`"` + stopHookType + `":[]`, func(l settingsLoc) *jsonSpan { return l.stop }},
-		{`"hooks":{}`, func(l settingsLoc) *jsonSpan { return l.hooks }},
-	} {
-		loc, err := locateSettings(raw)
-		if err != nil {
-			return nil, err
-		}
-		sp := m.pick(loc)
-		if sp == nil || sp.keyStart < 0 || string(raw[sp.keyStart:sp.close+1]) != m.tight {
-			break
-		}
-		raw = cutItem(raw, sp.keyStart, sp.close+1)
-	}
 	return raw, nil
+}
+
+// cutOneMarkedHook performs the first applicable cut in the Stop array.
+func cutOneMarkedHook(raw []byte, stop jsonSpan) ([]byte, bool, error) {
+	groups, err := arrayElements(raw, stop)
+	if err != nil {
+		return nil, false, err
+	}
+	for _, g := range groups {
+		arr, ok := groupHooksArray(raw, g)
+		if !ok {
+			continue
+		}
+		hooks, err := arrayElements(raw, arr)
+		if err != nil {
+			return nil, false, err
+		}
+		ours := 0
+		first := -1
+		for i, h := range hooks {
+			if isOurHook(raw[h[0]:h[1]]) {
+				ours++
+				if first < 0 {
+					first = i
+				}
+			}
+		}
+		switch {
+		case ours == 0:
+			continue
+		case ours == len(hooks):
+			return cutItem(raw, g[0], g[1]), true, nil
+		default:
+			h := hooks[first]
+			return cutItem(raw, h[0], h[1]), true, nil
+		}
+	}
+	return raw, false, nil
 }
 
 // StopHookPayload is the subset of Claude Code's Stop-hook stdin payload
@@ -489,7 +542,8 @@ func RunStopHookReceiver(home string, stdin io.Reader, stdout io.Writer) int {
 	if fi, err := os.Lstat(dir); err != nil || !fi.IsDir() {
 		return 0 // a symlinked marker directory is never written through
 	}
-	if fi, err := os.Lstat(marker); err == nil && !fi.Mode().IsRegular() {
+	pre, preErr := os.Lstat(marker)
+	if preErr == nil && !pre.Mode().IsRegular() {
 		return 0
 	}
 	f, err := os.OpenFile(marker, os.O_APPEND|os.O_CREATE|os.O_WRONLY|openNoFollowFlag, 0o600)
@@ -497,7 +551,20 @@ func RunStopHookReceiver(home string, stdin io.Reader, stdout io.Writer) int {
 		return 0
 	}
 	defer func() { _ = f.Close() }()
-	if fi, err := f.Stat(); err != nil || !fi.Mode().IsRegular() {
+	// Same-file check before writing (all platforms): the description must
+	// be the regular file the path names without following a link — the
+	// one lstat saw, or, when the file was just created, the one a fresh
+	// lstat sees now.
+	post, err := f.Stat()
+	if err != nil || !post.Mode().IsRegular() {
+		return 0
+	}
+	if preErr != nil {
+		if pre, err = os.Lstat(marker); err != nil || !pre.Mode().IsRegular() {
+			return 0
+		}
+	}
+	if !os.SameFile(pre, post) {
 		return 0
 	}
 	line, err := json.Marshal(map[string]any{"ts": time.Now().UnixMilli(), "session_id": payload.SessionID})

@@ -9,21 +9,23 @@ import (
 // openRegular opens a local-writable path for reading with the package's
 // fail-closed rules, shared by every reader of a file the target harness
 // (or anything with the same uid) can replace under us: the session
-// registry, the peer-key file, the transcript, and the Stop marker.
+// registry, the peer-key file, the transcript, the Stop marker and
+// settings.json.
 //
 //  1. Lstat gate: the leaf must exist and be a regular file. A symlink,
 //     FIFO or directory is refused before any open.
 //  2. Size bound (maxBytes > 0): checked on the lstat result BEFORE open
-//     so a huge file is never mapped or read (r3 P1 on #852).
-//  3. Open with openNoFollowFlag: O_NOFOLLOW|O_NONBLOCK on unix. O_NOFOLLOW
-//     refuses a symlink swapped in after the lstat; O_NONBLOCK makes an
-//     open of a FIFO swapped in after the lstat return at once instead of
-//     blocking until a writer appears (codex #855 r1 item 9). Regular
-//     files ignore O_NONBLOCK.
-//  4. Fstat recheck on the open description: anything but a regular file
-//     is closed and refused. On Windows the flags are 0, so this recheck
-//     is the only guard there and it detects rather than prevents a
-//     blocking open; see registrynofollow_windows.go.
+//     so a huge file is never read (r3 P1 on #852).
+//  3. Open with openNoFollowFlag: O_NOFOLLOW|O_NONBLOCK on unix, so a
+//     symlink swapped in after the gate is refused and a FIFO swapped in
+//     after the gate cannot block the open (codex #855 r1 item 9).
+//  4. Same-file check: the opened description must be a regular file AND
+//     the very file the lstat gate saw (os.SameFile). This is the guard
+//     that holds on every platform: whatever was swapped in between lstat
+//     and open, the reader either holds the file it vetted or refuses. On
+//     Windows, where the open flags are 0 and a followed symlink's target
+//     would pass a plain mode check, this is what refuses it (codex #855
+//     r2 item 5).
 //
 // The caller owns the returned file.
 func openRegular(path string, maxBytes int64) (*os.File, os.FileInfo, error) {
@@ -46,9 +48,9 @@ func openRegular(path string, maxBytes int64) (*os.File, os.FileInfo, error) {
 		_ = f.Close()
 		return nil, nil, err
 	}
-	if !fi2.Mode().IsRegular() {
+	if !fi2.Mode().IsRegular() || !os.SameFile(fi, fi2) {
 		_ = f.Close()
-		return nil, nil, fmt.Errorf("%s: replaced by a non-regular file between lstat and open; refusing", path)
+		return nil, nil, fmt.Errorf("%s: replaced between lstat and open; refusing", path)
 	}
 	return f, fi2, nil
 }

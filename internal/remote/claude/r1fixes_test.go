@@ -91,16 +91,25 @@ func TestInstalledStopHookShapeAndCommandWord(t *testing.T) {
 	}
 }
 
-// codex #855 r1 item 5: existing hooks without Stop, and an existing empty
-// Stop array. Install yields valid JSON with one hooks key and the prior
-// hooks intact; uninstall restores the original bytes.
+// codex #855 r1 item 5 and r2 item 3: install into existing hooks without
+// Stop, and into an operator's existing empty Stop array. Install yields
+// valid JSON with one hooks object and the prior hooks intact. Uninstall
+// removes our hook and never an operator container: the file with its own
+// Stop array round-trips byte for byte; the other keeps the Stop array we
+// had to create, empty.
 func TestInstallIntoExistingHooksRoundTrips(t *testing.T) {
-	for name, original := range map[string]string{
-		"hooks without Stop": "{\n  \"hooks\": {\n    \"PreToolUse\": [{\"matcher\": \"*\", \"hooks\": [{\"type\": \"command\", \"command\": \"echo pre\"}]}]\n  }\n}\n",
-		"empty Stop":         "{\n  \"hooks\": {\n    \"Stop\": []\n  }\n}\n",
+	for name, tc := range map[string]struct{ original, afterUninstall string }{
+		"hooks without Stop": {
+			original:       "{\n  \"hooks\": {\n    \"PreToolUse\": [{\"matcher\": \"*\", \"hooks\": [{\"type\": \"command\", \"command\": \"echo pre\"}]}]\n  }\n}\n",
+			afterUninstall: "{\n  \"hooks\": {\"Stop\":[],\n    \"PreToolUse\": [{\"matcher\": \"*\", \"hooks\": [{\"type\": \"command\", \"command\": \"echo pre\"}]}]\n  }\n}\n",
+		},
+		"operator's empty Stop": {
+			original:       "{\"hooks\":{\"Stop\":[]},\"x\":1}\n",
+			afterUninstall: "{\"hooks\":{\"Stop\":[]},\"x\":1}\n",
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			home, installed := installSettings(t, original)
+			home, installed := installSettings(t, tc.original)
 			if !json.Valid([]byte(installed)) {
 				t.Fatalf("install produced invalid JSON:\n%s", installed)
 			}
@@ -112,17 +121,45 @@ func TestInstallIntoExistingHooksRoundTrips(t *testing.T) {
 			if len(s.Hooks["Stop"]) != 1 {
 				t.Fatalf("Stop chain has %d groups, want 1:\n%s", len(s.Hooks["Stop"]), installed)
 			}
-			if strings.Contains(original, "PreToolUse") && len(s.Hooks["PreToolUse"]) != 1 {
+			if strings.Contains(tc.original, "PreToolUse") && len(s.Hooks["PreToolUse"]) != 1 {
 				t.Fatalf("prior PreToolUse hooks lost:\n%s", installed)
 			}
 			if err := UninstallStopHook(home); err != nil {
 				t.Fatal(err)
 			}
 			got, _ := os.ReadFile(settingsPath(home))
-			if string(got) != original {
-				t.Fatalf("uninstall is not byte-for-byte:\nwant %q\ngot  %q", original, got)
+			if string(got) != tc.afterUninstall {
+				t.Fatalf("after uninstall:\nwant %q\ngot  %q", tc.afterUninstall, got)
 			}
 		})
+	}
+}
+
+// codex #855 r2 item 4: an operator added a foreign hook to the matcher
+// group we installed. Uninstall removes our inner hook and keeps theirs.
+func TestUninstallFromMixedGroupKeepsForeignHook(t *testing.T) {
+	home, _ := installSettings(t, "")
+	raw, _ := os.ReadFile(settingsPath(home))
+	mixed := strings.Replace(string(raw), `,"timeout":10}]`, `,"timeout":10},{"type":"command","command":"echo operator"}]`, 1)
+	if mixed == string(raw) {
+		t.Fatalf("setup: could not add a foreign hook to:\n%s", raw)
+	}
+	if err := os.WriteFile(settingsPath(home), []byte(mixed), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := UninstallStopHook(home); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := os.ReadFile(settingsPath(home))
+	var s settingsShape
+	if err := json.Unmarshal(got, &s); err != nil {
+		t.Fatalf("uninstall produced invalid JSON: %v\n%s", err, got)
+	}
+	if strings.Contains(string(got), stopHookMarker) {
+		t.Fatalf("our hook is still installed:\n%s", got)
+	}
+	if g := s.Hooks["Stop"]; len(g) != 1 || len(g[0].Hooks) != 1 || g[0].Hooks[0].Command != "echo operator" {
+		t.Fatalf("foreign hook not preserved: %+v\n%s", g, got)
 	}
 }
 

@@ -67,13 +67,19 @@ func absorbedLine(t *testing.T, msgID, envelope string) string {
 	return string(b)
 }
 
-func writeTranscript(t *testing.T, home string, lines ...string) {
+// appendTranscript appends complete JSONL lines, as the harness does.
+func appendTranscript(t *testing.T, home string, lines ...string) {
 	t.Helper()
 	dir := filepath.Join(home, ".claude", "projects", slugifyCwd("/tmp/proj"))
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "sess-abc.jsonl"), []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+	f, err := os.OpenFile(filepath.Join(dir, "sess-abc.jsonl"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	if _, err := f.WriteString(strings.Join(lines, "\n") + "\n"); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -122,21 +128,21 @@ func TestConfirmationLadderOnValidJSONL(t *testing.T) {
 		t.Fatal("fixture leaks the raw envelope into the JSONL; escaping did not happen")
 	}
 
-	writeTranscript(t, ft.home, userLine)
+	appendTranscript(t, ft.home, userLine)
 	att.pollConfirmations()
 	ev, _ := att.Lookup(key, "")
 	if ev.Class != core.EvidenceTentative || !att.runs[key].submitted {
 		t.Fatalf("after user line: class=%s submitted=%v, want tentative+submitted", ev.Class, att.runs[key].submitted)
 	}
 
-	writeTranscript(t, ft.home, userLine, transcriptLine(t, "assistant", "working on it"))
+	appendTranscript(t, ft.home, transcriptLine(t, "assistant", "working on it"))
 	att.pollConfirmations()
 	ev, _ = att.Lookup(key, "")
 	if ev.Class != core.EvidenceConfirmed || !ev.Admitted || ev.RunID != admission.RunID {
 		t.Fatalf("after assistant line: %+v, want admitted with RunID %s", ev, admission.RunID)
 	}
 
-	writeTranscript(t, ft.home, userLine, transcriptLine(t, "assistant", "working on it"), transcriptLine(t, "assistant", "pong"))
+	appendTranscript(t, ft.home, transcriptLine(t, "assistant", "pong"))
 	appendStopMarker(t, ft.home, time.Now().UnixMilli()+1)
 	att.pollConfirmations()
 	ev, _ = att.Lookup(key, "")
@@ -180,7 +186,7 @@ func TestStopMarkerBindsToRunNotToSize(t *testing.T) {
 	// Tick 1: transcript shows only the user line; a FRESH stop marker is
 	// already on disk (hook fired before the transcript flushed the
 	// assistant entry). Old marker → dropped; fresh marker → preserved.
-	writeTranscript(t, ft.home, userLine)
+	appendTranscript(t, ft.home, userLine)
 	appendStopMarker(t, ft.home, time.Now().UnixMilli()+1)
 	att.pollConfirmations()
 	if rec := att.runs[key]; rec.terminal || rec.admitted {
@@ -189,7 +195,7 @@ func TestStopMarkerBindsToRunNotToSize(t *testing.T) {
 
 	// Tick 2: the assistant entry lands. The preserved marker now completes
 	// exactly this run.
-	writeTranscript(t, ft.home, userLine, transcriptLine(t, "assistant", "done"))
+	appendTranscript(t, ft.home, transcriptLine(t, "assistant", "done"))
 	att.pollConfirmations()
 	rec := att.runs[key]
 	if !rec.admitted || !rec.terminal || rec.result == nil || rec.result.Text != "done" {
@@ -214,7 +220,7 @@ func TestCompletionCallbackMayReacquireMutex(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	writeTranscript(t, ft.home, deliveredLine(t, admission.RunID, frameEnvelope(t, ft)), transcriptLine(t, "assistant", "ok"))
+	appendTranscript(t, ft.home, deliveredLine(t, admission.RunID, frameEnvelope(t, ft)), transcriptLine(t, "assistant", "ok"))
 	appendStopMarker(t, ft.home, time.Now().UnixMilli()+1)
 
 	done := make(chan struct{})
@@ -257,7 +263,7 @@ func TestAbsorbedMidTurnFrameClimbsTheLadder(t *testing.T) {
 		t.Fatalf("submit: %+v %v", admission, err)
 	}
 	key := pr2Key()
-	writeTranscript(t, ft.home,
+	appendTranscript(t, ft.home,
 		transcriptLine(t, "assistant", "busy with something else"),
 		absorbedLine(t, admission.RunID, frameEnvelope(t, ft)),
 		transcriptLine(t, "assistant", "handling the peer request"))
@@ -265,5 +271,97 @@ func TestAbsorbedMidTurnFrameClimbsTheLadder(t *testing.T) {
 	ev, _ := att.Lookup(key, "")
 	if !att.runs[key].submitted || ev.Class != core.EvidenceConfirmed || !ev.Admitted {
 		t.Fatalf("absorbed frame: submitted=%v evidence=%+v, want submitted and admitted", att.runs[key].submitted, ev)
+	}
+}
+
+// codex #855 r2 item 1 (reproduced by the reviewer): a large entry between
+// the delivery and the first assistant entry pushed the delivery out of the
+// fixed 256 KiB tail, and the run stayed tentative forever. The cursor
+// follows the file from the submit-time offset, so the delivery is seen
+// once and remembered.
+func TestAdmissionSurvivesLargeEntryAfterDelivery(t *testing.T) {
+	ft := newFakeTarget(t, 4242, nil)
+	att := ft.attach(t)
+	admission, err := att.Submit(pr2BoundRequest("rollover-probe"))
+	if err != nil || !admission.Admitted {
+		t.Fatalf("submit: %+v %v", admission, err)
+	}
+	key := pr2Key()
+	appendTranscript(t, ft.home, deliveredLine(t, admission.RunID, frameEnvelope(t, ft)))
+	att.pollConfirmations()
+	if !att.runs[key].submitted {
+		t.Fatal("setup: delivery was not observed")
+	}
+	large, _ := json.Marshal(map[string]any{"type": "progress", "data": strings.Repeat("x", 300<<10)})
+	appendTranscript(t, ft.home, string(large), transcriptLine(t, "assistant", "the result"))
+	att.pollConfirmations()
+	if !att.runs[key].admitted || att.runs[key].lastText != "the result" {
+		t.Fatalf("admitted=%v lastText=%q: the delivery was forgotten once a large entry followed it", att.runs[key].admitted, att.runs[key].lastText)
+	}
+}
+
+// codex #855 r2 item 2 (reproduced by the reviewer): our delivery, then an
+// unrelated local prompt, then its answer. The answer must not admit our
+// run, and a Stop after that prompt must not complete it.
+func TestUnrelatedLaterPromptNeverAdmitsOrCompletes(t *testing.T) {
+	ft := newFakeTarget(t, 4242, nil)
+	att := ft.attach(t)
+	admission, err := att.Submit(pr2BoundRequest("turn-probe"))
+	if err != nil || !admission.Admitted {
+		t.Fatalf("submit: %+v %v", admission, err)
+	}
+	key := pr2Key()
+	appendTranscript(t, ft.home,
+		deliveredLine(t, admission.RunID, frameEnvelope(t, ft)),
+		transcriptLine(t, "user", "a different local request"),
+		transcriptLine(t, "assistant", "local request answer"))
+	appendStopMarker(t, ft.home, time.Now().UnixMilli()+50)
+	att.pollConfirmations()
+	rec := att.runs[key]
+	if rec.admitted || rec.terminal {
+		t.Fatalf("admitted=%v terminal=%v: another turn's answer or Stop was attributed to our run", rec.admitted, rec.terminal)
+	}
+}
+
+// codex #855 r2 item 6: the poller ran forever after the endpoint
+// unsubscribed. Unsubscribe stops it and it never restarts; with nothing
+// left to confirm it also stops by itself.
+func TestPollerStopsOnUnsubscribeAndWhenIdle(t *testing.T) {
+	ft := newFakeTarget(t, 4242, nil)
+	att := ft.attach(t)
+	unsubscribe := att.Subscribe(func(core.NativeEvent) {})
+	if _, err := att.Submit(pr2BoundRequest("lifetime-probe")); err != nil {
+		t.Fatal(err)
+	}
+	att.mu.Lock()
+	running := att.confirmCancel != nil
+	att.mu.Unlock()
+	if !running {
+		t.Fatal("setup: submit did not start the poller")
+	}
+	unsubscribe()
+	att.kickConfirmations()
+	att.mu.Lock()
+	restarted := att.confirmCancel != nil
+	att.mu.Unlock()
+	if restarted {
+		t.Fatal("poller running after unsubscribe")
+	}
+
+	idle := ft.attach(t)
+	idle.Subscribe(func(core.NativeEvent) {})
+	idle.kickConfirmations() // no runs: the first tick must end it
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		idle.mu.Lock()
+		stopped := idle.confirmCancel == nil
+		idle.mu.Unlock()
+		if stopped {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("poller kept running with no run to confirm")
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }
