@@ -234,12 +234,14 @@ first `prepared` record binds the transfer's payload digest immutably; a
 different digest under the same key is `transfer_conflict` observed in the
 outcome and never overwrites the binding or a committed winner. The intent
 (`prepared`) is durable — file and directory chain — before `ApplyEnvelope`
-runs. On Windows, "directory chain" is established by `FlushFileBuffers` on
-a `FILE_FLAG_BACKUP_SEMANTICS` directory handle — the supported equivalent
-of `fsync(dir)`; directory durability is provided on NTFS and on any
-filesystem that accepts the flush, and degrades to file-level fsync on
-filesystems that reject it (`ERROR_INVALID_FUNCTION` / `ERROR_NOT_SUPPORTED`
-class), matching the Unix treatment of `EINVAL` / `ENOTSUP`. A crash before the `committed` append recovers from durable publication
+runs. Per platform: on Unix, directory-chain durability is `fsync` on each
+synced directory; on Windows, a directory flush is not part of the
+contract — file data is made durable by `FlushFileBuffers` on the file
+handle before the rename, and rename durability by `MOVEFILE_WRITE_THROUGH`
+on `MoveFileEx` (the mechanism `fsq.WriteFileAtomic` uses on Windows); on
+filesystems or configurations where a platform primitive is rejected
+(`EINVAL`/`ENOTSUP` on Unix, unsupported flush classes on Windows) the
+corresponding durability claim degrades to the file-level fsync. A crash before the `committed` append recovers from durable publication
 evidence: a digest-matching artifact retained in `inbox/new`, `inbox/cur`, or
 a DLQ envelope wrapping the original bytes promotes the record to `committed`
 (replayed) without re-applying.
