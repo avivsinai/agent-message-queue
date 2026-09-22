@@ -44,17 +44,16 @@ func isDirSyncUnsupported(err error) bool {
 // GENERIC_WRITE (MSDN); FILE_DIRECTORY_FILE|FILE_OPEN_FOR_BACKUP_INTENT|
 // FILE_SYNCHRONOUS_IO_NONALERT make it a proper directory open.
 func ntOpenDirectoryIn(parent windows.Handle, leafName string) (windows.Handle, error) {
-	var objectName *windows.NTUnicodeString
-	if leafName != "" {
-		var err error
-		objectName, err = windows.NewNTUnicodeString(leafName)
-		if err != nil {
-			return 0, fmt.Errorf("dir sync name %s: %w", leafName, err)
-		}
+	// A zero-length (but non-null) ObjectName with a RootDirectory refers
+	// to the RootDirectory object itself — the NT idiom for reopening the
+	// same directory with different access rights (the root case); a
+	// non-empty leafName resolves relative to the parent. A NULL ObjectName
+	// pointer is NOT the same thing: NT rejects it with
+	// STATUS_OBJECT_NAME_INVALID when RootDirectory is set.
+	objectName, err := windows.NewNTUnicodeString(leafName)
+	if err != nil {
+		return 0, fmt.Errorf("dir sync name %q: %w", leafName, err)
 	}
-	// An empty ObjectName with a RootDirectory refers to the directory
-	// object itself (the root case); otherwise leafName resolves relative
-	// to the parent.
 	attributes := &windows.OBJECT_ATTRIBUTES{
 		Length:        uint32(unsafe.Sizeof(windows.OBJECT_ATTRIBUTES{})),
 		RootDirectory: parent,
