@@ -144,7 +144,7 @@ func Attach(cfg config) (*Attachment, error) {
 		home:         home,
 		runs:         map[requests.Key]*runRecord{},
 		cancelIntent: map[requests.Key]bool{},
-		recoverFrom:  map[requests.Key]int64{},
+		recoverFrom:  map[requests.Key]recoverScan{},
 		released:     map[requests.Key]struct{}{},
 		ctx:          context.Background(),
 	}, nil
@@ -226,7 +226,7 @@ type Attachment struct {
 	// recoverFrom[key] is how far a restart-recovery scan has read for a
 	// key it has not found yet, so an uncertain record costs only the new
 	// transcript bytes on each reconcile tick (611.25).
-	recoverFrom map[requests.Key]int64
+	recoverFrom map[requests.Key]recoverScan
 	// released holds keys whose result the endpoint acknowledged: their
 	// delivery is still in the transcript, and recovery must never bring
 	// them back as a phantom running run. Bounded by maxReleased.

@@ -458,3 +458,47 @@ func TestMetaFlaggedDeliveryStillClimbsTheLadder(t *testing.T) {
 		t.Fatalf("meta-flagged delivery: %+v, want completed with pong", ev)
 	}
 }
+
+// codex #859 P1 (reproduced by the reviewer): a transcript ending inside a
+// 4 MiB unfinished line made the recovery scan loop forever, hanging Lookup
+// and reconcile.
+func TestRecoveryScanReturnsAtPartialLineEOF(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "transcript.jsonl")
+	if err := os.WriteFile(path, []byte(strings.Repeat("x", transcriptChunkBytes)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		scanForDelivery(path, 0, false, "not-present")
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("scanForDelivery did not return at EOF of an unfinished line")
+	}
+}
+
+// codex #859 P2: the saved scan position must not outlive its transcript.
+// The first recovery lookup scans past a transcript without the delivery;
+// the transcript is then replaced by a shorter one that has it. The next
+// lookup must rescan the new file, not resume beyond its end.
+func TestRecoveryRescansAReplacedTranscript(t *testing.T) {
+	ft := newFakeTarget(t, 4242, nil)
+	after := ft.attach(t)
+	key := pr2Key()
+	filler, _ := json.Marshal(map[string]any{"type": "progress", "data": strings.Repeat("x", 4096)})
+	appendTranscript(t, ft.home, string(filler), string(filler))
+	if ev, _ := after.Lookup(key, ""); ev.Class != core.EvidenceUnknown {
+		t.Fatalf("setup: lookup = %+v, want unknown before any delivery", ev)
+	}
+	dir := filepath.Join(ft.home, ".claude", "projects", slugifyCwd("/tmp/proj"))
+	tr := filepath.Join(dir, "sess-abc.jsonl")
+	if err := os.Remove(tr); err != nil {
+		t.Fatal(err)
+	}
+	appendTranscript(t, ft.home, deliveredLine(t, frameMsgID(key), "envelope"))
+	if ev, _ := after.Lookup(key, ""); ev.Class != core.EvidenceTentative {
+		t.Fatalf("after replacement: lookup = %+v, want the delivery recovered (tentative)", ev)
+	}
+}

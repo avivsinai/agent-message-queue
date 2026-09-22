@@ -617,20 +617,23 @@ func (a *Attachment) recoverRun(key requests.Key) core.Evidence {
 	path := transcriptPath(a.home, reg.Cwd, reg.SessionID)
 	msgID := frameMsgID(key)
 
+	fi, err := os.Lstat(path)
+	if err != nil || !fi.Mode().IsRegular() {
+		return unknown
+	}
 	a.mu.Lock()
-	from, seen := a.recoverFrom[key]
+	scan, seen := a.recoverFrom[key]
 	a.mu.Unlock()
-	skipping := false
-	if !seen {
-		size := transcriptSize(path)
-		if size < 0 {
-			return unknown
-		}
-		if size > recoverScanBytes {
-			from, skipping = size-recoverScanBytes, true
+	// The saved position is only valid for the same transcript file, not
+	// truncated below it (codex #859 P2): a changed session path, a replaced
+	// file, or a shorter file restarts the scan from the recovery window.
+	if !seen || scan.path != path || scan.file == nil || !os.SameFile(scan.file, fi) || fi.Size() < scan.off {
+		scan = recoverScan{path: path, file: fi}
+		if fi.Size() > recoverScanBytes {
+			scan.off, scan.skipping = fi.Size()-recoverScanBytes, true
 		}
 	}
-	off, ts, found, next := scanForDelivery(path, from, skipping, msgID)
+	found, off, ts, next, nextSkipping := scanForDelivery(path, scan.off, scan.skipping, msgID)
 
 	a.mu.Lock()
 	if rec, ok := a.runs[key]; ok { // a concurrent Lookup won the race
@@ -639,7 +642,7 @@ func (a *Attachment) recoverRun(key requests.Key) core.Evidence {
 		return ev
 	}
 	if !found {
-		a.recoverFrom[key] = next
+		a.recoverFrom[key] = recoverScan{path: path, file: fi, off: next, skipping: nextSkipping}
 		a.mu.Unlock()
 		return unknown
 	}
@@ -665,24 +668,33 @@ func (a *Attachment) recoverRun(key requests.Key) core.Evidence {
 
 // scanForDelivery reads the transcript from off to its current end looking
 // for the entry that delivered msgID. It returns that entry's byte offset
-// and timestamp when found, and in every case the offset it read up to.
-func scanForDelivery(path string, off int64, skipping bool, msgID string) (int64, int64, bool, int64) {
+// and timestamp when found, and in every case the position it reached and
+// whether it stopped inside an over-long line. It always returns once a
+// read makes no progress, including at an unfinished line at EOF (codex
+// #859 P1: skipping at EOF looped forever).
+func scanForDelivery(path string, off int64, skipping bool, msgID string) (found bool, at, ts, next int64, nextSkipping bool) {
 	for {
 		rd, err := readTranscriptFrom(path, off, skipping)
 		if err != nil {
-			return 0, 0, false, off
+			return false, 0, 0, off, skipping
 		}
 		for i, line := range rd.lines {
 			if e, ok := parseTranscriptLine(line); ok && e.Type == "user" && e.MsgID == msgID {
-				return rd.starts[i], e.TS, true, rd.next
+				return true, rd.starts[i], e.TS, rd.next, rd.skipping
 			}
 		}
-		if rd.next == off && !rd.skipping {
-			return 0, 0, false, off
+		if rd.next == off {
+			return false, 0, 0, off, rd.skipping
 		}
 		off, skipping = rd.next, rd.skipping
-		if off >= rd.size && !skipping {
-			return 0, 0, false, off
-		}
 	}
+}
+
+// recoverScan is where a restart-recovery scan for one key stopped, bound to
+// the transcript file it read.
+type recoverScan struct {
+	path     string
+	file     os.FileInfo
+	off      int64
+	skipping bool
 }
