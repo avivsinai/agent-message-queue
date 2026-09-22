@@ -108,6 +108,25 @@ func TestMain(m *testing.M) {
 			realGocache = filepath.Join(userCache, "go-build")
 		}
 	}
+	// Isolate temp-directory selection too, not just HOME (issue #988, rev-853
+	// P0). The cwd-ancestor root-discovery walk starts from the test cwd, and
+	// tests chdir into t.TempDir(), which resolves under $TMPDIR. On machines
+	// whose TMPDIR sits inside the operator's home (every agent harness here),
+	// the walk climbed out of the temp dir, past the fake home — which the walk
+	// no longer recognizes as home because HOME is overridden — and resolved
+	// the live ~/.amqrc / ~/.agent-mail. Pointing TMPDIR (Unix) and TMP/TEMP
+	// (Windows) at a private dir inside the isolated home makes every
+	// t.TempDir() an ancestor-STOP child of the fake home: the walk reaches
+	// isHomeConfigDir at the fake home and stops, so the real home is never an
+	// ancestor of any test cwd. Ancestor modes stay safe: the dir is under the
+	// fake home, which is under the real home (never world-writable), so the
+	// --inject-via ancestor check still holds (see P0-1 above).
+	testTmpDir := filepath.Join(fakeHome, "tmp")
+	if err := os.MkdirAll(testTmpDir, 0o700); err != nil {
+		_ = os.RemoveAll(fakeHome)
+		_, _ = fmt.Fprintf(os.Stderr, "create isolated test temp dir: %v\n", err)
+		os.Exit(1)
+	}
 	// Override every variable os.UserHomeDir (and the tools it fronts) consults
 	// so tests can never read or write the operator's real home: ~/.amqrc must
 	// not leak authority into root resolution (issue #988: with a live ~/.amqrc
@@ -122,6 +141,9 @@ func TestMain(m *testing.M) {
 		{"USERPROFILE", fakeHome},
 		{"HOMEDRIVE", filepath.VolumeName(fakeHome)},
 		{"HOMEPATH", strings.TrimPrefix(fakeHome, filepath.VolumeName(fakeHome))},
+		{"TMPDIR", testTmpDir},
+		{"TMP", testTmpDir},
+		{"TEMP", testTmpDir},
 		{"GOPATH", realGopath},
 		{"GOMODCACHE", realGomodcache},
 		{"GOCACHE", realGocache},
@@ -144,6 +166,14 @@ func TestMain(m *testing.M) {
 		_, _ = fmt.Fprintf(os.Stderr, "resolve test home directory symlinks: %v\n", err)
 		os.Exit(1)
 	}
+	// P0 (issue #988, rev-853): the isolated home is also the hard boundary
+	// for the cwd-ancestor resolution walks. Per-test fixtures re-point HOME
+	// at sibling temp dirs (t.Setenv("HOME", t.TempDir())), which moves the
+	// isHomeConfigDir stop off the walk's ancestor chain; without this ceiling
+	// the walk climbs past the fake home and resolves the operator's real
+	// ~/.amqrc / ~/.agent-mail. Production never sets walkCeilingForTests, so
+	// live resolution is unchanged.
+	walkCeilingForTests = home
 	tempRoot, err := os.MkdirTemp(home, ".amq-cli-test-")
 	if err != nil {
 		_ = os.RemoveAll(fakeHome)
@@ -171,10 +201,12 @@ func TestMain(m *testing.M) {
 	// queue, and every test that pins a temp root then fails with "active
 	// root ... conflicts with initialized repo-local root ... detected from
 	// cwd" (issue #707). CI never sees this because its checkout has no queue.
-	// The temp root sits directly under the FAKE home, which the walk treats as
-	// global state rather than repo-local evidence; a developer whose real HOME
-	// is a Git worktree (dotfiles kept as a repo in HOME) is therefore also
-	// covered, because tests never see the real home at all.
+	// The walk's ceiling is isHomeConfigDir (os.UserHomeDir, now the fake
+	// home): the temp root sits directly under the fake home, and so does
+	// every t.TempDir() (TMPDIR points into the fake home), so the walk stops
+	// at the fake home and never climbs into the real home. A developer whose
+	// real HOME is a Git worktree (dotfiles kept as a repo in HOME) is
+	// covered by the same stop: the walk reaches the fake home first.
 	if err := os.Chdir(tempRoot); err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "isolate test working directory: %v\n", err)
 		_ = os.RemoveAll(tempRoot)

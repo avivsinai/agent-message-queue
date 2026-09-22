@@ -18,9 +18,13 @@ var testRealHome string
 // $HOME, so without the seam a suite run on a machine with a live home
 // appends to the operator's real ~/.zsh_history. The seam points HOME,
 // USERPROFILE and the Windows drive-letter pair (HOMEDRIVE/HOMEPATH) at one
-// fresh temp dir, pins the Go toolchain caches to their pre-override
-// locations (commands_test builds the amq binary), and restores everything
-// after m.Run(). Per-test t.Setenv("HOME", ...) keeps working.
+// fresh temp dir, and temp-directory selection (TMPDIR/TMP/TEMP) at a private
+// dir inside it so t.TempDir() can never resolve outside the isolated home;
+// it pins the Go toolchain caches to their pre-override locations
+// (commands_test builds the amq binary). It restores the process cwd and
+// removes the temp dirs after m.Run(); the env overrides themselves are not
+// restored, but the process exits immediately afterwards so nothing observes
+// them. Per-test t.Setenv("HOME", ...) keeps working.
 //
 // The fake home is created under the real home, not os.TempDir(): the
 // --inject-via ancestor check refuses group/world-writable ancestors and
@@ -58,11 +62,20 @@ func TestMain(m *testing.M) {
 		_, _ = fmt.Fprintf(os.Stderr, "secure isolated test home: %v\n", err)
 		os.Exit(1)
 	}
+	testTmpDir := filepath.Join(fakeHome, "tmp")
+	if err := os.MkdirAll(testTmpDir, 0o700); err != nil {
+		_ = os.RemoveAll(fakeHome)
+		_, _ = fmt.Fprintf(os.Stderr, "create isolated test temp dir: %v\n", err)
+		os.Exit(1)
+	}
 	for _, env := range []struct{ key, value string }{
 		{"HOME", fakeHome},
 		{"USERPROFILE", fakeHome},
 		{"HOMEDRIVE", filepath.VolumeName(fakeHome)},
 		{"HOMEPATH", strings.TrimPrefix(fakeHome, filepath.VolumeName(fakeHome))},
+		{"TMPDIR", testTmpDir},
+		{"TMP", testTmpDir},
+		{"TEMP", testTmpDir},
 		{"GOPATH", realGopath},
 		{"GOMODCACHE", realGomodcache},
 		{"GOCACHE", realGocache},
@@ -73,8 +86,18 @@ func TestMain(m *testing.M) {
 			os.Exit(1)
 		}
 	}
+	workingDir, err := os.Getwd()
+	if err != nil {
+		_ = os.RemoveAll(fakeHome)
+		_, _ = fmt.Fprintf(os.Stderr, "resolve test working directory: %v\n", err)
+		os.Exit(1)
+	}
 
 	exitCode := m.Run()
+	if err := os.Chdir(workingDir); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "restore test working directory: %v\n", err)
+		exitCode = 1
+	}
 	if err := os.RemoveAll(fakeHome); err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "remove isolated test home: %v\n", err)
 		exitCode = 1
@@ -84,8 +107,10 @@ func TestMain(m *testing.M) {
 
 // TestTestHomeIsIsolatedFromRealHome pins the seam: during the package run
 // os.UserHomeDir must resolve to the isolated home, never the operator's real
-// home (issue #988). Reverting the TestMain override fails this everywhere,
-// not only on a machine with a live ~/.zsh_history.
+// home (issue #988), and os.TempDir must resolve inside it, so a test cwd can
+// never be an ancestor-escape path back into the real home (rev-853 P0).
+// Reverting either part of the TestMain seam fails this everywhere, not only
+// on a machine with a live ~/.zsh_history.
 func TestTestHomeIsIsolatedFromRealHome(t *testing.T) {
 	if testRealHome == "" {
 		t.Fatal("TestMain did not record the real home; the seam is not in effect")
@@ -104,5 +129,16 @@ func TestTestHomeIsIsolatedFromRealHome(t *testing.T) {
 	}
 	if !homeInfo.IsDir() || homeInfo.Mode().Perm()&0o777 != 0o700 {
 		t.Fatalf("isolated test home %s is not a 0700 directory", home)
+	}
+	homeResolved, err := filepath.EvalSymlinks(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpResolved, err := filepath.EvalSymlinks(os.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(tmpResolved, homeResolved+string(filepath.Separator)) {
+		t.Fatalf("os.TempDir %s is not under the isolated test home %s", tmpResolved, homeResolved)
 	}
 }
