@@ -177,14 +177,34 @@ type Receipt struct {
 }
 
 // PutReceipt writes a request's receipt (created on first root publish,
-// updated as edits are prepared).
+// updated as edits are prepared). Once the row exists, its event id also
+// maps back to the request, so an owner reaction on the row can name it.
 func (l *Ledger) PutReceipt(r Receipt) error {
 	raw, err := json.Marshal(r)
 	if err != nil {
 		return err
 	}
-	_, err = fsq.WriteFileAtomic(filepath.Join(l.dir, "receipts"), keyFile("ref/"+r.RequestRef), raw, 0o600)
+	dir := filepath.Join(l.dir, "receipts")
+	if _, err := fsq.WriteFileAtomic(dir, keyFile("ref/"+r.RequestRef), raw, 0o600); err != nil {
+		return err
+	}
+	if r.RootEventID == "" {
+		return nil
+	}
+	_, err = fsq.WriteFileAtomic(dir, keyFile("row/"+r.RootEventID), []byte(r.RequestRef), 0o600)
 	return err
+}
+
+// RequestForRow returns the request whose result row has this event id.
+func (l *Ledger) RequestForRow(rowEventID string) (string, bool, error) {
+	raw, err := readBounded(filepath.Join(l.dir, "receipts", keyFile("row/"+rowEventID)))
+	if errors.Is(err, os.ErrNotExist) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return string(raw), true, nil
 }
 
 // ReceiptFor returns the receipt for a request, if one exists.

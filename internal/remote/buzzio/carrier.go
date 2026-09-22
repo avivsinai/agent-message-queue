@@ -75,6 +75,47 @@ func (c *Carrier) source(eventID string) core.Source {
 	}
 }
 
+// KindReaction is a NIP-25 reaction.
+const KindReaction = 7
+
+// cancelReaction is the owner's cancel gesture on a result row.
+const cancelReaction = "❌"
+
+// IngestReaction handles one verified kind 7 event: the owner reacting ❌
+// on one of this edge's result rows cancels exactly that row's request
+// (relay design §4, slice 5). The row is resolved through the persisted
+// receipt mapping, not the reaction's own tags, and a reaction carries no h
+// tag it has to match. Anything else is ignored; removing a reaction never
+// undoes a cancel.
+func (c *Carrier) IngestReaction(evt nostr.Event) error {
+	if evt.Kind != KindReaction || evt.PubKey.Hex() != c.binding.Owner || strings.TrimSpace(evt.Content) != cancelReaction {
+		return nil
+	}
+	target := ""
+	for _, t := range evt.Tags {
+		if len(t) >= 2 && t[0] == "e" {
+			target = t[1] // NIP-25: the last e tag is the reacted-to event
+		}
+	}
+	if target == "" {
+		return nil
+	}
+	ref, ok, err := c.ledger.RequestForRow(target)
+	if err != nil || !ok {
+		return err
+	}
+	now := c.now()
+	created := time.Unix(int64(evt.CreatedAt), 0)
+	if created.After(now.Add(maxFutureSkew)) || now.Sub(created) > MutationWindow {
+		return nil // a stale cancel gesture never executes
+	}
+	cmd, _ := json.Marshal(map[string]string{"ref": ref})
+	if _, _, err := c.ledger.Claim(Claim{EventID: evt.ID.Hex(), Owner: c.binding.Owner, Channel: c.binding.Channel, Op: OpCancel, Target: c.binding.Target, CreatedAt: int64(evt.CreatedAt), Command: cmd}); err != nil {
+		return err
+	}
+	return c.statusOrCancel(evt, OpCancel, ref)
+}
+
 // Ingest handles one verified owner event from the subscription. The claim
 // is persisted before the endpoint sees the command, and a redelivered
 // event replays its stored claim, so one signed event is at most one

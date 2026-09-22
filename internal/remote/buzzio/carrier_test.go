@@ -80,3 +80,44 @@ func TestCarrierSubmitsOnceAndKeepsOneEditableRow(t *testing.T) {
 		t.Fatalf("pending after flush = %d, want 0", len(pending))
 	}
 }
+
+// 611.16 slice 5: the owner reacting ❌ on this edge's result row cancels
+// exactly that row's request.
+func TestReactionOnRowCancelsItsRequest(t *testing.T) {
+	var owner, body [32]byte
+	_, _ = rand.Read(owner[:])
+	_, _ = rand.Read(body[:])
+	b := Binding{Owner: nostr.GetPublicKey(owner).Hex(), Body: nostr.GetPublicKey(body).Hex(), Channel: "dm-1", Target: "cx", RelayHost: "relay"}
+	ledger, _ := OpenLedger(t.TempDir())
+	var cancelled string
+	c := NewCarrier(ledger, b, body, func(cmd *protocol.Command, _ core.Source) (any, error) {
+		switch cmd.Op {
+		case protocol.OpSessionInspect:
+			return protocol.Session{TargetID: "cx", Epoch: "e1"}, nil
+		case protocol.OpRequestSubmit:
+			return protocol.Reply{Snapshot: protocol.Snapshot{RequestRef: "amqr1_x", Revision: 1, State: protocol.StateRunning}}, nil
+		case protocol.OpRequestCancel:
+			cancelled = cmd.RequestRef
+			return protocol.Reply{Snapshot: protocol.Snapshot{RequestRef: cmd.RequestRef, Revision: 2, State: protocol.StateCancelled}}, nil
+		}
+		return nil, nil
+	})
+	now := time.Now()
+	if err := c.Ingest(ownerEvent(t, owner, "dm-1", "long job", now)); err != nil {
+		t.Fatal(err)
+	}
+	rc, _, _ := ledger.ReceiptFor("amqr1_x")
+	if rc.RootEventID == "" {
+		t.Fatal("setup: no result row prepared")
+	}
+	react := nostr.Event{CreatedAt: nostr.Timestamp(now.Unix()), Kind: KindReaction, Content: "❌", Tags: nostr.Tags{{"e", rc.RootEventID}}}
+	if err := react.Sign(owner); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.IngestReaction(react); err != nil {
+		t.Fatal(err)
+	}
+	if cancelled != "amqr1_x" {
+		t.Fatalf("cancelled = %q, want the reacted row's request", cancelled)
+	}
+}

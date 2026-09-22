@@ -159,6 +159,18 @@ func (ds *dmShare) runDM(ctx context.Context, conn *relay.Conn, edges *dmEdges, 
 		edges.setState(session, "closed: subscribe: "+err.Error())
 		return
 	}
+	// Reactions need their own owner-authored subscription with no h filter:
+	// the phone's reaction carries the target row, not the channel. Each is
+	// validated against this edge's persisted rows (IngestReaction).
+	reactions, err := conn.Subscribe(ctx, "dm-react-"+session, nostr.Filter{
+		Kinds:   []nostr.Kind{buzzio.KindReaction},
+		Authors: []nostr.PubKey{owner},
+		Since:   nostr.Timestamp(time.Now().Add(-dmOverlap).Unix()),
+	})
+	if err != nil {
+		edges.setState(session, "closed: subscribe reactions: "+err.Error())
+		return
+	}
 	edges.setState(session, "subscription_active")
 	flush := time.NewTicker(time.Second)
 	defer flush.Stop()
@@ -172,6 +184,13 @@ func (ds *dmShare) runDM(ctx context.Context, conn *relay.Conn, edges *dmEdges, 
 		case evt := <-sub.Events:
 			if err := ds.carrier.Ingest(evt); err != nil {
 				say(warn, "relay share %s: ingest %s: %v", session, evt.ID.Hex(), err)
+			}
+		case <-reactions.Done():
+			edges.setState(session, "closed: "+fmt.Sprint(reactions.Err()))
+			return
+		case evt := <-reactions.Events:
+			if err := ds.carrier.IngestReaction(evt); err != nil {
+				say(warn, "relay share %s: reaction %s: %v", session, evt.ID.Hex(), err)
 			}
 		case <-flush.C:
 			if err := ds.carrier.Flush(ctx, conn.Publish); err != nil {
