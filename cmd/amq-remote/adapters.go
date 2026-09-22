@@ -6,7 +6,7 @@ package main
 
 import (
 	_ "github.com/avivsinai/agent-message-queue/internal/remote/amit"   // registers amit factory
-	_ "github.com/avivsinai/agent-message-queue/internal/remote/claude" // registers claude stub factory
+	_ "github.com/avivsinai/agent-message-queue/internal/remote/claude" // registers claude factory
 	_ "github.com/avivsinai/agent-message-queue/internal/remote/codex"  // registers codex factory
 	_ "github.com/avivsinai/agent-message-queue/internal/remote/fake"   // registers fake factory
 )

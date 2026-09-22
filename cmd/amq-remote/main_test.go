@@ -1889,8 +1889,9 @@ func TestStartupSequenceWithManifest(t *testing.T) {
 
 // TestBuildPartialFailureFakeAndClaude (611.13 r1) pins the partial-failure
 // happy path: a manifest with [fake, claude] yields one attachment (fake)
-// and one typed refusal (claude stub). serve registers what built and
-// persists the refusal; one bad adapter never takes down serve.
+// and one typed refusal (claude without the required config). serve
+// registers what built and persists the refusal; one bad adapter never
+// takes down serve.
 func TestBuildPartialFailureFakeAndClaude(t *testing.T) {
 	root, err := os.MkdirTemp("", "amqrpartial")
 	if err != nil {
@@ -1927,8 +1928,8 @@ func TestBuildPartialFailureFakeAndClaude(t *testing.T) {
 	if outcomes[1].Refusal == nil {
 		t.Fatal("outcome[1] (claude): expected refusal, got nil")
 	}
-	if outcomes[1].Refusal.Error() != "claude adapter not yet authorized (gated on 611.2 wire-capture probe)" {
-		t.Fatalf("outcome[1] refusal=%q, want claude ErrNotAuthorized", outcomes[1].Refusal.Error())
+	if !strings.Contains(outcomes[1].Refusal.Error(), "pid is required") {
+		t.Fatalf("outcome[1] refusal=%q, want the claude pid-required config error", outcomes[1].Refusal.Error())
 	}
 }
 
