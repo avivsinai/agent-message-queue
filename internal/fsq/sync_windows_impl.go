@@ -17,8 +17,8 @@ import (
 // broader. In Windows errno terms that is ERROR_INVALID_FUNCTION (the
 // EINVAL twin) and ERROR_NOT_SUPPORTED / ERROR_CALL_NOT_IMPLEMENTED (the
 // ENOTSUP twins). ERROR_ACCESS_DENIED is deliberately NOT tolerated: on
-// NTFS it is a real failure (wrong handle, ACL denial) and must surface
-// (architect ruling on bead u35, 2026-09-22).
+// NTFS it is a real failure and must surface (architect ruling on bead
+// u35, 2026-09-22).
 func isDirSyncUnsupported(err error) bool {
 	if err == nil {
 		return false
@@ -48,8 +48,13 @@ func (r *DeliveryRoot) syncDirPlatform(dir string) error {
 	if err != nil {
 		return fmt.Errorf("dir sync path %s: %w", full, err)
 	}
+	// MSDN FlushFileBuffers: "The file handle must have the GENERIC_WRITE
+	// access right." Open the directory GENERIC_READ|GENERIC_WRITE with
+	// FILE_FLAG_BACKUP_SEMANTICS (directories cannot be opened for write
+	// without BACKUP_SEMANTICS); GENERIC_WRITE here grants flush rights,
+	// not content mutation.
 	handle, err := windows.CreateFile(namePtr,
-		windows.GENERIC_READ, // FlushFileBuffers requires read access on the handle
+		windows.GENERIC_READ|windows.GENERIC_WRITE,
 		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
 		nil,
 		windows.OPEN_EXISTING,
@@ -83,7 +88,7 @@ func syncDirPlatformAmbient(dir string) error {
 		return fmt.Errorf("dir sync path %s: %w", dir, err)
 	}
 	handle, err := windows.CreateFile(namePtr,
-		windows.GENERIC_READ,
+		windows.GENERIC_READ|windows.GENERIC_WRITE,
 		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
 		nil,
 		windows.OPEN_EXISTING,
