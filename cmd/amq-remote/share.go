@@ -63,16 +63,17 @@ func shareKeyDir(root, session string) (string, error) {
 	return dir, nil
 }
 
-// validateKeyDirSymlinks walks each component of dir below the keys root
-// and refuses any symlink (codex P1: a symlinked key path could place
-// body.key outside the root). Absent components are fine — Mint creates
-// them as real directories.
-func validateKeyDirSymlinks(keysRoot, dir string) error {
-	rel, err := filepath.Rel(keysRoot, dir)
+// validateKeyDirSymlinks walks the FULL owned path from root down to dir
+// (including extensions/remote/keys itself and its parents — codex P1:
+// checking only below the keys root misses a symlink AT keys that redirects
+// mint outside the root) and refuses any symlink or non-directory
+// component. Absent components are fine — Mint creates real directories.
+func validateKeyDirSymlinks(root, dir string) error {
+	rel, err := filepath.Rel(root, dir)
 	if err != nil {
 		return err
 	}
-	cur := keysRoot
+	cur := root
 	for _, part := range strings.Split(rel, string(filepath.Separator)) {
 		if part == "" || part == "." {
 			continue
@@ -124,8 +125,7 @@ func share(args []string, stdout, stderr io.Writer) (int, error) {
 	if err != nil {
 		return protocol.ExitUsage, err
 	}
-	keysRoot := filepath.Join(*root, stateDirName, "keys")
-	if err := validateKeyDirSymlinks(keysRoot, keyDir); err != nil {
+	if err := validateKeyDirSymlinks(*root, keyDir); err != nil {
 		return protocol.ExitActionRequired, err
 	}
 
@@ -161,12 +161,34 @@ func share(args []string, stdout, stderr io.Writer) (int, error) {
 	// Mint or renew: persist one pending window per kind so doctor can warn
 	// before expiry, and print the preimages for the owner to sign.
 	notAfter := time.Now().Add(time.Duration(*days) * 24 * time.Hour)
+	if *renew {
+		// A renewal is a NEW generation even in the same second as the old
+		// window: bump the bound past any existing pending/enrolled
+		// conditions so the signed preimages (and generation identity)
+		// actually change.
+		if prev, _, perr := readSharePending(keyDir); perr == nil && len(prev) > 0 {
+			if maxOld := maxPendingBound(prev); notAfter.Unix() <= maxOld {
+				notAfter = time.Unix(maxOld+1, 0)
+			}
+		}
+		if gen, gerr := readEnrolledState(keyDir); gerr == nil && gen != nil {
+			if maxEnrolled := maxEnrolledBound(gen.Tags); notAfter.Unix() <= maxEnrolled {
+				notAfter = time.Unix(maxEnrolled+1, 0)
+			}
+		}
+	}
 	if !*renew {
-		if enrolled := readEnrolledTags(keyDir); len(enrolled) > 0 {
+		gen, gerr := readEnrolledState(keyDir)
+		if gerr != nil {
+			// Corrupt/unreadable enrolled state is NOT absence: refuse and
+			// let the operator inspect it (codex P2).
+			return protocol.ExitActionRequired, gerr
+		}
+		if gen != nil && len(gen.Tags) > 0 {
 			// Tags are already enrolled; plain `share` does not disturb
 			// them. Print the ENROLLED state (expiry derived from the
 			// signed conditions — codex P1: pending/enrolled mixing).
-			printShareEnrolled(stdout, *session, k, enrolled)
+			printShareEnrolled(stdout, *session, k, gen.Tags)
 			return 0, nil
 		}
 	}
@@ -227,7 +249,7 @@ func enrollTag(keyDir, tagPath string, k *bodykey.BodyKey) (int, error) {
 	if err := tag.Satisfies(tf.Kind, time.Now().Add(time.Minute).Unix()); err != nil {
 		return protocol.ExitActionRequired, fmt.Errorf("owner tag conditions rejected for kind %d: %v", tf.Kind, err)
 	}
-	if err := writeShareTag(keyDir, &tf); err != nil {
+	if err := writeShareTag(keyDir, pending, &tf); err != nil {
 		return protocol.ExitActionRequired, err
 	}
 	return 0, nil
@@ -259,22 +281,33 @@ func readSharePending(keyDir string) ([]shareTagFile, time.Time, error) {
 	return doc.Tags, time.Unix(doc.NotAfter, 0), nil
 }
 
-// readEnrolledTags returns the enrolled per-kind tags from share.json.
-// Empty when the file is absent or unreadable — callers distinguish that
-// from a validation failure.
-func readEnrolledTags(keyDir string) []shareTagFile {
+// enrolledGeneration records the signed tags enrolled for the pending
+// generation. Generation identity comes from the tags' own signed
+// conditions: renewing mints a new created_at< bound, so a tag belongs to
+// the current generation iff its conditions match the pending window for
+// its kind (codex P1: counting five tags old-plus-new wrongly completed a
+// renewal after its first enrollment).
+type enrolledGeneration struct {
+	Tags []shareTagFile `json:"tags"`
+}
+
+// readEnrolledState distinguishes absence (nil, nil) from an unreadable or
+// invalid enrolled doc (nil, err). A corrupt share.json is never treated
+// as a fresh enrollment and never silently overwritten (codex P2).
+func readEnrolledState(keyDir string) (*enrolledGeneration, error) {
 	_, enrolled := sharePaths(keyDir)
 	raw, err := os.ReadFile(enrolled)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
 	if err != nil {
-		return nil
+		return nil, err
 	}
-	var doc struct {
-		Tags []shareTagFile `json:"tags"`
+	var gen enrolledGeneration
+	if err := json.Unmarshal(raw, &gen); err != nil {
+		return nil, fmt.Errorf("enrolled state at share.json is invalid: %w", err)
 	}
-	if err := json.Unmarshal(raw, &doc); err != nil {
-		return nil
-	}
-	return doc.Tags
+	return &gen, nil
 }
 
 func writeSharePending(keyDir string, tags []shareTagFile, notAfter time.Time) error {
@@ -290,42 +323,74 @@ func writeSharePending(keyDir string, tags []shareTagFile, notAfter time.Time) e
 	return os.WriteFile(p, raw, 0o600)
 }
 
-func writeShareTag(keyDir string, tf *shareTagFile) error {
-	// Enrolled doc keeps every tag of the current generation: the freshly
-	// enrolled one replaces its kind's entry; a generation is complete when
-	// all ShareKinds are present.
-	tags := enrolledOfKind(readEnrolledTags(keyDir), tf.Kind, tf)
-	complete := len(tags) == len(bodykey.ShareKinds)
+func writeShareTag(keyDir string, pending []shareTagFile, tf *shareTagFile) error {
+	// The enrolled doc accumulates the CURRENT pending generation's tags:
+	// the freshly enrolled one plus the pending-generation entries already
+	// enrolled (their signed conditions match the pending window). Stale
+	// tags from an older generation never count toward completion —
+	// completion is one enrolled tag per pending kind.
+	gen, err := readEnrolledState(keyDir)
+	if err != nil {
+		return err // corrupt/unreadable enrolled state is never overwritten
+	}
+	enrolled := map[uint16]shareTagFile{}
+	if gen != nil {
+		for _, t := range gen.Tags {
+			if p := pendingTagForKind(pending, t.Kind); p != nil && p.Conditions == t.Conditions {
+				enrolled[t.Kind] = t
+			}
+		}
+	}
+	enrolled[tf.Kind] = *tf
+	complete := len(enrolled) == len(pending)
 	doc := struct {
 		Tags     []shareTagFile `json:"tags"`
 		Complete bool           `json:"complete"`
-	}{tags, complete}
+	}{make([]shareTagFile, 0, len(enrolled)), complete}
+	for _, t := range enrolled {
+		doc.Tags = append(doc.Tags, t)
+	}
 	raw, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
 		return err
 	}
-	_, enrolled := sharePaths(keyDir)
-	if err := os.WriteFile(enrolled, raw, 0o600); err != nil {
+	_, enrolledPath := sharePaths(keyDir)
+	if err := os.WriteFile(enrolledPath, raw, 0o600); err != nil {
 		return err
 	}
 	if complete {
-		// Enrollment of all kinds completes the flow: the pending windows
-		// are consumed.
+		// The pending generation is fully enrolled: its windows are consumed.
 		p, _ := sharePaths(keyDir)
 		_ = os.Remove(p)
 	}
 	return nil
 }
 
-func enrolledOfKind(tags []shareTagFile, kind uint16, replacement *shareTagFile) []shareTagFile {
-	out := make([]shareTagFile, 0, len(bodykey.ShareKinds))
+// maxPendingBound returns the largest created_at< bound across the pending
+// windows.
+func maxPendingBound(tags []shareTagFile) int64 {
+	var max int64
 	for _, t := range tags {
-		if t.Kind != kind {
-			out = append(out, t)
+		if exp, err := enrolledExpiry(t); err == nil && exp.Unix() > max {
+			max = exp.Unix()
 		}
 	}
-	out = append(out, *replacement)
-	return out
+	return max
+}
+
+// maxEnrolledBound returns the largest created_at< bound across enrolled
+// tags.
+func maxEnrolledBound(tags []shareTagFile) int64 {
+	return maxPendingBound(tags)
+}
+
+func pendingTagForKind(pending []shareTagFile, kind uint16) *shareTagFile {
+	for i := range pending {
+		if pending[i].Kind == kind {
+			return &pending[i]
+		}
+	}
+	return nil
 }
 
 // enrolledExpiry derives the expiry of one enrolled tag from its OWN signed
@@ -404,10 +469,16 @@ func doctorShareInspection(root string) map[string]any {
 			out[e.Name()] = info
 			continue
 		}
-		if tags := readEnrolledTags(keyDir); len(tags) > 0 {
+		gen, gerr := readEnrolledState(keyDir)
+		if gerr != nil {
+			info["attestation_error"] = gerr.Error()
+			out[e.Name()] = info
+			continue
+		}
+		if gen != nil && len(gen.Tags) > 0 {
 			perKind := map[string]any{}
 			earliest := time.Time{}
-			for _, t := range tags {
+			for _, t := range gen.Tags {
 				exp, err := enrolledExpiry(t)
 				if err != nil {
 					perKind[fmt.Sprint(t.Kind)] = map[string]string{"error": err.Error()}

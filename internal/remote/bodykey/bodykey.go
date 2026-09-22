@@ -102,6 +102,12 @@ func parse(content string) (*BodyKey, error) {
 			if len(fields[1]) != hexSecretLen {
 				return nil, fmt.Errorf("%w: secret must be %d hex chars", ErrWrongFormat, hexSecretLen)
 			}
+			// The file format is lowercase hex (writeSecretFile emits only
+			// lowercase); reject uppercase so the on-disk contract stays
+			// canonical (codex P2: one consistent parser contract).
+			if strings.ToLower(fields[1]) != fields[1] {
+				return nil, fmt.Errorf("%w: secret hex must be lowercase", ErrWrongFormat)
+			}
 			raw, err := hex.DecodeString(fields[1])
 			if err != nil {
 				return nil, fmt.Errorf("%w: secret is not hex: %v", ErrWrongFormat, err)
@@ -484,11 +490,14 @@ func (k *BodyKey) PreimageHex(conditions string) string {
 	return hex.EncodeToString(t.Preimage(k.PublicKeyHex()))
 }
 
-// SetSigHex decodes a 128-char hex signature into the tag.
+// SetSigHex decodes a 128-char signature into the tag with the same
+// canonical rules as ParseAuthTag (lowercase hex — codex P2: one canonical
+// parser for signature text, so anything persisted is accepted by the wire
+// parser).
 func (t *AuthTag) SetSigHex(s string) error {
-	raw, err := hex.DecodeString(s)
-	if err != nil || len(raw) != len(t.Sig) {
-		return fmt.Errorf("signature must be %d hex chars", 2*len(t.Sig))
+	raw, err := parseSigHex(s)
+	if err != nil {
+		return err
 	}
 	copy(t.Sig[:], raw)
 	return nil

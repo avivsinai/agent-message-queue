@@ -264,7 +264,7 @@ func TestShareRejectsUppercaseOwnerEncoding(t *testing.T) {
 		t.Fatal("uppercase-encoded self-attested tag enrolled; want refusal")
 	}
 	// No share.json was written — a failed enrollment preserves state.
-	if got := readEnrolledTags(keyDir); len(got) != 0 {
+	if gen, err := readEnrolledState(keyDir); err != nil || gen != nil {
 		t.Fatal("failed enrollment mutated enrolled state")
 	}
 }
@@ -389,5 +389,186 @@ func TestShareRejectsSelfAttestation(t *testing.T) {
 	var stderr bytes.Buffer
 	if code, _ := share([]string{"--root", root, "--session", "s3", "--tag-file", tagPath}, &bytes.Buffer{}, &stderr); code == 0 {
 		t.Fatal("self-attested tag enrolled; want refusal")
+	}
+}
+
+// enrollAllPending enrolls every pending tag and fails on refusal.
+func enrollAllPending(t *testing.T, root, session string) {
+	t.Helper()
+	keyDir := filepath.Join(root, "extensions", "remote", "keys", session)
+	k, err := bodykey.Load(filepath.Join(keyDir, "body.key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tags, _, err := readSharePending(keyDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tag := range tags {
+		tagPath := filepath.Join(t.TempDir(), "tag.json")
+		doc := `{"kind":` + jsonNumber(int(tag.Kind)) + `,"owner_pubkey":"` + ownerPubHex + `","conditions":"` + tag.Conditions + `","sig":"` + ownerSignFor(t, k.PublicKeyHex(), tag.Conditions) + `"}`
+		if err := os.WriteFile(tagPath, []byte(doc), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		var stderr bytes.Buffer
+		if code, _ := share([]string{"--root", root, "--session", session, "--tag-file", tagPath}, &bytes.Buffer{}, &stderr); code != 0 {
+			t.Fatalf("enroll kind %d refused: %s", tag.Kind, stderr.String())
+		}
+	}
+}
+
+// TestFullEnrollRenewEnrollAllKinds pins codex P1 finding 1: renewal mints a
+// NEW generation; the first new tag must not complete the generation by
+// counting old-plus-new entries, and every remaining kind must enroll.
+func TestFullEnrollRenewEnrollAllKinds(t *testing.T) {
+	root := t.TempDir()
+	runShare(t, "--root", root, "--session", "g1")
+	enrollAllPending(t, root, "g1")
+	keyDir := filepath.Join(root, "extensions", "remote", "keys", "g1")
+	if _, err := os.Stat(filepath.Join(keyDir, "share.pending.json")); !os.IsNotExist(err) {
+		t.Fatalf("pending not consumed after full enrollment: %v", err)
+	}
+	firstGen := readEnrolledTagsForTest(t, keyDir)
+	// Renew: new window, new pending, new generation.
+	out, _, code := runShare(t, "--root", root, "--session", "g1", "--renew")
+	if code != 0 {
+		t.Fatal("renew refused")
+	}
+	condsByKind := pendingConditions(t, out)
+	// Enroll ONE kind of the new generation: pending must NOT be consumed
+	// (the old five-tag enrollment must not count toward completion).
+	one := condsByKindFirst(condsByKind)
+	conds := condsByKind[one]
+	k, err := bodykey.Load(filepath.Join(keyDir, "body.key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tagPath := filepath.Join(t.TempDir(), "tag.json")
+	doc := `{"kind":` + jsonNumber(int(one)) + `,"owner_pubkey":"` + ownerPubHex + `","conditions":"` + conds + `","sig":"` + ownerSignFor(t, k.PublicKeyHex(), conds) + `"}`
+	_ = os.WriteFile(tagPath, []byte(doc), 0o600)
+	if _, _, code := runShare(t, "--root", root, "--session", "g1", "--tag-file", tagPath); code != 0 {
+		t.Fatalf("first renewal enrollment refused")
+	}
+	if _, err := os.Stat(filepath.Join(keyDir, "share.pending.json")); err != nil {
+		t.Fatal("pending consumed after ONE renewal enrollment — old generation counted toward completion")
+	}
+	// Enroll the remaining four; only now is the new generation complete.
+	enrollRemaining(t, root, "g1", condsByKind, one)
+	if _, err := os.Stat(filepath.Join(keyDir, "share.pending.json")); !os.IsNotExist(err) {
+		t.Fatalf("pending not consumed after full renewal enrollment: %v", err)
+	}
+	secondGen := readEnrolledTagsForTest(t, keyDir)
+	if len(secondGen) != len(bodykey.ShareKinds) {
+		t.Fatalf("renewed generation has %d tags, want %d", len(secondGen), len(bodykey.ShareKinds))
+	}
+	// Every renewed tag's conditions are the NEW window, not the old one.
+	for _, tf := range secondGen {
+		if condsByKind[tf.Kind] != tf.Conditions {
+			t.Fatalf("renewed generation kept stale tag for kind %d", tf.Kind)
+		}
+	}
+	_ = firstGen
+}
+
+func enrollRemaining(t *testing.T, root, session string, condsByKind map[uint16]string, done uint16) {
+	t.Helper()
+	keyDir := filepath.Join(root, "extensions", "remote", "keys", session)
+	k, err := bodykey.Load(filepath.Join(keyDir, "body.key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for kind, conds := range condsByKind {
+		if kind == done {
+			continue
+		}
+		tagPath := filepath.Join(t.TempDir(), "tag.json")
+		doc := `{"kind":` + jsonNumber(int(kind)) + `,"owner_pubkey":"` + ownerPubHex + `","conditions":"` + conds + `","sig":"` + ownerSignFor(t, k.PublicKeyHex(), conds) + `"}`
+		_ = os.WriteFile(tagPath, []byte(doc), 0o600)
+		var stderr bytes.Buffer
+		if code, _ := share([]string{"--root", root, "--session", session, "--tag-file", tagPath}, &bytes.Buffer{}, &stderr); code != 0 {
+			t.Fatalf("renewal enroll kind %d refused: %s", kind, stderr.String())
+		}
+	}
+}
+
+func readEnrolledTagsForTest(t *testing.T, keyDir string) []shareTagFile {
+	t.Helper()
+	gen, err := readEnrolledState(keyDir)
+	if err != nil || gen == nil {
+		t.Fatalf("enrolled state missing/invalid: %v", err)
+	}
+	return gen.Tags
+}
+
+// TestShareRejectsSymlinkedKeysRoot pins codex P1 finding 2: a symlink AT
+// the keys root (or any owned parent) redirects mint outside the root and
+// is refused.
+func TestShareRejectsSymlinkedKeysRoot(t *testing.T) {
+	outside := t.TempDir()
+	root := t.TempDir()
+	remote := filepath.Join(root, "extensions", "remote")
+	if err := os.MkdirAll(remote, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(remote, "keys")); err != nil {
+		t.Skipf("cannot symlink here: %v", err)
+	}
+	var stderr bytes.Buffer
+	if code, _ := share([]string{"--root", root, "--session", "s"}, &bytes.Buffer{}, &stderr); code == 0 {
+		t.Fatal("symlinked keys root accepted")
+	}
+	if _, err := os.Stat(filepath.Join(outside, "s", "body.key")); !os.IsNotExist(err) {
+		t.Fatal("body.key minted through the symlinked keys root")
+	}
+}
+
+// TestShareRefusesCorruptEnrolledState pins codex P2 finding 4: invalid
+// share.json is an error, not absence — plain share refuses and enrollment
+// never overwrites it.
+func TestShareRefusesCorruptEnrolledState(t *testing.T) {
+	root := t.TempDir()
+	runShare(t, "--root", root, "--session", "c1")
+	keyDir := filepath.Join(root, "extensions", "remote", "keys", "c1")
+	if err := os.WriteFile(filepath.Join(keyDir, "share.json"), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+	if code, _ := share([]string{"--root", root, "--session", "c1"}, &bytes.Buffer{}, &stderr); code == 0 {
+		t.Fatal("plain share over corrupt enrolled state did not refuse")
+	}
+	if _, err := os.ReadFile(filepath.Join(keyDir, "share.json")); err != nil {
+		t.Fatal("corrupt enrolled state removed")
+	}
+	if got, _ := os.ReadFile(filepath.Join(keyDir, "share.json")); string(got) != "{not json" {
+		t.Fatal("corrupt enrolled state overwritten")
+	}
+}
+
+// TestShareRejectsUppercaseSignature pins codex P2 finding 5: signature hex
+// uses the canonical lowercase parser; mixed-case is refused before
+// persistence.
+func TestShareRejectsUppercaseSignature(t *testing.T) {
+	root := t.TempDir()
+	runShare(t, "--root", root, "--session", "u2")
+	keyDir := filepath.Join(root, "extensions", "remote", "keys", "u2")
+	k, err := bodykey.Load(filepath.Join(keyDir, "body.key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tags, _, err := readSharePending(keyDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conds := tags[0].Conditions
+	sig := strings.ToUpper(ownerSignFor(t, k.PublicKeyHex(), conds))
+	tagPath := filepath.Join(t.TempDir(), "tag.json")
+	doc := `{"kind":` + jsonNumber(int(tags[0].Kind)) + `,"owner_pubkey":"` + ownerPubHex + `","conditions":"` + conds + `","sig":"` + sig + `"}`
+	_ = os.WriteFile(tagPath, []byte(doc), 0o600)
+	var stderr bytes.Buffer
+	if code, _ := share([]string{"--root", root, "--session", "u2", "--tag-file", tagPath}, &bytes.Buffer{}, &stderr); code == 0 {
+		t.Fatal("uppercase signature accepted")
+	}
+	if gen, err := readEnrolledState(keyDir); err != nil || gen != nil {
+		t.Fatal("refused tag mutated enrolled state")
 	}
 }

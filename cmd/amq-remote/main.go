@@ -238,9 +238,9 @@ func printHuman(w io.Writer, out any) {
 		}
 		_, _ = fmt.Fprintln(w)
 		if v.Result != nil {
-			say(w, "", v.Result.Text)
+			say(w, "%s", v.Result.Text)
 			if v.Result.Truncated {
-				say(w, "", "[truncated; full result stays with the harness]")
+				say(w, "%s", "[truncated; full result stays with the harness]")
 			}
 		}
 	case []protocol.Session:
@@ -273,7 +273,7 @@ func printSession(w io.Writer, s protocol.Session) {
 	if s.Capabilities.AnswerQuestion {
 		caps = append(caps, "answer")
 	}
-	say(w, "%-24s %-8s %-8s %-8s epoch=%s caps=", s.TargetID, s.Harness, s.Attachment, s.Status, s.Epoch, strings.Join(caps, ","))
+	say(w, "%-24s %-8s %-8s %-8s epoch=%s caps=%s", s.TargetID, s.Harness, s.Attachment, s.Status, s.Epoch, strings.Join(caps, ","))
 }
 
 // serveFlags holds pointers to the flags serve defines beyond the common
@@ -335,9 +335,9 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	// agents in the root can route to it. This preserves every other agent's
 	// config; amqio.New stays free of configuration side effects.
 	if added, cerr := config.EnsureAgent(c.root, *me); cerr != nil {
-		say(stderr, "warning: could not register handle %q in config.json: ", *me, cerr)
+		say(stderr, "warning: could not register handle %q in config.json: %v", *me, cerr)
 	} else if added {
-		say(stderr, "registered handle %q in ", *me, filepath.Join(c.root, "meta", "config.json"))
+		say(stderr, "registered handle %q in %s", *me, filepath.Join(c.root, "meta", "config.json"))
 	}
 	// Carrier publish callback: nil-safe until startupSequence assigns the
 	// carrier. SetPublish runs inside startupSequence; this closure forwards
@@ -382,7 +382,7 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 			return 0, derr
 		}
 		for _, cand := range cands {
-			say(stdout, "%-12s ", cand.Kind, cand.Target)
+			say(stdout, "%-12s %s", cand.Kind, cand.Target)
 		}
 		_ = mf
 		return 0, nil
@@ -469,7 +469,7 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	say(stdout, "amq-remote %s serving root=%s handle=%s socket=%s targets=", version, c.root, *me, server.Path(), len(ep.Targets()))
+	say(stdout, "amq-remote %s serving root=%s handle=%s socket=%s targets=%d", version, c.root, *me, server.Path(), len(ep.Targets()))
 	go func() {
 		t := time.NewTicker(*poll)
 		defer t.Stop()
@@ -479,10 +479,10 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 				return
 			case <-t.C:
 				if _, err := carrier.ImportOnce(); err != nil {
-					say(stderr, "import: ", err)
+					say(stderr, "import: %v", err)
 				}
 				if err := ep.Tick(); err != nil {
-					say(stderr, "tick: ", err)
+					say(stderr, "tick: %v", err)
 				}
 				// Replay durable sender envelopes (CLI submits persisted while the
 				// companion was down), then reap settled ones older than the reap
@@ -490,7 +490,7 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 				// independent of Drain activity — a live submit settles its own
 				// envelope so Drain returns zero forever, and Reap must still run.
 				if _, derr := drainer.Drain(ctx); derr != nil {
-					say(stderr, "drain: ", derr)
+					say(stderr, "drain: %v", derr)
 				}
 				_, _ = spool.Reap(time.Now().Add(-spoolReapHorizon), 64)
 			}
@@ -1234,7 +1234,7 @@ func serveStartup(stateDir, root, handle, manifestFile string, sugar []manifest.
 			} else {
 				refusals = append(refusals, oc)
 				if warn != nil {
-					say(warn, "warning: adapter %q (kind %q) refused: ", oc.Manifest.Target, oc.Manifest.Kind, oc.Refusal)
+					say(warn, "warning: adapter %q (kind %q) refused: %v", oc.Manifest.Target, oc.Manifest.Kind, oc.Refusal)
 				}
 			}
 		}
@@ -1253,10 +1253,10 @@ func serveStartup(stateDir, root, handle, manifestFile string, sugar []manifest.
 		return store, ep, carrier, refusals, err
 	}
 	if perr := persistRefusals(stateDir, refusals); perr != nil && warn != nil {
-		say(warn, "warning: could not persist adapter refusals: ", perr)
+		say(warn, "warning: could not persist adapter refusals: %v", perr)
 	}
 	if werr := writeEffectiveAdapters(stateDir, mf, attachments, refusals); werr != nil && warn != nil {
-		say(warn, "warning: could not write effective adapters: ", werr)
+		say(warn, "warning: could not write effective adapters: %v", werr)
 	}
 	return store, ep, carrier, refusals, nil
 }
