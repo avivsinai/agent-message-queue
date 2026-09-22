@@ -479,10 +479,12 @@ func parseCanonicalUint(s string, max uint64) (uint64, error) {
 }
 
 // Satisfies evaluates the tag's conditions against an event's kind and
-// created_at, exactly as NIP-OA states: every clause must hold, `kind=<n>`
-// holds iff event.kind = n, `created_at<t>` iff event.created_at < t.
-// Any false clause rejects. (The share credential is one condition string
-// per kind — see ShareConditions — so a tag authorizes exactly one kind.)
+// created_at. Every clause must hold: `kind=<n>` holds iff event.kind = n,
+// `created_at<t>` iff event.created_at < t; any false clause rejects, and
+// unknown clauses are unsupported (parseClause). Beyond NIP-OA's minimum,
+// a credential with NO kind clause is rejected outright (least-privilege:
+// a tag must name the kind it authorizes), so a tag authorizes exactly one
+// kind — see ShareConditions.
 func (t AuthTag) Satisfies(kind uint16, createdAt int64) error {
 	conds, err := ParseConditions(t.Conditions)
 	if err != nil {

@@ -121,6 +121,12 @@ func share(args []string, stdout, stderr io.Writer) (int, error) {
 	if !filepath.IsAbs(*root) {
 		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "--root must be absolute")
 	}
+	if daysSet && *days == 0 {
+		// Verifier r4 P2-5: an EXPLICIT --days 0 is out of range, never
+		// silently promoted to the default; only an unset flag gets the
+		// documented default.
+		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "--days must be 1..90 (NIP-OA window bounds), got 0")
+	}
 	if *days == 0 {
 		*days = shareDefaultDays // unset flag: the documented default
 	}
@@ -362,12 +368,26 @@ func lstatStateLeaf(path string) error {
 		return err
 	}
 	if fi.Mode()&os.ModeSymlink != 0 {
-		return errors.New("symlinked; refusing")
+		// Verifier r4 P1-2: the path travels with the error (typed), so
+		// doctor and every other surface can name the refused file without
+		// substring matching.
+		return &stateLeafError{Path: path, Reason: "symlinked"}
 	}
 	if !fi.Mode().IsRegular() {
-		return errors.New("not a regular file; refusing")
+		return &stateLeafError{Path: path, Reason: "not a regular file"}
 	}
 	return nil
+}
+
+// stateLeafError is the typed leaf-confinement refusal: it names the state
+// file and why it was refused (verifier r4 P1-2).
+type stateLeafError struct {
+	Path   string
+	Reason string
+}
+
+func (e *stateLeafError) Error() string {
+	return "state file " + e.Path + ": " + e.Reason + "; refusing"
 }
 
 // enrollTag validates one owner-signed tag against this session's body key
@@ -531,14 +551,14 @@ func writeShareTag(keyDir string, pending []shareTagFile, tf *shareTagFile) erro
 	// Reconcile crash leftovers before reading staged state (verifier r3
 	// P2-3): a complete published generation with stale pending/staged is
 	// healed here so the enrollment targets the live window, not stale
-	// leftovers.
+	// leftovers. (writeShareTag is called after enrollTag has already
+	// reconciled, so this only fires when state changed in between.)
 	pendingTags, _, pendingReadErr := readSharePending(keyDir)
-	if pendingReadErr != nil && !errors.Is(pendingReadErr, os.ErrNotExist) {
-		return pendingReadErr
-	}
-	gen0, _ := readEnrolledState(keyDir)
-	if rerr := reconcileStagedState(keyDir, gen0, pendingTags, pendingReadErr); rerr != nil {
-		return rerr
+	if pendingReadErr == nil {
+		gen0, _ := readEnrolledState(keyDir)
+		if rerr := reconcileStagedState(keyDir, gen0, pendingTags, pendingReadErr); rerr != nil {
+			return rerr
+		}
 	}
 	staged, serr := readShareStaged(keyDir)
 	if serr != nil {
@@ -564,6 +584,29 @@ func writeShareTag(keyDir string, pending []shareTagFile, tf *shareTagFile) erro
 		}
 	}
 	if !complete {
+		// Verifier r4 P2-2: a window that cannot cover ShareKinds never
+		// publishes — the operator gets a REFUSAL naming the missing kinds,
+		// not silent staging forever. (A complete-but-in-progress window
+		// for a healthy renewal just stages; the refusal is only for
+		// windows that can never be completed.)
+		coversShareKinds := true
+		for _, kind := range bodykey.ShareKinds {
+			if pendingTagForKind(pending, kind) == nil {
+				coversShareKinds = false
+				break
+			}
+		}
+		if !coversShareKinds {
+			missing := make([]uint16, 0, len(bodykey.ShareKinds))
+			for _, kind := range bodykey.ShareKinds {
+				if pendingTagForKind(pending, kind) == nil {
+					missing = append(missing, kind)
+				}
+			}
+			return protocol.Refuse(protocol.CodeInvalid,
+				"pending window at share.pending.json does not cover every kind in ShareKinds (missing %v); publication is refused because it would drop still-valid tags — remedy: remove share.pending.json and run `amq-remote share --session ... --renew` for a fresh full window",
+				missing)
+		}
 		return writeShareStaged(keyDir, staged)
 	}
 
@@ -585,10 +628,50 @@ func writeShareTag(keyDir string, pending []shareTagFile, tf *shareTagFile) erro
 	if err := writeStateFile(enrolledPath, raw); err != nil {
 		return err
 	}
+	// The generation is committed (renamed into place); the pending and
+	// staged files are cleanup. Failures are propagated with the
+	// committed-state distinction (verifier r4 P2-4) — the caller must
+	// know the publication succeeded even if cleanup did not.
 	p, _ := sharePaths(keyDir)
-	_ = os.Remove(p)
-	_ = os.Remove(filepath.Join(keyDir, stagedName))
+	if err := removeStateLeaf(p); err != nil {
+		return err
+	}
+	stagedPath := filepath.Join(keyDir, stagedName)
+	if err := removeStateLeaf(stagedPath); err != nil {
+		return err
+	}
 	return nil
+}
+
+// removeStateLeaf removes one state leaf, propagating failures with the
+// committed-state distinction (verifier r4 P2-4): the publication has
+// already been renamed into place, so a failed cleanup must reach the
+// operator without suggesting the generation is lost. An empty directory
+// accidentally standing where the leaf belongs is removed too.
+func removeStateLeaf(path string) error {
+	err := os.Remove(path)
+	if err == nil || errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if removeErr := removeEmptyDir(path); removeErr == nil {
+		return nil
+	}
+	return fmt.Errorf("cleanup after publication: removing %s: %w (published generation is committed)", path, err)
+}
+
+func removeEmptyDir(path string) error {
+	fi, err := os.Lstat(path)
+	if err != nil || !fi.IsDir() {
+		return err
+	}
+	entries, err := os.ReadDir(path)
+	if err != nil || len(entries) > 0 {
+		if err == nil {
+			err = errors.New("not empty")
+		}
+		return err
+	}
+	return os.Remove(path)
 }
 
 // stagedName is the accumulation file for signed-but-unpublished tags.
@@ -604,6 +687,13 @@ const stagedName = "share.staged.json"
 //   - a corrupt staged file is refused with the file named and the
 //     remedy (remove it, re-sign) instead of an unrecoverable error.
 func reconcileStagedState(keyDir string, gen *enrolledGeneration, pending []shareTagFile, pendingErr error) error {
+	// Verifier r4 P1-1: reconcile READS and WRITES state leaves, so the
+	// leaf-confinement rule applies here too — doctor reaches this helper
+	// without any other guard, and a symlinked staged file was previously
+	// read through the link, used, and silently replaced.
+	if err := refuseSymlinkedState(keyDir); err != nil {
+		return err
+	}
 	if pendingErr != nil && !errors.Is(pendingErr, os.ErrNotExist) {
 		return pendingErr // malformed pending: refuse everywhere
 	}
@@ -637,10 +727,17 @@ func reconcileStagedState(keyDir string, gen *enrolledGeneration, pending []shar
 		}
 		if genCoversPending {
 			// Crash leftovers after publication: pending and staged are
-			// both stale; the published generation is the authority.
+			// both stale; the published generation is the authority. The
+			// publication already happened, so this is the committed
+			// state: cleanup failures are propagated (verifier r4 P2-4)
+			// but never rolled back.
 			p, _ := sharePaths(keyDir)
-			_ = os.Remove(p)
-			_ = os.Remove(stagedPath)
+			if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("cleanup after publication: removing %s: %w (published generation is committed)", p, err)
+			}
+			if err := os.Remove(stagedPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("cleanup after publication: removing %s: %w (published generation is committed)", stagedPath, err)
+			}
 			return nil
 		}
 		// Drop staged entries superseded by the current pending window.
@@ -660,21 +757,24 @@ func reconcileStagedState(keyDir string, gen *enrolledGeneration, pending []shar
 	}
 	if genCoversPending {
 		// Staged absent but pending remains after publication (crash
-		// between the two removes): pending is stale too.
+		// between the two removes): pending is stale too. Committed state;
+		// cleanup failures propagate (verifier r4 P2-4).
 		p, _ := sharePaths(keyDir)
-		_ = os.Remove(p)
+		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("cleanup after publication: removing %s: %w (published generation is committed)", p, err)
+		}
 	}
 	return nil
 }
 
 // doctorNamedLeafError names the state file in a leaf-confinement error so
 // the operator knows which file to inspect (verifier r3 P2-7).
-func doctorNamedLeafError(keyDir string, err error) string {
-	pendingPath, enrolledPath := sharePaths(keyDir)
-	for _, p := range []string{pendingPath, filepath.Join(keyDir, stagedName), enrolledPath} {
-		if strings.Contains(err.Error(), p) || strings.Contains(err.Error(), filepath.Base(p)) {
-			return p + ": " + err.Error()
-		}
+func doctorNamedLeafError(_ string, err error) string {
+	// Verifier r4 P1-2: leaf-confinement refusals are typed and carry
+	// their path; match with errors.As, never substrings.
+	var leaf *stateLeafError
+	if errors.As(err, &leaf) {
+		return leaf.Error()
 	}
 	return err.Error()
 }

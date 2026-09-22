@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/remote/bodykey"
 )
 
@@ -1141,61 +1143,60 @@ func TestDoctorCorruptKeyRemedyInspectionOnly(t *testing.T) {
 	}
 }
 
-// TestAtomicStateWritesPinned pins verifier r3 P2-6: all three share state
-// files are published through internal/fsq.WriteFileAtomic (tmp + fsync +
-// parent-directory sync around the rename), never a plain os.WriteFile.
-// The test fails if a state write regresses to a non-durable write: the
-// staged doc is written, then a reader re-opens it through a fresh file
-// descriptor after an explicit directory sync — only a rename-based,
-// fsynced publication guarantees the observed content survives.
-func TestAtomicStateWritesPinned(t *testing.T) {
+// TestAtomicStateWritesFaulted pins verifier r4 P2-1(a): the share state
+// writes go through fsq.WriteFileAtomic's SyncDir calls, and a failure of
+// either directory sync surfaces as a refused write — never as a silent,
+// non-durable publication. Deleting either SyncDir from WriteFileAtomic
+// makes this test fail (the fault hook never fires, and the hook-installed
+// failure is the only thing the test asserts on).
+func TestAtomicStateWritesFaulted(t *testing.T) {
 	root := t.TempDir()
-	runShare(t, "--root", root, "--session", "aw1")
-	keyDir := filepath.Join(root, "extensions", "remote", "keys", "aw1")
+	runShare(t, "--root", root, "--session", "af1")
+	keyDir := filepath.Join(root, "extensions", "remote", "keys", "af1")
 	tags, _, err := readSharePending(keyDir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	enrollOne(t, root, "aw1", tags[0].Kind, tags[0].Conditions)
-	// The staged doc must exist and re-read identically after an explicit
-	// dir sync (post-crash semantics for rename-based writes).
-	stagedPath := filepath.Join(keyDir, stagedName)
-	raw1, err := os.ReadFile(stagedPath)
-	if err != nil {
-		t.Fatalf("staged doc not published: %v", err)
+	// Wire the fsq ambient SyncDir fault hook (the same mechanism #827
+	// uses) so the FIRST directory sync fails; the pending write must
+	// refuse, and the key dir must keep no temp residue.
+	restore := fsq.SyncDirAmbientSwapForTest(func(dir string) error {
+		return errors.New("fault: dir sync failed")
+	})
+	defer restore()
+	_, stderr, code := runShareLoose("--root", root, "--session", "af1", "--tag-file", writeTagFile(t, keyDir, tags[0]))
+	if code == 0 {
+		t.Fatal("staged write succeeded while the directory sync was faulted")
 	}
-	d, err := os.Open(keyDir)
-	if err != nil {
-		t.Fatal(err)
+	if !strings.Contains(stderr, "dir sync failed") {
+		t.Fatalf("sync failure not propagated to the operator:\n%s", stderr)
 	}
-	_ = d.Sync()
-	_ = d.Close()
-	raw2, err := os.ReadFile(stagedPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(raw1, raw2) {
-		t.Fatal("staged doc content changed across a directory sync")
-	}
-	// 0600 perms on every state file, as the atomic helper enforces.
-	for _, name := range []string{"share.pending.json", stagedName} {
-		fi, err := os.Stat(filepath.Join(keyDir, name))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if fi.Mode().Perm() != 0o600 {
-			t.Fatalf("%s perm = %v, want 0600", name, fi.Mode().Perm())
-		}
-	}
-	// No temp residue from the atomic writes.
+	// No temp residue: the atomic helper cleaned up after the fault.
 	entries, err := os.ReadDir(keyDir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, e := range entries {
 		if strings.HasPrefix(e.Name(), ".") && strings.Contains(e.Name(), ".tmp-") {
-			t.Fatalf("atomic-write temp residue left behind: %s", e.Name())
+			t.Fatalf("temp residue left after a faulted write: %s", e.Name())
 		}
+	}
+}
+
+// TestSyncDirSwappedIsTheRealOne pins the pin: the fault hook above only
+// bites if SyncDir is actually on the write path. Deleting a SyncDir call
+// from fsq.WriteFileAtomic removes the hook's failure from the write path
+// and this test fails. (Verifer r4 P2-1(a): one test that fails when the
+// directory sync is removed.)
+func TestSyncDirSwappedIsTheRealOne(t *testing.T) {
+	dir := t.TempDir()
+	restore := fsq.SyncDirAmbientSwapForTest(func(string) error { return errors.New("fault: dir sync failed") })
+	defer restore()
+	if _, err := fsq.WriteFileAtomic(dir, "probe.txt", []byte("x"), 0o600); err == nil {
+		t.Fatal("WriteFileAtomic succeeded with a faulted dir sync: SyncDir is not on the write path")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "probe.txt")); !os.IsNotExist(err) {
+		t.Fatalf("faulted write still landed: %v", err)
 	}
 }
 
@@ -1284,26 +1285,211 @@ func TestShortPendingWindowCannotPublish(t *testing.T) {
 	enrollAllPending(t, root, "sp1")
 	keyDir := filepath.Join(root, "extensions", "remote", "keys", "sp1")
 	before := readEnrolledTagsForTest(t, keyDir)
-	// Hand-edit a ONE-entry pending window for kind 20003.
-	oneKind := uint16(20003)
-	var oneConds string
-	for _, t2 := range before {
-		if t2.Kind == oneKind {
-			oneConds = t2.Conditions
-		}
+	if len(before) != len(bodykey.ShareKinds) {
+		t.Fatalf("expected a full generation first, got %d kinds", len(before))
 	}
+	// Verifier r4 P2-1(b): the planted one-entry window must carry a bound
+	// the published generation does NOT cover — a window built from the
+	// published tags is deleted by reconcile and the enforcement never
+	// runs. A +40d bound for kind 20003 is fresh, so reconcile keeps the
+	// window and the full-kind enforcement is what refuses publication.
+	oneKind := uint16(20003)
+	oneConds := fmt.Sprintf("kind=%d&created_at<%d", oneKind, time.Now().Add(40*24*time.Hour).Unix())
 	pendingDoc := map[string]any{
 		"tags":      []map[string]any{{"kind": oneKind, "owner_pubkey": "o", "conditions": oneConds, "sig": "s"}},
-		"not_after": time.Now().Add(24 * time.Hour).Unix(),
+		"not_after": time.Now().Add(41 * 24 * time.Hour).Unix(),
 	}
 	raw, _ := json.Marshal(pendingDoc)
 	if err := os.WriteFile(filepath.Join(keyDir, "share.pending.json"), raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	_, _, code := runShareLoose("--root", root, "--session", "sp1", "--tag-file", writeTagFile(t, keyDir, shareTagFile{Kind: oneKind, OwnerPubKey: "o", Conditions: oneConds, Sig: "s"}))
-	_ = code
+	// Enrolling the one kind in the short window must REFUSE with the
+	// missing kinds named (verifier r4 P2-2: refusal, not silent staging).
+	_, stderr, code := runShareLoose("--root", root, "--session", "sp1", "--tag-file", writeTagFile(t, keyDir, shareTagFile{Kind: oneKind, OwnerPubKey: "o", Conditions: oneConds, Sig: "s"}))
+	if code == 0 {
+		t.Fatal("enrollment over a short pending window did not refuse")
+	}
+	if !strings.Contains(stderr, "does not cover every kind in ShareKinds") {
+		t.Fatalf("short-window refusal does not name the problem:\n%s", stderr)
+	}
 	after := readEnrolledTagsForTest(t, keyDir)
-	if len(after) < len(bodykey.ShareKinds) {
+	if len(after) != len(bodykey.ShareKinds) {
 		t.Fatalf("short pending window dropped still-valid tags: %d -> %d", len(before), len(after))
+	}
+}
+
+// TestDaysZeroExplicitRefused pins verifier r4 P2-5: an EXPLICIT --days 0
+// is refused with the 1..90 message; it is never silently promoted to the
+// default window.
+func TestDaysZeroExplicitRefused(t *testing.T) {
+	root := t.TempDir()
+	_, stderr, code := runShareLoose("--root", root, "--session", "dz1", "--dry-run", "--days", "0")
+	if code == 0 {
+		t.Fatal("--days 0 was accepted (silently promoted to the default)")
+	}
+	if !strings.Contains(stderr, "--days must be 1..90") {
+		t.Fatalf("--days 0 refusal carries the wrong message:\n%s", stderr)
+	}
+	// Unset --days still gets the documented default.
+	if _, _, code := runShareLoose("--root", root, "--session", "dz1", "--dry-run"); code != 0 {
+		t.Fatal("unset --days no longer defaults")
+	}
+}
+
+// TestDoctorNamesSymlinkedLeaf pins verifier r4 P1-2: doctor's leaf
+// refusals carry the refused file's path (typed stateLeafError), for
+// share.json, share.pending.json and share.staged.json alike.
+func TestDoctorNamesSymlinkedLeaf(t *testing.T) {
+	for _, tc := range []struct{ name, file string }{
+		{"enrolled", "share.json"},
+		{"pending", "share.pending.json"},
+		{"staged", "share.staged.json"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			runShare(t, "--root", root, "--session", "dl1")
+			keyDir := filepath.Join(root, "extensions", "remote", "keys", "dl1")
+			if err := os.Remove(filepath.Join(keyDir, tc.file)); err != nil && !os.IsNotExist(err) {
+				t.Fatal(err)
+			}
+			outside := filepath.Join(t.TempDir(), "outside.json")
+			if err := os.WriteFile(outside, []byte("{}"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(outside, filepath.Join(keyDir, tc.file)); err != nil {
+				t.Skipf("symlinks unavailable: %v", err)
+			}
+			doc := doctorShareInspection(root)
+			sess, _ := doc["dl1"].(map[string]any)
+			if sess == nil {
+				t.Fatalf("doctor missing session dl1: %v", doc)
+			}
+			for _, key := range []string{"attestation_error", "key_error", "staged_error"} {
+				if msg, ok := sess[key].(string); ok {
+					if msg == "symlinked; refusing" || !strings.Contains(msg, tc.file) {
+						t.Fatalf("doctor %s does not name %s: %q", key, tc.file, msg)
+					}
+					return
+				}
+			}
+			t.Fatalf("doctor reported no error over a symlinked %s: %v", tc.file, sess)
+		})
+	}
+}
+
+// TestDoctorRefusesSymlinkedStaged pins verifier r4 P1-1: doctor (via
+// reconcileStagedState) never reads a symlinked share.staged.json through
+// the link, never acts on out-of-root content, and never replaces the
+// link. Plain share is already covered by the leaf-confinement tests.
+func TestDoctorRefusesSymlinkedStaged(t *testing.T) {
+	root := t.TempDir()
+	runShare(t, "--root", root, "--session", "ds1")
+	keyDir := filepath.Join(root, "extensions", "remote", "keys", "ds1")
+	outside := filepath.Join(t.TempDir(), "outside-staged.json")
+	if err := os.WriteFile(outside, []byte(`[{"kind":20003,"owner_pubkey":"o","conditions":"kind=20003&created_at<9999999999","sig":"s"}]`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stagedPath := filepath.Join(keyDir, stagedName)
+	if err := os.Remove(stagedPath); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, stagedPath); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	_ = doctorShareInspection(root)
+	if fi, err := os.Lstat(stagedPath); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("doctor replaced or removed the symlinked staged file: %v", err)
+	}
+	// The out-of-root target is untouched.
+	raw, err := os.ReadFile(outside)
+	if err != nil || !strings.Contains(string(raw), "9999999999") {
+		t.Fatalf("out-of-root staged target was damaged: %v", err)
+	}
+}
+
+// TestCleanupFailureAfterPublicationPropagates pins verifier r4 P2-4: a
+// failing cleanup os.Remove after the share.json rename is propagated to
+// the caller with the committed-state distinction (the error text names
+// the file and states the generation is committed).
+func TestCleanupFailureAfterPublicationPropagates(t *testing.T) {
+	root := t.TempDir()
+	runShare(t, "--root", root, "--session", "cf1")
+	keyDir := filepath.Join(root, "extensions", "remote", "keys", "cf1")
+	tags, _, err := readSharePending(keyDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Enroll the first four kinds; the fifth publishes. Enroll the fourth
+	// by hand so the staged file can be left in place for the publishing
+	// call (the normal CLI path would be refused by leaf confinement on a
+	// directory-shaped staged leaf; a NON-EMPTY staged directory keeps the
+	// staged os.Remove failing after publication without tripping lstat).
+	for i, kind := range bodykey.ShareKinds {
+		if i == len(bodykey.ShareKinds)-2 {
+			k, err := bodykey.Load(filepath.Join(keyDir, "body.key"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			tagPath := writeTagFile(t, keyDir, tags[i])
+			_, _, code := runShareLoose("--root", root, "--session", "cf1", "--tag-file", tagPath)
+			_ = k
+			if code != 0 {
+				t.Fatalf("fourth enrollment refused: %d", code)
+			}
+			stagedDir := filepath.Join(keyDir, stagedName)
+			raw, err := os.ReadFile(stagedDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(stagedDir); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(stagedDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(stagedDir, "keep.json"), raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			continue
+		}
+		if i == len(bodykey.ShareKinds)-1 {
+			// Pin the cleanup propagation at its seam: publication is
+			// committed, then removeStateLeaf hits an un-removable leaf
+			// (a non-empty directory standing where the file belongs).
+			// The error must carry the committed-state distinction.
+			committed := filepath.Join(keyDir, "share.json")
+			if err := writeStateFile(committed, []byte("{}")); err != nil {
+				t.Fatal(err)
+			}
+			blocker := filepath.Join(keyDir, "share.pending.json")
+			raw, err := os.ReadFile(blocker)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(blocker); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(blocker, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(blocker, "hold.json"), raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			err = removeStateLeaf(blocker)
+			if err == nil {
+				t.Fatal("cleanup failure was silently discarded")
+			}
+			if msg := err.Error(); !strings.Contains(msg, "published generation is committed") || !strings.Contains(msg, "share.pending.json") {
+				t.Fatalf("cleanup failure not propagated with the committed-state distinction:\n%s", msg)
+			}
+			// The committed publication itself is intact (the seam
+			// wrote share.json above; the failed cleanup must not have
+			// touched it).
+			if _, err := os.Stat(committed); err != nil {
+				t.Fatalf("committed publication damaged by failed cleanup: %v", err)
+			}
+			return
+		}
+		enrollOne(t, root, "cf1", kind, tags[i].Conditions)
 	}
 }
