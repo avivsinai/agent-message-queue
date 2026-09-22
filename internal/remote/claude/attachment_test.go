@@ -63,12 +63,13 @@ func TestAttachResolvesRegistryAndTarget(t *testing.T) {
 	if s.Epoch != SentinelUnpinned {
 		t.Fatalf("epoch = %q, want the unpinned sentinel (PR1 binds nothing)", s.Epoch)
 	}
-	// Honest projection: inspect true, everything else false.
+	// Honest projection: inspect true, submit true (PR2 wired the socket),
+	// the interrupt family false.
 	if !s.Capabilities.Inspect {
 		t.Fatal("inspect capability must be true")
 	}
-	if s.Capabilities.Submit {
-		t.Fatal("submit must be FALSE until PR2 wires the socket (ruling 10:59Z)")
+	if !s.Capabilities.Submit {
+		t.Fatal("submit must be TRUE: PR2 wired the pinned 611.2 socket wire")
 	}
 	for _, cap := range []string{"cancel_request", "approve_tool", "answer_question", "steer"} {
 		switch cap {
@@ -111,7 +112,7 @@ func TestAttachRefusesUnknownPidAndNonInteractive(t *testing.T) {
 	}
 }
 
-func TestSubmitRefusesWithoutSideEffect(t *testing.T) {
+func TestSubmitRefusesWithoutInboundPrecondition(t *testing.T) {
 	home := tempHome(t, 9, &sessionRegistry{Pid: 9, SessionID: "s9", Kind: "interactive", Cwd: "/tmp"})
 	att, err := Attach(config{Pid: 9, Home: home})
 	if err != nil {
@@ -122,13 +123,15 @@ func TestSubmitRefusesWithoutSideEffect(t *testing.T) {
 		t.Fatalf("Submit returned an error instead of a typed admission refusal: %v", err)
 	}
 	if admission.Admitted {
-		t.Fatal("Submit admitted a request in PR1")
+		t.Fatal("Submit admitted a request with no messaging socket (inbound precondition)")
 	}
 	if string(admission.Code) != "unsupported" {
 		t.Fatalf("refusal code = %q, want unsupported", admission.Code)
 	}
-	if !strings.Contains(admission.Message, "PR2") {
-		t.Fatalf("refusal message does not state the PR2 gate: %q", admission.Message)
+	// The refusal names the documented inbound precondition, not a
+	// transient transport state.
+	if !strings.Contains(admission.Message, "messaging socket") {
+		t.Fatalf("refusal message does not state the inbound precondition: %q", admission.Message)
 	}
 }
 

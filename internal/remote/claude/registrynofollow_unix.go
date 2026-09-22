@@ -9,3 +9,7 @@ import "syscall"
 // and the open is swapped for a symlink pointing elsewhere (the LimitReader
 // bounds what follows, but refusing outright is stricter and correct).
 const registryNoFollow = syscall.O_NOFOLLOW
+
+// openNoFollowFlag is the os.OpenFile flag refusing a final-component
+// symlink at open time.
+const openNoFollowFlag = registryNoFollow
