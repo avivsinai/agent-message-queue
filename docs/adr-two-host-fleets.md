@@ -118,8 +118,9 @@ ACK, or a missing remote drain receipt as proof of consumption.
 Peer-exchange outcomes use `status-tx/<peer>/returned`; `sent/` remains an
 HTTPS-only archive. Trusted peer keys use one flat `trusted/<host>` file
 holding the peer's single active generation; rotation replaces it
-atomically via `amq-bridge trust add --replace`, and envelopes naming an
-older generation are refused after the replacement.
+atomically via `amq-bridge trust add --replace` (generations are decimal
+integers compared numerically; a downgrade is refused), and envelopes
+naming an older generation are refused after the replacement.
 
 ### Wake (out of scope except the kill-list)
 

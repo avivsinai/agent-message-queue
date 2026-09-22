@@ -6,11 +6,13 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
@@ -261,10 +263,20 @@ func writeTrusted(root, host string, pub ed25519.PublicKey, generation string, r
 	}
 	path := TrustedPath(root, host)
 	if !replace {
-		return writePrivateFile(path, []byte(trustedBody(pub, generation)))
+		err := writePrivateFile(path, []byte(trustedBody(pub, generation)))
+		if errors.Is(err, os.ErrExist) {
+			return fmt.Errorf("trusted host %s already provisioned; use --replace to rotate", host)
+		}
+		return err
 	}
-	if _, current, lerr := LoadTrusted(root, host); lerr == nil && generation < current {
-		return fmt.Errorf("trusted host %s: refusing to rotate generation %q back to %q", host, current, generation)
+	if _, current, lerr := LoadTrusted(root, host); lerr == nil {
+		ordered, reason := compareGenerations(current, generation)
+		if !ordered {
+			return fmt.Errorf("trusted host %s: cannot order generations %q and %q; provision with a generated label", host, current, generation)
+		}
+		if reason < 0 {
+			return fmt.Errorf("trusted host %s: refusing to rotate generation %q back to %q", host, current, generation)
+		}
 	}
 	body := []byte(trustedBody(pub, generation))
 	tmp, err := os.CreateTemp(dir, ".trusted-*")
@@ -296,6 +308,40 @@ func writeTrusted(root, host string, pub ed25519.PublicKey, generation string, r
 		return fmt.Errorf("replace trusted host %s: %w", host, err)
 	}
 	return nil
+}
+
+// compareGenerations orders generation labels for the --replace downgrade
+// guard (review-845-r2 P1: a byte-string compare inverts across the digit
+// boundary — 9 -> 10 refused, 10 -> 9 allowed). Generations are unsigned
+// decimal integers as minted by identity init, so all-digit labels compare
+// numerically; any other label class (or a mixed pair) has no defined
+// order and is reported as unordered rather than guessed at. Returns
+// (ordered, cmp) where cmp is -1 when b is older, +1 when b is newer, and
+// 0 when the labels are equal.
+func compareGenerations(a, b string) (bool, int) {
+	if a == b {
+		return true, 0
+	}
+	for _, s := range []string{a, b} {
+		for i := 0; i < len(s); i++ {
+			if s[i] < '0' || s[i] > '9' {
+				return false, 0
+			}
+		}
+	}
+	na, aerr := strconv.ParseUint(a, 10, 64)
+	nb, berr := strconv.ParseUint(b, 10, 64)
+	if aerr != nil || berr != nil {
+		return false, 0
+	}
+	switch {
+	case nb < na:
+		return true, -1
+	case nb > na:
+		return true, 1
+	default:
+		return true, 0
+	}
 }
 
 func trustedBody(pub ed25519.PublicKey, generation string) string {

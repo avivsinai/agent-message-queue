@@ -1,7 +1,6 @@
 package main
 
 import (
-	"crypto/ed25519"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -122,7 +121,7 @@ func TestTrustAddHostParity(t *testing.T) {
 // in place, no partial body), and refuses a generation downgrade. Without
 // --replace, re-provisioning an existing host fails with a clear error.
 func TestTrustAddRotateReplacesAtomicallyNoDowngrade(t *testing.T) {
-	key1 := testHostKey("src-rot", "g1")
+	key1 := testHostKey("src-rot", "1")
 	dstRoot := newBridgeRoot(t, "claude")
 	ensureHostID(t, dstRoot, "dst-mac")
 	record1 := fmt.Sprintf("host=src-rot generation=%s public=%x\n", key1.Generation, key1.Public())
@@ -135,18 +134,18 @@ func TestTrustAddRotateReplacesAtomicallyNoDowngrade(t *testing.T) {
 		t.Fatal("re-provision without --replace = nil, want refusal")
 	}
 	got, generation, err := bridge.LoadTrusted(dstRoot, "src-rot")
-	if err != nil || string(got) != string(key1.Public()) || generation != "g1" {
+	if err != nil || string(got) != string(key1.Public()) || generation != "1" {
 		t.Fatalf("original record disturbed by refused re-provision: (%x, %s, %v)", got, generation, err)
 	}
 
 	// --replace with a NEWER generation: rotated in place.
-	key2 := testHostKey("src-rot", "g2")
+	key2 := testHostKey("src-rot", "2")
 	record2 := fmt.Sprintf("host=src-rot generation=%s public=%x\n", key2.Generation, key2.Public())
 	if err := runTrustAdd([]string{"--root", dstRoot, "--replace"}, strings.NewReader(record2)); err != nil {
 		t.Fatalf("runTrustAdd --replace: %v", err)
 	}
 	got, generation, err = bridge.LoadTrusted(dstRoot, "src-rot")
-	if err != nil || string(got) != string(key2.Public()) || generation != "g2" {
+	if err != nil || string(got) != string(key2.Public()) || generation != "2" {
 		t.Fatalf("rotation did not land: (%x, %s, %v)", got, generation, err)
 	}
 	info, err := os.Lstat(bridge.TrustedPath(dstRoot, "src-rot"))
@@ -161,24 +160,81 @@ func TestTrustAddRotateReplacesAtomicallyNoDowngrade(t *testing.T) {
 	if err := runTrustAdd([]string{"--root", dstRoot, "--replace"}, strings.NewReader(record1)); err == nil {
 		t.Fatal("downgrade --replace = nil, want refusal")
 	}
-	if _, generation, err = bridge.LoadTrusted(dstRoot, "src-rot"); err != nil || generation != "g2" {
+	if _, generation, err = bridge.LoadTrusted(dstRoot, "src-rot"); err != nil || generation != "2" {
 		t.Fatalf("downgrade disturbed the active generation: (%s, %v)", generation, err)
+	}
+}
+
+// TestTrustAddRotateCrossesDigitBoundary pins review-845-r2 P1: the
+// downgrade guard compares decimal generations numerically, not as byte
+// strings — the legitimate 9 -> 10 rotation is accepted and the 10 -> 9
+// downgrade is refused. A byte-wise compare fails both halves of this
+// test.
+func TestTrustAddRotateCrossesDigitBoundary(t *testing.T) {
+	key9 := testHostKey("src-num", "9")
+	key10 := testHostKey("src-num", "10")
+	record9 := fmt.Sprintf("host=src-num generation=%s public=%x\n", key9.Generation, key9.Public())
+	record10 := fmt.Sprintf("host=src-num generation=%s public=%x\n", key10.Generation, key10.Public())
+
+	root := newBridgeRoot(t, "claude")
+	ensureHostID(t, root, "dst-mac")
+	if err := runTrustAdd([]string{"--root", root}, strings.NewReader(record9)); err != nil {
+		t.Fatalf("provision at 9: %v", err)
+	}
+	if err := runTrustAdd([]string{"--root", root, "--replace"}, strings.NewReader(record10)); err != nil {
+		t.Fatalf("rotate 9 -> 10: %v (byte-compare inverts here)", err)
+	}
+	if _, generation, err := bridge.LoadTrusted(root, "src-num"); err != nil || generation != "10" {
+		t.Fatalf("after 9 -> 10: (%s, %v)", generation, err)
+	}
+	if err := runTrustAdd([]string{"--root", root, "--replace"}, strings.NewReader(record9)); err == nil {
+		t.Fatal("downgrade 10 -> 9 = nil, want refusal")
+	}
+	if _, generation, err := bridge.LoadTrusted(root, "src-num"); err != nil || generation != "10" {
+		t.Fatalf("after refused 10 -> 9: (%s, %v)", generation, err)
+	}
+
+	// Non-decimal label classes have no defined order: --replace refuses
+	// to guess rather than byte-comparing. (Identical labels are an
+	// idempotent re-provision, not an ordering question.)
+	rootWord := newBridgeRoot(t, "claude")
+	ensureHostID(t, rootWord, "dst-mac")
+	keyAlpha := testHostKey("src-alpha", "alpha")
+	recAlpha := fmt.Sprintf("host=src-alpha generation=%s public=%x\n", keyAlpha.Generation, keyAlpha.Public())
+	keyBeta := testHostKey("src-alpha", "beta")
+	recBeta := fmt.Sprintf("host=src-alpha generation=%s public=%x\n", keyBeta.Generation, keyBeta.Public())
+	if err := runTrustAdd([]string{"--root", rootWord}, strings.NewReader(recAlpha)); err != nil {
+		t.Fatalf("provision alpha: %v", err)
+	}
+	if err := runTrustAdd([]string{"--root", rootWord, "--replace"}, strings.NewReader(recBeta)); err == nil || !strings.Contains(err.Error(), "cannot order") {
+		t.Fatalf("unordered --replace = %v, want 'cannot order' refusal", err)
+	}
+	if _, generation, err := bridge.LoadTrusted(rootWord, "src-alpha"); err != nil || generation != "alpha" {
+		t.Fatalf("unordered --replace disturbed the active generation: (%s, %v)", generation, err)
 	}
 }
 
 // TestTrustAddRejectsUnparseableRecord reproduces the bead's observed
 // defect class: a record the trusted-file parser rejects ("line 1 is
 // invalid") must be refused by trust add too, with the parser's honest
-// error — never accepted, and never a file written. `bad-host` stays to
-// pin the traversal boundary: the host value becomes a file name under
-// bridge/trusted/.
+// error — never accepted, and never a file written. The bad-host subtest
+// pins the traversal boundary with a record whose ONLY defect is the host
+// alias (review-845-r2 P2-2: the host check must run, not be pre-empted
+// by an invalid key — the host value becomes a file name under
+// bridge/trusted/).
 func TestTrustAddRejectsUnparseableRecord(t *testing.T) {
+	key := testHostKey("src-x", "g1")
+	// Two-line record (no host field) so --host is required and the given
+	// alias is the only defect: it reaches validateBridgeIdentifier inside
+	// WriteTrusted, which refuses it before any file is written.
+	validRecord := fmt.Sprintf("generation %s\npublic %x\n", key.Generation, key.Public())
 	for name, tc := range map[string]struct {
-		host string
-		data string
+		host    string
+		data    string
+		wantMsg string
 	}{
-		"bad-record": {host: "src-x", data: "not a record at all\n"},
-		"bad-host":   {host: "Bad Host", data: "host=x generation=1\npublic=00\n"},
+		"bad-record": {host: "src-x", data: "not a record at all\n", wantMsg: "line 1 is invalid"},
+		"bad-host":   {host: "../x", data: validRecord, wantMsg: "trusted source host"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			root := newBridgeRoot(t, "claude")
@@ -187,10 +243,12 @@ func TestTrustAddRejectsUnparseableRecord(t *testing.T) {
 			if err == nil {
 				t.Fatalf("runTrustAdd(%s) = nil, want refusal", name)
 			}
+			if !strings.Contains(err.Error(), tc.wantMsg) {
+				t.Fatalf("runTrustAdd(%s) error = %q, want it to name %q", name, err, tc.wantMsg)
+			}
 			if _, err := os.Lstat(bridge.TrustedPath(root, tc.host)); !os.IsNotExist(err) {
 				t.Fatalf("trusted file written despite refusal: %v", err)
 			}
 		})
 	}
-	_ = ed25519.PublicKeySize
 }

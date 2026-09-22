@@ -138,7 +138,11 @@ for that host. Provision the peer's trust with
 `amq-bridge trust add --host <source_host>` on the destination, fed the
 peer's public key record (never a private seed). Rotation re-runs the same
 command with `--replace`, which renames the new record over the file
-atomically and refuses a generation downgrade. The file holds one active
+atomically and refuses a generation downgrade. Generations are unsigned
+decimal integers as `identity init` mints them and are compared
+numerically (9 → 10 accepted, 10 → 9 refused); non-decimal labels have no
+defined order and `--replace` refuses them rather than guessing. The file
+holds one active
 generation; envelopes naming an older generation are refused once it is
 replaced. Verify the generation named in each envelope.
 Do not use a per-generation `trusted/<source_host>/<generation>` directory

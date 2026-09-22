@@ -57,7 +57,12 @@ func runTrustAdd(args []string, stdin io.Reader) error {
 	}
 	recordHost, generation, pub, err := bridge.ParsePublicIdentity(data)
 	if err != nil {
-		return fmt.Errorf("trusted host %s: %w", strings.TrimSpace(*host), err)
+		// No host prefix when the operator gave none (review-845-r2 P2-3:
+		// the README-recommended invocation has no --host).
+		if h := strings.TrimSpace(*host); h != "" {
+			return fmt.Errorf("trusted host %s: %w", h, err)
+		}
+		return err
 	}
 	// The record's host field is the sender's bridge/host-id — the exact
 	// name apply-file looks the trust file up by. Default to it and refuse
