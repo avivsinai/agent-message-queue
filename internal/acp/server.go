@@ -106,6 +106,10 @@ type turnState struct {
 	// done is closed when the turn is settled from outside the wait loop
 	// (cancel or stream close).
 	done chan struct{}
+	// ready is closed once delivery has finished and prompt is set (or
+	// delivery failed). A steer arriving before then waits for it, so it is
+	// never classified before the turn's prompt identity exists.
+	ready chan struct{}
 	// outcome is "" until settled, then "replied", "session_cancelled",
 	// "client_disconnected" or "reply_timeout".
 	outcome string
@@ -214,14 +218,22 @@ func (s *Server) Serve(in io.Reader, out io.Writer) error {
 		}
 		lineCopy := append([]byte(nil), line...)
 		if requestMethod(lineCopy) == "session/prompt" {
+			// Validate and reserve the turn here, on the reader, before any
+			// later line is handled; only delivery and the wait run apart.
+			resp, run, ok := s.beginPromptLine(lineCopy)
+			if run == nil {
+				if ok {
+					recordWriteErr(writer.write(resp))
+				}
+				continue
+			}
 			pending.Add(1)
 			go func() {
 				defer pending.Done()
-				resp, ok := s.handleWithNotify(lineCopy, writer.write)
-				if !ok {
-					return
+				resp := run(writer.write)
+				if ok {
+					recordWriteErr(writer.write(resp))
 				}
-				recordWriteErr(writer.write(resp))
 			}()
 			continue
 		}
@@ -280,6 +292,34 @@ func (s *Server) handleWithNotify(line []byte, emit func(any) error) (response, 
 }
 
 // handle turns one request line into at most one response.
+// beginPromptLine is handleWithNotify for session/prompt split in two: the
+// request is parsed, validated and its turn reserved now; the returned run
+// completes it. ok reports whether the request expects a response.
+func (s *Server) beginPromptLine(line []byte) (response, func(emit func(any) error) response, bool) {
+	var req request
+	if err := json.Unmarshal(line, &req); err != nil {
+		return errorResponse(nil, newRPCError(codeParseError, "invalid JSON: %v", err)), nil, true
+	}
+	if req.JSONRPC != jsonRPCVersion {
+		return errorResponse(req.ID, newRPCError(codeInvalidRequest, "request must set jsonrpc %q and a method", jsonRPCVersion)), nil, true
+	}
+	hasID := req.ID != nil
+	run, result, rpcErr := s.beginPrompt(req.Params)
+	if run == nil {
+		if rpcErr != nil {
+			return errorResponse(req.ID, rpcErr), nil, hasID
+		}
+		return response{JSONRPC: jsonRPCVersion, ID: req.ID, Result: result}, nil, hasID
+	}
+	return response{}, func(emit func(any) error) response {
+		result, rpcErr := run(emit)
+		if rpcErr != nil {
+			return errorResponse(req.ID, rpcErr)
+		}
+		return response{JSONRPC: jsonRPCVersion, ID: req.ID, Result: result}
+	}, hasID
+}
+
 func (s *Server) handle(line []byte) (response, bool) {
 	return s.handleWithNotify(line, nil)
 }
@@ -487,45 +527,63 @@ type amqDelivery struct {
 }
 
 func (s *Server) prompt(params json.RawMessage, emit func(any) error) (any, *rpcError) {
+	run, result, rpcErr := s.beginPrompt(params)
+	if run == nil {
+		return result, rpcErr
+	}
+	return run(emit)
+}
+
+// beginPrompt validates a session/prompt and reserves its turn. It runs on
+// the reader goroutine before the prompt's own goroutine starts, so a
+// session/cancel or steer read right after the prompt always finds the turn
+// (codex #860: reserving inside the goroutine let an immediate cancel see no
+// turn and be lost). It returns a run function for the slow part (delivery
+// and the bounded wait), or an immediate result or error.
+func (s *Server) beginPrompt(params json.RawMessage) (func(emit func(any) error) (any, *rpcError), any, *rpcError) {
 	s.mu.Lock()
 	ready := s.ready
 	s.mu.Unlock()
 	if !ready {
-		return nil, newRPCError(codeInvalidRequest, "initialize must complete before session/prompt")
+		return nil, nil, newRPCError(codeInvalidRequest, "initialize must complete before session/prompt")
 	}
 	var parsed promptParams
 	if err := decodeParams(params, &parsed, false); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	text, rpcErr := promptText(parsed.Prompt)
 	if rpcErr != nil {
-		return nil, rpcErr
+		return nil, nil, rpcErr
 	}
 	eventID, rpcErr := resolveEventID(parsed.Meta)
 	if rpcErr != nil {
-		return nil, rpcErr
+		return nil, nil, rpcErr
 	}
 
 	s.mu.Lock()
 	if s.streamClosed {
 		s.mu.Unlock()
-		return disconnectedRefusal(), nil
+		return nil, disconnectedRefusal(), nil
 	}
 	session, turn, rpcErr := s.beginTurnLocked(parsed.SessionID)
 	s.mu.Unlock()
 	if rpcErr != nil {
-		return nil, rpcErr
+		return nil, nil, rpcErr
 	}
-	defer s.finishTurn(session, turn)
-
-	delivery, err := DeliverCockpitPrompt(s.cfg, text, session.Thread, eventID)
-	if err != nil {
-		return nil, newRPCError(codeInternalError, "deliver prompt to %s: %v", s.cfg.To, err)
-	}
-	s.mu.Lock()
-	turn.prompt = delivery.MessageID
-	s.mu.Unlock()
-	return s.waitForReply(parsed.SessionID, delivery, turn, emit)
+	return func(emit func(any) error) (any, *rpcError) {
+		defer s.finishTurn(session, turn)
+		delivery, err := DeliverCockpitPrompt(s.cfg, text, session.Thread, eventID)
+		s.mu.Lock()
+		if err == nil {
+			turn.prompt = delivery.MessageID
+		}
+		close(turn.ready)
+		s.mu.Unlock()
+		if err != nil {
+			return nil, newRPCError(codeInternalError, "deliver prompt to %s: %v", s.cfg.To, err)
+		}
+		return s.waitForReply(parsed.SessionID, delivery, turn, emit)
+	}, nil, nil
 }
 
 func (s *Server) beginTurnLocked(sessionID string) (*sessionState, *turnState, *rpcError) {
@@ -536,7 +594,7 @@ func (s *Server) beginTurnLocked(sessionID string) (*sessionState, *turnState, *
 	if session.turn != nil {
 		return nil, nil, newRPCError(codeInvalidRequest, "sessionId %q already has an in-flight prompt", sessionID)
 	}
-	session.turn = &turnState{done: make(chan struct{})}
+	session.turn = &turnState{done: make(chan struct{}), ready: make(chan struct{})}
 	return session, session.turn, nil
 }
 
@@ -825,7 +883,14 @@ type steeringResult struct {
 const (
 	SteeringInjected       = "injected"
 	SteeringStartedNewTurn = "startedNewTurn"
+	// SteeringDuplicate is a redelivered steer event: the original message
+	// (its id is in _meta.amq) stands, and nothing new was delivered.
+	SteeringDuplicate = "duplicate"
 )
+
+// steerPromptWait bounds how long a steer waits for an in-flight prompt's
+// delivery, a local write, to finish.
+const steerPromptWait = 5 * time.Second
 
 const (
 	steeringBodyPrefix = "[Buzz steer — owner adjusted the task mid-flight]"
@@ -857,6 +922,18 @@ func (s *Server) steering(params json.RawMessage) (any, *rpcError) {
 		s.mu.Unlock()
 		return nil, newRPCError(codeInvalidParams, "unknown sessionId %q", parsed.SessionID)
 	}
+	// A turn whose prompt is still being delivered has no identity yet;
+	// wait for it rather than classify the steer as idle (codex #860).
+	if t := session.turn; t != nil && t.outcome == "" && t.prompt == "" {
+		ready := t.ready
+		s.mu.Unlock()
+		select {
+		case <-ready:
+		case <-time.After(steerPromptWait):
+			return nil, newRPCError(codeInternalError, "steering: the in-flight prompt did not finish delivery in time")
+		}
+		s.mu.Lock()
+	}
 	turnPrompt := ""
 	if t := session.turn; t != nil && t.outcome == "" {
 		turnPrompt = t.prompt
@@ -870,7 +947,13 @@ func (s *Server) steering(params json.RawMessage) (any, *rpcError) {
 	// proof the peer steered or started anything; the evidence fields say
 	// what is proven (committed to the inbox, not drained or started).
 	outcome := SteeringStartedNewTurn
-	if turnPrompt != "" {
+	switch {
+	case delivery.Duplicate:
+		// A replayed steer: nothing new was delivered, and the original
+		// delivery mode belongs to the original event, not to the session's
+		// current state (codex #860 P2).
+		outcome = SteeringDuplicate
+	case turnPrompt != "":
 		outcome = SteeringInjected
 	}
 	return steeringResult{

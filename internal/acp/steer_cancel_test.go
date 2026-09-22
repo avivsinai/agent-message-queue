@@ -3,7 +3,9 @@ package acp
 import (
 	"encoding/json"
 	"fmt"
+	"runtime"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -106,5 +108,48 @@ func TestLateAnswerToCancelledPromptNeverCompletesTheNext(t *testing.T) {
 	reply := result["_meta"].(map[string]any)["amq"].(map[string]any)["reply"]
 	if result["stopReason"] != StopReasonEndTurn || reply != "answer to B" {
 		t.Fatalf("prompt B = %v, want end_turn with B's own answer, never A's late one", result)
+	}
+}
+
+// codex #860 P1 (reproduced by the reviewer at GOMAXPROCS=1): a cancel read
+// right after its prompt found no turn, because the prompt reserved its turn
+// inside its own goroutine, and the prompt then timed out instead of
+// returning cancelled.
+func TestCancelImmediatelyAfterPromptIsNotLost(t *testing.T) {
+	old := runtime.GOMAXPROCS(1)
+	defer runtime.GOMAXPROCS(old)
+	cfg := testConfig(t)
+	s := NewServer(cfg, "test")
+	s.ready = true
+	s.sessions["known"] = &sessionState{ID: "known", Thread: "cockpit/immediate"}
+	replies := serve(t, s, promptRequest(3, "known", "do work"), `{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"known"}}`)
+	var reply struct {
+		Result promptResult `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(replies[0]), &reply); err != nil {
+		t.Fatal(err)
+	}
+	if reply.Result.StopReason != StopReasonCancelled {
+		t.Fatalf("stopReason = %q reason = %q, want cancelled", reply.Result.StopReason, reply.Result.Meta.AMQ.Reason)
+	}
+}
+
+// codex #860 P2: a replayed steer event must not be reclassified from the
+// session's current state; it reports duplicate and delivers nothing new.
+func TestReplayedSteerReportsDuplicate(t *testing.T) {
+	cfg := testConfig(t)
+	live, sessionID, _ := newLiveSession(t, cfg, "steer-dup")
+	req := func(id int) string {
+		return fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"_session/steering","params":{"sessionId":%q,"prompt":"note","_meta":{"nostr":{"eventId":%q}}}}`, id, sessionID, strings.Repeat("a", 64))
+	}
+	live.send(req(3))
+	first := live.readUntilResult()["result"].(map[string]any)
+	if first["outcome"] != SteeringStartedNewTurn {
+		t.Fatalf("first steer outcome = %v", first["outcome"])
+	}
+	live.send(req(4))
+	second := live.readUntilResult()["result"].(map[string]any)
+	if second["outcome"] != SteeringDuplicate {
+		t.Fatalf("replayed steer outcome = %v, want %s", second["outcome"], SteeringDuplicate)
 	}
 }
