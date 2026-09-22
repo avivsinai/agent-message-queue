@@ -64,6 +64,8 @@ func TestInstallNoLoadWritesPlist(t *testing.T) {
 		RegistryPath: filepath.Join(dir, "registry.json"),
 		AMQPath:      "/bin/echo",
 		Interval:     time.Second,
+		StdoutPath:   filepath.Join(dir, "out.log"),
+		StderrPath:   filepath.Join(dir, "err.log"),
 		Load:         false,
 	}
 	if err := Install(context.Background(), opts); err != nil {
@@ -174,6 +176,8 @@ func TestInstallRefusesForeignPlist(t *testing.T) {
 		RegistryPath: filepath.Join(dir, "registry.json"),
 		AMQPath:      "/bin/echo",
 		Interval:     time.Second,
+		StdoutPath:   filepath.Join(dir, "out.log"),
+		StderrPath:   filepath.Join(dir, "err.log"),
 		Load:         false,
 	}
 	if err := Install(context.Background(), opts); err == nil {
@@ -223,8 +227,8 @@ func TestInstallAndUninstallRequireEveryOwnershipMarker(t *testing.T) {
 		RegistryPath: "/tmp/registry.json",
 		AMQPath:      "/bin/echo",
 		Interval:     time.Second,
-		StdoutPath:   "/tmp/out.log",
-		StderrPath:   "/tmp/err.log",
+		StdoutPath:   filepath.Join(t.TempDir(), "out.log"),
+		StderrPath:   filepath.Join(t.TempDir(), "err.log"),
 	}
 	owned := BuildPlist(base)
 	markers := []string{
@@ -384,6 +388,8 @@ func TestUnrelatedPlistWithMatchingSubstringsIsNotOwned(t *testing.T) {
 		RegistryPath: filepath.Join(dir, "registry.json"),
 		AMQPath:      "/bin/echo",
 		Interval:     time.Second,
+		StdoutPath:   filepath.Join(dir, "out.log"),
+		StderrPath:   filepath.Join(dir, "err.log"),
 		Load:         false,
 	}
 	if err := Install(context.Background(), opts); err == nil {
