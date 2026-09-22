@@ -122,21 +122,22 @@ func BuildFrame(from, body string) (*Frame, error) {
 	}, nil
 }
 
-// EncodeFrames renders the auth line (optional) and the frame line with
+// EncodeFrames renders the mandatory auth line and the frame line with
 // compact separators, each \n-terminated — the pinned line-delimited JSON.
 func EncodeFrames(token string, f *Frame) ([]byte, error) {
 	var out []byte
-	if token != "" {
-		if !peerTokenRe.MatchString(token) {
-			return nil, fmt.Errorf("peer token does not match the pinned [0-9a-f]{32} shape")
-		}
-		a, err := json.Marshal(authLine{Type: "auth", Token: token})
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, a...)
-		out = append(out, '\n')
+	// The auth line is mandatory: an empty token is a fail-open shape
+	// (architect PR2 note) — frames with no auth line must never be
+	// emitted, so an empty token is refused, not skipped.
+	if !peerTokenRe.MatchString(token) {
+		return nil, fmt.Errorf("peer token does not match the pinned [0-9a-f]{32} shape")
 	}
+	a, err := json.Marshal(authLine{Type: "auth", Token: token})
+	if err != nil {
+		return nil, err
+	}
+	out = append(out, a...)
+	out = append(out, '\n')
 	line, err := json.Marshal(f)
 	if err != nil {
 		return nil, err

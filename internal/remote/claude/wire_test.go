@@ -87,6 +87,11 @@ func TestEncodeFramesAuthAndCompact(t *testing.T) {
 	if _, err := EncodeFrames("short", f); err == nil {
 		t.Fatal("accepted a malformed peer token")
 	}
+	// An empty token is refused too (architect PR2 note): frames with no
+	// auth line are a fail-open shape and must never be emitted.
+	if _, err := EncodeFrames("", f); err == nil {
+		t.Fatal("accepted an empty peer token — would emit frames with no auth line")
+	}
 }
 
 func TestReadPeerToken(t *testing.T) {
