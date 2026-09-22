@@ -18,7 +18,7 @@ import (
 func runReply(args []string) error {
 	fs := flag.NewFlagSet("reply", flag.ContinueOnError)
 	common := addCommonFlags(fs)
-	idFlag := fs.String("id", "", "Message ID to reply to")
+	idFlag := fs.String("id", "", "Message ID to reply to (a bridged message may be addressed by its header ID even though it is stored under a transfer filename)")
 	bodyFlag := fs.String("body", "", "Body string, @file, or - / empty to read stdin")
 	allowEmptyFlag := fs.Bool("allow-empty", false, "Allow sending a blank body (otherwise an empty body is rejected)")
 	subjectFlag := fs.String("subject", "", "Override subject (default: Re: <original>)")
@@ -37,6 +37,10 @@ func runReply(args []string) error {
 		"Finds the original message, sets to/thread/refs automatically.",
 		"Cross-session replies are routed via reply_to header.",
 		"To follow up on a sent cross-session message, use amq send --session instead.",
+		"",
+		"--id also resolves bridged messages by their header ID (stored under a transfer filename). If the ID",
+		"matches more than one stored message, the command fails with a general error (exit 1) naming both",
+		"paths; a missing message exits 3.",
 		"Use --wait-for drained to block until the recipient ingests the reply,",
 		"mirroring amq send --wait-for.")
 	if handled, err := parseFlags(fs, args, usage); err != nil {

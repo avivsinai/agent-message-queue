@@ -73,6 +73,13 @@ func findMessageDeliveryRoot(root *fsq.DeliveryRoot, agent, filename string, inc
 		dir := filepath.Dir(candidate.path)
 		entries, err := root.ReadDir(dir)
 		if err != nil {
+			if os.IsNotExist(err) {
+				// A missing candidate directory is definitive absence for that
+				// box, not filesystem uncertainty: fall through so a handle
+				// with no mailbox reports not-found (exit 3), not a raw open
+				// failure (exit 1).
+				continue
+			}
 			return "", "", fmt.Errorf("scan messages in %s: %w", dir, err)
 		}
 		for _, entry := range entries {

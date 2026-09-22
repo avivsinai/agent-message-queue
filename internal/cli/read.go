@@ -26,6 +26,11 @@ func runRead(args []string) error {
 		"",
 		"If the message is in inbox/new, AMQ only moves it to inbox/cur after parse and header validation succeed.",
 		"If the message in inbox/new is corrupt or malformed, AMQ moves it to DLQ and emits a dlq receipt.",
+		"",
+		"--id also resolves bridged messages by their header ID: messages delivered by amq-bridge keep",
+		"the header ID but are stored under a transfer filename (xfer-<host>-<transfer>.md). If the ID",
+		"matches more than one stored message, the command fails with a general error (exit 1) naming",
+		"both paths; a missing message exits 3.",
 	)
 	if handled, err := parseFlags(fs, args, usage); err != nil {
 		return err
