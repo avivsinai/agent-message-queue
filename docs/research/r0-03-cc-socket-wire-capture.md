@@ -203,8 +203,8 @@ Claude act, 'refuse' opts t…"`, plus a `default` UI value that clears the key)
   a second default-on gate `tengu_cuddly_willow`; sockets-dir vetting failures
   refuse to bind (fail-closed). When messaging is off, parked messages drop with
   "parked peer message(s) (cross-session messaging disabled)". `[binary]`
-  (Note: this capture ran **before** the version bump to 2.1.273 documented in the
-  manifest; all `[binary]` statements here are against the exact 2.1.278 build.)
+  (Note: all `[binary]` statements here are against the exact 2.1.278 build, which
+  is also the `claude` version recorded in the compat manifest.)
 
 **Required user-level value for AMQ: none** — defaults deliver. Operators who want
 supervision can set `crossSessionInbound: "hold"` (user or managed scope); AMQ's
