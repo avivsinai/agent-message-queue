@@ -62,10 +62,16 @@ func TestDeliverPendingCancelBeforePublicationIsSafe(t *testing.T) {
 		a.client.Store(real)
 		a.client.Load()
 	}
+	// Close BEFORE waiting on the readers: the fake app server's frame
+	// channel is cap-16 and never drained, so past 16 unanswered frames a
+	// reader's turn/interrupt Call would park for its full 20s ctx — the
+	// wait would inherit that stall. Closing first fails any in-flight or
+	// subsequent Call immediately (review-842-r1 P1, reproduced with a 1ms
+	// writer yield).
+	_ = real.Close()
 	close(stop)
 	wg.Wait()
 	_ = srv
-	_ = real.Close()
 }
 
 // bk5Key is the correlation key the spawned cancel carries; deliverPendingCancel
