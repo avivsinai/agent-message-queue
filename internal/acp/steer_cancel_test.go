@@ -20,6 +20,9 @@ func steeringRequest(id int, sessionID, text string) string {
 // with the peer's reply.
 func TestSteeringDuringTurnIsInjectedUrgent(t *testing.T) {
 	cfg := testConfig(t)
+	// The turn must stay open across the steer and the reply; the 40ms
+	// package default expired first under load (cursor's pre-push run).
+	cfg.TurnTimeout = 5 * time.Second
 	live, sessionID, threadID := newLiveSession(t, cfg, "steer-live")
 	live.send(promptRequest(3, sessionID, "build the thing"))
 	live.readUntilUpdate("agent_thought_chunk")
@@ -60,6 +63,7 @@ func TestSteeringWhileIdleStartsNewTurn(t *testing.T) {
 // with the typed cancelled stop; the queued prompt stays in the inbox.
 func TestCancelEndsInFlightTurnAsCancelled(t *testing.T) {
 	cfg := testConfig(t)
+	cfg.TurnTimeout = 5 * time.Second // the cancel, not the timeout, must end the turn
 	live, sessionID, _ := newLiveSession(t, cfg, "cancel-live")
 	live.send(promptRequest(3, sessionID, "long task"))
 	live.readUntilUpdate("agent_thought_chunk")
@@ -79,7 +83,7 @@ func TestCancelEndsInFlightTurnAsCancelled(t *testing.T) {
 // than B, but it refs A, so it must never complete B.
 func TestLateAnswerToCancelledPromptNeverCompletesTheNext(t *testing.T) {
 	cfg := testConfig(t)
-	cfg.TurnTimeout = 300 * time.Millisecond
+	cfg.TurnTimeout = 5 * time.Second
 	live, sessionID, threadID := newLiveSession(t, cfg, "late-answer")
 	live.send(promptRequest(3, sessionID, "prompt A"))
 	live.readUntilUpdate("agent_thought_chunk")
@@ -91,9 +95,16 @@ func TestLateAnswerToCancelledPromptNeverCompletesTheNext(t *testing.T) {
 
 	live.send(promptRequest(4, sessionID, "prompt B"))
 	live.readUntilUpdate("agent_thought_chunk")
+	promptB, ok := newestPromptOnThread(cfg.Root, cfg.To, threadID)
+	if !ok || promptB == promptA {
+		t.Fatalf("setup: prompt B not delivered (got %q, A %q)", promptB, promptA)
+	}
 	deliverReplyWithRefs(t, cfg, threadID, "late answer to A", promptA)
+	time.Sleep(3 * cfg.PollInterval) // give the wait loop a chance to (wrongly) take A's answer
+	deliverReplyWithRefs(t, cfg, threadID, "answer to B", promptB)
 	result := live.readUntilResult()["result"].(map[string]any)
-	if result["stopReason"] == StopReasonEndTurn {
-		t.Fatalf("prompt B completed with A's late answer: %v", result)
+	reply := result["_meta"].(map[string]any)["amq"].(map[string]any)["reply"]
+	if result["stopReason"] != StopReasonEndTurn || reply != "answer to B" {
+		t.Fatalf("prompt B = %v, want end_turn with B's own answer, never A's late one", result)
 	}
 }
