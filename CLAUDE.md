@@ -48,7 +48,7 @@ own worktrees, dependency scheduling, task decomposition, and PR landing.
 ## Build and Development Commands
 
 ```bash
-make build          # go build amq, amq-keepalive, amq-bridge, amq-acp
+make build          # go build amq, amq-keepalive, amq-bridge, amq-acp, amq-remote
 make test           # go test ./...
 make fmt            # gofmt -w
 make vet            # go vet
@@ -70,6 +70,7 @@ cmd/amq/             CLI entry point
 cmd/amq-keepalive/   macOS wake supervisor companion
 cmd/amq-bridge/      Cross-host courier companion (apply-file + HTTPS, not Core)
 cmd/amq-acp/         Preview ACP v1 stdio companion (not Core)
+cmd/amq-remote/      Remote-session companion (not Core)
 internal/cli/        Command handlers and routing policy
 internal/fsq/        Maildir delivery, atomic operations, and scans
 internal/format/     JSON frontmatter plus Markdown message serialization
@@ -80,6 +81,7 @@ internal/launch/     Plans, adapters, trust, leases, bindings, and resume state
 internal/keepalive/  Companion registry, adapters, hooks, and supervision
 internal/bridge/     Envelope, auth, and crash-idempotent local apply
 internal/acp/        ACP v1 session and prompt delivery
+internal/remote/     Endpoint, adapters, and request store for amq-remote
 internal/sessionguard Shared fail-closed session decision table
 internal/swarm/      Claude Code Agent Teams interoperability
 internal/thread/     Cross-mailbox thread collection
@@ -141,7 +143,8 @@ Wake capability (no silent downgrade) is
 [the wake capability-vector ADR](docs/adr-wake-capability-vector.md). Remote
 control of a running harness session is
 [the remote-control ADR](docs/adr-remote-control.md), with installed seams in
-[the compatibility manifest](docs/remote-compat.md). Preview
+[the compatibility manifest](docs/remote-compat.md). Operator commands are
+[the amq-remote companion](cmd/amq-remote/README.md). Preview
 ACP v1 is [the amq-acp companion](cmd/amq-acp/README.md).
 
 ## CLI Commands

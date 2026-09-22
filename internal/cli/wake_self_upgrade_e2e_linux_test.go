@@ -45,6 +45,7 @@ func TestLinuxWakeSelfUpgradeRealPTYStableSymlink(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "/usr/bin/script", "-q", "-e", "-c", strings.Join(quoted, " "), "/dev/null")
+	cmd.Dir = wakeSelfUpgradeWorkDir(root)
 	cmd.Env = wakeSelfUpgradeE2EEnv(root, stable, oldBinary, newBinary, oldVersion, newVersion)
 	ptyInput, keepPTYInputOpen, err := os.Pipe()
 	if err != nil {

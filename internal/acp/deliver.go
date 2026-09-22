@@ -11,9 +11,8 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
-// PromptSubject labels prompts arriving over the ACP companion so an operator
-// reading a mailbox can tell where the message came from.
-const PromptSubject = "ACP prompt"
+// CockpitPromptSubject labels prompts delivered on the durable cockpit thread.
+const CockpitPromptSubject = "ACP cockpit prompt"
 
 // Delivery is the durable outcome of one prompt turn. The message is queued in
 // the recipient's inbox; nothing here proves the recipient consumed it.
@@ -21,6 +20,7 @@ type Delivery struct {
 	MessageID string
 	To        string
 	Thread    string
+	Created   time.Time
 	EventID   string
 	State     string
 	Committed bool
@@ -31,15 +31,20 @@ type Delivery struct {
 	Duplicate bool
 }
 
-// DeliverPrompt writes the prompt text into the destination inbox using the
-// ordinary Maildir tmp -> new delivery, so amq list and amq drain observe it
-// exactly like any other message. Recipient and root always come from Config;
-// prompt text, including a Buzz [Context] section, is never treated as
-// authentication or a routing override.
-func DeliverPrompt(cfg Config, body, eventID string) (Delivery, error) {
+// DeliverCockpitPrompt sends a prompt on the stable cockpit thread used by the
+// live ACP bridge. The returned creation time is the lower bound for reply
+// polling, so an older message on the same thread cannot answer this turn.
+func DeliverCockpitPrompt(cfg Config, body, thread, eventID string) (Delivery, error) {
+	return deliver(cfg, body, thread, CockpitPromptSubject, []string{"acp", "cockpit"}, eventID)
+}
+
+func deliver(cfg Config, body, thread, subject string, labels []string, eventID string) (Delivery, error) {
 	body = strings.TrimRight(body, "\n")
 	if strings.TrimSpace(body) == "" {
 		return Delivery{}, fmt.Errorf("prompt contains no text content")
+	}
+	if strings.TrimSpace(thread) == "" {
+		return Delivery{}, fmt.Errorf("message thread is empty")
 	}
 
 	if eventID != "" {
@@ -55,6 +60,8 @@ func DeliverPrompt(cfg Config, body, eventID string) (Delivery, error) {
 			out.Completed = existing.Completed
 			out.Egress = existing.Egress
 			out.Duplicate = true
+			// A replayed turn polls only for replies newer than this call.
+			out.Created = time.Now()
 			return out, nil
 		}
 	}
@@ -64,10 +71,8 @@ func DeliverPrompt(cfg Config, body, eventID string) (Delivery, error) {
 	if err != nil {
 		return Delivery{}, err
 	}
-	thread := p2pThread(cfg.Me, cfg.To)
-	labels := []string{"acp"}
 	if eventID != "" {
-		labels = append(labels, "nostr:"+eventID)
+		labels = append(append([]string(nil), labels...), "nostr:"+eventID)
 	}
 	message := format.Message{
 		Header: format.Header{
@@ -76,7 +81,7 @@ func DeliverPrompt(cfg Config, body, eventID string) (Delivery, error) {
 			From:    cfg.Me,
 			To:      []string{cfg.To},
 			Thread:  thread,
-			Subject: PromptSubject,
+			Subject: subject,
 			Created: now.UTC().Format(time.RFC3339Nano),
 			Labels:  labels,
 		},
@@ -114,6 +119,7 @@ func DeliverPrompt(cfg Config, body, eventID string) (Delivery, error) {
 		MessageID: id,
 		To:        cfg.To,
 		Thread:    thread,
+		Created:   now,
 		EventID:   eventID,
 		State:     DeliveryStateQueued,
 		Committed: true,
@@ -141,15 +147,4 @@ func DeliverPrompt(cfg Config, body, eventID string) (Delivery, error) {
 		return Delivery{}, rememberErr
 	}
 	return out, nil
-}
-
-// p2pThread builds the documented canonical peer thread name so replies sent
-// with amq reply and views from amq thread join the same conversation.
-func p2pThread(a, b string) string {
-	a = strings.ToLower(strings.TrimSpace(a))
-	b = strings.ToLower(strings.TrimSpace(b))
-	if b < a {
-		a, b = b, a
-	}
-	return "p2p/" + a + "__" + b
 }

@@ -22,6 +22,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/config"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/remote/amqio"
+	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
 	"github.com/avivsinai/agent-message-queue/internal/remote/codex"
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/ipc"
@@ -139,6 +140,12 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return finish(stderr, nil, false, code, err)
 	case "doctor":
 		out, code, err = doctor(rest)
+	case "claude":
+		// PR2 Stop-hook bridge: the receiver subcommand is FAIL-OPEN by
+		// contract — exit 0 on ANY error, any parse failure, any panic —
+		// because Claude Code treats exit 2 as a blocking error and a
+		// broken bridge must never hold the target session hostage.
+		return claudeSubcommand(rest, stdin, stdout)
 	default:
 		say(stderr, "unknown command %q\n%s", cmd, usageText)
 		return protocol.ExitUsage
@@ -1425,4 +1432,44 @@ func discoverAndPrint(root, stateDir, manifestFile, codexSocket string, stdout i
 	}
 	printCandidates(stdout, cands)
 	return 0, nil
+}
+
+// claudeSubcommand dispatches the PR2 Stop-hook bridge subcommands. The
+// receiver is fail-open: exit 0 on any error path. install/uninstall are
+// the only subcommands allowed to fail (exit 1) — they run from the
+// sponsor, never from inside Claude Code.
+func claudeSubcommand(args []string, stdin io.Reader, stdout io.Writer) int {
+	if len(args) == 0 {
+		say(os.Stderr, "claude subcommand required (stop-hook | install-stop-hook | uninstall-stop-hook)\n")
+		return protocol.ExitUsage
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return 0 // fail-open even on home resolution failure
+	}
+	switch args[0] {
+	case "stop-hook":
+		return claude.RunStopHookReceiver(home, stdin, stdout)
+	case "install-stop-hook":
+		bin, err := os.Executable()
+		if err != nil {
+			bin = "amq-remote"
+		}
+		if err := claude.InstallStopHook(home, bin); err != nil {
+			say(os.Stderr, "install-stop-hook: %v\n", err)
+			return 1
+		}
+		say(stdout, "stop hook installed\n")
+		return 0
+	case "uninstall-stop-hook":
+		if err := claude.UninstallStopHook(home); err != nil {
+			say(os.Stderr, "uninstall-stop-hook: %v\n", err)
+			return 1
+		}
+		say(stdout, "stop hook removed\n")
+		return 0
+	default:
+		say(os.Stderr, "unknown claude subcommand %q\n", args[0])
+		return protocol.ExitUsage
+	}
 }
