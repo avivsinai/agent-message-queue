@@ -18,7 +18,10 @@ func runShare(t *testing.T, args ...string) (string, string, int) {
 	var stdout, stderr bytes.Buffer
 	code, err := share(args, &stdout, &stderr)
 	if err != nil {
-		t.Fatalf("share %v: %v", args, err)
+		t.Fatalf("share %v: %v (stderr=%q)", args, err, stderr.String())
+	}
+	if code != 0 {
+		t.Fatalf("share %v: exit %d, stderr=%q", args, code, stderr.String())
 	}
 	return stdout.String(), stderr.String(), code
 }
@@ -429,6 +432,9 @@ func TestFullEnrollRenewEnrollAllKinds(t *testing.T) {
 		t.Fatalf("pending not consumed after full enrollment: %v", err)
 	}
 	firstGen := readEnrolledTagsForTest(t, keyDir)
+	if len(firstGen) != len(bodykey.ShareKinds) {
+		t.Fatalf("first generation incomplete: %d tags", len(firstGen))
+	}
 	// Renew: new window, new pending, new generation.
 	out, _, code := runShare(t, "--root", root, "--session", "g1", "--renew")
 	if code != 0 {
@@ -452,6 +458,21 @@ func TestFullEnrollRenewEnrollAllKinds(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(keyDir, "share.pending.json")); err != nil {
 		t.Fatal("pending consumed after ONE renewal enrollment — old generation counted toward completion")
 	}
+	// Retention (verifier P0-1): the still-valid first-generation tags must
+	// SURVIVE the first new-generation enrollment — make-before-break.
+	midGen := readEnrolledTagsForTest(t, keyDir)
+	midKinds := map[uint16]bool{}
+	for _, tf := range midGen {
+		midKinds[tf.Kind] = true
+	}
+	for _, tf := range firstGen {
+		if !midKinds[tf.Kind] {
+			t.Fatalf("first-generation tag for kind %d erased by the first renewal enrollment", tf.Kind)
+		}
+	}
+	if len(midGen) < len(firstGen) {
+		t.Fatalf("renewal dropped tags: %d -> %d", len(firstGen), len(midGen))
+	}
 	// Enroll the remaining four; only now is the new generation complete.
 	enrollRemaining(t, root, "g1", condsByKind, one)
 	if _, err := os.Stat(filepath.Join(keyDir, "share.pending.json")); !os.IsNotExist(err) {
@@ -467,7 +488,26 @@ func TestFullEnrollRenewEnrollAllKinds(t *testing.T) {
 			t.Fatalf("renewed generation kept stale tag for kind %d", tf.Kind)
 		}
 	}
-	_ = firstGen
+}
+
+// enrollOne enrolls a single (kind, conditions) tag.
+func enrollOne(t *testing.T, root, session string, kind uint16, conds string) {
+	t.Helper()
+	keyDir := filepath.Join(root, "extensions", "remote", "keys", session)
+	k, err := bodykey.Load(filepath.Join(keyDir, "body.key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tagPath := filepath.Join(t.TempDir(), "tag.json")
+	doc := `{"kind":` + jsonNumber(int(kind)) + `,"owner_pubkey":"` + ownerPubHex + `","conditions":"` + conds + `","sig":"` + ownerSignFor(t, k.PublicKeyHex(), conds) + `"}`
+	if err := os.WriteFile(tagPath, []byte(doc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	errBuf := &bytes.Buffer{}
+	code2, err2 := share([]string{"--root", root, "--session", session, "--tag-file", tagPath}, &bytes.Buffer{}, errBuf)
+	if err2 != nil || code2 != 0 {
+		t.Fatalf("enroll kind %d refused: code=%d err=%v stderr=%q", kind, code2, err2, errBuf.String())
+	}
 }
 
 func enrollRemaining(t *testing.T, root, session string, condsByKind map[uint16]string, done uint16) {
@@ -483,11 +523,10 @@ func enrollRemaining(t *testing.T, root, session string, condsByKind map[uint16]
 		}
 		tagPath := filepath.Join(t.TempDir(), "tag.json")
 		doc := `{"kind":` + jsonNumber(int(kind)) + `,"owner_pubkey":"` + ownerPubHex + `","conditions":"` + conds + `","sig":"` + ownerSignFor(t, k.PublicKeyHex(), conds) + `"}`
-		_ = os.WriteFile(tagPath, []byte(doc), 0o600)
-		var stderr bytes.Buffer
-		if code, _ := share([]string{"--root", root, "--session", session, "--tag-file", tagPath}, &bytes.Buffer{}, &stderr); code != 0 {
-			t.Fatalf("renewal enroll kind %d refused: %s", kind, stderr.String())
+		if err := os.WriteFile(tagPath, []byte(doc), 0o600); err != nil {
+			t.Fatal(err)
 		}
+		enrollOne(t, root, session, kind, conds)
 	}
 }
 
@@ -570,5 +609,123 @@ func TestShareRejectsUppercaseSignature(t *testing.T) {
 	}
 	if gen, err := readEnrolledState(keyDir); err != nil || gen != nil {
 		t.Fatal("refused tag mutated enrolled state")
+	}
+}
+
+// TestBodyKeySymlinkLeafRefused pins verifier P1-1: a body.key symlinked to
+// an existing out-of-root key is refused by Load (both plain share and
+// enrollment), not adopted.
+func TestBodyKeySymlinkLeafRefused(t *testing.T) {
+	root := t.TempDir()
+	// Foreign valid key outside the root.
+	foreignDir := t.TempDir()
+	foreign, err := bodykey.LoadOrMint(foreignDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runShare(t, "--root", root, "--session", "sl1")
+	keyDir := filepath.Join(root, "extensions", "remote", "keys", "sl1")
+	if err := os.Remove(filepath.Join(keyDir, "body.key")); err != nil {
+		t.Fatal(err)
+	}
+	// Drop the legit pending window from the first share so the only thing
+	// under test is the symlink adoption.
+	if err := os.Remove(filepath.Join(keyDir, "share.pending.json")); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(foreignDir, "body.key"), filepath.Join(keyDir, "body.key")); err != nil {
+		t.Skipf("cannot symlink here: %v", err)
+	}
+	var stderr bytes.Buffer
+	if code, _ := share([]string{"--root", root, "--session", "sl1"}, &bytes.Buffer{}, &stderr); code == 0 {
+		t.Fatalf("symlinked body.key adopted; stderr: %s", stderr.String())
+	}
+	// The adopted key must not appear anywhere in session state.
+	if _, err := os.Stat(filepath.Join(keyDir, "share.pending.json")); err == nil {
+		t.Fatal("pending window minted for the symlinked foreign key")
+	}
+	_ = foreign
+}
+
+// TestPlainShareReprintsOutstanding pins verifier P0-1's flow fix: mid-renewal
+// (one new kind enrolled), plain share reprints the OUTSTANDING pending
+// preimages instead of only the enrolled state, and the old generation
+// survives.
+func TestPlainShareReprintsOutstanding(t *testing.T) {
+	root := t.TempDir()
+	runShare(t, "--root", root, "--session", "o1")
+	enrollAllPending(t, root, "o1")
+	keyDir := filepath.Join(root, "extensions", "remote", "keys", "o1")
+	firstGen := readEnrolledTagsForTest(t, keyDir)
+	out, _, code := runShare(t, "--root", root, "--session", "o1", "--renew")
+	if code != 0 {
+		t.Fatal("renew refused")
+	}
+	condsByKind := pendingConditions(t, out)
+	doneKind := uint16(20003)
+	enrollOne(t, root, "o1", doneKind, condsByKind[doneKind])
+	// Plain share now: must print outstanding preimages for the other 4.
+	out2, _, code := runShare(t, "--root", root, "--session", "o1")
+	if code != 0 {
+		t.Fatal("plain share refused mid-renewal")
+	}
+	if !strings.Contains(out2, "outstanding preimages (4") {
+		t.Fatalf("plain share did not reprint outstanding preimages:\n%s", out2)
+	}
+	// Old generation survived (all five kinds still present, still valid).
+	midGen := readEnrolledTagsForTest(t, keyDir)
+	seen := map[uint16]bool{}
+	for _, tf := range midGen {
+		seen[tf.Kind] = true
+	}
+	for _, tf := range firstGen {
+		if !seen[tf.Kind] {
+			t.Fatalf("mid-renewal enrolled set lost kind %d", tf.Kind)
+		}
+	}
+	// Finish enrollment from the REPRINTED output; completion works without
+	// another renew. The one kind already enrolled (done) must not be
+	// re-enrolled.
+	enrollRemaining(t, root, "o1", condsByKind, doneKind)
+	gen, gerr := readEnrolledState(keyDir)
+	if gerr != nil {
+		t.Fatal(gerr)
+	}
+	enrolledConds := map[uint16]string{}
+	for _, tf := range gen.Tags {
+		enrolledConds[tf.Kind] = tf.Conditions
+	}
+	if !gen.Complete {
+		t.Fatalf("renewed generation not complete: %+v", gen)
+	}
+	if _, err := os.Stat(filepath.Join(keyDir, "share.pending.json")); !os.IsNotExist(err) {
+		t.Fatalf("pending not consumed after completing the renewal: %v", err)
+	}
+}
+
+// TestDryRunPrintsPendingPreimages pins verifier P1-3: with a pending window,
+// --dry-run prints the ENROLLABLE preimages (they match the pending
+// conditions).
+func TestDryRunPrintsPendingPreimages(t *testing.T) {
+	root := t.TempDir()
+	runShare(t, "--root", root, "--session", "d3")
+	keyDir := filepath.Join(root, "extensions", "remote", "keys", "d3")
+	pendingTags, _, err := readSharePending(keyDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	k, err := bodykey.Load(filepath.Join(keyDir, "body.key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, _, code := runShare(t, "--root", root, "--session", "d3", "--dry-run")
+	if code != 0 {
+		t.Fatal("dry-run refused")
+	}
+	for _, pt := range pendingTags {
+		want := k.PreimageHex(pt.Conditions)
+		if !strings.Contains(out, want) {
+			t.Fatalf("dry-run output missing enrollable preimage for kind %d:\n%s", pt.Kind, out)
+		}
 	}
 }

@@ -76,7 +76,34 @@ var ErrWrongFormat = errors.New("not a body key file")
 // Load reads and validates a body key file. The scalar must be a 64-char
 // lowercase hex BIP340 scalar in [1, n−1]; the optional `public` line, when
 // present, must equal the derived x-only pubkey.
+// errSymlinkedKey refuses a symlinked key path: the key material must live
+// at the owned path inside the root, never behind a link that can point
+// outside it (verifier P1-1: Load/Stat follow symlinks and would adopt an
+// out-of-root key silently).
+var errSymlinkedKey = errors.New("body key path is a symlink; refusing")
+
+// lstatKeyLeaf Lstats the key path: it must be a regular file (or absent).
+func lstatKeyLeaf(path string) error {
+	fi, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%w: %s", errSymlinkedKey, path)
+	}
+	if !fi.Mode().IsRegular() {
+		return fmt.Errorf("body key path %s is not a regular file", path)
+	}
+	return nil
+}
+
 func Load(path string) (*BodyKey, error) {
+	if err := lstatKeyLeaf(path); err != nil {
+		return nil, err
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -146,6 +173,9 @@ func parse(content string) (*BodyKey, error) {
 // never overwritten — one keypair per shared session, minted once.
 func Mint(dir string) (*BodyKey, error) {
 	keyPath := filepath.Join(dir, "body.key")
+	if err := lstatKeyLeaf(keyPath); err != nil {
+		return nil, err // symlinked leaf: confinement refusal, not mint-once
+	}
 	if _, err := os.Stat(keyPath); err == nil {
 		return nil, fmt.Errorf("body key already exists at %s: mint once per shared session, use renew for the tag", keyPath)
 	} else if !errors.Is(err, os.ErrNotExist) {
