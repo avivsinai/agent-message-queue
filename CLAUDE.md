@@ -247,7 +247,7 @@ make check-skills
 ```
 
 Opt-in live proofs (`AMQ_CMUX_LIVE`, `AMQ_GHOSTTY_LIVE`, `AMQ_CLAUDE_LIVE`,
-`AMQ_CODEX_LIVE`) skip unless the env is `1`. They are not
+`AMQ_CODEX_LIVE`, `AMQ_TMUX_LIVE`) skip unless the env is `1`. They are not
 part of `make ci`. Commands are in
 [Contributing: live proofs](CONTRIBUTING.md#live-proofs-opt-in).
 
