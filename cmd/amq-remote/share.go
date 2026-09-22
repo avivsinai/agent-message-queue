@@ -349,7 +349,10 @@ func refuseSymlinkedState(keyDir string) error {
 	pendingPath, enrolledPath := sharePaths(keyDir)
 	for _, p := range []string{pendingPath, filepath.Join(keyDir, stagedName), enrolledPath} {
 		if err := lstatStateLeaf(p); err != nil {
-			return protocol.Refuse(protocol.CodeInvalid, "state file %s: %v", p, err)
+			// The typed stateLeafError already renders "state file <p>: …",
+			// so the wrapper must not duplicate the path; RefuseWrap keeps the
+			// errors.As chain to the typed error (r5 review P2-2).
+			return protocol.RefuseWrap(protocol.CodeInvalid, err, "%s", err)
 		}
 	}
 	return nil
@@ -646,32 +649,17 @@ func writeShareTag(keyDir string, pending []shareTagFile, tf *shareTagFile) erro
 // removeStateLeaf removes one state leaf, propagating failures with the
 // committed-state distinction (verifier r4 P2-4): the publication has
 // already been renamed into place, so a failed cleanup must reach the
-// operator without suggesting the generation is lost. An empty directory
-// accidentally standing where the leaf belongs is removed too.
+// operator without suggesting the generation is lost.
 func removeStateLeaf(path string) error {
 	err := os.Remove(path)
 	if err == nil || errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
-	if removeErr := removeEmptyDir(path); removeErr == nil {
-		return nil
-	}
+	// No fallback: a failed removal propagates with the committed-state
+	// text for every file shape (r5 review P1-1 — the removeEmptyDir
+	// fallback returned nil for a regular file, silently discarding the
+	// failure; os.Remove already removes an empty directory itself).
 	return fmt.Errorf("cleanup after publication: removing %s: %w (published generation is committed)", path, err)
-}
-
-func removeEmptyDir(path string) error {
-	fi, err := os.Lstat(path)
-	if err != nil || !fi.IsDir() {
-		return err
-	}
-	entries, err := os.ReadDir(path)
-	if err != nil || len(entries) > 0 {
-		if err == nil {
-			err = errors.New("not empty")
-		}
-		return err
-	}
-	return os.Remove(path)
 }
 
 // stagedName is the accumulation file for signed-but-unpublished tags.

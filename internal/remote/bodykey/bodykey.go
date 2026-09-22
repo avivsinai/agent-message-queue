@@ -195,6 +195,13 @@ func Mint(dir string) (*BodyKey, error) {
 		return nil, werr
 	}
 	pubPath := filepath.Join(dir, "body.pub")
+	// Same leaf-confinement rule as body.key (r5 review P1-2): a symlink at
+	// body.pub would otherwise be followed and an out-of-root file truncated
+	// silently. Nothing guards this write before Mint's first call, so the
+	// check must live here, not only in Load.
+	if err := lstatKeyLeaf(pubPath); err != nil {
+		return nil, err
+	}
 	if err := os.WriteFile(pubPath, []byte(k.PublicKeyHex()+"\n"), 0o644); err != nil {
 		return nil, err
 	}

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -1407,90 +1408,42 @@ func TestDoctorRefusesSymlinkedStaged(t *testing.T) {
 	}
 }
 
-// TestCleanupFailureAfterPublicationPropagates pins verifier r4 P2-4: a
-// failing cleanup os.Remove after the share.json rename is propagated to
-// the caller with the committed-state distinction (the error text names
-// the file and states the generation is committed).
+// TestCleanupFailureAfterPublicationPropagates pins verifier r5 P1-1:
+// removeStateLeaf propagates the removal error for an ORDINARY REGULAR
+// file — the exact input the deleted removeEmptyDir fallback silently
+// discarded (Lstat succeeded, IsDir false, nil returned) — and the error
+// carries the committed-state text. Probed at the helper seam with a
+// regular file in a read-only parent directory (portable unlink
+// blocker); the verifier's live binary run proved the two publication
+// sites use this helper (share.go:637/:641), and the three reconcile
+// sites propagate separately.
 func TestCleanupFailureAfterPublicationPropagates(t *testing.T) {
-	root := t.TempDir()
-	runShare(t, "--root", root, "--session", "cf1")
-	keyDir := filepath.Join(root, "extensions", "remote", "keys", "cf1")
-	tags, _, err := readSharePending(keyDir)
-	if err != nil {
+	if runtime.GOOS == "windows" {
+		t.Skip("read-only-dir removal semantics differ on Windows")
+	}
+	dir := t.TempDir()
+	victim := filepath.Join(dir, "share.pending.json")
+	if err := os.WriteFile(victim, []byte("{}"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	// Enroll the first four kinds; the fifth publishes. Enroll the fourth
-	// by hand so the staged file can be left in place for the publishing
-	// call (the normal CLI path would be refused by leaf confinement on a
-	// directory-shaped staged leaf; a NON-EMPTY staged directory keeps the
-	// staged os.Remove failing after publication without tripping lstat).
-	for i, kind := range bodykey.ShareKinds {
-		if i == len(bodykey.ShareKinds)-2 {
-			k, err := bodykey.Load(filepath.Join(keyDir, "body.key"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			tagPath := writeTagFile(t, keyDir, tags[i])
-			_, _, code := runShareLoose("--root", root, "--session", "cf1", "--tag-file", tagPath)
-			_ = k
-			if code != 0 {
-				t.Fatalf("fourth enrollment refused: %d", code)
-			}
-			stagedDir := filepath.Join(keyDir, stagedName)
-			raw, err := os.ReadFile(stagedDir)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := os.Remove(stagedDir); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.Mkdir(stagedDir, 0o700); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(filepath.Join(stagedDir, "keep.json"), raw, 0o600); err != nil {
-				t.Fatal(err)
-			}
-			continue
-		}
-		if i == len(bodykey.ShareKinds)-1 {
-			// Pin the cleanup propagation at its seam: publication is
-			// committed, then removeStateLeaf hits an un-removable leaf
-			// (a non-empty directory standing where the file belongs).
-			// The error must carry the committed-state distinction.
-			committed := filepath.Join(keyDir, "share.json")
-			if err := writeStateFile(committed, []byte("{}")); err != nil {
-				t.Fatal(err)
-			}
-			blocker := filepath.Join(keyDir, "share.pending.json")
-			raw, err := os.ReadFile(blocker)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := os.Remove(blocker); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.Mkdir(blocker, 0o700); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(filepath.Join(blocker, "hold.json"), raw, 0o600); err != nil {
-				t.Fatal(err)
-			}
-			err = removeStateLeaf(blocker)
-			if err == nil {
-				t.Fatal("cleanup failure was silently discarded")
-			}
-			if msg := err.Error(); !strings.Contains(msg, "published generation is committed") || !strings.Contains(msg, "share.pending.json") {
-				t.Fatalf("cleanup failure not propagated with the committed-state distinction:\n%s", msg)
-			}
-			// The committed publication itself is intact (the seam
-			// wrote share.json above; the failed cleanup must not have
-			// touched it).
-			if _, err := os.Stat(committed); err != nil {
-				t.Fatalf("committed publication damaged by failed cleanup: %v", err)
-			}
-			return
-		}
-		enrollOne(t, root, "cf1", kind, tags[i].Conditions)
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	err := removeStateLeaf(victim)
+	if err == nil {
+		t.Fatal("removeStateLeaf returned nil for an un-removable REGULAR file (r5 P1-1: error discarded)")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "published generation is committed") {
+		t.Fatalf("cleanup failure lacks the committed-state distinction:\n%s", msg)
+	}
+	if !strings.Contains(msg, "share.pending.json") {
+		t.Fatalf("cleanup failure does not name the file:\n%s", msg)
+	}
+	// The leaf itself is untouched (still present for the operator).
+	if _, statErr := os.Stat(victim); statErr != nil {
+		t.Fatalf("the un-removable leaf vanished (setup wrong): %v", statErr)
 	}
 }
 

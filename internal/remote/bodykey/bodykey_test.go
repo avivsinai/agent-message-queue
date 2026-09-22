@@ -293,3 +293,34 @@ func TestPerKindCredential(t *testing.T) {
 		t.Fatal("kind-less credential accepted")
 	}
 }
+
+// TestMintRefusesSymlinkedBodyPub pins verifier r5 P1-2: a symlink planted
+// at body.pub is refused before the write; the out-of-root target is never
+// truncated. Mint guards body.key with lstatKeyLeaf; body.pub is a state
+// leaf under the same confinement rule.
+func TestMintRefusesSymlinkedBodyPub(t *testing.T) {
+	dir := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "victim.txt")
+	victim := "IMPORTANT USER FILE"
+	if err := os.WriteFile(outside, []byte(victim), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dir, "body.pub")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Mint(dir); err == nil {
+		t.Fatal("Mint accepted a symlinked body.pub (r5 P1-2: would truncate the target)")
+	}
+	raw, err := os.ReadFile(outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != victim {
+		t.Fatalf("out-of-root target was damaged:\nbefore %q\nafter  %q", victim, string(raw))
+	}
+	// The link itself is preserved.
+	fi, err := os.Lstat(filepath.Join(dir, "body.pub"))
+	if err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("body.pub symlink was replaced or removed: %v", err)
+	}
+}
