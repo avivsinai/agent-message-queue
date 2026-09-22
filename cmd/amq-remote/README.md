@@ -113,6 +113,42 @@ id that appears both in the file and in the flags is exit 2.
 `--discover` lists discovered candidates as `<kind> <target>` and exits
 before attaching anything.
 
+## Relay
+
+A manifest with `"schema_version": 2` may carry one `relay` object. Without
+it, `serve` makes no relay connection. An older binary refuses a version 2
+file instead of ignoring the object.
+
+```json
+{
+  "schema_version": 2,
+  "layer": "remote",
+  "adapters": [{"kind": "codex", "target": "codex-work", "config": {"socket": "...", "thread": "..."}}],
+  "relay": {
+    "url": "wss://relay.example",
+    "shares": [{"target": "codex-work", "session": "work", "owner_pubkey": "<64 lowercase hex>"}]
+  }
+}
+```
+
+Each share binds one declared target to the body key enrolled under
+`amq-remote share --session <session>`. `url` must be `wss://`; `ws://` is
+accepted only for a loopback host. A target or session can be shared once.
+`commands` and `activity` are refused: this binary authenticates on the
+relay and does nothing more yet.
+
+`serve` keeps one connection per share. It answers the relay's NIP-42
+challenge with a kind 22242 event signed by the body key, carrying exactly
+one enrolled NIP-OA tag: the owner's kind 1059 grant. The connection counts
+as authenticated only after the relay's positive OK for that event. On each
+connect `serve` re-reads the enrolled generation, so a renewal is picked up.
+An expired grant, or an enrolled owner that differs from `owner_pubkey`,
+stops authentication. A lost connection reconnects with backoff of 1 to 30
+seconds. Local IPC and AMQ delivery keep working while the relay is down.
+
+`serve` never mints, renews or enrolls a key. Use `amq-remote share` for
+that.
+
 ## Flags
 
 Flags may appear before or after the positional argument.
@@ -218,3 +254,10 @@ socket path, whether the endpoint answered `session.list`, record counts by
 state, and any persisted adapter refusals. No state directory yet means the
 endpoint has never been started: the report says to run `amq-remote serve`
 once. `amq-remote up` starts that same `serve` child.
+
+With a relay configured, doctor also reports each share's connection state
+as `serve` last wrote it: `auth_pending`, `authenticated` or `unavailable`,
+with the last error. Any share that is not `authenticated` makes doctor exit
+6. `authenticated` means the relay accepted this body's AUTH. It does not
+prove that the relay materialized the owner binding or that any viewer
+is ready.

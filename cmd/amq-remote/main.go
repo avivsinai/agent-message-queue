@@ -15,12 +15,14 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	amqcli "github.com/avivsinai/agent-message-queue/internal/cli"
 	"github.com/avivsinai/agent-message-queue/internal/config"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/relay"
 	"github.com/avivsinai/agent-message-queue/internal/remote/amqio"
 	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
 	"github.com/avivsinai/agent-message-queue/internal/remote/codex"
@@ -477,6 +479,13 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	say(stdout, "amq-remote %s serving root=%s handle=%s socket=%s targets=%d", version, c.root, *me, server.Path(), len(ep.Targets()))
+	// Relay surface (611.15): one authenticated client per share. The
+	// manifest was already loaded and validated by serveStartup.
+	var relays *sync.WaitGroup
+	if mfRelay, rerr := manifest.Load(manifestFile); rerr == nil && mfRelay.Relay != nil {
+		relays = startRelays(ctx, c.root, stateDir, mfRelay.Relay, stderr)
+		say(stdout, "relay %s: %d shared session(s)", mfRelay.Relay.URL, len(mfRelay.Relay.Shares))
+	}
 	go func() {
 		t := time.NewTicker(*poll)
 		defer t.Stop()
@@ -504,6 +513,9 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 		}
 	}()
 	err = server.Serve(ctx)
+	if relays != nil {
+		relays.Wait()
+	}
 	if cerr := ep.Close(); cerr != nil && err == nil {
 		err = cerr
 	}
@@ -1029,6 +1041,20 @@ func doctor(args []string) (any, int, error) {
 	// dir reports nothing — sessions without remote sharing are normal.
 	if bodyKeys := doctorShareInspection(c.root); bodyKeys != nil {
 		report["body_keys"] = bodyKeys
+	}
+	// Relay connections (611.15), as serve last reported them. Each state
+	// is distinct: auth_pending is not authenticated, and authenticated is
+	// not proof the relay materialized ownership.
+	switch rs, rerr := loadRelayStatus(stateDir); {
+	case rerr == nil:
+		report["relay"] = rs
+		for _, sh := range rs.Shares {
+			if sh.State != string(relay.StateAuthenticated) {
+				code = protocol.ExitActionRequired
+			}
+		}
+	case !errors.Is(rerr, os.ErrNotExist):
+		report["relay_error"] = rerr.Error()
 	}
 	return report, code, nil
 }

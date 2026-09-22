@@ -20,9 +20,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 )
@@ -41,6 +44,32 @@ type File struct {
 	SchemaVersion int       `json:"schema_version"`
 	Layer         string    `json:"layer"`
 	Adapters      []Adapter `json:"adapters"`
+	// Relay is the optional Buzz relay surface (bead 611.15). Absent means
+	// no relay network traffic. It requires schema_version 2, so an older
+	// binary refuses the file instead of silently ignoring the object.
+	Relay *Relay `json:"relay,omitempty"`
+}
+
+// RelaySchemaVersion is the manifest version that may carry a relay object.
+const RelaySchemaVersion = 2
+
+// Relay configures one relay endpoint and the sessions shared on it.
+type Relay struct {
+	// URL is wss://, or ws:// to a loopback host for in-process tests.
+	URL    string  `json:"url"`
+	Shares []Share `json:"shares"`
+}
+
+// Share binds one enrolled body (keys/<session>) to exactly one declared
+// adapter target. Surfaces beyond authentication (commands, activity) are
+// refused until their slices ship, so the file can never claim a surface
+// the binary does not have.
+type Share struct {
+	Target      string `json:"target"`
+	Session     string `json:"session"`
+	OwnerPubKey string `json:"owner_pubkey"`
+	Commands    bool   `json:"commands,omitempty"`
+	Activity    bool   `json:"activity,omitempty"`
 }
 
 // Adapter is one adapter instance in the manifest.
@@ -78,8 +107,8 @@ func Load(path string) (File, error) {
 	if f.SchemaVersion == 0 {
 		f.SchemaVersion = SchemaVersion
 	}
-	if f.SchemaVersion != SchemaVersion {
-		return File{}, fmt.Errorf("manifest schema_version %d, want %d", f.SchemaVersion, SchemaVersion)
+	if f.SchemaVersion != SchemaVersion && f.SchemaVersion != RelaySchemaVersion {
+		return File{}, fmt.Errorf("manifest schema_version %d, want %d or %d", f.SchemaVersion, SchemaVersion, RelaySchemaVersion)
 	}
 	// Layer defaults to "remote" in memory when absent. A non-empty layer
 	// other than "remote" is a validation error (caught by Validate).
@@ -215,7 +244,90 @@ func Validate(f File) error {
 			return &ErrEpochOnNonFake{Target: a.Target, Kind: a.Kind}
 		}
 	}
+	return validateRelay(f, seen)
+}
+
+// ErrInvalidRelay is a relay object that cannot be used as written.
+type ErrInvalidRelay struct{ Reason string }
+
+func (e *ErrInvalidRelay) Error() string { return "manifest relay: " + e.Reason }
+
+func validateRelay(f File, targets map[string]bool) error {
+	r := f.Relay
+	if r == nil {
+		return nil
+	}
+	if f.SchemaVersion != RelaySchemaVersion {
+		return &ErrInvalidRelay{Reason: fmt.Sprintf("a relay object needs schema_version %d", RelaySchemaVersion)}
+	}
+	if err := validRelayURL(r.URL); err != nil {
+		return &ErrInvalidRelay{Reason: err.Error()}
+	}
+	if len(r.Shares) == 0 {
+		return &ErrInvalidRelay{Reason: "shares is empty"}
+	}
+	sessions, bound := map[string]bool{}, map[string]bool{}
+	for _, sh := range r.Shares {
+		switch {
+		case !targets[sh.Target]:
+			return &ErrInvalidRelay{Reason: fmt.Sprintf("share target %q is not a declared adapter", sh.Target)}
+		case bound[sh.Target]:
+			return &ErrInvalidRelay{Reason: fmt.Sprintf("target %q is shared twice", sh.Target)}
+		case !validSession(sh.Session):
+			return &ErrInvalidRelay{Reason: fmt.Sprintf("share session %q must be one path component", sh.Session)}
+		case sessions[sh.Session]:
+			return &ErrInvalidRelay{Reason: fmt.Sprintf("session %q is shared twice", sh.Session)}
+		case !validHex64(sh.OwnerPubKey):
+			return &ErrInvalidRelay{Reason: fmt.Sprintf("share %q owner_pubkey must be 64 lowercase hex", sh.Session)}
+		case sh.Commands:
+			return &ErrInvalidRelay{Reason: fmt.Sprintf("share %q: commands are not supported by this binary", sh.Session)}
+		case sh.Activity:
+			return &ErrInvalidRelay{Reason: fmt.Sprintf("share %q: activity is not supported by this binary", sh.Session)}
+		}
+		bound[sh.Target], sessions[sh.Session] = true, true
+	}
 	return nil
+}
+
+func validSession(s string) bool {
+	return s != "" && s != "." && s != ".." && !strings.ContainsAny(s, "/\\\x00")
+}
+
+func validHex64(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for _, c := range s {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// validRelayURL mirrors internal/relay.ValidateURL (kept here so the
+// manifest package stays dependency-free): wss://, or ws:// to loopback,
+// never userinfo.
+func validRelayURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("url: %v", err)
+	}
+	if u.User != nil {
+		return errors.New("url must not carry userinfo")
+	}
+	switch u.Scheme {
+	case "wss":
+		return nil
+	case "ws":
+		host := u.Hostname()
+		if ip := net.ParseIP(host); (ip != nil && ip.IsLoopback()) || host == "localhost" {
+			return nil
+		}
+		return errors.New("ws:// is allowed only to a loopback host; use wss://")
+	default:
+		return fmt.Errorf("url scheme %q: want wss://", u.Scheme)
+	}
 }
 
 // Write persists the manifest, filling the passive-manifest layer field
