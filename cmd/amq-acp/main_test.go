@@ -219,7 +219,7 @@ func TestACPPromptIsDrainableByRealAMQ(t *testing.T) {
 		promptedCh <- session.call(`{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"` + sessionID + `","prompt":[{"type":"text","text":"` + body + `"}]}}`)
 	}()
 	promptMessage := waitForMessage(t, root, testTo, "ACP cockpit prompt")
-	deliverReply(t, root, testTo, testMe, promptMessage.Header.Thread, "acknowledged by the real AMQ path")
+	deliverReply(t, root, testTo, testMe, promptMessage.Header.Thread, "acknowledged by the real AMQ path", promptMessage.Header.ID)
 	prompted := <-promptedCh
 	if reason := unquote(t, prompted["stopReason"]); reason != "end_turn" {
 		t.Fatalf("stopReason = %q, want end_turn", reason)
@@ -300,7 +300,7 @@ func waitForMessage(t *testing.T, root, agent, subject string) format.Message {
 	return format.Message{}
 }
 
-func deliverReply(t *testing.T, root, from, to, thread, body string) {
+func deliverReply(t *testing.T, root, from, to, thread, body string, refs ...string) {
 	t.Helper()
 	now := time.Now()
 	id, err := format.NewMessageID(now)
@@ -315,6 +315,7 @@ func deliverReply(t *testing.T, root, from, to, thread, body string) {
 		Thread:  thread,
 		Subject: "reply",
 		Created: now.UTC().Format(time.RFC3339Nano),
+		Refs:    refs,
 	}, Body: body}
 	data, err := message.Marshal()
 	if err != nil {
