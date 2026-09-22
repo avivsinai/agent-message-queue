@@ -169,7 +169,7 @@ func up(args []string, stdout, stderr io.Writer) (int, error) {
 		if *sf.manifestPath != "" {
 			manifestFile = *sf.manifestPath
 		}
-		return discoverAndPrint(c.root, stateDir, manifestFile, *sf.codexSocket, stdout)
+		return discoverAndPrint(c.root, stateDir, manifestFile, *sf.codexSocket, stdout, stderr)
 	}
 	regPath := *registryPath
 	var err error

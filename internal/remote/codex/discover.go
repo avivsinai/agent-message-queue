@@ -3,6 +3,8 @@ package codex
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 
@@ -29,24 +31,35 @@ type discoverer struct {
 const HintSocket = "codex.socket"
 
 func (d discoverer) Discover(_ context.Context, req registry.DiscoverRequest) ([]registry.Candidate, error) {
-	sock := d.socket
+	sock, explicit := d.socket, false
 	if h := req.Hints[HintSocket]; h != "" {
-		sock = h
+		sock, explicit = h, true
 	}
 	if sock == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {
-			return nil, nil
+			return nil, fmt.Errorf("resolve home: %w", err)
 		}
 		sock = defaultControlSocket(home)
 	}
 	fi, err := os.Lstat(sock)
-	if err != nil || fi.Mode()&os.ModeSocket == 0 {
-		return nil, nil // no running daemon: nothing to discover
+	switch {
+	case err != nil && errors.Is(err, os.ErrNotExist) && !explicit:
+		return nil, nil // no daemon at the default path: nothing to discover
+	case err != nil && explicit:
+		return nil, fmt.Errorf("%w: --codex-socket %s: %v", registry.ErrBadHint, sock, err)
+	case err != nil:
+		return nil, fmt.Errorf("stat %s: %w", sock, err)
+	case fi.Mode()&os.ModeSocket == 0 && explicit:
+		return nil, fmt.Errorf("%w: --codex-socket %s is not a unix socket (mode %s)", registry.ErrBadHint, sock, fi.Mode())
+	case fi.Mode()&os.ModeSocket == 0:
+		return nil, fmt.Errorf("%s is not a unix socket (mode %s)", sock, fi.Mode())
 	}
 	threads, err := LoadedThreads(sock)
 	if err != nil {
-		return nil, err
+		// A stale socket (daemon gone) fails here; it becomes a diagnostic
+		// for this discoverer only, never a failure of discovery as a whole.
+		return nil, fmt.Errorf("list loaded threads on %s: %w", sock, err)
 	}
 	out := make([]registry.Candidate, 0, len(threads))
 	for _, th := range threads {

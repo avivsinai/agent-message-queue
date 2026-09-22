@@ -11,6 +11,7 @@ package registry
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"sync"
@@ -164,9 +165,26 @@ func Build(ctx context.Context, root, stateDir string, f manifest.File) []Outcom
 	return outcomes
 }
 
+// ErrIncomplete marks a discoverer that returned some candidates but could
+// not examine everything (a bounded scan hit its limit). Its candidates are
+// still valid.
+var ErrIncomplete = errors.New("discovery incomplete")
+
+// ErrBadHint marks an explicitly supplied hint (such as --codex-socket) that
+// does not name a usable target. The caller refuses it as a usage error.
+var ErrBadHint = errors.New("discovery hint is unusable")
+
+// Diagnostic is one discoverer's failure or incompleteness.
+type Diagnostic struct {
+	Kind string
+	Err  error
+}
+
 // Discover lists candidates from all registered discoverers. serve --discover
-// calls this and attaches nothing.
-func Discover(ctx context.Context, req DiscoverRequest) ([]Candidate, error) {
+// calls this and attaches nothing. Discoverers are independent: one that
+// fails or is incomplete becomes a Diagnostic and never discards another's
+// candidates (codex #858).
+func Discover(ctx context.Context, req DiscoverRequest) ([]Candidate, []Diagnostic) {
 	factMu.RLock()
 	kinds := make([]string, 0, len(discs))
 	for k := range discs {
@@ -175,15 +193,16 @@ func Discover(ctx context.Context, req DiscoverRequest) ([]Candidate, error) {
 	factMu.RUnlock()
 	sort.Strings(kinds)
 	var out []Candidate
+	var diags []Diagnostic
 	for _, k := range kinds {
 		factMu.RLock()
 		d := discs[k]
 		factMu.RUnlock()
 		cands, err := d.Discover(ctx, req)
-		if err != nil {
-			return nil, fmt.Errorf("discover %s: %w", k, err)
-		}
 		out = append(out, cands...)
+		if err != nil {
+			diags = append(diags, Diagnostic{Kind: k, Err: err})
+		}
 	}
-	return out, nil
+	return out, diags
 }

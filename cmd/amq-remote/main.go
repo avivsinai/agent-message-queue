@@ -346,7 +346,7 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	// 611.13 consult, requirement 1): no EnsureAgent, no store, no socket, so
 	// it also works while an endpoint for this root is running.
 	if *discover {
-		return discoverAndPrint(c.root, stateDir, manifestFile, *codexSocket, stdout)
+		return discoverAndPrint(c.root, stateDir, manifestFile, *codexSocket, stdout, stderr)
 	}
 	// .10: register the endpoint's mailbox handle in config.json so other
 	// agents in the root can route to it. This preserves every other agent's
@@ -1412,7 +1412,7 @@ func printCandidates(w io.Writer, cands []registry.Candidate) {
 // exactly like the serve path: validation failures are usage errors (exit
 // 2), I/O and parse failures are not. An explicit --codex-socket replaces
 // the default daemon socket (requirement 2).
-func discoverAndPrint(root, stateDir, manifestFile, codexSocket string, stdout io.Writer) (int, error) {
+func discoverAndPrint(root, stateDir, manifestFile, codexSocket string, stdout, stderr io.Writer) (int, error) {
 	mf, lerr := manifest.Load(manifestFile)
 	if lerr != nil {
 		if manifest.IsValidation(lerr) {
@@ -1423,14 +1423,22 @@ func discoverAndPrint(root, stateDir, manifestFile, codexSocket string, stdout i
 	if verr := manifest.Validate(mf); verr != nil {
 		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", verr)
 	}
-	cands, err := registry.Discover(context.Background(), registry.DiscoverRequest{
+	cands, diags := registry.Discover(context.Background(), registry.DiscoverRequest{
 		Root: root, StateDir: stateDir,
 		Hints: map[string]string{codex.HintSocket: codexSocket},
 	})
-	if err != nil {
-		return 0, err
-	}
 	printCandidates(stdout, cands)
+	// Each failed or incomplete discoverer is reported on stderr; the other
+	// discoverers' candidates above stand (codex #858). An explicitly
+	// supplied unusable hint is a usage error.
+	for _, d := range diags {
+		if errors.Is(d.Err, registry.ErrBadHint) {
+			return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "discover %s: %v", d.Kind, d.Err)
+		}
+	}
+	for _, d := range diags {
+		say(stderr, "amq-remote: discover %s: %v", d.Kind, d.Err)
+	}
 	return 0, nil
 }
 
