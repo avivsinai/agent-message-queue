@@ -79,11 +79,14 @@ func runRead(args []string) error {
 
 	path, box, err := findMessageDeliveryRoot(deliveryRoot, common.Me, filename, false)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
+		if errors.Is(err, errMessageNotFound) {
 			return NotFoundError("message not found: %s", *idFlag)
 		}
 		return err
 	}
+	// Header ID lookup can resolve a bridge transfer filename. Claims and DLQ
+	// transitions must operate on that stored filename, not the requested ID.
+	filename = filepath.Base(path)
 
 	// Parse first before moving to avoid stuck corrupt messages in cur
 	msg, err := readMessageDeliveryRoot(deliveryRoot, path)

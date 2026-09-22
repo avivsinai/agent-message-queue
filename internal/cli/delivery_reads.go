@@ -1,13 +1,19 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
+
+// Only a completed lookup may report absence. Filesystem failures retain their
+// original cause without being translated into a missing message by callers.
+var errMessageNotFound = errors.New("message not found")
 
 func requireMailboxDeliveryRoot(root *fsq.DeliveryRoot, displayRoot, me string) error {
 	for _, dir := range []string{
@@ -58,7 +64,39 @@ func findMessageDeliveryRoot(root *fsq.DeliveryRoot, agent, filename string, inc
 			return "", "", err
 		}
 	}
-	return "", "", os.ErrNotExist
+
+	// Bridge deliveries retain the message ID in the header but use a transfer
+	// filename. Keep the direct filename lookup above for existing CLI callers.
+	id := strings.TrimSuffix(filename, ".md")
+	var matchedPath, matchedBox string
+	for _, candidate := range candidates {
+		dir := filepath.Dir(candidate.path)
+		entries, err := root.ReadDir(dir)
+		if err != nil {
+			return "", "", fmt.Errorf("scan messages in %s: %w", dir, err)
+		}
+		for _, entry := range entries {
+			if !strings.HasSuffix(entry.Name(), ".md") || strings.HasPrefix(entry.Name(), ".") {
+				continue
+			}
+			path := filepath.Join(dir, entry.Name())
+			msg, err := readMessageDeliveryRoot(root, path)
+			if err != nil {
+				return "", "", fmt.Errorf("look up message ID in %s: %w", path, err)
+			}
+			if msg.Header.ID != id {
+				continue
+			}
+			if matchedPath != "" {
+				return "", "", fmt.Errorf("ambiguous message ID %q: matches %s and %s", id, matchedPath, path)
+			}
+			matchedPath, matchedBox = path, candidate.box
+		}
+	}
+	if matchedPath != "" {
+		return matchedPath, matchedBox, nil
+	}
+	return "", "", errMessageNotFound
 }
 
 func readMessageDeliveryRoot(root *fsq.DeliveryRoot, path string) (format.Message, error) {

@@ -118,7 +118,7 @@ func runReply(args []string) error {
 	}
 	originalPath, originalBox, err := findMessageDeliveryRoot(sourceFS, me, originalFilename, true)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
+		if errors.Is(err, errMessageNotFound) {
 			return NotFoundError("message not found: %s", *idFlag)
 		}
 		return err
