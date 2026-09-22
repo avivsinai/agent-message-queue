@@ -10,6 +10,7 @@ package registry
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"sync"
@@ -38,14 +39,29 @@ type Factory func(ctx context.Context, cfg FactoryConfig) (core.Attachment, erro
 
 // Candidate is a discovered adapter that could be attached.
 type Candidate struct {
-	Kind   string
+	Kind string
+	// Target is unique and protocol-valid; it is the manifest target id.
 	Target string
+	// Display is human text (a session name); never an identity.
+	Display string
+	// Config is the adapter config block a manifest entry for this
+	// candidate needs, so discovery output can be pasted into the manifest.
+	// Discovery never attaches: registration stays an explicit manifest edit.
+	Config json.RawMessage
 }
 
 // Discoverer optionally lists attachable adapters without attaching. .11's
 // Codex socket discovery plugs in here so serve is never edited for discovery.
 type Discoverer interface {
-	Discover(ctx context.Context, root, stateDir string) ([]Candidate, error)
+	Discover(ctx context.Context, req DiscoverRequest) ([]Candidate, error)
+}
+
+// DiscoverRequest carries what a discoverer may use. Hints holds operator
+// flags a kind honors in place of its default location, e.g. "codex.socket"
+// from serve's --codex-socket.
+type DiscoverRequest struct {
+	Root, StateDir string
+	Hints          map[string]string
 }
 
 var (
@@ -150,7 +166,7 @@ func Build(ctx context.Context, root, stateDir string, f manifest.File) []Outcom
 
 // Discover lists candidates from all registered discoverers. serve --discover
 // calls this and attaches nothing.
-func Discover(ctx context.Context, root, stateDir string) ([]Candidate, error) {
+func Discover(ctx context.Context, req DiscoverRequest) ([]Candidate, error) {
 	factMu.RLock()
 	kinds := make([]string, 0, len(discs))
 	for k := range discs {
@@ -163,7 +179,7 @@ func Discover(ctx context.Context, root, stateDir string) ([]Candidate, error) {
 		factMu.RLock()
 		d := discs[k]
 		factMu.RUnlock()
-		cands, err := d.Discover(ctx, root, stateDir)
+		cands, err := d.Discover(ctx, req)
 		if err != nil {
 			return nil, fmt.Errorf("discover %s: %w", k, err)
 		}
