@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -1614,7 +1615,9 @@ func TestDoctorRemedyForSymlinkedStagedIsExecutable(t *testing.T) {
 // TestBodyPubLeafConfinementEveryCommand pins verifier r6 P2-3: a
 // symlinked body.pub is refused by share, renew and dry-run even when
 // body.key already exists, and the half-minted key directory is never
-// created (body.pub is lstat'd before the body.key write).
+// created (body.pub is lstat'd before the body.key write). Doctor (r7
+// round-6 order) reports the leaf additively instead of refusing —
+// it must name body.pub and print the remedy.
 func TestBodyPubLeafConfinementEveryCommand(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -1680,5 +1683,106 @@ func TestBodyPubLeafConfinementEveryCommand(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "body.pub") {
 		t.Fatalf("body.pub refusal does not name the leaf (r6 P3): %s", stderr)
+	}
+	// Doctor (r7 round-6 order) reports the same leaf additively: it does
+	// not refuse (read-only), but the row names body.pub and the remedy.
+	inspect := doctorShareInspection(root)
+	info := inspect["bp2"].(map[string]any)
+	if bpErr, _ := info["body_pub_error"].(string); !strings.Contains(bpErr, "body.pub") {
+		t.Fatalf("doctor did not report the symlinked body.pub leaf: %v", info)
+	}
+	if remedy, _ := info["remedy"].(string); !strings.Contains(remedy, "body.pub") {
+		t.Fatalf("doctor remedy does not name the leaf: %v", info["remedy"])
+	}
+}
+
+// TestDoctorUnknownProgressOverCorruptStaged pins verifier r7 P1: when the
+// staged leaf is unreadable (corrupt) the signed count is NOT printed —
+// the zero default fabricated "5 of 5 kinds signed" over a session with
+// 2 of 5 signed. Progress is a tri-state: doctor says "progress unknown",
+// keeps the enrolled attestation, and suppresses any remedy that presumes
+// known progress (renew). Same for the plain-pending branch.
+func TestDoctorUnknownProgressOverCorruptStaged(t *testing.T) {
+	root := t.TempDir()
+	runShare(t, "--root", root, "--session", "u1")
+	enrollAllPending(t, root, "u1")
+	out, _, code := runShare(t, "--root", root, "--session", "u1", "--renew")
+	if code != 0 {
+		t.Fatal("renew refused")
+	}
+	condsByKind := pendingConditions(t, out)
+	// Two of five kinds signed; the staged leaf then corrupts. Derive the
+	// kinds from the pending window itself (ShareKinds is not sequential)
+	// and capture the conditions up front — the staged file shrinks after
+	// each enrollment.
+	kinds := make([]uint16, 0, len(condsByKind))
+	for kind := range condsByKind {
+		kinds = append(kinds, kind)
+	}
+	sort.Slice(kinds, func(i, j int) bool { return kinds[i] < kinds[j] })
+	enrollOne(t, root, "u1", kinds[0], condsByKind[kinds[0]])
+	enrollOne(t, root, "u1", kinds[1], condsByKind[kinds[1]])
+	keyDir := filepath.Join(root, "extensions", "remote", "keys", "u1")
+	if err := os.WriteFile(filepath.Join(keyDir, stagedName), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	inspect := doctorShareInspection(root)
+	info := inspect["u1"].(map[string]any)
+	att, _ := info["attestation"].(string)
+	if strings.Contains(att, "of 5") {
+		t.Fatalf("doctor fabricated a signed count over corrupt staged state (r7 P1): %q", att)
+	}
+	// Enrolled branch: attestation stays the enrolled FACT; the unknown
+	// progress is its own row (the r7 wording for the pending branch).
+	prog, _ := info["progress"].(string)
+	if !strings.Contains(prog, "unknown") {
+		t.Fatalf("doctor progress = %q, want the unknown-progress row (r7 P1)", prog)
+	}
+	if _, has := info["warning"]; has {
+		t.Fatalf("renewal-in-progress warning printed over unreadable state: %v", info["warning"])
+	}
+	if _, has := info["staged_error"]; !has {
+		t.Fatalf("staged_error row missing: %v", info)
+	}
+	// The same tri-state holds in the plain-pending branch (no enrollment):
+	// corrupt staged over a pending window is unknown, never "0 of 5".
+	root2 := t.TempDir()
+	runShare(t, "--root", root2, "--session", "u2")
+	keyDir2 := filepath.Join(root2, "extensions", "remote", "keys", "u2")
+	if err := os.WriteFile(filepath.Join(keyDir2, stagedName), []byte("{also not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	inspect2 := doctorShareInspection(root2)
+	info2 := inspect2["u2"].(map[string]any)
+	att2, _ := info2["attestation"].(string)
+	if strings.Contains(att2, "of 5") {
+		t.Fatalf("doctor printed a signed count over unreadable staged state (r7 P1): %q", att2)
+	}
+	if !strings.Contains(att2, "progress unknown") {
+		t.Fatalf("pending-branch attestation = %q, want unknown-progress", att2)
+	}
+}
+
+// TestDryRunRefusesCorruptStaged pins verifier r7 P2 (codex 3): plain
+// --dry-run with a valid pending window and a corrupt share.staged.json
+// must refuse (nonzero) like the real run — it must not exit 0 and print
+// signing data a real run would never print.
+func TestDryRunRefusesCorruptStaged(t *testing.T) {
+	root := t.TempDir()
+	out, _, code := runShare(t, "--root", root, "--session", "u3")
+	if code != 0 {
+		t.Fatal("share refused pre-mint")
+	}
+	_ = out
+	keyDir := filepath.Join(root, "extensions", "remote", "keys", "u3")
+	if err := os.WriteFile(filepath.Join(keyDir, stagedName), []byte("{corrupt"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, stderr, code := runShareLoose("--root", root, "--session", "u3", "--dry-run")
+	if code == 0 {
+		t.Fatal("dry-run exited 0 over corrupt staged state while the real run refuses (r7 P2)")
+	}
+	if !strings.Contains(stderr, stagedName) && !strings.Contains(stderr, "invalid") {
+		t.Fatalf("dry-run refusal does not name the corrupt leaf: %s", stderr)
 	}
 }

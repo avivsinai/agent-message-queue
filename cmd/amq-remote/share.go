@@ -178,6 +178,18 @@ func share(args []string, stdout, stderr io.Writer) (int, error) {
 		if perr != nil && !errors.Is(perr, os.ErrNotExist) {
 			return protocol.ExitActionRequired, perr
 		}
+		// r7 P2: the dry-run previously skipped the STAGED leaf — a valid
+		// pending window plus a corrupt share.staged.json exited 0 and
+		// printed signing data while the real run refused. The preview
+		// validates every state leaf read-only before choosing output:
+		// when staged is unreadable the real command would refuse with
+		// doctor's reconcile remedy, so the preview refuses with the
+		// same refusal instead of printing.
+		if len(pendingTags) > 0 {
+			if _, serr := readShareStaged(keyDir); serr != nil && !errors.Is(serr, os.ErrNotExist) {
+				return protocol.ExitActionRequired, serr
+			}
+		}
 		if *renew {
 			if len(pendingTags) > 0 {
 				printSharePending(stdout, *session, k, pendingTags, time.Time{})
@@ -1109,6 +1121,16 @@ func doctorShareInspection(root string) map[string]any {
 			out[e.Name()] = info
 			continue
 		}
+		// Round-6 order (folded into r7): doctor reports a symlinked (or
+		// otherwise non-regular) body.pub leaf too — doctor is read-only so
+		// it lstats the leaf additively instead of refusing, but the row
+		// names the leaf and the same remedy share prints, so the
+		// operator sees the confinement problem before the next real
+		// command refuses.
+		if err := lstatStateLeaf(filepath.Join(keyDir, "body.pub")); err != nil {
+			info["body_pub_error"] = doctorNamedLeafError(keyDir, err)
+			info["remedy"] = "remove the symlink at " + filepath.Join(keyDir, "body.pub") + " and re-run share/renew"
+		}
 		// Outstanding pending preimages are visible in BOTH branches: a
 		// half-finished renewal keeps every old tag, so the enrolled tag
 		// count alone cannot distinguish it from a healthy enrollment
@@ -1117,6 +1139,13 @@ func doctorShareInspection(root string) map[string]any {
 		// window and strands preimages the owner may already be signing.
 		pendingTags, _, pendingErr := readSharePending(keyDir)
 		outstanding := 0
+		// progressKnown is the r7 P1 tri-state: progress over the staged
+		// leaf is only reported when the leaf was actually read. An
+		// unreadable staged leaf (corrupt or symlinked) sets it false —
+		// doctor then reports "progress unknown" and never a signed count
+		// it did not read, and the renewal-in-progress warning/attestation
+		// paths that a zero default would fabricate are suppressed.
+		progressKnown := true
 		if pendingErr != nil && !errors.Is(pendingErr, os.ErrNotExist) {
 			// Malformed pending state is surfaced, never treated as absence
 			// (codex r3 #2: doctor must not report a healthy state over a
@@ -1138,8 +1167,12 @@ func doctorShareInspection(root string) map[string]any {
 		stagedUnusable := strings.Contains(leftoverRow, "is invalid") || strings.Contains(leftoverRow, "symlink")
 		if stagedUnusable {
 			// Corrupt or symlinked staged: surface the refusal and still
-			// complete the diagnostic (attestation/expiry below).
+			// complete the diagnostic (attestation/expiry below). Progress
+			// over unreadable state is UNKNOWN (r7 P1): no signed count is
+			// printed and the renew remedy is suppressed — an unreadable
+			// staged leaf must never read as a completed renewal.
 			info["staged_error"] = leftoverRow
+			progressKnown = false
 		} else if leftoverRow != "" {
 			info["leftover"] = leftoverRow
 		}
@@ -1148,10 +1181,11 @@ func doctorShareInspection(root string) map[string]any {
 			if serr != nil {
 				// Verifier r6 P1-1: the refusal is ADDITIVE — it joins the
 				// report (attestation/expiry/per-kind are still emitted
-				// below) and never replaces the whole diagnostic. Only the
-				// outstanding count is skipped: there is nothing trustworthy
-				// to count over a corrupt staged leaf.
+				// below). Progress over unreadable state is UNKNOWN: the
+				// count is skipped and no signed fraction is printed (r7 P1:
+				// the zero default fabricated "5 of 5 signed").
 				info["staged_error"] = doctorNamedLeafError(keyDir, serr)
+				progressKnown = false
 			} else {
 				outstanding = len(outstandingPending(pendingTags, staged, gen))
 			}
@@ -1170,9 +1204,15 @@ func doctorShareInspection(root string) map[string]any {
 					earliest = exp
 				}
 			}
-			if pendingErr == nil && outstanding > 0 {
+			if pendingErr == nil && progressKnown && outstanding > 0 {
 				info["attestation"] = fmt.Sprintf("enrolled, renewal in progress: %d of %d kinds signed (staged)", len(bodykey.ShareKinds)-outstanding, len(bodykey.ShareKinds))
 				info["warning"] = fmt.Sprintf("renewal in progress: %d preimage(s) still unsigned; run `amq-remote share --session %s` to reprint them (do NOT renew: renewing rotates the window and the still-unsigned preimages)", outstanding, e.Name())
+			} else if !progressKnown {
+				// r7 P1: progress unknown — say so, never a count we did not
+				// read, and never the plain-`share`-to-complete remedy (it
+				// presumes known progress).
+				info["attestation"] = "enrolled"
+				info["progress"] = "unknown: staged state unreadable (see staged_error)"
 			} else {
 				info["attestation"] = "enrolled"
 			}
@@ -1190,6 +1230,12 @@ func doctorShareInspection(root string) map[string]any {
 				shareRemedy := "run `amq-remote share --session " + e.Name() + " --renew`"
 				if renewalOutstanding {
 					shareRemedy = "run `amq-remote share --session " + e.Name() + "` to complete the in-progress renewal"
+				} else if !progressKnown {
+					// r7 P1: while progress is unknown the renew remedy is
+					// suppressed — an unreadable staged leaf may be an
+					// in-progress renewal; renewing would rotate the window
+					// and strand preimages the owner may already be signing.
+					shareRemedy = "run `amq-remote share --session " + e.Name() + "` (renewal state unreadable; do NOT renew until the staged leaf is repaired)"
 				}
 				switch {
 				case remaining <= 0:
@@ -1201,8 +1247,12 @@ func doctorShareInspection(root string) map[string]any {
 			out[e.Name()] = info
 			continue
 		}
-		if pendingErr == nil {
+		if pendingErr == nil && progressKnown {
 			info["attestation"] = fmt.Sprintf("pending: %d of %d kinds signed (staged)", len(bodykey.ShareKinds)-outstanding, len(bodykey.ShareKinds))
+		} else if pendingErr == nil && !progressKnown {
+			// r7 P1: progress over unreadable staged state is UNKNOWN —
+			// "pending: 5 of 5" over a corrupt leaf fabricated completion.
+			info["attestation"] = "pending: progress unknown (staged state unreadable: see staged_error)"
 		} else {
 			info["attestation"] = "missing: run `amq-remote share --session " + e.Name() + "`"
 		}
