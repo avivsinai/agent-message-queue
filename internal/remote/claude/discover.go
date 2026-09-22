@@ -39,7 +39,7 @@ func (d discoverer) Discover(_ context.Context, _ registry.DiscoverRequest) ([]r
 	// Bounded enumeration (codex #858): read the directory in batches and
 	// stop after maxDiscoverEntries names, reporting the scan incomplete
 	// instead of silently hiding live sessions behind stale rows.
-	dir, err := os.Open(claudeSessionsDir(home))
+	dir, err := openSessionsDir(claudeSessionsDir(home))
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil // no Claude sessions directory: nothing to discover
