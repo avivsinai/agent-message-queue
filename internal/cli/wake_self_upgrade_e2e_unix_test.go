@@ -41,7 +41,17 @@ func prepareWakeSelfUpgradeE2E(t *testing.T) (stable, oldBinary, newBinary, root
 		t.Fatal(err)
 	}
 	root = filepath.Join(temp, "root")
+	// Fixture-owned Git boundary (codex #853 r3): these are production
+	// binaries, which cannot see the test-only walk ceiling, and an ancestor
+	// HOME alone does not stop their Git discovery when the real home is a
+	// Git worktree. Every binary here runs with its cwd in work/, whose .git
+	// marker is the nearest Git root, so no resolution walk leaves the
+	// fixture.
+	if err := os.MkdirAll(filepath.Join(wakeSelfUpgradeWorkDir(root), ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	init := exec.Command(stable, "init", "--root", root, "--agents", "codex")
+	init.Dir = wakeSelfUpgradeWorkDir(root)
 	init.Env = wakeABICleanEnv()
 	if output, err := init.CombinedOutput(); err != nil {
 		t.Fatalf("initialize self-upgrade E2E: %v\n%s", err, output)
@@ -57,6 +67,12 @@ func prepareWakeSelfUpgradeE2E(t *testing.T) (stable, oldBinary, newBinary, root
 		"--subject", "before-self-upgrade", "--body", "preserve this unread message",
 	)
 	return stable, oldBinary, newBinary, root, oldVersion, newVersion
+}
+
+// wakeSelfUpgradeWorkDir is the fixture-owned cwd (with its own .git marker)
+// every self-upgrade binary runs in; it sits beside the fixture root.
+func wakeSelfUpgradeWorkDir(root string) string {
+	return filepath.Join(filepath.Dir(root), "work")
 }
 
 func wakeSelfUpgradeE2EEnv(root, stable, oldBinary, newBinary, oldVersion, newVersion string) []string {
@@ -176,6 +192,7 @@ func wakeSelfUpgradeTimeoutDiagnostics(binary, root string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, binary, "wake", "check", "--root", root, "--me", "codex", "--json", "--json-schema=2")
+	cmd.Dir = wakeSelfUpgradeWorkDir(root)
 	cmd.Env = wakeABICleanEnv()
 	output, err := cmd.CombinedOutput()
 	check := wakeCheckResultV2{}
@@ -239,6 +256,7 @@ func wakeSelfUpgradeExternalDoctorDiagnostics(binary, root string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, binary, "doctor", "--ops", "--root", root, "--json", "--json-schema=2")
+	cmd.Dir = wakeSelfUpgradeWorkDir(root)
 	cmd.Env = wakeABICleanEnv()
 	output, err := cmd.CombinedOutput()
 	var report struct {
@@ -293,6 +311,7 @@ func runWakeSelfUpgradeCommand(t *testing.T, binary string, args ...string) stri
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, binary, args...)
+	cmd.Dir = wakeSelfUpgradeWorkDirFromArgs(args)
 	cmd.Env = wakeABICleanEnv()
 	output, err := cmd.CombinedOutput()
 	if ctx.Err() != nil {
@@ -311,4 +330,15 @@ func wakeSelfUpgradeE2ERepoRoot(t *testing.T) string {
 		t.Fatal("resolve self-upgrade E2E test source path")
 	}
 	return filepath.Clean(filepath.Join(filepath.Dir(testFile), "..", ".."))
+}
+
+// wakeSelfUpgradeWorkDirFromArgs derives the fixture cwd from the command's
+// --root argument; every runWakeSelfUpgradeCommand call passes one.
+func wakeSelfUpgradeWorkDirFromArgs(args []string) string {
+	for i, a := range args {
+		if a == "--root" && i+1 < len(args) {
+			return wakeSelfUpgradeWorkDir(args[i+1])
+		}
+	}
+	panic("runWakeSelfUpgradeCommand: --root is required to place the fixture cwd")
 }

@@ -611,6 +611,12 @@ func gitWorktreeRootFrom(path string) (string, bool) {
 	}
 	bareCandidate := ""
 	for dir := path; ; dir = filepath.Dir(dir) {
+		if atWalkCeilingForTests(dir) {
+			if bareCandidate != "" {
+				return bareCandidate, true
+			}
+			return "", false
+		}
 		marker := filepath.Join(dir, ".git")
 		_, statErr := gitMarkerLstat(marker)
 		if statErr == nil {
@@ -774,6 +780,9 @@ func findAndLoadAmqrc() (amqrcResult, error) {
 	// own .agent-mail. When HOME is itself the Git worktree root, however, the
 	// file is worktree-local authority and the inclusive Git ceiling wins.
 	for ceiling != "" || !isHomeConfigDir(dir) {
+		if atWalkCeilingForTests(dir) {
+			break
+		}
 		rcPath := filepath.Join(dir, ".amqrc")
 		// Refuse configuration whose provenance cannot be established. In
 		// particular, symlinks and group/world-writable files are attacker
@@ -854,6 +863,9 @@ func detectAgentMailDir() string {
 	// repository owns that queue. If HOME is the Git worktree root, it is local
 	// evidence and must be inspected at the inclusive ceiling.
 	for ceiling != "" || !isHomeConfigDir(dir) {
+		if atWalkCeilingForTests(dir) {
+			break
+		}
 		candidate := filepath.Join(dir, ".agent-mail")
 		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
 			// Return relative path if in cwd, absolute otherwise
@@ -874,6 +886,26 @@ func detectAgentMailDir() string {
 	}
 
 	return ""
+}
+
+// walkCeilingForTests is a test-only hard boundary for the cwd-ancestor
+// resolution walks (findAndLoadAmqrc, detectAgentMailDir, findAmqrcForRoot,
+// findRootInParents, findProjectLaunchJSONPath) and the git worktree search
+// (gitWorktreeRootFrom). When non-empty, none of those walks inspects this
+// directory or anything above it. Test seams re-point HOME at per-test
+// sibling temp dirs, which moves the home stop off the walk's ancestor chain
+// and lets a walk climb out of the isolated test home into the operator's
+// real ~/.amqrc / ~/.agent-mail (issue #988, rev-853 P0). TestMain sets it
+// to the isolated test home; production binaries never set it, so live
+// resolution behavior is unchanged.
+var walkCeilingForTests string
+
+// atWalkCeilingForTests reports whether dir is the test-only walk boundary.
+// The boundary's own directory entries are never inspected (home-stop
+// semantics): it separates the test tree from the operator's real home.
+func atWalkCeilingForTests(dir string) bool {
+	stop := walkCeilingForTests
+	return stop != "" && sameCleanPath(dir, stop)
 }
 
 func sameCleanPath(left, right string) bool {
@@ -1100,6 +1132,9 @@ func findAmqrcForRoot(root string) (amqrcResult, error) {
 		}
 		dir := absRoot
 		for ceiling != "" || !isHomeConfigDir(dir) {
+			if atWalkCeilingForTests(dir) {
+				break
+			}
 			rcPath := filepath.Join(dir, ".amqrc")
 			if info, statErr := amqrcLstat(rcPath); statErr == nil {
 				if err := validateAmqrcInfo(rcPath, info); err != nil {

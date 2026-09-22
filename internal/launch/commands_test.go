@@ -235,7 +235,11 @@ esac
 	for i, command := range result.Commands {
 		cmd := exec.Command(command.Argv[0], command.Argv[1:]...)
 		cmd.Dir = command.Cwd
-		cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + t.TempDir(), "TMPDIR=" + os.TempDir(), "AMQ_NO_UPDATE_CHECK=1"}
+		// HOME is the package's isolated home, an ancestor of every test cwd
+		// (TMPDIR points inside it), so the built binary's root-discovery walk
+		// stops there. A fresh sibling t.TempDir() HOME left the walk free to
+		// climb past the isolated home into the real one (codex #853 r2).
+		cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + os.Getenv("HOME"), "TMPDIR=" + os.TempDir(), "AMQ_NO_UPDATE_CHECK=1"}
 		for key, value := range command.Env {
 			cmd.Env = append(cmd.Env, key+"="+value)
 		}

@@ -50,6 +50,7 @@ func TestDarwinWakeSelfUpgradeRealPTYStableSymlink(t *testing.T) {
 		testBinary,
 		"-test.run=^TestWakeSelfUpgradeRealPTYOwnerHelper$",
 	)
+	cmd.Dir = wakeSelfUpgradeWorkDir(root)
 	cmd.Env = wakeSelfUpgradeE2EEnv(root, stable, oldBinary, newBinary, oldVersion, newVersion)
 	ptyInput, keepPTYInputOpen, err := os.Pipe()
 	if err != nil {
