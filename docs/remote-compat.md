@@ -10,9 +10,11 @@ about current support on an unverified installation. Re-run the relevant
 compatibility checks after upgrading a harness or runtime; a version bump
 alone does not change a capability's truth value.
 
-Citation paths in the seam tables refer to a point-in-time research bundle
-that is not included in this repository. They identify the evidence behind a
-row; they are not required files for ordinary onboarding.
+Citation paths in the seam tables identify the evidence behind a row. Paths under
+`docs/research/` are included in this repository as point-in-time research records
+(see the framing note at the top of each such document); other paths refer to a
+point-in-time research bundle that is not included. They are not required files for
+ordinary onboarding.
 
 ## 2. Pinned compatibility evidence
 
@@ -21,7 +23,7 @@ row; they are not required files for ordinary onboarding.
 | `amq` | 0.77.3 | `amq --version` |
 | `amit` (pi core) | 0.1.23 (pi 0.85.1 @ d981de1229ef) | `amit --version` |
 | `codex` | codex-cli 0.154.0 | `codex --version` |
-| `claude` | 2.1.273 (Claude Code) | `claude --version` |
+| `claude` | 2.1.278 (Claude Code) | `claude --version` |
 | `tmux` | 3.7c | `tmux -V` |
 | macOS | 26.5.2 | `sw_vers -productVersion` |
 | `go` | go1.27.1 darwin/arm64 | `go version` |
@@ -77,7 +79,10 @@ terminal outcome for that run).
 | Row | Mechanism | Evidence class | Citation |
 | --- | --- | --- | --- |
 | Submit entry | Cross-session messaging socket (`CLAUDE_CODE_MESSAGING_SOCKET`), optional `{"type":"auth","token":"..."}` first line on macOS/Linux | delivered, not admitted | (source: research/p2-cc-socket-probe.md "Socket location and binding", "Auth line"; research/r9-cc-codex-attachment.md §A.1) |
-| Acceptance evidence | None documented at the field level; the doc's own language ("starts a new turn" / "reads the message between tool calls") is prose, not an RPC ack | delivered only | (source: research/r9-cc-codex-attachment.md §A.4 verdict table row "submit"; research/p2-cc-socket-probe.md "5-line conclusion" item 3) |
+| Wire protocol (captured end-to-end, v2.1.278) | Newline-delimited JSON over the UDS: auth line `{"type":"auth","token":"<target peerToken>"}` (token from `~/.claude/sessions/<pid>.<sha256(resolve(sockPath))>.key`), then one frame `{msgV:1,msg_id:<uuid>,type:"user",message:{role:"user",content:"<cross-session-message XML envelope>"},priority:"next",from:"<sender addr>"}`. Envelope: `<cross-session-message from="…" from-session="…" from-name="…">\n<body>\n</cross-session-message>` — byte-exact round-trip required by the receiver's re-serialize-and-compare parse. 1 MiB line cap. No per-frame ack on the happy path (fire-and-forget with internal `msg_id` receipt tracking); malformed frames are dropped silently. Hand-crafted frame delivered to a live `claude --bg` target and rendered in its transcript as `› Message from @amq-probe: …` | delivered (live capture) | (source: research/r0-03-cc-socket-wire-capture.md — full frame shapes, ingress guard limits, adapter implications; binary symbols `Jht`/`Pe`/`pQe`/`TG`/`Gar`/`kXr`) |
+| Acceptance evidence | `[live]` field-level: the target's JSONL transcript gains a `type: "queue-operation"` entry then a `type: "user"` entry carrying the exact envelope plus the harness wrapper ("Another Claude session sent a message: …"). TUI banner `› Message from @amq-probe: …` confirmed in the same probe | submitted | (source: research/r0-03-cc-socket-wire-capture.md §3.2/§4; research/r9-cc-codex-attachment.md §A.4 verdict table row "submit") |
+| Busy/queue + dedup behavior | `[live]` Frames sent while the target is mid-turn are parked and queued, rendered as `› Message from @…` banners at the next turn boundary, and processed in one batched turn; duplicate bodies within 30s are dropped with a visible in-session notice `Dropped a peer message from @…: identical to the previous message from this sender.` `[binary]` Queue cap is 50 (`maxQueuedPeerMessages`; overflow → `queue-full` drop) — cap value from the binary, overflow itself not live-exercised | delivered (idle/busy/dedup live; cap binary) | (source: research/r0-03-cc-socket-wire-capture.md §5 — busy/parked/dedup probes against a `claude --bg` target) |
+| Inbound policy | `crossSessionInbound` setting: enum `accept` / `hold` / `refuse`; policy > user > repo, repo may only tighten; invalid value fails closed to `hold`; an explicit value always wins. `[binary]` Unset (default) is mode-parity gating, not unconditional delivery: auto-delivers only when the sender's permission-mode class matches the target's; a mismatched sender is held; a sender asserting no class is held while the target bypasses prompts. Since AMQ envelopes omit `from-mode`, the required user-level value for unattended sends is **`accept`**. Listener gate: `CLAUDE_CODE_HARBOR_KITE` env → flag `tengu_harbor_kite`, default on (fail-closed on sockets-dir vetting) | delivered (binary: schema + hold taxonomy; parity default not live-exercised) | (source: research/r0-03-cc-socket-wire-capture.md §5a — full schema string quoted) |
 | Native run identity | `unavailable` — no request-id or turn-id concept on this channel | n/a | (source: research/r9-cc-codex-attachment.md §A.4 "No native concept of 'the result of request X'") |
 | Completion evidence | Opt-in user-level `Stop` hook reporting `prompt_id`, `transcript_path`, `last_assistant_message`; or `notify_when_idle` one-shot idle/exit notice | completed (Stop hook, requires target's own settings.json), weak/heartbeat (notify_when_idle) | (source: research/r9-cc-codex-attachment.md §A.2 "Stop correlation", §A.4 "lookup/correlate to result" row) |
 | Exact cancellation gate | `unavailable` — confirmed: "there is no user-level way to interrupt a running foreground turn without keystrokes" | n/a | (source: research/r9-cc-codex-attachment.md §A.4 "cancelExact" row; review-verdict.md "Confirmed by verification" bullet) |
@@ -126,14 +131,15 @@ valid value for the runtime `terminal` enum.
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | Codex | true | true | true | false | false | false | unavailable |
 | Amit/pi | true | true | true (current bound run only) | false | false | false | unavailable |
-| Claude Code | true | unverified | false | false | false | false | unavailable |
+| Claude Code | true | submitted | false | false | false | false | unavailable |
 
 The v1 endpoint masks `steer` to false at the D1 gate even where an
 attachment declares it (`internal/remote/codex/attachment.go:293`,
-`internal/remote/core/endpoint.go:1055-1056`). Claude Code `submit` remains
-unverified because its cross-session socket has no admission receipt
-(verification reference: `agent-message-queue-611.2`); a delivered submit is
-not an admitted one. The void-returning
+`internal/remote/core/endpoint.go:1055-1056`). Claude Code `submit` is graded **submitted** (bead `agent-message-queue-611.2`,
+closed): after a socket send, the target's transcript gains the `type: "user"`
+JSONL entry carrying the exact envelope (preceded by a `queue-operation` entry) —
+the harness accepted the payload, but the channel has no admission receipt and no
+run identity, so a submit never reaches `admitted`. The void-returning
 `sendUserMessage` seam is pi/Amit's, not Claude Code's.
 
 Reasons for every `false` (source: as cited per row in §3, plus
