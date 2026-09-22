@@ -108,7 +108,7 @@ about the ping. Earlier "empty response" probes (bare `sendUserMessage`, bare
 `type:"user"` without the XML envelope, Content-Length framing) were correctly
 rejected silently — the receiver drops malformed frames without an error frame.
 
-## 5. Ingress guards (receiver side, `Sr.admit` / `peer-guard`)
+## 5. Ingress guards (receiver side, `Sr.admit` / `peer-guard`) — verified live
 
 Defaults (`tzt`): `bucketCapacity:30, refillPerSecond:0.5, dedupWindowMs:30000,
 maxSelfHops:10, maxChainLength:28, maxTrackedSenders:256, maxQueuedPeerMessages:50`.
@@ -116,6 +116,44 @@ Drop reasons: `rate-limited`, `duplicate`, `hop-loop`, `hop-runaway`, `queue-ful
 Dedup keys on `(sender, identical body within 30s)`. Batch-drop receipts are
 coalesced (500ms trail, 5s max) and reported as
 `Dropped a peer message from <addr> (@name): <reason>`.
+
+Live verification against the idle→busy→idle target:
+
+- **Idle target:** frame delivered instantly; message banner appears in the
+  target UI (`› Message from @amq-probe: <body> (ctrl+o to expand)`) and a new
+  turn starts immediately.
+- **Busy target:** frames sent while the target was mid-turn were **parked and
+  queued**, not dropped. All queued banners rendered together at the next turn
+  boundary and were processed in one batched turn (both replies produced in a
+  single 9s turn). Queue cap is 50 (`maxQueuedPeerMessages`); beyond it the
+  `queue-full` drop reason applies.
+- **Dedup:** an identical body re-sent 1s later was dropped with a visible
+  in-session notice: `⏺ Dropped a peer message from @amq-probe (unknown):
+  identical to the previous message from this sender.` — i.e. duplicate drops
+  are surfaced to the target user/model, not silent.
+
+## 5a. Inbound gate — no `crossSessionInbound` setting exists
+
+There is **no user-level `crossSessionInbound` (or equivalent) setting** in
+v2.1.278; no such key appears anywhere in the binary. Inbound acceptance is
+gated in code by `As()`:
+
+- env override `CLAUDE_CODE_HARBOR_KITE` (checked first), else GrowthBook
+  feature flag `tengu_harbor_kite`, **default: on** (`!0`). Windows additionally
+  checks `tengu_harbor_kite_win` (default on).
+- A second default-on gate `tengu_cuddly_willow` exists alongside; when either
+  gate is off the listener logs `[uds-messaging] Skipped: cross-session
+  messaging gate off` and never binds, and parked messages are dropped with
+  "parked peer message(s) (cross-session messaging disabled)".
+- Sockets dir vetting failures also refuse to bind (fail-closed, message
+  "cross-session messaging is OFF for this session").
+
+**Required user-level value: none.** With defaults (gate on), any local process
+that can read the target's key file and connect to the socket can deliver
+inbound messages; there is no opt-in to flip. AMQ's adapter can rely on the
+default and surface the `CLAUDE_CODE_HARBOR_KITE=0` case as "messaging
+disabled". (Discovery artifact: `Ubt = "Cross-session messaging is not
+available in this session."` shown in sessions where the gate is off.)
 
 ## 6. Implications for the AMQ adapter (`internal/remote/claude`)
 
