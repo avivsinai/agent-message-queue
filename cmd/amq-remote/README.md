@@ -1,8 +1,9 @@
 # amq-remote
 
-`amq-remote` attaches to a harness session that is already running and lets
-another client submit work, follow it, and cancel it. It is a separate binary
-on purpose: `amq` itself gains no socket. Design invariants live in
+`amq-remote` attaches to a harness session that is already running. Run
+`inspect` on the target and use only the operations and evidence it
+advertises. A declared harness does not imply `submit` or `cancel`. It is a
+separate binary on purpose: `amq` itself gains no socket. Design invariants live in
 [the remote-control ADR](../../docs/adr-remote-control.md). Pinned harness
 seams live in [the compatibility manifest](../../docs/remote-compat.md). This
 page is the operator reference for the binary.
@@ -49,9 +50,11 @@ child exit 2 is a usage error and is not respawned. A second `up` for the
 same root exits 6 (`endpoint_already_running`) while the first supervisor
 holds the lifetime lock.
 
-`sessions`, `inspect`, `submit`, `status`, `wait`, `cancel`, `requests`, and
-`doctor` are clients of a running endpoint, except `status` and `requests`,
-which also read the local sender spool when the endpoint has no record yet.
+`sessions`, `inspect`, `submit`, `status`, `wait`, `cancel`, and `doctor`
+talk to a running endpoint. `status` also reads the local sender spool when
+the endpoint has no record yet. `requests` does not use that socket: it reads
+the local request store and the sender spool directly, including while the
+endpoint is down.
 `share` mints or enrolls a session body key and does not start the endpoint.
 `version` prints `amq-remote <version>`.
 
@@ -65,11 +68,11 @@ adapter list, which is legal. `schema_version` is `1`. `layer` is `remote`.
 Each adapter has a unique `target` (the id you pass to `inspect` and
 `submit`), a `kind`, and an optional `config` object.
 
-| Kind | Required `config` | Notes |
+| Kind | Required `config` | What `inspect` advertises on this tree |
 | --- | --- | --- |
-| `claude` | `pid` (Claude Code process id) | Optional `home` overrides the Claude home directory. |
-| `codex` | `socket`, `thread` | Optional `approve` advertises tool approval. |
-| `amit` | `handle` | The Amit extension directory for that handle must already exist under the root. |
+| `claude` | `pid` (Claude Code process id). Optional `home` overrides the Claude home directory. | `Inspect` only. `Submit` and `CancelRequest` are false. |
+| `codex` | `socket` and `thread`. Optional `approve` advertises `ApproveTool`. | `Inspect`, `Submit`, and `CancelRequest`. `Steer` is false. |
+| `amit` | `handle`. The Amit extension directory for that handle must already exist under the root. | `Inspect` and `Submit`. `CancelRequest` is false. Submit evidence is `submitted`. |
 | `fake` | none | Test double. `epoch` is accepted only for this kind. |
 
 `epoch` on any kind other than `fake` is exit 2. A duplicate `target` is
@@ -157,16 +160,18 @@ prompt is exit 2.
 | `--text STRING` | empty | Prompt text. |
 | `--text-file PATH` | empty | Read the prompt from a file. |
 | `--stdin` | false | Read the prompt from stdin. |
-| `--busy reject\|queue` | `reject` | What to do when the runtime is busy. |
-| `--deliver turn\|steer` | `turn` | Delivery mode. |
+| `--busy reject\|queue` | `reject` | Accepted values. `queue` is disabled in v1: the endpoint returns `unsupported` (exit 6) before any durable write. |
+| `--deliver turn\|steer` | `turn` | Accepted values. `steer` is disabled in v1: the endpoint returns `unsupported` (exit 6) before any durable write. |
 | `--request-id UUID` | new UUID | Retry identity. A repeat reconciles instead of submitting twice. |
 | `--admit-within DURATION` | `2m` | Latest admission time relative to now. Must be inside `(0, 24h]`. |
 | `--min-evidence admitted\|submitted` | omitted | Minimum submit evidence. Omitted keeps legacy admission. |
-| `--epoch EPOCH` | live inspect | Previously verified epoch for offline enqueue. Skips live inspect. |
+| `--epoch EPOCH` | live inspect | Previously verified epoch. Required to enqueue while the endpoint is down. |
 
-`submit` writes the sender envelope before it returns. If the endpoint is
-down, the command still exits 0 and reports the spool receipt; the endpoint
-dispatches that envelope when it is next up.
+`submit` does not spool until it has an epoch. With no `--epoch` it inspects
+the live target first, and a failed inspect writes nothing. With a previously
+verified `--epoch`, an unreachable endpoint still exits 0 and returns the
+spool receipt. Restart dispatches that envelope only while its admission
+window is still open; a closed window expires it without dispatch.
 
 ### `status`, `wait`, `cancel`
 
@@ -198,12 +203,12 @@ return 5; the banner's "context mismatch" line is not a path in that mapper.
 
 | Exit | Meaning |
 | --- | --- |
-| 0 | Success. A `submit` or `status` snapshot that is still running is also 0. An unreachable endpoint after a durable `submit` is 0. |
-| 1 | The snapshot is `failed` or `cancelled`, or the spool envelope is `failed` or `expired`. Any error that is not a typed refusal is also 1. |
+| 0 | Success. A `submit` or `status` snapshot that is still running is also 0. An unreachable endpoint is 0 only after `submit` has spooled an envelope. |
+| 1 | The snapshot is `failed` or `cancelled`, or the spool envelope is `failed` or `expired`. An error that is not a typed refusal is 1 when the command did not choose an exit code. |
 | 2 | Usage. Includes a bad flag, a relative or missing root, manifest validation, and a duplicate target. |
 | 3 | `not_found`. |
 | 4 | `wait` reached `--timeout`, or `wait` is looking at a snapshot that is not `completed`, `failed`, `cancelled`, `rejected`, or `uncertain`. |
-| 6 | Action required. Refusal codes: `busy`, `unsupported`, `unshared`, `expired`, `stale_epoch`, `request_conflict`, `storage_full`, `attachment_lost`, `result_expired`, `already_resolved`, `endpoint_already_running`, `endpoint_unreachable`, `store_closed`, `draining`. A snapshot in `rejected` or `uncertain` is also 6. `doctor` uses 6 when the state directory is missing or the endpoint is not reachable. |
+| 6 | Action required. Refusal codes: `busy`, `unsupported`, `unshared`, `expired`, `stale_epoch`, `request_conflict`, `storage_full`, `attachment_lost`, `result_expired`, `already_resolved`, `endpoint_already_running`, `endpoint_unreachable`, `store_closed`, `draining`. A snapshot in `rejected` or `uncertain` is also 6. `doctor` uses 6 when the state directory is missing or the endpoint is not reachable. `share` returns 6 for symlink, key-loading, and mint failures, and that explicit code is kept. |
 | 130 | `wait` was interrupted. The request keeps running. |
 
 ## Doctor
