@@ -246,3 +246,50 @@ func TestShareConditionsAndRenew(t *testing.T) {
 		t.Fatalf("renewed tag admits the event the old one refused: %v", err)
 	}
 }
+
+// TestPerKindCredential pins the architect ruling (2026-09-22): one NIP-OA
+// condition string per kind; Satisfies is fully conjunctive; a multi-kind
+// string is satisfiable by no event and is rejected as a credential; a
+// kind-less string is rejected.
+func TestPerKindCredential(t *testing.T) {
+	owner := mustHexSecret(t, vecOwnerSecret)
+	dir := t.TempDir()
+	k, err := LoadOrMint(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, kind := range ShareKinds {
+		tag, err := SignAuthTag(owner, k.PublicKeyHex(), ShareConditions(kind, 1713957000))
+		if err != nil {
+			t.Fatalf("kind %d: %v", kind, err)
+		}
+		if err := tag.Satisfies(kind, 1713956999); err != nil {
+			t.Fatalf("kind %d within window: %v", kind, err)
+		}
+		if err := tag.Satisfies(20003, 1713957000); err == nil {
+			t.Fatalf("kind %d tag accepted kind 20003 at the bound", kind)
+		}
+	}
+	// A multi-kind string is a local reinterpretation and must never be a
+	// credential: Satisfies rejects every event for it.
+	multi := "kind=20003&kind=1059&created_at<1713957000"
+	multiTag, err := SignAuthTag(owner, k.PublicKeyHex(), multi)
+	if err != nil {
+		t.Fatalf("multi-kind string parses and signs: %v", err)
+	}
+	if err := multiTag.Satisfies(20003, 1713956400); err == nil {
+		t.Fatal("multi-kind string accepted as a credential")
+	}
+	if err := multiTag.Satisfies(1059, 1713956400); err == nil {
+		t.Fatal("multi-kind string accepted as a credential (other kind)")
+	}
+	// A kind-less string authorizes nothing.
+	kindless := "created_at<1713957000"
+	klTag, err := SignAuthTag(owner, k.PublicKeyHex(), kindless)
+	if err != nil {
+		t.Fatalf("kind-less string signs: %v", err)
+	}
+	if err := klTag.Satisfies(1, 1713956400); err == nil {
+		t.Fatal("kind-less credential accepted")
+	}
+}
