@@ -737,7 +737,11 @@ func (e *Endpoint) get(cmd *protocol.Command) (protocol.Reply, error) {
 	if !ok {
 		return protocol.Reply{}, protocol.Refuse(protocol.CodeNotFound, "no record for request_ref")
 	}
-	return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestGet}}, nil
+	out := protocol.Outcome{Op: protocol.OpRequestGet}
+	if rec.State == protocol.StateRejected {
+		out.Message = rec.RefusalReason
+	}
+	return protocol.Reply{Snapshot: rec.Snapshot, Outcome: out}, nil
 }
 
 func (e *Endpoint) cancel(cmd *protocol.Command, src Source) (protocol.Reply, error) {
@@ -1330,7 +1334,7 @@ func (e *Endpoint) transitionLocked(rec *requests.Record, c cause, ev nativeEvid
 	case causeDispatching:
 		rec.State = protocol.StateDispatching
 		rec.Code = ""
-		rec.Reason = ""
+		rec.RefusalReason = ""
 		rec.Tombstone = false
 		if ev.runID != "" {
 			run := ev.runID
@@ -1342,7 +1346,7 @@ func (e *Endpoint) transitionLocked(rec *requests.Record, c cause, ev nativeEvid
 	case causeAdmitted:
 		rec.State = protocol.StateRunning
 		rec.Code = ""
-		rec.Reason = ""
+		rec.RefusalReason = ""
 		rec.Tombstone = false
 		if ev.runID != "" {
 			run := ev.runID
@@ -1354,7 +1358,7 @@ func (e *Endpoint) transitionLocked(rec *requests.Record, c cause, ev nativeEvid
 	case causeCompleted:
 		rec.State = protocol.StateCompleted
 		rec.Code = ""
-		rec.Reason = ""
+		rec.RefusalReason = ""
 		if ev.runID != "" {
 			run := ev.runID
 			rec.NativeRun = &run
@@ -1366,7 +1370,7 @@ func (e *Endpoint) transitionLocked(rec *requests.Record, c cause, ev nativeEvid
 	case causeFailed:
 		rec.State = protocol.StateFailed
 		rec.Code = protocol.CodeNativeError
-		rec.Reason = ""
+		rec.RefusalReason = ""
 		if ev.runID != "" {
 			run := ev.runID
 			rec.NativeRun = &run
@@ -1378,7 +1382,7 @@ func (e *Endpoint) transitionLocked(rec *requests.Record, c cause, ev nativeEvid
 	case causeCancelledByRequest:
 		rec.State = protocol.StateCancelled
 		rec.Code = protocol.CodeCancelledByRequest
-		rec.Reason = ""
+		rec.RefusalReason = ""
 		if ev.runID != "" {
 			run := ev.runID
 			rec.NativeRun = &run
@@ -1397,7 +1401,7 @@ func (e *Endpoint) transitionLocked(rec *requests.Record, c cause, ev nativeEvid
 	case causeCancelledBeforeAdmission:
 		rec.State = protocol.StateCancelled
 		rec.Code = protocol.CodeCancelledBeforeAdmission
-		rec.Reason = ""
+		rec.RefusalReason = ""
 		if rec.Cancel == nil {
 			rec.Cancel = &protocol.Cancel{RequestedAt: protocol.FormatTime(e.now())}
 		}
@@ -1427,7 +1431,7 @@ func (e *Endpoint) transitionLocked(rec *requests.Record, c cause, ev nativeEvid
 	case causeAttachmentLost:
 		rec.State = protocol.StateUncertain
 		rec.Code = protocol.CodeAttachmentLost
-		rec.Reason = ""
+		rec.RefusalReason = ""
 		if ev.runID != "" {
 			run := ev.runID
 			rec.NativeRun = &run
@@ -1438,12 +1442,12 @@ func (e *Endpoint) transitionLocked(rec *requests.Record, c cause, ev nativeEvid
 		if rec.Code == "" {
 			rec.Code = protocol.CodeNativeError
 		}
-		rec.Reason = protocol.BoundReason(ev.reason)
+		rec.RefusalReason = protocol.BoundReason(ev.reason)
 		rec.Interaction = nil
 	case causeBusyTombstone:
 		rec.State = protocol.StateRejected
 		rec.Code = protocol.CodeBusy
-		rec.Reason = ""
+		rec.RefusalReason = ""
 		rec.Tombstone = true
 		rec.NativeRun = nil
 		rec.Interaction = nil
@@ -2178,7 +2182,7 @@ func (e *Endpoint) finishAdmissionLocked(rec *requests.Record, exists bool, t *t
 		e.mu.Unlock()
 		ev := achievedEvidence(t)
 		e.publishRevision(rec)
-		return protocol.Reply{Snapshot: snap, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: rec.Code, Evidence: ev}}, nil
+		return protocol.Reply{Snapshot: snap, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: rec.Code, Evidence: ev, Message: rec.RefusalReason}}, nil
 	}
 	// The record was moved by a native event while Submit was in flight
 	// (the raced shape). RECONCILE from (adm, nerr, rec.State) — never branch
@@ -2209,7 +2213,7 @@ func (e *Endpoint) finishAdmissionLocked(rec *requests.Record, exists bool, t *t
 		e.mu.Unlock()
 		ev := achievedEvidence(t)
 		e.publishRevision(rec)
-		return protocol.Reply{Snapshot: snap, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: rec.Code, Evidence: ev}}, nil
+		return protocol.Reply{Snapshot: snap, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: rec.Code, Evidence: ev, Message: rec.RefusalReason}}, nil
 	}
 	if rec.State == protocol.StateCancelled && !adm.Admitted && nerr == nil {
 		// B3: cancellation raced admission and never got metadata, and the
@@ -2241,12 +2245,12 @@ func (e *Endpoint) finishAdmissionLocked(rec *requests.Record, exists bool, t *t
 		e.mu.Unlock()
 		ev := achievedEvidence(t)
 		e.publishRevision(rec)
-		return protocol.Reply{Snapshot: snap, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: rec.Code, Evidence: ev}}, nil
+		return protocol.Reply{Snapshot: snap, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: rec.Code, Evidence: ev, Message: rec.RefusalReason}}, nil
 	}
 	// Default: return the durable snapshot. Outcome.Code is read from rec.Code
 	// so snapshot.Code == outcome.Code always (Pro #4).
 	snap := rec.Snapshot
-	out := protocol.Outcome{Op: protocol.OpRequestSubmit, Code: rec.Code}
+	out := protocol.Outcome{Op: protocol.OpRequestSubmit, Code: rec.Code, Message: rec.RefusalReason}
 	if rec.Cancel != nil {
 		out.Disposition = rec.Cancel.Disposition
 	}

@@ -398,8 +398,7 @@
           },
           "reply": {
             "state": "rejected",
-            "code": "native_error",
-            "reason": "native admission failed after helper returned"
+            "code": "native_error"
           }
         },
         {

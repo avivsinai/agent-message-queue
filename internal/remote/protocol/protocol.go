@@ -302,7 +302,6 @@ type Snapshot struct {
 	Revision          int64        `json:"revision"`
 	State             State        `json:"state"`
 	Code              Code         `json:"code,omitempty"`
-	Reason            string       `json:"reason,omitempty"`
 	InputDigest       string       `json:"input_digest,omitempty"`
 	NotAfter          string       `json:"not_after,omitempty"`
 	NativeRun         *string      `json:"native_run"`

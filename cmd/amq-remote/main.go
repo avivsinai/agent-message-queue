@@ -226,6 +226,9 @@ func printHuman(w io.Writer, out any) {
 		_, _ = fmt.Fprintln(w)
 	case protocol.Reply:
 		printHuman(w, v.Snapshot)
+		if v.Outcome.Message != "" {
+			say(w, "%s", v.Outcome.Message)
+		}
 		if v.Outcome.Code != "" {
 			say(w, "outcome=%s", v.Outcome.Code)
 		}
@@ -239,9 +242,6 @@ func printHuman(w io.Writer, out any) {
 		say(w, "%s  %s", v.State, v.RequestRef)
 		if v.Code != "" {
 			say(w, "  code=%s", v.Code)
-		}
-		if v.Reason != "" {
-			say(w, "  %s", v.Reason)
 		}
 		if v.NativeRun != nil {
 			say(w, "  run=%s", *v.NativeRun)

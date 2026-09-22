@@ -60,11 +60,6 @@
         "uncertain"
       ]
     },
-    "reason": {
-      "type": "string",
-      "maxLength": 1024,
-      "description": "Adapter refusal text for a rejected record. Control characters are stripped. Omitted when the refusal has no message."
-    },
     "code": {
       "type": "string",
       "description": "Typed reason for rejected, failed, cancelled, or uncertain.",
