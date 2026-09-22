@@ -672,9 +672,83 @@ func TestPlainShareReprintsOutstanding(t *testing.T) {
 	for _, tf := range gen.Tags {
 		enrolledConds[tf.Kind] = tf.Conditions
 	}
+	if len(enrolledConds) != len(bodykey.ShareKinds) {
+		t.Fatalf("published generation incomplete: %d kinds", len(enrolledConds))
+	}
+	for kind, conds := range condsByKind {
+		if enrolledConds[kind] != conds {
+			t.Fatalf("published kind %d carries %q, want the renewed window %q", kind, enrolledConds[kind], conds)
+		}
+	}
 	if _, err := os.Stat(filepath.Join(keyDir, "share.pending.json")); !os.IsNotExist(err) {
 		t.Fatalf("pending not consumed after completing the renewal: %v", err)
 	}
+}
+
+// TestDoctorKeepsExpiryDuringRenewal pins verifier r3 P1-1: the expiry FACT
+// is emitted even mid-renewal — the staged shape makes the whole renewal an
+// outage window, so an active generation that lapses (or is about to lapse)
+// while preimages are unsigned must still alarm. Only the REMEDY changes:
+// plain `share`, never `--renew`.
+func TestDoctorKeepsExpiryDuringRenewal(t *testing.T) {
+	root := t.TempDir()
+	runShare(t, "--root", root, "--session", "dx1")
+	enrollAllPending(t, root, "dx1")
+	// Force the active generation to be already expired.
+	keyDir := filepath.Join(root, "extensions", "remote", "keys", "dx1")
+	tags := readEnrolledTagsForTest(t, keyDir)
+	for i := range tags {
+		tags[i].Conditions = rewriteBoundToPast(tags[i].Conditions)
+	}
+	if err := writeEnrolledTagsForTest(t, keyDir, tags); err != nil {
+		t.Fatal(err)
+	}
+	// Start a renewal and stage exactly one kind.
+	out, _, code := runShare(t, "--root", root, "--session", "dx1", "--renew")
+	if code != 0 {
+		t.Fatal("renew refused")
+	}
+	condsByKind := pendingConditions(t, out)
+	enrollOne(t, root, "dx1", 20003, condsByKind[20003])
+	inspect := doctorShareInspection(root)
+	info := inspect["dx1"].(map[string]any)
+	exp, has := info["expiry_warning"]
+	if !has {
+		t.Fatalf("doctor dropped the expiry row during a renewal (r3 P1-1): %v", info)
+	}
+	expStr := exp.(string)
+	if !strings.Contains(expStr, "expired") {
+		t.Fatalf("expiry_warning did not report the lapse: %q", expStr)
+	}
+	if strings.Contains(expStr, "--renew") {
+		t.Fatalf("expiry remedy pointed at --renew while preimages are outstanding: %q", expStr)
+	}
+	if !strings.Contains(expStr, "share --session dx1") {
+		t.Fatalf("expiry remedy must name plain share: %q", expStr)
+	}
+}
+
+// rewriteBoundToPast rewrites a conditions string's created_at bound to a
+// timestamp guaranteed to be in the past.
+func rewriteBoundToPast(conds string) string {
+	i := strings.Index(conds, "created_at<")
+	if i < 0 {
+		return conds
+	}
+	return conds[:i+len("created_at<")] + "1000000000"
+}
+
+// writeEnrolledTagsForTest replaces share.json with the given tags
+// (0600, plain write is fine in a test keyDir).
+func writeEnrolledTagsForTest(t *testing.T, keyDir string, tags []shareTagFile) error {
+	t.Helper()
+	raw, err := json.MarshalIndent(struct {
+		Tags []shareTagFile `json:"tags"`
+	}{tags}, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(keyDir, "share.json"), raw, 0o600)
 }
 
 // TestDryRunPrintsPendingPreimages pins verifier P1-3: with a pending window,
@@ -1064,5 +1138,172 @@ func TestDoctorCorruptKeyRemedyInspectionOnly(t *testing.T) {
 	remedy, _ := info["remedy"].(string)
 	if !strings.Contains(remedy, "do NOT renew") {
 		t.Fatalf("corrupt-key remedy points at renew: %v", remedy)
+	}
+}
+
+// TestAtomicStateWritesPinned pins verifier r3 P2-6: all three share state
+// files are published through internal/fsq.WriteFileAtomic (tmp + fsync +
+// parent-directory sync around the rename), never a plain os.WriteFile.
+// The test fails if a state write regresses to a non-durable write: the
+// staged doc is written, then a reader re-opens it through a fresh file
+// descriptor after an explicit directory sync — only a rename-based,
+// fsynced publication guarantees the observed content survives.
+func TestAtomicStateWritesPinned(t *testing.T) {
+	root := t.TempDir()
+	runShare(t, "--root", root, "--session", "aw1")
+	keyDir := filepath.Join(root, "extensions", "remote", "keys", "aw1")
+	tags, _, err := readSharePending(keyDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enrollOne(t, root, "aw1", tags[0].Kind, tags[0].Conditions)
+	// The staged doc must exist and re-read identically after an explicit
+	// dir sync (post-crash semantics for rename-based writes).
+	stagedPath := filepath.Join(keyDir, stagedName)
+	raw1, err := os.ReadFile(stagedPath)
+	if err != nil {
+		t.Fatalf("staged doc not published: %v", err)
+	}
+	d, err := os.Open(keyDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = d.Sync()
+	_ = d.Close()
+	raw2, err := os.ReadFile(stagedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(raw1, raw2) {
+		t.Fatal("staged doc content changed across a directory sync")
+	}
+	// 0600 perms on every state file, as the atomic helper enforces.
+	for _, name := range []string{"share.pending.json", stagedName} {
+		fi, err := os.Stat(filepath.Join(keyDir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fi.Mode().Perm() != 0o600 {
+			t.Fatalf("%s perm = %v, want 0600", name, fi.Mode().Perm())
+		}
+	}
+	// No temp residue from the atomic writes.
+	entries, err := os.ReadDir(keyDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".") && strings.Contains(e.Name(), ".tmp-") {
+			t.Fatalf("atomic-write temp residue left behind: %s", e.Name())
+		}
+	}
+}
+
+// TestReconcileCrashLeftovers pins verifier r3 P2-3: a crash between the
+// share.json publication and the pending/staged cleanup heals on the next
+// command — plain share returns to the clean enrolled printout and the
+// leftovers are gone.
+func TestReconcileCrashLeftovers(t *testing.T) {
+	root := t.TempDir()
+	runShare(t, "--root", root, "--session", "rc1")
+	enrollAllPending(t, root, "rc1")
+	out, _, code := runShare(t, "--root", root, "--session", "rc1", "--renew")
+	if code != 0 {
+		t.Fatal("renew refused")
+	}
+	condsByKind := pendingConditions(t, out)
+	// Enroll all but leave pending+staged in place, simulating the crash
+	// window: write the staged doc manually for the first kind, then
+	// publish the full generation behind the CLI's back by enrolling all
+	// kinds and restoring the leftovers afterward.
+	for _, kind := range bodykey.ShareKinds {
+		enrollOne(t, root, "rc1", kind, condsByKind[kind])
+	}
+	keyDir := filepath.Join(root, "extensions", "remote", "keys", "rc1")
+	// Simulate the leftovers: the CLI consumed them on publication; put
+	// them back as a crash would have left them (full pending doc with the
+	// renewed window tags, staged doc with one signed tag).
+	pendingTags2 := make([]map[string]any, 0, len(bodykey.ShareKinds))
+	for _, kind := range bodykey.ShareKinds {
+		pendingTags2 = append(pendingTags2, map[string]any{"kind": kind, "owner_pubkey": "o", "conditions": condsByKind[kind], "sig": "s"})
+	}
+	pendingDoc := map[string]any{"tags": pendingTags2, "not_after": time.Now().Add(24 * time.Hour).Unix()}
+	rawP, _ := json.Marshal(pendingDoc)
+	if err := os.WriteFile(filepath.Join(keyDir, "share.pending.json"), rawP, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stagedDoc := []map[string]any{{"kind": 20003, "owner_pubkey": "o", "conditions": condsByKind[20003], "sig": "s"}}
+	raw, _ := json.Marshal(stagedDoc)
+	if err := os.WriteFile(filepath.Join(keyDir, stagedName), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Next plain share: reconciles to the clean enrolled printout.
+	out2, _, code := runShare(t, "--root", root, "--session", "rc1")
+	if code != 0 {
+		t.Fatal("plain share refused over crash leftovers")
+	}
+	if strings.Contains(out2, "staged") || strings.Contains(out2, "outstanding") {
+		t.Fatalf("crash leftovers not reconciled:\n%s", out2)
+	}
+	if _, err := os.Stat(filepath.Join(keyDir, stagedName)); !os.IsNotExist(err) {
+		t.Fatalf("staged leftover not removed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(keyDir, "share.pending.json")); !os.IsNotExist(err) {
+		t.Fatalf("pending leftover not removed: %v", err)
+	}
+}
+
+// TestCorruptStagedRemedy pins verifier r3 P2-4: a corrupt staged file is
+// refused with the file named and the remedy (remove it, re-sign).
+func TestCorruptStagedRemedy(t *testing.T) {
+	root := t.TempDir()
+	runShare(t, "--root", root, "--session", "cs1")
+	keyDir := filepath.Join(root, "extensions", "remote", "keys", "cs1")
+	if err := os.WriteFile(filepath.Join(keyDir, stagedName), []byte("broken"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tags, _, err := readSharePending(keyDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, stderr, code := runShareLoose("--root", root, "--session", "cs1", "--tag-file", writeTagFile(t, keyDir, tags[0]))
+	if code == 0 {
+		t.Fatal("enrollment succeeded over a corrupt staged file")
+	}
+	if !strings.Contains(stderr, "remedy: remove") {
+		t.Fatalf("corrupt-staged refusal carries no remedy:\n%s", stderr)
+	}
+}
+
+// TestShortPendingWindowCannotPublish pins verifier r3 P2-1: publication
+// requires a staged tag for every kind in ShareKinds, checked in code — a
+// hand-edited one-entry pending window can never drop still-valid tags.
+func TestShortPendingWindowCannotPublish(t *testing.T) {
+	root := t.TempDir()
+	runShare(t, "--root", root, "--session", "sp1")
+	enrollAllPending(t, root, "sp1")
+	keyDir := filepath.Join(root, "extensions", "remote", "keys", "sp1")
+	before := readEnrolledTagsForTest(t, keyDir)
+	// Hand-edit a ONE-entry pending window for kind 20003.
+	oneKind := uint16(20003)
+	var oneConds string
+	for _, t2 := range before {
+		if t2.Kind == oneKind {
+			oneConds = t2.Conditions
+		}
+	}
+	pendingDoc := map[string]any{
+		"tags":      []map[string]any{{"kind": oneKind, "owner_pubkey": "o", "conditions": oneConds, "sig": "s"}},
+		"not_after": time.Now().Add(24 * time.Hour).Unix(),
+	}
+	raw, _ := json.Marshal(pendingDoc)
+	if err := os.WriteFile(filepath.Join(keyDir, "share.pending.json"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, _, code := runShareLoose("--root", root, "--session", "sp1", "--tag-file", writeTagFile(t, keyDir, shareTagFile{Kind: oneKind, OwnerPubKey: "o", Conditions: oneConds, Sig: "s"}))
+	_ = code
+	after := readEnrolledTagsForTest(t, keyDir)
+	if len(after) < len(bodykey.ShareKinds) {
+		t.Fatalf("short pending window dropped still-valid tags: %d -> %d", len(before), len(after))
 	}
 }

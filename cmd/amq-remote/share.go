@@ -218,20 +218,28 @@ func share(args []string, stdout, stderr io.Writer) (int, error) {
 		return protocol.ExitActionRequired, err
 	}
 	notAfter, pending := window.notAfter, window.tags
+	gen, gerr := readEnrolledState(keyDir)
+	if gerr != nil {
+		// Corrupt/unreadable enrolled state is NOT absence: refuse and
+		// let the operator inspect it (verifier P0-1).
+		return protocol.ExitActionRequired, gerr
+	}
+	pendingTags, _, pendingReadErr := readSharePending(keyDir)
+	if pendingReadErr != nil && !errors.Is(pendingReadErr, os.ErrNotExist) {
+		// Malformed pending state is NOT absence (codex r3 #2): never
+		// silently replace an existing window the owner may be
+		// signing against.
+		return protocol.ExitActionRequired, pendingReadErr
+	}
+	if rerr := reconcileStagedState(keyDir, gen, pendingTags, pendingReadErr); rerr != nil {
+		return protocol.ExitActionRequired, rerr
+	}
+	// Re-read after reconciliation: stale leftovers may be gone.
+	pendingTags, _, pendingReadErr = readSharePending(keyDir)
+	if pendingReadErr != nil && !errors.Is(pendingReadErr, os.ErrNotExist) {
+		return protocol.ExitActionRequired, pendingReadErr
+	}
 	if !*renew {
-		gen, gerr := readEnrolledState(keyDir)
-		if gerr != nil {
-			// Corrupt/unreadable enrolled state is NOT absence: refuse and
-			// let the operator inspect it (verifier P0-1).
-			return protocol.ExitActionRequired, gerr
-		}
-		pendingTags, _, pendingReadErr := readSharePending(keyDir)
-		if pendingReadErr != nil && !errors.Is(pendingReadErr, os.ErrNotExist) {
-			// Malformed pending state is NOT absence (codex r3 #2): never
-			// silently replace an existing window the owner may be
-			// signing against.
-			return protocol.ExitActionRequired, pendingReadErr
-		}
 		if pendingReadErr == nil && len(pendingTags) > 0 {
 			// An enrollment is incomplete: reprint the OUTSTANDING pending
 			// preimages (verifier P0-1: the owner signs one kind at a time
@@ -242,7 +250,7 @@ func share(args []string, stdout, stderr io.Writer) (int, error) {
 				return protocol.ExitActionRequired, serr
 			}
 			outstanding := outstandingPending(pendingTags, staged, gen)
-			printShareOutstanding(stdout, *session, k, outstanding, staged, gen)
+			printShareOutstanding(stdout, *session, k, outstanding, staged, pendingTags, gen)
 			return 0, nil
 		}
 		if gen != nil && len(gen.Tags) > 0 {
@@ -390,6 +398,20 @@ func enrollTag(keyDir, tagPath string, k *bodykey.BodyKey) (int, error) {
 		}
 		return protocol.ExitActionRequired, perr
 	}
+	// Reconcile crash leftovers before matching (verifier r3 P2-3): a
+	// complete published generation with stale pending/staged heals here
+	// so the owner is never asked to sign against a consumed window.
+	gen0, _ := readEnrolledState(keyDir)
+	if rerr := reconcileStagedState(keyDir, gen0, pending, nil); rerr != nil {
+		return protocol.ExitActionRequired, rerr
+	}
+	pending, _, perr = readSharePending(keyDir)
+	if perr != nil {
+		if errors.Is(perr, os.ErrNotExist) {
+			return protocol.ExitActionRequired, fmt.Errorf("no pending window: the current generation already covers it; run `amq-remote share --session ...` for the enrolled state")
+		}
+		return protocol.ExitActionRequired, perr
+	}
 	var match *shareTagFile
 	for i := range pending {
 		if pending[i].Kind == tf.Kind {
@@ -506,6 +528,18 @@ func writeShareTag(keyDir string, pending []shareTagFile, tf *shareTagFile) erro
 	if _, err := readEnrolledState(keyDir); err != nil {
 		return err // corrupt/unreadable enrolled state is never overwritten
 	}
+	// Reconcile crash leftovers before reading staged state (verifier r3
+	// P2-3): a complete published generation with stale pending/staged is
+	// healed here so the enrollment targets the live window, not stale
+	// leftovers.
+	pendingTags, _, pendingReadErr := readSharePending(keyDir)
+	if pendingReadErr != nil && !errors.Is(pendingReadErr, os.ErrNotExist) {
+		return pendingReadErr
+	}
+	gen0, _ := readEnrolledState(keyDir)
+	if rerr := reconcileStagedState(keyDir, gen0, pendingTags, pendingReadErr); rerr != nil {
+		return rerr
+	}
 	staged, serr := readShareStaged(keyDir)
 	if serr != nil {
 		return serr
@@ -514,12 +548,17 @@ func writeShareTag(keyDir string, pending []shareTagFile, tf *shareTagFile) erro
 	// the same window replaces that staged entry.
 	staged[tf.Kind] = *tf
 
-	// Completion: one STAGED tag per pending kind whose conditions match
-	// the pending window for that kind.
-	complete := len(staged) == len(pending)
-	for kind, t := range staged {
+	// Completion: one STAGED tag per kind in ShareKinds (verifier r3 P2-1:
+	// enforced in code, not by construction — publication requires the
+	// staged set to cover every kind the credential set defines, with
+	// conditions matching the pending window for that kind). A short or
+	// hand-edited pending window can never publish, so no still-valid tag
+	// is ever dropped without a valid replacement for its kind.
+	complete := true
+	for _, kind := range bodykey.ShareKinds {
+		t, ok := staged[kind]
 		p := pendingTagForKind(pending, kind)
-		if p == nil || p.Conditions != t.Conditions {
+		if !ok || p == nil || p.Conditions != t.Conditions {
 			complete = false
 			break
 		}
@@ -528,18 +567,15 @@ func writeShareTag(keyDir string, pending []shareTagFile, tf *shareTagFile) erro
 		return writeShareStaged(keyDir, staged)
 	}
 
-	// Publish: the new generation is the staged tags; still-valid tags of
-	// the previous generation for kinds the new generation covers are
-	// superseded. The pending set covers every ShareKinds kind, so every
-	// prior tag's kind is superseded by its staged replacement — the
-	// retained set is exactly the staged generation.
+	// Publish: the new generation is exactly the staged tags, one per
+	// ShareKinds kind (enforced above). share.json is single-generation
+	// from here: the staged replacement supersedes every prior tag of its
+	// kind, so nothing still-valid is dropped.
 	doc := struct {
 		Tags []shareTagFile `json:"tags"`
 	}{make([]shareTagFile, 0, len(staged))}
 	for _, kind := range bodykey.ShareKinds {
-		if t, ok := staged[kind]; ok {
-			doc.Tags = append(doc.Tags, t)
-		}
+		doc.Tags = append(doc.Tags, staged[kind])
 	}
 	raw, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
@@ -557,6 +593,100 @@ func writeShareTag(keyDir string, pending []shareTagFile, tf *shareTagFile) erro
 
 // stagedName is the accumulation file for signed-but-unpublished tags.
 const stagedName = "share.staged.json"
+
+// reconcileStagedState heals or refuses leftovers, on every command that
+// touches share state (verifier r3 P2-3/P2-4):
+//   - a complete new generation with pending/staged still on disk (crash
+//     between publication and cleanup) is reconciled by removing them —
+//     the publication is already the committed state;
+//   - staged entries whose conditions do not match the current pending
+//     window (superseded by a later --renew) are dropped;
+//   - a corrupt staged file is refused with the file named and the
+//     remedy (remove it, re-sign) instead of an unrecoverable error.
+func reconcileStagedState(keyDir string, gen *enrolledGeneration, pending []shareTagFile, pendingErr error) error {
+	if pendingErr != nil && !errors.Is(pendingErr, os.ErrNotExist) {
+		return pendingErr // malformed pending: refuse everywhere
+	}
+	genCoversPending := pendingErr == nil && gen != nil && len(gen.Tags) > 0 &&
+		func() bool {
+			byKind := map[uint16]string{}
+			for _, t := range gen.Tags {
+				byKind[t.Kind] = t.Conditions
+			}
+			if len(byKind) < len(bodykey.ShareKinds) {
+				return false
+			}
+			for _, p := range pending {
+				if byKind[p.Kind] != p.Conditions {
+					return false
+				}
+			}
+			return true
+		}()
+	stagedPath := filepath.Join(keyDir, stagedName)
+	raw, readErr := os.ReadFile(stagedPath)
+	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+		return readErr
+	}
+	if readErr == nil {
+		var tags []shareTagFile
+		if err := json.Unmarshal(raw, &tags); err != nil {
+			return protocol.Refuse(protocol.CodeInvalid,
+				"staged state at %s is invalid (%v); remedy: remove %s and re-sign the pending preimages (`amq-remote share --session ...` reprints them)",
+				stagedPath, err, stagedPath)
+		}
+		if genCoversPending {
+			// Crash leftovers after publication: pending and staged are
+			// both stale; the published generation is the authority.
+			p, _ := sharePaths(keyDir)
+			_ = os.Remove(p)
+			_ = os.Remove(stagedPath)
+			return nil
+		}
+		// Drop staged entries superseded by the current pending window.
+		conds := map[uint16]string{}
+		for _, p := range pending {
+			conds[p.Kind] = p.Conditions
+		}
+		kept := make([]shareTagFile, 0, len(tags))
+		for _, t := range tags {
+			if conds[t.Kind] == t.Conditions {
+				kept = append(kept, t)
+			}
+		}
+		if len(kept) != len(tags) {
+			return writeShareStaged(keyDir, byKind(kept))
+		}
+	}
+	if genCoversPending {
+		// Staged absent but pending remains after publication (crash
+		// between the two removes): pending is stale too.
+		p, _ := sharePaths(keyDir)
+		_ = os.Remove(p)
+	}
+	return nil
+}
+
+// doctorNamedLeafError names the state file in a leaf-confinement error so
+// the operator knows which file to inspect (verifier r3 P2-7).
+func doctorNamedLeafError(keyDir string, err error) string {
+	pendingPath, enrolledPath := sharePaths(keyDir)
+	for _, p := range []string{pendingPath, filepath.Join(keyDir, stagedName), enrolledPath} {
+		if strings.Contains(err.Error(), p) || strings.Contains(err.Error(), filepath.Base(p)) {
+			return p + ": " + err.Error()
+		}
+	}
+	return err.Error()
+}
+
+// byKind converts a tag slice to the staged map shape.
+func byKind(tags []shareTagFile) map[uint16]shareTagFile {
+	m := make(map[uint16]shareTagFile, len(tags))
+	for _, t := range tags {
+		m[t.Kind] = t
+	}
+	return m
+}
 
 // readShareStaged returns the staged tags keyed by kind (empty map when no
 // staged doc exists). A staged doc is advisory state; a corrupt one is
@@ -704,7 +834,7 @@ func printSharePending(w io.Writer, session string, k *bodykey.BodyKey, tags []s
 
 // printShareOutstanding prints the still-outstanding preimages of the
 // current pending generation plus the state of what is already enrolled.
-func printShareOutstanding(w io.Writer, session string, k *bodykey.BodyKey, outstanding []shareTagFile, staged map[uint16]shareTagFile, gen *enrolledGeneration) {
+func printShareOutstanding(w io.Writer, session string, k *bodykey.BodyKey, outstanding []shareTagFile, staged map[uint16]shareTagFile, pending []shareTagFile, gen *enrolledGeneration) {
 	say(w, "session:     %s", session)
 	say(w, "body-pubkey: %s", k.PublicKeyHex())
 	if gen != nil {
@@ -714,8 +844,17 @@ func printShareOutstanding(w io.Writer, session string, k *bodykey.BodyKey, outs
 			}
 		}
 	}
-	for kind := range staged {
-		say(w, "kind %d: signed, staged until the generation completes", kind)
+	// Verifier r3 P2-2: only staged entries matching the CURRENT pending
+	// window are signed progress; a stale entry (superseded by a later
+	// --renew) is never presented as signed.
+	conds := map[uint16]string{}
+	for _, p := range pending {
+		conds[p.Kind] = p.Conditions
+	}
+	for _, t := range staged {
+		if conds[t.Kind] == t.Conditions {
+			say(w, "kind %d: signed, staged until the generation completes", t.Kind)
+		}
 	}
 	if len(outstanding) == 0 {
 		return
@@ -789,7 +928,8 @@ func doctorShareInspection(root string) map[string]any {
 		}
 		gen, gerr := readEnrolledState(keyDir)
 		if gerr != nil {
-			info["attestation_error"] = gerr.Error()
+			// Name the file in leaf-confinement errors (verifier r3 P2-7).
+			info["attestation_error"] = doctorNamedLeafError(keyDir, gerr)
 			out[e.Name()] = info
 			continue
 		}
@@ -805,10 +945,23 @@ func doctorShareInspection(root string) map[string]any {
 			// Malformed pending state is surfaced, never treated as absence
 			// (codex r3 #2: doctor must not report a healthy state over a
 			// corrupt window).
-			info["attestation_error"] = pendingErr.Error()
+			info["attestation_error"] = doctorNamedLeafError(keyDir, pendingErr)
 			out[e.Name()] = info
 			continue
 		}
+		// Reconcile crash leftovers so doctor reports the true state
+		// (verifier r3 P2-3); a corrupt staged file is surfaced with its
+		// remedy, not a dead end (verifier r3 P2-4).
+		if rerr := reconcileStagedState(keyDir, gen, pendingTags, pendingErr); rerr != nil {
+			if refusal, ok := rerr.(*protocol.Refusal); ok {
+				info["staged_error"] = refusal.Message
+			} else {
+				info["staged_error"] = rerr.Error()
+			}
+			out[e.Name()] = info
+			continue
+		}
+		pendingTags, _, pendingErr = readSharePending(keyDir)
 		if pendingErr == nil {
 			staged, serr := readShareStaged(keyDir)
 			if serr != nil {
@@ -838,16 +991,26 @@ func doctorShareInspection(root string) map[string]any {
 			} else {
 				info["attestation"] = "enrolled"
 			}
-			info["kinds"] = perKind
 			renewalOutstanding := pendingErr == nil && outstanding > 0
-			if !earliest.IsZero() && !renewalOutstanding {
-				// The --renew remedy is safe only when nothing is pending.
+			info["kinds"] = perKind
+			if !earliest.IsZero() {
+				// Verifier r3 P1-1: the expiry FACT is always emitted — an
+				// active generation lapsing mid-renewal is exactly when the
+				// alarm matters (the staged shape makes the whole renewal an
+				// outage window). Only the REMEDY is conditional: while
+				// preimages are outstanding the remedy is plain `share`,
+				// never `--renew` (rotating the window would strand the
+				// still-unsigned preimages).
 				remaining := time.Until(earliest)
+				shareRemedy := "run `amq-remote share --session " + e.Name() + " --renew`"
+				if renewalOutstanding {
+					shareRemedy = "run `amq-remote share --session " + e.Name() + "` to complete the in-progress renewal"
+				}
 				switch {
 				case remaining <= 0:
-					info["expiry_warning"] = "expired: run `amq-remote share --session " + e.Name() + " --renew`"
+					info["expiry_warning"] = "expired: " + shareRemedy
 				case remaining < warnHorizon:
-					info["expiry_warning"] = fmt.Sprintf("expires in %s: run `amq-remote share --session %s --renew`", remaining.Round(time.Hour), e.Name())
+					info["expiry_warning"] = fmt.Sprintf("expires in %s: %s", remaining.Round(time.Hour), shareRemedy)
 				}
 			}
 			out[e.Name()] = info
