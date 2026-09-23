@@ -55,8 +55,9 @@ than silently dropped.
 | Variable | Meaning |
 | --- | --- |
 | `AM_ROOT` | Required absolute queue root. |
-| `AM_ME` | Required sender handle. |
-| `AMQ_ACP_TO` | Required recipient handle for every prompt. |
+| `AM_ME` | Sender handle. Required unless `AMQ_ACP_REMOTE_TARGET` is set. |
+| `AMQ_ACP_TO` | Recipient handle for every prompt. Required unless `AMQ_ACP_REMOTE_TARGET` is set. |
+| `AMQ_ACP_REMOTE_TARGET` | Remote mode: submit each prompt to this amq-remote target. See [Remote mode](#remote-mode). |
 | `AM_BASE_ROOT` | Pinned base root; required whenever any pin variable is set. |
 | `AM_SESSION` | Pinned session name. |
 | `AM_ROOT_ID`, `AM_BASE_ROOT_ID` | Identity tokens authenticating the two roots. |
@@ -107,6 +108,33 @@ no env: Buzz's default `BUZZ_ACP_AGENT_ARGS=acp` would be extra argv and
   `completed`, and `egress` (`confirmed` or `uncertain`). Queued is not
   drained. Uncertain egress is not retried. The turn outcome adds `state`
   (`replied` or `no_reply`), `reason`, and the `reply` text when one arrived.
+
+## Remote mode
+
+With `AMQ_ACP_REMOTE_TARGET` set, a prompt drives one live native session
+through the amq-remote endpoint that runs on `AM_ROOT` (`amq-remote up --root
+"$AM_ROOT"`). No AMQ message is written. `AMQ_ACP_TO` must then be unset.
+
+- `session/prompt` inspects the target, submits the text with `busy=reject`
+  and `deliver=turn`, and holds the turn open until the request is terminal
+  or uncertain. A completed request returns its native result as the agent
+  message and `stopReason: "end_turn"`. Any other state, or a refusal such as
+  `busy` or `endpoint_unreachable`, returns `stopReason: "refusal"` and an
+  agent message that names the state and code.
+- `session/cancel` sends a cancel for that exact request. `_meta.remote.cancel`
+  holds the endpoint's disposition, or its refusal code: a Claude target
+  answers `unsupported`, and its native work keeps running.
+- A Nostr event id maps to a fixed request id, so a redelivered event
+  reconciles with its first submit.
+- `_session/steering` is not available, and `initialize` reports
+  `_meta.steering.supported: false`.
+- `_meta.remote` reports `target`, `requestRef`, `state`, `code`, `reason`,
+  `cancel`, and `truncated`.
+
+In Buzz Desktop, the managed agent's identity and grants belong to Desktop.
+Desktop signs a grant with no kind limit and no expiry; archive the agent in
+Desktop to revoke it. The strict per-kind path is `amq-remote` with a `relay`
+manifest block.
 
 ## Limitations
 

@@ -28,6 +28,7 @@ const (
 	EnvTurnTimeout       = "AMQ_ACP_TURN_TIMEOUT"
 	EnvPollInterval      = "AMQ_ACP_POLL_INTERVAL"
 	EnvHeartbeatInterval = "AMQ_ACP_HEARTBEAT_INTERVAL"
+	EnvRemoteTarget      = "AMQ_ACP_REMOTE_TARGET"
 )
 
 const (
@@ -52,9 +53,12 @@ func contextError(format string, args ...any) error {
 
 // Config is the resolved routing context for one amq-acp process.
 type Config struct {
-	Root              string
-	Me                string
-	To                string
+	Root string
+	Me   string
+	To   string
+	// RemoteTarget, when set, submits each prompt to this amq-remote target
+	// through the endpoint running on Root, in place of an AMQ message to To.
+	RemoteTarget      string
 	StateDir          string
 	TurnTimeout       time.Duration
 	PollInterval      time.Duration
@@ -75,12 +79,20 @@ func LoadConfig() (Config, error) {
 	root = filepath.Clean(root)
 
 	me := strings.TrimSpace(os.Getenv(EnvMe))
-	if err := fsq.ValidateHandle(me); err != nil {
-		return Config{}, contextError("%s: %v", EnvMe, err)
-	}
 	to := strings.TrimSpace(os.Getenv(EnvTo))
-	if err := fsq.ValidateHandle(to); err != nil {
-		return Config{}, contextError("%s: %v", EnvTo, err)
+	remoteTarget := strings.TrimSpace(os.Getenv(EnvRemoteTarget))
+	if remoteTarget != "" {
+		// Remote mode writes no AMQ message, so no sender or recipient.
+		if to != "" {
+			return Config{}, contextError("set %s or %s, not both", EnvTo, EnvRemoteTarget)
+		}
+	} else {
+		if err := fsq.ValidateHandle(me); err != nil {
+			return Config{}, contextError("%s: %v", EnvMe, err)
+		}
+		if err := fsq.ValidateHandle(to); err != nil {
+			return Config{}, contextError("%s: %v", EnvTo, err)
+		}
 	}
 
 	if err := verifySessionPin(root); err != nil {
@@ -107,6 +119,7 @@ func LoadConfig() (Config, error) {
 		Root:              root,
 		Me:                me,
 		To:                to,
+		RemoteTarget:      remoteTarget,
 		StateDir:          stateDir,
 		TurnTimeout:       turnTimeout,
 		PollInterval:      pollInterval,
