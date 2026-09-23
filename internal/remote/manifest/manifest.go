@@ -30,6 +30,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 )
 
@@ -431,10 +432,14 @@ func Write(path string, f File) error {
 	if err != nil {
 		return fmt.Errorf("encode manifest: %w", err)
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-		return fmt.Errorf("create manifest dir: %w", err)
+	fi, err := os.Lstat(path)
+	if err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("manifest %s is a symlink; refusing", path)
 	}
-	if err := os.WriteFile(path, append(data, '\n'), 0644); err != nil {
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("manifest %s: %w", path, err)
+	}
+	if _, err := fsq.WriteFileAtomic(filepath.Dir(path), filepath.Base(path), append(data, '\n'), 0644); err != nil {
 		return fmt.Errorf("write manifest %s: %w", path, err)
 	}
 	return nil

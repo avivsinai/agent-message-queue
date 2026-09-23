@@ -14,7 +14,9 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/lock"
 	"github.com/avivsinai/agent-message-queue/internal/remote/bodykey"
+	"github.com/avivsinai/agent-message-queue/internal/remote/manifest"
 )
 
 // runShareLoose runs share without failing on non-zero exits; returns
@@ -146,6 +148,325 @@ func TestShareMintPrintEnrollFullLifecycle(t *testing.T) {
 	if strings.Contains(out2, "preimage") {
 		t.Fatalf("plain share must not mint a new window over an enrolled one:\n%s", out2)
 	}
+}
+
+// TestShareBundleWritesRelayBlock is the one-step enroll (611.30): one
+// bundle file publishes the window, and --target with --relay writes the
+// manifest relay block from the enrolled owner key.
+func TestShareBundleWritesRelayBlock(t *testing.T) {
+	root := t.TempDir()
+	const target = "codex-work"
+	manifestPath := manifest.DefaultPath(filepath.Join(root, "extensions", "remote"))
+	if err := manifest.Write(manifestPath, manifest.File{
+		SchemaVersion: manifest.SchemaVersion,
+		Layer:         manifest.Layer,
+		Adapters:      []manifest.Adapter{{Kind: "codex", Target: target}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	out, _, code := runShare(t, "--root", root, "--session", "s1")
+	if code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	k, err := bodykey.Load(filepath.Join(root, "extensions", "remote", "keys", "s1", "body.key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	condsByKind := pendingConditions(t, out)
+	tags := make([]map[string]any, 0, len(bodykey.ShareKinds))
+	for _, kind := range bodykey.ShareKinds {
+		conds := condsByKind[kind]
+		tags = append(tags, map[string]any{
+			"kind": kind, "owner_pubkey": ownerPubHex, "conditions": conds,
+			"sig": ownerSignFor(t, k.PublicKeyHex(), conds),
+		})
+	}
+	raw, err := json.Marshal(tags)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle := filepath.Join(t.TempDir(), "bundle.json")
+	if err := os.WriteFile(bundle, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, code := runShare(t, "--root", root, "--session", "s1", "--bundle", bundle, "--target", target, "--relay", "wss://relay.example"); code != 0 {
+		t.Fatalf("bundle enroll exit = %d", code)
+	}
+	if _, err := os.Stat(filepath.Join(root, "extensions", "remote", "keys", "s1", "share.pending.json")); !os.IsNotExist(err) {
+		t.Fatalf("pending window still present: %v", err)
+	}
+	got, err := manifest.Load(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.SchemaVersion != manifest.RelaySchemaVersion || got.Relay == nil || got.Relay.URL != "wss://relay.example" {
+		t.Fatalf("relay block = %#v", got.Relay)
+	}
+	if len(got.Relay.Shares) != 1 || got.Relay.Shares[0].Target != target || got.Relay.Shares[0].Session != "s1" || got.Relay.Shares[0].OwnerPubKey != ownerPubHex {
+		t.Fatalf("share = %#v", got.Relay.Shares)
+	}
+	if len(got.Adapters) != 1 || got.Adapters[0].Target != target {
+		t.Fatalf("adapters = %#v", got.Adapters)
+	}
+}
+
+// Codex review 2026-09-23T13-50-18.940Z_pid1568_df2e5f1e finding 2: a one-tag
+// bundle must refuse before it stages anything.
+func TestShareBundleRefusesIncomplete(t *testing.T) {
+	root, dir, tags := review878Setup(t)
+	_, stderr, code := runShareLoose("--root", root, "--session", "s1", "--bundle", review878Bundle(t, tags[:1]))
+	st, err := loadShareState(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code == 0 || st.Enrolled.Gen != nil || len(st.Staged.Tags) != 0 || len(st.Pending.Tags) != len(tags) {
+		t.Fatalf("incomplete bundle exit=%d enrolled=%v staged=%d pending=%d stderr=%s", code, st.Enrolled.Gen != nil, len(st.Staged.Tags), len(st.Pending.Tags), stderr)
+	}
+}
+
+// Codex review 2026-09-23T13-50-18.940Z_pid1568_df2e5f1e finding 1: a full
+// bundle publishes only its own tags, not the previously staged owner.
+func TestShareBundlePublishesOneGeneration(t *testing.T) {
+	root, dir, tags := review878Setup(t)
+	for _, tag := range tags[:len(tags)-1] {
+		runShare(t, "--root", root, "--session", "s1", "--tag-file", writeTagFile(t, dir, tag))
+	}
+	k, err := bodykey.Load(filepath.Join(dir, "body.key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var other [32]byte
+	other[31] = 2
+	for i := range tags {
+		signed, err := bodykey.SignAuthTag(other, k.PublicKeyHex(), tags[i].Conditions)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tags[i].OwnerPubKey = signed.OwnerPubKey
+		tags[i].Sig = signed.SigHex()
+	}
+	tags = append(tags[len(tags)-1:], tags[:len(tags)-1]...)
+	_, stderr, code := runShareLoose("--root", root, "--session", "s1", "--bundle", review878Bundle(t, tags))
+	st, err := loadShareState(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owners := map[string]bool{}
+	if st.Enrolled.Gen != nil {
+		for _, tag := range st.Enrolled.Gen.Tags {
+			owners[tag.OwnerPubKey] = true
+		}
+	}
+	if code != 0 || len(owners) != 1 || len(st.Staged.Tags) != 0 {
+		t.Fatalf("bundle exit=%d owners=%d staged=%d stderr=%s", code, len(owners), len(st.Staged.Tags), stderr)
+	}
+}
+
+// Codex review 2026-09-23T13-50-18.940Z_pid1568_df2e5f1e finding 3: --target
+// must not replace another share's session.
+func TestShareTargetRefusesRebind(t *testing.T) {
+	root, _, tags := review878Setup(t)
+	if _, _, code := runShareLoose("--root", root, "--session", "s1", "--bundle", review878Bundle(t, tags)); code != 0 {
+		t.Fatal("enroll")
+	}
+	const target = "codex-work"
+	manifestPath := manifest.DefaultPath(filepath.Join(root, "extensions", "remote"))
+	original := manifest.File{
+		SchemaVersion: manifest.RelaySchemaVersion,
+		Layer:         manifest.Layer,
+		Adapters:      []manifest.Adapter{{Kind: "codex", Target: target}},
+		Relay: &manifest.Relay{URL: "wss://relay.example", Shares: []manifest.Share{{
+			Target: target, Session: "other", OwnerPubKey: ownerPubHex,
+		}}},
+	}
+	if err := manifest.Write(manifestPath, original); err != nil {
+		t.Fatal(err)
+	}
+	_, stderr, code := runShareLoose("--root", root, "--session", "s1", "--target", target, "--relay", "wss://relay.example")
+	got, err := manifest.Load(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code == 0 || len(got.Relay.Shares) != 1 || got.Relay.Shares[0].Session != "other" {
+		t.Fatalf("rebind exit=%d share=%#v stderr=%s", code, got.Relay.Shares, stderr)
+	}
+}
+
+// Codex r2 via Claude 2026-09-23T13-59-45.378Z_pid16400_37a3a850: a refused
+// rebind must not replace the enrolled generation.
+func TestShareRefusedRebindPreservesWorkingShare(t *testing.T) {
+	root, dir, tags := review878Setup(t)
+	manifestPath := manifest.DefaultPath(filepath.Join(root, "extensions", "remote"))
+	if err := manifest.Write(manifestPath, manifest.File{
+		SchemaVersion: manifest.SchemaVersion,
+		Layer:         manifest.Layer,
+		Adapters:      []manifest.Adapter{{Kind: "codex", Target: "codex-work"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	runShare(t, "--root", root, "--session", "s1", "--bundle", review878Bundle(t, tags), "--target", "codex-work", "--relay", "wss://relay.example")
+	loaded, err := manifest.Load(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	connect := relayConfigFor(root, loaded.Relay.URL, loaded.Relay.Shares[0])
+	if _, err := connect(); err != nil {
+		t.Fatalf("initial config: %v", err)
+	}
+	before, err := os.ReadFile(filepath.Join(dir, "share.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runShare(t, "--root", root, "--session", "s1", "--renew", "--days", "31")
+	st, err := loadShareState(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tags = append([]shareTagFile(nil), st.Pending.Tags...)
+	k, err := bodykey.Load(filepath.Join(dir, "body.key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var other [32]byte
+	other[31] = 2
+	for i := range tags {
+		signed, err := bodykey.SignAuthTag(other, k.PublicKeyHex(), tags[i].Conditions)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tags[i].OwnerPubKey = signed.OwnerPubKey
+		tags[i].Sig = signed.SigHex()
+	}
+	_, stderr, code := runShareLoose("--root", root, "--session", "s1", "--bundle", review878Bundle(t, tags), "--target", "codex-work", "--relay", "wss://relay.example")
+	after, err := os.ReadFile(filepath.Join(dir, "share.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, connectErr := connect()
+	if code == 0 || !bytes.Equal(before, after) || connectErr != nil {
+		t.Fatalf("refused rebind: exit=%d generationChanged=%v relayConfigError=%v stderr=%s", code, !bytes.Equal(before, after), connectErr, stderr)
+	}
+}
+
+// Codex review 2026-09-23T13-50-18.940Z_pid1568_df2e5f1e finding 4: a leaf
+// symlink is not followed or replaced.
+func TestShareManifestRefusesLeafSymlink(t *testing.T) {
+	root, _, tags := review878Setup(t)
+	if _, _, code := runShareLoose("--root", root, "--session", "s1", "--bundle", review878Bundle(t, tags)); code != 0 {
+		t.Fatal("enroll")
+	}
+	outside := filepath.Join(t.TempDir(), "outside.json")
+	raw, err := json.Marshal(manifest.File{
+		SchemaVersion: manifest.SchemaVersion,
+		Layer:         manifest.Layer,
+		Adapters:      []manifest.Adapter{{Kind: "codex", Target: "codex-work"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(outside, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manifestPath := manifest.DefaultPath(filepath.Join(root, "extensions", "remote"))
+	if err := os.Symlink(outside, manifestPath); err != nil {
+		t.Fatal(err)
+	}
+	_, _, code := runShareLoose("--root", root, "--session", "s1", "--target", "codex-work", "--relay", "wss://relay.example")
+	got, err := manifest.Load(outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Lstat(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code == 0 || got.Relay != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("symlink exit=%d relay=%v mode=%v", code, got.Relay, fi.Mode())
+	}
+}
+
+// Codex review 2026-09-23T13-50-18.940Z_pid1568_df2e5f1e finding 5: the
+// manifest transaction waits for the lock instead of writing past it.
+func TestShareManifestLockSerializesBinding(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("manifest lock is flock")
+	}
+	root, _, tags := review878Setup(t)
+	if _, _, code := runShareLoose("--root", root, "--session", "s1", "--bundle", review878Bundle(t, tags)); code != 0 {
+		t.Fatal("enroll")
+	}
+	const target = "codex-work"
+	manifestPath := manifest.DefaultPath(filepath.Join(root, "extensions", "remote"))
+	if err := manifest.Write(manifestPath, manifest.File{
+		SchemaVersion: manifest.SchemaVersion,
+		Layer:         manifest.Layer,
+		Adapters:      []manifest.Adapter{{Kind: "codex", Target: target}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	release := make(chan struct{})
+	held := make(chan struct{})
+	go func() {
+		_ = lock.WithExclusiveFileLock(manifestPath+".lock", func() error {
+			close(held)
+			<-release
+			return nil
+		})
+	}()
+	<-held
+	done := make(chan int, 1)
+	go func() {
+		_, _, code := runShareLoose("--root", root, "--session", "s1", "--target", target, "--relay", "wss://relay.example")
+		done <- code
+	}()
+	select {
+	case code := <-done:
+		t.Fatalf("binding finished while the manifest lock was held, exit %d", code)
+	case <-time.After(400 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case code := <-done:
+		if code != 0 {
+			t.Fatalf("binding exit %d", code)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("binding did not finish after the lock was released")
+	}
+}
+
+func review878Setup(t *testing.T) (string, string, []shareTagFile) {
+	t.Helper()
+	root := t.TempDir()
+	runShare(t, "--root", root, "--session", "s1")
+	dir := filepath.Join(root, "extensions", "remote", "keys", "s1")
+	st, err := loadShareState(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	k, err := bodykey.Load(filepath.Join(dir, "body.key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tags := append([]shareTagFile(nil), st.Pending.Tags...)
+	for i := range tags {
+		tags[i].OwnerPubKey = ownerPubHex
+		tags[i].Sig = ownerSignFor(t, k.PublicKeyHex(), tags[i].Conditions)
+	}
+	return root, dir, tags
+}
+
+func review878Bundle(t *testing.T, tags []shareTagFile) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "bundle.json")
+	raw, err := json.Marshal(tags)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
 }
 
 func jsonNumber(i int) string {
