@@ -6,6 +6,8 @@ package activity
 import (
 	"context"
 	"fmt"
+	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -52,14 +54,24 @@ type Sink struct {
 	// session. Empty keeps the reservation in this process only.
 	StateDir string
 
+	mu         sync.Mutex
 	sawSession bool
-	ring       []queuedFrame
-	dropped    uint64
+	dropped    atomic.Uint64
 }
 
 // Drops is the number of queued frames this sink discarded for age or budget.
 func (s *Sink) Drops() uint64 {
-	return s.dropped
+	return s.dropped.Load()
+}
+
+func (s *Sink) noteDrop() {
+	s.dropped.Add(1)
+}
+
+// Close drops this sink's queued frames and releases their body and process
+// byte charges.
+func (s *Sink) Close() {
+	live.release(s, s.Body.Public().Hex())
 }
 
 // Enqueue copies one notification into the bounded frame queue and returns
@@ -69,18 +81,47 @@ func (s *Sink) Enqueue(n codex.Notification) error {
 	return err
 }
 
+// Drain publishes frames already queued for this sink. It does not require a
+// new notification. The queue lock is not held across Publish.
+func (s *Sink) Drain(ctx context.Context) error {
+	if s.Publish == nil {
+		return fmt.Errorf("activity publish is not set")
+	}
+	body := s.Body.Public().Hex()
+	for {
+		now := s.now()
+		live.mu.Lock()
+		live.evictStaleLocked(now)
+		if !live.hasLocked(s, body) {
+			live.mu.Unlock()
+			return nil
+		}
+		if !processLimit.reserve(body, now) {
+			live.mu.Unlock()
+			return nil
+		}
+		item, ok := live.popLocked(s, body)
+		live.mu.Unlock()
+		if !ok {
+			return nil
+		}
+		err := s.Publish(ctx, item.evt)
+		processLimit.finish(body, s.now())
+		if err != nil {
+			return err
+		}
+	}
+}
+
 // Accept maps one Codex notification, queues the frames, and publishes those
 // the process-wide per-body rate allows. A notification for another thread
 // is ignored. An ambiguous publish is not retried.
 func (s *Sink) Accept(ctx context.Context, n codex.Notification) error {
-	if s.Publish == nil {
-		return fmt.Errorf("activity publish is not set")
-	}
 	queued, err := s.enqueue(n)
 	if err != nil || !queued {
 		return err
 	}
-	return s.flush(ctx)
+	return s.Drain(ctx)
 }
 
 func (s *Sink) enqueue(n codex.Notification) (bool, error) {
@@ -88,12 +129,20 @@ func (s *Sink) enqueue(n codex.Notification) (bool, error) {
 	if !ok {
 		return false, nil
 	}
-	if !s.sawSession && s.ThreadID != "" {
+	s.mu.Lock()
+	emitReady := !s.sawSession && s.ThreadID != ""
+	if emitReady {
+		s.sawSession = true
+	}
+	s.mu.Unlock()
+	if emitReady {
 		ready := observation{Kind: "session_resolved", SessionID: s.ThreadID, At: obs.At}
 		if err := s.queue(ready); err != nil {
+			s.mu.Lock()
+			s.sawSession = false
+			s.mu.Unlock()
 			return false, err
 		}
-		s.sawSession = true
 	}
 	if err := s.queue(obs); err != nil {
 		return false, err
@@ -135,13 +184,12 @@ func (s *Sink) fit(obs observation) ([]nostr.Event, error) {
 	if obs.At.IsZero() {
 		obs.At = s.now()
 	}
-	probe := obs
-	seq, err := s.peekSeq()
+	seq, err := s.commitSeq()
 	if err != nil {
 		return nil, err
 	}
-	probe.Seq = seq
-	evt, err := s.build(probe)
+	obs.Seq = seq
+	evt, err := s.build(obs)
 	if err != nil {
 		return nil, err
 	}
@@ -163,14 +211,6 @@ func (s *Sink) fit(obs observation) ([]nostr.Event, error) {
 			return nil, err
 		}
 		return append(a, b...), nil
-	}
-	obs.Seq, err = s.commitSeq()
-	if err != nil {
-		return nil, err
-	}
-	evt, err = s.build(obs)
-	if err != nil {
-		return nil, err
 	}
 	return []nostr.Event{evt}, nil
 }
@@ -213,10 +253,6 @@ func (s *Sink) seqKey() string {
 	return s.Body.Public().Hex() + "\x00" + s.ThreadID
 }
 
-func (s *Sink) peekSeq() (uint64, error) {
-	return processSeq.peek(s.seqKey(), s.StateDir)
-}
-
 func (s *Sink) commitSeq() (uint64, error) {
 	return processSeq.commit(s.seqKey(), s.StateDir)
 }
@@ -226,48 +262,7 @@ func (s *Sink) push(evt nostr.Event) error {
 	if err != nil {
 		return err
 	}
-	s.discardStale()
-	s.ring = append(s.ring, queuedFrame{evt: evt, n: n})
-	queueBytes.add(s.Body.Public().Hex(), n)
-	s.trim()
-	return nil
-}
-
-func (s *Sink) discardStale() {
-	for len(s.ring) > 0 && s.now().Unix()-int64(s.ring[0].evt.CreatedAt) > int64(maxPendingAge/time.Second) {
-		s.dropFront()
-	}
-}
-
-func (s *Sink) trim() {
-	body := s.Body.Public().Hex()
-	for len(s.ring) > 0 && (len(s.ring) > ringCap || queueBytes.over(body)) {
-		s.dropFront()
-	}
-}
-
-func (s *Sink) dropFront() {
-	item := s.ring[0]
-	s.ring = s.ring[1:]
-	queueBytes.add(s.Body.Public().Hex(), -item.n)
-	s.dropped++
-}
-
-func (s *Sink) flush(ctx context.Context) error {
-	s.discardStale()
-	body := s.Body.Public().Hex()
-	for len(s.ring) > 0 {
-		if !processLimit.allow(body, s.now()) {
-			return nil
-		}
-		item := s.ring[0]
-		s.ring = s.ring[1:]
-		queueBytes.add(body, -item.n)
-		if err := s.Publish(ctx, item.evt); err != nil {
-			return err
-		}
-		processLimit.commit(body, s.now())
-	}
+	live.push(s, s.Body.Public().Hex(), evt, n)
 	return nil
 }
 
