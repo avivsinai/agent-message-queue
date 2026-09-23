@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -82,5 +83,26 @@ func TestClaudeDrainersPreservePublicationOrder(t *testing.T) {
 	}
 	if overtook {
 		t.Fatal("tick Drain published the later Claude frame while the worker held the first dequeued frame at its publication fence")
+	}
+}
+
+// codex #872 r2: the charge used 64 bytes per block and len, but the note
+// retains cap(Blocks) of 72-byte blocks, so a note of empty blocks slipped
+// past the 1 MiB item cap.
+func TestClaudeNoteChargesRetainedBlockAllocation(t *testing.T) {
+	raw := `{"type":"user","uuid":"r1","sessionId":"thread-1","message":{"content":[` + strings.TrimSuffix(strings.Repeat(`{"type":"tool_result"},`, 13800), ",") + `]}}`
+	line, ok := claude.ParseTranscriptLine(raw)
+	if !ok {
+		t.Fatal("parse")
+	}
+	note := claude.ActivityNote{Line: line, SessionID: "thread-1", TurnID: "turn-1"}
+	it := activityItem{claude: &note}
+	storage := int64(cap(line.Blocks)) * int64(reflect.TypeOf(claude.TranscriptBlock{}).Size())
+	// This lower bound omits all strings and the containing note itself.
+	if storage <= activityItemBytes {
+		t.Fatalf("repro needs backing storage over cap: len=%d cap=%d storage=%d charged=%d", len(line.Blocks), cap(line.Blocks), storage, it.size())
+	}
+	if newActivityInbox().offer(it) {
+		t.Fatalf("admitted parsed note with block backing array alone=%d bytes, charged=%d, cap=%d; block size=%d len=%d capacity=%d", storage, it.size(), activityItemBytes, reflect.TypeOf(claude.TranscriptBlock{}).Size(), len(line.Blocks), cap(line.Blocks))
 	}
 }

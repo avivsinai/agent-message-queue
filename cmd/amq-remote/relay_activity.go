@@ -10,6 +10,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unsafe"
 
 	"fiatjaf.com/nostr"
 
@@ -39,20 +40,22 @@ type activityItem struct {
 	claude *claude.ActivityNote
 }
 
-// blockOverhead charges each Claude block's own storage, so many empty
-// blocks still count against the budget.
-const blockOverhead = 64
+// blockSize is one Claude block's in-memory size; the note retains its whole
+// backing array, capacity included.
+var blockSize = int64(unsafe.Sizeof(claude.TranscriptBlock{}))
 
 // size is the bytes an item retains, for the queue's byte budget: for a
-// Claude note every string it holds plus each block's storage (codex #872 r1).
+// Claude note every string it holds plus the block array's full allocation,
+// cap times element size (codex #872 r1, r2).
 func (it activityItem) size() int64 {
 	if it.codex != nil {
 		return int64(len(it.codex.Params)) // the method is one of three allowlisted names
 	}
 	n := it.claude
 	total := int64(len(n.SessionID) + len(n.TurnID) + len(n.Line.Type) + len(n.Line.SessionID) + len(n.Line.UUID))
+	total += int64(cap(n.Line.Blocks)) * blockSize
 	for _, b := range n.Line.Blocks {
-		total += blockOverhead + int64(len(b.Type)+len(b.Text)+len(b.Name)+len(b.ID))
+		total += int64(len(b.Type) + len(b.Text) + len(b.Name) + len(b.ID))
 	}
 	return total
 }
