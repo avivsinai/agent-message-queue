@@ -32,8 +32,8 @@ func TestCodexNotificationsPublishDecryptableFrames(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if len(got) != 3 {
-		t.Fatalf("frames = %d, want 3", len(got))
+	if len(got) != 4 {
+		t.Fatalf("frames = %d, want 4", len(got))
 	}
 	key, err := nip44.GenerateConversationKey(body.Public(), owner)
 	if err != nil {
@@ -58,15 +58,26 @@ func TestCodexNotificationsPublishDecryptableFrames(t *testing.T) {
 		if err := json.Unmarshal([]byte(plain), &obs); err != nil {
 			t.Fatal(err)
 		}
-		if obs.Seq != uint64(i+1) || obs.Provenance != "native_projection" || obs.SessionID != "thread-1" || obs.TurnID != "turn-1" {
+		if obs.Seq != uint64(i+1) || obs.SessionID != "thread-1" || !strings.Contains(plain, `"channelId":null`) {
 			t.Fatalf("observation = %#v", obs)
 		}
 		kinds = append(kinds, obs.Kind)
-		if obs.Kind == "session_update" && !strings.Contains(string(obs.Payload), "hello") {
-			t.Fatalf("payload = %s", obs.Payload)
+		switch obs.Kind {
+		case "acp_read":
+			if obs.TurnID != "turn-1" || !strings.Contains(string(obs.Payload), "hello") || !strings.Contains(string(obs.Payload), `"provenance":"native_projection"`) {
+				t.Fatalf("payload = %s", obs.Payload)
+			}
+		case "session_resolved":
+			if !strings.Contains(string(obs.Payload), `"isNewSession":false`) || !strings.Contains(string(obs.Payload), `"sessionId":"thread-1"`) {
+				t.Fatalf("payload = %s", obs.Payload)
+			}
+		default:
+			if obs.TurnID != "turn-1" {
+				t.Fatalf("observation = %#v", obs)
+			}
 		}
 	}
-	if strings.Join(kinds, ",") != "turn_started,session_update,turn_completed" {
+	if strings.Join(kinds, ",") != "session_resolved,turn_started,acp_read,turn_completed" {
 		t.Fatalf("kinds = %s", kinds)
 	}
 }
