@@ -183,6 +183,73 @@ func newVanishedBinaryStaleLockFixture(t *testing.T) vanishedBinaryStaleLockFixt
 	return vanishedBinaryStaleLockFixture{root: root, lockPath: lockPath}
 }
 
+// Field regression (amit-502vx, 2026-09-22): after moving to a new machine,
+// every wake lock the old machine wrote named a binary directory absent here.
+// Doctor labeled them binary_dir_gone, whose documented remedy is
+// --fix-wake-locks, and that fix rightly never removes an unverified lock, so
+// the dead wake could not be recovered. The foreign-machine reason must win
+// and name the operator-confirmed -y relaunch; --fix must report preserved.
+func TestDoctorForeignMachineLockWithMissingBinaryDirNamesConfirmedRelaunch(t *testing.T) {
+	root := secureTempDirForTest(t)
+	if err := fsq.EnsureRootDirs(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.WriteConfig(
+		filepath.Join(root, "meta", "config.json"),
+		config.Config{Version: 1, Agents: []string{"codex"}},
+		true,
+	); err != nil {
+		t.Fatal(err)
+	}
+	stubCurrentWakeMachineID(t, testMachineUUID)
+	lockPath := writeWakeLockForTest(t, root, "codex", wakeLock{
+		PID:        4242,
+		Hostname:   "old-laptop",
+		MachineID:  "99999999-8888-7777-6666-555555555555",
+		Executable: "/opt/homebrew/bin/amq",
+		ImagePath:  filepath.Join(t.TempDir(), "Cellar", "amq", "0.61.0", "bin", "amq"),
+		WakeMode:   wakeInjectModeRaw,
+		Generation: "foreign-machine-generation",
+	})
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		return wakeProcessInfo{PID: pid}
+	})
+	stubWakeCheckRuntime(t, true, "0.64.1")
+	fixHint := doctorRootCommandForOS(root, "", runtime.GOOS, "--ops", "--fix-wake-locks")
+
+	decision := inspectWakeCheckDecision(root, "codex")
+	v1 := renderWakeCheckV1(decision)
+	v2 := renderWakeCheckV2(decision)
+	if v1.WakeStatus != string(wakeLockUnverified) ||
+		v2.Action.ReasonCode != wakeReasonForeignMachineLock ||
+		v2.Action.Actor != wakeActionActorOperator ||
+		!strings.Contains(v1.NextAction, "another machine (hostname old-laptop") ||
+		!strings.Contains(v1.NextAction, "with -y") ||
+		strings.Contains(v1.NextAction, "--fix-wake-locks") {
+		t.Fatalf("wake check foreign lock = v1%#v v2%#v", v1, v2)
+	}
+
+	for _, fix := range []bool{false, true} {
+		got := runOpsChecksWithSchema(root, "test", fix, wakeCheckSchemaV2).WakeLocks
+		if len(got) != 1 ||
+			got[0].Status != string(wakeLockUnverified) ||
+			got[0].Reason != "machine id mismatch" ||
+			got[0].Fix == fixHint ||
+			strings.Contains(got[0].NextAction, "--fix-wake-locks") {
+			t.Fatalf("doctor --ops fix=%v foreign lock = %#v", fix, got)
+		}
+		if fix && (got[0].Mutation == nil || got[0].Mutation.Status != "preserved" || got[0].Removed) {
+			t.Fatalf("doctor --fix-wake-locks foreign lock mutation = %#v", got[0].Mutation)
+		}
+	}
+	if v1ops := runOpsChecks(root, "test", false).WakeLocks; len(v1ops) != 1 || v1ops[0].Reason != "machine id mismatch" {
+		t.Fatalf("doctor --ops v1 foreign lock = %#v", v1ops)
+	}
+	if _, err := os.Stat(lockPath); err != nil {
+		t.Fatalf("foreign lock must be preserved: %v", err)
+	}
+}
+
 func assertNoRawENOENT(t *testing.T, parts ...string) {
 	t.Helper()
 	for _, part := range parts {

@@ -54,6 +54,7 @@ const (
 	wakeReasonBinaryDirGone              = "binary_dir_gone"
 	wakeReasonWakeStateCreating          = "wake_state_creating"
 	wakeReasonWakeStateUnverified        = "wake_state_unverified"
+	wakeReasonForeignMachineLock         = "foreign_machine_lock"
 	wakeReasonObservationChanged         = "observation_changed"
 	wakeReasonExecutableUnavailable      = "executable_identity_unavailable"
 	wakeReasonPlatformUnsupported        = "platform_unsupported"
