@@ -81,7 +81,7 @@ type Share struct {
 	// the mentioning channel. Commands require dm_channel_id first.
 	MentionChannels []string `json:"mention_channels,omitempty"`
 	Commands        bool     `json:"commands,omitempty"`
-	Activity    bool   `json:"activity,omitempty"`
+	Activity        bool     `json:"activity,omitempty"`
 }
 
 // Adapter is one adapter instance in the manifest.
