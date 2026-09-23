@@ -292,6 +292,62 @@ func TestShareTargetRefusesRebind(t *testing.T) {
 	}
 }
 
+// Codex r2 via Claude 2026-09-23T13-59-45.378Z_pid16400_37a3a850: a refused
+// rebind must not replace the enrolled generation.
+func TestShareRefusedRebindPreservesWorkingShare(t *testing.T) {
+	root, dir, tags := review878Setup(t)
+	manifestPath := manifest.DefaultPath(filepath.Join(root, "extensions", "remote"))
+	if err := manifest.Write(manifestPath, manifest.File{
+		SchemaVersion: manifest.SchemaVersion,
+		Layer:         manifest.Layer,
+		Adapters:      []manifest.Adapter{{Kind: "codex", Target: "codex-work"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	runShare(t, "--root", root, "--session", "s1", "--bundle", review878Bundle(t, tags), "--target", "codex-work", "--relay", "wss://relay.example")
+	loaded, err := manifest.Load(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	connect := relayConfigFor(root, loaded.Relay.URL, loaded.Relay.Shares[0])
+	if _, err := connect(); err != nil {
+		t.Fatalf("initial config: %v", err)
+	}
+	before, err := os.ReadFile(filepath.Join(dir, "share.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runShare(t, "--root", root, "--session", "s1", "--renew", "--days", "31")
+	st, err := loadShareState(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tags = append([]shareTagFile(nil), st.Pending.Tags...)
+	k, err := bodykey.Load(filepath.Join(dir, "body.key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var other [32]byte
+	other[31] = 2
+	for i := range tags {
+		signed, err := bodykey.SignAuthTag(other, k.PublicKeyHex(), tags[i].Conditions)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tags[i].OwnerPubKey = signed.OwnerPubKey
+		tags[i].Sig = signed.SigHex()
+	}
+	_, stderr, code := runShareLoose("--root", root, "--session", "s1", "--bundle", review878Bundle(t, tags), "--target", "codex-work", "--relay", "wss://relay.example")
+	after, err := os.ReadFile(filepath.Join(dir, "share.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, connectErr := connect()
+	if code == 0 || !bytes.Equal(before, after) || connectErr != nil {
+		t.Fatalf("refused rebind: exit=%d generationChanged=%v relayConfigError=%v stderr=%s", code, !bytes.Equal(before, after), connectErr, stderr)
+	}
+}
+
 // Codex review 2026-09-23T13-50-18.940Z_pid1568_df2e5f1e finding 4: a leaf
 // symlink is not followed or replaced.
 func TestShareManifestRefusesLeafSymlink(t *testing.T) {

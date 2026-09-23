@@ -259,12 +259,15 @@ func share(args []string, stdout, stderr io.Writer) (int, error) {
 	}
 
 	if *bundle != "" {
-		code, err := enrollBundle(*session, keyDir, *bundle, k, st)
+		tags, pending, code, err := loadBundle(*session, keyDir, *bundle, k, st)
 		if code != 0 || err != nil {
 			return code, err
 		}
 		if *target != "" {
-			return writeRelayShare(*root, *session, *target, *relayURL, keyDir)
+			return bindBundle(*root, *session, *target, *relayURL, keyDir, tags, pending)
+		}
+		if err := publishBundle(*session, keyDir, tags, pending); err != nil {
+			return protocol.ExitActionRequired, err
 		}
 		return 0, nil
 	}
@@ -491,46 +494,72 @@ func enrollTag(session, keyDir, tagPath string, k *bodykey.BodyKey, st *shareSta
 	return 0, nil
 }
 
-// enrollBundle validates every tag in one owner-signed file, then publishes
-// that set as one generation. The file is a JSON array of the same objects
-// --tag-file accepts. An incomplete set, or any rejected tag, writes nothing.
-// Previously staged tags are not mixed into the generation.
-func enrollBundle(session, keyDir, bundlePath string, k *bodykey.BodyKey, st *shareState) (int, error) {
+// loadBundle reads and validates one owner-signed tag file. It does not
+// write. An incomplete set or any rejected tag is refused here.
+func loadBundle(session, keyDir, bundlePath string, k *bodykey.BodyKey, st *shareState) ([]shareTagFile, []shareTagFile, int, error) {
 	raw, err := os.ReadFile(bundlePath)
 	if err != nil {
-		return protocol.ExitUsage, fmt.Errorf("--bundle: %w", err)
+		return nil, nil, protocol.ExitUsage, fmt.Errorf("--bundle: %w", err)
 	}
 	var tags []shareTagFile
 	if err := json.Unmarshal(raw, &tags); err != nil {
-		return protocol.ExitUsage, fmt.Errorf("--bundle: %w", err)
+		return nil, nil, protocol.ExitUsage, fmt.Errorf("--bundle: %w", err)
 	}
 	if len(tags) == 0 {
-		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "--bundle is empty")
+		return nil, nil, protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "--bundle is empty")
 	}
 	pending, code, err := enrollablePending(session, keyDir, st)
 	if code != 0 || err != nil {
-		return code, err
+		return nil, nil, code, err
 	}
 	seen := map[uint16]bool{}
 	owner := ""
 	for i := range tags {
 		if seen[tags[i].Kind] {
-			return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "--bundle repeats kind %d", tags[i].Kind)
+			return nil, nil, protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "--bundle repeats kind %d", tags[i].Kind)
 		}
 		seen[tags[i].Kind] = true
 		if owner == "" {
 			owner = tags[i].OwnerPubKey
 		} else if tags[i].OwnerPubKey != owner {
-			return protocol.ExitActionRequired, fmt.Errorf("--bundle tags name more than one owner")
+			return nil, nil, protocol.ExitActionRequired, fmt.Errorf("--bundle tags name more than one owner")
 		}
 		if code, err = matchShareTag(&tags[i], pending, k); code != 0 || err != nil {
-			return code, err
+			return nil, nil, code, err
 		}
 	}
-	if err := publishBundle(session, keyDir, tags, pending); err != nil {
+	return tags, pending, 0, nil
+}
+
+// bindBundle checks the manifest association under the lock, and only then
+// publishes the bundle and the relay block. A refusal leaves the enrolled
+// generation untouched.
+func bindBundle(root, session, target, relayURL, keyDir string, tags, pending []shareTagFile) (int, error) {
+	if !lock.AdvisoryLockAvailable() {
+		return protocol.ExitActionRequired, fmt.Errorf("refusing to update the manifest without an advisory file lock")
+	}
+	path := manifest.DefaultPath(filepath.Join(root, stateDirName))
+	var code int
+	err := lock.WithExclusiveFileLock(path+".lock", func() error {
+		prepared, c, err := prepareManifest(path, session, target, relayURL, tags[0].OwnerPubKey)
+		if err != nil {
+			code = c
+			return err
+		}
+		if err := publishBundle(session, keyDir, tags, pending); err != nil {
+			code = protocol.ExitActionRequired
+			return err
+		}
+		if err := manifest.Write(path, prepared); err != nil {
+			code = protocol.ExitActionRequired
+			return err
+		}
+		return nil
+	})
+	if err != nil && code == 0 {
 		return protocol.ExitActionRequired, err
 	}
-	return 0, nil
+	return code, err
 }
 
 // publishBundle writes the bundle as the enrolled generation. It refuses,
@@ -670,6 +699,9 @@ func writeRelayShare(root, session, target, relayURL, keyDir string) (int, error
 			return protocol.ExitActionRequired, fmt.Errorf("enrolled tags name more than one owner")
 		}
 	}
+	if !lock.AdvisoryLockAvailable() {
+		return protocol.ExitActionRequired, fmt.Errorf("refusing to update the manifest without an advisory file lock")
+	}
 	path := manifest.DefaultPath(filepath.Join(root, stateDirName))
 	var code int
 	err = lock.WithExclusiveFileLock(path+".lock", func() error {
@@ -687,9 +719,22 @@ func writeRelayShare(root, session, target, relayURL, keyDir string) (int, error
 // holds the manifest lock for this whole transaction. An existing share is
 // left unchanged unless its target, session, and owner already match.
 func bindManifest(path, session, target, relayURL, owner string) (int, error) {
+	f, code, err := prepareManifest(path, session, target, relayURL, owner)
+	if err != nil {
+		return code, err
+	}
+	if err := manifest.Write(path, f); err != nil {
+		return protocol.ExitActionRequired, err
+	}
+	return 0, nil
+}
+
+// prepareManifest is the read-only half of a relay bind. It refuses a rebind
+// whose target, session, or owner does not already match.
+func prepareManifest(path, session, target, relayURL, owner string) (manifest.File, int, error) {
 	f, err := manifest.Load(path)
 	if err != nil {
-		return protocol.ExitActionRequired, err
+		return manifest.File{}, protocol.ExitActionRequired, err
 	}
 	found := false
 	for _, a := range f.Adapters {
@@ -699,14 +744,14 @@ func bindManifest(path, session, target, relayURL, owner string) (int, error) {
 		}
 	}
 	if !found {
-		return protocol.ExitActionRequired, fmt.Errorf("manifest has no adapter %q; declare the target before share --target", target)
+		return manifest.File{}, protocol.ExitActionRequired, fmt.Errorf("manifest has no adapter %q; declare the target before share --target", target)
 	}
 	entry := manifest.Share{Target: target, Session: session, OwnerPubKey: owner}
 	if f.Relay == nil {
 		f.SchemaVersion = manifest.RelaySchemaVersion
 		f.Relay = &manifest.Relay{URL: relayURL, Shares: []manifest.Share{entry}}
 	} else if f.Relay.URL != relayURL {
-		return protocol.ExitActionRequired, fmt.Errorf("manifest relay url is %s; refusing to replace it with %s", f.Relay.URL, relayURL)
+		return manifest.File{}, protocol.ExitActionRequired, fmt.Errorf("manifest relay url is %s; refusing to replace it with %s", f.Relay.URL, relayURL)
 	} else {
 		placed := false
 		for _, sh := range f.Relay.Shares {
@@ -714,7 +759,7 @@ func bindManifest(path, session, target, relayURL, owner string) (int, error) {
 				continue
 			}
 			if sh.Session != session || sh.OwnerPubKey != owner {
-				return protocol.ExitActionRequired, fmt.Errorf("target %q is already shared as session %q; refusing to rebind", target, sh.Session)
+				return manifest.File{}, protocol.ExitActionRequired, fmt.Errorf("target %q is already shared as session %q; refusing to rebind", target, sh.Session)
 			}
 			placed = true
 			break
@@ -724,12 +769,9 @@ func bindManifest(path, session, target, relayURL, owner string) (int, error) {
 		}
 	}
 	if err := manifest.Validate(f); err != nil {
-		return protocol.ExitUsage, err
+		return manifest.File{}, protocol.ExitUsage, err
 	}
-	if err := manifest.Write(path, f); err != nil {
-		return protocol.ExitActionRequired, err
-	}
-	return 0, nil
+	return f, 0, nil
 }
 
 func sharePaths(keyDir string) (pending, enrolled string) {

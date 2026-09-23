@@ -9,6 +9,10 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// AdvisoryLockAvailable reports whether WithExclusiveFileLock holds a real
+// interprocess lock. On other platforms the helper runs fn with no lock.
+func AdvisoryLockAvailable() bool { return true }
+
 // WithExclusiveFileLock runs fn while holding an exclusive advisory lock on
 // lockPath. The lock is released when fn returns.
 //
