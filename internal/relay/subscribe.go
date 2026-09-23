@@ -61,6 +61,9 @@ func (c *Conn) Subscribe(ctx context.Context, id string, filters ...nostr.Filter
 		done:   make(chan struct{}),
 	}
 	s.Events, s.EOSE = s.events, s.eose
+	if c.cfg.expiredAt(c.cfg.Now()) {
+		return nil, ErrGrantExpired
+	}
 	c.mu.Lock()
 	if c.readErr != nil {
 		c.mu.Unlock()

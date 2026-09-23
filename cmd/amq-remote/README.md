@@ -143,9 +143,11 @@ redirect.
 challenge with a kind 22242 event signed by the body key, carrying exactly
 one enrolled NIP-OA tag: the owner's kind 1059 grant. The connection counts
 as authenticated only after the relay's positive OK for that event. On each
-connect `serve` re-reads the enrolled generation, so a renewal is picked up.
-An expired grant, or an enrolled owner that differs from `owner_pubkey`,
-stops authentication. A lost connection reconnects with backoff of 1 to 30
+connect, and every minute while connected, `serve` re-reads the enrolled
+generation, so a renewal is picked up. The connection closes at the grant's
+signed expiry. An enrolled owner that differs from `owner_pubkey` stops
+authentication. The first body `serve` loads stays pinned: a different body
+enrolled under the same owner is refused until `serve` restarts. A lost connection reconnects with backoff of 1 to 30
 seconds. Local IPC and AMQ delivery keep working while the relay is down.
 
 `serve` never mints, renews or enrolls a key. Use `amq-remote share` for

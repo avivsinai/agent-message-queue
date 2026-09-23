@@ -88,7 +88,8 @@ func (c *Client) set(state State, err error, conn *Conn) {
 }
 
 // identityCheck is how often a live connection's enrolled identity is
-// re-validated (codex slice 1 review #2).
+// re-validated for removal or renewal (codex slice 1 review #2). Expiry is
+// not polled: the connection itself closes at the grant's not-after.
 var identityCheck = time.Minute
 
 // errIdentityChanged ends a connection whose enrolled grant expired, was
@@ -125,7 +126,7 @@ func (c *Client) hold(ctx context.Context, conn *Conn, authed Config) bool {
 }
 
 func sameIdentity(a, b Config) bool {
-	if a.URL != b.URL || a.Secret != b.Secret || len(a.AuthTag) != len(b.AuthTag) {
+	if a.URL != b.URL || a.Secret != b.Secret || !a.NotAfter.Equal(b.NotAfter) || len(a.AuthTag) != len(b.AuthTag) {
 		return false
 	}
 	for i := range a.AuthTag {
@@ -146,6 +147,8 @@ func Category(err error) string {
 		return ""
 	case errors.As(err, &remote):
 		return remote.Kind.Error()
+	case errors.Is(err, ErrGrantExpired):
+		return ErrGrantExpired.Error()
 	case errors.Is(err, errIdentityChanged):
 		return "enrolled identity changed; re-authenticating"
 	case errors.Is(err, ErrUnknownDelivery):

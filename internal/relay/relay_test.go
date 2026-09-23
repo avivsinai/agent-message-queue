@@ -3,6 +3,7 @@ package relay_test
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"testing"
 	"time"
 
@@ -118,5 +119,34 @@ func TestSubscribeDeliversVerifiedMatchingEvents(t *testing.T) {
 	}
 	if got := next(); got.Content != "live" {
 		t.Fatalf("next event = %q, want live (the forged event must be dropped)", got.Content)
+	}
+}
+
+// codex slice 1 review r2 #3: a grant that expired just after the minute
+// check left the connection usable for up to another minute. The
+// connection now closes at the signed not-after and refuses to publish.
+func TestConnClosesAtGrantExpiry(t *testing.T) {
+	body, tag := testIdentity(t)
+	_, srv, url := relaytest.Start(body.PublicKeyHex(), tag)
+	defer srv.Close()
+	notAfter := time.Unix(time.Now().Unix()+2, 0)
+	conn, err := relay.Connect(context.Background(), relay.Config{URL: url, Secret: body.Secret(), AuthTag: tag, NotAfter: notAfter})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-conn.Done():
+	case <-time.After(4 * time.Second):
+		t.Fatal("connection still open after the grant's not-after")
+	}
+	if !errors.Is(conn.Err(), relay.ErrGrantExpired) {
+		t.Fatalf("conn.Err() = %v, want ErrGrantExpired", conn.Err())
+	}
+	evt := nostr.Event{CreatedAt: nostr.Now(), Kind: 1059, Content: "x"}
+	if err := evt.Sign(body.Secret()); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.Publish(context.Background(), evt); !errors.Is(err, relay.ErrGrantExpired) {
+		t.Fatalf("publish after expiry: err=%v, want ErrGrantExpired", err)
 	}
 }
