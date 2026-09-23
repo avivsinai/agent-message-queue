@@ -43,7 +43,14 @@ type relayStatusDoc struct {
 // connection attempt: a renewal is picked up on reconnect, and an expired or
 // mismatched credential stops authentication instead of riding an old
 // socket. serve never mints, renews or enrolls.
+//
+// The first body this serve loads is pinned for its lifetime
+// (codex slice 1 review r2 #1): a renewal for that body is adopted, but a
+// different body under the same owner is refused until the operator
+// restarts serve.
 func relayConfigFor(root, url string, sh manifest.Share) relay.ConfigFunc {
+	var mu sync.Mutex
+	pinned := ""
 	return func() (relay.Config, error) {
 		creds, err := sharestate.Load(root, sh.Session)
 		if err != nil {
@@ -52,14 +59,25 @@ func relayConfigFor(root, url string, sh manifest.Share) relay.ConfigFunc {
 		if creds.Owner != sh.OwnerPubKey {
 			return relay.Config{}, fmt.Errorf("share %s: enrolled owner %s differs from the manifest owner %s", sh.Session, creds.Owner, sh.OwnerPubKey)
 		}
+		body := creds.Body.PublicKeyHex()
+		mu.Lock()
+		if pinned == "" {
+			pinned = body
+		}
+		same := pinned == body
+		mu.Unlock()
+		if !same {
+			return relay.Config{}, fmt.Errorf("share %s: enrolled body changed from %s to %s; restart serve to adopt it", sh.Session, pinned, body)
+		}
 		tag, err := creds.TagFor(authKind, time.Now())
 		if err != nil {
 			return relay.Config{}, err
 		}
 		return relay.Config{
-			URL:     url,
-			Secret:  creds.Body.Secret(),
-			AuthTag: []string{"auth", tag.OwnerPubKey, tag.Conditions, tag.SigHex()},
+			URL:      url,
+			Secret:   creds.Body.Secret(),
+			AuthTag:  []string{"auth", tag.OwnerPubKey, tag.Conditions, tag.SigHex()},
+			NotAfter: creds.NotAfter,
 		}, nil
 	}
 }

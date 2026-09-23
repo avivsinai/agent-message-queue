@@ -69,3 +69,36 @@ func TestLoadRefusesSymlinkedKeysDir(t *testing.T) {
 		t.Fatal("loaded a generation through a symlinked keys directory")
 	}
 }
+
+// codex slice 1 review r2 #2: keys/<session> swapped for an outside symlink
+// after the directory check and before the leaf reads adopted the outside
+// body key. Leaves now read through the held, verified directory handle.
+func TestLoadReadsThroughVerifiedDirAfterParentSwap(t *testing.T) {
+	outside := t.TempDir()
+	enroll(t, outside, bodykey.ShareKinds)
+	root := t.TempDir()
+	enroll(t, root, bodykey.ShareKinds)
+	keys := filepath.Join(root, "extensions", "remote", "keys")
+	inside, err := os.ReadFile(filepath.Join(keys, "s", "body.key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err := openKeyDir(root, []string{"extensions", "remote", "keys", "s"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = d.Close() }()
+	if err := os.Rename(filepath.Join(keys, "s"), filepath.Join(keys, "s.old")); err != nil {
+		t.Skipf("the held directory cannot be moved here: %v", err) // Windows handle sharing
+	}
+	if err := os.Symlink(filepath.Join(outside, "extensions", "remote", "keys", "s"), filepath.Join(keys, "s")); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	got, _, err := readLeaf(d, "body.key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(inside) {
+		t.Fatal("read the swapped-in outside body key, want the verified directory's")
+	}
+}

@@ -40,6 +40,11 @@ var ErrAuthRefused = errors.New("relay refused authentication")
 // may not have been accepted. It is never reported as non-delivery.
 var ErrUnknownDelivery = errors.New("relay publish result unknown")
 
+// ErrGrantExpired means the enrolled grant this connection authenticated
+// with has passed its signed not-after: the connection is unusable from that
+// instant (codex slice 1 review r2 #3).
+var ErrGrantExpired = errors.New("enrolled grant expired")
+
 // ErrRejected is an explicit negative OK for a published event.
 var ErrRejected = errors.New("relay rejected event")
 
@@ -65,6 +70,10 @@ type Config struct {
 	// AuthTag is the one enrolled NIP-OA tag ["auth", owner, conditions,
 	// sig] presented on AUTH.
 	AuthTag []string
+	// NotAfter is the enrolled grant's signed not-after (created_at must be
+	// before it). From that instant the connection is closed and unusable,
+	// and an AUTH that completes at or after it is refused. Zero means none.
+	NotAfter time.Time
 	// Bounds; zero means the default.
 	MaxInbound  int64
 	MaxOutbound int
@@ -118,6 +127,9 @@ type Conn struct {
 	challenge chan string
 	done      chan struct{}
 	readErr   error
+	expired   bool
+	// expiry closes the connection at cfg.NotAfter; readPump stops it.
+	expiry *time.Timer
 }
 
 // Connect dials the relay, awaits its AUTH challenge, answers it with a
@@ -147,6 +159,9 @@ func Connect(ctx context.Context, cfg Config) (*Conn, error) {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
+	if cfg.expiredAt(cfg.Now()) {
+		return nil, ErrGrantExpired
+	}
 	dctx, cancel := context.WithTimeout(ctx, cfg.DialTimeout)
 	defer cancel()
 	// No redirect is followed (codex slice 1 review #1): the library would
@@ -167,6 +182,14 @@ func Connect(ctx context.Context, cfg Config) (*Conn, error) {
 		waiters:   map[nostr.ID]chan okResult{},
 		challenge: make(chan string, 1),
 		done:      make(chan struct{}),
+	}
+	if !cfg.NotAfter.IsZero() {
+		c.expiry = time.AfterFunc(cfg.NotAfter.Sub(cfg.Now()), func() {
+			c.mu.Lock()
+			c.expired = true
+			c.mu.Unlock()
+			c.Close()
+		})
 	}
 	go c.readPump()
 
@@ -199,7 +222,19 @@ func Connect(ctx context.Context, cfg Config) (*Conn, error) {
 		c.Close()
 		return nil, &RemoteError{Kind: ErrAuthRefused, Reason: res.reason}
 	}
+	if cfg.expiredAt(cfg.Now()) {
+		// A stale completion: the relay accepted a grant that has since run
+		// out, so the connection is never handed out.
+		c.Close()
+		return nil, ErrGrantExpired
+	}
 	return c, nil
+}
+
+// expiredAt reports whether the grant no longer admits an event at now:
+// NIP-OA's created_at < not-after, on whole seconds.
+func (cfg Config) expiredAt(now time.Time) bool {
+	return !cfg.NotAfter.IsZero() && now.Unix() >= cfg.NotAfter.Unix()
 }
 
 // Publish sends one already signed event and returns nil only on the
@@ -208,6 +243,9 @@ func Connect(ctx context.Context, cfg Config) (*Conn, error) {
 func (c *Conn) Publish(ctx context.Context, evt nostr.Event) error {
 	if !evt.CheckID() || !evt.VerifySignature() {
 		return errors.New("relay publish: event is not signed")
+	}
+	if c.cfg.expiredAt(c.cfg.Now()) {
+		return ErrGrantExpired
 	}
 	res, err := c.roundTrip(ctx, evt, nostr.EventEnvelope{Event: evt})
 	if err != nil {
@@ -231,6 +269,9 @@ func (c *Conn) Close() { _ = c.ws.Close(websocket.StatusNormalClosure, "") }
 func (c *Conn) err() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.expired {
+		return ErrGrantExpired
+	}
 	return c.readErr
 }
 
@@ -299,6 +340,11 @@ func (c *Conn) write(ctx context.Context, frame []byte) error {
 // into callers or blocks on them.
 func (c *Conn) readPump() {
 	defer close(c.done)
+	defer func() {
+		if c.expiry != nil {
+			c.expiry.Stop()
+		}
+	}()
 	for {
 		_, data, err := c.ws.Read(context.Background())
 		if err != nil {

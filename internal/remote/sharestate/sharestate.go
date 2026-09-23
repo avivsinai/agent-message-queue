@@ -54,11 +54,15 @@ func KeyDir(root, session string) (string, error) {
 // Load reads the session's body key and enrolled generation (share.json)
 // with the producer's rules (codex slice 1 review #3, #4):
 //
-//   - every directory from the root's extensions/ down to keys/<session> is
-//     a real directory, never a symlink, so no out-of-root key is adopted;
-//   - both leaves are read with no-follow, non-blocking opens and checked
-//     on the opened handle, so a symlink or FIFO swapped in cannot be
-//     followed or hang startup;
+//   - the directory chain from the root's extensions/ down to
+//     keys/<session> is opened one component at a time through held
+//     directory handles, each a real directory and never a symlink, and
+//     both leaves are opened relative to the final handle; so no swap of a
+//     parent, before or during the read, adopts an out-of-root key
+//     (codex slice 1 review r2 #2);
+//   - both leaves are opened no-follow and non-blocking and checked on the
+//     opened handle, so a symlink or FIFO cannot be followed or hang
+//     startup;
 //   - the generation is complete and bounded: every base kind is present,
 //     each tag's conditions are exactly the canonical string for its kind,
 //     all tags share one not-after within the NIP-OA bound, each tag
@@ -69,10 +73,12 @@ func Load(root, session string) (*Credentials, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := confinedDirs(root, dir); err != nil {
-		return nil, fmt.Errorf("share %s: %w", session, err)
+	d, err := openKeyDir(root, []string{"extensions", "remote", "keys", session})
+	if err != nil {
+		return nil, fmt.Errorf("share %s: key directory %s: %w", session, dir, err)
 	}
-	keyRaw, keyInfo, err := readLeaf(filepath.Join(dir, "body.key"))
+	defer func() { _ = d.Close() }()
+	keyRaw, keyInfo, err := readLeaf(d, "body.key")
 	if err != nil {
 		return nil, fmt.Errorf("share %s: body key: %w", session, err)
 	}
@@ -83,7 +89,7 @@ func Load(root, session string) (*Credentials, error) {
 	if err != nil {
 		return nil, fmt.Errorf("share %s: body key: %w", session, err)
 	}
-	raw, _, err := readLeaf(filepath.Join(dir, "share.json"))
+	raw, _, err := readLeaf(d, "share.json")
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("share %s: %w (run amq-remote share)", session, ErrNotEnrolled)
 	}
@@ -178,56 +184,37 @@ func (c *Credentials) TagFor(kind uint16, now time.Time) (bodykey.AuthTag, error
 	return t, nil
 }
 
-// confinedDirs requires every directory from root/extensions down to dir to
-// be a real directory: a symlinked parent would let the loader adopt keys
-// from outside the root (the producer's shareKeyDir rule).
-func confinedDirs(root, dir string) error {
-	rel, err := filepath.Rel(root, dir)
-	if err != nil || strings.HasPrefix(rel, "..") {
-		return fmt.Errorf("key directory %s is outside the root", dir)
-	}
-	cur := root
-	for _, part := range strings.Split(rel, string(filepath.Separator)) {
-		cur = filepath.Join(cur, part)
-		fi, err := os.Lstat(cur)
-		if err != nil {
-			return err
-		}
-		if fi.Mode()&os.ModeSymlink != 0 || !fi.IsDir() {
-			return fmt.Errorf("%s is not a real directory; refusing", cur)
-		}
-	}
-	return nil
+// dirHandle is an opened, confined key directory; leaves open relative to
+// it, never by path.
+type dirHandle interface {
+	openLeaf(name string) (*os.File, error)
+	Close() error
 }
 
-// readLeaf reads a small regular file: lstat gate, no-follow non-blocking
-// open, same-file check on the handle, bounded read.
-func readLeaf(path string) ([]byte, os.FileInfo, error) {
-	fi, err := os.Lstat(path)
-	if err != nil {
-		return nil, nil, err
-	}
-	if !fi.Mode().IsRegular() {
-		return nil, nil, fmt.Errorf("%s is not a regular file", path)
-	}
-	if fi.Size() > maxLeafBytes {
-		return nil, nil, fmt.Errorf("%s exceeds %d bytes", path, maxLeafBytes)
-	}
-	f, err := openLeaf(path)
+// readLeaf reads a small regular file relative to d: no-follow,
+// non-blocking open, regular-file check on the handle, bounded read.
+func readLeaf(d dirHandle, name string) ([]byte, os.FileInfo, error) {
+	f, err := d.openLeaf(name)
 	if err != nil {
 		return nil, nil, err
 	}
 	defer func() { _ = f.Close() }()
-	fi2, err := f.Stat()
-	if err != nil || !fi2.Mode().IsRegular() || !os.SameFile(fi, fi2) {
-		return nil, nil, fmt.Errorf("%s changed while opening", path)
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, nil, fmt.Errorf("%s is not a regular file", name)
+	}
+	if fi.Size() > maxLeafBytes {
+		return nil, nil, fmt.Errorf("%s exceeds %d bytes", name, maxLeafBytes)
 	}
 	raw, err := io.ReadAll(io.LimitReader(f, maxLeafBytes+1))
 	if err != nil {
 		return nil, nil, err
 	}
 	if len(raw) > maxLeafBytes {
-		return nil, nil, fmt.Errorf("%s exceeds %d bytes", path, maxLeafBytes)
+		return nil, nil, fmt.Errorf("%s exceeds %d bytes", name, maxLeafBytes)
 	}
-	return raw, fi2, nil
+	return raw, fi, nil
 }
