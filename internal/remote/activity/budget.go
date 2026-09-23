@@ -17,8 +17,9 @@ import (
 )
 
 type queuedFrame struct {
-	evt nostr.Event
-	n   int
+	sink *Sink
+	evt  nostr.Event
+	n    int
 }
 
 // seqAllocator reserves blocks of 1024 sequence numbers per body and native
@@ -34,16 +35,6 @@ type seqSlot struct {
 	hi     uint64
 	dir    string
 	failed error
-}
-
-func (a *seqAllocator) peek(key, dir string) (uint64, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	slot, err := a.prepare(key, dir)
-	if err != nil {
-		return 0, err
-	}
-	return slot.next + 1, nil
 }
 
 func (a *seqAllocator) commit(key, dir string) (uint64, error) {
@@ -89,7 +80,21 @@ func (a *seqAllocator) prepare(key, dir string) (*seqSlot, error) {
 		}
 		a.slots[key] = slot
 	} else if slot.dir == "" && dir != "" {
+		hi, err := readSeqHi(dir, key)
+		if err != nil {
+			slot.failed = err
+			return nil, err
+		}
+		if hi > slot.hi {
+			slot.next, slot.hi = hi, hi
+		}
 		slot.dir = dir
+		if slot.hi > 0 {
+			if err := writeSeqHi(dir, key, slot.hi); err != nil {
+				slot.failed = err
+				return nil, err
+			}
+		}
 	}
 	if slot.failed != nil {
 		return nil, slot.failed
@@ -124,71 +129,166 @@ func writeSeqHi(dir, key string, hi uint64) error {
 
 var processSeq seqAllocator
 
-// byteLedger is the process-wide ciphertext budget. 8 MiB per body, 32 MiB
-// across bodies.
-type byteLedger struct {
-	mu    sync.Mutex
-	body  map[string]int
-	total int
+// liveQueue is the shared body and process frame budget. Age, count, and
+// bytes are owned here, not on one sink. Close releases that sink's charges.
+type liveQueue struct {
+	mu           sync.Mutex
+	body         map[string][]queuedFrame
+	bodyBytes    map[string]int
+	processBytes int
 }
 
-func (q *byteLedger) add(body string, n int) {
+func (q *liveQueue) push(sink *Sink, body string, evt nostr.Event, n int) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	q.evictStaleLocked(sink.now())
 	if q.body == nil {
-		q.body = map[string]int{}
+		q.body = map[string][]queuedFrame{}
+		q.bodyBytes = map[string]int{}
 	}
-	q.body[body] += n
-	q.total += n
-	if q.body[body] < 0 {
-		q.total -= q.body[body]
-		q.body[body] = 0
-	}
-	if q.total < 0 {
-		q.total = 0
+	q.body[body] = append(q.body[body], queuedFrame{sink: sink, evt: evt, n: n})
+	q.bodyBytes[body] += n
+	q.processBytes += n
+	q.trimLocked(body)
+}
+
+func (q *liveQueue) trimLocked(body string) {
+	for q.overLocked(body) && len(q.body[body]) > 0 {
+		q.dropLocked(body, 0)
 	}
 }
 
-func (q *byteLedger) over(body string) bool {
+func (q *liveQueue) overLocked(body string) bool {
+	return len(q.body[body]) > ringCap || q.bodyBytes[body] > bodyQueueBytes || q.processBytes > processQueueMax
+}
+
+func (q *liveQueue) dropLocked(body string, i int) {
+	items := q.body[body]
+	item := items[i]
+	q.body[body] = append(items[:i], items[i+1:]...)
+	q.bodyBytes[body] -= item.n
+	q.processBytes -= item.n
+	if q.bodyBytes[body] < 0 {
+		q.bodyBytes[body] = 0
+	}
+	if q.processBytes < 0 {
+		q.processBytes = 0
+	}
+	item.sink.noteDrop()
+}
+
+func (q *liveQueue) evictStaleLocked(now time.Time) {
+	for body, items := range q.body {
+		for i := 0; i < len(items); {
+			if staleFrame(items[i].evt, now) {
+				q.dropLocked(body, i)
+				items = q.body[body]
+				continue
+			}
+			i++
+		}
+	}
+}
+
+func (q *liveQueue) hasLocked(sink *Sink, body string) bool {
+	for _, item := range q.body[body] {
+		if item.sink == sink {
+			return true
+		}
+	}
+	return false
+}
+
+func (q *liveQueue) popLocked(sink *Sink, body string) (queuedFrame, bool) {
+	items := q.body[body]
+	for i, item := range items {
+		if item.sink != sink {
+			continue
+		}
+		q.body[body] = append(items[:i], items[i+1:]...)
+		q.bodyBytes[body] -= item.n
+		q.processBytes -= item.n
+		if q.bodyBytes[body] < 0 {
+			q.bodyBytes[body] = 0
+		}
+		if q.processBytes < 0 {
+			q.processBytes = 0
+		}
+		return item, true
+	}
+	return queuedFrame{}, false
+}
+
+func (q *liveQueue) release(sink *Sink, body string) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	return q.body[body] > bodyQueueBytes || q.total > processQueueMax
+	items := q.body[body]
+	for i := 0; i < len(items); {
+		if items[i].sink == sink {
+			q.dropLocked(body, i)
+			items = q.body[body]
+			continue
+		}
+		i++
+	}
 }
 
-var queueBytes byteLedger
+func staleFrame(evt nostr.Event, now time.Time) bool {
+	return now.Unix()-int64(evt.CreatedAt) > int64(maxPendingAge/time.Second)
+}
 
-// limiter caps sends, not frame construction, at 100 frames in any one-second
-// window per body. allow checks. commit records a send that returned.
+var live liveQueue
+
+// limiter is the process-wide cap of 100 attempted sends in any one-second
+// window per body. reserve counts an attempt, including time spent in Publish.
+// finish keeps that charge after an ambiguous result.
 type limiter struct {
 	mu   sync.Mutex
-	hits map[string][]time.Time
+	hits map[string][]rateHit
 }
 
-func (l *limiter) allow(body string, now time.Time) bool {
+type rateHit struct {
+	at       time.Time
+	inflight bool
+}
+
+func (l *limiter) reserve(body string, now time.Time) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return len(l.kept(body, now)) < ratePerBody
+	kept := l.kept(body, now)
+	if len(kept) >= ratePerBody {
+		l.hits[body] = kept
+		return false
+	}
+	l.hits[body] = append(kept, rateHit{at: now, inflight: true})
+	return true
 }
 
-func (l *limiter) commit(body string, now time.Time) {
+func (l *limiter) finish(body string, now time.Time) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.hits[body] = append(l.kept(body, now), now)
+	hits := l.hits[body]
+	for i := range hits {
+		if hits[i].inflight {
+			hits[i].inflight = false
+			hits[i].at = now
+			return
+		}
+	}
 }
 
-func (l *limiter) kept(body string, now time.Time) []time.Time {
+func (l *limiter) kept(body string, now time.Time) []rateHit {
 	if l.hits == nil {
-		l.hits = map[string][]time.Time{}
+		l.hits = map[string][]rateHit{}
 	}
 	floor := now.Add(-time.Second)
 	prev := l.hits[body]
-	kept := prev[:0]
-	for _, at := range prev {
-		if at.After(floor) {
-			kept = append(kept, at)
+	kept := make([]rateHit, 0, len(prev))
+	for _, hit := range prev {
+		if hit.inflight || hit.at.After(floor) {
+			kept = append(kept, hit)
 		}
 	}
-	l.hits[body] = kept
 	return kept
 }
 
