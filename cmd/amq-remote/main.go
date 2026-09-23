@@ -226,6 +226,9 @@ func printHuman(w io.Writer, out any) {
 		_, _ = fmt.Fprintln(w)
 	case protocol.Reply:
 		printHuman(w, v.Snapshot)
+		if v.Outcome.Message != "" {
+			say(w, "%s", v.Outcome.Message)
+		}
 		if v.Outcome.Code != "" {
 			say(w, "outcome=%s", v.Outcome.Code)
 		}
