@@ -69,7 +69,11 @@ canonical setup path.
 harness session that is already running. Targets are declared in
 `<AM_ROOT>/extensions/remote/manifest.json` (`claude`, `codex`, `amit`, or
 `fake`). `up` supervises the endpoint; `submit`, `status`, `wait`, and
-`cancel` talk to it; `share` mints the session body key. Flags and exit codes
+`cancel` talk to it; `share` mints the session body key. A manifest `relay`
+object shares a target with its owner over a Buzz relay: DM commands, Desktop
+presence, and activity, each fenced to the pinned `native_session_id`.
+`doctor` lists each failing boundary under `failing` and exits 6 while any
+remains. Flags and exit codes
 are in the [amq-remote reference](https://github.com/avivsinai/agent-message-queue/blob/main/cmd/amq-remote/README.md). The design is
 [the remote-control ADR](https://github.com/avivsinai/agent-message-queue/blob/main/docs/adr-remote-control.md). Pinned seams are
 [the compatibility manifest](https://github.com/avivsinai/agent-message-queue/blob/main/docs/remote-compat.md).

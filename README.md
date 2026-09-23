@@ -147,8 +147,9 @@ each host keeps control of its own queue.
 
 The optional [remote companion](cmd/amq-remote/README.md) attaches to a
 harness session that is already running. It is a separate binary: `amq` gains
-no socket, and Homebrew does not install it. Commands, flags, and exit codes
-are in that README. The design is
+no socket, and Homebrew does not install it. It can share a target with its
+owner over a Buzz relay (DM commands, Desktop presence, activity). Commands,
+flags, and exit codes are in that README. The design is
 [the remote-control ADR](docs/adr-remote-control.md); pinned seams are
 [the compatibility manifest](docs/remote-compat.md).
 
