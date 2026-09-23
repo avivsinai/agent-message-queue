@@ -227,3 +227,74 @@ func TestRemoteSettledCancelWins(t *testing.T) {
 		t.Fatalf("settled cancel overwritten: %+v", got)
 	}
 }
+
+// Codex #876 r2 P1 #2: a redelivery whose lookup failed asserted
+// not_submitted while the original native run existed.
+func TestRemoteRedeliveryLookupFailureIsUncertain(t *testing.T) {
+	rt := fake.New("fake", "e_1")
+	s := remoteServer(t, rt, nil)
+	eventID := strings.Repeat("e", 64)
+	if _, rpcErr := s.runRemote("s", "hello", eventID, newTurn(), func(any) error { return nil }); rpcErr != nil {
+		t.Fatal(rpcErr)
+	}
+	path := ipc.SocketPath(filepath.Join(s.cfg.Root, remoteStateDir))
+	if err := os.Rename(path, path+".hold"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Rename(path+".hold", path) })
+	result, rpcErr := s.runRemote("s", "hello", eventID, newTurn(), func(any) error { return nil })
+	if rpcErr != nil {
+		t.Fatal(rpcErr)
+	}
+	if got := result.(remotePromptResult).Meta.Remote; got.State != remoteUncertain || got.RequestRef == "" {
+		t.Fatalf("redelivery = %+v", got)
+	}
+}
+
+// Codex #876 r2 P1 #3: the replay path read a completed request with a wrong
+// native pin.
+func TestRemoteReplayWithWrongPinIsRefused(t *testing.T) {
+	rt := fake.New("fake", "e_1")
+	s := remoteServer(t, rt, nil)
+	eventID := strings.Repeat("f", 64)
+	id, _ := remoteRequestID(eventID)
+	if _, rpcErr := s.runRemote("s", "hello", eventID, newTurn(), func(any) error { rt.Complete(id, "private result"); return nil }); rpcErr != nil {
+		t.Fatal(rpcErr)
+	}
+	s.cfg.RemoteNative = "another-session"
+	result, rpcErr := s.runRemote("s", "hello", eventID, newTurn(), func(any) error { return nil })
+	if rpcErr != nil {
+		t.Fatal(rpcErr)
+	}
+	if got := result.(remotePromptResult); got.StopReason == StopReasonEndTurn || got.Meta.Remote.Code != string(protocol.CodeUnshared) {
+		t.Fatalf("wrong pin read the request: %+v", got)
+	}
+}
+
+// Codex #876 r2 P2 #4: a busy-rejected event could not be retried after the
+// target became free.
+func TestRemoteBusyRedeliveryRetries(t *testing.T) {
+	rt := fake.New("fake", "e_1")
+	s := remoteServer(t, rt, nil)
+	busyID := "d2c80e1d-feb7-4c10-959e-23456789abcd"
+	resp, err := ipc.Call(filepath.Join(s.cfg.Root, remoteStateDir), ipc.Request{Command: &protocol.Command{Schema: protocol.SchemaCommand, Op: protocol.OpRequestSubmit, RequestID: busyID, TargetID: "fake", Epoch: "e_1", NotAfter: protocol.FormatTime(time.Now().Add(time.Minute)), Input: &protocol.SubmitInput{Text: "occupy", Busy: protocol.BusyReject, Deliver: protocol.DeliverTurn}}})
+	if err != nil || resp.AsError() != nil {
+		t.Fatal(err, resp.AsError())
+	}
+	eventID := strings.Repeat("d", 64)
+	id, _ := remoteRequestID(eventID)
+	first, rpcErr := s.runRemote("s", "hello", eventID, newTurn(), func(any) error { return nil })
+	if rpcErr != nil || first.(remotePromptResult).Meta.Remote.Code != string(protocol.CodeBusy) {
+		t.Fatalf("first = %+v %v", first, rpcErr)
+	}
+	if !rt.Complete(busyID, "finished") {
+		t.Fatal("no busy run")
+	}
+	second, rpcErr := s.runRemote("s", "hello", eventID, newTurn(), func(any) error { rt.Complete(id, "recovered"); return nil })
+	if rpcErr != nil {
+		t.Fatal(rpcErr)
+	}
+	if got := second.(remotePromptResult); got.StopReason != StopReasonEndTurn {
+		t.Fatalf("busy redelivery = %+v", got)
+	}
+}
