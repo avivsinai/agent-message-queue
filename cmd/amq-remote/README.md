@@ -371,6 +371,7 @@ remedy. Doctor exits 6 exactly when `failing` is not empty.
 | Boundary | Fails when |
 | --- | --- |
 | `endpoint` | No state directory yet, or the endpoint does not answer `session.list`. |
+| `amq_route` | The endpoint handle (`--me`, default `remote`) is not listed in the root's `config.json`, so other agents cannot route to it. |
 | `registration` | An adapter was refused at startup, or `refusals.json` is unreadable. |
 | `native_capability` | A Claude target is attached but `~/.claude/settings.json` has no AMQ Stop hook. Doctor reads only that file; when it sets `disableAllHooks`, doctor reports `claude_stop_hook` instead, because project or managed settings decide the effective state. |
 | `body_key` | A share's body key or enrolled generation cannot be used. |

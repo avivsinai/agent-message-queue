@@ -1009,8 +1009,12 @@ func doctor(args []string) (any, int, error) {
 	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	c := addCommon(fs)
+	me := fs.String("me", amqio.DefaultHandle, "endpoint mailbox handle in the root")
 	if err := fs.Parse(args); err != nil {
 		return nil, protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", err)
+	}
+	if err := fsq.ValidateHandle(*me); err != nil {
+		return nil, protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "invalid handle %q: %v", *me, err)
 	}
 	stateDir, err := c.stateDir()
 	if err != nil {
@@ -1018,8 +1022,9 @@ func doctor(args []string) (any, int, error) {
 	}
 	report := map[string]any{"root": c.root, "state_dir": stateDir, "socket": ipc.SocketPath(stateDir)}
 	// failing names each broken boundary between the owner and the native
-	// session (611.18): endpoint, registration, native capability, body key,
-	// tag expiry, relay auth, DM surface, publication, presence, discovery.
+	// session (611.18): AMQ route, endpoint, registration, native capability,
+	// body key, tag expiry, relay auth, DM surface, publication, presence,
+	// discovery.
 	// Doctor exits 6 exactly when it is not empty.
 	var failing []boundaryFailure
 	fail := func(boundary, subject, detail, remedy string) {
@@ -1037,6 +1042,9 @@ func doctor(args []string) (any, int, error) {
 		report["endpoint"] = "no state directory; run `amq-remote serve` once"
 		fail("endpoint", "", "no state directory", "run `amq-remote serve` once")
 		return finish()
+	}
+	if detail := amqRouteDetail(c.root, *me); detail != "" {
+		fail("amq_route", *me, detail, "run `amq-remote serve` once so it registers this handle in config.json")
 	}
 	var sessions []protocol.Session
 	resp, err := ipc.Call(stateDir, ipc.Request{Command: &protocol.Command{Schema: protocol.SchemaCommand, Op: protocol.OpSessionList}})
@@ -1170,6 +1178,25 @@ func doctor(args []string) (any, int, error) {
 		fail("relay_auth", "relay-status.json", rerr.Error(), "restart serve; it rewrites relay-status.json")
 	}
 	return finish()
+}
+
+// amqRouteDetail reports why other agents cannot route to the endpoint
+// handle. serve registers that handle in config.json; an empty result means
+// the handle is listed.
+func amqRouteDetail(root, handle string) string {
+	cfg, err := config.LoadConfig(filepath.Join(root, "meta", "config.json"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "config.json does not exist, so no agent can route to " + handle
+		}
+		return "cannot read config.json: " + err.Error()
+	}
+	for _, agent := range cfg.Agents {
+		if agent == handle {
+			return ""
+		}
+	}
+	return fmt.Sprintf("handle %q is not in config.json agents", handle)
 }
 
 // boundaryFailure is one broken boundary doctor names, with what to do.
