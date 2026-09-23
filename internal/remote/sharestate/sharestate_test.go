@@ -89,7 +89,7 @@ func TestLoadReadsThroughVerifiedDirAfterParentSwap(t *testing.T) {
 	}
 	defer func() { _ = d.Close() }()
 	if err := os.Rename(filepath.Join(keys, "s"), filepath.Join(keys, "s.old")); err != nil {
-		t.Skipf("the held directory cannot be moved here: %v", err) // Windows handle sharing
+		t.Skipf("the open directory cannot be moved here: %v", err)
 	}
 	if err := os.Symlink(filepath.Join(outside, "extensions", "remote", "keys", "s"), filepath.Join(keys, "s")); err != nil {
 		t.Skipf("symlink unsupported: %v", err)
