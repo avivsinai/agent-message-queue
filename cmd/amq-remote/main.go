@@ -1091,7 +1091,10 @@ func doctor(args []string) (any, int, error) {
 		case state == claude.StopHookMissing:
 			fail("native_capability", s.TargetID, "the Claude Stop hook is not installed, so requests are admitted but never complete", "run `amq-remote claude install-stop-hook`")
 		case state == claude.StopHookDisabled:
-			fail("native_capability", s.TargetID, "~/.claude/settings.json sets disableAllHooks, so the Stop hook never runs", "remove disableAllHooks from ~/.claude/settings.json")
+			// Only the user file was read; a project or managed setting can
+			// override disableAllHooks, so the effective state is unknown and
+			// is reported, not failed (codex #869 r2).
+			report["claude_stop_hook"] = "~/.claude/settings.json holds the Stop hook and sets disableAllHooks; project or managed settings decide whether it runs"
 		}
 		break
 	}

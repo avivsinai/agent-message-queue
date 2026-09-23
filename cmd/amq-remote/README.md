@@ -353,7 +353,7 @@ remedy. Doctor exits 6 exactly when `failing` is not empty.
 | --- | --- |
 | `endpoint` | No state directory yet, or the endpoint does not answer `session.list`. |
 | `registration` | An adapter was refused at startup, or `refusals.json` is unreadable. |
-| `native_capability` | A Claude target is attached but the Stop hook is not installed. |
+| `native_capability` | A Claude target is attached but `~/.claude/settings.json` has no AMQ Stop hook. Doctor reads only that file; when it sets `disableAllHooks`, doctor reports `claude_stop_hook` instead, because project or managed settings decide the effective state. |
 | `body_key` | A share's body key or enrolled generation cannot be used. |
 | `tag_expiry` | A share's enrolled grants have expired. |
 | `relay_auth` | A share is not `authenticated`. |
