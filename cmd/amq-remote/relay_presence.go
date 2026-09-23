@@ -59,13 +59,17 @@ func (ps *presenceShare) view() (string, string) {
 }
 
 // status maps the target's attachment to a presence status: online only
-// when the endpoint has it attached, away otherwise.
+// when the endpoint has it attached and, for a share that pins
+// native_session_id, the attached session is the approved one; away
+// otherwise.
 func (ps *presenceShare) status(edges *dmEdges) string {
 	out, err := edges.handleLate(&protocol.Command{Schema: protocol.SchemaCommand, Op: protocol.OpSessionInspect, TargetID: ps.share.Target}, sourceForPresence())
 	if err != nil {
 		return buzzio.StatusAway
 	}
-	if s, ok := out.(protocol.Session); ok && s.Attachment != "" && s.Attachment != "offline" {
+	s, ok := out.(protocol.Session)
+	if ok && s.Attachment != "" && s.Attachment != "offline" &&
+		(ps.share.NativeSessionID == "" || s.NativeSessionID == ps.share.NativeSessionID) {
 		return buzzio.StatusOnline
 	}
 	return buzzio.StatusAway
