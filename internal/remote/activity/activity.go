@@ -185,8 +185,13 @@ func (s *Sink) frames(obs observation) ([]nostr.Event, error) {
 	return out, nil
 }
 
+// toolResultBound marks a tool result that was shortened to one relay frame.
+// Desktop replaces the whole result, so the frame keeps a prefix, not a tail.
+const toolResultBound = "\n[truncated]"
+
 // oneFrame publishes a tool result as a single update. The text is not
-// split: a later piece would replace the earlier ones on Desktop.
+// split: a later piece would replace the earlier ones on Desktop. A result
+// that would exceed MaxFrameBytes is an explicit prefix of the original.
 func (s *Sink) oneFrame(obs observation) ([]nostr.Event, error) {
 	if obs.At.IsZero() {
 		obs.At = s.now()
@@ -196,11 +201,59 @@ func (s *Sink) oneFrame(obs observation) ([]nostr.Event, error) {
 		return nil, err
 	}
 	obs.Seq = seq
+	text, err := s.boundToolText(obs)
+	if err != nil {
+		return nil, err
+	}
+	obs.Text = text
 	evt, err := s.build(obs)
 	if err != nil {
 		return nil, err
 	}
 	return []nostr.Event{evt}, nil
+}
+
+// boundToolText returns text when its event fits MaxFrameBytes. Otherwise it
+// returns the longest prefix that fits with toolResultBound appended.
+func (s *Sink) boundToolText(obs observation) (string, error) {
+	full := obs.Text
+	fits, err := s.toolTextFits(obs, full)
+	if err != nil || fits {
+		return full, err
+	}
+	runes := []rune(full)
+	lo, hi := 0, len(runes)
+	best := -1
+	for lo <= hi {
+		mid := (lo + hi) / 2
+		ok, err := s.toolTextFits(obs, string(runes[:mid])+toolResultBound)
+		if err != nil {
+			return "", err
+		}
+		if ok {
+			best = mid
+			lo = mid + 1
+		} else {
+			hi = mid - 1
+		}
+	}
+	if best < 0 {
+		return "", fmt.Errorf("activity frame exceeds %d bytes", MaxFrameBytes)
+	}
+	return string(runes[:best]) + toolResultBound, nil
+}
+
+func (s *Sink) toolTextFits(obs observation, text string) (bool, error) {
+	obs.Text = text
+	evt, err := s.build(obs)
+	if err != nil {
+		return false, err
+	}
+	n, err := frameLen(evt)
+	if err != nil {
+		return false, err
+	}
+	return n <= MaxFrameBytes, nil
 }
 
 func (s *Sink) fit(obs observation) ([]nostr.Event, error) {

@@ -364,16 +364,23 @@ func (a *Attachment) pollConfirmations() {
 		return
 	}
 	caughtUp := err == nil && !rd.skipping && rd.next >= rd.size
+	truncated := false
 	if err == nil && rd.size < cur.off {
 		// Truncated or replaced in place: restart from the top next tick,
 		// and bind nothing until that re-read has caught up.
 		rd, caughtUp = transcriptRead{next: 0}, false
+		truncated = true
 	}
 	cur.off, cur.skipping = rd.next, rd.skipping
 
 	var events []core.NativeEvent
 	var notes []ActivityNote
 	a.mu.Lock()
+	if truncated {
+		// The file is a new generation. Recovery rewinds cur without
+		// shrinking the file, so it must not clear this watermark.
+		a.activityNext = 0
+	}
 	for i, line := range rd.lines {
 		e, ok := parseTranscriptLine(line)
 		if !ok {
