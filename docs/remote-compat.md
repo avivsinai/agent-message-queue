@@ -135,8 +135,7 @@ valid value for the runtime `terminal` enum.
 
 The v1 endpoint masks `steer` to false at the D1 gate even where an
 attachment declares it (`internal/remote/codex/attachment.go:293`,
-`internal/remote/core/endpoint.go:1055-1056`). Claude Code `submit` is graded **submitted** (bead `agent-message-queue-611.2`,
-closed): after a socket send, the target's transcript gains the `type: "user"`
+`internal/remote/core/endpoint.go:1055-1056`). Claude Code `submit` is graded **submitted**: after a socket send, the target's transcript gains the `type: "user"`
 JSONL entry carrying the exact envelope (preceded by a `queue-operation` entry) —
 the harness accepted the payload, but the channel has no admission receipt and no
 run identity, so a submit never reaches `admitted`. The void-returning

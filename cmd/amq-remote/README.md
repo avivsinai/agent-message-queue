@@ -202,7 +202,7 @@ parses. Export runs only while the target's attached native
 session is the pinned one, and stops the moment it is not. Activity carries
 no control: nothing in it can submit, cancel or approve. A frame the relay
 may or may not have accepted is never sent again. Codex and Claude targets
-export activity; Amit does not yet.
+export activity; Amit targets do not.
 
 ### Owner DM commands
 
