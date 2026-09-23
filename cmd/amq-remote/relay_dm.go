@@ -36,7 +36,11 @@ type dmEdges struct {
 	byBody map[string]*dmShare
 	// presence holds each presence share by session (611.17 slice 2).
 	presence map[string]*presenceShare
-	state    map[string]string // session -> commands surface state, for status
+	// activity holds each activity share by session (611.17 slice 3), and
+	// attachment is the endpoint's attachment accessor it reads, bound late.
+	activity   map[string]*activityShare
+	attachment func(target string) (core.Attachment, bool)
+	state      map[string]string // session -> commands surface state, for status
 	// handle is bound once the endpoint exists; carriers only call it from
 	// Ingest, which starts after startup.
 	handle buzzio.Handler
@@ -57,6 +61,17 @@ func buildDMEdges(root, stateDir string, r *manifest.Relay, warn io.Writer) *dmE
 	d.relay, d.self = r.URL, r.Self
 	dupBodies := map[string]bool{}
 	for _, sh := range r.Shares {
+		if sh.Activity {
+			as, err := newActivityShare(root, stateDir, sh)
+			if err != nil {
+				say(warn, "relay share %s: activity disabled: %v", sh.Session, err)
+				as = &activityShare{share: sh, state: "refused: " + err.Error()}
+			}
+			if d.activity == nil {
+				d.activity = map[string]*activityShare{}
+			}
+			d.activity[sh.Session] = as
+		}
 		if sh.Presence {
 			d.addPresence(root, sh, warn)
 		}
@@ -150,6 +165,40 @@ func (d *dmEdges) addPresence(root string, sh manifest.Share, warn io.Writer) {
 	ps.p = buzzio.NewPresence(buzzio.NewSigner(creds.Body.Secret(), enrolledGrant(root, sh.Session, b)), sh.Name)
 	ps.state = "configured"
 	d.presence[sh.Session] = ps
+}
+
+// bindAttachments attaches the endpoint's attachment accessor.
+func (d *dmEdges) bindAttachments(fn func(target string) (core.Attachment, bool)) {
+	d.mu.Lock()
+	d.attachment = fn
+	d.mu.Unlock()
+}
+
+// attachmentLate is the target's attachment, or false before bind.
+func (d *dmEdges) attachmentLate(target string) (core.Attachment, bool) {
+	d.mu.Lock()
+	fn := d.attachment
+	d.mu.Unlock()
+	if fn == nil {
+		return nil, false
+	}
+	return fn(target)
+}
+
+// activityFor returns a session's activity share when it can export.
+func (d *dmEdges) activityFor(session string) *activityShare {
+	if d == nil || d.activity[session] == nil || d.activity[session].stateDir == "" {
+		return nil
+	}
+	return d.activity[session]
+}
+
+// activityView is an activity share's state for status.
+func (d *dmEdges) activityView(session string) string {
+	if d == nil || d.activity[session] == nil {
+		return ""
+	}
+	return d.activity[session].view()
 }
 
 // presenceFor returns a session's presence share when it can publish.

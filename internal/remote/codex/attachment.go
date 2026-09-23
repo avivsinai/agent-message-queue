@@ -72,6 +72,12 @@ type run struct {
 // Attachment is one running Codex thread reached through the shared
 // app-server daemon. It implements core.Attachment.
 type Attachment struct {
+	// obsMu guards the activity observers (ObserveNotifications); it is
+	// separate from mu so an observer never runs under the adapter lock.
+	obsMu     sync.Mutex
+	observers map[uint64]func(Notification)
+	nextObs   uint64
+
 	client   atomic.Pointer[Client] // BK5: set before Attach returns, read by read-loop-spawned paths
 	threadID string
 	targetID string
@@ -1031,7 +1037,41 @@ func (a *Attachment) emit(ev core.NativeEvent) {
 	}
 }
 
+// ObserveNotifications adds fn as a read-only observer of the app-server
+// notifications this attachment receives, called on the read pump after
+// the adapter's own handling. It is the activity export seam (611.17): fn
+// must not block (activity.Sink.Enqueue does not) and gains no control. The
+// returned func removes the observer.
+func (a *Attachment) ObserveNotifications(fn func(Notification)) (stop func()) {
+	a.obsMu.Lock()
+	defer a.obsMu.Unlock()
+	if a.observers == nil {
+		a.observers = map[uint64]func(Notification){}
+	}
+	a.nextObs++
+	id := a.nextObs
+	a.observers[id] = fn
+	return func() {
+		a.obsMu.Lock()
+		delete(a.observers, id)
+		a.obsMu.Unlock()
+	}
+}
+
+func (a *Attachment) notifyObservers(n Notification) {
+	a.obsMu.Lock()
+	fns := make([]func(Notification), 0, len(a.observers))
+	for _, fn := range a.observers {
+		fns = append(fns, fn)
+	}
+	a.obsMu.Unlock()
+	for _, fn := range fns {
+		fn(n)
+	}
+}
+
 func (a *Attachment) onNotification(n Notification) {
+	defer a.notifyObservers(n)
 	switch n.Method {
 	case "turn/started":
 		var p struct {

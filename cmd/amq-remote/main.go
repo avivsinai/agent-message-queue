@@ -498,6 +498,7 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 		// Fresh remote commands are admitted only now, after attachment and
 		// startup reconciliation.
 		edges.bind(ep.Handle, ep.NativeSessionID)
+		edges.bindAttachments(ep.AttachmentOf)
 		relays = startRelays(ctx, c.root, stateDir, relayCfg, edges, stderr)
 		say(stdout, "relay %s: %d shared session(s)", relayCfg.URL, len(relayCfg.Shares))
 	}
@@ -1156,6 +1157,9 @@ func doctor(args []string) (any, int, error) {
 			// 30177 policy, or Desktop cannot list the body as owned.
 			if sh.Presence != "" && sh.Presence != "online" && sh.Presence != "away" {
 				fail("presence", sh.Session, sh.Presence, "enroll the profile kind with `amq-remote share --session "+sh.Session+" --enable buzz-profile`")
+			}
+			if sh.Activity != "" && sh.Activity != "exporting" {
+				fail("activity", sh.Session, sh.Activity, "check the native_session_id pin and that the target is an attached Codex thread")
 			}
 			if sh.Discovery != "" && sh.Discovery != "policy_present" {
 				fail("discovery", sh.Session, sh.Discovery, "the owner publishes the kind 30177 policy for this body from their Buzz client")

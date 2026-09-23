@@ -41,6 +41,8 @@ type relayShareStatus struct {
 	// 30177 policy that Desktop needs exists.
 	Presence  string `json:"presence,omitempty"`
 	Discovery string `json:"discovery,omitempty"`
+	// Activity is the share's activity export state: exporting, or why not.
+	Activity string `json:"activity,omitempty"`
 }
 
 type relayStatusDoc struct {
@@ -114,6 +116,11 @@ func startRelays(ctx context.Context, root, stateDir string, r *manifest.Relay, 
 				}
 			}
 		}
+		if as := edges.activityFor(sh.Session); as != nil {
+			hooks = append(hooks, func(ctx context.Context, conn *relay.Conn) {
+				as.runActivity(ctx, conn, edges.identityLate, edges.attachmentLate, stderr)
+			})
+		}
 		if ps := edges.presenceFor(sh.Session); ps != nil {
 			hooks = append(hooks, func(ctx context.Context, conn *relay.Conn) { ps.runPresence(ctx, conn, edges, stderr) })
 			c.BeforeClose = ps.beforeClose
@@ -154,6 +161,9 @@ func startRelays(ctx context.Context, root, stateDir string, r *manifest.Relay, 
 				}
 				if edges != nil && e.share.Commands {
 					row.Commands = edges.stateOf(e.share.Session)
+				}
+				if e.share.Activity {
+					row.Activity = edges.activityView(e.share.Session)
 				}
 				if e.share.Presence {
 					row.Presence, row.Discovery = edges.presenceView(e.share.Session)
