@@ -40,6 +40,9 @@ func run(args []string) int {
 		fmt.Println(version)
 		return 0
 	}
+	if len(args) > 0 && args[0] == "install" {
+		return runInstall(args[1:])
+	}
 
 	flags := flag.NewFlagSet("amq-acp", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
@@ -84,6 +87,12 @@ reply. It never listens on a socket.
 Usage:
   amq-acp            serve ACP v2 on stdin and stdout
   amq-acp --version  print the binary version
+  amq-acp install --to <handle>
+                 write the Buzz Desktop harness for mailbox mode
+  amq-acp install --remote-target <target>
+                 write the harness with AMQ_ACP_REMOTE_TARGET set
+  amq-acp install --remove --to <handle>
+                 delete the harness file this command wrote
 
 Environment:
   AM_ROOT          required absolute queue root

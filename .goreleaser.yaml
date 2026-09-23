@@ -91,7 +91,7 @@ builds:
 
 archives:
   - id: amq
-    ids: [amq]
+    ids: [amq, amq-acp]
     formats: [tar.gz]
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     format_overrides:
@@ -159,8 +159,12 @@ brews:
     homepage: "https://github.com/avivsinai/agent-message-queue"
     description: "Agent Message Queue - file-based inter-agent messaging for Claude Code and Codex CLI"
     license: "MIT"
+    install: |
+      bin.install "amq"
+      bin.install "amq-acp"
     test: |
       system "#{bin}/amq", "--version"
+      system "#{bin}/amq-acp", "--version"
 
 scoops:
   - name: amq
