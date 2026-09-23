@@ -58,8 +58,8 @@ invariants.
    CLI requests, AMQ-delivered requests, and Buzz-delivered requests end in
    the same handler. Live activity is a projection and never mutates.
 8. **Exit codes follow the AMQ contract.** `0` success, `1` native work
-   failed or cancelled, `2` usage, `3` not found, `4` timeout, `5` context
-   mismatch, `6` action required (busy, unsupported, unshared, expired, or
+   failed or cancelled, `2` usage, `3` not found, `4` timeout, `6` action
+   required (busy, unsupported, unshared, expired, or
    uncertain), `130` reader interrupted. JSON output never changes a code.
 
 ### Settled contract details
@@ -142,8 +142,7 @@ separate process beside `amq`, as `amq-keepalive` and `amq-bridge` do.
   is design intent, not a verified submit capability; see the
   [compatibility manifest](remote-compat.md). It has no interrupt seam without
   keystrokes.
-- Terminal viewing (a read-only tmux observer over an iroh stream) and native
-  Buzz Desktop panels are deferred; the request contract does not depend on
-  them.
-- Known limitation: the Claude Code cross-session socket wire format is not
-  published.
+- The request contract does not include terminal viewing or native Buzz
+  Desktop panels.
+- The Claude Code cross-session socket wire format is not published upstream;
+  [the compatibility manifest](remote-compat.md) pins the observed format.

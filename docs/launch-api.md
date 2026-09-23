@@ -173,8 +173,8 @@ OpenCode also remain outside this adapter set. In committed
 `.amq/launch.json`, `agents[].named` overrides the top-level `named` setting,
 and naming defaults to enabled. Managed Claude fresh plans carry
 `--name <session>/<handle>` in the ticket and trust digest. Resume plans never
-add or rename a session. Codex, Cursor, and Grok remain unnamed under managed
-launch in this release.
+add or rename a session. Codex, Cursor, and Grok are unnamed under managed
+launch.
 
 ## Prepare and Apply
 
@@ -216,7 +216,7 @@ requests cannot replace it.
 
 The public decoder accepts only the underscore target enum and the
 `columns|rows|tiled` layout enum. One refused seat cohort-blocks creation of
-every missing seat. The `argument` carrier is the only currently advertised
+every missing seat. The `argument` carrier is the only advertised
 initial-input carrier; `stdin` and `file` remain typed refusals, including when
 a wrapper is present.
 

@@ -217,7 +217,7 @@ one host principal unless a separate, verified identity boundary is provided.
 - Each peer is a normal AMQ install. Pin `AM_ROOT` in operator config, never in
   prompt text. Durable state belongs under a path that survives client close.
 
-### Addendum 4 — transfer ledger (611.14, amended per review-827-r1)
+### Addendum 4 — transfer ledger
 
 Applies to the destination-apply path (courier `PollOnce` and
 `amq-bridge apply-file`). Where Addendum 3 names an apply-lock path, this
@@ -248,8 +248,7 @@ evidence: a digest-matching artifact retained in `inbox/new`, `inbox/cur`, or
 a DLQ envelope wrapping the original bytes promotes the record to `committed`
 (replayed) without re-applying.
 
-**Proven non-delivery is retryable (review-827-r1 P0, amended per
-review-827-r2 P0).** An in-process apply failure — in the same process that
+**Proven non-delivery is retryable.** An in-process apply failure — in the same process that
 just wrote `prepared` — is recorded as a retryable `rejected` record (typed
 `retryable` flag) naming the failure (`apply failed (retryable): ...`).
 ApplyEnvelope is NOT all-or-nothing: a `*fsq.CommittedDurabilityError` means
@@ -282,7 +281,7 @@ receipt and the ACK.
 (`transfer_conflict`) on the first refusal and reports the same terminal
 outcome on every later attempt.
 
-**Torn tail (review-827-r1 P1c, amended per review-827-r2).** An unparseable
+**Torn tail.** An unparseable
 tail line of the ledger file is a torn append over an intact prefix: the last
 valid record governs the disposition, and a torn tail after a terminal record
 cannot un-terminal it. A torn read with no valid record (or a conflicting
@@ -293,15 +292,14 @@ committed record lands on its own parseable line — appended JSON fused into
 an unterminated fragment would be discarded by the reader with the artifact
 it names.
 
-**Courier batching (review-827-r1 P1b, amended per review-827-r2 P1).** A
+**Courier batching.** A
 refused transfer — `uncertain` history, terminal rejection, or conflict — is
 skipped, not batch-fatal: the poll loop continues, envelopes behind it still
 apply and ACK, and the refusal is reported in `PollResult.Refused`, which the
 CLI serializes to the operator on every run alongside the ledger's
 unresolved-transfer diagnostics.
 
-**Conflicted-transfer retirement (review-827-r2 P1, corrected per codex
-r2-r2 finding 4).** The `destination_rejected` row in the outcome table names
+**Conflicted-transfer retirement.** The `destination_rejected` row in the outcome table names
 a stage this protocol does NOT implement: no receiver code emits it and no
 source code consumes it, and a receiver-side redelivery loop cannot be
 closed from the wire alone. The refused envelope STAYS in the receiver's
