@@ -232,17 +232,6 @@ func optionalAbsoluteEnv(key string) (string, error) {
 	return value, nil
 }
 
-func plainEnv(key string) (string, error) {
-	value, err := optionalPlainEnv(key)
-	if err != nil || value == "" {
-		if err != nil {
-			return "", err
-		}
-		return "", contextInstallError(key + " is not set")
-	}
-	return value, nil
-}
-
 func optionalPlainEnv(key string) (string, error) {
 	value := strings.TrimSpace(os.Getenv(key))
 	if value == "" {
