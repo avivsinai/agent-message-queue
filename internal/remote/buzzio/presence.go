@@ -18,18 +18,31 @@ const (
 	KindManagedAgent = 30177
 )
 
-// PolicyFor reports whether evt is a 30177 coordinate for body whose
-// content names the agent (buzz desktop managed_agents/agent_events.rs:
-// 37-60: name and respond_to are the fields discovery relies on).
+// PolicyFor reports whether evt is a 30177 coordinate for body that the
+// pinned Desktop parser accepts (buzz a929532 desktop managed_agents/
+// agent_events.rs:37-60 ManagedAgentEventContent): name is a string,
+// parallelism a u32, respond_to one of its wire values, and
+// respond_to_allowlist a list of strings. Desktop drops a policy that fails
+// that parse (nostr_convert/agent_directory.rs:89-98), so AMQ does too
+// (codex #867 r1).
 func PolicyFor(evt nostr.Event, body string) bool {
 	if evt.Kind != KindManagedAgent || tagValue(evt, "d") != body {
 		return false
 	}
 	var c struct {
-		Name      string `json:"name"`
-		RespondTo string `json:"respond_to"`
+		Name        *string  `json:"name"`
+		Parallelism *uint32  `json:"parallelism"`
+		RespondTo   *string  `json:"respond_to"`
+		Allowlist   []string `json:"respond_to_allowlist"`
 	}
-	return json.Unmarshal([]byte(evt.Content), &c) == nil && c.Name != "" && c.RespondTo != ""
+	if json.Unmarshal([]byte(evt.Content), &c) != nil || c.Name == nil || c.Parallelism == nil || c.RespondTo == nil {
+		return false
+	}
+	switch *c.RespondTo {
+	case "anyone", "owner-only", "allowlist":
+		return true
+	}
+	return false
 }
 
 // Presence statuses Buzz Desktop accepts as explicit runtime evidence

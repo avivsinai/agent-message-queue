@@ -116,3 +116,37 @@ func TestPresencePublishesProfileStatusAndOffline(t *testing.T) {
 		t.Fatalf("10100 statuses = %v, want online first and offline last", statuses)
 	}
 }
+
+// codex #867 r1: without the kind 0 grant the profile was never published,
+// yet presence read online and doctor passed.
+func TestPresenceWithoutProfileGrantIsNotReady(t *testing.T) {
+	root := t.TempDir()
+	keyDir := filepath.Join(root, "extensions", "remote", "keys", "work")
+	var owner [32]byte
+	if _, err := rand.Read(owner[:]); err != nil {
+		t.Fatal(err)
+	}
+	body, tag := enrollShare(t, keyDir, owner) // base kinds only: no kind 0
+	_, srv, url := relaytest.Start(body.PublicKeyHex(), []string{"auth", tag.OwnerPubKey, tag.Conditions, tag.SigHex()})
+	defer srv.Close()
+	r := &manifest.Relay{URL: url, Shares: []manifest.Share{{Target: "fake", Session: "work", OwnerPubKey: tag.OwnerPubKey, Presence: true, Name: "AMQ work"}}}
+	stateDir := filepath.Join(root, "extensions", "remote")
+	edges := buildDMEdges(root, stateDir, r, io.Discard)
+	edges.bind(func(*protocol.Command, core.Source) (any, error) {
+		return protocol.Session{TargetID: "fake", Attachment: "live"}, nil
+	}, func(string) string { return "" })
+	ctx, cancel := context.WithCancel(context.Background())
+	wg := startRelays(ctx, root, stateDir, r, edges, io.Discard)
+	defer func() { cancel(); wg.Wait() }()
+	deadline := time.Now().Add(4 * time.Second)
+	for {
+		st, _ := edges.presenceView("work")
+		if strings.HasPrefix(st, "refused: profile") {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("presence = %q, want the missing profile reported", st)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
