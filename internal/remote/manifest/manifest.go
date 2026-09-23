@@ -76,6 +76,11 @@ type Share struct {
 	// DMChannelID is the owner's one-to-one private Buzz channel, bound
 	// explicitly by the operator. Commands require it.
 	DMChannelID string `json:"dm_channel_id,omitempty"`
+	// NativeSessionID pins the harness session the operator approved for
+	// sharing (the target's inspected native_session_id). Commands require
+	// it; a different session under the same target is never shared by
+	// inheritance, and serve never rewrites it.
+	NativeSessionID string `json:"native_session_id,omitempty"`
 	// MentionChannels are channels where an owner message that mentions the
 	// body submits a request; its output goes to the DM channel, never to
 	// the mentioning channel. Commands require dm_channel_id first.
@@ -323,6 +328,8 @@ func validateRelay(f File, targets map[string]bool) error {
 			return &ErrInvalidRelay{Reason: fmt.Sprintf("share %q owner_pubkey must be 64 lowercase hex", sh.Session)}
 		case sh.Commands && sh.DMChannelID == "":
 			return &ErrInvalidRelay{Reason: fmt.Sprintf("share %q: commands need dm_channel_id, the owner's private DM channel", sh.Session)}
+		case sh.Commands && sh.NativeSessionID == "":
+			return &ErrInvalidRelay{Reason: fmt.Sprintf("share %q: commands need native_session_id, the approved native session (see amq-remote inspect)", sh.Session)}
 		case sh.Activity:
 			return &ErrInvalidRelay{Reason: fmt.Sprintf("share %q: activity is not supported by this binary", sh.Session)}
 		case len(sh.MentionChannels) > 0 && !sh.Commands:

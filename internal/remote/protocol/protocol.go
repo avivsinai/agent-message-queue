@@ -362,11 +362,16 @@ type Evidence struct {
 
 // Session is the projection of one registered runtime.
 type Session struct {
-	Schema             string       `json:"schema"`
-	TargetID           string       `json:"target_id"`
-	Epoch              string       `json:"epoch"`
-	Harness            string       `json:"harness"`
-	DisplayName        string       `json:"display_name,omitempty"`
+	Schema      string `json:"schema"`
+	TargetID    string `json:"target_id"`
+	Epoch       string `json:"epoch"`
+	Harness     string `json:"harness"`
+	DisplayName string `json:"display_name,omitempty"`
+	// NativeSessionID is the harness's own identity for the attached session
+	// (Codex thread id, Claude session id), when the adapter can prove it.
+	// Relay sharing pins it: a different native session under the same
+	// target is never shared by inheritance.
+	NativeSessionID    string       `json:"native_session_id,omitempty"`
 	Host               string       `json:"host,omitempty"`
 	Project            string       `json:"project,omitempty"`
 	Attachment         string       `json:"attachment"`

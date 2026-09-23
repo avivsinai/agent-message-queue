@@ -309,6 +309,7 @@ func (a *Attachment) Inspect() protocol.Session {
 		Epoch:              a.epoch,
 		Harness:            "codex",
 		DisplayName:        "codex " + a.threadID,
+		NativeSessionID:    a.threadID,
 		Project:            a.cwd,
 		Attachment:         att,
 		Status:             status,

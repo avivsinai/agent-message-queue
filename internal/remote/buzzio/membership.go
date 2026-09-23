@@ -38,9 +38,9 @@ var ErrMembership = errors.New("DM channel membership is not owner and body only
 // must itself be a member to read them).
 //
 // Limit, stated rather than hidden: these are stored snapshots behind a
-// short relay-side cache, not a linearizable read, so a membership change
-// can be seen late; callers re-verify on a timer and close the surface when
-// the answer changes.
+// relay-side cache, not a read of current membership, so a change can show
+// late with no bound AMQ can state; callers re-verify on a timer and close
+// the surface when the answer changes.
 func VerifyDMMembership(ctx context.Context, conn *relay.Conn, relaySelf string, b Binding) error {
 	self, err := nostr.PubKeyFromHex(relaySelf)
 	if err != nil {
@@ -57,32 +57,53 @@ func VerifyDMMembership(ctx context.Context, conn *relay.Conn, relaySelf string,
 		return fmt.Errorf("%w: %v", ErrMembership, err)
 	}
 	defer sub.Close()
+	// The newest snapshot of each kind wins. Two different snapshots with the
+	// same created_at are ambiguous and refuse, never first-come.
 	var members, meta *nostr.Event
-	newer := func(cur *nostr.Event, evt nostr.Event) *nostr.Event {
-		if cur == nil || evt.CreatedAt > cur.CreatedAt {
-			return &evt
+	ambiguous := false
+	take := func(evt nostr.Event) {
+		if tagValue(evt, "d") != b.Channel {
+			return
 		}
-		return cur
+		cur := &members
+		if evt.Kind == kindGroupMetadata {
+			cur = &meta
+		} else if evt.Kind != kindGroupMembers {
+			return
+		}
+		switch {
+		case *cur == nil || evt.CreatedAt > (*cur).CreatedAt:
+			e := evt
+			*cur = &e
+		case evt.CreatedAt == (*cur).CreatedAt && evt.ID != (*cur).ID:
+			ambiguous = true
+		}
 	}
 	for done := false; !done; {
 		select {
 		case evt := <-sub.Events:
-			if tagValue(evt, "d") != b.Channel {
-				continue
-			}
-			switch evt.Kind {
-			case kindGroupMembers:
-				members = newer(members, evt)
-			case kindGroupMetadata:
-				meta = newer(meta, evt)
-			}
+			take(evt)
 		case <-sub.EOSE:
+			// Every stored event is queued before EOSE closes, but select
+			// may pick EOSE first: drain what is already queued, so the
+			// snapshot boundary keeps stream order (codex #866 r1 #7).
+			for drained := false; !drained; {
+				select {
+				case evt := <-sub.Events:
+					take(evt)
+				default:
+					drained = true
+				}
+			}
 			done = true
 		case <-sub.Done():
 			return fmt.Errorf("%w: membership read ended: %v", ErrMembership, sub.Err())
 		case <-ctx.Done():
 			return fmt.Errorf("%w: membership read timed out", ErrMembership)
 		}
+	}
+	if ambiguous {
+		return fmt.Errorf("%w: channel %s has conflicting snapshots at one time", ErrMembership, b.Channel)
 	}
 	if members == nil || meta == nil {
 		return fmt.Errorf("%w: no relay-signed membership and metadata for channel %s", ErrMembership, b.Channel)

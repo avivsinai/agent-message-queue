@@ -22,7 +22,7 @@ func TestCarrierSubmitsOnceAndKeepsOneEditableRow(t *testing.T) {
 	var owner, body [32]byte
 	_, _ = rand.Read(owner[:])
 	_, _ = rand.Read(body[:])
-	b := Binding{Owner: nostr.GetPublicKey(owner).Hex(), Body: nostr.GetPublicKey(body).Hex(), Channel: "dm-1", Target: "cx", RelayHost: "relay"}
+	b := Binding{Owner: nostr.GetPublicKey(owner).Hex(), Body: nostr.GetPublicKey(body).Hex(), Channel: "dm-1", Target: "cx", RelayHost: "relay", NativeSession: "thread-1"}
 	ledger, err := OpenLedger(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -31,7 +31,7 @@ func TestCarrierSubmitsOnceAndKeepsOneEditableRow(t *testing.T) {
 	handle := func(cmd *protocol.Command, src core.Source) (any, error) {
 		switch cmd.Op {
 		case protocol.OpSessionInspect:
-			return protocol.Session{TargetID: "cx", Epoch: "e1"}, nil
+			return protocol.Session{TargetID: "cx", Epoch: "e1", NativeSessionID: "thread-1"}, nil
 		case protocol.OpRequestSubmit:
 			ids = append(ids, cmd.RequestID+"|"+cmd.Epoch)
 			if cmd.Input.MinEvidence != string(protocol.EvidenceAdmitted) || cmd.Input.Busy != protocol.BusyReject || src.Origin["carrier"] != "buzz" {
@@ -53,11 +53,9 @@ func TestCarrierSubmitsOnceAndKeepsOneEditableRow(t *testing.T) {
 	if err := c.Ingest(dm); err != nil { // redelivery
 		t.Fatal(err)
 	}
-	// A redelivered event replays its stored claim: the endpoint sees the
-	// identical request (same id, same epoch) and its dispatch record keeps
-	// it at one native submit.
-	if len(ids) != 2 || ids[0] != ids[1] || ids[0] == "|" {
-		t.Fatalf("submit identities = %v, want one identical request both times", ids)
+	// A redelivered event is settled: the endpoint sees the request once.
+	if len(ids) != 1 || ids[0] == "|" {
+		t.Fatalf("submit identities = %v, want exactly one request", ids)
 	}
 	now = now.Add(2 * time.Second)
 	origin := c.source(dm.ID.Hex(), "").Origin
@@ -69,7 +67,7 @@ func TestCarrierSubmitsOnceAndKeepsOneEditableRow(t *testing.T) {
 	if err := c.Flush(context.Background(), func(_ context.Context, evt nostr.Event) error {
 		sent = append(sent, evt)
 		return nil
-	}); err != nil {
+	}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if len(sent) != 2 || sent[0].Kind != KindDM || sent[1].Kind != KindEdit {
@@ -94,7 +92,7 @@ func TestCarrierSubmitsOnceAndKeepsOneEditableRow(t *testing.T) {
 		t.Fatal(err)
 	}
 	var answer []nostr.Event
-	_ = c.Flush(context.Background(), func(_ context.Context, evt nostr.Event) error { answer = append(answer, evt); return nil })
+	_ = c.Flush(context.Background(), func(_ context.Context, evt nostr.Event) error { answer = append(answer, evt); return nil }, nil)
 	if len(answer) != 1 || !hasTag(answer[0], "e", threadRootID, "", "root") || !hasTag(answer[0], "e", inThread.ID.Hex(), "", "reply") {
 		t.Fatalf("threaded answer = %+v, want root and reply tags", answer)
 	}
@@ -114,13 +112,13 @@ func TestReactionOnRowCancelsItsRequest(t *testing.T) {
 	var owner, body [32]byte
 	_, _ = rand.Read(owner[:])
 	_, _ = rand.Read(body[:])
-	b := Binding{Owner: nostr.GetPublicKey(owner).Hex(), Body: nostr.GetPublicKey(body).Hex(), Channel: "dm-1", Target: "cx", RelayHost: "relay"}
+	b := Binding{Owner: nostr.GetPublicKey(owner).Hex(), Body: nostr.GetPublicKey(body).Hex(), Channel: "dm-1", Target: "cx", RelayHost: "relay", NativeSession: "thread-1"}
 	ledger, _ := OpenLedger(t.TempDir())
 	var cancelled string
 	c := NewCarrier(ledger, b, body, ownerGrant(t, owner, b.Body, KindDM, KindEdit), func(cmd *protocol.Command, _ core.Source) (any, error) {
 		switch cmd.Op {
 		case protocol.OpSessionInspect:
-			return protocol.Session{TargetID: "cx", Epoch: "e1"}, nil
+			return protocol.Session{TargetID: "cx", Epoch: "e1", NativeSessionID: "thread-1"}, nil
 		case protocol.OpRequestSubmit:
 			return protocol.Reply{Snapshot: protocol.Snapshot{RequestRef: "amqr1_x", Revision: 1, State: protocol.StateRunning}}, nil
 		case protocol.OpRequestCancel:
@@ -149,21 +147,25 @@ func TestReactionOnRowCancelsItsRequest(t *testing.T) {
 	}
 }
 
-// slice 4 contract §4: Buzz does not enforce NIP-OA kind grants, so the
-// carrier refuses to sign an event no enrolled grant admits.
-func TestCarrierRefusesToSignWithoutGrant(t *testing.T) {
+// codex #866 r1 #3: a share enrolled without buzz-dm ran the owner's
+// prompt and only then failed to sign the answer. Nothing is admitted
+// unless every DM kind is granted.
+func TestCarrierAdmitsNothingWithoutDMGrants(t *testing.T) {
 	var owner, body [32]byte
 	_, _ = rand.Read(owner[:])
 	_, _ = rand.Read(body[:])
-	b := Binding{Owner: nostr.GetPublicKey(owner).Hex(), Body: nostr.GetPublicKey(body).Hex(), Channel: "dm-1", Target: "cx", RelayHost: "relay"}
+	b := Binding{Owner: nostr.GetPublicKey(owner).Hex(), Body: nostr.GetPublicKey(body).Hex(), Channel: "dm-1", Target: "cx", RelayHost: "relay", NativeSession: "thread-1"}
 	ledger, _ := OpenLedger(t.TempDir())
-	c := NewCarrier(ledger, b, body, ownerGrant(t, owner, b.Body, KindEdit), nil) // no kind 9 grant
-	err := c.Publish(protocol.Snapshot{RequestRef: "amqr1_x", Revision: 1, State: protocol.StateRunning}, c.source("", "").Origin)
-	if !errors.Is(err, ErrNoGrant) {
-		t.Fatalf("publish without a kind 9 grant: err=%v, want ErrNoGrant", err)
+	calls := 0
+	c := NewCarrier(ledger, b, body, ownerGrant(t, owner, b.Body, KindEdit), func(*protocol.Command, core.Source) (any, error) { // no kind 9 grant
+		calls++
+		return protocol.Session{TargetID: "cx", Epoch: "e1", NativeSessionID: "thread-1"}, nil
+	})
+	if err := c.Ingest(ownerEvent(t, owner, "dm-1", "fix the build", time.Now())); !errors.Is(err, ErrNoGrant) {
+		t.Fatalf("ingest without a kind 9 grant: err=%v, want ErrNoGrant", err)
 	}
-	if pending, _ := ledger.Pending(); len(pending) != 0 {
-		t.Fatalf("owed outputs = %d, want none signed", len(pending))
+	if pending, _ := ledger.Pending(); calls != 0 || len(pending) != 0 {
+		t.Fatalf("endpoint calls = %d, owed outputs = %d; want nothing admitted or signed", calls, len(pending))
 	}
 }
 
@@ -209,13 +211,13 @@ func TestMentionSubmitsAndAnswersInDM(t *testing.T) {
 	var owner, body [32]byte
 	_, _ = rand.Read(owner[:])
 	_, _ = rand.Read(body[:])
-	b := Binding{Owner: nostr.GetPublicKey(owner).Hex(), Body: nostr.GetPublicKey(body).Hex(), Channel: "dm-1", Target: "cx", RelayHost: "relay", Mentions: map[string]bool{"team-1": true}}
+	b := Binding{Owner: nostr.GetPublicKey(owner).Hex(), Body: nostr.GetPublicKey(body).Hex(), Channel: "dm-1", Target: "cx", RelayHost: "relay", NativeSession: "thread-1", Mentions: map[string]bool{"team-1": true}}
 	ledger, _ := OpenLedger(t.TempDir())
 	var prompt string
 	c := NewCarrier(ledger, b, body, ownerGrant(t, owner, b.Body, KindDM, KindEdit), func(cmd *protocol.Command, _ core.Source) (any, error) {
 		switch cmd.Op {
 		case protocol.OpSessionInspect:
-			return protocol.Session{TargetID: "cx", Epoch: "e1"}, nil
+			return protocol.Session{TargetID: "cx", Epoch: "e1", NativeSessionID: "thread-1"}, nil
 		case protocol.OpRequestSubmit:
 			prompt = cmd.Input.Text
 			return protocol.Reply{Snapshot: protocol.Snapshot{RequestRef: "amqr1_m", Revision: 1, State: protocol.StateRunning}}, nil
@@ -233,7 +235,7 @@ func TestMentionSubmitsAndAnswersInDM(t *testing.T) {
 		t.Fatalf("submitted prompt = %q, want the text after the mention", prompt)
 	}
 	var sent []nostr.Event
-	_ = c.Flush(context.Background(), func(_ context.Context, evt nostr.Event) error { sent = append(sent, evt); return nil })
+	_ = c.Flush(context.Background(), func(_ context.Context, evt nostr.Event) error { sent = append(sent, evt); return nil }, nil)
 	if len(sent) != 1 || tagValue(sent[0], "h") != "dm-1" || tagValue(sent[0], "e") != "" {
 		t.Fatalf("sent = %+v, want one DM row with no reference into the mention channel", sent)
 	}

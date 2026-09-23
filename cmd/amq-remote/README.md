@@ -172,9 +172,15 @@ that.
 
 ### Owner DM commands
 
-With `"commands": true` and `"dm_channel_id": "<channel>"`, the owner can
-operate the shared target from the Buzz DM channel. Enroll the DM kinds
-first with `amq-remote share --session <session> --enable buzz-dm`.
+With `"commands": true`, `"dm_channel_id": "<channel>"` and
+`"native_session_id": "<id>"`, the owner can operate the shared target from
+the Buzz DM channel. Copy `native_session_id` from `amq-remote inspect
+<target> --json`: it is the Codex thread id or the Claude session id you
+approve for sharing. Commands run only while the target's attached session
+has that id, so a different session under the same target is never shared
+by inheritance. Enroll the DM kinds first with `amq-remote share --session
+<session> --enable buzz-dm`; without them the surface stays closed and no
+command runs.
 
 | Owner sends | Result |
 | --- | --- |
@@ -191,14 +197,19 @@ channel. Slash commands work only in the DM.
 
 The surface opens only when the relay's own key signs the channel's NIP-29
 membership (kind 39002) as exactly the owner and the body, and its metadata
-(kind 39000) as private and of type `dm`. `serve` reads the membership again
-every minute and closes the surface when it changes. Because the relay caches
-these snapshots, a change can show late.
+(kind 39000) as private and of type `dm`. `serve` reads the membership and
+the native session again every minute and closes the surface on the first
+read that no longer verifies. These are stored relay snapshots, not a read
+of current membership, so a change can show late; no bound on the delay is
+claimed.
 
 The body signs a kind 9 or 40003 event only when the enrolled generation has
 the owner's grant for that kind. It attaches that grant as the event's
-NIP-OA tag. The relay does not enforce these grants; `serve` does. Each
-owner event is claimed once, so a redelivered DM does not submit twice.
+NIP-OA tag. The relay does not enforce these grants; `serve` does, and it
+checks them again before it sends owed output. Each owner event is claimed
+once and its outcome recorded, so a redelivered DM never runs again, even
+after a busy rejection. Output owed from an earlier channel or body is kept,
+never redirected.
 
 Privacy: Buzz DM content is not end-to-end encrypted. The relay operator can
 read the prompts and the result rows. Do not share a session whose prompts or

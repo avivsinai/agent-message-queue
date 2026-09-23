@@ -49,6 +49,8 @@ func OpenLedger(stateDir string) (*Ledger, error) {
 type Claim struct {
 	EventID   string          `json:"event_id"`
 	Owner     string          `json:"owner"`
+	Body      string          `json:"body"`
+	Relay     string          `json:"relay"`
 	Channel   string          `json:"channel"`
 	Op        string          `json:"op"`
 	RequestID string          `json:"request_id,omitempty"`
@@ -81,12 +83,65 @@ func (l *Ledger) Claim(c Claim) (Claim, bool, error) {
 	return out, created, nil
 }
 
+// Settlement is the decision an owner command reached, recorded once after
+// the endpoint answered it. A redelivered event with a settlement is never
+// sent to the endpoint again, so a busy rejection the owner already saw
+// cannot later turn into execution (codex #866 r1 #4). A claim without a
+// settlement is an import interrupted before its outcome was known; it is
+// recovered by re-sending the same command.
+type Settlement struct {
+	Op         string `json:"op"`
+	RequestRef string `json:"request_ref,omitempty"`
+	State      string `json:"state,omitempty"`
+}
+
+// Settle records s for eventID once and returns the stored settlement.
+func (l *Ledger) Settle(eventID string, s Settlement) (Settlement, error) {
+	if !validHexID(eventID) {
+		return Settlement{}, fmt.Errorf("settle: event id %q is not 64 lowercase hex", eventID)
+	}
+	raw, err := json.Marshal(s)
+	if err != nil {
+		return Settlement{}, err
+	}
+	stored, _, err := createOnce(filepath.Join(l.dir, "ingress"), eventID+".settled.json", raw)
+	if err != nil {
+		return Settlement{}, err
+	}
+	var out Settlement
+	if err := json.Unmarshal(stored, &out); err != nil {
+		return Settlement{}, fmt.Errorf("settlement %s is unreadable: %w", eventID, err)
+	}
+	return out, nil
+}
+
+// Settled returns eventID's settlement, if one was recorded.
+func (l *Ledger) Settled(eventID string) (Settlement, bool, error) {
+	if !validHexID(eventID) {
+		return Settlement{}, false, nil
+	}
+	raw, err := readBounded(filepath.Join(l.dir, "ingress", eventID+".settled.json"))
+	if errors.Is(err, os.ErrNotExist) {
+		return Settlement{}, false, nil
+	}
+	if err != nil {
+		return Settlement{}, false, err
+	}
+	var out Settlement
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return Settlement{}, false, fmt.Errorf("settlement %s is unreadable: %w", eventID, err)
+	}
+	return out, true, nil
+}
+
 // Outbound is one prepared output: exact signed event bytes owed to the
 // relay, keyed by the obligation it satisfies (a direct answer to an
-// ingress event, or a request's result row revision).
+// ingress event, or a request's result row). Revision is the snapshot
+// revision a row event shows.
 type Outbound struct {
 	Key      string          `json:"key"`
 	Event    json.RawMessage `json:"event"`
+	Revision int             `json:"revision,omitempty"`
 	Accepted bool            `json:"accepted"`
 }
 
@@ -95,7 +150,12 @@ type Outbound struct {
 // and are returned unchanged: a retry resends the same event id, never a
 // re-signed one.
 func (l *Ledger) Prepare(key string, event json.RawMessage) (Outbound, error) {
-	o := Outbound{Key: key, Event: event}
+	return l.PrepareRevision(key, event, 0)
+}
+
+// PrepareRevision is Prepare for a row event that shows revision.
+func (l *Ledger) PrepareRevision(key string, event json.RawMessage, revision int) (Outbound, error) {
+	o := Outbound{Key: key, Event: event, Revision: revision}
 	raw, err := json.Marshal(o)
 	if err != nil {
 		return Outbound{}, err
@@ -174,24 +234,43 @@ type Receipt struct {
 	RootEventID string `json:"root_event_id"`
 	LastEditAt  int64  `json:"last_edit_at"`
 	Revision    int    `json:"revision"`
+	// The share binding and native address the request was submitted
+	// under: cancel needs the target and epoch, and a changed share never
+	// adopts or redirects another binding's request (codex #866 r1 #1, #6).
+	Owner   string `json:"owner"`
+	Body    string `json:"body"`
+	Relay   string `json:"relay"`
+	Channel string `json:"channel"`
+	Target  string `json:"target"`
+	Epoch   string `json:"epoch"`
 }
 
-// PutReceipt writes a request's receipt (created on first root publish,
-// updated as edits are prepared). Once the row exists, its event id also
-// maps back to the request, so an owner reaction on the row can name it.
+// PutReceipt writes a request's receipt (created when the request is
+// submitted, updated as its row is prepared). The row-to-request mapping
+// is written first, so a crash between the two leaves the reaction lookup
+// in place and the next PutReceipt completes the receipt (codex #866 r1 #5).
 func (l *Ledger) PutReceipt(r Receipt) error {
 	raw, err := json.Marshal(r)
 	if err != nil {
 		return err
 	}
-	dir := filepath.Join(l.dir, "receipts")
-	if _, err := fsq.WriteFileAtomic(dir, keyFile("ref/"+r.RequestRef), raw, 0o600); err != nil {
+	if err := l.ensureRowMap(r); err != nil {
 		return err
 	}
+	_, err = fsq.WriteFileAtomic(filepath.Join(l.dir, "receipts"), keyFile("ref/"+r.RequestRef), raw, 0o600)
+	return err
+}
+
+// ensureRowMap writes the row-to-request mapping of r's root row if it is
+// missing.
+func (l *Ledger) ensureRowMap(r Receipt) error {
 	if r.RootEventID == "" {
 		return nil
 	}
-	_, err = fsq.WriteFileAtomic(dir, keyFile("row/"+r.RootEventID), []byte(r.RequestRef), 0o600)
+	if ref, ok, err := l.RequestForRow(r.RootEventID); err != nil || (ok && ref == r.RequestRef) {
+		return err
+	}
+	_, err := fsq.WriteFileAtomic(filepath.Join(l.dir, "receipts"), keyFile("row/"+r.RootEventID), []byte(r.RequestRef), 0o600)
 	return err
 }
 

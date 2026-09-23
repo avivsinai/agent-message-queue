@@ -73,7 +73,7 @@ func TestDMEdgeSubmitsOwnerMessageAndPublishesRow(t *testing.T) {
 	}
 	groupEvent(39000, nostr.Tags{{"private"}, {"t", "dm"}})
 	groupEvent(39002, nostr.Tags{{"p", ownerHex}, {"p", body.PublicKeyHex()}})
-	r := &manifest.Relay{URL: url, Self: nostr.GetPublicKey(relayKey).Hex(), Shares: []manifest.Share{{Target: "fake", Session: "work", OwnerPubKey: ownerHex, DMChannelID: "dm-1", Commands: true}}}
+	r := &manifest.Relay{URL: url, Self: nostr.GetPublicKey(relayKey).Hex(), Shares: []manifest.Share{{Target: "fake", Session: "work", OwnerPubKey: ownerHex, DMChannelID: "dm-1", NativeSessionID: "thread-1", Commands: true}}}
 
 	stateDir := filepath.Join(root, "extensions", "remote")
 	edges := buildDMEdges(root, stateDir, r, io.Discard)
@@ -81,7 +81,7 @@ func TestDMEdgeSubmitsOwnerMessageAndPublishesRow(t *testing.T) {
 	edges.bind(func(cmd *protocol.Command, src core.Source) (any, error) {
 		switch cmd.Op {
 		case protocol.OpSessionInspect:
-			return protocol.Session{TargetID: "fake", Epoch: "e_1"}, nil
+			return protocol.Session{TargetID: "fake", Epoch: "e_1", NativeSessionID: "thread-1"}, nil
 		case protocol.OpRequestSubmit:
 			submitted <- cmd.Input.Text
 			return protocol.Reply{Snapshot: protocol.Snapshot{RequestRef: "amqr1_dm", Revision: 1, State: protocol.StateRunning}}, nil
