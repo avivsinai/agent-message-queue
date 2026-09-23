@@ -1,6 +1,7 @@
 package buzzio
 
 import (
+	"bytes"
 	"encoding/json"
 	"sync"
 	"time"
@@ -29,20 +30,52 @@ func PolicyFor(evt nostr.Event, body string) bool {
 	if evt.Kind != KindManagedAgent || tagValue(evt, "d") != body {
 		return false
 	}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal([]byte(evt.Content), &fields) != nil {
+		return false
+	}
 	var c struct {
-		Name        *string  `json:"name"`
-		Parallelism *uint32  `json:"parallelism"`
-		RespondTo   *string  `json:"respond_to"`
-		Allowlist   []string `json:"respond_to_allowlist"`
+		Name        *string `json:"name"`
+		Parallelism *uint32 `json:"parallelism"`
+		RespondTo   *string `json:"respond_to"`
 	}
 	if json.Unmarshal([]byte(evt.Content), &c) != nil || c.Name == nil || c.Parallelism == nil || c.RespondTo == nil {
 		return false
 	}
 	switch *c.RespondTo {
 	case "anyone", "owner-only", "allowlist":
+	default:
+		return false
+	}
+	// Option<String> fields: absent, null, or a string (codex #867 r2).
+	for _, k := range []string{"persona_id", "system_prompt", "model", "provider", "persona_source_version"} {
+		if raw, ok := fields[k]; ok && !isNullOr(raw, '"') {
+			return false
+		}
+	}
+	// Vec<String>: absent, or an array of strings with no null element.
+	if raw, ok := fields["respond_to_allowlist"]; ok {
+		var list []*string
+		if json.Unmarshal(raw, &list) != nil || isNullOr(raw, 0) {
+			return false
+		}
+		for _, v := range list {
+			if v == nil {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// isNullOr reports whether raw is JSON null or, when first is not 0, a value
+// whose first byte is first ('"' for a string).
+func isNullOr(raw json.RawMessage, first byte) bool {
+	v := bytes.TrimSpace(raw)
+	if bytes.Equal(v, []byte("null")) {
 		return true
 	}
-	return false
+	return first != 0 && len(v) > 0 && v[0] == first
 }
 
 // Presence statuses Buzz Desktop accepts as explicit runtime evidence

@@ -203,7 +203,10 @@ func (ps *presenceShare) checkDiscovery(ctx context.Context, conn *relay.Conn) {
 	// as Desktop does, so an older valid one never hides a newer invalid one.
 	var latest *nostr.Event
 	take := func(evt nostr.Event) {
-		if evt.PubKey == ps.owner && (latest == nil || evt.CreatedAt > latest.CreatedAt) {
+		// Desktop's order: newer created_at wins; on a tie, the lower event
+		// id (buzz desktop nostr_convert/agent_directory.rs:24-26).
+		if evt.PubKey == ps.owner && (latest == nil || evt.CreatedAt > latest.CreatedAt ||
+			(evt.CreatedAt == latest.CreatedAt && evt.ID.Hex() < latest.ID.Hex())) {
 			e := evt
 			latest = &e
 		}
