@@ -39,16 +39,22 @@ type activityItem struct {
 	claude *claude.ActivityNote
 }
 
-// size is the payload bytes an item holds, for the queue's byte budget.
+// blockOverhead charges each Claude block's own storage, so many empty
+// blocks still count against the budget.
+const blockOverhead = 64
+
+// size is the bytes an item retains, for the queue's byte budget: for a
+// Claude note every string it holds plus each block's storage (codex #872 r1).
 func (it activityItem) size() int64 {
 	if it.codex != nil {
-		return int64(len(it.codex.Params))
+		return int64(len(it.codex.Params)) // the method is one of three allowlisted names
 	}
-	var n int64
-	for _, b := range it.claude.Line.Blocks {
-		n += int64(len(b.Text) + len(b.Name) + len(b.ID))
+	n := it.claude
+	total := int64(len(n.SessionID) + len(n.TurnID) + len(n.Line.Type) + len(n.Line.SessionID) + len(n.Line.UUID))
+	for _, b := range n.Line.Blocks {
+		total += blockOverhead + int64(len(b.Type)+len(b.Text)+len(b.Name)+len(b.ID))
 	}
-	return n
+	return total
 }
 
 // observeFunc registers offer as the attachment's observer and returns stop.
@@ -92,7 +98,9 @@ type activityShare struct {
 // fence re-checked.
 var activityDrainTick = 250 * time.Millisecond
 
-// activityPublishTimeout bounds one drain pass's sends.
+// activityPublishTimeout bounds how long one drain pass waits on the relay.
+// It does not bound sequence I/O or encoding, so shutdown can take longer
+// while a directory sync is slow.
 const activityPublishTimeout = 10 * time.Second
 
 func (as *activityShare) set(state string) {
@@ -235,6 +243,10 @@ func (as *activityShare) export(ctx context.Context, conn *relay.Conn, observe o
 	// Only the worker touches the sink. A callback that runs after cleanup
 	// can at most fill this buffer, which no one reads again.
 	inbox := newActivityInbox()
+	// drainMu serializes every path that pops and publishes frames: one
+	// drainer at a time, from dequeue through publication. The native
+	// callback never takes it.
+	var drainMu sync.Mutex
 	stop := observe(func(it activityItem) { inbox.offer(it) })
 
 	wctx, cancelWorker := context.WithCancel(ctx)
@@ -255,9 +267,13 @@ func (as *activityShare) export(ctx context.Context, conn *relay.Conn, observe o
 				if it.codex != nil {
 					err = sink.Enqueue(*it.codex)
 				} else {
-					// AcceptParsed also drains, through the fenced Publish.
+					// AcceptParsed also drains, through the fenced Publish;
+					// drainMu keeps it and the tick's Drain from publishing
+					// out of order (codex #872 r1).
 					pctx, cancel := context.WithTimeout(wctx, activityPublishTimeout)
+					drainMu.Lock()
 					err = sink.AcceptParsed(pctx, *it.claude)
+					drainMu.Unlock()
 					cancel()
 				}
 				if err != nil && !errors.Is(err, errActivityFenced) {
@@ -292,7 +308,9 @@ func (as *activityShare) export(ctx context.Context, conn *relay.Conn, observe o
 			return
 		}
 		pctx, cancel := context.WithTimeout(ctx, activityPublishTimeout)
+		drainMu.Lock()
 		err := sink.Drain(pctx)
+		drainMu.Unlock()
 		cancel()
 		switch {
 		case errors.Is(err, errActivityFenced):
