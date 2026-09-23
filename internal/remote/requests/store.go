@@ -48,6 +48,12 @@ var hostSegmentRe = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,128}$`)
 type Record struct {
 	protocol.Snapshot
 
+	// RefusalReason is the adapter's refusal text for a rejected record.
+	// It stays on the durable record and is never copied onto Snapshot, so a
+	// published revision stays byte-identical. Replies surface it as
+	// Outcome.Message.
+	RefusalReason string `json:"refusal_reason,omitempty"`
+
 	// Input is the exact submit input, kept until compaction so recovery can
 	// show what was asked. It is never re-dispatched from here.
 	Input *protocol.SubmitInput `json:"input,omitempty"`

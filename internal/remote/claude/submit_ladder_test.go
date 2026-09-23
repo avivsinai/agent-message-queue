@@ -397,3 +397,108 @@ func TestStopWaitsForTranscriptCatchUp(t *testing.T) {
 		t.Fatalf("terminal=%v result=%+v, want completed with the final answer", rec.terminal, rec.result)
 	}
 }
+
+// 611.25 (observed live 2026-09-22: request 27179a41 went uncertain at an
+// endpoint restart and the target stayed busy). A fresh attachment, as
+// after a restart, holds no record of the key; Lookup finds the delivery by
+// the key-derived msg_id, and the poller carries the run to completed,
+// including a Stop recorded while the endpoint was down.
+func TestLookupRecoversRunAfterRestart(t *testing.T) {
+	ft := newFakeTarget(t, 4242, nil)
+	before := ft.attach(t)
+	admission, err := before.Submit(pr2BoundRequest("restart-probe"))
+	if err != nil || !admission.Admitted {
+		t.Fatalf("submit: %+v %v", admission, err)
+	}
+	key := pr2Key()
+	if admission.RunID != frameMsgID(key) {
+		t.Fatalf("run id %s is not the key-derived msg_id %s", admission.RunID, frameMsgID(key))
+	}
+	appendTranscript(t, ft.home,
+		deliveredLine(t, admission.RunID, frameEnvelope(t, ft)),
+		transcriptLine(t, "assistant", "answered while the endpoint was down"))
+	appendStopMarker(t, ft.home, time.Now().UnixMilli()+1)
+
+	after := ft.attach(t) // the restarted endpoint's attachment
+	ev, err := after.Lookup(key, "")
+	if err != nil || ev.Class != core.EvidenceTentative || ev.RunID != admission.RunID {
+		t.Fatalf("recovery lookup = %+v %v, want tentative on run %s", ev, err, admission.RunID)
+	}
+	after.pollConfirmations()
+	ev, _ = after.Lookup(key, "")
+	if !ev.Admitted || ev.State != protocol.StateCompleted || ev.Result == nil || ev.Result.Text != "answered while the endpoint was down" {
+		t.Fatalf("after replay: %+v, want completed with the turn's answer", ev)
+	}
+	after.AcknowledgeResult(key, "", "")
+	if ev, _ := after.Lookup(key, ""); ev.Class != core.EvidenceUnknown {
+		t.Fatalf("released key recovered again: %+v", ev)
+	}
+}
+
+// Live 2026-09-22 on Claude Code v2.1.280: the delivered user entry carries
+// isMeta:true, the Stop hook fired, and the run stayed running because the
+// ladder skipped meta entries.
+func TestMetaFlaggedDeliveryStillClimbsTheLadder(t *testing.T) {
+	ft := newFakeTarget(t, 4242, nil)
+	att := ft.attach(t)
+	admission, err := att.Submit(pr2BoundRequest("meta-probe"))
+	if err != nil || !admission.Admitted {
+		t.Fatalf("submit: %+v %v", admission, err)
+	}
+	key := pr2Key()
+	line, _ := json.Marshal(map[string]any{
+		"type": "user", "isMeta": true, "timestamp": time.Now().UTC().Format(time.RFC3339Nano),
+		"message": map[string]any{"role": "user", "content": harnessUserText(frameEnvelope(t, ft))},
+		"origin":  map[string]any{"kind": "peer", "from": "unknown", "msg_id": admission.RunID},
+	})
+	appendTranscript(t, ft.home, string(line), transcriptLine(t, "assistant", "pong"))
+	appendStopMarker(t, ft.home, time.Now().UnixMilli()+1)
+	att.pollConfirmations()
+	if ev, _ := att.Lookup(key, ""); ev.State != protocol.StateCompleted || ev.Result == nil || ev.Result.Text != "pong" {
+		t.Fatalf("meta-flagged delivery: %+v, want completed with pong", ev)
+	}
+}
+
+// codex #859 P1 (reproduced by the reviewer): a transcript ending inside a
+// 4 MiB unfinished line made the recovery scan loop forever, hanging Lookup
+// and reconcile.
+func TestRecoveryScanReturnsAtPartialLineEOF(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "transcript.jsonl")
+	if err := os.WriteFile(path, []byte(strings.Repeat("x", transcriptChunkBytes)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		scanForDelivery(path, 0, false, "not-present")
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("scanForDelivery did not return at EOF of an unfinished line")
+	}
+}
+
+// codex #859 P2: the saved scan position must not outlive its transcript.
+// The first recovery lookup scans past a transcript without the delivery;
+// the transcript is then replaced by a shorter one that has it. The next
+// lookup must rescan the new file, not resume beyond its end.
+func TestRecoveryRescansAReplacedTranscript(t *testing.T) {
+	ft := newFakeTarget(t, 4242, nil)
+	after := ft.attach(t)
+	key := pr2Key()
+	filler, _ := json.Marshal(map[string]any{"type": "progress", "data": strings.Repeat("x", 4096)})
+	appendTranscript(t, ft.home, string(filler), string(filler))
+	if ev, _ := after.Lookup(key, ""); ev.Class != core.EvidenceUnknown {
+		t.Fatalf("setup: lookup = %+v, want unknown before any delivery", ev)
+	}
+	dir := filepath.Join(ft.home, ".claude", "projects", slugifyCwd("/tmp/proj"))
+	tr := filepath.Join(dir, "sess-abc.jsonl")
+	if err := os.Remove(tr); err != nil {
+		t.Fatal(err)
+	}
+	appendTranscript(t, ft.home, deliveredLine(t, frameMsgID(key), "envelope"))
+	if ev, _ := after.Lookup(key, ""); ev.Class != core.EvidenceTentative {
+		t.Fatalf("after replacement: lookup = %+v, want the delivery recovered (tentative)", ev)
+	}
+}

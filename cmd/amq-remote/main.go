@@ -72,8 +72,8 @@ Common options:
   --json        Machine-readable output on stdout; diagnostics on stderr
 
 Exit codes: 0 ok · 1 work failed or cancelled · 2 usage · 3 not found ·
-4 timeout · 5 context mismatch · 6 action required (busy, unsupported,
-unshared, expired, uncertain) · 130 interrupted
+4 timeout · 6 action required (busy, unsupported, unshared, expired,
+uncertain) · 130 interrupted
 `
 
 func main() {
@@ -228,6 +228,9 @@ func printHuman(w io.Writer, out any) {
 		_, _ = fmt.Fprintln(w)
 	case protocol.Reply:
 		printHuman(w, v.Snapshot)
+		if v.Outcome.Message != "" {
+			say(w, "%s", v.Outcome.Message)
+		}
 		if v.Outcome.Code != "" {
 			say(w, "outcome=%s", v.Outcome.Code)
 		}
@@ -282,7 +285,7 @@ func printSession(w io.Writer, s protocol.Session) {
 	if s.Capabilities.AnswerQuestion {
 		caps = append(caps, "answer")
 	}
-	say(w, "%-24s %-8s %-8s %-8s epoch=%s caps=%s", s.TargetID, s.Harness, s.Attachment, s.Status, s.Epoch, strings.Join(caps, ","))
+	say(w, "%-24s %-8s %-8s %-8s epoch=%s caps=%s observed=%s", s.TargetID, s.Harness, s.Attachment, s.Status, s.Epoch, strings.Join(caps, ","), s.ObservedAt)
 }
 
 // serveFlags holds pointers to the flags serve defines beyond the common
@@ -340,6 +343,16 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	if err != nil {
 		return protocol.ExitUsage, err
 	}
+	manifestFile := manifest.DefaultPath(stateDir)
+	if *manifestPath != "" {
+		manifestFile = *manifestPath
+	}
+	// --discover runs before any startup write or ownership check (codex
+	// 611.13 consult, requirement 1): no EnsureAgent, no store, no socket, so
+	// it also works while an endpoint for this root is running.
+	if *discover {
+		return discoverAndPrint(c.root, stateDir, manifestFile, *codexSocket, stdout, stderr)
+	}
 	// .10: register the endpoint's mailbox handle in config.json so other
 	// agents in the root can route to it. This preserves every other agent's
 	// config; amqio.New stays free of configuration side effects.
@@ -377,37 +390,7 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	// duplicate target is exit 2 via the typed validation error. serveStartup
 	// returns Load/Validate failures classified: validation -> exit 2, I/O or
 	// parse -> runtime error.
-	manifestFile := manifest.DefaultPath(stateDir)
-	if *manifestPath != "" {
-		manifestFile = *manifestPath
-	}
 	var sugar []manifest.Adapter
-	if *discover {
-		// --discover lists candidates from registered discoverers and exits
-		// before any startup side effect. The manifest must classify exactly
-		// like the serve path: validation failures are usage errors (exit 2),
-		// I/O and parse failures are not (observed regression: discover
-		// exited 1 where serve exited 2 on the same invalid manifest).
-		mf, lerr := manifest.Load(manifestFile)
-		if lerr != nil {
-			if manifest.IsValidation(lerr) {
-				return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", lerr)
-			}
-			return 0, lerr
-		}
-		if verr := manifest.Validate(mf); verr != nil {
-			return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", verr)
-		}
-		cands, derr := registry.Discover(context.Background(), c.root, stateDir)
-		if derr != nil {
-			return 0, derr
-		}
-		for _, cand := range cands {
-			say(stdout, "%-12s %s", cand.Kind, cand.Target)
-		}
-		_ = mf
-		return 0, nil
-	}
 	if *useFake {
 		sugar = append(sugar, manifest.Adapter{Kind: "fake", Target: "fake", Epoch: "e_1"})
 	}
@@ -501,6 +484,12 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	say(stdout, "amq-remote %s serving root=%s handle=%s socket=%s targets=%d", version, c.root, *me, server.Path(), len(ep.Targets()))
+	// The attached targets, printed by the process that attached them, so
+	// `up` shows them from its own child and never from some other endpoint
+	// answering on the socket (codex 611.13 consult, requirement 4).
+	for _, s := range ep.Sessions() {
+		printSession(stdout, s)
+	}
 	// Relay surface (611.15): one authenticated client per share. The
 	// manifest was already loaded and validated by serveStartup.
 	var relays *sync.WaitGroup
@@ -597,8 +586,8 @@ func submit(args []string, stdin io.Reader) (any, int, error) {
 	text := fs.String("text", "", "prompt text")
 	textFile := fs.String("text-file", "", "read prompt text from a file")
 	useStdin := fs.Bool("stdin", false, "read prompt text from stdin")
-	busy := fs.String("busy", string(protocol.BusyReject), "reject or queue when the runtime is busy")
-	deliver := fs.String("deliver", string(protocol.DeliverTurn), "turn or steer")
+	busy := fs.String("busy", string(protocol.BusyReject), "when the runtime is busy: reject (queue is refused in v1)")
+	deliver := fs.String("deliver", string(protocol.DeliverTurn), "turn (steer is refused in v1)")
 	requestID := fs.String("request-id", "", "caller-supplied UUID so a retry reconciles instead of resubmitting")
 	window := fs.Duration("admit-within", 2*time.Minute, "latest admission time relative to now (max 24h)")
 	minEvidence := fs.String("min-evidence", "", "minimum submit evidence class to require (admitted or submitted; omitted = legacy)")
@@ -1463,6 +1452,62 @@ func exitForState(s protocol.State) int {
 		return protocol.ExitError
 	}
 	return protocol.ExitSuccess
+}
+
+// printCandidates prints one discovered candidate per line: kind, target,
+// display name, then a manifest entry to paste. Discovery never attaches
+// (611.13): registration stays an explicit manifest edit, the owner's
+// consent to share the session.
+func printCandidates(w io.Writer, cands []registry.Candidate) {
+	for _, cand := range cands {
+		entry := map[string]any{"kind": cand.Kind, "target": cand.Target}
+		if len(cand.Config) > 0 {
+			entry["config"] = cand.Config
+		}
+		raw, _ := json.Marshal(entry)
+		display := cand.Display
+		if display == "" {
+			display = "-"
+		}
+		say(w, "%-8s %-40s %-20s %s", cand.Kind, cand.Target, display, raw)
+	}
+}
+
+// discoverAndPrint lists discovered candidates and exits. It runs before any
+// startup write or ownership check (codex 611.13 consult, requirement 1): no
+// EnsureAgent, no store, no socket, no lifetime lock, so it also works while
+// an endpoint or supervisor for this root is running. The manifest classifies
+// exactly like the serve path: validation failures are usage errors (exit
+// 2), I/O and parse failures are not. An explicit --codex-socket replaces
+// the default daemon socket (requirement 2).
+func discoverAndPrint(root, stateDir, manifestFile, codexSocket string, stdout, stderr io.Writer) (int, error) {
+	mf, lerr := manifest.Load(manifestFile)
+	if lerr != nil {
+		if manifest.IsValidation(lerr) {
+			return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", lerr)
+		}
+		return 0, lerr
+	}
+	if verr := manifest.Validate(mf); verr != nil {
+		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", verr)
+	}
+	cands, diags := registry.Discover(context.Background(), registry.DiscoverRequest{
+		Root: root, StateDir: stateDir,
+		Hints: map[string]string{codex.HintSocket: codexSocket},
+	})
+	printCandidates(stdout, cands)
+	// Each failed or incomplete discoverer is reported on stderr; the other
+	// discoverers' candidates above stand (codex #858). An explicitly
+	// supplied unusable hint is a usage error.
+	for _, d := range diags {
+		if errors.Is(d.Err, registry.ErrBadHint) {
+			return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "discover %s: %v", d.Kind, d.Err)
+		}
+	}
+	for _, d := range diags {
+		say(stderr, "amq-remote: discover %s: %v", d.Kind, d.Err)
+	}
+	return 0, nil
 }
 
 // claudeSubcommand dispatches the PR2 Stop-hook bridge subcommands. The

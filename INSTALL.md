@@ -291,7 +291,7 @@ Homebrew:
   use a versioned package-manager path for a registered macOS wake.
 - `amq-bridge_*_{linux,darwin}_{amd64,arm64}.tar.gz` is the signed cross-host
   courier. See [amq-bridge](cmd/amq-bridge/README.md).
-- `amq-acp_*_{linux,darwin}_{amd64,arm64}.tar.gz` is the preview ACP v1 stdio
+- `amq-acp_*_{linux,darwin}_{amd64,arm64}.tar.gz` is the preview ACP v2 stdio
   companion. See [amq-acp](cmd/amq-acp/README.md).
 - `amq-remote_*_{linux,darwin}_{amd64,arm64}.tar.gz` is the remote-session
   companion. See [amq-remote](cmd/amq-remote/README.md) for commands, flags,

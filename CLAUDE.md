@@ -69,7 +69,7 @@ required by `make lint` and `make ci`.
 cmd/amq/             CLI entry point
 cmd/amq-keepalive/   macOS wake supervisor companion
 cmd/amq-bridge/      Cross-host courier companion (apply-file + HTTPS, not Core)
-cmd/amq-acp/         Preview ACP v1 stdio companion (not Core)
+cmd/amq-acp/         Preview ACP v2 stdio companion (not Core)
 cmd/amq-remote/      Remote-session companion (not Core)
 internal/cli/        Command handlers and routing policy
 internal/fsq/        Maildir delivery, atomic operations, and scans
@@ -80,7 +80,7 @@ internal/integration Shared adapter support for Symphony and Kanban
 internal/launch/     Plans, adapters, trust, leases, bindings, and resume state
 internal/keepalive/  Companion registry, adapters, hooks, and supervision
 internal/bridge/     Envelope, auth, and crash-idempotent local apply
-internal/acp/        ACP v1 session and prompt delivery
+internal/acp/        ACP v2 sessions, steering, and prompt delivery
 internal/remote/     Endpoint, adapters, and request store for amq-remote
 internal/sessionguard Shared fail-closed session decision table
 internal/swarm/      Claude Code Agent Teams interoperability
@@ -145,7 +145,7 @@ control of a running harness session is
 [the remote-control ADR](docs/adr-remote-control.md), with installed seams in
 [the compatibility manifest](docs/remote-compat.md). Operator commands are
 [the amq-remote companion](cmd/amq-remote/README.md). Preview
-ACP v1 is [the amq-acp companion](cmd/amq-acp/README.md).
+ACP v2 is [the amq-acp companion](cmd/amq-acp/README.md).
 
 ## CLI Commands
 
@@ -247,7 +247,7 @@ make check-skills
 ```
 
 Opt-in live proofs (`AMQ_CMUX_LIVE`, `AMQ_GHOSTTY_LIVE`, `AMQ_CLAUDE_LIVE`,
-`AMQ_CODEX_LIVE`) skip unless the env is `1`. They are not
+`AMQ_CODEX_LIVE`, `AMQ_TMUX_LIVE`) skip unless the env is `1`. They are not
 part of `make ci`. Commands are in
 [Contributing: live proofs](CONTRIBUTING.md#live-proofs-opt-in).
 
