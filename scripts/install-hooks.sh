@@ -1,9 +1,20 @@
 #!/bin/sh
-# Install git hooks for this repository
+# Install git hooks for this repository.
+# An existing pre-push hook is left in place unless it is already this
+# script's hook, or the caller passes --force.
 
 HOOK_DIR="$(git rev-parse --git-dir)/hooks"
+HOOK="$HOOK_DIR/pre-push"
+force=0
+if [ "${1:-}" = "--force" ]; then
+  force=1
+elif [ -n "${1:-}" ]; then
+  echo "usage: scripts/install-hooks.sh [--force]" >&2
+  exit 2
+fi
 
-cat > "$HOOK_DIR/pre-push" << 'EOF'
+hook_body() {
+  cat << 'EOF'
 #!/bin/sh
 # Pre-push hook: runs lint and tests before allowing push
 
@@ -26,6 +37,19 @@ fi
 
 echo "✓ Pre-push checks passed"
 EOF
+}
 
-chmod +x "$HOOK_DIR/pre-push"
+if [ -e "$HOOK" ] || [ -L "$HOOK" ]; then
+  if [ "$force" -eq 0 ]; then
+    if [ -L "$HOOK" ] || ! hook_body | cmp -s - "$HOOK"; then
+      echo "refusing to replace existing pre-push hook: $HOOK" >&2
+      exit 1
+    fi
+  elif [ -L "$HOOK" ]; then
+    rm "$HOOK"
+  fi
+fi
+
+hook_body > "$HOOK"
+chmod +x "$HOOK"
 echo "✓ Installed pre-push hook"
