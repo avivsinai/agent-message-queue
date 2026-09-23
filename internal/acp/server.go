@@ -811,8 +811,9 @@ type sessionUpdateNotification struct {
 }
 
 type sessionUpdateParams struct {
-	SessionID string        `json:"sessionId"`
-	Update    sessionUpdate `json:"update"`
+	SessionID string            `json:"sessionId"`
+	Update    sessionUpdate     `json:"update"`
+	Meta      map[string]string `json:"_meta,omitempty"`
 }
 
 type sessionUpdate struct {
@@ -829,7 +830,11 @@ func emitText(emit func(any) error, sessionID, updateType, text string) error {
 	if emit == nil {
 		return nil
 	}
-	return emit(sessionUpdateNotification{
+	return emit(textSessionUpdate(sessionID, updateType, text))
+}
+
+func textSessionUpdate(sessionID, updateType, text string) sessionUpdateNotification {
+	return sessionUpdateNotification{
 		JSONRPC: jsonRPCVersion,
 		Method:  "session/update",
 		Params: sessionUpdateParams{
@@ -839,7 +844,15 @@ func emitText(emit func(any) error, sessionID, updateType, text string) error {
 				Content:       textContent{Type: "text", Text: text},
 			},
 		},
-	})
+	}
+}
+
+// MarshalTextSessionUpdate encodes the session/update notification emitText
+// sends. meta is ACP extension metadata and is omitted when empty.
+func MarshalTextSessionUpdate(sessionID, updateType, text string, meta map[string]string) (json.RawMessage, error) {
+	note := textSessionUpdate(sessionID, updateType, text)
+	note.Params.Meta = meta
+	return json.Marshal(note)
 }
 
 // decodeParams decodes request params. When strict, unrecognized top-level
