@@ -85,7 +85,10 @@ func (a *seqAllocator) prepare(key, dir string) (*seqSlot, error) {
 			slot.failed = err
 			return nil, err
 		}
-		if hi > slot.hi {
+		// Equal ceilings are still two reservations of the same block: a
+		// process-only allocator and a durable one can both stop at 1024.
+		// The next number has to pass the persisted reservation.
+		if hi >= slot.hi && hi > 0 {
 			slot.next, slot.hi = hi, hi
 		}
 		slot.dir = dir
@@ -163,18 +166,33 @@ func (q *liveQueue) overLocked(body string) bool {
 }
 
 func (q *liveQueue) dropLocked(body string, i int) {
+	item := q.takeLocked(body, i)
+	item.sink.noteDrop()
+}
+
+// takeLocked removes one queued frame and drops the backing-array slot.
+// An empty body is removed from the process maps so a closed sink does not
+// keep ciphertext or the sink pointer alive.
+func (q *liveQueue) takeLocked(body string, i int) queuedFrame {
 	items := q.body[body]
 	item := items[i]
-	q.body[body] = append(items[:i], items[i+1:]...)
+	copy(items[i:], items[i+1:])
+	items[len(items)-1] = queuedFrame{}
+	items = items[:len(items)-1]
+	if len(items) == 0 {
+		delete(q.body, body)
+	} else {
+		q.body[body] = items
+	}
 	q.bodyBytes[body] -= item.n
 	q.processBytes -= item.n
-	if q.bodyBytes[body] < 0 {
-		q.bodyBytes[body] = 0
+	if q.bodyBytes[body] <= 0 {
+		delete(q.bodyBytes, body)
 	}
 	if q.processBytes < 0 {
 		q.processBytes = 0
 	}
-	item.sink.noteDrop()
+	return item
 }
 
 func (q *liveQueue) evictStaleLocked(now time.Time) {
@@ -205,16 +223,7 @@ func (q *liveQueue) popLocked(sink *Sink, body string) (queuedFrame, bool) {
 		if item.sink != sink {
 			continue
 		}
-		q.body[body] = append(items[:i], items[i+1:]...)
-		q.bodyBytes[body] -= item.n
-		q.processBytes -= item.n
-		if q.bodyBytes[body] < 0 {
-			q.bodyBytes[body] = 0
-		}
-		if q.processBytes < 0 {
-			q.processBytes = 0
-		}
-		return item, true
+		return q.takeLocked(body, i), true
 	}
 	return queuedFrame{}, false
 }
