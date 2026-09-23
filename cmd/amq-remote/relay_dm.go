@@ -34,7 +34,9 @@ type dmEdges struct {
 	relay  string // relay URL, for the NIP-11 self lookup
 	self   string // pinned relay self key; empty reads NIP-11
 	byBody map[string]*dmShare
-	state  map[string]string // session -> commands surface state, for status
+	// presence holds each presence share by session (611.17 slice 2).
+	presence map[string]*presenceShare
+	state    map[string]string // session -> commands surface state, for status
 	// handle is bound once the endpoint exists; carriers only call it from
 	// Ingest, which starts after startup.
 	handle buzzio.Handler
@@ -48,13 +50,16 @@ type dmEdges struct {
 // during reconcile. A share whose enrolled credentials cannot load keeps its
 // commands surface closed and is reported, never silently attached.
 func buildDMEdges(root, stateDir string, r *manifest.Relay, warn io.Writer) *dmEdges {
-	d := &dmEdges{byBody: map[string]*dmShare{}, state: map[string]string{}}
+	d := &dmEdges{byBody: map[string]*dmShare{}, state: map[string]string{}, presence: map[string]*presenceShare{}}
 	if r == nil {
 		return d
 	}
 	d.relay, d.self = r.URL, r.Self
 	dupBodies := map[string]bool{}
 	for _, sh := range r.Shares {
+		if sh.Presence {
+			d.addPresence(root, sh, warn)
+		}
 		if !sh.Commands {
 			continue
 		}
@@ -122,6 +127,49 @@ func enrolledGrant(root, session string, b buzzio.Binding) buzzio.Grant {
 		}
 		return creds.TagFor(kind, at)
 	}
+}
+
+// addPresence builds a share's presence surface from its enrolled body. A
+// share whose body cannot load is reported and publishes nothing.
+func (d *dmEdges) addPresence(root string, sh manifest.Share, warn io.Writer) {
+	ps := &presenceShare{share: sh}
+	creds, err := sharestate.Load(root, sh.Session)
+	if err == nil {
+		ps.owner, err = nostr.PubKeyFromHex(sh.OwnerPubKey)
+	}
+	if err == nil {
+		ps.body, err = nostr.PubKeyFromHex(creds.Body.PublicKeyHex())
+	}
+	if err != nil {
+		ps.state = "refused: " + err.Error()
+		say(warn, "relay share %s: presence disabled: %v", sh.Session, err)
+		d.presence[sh.Session] = ps
+		return
+	}
+	b := buzzio.Binding{Owner: sh.OwnerPubKey, Body: creds.Body.PublicKeyHex()}
+	ps.p = buzzio.NewPresence(buzzio.NewSigner(creds.Body.Secret(), enrolledGrant(root, sh.Session, b)), sh.Name)
+	ps.state = "configured"
+	d.presence[sh.Session] = ps
+}
+
+// presenceFor returns a session's presence share when it can publish.
+func (d *dmEdges) presenceFor(session string) *presenceShare {
+	if d == nil {
+		return nil
+	}
+	ps := d.presence[session]
+	if ps == nil || ps.p == nil {
+		return nil
+	}
+	return ps
+}
+
+// presenceView returns a presence share's state and discovery for status.
+func (d *dmEdges) presenceView(session string) (string, string) {
+	if d == nil || d.presence[session] == nil {
+		return "", ""
+	}
+	return d.presence[session].view()
 }
 
 // bind attaches the endpoint: its command handler and its native session

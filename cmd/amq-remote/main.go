@@ -1073,6 +1073,14 @@ func doctor(args []string) (any, int, error) {
 			if sh.Commands != "" && sh.Commands != "subscription_active" {
 				code = protocol.ExitActionRequired
 			}
+			// A presence share needs a published status and the owner's
+			// 30177 policy, or Desktop cannot list the body as owned.
+			if sh.Presence != "" && sh.Presence != "online" && sh.Presence != "away" {
+				code = protocol.ExitActionRequired
+			}
+			if sh.Discovery != "" && sh.Discovery != "policy_present" {
+				code = protocol.ExitActionRequired
+			}
 		}
 	case !errors.Is(rerr, os.ErrNotExist):
 		report["relay_error"] = rerr.Error()

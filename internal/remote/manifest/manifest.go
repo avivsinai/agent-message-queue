@@ -27,6 +27,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 )
@@ -86,7 +88,12 @@ type Share struct {
 	// the mentioning channel. Commands require dm_channel_id first.
 	MentionChannels []string `json:"mention_channels,omitempty"`
 	Commands        bool     `json:"commands,omitempty"`
-	Activity        bool     `json:"activity,omitempty"`
+	// Presence publishes the body's kind 0 profile and kind 10100 status so
+	// the owner's Buzz Desktop lists it. Name is the display name, published
+	// in clear text; it must not carry a path or prompt data.
+	Presence bool   `json:"presence,omitempty"`
+	Name     string `json:"name,omitempty"`
+	Activity bool   `json:"activity,omitempty"`
 }
 
 // Adapter is one adapter instance in the manifest.
@@ -332,6 +339,8 @@ func validateRelay(f File, targets map[string]bool) error {
 			return &ErrInvalidRelay{Reason: fmt.Sprintf("share %q: commands need native_session_id, the approved native session (see amq-remote inspect)", sh.Session)}
 		case sh.Activity:
 			return &ErrInvalidRelay{Reason: fmt.Sprintf("share %q: activity is not supported by this binary", sh.Session)}
+		case sh.Presence && !validDisplayName(sh.Name):
+			return &ErrInvalidRelay{Reason: fmt.Sprintf("share %q: presence needs a name of 1 to 64 printable characters with no path separator", sh.Session)}
 		case len(sh.MentionChannels) > 0 && !sh.Commands:
 			return &ErrInvalidRelay{Reason: fmt.Sprintf("share %q: mention_channels need commands", sh.Session)}
 		case len(sh.MentionChannels) > maxMentionChannels:
@@ -347,6 +356,20 @@ func validateRelay(f File, targets map[string]bool) error {
 		bound[sh.Target], sessions[sh.Session] = true, true
 	}
 	return nil
+}
+
+// validDisplayName is a short printable name with no path separator, so a
+// clear-text profile cannot leak a local path.
+func validDisplayName(s string) bool {
+	if s == "" || utf8.RuneCountInString(s) > 64 || strings.ContainsAny(s, "/\\") {
+		return false
+	}
+	for _, r := range s {
+		if !unicode.IsPrint(r) {
+			return false
+		}
+	}
+	return true
 }
 
 // maxMentionChannels bounds one share's mention subscription filter.
