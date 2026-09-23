@@ -365,12 +365,24 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	// carrier. SetPublish runs inside startupSequence; this closure forwards
 	// to the carrier once it exists.
 	var carrier *amqio.Carrier
-	carrierPublish := func(s protocol.Snapshot, origin map[string]string) error {
-		if carrier == nil {
-			return nil
-		}
-		return carrier.Publish(s, origin)
-	}
+	// Buzz DM carriers (611.16) are built below, once the manifest path is
+	// known and before startup reconciliation.
+	var relayCfg *manifest.Relay
+	var edges *dmEdges
+	carrierPublish := publishRouter(map[string]publishFunc{
+		"amq": func(s protocol.Snapshot, origin map[string]string) error {
+			if carrier == nil {
+				return errCarrierUnavailable
+			}
+			return carrier.Publish(s, origin)
+		},
+		"buzz": func(s protocol.Snapshot, origin map[string]string) error {
+			if edges == nil {
+				return errCarrierUnavailable
+			}
+			return edges.publish(s, origin)
+		},
+	})
 	// .13: the manifest load, flag-sugar append (--fake, --codex-socket),
 	// validation and owned startup are ONE production path, serveStartup —
 	// shared verbatim by the focused regressions (611.13 r4). Flag sugar is
@@ -400,11 +412,15 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 			sugar = append(sugar, manifest.Adapter{Kind: "codex", Target: codex.TargetID(id), Config: cfg})
 		}
 	}
-	// One manifest snapshot drives target attachment and the relay alike
-	// (codex slice 1 review #8): a second read could see a different file.
+	// One manifest snapshot drives target attachment, the Buzz DM carriers
+	// and the relay alike (codex slice 1 review #8): a second read could see
+	// a different file. Buzz DM carriers exist before startup reconciliation,
+	// so a Buzz record owed from before a restart publishes during reconcile.
 	mfSnap, err := manifest.Load(manifestFile)
 	var ep *core.Endpoint
 	if err == nil {
+		relayCfg = mfSnap.Relay
+		edges = buildDMEdges(c.root, stateDir, relayCfg, stderr)
 		_, ep, carrier, _, err = serveStartupFrom(stateDir, c.root, *me, mfSnap, sugar, carrierPublish, &carrier, stderr, wireCarrier(c.root, stderr))
 	}
 	if err != nil {
@@ -477,9 +493,12 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	// Relay surface (611.15): one authenticated client per share. The
 	// manifest was already loaded and validated by serveStartup.
 	var relays *sync.WaitGroup
-	if mfSnap.Relay != nil {
-		relays = startRelays(ctx, c.root, stateDir, mfSnap.Relay, stderr)
-		say(stdout, "relay %s: %d shared session(s)", mfSnap.Relay.URL, len(mfSnap.Relay.Shares))
+	if relayCfg != nil {
+		// Fresh remote commands are admitted only now, after attachment and
+		// startup reconciliation.
+		edges.bind(ep.Handle, ep.NativeSessionID)
+		relays = startRelays(ctx, c.root, stateDir, relayCfg, edges, stderr)
+		say(stdout, "relay %s: %d shared session(s)", relayCfg.URL, len(relayCfg.Shares))
 	}
 	go func() {
 		t := time.NewTicker(*poll)
@@ -1048,6 +1067,10 @@ func doctor(args []string) (any, int, error) {
 		report["relay"] = rs
 		for _, sh := range rs.Shares {
 			if sh.State != string(relay.StateAuthenticated) {
+				code = protocol.ExitActionRequired
+			}
+			// A commands share also needs its DM surface open.
+			if sh.Commands != "" && sh.Commands != "subscription_active" {
 				code = protocol.ExitActionRequired
 			}
 		}

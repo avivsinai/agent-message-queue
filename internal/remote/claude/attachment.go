@@ -248,7 +248,7 @@ type Attachment struct {
 // evidence is carried by Lookup, and the projection fails closed under
 // any caller floor.
 func (a *Attachment) Inspect() protocol.Session {
-	status := a.observeStatus()
+	status, _ := a.observe()
 	att := "live"
 	if status == "offline" {
 		att = "offline"
@@ -287,27 +287,37 @@ func normalizeStatus(s string) string {
 	return "unknown"
 }
 
-// observeStatus is a pure filesystem read: the registry file's status
-// field plus a pid liveness check. No child process, no bound that can
-// silently exceed its timeout (P0-1).
-func (a *Attachment) observeStatus() string {
+// NativeSessionID is the live registry entry's sessionId, the identity
+// relay sharing pins (core.NativeIdentifier); empty when the session is not
+// live.
+func (a *Attachment) NativeSessionID() string {
+	_, sessionID := a.observe()
+	return sessionID
+}
+
+// observe returns the projection status and, for a live registry entry, its
+// sessionId: the native identity relay sharing pins. It is a pure
+// filesystem read: the registry file's status field plus a pid liveness
+// check. No child process, no bound that can silently exceed its timeout
+// (P0-1).
+func (a *Attachment) observe() (string, string) {
 	reg, err := readSessionRegistry(a.home, a.cfg.Pid)
 	if err != nil {
-		return "offline"
+		return "offline", ""
 	}
 	if reg == nil {
 		// No registry entry (r3: missing-file path) — offline.
-		return "offline"
+		return "offline", ""
 	}
 	if alive, err := pidAlive(a.cfg.Pid); err != nil || !alive {
-		return "offline"
+		return "offline", ""
 	}
 	// A registry status the process does not update any more is still
 	// "unknown" in the projection, never a guessed idle.
 	if reg.Status == "" {
-		return "unknown"
+		return "unknown", reg.SessionID
 	}
-	return normalizeStatus(reg.Status)
+	return normalizeStatus(reg.Status), reg.SessionID
 }
 
 func (a *Attachment) now() time.Time { return time.Now() }

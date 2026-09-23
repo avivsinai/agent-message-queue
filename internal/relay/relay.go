@@ -124,6 +124,7 @@ type Conn struct {
 
 	mu        sync.Mutex
 	waiters   map[nostr.ID]chan okResult
+	subs      map[string]*Sub
 	challenge chan string
 	done      chan struct{}
 	readErr   error
@@ -362,8 +363,8 @@ func (c *Conn) write(ctx context.Context, frame []byte) error {
 	return c.ws.Write(ctx, websocket.MessageText, frame)
 }
 
-// readPump is the connection's only reader. It routes the AUTH challenge
-// and OK results; everything else is ignored in this slice. It never calls
+// readPump is the connection's only reader. It routes the AUTH challenge,
+// OK results, and subscription EVENT/EOSE/CLOSED frames. It never calls
 // into callers or blocks on them.
 func (c *Conn) readPump() {
 	defer close(c.done)
@@ -378,6 +379,7 @@ func (c *Conn) readPump() {
 			c.mu.Lock()
 			c.readErr = err
 			c.mu.Unlock()
+			c.endAllSubs(err)
 			return
 		}
 		env, err := nostr.ParseMessage(string(data))
@@ -392,6 +394,14 @@ func (c *Conn) readPump() {
 				default: // one challenge per connection is honored
 				}
 			}
+		case *nostr.EventEnvelope:
+			if e.SubscriptionID != nil {
+				c.routeEvent(*e.SubscriptionID, e.Event)
+			}
+		case *nostr.EOSEEnvelope:
+			c.routeEOSE(e.SubscriptionID)
+		case *nostr.ClosedEnvelope:
+			c.routeClosed(e.SubscriptionID, e.Reason)
 		case *nostr.OKEnvelope:
 			c.mu.Lock()
 			w := c.waiters[e.EventID]

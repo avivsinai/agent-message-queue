@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -35,6 +36,48 @@ type Relay struct {
 	// DropOnce closes the first authenticated connection, to exercise
 	// reconnect.
 	DropOnce atomic.Bool
+
+	mu     sync.Mutex
+	stored []nostr.Event
+	live   map[*liveSub]struct{}
+}
+
+type liveSub struct {
+	id      string
+	filters []nostr.Filter
+	send    func([]byte)
+}
+
+// Inject stores an event and fans it out to open subscriptions without
+// checking it, so tests can deliver a forged event and see the client
+// refuse it.
+func (r *Relay) Inject(evt nostr.Event) { r.store(evt) }
+
+// Events returns the events accepted so far.
+func (r *Relay) Events() []nostr.Event {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]nostr.Event(nil), r.stored...)
+}
+
+func (r *Relay) store(evt nostr.Event) {
+	r.mu.Lock()
+	r.stored = append(r.stored, evt)
+	subs := make([]*liveSub, 0, len(r.live))
+	for s := range r.live {
+		subs = append(subs, s)
+	}
+	r.mu.Unlock()
+	for _, s := range subs {
+		for _, f := range s.filters {
+			if f.Matches(evt) {
+				id := s.id
+				frame, _ := nostr.EventEnvelope{SubscriptionID: &id, Event: evt}.MarshalJSON()
+				s.send(frame)
+				break
+			}
+		}
+	}
 }
 
 func (r *Relay) ServeHTTP(w http.ResponseWriter, req *http.Request) {
@@ -44,6 +87,12 @@ func (r *Relay) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 	defer func() { _ = ws.CloseNow() }()
 	ctx := req.Context()
+	var writeMu sync.Mutex
+	send := func(frame []byte) {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		_ = ws.Write(ctx, websocket.MessageText, frame)
+	}
 	challenge := fmt.Sprintf("chal-%d", time.Now().UnixNano())
 	chJSON, _ := nostr.AuthEnvelope{Challenge: &challenge}.MarshalJSON()
 	if ws.Write(ctx, websocket.MessageText, chJSON) != nil {
@@ -63,7 +112,7 @@ func (r *Relay) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		case *nostr.AuthEnvelope:
 			reason := r.checkAuth(e.Event, challenge, "ws://"+req.Host)
 			ok, _ := nostr.OKEnvelope{EventID: e.Event.ID, OK: reason == "", Reason: reason}.MarshalJSON()
-			_ = ws.Write(ctx, websocket.MessageText, ok)
+			send(ok)
 			if reason == "" {
 				authed = true
 				r.AuthOK.Add(1)
@@ -79,7 +128,36 @@ func (r *Relay) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 				reason = "invalid: bad signature"
 			}
 			ok, _ := nostr.OKEnvelope{EventID: e.Event.ID, OK: reason == "", Reason: reason}.MarshalJSON()
-			_ = ws.Write(ctx, websocket.MessageText, ok)
+			send(ok)
+			if reason == "" {
+				r.store(e.Event)
+			}
+		case *nostr.ReqEnvelope:
+			sub := &liveSub{id: e.SubscriptionID, filters: e.Filters, send: send}
+			r.mu.Lock()
+			stored := append([]nostr.Event(nil), r.stored...)
+			if r.live == nil {
+				r.live = map[*liveSub]struct{}{}
+			}
+			r.live[sub] = struct{}{}
+			r.mu.Unlock()
+			for _, evt := range stored {
+				for _, f := range e.Filters {
+					if f.Matches(evt) {
+						id := e.SubscriptionID
+						frame, _ := nostr.EventEnvelope{SubscriptionID: &id, Event: evt}.MarshalJSON()
+						send(frame)
+						break
+					}
+				}
+			}
+			eose, _ := nostr.EOSEEnvelope{SubscriptionID: e.SubscriptionID}.MarshalJSON()
+			send(eose)
+			defer func() {
+				r.mu.Lock()
+				delete(r.live, sub)
+				r.mu.Unlock()
+			}()
 		}
 	}
 }

@@ -151,8 +151,10 @@ file instead of ignoring the object.
 Each share binds one declared target to the body key enrolled under
 `amq-remote share --session <session>`. `url` must be `wss://`; `ws://` is
 accepted only for a loopback host. A target or session can be shared once.
-`commands` and `activity` are refused: this binary authenticates on the
-relay and does nothing more yet.
+`activity` is refused. `commands` needs `dm_channel_id`. The optional
+`relay_self` pins the relay's NIP-11 `self` key (64 lowercase hex); without
+it, `serve` reads the key from the relay's NIP-11 document and refuses a
+redirect.
 
 `serve` keeps one connection per share. It answers the relay's NIP-42
 challenge with a kind 22242 event signed by the body key, carrying exactly
@@ -167,6 +169,51 @@ connection reconnects with backoff of 1 to 30 seconds. Local IPC and AMQ deliver
 
 `serve` never mints, renews or enrolls a key. Use `amq-remote share` for
 that.
+
+### Owner DM commands
+
+With `"commands": true`, `"dm_channel_id": "<channel>"` and
+`"native_session_id": "<id>"`, the owner can operate the shared target from
+the Buzz DM channel. `native_session_id` is the native session you approve
+for sharing: the Codex thread id (the `thread` in `--discover` output) or
+the Claude `sessionId` in `~/.claude/sessions/<pid>.json`. Commands run only while the target's attached session
+has that id, so a different session under the same target is never shared
+by inheritance. Enroll the DM kinds first with `amq-remote share --session
+<session> --enable buzz-dm`; without them the surface stays closed and no
+command runs.
+
+| Owner sends | Result |
+| --- | --- |
+| Plain text | One submit to the target. The body replies with one result row and edits that row as the request changes. |
+| `/inspect` | The target's session state. |
+| `/status <ref>` | The state of a request that this channel submitted. |
+| `/cancel <ref>`, or ❌ on a result row | Cancels that request. |
+
+With `"mention_channels": ["<channel>", ...]` (at most 16, commands
+required), an owner message in one of those channels that mentions the body
+submits a plain prompt too. A leading `nostr:npub1…` mention is dropped from
+the prompt. The result row goes to the DM channel, never to the mentioning
+channel. Slash commands work only in the DM.
+
+The surface opens only when the relay's own key signs the channel's NIP-29
+membership (kind 39002) as exactly the owner and the body, and its metadata
+(kind 39000) as private and of type `dm`. `serve` reads the membership and
+the native session again every minute and closes the surface on the first
+read that no longer verifies. These are stored relay snapshots, not a read
+of current membership, so a change can show late; no bound on the delay is
+claimed.
+
+The body signs a kind 9 or 40003 event only when the enrolled generation has
+the owner's grant for that kind. It attaches that grant as the event's
+NIP-OA tag. The relay does not enforce these grants; `serve` does, and it
+checks them again before it sends owed output. Each owner event is claimed
+once and its outcome recorded, so a redelivered DM never runs again, even
+after a busy rejection. Output owed from an earlier channel or body is kept,
+never redirected.
+
+Privacy: Buzz DM content is not end-to-end encrypted. The relay operator can
+read the prompts and the result rows. Do not share a session whose prompts or
+results the relay operator must not see.
 
 ## Flags
 
@@ -248,6 +295,7 @@ still in the sender spool.
 | `--renew` | false | Reprint preimages for a fresh attestation window, for every kind. |
 | `--days N` | `30` | Attestation window in days. Range `1..90`. An explicit `0` is exit 2. On `--renew`, an explicit `--days` that would not exceed the current window bounds is refused. |
 | `--tag-file PATH` | empty | JSON file with one owner-signed tag: `kind`, `owner_pubkey`, `conditions`, `sig`. Enrolls that tag. |
+| `--enable SURFACE` | empty | Request the kinds of `buzz-dm` (9, 40003) or `buzz-profile` (0) in the new window. Repeatable. |
 | `--dry-run` | false | Print what a real run would do. Writes nothing. |
 
 ## Exit codes
@@ -276,7 +324,10 @@ once. `amq-remote up` starts that same `serve` child.
 With a relay configured, doctor also reports each share's connection state
 as `serve` last wrote it: `auth_pending`, `authenticated` or `unavailable`,
 with the last error. Any share that is not `authenticated` makes doctor exit
-6. `authenticated` means the relay accepted this body's AUTH. It does not
+6. A commands share also reports its DM surface under `commands`:
+`subscription_active` when open, or `closed: <reason>` or
+`publish_pending: <reason>`. Any other value than `subscription_active`
+makes doctor exit 6. `authenticated` means the relay accepted this body's AUTH. It does not
 prove that the relay materialized the owner binding or that any viewer
 is ready.
 
