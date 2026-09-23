@@ -819,6 +819,7 @@ type sessionUpdateParams struct {
 type sessionUpdate struct {
 	SessionUpdate string      `json:"sessionUpdate"`
 	Content       textContent `json:"content"`
+	ToolCallID    string      `json:"toolCallId,omitempty"`
 }
 
 type textContent struct {
@@ -848,10 +849,12 @@ func textSessionUpdate(sessionID, updateType, text string) sessionUpdateNotifica
 }
 
 // MarshalTextSessionUpdate encodes the session/update notification emitText
-// sends. meta is ACP extension metadata and is omitted when empty.
-func MarshalTextSessionUpdate(sessionID, updateType, text string, meta map[string]string) (json.RawMessage, error) {
+// sends. meta is ACP extension metadata and is omitted when empty. toolCallID
+// is omitted when empty.
+func MarshalTextSessionUpdate(sessionID, updateType, text string, meta map[string]string, toolCallID string) (json.RawMessage, error) {
 	note := textSessionUpdate(sessionID, updateType, text)
 	note.Params.Meta = meta
+	note.Params.Update.ToolCallID = toolCallID
 	return json.Marshal(note)
 }
 

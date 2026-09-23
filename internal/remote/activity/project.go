@@ -16,6 +16,11 @@ type observation struct {
 	SessionID string
 	TurnID    string
 	Text      string
+	Update    string
+	ToolID    string
+	Title     string
+	Status    string
+	ItemID    string
 	At        time.Time
 }
 
@@ -61,12 +66,55 @@ func (o observation) payload() (json.RawMessage, error) {
 			"isNewSession": false,
 		})
 	case "acp_read":
-		return acp.MarshalTextSessionUpdate(o.SessionID, "agent_message_chunk", o.Text, map[string]string{
-			"provenance": "native_projection",
-		})
+		meta := map[string]string{"provenance": "native_projection"}
+		if o.ItemID != "" {
+			meta["itemId"] = o.ItemID
+		}
+		switch o.Update {
+		case "tool_call", "tool_call_update":
+			return toolSessionUpdate(o, meta)
+		default:
+			update := o.Update
+			if update == "" {
+				update = "agent_message_chunk"
+			}
+			return acp.MarshalTextSessionUpdate(o.SessionID, update, o.Text, meta, o.ToolID)
+		}
 	default:
 		return nil, fmt.Errorf("activity kind %q", o.Kind)
 	}
+}
+
+// toolSessionUpdate is the ACP tool_call / tool_call_update notification.
+// It is not the text-message codec: tool content is a ToolCallContent array,
+// and status is the observed state (Desktop treats a missing status as completed).
+func toolSessionUpdate(o observation, meta map[string]string) (json.RawMessage, error) {
+	update := map[string]any{
+		"sessionUpdate": o.Update,
+		"toolCallId":    o.ToolID,
+		"title":         o.Title,
+		"status":        o.Status,
+	}
+	if o.Update == "tool_call_update" && o.Text != "" {
+		update["content"] = []any{
+			map[string]any{
+				"type": "content",
+				"content": map[string]any{
+					"type": "text",
+					"text": o.Text,
+				},
+			},
+		}
+	}
+	return json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"method":  "session/update",
+		"params": map[string]any{
+			"sessionId": o.SessionID,
+			"update":    update,
+			"_meta":     meta,
+		},
+	})
 }
 
 // projectCodex maps the Codex app-server notifications the attachment already
