@@ -15,12 +15,14 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	amqcli "github.com/avivsinai/agent-message-queue/internal/cli"
 	"github.com/avivsinai/agent-message-queue/internal/config"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/relay"
 	"github.com/avivsinai/agent-message-queue/internal/remote/amqio"
 	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
 	"github.com/avivsinai/agent-message-queue/internal/remote/codex"
@@ -398,7 +400,13 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 			sugar = append(sugar, manifest.Adapter{Kind: "codex", Target: codex.TargetID(id), Config: cfg})
 		}
 	}
-	_, ep, carrier, _, err := serveStartup(stateDir, c.root, *me, manifestFile, sugar, carrierPublish, &carrier, stderr, wireCarrier(c.root, stderr))
+	// One manifest snapshot drives target attachment and the relay alike
+	// (codex slice 1 review #8): a second read could see a different file.
+	mfSnap, err := manifest.Load(manifestFile)
+	var ep *core.Endpoint
+	if err == nil {
+		_, ep, carrier, _, err = serveStartupFrom(stateDir, c.root, *me, mfSnap, sugar, carrierPublish, &carrier, stderr, wireCarrier(c.root, stderr))
+	}
 	if err != nil {
 		if manifest.IsValidation(err) {
 			if dup, ok := err.(*manifest.ErrDuplicateTarget); ok {
@@ -466,6 +474,13 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	for _, s := range ep.Sessions() {
 		printSession(stdout, s)
 	}
+	// Relay surface (611.15): one authenticated client per share. The
+	// manifest was already loaded and validated by serveStartup.
+	var relays *sync.WaitGroup
+	if mfSnap.Relay != nil {
+		relays = startRelays(ctx, c.root, stateDir, mfSnap.Relay, stderr)
+		say(stdout, "relay %s: %d shared session(s)", mfSnap.Relay.URL, len(mfSnap.Relay.Shares))
+	}
 	go func() {
 		t := time.NewTicker(*poll)
 		defer t.Stop()
@@ -493,6 +508,12 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 		}
 	}()
 	err = server.Serve(ctx)
+	// Cancel before joining (codex slice 1 review #7): Serve can also return
+	// on an accept error with ctx still live, and the relays would never end.
+	stop()
+	if relays != nil {
+		relays.Wait()
+	}
 	if cerr := ep.Close(); cerr != nil && err == nil {
 		err = cerr
 	}
@@ -1019,6 +1040,20 @@ func doctor(args []string) (any, int, error) {
 	if bodyKeys := doctorShareInspection(c.root); bodyKeys != nil {
 		report["body_keys"] = bodyKeys
 	}
+	// Relay connections (611.15), as serve last reported them. Each state
+	// is distinct: auth_pending is not authenticated, and authenticated is
+	// not proof the relay materialized ownership.
+	switch rs, rerr := loadRelayStatus(stateDir); {
+	case rerr == nil:
+		report["relay"] = rs
+		for _, sh := range rs.Shares {
+			if sh.State != string(relay.StateAuthenticated) {
+				code = protocol.ExitActionRequired
+			}
+		}
+	case !errors.Is(rerr, os.ErrNotExist):
+		report["relay_error"] = rerr.Error()
+	}
 	return report, code, nil
 }
 
@@ -1217,7 +1252,14 @@ func serveStartup(stateDir, root, handle, manifestFile string, sugar []manifest.
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
-	mf.Adapters = append(mf.Adapters, sugar...)
+	return serveStartupFrom(stateDir, root, handle, mf, sugar, publish, carrierOut, warn, wire)
+}
+
+// serveStartupFrom is serveStartup over an already loaded manifest, so serve
+// can use one validated snapshot for both target attachment and the relay
+// (codex slice 1 review #8).
+func serveStartupFrom(stateDir, root, handle string, mf manifest.File, sugar []manifest.Adapter, publish core.Publisher, carrierOut **amqio.Carrier, warn io.Writer, wire func(*amqio.Carrier)) (*requests.Store, *core.Endpoint, *amqio.Carrier, []registry.Outcome, error) {
+	mf.Adapters = append(append([]manifest.Adapter(nil), mf.Adapters...), sugar...)
 	if verr := manifest.Validate(mf); verr != nil {
 		return nil, nil, nil, nil, verr
 	}

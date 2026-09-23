@@ -115,6 +115,11 @@ func Load(path string) (*BodyKey, error) {
 	return parse(string(data))
 }
 
+// Parse decodes body key file content the caller already read under its
+// own confinement rules (the runtime loader reads with no-follow,
+// non-blocking opens). It applies the same format checks as Load.
+func Parse(content []byte) (*BodyKey, error) { return parse(string(content)) }
+
 func parse(content string) (*BodyKey, error) {
 	secretSet := false
 	publicLine := ""
