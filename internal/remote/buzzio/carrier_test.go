@@ -60,7 +60,7 @@ func TestCarrierSubmitsOnceAndKeepsOneEditableRow(t *testing.T) {
 		t.Fatalf("submit identities = %v, want one identical request both times", ids)
 	}
 	now = now.Add(2 * time.Second)
-	origin := c.source(dm.ID.Hex()).Origin
+	origin := c.source(dm.ID.Hex(), "").Origin
 	if err := c.Publish(protocol.Snapshot{RequestRef: "amqr1_ref", Revision: 2, State: protocol.StateCompleted, Result: &protocol.Result{Text: "done"}}, origin); err != nil {
 		t.Fatal(err)
 	}
@@ -82,6 +82,21 @@ func TestCarrierSubmitsOnceAndKeepsOneEditableRow(t *testing.T) {
 	// and both events carry the owner's grant for their kind.
 	if tagValue(sent[0], "p") != b.Owner || !hasTag(sent[0], "e", dm.ID.Hex(), "", "reply") {
 		t.Fatalf("row tags = %v, want p=owner and a reply to the input", sent[0].Tags)
+	}
+	// An owner reply inside a thread gets an answer naming that thread's
+	// root as well as the input.
+	threadRootID := sent[0].ID.Hex()
+	inThread := nostr.Event{CreatedAt: nostr.Timestamp(now.Unix()), Kind: KindDM, Content: "/inspect", Tags: nostr.Tags{{"h", "dm-1"}, {"e", threadRootID, "", "root"}}}
+	if err := inThread.Sign(owner); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Ingest(inThread); err != nil {
+		t.Fatal(err)
+	}
+	var answer []nostr.Event
+	_ = c.Flush(context.Background(), func(_ context.Context, evt nostr.Event) error { answer = append(answer, evt); return nil })
+	if len(answer) != 1 || !hasTag(answer[0], "e", threadRootID, "", "root") || !hasTag(answer[0], "e", inThread.ID.Hex(), "", "reply") {
+		t.Fatalf("threaded answer = %+v, want root and reply tags", answer)
 	}
 	for _, evt := range sent {
 		if tagValue(evt, "auth") != b.Owner {
@@ -143,7 +158,7 @@ func TestCarrierRefusesToSignWithoutGrant(t *testing.T) {
 	b := Binding{Owner: nostr.GetPublicKey(owner).Hex(), Body: nostr.GetPublicKey(body).Hex(), Channel: "dm-1", Target: "cx", RelayHost: "relay"}
 	ledger, _ := OpenLedger(t.TempDir())
 	c := NewCarrier(ledger, b, body, ownerGrant(t, owner, b.Body, KindEdit), nil) // no kind 9 grant
-	err := c.Publish(protocol.Snapshot{RequestRef: "amqr1_x", Revision: 1, State: protocol.StateRunning}, c.source("").Origin)
+	err := c.Publish(protocol.Snapshot{RequestRef: "amqr1_x", Revision: 1, State: protocol.StateRunning}, c.source("", "").Origin)
 	if !errors.Is(err, ErrNoGrant) {
 		t.Fatalf("publish without a kind 9 grant: err=%v, want ErrNoGrant", err)
 	}

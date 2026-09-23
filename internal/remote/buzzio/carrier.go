@@ -86,9 +86,9 @@ func (c *Carrier) sign(evt *nostr.Event) error {
 // source is this carrier's identity to the endpoint: a stable,
 // protocol-valid host derived from relay, body and owner. It carries no
 // authority beyond naming the creator of requests submitted here.
-func (c *Carrier) source(eventID string) core.Source {
+func (c *Carrier) source(eventID, root string) core.Source {
 	sum := sha256.Sum256([]byte("amq-remote/buzz/host\x00" + c.binding.RelayHost + "\x00" + c.binding.Body + "\x00" + c.binding.Owner))
-	return core.Source{
+	src := core.Source{
 		Host: "buzz-" + hex.EncodeToString(sum[:8]),
 		Origin: map[string]string{
 			"carrier": "buzz",
@@ -97,6 +97,20 @@ func (c *Carrier) source(eventID string) core.Source {
 			"event":   eventID,
 		},
 	}
+	if root != "" {
+		src.Origin["root"] = root // the input's thread root, derived from the signed event
+	}
+	return src
+}
+
+// threadRoot is the NIP-10 root an owner event replies within, if any.
+func threadRoot(evt nostr.Event) string {
+	for _, t := range evt.Tags {
+		if len(t) >= 4 && t[0] == "e" && t[3] == "root" && validHexID(t[1]) {
+			return t[1]
+		}
+	}
+	return ""
 }
 
 // KindReaction is a NIP-25 reaction.
@@ -193,7 +207,7 @@ func (c *Carrier) Ingest(evt nostr.Event) error {
 }
 
 func (c *Carrier) inspect() (protocol.Session, error) {
-	out, err := c.handle(&protocol.Command{Schema: protocol.SchemaCommand, Op: protocol.OpSessionInspect, TargetID: c.binding.Target}, c.source(""))
+	out, err := c.handle(&protocol.Command{Schema: protocol.SchemaCommand, Op: protocol.OpSessionInspect, TargetID: c.binding.Target}, c.source("", ""))
 	if err != nil {
 		return protocol.Session{}, err
 	}
@@ -213,7 +227,7 @@ func (c *Carrier) submit(evt nostr.Event, claim Claim, text string) error {
 			MinEvidence: string(protocol.EvidenceAdmitted),
 		},
 	}
-	out, err := c.handle(cmd, c.source(claim.EventID))
+	out, err := c.handle(cmd, c.source(claim.EventID, threadRoot(evt)))
 	if err != nil {
 		return c.answer(evt, "submit refused: "+err.Error())
 	}
@@ -230,7 +244,7 @@ func (c *Carrier) submit(evt nostr.Event, claim Claim, text string) error {
 			return err
 		}
 	}
-	return c.Publish(reply.Snapshot, c.source(claim.EventID).Origin)
+	return c.Publish(reply.Snapshot, c.source(claim.EventID, threadRoot(evt)).Origin)
 }
 
 func (c *Carrier) statusOrCancel(evt nostr.Event, op, ref string) error {
@@ -243,7 +257,7 @@ func (c *Carrier) statusOrCancel(evt nostr.Event, op, ref string) error {
 	if op == OpCancel {
 		cmd.Op = protocol.OpRequestCancel
 	}
-	out, err := c.handle(cmd, c.source(evt.ID.Hex()))
+	out, err := c.handle(cmd, c.source(evt.ID.Hex(), ""))
 	if err != nil {
 		return c.answer(evt, op+" failed: "+err.Error())
 	}
@@ -259,7 +273,7 @@ func (c *Carrier) answer(to nostr.Event, text string) error {
 	evt := nostr.Event{
 		CreatedAt: nostr.Timestamp(c.now().Unix()),
 		Kind:      KindDM,
-		Tags:      c.rowTags(to.ID.Hex()),
+		Tags:      c.rowTags(to.ID.Hex(), threadRoot(to)),
 		Content:   text,
 	}
 	return c.prepare("direct/"+to.ID.Hex(), evt)
@@ -291,7 +305,7 @@ func (c *Carrier) Publish(snap protocol.Snapshot, origin map[string]string) erro
 	key := fmt.Sprintf("row/%s/%08d", snap.RequestRef, snap.Revision)
 	var evt nostr.Event
 	if rc.RootEventID == "" {
-		evt = nostr.Event{CreatedAt: nostr.Timestamp(now), Kind: KindDM, Tags: c.rowTags(origin["event"]), Content: text}
+		evt = nostr.Event{CreatedAt: nostr.Timestamp(now), Kind: KindDM, Tags: c.rowTags(origin["event"], origin["root"]), Content: text}
 	} else {
 		if now <= rc.LastEditAt {
 			return ErrClockBehind
@@ -360,10 +374,14 @@ func (c *Carrier) Flush(ctx context.Context, pub Publisher) error {
 // rowTags and editTags are the only place row tags are built (relay design
 // B2/B3, slice 4 contract §3): a row lives in the owner DM channel (h),
 // addresses the owner (p) and replies to the owner's input event (e ...
-// reply) when it has one; an edit names its original row (e) in the same
-// channel.
-func (c *Carrier) rowTags(inputID string) nostr.Tags {
+// reply) when it has one, naming the input's thread root (e ... root) when
+// the input was itself a reply; an edit names its original row (e) in the
+// same channel.
+func (c *Carrier) rowTags(inputID, root string) nostr.Tags {
 	tags := nostr.Tags{{"h", c.binding.Channel}, {"p", c.binding.Owner}}
+	if validHexID(root) && root != inputID {
+		tags = append(tags, nostr.Tag{"e", root, "", "root"})
+	}
 	if validHexID(inputID) {
 		tags = append(tags, nostr.Tag{"e", inputID, "", "reply"})
 	}
