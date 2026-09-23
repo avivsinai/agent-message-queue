@@ -29,6 +29,7 @@ const (
 	EnvPollInterval      = "AMQ_ACP_POLL_INTERVAL"
 	EnvHeartbeatInterval = "AMQ_ACP_HEARTBEAT_INTERVAL"
 	EnvRemoteTarget      = "AMQ_ACP_REMOTE_TARGET"
+	EnvRemoteNative      = "AMQ_ACP_REMOTE_NATIVE_SESSION"
 )
 
 const (
@@ -58,7 +59,10 @@ type Config struct {
 	To   string
 	// RemoteTarget, when set, submits each prompt to this amq-remote target
 	// through the endpoint running on Root, in place of an AMQ message to To.
-	RemoteTarget      string
+	RemoteTarget string
+	// RemoteNative is the native session the owner shared. A target attached
+	// to any other session is refused.
+	RemoteNative      string
 	StateDir          string
 	TurnTimeout       time.Duration
 	PollInterval      time.Duration
@@ -81,10 +85,16 @@ func LoadConfig() (Config, error) {
 	me := strings.TrimSpace(os.Getenv(EnvMe))
 	to := strings.TrimSpace(os.Getenv(EnvTo))
 	remoteTarget := strings.TrimSpace(os.Getenv(EnvRemoteTarget))
+	remoteNative := strings.TrimSpace(os.Getenv(EnvRemoteNative))
 	if remoteTarget != "" {
 		// Remote mode writes no AMQ message, so no sender or recipient.
 		if to != "" {
 			return Config{}, contextError("set %s or %s, not both", EnvTo, EnvRemoteTarget)
+		}
+		// Sharing a target shares one native session, never whatever
+		// replaces it behind the same target (codex #876 P1 #3).
+		if remoteNative == "" {
+			return Config{}, contextError("%s requires %s", EnvRemoteTarget, EnvRemoteNative)
 		}
 	} else {
 		if err := fsq.ValidateHandle(me); err != nil {
@@ -120,6 +130,7 @@ func LoadConfig() (Config, error) {
 		Me:                me,
 		To:                to,
 		RemoteTarget:      remoteTarget,
+		RemoteNative:      remoteNative,
 		StateDir:          stateDir,
 		TurnTimeout:       turnTimeout,
 		PollInterval:      pollInterval,

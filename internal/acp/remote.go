@@ -33,8 +33,9 @@ type remotePromptMeta struct {
 }
 
 // remoteMeta reports what the endpoint recorded. State is the request's
-// recorded state; Cancel is the endpoint's cancel disposition or refusal code,
-// set only when the client cancelled the turn.
+// recorded state, or not_submitted when no request exists, or uncertain when
+// its existence is unknown. Cancel is the endpoint's cancel disposition or
+// refusal code, set only when the client cancelled a live request.
 type remoteMeta struct {
 	Target     string `json:"target"`
 	RequestRef string `json:"requestRef,omitempty"`
@@ -45,28 +46,65 @@ type remoteMeta struct {
 	Truncated  bool   `json:"truncated,omitempty"`
 }
 
+const (
+	remoteNotSubmitted = "not_submitted"
+	remoteUncertain    = "uncertain"
+)
+
 type remoteWait struct {
 	resp *ipc.Response
 	err  error
 }
 
-// runRemote submits the prompt to the pinned amq-remote target and holds the
-// turn open until the request reaches a terminal or uncertain state. A cancel
-// asks the endpoint to cancel that exact request; the endpoint's answer is
-// reported, so an adapter that cannot cancel never reads as cancelled work.
-func (s *Server) runRemote(sessionID, text, eventID string, turn *turnState, emit func(any) error) (any, *rpcError) {
-	dir := filepath.Join(s.cfg.Root, remoteStateDir)
-	meta := remoteMeta{Target: s.cfg.RemoteTarget}
+// remoteTurn is one prompt turn against the pinned target.
+type remoteTurn struct {
+	s         *Server
+	dir       string
+	sessionID string
+	emit      func(any) error
+	turn      *turnState
+	meta      remoteMeta
+}
 
-	session, err := remoteSession(dir, s.cfg.RemoteTarget)
-	if err != nil {
-		return s.remoteRefusal(sessionID, emit, meta, err)
-	}
+// runRemote submits the prompt to the pinned amq-remote target and holds the
+// turn open until the request reaches a terminal or uncertain state. Every
+// command carries the pinned native session, so a replacement session behind
+// the same target is refused. A cancel asks the endpoint to cancel that exact
+// request, and its answer is reported: an adapter that cannot cancel never
+// reads as cancelled work.
+func (s *Server) runRemote(sessionID, text, eventID string, turn *turnState, emit func(any) error) (any, *rpcError) {
 	id, err := remoteRequestID(eventID)
 	if err != nil {
 		return nil, newRPCError(codeInternalError, "request id: %v", err)
 	}
-	rep, err := remoteCall(dir, &protocol.Command{
+	r := &remoteTurn{
+		s:         s,
+		dir:       filepath.Join(s.cfg.Root, remoteStateDir),
+		sessionID: sessionID,
+		emit:      emit,
+		turn:      turn,
+		// The exact reference exists before any IPC, so an unknown submit
+		// outcome still names the request (codex #876 P1 #2).
+		meta: remoteMeta{Target: s.cfg.RemoteTarget, RequestRef: protocol.EncodeRef(ipc.LocalHost, s.cfg.RemoteTarget, id)},
+	}
+
+	// A redelivered event follows its stored request, whatever the target's
+	// epoch is now (codex #876 P2 #4).
+	if eventID != "" {
+		rep, err := r.get()
+		if err == nil {
+			return r.follow(rep.Snapshot)
+		}
+		if !hasCode(err, protocol.CodeNotFound) {
+			return r.failed(remoteNotSubmitted, err)
+		}
+	}
+
+	session, err := remoteSession(r.dir, s.cfg.RemoteTarget, s.cfg.RemoteNative)
+	if err != nil {
+		return r.failed(remoteNotSubmitted, err)
+	}
+	rep, err := r.call(&protocol.Command{
 		Schema:    protocol.SchemaCommand,
 		Op:        protocol.OpRequestSubmit,
 		RequestID: id,
@@ -76,18 +114,40 @@ func (s *Server) runRemote(sessionID, text, eventID string, turn *turnState, emi
 		Input:     &protocol.SubmitInput{Text: text, Busy: protocol.BusyReject, Deliver: protocol.DeliverTurn},
 	})
 	if err != nil {
-		return s.remoteRefusal(sessionID, emit, meta, err)
+		// Unreachable and unshared refuse before the endpoint sees the
+		// command. Any other error may follow a native run, so the exact
+		// record decides (codex #876 P1 #2).
+		if hasCode(err, protocol.CodeEndpointUnreachable) || hasCode(err, protocol.CodeUnshared) {
+			return r.failed(remoteNotSubmitted, err)
+		}
+		stored, gerr := r.get()
+		switch {
+		case gerr == nil:
+			return r.follow(stored.Snapshot)
+		case hasCode(gerr, protocol.CodeNotFound):
+			return r.failed(remoteNotSubmitted, err)
+		default:
+			return r.failed(remoteUncertain, err)
+		}
 	}
-	snap := rep.Snapshot
-	meta.RequestRef, meta.State = snap.RequestRef, string(snap.State)
 	if rep.Outcome.Code != "" {
-		meta.Code, meta.Reason = string(rep.Outcome.Code), rep.Outcome.Message
-		return s.remoteFinish(sessionID, emit, meta, snap, StopReasonRefusal)
+		r.meta.Code, r.meta.Reason = string(rep.Outcome.Code), rep.Outcome.Message
+		r.meta.State = string(rep.Snapshot.State)
+		if outcome := r.settle("replied"); outcome != "replied" {
+			return r.settled(outcome, rep.Snapshot)
+		}
+		return r.say("replied", StopReasonRefusal, r.statusText(rep.Snapshot))
 	}
+	return r.follow(rep.Snapshot)
+}
+
+// follow waits on the endpoint until the request is terminal or uncertain,
+// the client cancels or leaves, or the turn times out.
+func (r *remoteTurn) follow(snap protocol.Snapshot) (any, *rpcError) {
 	if snap.State.Terminal() || snap.State == protocol.StateUncertain {
-		return s.remoteSettled(sessionID, emit, meta, snap, turn)
+		return r.settled(r.settle("replied"), snap)
 	}
-	if err := emitText(emit, sessionID, "agent_thought_chunk", fmt.Sprintf("Submitted to %s as %s.", s.cfg.RemoteTarget, snap.RequestRef)); err != nil {
+	if err := emitText(r.emit, r.sessionID, "agent_thought_chunk", fmt.Sprintf("Submitted to %s as %s.", r.meta.Target, snap.RequestRef)); err != nil {
 		return nil, newRPCError(codeInternalError, "emit ACP session update: %v", err)
 	}
 
@@ -96,7 +156,7 @@ func (s *Server) runRemote(sessionID, text, eventID string, turn *turnState, emi
 	defer close(stop)
 	go func() {
 		for {
-			resp, err := ipc.Call(dir, ipc.Request{Wait: &ipc.WaitRequest{RequestRef: snap.RequestRef, TimeoutMS: s.cfg.HeartbeatInterval.Milliseconds()}})
+			resp, err := ipc.Call(r.dir, ipc.Request{Wait: &ipc.WaitRequest{RequestRef: snap.RequestRef, TimeoutMS: r.s.cfg.HeartbeatInterval.Milliseconds()}})
 			select {
 			case waits <- remoteWait{resp, err}:
 			case <-stop:
@@ -108,129 +168,87 @@ func (s *Server) runRemote(sessionID, text, eventID string, turn *turnState, emi
 		}
 	}()
 
-	deadline := time.NewTimer(s.cfg.TurnTimeout)
+	deadline := time.NewTimer(r.s.cfg.TurnTimeout)
 	defer deadline.Stop()
 	for {
 		select {
-		case <-turn.done:
-			s.mu.Lock()
-			outcome := turn.outcome
-			s.mu.Unlock()
-			meta.Reason = outcome
-			if outcome != "session_cancelled" {
-				// The client is gone. The native work keeps running.
-				return remotePromptResult{StopReason: StopReasonRefusal, Meta: remotePromptMeta{Remote: meta}}, nil
-			}
-			meta.Cancel = remoteCancel(dir, snap)
-			return remotePromptResult{StopReason: StopReasonCancelled, Meta: remotePromptMeta{Remote: meta}}, nil
+		case <-r.turn.done:
+			return r.settled(r.settle(""), snap)
 		case <-deadline.C:
-			if outcome := s.settle(turn, "reply_timeout"); outcome != "reply_timeout" {
-				continue // cancel or disconnect won; turn.done is closed
-			}
-			meta.Reason = "reply_timeout"
-			return remotePromptResult{StopReason: StopReasonRefusal, Meta: remotePromptMeta{Remote: meta}}, nil
+			return r.settled(r.settle("reply_timeout"), snap)
 		case w := <-waits:
 			if w.err == nil {
 				w.err = w.resp.AsError()
 			}
 			if w.err != nil {
-				if outcome := s.settle(turn, "replied"); outcome != "replied" {
-					continue
-				}
-				return s.remoteRefusal(sessionID, emit, meta, w.err)
+				return r.failed(remoteUncertain, w.err)
 			}
 			var current protocol.Snapshot
 			if err := json.Unmarshal(w.resp.Reply, &current); err != nil {
 				return nil, newRPCError(codeInternalError, "decode request snapshot: %v", err)
 			}
+			snap = current
 			if w.resp.TimedOut {
-				if err := emitText(emit, sessionID, "agent_thought_chunk", fmt.Sprintf("Still running on %s.", s.cfg.RemoteTarget)); err != nil {
+				if err := emitText(r.emit, r.sessionID, "agent_thought_chunk", fmt.Sprintf("Still running on %s.", r.meta.Target)); err != nil {
 					return nil, newRPCError(codeInternalError, "emit ACP heartbeat: %v", err)
 				}
 				continue
 			}
-			if outcome := s.settle(turn, "replied"); outcome != "replied" {
-				continue
-			}
-			return s.remoteSettled(sessionID, emit, meta, current, turn)
+			return r.settled(r.settle("replied"), snap)
 		}
 	}
 }
 
 // settle decides the turn's outcome if it is still open and returns the
-// outcome that stands.
-func (s *Server) settle(turn *turnState, outcome string) string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	turn.settleLocked(outcome)
-	return turn.outcome
+// outcome that stands. An empty outcome only reads it.
+func (r *remoteTurn) settle(outcome string) string {
+	r.s.mu.Lock()
+	defer r.s.mu.Unlock()
+	if outcome != "" {
+		r.turn.settleLocked(outcome)
+	}
+	return r.turn.outcome
 }
 
-// remoteSettled renders a request that reached a terminal or uncertain state.
-func (s *Server) remoteSettled(sessionID string, emit func(any) error, meta remoteMeta, snap protocol.Snapshot, turn *turnState) (any, *rpcError) {
-	s.settle(turn, "replied")
-	meta.State, meta.Code = string(snap.State), string(snap.Code)
+// settled renders the turn once its outcome stands. The first settled
+// outcome wins on every path (codex #876 P2 #5): a cancel that won is
+// reported even when the request later completed.
+func (r *remoteTurn) settled(outcome string, snap protocol.Snapshot) (any, *rpcError) {
+	r.meta.State, r.meta.Code = string(snap.State), string(snap.Code)
+	switch outcome {
+	case "session_cancelled":
+		return r.cancel(snap)
+	case "client_disconnected":
+		r.meta.Reason = outcome
+		return remotePromptResult{StopReason: StopReasonRefusal, Meta: remotePromptMeta{Remote: r.meta}}, nil
+	case "reply_timeout":
+		r.meta.Reason = outcome
+		return r.say(outcome, StopReasonRefusal, fmt.Sprintf("%s: request %s is still %s and the work continues. Check it with `amq-remote status %s`.", r.meta.Target, snap.RequestRef, snap.State, snap.RequestRef))
+	}
 	switch snap.State {
 	case protocol.StateCompleted:
-		return s.remoteFinish(sessionID, emit, meta, snap, StopReasonEndTurn)
-	case protocol.StateCancelled:
-		return s.remoteFinish(sessionID, emit, meta, snap, StopReasonCancelled)
-	default: // failed, rejected, uncertain
-		return s.remoteFinish(sessionID, emit, meta, snap, StopReasonRefusal)
-	}
-}
-
-// remoteFinish emits the text the owner should read and returns the result.
-// A completed request shows its native result; anything else shows the state
-// and reason, so a refusal is never an empty reply.
-func (s *Server) remoteFinish(sessionID string, emit func(any) error, meta remoteMeta, snap protocol.Snapshot, stopReason string) (any, *rpcError) {
-	text := ""
-	if snap.Result != nil {
-		text = snap.Result.Text
-		meta.Truncated = snap.Result.Truncated
-	}
-	if stopReason != StopReasonEndTurn {
-		text = remoteStatusText(meta, snap)
-	}
-	if text != "" {
-		if err := emitText(emit, sessionID, "agent_message_chunk", text); err != nil {
-			return nil, newRPCError(codeInternalError, "emit ACP reply update: %v", err)
+		text := ""
+		if snap.Result != nil {
+			text, r.meta.Truncated = snap.Result.Text, snap.Result.Truncated
 		}
+		return r.say(outcome, StopReasonEndTurn, text)
+	case protocol.StateCancelled:
+		return r.say(outcome, StopReasonCancelled, r.statusText(snap))
+	default: // failed, rejected, uncertain
+		return r.say(outcome, StopReasonRefusal, r.statusText(snap))
 	}
-	return remotePromptResult{StopReason: stopReason, Meta: remotePromptMeta{Remote: meta}}, nil
 }
 
-func remoteStatusText(meta remoteMeta, snap protocol.Snapshot) string {
-	text := fmt.Sprintf("%s: request %s", meta.Target, meta.State)
-	if meta.Code != "" {
-		text += " (" + meta.Code + ")"
+// cancel asks the endpoint to cancel the exact request under the epoch it was
+// stored with. The disposition comes from the reply's outcome or, for the
+// usual path, its snapshot (codex #876 P1 #1). Work that keeps running is
+// said so.
+func (r *remoteTurn) cancel(snap protocol.Snapshot) (any, *rpcError) {
+	r.meta.Reason = "session_cancelled"
+	if snap.State.Terminal() {
+		return remotePromptResult{StopReason: StopReasonCancelled, Meta: remotePromptMeta{Remote: r.meta}}, nil
 	}
-	if meta.Reason != "" {
-		text += ": " + meta.Reason
-	} else if snap.Result != nil && snap.Result.Error != "" {
-		text += ": " + snap.Result.Error
-	}
-	return text
-}
-
-// remoteRefusal reports a submit or wait the endpoint refused or could not
-// answer. The typed code is kept; the text names it for the owner.
-func (s *Server) remoteRefusal(sessionID string, emit func(any) error, meta remoteMeta, err error) (any, *rpcError) {
-	meta.Reason = err.Error()
-	var refusal *protocol.Refusal
-	if errors.As(err, &refusal) {
-		meta.Code, meta.Reason = string(refusal.Code), refusal.Message
-	}
-	if meta.State == "" {
-		meta.State = "not_submitted"
-	}
-	return s.remoteFinish(sessionID, emit, meta, protocol.Snapshot{}, StopReasonRefusal)
-}
-
-// remoteCancel asks the endpoint to cancel the exact request under the epoch
-// it was stored with, and returns the disposition or the refusal code.
-func remoteCancel(dir string, snap protocol.Snapshot) string {
-	rep, err := remoteCall(dir, &protocol.Command{
+	rep, err := r.call(&protocol.Command{
 		Schema:     protocol.SchemaCommand,
 		Op:         protocol.OpRequestCancel,
 		RequestRef: snap.RequestRef,
@@ -238,21 +256,100 @@ func remoteCancel(dir string, snap protocol.Snapshot) string {
 		Epoch:      snap.Epoch,
 		NotAfter:   protocol.FormatTime(time.Now().Add(remoteAdmitWithin)),
 	})
-	if err != nil {
-		var refusal *protocol.Refusal
-		if errors.As(err, &refusal) {
-			return string(refusal.Code)
+	switch {
+	case err != nil:
+		r.meta.Cancel = codeOf(err)
+	case rep.Outcome.Code != "":
+		r.meta.Cancel = string(rep.Outcome.Code)
+	default:
+		disposition := rep.Outcome.Disposition
+		if disposition == "" && rep.Snapshot.Cancel != nil {
+			disposition = rep.Snapshot.Cancel.Disposition
 		}
-		return "error: " + err.Error()
+		r.meta.Cancel = string(disposition)
 	}
-	if rep.Outcome.Code != "" {
-		return string(rep.Outcome.Code)
+	if err == nil && rep.Snapshot.State != "" {
+		r.meta.State = string(rep.Snapshot.State)
 	}
-	return string(rep.Outcome.Disposition)
+	if r.meta.State == string(protocol.StateCancelled) {
+		return remotePromptResult{StopReason: StopReasonCancelled, Meta: remotePromptMeta{Remote: r.meta}}, nil
+	}
+	return r.say("session_cancelled", StopReasonCancelled, fmt.Sprintf("%s: cancel %s; request %s is still %s and the work continues.", r.meta.Target, r.meta.Cancel, snap.RequestRef, r.meta.State))
 }
 
-func remoteSession(dir, target string) (protocol.Session, error) {
-	resp, err := ipc.Call(dir, ipc.Request{Command: &protocol.Command{Schema: protocol.SchemaCommand, Op: protocol.OpSessionInspect, TargetID: target}})
+// failed ends a turn whose request is absent (not_submitted) or unknown
+// (uncertain). The exact reference stays in the result, so an unknown
+// outcome is never an invitation to submit again.
+func (r *remoteTurn) failed(state string, err error) (any, *rpcError) {
+	r.meta.State, r.meta.Code, r.meta.Reason = state, codeOf(err), err.Error()
+	var refusal *protocol.Refusal
+	if errors.As(err, &refusal) {
+		r.meta.Reason = refusal.Message
+	}
+	if state == remoteNotSubmitted {
+		r.meta.RequestRef = ""
+	}
+	outcome := r.settle("replied")
+	if outcome == "client_disconnected" {
+		r.meta.Reason = outcome
+		return remotePromptResult{StopReason: StopReasonRefusal, Meta: remotePromptMeta{Remote: r.meta}}, nil
+	}
+	stopReason := StopReasonRefusal
+	if outcome == "session_cancelled" {
+		stopReason = StopReasonCancelled
+	}
+	text := fmt.Sprintf("%s: not submitted (%s): %s", r.meta.Target, r.meta.Code, r.meta.Reason)
+	if state == remoteUncertain {
+		text = fmt.Sprintf("%s: the outcome of request %s is unknown: %s. Do not resend; check it with `amq-remote status %s`.", r.meta.Target, r.meta.RequestRef, r.meta.Reason, r.meta.RequestRef)
+	}
+	return r.say(outcome, stopReason, text)
+}
+
+// say emits text as the agent message and returns the result. A client that
+// left gets no message.
+func (r *remoteTurn) say(outcome, stopReason, text string) (any, *rpcError) {
+	if outcome != "client_disconnected" && text != "" {
+		if err := emitText(r.emit, r.sessionID, "agent_message_chunk", text); err != nil {
+			return nil, newRPCError(codeInternalError, "emit ACP reply update: %v", err)
+		}
+	}
+	return remotePromptResult{StopReason: stopReason, Meta: remotePromptMeta{Remote: r.meta}}, nil
+}
+
+func (r *remoteTurn) statusText(snap protocol.Snapshot) string {
+	text := fmt.Sprintf("%s: request %s", r.meta.Target, r.meta.State)
+	if r.meta.Code != "" {
+		text += " (" + r.meta.Code + ")"
+	}
+	if r.meta.Reason != "" {
+		text += ": " + r.meta.Reason
+	} else if snap.Result != nil && snap.Result.Error != "" {
+		text += ": " + snap.Result.Error
+	}
+	return text
+}
+
+func (r *remoteTurn) get() (protocol.Reply, error) {
+	return r.call(&protocol.Command{Schema: protocol.SchemaCommand, Op: protocol.OpRequestGet, RequestRef: r.meta.RequestRef})
+}
+
+func (r *remoteTurn) call(cmd *protocol.Command) (protocol.Reply, error) {
+	resp, err := ipc.Call(r.dir, ipc.Request{Command: cmd, NativeSession: r.s.cfg.RemoteNative})
+	if err != nil {
+		return protocol.Reply{}, err
+	}
+	if err := resp.AsError(); err != nil {
+		return protocol.Reply{}, err
+	}
+	var rep protocol.Reply
+	if err := json.Unmarshal(resp.Reply, &rep); err != nil {
+		return protocol.Reply{}, err
+	}
+	return rep, nil
+}
+
+func remoteSession(dir, target, native string) (protocol.Session, error) {
+	resp, err := ipc.Call(dir, ipc.Request{Command: &protocol.Command{Schema: protocol.SchemaCommand, Op: protocol.OpSessionInspect, TargetID: target}, NativeSession: native})
 	if err != nil {
 		return protocol.Session{}, err
 	}
@@ -266,19 +363,17 @@ func remoteSession(dir, target string) (protocol.Session, error) {
 	return session, nil
 }
 
-func remoteCall(dir string, cmd *protocol.Command) (protocol.Reply, error) {
-	resp, err := ipc.Call(dir, ipc.Request{Command: cmd})
-	if err != nil {
-		return protocol.Reply{}, err
+func hasCode(err error, code protocol.Code) bool {
+	var refusal *protocol.Refusal
+	return errors.As(err, &refusal) && refusal.Code == code
+}
+
+func codeOf(err error) string {
+	var refusal *protocol.Refusal
+	if errors.As(err, &refusal) {
+		return string(refusal.Code)
 	}
-	if err := resp.AsError(); err != nil {
-		return protocol.Reply{}, err
-	}
-	var rep protocol.Reply
-	if err := json.Unmarshal(resp.Reply, &rep); err != nil {
-		return protocol.Reply{}, err
-	}
-	return rep, nil
+	return "error"
 }
 
 // remoteRequestID is the endpoint request id for one prompt. A Nostr event id
