@@ -164,6 +164,11 @@ func (s *Sink) queue(obs observation) error {
 }
 
 func (s *Sink) frames(obs observation) ([]nostr.Event, error) {
+	if obs.Update == "tool_call_update" {
+		// Desktop replaces the whole tool result on each update. Splitting
+		// the text into successive updates keeps only the last piece.
+		return s.oneFrame(obs)
+	}
 	if obs.Text == "" {
 		return s.fit(obs)
 	}
@@ -178,6 +183,24 @@ func (s *Sink) frames(obs observation) ([]nostr.Event, error) {
 		out = append(out, events...)
 	}
 	return out, nil
+}
+
+// oneFrame publishes a tool result as a single update. The text is not
+// split: a later piece would replace the earlier ones on Desktop.
+func (s *Sink) oneFrame(obs observation) ([]nostr.Event, error) {
+	if obs.At.IsZero() {
+		obs.At = s.now()
+	}
+	seq, err := s.commitSeq()
+	if err != nil {
+		return nil, err
+	}
+	obs.Seq = seq
+	evt, err := s.build(obs)
+	if err != nil {
+		return nil, err
+	}
+	return []nostr.Event{evt}, nil
 }
 
 func (s *Sink) fit(obs observation) ([]nostr.Event, error) {

@@ -223,6 +223,13 @@ type Attachment struct {
 	// event sink, and its lifetime does not replace Subscribe.
 	activitySink func(ActivityNote)
 	activityTurn string
+	// activityTurnTS is the transcript time of the user boundary that
+	// opened activityTurn. An older Stop must not clear a later turn.
+	activityTurnTS int64
+	// activityPath and activityNext are how far activity has delivered.
+	// Confirmation recovery may rewind cur; it must not replay these notes.
+	activityPath string
+	activityNext int64
 	// curGen increments whenever the cursor is reset outside the poller (a
 	// recovered run needs a replay from its delivery offset); a poll that
 	// started under an older generation does not write its cursor back.
