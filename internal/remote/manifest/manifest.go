@@ -76,7 +76,11 @@ type Share struct {
 	// DMChannelID is the owner's one-to-one private Buzz channel, bound
 	// explicitly by the operator. Commands require it.
 	DMChannelID string `json:"dm_channel_id,omitempty"`
-	Commands    bool   `json:"commands,omitempty"`
+	// MentionChannels are channels where an owner message that mentions the
+	// body submits a request; its output goes to the DM channel, never to
+	// the mentioning channel. Commands require dm_channel_id first.
+	MentionChannels []string `json:"mention_channels,omitempty"`
+	Commands        bool     `json:"commands,omitempty"`
 	Activity    bool   `json:"activity,omitempty"`
 }
 
@@ -321,11 +325,25 @@ func validateRelay(f File, targets map[string]bool) error {
 			return &ErrInvalidRelay{Reason: fmt.Sprintf("share %q: commands need dm_channel_id, the owner's private DM channel", sh.Session)}
 		case sh.Activity:
 			return &ErrInvalidRelay{Reason: fmt.Sprintf("share %q: activity is not supported by this binary", sh.Session)}
+		case len(sh.MentionChannels) > 0 && !sh.Commands:
+			return &ErrInvalidRelay{Reason: fmt.Sprintf("share %q: mention_channels need commands", sh.Session)}
+		case len(sh.MentionChannels) > maxMentionChannels:
+			return &ErrInvalidRelay{Reason: fmt.Sprintf("share %q: at most %d mention_channels", sh.Session, maxMentionChannels)}
+		}
+		seen := map[string]bool{sh.DMChannelID: true}
+		for _, ch := range sh.MentionChannels {
+			if ch == "" || seen[ch] {
+				return &ErrInvalidRelay{Reason: fmt.Sprintf("share %q: mention channel %q is empty, repeated, or the DM channel", sh.Session, ch)}
+			}
+			seen[ch] = true
 		}
 		bound[sh.Target], sessions[sh.Session] = true, true
 	}
 	return nil
 }
+
+// maxMentionChannels bounds one share's mention subscription filter.
+const maxMentionChannels = 16
 
 func validSession(s string) bool {
 	return s != "" && s != "." && s != ".." && !strings.ContainsAny(s, "/\\\x00")

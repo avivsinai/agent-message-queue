@@ -166,6 +166,12 @@ first with `amq-remote share --session <session> --enable buzz-dm`.
 | `/status <ref>` | The state of a request that this channel submitted. |
 | `/cancel <ref>`, or ❌ on a result row | Cancels that request. |
 
+With `"mention_channels": ["<channel>", ...]` (at most 16, commands
+required), an owner message in one of those channels that mentions the body
+submits a plain prompt too. A leading `nostr:npub1…` mention is dropped from
+the prompt. The result row goes to the DM channel, never to the mentioning
+channel. Slash commands work only in the DM.
+
 The surface opens only when the relay's own key signs the channel's NIP-29
 membership (kind 39002) as exactly the owner and the body, and its metadata
 (kind 39000) as private and of type `dm`. `serve` reads the membership again

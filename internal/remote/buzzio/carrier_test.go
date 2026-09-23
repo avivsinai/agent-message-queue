@@ -201,3 +201,40 @@ func hasTag(evt nostr.Event, want ...string) bool {
 	}
 	return false
 }
+
+// 611.16 slice 5: an owner message that mentions the body in an opted-in
+// channel submits one request; the result row goes to the DM channel and
+// carries no reference into the mentioning channel.
+func TestMentionSubmitsAndAnswersInDM(t *testing.T) {
+	var owner, body [32]byte
+	_, _ = rand.Read(owner[:])
+	_, _ = rand.Read(body[:])
+	b := Binding{Owner: nostr.GetPublicKey(owner).Hex(), Body: nostr.GetPublicKey(body).Hex(), Channel: "dm-1", Target: "cx", RelayHost: "relay", Mentions: map[string]bool{"team-1": true}}
+	ledger, _ := OpenLedger(t.TempDir())
+	var prompt string
+	c := NewCarrier(ledger, b, body, ownerGrant(t, owner, b.Body, KindDM, KindEdit), func(cmd *protocol.Command, _ core.Source) (any, error) {
+		switch cmd.Op {
+		case protocol.OpSessionInspect:
+			return protocol.Session{TargetID: "cx", Epoch: "e1"}, nil
+		case protocol.OpRequestSubmit:
+			prompt = cmd.Input.Text
+			return protocol.Reply{Snapshot: protocol.Snapshot{RequestRef: "amqr1_m", Revision: 1, State: protocol.StateRunning}}, nil
+		}
+		return nil, nil
+	})
+	mention := nostr.Event{CreatedAt: nostr.Now(), Kind: KindDM, Content: "nostr:npub1example fix the build", Tags: nostr.Tags{{"h", "team-1"}, {"p", b.Body}}}
+	if err := mention.Sign(owner); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.IngestMention(mention); err != nil {
+		t.Fatal(err)
+	}
+	if prompt != "fix the build" {
+		t.Fatalf("submitted prompt = %q, want the text after the mention", prompt)
+	}
+	var sent []nostr.Event
+	_ = c.Flush(context.Background(), func(_ context.Context, evt nostr.Event) error { sent = append(sent, evt); return nil })
+	if len(sent) != 1 || tagValue(sent[0], "h") != "dm-1" || tagValue(sent[0], "e") != "" {
+		t.Fatalf("sent = %+v, want one DM row with no reference into the mention channel", sent)
+	}
+}

@@ -103,6 +103,35 @@ func (c *Carrier) source(eventID, root string) core.Source {
 	return src
 }
 
+// sourceFor is the source of a request submitted by evt. A mention-channel
+// input is marked, so its result row carries no reference into the channel
+// it came from.
+func (c *Carrier) sourceFor(evt nostr.Event) core.Source {
+	if tagValue(evt, "h") == c.binding.Channel {
+		return c.source(evt.ID.Hex(), threadRoot(evt))
+	}
+	src := c.source(evt.ID.Hex(), "")
+	src.Origin["entry"] = "mention"
+	return src
+}
+
+// replyTags are a direct answer's tags: a reply in the DM thread, or a
+// standalone DM row for mention-channel input.
+func (c *Carrier) replyTags(to nostr.Event) nostr.Tags {
+	if tagValue(to, "h") != c.binding.Channel {
+		return c.rowTags("", "")
+	}
+	return c.rowTags(to.ID.Hex(), threadRoot(to))
+}
+
+// originTags are a result row's tags from its record's origin.
+func (c *Carrier) originTags(origin map[string]string) nostr.Tags {
+	if origin["entry"] == "mention" {
+		return c.rowTags("", "")
+	}
+	return c.rowTags(origin["event"], origin["root"])
+}
+
 // threadRoot is the NIP-10 root an owner event replies within, if any.
 func threadRoot(evt nostr.Event) string {
 	for _, t := range evt.Tags {
@@ -161,7 +190,18 @@ func (c *Carrier) IngestReaction(evt nostr.Event) error {
 // prepared in the outbox keyed by the event; the submit's result row
 // follows through Publish.
 func (c *Carrier) Ingest(evt nostr.Event) error {
-	n, err := Normalize(evt, c.binding, c.now())
+	return c.ingest(evt, Normalize)
+}
+
+// IngestMention handles one verified owner event from a mention channel:
+// the same claim and submit path as a DM, with every answer and result row
+// going to the DM channel (slice 5).
+func (c *Carrier) IngestMention(evt nostr.Event) error {
+	return c.ingest(evt, NormalizeMention)
+}
+
+func (c *Carrier) ingest(evt nostr.Event, normalize func(nostr.Event, Binding, time.Time) (Normalized, error)) error {
+	n, err := normalize(evt, c.binding, c.now())
 	if errors.Is(err, ErrNotForUs) || errors.Is(err, ErrStale) {
 		return nil // not ours, or too old to act on: no reply flood on replay
 	}
@@ -169,7 +209,7 @@ func (c *Carrier) Ingest(evt nostr.Event) error {
 		return c.answer(evt, err.Error())
 	}
 	claim := Claim{
-		EventID: evt.ID.Hex(), Owner: c.binding.Owner, Channel: c.binding.Channel,
+		EventID: evt.ID.Hex(), Owner: c.binding.Owner, Channel: tagValue(evt, "h"),
 		Op: n.Op, RequestID: n.RequestID, Target: c.binding.Target, CreatedAt: int64(evt.CreatedAt),
 	}
 	if !n.NotAfter.IsZero() {
@@ -227,7 +267,7 @@ func (c *Carrier) submit(evt nostr.Event, claim Claim, text string) error {
 			MinEvidence: string(protocol.EvidenceAdmitted),
 		},
 	}
-	out, err := c.handle(cmd, c.source(claim.EventID, threadRoot(evt)))
+	out, err := c.handle(cmd, c.sourceFor(evt))
 	if err != nil {
 		return c.answer(evt, "submit refused: "+err.Error())
 	}
@@ -244,7 +284,7 @@ func (c *Carrier) submit(evt nostr.Event, claim Claim, text string) error {
 			return err
 		}
 	}
-	return c.Publish(reply.Snapshot, c.source(claim.EventID, threadRoot(evt)).Origin)
+	return c.Publish(reply.Snapshot, c.sourceFor(evt).Origin)
 }
 
 func (c *Carrier) statusOrCancel(evt nostr.Event, op, ref string) error {
@@ -273,7 +313,7 @@ func (c *Carrier) answer(to nostr.Event, text string) error {
 	evt := nostr.Event{
 		CreatedAt: nostr.Timestamp(c.now().Unix()),
 		Kind:      KindDM,
-		Tags:      c.rowTags(to.ID.Hex(), threadRoot(to)),
+		Tags:      c.replyTags(to),
 		Content:   text,
 	}
 	return c.prepare("direct/"+to.ID.Hex(), evt)
@@ -305,7 +345,7 @@ func (c *Carrier) Publish(snap protocol.Snapshot, origin map[string]string) erro
 	key := fmt.Sprintf("row/%s/%08d", snap.RequestRef, snap.Revision)
 	var evt nostr.Event
 	if rc.RootEventID == "" {
-		evt = nostr.Event{CreatedAt: nostr.Timestamp(now), Kind: KindDM, Tags: c.rowTags(origin["event"], origin["root"]), Content: text}
+		evt = nostr.Event{CreatedAt: nostr.Timestamp(now), Kind: KindDM, Tags: c.originTags(origin), Content: text}
 	} else {
 		if now <= rc.LastEditAt {
 			return ErrClockBehind

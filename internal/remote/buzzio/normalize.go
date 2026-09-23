@@ -35,6 +35,9 @@ type Binding struct {
 	Channel   string // the owner DM channel id (the h tag)
 	Target    string // the one shared adapter target
 	RelayHost string // relay identity, part of the ingress key
+	// Mentions are the opted-in channels where an owner message that
+	// mentions the body (p tag) submits; output still goes to Channel.
+	Mentions map[string]bool
 }
 
 // Normalized is an owner command reduced to what the endpoint needs.
@@ -90,6 +93,54 @@ func Normalize(evt nostr.Event, b Binding, now time.Time) (Normalized, error) {
 		n.NotAfter = created.Add(MutationWindow)
 	}
 	return n, nil
+}
+
+// NormalizeMention turns one verified owner event in an opted-in mention
+// channel into a submit. It must carry a p tag for the body, and only plain
+// prompts submit: slash commands belong in the DM and are answered as
+// unsupported. Leading NIP-27 profile references (the addressing, such as
+// "nostr:npub1… fix the build") are removed; the rest of the text is the
+// prompt, unchanged.
+func NormalizeMention(evt nostr.Event, b Binding, now time.Time) (Normalized, error) {
+	ch := tagValue(evt, "h")
+	if evt.Kind != 9 || evt.PubKey.Hex() != b.Owner || ch == "" || ch == b.Channel || !b.Mentions[ch] || !hasP(evt, b.Body) {
+		return Normalized{}, ErrNotForUs
+	}
+	text := stripLeadingMentions(evt.Content)
+	switch {
+	case text == "":
+		return Normalized{}, ErrNotForUs
+	case strings.HasPrefix(text, "/"):
+		return Normalized{Op: OpUnsupported}, nil
+	}
+	created := time.Unix(int64(evt.CreatedAt), 0)
+	if created.After(now.Add(maxFutureSkew)) || now.Sub(created) > MutationWindow {
+		return Normalized{}, ErrStale
+	}
+	return Normalized{Op: OpSubmit, Text: text, RequestID: requestIDFor(b, evt.ID.Hex()), NotAfter: created.Add(MutationWindow)}, nil
+}
+
+// stripLeadingMentions drops leading whitespace-separated nostr:npub1… and
+// nostr:nprofile1… tokens.
+func stripLeadingMentions(s string) string {
+	s = strings.TrimSpace(s)
+	for strings.HasPrefix(s, "nostr:npub1") || strings.HasPrefix(s, "nostr:nprofile1") {
+		i := strings.IndexAny(s, " \t\n")
+		if i < 0 {
+			return ""
+		}
+		s = strings.TrimSpace(s[i:])
+	}
+	return s
+}
+
+func hasP(evt nostr.Event, pub string) bool {
+	for _, t := range evt.Tags {
+		if len(t) >= 2 && t[0] == "p" && t[1] == pub {
+			return true
+		}
+	}
+	return false
 }
 
 // requestIDFor derives the request UUID from the relay, body, owner and

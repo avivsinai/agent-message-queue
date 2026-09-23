@@ -66,6 +66,12 @@ func buildDMEdges(root, stateDir string, r *manifest.Relay, warn io.Writer) *dmE
 			continue
 		}
 		b := buzzio.Binding{Owner: sh.OwnerPubKey, Body: creds.Body.PublicKeyHex(), Channel: sh.DMChannelID, Target: sh.Target, RelayHost: r.URL}
+		if len(sh.MentionChannels) > 0 {
+			b.Mentions = map[string]bool{}
+			for _, ch := range sh.MentionChannels {
+				b.Mentions[ch] = true
+			}
+		}
 		ds := &dmShare{share: sh, binding: b}
 		ds.carrier = buzzio.NewCarrier(ledger, b, creds.Body.Secret(), enrolledGrant(root, sh.Session, b), d.handleLate)
 		d.byBody[b.Body] = ds
@@ -232,6 +238,25 @@ func (ds *dmShare) serveDM(ctx context.Context, conn *relay.Conn, edges *dmEdges
 		return err
 	}
 	defer reactions.Close()
+	// Owner messages that mention the body in an opted-in channel (slice 5).
+	// Without mention channels this subscription stays nil and never fires.
+	var mentions *relay.Sub
+	var mentionEvents <-chan nostr.Event
+	var mentionsDone <-chan struct{}
+	if len(ds.share.MentionChannels) > 0 {
+		mentions, err = conn.Subscribe(ctx, "dm-mention-"+session, nostr.Filter{
+			Kinds:   []nostr.Kind{buzzio.KindDM},
+			Authors: []nostr.PubKey{owner},
+			Tags:    nostr.TagMap{"h": ds.share.MentionChannels, "p": {ds.binding.Body}},
+			Since:   nostr.Timestamp(time.Now().Add(-dmOverlap).Unix()),
+		})
+		if err != nil {
+			edges.setState(session, "closed: subscribe mentions: "+err.Error())
+			return err
+		}
+		defer mentions.Close()
+		mentionEvents, mentionsDone = mentions.Events, mentions.Done()
+	}
 	edges.setState(session, "subscription_active")
 	flush := time.NewTicker(time.Second)
 	defer flush.Stop()
@@ -254,6 +279,13 @@ func (ds *dmShare) serveDM(ctx context.Context, conn *relay.Conn, edges *dmEdges
 		case evt := <-reactions.Events:
 			if err := ds.carrier.IngestReaction(evt); err != nil {
 				say(warn, "relay share %s: reaction %s: %v", session, evt.ID.Hex(), err)
+			}
+		case <-mentionsDone:
+			edges.setState(session, "closed: "+fmt.Sprint(mentions.Err()))
+			return mentions.Err()
+		case evt := <-mentionEvents:
+			if err := ds.carrier.IngestMention(evt); err != nil {
+				say(warn, "relay share %s: mention %s: %v", session, evt.ID.Hex(), err)
 			}
 		case <-recheck.C:
 			if err := ds.verify(ctx, conn, edges); err != nil {
