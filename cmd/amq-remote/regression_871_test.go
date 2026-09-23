@@ -222,3 +222,30 @@ func TestActivityCallbackAfterCleanupDoesNothing(t *testing.T) {
 		t.Fatal("a callback after cleanup wrote sequence state")
 	}
 }
+
+// codex #871 r2: the queue bounded only the count, so 256 native frames of
+// up to 16 MiB could be copied and held. Admission now checks the method,
+// the per-item cap and the byte budget before any copy.
+func TestActivityInboxBoundsBytesBeforeCopying(t *testing.T) {
+	b := newActivityInbox()
+	big := json.RawMessage(strings.Repeat("x", activityItemBytes))
+	if b.offer(codex.Notification{Method: "item/completed", Params: append(big, 'x')}) {
+		t.Fatal("admitted a payload over the per-item cap")
+	}
+	if b.offer(codex.Notification{Method: "thread/tokenUsage", Params: json.RawMessage(`{}`)}) {
+		t.Fatal("admitted a method the projection ignores")
+	}
+	admitted := 0
+	for i := 0; i < activityQueueBytes/activityItemBytes+1; i++ {
+		if b.offer(codex.Notification{Method: "item/completed", Params: big}) {
+			admitted++
+		}
+	}
+	if admitted != activityQueueBytes/activityItemBytes {
+		t.Fatalf("admitted %d MiB, want the %d MiB budget", admitted, activityQueueBytes>>20)
+	}
+	b.taken(<-b.q)
+	if !b.offer(codex.Notification{Method: "item/completed", Params: big}) {
+		t.Fatal("a taken item's bytes were not released")
+	}
+}
