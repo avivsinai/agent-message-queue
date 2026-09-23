@@ -251,14 +251,18 @@ func TestClaudeTranscriptPublishesDecryptableFrames(t *testing.T) {
 		if obs.Kind != "acp_read" || !strings.Contains(string(obs.Payload), `"provenance":"native_projection"`) {
 			t.Fatalf("payload = %s", obs.Payload)
 		}
+		if obs.TurnID != "" {
+			t.Fatalf("line uuid must not be the turn id: %q", obs.TurnID)
+		}
 		var note struct {
 			Params struct {
+				Meta   map[string]string `json:"_meta"`
 				Update struct {
 					SessionUpdate string `json:"sessionUpdate"`
 					ToolCallID    string `json:"toolCallId"`
-					Content       struct {
-						Text string `json:"text"`
-					} `json:"content"`
+					Title         string `json:"title"`
+					Status        string `json:"status"`
+					Content       any    `json:"content"`
 				} `json:"update"`
 			} `json:"params"`
 		}
@@ -267,8 +271,38 @@ func TestClaudeTranscriptPublishesDecryptableFrames(t *testing.T) {
 		}
 		gotUpdate := note.Params.Update
 		w := want[i-1]
-		if gotUpdate.SessionUpdate != w.update || gotUpdate.Content.Text != w.text || gotUpdate.ToolCallID != w.toolID {
+		if gotUpdate.SessionUpdate != w.update || gotUpdate.ToolCallID != w.toolID {
 			t.Fatalf("update = %#v", gotUpdate)
+		}
+		if note.Params.Meta["itemId"] == "" {
+			t.Fatalf("line uuid missing from _meta: %s", obs.Payload)
+		}
+		switch w.update {
+		case "tool_call":
+			if gotUpdate.Title != w.text || gotUpdate.Status != "pending" {
+				t.Fatalf("tool_call = %#v", gotUpdate)
+			}
+			if _, ok := gotUpdate.Content.([]any); gotUpdate.Content != nil && !ok {
+				t.Fatalf("tool content = %T", gotUpdate.Content)
+			}
+		case "tool_call_update":
+			if gotUpdate.Status != "completed" {
+				t.Fatalf("tool_call_update = %#v", gotUpdate)
+			}
+			items, ok := gotUpdate.Content.([]any)
+			if !ok || len(items) != 1 {
+				t.Fatalf("tool content = %#v", gotUpdate.Content)
+			}
+			item, _ := items[0].(map[string]any)
+			inner, _ := item["content"].(map[string]any)
+			if inner["text"] != w.text {
+				t.Fatalf("tool content = %#v", gotUpdate.Content)
+			}
+		default:
+			body, _ := gotUpdate.Content.(map[string]any)
+			if body["text"] != w.text {
+				t.Fatalf("text = %#v", gotUpdate.Content)
+			}
 		}
 	}
 }

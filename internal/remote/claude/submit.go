@@ -267,14 +267,18 @@ func (a *Attachment) confirmLoop(ctx context.Context, cancel context.CancelFunc)
 	}
 }
 
-// idleStop ends the poller when no run is left to confirm. The check and
-// the reset happen under a.mu, and Submit records its run under a.mu before
-// kicking, so a run added concurrently either keeps this loop alive or
-// starts a fresh one. The cursor is reset so the next run seeds it from its
-// own submit-time offset instead of replaying the idle gap.
+// idleStop ends the poller when no run is left to confirm and no activity
+// observer is registered. The check and the reset happen under a.mu, and
+// Submit records its run under a.mu before kicking, so a run added
+// concurrently either keeps this loop alive or starts a fresh one. The
+// cursor is reset so the next run seeds it from its own submit-time offset
+// instead of replaying the idle gap.
 func (a *Attachment) idleStop() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.activitySink != nil {
+		return false
+	}
 	for _, rec := range a.runs {
 		if !rec.terminal {
 			return false
@@ -367,10 +371,14 @@ func (a *Attachment) pollConfirmations() {
 	cur.off, cur.skipping = rd.next, rd.skipping
 
 	var events []core.NativeEvent
+	var notes []ActivityNote
 	a.mu.Lock()
 	for _, line := range rd.lines {
 		if e, ok := parseTranscriptLine(line); ok {
 			events = a.applyEntryLocked(e, events)
+			if a.activitySink != nil {
+				notes = append(notes, a.activityNoteLocked(e, reg.SessionID))
+			}
 		}
 	}
 	if a.curGen == gen {
@@ -380,11 +388,17 @@ func (a *Attachment) pollConfirmations() {
 		events = a.bindStopsLocked(stops, events)
 	}
 	sink := a.eventSink
+	activity := a.activitySink
 	a.mu.Unlock()
 
 	if sink != nil {
 		for _, ev := range events {
 			sink(ev)
+		}
+	}
+	if activity != nil {
+		for _, note := range notes {
+			activity(note)
 		}
 	}
 }
@@ -404,6 +418,19 @@ func (a *Attachment) pollConfirmations() {
 func (a *Attachment) applyEntryLocked(e transcriptEntry, events []core.NativeEvent) []core.NativeEvent {
 	switch {
 	case e.Type == "user" && !e.Meta && e.Text != "":
+		if !e.Absorbed {
+			if id := e.UUID; id != "" {
+				a.activityTurn = id
+			} else if e.MsgID != "" {
+				a.activityTurn = e.MsgID
+			}
+		} else if a.activityTurn == "" {
+			if id := e.UUID; id != "" {
+				a.activityTurn = id
+			} else if e.MsgID != "" {
+				a.activityTurn = e.MsgID
+			}
+		}
 		if rec := a.runByMsgIDLocked(e.MsgID); rec != nil {
 			if !rec.submitted {
 				rec.submitted, rec.userTS = true, e.TS
@@ -432,6 +459,23 @@ func (a *Attachment) applyEntryLocked(e transcriptEntry, events []core.NativeEve
 		}
 	}
 	return events
+}
+
+// activityNoteLocked records the cursor session and the turn opened by the
+// latest user boundary. Caller holds a.mu and has already applied e.
+func (a *Attachment) activityNoteLocked(e transcriptEntry, cursorSession string) ActivityNote {
+	session := cursorSession
+	if e.SessionID != "" {
+		session = e.SessionID
+	}
+	return ActivityNote{
+		Line: TranscriptLine{
+			Type: e.Type, Meta: e.Meta, SessionID: e.SessionID, UUID: e.UUID, TS: e.TS,
+			Blocks: e.Blocks,
+		},
+		SessionID: session,
+		TurnID:    a.activityTurn,
+	}
 }
 
 // runByMsgIDLocked returns the non-terminal run whose frame carried msgID.
@@ -502,6 +546,7 @@ func (a *Attachment) bindStopsLocked(stops stopMarkers, events []core.NativeEven
 			break
 		}
 		a.stopConsumed = s.end
+		a.activityTurn = ""
 		if done == nil {
 			continue
 		}

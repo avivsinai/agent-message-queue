@@ -219,6 +219,10 @@ type Attachment struct {
 	// the turn the cursor is inside, nil for a foreign or unknown turn.
 	cur   transcriptCursor
 	owner *runRecord
+	// activitySink is the parsed-transcript observer. It is not the core
+	// event sink, and its lifetime does not replace Subscribe.
+	activitySink func(ActivityNote)
+	activityTurn string
 	// curGen increments whenever the cursor is reset outside the poller (a
 	// recovered run needs a replay from its delivery offset); a poll that
 	// started under an older generation does not write its cursor back.
@@ -384,6 +388,25 @@ func (a *Attachment) Subscribe(cb func(core.NativeEvent)) func() {
 		if stop != nil {
 			stop()
 		}
+	}
+}
+
+// ObserveActivity registers a parsed-transcript observer. It uses the
+// confirmation poller already running for this attachment; it does not
+// replace Subscribe or start a second reader. The poller keeps running
+// while the observer is registered, including when no remote run is open.
+// Unsubscribe releases that hold. The callback is not invoked with a.mu held.
+func (a *Attachment) ObserveActivity(cb func(ActivityNote)) func() {
+	a.mu.Lock()
+	a.activitySink = cb
+	a.mu.Unlock()
+	if cb != nil {
+		a.kickConfirmations()
+	}
+	return func() {
+		a.mu.Lock()
+		a.activitySink = nil
+		a.mu.Unlock()
 	}
 }
 

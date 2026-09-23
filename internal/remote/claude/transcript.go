@@ -225,10 +225,11 @@ func decodeContent(raw json.RawMessage) string {
 // TranscriptBlock is one content block the transcript parse already walked.
 // Tool input is omitted: it carries local paths.
 type TranscriptBlock struct {
-	Type string
-	Text string
-	Name string
-	ID   string
+	Type   string
+	Text   string
+	Name   string
+	ID     string
+	Failed bool
 }
 
 // decodeContentBlocks is the one content walk. Text blocks feed the ladder.
@@ -251,6 +252,7 @@ func decodeContentBlocks(raw json.RawMessage) (string, []TranscriptBlock) {
 		Name      string          `json:"name"`
 		ID        string          `json:"id"`
 		ToolUseID string          `json:"tool_use_id"`
+		IsError   bool            `json:"is_error"`
 		Content   json.RawMessage `json:"content"`
 	}
 	if err := json.Unmarshal(raw, &blocks); err != nil {
@@ -272,7 +274,7 @@ func decodeContentBlocks(raw json.RawMessage) (string, []TranscriptBlock) {
 			}
 			out = append(out, TranscriptBlock{Type: "tool_use", Name: b.Name, ID: b.ID})
 		case "tool_result":
-			out = append(out, TranscriptBlock{Type: "tool_result", ID: b.ToolUseID, Text: decodeContent(b.Content)})
+			out = append(out, TranscriptBlock{Type: "tool_result", ID: b.ToolUseID, Text: decodeContent(b.Content), Failed: b.IsError})
 		}
 	}
 	return strings.Join(parts, "\n"), out
@@ -286,6 +288,15 @@ type TranscriptLine struct {
 	UUID      string
 	TS        int64
 	Blocks    []TranscriptBlock
+}
+
+// ActivityNote is one parsed transcript line plus the cursor's session and
+// the turn opened by a user or absorbed boundary. Line.UUID is the message
+// identity, not the turn.
+type ActivityNote struct {
+	Line      TranscriptLine
+	SessionID string
+	TurnID    string
 }
 
 // ParseTranscriptLine is the exported form of the adapter's one transcript
