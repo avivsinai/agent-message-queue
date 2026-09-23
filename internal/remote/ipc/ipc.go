@@ -176,6 +176,10 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 		return
 	}
 	_ = conn.SetReadDeadline(time.Time{})
+	if err := s.checkPin(req); err != nil {
+		writeRecord(conn, errorResponse(err))
+		return
+	}
 	switch {
 	case req.Wait != nil:
 		timeout := time.Duration(req.Wait.TimeoutMS) * time.Millisecond
@@ -209,10 +213,6 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 		}
 		writeRecord(conn, Response{Reply: mustJSON(NativeReply{NativeSession: id})})
 	case req.Command != nil:
-		if req.NativeSession != "" && req.Command.TargetID != "" && s.ep.NativeSessionID(req.Command.TargetID) != req.NativeSession {
-			writeRecord(conn, errorResponse(protocol.Refuse(protocol.CodeUnshared, "target %q is not attached to the pinned native session", req.Command.TargetID)))
-			return
-		}
 		reply, err := s.ep.Handle(req.Command, core.Source{Host: LocalHost})
 		if err != nil {
 			writeRecord(conn, errorResponse(err))
@@ -222,6 +222,35 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 	default:
 		writeRecord(conn, Response{Error: &ErrorBody{Code: string(protocol.CodeInvalid), Message: "request carries neither command nor wait"}})
 	}
+}
+
+// checkPin refuses a pinned request whose target is not attached to the
+// pinned native session. The target comes from the command, or from the
+// request reference for get and wait, so reads are fenced too (codex #876 r2
+// P1 #3).
+func (s *Server) checkPin(req *Request) error {
+	if req.NativeSession == "" {
+		return nil
+	}
+	ref := ""
+	target := ""
+	switch {
+	case req.Wait != nil:
+		ref = req.Wait.RequestRef
+	case req.Command != nil && req.Command.TargetID != "":
+		target = req.Command.TargetID
+	case req.Command != nil:
+		ref = req.Command.RequestRef
+	}
+	if ref != "" {
+		if _, t, _, err := protocol.DecodeRef(ref); err == nil {
+			target = t
+		}
+	}
+	if target == "" || s.ep.NativeSessionID(target) != req.NativeSession {
+		return protocol.Refuse(protocol.CodeUnshared, "target %q is not attached to the pinned native session", target)
+	}
+	return nil
 }
 
 func errorResponse(err error) Response {

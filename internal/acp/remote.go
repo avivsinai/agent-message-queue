@@ -89,27 +89,35 @@ func (s *Server) runRemote(sessionID, text, eventID string, turn *turnState, emi
 	}
 
 	// A redelivered event follows its stored request, whatever the target's
-	// epoch is now (codex #876 P2 #4).
+	// epoch is now (codex #876 P2 #4). A busy-rejected record is resubmitted
+	// under its stored epoch, so the endpoint's own retry rule decides it
+	// (codex #876 r2 P2 #4). A failed lookup proves nothing about absence
+	// (codex #876 r2 P1 #2).
+	epoch := ""
 	if eventID != "" {
 		rep, err := r.get()
-		if err == nil {
+		switch {
+		case err == nil && rep.Snapshot.State == protocol.StateRejected && rep.Snapshot.Code == protocol.CodeBusy:
+			epoch = rep.Snapshot.Epoch
+		case err == nil:
 			return r.follow(rep.Snapshot)
-		}
-		if !hasCode(err, protocol.CodeNotFound) {
-			return r.failed(remoteNotSubmitted, err)
+		case !hasCode(err, protocol.CodeNotFound):
+			return r.failed(remoteUncertain, err)
 		}
 	}
-
-	session, err := remoteSession(r.dir, s.cfg.RemoteTarget, s.cfg.RemoteNative)
-	if err != nil {
-		return r.failed(remoteNotSubmitted, err)
+	if epoch == "" {
+		session, err := remoteSession(r.dir, s.cfg.RemoteTarget, s.cfg.RemoteNative)
+		if err != nil {
+			return r.failed(remoteNotSubmitted, err)
+		}
+		epoch = session.Epoch
 	}
 	rep, err := r.call(&protocol.Command{
 		Schema:    protocol.SchemaCommand,
 		Op:        protocol.OpRequestSubmit,
 		RequestID: id,
 		TargetID:  s.cfg.RemoteTarget,
-		Epoch:     session.Epoch,
+		Epoch:     epoch,
 		NotAfter:  protocol.FormatTime(time.Now().Add(remoteAdmitWithin)),
 		Input:     &protocol.SubmitInput{Text: text, Busy: protocol.BusyReject, Deliver: protocol.DeliverTurn},
 	})
@@ -151,12 +159,15 @@ func (r *remoteTurn) follow(snap protocol.Snapshot) (any, *rpcError) {
 		return nil, newRPCError(codeInternalError, "emit ACP session update: %v", err)
 	}
 
+	// The goroutine reads only this immutable reference; snap belongs to the
+	// consumer loop below (codex #876 r2 P1 #1).
+	ref, native, timeout := snap.RequestRef, r.s.cfg.RemoteNative, r.s.cfg.HeartbeatInterval.Milliseconds()
 	waits := make(chan remoteWait, 1)
 	stop := make(chan struct{})
 	defer close(stop)
 	go func() {
 		for {
-			resp, err := ipc.Call(r.dir, ipc.Request{Wait: &ipc.WaitRequest{RequestRef: snap.RequestRef, TimeoutMS: r.s.cfg.HeartbeatInterval.Milliseconds()}})
+			resp, err := ipc.Call(r.dir, ipc.Request{Wait: &ipc.WaitRequest{RequestRef: ref, TimeoutMS: timeout}, NativeSession: native})
 			select {
 			case waits <- remoteWait{resp, err}:
 			case <-stop:
