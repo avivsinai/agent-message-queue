@@ -39,8 +39,40 @@ type activityItem struct {
 	claude *claude.ActivityNote
 }
 
-// observeFunc registers push as the attachment's observer and returns stop.
-type observeFunc func(push func(activityItem)) (stop func())
+// size is the payload bytes an item holds, for the queue's byte budget.
+func (it activityItem) size() int64 {
+	if it.codex != nil {
+		return int64(len(it.codex.Params))
+	}
+	var n int64
+	for _, b := range it.claude.Line.Blocks {
+		n += int64(len(b.Text) + len(b.Name) + len(b.ID))
+	}
+	return n
+}
+
+// observeFunc registers offer as the attachment's observer and returns stop.
+type observeFunc func(offer func(activityItem)) (stop func())
+
+// observerOf returns the activity observer of an attachment, or nil.
+func observerOf(att any) observeFunc {
+	switch src := att.(type) {
+	case notificationSource:
+		return func(offer func(activityItem)) func() {
+			return src.ObserveNotifications(func(n codex.Notification) {
+				if !projectedMethods[n.Method] {
+					return // ignored before any copy
+				}
+				offer(activityItem{codex: &n})
+			})
+		}
+	case claudeSource:
+		return func(offer func(activityItem)) func() {
+			return src.ObserveActivity(func(n claude.ActivityNote) { offer(activityItem{claude: &n}) })
+		}
+	}
+	return nil
+}
 
 // activityShare is one share's activity export (611.17 slice 3): Codex
 // notifications for the approved native thread become NIP-44 kind 24200
@@ -120,27 +152,61 @@ func (as *activityShare) runActivity(ctx context.Context, conn *relay.Conn, iden
 	}
 }
 
-// observerOf returns the activity observer of an attachment, or nil.
-func observerOf(att any) observeFunc {
-	switch src := att.(type) {
-	case notificationSource:
-		return func(push func(activityItem)) func() {
-			return src.ObserveNotifications(func(n codex.Notification) {
-				n.Params = append(json.RawMessage(nil), n.Params...) // the pump may reuse its buffer
-				push(activityItem{codex: &n})
-			})
-		}
-	case claudeSource:
-		return func(push func(activityItem)) func() {
-			return src.ObserveActivity(func(n claude.ActivityNote) { push(activityItem{claude: &n}) })
-		}
-	}
-	return nil
+// Queue bounds (codex #871 r2): the read-pump callback admits a
+// notification only if its method is one the projection uses, the queue has
+// room, the payload is at most activityItemBytes, and the queued payloads
+// stay within activityQueueBytes (the sink's per-body budget). Everything
+// else is dropped before any copy.
+const (
+	activityQueue      = 256
+	activityItemBytes  = 1 << 20
+	activityQueueBytes = 8 << 20
+)
+
+// projectedMethods are the Codex notifications the activity projection maps.
+var projectedMethods = map[string]bool{"turn/started": true, "item/completed": true, "turn/completed": true}
+
+// activityInbox is the bounded hand-off from the native observer to the
+// worker.
+type activityInbox struct {
+	q       chan activityItem
+	bytes   atomic.Int64 // payload bytes admitted and not yet taken
+	dropped atomic.Uint64
 }
 
-// activityQueue bounds notifications waiting for the export worker; the
-// read-pump callback drops rather than waits when it is full.
-const activityQueue = 256
+func newActivityInbox() *activityInbox {
+	return &activityInbox{q: make(chan activityItem, activityQueue)}
+}
+
+// offer admits it without blocking, or drops it before any copy.
+func (b *activityInbox) offer(it activityItem) bool {
+	size := it.size()
+	if size > activityItemBytes || len(b.q) == cap(b.q) {
+		b.dropped.Add(1)
+		return false
+	}
+	if b.bytes.Add(size) > activityQueueBytes {
+		b.bytes.Add(-size)
+		b.dropped.Add(1)
+		return false
+	}
+	if it.codex != nil {
+		n := *it.codex
+		n.Params = append(json.RawMessage(nil), n.Params...) // the pump may reuse its buffer
+		it.codex = &n
+	}
+	select {
+	case b.q <- it:
+		return true
+	default:
+		b.bytes.Add(-size)
+		b.dropped.Add(1)
+		return false
+	}
+}
+
+// taken releases an item's bytes once the worker has it.
+func (b *activityInbox) taken(it activityItem) { b.bytes.Add(-it.size()) }
 
 // errActivityFenced ends a publication whose native session is no longer
 // the pinned one.
@@ -168,15 +234,8 @@ func (as *activityShare) export(ctx context.Context, conn *relay.Conn, observe o
 
 	// Only the worker touches the sink. A callback that runs after cleanup
 	// can at most fill this buffer, which no one reads again.
-	queue := make(chan activityItem, activityQueue)
-	var dropped atomic.Uint64
-	stop := observe(func(it activityItem) {
-		select {
-		case queue <- it:
-		default:
-			dropped.Add(1)
-		}
-	})
+	inbox := newActivityInbox()
+	stop := observe(func(it activityItem) { inbox.offer(it) })
 
 	wctx, cancelWorker := context.WithCancel(ctx)
 	var worker sync.WaitGroup
@@ -187,7 +246,8 @@ func (as *activityShare) export(ctx context.Context, conn *relay.Conn, observe o
 			select {
 			case <-wctx.Done():
 				return
-			case it := <-queue:
+			case it := <-inbox.q:
+				inbox.taken(it)
 				if fenced() {
 					continue // never export a replacement session's activity
 				}
@@ -211,7 +271,7 @@ func (as *activityShare) export(ctx context.Context, conn *relay.Conn, observe o
 		cancelWorker()
 		worker.Wait()
 		sink.Close()
-		if n := dropped.Load(); n > 0 {
+		if n := inbox.dropped.Load(); n > 0 {
 			say(warn, "relay share %s: activity: %d notification(s) dropped at a full queue", as.share.Session, n)
 		}
 	}()
