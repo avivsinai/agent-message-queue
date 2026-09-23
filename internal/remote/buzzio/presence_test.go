@@ -20,6 +20,15 @@ func TestPolicyForMatchesDesktopParser(t *testing.T) {
 	if PolicyFor(policy(`{"name":"AMQ session","respond_to":"owner-only"}`), body) {
 		t.Fatal("a policy without parallelism was accepted")
 	}
+	// codex #867 r2: a wrong optional field type or a null allowlist entry.
+	for _, bad := range []string{
+		`{"name":"AMQ session","parallelism":1,"respond_to":"owner-only","model":42}`,
+		`{"name":"AMQ session","parallelism":1,"respond_to":"allowlist","respond_to_allowlist":[null]}`,
+	} {
+		if PolicyFor(policy(bad), body) {
+			t.Fatalf("policy %s was accepted; Desktop's parser rejects it", bad)
+		}
+	}
 	if !PolicyFor(policy(`{"name":"AMQ session","parallelism":1,"respond_to":"owner-only"}`), body) {
 		t.Fatal("a complete policy was refused")
 	}
