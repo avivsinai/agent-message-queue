@@ -30,9 +30,14 @@ type presenceShare struct {
 
 	mu        sync.Mutex
 	state     string // online, away, offline, or an error
+	profile   string // "published", or why the kind 0 profile is not
 	discovery string // policy_present, policy_missing, or an error
 	published string // the last status published on this connection
 }
+
+// presencePublishTimeout bounds one presence publication's wait for its OK,
+// so one missing OK never stalls status or policy refresh (codex #867 r1).
+const presencePublishTimeout = 10 * time.Second
 
 // presenceTick is how often a live connection re-derives the status from
 // the target's attachment and republishes it on change.
@@ -52,9 +57,15 @@ func (ps *presenceShare) set(state, discovery string) {
 	}
 }
 
+// view is the presence state and discovery for status. Until the profile
+// is published the state is the profile's problem, never a status that
+// would read ready without an ownership profile (codex #867 r1).
 func (ps *presenceShare) view() (string, string) {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
+	if ps.profile != "" && ps.profile != "published" {
+		return ps.profile, ps.discovery
+	}
 	return ps.state, ps.discovery
 }
 
@@ -81,16 +92,9 @@ func (ps *presenceShare) status(edges *dmEdges) string {
 func (ps *presenceShare) runPresence(ctx context.Context, conn *relay.Conn, edges *dmEdges, warn io.Writer) {
 	session := ps.share.Session
 	ps.mu.Lock()
-	ps.published = ""
+	ps.published, ps.profile = "", ""
 	ps.mu.Unlock()
-	if evt, err := ps.p.Profile(time.Now()); err != nil {
-		if errors.Is(err, buzzio.ErrNoGrant) {
-			say(warn, "relay share %s: profile not enrolled: run amq-remote share --session %s --enable buzz-profile", session, session)
-		}
-		ps.set("refused: profile: "+err.Error(), "")
-	} else if err := conn.Publish(ctx, evt); err != nil {
-		ps.set("publish_pending: profile: "+relay.Category(err), "")
-	}
+	ps.publishProfile(ctx, conn, session, warn)
 	ps.publishStatus(ctx, conn, ps.status(edges))
 	ps.checkDiscovery(ctx, conn)
 	tick := time.NewTicker(presenceTick)
@@ -104,11 +108,45 @@ func (ps *presenceShare) runPresence(ctx context.Context, conn *relay.Conn, edge
 		case <-conn.Done():
 			return
 		case <-tick.C:
+			ps.publishProfile(ctx, conn, session, warn) // retried until published
 			ps.publishStatus(ctx, conn, ps.status(edges))
 		case <-recheck.C:
 			ps.checkDiscovery(ctx, conn)
 		}
 	}
+}
+
+// publishProfile publishes the kind 0 profile once per connection, and
+// retries on each tick until the relay accepts it.
+func (ps *presenceShare) publishProfile(ctx context.Context, conn *relay.Conn, session string, warn io.Writer) {
+	ps.mu.Lock()
+	done := ps.profile == "published"
+	first := ps.profile == ""
+	ps.mu.Unlock()
+	if done {
+		return
+	}
+	evt, err := ps.p.Profile(time.Now())
+	if err != nil {
+		if first && errors.Is(err, buzzio.ErrNoGrant) {
+			say(warn, "relay share %s: profile not enrolled: run amq-remote share --session %s --enable buzz-profile", session, session)
+		}
+		ps.setProfile("refused: profile: " + err.Error())
+		return
+	}
+	pctx, cancel := context.WithTimeout(ctx, presencePublishTimeout)
+	defer cancel()
+	if err := conn.Publish(pctx, evt); err != nil {
+		ps.setProfile("publish_pending: profile: " + relay.Category(err))
+		return
+	}
+	ps.setProfile("published")
+}
+
+func (ps *presenceShare) setProfile(v string) {
+	ps.mu.Lock()
+	ps.profile = v
+	ps.mu.Unlock()
 }
 
 // publishStatus publishes status when it differs from the last one this
@@ -125,7 +163,9 @@ func (ps *presenceShare) publishStatus(ctx context.Context, conn *relay.Conn, st
 		ps.set("refused: status: "+err.Error(), "")
 		return
 	}
-	if err := conn.Publish(ctx, evt); err != nil {
+	pctx, cancel := context.WithTimeout(ctx, presencePublishTimeout)
+	defer cancel()
+	if err := conn.Publish(pctx, evt); err != nil {
 		ps.set("publish_pending: status: "+relay.Category(err), "")
 		return
 	}
@@ -159,15 +199,30 @@ func (ps *presenceShare) checkDiscovery(ctx context.Context, conn *relay.Conn) {
 		return
 	}
 	defer sub.Close()
-	found := false
+	// The latest coordinate is the policy; it is validated after selection,
+	// as Desktop does, so an older valid one never hides a newer invalid one.
+	var latest *nostr.Event
+	take := func(evt nostr.Event) {
+		if evt.PubKey == ps.owner && (latest == nil || evt.CreatedAt > latest.CreatedAt) {
+			e := evt
+			latest = &e
+		}
+	}
 	for {
 		select {
 		case evt := <-sub.Events:
-			if evt.PubKey == ps.owner && buzzio.PolicyFor(evt, ps.body.Hex()) {
-				found = true
-			}
+			take(evt)
 		case <-sub.EOSE:
-			if found {
+			// Stored events are queued before EOSE; drain them before deciding.
+			for drained := false; !drained; {
+				select {
+				case evt := <-sub.Events:
+					take(evt)
+				default:
+					drained = true
+				}
+			}
+			if latest != nil && buzzio.PolicyFor(*latest, ps.body.Hex()) {
 				ps.set("", "policy_present")
 			} else {
 				ps.set("", "policy_missing")
