@@ -184,11 +184,14 @@ func Connect(ctx context.Context, cfg Config) (*Conn, error) {
 		done:      make(chan struct{}),
 	}
 	if !cfg.NotAfter.IsZero() {
+		// At expiry access is revoked first, then the transport is aborted
+		// without a close handshake: a peer that withholds its close reply
+		// cannot keep the connection open (codex slice 1 review r3 #2).
 		c.expiry = time.AfterFunc(cfg.NotAfter.Sub(cfg.Now()), func() {
 			c.mu.Lock()
 			c.expired = true
 			c.mu.Unlock()
-			c.Close()
+			_ = c.ws.CloseNow()
 		})
 	}
 	go c.readPump()
@@ -244,9 +247,6 @@ func (c *Conn) Publish(ctx context.Context, evt nostr.Event) error {
 	if !evt.CheckID() || !evt.VerifySignature() {
 		return errors.New("relay publish: event is not signed")
 	}
-	if c.cfg.expiredAt(c.cfg.Now()) {
-		return ErrGrantExpired
-	}
 	res, err := c.roundTrip(ctx, evt, nostr.EventEnvelope{Event: evt})
 	if err != nil {
 		return err
@@ -266,6 +266,23 @@ func (c *Conn) Err() error { return c.err() }
 // Close ends the connection.
 func (c *Conn) Close() { _ = c.ws.Close(websocket.StatusNormalClosure, "") }
 
+// Expired reports whether the connection's grant has passed its not-after.
+func (c *Conn) Expired() bool {
+	c.mu.Lock()
+	expired := c.expired
+	c.mu.Unlock()
+	return expired || c.cfg.expiredAt(c.cfg.Now())
+}
+
+// grantCtx bounds ctx by the grant's not-after, so a queued or in-flight
+// write or OK wait never outlives the grant.
+func (c *Conn) grantCtx(ctx context.Context) (context.Context, context.CancelFunc) {
+	if c.cfg.NotAfter.IsZero() {
+		return context.WithCancel(ctx)
+	}
+	return context.WithDeadline(ctx, c.cfg.NotAfter)
+}
+
 func (c *Conn) err() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -277,6 +294,11 @@ func (c *Conn) err() error {
 
 // roundTrip registers a waiter for evt's OK, writes the envelope, and waits.
 func (c *Conn) roundTrip(ctx context.Context, evt nostr.Event, env interface{ MarshalJSON() ([]byte, error) }) (okResult, error) {
+	if c.Expired() {
+		return okResult{}, ErrGrantExpired
+	}
+	ctx, cancel := c.grantCtx(ctx)
+	defer cancel()
 	frame, err := env.MarshalJSON()
 	if err != nil {
 		return okResult{}, err
@@ -322,8 +344,13 @@ func (c *Conn) roundTrip(ctx context.Context, evt nostr.Event, env interface{ Ma
 }
 
 // write sends one frame, waiting for the write slot only as long as ctx
-// allows.
+// and the grant's not-after allow.
 func (c *Conn) write(ctx context.Context, frame []byte) error {
+	if c.Expired() {
+		return ErrGrantExpired
+	}
+	ctx, cancel := c.grantCtx(ctx)
+	defer cancel()
 	select {
 	case c.writeSem <- struct{}{}:
 	case <-ctx.Done():

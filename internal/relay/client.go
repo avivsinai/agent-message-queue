@@ -66,11 +66,16 @@ func (c *Client) Status() Status {
 	return c.status
 }
 
-// Conn returns the current authenticated connection, or nil.
+// Conn returns the current authenticated connection, or nil. A connection
+// whose grant expired is never handed out, even before its transport ends.
 func (c *Client) Conn() *Conn {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.conn
+	conn := c.conn
+	c.mu.Unlock()
+	if conn != nil && conn.Expired() {
+		return nil
+	}
+	return conn
 }
 
 func (c *Client) set(state State, err error, conn *Conn) {

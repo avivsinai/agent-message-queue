@@ -4,10 +4,14 @@ import (
 	"context"
 	"crypto/rand"
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"fiatjaf.com/nostr"
+	"github.com/coder/websocket"
 
 	"github.com/avivsinai/agent-message-queue/internal/relay"
 	"github.com/avivsinai/agent-message-queue/internal/relay/relaytest"
@@ -92,5 +96,54 @@ func TestConnClosesAtGrantExpiry(t *testing.T) {
 	}
 	if err := conn.Publish(context.Background(), evt); !errors.Is(err, relay.ErrGrantExpired) {
 		t.Fatalf("publish after expiry: err=%v, want ErrGrantExpired", err)
+	}
+}
+
+// codex slice 1 review r3 #2: at expiry the graceful close waited for a
+// peer that withheld its close reply, so the expired connection stayed open
+// for up to 10 s. Expiry now aborts the transport.
+func TestConnExpiryDoesNotWaitForPeerClose(t *testing.T) {
+	body, tag := testIdentity(t)
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ws, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer func() { _ = ws.CloseNow() }()
+		challenge := "expiry"
+		frame, _ := (nostr.AuthEnvelope{Challenge: &challenge}).MarshalJSON()
+		if ws.Write(r.Context(), websocket.MessageText, frame) != nil {
+			return
+		}
+		_, data, err := ws.Read(r.Context())
+		if err != nil {
+			return
+		}
+		env, err := nostr.ParseMessage(string(data))
+		if err != nil {
+			return
+		}
+		auth, ok := env.(*nostr.AuthEnvelope)
+		if !ok {
+			return
+		}
+		frame, _ = (nostr.OKEnvelope{EventID: auth.Event.ID, OK: true}).MarshalJSON()
+		if ws.Write(r.Context(), websocket.MessageText, frame) != nil {
+			return
+		}
+		<-release // never read or answer the close frame
+	}))
+	defer srv.Close()
+	defer close(release)
+	notAfter := time.Unix(time.Now().Unix()+2, 0)
+	conn, err := relay.Connect(context.Background(), relay.Config{URL: "ws" + strings.TrimPrefix(srv.URL, "http"), Secret: body.Secret(), AuthTag: tag, NotAfter: notAfter})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-conn.Done():
+	case <-time.After(time.Until(notAfter) + 500*time.Millisecond):
+		t.Fatal("expired connection stays open while the peer withholds its close reply")
 	}
 }
