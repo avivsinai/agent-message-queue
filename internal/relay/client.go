@@ -40,6 +40,15 @@ type ConfigFunc func() (Config, error)
 // waiter or authenticated flag crosses a reconnect.
 type Client struct {
 	config ConfigFunc
+	// OnConnect, if set, runs for each authenticated connection in its own
+	// goroutine; its context ends when that connection does. Subscriptions
+	// and outbox flushing live here, so nothing crosses a reconnect.
+	OnConnect func(ctx context.Context, conn *Conn)
+	// BeforeClose, if set, runs when Run's ctx ends while a connection is
+	// authenticated, before the socket closes, with its own short deadline:
+	// the last chance to publish (a graceful offline). It never runs after a
+	// transport loss.
+	BeforeClose func(ctx context.Context, conn *Conn)
 
 	mu     sync.Mutex
 	status Status
@@ -93,6 +102,9 @@ func (c *Client) set(state State, err error, conn *Conn) {
 // not polled: the connection itself closes at the grant's not-after.
 var identityCheck = time.Minute
 
+// beforeCloseTimeout bounds BeforeClose at shutdown.
+const beforeCloseTimeout = 2 * time.Second
+
 // errIdentityChanged ends a connection whose enrolled grant expired, was
 // removed, or changed; the reconnect re-authenticates under the current
 // one, or fails.
@@ -110,6 +122,11 @@ func (c *Client) hold(ctx context.Context, conn *Conn, authed Config) bool {
 			c.set(StateUnavailable, conn.Err(), nil)
 			return false
 		case <-ctx.Done():
+			if c.BeforeClose != nil {
+				bctx, cancel := context.WithTimeout(context.Background(), beforeCloseTimeout)
+				c.BeforeClose(bctx, conn)
+				cancel()
+			}
 			conn.Close()
 			return true
 		case <-t.C:
@@ -185,7 +202,20 @@ func (c *Client) Run(ctx context.Context) error {
 			c.set(StateUnavailable, err, nil)
 		} else {
 			c.set(StateAuthenticated, nil, conn)
-			if ended := c.hold(ctx, conn, cfg); ended {
+			connCtx, connCancel := context.WithCancel(ctx)
+			hookDone := make(chan struct{})
+			if c.OnConnect != nil {
+				go func() {
+					defer close(hookDone)
+					c.OnConnect(connCtx, conn)
+				}()
+			} else {
+				close(hookDone)
+			}
+			ended := c.hold(ctx, conn, cfg)
+			connCancel()
+			<-hookDone
+			if ended {
 				c.set(StateUnavailable, nil, nil)
 				return nil
 			}

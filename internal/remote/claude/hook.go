@@ -67,6 +67,56 @@ func UninstallStopHook(home string) error {
 	return mutateStopHook(home, false, "")
 }
 
+// Stop hook states in the user settings file (StopHookState).
+const (
+	StopHookPresent  = "installed"
+	StopHookMissing  = "missing"
+	StopHookDisabled = "disabled" // present, but disableAllHooks is true
+)
+
+// StopHookState reports whether the user settings file under home holds the
+// AMQ Stop hook, and whether that file disables all hooks. Without an
+// effective hook a Claude request is admitted but never completes. It reads
+// only ~/.claude/settings.json, through the installer's bounded reader
+// (codex #869 r1); project or managed settings can still change the
+// effective result.
+func StopHookState(home string) (string, error) {
+	raw, err := readRegularBounded(settingsPath(home), maxSettingsBytes)
+	if errors.Is(err, os.ErrNotExist) {
+		return StopHookMissing, nil
+	}
+	if err != nil {
+		return "", err
+	}
+	loc, err := locateSettings(raw)
+	if err != nil {
+		return "", err
+	}
+	var root struct {
+		DisableAllHooks bool `json:"disableAllHooks"`
+	}
+	_ = json.Unmarshal(raw, &root)
+	found := false
+	if loc.stop != nil {
+		els, err := arrayElements(raw, *loc.stop)
+		if err != nil {
+			return "", err
+		}
+		for _, el := range els {
+			if groupHasOurHook(raw[el[0]:el[1]]) {
+				found = true
+			}
+		}
+	}
+	switch {
+	case !found:
+		return StopHookMissing, nil
+	case root.DisableAllHooks:
+		return StopHookDisabled, nil
+	}
+	return StopHookPresent, nil
+}
+
 func settingsPath(home string) string {
 	return filepath.Join(home, ".claude", "settings.json")
 }

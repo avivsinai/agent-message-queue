@@ -110,6 +110,9 @@ func (r *Runtime) WithEvidence(ev *protocol.Evidence) *Runtime {
 }
 
 // Inspect implements core.Attachment.
+// NativeSessionID is the fake's native identity: its target id.
+func (r *Runtime) NativeSessionID() string { return r.targetID }
+
 func (r *Runtime) Inspect() protocol.Session {
 	r.mu.Lock()
 	defer r.mu.Unlock()

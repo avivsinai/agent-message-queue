@@ -27,6 +27,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 )
@@ -57,7 +59,11 @@ const RelaySchemaVersion = 2
 // Relay configures one relay endpoint and the sessions shared on it.
 type Relay struct {
 	// URL is wss://, or ws:// to a loopback host for in-process tests.
-	URL    string  `json:"url"`
+	URL string `json:"url"`
+	// Self optionally pins the relay's NIP-11 self key, the key that signs
+	// NIP-29 group membership. Unset, it is read from the relay's NIP-11
+	// document on each connection.
+	Self   string  `json:"relay_self,omitempty"`
 	Shares []Share `json:"shares"`
 }
 
@@ -69,8 +75,25 @@ type Share struct {
 	Target      string `json:"target"`
 	Session     string `json:"session"`
 	OwnerPubKey string `json:"owner_pubkey"`
-	Commands    bool   `json:"commands,omitempty"`
-	Activity    bool   `json:"activity,omitempty"`
+	// DMChannelID is the owner's one-to-one private Buzz channel, bound
+	// explicitly by the operator. Commands require it.
+	DMChannelID string `json:"dm_channel_id,omitempty"`
+	// NativeSessionID pins the harness session the operator approved for
+	// sharing (the target's inspected native_session_id). Commands require
+	// it; a different session under the same target is never shared by
+	// inheritance, and serve never rewrites it.
+	NativeSessionID string `json:"native_session_id,omitempty"`
+	// MentionChannels are channels where an owner message that mentions the
+	// body submits a request; its output goes to the DM channel, never to
+	// the mentioning channel. Commands require dm_channel_id first.
+	MentionChannels []string `json:"mention_channels,omitempty"`
+	Commands        bool     `json:"commands,omitempty"`
+	// Presence publishes the body's kind 0 profile and kind 10100 status so
+	// the owner's Buzz Desktop lists it. Name is the display name, published
+	// in clear text; it must not carry a path or prompt data.
+	Presence bool   `json:"presence,omitempty"`
+	Name     string `json:"name,omitempty"`
+	Activity bool   `json:"activity,omitempty"`
 }
 
 // Adapter is one adapter instance in the manifest.
@@ -291,6 +314,9 @@ func validateRelay(f File, targets map[string]bool) error {
 	if err := validRelayURL(r.URL); err != nil {
 		return &ErrInvalidRelay{Reason: err.Error()}
 	}
+	if r.Self != "" && !validHex64(r.Self) {
+		return &ErrInvalidRelay{Reason: "relay_self must be 64 lowercase hex"}
+	}
 	if len(r.Shares) == 0 {
 		return &ErrInvalidRelay{Reason: "shares is empty"}
 	}
@@ -307,15 +333,47 @@ func validateRelay(f File, targets map[string]bool) error {
 			return &ErrInvalidRelay{Reason: fmt.Sprintf("session %q is shared twice", sh.Session)}
 		case !validHex64(sh.OwnerPubKey):
 			return &ErrInvalidRelay{Reason: fmt.Sprintf("share %q owner_pubkey must be 64 lowercase hex", sh.Session)}
-		case sh.Commands:
-			return &ErrInvalidRelay{Reason: fmt.Sprintf("share %q: commands are not supported by this binary", sh.Session)}
+		case sh.Commands && sh.DMChannelID == "":
+			return &ErrInvalidRelay{Reason: fmt.Sprintf("share %q: commands need dm_channel_id, the owner's private DM channel", sh.Session)}
+		case sh.Commands && sh.NativeSessionID == "":
+			return &ErrInvalidRelay{Reason: fmt.Sprintf("share %q: commands need native_session_id, the approved native session (see amq-remote inspect)", sh.Session)}
 		case sh.Activity:
 			return &ErrInvalidRelay{Reason: fmt.Sprintf("share %q: activity is not supported by this binary", sh.Session)}
+		case sh.Presence && !validDisplayName(sh.Name):
+			return &ErrInvalidRelay{Reason: fmt.Sprintf("share %q: presence needs a name of 1 to 64 printable characters with no path separator", sh.Session)}
+		case len(sh.MentionChannels) > 0 && !sh.Commands:
+			return &ErrInvalidRelay{Reason: fmt.Sprintf("share %q: mention_channels need commands", sh.Session)}
+		case len(sh.MentionChannels) > maxMentionChannels:
+			return &ErrInvalidRelay{Reason: fmt.Sprintf("share %q: at most %d mention_channels", sh.Session, maxMentionChannels)}
+		}
+		seen := map[string]bool{sh.DMChannelID: true}
+		for _, ch := range sh.MentionChannels {
+			if ch == "" || seen[ch] {
+				return &ErrInvalidRelay{Reason: fmt.Sprintf("share %q: mention channel %q is empty, repeated, or the DM channel", sh.Session, ch)}
+			}
+			seen[ch] = true
 		}
 		bound[sh.Target], sessions[sh.Session] = true, true
 	}
 	return nil
 }
+
+// validDisplayName is a short printable name with no path separator, so a
+// clear-text profile cannot leak a local path.
+func validDisplayName(s string) bool {
+	if s == "" || utf8.RuneCountInString(s) > 64 || strings.ContainsAny(s, "/\\") {
+		return false
+	}
+	for _, r := range s {
+		if !unicode.IsPrint(r) {
+			return false
+		}
+	}
+	return true
+}
+
+// maxMentionChannels bounds one share's mention subscription filter.
+const maxMentionChannels = 16
 
 func validSession(s string) bool {
 	return s != "" && s != "." && s != ".." && !strings.ContainsAny(s, "/\\\x00")

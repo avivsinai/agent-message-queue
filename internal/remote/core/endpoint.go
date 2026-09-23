@@ -1069,6 +1069,28 @@ func (e *Endpoint) sessionProjection(targetID string) (protocol.Session, error) 
 	return s, nil
 }
 
+// NativeIdentifier is implemented by an attachment that can prove the
+// harness's own identity for its attached session (Codex thread id, Claude
+// session id). It is in-process only, never on the session wire schema.
+type NativeIdentifier interface {
+	NativeSessionID() string
+}
+
+// NativeSessionID returns the attached native session identity of a target,
+// or "" when the target is unknown or its adapter cannot prove one.
+func (e *Endpoint) NativeSessionID(targetID string) string {
+	e.mu.Lock()
+	t, ok := e.targets[targetID]
+	e.mu.Unlock()
+	if !ok {
+		return ""
+	}
+	if n, ok := t.att.(NativeIdentifier); ok {
+		return n.NativeSessionID()
+	}
+	return ""
+}
+
 func (e *Endpoint) inspect(targetID string) (any, error) {
 	return e.sessionProjection(targetID)
 }

@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -106,6 +107,15 @@ func share(args []string, stdout, stderr io.Writer) (int, error) {
 	days := fs.Int("days", 0, "attestation window in days (default 30; 1..90; on renew, an explicit --days that cannot exceed the current bounds is REFUSED, not silently bumped)")
 	tagFile := fs.String("tag-file", "", "JSON file with one owner-signed tag {kind,owner_pubkey,conditions,sig}")
 	dryRun := fs.Bool("dry-run", false, "print preimages without writing or changing anything")
+	var enable []uint16
+	fs.Func("enable", "opt in to an extra share surface for a new window (repeatable): buzz-dm (kinds 9, 40003), buzz-profile (kind 0)", func(v string) error {
+		kinds, ok := shareSurfaces[v]
+		if !ok {
+			return fmt.Errorf("unknown surface %q (want buzz-dm or buzz-profile)", v)
+		}
+		enable = append(enable, kinds...)
+		return nil
+	})
 	if err := fs.Parse(args); err != nil {
 		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", err)
 	}
@@ -189,7 +199,7 @@ func share(args []string, stdout, stderr io.Writer) (int, error) {
 		// window the preview refuses exactly where the real run refuses).
 		pendingTags := st.Pending.Tags
 		if *renew {
-			preview, err := renewalWindow(st, *days, daysSet)
+			preview, err := renewalWindow(st, *days, daysSet, enable)
 			if err != nil {
 				return protocol.ExitActionRequired, err
 			}
@@ -201,7 +211,7 @@ func share(args []string, stdout, stderr io.Writer) (int, error) {
 			printSharePending(stdout, *session, k, pendingTags, time.Time{})
 			return 0, nil
 		}
-		printShareDryRun(stdout, *session, k, *days)
+		printShareDryRun(stdout, *session, k, *days, enable)
 		return 0, nil
 	}
 
@@ -239,7 +249,7 @@ func share(args []string, stdout, stderr io.Writer) (int, error) {
 	// before expiry, and print the preimages for the owner to sign. The
 	// window arithmetic lives in ONE place (renewalWindow) so --dry-run
 	// previews exactly what a real run mints (codex re-review P2).
-	window, err := renewalWindow(st, *days, daysSet)
+	window, err := renewalWindow(st, *days, daysSet, enable)
 	if err != nil {
 		return protocol.ExitActionRequired, err
 	}
@@ -271,6 +281,12 @@ func share(args []string, stdout, stderr io.Writer) (int, error) {
 			printShareOutstanding(stdout, *session, k, outstanding, st2.Staged.Tags, pendingTags, st2.Enrolled.Gen)
 			return 0, nil
 		}
+		if st2.Enrolled.Gen != nil && len(st2.Enrolled.Gen.Tags) > 0 && len(enable) > 0 {
+			// A new surface needs fresh owner signatures in a new window;
+			// the enrolled grants stay active until it completes.
+			return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid,
+				"--enable on an enrolled session needs --renew: the new window keeps every enrolled kind and adds the surface")
+		}
 		if st2.Enrolled.Gen != nil && len(st2.Enrolled.Gen.Tags) > 0 {
 			// Fully enrolled; plain `share` does not disturb the state.
 			// Print the ENROLLED state (expiry derived from the signed
@@ -299,7 +315,7 @@ type shareWindow struct {
 // renewalWindow computes the attestation window a real `share`/`share
 // --renew` run would persist. It consumes the loader snapshot (r9): no
 // re-reads, and the confinement check already ran in the caller.
-func renewalWindow(st *shareState, days int, daysExplicit bool) (shareWindow, error) {
+func renewalWindow(st *shareState, days int, daysExplicit bool, enable []uint16) (shareWindow, error) {
 	notAfter := time.Now().Add(time.Duration(days) * 24 * time.Hour)
 	// Unreadable state is NOT absence (verifier r2 P1-2): a renewal over
 	// torn state would mint a window no tag can ever be enrolled into.
@@ -338,11 +354,64 @@ func renewalWindow(st *shareState, days int, daysExplicit bool) (shareWindow, er
 		}
 		notAfter = time.Unix(minDays+1, 0)
 	}
-	tags := make([]shareTagFile, 0, len(bodykey.ShareKinds))
-	for _, kind := range bodykey.ShareKinds {
+	kinds := windowKinds(st, enable)
+	tags := make([]shareTagFile, 0, len(kinds))
+	for _, kind := range kinds {
 		tags = append(tags, shareTagFile{Kind: kind, Conditions: bodykey.ShareConditions(kind, notAfter.Unix())})
 	}
 	return shareWindow{notAfter: notAfter, tags: tags}, nil
+}
+
+// shareSurfaces maps an --enable surface to the extra kinds it needs owner
+// grants for (relay design §4: the DM edge publishes kind 9 rows and kind
+// 40003 edits; the owned-agent profile is kind 0).
+var shareSurfaces = map[string][]uint16{
+	"buzz-dm":      {9, 40003},
+	"buzz-profile": {0},
+}
+
+// windowKinds is the kind set a new window requests: the base ShareKinds,
+// every kind already enrolled or pending (a renewal never drops a grant),
+// and any newly enabled surface. Base kinds come first in their fixed
+// order, extras ascending, so preimage output is stable.
+func windowKinds(st *shareState, enable []uint16) []uint16 {
+	set := map[uint16]bool{}
+	for _, k := range bodykey.ShareKinds {
+		set[k] = true
+	}
+	if st.Enrolled.Gen != nil {
+		for _, t := range st.Enrolled.Gen.Tags {
+			set[t.Kind] = true
+		}
+	}
+	for _, t := range st.Pending.Tags {
+		set[t.Kind] = true
+	}
+	for _, k := range enable {
+		set[k] = true
+	}
+	return orderedKinds(set)
+}
+
+// orderedKinds returns the keys of set: ShareKinds first in their order,
+// then any others ascending.
+func orderedKinds[V any](set map[uint16]V) []uint16 {
+	out := make([]uint16, 0, len(set))
+	base := map[uint16]bool{}
+	for _, k := range bodykey.ShareKinds {
+		base[k] = true
+		if _, ok := set[k]; ok {
+			out = append(out, k)
+		}
+	}
+	extra := make([]uint16, 0)
+	for k := range set {
+		if !base[k] {
+			extra = append(extra, k)
+		}
+	}
+	sort.Slice(extra, func(i, j int) bool { return extra[i] < extra[j] })
+	return append(out, extra...)
 }
 
 // refuseSymlinkedState was folded into loadShareState (r9): the loader
@@ -728,57 +797,55 @@ func writeShareTag(session, keyDir string, tf *shareTagFile) error {
 	// the same window replaces that staged entry.
 	staged[tf.Kind] = *tf
 
-	// Completion: one STAGED tag per kind in ShareKinds (verifier r3 P2-1:
-	// enforced in code, not by construction — publication requires the
-	// staged set to cover every kind the credential set defines, with
-	// conditions matching the pending window for that kind). A short or
-	// hand-edited pending window can never publish, so no still-valid tag
-	// is ever dropped without a valid replacement for its kind.
-	complete := true
+	// Coverage first (verifier r4 P2-2, and the 611.16 kind-set change): a
+	// pending window must ask for every base kind AND every kind already
+	// enrolled, or publishing it would drop still-valid grants. Such a
+	// window never publishes; the operator gets a refusal naming the
+	// missing kinds instead of silent staging forever.
+	required := map[uint16]bool{}
 	for _, kind := range bodykey.ShareKinds {
-		t, ok := staged[kind]
-		p := pendingTagForKind(pending, kind)
-		if !ok || p == nil || p.Conditions != t.Conditions {
+		required[kind] = true
+	}
+	if st.Enrolled.Gen != nil {
+		for _, t := range st.Enrolled.Gen.Tags {
+			required[t.Kind] = true
+		}
+	}
+	var missing []uint16
+	for _, kind := range orderedKinds(required) {
+		if pendingTagForKind(pending, kind) == nil {
+			missing = append(missing, kind)
+		}
+	}
+	if len(missing) > 0 {
+		return protocol.Refuse(protocol.CodeInvalid,
+			"pending window at share.pending.json does not cover every kind in ShareKinds and every enrolled kind (missing %v); publication is refused because it would drop still-valid tags — remedy: remove share.pending.json and run `amq-remote share --session %s --renew` for a fresh full window",
+			missing, session)
+	}
+	// Completion: one staged tag, with the window's conditions, for every
+	// kind the pending window asks for (the base kinds plus any enabled
+	// surface). A complete-but-in-progress renewal just stages.
+	complete := true
+	for _, p := range pending {
+		t, ok := staged[p.Kind]
+		if !ok || p.Conditions != t.Conditions {
 			complete = false
 			break
 		}
 	}
 	if !complete {
-		// Verifier r4 P2-2: a window that cannot cover ShareKinds never
-		// publishes — the operator gets a REFUSAL naming the missing kinds,
-		// not silent staging forever. (A complete-but-in-progress window
-		// for a healthy renewal just stages; the refusal is only for
-		// windows that can never be completed.)
-		coversShareKinds := true
-		for _, kind := range bodykey.ShareKinds {
-			if pendingTagForKind(pending, kind) == nil {
-				coversShareKinds = false
-				break
-			}
-		}
-		if !coversShareKinds {
-			missing := make([]uint16, 0, len(bodykey.ShareKinds))
-			for _, kind := range bodykey.ShareKinds {
-				if pendingTagForKind(pending, kind) == nil {
-					missing = append(missing, kind)
-				}
-			}
-			return protocol.Refuse(protocol.CodeInvalid,
-				"pending window at share.pending.json does not cover every kind in ShareKinds (missing %v); publication is refused because it would drop still-valid tags — remedy: remove share.pending.json and run `amq-remote share --session %s --renew` for a fresh full window",
-				missing, session)
-		}
 		return writeShareStaged(keyDir, staged)
 	}
 
 	// Publish: the new generation is exactly the staged tags, one per
-	// ShareKinds kind (enforced above). share.json is single-generation
+	// window kind (enforced above). share.json is single-generation
 	// from here: the staged replacement supersedes every prior tag of its
 	// kind, so nothing still-valid is dropped.
 	doc := struct {
 		Tags []shareTagFile `json:"tags"`
 	}{make([]shareTagFile, 0, len(staged))}
-	for _, kind := range bodykey.ShareKinds {
-		doc.Tags = append(doc.Tags, staged[kind])
+	for _, p := range pending {
+		doc.Tags = append(doc.Tags, staged[p.Kind])
 	}
 	raw, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
@@ -908,10 +975,8 @@ func stagedTags(st *shareState) []shareTagFile {
 		return nil
 	}
 	out := make([]shareTagFile, 0, len(st.Staged.Tags))
-	for _, kind := range bodykey.ShareKinds {
-		if t, ok := st.Staged.Tags[kind]; ok {
-			out = append(out, t)
-		}
+	for _, kind := range orderedKinds(st.Staged.Tags) {
+		out = append(out, st.Staged.Tags[kind])
 	}
 	return out
 }
@@ -935,7 +1000,7 @@ func genCoversPendingWindow(gen *enrolledGeneration, pending []shareTagFile, pen
 			for _, t := range gen.Tags {
 				byKind[t.Kind] = t.Conditions
 			}
-			if len(byKind) < len(bodykey.ShareKinds) {
+			if len(byKind) < len(pending) {
 				return false
 			}
 			for _, p := range pending {
@@ -1020,10 +1085,8 @@ func byKind(tags []shareTagFile) map[uint16]shareTagFile {
 
 func writeShareStaged(keyDir string, staged map[uint16]shareTagFile) error {
 	tags := make([]shareTagFile, 0, len(staged))
-	for _, kind := range bodykey.ShareKinds {
-		if t, ok := staged[kind]; ok {
-			tags = append(tags, t)
-		}
+	for _, kind := range orderedKinds(staged) {
+		tags = append(tags, staged[kind])
 	}
 	raw, err := json.MarshalIndent(tags, "", "  ")
 	if err != nil {
@@ -1183,12 +1246,12 @@ func printShareEnrolled(w io.Writer, session string, k *bodykey.BodyKey, tags []
 	}
 }
 
-func printShareDryRun(w io.Writer, session string, k *bodykey.BodyKey, days int) {
+func printShareDryRun(w io.Writer, session string, k *bodykey.BodyKey, days int, enable []uint16) {
 	notAfter := time.Now().Add(time.Duration(days) * 24 * time.Hour)
 	say(w, "session:     %s (dry-run)", session)
 	say(w, "body-pubkey: %s", k.PublicKeyHex())
 	say(w, "(illustrative fresh %d-day window; nothing was written and these preimages are NOT enrollable — run a real share to mint the window)", days)
-	for _, kind := range bodykey.ShareKinds {
+	for _, kind := range windowKinds(&shareState{}, enable) {
 		conds := bodykey.ShareConditions(kind, notAfter.Unix())
 		say(w, "kind %d preimage: %s", kind, k.PreimageHex(conds))
 		say(w, "kind %d conditions: %s", kind, conds)
@@ -1350,7 +1413,7 @@ func doctorShareInspection(root string) map[string]any {
 			}
 			renewalInProgress := len(pendingTags) > 0
 			if renewalInProgress && progressKnown && outstanding > 0 {
-				info["attestation"] = fmt.Sprintf("enrolled, renewal in progress: %d of %d kinds signed (staged)", len(bodykey.ShareKinds)-outstanding, len(bodykey.ShareKinds))
+				info["attestation"] = fmt.Sprintf("enrolled, renewal in progress: %d of %d kinds signed (staged)", len(pendingTags)-outstanding, len(pendingTags))
 				info["warning"] = fmt.Sprintf("renewal in progress: %d preimage(s) still unsigned; run `amq-remote share --session %s` to reprint them (do NOT renew: renewing rotates the window and the still-unsigned preimages)", outstanding, e.Name())
 			} else if renewalInProgress && !progressKnown {
 				// r8 P1-3: whether a renewal is in progress is knowable from
@@ -1395,7 +1458,7 @@ func doctorShareInspection(root string) map[string]any {
 			continue
 		}
 		if st.Pending.readable() && progressKnown {
-			info["attestation"] = fmt.Sprintf("pending: %d of %d kinds signed (staged)", len(bodykey.ShareKinds)-outstanding, len(bodykey.ShareKinds))
+			info["attestation"] = fmt.Sprintf("pending: %d of %d kinds signed (staged)", len(pendingTags)-outstanding, len(pendingTags))
 		} else if st.Pending.readable() && !progressKnown {
 			// r7 P1: progress over unreadable staged state is UNKNOWN —
 			// "pending: 5 of 5" over a corrupt leaf fabricated completion.
