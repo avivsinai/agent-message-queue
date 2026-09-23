@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -1015,21 +1016,37 @@ func doctor(args []string) (any, int, error) {
 		return nil, protocol.ExitUsage, err
 	}
 	report := map[string]any{"root": c.root, "state_dir": stateDir, "socket": ipc.SocketPath(stateDir)}
-	code := 0
+	// failing names each broken boundary between the owner and the native
+	// session (611.18): endpoint, registration, native capability, body key,
+	// tag expiry, relay auth, DM surface, publication, presence, discovery.
+	// Doctor exits 6 exactly when it is not empty.
+	var failing []boundaryFailure
+	fail := func(boundary, subject, detail, remedy string) {
+		failing = append(failing, boundaryFailure{Boundary: boundary, Subject: subject, Detail: detail, Remedy: remedy})
+	}
+	finish := func() (any, int, error) {
+		report["failing"] = failing
+		if len(failing) > 0 {
+			return report, protocol.ExitActionRequired, nil
+		}
+		report["failing"] = []boundaryFailure{}
+		return report, 0, nil
+	}
 	if _, err := os.Stat(stateDir); err != nil {
 		report["endpoint"] = "no state directory; run `amq-remote serve` once"
-		return report, protocol.ExitActionRequired, nil
+		fail("endpoint", "", "no state directory", "run `amq-remote serve` once")
+		return finish()
 	}
+	var sessions []protocol.Session
 	resp, err := ipc.Call(stateDir, ipc.Request{Command: &protocol.Command{Schema: protocol.SchemaCommand, Op: protocol.OpSessionList}})
 	switch {
 	case err != nil:
 		report["endpoint"] = "not reachable: " + err.Error()
-		code = protocol.ExitActionRequired
+		fail("endpoint", "", "not reachable: "+err.Error(), "start `amq-remote serve` (or `up`) for this root")
 	case resp.AsError() != nil:
 		report["endpoint"] = "refused session.list: " + resp.AsError().Error()
-		code = protocol.ExitActionRequired
+		fail("endpoint", "", "refused session.list: "+resp.AsError().Error(), "check the endpoint's stderr, then restart serve")
 	default:
-		var sessions []protocol.Session
 		_ = json.Unmarshal(resp.Reply, &sessions)
 		report["endpoint"] = "reachable"
 		report["targets"] = len(sessions)
@@ -1048,16 +1065,74 @@ func doctor(args []string) (any, int, error) {
 	switch {
 	case loadErr == nil && len(refusals) > 0:
 		report["refusals"] = refusals
+		for _, r := range refusals {
+			fail("registration", r.Target, r.Kind+": "+r.Error, "fix the manifest entry for "+r.Target+", then restart serve")
+		}
 	case loadErr != nil && !errors.Is(loadErr, os.ErrNotExist):
 		// 611.13.4-1: a truncated/unreadable refusals.json used to be
 		// dropped silently and doctor exited 0 with no hint.
 		report["refusals_error"] = loadErr.Error()
+		fail("registration", "refusals.json", loadErr.Error(), "restart serve; it rewrites refusals.json on every start")
+	}
+	// Native capability: a Claude target completes a request only through
+	// the Stop hook.
+	for _, s := range sessions {
+		if s.Harness != "claude_code" {
+			continue
+		}
+		home, herr := os.UserHomeDir()
+		state, serr := "", herr
+		if herr == nil {
+			state, serr = claude.StopHookState(home)
+		}
+		switch {
+		case serr != nil:
+			fail("native_capability", s.TargetID, "cannot read ~/.claude/settings.json: "+serr.Error(), "repair ~/.claude/settings.json")
+		case state == claude.StopHookMissing:
+			fail("native_capability", s.TargetID, "the Claude Stop hook is not installed, so requests are admitted but never complete", "run `amq-remote claude install-stop-hook`")
+		case state == claude.StopHookDisabled:
+			// Only the user file was read; a project or managed setting can
+			// override disableAllHooks, so the effective state is unknown and
+			// is reported, not failed (codex #869 r2).
+			report["claude_stop_hook"] = "~/.claude/settings.json holds the Stop hook and sets disableAllHooks; project or managed settings decide whether it runs"
+		}
+		break
 	}
 	// Body identity (611.15): per-session body keys, attestations, expiry
 	// warnings (7-day horizon enforced inside the inspection). Absent keys
 	// dir reports nothing — sessions without remote sharing are normal.
 	if bodyKeys := doctorShareInspection(c.root); bodyKeys != nil {
 		report["body_keys"] = bodyKeys
+		sessionsWithKeys := make([]string, 0, len(bodyKeys))
+		for name := range bodyKeys {
+			sessionsWithKeys = append(sessionsWithKeys, name)
+		}
+		sort.Strings(sessionsWithKeys)
+		for _, name := range sessionsWithKeys {
+			info, _ := bodyKeys[name].(map[string]any)
+			remedy, _ := info["remedy"].(string)
+			if remedy == "" {
+				remedy = "run `amq-remote share --session " + name + "` and follow its output"
+			}
+			for _, key := range []string{"attestation_error", "key_error", "body_pub_error", "staged_error"} {
+				if msg, ok := info[key].(string); ok {
+					fail("body_key", name, msg, remedy)
+				}
+			}
+			// A body with no enrolled generation, or only a pending one,
+			// cannot authenticate: that is a failing share (codex #869 r1).
+			if att, ok := info["attestation"].(string); ok {
+				switch {
+				case strings.HasPrefix(att, "missing"):
+					fail("body_key", name, "no owner-signed generation is enrolled", "run `amq-remote share --session "+name+"` and have the owner sign the printed preimages")
+				case strings.HasPrefix(att, "pending"):
+					fail("body_key", name, att, "have the owner sign the printed preimages, then run `amq-remote share --session "+name+"`")
+				}
+			}
+			if msg, ok := info["expiry_warning"].(string); ok && strings.HasPrefix(msg, "expired") {
+				fail("tag_expiry", name, "the enrolled grants have expired", strings.TrimPrefix(msg, "expired: "))
+			}
+		}
 	}
 	// Relay connections (611.15), as serve last reported them. Each state
 	// is distinct: auth_pending is not authenticated, and authenticated is
@@ -1067,17 +1142,45 @@ func doctor(args []string) (any, int, error) {
 		report["relay"] = rs
 		for _, sh := range rs.Shares {
 			if sh.State != string(relay.StateAuthenticated) {
-				code = protocol.ExitActionRequired
+				fail("relay_auth", sh.Session, sh.State+errSuffix(sh.Error), "check the relay URL and the share's enrollment (`amq-remote share --session "+sh.Session+"`)")
 			}
 			// A commands share also needs its DM surface open.
-			if sh.Commands != "" && sh.Commands != "subscription_active" {
-				code = protocol.ExitActionRequired
+			switch {
+			case sh.Commands == "" || sh.Commands == "subscription_active":
+			case strings.HasPrefix(sh.Commands, "publish_pending"):
+				fail("publication", sh.Session, sh.Commands, "output stays owed and is resent; check the relay")
+			default:
+				fail("dm_surface", sh.Session, sh.Commands, "check the DM channel membership, the native_session_id pin and the buzz-dm enrollment")
+			}
+			// A presence share needs a published status and the owner's
+			// 30177 policy, or Desktop cannot list the body as owned.
+			if sh.Presence != "" && sh.Presence != "online" && sh.Presence != "away" {
+				fail("presence", sh.Session, sh.Presence, "enroll the profile kind with `amq-remote share --session "+sh.Session+" --enable buzz-profile`")
+			}
+			if sh.Discovery != "" && sh.Discovery != "policy_present" {
+				fail("discovery", sh.Session, sh.Discovery, "the owner publishes the kind 30177 policy for this body from their Buzz client")
 			}
 		}
 	case !errors.Is(rerr, os.ErrNotExist):
 		report["relay_error"] = rerr.Error()
+		fail("relay_auth", "relay-status.json", rerr.Error(), "restart serve; it rewrites relay-status.json")
 	}
-	return report, code, nil
+	return finish()
+}
+
+// boundaryFailure is one broken boundary doctor names, with what to do.
+type boundaryFailure struct {
+	Boundary string `json:"boundary"`
+	Subject  string `json:"subject,omitempty"`
+	Detail   string `json:"detail"`
+	Remedy   string `json:"remedy,omitempty"`
+}
+
+func errSuffix(e string) string {
+	if e == "" {
+		return ""
+	}
+	return ": " + e
 }
 
 func newUUID() (string, error) {
