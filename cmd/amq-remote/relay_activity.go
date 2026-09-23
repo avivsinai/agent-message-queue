@@ -15,17 +15,32 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/relay"
 	"github.com/avivsinai/agent-message-queue/internal/remote/activity"
+	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
 	"github.com/avivsinai/agent-message-queue/internal/remote/codex"
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/manifest"
 	"github.com/avivsinai/agent-message-queue/internal/remote/sharestate"
 )
 
-// notificationSource is the attachment seam activity export reads: the Codex
-// adapter's read-only notification observer.
+// notificationSource is the Codex attachment's read-only notification
+// observer; claudeSource is the Claude attachment's parsed-transcript
+// observer. Activity export reads either one.
 type notificationSource interface {
 	ObserveNotifications(fn func(codex.Notification)) (stop func())
 }
+
+type claudeSource interface {
+	ObserveActivity(fn func(claude.ActivityNote)) (stop func())
+}
+
+// activityItem is one queued native observation: exactly one field is set.
+type activityItem struct {
+	codex  *codex.Notification
+	claude *claude.ActivityNote
+}
+
+// observeFunc registers push as the attachment's observer and returns stop.
+type observeFunc func(push func(activityItem)) (stop func())
 
 // activityShare is one share's activity export (611.17 slice 3): Codex
 // notifications for the approved native thread become NIP-44 kind 24200
@@ -90,10 +105,10 @@ func (as *activityShare) runActivity(ctx context.Context, conn *relay.Conn, iden
 			as.set("closed: the attached session is not the one approved for sharing")
 		} else if att, ok := attachment(target); !ok {
 			as.set("closed: target is not attached")
-		} else if src, ok := att.(notificationSource); !ok {
+		} else if observe := observerOf(att); observe == nil {
 			as.set("refused: this target's adapter has no activity seam")
 		} else {
-			as.export(ctx, conn, src, identity, warn)
+			as.export(ctx, conn, observe, identity, warn)
 		}
 		select {
 		case <-ctx.Done():
@@ -103,6 +118,24 @@ func (as *activityShare) runActivity(ctx context.Context, conn *relay.Conn, iden
 		case <-tick.C:
 		}
 	}
+}
+
+// observerOf returns the activity observer of an attachment, or nil.
+func observerOf(att any) observeFunc {
+	switch src := att.(type) {
+	case notificationSource:
+		return func(push func(activityItem)) func() {
+			return src.ObserveNotifications(func(n codex.Notification) {
+				n.Params = append(json.RawMessage(nil), n.Params...) // the pump may reuse its buffer
+				push(activityItem{codex: &n})
+			})
+		}
+	case claudeSource:
+		return func(push func(activityItem)) func() {
+			return src.ObserveActivity(func(n claude.ActivityNote) { push(activityItem{claude: &n}) })
+		}
+	}
+	return nil
 }
 
 // activityQueue bounds notifications waiting for the export worker; the
@@ -122,7 +155,7 @@ var errActivityFenced = errors.New("the attached session is not the one approved
 // discards the rest of the queue (#1). Shutdown stops the observer and waits
 // for the worker before the sink is released; only the worker feeds the
 // sink, so no late callback acts after cleanup (#3).
-func (as *activityShare) export(ctx context.Context, conn *relay.Conn, src notificationSource, identity func(string) string, warn io.Writer) {
+func (as *activityShare) export(ctx context.Context, conn *relay.Conn, observe observeFunc, identity func(string) string, warn io.Writer) {
 	target, pin := as.share.Target, as.share.NativeSessionID
 	fenced := func() bool { return identity(target) != pin }
 	sink := &activity.Sink{ThreadID: pin, Body: as.body, Owner: as.owner, StateDir: as.stateDir,
@@ -135,12 +168,11 @@ func (as *activityShare) export(ctx context.Context, conn *relay.Conn, src notif
 
 	// Only the worker touches the sink. A callback that runs after cleanup
 	// can at most fill this buffer, which no one reads again.
-	queue := make(chan codex.Notification, activityQueue)
+	queue := make(chan activityItem, activityQueue)
 	var dropped atomic.Uint64
-	stop := src.ObserveNotifications(func(n codex.Notification) {
-		n.Params = append(json.RawMessage(nil), n.Params...) // the pump may reuse its buffer
+	stop := observe(func(it activityItem) {
 		select {
-		case queue <- n:
+		case queue <- it:
 		default:
 			dropped.Add(1)
 		}
@@ -155,11 +187,20 @@ func (as *activityShare) export(ctx context.Context, conn *relay.Conn, src notif
 			select {
 			case <-wctx.Done():
 				return
-			case n := <-queue:
+			case it := <-queue:
 				if fenced() {
 					continue // never export a replacement session's activity
 				}
-				if err := sink.Enqueue(n); err != nil {
+				var err error
+				if it.codex != nil {
+					err = sink.Enqueue(*it.codex)
+				} else {
+					// AcceptParsed also drains, through the fenced Publish.
+					pctx, cancel := context.WithTimeout(wctx, activityPublishTimeout)
+					err = sink.AcceptParsed(pctx, *it.claude)
+					cancel()
+				}
+				if err != nil && !errors.Is(err, errActivityFenced) {
 					say(warn, "relay share %s: activity: %v", as.share.Session, err)
 				}
 			}

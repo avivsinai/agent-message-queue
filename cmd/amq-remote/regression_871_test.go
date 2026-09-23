@@ -118,7 +118,7 @@ func TestActivityFenceHoldsBetweenQueuedPublications(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		as.export(ctx, conn, src, func(string) string { return native.Load().(string) }, io.Discard)
+		as.export(ctx, conn, observerOf(src), func(string) string { return native.Load().(string) }, io.Discard)
 	}()
 	reviewWait(t, "observer", func() bool { return as.view() == "exporting" })
 	src.emit(reviewNote()) // session_resolved plus the message are queued
@@ -149,7 +149,7 @@ func TestActivityCallbackNeverBlocksTheReadPump(t *testing.T) {
 	exportDone := make(chan struct{})
 	go func() {
 		defer close(exportDone)
-		as.export(ctx, conn, src, func(string) string { return "thread-1" }, io.Discard)
+		as.export(ctx, conn, observerOf(src), func(string) string { return "thread-1" }, io.Discard)
 	}()
 	reviewWait(t, "observer", func() bool { return as.view() == "exporting" })
 	entered, release := make(chan struct{}), make(chan struct{})
@@ -208,7 +208,7 @@ func TestActivityCallbackAfterCleanupDoesNothing(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		as.export(ctx, conn, src, func(string) string { return "thread-1" }, io.Discard)
+		as.export(ctx, conn, observerOf(src), func(string) string { return "thread-1" }, io.Discard)
 	}()
 	reviewWait(t, "observer", func() bool { return as.view() == "exporting" })
 	cancel()
