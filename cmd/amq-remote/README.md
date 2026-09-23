@@ -291,6 +291,9 @@ once. `amq-remote up` starts that same `serve` child.
 With a relay configured, doctor also reports each share's connection state
 as `serve` last wrote it: `auth_pending`, `authenticated` or `unavailable`,
 with the last error. Any share that is not `authenticated` makes doctor exit
-6. `authenticated` means the relay accepted this body's AUTH. It does not
+6. A commands share also reports its DM surface under `commands`:
+`subscription_active` when open, or `closed: <reason>` or
+`publish_pending: <reason>`. Any other value than `subscription_active`
+makes doctor exit 6. `authenticated` means the relay accepted this body's AUTH. It does not
 prove that the relay materialized the owner binding or that any viewer
 is ready.

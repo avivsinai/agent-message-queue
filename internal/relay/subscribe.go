@@ -17,6 +17,9 @@ const (
 	closeWriteTimeout = 5 * time.Second
 )
 
+// ErrSubscriptionClosed is a CLOSED from the relay for a subscription.
+var ErrSubscriptionClosed = errors.New("relay closed the subscription")
+
 // ErrOverflow closes a subscription whose consumer fell behind. Events are
 // never dropped silently: the consumer re-subscribes from its own cursor.
 var ErrOverflow = errors.New("relay subscription overflowed; resubscribe from your cursor")
@@ -159,7 +162,9 @@ func (c *Conn) routeClosed(subID, reason string) {
 	s := c.subs[subID]
 	c.mu.Unlock()
 	if s != nil {
-		c.endSub(s, fmt.Errorf("relay closed subscription: %s", reason))
+		// The reason is relay-controlled text: it rides in RemoteError, whose
+		// Error() is only the category, so it never reaches a status file.
+		c.endSub(s, &RemoteError{Kind: ErrSubscriptionClosed, Reason: reason})
 	}
 }
 

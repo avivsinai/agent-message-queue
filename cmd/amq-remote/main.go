@@ -1080,6 +1080,10 @@ func doctor(args []string) (any, int, error) {
 			if sh.State != string(relay.StateAuthenticated) {
 				code = protocol.ExitActionRequired
 			}
+			// A commands share also needs its DM surface open.
+			if sh.Commands != "" && sh.Commands != "subscription_active" {
+				code = protocol.ExitActionRequired
+			}
 		}
 	case !errors.Is(rerr, os.ErrNotExist):
 		report["relay_error"] = rerr.Error()
