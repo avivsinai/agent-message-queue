@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -70,12 +71,9 @@ func runInstall(args []string) int {
 		fmt.Fprintln(os.Stderr, "amq-acp install: set exactly one of --to or --remote-target")
 		return exitUsage
 	}
-	token := *to
-	if token == "" {
-		token = *remote
-	}
-	if !harnessToken.MatchString(token) {
-		fmt.Fprintf(os.Stderr, "amq-acp install: %q is not a harness id token\n", token)
+	token, err := harnessFileToken(*to, *remote)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "amq-acp install:", err)
 		return exitUsage
 	}
 
@@ -114,14 +112,6 @@ func buildHarness(to, remote, token string) (buzzHarness, error) {
 	if err != nil {
 		return buzzHarness{}, err
 	}
-	base, err := absoluteEnv("AM_BASE_ROOT")
-	if err != nil {
-		return buzzHarness{}, err
-	}
-	session, err := plainEnv("AM_SESSION")
-	if err != nil {
-		return buzzHarness{}, err
-	}
 	me, err := plainEnv("AM_ME")
 	if err != nil {
 		return buzzHarness{}, err
@@ -134,16 +124,30 @@ func buildHarness(to, remote, token string) (buzzHarness, error) {
 		return buzzHarness{}, err
 	}
 	env := map[string]string{
-		"AM_ROOT":      root,
-		"AM_BASE_ROOT": base,
-		"AM_SESSION":   session,
-		"AM_ME":        me,
+		"AM_ROOT": root,
+		"AM_ME":   me,
 	}
+	base, err := optionalAbsoluteEnv("AM_BASE_ROOT")
+	if err != nil {
+		return buzzHarness{}, err
+	}
+	if base != "" {
+		env["AM_BASE_ROOT"] = base
+	}
+	session, err := optionalPlainEnv("AM_SESSION")
+	if err != nil {
+		return buzzHarness{}, err
+	}
+	if session != "" {
+		env["AM_SESSION"] = session
+	}
+	label := "AMQ → " + token + " (" + projectName(root, base) + ")"
 	hint := harnessHintPrefix + " Prompts go to handle " + to + "."
 	if to != "" {
 		env["AMQ_ACP_TO"] = to
 	} else {
 		env["AMQ_ACP_REMOTE_TARGET"] = remote
+		label = "AMQ remote → " + remote + " (" + projectName(root, base) + ")"
 		hint = harnessHintPrefix + " Remote target " + remote + "."
 	}
 	for _, key := range []string{"AM_ROOT_ID", "AM_BASE_ROOT_ID"} {
@@ -153,13 +157,30 @@ func buildHarness(to, remote, token string) (buzzHarness, error) {
 	}
 	return buzzHarness{
 		ID:                     "amq_" + token,
-		Label:                  "AMQ → " + token + " (" + projectName(base) + ")",
+		Label:                  label,
 		Command:                command,
 		Args:                   []string{},
 		Env:                    env,
 		InstallInstructionsURL: harnessDocsURL,
 		InstallHint:            hint,
 	}, nil
+}
+
+// harnessFileToken is the harness id after amq_. A mailbox handle is used as
+// itself. A remote target may contain ':' (claude:98402); that colon becomes
+// '_' in the file name, and the raw target stays in the environment.
+func harnessFileToken(to, remote string) (string, error) {
+	if to != "" {
+		if !harnessToken.MatchString(to) {
+			return "", fmt.Errorf("%q is not a harness id token", to)
+		}
+		return to, nil
+	}
+	token := strings.ReplaceAll(remote, ":", "_")
+	if !harnessToken.MatchString(token) {
+		return "", fmt.Errorf("%q is not a harness id token", remote)
+	}
+	return token, nil
 }
 
 func absoluteEnv(key string) (string, error) {
@@ -173,19 +194,48 @@ func absoluteEnv(key string) (string, error) {
 	return value, nil
 }
 
-func plainEnv(key string) (string, error) {
+func optionalAbsoluteEnv(key string) (string, error) {
 	value := strings.TrimSpace(os.Getenv(key))
-	if value == "" || strings.ContainsAny(value, `/\`) {
+	if value == "" {
+		return "", nil
+	}
+	if !filepath.IsAbs(value) {
+		return "", contextInstallError(key + " must be absolute")
+	}
+	return value, nil
+}
+
+func plainEnv(key string) (string, error) {
+	value, err := optionalPlainEnv(key)
+	if err != nil || value == "" {
+		if err != nil {
+			return "", err
+		}
 		return "", contextInstallError(key + " is not set")
 	}
 	return value, nil
 }
 
-func projectName(base string) string {
-	if filepath.Base(base) == ".agent-mail" {
-		base = filepath.Dir(base)
+func optionalPlainEnv(key string) (string, error) {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return "", nil
 	}
-	name := filepath.Base(base)
+	if strings.ContainsAny(value, `/\`) {
+		return "", contextInstallError(key + " is not set")
+	}
+	return value, nil
+}
+
+func projectName(root, base string) string {
+	dir := root
+	if base != "" {
+		dir = base
+	}
+	if filepath.Base(dir) == ".agent-mail" {
+		dir = filepath.Dir(dir)
+	}
+	name := filepath.Base(dir)
 	if name == "." || name == string(filepath.Separator) {
 		return "amq"
 	}
@@ -203,6 +253,24 @@ func currentExecutable() (string, error) {
 	}
 	if !filepath.IsAbs(resolved) {
 		return "", fmt.Errorf("amq-acp path %s is not absolute", resolved)
+	}
+	// A Homebrew bin/amq-acp symlink and the Cellar binary are the same file.
+	// EvalSymlinks would store the versioned Cellar path, which brew cleanup
+	// removes. Prefer the PATH entry when it names this executable.
+	looked, err := exec.LookPath("amq-acp")
+	if err != nil {
+		return resolved, nil
+	}
+	if !filepath.IsAbs(looked) {
+		looked, err = filepath.Abs(looked)
+		if err != nil {
+			return resolved, nil
+		}
+	}
+	lookedInfo, lookedErr := os.Stat(looked)
+	exeInfo, exeErr := os.Stat(exe)
+	if lookedErr == nil && exeErr == nil && os.SameFile(lookedInfo, exeInfo) {
+		return looked, nil
 	}
 	return resolved, nil
 }
