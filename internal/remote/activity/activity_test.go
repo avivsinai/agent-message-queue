@@ -172,6 +172,86 @@ func TestLongTextIsResplitUnder64KiB(t *testing.T) {
 	}
 }
 
+func TestClaudeTranscriptPublishesDecryptableFrames(t *testing.T) {
+	body := nostr.Generate()
+	owner := nostr.Generate()
+	var got []nostr.Event
+	sink := testSink(body, owner, func(_ context.Context, evt nostr.Event) error {
+		got = append(got, evt)
+		return nil
+	})
+	const hiddenPath = "/Users/aviv.s/secret/transcript.go"
+	lines := []string{
+		`{"type":"user","uuid":"u1","sessionId":"thread-1","timestamp":"2026-09-23T06:00:00.000000000Z","message":{"role":"user","content":"where is the parser"}}`,
+		`{"type":"assistant","uuid":"a1","sessionId":"thread-1","timestamp":"2026-09-23T06:00:01.000000000Z","message":{"role":"assistant","content":[{"type":"text","text":"Looking."},{"type":"tool_use","id":"toolu_1","name":"Read","input":{"file_path":"` + hiddenPath + `"}}]}}`,
+		`{"type":"user","uuid":"r1","sessionId":"thread-1","timestamp":"2026-09-23T06:00:02.000000000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"package claude"}]}}`,
+	}
+	for _, line := range lines {
+		if err := sink.AcceptClaude(context.Background(), line); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(got) != 4 {
+		t.Fatalf("frames = %d, want 4", len(got))
+	}
+	key, err := nip44.GenerateConversationKey(body.Public(), owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []struct{ update, text, toolID string }{
+		{"user_message_chunk", "where is the parser", ""},
+		{"agent_message_chunk", "Looking.", ""},
+		{"tool_call", "Read", "toolu_1"},
+		{"tool_call_update", "package claude", "toolu_1"},
+	}
+	for i, evt := range got {
+		if evt.Kind != KindTelemetry || evt.PubKey != body.Public() || !evt.VerifySignature() {
+			t.Fatalf("event %d is not a signed 24200 frame", i)
+		}
+		if !hasTag(evt, "p", owner.Public().Hex()) || !hasTag(evt, "agent", body.Public().Hex()) || !hasTag(evt, "frame", "telemetry") {
+			t.Fatalf("tags = %#v", evt.Tags)
+		}
+		for _, tag := range evt.Tags {
+			joined := strings.Join(tag, " ")
+			if strings.Contains(joined, hiddenPath) || strings.Contains(joined, want[i].text) {
+				t.Fatalf("clear tag %q carries transcript data", joined)
+			}
+		}
+		plain, err := nip44.Decrypt(evt.Content, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(plain, hiddenPath) {
+			t.Fatalf("frame %d copied a local path", i)
+		}
+		var obs observerJSON
+		if err := json.Unmarshal([]byte(plain), &obs); err != nil {
+			t.Fatal(err)
+		}
+		if obs.Seq != uint64(i+1) || obs.Kind != "session_update" || obs.Provenance != "native_projection" || obs.SessionID != "thread-1" {
+			t.Fatalf("observation = %#v", obs)
+		}
+		var note struct {
+			Params struct {
+				Update struct {
+					SessionUpdate string `json:"sessionUpdate"`
+					ToolCallID    string `json:"toolCallId"`
+					Content       struct {
+						Text string `json:"text"`
+					} `json:"content"`
+				} `json:"update"`
+			} `json:"params"`
+		}
+		if err := json.Unmarshal(obs.Payload, &note); err != nil {
+			t.Fatal(err)
+		}
+		gotUpdate := note.Params.Update
+		if gotUpdate.SessionUpdate != want[i].update || gotUpdate.Content.Text != want[i].text || gotUpdate.ToolCallID != want[i].toolID {
+			t.Fatalf("update = %#v", gotUpdate)
+		}
+	}
+}
+
 func testSink(body, owner nostr.SecretKey, publish Publish) *Sink {
 	return &Sink{
 		ThreadID: "thread-1",

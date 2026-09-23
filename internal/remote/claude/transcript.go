@@ -142,6 +142,13 @@ type transcriptEntry struct {
 	// array; for an absorbed frame, the queued prompt. Tool results decode
 	// to "".
 	Text string
+	// Blocks are the content blocks the line actually carried. Text stays
+	// the joined text blocks so the ladder's correlation is unchanged.
+	Blocks []contentBlock
+	// SessionID and UUID are the line's own ids when present. They are not
+	// paths.
+	SessionID string
+	UUID      string
 	// MsgID is origin.msg_id of a peer-delivered entry: the msg_id of the
 	// frame we wrote. It is the ONLY delivery-ownership key.
 	MsgID string
@@ -166,6 +173,8 @@ type peerOrigin struct {
 // 2026-09-22). ok is false for undecodable or untyped lines.
 func parseTranscriptLine(line string) (transcriptEntry, bool) {
 	var raw struct {
+		SessionID  string      `json:"sessionId"`
+		UUID       string      `json:"uuid"`
 		Type       string      `json:"type"`
 		IsMeta     bool        `json:"isMeta"`
 		Timestamp  string      `json:"timestamp"`
@@ -182,10 +191,15 @@ func parseTranscriptLine(line string) (transcriptEntry, bool) {
 	if err := json.Unmarshal([]byte(line), &raw); err != nil || raw.Type == "" {
 		return transcriptEntry{}, false
 	}
-	e := transcriptEntry{Type: raw.Type, Meta: raw.IsMeta, Text: decodeContent(raw.Message.Content)}
+	text, blocks := decodeContentBlocks(raw.Message.Content)
+	e := transcriptEntry{Type: raw.Type, Meta: raw.IsMeta, Text: text, Blocks: blocks, SessionID: raw.SessionID, UUID: raw.UUID}
 	origin := raw.Origin
 	if raw.Type == "attachment" && raw.Attachment != nil && raw.Attachment.Type == "queued_command" {
 		e.Type, e.Absorbed, e.Meta, e.Text, origin = "user", true, false, raw.Attachment.Prompt, raw.Attachment.Origin
+		e.Blocks = nil
+		if e.Text != "" {
+			e.Blocks = []contentBlock{{Type: "text", Text: e.Text}}
+		}
 	}
 	if origin != nil && origin.Kind == "peer" {
 		e.MsgID = origin.MsgID
@@ -204,25 +218,93 @@ func parseTranscriptLine(line string) (transcriptEntry, bool) {
 // JSON string as-is, a block array as its text blocks joined by newlines.
 // Anything else (tool results, unknown shapes) yields "".
 func decodeContent(raw json.RawMessage) string {
+	text, _ := decodeContentBlocks(raw)
+	return text
+}
+
+type contentBlock struct {
+	Type string
+	Text string
+	Name string
+	ID   string
+}
+
+// decodeContentBlocks is the one content walk. Text blocks feed the ladder.
+// tool_use and tool_result are kept beside that text, and tool_use input is
+// not copied: it carries local paths.
+func decodeContentBlocks(raw json.RawMessage) (string, []contentBlock) {
 	if len(raw) == 0 {
-		return ""
+		return "", nil
 	}
 	var s string
 	if err := json.Unmarshal(raw, &s); err == nil {
-		return s
+		if s == "" {
+			return "", nil
+		}
+		return s, []contentBlock{{Type: "text", Text: s}}
 	}
 	var blocks []struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
+		Type      string          `json:"type"`
+		Text      string          `json:"text"`
+		Name      string          `json:"name"`
+		ID        string          `json:"id"`
+		ToolUseID string          `json:"tool_use_id"`
+		Content   json.RawMessage `json:"content"`
 	}
 	if err := json.Unmarshal(raw, &blocks); err != nil {
-		return ""
+		return "", nil
 	}
 	var parts []string
+	var out []contentBlock
 	for _, b := range blocks {
-		if b.Type == "text" && b.Text != "" {
+		switch b.Type {
+		case "text":
+			if b.Text == "" {
+				continue
+			}
 			parts = append(parts, b.Text)
+			out = append(out, contentBlock{Type: "text", Text: b.Text})
+		case "tool_use":
+			if b.Name == "" && b.ID == "" {
+				continue
+			}
+			out = append(out, contentBlock{Type: "tool_use", Name: b.Name, ID: b.ID})
+		case "tool_result":
+			out = append(out, contentBlock{Type: "tool_result", ID: b.ToolUseID, Text: decodeContent(b.Content)})
 		}
 	}
-	return strings.Join(parts, "\n")
+	return strings.Join(parts, "\n"), out
+}
+
+// TranscriptBlock is one content block parseTranscriptLine already walked.
+// Tool input is omitted: it carries local paths.
+type TranscriptBlock struct {
+	Type string
+	Text string
+	Name string
+	ID   string
+}
+
+// TranscriptLine is the activity view of one parsed transcript line.
+type TranscriptLine struct {
+	Type      string
+	Meta      bool
+	SessionID string
+	UUID      string
+	TS        int64
+	Blocks    []TranscriptBlock
+}
+
+// ParseTranscriptLine is the exported form of the adapter's one transcript
+// parse. Callers must not decode the JSONL a second way.
+func ParseTranscriptLine(line string) (TranscriptLine, bool) {
+	e, ok := parseTranscriptLine(line)
+	if !ok {
+		return TranscriptLine{}, false
+	}
+	out := TranscriptLine{Type: e.Type, Meta: e.Meta, SessionID: e.SessionID, UUID: e.UUID, TS: e.TS}
+	for _, b := range e.Blocks {
+		out.Blocks = append(out.Blocks, TranscriptBlock{Type: b.Type, Text: b.Text, Name: b.Name, ID: b.ID})
+	}
+	return out, true
 }

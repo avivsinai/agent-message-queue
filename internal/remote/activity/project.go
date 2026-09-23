@@ -15,6 +15,8 @@ type observation struct {
 	SessionID string
 	TurnID    string
 	Text      string
+	Update    string
+	ToolID    string
 	At        time.Time
 }
 
@@ -56,18 +58,26 @@ func (o observation) payload() (json.RawMessage, error) {
 	case "turn_started", "turn_completed":
 		return json.RawMessage("{}"), nil
 	case "session_update":
+		sessionUpdate := o.Update
+		if sessionUpdate == "" {
+			sessionUpdate = "agent_message_chunk"
+		}
+		update := map[string]any{
+			"sessionUpdate": sessionUpdate,
+			"content": map[string]string{
+				"type": "text",
+				"text": o.Text,
+			},
+		}
+		if o.ToolID != "" {
+			update["toolCallId"] = o.ToolID
+		}
 		note := map[string]any{
 			"jsonrpc": "2.0",
 			"method":  "session/update",
 			"params": map[string]any{
 				"sessionId": o.SessionID,
-				"update": map[string]any{
-					"sessionUpdate": "agent_message_chunk",
-					"content": map[string]string{
-						"type": "text",
-						"text": o.Text,
-					},
-				},
+				"update":    update,
 			},
 		}
 		return json.Marshal(note)
