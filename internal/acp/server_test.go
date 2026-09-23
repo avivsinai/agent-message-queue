@@ -391,8 +391,42 @@ func readInboxMessageSubject(t *testing.T, root, agent, subject string) format.M
 }
 
 // deliverReply delivers a message from the configured peer on threadID, the
-// same way an amq reply arrives.
+// same way `amq reply` does: it refs the newest cockpit prompt waiting on that
+// thread, if there is one.
 func deliverReply(t *testing.T, cfg Config, threadID, body string) {
+	t.Helper()
+	var refs []string
+	if prompt, ok := newestPromptOnThread(cfg.Root, cfg.To, threadID); ok {
+		refs = []string{prompt}
+	}
+	deliverReplyWithRefs(t, cfg, threadID, body, refs...)
+}
+
+// newestPromptOnThread returns the id of the newest cockpit prompt on
+// threadID in agent's inbox.
+func newestPromptOnThread(root, agent, threadID string) (string, bool) {
+	entries, err := os.ReadDir(fsq.AgentInboxNew(root, agent))
+	if err != nil {
+		return "", false
+	}
+	best, bestCreated := "", ""
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".md") {
+			continue
+		}
+		message, err := format.ReadMessageFile(filepath.Join(fsq.AgentInboxNew(root, agent), entry.Name()))
+		if err != nil || message.Header.Thread != threadID || message.Header.Subject != CockpitPromptSubject {
+			continue
+		}
+		if message.Header.Created > bestCreated {
+			best, bestCreated = message.Header.ID, message.Header.Created
+		}
+	}
+	return best, best != ""
+}
+
+// deliverReplyWithRefs delivers a peer message on threadID with explicit refs.
+func deliverReplyWithRefs(t *testing.T, cfg Config, threadID, body string, refs ...string) {
 	t.Helper()
 	now := time.Now()
 	id, err := format.NewMessageID(now)
@@ -407,6 +441,7 @@ func deliverReply(t *testing.T, cfg Config, threadID, body string) {
 		Thread:  threadID,
 		Subject: "reply",
 		Created: now.UTC().Format(time.RFC3339Nano),
+		Refs:    refs,
 	}, Body: body}
 	data, err := message.Marshal()
 	if err != nil {

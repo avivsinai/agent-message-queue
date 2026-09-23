@@ -39,6 +39,8 @@ const transcriptChunkBytes = 4 << 20
 // byte offset.
 type transcriptRead struct {
 	lines []string
+	// starts[i] is the byte offset where lines[i] begins.
+	starts []int64
 	// next is the offset just past the last consumed byte: the end of the
 	// last complete line, or of a discarded over-long line segment.
 	next int64
@@ -100,10 +102,13 @@ func readTranscriptFrom(path string, off int64, skipping bool) (transcriptRead, 
 		return out, nil
 	}
 	end := pos + last
+	start := pos
 	for _, line := range bytes.Split(buf[pos:end], []byte{'\n'}) {
 		if len(line) > 0 {
 			out.lines = append(out.lines, string(line))
+			out.starts = append(out.starts, off+int64(start))
 		}
+		start += len(line) + 1
 	}
 	out.next = off + int64(end) + 1
 	return out, nil
@@ -130,7 +135,8 @@ type transcriptEntry struct {
 	// opposed to a user entry that starts a new turn.
 	Absorbed bool
 	// Meta marks harness-injected user entries (isMeta: caveats, command
-	// output). They are not prompts and never start or end a turn.
+	// output). They are not prompts and never start or end a turn. A peer
+	// delivery (MsgID set) is never Meta.
 	Meta bool
 	// Text is the content string, or the joined text blocks of a block
 	// array; for an absorbed frame, the queued prompt. Tool results decode
@@ -183,6 +189,10 @@ func parseTranscriptLine(line string) (transcriptEntry, bool) {
 	}
 	if origin != nil && origin.Kind == "peer" {
 		e.MsgID = origin.MsgID
+		// A peer delivery is input, whatever its meta flag: v2.1.280 marks
+		// the delivered user entry isMeta:true (observed live 2026-09-22),
+		// which v2.1.278 did not, and the ladder skips meta entries.
+		e.Meta = false
 	}
 	if ts, err := time.Parse(time.RFC3339Nano, raw.Timestamp); err == nil {
 		e.TS = ts.UnixMilli()

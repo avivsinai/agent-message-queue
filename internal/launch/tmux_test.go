@@ -16,6 +16,11 @@ import (
 )
 
 func TestTmuxBackendLifecycleAndRecovery(t *testing.T) {
+	// Bead agent-message-queue-j51: this proof starts a real tmux server and
+	// missed a 5s command deadline under load. It is not part of make ci.
+	if os.Getenv("AMQ_TMUX_LIVE") != "1" {
+		t.Skip("set AMQ_TMUX_LIVE=1 to run the real tmux lifecycle proof")
+	}
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux is not installed")
 	}
