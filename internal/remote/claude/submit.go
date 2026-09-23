@@ -267,14 +267,18 @@ func (a *Attachment) confirmLoop(ctx context.Context, cancel context.CancelFunc)
 	}
 }
 
-// idleStop ends the poller when no run is left to confirm. The check and
-// the reset happen under a.mu, and Submit records its run under a.mu before
-// kicking, so a run added concurrently either keeps this loop alive or
-// starts a fresh one. The cursor is reset so the next run seeds it from its
-// own submit-time offset instead of replaying the idle gap.
+// idleStop ends the poller when no run is left to confirm and no activity
+// observer is registered. The check and the reset happen under a.mu, and
+// Submit records its run under a.mu before kicking, so a run added
+// concurrently either keeps this loop alive or starts a fresh one. The
+// cursor is reset so the next run seeds it from its own submit-time offset
+// instead of replaying the idle gap.
 func (a *Attachment) idleStop() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.activitySink != nil {
+		return false
+	}
 	for _, rec := range a.runs {
 		if !rec.terminal {
 			return false
@@ -322,6 +326,7 @@ func (a *Attachment) pollConfirmations() {
 	a.mu.Lock()
 	cur := a.cur
 	gen := a.curGen
+	actPath, actNext := a.activityPath, a.activityNext
 	fresh := cur.path != path
 	if fresh {
 		// New or switched transcript: start at the earliest submit-time
@@ -367,24 +372,44 @@ func (a *Attachment) pollConfirmations() {
 	cur.off, cur.skipping = rd.next, rd.skipping
 
 	var events []core.NativeEvent
+	var notes []ActivityNote
 	a.mu.Lock()
-	for _, line := range rd.lines {
-		if e, ok := parseTranscriptLine(line); ok {
-			events = a.applyEntryLocked(e, events)
+	for i, line := range rd.lines {
+		e, ok := parseTranscriptLine(line)
+		if !ok {
+			continue
 		}
+		events = a.applyEntryLocked(e, events)
+		if a.activitySink == nil {
+			continue
+		}
+		if actPath == path && i < len(rd.starts) && rd.starts[i] < actNext {
+			continue
+		}
+		notes = append(notes, a.activityNoteLocked(e, reg.SessionID))
 	}
 	if a.curGen == gen {
 		a.cur = cur
+	}
+	if err == nil && (a.activityPath != path || rd.next > a.activityNext) {
+		a.activityPath = path
+		a.activityNext = rd.next
 	}
 	if caughtUp {
 		events = a.bindStopsLocked(stops, events)
 	}
 	sink := a.eventSink
+	activity := a.activitySink
 	a.mu.Unlock()
 
 	if sink != nil {
 		for _, ev := range events {
 			sink(ev)
+		}
+	}
+	if activity != nil {
+		for _, note := range notes {
+			activity(note)
 		}
 	}
 }
@@ -404,6 +429,19 @@ func (a *Attachment) pollConfirmations() {
 func (a *Attachment) applyEntryLocked(e transcriptEntry, events []core.NativeEvent) []core.NativeEvent {
 	switch {
 	case e.Type == "user" && !e.Meta && e.Text != "":
+		if !e.Absorbed {
+			if id := e.UUID; id != "" {
+				a.setActivityTurn(id, e.TS)
+			} else if e.MsgID != "" {
+				a.setActivityTurn(e.MsgID, e.TS)
+			}
+		} else if a.activityTurn == "" {
+			if id := e.UUID; id != "" {
+				a.setActivityTurn(id, e.TS)
+			} else if e.MsgID != "" {
+				a.setActivityTurn(e.MsgID, e.TS)
+			}
+		}
 		if rec := a.runByMsgIDLocked(e.MsgID); rec != nil {
 			if !rec.submitted {
 				rec.submitted, rec.userTS = true, e.TS
@@ -432,6 +470,31 @@ func (a *Attachment) applyEntryLocked(e transcriptEntry, events []core.NativeEve
 		}
 	}
 	return events
+}
+
+func (a *Attachment) setActivityTurn(id string, ts int64) {
+	if id == "" {
+		return
+	}
+	a.activityTurn = id
+	a.activityTurnTS = ts
+}
+
+// activityNoteLocked records the cursor session and the turn opened by the
+// latest user boundary. Caller holds a.mu and has already applied e.
+func (a *Attachment) activityNoteLocked(e transcriptEntry, cursorSession string) ActivityNote {
+	session := cursorSession
+	if e.SessionID != "" {
+		session = e.SessionID
+	}
+	return ActivityNote{
+		Line: TranscriptLine{
+			Type: e.Type, Meta: e.Meta, SessionID: e.SessionID, UUID: e.UUID, TS: e.TS,
+			Blocks: e.Blocks,
+		},
+		SessionID: session,
+		TurnID:    a.activityTurn,
+	}
 }
 
 // runByMsgIDLocked returns the non-terminal run whose frame carried msgID.
@@ -502,6 +565,13 @@ func (a *Attachment) bindStopsLocked(stops stopMarkers, events []core.NativeEven
 			break
 		}
 		a.stopConsumed = s.end
+		// A Stop ends the turn it belongs to. A newer user boundary in the
+		// same batch has already replaced activityTurn; an older Stop must
+		// leave that turn in place (codex #868 r2).
+		if a.activityTurnTS == 0 || s.ts >= a.activityTurnTS {
+			a.activityTurn = ""
+			a.activityTurnTS = 0
+		}
 		if done == nil {
 			continue
 		}
