@@ -184,19 +184,26 @@ func (c *Carrier) IngestReaction(evt nostr.Event) error {
 	if created.After(now.Add(maxFutureSkew)) || now.Sub(created) > MutationWindow {
 		return nil // a stale cancel gesture never executes
 	}
-	cmd, _ := json.Marshal(map[string]string{"ref": ref})
-	if _, _, err := c.ledger.Claim(Claim{EventID: evt.ID.Hex(), Owner: c.binding.Owner, Channel: c.binding.Channel, Op: OpCancel, Target: c.binding.Target, CreatedAt: int64(evt.CreatedAt), Command: cmd}); err != nil {
+	if err := c.eligible(now); err != nil {
 		return err
 	}
-	return c.statusOrCancel(evt, OpCancel, ref)
+	if _, settled, err := c.ledger.Settled(evt.ID.Hex()); err != nil || settled {
+		return err
+	}
+	cmd, _ := json.Marshal(map[string]string{"ref": ref})
+	claim, _, err := c.ledger.Claim(c.claimFor(evt, OpCancel, "", "", created.Add(MutationWindow), cmd))
+	if err != nil || !c.owns(claim) {
+		return err
+	}
+	return c.statusOrCancel(evt, OpCancel, ref, created.Add(MutationWindow))
 }
 
 // Ingest handles one verified owner event from the subscription. The claim
-// is persisted before the endpoint sees the command, and a redelivered
-// event replays its stored claim, so one signed event is at most one
-// request. Direct answers (inspect, status, cancel, unsupported) are
-// prepared in the outbox keyed by the event; the submit's result row
-// follows through Publish.
+// is persisted before the endpoint sees the command, and the command's
+// settlement after, so one signed event is at most one decision: a
+// redelivered settled event is not sent to the endpoint again. Direct
+// answers (inspect, status, cancel, unsupported) are prepared in the outbox
+// keyed by the event; the submit's result row follows through Publish.
 func (c *Carrier) Ingest(evt nostr.Event) error {
 	return c.ingest(evt, Normalize)
 }
@@ -209,34 +216,44 @@ func (c *Carrier) IngestMention(evt nostr.Event) error {
 }
 
 func (c *Carrier) ingest(evt nostr.Event, normalize func(nostr.Event, Binding, time.Time) (Normalized, error)) error {
-	n, err := normalize(evt, c.binding, c.now())
+	now := c.now()
+	n, err := normalize(evt, c.binding, now)
 	if errors.Is(err, ErrNotForUs) || errors.Is(err, ErrStale) {
 		return nil // not ours, or too old to act on: no reply flood on replay
+	}
+	// The whole enabled surface must be granted before anything is admitted:
+	// a share whose owner never enabled buzz-dm must not run work it cannot
+	// answer (codex #866 r1 #3).
+	if gerr := c.eligible(now); gerr != nil {
+		return gerr
+	}
+	if _, settled, serr := c.ledger.Settled(evt.ID.Hex()); serr != nil || settled {
+		return serr
 	}
 	if err != nil {
 		return c.answer(evt, err.Error())
 	}
-	claim := Claim{
-		EventID: evt.ID.Hex(), Owner: c.binding.Owner, Channel: tagValue(evt, "h"),
-		Op: n.Op, RequestID: n.RequestID, Target: c.binding.Target, CreatedAt: int64(evt.CreatedAt),
-	}
-	if !n.NotAfter.IsZero() {
-		claim.NotAfter = protocol.FormatTime(n.NotAfter)
-	}
+	claim := c.claimFor(evt, n.Op, n.RequestID, "", n.NotAfter, nil)
 	if n.Op == OpSubmit {
 		// The epoch is fixed at first sight and stored in the claim, so a
-		// later import never retargets a new epoch.
+		// later import never retargets a new epoch. The native session must
+		// be the one the operator approved (codex #866 r1 #2).
 		s, err := c.inspect()
 		if err != nil {
 			return c.answer(evt, "cannot reach the shared session: "+err.Error())
 		}
+		if err := c.fence(s); err != nil {
+			return c.settleAnswer(evt, Settlement{Op: n.Op, State: "refused"}, err.Error())
+		}
 		claim.Epoch = s.Epoch
 	}
-	cmdText := map[string]string{"text": n.Text, "ref": n.Ref}
-	claim.Command, _ = json.Marshal(cmdText)
+	claim.Command, _ = json.Marshal(map[string]string{"text": n.Text, "ref": n.Ref})
 	claim, _, err = c.ledger.Claim(claim)
 	if err != nil {
 		return err
+	}
+	if !c.owns(claim) {
+		return nil // claimed under another share binding: never acted on here
 	}
 	switch claim.Op {
 	case OpSubmit:
@@ -244,14 +261,77 @@ func (c *Carrier) ingest(evt nostr.Event, normalize func(nostr.Event, Binding, t
 	case OpInspect:
 		s, err := c.inspect()
 		if err != nil {
-			return c.answer(evt, "inspect failed: "+err.Error())
+			return c.settleAnswer(evt, Settlement{Op: claim.Op}, "inspect failed: "+err.Error())
 		}
-		return c.answer(evt, sessionText(s))
+		return c.settleAnswer(evt, Settlement{Op: claim.Op}, sessionText(s))
 	case OpStatus, OpCancel:
-		return c.statusOrCancel(evt, claim.Op, n.Ref)
+		return c.statusOrCancel(evt, claim.Op, n.Ref, n.NotAfter)
 	default:
-		return c.answer(evt, "unsupported command; use /inspect, /status <ref> or /cancel <ref>, or plain text to submit")
+		return c.settleAnswer(evt, Settlement{Op: claim.Op}, "unsupported command; use /inspect, /status <ref> or /cancel <ref>, or plain text to submit")
 	}
+}
+
+// claimFor is the claim of evt under this carrier's binding.
+func (c *Carrier) claimFor(evt nostr.Event, op, requestID, epoch string, notAfter time.Time, cmd json.RawMessage) Claim {
+	cl := Claim{
+		EventID: evt.ID.Hex(), Owner: c.binding.Owner, Body: c.binding.Body, Relay: c.binding.RelayHost,
+		Channel: tagValue(evt, "h"), Op: op, RequestID: requestID, Target: c.binding.Target, Epoch: epoch,
+		CreatedAt: int64(evt.CreatedAt), Command: cmd,
+	}
+	if cl.Channel == "" {
+		cl.Channel = c.binding.Channel // a reaction carries no h
+	}
+	if !notAfter.IsZero() {
+		cl.NotAfter = protocol.FormatTime(notAfter)
+	}
+	return cl
+}
+
+// owns reports whether a stored claim was made under this carrier's
+// binding. A claim from an earlier binding (another channel, body, relay or
+// target) is never replayed here (codex #866 r1 #6).
+func (c *Carrier) owns(cl Claim) bool {
+	return cl.Owner == c.binding.Owner && cl.Body == c.binding.Body && cl.Relay == c.binding.RelayHost &&
+		cl.Target == c.binding.Target && (cl.Channel == c.binding.Channel || c.binding.Mentions[cl.Channel])
+}
+
+// ownsReceipt is owns for a request's receipt.
+func (c *Carrier) ownsReceipt(r Receipt) bool {
+	return r.Owner == c.binding.Owner && r.Body == c.binding.Body && r.Relay == c.binding.RelayHost &&
+		r.Target == c.binding.Target && r.Channel == c.binding.Channel
+}
+
+// eligible reports whether the enrolled generation grants every kind the
+// DM surface signs, now.
+func (c *Carrier) eligible(now time.Time) error {
+	for _, kind := range []uint16{KindDM, KindEdit} {
+		if _, err := c.grant(kind, now); err != nil {
+			return fmt.Errorf("%w: kind %d: %v", ErrNoGrant, kind, err)
+		}
+	}
+	return nil
+}
+
+// ErrNotShared is a target whose attached native session is not the one the
+// operator approved for sharing, or that cannot prove its identity.
+var ErrNotShared = errors.New("the attached session is not the one approved for sharing")
+
+// fence checks the attached session against the approved native identity.
+func (c *Carrier) fence(s protocol.Session) error {
+	if c.binding.NativeSession == "" || s.NativeSessionID != c.binding.NativeSession {
+		return ErrNotShared
+	}
+	return nil
+}
+
+// Shared reports whether the target's attached native session is the one
+// the operator approved for sharing.
+func (c *Carrier) Shared() error {
+	s, err := c.inspect()
+	if err != nil {
+		return err
+	}
+	return c.fence(s)
 }
 
 func (c *Carrier) inspect() (protocol.Session, error) {
@@ -277,43 +357,70 @@ func (c *Carrier) submit(evt nostr.Event, claim Claim, text string) error {
 	}
 	out, err := c.handle(cmd, c.sourceFor(evt))
 	if err != nil {
-		return c.answer(evt, "submit refused: "+err.Error())
+		return c.settleAnswer(evt, Settlement{Op: claim.Op, State: "refused"}, "submit refused: "+err.Error())
 	}
 	reply, ok := out.(protocol.Reply)
 	if !ok {
 		return fmt.Errorf("unexpected submit reply %T", out)
 	}
-	// Record ownership now, before any row: /status and /cancel may only
-	// address requests this edge submitted for this body.
-	if _, owned, err := c.ledger.ReceiptFor(reply.Snapshot.RequestRef); err != nil {
+	ref := reply.Snapshot.RequestRef
+	// Record ownership and the native address now, before any row: /status
+	// and /cancel may only address requests this edge submitted for this
+	// share, and cancel needs the target and epoch.
+	if _, owned, err := c.ledger.ReceiptFor(ref); err != nil {
 		return err
 	} else if !owned {
-		if err := c.ledger.PutReceipt(Receipt{RequestRef: reply.Snapshot.RequestRef}); err != nil {
+		if err := c.ledger.PutReceipt(c.receiptFor(ref, claim)); err != nil {
 			return err
 		}
+	}
+	if _, err := c.ledger.Settle(evt.ID.Hex(), Settlement{Op: claim.Op, RequestRef: ref, State: string(reply.Snapshot.State)}); err != nil {
+		return err
 	}
 	return c.Publish(reply.Snapshot, c.sourceFor(evt).Origin)
 }
 
-func (c *Carrier) statusOrCancel(evt nostr.Event, op, ref string) error {
-	if _, owned, err := c.ledger.ReceiptFor(ref); err != nil {
+// receiptFor is a new request's receipt under this binding.
+func (c *Carrier) receiptFor(ref string, claim Claim) Receipt {
+	return Receipt{
+		RequestRef: ref, Owner: c.binding.Owner, Body: c.binding.Body, Relay: c.binding.RelayHost,
+		Channel: c.binding.Channel, Target: claim.Target, Epoch: claim.Epoch,
+	}
+}
+
+// statusOrCancel answers /status or performs /cancel (or a ❌) for a request
+// this share submitted. Cancel carries the request's stored target and
+// epoch and the owner command's signed deadline (codex #866 r1 #1).
+func (c *Carrier) statusOrCancel(evt nostr.Event, op, ref string, notAfter time.Time) error {
+	rc, owned, err := c.ledger.ReceiptFor(ref)
+	if err != nil {
 		return err
-	} else if !owned {
-		return c.answer(evt, "unknown request "+ref+" for this session")
+	}
+	if !owned || !c.ownsReceipt(rc) {
+		return c.settleAnswer(evt, Settlement{Op: op}, "unknown request "+ref+" for this session")
 	}
 	cmd := &protocol.Command{Schema: protocol.SchemaCommand, Op: protocol.OpRequestGet, RequestRef: ref}
 	if op == OpCancel {
 		cmd.Op = protocol.OpRequestCancel
+		cmd.TargetID, cmd.Epoch, cmd.NotAfter = rc.Target, rc.Epoch, protocol.FormatTime(notAfter)
 	}
 	out, err := c.handle(cmd, c.source(evt.ID.Hex(), ""))
 	if err != nil {
-		return c.answer(evt, op+" failed: "+err.Error())
+		return c.settleAnswer(evt, Settlement{Op: op, RequestRef: ref, State: "refused"}, op+" failed: "+err.Error())
 	}
 	reply, ok := out.(protocol.Reply)
 	if !ok {
 		return fmt.Errorf("unexpected %s reply %T", op, out)
 	}
-	return c.answer(evt, snapshotText(reply.Snapshot, reply.Outcome.Message))
+	return c.settleAnswer(evt, Settlement{Op: op, RequestRef: ref, State: string(reply.Snapshot.State)}, snapshotText(reply.Snapshot, reply.Outcome.Message))
+}
+
+// settleAnswer records the command's settlement, then prepares its answer.
+func (c *Carrier) settleAnswer(evt nostr.Event, st Settlement, text string) error {
+	if _, err := c.ledger.Settle(evt.ID.Hex(), st); err != nil {
+		return err
+	}
+	return c.answer(evt, text)
 }
 
 // answer prepares a direct reply to one ingress event, once.
@@ -328,58 +435,83 @@ func (c *Carrier) answer(to nostr.Event, text string) error {
 }
 
 // Publish is this carrier's core.Publisher for records whose origin is
-// this body. The first revision creates the request's one row (kind 9);
-// later revisions are kind 40003 edits of that row, each dated strictly
-// after the previous one. Returning nil means the output is durably owed
-// in the outbox; Flush delivers it.
+// this body and DM channel. A request has one root row (kind 9) under a
+// revision-independent key, so a crash after preparing it is recovered,
+// never duplicated; later revisions are kind 40003 edits of that row, each
+// dated strictly after the previous one (codex #866 r1 #5). Returning nil
+// means the output is durably owed in the outbox; Flush delivers it.
 func (c *Carrier) Publish(snap protocol.Snapshot, origin map[string]string) error {
-	if origin["carrier"] != "buzz" || origin["body"] != c.binding.Body {
+	if origin["carrier"] != "buzz" || origin["body"] != c.binding.Body || origin["channel"] != c.binding.Channel {
 		return fmt.Errorf("record %s is not this Buzz carrier's", snap.RequestRef)
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	rc, _, err := c.ledger.ReceiptFor(snap.RequestRef)
+	rc, owned, err := c.ledger.ReceiptFor(snap.RequestRef)
 	if err != nil {
 		return err
 	}
-	if rc.RequestRef == "" {
-		rc.RequestRef = snap.RequestRef
-	}
-	if int(snap.Revision) <= rc.Revision && rc.RootEventID != "" {
-		return nil // already prepared this or a newer revision
+	if !owned || !c.ownsReceipt(rc) {
+		return fmt.Errorf("record %s has no receipt under this share binding", snap.RequestRef)
 	}
 	text := snapshotText(snap, "")
-	now := c.now().Unix()
-	key := fmt.Sprintf("row/%s/%08d", snap.RequestRef, snap.Revision)
-	var evt nostr.Event
 	if rc.RootEventID == "" {
-		evt = nostr.Event{CreatedAt: nostr.Timestamp(now), Kind: KindDM, Tags: c.originTags(origin), Content: text}
-	} else {
-		if now <= rc.LastEditAt {
-			return ErrClockBehind
+		evt := nostr.Event{CreatedAt: nostr.Timestamp(c.now().Unix()), Kind: KindDM, Tags: c.originTags(origin), Content: text}
+		stored, err := c.prepareRow(rootKey(snap.RequestRef), evt, int(snap.Revision))
+		if err != nil {
+			return err
 		}
-		evt = nostr.Event{CreatedAt: nostr.Timestamp(now), Kind: KindEdit, Tags: c.editTags(rc.RootEventID), Content: text}
-	}
-	if err := c.sign(&evt); err != nil {
+		rc.RootEventID, rc.LastEditAt, rc.Revision = stored.ID.Hex(), int64(stored.CreatedAt), stored.revision
+		if err := c.ledger.PutReceipt(rc); err != nil {
+			return err
+		}
+	} else if err := c.ledger.ensureRowMap(rc); err != nil {
 		return err
+	}
+	if int(snap.Revision) <= rc.Revision {
+		return nil // this or a newer revision is already prepared
+	}
+	now := c.now().Unix()
+	if now <= rc.LastEditAt {
+		return ErrClockBehind
+	}
+	evt := nostr.Event{CreatedAt: nostr.Timestamp(now), Kind: KindEdit, Tags: c.editTags(rc.RootEventID), Content: text}
+	stored, err := c.prepareRow(fmt.Sprintf("row/%s/%08d", snap.RequestRef, snap.Revision), evt, int(snap.Revision))
+	if err != nil {
+		return err
+	}
+	rc.LastEditAt, rc.Revision = int64(stored.CreatedAt), stored.revision
+	return c.ledger.PutReceipt(rc)
+}
+
+// rootKey is a request's one root-row obligation; it sorts before every
+// edit key of the same request, so Flush sends the root first.
+func rootKey(ref string) string { return fmt.Sprintf("row/%s/%08d", ref, 0) }
+
+// preparedRow is a stored row event and the revision it shows.
+type preparedRow struct {
+	nostr.Event
+	revision int
+}
+
+// prepareRow signs and stores a row event for key, or returns the one
+// already stored there.
+func (c *Carrier) prepareRow(key string, evt nostr.Event, revision int) (preparedRow, error) {
+	if err := c.sign(&evt); err != nil {
+		return preparedRow{}, err
 	}
 	raw, err := json.Marshal(evt)
 	if err != nil {
-		return err
+		return preparedRow{}, err
 	}
-	stored, err := c.ledger.Prepare(key, raw)
+	stored, err := c.ledger.PrepareRevision(key, raw, revision)
 	if err != nil {
-		return err
+		return preparedRow{}, err
 	}
 	var prepared nostr.Event
 	if err := json.Unmarshal(stored.Event, &prepared); err != nil {
-		return err
+		return preparedRow{}, err
 	}
-	if rc.RootEventID == "" {
-		rc.RootEventID = prepared.ID.Hex()
-	}
-	rc.LastEditAt, rc.Revision = int64(prepared.CreatedAt), int(snap.Revision)
-	return c.ledger.PutReceipt(rc)
+	return preparedRow{Event: prepared, revision: stored.Revision}, nil
 }
 
 func (c *Carrier) prepare(key string, evt nostr.Event) error {
@@ -394,25 +526,58 @@ func (c *Carrier) prepare(key string, evt nostr.Event) error {
 	return err
 }
 
-// Flush sends every owed output in order and records acceptance on the
-// relay's matching OK. An explicit rejection or an unknown result leaves
-// the output owed; the same stored bytes are sent again next time.
-func (c *Carrier) Flush(ctx context.Context, pub Publisher) error {
+// Flush bounds for one pass (codex #866 r1 #8): at most flushBatch sends,
+// each waiting at most publishTimeout for its OK, so a stalled relay never
+// holds the edge.
+const (
+	flushBatch     = 16
+	publishTimeout = 10 * time.Second
+)
+
+// Flush sends owed outputs in order and records acceptance on the relay's
+// matching OK. Before each send it re-checks that the output belongs to this
+// share (body and DM channel), that the enrolled generation still grants
+// its kind, and that gate (the verified membership) still admits export;
+// an output that fails stays owed and is never re-signed (codex #866 r1 #3,
+// #6). An explicit rejection or an unknown result leaves it owed; the same
+// stored bytes are sent again next time. The ledger lock is not held while
+// a send waits.
+func (c *Carrier) Flush(ctx context.Context, pub Publisher, gate func() error) error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	pending, err := c.ledger.Pending()
+	c.mu.Unlock()
 	if err != nil {
 		return err
 	}
-	for _, o := range pending {
+	for i, o := range pending {
+		if i == flushBatch {
+			return nil
+		}
 		var evt nostr.Event
 		if err := json.Unmarshal(o.Event, &evt); err != nil {
 			return fmt.Errorf("outbox %s: %w", o.Key, err)
 		}
-		if err := pub(ctx, evt); err != nil {
+		if evt.PubKey.Hex() != c.binding.Body || tagValue(evt, "h") != c.binding.Channel {
+			continue // another binding's output: owed, never redirected
+		}
+		if _, err := c.grant(uint16(evt.Kind), c.now()); err != nil {
+			return fmt.Errorf("%w: kind %d: %v", ErrNoGrant, evt.Kind, err)
+		}
+		if gate != nil {
+			if err := gate(); err != nil {
+				return err
+			}
+		}
+		pctx, cancel := context.WithTimeout(ctx, publishTimeout)
+		err := pub(pctx, evt)
+		cancel()
+		if err != nil {
 			return fmt.Errorf("publish %s: %w", o.Key, err)
 		}
-		if err := c.ledger.MarkAccepted(o.Key); err != nil {
+		c.mu.Lock()
+		err = c.ledger.MarkAccepted(o.Key)
+		c.mu.Unlock()
+		if err != nil {
 			return err
 		}
 	}

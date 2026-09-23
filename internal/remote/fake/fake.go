@@ -129,16 +129,18 @@ func (r *Runtime) Inspect() protocol.Session {
 		ev = r.evidenceOverride // may be nil
 	}
 	return protocol.Session{
-		Schema:       protocol.SchemaSession,
-		TargetID:     r.targetID,
-		Epoch:        r.epoch,
-		Harness:      "fake",
-		DisplayName:  "fake runtime",
-		Attachment:   r.attachment,
-		Status:       status,
-		Capabilities: caps,
-		Evidence:     ev,
-		ObservedAt:   "2026-09-08T10:00:00Z",
+		Schema:      protocol.SchemaSession,
+		TargetID:    r.targetID,
+		Epoch:       r.epoch,
+		Harness:     "fake",
+		DisplayName: "fake runtime",
+		// The fake's native session is its target: a relay share pins it.
+		NativeSessionID: r.targetID,
+		Attachment:      r.attachment,
+		Status:          status,
+		Capabilities:    caps,
+		Evidence:        ev,
+		ObservedAt:      "2026-09-08T10:00:00Z",
 	}
 }
 

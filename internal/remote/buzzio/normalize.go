@@ -38,6 +38,10 @@ type Binding struct {
 	// Mentions are the opted-in channels where an owner message that
 	// mentions the body (p tag) submits; output still goes to Channel.
 	Mentions map[string]bool
+	// NativeSession is the harness session the operator approved for
+	// sharing (manifest native_session_id); commands admit only while the
+	// target's attached session proves this identity.
+	NativeSession string
 }
 
 // Normalized is an owner command reduced to what the endpoint needs.

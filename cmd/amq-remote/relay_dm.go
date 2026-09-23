@@ -7,6 +7,7 @@ import (
 	"io"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"fiatjaf.com/nostr"
@@ -51,6 +52,7 @@ func buildDMEdges(root, stateDir string, r *manifest.Relay, warn io.Writer) *dmE
 		return d
 	}
 	d.relay, d.self = r.URL, r.Self
+	dupBodies := map[string]bool{}
 	for _, sh := range r.Shares {
 		if sh.Presence {
 			d.addPresence(root, sh, warn)
@@ -70,7 +72,19 @@ func buildDMEdges(root, stateDir string, r *manifest.Relay, warn io.Writer) *dmE
 			say(warn, "relay share %s: commands disabled: %v", sh.Session, err)
 			continue
 		}
-		b := buzzio.Binding{Owner: sh.OwnerPubKey, Body: creds.Body.PublicKeyHex(), Channel: sh.DMChannelID, Target: sh.Target, RelayHost: r.URL}
+		b := buzzio.Binding{Owner: sh.OwnerPubKey, Body: creds.Body.PublicKeyHex(), Channel: sh.DMChannelID, Target: sh.Target, RelayHost: r.URL, NativeSession: sh.NativeSessionID}
+		// One body serves one share: two sessions whose key directories hold
+		// the same body are both refused, never merged (codex #866 r1 #2).
+		if prev, dup := d.byBody[b.Body]; dup || dupBodies[b.Body] {
+			if prev != nil {
+				d.state[prev.share.Session] = "refused: its body key is also enrolled for another share"
+				delete(d.byBody, b.Body)
+			}
+			dupBodies[b.Body] = true
+			d.state[sh.Session] = "refused: its body key is also enrolled for another share"
+			say(warn, "relay share %s: commands disabled: body key shared with another session", sh.Session)
+			continue
+		}
 		if len(sh.MentionChannels) > 0 {
 			b.Mentions = map[string]bool{}
 			for _, ch := range sh.MentionChannels {
@@ -78,7 +92,18 @@ func buildDMEdges(root, stateDir string, r *manifest.Relay, warn io.Writer) *dmE
 			}
 		}
 		ds := &dmShare{share: sh, binding: b}
-		ds.carrier = buzzio.NewCarrier(ledger, b, creds.Body.Secret(), enrolledGrant(root, sh.Session, b), d.handleLate)
+		grant := enrolledGrant(root, sh.Session, b)
+		for _, kind := range []uint16{buzzio.KindDM, buzzio.KindEdit} {
+			if _, gerr := grant(kind, time.Now()); gerr != nil && err == nil {
+				err = gerr
+			}
+		}
+		if err != nil {
+			d.state[sh.Session] = fmt.Sprintf("refused: buzz-dm is not enrolled (run amq-remote share --session %s --enable buzz-dm): %v", sh.Session, err)
+			say(warn, "relay share %s: commands disabled: buzz-dm is not enrolled", sh.Session)
+			continue
+		}
+		ds.carrier = buzzio.NewCarrier(ledger, b, creds.Body.Secret(), grant, d.handleLate)
 		d.byBody[b.Body] = ds
 		d.state[sh.Session] = "configured"
 	}
@@ -200,13 +225,17 @@ const dmOverlap = 5 * time.Minute
 var verifyMembership = buzzio.VerifyDMMembership
 
 // membershipRecheck is how often an open DM surface re-reads membership.
-// The snapshots are cached relay-side, so a change is seen within about this
-// interval plus the relay's cache, never instantly.
+//
+// Freshness policy (lead ruling 2026-09-23, codex #866 r1): Buzz offers no
+// read of current membership; the relay-signed 39002/39000 snapshots are
+// stored events behind a relay-side cache. v1 accepts them as the gate: the
+// surface opens on a verified snapshot and closes on the first re-read that
+// no longer verifies. No bound on how late a change shows is claimed.
 var membershipRecheck = time.Minute
 
 // errMembershipChanged ends one open DM session when a re-read no longer
-// proves owner-and-body membership.
-var errMembershipChanged = errors.New("DM channel membership changed")
+// proves owner-and-body membership or the approved native session.
+var errMembershipChanged = errors.New("DM channel membership or shared session changed")
 
 // relaySelf returns the pinned relay self key, or reads it from the relay's
 // NIP-11 document.
@@ -217,19 +246,26 @@ func (d *dmEdges) relaySelf(ctx context.Context) (string, error) {
 	return buzzio.RelaySelf(ctx, d.relay)
 }
 
-// verify resolves the relay self key and checks membership once.
+// verify checks, once, that the channel membership is exactly owner and body
+// and that the target's attached session is the approved native session.
 func (ds *dmShare) verify(ctx context.Context, conn *relay.Conn, edges *dmEdges) error {
 	self, err := edges.relaySelf(ctx)
 	if err != nil {
 		return err
 	}
-	return verifyMembership(ctx, conn, self, ds.binding)
+	if err := verifyMembership(ctx, conn, self, ds.binding); err != nil {
+		return err
+	}
+	return ds.carrier.Shared()
 }
 
 // runDM is one authenticated connection's DM edge. The surface opens only
-// while membership verifies; a failed check or a changed membership closes
-// it (no command admitted, no result published) and it re-checks on the
-// recheck interval. It returns when the connection or ctx ends.
+// while verify passes; a failed check or a change closes it (no command
+// admitted, no output exported) and it re-checks on the recheck interval. A
+// subscription that ends on a healthy socket (CLOSED, overflow) closes the
+// connection, so the client's reconnect restores every subscription and
+// re-reads the overlap window (codex #866 r1 #9). It returns when the
+// connection or ctx ends.
 func (ds *dmShare) runDM(ctx context.Context, conn *relay.Conn, edges *dmEdges, warn io.Writer) {
 	session := ds.share.Session
 	for {
@@ -237,6 +273,14 @@ func (ds *dmShare) runDM(ctx context.Context, conn *relay.Conn, edges *dmEdges, 
 		if err == nil {
 			err = ds.serveDM(ctx, conn, edges, warn)
 			if !errors.Is(err, errMembershipChanged) {
+				if ctx.Err() == nil {
+					select {
+					case <-conn.Done():
+					default:
+						edges.setState(session, "closed: "+fmt.Sprint(err)+"; reconnecting")
+						conn.Close()
+					}
+				}
 				return
 			}
 		}
@@ -251,10 +295,13 @@ func (ds *dmShare) runDM(ctx context.Context, conn *relay.Conn, edges *dmEdges, 
 	}
 }
 
-// serveDM subscribes to the owner's messages and reactions in the bound
-// channel, ingests them, and flushes owed output, re-verifying membership
-// on the recheck interval. It returns errMembershipChanged when a re-read
-// fails, and nil or a subscription error when the session ends otherwise.
+// serveDM subscribes to the owner's messages, reactions and mentions,
+// ingests them, and runs two bounded loops beside the ingest loop: the
+// membership re-check and the outbox flush. Each command admission and each
+// export checks the verified flag, so a stalled publication never delays a
+// membership change or command handling (codex #866 r1 #8). It returns
+// errMembershipChanged when a re-check fails, and nil or a subscription
+// error when the session ends otherwise.
 func (ds *dmShare) serveDM(ctx context.Context, conn *relay.Conn, edges *dmEdges, warn io.Writer) error {
 	session := ds.share.Session
 	owner, err := nostr.PubKeyFromHex(ds.binding.Owner)
@@ -262,89 +309,119 @@ func (ds *dmShare) serveDM(ctx context.Context, conn *relay.Conn, edges *dmEdges
 		edges.setState(session, "closed: owner pubkey: "+err.Error())
 		return err
 	}
+	since := nostr.Timestamp(time.Now().Add(-dmOverlap).Unix())
 	sub, err := conn.Subscribe(ctx, "dm-"+session, nostr.Filter{
-		Kinds:   []nostr.Kind{buzzio.KindDM},
-		Authors: []nostr.PubKey{owner},
-		Tags:    nostr.TagMap{"h": {ds.binding.Channel}},
-		Since:   nostr.Timestamp(time.Now().Add(-dmOverlap).Unix()),
+		Kinds: []nostr.Kind{buzzio.KindDM}, Authors: []nostr.PubKey{owner},
+		Tags: nostr.TagMap{"h": {ds.binding.Channel}}, Since: since,
 	})
 	if err != nil {
-		edges.setState(session, "closed: subscribe: "+err.Error())
-		return err
+		return fmt.Errorf("subscribe: %w", err)
 	}
 	defer sub.Close()
 	// Reactions need their own owner-authored subscription with no h filter:
 	// the phone's reaction carries the target row, not the channel. Each is
 	// validated against this edge's persisted rows (IngestReaction).
 	reactions, err := conn.Subscribe(ctx, "dm-react-"+session, nostr.Filter{
-		Kinds:   []nostr.Kind{buzzio.KindReaction},
-		Authors: []nostr.PubKey{owner},
-		Since:   nostr.Timestamp(time.Now().Add(-dmOverlap).Unix()),
+		Kinds: []nostr.Kind{buzzio.KindReaction}, Authors: []nostr.PubKey{owner}, Since: since,
 	})
 	if err != nil {
-		edges.setState(session, "closed: subscribe reactions: "+err.Error())
-		return err
+		return fmt.Errorf("subscribe reactions: %w", err)
 	}
 	defer reactions.Close()
 	// Owner messages that mention the body in an opted-in channel (slice 5).
-	// Without mention channels this subscription stays nil and never fires.
+	// Without mention channels these channels stay nil and never fire.
 	var mentions *relay.Sub
 	var mentionEvents <-chan nostr.Event
 	var mentionsDone <-chan struct{}
 	if len(ds.share.MentionChannels) > 0 {
 		mentions, err = conn.Subscribe(ctx, "dm-mention-"+session, nostr.Filter{
-			Kinds:   []nostr.Kind{buzzio.KindDM},
-			Authors: []nostr.PubKey{owner},
-			Tags:    nostr.TagMap{"h": ds.share.MentionChannels, "p": {ds.binding.Body}},
-			Since:   nostr.Timestamp(time.Now().Add(-dmOverlap).Unix()),
+			Kinds: []nostr.Kind{buzzio.KindDM}, Authors: []nostr.PubKey{owner},
+			Tags: nostr.TagMap{"h": ds.share.MentionChannels, "p": {ds.binding.Body}}, Since: since,
 		})
 		if err != nil {
-			edges.setState(session, "closed: subscribe mentions: "+err.Error())
-			return err
+			return fmt.Errorf("subscribe mentions: %w", err)
 		}
 		defer mentions.Close()
 		mentionEvents, mentionsDone = mentions.Events, mentions.Done()
 	}
 	edges.setState(session, "subscription_active")
-	flush := time.NewTicker(time.Second)
-	defer flush.Stop()
-	recheck := time.NewTicker(membershipRecheck)
-	defer recheck.Stop()
+
+	var open atomic.Bool
+	open.Store(true)
+	gate := func() error {
+		if !open.Load() {
+			return errMembershipChanged
+		}
+		return nil
+	}
+	changed := make(chan error, 1)
+	var loops sync.WaitGroup
+	defer loops.Wait()
+	lctx, stop := context.WithCancel(ctx)
+	defer stop() // runs before loops.Wait
+	loops.Add(2)
+	go func() {
+		defer loops.Done()
+		t := time.NewTicker(membershipRecheck)
+		defer t.Stop()
+		for {
+			select {
+			case <-lctx.Done():
+				return
+			case <-t.C:
+				if err := ds.verify(lctx, conn, edges); err != nil && lctx.Err() == nil {
+					open.Store(false)
+					changed <- err
+					return
+				}
+			}
+		}
+	}()
+	go func() {
+		defer loops.Done()
+		t := time.NewTicker(time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-lctx.Done():
+				return
+			case <-t.C:
+				if err := ds.carrier.Flush(lctx, conn.Publish, gate); err != nil {
+					if open.Load() {
+						edges.setState(session, "publish_pending: "+err.Error())
+					}
+				} else if open.Load() && edges.stateOf(session) != "subscription_active" {
+					edges.setState(session, "subscription_active")
+				}
+			}
+		}
+	}()
+	ingest := func(kind string, evt nostr.Event, fn func(nostr.Event) error) {
+		if !open.Load() {
+			return // re-read from the overlap window once the surface reopens
+		}
+		if err := fn(evt); err != nil {
+			say(warn, "relay share %s: %s %s: %v", session, kind, evt.ID.Hex(), err)
+		}
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
+		case err := <-changed:
+			return fmt.Errorf("%w: %v", errMembershipChanged, err)
 		case <-sub.Done():
-			edges.setState(session, "closed: "+fmt.Sprint(sub.Err()))
-			return sub.Err()
+			return fmt.Errorf("dm subscription ended: %v", sub.Err())
 		case evt := <-sub.Events:
-			if err := ds.carrier.Ingest(evt); err != nil {
-				say(warn, "relay share %s: ingest %s: %v", session, evt.ID.Hex(), err)
-			}
+			ingest("ingest", evt, ds.carrier.Ingest)
 		case <-reactions.Done():
-			edges.setState(session, "closed: "+fmt.Sprint(reactions.Err()))
-			return reactions.Err()
+			return fmt.Errorf("reaction subscription ended: %v", reactions.Err())
 		case evt := <-reactions.Events:
-			if err := ds.carrier.IngestReaction(evt); err != nil {
-				say(warn, "relay share %s: reaction %s: %v", session, evt.ID.Hex(), err)
-			}
+			ingest("reaction", evt, ds.carrier.IngestReaction)
 		case <-mentionsDone:
-			edges.setState(session, "closed: "+fmt.Sprint(mentions.Err()))
-			return mentions.Err()
+			return fmt.Errorf("mention subscription ended: %v", mentions.Err())
 		case evt := <-mentionEvents:
-			if err := ds.carrier.IngestMention(evt); err != nil {
-				say(warn, "relay share %s: mention %s: %v", session, evt.ID.Hex(), err)
-			}
-		case <-recheck.C:
-			if err := ds.verify(ctx, conn, edges); err != nil {
-				return fmt.Errorf("%w: %v", errMembershipChanged, err)
-			}
-		case <-flush.C:
-			if err := ds.carrier.Flush(ctx, conn.Publish); err != nil {
-				edges.setState(session, "publish_pending: "+err.Error())
-			} else if edges.stateOf(session) != "subscription_active" {
-				edges.setState(session, "subscription_active")
-			}
+			ingest("mention", evt, ds.carrier.IngestMention)
 		}
 	}
 }
