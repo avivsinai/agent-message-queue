@@ -144,7 +144,7 @@ type transcriptEntry struct {
 	Text string
 	// Blocks are the content blocks the line actually carried. Text stays
 	// the joined text blocks so the ladder's correlation is unchanged.
-	Blocks []contentBlock
+	Blocks []TranscriptBlock
 	// SessionID and UUID are the line's own ids when present. They are not
 	// paths.
 	SessionID string
@@ -198,7 +198,7 @@ func parseTranscriptLine(line string) (transcriptEntry, bool) {
 		e.Type, e.Absorbed, e.Meta, e.Text, origin = "user", true, false, raw.Attachment.Prompt, raw.Attachment.Origin
 		e.Blocks = nil
 		if e.Text != "" {
-			e.Blocks = []contentBlock{{Type: "text", Text: e.Text}}
+			e.Blocks = []TranscriptBlock{{Type: "text", Text: e.Text}}
 		}
 	}
 	if origin != nil && origin.Kind == "peer" {
@@ -222,7 +222,9 @@ func decodeContent(raw json.RawMessage) string {
 	return text
 }
 
-type contentBlock struct {
+// TranscriptBlock is one content block the transcript parse already walked.
+// Tool input is omitted: it carries local paths.
+type TranscriptBlock struct {
 	Type string
 	Text string
 	Name string
@@ -232,7 +234,7 @@ type contentBlock struct {
 // decodeContentBlocks is the one content walk. Text blocks feed the ladder.
 // tool_use and tool_result are kept beside that text, and tool_use input is
 // not copied: it carries local paths.
-func decodeContentBlocks(raw json.RawMessage) (string, []contentBlock) {
+func decodeContentBlocks(raw json.RawMessage) (string, []TranscriptBlock) {
 	if len(raw) == 0 {
 		return "", nil
 	}
@@ -241,7 +243,7 @@ func decodeContentBlocks(raw json.RawMessage) (string, []contentBlock) {
 		if s == "" {
 			return "", nil
 		}
-		return s, []contentBlock{{Type: "text", Text: s}}
+		return s, []TranscriptBlock{{Type: "text", Text: s}}
 	}
 	var blocks []struct {
 		Type      string          `json:"type"`
@@ -255,7 +257,7 @@ func decodeContentBlocks(raw json.RawMessage) (string, []contentBlock) {
 		return "", nil
 	}
 	var parts []string
-	var out []contentBlock
+	var out []TranscriptBlock
 	for _, b := range blocks {
 		switch b.Type {
 		case "text":
@@ -263,26 +265,17 @@ func decodeContentBlocks(raw json.RawMessage) (string, []contentBlock) {
 				continue
 			}
 			parts = append(parts, b.Text)
-			out = append(out, contentBlock{Type: "text", Text: b.Text})
+			out = append(out, TranscriptBlock{Type: "text", Text: b.Text})
 		case "tool_use":
 			if b.Name == "" && b.ID == "" {
 				continue
 			}
-			out = append(out, contentBlock{Type: "tool_use", Name: b.Name, ID: b.ID})
+			out = append(out, TranscriptBlock{Type: "tool_use", Name: b.Name, ID: b.ID})
 		case "tool_result":
-			out = append(out, contentBlock{Type: "tool_result", ID: b.ToolUseID, Text: decodeContent(b.Content)})
+			out = append(out, TranscriptBlock{Type: "tool_result", ID: b.ToolUseID, Text: decodeContent(b.Content)})
 		}
 	}
 	return strings.Join(parts, "\n"), out
-}
-
-// TranscriptBlock is one content block parseTranscriptLine already walked.
-// Tool input is omitted: it carries local paths.
-type TranscriptBlock struct {
-	Type string
-	Text string
-	Name string
-	ID   string
 }
 
 // TranscriptLine is the activity view of one parsed transcript line.
@@ -302,9 +295,8 @@ func ParseTranscriptLine(line string) (TranscriptLine, bool) {
 	if !ok {
 		return TranscriptLine{}, false
 	}
-	out := TranscriptLine{Type: e.Type, Meta: e.Meta, SessionID: e.SessionID, UUID: e.UUID, TS: e.TS}
-	for _, b := range e.Blocks {
-		out.Blocks = append(out.Blocks, TranscriptBlock{Type: b.Type, Text: b.Text, Name: b.Name, ID: b.ID})
-	}
-	return out, true
+	return TranscriptLine{
+		Type: e.Type, Meta: e.Meta, SessionID: e.SessionID, UUID: e.UUID, TS: e.TS,
+		Blocks: e.Blocks,
+	}, true
 }
