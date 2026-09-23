@@ -97,11 +97,15 @@ amq-acp install --to codex
 That writes `custom_harnesses/amq_codex.json` with mode 0600, the absolute
 `amq-acp` path, and `AM_ROOT`, `AM_BASE_ROOT`, `AM_SESSION`, `AM_ME`, and
 `AMQ_ACP_TO`. It prints `In Buzz Desktop: New agent, select <label>`.
-`--remote-target <target>` writes `AMQ_ACP_REMOTE_TARGET` instead of a mailbox
-handle. A target id such as `claude:98402` is kept in that variable; the file
-name replaces `:` with `_`. `AM_BASE_ROOT` and `AM_SESSION` are written only
-when this shell has them. `--remove` deletes only the file this command wrote.
-A harness file this command did not write is left unchanged.
+`--remote-target <target>` asks the endpoint which native session that target
+is attached to and writes `AMQ_ACP_REMOTE_TARGET` plus
+`AMQ_ACP_REMOTE_NATIVE_SESSION`. `AM_ME` is optional in that mode. A target id
+such as `claude:98402` is kept in `AMQ_ACP_REMOTE_TARGET`; the file name
+replaces `:` with `_`. If the endpoint is down or the target is unshared, the
+command refuses: start `amq-remote up --root $AM_ROOT` first. `AM_BASE_ROOT`
+and `AM_SESSION` are written only when this shell has them. `--remove` deletes
+only the file this command wrote. A harness file this command did not write is
+left unchanged.
 
 ## Buzz BYOH
 

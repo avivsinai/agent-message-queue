@@ -3,9 +3,13 @@ package main
 import (
 	"encoding/json"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/avivsinai/agent-message-queue/internal/remote/ipc"
 )
 
 func TestInstallToWritesHarness(t *testing.T) {
@@ -81,9 +85,15 @@ func TestInstallRemoveDeletesOnlyItsFile(t *testing.T) {
 
 // Claude #877 review 2026-09-23T13-05-33.108Z_pid93850_feca21ef: target ids
 // contain a colon. The file token maps it; the environment keeps the raw id.
+// Claude #877 2026-09-23T13-14-53.733Z_pid93509_0771f6ac: install pins the
+// native session the endpoint reports, and remote mode does not need AM_ME.
 func TestInstallRemoteTargetSetsEnv(t *testing.T) {
 	home, _, _ := pinInstallShell(t)
+	root := shortQueueRoot(t)
+	t.Setenv("AM_ME", "")
 	const target = "claude:98402"
+	const native = "native-98402"
+	serveNative(t, root, native, false)
 	stdout := captureStdout(t, func() int {
 		return run([]string{"install", "--remote-target", target})
 	})
@@ -94,8 +104,30 @@ func TestInstallRemoteTargetSetsEnv(t *testing.T) {
 	if harness.ID != "amq_claude_98402" || harness.Label != "AMQ remote → claude:98402 (agent-message-queue)" {
 		t.Fatalf("id=%q label=%q", harness.ID, harness.Label)
 	}
-	if harness.Env["AMQ_ACP_REMOTE_TARGET"] != target || harness.Env["AMQ_ACP_TO"] != "" {
+	if harness.Env["AMQ_ACP_REMOTE_TARGET"] != target || harness.Env["AMQ_ACP_REMOTE_NATIVE_SESSION"] != native ||
+		harness.Env["AMQ_ACP_TO"] != "" || harness.Env["AM_ME"] != "" {
 		t.Fatalf("env = %#v", harness.Env)
+	}
+}
+
+// Claude #877 2026-09-23T13-14-53.733Z_pid93509_0771f6ac: an unreachable
+// endpoint or an unshared target both tell the owner to start amq-remote.
+func TestInstallRemoteRefusesWithoutNativeSession(t *testing.T) {
+	pinInstallShell(t)
+	root := shortQueueRoot(t)
+	code, stderr := captureStderr(t, func() int {
+		return run([]string{"install", "--remote-target", "claude:98402"})
+	})
+	want := "start amq-remote up --root " + root + " first"
+	if code == 0 || !strings.Contains(stderr, want) {
+		t.Fatalf("unreachable exit %d stderr %q", code, stderr)
+	}
+	serveNative(t, root, "", true)
+	code, stderr = captureStderr(t, func() int {
+		return run([]string{"install", "--remote-target", "claude:98402"})
+	})
+	if code == 0 || !strings.Contains(stderr, want) {
+		t.Fatalf("unshared exit %d stderr %q", code, stderr)
 	}
 }
 
@@ -176,6 +208,65 @@ func readHarness(t *testing.T, path string) buzzHarness {
 		t.Fatal(err)
 	}
 	return harness
+}
+
+func shortQueueRoot(t *testing.T) string {
+	t.Helper()
+	root, err := os.MkdirTemp("", "ai")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	t.Setenv("AM_ROOT", root)
+	return root
+}
+
+func serveNative(t *testing.T, root, session string, unshared bool) {
+	t.Helper()
+	dir := filepath.Join(root, "extensions", "remote")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("unix", ipc.SocketPath(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			buf := make([]byte, 4096)
+			_, _ = conn.Read(buf)
+			body := `{"reply":{"native_session":"` + session + `"}}` + "\n"
+			if unshared {
+				body = `{"error":{"code":"unshared","message":"target has no native session identity"}}` + "\n"
+			}
+			_, _ = conn.Write([]byte(body))
+			_ = conn.Close()
+		}
+	}()
+}
+
+func captureStderr(t *testing.T, fn func() int) (int, string) {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := os.Stderr
+	os.Stderr = w
+	code := fn()
+	_ = w.Close()
+	os.Stderr = old
+	out, err := io.ReadAll(r)
+	_ = r.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return code, string(out)
 }
 
 func captureStdout(t *testing.T, fn func() int) string {

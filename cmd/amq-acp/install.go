@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/avivsinai/agent-message-queue/internal/remote/ipc"
 )
 
 const (
@@ -112,11 +114,12 @@ func buildHarness(to, remote, token string) (buzzHarness, error) {
 	if err != nil {
 		return buzzHarness{}, err
 	}
-	me, err := plainEnv("AM_ME")
-	if err != nil {
-		return buzzHarness{}, err
-	}
-	if !harnessToken.MatchString(me) {
+	me := strings.TrimSpace(os.Getenv("AM_ME"))
+	if to != "" {
+		if me == "" || !harnessToken.MatchString(me) {
+			return buzzHarness{}, contextInstallError("AM_ME is not a handle")
+		}
+	} else if me != "" && !harnessToken.MatchString(me) {
 		return buzzHarness{}, contextInstallError("AM_ME is not a handle")
 	}
 	command, err := currentExecutable()
@@ -125,7 +128,9 @@ func buildHarness(to, remote, token string) (buzzHarness, error) {
 	}
 	env := map[string]string{
 		"AM_ROOT": root,
-		"AM_ME":   me,
+	}
+	if me != "" {
+		env["AM_ME"] = me
 	}
 	base, err := optionalAbsoluteEnv("AM_BASE_ROOT")
 	if err != nil {
@@ -146,7 +151,12 @@ func buildHarness(to, remote, token string) (buzzHarness, error) {
 	if to != "" {
 		env["AMQ_ACP_TO"] = to
 	} else {
+		native, err := remoteNativeSession(root, remote)
+		if err != nil {
+			return buzzHarness{}, err
+		}
 		env["AMQ_ACP_REMOTE_TARGET"] = remote
+		env["AMQ_ACP_REMOTE_NATIVE_SESSION"] = native
 		label = "AMQ remote → " + remote + " (" + projectName(root, base) + ")"
 		hint = harnessHintPrefix + " Remote target " + remote + "."
 	}
@@ -169,6 +179,23 @@ func buildHarness(to, remote, token string) (buzzHarness, error) {
 // harnessFileToken is the harness id after amq_. A mailbox handle is used as
 // itself. A remote target may contain ':' (claude:98402); that colon becomes
 // '_' in the file name, and the raw target stays in the environment.
+// remoteNativeSession asks the endpoint which native session target is
+// attached to. That id is pinned into the harness. An unreachable endpoint
+// or an unshared target both refuse with the same next step.
+func remoteNativeSession(root, target string) (string, error) {
+	resp, err := ipc.Call(filepath.Join(root, "extensions", "remote"), ipc.Request{
+		Native: &ipc.NativeQuery{TargetID: target},
+	})
+	if err != nil || resp == nil || resp.Error != nil {
+		return "", fmt.Errorf("start amq-remote up --root %s first", root)
+	}
+	var reply ipc.NativeReply
+	if json.Unmarshal(resp.Reply, &reply) != nil || reply.NativeSession == "" {
+		return "", fmt.Errorf("start amq-remote up --root %s first", root)
+	}
+	return reply.NativeSession, nil
+}
+
 func harnessFileToken(to, remote string) (string, error) {
 	if to != "" {
 		if !harnessToken.MatchString(to) {
