@@ -47,18 +47,23 @@ func OpenLedger(stateDir string) (*Ledger, error) {
 // from the signed event, so a retried import can only ever address the same
 // request.
 type Claim struct {
-	EventID   string          `json:"event_id"`
-	Owner     string          `json:"owner"`
-	Body      string          `json:"body"`
-	Relay     string          `json:"relay"`
-	Channel   string          `json:"channel"`
-	Op        string          `json:"op"`
-	RequestID string          `json:"request_id,omitempty"`
-	Target    string          `json:"target"`
-	Epoch     string          `json:"epoch,omitempty"`
-	NotAfter  string          `json:"not_after,omitempty"`
-	Command   json.RawMessage `json:"command"`
-	CreatedAt int64           `json:"created_at"`
+	EventID string `json:"event_id"`
+	Owner   string `json:"owner"`
+	Body    string `json:"body"`
+	Relay   string `json:"relay"`
+	Channel string `json:"channel"`
+	// DMChannel and NativeSession complete the share binding the claim was
+	// made under: a mention's source channel is not its destination, and a
+	// replacement native session never inherits old work (codex #866 r3 #2).
+	DMChannel     string          `json:"dm_channel"`
+	NativeSession string          `json:"native_session"`
+	Op            string          `json:"op"`
+	RequestID     string          `json:"request_id,omitempty"`
+	Target        string          `json:"target"`
+	Epoch         string          `json:"epoch,omitempty"`
+	NotAfter      string          `json:"not_after,omitempty"`
+	Command       json.RawMessage `json:"command"`
+	CreatedAt     int64           `json:"created_at"`
 }
 
 // Claim records c if its event id is new, and returns the stored claim and
@@ -232,6 +237,19 @@ func (l *Ledger) Pending() ([]Outbound, error) {
 	return out, nil
 }
 
+// Prepared returns the output prepared for key, if any.
+func (l *Ledger) Prepared(key string) (Outbound, bool, error) {
+	raw, err := readBounded(filepath.Join(l.dir, "outbox", keyFile(key)))
+	if errors.Is(err, os.ErrNotExist) {
+		return Outbound{}, false, nil
+	}
+	if err != nil {
+		return Outbound{}, false, err
+	}
+	o, err := l.readOutbound(raw)
+	return o, err == nil, err
+}
+
 func (l *Ledger) readOutbound(raw []byte) (Outbound, error) {
 	var o Outbound
 	if err := json.Unmarshal(raw, &o); err != nil {
@@ -251,12 +269,13 @@ type Receipt struct {
 	// The share binding and native address the request was submitted
 	// under: cancel needs the target and epoch, and a changed share never
 	// adopts or redirects another binding's request (codex #866 r1 #1, #6).
-	Owner   string `json:"owner"`
-	Body    string `json:"body"`
-	Relay   string `json:"relay"`
-	Channel string `json:"channel"`
-	Target  string `json:"target"`
-	Epoch   string `json:"epoch"`
+	Owner         string `json:"owner"`
+	Body          string `json:"body"`
+	Relay         string `json:"relay"`
+	Channel       string `json:"channel"`
+	Target        string `json:"target"`
+	Epoch         string `json:"epoch"`
+	NativeSession string `json:"native_session"`
 }
 
 // PutReceipt writes a request's receipt (created when the request is
