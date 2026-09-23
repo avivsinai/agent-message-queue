@@ -81,13 +81,13 @@ func TestDMEdgeSubmitsOwnerMessageAndPublishesRow(t *testing.T) {
 	edges.bind(func(cmd *protocol.Command, src core.Source) (any, error) {
 		switch cmd.Op {
 		case protocol.OpSessionInspect:
-			return protocol.Session{TargetID: "fake", Epoch: "e_1", NativeSessionID: "thread-1"}, nil
+			return protocol.Session{TargetID: "fake", Epoch: "e_1"}, nil
 		case protocol.OpRequestSubmit:
 			submitted <- cmd.Input.Text
-			return protocol.Reply{Snapshot: protocol.Snapshot{RequestRef: "amqr1_dm", Revision: 1, State: protocol.StateRunning}}, nil
+			return protocol.Reply{Snapshot: protocol.Snapshot{RequestRef: protocol.EncodeRef(src.Host, cmd.TargetID, cmd.RequestID), Revision: 1, State: protocol.StateRunning}}, nil
 		}
 		return nil, nil
-	})
+	}, func(string) string { return "thread-1" })
 	ctx, cancel := context.WithCancel(context.Background())
 	wg := startRelays(ctx, root, stateDir, r, edges, io.Discard)
 	defer func() { cancel(); wg.Wait() }()

@@ -253,6 +253,10 @@ func Attach(socketPath, threadID string, opts ...Option) (*Attachment, error) {
 }
 
 // TargetID derives the stable target id for a thread.
+// NativeSessionID is the attached thread's id, the identity relay sharing
+// pins (core.NativeIdentifier).
+func (a *Attachment) NativeSessionID() string { return a.threadID }
+
 func TargetID(threadID string) string {
 	// The full de-hyphenated thread id, never truncated: two distinct thread
 	// ids must not collapse to one target (Pro B03). Codex thread ids are
@@ -309,7 +313,6 @@ func (a *Attachment) Inspect() protocol.Session {
 		Epoch:              a.epoch,
 		Harness:            "codex",
 		DisplayName:        "codex " + a.threadID,
-		NativeSessionID:    a.threadID,
 		Project:            a.cwd,
 		Attachment:         att,
 		Status:             status,

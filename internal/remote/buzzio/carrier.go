@@ -55,32 +55,51 @@ type Publisher func(ctx context.Context, evt nostr.Event) error
 // events into endpoint commands and endpoint snapshots into one editable
 // result row per request.
 type Carrier struct {
+	Signer
 	ledger  *Ledger
 	binding Binding
-	secret  [32]byte
-	grant   Grant
 	handle  Handler
-	now     func() time.Time
+	// identity returns the target's attached native session id (the
+	// endpoint's in-process NativeSessionID), "" when unproven.
+	identity func(target string) string
+	now      func() time.Time
 
 	mu sync.Mutex // serializes row preparation (edit dating) and flush
 }
 
 // NewCarrier builds the edge for one binding. secret is the body key and
 // grant looks up the enrolled owner grants every signed event needs.
-func NewCarrier(ledger *Ledger, b Binding, secret [32]byte, grant Grant, handle Handler) *Carrier {
-	return &Carrier{ledger: ledger, binding: b, secret: secret, grant: grant, handle: handle, now: time.Now}
+func NewCarrier(ledger *Ledger, b Binding, secret [32]byte, grant Grant, identity func(target string) string, handle Handler) *Carrier {
+	return &Carrier{Signer: Signer{secret: secret, grant: grant}, ledger: ledger, binding: b, handle: handle, identity: identity, now: time.Now}
 }
 
+// share is this carrier's full binding, recorded on every output.
+func (c *Carrier) share() ShareBinding {
+	return ShareBinding{
+		Relay: c.binding.RelayHost, Owner: c.binding.Owner, Body: c.binding.Body,
+		Channel: c.binding.Channel, Target: c.binding.Target, NativeSession: c.binding.NativeSession,
+	}
+}
+
+// Signer signs the body's events under the owner's enrolled grants.
+type Signer struct {
+	secret [32]byte
+	grant  Grant
+}
+
+// NewSigner returns a signer for the body key secret and its grants.
+func NewSigner(secret [32]byte, grant Grant) Signer { return Signer{secret: secret, grant: grant} }
+
 // sign enforces the owner's grant for the event's kind at its created_at,
-// attaches that grant as the NIP-OA provenance tag, and signs. An event no
-// grant admits is never signed.
-func (c *Carrier) sign(evt *nostr.Event) error {
-	tag, err := c.grant(uint16(evt.Kind), time.Unix(int64(evt.CreatedAt), 0))
+// attaches that grant as the one NIP-OA provenance tag, and signs. An event
+// no grant admits is never signed.
+func (s Signer) sign(evt *nostr.Event) error {
+	tag, err := s.grant(uint16(evt.Kind), time.Unix(int64(evt.CreatedAt), 0))
 	if err != nil {
 		return fmt.Errorf("%w: kind %d: %v", ErrNoGrant, evt.Kind, err)
 	}
 	evt.Tags = append(evt.Tags, nostr.Tag{"auth", tag.OwnerPubKey, tag.Conditions, tag.SigHex()})
-	return evt.Sign(c.secret)
+	return evt.Sign(s.secret)
 }
 
 // source is this carrier's identity to the endpoint: a stable,
@@ -182,6 +201,9 @@ func (c *Carrier) IngestReaction(evt nostr.Event) error {
 	if _, settled, err := c.ledger.Settled(evt.ID.Hex()); err != nil || settled {
 		return err
 	}
+	if err := c.fence(); err != nil {
+		return nil // a replacement native session is never acted on for a reaction
+	}
 	cmd, _ := json.Marshal(map[string]string{"ref": ref})
 	claim, _, err := c.ledger.Claim(c.claimFor(evt, OpCancel, "", "", created.Add(MutationWindow), cmd))
 	if err != nil || !c.owns(claim) {
@@ -225,22 +247,24 @@ func (c *Carrier) ingest(evt nostr.Event, normalize func(nostr.Event, Binding, t
 	if err != nil {
 		return c.answer(evt, err.Error())
 	}
+	// Every command, not only submit, runs only against the approved native
+	// session: /inspect of a replacement session is never answered (codex
+	// #866 r2 #7).
+	if err := c.fence(); err != nil {
+		return c.settleAnswer(evt, Settlement{Op: n.Op, State: "refused"}, err.Error())
+	}
 	claim := c.claimFor(evt, n.Op, n.RequestID, "", n.NotAfter, nil)
 	if n.Op == OpSubmit {
 		// The epoch is fixed at first sight and stored in the claim, so a
-		// later import never retargets a new epoch. The native session must
-		// be the one the operator approved (codex #866 r1 #2).
+		// later import never retargets a new epoch.
 		s, err := c.inspect()
 		if err != nil {
 			return c.answer(evt, "cannot reach the shared session: "+err.Error())
 		}
-		if err := c.fence(s); err != nil {
-			return c.settleAnswer(evt, Settlement{Op: n.Op, State: "refused"}, err.Error())
-		}
 		claim.Epoch = s.Epoch
 	}
 	claim.Command, _ = json.Marshal(map[string]string{"text": n.Text, "ref": n.Ref})
-	claim, _, err = c.ledger.Claim(claim)
+	claim, created, err := c.ledger.Claim(claim)
 	if err != nil {
 		return err
 	}
@@ -249,7 +273,7 @@ func (c *Carrier) ingest(evt nostr.Event, normalize func(nostr.Event, Binding, t
 	}
 	switch claim.Op {
 	case OpSubmit:
-		return c.submit(evt, claim, n.Text)
+		return c.submit(evt, claim, created, n.Text)
 	case OpInspect:
 		s, err := c.inspect()
 		if err != nil {
@@ -308,9 +332,11 @@ func (c *Carrier) eligible(now time.Time) error {
 // operator approved for sharing, or that cannot prove its identity.
 var ErrNotShared = errors.New("the attached session is not the one approved for sharing")
 
-// fence checks the attached session against the approved native identity.
-func (c *Carrier) fence(s protocol.Session) error {
-	if c.binding.NativeSession == "" || s.NativeSessionID != c.binding.NativeSession {
+// fence checks the target's attached native session against the approved
+// identity, through the endpoint's in-process accessor (never the session
+// wire schema, codex #866 r2 #6).
+func (c *Carrier) fence() error {
+	if c.binding.NativeSession == "" || c.identity == nil || c.identity(c.binding.Target) != c.binding.NativeSession {
 		return ErrNotShared
 	}
 	return nil
@@ -318,13 +344,7 @@ func (c *Carrier) fence(s protocol.Session) error {
 
 // Shared reports whether the target's attached native session is the one
 // the operator approved for sharing.
-func (c *Carrier) Shared() error {
-	s, err := c.inspect()
-	if err != nil {
-		return err
-	}
-	return c.fence(s)
-}
+func (c *Carrier) Shared() error { return c.fence() }
 
 func (c *Carrier) inspect() (protocol.Session, error) {
 	out, err := c.handle(&protocol.Command{Schema: protocol.SchemaCommand, Op: protocol.OpSessionInspect, TargetID: c.binding.Target}, c.source("", ""))
@@ -338,27 +358,17 @@ func (c *Carrier) inspect() (protocol.Session, error) {
 	return s, nil
 }
 
-func (c *Carrier) submit(evt nostr.Event, claim Claim, text string) error {
-	cmd := &protocol.Command{
-		Schema: protocol.SchemaCommand, Op: protocol.OpRequestSubmit,
-		RequestID: claim.RequestID, TargetID: claim.Target, Epoch: claim.Epoch, NotAfter: claim.NotAfter,
-		Input: &protocol.SubmitInput{
-			Text: text, Busy: protocol.BusyReject, Deliver: protocol.DeliverTurn,
-			MinEvidence: string(protocol.EvidenceAdmitted),
-		},
-	}
-	out, err := c.handle(cmd, c.sourceFor(evt))
-	if err != nil {
-		return c.settleAnswer(evt, Settlement{Op: claim.Op, State: "refused"}, "submit refused: "+err.Error())
-	}
-	reply, ok := out.(protocol.Reply)
-	if !ok {
-		return fmt.Errorf("unexpected submit reply %T", out)
-	}
-	ref := reply.Snapshot.RequestRef
-	// Record ownership and the native address now, before any row: /status
-	// and /cancel may only address requests this edge submitted for this
-	// share, and cancel needs the target and epoch.
+// submit dispatches a claimed submit. The request's ref is deterministic
+// (protocol.EncodeRef of source host, target and request id), so its
+// receipt is written before dispatch and a result is never stranded without
+// one (codex #866 r2 #2). A claim that already existed but has no
+// settlement is an interrupted import: the core's own decision is read back
+// first and only a request the core never saw is submitted, so an
+// interrupted busy rejection never turns into execution (codex #866 r2 #1).
+// The settlement is recorded only after the row is prepared.
+func (c *Carrier) submit(evt nostr.Event, claim Claim, created bool, text string) error {
+	src := c.sourceFor(evt)
+	ref := protocol.EncodeRef(src.Host, claim.Target, claim.RequestID)
 	if _, owned, err := c.ledger.ReceiptFor(ref); err != nil {
 		return err
 	} else if !owned {
@@ -366,10 +376,51 @@ func (c *Carrier) submit(evt nostr.Event, claim Claim, text string) error {
 			return err
 		}
 	}
-	if _, err := c.ledger.Settle(evt.ID.Hex(), Settlement{Op: claim.Op, RequestRef: ref, State: string(reply.Snapshot.State)}); err != nil {
+	var reply protocol.Reply
+	recovered := false
+	if !created {
+		out, err := c.handle(&protocol.Command{Schema: protocol.SchemaCommand, Op: protocol.OpRequestGet, RequestRef: ref}, src)
+		var refusal *protocol.Refusal
+		switch {
+		case err == nil:
+			r, ok := out.(protocol.Reply)
+			if !ok {
+				return fmt.Errorf("unexpected get reply %T", out)
+			}
+			reply, recovered = r, true
+		case errors.As(err, &refusal) && refusal.Code == protocol.CodeNotFound:
+			// the core never saw it: submit below
+		default:
+			return err // unknown: stay unsettled and retry on the next delivery
+		}
+	}
+	if !recovered {
+		cmd := &protocol.Command{
+			Schema: protocol.SchemaCommand, Op: protocol.OpRequestSubmit,
+			RequestID: claim.RequestID, TargetID: claim.Target, Epoch: claim.Epoch, NotAfter: claim.NotAfter,
+			Input: &protocol.SubmitInput{
+				Text: text, Busy: protocol.BusyReject, Deliver: protocol.DeliverTurn,
+				MinEvidence: string(protocol.EvidenceAdmitted),
+			},
+		}
+		out, err := c.handle(cmd, src)
+		if err != nil {
+			return c.settleAnswer(evt, Settlement{Op: claim.Op, RequestRef: ref, State: "refused"}, "submit refused: "+err.Error())
+		}
+		r, ok := out.(protocol.Reply)
+		if !ok {
+			return fmt.Errorf("unexpected submit reply %T", out)
+		}
+		reply = r
+	}
+	if reply.Snapshot.RequestRef != ref {
+		return fmt.Errorf("endpoint answered request %s with ref %s, want %s", claim.RequestID, reply.Snapshot.RequestRef, ref)
+	}
+	if err := c.Publish(reply.Snapshot, src.Origin); err != nil {
 		return err
 	}
-	return c.Publish(reply.Snapshot, c.sourceFor(evt).Origin)
+	_, err := c.ledger.Settle(evt.ID.Hex(), Settlement{Op: claim.Op, RequestRef: ref, State: string(reply.Snapshot.State)})
+	return err
 }
 
 // receiptFor is a new request's receipt under this binding.
@@ -407,12 +458,16 @@ func (c *Carrier) statusOrCancel(evt nostr.Event, op, ref string, notAfter time.
 	return c.settleAnswer(evt, Settlement{Op: op, RequestRef: ref, State: string(reply.Snapshot.State)}, snapshotText(reply.Snapshot, reply.Outcome.Message))
 }
 
-// settleAnswer records the command's settlement, then prepares its answer.
+// settleAnswer prepares the command's answer, then records its settlement:
+// a failed answer leaves the command unsettled, so its redelivery answers it
+// (codex #866 r2 #3). The answer is keyed by the event, so a retry returns
+// the stored one.
 func (c *Carrier) settleAnswer(evt nostr.Event, st Settlement, text string) error {
-	if _, err := c.ledger.Settle(evt.ID.Hex(), st); err != nil {
+	if err := c.answer(evt, text); err != nil {
 		return err
 	}
-	return c.answer(evt, text)
+	_, err := c.ledger.Settle(evt.ID.Hex(), st)
+	return err
 }
 
 // answer prepares a direct reply to one ingress event, once.
@@ -466,14 +521,29 @@ func (c *Carrier) Publish(snap protocol.Snapshot, origin map[string]string) erro
 	if now <= rc.LastEditAt {
 		return ErrClockBehind
 	}
+	// Reserve the edit's second before preparing it: after a crash between
+	// the two, the next edit is still dated strictly later than any edit
+	// already prepared (codex #866 r2 #5).
+	rc.LastEditAt = now
+	if err := c.ledger.PutReceipt(rc); err != nil {
+		return err
+	}
 	evt := nostr.Event{CreatedAt: nostr.Timestamp(now), Kind: KindEdit, Tags: c.editTags(rc.RootEventID), Content: text}
 	stored, err := c.prepareRow(fmt.Sprintf("row/%s/%08d", snap.RequestRef, snap.Revision), evt, int(snap.Revision))
 	if err != nil {
 		return err
 	}
-	rc.LastEditAt, rc.Revision = int64(stored.CreatedAt), stored.revision
+	editPrepared()
+	if int64(stored.CreatedAt) > rc.LastEditAt {
+		rc.LastEditAt = int64(stored.CreatedAt)
+	}
+	rc.Revision = stored.revision
 	return c.ledger.PutReceipt(rc)
 }
+
+// editPrepared runs between preparing an edit and saving its receipt; tests
+// crash the edge there.
+var editPrepared = func() {}
 
 // rootKey is a request's one root-row obligation; it sorts before every
 // edit key of the same request, so Flush sends the root first.
@@ -495,7 +565,7 @@ func (c *Carrier) prepareRow(key string, evt nostr.Event, revision int) (prepare
 	if err != nil {
 		return preparedRow{}, err
 	}
-	stored, err := c.ledger.PrepareRevision(key, raw, revision)
+	stored, err := c.ledger.PrepareRevision(key, raw, revision, c.share())
 	if err != nil {
 		return preparedRow{}, err
 	}
@@ -514,7 +584,7 @@ func (c *Carrier) prepare(key string, evt nostr.Event) error {
 	if err != nil {
 		return err
 	}
-	_, err = c.ledger.Prepare(key, raw)
+	_, err = c.ledger.Prepare(key, raw, c.share())
 	return err
 }
 
@@ -541,19 +611,23 @@ func (c *Carrier) Flush(ctx context.Context, pub Publisher, gate func() error) e
 	if err != nil {
 		return err
 	}
-	for i, o := range pending {
-		if i == flushBatch {
-			return nil
+	sent := 0
+	for _, o := range pending {
+		if o.Binding != c.share() {
+			continue // another binding's output: owed, never redirected
+		}
+		if sent == flushBatch {
+			return nil // only eligible sends count (codex #866 r2 #8)
 		}
 		var evt nostr.Event
 		if err := json.Unmarshal(o.Event, &evt); err != nil {
 			return fmt.Errorf("outbox %s: %w", o.Key, err)
 		}
-		if evt.PubKey.Hex() != c.binding.Body || tagValue(evt, "h") != c.binding.Channel {
-			continue // another binding's output: owed, never redirected
-		}
 		if _, err := c.grant(uint16(evt.Kind), c.now()); err != nil {
 			return fmt.Errorf("%w: kind %d: %v", ErrNoGrant, evt.Kind, err)
+		}
+		if err := c.fence(); err != nil {
+			return err // exported only while the approved native session is attached
 		}
 		if gate != nil {
 			if err := gate(); err != nil {
@@ -566,6 +640,7 @@ func (c *Carrier) Flush(ctx context.Context, pub Publisher, gate func() error) e
 		if err != nil {
 			return fmt.Errorf("publish %s: %w", o.Key, err)
 		}
+		sent++
 		c.mu.Lock()
 		err = c.ledger.MarkAccepted(o.Key)
 		c.mu.Unlock()

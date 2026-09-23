@@ -41,7 +41,7 @@ func TestBusyRejectedDMRedeliveryDoesNotDispatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := NewCarrier(ledger, b, body, ownerGrant(t, owner, b.Body, KindDM, KindEdit), ep.Handle)
+	c := NewCarrier(ledger, b, body, ownerGrant(t, owner, b.Body, KindDM, KindEdit), ep.NativeSessionID, ep.Handle)
 	c.now = func() time.Time { return now }
 	dm := ownerEvent(t, owner, b.Channel, "run this once", now)
 	if err := c.Ingest(dm); err != nil {
@@ -92,7 +92,7 @@ func TestDMCancelReachesTheNativeAdapter(t *testing.T) {
 	rt := fake.New("cx", "e_1")
 	ep.Register(rt)
 	var cancelErr error
-	c := NewCarrier(ledger, b, body, ownerGrant(t, owner, b.Body, KindDM, KindEdit), func(cmd *protocol.Command, src core.Source) (any, error) {
+	c := NewCarrier(ledger, b, body, ownerGrant(t, owner, b.Body, KindDM, KindEdit), fixedIdentity("cx"), func(cmd *protocol.Command, src core.Source) (any, error) {
 		result, err := ep.Handle(cmd, src)
 		if cmd.Op == protocol.OpRequestCancel {
 			cancelErr = err
@@ -125,7 +125,7 @@ func TestRootRowRecoveredAfterCrashBeforeReceipt(t *testing.T) {
 	_, _ = rand.Read(body[:])
 	b := Binding{Owner: nostr.GetPublicKey(owner).Hex(), Body: nostr.GetPublicKey(body).Hex(), Channel: "dm-1", Target: "cx", RelayHost: "relay", NativeSession: "cx"}
 	ledger, _ := OpenLedger(t.TempDir())
-	c := NewCarrier(ledger, b, body, ownerGrant(t, owner, b.Body, KindDM, KindEdit), nil)
+	c := NewCarrier(ledger, b, body, ownerGrant(t, owner, b.Body, KindDM, KindEdit), fixedIdentity("cx"), nil)
 	now := time.Now()
 	c.now = func() time.Time { return now }
 	if err := ledger.PutReceipt(c.receiptFor("amqr1_x", Claim{Target: "cx", Epoch: "e1"})); err != nil {

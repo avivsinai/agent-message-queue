@@ -142,20 +142,34 @@ type Outbound struct {
 	Key      string          `json:"key"`
 	Event    json.RawMessage `json:"event"`
 	Revision int             `json:"revision,omitempty"`
-	Accepted bool            `json:"accepted"`
+	// Binding is the share the output was prepared under; Flush sends it
+	// only while the current share is the same (codex #866 r2 #4).
+	Binding  ShareBinding `json:"binding"`
+	Accepted bool         `json:"accepted"`
+}
+
+// ShareBinding is the full identity of a share: an output, claim or
+// receipt from any other binding is never sent, replayed or redirected.
+type ShareBinding struct {
+	Relay         string `json:"relay"`
+	Owner         string `json:"owner"`
+	Body          string `json:"body"`
+	Channel       string `json:"channel"`
+	Target        string `json:"target"`
+	NativeSession string `json:"native_session"`
 }
 
 // Prepare records the signed event bytes for key before transmission and
 // returns what is stored. If key was prepared before, the stored bytes win
 // and are returned unchanged: a retry resends the same event id, never a
 // re-signed one.
-func (l *Ledger) Prepare(key string, event json.RawMessage) (Outbound, error) {
-	return l.PrepareRevision(key, event, 0)
+func (l *Ledger) Prepare(key string, event json.RawMessage, b ShareBinding) (Outbound, error) {
+	return l.PrepareRevision(key, event, 0, b)
 }
 
 // PrepareRevision is Prepare for a row event that shows revision.
-func (l *Ledger) PrepareRevision(key string, event json.RawMessage, revision int) (Outbound, error) {
-	o := Outbound{Key: key, Event: event, Revision: revision}
+func (l *Ledger) PrepareRevision(key string, event json.RawMessage, revision int, b ShareBinding) (Outbound, error) {
+	o := Outbound{Key: key, Event: event, Revision: revision, Binding: b}
 	raw, err := json.Marshal(o)
 	if err != nil {
 		return Outbound{}, err
