@@ -228,6 +228,7 @@ type Attachment struct {
 	activityTurnTS int64
 	// activityPath and activityNext are how far activity has delivered.
 	// Confirmation recovery may rewind cur; it must not replay these notes.
+	// A truncated file resets activityNext. A recovery rewind does not.
 	activityPath string
 	activityNext int64
 	// curGen increments whenever the cursor is reset outside the poller (a
