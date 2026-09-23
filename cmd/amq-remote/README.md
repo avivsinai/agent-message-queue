@@ -151,10 +151,10 @@ file instead of ignoring the object.
 Each share binds one declared target to the body key enrolled under
 `amq-remote share --session <session>`. `url` must be `wss://`; `ws://` is
 accepted only for a loopback host. A target or session can be shared once.
-`activity` is refused. `commands` needs `dm_channel_id`. The optional
-`relay_self` pins the relay's NIP-11 `self` key (64 lowercase hex); without
-it, `serve` reads the key from the relay's NIP-11 document and refuses a
-redirect.
+`commands` needs `dm_channel_id` and `native_session_id`; `activity` needs
+`native_session_id`. The optional `relay_self` pins the relay's NIP-11
+`self` key (64 lowercase hex); without it, `serve` reads the key from the
+relay's NIP-11 document and refuses a redirect.
 
 `serve` keeps one connection per share. It answers the relay's NIP-42
 challenge with a kind 22242 event signed by the body key, carrying exactly
@@ -190,6 +190,17 @@ the owner's Buzz Desktop can list it as an owned agent.
 
 The name and status are clear text on the relay. Do not put a path or
 prompt data in `name`.
+
+### Activity in Buzz Desktop
+
+With `"activity": true` and `"native_session_id": "<thread id>"`, `serve`
+exports the pinned Codex thread's turns, messages and tool calls to the
+owner as NIP-44 encrypted kind 24200 frames, which the Buzz Desktop agent
+session panel renders. Export runs only while the target's attached native
+session is the pinned one, and stops the moment it is not. Activity carries
+no control: nothing in it can submit, cancel or approve. A frame the relay
+may or may not have accepted is never sent again. Only Codex targets export
+activity in this release.
 
 ### Owner DM commands
 
@@ -360,6 +371,7 @@ remedy. Doctor exits 6 exactly when `failing` is not empty.
 | `dm_surface` | A commands share's DM surface is not `subscription_active`. |
 | `publication` | Owed DM output could not be sent yet. |
 | `presence` | A presence share has not published `online` or `away`. |
+| `activity` | An activity share is not `exporting`. |
 | `discovery` | The owner has not published the kind 30177 policy for the body. |
 
 `authenticated` means the relay accepted this body's AUTH. It does not prove
