@@ -1081,15 +1081,17 @@ func doctor(args []string) (any, int, error) {
 			continue
 		}
 		home, herr := os.UserHomeDir()
-		installed, ierr := false, herr
+		state, serr := "", herr
 		if herr == nil {
-			installed, ierr = claude.StopHookInstalled(home)
+			state, serr = claude.StopHookState(home)
 		}
 		switch {
-		case ierr != nil:
-			fail("native_capability", s.TargetID, "cannot read the Claude Stop hook: "+ierr.Error(), "check ~/.claude/settings.json")
-		case !installed:
+		case serr != nil:
+			fail("native_capability", s.TargetID, "cannot read ~/.claude/settings.json: "+serr.Error(), "repair ~/.claude/settings.json")
+		case state == claude.StopHookMissing:
 			fail("native_capability", s.TargetID, "the Claude Stop hook is not installed, so requests are admitted but never complete", "run `amq-remote claude install-stop-hook`")
+		case state == claude.StopHookDisabled:
+			fail("native_capability", s.TargetID, "~/.claude/settings.json sets disableAllHooks, so the Stop hook never runs", "remove disableAllHooks from ~/.claude/settings.json")
 		}
 		break
 	}
@@ -1106,13 +1108,26 @@ func doctor(args []string) (any, int, error) {
 		for _, name := range sessionsWithKeys {
 			info, _ := bodyKeys[name].(map[string]any)
 			remedy, _ := info["remedy"].(string)
+			if remedy == "" {
+				remedy = "run `amq-remote share --session " + name + "` and follow its output"
+			}
 			for _, key := range []string{"attestation_error", "key_error", "body_pub_error", "staged_error"} {
 				if msg, ok := info[key].(string); ok {
 					fail("body_key", name, msg, remedy)
 				}
 			}
+			// A body with no enrolled generation, or only a pending one,
+			// cannot authenticate: that is a failing share (codex #869 r1).
+			if att, ok := info["attestation"].(string); ok {
+				switch {
+				case strings.HasPrefix(att, "missing"):
+					fail("body_key", name, "no owner-signed generation is enrolled", "run `amq-remote share --session "+name+"` and have the owner sign the printed preimages")
+				case strings.HasPrefix(att, "pending"):
+					fail("body_key", name, att, "have the owner sign the printed preimages, then run `amq-remote share --session "+name+"`")
+				}
+			}
 			if msg, ok := info["expiry_warning"].(string); ok && strings.HasPrefix(msg, "expired") {
-				fail("tag_expiry", name, msg, "")
+				fail("tag_expiry", name, "the enrolled grants have expired", strings.TrimPrefix(msg, "expired: "))
 			}
 		}
 	}

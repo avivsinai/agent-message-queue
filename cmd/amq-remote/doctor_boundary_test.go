@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/avivsinai/agent-message-queue/internal/remote/bodykey"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 )
 
@@ -39,4 +40,23 @@ func TestDoctorNamesFailingBoundaries(t *testing.T) {
 	if !got["endpoint"] || !got["dm_surface"] || got["relay_auth"] {
 		t.Fatalf("failing boundaries = %v, want endpoint and dm_surface only", got)
 	}
+}
+
+// codex #869 r1: a minted body with no owner-signed generation reported
+// attestation=missing but no failing boundary.
+func TestDoctorListsAnUnenrolledBody(t *testing.T) {
+	root := t.TempDir()
+	if _, err := bodykey.Mint(filepath.Join(root, "extensions", "remote", "keys", "work")); err != nil {
+		t.Fatal(err)
+	}
+	out, _, err := doctor([]string{"--root", root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range out.(map[string]any)["failing"].([]boundaryFailure) {
+		if f.Boundary == "body_key" && f.Subject == "work" && f.Remedy != "" {
+			return
+		}
+	}
+	t.Fatalf("unenrolled body not listed: %v", out.(map[string]any)["failing"])
 }
