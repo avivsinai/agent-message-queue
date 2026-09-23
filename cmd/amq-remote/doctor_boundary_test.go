@@ -60,3 +60,49 @@ func TestDoctorListsAnUnenrolledBody(t *testing.T) {
 	}
 	t.Fatalf("unenrolled body not listed: %v", out.(map[string]any)["failing"])
 }
+
+// Codex 2026-09-23T12-18-36.287Z_pid90763_92e75d76: doctor named no AMQ-route
+// boundary when the endpoint handle was absent from config.json.
+func TestDoctorNamesAMQRoute(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "extensions", "remote"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	out, code, err := doctor([]string{"--root", root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != protocol.ExitActionRequired || !doctorHasBoundary(out, "amq_route", "remote") {
+		t.Fatalf("missing route: exit=%d failing=%v", code, out.(map[string]any)["failing"])
+	}
+	if err := os.MkdirAll(filepath.Join(root, "meta"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := []byte("{\"version\":1,\"created_utc\":\"2026-09-23T00:00:00Z\",\"agents\":[\"remote\"]}\n")
+	if err := os.WriteFile(filepath.Join(root, "meta", "config.json"), cfg, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, _, err = doctor([]string{"--root", root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if doctorHasBoundary(out, "amq_route", "remote") {
+		t.Fatalf("registered handle still failing: %v", out.(map[string]any)["failing"])
+	}
+	out, _, err = doctor([]string{"--root", root, "--me", "other"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !doctorHasBoundary(out, "amq_route", "other") {
+		t.Fatalf("--me other not named: %v", out.(map[string]any)["failing"])
+	}
+}
+
+func doctorHasBoundary(out any, boundary, subject string) bool {
+	for _, f := range out.(map[string]any)["failing"].([]boundaryFailure) {
+		if f.Boundary == boundary && f.Subject == subject && f.Remedy != "" {
+			return true
+		}
+	}
+	return false
+}
