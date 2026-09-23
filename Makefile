@@ -58,6 +58,7 @@ mod-tidy-check:
 
 hook-env-check:
 	@sh scripts/test_pre_push_hook_env.sh
+	@sh scripts/test_install_hooks.sh
 
 contract-check:
 	@sh scripts/probe-codex-app-execute-javascript_test.sh
