@@ -41,6 +41,24 @@ type Request struct {
 	Command *protocol.Command `json:"command,omitempty"`
 	// Wait blocks for a request to reach a terminal or uncertain state.
 	Wait *WaitRequest `json:"wait,omitempty"`
+	// NativeSession, when set, requires the command's target to be attached
+	// to exactly this native session; any other session refuses with
+	// unshared before the endpoint sees the command. Local-only: the native
+	// identity never enters the session wire schema (codex #866 r2 #6).
+	NativeSession string `json:"native_session,omitempty"`
+	// Native asks which native session a target is attached to, so a local
+	// sharing choice can pin it. Local-only, like NativeSession.
+	Native *NativeQuery `json:"native,omitempty"`
+}
+
+// NativeQuery names the target whose native session is asked for.
+type NativeQuery struct {
+	TargetID string `json:"target_id"`
+}
+
+// NativeReply is the reply to a NativeQuery.
+type NativeReply struct {
+	NativeSession string `json:"native_session"`
 }
 
 // WaitRequest is the local-only wait operation.
@@ -183,7 +201,18 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 			return
 		}
 		writeRecord(conn, Response{Reply: mustJSON(snap)})
+	case req.Native != nil:
+		id := s.ep.NativeSessionID(req.Native.TargetID)
+		if id == "" {
+			writeRecord(conn, errorResponse(protocol.Refuse(protocol.CodeUnshared, "target %q has no native session identity", req.Native.TargetID)))
+			return
+		}
+		writeRecord(conn, Response{Reply: mustJSON(NativeReply{NativeSession: id})})
 	case req.Command != nil:
+		if req.NativeSession != "" && req.Command.TargetID != "" && s.ep.NativeSessionID(req.Command.TargetID) != req.NativeSession {
+			writeRecord(conn, errorResponse(protocol.Refuse(protocol.CodeUnshared, "target %q is not attached to the pinned native session", req.Command.TargetID)))
+			return
+		}
 		reply, err := s.ep.Handle(req.Command, core.Source{Host: LocalHost})
 		if err != nil {
 			writeRecord(conn, errorResponse(err))

@@ -96,8 +96,13 @@ Usage:
 
 Environment:
   AM_ROOT          required absolute queue root
-  AM_ME            required sender handle
-  AMQ_ACP_TO       required recipient handle for every prompt
+  AM_ME            sender handle, required unless AMQ_ACP_REMOTE_TARGET is set
+  AMQ_ACP_TO       recipient handle for every prompt, required unless
+                   AMQ_ACP_REMOTE_TARGET is set
+  AMQ_ACP_REMOTE_TARGET submit each prompt to this amq-remote target through
+                   the endpoint on AM_ROOT, in place of an AMQ message
+  AMQ_ACP_REMOTE_NATIVE_SESSION required with AMQ_ACP_REMOTE_TARGET: the
+                   shared native session; any other session is refused
   AM_BASE_ROOT     pinned base root, required when a session pin is present
   AM_SESSION       pinned session name
   AM_ROOT_ID       identity token authenticating AM_ROOT

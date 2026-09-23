@@ -335,6 +335,9 @@ func (s *Server) dispatchWithNotify(method string, params json.RawMessage, emit 
 	case "session/cancel":
 		return s.cancel(params)
 	case "_session/steering":
+		if s.cfg.RemoteTarget != "" {
+			return nil, newRPCError(codeMethodNotFound, "steering is not supported for amq-remote target %q", s.cfg.RemoteTarget)
+		}
 		return s.steering(params)
 	default:
 		return nil, newRPCError(codeMethodNotFound, "method %q is not implemented by this ACP v2 bridge", method)
@@ -413,7 +416,7 @@ func (s *Server) initialize(params json.RawMessage) (any, *rpcError) {
 			Version: s.version,
 		},
 		AuthMethods: []any{},
-		Meta:        initializeMeta{Steering: steeringCapability{Supported: true}},
+		Meta:        initializeMeta{Steering: steeringCapability{Supported: s.cfg.RemoteTarget == ""}},
 	}, nil
 }
 
@@ -572,6 +575,12 @@ func (s *Server) beginPrompt(params json.RawMessage) (func(emit func(any) error)
 	}
 	return func(emit func(any) error) (any, *rpcError) {
 		defer s.finishTurn(session, turn)
+		if s.cfg.RemoteTarget != "" {
+			s.mu.Lock()
+			close(turn.ready)
+			s.mu.Unlock()
+			return s.runRemote(parsed.SessionID, text, eventID, turn, emit)
+		}
 		delivery, err := DeliverCockpitPrompt(s.cfg, text, session.Thread, eventID)
 		s.mu.Lock()
 		if err == nil {
