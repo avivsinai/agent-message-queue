@@ -106,8 +106,11 @@ and its routing authority do not change.
 
 The companion holds one owned body key per shared session or host. The human
 owner attests the key with a NIP-OA `auth` tag signed from their own Buzz
-identity. Activity is published as NIP-AO kind 24200 observer frames whose
-payload is a genuine ACP JSON-RPC line, which Buzz Desktop renders unchanged.
+identity. Activity is published as NIP-AO kind 24200 observer frames.
+Assistant text is an `acp_read` frame whose payload is a genuine ACP
+`session/update` line, with projection provenance in that line's extension
+metadata. `session_resolved`, `turn_started`, and `turn_completed` use the
+Desktop lifecycle payloads. Buzz Desktop renders those kinds unchanged.
 Requests and results are a DM thread between the body and the owner;
 reactions carry typed commands. No Buzz client change is required.
 
