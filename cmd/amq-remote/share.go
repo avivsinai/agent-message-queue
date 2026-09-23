@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/lock"
 	"github.com/avivsinai/agent-message-queue/internal/remote/bodykey"
 	"github.com/avivsinai/agent-message-queue/internal/remote/manifest"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
@@ -490,9 +491,10 @@ func enrollTag(session, keyDir, tagPath string, k *bodykey.BodyKey, st *shareSta
 	return 0, nil
 }
 
-// enrollBundle validates every tag in one owner-signed file, then enrolls
-// them in order. The file is a JSON array of the same objects --tag-file
-// accepts. Nothing is written when any tag is rejected.
+// enrollBundle validates every tag in one owner-signed file, then publishes
+// that set as one generation. The file is a JSON array of the same objects
+// --tag-file accepts. An incomplete set, or any rejected tag, writes nothing.
+// Previously staged tags are not mixed into the generation.
 func enrollBundle(session, keyDir, bundlePath string, k *bodykey.BodyKey, st *shareState) (int, error) {
 	raw, err := os.ReadFile(bundlePath)
 	if err != nil {
@@ -525,12 +527,68 @@ func enrollBundle(session, keyDir, bundlePath string, k *bodykey.BodyKey, st *sh
 			return code, err
 		}
 	}
-	for i := range tags {
-		if err := writeShareTag(session, keyDir, &tags[i]); err != nil {
-			return protocol.ExitActionRequired, err
-		}
+	if err := publishBundle(session, keyDir, tags, pending); err != nil {
+		return protocol.ExitActionRequired, err
 	}
 	return 0, nil
+}
+
+// publishBundle writes the bundle as the enrolled generation. It refuses,
+// before any write, unless the bundle covers the pending window, the base
+// kinds, and every kind already enrolled.
+func publishBundle(session, keyDir string, tags, pending []shareTagFile) error {
+	st, err := loadShareState(keyDir)
+	if err != nil {
+		return err
+	}
+	if err := st.refuseIfConfined(); err != nil {
+		return err
+	}
+	required := map[uint16]bool{}
+	for _, kind := range bodykey.ShareKinds {
+		required[kind] = true
+	}
+	if st.Enrolled.Gen != nil {
+		for _, t := range st.Enrolled.Gen.Tags {
+			required[t.Kind] = true
+		}
+	}
+	for _, p := range pending {
+		required[p.Kind] = true
+	}
+	have := make(map[uint16]shareTagFile, len(tags))
+	for _, t := range tags {
+		have[t.Kind] = t
+	}
+	var missing []uint16
+	for _, kind := range orderedKinds(required) {
+		if _, ok := have[kind]; !ok {
+			missing = append(missing, kind)
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("--bundle is missing kind(s) %v; it must cover every kind in the pending window", missing)
+	}
+	ordered := make([]shareTagFile, 0, len(pending))
+	for _, p := range pending {
+		ordered = append(ordered, have[p.Kind])
+	}
+	raw, err := json.MarshalIndent(enrolledGeneration{Tags: ordered}, "", "  ")
+	if err != nil {
+		return err
+	}
+	_, enrolledPath := sharePaths(keyDir)
+	if err := writeStateFile(enrolledPath, raw); err != nil {
+		return err
+	}
+	p, _ := sharePaths(keyDir)
+	if err := removeStateLeaf(p); err != nil {
+		return err
+	}
+	if err := removeStateLeaf(filepath.Join(keyDir, stagedName)); err != nil {
+		return err
+	}
+	return nil
 }
 
 // enrollablePending is the pending window a tag or bundle may sign. It
@@ -613,6 +671,22 @@ func writeRelayShare(root, session, target, relayURL, keyDir string) (int, error
 		}
 	}
 	path := manifest.DefaultPath(filepath.Join(root, stateDirName))
+	var code int
+	err = lock.WithExclusiveFileLock(path+".lock", func() error {
+		var bindErr error
+		code, bindErr = bindManifest(path, session, target, relayURL, owner)
+		return bindErr
+	})
+	if err != nil && code == 0 {
+		return protocol.ExitActionRequired, err
+	}
+	return code, err
+}
+
+// bindManifest loads, updates, and publishes the relay block. The caller
+// holds the manifest lock for this whole transaction. An existing share is
+// left unchanged unless its target, session, and owner already match.
+func bindManifest(path, session, target, relayURL, owner string) (int, error) {
 	f, err := manifest.Load(path)
 	if err != nil {
 		return protocol.ExitActionRequired, err
@@ -635,14 +709,15 @@ func writeRelayShare(root, session, target, relayURL, keyDir string) (int, error
 		return protocol.ExitActionRequired, fmt.Errorf("manifest relay url is %s; refusing to replace it with %s", f.Relay.URL, relayURL)
 	} else {
 		placed := false
-		for i := range f.Relay.Shares {
-			if f.Relay.Shares[i].Target == target {
-				prev := f.Relay.Shares[i]
-				prev.Target, prev.Session, prev.OwnerPubKey = target, session, owner
-				f.Relay.Shares[i] = prev
-				placed = true
-				break
+		for _, sh := range f.Relay.Shares {
+			if sh.Target != target {
+				continue
 			}
+			if sh.Session != session || sh.OwnerPubKey != owner {
+				return protocol.ExitActionRequired, fmt.Errorf("target %q is already shared as session %q; refusing to rebind", target, sh.Session)
+			}
+			placed = true
+			break
 		}
 		if !placed {
 			f.Relay.Shares = append(f.Relay.Shares, entry)
