@@ -17,6 +17,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/relay/relaytest"
 	"github.com/avivsinai/agent-message-queue/internal/remote/activity"
+	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
 	"github.com/avivsinai/agent-message-queue/internal/remote/codex"
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/fake"
@@ -106,4 +107,73 @@ func TestActivityExportsPinnedThreadAndStopsOnReplacement(t *testing.T) {
 	})
 	native.Store("thread-2") // a replacement native session attaches
 	waitFor("export to close", func() bool { return strings.HasPrefix(edges.activityView("work"), "closed:") })
+}
+
+// observedClaude is a fake attachment with the Claude activity seam.
+type observedClaude struct {
+	*fake.Runtime
+	mu sync.Mutex
+	fn func(claude.ActivityNote)
+}
+
+func (o *observedClaude) ObserveActivity(fn func(claude.ActivityNote)) func() {
+	o.mu.Lock()
+	o.fn = fn
+	o.mu.Unlock()
+	return func() { o.mu.Lock(); o.fn = nil; o.mu.Unlock() }
+}
+
+// 611.17 slice 6, through serve's relay wiring: a Claude session's parsed
+// transcript activity reaches the relay as a frame the owner can decrypt.
+func TestActivityExportsPinnedClaudeSession(t *testing.T) {
+	root := t.TempDir()
+	keyDir := filepath.Join(root, "extensions", "remote", "keys", "work")
+	var owner [32]byte
+	if _, err := rand.Read(owner[:]); err != nil {
+		t.Fatal(err)
+	}
+	body, tag := enrollShare(t, keyDir, owner)
+	lr, srv, url := relaytest.Start(body.PublicKeyHex(), []string{"auth", tag.OwnerPubKey, tag.Conditions, tag.SigHex()})
+	defer srv.Close()
+	r := &manifest.Relay{URL: url, Shares: []manifest.Share{{Target: "claude-main", Session: "work", OwnerPubKey: tag.OwnerPubKey, NativeSessionID: "sess-1", Activity: true}}}
+	stateDir := filepath.Join(root, "extensions", "remote")
+	edges := buildDMEdges(root, stateDir, r, io.Discard)
+	src := &observedClaude{Runtime: fake.New("claude-main", "e1")}
+	edges.bind(func(*protocol.Command, core.Source) (any, error) { return nil, nil }, func(string) string { return "sess-1" })
+	edges.bindAttachments(func(string) (core.Attachment, bool) { return src, true })
+	ctx, cancel := context.WithCancel(context.Background())
+	wg := startRelays(ctx, root, stateDir, r, edges, io.Discard)
+	defer func() { cancel(); wg.Wait() }()
+
+	deadline := time.Now().Add(4 * time.Second)
+	for edges.activityView("work") != "exporting" {
+		if time.Now().After(deadline) {
+			t.Fatalf("activity = %q, want exporting", edges.activityView("work"))
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	src.mu.Lock()
+	fn := src.fn
+	src.mu.Unlock()
+	fn(claude.ActivityNote{SessionID: "sess-1", TurnID: "turn-1", Line: claude.TranscriptLine{
+		Type: "assistant", SessionID: "sess-1", UUID: "a1", TS: time.Now().UnixMilli(),
+		Blocks: []claude.TranscriptBlock{{Type: "text", Text: "hello from claude"}},
+	}})
+	key, err := nip44.GenerateConversationKey(nostr.GetPublicKey(owner), nostr.SecretKey(body.Secret()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for {
+		for _, evt := range lr.Events() {
+			if evt.Kind == activity.KindTelemetry && evt.PubKey.Hex() == body.PublicKeyHex() {
+				if plain, err := nip44.Decrypt(evt.Content, key); err == nil && strings.Contains(plain, "hello from claude") {
+					return
+				}
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no decryptable Claude frame (activity = %q)", edges.activityView("work"))
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }

@@ -10,21 +10,77 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unsafe"
 
 	"fiatjaf.com/nostr"
 
 	"github.com/avivsinai/agent-message-queue/internal/relay"
 	"github.com/avivsinai/agent-message-queue/internal/remote/activity"
+	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
 	"github.com/avivsinai/agent-message-queue/internal/remote/codex"
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/manifest"
 	"github.com/avivsinai/agent-message-queue/internal/remote/sharestate"
 )
 
-// notificationSource is the attachment seam activity export reads: the Codex
-// adapter's read-only notification observer.
+// notificationSource is the Codex attachment's read-only notification
+// observer; claudeSource is the Claude attachment's parsed-transcript
+// observer. Activity export reads either one.
 type notificationSource interface {
 	ObserveNotifications(fn func(codex.Notification)) (stop func())
+}
+
+type claudeSource interface {
+	ObserveActivity(fn func(claude.ActivityNote)) (stop func())
+}
+
+// activityItem is one queued native observation: exactly one field is set.
+type activityItem struct {
+	codex  *codex.Notification
+	claude *claude.ActivityNote
+}
+
+// blockSize is one Claude block's in-memory size; the note retains its whole
+// backing array, capacity included.
+var blockSize = int64(unsafe.Sizeof(claude.TranscriptBlock{}))
+
+// size is the bytes an item retains, for the queue's byte budget: for a
+// Claude note every string it holds plus the block array's full allocation,
+// cap times element size (codex #872 r1, r2).
+func (it activityItem) size() int64 {
+	if it.codex != nil {
+		return int64(len(it.codex.Params)) // the method is one of three allowlisted names
+	}
+	n := it.claude
+	total := int64(len(n.SessionID) + len(n.TurnID) + len(n.Line.Type) + len(n.Line.SessionID) + len(n.Line.UUID))
+	total += int64(cap(n.Line.Blocks)) * blockSize
+	for _, b := range n.Line.Blocks {
+		total += int64(len(b.Type) + len(b.Text) + len(b.Name) + len(b.ID))
+	}
+	return total
+}
+
+// observeFunc registers offer as the attachment's observer and returns stop.
+type observeFunc func(offer func(activityItem)) (stop func())
+
+// observerOf returns the activity observer of an attachment, or nil.
+func observerOf(att any) observeFunc {
+	switch src := att.(type) {
+	case notificationSource:
+		return func(offer func(activityItem)) func() {
+			return src.ObserveNotifications(func(n codex.Notification) {
+				if !projectedMethods[n.Method] {
+					return // ignored before any copy
+				}
+				offer(activityItem{codex: &n})
+			})
+		}
+	case claudeSource:
+		return func(offer func(activityItem)) func() {
+			return src.ObserveActivity(func(n claude.ActivityNote) { offer(activityItem{claude: &n}) })
+		}
+	}
+	return nil
 }
 
 // activityShare is one share's activity export (611.17 slice 3): Codex
@@ -45,7 +101,9 @@ type activityShare struct {
 // fence re-checked.
 var activityDrainTick = 250 * time.Millisecond
 
-// activityPublishTimeout bounds one drain pass's sends.
+// activityPublishTimeout bounds how long one drain pass waits on the relay.
+// It does not bound sequence I/O or encoding, so shutdown can take longer
+// while a directory sync is slow.
 const activityPublishTimeout = 10 * time.Second
 
 func (as *activityShare) set(state string) {
@@ -90,10 +148,10 @@ func (as *activityShare) runActivity(ctx context.Context, conn *relay.Conn, iden
 			as.set("closed: the attached session is not the one approved for sharing")
 		} else if att, ok := attachment(target); !ok {
 			as.set("closed: target is not attached")
-		} else if src, ok := att.(notificationSource); !ok {
+		} else if observe := observerOf(att); observe == nil {
 			as.set("refused: this target's adapter has no activity seam")
 		} else {
-			as.export(ctx, conn, src, identity, warn)
+			as.export(ctx, conn, observe, identity, warn)
 		}
 		select {
 		case <-ctx.Done():
@@ -119,21 +177,22 @@ const (
 // projectedMethods are the Codex notifications the activity projection maps.
 var projectedMethods = map[string]bool{"turn/started": true, "item/completed": true, "turn/completed": true}
 
-// activityInbox is the bounded hand-off from the read pump to the worker.
+// activityInbox is the bounded hand-off from the native observer to the
+// worker.
 type activityInbox struct {
-	q       chan codex.Notification
+	q       chan activityItem
 	bytes   atomic.Int64 // payload bytes admitted and not yet taken
 	dropped atomic.Uint64
 }
 
 func newActivityInbox() *activityInbox {
-	return &activityInbox{q: make(chan codex.Notification, activityQueue)}
+	return &activityInbox{q: make(chan activityItem, activityQueue)}
 }
 
-// offer admits n without blocking, or drops it before any copy.
-func (b *activityInbox) offer(n codex.Notification) bool {
-	size := int64(len(n.Params))
-	if !projectedMethods[n.Method] || size > activityItemBytes || len(b.q) == cap(b.q) {
+// offer admits it without blocking, or drops it before any copy.
+func (b *activityInbox) offer(it activityItem) bool {
+	size := it.size()
+	if size > activityItemBytes || len(b.q) == cap(b.q) {
 		b.dropped.Add(1)
 		return false
 	}
@@ -142,9 +201,13 @@ func (b *activityInbox) offer(n codex.Notification) bool {
 		b.dropped.Add(1)
 		return false
 	}
-	n.Params = append(json.RawMessage(nil), n.Params...) // the pump may reuse its buffer
+	if it.codex != nil {
+		n := *it.codex
+		n.Params = append(json.RawMessage(nil), n.Params...) // the pump may reuse its buffer
+		it.codex = &n
+	}
 	select {
-	case b.q <- n:
+	case b.q <- it:
 		return true
 	default:
 		b.bytes.Add(-size)
@@ -153,8 +216,8 @@ func (b *activityInbox) offer(n codex.Notification) bool {
 	}
 }
 
-// taken releases a notification's bytes once the worker has it.
-func (b *activityInbox) taken(n codex.Notification) { b.bytes.Add(-int64(len(n.Params))) }
+// taken releases an item's bytes once the worker has it.
+func (b *activityInbox) taken(it activityItem) { b.bytes.Add(-it.size()) }
 
 // errActivityFenced ends a publication whose native session is no longer
 // the pinned one.
@@ -169,7 +232,7 @@ var errActivityFenced = errors.New("the attached session is not the one approved
 // discards the rest of the queue (#1). Shutdown stops the observer and waits
 // for the worker before the sink is released; only the worker feeds the
 // sink, so no late callback acts after cleanup (#3).
-func (as *activityShare) export(ctx context.Context, conn *relay.Conn, src notificationSource, identity func(string) string, warn io.Writer) {
+func (as *activityShare) export(ctx context.Context, conn *relay.Conn, observe observeFunc, identity func(string) string, warn io.Writer) {
 	target, pin := as.share.Target, as.share.NativeSessionID
 	fenced := func() bool { return identity(target) != pin }
 	sink := &activity.Sink{ThreadID: pin, Body: as.body, Owner: as.owner, StateDir: as.stateDir,
@@ -183,7 +246,11 @@ func (as *activityShare) export(ctx context.Context, conn *relay.Conn, src notif
 	// Only the worker touches the sink. A callback that runs after cleanup
 	// can at most fill this buffer, which no one reads again.
 	inbox := newActivityInbox()
-	stop := src.ObserveNotifications(func(n codex.Notification) { inbox.offer(n) })
+	// drainMu serializes every path that pops and publishes frames: one
+	// drainer at a time, from dequeue through publication. The native
+	// callback never takes it.
+	var drainMu sync.Mutex
+	stop := observe(func(it activityItem) { inbox.offer(it) })
 
 	wctx, cancelWorker := context.WithCancel(ctx)
 	var worker sync.WaitGroup
@@ -194,12 +261,25 @@ func (as *activityShare) export(ctx context.Context, conn *relay.Conn, src notif
 			select {
 			case <-wctx.Done():
 				return
-			case n := <-inbox.q:
-				inbox.taken(n)
+			case it := <-inbox.q:
+				inbox.taken(it)
 				if fenced() {
 					continue // never export a replacement session's activity
 				}
-				if err := sink.Enqueue(n); err != nil {
+				var err error
+				if it.codex != nil {
+					err = sink.Enqueue(*it.codex)
+				} else {
+					// AcceptParsed also drains, through the fenced Publish;
+					// drainMu keeps it and the tick's Drain from publishing
+					// out of order (codex #872 r1).
+					pctx, cancel := context.WithTimeout(wctx, activityPublishTimeout)
+					drainMu.Lock()
+					err = sink.AcceptParsed(pctx, *it.claude)
+					drainMu.Unlock()
+					cancel()
+				}
+				if err != nil && !errors.Is(err, errActivityFenced) {
 					say(warn, "relay share %s: activity: %v", as.share.Session, err)
 				}
 			}
@@ -231,7 +311,9 @@ func (as *activityShare) export(ctx context.Context, conn *relay.Conn, src notif
 			return
 		}
 		pctx, cancel := context.WithTimeout(ctx, activityPublishTimeout)
+		drainMu.Lock()
 		err := sink.Drain(pctx)
+		drainMu.Unlock()
 		cancel()
 		switch {
 		case errors.Is(err, errActivityFenced):

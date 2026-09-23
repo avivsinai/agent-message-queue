@@ -193,14 +193,16 @@ prompt data in `name`.
 
 ### Activity in Buzz Desktop
 
-With `"activity": true` and `"native_session_id": "<thread id>"`, `serve`
-exports the pinned Codex thread's turns, messages and tool calls to the
-owner as NIP-44 encrypted kind 24200 frames, which the Buzz Desktop agent
-session panel renders. Export runs only while the target's attached native
+With `"activity": true` and `"native_session_id": "<id>"`, `serve` exports
+the pinned session's turns, messages and tool calls to the owner as NIP-44
+encrypted kind 24200 frames, which the Buzz Desktop agent session panel
+renders. For Codex the id is the thread id; for Claude it is the registry
+`sessionId`, and the activity comes from the transcript the adapter already
+parses. Export runs only while the target's attached native
 session is the pinned one, and stops the moment it is not. Activity carries
 no control: nothing in it can submit, cancel or approve. A frame the relay
-may or may not have accepted is never sent again. Only Codex targets export
-activity in this release.
+may or may not have accepted is never sent again. Codex and Claude targets
+export activity; Amit does not yet.
 
 ### Owner DM commands
 

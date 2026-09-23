@@ -118,7 +118,7 @@ func TestActivityFenceHoldsBetweenQueuedPublications(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		as.export(ctx, conn, src, func(string) string { return native.Load().(string) }, io.Discard)
+		as.export(ctx, conn, observerOf(src), func(string) string { return native.Load().(string) }, io.Discard)
 	}()
 	reviewWait(t, "observer", func() bool { return as.view() == "exporting" })
 	src.emit(reviewNote()) // session_resolved plus the message are queued
@@ -149,7 +149,7 @@ func TestActivityCallbackNeverBlocksTheReadPump(t *testing.T) {
 	exportDone := make(chan struct{})
 	go func() {
 		defer close(exportDone)
-		as.export(ctx, conn, src, func(string) string { return "thread-1" }, io.Discard)
+		as.export(ctx, conn, observerOf(src), func(string) string { return "thread-1" }, io.Discard)
 	}()
 	reviewWait(t, "observer", func() bool { return as.view() == "exporting" })
 	entered, release := make(chan struct{}), make(chan struct{})
@@ -208,7 +208,7 @@ func TestActivityCallbackAfterCleanupDoesNothing(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		as.export(ctx, conn, src, func(string) string { return "thread-1" }, io.Discard)
+		as.export(ctx, conn, observerOf(src), func(string) string { return "thread-1" }, io.Discard)
 	}()
 	reviewWait(t, "observer", func() bool { return as.view() == "exporting" })
 	cancel()
@@ -229,15 +229,19 @@ func TestActivityCallbackAfterCleanupDoesNothing(t *testing.T) {
 func TestActivityInboxBoundsBytesBeforeCopying(t *testing.T) {
 	b := newActivityInbox()
 	big := json.RawMessage(strings.Repeat("x", activityItemBytes))
-	if b.offer(codex.Notification{Method: "item/completed", Params: append(big, 'x')}) {
+	if b.offer(activityItem{codex: &codex.Notification{Method: "item/completed", Params: append(big, 'x')}}) {
 		t.Fatal("admitted a payload over the per-item cap")
 	}
-	if b.offer(codex.Notification{Method: "thread/tokenUsage", Params: json.RawMessage(`{}`)}) {
-		t.Fatal("admitted a method the projection ignores")
+	src := &keptObserver{}
+	offered := 0
+	observerOf(src)(func(activityItem) { offered++ })
+	src.fn(codex.Notification{Method: "thread/tokenUsage", Params: json.RawMessage(`{}`)})
+	if offered != 0 {
+		t.Fatal("offered a method the projection ignores")
 	}
 	admitted := 0
 	for i := 0; i < activityQueueBytes/activityItemBytes+1; i++ {
-		if b.offer(codex.Notification{Method: "item/completed", Params: big}) {
+		if b.offer(activityItem{codex: &codex.Notification{Method: "item/completed", Params: big}}) {
 			admitted++
 		}
 	}
@@ -245,7 +249,7 @@ func TestActivityInboxBoundsBytesBeforeCopying(t *testing.T) {
 		t.Fatalf("admitted %d MiB, want the %d MiB budget", admitted, activityQueueBytes>>20)
 	}
 	b.taken(<-b.q)
-	if !b.offer(codex.Notification{Method: "item/completed", Params: big}) {
+	if !b.offer(activityItem{codex: &codex.Notification{Method: "item/completed", Params: big}}) {
 		t.Fatal("a taken item's bytes were not released")
 	}
 }
