@@ -875,6 +875,29 @@ func classifyWakeCheckRestart(
 		}
 	default:
 		decision.RestartCapability = wakeRestartUnavailable
+		if wakeForeignGenericLock(inspection) {
+			known := func(value string) string {
+				if value = strings.TrimSpace(value); value != "" {
+					return value
+				}
+				return "unknown"
+			}
+			message := fmt.Sprintf(
+				"wake lock written on another machine (hostname %s, started %s); preserve it while that machine or a VM may still use this root; once you confirm it does not, rerun the original owning-terminal or supervisor launch with -y to supersede it",
+				known(inspection.Lock.Hostname),
+				known(inspection.Lock.Started),
+			)
+			decision.Action = wakeCheckActionDecision{
+				Kind:             wakeActionInspectUnverified,
+				Actor:            wakeActionActorOperator,
+				ReasonCode:       wakeReasonForeignMachineLock,
+				Command:          diagnosticArgv,
+				TerminalRequired: true,
+				Message:          message + "; inspect with " + diagnosticCommand,
+				legacyMessage:    message,
+			}
+			return
+		}
 		legacyMessage := "preserve the unverified wake state and inspect it with amq doctor --ops"
 		decision.Action = wakeCheckActionDecision{
 			Kind:          wakeActionInspectUnverified,

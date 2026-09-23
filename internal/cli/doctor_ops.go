@@ -857,6 +857,14 @@ func checkWakeLocksWithHintsSchema(
 				}
 			}
 		}
+		if fix && wakeForeignGenericLock(inspection) {
+			// Doctor has no authority to prove another machine's wake dead; the
+			// operator supersedes it by rerunning the original launch with -y.
+			lock.Mutation = &opsWakeMutation{
+				Status: "preserved",
+				Reason: "written on another machine; confirm it no longer uses this root, then rerun the original launch with -y",
+			}
+		}
 		if fix {
 			stage = diagnoseWakeRestartStage(root, agent, inspection)
 		}

@@ -57,6 +57,12 @@ func applyWakeBinaryDirGoneOpsReason(lock *opsWakeLock, inspection wakeLockInspe
 	if lock == nil {
 		return
 	}
+	// A lock another machine wrote names that machine's binary: its path being
+	// absent here proves nothing, and binary_dir_gone would send the operator to
+	// --fix-wake-locks, which rightly never removes an unverified lock.
+	if wakeForeignGenericLock(inspection) {
+		return
+	}
 	if wakeInspectionBinaryDirGone(inspection) ||
 		stage.Status == wakeRestartStageBinaryDirGone ||
 		(lock.WakeCheckDecision != nil &&
