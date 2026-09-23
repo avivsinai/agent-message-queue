@@ -18,8 +18,9 @@ import (
 const codexNotifyForwardTimeout = 10 * time.Second
 
 var (
-	codexNotifyExecutable = os.Executable
-	codexNotifyForward    = forwardOperatorCodexNotify
+	codexNotifyExecutable  = os.Executable
+	codexNotifyForward     = forwardOperatorCodexNotify
+	runOperatorCodexNotify = defaultRunOperatorCodexNotify
 )
 
 func runCodexNotify(args []string) error {
@@ -88,16 +89,20 @@ func forwardOperatorCodexNotify(amqExecutable string, payload []byte) error {
 	forwardArgs := append(append([]string(nil), argv[1:]...), string(payload))
 	ctx, cancel := context.WithTimeout(context.Background(), codexNotifyForwardTimeout)
 	defer cancel()
-	command := exec.CommandContext(ctx, target, forwardArgs...)
-	command.Stdout = io.Discard
-	command.Stderr = io.Discard
-	if err := command.Run(); err != nil {
+	if err := runOperatorCodexNotify(ctx, target, forwardArgs); err != nil {
 		if ctx.Err() != nil {
 			return fmt.Errorf("operator notify timed out: %w", ctx.Err())
 		}
 		return fmt.Errorf("operator notify failed: %w", err)
 	}
 	return nil
+}
+
+func defaultRunOperatorCodexNotify(ctx context.Context, name string, args []string) error {
+	command := exec.CommandContext(ctx, name, args...)
+	command.Stdout = io.Discard
+	command.Stderr = io.Discard
+	return command.Run()
 }
 
 func loadOperatorCodexNotify() ([]string, error) {

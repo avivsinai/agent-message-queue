@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -41,14 +42,15 @@ func TestCodexNotifyRecordsBeforeForwardAndIgnoresForwardFailure(t *testing.T) {
 	}
 }
 
+// agent-message-queue-mdb: the previous test spawned a shell and timed out
+// under load. The runner records the argv the forward would execute.
 func TestForwardOperatorCodexNotifyUsesIdenticalPayload(t *testing.T) {
 	home := t.TempDir()
-	output := filepath.Join(t.TempDir(), "payload")
-	script := filepath.Join(t.TempDir(), "notify")
-	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf '%s' \"$2\" > \"$1\"\n"), 0o700); err != nil {
+	hook := filepath.Join(t.TempDir(), "notify")
+	if err := os.WriteFile(hook, []byte("not run"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	config := "notify = [" + tomlQuote(script) + ", " + tomlQuote(output) + "]\n"
+	config := "notify = [" + tomlQuote(hook) + "]\n"
 	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(config), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -58,12 +60,20 @@ func TestForwardOperatorCodexNotifyUsesIdenticalPayload(t *testing.T) {
 		t.Fatal(err)
 	}
 	payload := []byte(`{"type":"agent-turn-complete","thread-id":"` + codexNotifyTestID + `"}`)
+	original := runOperatorCodexNotify
+	t.Cleanup(func() { runOperatorCodexNotify = original })
+	var gotName string
+	var gotArgs []string
+	runOperatorCodexNotify = func(_ context.Context, name string, args []string) error {
+		gotName = name
+		gotArgs = append([]string(nil), args...)
+		return nil
+	}
 	if err := forwardOperatorCodexNotify(amq, payload); err != nil {
 		t.Fatal(err)
 	}
-	got, err := os.ReadFile(output)
-	if err != nil || !reflect.DeepEqual(got, payload) {
-		t.Fatalf("forwarded payload = %q, %v", got, err)
+	if gotName != hook || !reflect.DeepEqual(gotArgs, []string{string(payload)}) {
+		t.Fatalf("forward = %q %q", gotName, gotArgs)
 	}
 }
 
