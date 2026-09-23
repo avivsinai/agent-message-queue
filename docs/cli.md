@@ -342,6 +342,11 @@ Read a message by id.
 If the message is in inbox/new, AMQ only moves it to inbox/cur after parse and header validation succeed.
 If the message in inbox/new is corrupt or malformed, AMQ moves it to DLQ and emits a dlq receipt.
 
+--id also resolves bridged messages by their header ID: messages delivered by amq-bridge keep
+the header ID but are stored under a transfer filename (xfer-<host>-<transfer>.md). If the ID
+matches more than one stored message, the command fails with a general error (exit 1) naming
+both paths; a missing message exits 3.
+
 Options:
   -id string
         Message id
@@ -554,6 +559,10 @@ Reply to a message with automatic thread/refs handling.
 Finds the original message, sets to/thread/refs automatically.
 Cross-session replies are routed via reply_to header.
 To follow up on a sent cross-session message, use amq send --session instead.
+
+--id also resolves bridged messages by their header ID (stored under a transfer filename). If the ID
+matches more than one stored message, the command fails with a general error (exit 1) naming both
+paths; a missing message exits 3.
 Use --wait-for drained to block until the recipient ingests the reply,
 mirroring amq send --wait-for.
 
@@ -565,7 +574,7 @@ Options:
   -context string
         JSON context object or @file.json
   -id string
-        Message ID to reply to
+        Message ID to reply to (a bridged message may be addressed by its header ID even though it is stored under a transfer filename)
   -ignore-session-pin
         With explicit --root, ignore a conflicting AM_SESSION source pin
   -json
