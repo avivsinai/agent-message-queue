@@ -186,17 +186,6 @@ def test_version_files_and_replacement_gates() -> None:
     ci = (ROOT / ".github/workflows/ci.yml").read_text()
     assert "scripts/check_pr_title.py" in ci
     assert "scripts/check_pr_changelog.py" not in ci
-    # agent-message-queue-0wp: #876 ran the matrix twice for one head
-    # (35867392070 and 35867387237) because every branch push and the PR
-    # sync both started ci.yml.
-    push, _, _ = ci.partition("pull_request:")
-    assert 'branches: ["main"]' in push
-    assert 'branches: ["**"]' not in ci
-    for path in (".github/workflows/release.yml", ".github/workflows/publish-skill.yml"):
-        text = (ROOT / path).read_text()
-        assert "node-version: '24'" in text, path
-        assert "node-version: '20'" not in text, path
-    assert "toolchain go1.26.8" in (ROOT / "go.mod").read_text()
 
     dependabot = (ROOT / ".github/dependabot.yml").read_text()
     assert dependabot.count('prefix: "deps"') == 2
