@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"net/url"
 	"strings"
 	"sync"
@@ -41,6 +42,18 @@ var ErrUnknownDelivery = errors.New("relay publish result unknown")
 
 // ErrRejected is an explicit negative OK for a published event.
 var ErrRejected = errors.New("relay rejected event")
+
+// RemoteError carries a relay's refusal. Kind is the stable category;
+// Reason is relay-controlled text, kept for local debugging and never
+// written to status files or shown as AMQ's own words (codex slice 1 review
+// #9). Error() returns only the category.
+type RemoteError struct {
+	Kind   error
+	Reason string
+}
+
+func (e *RemoteError) Error() string { return e.Kind.Error() }
+func (e *RemoteError) Unwrap() error { return e.Kind }
 
 // Config is one connection's identity and bounds.
 type Config struct {
@@ -93,9 +106,12 @@ type okResult struct {
 // Conn is one authenticated relay connection. A Conn never crosses a
 // reconnect: its challenge, OK waiters and authenticated flag die with it.
 type Conn struct {
-	cfg     Config
-	ws      *websocket.Conn
-	writeMu sync.Mutex
+	cfg Config
+	ws  *websocket.Conn
+	// writeSem serializes frame writes; a waiter honors its own context, so
+	// a queued publish keeps its deadline behind a stalled writer (codex
+	// slice 1 review #6).
+	writeSem chan struct{}
 
 	mu        sync.Mutex
 	waiters   map[nostr.ID]chan okResult
@@ -134,7 +150,13 @@ func Connect(ctx context.Context, cfg Config) (*Conn, error) {
 	}
 	dctx, cancel := context.WithTimeout(ctx, cfg.DialTimeout)
 	defer cancel()
-	ws, _, err := websocket.Dial(dctx, cfg.URL, &websocket.DialOptions{})
+	// No redirect is followed (codex slice 1 review #1): the library would
+	// otherwise follow one with scheme conversion, taking AUTH to another
+	// origin or to cleartext.
+	noRedirect := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
+		return errors.New("relay redirected; refusing")
+	}}
+	ws, _, err := websocket.Dial(dctx, cfg.URL, &websocket.DialOptions{HTTPClient: noRedirect})
 	if err != nil {
 		return nil, fmt.Errorf("relay dial: %w", err)
 	}
@@ -142,6 +164,7 @@ func Connect(ctx context.Context, cfg Config) (*Conn, error) {
 	c := &Conn{
 		cfg:       cfg,
 		ws:        ws,
+		writeSem:  make(chan struct{}, 1),
 		waiters:   map[nostr.ID]chan okResult{},
 		challenge: make(chan string, 1),
 		done:      make(chan struct{}),
@@ -175,7 +198,7 @@ func Connect(ctx context.Context, cfg Config) (*Conn, error) {
 	}
 	if !res.ok {
 		c.Close()
-		return nil, fmt.Errorf("%w: %s", ErrAuthRefused, res.reason)
+		return nil, &RemoteError{Kind: ErrAuthRefused, Reason: res.reason}
 	}
 	return c, nil
 }
@@ -192,7 +215,7 @@ func (c *Conn) Publish(ctx context.Context, evt nostr.Event) error {
 		return err
 	}
 	if !res.ok {
-		return fmt.Errorf("%w: %s", ErrRejected, res.reason)
+		return &RemoteError{Kind: ErrRejected, Reason: res.reason}
 	}
 	return nil
 }
@@ -227,6 +250,13 @@ func (c *Conn) roundTrip(ctx context.Context, evt nostr.Event, env interface{ Ma
 		c.mu.Unlock()
 		return okResult{}, fmt.Errorf("relay connection closed: %w", c.readErr)
 	}
+	if _, dup := c.waiters[evt.ID]; dup {
+		// One immutable event id has one OK; a second concurrent send of
+		// it must not steal or delete the first waiter (codex slice 1
+		// review #5).
+		c.mu.Unlock()
+		return okResult{}, fmt.Errorf("relay: event %s is already awaiting its OK", evt.ID.Hex())
+	}
 	if len(c.waiters) >= maxPending {
 		c.mu.Unlock()
 		return okResult{}, errors.New("relay: too many publications awaiting OK")
@@ -238,10 +268,7 @@ func (c *Conn) roundTrip(ctx context.Context, evt nostr.Event, env interface{ Ma
 		delete(c.waiters, evt.ID)
 		c.mu.Unlock()
 	}()
-	c.writeMu.Lock()
-	err = c.ws.Write(ctx, websocket.MessageText, frame)
-	c.writeMu.Unlock()
-	if err != nil {
+	if err := c.write(ctx, frame); err != nil {
 		return okResult{}, fmt.Errorf("%w: write: %v", ErrUnknownDelivery, err)
 	}
 	select {
@@ -252,6 +279,20 @@ func (c *Conn) roundTrip(ctx context.Context, evt nostr.Event, env interface{ Ma
 	case <-ctx.Done():
 		return okResult{}, fmt.Errorf("%w: %v", ErrUnknownDelivery, ctx.Err())
 	}
+}
+
+// write sends one frame, waiting for the write slot only as long as ctx
+// allows.
+func (c *Conn) write(ctx context.Context, frame []byte) error {
+	select {
+	case c.writeSem <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-c.done:
+		return errors.New("connection closed")
+	}
+	defer func() { <-c.writeSem }()
+	return c.ws.Write(ctx, websocket.MessageText, frame)
 }
 
 // readPump is the connection's only reader. It routes the AUTH challenge,

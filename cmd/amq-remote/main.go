@@ -429,13 +429,17 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 			sugar = append(sugar, manifest.Adapter{Kind: "codex", Target: codex.TargetID(id), Config: cfg})
 		}
 	}
-	// Buzz DM carriers exist before startup reconciliation, so a Buzz record
-	// owed from before a restart publishes during reconcile.
-	if mfRelay, rerr := manifest.Load(manifestFile); rerr == nil {
-		relayCfg = mfRelay.Relay
+	// One manifest snapshot drives target attachment, the Buzz DM carriers
+	// and the relay alike (codex slice 1 review #8): a second read could see
+	// a different file. Buzz DM carriers exist before startup reconciliation,
+	// so a Buzz record owed from before a restart publishes during reconcile.
+	mfSnap, err := manifest.Load(manifestFile)
+	var ep *core.Endpoint
+	if err == nil {
+		relayCfg = mfSnap.Relay
+		edges = buildDMEdges(c.root, stateDir, relayCfg, stderr)
+		_, ep, carrier, _, err = serveStartupFrom(stateDir, c.root, *me, mfSnap, sugar, carrierPublish, &carrier, stderr, wireCarrier(c.root, stderr))
 	}
-	edges = buildDMEdges(c.root, stateDir, relayCfg, stderr)
-	_, ep, carrier, _, err := serveStartup(stateDir, c.root, *me, manifestFile, sugar, carrierPublish, &carrier, stderr, wireCarrier(c.root, stderr))
 	if err != nil {
 		if manifest.IsValidation(err) {
 			if dup, ok := err.(*manifest.ErrDuplicateTarget); ok {
@@ -534,6 +538,9 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 		}
 	}()
 	err = server.Serve(ctx)
+	// Cancel before joining (codex slice 1 review #7): Serve can also return
+	// on an accept error with ctx still live, and the relays would never end.
+	stop()
 	if relays != nil {
 		relays.Wait()
 	}
@@ -1275,7 +1282,14 @@ func serveStartup(stateDir, root, handle, manifestFile string, sugar []manifest.
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
-	mf.Adapters = append(mf.Adapters, sugar...)
+	return serveStartupFrom(stateDir, root, handle, mf, sugar, publish, carrierOut, warn, wire)
+}
+
+// serveStartupFrom is serveStartup over an already loaded manifest, so serve
+// can use one validated snapshot for both target attachment and the relay
+// (codex slice 1 review #8).
+func serveStartupFrom(stateDir, root, handle string, mf manifest.File, sugar []manifest.Adapter, publish core.Publisher, carrierOut **amqio.Carrier, warn io.Writer, wire func(*amqio.Carrier)) (*requests.Store, *core.Endpoint, *amqio.Carrier, []registry.Outcome, error) {
+	mf.Adapters = append(append([]manifest.Adapter(nil), mf.Adapters...), sugar...)
 	if verr := manifest.Validate(mf); verr != nil {
 		return nil, nil, nil, nil, verr
 	}

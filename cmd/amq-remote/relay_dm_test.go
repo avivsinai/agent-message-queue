@@ -42,7 +42,8 @@ func TestDMEdgeSubmitsOwnerMessageAndPublishesRow(t *testing.T) {
 	notAfter := time.Now().Add(time.Hour).Unix()
 	var tags []map[string]any
 	var authTag []string
-	for _, kind := range []uint16{authKind, buzzio.KindDM, buzzio.KindEdit} {
+	// A complete generation (every base kind) with the buzz-dm kinds enabled.
+	for _, kind := range append(append([]uint16{}, bodykey.ShareKinds...), buzzio.KindDM, buzzio.KindEdit) {
 		tag, err := bodykey.SignAuthTag(owner, body.PublicKeyHex(), bodykey.ShareConditions(kind, notAfter))
 		if err != nil {
 			t.Fatal(err)

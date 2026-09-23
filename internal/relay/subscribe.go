@@ -4,15 +4,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"fiatjaf.com/nostr"
-	"github.com/coder/websocket"
 )
 
 // Subscription bounds (relay design §3).
 const (
 	maxSubscriptions = 32
 	subBuffer        = 256
+	// closeWriteTimeout bounds the best-effort CLOSE frame.
+	closeWriteTimeout = 5 * time.Second
 )
 
 // ErrOverflow closes a subscription whose consumer fell behind. Events are
@@ -82,9 +84,7 @@ func (c *Conn) Subscribe(ctx context.Context, id string, filters ...nostr.Filter
 		err = fmt.Errorf("REQ is %d bytes, over the %d-byte bound", len(frame), c.cfg.MaxOutbound)
 	}
 	if err == nil {
-		c.writeMu.Lock()
-		err = c.ws.Write(ctx, websocket.MessageText, frame)
-		c.writeMu.Unlock()
+		err = c.write(ctx, frame)
 	}
 	if err != nil {
 		c.endSub(s, err)
@@ -96,9 +96,9 @@ func (c *Conn) Subscribe(ctx context.Context, id string, filters ...nostr.Filter
 // Close sends CLOSE and ends the subscription.
 func (s *Sub) Close() {
 	frame, _ := nostr.CloseEnvelope(s.ID).MarshalJSON()
-	s.conn.writeMu.Lock()
-	_ = s.conn.ws.Write(context.Background(), websocket.MessageText, frame)
-	s.conn.writeMu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), closeWriteTimeout)
+	_ = s.conn.write(ctx, frame)
+	cancel()
 	s.conn.endSub(s, nil)
 }
 

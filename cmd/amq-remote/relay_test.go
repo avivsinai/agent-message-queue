@@ -30,13 +30,21 @@ func TestRelayShareAuthenticatesFromEnrolledCredentials(t *testing.T) {
 	if _, err := rand.Read(owner[:]); err != nil {
 		t.Fatal(err)
 	}
-	tag, err := bodykey.SignAuthTag(owner, body.PublicKeyHex(), bodykey.ShareConditions(authKind, time.Now().Add(time.Hour).Unix()))
-	if err != nil {
-		t.Fatal(err)
+	// A complete enrolled generation: every base kind, one not-after.
+	notAfter := time.Now().Add(time.Hour).Unix()
+	var tags []map[string]any
+	var tag *bodykey.AuthTag
+	for _, kind := range bodykey.ShareKinds {
+		t2, err := bodykey.SignAuthTag(owner, body.PublicKeyHex(), bodykey.ShareConditions(kind, notAfter))
+		if err != nil {
+			t.Fatal(err)
+		}
+		tags = append(tags, map[string]any{"kind": kind, "owner_pubkey": t2.OwnerPubKey, "conditions": t2.Conditions, "sig": t2.SigHex()})
+		if kind == authKind {
+			tag = t2
+		}
 	}
-	share, _ := json.Marshal(map[string]any{"tags": []map[string]any{{
-		"kind": authKind, "owner_pubkey": tag.OwnerPubKey, "conditions": tag.Conditions, "sig": tag.SigHex(),
-	}}})
+	share, _ := json.Marshal(map[string]any{"tags": tags})
 	if err := os.WriteFile(filepath.Join(keyDir, "share.json"), share, 0o600); err != nil {
 		t.Fatal(err)
 	}
