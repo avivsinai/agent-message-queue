@@ -176,9 +176,6 @@ func buildHarness(to, remote, token string) (buzzHarness, error) {
 	}, nil
 }
 
-// harnessFileToken is the harness id after amq_. A mailbox handle is used as
-// itself. A remote target may contain ':' (claude:98402); that colon becomes
-// '_' in the file name, and the raw target stays in the environment.
 // remoteNativeSession asks the endpoint which native session target is
 // attached to. That id is pinned into the harness. An unreachable endpoint
 // or an unshared target both refuse with the same next step.
@@ -196,6 +193,9 @@ func remoteNativeSession(root, target string) (string, error) {
 	return reply.NativeSession, nil
 }
 
+// harnessFileToken is the harness id after amq_. A mailbox handle is used as
+// itself. A remote target may contain ':' (claude:98402); that colon becomes
+// '_' in the file name, and the raw target stays in the environment.
 func harnessFileToken(to, remote string) (string, error) {
 	if to != "" {
 		if !harnessToken.MatchString(to) {
