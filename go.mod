@@ -2,7 +2,7 @@ module github.com/avivsinai/agent-message-queue
 
 go 1.26.0
 
-toolchain go1.26.6
+toolchain go1.26.8
 
 require (
 	fiatjaf.com/nostr v0.0.0-20260916040958-27e395a0f6e7
