@@ -334,6 +334,8 @@ func (s *Server) dispatchWithNotify(method string, params json.RawMessage, emit 
 		return s.prompt(params, emit)
 	case "session/cancel":
 		return s.cancel(params)
+	case "session/set_model":
+		return s.setModel(params)
 	case "_session/steering":
 		if s.cfg.RemoteTarget != "" {
 			return nil, newRPCError(codeMethodNotFound, "steering is not supported for amq-remote target %q", s.cfg.RemoteTarget)
@@ -429,6 +431,62 @@ type newSessionParams struct {
 type newSessionResult struct {
 	SessionID string          `json:"sessionId"`
 	Meta      sessionMetaInfo `json:"_meta"`
+	Models    sessionModels   `json:"models"`
+}
+
+// sessionModels is the ACP session model state. Buzz Desktop requires at
+// least one model before it saves an agent. This bridge runs no model, so it
+// advertises exactly one: its fixed destination.
+type sessionModels struct {
+	CurrentModelID  string      `json:"currentModelId"`
+	AvailableModels []modelInfo `json:"availableModels"`
+}
+
+type modelInfo struct {
+	ModelID     string `json:"modelId"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+}
+
+// model is the one destination this process delivers to.
+func (s *Server) model() modelInfo {
+	if s.cfg.RemoteTarget != "" {
+		return modelInfo{
+			ModelID:     "amq-remote:" + s.cfg.RemoteTarget,
+			Name:        "Live session " + s.cfg.RemoteTarget,
+			Description: "Runs in the shared native session, with that session's own model.",
+		}
+	}
+	return modelInfo{
+		ModelID:     "amq:" + s.cfg.To,
+		Name:        "AMQ handle " + s.cfg.To,
+		Description: "Delivers to the AMQ handle, which answers with its own model.",
+	}
+}
+
+type setModelParams struct {
+	SessionID string          `json:"sessionId"`
+	ModelID   string          `json:"modelId"`
+	Meta      json.RawMessage `json:"_meta"`
+}
+
+// setModel accepts only the one advertised model; the destination is fixed
+// by the process environment, never by the client.
+func (s *Server) setModel(params json.RawMessage) (any, *rpcError) {
+	var parsed setModelParams
+	if err := decodeParams(params, &parsed, false); err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	_, ok := s.sessions[parsed.SessionID]
+	s.mu.Unlock()
+	if !ok {
+		return nil, newRPCError(codeInvalidParams, "unknown sessionId %q", parsed.SessionID)
+	}
+	if want := s.model().ModelID; parsed.ModelID != want {
+		return nil, newRPCError(codeInvalidParams, "model %q is not available; this bridge serves only %q", parsed.ModelID, want)
+	}
+	return struct{}{}, nil
 }
 
 type sessionMetaInfo struct {
@@ -487,6 +545,7 @@ func (s *Server) newSession(params json.RawMessage) (any, *rpcError) {
 	return newSessionResult{
 		SessionID: id,
 		Meta:      sessionMetaInfo{ChannelID: channelID, Thread: threadID},
+		Models:    sessionModels{CurrentModelID: s.model().ModelID, AvailableModels: []modelInfo{s.model()}},
 	}, nil
 }
 

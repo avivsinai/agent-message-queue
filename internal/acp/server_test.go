@@ -1214,3 +1214,23 @@ func decodeAMQ(t *testing.T, line string) struct {
 		} `json:"_meta"`
 	}](t, line)
 }
+
+// Buzz Desktop 2026-09-23: "amq-acp reported no models" kept Add agent
+// disabled, because session/new carried no model state. The one advertised
+// model must also be accepted by session/set_model.
+func TestSessionNewAdvertisesOneModelThatSetModelAccepts(t *testing.T) {
+	live := startServer(t, testConfig(t))
+	live.send(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":2}}`)
+	live.read()
+	live.send(`{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/tmp"}}`)
+	created := live.read()["result"].(map[string]any)
+	models := created["models"].(map[string]any)
+	available := models["availableModels"].([]any)
+	if len(available) != 1 || models["currentModelId"] != "amq:"+testTo {
+		t.Fatalf("models = %v", models)
+	}
+	live.send(fmt.Sprintf(`{"jsonrpc":"2.0","id":3,"method":"session/set_model","params":{"sessionId":%q,"modelId":"amq:%s"}}`, created["sessionId"], testTo))
+	if reply := live.read(); reply["error"] != nil {
+		t.Fatalf("set_model refused the advertised model: %v", reply)
+	}
+}
