@@ -55,9 +55,11 @@ AMQ_CMUX_LIVE=1 go test ./internal/keepalive/adapter -run '^TestCmuxLiveDiscover
 AMQ_GHOSTTY_LIVE=1 go test ./internal/keepalive/adapter -run '^TestGhosttyLiveDiscoverProbe$' -count=1 -v
 AMQ_CLAUDE_LIVE=1 go test ./internal/keepalive/adapter -run '^TestClaudePrintLiveResumeAck$' -count=1 -v
 AMQ_CODEX_LIVE=1 AMQ_CODEX_LIVE_THREAD="<scratch-thread-uuid>" go test ./internal/keepalive/adapter -run '^TestCodexQueueLiveEnqueue$' -count=1 -v
+AMQ_TMUX_LIVE=1 go test ./internal/launch -run '^TestTmuxBackendLifecycleAndRecovery$' -count=1 -v
 ```
 
-Read the selected test before running it. The terminal probes create and close
+Read the selected test before running it. The tmux proof starts a private
+tmux server on its own socket and removes it. The terminal probes create and close
 windows or workspaces; use a dedicated application instance with no concurrent
 users. The Claude check creates and resumes a scratch conversation. The Codex
 check submits to the exact live thread you supply; replace the placeholder
