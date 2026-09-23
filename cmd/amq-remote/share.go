@@ -14,6 +14,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/remote/bodykey"
+	"github.com/avivsinai/agent-message-queue/internal/remote/manifest"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 )
 
@@ -106,6 +107,9 @@ func share(args []string, stdout, stderr io.Writer) (int, error) {
 	renew := fs.Bool("renew", false, "re-print preimages for a fresh attestation window (all kinds)")
 	days := fs.Int("days", 0, "attestation window in days (default 30; 1..90; on renew, an explicit --days that cannot exceed the current bounds is REFUSED, not silently bumped)")
 	tagFile := fs.String("tag-file", "", "JSON file with one owner-signed tag {kind,owner_pubkey,conditions,sig}")
+	bundle := fs.String("bundle", "", "JSON array of owner-signed tags, one file for every kind in the window")
+	target := fs.String("target", "", "adapter target bound into the manifest relay block; requires --relay")
+	relayURL := fs.String("relay", "", "relay wss:// URL written into the manifest relay block; requires --target")
 	dryRun := fs.Bool("dry-run", false, "print preimages without writing or changing anything")
 	var enable []uint16
 	fs.Func("enable", "opt in to an extra share surface for a new window (repeatable): buzz-dm (kinds 9, 40003), buzz-profile (kind 0)", func(v string) error {
@@ -142,6 +146,12 @@ func share(args []string, stdout, stderr io.Writer) (int, error) {
 	}
 	if *days < 1 || *days > 90 {
 		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "--days must be 1..90 (NIP-OA window bounds), got %d", *days)
+	}
+	if *tagFile != "" && *bundle != "" {
+		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "set only one of --tag-file or --bundle")
+	}
+	if (*target == "") != (*relayURL == "") {
+		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "--target and --relay are set together")
 	}
 
 	keyDir, err := shareKeyDir(*root, *session)
@@ -228,6 +238,12 @@ func share(args []string, stdout, stderr io.Writer) (int, error) {
 		return protocol.ExitActionRequired, l.Err
 	}
 
+	// Binding an already enrolled session writes the manifest and does not
+	// mint a key. A missing enrollment refuses before any file is created.
+	if *bundle == "" && *tagFile == "" && *target != "" {
+		return writeRelayShare(*root, *session, *target, *relayURL, keyDir)
+	}
+
 	// Load-or-mint the body keypair. Mint is refused if a key already
 	// exists; renewal and tag enrollment reuse the existing key.
 	if loadErr != nil {
@@ -241,6 +257,16 @@ func share(args []string, stdout, stderr io.Writer) (int, error) {
 		}
 	}
 
+	if *bundle != "" {
+		code, err := enrollBundle(*session, keyDir, *bundle, k, st)
+		if code != 0 || err != nil {
+			return code, err
+		}
+		if *target != "" {
+			return writeRelayShare(*root, *session, *target, *relayURL, keyDir)
+		}
+		return 0, nil
+	}
 	if *tagFile != "" {
 		return enrollTag(*session, keyDir, *tagFile, k, st)
 	}
@@ -299,7 +325,7 @@ func share(args []string, stdout, stderr io.Writer) (int, error) {
 		return protocol.ExitActionRequired, err
 	}
 	printSharePending(stdout, *session, k, pending, notAfter)
-	say(stderr, "sign each preimage with the owner's Buzz identity, then enroll one per kind:\n  amq-remote share --root %s --session %s --tag-file <tag.json> (repeat per kind)", *root, *session)
+	say(stderr, "sign the preimages into one bundle, then enroll it:\n  amq-remote share --root %s --session %s --bundle <bundle.json> --target <target> --relay <wss-url>", *root, *session)
 	return 0, nil
 }
 
@@ -451,36 +477,92 @@ func enrollTag(session, keyDir, tagPath string, k *bodykey.BodyKey, st *shareSta
 	if err := json.Unmarshal(raw, &tf); err != nil {
 		return protocol.ExitUsage, fmt.Errorf("--tag-file: %w", err)
 	}
-	// The kind must be one the share credential set defines, and the
-	// conditions string must be exactly the canonical per-kind string for
-	// the pending (or current) window — no free-form conditions.
+	pending, code, err := enrollablePending(session, keyDir, st)
+	if code != 0 || err != nil {
+		return code, err
+	}
+	if code, err = matchShareTag(&tf, pending, k); code != 0 || err != nil {
+		return code, err
+	}
+	if err := writeShareTag(session, keyDir, &tf); err != nil {
+		return protocol.ExitActionRequired, err
+	}
+	return 0, nil
+}
+
+// enrollBundle validates every tag in one owner-signed file, then enrolls
+// them in order. The file is a JSON array of the same objects --tag-file
+// accepts. Nothing is written when any tag is rejected.
+func enrollBundle(session, keyDir, bundlePath string, k *bodykey.BodyKey, st *shareState) (int, error) {
+	raw, err := os.ReadFile(bundlePath)
+	if err != nil {
+		return protocol.ExitUsage, fmt.Errorf("--bundle: %w", err)
+	}
+	var tags []shareTagFile
+	if err := json.Unmarshal(raw, &tags); err != nil {
+		return protocol.ExitUsage, fmt.Errorf("--bundle: %w", err)
+	}
+	if len(tags) == 0 {
+		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "--bundle is empty")
+	}
+	pending, code, err := enrollablePending(session, keyDir, st)
+	if code != 0 || err != nil {
+		return code, err
+	}
+	seen := map[uint16]bool{}
+	owner := ""
+	for i := range tags {
+		if seen[tags[i].Kind] {
+			return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "--bundle repeats kind %d", tags[i].Kind)
+		}
+		seen[tags[i].Kind] = true
+		if owner == "" {
+			owner = tags[i].OwnerPubKey
+		} else if tags[i].OwnerPubKey != owner {
+			return protocol.ExitActionRequired, fmt.Errorf("--bundle tags name more than one owner")
+		}
+		if code, err = matchShareTag(&tags[i], pending, k); code != 0 || err != nil {
+			return code, err
+		}
+	}
+	for i := range tags {
+		if err := writeShareTag(session, keyDir, &tags[i]); err != nil {
+			return protocol.ExitActionRequired, err
+		}
+	}
+	return 0, nil
+}
+
+// enrollablePending is the pending window a tag or bundle may sign. It
+// heals crash leftovers first, and refuses a missing or unreadable window.
+func enrollablePending(session, keyDir string, st *shareState) ([]shareTagFile, int, error) {
 	if st.Pending.State == leafAbsent {
-		return protocol.ExitActionRequired, fmt.Errorf("no pending window: run `amq-remote share --session %s --renew` first", session)
+		return nil, protocol.ExitActionRequired, fmt.Errorf("no pending window: run `amq-remote share --session %s --renew` first", session)
 	}
 	if st.Pending.Err != nil {
-		return protocol.ExitActionRequired, st.Pending.Err
+		return nil, protocol.ExitActionRequired, st.Pending.Err
 	}
-	// Reconcile crash leftovers before matching (verifier r3 P2-3): a
-	// complete published generation with stale pending/staged heals here
-	// so the owner is never asked to sign against a consumed window.
 	if rerr := reconcileStagedState(session, keyDir, st); rerr != nil {
-		return protocol.ExitActionRequired, rerr
+		return nil, protocol.ExitActionRequired, rerr
 	}
-	// Re-load after reconciliation; the loader is the only reader.
 	st2, err := loadShareState(keyDir)
 	if err != nil {
-		return protocol.ExitActionRequired, err
+		return nil, protocol.ExitActionRequired, err
 	}
 	if err := st2.refuseIfConfined(); err != nil {
-		return protocol.ExitActionRequired, err
+		return nil, protocol.ExitActionRequired, err
 	}
 	if st2.Pending.State == leafAbsent {
-		return protocol.ExitActionRequired, fmt.Errorf("no pending window: the current generation already covers it; run `amq-remote share --session %s` for the enrolled state", session)
+		return nil, protocol.ExitActionRequired, fmt.Errorf("no pending window: the current generation already covers it; run `amq-remote share --session %s` for the enrolled state", session)
 	}
 	if st2.Pending.Err != nil {
-		return protocol.ExitActionRequired, st2.Pending.Err
+		return nil, protocol.ExitActionRequired, st2.Pending.Err
 	}
-	pending := st2.Pending.Tags
+	return st2.Pending.Tags, 0, nil
+}
+
+// matchShareTag checks one tag against the pending window and the body key.
+func matchShareTag(tf *shareTagFile, pending []shareTagFile, k *bodykey.BodyKey) (int, error) {
 	var match *shareTagFile
 	for i := range pending {
 		if pending[i].Kind == tf.Kind {
@@ -501,12 +583,75 @@ func enrollTag(session, keyDir, tagPath string, k *bodykey.BodyKey, st *shareSta
 	if err := tag.Verify(k.PublicKeyHex()); err != nil {
 		return protocol.ExitActionRequired, fmt.Errorf("owner tag rejected: %w", err)
 	}
-	// Verify the conditions actually satisfy their own kind (defense in
-	// depth: the canonical string always does; anything else is refused).
 	if err := tag.Satisfies(tf.Kind, time.Now().Add(time.Minute).Unix()); err != nil {
 		return protocol.ExitActionRequired, fmt.Errorf("owner tag conditions rejected for kind %d: %v", tf.Kind, err)
 	}
-	if err := writeShareTag(session, keyDir, &tf); err != nil {
+	return 0, nil
+}
+
+// writeRelayShare records the enrolled session in the manifest relay block.
+// The owner public key comes from the enrolled tags. The human nsec is never
+// read. An existing share for the same target keeps its DM and native fields.
+func writeRelayShare(root, session, target, relayURL, keyDir string) (int, error) {
+	st, err := loadShareState(keyDir)
+	if err != nil {
+		return protocol.ExitActionRequired, err
+	}
+	if err := st.refuseIfConfined(); err != nil {
+		return protocol.ExitActionRequired, err
+	}
+	if st.Enrolled.Err != nil {
+		return protocol.ExitActionRequired, st.Enrolled.Err
+	}
+	if st.Enrolled.Gen == nil || len(st.Enrolled.Gen.Tags) == 0 {
+		return protocol.ExitActionRequired, fmt.Errorf("no enrolled generation for session %s", session)
+	}
+	owner := st.Enrolled.Gen.Tags[0].OwnerPubKey
+	for _, t := range st.Enrolled.Gen.Tags[1:] {
+		if t.OwnerPubKey != owner {
+			return protocol.ExitActionRequired, fmt.Errorf("enrolled tags name more than one owner")
+		}
+	}
+	path := manifest.DefaultPath(filepath.Join(root, stateDirName))
+	f, err := manifest.Load(path)
+	if err != nil {
+		return protocol.ExitActionRequired, err
+	}
+	found := false
+	for _, a := range f.Adapters {
+		if a.Target == target {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return protocol.ExitActionRequired, fmt.Errorf("manifest has no adapter %q; declare the target before share --target", target)
+	}
+	entry := manifest.Share{Target: target, Session: session, OwnerPubKey: owner}
+	if f.Relay == nil {
+		f.SchemaVersion = manifest.RelaySchemaVersion
+		f.Relay = &manifest.Relay{URL: relayURL, Shares: []manifest.Share{entry}}
+	} else if f.Relay.URL != relayURL {
+		return protocol.ExitActionRequired, fmt.Errorf("manifest relay url is %s; refusing to replace it with %s", f.Relay.URL, relayURL)
+	} else {
+		placed := false
+		for i := range f.Relay.Shares {
+			if f.Relay.Shares[i].Target == target {
+				prev := f.Relay.Shares[i]
+				prev.Target, prev.Session, prev.OwnerPubKey = target, session, owner
+				f.Relay.Shares[i] = prev
+				placed = true
+				break
+			}
+		}
+		if !placed {
+			f.Relay.Shares = append(f.Relay.Shares, entry)
+		}
+	}
+	if err := manifest.Validate(f); err != nil {
+		return protocol.ExitUsage, err
+	}
+	if err := manifest.Write(path, f); err != nil {
 		return protocol.ExitActionRequired, err
 	}
 	return 0, nil

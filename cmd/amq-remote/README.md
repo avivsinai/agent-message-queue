@@ -149,7 +149,10 @@ file instead of ignoring the object.
 ```
 
 Each share binds one declared target to the body key enrolled under
-`amq-remote share --session <session>`. `url` must be `wss://`; `ws://` is
+`amq-remote share --session <session>`. `amq-remote share --session <session>
+--bundle <file> --target <target> --relay <url>` writes this block after the
+bundle enrolls. The target must already be an adapter in the manifest. `url`
+must be `wss://`; `ws://` is
 accepted only for a loopback host. A target or session can be shared once.
 `commands` needs `dm_channel_id` and `native_session_id`; `activity` needs
 `native_session_id`. The optional `relay_self` pins the relay's NIP-11
@@ -328,7 +331,10 @@ still in the sender spool.
 | `--session ID` | empty | Shared session id. Required. |
 | `--renew` | false | Reprint preimages for a fresh attestation window, for every kind. |
 | `--days N` | `30` | Attestation window in days. Range `1..90`. An explicit `0` is exit 2. On `--renew`, an explicit `--days` that would not exceed the current window bounds is refused. |
-| `--tag-file PATH` | empty | JSON file with one owner-signed tag: `kind`, `owner_pubkey`, `conditions`, `sig`. Enrolls that tag. |
+| `--tag-file PATH` | empty | JSON file with one owner-signed tag: `kind`, `owner_pubkey`, `conditions`, `sig`. Enrolls that tag. | 
+| `--bundle PATH` | empty | JSON array of those tags, one file for the whole window. Enrolls every tag. Not combined with `--tag-file`. |
+| `--target ID` | empty | Adapter target written into the manifest relay block. Set with `--relay`. |
+| `--relay URL` | empty | Relay `wss://` URL written into the manifest relay block. Set with `--target`. The owner public key is copied from the enrolled tags. |
 | `--enable SURFACE` | empty | Request the kinds of `buzz-dm` (9, 40003) or `buzz-profile` (0) in the new window. Repeatable. |
 | `--dry-run` | false | Print what a real run would do. Writes nothing. |
 

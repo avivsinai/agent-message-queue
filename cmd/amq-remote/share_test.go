@@ -15,6 +15,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/remote/bodykey"
+	"github.com/avivsinai/agent-message-queue/internal/remote/manifest"
 )
 
 // runShareLoose runs share without failing on non-zero exits; returns
@@ -145,6 +146,66 @@ func TestShareMintPrintEnrollFullLifecycle(t *testing.T) {
 	}
 	if strings.Contains(out2, "preimage") {
 		t.Fatalf("plain share must not mint a new window over an enrolled one:\n%s", out2)
+	}
+}
+
+// TestShareBundleWritesRelayBlock is the one-step enroll (611.30): one
+// bundle file publishes the window, and --target with --relay writes the
+// manifest relay block from the enrolled owner key.
+func TestShareBundleWritesRelayBlock(t *testing.T) {
+	root := t.TempDir()
+	const target = "codex-work"
+	manifestPath := manifest.DefaultPath(filepath.Join(root, "extensions", "remote"))
+	if err := manifest.Write(manifestPath, manifest.File{
+		SchemaVersion: manifest.SchemaVersion,
+		Layer:         manifest.Layer,
+		Adapters:      []manifest.Adapter{{Kind: "codex", Target: target}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	out, _, code := runShare(t, "--root", root, "--session", "s1")
+	if code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	k, err := bodykey.Load(filepath.Join(root, "extensions", "remote", "keys", "s1", "body.key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	condsByKind := pendingConditions(t, out)
+	tags := make([]map[string]any, 0, len(bodykey.ShareKinds))
+	for _, kind := range bodykey.ShareKinds {
+		conds := condsByKind[kind]
+		tags = append(tags, map[string]any{
+			"kind": kind, "owner_pubkey": ownerPubHex, "conditions": conds,
+			"sig": ownerSignFor(t, k.PublicKeyHex(), conds),
+		})
+	}
+	raw, err := json.Marshal(tags)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle := filepath.Join(t.TempDir(), "bundle.json")
+	if err := os.WriteFile(bundle, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, code := runShare(t, "--root", root, "--session", "s1", "--bundle", bundle, "--target", target, "--relay", "wss://relay.example"); code != 0 {
+		t.Fatalf("bundle enroll exit = %d", code)
+	}
+	if _, err := os.Stat(filepath.Join(root, "extensions", "remote", "keys", "s1", "share.pending.json")); !os.IsNotExist(err) {
+		t.Fatalf("pending window still present: %v", err)
+	}
+	got, err := manifest.Load(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.SchemaVersion != manifest.RelaySchemaVersion || got.Relay == nil || got.Relay.URL != "wss://relay.example" {
+		t.Fatalf("relay block = %#v", got.Relay)
+	}
+	if len(got.Relay.Shares) != 1 || got.Relay.Shares[0].Target != target || got.Relay.Shares[0].Session != "s1" || got.Relay.Shares[0].OwnerPubKey != ownerPubHex {
+		t.Fatalf("share = %#v", got.Relay.Shares)
+	}
+	if len(got.Adapters) != 1 || got.Adapters[0].Target != target {
+		t.Fatalf("adapters = %#v", got.Adapters)
 	}
 }
 
