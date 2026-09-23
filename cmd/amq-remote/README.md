@@ -343,16 +343,24 @@ endpoint has never been started: the report says to run `amq-remote serve`
 once. `amq-remote up` starts that same `serve` child.
 
 With a relay configured, doctor also reports each share's connection state
-as `serve` last wrote it: `auth_pending`, `authenticated` or `unavailable`,
-with the last error. Any share that is not `authenticated` makes doctor exit
-6. A commands share also reports its DM surface under `commands`:
-`subscription_active` when open, or `closed: <reason>` or
-`publish_pending: <reason>`. Any other value than `subscription_active`
-makes doctor exit 6. A presence share reports `presence` (`online`,
-`away`, or why nothing was published) and `discovery` (`policy_present`, or
-`policy_missing` when the owner has not published the kind 30177 policy);
-anything else than `online`, `away` and `policy_present` makes doctor exit
-6.
+as `serve` last wrote it (`auth_pending`, `authenticated` or `unavailable`),
+its DM surface under `commands`, and its `presence` and `discovery`.
+
+`failing` lists each broken boundary with a subject, the detail, and a
+remedy. Doctor exits 6 exactly when `failing` is not empty.
+
+| Boundary | Fails when |
+| --- | --- |
+| `endpoint` | No state directory yet, or the endpoint does not answer `session.list`. |
+| `registration` | An adapter was refused at startup, or `refusals.json` is unreadable. |
+| `native_capability` | A Claude target is attached but the Stop hook is not installed. |
+| `body_key` | A share's body key or enrolled generation cannot be used. |
+| `tag_expiry` | A share's enrolled grants have expired. |
+| `relay_auth` | A share is not `authenticated`. |
+| `dm_surface` | A commands share's DM surface is not `subscription_active`. |
+| `publication` | Owed DM output could not be sent yet. |
+| `presence` | A presence share has not published `online` or `away`. |
+| `discovery` | The owner has not published the kind 30177 policy for the body. |
 
 `authenticated` means the relay accepted this body's AUTH. It does not prove
 that the relay materialized the owner binding or that any viewer is ready.

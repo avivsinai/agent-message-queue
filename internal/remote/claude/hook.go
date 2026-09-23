@@ -67,6 +67,32 @@ func UninstallStopHook(home string) error {
 	return mutateStopHook(home, false, "")
 }
 
+// StopHookInstalled reports whether settings.json under home holds the AMQ
+// Stop hook. Without it a Claude request is admitted but never completes.
+func StopHookInstalled(home string) (bool, error) {
+	raw, err := os.ReadFile(settingsPath(home))
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	loc, err := locateSettings(raw)
+	if err != nil || loc.stop == nil {
+		return false, err
+	}
+	els, err := arrayElements(raw, *loc.stop)
+	if err != nil {
+		return false, err
+	}
+	for _, el := range els {
+		if groupHasOurHook(raw[el[0]:el[1]]) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func settingsPath(home string) string {
 	return filepath.Join(home, ".claude", "settings.json")
 }
