@@ -12,18 +12,13 @@ import (
 	"fiatjaf.com/nostr"
 
 	"github.com/avivsinai/agent-message-queue/internal/relay"
+	"github.com/avivsinai/agent-message-queue/internal/remote/bodykey"
 	"github.com/avivsinai/agent-message-queue/internal/remote/buzzio"
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/manifest"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 	"github.com/avivsinai/agent-message-queue/internal/remote/sharestate"
 )
-
-// errMembershipUnverified keeps the DM surface closed until the channel's
-// relay-authoritative membership is proven to be exactly owner and body
-// (relay design §4). It fails closed: no command is admitted and no private
-// result is published on an unverified channel.
-var errMembershipUnverified = errors.New("DM channel membership is not verified")
 
 // dmShare is one share's owner-DM edge.
 type dmShare struct {
@@ -35,6 +30,8 @@ type dmShare struct {
 // dmEdges holds the DM carriers of every commands share, keyed by body.
 type dmEdges struct {
 	mu     sync.Mutex
+	relay  string // relay URL, for the NIP-11 self lookup
+	self   string // pinned relay self key; empty reads NIP-11
 	byBody map[string]*dmShare
 	state  map[string]string // session -> commands surface state, for status
 	// handle is bound once the endpoint exists; carriers only call it from
@@ -51,6 +48,7 @@ func buildDMEdges(root, stateDir string, r *manifest.Relay, warn io.Writer) *dmE
 	if r == nil {
 		return d
 	}
+	d.relay, d.self = r.URL, r.Self
 	for _, sh := range r.Shares {
 		if !sh.Commands {
 			continue
@@ -69,11 +67,27 @@ func buildDMEdges(root, stateDir string, r *manifest.Relay, warn io.Writer) *dmE
 		}
 		b := buzzio.Binding{Owner: sh.OwnerPubKey, Body: creds.Body.PublicKeyHex(), Channel: sh.DMChannelID, Target: sh.Target, RelayHost: r.URL}
 		ds := &dmShare{share: sh, binding: b}
-		ds.carrier = buzzio.NewCarrier(ledger, b, creds.Body.Secret(), d.handleLate)
+		ds.carrier = buzzio.NewCarrier(ledger, b, creds.Body.Secret(), enrolledGrant(root, sh.Session, b), d.handleLate)
 		d.byBody[b.Body] = ds
 		d.state[sh.Session] = "configured"
 	}
 	return d
+}
+
+// enrolledGrant reads the session's current enrolled generation for each
+// signed event, so a renewed generation is used without a restart and an
+// expired or re-bound one stops signing.
+func enrolledGrant(root, session string, b buzzio.Binding) buzzio.Grant {
+	return func(kind uint16, at time.Time) (bodykey.AuthTag, error) {
+		creds, err := sharestate.Load(root, session)
+		if err != nil {
+			return bodykey.AuthTag{}, err
+		}
+		if creds.Body.PublicKeyHex() != b.Body || creds.Owner != b.Owner {
+			return bodykey.AuthTag{}, errors.New("enrolled body or owner changed")
+		}
+		return creds.TagFor(kind, at)
+	}
 }
 
 func (d *dmEdges) bind(h buzzio.Handler) {
@@ -128,26 +142,71 @@ func (d *dmEdges) forBody(body string) *dmShare {
 const dmOverlap = 5 * time.Minute
 
 // verifyMembership proves the DM channel's members are exactly owner and
-// body. It is the one piece of the edge that depends on the deployment's
-// Buzz membership contract; until that read is implemented it refuses.
-var verifyMembership = func(ctx context.Context, conn *relay.Conn, b buzzio.Binding) error {
-	return errMembershipUnverified
+// body, from snapshots signed by the relay's self key (slice 4 contract).
+var verifyMembership = buzzio.VerifyDMMembership
+
+// membershipRecheck is how often an open DM surface re-reads membership.
+// The snapshots are cached relay-side, so a change is seen within about this
+// interval plus the relay's cache, never instantly.
+var membershipRecheck = time.Minute
+
+// errMembershipChanged ends one open DM session when a re-read no longer
+// proves owner-and-body membership.
+var errMembershipChanged = errors.New("DM channel membership changed")
+
+// relaySelf returns the pinned relay self key, or reads it from the relay's
+// NIP-11 document.
+func (d *dmEdges) relaySelf(ctx context.Context) (string, error) {
+	if d.self != "" {
+		return d.self, nil
+	}
+	return buzzio.RelaySelf(ctx, d.relay)
 }
 
-// runDM is one authenticated connection's DM session: verify membership,
-// subscribe to the owner's messages in the bound channel, ingest them, and
-// flush owed output. It returns when the connection or ctx ends.
+// verify resolves the relay self key and checks membership once.
+func (ds *dmShare) verify(ctx context.Context, conn *relay.Conn, edges *dmEdges) error {
+	self, err := edges.relaySelf(ctx)
+	if err != nil {
+		return err
+	}
+	return verifyMembership(ctx, conn, self, ds.binding)
+}
+
+// runDM is one authenticated connection's DM edge. The surface opens only
+// while membership verifies; a failed check or a changed membership closes
+// it (no command admitted, no result published) and it re-checks on the
+// recheck interval. It returns when the connection or ctx ends.
 func (ds *dmShare) runDM(ctx context.Context, conn *relay.Conn, edges *dmEdges, warn io.Writer) {
 	session := ds.share.Session
-	if err := verifyMembership(ctx, conn, ds.binding); err != nil {
+	for {
+		err := ds.verify(ctx, conn, edges)
+		if err == nil {
+			err = ds.serveDM(ctx, conn, edges, warn)
+			if !errors.Is(err, errMembershipChanged) {
+				return
+			}
+		}
 		edges.setState(session, "closed: "+err.Error())
-		<-ctx.Done()
-		return
+		select {
+		case <-ctx.Done():
+			return
+		case <-conn.Done():
+			return
+		case <-time.After(membershipRecheck):
+		}
 	}
+}
+
+// serveDM subscribes to the owner's messages and reactions in the bound
+// channel, ingests them, and flushes owed output, re-verifying membership
+// on the recheck interval. It returns errMembershipChanged when a re-read
+// fails, and nil or a subscription error when the session ends otherwise.
+func (ds *dmShare) serveDM(ctx context.Context, conn *relay.Conn, edges *dmEdges, warn io.Writer) error {
+	session := ds.share.Session
 	owner, err := nostr.PubKeyFromHex(ds.binding.Owner)
 	if err != nil {
 		edges.setState(session, "closed: owner pubkey: "+err.Error())
-		return
+		return err
 	}
 	sub, err := conn.Subscribe(ctx, "dm-"+session, nostr.Filter{
 		Kinds:   []nostr.Kind{buzzio.KindDM},
@@ -157,8 +216,9 @@ func (ds *dmShare) runDM(ctx context.Context, conn *relay.Conn, edges *dmEdges, 
 	})
 	if err != nil {
 		edges.setState(session, "closed: subscribe: "+err.Error())
-		return
+		return err
 	}
+	defer sub.Close()
 	// Reactions need their own owner-authored subscription with no h filter:
 	// the phone's reaction carries the target row, not the channel. Each is
 	// validated against this edge's persisted rows (IngestReaction).
@@ -169,28 +229,35 @@ func (ds *dmShare) runDM(ctx context.Context, conn *relay.Conn, edges *dmEdges, 
 	})
 	if err != nil {
 		edges.setState(session, "closed: subscribe reactions: "+err.Error())
-		return
+		return err
 	}
+	defer reactions.Close()
 	edges.setState(session, "subscription_active")
 	flush := time.NewTicker(time.Second)
 	defer flush.Stop()
+	recheck := time.NewTicker(membershipRecheck)
+	defer recheck.Stop()
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			return nil
 		case <-sub.Done():
 			edges.setState(session, "closed: "+fmt.Sprint(sub.Err()))
-			return
+			return sub.Err()
 		case evt := <-sub.Events:
 			if err := ds.carrier.Ingest(evt); err != nil {
 				say(warn, "relay share %s: ingest %s: %v", session, evt.ID.Hex(), err)
 			}
 		case <-reactions.Done():
 			edges.setState(session, "closed: "+fmt.Sprint(reactions.Err()))
-			return
+			return reactions.Err()
 		case evt := <-reactions.Events:
 			if err := ds.carrier.IngestReaction(evt); err != nil {
 				say(warn, "relay share %s: reaction %s: %v", session, evt.ID.Hex(), err)
+			}
+		case <-recheck.C:
+			if err := ds.verify(ctx, conn, edges); err != nil {
+				return fmt.Errorf("%w: %v", errMembershipChanged, err)
 			}
 		case <-flush.C:
 			if err := ds.carrier.Flush(ctx, conn.Publish); err != nil {

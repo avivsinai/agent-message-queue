@@ -57,7 +57,11 @@ const RelaySchemaVersion = 2
 // Relay configures one relay endpoint and the sessions shared on it.
 type Relay struct {
 	// URL is wss://, or ws:// to a loopback host for in-process tests.
-	URL    string  `json:"url"`
+	URL string `json:"url"`
+	// Self optionally pins the relay's NIP-11 self key, the key that signs
+	// NIP-29 group membership. Unset, it is read from the relay's NIP-11
+	// document on each connection.
+	Self   string  `json:"relay_self,omitempty"`
 	Shares []Share `json:"shares"`
 }
 
@@ -293,6 +297,9 @@ func validateRelay(f File, targets map[string]bool) error {
 	}
 	if err := validRelayURL(r.URL); err != nil {
 		return &ErrInvalidRelay{Reason: err.Error()}
+	}
+	if r.Self != "" && !validHex64(r.Self) {
+		return &ErrInvalidRelay{Reason: "relay_self must be 64 lowercase hex"}
 	}
 	if len(r.Shares) == 0 {
 		return &ErrInvalidRelay{Reason: "shares is empty"}

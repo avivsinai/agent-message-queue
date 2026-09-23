@@ -3,11 +3,13 @@ package buzzio
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"testing"
 	"time"
 
 	"fiatjaf.com/nostr"
 
+	"github.com/avivsinai/agent-message-queue/internal/remote/bodykey"
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 )
@@ -40,7 +42,7 @@ func TestCarrierSubmitsOnceAndKeepsOneEditableRow(t *testing.T) {
 		t.Fatalf("unexpected op %s", cmd.Op)
 		return nil, nil
 	}
-	c := NewCarrier(ledger, b, body, handle)
+	c := NewCarrier(ledger, b, body, ownerGrant(t, owner, b.Body, KindDM, KindEdit), handle)
 	now := time.Now()
 	c.now = func() time.Time { return now }
 
@@ -76,6 +78,16 @@ func TestCarrierSubmitsOnceAndKeepsOneEditableRow(t *testing.T) {
 	if tagValue(sent[1], "e") != sent[0].ID.Hex() || sent[1].CreatedAt <= sent[0].CreatedAt {
 		t.Fatalf("edit does not name its row or is not strictly later: %+v", sent[1])
 	}
+	// The row replies to the owner's input (h, p=owner, e input "reply"),
+	// and both events carry the owner's grant for their kind.
+	if tagValue(sent[0], "p") != b.Owner || !hasTag(sent[0], "e", dm.ID.Hex(), "", "reply") {
+		t.Fatalf("row tags = %v, want p=owner and a reply to the input", sent[0].Tags)
+	}
+	for _, evt := range sent {
+		if tagValue(evt, "auth") != b.Owner {
+			t.Fatalf("kind %d tags = %v, want the owner's grant attached", evt.Kind, evt.Tags)
+		}
+	}
 	if pending, _ := ledger.Pending(); len(pending) != 0 {
 		t.Fatalf("pending after flush = %d, want 0", len(pending))
 	}
@@ -90,7 +102,7 @@ func TestReactionOnRowCancelsItsRequest(t *testing.T) {
 	b := Binding{Owner: nostr.GetPublicKey(owner).Hex(), Body: nostr.GetPublicKey(body).Hex(), Channel: "dm-1", Target: "cx", RelayHost: "relay"}
 	ledger, _ := OpenLedger(t.TempDir())
 	var cancelled string
-	c := NewCarrier(ledger, b, body, func(cmd *protocol.Command, _ core.Source) (any, error) {
+	c := NewCarrier(ledger, b, body, ownerGrant(t, owner, b.Body, KindDM, KindEdit), func(cmd *protocol.Command, _ core.Source) (any, error) {
 		switch cmd.Op {
 		case protocol.OpSessionInspect:
 			return protocol.Session{TargetID: "cx", Epoch: "e1"}, nil
@@ -120,4 +132,57 @@ func TestReactionOnRowCancelsItsRequest(t *testing.T) {
 	if cancelled != "amqr1_x" {
 		t.Fatalf("cancelled = %q, want the reacted row's request", cancelled)
 	}
+}
+
+// slice 4 contract §4: Buzz does not enforce NIP-OA kind grants, so the
+// carrier refuses to sign an event no enrolled grant admits.
+func TestCarrierRefusesToSignWithoutGrant(t *testing.T) {
+	var owner, body [32]byte
+	_, _ = rand.Read(owner[:])
+	_, _ = rand.Read(body[:])
+	b := Binding{Owner: nostr.GetPublicKey(owner).Hex(), Body: nostr.GetPublicKey(body).Hex(), Channel: "dm-1", Target: "cx", RelayHost: "relay"}
+	ledger, _ := OpenLedger(t.TempDir())
+	c := NewCarrier(ledger, b, body, ownerGrant(t, owner, b.Body, KindEdit), nil) // no kind 9 grant
+	err := c.Publish(protocol.Snapshot{RequestRef: "amqr1_x", Revision: 1, State: protocol.StateRunning}, c.source("").Origin)
+	if !errors.Is(err, ErrNoGrant) {
+		t.Fatalf("publish without a kind 9 grant: err=%v, want ErrNoGrant", err)
+	}
+	if pending, _ := ledger.Pending(); len(pending) != 0 {
+		t.Fatalf("owed outputs = %d, want none signed", len(pending))
+	}
+}
+
+// ownerGrant signs real owner grants for kinds, valid for an hour.
+func ownerGrant(t *testing.T, owner [32]byte, bodyPub string, kinds ...uint16) Grant {
+	t.Helper()
+	tags := map[uint16]bodykey.AuthTag{}
+	for _, k := range kinds {
+		tag, err := bodykey.SignAuthTag(owner, bodyPub, bodykey.ShareConditions(k, time.Now().Add(time.Hour).Unix()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		tags[k] = *tag
+	}
+	return func(kind uint16, at time.Time) (bodykey.AuthTag, error) {
+		tag, ok := tags[kind]
+		if !ok {
+			return bodykey.AuthTag{}, errors.New("not granted")
+		}
+		return tag, tag.Satisfies(kind, at.Unix())
+	}
+}
+
+func hasTag(evt nostr.Event, want ...string) bool {
+	for _, tag := range evt.Tags {
+		if len(tag) == len(want) {
+			match := true
+			for i := range want {
+				match = match && tag[i] == want[i]
+			}
+			if match {
+				return true
+			}
+		}
+	}
+	return false
 }

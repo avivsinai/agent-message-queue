@@ -7,12 +7,12 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"fiatjaf.com/nostr"
 
-	"github.com/avivsinai/agent-message-queue/internal/relay"
 	"github.com/avivsinai/agent-message-queue/internal/relay/relaytest"
 	"github.com/avivsinai/agent-message-queue/internal/remote/bodykey"
 	"github.com/avivsinai/agent-message-queue/internal/remote/buzzio"
@@ -25,9 +25,9 @@ import (
 // channel reaches the endpoint as a submit, and the body publishes the
 // request's result row back into that channel.
 func TestDMEdgeSubmitsOwnerMessageAndPublishesRow(t *testing.T) {
-	prev := verifyMembership
-	verifyMembership = func(context.Context, *relay.Conn, buzzio.Binding) error { return nil } // contract pending; see relay_dm.go
-	defer func() { verifyMembership = prev }()
+	prev := membershipRecheck
+	membershipRecheck = 200 * time.Millisecond
+	defer func() { membershipRecheck = prev }()
 
 	root := t.TempDir()
 	keyDir := filepath.Join(root, "extensions", "remote", "keys", "work")
@@ -60,7 +60,20 @@ func TestDMEdgeSubmitsOwnerMessageAndPublishesRow(t *testing.T) {
 	lr, srv, url := relaytest.Start(body.PublicKeyHex(), authTag)
 	defer srv.Close()
 	ownerHex := nostr.GetPublicKey(owner).Hex()
-	r := &manifest.Relay{URL: url, Shares: []manifest.Share{{Target: "fake", Session: "work", OwnerPubKey: ownerHex, DMChannelID: "dm-1", Commands: true}}}
+	// The relay's own key signs the channel's NIP-29 membership (39002) and
+	// metadata (39000): exactly owner and body, private, type dm.
+	relayKey := nostr.Generate()
+	groupEvent := func(kind nostr.Kind, tags nostr.Tags) {
+		t.Helper()
+		evt := nostr.Event{CreatedAt: nostr.Now(), Kind: kind, Tags: append(nostr.Tags{{"d", "dm-1"}}, tags...)}
+		if err := evt.Sign(relayKey); err != nil {
+			t.Fatal(err)
+		}
+		lr.Inject(evt)
+	}
+	groupEvent(39000, nostr.Tags{{"private"}, {"t", "dm"}})
+	groupEvent(39002, nostr.Tags{{"p", ownerHex}, {"p", body.PublicKeyHex()}})
+	r := &manifest.Relay{URL: url, Self: nostr.GetPublicKey(relayKey).Hex(), Shares: []manifest.Share{{Target: "fake", Session: "work", OwnerPubKey: ownerHex, DMChannelID: "dm-1", Commands: true}}}
 
 	stateDir := filepath.Join(root, "extensions", "remote")
 	edges := buildDMEdges(root, stateDir, r, io.Discard)
@@ -102,11 +115,21 @@ func TestDMEdgeSubmitsOwnerMessageAndPublishesRow(t *testing.T) {
 	for {
 		for _, evt := range lr.Events() {
 			if evt.Kind == buzzio.KindDM && evt.PubKey.Hex() == body.PublicKeyHex() {
-				return // the body's result row is on the relay
+				goto published // the body's result row is on the relay
 			}
 		}
 		if time.Now().After(deadline.Add(5 * time.Second)) {
 			t.Fatal("no result row from the body on the relay")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+published:
+	// A third member joins: the next membership re-read closes the surface.
+	time.Sleep(1100 * time.Millisecond) // a strictly newer created_at second
+	groupEvent(39002, nostr.Tags{{"p", ownerHex}, {"p", body.PublicKeyHex()}, {"p", nostr.GetPublicKey(nostr.Generate()).Hex()}})
+	for !strings.HasPrefix(edges.stateOf("work"), "closed:") {
+		if time.Now().After(deadline.Add(10 * time.Second)) {
+			t.Fatalf("DM surface state = %q after a third member joined, want closed", edges.stateOf("work"))
 		}
 		time.Sleep(20 * time.Millisecond)
 	}

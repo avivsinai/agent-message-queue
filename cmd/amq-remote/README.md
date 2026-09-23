@@ -134,8 +134,10 @@ file instead of ignoring the object.
 Each share binds one declared target to the body key enrolled under
 `amq-remote share --session <session>`. `url` must be `wss://`; `ws://` is
 accepted only for a loopback host. A target or session can be shared once.
-`commands` and `activity` are refused: this binary authenticates on the
-relay and does nothing more yet.
+`activity` is refused. `commands` needs `dm_channel_id`. The optional
+`relay_self` pins the relay's NIP-11 `self` key (64 lowercase hex); without
+it, `serve` reads the key from the relay's NIP-11 document and refuses a
+redirect.
 
 `serve` keeps one connection per share. It answers the relay's NIP-42
 challenge with a kind 22242 event signed by the body key, carrying exactly
@@ -148,6 +150,34 @@ seconds. Local IPC and AMQ delivery keep working while the relay is down.
 
 `serve` never mints, renews or enrolls a key. Use `amq-remote share` for
 that.
+
+### Owner DM commands
+
+With `"commands": true` and `"dm_channel_id": "<channel>"`, the owner can
+operate the shared target from the Buzz DM channel. Enroll the DM kinds
+first with `amq-remote share --session <session> --enable buzz-dm`.
+
+| Owner sends | Result |
+| --- | --- |
+| Plain text | One submit to the target. The body replies with one result row and edits that row as the request changes. |
+| `/inspect` | The target's session state. |
+| `/status <ref>` | The state of a request that this channel submitted. |
+| `/cancel <ref>`, or ❌ on a result row | Cancels that request. |
+
+The surface opens only when the relay's own key signs the channel's NIP-29
+membership (kind 39002) as exactly the owner and the body, and its metadata
+(kind 39000) as private and of type `dm`. `serve` reads the membership again
+every minute and closes the surface when it changes. Because the relay caches
+these snapshots, a change can show late.
+
+The body signs a kind 9 or 40003 event only when the enrolled generation has
+the owner's grant for that kind. It attaches that grant as the event's
+NIP-OA tag. The relay does not enforce these grants; `serve` does. Each
+owner event is claimed once, so a redelivered DM does not submit twice.
+
+Privacy: Buzz DM content is not end-to-end encrypted. The relay operator can
+read the prompts and the result rows. Do not share a session whose prompts or
+results the relay operator must not see.
 
 ## Flags
 
@@ -229,6 +259,7 @@ still in the sender spool.
 | `--renew` | false | Reprint preimages for a fresh attestation window, for every kind. |
 | `--days N` | `30` | Attestation window in days. Range `1..90`. An explicit `0` is exit 2. On `--renew`, an explicit `--days` that would not exceed the current window bounds is refused. |
 | `--tag-file PATH` | empty | JSON file with one owner-signed tag: `kind`, `owner_pubkey`, `conditions`, `sig`. Enrolls that tag. |
+| `--enable SURFACE` | empty | Request the kinds of `buzz-dm` (9, 40003) or `buzz-profile` (0) in the new window. Repeatable. |
 | `--dry-run` | false | Print what a real run would do. Writes nothing. |
 
 ## Exit codes

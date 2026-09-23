@@ -14,6 +14,7 @@ import (
 
 	"fiatjaf.com/nostr"
 
+	"github.com/avivsinai/agent-message-queue/internal/remote/bodykey"
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 )
@@ -34,6 +35,15 @@ const maxRowText = 4000
 // stays owed and is retried.
 var ErrClockBehind = errors.New("edit waits for the clock to pass the previous edit's second")
 
+// ErrNoGrant means the enrolled generation holds no owner grant admitting
+// an event of this kind at this time. Buzz does not enforce NIP-OA kind
+// grants, so AMQ refuses to sign locally (slice 4 contract §4).
+var ErrNoGrant = errors.New("no enrolled owner grant for this event")
+
+// Grant returns the enrolled owner tag that admits kind at createdAt, or an
+// error when none does.
+type Grant func(kind uint16, createdAt time.Time) (bodykey.AuthTag, error)
+
 // Handler is the endpoint's command entry point (core.Endpoint.Handle).
 type Handler func(cmd *protocol.Command, src core.Source) (any, error)
 
@@ -48,15 +58,29 @@ type Carrier struct {
 	ledger  *Ledger
 	binding Binding
 	secret  [32]byte
+	grant   Grant
 	handle  Handler
 	now     func() time.Time
 
 	mu sync.Mutex // serializes row preparation (edit dating) and flush
 }
 
-// NewCarrier builds the edge for one binding. secret is the body key.
-func NewCarrier(ledger *Ledger, b Binding, secret [32]byte, handle Handler) *Carrier {
-	return &Carrier{ledger: ledger, binding: b, secret: secret, handle: handle, now: time.Now}
+// NewCarrier builds the edge for one binding. secret is the body key and
+// grant looks up the enrolled owner grants every signed event needs.
+func NewCarrier(ledger *Ledger, b Binding, secret [32]byte, grant Grant, handle Handler) *Carrier {
+	return &Carrier{ledger: ledger, binding: b, secret: secret, grant: grant, handle: handle, now: time.Now}
+}
+
+// sign enforces the owner's grant for the event's kind at its created_at,
+// attaches that grant as the NIP-OA provenance tag, and signs. An event no
+// grant admits is never signed.
+func (c *Carrier) sign(evt *nostr.Event) error {
+	tag, err := c.grant(uint16(evt.Kind), time.Unix(int64(evt.CreatedAt), 0))
+	if err != nil {
+		return fmt.Errorf("%w: kind %d: %v", ErrNoGrant, evt.Kind, err)
+	}
+	evt.Tags = append(evt.Tags, nostr.Tag{"auth", tag.OwnerPubKey, tag.Conditions, tag.SigHex()})
+	return evt.Sign(c.secret)
 }
 
 // source is this carrier's identity to the endpoint: a stable,
@@ -235,7 +259,7 @@ func (c *Carrier) answer(to nostr.Event, text string) error {
 	evt := nostr.Event{
 		CreatedAt: nostr.Timestamp(c.now().Unix()),
 		Kind:      KindDM,
-		Tags:      c.rowTags(),
+		Tags:      c.rowTags(to.ID.Hex()),
 		Content:   text,
 	}
 	return c.prepare("direct/"+to.ID.Hex(), evt)
@@ -267,14 +291,14 @@ func (c *Carrier) Publish(snap protocol.Snapshot, origin map[string]string) erro
 	key := fmt.Sprintf("row/%s/%08d", snap.RequestRef, snap.Revision)
 	var evt nostr.Event
 	if rc.RootEventID == "" {
-		evt = nostr.Event{CreatedAt: nostr.Timestamp(now), Kind: KindDM, Tags: c.rowTags(), Content: text}
+		evt = nostr.Event{CreatedAt: nostr.Timestamp(now), Kind: KindDM, Tags: c.rowTags(origin["event"]), Content: text}
 	} else {
 		if now <= rc.LastEditAt {
 			return ErrClockBehind
 		}
 		evt = nostr.Event{CreatedAt: nostr.Timestamp(now), Kind: KindEdit, Tags: c.editTags(rc.RootEventID), Content: text}
 	}
-	if err := evt.Sign(c.secret); err != nil {
+	if err := c.sign(&evt); err != nil {
 		return err
 	}
 	raw, err := json.Marshal(evt)
@@ -297,7 +321,7 @@ func (c *Carrier) Publish(snap protocol.Snapshot, origin map[string]string) erro
 }
 
 func (c *Carrier) prepare(key string, evt nostr.Event) error {
-	if err := evt.Sign(c.secret); err != nil {
+	if err := c.sign(&evt); err != nil {
 		return err
 	}
 	raw, err := json.Marshal(evt)
@@ -334,10 +358,16 @@ func (c *Carrier) Flush(ctx context.Context, pub Publisher) error {
 }
 
 // rowTags and editTags are the only place row tags are built (relay design
-// B2/B3): a row lives in the owner DM channel (h); an edit names its
-// original row (e) in the same channel.
-func (c *Carrier) rowTags() nostr.Tags {
-	return nostr.Tags{{"h", c.binding.Channel}}
+// B2/B3, slice 4 contract §3): a row lives in the owner DM channel (h),
+// addresses the owner (p) and replies to the owner's input event (e ...
+// reply) when it has one; an edit names its original row (e) in the same
+// channel.
+func (c *Carrier) rowTags(inputID string) nostr.Tags {
+	tags := nostr.Tags{{"h", c.binding.Channel}, {"p", c.binding.Owner}}
+	if validHexID(inputID) {
+		tags = append(tags, nostr.Tag{"e", inputID, "", "reply"})
+	}
+	return tags
 }
 
 func (c *Carrier) editTags(rootID string) nostr.Tags {
