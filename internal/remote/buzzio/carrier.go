@@ -55,10 +55,9 @@ type Publisher func(ctx context.Context, evt nostr.Event) error
 // events into endpoint commands and endpoint snapshots into one editable
 // result row per request.
 type Carrier struct {
+	Signer
 	ledger  *Ledger
 	binding Binding
-	secret  [32]byte
-	grant   Grant
 	handle  Handler
 	now     func() time.Time
 
@@ -68,19 +67,28 @@ type Carrier struct {
 // NewCarrier builds the edge for one binding. secret is the body key and
 // grant looks up the enrolled owner grants every signed event needs.
 func NewCarrier(ledger *Ledger, b Binding, secret [32]byte, grant Grant, handle Handler) *Carrier {
-	return &Carrier{ledger: ledger, binding: b, secret: secret, grant: grant, handle: handle, now: time.Now}
+	return &Carrier{Signer: Signer{secret: secret, grant: grant}, ledger: ledger, binding: b, handle: handle, now: time.Now}
 }
 
+// Signer signs the body's events under the owner's enrolled grants.
+type Signer struct {
+	secret [32]byte
+	grant  Grant
+}
+
+// NewSigner returns a signer for the body key secret and its grants.
+func NewSigner(secret [32]byte, grant Grant) Signer { return Signer{secret: secret, grant: grant} }
+
 // sign enforces the owner's grant for the event's kind at its created_at,
-// attaches that grant as the NIP-OA provenance tag, and signs. An event no
-// grant admits is never signed.
-func (c *Carrier) sign(evt *nostr.Event) error {
-	tag, err := c.grant(uint16(evt.Kind), time.Unix(int64(evt.CreatedAt), 0))
+// attaches that grant as the one NIP-OA provenance tag, and signs. An event
+// no grant admits is never signed.
+func (s Signer) sign(evt *nostr.Event) error {
+	tag, err := s.grant(uint16(evt.Kind), time.Unix(int64(evt.CreatedAt), 0))
 	if err != nil {
 		return fmt.Errorf("%w: kind %d: %v", ErrNoGrant, evt.Kind, err)
 	}
 	evt.Tags = append(evt.Tags, nostr.Tag{"auth", tag.OwnerPubKey, tag.Conditions, tag.SigHex()})
-	return evt.Sign(c.secret)
+	return evt.Sign(s.secret)
 }
 
 // source is this carrier's identity to the endpoint: a stable,

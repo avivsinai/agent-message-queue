@@ -170,6 +170,27 @@ connection reconnects with backoff of 1 to 30 seconds. Local IPC and AMQ deliver
 `serve` never mints, renews or enrolls a key. Use `amq-remote share` for
 that.
 
+### Presence in Buzz Desktop
+
+With `"presence": true` and a `"name"` (1 to 64 printable characters, no
+path separator), `serve` publishes the body's Buzz profile and status so
+the owner's Buzz Desktop can list it as an owned agent.
+
+- Enroll the profile kind first with `amq-remote share --session <session>
+  --enable buzz-profile`. The kind 0 profile carries the owner's one kind 0
+  grant; without that grant no profile is published.
+- The kind 10100 status is `online` while the endpoint has the target
+  attached and `away` otherwise. A graceful shutdown publishes `offline`. A
+  crash cannot, so `offline` is never a liveness claim.
+- Desktop also needs the owner's own kind 30177 policy, with `d` set to the
+  body's public key. The relay accepts an event only from the key that
+  authenticated, so the owner's Buzz client must publish that policy, not
+  `serve`. `serve` reads it and reports `policy_present` or
+  `policy_missing`.
+
+The name and status are clear text on the relay. Do not put a path or
+prompt data in `name`.
+
 ### Owner DM commands
 
 With `"commands": true` and `"dm_channel_id": "<channel>"`, the owner can
@@ -316,9 +337,14 @@ with the last error. Any share that is not `authenticated` makes doctor exit
 6. A commands share also reports its DM surface under `commands`:
 `subscription_active` when open, or `closed: <reason>` or
 `publish_pending: <reason>`. Any other value than `subscription_active`
-makes doctor exit 6. `authenticated` means the relay accepted this body's AUTH. It does not
-prove that the relay materialized the owner binding or that any viewer
-is ready.
+makes doctor exit 6. A presence share reports `presence` (`online`,
+`away`, or why nothing was published) and `discovery` (`policy_present`, or
+`policy_missing` when the owner has not published the kind 30177 policy);
+anything else than `online`, `away` and `policy_present` makes doctor exit
+6.
+
+`authenticated` means the relay accepted this body's AUTH. It does not prove
+that the relay materialized the owner binding or that any viewer is ready.
 
 ## Claude Code
 
