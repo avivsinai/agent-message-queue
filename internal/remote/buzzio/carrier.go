@@ -391,6 +391,24 @@ func (c *Carrier) submit(evt nostr.Event, claim Claim, created bool, text string
 		if err != nil {
 			return err
 		}
+		// The root row is committed before its id reaches the receipt, so the
+		// prepared root obligation itself is checked, and the receipt is
+		// restored from it (codex #866 r4).
+		if rc.RootEventID == "" {
+			if root, ok, err := c.ledger.Prepared(rootKey(ref)); err != nil {
+				return err
+			} else if ok && root.Binding == c.share() {
+				var evt nostr.Event
+				if err := json.Unmarshal(root.Event, &evt); err != nil {
+					return fmt.Errorf("outbox %s: %w", root.Key, err)
+				}
+				rc = c.receiptFor(ref, claim)
+				rc.RootEventID, rc.LastEditAt, rc.Revision = evt.ID.Hex(), int64(evt.CreatedAt), root.Revision
+				if err := c.ledger.PutReceipt(rc); err != nil {
+					return err
+				}
+			}
+		}
 		if answered || rc.RootEventID != "" {
 			_, err := c.ledger.Settle(evt.ID.Hex(), Settlement{Op: claim.Op, RequestRef: ref, State: "decided"})
 			return err
