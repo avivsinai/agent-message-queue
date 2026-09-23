@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/acp"
 	"github.com/avivsinai/agent-message-queue/internal/remote/codex"
 )
 
@@ -25,10 +26,10 @@ type observerJSON struct {
 	Timestamp  string          `json:"timestamp"`
 	Kind       string          `json:"kind"`
 	AgentIndex int             `json:"agentIndex"`
-	Channel    *string         `json:"channel"`
+	ChannelID  *string         `json:"channelId"`
 	SessionID  string          `json:"sessionId"`
-	TurnID     string          `json:"turnId"`
-	Provenance string          `json:"provenance"`
+	TurnID     string          `json:"turnId,omitempty"`
+	StartedAt  string          `json:"startedAt,omitempty"`
 	Payload    json.RawMessage `json:"payload"`
 }
 
@@ -44,7 +45,6 @@ func (o observation) marshal() (string, error) {
 		AgentIndex: 0,
 		SessionID:  o.SessionID,
 		TurnID:     o.TurnID,
-		Provenance: "native_projection",
 		Payload:    payload,
 	})
 	if err != nil {
@@ -57,30 +57,19 @@ func (o observation) payload() (json.RawMessage, error) {
 	switch o.Kind {
 	case "turn_started", "turn_completed":
 		return json.RawMessage("{}"), nil
-	case "session_update":
-		sessionUpdate := o.Update
-		if sessionUpdate == "" {
-			sessionUpdate = "agent_message_chunk"
+	case "session_resolved":
+		return json.Marshal(map[string]any{
+			"sessionId":    o.SessionID,
+			"isNewSession": false,
+		})
+	case "acp_read":
+		update := o.Update
+		if update == "" {
+			update = "agent_message_chunk"
 		}
-		update := map[string]any{
-			"sessionUpdate": sessionUpdate,
-			"content": map[string]string{
-				"type": "text",
-				"text": o.Text,
-			},
-		}
-		if o.ToolID != "" {
-			update["toolCallId"] = o.ToolID
-		}
-		note := map[string]any{
-			"jsonrpc": "2.0",
-			"method":  "session/update",
-			"params": map[string]any{
-				"sessionId": o.SessionID,
-				"update":    update,
-			},
-		}
-		return json.Marshal(note)
+		return acp.MarshalTextSessionUpdate(o.SessionID, update, o.Text, map[string]string{
+			"provenance": "native_projection",
+		}, o.ToolID)
 	default:
 		return nil, fmt.Errorf("activity kind %q", o.Kind)
 	}
@@ -113,7 +102,7 @@ func projectCodex(threadID string, n codex.Notification) (observation, bool) {
 		if json.Unmarshal(n.Params, &p) != nil || p.ThreadID != threadID || p.Item.Type != "agentMessage" || p.Item.Text == "" {
 			return observation{}, false
 		}
-		return observation{Kind: "session_update", SessionID: p.ThreadID, TurnID: p.TurnID, Text: p.Item.Text}, true
+		return observation{Kind: "acp_read", SessionID: p.ThreadID, TurnID: p.TurnID, Text: p.Item.Text}, true
 	case "turn/completed":
 		var p struct {
 			ThreadID string `json:"threadId"`

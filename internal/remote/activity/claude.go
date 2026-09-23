@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"time"
 
-	"fiatjaf.com/nostr"
-
 	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
 )
 
@@ -27,7 +25,7 @@ func (s *Sink) AcceptClaude(ctx context.Context, line string) error {
 	if parsed.Type != "user" && parsed.Type != "assistant" {
 		return nil
 	}
-	var events []nostr.Event
+	var queued bool
 	for _, block := range parsed.Blocks {
 		obs, ok := projectClaudeBlock(s.ThreadID, parsed, block)
 		if !ok {
@@ -36,23 +34,26 @@ func (s *Sink) AcceptClaude(ctx context.Context, line string) error {
 		if obs.At.IsZero() {
 			obs.At = s.now()
 		}
-		part, err := s.frames(obs)
-		if err != nil {
+		if !s.sawSession && s.ThreadID != "" {
+			ready := observation{Kind: "session_resolved", SessionID: s.ThreadID, At: obs.At}
+			if err := s.queue(ready); err != nil {
+				return err
+			}
+			s.sawSession = true
+		}
+		if err := s.queue(obs); err != nil {
 			return err
 		}
-		events = append(events, part...)
+		queued = true
 	}
-	if len(events) == 0 {
+	if !queued {
 		return nil
-	}
-	for _, evt := range events {
-		s.push(evt)
 	}
 	return s.flush(ctx)
 }
 
 func projectClaudeBlock(session string, line claude.TranscriptLine, block claude.TranscriptBlock) (observation, bool) {
-	obs := observation{Kind: "session_update", SessionID: session, TurnID: line.UUID}
+	obs := observation{Kind: "acp_read", SessionID: session, TurnID: line.UUID}
 	if line.TS != 0 {
 		obs.At = time.UnixMilli(line.TS).UTC()
 	}
