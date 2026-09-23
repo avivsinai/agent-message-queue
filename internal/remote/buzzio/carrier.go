@@ -293,6 +293,7 @@ func (c *Carrier) claimFor(evt nostr.Event, op, requestID, epoch string, notAfte
 		EventID: evt.ID.Hex(), Owner: c.binding.Owner, Body: c.binding.Body, Relay: c.binding.RelayHost,
 		Channel: tagValue(evt, "h"), Op: op, RequestID: requestID, Target: c.binding.Target, Epoch: epoch,
 		CreatedAt: int64(evt.CreatedAt), Command: cmd,
+		DMChannel: c.binding.Channel, NativeSession: c.binding.NativeSession,
 	}
 	if cl.Channel == "" {
 		cl.Channel = c.binding.Channel // a reaction carries no h
@@ -308,13 +309,14 @@ func (c *Carrier) claimFor(evt nostr.Event, op, requestID, epoch string, notAfte
 // target) is never replayed here (codex #866 r1 #6).
 func (c *Carrier) owns(cl Claim) bool {
 	return cl.Owner == c.binding.Owner && cl.Body == c.binding.Body && cl.Relay == c.binding.RelayHost &&
-		cl.Target == c.binding.Target && (cl.Channel == c.binding.Channel || c.binding.Mentions[cl.Channel])
+		cl.Target == c.binding.Target && cl.DMChannel == c.binding.Channel && cl.NativeSession == c.binding.NativeSession &&
+		(cl.Channel == c.binding.Channel || c.binding.Mentions[cl.Channel])
 }
 
 // ownsReceipt is owns for a request's receipt.
 func (c *Carrier) ownsReceipt(r Receipt) bool {
 	return r.Owner == c.binding.Owner && r.Body == c.binding.Body && r.Relay == c.binding.RelayHost &&
-		r.Target == c.binding.Target && r.Channel == c.binding.Channel
+		r.Target == c.binding.Target && r.Channel == c.binding.Channel && r.NativeSession == c.binding.NativeSession
 }
 
 // eligible reports whether the enrolled generation grants every kind the
@@ -369,9 +371,11 @@ func (c *Carrier) inspect() (protocol.Session, error) {
 func (c *Carrier) submit(evt nostr.Event, claim Claim, created bool, text string) error {
 	src := c.sourceFor(evt)
 	ref := protocol.EncodeRef(src.Host, claim.Target, claim.RequestID)
-	if _, owned, err := c.ledger.ReceiptFor(ref); err != nil {
+	rc, owned, err := c.ledger.ReceiptFor(ref)
+	if err != nil {
 		return err
-	} else if !owned {
+	}
+	if !owned {
 		if err := c.ledger.PutReceipt(c.receiptFor(ref, claim)); err != nil {
 			return err
 		}
@@ -379,6 +383,18 @@ func (c *Carrier) submit(evt nostr.Event, claim Claim, created bool, text string
 	var reply protocol.Reply
 	recovered := false
 	if !created {
+		// A decision already shown to the owner (a direct answer, or the
+		// request's result row) settles the command even when the core
+		// stored nothing, as for a refusal before admission: it is never
+		// resubmitted (codex #866 r3 #1).
+		_, answered, err := c.ledger.Prepared("direct/" + evt.ID.Hex())
+		if err != nil {
+			return err
+		}
+		if answered || rc.RootEventID != "" {
+			_, err := c.ledger.Settle(evt.ID.Hex(), Settlement{Op: claim.Op, RequestRef: ref, State: "decided"})
+			return err
+		}
 		out, err := c.handle(&protocol.Command{Schema: protocol.SchemaCommand, Op: protocol.OpRequestGet, RequestRef: ref}, src)
 		var refusal *protocol.Refusal
 		switch {
@@ -419,7 +435,7 @@ func (c *Carrier) submit(evt nostr.Event, claim Claim, created bool, text string
 	if err := c.Publish(reply.Snapshot, src.Origin); err != nil {
 		return err
 	}
-	_, err := c.ledger.Settle(evt.ID.Hex(), Settlement{Op: claim.Op, RequestRef: ref, State: string(reply.Snapshot.State)})
+	_, err = c.ledger.Settle(evt.ID.Hex(), Settlement{Op: claim.Op, RequestRef: ref, State: string(reply.Snapshot.State)})
 	return err
 }
 
@@ -427,7 +443,7 @@ func (c *Carrier) submit(evt nostr.Event, claim Claim, created bool, text string
 func (c *Carrier) receiptFor(ref string, claim Claim) Receipt {
 	return Receipt{
 		RequestRef: ref, Owner: c.binding.Owner, Body: c.binding.Body, Relay: c.binding.RelayHost,
-		Channel: c.binding.Channel, Target: claim.Target, Epoch: claim.Epoch,
+		Channel: c.binding.Channel, Target: claim.Target, Epoch: claim.Epoch, NativeSession: c.binding.NativeSession,
 	}
 }
 
