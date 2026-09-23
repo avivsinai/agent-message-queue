@@ -82,17 +82,29 @@ AM_ROOT=/absolute/path/to/.agent-mail/collab AM_ME=cursor AMQ_ACP_TO=codex amq-a
 Pin those values in operator config or in a local Buzz harness copy. Chat and
 prompt text must not pass `--root`, recipients, or argv.
 
-Install the binary from the matching `amq-acp_*_{linux,darwin}_{amd64,arm64}.tar.gz`
-release asset; Homebrew does not install it. See [INSTALL.md](../../INSTALL.md).
+`brew install avivsinai/tap/amq` puts `amq-acp` on `PATH`. A direct install
+uses the matching `amq-acp_*_{linux,darwin}_{amd64,arm64}.tar.gz` asset. See
+[INSTALL.md](../../INSTALL.md).
+
+From a pinned AMQ shell, write the Buzz harness instead of editing JSON:
+
+```sh
+amq-acp install --to codex
+```
+
+That writes `custom_harnesses/amq_codex.json` with mode 0600, the absolute
+`amq-acp` path, and `AM_ROOT`, `AM_BASE_ROOT`, `AM_SESSION`, `AM_ME`, and
+`AMQ_ACP_TO`. It prints `In Buzz Desktop: New agent, select <label>`.
+`--remote-target <target>` writes `AMQ_ACP_REMOTE_TARGET` instead of a mailbox
+handle. `--remove` deletes only the file this command wrote. A harness file
+this command did not write is left unchanged.
 
 ## Buzz BYOH
 
-This is a custom harness, not a Buzz preset. Copy
-[`buzz-harness.json`](buzz-harness.json) to Buzz Desktop
-`custom_harnesses/amq_acp.json`. Then add `env` on **that machine copy** with
-`AM_ROOT`, `AM_ME`, and `AMQ_ACP_TO`. The committed example has empty `args` and
-no env: Buzz's default `BUZZ_ACP_AGENT_ARGS=acp` would be extra argv and
-`amq-acp` would refuse.
+This is a custom harness, not a Buzz preset. `amq-acp install` writes the
+machine copy. The committed [`buzz-harness.json`](buzz-harness.json) has empty
+`args` and no env: Buzz's default `BUZZ_ACP_AGENT_ARGS=acp` would be extra argv
+and `amq-acp` would refuse.
 
 - ACP pool workers must not drain AMQ mailboxes. `amq-acp` only writes
   `inbox/new`. A separate Edge owner drains with `amq drain`.

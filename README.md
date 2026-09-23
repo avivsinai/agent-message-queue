@@ -98,6 +98,12 @@ Start both agents before sending the first message. Messages that arrive
 before a recipient's wake starts remain unread but do not trigger that new
 wake. The recipient can still get them with `amq drain --include-body`.
 
+### Buzz Desktop
+
+`amq-acp install --to <handle>` writes that agent's Buzz harness from this shell.
+In Buzz Desktop: New agent, select the printed label.
+Restart Desktop if it is already open.
+
 <a id="messaging"></a>
 
 ### 5. Exchange a message
