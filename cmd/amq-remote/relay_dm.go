@@ -40,6 +40,9 @@ type dmEdges struct {
 	// handle is bound once the endpoint exists; carriers only call it from
 	// Ingest, which starts after startup.
 	handle buzzio.Handler
+	// identity is the endpoint's in-process native session accessor, bound
+	// with handle.
+	identity func(target string) string
 }
 
 // buildDMEdges opens a carrier per commands share before startup
@@ -103,7 +106,7 @@ func buildDMEdges(root, stateDir string, r *manifest.Relay, warn io.Writer) *dmE
 			say(warn, "relay share %s: commands disabled: buzz-dm is not enrolled", sh.Session)
 			continue
 		}
-		ds.carrier = buzzio.NewCarrier(ledger, b, creds.Body.Secret(), grant, d.handleLate)
+		ds.carrier = buzzio.NewCarrier(ledger, b, creds.Body.Secret(), grant, d.identityLate, d.handleLate)
 		d.byBody[b.Body] = ds
 		d.state[sh.Session] = "configured"
 	}
@@ -169,10 +172,23 @@ func (d *dmEdges) presenceView(session string) (string, string) {
 	return d.presence[session].view()
 }
 
-func (d *dmEdges) bind(h buzzio.Handler) {
+// bind attaches the endpoint: its command handler and its native session
+// accessor.
+func (d *dmEdges) bind(h buzzio.Handler, identity func(target string) string) {
 	d.mu.Lock()
-	d.handle = h
+	d.handle, d.identity = h, identity
 	d.mu.Unlock()
+}
+
+// identityLate is the native session of target, "" before bind.
+func (d *dmEdges) identityLate(target string) string {
+	d.mu.Lock()
+	id := d.identity
+	d.mu.Unlock()
+	if id == nil {
+		return ""
+	}
+	return id(target)
 }
 
 func (d *dmEdges) handleLate(cmd *protocol.Command, src core.Source) (any, error) {

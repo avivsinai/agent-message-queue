@@ -248,20 +248,19 @@ type Attachment struct {
 // evidence is carried by Lookup, and the projection fails closed under
 // any caller floor.
 func (a *Attachment) Inspect() protocol.Session {
-	status, sessionID := a.observe()
+	status, _ := a.observe()
 	att := "live"
 	if status == "offline" {
 		att = "offline"
 	}
 	return protocol.Session{
-		Schema:          protocol.SchemaSession,
-		TargetID:        a.target,
-		Epoch:           SentinelUnpinned,
-		Harness:         "claude_code",
-		DisplayName:     "claude " + a.target,
-		NativeSessionID: sessionID,
-		Attachment:      att,
-		Status:          status,
+		Schema:      protocol.SchemaSession,
+		TargetID:    a.target,
+		Epoch:       SentinelUnpinned,
+		Harness:     "claude_code",
+		DisplayName: "claude " + a.target,
+		Attachment:  att,
+		Status:      status,
 		// PR2: submit true over the pinned socket wire; the rest stay
 		// false — no interrupt seam without keystrokes.
 		Capabilities: protocol.Capabilities{
@@ -286,6 +285,14 @@ func normalizeStatus(s string) string {
 		return "busy"
 	}
 	return "unknown"
+}
+
+// NativeSessionID is the live registry entry's sessionId, the identity
+// relay sharing pins (core.NativeIdentifier); empty when the session is not
+// live.
+func (a *Attachment) NativeSessionID() string {
+	_, sessionID := a.observe()
+	return sessionID
 }
 
 // observe returns the projection status and, for a live registry entry, its

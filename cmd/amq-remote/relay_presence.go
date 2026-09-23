@@ -69,7 +69,7 @@ func (ps *presenceShare) status(edges *dmEdges) string {
 	}
 	s, ok := out.(protocol.Session)
 	if ok && s.Attachment != "" && s.Attachment != "offline" &&
-		(ps.share.NativeSessionID == "" || s.NativeSessionID == ps.share.NativeSessionID) {
+		(ps.share.NativeSessionID == "" || edges.identityLate(ps.share.Target) == ps.share.NativeSessionID) {
 		return buzzio.StatusOnline
 	}
 	return buzzio.StatusAway

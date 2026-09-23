@@ -24,10 +24,10 @@ func TestLedgerReplaysClaimsAndPreparedOutputVerbatim(t *testing.T) {
 	}
 
 	signed := json.RawMessage(`{"id":"one"}`)
-	if _, err := l.Prepare("row/ref-1/1", signed); err != nil {
+	if _, err := l.Prepare("row/ref-1/1", signed, ShareBinding{}); err != nil {
 		t.Fatal(err)
 	}
-	o, err := l.Prepare("row/ref-1/1", json.RawMessage(`{"id":"re-signed"}`))
+	o, err := l.Prepare("row/ref-1/1", json.RawMessage(`{"id":"re-signed"}`), ShareBinding{})
 	if err != nil || string(o.Event) != string(signed) {
 		t.Fatalf("re-prepare returned %s err=%v, want the original bytes", o.Event, err)
 	}

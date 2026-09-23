@@ -28,21 +28,23 @@ func TestCarrierSubmitsOnceAndKeepsOneEditableRow(t *testing.T) {
 		t.Fatal(err)
 	}
 	var ids []string
+	var ref string
 	handle := func(cmd *protocol.Command, src core.Source) (any, error) {
 		switch cmd.Op {
 		case protocol.OpSessionInspect:
-			return protocol.Session{TargetID: "cx", Epoch: "e1", NativeSessionID: "thread-1"}, nil
+			return protocol.Session{TargetID: "cx", Epoch: "e1"}, nil
 		case protocol.OpRequestSubmit:
 			ids = append(ids, cmd.RequestID+"|"+cmd.Epoch)
 			if cmd.Input.MinEvidence != string(protocol.EvidenceAdmitted) || cmd.Input.Busy != protocol.BusyReject || src.Origin["carrier"] != "buzz" {
 				t.Fatalf("submit command = %+v origin = %v", cmd, src.Origin)
 			}
-			return protocol.Reply{Snapshot: protocol.Snapshot{RequestRef: "amqr1_ref", Revision: 1, State: protocol.StateRunning}}, nil
+			ref = protocol.EncodeRef(src.Host, cmd.TargetID, cmd.RequestID)
+			return protocol.Reply{Snapshot: protocol.Snapshot{RequestRef: ref, Revision: 1, State: protocol.StateRunning}}, nil
 		}
 		t.Fatalf("unexpected op %s", cmd.Op)
 		return nil, nil
 	}
-	c := NewCarrier(ledger, b, body, ownerGrant(t, owner, b.Body, KindDM, KindEdit), handle)
+	c := NewCarrier(ledger, b, body, ownerGrant(t, owner, b.Body, KindDM, KindEdit), fixedIdentity("thread-1"), handle)
 	now := time.Now()
 	c.now = func() time.Time { return now }
 
@@ -59,7 +61,7 @@ func TestCarrierSubmitsOnceAndKeepsOneEditableRow(t *testing.T) {
 	}
 	now = now.Add(2 * time.Second)
 	origin := c.source(dm.ID.Hex(), "").Origin
-	if err := c.Publish(protocol.Snapshot{RequestRef: "amqr1_ref", Revision: 2, State: protocol.StateCompleted, Result: &protocol.Result{Text: "done"}}, origin); err != nil {
+	if err := c.Publish(protocol.Snapshot{RequestRef: ref, Revision: 2, State: protocol.StateCompleted, Result: &protocol.Result{Text: "done"}}, origin); err != nil {
 		t.Fatal(err)
 	}
 
@@ -115,12 +117,14 @@ func TestReactionOnRowCancelsItsRequest(t *testing.T) {
 	b := Binding{Owner: nostr.GetPublicKey(owner).Hex(), Body: nostr.GetPublicKey(body).Hex(), Channel: "dm-1", Target: "cx", RelayHost: "relay", NativeSession: "thread-1"}
 	ledger, _ := OpenLedger(t.TempDir())
 	var cancelled string
-	c := NewCarrier(ledger, b, body, ownerGrant(t, owner, b.Body, KindDM, KindEdit), func(cmd *protocol.Command, _ core.Source) (any, error) {
+	var ref string
+	c := NewCarrier(ledger, b, body, ownerGrant(t, owner, b.Body, KindDM, KindEdit), fixedIdentity("thread-1"), func(cmd *protocol.Command, src core.Source) (any, error) {
 		switch cmd.Op {
 		case protocol.OpSessionInspect:
-			return protocol.Session{TargetID: "cx", Epoch: "e1", NativeSessionID: "thread-1"}, nil
+			return protocol.Session{TargetID: "cx", Epoch: "e1"}, nil
 		case protocol.OpRequestSubmit:
-			return protocol.Reply{Snapshot: protocol.Snapshot{RequestRef: "amqr1_x", Revision: 1, State: protocol.StateRunning}}, nil
+			ref = protocol.EncodeRef(src.Host, cmd.TargetID, cmd.RequestID)
+			return protocol.Reply{Snapshot: protocol.Snapshot{RequestRef: ref, Revision: 1, State: protocol.StateRunning}}, nil
 		case protocol.OpRequestCancel:
 			cancelled = cmd.RequestRef
 			return protocol.Reply{Snapshot: protocol.Snapshot{RequestRef: cmd.RequestRef, Revision: 2, State: protocol.StateCancelled}}, nil
@@ -131,7 +135,7 @@ func TestReactionOnRowCancelsItsRequest(t *testing.T) {
 	if err := c.Ingest(ownerEvent(t, owner, "dm-1", "long job", now)); err != nil {
 		t.Fatal(err)
 	}
-	rc, _, _ := ledger.ReceiptFor("amqr1_x")
+	rc, _, _ := ledger.ReceiptFor(ref)
 	if rc.RootEventID == "" {
 		t.Fatal("setup: no result row prepared")
 	}
@@ -142,7 +146,7 @@ func TestReactionOnRowCancelsItsRequest(t *testing.T) {
 	if err := c.IngestReaction(react); err != nil {
 		t.Fatal(err)
 	}
-	if cancelled != "amqr1_x" {
+	if cancelled != ref {
 		t.Fatalf("cancelled = %q, want the reacted row's request", cancelled)
 	}
 }
@@ -157,9 +161,9 @@ func TestCarrierAdmitsNothingWithoutDMGrants(t *testing.T) {
 	b := Binding{Owner: nostr.GetPublicKey(owner).Hex(), Body: nostr.GetPublicKey(body).Hex(), Channel: "dm-1", Target: "cx", RelayHost: "relay", NativeSession: "thread-1"}
 	ledger, _ := OpenLedger(t.TempDir())
 	calls := 0
-	c := NewCarrier(ledger, b, body, ownerGrant(t, owner, b.Body, KindEdit), func(*protocol.Command, core.Source) (any, error) { // no kind 9 grant
+	c := NewCarrier(ledger, b, body, ownerGrant(t, owner, b.Body, KindEdit), fixedIdentity("thread-1"), func(*protocol.Command, core.Source) (any, error) { // no kind 9 grant
 		calls++
-		return protocol.Session{TargetID: "cx", Epoch: "e1", NativeSessionID: "thread-1"}, nil
+		return protocol.Session{TargetID: "cx", Epoch: "e1"}, nil
 	})
 	if err := c.Ingest(ownerEvent(t, owner, "dm-1", "fix the build", time.Now())); !errors.Is(err, ErrNoGrant) {
 		t.Fatalf("ingest without a kind 9 grant: err=%v, want ErrNoGrant", err)
@@ -214,13 +218,13 @@ func TestMentionSubmitsAndAnswersInDM(t *testing.T) {
 	b := Binding{Owner: nostr.GetPublicKey(owner).Hex(), Body: nostr.GetPublicKey(body).Hex(), Channel: "dm-1", Target: "cx", RelayHost: "relay", NativeSession: "thread-1", Mentions: map[string]bool{"team-1": true}}
 	ledger, _ := OpenLedger(t.TempDir())
 	var prompt string
-	c := NewCarrier(ledger, b, body, ownerGrant(t, owner, b.Body, KindDM, KindEdit), func(cmd *protocol.Command, _ core.Source) (any, error) {
+	c := NewCarrier(ledger, b, body, ownerGrant(t, owner, b.Body, KindDM, KindEdit), fixedIdentity("thread-1"), func(cmd *protocol.Command, src core.Source) (any, error) {
 		switch cmd.Op {
 		case protocol.OpSessionInspect:
-			return protocol.Session{TargetID: "cx", Epoch: "e1", NativeSessionID: "thread-1"}, nil
+			return protocol.Session{TargetID: "cx", Epoch: "e1"}, nil
 		case protocol.OpRequestSubmit:
 			prompt = cmd.Input.Text
-			return protocol.Reply{Snapshot: protocol.Snapshot{RequestRef: "amqr1_m", Revision: 1, State: protocol.StateRunning}}, nil
+			return protocol.Reply{Snapshot: protocol.Snapshot{RequestRef: protocol.EncodeRef(src.Host, cmd.TargetID, cmd.RequestID), Revision: 1, State: protocol.StateRunning}}, nil
 		}
 		return nil, nil
 	})
@@ -240,3 +244,6 @@ func TestMentionSubmitsAndAnswersInDM(t *testing.T) {
 		t.Fatalf("sent = %+v, want one DM row with no reference into the mention channel", sent)
 	}
 }
+
+// fixedIdentity is a native session accessor that always reports id.
+func fixedIdentity(id string) func(string) string { return func(string) string { return id } }

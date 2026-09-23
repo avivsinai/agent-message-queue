@@ -195,9 +195,9 @@ prompt data in `name`.
 
 With `"commands": true`, `"dm_channel_id": "<channel>"` and
 `"native_session_id": "<id>"`, the owner can operate the shared target from
-the Buzz DM channel. Copy `native_session_id` from `amq-remote inspect
-<target> --json`: it is the Codex thread id or the Claude session id you
-approve for sharing. Commands run only while the target's attached session
+the Buzz DM channel. `native_session_id` is the native session you approve
+for sharing: the Codex thread id (the `thread` in `--discover` output) or
+the Claude `sessionId` in `~/.claude/sessions/<pid>.json`. Commands run only while the target's attached session
 has that id, so a different session under the same target is never shared
 by inheritance. Enroll the DM kinds first with `amq-remote share --session
 <session> --enable buzz-dm`; without them the surface stays closed and no

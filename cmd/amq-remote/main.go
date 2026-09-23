@@ -496,7 +496,7 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	if relayCfg != nil {
 		// Fresh remote commands are admitted only now, after attachment and
 		// startup reconciliation.
-		edges.bind(ep.Handle)
+		edges.bind(ep.Handle, ep.NativeSessionID)
 		relays = startRelays(ctx, c.root, stateDir, relayCfg, edges, stderr)
 		say(stdout, "relay %s: %d shared session(s)", relayCfg.URL, len(relayCfg.Shares))
 	}

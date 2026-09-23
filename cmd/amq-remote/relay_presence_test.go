@@ -67,7 +67,7 @@ func TestPresencePublishesProfileStatusAndOffline(t *testing.T) {
 	edges := buildDMEdges(root, stateDir, r, io.Discard)
 	edges.bind(func(cmd *protocol.Command, _ core.Source) (any, error) {
 		return protocol.Session{TargetID: "fake", Attachment: "live"}, nil
-	})
+	}, func(string) string { return "" })
 	ctx, cancel := context.WithCancel(context.Background())
 	wg := startRelays(ctx, root, stateDir, r, edges, io.Discard)
 
