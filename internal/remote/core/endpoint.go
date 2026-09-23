@@ -1076,6 +1076,18 @@ type NativeIdentifier interface {
 	NativeSessionID() string
 }
 
+// AttachmentOf returns a target's attachment for in-process seams such as
+// activity export, which assert the narrow interface they need.
+func (e *Endpoint) AttachmentOf(targetID string) (Attachment, bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	t, ok := e.targets[targetID]
+	if !ok {
+		return nil, false
+	}
+	return t.att, true
+}
+
 // NativeSessionID returns the attached native session identity of a target,
 // or "" when the target is unknown or its adapter cannot prove one.
 func (e *Endpoint) NativeSessionID(targetID string) string {

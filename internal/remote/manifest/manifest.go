@@ -330,8 +330,8 @@ func validateRelay(f File, targets map[string]bool) error {
 			return &ErrInvalidRelay{Reason: fmt.Sprintf("share %q: commands need dm_channel_id, the owner's private DM channel", sh.Session)}
 		case sh.Commands && sh.NativeSessionID == "":
 			return &ErrInvalidRelay{Reason: fmt.Sprintf("share %q: commands need native_session_id, the approved native session (see amq-remote inspect)", sh.Session)}
-		case sh.Activity:
-			return &ErrInvalidRelay{Reason: fmt.Sprintf("share %q: activity is not supported by this binary", sh.Session)}
+		case sh.Activity && sh.NativeSessionID == "":
+			return &ErrInvalidRelay{Reason: fmt.Sprintf("share %q: activity needs native_session_id, the approved native session", sh.Session)}
 		case len(sh.MentionChannels) > 0 && !sh.Commands:
 			return &ErrInvalidRelay{Reason: fmt.Sprintf("share %q: mention_channels need commands", sh.Session)}
 		case len(sh.MentionChannels) > maxMentionChannels:
