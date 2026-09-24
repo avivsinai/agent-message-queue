@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/acp"
 	"github.com/avivsinai/agent-message-queue/internal/lock"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
@@ -109,6 +110,11 @@ func attachMailbox(root, handle string, stdout io.Writer) (int, error) {
 	if fi, err := os.Stat(root); err != nil || !fi.IsDir() {
 		return protocol.ExitActionRequired, fmt.Errorf("AMQ root %s is not a directory", root)
 	}
+	// The inherited session pin must name this root, exactly as a direct
+	// amq-acp mailbox checks it (codex #895 P1 #4).
+	if err := acp.VerifySessionPin(filepath.Clean(root)); err != nil {
+		return protocol.ExitActionRequired, err
+	}
 	b := binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: handle, Display: handle}
 	if err := binding.Write(b); err != nil {
 		return protocol.ExitActionRequired, err
@@ -128,6 +134,13 @@ func detach(args []string, stdout, stderr io.Writer) (int, error) {
 		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", err)
 	}
 	var match func(binding.Binding) bool
+	// A native binding made outside AMQ used a fallback root; detach finds it
+	// in the binding itself, so off needs no --root (codex #895 P2 #5).
+	if *self && c.root == "" {
+		if b, err := binding.Read(); err == nil {
+			c.root = b.Root
+		}
+	}
 	if *self && os.Getenv("AM_ME") != "" && c.root != "" {
 		mine := binding.Binding{Carrier: binding.CarrierMailbox, Root: c.root, Handle: strings.TrimSpace(os.Getenv("AM_ME"))}
 		native := func(binding.Binding) bool { return false }

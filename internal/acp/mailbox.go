@@ -12,6 +12,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/lock"
 	"github.com/avivsinai/agent-message-queue/internal/receipt"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"github.com/avivsinai/agent-message-queue/internal/thread"
@@ -31,6 +32,10 @@ const mailboxSubject = "Buzz DM"
 type mailboxClaim struct {
 	MessageID string `json:"message_id"`
 	Created   string `json:"created"`
+	// Thread is the cockpit thread of the first delivery. A redelivery on a
+	// new ACP session publishes and waits there, never on its own thread
+	// (codex #895 P1 #1).
+	Thread string `json:"thread"`
 }
 
 // runMailbox delivers the prompt as an AMQ message to the bound handle and
@@ -50,16 +55,31 @@ func (s *Server) runMailbox(sessionID, text, eventID string, b binding.Binding, 
 		threadID = cockpitThread("session/" + sessionID)
 	}
 
-	claim, err := s.mailboxClaim(eventID)
+	// A turn cancelled before delivery delivers nothing (codex #895 P1 #3).
+	if outcome := r.settle(""); outcome == "session_cancelled" || outcome == "client_disconnected" {
+		if outcome == "session_cancelled" && eventID != "" {
+			if err := s.recordEventCancel(eventID); err != nil {
+				return nil, newRPCError(codeInternalError, "record cancel: %v", err)
+			}
+		}
+		r.meta.Reason = outcome
+		stop := StopReasonCancelled
+		if outcome == "client_disconnected" {
+			stop = StopReasonRefusal
+		}
+		return remotePromptResult{StopReason: stop, Meta: remotePromptMeta{Remote: r.meta}}, nil
+	}
+	claim, err := s.mailboxClaim(eventID, threadID)
 	if err != nil {
 		return r.failed(remoteUncertain, err)
 	}
+	threadID = claim.Thread
 	created, err := time.Parse(time.RFC3339Nano, claim.Created)
 	if err != nil {
 		return nil, newRPCError(codeInternalError, "mailbox claim time: %v", err)
 	}
 	r.meta.RequestRef = claim.MessageID
-	if err := publishOnce(b, threadID, claim.MessageID, created, text); err != nil {
+	if err := s.publishClaimed(eventID, b, threadID, claim.MessageID, created, text); err != nil {
 		return r.failed(remoteUncertain, err)
 	}
 	r.meta.State = DeliveryStateQueued
@@ -130,13 +150,13 @@ func (s *Server) mailboxStopped(r *remoteTurn, outcome string, b binding.Binding
 // mailboxClaim returns the message id and time for this prompt. With an
 // event id it is claimed exclusively before any publish, and a redelivery
 // reuses it.
-func (s *Server) mailboxClaim(eventID string) (mailboxClaim, error) {
+func (s *Server) mailboxClaim(eventID, threadID string) (mailboxClaim, error) {
 	now := time.Now()
 	id, err := format.NewMessageID(now)
 	if err != nil {
 		return mailboxClaim{}, err
 	}
-	fresh := mailboxClaim{MessageID: id, Created: now.UTC().Format(time.RFC3339Nano)}
+	fresh := mailboxClaim{MessageID: id, Created: now.UTC().Format(time.RFC3339Nano), Thread: threadID}
 	if eventID == "" {
 		return fresh, nil
 	}
@@ -156,10 +176,26 @@ func (s *Server) mailboxClaim(eventID string) (mailboxClaim, error) {
 		return mailboxClaim{}, err
 	}
 	var claim mailboxClaim
-	if err := json.Unmarshal(stored, &claim); err != nil || claim.MessageID == "" {
+	if err := json.Unmarshal(stored, &claim); err != nil || claim.MessageID == "" || claim.Thread == "" {
 		return mailboxClaim{}, fmt.Errorf("event %s has an unreadable mailbox claim; refusing to publish", eventID)
 	}
 	return claim, nil
+}
+
+// publishClaimed publishes an event's claimed message under a per-event
+// lock, so two retries cannot both pass the absence check and publish the
+// same message twice (codex #895 P1 #2).
+func (s *Server) publishClaimed(eventID string, b binding.Binding, threadID, id string, created time.Time, text string) error {
+	if eventID == "" {
+		return publishOnce(b, threadID, id, created, text)
+	}
+	if !lock.AdvisoryLockAvailable() {
+		return errors.New("refusing to publish a Buzz event without an advisory file lock")
+	}
+	path := filepath.Join(s.cfg.StateDir, "remote-events", eventID+".mailbox.lock")
+	return lock.WithExclusiveFileLock(path, func() error {
+		return publishOnce(b, threadID, id, created, text)
+	})
 }
 
 // publishOnce delivers the prompt to the handle unless the claimed message

@@ -76,6 +76,11 @@ func (b Binding) Valid() error {
 	}
 	switch b.Carrier {
 	case CarrierMailbox:
+		// A mailbox binding never names a native session, so nothing that
+		// keys on one (the Claude Stop receiver) treats it as native.
+		if b.Target != "" || b.NativeSession != "" {
+			return errors.New("mailbox binding must not name a native target or session")
+		}
 		return fsq.ValidateHandle(b.Handle)
 	case "", CarrierNative:
 		if b.Target == "" || b.NativeSession == "" {

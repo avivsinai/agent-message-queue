@@ -133,3 +133,50 @@ func TestMailboxCancelSaysTheMessageStays(t *testing.T) {
 		t.Fatalf("inbox holds %d prompts; a cancel must not recall the message", len(ids))
 	}
 }
+
+// Codex #895 P1 #1: a redelivery on a new ACP session polled its own thread
+// and missed the final answer on the first delivery's thread.
+func TestMailboxReplayUsesTheFirstThread(t *testing.T) {
+	s, root := mailboxServer(t)
+	s.cfg.TurnTimeout = 25 * time.Millisecond
+	eventID := strings.Repeat("4", 64)
+	if _, rpcErr := s.runRemote("first", "hello", eventID, newTurn(), func(any) error { return nil }); rpcErr != nil {
+		t.Fatal(rpcErr)
+	}
+	ids := inboxPrompts(t, root)
+	if len(ids) != 1 {
+		t.Fatalf("first delivery count = %d", len(ids))
+	}
+	replyAs(t, root, cockpitThread("session/first"), ids[0], format.KindAnswer, "first reply")
+	s.cfg.TurnTimeout = time.Second
+	said := ""
+	result, rpcErr := s.runRemote("second", "hello", eventID, newTurn(), func(v any) error {
+		if note := v.(sessionUpdateNotification); note.Params.Update.SessionUpdate == "agent_message_chunk" {
+			said += note.Params.Update.Content.Text
+		}
+		return nil
+	})
+	if rpcErr != nil {
+		t.Fatal(rpcErr)
+	}
+	if got := result.(remotePromptResult); got.StopReason != StopReasonEndTurn || said != "first reply" {
+		t.Fatalf("replay: stop=%s said=%q; want the first reply", got.StopReason, said)
+	}
+}
+
+// Codex #895 P1 #3: a turn cancelled before delivery still published.
+func TestMailboxCancelBeforeDeliveryPublishesNothing(t *testing.T) {
+	s, root := mailboxServer(t)
+	turn := newTurn()
+	s.mu.Lock()
+	if turn.settleLocked("session_cancelled") {
+		close(turn.done)
+	}
+	s.mu.Unlock()
+	if _, rpcErr := s.runRemote("s", "hello", strings.Repeat("5", 64), turn, func(any) error { return nil }); rpcErr != nil {
+		t.Fatal(rpcErr)
+	}
+	if ids := inboxPrompts(t, root); len(ids) != 0 {
+		t.Fatalf("cancelled before delivery, but the inbox has %d prompt(s)", len(ids))
+	}
+}
