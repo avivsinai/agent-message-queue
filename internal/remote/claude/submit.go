@@ -623,6 +623,12 @@ func readStopMarkers(path string, from int64) stopMarkers {
 	}
 	defer func() { _ = f.Close() }()
 	size := fi.Size()
+	// A reset flag means the writer replaced the file. Size alone misses
+	// that once the new file grows back to the old offset (codex #894).
+	if _, err := os.Lstat(stopResetPath(path)); err == nil {
+		removeRegular(stopResetPath(path))
+		return stopMarkers{truncated: true}
+	}
 	if size < from {
 		return stopMarkers{truncated: true}
 	}

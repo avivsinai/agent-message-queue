@@ -54,7 +54,7 @@ func TestFIFOLeavesNeverBlock(t *testing.T) {
 	}
 	// The receiver opens the marker only for an attached session. Bind
 	// first so this still reaches the FIFO refusal (bead 611.37).
-	if err := bindStopSession(home, "s9"); err != nil {
+	if _, err := bindStopSession(home, "s9"); err != nil {
 		t.Fatal(err)
 	}
 	done := make(chan error, 1)

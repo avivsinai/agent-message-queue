@@ -149,9 +149,11 @@ func Attach(cfg config) (*Attachment, error) {
 		released:     map[requests.Key]struct{}{},
 		ctx:          context.Background(),
 	}
-	if err := bindStopSession(home, reg.SessionID); err != nil && !errors.Is(err, errUnsupportedPlatform) {
+	token, err := bindStopSession(home, reg.SessionID)
+	if err != nil && !errors.Is(err, errUnsupportedPlatform) {
 		return nil, fmt.Errorf("claude adapter: %w", err)
 	}
+	att.boundToken = token
 	return att, nil
 }
 
@@ -224,6 +226,8 @@ type Attachment struct {
 	// Empty after unsubscribe. The receiver writes a marker only for this
 	// id or the per-user binding.
 	boundSession string
+	// boundToken is this attachment's sentinel file under amq-bound.
+	boundToken string
 	// cur is the poller's transcript position; owner is the run that owns
 	// the turn the cursor is inside, nil for a foreign or unknown turn.
 	cur   transcriptCursor
@@ -352,12 +356,13 @@ func (a *Attachment) trackBoundSession(sessionID string) {
 	if a.closed || a.boundSession == sessionID {
 		return
 	}
-	prev := a.boundSession
+	prev, prevToken := a.boundSession, a.boundToken
 	a.boundSession = sessionID
+	token, _ := bindStopSession(a.home, sessionID)
+	a.boundToken = token
 	if prev != "" {
-		unbindStopSession(a.home, prev)
+		unbindStopSession(a.home, prev, prevToken)
 	}
-	_ = bindStopSession(a.home, sessionID)
 }
 
 // Submit implements core.Attachment. PR1 refuses before ANY side effect:
@@ -426,13 +431,14 @@ func (a *Attachment) Subscribe(cb func(core.NativeEvent)) func() {
 		a.mu.Lock()
 		a.eventSink = nil
 		a.closed = true
-		sid := a.boundSession
+		sid, token := a.boundSession, a.boundToken
 		a.boundSession = ""
+		a.boundToken = ""
 		stop := a.confirmCancel
 		a.confirmCancel = nil
 		a.mu.Unlock()
 		if sid != "" {
-			unbindStopSession(a.home, sid)
+			unbindStopSession(a.home, sid, token)
 		}
 		if stop != nil {
 			stop()

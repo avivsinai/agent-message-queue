@@ -633,10 +633,17 @@ func RunStopHookReceiver(home string, stdin io.Reader, stdout io.Writer) int {
 	if !os.SameFile(pre, post) {
 		return 0
 	}
-	// One session's marker stays a short tail. The poller already treats a
-	// file that shrank as rotated and reads from the start.
+	// Past the cap, replace the file with a copy of the same bytes so the
+	// inode changes, and leave a reset flag. In-place truncation would hide
+	// a fresh Stop once the file regrew to the old offset, and would drop
+	// lines the poller has not consumed (codex #894).
 	if post.Size() >= maxStopMarkerKeep {
-		if err := f.Truncate(0); err != nil {
+		_ = f.Close()
+		if err := rotateStopMarker(marker); err != nil {
+			return 0
+		}
+		f, err = os.OpenFile(marker, os.O_APPEND|os.O_WRONLY|openNoFollowFlag, 0o600)
+		if err != nil {
 			return 0
 		}
 	}
@@ -652,58 +659,78 @@ func stopMarkerPath(home, sessionID string) string {
 	return filepath.Join(claudeSessionsDir(home), "amq-stop", sessionID+".jsonl")
 }
 
-// maxStopMarkerKeep is the size at which the receiver truncates a session's
-// marker before appending. A line is about 60 bytes, so this keeps roughly
-// a hundred turns and then one fresh line.
+// maxStopMarkerKeep is the size at which the receiver rotates a session's
+// marker onto a new inode. Lines already in the file stay. A line is about
+// 60 bytes, so this is roughly a hundred turns between rotations.
 const maxStopMarkerKeep = 8 << 10
 
-func stopBoundPath(home, sessionID string) string {
+func stopBoundDir(home, sessionID string) string {
 	return filepath.Join(claudeSessionsDir(home), "amq-bound", sessionID)
 }
 
-// bindStopSession records that this Claude session is an attached target,
-// so its Stop hook may write a marker. Idempotent.
-func bindStopSession(home, sessionID string) error {
-	if !sessionIDRe.MatchString(sessionID) {
-		return fmt.Errorf("stop session %q is not a file-safe id", sessionID)
-	}
-	if !noFollowSupported {
-		return errUnsupportedPlatform
-	}
-	path := stopBoundPath(home, sessionID)
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
-	if fi, err := os.Lstat(dir); err != nil || !fi.IsDir() {
-		return fmt.Errorf("stop bound dir %s is not a plain directory", dir)
-	}
-	if pre, err := os.Lstat(path); err == nil {
-		if !pre.Mode().IsRegular() {
-			return fmt.Errorf("stop bound %s is not a regular file", path)
-		}
-		return nil
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_EXCL|openNoFollowFlag, 0o600)
-	if err != nil {
-		if errors.Is(err, os.ErrExist) {
-			return nil
-		}
-		return err
-	}
-	return f.Close()
+func stopResetPath(marker string) string {
+	return marker + ".reset"
 }
 
-// unbindStopSession drops the attached-session record and that session's
-// marker file. A non-regular leaf is left in place.
-func unbindStopSession(home, sessionID string) {
-	if !sessionIDRe.MatchString(sessionID) || !noFollowSupported {
+// rotateStopMarker copies the marker onto a new inode and records a reset
+// the reader can see. The bytes are unchanged, so an unconsumed line stays.
+func rotateStopMarker(path string) error {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return os.WriteFile(stopResetPath(path), []byte("1\n"), 0o600)
+}
+
+// bindStopSession records one attachment's ownership of this session.
+// Each attachment gets its own sentinel file, so one attachment's cleanup
+// cannot drop a replacement that still owns the session.
+func bindStopSession(home, sessionID string) (string, error) {
+	if !sessionIDRe.MatchString(sessionID) {
+		return "", fmt.Errorf("stop session %q is not a file-safe id", sessionID)
+	}
+	if !noFollowSupported {
+		return "", errUnsupportedPlatform
+	}
+	dir := stopBoundDir(home, sessionID)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	if fi, err := os.Lstat(dir); err != nil || !fi.IsDir() {
+		return "", fmt.Errorf("stop bound dir %s is not a plain directory", dir)
+	}
+	f, err := os.CreateTemp(dir, "owner-")
+	if err != nil {
+		return "", err
+	}
+	token := filepath.Base(f.Name())
+	if err := f.Close(); err != nil {
+		return "", err
+	}
+	return token, nil
+}
+
+// unbindStopSession drops one attachment's sentinel. The marker stays while
+// any other attachment still owns the session.
+func unbindStopSession(home, sessionID, token string) {
+	if !sessionIDRe.MatchString(sessionID) || !noFollowSupported || token == "" {
 		return
 	}
-	removeRegular(stopBoundPath(home, sessionID))
-	removeRegular(stopMarkerPath(home, sessionID))
+	removeRegular(filepath.Join(stopBoundDir(home, sessionID), token))
+	if stopSentinelPresent(home, sessionID) {
+		return
+	}
+	marker := stopMarkerPath(home, sessionID)
+	removeRegular(marker)
+	removeRegular(stopResetPath(marker))
 }
 
 func removeRegular(path string) {
@@ -714,35 +741,61 @@ func removeRegular(path string) {
 	_ = os.Remove(path)
 }
 
-// stopSessionAllowed is true when sessionID is the attached target recorded
-// by bindStopSession, or the native session in the per-user binding.
+// stopSessionAllowed reports whether this Stop may write. A binding file
+// decides on its own: write only when it names this session. Mailbox
+// bindings have no native session, so a stale sentinel must not write.
+// With no binding file, an attached sentinel is enough.
 func stopSessionAllowed(home, sessionID string) bool {
-	if boundNativeSession(home) == sessionID {
+	switch bindingDecision(home, sessionID) {
+	case bindingAllow:
 		return true
+	case bindingDeny:
+		return false
+	default:
+		return stopSentinelPresent(home, sessionID)
 	}
-	fi, err := os.Lstat(stopBoundPath(home, sessionID))
-	return err == nil && fi.Mode().IsRegular()
 }
 
-// boundNativeSession reads native_session from the binding file. The hook
-// process has only the Claude home, so an unset AMQ_REMOTE_BINDING resolves
-// under that home, not a second UserHomeDir lookup.
-func boundNativeSession(home string) string {
+func stopSentinelPresent(home, sessionID string) bool {
+	entries, err := os.ReadDir(stopBoundDir(home, sessionID))
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if e.Type().IsRegular() {
+			return true
+		}
+	}
+	return false
+}
+
+const (
+	bindingAbsent = iota
+	bindingAllow
+	bindingDeny
+)
+
+// bindingDecision reads the per-user binding. The hook process has only the
+// Claude home, so an unset AMQ_REMOTE_BINDING resolves under that home.
+func bindingDecision(home, sessionID string) int {
 	path := filepath.Join(home, ".amq", "remote", "binding.json")
 	if p := strings.TrimSpace(os.Getenv(binding.EnvPath)); p != "" && filepath.IsAbs(p) {
 		path = filepath.Clean(p)
 	}
 	raw, err := readRegularBounded(path, bindingMaxBytes)
+	if errors.Is(err, os.ErrNotExist) {
+		return bindingAbsent
+	}
 	if err != nil {
-		return ""
+		return bindingDeny
 	}
 	var b struct {
 		NativeSession string `json:"native_session"`
 	}
-	if json.Unmarshal(raw, &b) != nil || !sessionIDRe.MatchString(b.NativeSession) {
-		return ""
+	if json.Unmarshal(raw, &b) != nil || b.NativeSession != sessionID {
+		return bindingDeny
 	}
-	return b.NativeSession
+	return bindingAllow
 }
 
 // bindingMaxBytes matches the binding package's read bound.
