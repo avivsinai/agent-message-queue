@@ -142,7 +142,7 @@ v1 does not:
 - treat claimed agent names, labels, or remote paths as authority
 - let prompt text select `--root`, argv, env, or executable
 - put OAuth MCP inside `amq`
-- claim ACP v2
+- put an ACP server inside the `amq` binary (`amq-acp` speaks ACP v2)
 - put `--always-approve` in committed launch plans
 - hold a human owner's private messaging key inside AMQ
 - let a companion hold a per-session or per-host body key unless the owner

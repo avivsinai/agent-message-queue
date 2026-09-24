@@ -326,7 +326,7 @@ still in the sender spool.
 
 ### `attach`, `detach`
 
-`amq-remote attach --self` binds the per-user Buzz agent (amq-acp in binding
+`amq-remote attach --self` binds this session's Buzz agent (amq-acp in binding
 mode) to this session's AMQ handle, `AM_ME` under `AM_ROOT`. Each Buzz DM then
 arrives as an AMQ message from `buzz`, and the handle's `amq reply` is the
 answer; a `kind: status` reply is progress. No endpoint, hook, or wake is
@@ -339,9 +339,8 @@ is found by the command's process ancestry. Codex is found by
 `CODEX_THREAD_ID` among the threads loaded in the app-server daemon. Attach
 registers the target in the running endpoint without a restart and adds it
 to `manifest.json`. When no endpoint runs, it starts `amq-remote up` in the
-background (log: `up.log` in the state directory). Then it writes
-`~/.amq/remote/binding.json` (mode 0600, or `$AMQ_REMOTE_BINDING`) with the
-root, the target and the target's native session.
+background (log: `up.log` in the state directory). Claude needs the Stop hook
+on this path.
 
 Each attach writes a **named** binding, `~/.amq/remote/bindings/<name>.json`
 (default `<handle>-<project>`, or the native target; `--name` overrides), and

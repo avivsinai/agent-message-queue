@@ -109,20 +109,24 @@ and `AM_SESSION` are written only when this shell has them. `--remove` deletes
 only the file this command wrote. A harness file this command did not write is
 left unchanged.
 
-Once per Mac, write the AMQ Remote harness and the Desktop import file:
+Once per Mac, write the harness. Each session then gets its own Desktop agent:
 
 ```sh
 amq-acp setup
+amq-acp setup --session <name>
 ```
 
-That writes `custom_harnesses/amq_remote.json` with mode 0600, the stable
+`setup` writes `custom_harnesses/amq_remote.json` with mode 0600, the stable
 `amq-acp` path, and env `AMQ_ACP_REMOTE=binding` only. It does not record a
-root, a target, or a session pin. It also writes `AMQ Remote.agent.json` in
-the current directory (`--out` chooses another path). The file is a
-`buzz-agent-snapshot` version 1 whose definition is name `AMQ Remote`, runtime
-`amq_remote`, model `amq-remote`, parallelism 1, and `respondTo` `owner-only`.
-Import that file in Buzz Desktop: Agents, then + then Import, pick the file,
-then Start. Then run `/amq-remote` in a session. A harness file this command
+root, a target, or a session pin. `setup --session <name>` writes
+`AMQ <name>.agent.json` in the current directory (`--out` chooses another
+path): a `buzz-agent-snapshot` version 1 named `AMQ: <name>`, runtime
+`amq_remote`, model `amq-remote:<name>`, parallelism 1, and `respondTo`
+`owner-only`. That model selects the named binding, so the agent serves that
+session only. A bare `setup` writes `AMQ Remote.agent.json` with model
+`amq-remote`, which drives the only binding and refuses when several exist.
+Import the file in Buzz Desktop: Agents, then + then Import, pick the file,
+then Start. Then run `/amq-remote` in the session. A harness file this command
 did not write is left unchanged.
 
 ## Buzz BYOH
@@ -183,9 +187,8 @@ can pin it; the identity is not part of the session schema.
 ### Binding mode
 
 With `AMQ_ACP_REMOTE=binding`, the harness environment names no root, target
-or pin. Each prompt reads the binding that `amq-remote attach --self` wrote
-in the session the owner chose (`~/.amq/remote/binding.json`, or
-`$AMQ_REMOTE_BINDING`).
+or pin. Each prompt reads the named binding that `amq-remote attach --self`
+wrote (`~/.amq/remote/bindings/<name>.json`).
 
 - A mailbox binding (the default) delivers the prompt as an AMQ message from
   `buzz` to the bound handle, then waits for a reply that refs it. A `status`
