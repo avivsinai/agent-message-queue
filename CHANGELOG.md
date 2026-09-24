@@ -8,6 +8,63 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.81.0](https://github.com/avivsinai/agent-message-queue/compare/v0.80.1...v0.81.0) (2026-09-24)
+
+
+### Features
+
+* **acp:** install a Buzz harness from the pinned shell ([#877](https://github.com/avivsinai/agent-message-queue/issues/877)) ([5e41e11](https://github.com/avivsinai/agent-message-queue/commit/5e41e11df356fc440bb79de8caf066a5c6fef481))
+* **acp:** live ACP v2 cockpit turns over AMQ threads ([#854](https://github.com/avivsinai/agent-message-queue/issues/854)) ([4b929d6](https://github.com/avivsinai/agent-message-queue/commit/4b929d655d2da41ad180ccd3b925a3e501e6bbf2))
+* **acp:** remote mode submits Buzz Desktop prompts to one amq-remote target ([#876](https://github.com/avivsinai/agent-message-queue/issues/876)) ([c533d37](https://github.com/avivsinai/agent-message-queue/commit/c533d3741f292f59772cb455f7459dc244447fc8))
+* **acp:** steer and cancel live cockpit turns; replies correlate by refs ([#860](https://github.com/avivsinai/agent-message-queue/issues/860)) ([36b92ce](https://github.com/avivsinai/agent-message-queue/commit/36b92ce042259bff2b4aca7698b91c222264854b))
+* **acp:** write the AMQ Remote Buzz import in one setup ([#884](https://github.com/avivsinai/agent-message-queue/issues/884)) ([0b80746](https://github.com/avivsinai/agent-message-queue/commit/0b80746e1c61debeca992d8e4a51a3f53461d140))
+* **amq-bridge:** trust add provisions peer trust from identity public output (ug3) ([#845](https://github.com/avivsinai/agent-message-queue/issues/845)) ([3785459](https://github.com/avivsinai/agent-message-queue/commit/378545925a1367dae41893fdf4514f22fb2ab3da))
+* **remote:** /amq-remote defaults to the AMQ mailbox carrier ([#895](https://github.com/avivsinai/agent-message-queue/issues/895)) ([1a301d0](https://github.com/avivsinai/agent-message-queue/commit/1a301d0d8d14bd85bd25298cbda993360da308a6))
+* **remote/claude:** adapter skeleton — registry-backed inspect, honest refusal projection (611.12 PR1) ([#852](https://github.com/avivsinai/agent-message-queue/issues/852)) ([1fe7c8e](https://github.com/avivsinai/agent-message-queue/commit/1fe7c8ea463294b9f20b881f9a6f7a0157b674ec))
+* **remote/claude:** submit over the pinned socket wire with a transcript evidence ladder and Stop-hook bridge ([#855](https://github.com/avivsinai/agent-message-queue/issues/855)) ([b86b3c2](https://github.com/avivsinai/agent-message-queue/commit/b86b3c2c91c0a06c9ee4354c499578c41865c145))
+* **remote:** attach --self binds the Buzz agent to the invoking session ([#885](https://github.com/avivsinai/agent-message-queue/issues/885)) ([c8d376c](https://github.com/avivsinai/agent-message-queue/commit/c8d376cfb717cbef664dabd198296946de1622fa))
+* **remote:** Buzz presence: owned profile, status and policy check (611.17) ([#867](https://github.com/avivsinai/agent-message-queue/issues/867)) ([91dcd05](https://github.com/avivsinai/agent-message-queue/commit/91dcd059285d9a1eba102a55fd813cfe55e1e707))
+* **remote:** discover running Claude and Codex sessions for the manifest; serve prints attached targets ([#858](https://github.com/avivsinai/agent-message-queue/issues/858)) ([196ab2c](https://github.com/avivsinai/agent-message-queue/commit/196ab2c8e79ac2016b98ed0dbbd60509313fce1a))
+* **remote:** doctor names each failing boundary with a remedy (611.18) ([#869](https://github.com/avivsinai/agent-message-queue/issues/869)) ([954ba7d](https://github.com/avivsinai/agent-message-queue/commit/954ba7df2a6277f9b56315773d2a23f5eae2fdd3))
+* **remote:** enroll one bundle and write the relay block ([#878](https://github.com/avivsinai/agent-message-queue/issues/878)) ([92cfb37](https://github.com/avivsinai/agent-message-queue/commit/92cfb37828e5931deebdf26bd87ddcda73ce4226))
+* **remote:** NIP-OA body identity — per-kind bodykey enrollment, share command, doctor ([#846](https://github.com/avivsinai/agent-message-queue/issues/846)) ([57a19ad](https://github.com/avivsinai/agent-message-queue/commit/57a19ad295d2c00c74a4c820a0fb688943c7f1fa))
+* **remote:** one Buzz agent per session, selected by the ACP model ([#897](https://github.com/avivsinai/agent-message-queue/issues/897)) ([1e3876d](https://github.com/avivsinai/agent-message-queue/commit/1e3876d102da5944e2758a11beac2380bb38b9c7))
+* **remote:** owner Buzz DM commands with one editable result row (611.16) ([#866](https://github.com/avivsinai/agent-message-queue/issues/866)) ([85a571f](https://github.com/avivsinai/agent-message-queue/commit/85a571f16084161ab8a1454bd4c6a6494fda9ae2))
+* **remote:** project Claude transcript lines into kind 24200 frames ([#868](https://github.com/avivsinai/agent-message-queue/issues/868)) ([a2f5e32](https://github.com/avivsinai/agent-message-queue/commit/a2f5e32055d646961f6e77bcdcc3c687691cb308))
+* **remote:** project Codex activity into kind 24200 frames ([#865](https://github.com/avivsinai/agent-message-queue/issues/865)) ([2262535](https://github.com/avivsinai/agent-message-queue/commit/22625356e881ad6a9a76e99c0a8636f831b364de))
+* **remote:** relay AUTH for enrolled shares (611.15 slice 1) ([#863](https://github.com/avivsinai/agent-message-queue/issues/863)) ([7a559c9](https://github.com/avivsinai/agent-message-queue/commit/7a559c96cb3daaaadc832daf3d3da5254e1b3389))
+* **remote:** serve exports Claude activity for pinned shares (611.17) ([#872](https://github.com/avivsinai/agent-message-queue/issues/872)) ([aa8abe1](https://github.com/avivsinai/agent-message-queue/commit/aa8abe17c5183c97966f2ab1c491288300521023))
+* **remote:** serve exports Codex activity for pinned shares (611.17) ([#871](https://github.com/avivsinai/agent-message-queue/issues/871)) ([b14492e](https://github.com/avivsinai/agent-message-queue/commit/b14492e002fcd70f926391d10d47b1d9baba92dc))
+* **skills:** /amq-remote connects this session to Buzz in one command ([#887](https://github.com/avivsinai/agent-message-queue/issues/887)) ([761da23](https://github.com/avivsinai/agent-message-queue/commit/761da23d78636df4e7faab83ff10e9e119aed842))
+
+
+### Bug Fixes
+
+* **acp:** advertise the one destination as the session model ([#883](https://github.com/avivsinai/agent-message-queue/issues/883)) ([5652b9b](https://github.com/avivsinai/agent-message-queue/commit/5652b9bc8a03d97e366b14b6c08f3947255a4e87))
+* **acp:** post owner-facing answers into the Buzz DM ([#896](https://github.com/avivsinai/agent-message-queue/issues/896)) ([06b372a](https://github.com/avivsinai/agent-message-queue/commit/06b372a7abfa4b6a9f58925c65a805c354461d13))
+* **acp:** queue a busy DM until the session can run it ([#889](https://github.com/avivsinai/agent-message-queue/issues/889)) ([e949eb8](https://github.com/avivsinai/agent-message-queue/commit/e949eb8c5162ef8576bc2ab8839bd0ded0720295))
+* **amit:** a foreign-stream refusal on a terminal run lifts once the seam is clean v1 (e3b) ([#839](https://github.com/avivsinai/agent-message-queue/issues/839)) ([761bba4](https://github.com/avivsinai/agent-message-queue/commit/761bba4d11bfea03061c2476956000fe3208128a))
+* **amq-remote:** describe only the exits and busy modes v1 has ([#862](https://github.com/avivsinai/agent-message-queue/issues/862)) ([814be90](https://github.com/avivsinai/agent-message-queue/commit/814be903350a9935294ba91e996a7dd4e214d468))
+* **amq-remote:** install carrier warn handler + reply router before Reconcile (w4x) ([#836](https://github.com/avivsinai/agent-message-queue/issues/836)) ([fe4f1f2](https://github.com/avivsinai/agent-message-queue/commit/fe4f1f2434b90614bd6a7b5ed6eecca427430d4f))
+* **cli:** stop the Codex notify test from spawning a shell ([#873](https://github.com/avivsinai/agent-message-queue/issues/873)) ([0468f74](https://github.com/avivsinai/agent-message-queue/commit/0468f74edbdededb27543835578889ed658c7122))
+* **doctor:** name the confirmed relaunch for a wake lock another machine wrote ([#874](https://github.com/avivsinai/agent-message-queue/issues/874)) ([4483165](https://github.com/avivsinai/agent-message-queue/commit/4483165f0253d6669798849bf38b3dfdfe84006f))
+* **fsq:** implement Windows directory sync via FlushFileBuffers (u35) ([#847](https://github.com/avivsinai/agent-message-queue/issues/847)) ([644a70f](https://github.com/avivsinai/agent-message-queue/commit/644a70fa802a572b40f0aa0cdb259c224d0f5121))
+* **hooks:** keep an existing pre-push hook ([#882](https://github.com/avivsinai/agent-message-queue/issues/882)) ([30f9f75](https://github.com/avivsinai/agent-message-queue/commit/30f9f758363e98f716f68db2acc11333a7ac0bd3))
+* **remote/claude:** recover in-flight requests after an endpoint restart; accept meta-flagged deliveries (v2.1.280) ([#859](https://github.com/avivsinai/agent-message-queue/issues/859)) ([b55391f](https://github.com/avivsinai/agent-message-queue/commit/b55391f0b383ef467232beb4d2be138f3a46a021))
+* **remote/codex:** synchronize attachment client publication (611.22.20 BK5) ([#842](https://github.com/avivsinai/agent-message-queue/issues/842)) ([920ee64](https://github.com/avivsinai/agent-message-queue/commit/920ee64b6ce5758a6d2db27c276544ce4cd66969))
+* **remote:** bound request-store reads to regular files ([#888](https://github.com/avivsinai/agent-message-queue/issues/888)) ([d28a554](https://github.com/avivsinai/agent-message-queue/commit/d28a5544b09b864cc8f8fbe4f2ed742733bc4bf0))
+* **remote:** doctor names a missing endpoint route ([#880](https://github.com/avivsinai/agent-message-queue/issues/880)) ([3546be0](https://github.com/avivsinai/agent-message-queue/commit/3546be0dfd247debf0f125532ccc6f3e51c46fa2))
+* **remote:** fence store close against in-flight writers ([#886](https://github.com/avivsinai/agent-message-queue/issues/886)) ([f7ba30f](https://github.com/avivsinai/agent-message-queue/commit/f7ba30f2761f0f181a896ea93806095a1b1ae8de))
+* **remote:** keep the adapter refusal reason on the snapshot ([#857](https://github.com/avivsinai/agent-message-queue/issues/857)) ([c27d62a](https://github.com/avivsinai/agent-message-queue/commit/c27d62a4baa5933a7b91e1a3b061d8f1551c75d5))
+* **remote:** limit the Claude Stop hook to bound sessions ([#894](https://github.com/avivsinai/agent-message-queue/issues/894)) ([6ba3162](https://github.com/avivsinai/agent-message-queue/commit/6ba3162ba3628566fc192ff962c8ce5190d561e7))
+* **sender:** serialize Spool transactions across processes with a stable flock (asd) ([#838](https://github.com/avivsinai/agent-message-queue/issues/838)) ([f49593c](https://github.com/avivsinai/agent-message-queue/commit/f49593c7c260990fcd861d3a44ba086f746cda35))
+* **tests:** isolate the test home, temp dirs and walks so no test reads or writes the operator's real HOME (988) ([#853](https://github.com/avivsinai/agent-message-queue/issues/853)) ([00f1768](https://github.com/avivsinai/agent-message-queue/commit/00f1768efd681679ef212ff623cbf26bcdea596a))
+
+
+### Dependencies
+
+* bump golang.org/x/crypto from 0.39.0 to 0.52.0 ([#875](https://github.com/avivsinai/agent-message-queue/issues/875)) ([f627bec](https://github.com/avivsinai/agent-message-queue/commit/f627bec3d3218534b767bf4791e6482ef2949194))
+
 ## [0.80.1](https://github.com/avivsinai/agent-message-queue/compare/v0.80.0...v0.80.1) (2026-09-20)
 
 
