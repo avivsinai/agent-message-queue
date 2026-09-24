@@ -91,7 +91,7 @@ builds:
 
 archives:
   - id: amq
-    ids: [amq, amq-acp]
+    ids: [amq, amq-acp, amq-remote]
     formats: [tar.gz]
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     format_overrides:
@@ -162,9 +162,11 @@ brews:
     install: |
       bin.install "amq"
       bin.install "amq-acp"
+      bin.install "amq-remote"
     test: |
       system "#{bin}/amq", "--version"
       system "#{bin}/amq-acp", "--version"
+      system "#{bin}/amq-remote", "version"
 
 scoops:
   - name: amq
