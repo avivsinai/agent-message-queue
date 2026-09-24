@@ -390,6 +390,7 @@ func queuedThoughts(mu *sync.Mutex, thoughts []string) int {
 func TestRemoteCancelWhileQueuedSubmitsNothing(t *testing.T) {
 	rt := fake.New("fake", "e_1")
 	s := remoteServer(t, rt, nil)
+	s.cfg.StateDir = t.TempDir()
 	s.cfg.PollInterval = 5 * time.Millisecond
 	s.cfg.TurnTimeout = 2 * time.Second
 	occupy := "d2c80e1d-feb7-4c10-959e-23456789abcf"
@@ -434,6 +435,18 @@ func TestRemoteCancelWhileQueuedSubmitsNothing(t *testing.T) {
 	got := <-done
 	if got.StopReason != StopReasonCancelled || rt.HasRun(id) {
 		t.Fatalf("cancel admitted the dm: %+v hasRun=%v", got, rt.HasRun(id))
+	}
+	// Claude #889 P2: a later delivery of the same event must not run the
+	// work the owner cancelled.
+	if !rt.Complete(occupy, "local done") {
+		t.Fatal("occupy did not complete")
+	}
+	again, rpcErr := s.runRemote("s", "hello from buzz", eventID, newTurn(), func(any) error { return nil })
+	if rpcErr != nil {
+		t.Fatal(rpcErr)
+	}
+	if again.(remotePromptResult).StopReason != StopReasonCancelled || rt.HasRun(id) {
+		t.Fatalf("redelivery ran: %+v hasRun=%v", again, rt.HasRun(id))
 	}
 }
 

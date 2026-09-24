@@ -24,6 +24,10 @@ const remoteStateDir = "extensions/remote"
 // It matches the amq-remote submit default.
 const remoteAdmitWithin = 2 * time.Minute
 
+// busyRetryPause is the gap between busy submit retries. A 10-minute turn
+// budget must not become thousands of submit IPCs (Claude #889 P3).
+const busyRetryPause = time.Second
+
 // remotePromptResult is a prompt turn run against one amq-remote target. The
 // turn submits into the live native session; it writes no AMQ message.
 type remotePromptResult struct {
@@ -68,6 +72,7 @@ type remoteTurn struct {
 	target    string
 	native    string
 	sessionID string
+	eventID   string
 	emit      func(any) error
 	turn      *turnState
 	meta      remoteMeta
@@ -83,6 +88,11 @@ func (s *Server) runRemote(sessionID, text, eventID string, turn *turnState, emi
 	id, err := remoteRequestID(eventID)
 	if err != nil {
 		return nil, newRPCError(codeInternalError, "request id: %v", err)
+	}
+	// A cancel while queued is durable. A later delivery of the same event
+	// answers cancelled and submits nothing (Claude #889 P2).
+	if s.eventCancelled(eventID) {
+		return remotePromptResult{StopReason: StopReasonCancelled, Meta: remotePromptMeta{Remote: remoteMeta{Reason: "session_cancelled"}}}, nil
 	}
 	root, target, native := s.cfg.Root, s.cfg.RemoteTarget, s.cfg.RemoteNative
 	if s.cfg.RemoteBinding {
@@ -103,6 +113,7 @@ func (s *Server) runRemote(sessionID, text, eventID string, turn *turnState, emi
 		target:    target,
 		native:    native,
 		sessionID: sessionID,
+		eventID:   eventID,
 		emit:      emit,
 		turn:      turn,
 		// The exact reference exists before any IPC, so an unknown submit
@@ -209,6 +220,11 @@ func (s *Server) runRemote(sessionID, text, eventID string, turn *turnState, emi
 // submit again and does not ask the endpoint to cancel: a busy tombstone
 // never started a native run (611.34).
 func (r *remoteTurn) stoppedBeforeAdmit(outcome string, snap protocol.Snapshot) (any, *rpcError) {
+	if outcome == "session_cancelled" {
+		if err := r.s.recordEventCancel(r.eventID); err != nil {
+			return nil, newRPCError(codeInternalError, "record cancel: %v", err)
+		}
+	}
 	if snap.RequestRef != "" {
 		r.meta.State, r.meta.Code = string(snap.State), string(snap.Code)
 	}
@@ -219,16 +235,35 @@ func (r *remoteTurn) stoppedBeforeAdmit(outcome string, snap protocol.Snapshot) 
 	return remotePromptResult{StopReason: StopReasonCancelled, Meta: remotePromptMeta{Remote: r.meta}}, nil
 }
 
+func (s *Server) eventCancelPath(eventID string) (string, error) {
+	if s.cfg.StateDir == "" || eventID == "" || eventID != filepath.Base(eventID) {
+		return "", fmt.Errorf("cancel has no durable event record")
+	}
+	return filepath.Join(s.cfg.StateDir, "remote-events", eventID+".cancelled"), nil
+}
+
+func (s *Server) eventCancelled(eventID string) bool {
+	path, err := s.eventCancelPath(eventID)
+	if err != nil {
+		return false
+	}
+	fi, err := os.Lstat(path)
+	return err == nil && fi.Mode().IsRegular()
+}
+
+func (s *Server) recordEventCancel(eventID string) error {
+	path, err := s.eventCancelPath(eventID)
+	if err != nil {
+		return err
+	}
+	_, err = createExclusive(path, []byte("cancelled\n"))
+	return err
+}
+
 // waitBusy pauses between busy retries. An empty result means retry. The
 // turn budget and a cancel both stop the loop without another submit.
 func (r *remoteTurn) waitBusy(deadline time.Time) string {
-	pause := r.s.cfg.PollInterval
-	if pause <= 0 {
-		pause = r.s.cfg.HeartbeatInterval
-	}
-	if pause <= 0 {
-		pause = 100 * time.Millisecond
-	}
+	pause := busyRetryPause
 	if remain := time.Until(deadline); remain < pause {
 		pause = remain
 	}
