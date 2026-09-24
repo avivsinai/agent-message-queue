@@ -108,6 +108,22 @@ and `AM_SESSION` are written only when this shell has them. `--remove` deletes
 only the file this command wrote. A harness file this command did not write is
 left unchanged.
 
+Once per Mac, write the AMQ Remote harness and the Desktop import file:
+
+```sh
+amq-acp setup
+```
+
+That writes `custom_harnesses/amq_remote.json` with mode 0600, the stable
+`amq-acp` path, and env `AMQ_ACP_REMOTE=binding` only. It does not record a
+root, a target, or a session pin. It also writes `AMQ Remote.agent.json` in
+the current directory (`--out` chooses another path). The file is a
+`buzz-agent-snapshot` version 1 whose definition is name `AMQ Remote`, runtime
+`amq_remote`, model `amq-remote`, parallelism 1, and `respondTo` `owner-only`.
+Import that file in Buzz Desktop: Agents, then + then Import, pick the file,
+then Start. Then run `/amq-remote` in a session. A harness file this command
+did not write is left unchanged.
+
 ## Buzz BYOH
 
 This is a custom harness, not a Buzz preset. `amq-acp install` writes the
