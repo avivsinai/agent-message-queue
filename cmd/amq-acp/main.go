@@ -43,6 +43,9 @@ func run(args []string) int {
 	if len(args) > 0 && args[0] == "install" {
 		return runInstall(args[1:])
 	}
+	if len(args) > 0 && args[0] == "setup" {
+		return runSetup(args[1:])
+	}
 
 	flags := flag.NewFlagSet("amq-acp", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
@@ -93,6 +96,8 @@ Usage:
                  write the harness with AMQ_ACP_REMOTE_TARGET set
   amq-acp install --remove --to <handle>
                  delete the harness file this command wrote
+  amq-acp setup [--out <file>]
+                 write the AMQ Remote harness and the Desktop import file
 
 Environment:
   AM_ROOT          required absolute queue root

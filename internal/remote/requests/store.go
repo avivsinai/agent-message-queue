@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -238,8 +239,16 @@ func OpenReadOnly(stateDir string) (*Store, error) {
 // Close releases the owner lock and marks the store closed. Every mutation
 // after Close refuses with store_closed, so a stale reference cannot write
 // once ownership has moved on. The records stay on disk.
+//
+// The owner lock is released only after s.mu is held. A settlement writer
+// that already passed its closed check (agent-message-queue-859) still holds
+// s.mu through the durable write, so that write finishes before a replacement
+// Open can take ownership. A writer that has not entered the mutex yet sees
+// closed and refuses.
 func (s *Store) Close() error {
 	s.closed.Store(true)
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.lock == nil {
 		return nil
 	}
@@ -531,8 +540,12 @@ func (s *Store) ListWithPoison() ([]*Record, []Poison, error) {
 // looser than one read by a live request. The boolean is false only when the
 // file does not exist; a present-but-undecodable file returns an error so a
 // caller never mistakes poison for absence.
+//
+// The read is bounded and no-follow (agent-message-queue-qgc). A FIFO or an
+// oversized file is an error for this record, never a block and never a
+// missing record, so List can skip it and continue with the other targets.
 func (s *Store) readRecord(path string) (*Record, bool, error) {
-	data, err := os.ReadFile(path)
+	data, err := readRegularBounded(path, int64(MaxRecordBytes))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, false, nil
 	}
@@ -545,6 +558,45 @@ func (s *Store) readRecord(path string) (*Record, bool, error) {
 	}
 	normalizeRecord(rec)
 	return rec, true, nil
+}
+
+// readRegularBounded reads one record through the same fail-closed sequence
+// as internal/remote/claude/safeopen.go: the leaf must be a regular file no
+// larger than maxBytes, opened no-follow where the platform allows it, and
+// still that same regular file after open. A file that grows past maxBytes
+// between the size check and the read is refused. os.ErrNotExist passes
+// through unwrapped so a vanished file stays "not found".
+func readRegularBounded(path string, maxBytes int64) ([]byte, error) {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("not a regular file (mode %s); refusing", fi.Mode())
+	}
+	if fi.Size() > maxBytes {
+		return nil, fmt.Errorf("%d bytes exceeds %d; refusing", fi.Size(), maxBytes)
+	}
+	f, err := os.OpenFile(path, os.O_RDONLY|recordNoFollowFlag, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	fi2, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !fi2.Mode().IsRegular() || !os.SameFile(fi, fi2) {
+		return nil, fmt.Errorf("replaced between lstat and open; refusing")
+	}
+	raw, err := io.ReadAll(io.LimitReader(f, maxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(raw)) > maxBytes {
+		return nil, fmt.Errorf("larger than %d bytes after read; refusing", maxBytes)
+	}
+	return raw, nil
 }
 
 // keyFromPath recovers a record key from its on-disk path segments so a poison
@@ -705,9 +757,10 @@ func (s *Store) CompactOne(key Key, before time.Time) (bool, error) {
 }
 
 // checkClosed refuses every mutation on a closed store. Close sets closed
-// before releasing the owner lock, so a stale reference cannot write after a
-// replacement endpoint has taken ownership. Reads (Get/List) are still
-// permitted on a closed store for diagnosis.
+// and then waits for s.mu before releasing the owner lock, so a writer that
+// already passed this check finishes its durable write before a replacement
+// owner can open, and a writer that has not entered s.mu yet refuses.
+// Reads (Get/List) are still permitted on a closed store for diagnosis.
 func (s *Store) checkClosed() error {
 	if s.closed.Load() {
 		return protocol.Refuse(protocol.CodeStoreClosed, "store is closed")

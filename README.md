@@ -98,11 +98,12 @@ Start both agents before sending the first message. Messages that arrive
 before a recipient's wake starts remain unread but do not trigger that new
 wake. The recipient can still get them with `amq drain --include-body`.
 
-### Buzz Desktop
+### Control a session from Buzz
 
-`amq-acp install --to <handle>` writes that agent's Buzz harness from this shell.
-In Buzz Desktop: New agent, select the printed label.
-Restart Desktop if it is already open.
+Inside a running Claude Code or Codex session, type `/amq-remote`. The first
+time, it asks you to import one agent into Buzz Desktop. Then DM **AMQ Remote**
+from the Buzz app or Desktop, and the DM runs in that session.
+`/amq-remote off` disconnects it. See [amq-remote](cmd/amq-remote/README.md).
 
 <a id="messaging"></a>
 

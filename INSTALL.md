@@ -280,7 +280,7 @@ not required for the AMQ onboarding path.
 
 ## Companion binaries
 
-`brew install avivsinai/tap/amq` installs `amq` and `amq-acp`. The other
+`brew install avivsinai/tap/amq` installs `amq`, `amq-acp` and `amq-remote`. The other
 companions are separate release assets and are not installed by Homebrew:
 
 - `amq-keepalive_*_darwin_{amd64,arm64}.tar.gz` and
@@ -294,8 +294,9 @@ companions are separate release assets and are not installed by Homebrew:
 - `amq-acp` is the preview ACP v2 stdio companion. The `amq` Homebrew formula
   installs it; `amq-acp_*_{linux,darwin}_{amd64,arm64}.tar.gz` remains for a
   direct install. See [amq-acp](cmd/amq-acp/README.md).
-- `amq-remote_*_{linux,darwin}_{amd64,arm64}.tar.gz` is the remote-session
-  companion. See [amq-remote](cmd/amq-remote/README.md) for commands, flags,
+- `amq-remote` is the remote-session companion. The `amq` Homebrew formula
+  installs it; `amq-remote_*_{linux,darwin}_{amd64,arm64}.tar.gz` remains for a
+  direct install. See [amq-remote](cmd/amq-remote/README.md) for commands, flags,
   and exit codes. Design and pinned seams stay in the
   [remote design](docs/adr-remote-control.md) and
   [capability reference](docs/remote-compat.md).
@@ -345,9 +346,9 @@ the direct `inject` adapters are supported there.
 
 `amq upgrade --all` upgrades directly installed `amq-keepalive`, `amq-bridge`,
 and `amq-acp` when their targets are unambiguous and match the release build
-identity. Update `amq-remote` from its release asset separately. Package-managed
+identity. A directly installed `amq-remote` is updated from its release asset. Package-managed
 core installs are delegated to their package manager. `brew upgrade amq` updates
-the formula's `amq-acp`; a directly installed `amq-acp` still uses
+the formula's `amq-acp` and `amq-remote`; a directly installed `amq-acp` still uses
 `amq upgrade --all`. On Windows, `--all` can upgrade `amq-keepalive.exe`; bridge
 and ACP are not published for Windows.
 
