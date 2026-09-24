@@ -65,6 +65,9 @@ Commands:
   share --session ID       Mint the session body key and print its NIP-OA
                            preimage for the owner to sign (--renew reprints,
                            --tag-file enrolls the signed tag)
+  attach --self            Bind your AMQ Remote Buzz agent to the session this
+                           runs in (starts the endpoint when none runs)
+  detach [--self]          Unbind it; the session keeps running
   doctor                   Diagnose the endpoint chain
   version                  Print the version
 
@@ -140,6 +143,12 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		out, code, err = listRequests(rest)
 	case "share":
 		code, err = share(rest, stdout, stderr)
+		return finish(stderr, nil, false, code, err)
+	case "attach":
+		code, err = attach(rest, stdout, stderr)
+		return finish(stderr, nil, false, code, err)
+	case "detach":
+		code, err = detach(rest, stdout, stderr)
 		return finish(stderr, nil, false, code, err)
 	case "doctor":
 		out, code, err = doctor(rest)
@@ -482,6 +491,7 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 		_ = ep.Close()
 		return 0, err
 	}
+	server.SetRegistrar(liveRegistrar(c.root, stateDir, ep))
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	say(stdout, "amq-remote %s serving root=%s handle=%s socket=%s targets=%d", version, c.root, *me, server.Path(), len(ep.Targets()))

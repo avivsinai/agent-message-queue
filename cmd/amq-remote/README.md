@@ -324,6 +324,22 @@ still in the sender spool.
 
 `wait` interrupted by SIGINT exits 130. The request keeps running.
 
+### `attach`, `detach`
+
+`amq-remote attach --self` binds the per-user Buzz agent (amq-acp in binding
+mode) to the session the command runs in. Typing it is the sharing choice, so
+the session is found exactly and never guessed from a discovery list. Claude
+is found by the command's process ancestry. Codex is found by
+`CODEX_THREAD_ID` among the threads loaded in the app-server daemon. Attach
+registers the target in the running endpoint without a restart and adds it
+to `manifest.json`. When no endpoint runs, it starts `amq-remote up` in the
+background (log: `up.log` in the state directory). Then it writes
+`~/.amq/remote/binding.json` (mode 0600, or `$AMQ_REMOTE_BINDING`) with the
+root, the target and the target's native session.
+
+`amq-remote detach` removes the binding. `detach --self` removes it only when
+it names this session. The session and the endpoint keep running.
+
 ### `share`
 
 | Flag | Default | Meaning |

@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/fake"
 	"github.com/avivsinai/agent-message-queue/internal/remote/ipc"
@@ -296,5 +297,39 @@ func TestRemoteBusyRedeliveryRetries(t *testing.T) {
 	}
 	if got := second.(remotePromptResult); got.StopReason != StopReasonEndTurn {
 		t.Fatalf("busy redelivery = %+v", got)
+	}
+}
+
+// Bead agent-message-queue-611.31: in binding mode a prompt answers "Not
+// connected" until a session is bound, then runs in the bound session.
+func TestBindingModeFollowsTheBoundSession(t *testing.T) {
+	t.Setenv(binding.EnvPath, filepath.Join(t.TempDir(), "binding.json"))
+	rt := fake.New("fake", "e_1")
+	bound := remoteServer(t, rt, nil)
+	s := NewServer(Config{RemoteBinding: true, StateDir: t.TempDir(), HeartbeatInterval: 10 * time.Millisecond, TurnTimeout: time.Second}, "test")
+
+	var said []string
+	emit := func(v any) error {
+		if note := v.(sessionUpdateNotification); note.Params.Update.SessionUpdate == "agent_message_chunk" {
+			said = append(said, note.Params.Update.Content.Text)
+		}
+		return nil
+	}
+	result, rpcErr := s.runRemote("s", "hello", "", newTurn(), emit)
+	if rpcErr != nil || len(said) != 1 || !strings.HasPrefix(said[0], "Not connected") {
+		t.Fatalf("unbound: result=%+v said=%q err=%v", result, said, rpcErr)
+	}
+
+	if err := binding.Write(binding.Binding{Root: bound.cfg.Root, Target: "fake", NativeSession: "fake"}); err != nil {
+		t.Fatal(err)
+	}
+	eventID := strings.Repeat("9", 64)
+	id, _ := remoteRequestID(eventID)
+	result, rpcErr = s.runRemote("s", "hello", eventID, newTurn(), func(any) error { rt.Complete(id, "from the bound session"); return nil })
+	if rpcErr != nil {
+		t.Fatal(rpcErr)
+	}
+	if got := result.(remotePromptResult); got.StopReason != StopReasonEndTurn || got.Meta.Remote.Target != "fake" {
+		t.Fatalf("bound: %+v", got)
 	}
 }

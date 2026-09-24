@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"github.com/avivsinai/agent-message-queue/internal/remote/ipc"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 )
@@ -56,10 +57,14 @@ type remoteWait struct {
 	err  error
 }
 
-// remoteTurn is one prompt turn against the pinned target.
+// remoteTurn is one prompt turn against the pinned target. Its root,
+// target and native pin are fixed when the turn starts, so a later rebind
+// never moves work that is already submitted.
 type remoteTurn struct {
 	s         *Server
 	dir       string
+	target    string
+	native    string
 	sessionID string
 	emit      func(any) error
 	turn      *turnState
@@ -77,15 +82,30 @@ func (s *Server) runRemote(sessionID, text, eventID string, turn *turnState, emi
 	if err != nil {
 		return nil, newRPCError(codeInternalError, "request id: %v", err)
 	}
+	root, target, native := s.cfg.Root, s.cfg.RemoteTarget, s.cfg.RemoteNative
+	if s.cfg.RemoteBinding {
+		b, err := binding.Read()
+		if err != nil {
+			r := &remoteTurn{s: s, sessionID: sessionID, emit: emit, turn: turn, meta: remoteMeta{State: "not_connected", Reason: err.Error()}}
+			text := "Not connected. Run /amq-remote in a Claude Code or Codex session."
+			if !errors.Is(err, binding.ErrNone) {
+				text = "Not connected: " + err.Error()
+			}
+			return r.say(r.settle("replied"), StopReasonRefusal, text)
+		}
+		root, target, native = b.Root, b.Target, b.NativeSession
+	}
 	r := &remoteTurn{
 		s:         s,
-		dir:       filepath.Join(s.cfg.Root, remoteStateDir),
+		dir:       filepath.Join(root, remoteStateDir),
+		target:    target,
+		native:    native,
 		sessionID: sessionID,
 		emit:      emit,
 		turn:      turn,
 		// The exact reference exists before any IPC, so an unknown submit
 		// outcome still names the request (codex #876 P1 #2).
-		meta: remoteMeta{Target: s.cfg.RemoteTarget, RequestRef: protocol.EncodeRef(ipc.LocalHost, s.cfg.RemoteTarget, id)},
+		meta: remoteMeta{Target: target, RequestRef: protocol.EncodeRef(ipc.LocalHost, target, id)},
 	}
 
 	// A redelivered event follows its stored request, whatever the target's
@@ -106,7 +126,7 @@ func (s *Server) runRemote(sessionID, text, eventID string, turn *turnState, emi
 		}
 	}
 	if epoch == "" {
-		session, err := remoteSession(r.dir, s.cfg.RemoteTarget, s.cfg.RemoteNative)
+		session, err := remoteSession(r.dir, r.target, r.native)
 		if err != nil {
 			return r.failed(remoteNotSubmitted, err)
 		}
@@ -116,7 +136,7 @@ func (s *Server) runRemote(sessionID, text, eventID string, turn *turnState, emi
 		Schema:    protocol.SchemaCommand,
 		Op:        protocol.OpRequestSubmit,
 		RequestID: id,
-		TargetID:  s.cfg.RemoteTarget,
+		TargetID:  r.target,
 		Epoch:     epoch,
 		NotAfter:  protocol.FormatTime(time.Now().Add(remoteAdmitWithin)),
 		Input:     &protocol.SubmitInput{Text: text, Busy: protocol.BusyReject, Deliver: protocol.DeliverTurn},
@@ -161,7 +181,7 @@ func (r *remoteTurn) follow(snap protocol.Snapshot) (any, *rpcError) {
 
 	// The goroutine reads only this immutable reference; snap belongs to the
 	// consumer loop below (codex #876 r2 P1 #1).
-	ref, native, timeout := snap.RequestRef, r.s.cfg.RemoteNative, r.s.cfg.HeartbeatInterval.Milliseconds()
+	ref, native, timeout := snap.RequestRef, r.native, r.s.cfg.HeartbeatInterval.Milliseconds()
 	waits := make(chan remoteWait, 1)
 	stop := make(chan struct{})
 	defer close(stop)
@@ -345,7 +365,7 @@ func (r *remoteTurn) get() (protocol.Reply, error) {
 }
 
 func (r *remoteTurn) call(cmd *protocol.Command) (protocol.Reply, error) {
-	resp, err := ipc.Call(r.dir, ipc.Request{Command: cmd, NativeSession: r.s.cfg.RemoteNative})
+	resp, err := ipc.Call(r.dir, ipc.Request{Command: cmd, NativeSession: r.native})
 	if err != nil {
 		return protocol.Reply{}, err
 	}

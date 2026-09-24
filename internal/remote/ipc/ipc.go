@@ -49,7 +49,26 @@ type Request struct {
 	// Native asks which native session a target is attached to, so a local
 	// sharing choice can pin it. Local-only, like NativeSession.
 	Native *NativeQuery `json:"native,omitempty"`
+	// Register attaches one more adapter to the running endpoint, the way
+	// startup attaches manifest entries, and persists it for restarts.
+	// Local-only: `amq-remote attach --self` sends it for the session the
+	// owner is typing in.
+	Register *RegisterRequest `json:"register,omitempty"`
 }
+
+// RegisterRequest names one adapter by kind, target and config, exactly as
+// a manifest entry does.
+type RegisterRequest struct {
+	Kind   string          `json:"kind"`
+	Target string          `json:"target"`
+	Config json.RawMessage `json:"config,omitempty"`
+	// Epoch is accepted only for kind fake, as in the manifest.
+	Epoch string `json:"epoch,omitempty"`
+}
+
+// Registrar attaches one adapter and returns its session. serve supplies it;
+// without one the endpoint refuses Register.
+type Registrar func(RegisterRequest) (protocol.Session, error)
 
 // NativeQuery names the target whose native session is asked for.
 type NativeQuery struct {
@@ -96,10 +115,14 @@ func SocketPath(stateDir string) string {
 
 // Server accepts local connections and hands commands to the endpoint.
 type Server struct {
-	ep       *core.Endpoint
-	listener net.Listener
-	path     string
+	ep        *core.Endpoint
+	listener  net.Listener
+	path      string
+	registrar Registrar
 }
+
+// SetRegistrar installs the live registration handler. Call it before Serve.
+func (s *Server) SetRegistrar(r Registrar) { s.registrar = r }
 
 // Close stops the listener and removes the socket file. Tests and callers
 // that drive startup without Serve(ctx) use it so the bound socket does not
@@ -205,6 +228,17 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 			return
 		}
 		writeRecord(conn, Response{Reply: mustJSON(snap)})
+	case req.Register != nil:
+		if s.registrar == nil {
+			writeRecord(conn, errorResponse(protocol.Refuse(protocol.CodeUnsupported, "this endpoint does not accept live registration")))
+			return
+		}
+		session, err := s.registrar(*req.Register)
+		if err != nil {
+			writeRecord(conn, errorResponse(err))
+			return
+		}
+		writeRecord(conn, Response{Reply: mustJSON(session)})
 	case req.Native != nil:
 		id := s.ep.NativeSessionID(req.Native.TargetID)
 		if id == "" {
