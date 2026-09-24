@@ -359,12 +359,20 @@ and ACP are not published for Windows.
 | macOS | Supported | Supported | Supported | Supported | Supported |
 | Linux | Supported | Supported | Supported | Supported; raw TTY injection may be disabled by kernel hardening | Supported |
 | WSL | Supported via Linux binary | Supported | Supported | Same constraints as Linux | Supported |
-| Native Windows | Supported via Windows ZIP | Supported | Not supported natively | Not supported natively | Use the ZIP; the script rejects Windows |
+| Native Windows | Verified subset only (below) | Supported | Not supported natively ([#891](https://github.com/avivsinai/agent-message-queue/issues/891)) | Not supported natively ([#891](https://github.com/avivsinai/agent-message-queue/issues/891)) | Use the ZIP; the script rejects Windows ([#891](https://github.com/avivsinai/agent-message-queue/issues/891)) |
 
-Native Windows supports core queue commands and direct submitted injection via
-`amq-keepalive.exe`, but not `amq wake`, `coop exec`, or terminal supervision.
-Use WSL with a Linux asset for the complete co-op workflow. `amq-bridge` and
-`amq-acp` are published for Linux and macOS, not Windows.
+Native Windows CI (`windows-claim-test`) verifies one subset: exclusive drain
+claim (`internal/fsq` claim tests and `internal/cli` drain claim), the callable
+Windows launch surface (`launchapi`), and the Windows Codex and Claude
+keepalive adapters (`internal/keepalive/adapter`). The rest of `go test ./...`
+is not run there; the broader suite has known failures
+([#891](https://github.com/avivsinai/agent-message-queue/issues/891)).
+`amq wake`, `coop exec`, and terminal supervision are not native Windows
+contracts ([#891](https://github.com/avivsinai/agent-message-queue/issues/891)).
+Direct submitted injection via `amq-keepalive.exe` is the supported injection
+path. Use WSL with a Linux asset for the complete co-op workflow. `amq-bridge`
+and `amq-acp` are published for Linux and macOS, not Windows
+([#891](https://github.com/avivsinai/agent-message-queue/issues/891)).
 
 ## Verify and upgrade
 
