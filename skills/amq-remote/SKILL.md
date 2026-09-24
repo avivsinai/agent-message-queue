@@ -13,7 +13,7 @@ metadata:
 session. The owner then DMs that agent from the Buzz phone app or Buzz
 Desktop, and each DM runs here as a prompt. The reply goes back to the DM.
 
-Run the steps in order. Stop at the first failure and show the user the
+Run the steps in order. When a step says to stop, show the user the
 command's own message. Do not work around a refusal.
 
 ## `/amq-remote` (connect)
@@ -22,21 +22,24 @@ command's own message. Do not work around a refusal.
    the user to run `brew install avivsinai/tap/amq`, then stop.
 2. **Root.** Use `$AM_ROOT` when it is set. Otherwise use
    `$HOME/.amq/remote/root`, and create it with `mkdir -p`.
-3. **Claude Code only: the Stop hook.** A Claude turn completes only through
-   the AMQ Stop hook. Run `amq-remote doctor --root "$ROOT" --json`. If its
-   `failing` list names `native_capability`, tell the user this step adds one
-   Stop hook to `~/.claude/settings.json` (it always exits 0, and
+3. **Bind this session.** Run `amq-remote attach --self --root "$ROOT"`. It
+   finds this session exactly, starts the endpoint when none runs, and binds
+   it. If it fails, show its message and stop.
+4. **Claude Code only: the Stop hook.** A Claude turn completes only through
+   the AMQ Stop hook. Run `amq-remote doctor --root "$ROOT" --json`. Its exit
+   code is not the signal here: read its `failing` list. If an entry has
+   `boundary` `native_capability`, tell the user this step adds one Stop hook
+   to `~/.claude/settings.json` (it always exits 0, and
    `amq-remote claude uninstall-stop-hook` removes it). Ask once, then run
-   `amq-remote claude install-stop-hook`.
-4. **The Buzz agent, once per Mac.** If
+   `amq-remote claude install-stop-hook`. Without it, DMs arrive but replies
+   never return.
+5. **The Buzz agent, once per Mac.** If
    `~/Library/Application Support/xyz.block.buzz.app/custom_harnesses/amq_remote.json`
    does not exist, run `amq-acp setup --out "$HOME/Downloads/AMQ Remote.agent.json"`
    and show the user its printed steps: in Buzz Desktop, Agents, then + then
    Import, pick that file, then Start. This is the only Desktop step, and it
    happens once. If Desktop was open, it must be restarted first so it sees the
    new harness.
-5. **Bind this session.** Run `amq-remote attach --self --root "$ROOT"`. It
-   finds this session exactly, starts the endpoint if needed, and binds it.
 6. Tell the user: "Connected. DM **AMQ Remote** from the Buzz app or
    Desktop." Say that a DM sent while this session is mid-turn waits or
    is refused as busy, and that Buzz Stop cannot interrupt a Claude turn (the
