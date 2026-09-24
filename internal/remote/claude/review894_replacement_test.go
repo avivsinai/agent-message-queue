@@ -48,21 +48,11 @@ func TestReview894RotationCannotHideFreshStop(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A consumer pauses after the first marker; hook calls continue.
-	for i := 0; i < 1000; i++ {
-		fi, err := os.Stat(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if fi.Size() >= maxStopMarkerKeep {
-			break
-		}
-		write()
-	}
-	write() // truncates, then publishes the latest completion
+	// Later turns append. The reader at the old offset still sees them.
+	write()
 	got := readStopMarkers(path, first.Size())
-	if !got.truncated && len(got.lines) == 0 {
-		t.Fatal("fresh Stop after rotation is invisible at the prior consumed offset")
+	if len(got.lines) == 0 {
+		t.Fatal("later Stop is invisible at the prior consumed offset")
 	}
 }
 

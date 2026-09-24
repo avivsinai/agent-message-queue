@@ -633,20 +633,6 @@ func RunStopHookReceiver(home string, stdin io.Reader, stdout io.Writer) int {
 	if !os.SameFile(pre, post) {
 		return 0
 	}
-	// Past the cap, replace the file with a copy of the same bytes so the
-	// inode changes, and leave a reset flag. In-place truncation would hide
-	// a fresh Stop once the file regrew to the old offset, and would drop
-	// lines the poller has not consumed (codex #894).
-	if post.Size() >= maxStopMarkerKeep {
-		_ = f.Close()
-		if err := rotateStopMarker(marker); err != nil {
-			return 0
-		}
-		f, err = os.OpenFile(marker, os.O_APPEND|os.O_WRONLY|openNoFollowFlag, 0o600)
-		if err != nil {
-			return 0
-		}
-	}
 	line, err := json.Marshal(map[string]any{"ts": time.Now().UnixMilli(), "session_id": payload.SessionID})
 	if err != nil {
 		return 0
@@ -659,35 +645,8 @@ func stopMarkerPath(home, sessionID string) string {
 	return filepath.Join(claudeSessionsDir(home), "amq-stop", sessionID+".jsonl")
 }
 
-// maxStopMarkerKeep is the size at which the receiver rotates a session's
-// marker onto a new inode. Lines already in the file stay. A line is about
-// 60 bytes, so this is roughly a hundred turns between rotations.
-const maxStopMarkerKeep = 8 << 10
-
 func stopBoundDir(home, sessionID string) string {
 	return filepath.Join(claudeSessionsDir(home), "amq-bound", sessionID)
-}
-
-func stopResetPath(marker string) string {
-	return marker + ".reset"
-}
-
-// rotateStopMarker copies the marker onto a new inode and records a reset
-// the reader can see. The bytes are unchanged, so an unconsumed line stays.
-func rotateStopMarker(path string) error {
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return err
-	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	return os.WriteFile(stopResetPath(path), []byte("1\n"), 0o600)
 }
 
 // bindStopSession records one attachment's ownership of this session.
@@ -728,9 +687,7 @@ func unbindStopSession(home, sessionID, token string) {
 	if stopSentinelPresent(home, sessionID) {
 		return
 	}
-	marker := stopMarkerPath(home, sessionID)
-	removeRegular(marker)
-	removeRegular(stopResetPath(marker))
+	removeRegular(stopMarkerPath(home, sessionID))
 }
 
 func removeRegular(path string) {
