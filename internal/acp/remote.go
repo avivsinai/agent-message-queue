@@ -6,9 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"github.com/avivsinai/agent-message-queue/internal/remote/ipc"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 )
@@ -56,10 +59,14 @@ type remoteWait struct {
 	err  error
 }
 
-// remoteTurn is one prompt turn against the pinned target.
+// remoteTurn is one prompt turn against the pinned target. Its root,
+// target and native pin are fixed when the turn starts, so a later rebind
+// never moves work that is already submitted.
 type remoteTurn struct {
 	s         *Server
 	dir       string
+	target    string
+	native    string
 	sessionID string
 	emit      func(any) error
 	turn      *turnState
@@ -77,15 +84,30 @@ func (s *Server) runRemote(sessionID, text, eventID string, turn *turnState, emi
 	if err != nil {
 		return nil, newRPCError(codeInternalError, "request id: %v", err)
 	}
+	root, target, native := s.cfg.Root, s.cfg.RemoteTarget, s.cfg.RemoteNative
+	if s.cfg.RemoteBinding {
+		b, err := s.turnBinding(eventID)
+		if err != nil {
+			r := &remoteTurn{s: s, sessionID: sessionID, emit: emit, turn: turn, meta: remoteMeta{State: "not_connected", Reason: err.Error()}}
+			text := "Not connected. Run /amq-remote in a Claude Code or Codex session."
+			if !errors.Is(err, binding.ErrNone) {
+				text = "Not connected: " + err.Error()
+			}
+			return r.say(r.settle("replied"), StopReasonRefusal, text)
+		}
+		root, target, native = b.Root, b.Target, b.NativeSession
+	}
 	r := &remoteTurn{
 		s:         s,
-		dir:       filepath.Join(s.cfg.Root, remoteStateDir),
+		dir:       filepath.Join(root, remoteStateDir),
+		target:    target,
+		native:    native,
 		sessionID: sessionID,
 		emit:      emit,
 		turn:      turn,
 		// The exact reference exists before any IPC, so an unknown submit
 		// outcome still names the request (codex #876 P1 #2).
-		meta: remoteMeta{Target: s.cfg.RemoteTarget, RequestRef: protocol.EncodeRef(ipc.LocalHost, s.cfg.RemoteTarget, id)},
+		meta: remoteMeta{Target: target, RequestRef: protocol.EncodeRef(ipc.LocalHost, target, id)},
 	}
 
 	// A redelivered event follows its stored request, whatever the target's
@@ -106,7 +128,7 @@ func (s *Server) runRemote(sessionID, text, eventID string, turn *turnState, emi
 		}
 	}
 	if epoch == "" {
-		session, err := remoteSession(r.dir, s.cfg.RemoteTarget, s.cfg.RemoteNative)
+		session, err := remoteSession(r.dir, r.target, r.native)
 		if err != nil {
 			return r.failed(remoteNotSubmitted, err)
 		}
@@ -116,7 +138,7 @@ func (s *Server) runRemote(sessionID, text, eventID string, turn *turnState, emi
 		Schema:    protocol.SchemaCommand,
 		Op:        protocol.OpRequestSubmit,
 		RequestID: id,
-		TargetID:  s.cfg.RemoteTarget,
+		TargetID:  r.target,
 		Epoch:     epoch,
 		NotAfter:  protocol.FormatTime(time.Now().Add(remoteAdmitWithin)),
 		Input:     &protocol.SubmitInput{Text: text, Busy: protocol.BusyReject, Deliver: protocol.DeliverTurn},
@@ -149,6 +171,97 @@ func (s *Server) runRemote(sessionID, text, eventID string, turn *turnState, emi
 	return r.follow(rep.Snapshot)
 }
 
+// turnBinding fixes the binding a prompt runs under. A redelivered event
+// follows the binding its first delivery recorded, never the current one,
+// so a rebind between deliveries cannot run the event twice in two sessions
+// (codex #885 P1 #1). A first delivery records its binding before submit.
+func (s *Server) turnBinding(eventID string) (binding.Binding, error) {
+	if eventID == "" {
+		return binding.Read()
+	}
+	path := filepath.Join(s.cfg.StateDir, "remote-events", eventID+".json")
+	if raw, err := readSmallRegular(path); err == nil {
+		var b binding.Binding
+		if err := json.Unmarshal(raw, &b); err != nil || b.Target == "" || b.NativeSession == "" || !filepath.IsAbs(b.Root) {
+			return binding.Binding{}, fmt.Errorf("event %s has an unreadable recorded binding; refusing to resubmit", eventID)
+		}
+		// A claim can be visible before its directory entry is durable. Every
+		// reader makes it durable before it submits, so a crash cannot lose
+		// the claim behind a submission (codex #885 r3 P1).
+		if err := fsq.SyncDir(filepath.Dir(path)); err != nil {
+			return binding.Binding{}, err
+		}
+		return b, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return binding.Binding{}, err
+	}
+	b, err := binding.Read()
+	if err != nil {
+		return b, err
+	}
+	raw, err := json.Marshal(b)
+	if err != nil {
+		return binding.Binding{}, err
+	}
+	// The first delivery claims the event exclusively. A concurrent first
+	// delivery that loses reads the winner's binding and never uses the one
+	// it captured, so all deliveries of one event share one session
+	// (codex #885 r2 P1).
+	won, err := createExclusive(path, raw)
+	if err != nil {
+		return binding.Binding{}, err
+	}
+	if !won {
+		return s.turnBinding(eventID)
+	}
+	return b, nil
+}
+
+// createExclusive publishes raw at path only if nothing is there yet. The
+// bytes are complete and synced before the link makes them visible, so a
+// reader never sees a partial claim. It reports whether this call won.
+func createExclusive(path string, raw []byte) (bool, error) {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return false, err
+	}
+	tmp, err := os.CreateTemp(dir, ".claim-*")
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = os.Remove(tmp.Name()) }()
+	if _, err := tmp.Write(raw); err != nil {
+		_ = tmp.Close()
+		return false, err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return false, err
+	}
+	if err := tmp.Close(); err != nil {
+		return false, err
+	}
+	if err := os.Link(tmp.Name(), path); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, fsq.SyncDir(dir)
+}
+
+// readSmallRegular reads a small regular file, refusing a symlink leaf.
+func readSmallRegular(path string) ([]byte, error) {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() || fi.Size() > 64*1024 {
+		return nil, fmt.Errorf("%s is not a small regular file; refusing", path)
+	}
+	return os.ReadFile(path)
+}
+
 // follow waits on the endpoint until the request is terminal or uncertain,
 // the client cancels or leaves, or the turn times out.
 func (r *remoteTurn) follow(snap protocol.Snapshot) (any, *rpcError) {
@@ -161,7 +274,7 @@ func (r *remoteTurn) follow(snap protocol.Snapshot) (any, *rpcError) {
 
 	// The goroutine reads only this immutable reference; snap belongs to the
 	// consumer loop below (codex #876 r2 P1 #1).
-	ref, native, timeout := snap.RequestRef, r.s.cfg.RemoteNative, r.s.cfg.HeartbeatInterval.Milliseconds()
+	ref, native, timeout := snap.RequestRef, r.native, r.s.cfg.HeartbeatInterval.Milliseconds()
 	waits := make(chan remoteWait, 1)
 	stop := make(chan struct{})
 	defer close(stop)
@@ -345,7 +458,7 @@ func (r *remoteTurn) get() (protocol.Reply, error) {
 }
 
 func (r *remoteTurn) call(cmd *protocol.Command) (protocol.Reply, error) {
-	resp, err := ipc.Call(r.dir, ipc.Request{Command: cmd, NativeSession: r.s.cfg.RemoteNative})
+	resp, err := ipc.Call(r.dir, ipc.Request{Command: cmd, NativeSession: r.native})
 	if err != nil {
 		return protocol.Reply{}, err
 	}
