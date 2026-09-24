@@ -223,8 +223,9 @@ type Attachment struct {
 	// orphans). Lines past it are preserved for the next poll.
 	stopConsumed int64
 	// boundSession is the session id published for the Stop-hook receiver.
-	// Empty after unsubscribe. The receiver writes a marker only for this
-	// id or the per-user binding.
+	// Empty after unsubscribe. User off does not clear it. The receiver
+	// writes for this id when no binding file is present, or when the
+	// binding names this session.
 	boundSession string
 	// boundToken is this attachment's sentinel file under amq-bound.
 	boundToken string

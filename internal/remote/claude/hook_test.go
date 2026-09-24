@@ -115,8 +115,8 @@ func TestReceiverFailOpen(t *testing.T) {
 }
 
 // TestStopHookBoundSessionStaysSmall is the 611.37 happy path: an unbound
-// turn writes nothing, and a bound session's marker stays small across
-// many turns and is removed when the attachment detaches.
+// turn writes nothing, a bound session's turns append, and the marker is
+// removed when the attachment unsubscribes.
 func TestStopHookBoundSessionStaysSmall(t *testing.T) {
 	if !noFollowSupported {
 		t.Skip("stop hook receiver needs a no-follow open")
@@ -156,6 +156,6 @@ func TestStopHookBoundSessionStaysSmall(t *testing.T) {
 	}
 	att.Subscribe(nil)()
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
-		t.Fatal("detach left the marker file")
+		t.Fatal("unsubscribe left the marker file")
 	}
 }

@@ -64,7 +64,10 @@ const maxSettingsBytes = 4 << 20
 // exist only in memory inside that process
 // (https://code.claude.com/docs/en/hooks). The bound session can live in
 // any project, so the installer keeps this user-level hook. The receiver
-// returns before any write unless that session is attached or bound.
+// returns before any write unless that session is attached or the binding
+// names it. That limits who writes, not how many bytes a session's marker
+// may hold: the file is one appended line per turn, and it is removed when
+// the attachment unsubscribes. User off removes only the Buzz binding.
 func InstallStopHook(home, bin string) error {
 	return mutateStopHook(home, true, bin)
 }
@@ -578,6 +581,9 @@ var sessionIDRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
 // session id is validated before it becomes a path, and the marker is
 // opened no-follow and non-blocking so a symlink or FIFO planted at the
 // leaf is refused rather than followed or waited on (codex #855 r1).
+// Scope limits who may append. It does not cap the file. With no binding
+// file the receiver follows the attachment sentinel, so user off leaves
+// writes in place while that attachment still owns the session.
 func RunStopHookReceiver(home string, stdin io.Reader, stdout io.Writer) int {
 	defer func() { _ = recover() }() // fail-open, unconditionally
 	_ = stdout
@@ -677,8 +683,9 @@ func bindStopSession(home, sessionID string) (string, error) {
 	return token, nil
 }
 
-// unbindStopSession drops one attachment's sentinel. The marker stays while
-// any other attachment still owns the session.
+// unbindStopSession drops one attachment's sentinel when that attachment
+// unsubscribes. The marker stays while any other attachment still owns the
+// session. This is not user off: off removes only the Buzz binding.
 func unbindStopSession(home, sessionID, token string) {
 	if !sessionIDRe.MatchString(sessionID) || !noFollowSupported || token == "" {
 		return
@@ -701,7 +708,8 @@ func removeRegular(path string) {
 // stopSessionAllowed reports whether this Stop may write. A binding file
 // decides on its own: write only when it names this session. Mailbox
 // bindings have no native session, so a stale sentinel must not write.
-// With no binding file, an attached sentinel is enough.
+// With no binding file, an attached sentinel is enough, including after
+// user off while the endpoint attachment is still subscribed.
 func stopSessionAllowed(home, sessionID string) bool {
 	switch bindingDecision(home, sessionID) {
 	case bindingAllow:
