@@ -321,6 +321,7 @@ func (a *Attachment) pollConfirmations() {
 	if err != nil || reg == nil || reg.SessionID == "" {
 		return
 	}
+	a.trackBoundSession(reg.SessionID)
 	path := transcriptPath(a.home, reg.Cwd, reg.SessionID)
 
 	a.mu.Lock()

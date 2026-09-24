@@ -138,16 +138,21 @@ func Attach(cfg config) (*Attachment, error) {
 	if !protocol.ValidTargetID(target) {
 		return nil, fmt.Errorf("claude adapter: derived target id %q is not protocol-addressable (opaque grammar); set an explicit target in the manifest", target)
 	}
-	return &Attachment{
+	att := &Attachment{
 		target:       target,
 		cfg:          cfg,
 		home:         home,
+		boundSession: reg.SessionID,
 		runs:         map[requests.Key]*runRecord{},
 		cancelIntent: map[requests.Key]bool{},
 		recoverFrom:  map[requests.Key]recoverScan{},
 		released:     map[requests.Key]struct{}{},
 		ctx:          context.Background(),
-	}, nil
+	}
+	if err := bindStopSession(home, reg.SessionID); err != nil && !errors.Is(err, errUnsupportedPlatform) {
+		return nil, fmt.Errorf("claude adapter: %w", err)
+	}
+	return att, nil
 }
 
 // deriveTarget prefers the registry name when it is protocol-valid; the
@@ -215,6 +220,10 @@ type Attachment struct {
 	// to which marker lines are settled (matched to a run or dropped as
 	// orphans). Lines past it are preserved for the next poll.
 	stopConsumed int64
+	// boundSession is the session id published for the Stop-hook receiver.
+	// Empty after unsubscribe. The receiver writes a marker only for this
+	// id or the per-user binding.
+	boundSession string
 	// cur is the poller's transcript position; owner is the run that owns
 	// the turn the cursor is inside, nil for a foreign or unknown turn.
 	cur   transcriptCursor
@@ -334,6 +343,23 @@ func (a *Attachment) observe() (string, string) {
 
 func (a *Attachment) now() time.Time { return time.Now() }
 
+// trackBoundSession publishes sessionID for the Stop-hook receiver when the
+// live registry session changes. File IO stays under a.mu: the files are
+// tiny and the unsubscribe path clears the same field under that lock.
+func (a *Attachment) trackBoundSession(sessionID string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.closed || a.boundSession == sessionID {
+		return
+	}
+	prev := a.boundSession
+	a.boundSession = sessionID
+	if prev != "" {
+		unbindStopSession(a.home, prev)
+	}
+	_ = bindStopSession(a.home, sessionID)
+}
+
 // Submit implements core.Attachment. PR1 refuses before ANY side effect:
 // the endpoint gates on Capabilities.Submit=false before dispatch reaches
 // the adapter (internal/remote/core/endpoint.go), so this is the second,
@@ -400,9 +426,14 @@ func (a *Attachment) Subscribe(cb func(core.NativeEvent)) func() {
 		a.mu.Lock()
 		a.eventSink = nil
 		a.closed = true
+		sid := a.boundSession
+		a.boundSession = ""
 		stop := a.confirmCancel
 		a.confirmCancel = nil
 		a.mu.Unlock()
+		if sid != "" {
+			unbindStopSession(a.home, sid)
+		}
 		if stop != nil {
 			stop()
 		}

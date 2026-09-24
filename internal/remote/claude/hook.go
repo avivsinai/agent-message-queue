@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 )
 
 // Stop-hook bridge (bead 611.12 PR2): the hook is how the adapter learns a
@@ -57,6 +58,13 @@ const maxSettingsBytes = 4 << 20
 // marker exists the file is left untouched. The settings leaf must be a
 // regular file (lstat rule — a directory or symlink is refused); the write
 // is fsq atomic-replace.
+//
+// Claude Code's durable hook scopes are the user, project, local, and
+// managed settings files. None of them is a single session: session hooks
+// exist only in memory inside that process
+// (https://code.claude.com/docs/en/hooks). The bound session can live in
+// any project, so the installer keeps this user-level hook. The receiver
+// returns before any write unless that session is attached or bound.
 func InstallStopHook(home, bin string) error {
 	return mutateStopHook(home, true, bin)
 }
@@ -587,6 +595,11 @@ func RunStopHookReceiver(home string, stdin io.Reader, stdout io.Writer) int {
 	if !sessionIDRe.MatchString(payload.SessionID) {
 		return 0
 	}
+	// An unbound session writes nothing. The check is before the marker
+	// directory is created (bead 611.37).
+	if !stopSessionAllowed(home, payload.SessionID) {
+		return 0
+	}
 	marker := stopMarkerPath(home, payload.SessionID)
 	dir := filepath.Dir(marker)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -620,6 +633,13 @@ func RunStopHookReceiver(home string, stdin io.Reader, stdout io.Writer) int {
 	if !os.SameFile(pre, post) {
 		return 0
 	}
+	// One session's marker stays a short tail. The poller already treats a
+	// file that shrank as rotated and reads from the start.
+	if post.Size() >= maxStopMarkerKeep {
+		if err := f.Truncate(0); err != nil {
+			return 0
+		}
+	}
 	line, err := json.Marshal(map[string]any{"ts": time.Now().UnixMilli(), "session_id": payload.SessionID})
 	if err != nil {
 		return 0
@@ -631,3 +651,99 @@ func RunStopHookReceiver(home string, stdin io.Reader, stdout io.Writer) int {
 func stopMarkerPath(home, sessionID string) string {
 	return filepath.Join(claudeSessionsDir(home), "amq-stop", sessionID+".jsonl")
 }
+
+// maxStopMarkerKeep is the size at which the receiver truncates a session's
+// marker before appending. A line is about 60 bytes, so this keeps roughly
+// a hundred turns and then one fresh line.
+const maxStopMarkerKeep = 8 << 10
+
+func stopBoundPath(home, sessionID string) string {
+	return filepath.Join(claudeSessionsDir(home), "amq-bound", sessionID)
+}
+
+// bindStopSession records that this Claude session is an attached target,
+// so its Stop hook may write a marker. Idempotent.
+func bindStopSession(home, sessionID string) error {
+	if !sessionIDRe.MatchString(sessionID) {
+		return fmt.Errorf("stop session %q is not a file-safe id", sessionID)
+	}
+	if !noFollowSupported {
+		return errUnsupportedPlatform
+	}
+	path := stopBoundPath(home, sessionID)
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	if fi, err := os.Lstat(dir); err != nil || !fi.IsDir() {
+		return fmt.Errorf("stop bound dir %s is not a plain directory", dir)
+	}
+	if pre, err := os.Lstat(path); err == nil {
+		if !pre.Mode().IsRegular() {
+			return fmt.Errorf("stop bound %s is not a regular file", path)
+		}
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_EXCL|openNoFollowFlag, 0o600)
+	if err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return nil
+		}
+		return err
+	}
+	return f.Close()
+}
+
+// unbindStopSession drops the attached-session record and that session's
+// marker file. A non-regular leaf is left in place.
+func unbindStopSession(home, sessionID string) {
+	if !sessionIDRe.MatchString(sessionID) || !noFollowSupported {
+		return
+	}
+	removeRegular(stopBoundPath(home, sessionID))
+	removeRegular(stopMarkerPath(home, sessionID))
+}
+
+func removeRegular(path string) {
+	fi, err := os.Lstat(path)
+	if err != nil || !fi.Mode().IsRegular() {
+		return
+	}
+	_ = os.Remove(path)
+}
+
+// stopSessionAllowed is true when sessionID is the attached target recorded
+// by bindStopSession, or the native session in the per-user binding.
+func stopSessionAllowed(home, sessionID string) bool {
+	if boundNativeSession(home) == sessionID {
+		return true
+	}
+	fi, err := os.Lstat(stopBoundPath(home, sessionID))
+	return err == nil && fi.Mode().IsRegular()
+}
+
+// boundNativeSession reads native_session from the binding file. The hook
+// process has only the Claude home, so an unset AMQ_REMOTE_BINDING resolves
+// under that home, not a second UserHomeDir lookup.
+func boundNativeSession(home string) string {
+	path := filepath.Join(home, ".amq", "remote", "binding.json")
+	if p := strings.TrimSpace(os.Getenv(binding.EnvPath)); p != "" && filepath.IsAbs(p) {
+		path = filepath.Clean(p)
+	}
+	raw, err := readRegularBounded(path, bindingMaxBytes)
+	if err != nil {
+		return ""
+	}
+	var b struct {
+		NativeSession string `json:"native_session"`
+	}
+	if json.Unmarshal(raw, &b) != nil || !sessionIDRe.MatchString(b.NativeSession) {
+		return ""
+	}
+	return b.NativeSession
+}
+
+// bindingMaxBytes matches the binding package's read bound.
+const bindingMaxBytes = 64 << 10
