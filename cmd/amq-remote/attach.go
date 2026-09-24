@@ -37,11 +37,16 @@ func attach(args []string, stdout, stderr io.Writer) (int, error) {
 	fs.SetOutput(io.Discard)
 	c := addCommon(fs)
 	self := fs.Bool("self", false, "bind the session this command runs in")
+	nativeMode := fs.Bool("native", false, "drive the exact native session through amq-remote, not the AMQ mailbox")
+	me := fs.String("me", os.Getenv("AM_ME"), "AMQ handle of this session (default AM_ME)")
 	if err := fs.Parse(args); err != nil {
 		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", err)
 	}
 	if !*self {
 		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "attach needs --self")
+	}
+	if !*nativeMode {
+		return attachMailbox(c.root, strings.TrimSpace(*me), stdout)
 	}
 	stateDir, err := c.stateDir()
 	if err != nil {
@@ -90,6 +95,28 @@ func attach(args []string, stdout, stderr io.Writer) (int, error) {
 	return 0, nil
 }
 
+// attachMailbox binds the Buzz agent to this session's AMQ handle (bead
+// agent-message-queue-611.36). Each DM becomes an AMQ message to the handle;
+// no endpoint, hook, or wake is required, because noticing the message is
+// the handle owner's business.
+func attachMailbox(root, handle string, stdout io.Writer) (int, error) {
+	if root == "" || handle == "" {
+		return protocol.ExitActionRequired, errors.New("this session is not an AMQ participant (AM_ROOT and AM_ME are unset); join AMQ, or use attach --self --native")
+	}
+	if !filepath.IsAbs(root) {
+		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "--root must be absolute")
+	}
+	if fi, err := os.Stat(root); err != nil || !fi.IsDir() {
+		return protocol.ExitActionRequired, fmt.Errorf("AMQ root %s is not a directory", root)
+	}
+	b := binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: handle, Display: handle}
+	if err := binding.Write(b); err != nil {
+		return protocol.ExitActionRequired, err
+	}
+	say(stdout, "Connected: AMQ handle %s at %s. DM your AMQ Remote agent from Buzz.", handle, root)
+	return 0, nil
+}
+
 // detach ends the binding. With --self it unbinds only when the binding
 // names this session, so one session's off never unbinds another.
 func detach(args []string, stdout, stderr io.Writer) (int, error) {
@@ -101,7 +128,19 @@ func detach(args []string, stdout, stderr io.Writer) (int, error) {
 		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", err)
 	}
 	var match func(binding.Binding) bool
-	if *self {
+	if *self && os.Getenv("AM_ME") != "" && c.root != "" {
+		mine := binding.Binding{Carrier: binding.CarrierMailbox, Root: c.root, Handle: strings.TrimSpace(os.Getenv("AM_ME"))}
+		native := func(binding.Binding) bool { return false }
+		if stateDir, err := c.stateDir(); err == nil {
+			if cand, err := selfCandidate(c.root, stateDir); err == nil {
+				if id, err := selfNativeSession(cand); err == nil {
+					nb := binding.Binding{Root: c.root, Target: cand.Target, NativeSession: id}
+					native = nb.Same
+				}
+			}
+		}
+		match = func(b binding.Binding) bool { return mine.Same(b) || native(b) }
+	} else if *self {
 		stateDir, err := c.stateDir()
 		if err != nil {
 			return protocol.ExitUsage, err

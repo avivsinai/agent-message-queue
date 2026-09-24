@@ -185,7 +185,17 @@ can pin it; the identity is not part of the session schema.
 With `AMQ_ACP_REMOTE=binding`, the harness environment names no root, target
 or pin. Each prompt reads the binding that `amq-remote attach --self` wrote
 in the session the owner chose (`~/.amq/remote/binding.json`, or
-`$AMQ_REMOTE_BINDING`), and submits there with that binding's native pin.
+`$AMQ_REMOTE_BINDING`).
+
+- A mailbox binding (the default) delivers the prompt as an AMQ message from
+  `buzz` to the bound handle, then waits for a reply that refs it. A `status`
+  reply is progress; any other reply is the final answer. The first delivery
+  of an event claims one message id, and a redelivery reuses it and publishes
+  only if the message is absent. Progress shows "Delivered", then "Read by"
+  (the handle's drained receipt), then the reply. Stop ends the wait and says
+  the message stays in the inbox; it is never recalled.
+- A native binding (`attach --self --native`) submits there with that
+  binding's native pin.
 With no binding, the agent answers "Not connected. Run /amq-remote in a
 Claude Code or Codex session." A request keeps the binding it started with;
 a later attach moves only new prompts. `session/new` advertises the one

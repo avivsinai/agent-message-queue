@@ -1,0 +1,135 @@
+package acp
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/avivsinai/agent-message-queue/internal/format"
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
+)
+
+// mailboxServer binds a binding-mode server to handle "agent" on a fresh
+// queue root.
+func mailboxServer(t *testing.T) (*Server, string) {
+	t.Helper()
+	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
+	root := canonicalTempDir(t)
+	if err := binding.Write(binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: "agent"}); err != nil {
+		t.Fatal(err)
+	}
+	return NewServer(Config{RemoteBinding: true, StateDir: canonicalTempDir(t), TurnTimeout: 2 * time.Second, PollInterval: 5 * time.Millisecond, HeartbeatInterval: 20 * time.Millisecond}, "test"), root
+}
+
+// inboxPrompts lists the prompt ids in the agent's inbox (new and cur).
+func inboxPrompts(t *testing.T, root string) []string {
+	t.Helper()
+	var ids []string
+	for _, dir := range []string{fsq.AgentInboxNew(root, "agent"), fsq.AgentInboxCur(root, "agent")} {
+		entries, _ := os.ReadDir(dir)
+		for _, e := range entries {
+			ids = append(ids, strings.TrimSuffix(e.Name(), ".md"))
+		}
+	}
+	return ids
+}
+
+// replyAs delivers a reply from the agent to buzz that refs prompt.
+func replyAs(t *testing.T, root, thread, prompt, kind, body string) {
+	t.Helper()
+	cfg := Config{Root: root, Me: mailboxSender, To: "agent"}
+	now := time.Now()
+	id, _ := format.NewMessageID(now)
+	msg := format.Message{Header: format.Header{Schema: format.CurrentSchema, ID: id, From: "agent", To: []string{mailboxSender}, Thread: thread, Subject: "re", Created: now.UTC().Format(time.RFC3339Nano), Kind: kind, Refs: []string{prompt}}, Body: body}
+	data, err := msg.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, _ := fsq.SnapshotDeliveryRoot(cfg.Root)
+	dr, err := fsq.OpenDeliveryRoot(cfg.Root, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = dr.Close() }()
+	if _, err := fsq.DeliverToInboxes(dr, []string{mailboxSender}, id+".md", data); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Bead agent-message-queue-611.36: a mailbox binding delivers the DM to the
+// handle and ends the turn on its final reply. A status reply is progress
+// and does not end the turn (codex 611.36 research, final-answer gap).
+func TestMailboxBindingDeliversAndEndsOnTheFinalReply(t *testing.T) {
+	s, root := mailboxServer(t)
+	var thoughts []string
+	replied := false
+	result, rpcErr := s.runRemote("s", "say hi", strings.Repeat("1", 64), newTurn(), func(v any) error {
+		note := v.(sessionUpdateNotification)
+		if note.Params.Update.SessionUpdate == "agent_thought_chunk" {
+			thoughts = append(thoughts, note.Params.Update.Content.Text)
+		}
+		if !replied {
+			if ids := inboxPrompts(t, root); len(ids) == 1 {
+				replied = true
+				replyAs(t, root, cockpitThread("session/s"), ids[0], format.KindStatus, "working on it")
+				replyAs(t, root, cockpitThread("session/s"), ids[0], format.KindAnswer, "hi from the agent")
+			}
+		}
+		return nil
+	})
+	if rpcErr != nil {
+		t.Fatal(rpcErr)
+	}
+	got := result.(remotePromptResult)
+	if got.StopReason != StopReasonEndTurn || !strings.Contains(strings.Join(thoughts, "|"), "agent: working on it") {
+		t.Fatalf("result=%+v thoughts=%q", got, thoughts)
+	}
+}
+
+// Codex 611.36 research, replay gap: a redelivered event published a second
+// message. It must reuse the first delivery's message.
+func TestMailboxRedeliveryPublishesOnce(t *testing.T) {
+	s, root := mailboxServer(t)
+	s.cfg.TurnTimeout = 50 * time.Millisecond
+	eventID := strings.Repeat("2", 64)
+	for range 2 {
+		if _, rpcErr := s.runRemote("s", "say hi", eventID, newTurn(), func(any) error { return nil }); rpcErr != nil {
+			t.Fatal(rpcErr)
+		}
+	}
+	if ids := inboxPrompts(t, root); len(ids) != 1 {
+		t.Fatalf("inbox holds %d prompts after a redelivery; want 1", len(ids))
+	}
+}
+
+// Codex 611.36 research, honest stop: a cancel says the message stays and
+// may still run, and the message is not recalled.
+func TestMailboxCancelSaysTheMessageStays(t *testing.T) {
+	s, root := mailboxServer(t)
+	turn := newTurn()
+	var said []string
+	result, rpcErr := s.runRemote("s", "say hi", strings.Repeat("3", 64), turn, func(v any) error {
+		note := v.(sessionUpdateNotification)
+		if note.Params.Update.SessionUpdate == "agent_message_chunk" {
+			said = append(said, note.Params.Update.Content.Text)
+		}
+		s.mu.Lock()
+		if turn.settleLocked("session_cancelled") {
+			close(turn.done)
+		}
+		s.mu.Unlock()
+		return nil
+	})
+	if rpcErr != nil {
+		t.Fatal(rpcErr)
+	}
+	if got := result.(remotePromptResult); got.StopReason != StopReasonCancelled || len(said) != 1 || !strings.Contains(said[0], "may still act") {
+		t.Fatalf("result=%+v said=%q", got, said)
+	}
+	if ids := inboxPrompts(t, root); len(ids) != 1 {
+		t.Fatalf("inbox holds %d prompts; a cancel must not recall the message", len(ids))
+	}
+}
