@@ -52,6 +52,11 @@ func TestFIFOLeavesNeverBlock(t *testing.T) {
 	if err := syscall.Mkfifo(marker, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// The receiver opens the marker only for an attached session. Bind
+	// first so this still reaches the FIFO refusal (bead 611.37).
+	if _, err := bindStopSession(home, "s9"); err != nil {
+		t.Fatal(err)
+	}
 	done := make(chan error, 1)
 	go func() {
 		_, err := readPeerToken(home, 9, sock)

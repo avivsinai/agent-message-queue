@@ -103,16 +103,59 @@ func TestReceiverFailOpen(t *testing.T) {
 	if code := RunStopHookReceiver(home, strings.NewReader(`{"hook_event_name":"Stop"}`), os.Stderr); code != 0 {
 		t.Fatalf("missing session exit = %d, want 0 (fail-open)", code)
 	}
-	// A well-formed payload appends the marker.
+	// A well-formed payload for a session that is not attached or bound
+	// still exits 0 and writes nothing (bead 611.37).
 	payload, _ := json.Marshal(StopHookPayload{SessionID: "sess-abc", HookEventName: "Stop"})
 	if code := RunStopHookReceiver(home, strings.NewReader(string(payload)), os.Stderr); code != 0 {
-		t.Fatalf("good payload exit = %d, want 0", code)
+		t.Fatalf("unbound payload exit = %d, want 0", code)
 	}
-	raw, err := os.ReadFile(stopMarkerPath(home, "sess-abc"))
+	if _, err := os.Stat(stopMarkerPath(home, "sess-abc")); !os.IsNotExist(err) {
+		t.Fatal("unbound session wrote a marker")
+	}
+}
+
+// TestStopHookBoundSessionStaysSmall is the 611.37 happy path: an unbound
+// turn writes nothing, a bound session's turns append, and the marker is
+// removed when the attachment unsubscribes.
+func TestStopHookBoundSessionStaysSmall(t *testing.T) {
+	if !noFollowSupported {
+		t.Skip("stop hook receiver needs a no-follow open")
+	}
+	const sid = "sess-bound"
+	home := tempHome(t, 7, &sessionRegistry{Pid: 7, SessionID: sid, Kind: "interactive"})
+	if code := RunStopHookReceiver(home, strings.NewReader(`{"session_id":"sess-other","hook_event_name":"Stop"}`), os.Stderr); code != 0 {
+		t.Fatalf("unbound exit = %d, want 0", code)
+	}
+	if _, err := os.Stat(stopMarkerPath(home, "sess-other")); !os.IsNotExist(err) {
+		t.Fatal("unbound session wrote a marker")
+	}
+	att, err := Attach(config{Pid: 7, Home: home, Target: "cc-bound"})
 	if err != nil {
-		t.Fatalf("marker not written: %v", err)
+		t.Fatal(err)
 	}
-	if !strings.Contains(string(raw), `"session_id":"sess-abc"`) {
-		t.Fatalf("marker line wrong: %q", raw)
+	payload := `{"session_id":"` + sid + `","hook_event_name":"Stop"}`
+	for range 300 {
+		if code := RunStopHookReceiver(home, strings.NewReader(payload), os.Stderr); code != 0 {
+			t.Fatalf("bound exit = %d, want 0", code)
+		}
+	}
+	marker := stopMarkerPath(home, sid)
+	fi, err := os.Stat(marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Size() == 0 {
+		t.Fatal("bound session wrote an empty marker")
+	}
+	raw, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), sid) {
+		t.Fatalf("marker missing session: %q", raw)
+	}
+	att.Subscribe(nil)()
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatal("unsubscribe left the marker file")
 	}
 }

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 )
 
 // Stop-hook bridge (bead 611.12 PR2): the hook is how the adapter learns a
@@ -57,6 +58,16 @@ const maxSettingsBytes = 4 << 20
 // marker exists the file is left untouched. The settings leaf must be a
 // regular file (lstat rule — a directory or symlink is refused); the write
 // is fsq atomic-replace.
+//
+// Claude Code's durable hook scopes are the user, project, local, and
+// managed settings files. None of them is a single session: session hooks
+// exist only in memory inside that process
+// (https://code.claude.com/docs/en/hooks). The bound session can live in
+// any project, so the installer keeps this user-level hook. The receiver
+// returns before any write unless that session is attached or the binding
+// names it. That limits who writes, not how many bytes a session's marker
+// may hold: the file is one appended line per turn, and it is removed when
+// the attachment unsubscribes. User off removes only the Buzz binding.
 func InstallStopHook(home, bin string) error {
 	return mutateStopHook(home, true, bin)
 }
@@ -570,6 +581,9 @@ var sessionIDRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
 // session id is validated before it becomes a path, and the marker is
 // opened no-follow and non-blocking so a symlink or FIFO planted at the
 // leaf is refused rather than followed or waited on (codex #855 r1).
+// Scope limits who may append. It does not cap the file. With no binding
+// file the receiver follows the attachment sentinel, so user off leaves
+// writes in place while that attachment still owns the session.
 func RunStopHookReceiver(home string, stdin io.Reader, stdout io.Writer) int {
 	defer func() { _ = recover() }() // fail-open, unconditionally
 	_ = stdout
@@ -585,6 +599,11 @@ func RunStopHookReceiver(home string, stdin io.Reader, stdout io.Writer) int {
 		return 0
 	}
 	if !sessionIDRe.MatchString(payload.SessionID) {
+		return 0
+	}
+	// An unbound session writes nothing. The check is before the marker
+	// directory is created (bead 611.37).
+	if !stopSessionAllowed(home, payload.SessionID) {
 		return 0
 	}
 	marker := stopMarkerPath(home, payload.SessionID)
@@ -631,3 +650,118 @@ func RunStopHookReceiver(home string, stdin io.Reader, stdout io.Writer) int {
 func stopMarkerPath(home, sessionID string) string {
 	return filepath.Join(claudeSessionsDir(home), "amq-stop", sessionID+".jsonl")
 }
+
+func stopBoundDir(home, sessionID string) string {
+	return filepath.Join(claudeSessionsDir(home), "amq-bound", sessionID)
+}
+
+// bindStopSession records one attachment's ownership of this session.
+// Each attachment gets its own sentinel file, so one attachment's cleanup
+// cannot drop a replacement that still owns the session.
+func bindStopSession(home, sessionID string) (string, error) {
+	if !sessionIDRe.MatchString(sessionID) {
+		return "", fmt.Errorf("stop session %q is not a file-safe id", sessionID)
+	}
+	if !noFollowSupported {
+		return "", errUnsupportedPlatform
+	}
+	dir := stopBoundDir(home, sessionID)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	if fi, err := os.Lstat(dir); err != nil || !fi.IsDir() {
+		return "", fmt.Errorf("stop bound dir %s is not a plain directory", dir)
+	}
+	f, err := os.CreateTemp(dir, "owner-")
+	if err != nil {
+		return "", err
+	}
+	token := filepath.Base(f.Name())
+	if err := f.Close(); err != nil {
+		return "", err
+	}
+	return token, nil
+}
+
+// unbindStopSession drops one attachment's sentinel when that attachment
+// unsubscribes. The marker stays while any other attachment still owns the
+// session. This is not user off: off removes only the Buzz binding.
+func unbindStopSession(home, sessionID, token string) {
+	if !sessionIDRe.MatchString(sessionID) || !noFollowSupported || token == "" {
+		return
+	}
+	removeRegular(filepath.Join(stopBoundDir(home, sessionID), token))
+	if stopSentinelPresent(home, sessionID) {
+		return
+	}
+	removeRegular(stopMarkerPath(home, sessionID))
+}
+
+func removeRegular(path string) {
+	fi, err := os.Lstat(path)
+	if err != nil || !fi.Mode().IsRegular() {
+		return
+	}
+	_ = os.Remove(path)
+}
+
+// stopSessionAllowed reports whether this Stop may write. A binding file
+// decides on its own: write only when it names this session. Mailbox
+// bindings have no native session, so a stale sentinel must not write.
+// With no binding file, an attached sentinel is enough, including after
+// user off while the endpoint attachment is still subscribed.
+func stopSessionAllowed(home, sessionID string) bool {
+	switch bindingDecision(home, sessionID) {
+	case bindingAllow:
+		return true
+	case bindingDeny:
+		return false
+	default:
+		return stopSentinelPresent(home, sessionID)
+	}
+}
+
+func stopSentinelPresent(home, sessionID string) bool {
+	entries, err := os.ReadDir(stopBoundDir(home, sessionID))
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if e.Type().IsRegular() {
+			return true
+		}
+	}
+	return false
+}
+
+const (
+	bindingAbsent = iota
+	bindingAllow
+	bindingDeny
+)
+
+// bindingDecision reads the per-user binding. The hook process has only the
+// Claude home, so an unset AMQ_REMOTE_BINDING resolves under that home.
+func bindingDecision(home, sessionID string) int {
+	path := filepath.Join(home, ".amq", "remote", "binding.json")
+	if p := strings.TrimSpace(os.Getenv(binding.EnvPath)); p != "" && filepath.IsAbs(p) {
+		path = filepath.Clean(p)
+	}
+	raw, err := readRegularBounded(path, bindingMaxBytes)
+	if errors.Is(err, os.ErrNotExist) {
+		return bindingAbsent
+	}
+	if err != nil {
+		return bindingDeny
+	}
+	var b struct {
+		NativeSession string `json:"native_session"`
+	}
+	if json.Unmarshal(raw, &b) != nil || b.NativeSession != sessionID {
+		return bindingDeny
+	}
+	return bindingAllow
+}
+
+// bindingMaxBytes matches the binding package's read bound.
+const bindingMaxBytes = 64 << 10
