@@ -92,7 +92,27 @@ invariants.
   decided from native evidence and the durable record alone, and a
   divergence in the projection never authorises a dispatch or a cancel.
 
-### Cross-host delivery
+### Carriers
+
+The default carrier is the AMQ mailbox. `/amq-remote` binds this session's
+AMQ handle. A Buzz direct message arrives as an AMQ message from `buzz`, and
+the agent's `amq reply` is the answer that `amq-acp` posts into that
+DM. No wake and no Stop hook are required.
+
+`--native` drives the exact native session through `amq-remote`. Claude needs
+the Stop hook on that path.
+
+One Buzz agent serves one session. A named binding selects it: the ACP model
+id is `amq-remote:<name>`.
+
+The relay below — `share`, a body key, and per-kind grants — is an advanced
+path. It is not how a session is connected.
+
+The Desktop grant is broad and does not expire. Archiving the agent in
+Desktop does not invalidate a copied key and grant; only removing its relay
+access does. An owner-only audience also admits the owner's other agents.
+
+### Advanced relay
 
 `amq-bridge` gains a courier class, `buzz-relay`. The existing signed
 envelope is sealed with NIP-44 v2 to the peer host's body key, gift-wrapped,
@@ -104,9 +124,9 @@ and its routing authority do not change.
 
 ### Buzz surfaces
 
-The companion holds one owned body key per shared session or host. The human
-owner attests the key with a NIP-OA `auth` tag signed from their own Buzz
-identity. Activity is published as NIP-AO kind 24200 observer frames.
+On the advanced relay, the companion holds one owned body key per shared
+session or host. The human owner attests the key with a NIP-OA `auth` tag
+signed from their own Buzz identity. Activity is published as NIP-AO kind 24200 observer frames.
 Assistant text is an `acp_read` frame whose payload is a genuine ACP
 `session/update` line, with projection provenance in that line's extension
 metadata. `session_resolved`, `turn_started`, and `turn_completed` use the
@@ -138,10 +158,12 @@ separate process beside `amq`, as `amq-keepalive` and `amq-bridge` do.
   the Amit adapter's evidence class is `submitted`, never `admitted`, and it
   leaves a record `uncertain` rather than `rejected` when it retains nothing.
   Off-box export of Amit session content is gated by Amit's own privacy ruling.
-- The design permits Claude Code inspect and weak-evidence submit only. This
-  is design intent, not a verified submit capability; see the
-  [compatibility manifest](remote-compat.md). It has no interrupt seam without
-  keystrokes.
+- Claude Code has no supported exact-turn interrupt for an independently
+  running interactive session. The mailbox carrier does not use one: the
+  agent's reply is the answer. Native submit into Claude is live-verified;
+  its completion needs the Stop hook; cancel is unsupported. See the
+  [compatibility manifest](remote-compat.md). A session-wide abort is not
+  exact cancellation.
 - The request contract does not include terminal viewing or native Buzz
   Desktop panels.
 - The Claude Code cross-session socket wire format is not published upstream;

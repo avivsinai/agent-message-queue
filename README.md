@@ -101,8 +101,9 @@ wake. The recipient can still get them with `amq drain --include-body`.
 ### Control a session from Buzz
 
 Inside a running Claude Code or Codex session, type `/amq-remote`. The first
-time, it asks you to import one agent into Buzz Desktop. Then DM **AMQ Remote**
-from the Buzz app or Desktop, and the DM runs in that session.
+time, import that session's agent into Buzz Desktop. Each session has its own
+agent; the ACP model `amq-remote:<name>` selects it. DM that agent from the
+Buzz app or Desktop, and the DM runs in that session.
 `/amq-remote off` disconnects it. See [amq-remote](cmd/amq-remote/README.md).
 
 <a id="messaging"></a>
@@ -152,11 +153,12 @@ each host keeps control of its own queue.
 
 ### Remote
 
-The optional [remote companion](cmd/amq-remote/README.md) attaches to a
-harness session that is already running. It is a separate binary: `amq` gains
-no socket, and Homebrew does not install it. It can share a target with its
-owner over a Buzz relay (DM commands, Desktop presence). Commands,
-flags, and exit codes are in that README. The design is
+The optional [remote companion](cmd/amq-remote/README.md) connects a running
+session to its own Buzz agent. The default path is the session mailbox: a DM
+arrives as an AMQ message from `buzz`, and the agent's reply is the answer.
+`--native` and the relay are the other paths. It is a separate binary: `amq`
+gains no socket. The Homebrew `amq` formula installs `amq`, `amq-acp`, and
+`amq-remote`. Commands, flags, and exit codes are in that README. The design is
 [the remote-control ADR](docs/adr-remote-control.md); pinned seams are
 [the compatibility manifest](docs/remote-compat.md).
 
