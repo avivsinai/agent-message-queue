@@ -238,8 +238,16 @@ func OpenReadOnly(stateDir string) (*Store, error) {
 // Close releases the owner lock and marks the store closed. Every mutation
 // after Close refuses with store_closed, so a stale reference cannot write
 // once ownership has moved on. The records stay on disk.
+//
+// The owner lock is released only after s.mu is held. A settlement writer
+// that already passed its closed check (agent-message-queue-859) still holds
+// s.mu through the durable write, so that write finishes before a replacement
+// Open can take ownership. A writer that has not entered the mutex yet sees
+// closed and refuses.
 func (s *Store) Close() error {
 	s.closed.Store(true)
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.lock == nil {
 		return nil
 	}
@@ -705,9 +713,10 @@ func (s *Store) CompactOne(key Key, before time.Time) (bool, error) {
 }
 
 // checkClosed refuses every mutation on a closed store. Close sets closed
-// before releasing the owner lock, so a stale reference cannot write after a
-// replacement endpoint has taken ownership. Reads (Get/List) are still
-// permitted on a closed store for diagnosis.
+// and then waits for s.mu before releasing the owner lock, so a writer that
+// already passed this check finishes its durable write before a replacement
+// owner can open, and a writer that has not entered s.mu yet refuses.
+// Reads (Get/List) are still permitted on a closed store for diagnosis.
 func (s *Store) checkClosed() error {
 	if s.closed.Load() {
 		return protocol.Refuse(protocol.CodeStoreClosed, "store is closed")
