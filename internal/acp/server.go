@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
+	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"github.com/avivsinai/agent-message-queue/internal/thread"
 )
 
@@ -143,6 +144,11 @@ type Server struct {
 
 // NewServer builds a server bound to one already authenticated routing context.
 func NewServer(cfg Config, version string) *Server {
+	if cfg.StateDir == "" && cfg.RemoteBinding {
+		if path, err := binding.Path(); err == nil {
+			cfg.StateDir = filepath.Join(filepath.Dir(path), "acp")
+		}
+	}
 	if cfg.StateDir == "" {
 		cfg.StateDir = filepath.Join(cfg.Root, "meta", "acp")
 	}
@@ -337,8 +343,8 @@ func (s *Server) dispatchWithNotify(method string, params json.RawMessage, emit 
 	case "session/set_model":
 		return s.setModel(params)
 	case "_session/steering":
-		if s.cfg.RemoteTarget != "" {
-			return nil, newRPCError(codeMethodNotFound, "steering is not supported for amq-remote target %q", s.cfg.RemoteTarget)
+		if s.remote() {
+			return nil, newRPCError(codeMethodNotFound, "steering is not supported in amq-remote mode")
 		}
 		return s.steering(params)
 	default:
@@ -418,7 +424,7 @@ func (s *Server) initialize(params json.RawMessage) (any, *rpcError) {
 			Version: s.version,
 		},
 		AuthMethods: []any{},
-		Meta:        initializeMeta{Steering: steeringCapability{Supported: s.cfg.RemoteTarget == ""}},
+		Meta:        initializeMeta{Steering: steeringCapability{Supported: !s.remote()}},
 	}, nil
 }
 
@@ -448,8 +454,19 @@ type modelInfo struct {
 	Description string `json:"description"`
 }
 
+// remote reports whether prompts drive an amq-remote target, pinned in the
+// environment or read from the binding on each prompt.
+func (s *Server) remote() bool { return s.cfg.RemoteTarget != "" || s.cfg.RemoteBinding }
+
 // model is the one destination this process delivers to.
 func (s *Server) model() modelInfo {
+	if s.cfg.RemoteBinding {
+		return modelInfo{
+			ModelID:     "amq-remote",
+			Name:        "AMQ Remote (bound session)",
+			Description: "Runs in the session bound by /amq-remote, with that session's own model.",
+		}
+	}
 	if s.cfg.RemoteTarget != "" {
 		return modelInfo{
 			ModelID:     "amq-remote:" + s.cfg.RemoteTarget,
@@ -634,7 +651,7 @@ func (s *Server) beginPrompt(params json.RawMessage) (func(emit func(any) error)
 	}
 	return func(emit func(any) error) (any, *rpcError) {
 		defer s.finishTurn(session, turn)
-		if s.cfg.RemoteTarget != "" {
+		if s.remote() {
 			s.mu.Lock()
 			close(turn.ready)
 			s.mu.Unlock()
