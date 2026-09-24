@@ -9,6 +9,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/lock"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 )
 
@@ -178,5 +179,59 @@ func TestMailboxCancelBeforeDeliveryPublishesNothing(t *testing.T) {
 	}
 	if ids := inboxPrompts(t, root); len(ids) != 0 {
 		t.Fatalf("cancelled before delivery, but the inbox has %d prompt(s)", len(ids))
+	}
+}
+
+// Codex #895 r2 P1: a cancel while the publish lock was held still
+// delivered the prompt once the lock was released.
+func TestMailboxCancelWhilePublishLockHeldPublishesNothing(t *testing.T) {
+	s, root := mailboxServer(t)
+	eventID := strings.Repeat("6", 64)
+	turn := newTurn()
+	lockPath := filepath.Join(s.cfg.StateDir, "remote-events", eventID+".mailbox.lock")
+	claimPath := filepath.Join(s.cfg.StateDir, "remote-events", eventID+".mailbox.json")
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	finished := make(chan *rpcError, 1)
+	if err := lock.WithExclusiveFileLock(lockPath, func() error {
+		go func() {
+			_, rpcErr := s.runRemote("s", "hello", eventID, turn, func(any) error { return nil })
+			finished <- rpcErr
+		}()
+		deadline := time.After(time.Second)
+		for {
+			if _, err := os.Lstat(claimPath); err == nil {
+				break
+			}
+			select {
+			case <-deadline:
+				t.Fatal("claim not created")
+			default:
+				time.Sleep(time.Millisecond)
+			}
+		}
+		if ids := inboxPrompts(t, root); len(ids) != 0 {
+			t.Fatalf("message published while lock held")
+		}
+		s.mu.Lock()
+		if turn.settleLocked("session_cancelled") {
+			close(turn.done)
+		}
+		s.mu.Unlock()
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case rpcErr := <-finished:
+		if rpcErr != nil {
+			t.Fatal(rpcErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("prompt did not finish")
+	}
+	if ids := inboxPrompts(t, root); len(ids) != 0 {
+		t.Fatalf("cancelled before publication, but inbox has %d prompt(s)", len(ids))
 	}
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"io"
 	"os"
@@ -99,7 +100,20 @@ func TestDetachOutsideAMQUsesTheBoundRoot(t *testing.T) {
 	if err := binding.Write(binding.Binding{Root: dir, Target: "claude:7", NativeSession: "session-7"}); err != nil {
 		t.Fatal(err)
 	}
+	// A fixed invoking session, not this machine's ambient one (codex #895
+	// r2: the first version passed only inside a real Claude session).
+	saved := selfIdentity
+	t.Cleanup(func() { selfIdentity = saved })
+	selfIdentity = func(root, _ string) (string, string, error) {
+		if root != dir {
+			t.Errorf("detach resolved self under %q; want the bound root %q", root, dir)
+		}
+		return "claude:7", "session-7", nil
+	}
 	if code, err := detach([]string{"--self"}, io.Discard, io.Discard); code != 0 || err != nil {
 		t.Fatalf("detach outside AMQ: code=%d err=%v", code, err)
+	}
+	if _, err := binding.Read(); !errors.Is(err, binding.ErrNone) {
+		t.Fatalf("binding still present after detach: %v", err)
 	}
 }

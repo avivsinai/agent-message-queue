@@ -57,18 +57,11 @@ func (s *Server) runMailbox(sessionID, text, eventID string, b binding.Binding, 
 
 	// A turn cancelled before delivery delivers nothing (codex #895 P1 #3).
 	if outcome := r.settle(""); outcome == "session_cancelled" || outcome == "client_disconnected" {
-		if outcome == "session_cancelled" && eventID != "" {
-			if err := s.recordEventCancel(eventID); err != nil {
-				return nil, newRPCError(codeInternalError, "record cancel: %v", err)
-			}
-		}
-		r.meta.Reason = outcome
-		stop := StopReasonCancelled
-		if outcome == "client_disconnected" {
-			stop = StopReasonRefusal
-		}
-		return remotePromptResult{StopReason: stop, Meta: remotePromptMeta{Remote: r.meta}}, nil
+		return s.mailboxNotDelivered(r, outcome)
 	}
+	// The turn budget starts before the claim, so a publish-lock wait counts
+	// against it (codex #895 r2 P1).
+	budget := time.Now().Add(s.cfg.TurnTimeout)
 	claim, err := s.mailboxClaim(eventID, threadID)
 	if err != nil {
 		return r.failed(remoteUncertain, err)
@@ -79,7 +72,17 @@ func (s *Server) runMailbox(sessionID, text, eventID string, b binding.Binding, 
 		return nil, newRPCError(codeInternalError, "mailbox claim time: %v", err)
 	}
 	r.meta.RequestRef = claim.MessageID
-	if err := s.publishClaimed(eventID, b, threadID, claim.MessageID, created, text); err != nil {
+	if err := s.publishClaimed(r, budget, b, threadID, claim.MessageID, created, text); err != nil {
+		if errors.Is(err, errStoppedBeforePublish) {
+			return s.mailboxNotDelivered(r, r.settle(""))
+		}
+		if errors.Is(err, lock.ErrStopped) {
+			if outcome := r.settle("reply_timeout"); outcome != "reply_timeout" {
+				return s.mailboxNotDelivered(r, outcome)
+			}
+			r.meta.Reason = "reply_timeout"
+			return r.say("reply_timeout", StopReasonRefusal, fmt.Sprintf("Not delivered to %s: the turn ran out of time before the message could be published.", b.Handle))
+		}
 		return r.failed(remoteUncertain, err)
 	}
 	r.meta.State = DeliveryStateQueued
@@ -87,7 +90,7 @@ func (s *Server) runMailbox(sessionID, text, eventID string, b binding.Binding, 
 		return nil, newRPCError(codeInternalError, "emit ACP session update: %v", err)
 	}
 
-	deadline := time.NewTimer(s.cfg.TurnTimeout)
+	deadline := time.NewTimer(time.Until(budget))
 	defer deadline.Stop()
 	poll := time.NewTicker(s.cfg.PollInterval)
 	defer poll.Stop()
@@ -182,20 +185,59 @@ func (s *Server) mailboxClaim(eventID, threadID string) (mailboxClaim, error) {
 	return claim, nil
 }
 
+// errStoppedBeforePublish means the turn was cancelled or left before the
+// message was published; nothing was delivered.
+var errStoppedBeforePublish = errors.New("stopped before publish")
+
 // publishClaimed publishes an event's claimed message under a per-event
 // lock, so two retries cannot both pass the absence check and publish the
-// same message twice (codex #895 P1 #2).
-func (s *Server) publishClaimed(eventID string, b binding.Binding, threadID, id string, created time.Time, text string) error {
-	if eventID == "" {
+// same message twice (codex #895 P1 #2). The lock wait gives up on cancel,
+// disconnect or the turn budget, and cancellation is checked again once the
+// lock is held, so a cancelled prompt is never published (codex #895 r2 P1).
+func (s *Server) publishClaimed(r *remoteTurn, budget time.Time, b binding.Binding, threadID, id string, created time.Time, text string) error {
+	publish := func() error {
+		if outcome := r.settle(""); outcome == "session_cancelled" || outcome == "client_disconnected" {
+			return errStoppedBeforePublish
+		}
 		return publishOnce(b, threadID, id, created, text)
+	}
+	if r.eventID == "" {
+		return publish()
 	}
 	if !lock.AdvisoryLockAvailable() {
 		return errors.New("refusing to publish a Buzz event without an advisory file lock")
 	}
-	path := filepath.Join(s.cfg.StateDir, "remote-events", eventID+".mailbox.lock")
-	return lock.WithExclusiveFileLock(path, func() error {
-		return publishOnce(b, threadID, id, created, text)
-	})
+	stopped := func() bool {
+		select {
+		case <-r.turn.done:
+			return true
+		default:
+		}
+		return !time.Now().Before(budget)
+	}
+	path := filepath.Join(s.cfg.StateDir, "remote-events", r.eventID+".mailbox.lock")
+	err := lock.WithExclusiveFileLockUntil(path, stopped, publish)
+	if errors.Is(err, lock.ErrStopped) {
+		if outcome := r.settle(""); outcome == "session_cancelled" || outcome == "client_disconnected" {
+			return errStoppedBeforePublish
+		}
+	}
+	return err
+}
+
+// mailboxNotDelivered ends a turn stopped before its message was published:
+// nothing reached the handle, and a cancel is recorded against replay.
+func (s *Server) mailboxNotDelivered(r *remoteTurn, outcome string) (any, *rpcError) {
+	r.meta.Reason = outcome
+	if outcome == "client_disconnected" {
+		return remotePromptResult{StopReason: StopReasonRefusal, Meta: remotePromptMeta{Remote: r.meta}}, nil
+	}
+	if r.eventID != "" {
+		if err := s.recordEventCancel(r.eventID); err != nil {
+			return nil, newRPCError(codeInternalError, "record cancel: %v", err)
+		}
+	}
+	return remotePromptResult{StopReason: StopReasonCancelled, Meta: remotePromptMeta{Remote: r.meta}}, nil
 }
 
 // publishOnce delivers the prompt to the handle unless the claimed message

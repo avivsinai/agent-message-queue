@@ -145,11 +145,9 @@ func detach(args []string, stdout, stderr io.Writer) (int, error) {
 		mine := binding.Binding{Carrier: binding.CarrierMailbox, Root: c.root, Handle: strings.TrimSpace(os.Getenv("AM_ME"))}
 		native := func(binding.Binding) bool { return false }
 		if stateDir, err := c.stateDir(); err == nil {
-			if cand, err := selfCandidate(c.root, stateDir); err == nil {
-				if id, err := selfNativeSession(cand); err == nil {
-					nb := binding.Binding{Root: c.root, Target: cand.Target, NativeSession: id}
-					native = nb.Same
-				}
+			if target, id, err := selfIdentity(c.root, stateDir); err == nil {
+				nb := binding.Binding{Root: c.root, Target: target, NativeSession: id}
+				native = nb.Same
 			}
 		}
 		match = func(b binding.Binding) bool { return mine.Same(b) || native(b) }
@@ -158,15 +156,11 @@ func detach(args []string, stdout, stderr io.Writer) (int, error) {
 		if err != nil {
 			return protocol.ExitUsage, err
 		}
-		cand, err := selfCandidate(c.root, stateDir)
+		target, native, err := selfIdentity(c.root, stateDir)
 		if err != nil {
 			return protocol.ExitActionRequired, err
 		}
-		native, err := selfNativeSession(cand)
-		if err != nil {
-			return protocol.ExitActionRequired, err
-		}
-		mine := binding.Binding{Root: c.root, Target: cand.Target, NativeSession: native}
+		mine := binding.Binding{Root: c.root, Target: target, NativeSession: native}
 		match = mine.Same
 	}
 	removed, err := binding.Remove(match)
@@ -216,6 +210,21 @@ func selfCandidate(root, stateDir string) (registry.Candidate, error) {
 		}
 	}
 	return registry.Candidate{}, errors.New("cannot identify the session this runs in; run it from inside a Claude Code or Codex session")
+}
+
+// selfIdentity is the invoking session's target and native session. It is a
+// variable so detach tests can supply a fixed session instead of the
+// machine's ambient one.
+var selfIdentity = func(root, stateDir string) (string, string, error) {
+	cand, err := selfCandidate(root, stateDir)
+	if err != nil {
+		return "", "", err
+	}
+	native, err := selfNativeSession(cand)
+	if err != nil {
+		return "", "", err
+	}
+	return cand.Target, native, nil
 }
 
 // selfNativeSession resolves the invoking session's native identity without
