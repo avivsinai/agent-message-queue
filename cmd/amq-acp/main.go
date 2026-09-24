@@ -117,8 +117,12 @@ Environment:
   AMQ_ACP_POLL_INTERVAL reply poll interval (default 100ms)
   AMQ_ACP_HEARTBEAT_INTERVAL session/update heartbeat interval (default 15s)
 
-BUZZ_* variables are read only to refuse agents!=1 and non-owner inbound, then
-stripped before any message is written. A lease-based gate that would relax
+BUZZ_* variables are read to refuse agents!=1 and non-owner inbound, then
+stripped from the environment. The managed agent identity (BUZZ_PRIVATE_KEY,
+BUZZ_AUTH_TAG, BUZZ_RELAY_URL) stays in process memory only to post each
+owner-facing answer into its Buzz channel with the buzz CLI
+(AMQ_ACP_BUZZ_CLI, else PATH, else Buzz Desktop's bundled buzz). It never
+enters an AMQ message. A lease-based gate that would relax
 this refusal is tracked in bead agent-message-queue-1xl; upstream Buzz has no
 deployment lease profile today, and this binary does not treat an env string
 as one.

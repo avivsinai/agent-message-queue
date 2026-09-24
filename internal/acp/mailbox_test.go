@@ -251,3 +251,38 @@ func TestMailboxExpiredBudgetPublishesNothing(t *testing.T) {
 		t.Fatalf("the turn budget expired before publish, but the inbox has %d prompt(s)", len(ids))
 	}
 }
+
+// Bead agent-message-queue-611.38 (live test 2026-09-24): the answer ended
+// the ACP turn but never reached the Buzz DM, because buzz-acp does not post
+// ACP answer text. amq-acp posts it into the prompt's channel itself.
+func TestBuzzAnswerIsPostedIntoTheDMChannel(t *testing.T) {
+	s, root := mailboxServer(t)
+	type post struct{ channel, content string }
+	var posts []post
+	saved := postAnswer
+	t.Cleanup(func() { postAnswer = saved })
+	postAnswer = func(channel, content string) error {
+		posts = append(posts, post{channel, content})
+		return nil
+	}
+	prompt := "<context>\nScope: dm\nChannel: DM (#6eff60e4-32ab-48ec-bd3d-f4c97872f370)\n</context>\nhi"
+	turn := newTurn()
+	turn.channel = buzzChannel(prompt)
+	replied := false
+	result, rpcErr := s.runRemote("s", prompt, "", turn, func(any) error {
+		if !replied {
+			if ids := inboxPrompts(t, root); len(ids) == 1 {
+				replied = true
+				replyAs(t, root, cockpitThread("session/s"), ids[0], format.KindAnswer, "hi back")
+			}
+		}
+		return nil
+	})
+	if rpcErr != nil {
+		t.Fatal(rpcErr)
+	}
+	got := result.(remotePromptResult)
+	if len(posts) != 1 || posts[0].channel != "6eff60e4-32ab-48ec-bd3d-f4c97872f370" || posts[0].content != "hi back" || got.Meta.Remote.Posted != "posted" {
+		t.Fatalf("posts=%+v meta=%+v", posts, got.Meta.Remote)
+	}
+}
