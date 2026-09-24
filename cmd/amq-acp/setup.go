@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 )
 
 const setupUsage = `amq-acp setup writes the AMQ Remote Buzz harness and the Desktop import file.
@@ -60,7 +62,8 @@ type agentSnapshotMemory struct {
 func runSetup(args []string) int {
 	flags := flag.NewFlagSet("amq-acp setup", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
-	out := flags.String("out", "", "Import file path (default: ./AMQ Remote.agent.json)")
+	out := flags.String("out", "", "Import file path (default: ./AMQ Remote.agent.json, or ./AMQ <session>.agent.json)")
+	session := flags.String("session", "", "binding name from amq-remote attach; the agent is \"AMQ: <session>\" and drives only that session")
 	flags.Usage = func() { fmt.Fprint(os.Stderr, setupUsage) }
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -82,9 +85,19 @@ func runSetup(args []string) int {
 		fmt.Fprintln(os.Stderr, "amq-acp setup:", err)
 		return exitGeneral
 	}
+	name := strings.TrimSpace(*session)
+	if name != "" {
+		if err := binding.ValidName(name); err != nil {
+			fmt.Fprintln(os.Stderr, "amq-acp setup:", err)
+			return exitUsage
+		}
+	}
 	snapshotPath := *out
 	if snapshotPath == "" {
 		snapshotPath = agentSnapshotName
+		if name != "" {
+			snapshotPath = "AMQ " + name + ".agent.json"
+		}
 	}
 	snapshotPath, err = filepath.Abs(snapshotPath)
 	if err != nil {
@@ -96,7 +109,7 @@ func runSetup(args []string) int {
 		fmt.Fprintln(os.Stderr, "amq-acp setup:", err)
 		return exitGeneral
 	}
-	body, err := remoteSnapshotBody()
+	body, err := remoteSnapshotBody(name)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "amq-acp setup:", err)
 		return exitGeneral
@@ -121,18 +134,25 @@ func remoteHarness(command string) buzzHarness {
 	}
 }
 
-func remoteSnapshotBody() ([]byte, error) {
+// remoteSnapshotBody is the Import file. With a session name the agent is
+// "AMQ: <name>" and its model amq-remote:<name> selects that one binding, so
+// each session has its own Buzz agent (bead agent-message-queue-611.39).
+func remoteSnapshotBody(session string) ([]byte, error) {
+	agentName, model := "AMQ Remote", remoteModelID
+	if session != "" {
+		agentName, model = "AMQ: "+session, remoteModelID+":"+session
+	}
 	body, err := json.MarshalIndent(agentSnapshot{
 		Format:  "buzz-agent-snapshot",
 		Version: 1,
 		Definition: agentSnapshotDefinition{
-			Name:        "AMQ Remote",
+			Name:        agentName,
 			Runtime:     remoteHarnessID,
-			Model:       remoteModelID,
+			Model:       model,
 			Parallelism: 1,
 			RespondTo:   ownerOnlyRespondTo,
 		},
-		Profile: agentSnapshotProfile{DisplayName: "AMQ Remote"},
+		Profile: agentSnapshotProfile{DisplayName: agentName},
 		Memory:  agentSnapshotMemory{Level: "none"},
 	}, "", "  ")
 	if err != nil {

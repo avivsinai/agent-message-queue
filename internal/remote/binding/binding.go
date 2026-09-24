@@ -12,6 +12,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -52,6 +54,8 @@ type Binding struct {
 	NativeSession string `json:"native_session,omitempty"`
 	// Display is human text for replies; never an identity.
 	Display string `json:"display,omitempty"`
+	// Name is the binding's name; it is the file name, not stored in it.
+	Name    string `json:"-"`
 	BoundAt string `json:"bound_at"`
 }
 
@@ -273,4 +277,190 @@ func read(path string) (Binding, error) {
 		return Binding{}, fmt.Errorf("binding %s: %v; run /amq-remote again", path, err)
 	}
 	return b, nil
+}
+
+// Named bindings: one per shared session, so each session has its own Buzz
+// agent (bead agent-message-queue-611.39). They live in a bindings
+// directory beside the legacy single binding file, which still reads as the
+// name "default". All writes share the binding lock.
+
+// LegacyName is the name the single legacy binding file reads as.
+const LegacyName = "default"
+
+var nameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
+
+// ValidName reports whether name can name a binding.
+func ValidName(name string) error {
+	if !nameRe.MatchString(name) {
+		return fmt.Errorf("binding name %q must match [a-z0-9][a-z0-9_-]{0,63}", name)
+	}
+	return nil
+}
+
+// SanitizeName turns free text (a handle and project) into a binding name.
+func SanitizeName(s string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(s) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-', r == '_':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('-')
+		}
+	}
+	out := strings.Trim(b.String(), "-_")
+	if len(out) > 64 {
+		out = strings.Trim(out[:64], "-_")
+	}
+	if out == "" {
+		return LegacyName
+	}
+	return out
+}
+
+// namedDir is the bindings directory, confined like the binding file.
+func namedDir(create bool) (string, error) {
+	path, err := confinedPath(create)
+	if err != nil {
+		return "", err
+	}
+	dir := filepath.Join(filepath.Dir(path), "bindings")
+	fi, err := os.Lstat(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		if !create {
+			return dir, nil
+		}
+		if err := os.Mkdir(dir, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+			return "", err
+		}
+		fi, err = os.Lstat(dir)
+	}
+	if err != nil {
+		return "", err
+	}
+	if !fi.IsDir() || fi.Mode()&os.ModeSymlink != 0 {
+		return "", fmt.Errorf("bindings directory %s is not a plain directory; refusing", dir)
+	}
+	return dir, nil
+}
+
+// ReadNamed returns the binding called name, or ErrNone.
+func ReadNamed(name string) (Binding, error) {
+	if name == LegacyName {
+		if b, err := Read(); !errors.Is(err, ErrNone) {
+			b.Name = LegacyName
+			return b, err
+		}
+	}
+	if err := ValidName(name); err != nil {
+		return Binding{}, err
+	}
+	dir, err := namedDir(false)
+	if err != nil {
+		return Binding{}, err
+	}
+	b, err := read(filepath.Join(dir, name+".json"))
+	if err != nil {
+		return Binding{}, err
+	}
+	b.Name = name
+	return b, nil
+}
+
+// WriteNamed adds or replaces only the binding called b.Name.
+func WriteNamed(b Binding) error {
+	if err := ValidName(b.Name); err != nil {
+		return err
+	}
+	if err := b.Valid(); err != nil {
+		return err
+	}
+	if b.BoundAt == "" {
+		b.BoundAt = time.Now().UTC().Format(time.RFC3339)
+	}
+	raw, err := json.MarshalIndent(b, "", "  ")
+	if err != nil {
+		return err
+	}
+	return transact(func(string) error {
+		dir, err := namedDir(true)
+		if err != nil {
+			return err
+		}
+		_, err = fsq.WriteFileAtomic(dir, b.Name+".json", append(raw, '\n'), 0o600)
+		return err
+	})
+}
+
+// List returns every binding, named ones sorted by name, then the legacy one.
+func List() ([]Binding, error) {
+	dir, err := namedDir(false)
+	if err != nil {
+		return nil, err
+	}
+	var out []Binding
+	entries, err := os.ReadDir(dir)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	for _, e := range entries {
+		name := strings.TrimSuffix(e.Name(), ".json")
+		if e.IsDir() || name == e.Name() || ValidName(name) != nil {
+			continue
+		}
+		b, err := read(filepath.Join(dir, e.Name()))
+		if err != nil {
+			continue
+		}
+		b.Name = name
+		out = append(out, b)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	if b, err := Read(); err == nil {
+		b.Name = LegacyName
+		out = append(out, b)
+	}
+	return out, nil
+}
+
+// RemoveMatching removes every binding match accepts, named and legacy,
+// under the binding lock, and returns the names removed.
+func RemoveMatching(match func(Binding) bool) ([]string, error) {
+	var removed []string
+	err := transact(func(path string) error {
+		dir, err := namedDir(false)
+		if err != nil {
+			return err
+		}
+		entries, err := os.ReadDir(dir)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		for _, e := range entries {
+			name := strings.TrimSuffix(e.Name(), ".json")
+			if e.IsDir() || name == e.Name() || ValidName(name) != nil {
+				continue
+			}
+			b, err := read(filepath.Join(dir, e.Name()))
+			if err != nil {
+				continue
+			}
+			b.Name = name
+			if !match(b) {
+				continue
+			}
+			if err := os.Remove(filepath.Join(dir, e.Name())); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+			removed = append(removed, name)
+		}
+		if b, err := read(path); err == nil && func() bool { b.Name = LegacyName; return match(b) }() {
+			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+			removed = append(removed, LegacyName)
+		}
+		return nil
+	})
+	return removed, err
 }

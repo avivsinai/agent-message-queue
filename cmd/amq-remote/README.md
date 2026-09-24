@@ -343,6 +343,13 @@ background (log: `up.log` in the state directory). Then it writes
 `~/.amq/remote/binding.json` (mode 0600, or `$AMQ_REMOTE_BINDING`) with the
 root, the target and the target's native session.
 
+Each attach writes a **named** binding, `~/.amq/remote/bindings/<name>.json`
+(default `<handle>-<project>`, or the native target; `--name` overrides), and
+removes any other binding for the same session. Several sessions can be
+connected at once. Each has its own Buzz agent, whose ACP model
+`amq-remote:<name>` selects that binding (`amq-acp setup --session <name>`
+writes its Import file).
+
 `amq-remote detach` removes the binding. `detach --self` removes it only when
 it names this session. The session and the endpoint keep running.
 

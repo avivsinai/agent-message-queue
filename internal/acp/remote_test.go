@@ -547,7 +547,7 @@ func TestEventClaimLoserFollowsTheWinner(t *testing.T) {
 	if err := binding.Write(binding.Binding{Root: "/loser", Target: "claude:2", NativeSession: "s-loser"}); err != nil {
 		t.Fatal(err)
 	}
-	got, err := s.turnBinding(eventID)
+	got, err := s.turnBinding("s", eventID)
 	if err != nil || !got.Same(winner) {
 		t.Fatalf("turn binding = %+v %v; want the winner's", got, err)
 	}
@@ -571,7 +571,7 @@ func TestExistingEventClaimIsMadeDurableBeforeUse(t *testing.T) {
 		return nil
 	})
 	defer restore()
-	if _, err := s.turnBinding(eventID); err != nil {
+	if _, err := s.turnBinding("s", eventID); err != nil {
 		t.Fatal(err)
 	}
 	if !synced {
