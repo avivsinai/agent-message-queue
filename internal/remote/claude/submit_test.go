@@ -31,11 +31,15 @@ type fakeTarget struct {
 func newFakeTarget(t *testing.T, pid int, features []string) *fakeTarget {
 	t.Helper()
 	home := t.TempDir()
-	// Unix socket paths are limited to ~104 bytes on macOS; the t.TempDir
-	// base is too long, so the test socket lives at a short /tmp path and
-	// is removed with the test.
-	sockPath := fmt.Sprintf("/tmp/cc-pr2test-%d-%d.sock", pid, time.Now().UnixNano())
-	t.Cleanup(func() { _ = os.Remove(sockPath) })
+	// Unix socket paths are limited to ~104 bytes on macOS and the t.TempDir
+	// base is too long, so the socket lives in a short directory directly
+	// under the temp root, which honors TMPDIR (agent-message-queue-8p9).
+	sockDir, err := os.MkdirTemp("", "cc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(sockDir) })
+	sockPath := filepath.Join(sockDir, fmt.Sprintf("%d.sock", pid))
 
 	ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: sockPath, Net: "unix"})
 	if err != nil {

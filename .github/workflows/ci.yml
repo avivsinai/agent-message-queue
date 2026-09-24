@@ -65,6 +65,10 @@ jobs:
           govulncheck ./...
       - name: Test
         run: go test ./...
+      - name: Race tests (activity)
+        # TestR2NativeEnqueueAndConsumer is a data-race regression: it can
+        # only fail under -race (agent-message-queue-8p9).
+        run: go test -race -count=1 ./internal/remote/activity/
       - name: Hook script tests (serial)
         # Real SessionStart bash script; wall-clock sensitive, so it runs
         # alone with -p 1 instead of inside the parallel suite above.
