@@ -197,13 +197,51 @@ func (s *Server) turnBinding(eventID string) (binding.Binding, error) {
 	if err != nil {
 		return binding.Binding{}, err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	// The first delivery claims the event exclusively. A concurrent first
+	// delivery that loses reads the winner's binding and never uses the one
+	// it captured, so all deliveries of one event share one session
+	// (codex #885 r2 P1).
+	won, err := createExclusive(path, raw)
+	if err != nil {
 		return binding.Binding{}, err
 	}
-	if _, err := fsq.WriteFileAtomic(filepath.Dir(path), filepath.Base(path), raw, 0o600); err != nil {
-		return binding.Binding{}, err
+	if !won {
+		return s.turnBinding(eventID)
 	}
 	return b, nil
+}
+
+// createExclusive publishes raw at path only if nothing is there yet. The
+// bytes are complete and synced before the link makes them visible, so a
+// reader never sees a partial claim. It reports whether this call won.
+func createExclusive(path string, raw []byte) (bool, error) {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return false, err
+	}
+	tmp, err := os.CreateTemp(dir, ".claim-*")
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = os.Remove(tmp.Name()) }()
+	if _, err := tmp.Write(raw); err != nil {
+		_ = tmp.Close()
+		return false, err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return false, err
+	}
+	if err := tmp.Close(); err != nil {
+		return false, err
+	}
+	if err := os.Link(tmp.Name(), path); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, fsq.SyncDir(dir)
 }
 
 // readSmallRegular reads a small regular file, refusing a symlink leaf.

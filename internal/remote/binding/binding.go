@@ -153,7 +153,14 @@ func confinedPath(create bool) (string, error) {
 		parts = strings.Split(rel, string(filepath.Separator))
 	}
 	if os.Getenv(EnvPath) != "" {
-		cur, parts = filepath.Dir(dir), []string{filepath.Base(dir)}
+		// An override must be canonical: no symlink anywhere on its chain
+		// (codex #885 r2 P2). EvalSymlinks returns a different path exactly
+		// when some component is a symlink.
+		parent := filepath.Dir(dir)
+		if resolved, err := filepath.EvalSymlinks(parent); err != nil || resolved != parent {
+			return "", fmt.Errorf("%s directory %s must have no symlink on its path; refusing", EnvPath, parent)
+		}
+		cur, parts = parent, []string{filepath.Base(dir)}
 	}
 	for _, part := range parts {
 		cur = filepath.Join(cur, part)
