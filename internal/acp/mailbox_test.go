@@ -235,3 +235,16 @@ func TestMailboxCancelWhilePublishLockHeldPublishesNothing(t *testing.T) {
 		t.Fatalf("cancelled before publication, but inbox has %d prompt(s)", len(ids))
 	}
 }
+
+// Codex #895 r3 P2: an expired turn budget still published when the lock
+// was free.
+func TestMailboxExpiredBudgetPublishesNothing(t *testing.T) {
+	s, root := mailboxServer(t)
+	s.cfg.TurnTimeout = time.Nanosecond
+	if _, rpcErr := s.runRemote("s", "hello", strings.Repeat("7", 64), newTurn(), func(any) error { return nil }); rpcErr != nil {
+		t.Fatal(rpcErr)
+	}
+	if ids := inboxPrompts(t, root); len(ids) != 0 {
+		t.Fatalf("the turn budget expired before publish, but the inbox has %d prompt(s)", len(ids))
+	}
+}

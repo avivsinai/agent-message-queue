@@ -199,6 +199,11 @@ func (s *Server) publishClaimed(r *remoteTurn, budget time.Time, b binding.Bindi
 		if outcome := r.settle(""); outcome == "session_cancelled" || outcome == "client_disconnected" {
 			return errStoppedBeforePublish
 		}
+		// An expired budget publishes nothing, also when the lock was free
+		// or there is no event lock at all (codex #895 r3 P2).
+		if !time.Now().Before(budget) {
+			return lock.ErrStopped
+		}
 		return publishOnce(b, threadID, id, created, text)
 	}
 	if r.eventID == "" {
