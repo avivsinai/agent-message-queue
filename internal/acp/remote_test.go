@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/fake"
@@ -401,5 +402,31 @@ func TestEventClaimLoserFollowsTheWinner(t *testing.T) {
 	got, err := s.turnBinding(eventID)
 	if err != nil || !got.Same(winner) {
 		t.Fatalf("turn binding = %+v %v; want the winner's", got, err)
+	}
+}
+
+// Codex #885 r3 P1: a reader used a visible claim before its directory entry
+// was durable. Every returned claim is synced first.
+func TestExistingEventClaimIsMadeDurableBeforeUse(t *testing.T) {
+	s := NewServer(Config{RemoteBinding: true, StateDir: canonicalTempDir(t)}, "test")
+	eventID := strings.Repeat("c", 64)
+	claimDir := filepath.Join(s.cfg.StateDir, "remote-events")
+	raw, _ := json.Marshal(binding.Binding{Root: "/r", Target: "claude:1", NativeSession: "s"})
+	if won, err := createExclusive(filepath.Join(claimDir, eventID+".json"), raw); err != nil || !won {
+		t.Fatalf("seed claim: %v %v", won, err)
+	}
+	synced := false
+	restore := fsq.SyncDirAmbientSwapForTest(func(dir string) error {
+		if dir == claimDir {
+			synced = true
+		}
+		return nil
+	})
+	defer restore()
+	if _, err := s.turnBinding(eventID); err != nil {
+		t.Fatal(err)
+	}
+	if !synced {
+		t.Fatal("an existing claim was returned before its directory was synced")
 	}
 }

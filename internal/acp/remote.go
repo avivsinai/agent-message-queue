@@ -185,6 +185,12 @@ func (s *Server) turnBinding(eventID string) (binding.Binding, error) {
 		if err := json.Unmarshal(raw, &b); err != nil || b.Target == "" || b.NativeSession == "" || !filepath.IsAbs(b.Root) {
 			return binding.Binding{}, fmt.Errorf("event %s has an unreadable recorded binding; refusing to resubmit", eventID)
 		}
+		// A claim can be visible before its directory entry is durable. Every
+		// reader makes it durable before it submits, so a crash cannot lose
+		// the claim behind a submission (codex #885 r3 P1).
+		if err := fsq.SyncDir(filepath.Dir(path)); err != nil {
+			return binding.Binding{}, err
+		}
 		return b, nil
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return binding.Binding{}, err
