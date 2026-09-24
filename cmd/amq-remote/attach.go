@@ -128,7 +128,7 @@ func selfCandidate(root, stateDir string) (registry.Candidate, error) {
 				return cand, nil
 			}
 		}
-		return registry.Candidate{}, fmt.Errorf("Codex thread %s is not loaded in the app-server daemon; start Codex with `codex --remote unix://`", thread)
+		return registry.Candidate{}, fmt.Errorf("codex thread %s is not loaded in the app-server daemon; start Codex with `codex --remote unix://`", thread)
 	}
 	ancestors, err := ancestorPIDs(os.Getpid())
 	if err != nil {
