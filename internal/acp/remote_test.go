@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -286,6 +287,8 @@ func TestRemoteBusyRedeliveryRetries(t *testing.T) {
 	}
 	eventID := strings.Repeat("d", 64)
 	id, _ := remoteRequestID(eventID)
+	s.cfg.TurnTimeout = 40 * time.Millisecond
+	s.cfg.PollInterval = 5 * time.Millisecond
 	first, rpcErr := s.runRemote("s", "hello", eventID, newTurn(), func(any) error { return nil })
 	if rpcErr != nil || first.(remotePromptResult).Meta.Remote.Code != string(protocol.CodeBusy) {
 		t.Fatalf("first = %+v %v", first, rpcErr)
@@ -299,6 +302,138 @@ func TestRemoteBusyRedeliveryRetries(t *testing.T) {
 	}
 	if got := second.(remotePromptResult); got.StopReason != StopReasonEndTurn {
 		t.Fatalf("busy redelivery = %+v", got)
+	}
+}
+
+// TestRemoteBusyDMWaitsThenRuns is agent-message-queue-611.34: a DM that
+// arrives while the session is busy is queued once, then runs on the same
+// request id after the session is free.
+func TestRemoteBusyDMWaitsThenRuns(t *testing.T) {
+	rt := fake.New("fake", "e_1")
+	s := remoteServer(t, rt, nil)
+	s.cfg.PollInterval = 5 * time.Millisecond
+	s.cfg.TurnTimeout = 2 * time.Second
+	occupy := "d2c80e1d-feb7-4c10-959e-23456789abce"
+	resp, err := ipc.Call(filepath.Join(s.cfg.Root, remoteStateDir), ipc.Request{Command: &protocol.Command{Schema: protocol.SchemaCommand, Op: protocol.OpRequestSubmit, RequestID: occupy, TargetID: "fake", Epoch: "e_1", NotAfter: protocol.FormatTime(time.Now().Add(time.Minute)), Input: &protocol.SubmitInput{Text: "local turn", Busy: protocol.BusyReject, Deliver: protocol.DeliverTurn}}})
+	if err != nil || resp.AsError() != nil {
+		t.Fatal(err, resp.AsError())
+	}
+	eventID := strings.Repeat("e", 64)
+	id, err := remoteRequestID(eventID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var thoughts []string
+	done := make(chan remotePromptResult, 1)
+	go func() {
+		result, rpcErr := s.runRemote("s", "hello from buzz", eventID, newTurn(), func(v any) error {
+			note := v.(sessionUpdateNotification)
+			if note.Params.Update.SessionUpdate == "agent_thought_chunk" {
+				mu.Lock()
+				thoughts = append(thoughts, note.Params.Update.Content.Text)
+				mu.Unlock()
+			}
+			return nil
+		})
+		if rpcErr != nil {
+			t.Errorf("run: %v", rpcErr)
+		}
+		done <- result.(remotePromptResult)
+	}()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) && queuedThoughts(&mu, thoughts) == 0 {
+		time.Sleep(5 * time.Millisecond)
+	}
+	queued := queuedThoughts(&mu, thoughts)
+	if queued != 1 {
+		t.Fatalf("queued thoughts = %q", thoughts)
+	}
+	if rt.HasRun(id) {
+		t.Fatal("dm ran while the session was busy")
+	}
+	if !rt.Complete(occupy, "local done") {
+		t.Fatal("occupy did not complete")
+	}
+	for time.Now().Before(deadline.Add(time.Second)) {
+		if rt.Complete(id, "ran after the wait") {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	got := <-done
+	if got.StopReason != StopReasonEndTurn {
+		t.Fatalf("result = %+v", got)
+	}
+	if queuedThoughts(&mu, thoughts) != 1 {
+		mu.Lock()
+		gotThoughts := append([]string(nil), thoughts...)
+		mu.Unlock()
+		t.Fatalf("queued thoughts after admit = %q", gotThoughts)
+	}
+}
+
+func queuedThoughts(mu *sync.Mutex, thoughts []string) int {
+	mu.Lock()
+	defer mu.Unlock()
+	n := 0
+	for _, text := range thoughts {
+		if strings.HasPrefix(text, "Queued:") {
+			n++
+		}
+	}
+	return n
+}
+
+// TestRemoteCancelWhileQueuedSubmitsNothing is agent-message-queue-611.34:
+// session/cancel during the busy wait stops retrying and never admits the DM.
+func TestRemoteCancelWhileQueuedSubmitsNothing(t *testing.T) {
+	rt := fake.New("fake", "e_1")
+	s := remoteServer(t, rt, nil)
+	s.cfg.PollInterval = 5 * time.Millisecond
+	s.cfg.TurnTimeout = 2 * time.Second
+	occupy := "d2c80e1d-feb7-4c10-959e-23456789abcf"
+	resp, err := ipc.Call(filepath.Join(s.cfg.Root, remoteStateDir), ipc.Request{Command: &protocol.Command{Schema: protocol.SchemaCommand, Op: protocol.OpRequestSubmit, RequestID: occupy, TargetID: "fake", Epoch: "e_1", NotAfter: protocol.FormatTime(time.Now().Add(time.Minute)), Input: &protocol.SubmitInput{Text: "local turn", Busy: protocol.BusyReject, Deliver: protocol.DeliverTurn}}})
+	if err != nil || resp.AsError() != nil {
+		t.Fatal(err, resp.AsError())
+	}
+	eventID := strings.Repeat("9", 64)
+	id, err := remoteRequestID(eventID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	turn := newTurn()
+	sawQueue := make(chan struct{}, 1)
+	done := make(chan remotePromptResult, 1)
+	go func() {
+		result, rpcErr := s.runRemote("s", "hello from buzz", eventID, turn, func(v any) error {
+			note := v.(sessionUpdateNotification)
+			if note.Params.Update.SessionUpdate == "agent_thought_chunk" && strings.HasPrefix(note.Params.Update.Content.Text, "Queued:") {
+				select {
+				case sawQueue <- struct{}{}:
+				default:
+				}
+			}
+			return nil
+		})
+		if rpcErr != nil {
+			t.Errorf("run: %v", rpcErr)
+		}
+		done <- result.(remotePromptResult)
+	}()
+	select {
+	case <-sawQueue:
+	case <-time.After(time.Second):
+		t.Fatal("dm was not queued")
+	}
+	s.mu.Lock()
+	if turn.settleLocked("session_cancelled") {
+		close(turn.done)
+	}
+	s.mu.Unlock()
+	got := <-done
+	if got.StopReason != StopReasonCancelled || rt.HasRun(id) {
+		t.Fatalf("cancel admitted the dm: %+v hasRun=%v", got, rt.HasRun(id))
 	}
 }
 

@@ -127,48 +127,125 @@ func (s *Server) runRemote(sessionID, text, eventID string, turn *turnState, emi
 			return r.failed(remoteUncertain, err)
 		}
 	}
+	label := r.target
 	if epoch == "" {
 		session, err := remoteSession(r.dir, r.target, r.native)
 		if err != nil {
 			return r.failed(remoteNotSubmitted, err)
 		}
 		epoch = session.Epoch
-	}
-	rep, err := r.call(&protocol.Command{
-		Schema:    protocol.SchemaCommand,
-		Op:        protocol.OpRequestSubmit,
-		RequestID: id,
-		TargetID:  r.target,
-		Epoch:     epoch,
-		NotAfter:  protocol.FormatTime(time.Now().Add(remoteAdmitWithin)),
-		Input:     &protocol.SubmitInput{Text: text, Busy: protocol.BusyReject, Deliver: protocol.DeliverTurn},
-	})
-	if err != nil {
-		// Unreachable and unshared refuse before the endpoint sees the
-		// command. Any other error may follow a native run, so the exact
-		// record decides (codex #876 P1 #2).
-		if hasCode(err, protocol.CodeEndpointUnreachable) || hasCode(err, protocol.CodeUnshared) {
-			return r.failed(remoteNotSubmitted, err)
-		}
-		stored, gerr := r.get()
-		switch {
-		case gerr == nil:
-			return r.follow(stored.Snapshot)
-		case hasCode(gerr, protocol.CodeNotFound):
-			return r.failed(remoteNotSubmitted, err)
-		default:
-			return r.failed(remoteUncertain, err)
+		if session.DisplayName != "" {
+			label = session.DisplayName
 		}
 	}
-	if rep.Outcome.Code != "" {
-		r.meta.Code, r.meta.Reason = string(rep.Outcome.Code), rep.Outcome.Message
-		r.meta.State = string(rep.Snapshot.State)
-		if outcome := r.settle("replied"); outcome != "replied" {
-			return r.settled(outcome, rep.Snapshot)
+	// root, target and native stay the values captured above for every
+	// retry, so a rebind during the wait cannot move this turn (611.34).
+	deadline := time.Now().Add(r.s.cfg.TurnTimeout)
+	queued := false
+	var last protocol.Snapshot
+	for {
+		if outcome := r.settle(""); outcome == "session_cancelled" || outcome == "client_disconnected" {
+			return r.stoppedBeforeAdmit(outcome, last)
 		}
-		return r.say("replied", StopReasonRefusal, r.statusText(rep.Snapshot))
+		rep, err := r.call(&protocol.Command{
+			Schema:    protocol.SchemaCommand,
+			Op:        protocol.OpRequestSubmit,
+			RequestID: id,
+			TargetID:  r.target,
+			Epoch:     epoch,
+			NotAfter:  protocol.FormatTime(time.Now().Add(remoteAdmitWithin)),
+			Input:     &protocol.SubmitInput{Text: text, Busy: protocol.BusyReject, Deliver: protocol.DeliverTurn},
+		})
+		if err != nil {
+			// Unreachable and unshared refuse before the endpoint sees the
+			// command. Any other error may follow a native run, so the exact
+			// record decides (codex #876 P1 #2).
+			if hasCode(err, protocol.CodeEndpointUnreachable) || hasCode(err, protocol.CodeUnshared) {
+				return r.failed(remoteNotSubmitted, err)
+			}
+			stored, gerr := r.get()
+			switch {
+			case gerr == nil:
+				return r.follow(stored.Snapshot)
+			case hasCode(gerr, protocol.CodeNotFound):
+				return r.failed(remoteNotSubmitted, err)
+			default:
+				return r.failed(remoteUncertain, err)
+			}
+		}
+		if rep.Outcome.Code == protocol.CodeBusy {
+			last = rep.Snapshot
+			if rep.Snapshot.Epoch != "" {
+				epoch = rep.Snapshot.Epoch
+			}
+			if !queued {
+				queued = true
+				if err := emitText(r.emit, r.sessionID, "agent_thought_chunk", fmt.Sprintf("Queued: %s is busy", label)); err != nil {
+					return nil, newRPCError(codeInternalError, "emit ACP session update: %v", err)
+				}
+			}
+			switch stop := r.waitBusy(deadline); stop {
+			case "":
+				continue
+			case "reply_timeout":
+				return r.settled(r.settle("reply_timeout"), last)
+			default:
+				return r.stoppedBeforeAdmit(stop, last)
+			}
+		}
+		if rep.Outcome.Code != "" {
+			r.meta.Code, r.meta.Reason = string(rep.Outcome.Code), rep.Outcome.Message
+			r.meta.State = string(rep.Snapshot.State)
+			if outcome := r.settle("replied"); outcome != "replied" {
+				return r.settled(outcome, rep.Snapshot)
+			}
+			return r.say("replied", StopReasonRefusal, r.statusText(rep.Snapshot))
+		}
+		return r.follow(rep.Snapshot)
 	}
-	return r.follow(rep.Snapshot)
+}
+
+// stoppedBeforeAdmit ends a queued turn that was never admitted. It does not
+// submit again and does not ask the endpoint to cancel: a busy tombstone
+// never started a native run (611.34).
+func (r *remoteTurn) stoppedBeforeAdmit(outcome string, snap protocol.Snapshot) (any, *rpcError) {
+	if snap.RequestRef != "" {
+		r.meta.State, r.meta.Code = string(snap.State), string(snap.Code)
+	}
+	r.meta.Reason = outcome
+	if outcome == "client_disconnected" {
+		return remotePromptResult{StopReason: StopReasonRefusal, Meta: remotePromptMeta{Remote: r.meta}}, nil
+	}
+	return remotePromptResult{StopReason: StopReasonCancelled, Meta: remotePromptMeta{Remote: r.meta}}, nil
+}
+
+// waitBusy pauses between busy retries. An empty result means retry. The
+// turn budget and a cancel both stop the loop without another submit.
+func (r *remoteTurn) waitBusy(deadline time.Time) string {
+	pause := r.s.cfg.PollInterval
+	if pause <= 0 {
+		pause = r.s.cfg.HeartbeatInterval
+	}
+	if pause <= 0 {
+		pause = 100 * time.Millisecond
+	}
+	if remain := time.Until(deadline); remain < pause {
+		pause = remain
+	}
+	if pause <= 0 {
+		return "reply_timeout"
+	}
+	timer := time.NewTimer(pause)
+	defer timer.Stop()
+	select {
+	case <-r.turn.done:
+		return r.settle("")
+	case <-timer.C:
+		if !time.Now().Before(deadline) {
+			return "reply_timeout"
+		}
+		return ""
+	}
 }
 
 // turnBinding fixes the binding a prompt runs under. A redelivered event
