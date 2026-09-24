@@ -1,6 +1,7 @@
 package acp
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -284,5 +285,43 @@ func TestBuzzAnswerIsPostedIntoTheDMChannel(t *testing.T) {
 	got := result.(remotePromptResult)
 	if len(posts) != 1 || posts[0].channel != "6eff60e4-32ab-48ec-bd3d-f4c97872f370" || posts[0].content != "hi back" || got.Meta.Remote.Posted != "posted" {
 		t.Fatalf("posts=%+v meta=%+v", posts, got.Meta.Remote)
+	}
+}
+
+// Bead agent-message-queue-611.39: two sessions, each with its own named
+// binding. Each Buzz agent's model selects its binding, so each prompt lands
+// in its own session's inbox.
+func TestModelSelectsEachAgentsSession(t *testing.T) {
+	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
+	rootA, rootB := canonicalTempDir(t), canonicalTempDir(t)
+	for _, b := range []binding.Binding{
+		{Carrier: binding.CarrierMailbox, Root: rootA, Handle: "agent", Name: "a"},
+		{Carrier: binding.CarrierMailbox, Root: rootB, Handle: "agent", Name: "b"},
+	} {
+		if err := binding.WriteNamed(b); err != nil {
+			t.Fatal(err)
+		}
+	}
+	live := startServer(t, Config{RemoteBinding: true, StateDir: canonicalTempDir(t), TurnTimeout: 100 * time.Millisecond, PollInterval: 5 * time.Millisecond, HeartbeatInterval: 20 * time.Millisecond})
+	live.send(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":2}}`)
+	live.read()
+	for i, name := range []string{"a", "b"} {
+		live.send(fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"session/new","params":{"cwd":"/tmp"}}`, 10+i))
+		created := live.read()["result"].(map[string]any)
+		if n := len(created["models"].(map[string]any)["availableModels"].([]any)); n != 2 {
+			t.Fatalf("session/new advertises %d models; want one per binding", n)
+		}
+		sid := created["sessionId"].(string)
+		live.send(fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"session/set_model","params":{"sessionId":%q,"modelId":"amq-remote:%s"}}`, 20+i, sid, name))
+		if reply := live.read(); reply["error"] != nil {
+			t.Fatalf("set_model %s: %v", name, reply)
+		}
+		live.send(fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"session/prompt","params":{"sessionId":%q,"prompt":[{"type":"text","text":"for %s"}]}}`, 30+i, sid, name))
+		live.readUntilResult()
+	}
+	for name, root := range map[string]string{"a": rootA, "b": rootB} {
+		if ids := inboxPrompts(t, root); len(ids) != 1 {
+			t.Fatalf("session %s inbox holds %d prompts; want 1", name, len(ids))
+		}
 	}
 }

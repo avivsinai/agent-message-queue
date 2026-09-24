@@ -9,8 +9,9 @@ metadata:
 
 # AMQ Remote
 
-`/amq-remote` connects the owner's one "AMQ Remote" Buzz agent to this
-agent. The owner DMs that agent from the Buzz phone app or Buzz Desktop.
+`/amq-remote` gives this session its own Buzz agent, "AMQ: <name>", with its
+own DM. The owner DMs that agent from the Buzz phone app or Buzz Desktop.
+Several sessions can be connected at once; each has its own agent.
 
 - **Default (AMQ mailbox).** Each DM arrives as an AMQ message from `buzz` in
   this agent's inbox. This agent answers with `amq reply --id <id>`, and that
@@ -44,13 +45,14 @@ command's own message. Do not work around a refusal.
    `amq-remote claude uninstall-stop-hook` removes it). Ask once, then run
    `amq-remote claude install-stop-hook`. The default mailbox path never
    needs this.
-4. **The Buzz agent, once per Mac.** If
-   `~/Library/Application Support/xyz.block.buzz.app/custom_harnesses/amq_remote.json`
-   does not exist, run `amq-acp setup --out "$HOME/Downloads/AMQ Remote.agent.json"`
+4. **This session's Buzz agent.** Attach printed the session name `<name>`.
+   Run `amq-acp setup --session <name> --out "$HOME/Downloads/AMQ <name>.agent.json"`
    and show its printed steps: in Buzz Desktop, Agents, then + then Import,
-   pick that file, then Start. This happens once. If Desktop was open, it must
-   be restarted first so it sees the new harness.
-5. Tell the user: "Connected. DM **AMQ Remote** from the Buzz app or
+   pick that file, then Start. If this was the first `/amq-remote` on the Mac
+   (the harness file did not exist before) and Desktop was open, it must be
+   restarted first so it sees the harness. Skip this step when the agent
+   "AMQ: <name>" already exists in Desktop.
+5. Tell the user: "Connected. DM **AMQ: <name>** from the Buzz app or
    Desktop."
    - Default: "DMs arrive in this agent's AMQ inbox. Stop in Buzz stops
      waiting; a delivered message may still be acted on."
@@ -76,7 +78,8 @@ then answers "Not connected".
 
 ## `/amq-remote status`
 
-Show `~/.amq/remote/binding.json` (carrier, root, and handle or target).
+List `~/.amq/remote/bindings/` (one file per connected session: carrier,
+root, and handle or target).
 
 ## Trust limits
 

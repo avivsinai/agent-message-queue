@@ -40,6 +40,7 @@ func attach(args []string, stdout, stderr io.Writer) (int, error) {
 	self := fs.Bool("self", false, "bind the session this command runs in")
 	nativeMode := fs.Bool("native", false, "drive the exact native session through amq-remote, not the AMQ mailbox")
 	me := fs.String("me", os.Getenv("AM_ME"), "AMQ handle of this session (default AM_ME)")
+	name := fs.String("name", "", "binding name, which names this session's Buzz agent (default <handle>-<project>, or the native target)")
 	if err := fs.Parse(args); err != nil {
 		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", err)
 	}
@@ -47,7 +48,7 @@ func attach(args []string, stdout, stderr io.Writer) (int, error) {
 		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "attach needs --self")
 	}
 	if !*nativeMode {
-		return attachMailbox(c.root, strings.TrimSpace(*me), stdout)
+		return attachMailbox(c.root, strings.TrimSpace(*me), strings.TrimSpace(*name), stdout)
 	}
 	stateDir, err := c.stateDir()
 	if err != nil {
@@ -89,10 +90,11 @@ func attach(args []string, stdout, stderr io.Writer) (int, error) {
 	if display == "" {
 		display = session.DisplayName
 	}
-	if err := binding.Write(binding.Binding{Root: c.root, Target: cand.Target, NativeSession: native, Display: display}); err != nil {
+	nb := binding.Binding{Root: c.root, Target: cand.Target, NativeSession: native, Display: display, Name: nonEmpty(strings.TrimSpace(*name), binding.SanitizeName(cand.Target))}
+	if err := writeBinding(nb); err != nil {
 		return protocol.ExitActionRequired, err
 	}
-	say(stdout, "Connected: %s (%s). DM your AMQ Remote agent from Buzz.", nonEmpty(display, cand.Target), cand.Target)
+	say(stdout, "Connected: %s (%s) as session %s. DM its Buzz agent \"AMQ: %s\".", nonEmpty(display, cand.Target), cand.Target, nb.Name, nb.Name)
 	return 0, nil
 }
 
@@ -100,7 +102,7 @@ func attach(args []string, stdout, stderr io.Writer) (int, error) {
 // agent-message-queue-611.36). Each DM becomes an AMQ message to the handle;
 // no endpoint, hook, or wake is required, because noticing the message is
 // the handle owner's business.
-func attachMailbox(root, handle string, stdout io.Writer) (int, error) {
+func attachMailbox(root, handle, name string, stdout io.Writer) (int, error) {
 	if root == "" || handle == "" {
 		return protocol.ExitActionRequired, errors.New("this session is not an AMQ participant (AM_ROOT and AM_ME are unset); join AMQ, or use attach --self --native")
 	}
@@ -115,12 +117,37 @@ func attachMailbox(root, handle string, stdout io.Writer) (int, error) {
 	if err := acp.VerifySessionPin(filepath.Clean(root)); err != nil {
 		return protocol.ExitActionRequired, err
 	}
-	b := binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: handle, Display: handle}
-	if err := binding.Write(b); err != nil {
+	if name == "" {
+		name = binding.SanitizeName(handle + "-" + projectOf(root))
+	}
+	b := binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: handle, Display: handle, Name: name}
+	if err := writeBinding(b); err != nil {
 		return protocol.ExitActionRequired, err
 	}
-	say(stdout, "Connected: AMQ handle %s at %s. DM your AMQ Remote agent from Buzz.", handle, root)
+	say(stdout, "Connected: AMQ handle %s at %s as session %s. DM its Buzz agent \"AMQ: %s\".", handle, root, name, name)
 	return 0, nil
+}
+
+// writeBinding adds the named binding and removes any other binding for the
+// same session, so one session is one Buzz agent (bead
+// agent-message-queue-611.39).
+func writeBinding(b binding.Binding) error {
+	if err := binding.WriteNamed(b); err != nil {
+		return err
+	}
+	_, err := binding.RemoveMatching(func(o binding.Binding) bool { return o.Same(b) && o.Name != b.Name })
+	return err
+}
+
+// projectOf is the project directory name of an AMQ root such as
+// <project>/.agent-mail/<session>.
+func projectOf(root string) string {
+	for dir := filepath.Clean(root); dir != filepath.Dir(dir); dir = filepath.Dir(dir) {
+		if filepath.Base(dir) == ".agent-mail" {
+			return filepath.Base(filepath.Dir(dir))
+		}
+	}
+	return filepath.Base(root)
 }
 
 // detach ends the binding. With --self it unbinds only when the binding
@@ -137,8 +164,13 @@ func detach(args []string, stdout, stderr io.Writer) (int, error) {
 	// A native binding made outside AMQ used a fallback root; detach finds it
 	// in the binding itself, so off needs no --root (codex #895 P2 #5).
 	if *self && c.root == "" {
-		if b, err := binding.Read(); err == nil {
-			c.root = b.Root
+		if all, err := binding.List(); err == nil {
+			for _, b := range all {
+				if !b.Mailbox() {
+					c.root = b.Root
+					break
+				}
+			}
 		}
 	}
 	if *self && os.Getenv("AM_ME") != "" && c.root != "" {
@@ -163,11 +195,14 @@ func detach(args []string, stdout, stderr io.Writer) (int, error) {
 		mine := binding.Binding{Root: c.root, Target: target, NativeSession: native}
 		match = mine.Same
 	}
-	removed, err := binding.Remove(match)
+	if match == nil {
+		match = func(binding.Binding) bool { return true }
+	}
+	removed, err := binding.RemoveMatching(match)
 	if err != nil {
 		return protocol.ExitActionRequired, err
 	}
-	if !removed {
+	if len(removed) == 0 {
 		say(stdout, "Not connected.")
 		return 0, nil
 	}

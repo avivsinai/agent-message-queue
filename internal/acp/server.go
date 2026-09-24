@@ -94,6 +94,9 @@ type sessionState struct {
 	Thread    string
 	// turn is the in-flight prompt turn, nil while idle.
 	turn *turnState
+	// binding is the named binding this session's model selected ("" means
+	// none selected); binding mode only.
+	binding string
 }
 
 // turnState is one prompt turn. Its terminal outcome is decided exactly once,
@@ -461,6 +464,32 @@ type modelInfo struct {
 // environment or read from the binding on each prompt.
 func (s *Server) remote() bool { return s.cfg.RemoteTarget != "" || s.cfg.RemoteBinding }
 
+// bindingModelPrefix names a binding as an ACP model: amq-remote:<name>.
+const bindingModelPrefix = "amq-remote:"
+
+// models lists the destinations this process can serve. In binding mode it
+// is one model per named binding, so each Buzz agent's configured model picks
+// its own session (bead agent-message-queue-611.39); with no binding it is
+// the plain "amq-remote" model, which answers "Not connected".
+func (s *Server) models() []modelInfo {
+	if !s.cfg.RemoteBinding {
+		return []modelInfo{s.model()}
+	}
+	all, _ := binding.List()
+	var out []modelInfo
+	for _, b := range all {
+		out = append(out, modelInfo{
+			ModelID:     bindingModelPrefix + b.Name,
+			Name:        "Session " + b.Name,
+			Description: "Runs in the session bound as " + b.Name + " by /amq-remote, with that session's own model.",
+		})
+	}
+	if len(out) == 0 {
+		out = append(out, s.model())
+	}
+	return out
+}
+
 // model is the one destination this process delivers to.
 func (s *Server) model() modelInfo {
 	if s.cfg.RemoteBinding {
@@ -503,10 +532,22 @@ func (s *Server) setModel(params json.RawMessage) (any, *rpcError) {
 	if !ok {
 		return nil, newRPCError(codeInvalidParams, "unknown sessionId %q", parsed.SessionID)
 	}
-	if want := s.model().ModelID; parsed.ModelID != want {
-		return nil, newRPCError(codeInvalidParams, "model %q is not available; this bridge serves only %q", parsed.ModelID, want)
+	for _, m := range s.models() {
+		if m.ModelID != parsed.ModelID {
+			continue
+		}
+		name := strings.TrimPrefix(m.ModelID, bindingModelPrefix)
+		if name == m.ModelID {
+			name = ""
+		}
+		s.mu.Lock()
+		if session, ok := s.sessions[parsed.SessionID]; ok {
+			session.binding = name
+		}
+		s.mu.Unlock()
+		return struct{}{}, nil
 	}
-	return struct{}{}, nil
+	return nil, newRPCError(codeInvalidParams, "model %q is not available here", parsed.ModelID)
 }
 
 type sessionMetaInfo struct {
@@ -565,7 +606,7 @@ func (s *Server) newSession(params json.RawMessage) (any, *rpcError) {
 	return newSessionResult{
 		SessionID: id,
 		Meta:      sessionMetaInfo{ChannelID: channelID, Thread: threadID},
-		Models:    sessionModels{CurrentModelID: s.model().ModelID, AvailableModels: []modelInfo{s.model()}},
+		Models:    sessionModels{CurrentModelID: s.models()[0].ModelID, AvailableModels: s.models()},
 	}, nil
 }
 

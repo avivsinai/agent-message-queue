@@ -16,7 +16,7 @@ Implemented methods:
 | --- | --- |
 | `initialize` | Answers `protocolVersion: 2` and the minimum honest capability set. Unknown top-level params are rejected. |
 | `session/new` | Returns a `sessionId`, `_meta.thread` (the durable AMQ cockpit thread for the session's channel), and `models` with exactly one model, the fixed destination. Requires a completed `initialize`. |
-| `session/set_model` | Accepts only the one model that `session/new` advertises in `models`: `amq:<AMQ_ACP_TO>`, or `amq-remote:<target>` in remote mode. This bridge runs no model; the destination answers with its own. Any other id is refused. |
+| `session/set_model` | Accepts only a model that `session/new` advertises in `models`: `amq:<AMQ_ACP_TO>`, `amq-remote:<target>` in remote mode, or `amq-remote:<name>` for a named binding in binding mode, which selects that binding for the session. This bridge runs no model; the destination answers with its own. Any other id is refused. |
 | `session/prompt` | Delivers the prompt text to `AMQ_ACP_TO` on the session's cockpit thread, then holds the turn open. The client receives `session/update` notifications as the turn progresses and the reply text as an `agent_message_chunk`; the final result is `stopReason: "end_turn"` with the reply in `_meta.amq`, or the typed refusal `stopReason: "refusal"` with `_meta.amq.state: "no_reply"` when the bounded wait expires. |
 | `_session/steering` | Delivers owner steering on the session's cockpit thread, framed as untrusted task guidance. During an in-flight prompt it is AMQ `urgent` with the `buzz-steer` label and returns `outcome: "injected"`; while idle it is `normal` priority and returns `outcome: "startedNewTurn"`. A redelivered steer event returns `outcome: "duplicate"` with the original message id and delivers nothing new. The outcome names the delivery mode only: `_meta.amq` reports the prompt committed to the inbox, not drained or started, so neither outcome proves the peer acted. An in-turn steer refs the turn's prompt. A Nostr event id in `_meta` makes a redelivered steer idempotent. `initialize` advertises it as `_meta.steering.supported: true`. |
 | `session/cancel` | Ends the session's in-flight prompt turn: that `session/prompt` returns `stopReason: "cancelled"` with `_meta.amq.state: "cancelled"` and `reason: "session_cancelled"`. The queued AMQ prompt is not retracted and the peer is not notified; a later reply on the thread cannot answer a new prompt. With no turn in flight it is a no-op. |
@@ -198,8 +198,11 @@ in the session the owner chose (`~/.amq/remote/binding.json`, or
   binding's native pin.
 With no binding, the agent answers "Not connected. Run /amq-remote in a
 Claude Code or Codex session." A request keeps the binding it started with;
-a later attach moves only new prompts. `session/new` advertises the one
-model `amq-remote`. `AMQ_ACP_TO`, `AMQ_ACP_REMOTE_TARGET` and
+a later attach moves only new prompts. `session/new` advertises one model per
+named binding, `amq-remote:<name>`, and `session/set_model` selects which
+binding the ACP session drives, so each Buzz agent serves exactly one session.
+With no selection it uses the only binding, or refuses when there are several.
+With no binding it advertises the plain `amq-remote` model. `AMQ_ACP_TO`, `AMQ_ACP_REMOTE_TARGET` and
 `AMQ_ACP_REMOTE_NATIVE_SESSION` are refused in this mode.
 
 ### Posting answers into Buzz

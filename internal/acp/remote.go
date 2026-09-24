@@ -99,7 +99,7 @@ func (s *Server) runRemote(sessionID, text, eventID string, turn *turnState, emi
 	}
 	root, target, native := s.cfg.Root, s.cfg.RemoteTarget, s.cfg.RemoteNative
 	if s.cfg.RemoteBinding {
-		b, err := s.turnBinding(eventID)
+		b, err := s.turnBinding(sessionID, eventID)
 		if err != nil {
 			r := &remoteTurn{s: s, sessionID: sessionID, emit: emit, turn: turn, meta: remoteMeta{State: "not_connected", Reason: err.Error()}}
 			text := "Not connected. Run /amq-remote in a Claude Code or Codex session."
@@ -289,13 +289,40 @@ func (r *remoteTurn) waitBusy(deadline time.Time) string {
 	}
 }
 
+// sessionBinding is the binding this ACP session drives: the one its model
+// selected (session/set_model), else the only binding there is (bead
+// agent-message-queue-611.39). With several bindings and no selection it
+// refuses rather than guess.
+func (s *Server) sessionBinding(sessionID string) (binding.Binding, error) {
+	s.mu.Lock()
+	name := ""
+	if session, ok := s.sessions[sessionID]; ok {
+		name = session.binding
+	}
+	s.mu.Unlock()
+	if name != "" {
+		return binding.ReadNamed(name)
+	}
+	all, err := binding.List()
+	if err != nil {
+		return binding.Binding{}, err
+	}
+	switch len(all) {
+	case 0:
+		return binding.Binding{}, binding.ErrNone
+	case 1:
+		return all[0], nil
+	}
+	return binding.Binding{}, errors.New("this agent has no session selected; set its model to one amq-remote:<name> session")
+}
+
 // turnBinding fixes the binding a prompt runs under. A redelivered event
 // follows the binding its first delivery recorded, never the current one,
 // so a rebind between deliveries cannot run the event twice in two sessions
 // (codex #885 P1 #1). A first delivery records its binding before submit.
-func (s *Server) turnBinding(eventID string) (binding.Binding, error) {
+func (s *Server) turnBinding(sessionID, eventID string) (binding.Binding, error) {
 	if eventID == "" {
-		return binding.Read()
+		return s.sessionBinding(sessionID)
 	}
 	path := filepath.Join(s.cfg.StateDir, "remote-events", eventID+".json")
 	if raw, err := readSmallRegular(path); err == nil {
@@ -313,7 +340,7 @@ func (s *Server) turnBinding(eventID string) (binding.Binding, error) {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return binding.Binding{}, err
 	}
-	b, err := binding.Read()
+	b, err := s.sessionBinding(sessionID)
 	if err != nil {
 		return b, err
 	}
@@ -330,7 +357,7 @@ func (s *Server) turnBinding(eventID string) (binding.Binding, error) {
 		return binding.Binding{}, err
 	}
 	if !won {
-		return s.turnBinding(eventID)
+		return s.turnBinding(sessionID, eventID)
 	}
 	return b, nil
 }
