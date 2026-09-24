@@ -139,7 +139,10 @@ func TestMailboxCancelSaysTheMessageStays(t *testing.T) {
 // and missed the final answer on the first delivery's thread.
 func TestMailboxReplayUsesTheFirstThread(t *testing.T) {
 	s, root := mailboxServer(t)
-	s.cfg.TurnTimeout = 25 * time.Millisecond
+	// Long enough for the publish itself. The budget is checked again just
+	// before publish (codex #895 r3); 25ms expired under the parallel suite
+	// and the first delivery wrote nothing.
+	s.cfg.TurnTimeout = time.Second
 	eventID := strings.Repeat("4", 64)
 	if _, rpcErr := s.runRemote("first", "hello", eventID, newTurn(), func(any) error { return nil }); rpcErr != nil {
 		t.Fatal(rpcErr)
