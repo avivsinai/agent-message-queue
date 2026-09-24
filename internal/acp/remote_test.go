@@ -333,3 +333,41 @@ func TestBindingModeFollowsTheBoundSession(t *testing.T) {
 		t.Fatalf("bound: %+v", got)
 	}
 }
+
+// Codex #885 P1 #1: a redelivered event followed the current binding, so a
+// rebind between deliveries ran it again in the new session.
+func TestRedeliveryAfterRebindStaysOnTheFirstSession(t *testing.T) {
+	t.Setenv(binding.EnvPath, filepath.Join(t.TempDir(), "binding.json"))
+	a, b := fake.New("fake", "e_1"), fake.New("fake", "e_1")
+	serverA, serverB := remoteServer(t, a, nil), remoteServer(t, b, nil)
+	s := NewServer(Config{RemoteBinding: true, StateDir: t.TempDir(), TurnTimeout: time.Second, HeartbeatInterval: 10 * time.Millisecond}, "test")
+	eventID := strings.Repeat("a", 64)
+	id, _ := remoteRequestID(eventID)
+	run := func(rt *fake.Runtime, label string) string {
+		t.Helper()
+		out := ""
+		if _, rpcErr := s.runRemote("s", "hello", eventID, newTurn(), func(v any) error {
+			note := v.(sessionUpdateNotification)
+			if note.Params.Update.SessionUpdate == "agent_thought_chunk" {
+				rt.Complete(id, "result from "+label)
+			}
+			if note.Params.Update.SessionUpdate == "agent_message_chunk" {
+				out += note.Params.Update.Content.Text
+			}
+			return nil
+		}); rpcErr != nil {
+			t.Fatal(rpcErr)
+		}
+		return out
+	}
+	if err := binding.Write(binding.Binding{Root: serverA.cfg.Root, Target: "fake", NativeSession: "fake"}); err != nil {
+		t.Fatal(err)
+	}
+	first := run(a, "A")
+	if err := binding.Write(binding.Binding{Root: serverB.cfg.Root, Target: "fake", NativeSession: "fake"}); err != nil {
+		t.Fatal(err)
+	}
+	if second := run(b, "B"); first != "result from A" || second != first {
+		t.Fatalf("first=%q second=%q; the redelivery must return the first session's result", first, second)
+	}
+}

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
+	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"github.com/avivsinai/agent-message-queue/internal/thread"
 )
 
@@ -143,6 +144,11 @@ type Server struct {
 
 // NewServer builds a server bound to one already authenticated routing context.
 func NewServer(cfg Config, version string) *Server {
+	if cfg.StateDir == "" && cfg.RemoteBinding {
+		if path, err := binding.Path(); err == nil {
+			cfg.StateDir = filepath.Join(filepath.Dir(path), "acp")
+		}
+	}
 	if cfg.StateDir == "" {
 		cfg.StateDir = filepath.Join(cfg.Root, "meta", "acp")
 	}

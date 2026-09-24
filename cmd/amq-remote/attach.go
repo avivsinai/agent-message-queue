@@ -17,6 +17,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/lock"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
+	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/ipc"
 	"github.com/avivsinai/agent-message-queue/internal/remote/manifest"
@@ -68,6 +69,16 @@ func attach(args []string, stdout, stderr io.Writer) (int, error) {
 	if err != nil {
 		return protocol.ExitActionRequired, err
 	}
+	// The endpoint's answer is checked against the identity resolved here,
+	// independently, so a target name reused for another session is never
+	// pinned as this one (codex #885 P1 #2).
+	want, err := selfNativeSession(cand)
+	if err != nil {
+		return protocol.ExitActionRequired, err
+	}
+	if native != want {
+		return protocol.ExitActionRequired, fmt.Errorf("the endpoint's %s is attached to another session; refusing to bind", cand.Target)
+	}
 	display := cand.Display
 	if display == "" {
 		display = session.DisplayName
@@ -89,7 +100,7 @@ func detach(args []string, stdout, stderr io.Writer) (int, error) {
 	if err := fs.Parse(args); err != nil {
 		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", err)
 	}
-	target := ""
+	var match func(binding.Binding) bool
 	if *self {
 		stateDir, err := c.stateDir()
 		if err != nil {
@@ -99,9 +110,14 @@ func detach(args []string, stdout, stderr io.Writer) (int, error) {
 		if err != nil {
 			return protocol.ExitActionRequired, err
 		}
-		target = cand.Target
+		native, err := selfNativeSession(cand)
+		if err != nil {
+			return protocol.ExitActionRequired, err
+		}
+		mine := binding.Binding{Root: c.root, Target: cand.Target, NativeSession: native}
+		match = mine.Same
 	}
-	removed, err := binding.Remove(target)
+	removed, err := binding.Remove(match)
 	if err != nil {
 		return protocol.ExitActionRequired, err
 	}
@@ -148,6 +164,30 @@ func selfCandidate(root, stateDir string) (registry.Candidate, error) {
 		}
 	}
 	return registry.Candidate{}, errors.New("cannot identify the session this runs in; run it from inside a Claude Code or Codex session")
+}
+
+// selfNativeSession resolves the invoking session's native identity without
+// the endpoint: the Claude registry entry for its pid, or the Codex thread.
+func selfNativeSession(cand registry.Candidate) (string, error) {
+	switch cand.Kind {
+	case "claude":
+		var cfg struct {
+			PID int `json:"pid"`
+		}
+		if err := json.Unmarshal(cand.Config, &cfg); err != nil || cfg.PID <= 0 {
+			return "", fmt.Errorf("claude candidate %s has no pid", cand.Target)
+		}
+		return claude.SessionIDForPID(cfg.PID)
+	case "codex":
+		var cfg struct {
+			Thread string `json:"thread"`
+		}
+		if err := json.Unmarshal(cand.Config, &cfg); err != nil || cfg.Thread == "" {
+			return "", fmt.Errorf("codex candidate %s has no thread", cand.Target)
+		}
+		return cfg.Thread, nil
+	}
+	return "", fmt.Errorf("cannot verify a %s session", cand.Kind)
 }
 
 // ancestorPIDs lists the parent chain of pid, nearest first.
@@ -225,9 +265,15 @@ func persistAdapter(stateDir string, a manifest.Adapter) error {
 			return err
 		}
 		for _, existing := range f.Adapters {
-			if existing.Target == a.Target {
-				return nil
+			if existing.Target != a.Target {
+				continue
 			}
+			// The same target name with another kind or config names another
+			// session; it is refused, never silently kept (codex #885 P1 #2).
+			if existing.Kind != a.Kind || !sameJSON(existing.Config, a.Config) || existing.Epoch != a.Epoch {
+				return protocol.Refuse(protocol.CodeInvalid, "manifest already declares %s for another session; refusing", a.Target)
+			}
+			return nil
 		}
 		f.Adapters = append(f.Adapters, a)
 		if err := manifest.Validate(f); err != nil {
@@ -266,6 +312,20 @@ func liveRegistrar(root, stateDir string, ep *core.Endpoint) ipc.Registrar {
 		}
 		return protocol.Session{}, protocol.Refuse(protocol.CodeNotFound, "target %s did not attach", r.Target)
 	}
+}
+
+// sameJSON compares two config blocks by value.
+func sameJSON(a, b json.RawMessage) bool {
+	var va, vb any
+	if len(a) == 0 || len(b) == 0 {
+		return len(a) == len(b)
+	}
+	if json.Unmarshal(a, &va) != nil || json.Unmarshal(b, &vb) != nil {
+		return false
+	}
+	ja, _ := json.Marshal(va)
+	jb, _ := json.Marshal(vb)
+	return string(ja) == string(jb)
 }
 
 func nonEmpty(s, fallback string) string {

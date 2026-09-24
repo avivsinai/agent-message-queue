@@ -48,3 +48,15 @@ func TestLiveRegisterAttachesAndPersistsTheTarget(t *testing.T) {
 		t.Fatalf("manifest: %+v %v", f.Adapters, err)
 	}
 }
+
+// Codex #885 P1 #2: registering a target name the manifest already gives to
+// another session kept the other session silently.
+func TestPersistAdapterRefusesAnotherSessionsTarget(t *testing.T) {
+	stateDir := t.TempDir()
+	if err := persistAdapter(stateDir, manifest.Adapter{Kind: "fake", Target: "fake", Epoch: "e_1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := persistAdapter(stateDir, manifest.Adapter{Kind: "fake", Target: "fake", Epoch: "e_2"}); err == nil {
+		t.Fatal("a conflicting entry for the same target was accepted")
+	}
+}

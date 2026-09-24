@@ -9,16 +9,21 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/lock"
 )
 
 // EnvPath overrides the binding file location (tests, alternate homes).
 const EnvPath = "AMQ_REMOTE_BINDING"
+
+// maxBindingBytes bounds a binding file read.
+const maxBindingBytes = 64 * 1024
 
 // Binding names one shared native session.
 type Binding struct {
@@ -32,6 +37,11 @@ type Binding struct {
 	// Display is human text for replies; never an identity.
 	Display string `json:"display,omitempty"`
 	BoundAt string `json:"bound_at"`
+}
+
+// Same reports whether two bindings name the same shared session.
+func (b Binding) Same(o Binding) bool {
+	return b.Root == o.Root && b.Target == o.Target && b.NativeSession == o.NativeSession
 }
 
 // ErrNone is returned when no session is bound.
@@ -54,9 +64,124 @@ func Path() (string, error) {
 
 // Read returns the current binding, or ErrNone.
 func Read() (Binding, error) {
-	path, err := Path()
+	path, err := confinedPath(false)
 	if err != nil {
 		return Binding{}, err
+	}
+	return read(path)
+}
+
+// Write replaces the binding atomically with mode 0600.
+func Write(b Binding) error {
+	if b.BoundAt == "" {
+		b.BoundAt = time.Now().UTC().Format(time.RFC3339)
+	}
+	raw, err := json.MarshalIndent(b, "", "  ")
+	if err != nil {
+		return err
+	}
+	return transact(func(path string) error {
+		_, err := fsq.WriteFileAtomic(filepath.Dir(path), filepath.Base(path), append(raw, '\n'), 0o600)
+		return err
+	})
+}
+
+// Remove deletes the binding when match accepts it, all under the same lock
+// as Write, so a concurrent attach is never undone by an older off.
+// A nil match removes any binding.
+func Remove(match func(Binding) bool) (bool, error) {
+	removed := false
+	err := transact(func(path string) error {
+		b, err := read(path)
+		if errors.Is(err, ErrNone) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if match != nil && !match(b) {
+			return nil
+		}
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		removed = true
+		return nil
+	})
+	return removed, err
+}
+
+// transact runs fn under the binding's interprocess lock, after confining
+// its directory.
+func transact(fn func(path string) error) error {
+	if !lock.AdvisoryLockAvailable() {
+		return errors.New("refusing to change the binding without an advisory file lock")
+	}
+	path, err := confinedPath(true)
+	if err != nil {
+		return err
+	}
+	return lock.WithExclusiveFileLock(path+".lock", func() error { return fn(path) })
+}
+
+// confinedPath returns the binding path after checking that no directory
+// between the home (or the override's parent) and the file is a symlink.
+// With create, missing directories are made one at a time with mode 0700.
+func confinedPath(create bool) (string, error) {
+	path, err := Path()
+	if err != nil {
+		return "", err
+	}
+	dir := filepath.Dir(path)
+	base := dir
+	if os.Getenv(EnvPath) == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		base = home
+	}
+	rel, err := filepath.Rel(base, dir)
+	if err != nil || strings.HasPrefix(rel, "..") {
+		return "", fmt.Errorf("binding directory %s escapes %s", dir, base)
+	}
+	// Under the home, check each directory below it (the home itself may be
+	// a symlink on some systems). An override checks its own directory.
+	cur := base
+	parts := []string{}
+	if rel != "." {
+		parts = strings.Split(rel, string(filepath.Separator))
+	}
+	if os.Getenv(EnvPath) != "" {
+		cur, parts = filepath.Dir(dir), []string{filepath.Base(dir)}
+	}
+	for _, part := range parts {
+		cur = filepath.Join(cur, part)
+		fi, err := os.Lstat(cur)
+		if errors.Is(err, os.ErrNotExist) && create {
+			if err := os.Mkdir(cur, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+				return "", err
+			}
+			fi, err = os.Lstat(cur)
+		}
+		if errors.Is(err, os.ErrNotExist) && !create {
+			return path, nil // nothing bound yet; read reports ErrNone
+		}
+		if err != nil {
+			return "", err
+		}
+		if !fi.IsDir() || fi.Mode()&os.ModeSymlink != 0 {
+			return "", fmt.Errorf("binding directory %s is not a plain directory; refusing", cur)
+		}
+	}
+	return path, nil
+}
+
+// read opens the leaf no-follow and bounded, and checks it is the file the
+// lstat gate saw.
+func read(path string) (Binding, error) {
+	if !noFollowSupported {
+		return Binding{}, errors.New("the binding needs a no-follow file open, which this platform lacks")
 	}
 	fi, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -65,12 +190,23 @@ func Read() (Binding, error) {
 	if err != nil {
 		return Binding{}, err
 	}
-	if !fi.Mode().IsRegular() {
-		return Binding{}, fmt.Errorf("binding %s is not a regular file; refusing", path)
+	if !fi.Mode().IsRegular() || fi.Size() > maxBindingBytes {
+		return Binding{}, fmt.Errorf("binding %s is not a small regular file; refusing", path)
 	}
-	raw, err := os.ReadFile(path)
+	f, err := os.OpenFile(path, os.O_RDONLY|openNoFollowFlag, 0)
 	if err != nil {
 		return Binding{}, err
+	}
+	defer func() { _ = f.Close() }()
+	if fi2, err := f.Stat(); err != nil || !os.SameFile(fi, fi2) {
+		return Binding{}, fmt.Errorf("binding %s was replaced while opening; refusing", path)
+	}
+	raw, err := io.ReadAll(io.LimitReader(f, maxBindingBytes+1))
+	if err != nil {
+		return Binding{}, err
+	}
+	if len(raw) > maxBindingBytes {
+		return Binding{}, fmt.Errorf("binding %s is larger than %d bytes; refusing", path, maxBindingBytes)
 	}
 	var b Binding
 	if err := json.Unmarshal(raw, &b); err != nil {
@@ -80,50 +216,4 @@ func Read() (Binding, error) {
 		return Binding{}, fmt.Errorf("binding %s is incomplete; run /amq-remote again", path)
 	}
 	return b, nil
-}
-
-// Write replaces the binding atomically with mode 0600.
-func Write(b Binding) error {
-	path, err := Path()
-	if err != nil {
-		return err
-	}
-	if b.BoundAt == "" {
-		b.BoundAt = time.Now().UTC().Format(time.RFC3339)
-	}
-	raw, err := json.MarshalIndent(b, "", "  ")
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
-	}
-	if fi, err := os.Lstat(path); err == nil && !fi.Mode().IsRegular() {
-		return fmt.Errorf("binding %s is not a regular file; refusing", path)
-	}
-	_, err = fsq.WriteFileAtomic(filepath.Dir(path), filepath.Base(path), append(raw, '\n'), 0o600)
-	return err
-}
-
-// Remove deletes the binding. With target set, it removes the binding only
-// when it names that target, so one session's off never unbinds another.
-func Remove(target string) (bool, error) {
-	b, err := Read()
-	if errors.Is(err, ErrNone) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	if target != "" && b.Target != target {
-		return false, nil
-	}
-	path, err := Path()
-	if err != nil {
-		return false, err
-	}
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return false, err
-	}
-	return true, nil
 }

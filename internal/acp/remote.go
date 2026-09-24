@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"github.com/avivsinai/agent-message-queue/internal/remote/ipc"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
@@ -84,7 +86,7 @@ func (s *Server) runRemote(sessionID, text, eventID string, turn *turnState, emi
 	}
 	root, target, native := s.cfg.Root, s.cfg.RemoteTarget, s.cfg.RemoteNative
 	if s.cfg.RemoteBinding {
-		b, err := binding.Read()
+		b, err := s.turnBinding(eventID)
 		if err != nil {
 			r := &remoteTurn{s: s, sessionID: sessionID, emit: emit, turn: turn, meta: remoteMeta{State: "not_connected", Reason: err.Error()}}
 			text := "Not connected. Run /amq-remote in a Claude Code or Codex session."
@@ -167,6 +169,53 @@ func (s *Server) runRemote(sessionID, text, eventID string, turn *turnState, emi
 		return r.say("replied", StopReasonRefusal, r.statusText(rep.Snapshot))
 	}
 	return r.follow(rep.Snapshot)
+}
+
+// turnBinding fixes the binding a prompt runs under. A redelivered event
+// follows the binding its first delivery recorded, never the current one,
+// so a rebind between deliveries cannot run the event twice in two sessions
+// (codex #885 P1 #1). A first delivery records its binding before submit.
+func (s *Server) turnBinding(eventID string) (binding.Binding, error) {
+	if eventID == "" {
+		return binding.Read()
+	}
+	path := filepath.Join(s.cfg.StateDir, "remote-events", eventID+".json")
+	if raw, err := readSmallRegular(path); err == nil {
+		var b binding.Binding
+		if err := json.Unmarshal(raw, &b); err != nil || b.Target == "" || b.NativeSession == "" || !filepath.IsAbs(b.Root) {
+			return binding.Binding{}, fmt.Errorf("event %s has an unreadable recorded binding; refusing to resubmit", eventID)
+		}
+		return b, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return binding.Binding{}, err
+	}
+	b, err := binding.Read()
+	if err != nil {
+		return b, err
+	}
+	raw, err := json.Marshal(b)
+	if err != nil {
+		return binding.Binding{}, err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return binding.Binding{}, err
+	}
+	if _, err := fsq.WriteFileAtomic(filepath.Dir(path), filepath.Base(path), raw, 0o600); err != nil {
+		return binding.Binding{}, err
+	}
+	return b, nil
+}
+
+// readSmallRegular reads a small regular file, refusing a symlink leaf.
+func readSmallRegular(path string) ([]byte, error) {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() || fi.Size() > 64*1024 {
+		return nil, fmt.Errorf("%s is not a small regular file; refusing", path)
+	}
+	return os.ReadFile(path)
 }
 
 // follow waits on the endpoint until the request is terminal or uncertain,
