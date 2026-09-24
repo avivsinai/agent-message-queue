@@ -59,6 +59,7 @@ than silently dropped.
 | `AM_ME` | Sender handle. Required unless `AMQ_ACP_REMOTE_TARGET` is set. |
 | `AMQ_ACP_TO` | Recipient handle for every prompt. Required unless `AMQ_ACP_REMOTE_TARGET` is set. |
 | `AMQ_ACP_REMOTE_TARGET` | Remote mode: submit each prompt to this amq-remote target. See [Remote mode](#remote-mode). |
+| `AMQ_ACP_REMOTE` | `binding`: follow the session bound by `amq-remote attach --self`. See [Binding mode](#binding-mode). |
 | `AMQ_ACP_REMOTE_NATIVE_SESSION` | Required with `AMQ_ACP_REMOTE_TARGET`: the native session the owner shared. |
 | `AM_BASE_ROOT` | Pinned base root; required whenever any pin variable is set. |
 | `AM_SESSION` | Pinned session name. |
@@ -107,6 +108,22 @@ command refuses: start `amq-remote up --root $AM_ROOT` first. `AM_BASE_ROOT`
 and `AM_SESSION` are written only when this shell has them. `--remove` deletes
 only the file this command wrote. A harness file this command did not write is
 left unchanged.
+
+Once per Mac, write the AMQ Remote harness and the Desktop import file:
+
+```sh
+amq-acp setup
+```
+
+That writes `custom_harnesses/amq_remote.json` with mode 0600, the stable
+`amq-acp` path, and env `AMQ_ACP_REMOTE=binding` only. It does not record a
+root, a target, or a session pin. It also writes `AMQ Remote.agent.json` in
+the current directory (`--out` chooses another path). The file is a
+`buzz-agent-snapshot` version 1 whose definition is name `AMQ Remote`, runtime
+`amq_remote`, model `amq-remote`, parallelism 1, and `respondTo` `owner-only`.
+Import that file in Buzz Desktop: Agents, then + then Import, pick the file,
+then Start. Then run `/amq-remote` in a session. A harness file this command
+did not write is left unchanged.
 
 ## Buzz BYOH
 
@@ -163,9 +180,26 @@ can pin it; the identity is not part of the session schema.
 - `_meta.remote` reports `target`, `requestRef`, `state`, `code`, `reason`,
   `cancel`, and `truncated`.
 
-In Buzz Desktop, the managed agent's identity and grants belong to Desktop.
-Desktop signs a grant with no kind limit and no expiry; archive the agent in
-Desktop to revoke it. The strict per-kind path is `amq-remote` with a `relay`
+### Binding mode
+
+With `AMQ_ACP_REMOTE=binding`, the harness environment names no root, target
+or pin. Each prompt reads the binding that `amq-remote attach --self` wrote
+in the session the owner chose (`~/.amq/remote/binding.json`, or
+`$AMQ_REMOTE_BINDING`), and submits there with that binding's native pin.
+With no binding, the agent answers "Not connected. Run /amq-remote in a
+Claude Code or Codex session." A request keeps the binding it started with;
+a later attach moves only new prompts. `session/new` advertises the one
+model `amq-remote`. `AMQ_ACP_TO`, `AMQ_ACP_REMOTE_TARGET` and
+`AMQ_ACP_REMOTE_NATIVE_SESSION` are refused in this mode.
+
+### Trust limits
+
+In Buzz Desktop, the managed agent's identity and grant belong to Desktop,
+and amq-acp never receives the key. Desktop signs a grant with no kind limit
+and no expiry. Archiving the agent hides it and removes Desktop's local key;
+it does not invalidate a copied key and grant. Only removing the agent's relay
+access does that. Buzz's owner-only setting also admits the owner's other
+agents. The strict per-kind, expiring path is `amq-remote` with a `relay`
 manifest block.
 
 ## Limitations

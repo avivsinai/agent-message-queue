@@ -84,7 +84,7 @@ func runInstall(args []string) int {
 		fmt.Fprintln(os.Stderr, "amq-acp install:", err)
 		return exitGeneral
 	}
-	path := filepath.Join(home, "Library", "Application Support", "xyz.block.buzz.app", "custom_harnesses", "amq_"+token+".json")
+	path := filepath.Join(buzzHarnessDir(home), "amq_"+token+".json")
 	if *remove {
 		if err := removeHarness(path); err != nil {
 			fmt.Fprintln(os.Stderr, "amq-acp install:", err)
@@ -256,6 +256,10 @@ func projectName(root, base string) string {
 		return "amq"
 	}
 	return name
+}
+
+func buzzHarnessDir(home string) string {
+	return filepath.Join(home, "Library", "Application Support", "xyz.block.buzz.app", "custom_harnesses")
 }
 
 func currentExecutable() (string, error) {

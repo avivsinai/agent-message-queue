@@ -431,3 +431,22 @@ func (a *Attachment) ObserveActivity(cb func(ActivityNote)) func() {
 func init() {
 	registry.Register("claude", Factory)
 }
+
+// SessionIDForPID reads the sessionId of the interactive session with this
+// pid from ~/.claude/sessions, the same registry the adapter attaches
+// through. amq-remote attach uses it to verify the session it pins is the
+// one it runs in.
+func SessionIDForPID(pid int) (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	reg, err := readSessionRegistry(home, pid)
+	if err != nil {
+		return "", err
+	}
+	if reg == nil {
+		return "", fmt.Errorf("no Claude session registry entry for pid %d", pid)
+	}
+	return reg.SessionID, nil
+}

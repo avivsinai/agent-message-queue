@@ -2,6 +2,7 @@ package acp
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/fake"
 	"github.com/avivsinai/agent-message-queue/internal/remote/ipc"
@@ -296,5 +299,134 @@ func TestRemoteBusyRedeliveryRetries(t *testing.T) {
 	}
 	if got := second.(remotePromptResult); got.StopReason != StopReasonEndTurn {
 		t.Fatalf("busy redelivery = %+v", got)
+	}
+}
+
+// Bead agent-message-queue-611.31: in binding mode a prompt answers "Not
+// connected" until a session is bound, then runs in the bound session.
+func TestBindingModeFollowsTheBoundSession(t *testing.T) {
+	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
+	rt := fake.New("fake", "e_1")
+	bound := remoteServer(t, rt, nil)
+	s := NewServer(Config{RemoteBinding: true, StateDir: t.TempDir(), HeartbeatInterval: 10 * time.Millisecond, TurnTimeout: time.Second}, "test")
+
+	var said []string
+	emit := func(v any) error {
+		if note := v.(sessionUpdateNotification); note.Params.Update.SessionUpdate == "agent_message_chunk" {
+			said = append(said, note.Params.Update.Content.Text)
+		}
+		return nil
+	}
+	result, rpcErr := s.runRemote("s", "hello", "", newTurn(), emit)
+	if rpcErr != nil || len(said) != 1 || !strings.HasPrefix(said[0], "Not connected") {
+		t.Fatalf("unbound: result=%+v said=%q err=%v", result, said, rpcErr)
+	}
+
+	if err := binding.Write(binding.Binding{Root: bound.cfg.Root, Target: "fake", NativeSession: "fake"}); err != nil {
+		t.Fatal(err)
+	}
+	eventID := strings.Repeat("9", 64)
+	id, _ := remoteRequestID(eventID)
+	result, rpcErr = s.runRemote("s", "hello", eventID, newTurn(), func(any) error { rt.Complete(id, "from the bound session"); return nil })
+	if rpcErr != nil {
+		t.Fatal(rpcErr)
+	}
+	if got := result.(remotePromptResult); got.StopReason != StopReasonEndTurn || got.Meta.Remote.Target != "fake" {
+		t.Fatalf("bound: %+v", got)
+	}
+}
+
+// Codex #885 P1 #1: a redelivered event followed the current binding, so a
+// rebind between deliveries ran it again in the new session.
+func TestRedeliveryAfterRebindStaysOnTheFirstSession(t *testing.T) {
+	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
+	a, b := fake.New("fake", "e_1"), fake.New("fake", "e_1")
+	serverA, serverB := remoteServer(t, a, nil), remoteServer(t, b, nil)
+	s := NewServer(Config{RemoteBinding: true, StateDir: t.TempDir(), TurnTimeout: time.Second, HeartbeatInterval: 10 * time.Millisecond}, "test")
+	eventID := strings.Repeat("a", 64)
+	id, _ := remoteRequestID(eventID)
+	run := func(rt *fake.Runtime, label string) string {
+		t.Helper()
+		out := ""
+		if _, rpcErr := s.runRemote("s", "hello", eventID, newTurn(), func(v any) error {
+			note := v.(sessionUpdateNotification)
+			if note.Params.Update.SessionUpdate == "agent_thought_chunk" {
+				rt.Complete(id, "result from "+label)
+			}
+			if note.Params.Update.SessionUpdate == "agent_message_chunk" {
+				out += note.Params.Update.Content.Text
+			}
+			return nil
+		}); rpcErr != nil {
+			t.Fatal(rpcErr)
+		}
+		return out
+	}
+	if err := binding.Write(binding.Binding{Root: serverA.cfg.Root, Target: "fake", NativeSession: "fake"}); err != nil {
+		t.Fatal(err)
+	}
+	first := run(a, "A")
+	if err := binding.Write(binding.Binding{Root: serverB.cfg.Root, Target: "fake", NativeSession: "fake"}); err != nil {
+		t.Fatal(err)
+	}
+	if second := run(b, "B"); first != "result from A" || second != first {
+		t.Fatalf("first=%q second=%q; the redelivery must return the first session's result", first, second)
+	}
+}
+
+// canonicalTempDir is t.TempDir with symlinks resolved: the binding override
+// refuses a symlinked path, and macOS temp dirs live under the /var symlink.
+func canonicalTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// Codex #885 r2 P1: a concurrent first delivery that lost the event claim
+// used its own captured binding. The loser must follow the winner.
+func TestEventClaimLoserFollowsTheWinner(t *testing.T) {
+	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
+	s := NewServer(Config{RemoteBinding: true, StateDir: canonicalTempDir(t)}, "test")
+	eventID := strings.Repeat("b", 64)
+	winner := binding.Binding{Root: "/winner", Target: "claude:1", NativeSession: "s-winner"}
+	raw, _ := json.Marshal(winner)
+	if won, err := createExclusive(filepath.Join(s.cfg.StateDir, "remote-events", eventID+".json"), raw); err != nil || !won {
+		t.Fatalf("seed claim: won=%v err=%v", won, err)
+	}
+	if err := binding.Write(binding.Binding{Root: "/loser", Target: "claude:2", NativeSession: "s-loser"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.turnBinding(eventID)
+	if err != nil || !got.Same(winner) {
+		t.Fatalf("turn binding = %+v %v; want the winner's", got, err)
+	}
+}
+
+// Codex #885 r3 P1: a reader used a visible claim before its directory entry
+// was durable. Every returned claim is synced first.
+func TestExistingEventClaimIsMadeDurableBeforeUse(t *testing.T) {
+	s := NewServer(Config{RemoteBinding: true, StateDir: canonicalTempDir(t)}, "test")
+	eventID := strings.Repeat("c", 64)
+	claimDir := filepath.Join(s.cfg.StateDir, "remote-events")
+	raw, _ := json.Marshal(binding.Binding{Root: "/r", Target: "claude:1", NativeSession: "s"})
+	if won, err := createExclusive(filepath.Join(claimDir, eventID+".json"), raw); err != nil || !won {
+		t.Fatalf("seed claim: %v %v", won, err)
+	}
+	synced := false
+	restore := fsq.SyncDirAmbientSwapForTest(func(dir string) error {
+		if dir == claimDir {
+			synced = true
+		}
+		return nil
+	})
+	defer restore()
+	if _, err := s.turnBinding(eventID); err != nil {
+		t.Fatal(err)
+	}
+	if !synced {
+		t.Fatal("an existing claim was returned before its directory was synced")
 	}
 }
