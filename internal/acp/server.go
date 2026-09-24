@@ -114,6 +114,9 @@ type turnState struct {
 	// outcome is "" until settled, then "replied", "session_cancelled",
 	// "client_disconnected" or "reply_timeout".
 	outcome string
+	// channel is the Buzz channel the prompt came from ("" when it did not
+	// come from Buzz); the owner-facing text is posted there.
+	channel string
 }
 
 // settleLocked decides the turn's outcome if it is still open; it reports
@@ -603,6 +606,9 @@ type amqDelivery struct {
 	Completed bool   `json:"completed"`
 	Egress    string `json:"egress"`
 	Duplicate bool   `json:"duplicate,omitempty"`
+	// Posted is "posted" when the reply was published into the Buzz
+	// channel, or the post error.
+	Posted string `json:"posted,omitempty"`
 }
 
 func (s *Server) prompt(params json.RawMessage, emit func(any) error) (any, *rpcError) {
@@ -645,6 +651,9 @@ func (s *Server) beginPrompt(params json.RawMessage) (func(emit func(any) error)
 		return nil, disconnectedRefusal(), nil
 	}
 	session, turn, rpcErr := s.beginTurnLocked(parsed.SessionID)
+	if turn != nil {
+		turn.channel = buzzChannel(text)
+	}
 	s.mu.Unlock()
 	if rpcErr != nil {
 		return nil, nil, rpcErr
@@ -738,7 +747,9 @@ func (s *Server) waitForReply(sessionID string, delivery Delivery, turn *turnSta
 			if err := emitText(emit, sessionID, "agent_message_chunk", reply); err != nil {
 				return nil, newRPCError(codeInternalError, "emit ACP reply update: %v", err)
 			}
-			return turnResult(delivery, "replied", reply), nil
+			result := turnResult(delivery, "replied", reply)
+			result.Meta.AMQ.Posted = publish(turn.channel, reply)
+			return result, nil
 		}
 
 		select {

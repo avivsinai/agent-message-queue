@@ -51,6 +51,9 @@ type remoteMeta struct {
 	Reason     string `json:"reason,omitempty"`
 	Cancel     string `json:"cancel,omitempty"`
 	Truncated  bool   `json:"truncated,omitempty"`
+	// Posted is "posted" when the owner-facing text was published into the
+	// Buzz channel, or the post error (bead agent-message-queue-611.38).
+	Posted string `json:"posted,omitempty"`
 }
 
 const (
@@ -551,6 +554,7 @@ func (r *remoteTurn) say(outcome, stopReason, text string) (any, *rpcError) {
 		if err := emitText(r.emit, r.sessionID, "agent_message_chunk", text); err != nil {
 			return nil, newRPCError(codeInternalError, "emit ACP reply update: %v", err)
 		}
+		r.meta.Posted = publish(r.turn.channel, text)
 	}
 	return remotePromptResult{StopReason: stopReason, Meta: remotePromptMeta{Remote: r.meta}}, nil
 }

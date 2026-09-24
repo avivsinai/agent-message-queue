@@ -29,6 +29,10 @@ func PrepareWorkerEnv() error {
 	if respondTo != "" && respondTo != "owner-only" {
 		return fmt.Errorf("%s=%s: amq-acp accepts only owner-only inbound; a lease-based gate would relax this, but upstream Buzz has no deployment-lease profile today (tracked in bead agent-message-queue-1xl)", envBuzzRespondTo, respondTo)
 	}
+	// The managed agent's identity stays in process memory for posting
+	// answers (post.go); the environment is still stripped, so no later
+	// child and no AMQ message sees it.
+	captureBuzzIdentity()
 	stripBuzzSecrets()
 	return nil
 }

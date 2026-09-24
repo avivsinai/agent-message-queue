@@ -202,6 +202,19 @@ a later attach moves only new prompts. `session/new` advertises the one
 model `amq-remote`. `AMQ_ACP_TO`, `AMQ_ACP_REMOTE_TARGET` and
 `AMQ_ACP_REMOTE_NATIVE_SESSION` are refused in this mode.
 
+### Posting answers into Buzz
+
+buzz-acp sends ACP answer text only to the owner's activity view; a Buzz
+agent's chat reply exists only if the agent publishes it. So amq-acp posts
+every owner-facing text (a final answer, "Not connected", a busy or stop
+notice) into the channel named by the prompt's `<context>` block with
+`buzz messages send`, as the managed agent. The identity (`BUZZ_PRIVATE_KEY`,
+`BUZZ_AUTH_TAG`, `BUZZ_RELAY_URL`) is kept in process memory for that child
+only; the environment is still stripped and no AMQ message carries it.
+`_meta.remote.posted` (or `_meta.amq.posted`) is `posted` or the error. The
+binary is `AMQ_ACP_BUZZ_CLI`, else `buzz` on `PATH`, else the one bundled
+with Buzz Desktop.
+
 ### Trust limits
 
 In Buzz Desktop, the managed agent's identity and grant belong to Desktop,
