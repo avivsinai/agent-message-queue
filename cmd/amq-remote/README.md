@@ -327,7 +327,13 @@ still in the sender spool.
 ### `attach`, `detach`
 
 `amq-remote attach --self` binds the per-user Buzz agent (amq-acp in binding
-mode) to the session the command runs in. Typing it is the sharing choice, so
+mode) to this session's AMQ handle, `AM_ME` under `AM_ROOT`. Each Buzz DM then
+arrives as an AMQ message from `buzz`, and the handle's `amq reply` is the
+answer; a `kind: status` reply is progress. No endpoint, hook, or wake is
+needed; noticing the message is the handle owner's business. A session that
+is not on AMQ is refused and pointed at `--native`.
+
+`amq-remote attach --self --native` binds the exact native session instead. Typing it is the sharing choice, so
 the session is found exactly and never guessed from a discovery list. Claude
 is found by the command's process ancestry. Codex is found by
 `CODEX_THREAD_ID` among the threads loaded in the app-server daemon. Attach

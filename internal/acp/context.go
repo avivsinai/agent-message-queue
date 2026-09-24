@@ -217,6 +217,11 @@ func durationEnv(name string, fallback time.Duration) (time.Duration, error) {
 	return duration, nil
 }
 
+// VerifySessionPin authenticates the inherited AMQ session pin (AM_SESSION,
+// AM_BASE_ROOT and the identity tokens) against root. Callers that bind a
+// mailbox from the environment use it so a foreign AM_ROOT is refused.
+func VerifySessionPin(root string) error { return verifySessionPin(root) }
+
 // verifySessionPin authenticates an inherited pin against the target root. Pin
 // evidence without an exact base root, a root that disagrees with the pinned
 // base and session, and identity tokens that no longer name the same physical

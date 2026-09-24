@@ -25,23 +25,70 @@ const EnvPath = "AMQ_REMOTE_BINDING"
 // maxBindingBytes bounds a binding file read.
 const maxBindingBytes = 64 * 1024
 
-// Binding names one shared native session.
+// Carriers. A mailbox binding delivers each prompt as an AMQ message to
+// Handle and completes on its final reply; the handle is the identity, and
+// noticing the message is the handle owner's business (a wake, a built-in
+// consumer, monitor, or the next drain). A native binding submits into the
+// exact native session through amq-remote. The zero value is native.
+const (
+	CarrierMailbox = "mailbox"
+	CarrierNative  = "native"
+)
+
+// Binding names what the Buzz agent drives: an AMQ handle, or one native
+// session.
 type Binding struct {
-	// Root is the AMQ root whose amq-remote endpoint owns Target.
+	// Carrier is CarrierMailbox or CarrierNative (empty means native).
+	Carrier string `json:"carrier,omitempty"`
+	// Root is the AMQ root: the handle's queue, or the root whose
+	// amq-remote endpoint owns Target.
 	Root string `json:"root"`
+	// Handle is the AMQ handle a mailbox binding delivers to.
+	Handle string `json:"handle,omitempty"`
 	// Target is the endpoint target id, for example claude:12345.
-	Target string `json:"target"`
+	Target string `json:"target,omitempty"`
 	// NativeSession is the native identity the owner shared. The endpoint
 	// refuses every command once the target is attached to another one.
-	NativeSession string `json:"native_session"`
+	NativeSession string `json:"native_session,omitempty"`
 	// Display is human text for replies; never an identity.
 	Display string `json:"display,omitempty"`
 	BoundAt string `json:"bound_at"`
 }
 
-// Same reports whether two bindings name the same shared session.
+// Mailbox reports whether b delivers through an AMQ handle.
+func (b Binding) Mailbox() bool { return b.Carrier == CarrierMailbox }
+
+// Same reports whether two bindings name the same destination.
 func (b Binding) Same(o Binding) bool {
+	if b.Mailbox() != o.Mailbox() {
+		return false
+	}
+	if b.Mailbox() {
+		return b.Root == o.Root && b.Handle == o.Handle
+	}
 	return b.Root == o.Root && b.Target == o.Target && b.NativeSession == o.NativeSession
+}
+
+// Valid reports whether b is complete for its carrier.
+func (b Binding) Valid() error {
+	if !filepath.IsAbs(b.Root) {
+		return errors.New("binding root must be absolute")
+	}
+	switch b.Carrier {
+	case CarrierMailbox:
+		// A mailbox binding never names a native session, so nothing that
+		// keys on one (the Claude Stop receiver) treats it as native.
+		if b.Target != "" || b.NativeSession != "" {
+			return errors.New("mailbox binding must not name a native target or session")
+		}
+		return fsq.ValidateHandle(b.Handle)
+	case "", CarrierNative:
+		if b.Target == "" || b.NativeSession == "" {
+			return errors.New("native binding needs a target and a native session")
+		}
+		return nil
+	}
+	return fmt.Errorf("unknown binding carrier %q", b.Carrier)
 }
 
 // ErrNone is returned when no session is bound.
@@ -73,6 +120,9 @@ func Read() (Binding, error) {
 
 // Write replaces the binding atomically with mode 0600.
 func Write(b Binding) error {
+	if err := b.Valid(); err != nil {
+		return err
+	}
 	if b.BoundAt == "" {
 		b.BoundAt = time.Now().UTC().Format(time.RFC3339)
 	}
@@ -219,8 +269,8 @@ func read(path string) (Binding, error) {
 	if err := json.Unmarshal(raw, &b); err != nil {
 		return Binding{}, fmt.Errorf("binding %s: %w", path, err)
 	}
-	if !filepath.IsAbs(b.Root) || b.Target == "" || b.NativeSession == "" {
-		return Binding{}, fmt.Errorf("binding %s is incomplete; run /amq-remote again", path)
+	if err := b.Valid(); err != nil {
+		return Binding{}, fmt.Errorf("binding %s: %v; run /amq-remote again", path, err)
 	}
 	return b, nil
 }

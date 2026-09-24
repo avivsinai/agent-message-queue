@@ -105,6 +105,9 @@ func (s *Server) runRemote(sessionID, text, eventID string, turn *turnState, emi
 			}
 			return r.say(r.settle("replied"), StopReasonRefusal, text)
 		}
+		if b.Mailbox() {
+			return s.runMailbox(sessionID, text, eventID, b, turn, emit)
+		}
 		root, target, native = b.Root, b.Target, b.NativeSession
 	}
 	r := &remoteTurn{
@@ -294,7 +297,7 @@ func (s *Server) turnBinding(eventID string) (binding.Binding, error) {
 	path := filepath.Join(s.cfg.StateDir, "remote-events", eventID+".json")
 	if raw, err := readSmallRegular(path); err == nil {
 		var b binding.Binding
-		if err := json.Unmarshal(raw, &b); err != nil || b.Target == "" || b.NativeSession == "" || !filepath.IsAbs(b.Root) {
+		if err := json.Unmarshal(raw, &b); err != nil || b.Valid() != nil {
 			return binding.Binding{}, fmt.Errorf("event %s has an unreadable recorded binding; refusing to resubmit", eventID)
 		}
 		// A claim can be visible before its directory entry is durable. Every
