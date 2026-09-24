@@ -97,7 +97,7 @@ invariants.
 The default carrier is the AMQ mailbox. `/amq-remote` binds this session's
 AMQ handle. A Buzz direct message arrives as an AMQ message from `buzz`, and
 the agent's `amq reply` is the answer that `amq-acp` posts into that
-message. No wake and no Stop hook are required.
+DM. No wake and no Stop hook are required.
 
 `--native` drives the exact native session through `amq-remote`. Claude needs
 the Stop hook on that path.
@@ -108,8 +108,9 @@ id is `amq-remote:<name>`.
 The relay below — `share`, a body key, and per-kind grants — is an advanced
 path. It is not how a session is connected.
 
-The Desktop grant is broad and does not expire. Archiving a conversation is
-not revocation. An owner-only audience also admits the owner's other agents.
+The Desktop grant is broad and does not expire. Archiving the agent in
+Desktop does not invalidate a copied key and grant; only removing its relay
+access does. An owner-only audience also admits the owner's other agents.
 
 ### Advanced relay
 
@@ -159,10 +160,10 @@ separate process beside `amq`, as `amq-keepalive` and `amq-bridge` do.
   Off-box export of Amit session content is gated by Amit's own privacy ruling.
 - Claude Code has no supported exact-turn interrupt for an independently
   running interactive session. The mailbox carrier does not use one: the
-  agent's reply is the answer. On the native path the design permits inspect
-  and weak-evidence submit only. This is design intent, not a verified submit
-  capability; see the [compatibility manifest](remote-compat.md). A
-  session-wide abort is not exact cancellation.
+  agent's reply is the answer. Native submit into Claude is live-verified;
+  its completion needs the Stop hook; cancel is unsupported. See the
+  [compatibility manifest](remote-compat.md). A session-wide abort is not
+  exact cancellation.
 - The request contract does not include terminal viewing or native Buzz
   Desktop panels.
 - The Claude Code cross-session socket wire format is not published upstream;

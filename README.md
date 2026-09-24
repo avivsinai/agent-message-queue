@@ -157,8 +157,8 @@ The optional [remote companion](cmd/amq-remote/README.md) connects a running
 session to its own Buzz agent. The default path is the session mailbox: a DM
 arrives as an AMQ message from `buzz`, and the agent's reply is the answer.
 `--native` and the relay are the other paths. It is a separate binary: `amq`
-gains no socket, and Homebrew does not install it. Commands, flags, and exit
-codes are in that README. The design is
+gains no socket. The Homebrew `amq` formula installs `amq`, `amq-acp`, and
+`amq-remote`. Commands, flags, and exit codes are in that README. The design is
 [the remote-control ADR](docs/adr-remote-control.md); pinned seams are
 [the compatibility manifest](docs/remote-compat.md).
 
