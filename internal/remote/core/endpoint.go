@@ -1986,6 +1986,12 @@ func (e *Endpoint) reconcileLive(rec *requests.Record) error {
 		// action-required — never a silent dispatch and never evidence of
 		// non-admission.
 		e.transitionLocked(rec, causeRefused, nativeEvidence{runID: ev.RunID, code: ev.RefusalCode})
+	case ev.RefusalCode != "" && ev.State == protocol.StateRejected:
+		// A DEFINITIVE pre-delivery refusal (no receipt: nothing ran), e.g.
+		// amit's refused(generation) after a session restart. Keep the typed
+		// code (stale_epoch: re-inspect and resubmit) instead of the generic
+		// native_error the default refusal would record.
+		e.transitionLocked(rec, causeRefused, nativeEvidence{code: ev.RefusalCode})
 	case ev.Class == EvidenceTentative:
 		// Bound but native ownership not yet proven. Never reject a submission
 		// that is still about to execute; re-check next tick.

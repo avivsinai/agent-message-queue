@@ -126,6 +126,7 @@ type livenessState struct {
 	live   bool
 	age    time.Duration
 	reason string
+	pid    int // the live bridge process (set only when live)
 }
 
 // publishRequest publishes one §1 request: atomic write (unique temp name,
@@ -315,7 +316,7 @@ func (b bridgeDir) liveness(now time.Time) livenessState {
 	if !rec.Live || rec.PID <= 0 {
 		return livenessState{age: age, reason: "malformed"}
 	}
-	return livenessState{live: true, age: age}
+	return livenessState{live: true, age: age, pid: rec.PID}
 }
 
 // listReceipts returns every parseable receipt, ordered oldest-first by

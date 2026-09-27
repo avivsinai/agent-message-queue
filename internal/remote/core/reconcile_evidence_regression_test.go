@@ -131,3 +131,34 @@ func TestRefusalOverProvenAdmissionEndsRejectedTyped(t *testing.T) {
 		t.Fatalf("code = %q, want expired", rec.Code)
 	}
 }
+
+// TestPreDeliveryRefusalKeepsTypedCode reproduces amit-myp1g (pi087 rig
+// 2026-09-24): amit's refused(generation) has no receipt, so the evidence is
+// NOT admitted. The record ended rejected+native_error; it must keep the
+// typed stale_epoch code.
+func TestPreDeliveryRefusalKeepsTypedCode(t *testing.T) {
+	store, now := openStore(t)
+	rt := &delegatingAttachment{inner: newFakeTarget(t, store, now)}
+	ep := core.New(core.Config{Store: store, Now: func() time.Time { return now() }})
+	ep.Register(rt)
+
+	id := "11111111-1111-4111-8111-111111111103"
+	if _, err := ep.Handle(submitCmd(id), core.Source{Host: "local"}); err != nil {
+		t.Fatalf("seed submit: %v", err)
+	}
+	key := requests.Key{CreatorHost: "local", TargetID: "fake", RequestID: id}
+	rt.lookupE = &core.Evidence{
+		Known: true, Class: core.EvidenceHistoryTerminated, Admitted: false,
+		State: protocol.StateRejected, RefusalCode: protocol.CodeStaleEpoch,
+	}
+	if err := ep.Reconcile(); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	rec, ok, err := store.Get(key)
+	if err != nil || !ok {
+		t.Fatalf("get record: %v (ok=%v)", err, ok)
+	}
+	if rec.State != protocol.StateRejected || rec.Code != protocol.CodeStaleEpoch {
+		t.Fatalf("record = %s/%q, want rejected/stale_epoch", rec.State, rec.Code)
+	}
+}
