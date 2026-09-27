@@ -92,6 +92,10 @@ type Attachment struct {
 	// receipt observed yet" — Inspect publishes the sentinel `unpinned` and
 	// submits carry an empty epoch_hint (first contact, no check).
 	epoch string
+	// epochPID is the Amit process that wrote the pinning receipt. A
+	// generation lives inside one process, so a live bridge with another
+	// pid proves the pin stale (see dropStalePinLocked). 0 = unknown.
+	epochPID int
 
 	runs      map[requests.Key]*run
 	order     []requests.Key // bind order, for bounded pruning + deterministic consume
@@ -209,7 +213,7 @@ func (a *Attachment) recover() {
 		rc := sd.rc
 		r := a.bindRunLocked(sd.key, "") // recovered history: epoch wildcard
 		r.confirmed = true
-		a.observeGenerationLocked(rc.SessionGeneration)
+		a.observeGenerationLocked(rc.SessionGeneration, rc.PID)
 		if sd.evErr != nil {
 			// §9: a refused event stream (foreign protocol) is never "no
 			// events" — bind with the refusal so Lookup surfaces it.
@@ -255,7 +259,7 @@ func (a *Attachment) lateBindLocked(key requests.Key, rc *receipt, rcErr error, 
 	case rc != nil:
 		r := a.bindRunLocked(key, "") // recovered history: epoch wildcard
 		r.confirmed = true
-		a.observeGenerationLocked(rc.SessionGeneration)
+		a.observeGenerationLocked(rc.SessionGeneration, rc.PID)
 		if evErr != nil {
 			// §9: a refused event stream (foreign protocol) is never "no
 			// events" — bind with the refusal so Lookup surfaces it.
@@ -296,9 +300,24 @@ func (a *Attachment) bindRunLocked(key requests.Key, epoch string) *run {
 // regression is self-healing: the extension answers a stale hint with
 // refused(generation), which unpins to the sentinel and lets the next
 // receipt re-pin. An invalid generation string is never pinned.
-func (a *Attachment) observeGenerationLocked(gen string) {
+func (a *Attachment) observeGenerationLocked(gen string, pid int) {
 	if gen != "" && protocol.ValidEpoch(gen) && gen != a.epoch {
 		a.epoch = gen
+		a.epochPID = pid
+	}
+}
+
+// dropStalePinLocked unpins when a live bridge runs in a different process
+// than the one whose receipt pinned the generation (amit-myp1g: after an
+// Amit restart the old pin made the first submit carry a dead epoch_hint,
+// which the extension refused). Liveness never PINS (§4); it only proves the
+// pinning process gone, so the next submit goes out as first contact and its
+// receipt pins the live generation. A same-process restart (/new, reload)
+// keeps the pid and still ends in refused(generation) → stale_epoch.
+func (a *Attachment) dropStalePinLocked(live livenessState) {
+	if a.epoch != "" && a.epochPID > 0 && live.live && live.pid > 0 && live.pid != a.epochPID {
+		a.epoch = ""
+		a.epochPID = 0
 	}
 }
 
@@ -392,7 +411,7 @@ func (a *Attachment) applyObservationLocked(r *run, o *seamObservation) {
 			// other's protocol. A §9 refusal recorded before the receipt
 			// landed (events-first ordering) must survive the receipt: only
 			// a present, validated stream (the events branch below) lifts it.
-			a.observeGenerationLocked(o.receipt.SessionGeneration)
+			a.observeGenerationLocked(o.receipt.SessionGeneration, o.receipt.PID)
 		case o.rcErr != nil && !r.confirmed:
 			// Unreadable or foreign-protocol: never consume it as evidence.
 			// Only an unconfirmed run records the error (review 816-r3
@@ -498,6 +517,7 @@ func (a *Attachment) applyEventsLocked(r *run, events []event) {
 				// back to the `unpinned` sentinel; the next delivered
 				// request's receipt re-pins the live generation.
 				a.epoch = ""
+				a.epochPID = 0
 			}
 		}
 		if r.terminal {
@@ -563,15 +583,17 @@ func (r *run) result() *protocol.Result {
 // generation, or the `unpinned` sentinel before the first receipt (§4/A4 —
 // an empty epoch would defeat stale-epoch protection because "" == "").
 func (a *Attachment) Inspect() protocol.Session {
-	a.consume() // 9a: seam reads outside a.mu; apply under it
+	a.consume()                     // 9a: seam reads outside a.mu; apply under it
+	live := a.dir.liveness(a.now()) // 9a: FS read, no lock
 	a.mu.Lock()
+	a.dropStalePinLocked(live)
 	epoch := a.epoch
 	if epoch == "" {
 		epoch = SentinelUnpinned
 	}
 	a.mu.Unlock()
 	att, status := "live", "idle"
-	if live := a.dir.liveness(a.now()); !live.live { // 9a: FS read, no lock
+	if !live.live {
 		att, status = "offline", "offline"
 	}
 	// No interaction surface is wired (Respond is already_resolved), so

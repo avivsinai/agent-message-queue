@@ -534,6 +534,55 @@ func TestGenerationRefusalDropsToSentinel(t *testing.T) {
 	}
 }
 
+// TestRestartedBridgeDropsDeadPin reproduces amit-myp1g (pi087 rig
+// 2026-09-24): a receipt from Amit pid A pinned its generation, Amit
+// restarted as pid B, and the first submit carried A's generation as
+// epoch_hint, which B refused. A live bridge in another process must unpin,
+// so the first submit goes out as first contact and completes.
+func TestRestartedBridgeDropsDeadPin(t *testing.T) {
+	a, dir := newTestAttachment(t)
+	seed := clientRef(testKey("seed"))
+	seedRequest(t, dir, seed, "")
+	writeReceipt(t, dir, seed, "gen-1", fixedNow) // pid = this process
+	if _, err := a.Submit(submitReq(testKey("seed"), "hello")); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	restarted := fmt.Sprintf(`{"protocol":%q,"live":true,"at":%q,"pid":%d,"surface":"tui"}`,
+		ProtocolV1, fixedNow.UTC().Format(time.RFC3339Nano), os.Getpid()+1)
+	if err := os.WriteFile(filepath.Join(dir, "bridge.liveness"), []byte(restarted), 0o600); err != nil {
+		t.Fatalf("write liveness: %v", err)
+	}
+	if err := os.Chtimes(filepath.Join(dir, "bridge.liveness"), fixedNow, fixedNow); err != nil {
+		t.Fatalf("chtimes liveness: %v", err)
+	}
+	s := a.Inspect()
+	if s.Epoch != SentinelUnpinned {
+		t.Fatalf("epoch after restart = %q, want sentinel %q", s.Epoch, SentinelUnpinned)
+	}
+	key := testKey("after-restart")
+	ref := clientRef(key)
+	receiptB := fmt.Sprintf(`{"protocol":%q,"ref":%q,"session_generation":"gen-2","delivered_at":%q,"pid":%d}`,
+		ProtocolV1, ref, fixedNow.UTC().Format(time.RFC3339Nano), os.Getpid()+1)
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		_ = os.WriteFile(filepath.Join(dir, "receipts", refSanitize(ref)+".json"), []byte(receiptB), 0o600)
+	}()
+	adm, err := a.Submit(core.BoundRequest{Key: key, Epoch: s.Epoch, Input: protocol.SubmitInput{Text: "q"}, NotAfter: "2036-01-01T00:00:00Z"})
+	if err != nil || !adm.Admitted {
+		t.Fatalf("first submit after restart = %+v, %v; want admitted", adm, err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "requests", refSanitize(ref)+".json"))
+	if err != nil {
+		t.Fatalf("read request: %v", err)
+	}
+	if strings.Contains(string(data), "epoch_hint") {
+		t.Fatalf("first submit after restart carried a dead epoch_hint:\n%s", data)
+	}
+	if got := a.Inspect().Epoch; got != "gen-2" {
+		t.Fatalf("epoch after first receipt = %q, want gen-2", got)
+	}
+}
+
 // --- §5 restart recovery against real files --------------------------------
 
 // TestRecoveryTableVerbatim drives the §5 recovery table against a real
