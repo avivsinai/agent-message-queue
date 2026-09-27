@@ -307,15 +307,20 @@ func (a *Attachment) observeGenerationLocked(gen string, pid int) {
 	}
 }
 
-// dropStalePinLocked unpins when a live bridge runs in a different process
-// than the one whose receipt pinned the generation (amit-myp1g: after an
-// Amit restart the old pin made the first submit carry a dead epoch_hint,
-// which the extension refused). Liveness never PINS (§4); it only proves the
-// pinning process gone, so the next submit goes out as first contact and its
-// receipt pins the live generation. A same-process restart (/new, reload)
-// keeps the pid and still ends in refused(generation) → stale_epoch.
+// dropStalePinLocked unpins when the live bridge proves the pinned
+// generation ended: it runs in a different process than the one whose
+// receipt pinned it (amit-myp1g: kill, crash, app restart), or it publishes
+// a different generation (amit-gnwsm: /new, reload, fork keep the pid).
+// Without this the first submit carried a dead epoch_hint, which the
+// extension refused. Liveness never PINS (§4): the next submit goes out as
+// first contact and its receipt pins the live generation.
 func (a *Attachment) dropStalePinLocked(live livenessState) {
-	if a.epoch != "" && a.epochPID > 0 && live.live && live.pid > 0 && live.pid != a.epochPID {
+	if a.epoch == "" || !live.live {
+		return
+	}
+	otherProcess := a.epochPID > 0 && live.pid > 0 && live.pid != a.epochPID
+	otherGeneration := live.gen != "" && protocol.ValidEpoch(live.gen) && live.gen != a.epoch
+	if otherProcess || otherGeneration {
 		a.epoch = ""
 		a.epochPID = 0
 	}
