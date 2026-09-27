@@ -58,8 +58,9 @@ representative at an online or offline event.
 ## Enforcement
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
-reported by opening a GitHub issue in this repository. All complaints will be
-reviewed and investigated promptly and fairly.
+reported privately to the maintainer at avivsinai@gmail.com. All complaints
+will be reviewed and investigated promptly and fairly. The maintainer will
+respect the privacy and security of the reporter of any incident.
 
 ## Enforcement Guidelines
 
