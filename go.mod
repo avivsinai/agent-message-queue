@@ -6,7 +6,7 @@ toolchain go1.26.8
 
 require (
 	fiatjaf.com/nostr v0.0.0-20260916040958-27e395a0f6e7
-	github.com/btcsuite/btcd/btcec/v2 v2.3.4
+	github.com/btcsuite/btcd/btcec/v2 v2.5.0
 	github.com/coder/websocket v1.8.15
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/pelletier/go-toml/v2 v2.4.3
@@ -18,7 +18,7 @@ require (
 
 require (
 	github.com/ImVexed/fasturl v0.0.0-20230304231329-4e41488060f3 // indirect
-	github.com/btcsuite/btcd/chaincfg/chainhash v1.1.0 // indirect
+	github.com/btcsuite/btcd/chainhash/v2 v2.0.0 // indirect
 	github.com/decred/dcrd/crypto/blake256 v1.1.0 // indirect
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.0 // indirect
 	github.com/josharian/intern v1.0.0 // indirect
