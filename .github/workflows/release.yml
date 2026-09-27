@@ -15,6 +15,11 @@ on:
         required: false
         type: boolean
         default: true
+      goreleaser-config-from-workflow-ref:
+        description: "Build the tag's source with .goreleaser.yaml from the dispatched ref (a tag whose packaging config failed)"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -157,13 +162,32 @@ jobs:
               text[match.start():end].strip() + "\n", encoding="utf-8"
           )
           PY
+      # A tag's source is immutable once published to the Go module proxy, so a
+      # tag whose packaging config failed is re-released from the same source
+      # with the corrected .goreleaser.yaml of the dispatched ref. Opt-in only;
+      # the v0.81.0 archive failure is the case it exists for.
+      - name: Select GoReleaser config
+        id: goreleaser_config
+        shell: bash
+        env:
+          FROM_WORKFLOW_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.goreleaser-config-from-workflow-ref == true }}
+        run: |
+          set -euo pipefail
+          if [[ "$FROM_WORKFLOW_REF" != "true" ]]; then
+            echo "args=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git fetch --no-tags --depth=1 origin "$GITHUB_SHA"
+          git show "$GITHUB_SHA:.goreleaser.yaml" > "$RUNNER_TEMP/goreleaser.yaml"
+          echo "args=--config $RUNNER_TEMP/goreleaser.yaml" >> "$GITHUB_OUTPUT"
+          echo "::notice::Building ${{ needs.prepare.outputs.tag }} source with .goreleaser.yaml from ${GITHUB_SHA}."
       - name: Release
         id: publish_release
         uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
         with:
           distribution: goreleaser
           version: '~> v2'
-          args: release --clean --release-notes ${{ runner.temp }}/RELEASE_NOTES.md
+          args: release --clean ${{ steps.goreleaser_config.outputs.args }} --release-notes ${{ runner.temp }}/RELEASE_NOTES.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
