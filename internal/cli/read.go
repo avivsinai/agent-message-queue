@@ -26,6 +26,11 @@ func runRead(args []string) error {
 		"",
 		"If the message is in inbox/new, AMQ only moves it to inbox/cur after parse and header validation succeed.",
 		"If the message in inbox/new is corrupt or malformed, AMQ moves it to DLQ and emits a dlq receipt.",
+		"",
+		"--id also resolves bridged messages by their header ID: messages delivered by amq-bridge keep",
+		"the header ID but are stored under a transfer filename (xfer-<host>-<transfer>.md). If the ID",
+		"matches more than one stored message, the command fails with a general error (exit 1) naming",
+		"both paths; a missing message exits 3.",
 	)
 	if handled, err := parseFlags(fs, args, usage); err != nil {
 		return err
@@ -79,11 +84,14 @@ func runRead(args []string) error {
 
 	path, box, err := findMessageDeliveryRoot(deliveryRoot, common.Me, filename, false)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
+		if errors.Is(err, errMessageNotFound) {
 			return NotFoundError("message not found: %s", *idFlag)
 		}
 		return err
 	}
+	// Header ID lookup can resolve a bridge transfer filename. Claims and DLQ
+	// transitions must operate on that stored filename, not the requested ID.
+	filename = filepath.Base(path)
 
 	// Parse first before moving to avoid stuck corrupt messages in cur
 	msg, err := readMessageDeliveryRoot(deliveryRoot, path)
