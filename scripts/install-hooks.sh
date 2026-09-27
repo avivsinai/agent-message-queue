@@ -19,8 +19,9 @@ hook_body() {
 # Pre-push hook: runs the static gates before allowing push; CI runs tests
 
 # git exports repo-selection variables into hooks; an inherited GIT_DIR
-# would point the checks' git commands at this repository itself. Config-injection variables are
-# scrubbed too so hook-launched git sees only on-disk configuration.
+# would point the checks' git commands at this repository itself.
+# Config-injection variables are scrubbed too so hook-launched git sees
+# only on-disk configuration.
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_COMMON_DIR \
   GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_NAMESPACE \
   GIT_CONFIG_COUNT GIT_CONFIG_PARAMETERS GIT_CONFIG_NOSYSTEM 2>/dev/null || true
