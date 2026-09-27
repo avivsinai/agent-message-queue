@@ -92,6 +92,9 @@ builds:
 archives:
   - id: amq
     ids: [amq, amq-acp, amq-remote]
+    # amq-acp and amq-remote are not built for Windows, so the Windows zip
+    # holds only amq; the Homebrew formula (macOS and Linux) gets all three.
+    allow_different_binary_count: true
     formats: [tar.gz]
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     format_overrides:
