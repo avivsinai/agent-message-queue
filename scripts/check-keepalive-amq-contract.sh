@@ -15,19 +15,23 @@ mkdir -p "$private_base"
 tmp_dir=$(mktemp -d "$private_base/probe.XXXXXX")
 amq_pid=''
 
-amq_command() {
-  env \
-    -u AM_ROOT \
-    -u AM_ROOT_ID \
-    -u AM_ME \
-    -u AM_BASE_ROOT \
-    -u AM_BASE_ROOT_ID \
-    -u AM_SESSION \
-    -u AMQ_GLOBAL_ROOT \
-    -u AMQ_WAKE_OWNER \
-    AMQ_NO_UPDATE_CHECK=1 \
-    "$amq_bin" "$@"
-}
+# An argument vector, not a function: `amq_command wake ... &` on a function
+# forks a subshell, so $! was the subshell and cleanup killed it while the
+# real wake (env's child) lived on under ppid 1 — one leaked wake per run.
+# Backgrounding env directly makes $! the wake itself (env execs amq).
+amq_command=(
+  env
+  -u AM_ROOT
+  -u AM_ROOT_ID
+  -u AM_ME
+  -u AM_BASE_ROOT
+  -u AM_BASE_ROOT_ID
+  -u AM_SESSION
+  -u AMQ_GLOBAL_ROOT
+  -u AMQ_WAKE_OWNER
+  AMQ_NO_UPDATE_CHECK=1
+  "$amq_bin"
+)
 
 cleanup() {
   if [[ -n "$amq_pid" ]] && kill -0 "$amq_pid" 2>/dev/null; then
@@ -37,10 +41,11 @@ cleanup() {
   rm -rf "$tmp_dir"
 }
 trap cleanup EXIT
+trap 'exit 130' INT TERM
 
 root="$tmp_dir/amq-root"
 ready_file="$tmp_dir/ready"
-if ! amq_command init --root "$root" --agents probe \
+if ! "${amq_command[@]}" init --root "$root" --agents probe \
   >"$tmp_dir/init.stdout" 2>"$tmp_dir/init.stderr"; then
   printf 'AMQ keepalive contract failed: candidate could not initialize isolated root\n' >&2
   sed -n '1,5p' "$tmp_dir/init.stderr" >&2
@@ -57,7 +62,7 @@ EOF
 chmod +x "$inject_via"
 
 set +e
-amq_command wake \
+"${amq_command[@]}" wake \
   --root "$root" \
   --me probe \
   --baseline-existing \
