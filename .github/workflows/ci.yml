@@ -75,6 +75,9 @@ jobs:
         run: AMQ_HOOK_SCRIPT_TESTS=1 go test -p 1 -count=1 ./internal/keepalive/hookinstall/
       - name: Smoke test
         run: make smoke
+      - name: Module, contract, and hook checks
+        # These make ci targets ran only in the old pre-push hook.
+        run: make mod-tidy-check contract-check hook-env-check
       - name: Lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:

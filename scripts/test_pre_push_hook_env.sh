@@ -1,7 +1,7 @@
 #!/bin/sh
 # Integration test for the generated pre-push hook's git-env scrub.
 # Installs the hook into a temp repo, invokes it under hostile git
-# environment variables, and proves the hook's `make ci` sees none of them.
+# environment variables, and proves the hook's `make check` sees none of them.
 set -eu
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -58,10 +58,10 @@ if ! env \
   exit 1
 fi
 
-[ -f "$REPORT" ] || { echo "FAIL: hook never ran make ci"; exit 1; }
+[ -f "$REPORT" ] || { echo "FAIL: hook never ran make check"; exit 1; }
 leaked="$(cat "$REPORT")"
 if [ -n "$(printf '%s' "$leaked" | tr -d ' ')" ]; then
-  echo "FAIL: hook leaked git env into make ci:$leaked"
+  echo "FAIL: hook leaked git env into make check:$leaked"
   exit 1
 fi
 
