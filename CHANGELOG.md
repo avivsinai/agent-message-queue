@@ -8,6 +8,15 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.81.1](https://github.com/avivsinai/agent-message-queue/compare/v0.81.0...v0.81.1) (2026-09-27)
+
+
+### Bug Fixes
+
+* **release:** allow the amq archive to hold fewer binaries on Windows ([#900](https://github.com/avivsinai/agent-message-queue/issues/900)) ([573df18](https://github.com/avivsinai/agent-message-queue/commit/573df1879dc5cc04052bedbfe949a26c377ef92e))
+* **release:** re-release a tag's source with the dispatched GoReleaser config ([#903](https://github.com/avivsinai/agent-message-queue/issues/903)) ([c761892](https://github.com/avivsinai/agent-message-queue/commit/c76189212615d9d9165587448ad84da72f083088))
+* **remote:** first amit submit after a restart completes ([#901](https://github.com/avivsinai/agent-message-queue/issues/901)) ([baf53e4](https://github.com/avivsinai/agent-message-queue/commit/baf53e47c9271c713912da3dfa4aa10f291641d8))
+
 ## [0.81.0](https://github.com/avivsinai/agent-message-queue/compare/v0.80.1...v0.81.0) (2026-09-24)
 
 
