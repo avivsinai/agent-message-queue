@@ -1,4 +1,4 @@
-.PHONY: build test fmt fmt-check vet lint ci smoke contract-check check-skills check-docs-cli docs-cli hook-env-check
+.PHONY: build test fmt fmt-check vet lint check ci smoke contract-check check-skills check-docs-cli docs-cli hook-env-check
 
 GO_FILES := $(shell find . -name '*.go' -not -path './vendor/*' -not -path './.worktrees/*' -not -path './.agent-mail/*')
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
@@ -51,7 +51,10 @@ smoke:
 	AMQ_WAKE_OWNER=smoke-inherited-wake-owner \
 	./scripts/smoke-test.sh
 
-ci: check-skills check-docs-cli mod-tidy-check fmt-check vet lint test smoke contract-check hook-env-check
+# Static gates the pre-push hook runs; tests and smoke run in CI.
+check: check-skills check-docs-cli mod-tidy-check fmt-check vet lint
+
+ci: check test smoke contract-check hook-env-check
 
 mod-tidy-check:
 	@go mod tidy -diff

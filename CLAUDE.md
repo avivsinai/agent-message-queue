@@ -53,7 +53,8 @@ make test           # go test ./...
 make fmt            # gofmt -w
 make vet            # go vet
 make lint           # golangci-lint
-make ci             # fmt-check, vet, lint, test, smoke checks
+make check          # static gates the pre-push hook runs (fmt, vet, lint, docs, skills)
+make ci             # check plus the full test suite and smoke checks (CI runs this)
 make check-skills   # validate canonical and symlinked skill content
 ```
 
@@ -236,8 +237,9 @@ AMQ messages to a teammate still require the team leader to relay them.
 
 ## Testing
 
-Run the narrowest test that exercises the owning boundary, then run `make ci`
-before a commit. Useful focused commands include:
+Run the tests of the packages you changed, narrowest first. The pre-push hook
+runs `make check`; CI runs the full `make ci` suite. Useful focused commands
+include:
 
 ```bash
 go test ./internal/fsq -run TestMaildir
@@ -283,7 +285,8 @@ not tuned.
 - Install the repository hooks with `./scripts/install-hooks.sh`.
 - Use conventional, descriptive commits such as
   `fix(wake): preserve replacement generation`.
-- Run `make ci` before committing and follow every pushed CI run to completion.
+- Run the focused tests before committing and follow every pushed CI run to
+  completion.
 - Do not commit placeholders, weaken a validator, regenerate goldens to hide a
   defect, or split code from the test that ships with it.
 
