@@ -58,9 +58,10 @@ make_fake_amq "$passing"
 "$probe" "$passing" >/dev/null
 # The probe must stop the wake it started: 170 wakes leaked (ppid 1) when
 # cleanup killed a subshell instead of the wake itself.
-if pgrep -f "$passing wake" >/dev/null; then
+leaked=$(pgrep -f "$passing wake" || true)
+if [[ -n "$leaked" ]]; then
   printf 'contract leaked its wake process after returning\n' >&2
-  pkill -f "$passing wake" || true
+  kill $leaked 2>/dev/null || true
   exit 1
 fi
 if ! grep -Eq '^init --root .+ --agents probe$' "$AMQ_KEEPALIVE_FAKE_LOG"; then
