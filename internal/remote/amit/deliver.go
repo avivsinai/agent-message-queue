@@ -86,6 +86,9 @@ type livenessRecord struct {
 	At       string `json:"at"`
 	PID      int    `json:"pid"`
 	Surface  string `json:"surface"`
+	// SessionGeneration is advisory (amit-gnwsm): it may drop a pin that no
+	// longer matches, never set one (§4).
+	SessionGeneration string `json:"session_generation,omitempty"`
 }
 
 // heartbeat / freshness: the extension refreshes the heartbeat every 2s and
@@ -126,7 +129,8 @@ type livenessState struct {
 	live   bool
 	age    time.Duration
 	reason string
-	pid    int // the live bridge process (set only when live)
+	pid    int    // the live bridge process (set only when live)
+	gen    string // the live bridge's advisory generation ("" = not published)
 }
 
 // publishRequest publishes one §1 request: atomic write (unique temp name,
@@ -282,7 +286,7 @@ func (b bridgeDir) readEvents(ref string) ([]event, error) {
 
 // liveness reads and classifies bridge.liveness (§2): heartbeat freshness
 // over the file's mtime (the doorbell pattern), 5s fresh window. The file's
-// session_generation advisory is NEVER epoch evidence (§4).
+// session_generation advisory never pins (§4); it only drops a stale pin.
 func (b bridgeDir) liveness(now time.Time) livenessState {
 	if b.live != nil {
 		return b.live(now)
@@ -316,7 +320,7 @@ func (b bridgeDir) liveness(now time.Time) livenessState {
 	if !rec.Live || rec.PID <= 0 {
 		return livenessState{age: age, reason: "malformed"}
 	}
-	return livenessState{live: true, age: age, pid: rec.PID}
+	return livenessState{live: true, age: age, pid: rec.PID, gen: rec.SessionGeneration}
 }
 
 // listReceipts returns every parseable receipt, ordered oldest-first by

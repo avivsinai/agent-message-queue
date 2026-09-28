@@ -583,6 +583,30 @@ func TestRestartedBridgeDropsDeadPin(t *testing.T) {
 	}
 }
 
+// TestSameProcessRestartDropsPin covers amit-gnwsm: /new, reload and fork
+// keep the Amit pid, so only the generation the bridge publishes in
+// bridge.liveness shows the pin is dead.
+func TestSameProcessRestartDropsPin(t *testing.T) {
+	a, dir := newTestAttachment(t)
+	seed := clientRef(testKey("seed"))
+	seedRequest(t, dir, seed, "")
+	writeReceipt(t, dir, seed, "gen-1", fixedNow)
+	if _, err := a.Submit(submitReq(testKey("seed"), "hello")); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	renewed := fmt.Sprintf(`{"protocol":%q,"live":true,"at":%q,"pid":%d,"surface":"tui","session_generation":"gen-2"}`,
+		ProtocolV1, fixedNow.UTC().Format(time.RFC3339Nano), os.Getpid())
+	if err := os.WriteFile(filepath.Join(dir, "bridge.liveness"), []byte(renewed), 0o600); err != nil {
+		t.Fatalf("write liveness: %v", err)
+	}
+	if err := os.Chtimes(filepath.Join(dir, "bridge.liveness"), fixedNow, fixedNow); err != nil {
+		t.Fatalf("chtimes liveness: %v", err)
+	}
+	if got := a.Inspect().Epoch; got != SentinelUnpinned {
+		t.Fatalf("epoch after same-process restart = %q, want sentinel %q", got, SentinelUnpinned)
+	}
+}
+
 // --- §5 restart recovery against real files --------------------------------
 
 // TestRecoveryTableVerbatim drives the §5 recovery table against a real
