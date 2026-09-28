@@ -8,6 +8,21 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.81.2](https://github.com/avivsinai/agent-message-queue/compare/v0.81.1...v0.81.2) (2026-09-28)
+
+
+### Bug Fixes
+
+* **cli:** resolve bridged messages by header ID ([#849](https://github.com/avivsinai/agent-message-queue/issues/849)) ([43e9574](https://github.com/avivsinai/agent-message-queue/commit/43e95743fefd80b79aa8c3704ac9b8c80b62c838))
+* **remote:** drop a dead amit pin after /new, reload or fork ([#902](https://github.com/avivsinai/agent-message-queue/issues/902)) ([0c83d8a](https://github.com/avivsinai/agent-message-queue/commit/0c83d8a78ac10deff2a0a39cb91c1b780105a50f))
+* **remote:** keep admission evidence when reconcile races submit ([#909](https://github.com/avivsinai/agent-message-queue/issues/909)) ([a197209](https://github.com/avivsinai/agent-message-queue/commit/a197209ecc7d7e3f5343aea04a2f05e1d56487c0))
+* **scripts:** stop the keepalive contract probe from leaking its wake ([#906](https://github.com/avivsinai/agent-message-queue/issues/906)) ([4d9665e](https://github.com/avivsinai/agent-message-queue/commit/4d9665ef0fa666ebeed1df0e6c108b27be9f8431))
+
+
+### Dependencies
+
+* bump github.com/btcsuite/btcd/btcec/v2 from 2.3.4 to 2.5.0 ([#899](https://github.com/avivsinai/agent-message-queue/issues/899)) ([2ef9667](https://github.com/avivsinai/agent-message-queue/commit/2ef96676ece5fb8105f97d21fa08434eb902af82))
+
 ## [0.81.1](https://github.com/avivsinai/agent-message-queue/compare/v0.81.0...v0.81.1) (2026-09-27)
 
 
