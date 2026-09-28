@@ -1,0 +1,2 @@
+{"protocol":"amq:pi-bridge:v1","ref":"amqr1_nbxxg5brabygsljraaydambqgaydambngaydambngqydambnhaydambngaydambqgaydambqgayq","event":"started","at":"2000-01-01T00:00:00.000Z"}
+{"protocol":"amq:pi-bridge:v1","ref":"amqr1_nbxxg5brabygsljraaydambqgaydambngaydambngqydambnhaydambngaydambqgaydambqgayq","event":"completed","text":"two files changed","at":"2000-01-01T00:00:00.000Z"}

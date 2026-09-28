@@ -34,3 +34,6 @@ __pycache__/
 /amq-owner-sign
 .pi/
 .beads.gate.lock
+
+# pi package (integrations/pi)
+node_modules/

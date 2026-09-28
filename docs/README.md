@@ -23,6 +23,8 @@ syntax comes from the [generated CLI reference](cli.md).
 
 - [Bridge companion](../cmd/amq-bridge/README.md) — exchange messages between hosts.
 - [ACP companion](../cmd/amq-acp/README.md) — deliver ACP prompts to an AMQ inbox.
+- [pi extension](../integrations/pi/README.md) — reach a live pi session from
+  `amq-remote`; its wire contract is the [pi bridge protocol](pi-bridge-protocol.md).
 - [Adapter contract](adapter-contract.md) — convert external events into messages.
 - [Launch API](launch-api.md) — version negotiation and prepare/apply integration.
 - [Extension metadata](adr-layer-extensions.md) — store layer-owned data without

@@ -1,0 +1,1 @@
+{"protocol":"amq:pi-bridge:v1","ref":"amqr1_nbxxg5brabygsljraaydambqgaydambngaydambngqydambnhaydambngaydambqgaydambqgaza","event":"failed","error":"the pi bridge restarted before the request settled; the outcome is unknown","at":"2000-01-01T00:00:00.000Z"}
