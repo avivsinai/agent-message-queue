@@ -459,3 +459,39 @@ func TestB14cAdmitDeferredStaysDeferredWhenReserved(t *testing.T) {
 		t.Fatalf("B never admitted after sibling resolved: state=%s", rec.State)
 	}
 }
+
+// TestSubmitRacedByReconcileKeepsEvidence reproduces CI run 36407766979
+// (TestCLISubmitPrintsAchievedEvidence flake): a reconcile tick moved the
+// admitted record to running while Submit was in flight, and the reply lost
+// Outcome.Evidence.
+func TestSubmitRacedByReconcileKeepsEvidence(t *testing.T) {
+	ep, rt, store, _ := b14cEndpoint(t)
+	rt.HoldAfterAdmit()
+	t.Cleanup(rt.ReleaseAfterAdmit)
+	id := "11111111-1111-4111-8111-1111111111e1"
+	done := make(chan protocol.Reply, 1)
+	go func() {
+		out, _ := ep.Handle(submitCmd(id), core.Source{Host: "local"})
+		rep, _ := out.(protocol.Reply)
+		done <- rep
+	}()
+	if !b14cWait(func() bool { return rt.HasRun(id) }) {
+		t.Fatal("submit never admitted a run")
+	}
+	if err := ep.Tick(); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	k := requests.Key{CreatorHost: "local", TargetID: "fake", RequestID: id}
+	if rec, ok, _ := store.Get(k); !ok || rec.State != protocol.StateRunning {
+		t.Fatalf("precondition: state=%s, want running", recState(rec, ok))
+	}
+	rt.ReleaseAfterAdmit()
+	select {
+	case rep := <-done:
+		if rep.Outcome.Evidence != protocol.EvidenceAdmitted {
+			t.Fatalf("Outcome.Evidence=%q, want %q", rep.Outcome.Evidence, protocol.EvidenceAdmitted)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("submit did not return after the gate opened")
+	}
+}

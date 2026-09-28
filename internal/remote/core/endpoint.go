@@ -2302,7 +2302,13 @@ func (e *Endpoint) finishAdmissionLocked(rec *requests.Record, exists bool, t *t
 	if rec.Cancel != nil {
 		out.Disposition = rec.Cancel.Disposition
 	}
+	// A reconcile tick that saw the admitted run already moved the record to
+	// running; the admission this Submit achieved still carries its evidence.
+	admittedRunning := adm.Admitted && nerr == nil && rec.State == protocol.StateRunning
 	e.mu.Unlock()
+	if admittedRunning {
+		out.Evidence = achievedEvidence(t)
+	}
 	e.publishRevision(rec)
 	return protocol.Reply{Snapshot: snap, Outcome: out}, nil
 }
