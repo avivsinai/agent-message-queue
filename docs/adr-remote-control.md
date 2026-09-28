@@ -6,7 +6,7 @@ Accepted.
 
 ## Context
 
-Coding harnesses (Codex, Amit on pi, Claude Code) run on a laptop under a
+Coding harnesses (Codex, pi, Claude Code) run on a laptop under a
 person's own terminal or app. Another client, a phone on Buzz or an agent on a
 second host, wants to see what such a session does, give it work, follow that
 work to its result, and cancel it. The first-party answers route through a
@@ -153,11 +153,12 @@ separate process beside `amq`, as `amq-keepalive` and `amq-bridge` do.
   `turn/start`, admits only after our own `userMessage` item (keyed by
   `clientUserMessageId`) confirms the text landed; an unconfirmed turn is
   refused, never admitted.
-- Amit attaches through an extension that owns the input boundary in the Amit
-  repository. Because pi's `sendUserMessage` cannot report its own rejection,
-  the Amit adapter's evidence class is `submitted`, never `admitted`, and it
-  leaves a record `uncertain` rather than `rejected` when it retains nothing.
-  Off-box export of Amit session content is gated by Amit's own privacy ruling.
+- pi attaches through the pi-bridge, a pi extension that owns the input
+  boundary inside the pi process and exchanges request, receipt, and event
+  files with the adapter. Because pi's `sendUserMessage` cannot report its
+  own rejection, the pi adapter's evidence class is `submitted`, never
+  `admitted`, and it leaves a record `uncertain` rather than `rejected` when
+  it retains nothing.
 - Claude Code has no supported exact-turn interrupt for an independently
   running interactive session. The mailbox carrier does not use one: the
   agent's reply is the answer. Native submit into Claude is live-verified;

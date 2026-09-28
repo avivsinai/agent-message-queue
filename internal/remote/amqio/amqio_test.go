@@ -247,7 +247,7 @@ func TestImportConflictRepliesToSender(t *testing.T) {
 	}
 }
 
-// TestImportNoopCancelRepliesToSender pins Pro/amit-pi's Q4 finding: a no-op
+// TestImportNoopCancelRepliesToSender pins a pre-merge review finding: a no-op
 // terminal cancel carries an Outcome disposition with an empty Code and never
 // publishes a revision, so the carrier must still reply to the sender.
 func TestImportNoopCancelRepliesToSender(t *testing.T) {

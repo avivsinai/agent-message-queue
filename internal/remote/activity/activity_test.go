@@ -192,7 +192,7 @@ func TestClaudeTranscriptPublishesDecryptableFrames(t *testing.T) {
 		got = append(got, evt)
 		return nil
 	})
-	const hiddenPath = "/Users/aviv.s/secret/transcript.go"
+	const hiddenPath = "/home/user/secret/transcript.go"
 	lines := []string{
 		`{"type":"user","uuid":"u1","sessionId":"thread-1","timestamp":"2026-09-23T06:00:00.000000000Z","message":{"role":"user","content":"where is the parser"}}`,
 		`{"type":"assistant","uuid":"a1","sessionId":"thread-1","timestamp":"2026-09-23T06:00:01.000000000Z","message":{"role":"assistant","content":[{"type":"text","text":"Looking."},{"type":"tool_use","id":"toolu_1","name":"Read","input":{"file_path":"` + hiddenPath + `"}}]}}`,

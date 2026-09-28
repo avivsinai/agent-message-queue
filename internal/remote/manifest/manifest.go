@@ -99,7 +99,7 @@ type Share struct {
 
 // Adapter is one adapter instance in the manifest.
 type Adapter struct {
-	// Kind names the factory: "fake", "codex", "amit", "claude".
+	// Kind names the factory: "fake", "codex", "pi", "claude".
 	Kind string `json:"kind"`
 	// Target is the target id; it is the manifest key and must be unique.
 	Target string `json:"target"`

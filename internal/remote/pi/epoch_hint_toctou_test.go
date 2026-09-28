@@ -1,4 +1,4 @@
-package amit
+package pi
 
 import (
 	"errors"
@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-// TestSubmitEpochHintValidatedByGate pins review 816-r3's P1: the §4 epoch
+// TestSubmitEpochHintValidatedByGate pins review 816-r3's P1: the epoch
 // gate and the published epoch_hint must be ONE critical section. A
 // concurrent receipt pin (or a refused(generation) unpin) inside the window
 // between the gate check and the publish must not change the hint: a request
@@ -46,7 +46,7 @@ func TestSubmitEpochHintValidatedByGate(t *testing.T) {
 	}
 
 	stampLiveness(t, dir, fixedNow)
-	a, err := New("amit", "agent1", bridgeDir{dir: dir, live: liveHook})
+	a, err := New("pi-1", "agent1", bridgeDir{dir: dir, names: piWire, live: liveHook})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -140,7 +140,7 @@ func TestSubmitEpochHintNotOmittedByUnpin(t *testing.T) {
 		})
 		return livenessState{live: true}
 	}
-	a, err := New("amit", "agent1", bridgeDir{dir: dir, live: liveHook})
+	a, err := New("pi-1", "agent1", bridgeDir{dir: dir, names: piWire, live: liveHook})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -201,7 +201,7 @@ func contains(s, sub string) bool {
 	return strings.Contains(s, sub)
 }
 
-// TestForeignStreamRefusalSurvivesRotation pins review 816-r4's P1: a §9
+// TestForeignStreamRefusalSurvivesRotation pins review 816-r4's P1: a protocol-string
 // refusal of a foreign-protocol event stream is proof about the SEAM, not
 // about one file. When the v2 log later rotates away, readEvents returns
 // (nil, nil) — and that must NOT clear the refusal: a v1 receipt plus an
@@ -215,7 +215,7 @@ func TestForeignStreamRefusalSurvivesRotation(t *testing.T) {
 	ref := clientRef(key)
 	seedRequest(t, dir, ref, "")
 	writeReceipt(t, dir, ref, "gen-1", fixedNow)
-	appendEvents(t, dir, ref, fmt.Sprintf(`{"protocol":"amit:amq-remote:v2","event":"completed","ref":%q,"text":"done"}`, ref))
+	appendEvents(t, dir, ref, fmt.Sprintf(`{"protocol":"amq:pi-bridge:v2","event":"completed","ref":%q,"text":"done"}`, ref))
 
 	// Step 1: the foreign line is visible — the stream is refused.
 	ev, err := a.Lookup(key, "gen-1")
@@ -319,7 +319,7 @@ func TestStaleReceiptReadErrorCannotWedgeConfirmedRun(t *testing.T) {
 }
 
 // TestReceiptDoesNotLiftForeignStreamRefusal pins review 816-r5's P1 (the
-// events-first ordering): a §9 refusal recorded while the run is still
+// events-first ordering): a protocol-string refusal recorded while the run is still
 // unconfirmed (a v2 event log visible, no receipt yet) must SURVIVE the
 // v1 receipt landing afterwards. The receipt and the event log are
 // different files — reading one proves nothing about the other's protocol,
@@ -336,7 +336,7 @@ func TestReceiptDoesNotLiftForeignStreamRefusal(t *testing.T) {
 	// A Submit binds the run unconfirmed (the bridge does not answer inside
 	// the poll window) and the poll's readSeamFor carries the stream
 	// refusal, which applyObservationLocked records.
-	appendEvents(t, dir, ref, fmt.Sprintf(`{"protocol":"amit:amq-remote:v2","event":"completed","ref":%q,"text":"done"}`, ref))
+	appendEvents(t, dir, ref, fmt.Sprintf(`{"protocol":"amq:pi-bridge:v2","event":"completed","ref":%q,"text":"done"}`, ref))
 	stampLiveness(t, dir, fixedNow)
 	if _, serr := a.Submit(submitReq(key, "hello")); serr == nil {
 		t.Fatalf("step 1: Submit err = nil; want the uncertain no-receipt error")
@@ -349,7 +349,7 @@ func TestReceiptDoesNotLiftForeignStreamRefusal(t *testing.T) {
 		t.Fatalf("step 1: run not bound by Submit")
 	}
 	if !refused {
-		t.Fatalf("step 1: §9 refusal not recorded on the unconfirmed run")
+		t.Fatalf("step 1: protocol-string refusal not recorded on the unconfirmed run")
 	}
 	if _, err := a.Lookup(key, SentinelUnpinned); err == nil || !errors.Is(err, ErrForeignEventStream) {
 		t.Fatalf("step 1: Lookup err = %v, want the refusal surfaced", err)

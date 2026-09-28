@@ -97,7 +97,7 @@ func New(targetID, epoch string) *Runtime {
 }
 
 // WithEvidence overrides the session evidence projection (default: submit=
-// admitted). Tests use it to simulate a weaker-evidence adapter (e.g. Amit's
+// admitted). Tests use it to simulate a weaker-evidence adapter (e.g. pi's
 // submit=submitted) so the endpoint's MinEvidence floor can be exercised.
 // Passing nil explicitly sets the projection to nil (an adapter that publishes
 // no evidence), distinguishable from never calling WithEvidence at all.

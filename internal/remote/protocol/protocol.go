@@ -146,7 +146,7 @@ type SubmitInput struct {
 // it does not rank unrelated evidence kinds (completion/approval).
 const (
 	// EvidenceSubmitted: the adapter delivered the prompt to the harness's
-	// input boundary but cannot prove the harness admitted it to a run. Amit's
+	// input boundary but cannot prove the harness admitted it to a run. pi's
 	// evidence class (its sendUserMessage cannot report its own rejection).
 	EvidenceSubmitted = "submitted"
 	// EvidenceAdmitted: the adapter proved the harness admitted the prompt to a

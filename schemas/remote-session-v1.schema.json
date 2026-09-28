@@ -10,7 +10,7 @@
     "schema": { "const": "amq.remote.session/1" },
     "target_id": { "type": "string", "minLength": 1, "maxLength": 128 },
     "epoch": { "type": "string", "minLength": 1, "maxLength": 128 },
-    "harness": { "enum": ["codex", "amit", "claude_code", "fake"] },
+    "harness": { "enum": ["codex", "pi", "claude_code", "fake"] },
     "display_name": { "type": "string", "maxLength": 256 },
     "host": { "type": "string", "maxLength": 128 },
     "project": { "type": "string", "maxLength": 1024, "description": "Working directory or project label as the harness reports it." },

@@ -1,31 +1,30 @@
-// Package amit is the Amit (pi) adapter factory. It registers the
-// kind:"amit" factory under the named-factory registry so a manifest entry
-// `{"kind":"amit","target":"amit","config":{"handle":"<session handle>"}}`
-// builds an AmitAttachment without editing serve.
+// Package pi is the pi coding-agent adapter factory. It registers the
+// kind:"pi" factory under the named-factory registry so a manifest entry
+// `{"kind":"pi","target":"pi-1","config":{"handle":"<session handle>"}}`
+// builds an Attachment without editing serve.
 //
-// The adapter implements the amit-remote contract v1 (packages/amit/
-// extensions/amit-remote/CONTRACT.md, merged to amit master as 1e21930a).
-// It is extension-only: it does not spawn, own, or supervise the Amit
-// process (ADR invariant 1 — up supervises serve only; serve never owns a
-// harness). All coordination happens through the contract's file seam under
-// <AM_ROOT>/agents/<handle>/extensions/amit-remote/:
+// The adapter implements the pi-bridge protocol v1. The bridge is a pi
+// extension; this adapter is extension-only: it does not spawn, own, or
+// supervise the pi process (ADR invariant 1 — up supervises serve only;
+// serve never owns a harness). All coordination happens through the
+// protocol's file seam under <AM_ROOT>/agents/<handle>/extensions/pi-bridge/:
 //
 //	requests/<ref>.json   written by THIS adapter (atomic, create-new)
 //	receipts/<ref>.json   read by THIS adapter (admission proof)
 //	events/<ref>.jsonl    read by THIS adapter (terminal evidence)
 //	bridge.liveness       read by THIS adapter (heartbeat freshness)
 //
-// Ownership (contract §8): the adapter writes ONLY requests/<ref>.json and
+// Ownership (protocol: ownership): the adapter writes ONLY requests/<ref>.json and
 // reads ONLY receipts/, events/, and bridge.liveness. It never touches pi
 // internals, the doorbell layer, or any other extension directory.
 //
 // Evidence: pi's sendUserMessage returns void and swallows rejections, and
 // v1 has no native admission primitive — the per-ref RECEIPT is the only
-// admission proof (contract §2). Until a receipt is observed the adapter
-// publishes the sentinel epoch `unpinned` (§4/A4); the first receipt pins
+// admission proof (protocol: receipts). Until a receipt is observed the adapter
+// publishes the sentinel epoch `unpinned` (protocol: session generation and epoch); the first receipt pins
 // the session generation. A key the adapter retains nothing about is
 // EvidenceUnknown, never EvidenceNone.
-package amit
+package pi
 
 import (
 	"context"
@@ -45,54 +44,54 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/requests"
 )
 
-// config is the adapter-specific config block for an amit manifest entry.
+// config is the adapter-specific config block for a pi manifest entry.
 type config struct {
-	// Handle is the AMQ session handle whose amit-remote extension
-	// directory this adapter coordinates with. The (root, handle) pair must
-	// match the session identity entry the Amit-side extension resolved
-	// (contract §Identity: identity entry is the source of truth, no env
-	// fallback). The manifest is AMQ-owned (contract §8), so the handle is
+	// Handle is the AMQ session handle whose bridge extension directory
+	// this adapter coordinates with. The (root, handle) pair must match the
+	// session identity entry the pi-side extension resolved
+	// (protocol: identity and layout; the identity entry is the source of
+	// truth, no env fallback). The manifest is AMQ-owned (protocol: ownership), so the handle is
 	// stated here explicitly — never derived from AM_ME/AM_ROOT env.
 	Handle string `json:"handle"`
 }
 
 // run is one bound request tracked by the adapter. The durable record is
 // the extension's (receipts + events); this struct is the in-memory
-// correlation the adapter rebuilds from those files on attach (§5).
+// correlation the adapter rebuilds from those files on attach (protocol: adapter recovery and evidence).
 type run struct {
 	key     requests.Key
 	ref     string
 	runID   string
 	epoch   string // epoch the submit was bound under; "" = recovered history (any epoch matches)
 	state   protocol.State
-	refused protocol.Code // set by a definitive refused event (§3), mapped per §6/A3
+	refused protocol.Code // set by a definitive refused event, mapped to a typed code (protocol: events; adapter recovery and evidence)
 
 	text      strings.Builder
 	errText   string
 	nativeRef string
 
-	confirmed bool  // receipt observed — admission proven (contract §2)
-	terminal  bool  // first terminal event consumed (first-terminal-wins, §3)
+	confirmed bool  // receipt observed — admission proven (protocol: receipts)
+	terminal  bool  // first terminal event consumed (first-terminal-wins; protocol: events)
 	acked     bool  // endpoint acknowledged the retained result
 	notFound  error // last seam error that blocks evidence (never guessed around)
-	// eventsRefused is a §9 refusal of the event stream (foreign protocol).
-	// Unlike an A2 unreadable log it is surfaced by Lookup: a refused stream
+	// eventsRefused is a protocol-string refusal of the event stream (foreign protocol).
+	// Unlike an unreadable log it is surfaced by Lookup: a refused stream
 	// is never "no events" (never confirmed-running).
 	eventsRefused error
 }
 
-// Attachment implements core.Attachment over the amit-remote file seam. It
+// Attachment implements core.Attachment over the pi-bridge file seam. It
 // never touches the local editor and owns no process.
 type Attachment struct {
 	mu     sync.Mutex
 	target string
 	handle string
 	dir    bridgeDir
-	// epoch is the receipt-pinned session generation (§4). Empty means "no
+	// epoch is the receipt-pinned session generation (protocol: session generation and epoch). Empty means "no
 	// receipt observed yet" — Inspect publishes the sentinel `unpinned` and
 	// submits carry an empty epoch_hint (first contact, no check).
 	epoch string
-	// epochPID is the Amit process that wrote the pinning receipt. A
+	// epochPID is the pi process that wrote the pinning receipt. A
 	// generation lives inside one process, so a live bridge with another
 	// pid proves the pin stale (see dropStalePinLocked). 0 = unknown.
 	epochPID int
@@ -103,9 +102,9 @@ type Attachment struct {
 	nextID    int
 	now       func() time.Time
 	// submitWait bounds the post-publication receipt poll in Submit. The
-	// extension writes the receipt when it delivers (§2); a poll window
+	// extension writes the receipt when it delivers (protocol: receipts); a poll window
 	// that expires with a live bridge leaves the record UNCERTAIN, never
-	// rejected (AMQ never replays a ref, §2).
+	// rejected (AMQ never replays a ref; protocol: receipts).
 	submitWait time.Duration
 }
 
@@ -122,13 +121,13 @@ const submitPollStep = 25 * time.Millisecond
 
 // New builds an attachment over the contract's file seam for the manifest
 // target. The epoch is never an argument: it is OBSERVED from receipts
-// (§4) — until the first receipt Inspect publishes the `unpinned` sentinel.
+// (protocol: session generation and epoch) — until the first receipt Inspect publishes the `unpinned` sentinel.
 func New(target, handle string, dir bridgeDir) (*Attachment, error) {
 	if target == "" {
-		return nil, fmt.Errorf("amit: target is required")
+		return nil, fmt.Errorf("pi: target is required")
 	}
 	if handle == "" {
-		return nil, fmt.Errorf("amit: handle is required")
+		return nil, fmt.Errorf("pi: handle is required")
 	}
 	a := &Attachment{
 		target:     target,
@@ -139,47 +138,51 @@ func New(target, handle string, dir bridgeDir) (*Attachment, error) {
 		now:        time.Now,
 		submitWait: defaultSubmitWait,
 	}
-	// §5 restart recovery: rebuild in-memory correlation from the durable
+	// Restart recovery: rebuild in-memory correlation from the durable
 	// seam BEFORE any endpoint call. A recovered attachment never
 	// redispatches: an existing request file plus any receipt/event answers
-	// from history (§5).
+	// from history (protocol: adapter recovery and evidence).
 	a.recover()
 	return a, nil
 }
 
-// Factory builds an AmitAttachment from a registry.FactoryConfig.
+// Factory builds a kind "pi" Attachment from a registry.FactoryConfig.
 func Factory(_ context.Context, cfg registry.FactoryConfig) (core.Attachment, error) {
+	return build(cfg, piWire)
+}
+
+func build(cfg registry.FactoryConfig, names wireNames) (core.Attachment, error) {
 	var c config
 	if len(cfg.Config) > 0 {
 		if err := json.Unmarshal(cfg.Config, &c); err != nil {
-			return nil, fmt.Errorf("parse amit config: %w", err)
+			return nil, fmt.Errorf("parse pi config: %w", err)
 		}
 	}
 	if c.Handle == "" {
-		return nil, fmt.Errorf("amit config: handle is required (the amit-remote session handle)")
+		return nil, fmt.Errorf("pi config: handle is required (the pi session handle)")
 	}
 	if err := fsq.ValidateHandle(c.Handle); err != nil {
-		return nil, fmt.Errorf("amit config: invalid handle: %v", err)
+		return nil, fmt.Errorf("pi config: invalid handle: %v", err)
 	}
-	dir := bridgeDir{dir: bridgePath(cfg.Root, c.Handle)}
+	dir := bridgeDir{dir: bridgePath(cfg.Root, c.Handle, names), names: names}
 	if st, err := os.Stat(dir.dir); err != nil || !st.IsDir() {
-		return nil, fmt.Errorf("amit: amit-remote extension directory not found at %s (is the amit-remote extension running for handle %q?)", dir.dir, c.Handle)
+		return nil, fmt.Errorf("pi: bridge extension directory not found at %s (is the %s extension running for handle %q?)", dir.dir, names.dir, c.Handle)
 	}
 	return New(cfg.Target, c.Handle, dir)
 }
 
 func init() {
-	registry.Register("amit", Factory)
+	registry.Register("pi", Factory)
 }
 
 // clientRef is the request identity: protocol.EncodeRef of the record key,
-// exactly as the contract's §Identity defines it. The extension keys its
+// exactly as the protocol's identity and layout section defines it. The extension keys its
 // receipts and events by the same ref.
 func clientRef(key requests.Key) string {
 	return protocol.EncodeRef(key.CreatorHost, key.TargetID, key.RequestID)
 }
 
-// recover rebuilds runs from receipts/ + events/ (§5). Receipts are
+// recover rebuilds runs from receipts/ + events/ (protocol: adapter recovery and evidence). Receipts are
 // iterated oldest-first so the pinned epoch ends at the newest receipt's
 // generation (the freshest receipt-proven observation). 9a: the seam reads
 // happen without the lock; the bind+apply section takes it. Junk files
@@ -215,7 +218,7 @@ func (a *Attachment) recover() {
 		r.confirmed = true
 		a.observeGenerationLocked(rc.SessionGeneration, rc.PID)
 		if sd.evErr != nil {
-			// §9: a refused event stream (foreign protocol) is never "no
+			// A refused event stream (foreign protocol) is never "no
 			// events" — bind with the refusal so Lookup surfaces it.
 			r.eventsRefused = sd.evErr
 		} else {
@@ -228,7 +231,7 @@ func (a *Attachment) recover() {
 // the seam reads happen outside a.mu), then binds under it. A receipt for a
 // ref whose run is not yet in the map (published by a prior process, or
 // seeded/published between calls) binds a wildcard-epoch run with the
-// receipt-proven state — history never hides behind an in-memory miss (§5).
+// receipt-proven state — history never hides behind an in-memory miss (protocol: adapter recovery and evidence).
 func (a *Attachment) lateBind(key requests.Key) {
 	a.mu.Lock()
 	_, ok := a.runs[key]
@@ -261,14 +264,14 @@ func (a *Attachment) lateBindLocked(key requests.Key, rc *receipt, rcErr error, 
 		r.confirmed = true
 		a.observeGenerationLocked(rc.SessionGeneration, rc.PID)
 		if evErr != nil {
-			// §9: a refused event stream (foreign protocol) is never "no
+			// A refused event stream (foreign protocol) is never "no
 			// events" — bind with the refusal so Lookup surfaces it.
 			r.eventsRefused = evErr
 		} else {
 			a.applyEventsLocked(r, events)
 		}
 	case rcErr != nil:
-		// Unreadable or foreign-protocol receipt (§9): bind unconfirmed with
+		// Unreadable or foreign-protocol receipt (protocol: protocol string): bind unconfirmed with
 		// the seam error so Lookup surfaces it instead of guessing it into
 		// evidence — or silently ignoring a record the endpoint still holds.
 		r := a.bindRunLocked(key, "")
@@ -283,17 +286,17 @@ func (a *Attachment) bindRunLocked(key requests.Key, epoch string) *run {
 	r := &run{
 		key:       key,
 		ref:       ref,
-		runID:     "amit:" + ref,
+		runID:     a.dir.names.runPrefix + ref,
 		epoch:     epoch,
 		state:     protocol.StateRunning,
-		nativeRef: "amit-remote " + ref,
+		nativeRef: a.dir.names.dir + " " + ref,
 	}
 	a.runs[key] = r
 	a.order = append(a.order, key)
 	return r
 }
 
-// observeGenerationLocked applies §4's epoch rule: only receipts pin. Any
+// observeGenerationLocked applies the epoch rule: only receipts pin. Any
 // valid, different generation replaces the current pin — the code does NOT
 // order observations by receipt time (P2-A, review 816-r3): with two
 // concurrent readers, a stale read can momentarily regress the pin. The
@@ -309,10 +312,10 @@ func (a *Attachment) observeGenerationLocked(gen string, pid int) {
 
 // dropStalePinLocked unpins when the live bridge proves the pinned
 // generation ended: it runs in a different process than the one whose
-// receipt pinned it (amit-myp1g: kill, crash, app restart), or it publishes
-// a different generation (amit-gnwsm: /new, reload, fork keep the pid).
+// receipt pinned it (kill, crash, app restart), or it publishes a different
+// generation (/new, reload, fork keep the pid).
 // Without this the first submit carried a dead epoch_hint, which the
-// extension refused. Liveness never PINS (§4): the next submit goes out as
+// extension refused. Liveness never PINS (protocol: session generation and epoch): the next submit goes out as
 // first contact and its receipt pins the live generation.
 func (a *Attachment) dropStalePinLocked(live livenessState) {
 	if a.epoch == "" || !live.live {
@@ -333,7 +336,7 @@ type seamObservation struct {
 	receipt  *receipt // nil = absent or already confirmed
 	rcErr    error    // unreadable/foreign-protocol receipt (never guessed around)
 	events   []event
-	evErr    error // unreadable/foreign-protocol event stream (A2 vs §9)
+	evErr    error // unreadable/foreign-protocol event stream (unreadable vs protocol-string refusal)
 	readEvts bool  // events were read (skip when terminal already known)
 }
 
@@ -355,8 +358,8 @@ func (a *Attachment) consume() {
 			continue
 		}
 		readRc := !r.confirmed
-		// e3b (review-816-r6 P2-1): a run whose stream was REFUSED (§9
-		// foreign protocol) must keep re-reading the events file even after
+		// e3b (review-816-r6 P2-1): a run whose stream was REFUSED (foreign
+		// protocol) must keep re-reading the events file even after
 		// the run went terminal — otherwise an operator rewriting the seam
 		// as clean v1 lines can never lift the refusal and every Lookup on
 		// the run returns the refusal error instead of the terminal result.
@@ -413,7 +416,7 @@ func (a *Attachment) applyObservationLocked(r *run, o *seamObservation) {
 			r.notFound = nil
 			// NOT cleared here (review 816-r5 P1): the receipt and the event
 			// log are different files — reading one proves nothing about the
-			// other's protocol. A §9 refusal recorded before the receipt
+			// other's protocol. A protocol-string refusal recorded before the receipt
 			// landed (events-first ordering) must survive the receipt: only
 			// a present, validated stream (the events branch below) lifts it.
 			a.observeGenerationLocked(o.receipt.SessionGeneration, o.receipt.PID)
@@ -430,8 +433,8 @@ func (a *Attachment) applyObservationLocked(r *run, o *seamObservation) {
 	if o.readEvts {
 		switch {
 		case o.evErr != nil:
-			// §9/A2 split: a rotated or temporarily unreadable log is
-			// tolerated (A2 — keep state, retry next refresh), but a
+			// Split: a rotated or temporarily unreadable log is
+			// tolerated (keep state, retry next refresh), but a
 			// foreign-protocol stream is REFUSED, never read as "no events"
 			// (recovery row 3 would map that to confirmed-running, hiding a
 			// terminal state).
@@ -448,16 +451,16 @@ func (a *Attachment) applyObservationLocked(r *run, o *seamObservation) {
 			a.applyEventsLocked(r, o.events)
 		default:
 			// Absent-or-empty log: keep state and any prior refusal
-			// exactly as they are (A2), never clear, never re-apply.
+			// exactly as they are, never clear, never re-apply.
 			a.applyEventsLocked(r, o.events)
 		}
 	}
 }
 
-// applyEventsLocked applies the ref's event stream (§3). The FIRST terminal
+// applyEventsLocked applies the ref's event stream (protocol: events). The FIRST terminal
 // event is final for the ref; later lines never overwrite it. A refused
 // event maps to the endpoint's typed refusal codes: fire-time window expiry
-// with a receipt present → expired (A3: the receipt STAYS — admission
+// with a receipt present → expired (the receipt STAYS — admission
 // happened, execution was refused), generation mismatch → stale_epoch,
 // busy → busy, anything else → native_error.
 func (a *Attachment) applyEventsLocked(r *run, events []event) {
@@ -516,7 +519,7 @@ func (a *Attachment) applyEventsLocked(r *run, events []event) {
 			r.state = protocol.StateRejected
 			r.refused = refusalCodeFor(ev.Reason)
 			if ev.Reason == "generation" {
-				// §4: the pinned generation is proven stale. The refused
+				// The pinned generation is proven stale. The refused
 				// event carries no live generation (the extension refused
 				// pre-delivery and wrote no receipt), so the adapter drops
 				// back to the `unpinned` sentinel; the next delivered
@@ -526,12 +529,12 @@ func (a *Attachment) applyEventsLocked(r *run, events []event) {
 			}
 		}
 		if r.terminal {
-			break // first-terminal-wins (§3): later lines are not evidence
+			break // first-terminal-wins (protocol: events): later lines are not evidence
 		}
 	}
 }
 
-// refusalCodeFor maps a §3 refused reason to the endpoint's typed codes.
+// refusalCodeFor maps a refused reason to the endpoint's typed codes.
 func refusalCodeFor(reason string) protocol.Code {
 	switch reason {
 	case "expired":
@@ -585,7 +588,7 @@ func (r *run) result() *protocol.Result {
 }
 
 // Inspect implements core.Attachment. The published epoch is the pinned
-// generation, or the `unpinned` sentinel before the first receipt (§4/A4 —
+// generation, or the `unpinned` sentinel before the first receipt (protocol: session generation and epoch;
 // an empty epoch would defeat stale-epoch protection because "" == "").
 func (a *Attachment) Inspect() protocol.Session {
 	a.consume()                     // 9a: seam reads outside a.mu; apply under it
@@ -607,12 +610,12 @@ func (a *Attachment) Inspect() protocol.Session {
 		Schema:             protocol.SchemaSession,
 		TargetID:           a.target,
 		Epoch:              epoch,
-		Harness:            "amit",
-		DisplayName:        "amit " + a.handle,
+		Harness:            "pi",
+		DisplayName:        "pi " + a.handle,
 		Attachment:         att,
 		Status:             status,
 		PendingInteraction: nil,
-		// §7 capability projection: Steer is FALSE (v1 is followUp-only; the
+		// Capability projection: Steer is FALSE (v1 is followUp-only; the
 		// endpoint's D1 gate refuses deliver=steer pre-adapter and the
 		// adapter refuses it again pre-side-effect), cancel/approve/question
 		// are false (no native seam; keystrokes are forbidden), terminal is
@@ -621,7 +624,7 @@ func (a *Attachment) Inspect() protocol.Session {
 			Inspect: true, Submit: true, CancelRequest: false, Steer: false,
 			ApproveTool: false, AnswerQuestion: false, Terminal: "unavailable",
 		},
-		// §7: the adapter never claims `admitted` in Inspect — the per-ref
+		// The adapter never claims `admitted` in Inspect — the per-ref
 		// receipt is the admission proof, not a session-wide capability.
 		Evidence:   &protocol.Evidence{Submit: protocol.EvidenceSubmitted, Completion: "run_terminal"},
 		ObservedAt: protocol.FormatTime(a.now()),
@@ -630,7 +633,7 @@ func (a *Attachment) Inspect() protocol.Session {
 
 // Submit implements core.Attachment.
 //
-// Contract flow (§1, §2): publish the request atomically and create-new
+// Contract flow (protocol: requests; receipts): publish the request atomically and create-new
 // (a duplicate ref is a positive pre-send refusal — AMQ must never
 // double-fire), then poll briefly for the receipt. Admission is
 // RECEIPT-GATED: Admitted:true is returned only when receipts/<ref>.json
@@ -644,7 +647,7 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 	a.consume()
 
 	a.mu.Lock()
-	// §4/A4 epoch gate: while unpinned (a.epoch == "") the caller's epoch is
+	// Epoch gate: while unpinned (a.epoch == "") the caller's epoch is
 	// the sentinel (it read Inspect), and the submit goes out with an EMPTY
 	// epoch_hint (first contact, no check). Once a receipt pinned a
 	// generation, the caller's epoch must match it exactly.
@@ -655,8 +658,8 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 		a.mu.Unlock()
 		return core.Admission{Code: protocol.CodeStaleEpoch, Message: "epoch does not match the pinned session generation; re-inspect"}, nil
 	}
-	epochHint := a.epoch // §4: pinned generation as hint; "" (unpinned) = first contact, no check
-	// The hint is captured in the SAME critical section as the §4 gate
+	epochHint := a.epoch // pinned generation as hint; "" (unpinned) = first contact, no check
+	// The hint is captured in the SAME critical section as the gate
 	// above (review 816-r3 P1): re-reading it after the lock-free liveness
 	// check let a concurrent re-pin/refuse publish a generation the gate
 	// never validated — or omit the hint entirely on a refused(generation),
@@ -676,29 +679,29 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 		// 9a: liveness is a filesystem read — take it without the lock.
 		live := a.dir.liveness(a.now())
 		if !live.live {
-			// §2: no receipt + stale/absent liveness. The request file
+			// No receipt + stale/absent liveness. The request file
 			// stays for a later bridge (the adapter owns it and never
 			// deletes); delivery is still possible, so this is an
 			// UNCERTAIN-shaped refusal — the endpoint keeps the correlation
 			// (admissionCause maps any native error to attachment_lost).
 			return core.Admission{}, protocol.Refuse(protocol.CodeAttachmentLost,
-				"no live amit-remote bridge for handle %q (bridge.liveness %s); request %s stays for a later bridge", a.handle, live.reason, r.ref)
+				"no live pi bridge for handle %q (bridge.liveness %s); request %s stays for a later bridge", a.handle, live.reason, r.ref)
 		}
-		return core.Admission{RunID: rid}, fmt.Errorf("amit: receipt for %s not yet observed; submission uncertain", r.ref)
+		return core.Admission{RunID: rid}, fmt.Errorf("pi: receipt for %s not yet observed; submission uncertain", r.ref)
 	}
 	if req.Input.Deliver == protocol.DeliverSteer {
-		// §7: v1 is followUp-only. The endpoint's D1 gate already refuses
+		// v1 is followUp-only. The endpoint's D1 gate already refuses
 		// deliver=steer; this is the belt-and-braces adapter-side refusal,
 		// before any file write.
 		a.mu.Unlock()
-		return core.Admission{Code: protocol.CodeUnsupported, Message: "deliver=steer is disabled in v1 (amit advertises no Steer); use deliver=turn"}, nil
+		return core.Admission{Code: protocol.CodeUnsupported, Message: "deliver=steer is disabled in v1 (pi advertises no Steer); use deliver=turn"}, nil
 	}
 	// Fresh submit: the liveness gate is PRE-SIDE-EFFECT — nobody listening
-	// means nothing is written and the refusal is positive (§2). 9a: the
+	// means nothing is written and the refusal is positive (protocol: receipts). 9a: the
 	// filesystem read happens without the lock.
 	a.mu.Unlock()
 	if live := a.dir.liveness(a.now()); !live.live {
-		return core.Admission{Code: protocol.CodeAttachmentLost, Message: fmt.Sprintf("no live amit-remote bridge for handle %q (bridge.liveness %s)", a.handle, live.reason)}, nil
+		return core.Admission{Code: protocol.CodeAttachmentLost, Message: fmt.Sprintf("no live pi bridge for handle %q (bridge.liveness %s)", a.handle, live.reason)}, nil
 	}
 	// File I/O outside a.mu: the mutex guards correlation state, not the
 	// seam. A concurrent same-key submit cannot happen (the endpoint's
@@ -708,7 +711,7 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 	preq := deliverRequest{
 		Ref:       ref,
 		Text:      req.Input.Text,
-		DeliverAs: "followUp", // §1/§6: v1 delivers followUp only
+		DeliverAs: "followUp", // v1 delivers followUp only
 		NotAfter:  req.NotAfter,
 		EpochHint: epochHint,
 		CreatedAt: protocol.FormatTime(a.now()),
@@ -728,7 +731,7 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 			// The request file already exists (a previous process published
 			// it and crashed before binding, or a duplicate raced the
 			// reservation). The ref was already delivered: bind, never
-			// rewrite (O_EXCL, §1), classify from the durable seam.
+			// rewrite (O_EXCL; protocol: requests), classify from the durable seam.
 			o := a.readSeamFor(refOfRun) // 9a: FS reads without the lock
 			a.mu.Lock()
 			a.applyObservationLocked(r, o)
@@ -744,9 +747,9 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 				// bridge can still deliver; admissionCause keeps the
 				// correlation (never a terminal rejected record).
 				return core.Admission{}, protocol.Refuse(protocol.CodeAttachmentLost,
-					"no live amit-remote bridge for handle %q (bridge.liveness %s); request %s stays for a later bridge", a.handle, live.reason, refOfRun)
+					"no live pi bridge for handle %q (bridge.liveness %s); request %s stays for a later bridge", a.handle, live.reason, refOfRun)
 			}
-			return core.Admission{RunID: rid}, fmt.Errorf("amit: receipt for %s not yet observed; submission uncertain", refOfRun)
+			return core.Admission{RunID: rid}, fmt.Errorf("pi: receipt for %s not yet observed; submission uncertain", refOfRun)
 		}
 		// Pre-send/ambiguous seam failure: nothing provably reached the
 		// extension. Return the error so the endpoint records uncertain —
@@ -755,7 +758,7 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 		return core.Admission{}, err
 	}
 
-	// Receipt poll: the extension writes the receipt when it delivers (§2).
+	// Receipt poll: the extension writes the receipt when it delivers (protocol: receipts).
 	// The window is REAL wall time (how long this call may block the
 	// endpoint), deliberately not the frozen test clock — a.now stays for
 	// timestamps and liveness freshness. 9a: each poll step reads the seam
@@ -778,14 +781,14 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 	}
 	live := a.dir.liveness(a.now())
 	if !live.live {
-		// The bridge died mid-window (the file is already published; §2's
-		// in-flight row: the file stays for a later bridge). Delivery is
+		// The bridge died mid-window (the file is already published; the
+		// file stays for a later bridge). Delivery is
 		// still possible from a later bridge scan, so the refusal is
 		// UNCERTAIN-shaped (admissionCause keeps the correlation).
 		return core.Admission{}, protocol.Refuse(protocol.CodeAttachmentLost,
-			"no live amit-remote bridge for handle %q (bridge.liveness %s); request %s stays for a later bridge", a.handle, live.reason, refOfRun)
+			"no live pi bridge for handle %q (bridge.liveness %s); request %s stays for a later bridge", a.handle, live.reason, refOfRun)
 	}
-	return core.Admission{RunID: rid}, fmt.Errorf("amit: receipt for %s not yet observed; submission uncertain", refOfRun)
+	return core.Admission{RunID: rid}, fmt.Errorf("pi: receipt for %s not yet observed; submission uncertain", refOfRun)
 }
 
 // readSeamFor reads one run's durable evidence by ref WITHOUT the lock
@@ -823,7 +826,7 @@ func (a *Attachment) Lookup(key requests.Key, epoch string) (core.Evidence, erro
 		return core.Evidence{}, r.notFound
 	}
 	if r.eventsRefused != nil {
-		// §9: the event stream was refused (foreign protocol). Surface the
+		// The event stream was refused (foreign protocol). Surface the
 		// refusal — it must never silently read as "no events".
 		return core.Evidence{}, r.eventsRefused
 	}
@@ -835,7 +838,7 @@ func (a *Attachment) Lookup(key requests.Key, epoch string) (core.Evidence, erro
 		return ev, nil
 	}
 	if r.refused != "" {
-		// §6/A3: definitive native refusal. With a receipt present the
+		// Definitive native refusal. With a receipt present the
 		// admission is PROVEN (the receipt stays across a fire-time
 		// refusal); RefusalCode routes the endpoint to the typed refusal
 		// (rejected+code), never to a silent dispatch and never to
@@ -848,27 +851,27 @@ func (a *Attachment) Lookup(key requests.Key, epoch string) (core.Evidence, erro
 	}
 	if r.terminal {
 		// A terminal turn event proves the turn ran — admission happened
-		// regardless of whether the receipt file survives (A2 tolerance).
+		// regardless of whether the receipt file survives (rotation tolerance).
 		ev.Class = core.EvidenceHistoryTerminated
 		ev.Admitted = true
 		ev.Result = r.result()
 		return ev, nil
 	}
 	if r.confirmed {
-		// §5: receipt present, no terminal event (rotated/absent log
+		// Receipt present, no terminal event (rotated/absent log
 		// included) → accepted, confirmed-running. NEVER uncertain: the
 		// receipt is positive admission evidence.
 		ev.Class = core.EvidenceConfirmed
 		ev.Admitted = true
 		return ev, nil
 	}
-	// No receipt: uncertain (§5). The record keeps correlating.
+	// No receipt: uncertain (protocol: adapter recovery and evidence). The record keeps correlating.
 	ev.Class = core.EvidenceUnknown
 	return ev, nil
 }
 
 // CancelExact implements core.Attachment. There is no native cancel seam
-// (keystrokes are forbidden, §7): a cancel is intent only and resolved when
+// (keystrokes are forbidden; protocol: capabilities): a cancel is intent only and resolved when
 // the run is already terminal.
 func (a *Attachment) CancelExact(key requests.Key, epoch string) (core.CancelEvidence, error) {
 	a.consume()     // 9a: seam reads outside a.mu; apply under it
@@ -877,7 +880,7 @@ func (a *Attachment) CancelExact(key requests.Key, epoch string) (core.CancelEvi
 	defer a.mu.Unlock()
 	r, ok := a.runs[key]
 	if !ok {
-		return core.CancelEvidence{Disposition: protocol.CancelUnsupported, Message: "amit adapter has no native cancel seam"}, nil
+		return core.CancelEvidence{Disposition: protocol.CancelUnsupported, Message: "pi adapter has no native cancel seam"}, nil
 	}
 	if r.epoch != "" && r.epoch != epoch {
 		return core.CancelEvidence{Disposition: protocol.CancelUnsupported, Message: "epoch mismatch"}, nil
@@ -885,7 +888,7 @@ func (a *Attachment) CancelExact(key requests.Key, epoch string) (core.CancelEvi
 	if r.state.Terminal() {
 		return core.CancelEvidence{Disposition: protocol.CancelNoopTerminal}, nil
 	}
-	return core.CancelEvidence{Disposition: protocol.CancelUnsupported, Message: "amit adapter has no native cancel seam; the run resolves from the amit-remote event stream"}, nil
+	return core.CancelEvidence{Disposition: protocol.CancelUnsupported, Message: "pi adapter has no native cancel seam; the run resolves from the bridge event stream"}, nil
 }
 
 // Respond implements core.Attachment: no interaction surface is wired, so

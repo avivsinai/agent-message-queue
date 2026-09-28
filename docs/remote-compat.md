@@ -21,7 +21,7 @@ ordinary onboarding.
 | Tool | Version | Source of truth |
 | --- | --- | --- |
 | `amq` | 0.77.3 | `amq --version` |
-| `amit` (pi core) | 0.1.23 (pi 0.85.1 @ d981de1229ef) | `amit --version` |
+| `pi` | 0.85.1 | `pi --version` |
 | `codex` | codex-cli 0.154.0 | `codex --version` |
 | `claude` | 2.1.278 (Claude Code) | `claude --version` |
 | `tmux` | 3.7c | `tmux -V` |
@@ -30,9 +30,9 @@ ordinary onboarding.
 
 These rows are pinned evidence, not a support matrix for whatever versions
 are installed today. The design's capability table used slightly older point
-releases (Codex 0.154, Amit 0.1.x/pi 0.80, Claude Code 2.1). Re-run the Amit
-seam checks if the pi minor version changes materially because the cited
-extension symbols can move between releases.
+releases (Codex 0.154, pi 0.80, Claude Code 2.1). Re-run the pi seam checks
+if the pi minor version changes materially because the cited extension
+symbols can move between releases.
 
 ## 3. Seam register
 
@@ -58,21 +58,27 @@ terminal outcome for that run).
 | Inspect/roster | `thread/read` (`includeTurns`), `thread/items/list`, `thread/turns/list`, `codex agents` | delivered (polling), strong typed schema | (source: research/r9-cc-codex-attachment.md §B.4; seats/harness-inject-surfaces.md §B.3) |
 | Observation | Connecting and calling `thread/resume`, then reading the broadcast `item/*`/`turn/*`/`thread/status/changed` stream; a second, non-resuming client already receives `thread/started` before it ever resumes | delivered | (source: research/p1-codex-probe.md results table phase 1 note: "B received `thread/started` for A's thread before B ever called `thread/resume`") |
 
-### 3.2 Amit / pi
+### 3.2 pi
+
+pi citations name files in the public
+[pi repository](https://github.com/earendil-works/pi) under
+`packages/coding-agent/`. The bridge is a pi extension that reads request
+files from the pi-bridge directory and calls the extension API; a claim marked
+**unverified** is not stated in those files.
 
 | Row | Mechanism | Evidence class | Citation |
 | --- | --- | --- | --- |
-| Submit entry | `pi.sendUserMessage(text, {deliverAs: "followUp"})` via the AMQ doorbell spool → bridge extension | delivered (queues natively; not itself a receipt) | (source: seats/harness-inject-surfaces.md §C.2; seats/amit-extension-seams.md "Bottom line for the Buzz face" item 2) |
-| Acceptance evidence | None native — `sendUserMessage` returns `void` | delivered only | (source: seats/harness-inject-surfaces.md §C.2 pi API citation "types.d.ts:903-905"; review-verdict.md "Confirmed by verification" bullet) |
-| Native run identity | `unavailable` in stock pi; Amit is extension-only over npm pi with no AgentSession wrapper. The remote extension owns the input boundary best-effort: the `isIdle()` precheck is **advisory only** (pi swallows `sendUserMessage` rejections into `emitError`, so a race between precheck and submit loses the request silently, never as a refusal); admission is serialized to one remote request in flight; correlation is by **exact** `message_start` user-message text (duplicate texts are indistinguishable; queues are untyped strings) plus a `getEntries()` tail-diff for the persisted entry id, which becomes visible **only at persist time (`message_end`)** | submitted (extension-owned boundary; not the design's admitted, and `Known=false` is not proof of non-admission here), completed (`turn_end`) | (source: seats/amit-attachment-feasibility.md §1, §A of the amit-pi review) |
-| Completion evidence | `agent_end`/`agent_settled` extension events, or the session JSONL's `message`/`custom` entries | completed (via shim correlation only) | (source: seats/harness-surfaces.md §1.1 event table; seats/amit-extension-seams.md §A.1) |
-| Exact cancellation gate | `ctx.abort()` stops the current run only and keeps queued follow-ups; `clearQueue()` is not on the extension context and pi has no dequeue-by-item primitive | completed for the current bound run; `unsupported` for a queued-not-started request | (source: seats/amit-attachment-feasibility.md §2) |
-| Steer | `pi.sendUserMessage(text, {deliverAs: "steer"})`, or the dedicated `steer` RPC command | submitted | (source: seats/harness-surfaces.md §1.1; amq-remote-design.html capability table row "steer") |
-| Approvals/questions | Guardrails' `ctx.ui.select(...)` await, race-able via `pi.events` (`amit:approval-decision`) once guardrails adds a listener — not wired today | submitted, requires an Amit code change | (source: seats/pi-inter-extension-bus.md §2b, "Verdict"; seats/amit-extension-seams.md §A.7 "the one real gap") |
-| Session-switch/reload epoch triggers | `session_before_switch`, `session_before_fork`, `session_before_compact`, `session_shutdown`, `session_before_tree` extension events | delivered | (source: seats/amit-extension-seams.md §A.1 "Lifecycle" row) |
-| Local draft access (must not submit) | `unavailable` — no draft concept found; `clear_queue` returns already-queued text (the Esc UX primitive), not an unsent draft | n/a | (source: seats/harness-surfaces.md §1.1 "abort, clear_queue... are also commands") |
-| Inspect/roster | Extension snapshot (`get_state`, `get_tree`, `get_messages`, `get_session_stats`) plus session JSONL tail with `get_entries since` durable cursor | delivered | (source: seats/harness-surfaces.md §1.1 "Second client attaching"; §D table) |
-| Observation | Session JSONL append-only tail (`~/.pi/agent/sessions/...jsonl`) plus `pi.events` in-process bus for extensions in the same runtime; no socket/server mode exists in stock pi RPC | delivered (file tail is lossy for streaming deltas, effort, background-task state) | (source: seats/harness-surfaces.md §1.1 "no socket/server mode"; seats/amit-extension-seams.md §D table "Conclusion") |
+| Submit entry | The bridge extension calls `pi.sendUserMessage(text, {deliverAs: "followUp"})` for each request file | delivered (queues natively; not itself a receipt) | (source: pi `src/core/extensions/types.ts` `sendUserMessage`; `docs/extensions.md` "Choose an integration point") |
+| Acceptance evidence | None native — `sendUserMessage` returns `void` | delivered only | (source: pi `src/core/extensions/types.ts` `sendUserMessage`) |
+| Native run identity | `unavailable` — the extension API returns no run id for a sent message. The bridge owns the input boundary best-effort: the `ctx.isIdle()` precheck is advisory only; admission is serialized to one remote request in flight; correlation is by exact `message_start` user-message text (duplicate texts are indistinguishable) plus the persisted entry id from `ctx.sessionManager.getEntries()`. **Unverified:** that pi reports a `sendUserMessage` failure only as an error event, never to the caller, and that the entry id appears only at `message_end` | submitted (extension-owned boundary; not the design's admitted, and `Known=false` is not proof of non-admission here), completed (`turn_end`) | (source: pi `src/core/extensions/types.ts` `isIdle`, `message_start`, `message_end`, `turn_end`, `getEntries`) |
+| Completion evidence | `agent_end`/`agent_settled` extension events, or the session JSONL's `message`/`custom` entries | completed (via bridge correlation only) | (source: pi `docs/extensions.md` "Respect the runtime lifecycle"; `docs/session-format.md`) |
+| Exact cancellation gate | `ctx.abort()` aborts the current agent operation; the extension context has no clear-queue or dequeue-by-item method (`hasPendingMessages()` only). The bridge exposes no cancel request, so the adapter answers `unsupported`. **Unverified:** that `ctx.abort()` keeps queued follow-ups | `unsupported` | (source: pi `src/core/extensions/types.ts` `abort`, `hasPendingMessages`) |
+| Steer | `pi.sendUserMessage(text, {deliverAs: "steer"})`, or the `steer` RPC command | submitted | (source: pi `src/core/extensions/types.ts` `sendUserMessage`; `docs/rpc-commands.md` "steer") |
+| Approvals/questions | `ctx.ui.select(...)` is an in-process await and `pi.events` is an in-process bus between extensions; the bridge has no external decision seam | n/a | (source: pi `src/core/extensions/types.ts` `select`, `events`; `docs/extensions.md` "Choose an integration point") |
+| Session-switch/reload epoch triggers | `session_before_switch`, `session_before_fork`, `session_before_compact`, `session_shutdown`, `session_before_tree` extension events | delivered | (source: pi `src/core/extensions/types.ts` event declarations) |
+| Local draft access (must not submit) | `ctx.ui.getEditorText()` reads the input editor text; the bridge does not read it. The `clear_queue` RPC command returns already-queued text, not an unsent draft | n/a | (source: pi `src/core/extensions/types.ts` `getEditorText`; `docs/rpc-commands.md` "clear_queue") |
+| Inspect/roster | RPC `get_state`, `get_tree`, `get_messages`, `get_session_stats`, and `get_entries` with a `since` entry-id cursor | delivered | (source: pi `docs/rpc-commands.md`) |
+| Observation | Session JSONL append-only files under `~/.pi/agent/sessions/` plus the `pi.events` in-process bus for extensions in the same runtime; RPC mode is a child process over stdin/stdout, with no socket or server mode | delivered (a file tail is lossy for streaming deltas) | (source: pi `docs/sessions.md`, `docs/session-format.md`, `docs/rpc.md`) |
 
 ### 3.3 Claude Code
 
@@ -130,7 +136,7 @@ valid value for the runtime `terminal` enum.
 | Harness | inspect | submit | cancel_request | answer_question | approve_tool | steer | terminal |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | Codex | true | true | true | false | false | false | unavailable |
-| Amit/pi | true | true | true (current bound run only) | false | false | false | unavailable |
+| pi | true | true | false | false | false | false | unavailable |
 | Claude Code | true | submitted | false | false | false | false | unavailable |
 
 The v1 endpoint masks `steer` to false at the D1 gate even where an
@@ -139,7 +145,7 @@ attachment declares it (`internal/remote/codex/attachment.go:293`,
 JSONL entry carrying the exact envelope (preceded by a `queue-operation` entry) —
 the harness accepted the payload, but the channel has no admission receipt and no
 run identity, so a submit never reaches `admitted`. The void-returning
-`sendUserMessage` seam is pi/Amit's, not Claude Code's.
+`sendUserMessage` seam is pi's, not Claude Code's.
 
 Reasons for every `false` (source: as cited per row in §3, plus
 amq-remote-design.html §Capability per harness):
@@ -149,15 +155,14 @@ amq-remote-design.html §Capability per harness):
   research/r9-cc-codex-attachment.md §B.3).
 - `codex.terminal`: app-server has no PTY concept in-protocol (source:
   research/r9-cc-codex-attachment.md §B.4 "terminal" row).
-- `amit.cancel_request` is `true` for the current bound run only:
-  `ctx.abort()` stops that run and keeps queued follow-ups; a queued
-  remote request that has not started cannot be cancelled because pi has no
-  dequeue primitive, and the adapter answers `unsupported` for it (source:
-  seats/amit-attachment-feasibility.md §2).
-- `amit.answer_question` / `amit.approve_tool`: the extension contract has no
-  external decision seam for the `ctx.ui.select` await (source:
-  seats/pi-inter-extension-bus.md §1; §2b).
-- `amit.terminal`: no terminal binding is part of this adapter contract.
+- `pi.cancel_request`: the bridge has no cancel request. `ctx.abort()`
+  aborts the current operation, not one request, and the extension context
+  has no dequeue primitive for a queued request that has not started
+  (source: §3.2 "Exact cancellation gate").
+- `pi.answer_question` / `pi.approve_tool`: the bridge has no external
+  decision seam for the in-process `ctx.ui.select` await (source: §3.2
+  "Approvals/questions").
+- `pi.terminal`: no terminal binding is part of this adapter contract.
 - `claude_code.cancel_request`: no user-level interrupt exists at all
   (source: research/r9-cc-codex-attachment.md §A.4 "cancelExact" row).
 - `claude_code.answer_question` / `claude_code.approve_tool`: no documented
