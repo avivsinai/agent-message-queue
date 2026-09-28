@@ -193,12 +193,15 @@ amq-remote up
 
 1. `share` mints the body key and prints one preimage per kind for a new
    window. Add `--enable buzz-profile` for [presence](#presence-in-buzz-desktop).
-2. `amq-owner-sign` reads the owner key (`nsec1...` or 64 hex) from the
-   terminal without echo. It checks each printed preimage against the body
-   and conditions, signs all of them, and publishes the owner's kind 30177
-   policy for the body on the relay. Then it writes one bundle, mode 0600,
-   that holds only the public signed tags. If the publish fails, it writes no
-   bundle; run it again.
+2. `amq-owner-sign` checks each printed preimage against the body and
+   conditions. The signer shows what it signs: the session, the body pubkey,
+   and each kind with its expiry date. Check the body pubkey against the
+   share output before you confirm by typing its first 8 characters. Only
+   then does it read the owner key (`nsec1...` or 64 hex) from the terminal
+   without echo. It signs every grant, writes one bundle, mode 0600, that
+   holds only the public signed tags, and then publishes the owner's kind
+   30177 policy for the body on the relay. If the publish fails, the bundle
+   is already written; run it again with the same flags.
 3. `share --bundle` checks every tag the same way `--tag-file` does and
    enrolls the whole bundle, or nothing. With `--target` and `--relay` it
    writes the relay block in the same locked step. It copies the owner

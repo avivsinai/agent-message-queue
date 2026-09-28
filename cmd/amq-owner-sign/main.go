@@ -41,8 +41,10 @@ Signs every grant in one saved ` + "`amq-remote share`" + ` output with the owne
 key, writes them as one bundle for ` + "`amq-remote share --bundle`" + `, and
 publishes the owner's kind 30177 policy for the body on the relay.
 
-The owner key (nsec1... or 64 hex) is read from the terminal without echo.
-It is never written or printed.
+It first shows the body and every grant it will sign, and asks you to type
+the first 8 characters of the body pubkey. Check the body pubkey against the
+share output before you confirm. Only then is the owner key (nsec1... or 64
+hex) read from the terminal without echo. It is never written or printed.
 
 Flags:
   --share FILE   saved output of amq-remote share or share --renew (required)
@@ -84,7 +86,7 @@ func runMain(args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintf(stderr, "amq-owner-sign: %v\n", err)
 		return 2
 	}
-	if err := run(o, readKeyFromTerminal(stderr), publishPolicy, stdout); err != nil {
+	if err := run(o, confirmOnTerminal, readKeyFromTerminal(stderr), publishPolicy, stdout); err != nil {
 		_, _ = fmt.Fprintf(stderr, "amq-owner-sign: %v\n", err)
 		return 1
 	}
@@ -110,10 +112,13 @@ type grant struct {
 	preimage   string
 }
 
-// run signs the share output with the key readKey returns, publishes the
-// policy, then writes the bundle. A failed publish writes no bundle, so the
-// owner reruns the same one step.
-func run(o options, readKey func() ([32]byte, error), publish func(ctx context.Context, url string, evt nostr.Event, sk [32]byte) error, stdout io.Writer) error {
+// confirmPrefix is how many body pubkey characters the owner types to confirm.
+const confirmPrefix = 8
+
+// run shows what the share output asks the owner to sign and reads the key
+// only after confirm accepts. It signs, writes the bundle, then publishes the
+// policy, so a published policy always names a body whose bundle exists.
+func run(o options, confirm func(body string) (bool, error), readKey func() ([32]byte, error), publish func(ctx context.Context, url string, evt nostr.Event, sk [32]byte) error, stdout io.Writer) error {
 	raw, err := os.ReadFile(o.share)
 	if err != nil {
 		return err
@@ -121,6 +126,16 @@ func run(o options, readKey func() ([32]byte, error), publish func(ctx context.C
 	session, body, grants, err := parseShareOutput(string(raw))
 	if err != nil {
 		return fmt.Errorf("%s: %w", o.share, err)
+	}
+	if err := printSummary(stdout, session, body, grants); err != nil {
+		return err
+	}
+	ok, err := confirm(body)
+	if err != nil {
+		return fmt.Errorf("confirm: %w", err)
+	}
+	if !ok {
+		return errors.New("not confirmed; nothing was signed")
 	}
 	sk, err := readKey()
 	if err != nil {
@@ -136,18 +151,11 @@ func run(o options, readKey func() ([32]byte, error), publish func(ctx context.C
 		}
 		tags = append(tags, bundleTag{Kind: g.kind, OwnerPubKey: tag.OwnerPubKey, Conditions: tag.Conditions, Sig: tag.SigHex()})
 	}
-	_, _ = fmt.Fprintf(stdout, "owner pubkey: %s\nbody pubkey:  %s\n", tags[0].OwnerPubKey, body)
-
+	_, _ = fmt.Fprintf(stdout, "owner pubkey: %s\n", tags[0].OwnerPubKey)
 	evt, err := policyEvent(sk, body, o.name)
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	if err := publish(ctx, o.relay, evt, sk); err != nil {
-		return fmt.Errorf("publish the kind 30177 policy (no bundle written; run again): %w", err)
-	}
-	_, _ = fmt.Fprintf(stdout, "published kind 30177 policy %s\n", evt.ID.Hex())
 
 	out, err := json.MarshalIndent(tags, "", "  ")
 	if err != nil {
@@ -160,8 +168,52 @@ func run(o options, readKey func() ([32]byte, error), publish func(ctx context.C
 	if _, err := fsq.WriteFileAtomic(filepath.Dir(abs), filepath.Base(abs), out, 0o600); err != nil {
 		return err
 	}
-	_, _ = fmt.Fprintf(stdout, "wrote %d signed grants to %s\nnext: amq-remote share --session %s --bundle %s --target <target> --relay %s\n", len(tags), abs, session, abs, o.relay)
+	_, _ = fmt.Fprintf(stdout, "wrote %d signed grants to %s\n", len(tags), abs)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := publish(ctx, o.relay, evt, sk); err != nil {
+		return fmt.Errorf("the bundle is written to %s, but the kind 30177 policy was not published; run again with the same flags: %w", abs, err)
+	}
+	_, _ = fmt.Fprintf(stdout, "published kind 30177 policy %s\nnext: amq-remote share --session %s --bundle %s --target <target> --relay %s\n", evt.ID.Hex(), session, abs, o.relay)
 	return nil
+}
+
+// printSummary shows the owner exactly what they are about to sign: the
+// session, the body, and each kind with its signed expiry as a UTC date.
+func printSummary(w io.Writer, session, body string, grants []grant) error {
+	_, _ = fmt.Fprintf(w, "You are about to sign these grants and publish a policy for this body.\nsession:     %s\nbody pubkey: %s\n", session, body)
+	for _, g := range grants {
+		conds, err := bodykey.ParseConditions(g.conditions)
+		if err != nil {
+			return fmt.Errorf("kind %d: %w", g.kind, err)
+		}
+		until := "no expiry"
+		for _, c := range conds {
+			if c.CreatedLt != nil {
+				until = "until " + time.Unix(int64(*c.CreatedLt), 0).UTC().Format(time.RFC3339)
+			}
+		}
+		_, _ = fmt.Fprintf(w, "  kind %d: %s (%s)\n", g.kind, g.conditions, until)
+	}
+	return nil
+}
+
+// confirmOnTerminal asks the owner, on the controlling terminal, to type the
+// first characters of the body pubkey. Any other answer, or no terminal,
+// declines.
+func confirmOnTerminal(body string) (bool, error) {
+	tty, err := os.Open("/dev/tty")
+	if err != nil {
+		return false, fmt.Errorf("a terminal is required to confirm: %w", err)
+	}
+	defer func() { _ = tty.Close() }()
+	_, _ = fmt.Fprintf(os.Stderr, "check the body pubkey against the share output, then type its first %d characters to sign: ", confirmPrefix)
+	line, err := bufio.NewReader(tty).ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return false, err
+	}
+	return strings.TrimSpace(line) == body[:confirmPrefix], nil
 }
 
 var (
@@ -254,7 +306,8 @@ func publishPolicy(ctx context.Context, url string, evt nostr.Event, sk [32]byte
 		return fmt.Errorf("connect: %w", err)
 	}
 	defer func() { _ = r.Close() }()
-	time.Sleep(time.Second) // let the relay's AUTH challenge arrive
+	// Wait for the relay's AUTH challenge; a late challenge fails loudly in r.Auth.
+	time.Sleep(time.Second)
 	if err := r.Auth(ctx, func(_ context.Context, e *nostr.Event) error { return e.Sign(sk) }); err != nil {
 		return fmt.Errorf("auth as owner: %w", err)
 	}

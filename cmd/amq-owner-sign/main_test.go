@@ -16,8 +16,9 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/bodykey"
 )
 
-// 611.30: one run signs every grant a `share` output printed into one
-// bundle and publishes the owner's kind 30177 policy for the body.
+// 611.30: one run shows the body and grants, reads the key only after the
+// owner confirms, signs every grant a `share` output printed into one bundle,
+// and then publishes the owner's kind 30177 policy for the body.
 func TestSignsShareOutputIntoOneBundle(t *testing.T) {
 	dir := t.TempDir()
 	body, err := bodykey.Mint(filepath.Join(dir, "keys"))
@@ -39,18 +40,39 @@ func TestSignsShareOutputIntoOneBundle(t *testing.T) {
 
 	var owner [32]byte
 	owner[31] = 7
+	keyReads := 0
+	readKey := func() ([32]byte, error) { keyReads++; return owner, nil }
+	bundlePath := filepath.Join(dir, "bundle.json")
 	var published nostr.Event
 	publish := func(_ context.Context, url string, evt nostr.Event, _ [32]byte) error {
+		if _, err := os.Stat(bundlePath); err != nil {
+			t.Errorf("policy published before the bundle was written: %v", err)
+		}
 		if url != "wss://relay.example" {
 			t.Errorf("published to %s", url)
 		}
 		published = evt
 		return nil
 	}
-	bundlePath := filepath.Join(dir, "bundle.json")
 	o := options{share: sharePath, out: bundlePath, relay: "wss://relay.example", name: "AMQ session"}
-	if err := run(o, func() ([32]byte, error) { return owner, nil }, publish, io.Discard); err != nil {
-		t.Fatal(err)
+
+	// A refused confirmation reads no key and writes nothing.
+	var summary bytes.Buffer
+	confirmed := ""
+	refuse := func(body string) (bool, error) { confirmed = body; return false, nil }
+	if err := run(o, refuse, readKey, publish, &summary); err == nil || keyReads != 0 {
+		t.Fatalf("refused confirmation: err=%v keyReads=%d", err, keyReads)
+	}
+	if confirmed != body.PublicKeyHex() || !bytes.Contains(summary.Bytes(), []byte("body pubkey: "+body.PublicKeyHex())) {
+		t.Fatalf("summary does not name the body:\n%s", summary.String())
+	}
+	if _, err := os.Stat(bundlePath); !os.IsNotExist(err) {
+		t.Fatalf("bundle written without confirmation: %v", err)
+	}
+
+	accept := func(string) (bool, error) { return true, nil }
+	if err := run(o, accept, readKey, publish, io.Discard); err != nil || keyReads != 1 {
+		t.Fatalf("run: err=%v keyReads=%d", err, keyReads)
 	}
 
 	fi, err := os.Stat(bundlePath)
