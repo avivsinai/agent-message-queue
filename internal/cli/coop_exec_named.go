@@ -35,9 +35,9 @@ type coopNamedHarness struct {
 var coopNamedHarnesses = map[string]coopNamedHarness{
 	launch.ClaudeProvider: {mode: coopNamedModeArgv, resumeSyntax: coopNamedResumeFlags},
 	"pi":                  {mode: coopNamedModeArgv, resumeSyntax: coopNamedResumeFlags},
-	// amit (product) accepts a --name global flag like pi, so a coop-named
-	// launch auto-names the session instead of printing the manual-rename
-	// reminder (the product binary is otherwise an unknown harness).
+	// A downstream pi build shipped under its own binary name accepts the
+	// same --name global flag, so a coop-named launch auto-names the
+	// session instead of printing the manual-rename reminder.
 	"amit":                {mode: coopNamedModeArgv, resumeSyntax: coopNamedResumeFlags},
 	launch.CodexProvider:  {mode: coopNamedModeTUI, resumeSyntax: coopNamedResumeCodex},
 	"agent":               {mode: coopNamedModeTUI, resumeSyntax: coopNamedResumeCursor},

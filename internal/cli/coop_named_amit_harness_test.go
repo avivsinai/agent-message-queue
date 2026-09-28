@@ -2,8 +2,8 @@ package cli
 
 import "testing"
 
-// A coop-named launch of the amit product binary must auto-name the session
-// via the --name argv injection (amit accepts a --name global flag like pi)
+// A coop-named launch of a downstream pi build under its own binary name must
+// auto-name the session via the --name argv injection (it accepts --name like pi)
 // instead of falling into coopNamedModeUnknown, which prints the
 // "name this CLI session manually (unknown binary)" reminder on every
 // product launch through coop exec.

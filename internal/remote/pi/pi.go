@@ -1,31 +1,30 @@
-// Package amit is the Amit (pi) adapter factory. It registers the
-// kind:"amit" factory under the named-factory registry so a manifest entry
-// `{"kind":"amit","target":"amit","config":{"handle":"<session handle>"}}`
-// builds an AmitAttachment without editing serve.
+// Package pi is the pi coding-agent adapter factory. It registers the
+// kind:"pi" factory under the named-factory registry so a manifest entry
+// `{"kind":"pi","target":"pi-1","config":{"handle":"<session handle>"}}`
+// builds an Attachment without editing serve.
 //
-// The adapter implements the amit-remote contract v1 (packages/amit/
-// extensions/amit-remote/CONTRACT.md, merged to amit master as 1e21930a).
-// It is extension-only: it does not spawn, own, or supervise the Amit
-// process (ADR invariant 1 — up supervises serve only; serve never owns a
-// harness). All coordination happens through the contract's file seam under
-// <AM_ROOT>/agents/<handle>/extensions/amit-remote/:
+// The adapter implements the pi-bridge protocol v1. The bridge is a pi
+// extension; this adapter is extension-only: it does not spawn, own, or
+// supervise the pi process (ADR invariant 1 — up supervises serve only;
+// serve never owns a harness). All coordination happens through the
+// protocol's file seam under <AM_ROOT>/agents/<handle>/extensions/pi-bridge/:
 //
 //	requests/<ref>.json   written by THIS adapter (atomic, create-new)
 //	receipts/<ref>.json   read by THIS adapter (admission proof)
 //	events/<ref>.jsonl    read by THIS adapter (terminal evidence)
 //	bridge.liveness       read by THIS adapter (heartbeat freshness)
 //
-// Ownership (contract §8): the adapter writes ONLY requests/<ref>.json and
+// Ownership (protocol §8): the adapter writes ONLY requests/<ref>.json and
 // reads ONLY receipts/, events/, and bridge.liveness. It never touches pi
 // internals, the doorbell layer, or any other extension directory.
 //
 // Evidence: pi's sendUserMessage returns void and swallows rejections, and
 // v1 has no native admission primitive — the per-ref RECEIPT is the only
-// admission proof (contract §2). Until a receipt is observed the adapter
+// admission proof (protocol §2). Until a receipt is observed the adapter
 // publishes the sentinel epoch `unpinned` (§4/A4); the first receipt pins
 // the session generation. A key the adapter retains nothing about is
 // EvidenceUnknown, never EvidenceNone.
-package amit
+package pi
 
 import (
 	"context"
@@ -45,12 +44,12 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/requests"
 )
 
-// config is the adapter-specific config block for an amit manifest entry.
+// config is the adapter-specific config block for a pi manifest entry.
 type config struct {
-	// Handle is the AMQ session handle whose amit-remote extension
-	// directory this adapter coordinates with. The (root, handle) pair must
-	// match the session identity entry the Amit-side extension resolved
-	// (contract §Identity: identity entry is the source of truth, no env
+	// Handle is the AMQ session handle whose bridge extension directory
+	// this adapter coordinates with. The (root, handle) pair must match the
+	// session identity entry the pi-side extension resolved
+	// (protocol §Identity: identity entry is the source of truth, no env
 	// fallback). The manifest is AMQ-owned (contract §8), so the handle is
 	// stated here explicitly — never derived from AM_ME/AM_ROOT env.
 	Handle string `json:"handle"`
@@ -81,7 +80,7 @@ type run struct {
 	eventsRefused error
 }
 
-// Attachment implements core.Attachment over the amit-remote file seam. It
+// Attachment implements core.Attachment over the pi-bridge file seam. It
 // never touches the local editor and owns no process.
 type Attachment struct {
 	mu     sync.Mutex
@@ -92,7 +91,7 @@ type Attachment struct {
 	// receipt observed yet" — Inspect publishes the sentinel `unpinned` and
 	// submits carry an empty epoch_hint (first contact, no check).
 	epoch string
-	// epochPID is the Amit process that wrote the pinning receipt. A
+	// epochPID is the pi process that wrote the pinning receipt. A
 	// generation lives inside one process, so a live bridge with another
 	// pid proves the pin stale (see dropStalePinLocked). 0 = unknown.
 	epochPID int
@@ -125,10 +124,10 @@ const submitPollStep = 25 * time.Millisecond
 // (§4) — until the first receipt Inspect publishes the `unpinned` sentinel.
 func New(target, handle string, dir bridgeDir) (*Attachment, error) {
 	if target == "" {
-		return nil, fmt.Errorf("amit: target is required")
+		return nil, fmt.Errorf("pi: target is required")
 	}
 	if handle == "" {
-		return nil, fmt.Errorf("amit: handle is required")
+		return nil, fmt.Errorf("pi: handle is required")
 	}
 	a := &Attachment{
 		target:     target,
@@ -147,29 +146,48 @@ func New(target, handle string, dir bridgeDir) (*Attachment, error) {
 	return a, nil
 }
 
-// Factory builds an AmitAttachment from a registry.FactoryConfig.
+// Factory builds a kind "pi" Attachment from a registry.FactoryConfig.
 func Factory(_ context.Context, cfg registry.FactoryConfig) (core.Attachment, error) {
+	return build(cfg, piWire)
+}
+
+// legacyAmitDeprecation prints the kind "amit" deprecation line once per
+// process, however often serve rebuilds its targets.
+var legacyAmitDeprecation sync.Once
+
+// LegacyAmitFactory builds the deprecated kind "amit": the same adapter over
+// the legacy wire names, kept until the downstream extension moves to
+// pi-bridge.
+func LegacyAmitFactory(_ context.Context, cfg registry.FactoryConfig) (core.Attachment, error) {
+	legacyAmitDeprecation.Do(func() {
+		fmt.Fprintln(os.Stderr, `amq-remote: kind "amit" is deprecated; use "pi"`)
+	})
+	return build(cfg, legacyAmitWire)
+}
+
+func build(cfg registry.FactoryConfig, names wireNames) (core.Attachment, error) {
 	var c config
 	if len(cfg.Config) > 0 {
 		if err := json.Unmarshal(cfg.Config, &c); err != nil {
-			return nil, fmt.Errorf("parse amit config: %w", err)
+			return nil, fmt.Errorf("parse pi config: %w", err)
 		}
 	}
 	if c.Handle == "" {
-		return nil, fmt.Errorf("amit config: handle is required (the amit-remote session handle)")
+		return nil, fmt.Errorf("pi config: handle is required (the pi session handle)")
 	}
 	if err := fsq.ValidateHandle(c.Handle); err != nil {
-		return nil, fmt.Errorf("amit config: invalid handle: %v", err)
+		return nil, fmt.Errorf("pi config: invalid handle: %v", err)
 	}
-	dir := bridgeDir{dir: bridgePath(cfg.Root, c.Handle)}
+	dir := bridgeDir{dir: bridgePath(cfg.Root, c.Handle, names), names: names}
 	if st, err := os.Stat(dir.dir); err != nil || !st.IsDir() {
-		return nil, fmt.Errorf("amit: amit-remote extension directory not found at %s (is the amit-remote extension running for handle %q?)", dir.dir, c.Handle)
+		return nil, fmt.Errorf("pi: bridge extension directory not found at %s (is the %s extension running for handle %q?)", dir.dir, names.dir, c.Handle)
 	}
 	return New(cfg.Target, c.Handle, dir)
 }
 
 func init() {
-	registry.Register("amit", Factory)
+	registry.Register("pi", Factory)
+	registry.Register("amit", LegacyAmitFactory)
 }
 
 // clientRef is the request identity: protocol.EncodeRef of the record key,
@@ -283,10 +301,10 @@ func (a *Attachment) bindRunLocked(key requests.Key, epoch string) *run {
 	r := &run{
 		key:       key,
 		ref:       ref,
-		runID:     "amit:" + ref,
+		runID:     a.dir.names.runPrefix + ref,
 		epoch:     epoch,
 		state:     protocol.StateRunning,
-		nativeRef: "amit-remote " + ref,
+		nativeRef: a.dir.names.dir + " " + ref,
 	}
 	a.runs[key] = r
 	a.order = append(a.order, key)
@@ -309,8 +327,8 @@ func (a *Attachment) observeGenerationLocked(gen string, pid int) {
 
 // dropStalePinLocked unpins when the live bridge proves the pinned
 // generation ended: it runs in a different process than the one whose
-// receipt pinned it (amit-myp1g: kill, crash, app restart), or it publishes
-// a different generation (amit-gnwsm: /new, reload, fork keep the pid).
+// receipt pinned it (kill, crash, app restart), or it publishes a different
+// generation (/new, reload, fork keep the pid).
 // Without this the first submit carried a dead epoch_hint, which the
 // extension refused. Liveness never PINS (§4): the next submit goes out as
 // first contact and its receipt pins the live generation.
@@ -607,8 +625,8 @@ func (a *Attachment) Inspect() protocol.Session {
 		Schema:             protocol.SchemaSession,
 		TargetID:           a.target,
 		Epoch:              epoch,
-		Harness:            "amit",
-		DisplayName:        "amit " + a.handle,
+		Harness:            "pi",
+		DisplayName:        "pi " + a.handle,
 		Attachment:         att,
 		Status:             status,
 		PendingInteraction: nil,
@@ -682,23 +700,23 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 			// UNCERTAIN-shaped refusal — the endpoint keeps the correlation
 			// (admissionCause maps any native error to attachment_lost).
 			return core.Admission{}, protocol.Refuse(protocol.CodeAttachmentLost,
-				"no live amit-remote bridge for handle %q (bridge.liveness %s); request %s stays for a later bridge", a.handle, live.reason, r.ref)
+				"no live pi bridge for handle %q (bridge.liveness %s); request %s stays for a later bridge", a.handle, live.reason, r.ref)
 		}
-		return core.Admission{RunID: rid}, fmt.Errorf("amit: receipt for %s not yet observed; submission uncertain", r.ref)
+		return core.Admission{RunID: rid}, fmt.Errorf("pi: receipt for %s not yet observed; submission uncertain", r.ref)
 	}
 	if req.Input.Deliver == protocol.DeliverSteer {
 		// §7: v1 is followUp-only. The endpoint's D1 gate already refuses
 		// deliver=steer; this is the belt-and-braces adapter-side refusal,
 		// before any file write.
 		a.mu.Unlock()
-		return core.Admission{Code: protocol.CodeUnsupported, Message: "deliver=steer is disabled in v1 (amit advertises no Steer); use deliver=turn"}, nil
+		return core.Admission{Code: protocol.CodeUnsupported, Message: "deliver=steer is disabled in v1 (pi advertises no Steer); use deliver=turn"}, nil
 	}
 	// Fresh submit: the liveness gate is PRE-SIDE-EFFECT — nobody listening
 	// means nothing is written and the refusal is positive (§2). 9a: the
 	// filesystem read happens without the lock.
 	a.mu.Unlock()
 	if live := a.dir.liveness(a.now()); !live.live {
-		return core.Admission{Code: protocol.CodeAttachmentLost, Message: fmt.Sprintf("no live amit-remote bridge for handle %q (bridge.liveness %s)", a.handle, live.reason)}, nil
+		return core.Admission{Code: protocol.CodeAttachmentLost, Message: fmt.Sprintf("no live pi bridge for handle %q (bridge.liveness %s)", a.handle, live.reason)}, nil
 	}
 	// File I/O outside a.mu: the mutex guards correlation state, not the
 	// seam. A concurrent same-key submit cannot happen (the endpoint's
@@ -744,9 +762,9 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 				// bridge can still deliver; admissionCause keeps the
 				// correlation (never a terminal rejected record).
 				return core.Admission{}, protocol.Refuse(protocol.CodeAttachmentLost,
-					"no live amit-remote bridge for handle %q (bridge.liveness %s); request %s stays for a later bridge", a.handle, live.reason, refOfRun)
+					"no live pi bridge for handle %q (bridge.liveness %s); request %s stays for a later bridge", a.handle, live.reason, refOfRun)
 			}
-			return core.Admission{RunID: rid}, fmt.Errorf("amit: receipt for %s not yet observed; submission uncertain", refOfRun)
+			return core.Admission{RunID: rid}, fmt.Errorf("pi: receipt for %s not yet observed; submission uncertain", refOfRun)
 		}
 		// Pre-send/ambiguous seam failure: nothing provably reached the
 		// extension. Return the error so the endpoint records uncertain —
@@ -783,9 +801,9 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 		// still possible from a later bridge scan, so the refusal is
 		// UNCERTAIN-shaped (admissionCause keeps the correlation).
 		return core.Admission{}, protocol.Refuse(protocol.CodeAttachmentLost,
-			"no live amit-remote bridge for handle %q (bridge.liveness %s); request %s stays for a later bridge", a.handle, live.reason, refOfRun)
+			"no live pi bridge for handle %q (bridge.liveness %s); request %s stays for a later bridge", a.handle, live.reason, refOfRun)
 	}
-	return core.Admission{RunID: rid}, fmt.Errorf("amit: receipt for %s not yet observed; submission uncertain", refOfRun)
+	return core.Admission{RunID: rid}, fmt.Errorf("pi: receipt for %s not yet observed; submission uncertain", refOfRun)
 }
 
 // readSeamFor reads one run's durable evidence by ref WITHOUT the lock
@@ -877,7 +895,7 @@ func (a *Attachment) CancelExact(key requests.Key, epoch string) (core.CancelEvi
 	defer a.mu.Unlock()
 	r, ok := a.runs[key]
 	if !ok {
-		return core.CancelEvidence{Disposition: protocol.CancelUnsupported, Message: "amit adapter has no native cancel seam"}, nil
+		return core.CancelEvidence{Disposition: protocol.CancelUnsupported, Message: "pi adapter has no native cancel seam"}, nil
 	}
 	if r.epoch != "" && r.epoch != epoch {
 		return core.CancelEvidence{Disposition: protocol.CancelUnsupported, Message: "epoch mismatch"}, nil
@@ -885,7 +903,7 @@ func (a *Attachment) CancelExact(key requests.Key, epoch string) (core.CancelEvi
 	if r.state.Terminal() {
 		return core.CancelEvidence{Disposition: protocol.CancelNoopTerminal}, nil
 	}
-	return core.CancelEvidence{Disposition: protocol.CancelUnsupported, Message: "amit adapter has no native cancel seam; the run resolves from the amit-remote event stream"}, nil
+	return core.CancelEvidence{Disposition: protocol.CancelUnsupported, Message: "pi adapter has no native cancel seam; the run resolves from the bridge event stream"}, nil
 }
 
 // Respond implements core.Attachment: no interaction surface is wired, so

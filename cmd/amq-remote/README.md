@@ -75,12 +75,15 @@ Each adapter has a unique `target` (the id you pass to `inspect` and
 | --- | --- | --- |
 | `claude` | `pid` (Claude Code process id). Optional `home` overrides the Claude home directory. | `Inspect` and `Submit` over the session's cross-session socket. `CancelRequest` and `Steer` are false. Unsupported on Windows. See [Claude Code](#claude-code). |
 | `codex` | `socket` and `thread`. Optional `approve` advertises `ApproveTool`. | `Inspect`, `Submit`, and `CancelRequest`. `Steer` is false. |
-| `amit` | `handle`. The Amit extension directory for that handle must already exist under the root. | `Inspect` and `Submit`. `CancelRequest` is false. Submit evidence is `submitted`. |
+| `pi` | `handle`. The pi-bridge extension directory for that handle, `agents/<handle>/extensions/pi-bridge/` under the root, must already exist. | `Inspect` and `Submit`. `CancelRequest` is false. Submit evidence is `submitted`. |
 | `fake` | none | Test double. `epoch` is accepted only for this kind. |
 
 `epoch` on any kind other than `fake` is exit 2. A duplicate `target` is
 exit 2. An unknown kind is refused at startup; `serve` continues with the
 adapters that attached, writes `refusals.json`, and prints the refusal.
+Kind `amit` is a deprecated legacy alias of `pi` that uses the directory
+`extensions/amit-remote/` and the protocol `amit:amq-remote:v1`; `serve`
+prints a deprecation line when a manifest uses it.
 
 ```json
 {
@@ -98,9 +101,9 @@ adapters that attached, writes `refusals.json`, and prints the refusal.
       "config": {"socket": "/absolute/path/codex.sock", "thread": "THREAD", "approve": false}
     },
     {
-      "kind": "amit",
-      "target": "amit-1",
-      "config": {"handle": "amit-pi"}
+      "kind": "pi",
+      "target": "pi-1",
+      "config": {"handle": "pi-agent"}
     }
   ]
 }
@@ -253,7 +256,7 @@ parses. Export runs only while the target's attached native
 session is the pinned one, and stops the moment it is not. Activity carries
 no control: nothing in it can submit, cancel or approve. A frame the relay
 may or may not have accepted is never sent again. Codex and Claude targets
-export activity; Amit targets do not.
+export activity; pi targets do not.
 
 ### Owner DM commands
 

@@ -1,4 +1,4 @@
-package amit
+package pi
 
 import (
 	"errors"
@@ -46,7 +46,7 @@ func TestSubmitEpochHintValidatedByGate(t *testing.T) {
 	}
 
 	stampLiveness(t, dir, fixedNow)
-	a, err := New("amit", "agent1", bridgeDir{dir: dir, live: liveHook})
+	a, err := New("pi-1", "agent1", bridgeDir{dir: dir, names: piWire, live: liveHook})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -140,7 +140,7 @@ func TestSubmitEpochHintNotOmittedByUnpin(t *testing.T) {
 		})
 		return livenessState{live: true}
 	}
-	a, err := New("amit", "agent1", bridgeDir{dir: dir, live: liveHook})
+	a, err := New("pi-1", "agent1", bridgeDir{dir: dir, names: piWire, live: liveHook})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -215,7 +215,7 @@ func TestForeignStreamRefusalSurvivesRotation(t *testing.T) {
 	ref := clientRef(key)
 	seedRequest(t, dir, ref, "")
 	writeReceipt(t, dir, ref, "gen-1", fixedNow)
-	appendEvents(t, dir, ref, fmt.Sprintf(`{"protocol":"amit:amq-remote:v2","event":"completed","ref":%q,"text":"done"}`, ref))
+	appendEvents(t, dir, ref, fmt.Sprintf(`{"protocol":"amq:pi-bridge:v2","event":"completed","ref":%q,"text":"done"}`, ref))
 
 	// Step 1: the foreign line is visible — the stream is refused.
 	ev, err := a.Lookup(key, "gen-1")
@@ -336,7 +336,7 @@ func TestReceiptDoesNotLiftForeignStreamRefusal(t *testing.T) {
 	// A Submit binds the run unconfirmed (the bridge does not answer inside
 	// the poll window) and the poll's readSeamFor carries the stream
 	// refusal, which applyObservationLocked records.
-	appendEvents(t, dir, ref, fmt.Sprintf(`{"protocol":"amit:amq-remote:v2","event":"completed","ref":%q,"text":"done"}`, ref))
+	appendEvents(t, dir, ref, fmt.Sprintf(`{"protocol":"amq:pi-bridge:v2","event":"completed","ref":%q,"text":"done"}`, ref))
 	stampLiveness(t, dir, fixedNow)
 	if _, serr := a.Submit(submitReq(key, "hello")); serr == nil {
 		t.Fatalf("step 1: Submit err = nil; want the uncertain no-receipt error")

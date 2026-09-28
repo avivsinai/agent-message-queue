@@ -1,8 +1,7 @@
-package amit
+package pi
 
-// Tests for the amit-remote contract v1 adapter. The contract
-// (packages/amit/extensions/amit-remote/CONTRACT.md, amit master 1e21930a)
-// governs every assertion here; section references are in the test names
+// Tests for the pi-bridge protocol v1 adapter. The protocol governs every
+// assertion here; section references are in the test names
 // and comments. Real-file tests cover the §5 recovery table verbatim —
 // including rotation tolerance and a partial last line — against an actual
 // extension directory layout, not a fake source.
@@ -29,7 +28,7 @@ import (
 func testKey(id string) requests.Key {
 	return requests.Key{
 		CreatorHost: "host1",
-		TargetID:    "amit",
+		TargetID:    "pi-1",
 		RequestID:   fmt.Sprintf("00000000-0000-4000-8000-%012x", fnv32a(id)%(1<<48)),
 	}
 }
@@ -59,7 +58,7 @@ func newTestAttachment(t *testing.T) (*Attachment, string) {
 func newExtDir(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
-	dir := filepath.Join(root, "agents", "agent1", "extensions", "amit-remote")
+	dir := filepath.Join(root, "agents", "agent1", "extensions", "pi-bridge")
 	for _, sub := range []string{"requests", "receipts", "events"} {
 		if err := os.MkdirAll(filepath.Join(dir, sub), 0o700); err != nil {
 			t.Fatalf("mkdir %s: %v", sub, err)
@@ -127,7 +126,7 @@ func appendEvents(t *testing.T, dir, ref string, lines ...string) {
 
 func mustAttach(t *testing.T, dir string) *Attachment {
 	t.Helper()
-	a, err := New("amit", "agent1", bridgeDir{dir: dir})
+	a, err := New("pi-1", "agent1", bridgeDir{dir: dir, names: piWire})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -246,8 +245,8 @@ func TestInspectCapabilities(t *testing.T) {
 	if s.Evidence == nil || s.Evidence.Submit != protocol.EvidenceSubmitted {
 		t.Fatalf("evidence = %+v, want submit=submitted", s.Evidence)
 	}
-	if s.Harness != "amit" || s.Attachment != "live" {
-		t.Fatalf("session = %+v, want live amit projection", s)
+	if s.Harness != "pi" || s.Attachment != "live" {
+		t.Fatalf("session = %+v, want live pi projection", s)
 	}
 	// Stale heartbeat → offline.
 	stampLiveness(t, dir, fixedNow.Add(-time.Minute))
@@ -271,7 +270,7 @@ func TestSubmitAdmittedOnlyWithReceipt(t *testing.T) {
 	// racing the poll window. Scoped to u1's ref only: u2's submit must
 	// still find no receipt and exercise the uncertain path.
 	a.dir.publish = func(req deliverRequest) error {
-		if err := (bridgeDir{dir: dir}).publishRequest(req); err != nil {
+		if err := (bridgeDir{dir: dir, names: piWire}).publishRequest(req); err != nil {
 			return err
 		}
 		if req.Ref == ref {
@@ -342,7 +341,7 @@ func TestSubmitDuplicateRefNeverRewrites(t *testing.T) {
 func TestPublishRequestAtomicShape(t *testing.T) {
 	_, dir := newTestAttachment(t)
 	ref := clientRef(testKey("atomic"))
-	bd := bridgeDir{dir: dir}
+	bd := bridgeDir{dir: dir, names: piWire}
 	err := bd.publishRequest(deliverRequest{
 		Ref: ref, Text: "body", DeliverAs: "followUp", NotAfter: "2036-01-01T00:00:00Z", CreatedAt: protocol.FormatTime(fixedNow),
 	})
@@ -379,7 +378,7 @@ func TestSubmitSteerRefused(t *testing.T) {
 
 // --- Lookup / evidence (§5) ------------------------------------------------
 
-// TestLookupUnretainedKeyUnknown pins the Amit evidence rule: a key the
+// TestLookupUnretainedKeyUnknown pins the pi evidence rule: a key the
 // adapter retains nothing about is EvidenceUnknown, never EvidenceNone.
 func TestLookupUnretainedKeyUnknown(t *testing.T) {
 	a, _ := newTestAttachment(t)
@@ -534,9 +533,8 @@ func TestGenerationRefusalDropsToSentinel(t *testing.T) {
 	}
 }
 
-// TestRestartedBridgeDropsDeadPin reproduces amit-myp1g (pi087 rig
-// 2026-09-24): a receipt from Amit pid A pinned its generation, Amit
-// restarted as pid B, and the first submit carried A's generation as
+// TestRestartedBridgeDropsDeadPin reproduces a field defect: a receipt from
+// pi pid A pinned its generation, pi restarted as pid B, and the first submit carried A's generation as
 // epoch_hint, which B refused. A live bridge in another process must unpin,
 // so the first submit goes out as first contact and completes.
 func TestRestartedBridgeDropsDeadPin(t *testing.T) {
@@ -583,8 +581,8 @@ func TestRestartedBridgeDropsDeadPin(t *testing.T) {
 	}
 }
 
-// TestSameProcessRestartDropsPin covers amit-gnwsm: /new, reload and fork
-// keep the Amit pid, so only the generation the bridge publishes in
+// TestSameProcessRestartDropsPin reproduces a field defect: /new, reload and
+// fork keep the pi pid, so only the generation the bridge publishes in
 // bridge.liveness shows the pin is dead.
 func TestSameProcessRestartDropsPin(t *testing.T) {
 	a, dir := newTestAttachment(t)
@@ -718,7 +716,7 @@ func TestForeignProtocolReceiptRefused(t *testing.T) {
 	key := testKey("fp")
 	ref := clientRef(key)
 	seedRequest(t, dir, ref, "")
-	rc := fmt.Sprintf(`{"protocol":"amit:amq-remote:v9","ref":%q,"session_generation":"gen-x","delivered_at":"","pid":1}`, ref)
+	rc := fmt.Sprintf(`{"protocol":"amq:pi-bridge:v9","ref":%q,"session_generation":"gen-x","delivered_at":"","pid":1}`, ref)
 	if err := os.WriteFile(filepath.Join(dir, "receipts", refSanitize(ref)+".json"), []byte(rc), 0o600); err != nil {
 		t.Fatalf("write receipt: %v", err)
 	}
@@ -734,7 +732,7 @@ func TestForeignProtocolReceiptRefused(t *testing.T) {
 // into the foreign seam.
 func TestForeignProtocolLivenessNotLive(t *testing.T) {
 	a, dir := newTestAttachment(t)
-	stampLivenessWithProtocol(t, dir, fixedNow, "amit:amq-remote:v9")
+	stampLivenessWithProtocol(t, dir, fixedNow, "amq:pi-bridge:v9")
 	adm, err := a.Submit(submitReq(testKey("fp9"), "hello"))
 	if err != nil || adm.Admitted || adm.Code != protocol.CodeAttachmentLost {
 		t.Fatalf("Submit = %+v, %v; want positive attachment_lost refusal (foreign protocol)", adm, err)
@@ -755,7 +753,7 @@ func TestForeignProtocolEventsRefused(t *testing.T) {
 	ref := clientRef(key)
 	seedRequest(t, dir, ref, "")
 	writeReceipt(t, dir, ref, "gen-1", fixedNow)
-	appendEvents(t, dir, ref, fmt.Sprintf(`{"protocol":"amit:amq-remote:v2","event":"completed","ref":%q,"text":"done"}`, ref))
+	appendEvents(t, dir, ref, fmt.Sprintf(`{"protocol":"amq:pi-bridge:v2","event":"completed","ref":%q,"text":"done"}`, ref))
 	ev, err := a.Lookup(key, "gen-1")
 	if err == nil {
 		t.Fatalf("evidence = %+v, nil error; want refusal (foreign-protocol event stream)", ev)
@@ -788,18 +786,64 @@ func TestCancelUnsupported(t *testing.T) {
 // TestFactoryRequiresHandleAndDir pins the factory contract: config.handle
 // is required, validated, and the extension directory must exist.
 func TestFactoryRequiresHandleAndDir(t *testing.T) {
-	if _, err := Factory(t.Context(), registry.FactoryConfig{Target: "amit"}); err == nil || !strings.Contains(err.Error(), "handle is required") {
+	if _, err := Factory(t.Context(), registry.FactoryConfig{Target: "pi-1"}); err == nil || !strings.Contains(err.Error(), "handle is required") {
 		t.Fatalf("err = %v, want handle-required refusal", err)
 	}
 	root := t.TempDir()
-	if _, err := Factory(t.Context(), registry.FactoryConfig{Target: "amit", Root: root, Config: []byte(`{"handle":"agent1"}`)}); err == nil || !strings.Contains(err.Error(), "not found") {
+	if _, err := Factory(t.Context(), registry.FactoryConfig{Target: "pi-1", Root: root, Config: []byte(`{"handle":"agent1"}`)}); err == nil || !strings.Contains(err.Error(), "not found") {
 		t.Fatalf("err = %v, want extension-dir-not-found refusal", err)
 	}
 	// Happy path over a real dir.
-	newExtDirAt(t, filepath.Join(root, "agents", "agent1", "extensions", "amit-remote"))
-	att, err := Factory(t.Context(), registry.FactoryConfig{Target: "amit", Root: root, Config: []byte(`{"handle":"agent1"}`)})
+	newExtDirAt(t, filepath.Join(root, "agents", "agent1", "extensions", "pi-bridge"))
+	att, err := Factory(t.Context(), registry.FactoryConfig{Target: "pi-1", Root: root, Config: []byte(`{"handle":"agent1"}`)})
 	if err != nil || att == nil {
 		t.Fatalf("Factory = %v, %v; want attachment", att, err)
+	}
+}
+
+// TestKindWireNames pins the wire names each kind uses: kind "pi" publishes
+// under extensions/pi-bridge/ and accepts amq:pi-bridge:v1 receipts; the
+// deprecated kind "amit" keeps the legacy names byte for byte.
+func TestKindWireNames(t *testing.T) {
+	for _, tc := range []struct {
+		kind, dir, proto, runPrefix string
+		factory                     registry.Factory
+	}{
+		{"pi", "pi-bridge", "amq:pi-bridge:v1", "pi:", Factory},
+		{"amit", "amit-remote", "amit:amq-remote:v1", "amit:", LegacyAmitFactory},
+	} {
+		t.Run(tc.kind, func(t *testing.T) {
+			root := t.TempDir()
+			dir := filepath.Join(root, "agents", "agent1", "extensions", tc.dir)
+			newExtDirAt(t, dir)
+			stampLivenessWithProtocol(t, dir, fixedNow, tc.proto)
+			att, err := tc.factory(t.Context(), registry.FactoryConfig{Target: "t1", Root: root, Config: []byte(`{"handle":"agent1"}`)})
+			if err != nil {
+				t.Fatalf("factory: %v", err)
+			}
+			a := att.(*Attachment)
+			a.now = func() time.Time { return fixedNow }
+			a.submitWait = 50 * time.Millisecond
+			key := testKey("wire-" + tc.kind)
+			ref := clientRef(key)
+			a.dir.publish = func(req deliverRequest) error {
+				if err := (bridgeDir{dir: dir, names: a.dir.names}).publishRequest(req); err != nil {
+					return err
+				}
+				rc := fmt.Sprintf(`{"protocol":%q,"ref":%q,"session_generation":"gen-1","delivered_at":"","pid":%d}`, tc.proto, ref, os.Getpid())
+				return os.WriteFile(filepath.Join(dir, "receipts", refSanitize(ref)+".json"), []byte(rc), 0o600)
+			}
+			adm, err := a.Submit(submitReq(key, "hello"))
+			if err != nil || !adm.Admitted {
+				t.Fatalf("Submit = %+v, %v; want admitted", adm, err)
+			}
+			if adm.RunID != tc.runPrefix+ref {
+				t.Fatalf("run id = %q, want %q", adm.RunID, tc.runPrefix+ref)
+			}
+			if _, err := os.Stat(filepath.Join(dir, "requests", refSanitize(ref)+".json")); err != nil {
+				t.Fatalf("request not published under %s: %v", tc.dir, err)
+			}
+		})
 	}
 }
 
@@ -895,7 +939,7 @@ func TestE3BRefusalLiftsAfterSeamRewrite(t *testing.T) {
 	// Phase 2 (the r6 probe step 2): apply a foreign-protocol observation
 	// to the terminal run. This is the Submit-poll path: readSeamFor reads
 	// whatever is on disk. A foreign line landed in the stream mid-window.
-	appendEvents(t, dir, ref, fmt.Sprintf(`{"protocol":"amit:amq-remote:v2","event":"completed","ref":%q,"text":"forged"}`, ref))
+	appendEvents(t, dir, ref, fmt.Sprintf(`{"protocol":"amq:pi-bridge:v2","event":"completed","ref":%q,"text":"forged"}`, ref))
 	o := a.readSeamFor(ref)
 	a.mu.Lock()
 	r := a.runs[key]

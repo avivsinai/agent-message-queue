@@ -1,7 +1,7 @@
-// Package amit (contract seam): deliver.go implements the adapter side of
-// the amit-remote contract v1 paths:
+// Package pi (bridge seam): deliver.go implements the adapter side of the
+// pi-bridge protocol v1 paths:
 //
-//	bridgePath: <AM_ROOT>/agents/<handle>/extensions/amit-remote/
+//	bridgePath: <AM_ROOT>/agents/<handle>/extensions/pi-bridge/ (see wireNames)
 //	requests/<ref>.json   publishRequest — atomic tmp+rename, O_EXCL (§1)
 //	receipts/<ref>.json   readReceipt — admission proof (§2)
 //	events/<ref>.jsonl    readEvents — terminal evidence, rotation-tolerant (§3, A2)
@@ -10,7 +10,7 @@
 // The adapter writes ONLY requests/<ref>.json (contract §8); every other
 // path is read-only. The file names use the sanitized ref (§Identity: ':'
 // and '/' replaced by '_').
-package amit
+package pi
 
 import (
 	"encoding/json"
@@ -33,7 +33,7 @@ const SentinelUnpinned = "unpinned"
 // ErrAlreadyDelivered marks the §1 duplicate guard: requests/<ref>.json
 // already exists, so the ref was already delivered and must never be
 // rewritten or re-sent.
-var ErrAlreadyDelivered = errors.New("amit: request already delivered")
+var ErrAlreadyDelivered = errors.New("pi: request already delivered")
 
 // ErrForeignEventStream marks the §9 refusal of an event stream carrying a
 // foreign protocol string. It is typed so tests and callers can recognise
@@ -41,7 +41,7 @@ var ErrAlreadyDelivered = errors.New("amit: request already delivered")
 // applyObservationLocked and are protocol-uniform: the refusal survives an
 // absent-or-unreadable log (rotation, truncation) and lifts only when a
 // present stream validates as v1 end to end.
-var ErrForeignEventStream = errors.New("amit: foreign-protocol event stream")
+var ErrForeignEventStream = errors.New("pi: foreign-protocol event stream")
 
 // deliverRequest is the §1 request JSON contract.
 type deliverRequest struct {
@@ -79,15 +79,16 @@ type event struct {
 const maxEventText = 256 * 1024
 
 // livenessRecord is the bridge.liveness JSON shape (the doorbell shape plus
-// the amit-remote protocol tag, §9).
+// the bridge protocol tag, §9).
 type livenessRecord struct {
 	Protocol string `json:"protocol"`
 	Live     bool   `json:"live"`
 	At       string `json:"at"`
 	PID      int    `json:"pid"`
 	Surface  string `json:"surface"`
-	// SessionGeneration is advisory (amit-gnwsm): it may drop a pin that no
-	// longer matches, never set one (§4).
+	// SessionGeneration is advisory: /new, reload, and fork keep the pid but
+	// change the generation, so it may drop a pin that no longer matches,
+	// never set one (§4).
 	SessionGeneration string `json:"session_generation,omitempty"`
 }
 
@@ -98,9 +99,9 @@ const (
 	heartbeatMaxAge = 5 * time.Second
 )
 
-// bridgePath resolves the contract's extension directory for one handle.
-func bridgePath(root, handle string) string {
-	return filepath.Join(root, "agents", handle, "extensions", "amit-remote")
+// bridgePath resolves the bridge's extension directory for one handle.
+func bridgePath(root, handle string, w wireNames) string {
+	return filepath.Join(root, "agents", handle, "extensions", w.dir)
 }
 
 // refSanitize makes a request ref safe as a filename. protocol.EncodeRef
@@ -115,6 +116,9 @@ func refSanitize(ref string) string {
 // New wires the real filesystem; tests may inject stubs per method.
 type bridgeDir struct {
 	dir string
+	// names are the wire names of this bridge generation; every receipt,
+	// event line, and liveness record must carry names.protocol (§9).
+	names wireNames
 
 	// Injectable for tests. Zero funcs fall through to the real files.
 	publish func(deliverRequest) error
@@ -148,14 +152,14 @@ func (b bridgeDir) publishRequest(req deliverRequest) error {
 		// pre-send duplicate refusal. Never overwrite.
 		return fmt.Errorf("%w: %s", ErrAlreadyDelivered, req.Ref)
 	} else if !os.IsNotExist(err) {
-		return fmt.Errorf("amit: stat request %s: %v", req.Ref, err)
+		return fmt.Errorf("pi: stat request %s: %v", req.Ref, err)
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("amit: prepare requests dir: %v", err)
+		return fmt.Errorf("pi: prepare requests dir: %v", err)
 	}
 	payload, err := json.Marshal(req)
 	if err != nil {
-		return fmt.Errorf("amit: marshal request %s: %v", req.Ref, err)
+		return fmt.Errorf("pi: marshal request %s: %v", req.Ref, err)
 	}
 	return writeAtomicNew(path, payload)
 }
@@ -170,11 +174,11 @@ func (b bridgeDir) publishRequest(req deliverRequest) error {
 func writeAtomicNew(path string, payload []byte) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("amit: prepare dir: %v", err)
+		return fmt.Errorf("pi: prepare dir: %v", err)
 	}
 	tmp, err := os.CreateTemp(dir, ".publish-*")
 	if err != nil {
-		return fmt.Errorf("amit: temp write: %v", err)
+		return fmt.Errorf("pi: temp write: %v", err)
 	}
 	tmpName := tmp.Name()
 	defer func() {
@@ -184,14 +188,14 @@ func writeAtomicNew(path string, payload []byte) error {
 	}()
 	if _, err := tmp.Write(payload); err != nil {
 		_ = tmp.Close()
-		return fmt.Errorf("amit: temp write: %v", err)
+		return fmt.Errorf("pi: temp write: %v", err)
 	}
 	if err := tmp.Sync(); err != nil {
 		_ = tmp.Close()
-		return fmt.Errorf("amit: temp sync: %v", err)
+		return fmt.Errorf("pi: temp sync: %v", err)
 	}
 	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("amit: temp close: %v", err)
+		return fmt.Errorf("pi: temp close: %v", err)
 	}
 	// Atomic create-new publication: link fails with EEXIST when another
 	// writer already published this ref — the §1 duplicate refusal.
@@ -199,17 +203,17 @@ func writeAtomicNew(path string, payload []byte) error {
 		if os.IsExist(err) {
 			return fmt.Errorf("%w: %s", ErrAlreadyDelivered, strings.TrimSuffix(filepath.Base(path), ".json"))
 		}
-		return fmt.Errorf("amit: publish %s: %v", path, err)
+		return fmt.Errorf("pi: publish %s: %v", path, err)
 	}
 	// link(2) leaves the source name in place — unlink it now (the target
 	// holds the published inode); the deferred remove is a no-op backstop.
 	if rerr := os.Remove(tmpName); rerr != nil {
 		tmpName = "" // target owns the inode; a lingering temp name is harmless
-		return fmt.Errorf("amit: unlink temp after publish %s: %v", path, rerr)
+		return fmt.Errorf("pi: unlink temp after publish %s: %v", path, rerr)
 	}
 	tmpName = "" // published and temp unlinked — the deferred remove is a no-op
 	if d, err := os.Open(dir); err != nil {
-		return fmt.Errorf("amit: fsync dir: %v", err)
+		return fmt.Errorf("pi: fsync dir: %v", err)
 	} else {
 		_ = d.Sync()
 		_ = d.Close()
@@ -229,14 +233,14 @@ func (b bridgeDir) readReceipt(ref string) (*receipt, error) {
 		return nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("amit: read receipt %s: %v", ref, err)
+		return nil, fmt.Errorf("pi: read receipt %s: %v", ref, err)
 	}
 	var rc receipt
 	if err := json.Unmarshal(data, &rc); err != nil {
-		return nil, fmt.Errorf("amit: parse receipt %s: %v", ref, err)
+		return nil, fmt.Errorf("pi: parse receipt %s: %v", ref, err)
 	}
-	if rc.Protocol != "" && rc.Protocol != ProtocolV1 {
-		return nil, fmt.Errorf("amit: receipt %s: unknown protocol %q (want %q)", ref, rc.Protocol, ProtocolV1)
+	if rc.Protocol != "" && rc.Protocol != b.names.protocol {
+		return nil, fmt.Errorf("pi: receipt %s: unknown protocol %q (want %q)", ref, rc.Protocol, b.names.protocol)
 	}
 	return &rc, nil
 }
@@ -253,7 +257,7 @@ func (b bridgeDir) readEvents(ref string) ([]event, error) {
 		return nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("amit: read events %s: %v", ref, err)
+		return nil, fmt.Errorf("pi: read events %s: %v", ref, err)
 	}
 	var out []event
 	for _, line := range strings.Split(string(data), "\n") {
@@ -271,13 +275,13 @@ func (b bridgeDir) readEvents(ref string) ([]event, error) {
 		if len(ev.Text) > maxEventText {
 			ev.Text = ev.Text[:maxEventText]
 		}
-		if ev.Protocol != "" && ev.Protocol != ProtocolV1 {
+		if ev.Protocol != "" && ev.Protocol != b.names.protocol {
 			// §9: refuse an unknown protocol string rather than guessing.
 			// A v1 receipt + v2-only event stream must NOT read as "no
 			// events" (recovery row 3 would map that to confirmed-running,
 			// hiding a terminal state); the whole stream is refused so the
 			// run keeps its current state and surfaces the error.
-			return nil, fmt.Errorf("%w: %s: unknown protocol %q (want %q)", ErrForeignEventStream, ref, ev.Protocol, ProtocolV1)
+			return nil, fmt.Errorf("%w: %s: unknown protocol %q (want %q)", ErrForeignEventStream, ref, ev.Protocol, b.names.protocol)
 		}
 		out = append(out, ev)
 	}
@@ -311,7 +315,7 @@ func (b bridgeDir) liveness(now time.Time) livenessState {
 	if err := json.Unmarshal(data, &rec); err != nil {
 		return livenessState{age: age, reason: "malformed"}
 	}
-	if rec.Protocol != "" && rec.Protocol != ProtocolV1 {
+	if rec.Protocol != "" && rec.Protocol != b.names.protocol {
 		// §9: a foreign-protocol bridge is not OUR bridge. Treating it as
 		// live would let the adapter write requests into a seam owned by a
 		// different protocol — refuse the pre-gate.
@@ -369,6 +373,23 @@ func (b bridgeDir) listReceipts() []receipt {
 	return out
 }
 
-// ProtocolV1 is the §9 protocol string. Every receipt/event line carries
-// it; the adapter refuses an unknown string rather than guessing.
-const ProtocolV1 = "amit:amq-remote:v1"
+// ProtocolV1 is the §9 protocol string of kind "pi". Every receipt/event
+// line carries it; the adapter refuses an unknown string rather than
+// guessing.
+const ProtocolV1 = "amq:pi-bridge:v1"
+
+// wireNames is the set of names one bridge generation puts on disk and on
+// the wire: the extension directory, the protocol string, and the run-id
+// prefix the endpoint persists as the native run.
+type wireNames struct {
+	dir       string
+	protocol  string
+	runPrefix string
+}
+
+// piWire is the wire of kind "pi".
+var piWire = wireNames{dir: "pi-bridge", protocol: ProtocolV1, runPrefix: "pi:"}
+
+// legacyAmitWire is the wire of the deprecated kind "amit": legacy wire
+// names, kept until the downstream extension moves to pi-bridge.
+var legacyAmitWire = wireNames{dir: "amit-remote", protocol: "amit:amq-remote:v1", runPrefix: "amit:"}

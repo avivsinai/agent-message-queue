@@ -34,7 +34,7 @@ func TestEnsureAgentPreservesUnmodelledKeys(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	added, err := EnsureAgent(rootDir, "amit-pi-lead")
+	added, err := EnsureAgent(rootDir, "pi-lead")
 	if err != nil {
 		t.Fatalf("EnsureAgent: %v", err)
 	}
@@ -75,7 +75,7 @@ func TestEnsureAgentPreservesUnmodelledKeys(t *testing.T) {
 		}
 	}
 	// Modelled keys updated correctly.
-	if !strings.Contains(string(after), "amit-pi-lead") {
+	if !strings.Contains(string(after), "pi-lead") {
 		t.Fatalf("handle missing after rewrite:\n%s", after)
 	}
 }
@@ -94,7 +94,7 @@ func TestEnsureAgentNullDocumentNoPanic(t *testing.T) {
 	if err := os.WriteFile(cfgPath, []byte("null"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	added, err := EnsureAgent(rootDir, "amit-pi-lead")
+	added, err := EnsureAgent(rootDir, "pi-lead")
 	if err != nil {
 		t.Fatalf("EnsureAgent(null document): %v", err)
 	}
@@ -109,7 +109,7 @@ func TestEnsureAgentNullDocumentNoPanic(t *testing.T) {
 	if err := json.Unmarshal(after, &doc); err != nil {
 		t.Fatalf("rewritten config is not valid JSON: %v\n%s", err, after)
 	}
-	if len(doc["agents"]) == 0 || !strings.Contains(string(doc["agents"]), "amit-pi-lead") {
+	if len(doc["agents"]) == 0 || !strings.Contains(string(doc["agents"]), "pi-lead") {
 		t.Fatalf("agents missing the new handle after null-document rewrite:\n%s", after)
 	}
 }

@@ -95,8 +95,8 @@ func TestTentativeEvidenceIsReconcileNoop(t *testing.T) {
 	}
 }
 
-// TestRefusalOverProvenAdmissionEndsRejectedTyped pins the A3 mapping (amit-
-// remote contract §6): a DEFINITIVE native refusal over PROVEN admission —
+// TestRefusalOverProvenAdmissionEndsRejectedTyped pins the A3 mapping (pi-bridge
+// protocol §6): a DEFINITIVE native refusal over PROVEN admission —
 // Evidence with RefusalCode set, Admitted true, State rejected — must end the
 // record as rejected with the typed refusal code (action-required), never a
 // silent dispatch and never evidence of non-admission.
@@ -132,8 +132,8 @@ func TestRefusalOverProvenAdmissionEndsRejectedTyped(t *testing.T) {
 	}
 }
 
-// TestPreDeliveryRefusalKeepsTypedCode reproduces amit-myp1g (pi087 rig
-// 2026-09-24): amit's refused(generation) has no receipt, so the evidence is
+// TestPreDeliveryRefusalKeepsTypedCode reproduces a field defect: pi's
+// refused(generation) after a restart has no receipt, so the evidence is
 // NOT admitted. The record ended rejected+native_error; it must keep the
 // typed stale_epoch code.
 func TestPreDeliveryRefusalKeepsTypedCode(t *testing.T) {
