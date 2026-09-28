@@ -22,7 +22,7 @@ test("a request file becomes a pi follow-up with a receipt and a terminal event"
 			sent.push({ content, options });
 		},
 	};
-	const ctx = { mode: "tui", hasUI: true, ui: { notify() {} }, hasPendingMessages: () => false };
+	const ctx = { mode: "tui", hasUI: true, ui: { notify() {} }, isIdle: () => true, hasPendingMessages: () => false };
 	const emit = async (name: string, event: object) => {
 		for (const h of handlers.get(name) ?? []) await h({ type: name, ...event }, ctx);
 	};

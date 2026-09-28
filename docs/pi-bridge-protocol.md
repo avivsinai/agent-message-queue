@@ -221,6 +221,11 @@ in-flight request is terminal. It correlates the run like this:
   `error`. A settle that arrives before `started` while pi still holds queued
   messages belongs to earlier work and is not used.
 
+pi reports a failed `sendUserMessage` out of band, so a follow-up can be lost
+without a signal. When the in-flight request has not started 5 seconds after
+delivery and pi is idle with no queued messages, the extension appends
+`failed` and moves on to the next request.
+
 On `session_shutdown` with a request in flight, the extension appends `failed`
 naming the shutdown reason. On `session_start` it appends `failed` to every
 receipt from another generation that has no terminal event, so a crash never

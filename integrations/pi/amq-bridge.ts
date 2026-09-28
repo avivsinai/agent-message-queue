@@ -11,6 +11,7 @@ export const PROTOCOL = "amq:pi-bridge:v1";
 
 const HEARTBEAT_MS = 2000; // the adapter treats a liveness file older than 5 s as stale
 const POLL_MS = 200; // the adapter waits 2 s for a receipt after it publishes a request
+const START_GRACE_MS = 5000; // an idle pi that has not started a follow-up by then dropped it
 const MAX_EVENT_TEXT = 256 * 1024;
 const REQUEST_FILE = /^(amqr1_[a-z2-7]{16,472})\.json$/;
 const HANDLE = /^[a-z0-9_][a-z0-9_-]*$/;
@@ -20,6 +21,7 @@ type EventFields = { event: string; text?: string; error?: string; reason?: stri
 
 type Bridge = {
 	dir: string;
+	ctx: ExtensionContext;
 	generation: string;
 	surface: string;
 	timers: ReturnType<typeof setInterval>[];
@@ -30,6 +32,7 @@ type Bridge = {
 type Inflight = {
 	ref: string;
 	text: string;
+	deliveredAt: number;
 	started: boolean;
 	lastText: string;
 	lastError: string;
@@ -119,6 +122,7 @@ function start(pi: ExtensionAPI, ctx: ExtensionContext): Bridge | null {
 	}
 	const b: Bridge = {
 		dir,
+		ctx,
 		generation: randomUUID(),
 		surface: ctx.mode,
 		timers: [],
@@ -181,6 +185,14 @@ function scan(pi: ExtensionAPI, b: Bridge): void {
 	}
 	pending.sort((x, y) => x.mtime - y.mtime || (x.ref < y.ref ? -1 : x.ref > y.ref ? 1 : 0));
 
+	// pi reports a failed sendUserMessage out of band. An idle session with
+	// nothing queued that never started the follow-up has dropped it.
+	const f = b.inflight;
+	if (f && !f.started && Date.now() - f.deliveredAt > START_GRACE_MS && b.ctx.isIdle() && !b.ctx.hasPendingMessages()) {
+		appendEvent(b.dir, f.ref, { event: "failed", error: "pi is idle and never started the follow-up" });
+		b.inflight = null;
+	}
+
 	for (const { ref } of pending) {
 		const verdict = examine(b, ref);
 		if (verdict.refuse) {
@@ -193,7 +205,7 @@ function scan(pi: ExtensionAPI, b: Bridge): void {
 		if (claim === "error") continue; // retried on the next poll
 		b.handled.add(ref);
 		if (claim === "taken") continue; // another bridge process already claimed it
-		b.inflight = { ref, text: verdict.text, started: false, lastText: "", lastError: "", outcome: "" };
+		b.inflight = { ref, text: verdict.text, deliveredAt: Date.now(), started: false, lastText: "", lastError: "", outcome: "" };
 		try {
 			pi.sendUserMessage(verdict.text, { deliverAs: "followUp" });
 		} catch (err) {
