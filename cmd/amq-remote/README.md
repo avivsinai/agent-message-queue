@@ -247,9 +247,15 @@ prompt data in `name`.
 With `"activity": true` and `"native_session_id": "<id>"`, `serve` exports
 the pinned session's turns, messages and tool calls to the owner as NIP-44
 encrypted kind 24200 frames, which the Buzz Desktop agent session panel
-renders. For Codex the id is the thread id; for Claude it is the registry
-`sessionId`, and the activity comes from the transcript the adapter already
-parses. Export runs only while the target's attached native
+renders. For Codex the id is the thread id. A Codex turn streams live,
+whether it started in the Codex TUI or from Buzz: the user prompt, the
+assistant text as it is written, each command with its output so far, and
+the plan. Deltas for one item are merged into one frame per 100 ms, so a
+fast stream stays well under the 100 frames per second cap. Approvals are
+not shown. For Claude the id is the registry `sessionId`, and the activity
+comes from the transcript the adapter already parses, one message at a
+time; a prompt sent from Buzz shows as the text the owner typed. Export
+runs only while the target's attached native
 session is the pinned one, and stops the moment it is not. Activity carries
 no control: nothing in it can submit, cancel or approve. A frame the relay
 may or may not have accepted is never sent again. Codex and Claude targets

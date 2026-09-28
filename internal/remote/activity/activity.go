@@ -56,6 +56,7 @@ type Sink struct {
 
 	mu         sync.Mutex
 	sawSession bool
+	stream     streamState
 	dropped    atomic.Uint64
 }
 
@@ -71,6 +72,9 @@ func (s *Sink) noteDrop() {
 // Close drops this sink's queued frames and releases their body and process
 // byte charges.
 func (s *Sink) Close() {
+	s.mu.Lock()
+	s.stream = streamState{}
+	s.mu.Unlock()
 	live.release(s, s.Body.Public().Hex())
 }
 
@@ -82,10 +86,17 @@ func (s *Sink) Enqueue(n codex.Notification) error {
 }
 
 // Drain publishes frames already queued for this sink. It does not require a
-// new notification. The queue lock is not held across Publish.
+// new notification. It first closes a run of Codex deltas that has been open
+// for coalesceWindow. The queue lock is not held across Publish.
 func (s *Sink) Drain(ctx context.Context) error {
 	if s.Publish == nil {
 		return fmt.Errorf("activity publish is not set")
+	}
+	s.mu.Lock()
+	err := s.flushDueLocked(s.now())
+	s.mu.Unlock()
+	if err != nil {
+		return err
 	}
 	body := s.Body.Public().Hex()
 	for {
@@ -125,29 +136,56 @@ func (s *Sink) Accept(ctx context.Context, n codex.Notification) error {
 }
 
 func (s *Sink) enqueue(n codex.Notification) (bool, error) {
-	obs, ok := projectCodex(s.ThreadID, n)
+	fact, ok := projectCodex(s.ThreadID, n)
 	if !ok {
 		return false, nil
 	}
+	// s.mu is held from the stream state through queue, so frames take
+	// their sequence numbers in the order the notifications arrived, also
+	// against a concurrent Drain that closes a due run.
 	s.mu.Lock()
-	emitReady := !s.sawSession && s.ThreadID != ""
-	if emitReady {
-		s.sawSession = true
-	}
-	s.mu.Unlock()
-	if emitReady {
-		ready := observation{Kind: "session_resolved", SessionID: s.ThreadID, At: obs.At}
+	defer s.mu.Unlock()
+	now := s.now()
+	if !s.sawSession && s.ThreadID != "" {
+		ready := observation{Kind: "session_resolved", SessionID: s.ThreadID, At: fact.obs.At}
 		if err := s.queue(ready); err != nil {
-			s.mu.Lock()
-			s.sawSession = false
-			s.mu.Unlock()
 			return false, err
 		}
+		s.sawSession = true
 	}
-	if err := s.queue(obs); err != nil {
+	switch fact.step {
+	case stepTextDelta:
+		s.stream.textDelta(fact.obs, now)
+		return true, s.flushDueLocked(now)
+	case stepOutputDelta:
+		s.stream.outputDelta(fact.obs, now)
+		return true, s.flushDueLocked(now)
+	}
+	// Any other fact ends the open runs first: Desktop closes the message
+	// being streamed when a tool or plan item arrives.
+	if err := s.flushLocked(); err != nil {
 		return false, err
 	}
-	return true, nil
+	obs := fact.obs
+	switch fact.step {
+	case stepMessageDone:
+		streamed := s.stream.streamed[obs.ItemID]
+		delete(s.stream.streamed, obs.ItemID)
+		if streamed || obs.Text == "" {
+			return true, nil
+		}
+	case stepCommandStart:
+		s.stream.command(obs.ToolID).title = obs.Title
+	case stepCommandDone:
+		if c := s.stream.commands[obs.ToolID]; c != nil && obs.Text == "" {
+			obs.Text = string(c.out)
+		}
+		delete(s.stream.commands, obs.ToolID)
+		obs.Text = capText(obs.Text, streamOutputCap)
+	case stepTurnDone:
+		s.stream = streamState{}
+	}
+	return true, s.queue(obs)
 }
 
 func (s *Sink) queue(obs observation) error {

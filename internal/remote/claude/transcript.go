@@ -142,8 +142,9 @@ type transcriptEntry struct {
 	// array; for an absorbed frame, the queued prompt. Tool results decode
 	// to "".
 	Text string
-	// Blocks are the content blocks the line actually carried. Text stays
-	// the joined text blocks so the ladder's correlation is unchanged.
+	// Blocks are the content blocks the line actually carried, except that
+	// a peer delivery's text is the envelope body. Text stays the joined
+	// text blocks so the ladder's correlation is unchanged.
 	Blocks []TranscriptBlock
 	// SessionID and UUID are the line's own ids when present. They are not
 	// paths.
@@ -207,6 +208,17 @@ func parseTranscriptLine(line string) (transcriptEntry, bool) {
 		// the delivered user entry isMeta:true (observed live 2026-09-22),
 		// which v2.1.278 did not, and the ladder skips meta entries.
 		e.Meta = false
+		// The activity view shows the prompt the sender wrote, not the
+		// envelope and harness prose. Text keeps the raw content.
+		if body, ok := crossSessionBodies(e.Text); ok {
+			blocks := []TranscriptBlock{{Type: "text", Text: body}}
+			for _, b := range e.Blocks {
+				if b.Type != "text" {
+					blocks = append(blocks, b)
+				}
+			}
+			e.Blocks = blocks
+		}
 	}
 	if ts, err := time.Parse(time.RFC3339Nano, raw.Timestamp); err == nil {
 		e.TS = ts.UnixMilli()
