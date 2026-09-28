@@ -176,6 +176,16 @@ connection reconnects with backoff of 1 to 30 seconds. Local IPC and AMQ deliver
 `serve` never mints, renews or enrolls a key. Use `amq-remote share` for
 that.
 
+What the relay checks: at NIP-42 AUTH, a Buzz relay verifies the owner
+signature on the NIP-OA tag and refuses self-attestation. Relays that include
+block/buzz#7004 also refuse a grant whose `created_at` bounds have passed;
+older relays accept a signed grant until the owner or the body key is removed
+from the relay. No relay checks `kind=` conditions at connection admission,
+so the per-kind limit is enforced by `amq-remote` itself, not by the relay.
+Treat a body key and its tags as one credential: to revoke it, remove the
+owner's relay membership or ban the body key on the relay. A socket that is
+already open stays open until it reconnects.
+
 ### Strict share in one owner step
 
 The strict relay path uses per-kind, expiring owner grants and works while
