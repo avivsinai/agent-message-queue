@@ -280,7 +280,8 @@ not required for the AMQ onboarding path.
 
 ## Companion binaries
 
-`brew install avivsinai/tap/amq` installs `amq`, `amq-acp` and `amq-remote`. The other
+`brew install avivsinai/tap/amq` installs `amq`, `amq-acp`, `amq-remote` and
+`amq-owner-sign`. The other
 companions are separate release assets and are not installed by Homebrew:
 
 - `amq-keepalive_*_darwin_{amd64,arm64}.tar.gz` and
@@ -300,6 +301,10 @@ companions are separate release assets and are not installed by Homebrew:
   and exit codes. Design and pinned seams stay in the
   [remote design](docs/adr-remote-control.md) and
   [capability reference](docs/remote-compat.md).
+- `amq-owner-sign` is the owner's signer for a strict relay share. It keeps
+  the owner key in its own process. The `amq` Homebrew formula installs it;
+  `amq-owner-sign_*_{linux,darwin}_{amd64,arm64}.tar.gz` remains for a direct
+  install. See [the strict share](cmd/amq-remote/README.md#strict-share-in-one-owner-step).
 
 Use the same release tag and checksum verification for each companion. A stable
 path matters because wake identity includes the resolved injector executable.
@@ -348,7 +353,7 @@ the direct `inject` adapters are supported there.
 and `amq-acp` when their targets are unambiguous and match the release build
 identity. A directly installed `amq-remote` is updated from its release asset. Package-managed
 core installs are delegated to their package manager. `brew upgrade amq` updates
-the formula's `amq-acp` and `amq-remote`; a directly installed `amq-acp` still uses
+the formula's `amq-acp`, `amq-remote` and `amq-owner-sign`; a directly installed `amq-acp` still uses
 `amq upgrade --all`. On Windows, `--all` can upgrade `amq-keepalive.exe`; bridge
 and ACP are not published for Windows.
 

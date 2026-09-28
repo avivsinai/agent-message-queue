@@ -145,9 +145,10 @@ jobs:
             actual="$(amq --version || true)"
             acp="$(amq-acp --version || true)"
             remote="$(amq-remote version || true)"
-            echo "Installed amq: ${actual:-<none>}; amq-acp: ${acp:-<none>}; amq-remote: ${remote:-<none>} (expect '${expected_version}', from release tag '${EXPECTED_TAG}')"
-            if [[ "${actual}" == "${expected_version}" && "${acp}" == "${expected_version}" && "${remote}" == "amq-remote ${expected_version}" ]]; then
-              echo "amq ${actual}, amq-acp ${acp}, and amq-remote ${remote} match expected release ${EXPECTED_TAG}."
+            signer="$(amq-owner-sign --version || true)"
+            echo "Installed amq: ${actual:-<none>}; amq-acp: ${acp:-<none>}; amq-remote: ${remote:-<none>}; amq-owner-sign: ${signer:-<none>} (expect '${expected_version}', from release tag '${EXPECTED_TAG}')"
+            if [[ "${actual}" == "${expected_version}" && "${acp}" == "${expected_version}" && "${remote}" == "amq-remote ${expected_version}" && "${signer}" == "${expected_version}" ]]; then
+              echo "amq ${actual}, amq-acp ${acp}, amq-remote ${remote}, and amq-owner-sign ${signer} match expected release ${EXPECTED_TAG}."
               exit 0
             fi
             if [[ "${attempt}" -lt "${max_attempts}" ]]; then
@@ -155,7 +156,7 @@ jobs:
               sleep 60
             fi
           done
-          echo "::error::Homebrew install did not match '${expected_version}' (from published release tag '${EXPECTED_TAG}') after ${max_attempts} attempts. amq='${actual}' amq-acp='${acp}' amq-remote='${remote}'."
+          echo "::error::Homebrew install did not match '${expected_version}' (from published release tag '${EXPECTED_TAG}') after ${max_attempts} attempts. amq='${actual}' amq-acp='${acp}' amq-remote='${remote}' amq-owner-sign='${signer}'."
           exit 1
 
       - name: End-to-end smoke test on a real queue

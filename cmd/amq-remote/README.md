@@ -10,12 +10,15 @@ page is the operator reference for the binary.
 
 ## Install
 
-Homebrew's `amq` formula does not install this binary. Download the matching
-`amq-remote_*_{linux,darwin}_{amd64,arm64}.tar.gz` release asset and verify
-its checksum. See [INSTALL.md](../../INSTALL.md). `amq upgrade` leaves this
-binary unchanged; update it from the release asset.
+Homebrew's `amq` formula installs `amq-remote` and the owner signer
+`amq-owner-sign`. Each also has a
+`<name>_*_{linux,darwin}_{amd64,arm64}.tar.gz` release asset; verify its
+checksum. See [INSTALL.md](../../INSTALL.md). `amq upgrade` leaves these
+binaries unchanged; update them with `brew upgrade amq` or from the release
+asset.
 
-`make build` also produces a local `amq-remote` next to `amq`.
+`make build` also produces a local `amq-remote` and `amq-owner-sign` next to
+`amq`.
 
 ## Where state lives
 
@@ -149,11 +152,11 @@ file instead of ignoring the object.
 ```
 
 Each share binds one declared target to the body key enrolled under
-`amq-remote share --session <session>`. `amq-remote share --session <session>
---bundle <file> --target <target> --relay <url>` writes this block after the
-bundle enrolls. The target must already be an adapter in the manifest. `url`
-must be `wss://`; `ws://` is
-accepted only for a loopback host. A target or session can be shared once.
+`amq-remote share --session <session>`. `share --target --relay` writes this
+block (see [Strict share in one owner step](#strict-share-in-one-owner-step));
+do not edit it by hand. The target must already be an adapter in the
+manifest. `url` must be `wss://`; `ws://` is accepted only for a loopback
+host. A target or session can be shared once.
 `commands` needs `dm_channel_id` and `native_session_id`; `activity` needs
 `native_session_id`. The optional `relay_self` pins the relay's NIP-11
 `self` key (64 lowercase hex); without it, `serve` reads the key from the
@@ -173,6 +176,51 @@ connection reconnects with backoff of 1 to 30 seconds. Local IPC and AMQ deliver
 `serve` never mints, renews or enrolls a key. Use `amq-remote share` for
 that.
 
+### Strict share in one owner step
+
+The strict relay path uses per-kind, expiring owner grants and works while
+Buzz Desktop is off. The owner signs every grant in one run of
+`amq-owner-sign`, a separate binary that keeps the owner key in its own
+process. `amq` and `amq-remote` never read the owner key.
+
+```bash
+amq-remote share --session work --enable buzz-dm > share.txt
+amq-owner-sign --share share.txt --out bundle.json --relay wss://relay.example
+amq-remote share --session work --bundle bundle.json --target codex-work \
+  --relay wss://relay.example --dm-channel <channel> --native-session <id>
+amq-remote up
+```
+
+1. `share` mints the body key and prints one preimage per kind for a new
+   window. Add `--enable buzz-profile` for [presence](#presence-in-buzz-desktop).
+2. `amq-owner-sign` checks each printed preimage against the body and
+   conditions. The signer shows what it signs: the session, the body pubkey,
+   and each kind with its expiry date. Check the body pubkey against the
+   share output before you confirm by typing its first 8 characters. Only
+   then does it read the owner key (`nsec1...` or 64 hex) from the terminal
+   without echo. It signs every grant, writes one bundle, mode 0600, that
+   holds only the public signed tags, and then publishes the owner's kind
+   30177 policy for the body on the relay. If the publish fails, the bundle
+   is already written; run it again with the same flags.
+3. `share --bundle` checks every tag the same way `--tag-file` does and
+   enrolls the whole bundle, or nothing. With `--target` and `--relay` it
+   writes the relay block in the same locked step. It copies the owner
+   public key from the tags. `--dm-channel` and `--native-session` turn on
+   [owner DM commands](#owner-dm-commands); they need the buzz-dm grants in
+   the bundle.
+
+Renewal is the same owner step: `share --session work --renew > share.txt`,
+one `amq-owner-sign` run, and one `share --bundle` with the same `--target`
+and `--relay`. With `--target`, a bundle signed by a different owner is
+refused before anything is enrolled. Without `--target`, `share --bundle`
+enrolls the bundle and leaves the manifest unchanged. The policy event is
+addressed by the body key, so publishing it again replaces it.
+
+The body cannot open a DM channel. Its grants cover the kinds in
+`ShareKinds` plus the opt-in surfaces, and none creates a channel. The owner
+opens the one-to-one DM with the body from the Buzz client and passes its
+channel id with `--dm-channel`.
+
 ### Presence in Buzz Desktop
 
 With `"presence": true` and a `"name"` (1 to 64 printable characters, no
@@ -187,9 +235,9 @@ the owner's Buzz Desktop can list it as an owned agent.
   crash cannot, so `offline` is never a liveness claim.
 - Desktop also needs the owner's own kind 30177 policy, with `d` set to the
   body's public key. The relay accepts an event only from the key that
-  authenticated, so the owner's Buzz client must publish that policy, not
-  `serve`. `serve` reads it and reports `policy_present` or
-  `policy_missing`.
+  authenticated, so the owner publishes that policy, not `serve`:
+  `amq-owner-sign` does it in the owner step. `serve` reads it and reports
+  `policy_present` or `policy_missing`.
 
 The name and status are clear text on the relay. Do not put a path or
 prompt data in `name`.
@@ -217,7 +265,8 @@ the Claude `sessionId` in `~/.claude/sessions/<pid>.json`. Commands run only whi
 has that id, so a different session under the same target is never shared
 by inheritance. Enroll the DM kinds first with `amq-remote share --session
 <session> --enable buzz-dm`; without them the surface stays closed and no
-command runs.
+command runs. `share --dm-channel <channel> --native-session <id>` writes
+these three fields.
 
 | Owner sends | Result |
 | --- | --- |
@@ -363,6 +412,8 @@ it names this session. The session and the endpoint keep running.
 | `--bundle PATH` | empty | JSON array of those tags, one file for the whole window. Enrolls every tag. Not combined with `--tag-file`. |
 | `--target ID` | empty | Adapter target written into the manifest relay block. Set with `--relay`. |
 | `--relay URL` | empty | Relay `wss://` URL written into the manifest relay block. Set with `--target`. The owner public key is copied from the enrolled tags. |
+| `--dm-channel ID` | empty | The owner's Buzz DM channel id. Set with `--native-session` and `--target`. Writes `dm_channel_id`, `native_session_id` and `"commands": true` into the share. Refused unless the tags hold the buzz-dm kinds. |
+| `--native-session ID` | empty | The native session id approved for sharing. Set with `--dm-channel`. |
 | `--enable SURFACE` | empty | Request the kinds of `buzz-dm` (9, 40003) or `buzz-profile` (0) in the new window. Repeatable. |
 | `--dry-run` | false | Print what a real run would do. Writes nothing. |
 
