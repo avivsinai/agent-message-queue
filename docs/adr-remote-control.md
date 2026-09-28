@@ -106,7 +106,10 @@ One Buzz agent serves one session. A named binding selects it: the ACP model
 id is `amq-remote:<name>`.
 
 The relay below — `share`, a body key, and per-kind grants — is an advanced
-path. It is not how a session is connected.
+path. It is not how a session is connected. The relay enforces the owner
+signature and, when it implements NIP-OA time bounds, the grant expiry; it
+does not enforce `kind=` conditions at admission, so per-kind limits are the
+endpoint's own restraint.
 
 The Desktop grant is broad and does not expire. Archiving the agent in
 Desktop does not invalidate a copied key and grant; only removing its relay
