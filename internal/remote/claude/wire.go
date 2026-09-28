@@ -78,6 +78,39 @@ func BuildCrossSessionEnvelope(from, fromSession, body, hopChain, fromName, from
 	return b.String(), nil
 }
 
+// crossSessionBodies is the inverse of BuildCrossSessionEnvelope for the
+// transcript: the body of each envelope in text, joined by newlines, without
+// the tag and without the harness prose around it. ok is false when text
+// holds no complete envelope.
+func crossSessionBodies(text string) (string, bool) {
+	const openTag, closeTag = "<cross-session-message", "\n</cross-session-message>"
+	var bodies []string
+	for {
+		i := strings.Index(text, openTag)
+		if i < 0 {
+			break
+		}
+		rest := text[i+len(openTag):]
+		// The tag ends at its first '>' and the newline the builder writes.
+		// Text that does not match is left as it is.
+		end := strings.IndexByte(rest, '>')
+		if end < 0 || !strings.HasPrefix(rest[end+1:], "\n") {
+			break
+		}
+		rest = rest[end+2:]
+		j := strings.Index(rest, closeTag)
+		if j < 0 {
+			break
+		}
+		bodies = append(bodies, rest[:j])
+		text = rest[j+len(closeTag):]
+	}
+	if len(bodies) == 0 {
+		return "", false
+	}
+	return strings.Join(bodies, "\n"), true
+}
+
 func safeAttr(s string) bool {
 	if s == "" {
 		return true

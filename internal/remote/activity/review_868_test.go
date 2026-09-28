@@ -7,6 +7,8 @@ import (
 
 	"fiatjaf.com/nostr"
 	"fiatjaf.com/nostr/nip44"
+
+	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
 )
 
 // Codex #868 review 2026-09-23T07-04-12.081Z_pid46637_0449f9e4: a tool_call
@@ -74,4 +76,31 @@ func claudeUpdates(t *testing.T, line string) []map[string]any {
 		t.Fatal(err)
 	}
 	return updates
+}
+
+// Code review 2026-09-28 (611.40): a prompt sent from Buzz reaches a Claude
+// session inside the cross-session envelope and harness prose, and the
+// activity view mirrored that XML instead of the text the owner typed.
+func TestReviewBuzzPromptMirrorsTypedText(t *testing.T) {
+	typed := "fix the flaky <test> & report"
+	env, err := claude.BuildCrossSessionEnvelope("amq-target", "amq", typed, "", "amq-remote", "code")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The idle-target delivery shape: the harness wraps the envelope.
+	line, err := json.Marshal(map[string]any{
+		"type": "user", "uuid": "u1", "sessionId": "thread-1", "isMeta": true,
+		"message": map[string]any{"role": "user", "content": "Another Claude session sent a message: " + env + "  This came from another Claude session — not typed by your user."},
+		"origin":  map[string]any{"kind": "peer", "from": "unknown", "msg_id": "m1", "name": "amq-remote"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := claudeUpdates(t, string(line))
+	if len(got) != 1 || got[0]["sessionUpdate"] != "user_message_chunk" {
+		t.Fatalf("updates = %#v", got)
+	}
+	if c, _ := got[0]["content"].(map[string]any); c["text"] != typed {
+		t.Fatalf("mirrored prompt = %#v, want the typed text", c["text"])
+	}
 }

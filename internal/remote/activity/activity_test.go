@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -324,4 +325,145 @@ func hasTag(evt nostr.Event, name, value string) bool {
 		}
 	}
 	return false
+}
+
+// A Codex turn streams live: the prompt, the plan, a command with its
+// output, and a burst of assistant deltas far above the 100 frames per
+// second cap become few ordered frames, and no text is lost.
+func TestCodexTurnStreamsCoalescedFrames(t *testing.T) {
+	body, owner := nostr.Generate(), nostr.Generate()
+	key, err := nip44.GenerateConversationKey(body.Public(), owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 9, 28, 5, 0, 0, 0, time.UTC)
+	type frame struct {
+		seq    uint64
+		kind   string
+		update map[string]any
+	}
+	var got []frame
+	sink := testSink(body, owner, func(_ context.Context, evt nostr.Event) error {
+		plain, err := nip44.Decrypt(evt.Content, key)
+		if err != nil {
+			return err
+		}
+		var obs observerJSON
+		if err := json.Unmarshal([]byte(plain), &obs); err != nil {
+			return err
+		}
+		var p struct {
+			Params struct {
+				Update map[string]any `json:"update"`
+			} `json:"params"`
+		}
+		_ = json.Unmarshal(obs.Payload, &p)
+		got = append(got, frame{obs.Seq, obs.Kind, p.Params.Update})
+		return nil
+	})
+	sink.Now = func() time.Time { return now }
+	defer sink.Close()
+	send := func(method string, params map[string]any) {
+		t.Helper()
+		params["threadId"] = "thread-1"
+		raw, err := json.Marshal(params)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := sink.Accept(context.Background(), codex.Notification{Method: method, Params: raw}); err != nil {
+			t.Fatal(err)
+		}
+		now = now.Add(time.Millisecond)
+	}
+	// Shapes from app-server-protocol v2 at rust-v0.156.1.
+	user := map[string]any{"type": "userMessage", "id": "u1", "clientId": nil, "content": []any{map[string]any{"type": "text", "text": "list the files", "text_elements": []any{}}}}
+	command := map[string]any{"type": "commandExecution", "id": "call_1", "command": "ls", "cwd": "/w", "processId": nil, "source": "agent", "status": "inProgress", "commandActions": []any{}, "aggregatedOutput": nil, "exitCode": nil, "durationMs": nil}
+	send("turn/started", map[string]any{"turn": map[string]any{"id": "turn-1", "items": []any{}, "status": "inProgress"}})
+	send("item/started", map[string]any{"turnId": "turn-1", "item": user, "startedAtMs": 1})
+	send("item/completed", map[string]any{"turnId": "turn-1", "item": user, "completedAtMs": 2})
+	send("turn/plan/updated", map[string]any{"turnId": "turn-1", "explanation": nil, "plan": []any{
+		map[string]any{"step": "list", "status": "inProgress"}, map[string]any{"step": "answer", "status": "pending"},
+	}})
+	send("item/started", map[string]any{"turnId": "turn-1", "item": command, "startedAtMs": 3})
+	var output strings.Builder
+	for i := range 50 {
+		piece := fmt.Sprintf("file-%d\n", i)
+		output.WriteString(piece)
+		send("item/commandExecution/outputDelta", map[string]any{"turnId": "turn-1", "itemId": "call_1", "delta": piece})
+		now = now.Add(4 * time.Millisecond)
+	}
+	command["status"], command["aggregatedOutput"], command["exitCode"] = "completed", output.String(), 0
+	send("item/completed", map[string]any{"turnId": "turn-1", "item": command, "completedAtMs": 4})
+	var answer strings.Builder
+	for i := range 300 {
+		piece := fmt.Sprintf("w%d ", i)
+		answer.WriteString(piece)
+		send("item/agentMessage/delta", map[string]any{"turnId": "turn-1", "itemId": "msg_1", "delta": piece})
+	}
+	send("item/completed", map[string]any{"turnId": "turn-1", "item": map[string]any{"type": "agentMessage", "id": "msg_1", "text": answer.String()}, "completedAtMs": 5})
+	send("turn/completed", map[string]any{"turn": map[string]any{"id": "turn-1", "items": []any{}, "status": "completed"}})
+
+	if now.Sub(time.Date(2026, 9, 28, 5, 0, 0, 0, time.UTC)) >= time.Second || len(got) >= ratePerBody {
+		t.Fatalf("%d frames in %s: the burst must stay under the cap inside one second", len(got), now.Sub(time.Date(2026, 9, 28, 5, 0, 0, 0, time.UTC)))
+	}
+	if sink.Drops() != 0 {
+		t.Fatalf("drops = %d", sink.Drops())
+	}
+	var kinds []string
+	var text, lastOutput, lastStatus string
+	var toolUpdates, textFrames int
+	for i, f := range got {
+		if f.seq != uint64(i+1) {
+			t.Fatalf("frame %d has seq %d", i, f.seq)
+		}
+		name := f.kind
+		if f.kind == "acp_read" {
+			name, _ = f.update["sessionUpdate"].(string)
+		}
+		if len(kinds) == 0 || kinds[len(kinds)-1] != name {
+			kinds = append(kinds, name)
+		}
+		switch name {
+		case "user_message_chunk":
+			if c, _ := f.update["content"].(map[string]any); c["text"] != "list the files" {
+				t.Fatalf("user prompt = %#v", f.update)
+			}
+		case "plan":
+			entries, _ := f.update["entries"].([]any)
+			first, _ := entries[0].(map[string]any)
+			if len(entries) != 2 || first["content"] != "list" || first["status"] != "in_progress" || first["priority"] != "medium" {
+				t.Fatalf("plan = %#v", f.update)
+			}
+		case "tool_call":
+			if f.update["title"] != "ls" || f.update["status"] != "in_progress" || f.update["toolCallId"] != "call_1" {
+				t.Fatalf("tool_call = %#v", f.update)
+			}
+		case "tool_call_update":
+			toolUpdates++
+			items, _ := f.update["content"].([]any)
+			item, _ := items[0].(map[string]any)
+			inner, _ := item["content"].(map[string]any)
+			out, _ := inner["text"].(string)
+			if !strings.HasPrefix(output.String(), out) || len(out) < len(lastOutput) || f.update["title"] != "ls" {
+				t.Fatalf("tool output is not the cumulative output so far: %#v", f.update)
+			}
+			lastOutput = out
+			lastStatus, _ = f.update["status"].(string)
+		case "agent_message_chunk":
+			textFrames++
+			c, _ := f.update["content"].(map[string]any)
+			s, _ := c["text"].(string)
+			text += s
+		}
+	}
+	want := "session_resolved,turn_started,user_message_chunk,plan,tool_call,tool_call_update,agent_message_chunk,turn_completed"
+	if strings.Join(kinds, ",") != want {
+		t.Fatalf("frame order = %s", strings.Join(kinds, ","))
+	}
+	if lastOutput != output.String() || lastStatus != "completed" || toolUpdates >= 50 {
+		t.Fatalf("%d tool updates, final %s output %q", toolUpdates, lastStatus, lastOutput)
+	}
+	if text != answer.String() || textFrames >= 300/10 {
+		t.Fatalf("%d text frames carry %d of %d bytes", textFrames, len(text), answer.Len())
+	}
 }

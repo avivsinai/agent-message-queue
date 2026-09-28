@@ -3,6 +3,7 @@ package activity
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/acp"
@@ -21,6 +22,7 @@ type observation struct {
 	Title     string
 	Status    string
 	ItemID    string
+	Plan      []planEntry
 	At        time.Time
 }
 
@@ -73,6 +75,8 @@ func (o observation) payload() (json.RawMessage, error) {
 		switch o.Update {
 		case "tool_call", "tool_call_update":
 			return toolSessionUpdate(o, meta)
+		case "plan":
+			return planSessionUpdate(o, meta)
 		default:
 			update := o.Update
 			if update == "" {
@@ -117,11 +121,71 @@ func toolSessionUpdate(o observation, meta map[string]string) (json.RawMessage, 
 	})
 }
 
-// projectCodex maps the Codex app-server notifications the attachment already
-// understands. Other methods, including NIP-AO cancel_turn, are ignored.
-func projectCodex(threadID string, n codex.Notification) (observation, bool) {
+// planSessionUpdate is the ACP plan notification. The client replaces the
+// whole plan on each update, so every frame carries every entry.
+func planSessionUpdate(o observation, meta map[string]string) (json.RawMessage, error) {
+	entries := o.Plan
+	if entries == nil {
+		entries = []planEntry{}
+	}
+	return json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"method":  "session/update",
+		"params": map[string]any{
+			"sessionId": o.SessionID,
+			"update": map[string]any{
+				"sessionUpdate": "plan",
+				"entries":       entries,
+			},
+			"_meta": meta,
+		},
+	})
+}
+
+// planEntry is one ACP PlanEntry. Codex steps carry no priority, and ACP
+// requires one, so every entry is "medium".
+type planEntry struct {
+	Content  string `json:"content"`
+	Priority string `json:"priority"`
+	Status   string `json:"status"`
+}
+
+// codexStep says what the sink does with one projected notification.
+type codexStep int
+
+const (
+	// stepFrame queues the observation as it is.
+	stepFrame codexStep = iota
+	// stepTextDelta and stepOutputDelta carry one streamed piece in
+	// obs.Text. The sink coalesces them before they become frames.
+	stepTextDelta
+	stepOutputDelta
+	// stepMessageDone is a completed agentMessage with its whole text. The
+	// sink queues it only when no delta streamed for the item.
+	stepMessageDone
+	// stepCommandStart is the tool_call for a command; obs.Title is the
+	// command line.
+	stepCommandStart
+	// stepCommandDone is the final tool_call_update; obs.Text is the
+	// aggregated output, empty when Codex sent none.
+	stepCommandDone
+	// stepTurnDone is turn_completed. It ends the turn's stream state.
+	stepTurnDone
+)
+
+// codexFact is one Codex notification for the pinned thread, projected.
+type codexFact struct {
+	step codexStep
+	obs  observation
+}
+
+// projectCodex maps the Codex app-server notifications that the activity
+// view renders (app-server-protocol v2 at codex rust-v0.156.1). Other
+// methods, and item types other than userMessage, agentMessage and
+// commandExecution, are ignored.
+func projectCodex(threadID string, n codex.Notification) (codexFact, bool) {
 	switch n.Method {
-	case "turn/started":
+	case "turn/started", "turn/completed":
 		var p struct {
 			ThreadID string `json:"threadId"`
 			Turn     struct {
@@ -129,34 +193,127 @@ func projectCodex(threadID string, n codex.Notification) (observation, bool) {
 			} `json:"turn"`
 		}
 		if json.Unmarshal(n.Params, &p) != nil || p.ThreadID != threadID || p.Turn.ID == "" {
-			return observation{}, false
+			return codexFact{}, false
 		}
-		return observation{Kind: "turn_started", SessionID: p.ThreadID, TurnID: p.Turn.ID}, true
-	case "item/completed":
+		if n.Method == "turn/started" {
+			return codexFact{step: stepFrame, obs: observation{Kind: "turn_started", SessionID: p.ThreadID, TurnID: p.Turn.ID}}, true
+		}
+		return codexFact{step: stepTurnDone, obs: observation{Kind: "turn_completed", SessionID: p.ThreadID, TurnID: p.Turn.ID}}, true
+	case "item/started", "item/completed":
+		var p struct {
+			ThreadID string    `json:"threadId"`
+			TurnID   string    `json:"turnId"`
+			Item     codexItem `json:"item"`
+		}
+		if json.Unmarshal(n.Params, &p) != nil || p.ThreadID != threadID {
+			return codexFact{}, false
+		}
+		return projectCodexItem(n.Method == "item/started", p.ThreadID, p.TurnID, p.Item)
+	case "item/agentMessage/delta", "item/commandExecution/outputDelta":
 		var p struct {
 			ThreadID string `json:"threadId"`
 			TurnID   string `json:"turnId"`
-			Item     struct {
-				Type string `json:"type"`
-				Text string `json:"text"`
-			} `json:"item"`
+			ItemID   string `json:"itemId"`
+			Delta    string `json:"delta"`
 		}
-		if json.Unmarshal(n.Params, &p) != nil || p.ThreadID != threadID || p.Item.Type != "agentMessage" || p.Item.Text == "" {
-			return observation{}, false
+		if json.Unmarshal(n.Params, &p) != nil || p.ThreadID != threadID || p.ItemID == "" || p.Delta == "" {
+			return codexFact{}, false
 		}
-		return observation{Kind: "acp_read", SessionID: p.ThreadID, TurnID: p.TurnID, Text: p.Item.Text}, true
-	case "turn/completed":
+		obs := observation{Kind: "acp_read", SessionID: p.ThreadID, TurnID: p.TurnID, ItemID: p.ItemID, Text: p.Delta}
+		if n.Method == "item/agentMessage/delta" {
+			obs.Update = "agent_message_chunk"
+			return codexFact{step: stepTextDelta, obs: obs}, true
+		}
+		obs.Update, obs.ToolID, obs.Status = "tool_call_update", p.ItemID, "in_progress"
+		return codexFact{step: stepOutputDelta, obs: obs}, true
+	case "turn/plan/updated":
 		var p struct {
 			ThreadID string `json:"threadId"`
-			Turn     struct {
-				ID string `json:"id"`
-			} `json:"turn"`
+			TurnID   string `json:"turnId"`
+			Plan     []struct {
+				Step   string `json:"step"`
+				Status string `json:"status"`
+			} `json:"plan"`
 		}
-		if json.Unmarshal(n.Params, &p) != nil || p.ThreadID != threadID || p.Turn.ID == "" {
-			return observation{}, false
+		if json.Unmarshal(n.Params, &p) != nil || p.ThreadID != threadID {
+			return codexFact{}, false
 		}
-		return observation{Kind: "turn_completed", SessionID: p.ThreadID, TurnID: p.Turn.ID}, true
+		entries := make([]planEntry, 0, len(p.Plan))
+		for _, step := range p.Plan {
+			status := "pending"
+			switch step.Status {
+			case "inProgress":
+				status = "in_progress"
+			case "completed":
+				status = "completed"
+			}
+			entries = append(entries, planEntry{Content: step.Step, Priority: "medium", Status: status})
+		}
+		return codexFact{step: stepFrame, obs: observation{Kind: "acp_read", Update: "plan", SessionID: p.ThreadID, TurnID: p.TurnID, Plan: entries}}, true
 	default:
-		return observation{}, false
+		return codexFact{}, false
+	}
+}
+
+// codexItem is the subset of a v2 ThreadItem the projection reads.
+type codexItem struct {
+	Type    string `json:"type"`
+	ID      string `json:"id"`
+	Text    string `json:"text"`
+	Content []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	} `json:"content"`
+	Command          string  `json:"command"`
+	Status           string  `json:"status"`
+	AggregatedOutput *string `json:"aggregatedOutput"`
+}
+
+func projectCodexItem(started bool, threadID, turnID string, item codexItem) (codexFact, bool) {
+	obs := observation{Kind: "acp_read", SessionID: threadID, TurnID: turnID, ItemID: item.ID}
+	switch {
+	case item.Type == "userMessage" && !started:
+		// Codex sends the same user item on start and on completion.
+		// Only text inputs are shown; images and mentions are not.
+		var parts []string
+		for _, c := range item.Content {
+			if c.Type == "text" && c.Text != "" {
+				parts = append(parts, c.Text)
+			}
+		}
+		if len(parts) == 0 {
+			return codexFact{}, false
+		}
+		obs.Update, obs.Text = "user_message_chunk", strings.Join(parts, "\n")
+		return codexFact{step: stepFrame, obs: obs}, true
+	case item.Type == "agentMessage" && !started:
+		obs.Update, obs.Text = "agent_message_chunk", item.Text
+		return codexFact{step: stepMessageDone, obs: obs}, true
+	case item.Type == "commandExecution" && item.ID != "":
+		obs.ToolID, obs.Title = item.ID, item.Command
+		if obs.Title == "" {
+			obs.Title = item.ID
+		}
+		if started {
+			obs.Update, obs.Status = "tool_call", "in_progress"
+			return codexFact{step: stepCommandStart, obs: obs}, true
+		}
+		obs.Update = "tool_call_update"
+		// ACP has no declined status; a declined command did not run, so it
+		// shows as failed.
+		switch item.Status {
+		case "completed":
+			obs.Status = "completed"
+		case "inProgress":
+			obs.Status = "in_progress"
+		default:
+			obs.Status = "failed"
+		}
+		if item.AggregatedOutput != nil {
+			obs.Text = *item.AggregatedOutput
+		}
+		return codexFact{step: stepCommandDone, obs: obs}, true
+	default:
+		return codexFact{}, false
 	}
 }
