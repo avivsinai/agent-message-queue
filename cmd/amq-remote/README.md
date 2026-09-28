@@ -81,9 +81,6 @@ Each adapter has a unique `target` (the id you pass to `inspect` and
 `epoch` on any kind other than `fake` is exit 2. A duplicate `target` is
 exit 2. An unknown kind is refused at startup; `serve` continues with the
 adapters that attached, writes `refusals.json`, and prints the refusal.
-Kind `amit` is a deprecated legacy alias of `pi` that uses the directory
-`extensions/amit-remote/` and the protocol `amit:amq-remote:v1`; `serve`
-prints a deprecation line when a manifest uses it.
 
 ```json
 {

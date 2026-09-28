@@ -389,7 +389,3 @@ type wireNames struct {
 
 // piWire is the wire of kind "pi".
 var piWire = wireNames{dir: "pi-bridge", protocol: ProtocolV1, runPrefix: "pi:"}
-
-// legacyAmitWire is the wire of the deprecated kind "amit": legacy wire
-// names, kept until the downstream extension moves to pi-bridge.
-var legacyAmitWire = wireNames{dir: "amit-remote", protocol: "amit:amq-remote:v1", runPrefix: "amit:"}

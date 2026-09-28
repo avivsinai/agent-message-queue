@@ -7,5 +7,5 @@ import (
 	_ "github.com/avivsinai/agent-message-queue/internal/remote/claude" // registers claude factory
 	_ "github.com/avivsinai/agent-message-queue/internal/remote/codex"  // registers codex factory
 	_ "github.com/avivsinai/agent-message-queue/internal/remote/fake"   // registers fake factory
-	_ "github.com/avivsinai/agent-message-queue/internal/remote/pi"     // registers pi factory and its deprecated amit alias
+	_ "github.com/avivsinai/agent-message-queue/internal/remote/pi"     // registers pi factory
 )

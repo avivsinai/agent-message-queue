@@ -801,16 +801,14 @@ func TestFactoryRequiresHandleAndDir(t *testing.T) {
 	}
 }
 
-// TestKindWireNames pins the wire names each kind uses: kind "pi" publishes
-// under extensions/pi-bridge/ and accepts amq:pi-bridge:v1 receipts; the
-// deprecated kind "amit" keeps the legacy names byte for byte.
+// TestKindWireNames pins the wire names of kind "pi": it publishes under
+// extensions/pi-bridge/ and accepts amq:pi-bridge:v1 receipts.
 func TestKindWireNames(t *testing.T) {
 	for _, tc := range []struct {
 		kind, dir, proto, runPrefix string
 		factory                     registry.Factory
 	}{
 		{"pi", "pi-bridge", "amq:pi-bridge:v1", "pi:", Factory},
-		{"amit", "amit-remote", "amit:amq-remote:v1", "amit:", LegacyAmitFactory},
 	} {
 		t.Run(tc.kind, func(t *testing.T) {
 			root := t.TempDir()

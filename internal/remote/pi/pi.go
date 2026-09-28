@@ -151,20 +151,6 @@ func Factory(_ context.Context, cfg registry.FactoryConfig) (core.Attachment, er
 	return build(cfg, piWire)
 }
 
-// legacyAmitDeprecation prints the kind "amit" deprecation line once per
-// process, however often serve rebuilds its targets.
-var legacyAmitDeprecation sync.Once
-
-// LegacyAmitFactory builds the deprecated kind "amit": the same adapter over
-// the legacy wire names, kept until the downstream extension moves to
-// pi-bridge.
-func LegacyAmitFactory(_ context.Context, cfg registry.FactoryConfig) (core.Attachment, error) {
-	legacyAmitDeprecation.Do(func() {
-		fmt.Fprintln(os.Stderr, `amq-remote: kind "amit" is deprecated; use "pi"`)
-	})
-	return build(cfg, legacyAmitWire)
-}
-
 func build(cfg registry.FactoryConfig, names wireNames) (core.Attachment, error) {
 	var c config
 	if len(cfg.Config) > 0 {
@@ -187,7 +173,6 @@ func build(cfg registry.FactoryConfig, names wireNames) (core.Attachment, error)
 
 func init() {
 	registry.Register("pi", Factory)
-	registry.Register("amit", LegacyAmitFactory)
 }
 
 // clientRef is the request identity: protocol.EncodeRef of the record key,
