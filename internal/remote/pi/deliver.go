@@ -2,14 +2,14 @@
 // pi-bridge protocol v1 paths:
 //
 //	bridgePath: <AM_ROOT>/agents/<handle>/extensions/pi-bridge/ (see wireNames)
-//	requests/<ref>.json   publishRequest — atomic tmp+rename, O_EXCL (§1)
-//	receipts/<ref>.json   readReceipt — admission proof (§2)
-//	events/<ref>.jsonl    readEvents — terminal evidence, rotation-tolerant (§3, A2)
-//	bridge.liveness       liveness — heartbeat freshness (§2)
+//	requests/<ref>.json   publishRequest — atomic tmp+rename, O_EXCL (protocol: requests)
+//	receipts/<ref>.json   readReceipt — admission proof (protocol: receipts)
+//	events/<ref>.jsonl    readEvents — terminal evidence, rotation-tolerant (protocol: events)
+//	bridge.liveness       liveness — heartbeat freshness (protocol: liveness)
 //
-// The adapter writes ONLY requests/<ref>.json (contract §8); every other
-// path is read-only. The file names use the sanitized ref (§Identity: ':'
-// and '/' replaced by '_').
+// The adapter writes ONLY requests/<ref>.json (protocol: ownership); every other
+// path is read-only. The file names use the sanitized ref, with ':'
+// and '/' replaced by '_' (protocol: identity and layout).
 package pi
 
 import (
@@ -23,19 +23,19 @@ import (
 	"time"
 )
 
-// SentinelUnpinned is the §4/A4 epoch sentinel: the epoch an attachment
+// SentinelUnpinned is the epoch sentinel: the epoch an attachment
 // publishes before it observes its first receipt. Non-empty and
 // protocol-valid, so stale-epoch protection cannot be defeated by ""=="".
 // Only receipts pin a real generation; the sentinel is never derived from
 // the session id or liveness.
 const SentinelUnpinned = "unpinned"
 
-// ErrAlreadyDelivered marks the §1 duplicate guard: requests/<ref>.json
+// ErrAlreadyDelivered marks the duplicate guard: requests/<ref>.json
 // already exists, so the ref was already delivered and must never be
 // rewritten or re-sent.
 var ErrAlreadyDelivered = errors.New("pi: request already delivered")
 
-// ErrForeignEventStream marks the §9 refusal of an event stream carrying a
+// ErrForeignEventStream marks the protocol-string refusal of an event stream carrying a
 // foreign protocol string. It is typed so tests and callers can recognise
 // the refusal via errors.Is (review 816-r4 P1). Lifting rules live in
 // applyObservationLocked and are protocol-uniform: the refusal survives an
@@ -43,17 +43,17 @@ var ErrAlreadyDelivered = errors.New("pi: request already delivered")
 // present stream validates as v1 end to end.
 var ErrForeignEventStream = errors.New("pi: foreign-protocol event stream")
 
-// deliverRequest is the §1 request JSON contract.
+// deliverRequest is the request JSON contract.
 type deliverRequest struct {
 	Ref       string `json:"ref"`
 	Text      string `json:"text"`
 	DeliverAs string `json:"deliver_as"`
 	NotAfter  string `json:"not_after"`
-	EpochHint string `json:"epoch_hint,omitempty"` // empty = first contact, no check (§4)
+	EpochHint string `json:"epoch_hint,omitempty"` // empty = first contact, no check (protocol: session generation and epoch)
 	CreatedAt string `json:"created_at"`
 }
 
-// receipt is the §2 receipt JSON contract.
+// receipt is the receipt JSON contract.
 type receipt struct {
 	Protocol          string `json:"protocol"`
 	Ref               string `json:"ref"`
@@ -62,7 +62,7 @@ type receipt struct {
 	PID               int    `json:"pid"`
 }
 
-// event is one JSON line of the §3 event stream.
+// event is one JSON line of the event stream.
 type event struct {
 	Protocol string `json:"protocol"`
 	Ref      string `json:"ref"`
@@ -74,12 +74,12 @@ type event struct {
 }
 
 // maxEventText bounds one event line's text to the contract's 256 KiB cap
-// (§3, mirrors the doorbell trace cap). The adapter never trusts a longer
+// (protocol: events; mirrors the doorbell trace cap). The adapter never trusts a longer
 // line than the contract allows.
 const maxEventText = 256 * 1024
 
 // livenessRecord is the bridge.liveness JSON shape (the doorbell shape plus
-// the bridge protocol tag, §9).
+// the bridge protocol tag; protocol: protocol string).
 type livenessRecord struct {
 	Protocol string `json:"protocol"`
 	Live     bool   `json:"live"`
@@ -88,13 +88,13 @@ type livenessRecord struct {
 	Surface  string `json:"surface"`
 	// SessionGeneration is advisory: /new, reload, and fork keep the pid but
 	// change the generation, so it may drop a pin that no longer matches,
-	// never set one (§4).
+	// never set one (protocol: session generation and epoch).
 	SessionGeneration string `json:"session_generation,omitempty"`
 }
 
 // heartbeat / freshness: the extension refreshes the heartbeat every 2s and
 // a record older than 5s is stale — the doorbell thresholds, one shared
-// truth per contract §2.
+// truth (protocol: liveness).
 const (
 	heartbeatMaxAge = 5 * time.Second
 )
@@ -107,7 +107,7 @@ func bridgePath(root, handle string, w wireNames) string {
 // refSanitize makes a request ref safe as a filename. protocol.EncodeRef
 // output is the prefix "amqr1_" plus base32 lowercase — already filename-
 // safe — so this is the identity today; it exists as the single named seam
-// if the ref grammar ever grows unsafe characters (§Identity).
+// if the ref grammar ever grows unsafe characters (protocol: identity and layout).
 func refSanitize(ref string) string {
 	return ref
 }
@@ -117,7 +117,7 @@ func refSanitize(ref string) string {
 type bridgeDir struct {
 	dir string
 	// names are the wire names of this bridge generation; every receipt,
-	// event line, and liveness record must carry names.protocol (§9).
+	// event line, and liveness record must carry names.protocol (protocol: protocol string).
 	names wireNames
 
 	// Injectable for tests. Zero funcs fall through to the real files.
@@ -137,7 +137,7 @@ type livenessState struct {
 	gen    string // the live bridge's advisory generation ("" = not published)
 }
 
-// publishRequest publishes one §1 request: atomic write (unique temp name,
+// publishRequest publishes one request: atomic write (unique temp name,
 // fsync file, rename, fsync dir), create-new via the rename over an
 // existing file being refused first. The rename is the publication
 // boundary — nothing polls a partial file.
@@ -148,7 +148,7 @@ func (b bridgeDir) publishRequest(req deliverRequest) error {
 	dir := filepath.Join(b.dir, "requests")
 	path := filepath.Join(dir, refSanitize(req.Ref)+".json")
 	if _, err := os.Stat(path); err == nil {
-		// §1: O_EXCL semantics — an existing request file is a positive
+		// O_EXCL semantics — an existing request file is a positive
 		// pre-send duplicate refusal. Never overwrite.
 		return fmt.Errorf("%w: %s", ErrAlreadyDelivered, req.Ref)
 	} else if !os.IsNotExist(err) {
@@ -170,7 +170,7 @@ func (b bridgeDir) publishRequest(req deliverRequest) error {
 // exists, so the publication is atomic O_EXCL — nothing ever observes a
 // partial or empty target file (rename-onto-existing would silently
 // overwrite; claim-then-fill would expose an empty file), and a concurrent
-// publisher of the same ref loses cleanly (§1).
+// publisher of the same ref loses cleanly (protocol: requests).
 func writeAtomicNew(path string, payload []byte) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -198,7 +198,7 @@ func writeAtomicNew(path string, payload []byte) error {
 		return fmt.Errorf("pi: temp close: %v", err)
 	}
 	// Atomic create-new publication: link fails with EEXIST when another
-	// writer already published this ref — the §1 duplicate refusal.
+	// writer already published this ref — the duplicate refusal.
 	if err := os.Link(tmpName, path); err != nil {
 		if os.IsExist(err) {
 			return fmt.Errorf("%w: %s", ErrAlreadyDelivered, strings.TrimSuffix(filepath.Base(path), ".json"))
@@ -221,8 +221,8 @@ func writeAtomicNew(path string, payload []byte) error {
 	return nil
 }
 
-// readReceipt reads receipts/<ref>.json (§2). Returns (nil, nil) when the
-// receipt is absent. A receipt carrying a foreign protocol string (§9) is
+// readReceipt reads receipts/<ref>.json (protocol: receipts). Returns (nil, nil) when the
+// receipt is absent. A receipt carrying a foreign protocol string (protocol: protocol string) is
 // refused, never guessed into evidence.
 func (b bridgeDir) readReceipt(ref string) (*receipt, error) {
 	if b.receipt != nil {
@@ -245,7 +245,7 @@ func (b bridgeDir) readReceipt(ref string) (*receipt, error) {
 	return &rc, nil
 }
 
-// readEvents reads events/<ref>.jsonl (§3), oldest first. A2 rotation
+// readEvents reads events/<ref>.jsonl (protocol: events), oldest first. Rotation
 // tolerance: only the LAST rotation segment is read (the current file); a
 // missing file yields no events, never an error.
 func (b bridgeDir) readEvents(ref string) ([]event, error) {
@@ -268,7 +268,7 @@ func (b bridgeDir) readEvents(ref string) ([]event, error) {
 		var ev event
 		if err := json.Unmarshal([]byte(line), &ev); err != nil {
 			// A partial trailing line (a crash mid-append) is skipped: the
-			// terminal line is fsynced by the writer (§3), so an unparsed
+			// terminal line is fsynced by the writer (protocol: events), so an unparsed
 			// line is never the terminal evidence.
 			continue
 		}
@@ -276,7 +276,7 @@ func (b bridgeDir) readEvents(ref string) ([]event, error) {
 			ev.Text = ev.Text[:maxEventText]
 		}
 		if ev.Protocol != "" && ev.Protocol != b.names.protocol {
-			// §9: refuse an unknown protocol string rather than guessing.
+			// Refuse an unknown protocol string rather than guessing.
 			// A v1 receipt + v2-only event stream must NOT read as "no
 			// events" (recovery row 3 would map that to confirmed-running,
 			// hiding a terminal state); the whole stream is refused so the
@@ -288,9 +288,9 @@ func (b bridgeDir) readEvents(ref string) ([]event, error) {
 	return out, nil
 }
 
-// liveness reads and classifies bridge.liveness (§2): heartbeat freshness
+// liveness reads and classifies bridge.liveness (protocol: liveness): heartbeat freshness
 // over the file's mtime (the doorbell pattern), 5s fresh window. The file's
-// session_generation advisory never pins (§4); it only drops a stale pin.
+// session_generation advisory never pins (protocol: session generation and epoch); it only drops a stale pin.
 func (b bridgeDir) liveness(now time.Time) livenessState {
 	if b.live != nil {
 		return b.live(now)
@@ -316,7 +316,7 @@ func (b bridgeDir) liveness(now time.Time) livenessState {
 		return livenessState{age: age, reason: "malformed"}
 	}
 	if rec.Protocol != "" && rec.Protocol != b.names.protocol {
-		// §9: a foreign-protocol bridge is not OUR bridge. Treating it as
+		// A foreign-protocol bridge is not OUR bridge. Treating it as
 		// live would let the adapter write requests into a seam owned by a
 		// different protocol — refuse the pre-gate.
 		return livenessState{age: age, reason: "foreign protocol " + rec.Protocol}
@@ -328,7 +328,7 @@ func (b bridgeDir) liveness(now time.Time) livenessState {
 }
 
 // listReceipts returns every parseable receipt, ordered oldest-first by
-// file mtime then name (deterministic; §5 recovery only needs a
+// file mtime then name (deterministic; recovery only needs a
 // deterministic sweep and the pinned epoch ends at the last receipt
 // applied). Unparseable/junk files are skipped, never guessed into
 // evidence.
@@ -373,7 +373,7 @@ func (b bridgeDir) listReceipts() []receipt {
 	return out
 }
 
-// ProtocolV1 is the §9 protocol string of kind "pi". Every receipt/event
+// ProtocolV1 is the protocol string of kind "pi". Every receipt/event
 // line carries it; the adapter refuses an unknown string rather than
 // guessing.
 const ProtocolV1 = "amq:pi-bridge:v1"

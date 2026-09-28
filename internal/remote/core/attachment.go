@@ -74,7 +74,7 @@ type Evidence struct {
 	LocalIntervention bool
 	Interaction       *protocol.Interaction
 	// RefusalCode is the typed refusal carried by a DEFINITIVE native
-	// refusal (pi-bridge protocol §6/A3: receipt present + refused event
+	// refusal (pi-bridge protocol: adapter recovery and evidence; receipt present + refused event
 	// = admission proven, execution refused). When set on terminal evidence,
 	// reconcile maps it to rejected+Code instead of the state-derived cause,
 	// so a fire-time window expiry surfaces as the endpoint's typed expired

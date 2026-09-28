@@ -106,8 +106,7 @@ func Factory(_ context.Context, cfg registry.FactoryConfig) (core.Attachment, er
 
 // Attach builds the attachment, resolving the session registry once. A
 // missing registry entry is a startup refusal: the adapter never guesses a
-// session identity (contract §Identity posture shared with the pi
-// adapter).
+// session identity (the same identity posture as the pi adapter).
 func Attach(cfg config) (*Attachment, error) {
 	home := cfg.Home
 	if home == "" {

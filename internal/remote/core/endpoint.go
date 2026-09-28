@@ -1980,7 +1980,7 @@ func (e *Endpoint) reconcileLive(rec *requests.Record) error {
 		}
 		e.transitionLocked(rec, causeAttachmentLost, nativeEvidence{})
 	case ev.RefusalCode != "" && ev.Admitted && ev.State == protocol.StateRejected:
-		// pi-bridge protocol section 6/A3: a DEFINITIVE native refusal over
+		// A DEFINITIVE native refusal over
 		// PROVEN admission (the receipt stays across a fire-time refusal).
 		// Map the typed refusal code onto the durable record — rejected+code,
 		// action-required — never a silent dispatch and never evidence of

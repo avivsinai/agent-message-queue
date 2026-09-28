@@ -95,8 +95,8 @@ func TestTentativeEvidenceIsReconcileNoop(t *testing.T) {
 	}
 }
 
-// TestRefusalOverProvenAdmissionEndsRejectedTyped pins the A3 mapping (pi-bridge
-// protocol §6): a DEFINITIVE native refusal over PROVEN admission —
+// TestRefusalOverProvenAdmissionEndsRejectedTyped pins the refusal mapping (pi-bridge
+// protocol: adapter recovery and evidence): a DEFINITIVE native refusal over PROVEN admission —
 // Evidence with RefusalCode set, Admitted true, State rejected — must end the
 // record as rejected with the typed refusal code (action-required), never a
 // silent dispatch and never evidence of non-admission.

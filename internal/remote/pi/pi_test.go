@@ -2,7 +2,7 @@ package pi
 
 // Tests for the pi-bridge protocol v1 adapter. The protocol governs every
 // assertion here; section references are in the test names
-// and comments. Real-file tests cover the §5 recovery table verbatim —
+// and comments. Real-file tests cover the recovery table verbatim —
 // including rotation tolerance and a partial last line — against an actual
 // extension directory layout, not a fake source.
 
@@ -82,7 +82,7 @@ func stampLiveness(t *testing.T, dir string, at time.Time) {
 }
 
 // stampLivenessWithProtocol writes a bridge.liveness with a custom protocol
-// string (the §9 test seam).
+// string (the protocol-string test seam).
 func stampLivenessWithProtocol(t *testing.T, dir string, at time.Time, proto string) {
 	t.Helper()
 	rec := fmt.Sprintf(`{"protocol":%q,"live":true,"at":%q,"pid":%d,"surface":"app"}`,
@@ -151,9 +151,9 @@ func submitReq(key requests.Key, text string) core.BoundRequest {
 	return core.BoundRequest{Key: key, Epoch: SentinelUnpinned, Input: protocol.SubmitInput{Text: text}, NotAfter: "2036-01-01T00:00:00Z"}
 }
 
-// --- Inspect & epoch (§4/A4, §7) -----------------------------------------
+// --- Inspect & epoch (protocol: session generation and epoch; capabilities) -----------------------------------------
 
-// TestInspectUnpinnedSentinel pins A4: before the first receipt the epoch
+// TestInspectUnpinnedSentinel pins that before the first receipt the epoch
 // is the non-empty sentinel `unpinned`, never "" (an empty epoch would
 // defeat stale-epoch protection because "" == "" always passes).
 func TestInspectUnpinnedSentinel(t *testing.T) {
@@ -167,7 +167,7 @@ func TestInspectUnpinnedSentinel(t *testing.T) {
 	}
 }
 
-// TestFirstReceiptPinsEpoch pins §4: the first receipt's session_generation
+// TestFirstReceiptPinsEpoch pins that the first receipt's session_generation
 // becomes the published epoch; only receipts pin (never liveness, never the
 // session id).
 func TestFirstReceiptPinsEpoch(t *testing.T) {
@@ -187,7 +187,7 @@ func TestFirstReceiptPinsEpoch(t *testing.T) {
 	}
 }
 
-// TestLaterSubmitCarriesEpochHint pins §1+§4: a submit after pinning
+// TestLaterSubmitCarriesEpochHint pins that a submit after pinning
 // publishes the pinned generation as epoch_hint (empty only while
 // unpinned), and the request JSON carries deliver_as followUp + not_after.
 func TestLaterSubmitCarriesEpochHint(t *testing.T) {
@@ -229,7 +229,7 @@ func TestLaterSubmitCarriesEpochHint(t *testing.T) {
 	}
 }
 
-// TestInspectCapabilities pins §7: submit true with evidence `submitted`,
+// TestInspectCapabilities pins the capability projection: submit true with evidence `submitted`,
 // steer false, cancel/approve/question false, terminal unavailable, and
 // offline when the heartbeat is stale.
 func TestInspectCapabilities(t *testing.T) {
@@ -255,7 +255,7 @@ func TestInspectCapabilities(t *testing.T) {
 	}
 }
 
-// --- Submit: receipt-gated admission, liveness, duplicates (§1, §2) -------
+// --- Submit: receipt-gated admission, liveness, duplicates (protocol: requests; liveness) -------
 
 // TestSubmitAdmittedOnlyWithReceipt pins 9b: Admitted:true is returned only
 // when the receipt lands; a live bridge without one leaves the submit
@@ -296,7 +296,7 @@ func TestSubmitAdmittedOnlyWithReceipt(t *testing.T) {
 	}
 }
 
-// TestSubmitDeadBridgeFailsPreSideEffect pins §2: no receipt + dead
+// TestSubmitDeadBridgeFailsPreSideEffect pins that no receipt + dead
 // liveness → FAILED pre-side-effect; a fresh submit writes NO request file
 // (nobody is listening), and the refusal is positive.
 func TestSubmitDeadBridgeFailsPreSideEffect(t *testing.T) {
@@ -316,7 +316,7 @@ func TestSubmitDeadBridgeFailsPreSideEffect(t *testing.T) {
 	}
 }
 
-// TestSubmitDuplicateRefNeverRewrites pins §1: the request file is
+// TestSubmitDuplicateRefNeverRewrites pins that the request file is
 // create-new; a duplicate publish refuses positively and the file content
 // is untouched (never double-fired).
 func TestSubmitDuplicateRefNeverRewrites(t *testing.T) {
@@ -335,7 +335,7 @@ func TestSubmitDuplicateRefNeverRewrites(t *testing.T) {
 	}
 }
 
-// TestPublishRequestAtomicShape pins §1's atomic write: the published file
+// TestPublishRequestAtomicShape pins the atomic request write: the published file
 // contains the full payload, no temp files leak, and the request dir still
 // holds only ref-named files.
 func TestPublishRequestAtomicShape(t *testing.T) {
@@ -360,7 +360,7 @@ func TestPublishRequestAtomicShape(t *testing.T) {
 	}
 }
 
-// TestSubmitSteerRefused pins §7: deliver=steer is refused pre-side-effect
+// TestSubmitSteerRefused pins that deliver=steer is refused pre-side-effect
 // (unsupported), before any file write.
 func TestSubmitSteerRefused(t *testing.T) {
 	a, dir := newTestAttachment(t)
@@ -376,7 +376,7 @@ func TestSubmitSteerRefused(t *testing.T) {
 	}
 }
 
-// --- Lookup / evidence (§5) ------------------------------------------------
+// --- Lookup / evidence (protocol: adapter recovery and evidence) ------------------------------------------------
 
 // TestLookupUnretainedKeyUnknown pins the pi evidence rule: a key the
 // adapter retains nothing about is EvidenceUnknown, never EvidenceNone.
@@ -388,7 +388,7 @@ func TestLookupUnretainedKeyUnknown(t *testing.T) {
 	}
 }
 
-// TestLookupReceiptNoEventsConfirmedRunning pins §5 row 3: receipt present,
+// TestLookupReceiptNoEventsConfirmedRunning pins recovery row 3: receipt present,
 // no events (rotated/absent log) → confirmed-running, never uncertain.
 func TestLookupReceiptNoEventsConfirmedRunning(t *testing.T) {
 	a, dir := newTestAttachment(t)
@@ -405,7 +405,7 @@ func TestLookupReceiptNoEventsConfirmedRunning(t *testing.T) {
 	}
 }
 
-// TestLookupTerminalEvents pins §5 rows 1: receipt + completed/failed/
+// TestLookupTerminalEvents pins recovery row 1: receipt + completed/failed/
 // cancelled events resolve the terminal states with results.
 func TestLookupTerminalEvents(t *testing.T) {
 	a, dir := newTestAttachment(t)
@@ -444,7 +444,7 @@ func TestLookupTerminalEvents(t *testing.T) {
 	}
 }
 
-// TestLookupNoReceiptUncertain pins §5 row 4: no receipt → uncertain, the
+// TestLookupNoReceiptUncertain pins recovery row 4: no receipt → uncertain, the
 // record keeps correlating (the send primitive cannot prove non-admission).
 func TestLookupNoReceiptUncertain(t *testing.T) {
 	a, dir := newTestAttachment(t)
@@ -485,9 +485,9 @@ func TestAcknowledgeReleasesResult(t *testing.T) {
 	}
 }
 
-// --- A3: fire-time expiry over proven admission ----------------------------
+// --- Fire-time expiry over proven admission ----------------------------
 
-// TestExpiredRefusalMapsTyped pins §6/A3: receipt present + refused(expired)
+// TestExpiredRefusalMapsTyped pins that receipt present + refused(expired)
 // → Lookup reports proven admission with RefusalCode expired — the endpoint
 // maps it to rejected+expired, never a silent dispatch.
 func TestExpiredRefusalMapsTyped(t *testing.T) {
@@ -506,7 +506,7 @@ func TestExpiredRefusalMapsTyped(t *testing.T) {
 	}
 }
 
-// TestGenerationRefusalDropsToSentinel pins §4: a refused(generation) event
+// TestGenerationRefusalDropsToSentinel pins that a refused(generation) event
 // proves the pinned epoch stale; the adapter drops back to the `unpinned`
 // sentinel so the next receipt re-pins the live generation.
 func TestGenerationRefusalDropsToSentinel(t *testing.T) {
@@ -605,9 +605,9 @@ func TestSameProcessRestartDropsPin(t *testing.T) {
 	}
 }
 
-// --- §5 restart recovery against real files --------------------------------
+// --- Restart recovery against real files --------------------------------
 
-// TestRecoveryTableVerbatim drives the §5 recovery table against a real
+// TestRecoveryTableVerbatim drives the recovery table against a real
 // extension directory: a fresh attachment over the same files answers from
 // history and never redispatches.
 func TestRecoveryTableVerbatim(t *testing.T) {
@@ -656,7 +656,7 @@ func TestRecoveryTableVerbatim(t *testing.T) {
 		t.Fatalf("row4 = %+v, %v; want unknown/uncertain", ev, err)
 	}
 
-	// §5: an existing request file is never redispatched — recovery binds
+	// An existing request file is never redispatched — recovery binds
 	// from receipts/events only; the request files above were never
 	// rewritten (mtime unchanged is over-pinning; content identity is the
 	// assertion).
@@ -668,7 +668,7 @@ func TestRecoveryTableVerbatim(t *testing.T) {
 	}
 }
 
-// TestRecoveryPinsNewestGeneration pins §4 across restart: with receipts
+// TestRecoveryPinsNewestGeneration pins the epoch rule across restart: with receipts
 // from two generations the recovered epoch is the NEWEST receipt's
 // generation.
 func TestRecoveryPinsNewestGeneration(t *testing.T) {
@@ -685,7 +685,7 @@ func TestRecoveryPinsNewestGeneration(t *testing.T) {
 	}
 }
 
-// TestRecoveryToleratesRotatedLogAndPartialLine pins A2 + §3: a truncated
+// TestRecoveryToleratesRotatedLogAndPartialLine pins that a truncated
 // trailing line (crash mid-append) is skipped; the fsynced terminal line
 // still resolves the record.
 func TestRecoveryToleratesRotatedLogAndPartialLine(t *testing.T) {
@@ -706,9 +706,9 @@ func TestRecoveryToleratesRotatedLogAndPartialLine(t *testing.T) {
 	}
 }
 
-// --- §9 protocol refusal ----------------------------------------------------
+// --- Protocol-string refusal ----------------------------------------------------
 
-// TestForeignProtocolReceiptRefused pins §9: a receipt carrying an unknown
+// TestForeignProtocolReceiptRefused pins that a receipt carrying an unknown
 // protocol string is refused, never guessed into evidence (the run stays
 // uncertain).
 func TestForeignProtocolReceiptRefused(t *testing.T) {
@@ -726,7 +726,7 @@ func TestForeignProtocolReceiptRefused(t *testing.T) {
 	}
 }
 
-// TestForeignProtocolLivenessNotLive pins §9 on the write path: a
+// TestForeignProtocolLivenessNotLive pins the protocol-string rule on the write path: a
 // bridge.liveness carrying an unknown protocol string is NOT a live bridge —
 // the pre-gate refuses with attachment_lost and NO request file is written
 // into the foreign seam.
@@ -743,7 +743,7 @@ func TestForeignProtocolLivenessNotLive(t *testing.T) {
 	}
 }
 
-// TestForeignProtocolEventsRefused pins §9/P2: with a v1 receipt and a
+// TestForeignProtocolEventsRefused pins that with a v1 receipt and a
 // v2-only event stream the stream is REFUSED (an error), never read as "no
 // events" — recovery row 3 must not map a hidden terminal to
 // confirmed-running.
@@ -765,7 +765,7 @@ func TestForeignProtocolEventsRefused(t *testing.T) {
 
 // --- Cancel & misc -----------------------------------------------------------
 
-// TestCancelUnsupported pins §7: no native cancel seam; terminal runs are
+// TestCancelUnsupported pins that there is no native cancel seam; terminal runs are
 // noop_already_terminal.
 func TestCancelUnsupported(t *testing.T) {
 	a, dir := newTestAttachment(t)
