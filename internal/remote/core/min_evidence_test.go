@@ -22,7 +22,7 @@ func TestMinEvidenceFloorRefusesWeakerAdapter(t *testing.T) {
 	t.Cleanup(func() { _ = ep.Close() })
 
 	// A weak-evidence adapter: it can submit but only proves "submitted",
-	// not "admitted". This mirrors Amit's evidence class.
+	// not "admitted". This mirrors pi's evidence class.
 	rt := fake.New("fake", "e_1").WithEvidence(&protocol.Evidence{Submit: protocol.EvidenceSubmitted, Completion: "run_terminal"})
 	ep.Register(rt)
 

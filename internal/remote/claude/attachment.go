@@ -51,7 +51,7 @@ type config struct {
 	// pid also keys the transcript under ~/.claude/projects via sessionId.
 	Pid int `json:"pid"`
 	// Target overrides the published target id (the manifest's declared
-	// identity, the same rule as codex/amit). Empty = the registry name,
+	// identity, the same rule as codex/pi). Empty = the registry name,
 	// validated, else "claude:<pid>".
 	Target string `json:"target,omitempty"`
 	// Home overrides the Claude home for tests; empty = os.UserHomeDir().
@@ -106,8 +106,7 @@ func Factory(_ context.Context, cfg registry.FactoryConfig) (core.Attachment, er
 
 // Attach builds the attachment, resolving the session registry once. A
 // missing registry entry is a startup refusal: the adapter never guesses a
-// session identity (contract §Identity posture shared with the amit
-// adapter).
+// session identity (the same identity posture as the pi adapter).
 func Attach(cfg config) (*Attachment, error) {
 	home := cfg.Home
 	if home == "" {
@@ -389,7 +388,7 @@ func (a *Attachment) CancelExact(key requests.Key, _ string) (core.CancelEvidenc
 // Respond implements core.Attachment: no approval/question seam exists
 // (docs/remote-compat.md §3; Remote Control is policy-disabled). The
 // typed already_resolved code (P2-3 — an empty code reads as success at
-// the endpoint) mirrors amit.
+// the endpoint) mirrors pi.
 func (a *Attachment) Respond(_ requests.Key, _, _, _ string) (protocol.Code, error) {
 	return protocol.CodeAlreadyResolved, nil
 }

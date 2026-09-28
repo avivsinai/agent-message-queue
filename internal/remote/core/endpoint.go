@@ -1980,7 +1980,7 @@ func (e *Endpoint) reconcileLive(rec *requests.Record) error {
 		}
 		e.transitionLocked(rec, causeAttachmentLost, nativeEvidence{})
 	case ev.RefusalCode != "" && ev.Admitted && ev.State == protocol.StateRejected:
-		// Amit-remote contract section 6/A3: a DEFINITIVE native refusal over
+		// A DEFINITIVE native refusal over
 		// PROVEN admission (the receipt stays across a fire-time refusal).
 		// Map the typed refusal code onto the durable record — rejected+code,
 		// action-required — never a silent dispatch and never evidence of
@@ -1988,7 +1988,7 @@ func (e *Endpoint) reconcileLive(rec *requests.Record) error {
 		e.transitionLocked(rec, causeRefused, nativeEvidence{runID: ev.RunID, code: ev.RefusalCode})
 	case ev.RefusalCode != "" && ev.State == protocol.StateRejected:
 		// A DEFINITIVE pre-delivery refusal (no receipt: nothing ran), e.g.
-		// amit's refused(generation) after a session restart. Keep the typed
+		// pi's refused(generation) after a session restart. Keep the typed
 		// code (stale_epoch: re-inspect and resubmit) instead of the generic
 		// native_error the default refusal would record.
 		e.transitionLocked(rec, causeRefused, nativeEvidence{code: ev.RefusalCode})

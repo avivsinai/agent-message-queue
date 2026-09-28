@@ -183,7 +183,7 @@ func newVanishedBinaryStaleLockFixture(t *testing.T) vanishedBinaryStaleLockFixt
 	return vanishedBinaryStaleLockFixture{root: root, lockPath: lockPath}
 }
 
-// Field regression (amit-502vx, 2026-09-22): after moving to a new machine,
+// Field regression: after moving to a new machine,
 // every wake lock the old machine wrote named a binary directory absent here.
 // Doctor labeled them binary_dir_gone, whose documented remedy is
 // --fix-wake-locks, and that fix rightly never removes an unverified lock, so

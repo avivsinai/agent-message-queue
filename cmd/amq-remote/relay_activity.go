@@ -49,7 +49,7 @@ var blockSize = int64(unsafe.Sizeof(claude.TranscriptBlock{}))
 // cap times element size (codex #872 r1, r2).
 func (it activityItem) size() int64 {
 	if it.codex != nil {
-		return int64(len(it.codex.Params)) // the method is one of three allowlisted names
+		return int64(len(it.codex.Params)) // the method is an allowlisted name
 	}
 	n := it.claude
 	total := int64(len(n.SessionID) + len(n.TurnID) + len(n.Line.Type) + len(n.Line.SessionID) + len(n.Line.UUID))
@@ -175,7 +175,11 @@ const (
 )
 
 // projectedMethods are the Codex notifications the activity projection maps.
-var projectedMethods = map[string]bool{"turn/started": true, "item/completed": true, "turn/completed": true}
+var projectedMethods = map[string]bool{
+	"turn/started": true, "turn/completed": true, "turn/plan/updated": true,
+	"item/started": true, "item/completed": true,
+	"item/agentMessage/delta": true, "item/commandExecution/outputDelta": true,
+}
 
 // activityInbox is the bounded hand-off from the native observer to the
 // worker.

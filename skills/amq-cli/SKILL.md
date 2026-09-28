@@ -67,7 +67,7 @@ canonical setup path.
 
 `amq-remote` is a companion binary, not an `amq` subcommand. It attaches to a
 harness session that is already running. Targets are declared in
-`<AM_ROOT>/extensions/remote/manifest.json` (`claude`, `codex`, `amit`, or
+`<AM_ROOT>/extensions/remote/manifest.json` (`claude`, `codex`, `pi`, or
 `fake`). `up` supervises the endpoint; `submit`, `status`, `wait`, and
 `cancel` talk to it; `share` mints the session body key. A manifest `relay`
 object shares a target with its owner over a Buzz relay. DM commands require

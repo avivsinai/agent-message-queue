@@ -28,7 +28,7 @@ type Admission struct {
 // seen. Known=false means the attachment retains nothing for the key. For an
 // adapter with a real admission primitive (codex, the fake) that is positive
 // evidence admission never happened. An adapter over an API that cannot report
-// its own rejections (the Amit adapter, whose sendUserMessage
+// its own rejections (the pi adapter, whose sendUserMessage
 // swallows errors) must NOT treat Known=false as proof of non-admission; there
 // a lost submit and a never-submitted key look identical, so such an adapter
 // leaves the record uncertain rather than rejecting it.
@@ -74,7 +74,7 @@ type Evidence struct {
 	LocalIntervention bool
 	Interaction       *protocol.Interaction
 	// RefusalCode is the typed refusal carried by a DEFINITIVE native
-	// refusal (amit-remote contract §6/A3: receipt present + refused event
+	// refusal (pi-bridge protocol: adapter recovery and evidence; receipt present + refused event
 	// = admission proven, execution refused). When set on terminal evidence,
 	// reconcile maps it to rejected+Code instead of the state-derived cause,
 	// so a fire-time window expiry surfaces as the endpoint's typed expired

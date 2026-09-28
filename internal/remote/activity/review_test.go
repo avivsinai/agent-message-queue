@@ -62,8 +62,8 @@ func TestReviewDesktopAssistantKind(t *testing.T) {
 	if !ok {
 		t.Fatal("not projected")
 	}
-	if o.Kind != "acp_read" {
-		t.Fatalf("assistant frame kind %q is not consumed by Desktop ACP branch", o.Kind)
+	if o.obs.Kind != "acp_read" {
+		t.Fatalf("assistant frame kind %q is not consumed by Desktop ACP branch", o.obs.Kind)
 	}
 }
 

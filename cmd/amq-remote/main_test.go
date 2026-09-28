@@ -1327,7 +1327,7 @@ func TestBK4ServeWiringCompactionNonVacuous(t *testing.T) {
 // TestCLISubmitPrintsAchievedEvidence pins the architect-review invariant:
 // submit prints the achieved evidence class (the human projection) on every
 // successful submit, so a human sees `admitted` from the fake (or
-// `submitted` from Amit/Claude) even when no floor was asked. The floor is
+// `submitted` from pi/Claude) even when no floor was asked. The floor is
 // the machine contract on SubmitInput; the projection is the live session's
 // Evidence.Submit. The CLI renders it as evidence=<class> on the human path.
 func TestCLISubmitPrintsAchievedEvidence(t *testing.T) {
