@@ -8,6 +8,16 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.82.0](https://github.com/avivsinai/agent-message-queue/compare/v0.81.2...v0.82.0) (2026-09-28)
+
+
+### Features
+
+* **remote:** one owner step enrolls a strict relay share ([#910](https://github.com/avivsinai/agent-message-queue/issues/910)) ([18f6f1c](https://github.com/avivsinai/agent-message-queue/commit/18f6f1cbbd309ca1f2ece2825c6dae8763847583))
+* **remote:** ship the pi bridge extension and its public protocol ([#914](https://github.com/avivsinai/agent-message-queue/issues/914)) ([4209f4f](https://github.com/avivsinai/agent-message-queue/commit/4209f4ffd30f5c2153c6b9d4b18aae6b4971efd0))
+* **remote:** stream Codex turns live into the Buzz activity view ([#913](https://github.com/avivsinai/agent-message-queue/issues/913)) ([8afa583](https://github.com/avivsinai/agent-message-queue/commit/8afa583d056f567c0b2bf8d87eb95a41d03f7ebc))
+* **remote:** support pi as the harness kind; remove kind amit ([#912](https://github.com/avivsinai/agent-message-queue/issues/912)) ([36065c0](https://github.com/avivsinai/agent-message-queue/commit/36065c0472cd99780aa8e360643d3249b3885764))
+
 ## [0.81.2](https://github.com/avivsinai/agent-message-queue/compare/v0.81.1...v0.81.2) (2026-09-28)
 
 
