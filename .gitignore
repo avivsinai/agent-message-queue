@@ -31,5 +31,6 @@ __pycache__/
 # Added by ggshield
 .cache_ggshield
 /amq-remote
+/amq-owner-sign
 .pi/
 .beads.gate.lock

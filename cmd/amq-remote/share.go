@@ -111,6 +111,8 @@ func share(args []string, stdout, stderr io.Writer) (int, error) {
 	bundle := fs.String("bundle", "", "JSON array of owner-signed tags, one file for every kind in the window")
 	target := fs.String("target", "", "adapter target bound into the manifest relay block; requires --relay")
 	relayURL := fs.String("relay", "", "relay wss:// URL written into the manifest relay block; requires --target")
+	dmChannel := fs.String("dm-channel", "", "owner's Buzz DM channel id; with --native-session, turns on owner DM commands in the relay block")
+	nativeSession := fs.String("native-session", "", "native session id approved for sharing (see amq-remote inspect); set with --dm-channel")
 	dryRun := fs.Bool("dry-run", false, "print preimages without writing or changing anything")
 	var enable []uint16
 	fs.Func("enable", "opt in to an extra share surface for a new window (repeatable): buzz-dm (kinds 9, 40003), buzz-profile (kind 0)", func(v string) error {
@@ -154,6 +156,13 @@ func share(args []string, stdout, stderr io.Writer) (int, error) {
 	if (*target == "") != (*relayURL == "") {
 		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "--target and --relay are set together")
 	}
+	if (*dmChannel == "") != (*nativeSession == "") {
+		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "--dm-channel and --native-session are set together")
+	}
+	if *dmChannel != "" && *target == "" {
+		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "--dm-channel needs --target and --relay")
+	}
+	bind := relayBinding{target: *target, relayURL: *relayURL, dmChannel: *dmChannel, nativeSession: *nativeSession}
 
 	keyDir, err := shareKeyDir(*root, *session)
 	if err != nil {
@@ -242,7 +251,7 @@ func share(args []string, stdout, stderr io.Writer) (int, error) {
 	// Binding an already enrolled session writes the manifest and does not
 	// mint a key. A missing enrollment refuses before any file is created.
 	if *bundle == "" && *tagFile == "" && *target != "" {
-		return writeRelayShare(*root, *session, *target, *relayURL, keyDir)
+		return writeRelayShare(*root, *session, bind, keyDir)
 	}
 
 	// Load-or-mint the body keypair. Mint is refused if a key already
@@ -264,7 +273,7 @@ func share(args []string, stdout, stderr io.Writer) (int, error) {
 			return code, err
 		}
 		if *target != "" {
-			return bindBundle(*root, *session, *target, *relayURL, keyDir, tags, pending)
+			return bindBundle(*root, *session, bind, keyDir, tags, pending)
 		}
 		if err := publishBundle(*session, keyDir, tags, pending); err != nil {
 			return protocol.ExitActionRequired, err
@@ -329,7 +338,7 @@ func share(args []string, stdout, stderr io.Writer) (int, error) {
 		return protocol.ExitActionRequired, err
 	}
 	printSharePending(stdout, *session, k, pending, notAfter)
-	say(stderr, "sign the preimages into one bundle, then enroll it:\n  amq-remote share --root %s --session %s --bundle <bundle.json> --target <target> --relay <wss-url>", *root, *session)
+	say(stderr, "save this output, sign it in one step, then enroll the bundle:\n  amq-owner-sign --share <this-output> --out <bundle.json> --relay <wss-url>\n  amq-remote share --root %s --session %s --bundle <bundle.json> --target <target> --relay <wss-url> [--dm-channel <channel> --native-session <id>]", *root, *session)
 	return 0, nil
 }
 
@@ -534,14 +543,17 @@ func loadBundle(session, keyDir, bundlePath string, k *bodykey.BodyKey, st *shar
 // bindBundle checks the manifest association under the lock, and only then
 // publishes the bundle and the relay block. A refusal leaves the enrolled
 // generation untouched.
-func bindBundle(root, session, target, relayURL, keyDir string, tags, pending []shareTagFile) (int, error) {
+func bindBundle(root, session string, bind relayBinding, keyDir string, tags, pending []shareTagFile) (int, error) {
+	if err := bind.requireDMGrants(session, tags); err != nil {
+		return protocol.ExitActionRequired, err
+	}
 	if !lock.AdvisoryLockAvailable() {
 		return protocol.ExitActionRequired, fmt.Errorf("refusing to update the manifest without an advisory file lock")
 	}
 	path := manifest.DefaultPath(filepath.Join(root, stateDirName))
 	var code int
 	err := lock.WithExclusiveFileLock(path+".lock", func() error {
-		prepared, c, err := prepareManifest(path, session, target, relayURL, tags[0].OwnerPubKey)
+		prepared, c, err := prepareManifest(path, session, bind, tags[0].OwnerPubKey)
 		if err != nil {
 			code = c
 			return err
@@ -678,8 +690,9 @@ func matchShareTag(tf *shareTagFile, pending []shareTagFile, k *bodykey.BodyKey)
 
 // writeRelayShare records the enrolled session in the manifest relay block.
 // The owner public key comes from the enrolled tags. The human nsec is never
-// read. An existing share for the same target keeps its DM and native fields.
-func writeRelayShare(root, session, target, relayURL, keyDir string) (int, error) {
+// read. An existing share for the same target keeps its DM and native fields
+// unless the binding names new ones.
+func writeRelayShare(root, session string, bind relayBinding, keyDir string) (int, error) {
 	st, err := loadShareState(keyDir)
 	if err != nil {
 		return protocol.ExitActionRequired, err
@@ -699,6 +712,9 @@ func writeRelayShare(root, session, target, relayURL, keyDir string) (int, error
 			return protocol.ExitActionRequired, fmt.Errorf("enrolled tags name more than one owner")
 		}
 	}
+	if err := bind.requireDMGrants(session, st.Enrolled.Gen.Tags); err != nil {
+		return protocol.ExitActionRequired, err
+	}
 	if !lock.AdvisoryLockAvailable() {
 		return protocol.ExitActionRequired, fmt.Errorf("refusing to update the manifest without an advisory file lock")
 	}
@@ -706,7 +722,7 @@ func writeRelayShare(root, session, target, relayURL, keyDir string) (int, error
 	var code int
 	err = lock.WithExclusiveFileLock(path+".lock", func() error {
 		var bindErr error
-		code, bindErr = bindManifest(path, session, target, relayURL, owner)
+		code, bindErr = bindManifest(path, session, bind, owner)
 		return bindErr
 	})
 	if err != nil && code == 0 {
@@ -718,8 +734,8 @@ func writeRelayShare(root, session, target, relayURL, keyDir string) (int, error
 // bindManifest loads, updates, and publishes the relay block. The caller
 // holds the manifest lock for this whole transaction. An existing share is
 // left unchanged unless its target, session, and owner already match.
-func bindManifest(path, session, target, relayURL, owner string) (int, error) {
-	f, code, err := prepareManifest(path, session, target, relayURL, owner)
+func bindManifest(path, session string, bind relayBinding, owner string) (int, error) {
+	f, code, err := prepareManifest(path, session, bind, owner)
 	if err != nil {
 		return code, err
 	}
@@ -729,9 +745,42 @@ func bindManifest(path, session, target, relayURL, owner string) (int, error) {
 	return 0, nil
 }
 
+// relayBinding is what `share --target --relay` writes into the manifest
+// relay block. A DM channel and native session, when given, turn on owner DM
+// commands for the share.
+type relayBinding struct {
+	target, relayURL         string
+	dmChannel, nativeSession string
+}
+
+// requireDMGrants refuses a DM binding when the tags lack the buzz-dm kinds:
+// serve would keep that surface closed.
+func (b relayBinding) requireDMGrants(session string, tags []shareTagFile) error {
+	if b.dmChannel == "" {
+		return nil
+	}
+	have := byKind(tags)
+	for _, kind := range shareSurfaces["buzz-dm"] {
+		if _, ok := have[kind]; !ok {
+			return fmt.Errorf("--dm-channel needs the buzz-dm grants (kind %d is not signed); run `amq-remote share --session %s --renew --enable buzz-dm` and sign that output", kind, session)
+		}
+	}
+	return nil
+}
+
+// apply sets the DM command fields on a share when the binding names them.
+// Without them the share keeps its existing fields.
+func (b relayBinding) apply(sh *manifest.Share) {
+	if b.dmChannel == "" {
+		return
+	}
+	sh.DMChannelID, sh.NativeSessionID, sh.Commands = b.dmChannel, b.nativeSession, true
+}
+
 // prepareManifest is the read-only half of a relay bind. It refuses a rebind
 // whose target, session, or owner does not already match.
-func prepareManifest(path, session, target, relayURL, owner string) (manifest.File, int, error) {
+func prepareManifest(path, session string, bind relayBinding, owner string) (manifest.File, int, error) {
+	target, relayURL := bind.target, bind.relayURL
 	f, err := manifest.Load(path)
 	if err != nil {
 		return manifest.File{}, protocol.ExitActionRequired, err
@@ -747,6 +796,7 @@ func prepareManifest(path, session, target, relayURL, owner string) (manifest.Fi
 		return manifest.File{}, protocol.ExitActionRequired, fmt.Errorf("manifest has no adapter %q; declare the target before share --target", target)
 	}
 	entry := manifest.Share{Target: target, Session: session, OwnerPubKey: owner}
+	bind.apply(&entry)
 	if f.Relay == nil {
 		f.SchemaVersion = manifest.RelaySchemaVersion
 		f.Relay = &manifest.Relay{URL: relayURL, Shares: []manifest.Share{entry}}
@@ -754,13 +804,15 @@ func prepareManifest(path, session, target, relayURL, owner string) (manifest.Fi
 		return manifest.File{}, protocol.ExitActionRequired, fmt.Errorf("manifest relay url is %s; refusing to replace it with %s", f.Relay.URL, relayURL)
 	} else {
 		placed := false
-		for _, sh := range f.Relay.Shares {
+		for i := range f.Relay.Shares {
+			sh := &f.Relay.Shares[i]
 			if sh.Target != target {
 				continue
 			}
 			if sh.Session != session || sh.OwnerPubKey != owner {
 				return manifest.File{}, protocol.ExitActionRequired, fmt.Errorf("target %q is already shared as session %q; refusing to rebind", target, sh.Session)
 			}
+			bind.apply(sh)
 			placed = true
 			break
 		}

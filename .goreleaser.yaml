@@ -89,11 +89,29 @@ builds:
       post:
         - sh -ceu 'if [ "$2" = darwin ]; then codesign --force --sign - --identifier io.github.avivsinai.amq-remote "$1"; fi' _ "{{ .Path }}" "{{ .Os }}"
 
+  - id: amq-owner-sign
+    main: ./cmd/amq-owner-sign
+    binary: amq-owner-sign
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    hooks:
+      post:
+        - sh -ceu 'if [ "$2" = darwin ]; then codesign --force --sign - --identifier io.github.avivsinai.amq-owner-sign "$1"; fi' _ "{{ .Path }}" "{{ .Os }}"
+
 archives:
   - id: amq
-    ids: [amq, amq-acp, amq-remote]
-    # amq-acp and amq-remote are not built for Windows, so the Windows zip
-    # holds only amq; the Homebrew formula (macOS and Linux) gets all three.
+    ids: [amq, amq-acp, amq-remote, amq-owner-sign]
+    # amq-acp, amq-remote and amq-owner-sign are not built for Windows, so the
+    # Windows zip holds only amq; the Homebrew formula (macOS and Linux) gets
+    # all four.
     allow_different_binary_count: true
     formats: [tar.gz]
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
@@ -123,6 +141,11 @@ archives:
     ids: [amq-remote]
     formats: [tar.gz]
     name_template: "amq-remote_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+  - id: amq-owner-sign
+    ids: [amq-owner-sign]
+    formats: [tar.gz]
+    name_template: "amq-owner-sign_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
 
 checksum:
   name_template: "checksums.txt"
@@ -166,10 +189,12 @@ brews:
       bin.install "amq"
       bin.install "amq-acp"
       bin.install "amq-remote"
+      bin.install "amq-owner-sign"
     test: |
       system "#{bin}/amq", "--version"
       system "#{bin}/amq-acp", "--version"
       system "#{bin}/amq-remote", "version"
+      system "#{bin}/amq-owner-sign", "--version"
 
 scoops:
   - name: amq
