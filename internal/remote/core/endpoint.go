@@ -452,9 +452,8 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 		}
 		// Fall through to the normal admission path with the existing
 		// record: the deferred/Tick machinery owns it from here.
-		t, code := e.admissibleLocked(cmd.TargetID, cmd.Epoch, cmd.NotAfter, cmd.Input.MinEvidence)
+		t, code, reason := e.admissibleLocked(cmd.TargetID, cmd.Epoch, cmd.NotAfter, cmd.Input.MinEvidence)
 		if code != "" {
-			reason := e.unsupportedReasonLocked(cmd.TargetID, code)
 			e.mu.Unlock()
 			return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: code, Message: reason}}, nil
 		}
@@ -536,10 +535,9 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 	// about to refuse is never written (no durable placeholder to leak on a
 	// failed rejection write, and nothing for Tick to dispatch). Only Create
 	// when we will dispatch or deliberately defer.
-	t, code := e.admissibleLocked(cmd.TargetID, cmd.Epoch, cmd.NotAfter, cmd.Input.MinEvidence)
+	t, code, reason := e.admissibleLocked(cmd.TargetID, cmd.Epoch, cmd.NotAfter, cmd.Input.MinEvidence)
 	if code != "" {
 		// Refused (unshared/expired/stale_epoch): no durable record.
-		reason := e.unsupportedReasonLocked(cmd.TargetID, code)
 		e.mu.Unlock()
 		return protocol.Reply{Snapshot: e.unpersisted(rec, protocol.StateRejected, code), Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: code, Message: reason}}, nil
 	}
@@ -671,38 +669,34 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 // The evidence floor (MinEvidence) is checked here, BEFORE any side effect: an
 // attachment whose strongest submit evidence is weaker than the floor is
 // refused (weaker capability is refused, not substituted — ADR invariant 5).
-// unsupportedReasonLocked is the adapter's text for an unsupported refusal
-// caused by Inspect advertising submit false; "" when there is none.
-func (e *Endpoint) unsupportedReasonLocked(targetID string, code protocol.Code) string {
-	if code != protocol.CodeUnsupported {
-		return ""
-	}
-	t, ok := e.targets[targetID]
-	if !ok {
-		return ""
-	}
-	b, ok := t.att.(SubmitBlocker)
-	if !ok || t.att.Inspect().Capabilities.Submit {
-		return ""
-	}
-	return b.SubmitBlockedReason()
+func (e *Endpoint) admissibleLocked(targetID, epoch, notAfter, minEvidence string) (*target, protocol.Code, string) {
+	t, code, reason := e.admissibleCodeLocked(targetID, epoch, notAfter, minEvidence)
+	return t, code, protocol.BoundReason(reason)
 }
 
-func (e *Endpoint) admissibleLocked(targetID, epoch, notAfter, minEvidence string) (*target, protocol.Code) {
+// admissibleCodeLocked is admissibleLocked's decision. reason is the
+// adapter's text for a submit-false refusal, read from the same Inspect.
+func (e *Endpoint) admissibleCodeLocked(targetID, epoch, notAfter, minEvidence string) (*target, protocol.Code, string) {
 	t, ok := e.targets[targetID]
 	if !ok {
-		return nil, protocol.CodeUnshared
+		return nil, protocol.CodeUnshared, ""
 	}
-	s := t.att.Inspect()
+	var s protocol.Session
+	blocked := ""
+	if b, ok := t.att.(SubmitBlocker); ok {
+		s, blocked = b.InspectSubmit()
+	} else {
+		s = t.att.Inspect()
+	}
 	if s.Epoch != epoch {
-		return nil, protocol.CodeStaleEpoch
+		return nil, protocol.CodeStaleEpoch, ""
 	}
 	deadline, err := protocol.ParseTime(notAfter)
 	if err != nil || e.now().After(deadline) {
-		return nil, protocol.CodeExpired
+		return nil, protocol.CodeExpired, ""
 	}
 	if !s.Capabilities.Submit {
-		return nil, protocol.CodeUnsupported
+		return nil, protocol.CodeUnsupported, blocked
 	}
 	// Evidence floor: an omitted floor preserves legacy semantics (any
 	// evidence is admitted). A supplied floor is checked before dispatch so a
@@ -713,13 +707,13 @@ func (e *Endpoint) admissibleLocked(targetID, epoch, notAfter, minEvidence strin
 	// attachment cannot meet.
 	if minEvidence != "" {
 		if s.Evidence == nil || !protocol.EvidenceClassMeets(s.Evidence.Submit, minEvidence) {
-			return nil, protocol.CodeUnsupported
+			return nil, protocol.CodeUnsupported, ""
 		}
 	}
 	if s.Attachment == "offline" {
-		return nil, ""
+		return nil, "", ""
 	}
-	return t, ""
+	return t, "", ""
 }
 
 // achievedEvidence returns the live session's submit evidence class for a
@@ -2167,7 +2161,7 @@ func (e *Endpoint) admitDeferred(rec *requests.Record) error {
 	if rec.Input != nil {
 		minEvidence = rec.Input.MinEvidence
 	}
-	t, code := e.admissibleLocked(rec.TargetID, rec.Epoch, rec.NotAfter, minEvidence)
+	t, code, reason := e.admissibleLocked(rec.TargetID, rec.Epoch, rec.NotAfter, minEvidence)
 	if code == "" && t == nil {
 		e.mu.Unlock()
 		return nil // still offline, still inside the window
@@ -2178,7 +2172,7 @@ func (e *Endpoint) admitDeferred(rec *requests.Record) error {
 			e.mu.Unlock()
 			return err
 		}
-		e.transitionLocked(rec, causeRefused, nativeEvidence{code: code, reason: e.unsupportedReasonLocked(rec.TargetID, code)})
+		e.transitionLocked(rec, causeRefused, nativeEvidence{code: code, reason: reason})
 		_, err = e.commitLocked(rec, nil)
 		e.mu.Unlock()
 		return err

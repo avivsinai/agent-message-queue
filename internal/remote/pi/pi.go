@@ -132,16 +132,6 @@ func oldBridgeMessage(handle string, revision int) string {
 		handle, have, MinBridgeRevision, install)
 }
 
-// SubmitBlockedReason implements core.SubmitBlocker: the install and reload
-// text when the live bridge predates MinBridgeRevision.
-func (a *Attachment) SubmitBlockedReason() string {
-	live := a.dir.liveness(a.now())
-	if !live.live || live.revision >= MinBridgeRevision {
-		return ""
-	}
-	return oldBridgeMessage(a.handle, live.revision)
-}
-
 // maxRetained bounds the retained run map; terminal+acked runs are dropped
 // FIFO. Process-local correlation state, bounded so a long-lived attachment
 // cannot grow it without limit.
@@ -716,6 +706,14 @@ func (r *run) result() *protocol.Result {
 // generation, or the `unpinned` sentinel before the first receipt (protocol: session generation and epoch;
 // an empty epoch would defeat stale-epoch protection because "" == "").
 func (a *Attachment) Inspect() protocol.Session {
+	s, _ := a.InspectSubmit()
+	return s
+}
+
+// InspectSubmit implements core.SubmitBlocker: the session projection and,
+// when it advertises submit false for an old bridge, the install and reload
+// text, both from one liveness read.
+func (a *Attachment) InspectSubmit() (protocol.Session, string) {
 	a.consume()                     // 9a: seam reads outside a.mu; apply under it
 	live := a.dir.liveness(a.now()) // 9a: FS read, no lock
 	a.mu.Lock()
@@ -734,6 +732,10 @@ func (a *Attachment) Inspect() protocol.Session {
 	// (protocol: bridge revision). Offline, the revision is unknown and
 	// Submit applies the same fence at dispatch.
 	submit := !live.live || live.revision >= MinBridgeRevision
+	blocked := ""
+	if !submit {
+		blocked = oldBridgeMessage(a.handle, live.revision)
+	}
 	att, status := "live", "idle"
 	if !live.live {
 		att, status = "offline", "offline"
@@ -762,7 +764,7 @@ func (a *Attachment) Inspect() protocol.Session {
 		// receipt is the admission proof, not a session-wide capability.
 		Evidence:   &protocol.Evidence{Submit: protocol.EvidenceSubmitted, Completion: "run_terminal"},
 		ObservedAt: protocol.FormatTime(a.now()),
-	}
+	}, blocked
 }
 
 // Submit implements core.Attachment.

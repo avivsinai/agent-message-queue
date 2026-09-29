@@ -578,3 +578,97 @@ func TestExistingEventClaimIsMadeDurableBeforeUse(t *testing.T) {
 		t.Fatal("an existing claim was returned before its directory was synced")
 	}
 }
+
+// blockedSubmit is a fake whose Inspect advertises submit false with an
+// adapter reason once blocked is set (core.SubmitBlocker).
+type blockedSubmit struct {
+	*fake.Runtime
+	mu      sync.Mutex
+	blocked string
+}
+
+func (b *blockedSubmit) block(reason string) { b.mu.Lock(); b.blocked = reason; b.mu.Unlock() }
+
+func (b *blockedSubmit) Inspect() protocol.Session { s, _ := b.InspectSubmit(); return s }
+
+func (b *blockedSubmit) InspectSubmit() (protocol.Session, string) {
+	s := b.Runtime.Inspect()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.blocked != "" {
+		s.Capabilities.Submit = false
+	}
+	return s, b.blocked
+}
+
+// Pro delta review of e19615f2 on #923, 2026-09-29, #1: a deferred
+// unsupported refusal kept the adapter's reason on the record only, so the
+// owner's DM showed a bare "rejected (unsupported)".
+func TestDeferredRefusalReasonReachesTheDM(t *testing.T) {
+	rt := fake.New("fake", "e_1")
+	att := &blockedSubmit{Runtime: rt}
+	root, err := os.MkdirTemp("", "rv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	dir := filepath.Join(root, remoteStateDir)
+	store, err := requests.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ep := core.New(core.Config{Store: store})
+	ep.Register(att)
+	srv, err := ipc.Listen(dir, ep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	served := make(chan struct{})
+	go func() { defer close(served); _ = srv.Serve(ctx) }()
+	t.Cleanup(func() { cancel(); <-served; _ = ep.Close(); _ = store.Close() })
+	s := NewServer(Config{Root: root, RemoteTarget: "fake", RemoteNative: "fake", HeartbeatInterval: 10 * time.Millisecond, TurnTimeout: 2 * time.Second}, "test")
+	s.cfg.PollInterval = 5 * time.Millisecond
+
+	rt.SetOffline(true)
+	const reason = "the bridge is too old: install it and reload the session"
+	var mu sync.Mutex
+	var said []string
+	done := make(chan remotePromptResult, 1)
+	go func() {
+		result, rpcErr := s.runRemote("s", "hello", strings.Repeat("d", 64), newTurn(), func(v any) error {
+			note := v.(sessionUpdateNotification)
+			if note.Params.Update.SessionUpdate == "agent_message_chunk" {
+				mu.Lock()
+				said = append(said, note.Params.Update.Content.Text)
+				mu.Unlock()
+			}
+			return nil
+		})
+		if rpcErr != nil {
+			t.Errorf("run: %v", rpcErr)
+		}
+		done <- result.(remotePromptResult)
+	}()
+	// Wait until the DM is deferred (received while offline), then let the
+	// target return with submit blocked and admit the deferred record.
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		recs, _ := store.List()
+		if len(recs) == 1 && recs[0].State == protocol.StateReceived {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	att.block(reason)
+	rt.SetOffline(false)
+	if err := ep.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	got := <-done
+	mu.Lock()
+	defer mu.Unlock()
+	if got.Meta.Remote.State != string(protocol.StateRejected) || len(said) != 1 || !strings.Contains(said[0], reason) {
+		t.Fatalf("result=%+v said=%q; want the rejection DM to carry %q", got.Meta.Remote, said, reason)
+	}
+}
