@@ -39,7 +39,7 @@ function harness() {
 	process.env.AM_ME = "pi-seat";
 	const handlers = new Map<string, Handler[]>();
 	const sent: { content: unknown; options: unknown }[] = [];
-	const state = { idle: true, pending: false };
+	const state = { idle: true, pending: false, idleChecks: 0 };
 	const pi = {
 		on(name: string, h: Handler) {
 			handlers.set(name, [...(handlers.get(name) ?? []), h]);
@@ -53,7 +53,10 @@ function harness() {
 		mode: "tui",
 		hasUI: true,
 		ui: { notify() {} },
-		isIdle: () => state.idle,
+		isIdle: () => {
+			state.idleChecks++;
+			return state.idle;
+		},
 		hasPendingMessages: () => state.pending,
 	};
 	const dir = path.join(root, "agents", "pi-seat", "extensions", "pi-bridge");
@@ -248,6 +251,82 @@ test("a request that arrives while pi is busy is refused busy without a receipt"
 		assert.deepEqual(
 			h.events(REF).map((e) => [e.event, e.reason]),
 			[["refused", "busy"]],
+		);
+	} finally {
+		await h.done();
+	}
+});
+
+// Pro review of #920, 2026-09-29, #3: after the remote request started, a
+// local follow-up that started before the session settled supplied the
+// completed answer.
+test("a later user message ends the request's ownership of output", async () => {
+	const h = harness();
+	await h.start();
+	try {
+		h.publish(REF, "remote task", h.generation());
+		await h.waitFor(() => h.sent.length === 1);
+
+		await h.emit("message_start", userMessage("remote task"));
+		await h.emit("message_end", assistantMessage("REMOTE ANSWER"));
+		await h.emit("message_start", userMessage("local follow-up"));
+		await h.emit("message_end", assistantMessage("LOCAL ANSWER"));
+		await h.emit("agent_before_settle", { outcome: "completed" });
+		await h.emit("agent_settled");
+		assert.deepEqual(
+			h.events(REF).map((e) => [e.event, e.text]),
+			[
+				["started", undefined],
+				["completed", "REMOTE ANSWER"],
+			],
+		);
+	} finally {
+		await h.done();
+	}
+});
+
+// Pro review of #920, 2026-09-29, #4: a busy refusal whose append failed
+// went back to admission, so once pi was idle the next poll claimed a
+// receipt and sent the request.
+test("a busy refusal whose append failed is retried, never sent", async () => {
+	const h = harness();
+	await h.start();
+	try {
+		const stream = path.join(h.dir, "events", `${REF}.jsonl`);
+		fs.mkdirSync(stream); // the refusal append fails
+		h.state.idle = false;
+		const checks = h.state.idleChecks;
+		h.publish(REF, "remote task", h.generation());
+		await h.waitFor(() => h.state.idleChecks > checks); // the busy refusal was decided
+		h.state.idle = true;
+		fs.rmdirSync(stream); // the filesystem recovers
+		await h.waitFor(() => h.events(REF).length > 0 || h.sent.length > 0);
+		assert.deepEqual(h.sent, []);
+		assert.equal(h.hasReceipt(REF), false);
+		assert.deepEqual(
+			h.events(REF).map((e) => [e.event, e.reason]),
+			[["refused", "busy"]],
+		);
+	} finally {
+		await h.done();
+	}
+});
+
+// Pro review of #920, 2026-09-29, #6: one failed receipt read during
+// orphan recovery counted as done, so the orphan was never closed in that
+// runtime.
+test("an orphan receipt whose read failed is recovered on a later poll", async () => {
+	const h = harness();
+	const receipt = path.join(h.dir, "receipts", `${ORPHAN}.json`);
+	fs.mkdirSync(receipt, { recursive: true }); // the first read fails
+	await h.start();
+	try {
+		fs.rmdirSync(receipt);
+		fs.copyFileSync(path.join(GOLDEN, "receipts", `${ORPHAN}.json`), receipt); // the filesystem recovers
+		await h.waitFor(() => h.events(ORPHAN).length > 0);
+		assert.deepEqual(
+			h.events(ORPHAN).map((e) => e.event),
+			["uncertain"],
 		);
 	} finally {
 		await h.done();

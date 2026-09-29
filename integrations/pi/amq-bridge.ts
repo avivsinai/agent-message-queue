@@ -8,6 +8,10 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 
 export const PROTOCOL = "amq:pi-bridge:v1";
+// BRIDGE_REVISION names the implementation rules the adapter relies on
+// (docs/pi-bridge-protocol.md, bridge revision). The adapter sends no new
+// requests to a bridge that publishes a lower revision or none.
+export const BRIDGE_REVISION = 2;
 
 const HEARTBEAT_MS = 2000; // the adapter treats a liveness file older than 5 s as stale
 const POLL_MS = 200; // the adapter waits 2 s for a receipt after it publishes a request
@@ -26,6 +30,9 @@ type Bridge = {
 	surface: string;
 	timers: ReturnType<typeof setInterval>[];
 	handled: Set<string>;
+	// refusals holds a refusal decided for a ref whose append failed. The
+	// ref is never examined again; only this same refusal is retried.
+	refusals: Map<string, EventFields>;
 	inflight: Inflight | null;
 	orphansPending: boolean;
 };
@@ -67,17 +74,29 @@ export default function amqPiBridge(pi: ExtensionAPI): void {
 
 	// Output and outcome belong to the request only after its own user
 	// message starts. The buffers reset at that boundary, so a local turn
-	// that ran before it never becomes the remote result.
+	// that ran before it never becomes the remote result. The start of any
+	// later user message ends that ownership: the request completes with
+	// the assistant text it already has, or is uncertain without it.
 	pi.on("message_start", (event) => {
+		const b = bridge;
 		const f = active();
-		if (!bridge || !f || f.started) return;
+		if (!b || !f) return;
 		const msg = event.message as { role?: string; content?: unknown };
-		if (msg.role === "user" && textOf(msg.content) === f.text) {
+		if (msg.role !== "user") return;
+		if (f.started) {
+			if (f.lastText && !f.lastError) {
+				settle(b, { event: "completed", text: f.lastText });
+			} else {
+				settle(b, { event: "uncertain", error: "another user message started before the request produced its answer; the outcome is unknown" });
+			}
+			return;
+		}
+		if (textOf(msg.content) === f.text) {
 			f.started = true;
 			f.lastText = "";
 			f.lastError = "";
 			f.outcome = "";
-			appendEvent(bridge.dir, f.ref, { event: "started" });
+			appendEvent(b.dir, f.ref, { event: "started" });
 		}
 	});
 
@@ -151,6 +170,7 @@ function start(pi: ExtensionAPI, ctx: ExtensionContext): Bridge | null {
 		surface: ctx.mode,
 		timers: [],
 		handled: new Set(),
+		refusals: new Map(),
 		inflight: null,
 		orphansPending: false,
 	};
@@ -232,6 +252,14 @@ function scan(pi: ExtensionAPI, b: Bridge): void {
 	}
 
 	for (const { ref } of pending) {
+		const decided = b.refusals.get(ref);
+		if (decided) {
+			if (appendEvent(b.dir, ref, decided)) {
+				b.refusals.delete(ref);
+				b.handled.add(ref);
+			}
+			continue;
+		}
 		const verdict = examine(b, ref);
 		let { refuse, error } = verdict;
 		// v1 refuses a busy target (the remote-control ADR). The check sits
@@ -241,9 +269,11 @@ function scan(pi: ExtensionAPI, b: Bridge): void {
 			error = b.inflight ? "another remote request is in flight" : "pi is busy with other work";
 		}
 		if (refuse) {
-			// A failed append leaves the ref unhandled, so the next poll
-			// refuses it again.
-			if (appendEvent(b.dir, ref, { event: "refused", reason: refuse, error })) b.handled.add(ref);
+			// The refusal is final for the ref. A failed append keeps it,
+			// and the next poll appends the same refusal again.
+			const fields: EventFields = { event: "refused", reason: refuse, error };
+			if (appendEvent(b.dir, ref, fields)) b.handled.add(ref);
+			else b.refusals.set(ref, fields);
 			continue;
 		}
 		const claim = claimReceipt(b, ref);
@@ -327,6 +357,7 @@ function writeLiveness(b: Bridge, live: boolean): void {
 		pid: process.pid,
 		surface: b.surface,
 		session_generation: b.generation,
+		bridge_revision: BRIDGE_REVISION,
 	});
 	try {
 		const tmp = writeTemp(b.dir, body);
@@ -362,7 +393,8 @@ function closeOrphanedReceipts(b: Bridge): boolean {
 			});
 			if (!ok) done = false;
 		} catch {
-			// An unreadable receipt is left for the adapter to report.
+			// An unreadable receipt is not recovered yet; scan reads it again.
+			done = false;
 		}
 	}
 	return done;
