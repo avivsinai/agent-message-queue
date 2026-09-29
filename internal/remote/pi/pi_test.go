@@ -740,6 +740,61 @@ func TestReceiptlessRefusalIsRecovered(t *testing.T) {
 	}
 }
 
+// TestReceiptReadErrorClearsOnAbsence reproduces
+// Pro review of #923, 2026-09-29, #3: one failed receipt read stored an
+// error that only a receipt could clear, so a receiptless busy refusal
+// stayed hidden behind it for the attachment's lifetime.
+func TestReceiptReadErrorClearsOnAbsence(t *testing.T) {
+	a, dir := newTestAttachment(t)
+	key := testKey("sticky")
+	ref := clientRef(key)
+	appendEvents(t, dir, ref, fmt.Sprintf(`{"protocol":%q,"ref":%q,"event":"refused","reason":"busy"}`, ProtocolV1, ref))
+	failed := false
+	a.dir.receipt = func(r string) (*receipt, error) {
+		if !failed {
+			failed = true
+			return nil, errors.New("injected transient read error")
+		}
+		return (bridgeDir{dir: dir, names: piWire}).readReceipt(r)
+	}
+	if _, err := a.Lookup(key, addressEpoch("gen-1")); err == nil {
+		t.Fatal("first Lookup: want the transient read error")
+	}
+	ev, err := a.Lookup(key, addressEpoch("gen-1"))
+	if err != nil || ev.Admitted || ev.State != protocol.StateRejected || ev.RefusalCode != protocol.CodeBusy {
+		t.Fatalf("Lookup after the read recovered = %+v, %v; want rejected busy without admission", ev, err)
+	}
+}
+
+// TestSubmitRetryReturnsKnownRefusal reproduces
+// Pro review of #923, 2026-09-29, #5: the existing-run and duplicate-file
+// Submit paths answered "submission uncertain" while the adapter already
+// held a definitive busy refusal.
+func TestSubmitRetryReturnsKnownRefusal(t *testing.T) {
+	a, dir := newTestAttachment(t)
+	busy := func(ref string) string {
+		return fmt.Sprintf(`{"protocol":%q,"ref":%q,"event":"refused","reason":"busy"}`, ProtocolV1, ref)
+	}
+
+	// Existing run: the refusal lands after the receipt wait expired.
+	key := testKey("retry")
+	if _, err := a.Submit(submitReq(key, "hello")); err == nil {
+		t.Fatal("first Submit: want uncertain without a receipt")
+	}
+	appendEvents(t, dir, clientRef(key), busy(clientRef(key)))
+	if adm, err := a.Submit(submitReq(key, "hello")); err != nil || adm.Code != protocol.CodeBusy {
+		t.Fatalf("retried Submit = %+v, %v; want the busy refusal", adm, err)
+	}
+
+	// Duplicate file: the request and its refusal appeared after attach.
+	dup := testKey("dup-refused")
+	seedRequest(t, dir, clientRef(dup), "gen-1")
+	appendEvents(t, dir, clientRef(dup), busy(clientRef(dup)))
+	if adm, err := a.Submit(submitReq(dup, "hello")); err != nil || adm.Code != protocol.CodeBusy {
+		t.Fatalf("Submit over an existing request = %+v, %v; want the busy refusal", adm, err)
+	}
+}
+
 // TestSameProcessRestartDropsPin reproduces a field defect: /new, reload and
 // fork keep the pi pid, so only the generation the bridge publishes in
 // bridge.liveness shows the pin is dead.

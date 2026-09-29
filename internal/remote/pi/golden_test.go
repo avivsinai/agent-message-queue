@@ -63,6 +63,25 @@ func TestGoldenExtensionVector(t *testing.T) {
 		t.Fatalf("Lookup(completed) = %+v result %+v", ev, ev.Result)
 	}
 
+	// The request vector is the adapter's bytes, which the extension's
+	// node:test delivers: the adapter writes the bridge_revision the
+	// extension checks.
+	out := t.TempDir()
+	if err := (bridgeDir{dir: out, names: piWire}).publishRequest(deliverRequest{
+		Ref: clientRef(key), Text: "summarize the diff", DeliverAs: "followUp", NotAfter: "2036-01-01T00:00:00Z",
+		EpochHint: "golden-generation", CreatedAt: "2000-01-01T00:00:00Z", BridgeRevision: MinBridgeRevision,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rel := filepath.Join("requests", clientRef(key)+".json")
+	got, err := os.ReadFile(filepath.Join(out, rel))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want, err := os.ReadFile(filepath.Join(src, rel)); err != nil || string(got) != string(want) {
+		t.Fatalf("request bytes = %s, want golden %s (%v)", got, want, err)
+	}
+
 	orphan := requests.Key{CreatorHost: "host1", TargetID: "pi-1", RequestID: "00000000-0000-4000-8000-000000000002"}
 	ev, err = a.Lookup(orphan, "")
 	if err != nil {

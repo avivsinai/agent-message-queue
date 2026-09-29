@@ -435,6 +435,7 @@ type seamObservation struct {
 	ref      string
 	receipt  *receipt // nil = absent or already confirmed
 	rcErr    error    // unreadable/foreign-protocol receipt (never guessed around)
+	readRc   bool     // the receipt was read (receipt and rcErr are the answer)
 	events   []event
 	evErr    error // unreadable/foreign-protocol event stream (unreadable vs protocol-string refusal)
 	readEvts bool  // events were read (skip when terminal already known)
@@ -481,7 +482,7 @@ func (a *Attachment) consume() {
 		o := &seamObservation{ref: p.r.ref}
 		if p.readRc {
 			rc, err := a.dir.readReceipt(p.r.ref)
-			o.receipt, o.rcErr = rc, err
+			o.receipt, o.rcErr, o.readRc = rc, err, true
 		}
 		if p.readEv {
 			evs, err := a.dir.readEvents(p.r.ref)
@@ -529,6 +530,11 @@ func (a *Attachment) applyObservationLocked(r *run, o *seamObservation) {
 			// permanent uncertainty.
 			r.notFound = o.rcErr
 		}
+	} else if o.readRc && !r.confirmed {
+		// A successful read shows the receipt is absent: an earlier read
+		// error no longer blocks the evidence (a receiptless refusal has no
+		// receipt to clear it).
+		r.notFound = nil
 	}
 	if o.readEvts {
 		switch {
@@ -659,6 +665,9 @@ func refusalCodeFor(reason string) protocol.Code {
 		return protocol.CodeStaleEpoch
 	case "busy":
 		return protocol.CodeBusy
+	case "revision":
+		// The extension does not accept this adapter's bridge_revision.
+		return protocol.CodeUnsupported
 	default:
 		return protocol.CodeNativeError
 	}
@@ -808,6 +817,11 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 			a.mu.Unlock()
 			return core.Admission{Admitted: true, RunID: rid}, nil
 		}
+		if r.refused != "" {
+			adm := refusalAdmission(r)
+			a.mu.Unlock()
+			return adm, nil
+		}
 		a.mu.Unlock()
 		// 9a: liveness is a filesystem read — take it without the lock.
 		live := a.dir.liveness(a.now())
@@ -861,12 +875,13 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 	// write below re-checks the map under the lock.
 	ref := clientRef(req.Key)
 	preq := deliverRequest{
-		Ref:       ref,
-		Text:      req.Input.Text,
-		DeliverAs: "followUp", // v1 delivers followUp only
-		NotAfter:  req.NotAfter,
-		EpochHint: epochHint,
-		CreatedAt: protocol.FormatTime(a.now()),
+		Ref:            ref,
+		Text:           req.Input.Text,
+		DeliverAs:      "followUp", // v1 delivers followUp only
+		NotAfter:       req.NotAfter,
+		EpochHint:      epochHint,
+		CreatedAt:      protocol.FormatTime(a.now()),
+		BridgeRevision: MinBridgeRevision,
 	}
 	err := a.dir.publishRequest(preq)
 
@@ -891,6 +906,11 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 			if r.confirmed {
 				a.mu.Unlock()
 				return core.Admission{Admitted: true, RunID: rid}, nil
+			}
+			if r.refused != "" {
+				adm := refusalAdmission(r)
+				a.mu.Unlock()
+				return adm, nil
 			}
 			a.mu.Unlock()
 			live := a.dir.liveness(a.now())
@@ -920,15 +940,17 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 		o := a.readSeamFor(refOfRun)
 		a.mu.Lock()
 		a.applyObservationLocked(r, o)
-		confirmed, refused, refusedMsg := r.confirmed, r.refused, r.refusedMsg
+		confirmed, refused := r.confirmed, r.refused != ""
+		var adm core.Admission
+		if refused {
+			adm = refusalAdmission(r)
+		}
 		a.mu.Unlock()
 		if confirmed {
 			return core.Admission{Admitted: true, RunID: rid}, nil
 		}
-		if refused != "" {
-			// A definitive pre-delivery refusal (no receipt): the extension
-			// never delivers this ref, so the refusal is final now.
-			return core.Admission{Code: refused, Message: "pi bridge refused the request: " + refusedMsg}, nil
+		if refused {
+			return adm, nil
 		}
 		if !time.Now().Before(deadline) {
 			break
@@ -947,11 +969,20 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 	return core.Admission{RunID: rid}, fmt.Errorf("pi: receipt for %s not yet observed; submission uncertain", refOfRun)
 }
 
+// refusalAdmission is the typed refusal for a run whose stream holds a
+// definitive pre-delivery refusal and no receipt: the extension never
+// delivers that ref, so the refusal is final. Every Submit path returns it
+// before the missing-receipt fallback. Called under a.mu.
+func refusalAdmission(r *run) core.Admission {
+	return core.Admission{Code: r.refused, Message: "pi bridge refused the request: " + r.refusedMsg}
+}
+
 // readSeamFor reads one run's durable evidence by ref WITHOUT the lock
 // (9a): a single-run observation for the Submit poll and retry paths.
 func (a *Attachment) readSeamFor(ref string) *seamObservation {
 	o := &seamObservation{ref: ref}
 	o.receipt, o.rcErr = a.dir.readReceipt(ref)
+	o.readRc = true
 	evs, evErr := a.dir.readEvents(ref)
 	o.events, o.evErr, o.readEvts = evs, evErr, true
 	return o

@@ -65,7 +65,8 @@ non-empty protocol string instead of guessing its meaning:
   "deliver_as": "followUp",
   "not_after": "2026-01-01T00:00:00.123456789Z",
   "epoch_hint": "3f0c...",
-  "created_at": "2026-01-01T00:00:00Z"
+  "created_at": "2026-01-01T00:00:00Z",
+  "bridge_revision": 2
 }
 ```
 
@@ -77,6 +78,7 @@ non-empty protocol string instead of guessing its meaning:
 | `not_after` | RFC 3339 deadline. The extension does not deliver after it. |
 | `epoch_hint` | The session generation the request addresses: the pinned generation, or on first contact the generation the caller's address epoch names. Always set. |
 | `created_at` | RFC 3339 publication time; informational. |
+| `bridge_revision` | The bridge revision the adapter requires. Always set. |
 
 The adapter publishes create-new: it writes and fsyncs a temporary file in
 `requests/`, hard-links it onto `<ref>.json`, removes the temporary name, and
@@ -141,6 +143,7 @@ One JSON object per line, appended and fsynced line by line:
 | `expired` | `expired` |
 | `generation` | `stale_epoch` |
 | `busy` | `busy` |
+| `revision` | `unsupported` |
 | anything else (for example `invalid`, `unsupported`) | `native_error` |
 
 The first terminal event (`completed`, `failed`, `cancelled`, `refused`,
@@ -194,13 +197,25 @@ boundary, request ownership that ends at the next user message, retained
 terminal and refusal decisions, and orphan recovery that retries until it
 succeeds. The protocol string stays `amq:pi-bridge:v1`.
 
-The adapter sends new requests only to a live bridge whose `bridge_revision`
-is at least 2. A missing field is revision 0, never "compatible". Below the
-minimum, `Inspect` advertises no submit and `Submit` refuses `unsupported`
-with the fix: install the extension from this repository at the adapter's
-release tag (`pi install git:github.com/avivsinai/agent-message-queue@v<version>`)
-and reload the pi session. The revision gates only new submissions: the
-adapter reads receipts and events already on disk from any revision.
+The fence holds in both directions, and a missing field is revision 0, never
+"compatible":
+
+- **Old extension, new adapter.** The adapter sends new requests only to a
+  live bridge whose `bridge_revision` is at least 2. Below the minimum,
+  `Inspect` advertises no submit and `Submit` refuses `unsupported` with the
+  fix: install the extension from this repository at the adapter's release
+  tag (`pi install git:github.com/avivsinai/agent-message-queue@v<version>`)
+  and reload the pi session.
+- **Old adapter, new extension.** Every request carries the
+  `bridge_revision` its adapter requires. The extension refuses a request
+  without it, or outside the revisions it implements, with a `refused` event
+  of reason `revision` and no receipt, on every fresh request and after
+  every session switch. The adapter maps the reason to `unsupported`.
+
+A rollout installs the extension, reloads every pi session, and restarts
+every running `amq-remote` process. The revision gates only new
+submissions: the adapter reads receipts and events already on disk from any
+revision.
 
 ## Session generation and epoch
 
@@ -244,7 +259,8 @@ nor a terminal event, in publication order, it:
 
 1. validates the shape: `ref` matches the file name, `text` is non-empty,
    `deliver_as` is `followUp`, and `not_after` parses. A failure is a `refused`
-   event (`invalid` or `unsupported`).
+   event (`invalid` or `unsupported`). A missing or unsupported
+   `bridge_revision` is a `refused` event with reason `revision`.
 2. refuses with reason `expired` when `not_after` has passed.
 3. applies the epoch rule above.
 4. refuses with reason `busy` when pi is busy: `ctx.isIdle()` is false,
@@ -259,7 +275,9 @@ checked at the admission boundary, immediately before the receipt. A request
 that already has a receipt or a terminal event is handled and is never
 examined or delivered again. Refusals write no receipt. A refusal is final for
 its ref: when the append fails, the extension keeps that refusal and appends
-it again on later polls, and never examines the ref again.
+it again on later polls, and never examines the ref again. A failed append
+stays pending even when its line is readable, because a line whose fsync
+failed is not durable.
 
 The reference extension keeps one delivered request in flight and correlates
 its run like this:
@@ -275,10 +293,12 @@ its run like this:
   `failed` for `error`. A settle before the start belongs to other work and
   never ends the request;
 - the end of ownership at the next user `message_start` after the start, such
-  as a local follow-up. The request then ends at once: `completed` with the
-  final assistant text it already has, or `uncertain` when it has no text or
-  its last assistant message carried an error. Output after that point never
-  belongs to the request.
+  as a local follow-up or local steering between tool turns. The request then
+  ends at once. It is `completed` only when its last assistant message is a
+  final answer: `stopReason` is `stop`, the message has no `toolCall`
+  content, it carries text, and the run recorded no error. Otherwise it is
+  `uncertain`; tool-use preamble text is never a final answer. Output after
+  that point never belongs to the request.
 
 The request stays in flight until its terminal event is durable.
 
@@ -293,7 +313,8 @@ the request started, or `uncertain` when it did not. On `session_start` it
 appends `uncertain` to every receipt from another generation that has no
 terminal event, so a crash never leaves a ref running forever and never
 records an outcome nobody observed. A receipt it cannot read or close is
-retried on later polls.
+retried on later polls, and a closing line whose append failed is appended
+again even when it is readable.
 
 ## Adapter recovery and evidence
 

@@ -12,6 +12,10 @@ export const PROTOCOL = "amq:pi-bridge:v1";
 // (docs/pi-bridge-protocol.md, bridge revision). The adapter sends no new
 // requests to a bridge that publishes a lower revision or none.
 export const BRIDGE_REVISION = 2;
+// A request carries the bridge_revision its adapter requires. A request
+// without one comes from an adapter that predates the revision fence and is
+// refused, so an old adapter cannot send work through this bridge.
+const MIN_ADAPTER_REVISION = 2;
 
 const HEARTBEAT_MS = 2000; // the adapter treats a liveness file older than 5 s as stale
 const POLL_MS = 200; // the adapter waits 2 s for a receipt after it publishes a request
@@ -35,6 +39,10 @@ type Bridge = {
 	refusals: Map<string, EventFields>;
 	inflight: Inflight | null;
 	orphansPending: boolean;
+	// orphanRetry holds orphan refs whose closing append failed. Their
+	// bytes may be on disk without being durable, so they are appended
+	// again until an append succeeds.
+	orphanRetry: Set<string>;
 };
 
 type Inflight = {
@@ -44,6 +52,10 @@ type Inflight = {
 	started: boolean;
 	lastText: string;
 	lastError: string;
+	// finalText is the text of the request's last assistant message when
+	// that message is a final answer: stop reason "stop" and no tool call.
+	// "" while the run is mid-tool-use or its last message is not final.
+	finalText: string;
 	outcome: string;
 	// terminal is the decided outcome. The request stays in flight until
 	// that event is durably appended, so a failed write is retried.
@@ -75,8 +87,9 @@ export default function amqPiBridge(pi: ExtensionAPI): void {
 	// Output and outcome belong to the request only after its own user
 	// message starts. The buffers reset at that boundary, so a local turn
 	// that ran before it never becomes the remote result. The start of any
-	// later user message ends that ownership: the request completes with
-	// the assistant text it already has, or is uncertain without it.
+	// later user message ends that ownership: the request completes only
+	// when its last assistant message is a final answer, otherwise it is
+	// uncertain (a tool-use preamble is never an answer).
 	pi.on("message_start", (event) => {
 		const b = bridge;
 		const f = active();
@@ -84,8 +97,8 @@ export default function amqPiBridge(pi: ExtensionAPI): void {
 		const msg = event.message as { role?: string; content?: unknown };
 		if (msg.role !== "user") return;
 		if (f.started) {
-			if (f.lastText && !f.lastError) {
-				settle(b, { event: "completed", text: f.lastText });
+			if (f.finalText && !f.lastError) {
+				settle(b, { event: "completed", text: f.finalText });
 			} else {
 				settle(b, { event: "uncertain", error: "another user message started before the request produced its answer; the outcome is unknown" });
 			}
@@ -95,6 +108,7 @@ export default function amqPiBridge(pi: ExtensionAPI): void {
 			f.started = true;
 			f.lastText = "";
 			f.lastError = "";
+			f.finalText = "";
 			f.outcome = "";
 			appendEvent(b.dir, f.ref, { event: "started" });
 		}
@@ -173,6 +187,7 @@ function start(pi: ExtensionAPI, ctx: ExtensionContext): Bridge | null {
 		refusals: new Map(),
 		inflight: null,
 		orphansPending: false,
+		orphanRetry: new Set(),
 	};
 	writeLiveness(b, true);
 	b.orphansPending = !closeOrphanedReceipts(b);
@@ -227,7 +242,9 @@ function scan(pi: ExtensionAPI, b: Bridge): void {
 		const m = REQUEST_FILE.exec(name);
 		if (!m || b.handled.has(m[1])) continue;
 		const ref = m[1];
-		if (exists(path.join(b.dir, "receipts", `${ref}.json`)) || hasTerminal(b.dir, ref)) {
+		// A known refusal whose append failed stays pending even when its
+		// line is visible: the line may not be durable.
+		if (!b.refusals.has(ref) && (exists(path.join(b.dir, "receipts", `${ref}.json`)) || hasTerminal(b.dir, ref))) {
 			b.handled.add(ref);
 			continue;
 		}
@@ -287,6 +304,7 @@ function scan(pi: ExtensionAPI, b: Bridge): void {
 			started: false,
 			lastText: "",
 			lastError: "",
+			finalText: "",
 			outcome: "",
 			terminal: null,
 		};
@@ -312,6 +330,13 @@ function examine(b: Bridge, ref: string): Verdict {
 	if (req.ref !== ref) return refuse("invalid", "request ref does not match its file name");
 	if (typeof req.text !== "string" || req.text.trim() === "") return refuse("invalid", "request text is empty");
 	if (req.deliver_as !== "followUp") return refuse("unsupported", `deliver_as ${JSON.stringify(req.deliver_as)} is not followUp`);
+	const rev = req.bridge_revision;
+	if (typeof rev !== "number" || rev < MIN_ADAPTER_REVISION || rev > BRIDGE_REVISION) {
+		return refuse(
+			"revision",
+			`the request needs bridge_revision ${rev === undefined ? "(none)" : JSON.stringify(rev)} and this pi bridge accepts ${MIN_ADAPTER_REVISION} to ${BRIDGE_REVISION}: upgrade amq-remote to the release that matches this extension and restart it`,
+		);
+	}
 	const notAfter = typeof req.not_after === "string" ? Date.parse(req.not_after) : Number.NaN;
 	if (Number.isNaN(notAfter)) return refuse("invalid", "not_after is not an RFC 3339 time");
 	if (Date.now() > notAfter) return refuse("expired", "not_after passed before delivery");
@@ -386,12 +411,18 @@ function closeOrphanedReceipts(b: Bridge): boolean {
 		const ref = m[1];
 		try {
 			const rc = JSON.parse(fs.readFileSync(path.join(b.dir, "receipts", name), "utf8"));
-			if (rc.session_generation === b.generation || hasTerminal(b.dir, ref)) continue;
+			const retry = b.orphanRetry.has(ref);
+			if (rc.session_generation === b.generation || (!retry && hasTerminal(b.dir, ref))) continue;
 			const ok = appendEvent(b.dir, ref, {
 				event: "uncertain",
 				error: "the pi bridge restarted before the request settled; the outcome is unknown",
 			});
-			if (!ok) done = false;
+			if (ok) {
+				b.orphanRetry.delete(ref);
+			} else {
+				b.orphanRetry.add(ref);
+				done = false;
+			}
 		} catch {
 			// An unreadable receipt is not recovered yet; scan reads it again.
 			done = false;
@@ -458,11 +489,13 @@ function writeAll(fd: number, text: string): void {
 }
 
 function noteAssistant(f: Inflight, message: unknown): void {
-	const msg = message as { role?: string; content?: unknown; errorMessage?: unknown };
+	const msg = message as { role?: string; content?: unknown; errorMessage?: unknown; stopReason?: unknown };
 	if (msg.role !== "assistant") return;
 	const text = textOf(msg.content);
 	if (text) f.lastText = text;
 	if (typeof msg.errorMessage === "string" && msg.errorMessage) f.lastError = msg.errorMessage;
+	const toolCall = Array.isArray(msg.content) && msg.content.some((p) => p && p.type === "toolCall");
+	f.finalText = msg.stopReason === "stop" && !toolCall ? text : "";
 }
 
 function textOf(content: unknown): string {

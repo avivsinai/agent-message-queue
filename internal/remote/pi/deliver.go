@@ -87,6 +87,10 @@ type deliverRequest struct {
 	NotAfter  string `json:"not_after"`
 	EpochHint string `json:"epoch_hint,omitempty"` // the addressed session generation; the adapter never sends it empty (protocol: session generation and epoch)
 	CreatedAt string `json:"created_at"`
+	// BridgeRevision is the bridge revision this adapter requires. The
+	// extension refuses a request without it, so an adapter that predates
+	// the fence cannot send work (protocol: bridge revision).
+	BridgeRevision int `json:"bridge_revision"`
 }
 
 // receipt is the receipt JSON contract.
