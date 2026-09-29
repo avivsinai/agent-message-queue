@@ -1289,6 +1289,7 @@ Stop an identity-confirmed live inject-via wake or remove its exactly-bound prov
 The expected executable and ordered arguments must exactly match the saved target.
 Pass --if-generation with the generation from amq wake check so a replacement published after that check is refused.
 Retirement preserves the mailbox, removes the exact saved target and coupled state projection, and never stops raw wakes.
+--takeover is for an explicit take by another surface of the same user: it skips only the injector match; the generation, lock and owner checks still apply.
 
 Options:
   -if-generation string
@@ -1307,6 +1308,8 @@ Options:
         Root directory for the queue (default ".agent-mail")
   -strict
         Error on unknown handles (default: warn)
+  -takeover
+        Retire a wake another surface started (a take): match the saved target's injector instead of --inject-via; requires --if-generation
 ```
 
 ## amq coop init
