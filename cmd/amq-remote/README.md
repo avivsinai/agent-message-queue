@@ -290,6 +290,7 @@ these three fields.
 | `/inspect` | The target's session state. |
 | `/status <ref>` | The state of a request that this channel submitted. |
 | `/cancel <ref>`, or ❌ on a result row | Cancels that request. |
+| ✅ or ❌ on an approval message | Approves or rejects that pending approval. ✅ is offered only for a command the message shows whole; a file change, a network or permission grant, or a shortened command is approved in the terminal. The first answer, in Buzz or in the terminal, wins, and the message is edited with the outcome. Codex targets with `approve` only. |
 
 With `"mention_channels": ["<channel>", ...]` (at most 16, commands
 required), an owner message in one of those channels that mentions the body
@@ -338,7 +339,7 @@ Flags may appear before or after the positional argument.
 | `--fake` | false | Append the fake runtime as target `fake`. |
 | `--codex-socket PATH` | empty | Unix socket of a running Codex app-server. |
 | `--codex-thread ID` | empty | With `--codex-socket`, attach only this thread. |
-| `--codex-approve` | false | Advertise `approve_tool` for those Codex threads. |
+| `--codex-approve` | false | Answer approvals of runs this endpoint submitted to those Codex threads from remote clients. |
 | `--manifest PATH` | `<root>/extensions/remote/manifest.json` | Adapter manifest path. |
 | `--discover` | false | List candidates and exit. |
 | `--poll DURATION` | `500ms` | Import and reconciliation interval. |

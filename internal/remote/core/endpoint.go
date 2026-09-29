@@ -946,6 +946,14 @@ func (e *Endpoint) respond(cmd *protocol.Command) (protocol.Reply, error) {
 		e.mu.Unlock()
 		return protocol.Reply{}, protocol.Refuse(protocol.CodeInvalid, "option %q is not offered by interaction %s", cmd.Option, cmd.InteractionID)
 	}
+	if prior, done := rec.Answered[cmd.InteractionID]; done && prior != cmd.Option {
+		// An earlier answer may already be with the runtime (in flight, or
+		// sent before a transport error). The runtime applies the first
+		// answer it gets, so a different one never replaces that intent
+		// (PR #919 review round 3).
+		e.mu.Unlock()
+		return protocol.Reply{}, protocol.Refuse(protocol.CodeAlreadyResolved, "an earlier answer (%s) is still being delivered; send it again or answer in the terminal", prior)
+	}
 	if rec.Answered == nil {
 		rec.Answered = map[string]string{}
 	}
@@ -1191,7 +1199,7 @@ func (e *Endpoint) onNative(targetID string, ev NativeEvent) {
 		// Pro #5: route through transitionLocked. Pro round 2 #21: the
 		// resolution carries no interaction, and causeNone treats a nil
 		// interaction as "unchanged", so the clear is an explicit flag.
-		e.transitionLocked(rec, causeNone, nativeEvidence{clearInteraction: true})
+		e.transitionLocked(rec, causeNone, nativeEvidence{clearInteraction: true, resolvedRemotely: ev.Remote})
 	case EventLocalIntervention:
 		if rec.State.Terminal() {
 			e.mu.Unlock()
@@ -1318,6 +1326,7 @@ type nativeEvidence struct {
 	reason            string           // adapter refusal text; causeRefused copies it onto the snapshot
 	interaction       *protocol.Interaction
 	clearInteraction  bool // the pending interaction is resolved natively; clear it (nil interaction means unchanged)
+	resolvedRemotely  bool // with clearInteraction: the answer AMQ delivered resolved it
 	localIntervention bool
 	runTerminal       bool // the run is definitively finished (noop_terminal) — confirm a pending cancel
 }
@@ -1346,6 +1355,47 @@ type nativeEvidence struct {
 //  6. memoAckIntentLocked is called by the CALLER (not here) when a terminal
 //     result is retained — transitionLocked only sets the fields.
 func (e *Endpoint) transitionLocked(rec *requests.Record, c cause, ev nativeEvidence) {
+	var open *protocol.Interaction
+	if rec.Interaction != nil {
+		cp := *rec.Interaction
+		open = &cp
+	}
+	e.applyTransitionLocked(rec, c, ev)
+	// Only a clear resolves an interaction. A replacement by another
+	// interaction says nothing about the first, which may still be open.
+	if open != nil && rec.Interaction == nil {
+		recordResolution(rec, open.InteractionID, ev)
+	}
+}
+
+// recordResolution appends how the interaction id stopped being pending,
+// keeping the most recent MaxResolutions entries. A clear that is neither
+// an explicit native resolution nor a terminal run records nothing.
+func recordResolution(rec *requests.Record, id string, ev nativeEvidence) {
+	var r protocol.Resolution
+	switch {
+	case ev.clearInteraction && ev.resolvedRemotely:
+		r = protocol.Resolution{InteractionID: id, Outcome: protocol.ResolutionAnswered, Option: rec.Answered[id]}
+	case ev.clearInteraction:
+		r = protocol.Resolution{InteractionID: id, Outcome: protocol.ResolutionElsewhere}
+	case rec.State.Terminal():
+		r = protocol.Resolution{InteractionID: id, Outcome: protocol.ResolutionRunEnded}
+		if opt, sent := rec.Answered[id]; sent {
+			// The run ended while an answer was sent or in flight: the
+			// resolution that answer caused can arrive after the run's end
+			// (PR #919 review round 4).
+			r = protocol.Resolution{InteractionID: id, Outcome: protocol.ResolutionAnswered, Option: opt}
+		}
+	default:
+		return
+	}
+	rec.Resolved = append(rec.Resolved, r)
+	if n := len(rec.Resolved); n > protocol.MaxResolutions {
+		rec.Resolved = append([]protocol.Resolution(nil), rec.Resolved[n-protocol.MaxResolutions:]...)
+	}
+}
+
+func (e *Endpoint) applyTransitionLocked(rec *requests.Record, c cause, ev nativeEvidence) {
 	switch c {
 	case causeNone:
 		// Evidence-only update: record Result/NativeRun/Interaction without

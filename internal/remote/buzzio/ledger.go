@@ -319,6 +319,48 @@ func (l *Ledger) RequestForRow(rowEventID string) (string, bool, error) {
 	return string(raw), true, nil
 }
 
+// Approval is one approval message this edge posted: the pending
+// interaction it shows and the request fields an answer must carry.
+type Approval struct {
+	RequestRef    string `json:"request_ref"`
+	InteractionID string `json:"interaction_id"`
+	Target        string `json:"target"`
+	Epoch         string `json:"epoch"`
+	Prompt        string `json:"prompt"`
+	ApproveOption string `json:"approve_option,omitempty"`
+	RejectOption  string `json:"reject_option,omitempty"`
+}
+
+// PutApproval maps an approval message's event id to what it shows, so an
+// owner reaction on that message answers exactly that interaction.
+func (l *Ledger) PutApproval(eventID string, a Approval) error {
+	if !validHexID(eventID) {
+		return fmt.Errorf("approval event id %q is not a hex id", eventID)
+	}
+	raw, err := json.Marshal(a)
+	if err != nil {
+		return err
+	}
+	_, _, err = createOnce(filepath.Join(l.dir, "receipts"), keyFile("approval/"+eventID), raw)
+	return err
+}
+
+// ApprovalFor returns the approval shown by the message with this event id.
+func (l *Ledger) ApprovalFor(eventID string) (Approval, bool, error) {
+	raw, err := readBounded(filepath.Join(l.dir, "receipts", keyFile("approval/"+eventID)))
+	if errors.Is(err, os.ErrNotExist) {
+		return Approval{}, false, nil
+	}
+	if err != nil {
+		return Approval{}, false, err
+	}
+	var a Approval
+	if err := json.Unmarshal(raw, &a); err != nil {
+		return Approval{}, false, fmt.Errorf("approval record is unreadable: %w", err)
+	}
+	return a, true, nil
+}
+
 // ReceiptFor returns the receipt for a request, if one exists.
 func (l *Ledger) ReceiptFor(requestRef string) (Receipt, bool, error) {
 	raw, err := readBounded(filepath.Join(l.dir, "receipts", keyFile("ref/"+requestRef)))

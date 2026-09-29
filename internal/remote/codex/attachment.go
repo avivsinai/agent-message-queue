@@ -1,6 +1,7 @@
 package codex
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -34,6 +35,9 @@ const (
 	methodCommandApproval    = "item/commandExecution/requestApproval"
 	methodFileChangeApproval = "item/fileChange/requestApproval"
 	methodLegacyExecApproval = "execCommand/approval"
+	// methodServerRequestResolved tells every client on the thread that a
+	// server request was answered, by whichever client answered first.
+	methodServerRequestResolved = "serverRequest/resolved"
 )
 
 type run struct {
@@ -47,6 +51,16 @@ type run struct {
 	local        bool
 	interaction  *protocol.Interaction
 	approvalReqs map[string]json.RawMessage
+	// sending is the interaction id whose answer Respond is sending. The
+	// resolution that answer causes can arrive before Respond returns, so
+	// onServerRequestResolved leaves it to Respond, which knows whether the
+	// send succeeded; resolvedWhileSending records that it arrived.
+	sending              string
+	resolvedWhileSending bool
+	// queued holds approvals that arrived while another was pending. The
+	// record shows one pending interaction, so they are shown one at a time,
+	// in arrival order, once the current one resolves.
+	queuedApprovals []*protocol.Interaction
 	// createdAt is when the run was bound, for the unconfirmed-shadow
 	// deadline (Pro F1): a retained-but-unconfirmed run shadows lookupHistory
 	// in Lookup. After confirmTimeout, if still unconfirmed, the run stops
@@ -135,7 +149,21 @@ type Attachment struct {
 	// would look like fresh evidence and restart the ack loop. Bounded by the
 	// same FIFO eviction as ackedOrder (611.22.19 BK4).
 	ackedKeys map[requests.Key]bool
+	// questionMu orders approval events: every path that changes the
+	// pending approval holds it from the change through the emission, so
+	// the endpoint sees EventQuestion and EventQuestionResolved in the order
+	// the state changed. It is taken before mu, and never by a method the
+	// endpoint calls while holding its own lock.
+	questionMu sync.Mutex
+	// resolvedEarly remembers request ids that serverRequest/resolved named
+	// before the request worker delivered the request itself; such a
+	// request is already answered and is never shown. FIFO-bounded.
+	resolvedEarly      map[string]bool
+	resolvedEarlyOrder []string
 }
+
+// maxResolvedEarly bounds Attachment.resolvedEarly.
+const maxResolvedEarly = 64
 
 // Option configures Attach.
 type Option func(*Attachment)
@@ -940,8 +968,34 @@ func (a *Attachment) Respond(key requests.Key, epoch, interactionID, option stri
 		a.mu.Unlock()
 		return protocol.CodeInvalid, nil
 	}
+	if r.sending != "" {
+		a.mu.Unlock()
+		return "", errAnswerInFlight
+	}
+	r.sending, r.resolvedWhileSending = interactionID, false
 	a.mu.Unlock()
-	if err := a.client.Load().Respond(reqID, map[string]string{"decision": option}); err != nil {
+	err := a.client.Load().Respond(reqID, map[string]string{"decision": option})
+	// The send is done; from here the pending approval changes, so hold the
+	// question order until the events are out.
+	a.questionMu.Lock()
+	defer a.questionMu.Unlock()
+	if err != nil {
+		a.mu.Lock()
+		resolved := r.resolvedWhileSending
+		r.sending, r.resolvedWhileSending = "", false
+		var next *protocol.Interaction
+		if resolved {
+			// Another client answered while our send failed: resolved
+			// elsewhere, and our answer never reached the harness.
+			delete(r.approvalReqs, interactionID)
+			r.interaction = nil
+			next = r.advanceLocked()
+		}
+		a.mu.Unlock()
+		if resolved {
+			a.emitResolved(r, false, next)
+			return protocol.CodeAlreadyResolved, nil
+		}
 		return "", err
 	}
 	// B8a (agent-message-queue-611.22.36): tear down the approval state ONLY
@@ -949,11 +1003,160 @@ func (a *Attachment) Respond(key requests.Key, epoch, interactionID, option stri
 	// send, so a transport failure left r.interaction == nil and a retry
 	// returned CodeAlreadyResolved while the native question was still open.
 	a.mu.Lock()
+	_, open := r.approvalReqs[interactionID]
+	open = open || r.resolvedWhileSending
 	delete(r.approvalReqs, interactionID)
-	r.interaction = nil
+	r.interaction, r.sending, r.resolvedWhileSending = nil, "", false
+	var next *protocol.Interaction
+	if open {
+		next = r.advanceLocked()
+	}
 	a.mu.Unlock()
-	a.emit(core.NativeEvent{Type: core.EventQuestionResolved, Key: key, RunID: a.runID(r)})
+	if open {
+		a.emitResolved(r, true, next)
+	}
 	return "", nil
+}
+
+// errAnswerInFlight refuses a second send of the same answer while the
+// first is in flight; the endpoint keeps that answer's intent. A different
+// answer never gets here: the endpoint refuses it first.
+var errAnswerInFlight = errors.New("an answer to this approval is already being sent")
+
+// advanceLocked makes the oldest queued approval that Codex still holds the
+// pending one, and returns it, or nil. The caller holds a.mu and has
+// cleared r.interaction.
+func (r *run) advanceLocked() *protocol.Interaction {
+	for len(r.queuedApprovals) > 0 {
+		next := r.queuedApprovals[0]
+		r.queuedApprovals = r.queuedApprovals[1:]
+		if _, open := r.approvalReqs[next.InteractionID]; open {
+			r.interaction = next
+			return next
+		}
+	}
+	return nil
+}
+
+// emitResolved reports the pending approval resolved, then the next queued
+// approval, if any, as the new pending one.
+func (a *Attachment) emitResolved(r *run, remote bool, next *protocol.Interaction) {
+	key, runID := r.key, a.runID(r)
+	a.emit(core.NativeEvent{Type: core.EventQuestionResolved, Key: key, RunID: runID, Remote: remote})
+	if next != nil {
+		a.emit(core.NativeEvent{Type: core.EventQuestion, Key: key, RunID: runID, Interaction: next})
+	}
+}
+
+// onServerRequestResolved clears an approval that another client, such as
+// the Codex terminal, answered first. The app-server drops a later answer
+// without an error, so without this a late remote answer would report
+// success for a decision it did not make.
+func (a *Attachment) onServerRequestResolved(n Notification) {
+	a.questionMu.Lock()
+	defer a.questionMu.Unlock()
+	var p struct {
+		ThreadID  string          `json:"threadId"`
+		RequestID json.RawMessage `json:"requestId"`
+	}
+	if json.Unmarshal(n.Params, &p) != nil || p.ThreadID != a.threadID || len(p.RequestID) == 0 {
+		return
+	}
+	a.mu.Lock()
+	for _, r := range a.runs {
+		for id, reqID := range r.approvalReqs {
+			if !sameRequestID(reqID, p.RequestID) {
+				continue
+			}
+			if r.sending == id {
+				// Our answer is in flight: Respond reports the resolution
+				// once it knows whether the send succeeded.
+				r.resolvedWhileSending = true
+				a.mu.Unlock()
+				return
+			}
+			delete(r.approvalReqs, id)
+			if r.interaction == nil || r.interaction.InteractionID != id {
+				// A queued approval, never shown: nothing to report.
+				a.mu.Unlock()
+				return
+			}
+			r.interaction = nil
+			next := r.advanceLocked()
+			a.mu.Unlock()
+			a.emitResolved(r, false, next)
+			return
+		}
+	}
+	// Server requests reach onServerRequest through a worker queue, so the
+	// resolution can overtake its own request. Remember it.
+	if key := compactID(p.RequestID); key != "" && !a.resolvedEarly[key] {
+		if a.resolvedEarly == nil {
+			a.resolvedEarly = map[string]bool{}
+		}
+		a.resolvedEarly[key] = true
+		a.resolvedEarlyOrder = append(a.resolvedEarlyOrder, key)
+		if len(a.resolvedEarlyOrder) > maxResolvedEarly {
+			delete(a.resolvedEarly, a.resolvedEarlyOrder[0])
+			a.resolvedEarlyOrder = a.resolvedEarlyOrder[1:]
+		}
+	}
+	a.mu.Unlock()
+}
+
+// approvalPrompt is the owner-facing text of one approval request: what
+// Codex asks to do, where, and why.
+func approvalPrompt(method string, command any, cwd, reason string) string {
+	var b strings.Builder
+	switch c := command.(type) {
+	case string:
+		b.WriteString(c)
+	case nil:
+		if method == methodFileChangeApproval {
+			b.WriteString("apply a file change")
+		}
+	default:
+		if raw, err := json.Marshal(c); err == nil {
+			b.Write(raw)
+		}
+	}
+	if cwd != "" {
+		fmt.Fprintf(&b, "\nin %s", cwd)
+	}
+	if reason != "" {
+		fmt.Fprintf(&b, "\nreason: %s", reason)
+	}
+	return b.String()
+}
+
+// isAbsent reports whether an optional JSON field is missing or null.
+func isAbsent(raw json.RawMessage) bool {
+	return len(raw) == 0 || string(raw) == "null"
+}
+
+// offered returns option when options contains it, and "" otherwise.
+func offered(options []string, option string) string {
+	for _, o := range options {
+		if o == option {
+			return option
+		}
+	}
+	return ""
+}
+
+// sameRequestID compares two JSON-RPC ids by their compact encoding.
+func sameRequestID(x, y json.RawMessage) bool {
+	cx := compactID(x)
+	return cx != "" && cx == compactID(y)
+}
+
+// compactID is the compact JSON encoding of a JSON-RPC id, or "".
+func compactID(id json.RawMessage) string {
+	var b bytes.Buffer
+	if json.Compact(&b, id) != nil {
+		return ""
+	}
+	return b.String()
 }
 
 // AcknowledgeResult implements core.Attachment. Codex keeps the transcript;
@@ -1089,6 +1292,8 @@ func (a *Attachment) onNotification(n Notification) {
 		a.mu.Unlock()
 	case "item/started", "item/completed":
 		a.onItem(n)
+	case methodServerRequestResolved:
+		a.onServerRequestResolved(n)
 	case "turn/completed":
 		var p struct {
 			ThreadID string `json:"threadId"`
@@ -1146,7 +1351,7 @@ func (a *Attachment) onNotification(n Notification) {
 			ev = core.NativeEvent{Type: core.EventRunFailed}
 		}
 		ev.Key, ev.RunID, ev.Result = r.key, r.runIDLocked(), r.result()
-		r.interaction = nil
+		r.interaction, r.queuedApprovals = nil, nil
 		a.mu.Unlock()
 		a.emit(ev)
 	case "thread/status/changed":
@@ -1233,13 +1438,22 @@ func (a *Attachment) onServerRequest(req ServerRequest) {
 	default:
 		return
 	}
+	a.questionMu.Lock()
+	defer a.questionMu.Unlock()
 	var p struct {
 		ThreadID           string   `json:"threadId"`
 		TurnID             string   `json:"turnId"`
 		ItemID             string   `json:"itemId"`
 		ApprovalID         string   `json:"approvalId"`
 		Command            any      `json:"command"`
+		Cwd                string   `json:"cwd"`
+		Reason             string   `json:"reason"`
 		AvailableDecisions []string `json:"availableDecisions"`
+		// Fields a one-tap approve cannot show; any of them withholds it.
+		Kind                  string          `json:"kind"`
+		GrantRoot             string          `json:"grantRoot"`
+		NetworkContext        json.RawMessage `json:"networkApprovalContext"`
+		AdditionalPermissions json.RawMessage `json:"additionalPermissions"`
 	}
 	if json.Unmarshal(req.Params, &p) != nil || p.ThreadID != a.threadID {
 		return
@@ -1251,6 +1465,10 @@ func (a *Attachment) onServerRequest(req ServerRequest) {
 		a.mu.Unlock()
 		return
 	}
+	if key := compactID(req.ID); a.resolvedEarly[key] {
+		a.mu.Unlock()
+		return // another client answered it before it reached us
+	}
 	id := p.ApprovalID
 	if id == "" {
 		id = p.ItemID
@@ -1259,13 +1477,27 @@ func (a *Attachment) onServerRequest(req ServerRequest) {
 	if len(options) == 0 {
 		options = []string{"accept", "decline"}
 	}
-	prompt := ""
-	if b, err := json.Marshal(p.Command); err == nil {
-		prompt = string(b)
+	prompt := approvalPrompt(req.Method, p.Command, p.Cwd, p.Reason)
+	// Approve is offered only for a plain command whose whole grant the
+	// prompt shows. A file change shows no paths or diff here, and a
+	// network, permission or write-root grant is not in the prompt, so those
+	// are approved in the terminal; reject is always safe to offer.
+	approve := ""
+	if _, isText := p.Command.(string); req.Method == methodCommandApproval && isText &&
+		(p.Kind == "" || p.Kind == "command") && p.GrantRoot == "" && isAbsent(p.NetworkContext) && isAbsent(p.AdditionalPermissions) &&
+		len(prompt) <= protocol.MaxApprovalPreview {
+		approve = offered(options, "accept")
 	}
-	r.interaction = &protocol.Interaction{InteractionID: id, Kind: "approval", Prompt: prompt, Options: options, RemoteAnswer: true}
+	inter := &protocol.Interaction{InteractionID: id, Kind: "approval", Prompt: prompt, Options: options, RemoteAnswer: true,
+		ApproveOption: approve, RejectOption: offered(options, "decline")}
 	r.approvalReqs[id] = req.ID
-	key, runID, inter := r.key, r.runIDLocked(), r.interaction
+	if r.interaction != nil {
+		r.queuedApprovals = append(r.queuedApprovals, inter)
+		a.mu.Unlock()
+		return
+	}
+	r.interaction = inter
+	key, runID := r.key, r.runIDLocked()
 	a.mu.Unlock()
 	a.emit(core.NativeEvent{Type: core.EventQuestion, Key: key, RunID: runID, Interaction: inter})
 }

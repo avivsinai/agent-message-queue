@@ -115,6 +115,9 @@ type NativeEvent struct {
 	Epoch       string
 	Status      string
 	Attachment  string
+	// Remote marks an EventQuestionResolved that the answer AMQ delivered
+	// caused. Without it the resolution came from the harness itself.
+	Remote bool
 }
 
 // Attachment is the native seam contract from the design. Implementations

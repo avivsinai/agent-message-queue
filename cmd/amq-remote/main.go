@@ -331,7 +331,7 @@ func defineServeFlags(fs *flag.FlagSet, meDefault string) serveFlags {
 		useFake:      fs.Bool("fake", false, "register the deterministic fake runtime as target 'fake' (sugar: appends to manifest)"),
 		codexSocket:  fs.String("codex-socket", "", "unix socket of the running Codex app-server daemon; attaches its loaded threads (sugar: appends to manifest)"),
 		codexThread:  fs.String("codex-thread", "", "attach only this Codex thread id (with --codex-socket)"),
-		codexApprove: fs.Bool("codex-approve", false, "advertise approve_tool for Codex threads (only after approval fanout is verified live)"),
+		codexApprove: fs.Bool("codex-approve", false, "answer approvals of runs submitted to those Codex threads from remote clients; the first answer wins"),
 		manifestPath: fs.String("manifest", "", "path to the adapter manifest (default: <stateDir>/manifest.json)"),
 		discover:     fs.Bool("discover", false, "list discovered adapter candidates and exit (attaches nothing)"),
 		poll:         fs.Duration("poll", 500*time.Millisecond, "AMQ import and reconciliation interval"),

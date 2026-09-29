@@ -52,7 +52,7 @@ terminal outcome for that run).
 | Completion evidence | `turn/completed` notification (`status: completed\|failed\|interrupted`) | completed | (source: research/r6-codex-app-server-events.md §1 "Turn Lifecycle"; research/p1-codex-probe.md results table) |
 | Exact cancellation gate | `turn/interrupt {threadId, turnId}` | completed (drives `turn/completed(interrupted)`) | (source: seats/harness-inject-surfaces.md §B.3 "Queue/steer" list; research/p1-codex-probe.md "Follow-up (`probe_busy.py`)" row — proven from a second, non-owning connection) |
 | Steer | `turn/steer` | submitted | (source: seats/harness-inject-surfaces.md §B.3 "Queue/steer" list; research/r6-codex-app-server-events.md §3) |
-| Approvals/questions | `ExecCommandApproval`, `ApplyPatchApproval`, `FileChangeRequestApproval`, `CommandExecutionRequestApproval`, `PermissionsRequestApproval`, `ToolRequestUserInput`, `McpServerElicitationRequest` (server-initiated JSON-RPC requests) | submitted (request), answered by client | (source: research/r6-codex-app-server-events.md §2; research/r9-cc-codex-attachment.md §B.3) — fanout to a non-owning client is **unverified** |
+| Approvals/questions | `ExecCommandApproval`, `ApplyPatchApproval`, `FileChangeRequestApproval`, `CommandExecutionRequestApproval`, `PermissionsRequestApproval`, `ToolRequestUserInput`, `McpServerElicitationRequest` (server-initiated JSON-RPC requests) | submitted (request), answered by client | (source: research/r6-codex-app-server-events.md §2; research/r9-cc-codex-attachment.md §B.3) — every client on the thread receives the request, the first response wins, and `serverRequest/resolved` follows (source-read at `rust-v0.156.1`, `app-server/src/outgoing_message.rs:330-495`; not live-verified) |
 | Session-switch/reload epoch triggers | `thread/resume` (rehydrates full history), `thread/started`/`thread/status/changed` notifications | delivered | (source: research/p1-codex-probe.md results table phases 1-2; research/r6-codex-app-server-events.md §1) |
 | Local draft access (must not submit) | `unavailable` — no draft/compose concept in the schema; the only staging primitive is `thread/queue/add`, which is a real queued submission, not a draft | n/a | (source: seats/harness-inject-surfaces.md §B.3; research/r6-codex-app-server-events.md §3 — no draft-shaped method found in the 155 `ClientRequest` methods) |
 | Inspect/roster | `thread/read` (`includeTurns`), `thread/items/list`, `thread/turns/list`, `codex agents` | delivered (polling), strong typed schema | (source: research/r9-cc-codex-attachment.md §B.4; seats/harness-inject-surfaces.md §B.3) |
@@ -115,7 +115,8 @@ contract:
   observed to require a path under `$HOME`; treat that as pinned evidence to
   re-check on upgrades, not as a timeless platform rule. Server notifications
   and non-owning `turn/interrupt` were observed to fan out to connected
-  clients, while approval-request fanout remains unverified.
+  clients. Approval-request fanout is source-read at `rust-v0.156.1`, not
+  observed live (§5).
   (source: research/p1-codex-probe.md)
 - **Claude Code delivery:** a message delivered to a busy session is read at
   a tool boundary and does not interrupt a running tool; an idle session
@@ -135,7 +136,7 @@ valid value for the runtime `terminal` enum.
 
 | Harness | inspect | submit | cancel_request | answer_question | approve_tool | steer | terminal |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| Codex | true | true | true | false | false | false | unavailable |
+| Codex | true | true | true | false | opt-in | false | unavailable |
 | pi | true | true | false | false | false | false | unavailable |
 | Claude Code | true | submitted | false | false | false | false | unavailable |
 
@@ -150,9 +151,18 @@ run identity, so a submit never reaches `admitted`. The void-returning
 Reasons for every `false` (source: as cited per row in §3, plus
 amq-remote-design.html §Capability per harness):
 
-- `codex.answer_question` / `codex.approve_tool`: the approval RPCs exist and
-  are typed, but fanout to a non-owning client is unverified (source:
-  research/r9-cc-codex-attachment.md §B.3).
+- `codex.approve_tool` is opt-in per target (`"approve": true`). At
+  `rust-v0.156.1` the app-server sends each approval request to every client
+  on the thread, applies the first response, drops later ones with only a
+  log line, and then sends `serverRequest/resolved` to every client (source:
+  `codex-rs/app-server/src/outgoing_message.rs:330-495`,
+  `thread_lifecycle.rs:864-885`). The adapter answers only approvals of runs
+  it submitted and clears an approval on `serverRequest/resolved`, so a late
+  answer is refused. A remote approve is offered only for a plain command
+  that the prompt shows whole; file changes and network, permission or
+  write-root grants take a remote reject only. Not live-verified against a
+  running Codex terminal.
+- `codex.answer_question`: user-input requests are not projected.
 - `codex.terminal`: app-server has no PTY concept in-protocol (source:
   research/r9-cc-codex-attachment.md §B.4 "terminal" row).
 - `pi.cancel_request`: the bridge has no cancel request. `ctx.abort()`
