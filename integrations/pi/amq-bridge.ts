@@ -15,7 +15,7 @@ const START_GRACE_MS = 5000; // an idle pi that has not started a follow-up by t
 const MAX_EVENT_TEXT = 256 * 1024;
 const REQUEST_FILE = /^(amqr1_[a-z2-7]{16,472})\.json$/;
 const HANDLE = /^[a-z0-9_][a-z0-9_-]*$/;
-const TERMINAL = new Set(["completed", "failed", "cancelled", "refused"]);
+const TERMINAL = new Set(["completed", "failed", "cancelled", "refused", "uncertain"]);
 
 type EventFields = { event: string; text?: string; error?: string; reason?: string };
 
@@ -27,6 +27,7 @@ type Bridge = {
 	timers: ReturnType<typeof setInterval>[];
 	handled: Set<string>;
 	inflight: Inflight | null;
+	orphansPending: boolean;
 };
 
 type Inflight = {
@@ -37,6 +38,9 @@ type Inflight = {
 	lastText: string;
 	lastError: string;
 	outcome: string;
+	// terminal is the decided outcome. The request stays in flight until
+	// that event is durably appended, so a failed write is retried.
+	terminal: EventFields | null;
 };
 
 let inactiveNoticeShown = false;
@@ -55,50 +59,70 @@ export default function amqPiBridge(pi: ExtensionAPI): void {
 		bridge = null;
 	});
 
-	pi.on("message_start", (event) => {
+	// active is the in-flight request whose outcome is still open.
+	const active = (): Inflight | null => {
 		const f = bridge?.inflight;
+		return f && !f.terminal ? f : null;
+	};
+
+	// Output and outcome belong to the request only after its own user
+	// message starts. The buffers reset at that boundary, so a local turn
+	// that ran before it never becomes the remote result.
+	pi.on("message_start", (event) => {
+		const f = active();
 		if (!bridge || !f || f.started) return;
 		const msg = event.message as { role?: string; content?: unknown };
 		if (msg.role === "user" && textOf(msg.content) === f.text) {
 			f.started = true;
+			f.lastText = "";
+			f.lastError = "";
+			f.outcome = "";
 			appendEvent(bridge.dir, f.ref, { event: "started" });
 		}
 	});
 
 	pi.on("message_end", (event) => {
-		const f = bridge?.inflight;
-		if (f) noteAssistant(f, event.message);
+		const f = active();
+		if (f?.started) noteAssistant(f, event.message);
 	});
 
 	pi.on("agent_end", (event) => {
-		const f = bridge?.inflight;
-		if (!f) return;
+		const f = active();
+		if (!f?.started) return;
 		const last = [...event.messages].reverse().find((m) => (m as { role?: string }).role === "assistant");
 		if (last) noteAssistant(f, last);
 	});
 
 	pi.on("agent_before_settle", (event) => {
-		const f = bridge?.inflight;
-		if (f) f.outcome = event.outcome;
+		const f = active();
+		if (f?.started) f.outcome = event.outcome;
 	});
 
-	pi.on("agent_settled", (_event, ctx) => {
+	pi.on("agent_settled", () => {
 		const b = bridge;
-		const f = b?.inflight;
-		if (!b || !f) return;
-		// A settle before the follow-up was seen belongs to earlier work unless
-		// pi no longer holds the follow-up in its queue.
-		if (!f.started && ctx.hasPendingMessages()) return;
+		const f = active();
+		// A settle before the request started belongs to other work. It is
+		// never the request's outcome; the start watchdog in scan closes a
+		// request that never starts.
+		if (!b || !f || !f.started) return;
 		if (f.outcome === "aborted") {
-			appendEvent(b.dir, f.ref, { event: "cancelled" });
+			settle(b, { event: "cancelled" });
 		} else if (f.outcome === "error") {
-			appendEvent(b.dir, f.ref, { event: "failed", error: f.lastError || "pi run ended with an error" });
+			settle(b, { event: "failed", error: f.lastError || "pi run ended with an error" });
 		} else {
-			appendEvent(b.dir, f.ref, { event: "completed", text: f.lastText });
+			settle(b, { event: "completed", text: f.lastText });
 		}
-		b.inflight = null;
-		scan(pi, b);
+		if (!b.inflight) scan(pi, b);
 	});
+}
+
+// settle records the in-flight request's terminal outcome and appends it.
+// Only a durable append ends the request; otherwise scan retries it.
+function settle(b: Bridge, fields: EventFields): void {
+	const f = b.inflight;
+	if (!f) return;
+	f.terminal = fields;
+	if (appendEvent(b.dir, f.ref, fields)) b.inflight = null;
 }
 
 function start(pi: ExtensionAPI, ctx: ExtensionContext): Bridge | null {
@@ -128,9 +152,10 @@ function start(pi: ExtensionAPI, ctx: ExtensionContext): Bridge | null {
 		timers: [],
 		handled: new Set(),
 		inflight: null,
+		orphansPending: false,
 	};
 	writeLiveness(b, true);
-	failOrphanedReceipts(b);
+	b.orphansPending = !closeOrphanedReceipts(b);
 	const beat = setInterval(() => writeLiveness(b, true), HEARTBEAT_MS);
 	const poll = setInterval(() => {
 		try {
@@ -148,18 +173,27 @@ function start(pi: ExtensionAPI, ctx: ExtensionContext): Bridge | null {
 function stop(b: Bridge | null, reason: string): void {
 	if (!b) return;
 	for (const t of b.timers.splice(0)) clearInterval(t);
-	if (b.inflight) {
-		appendEvent(b.dir, b.inflight.ref, {
-			event: "failed",
-			error: `pi session_shutdown (${reason}) before the request settled`,
-		});
+	const f = b.inflight;
+	if (f) {
+		// A decided outcome is written as decided. Otherwise a started run
+		// ends with the session; a request that never started has no
+		// native outcome. A failed append leaves the receipt for the next
+		// runtime's orphan recovery.
+		const fields: EventFields =
+			f.terminal ??
+			(f.started
+				? { event: "failed", error: `pi session_shutdown (${reason}) before the request settled` }
+				: { event: "uncertain", error: `pi session_shutdown (${reason}) before the request started; the outcome is unknown` });
+		appendEvent(b.dir, f.ref, fields);
 		b.inflight = null;
 	}
 	writeLiveness(b, false);
 }
 
 // scan examines every unhandled request in arrival order. Refusals are
-// written at once; at most one request is delivered and in flight.
+// written at once; at most one request is delivered and in flight, and only
+// into an idle pi. A request that arrives while pi or the bridge is busy is
+// refused busy, never queued.
 function scan(pi: ExtensionAPI, b: Bridge): void {
 	const reqDir = path.join(b.dir, "requests");
 	let names: string[];
@@ -173,7 +207,7 @@ function scan(pi: ExtensionAPI, b: Bridge): void {
 		const m = REQUEST_FILE.exec(name);
 		if (!m || b.handled.has(m[1])) continue;
 		const ref = m[1];
-		if (exists(path.join(b.dir, "receipts", `${ref}.json`)) || exists(path.join(b.dir, "events", `${ref}.jsonl`))) {
+		if (exists(path.join(b.dir, "receipts", `${ref}.json`)) || hasTerminal(b.dir, ref)) {
 			b.handled.add(ref);
 			continue;
 		}
@@ -185,32 +219,51 @@ function scan(pi: ExtensionAPI, b: Bridge): void {
 	}
 	pending.sort((x, y) => x.mtime - y.mtime || (x.ref < y.ref ? -1 : x.ref > y.ref ? 1 : 0));
 
-	// pi reports a failed sendUserMessage out of band. An idle session with
-	// nothing queued that never started the follow-up has dropped it.
+	if (b.orphansPending) b.orphansPending = !closeOrphanedReceipts(b);
+
 	const f = b.inflight;
-	if (f && !f.started && Date.now() - f.deliveredAt > START_GRACE_MS && b.ctx.isIdle() && !b.ctx.hasPendingMessages()) {
-		appendEvent(b.dir, f.ref, { event: "failed", error: "pi is idle and never started the follow-up" });
-		b.inflight = null;
+	if (f?.terminal) {
+		settle(b, f.terminal); // retry a terminal append that failed
+	} else if (f && !f.started && Date.now() - f.deliveredAt > START_GRACE_MS && b.ctx.isIdle() && !b.ctx.hasPendingMessages()) {
+		// pi reports a failed sendUserMessage out of band. An idle session
+		// with nothing queued that never started the follow-up most likely
+		// dropped it, but nothing proves that it did not run.
+		settle(b, { event: "uncertain", error: "pi is idle and never started the follow-up; the outcome is unknown" });
 	}
 
 	for (const { ref } of pending) {
 		const verdict = examine(b, ref);
-		if (verdict.refuse) {
-			appendEvent(b.dir, ref, { event: "refused", reason: verdict.refuse, error: verdict.error });
-			b.handled.add(ref);
+		let { refuse, error } = verdict;
+		// v1 refuses a busy target (the remote-control ADR). The check sits
+		// at the admission boundary, before the receipt and the hand-off.
+		if (!refuse && (b.inflight || !b.ctx.isIdle() || b.ctx.hasPendingMessages())) {
+			refuse = "busy";
+			error = b.inflight ? "another remote request is in flight" : "pi is busy with other work";
+		}
+		if (refuse) {
+			// A failed append leaves the ref unhandled, so the next poll
+			// refuses it again.
+			if (appendEvent(b.dir, ref, { event: "refused", reason: refuse, error })) b.handled.add(ref);
 			continue;
 		}
-		if (b.inflight) continue; // stays queued until the in-flight request settles
 		const claim = claimReceipt(b, ref);
 		if (claim === "error") continue; // retried on the next poll
 		b.handled.add(ref);
 		if (claim === "taken") continue; // another bridge process already claimed it
-		b.inflight = { ref, text: verdict.text, deliveredAt: Date.now(), started: false, lastText: "", lastError: "", outcome: "" };
+		b.inflight = {
+			ref,
+			text: verdict.text,
+			deliveredAt: Date.now(),
+			started: false,
+			lastText: "",
+			lastError: "",
+			outcome: "",
+			terminal: null,
+		};
 		try {
 			pi.sendUserMessage(verdict.text, { deliverAs: "followUp" });
 		} catch (err) {
-			appendEvent(b.dir, ref, { event: "failed", error: `sendUserMessage: ${String(err)}` });
-			b.inflight = null;
+			settle(b, { event: "failed", error: `sendUserMessage: ${String(err)}` });
 		}
 	}
 }
@@ -234,7 +287,10 @@ function examine(b: Bridge, ref: string): Verdict {
 	if (Date.now() > notAfter) return refuse("expired", "not_after passed before delivery");
 	const hint = req.epoch_hint ?? "";
 	if (typeof hint !== "string") return refuse("invalid", "epoch_hint is not a string");
-	if (hint !== "" && hint !== b.generation) return refuse("generation", "epoch_hint does not match the live session generation");
+	// The hint names the session generation the request addresses. An
+	// absent or empty hint addresses none, so a request retained across
+	// session_start never runs in a session it was not sent to.
+	if (hint !== b.generation) return refuse("generation", "epoch_hint does not match the live session generation");
 	return { refuse: "", error: "", text: req.text };
 }
 
@@ -280,16 +336,19 @@ function writeLiveness(b: Bridge, live: boolean): void {
 	}
 }
 
-// failOrphanedReceipts closes receipts that an earlier bridge process or
+// closeOrphanedReceipts closes receipts that an earlier bridge process or
 // generation left without a terminal event, so the adapter does not report
-// them running forever.
-function failOrphanedReceipts(b: Bridge): void {
+// them running forever. The outcome of such a request is unknown, so the
+// event is `uncertain`. It returns false when an append failed; scan then
+// runs it again (it is idempotent).
+function closeOrphanedReceipts(b: Bridge): boolean {
 	let names: string[];
 	try {
 		names = fs.readdirSync(path.join(b.dir, "receipts"));
 	} catch {
-		return;
+		return false;
 	}
+	let done = true;
 	for (const name of names) {
 		const m = REQUEST_FILE.exec(name);
 		if (!m) continue;
@@ -297,14 +356,16 @@ function failOrphanedReceipts(b: Bridge): void {
 		try {
 			const rc = JSON.parse(fs.readFileSync(path.join(b.dir, "receipts", name), "utf8"));
 			if (rc.session_generation === b.generation || hasTerminal(b.dir, ref)) continue;
-			appendEvent(b.dir, ref, {
-				event: "failed",
+			const ok = appendEvent(b.dir, ref, {
+				event: "uncertain",
 				error: "the pi bridge restarted before the request settled; the outcome is unknown",
 			});
+			if (!ok) done = false;
 		} catch {
 			// An unreadable receipt is left for the adapter to report.
 		}
 	}
+	return done;
 }
 
 function hasTerminal(dir: string, ref: string): boolean {
@@ -324,8 +385,13 @@ function hasTerminal(dir: string, ref: string): boolean {
 	return false;
 }
 
-// appendEvent appends one fsynced JSON line to events/<ref>.jsonl.
-function appendEvent(dir: string, ref: string, fields: EventFields): void {
+// appendEvent appends one fsynced JSON line to events/<ref>.jsonl and reports
+// whether the line is durable. The extension is the single writer of the
+// stream. A trailing fragment without a newline (a crash or a failed write
+// mid-append) is closed with a newline before the new line, so the new line
+// always parses; the fragment stays a line that readers skip. Bytes are only
+// ever appended, never truncated.
+function appendEvent(dir: string, ref: string, fields: EventFields): boolean {
 	const ev: Record<string, string> = { protocol: PROTOCOL, ref, event: fields.event };
 	if (fields.text) ev.text = truncateUtf8(fields.text, MAX_EVENT_TEXT);
 	if (fields.error) ev.error = truncateUtf8(fields.error, MAX_EVENT_TEXT);
@@ -334,14 +400,29 @@ function appendEvent(dir: string, ref: string, fields: EventFields): void {
 	const file = path.join(dir, "events", `${ref}.jsonl`);
 	let fd: number | undefined;
 	try {
-		fd = fs.openSync(file, "a", 0o600);
-		fs.writeSync(fd, `${JSON.stringify(ev)}\n`);
+		fd = fs.openSync(file, "a+", 0o600);
+		const size = fs.fstatSync(fd).size;
+		const last = Buffer.alloc(1);
+		if (size > 0 && fs.readSync(fd, last, 0, 1, size - 1) === 1 && last[0] !== 0x0a) writeAll(fd, "\n");
+		writeAll(fd, `${JSON.stringify(ev)}\n`);
 		fs.fsyncSync(fd);
+		return true;
 	} catch {
-		// Without the events directory there is no stream to append to.
+		return false;
 	} finally {
-		if (fd !== undefined) fs.closeSync(fd);
+		if (fd !== undefined) {
+			try {
+				fs.closeSync(fd);
+			} catch {
+				// The line was fsynced before close.
+			}
+		}
 	}
+}
+
+function writeAll(fd: number, text: string): void {
+	const buf = Buffer.from(text, "utf8");
+	if (fs.writeSync(fd, buf) !== buf.length) throw new Error("short write");
 }
 
 function noteAssistant(f: Inflight, message: unknown): void {

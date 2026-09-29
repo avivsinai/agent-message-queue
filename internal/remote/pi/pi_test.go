@@ -68,11 +68,18 @@ func newExtDir(t *testing.T) string {
 	return dir
 }
 
-// stampLiveness writes a fresh bridge.liveness at the given time.
+// stampLiveness writes a fresh bridge.liveness at the given time, publishing
+// generation gen-1 (the generation most tests pin).
 func stampLiveness(t *testing.T, dir string, at time.Time) {
 	t.Helper()
-	rec := fmt.Sprintf(`{"protocol":%q,"live":true,"at":%q,"pid":%d,"surface":"app"}`,
-		ProtocolV1, at.UTC().Format(time.RFC3339Nano), os.Getpid())
+	stampLivenessGen(t, dir, at, "gen-1")
+}
+
+// stampLivenessGen writes a fresh bridge.liveness publishing generation gen.
+func stampLivenessGen(t *testing.T, dir string, at time.Time, gen string) {
+	t.Helper()
+	rec := fmt.Sprintf(`{"protocol":%q,"live":true,"at":%q,"pid":%d,"surface":"app","session_generation":%q}`,
+		ProtocolV1, at.UTC().Format(time.RFC3339Nano), os.Getpid(), gen)
 	if err := os.WriteFile(filepath.Join(dir, "bridge.liveness"), []byte(rec), 0o600); err != nil {
 		t.Fatalf("write liveness: %v", err)
 	}
@@ -85,7 +92,7 @@ func stampLiveness(t *testing.T, dir string, at time.Time) {
 // string (the protocol-string test seam).
 func stampLivenessWithProtocol(t *testing.T, dir string, at time.Time, proto string) {
 	t.Helper()
-	rec := fmt.Sprintf(`{"protocol":%q,"live":true,"at":%q,"pid":%d,"surface":"app"}`,
+	rec := fmt.Sprintf(`{"protocol":%q,"live":true,"at":%q,"pid":%d,"surface":"app","session_generation":"gen-1"}`,
 		proto, at.UTC().Format(time.RFC3339Nano), os.Getpid())
 	if err := os.WriteFile(filepath.Join(dir, "bridge.liveness"), []byte(rec), 0o600); err != nil {
 		t.Fatalf("write liveness: %v", err)
@@ -176,6 +183,7 @@ func TestFirstReceiptPinsEpoch(t *testing.T) {
 	ref := clientRef(key)
 	seedRequest(t, dir, ref, "")
 	writeReceipt(t, dir, ref, "gen-7", fixedNow)
+	stampLivenessGen(t, dir, fixedNow, "gen-7")
 	// Submit against an existing receipt: recovery/refresh binds and pins.
 	adm, err := a.Submit(core.BoundRequest{Key: key, Epoch: SentinelUnpinned, Input: protocol.SubmitInput{Text: "hello"}, NotAfter: "2036-01-01T00:00:00Z"})
 	if err != nil || !adm.Admitted {
@@ -196,6 +204,7 @@ func TestLaterSubmitCarriesEpochHint(t *testing.T) {
 	other := clientRef(testKey("seed"))
 	seedRequest(t, dir, other, "")
 	writeReceipt(t, dir, other, "gen-9", fixedNow)
+	stampLivenessGen(t, dir, fixedNow, "gen-9")
 	if _, err := a.Submit(submitReq(testKey("seed"), "hello")); err != nil {
 		t.Fatalf("seed submit: %v", err)
 	}
@@ -536,7 +545,8 @@ func TestGenerationRefusalDropsToSentinel(t *testing.T) {
 // TestRestartedBridgeDropsDeadPin reproduces a field defect: a receipt from
 // pi pid A pinned its generation, pi restarted as pid B, and the first submit carried A's generation as
 // epoch_hint, which B refused. A live bridge in another process must unpin,
-// so the first submit goes out as first contact and completes.
+// so the first submit goes out as first contact, addressed to B's live
+// generation, and completes.
 func TestRestartedBridgeDropsDeadPin(t *testing.T) {
 	a, dir := newTestAttachment(t)
 	seed := clientRef(testKey("seed"))
@@ -545,7 +555,7 @@ func TestRestartedBridgeDropsDeadPin(t *testing.T) {
 	if _, err := a.Submit(submitReq(testKey("seed"), "hello")); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	restarted := fmt.Sprintf(`{"protocol":%q,"live":true,"at":%q,"pid":%d,"surface":"tui"}`,
+	restarted := fmt.Sprintf(`{"protocol":%q,"live":true,"at":%q,"pid":%d,"surface":"tui","session_generation":"gen-2"}`,
 		ProtocolV1, fixedNow.UTC().Format(time.RFC3339Nano), os.Getpid()+1)
 	if err := os.WriteFile(filepath.Join(dir, "bridge.liveness"), []byte(restarted), 0o600); err != nil {
 		t.Fatalf("write liveness: %v", err)
@@ -573,11 +583,51 @@ func TestRestartedBridgeDropsDeadPin(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read request: %v", err)
 	}
-	if strings.Contains(string(data), "epoch_hint") {
-		t.Fatalf("first submit after restart carried a dead epoch_hint:\n%s", data)
+	if !strings.Contains(string(data), `"epoch_hint":"gen-2"`) {
+		t.Fatalf("first submit after restart must address the live generation gen-2:\n%s", data)
 	}
 	if got := a.Inspect().Epoch; got != "gen-2" {
 		t.Fatalf("epoch after first receipt = %q, want gen-2", got)
+	}
+}
+
+// TestFirstContactAddressesLiveGeneration reproduces Pro review 2026-09-29 #2:
+// a first-contact request went out with an empty epoch_hint, which the
+// extension took as a wildcard, so a request retained from generation A ran
+// in replacement generation B. The first-contact request must carry the live
+// generation (without pinning it), and with no live generation nothing is
+// published.
+func TestFirstContactAddressesLiveGeneration(t *testing.T) {
+	a, dir := newTestAttachment(t)
+	stampLivenessGen(t, dir, fixedNow, "gen-a")
+	key := testKey("first")
+	ref := clientRef(key)
+	if _, err := a.Submit(submitReq(key, "hello")); err == nil {
+		t.Fatal("submit without a receipt must stay uncertain")
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "requests", refSanitize(ref)+".json"))
+	if err != nil || !strings.Contains(string(data), `"epoch_hint":"gen-a"`) {
+		t.Fatalf("first-contact request = %s, %v; want epoch_hint gen-a", data, err)
+	}
+	if got := a.Inspect().Epoch; got != SentinelUnpinned {
+		t.Fatalf("epoch = %q; liveness must never pin", got)
+	}
+
+	rec := fmt.Sprintf(`{"protocol":%q,"live":true,"at":%q,"pid":%d,"surface":"tui"}`,
+		ProtocolV1, fixedNow.UTC().Format(time.RFC3339Nano), os.Getpid())
+	if err := os.WriteFile(filepath.Join(dir, "bridge.liveness"), []byte(rec), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(filepath.Join(dir, "bridge.liveness"), fixedNow, fixedNow); err != nil {
+		t.Fatal(err)
+	}
+	none := testKey("no-generation")
+	adm, err := a.Submit(submitReq(none, "hello"))
+	if err != nil || adm.Code != protocol.CodeAttachmentLost {
+		t.Fatalf("Submit without a live generation = %+v, %v; want attachment_lost", adm, err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "requests", refSanitize(clientRef(none))+".json")); !os.IsNotExist(err) {
+		t.Fatalf("request published without a live generation: %v", err)
 	}
 }
 
@@ -679,6 +729,7 @@ func TestRecoveryPinsNewestGeneration(t *testing.T) {
 	seedRequest(t, dir, newRef, "")
 	writeReceipt(t, dir, oldRef, "gen-1", fixedNow)
 	writeReceipt(t, dir, newRef, "gen-2", fixedNow.Add(time.Second))
+	stampLivenessGen(t, dir, fixedNow, "gen-2")
 	a := mustAttach(t, dir)
 	if s := a.Inspect(); s.Epoch != "gen-2" {
 		t.Fatalf("recovered epoch = %q, want gen-2 (newest receipt)", s.Epoch)

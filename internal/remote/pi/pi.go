@@ -72,6 +72,7 @@ type run struct {
 
 	confirmed bool  // receipt observed — admission proven (protocol: receipts)
 	terminal  bool  // first terminal event consumed (first-terminal-wins; protocol: events)
+	uncertain bool  // the terminal event is `uncertain`: the extension has no native outcome
 	acked     bool  // endpoint acknowledged the retained result
 	notFound  error // last seam error that blocks evidence (never guessed around)
 	// eventsRefused is a protocol-string refusal of the event stream (foreign protocol).
@@ -89,7 +90,7 @@ type Attachment struct {
 	dir    bridgeDir
 	// epoch is the receipt-pinned session generation (protocol: session generation and epoch). Empty means "no
 	// receipt observed yet" — Inspect publishes the sentinel `unpinned` and
-	// submits carry an empty epoch_hint (first contact, no check).
+	// first-contact submits address the live generation from bridge.liveness.
 	epoch string
 	// epochPID is the pi process that wrote the pinning receipt. A
 	// generation lives inside one process, so a live bridge with another
@@ -511,6 +512,18 @@ func (a *Attachment) applyEventsLocked(r *run, events []event) {
 				Key:   r.key,
 				RunID: r.runID,
 			})
+		case "uncertain":
+			// The extension stopped tracking the ref without a native
+			// outcome (restart, shutdown before start, or a follow-up that
+			// never started). The run may or may not have happened, so the
+			// record stays uncertain; it is never failed or completed.
+			if r.terminal {
+				break
+			}
+			r.terminal = true
+			r.uncertain = true
+			r.state = protocol.StateUncertain
+			r.errText = ev.Error
 		case "refused":
 			if r.terminal {
 				break
@@ -648,9 +661,9 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 
 	a.mu.Lock()
 	// Epoch gate: while unpinned (a.epoch == "") the caller's epoch is
-	// the sentinel (it read Inspect), and the submit goes out with an EMPTY
-	// epoch_hint (first contact, no check). Once a receipt pinned a
-	// generation, the caller's epoch must match it exactly.
+	// the sentinel (it read Inspect), and the submit addresses the live
+	// generation from bridge.liveness (first contact, below). Once a receipt
+	// pinned a generation, the caller's epoch must match it exactly.
 	if a.epoch != "" && req.Epoch != a.epoch {
 		// The endpoint's admissible check compares cmd.Epoch against
 		// Inspect().Epoch, so this only fires on a race; it mirrors the
@@ -658,13 +671,12 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 		a.mu.Unlock()
 		return core.Admission{Code: protocol.CodeStaleEpoch, Message: "epoch does not match the pinned session generation; re-inspect"}, nil
 	}
-	epochHint := a.epoch // pinned generation as hint; "" (unpinned) = first contact, no check
+	epochHint := a.epoch // pinned generation as hint; "" (unpinned) = first contact, filled from liveness below
 	// The hint is captured in the SAME critical section as the gate
 	// above (review 816-r3 P1): re-reading it after the lock-free liveness
 	// check let a concurrent re-pin/refuse publish a generation the gate
-	// never validated — or omit the hint entirely on a refused(generation),
-	// which the extension defines as "no check" on a just-proven-stale
-	// request.
+	// never validated — or swap it for the live generation on a
+	// refused(generation), addressing a session the gate never checked.
 	if r, ok := a.runs[req.Key]; ok {
 		// Retry of an already-published submit (endpoint retries carry the
 		// same ref); consume() above already re-read the seam so the
@@ -700,8 +712,20 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 	// means nothing is written and the refusal is positive (protocol: receipts). 9a: the
 	// filesystem read happens without the lock.
 	a.mu.Unlock()
-	if live := a.dir.liveness(a.now()); !live.live {
+	live := a.dir.liveness(a.now())
+	if !live.live {
 		return core.Admission{Code: protocol.CodeAttachmentLost, Message: fmt.Sprintf("no live pi bridge for handle %q (bridge.liveness %s)", a.handle, live.reason)}, nil
+	}
+	if epochHint == "" {
+		// First contact: the request addresses the generation the live
+		// bridge publishes, so the extension refuses it in any other
+		// generation (after /new, reload, or restart). This addresses the
+		// session only; it is not admission evidence and never pins (only
+		// receipts pin).
+		if !protocol.ValidEpoch(live.gen) {
+			return core.Admission{Code: protocol.CodeAttachmentLost, Message: fmt.Sprintf("live pi bridge for handle %q publishes no valid session_generation", a.handle)}, nil
+		}
+		epochHint = live.gen
 	}
 	// File I/O outside a.mu: the mutex guards correlation state, not the
 	// seam. A concurrent same-key submit cannot happen (the endpoint's
@@ -779,7 +803,7 @@ func (a *Attachment) Submit(req core.BoundRequest) (core.Admission, error) {
 		}
 		time.Sleep(submitPollStep)
 	}
-	live := a.dir.liveness(a.now())
+	live = a.dir.liveness(a.now())
 	if !live.live {
 		// The bridge died mid-window (the file is already published; the
 		// file stays for a later bridge). Delivery is
@@ -847,6 +871,13 @@ func (a *Attachment) Lookup(key requests.Key, epoch string) (core.Evidence, erro
 		ev.Admitted = r.confirmed
 		ev.State = protocol.StateRejected
 		ev.RefusalCode = r.refused
+		return ev, nil
+	}
+	if r.uncertain {
+		// No native outcome exists for the ref: admission may be proven,
+		// but completion is not, so the endpoint keeps the record uncertain.
+		ev.Class = core.EvidenceUnknown
+		ev.State = protocol.StateUncertain
 		return ev, nil
 	}
 	if r.terminal {

@@ -75,7 +75,7 @@ non-empty protocol string instead of guessing its meaning:
 | `text` | The user message to submit, verbatim. |
 | `deliver_as` | Always `followUp` in v1. |
 | `not_after` | RFC 3339 deadline. The extension does not deliver after it. |
-| `epoch_hint` | The session generation the adapter has pinned, or absent/empty for first contact. |
+| `epoch_hint` | The session generation the request addresses: the pinned generation, or on first contact the live `session_generation`. Always set. |
 | `created_at` | RFC 3339 publication time; informational. |
 
 The adapter publishes create-new: it writes and fsyncs a temporary file in
@@ -83,8 +83,9 @@ The adapter publishes create-new: it writes and fsyncs a temporary file in
 fsyncs the directory. An existing `<ref>.json` means the ref was already
 published; the adapter never overwrites it and never re-sends a ref.
 
-Before a fresh publication the adapter checks liveness. With no live bridge it
-refuses the submit and writes nothing.
+Before a fresh publication the adapter checks liveness. With no live bridge, or
+a live bridge whose record has no valid `session_generation`, it refuses the
+submit (`attachment_lost`) and writes nothing.
 
 ## `receipts/<ref>.json`
 
@@ -125,6 +126,7 @@ One JSON object per line, appended and fsynced line by line:
 | `failed` | `error` | failed |
 | `cancelled` | - | cancelled |
 | `refused` | `reason`, optional `error` | rejected with a typed code |
+| `uncertain` | `error` | uncertain: the extension stopped tracking the ref without a native outcome |
 
 `refused` reasons map to typed codes:
 
@@ -135,12 +137,20 @@ One JSON object per line, appended and fsynced line by line:
 | `busy` | `busy` |
 | anything else (for example `invalid`, `unsupported`) | `native_error` |
 
-The first terminal event (`completed`, `failed`, `cancelled`, `refused`) is
-final for the ref; later lines are not evidence. Unknown event types are
-ignored. A line whose `ref` names another request is ignored. A partial
-trailing line from a crash mid-append is skipped; because each terminal line
-is fsynced, a skipped line is never the terminal evidence. `text` and `error`
-are at most 256 KiB, cut on a UTF-8 boundary.
+The first terminal event (`completed`, `failed`, `cancelled`, `refused`,
+`uncertain`) is final for the ref; later lines are not evidence. Unknown event
+types are ignored. A line whose `ref` names another request is ignored. A line
+that does not parse is skipped. `text` and `error` are at most 256 KiB, cut on
+a UTF-8 boundary.
+
+The extension is the single writer of a ref's stream. Before every append it
+checks the last byte of the file: a trailing fragment without a newline (a
+crash or a failed write mid-append) is closed with a newline first, so the
+fragment stays one skipped line and the new line always parses. The extension
+never truncates or rewrites the stream. An append counts only after the line
+is written in full and fsynced. A terminal outcome that fails to append is kept
+in memory and appended again on later polls, so a skipped fragment is never
+the only terminal evidence while the extension runs.
 
 A missing events file means "no events yet", never an error. The adapter
 reads only the current file, so rotating or truncating it loses history but
@@ -162,7 +172,8 @@ never fabricates a state.
 The extension replaces the whole file (temporary file plus rename) every 2
 seconds. Freshness is the file's modification time: a record older than 5
 seconds is stale. The record is live only when it is fresh, parses, carries
-this protocol, and has `live: true` and `pid > 0`. On shutdown the extension
+this protocol, and has `live: true` and `pid > 0`. `session_generation` is the
+current generation; the adapter addresses first-contact requests to it. On shutdown the extension
 writes `live: false`, so the adapter sees the bridge offline at once.
 `surface` is the pi run mode (`tui`, `rpc`, `json`, or `print`).
 
@@ -177,59 +188,74 @@ generation.
 The adapter's epoch rules:
 
 1. **Only receipts pin.** Before it observes any receipt the adapter publishes
-   the sentinel epoch `unpinned` and sends requests with an empty
-   `epoch_hint`. The first receipt pins its `session_generation`. On restart
-   the adapter rebuilds from `receipts/` oldest first, so the newest receipt
-   sets the pin.
-2. **Liveness may only drop a pin.** A live record whose `session_generation`
-   differs from the pin, or whose `pid` differs from the pinning receipt's
-   `pid`, drops the pin back to `unpinned`. Liveness never sets a pin.
-3. **A stale hint is refused.** The extension delivers a request with an empty
-   `epoch_hint` (first contact) or a hint equal to its current generation. Any
-   other hint gets a `refused` event with reason `generation` and **no
-   receipt**. The adapter maps it to `stale_epoch` and drops its pin; the next
-   delivered request's receipt pins the live generation.
+   the sentinel epoch `unpinned`. The first receipt pins its
+   `session_generation`. On restart the adapter rebuilds from `receipts/`
+   oldest first, so the newest receipt sets the pin.
+2. **Liveness addresses and may drop a pin, never set one.** Without a pin
+   (first contact) the adapter sends the live record's `session_generation`
+   as `epoch_hint`. That names the session the request is for; it is not
+   admission evidence and does not pin. A live record whose
+   `session_generation` differs from the pin, or whose `pid` differs from the
+   pinning receipt's `pid`, drops the pin back to `unpinned`.
+3. **A hint for another generation is refused.** The extension delivers a
+   request only when its `epoch_hint` equals the current generation. An
+   absent, empty, or different hint gets a `refused` event with reason
+   `generation` and **no receipt**, so a request retained across
+   `session_start` never runs in a session it was not sent to. The adapter
+   maps the refusal to `stale_epoch` and drops its pin; the next delivered
+   request's receipt pins the live generation.
 
 ## Extension processing rules
 
 The extension polls `requests/` often enough that a receipt lands well inside
 the adapter's 2-second receipt wait. For each request with neither a receipt
-nor an events file, in publication order, it:
+nor a terminal event, in publication order, it:
 
 1. validates the shape: `ref` matches the file name, `text` is non-empty,
    `deliver_as` is `followUp`, and `not_after` parses. A failure is a `refused`
    event (`invalid` or `unsupported`).
 2. refuses with reason `expired` when `not_after` has passed.
 3. applies the epoch rule above.
-4. claims the receipt and calls `sendUserMessage(text, { deliverAs: "followUp" })`
+4. refuses with reason `busy` when pi is busy: `ctx.isIdle()` is false,
+   `ctx.hasPendingMessages()` is true, or another remote request is in
+   flight. v1 never queues a request behind other work.
+5. claims the receipt and calls `sendUserMessage(text, { deliverAs: "followUp" })`
    without prompt-template expansion, so a body that starts with `/` stays
    text.
 
-A request that already has a receipt or an events file is handled and is never
-examined or delivered again. Refusals write no receipt.
+Steps 2 to 5 run in one synchronous pass, so `not_after` and idleness are
+checked at the admission boundary, immediately before the receipt. A request
+that already has a receipt or a terminal event is handled and is never
+examined or delivered again. Refusals write no receipt. A refusal that fails
+to append is retried on the next poll.
 
-The reference extension keeps one delivered request in flight. Other requests
-wait in `requests/` (still subject to `not_after` and the epoch rule) until the
-in-flight request is terminal. It correlates the run like this:
+The reference extension keeps one delivered request in flight and correlates
+its run like this:
 
-- `started` when pi emits `message_start` for a user message whose text equals
-  the request text;
-- the final assistant text from `message_end` and `agent_end`;
-- the outcome from `agent_before_settle` (`completed`, `aborted`, `error`);
-- the terminal event at `agent_settled`, the notification that pi will not
-  continue on its own: `completed`, `cancelled` for `aborted`, or `failed` for
-  `error`. A settle that arrives before `started` while pi still holds queued
-  messages belongs to earlier work and is not used.
+- the request starts when pi emits `message_start` for a user message whose
+  text equals the request text, after the delivery. The extension appends
+  `started`. Output and outcome collected before that point are discarded;
+- the final assistant text from `message_end` and `agent_end` after the start;
+- the outcome from `agent_before_settle` after the start (`completed`,
+  `aborted`, `error`);
+- the terminal event at `agent_settled` after the start, the notification that
+  pi will not continue on its own: `completed`, `cancelled` for `aborted`, or
+  `failed` for `error`. A settle before the start belongs to other work and
+  never ends the request.
+
+The request stays in flight until its terminal event is durable.
 
 pi reports a failed `sendUserMessage` out of band, so a follow-up can be lost
 without a signal. When the in-flight request has not started 5 seconds after
 delivery and pi is idle with no queued messages, the extension appends
-`failed` and moves on to the next request.
+`uncertain`: nothing proves the follow-up did not run.
 
-On `session_shutdown` with a request in flight, the extension appends `failed`
-naming the shutdown reason. On `session_start` it appends `failed` to every
-receipt from another generation that has no terminal event, so a crash never
-leaves a ref running forever.
+On `session_shutdown` with a request in flight, the extension appends the
+outcome it already decided; otherwise `failed` naming the shutdown reason when
+the request started, or `uncertain` when it did not. On `session_start` it
+appends `uncertain` to every receipt from another generation that has no
+terminal event, so a crash never leaves a ref running forever and never
+records an outcome nobody observed.
 
 ## Adapter recovery and evidence
 
@@ -244,6 +270,7 @@ never redispatches.
 | Request published, no receipt, no live bridge | `attachment_lost`, uncertain. The file stays for a later bridge. |
 | Receipt, no terminal event | admitted, confirmed running. |
 | Terminal `completed`, `failed`, or `cancelled` | admitted, terminal, with the result. |
+| Terminal `uncertain` | uncertain. The receipt proves admission; the outcome is unknown. |
 | `refused` | rejected with the mapped code; admitted only if a receipt exists. |
 | Unreadable or foreign receipt, or refused event stream | error for that ref; the adapter keeps the record uncertain. |
 
