@@ -219,11 +219,19 @@ func TestLaterSubmitCarriesEpochHint(t *testing.T) {
 	if _, ok := a.runs[key]; ok {
 		t.Fatal("fresh key must not be pre-bound")
 	}
+	// The watcher must finish before the test returns: if Submit returns
+	// first, a late write lands in a removed temp dir and fails a completed
+	// test (macOS CI run 36620459450, "Fail in goroutine after
+	// TestLaterSubmitCarriesEpochHint has completed").
+	written := make(chan struct{})
 	go func() {
+		defer close(written)
 		time.Sleep(10 * time.Millisecond)
 		writeReceipt(t, dir, ref, "gen-9", fixedNow)
 	}()
-	if _, err := a.Submit(core.BoundRequest{Key: key, Epoch: "gen-9", Input: protocol.SubmitInput{Text: "q"}, NotAfter: "2036-01-01T00:00:00Z"}); err != nil {
+	_, err := a.Submit(core.BoundRequest{Key: key, Epoch: "gen-9", Input: protocol.SubmitInput{Text: "q"}, NotAfter: "2036-01-01T00:00:00Z"})
+	<-written
+	if err != nil {
 		t.Fatalf("submit with pinned epoch: %v", err)
 	}
 	data, err := os.ReadFile(filepath.Join(dir, "requests", refSanitize(ref)+".json"))
