@@ -51,6 +51,7 @@ func runWakeRetire(args []string) error {
 	injectViaFlag := fs.String("inject-via", "", "Expected external injection executable")
 	ifGenerationFlag := fs.String("if-generation", "", "Retire only if the current lock generation still matches this exact value")
 	retryUntilFlag := fs.String("retry-until", wakeRetryUntilDrained, "Expected doorbell acknowledgement: drained or injected")
+	takeoverFlag := fs.Bool("takeover", false, "Retire a wake another surface started (a take): match the saved target's injector instead of --inject-via; requires --if-generation")
 	var injectArgFlags multiStringFlag
 	fs.Var(&injectArgFlags, "inject-arg", "Expected fixed injection argument (repeatable)")
 	usage := usageWithFlags(fs, "amq wake retire --me <agent> --inject-via <path> [options]",
@@ -58,7 +59,8 @@ func runWakeRetire(args []string) error {
 		"",
 		"The expected executable and ordered arguments must exactly match the saved target.",
 		"Pass --if-generation with the generation from amq wake check so a replacement published after that check is refused.",
-		"Retirement preserves the mailbox, removes the exact saved target and coupled state projection, and never stops raw wakes.")
+		"Retirement preserves the mailbox, removes the exact saved target and coupled state projection, and never stops raw wakes.",
+		"--takeover is for an explicit take by another surface of the same user: it skips only the injector match; the generation, lock and owner checks still apply.")
 	if handled, err := parseFlags(fs, args, usage); err != nil {
 		return err
 	} else if handled {
@@ -89,6 +91,12 @@ func runWakeRetire(args []string) error {
 	if retryUntil == wakeRetryUntilInjected {
 		requested.RetryUntil = retryUntil
 	}
+	if *takeoverFlag {
+		if strings.TrimSpace(*ifGenerationFlag) == "" {
+			return UsageError("--takeover requires --if-generation")
+		}
+		requested = takeoverWakeTarget(root, me, requested)
+	}
 	result, retireErr := retireWakeIfGeneration(root, me, requested, strings.TrimSpace(*ifGenerationFlag))
 	if common.JSON {
 		if err := writeJSON(os.Stdout, result); err != nil {
@@ -107,6 +115,21 @@ func runWakeRetire(args []string) error {
 		return err
 	}
 	return retireErr
+}
+
+// takeoverWakeTarget adopts the saved target's injector identity for --takeover: another
+// surface of the same user (for example the desktop app after a CLI take) retires a wake it
+// did not start. The --if-generation CAS, the lock match and the owner-bound refusal still
+// apply downstream; an absent, unreadable or owner-bearing target is left to refuse as before.
+func takeoverWakeTarget(root, me string, requested wakeTarget) wakeTarget {
+	saved, exists, err := readWakeTarget(root, me)
+	if err != nil || !exists || saved.Owner != nil {
+		return requested
+	}
+	requested.InjectVia = saved.InjectVia
+	requested.InjectArgs = append([]string(nil), saved.InjectArgs...)
+	requested.RetryUntil = saved.RetryUntil
+	return requested
 }
 
 func retireWake(root, me string, requested wakeTarget) (wakeRetireResult, error) {
