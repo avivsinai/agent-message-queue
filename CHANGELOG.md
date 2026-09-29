@@ -8,6 +8,18 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.84.0](https://github.com/avivsinai/agent-message-queue/compare/v0.83.0...v0.84.0) (2026-09-29)
+
+
+### Features
+
+* **remote:** approve Codex tool calls from the Buzz DM ([#919](https://github.com/avivsinai/agent-message-queue/issues/919)) ([86c4a3c](https://github.com/avivsinai/agent-message-queue/commit/86c4a3c3921240691ddb18080a21835840d8ceb0))
+
+
+### Bug Fixes
+
+* **remote:** correlate, pin, persist and busy-refuse pi bridge requests ([#920](https://github.com/avivsinai/agent-message-queue/issues/920)) ([a3b5728](https://github.com/avivsinai/agent-message-queue/commit/a3b57287defb8e714cbf6fdec1949bc78c960c7f))
+
 ## [0.83.0](https://github.com/avivsinai/agent-message-queue/compare/v0.82.0...v0.83.0) (2026-09-29)
 
 
