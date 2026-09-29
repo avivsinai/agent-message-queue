@@ -11,11 +11,11 @@ export const PROTOCOL = "amq:pi-bridge:v1";
 // BRIDGE_REVISION names the implementation rules the adapter relies on
 // (docs/pi-bridge-protocol.md, bridge revision). The adapter sends no new
 // requests to a bridge that publishes a lower revision or none.
-export const BRIDGE_REVISION = 2;
+export const BRIDGE_REVISION = 3;
 // A request carries the bridge_revision its adapter requires. A request
 // without one comes from an adapter that predates the revision fence and is
 // refused, so an old adapter cannot send work through this bridge.
-const MIN_ADAPTER_REVISION = 2;
+const MIN_ADAPTER_REVISION = 3;
 
 const HEARTBEAT_MS = 2000; // the adapter treats a liveness file older than 5 s as stale
 const POLL_MS = 200; // the adapter waits 2 s for a receipt after it publishes a request
@@ -43,6 +43,8 @@ type Bridge = {
 	// bytes may be on disk without being durable, so they are appended
 	// again until an append succeeds.
 	orphanRetry: Set<string>;
+	// revisionNoticeShown limits the old-adapter notice to once per runtime.
+	revisionNoticeShown: boolean;
 };
 
 type Inflight = {
@@ -188,6 +190,7 @@ function start(pi: ExtensionAPI, ctx: ExtensionContext): Bridge | null {
 		inflight: null,
 		orphansPending: false,
 		orphanRetry: new Set(),
+		revisionNoticeShown: false,
 	};
 	writeLiveness(b, true);
 	b.orphansPending = !closeOrphanedReceipts(b);
@@ -288,6 +291,12 @@ function scan(pi: ExtensionAPI, b: Bridge): void {
 		if (refuse) {
 			// The refusal is final for the ref. A failed append keeps it,
 			// and the next poll appends the same refusal again.
+			if (refuse === "revision" && !b.revisionNoticeShown) {
+				// An old amq-remote cannot read the refusal's text, so the
+				// owner's cue is this notice in pi.
+				b.revisionNoticeShown = true;
+				notify(b.ctx, "amq-bridge refused a remote request: the amq-remote on this machine is older than this pi extension. Upgrade amq-remote to the matching release and restart it.");
+			}
 			const fields: EventFields = { event: "refused", reason: refuse, error };
 			if (appendEvent(b.dir, ref, fields)) b.handled.add(ref);
 			else b.refusals.set(ref, fields);

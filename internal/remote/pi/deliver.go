@@ -64,7 +64,7 @@ func addressedGeneration(epoch string) (string, bool) {
 // the request-ownership, refusal, and recovery rules this adapter relies
 // on. A live bridge without the marker, or below it, gets no new
 // submissions (protocol: bridge revision).
-const MinBridgeRevision = 2
+const MinBridgeRevision = 3
 
 // ErrAlreadyDelivered marks the duplicate guard: requests/<ref>.json
 // already exists, so the ref was already delivered and must never be

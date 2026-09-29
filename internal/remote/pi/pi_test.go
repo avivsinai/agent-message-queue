@@ -78,7 +78,7 @@ func stampLiveness(t *testing.T, dir string, at time.Time) {
 // stampLivenessGen writes a fresh bridge.liveness publishing generation gen.
 func stampLivenessGen(t *testing.T, dir string, at time.Time, gen string) {
 	t.Helper()
-	rec := fmt.Sprintf(`{"protocol":%q,"live":true,"at":%q,"pid":%d,"surface":"app","session_generation":%q,"bridge_revision":2}`,
+	rec := fmt.Sprintf(`{"protocol":%q,"live":true,"at":%q,"pid":%d,"surface":"app","session_generation":%q,"bridge_revision":3}`,
 		ProtocolV1, at.UTC().Format(time.RFC3339Nano), os.Getpid(), gen)
 	if err := os.WriteFile(filepath.Join(dir, "bridge.liveness"), []byte(rec), 0o600); err != nil {
 		t.Fatalf("write liveness: %v", err)
@@ -92,7 +92,7 @@ func stampLivenessGen(t *testing.T, dir string, at time.Time, gen string) {
 // string (the protocol-string test seam).
 func stampLivenessWithProtocol(t *testing.T, dir string, at time.Time, proto string) {
 	t.Helper()
-	rec := fmt.Sprintf(`{"protocol":%q,"live":true,"at":%q,"pid":%d,"surface":"app","session_generation":"gen-1","bridge_revision":2}`,
+	rec := fmt.Sprintf(`{"protocol":%q,"live":true,"at":%q,"pid":%d,"surface":"app","session_generation":"gen-1","bridge_revision":3}`,
 		proto, at.UTC().Format(time.RFC3339Nano), os.Getpid())
 	if err := os.WriteFile(filepath.Join(dir, "bridge.liveness"), []byte(rec), 0o600); err != nil {
 		t.Fatalf("write liveness: %v", err)
@@ -567,7 +567,7 @@ func TestRestartedBridgeDropsDeadPin(t *testing.T) {
 	if _, err := a.Submit(submitReq(testKey("seed"), "hello")); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	restarted := fmt.Sprintf(`{"protocol":%q,"live":true,"at":%q,"pid":%d,"surface":"tui","session_generation":"gen-2","bridge_revision":2}`,
+	restarted := fmt.Sprintf(`{"protocol":%q,"live":true,"at":%q,"pid":%d,"surface":"tui","session_generation":"gen-2","bridge_revision":3}`,
 		ProtocolV1, fixedNow.UTC().Format(time.RFC3339Nano), os.Getpid()+1)
 	if err := os.WriteFile(filepath.Join(dir, "bridge.liveness"), []byte(restarted), 0o600); err != nil {
 		t.Fatalf("write liveness: %v", err)
@@ -627,7 +627,7 @@ func TestFirstContactAddressesLiveGeneration(t *testing.T) {
 		t.Fatalf("epoch = %q; liveness must never pin", got)
 	}
 
-	rec := fmt.Sprintf(`{"protocol":%q,"live":true,"at":%q,"pid":%d,"surface":"tui","bridge_revision":2}`,
+	rec := fmt.Sprintf(`{"protocol":%q,"live":true,"at":%q,"pid":%d,"surface":"tui","bridge_revision":3}`,
 		ProtocolV1, fixedNow.UTC().Format(time.RFC3339Nano), os.Getpid())
 	if err := os.WriteFile(filepath.Join(dir, "bridge.liveness"), []byte(rec), 0o600); err != nil {
 		t.Fatal(err)
@@ -683,6 +683,44 @@ func TestOldBridgeRevisionRefusesSubmit(t *testing.T) {
 	// reads the same text from the same observation through core.SubmitBlocker.
 	if s, got := a.InspectSubmit(); s.Capabilities.Submit || got != adm.Message {
 		t.Fatalf("InspectSubmit = submit %v, %q; want false and the Submit refusal %q", s.Capabilities.Submit, got, adm.Message)
+	}
+}
+
+// TestWithdrawnRevisionTwoRefused reproduces
+// Pro review of #923 r3, 2026-09-29, #1: the 3bedb7bf extension advertised
+// bridge_revision 2 and still completed tool-use preambles, and the adapter
+// accepted it. testdata/withdrawn-r2/bridge.liveness is that extension's
+// liveness, byte for byte (git show 3bedb7bf of the golden its test
+// asserted). The adapter must refuse it with the install and reload text.
+func TestWithdrawnRevisionTwoRefused(t *testing.T) {
+	a, dir := newTestAttachment(t)
+	data, err := os.ReadFile(filepath.Join("..", "..", "..", "integrations", "pi", "testdata", "withdrawn-r2", "bridge.liveness"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "bridge.liveness"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(filepath.Join(dir, "bridge.liveness"), fixedNow, fixedNow); err != nil {
+		t.Fatal(err)
+	}
+	s := a.Inspect()
+	if s.Capabilities.Submit {
+		t.Fatalf("capabilities = %+v; a revision 2 bridge must not advertise submit", s.Capabilities)
+	}
+	req := submitReq(testKey("withdrawn"), "hello")
+	req.Epoch = s.Epoch
+	adm, err := a.Submit(req)
+	if err != nil || adm.Code != protocol.CodeUnsupported {
+		t.Fatalf("Submit = %+v, %v; want unsupported", adm, err)
+	}
+	for _, want := range []string{"is bridge_revision 2", "pi install git:github.com/avivsinai/agent-message-queue", "reload the pi session"} {
+		if !strings.Contains(adm.Message, want) {
+			t.Fatalf("refusal %q does not say %q", adm.Message, want)
+		}
+	}
+	if entries, _ := os.ReadDir(filepath.Join(dir, "requests")); len(entries) != 0 {
+		t.Fatalf("requests dir has %d entries; a withdrawn bridge gets nothing", len(entries))
 	}
 }
 
@@ -806,7 +844,7 @@ func TestSameProcessRestartDropsPin(t *testing.T) {
 	if _, err := a.Submit(submitReq(testKey("seed"), "hello")); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	renewed := fmt.Sprintf(`{"protocol":%q,"live":true,"at":%q,"pid":%d,"surface":"tui","session_generation":"gen-2","bridge_revision":2}`,
+	renewed := fmt.Sprintf(`{"protocol":%q,"live":true,"at":%q,"pid":%d,"surface":"tui","session_generation":"gen-2","bridge_revision":3}`,
 		ProtocolV1, fixedNow.UTC().Format(time.RFC3339Nano), os.Getpid())
 	if err := os.WriteFile(filepath.Join(dir, "bridge.liveness"), []byte(renewed), 0o600); err != nil {
 		t.Fatalf("write liveness: %v", err)

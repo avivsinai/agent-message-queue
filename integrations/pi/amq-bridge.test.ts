@@ -42,6 +42,7 @@ function harness() {
 	const handlers = new Map<string, Handler[]>();
 	const sent: { content: unknown; options: unknown }[] = [];
 	const state = { idle: true, pending: false, idleChecks: 0 };
+	const notices: string[] = [];
 	const pi = {
 		on(name: string, h: Handler) {
 			handlers.set(name, [...(handlers.get(name) ?? []), h]);
@@ -54,7 +55,11 @@ function harness() {
 	const ctx = {
 		mode: "tui",
 		hasUI: true,
-		ui: { notify() {} },
+		ui: {
+			notify(message: string) {
+				notices.push(message);
+			},
+		},
 		isIdle: () => {
 			state.idleChecks++;
 			return state.idle;
@@ -70,10 +75,11 @@ function harness() {
 		dir,
 		sent,
 		state,
+		notices,
 		emit,
 		start: () => emit("session_start", { reason: "startup" }),
 		generation: () => JSON.parse(fs.readFileSync(path.join(dir, "bridge.liveness"), "utf8")).session_generation as string,
-		publish(ref: string, text: string, epochHint: string, fields: Record<string, unknown> = { bridge_revision: 2 }) {
+		publish(ref: string, text: string, epochHint: string, fields: Record<string, unknown> = { bridge_revision: 3 }) {
 			const request = {
 				ref,
 				text,
@@ -442,6 +448,29 @@ test("a refusal and an orphan closure whose fsync failed are appended again", as
 	} finally {
 		nodeFs.fsyncSync = realFsync;
 		syncBuiltinESMExports();
+		await h.done();
+	}
+});
+
+// Pro review of #923 r3, 2026-09-29, #2: an old amq-remote reports the
+// revision refusal as uncertain and then native_error, with no upgrade text,
+// so the extension itself tells the owner, once per runtime.
+test("an old adapter's requests show one upgrade notice in pi", async () => {
+	const h = harness();
+	await h.start();
+	try {
+		h.publish(REF, "first", h.generation(), {});
+		h.publish(OTHER, "second", h.generation(), {});
+		await h.waitFor(() => h.events(REF).length > 0 && h.events(OTHER).length > 0);
+		for (const ref of [REF, OTHER]) {
+			assert.deepEqual(
+				h.events(ref).map((e) => [e.event, e.reason]),
+				[["refused", "revision"]],
+			);
+		}
+		assert.equal(h.notices.length, 1);
+		assert.match(h.notices[0], /amq-remote on this machine is older than this pi extension.*restart it/);
+	} finally {
 		await h.done();
 	}
 });

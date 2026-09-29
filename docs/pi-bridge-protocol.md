@@ -66,7 +66,7 @@ non-empty protocol string instead of guessing its meaning:
   "not_after": "2026-01-01T00:00:00.123456789Z",
   "epoch_hint": "3f0c...",
   "created_at": "2026-01-01T00:00:00Z",
-  "bridge_revision": 2
+  "bridge_revision": 3
 }
 ```
 
@@ -175,7 +175,7 @@ never fabricates a state.
   "pid": 4242,
   "surface": "tui",
   "session_generation": "3f0c...",
-  "bridge_revision": 2
+  "bridge_revision": 3
 }
 ```
 
@@ -191,17 +191,22 @@ writes `live: false`, so the adapter sees the bridge offline at once.
 ## Bridge revision
 
 The protocol string names the file formats; `bridge_revision` names the
-extension rules the adapter relies on. Revision 2 is the rule set this document
+extension rules the adapter relies on. Revision 3 is the rule set this document
 describes: exact generation addressing, busy refusal at the admission
-boundary, request ownership that ends at the next user message, retained
-terminal and refusal decisions, and orphan recovery that retries until it
-succeeds. The protocol string stays `amq:pi-bridge:v1`.
+boundary, request ownership that ends at the next user message and completes
+only on a final answer, retained terminal and refusal decisions, and orphan
+recovery that retries until it succeeds. The protocol string stays
+`amq:pi-bridge:v1`.
+
+Revision 2 is withdrawn: its implementation completed a request with a
+tool-use preamble when a user message ended ownership. Adapters and
+extensions treat revision 2 like a missing revision.
 
 The fence holds in both directions, and a missing field is revision 0, never
 "compatible":
 
 - **Old extension, new adapter.** The adapter sends new requests only to a
-  live bridge whose `bridge_revision` is at least 2. Below the minimum,
+  live bridge whose `bridge_revision` is at least 3. Below the minimum,
   `Inspect` advertises no submit and `Submit` refuses `unsupported` with the
   fix: install the extension from this repository at the adapter's release
   tag (`pi install git:github.com/avivsinai/agent-message-queue@v<version>`)
@@ -210,7 +215,12 @@ The fence holds in both directions, and a missing field is revision 0, never
   `bridge_revision` its adapter requires. The extension refuses a request
   without it, or outside the revisions it implements, with a `refused` event
   of reason `revision` and no receipt, on every fresh request and after
-  every session switch. The adapter maps the reason to `unsupported`.
+  every session switch. A current adapter maps the reason to `unsupported`.
+  An adapter that predates the fence cannot: it reports the submission
+  uncertain and then `native_error`, with no upgrade text. The extension
+  therefore shows a notice in pi, once per extension runtime, that the
+  `amq-remote` on the machine is older than the extension and must be
+  upgraded and restarted.
 
 A rollout installs the extension, reloads every pi session, and restarts
 every running `amq-remote` process. The revision gates only new
