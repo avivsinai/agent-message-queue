@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"fiatjaf.com/nostr"
@@ -167,14 +168,15 @@ const KindReaction = 7
 // cancelReaction is the owner's cancel gesture on a result row.
 const cancelReaction = "❌"
 
-// IngestReaction handles one verified kind 7 event: the owner reacting ❌
-// on one of this edge's result rows cancels exactly that row's request
-// (relay design §4, slice 5). The row is resolved through the persisted
-// receipt mapping, not the reaction's own tags, and a reaction carries no h
-// tag it has to match. Anything else is ignored; removing a reaction never
-// undoes a cancel.
+// IngestReaction handles one verified kind 7 event from the owner. On an
+// approval message this edge posted, ✅ approves and ❌ rejects exactly that
+// interaction (answerApproval). On one of this edge's result rows, ❌
+// cancels exactly that row's request (relay design §4, slice 5); the row is
+// resolved through the persisted receipt mapping, not the reaction's own
+// tags, and a reaction carries no h tag it has to match. Anything else is
+// ignored; removing a reaction never undoes a cancel or an answer.
 func (c *Carrier) IngestReaction(evt nostr.Event) error {
-	if evt.Kind != KindReaction || evt.PubKey.Hex() != c.binding.Owner || strings.TrimSpace(evt.Content) != cancelReaction {
+	if evt.Kind != KindReaction || evt.PubKey.Hex() != c.binding.Owner {
 		return nil
 	}
 	target := ""
@@ -183,33 +185,58 @@ func (c *Carrier) IngestReaction(evt nostr.Event) error {
 			target = t[1] // NIP-25: the last e tag is the reacted-to event
 		}
 	}
-	if target == "" {
+	gesture := strings.TrimSpace(evt.Content)
+	if target == "" || gesture != approveReaction && !rejectReaction(gesture) {
+		return nil
+	}
+	appr, isApproval, err := c.ledger.ApprovalFor(target)
+	if err != nil {
+		return err
+	}
+	if isApproval {
+		return c.answerApproval(evt, target, appr, gesture)
+	}
+	if gesture != cancelReaction {
 		return nil
 	}
 	ref, ok, err := c.ledger.RequestForRow(target)
 	if err != nil || !ok {
 		return err
 	}
+	cmd, _ := json.Marshal(map[string]string{"ref": ref})
+	notAfter, ok, err := c.claimReaction(evt, OpCancel, "", cmd)
+	if err != nil || !ok {
+		return err
+	}
+	return c.statusOrCancel(evt, OpCancel, ref, notAfter)
+}
+
+// claimReaction admits one owner reaction as one decision: it must be
+// fresh, the surface granted, the event not yet settled, the shared
+// session unchanged, and the claim made under this binding. ok is false
+// when the reaction must be ignored. notAfter is the reaction's signed
+// deadline.
+func (c *Carrier) claimReaction(evt nostr.Event, op, epoch string, cmd json.RawMessage) (time.Time, bool, error) {
 	now := c.now()
 	created := time.Unix(int64(evt.CreatedAt), 0)
-	if created.After(now.Add(maxFutureSkew)) || now.Sub(created) > MutationWindow {
-		return nil // a stale cancel gesture never executes
+	notAfter := created.Add(MutationWindow)
+	if created.After(now.Add(maxFutureSkew)) || now.After(notAfter) {
+		return notAfter, false, nil // a stale gesture never executes
 	}
 	if err := c.eligible(now); err != nil {
-		return err
+		return notAfter, false, err
 	}
 	if _, settled, err := c.ledger.Settled(evt.ID.Hex()); err != nil || settled {
-		return err
+		return notAfter, false, err
 	}
 	if err := c.fence(); err != nil {
-		return nil // a replacement native session is never acted on for a reaction
+		return notAfter, false, nil // a replacement native session is never acted on for a reaction
 	}
-	cmd, _ := json.Marshal(map[string]string{"ref": ref})
-	claim, _, err := c.ledger.Claim(c.claimFor(evt, OpCancel, "", "", created.Add(MutationWindow), cmd))
+	claim, _, err := c.ledger.Claim(c.claimFor(evt, op, "", epoch, notAfter, cmd))
 	if err != nil || !c.owns(claim) {
-		return err
+		return notAfter, false, err
 	}
-	return c.statusOrCancel(evt, OpCancel, ref, created.Add(MutationWindow))
+	return notAfter, true, nil
 }
 
 // Ingest handles one verified owner event from the subscription. The claim
@@ -506,12 +533,12 @@ func (c *Carrier) settleAnswer(evt nostr.Event, st Settlement, text string) erro
 
 // answer prepares a direct reply to one ingress event, once.
 func (c *Carrier) answer(to nostr.Event, text string) error {
-	evt := nostr.Event{
-		CreatedAt: nostr.Timestamp(c.now().Unix()),
-		Kind:      KindDM,
-		Tags:      c.replyTags(to),
-		Content:   text,
-	}
+	return c.reply(to, c.replyTags(to), text)
+}
+
+// reply prepares the one direct reply owed for ingress event to, with tags.
+func (c *Carrier) reply(to nostr.Event, tags nostr.Tags, text string) error {
+	evt := nostr.Event{CreatedAt: nostr.Timestamp(c.now().Unix()), Kind: KindDM, Tags: tags, Content: text}
 	return c.prepare("direct/"+to.ID.Hex(), evt)
 }
 
@@ -548,6 +575,9 @@ func (c *Carrier) Publish(snap protocol.Snapshot, origin map[string]string) erro
 	} else if err := c.ledger.ensureRowMap(rc); err != nil {
 		return err
 	}
+	if err := c.prepareApprovals(snap, rc, origin); err != nil {
+		return err
+	}
 	if int(snap.Revision) <= rc.Revision {
 		return nil // this or a newer revision is already prepared
 	}
@@ -573,6 +603,178 @@ func (c *Carrier) Publish(snap protocol.Snapshot, origin map[string]string) erro
 	}
 	rc.Revision = stored.revision
 	return c.ledger.PutReceipt(rc)
+}
+
+// Owner reactions on an approval message. Approve runs a command, so it
+// takes only an explicit ✅, never the "+" that a plain like sends; reject
+// fails safe and takes any of the usual refusals.
+const approveReaction = "✅"
+
+func rejectReaction(gesture string) bool {
+	return gesture == "❌" || gesture == "👎" || gesture == "-"
+}
+
+// approvalKey is the outbox key of the message that shows one interaction.
+// It sorts after the request's row events, so Flush sends the row first.
+func approvalKey(ref, interactionID string) string {
+	return fmt.Sprintf("row/%s/approval/%s", ref, interactionID)
+}
+
+// prepareApprovals posts one message for a pending approval that the owner
+// can answer, and edits it once with the outcome when the record resolves
+// it. Both are keyed per interaction, so a republished revision changes
+// nothing.
+func (c *Carrier) prepareApprovals(snap protocol.Snapshot, rc Receipt, origin map[string]string) error {
+	// An older revision replayed after a newer one never posts its approval:
+	// that interaction may be resolved already.
+	if in := snap.Interaction; in != nil && in.RemoteAnswer && in.Kind == "approval" && int(snap.Revision) >= rc.Revision {
+		appr := Approval{RequestRef: snap.RequestRef, InteractionID: in.InteractionID, Target: rc.Target, Epoch: snap.Epoch,
+			Prompt: in.Prompt, ApproveOption: in.ApproveOption, RejectOption: in.RejectOption}
+		evt := nostr.Event{CreatedAt: nostr.Timestamp(c.now().Unix()), Kind: KindDM, Tags: c.originTags(origin), Content: approvalText(appr, "")}
+		stored, err := c.prepareRow(approvalKey(snap.RequestRef, in.InteractionID), evt, 0)
+		if err != nil {
+			return err
+		}
+		if err := c.ledger.PutApproval(stored.ID.Hex(), appr); err != nil {
+			return err
+		}
+	}
+	for _, r := range snap.Resolved {
+		key := approvalKey(snap.RequestRef, r.InteractionID)
+		if _, done, err := c.ledger.Prepared(key + "/outcome"); err != nil || done {
+			if err != nil {
+				return err
+			}
+			continue
+		}
+		posted, ok, err := c.ledger.Prepared(key)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			continue // never shown here: nothing to update
+		}
+		var msg nostr.Event
+		if err := json.Unmarshal(posted.Event, &msg); err != nil {
+			return err
+		}
+		appr, ok, err := c.ledger.ApprovalFor(msg.ID.Hex())
+		if err != nil {
+			return err
+		}
+		if !ok {
+			continue
+		}
+		now := c.now().Unix()
+		if now <= int64(msg.CreatedAt) {
+			return ErrClockBehind
+		}
+		edit := nostr.Event{CreatedAt: nostr.Timestamp(now), Kind: KindEdit, Tags: c.editTags(msg.ID.Hex()), Content: approvalText(appr, outcomeText(r, appr))}
+		if err := c.prepare(key+"/outcome", edit); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// approvalText is an approval message: what the harness asks to do and how
+// to answer it, or, once resolved, the outcome instead of the instructions.
+func approvalText(a Approval, outcome string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Approval needed (%s):\n\n%s", a.RequestRef, boundPreview(a.Prompt))
+	switch {
+	case outcome != "":
+		b.WriteString("\n\n" + outcome)
+	case a.ApproveOption != "" && a.RejectOption != "":
+		b.WriteString("\n\nReact ✅ to approve or ❌ to reject. The first answer, here or in the terminal, wins.")
+	case a.ApproveOption != "":
+		b.WriteString("\n\nReact ✅ to approve, or answer in the terminal. The first answer wins.")
+	case a.RejectOption != "":
+		b.WriteString("\n\nReact ❌ to reject, or answer in the terminal. The first answer wins.")
+	default:
+		b.WriteString("\n\nAnswer in the terminal.")
+	}
+	return b.String()
+}
+
+// outcomeText is the owner-facing line for one resolution.
+func outcomeText(r protocol.Resolution, a Approval) string {
+	switch r.Outcome {
+	case protocol.ResolutionAnswered:
+		switch r.Option {
+		case a.ApproveOption:
+			return "✅ Approve was sent from Buzz."
+		case a.RejectOption:
+			return "❌ Reject was sent from Buzz."
+		}
+		return fmt.Sprintf("Answer %q was sent from Buzz.", r.Option)
+	case protocol.ResolutionRunEnded:
+		return "The run ended before this was answered."
+	}
+	return "Answered outside Buzz, for example in the terminal."
+}
+
+// maxPreview bounds the command text an approval message shows.
+const maxPreview = 2000
+
+// boundPreview shortens a prompt for display and removes control
+// characters other than newline and tab, so the message shows what will run
+// and nothing hidden.
+func boundPreview(s string) string {
+	s = strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\t' || !unicode.IsControl(r) && !unicode.Is(unicode.Cf, r) {
+			return r
+		}
+		return -1
+	}, s)
+	if text, cut := protocol.TruncateText(s, maxPreview); cut {
+		return text + " …[shortened]"
+	}
+	return s
+}
+
+// answerApproval turns an owner reaction on an approval message into the
+// endpoint's interaction.respond for exactly that interaction. The reaction
+// is one decision: it is claimed before the endpoint sees it, and a stale
+// or repeated reaction never answers again.
+func (c *Carrier) answerApproval(evt nostr.Event, messageID string, appr Approval, gesture string) error {
+	option := appr.RejectOption
+	if gesture == approveReaction {
+		option = appr.ApproveOption
+	}
+	if option == "" {
+		return nil // this approval offers no one-tap answer for the gesture
+	}
+	cmd, _ := json.Marshal(map[string]string{"ref": appr.RequestRef, "interaction_id": appr.InteractionID, "option": option})
+	if _, ok, err := c.claimReaction(evt, OpRespond, appr.Epoch, cmd); err != nil || !ok {
+		return err
+	}
+	st := Settlement{Op: OpRespond, RequestRef: appr.RequestRef}
+	out, err := c.handle(&protocol.Command{
+		Schema: protocol.SchemaCommand, Op: protocol.OpInteractionRespond, RequestRef: appr.RequestRef,
+		TargetID: appr.Target, Epoch: appr.Epoch, InteractionID: appr.InteractionID, Option: option,
+	}, c.source(evt.ID.Hex(), ""))
+	var refusal *protocol.Refusal
+	switch reply, _ := out.(protocol.Reply); {
+	case errors.As(err, &refusal) && refusal.Code == protocol.CodeAlreadyResolved, err == nil && reply.Outcome.Code == protocol.CodeAlreadyResolved:
+		return c.settleApprovalAnswer(evt, messageID, st, "Not sent: this approval was already answered.")
+	case err != nil:
+		return c.settleApprovalAnswer(evt, messageID, st, "Not sent: "+err.Error())
+	}
+	// The outcome shows as an edit of the approval message when the record
+	// resolves the interaction.
+	_, err = c.ledger.Settle(evt.ID.Hex(), st)
+	return err
+}
+
+// settleApprovalAnswer replies under the approval message, then settles the
+// reaction.
+func (c *Carrier) settleApprovalAnswer(evt nostr.Event, messageID string, st Settlement, text string) error {
+	if err := c.reply(evt, c.rowTags(messageID, ""), text); err != nil {
+		return err
+	}
+	_, err := c.ledger.Settle(evt.ID.Hex(), st)
+	return err
 }
 
 // editPrepared runs between preparing an edit and saving its receipt; tests

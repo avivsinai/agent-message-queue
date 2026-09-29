@@ -1191,7 +1191,7 @@ func (e *Endpoint) onNative(targetID string, ev NativeEvent) {
 		// Pro #5: route through transitionLocked. Pro round 2 #21: the
 		// resolution carries no interaction, and causeNone treats a nil
 		// interaction as "unchanged", so the clear is an explicit flag.
-		e.transitionLocked(rec, causeNone, nativeEvidence{clearInteraction: true})
+		e.transitionLocked(rec, causeNone, nativeEvidence{clearInteraction: true, resolvedRemotely: ev.Remote})
 	case EventLocalIntervention:
 		if rec.State.Terminal() {
 			e.mu.Unlock()
@@ -1318,6 +1318,7 @@ type nativeEvidence struct {
 	reason            string           // adapter refusal text; causeRefused copies it onto the snapshot
 	interaction       *protocol.Interaction
 	clearInteraction  bool // the pending interaction is resolved natively; clear it (nil interaction means unchanged)
+	resolvedRemotely  bool // with clearInteraction: the answer AMQ delivered resolved it
 	localIntervention bool
 	runTerminal       bool // the run is definitively finished (noop_terminal) — confirm a pending cancel
 }
@@ -1346,6 +1347,34 @@ type nativeEvidence struct {
 //  6. memoAckIntentLocked is called by the CALLER (not here) when a terminal
 //     result is retained — transitionLocked only sets the fields.
 func (e *Endpoint) transitionLocked(rec *requests.Record, c cause, ev nativeEvidence) {
+	var open *protocol.Interaction
+	if rec.Interaction != nil {
+		cp := *rec.Interaction
+		open = &cp
+	}
+	e.applyTransitionLocked(rec, c, ev)
+	if open != nil && (rec.Interaction == nil || rec.Interaction.InteractionID != open.InteractionID) {
+		recordResolution(rec, open.InteractionID, ev)
+	}
+}
+
+// recordResolution appends how the interaction id stopped being pending,
+// keeping the most recent MaxResolutions entries.
+func recordResolution(rec *requests.Record, id string, ev nativeEvidence) {
+	r := protocol.Resolution{InteractionID: id, Outcome: protocol.ResolutionElsewhere}
+	switch {
+	case ev.clearInteraction && ev.resolvedRemotely:
+		r.Outcome, r.Option = protocol.ResolutionAnswered, rec.Answered[id]
+	case rec.State.Terminal():
+		r.Outcome = protocol.ResolutionRunEnded
+	}
+	rec.Resolved = append(rec.Resolved, r)
+	if n := len(rec.Resolved); n > protocol.MaxResolutions {
+		rec.Resolved = append([]protocol.Resolution(nil), rec.Resolved[n-protocol.MaxResolutions:]...)
+	}
+}
+
+func (e *Endpoint) applyTransitionLocked(rec *requests.Record, c cause, ev nativeEvidence) {
 	switch c {
 	case causeNone:
 		// Evidence-only update: record Result/NativeRun/Interaction without

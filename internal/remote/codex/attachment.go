@@ -1,6 +1,7 @@
 package codex
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -34,6 +35,9 @@ const (
 	methodCommandApproval    = "item/commandExecution/requestApproval"
 	methodFileChangeApproval = "item/fileChange/requestApproval"
 	methodLegacyExecApproval = "execCommand/approval"
+	// methodServerRequestResolved tells every client on the thread that a
+	// server request was answered, by whichever client answered first.
+	methodServerRequestResolved = "serverRequest/resolved"
 )
 
 type run struct {
@@ -47,6 +51,9 @@ type run struct {
 	local        bool
 	interaction  *protocol.Interaction
 	approvalReqs map[string]json.RawMessage
+	// sending is the interaction id whose answer Respond is sending. The
+	// resolution that answer causes can arrive before Respond returns.
+	sending string
 	// createdAt is when the run was bound, for the unconfirmed-shadow
 	// deadline (Pro F1): a retained-but-unconfirmed run shadows lookupHistory
 	// in Lookup. After confirmTimeout, if still unconfirmed, the run stops
@@ -940,8 +947,12 @@ func (a *Attachment) Respond(key requests.Key, epoch, interactionID, option stri
 		a.mu.Unlock()
 		return protocol.CodeInvalid, nil
 	}
+	r.sending = interactionID
 	a.mu.Unlock()
 	if err := a.client.Load().Respond(reqID, map[string]string{"decision": option}); err != nil {
+		a.mu.Lock()
+		r.sending = ""
+		a.mu.Unlock()
 		return "", err
 	}
 	// B8a (agent-message-queue-611.22.36): tear down the approval state ONLY
@@ -949,11 +960,93 @@ func (a *Attachment) Respond(key requests.Key, epoch, interactionID, option stri
 	// send, so a transport failure left r.interaction == nil and a retry
 	// returned CodeAlreadyResolved while the native question was still open.
 	a.mu.Lock()
+	_, open := r.approvalReqs[interactionID]
 	delete(r.approvalReqs, interactionID)
-	r.interaction = nil
+	r.interaction, r.sending = nil, ""
 	a.mu.Unlock()
-	a.emit(core.NativeEvent{Type: core.EventQuestionResolved, Key: key, RunID: a.runID(r)})
+	if open {
+		a.emit(core.NativeEvent{Type: core.EventQuestionResolved, Key: key, RunID: a.runID(r), Remote: true})
+	}
 	return "", nil
+}
+
+// onServerRequestResolved clears an approval that another client, such as
+// the Codex terminal, answered first. The app-server drops a later answer
+// without an error, so without this a late remote answer would report
+// success for a decision it did not make.
+func (a *Attachment) onServerRequestResolved(n Notification) {
+	var p struct {
+		ThreadID  string          `json:"threadId"`
+		RequestID json.RawMessage `json:"requestId"`
+	}
+	if json.Unmarshal(n.Params, &p) != nil || p.ThreadID != a.threadID || len(p.RequestID) == 0 {
+		return
+	}
+	a.mu.Lock()
+	for _, r := range a.runs {
+		for id, reqID := range r.approvalReqs {
+			if !sameRequestID(reqID, p.RequestID) {
+				continue
+			}
+			delete(r.approvalReqs, id)
+			if r.interaction != nil && r.interaction.InteractionID == id {
+				r.interaction = nil
+			}
+			// While our answer is being sent, this resolution may be the one
+			// it caused; the record then says the answer was sent, which is
+			// true either way.
+			remote := r.sending == id
+			key, runID := r.key, r.runIDLocked()
+			a.mu.Unlock()
+			a.emit(core.NativeEvent{Type: core.EventQuestionResolved, Key: key, RunID: runID, Remote: remote})
+			return
+		}
+	}
+	a.mu.Unlock()
+}
+
+// approvalPrompt is the owner-facing text of one approval request: what
+// Codex asks to do, where, and why.
+func approvalPrompt(method string, command any, cwd, reason string) string {
+	var b strings.Builder
+	switch c := command.(type) {
+	case string:
+		b.WriteString(c)
+	case nil:
+		if method == methodFileChangeApproval {
+			b.WriteString("apply a file change")
+		}
+	default:
+		if raw, err := json.Marshal(c); err == nil {
+			b.Write(raw)
+		}
+	}
+	if cwd != "" {
+		fmt.Fprintf(&b, "\nin %s", cwd)
+	}
+	if reason != "" {
+		fmt.Fprintf(&b, "\nreason: %s", reason)
+	}
+	return b.String()
+}
+
+// offered returns option when options contains it, and "" otherwise.
+func offered(options []string, option string) string {
+	for _, o := range options {
+		if o == option {
+			return option
+		}
+	}
+	return ""
+}
+
+// sameRequestID compares two JSON-RPC ids by their compact encoding.
+func sameRequestID(x, y json.RawMessage) bool {
+	var bx, by bytes.Buffer
+	if json.Compact(&bx, x) != nil || json.Compact(&by, y) != nil {
+		return false
+	}
+	return bytes.Equal(bx.Bytes(), by.Bytes())
 }
 
 // AcknowledgeResult implements core.Attachment. Codex keeps the transcript;
@@ -1089,6 +1182,8 @@ func (a *Attachment) onNotification(n Notification) {
 		a.mu.Unlock()
 	case "item/started", "item/completed":
 		a.onItem(n)
+	case methodServerRequestResolved:
+		a.onServerRequestResolved(n)
 	case "turn/completed":
 		var p struct {
 			ThreadID string `json:"threadId"`
@@ -1239,6 +1334,8 @@ func (a *Attachment) onServerRequest(req ServerRequest) {
 		ItemID             string   `json:"itemId"`
 		ApprovalID         string   `json:"approvalId"`
 		Command            any      `json:"command"`
+		Cwd                string   `json:"cwd"`
+		Reason             string   `json:"reason"`
 		AvailableDecisions []string `json:"availableDecisions"`
 	}
 	if json.Unmarshal(req.Params, &p) != nil || p.ThreadID != a.threadID {
@@ -1259,11 +1356,9 @@ func (a *Attachment) onServerRequest(req ServerRequest) {
 	if len(options) == 0 {
 		options = []string{"accept", "decline"}
 	}
-	prompt := ""
-	if b, err := json.Marshal(p.Command); err == nil {
-		prompt = string(b)
-	}
-	r.interaction = &protocol.Interaction{InteractionID: id, Kind: "approval", Prompt: prompt, Options: options, RemoteAnswer: true}
+	prompt := approvalPrompt(req.Method, p.Command, p.Cwd, p.Reason)
+	r.interaction = &protocol.Interaction{InteractionID: id, Kind: "approval", Prompt: prompt, Options: options, RemoteAnswer: true,
+		ApproveOption: offered(options, "accept"), RejectOption: offered(options, "decline")}
 	r.approvalReqs[id] = req.ID
 	key, runID, inter := r.key, r.runIDLocked(), r.interaction
 	a.mu.Unlock()

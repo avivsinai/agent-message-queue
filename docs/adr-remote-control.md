@@ -11,8 +11,8 @@ person's own terminal or app. Another client, a phone on Buzz or an agent on a
 second host, wants to see what such a session does, give it work, follow that
 work to its result, and cancel it. The first-party answers route through a
 vendor relay, need an organization policy change, or require a specific
-client. The open-source answers wrap the harness's PTY and break on every
-release.
+client. The open-source answers own the harness process or wrap its PTY,
+and they cannot reach a session the user already started.
 
 AMQ already owns durable local delivery, receipts, a bridge envelope, a wake
 capability vector, and a session guard. It does not own execution, and its
@@ -28,17 +28,32 @@ invariants.
    terminal, its conversation store, and its own permissions. The companion
    is not a wrapper, a PTY proxy, a scheduler, or a restart supervisor.
    Removing the companion leaves the local session intact.
-2. **Native seams only.** Observation uses the harness's own transcript,
-   protocol, or extension API. Steering uses the harness's own steering API.
-   No keystroke injection, no screen scraping, no competing process resumed
-   on the same session file. Where a harness has no seam for an operation,
-   the operation is advertised as unsupported.
+2. **Each operation names its medium.** The operations are Send (a prompt
+   in), Answer (the result out), Watch (live events or the screen), Decide
+   (approve or reject a pending tool call), and Stop (cancel the running
+   turn). A medium is how the companion touches the session:
+   - **message**: the agent reads an AMQ message and writes its own reply.
+     It is cooperative, not a weaker native medium.
+   - **native**: the harness's own transcript, protocol, hook, or extension
+     API. It is preferred wherever it exists.
+   - **terminal**: the screen of the harness's terminal and single keys.
+     It is opt-in per shared session. It never carries Send. A key is sent
+     once, before it expires, and only while the prompt region that a
+     per-harness rule extracts still matches the capture the owner saw.
+     A harness with no rule has no terminal Decide.
+
+   Fallback goes only from native to terminal, and a surface always shows
+   which medium an operation uses. No competing process is resumed on the
+   same session file. An operation that no medium supports is advertised as
+   unsupported.
 3. **A request has an identity and a result; a terminal has a picture.**
    Every remote work item carries a caller-generated request id, an opaque
    target id, and a registration epoch. Its state is one of `received`,
    `dispatching`, `running`, `completed`, `failed`, `cancelled`, `rejected`,
    or `uncertain`. `uncertain` is a real state, never a fabricated outcome
    and never permission to dispatch again. Global idle is not completion.
+   The terminal medium has no request identity, so a terminal Stop leaves
+   the record `uncertain` until native evidence arrives.
 4. **Exact cancellation.** Cancel names the original request; the native
    boundary compares the bound run before signalling. A cancel that arrives
    before its submit leaves a tombstone. A late cancel for one request never
@@ -86,6 +101,14 @@ invariants.
   `not_after` check at native admission for the queued item. Until both
   exist, a busy target is refused with `busy` (action-required) rather than
   admitting work whose ordering and expiry we cannot honour.
+- **A decision uses the medium of its evidence.** The owner answers the
+  exact interaction that was shown: a native approval by its interaction id,
+  a terminal approval by the capture it was shown with. The harness applies
+  the first answer it receives, from any side. Each interaction ends with one
+  recorded resolution: `answered` (the answer the companion delivered),
+  `answered_elsewhere` (the harness resolved it without that answer), or
+  `run_ended`. The companion never reports an answer as applied when the
+  harness resolved the interaction first.
 - **Activity divergence is acceptable for a cache, never for execution
   truth.** The live activity projection may lag or differ from the harness's
   own view; it is a convenience. Admission, cancellation and completion are
@@ -135,7 +158,9 @@ Assistant text is an `acp_read` frame whose payload is a genuine ACP
 metadata. `session_resolved`, `turn_started`, and `turn_completed` use the
 Desktop lifecycle payloads. Buzz Desktop renders those kinds unchanged.
 Requests and results are a DM thread between the body and the owner;
-reactions carry typed commands. No Buzz client change is required.
+reactions carry typed commands. A pending approval is its own message in
+that thread: ✅ on it approves and ❌ rejects, and the message is edited with
+the resolution. No Buzz client change is required.
 
 ## Kill-list amendments
 
@@ -168,7 +193,7 @@ separate process beside `amq`, as `amq-keepalive` and `amq-bridge` do.
   its completion needs the Stop hook; cancel is unsupported. See the
   [compatibility manifest](remote-compat.md). A session-wide abort is not
   exact cancellation.
-- The request contract does not include terminal viewing or native Buzz
-  Desktop panels.
+- The request contract does not include native Buzz Desktop panels. Terminal
+  Watch and Decide exist only where a harness advertises them (invariant 5).
 - The Claude Code cross-session socket wire format is not published upstream;
   [the compatibility manifest](remote-compat.md) pins the observed format.

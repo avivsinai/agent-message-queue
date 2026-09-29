@@ -299,7 +299,7 @@ func (r *Runtime) Respond(key requests.Key, _ string, interactionID, option stri
 	r.interactionAnswers = append(r.interactionAnswers, Answer{InteractionID: interactionID, Option: option, Source: "remote"})
 	delete(r.runsByInteraction, interactionID)
 	rn.interaction = nil
-	ev := core.NativeEvent{Type: core.EventQuestionResolved, Key: key, RunID: rn.id}
+	ev := core.NativeEvent{Type: core.EventQuestionResolved, Key: key, RunID: rn.id, Remote: true}
 	r.mu.Unlock()
 	r.emit(ev)
 	return "", nil

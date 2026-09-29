@@ -279,6 +279,39 @@ type Interaction struct {
 	Prompt        string   `json:"prompt,omitempty"`
 	Options       []string `json:"options"`
 	RemoteAnswer  bool     `json:"remote_answer,omitempty"`
+	// ApproveOption and RejectOption name the offered options that approve
+	// and reject an approval, so a surface can offer one-tap answers
+	// without knowing the harness's vocabulary. Empty means none.
+	ApproveOption string `json:"approve_option,omitempty"`
+	RejectOption  string `json:"reject_option,omitempty"`
+}
+
+// ResolutionOutcome is how a pending interaction stopped being pending.
+type ResolutionOutcome string
+
+const (
+	// ResolutionAnswered: the answer AMQ delivered resolved the interaction.
+	// Option is that answer. A native answer given in the same moment can
+	// still win, because the harness applies the first answer it receives.
+	ResolutionAnswered ResolutionOutcome = "answered"
+	// ResolutionElsewhere: the harness resolved the interaction without an
+	// AMQ answer, for example from its own terminal.
+	ResolutionElsewhere ResolutionOutcome = "answered_elsewhere"
+	// ResolutionRunEnded: the run reached a terminal state while the
+	// interaction was open.
+	ResolutionRunEnded ResolutionOutcome = "run_ended"
+)
+
+// MaxResolutions bounds Snapshot.Resolved to the most recent entries.
+const MaxResolutions = 8
+
+// Resolution records how one interaction ended. It is written in the
+// revision that clears the interaction, so every surface renders the same
+// outcome from the record alone, even when it skipped revisions.
+type Resolution struct {
+	InteractionID string            `json:"interaction_id"`
+	Outcome       ResolutionOutcome `json:"outcome"`
+	Option        string            `json:"option,omitempty"`
 }
 
 // Result is the bounded native outcome kept for remote delivery.
@@ -308,6 +341,7 @@ type Snapshot struct {
 	LocalIntervention bool         `json:"local_intervention,omitempty"`
 	Cancel            *Cancel      `json:"cancel,omitempty"`
 	Interaction       *Interaction `json:"interaction,omitempty"`
+	Resolved          []Resolution `json:"resolved,omitempty"`
 	Result            *Result      `json:"result,omitempty"`
 	ObservedAt        string       `json:"observed_at"`
 }

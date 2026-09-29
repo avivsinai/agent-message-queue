@@ -51,6 +51,10 @@ func TestQuestionResolvedClearsDurableInteraction(t *testing.T) {
 	if rec.Interaction != nil {
 		t.Fatalf("resolved question still pending in the durable snapshot: %+v", rec.Interaction)
 	}
+	// 611.42: the record says how it ended, so the DM can show the outcome.
+	if want := (protocol.Resolution{InteractionID: "i_1", Outcome: protocol.ResolutionAnswered, Option: "yes"}); len(rec.Resolved) != 1 || rec.Resolved[0] != want {
+		t.Fatalf("resolved = %+v, want %+v", rec.Resolved, want)
+	}
 	status := &protocol.Command{Schema: protocol.SchemaCommand, Op: protocol.OpRequestGet, RequestRef: ref}
 	rep, err := ep.Handle(status, core.Source{Host: "local"})
 	if err != nil {
