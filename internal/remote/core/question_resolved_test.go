@@ -64,3 +64,26 @@ func TestQuestionResolvedClearsDurableInteraction(t *testing.T) {
 		t.Fatalf("request.get still reports a pending interaction: %T %+v", rep, rep)
 	}
 }
+
+// PR #919 review: a second approval that replaced a pending one recorded
+// the first as answered elsewhere, though the harness still held it open.
+// Only a clear resolves an interaction.
+func TestReplacedInteractionIsNotResolved(t *testing.T) {
+	store, now := openStore(t)
+	rt := fake.New("fake", "e_1")
+	ep := core.New(core.Config{Store: store, Now: now})
+	ep.Register(rt)
+	id := "11111111-1111-4111-8111-1111111111f2"
+	if _, err := ep.Handle(submitCmd(id), core.Source{Host: "local"}); err != nil {
+		t.Fatal(err)
+	}
+	rt.Question(id, "i_1", []string{"yes", "no"})
+	rt.Question(id, "i_2", []string{"yes", "no"})
+	rec, _, err := store.Get(requests.Key{CreatorHost: "local", TargetID: "fake", RequestID: id})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.Interaction == nil || rec.Interaction.InteractionID != "i_2" || len(rec.Resolved) != 0 {
+		t.Fatalf("interaction = %+v resolved = %+v, want i_2 pending and nothing resolved", rec.Interaction, rec.Resolved)
+	}
+}

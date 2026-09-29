@@ -158,7 +158,10 @@ amq-remote-design.html §Capability per harness):
   `codex-rs/app-server/src/outgoing_message.rs:330-495`,
   `thread_lifecycle.rs:864-885`). The adapter answers only approvals of runs
   it submitted and clears an approval on `serverRequest/resolved`, so a late
-  answer is refused. Not live-verified against a running Codex terminal.
+  answer is refused. A remote approve is offered only for a plain command
+  that the prompt shows whole; file changes and network, permission or
+  write-root grants take a remote reject only. Not live-verified against a
+  running Codex terminal.
 - `codex.answer_question`: user-input requests are not projected.
 - `codex.terminal`: app-server has no PTY concept in-protocol (source:
   research/r9-cc-codex-attachment.md §B.4 "terminal" row).

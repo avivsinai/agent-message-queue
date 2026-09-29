@@ -302,6 +302,11 @@ const (
 	ResolutionRunEnded ResolutionOutcome = "run_ended"
 )
 
+// MaxApprovalPreview is the longest prompt a surface shows whole. An
+// adapter offers a one-tap approve only for a prompt within it, so the
+// owner never approves text they could not see.
+const MaxApprovalPreview = 2000
+
 // MaxResolutions bounds Snapshot.Resolved to the most recent entries.
 const MaxResolutions = 8
 

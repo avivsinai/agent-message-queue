@@ -52,8 +52,11 @@ type run struct {
 	interaction  *protocol.Interaction
 	approvalReqs map[string]json.RawMessage
 	// sending is the interaction id whose answer Respond is sending. The
-	// resolution that answer causes can arrive before Respond returns.
-	sending string
+	// resolution that answer causes can arrive before Respond returns, so
+	// onServerRequestResolved leaves it to Respond, which knows whether the
+	// send succeeded; resolvedWhileSending records that it arrived.
+	sending              string
+	resolvedWhileSending bool
 	// createdAt is when the run was bound, for the unconfirmed-shadow
 	// deadline (Pro F1): a retained-but-unconfirmed run shadows lookupHistory
 	// in Lookup. After confirmTimeout, if still unconfirmed, the run stops
@@ -947,12 +950,23 @@ func (a *Attachment) Respond(key requests.Key, epoch, interactionID, option stri
 		a.mu.Unlock()
 		return protocol.CodeInvalid, nil
 	}
-	r.sending = interactionID
+	r.sending, r.resolvedWhileSending = interactionID, false
 	a.mu.Unlock()
 	if err := a.client.Load().Respond(reqID, map[string]string{"decision": option}); err != nil {
 		a.mu.Lock()
-		r.sending = ""
+		resolved := r.resolvedWhileSending
+		r.sending, r.resolvedWhileSending = "", false
+		if resolved {
+			// Another client answered while our send failed: resolved
+			// elsewhere, and our answer never reached the harness.
+			delete(r.approvalReqs, interactionID)
+			r.interaction = nil
+		}
 		a.mu.Unlock()
+		if resolved {
+			a.emit(core.NativeEvent{Type: core.EventQuestionResolved, Key: key, RunID: a.runID(r)})
+			return protocol.CodeAlreadyResolved, nil
+		}
 		return "", err
 	}
 	// B8a (agent-message-queue-611.22.36): tear down the approval state ONLY
@@ -961,8 +975,9 @@ func (a *Attachment) Respond(key requests.Key, epoch, interactionID, option stri
 	// returned CodeAlreadyResolved while the native question was still open.
 	a.mu.Lock()
 	_, open := r.approvalReqs[interactionID]
+	open = open || r.resolvedWhileSending
 	delete(r.approvalReqs, interactionID)
-	r.interaction, r.sending = nil, ""
+	r.interaction, r.sending, r.resolvedWhileSending = nil, "", false
 	a.mu.Unlock()
 	if open {
 		a.emit(core.NativeEvent{Type: core.EventQuestionResolved, Key: key, RunID: a.runID(r), Remote: true})
@@ -988,17 +1003,20 @@ func (a *Attachment) onServerRequestResolved(n Notification) {
 			if !sameRequestID(reqID, p.RequestID) {
 				continue
 			}
+			if r.sending == id {
+				// Our answer is in flight: Respond reports the resolution
+				// once it knows whether the send succeeded.
+				r.resolvedWhileSending = true
+				a.mu.Unlock()
+				return
+			}
 			delete(r.approvalReqs, id)
 			if r.interaction != nil && r.interaction.InteractionID == id {
 				r.interaction = nil
 			}
-			// While our answer is being sent, this resolution may be the one
-			// it caused; the record then says the answer was sent, which is
-			// true either way.
-			remote := r.sending == id
 			key, runID := r.key, r.runIDLocked()
 			a.mu.Unlock()
-			a.emit(core.NativeEvent{Type: core.EventQuestionResolved, Key: key, RunID: runID, Remote: remote})
+			a.emit(core.NativeEvent{Type: core.EventQuestionResolved, Key: key, RunID: runID})
 			return
 		}
 	}
@@ -1028,6 +1046,11 @@ func approvalPrompt(method string, command any, cwd, reason string) string {
 		fmt.Fprintf(&b, "\nreason: %s", reason)
 	}
 	return b.String()
+}
+
+// isAbsent reports whether an optional JSON field is missing or null.
+func isAbsent(raw json.RawMessage) bool {
+	return len(raw) == 0 || string(raw) == "null"
 }
 
 // offered returns option when options contains it, and "" otherwise.
@@ -1337,6 +1360,11 @@ func (a *Attachment) onServerRequest(req ServerRequest) {
 		Cwd                string   `json:"cwd"`
 		Reason             string   `json:"reason"`
 		AvailableDecisions []string `json:"availableDecisions"`
+		// Fields a one-tap approve cannot show; any of them withholds it.
+		Kind                  string          `json:"kind"`
+		GrantRoot             string          `json:"grantRoot"`
+		NetworkContext        json.RawMessage `json:"networkApprovalContext"`
+		AdditionalPermissions json.RawMessage `json:"additionalPermissions"`
 	}
 	if json.Unmarshal(req.Params, &p) != nil || p.ThreadID != a.threadID {
 		return
@@ -1357,8 +1385,18 @@ func (a *Attachment) onServerRequest(req ServerRequest) {
 		options = []string{"accept", "decline"}
 	}
 	prompt := approvalPrompt(req.Method, p.Command, p.Cwd, p.Reason)
+	// Approve is offered only for a plain command whose whole grant the
+	// prompt shows. A file change shows no paths or diff here, and a
+	// network, permission or write-root grant is not in the prompt, so those
+	// are approved in the terminal; reject is always safe to offer.
+	approve := ""
+	if _, isText := p.Command.(string); req.Method == methodCommandApproval && isText &&
+		(p.Kind == "" || p.Kind == "command") && p.GrantRoot == "" && isAbsent(p.NetworkContext) && isAbsent(p.AdditionalPermissions) &&
+		len(prompt) <= protocol.MaxApprovalPreview {
+		approve = offered(options, "accept")
+	}
 	r.interaction = &protocol.Interaction{InteractionID: id, Kind: "approval", Prompt: prompt, Options: options, RemoteAnswer: true,
-		ApproveOption: offered(options, "accept"), RejectOption: offered(options, "decline")}
+		ApproveOption: approve, RejectOption: offered(options, "decline")}
 	r.approvalReqs[id] = req.ID
 	key, runID, inter := r.key, r.runIDLocked(), r.interaction
 	a.mu.Unlock()

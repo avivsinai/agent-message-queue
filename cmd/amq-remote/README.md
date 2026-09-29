@@ -290,7 +290,7 @@ these three fields.
 | `/inspect` | The target's session state. |
 | `/status <ref>` | The state of a request that this channel submitted. |
 | `/cancel <ref>`, or ❌ on a result row | Cancels that request. |
-| ✅ or ❌ on an approval message | Approves or rejects that pending approval. The first answer, in Buzz or in the terminal, wins, and the message is edited with the outcome. Codex targets with `approve` only. |
+| ✅ or ❌ on an approval message | Approves or rejects that pending approval. ✅ is offered only for a command the message shows whole; a file change, a network or permission grant, or a shortened command is approved in the terminal. The first answer, in Buzz or in the terminal, wins, and the message is edited with the outcome. Codex targets with `approve` only. |
 
 With `"mention_channels": ["<channel>", ...]` (at most 16, commands
 required), an owner message in one of those channels that mentions the body

@@ -3,6 +3,7 @@ package buzzio
 import (
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -93,5 +94,63 @@ func TestApprovalMessageAnsweredByReaction(t *testing.T) {
 	}
 	if !strings.Contains(edit.Content, "Approve was sent from Buzz") || strings.Contains(edit.Content, "React ✅") {
 		t.Fatalf("outcome edit = %q, want the sent answer instead of the instructions", edit.Content)
+	}
+}
+
+// PR #919 review: the ledger outlives a share binding, and an approval
+// posted under the old binding was answered by a reaction under the new
+// one. Only the binding that submitted the request answers its approvals.
+func TestApprovalNotAnsweredUnderAnotherBinding(t *testing.T) {
+	var owner, body [32]byte
+	_, _ = rand.Read(owner[:])
+	_, _ = rand.Read(body[:])
+	b := Binding{Owner: nostr.GetPublicKey(owner).Hex(), Body: nostr.GetPublicKey(body).Hex(), Channel: "dm-1", Target: "cx", RelayHost: "relay", NativeSession: "thread-1"}
+	ledger, _ := OpenLedger(t.TempDir())
+	var ref string
+	answered := false
+	handle := func(cmd *protocol.Command, src core.Source) (any, error) {
+		switch cmd.Op {
+		case protocol.OpSessionInspect:
+			return protocol.Session{TargetID: "cx", Epoch: "e1"}, nil
+		case protocol.OpRequestSubmit:
+			ref = protocol.EncodeRef(src.Host, cmd.TargetID, cmd.RequestID)
+			return protocol.Reply{Snapshot: protocol.Snapshot{RequestRef: ref, Revision: 1, State: protocol.StateRunning}}, nil
+		case protocol.OpInteractionRespond:
+			answered = true
+		}
+		return protocol.Reply{}, nil
+	}
+	grant := ownerGrant(t, owner, b.Body, KindDM, KindEdit)
+	old := NewCarrier(ledger, b, body, grant, fixedIdentity("thread-1"), handle)
+	now := time.Now()
+	old.now = func() time.Time { return now }
+	dm := ownerEvent(t, owner, "dm-1", "run the tests", now)
+	if err := old.Ingest(dm); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(time.Second)
+	pending := &protocol.Interaction{InteractionID: "item-7", Kind: "approval", Prompt: "ls", Options: []string{"accept", "decline"}, RemoteAnswer: true, ApproveOption: "accept", RejectOption: "decline"}
+	if err := old.Publish(protocol.Snapshot{RequestRef: ref, Epoch: "e1", Revision: 2, State: protocol.StateRunning, Interaction: pending}, old.source(dm.ID.Hex(), "").Origin); err != nil {
+		t.Fatal(err)
+	}
+	posted, ok, err := ledger.Prepared(approvalKey(ref, "item-7"))
+	if err != nil || !ok {
+		t.Fatalf("setup: approval not prepared: %v", err)
+	}
+	var msg nostr.Event
+	_ = json.Unmarshal(posted.Event, &msg)
+
+	b.NativeSession = "thread-2"
+	current := NewCarrier(ledger, b, body, grant, fixedIdentity("thread-2"), handle)
+	current.now = old.now
+	react := nostr.Event{CreatedAt: nostr.Timestamp(now.Unix()), Kind: KindReaction, Content: "✅", Tags: nostr.Tags{{"e", msg.ID.Hex()}}}
+	if err := react.Sign(owner); err != nil {
+		t.Fatal(err)
+	}
+	if err := current.IngestReaction(react); err != nil {
+		t.Fatal(err)
+	}
+	if answered {
+		t.Fatal("an approval from the old binding was answered under the new one")
 	}
 }

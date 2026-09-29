@@ -1353,20 +1353,27 @@ func (e *Endpoint) transitionLocked(rec *requests.Record, c cause, ev nativeEvid
 		open = &cp
 	}
 	e.applyTransitionLocked(rec, c, ev)
-	if open != nil && (rec.Interaction == nil || rec.Interaction.InteractionID != open.InteractionID) {
+	// Only a clear resolves an interaction. A replacement by another
+	// interaction says nothing about the first, which may still be open.
+	if open != nil && rec.Interaction == nil {
 		recordResolution(rec, open.InteractionID, ev)
 	}
 }
 
 // recordResolution appends how the interaction id stopped being pending,
-// keeping the most recent MaxResolutions entries.
+// keeping the most recent MaxResolutions entries. A clear that is neither
+// an explicit native resolution nor a terminal run records nothing.
 func recordResolution(rec *requests.Record, id string, ev nativeEvidence) {
-	r := protocol.Resolution{InteractionID: id, Outcome: protocol.ResolutionElsewhere}
+	var r protocol.Resolution
 	switch {
 	case ev.clearInteraction && ev.resolvedRemotely:
-		r.Outcome, r.Option = protocol.ResolutionAnswered, rec.Answered[id]
+		r = protocol.Resolution{InteractionID: id, Outcome: protocol.ResolutionAnswered, Option: rec.Answered[id]}
+	case ev.clearInteraction:
+		r = protocol.Resolution{InteractionID: id, Outcome: protocol.ResolutionElsewhere}
 	case rec.State.Terminal():
-		r.Outcome = protocol.ResolutionRunEnded
+		r = protocol.Resolution{InteractionID: id, Outcome: protocol.ResolutionRunEnded}
+	default:
+		return
 	}
 	rec.Resolved = append(rec.Resolved, r)
 	if n := len(rec.Resolved); n > protocol.MaxResolutions {

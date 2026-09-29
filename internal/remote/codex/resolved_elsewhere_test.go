@@ -64,3 +64,48 @@ func TestApprovalAnsweredElsewhereRefusesLateAnswer(t *testing.T) {
 		t.Fatalf("late Respond = (%q, %v), want already_resolved", code, err)
 	}
 }
+
+// PR #919 review: a file-change approval showed no paths or diff, yet one
+// ✅ approved it. Approve is offered only for a command the prompt shows
+// whole; reject stays available.
+func TestApprovalWithholdsApproveForUnseenGrants(t *testing.T) {
+	sock, srv := startFakeAppServer(t)
+	att, err := Attach(sock, "t1", WithApprovals(true))
+	if err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	t.Cleanup(func() { _ = att.Close() })
+	<-srv.calls // initialize
+	<-srv.calls // thread/resume
+	s := att.Inspect()
+	key := requests.Key{CreatorHost: "local", TargetID: s.TargetID, RequestID: "11111111-1111-4111-8111-111111111443"}
+	done := make(chan error, 1)
+	go func() {
+		_, err := att.Submit(core.BoundRequest{Key: key, Epoch: s.Epoch, Input: protocol.SubmitInput{Text: "edit"}})
+		done <- err
+	}()
+	<-srv.calls // turn/start
+	srv.notify(t, "turn/started", `{"threadId":"t1","turn":{"id":"u1"}}`)
+	srv.notify(t, "item/started", `{"threadId":"t1","turnId":"u1","item":{"type":"userMessage","id":"i1","clientId":"`+clientIDFor(key)+`","content":[]}}`)
+	if err := <-done; err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	pending := func() protocol.Interaction {
+		waitInteraction(t, att, key)
+		att.mu.Lock()
+		defer att.mu.Unlock()
+		return *att.runs[key].interaction
+	}
+	srv.sendServerRequest(t, "8", "item/fileChange/requestApproval", `{"threadId":"t1","turnId":"u1","itemId":"fc1","grantRoot":"/"}`)
+	if in := pending(); in.ApproveOption != "" || in.RejectOption != "decline" {
+		t.Fatalf("file change = approve %q reject %q, want reject only", in.ApproveOption, in.RejectOption)
+	}
+	srv.notify(t, "serverRequest/resolved", `{"threadId":"t1","requestId":"8"}`)
+	for i := 0; i < 1000 && att.Inspect().PendingInteraction != nil; i++ {
+		runtime.Gosched()
+	}
+	srv.sendServerRequest(t, "9", "item/commandExecution/requestApproval", `{"threadId":"t1","turnId":"u1","itemId":"c1","command":"ls"}`)
+	if in := pending(); in.ApproveOption != "accept" {
+		t.Fatalf("plain command approve = %q, want accept", in.ApproveOption)
+	}
+}

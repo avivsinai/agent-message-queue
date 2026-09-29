@@ -158,6 +158,47 @@
         "remote_answer": {
           "type": "boolean",
           "description": "Whether the attachment can address this exact interaction from a remote answer."
+        },
+        "approve_option": {
+          "type": "string",
+          "maxLength": 256,
+          "description": "The offered option that approves, when a one-tap approve is safe to offer."
+        },
+        "reject_option": {
+          "type": "string",
+          "maxLength": 256,
+          "description": "The offered option that rejects."
+        }
+      }
+    },
+    "resolved": {
+      "type": "array",
+      "description": "How recent interactions of this request ended, most recent last.",
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "interaction_id",
+          "outcome"
+        ],
+        "properties": {
+          "interaction_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "outcome": {
+            "enum": [
+              "answered",
+              "answered_elsewhere",
+              "run_ended"
+            ]
+          },
+          "option": {
+            "type": "string",
+            "maxLength": 256
+          }
         }
       }
     },

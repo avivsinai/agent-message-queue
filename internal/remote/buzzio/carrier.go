@@ -701,21 +701,21 @@ func approvalText(a Approval, outcome string) string {
 func outcomeText(r protocol.Resolution, a Approval) string {
 	switch r.Outcome {
 	case protocol.ResolutionAnswered:
+		// The harness applies the first answer it receives, so a terminal
+		// answer given in the same moment can still be the one that applied.
+		const race = " If the terminal answered at the same moment, its answer applied."
 		switch r.Option {
 		case a.ApproveOption:
-			return "✅ Approve was sent from Buzz."
+			return "✅ Approve was sent from Buzz." + race
 		case a.RejectOption:
-			return "❌ Reject was sent from Buzz."
+			return "❌ Reject was sent from Buzz." + race
 		}
-		return fmt.Sprintf("Answer %q was sent from Buzz.", r.Option)
+		return fmt.Sprintf("Answer %q was sent from Buzz.", r.Option) + race
 	case protocol.ResolutionRunEnded:
 		return "The run ended before this was answered."
 	}
-	return "Answered outside Buzz, for example in the terminal."
+	return "Closed outside Buzz: answered in the terminal, or the turn stopped."
 }
-
-// maxPreview bounds the command text an approval message shows.
-const maxPreview = 2000
 
 // boundPreview shortens a prompt for display and removes control
 // characters other than newline and tab, so the message shows what will run
@@ -727,7 +727,7 @@ func boundPreview(s string) string {
 		}
 		return -1
 	}, s)
-	if text, cut := protocol.TruncateText(s, maxPreview); cut {
+	if text, cut := protocol.TruncateText(s, protocol.MaxApprovalPreview); cut {
 		return text + " …[shortened]"
 	}
 	return s
@@ -745,6 +745,12 @@ func (c *Carrier) answerApproval(evt nostr.Event, messageID string, appr Approva
 	if option == "" {
 		return nil // this approval offers no one-tap answer for the gesture
 	}
+	// The approval belongs to a request this binding submitted: after a
+	// change of owner, channel or native session, old approvals are not
+	// answered.
+	if rc, owned, err := c.ledger.ReceiptFor(appr.RequestRef); err != nil || !owned || !c.ownsReceipt(rc) {
+		return err
+	}
 	cmd, _ := json.Marshal(map[string]string{"ref": appr.RequestRef, "interaction_id": appr.InteractionID, "option": option})
 	if _, ok, err := c.claimReaction(evt, OpRespond, appr.Epoch, cmd); err != nil || !ok {
 		return err
@@ -755,7 +761,10 @@ func (c *Carrier) answerApproval(evt nostr.Event, messageID string, appr Approva
 		TargetID: appr.Target, Epoch: appr.Epoch, InteractionID: appr.InteractionID, Option: option,
 	}, c.source(evt.ID.Hex(), ""))
 	var refusal *protocol.Refusal
-	switch reply, _ := out.(protocol.Reply); {
+	reply, _ := out.(protocol.Reply)
+	switch {
+	case err == nil && reply.Outcome.Code == protocol.CodeAlreadyResolved && answeredWith(reply.Snapshot, appr.InteractionID, option):
+		// A replay after a crash: this reaction's answer was delivered.
 	case errors.As(err, &refusal) && refusal.Code == protocol.CodeAlreadyResolved, err == nil && reply.Outcome.Code == protocol.CodeAlreadyResolved:
 		return c.settleApprovalAnswer(evt, messageID, st, "Not sent: this approval was already answered.")
 	case err != nil:
@@ -765,6 +774,17 @@ func (c *Carrier) answerApproval(evt nostr.Event, messageID string, appr Approva
 	// resolves the interaction.
 	_, err = c.ledger.Settle(evt.ID.Hex(), st)
 	return err
+}
+
+// answeredWith reports whether the record says AMQ delivered option for the
+// interaction.
+func answeredWith(s protocol.Snapshot, interactionID, option string) bool {
+	for _, r := range s.Resolved {
+		if r.InteractionID == interactionID && r.Outcome == protocol.ResolutionAnswered && r.Option == option {
+			return true
+		}
+	}
+	return false
 }
 
 // settleApprovalAnswer replies under the approval message, then settles the

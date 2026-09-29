@@ -153,6 +153,23 @@ func TestRequestSnapshotsValidateAgainstSchema(t *testing.T) {
 			"observed_at": "2026-09-01T00:00:00Z",
 		}},
 	}
+	// PR #919 review: the schema refused approval snapshots because the test
+	// built its own maps. Validate one encoded from the real type.
+	approval := Snapshot{
+		Schema: SchemaRequest, RequestRef: ref, RequestID: "11111111-1111-4111-8111-111111111101",
+		CreatorHost: "hostA", TargetID: "t_fake1", Epoch: "e_1", Revision: 6, State: StateRunning,
+		Interaction: &Interaction{InteractionID: "i_2", Kind: "approval", Options: []string{"accept", "decline"}, RemoteAnswer: true, ApproveOption: "accept", RejectOption: "decline"},
+		Resolved:    []Resolution{{InteractionID: "i_1", Outcome: ResolutionAnswered, Option: "accept"}},
+		ObservedAt:  "2026-09-01T00:00:00Z",
+	}
+	var encoded map[string]any
+	if err := json.Unmarshal([]byte(mustJSON(approval)), &encoded); err != nil {
+		t.Fatal(err)
+	}
+	cases = append(cases, struct {
+		name string
+		doc  map[string]any
+	}{"approval-resolved", encoded})
 	for _, c := range cases {
 		if err := sch.Validate(c.doc); err != nil {
 			t.Fatalf("%s: snapshot does not validate: %v\n%s", c.name, err, mustJSON(c.doc))
