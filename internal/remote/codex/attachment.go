@@ -149,6 +149,12 @@ type Attachment struct {
 	// would look like fresh evidence and restart the ack loop. Bounded by the
 	// same FIFO eviction as ackedOrder (611.22.19 BK4).
 	ackedKeys map[requests.Key]bool
+	// questionMu orders approval events: every path that changes the
+	// pending approval holds it from the change through the emission, so
+	// the endpoint sees EventQuestion and EventQuestionResolved in the order
+	// the state changed. It is taken before mu, and never by a method the
+	// endpoint calls while holding its own lock.
+	questionMu sync.Mutex
 	// resolvedEarly remembers request ids that serverRequest/resolved named
 	// before the request worker delivered the request itself; such a
 	// request is already answered and is never shown. FIFO-bounded.
@@ -968,7 +974,12 @@ func (a *Attachment) Respond(key requests.Key, epoch, interactionID, option stri
 	}
 	r.sending, r.resolvedWhileSending = interactionID, false
 	a.mu.Unlock()
-	if err := a.client.Load().Respond(reqID, map[string]string{"decision": option}); err != nil {
+	err := a.client.Load().Respond(reqID, map[string]string{"decision": option})
+	// The send is done; from here the pending approval changes, so hold the
+	// question order until the events are out.
+	a.questionMu.Lock()
+	defer a.questionMu.Unlock()
+	if err != nil {
 		a.mu.Lock()
 		resolved := r.resolvedWhileSending
 		r.sending, r.resolvedWhileSending = "", false
@@ -1007,9 +1018,10 @@ func (a *Attachment) Respond(key requests.Key, epoch, interactionID, option stri
 	return "", nil
 }
 
-// errAnswerInFlight refuses a second answer while one is being sent; the
-// endpoint keeps the answer intent and a replay decides.
-var errAnswerInFlight = errors.New("codex: an answer for this approval is already being sent")
+// errAnswerInFlight refuses a second send of the same answer while the
+// first is in flight; the endpoint keeps that answer's intent. A different
+// answer never gets here: the endpoint refuses it first.
+var errAnswerInFlight = errors.New("an answer to this approval is already being sent")
 
 // advanceLocked makes the oldest queued approval that Codex still holds the
 // pending one, and returns it, or nil. The caller holds a.mu and has
@@ -1041,6 +1053,8 @@ func (a *Attachment) emitResolved(r *run, remote bool, next *protocol.Interactio
 // without an error, so without this a late remote answer would report
 // success for a decision it did not make.
 func (a *Attachment) onServerRequestResolved(n Notification) {
+	a.questionMu.Lock()
+	defer a.questionMu.Unlock()
 	var p struct {
 		ThreadID  string          `json:"threadId"`
 		RequestID json.RawMessage `json:"requestId"`
@@ -1424,6 +1438,8 @@ func (a *Attachment) onServerRequest(req ServerRequest) {
 	default:
 		return
 	}
+	a.questionMu.Lock()
+	defer a.questionMu.Unlock()
 	var p struct {
 		ThreadID           string   `json:"threadId"`
 		TurnID             string   `json:"turnId"`

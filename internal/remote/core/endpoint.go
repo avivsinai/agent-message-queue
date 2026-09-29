@@ -946,6 +946,14 @@ func (e *Endpoint) respond(cmd *protocol.Command) (protocol.Reply, error) {
 		e.mu.Unlock()
 		return protocol.Reply{}, protocol.Refuse(protocol.CodeInvalid, "option %q is not offered by interaction %s", cmd.Option, cmd.InteractionID)
 	}
+	if prior, done := rec.Answered[cmd.InteractionID]; done && prior != cmd.Option {
+		// An earlier answer may already be with the runtime (in flight, or
+		// sent before a transport error). The runtime applies the first
+		// answer it gets, so a different one never replaces that intent
+		// (PR #919 review round 3).
+		e.mu.Unlock()
+		return protocol.Reply{}, protocol.Refuse(protocol.CodeAlreadyResolved, "interaction %s already has an answer (%s) being delivered", cmd.InteractionID, prior)
+	}
 	if rec.Answered == nil {
 		rec.Answered = map[string]string{}
 	}

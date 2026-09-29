@@ -1,6 +1,7 @@
 package core_test
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
@@ -85,5 +86,42 @@ func TestReplacedInteractionIsNotResolved(t *testing.T) {
 	}
 	if rec.Interaction == nil || rec.Interaction.InteractionID != "i_2" || len(rec.Resolved) != 0 {
 		t.Fatalf("interaction = %+v resolved = %+v, want i_2 pending and nothing resolved", rec.Interaction, rec.Resolved)
+	}
+}
+
+// PR #919 review round 3: while one answer could still be with the
+// runtime, a different answer replaced its durable intent, and the record
+// later named the second answer for what the first one did. A different
+// answer is refused until the first is settled.
+func TestSecondAnswerDoesNotReplaceLiveIntent(t *testing.T) {
+	store, now := openStore(t)
+	rt := fake.New("fake", "e_1")
+	ep := core.New(core.Config{Store: store, Now: now})
+	ep.Register(rt)
+	id := "11111111-1111-4111-8111-1111111111f3"
+	if _, err := ep.Handle(submitCmd(id), core.Source{Host: "local"}); err != nil {
+		t.Fatal(err)
+	}
+	rt.Question(id, "i_1", []string{"yes", "no"})
+	answer := func(option string) error {
+		_, err := ep.Handle(&protocol.Command{
+			Schema: protocol.SchemaCommand, Op: protocol.OpInteractionRespond, RequestRef: protocol.EncodeRef("local", "fake", id),
+			TargetID: "fake", Epoch: "e_1", InteractionID: "i_1", Option: option,
+		}, core.Source{Host: "local"})
+		return err
+	}
+	rt.FailNextRespond(errors.New("transport lost after write"))
+	if err := answer("yes"); err == nil {
+		t.Fatal("setup: the first answer should fail in transport")
+	}
+	if err := answer("no"); err == nil {
+		t.Fatal("a different answer replaced an intent that may already be applied")
+	}
+	if err := answer("yes"); err != nil {
+		t.Fatalf("replay of the first answer: %v", err)
+	}
+	rec, _, _ := store.Get(requests.Key{CreatorHost: "local", TargetID: "fake", RequestID: id})
+	if want := (protocol.Resolution{InteractionID: "i_1", Outcome: protocol.ResolutionAnswered, Option: "yes"}); len(rec.Resolved) != 1 || rec.Resolved[0] != want {
+		t.Fatalf("resolved = %+v, want %+v", rec.Resolved, want)
 	}
 }

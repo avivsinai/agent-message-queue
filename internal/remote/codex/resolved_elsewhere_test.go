@@ -177,3 +177,49 @@ func TestOverlappingApprovalsShowOneAtATime(t *testing.T) {
 		t.Fatalf("Respond on the second approval = (%q, %v), want it answered", code, err)
 	}
 }
+
+// PR #919 review round 2: approval requests reach the adapter through a
+// worker queue, so another client's resolution can overtake its own
+// request. Such a request is already answered and is never shown.
+func TestApprovalResolvedBeforeDeliveryIsNotShown(t *testing.T) {
+	sock, srv := startFakeAppServer(t)
+	att, err := Attach(sock, "t1", WithApprovals(true))
+	if err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	t.Cleanup(func() { _ = att.Close() })
+	<-srv.calls // initialize
+	<-srv.calls // thread/resume
+	asked := make(chan string, 4)
+	att.Subscribe(func(ev core.NativeEvent) {
+		if ev.Type == core.EventQuestion {
+			asked <- ev.Interaction.InteractionID
+		}
+	})
+	s := att.Inspect()
+	key := requests.Key{CreatorHost: "local", TargetID: s.TargetID, RequestID: "11111111-1111-4111-8111-111111111445"}
+	done := make(chan error, 1)
+	go func() {
+		_, err := att.Submit(core.BoundRequest{Key: key, Epoch: s.Epoch, Input: protocol.SubmitInput{Text: "run"}})
+		done <- err
+	}()
+	<-srv.calls // turn/start
+	srv.notify(t, "turn/started", `{"threadId":"t1","turn":{"id":"u1"}}`)
+	srv.notify(t, "item/started", `{"threadId":"t1","turnId":"u1","item":{"type":"userMessage","id":"i1","clientId":"`+clientIDFor(key)+`","content":[]}}`)
+	if err := <-done; err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	srv.notify(t, "serverRequest/resolved", `{"threadId":"t1","requestId":"12"}`)
+	// The read pump handles frames in order, so the resolution above is
+	// recorded before this request is read.
+	srv.sendServerRequest(t, "12", "item/commandExecution/requestApproval", `{"threadId":"t1","turnId":"u1","itemId":"late","command":"ls"}`)
+	srv.sendServerRequest(t, "13", "item/commandExecution/requestApproval", `{"threadId":"t1","turnId":"u1","itemId":"next","command":"pwd"}`)
+	select {
+	case id := <-asked:
+		if id != "next" {
+			t.Fatalf("shown approval = %s, want only the unresolved one", id)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the unresolved approval was never shown")
+	}
+}
