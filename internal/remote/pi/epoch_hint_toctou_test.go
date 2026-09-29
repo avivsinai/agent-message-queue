@@ -121,9 +121,8 @@ func TestSubmitEpochHintValidatedByGate(t *testing.T) {
 
 // TestSubmitEpochHintNotOmittedByUnpin pins the second half of the P1: a
 // concurrent refused(generation) unpin (a.epoch -> "") inside the window
-// must not drop the hint — the extension defines an empty epoch_hint as
-// "first contact, no check", which would skip the generation check on a
-// request whose generation was just proven stale.
+// must not swap the hint the gate validated for another one read after the
+// gate.
 func TestSubmitEpochHintNotOmittedByUnpin(t *testing.T) {
 	key := testKey("unpin")
 	ref := clientRef(key)

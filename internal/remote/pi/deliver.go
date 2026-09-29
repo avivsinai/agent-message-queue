@@ -49,7 +49,7 @@ type deliverRequest struct {
 	Text      string `json:"text"`
 	DeliverAs string `json:"deliver_as"`
 	NotAfter  string `json:"not_after"`
-	EpochHint string `json:"epoch_hint,omitempty"` // empty = first contact, no check (protocol: session generation and epoch)
+	EpochHint string `json:"epoch_hint,omitempty"` // the addressed session generation; the adapter never sends it empty (protocol: session generation and epoch)
 	CreatedAt string `json:"created_at"`
 }
 

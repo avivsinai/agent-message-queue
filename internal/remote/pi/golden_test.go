@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 	"github.com/avivsinai/agent-message-queue/internal/remote/requests"
 )
@@ -67,8 +68,8 @@ func TestGoldenExtensionVector(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "the pi bridge restarted before the request settled; the outcome is unknown"
-	if ev.State != protocol.StateFailed || ev.Result == nil || ev.Result.Error != want {
-		t.Fatalf("Lookup(orphan) = %+v result %+v", ev, ev.Result)
+	// Orphan recovery has no native outcome, so the record stays uncertain.
+	if ev.Class != core.EvidenceUnknown || ev.State != protocol.StateUncertain {
+		t.Fatalf("Lookup(orphan) = %+v, want unknown evidence in state uncertain", ev)
 	}
 }
