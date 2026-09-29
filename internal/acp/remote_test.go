@@ -342,10 +342,10 @@ func TestRemoteBusyDMWaitsThenRuns(t *testing.T) {
 		done <- result.(remotePromptResult)
 	}()
 	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) && queuedThoughts(&mu, thoughts) == 0 {
+	for time.Now().Before(deadline) && queuedThoughts(&mu, &thoughts) == 0 {
 		time.Sleep(5 * time.Millisecond)
 	}
-	queued := queuedThoughts(&mu, thoughts)
+	queued := queuedThoughts(&mu, &thoughts)
 	if queued != 1 {
 		t.Fatalf("queued thoughts = %q", thoughts)
 	}
@@ -365,7 +365,7 @@ func TestRemoteBusyDMWaitsThenRuns(t *testing.T) {
 	if got.StopReason != StopReasonEndTurn {
 		t.Fatalf("result = %+v", got)
 	}
-	if queuedThoughts(&mu, thoughts) != 1 {
+	if queuedThoughts(&mu, &thoughts) != 1 {
 		mu.Lock()
 		gotThoughts := append([]string(nil), thoughts...)
 		mu.Unlock()
@@ -373,11 +373,11 @@ func TestRemoteBusyDMWaitsThenRuns(t *testing.T) {
 	}
 }
 
-func queuedThoughts(mu *sync.Mutex, thoughts []string) int {
+func queuedThoughts(mu *sync.Mutex, thoughts *[]string) int {
 	mu.Lock()
 	defer mu.Unlock()
 	n := 0
-	for _, text := range thoughts {
+	for _, text := range *thoughts {
 		if strings.HasPrefix(text, "Queued:") {
 			n++
 		}
