@@ -57,6 +57,10 @@ type run struct {
 	// send succeeded; resolvedWhileSending records that it arrived.
 	sending              string
 	resolvedWhileSending bool
+	// queued holds approvals that arrived while another was pending. The
+	// record shows one pending interaction, so they are shown one at a time,
+	// in arrival order, once the current one resolves.
+	queuedApprovals []*protocol.Interaction
 	// createdAt is when the run was bound, for the unconfirmed-shadow
 	// deadline (Pro F1): a retained-but-unconfirmed run shadows lookupHistory
 	// in Lookup. After confirmTimeout, if still unconfirmed, the run stops
@@ -145,7 +149,15 @@ type Attachment struct {
 	// would look like fresh evidence and restart the ack loop. Bounded by the
 	// same FIFO eviction as ackedOrder (611.22.19 BK4).
 	ackedKeys map[requests.Key]bool
+	// resolvedEarly remembers request ids that serverRequest/resolved named
+	// before the request worker delivered the request itself; such a
+	// request is already answered and is never shown. FIFO-bounded.
+	resolvedEarly      map[string]bool
+	resolvedEarlyOrder []string
 }
+
+// maxResolvedEarly bounds Attachment.resolvedEarly.
+const maxResolvedEarly = 64
 
 // Option configures Attach.
 type Option func(*Attachment)
@@ -950,21 +962,27 @@ func (a *Attachment) Respond(key requests.Key, epoch, interactionID, option stri
 		a.mu.Unlock()
 		return protocol.CodeInvalid, nil
 	}
+	if r.sending != "" {
+		a.mu.Unlock()
+		return "", errAnswerInFlight
+	}
 	r.sending, r.resolvedWhileSending = interactionID, false
 	a.mu.Unlock()
 	if err := a.client.Load().Respond(reqID, map[string]string{"decision": option}); err != nil {
 		a.mu.Lock()
 		resolved := r.resolvedWhileSending
 		r.sending, r.resolvedWhileSending = "", false
+		var next *protocol.Interaction
 		if resolved {
 			// Another client answered while our send failed: resolved
 			// elsewhere, and our answer never reached the harness.
 			delete(r.approvalReqs, interactionID)
 			r.interaction = nil
+			next = r.advanceLocked()
 		}
 		a.mu.Unlock()
 		if resolved {
-			a.emit(core.NativeEvent{Type: core.EventQuestionResolved, Key: key, RunID: a.runID(r)})
+			a.emitResolved(r, false, next)
 			return protocol.CodeAlreadyResolved, nil
 		}
 		return "", err
@@ -978,11 +996,44 @@ func (a *Attachment) Respond(key requests.Key, epoch, interactionID, option stri
 	open = open || r.resolvedWhileSending
 	delete(r.approvalReqs, interactionID)
 	r.interaction, r.sending, r.resolvedWhileSending = nil, "", false
+	var next *protocol.Interaction
+	if open {
+		next = r.advanceLocked()
+	}
 	a.mu.Unlock()
 	if open {
-		a.emit(core.NativeEvent{Type: core.EventQuestionResolved, Key: key, RunID: a.runID(r), Remote: true})
+		a.emitResolved(r, true, next)
 	}
 	return "", nil
+}
+
+// errAnswerInFlight refuses a second answer while one is being sent; the
+// endpoint keeps the answer intent and a replay decides.
+var errAnswerInFlight = errors.New("codex: an answer for this approval is already being sent")
+
+// advanceLocked makes the oldest queued approval that Codex still holds the
+// pending one, and returns it, or nil. The caller holds a.mu and has
+// cleared r.interaction.
+func (r *run) advanceLocked() *protocol.Interaction {
+	for len(r.queuedApprovals) > 0 {
+		next := r.queuedApprovals[0]
+		r.queuedApprovals = r.queuedApprovals[1:]
+		if _, open := r.approvalReqs[next.InteractionID]; open {
+			r.interaction = next
+			return next
+		}
+	}
+	return nil
+}
+
+// emitResolved reports the pending approval resolved, then the next queued
+// approval, if any, as the new pending one.
+func (a *Attachment) emitResolved(r *run, remote bool, next *protocol.Interaction) {
+	key, runID := r.key, a.runID(r)
+	a.emit(core.NativeEvent{Type: core.EventQuestionResolved, Key: key, RunID: runID, Remote: remote})
+	if next != nil {
+		a.emit(core.NativeEvent{Type: core.EventQuestion, Key: key, RunID: runID, Interaction: next})
+	}
 }
 
 // onServerRequestResolved clears an approval that another client, such as
@@ -1011,13 +1062,29 @@ func (a *Attachment) onServerRequestResolved(n Notification) {
 				return
 			}
 			delete(r.approvalReqs, id)
-			if r.interaction != nil && r.interaction.InteractionID == id {
-				r.interaction = nil
+			if r.interaction == nil || r.interaction.InteractionID != id {
+				// A queued approval, never shown: nothing to report.
+				a.mu.Unlock()
+				return
 			}
-			key, runID := r.key, r.runIDLocked()
+			r.interaction = nil
+			next := r.advanceLocked()
 			a.mu.Unlock()
-			a.emit(core.NativeEvent{Type: core.EventQuestionResolved, Key: key, RunID: runID})
+			a.emitResolved(r, false, next)
 			return
+		}
+	}
+	// Server requests reach onServerRequest through a worker queue, so the
+	// resolution can overtake its own request. Remember it.
+	if key := compactID(p.RequestID); key != "" && !a.resolvedEarly[key] {
+		if a.resolvedEarly == nil {
+			a.resolvedEarly = map[string]bool{}
+		}
+		a.resolvedEarly[key] = true
+		a.resolvedEarlyOrder = append(a.resolvedEarlyOrder, key)
+		if len(a.resolvedEarlyOrder) > maxResolvedEarly {
+			delete(a.resolvedEarly, a.resolvedEarlyOrder[0])
+			a.resolvedEarlyOrder = a.resolvedEarlyOrder[1:]
 		}
 	}
 	a.mu.Unlock()
@@ -1065,11 +1132,17 @@ func offered(options []string, option string) string {
 
 // sameRequestID compares two JSON-RPC ids by their compact encoding.
 func sameRequestID(x, y json.RawMessage) bool {
-	var bx, by bytes.Buffer
-	if json.Compact(&bx, x) != nil || json.Compact(&by, y) != nil {
-		return false
+	cx := compactID(x)
+	return cx != "" && cx == compactID(y)
+}
+
+// compactID is the compact JSON encoding of a JSON-RPC id, or "".
+func compactID(id json.RawMessage) string {
+	var b bytes.Buffer
+	if json.Compact(&b, id) != nil {
+		return ""
 	}
-	return bytes.Equal(bx.Bytes(), by.Bytes())
+	return b.String()
 }
 
 // AcknowledgeResult implements core.Attachment. Codex keeps the transcript;
@@ -1264,7 +1337,7 @@ func (a *Attachment) onNotification(n Notification) {
 			ev = core.NativeEvent{Type: core.EventRunFailed}
 		}
 		ev.Key, ev.RunID, ev.Result = r.key, r.runIDLocked(), r.result()
-		r.interaction = nil
+		r.interaction, r.queuedApprovals = nil, nil
 		a.mu.Unlock()
 		a.emit(ev)
 	case "thread/status/changed":
@@ -1376,6 +1449,10 @@ func (a *Attachment) onServerRequest(req ServerRequest) {
 		a.mu.Unlock()
 		return
 	}
+	if key := compactID(req.ID); a.resolvedEarly[key] {
+		a.mu.Unlock()
+		return // another client answered it before it reached us
+	}
 	id := p.ApprovalID
 	if id == "" {
 		id = p.ItemID
@@ -1395,10 +1472,16 @@ func (a *Attachment) onServerRequest(req ServerRequest) {
 		len(prompt) <= protocol.MaxApprovalPreview {
 		approve = offered(options, "accept")
 	}
-	r.interaction = &protocol.Interaction{InteractionID: id, Kind: "approval", Prompt: prompt, Options: options, RemoteAnswer: true,
+	inter := &protocol.Interaction{InteractionID: id, Kind: "approval", Prompt: prompt, Options: options, RemoteAnswer: true,
 		ApproveOption: approve, RejectOption: offered(options, "decline")}
 	r.approvalReqs[id] = req.ID
-	key, runID, inter := r.key, r.runIDLocked(), r.interaction
+	if r.interaction != nil {
+		r.queuedApprovals = append(r.queuedApprovals, inter)
+		a.mu.Unlock()
+		return
+	}
+	r.interaction = inter
+	key, runID := r.key, r.runIDLocked()
 	a.mu.Unlock()
 	a.emit(core.NativeEvent{Type: core.EventQuestion, Key: key, RunID: runID, Interaction: inter})
 }

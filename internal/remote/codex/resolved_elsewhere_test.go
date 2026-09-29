@@ -2,6 +2,7 @@ package codex
 
 import (
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -107,5 +108,72 @@ func TestApprovalWithholdsApproveForUnseenGrants(t *testing.T) {
 	srv.sendServerRequest(t, "9", "item/commandExecution/requestApproval", `{"threadId":"t1","turnId":"u1","itemId":"c1","command":"ls"}`)
 	if in := pending(); in.ApproveOption != "accept" {
 		t.Fatalf("plain command approve = %q, want accept", in.ApproveOption)
+	}
+}
+
+// PR #919 review round 2: a second approval replaced a pending one, and the
+// first one's resolution then cleared the second at the endpoint, which
+// holds one pending interaction. Approvals are reported one at a time: the
+// second becomes pending only after the first resolves.
+func TestOverlappingApprovalsShowOneAtATime(t *testing.T) {
+	sock, srv := startFakeAppServer(t)
+	att, err := Attach(sock, "t1", WithApprovals(true))
+	if err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	t.Cleanup(func() { _ = att.Close() })
+	<-srv.calls // initialize
+	<-srv.calls // thread/resume
+	events := make(chan string, 8)
+	att.Subscribe(func(ev core.NativeEvent) {
+		switch ev.Type {
+		case core.EventQuestion:
+			events <- "ask " + ev.Interaction.InteractionID
+		case core.EventQuestionResolved:
+			events <- "resolved"
+		}
+	})
+	s := att.Inspect()
+	key := requests.Key{CreatorHost: "local", TargetID: s.TargetID, RequestID: "11111111-1111-4111-8111-111111111444"}
+	done := make(chan error, 1)
+	go func() {
+		_, err := att.Submit(core.BoundRequest{Key: key, Epoch: s.Epoch, Input: protocol.SubmitInput{Text: "two tools"}})
+		done <- err
+	}()
+	<-srv.calls // turn/start
+	srv.notify(t, "turn/started", `{"threadId":"t1","turn":{"id":"u1"}}`)
+	srv.notify(t, "item/started", `{"threadId":"t1","turnId":"u1","item":{"type":"userMessage","id":"i1","clientId":"`+clientIDFor(key)+`","content":[]}}`)
+	if err := <-done; err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	srv.sendServerRequest(t, "10", "item/commandExecution/requestApproval", `{"threadId":"t1","turnId":"u1","itemId":"a1","command":"ls"}`)
+	srv.sendServerRequest(t, "11", "item/commandExecution/requestApproval", `{"threadId":"t1","turnId":"u1","itemId":"b1","command":"pwd"}`)
+	// Both requests reach the adapter before the first is answered.
+	for deadline := time.Now().Add(5 * time.Second); ; runtime.Gosched() {
+		att.mu.Lock()
+		n := len(att.runs[key].approvalReqs)
+		att.mu.Unlock()
+		if n == 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the two approval requests never reached the adapter")
+		}
+	}
+	srv.notify(t, "serverRequest/resolved", `{"threadId":"t1","requestId":"10"}`)
+	var got []string
+	for len(got) < 3 {
+		select {
+		case e := <-events:
+			got = append(got, e)
+		case <-time.After(5 * time.Second):
+			t.Fatalf("events = %v, want three", got)
+		}
+	}
+	if want := []string{"ask a1", "resolved", "ask b1"}; strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("events = %v, want %v", got, want)
+	}
+	if code, err := att.Respond(key, s.Epoch, "b1", "accept"); err != nil || code != "" {
+		t.Fatalf("Respond on the second approval = (%q, %v), want it answered", code, err)
 	}
 }
