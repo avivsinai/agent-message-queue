@@ -59,6 +59,24 @@ func TestRetireWakeRefusesDifferentInjectTarget(t *testing.T) {
 	}
 }
 
+// Field (Amit 0.1.38, 2026-09-29): after a CLI take, the desktop app's Take over was refused with
+// "saved wake target uses a different injector identity", because the two surfaces run the same
+// doorbell injector from different install paths. --takeover adopts the saved injector and keeps
+// the generation CAS.
+func TestRetireWakeTakeoverAcceptsAnotherSurfacesInjector(t *testing.T) {
+	fixture := newGenericWakePreparedCleanupFixture(t, true)
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		return wakeProcessInfo{PID: pid, Running: false}
+	})
+	otherSurface := mustNewWakeTargetForTest(t, fixture.root, fixture.me, writeExecutableForTest(t, "other-surface-injector"), nil)
+	generation := inspectWakeLock(fixture.root, fixture.me).Lock.Generation
+
+	result, err := retireWakeIfGeneration(fixture.root, fixture.me, takeoverWakeTarget(fixture.root, fixture.me, otherSurface), generation)
+	if err != nil || result.Status != "retired" {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
+}
+
 func TestRetireWakeRemovesBoundTargetAndStateSoTargetlessWakeCanStart(t *testing.T) {
 	fixture := newGenericWakePreparedCleanupFixture(t, true)
 	requested := *fixture.target
