@@ -124,6 +124,13 @@ type NativeEvent struct {
 // serialize Submit and CancelExact against the harness's own input path and
 // never touch the local editor. Every method is exact about the request and
 // epoch it acts on.
+// SubmitBlocker is an optional Attachment method: it says why Inspect
+// advertises submit false, so the endpoint's unsupported refusal carries
+// the adapter's actionable text instead of a bare code.
+type SubmitBlocker interface {
+	SubmitBlockedReason() string
+}
+
 type Attachment interface {
 	// Inspect returns the current session projection.
 	Inspect() protocol.Session

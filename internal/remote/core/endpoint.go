@@ -454,8 +454,9 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 		// record: the deferred/Tick machinery owns it from here.
 		t, code := e.admissibleLocked(cmd.TargetID, cmd.Epoch, cmd.NotAfter, cmd.Input.MinEvidence)
 		if code != "" {
+			reason := e.unsupportedReasonLocked(cmd.TargetID, code)
 			e.mu.Unlock()
-			return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: code}}, nil
+			return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: code, Message: reason}}, nil
 		}
 		if t == nil {
 			e.mu.Unlock()
@@ -538,8 +539,9 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 	t, code := e.admissibleLocked(cmd.TargetID, cmd.Epoch, cmd.NotAfter, cmd.Input.MinEvidence)
 	if code != "" {
 		// Refused (unshared/expired/stale_epoch): no durable record.
+		reason := e.unsupportedReasonLocked(cmd.TargetID, code)
 		e.mu.Unlock()
-		return protocol.Reply{Snapshot: e.unpersisted(rec, protocol.StateRejected, code), Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: code}}, nil
+		return protocol.Reply{Snapshot: e.unpersisted(rec, protocol.StateRejected, code), Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: code, Message: reason}}, nil
 	}
 	if t == nil {
 		// Target registered but offline: Create received and let Tick admit
@@ -669,6 +671,23 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 // The evidence floor (MinEvidence) is checked here, BEFORE any side effect: an
 // attachment whose strongest submit evidence is weaker than the floor is
 // refused (weaker capability is refused, not substituted — ADR invariant 5).
+// unsupportedReasonLocked is the adapter's text for an unsupported refusal
+// caused by Inspect advertising submit false; "" when there is none.
+func (e *Endpoint) unsupportedReasonLocked(targetID string, code protocol.Code) string {
+	if code != protocol.CodeUnsupported {
+		return ""
+	}
+	t, ok := e.targets[targetID]
+	if !ok {
+		return ""
+	}
+	b, ok := t.att.(SubmitBlocker)
+	if !ok || t.att.Inspect().Capabilities.Submit {
+		return ""
+	}
+	return b.SubmitBlockedReason()
+}
+
 func (e *Endpoint) admissibleLocked(targetID, epoch, notAfter, minEvidence string) (*target, protocol.Code) {
 	t, ok := e.targets[targetID]
 	if !ok {
@@ -2159,7 +2178,7 @@ func (e *Endpoint) admitDeferred(rec *requests.Record) error {
 			e.mu.Unlock()
 			return err
 		}
-		e.transitionLocked(rec, causeRefused, nativeEvidence{code: code})
+		e.transitionLocked(rec, causeRefused, nativeEvidence{code: code, reason: e.unsupportedReasonLocked(rec.TargetID, code)})
 		_, err = e.commitLocked(rec, nil)
 		e.mu.Unlock()
 		return err

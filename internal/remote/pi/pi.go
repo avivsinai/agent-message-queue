@@ -132,6 +132,16 @@ func oldBridgeMessage(handle string, revision int) string {
 		handle, have, MinBridgeRevision, install)
 }
 
+// SubmitBlockedReason implements core.SubmitBlocker: the install and reload
+// text when the live bridge predates MinBridgeRevision.
+func (a *Attachment) SubmitBlockedReason() string {
+	live := a.dir.liveness(a.now())
+	if !live.live || live.revision >= MinBridgeRevision {
+		return ""
+	}
+	return oldBridgeMessage(a.handle, live.revision)
+}
+
 // maxRetained bounds the retained run map; terminal+acked runs are dropped
 // FIFO. Process-local correlation state, bounded so a long-lived attachment
 // cannot grow it without limit.

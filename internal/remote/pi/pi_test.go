@@ -679,6 +679,11 @@ func TestOldBridgeRevisionRefusesSubmit(t *testing.T) {
 	if entries, _ := os.ReadDir(filepath.Join(dir, "requests")); len(entries) != 0 {
 		t.Fatalf("requests dir has %d entries; an old bridge gets nothing", len(entries))
 	}
+	// The endpoint refuses before Submit when Inspect says submit false; it
+	// reads the same text through core.SubmitBlocker.
+	if got := a.SubmitBlockedReason(); got != adm.Message {
+		t.Fatalf("SubmitBlockedReason = %q, want the Submit refusal %q", got, adm.Message)
+	}
 }
 
 // TestSubmitKeepsInspectedGeneration reproduces
