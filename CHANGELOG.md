@@ -8,6 +8,13 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.83.0](https://github.com/avivsinai/agent-message-queue/compare/v0.82.0...v0.83.0) (2026-09-29)
+
+
+### Features
+
+* **wake:** let an explicit take retire a wake another surface started (--takeover) ([#916](https://github.com/avivsinai/agent-message-queue/issues/916)) ([bd5806c](https://github.com/avivsinai/agent-message-queue/commit/bd5806c849f802d7f395d11cea4a893da9eba68b))
+
 ## [0.82.0](https://github.com/avivsinai/agent-message-queue/compare/v0.81.2...v0.82.0) (2026-09-28)
 
 
