@@ -90,6 +90,13 @@ control socket. It can also remove an exactly bound proven-stale lock.
 `wake.target_digest` (JSON null when absent). A replacement published after
 that check is refused and preserved.
 
+`--takeover` is an explicit take by another surface of the same user, such as
+a desktop app retiring a wake that a CLI started. The caller still passes its
+own `--inject-via`; retire adopts the saved target's injector identity and
+retry policy instead. It requires `--if-generation`. The generation, lock,
+process-identity and owner-bound checks still apply, so a replaced or
+owner-bearing wake is refused.
+
 Darwin does not signal by numeric PID. A process that appears between the last
 identity recheck and TERM/KILL is never signaled; raw numeric signaling is
 `operator_only`. Live inject-via retirement uses the cooperative control
