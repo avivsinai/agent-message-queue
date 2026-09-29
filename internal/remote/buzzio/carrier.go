@@ -765,8 +765,11 @@ func (c *Carrier) answerApproval(evt nostr.Event, messageID string, appr Approva
 	switch {
 	case err == nil && reply.Outcome.Code == protocol.CodeAlreadyResolved && answeredWith(reply.Snapshot, appr.InteractionID, option):
 		// A replay after a crash: this reaction's answer was delivered.
-	case errors.As(err, &refusal) && refusal.Code == protocol.CodeAlreadyResolved, err == nil && reply.Outcome.Code == protocol.CodeAlreadyResolved:
+	case err == nil && reply.Outcome.Code == protocol.CodeAlreadyResolved:
 		return c.settleApprovalAnswer(evt, messageID, st, "Not sent: this approval was already answered.")
+	case errors.As(err, &refusal) && refusal.Code == protocol.CodeAlreadyResolved:
+		// The endpoint says why: resolved, or an earlier answer in flight.
+		return c.settleApprovalAnswer(evt, messageID, st, "Not sent: "+refusal.Message+".")
 	case err != nil:
 		return c.settleApprovalAnswer(evt, messageID, st, "Not sent: "+err.Error())
 	}

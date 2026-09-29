@@ -125,3 +125,29 @@ func TestSecondAnswerDoesNotReplaceLiveIntent(t *testing.T) {
 		t.Fatalf("resolved = %+v, want %+v", rec.Resolved, want)
 	}
 }
+
+// PR #919 review round 4: the run ended between our answer's send and its
+// resolution, and the record said the run ended before an answer.
+func TestRunEndAfterSentAnswerRecordsTheAnswer(t *testing.T) {
+	store, now := openStore(t)
+	rt := fake.New("fake", "e_1")
+	ep := core.New(core.Config{Store: store, Now: now})
+	ep.Register(rt)
+	id := "11111111-1111-4111-8111-1111111111f4"
+	if _, err := ep.Handle(submitCmd(id), core.Source{Host: "local"}); err != nil {
+		t.Fatal(err)
+	}
+	rt.Question(id, "i_1", []string{"yes", "no"})
+	rt.FailNextRespond(errors.New("transport lost after write"))
+	if _, err := ep.Handle(&protocol.Command{
+		Schema: protocol.SchemaCommand, Op: protocol.OpInteractionRespond, RequestRef: protocol.EncodeRef("local", "fake", id),
+		TargetID: "fake", Epoch: "e_1", InteractionID: "i_1", Option: "yes",
+	}, core.Source{Host: "local"}); err == nil {
+		t.Fatal("setup: the answer should fail in transport")
+	}
+	rt.Complete(id, "done")
+	rec, _, _ := store.Get(requests.Key{CreatorHost: "local", TargetID: "fake", RequestID: id})
+	if want := (protocol.Resolution{InteractionID: "i_1", Outcome: protocol.ResolutionAnswered, Option: "yes"}); len(rec.Resolved) != 1 || rec.Resolved[0] != want {
+		t.Fatalf("resolved = %+v, want %+v", rec.Resolved, want)
+	}
+}

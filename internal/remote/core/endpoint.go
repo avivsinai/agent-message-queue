@@ -952,7 +952,7 @@ func (e *Endpoint) respond(cmd *protocol.Command) (protocol.Reply, error) {
 		// answer it gets, so a different one never replaces that intent
 		// (PR #919 review round 3).
 		e.mu.Unlock()
-		return protocol.Reply{}, protocol.Refuse(protocol.CodeAlreadyResolved, "interaction %s already has an answer (%s) being delivered", cmd.InteractionID, prior)
+		return protocol.Reply{}, protocol.Refuse(protocol.CodeAlreadyResolved, "an earlier answer (%s) is still being delivered; send it again or answer in the terminal", prior)
 	}
 	if rec.Answered == nil {
 		rec.Answered = map[string]string{}
@@ -1380,6 +1380,12 @@ func recordResolution(rec *requests.Record, id string, ev nativeEvidence) {
 		r = protocol.Resolution{InteractionID: id, Outcome: protocol.ResolutionElsewhere}
 	case rec.State.Terminal():
 		r = protocol.Resolution{InteractionID: id, Outcome: protocol.ResolutionRunEnded}
+		if opt, sent := rec.Answered[id]; sent {
+			// The run ended while an answer was sent or in flight: the
+			// resolution that answer caused can arrive after the run's end
+			// (PR #919 review round 4).
+			r = protocol.Resolution{InteractionID: id, Outcome: protocol.ResolutionAnswered, Option: opt}
+		}
 	default:
 		return
 	}
