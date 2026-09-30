@@ -1227,8 +1227,10 @@ func TestE3BRefusalLiftsAfterSeamRewrite(t *testing.T) {
 // is not told to install this repo's stock extension.
 func TestOldBridgeNamesItsOwnRemedy(t *testing.T) {
 	for _, tc := range []struct{ name, liveness, hint, want string }{
-		{"published", `,"bridge_revision":2,"upgrade":"run pi-build update --self"`, "", "run pi-build update --self and reload"},
-		{"manifest hint", ``, "update the pi build", "update the pi build and reload"},
+		{"published", `,"bridge_revision":2,"upgrade":"run pi-build\nupdate --self"`, "", "run pi-build update --self (suggested by the pi bridge), then reload"},
+		// Pro review of #927, 2026-09-30: invisible-only published text must
+		// not suppress the manifest's remedy.
+		{"manifest hint", `,"upgrade":"\u200b"`, "update the pi build", "update the pi build (suggested by this target's manifest), then reload"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a, dir := newTestAttachment(t)

@@ -36,6 +36,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
@@ -131,19 +132,51 @@ func oldBridgeMessage(handle string, live livenessState, hint string) string {
 		have = fmt.Sprintf("is bridge_revision %d", live.revision)
 	}
 	// The remedy the bridge publishes names its own install path; then the
-	// manifest's hint; then this repo's stock extension.
-	remedy := live.upgrade
-	if remedy == "" {
-		remedy = hint
-	}
-	if remedy == "" {
+	// manifest's hint; then this repo's stock extension. A supplied remedy
+	// is labeled with its source, because a stale build keeps publishing it.
+	remedy := ""
+	if r := remedyText(live.upgrade); r != "" {
+		remedy = r + " (suggested by the pi bridge)"
+	} else if r := remedyText(hint); r != "" {
+		remedy = r + " (suggested by this target's manifest)"
+	} else {
 		remedy = "install the pi extension from this repo (pi install git:github.com/avivsinai/agent-message-queue)"
 		if v := strings.TrimPrefix(Version, "v"); v != "" && v != "dev" {
 			remedy = fmt.Sprintf("install the pi extension from this repo at the release tag (pi install git:github.com/avivsinai/agent-message-queue@v%s)", v)
 		}
 	}
-	return fmt.Sprintf("the pi bridge extension for handle %q %s; this amq-remote needs bridge_revision %d or later: %s and reload the pi session",
+	return fmt.Sprintf("the pi bridge extension for handle %q %s; this amq-remote needs bridge_revision %d or later: %s, then reload the pi session",
 		handle, have, MinBridgeRevision, remedy)
+}
+
+// maxRemedyBytes bounds a supplied remedy. A longer one is rejected, not
+// cut, so a truncated command is never shown.
+const maxRemedyBytes = 256
+
+// remedyText normalizes a supplied remedy: whitespace runs become one space,
+// control and format characters (bidi overrides, zero-width) are removed,
+// and text that is empty after that, or longer than maxRemedyBytes, is "".
+func remedyText(s string) string {
+	var b strings.Builder
+	space := false
+	for _, r := range s {
+		switch {
+		case unicode.IsSpace(r):
+			space = b.Len() > 0
+			continue
+		case unicode.IsControl(r), unicode.Is(unicode.Cf, r):
+			continue
+		}
+		if space {
+			b.WriteByte(' ')
+			space = false
+		}
+		b.WriteRune(r)
+	}
+	if out := b.String(); len(out) <= maxRemedyBytes {
+		return out
+	}
+	return ""
 }
 
 // maxRetained bounds the retained run map; terminal+acked runs are dropped
@@ -210,7 +243,7 @@ func build(cfg registry.FactoryConfig, names wireNames) (core.Attachment, error)
 	if err != nil {
 		return nil, err
 	}
-	a.upgradeHint = protocol.BoundReason(c.UpgradeHint)
+	a.upgradeHint = c.UpgradeHint
 	return a, nil
 }
 

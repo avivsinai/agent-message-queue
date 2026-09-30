@@ -372,7 +372,7 @@ func (b bridgeDir) liveness(now time.Time) livenessState {
 	if !rec.Live || rec.PID <= 0 {
 		return livenessState{age: age, reason: "malformed"}
 	}
-	return livenessState{live: true, age: age, pid: rec.PID, gen: rec.SessionGeneration, revision: rec.BridgeRevision, upgrade: protocol.BoundReason(rec.Upgrade)}
+	return livenessState{live: true, age: age, pid: rec.PID, gen: rec.SessionGeneration, revision: rec.BridgeRevision, upgrade: rec.Upgrade}
 }
 
 // listReceipts returns every parseable receipt, ordered oldest-first by
