@@ -58,9 +58,7 @@ func TestApprovalAnsweredElsewhereRefusesLateAnswer(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("serverRequest/resolved did not resolve the approval")
 	}
-	for i := 0; i < 1000 && att.Inspect().PendingInteraction != nil; i++ {
-		runtime.Gosched()
-	}
+	waitNoInteraction(t, att)
 	if code, err := att.Respond(key, s.Epoch, "tool1", "accept"); err != nil || code != protocol.CodeAlreadyResolved {
 		t.Fatalf("late Respond = (%q, %v), want already_resolved", code, err)
 	}
@@ -102,9 +100,7 @@ func TestApprovalWithholdsApproveForUnseenGrants(t *testing.T) {
 		t.Fatalf("file change = approve %q reject %q, want reject only", in.ApproveOption, in.RejectOption)
 	}
 	srv.notify(t, "serverRequest/resolved", `{"threadId":"t1","requestId":"8"}`)
-	for i := 0; i < 1000 && att.Inspect().PendingInteraction != nil; i++ {
-		runtime.Gosched()
-	}
+	waitNoInteraction(t, att)
 	srv.sendServerRequest(t, "9", "item/commandExecution/requestApproval", `{"threadId":"t1","turnId":"u1","itemId":"c1","command":"ls"}`)
 	if in := pending(); in.ApproveOption != "accept" {
 		t.Fatalf("plain command approve = %q, want accept", in.ApproveOption)
@@ -221,5 +217,19 @@ func TestApprovalResolvedBeforeDeliveryIsNotShown(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("the unresolved approval was never shown")
+	}
+}
+
+// waitNoInteraction waits until a resolution has cleared the pending
+// interaction. A bounded Gosched spin let the next read see the old one on a
+// slow runner (macOS CI run 36637228324: plain command approve = "", want
+// accept).
+func waitNoInteraction(t *testing.T, att *Attachment) {
+	t.Helper()
+	for deadline := time.Now().Add(2 * time.Second); att.Inspect().PendingInteraction != nil; {
+		if time.Now().After(deadline) {
+			t.Fatal("the resolved approval was never cleared")
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
