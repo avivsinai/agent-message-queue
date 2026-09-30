@@ -433,6 +433,8 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	if err == nil {
 		relayCfg = mfSnap.Relay
 		edges = buildDMEdges(c.root, stateDir, relayCfg, stderr)
+		edges.pinApprovals(mfSnap.Adapters, stderr)
+		defer edges.unpinApprovals()
 		_, ep, carrier, _, err = serveStartupFrom(stateDir, c.root, *me, mfSnap, sugar, carrierPublish, &carrier, stderr, wireCarrier(c.root, stderr))
 	}
 	if err != nil {
@@ -1119,6 +1121,27 @@ func doctor(args []string) (any, int, error) {
 		}
 		break
 	}
+	// DM approvals of a Claude target with approve need the PermissionRequest
+	// hook; without it every approval is answered in the terminal.
+	for _, s := range sessions {
+		if s.Harness != "claude_code" || !s.Capabilities.ApproveTool {
+			continue
+		}
+		home, herr := os.UserHomeDir()
+		state, serr := "", herr
+		if herr == nil {
+			state, serr = claude.PermissionHookState(home)
+		}
+		switch {
+		case serr != nil:
+			fail("native_capability", s.TargetID, "cannot read ~/.claude/settings.json: "+serr.Error(), "repair ~/.claude/settings.json")
+		case state == claude.StopHookMissing:
+			fail("native_capability", s.TargetID, "the PermissionRequest hook is not installed, so approvals are answered only in the terminal", "run `amq-remote claude install-approval-hook`")
+		case state == claude.StopHookDisabled:
+			report["claude_approval_hook"] = "~/.claude/settings.json holds the PermissionRequest hook and sets disableAllHooks; project or managed settings decide whether it runs"
+		}
+		break
+	}
 	// Body identity (611.15): per-session body keys, attestations, expiry
 	// warnings (7-day horizon enforced inside the inspection). Absent keys
 	// dir reports nothing — sessions without remote sharing are normal.
@@ -1662,7 +1685,7 @@ func discoverAndPrint(root, stateDir, manifestFile, codexSocket string, stdout, 
 // sponsor, never from inside Claude Code.
 func claudeSubcommand(args []string, stdin io.Reader, stdout io.Writer) int {
 	if len(args) == 0 {
-		say(os.Stderr, "claude subcommand required (stop-hook | install-stop-hook | uninstall-stop-hook)\n")
+		say(os.Stderr, "claude subcommand required (stop-hook | install-stop-hook | uninstall-stop-hook | permission-hook | install-approval-hook | uninstall-approval-hook)\n")
 		return protocol.ExitUsage
 	}
 	home, err := os.UserHomeDir()
@@ -1689,6 +1712,42 @@ func claudeSubcommand(args []string, stdin io.Reader, stdout io.Writer) int {
 			return 1
 		}
 		say(stdout, "stop hook removed\n")
+		return 0
+	case "permission-hook":
+		// No decision on any error: exit 0 with no output. TERM, INT and HUP
+		// end the wait, and the terminal dialog decides.
+		fs := flag.NewFlagSet("permission-hook", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		wait := fs.Int("wait", int(claude.DefaultPermissionWait/time.Second), "seconds to wait for a Buzz answer")
+		if fs.Parse(args[1:]) != nil {
+			return 0
+		}
+		done := make(chan struct{})
+		sigs := make(chan os.Signal, 1)
+		signal.Notify(sigs, syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
+		defer signal.Stop(sigs)
+		go func() {
+			<-sigs
+			close(done)
+		}()
+		return claude.RunPermissionHook(home, stdin, stdout, done, time.Duration(*wait)*time.Second)
+	case "install-approval-hook":
+		bin, err := os.Executable()
+		if err != nil {
+			bin = "amq-remote"
+		}
+		if err := claude.InstallPermissionHook(home, bin, claude.DefaultPermissionWait); err != nil {
+			say(os.Stderr, "install-approval-hook: %v\n", err)
+			return 1
+		}
+		say(stdout, "approval hook installed\n")
+		return 0
+	case "uninstall-approval-hook":
+		if err := claude.UninstallPermissionHook(home); err != nil {
+			say(os.Stderr, "uninstall-approval-hook: %v\n", err)
+			return 1
+		}
+		say(stdout, "approval hook removed\n")
 		return 0
 	default:
 		say(os.Stderr, "unknown claude subcommand %q\n", args[0])

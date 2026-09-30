@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -69,13 +70,44 @@ const maxSettingsBytes = 4 << 20
 // may hold: the file is one appended line per turn, and it is removed when
 // the attachment unsubscribes. User off removes only the Buzz binding.
 func InstallStopHook(home, bin string) error {
-	return mutateStopHook(home, true, bin)
+	return mutateHook(home, stopHook, stopHookEntry(bin))
 }
 
 // UninstallStopHook removes marked entries from the Stop chain. When no
 // marked entry exists the file is untouched (no rewrite, no mtime churn).
 func UninstallStopHook(home string) error {
-	return mutateStopHook(home, false, "")
+	return mutateHook(home, stopHook, nil)
+}
+
+// hookSpec names one hook event chain in settings.json and the marker that
+// owns AMQ's entry in it. The Stop and PermissionRequest entries share one
+// installer and differ only here.
+type hookSpec struct {
+	event, marker string
+}
+
+var (
+	stopHook       = hookSpec{event: stopHookType, marker: stopHookMarker}
+	permissionSpec = hookSpec{event: permissionHookType, marker: permissionHookMarker}
+)
+
+// InstallPermissionHook adds the PermissionRequest hook that answers DM
+// approvals: one entry with no matcher (every tool, so a reject can reach
+// any call), marked AMQ_APPROVAL_HOOK=1, whose own deadline is wait and
+// whose installed timeout is wait plus PermissionHookGrace. It is inert in
+// a session no relay share with approve is serving. Idempotent.
+func InstallPermissionHook(home, bin string, wait time.Duration) error {
+	return mutateHook(home, permissionSpec, permissionHookEntry(bin, wait))
+}
+
+// UninstallPermissionHook removes only the marked PermissionRequest entry.
+func UninstallPermissionHook(home string) error {
+	return mutateHook(home, permissionSpec, nil)
+}
+
+// PermissionHookState is StopHookState for the PermissionRequest entry.
+func PermissionHookState(home string) (string, error) {
+	return hookState(home, permissionSpec)
 }
 
 // Stop hook states in the user settings file (StopHookState).
@@ -92,6 +124,10 @@ const (
 // (codex #869 r1); project or managed settings can still change the
 // effective result.
 func StopHookState(home string) (string, error) {
+	return hookState(home, stopHook)
+}
+
+func hookState(home string, spec hookSpec) (string, error) {
 	raw, err := readRegularBounded(settingsPath(home), maxSettingsBytes)
 	if errors.Is(err, os.ErrNotExist) {
 		return StopHookMissing, nil
@@ -99,7 +135,7 @@ func StopHookState(home string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	loc, err := locateSettings(raw)
+	loc, err := locateSettings(raw, spec.event)
 	if err != nil {
 		return "", err
 	}
@@ -114,7 +150,7 @@ func StopHookState(home string) (string, error) {
 			return "", err
 		}
 		for _, el := range els {
-			if groupHasOurHook(raw[el[0]:el[1]]) {
+			if groupHasOurHook(raw[el[0]:el[1]], spec.marker) {
 				found = true
 			}
 		}
@@ -132,7 +168,10 @@ func settingsPath(home string) string {
 	return filepath.Join(home, ".claude", "settings.json")
 }
 
-func mutateStopHook(home string, install bool, bin string) error {
+// mutateHook installs entry into spec's chain, or removes spec's marked
+// entries when entry is nil.
+func mutateHook(home string, spec hookSpec, entry []byte) error {
+	install := entry != nil
 	path := settingsPath(home)
 	raw, err := readRegularBounded(path, maxSettingsBytes)
 	if err != nil {
@@ -149,9 +188,9 @@ func mutateStopHook(home string, install bool, bin string) error {
 	}
 	var out []byte
 	if install {
-		out, err = rawInsertStopEntry(raw, stopHookEntry(bin))
+		out, err = rawInsertEntry(raw, spec, entry)
 	} else {
-		out, err = rawRemoveStopEntries(raw)
+		out, err = rawRemoveEntries(raw, spec)
 	}
 	if err != nil {
 		return fmt.Errorf("settings %s: %w", path, err)
@@ -179,12 +218,29 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
+// permissionHookCommand runs the PermissionRequest receiver with its wait.
+func permissionHookCommand(bin string, wait time.Duration) string {
+	return permissionHookMarker + shellQuote(bin) + " claude permission-hook --wait " + strconv.Itoa(int(wait/time.Second))
+}
+
+// permissionHookEntry is the PermissionRequest group: no matcher, and a
+// timeout PermissionHookGrace longer than the hook's own wait, so the hook
+// ends first and the terminal dialog decides.
+func permissionHookEntry(bin string, wait time.Duration) []byte {
+	return commandHookEntry(permissionHookCommand(bin, wait), int((wait+PermissionHookGrace)/time.Second))
+}
+
 // stopHookEntry renders one Stop matcher group in Claude Code's settings
 // schema: an OUTER object whose "hooks" array holds the command hook
 // (codex #855 r1 item 4; https://code.claude.com/docs/en/hooks#configuration
 // and internal/keepalive/hookinstall's SessionStart entry use the same
 // shape). Stop takes no matcher.
 func stopHookEntry(bin string) []byte {
+	return commandHookEntry(stopHookCommand(bin), 10)
+}
+
+// commandHookEntry renders one matcher group holding one command hook.
+func commandHookEntry(command string, timeout int) []byte {
 	type hook struct {
 		Type    string `json:"type"`
 		Command string `json:"command"`
@@ -192,7 +248,7 @@ func stopHookEntry(bin string) []byte {
 	}
 	b, _ := json.Marshal(struct {
 		Hooks []hook `json:"hooks"`
-	}{Hooks: []hook{{Type: "command", Command: stopHookCommand(bin), Timeout: 10}}})
+	}{Hooks: []hook{{Type: "command", Command: command, Timeout: timeout}}})
 	return b
 }
 
@@ -204,7 +260,8 @@ type jsonSpan struct {
 	empty                 bool
 }
 
-// settingsLoc is where the root object, hooks object and Stop array live.
+// settingsLoc is where the root object, hooks object and the event's array
+// (Stop or PermissionRequest) live.
 type settingsLoc struct {
 	root  jsonSpan
 	hooks *jsonSpan
@@ -229,8 +286,8 @@ type locFrame struct {
 // hooks/Stop keys — editing any of those would hide or clobber content.
 // (codex #855 r1 item 5: the previous walker never recognized "hooks
 // without Stop" and so added a duplicate top-level hooks key.)
-func locateSettings(raw []byte) (settingsLoc, error) {
-	const hooksPath, stopPath = "$/hooks", "$/hooks/" + stopHookType
+func locateSettings(raw []byte, event string) (settingsLoc, error) {
+	hooksPath, stopPath := "$/hooks", "$/hooks/"+event
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
 	var loc settingsLoc
@@ -266,7 +323,7 @@ func locateSettings(raw []byte) (settingsLoc, error) {
 		case path == hooksPath && !isObj:
 			return errors.New("settings hooks is not an object; refusing to edit")
 		case path == stopPath && !isArr:
-			return errors.New("settings hooks.Stop is not an array; refusing to edit")
+			return fmt.Errorf("settings hooks.%s is not an array; refusing to edit", event)
 		}
 		return nil
 	}
@@ -395,15 +452,15 @@ func groupHooksArray(raw []byte, obj [2]int) (jsonSpan, bool) {
 }
 
 // isOurHook reports whether one inner hook object carries the marker.
-func isOurHook(el []byte) bool {
+func isOurHook(el []byte, marker string) bool {
 	var h struct {
 		Command string `json:"command"`
 	}
-	return json.Unmarshal(el, &h) == nil && strings.HasPrefix(h.Command, stopHookMarker)
+	return json.Unmarshal(el, &h) == nil && strings.HasPrefix(h.Command, marker)
 }
 
 // groupHasOurHook reports whether a matcher group holds any marked hook.
-func groupHasOurHook(el []byte) bool {
+func groupHasOurHook(el []byte, marker string) bool {
 	var g struct {
 		Hooks []json.RawMessage `json:"hooks"`
 	}
@@ -411,7 +468,7 @@ func groupHasOurHook(el []byte) bool {
 		return false
 	}
 	for _, h := range g.Hooks {
-		if isOurHook(h) {
+		if isOurHook(h, marker) {
 			return true
 		}
 	}
@@ -464,8 +521,8 @@ func cutItem(raw []byte, start, end int) []byte {
 // rawInsertStopEntry inserts the matcher group into the Stop chain by byte
 // surgery, creating "Stop" (and "hooks") when absent. Returns nil,nil when
 // an owned group already exists.
-func rawInsertStopEntry(raw, entry []byte) ([]byte, error) {
-	loc, err := locateSettings(raw)
+func rawInsertEntry(raw []byte, spec hookSpec, entry []byte) ([]byte, error) {
+	loc, err := locateSettings(raw, spec.event)
 	if err != nil {
 		return nil, err
 	}
@@ -476,16 +533,16 @@ func rawInsertStopEntry(raw, entry []byte) ([]byte, error) {
 			return nil, err
 		}
 		for _, e := range els {
-			if groupHasOurHook(raw[e[0]:e[1]]) {
+			if groupHasOurHook(raw[e[0]:e[1]], spec.marker) {
 				return nil, nil // already installed
 			}
 		}
 		return insertFirst(raw, *loc.stop, entry), nil
 	case loc.hooks != nil:
-		member := append([]byte(`"`+stopHookType+`":[`), entry...)
+		member := append([]byte(`"`+spec.event+`":[`), entry...)
 		return insertFirst(raw, *loc.hooks, append(member, ']')), nil
 	default:
-		member := append([]byte(`"hooks":{"`+stopHookType+`":[`), entry...)
+		member := append([]byte(`"hooks":{"`+spec.event+`":[`), entry...)
 		return insertFirst(raw, loc.root, append(member, "]}"...)), nil
 	}
 }
@@ -497,17 +554,17 @@ func rawInsertStopEntry(raw, entry []byte) ([]byte, error) {
 // version skipped mixed groups and reported success with our hook still
 // installed). Containers are never removed (see the header). No marked
 // hook -> nil,nil (no write).
-func rawRemoveStopEntries(raw []byte) ([]byte, error) {
+func rawRemoveEntries(raw []byte, spec hookSpec) ([]byte, error) {
 	removed := false
 	for {
-		loc, err := locateSettings(raw)
+		loc, err := locateSettings(raw, spec.event)
 		if err != nil {
 			return nil, err
 		}
 		if loc.stop == nil {
 			break
 		}
-		next, cut, err := cutOneMarkedHook(raw, *loc.stop)
+		next, cut, err := cutOneMarkedHook(raw, *loc.stop, spec.marker)
 		if err != nil {
 			return nil, err
 		}
@@ -523,7 +580,7 @@ func rawRemoveStopEntries(raw []byte) ([]byte, error) {
 }
 
 // cutOneMarkedHook performs the first applicable cut in the Stop array.
-func cutOneMarkedHook(raw []byte, stop jsonSpan) ([]byte, bool, error) {
+func cutOneMarkedHook(raw []byte, stop jsonSpan, marker string) ([]byte, bool, error) {
 	groups, err := arrayElements(raw, stop)
 	if err != nil {
 		return nil, false, err
@@ -540,7 +597,7 @@ func cutOneMarkedHook(raw []byte, stop jsonSpan) ([]byte, bool, error) {
 		ours := 0
 		first := -1
 		for i, h := range hooks {
-			if isOurHook(raw[h[0]:h[1]]) {
+			if isOurHook(raw[h[0]:h[1]], marker) {
 				ours++
 				if first < 0 {
 					first = i

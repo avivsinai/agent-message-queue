@@ -68,6 +68,17 @@ type runRecord struct {
 	// lastText is the newest non-empty assistant text of this run's turn.
 	lastText  string
 	createdAt time.Time
+	// promptID is the promptId of the run's own delivery line: the prompt
+	// its tool calls and PermissionRequests carry. An absorbed delivery has
+	// none, so it gets no DM approval (bead 611.42.3).
+	promptID string
+	// DM approvals (approvals.go): every one bound to the run by id, the
+	// open ones oldest first (open[0] is the one the endpoint shows), how
+	// each closed one ended, and the turn's tool calls.
+	approvals map[string]*approval
+	open      []*approval
+	outcomes  map[string]protocol.Resolution
+	calls     []*toolCall
 }
 
 // Submit implements core.Attachment over the pinned 611.2 wire: the
@@ -201,13 +212,13 @@ func sanitizeAddr(s string) string {
 func evidenceFor(rec *runRecord) core.Evidence {
 	switch {
 	case rec.admitted:
-		ev := core.Evidence{Known: true, Class: core.EvidenceConfirmed, Admitted: true, RunID: rec.msgID, State: rec.state}
+		ev := core.Evidence{Known: true, Class: core.EvidenceConfirmed, Admitted: true, RunID: rec.msgID, State: rec.state, Interaction: rec.pendingApproval()}
 		if rec.terminal && rec.result != nil {
 			ev.Result = rec.result
 		}
 		return ev
 	default:
-		return core.Evidence{Known: true, Class: core.EvidenceTentative, RunID: rec.msgID, State: rec.state}
+		return core.Evidence{Known: true, Class: core.EvidenceTentative, RunID: rec.msgID, State: rec.state, Interaction: rec.pendingApproval()}
 	}
 }
 
@@ -350,6 +361,10 @@ func (a *Attachment) pollConfirmations() {
 	// transcript read. Binding while the cursor lags would publish a result
 	// taken from a partial turn and miss a later turn boundary.
 	stops := readStopMarkers(stopMarkerPath(a.home, reg.SessionID), from)
+	a.mu.Lock()
+	known, openIDs := a.approvalIDsLocked()
+	approve := a.cfg.Approve
+	a.mu.Unlock()
 
 	if cur.off < 0 {
 		// No run knows where its delivery starts: begin at the last chunk,
@@ -373,6 +388,10 @@ func (a *Attachment) pollConfirmations() {
 		truncated = true
 	}
 	cur.off, cur.skipping = rd.next, rd.skipping
+	var disk approvalDisk
+	if approve {
+		disk = a.readApprovalDisk(reg.SessionID, known, openIDs)
+	}
 
 	var events []core.NativeEvent
 	var notes []ActivityNote
@@ -388,6 +407,10 @@ func (a *Attachment) pollConfirmations() {
 			continue
 		}
 		events = a.applyEntryLocked(e, events)
+		a.applyToolEntryLocked(e)
+		if e.Type == "user" && !e.Meta && e.Text != "" && !e.Absorbed {
+			a.claimPromptLocked(e, reg.SessionID)
+		}
 		if a.activitySink == nil {
 			continue
 		}
@@ -403,12 +426,23 @@ func (a *Attachment) pollConfirmations() {
 		a.activityPath = path
 		a.activityNext = rd.next
 	}
+	var writes []approvalResolved
+	events, writes = a.applyApprovalsLocked(reg.SessionID, disk, events)
 	if caughtUp {
 		events = a.bindStopsLocked(stops, events)
 	}
 	sink := a.eventSink
 	activity := a.activitySink
+	ops := a.pendingOps
+	a.pendingOps = nil
 	a.mu.Unlock()
+
+	for _, w := range writes {
+		_ = writeResolved(a.home, reg.SessionID, w)
+	}
+	for _, op := range ops {
+		op()
+	}
 
 	if sink != nil {
 		for _, ev := range events {
@@ -583,6 +617,11 @@ func (a *Attachment) bindStopsLocked(stops stopMarkers, events []core.NativeEven
 		if done == nil {
 			continue
 		}
+		// The run's end closes its open approvals first, so the endpoint sees
+		// each resolution before the terminal outcome.
+		var writes []approvalResolved
+		events, writes = done.endApprovals(events)
+		a.queueRunEndLocked(done, writes)
 		done.terminal = true
 		done.state = protocol.StateCompleted
 		done.result = &protocol.Result{Text: done.lastText, NativeRef: done.msgID}

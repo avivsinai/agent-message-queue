@@ -73,7 +73,7 @@ Each adapter has a unique `target` (the id you pass to `inspect` and
 
 | Kind | Required `config` | What `inspect` advertises on this tree |
 | --- | --- | --- |
-| `claude` | `pid` (Claude Code process id). Optional `home` overrides the Claude home directory. | `Inspect` and `Submit` over the session's cross-session socket. `CancelRequest` and `Steer` are false. Unsupported on Windows. See [Claude Code](#claude-code). |
+| `claude` | `pid` (Claude Code process id). Optional `home` overrides the Claude home directory. Optional `approve` advertises `ApproveTool` and answers approvals from the Buzz DM through the PermissionRequest hook. | `Inspect` and `Submit` over the session's cross-session socket. Submit evidence is `submitted`, so a relay share for Claude sets `min_evidence` `submitted`. `CancelRequest` and `Steer` are false. Unsupported on Windows. See [Claude Code](#claude-code). |
 | `codex` | `socket` and `thread`. Optional `approve` advertises `ApproveTool`. | `Inspect`, `Submit`, and `CancelRequest`. `Steer` is false. |
 | `pi` | `handle`; optional `upgrade_hint`, the remedy shown when the live bridge is too old and publishes none. The pi-bridge extension directory for that handle, `agents/<handle>/extensions/pi-bridge/` under the root, must already exist. | `Inspect` and `Submit`. `ApproveTool` only while the live bridge advertises `bridge_revision` 4 or higher; the reference bridge is revision 3. `CancelRequest` is false. Submit evidence is `submitted`. |
 | `fake` | none | Test double. `epoch` is accepted only for this kind. |
@@ -287,8 +287,8 @@ command runs. `share --dm-channel <channel> --native-session <id>` writes
 these three fields.
 
 Owner commands submit with evidence floor `admitted` by default. A target
-whose adapter proves only delivery, such as pi (`submitted`), refuses those
-submits. `"min_evidence": "submitted"` on the share, written by `share
+whose adapter proves only delivery, such as pi or Claude (`submitted`),
+refuses those submits. `"min_evidence": "submitted"` on the share, written by `share
 --min-evidence submitted`, accepts the weaker evidence. Until the request
 ends, the result row says so: once the request runs, that it reached the
 session and its start is not proven; before that, only that the share
@@ -301,7 +301,7 @@ answer is edited to say so, and a reaction on it then answers nothing.
 | `/inspect` | The target's session state. |
 | `/status <ref>` | The state of a request that this channel submitted. |
 | `/cancel <ref>`, or ❌ on a result row | Cancels that request. |
-| ✅ or ❌ on an approval message | Approves or rejects that pending approval. ✅ is offered only for a command the message shows whole; a file change, a network or permission grant, or a shortened command is approved in the terminal. The first answer, in Buzz or in the terminal, wins, and the message is edited with the outcome. Codex targets with `approve`, and pi targets whose bridge is revision 4 or later. |
+| ✅ or ❌ on an approval message | Approves or rejects that pending approval. ✅ is offered only for a command the message shows whole; a file change, a network or permission grant, or a shortened command is approved in the terminal. The first answer, in Buzz or in the terminal, wins, and the message is edited with the outcome. Codex targets with `approve`, pi targets whose bridge is revision 4 or later, and Claude targets with `approve` and the PermissionRequest hook. |
 
 With `"mention_channels": ["<channel>", ...]` (at most 16, commands
 required), an owner message in one of those channels that mentions the body
@@ -481,7 +481,7 @@ remedy. Doctor exits 6 exactly when `failing` is not empty.
 | `endpoint` | No state directory yet, or the endpoint does not answer `session.list`. |
 | `amq_route` | The endpoint handle (`--me`, default `remote`) is not listed in the root's `config.json`, so other agents cannot route to it. |
 | `registration` | An adapter was refused at startup, or `refusals.json` is unreadable. |
-| `native_capability` | A Claude target is attached but `~/.claude/settings.json` has no AMQ Stop hook. Doctor reads only that file; when it sets `disableAllHooks`, doctor reports `claude_stop_hook` instead, because project or managed settings decide the effective state. |
+| `native_capability` | A Claude target is attached but `~/.claude/settings.json` has no AMQ Stop hook, or a Claude target with `approve` has no AMQ PermissionRequest hook, so its approvals are answered only in the terminal. Doctor reads only that file; when it sets `disableAllHooks`, doctor reports `claude_stop_hook` or `claude_approval_hook` instead, because project or managed settings decide the effective state. |
 | `body_key` | A share's body key or enrolled generation cannot be used. |
 | `tag_expiry` | A share's enrolled grants have expired. |
 | `relay_auth` | A share is not `authenticated`. |
@@ -513,3 +513,34 @@ removes only the AMQ hook and leaves any empty `Stop` or `hooks` container
 behind. The hook command itself always exits 0, so a broken bridge never
 blocks Claude Code. After an endpoint restart, a request that was in flight
 reads `uncertain`.
+
+### Approvals from the Buzz DM
+
+A Claude target with `"approve": true`, shared by a relay share with
+commands and `native_session_id`, shows a tool approval of a request that
+the share submitted in the owner's DM. It needs one more hook:
+
+```text
+amq-remote claude install-approval-hook     # adds a PermissionRequest hook to ~/.claude/settings.json
+amq-remote claude uninstall-approval-hook   # removes only that hook
+```
+
+The hook has no matcher, a 600 second wait, and a 630 second timeout. It
+exits at once with no output, so the terminal dialog decides, unless every
+check passes: the session has a pin that a live `amq-remote serve` wrote for
+that share, and the call belongs to a prompt that an AMQ request delivered
+as its own turn. A request that Claude absorbed into a running turn gets no
+DM approval. The hook never exits 2 and never allows on its own: it prints
+a decision only for the owner's answer to that exact call.
+
+✅ is offered only for a Bash command that the message shows whole, with no
+field beyond `command`, `description`, `timeout` and `run_in_background`,
+and with nothing masked as a secret. Every other call can only be rejected
+from Buzz. ✅ allows that one call; ❌ denies it and the turn goes on. The
+first answer wins, in Buzz or in the terminal. A terminal reject stops the
+hook at once. A terminal approve does not signal the hook, so the endpoint
+detects it from the call's `tool_result` in the transcript and edits the
+message to say it was answered outside Buzz. When two identical calls are
+waiting in one turn, the approval cannot be bound to one of them, and only
+❌ is offered. Another PermissionRequest hook that decides can answer
+first; AMQ reports only what its own hook printed.
