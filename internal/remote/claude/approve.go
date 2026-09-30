@@ -225,9 +225,22 @@ var secretPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}`),
 	regexp.MustCompile(`(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}`),
 	regexp.MustCompile(`://[^/\s:@]+:[^/\s@]+@`),
-	regexp.MustCompile(`(?i)\b[A-Z0-9_]*(password|passwd|pwd|secret|token|api_?key|apikey|access_?key|private_?key|credentials?|auth)[A-Z0-9_]*\s*[=:]\s*[^\s'"]+`),
-	regexp.MustCompile(`(?i)--(password|passwd|token|secret|api-key|apikey|access-key|auth)(=|\s+)\S+`),
+	// Quoted values first, so a value with spaces is masked whole. An
+	// unterminated quote masks to the end of the text.
+	regexp.MustCompile(`(?i)\b` + secretName + `"?\s*[=:]\s*` + quotedValue),
+	regexp.MustCompile(`(?i)\b` + secretName + `"?\s*[=:]\s*[^\s'"]+`),
+	regexp.MustCompile(`(?i)--` + secretFlag + `(=|\s+)` + quotedValue),
+	regexp.MustCompile(`(?i)--` + secretFlag + `(=|\s+)\S+`),
 }
+
+// secretName is a name that holds a secret: an assignment (API_KEY=), a
+// JSON field ("password":), or a config key. secretFlag is such a flag.
+// quotedValue is a double-quoted value with escapes or a single-quoted one.
+const (
+	secretName  = `[A-Z0-9_-]*(password|passwd|pwd|secret|token|api_?key|apikey|access_?key|private_?key|credentials?|auth)[A-Z0-9_-]*`
+	secretFlag  = `(password|passwd|token|secret|api-key|apikey|access-key|auth)`
+	quotedValue = `("(?:[^"\\]|\\.)*("|$)|'[^']*('|$))`
+)
 
 // maskSecrets replaces every secret match with [masked] and reports whether
 // anything changed.

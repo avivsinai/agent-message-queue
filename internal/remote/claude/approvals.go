@@ -15,12 +15,13 @@ import (
 
 // The attachment side of DM approvals (bead 611.42.3). The poller binds
 // each PermissionRequest the hook raised to the run whose prompt it
-// belongs to, shows the oldest open one to the endpoint, and closes it from
-// the one file that decides how it ended: resolved/<iid>.json. The poller
-// writes that file itself only when the terminal decided (the call's
-// tool_result appeared, or the hook died), when the run ended, and never
-// when a Buzz answer is still with a live hook: the hook's own answered
-// record wins, since every resolved file is create-new.
+// belongs to and shows the oldest open one to the endpoint. One file
+// decides how each approval ended: the first create-new of
+// resolved/<iid>.json. The hook prints a decision only after it won that
+// create-new with answered. The poller tries it with answered_elsewhere
+// when the bound call's tool_result appears or the hook died, and with
+// run_ended when the run ends. Whoever loses adopts the file on disk, so
+// memory, events and disk always name the same outcome.
 
 // approval is one PermissionRequest bound to a run.
 type approval struct {
@@ -58,13 +59,14 @@ const maxRunToolCalls = 1024
 type approvalDisk struct {
 	requests map[string]approvalRequest
 	resolved map[string]approvalResolved
-	answered map[string]bool
 }
 
-// readApprovalDisk reads every request not yet known and the resolved and
-// answer state of the open approvals. known holds the ids already bound.
+// readApprovalDisk reads every request not yet known and the resolved file
+// of each open approval and each new request, so a resolution saved while
+// the endpoint was down is adopted when its request is found again. known
+// holds the ids already bound.
 func (a *Attachment) readApprovalDisk(sessionID string, known map[string]bool, open []string) approvalDisk {
-	d := approvalDisk{requests: map[string]approvalRequest{}, resolved: map[string]approvalResolved{}, answered: map[string]bool{}}
+	d := approvalDisk{requests: map[string]approvalRequest{}, resolved: map[string]approvalResolved{}}
 	dir := approveDir(a.home, sessionID)
 	if fi, err := os.Lstat(dir); err != nil || !fi.IsDir() {
 		return d
@@ -83,18 +85,39 @@ func (a *Attachment) readApprovalDisk(sessionID string, known map[string]bool, o
 				continue
 			}
 			d.requests[id] = r
+			open = append(open, id)
 		}
 	}
 	for _, id := range open {
-		var r approvalResolved
-		if err := readApprovalJSON(filepath.Join(dir, "resolved", id+".json"), &r); err == nil && r.InteractionID == id {
+		if r, ok := readResolved(a.home, sessionID, id); ok {
 			d.resolved[id] = r
-		}
-		if _, err := os.Lstat(filepath.Join(dir, "answers", id+".json")); err == nil {
-			d.answered[id] = true
 		}
 	}
 	return d
+}
+
+// readResolved reads resolved/<iid>.json.
+func readResolved(home, sessionID, id string) (approvalResolved, bool) {
+	var r approvalResolved
+	err := readApprovalJSON(filepath.Join(approveDir(home, sessionID), "resolved", id+".json"), &r)
+	return r, err == nil && r.InteractionID == id
+}
+
+// arbitrateLocked tries to record want as how the approval ended, create-new,
+// and returns the outcome that stands: want when this write won, the file's
+// outcome when another writer won first. false means neither is known. The
+// file is tiny, so the write runs under a.mu: the outcome in memory and in
+// the events must be the one on disk.
+func (a *Attachment) arbitrateLocked(sessionID string, want approvalResolved) (protocol.Resolution, bool) {
+	err := writeResolved(a.home, sessionID, want)
+	got := want
+	if err != nil {
+		var ok bool
+		if got, ok = readResolved(a.home, sessionID, want.InteractionID); !ok {
+			return protocol.Resolution{}, false
+		}
+	}
+	return protocol.Resolution{InteractionID: got.InteractionID, Outcome: got.Outcome, Option: got.Option}, true
 }
 
 // approvalIDsLocked lists the ids bound to any run and the open ones.
@@ -196,13 +219,13 @@ func (rec *runRecord) candidates(ap *approval) []*toolCall {
 
 // applyApprovalsLocked applies one poll's approval files and the
 // transcript's tool calls: new requests open on their run, a resolved file
-// closes its approval, and the poller decides when the terminal answered.
-// It returns the events to emit and the resolved files to write outside
-// a.mu. Caller holds a.mu.
-func (a *Attachment) applyApprovalsLocked(sessionID string, d approvalDisk, events []core.NativeEvent) ([]core.NativeEvent, []approvalResolved) {
-	var writes []approvalResolved
+// closes its approval, and the poller arbitrates when the terminal
+// answered. Binding needs the whole transcript: caughtUp reports that this
+// poll's read reached the end of the file, so no candidate call can still
+// be unread. Caller holds a.mu.
+func (a *Attachment) applyApprovalsLocked(sessionID string, d approvalDisk, caughtUp bool, events []core.NativeEvent) []core.NativeEvent {
 	if !a.cfg.Approve {
-		return events, nil
+		return events
 	}
 	ids := make([]string, 0, len(d.requests))
 	for id := range d.requests {
@@ -235,7 +258,9 @@ func (a *Attachment) applyApprovalsLocked(sessionID string, d approvalDisk, even
 		}
 		rec.approvals[id] = ap
 		rec.open = append(rec.open, ap)
-		a.bindCallLocked(rec, ap)
+		if caughtUp {
+			a.bindCallLocked(rec, ap)
+		}
 		if len(rec.open) == 1 {
 			events = append(events, rec.questionEvent(ap))
 		}
@@ -247,22 +272,24 @@ func (a *Attachment) applyApprovalsLocked(sessionID string, d approvalDisk, even
 				continue
 			}
 			before := projectApproval(ap).ApproveOption
-			a.bindCallLocked(rec, ap)
+			if caughtUp {
+				a.bindCallLocked(rec, ap)
+			}
 			if projectApproval(ap).ApproveOption != before && len(rec.open) > 0 && rec.open[0] == ap {
 				events = append(events, rec.questionEvent(ap)) // approve added or withdrawn
 			}
 			if !a.terminalAnswered(rec, ap) && !hookDead(ap.hookPID) {
 				continue
 			}
-			if d.answered[ap.id] && !hookDead(ap.hookPID) {
-				// A Buzz answer is with the live hook: its answered record,
-				// written after it prints, decides.
-				continue
+			// The terminal decided, or the hook is gone. An answer file on
+			// disk is not delivery: only the hook's own answered record,
+			// if it won the create-new first, stands over this one.
+			if res, ok := a.arbitrateLocked(sessionID, approvalResolved{InteractionID: ap.id, Outcome: protocol.ResolutionElsewhere}); ok {
+				events = rec.closeApproval(ap.id, res, events)
 			}
-			writes = append(writes, approvalResolved{InteractionID: ap.id, Outcome: protocol.ResolutionElsewhere})
 		}
 	}
-	return events, writes
+	return events
 }
 
 // bindCallLocked binds an unbound, certain approval to its one candidate
@@ -369,16 +396,23 @@ func (rec *runRecord) closeApproval(id string, res protocol.Resolution, events [
 	return events
 }
 
-// endApprovals closes every open approval as run_ended, queued ones first,
-// and returns the resolved files that tell a lingering hook to stop.
-func (rec *runRecord) endApprovals(events []core.NativeEvent) ([]core.NativeEvent, []approvalResolved) {
-	var writes []approvalResolved
+// endApprovalsLocked closes every open approval of a run that ended,
+// queued ones first. Each tries run_ended as its resolved file, which also
+// tells a lingering hook to stop, and closes with whatever outcome stands on
+// disk. When neither can be recorded the run's end still closes it as
+// run_ended. Caller holds a.mu.
+func (a *Attachment) endApprovalsLocked(rec *runRecord, events []core.NativeEvent) []core.NativeEvent {
 	for len(rec.open) > 0 {
 		id := rec.open[len(rec.open)-1].id
-		events = rec.closeApproval(id, protocol.Resolution{InteractionID: id, Outcome: protocol.ResolutionRunEnded}, events)
-		writes = append(writes, approvalResolved{InteractionID: id, Outcome: protocol.ResolutionRunEnded})
+		res := protocol.Resolution{InteractionID: id, Outcome: protocol.ResolutionRunEnded}
+		if a.boundSession != "" {
+			if got, ok := a.arbitrateLocked(a.boundSession, approvalResolved{InteractionID: id, Outcome: protocol.ResolutionRunEnded}); ok {
+				res = got
+			}
+		}
+		events = rec.closeApproval(id, res, events)
 	}
-	return events, writes
+	return events
 }
 
 // Respond implements core.Attachment for DM approvals. An answer already on
@@ -513,20 +547,12 @@ func (a *Attachment) claimPromptLocked(e transcriptEntry, sessionID string) {
 	a.pendingOps = append(a.pendingOps, func() { _ = writeRunMarker(home, sessionID, promptID, msgID) })
 }
 
-// queueRunEndLocked queues the files a run's end writes: a run_ended record
-// for each approval still open, so a lingering hook stops, and the removal
-// of its prompt marker. Caller holds a.mu.
-func (a *Attachment) queueRunEndLocked(rec *runRecord, writes []approvalResolved) {
+// queueRunEndLocked queues the removal of an ended run's prompt marker, so
+// the hook decides nothing more for that prompt. Caller holds a.mu.
+func (a *Attachment) queueRunEndLocked(rec *runRecord) {
 	sessionID, home, promptID := a.boundSession, a.home, rec.promptID
-	if sessionID == "" || (promptID == "" && len(writes) == 0) {
+	if sessionID == "" || promptID == "" {
 		return
 	}
-	a.pendingOps = append(a.pendingOps, func() {
-		for _, w := range writes {
-			_ = writeResolved(home, sessionID, w)
-		}
-		if promptID != "" {
-			removeRunMarker(home, sessionID, promptID)
-		}
-	})
+	a.pendingOps = append(a.pendingOps, func() { removeRunMarker(home, sessionID, promptID) })
 }

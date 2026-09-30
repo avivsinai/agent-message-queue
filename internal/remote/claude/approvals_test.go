@@ -94,11 +94,18 @@ func (f *approvalFixture) append(lines ...map[string]any) {
 // raise runs the hook for a Bash call and waits, bounded, for its request.
 func (f *approvalFixture) raise(command string) {
 	f.t.Helper()
+	f.raiseWith(command, nil)
+}
+
+// raiseWith is raise with the hook's poll paced by ticks, nil for its own
+// ticker.
+func (f *approvalFixture) raiseWith(command string, ticks <-chan time.Time) {
+	f.t.Helper()
 	in, _ := json.Marshal(map[string]any{
 		"session_id": approvalSession, "prompt_id": "p-1", "hook_event_name": "PermissionRequest",
 		"tool_name": "Bash", "tool_input": map[string]any{"command": command},
 	})
-	h := permissionHook{home: f.home, now: func() time.Time { return f.base }, wait: time.Minute, poll: 5 * time.Millisecond, markerGrace: 0}
+	h := permissionHook{home: f.home, now: func() time.Time { return f.base }, wait: time.Minute, poll: 5 * time.Millisecond, markerGrace: 0, ticks: ticks}
 	go func() {
 		defer close(f.exited)
 		h.run(bytes.NewReader(in), &f.out, f.done)
@@ -262,6 +269,118 @@ func TestApprovalOffersApproveOnlyOnceBound(t *testing.T) {
 		if time.Now().After(deadline) {
 			t.Fatal("approve was never offered after the matching tool_use appeared")
 		}
+	}
+	close(f.done)
+	f.hookExited()
+}
+
+func toolResult(f *approvalFixture, id string, sec int) map[string]any {
+	return map[string]any{
+		"type": "user", "promptId": "p-1", "timestamp": f.stamp(sec),
+		"message": map[string]any{"role": "user", "content": []map[string]any{{"type": "tool_result", "tool_use_id": id, "content": "ok"}}},
+	}
+}
+
+func (f *approvalFixture) resolvedOnDisk() approvalResolved {
+	f.t.Helper()
+	r, ok := readResolved(f.home, approvalSession, f.id)
+	if !ok {
+		f.t.Fatalf("no resolved file for %s", f.id)
+	}
+	return r
+}
+
+// Pro review of #929, 2026-09-30, #1: an answer file waiting on disk is not
+// delivery. The terminal approved, the tool_result appeared and a Buzz answer
+// landed before the hook read it: the terminal's closure wins the resolved
+// file, and the hook prints nothing.
+func TestApprovalTerminalApproveBeatsPendingBuzzAnswer(t *testing.T) {
+	f := newApprovalFixture(t, bashUse("toolu_1", "go test ./..."))
+	ticks := make(chan time.Time)
+	f.raiseWith("go test ./...", ticks)
+	if q := f.question(); q.ApproveOption != optionAllow {
+		t.Fatalf("question = %+v, want approve offered", q)
+	}
+	if code, err := f.att.Respond(pr2Key(), "", f.id, optionAllow); err != nil || code != "" {
+		t.Fatalf("respond = %q, %v; want the answer written", code, err)
+	}
+	f.append(toolResult(f, "toolu_1", 1))
+	if ev := f.resolution(); ev.Outcome != protocol.ResolutionElsewhere || ev.Remote {
+		t.Fatalf("resolution = %+v, want answered_elsewhere", ev)
+	}
+	ticks <- time.Time{} // the hook now reads the answer
+	f.hookExited()
+	if f.out.Len() != 0 {
+		t.Fatalf("hook printed %q, want no decision", f.out.String())
+	}
+	if r := f.resolvedOnDisk(); r.Outcome != protocol.ResolutionElsewhere {
+		t.Fatalf("resolved = %+v, want answered_elsewhere", r)
+	}
+}
+
+// Pro review of #929, 2026-09-30, #2: two identical calls split across the
+// transcript read limit. No binding is decided before the read reaches the
+// end of the file, so approve is never offered.
+func TestApprovalIdenticalCallsSplitAcrossReadNeverOfferApprove(t *testing.T) {
+	f := newApprovalFixture(t)
+	f.raise("make build")
+	filler := strings.Repeat("x", 1<<20)
+	lines := []map[string]any{{"type": "assistant", "timestamp": f.stamp(0),
+		"message": map[string]any{"role": "assistant", "content": []map[string]any{bashUse("toolu_1", "make build")}}}}
+	for i := 0; i < 5; i++ {
+		lines = append(lines, map[string]any{"type": "system", "timestamp": f.stamp(0), "content": filler})
+	}
+	lines = append(lines, map[string]any{"type": "assistant", "timestamp": f.stamp(0),
+		"message": map[string]any{"role": "assistant", "content": []map[string]any{bashUse("toolu_2", "make build")}}})
+	f.append(lines...)
+	for i := 0; i < 4; i++ {
+		f.att.pollConfirmations()
+	}
+	f.mu.Lock()
+	for _, ev := range f.events {
+		if ev.Type == core.EventQuestion && ev.Interaction != nil && ev.Interaction.ApproveOption != "" {
+			f.mu.Unlock()
+			t.Fatalf("approve offered: %+v", ev.Interaction)
+		}
+	}
+	f.mu.Unlock()
+	if code, _ := f.att.Respond(pr2Key(), "", f.id, optionAllow); code != protocol.CodeInvalid {
+		t.Fatalf("approve = %q, want invalid", code)
+	}
+	close(f.done)
+	f.hookExited()
+}
+
+// Pro review of #929, 2026-09-30, #3: a tool_result and its Stop marker in
+// one poll. The approval ends once, with the outcome on disk, before the
+// run completes.
+func TestApprovalToolResultAndStopInOnePollAgree(t *testing.T) {
+	f := newApprovalFixture(t, bashUse("toolu_1", "go test ./..."))
+	f.raiseWith("go test ./...", make(chan time.Time))
+	f.question()
+	f.append(toolResult(f, "toolu_1", 1), map[string]any{"type": "assistant", "timestamp": f.stamp(1),
+		"message": map[string]any{"role": "assistant", "content": "done"}})
+	appendStopMarker(t, f.home, f.base.Add(2*time.Second).UnixMilli())
+	ev := f.resolution()
+	for deadline := time.Now().Add(3 * time.Second); ; time.Sleep(time.Millisecond) {
+		f.mu.Lock()
+		completed := false
+		for _, e := range f.events {
+			completed = completed || e.Type == core.EventRunCompleted
+		}
+		f.mu.Unlock()
+		if completed {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the run never completed")
+		}
+		f.att.pollConfirmations()
+	}
+	disk := f.resolvedOnDisk()
+	kept, ok := f.att.ResolvedInteraction(pr2Key(), "", f.id)
+	if !ok || ev.Outcome != disk.Outcome || kept.Outcome != disk.Outcome {
+		t.Fatalf("event %s, memory %s (%v), disk %s: want one outcome", ev.Outcome, kept.Outcome, ok, disk.Outcome)
 	}
 	close(f.done)
 	f.hookExited()

@@ -55,6 +55,8 @@ type permissionHook struct {
 	// the attachment writes it when its poller sees the delivery line, which
 	// can trail the first tool call by a tick.
 	markerGrace time.Duration
+	// ticks paces the poll when set; nil uses a ticker of poll.
+	ticks <-chan time.Time
 }
 
 // RunPermissionHook is the hook body. done closes when the process gets
@@ -113,19 +115,24 @@ func (h permissionHook) run(stdin io.Reader, stdout io.Writer, done <-chan struc
 	elsewhere := approvalResolved{InteractionID: id, Outcome: protocol.ResolutionElsewhere}
 	answerPath := filepath.Join(approveDir(h.home, in.SessionID), "answers", id+".json")
 	resolvedPath := filepath.Join(approveDir(h.home, in.SessionID), "resolved", id+".json")
-	t := time.NewTicker(h.poll)
-	defer t.Stop()
+	ticks := h.ticks
+	if ticks == nil {
+		t := time.NewTicker(h.poll)
+		defer t.Stop()
+		ticks = t.C
+	}
 	for {
+		if option, ok := h.answer(answerPath, req); ok {
+			// The first create-new of the resolved file decides. The hook
+			// prints only after it won that with answered; when the
+			// terminal's closure won first, it stays silent.
+			if writeResolved(h.home, in.SessionID, approvalResolved{InteractionID: id, Outcome: protocol.ResolutionAnswered, Option: option}) == nil {
+				writeDecision(stdout, option)
+			}
+			return 0
+		}
 		if resolvedExists(resolvedPath) {
 			return 0 // closed elsewhere: the terminal decides
-		}
-		if option, ok := h.answer(answerPath, req); ok {
-			if resolvedExists(resolvedPath) {
-				return 0
-			}
-			writeDecision(stdout, option)
-			_ = writeResolved(h.home, in.SessionID, approvalResolved{InteractionID: id, Outcome: protocol.ResolutionAnswered, Option: option})
-			return 0
 		}
 		if !h.now().Before(deadline) {
 			_ = writeResolved(h.home, in.SessionID, elsewhere)
@@ -135,7 +142,7 @@ func (h permissionHook) run(stdin io.Reader, stdout io.Writer, done <-chan struc
 		case <-done:
 			_ = writeResolved(h.home, in.SessionID, elsewhere)
 			return 0
-		case <-t.C:
+		case <-ticks:
 		}
 	}
 }

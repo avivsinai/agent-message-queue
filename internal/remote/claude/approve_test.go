@@ -18,6 +18,20 @@ func TestApprovalPreviewMasksSecretsAndOffersApproveOnlyForPlainBash(t *testing.
 	if ok || strings.Contains(preview, "abcdef0123456789") || !strings.Contains(preview, "[masked]") {
 		t.Fatalf("Bash with a token = %q, %v; want the token masked and reject only", preview, ok)
 	}
+	// Pro review of #929, 2026-09-30, #4: quoted assignment and flag values,
+	// and string secret fields of another tool's input.
+	for _, tc := range []struct{ tool, input, secret string }{
+		{"Bash", `{"command":"API_KEY=\"ordinary-demo-value\" ./check"}`, "ordinary-demo-value"},
+		{"Bash", `{"command":"DATABASE_PASSWORD='ordinary demo value' ./check"}`, "demo value"},
+		{"Bash", `{"command":"login --password \"ordinary demo value\""}`, "demo value"},
+		{"Bash", `{"command":"export TOKEN='unterminated demo value"}`, "demo value"},
+		{"WebFetch", `{"url":"https://example.test","api_key":"ordinary-demo-value"}`, "ordinary-demo-value"},
+	} {
+		preview, ok := approvalPreview(tc.tool, json.RawMessage(tc.input), "")
+		if ok || strings.Contains(preview, tc.secret) {
+			t.Fatalf("%s %s = %q, %v; want the value masked and reject only", tc.tool, tc.input, preview, ok)
+		}
+	}
 }
 
 // Bead 611.42.3, design section 5: install adds one PermissionRequest entry

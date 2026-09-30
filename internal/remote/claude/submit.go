@@ -426,8 +426,7 @@ func (a *Attachment) pollConfirmations() {
 		a.activityPath = path
 		a.activityNext = rd.next
 	}
-	var writes []approvalResolved
-	events, writes = a.applyApprovalsLocked(reg.SessionID, disk, events)
+	events = a.applyApprovalsLocked(reg.SessionID, disk, caughtUp, events)
 	if caughtUp {
 		events = a.bindStopsLocked(stops, events)
 	}
@@ -437,9 +436,6 @@ func (a *Attachment) pollConfirmations() {
 	a.pendingOps = nil
 	a.mu.Unlock()
 
-	for _, w := range writes {
-		_ = writeResolved(a.home, reg.SessionID, w)
-	}
 	for _, op := range ops {
 		op()
 	}
@@ -619,9 +615,8 @@ func (a *Attachment) bindStopsLocked(stops stopMarkers, events []core.NativeEven
 		}
 		// The run's end closes its open approvals first, so the endpoint sees
 		// each resolution before the terminal outcome.
-		var writes []approvalResolved
-		events, writes = done.endApprovals(events)
-		a.queueRunEndLocked(done, writes)
+		events = a.endApprovalsLocked(done, events)
+		a.queueRunEndLocked(done)
 		done.terminal = true
 		done.state = protocol.StateCompleted
 		done.result = &protocol.Result{Text: done.lastText, NativeRef: done.msgID}
