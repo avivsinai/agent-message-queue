@@ -22,7 +22,7 @@ func TestRefusedAnswerDoesNotPoisonValidAnswer(t *testing.T) {
 	ep.Register(rt)
 
 	id := "11111111-1111-4111-8111-1111111111e1"
-	if _, err := ep.Handle(submitCmd(id), core.Source{Host: "local"}); err != nil {
+	if _, err := ep.Handle(submitCmd(id), ownerShare); err != nil {
 		t.Fatal(err)
 	}
 	rt.Question(id, "i_1", []string{"yes", "no"})
@@ -32,7 +32,7 @@ func TestRefusedAnswerDoesNotPoisonValidAnswer(t *testing.T) {
 		Schema: protocol.SchemaCommand, Op: protocol.OpInteractionRespond, RequestRef: ref,
 		TargetID: "fake", Epoch: "e_1", InteractionID: "i_1", Option: "maybe",
 	}
-	_, rerr := ep.Handle(wrong, core.Source{Host: "local"})
+	_, rerr := ep.Handle(wrong, ownerShare)
 	if rerr == nil {
 		t.Fatal("refused answer returned no error")
 	}
@@ -50,7 +50,7 @@ func TestRefusedAnswerDoesNotPoisonValidAnswer(t *testing.T) {
 		Schema: protocol.SchemaCommand, Op: protocol.OpInteractionRespond, RequestRef: ref,
 		TargetID: "fake", Epoch: "e_1", InteractionID: "i_1", Option: "yes",
 	}
-	if _, err := ep.Handle(right, core.Source{Host: "local"}); err != nil {
+	if _, err := ep.Handle(right, ownerShare); err != nil {
 		t.Fatalf("valid answer after refusal: %v", err)
 	}
 	answers := rt.Snapshot().Answers

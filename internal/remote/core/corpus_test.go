@@ -224,7 +224,9 @@ func (h *harness) command(raw map[string]any) (*protocol.Command, core.Source) {
 	if err != nil {
 		h.t.Fatalf("decode command %s: %v", data, err)
 	}
-	return decoded, core.Source{Host: host}
+	// Every step comes from the owner's Buzz share, the only source that
+	// may answer an interaction (agent-message-queue-611.46).
+	return decoded, core.Source{Host: host, Origin: ownerShare.Origin}
 }
 
 func setDefault(m map[string]any, key, value string) {
