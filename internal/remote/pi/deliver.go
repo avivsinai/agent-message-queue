@@ -133,6 +133,9 @@ type livenessRecord struct {
 	// BridgeRevision is the extension's implementation revision. 0 means
 	// the record carries none (protocol: bridge revision).
 	BridgeRevision int `json:"bridge_revision,omitempty"`
+	// Upgrade is the extension's own remedy for an owner whose bridge is too
+	// old, for example the command that updates the pi build that ships it.
+	Upgrade string `json:"upgrade,omitempty"`
 }
 
 // heartbeat / freshness: the extension refreshes the heartbeat every 2s and
@@ -179,6 +182,7 @@ type livenessState struct {
 	pid      int    // the live bridge process (set only when live)
 	gen      string // the live bridge's advisory generation ("" = not published)
 	revision int    // the live bridge's bridge_revision (0 = not published)
+	upgrade  string // the live bridge's own remedy, bounded ("" = not published)
 }
 
 // publishRequest publishes one request: atomic write (unique temp name,
@@ -368,7 +372,7 @@ func (b bridgeDir) liveness(now time.Time) livenessState {
 	if !rec.Live || rec.PID <= 0 {
 		return livenessState{age: age, reason: "malformed"}
 	}
-	return livenessState{live: true, age: age, pid: rec.PID, gen: rec.SessionGeneration, revision: rec.BridgeRevision}
+	return livenessState{live: true, age: age, pid: rec.PID, gen: rec.SessionGeneration, revision: rec.BridgeRevision, upgrade: protocol.BoundReason(rec.Upgrade)}
 }
 
 // listReceipts returns every parseable receipt, ordered oldest-first by
