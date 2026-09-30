@@ -1213,6 +1213,12 @@ func (e *Endpoint) onNative(targetID string, ev NativeEvent) {
 		// Pro #5: route through transitionLocked.
 		e.transitionLocked(rec, causeNone, nativeEvidence{interaction: ev.Interaction})
 	case EventQuestionResolved:
+		if ev.Interaction != nil && ev.Outcome != "" && owes(rec, ev.Interaction.InteractionID) {
+			// A late exact resolution settles an owed outcome, terminal
+			// record or not; the run's state does not change.
+			settleOwed(rec, protocol.Resolution{InteractionID: ev.Interaction.InteractionID, Outcome: ev.Outcome, Option: ev.Option})
+			break
+		}
 		if rec.State.Terminal() || (ev.Interaction != nil && (rec.Interaction == nil || rec.Interaction.InteractionID != ev.Interaction.InteractionID)) {
 			// An event that names its interaction resolves only that one.
 			e.mu.Unlock()
@@ -1392,13 +1398,89 @@ func (e *Endpoint) transitionLocked(rec *requests.Record, c cause, ev nativeEvid
 	if open != nil && rec.Interaction == nil {
 		if t := e.targets[rec.TargetID]; t != nil && !ev.clearInteraction {
 			// An adapter that records how each interaction ended reports
-			// the end itself; the run's end never stands in for it.
+			// the end itself; the run's end never stands in for it. The
+			// outcome is owed until the adapter or a late exact
+			// resolution supplies it.
 			if _, isResolver := t.att.(InteractionResolver); isResolver {
+				oweOutcome(rec, open.InteractionID)
 				return
 			}
 		}
 		recordResolution(rec, open.InteractionID, ev)
 	}
+}
+
+// oweOutcome records that interaction id's outcome is owed, once. It is
+// never trimmed: dropping an id would break the obligation. A record owes at
+// most one id in practice, since its pending interaction clears once, at the
+// terminal transition.
+func oweOutcome(rec *requests.Record, id string) {
+	if owes(rec, id) || resolvedIn(rec.Resolved, id) {
+		return
+	}
+	rec.OwedOutcomes = append(rec.OwedOutcomes, id)
+}
+
+// owes reports whether interaction id's outcome is owed.
+func owes(rec *requests.Record, id string) bool {
+	return slices.Contains(rec.OwedOutcomes, id)
+}
+
+// settleOwed records an owed outcome as given and clears the obligation.
+// It is idempotent: an id no longer owed changes nothing.
+func settleOwed(rec *requests.Record, r protocol.Resolution) bool {
+	if !owes(rec, r.InteractionID) {
+		return false
+	}
+	rec.OwedOutcomes = slices.DeleteFunc(rec.OwedOutcomes, func(id string) bool { return id == r.InteractionID })
+	recordResolution(rec, r.InteractionID, nativeEvidence{clearInteraction: true, outcome: r.Outcome, option: r.Option})
+	return true
+}
+
+// recoverOwedOutcomes asks the record's resolver for every owed outcome,
+// outside the lock, and records each one it has. It never changes the
+// record's state.
+func (e *Endpoint) recoverOwedOutcomes(rec *requests.Record) error {
+	key := keyOfRecord(rec)
+	e.mu.Lock()
+	t, ok := e.targets[rec.TargetID]
+	e.mu.Unlock()
+	if !ok {
+		return nil
+	}
+	resolver, isResolver := t.att.(InteractionResolver)
+	if !isResolver {
+		return nil
+	}
+	var found []protocol.Resolution
+	for _, id := range rec.OwedOutcomes {
+		if res, done := resolver.ResolvedInteraction(key, rec.Epoch, id); done && res.InteractionID == id {
+			found = append(found, res)
+		}
+	}
+	if len(found) == 0 {
+		return nil
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	cur, exists, err := e.store.Get(key)
+	if err != nil || !exists {
+		return err
+	}
+	changed := false
+	for _, r := range found {
+		changed = settleOwed(cur, r) || changed
+	}
+	if !changed {
+		return nil
+	}
+	// No target: the terminal result's ack intent is not this write's
+	// business; the ack replay below handles it as before.
+	if _, err := e.commitLocked(cur, nil); err != nil {
+		e.notifyStorageFailureLocked(cur, err)
+		return err
+	}
+	return nil
 }
 
 // resolvedIn reports whether id has a recorded resolution.
@@ -1787,6 +1869,11 @@ func (e *Endpoint) Reconcile() error {
 				rerr = e.replayTerminalAck(rec)
 			}
 		default:
+			if len(rec.OwedOutcomes) > 0 {
+				if rerr = e.recoverOwedOutcomes(rec); rerr != nil {
+					break
+				}
+			}
 			// The retry selector is owesCancel (a cancel we have not
 			// confirmed). If we don't owe a cancel, replay the ack.
 			// replayTerminalAck is idempotent (returns nil if the attachment

@@ -454,3 +454,56 @@ func TestApprovalResolvedFromFreshRecord(t *testing.T) {
 		t.Fatalf("snapshot %s, resolved %+v, want completed with tool-1 answered_elsewhere (Block)", s.State, s.Resolved)
 	}
 }
+
+// dropResolved loses every question-resolved event and delivers the rest.
+type dropResolved struct{ *Attachment }
+
+func (d dropResolved) Subscribe(fn func(core.NativeEvent)) func() {
+	return d.Attachment.Subscribe(func(ev core.NativeEvent) {
+		if ev.Type != core.EventQuestionResolved {
+			fn(ev)
+		}
+	})
+}
+
+// Pro review of #926 r4, 2026-09-30: the resolution callback was lost but
+// the completion callback arrived, so the completed record kept no pending
+// interaction and no outcome, and nothing recovered it. The outcome is owed
+// until Reconcile or a late exact resolution records it.
+func TestApprovalOutcomeRecoveredAfterLostResolution(t *testing.T) {
+	e := newEndpointRun(t)
+	e.ep.UnregisterAll()
+	a := mustAttach(t, e.dir)
+	a.SetNow(func() time.Time { return e.now })
+	e.ep.Register(dropResolved{a})
+	appendEvents(t, e.dir, e.ref, interactionLine(e.ref))
+	_ = a.Inspect()
+	for deadline := time.Now().Add(2 * time.Second); e.get().Interaction == nil; time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the question never reached the record")
+		}
+	}
+	if _, err := e.respond("tool-1", "Allow once"); err != nil {
+		t.Fatal(err)
+	}
+	appendEvents(t, e.dir, e.ref, resolvedLine(e.ref, "answered_elsewhere", "Block"), terminalLine(e.ref, "completed"))
+	_ = a.Inspect()
+	for deadline := time.Now().Add(2 * time.Second); e.get().State != protocol.StateCompleted; time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the completion never reached the record")
+		}
+	}
+	if s := e.get(); len(s.Resolved) != 0 {
+		t.Fatalf("setup: resolved %+v before reconcile, want the resolution lost", s.Resolved)
+	}
+	if err := e.ep.Reconcile(); err != nil {
+		t.Fatal(err)
+	}
+	s := e.get()
+	if len(s.Resolved) != 1 || s.Resolved[0].InteractionID != "tool-1" || s.Resolved[0].Outcome != protocol.ResolutionElsewhere || s.Resolved[0].Option != "Block" {
+		t.Fatalf("resolved %+v, want tool-1 answered_elsewhere (Block)", s.Resolved)
+	}
+	if s.State != protocol.StateCompleted {
+		t.Fatalf("state %s, want completed unchanged", s.State)
+	}
+}
