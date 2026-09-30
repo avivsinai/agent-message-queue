@@ -1,1 +1,1 @@
-{"protocol":"amq:pi-bridge:v1","live":true,"at":"2000-01-01T00:00:00.000Z","pid":4242,"surface":"tui","session_generation":"golden-generation"}
+{"protocol":"amq:pi-bridge:v1","live":true,"at":"2000-01-01T00:00:00.000Z","pid":4242,"surface":"tui","session_generation":"golden-generation","bridge_revision":3}

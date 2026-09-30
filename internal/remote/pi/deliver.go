@@ -21,14 +21,50 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 )
 
 // SentinelUnpinned is the epoch sentinel: the epoch an attachment
-// publishes before it observes its first receipt. Non-empty and
-// protocol-valid, so stale-epoch protection cannot be defeated by ""=="".
-// Only receipts pin a real generation; the sentinel is never derived from
-// the session id or liveness.
+// publishes before it observes its first receipt while no live generation
+// is known. Non-empty and protocol-valid, so stale-epoch protection cannot
+// be defeated by ""=="". It addresses no session generation, so a submit
+// under it is refused stale_epoch. Only receipts pin a real generation.
 const SentinelUnpinned = "unpinned"
+
+// addressPrefix starts an address epoch: `unpinned.<generation>` names the
+// live generation Inspect observed before the first receipt. It binds the
+// caller's submit to that generation without pinning it (protocol: session
+// generation and epoch).
+const addressPrefix = SentinelUnpinned + "."
+
+// addressEpoch returns the address epoch for a live generation, or "" when
+// the generation cannot form a protocol-valid epoch.
+func addressEpoch(gen string) string {
+	if !protocol.ValidEpoch(gen) {
+		return ""
+	}
+	e := addressPrefix + gen
+	if !protocol.ValidEpoch(e) {
+		return ""
+	}
+	return e
+}
+
+// addressedGeneration returns the generation an address epoch names.
+func addressedGeneration(epoch string) (string, bool) {
+	gen, ok := strings.CutPrefix(epoch, addressPrefix)
+	if !ok || addressEpoch(gen) != epoch {
+		return "", false
+	}
+	return gen, true
+}
+
+// MinBridgeRevision is the lowest extension bridge_revision that implements
+// the request-ownership, refusal, and recovery rules this adapter relies
+// on. A live bridge without the marker, or below it, gets no new
+// submissions (protocol: bridge revision).
+const MinBridgeRevision = 3
 
 // ErrAlreadyDelivered marks the duplicate guard: requests/<ref>.json
 // already exists, so the ref was already delivered and must never be
@@ -51,6 +87,10 @@ type deliverRequest struct {
 	NotAfter  string `json:"not_after"`
 	EpochHint string `json:"epoch_hint,omitempty"` // the addressed session generation; the adapter never sends it empty (protocol: session generation and epoch)
 	CreatedAt string `json:"created_at"`
+	// BridgeRevision is the bridge revision this adapter requires. The
+	// extension refuses a request without it, so an adapter that predates
+	// the fence cannot send work (protocol: bridge revision).
+	BridgeRevision int `json:"bridge_revision"`
 }
 
 // receipt is the receipt JSON contract.
@@ -90,6 +130,9 @@ type livenessRecord struct {
 	// change the generation, so it may drop a pin that no longer matches,
 	// never set one (protocol: session generation and epoch).
 	SessionGeneration string `json:"session_generation,omitempty"`
+	// BridgeRevision is the extension's implementation revision. 0 means
+	// the record carries none (protocol: bridge revision).
+	BridgeRevision int `json:"bridge_revision,omitempty"`
 }
 
 // heartbeat / freshness: the extension refreshes the heartbeat every 2s and
@@ -130,11 +173,12 @@ type bridgeDir struct {
 // livenessState is the classified heartbeat: live with the age, or dead with
 // a typed reason ("absent" | "stale" | "malformed" | "unreadable").
 type livenessState struct {
-	live   bool
-	age    time.Duration
-	reason string
-	pid    int    // the live bridge process (set only when live)
-	gen    string // the live bridge's advisory generation ("" = not published)
+	live     bool
+	age      time.Duration
+	reason   string
+	pid      int    // the live bridge process (set only when live)
+	gen      string // the live bridge's advisory generation ("" = not published)
+	revision int    // the live bridge's bridge_revision (0 = not published)
 }
 
 // publishRequest publishes one request: atomic write (unique temp name,
@@ -324,7 +368,7 @@ func (b bridgeDir) liveness(now time.Time) livenessState {
 	if !rec.Live || rec.PID <= 0 {
 		return livenessState{age: age, reason: "malformed"}
 	}
-	return livenessState{live: true, age: age, pid: rec.PID, gen: rec.SessionGeneration}
+	return livenessState{live: true, age: age, pid: rec.PID, gen: rec.SessionGeneration, revision: rec.BridgeRevision}
 }
 
 // listReceipts returns every parseable receipt, ordered oldest-first by
@@ -370,6 +414,24 @@ func (b bridgeDir) listReceipts() []receipt {
 		rc.Ref = f.name
 		out = append(out, *rc)
 	}
+	return out
+}
+
+// listEventRefs returns the ref of every event stream file, sorted by name.
+// Recovery uses it to find refused refs that have no receipt.
+func (b bridgeDir) listEventRefs() []string {
+	entries, err := os.ReadDir(filepath.Join(b.dir, "events"))
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") {
+			continue
+		}
+		out = append(out, strings.TrimSuffix(e.Name(), ".jsonl"))
+	}
+	sort.Strings(out)
 	return out
 }
 

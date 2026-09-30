@@ -504,6 +504,13 @@ func (r *remoteTurn) settled(outcome string, snap protocol.Snapshot) (any, *rpcE
 	case protocol.StateCancelled:
 		return r.say(outcome, StopReasonCancelled, r.statusText(snap))
 	default: // failed, rejected, uncertain
+		if snap.State == protocol.StateRejected && r.meta.Reason == "" {
+			// A deferred refusal keeps the adapter's text on the record,
+			// not the snapshot; request.get carries it.
+			if rep, err := r.get(); err == nil {
+				r.meta.Reason = rep.Outcome.Message
+			}
+		}
 		return r.say(outcome, StopReasonRefusal, r.statusText(snap))
 	}
 }
