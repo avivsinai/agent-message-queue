@@ -43,6 +43,10 @@ type Binding struct {
 	// sharing (manifest native_session_id); commands admit only while the
 	// target's attached session proves this identity.
 	NativeSession string
+	// MinEvidence is the submit evidence floor this share asks of the
+	// target (manifest min_evidence): "" or admitted by default, or
+	// submitted for a harness whose adapter proves delivery only.
+	MinEvidence string
 }
 
 // Normalized is an owner command reduced to what the endpoint needs.

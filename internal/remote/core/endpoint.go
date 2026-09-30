@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"time"
 
@@ -1198,21 +1199,24 @@ func (e *Endpoint) onNative(targetID string, ev NativeEvent) {
 			return
 		}
 	case EventQuestion:
-		if rec.State.Terminal() {
+		if rec.State.Terminal() || (ev.Interaction != nil && resolvedIn(rec.Resolved, ev.Interaction.InteractionID)) {
+			// A resolution recorded first (from Lookup evidence) is final:
+			// a late question event never reopens it.
 			e.mu.Unlock()
 			return
 		}
 		// Pro #5: route through transitionLocked.
 		e.transitionLocked(rec, causeNone, nativeEvidence{interaction: ev.Interaction})
 	case EventQuestionResolved:
-		if rec.State.Terminal() {
+		if rec.State.Terminal() || (ev.Interaction != nil && (rec.Interaction == nil || rec.Interaction.InteractionID != ev.Interaction.InteractionID)) {
+			// An event that names its interaction resolves only that one.
 			e.mu.Unlock()
 			return
 		}
 		// Pro #5: route through transitionLocked. Pro round 2 #21: the
 		// resolution carries no interaction, and causeNone treats a nil
 		// interaction as "unchanged", so the clear is an explicit flag.
-		e.transitionLocked(rec, causeNone, nativeEvidence{clearInteraction: true, resolvedRemotely: ev.Remote})
+		e.transitionLocked(rec, causeNone, nativeEvidence{clearInteraction: true, resolvedRemotely: ev.Remote, outcome: ev.Outcome, option: ev.Option})
 	case EventLocalIntervention:
 		if rec.State.Terminal() {
 			e.mu.Unlock()
@@ -1332,14 +1336,18 @@ const (
 // values mean "no evidence for that field" — transitionLocked preserves the
 // existing value unless the cause dictates otherwise.
 type nativeEvidence struct {
-	runID             string           // NativeRun ("" = no run)
-	result            *protocol.Result // terminal evidence
-	cancel            *protocol.Cancel // cancel metadata from the command/event path
-	code              protocol.Code    // explicit override for refused/attachment_lost
-	reason            string           // adapter refusal text; causeRefused copies it onto the snapshot
-	interaction       *protocol.Interaction
-	clearInteraction  bool // the pending interaction is resolved natively; clear it (nil interaction means unchanged)
-	resolvedRemotely  bool // with clearInteraction: the answer AMQ delivered resolved it
+	runID            string           // NativeRun ("" = no run)
+	result           *protocol.Result // terminal evidence
+	cancel           *protocol.Cancel // cancel metadata from the command/event path
+	code             protocol.Code    // explicit override for refused/attachment_lost
+	reason           string           // adapter refusal text; causeRefused copies it onto the snapshot
+	interaction      *protocol.Interaction
+	clearInteraction bool // the pending interaction is resolved natively; clear it (nil interaction means unchanged)
+	resolvedRemotely bool // with clearInteraction: the answer AMQ delivered resolved it
+	// outcome and option, with clearInteraction, are the exact resolution
+	// the harness reported. Set, they are recorded as given.
+	outcome           protocol.ResolutionOutcome
+	option            string
 	localIntervention bool
 	runTerminal       bool // the run is definitively finished (noop_terminal) — confirm a pending cancel
 }
@@ -1381,12 +1389,66 @@ func (e *Endpoint) transitionLocked(rec *requests.Record, c cause, ev nativeEvid
 	}
 }
 
+// resolvedIn reports whether id has a recorded resolution.
+func resolvedIn(resolved []protocol.Resolution, id string) bool {
+	for _, r := range resolved {
+		if r.InteractionID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// reconcileInteractionLocked applies an attachment's interaction evidence to
+// a live record, idempotently: a recorded resolution of the record's pending
+// interaction closes it with that exact outcome, and the attachment's
+// pending interaction fills a record that shows none, or refreshes the same
+// interaction shown differently, unless it is already resolved. A different
+// pending interaction never replaces the record's through this path; the
+// native events own that order. It runs before every state change in reconcileLive, so a lost
+// native event is recovered from Lookup and a terminal result never closes
+// an interaction ahead of the resolution the harness reported. It reports
+// whether the record changed.
+func (e *Endpoint) reconcileInteractionLocked(rec *requests.Record, ev Evidence) bool {
+	changed := false
+	for _, r := range ev.Resolved {
+		if rec.Interaction != nil && rec.Interaction.InteractionID == r.InteractionID {
+			e.transitionLocked(rec, causeNone, nativeEvidence{
+				clearInteraction: true, resolvedRemotely: r.Outcome == protocol.ResolutionAnswered, outcome: r.Outcome, option: r.Option,
+			})
+			changed = true
+		}
+	}
+	if in := ev.Interaction; in != nil && !resolvedIn(rec.Resolved, in.InteractionID) &&
+		(rec.Interaction == nil || rec.Interaction.InteractionID == in.InteractionID && !sameInteraction(*rec.Interaction, *in)) {
+		cp := *in
+		e.transitionLocked(rec, causeNone, nativeEvidence{interaction: &cp})
+		changed = true
+	}
+	return changed
+}
+
+// sameInteraction reports whether two views of an interaction are equal.
+func sameInteraction(a, b protocol.Interaction) bool {
+	return a.InteractionID == b.InteractionID && a.Kind == b.Kind && a.Prompt == b.Prompt &&
+		slices.Equal(a.Options, b.Options) && a.RemoteAnswer == b.RemoteAnswer &&
+		a.ApproveOption == b.ApproveOption && a.RejectOption == b.RejectOption
+}
+
 // recordResolution appends how the interaction id stopped being pending,
 // keeping the most recent MaxResolutions entries. A clear that is neither
 // an explicit native resolution nor a terminal run records nothing.
 func recordResolution(rec *requests.Record, id string, ev nativeEvidence) {
+	if resolvedIn(rec.Resolved, id) {
+		return // recorded once; a second report of the same end changes nothing
+	}
 	var r protocol.Resolution
 	switch {
+	case ev.clearInteraction && ev.outcome != "":
+		r = protocol.Resolution{InteractionID: id, Outcome: ev.outcome, Option: ev.option}
+		if r.Outcome == protocol.ResolutionAnswered && r.Option == "" {
+			r.Option = rec.Answered[id]
+		}
 	case ev.clearInteraction && ev.resolvedRemotely:
 		r = protocol.Resolution{InteractionID: id, Outcome: protocol.ResolutionAnswered, Option: rec.Answered[id]}
 	case ev.clearInteraction:
@@ -2034,6 +2096,13 @@ func (e *Endpoint) reconcileLive(rec *requests.Record) error {
 	if !exists || rec.State.Terminal() {
 		e.mu.Unlock()
 		return nil
+	}
+	if ok && lookupErr == nil && e.reconcileInteractionLocked(rec, ev) {
+		if _, err := e.commitLocked(rec, t); err != nil {
+			e.notifyStorageFailureLocked(rec, err)
+			e.mu.Unlock()
+			return err
+		}
 	}
 	switch {
 	case !ok || lookupErr != nil:

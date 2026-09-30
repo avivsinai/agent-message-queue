@@ -5,7 +5,7 @@
 //	requests/<ref>.json   publishRequest — atomic tmp+rename, O_EXCL (protocol: requests)
 //	receipts/<ref>.json   readReceipt — admission proof (protocol: receipts)
 //	events/<ref>.jsonl    readEvents — terminal evidence, rotation-tolerant (protocol: events)
-//	answers/<ref>.<id>.json publishAnswer — one approval answer, create-new (protocol: bridge revision 4)
+//	answers/<hash>.json   publishAnswer — one approval answer, create-new (protocol: bridge revision 4)
 //	bridge.liveness       liveness — heartbeat freshness (protocol: liveness)
 //
 // The adapter writes ONLY requests/ and answers/ (protocol: ownership); every
@@ -14,6 +14,8 @@
 package pi
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -132,7 +134,7 @@ type event struct {
 	Option        string   `json:"option,omitempty"`
 }
 
-// answerRecord is the answers/<ref>.<interaction_id>.json contract. Subject
+// answerRecord is the answers/<hash>.json contract (see answerName). Subject
 // is reserved: revision 4 never checks it, and this adapter leaves it out.
 type answerRecord struct {
 	Protocol      string `json:"protocol"`
@@ -144,11 +146,11 @@ type answerRecord struct {
 	At            string `json:"at"`
 }
 
-// validInteractionID reports whether id is safe as a file-name component:
-// 1 to 128 of [A-Za-z0-9._-], not starting with '.' (protocol: bridge
-// revision 4). An interaction line with another id is ignored.
+// validInteractionID reports whether id is 1 to 128 of [A-Za-z0-9._-]
+// (protocol: bridge revision 4). An interaction line with another id is
+// ignored. Case is significant.
 func validInteractionID(id string) bool {
-	if id == "" || len(id) > 128 || id[0] == '.' {
+	if id == "" || len(id) > 128 {
 		return false
 	}
 	for i := 0; i < len(id); i++ {
@@ -161,9 +163,29 @@ func validInteractionID(id string) bool {
 	return true
 }
 
+// validSessionID reports whether id is a pi session id: 1 to 128 of
+// [A-Za-z0-9._-], starting and ending with a letter or digit (protocol:
+// bridge revision 4; pi's own session id grammar).
+func validSessionID(id string) bool {
+	if !validInteractionID(id) {
+		return false
+	}
+	alnum := func(c byte) bool { return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' }
+	return alnum(id[0]) && alnum(id[len(id)-1])
+}
+
+// answerName is the answer file name for one interaction of one ref: the
+// lowercase hex SHA-256 of the ref, a NUL byte, and the interaction id. It
+// is bounded and case-independent, so two interaction ids that differ only
+// in case never share a file on a case-insensitive filesystem.
+func answerName(ref, interactionID string) string {
+	sum := sha256.Sum256([]byte(ref + "\x00" + interactionID))
+	return hex.EncodeToString(sum[:]) + ".json"
+}
+
 // answerPath is the answer file for one interaction of one ref.
 func (b bridgeDir) answerPath(ref, interactionID string) string {
-	return filepath.Join(b.dir, "answers", refSanitize(ref)+"."+interactionID+".json")
+	return filepath.Join(b.dir, "answers", answerName(ref, interactionID))
 }
 
 // publishAnswer writes one answer create-new (the writeAtomicNew rules). An
@@ -176,17 +198,23 @@ func (b bridgeDir) publishAnswer(ans answerRecord) error {
 	return writeAtomicNew(b.answerPath(ans.Ref, ans.InteractionID), payload)
 }
 
-// readAnswer reads a published answer back, for the duplicate path.
-func (b bridgeDir) readAnswer(ref, interactionID string) (*answerRecord, error) {
-	data, err := os.ReadFile(b.answerPath(ref, interactionID))
+// answerPublished reports whether the answer file for ans already holds
+// exactly ans: the same protocol, ref, interaction id, manifest hash and
+// option. An absent file is false; any other answer on disk is false.
+func (b bridgeDir) answerPublished(ans answerRecord) (bool, error) {
+	data, err := os.ReadFile(b.answerPath(ans.Ref, ans.InteractionID))
+	if os.IsNotExist(err) {
+		return false, nil
+	}
 	if err != nil {
-		return nil, fmt.Errorf("pi: read answer %s: %v", interactionID, err)
+		return false, fmt.Errorf("pi: read answer %s: %v", ans.InteractionID, err)
 	}
-	var ans answerRecord
-	if err := json.Unmarshal(data, &ans); err != nil {
-		return nil, fmt.Errorf("pi: parse answer %s: %v", interactionID, err)
+	var prior answerRecord
+	if err := json.Unmarshal(data, &prior); err != nil {
+		return false, fmt.Errorf("pi: parse answer %s: %v", ans.InteractionID, err)
 	}
-	return &ans, nil
+	return prior.Protocol == ans.Protocol && prior.Ref == ans.Ref && prior.InteractionID == ans.InteractionID &&
+		prior.ManifestHash == ans.ManifestHash && prior.Option == ans.Option, nil
 }
 
 // maxEventText bounds one event line's text to the contract's 256 KiB cap
@@ -209,6 +237,9 @@ type livenessRecord struct {
 	// BridgeRevision is the extension's implementation revision. 0 means
 	// the record carries none (protocol: bridge revision).
 	BridgeRevision int `json:"bridge_revision,omitempty"`
+	// SessionID is pi's own session id (revision 4): stable across reload
+	// and compaction, new on a new session or fork. A relay share pins it.
+	SessionID string `json:"session_id,omitempty"`
 }
 
 // heartbeat / freshness: the extension refreshes the heartbeat every 2s and
@@ -249,12 +280,13 @@ type bridgeDir struct {
 // livenessState is the classified heartbeat: live with the age, or dead with
 // a typed reason ("absent" | "stale" | "malformed" | "unreadable").
 type livenessState struct {
-	live     bool
-	age      time.Duration
-	reason   string
-	pid      int    // the live bridge process (set only when live)
-	gen      string // the live bridge's advisory generation ("" = not published)
-	revision int    // the live bridge's bridge_revision (0 = not published)
+	live      bool
+	age       time.Duration
+	reason    string
+	pid       int    // the live bridge process (set only when live)
+	gen       string // the live bridge's advisory generation ("" = not published)
+	revision  int    // the live bridge's bridge_revision (0 = not published)
+	sessionID string // the live bridge's pi session id ("" = not published)
 }
 
 // publishRequest publishes one request: atomic write (unique temp name,
@@ -444,7 +476,7 @@ func (b bridgeDir) liveness(now time.Time) livenessState {
 	if !rec.Live || rec.PID <= 0 {
 		return livenessState{age: age, reason: "malformed"}
 	}
-	return livenessState{live: true, age: age, pid: rec.PID, gen: rec.SessionGeneration, revision: rec.BridgeRevision}
+	return livenessState{live: true, age: age, pid: rec.PID, gen: rec.SessionGeneration, revision: rec.BridgeRevision, sessionID: rec.SessionID}
 }
 
 // listReceipts returns every parseable receipt, ordered oldest-first by

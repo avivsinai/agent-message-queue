@@ -25,8 +25,7 @@ and never from its own environment.
   requests/<ref>.json    adapter -> extension: one request per ref
   receipts/<ref>.json    extension -> adapter: admission proof
   events/<ref>.jsonl     extension -> adapter: lifecycle and terminal evidence
-  answers/<ref>.<interaction_id>.json
-                         adapter -> extension: one tool-approval answer (revision 4)
+  answers/<hash>.json    adapter -> extension: one tool-approval answer (revision 4)
   bridge.liveness        extension -> adapter: heartbeat
 ```
 
@@ -188,7 +187,9 @@ this protocol, and has `live: true` and `pid > 0`. `session_generation` is the
 current generation; the adapter addresses first-contact requests to it. On shutdown the extension
 writes `live: false`, so the adapter sees the bridge offline at once.
 `surface` is the pi run mode (`tui`, `rpc`, `json`, or `print`).
-`bridge_revision` is the extension's implementation revision.
+`bridge_revision` is the extension's implementation revision. From revision
+4 the record also carries `session_id` (see
+[Session identity](#session-identity)).
 
 ## Bridge revision
 
@@ -240,14 +241,25 @@ revision.
 
 ## Bridge revision 4: tool approval
 
-Revision 4 is revision 3 plus one seam: the extension raises a tool approval
-under a ref it owns, and the adapter answers it from a remote face. Nothing in
+Revision 4 is revision 3 plus a session identity in liveness and one seam:
+the extension raises a tool approval under a ref it owns, and the adapter
+answers it from a remote face. Nothing in
 revision 3 changes, and the protocol string stays `amq:pi-bridge:v1`.
 
 A revision-4 extension must hold a tool call until a decision arrives from a
 local face or from `answers/`, and apply the first one. Stock pi exposes no
 approval that an extension can answer from outside, so the reference extension
 in this repository is revision 3.
+
+### Session identity
+
+A revision-4 liveness record carries `session_id`: pi's own session id, from
+`ctx.sessionManager.getSessionId()`. It stays the same across a reload and a
+compaction, and it changes on a new session and on a fork. It matches
+`^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$`, at most 128 characters. The
+adapter reports it as the target's native session id, which a relay share
+pins; without a live record carrying a valid `session_id` the adapter reports
+none, and a share that needs one is refused.
 
 ### Interaction lines
 
@@ -261,7 +273,7 @@ while it owns the ref: after the receipt and before the ref's terminal event.
 
 | `interaction` field | Meaning |
 | --- | --- |
-| `interaction_id` | The approval's id: 1 to 128 of `[A-Za-z0-9._-]`, not starting with `.`. It is part of the answer file name. |
+| `interaction_id` | The approval's id: 1 to 128 of `[A-Za-z0-9._-]`. Case is significant. |
 | `kind` | `approval`. |
 | `prompt` | What the tool call does, as the owner sees it. |
 | `options` | The options the extension accepts from a remote face. |
@@ -274,7 +286,11 @@ The adapter shows one approval per ref at a time, the oldest open one first.
 It offers the remote face only `approve_option` and `reject_option`. It offers
 the approve option only when `presence` is `remote`, `prompt` is at most 2000
 bytes, and `options` contains `approve_option`; otherwise it offers
-`reject_option` alone and cuts `prompt` to 2000 bytes. Any other `presence`
+`reject_option` alone and cuts `prompt` to 2000 bytes. It marks the approval
+answerable from a remote face only while a remote answer can apply: a live
+bridge of revision 4 or later, in the session generation of the ref's
+receipt, before `expires_at`. Otherwise the approval shows with no remote
+answer, and the adapter updates it when that changes. Any other `presence`
 reads as `local_only`. The adapter ignores a line with an invalid
 `interaction_id`, a second line for an id it already saw, and a line without
 `kind: approval`, a `manifest_hash`, a parseable `expires_at`, or a
@@ -287,14 +303,26 @@ applied, when one did.
 | --- | --- | --- |
 | `answered` | The answer from `answers/` applied. | resolved, answered from AMQ |
 | `answered_elsewhere` | A local face, a timeout, or a refusal of the answer file resolved it. | resolved elsewhere |
-| `run_ended` | The ref reached its terminal event with the approval open. | closed; the terminal event records the end |
+| `run_ended` | The ref reached its terminal event with the approval open. | run ended |
 
-A terminal event closes every open approval of its ref. Neither line is
-terminal evidence: the first-terminal rule ignores both, and a ref with an open
-approval is still running. On attach the adapter rebuilds open approvals from
-the event stream, like every other state.
+A terminal event, `uncertain` included, closes every open approval of its ref
+as `run_ended`. Neither line is terminal evidence: the first-terminal rule
+ignores both, and a ref with an open approval is still running.
 
-### `answers/<ref>.<interaction_id>.json`
+The open approval and how each approval ended, with its exact outcome and
+option, are evidence the adapter rebuilds from the event stream, on attach and
+on every lookup, like every other state. The adapter also publishes each
+change at once, but a published change can be lost, for example at shutdown;
+the next reconcile recovers it from the evidence. A reported outcome is
+recorded as given: an answer AMQ sent never turns `answered_elsewhere` or
+`run_ended` into `answered`.
+
+### `answers/<hash>.json`
+
+`<hash>` is the lowercase hex SHA-256 of the ref, one NUL byte, and the
+`interaction_id`. The name is bounded and does not depend on case, so two
+interaction ids that differ only in case never share a file. The record keeps
+the ref and the interaction id.
 
 ```json
 {
@@ -314,14 +342,17 @@ the event stream, like every other state.
 | `subject` | Optional and reserved. Revision 4 never checks it, and the adapter does not write it. |
 | `at` | RFC 3339 answer time; informational. |
 
-The adapter writes an answer only for the approval it shows for that ref, only
-with an offered option, only before `expires_at`, and only while a live bridge
-advertises revision 4 or higher. It refuses otherwise and writes nothing:
-`attachment_lost` with no live bridge, `already_resolved` below revision 4 or
-for an approval that is not the one shown, `invalid` for an option not offered,
-and `expired` at or after `expires_at`. It publishes create-new, with the same
-steps as a request, and never rewrites an answer: a replay of the answer on
-disk is delivered, and any other answer finds the first one in place and is
+An answer file already on disk with the same `protocol`, `ref`,
+`interaction_id`, `manifest_hash` and `option` is delivered: a replay of it
+succeeds whatever the bridge state is now, and whether it applied is for
+`interaction_resolved` to say. For a fresh answer the adapter writes only for
+the approval it shows for that ref, only with an offered option, and only
+while a remote answer can apply. It refuses otherwise and writes nothing:
+`attachment_lost` with no live bridge, `already_resolved` below revision 4, in
+another session generation, or for an approval that is not the one shown,
+`invalid` for an option not offered, and `expired` at or after `expires_at`. It
+publishes create-new, with the same steps as a request, and never rewrites an
+answer: any other answer finds the first one in place and is
 `already_resolved`. First-answer-wins across remote faces belongs to the
 `amq-remote` endpoint; the extension decides between the remote answer and the
 local faces.

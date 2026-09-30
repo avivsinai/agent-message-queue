@@ -73,6 +73,12 @@ type Evidence struct {
 	Result            *protocol.Result
 	LocalIntervention bool
 	Interaction       *protocol.Interaction
+	// Resolved is how interactions of this run ended, with the exact
+	// outcome and option, for an adapter that keeps them as durable
+	// evidence (pi). Reconcile applies them before any state change, so a
+	// resolution whose native event was lost still closes the record's
+	// interaction with that outcome. Nil for adapters that keep none.
+	Resolved []protocol.Resolution
 	// RefusalCode is the typed refusal carried by a DEFINITIVE native
 	// refusal (pi-bridge protocol: adapter recovery and evidence; receipt present + refused event
 	// = admission proven, execution refused). When set on terminal evidence,
@@ -118,6 +124,12 @@ type NativeEvent struct {
 	// Remote marks an EventQuestionResolved that the answer AMQ delivered
 	// caused. Without it the resolution came from the harness itself.
 	Remote bool
+	// Outcome and Option, when Outcome is set on an EventQuestionResolved,
+	// are the exact resolution the harness reported; an answer intent
+	// never overrides them. With Interaction set, the event resolves only
+	// that interaction id.
+	Outcome protocol.ResolutionOutcome
+	Option  string
 }
 
 // Attachment is the native seam contract from the design. Implementations

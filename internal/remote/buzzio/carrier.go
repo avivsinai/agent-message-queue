@@ -461,7 +461,7 @@ func (c *Carrier) submit(evt nostr.Event, claim Claim, created bool, text string
 			RequestID: claim.RequestID, TargetID: claim.Target, Epoch: claim.Epoch, NotAfter: claim.NotAfter,
 			Input: &protocol.SubmitInput{
 				Text: text, Busy: protocol.BusyReject, Deliver: protocol.DeliverTurn,
-				MinEvidence: string(protocol.EvidenceAdmitted),
+				MinEvidence: c.minEvidence(),
 			},
 		}
 		out, err := c.handle(cmd, src)
@@ -483,6 +483,18 @@ func (c *Carrier) submit(evt nostr.Event, claim Claim, created bool, text string
 	_, err = c.ledger.Settle(evt.ID.Hex(), Settlement{Op: claim.Op, RequestRef: ref, State: string(reply.Snapshot.State)})
 	return err
 }
+
+// minEvidence is the share's submit evidence floor, admitted by default.
+func (c *Carrier) minEvidence() string {
+	if c.binding.MinEvidence == protocol.EvidenceSubmitted {
+		return protocol.EvidenceSubmitted
+	}
+	return protocol.EvidenceAdmitted
+}
+
+// submittedNote tells the owner what a share at submitted evidence proves
+// for a request that has not ended.
+const submittedNote = "\n\nThis share accepts submitted evidence: the request reached the session, and its start is not proven."
 
 // receiptFor is a new request's receipt under this binding.
 func (c *Carrier) receiptFor(ref string, claim Claim) Receipt {
@@ -562,6 +574,9 @@ func (c *Carrier) Publish(snap protocol.Snapshot, origin map[string]string) erro
 		return fmt.Errorf("record %s has no receipt under this share binding", snap.RequestRef)
 	}
 	text := snapshotText(snap, "")
+	if c.minEvidence() == protocol.EvidenceSubmitted && !snap.State.Terminal() {
+		text += submittedNote
+	}
 	if rc.RootEventID == "" {
 		evt := nostr.Event{CreatedAt: nostr.Timestamp(c.now().Unix()), Kind: KindDM, Tags: c.originTags(origin), Content: text}
 		stored, err := c.prepareRow(rootKey(snap.RequestRef), evt, int(snap.Revision))
