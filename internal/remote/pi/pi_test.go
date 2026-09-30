@@ -269,6 +269,14 @@ func TestInspectCapabilities(t *testing.T) {
 	if s.Harness != "pi" || s.Attachment != "live" {
 		t.Fatalf("session = %+v, want live pi projection", s)
 	}
+	// Revision 3 answers no approval; revision 4 advertises approve_tool.
+	if code, err := a.Respond(testKey("caps"), "gen-1", "tool-1", "Allow once"); err != nil || code != protocol.CodeAlreadyResolved {
+		t.Fatalf("revision 3 Respond = %q, %v, want already_resolved", code, err)
+	}
+	stampLivenessRevision(t, dir, ApproveBridgeRevision)
+	if c := a.Inspect().Capabilities; !c.ApproveTool {
+		t.Fatalf("revision 4 capabilities = %+v, want approve_tool", c)
+	}
 	// Stale heartbeat → offline.
 	stampLiveness(t, dir, fixedNow.Add(-time.Minute))
 	if s := a.Inspect(); s.Attachment != "offline" || s.Status != "offline" {

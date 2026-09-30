@@ -5,10 +5,11 @@
 //	requests/<ref>.json   publishRequest — atomic tmp+rename, O_EXCL (protocol: requests)
 //	receipts/<ref>.json   readReceipt — admission proof (protocol: receipts)
 //	events/<ref>.jsonl    readEvents — terminal evidence, rotation-tolerant (protocol: events)
+//	answers/<ref>.<id>.json publishAnswer — one approval answer, create-new (protocol: bridge revision 4)
 //	bridge.liveness       liveness — heartbeat freshness (protocol: liveness)
 //
-// The adapter writes ONLY requests/<ref>.json (protocol: ownership); every other
-// path is read-only. The file names use the sanitized ref, with ':'
+// The adapter writes ONLY requests/ and answers/ (protocol: ownership); every
+// other path is read-only. The file names use the sanitized ref, with ':'
 // and '/' replaced by '_' (protocol: identity and layout).
 package pi
 
@@ -66,6 +67,11 @@ func addressedGeneration(epoch string) (string, bool) {
 // submissions (protocol: bridge revision).
 const MinBridgeRevision = 3
 
+// ApproveBridgeRevision is the lowest bridge_revision that raises tool
+// approvals as interaction lines and reads answers/ (protocol: bridge
+// revision 4). Below it the adapter advertises no approve_tool.
+const ApproveBridgeRevision = 4
+
 // ErrAlreadyDelivered marks the duplicate guard: requests/<ref>.json
 // already exists, so the ref was already delivered and must never be
 // rewritten or re-sent.
@@ -111,6 +117,76 @@ type event struct {
 	Error    string `json:"error,omitempty"`
 	Reason   string `json:"reason,omitempty"`
 	At       string `json:"at,omitempty"`
+
+	// Revision 4 interaction fields (protocol: bridge revision 4).
+	InteractionID string   `json:"interaction_id,omitempty"`
+	Kind          string   `json:"kind,omitempty"`
+	Prompt        string   `json:"prompt,omitempty"`
+	Options       []string `json:"options,omitempty"`
+	ApproveOption string   `json:"approve_option,omitempty"`
+	RejectOption  string   `json:"reject_option,omitempty"`
+	ManifestHash  string   `json:"manifest_hash,omitempty"`
+	ExpiresAt     string   `json:"expires_at,omitempty"`
+	Presence      string   `json:"presence,omitempty"`
+	Outcome       string   `json:"outcome,omitempty"`
+	Option        string   `json:"option,omitempty"`
+}
+
+// answerRecord is the answers/<ref>.<interaction_id>.json contract. Subject
+// is reserved: revision 4 never checks it, and this adapter leaves it out.
+type answerRecord struct {
+	Protocol      string `json:"protocol"`
+	Ref           string `json:"ref"`
+	InteractionID string `json:"interaction_id"`
+	ManifestHash  string `json:"manifest_hash"`
+	Option        string `json:"option"`
+	Subject       string `json:"subject,omitempty"`
+	At            string `json:"at"`
+}
+
+// validInteractionID reports whether id is safe as a file-name component:
+// 1 to 128 of [A-Za-z0-9._-], not starting with '.' (protocol: bridge
+// revision 4). An interaction line with another id is ignored.
+func validInteractionID(id string) bool {
+	if id == "" || len(id) > 128 || id[0] == '.' {
+		return false
+	}
+	for i := 0; i < len(id); i++ {
+		switch c := id[i]; {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '.', c == '_', c == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// answerPath is the answer file for one interaction of one ref.
+func (b bridgeDir) answerPath(ref, interactionID string) string {
+	return filepath.Join(b.dir, "answers", refSanitize(ref)+"."+interactionID+".json")
+}
+
+// publishAnswer writes one answer create-new (the writeAtomicNew rules). An
+// existing file returns ErrAlreadyDelivered and is never rewritten.
+func (b bridgeDir) publishAnswer(ans answerRecord) error {
+	payload, err := json.Marshal(ans)
+	if err != nil {
+		return fmt.Errorf("pi: marshal answer %s: %v", ans.InteractionID, err)
+	}
+	return writeAtomicNew(b.answerPath(ans.Ref, ans.InteractionID), payload)
+}
+
+// readAnswer reads a published answer back, for the duplicate path.
+func (b bridgeDir) readAnswer(ref, interactionID string) (*answerRecord, error) {
+	data, err := os.ReadFile(b.answerPath(ref, interactionID))
+	if err != nil {
+		return nil, fmt.Errorf("pi: read answer %s: %v", interactionID, err)
+	}
+	var ans answerRecord
+	if err := json.Unmarshal(data, &ans); err != nil {
+		return nil, fmt.Errorf("pi: parse answer %s: %v", interactionID, err)
+	}
+	return &ans, nil
 }
 
 // maxEventText bounds one event line's text to the contract's 256 KiB cap

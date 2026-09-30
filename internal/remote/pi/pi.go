@@ -11,12 +11,13 @@
 //
 //	requests/<ref>.json   written by THIS adapter (atomic, create-new)
 //	receipts/<ref>.json   read by THIS adapter (admission proof)
-//	events/<ref>.jsonl    read by THIS adapter (terminal evidence)
+//	events/<ref>.jsonl    read by THIS adapter (terminal evidence, interactions)
+//	answers/<ref>.<id>.json written by THIS adapter (approval answers, revision 4)
 //	bridge.liveness       read by THIS adapter (heartbeat freshness)
 //
-// Ownership (protocol: ownership): the adapter writes ONLY requests/<ref>.json and
-// reads ONLY receipts/, events/, and bridge.liveness. It never touches pi
-// internals, the doorbell layer, or any other extension directory.
+// Ownership (protocol: ownership): the adapter writes ONLY requests/ and
+// answers/, and reads ONLY receipts/, events/, and bridge.liveness. It never
+// touches pi internals, the doorbell layer, or any other extension directory.
 //
 // Evidence: pi's sendUserMessage returns void and swallows rejections, and
 // v1 has no native admission primitive — the per-ref RECEIPT is the only
@@ -82,6 +83,22 @@ type run struct {
 	// Unlike an unreadable log it is surfaced by Lookup: a refused stream
 	// is never "no events" (never confirmed-running).
 	eventsRefused error
+
+	// open holds the run's open tool approvals, oldest first (protocol:
+	// bridge revision 4). open[0] is the pending interaction the endpoint
+	// shows and Respond answers. seen names every interaction id already
+	// applied, so a re-read of the stream never raises one twice.
+	open []*openInteraction
+	seen map[string]bool
+}
+
+// openInteraction is one approval raised by an interaction line. The
+// manifest hash and expiry bind an answer to exactly that tool call; they
+// travel into the answer file and never leave the adapter otherwise.
+type openInteraction struct {
+	inter        protocol.Interaction
+	manifestHash string
+	expiresAt    time.Time
 }
 
 // Attachment implements core.Attachment over the pi-bridge file seam. It
@@ -105,7 +122,12 @@ type Attachment struct {
 	order     []requests.Key // bind order, for bounded pruning + deterministic consume
 	listeners map[int]func(core.NativeEvent)
 	nextID    int
-	now       func() time.Time
+	// emitq is the FIFO of native events not yet delivered. One drainer
+	// goroutine delivers them in order outside a.mu, so a question and its
+	// resolution read in one pass reach the endpoint in that order.
+	emitq    []core.NativeEvent
+	emitting bool
+	now      func() time.Time
 	// submitWait bounds the post-publication receipt poll in Submit. The
 	// extension writes the receipt when it delivers (protocol: receipts); a poll window
 	// that expires with a live bridge leaves the record UNCERTAIN, never
@@ -569,6 +591,14 @@ func (a *Attachment) applyEventsLocked(r *run, events []event) {
 			if !r.terminal {
 				r.state = protocol.StateRunning
 			}
+		case "interaction":
+			if !r.terminal {
+				a.openInteractionLocked(r, ev)
+			}
+		case "interaction_resolved":
+			if !r.terminal {
+				a.resolveInteractionLocked(r, ev)
+			}
 		case "completed":
 			if r.terminal {
 				break
@@ -641,9 +671,111 @@ func (a *Attachment) applyEventsLocked(r *run, events []event) {
 			}
 		}
 		if r.terminal {
+			// A terminal run has no open interaction. The endpoint records
+			// run_ended (or answered, for an answer it sent) when the
+			// terminal transition clears its pending interaction.
+			r.open = nil
 			break // first-terminal-wins (protocol: events): later lines are not evidence
 		}
 	}
+}
+
+// openInteractionLocked applies one interaction line (protocol: bridge
+// revision 4). A line that is not a well-formed approval is ignored, so the
+// local face answers it. Approve is offered only for presence remote, a
+// prompt within MaxApprovalPreview, and an approve option the line offers;
+// otherwise the remote is offered reject only. The remote options are only
+// the approve and reject options, never a broader scope.
+func (a *Attachment) openInteractionLocked(r *run, ev event) {
+	id := ev.InteractionID
+	if !validInteractionID(id) || r.seen[id] {
+		return
+	}
+	if r.seen == nil {
+		r.seen = map[string]bool{}
+	}
+	r.seen[id] = true
+	expires, err := time.Parse(time.RFC3339Nano, ev.ExpiresAt)
+	if ev.Kind != "approval" || ev.ManifestHash == "" || err != nil || !offers(ev.Options, ev.RejectOption) {
+		return
+	}
+	prompt, cut := protocol.TruncateText(ev.Prompt, protocol.MaxApprovalPreview)
+	options := []string{ev.RejectOption}
+	approve := ""
+	if ev.Presence == "remote" && !cut && ev.ApproveOption != ev.RejectOption && offers(ev.Options, ev.ApproveOption) {
+		approve = ev.ApproveOption
+		options = []string{approve, ev.RejectOption}
+	}
+	oi := &openInteraction{
+		inter: protocol.Interaction{
+			InteractionID: id, Kind: "approval", Prompt: prompt, Options: options, RemoteAnswer: true,
+			ApproveOption: approve, RejectOption: ev.RejectOption,
+		},
+		manifestHash: ev.ManifestHash,
+		expiresAt:    expires,
+	}
+	r.open = append(r.open, oi)
+	if len(r.open) == 1 {
+		a.emitQuestionLocked(r, oi)
+	}
+}
+
+// resolveInteractionLocked applies one interaction_resolved line. answered
+// and answered_elsewhere publish the resolution, with Remote true only for
+// answered; run_ended publishes nothing, because the terminal event that
+// follows makes the endpoint record run_ended. An unknown outcome is ignored.
+func (a *Attachment) resolveInteractionLocked(r *run, ev event) {
+	idx := -1
+	for i, oi := range r.open {
+		if oi.inter.InteractionID == ev.InteractionID {
+			idx = i
+		}
+	}
+	if idx < 0 {
+		return
+	}
+	switch ev.Outcome {
+	case "answered", "answered_elsewhere", "run_ended":
+	default:
+		return
+	}
+	r.open = append(r.open[:idx], r.open[idx+1:]...)
+	if idx != 0 || ev.Outcome == "run_ended" {
+		return // a queued approval the endpoint never showed, or the run's end
+	}
+	a.emitLocked(core.NativeEvent{Type: core.EventQuestionResolved, Key: r.key, RunID: r.runID, Remote: ev.Outcome == "answered"})
+	if len(r.open) > 0 {
+		a.emitQuestionLocked(r, r.open[0])
+	}
+}
+
+// emitQuestionLocked publishes oi as the run's pending interaction.
+func (a *Attachment) emitQuestionLocked(r *run, oi *openInteraction) {
+	inter := oi.inter
+	a.emitLocked(core.NativeEvent{Type: core.EventQuestion, Key: r.key, RunID: r.runID, Interaction: &inter})
+}
+
+// pendingLocked returns a copy of the run's pending interaction, or nil.
+func (r *run) pendingLocked() *protocol.Interaction {
+	if len(r.open) == 0 {
+		return nil
+	}
+	inter := r.open[0].inter
+	inter.Options = append([]string(nil), inter.Options...)
+	return &inter
+}
+
+// offers reports whether option is non-empty and one of options.
+func offers(options []string, option string) bool {
+	if option == "" {
+		return false
+	}
+	for _, o := range options {
+		if o == option {
+			return true
+		}
+	}
+	return false
 }
 
 // refusalCodeFor maps a refused reason to the endpoint's typed codes.
@@ -677,10 +809,40 @@ func (a *Attachment) pruneLocked() {
 	}
 }
 
-// emitLocked fans one event out to subscribers. Callers hold a.mu.
+// emitLocked queues one event for subscribers. Callers hold a.mu. Delivery
+// runs on one drainer goroutine outside the lock, in queue order, so a
+// caller never blocks on a subscriber and the endpoint sees events in the
+// order the seam produced them.
 func (a *Attachment) emitLocked(ev core.NativeEvent) {
-	for _, fn := range a.listeners {
-		go fn(ev)
+	if len(a.listeners) == 0 {
+		return
+	}
+	a.emitq = append(a.emitq, ev)
+	if !a.emitting {
+		a.emitting = true
+		go a.drainEmits()
+	}
+}
+
+// drainEmits delivers queued events until the queue is empty.
+func (a *Attachment) drainEmits() {
+	for {
+		a.mu.Lock()
+		if len(a.emitq) == 0 {
+			a.emitting = false
+			a.mu.Unlock()
+			return
+		}
+		ev := a.emitq[0]
+		a.emitq = a.emitq[1:]
+		fns := make([]func(core.NativeEvent), 0, len(a.listeners))
+		for _, fn := range a.listeners {
+			fns = append(fns, fn)
+		}
+		a.mu.Unlock()
+		for _, fn := range fns {
+			fn(ev)
+		}
 	}
 }
 
@@ -718,6 +880,14 @@ func (a *Attachment) InspectSubmit() (protocol.Session, string) {
 	live := a.dir.liveness(a.now()) // 9a: FS read, no lock
 	a.mu.Lock()
 	a.dropStalePinLocked(live)
+	var pending *string
+	for _, k := range a.order {
+		if r, ok := a.runs[k]; ok && !r.acked && len(r.open) > 0 {
+			id := r.open[0].inter.InteractionID
+			pending = &id // the oldest bound run's approval waits longest
+			break
+		}
+	}
 	epoch := a.epoch
 	if epoch == "" {
 		// Before the first receipt the epoch names the live generation, so
@@ -740,8 +910,10 @@ func (a *Attachment) InspectSubmit() (protocol.Session, string) {
 	if !live.live {
 		att, status = "offline", "offline"
 	}
-	// No interaction surface is wired (Respond is already_resolved), so
-	// PendingInteraction is always nil.
+	// Tool approval needs a live bridge that raises interactions and reads
+	// answers/ (protocol: bridge revision 4). A weaker bridge is refused the
+	// capability, never given a substitute.
+	approve := live.live && live.revision >= ApproveBridgeRevision
 	return protocol.Session{
 		Schema:             protocol.SchemaSession,
 		TargetID:           a.target,
@@ -750,15 +922,15 @@ func (a *Attachment) InspectSubmit() (protocol.Session, string) {
 		DisplayName:        "pi " + a.handle,
 		Attachment:         att,
 		Status:             status,
-		PendingInteraction: nil,
+		PendingInteraction: pending,
 		// Capability projection: Steer is FALSE (v1 is followUp-only; the
 		// endpoint's D1 gate refuses deliver=steer pre-adapter and the
-		// adapter refuses it again pre-side-effect), cancel/approve/question
-		// are false (no native seam; keystrokes are forbidden), terminal is
-		// unavailable.
+		// adapter refuses it again pre-side-effect), cancel/question are
+		// false (no native seam; keystrokes are forbidden), approve needs
+		// bridge revision 4, terminal is unavailable.
 		Capabilities: protocol.Capabilities{
 			Inspect: true, Submit: submit, CancelRequest: false, Steer: false,
-			ApproveTool: false, AnswerQuestion: false, Terminal: "unavailable",
+			ApproveTool: approve, AnswerQuestion: false, Terminal: "unavailable",
 		},
 		// The adapter never claims `admitted` in Inspect — the per-ref
 		// receipt is the admission proof, not a session-wide capability.
@@ -1019,7 +1191,7 @@ func (a *Attachment) Lookup(key requests.Key, epoch string) (core.Evidence, erro
 		// refusal — it must never silently read as "no events".
 		return core.Evidence{}, r.eventsRefused
 	}
-	ev := core.Evidence{Known: true, RunID: r.runID, State: r.state}
+	ev := core.Evidence{Known: true, RunID: r.runID, State: r.state, Interaction: r.pendingLocked()}
 	if r.acked {
 		// Result released: nothing retained, admission proven.
 		ev.Class = core.EvidenceNone
@@ -1087,10 +1259,61 @@ func (a *Attachment) CancelExact(key requests.Key, epoch string) (core.CancelEvi
 	return core.CancelEvidence{Disposition: protocol.CancelUnsupported, Message: "pi adapter has no native cancel seam; the run resolves from the bridge event stream"}, nil
 }
 
-// Respond implements core.Attachment: no interaction surface is wired, so
-// every answer is already-resolved.
+// Respond implements core.Attachment for tool approvals (protocol: bridge
+// revision 4). It answers only the run's pending interaction, with an
+// offered option, before its expiry, and only through a live bridge of
+// revision 4 or later; a weaker bridge keeps already_resolved. The answer
+// file carries the interaction's manifest hash from the interaction line,
+// so the extension applies it to exactly that tool call. The endpoint owns
+// first-answer-wins; the extension reports which answer applied through
+// interaction_resolved.
 func (a *Attachment) Respond(key requests.Key, epoch, interactionID, option string) (protocol.Code, error) {
-	return protocol.CodeAlreadyResolved, nil
+	a.consume()                     // 9a: seam reads outside a.mu; apply under it
+	a.lateBind(key)                 // 9a: same, for a key not yet bound
+	live := a.dir.liveness(a.now()) // 9a: FS read, no lock
+	if !live.live {
+		return protocol.CodeAttachmentLost, nil
+	}
+	if live.revision < ApproveBridgeRevision {
+		return protocol.CodeAlreadyResolved, nil
+	}
+	a.mu.Lock()
+	r, ok := a.runs[key]
+	if !ok || (r.epoch != "" && r.epoch != epoch) || len(r.open) == 0 || r.open[0].inter.InteractionID != interactionID {
+		a.mu.Unlock()
+		return protocol.CodeAlreadyResolved, nil
+	}
+	head := r.open[0]
+	if !offers(head.inter.Options, option) {
+		a.mu.Unlock()
+		return protocol.CodeInvalid, nil
+	}
+	if !a.now().Before(head.expiresAt) {
+		a.mu.Unlock()
+		return protocol.CodeExpired, nil
+	}
+	ans := answerRecord{
+		Protocol: a.dir.names.protocol, Ref: r.ref, InteractionID: interactionID,
+		ManifestHash: head.manifestHash, Option: option, At: protocol.FormatTime(a.now()),
+	}
+	a.mu.Unlock()
+	err := a.dir.publishAnswer(ans) // file I/O outside a.mu
+	if errors.Is(err, ErrAlreadyDelivered) {
+		// A replay of an answer already on disk is delivered; any other
+		// answer on disk is the first answer and stands.
+		prior, rerr := a.dir.readAnswer(ans.Ref, interactionID)
+		if rerr != nil {
+			return "", rerr
+		}
+		if prior.Option == option && prior.ManifestHash == ans.ManifestHash {
+			return "", nil
+		}
+		return protocol.CodeAlreadyResolved, nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return "", nil
 }
 
 // AcknowledgeResult implements core.Attachment: releases the retained
