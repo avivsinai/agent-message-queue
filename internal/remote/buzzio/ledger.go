@@ -329,6 +329,21 @@ type Approval struct {
 	Prompt        string `json:"prompt"`
 	ApproveOption string `json:"approve_option,omitempty"`
 	RejectOption  string `json:"reject_option,omitempty"`
+	// Disabled means the message now shows that a remote answer cannot
+	// apply; a reaction answers nothing. EditedAt is the second its latest
+	// edit is dated, so the next edit is dated strictly later.
+	Disabled bool  `json:"disabled,omitempty"`
+	EditedAt int64 `json:"edited_at,omitempty"`
+	// Pending is an edit recorded but not yet finished: its view, outbox
+	// key and date. The carrier finishes it before any other change.
+	Pending *ApprovalEdit `json:"pending,omitempty"`
+}
+
+// ApprovalEdit is one intended edit of an approval message.
+type ApprovalEdit struct {
+	View Approval `json:"view"`
+	Key  string   `json:"key"`
+	At   int64    `json:"at"`
 }
 
 // PutApproval maps an approval message's event id to what it shows, so an
@@ -342,6 +357,19 @@ func (l *Ledger) PutApproval(eventID string, a Approval) error {
 		return err
 	}
 	_, _, err = createOnce(filepath.Join(l.dir, "receipts"), keyFile("approval/"+eventID), raw)
+	return err
+}
+
+// UpdateApproval replaces what an approval message shows after an edit.
+func (l *Ledger) UpdateApproval(eventID string, a Approval) error {
+	if !validHexID(eventID) {
+		return fmt.Errorf("approval event id %q is not a hex id", eventID)
+	}
+	raw, err := json.Marshal(a)
+	if err != nil {
+		return err
+	}
+	_, err = fsq.WriteFileAtomic(filepath.Join(l.dir, "receipts"), keyFile("approval/"+eventID), raw, 0o600)
 	return err
 }
 

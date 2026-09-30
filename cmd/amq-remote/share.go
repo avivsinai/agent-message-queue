@@ -113,6 +113,7 @@ func share(args []string, stdout, stderr io.Writer) (int, error) {
 	relayURL := fs.String("relay", "", "relay wss:// URL written into the manifest relay block; requires --target")
 	dmChannel := fs.String("dm-channel", "", "owner's Buzz DM channel id; with --native-session, turns on owner DM commands in the relay block")
 	nativeSession := fs.String("native-session", "", "native session id approved for sharing (see amq-remote inspect); set with --dm-channel")
+	minEvidence := fs.String("min-evidence", "", "submit evidence floor for this share: admitted (default) or submitted; requires --target and --relay")
 	dryRun := fs.Bool("dry-run", false, "print preimages without writing or changing anything")
 	var enable []uint16
 	fs.Func("enable", "opt in to an extra share surface for a new window (repeatable): buzz-dm (kinds 9, 40003), buzz-profile (kind 0)", func(v string) error {
@@ -162,7 +163,13 @@ func share(args []string, stdout, stderr io.Writer) (int, error) {
 	if *dmChannel != "" && *target == "" {
 		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "--dm-channel needs --target and --relay")
 	}
-	bind := relayBinding{target: *target, relayURL: *relayURL, dmChannel: *dmChannel, nativeSession: *nativeSession}
+	switch {
+	case *minEvidence != "" && *target == "":
+		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "--min-evidence needs --target and --relay")
+	case *minEvidence != "" && *minEvidence != protocol.EvidenceAdmitted && *minEvidence != protocol.EvidenceSubmitted:
+		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "--min-evidence must be admitted or submitted, got %q", *minEvidence)
+	}
+	bind := relayBinding{target: *target, relayURL: *relayURL, dmChannel: *dmChannel, nativeSession: *nativeSession, minEvidence: *minEvidence}
 
 	keyDir, err := shareKeyDir(*root, *session)
 	if err != nil {
@@ -751,6 +758,7 @@ func bindManifest(path, session string, bind relayBinding, owner string) (int, e
 type relayBinding struct {
 	target, relayURL         string
 	dmChannel, nativeSession string
+	minEvidence              string
 }
 
 // requireDMGrants refuses a DM binding when the tags lack the buzz-dm kinds:
@@ -768,9 +776,13 @@ func (b relayBinding) requireDMGrants(session string, tags []shareTagFile) error
 	return nil
 }
 
-// apply sets the DM command fields on a share when the binding names them.
+// apply sets the evidence floor and the DM command fields on a share when
+// the binding names them.
 // Without them the share keeps its existing fields.
 func (b relayBinding) apply(sh *manifest.Share) {
+	if b.minEvidence != "" {
+		sh.MinEvidence = b.minEvidence
+	}
 	if b.dmChannel == "" {
 		return
 	}

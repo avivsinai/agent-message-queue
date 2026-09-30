@@ -5,14 +5,17 @@
 //	requests/<ref>.json   publishRequest — atomic tmp+rename, O_EXCL (protocol: requests)
 //	receipts/<ref>.json   readReceipt — admission proof (protocol: receipts)
 //	events/<ref>.jsonl    readEvents — terminal evidence, rotation-tolerant (protocol: events)
+//	answers/<hash>.json   publishAnswer — one approval answer, create-new (protocol: bridge revision 4)
 //	bridge.liveness       liveness — heartbeat freshness (protocol: liveness)
 //
-// The adapter writes ONLY requests/<ref>.json (protocol: ownership); every other
-// path is read-only. The file names use the sanitized ref, with ':'
+// The adapter writes ONLY requests/ and answers/ (protocol: ownership); every
+// other path is read-only. The file names use the sanitized ref, with ':'
 // and '/' replaced by '_' (protocol: identity and layout).
 package pi
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -66,6 +69,11 @@ func addressedGeneration(epoch string) (string, bool) {
 // submissions (protocol: bridge revision).
 const MinBridgeRevision = 3
 
+// ApproveBridgeRevision is the lowest bridge_revision that raises tool
+// approvals as interaction lines and reads answers/ (protocol: bridge
+// revision 4). Below it the adapter advertises no approve_tool.
+const ApproveBridgeRevision = 4
+
 // ErrAlreadyDelivered marks the duplicate guard: requests/<ref>.json
 // already exists, so the ref was already delivered and must never be
 // rewritten or re-sent.
@@ -111,6 +119,102 @@ type event struct {
 	Error    string `json:"error,omitempty"`
 	Reason   string `json:"reason,omitempty"`
 	At       string `json:"at,omitempty"`
+
+	// Revision 4 interaction fields (protocol: bridge revision 4).
+	InteractionID string   `json:"interaction_id,omitempty"`
+	Kind          string   `json:"kind,omitempty"`
+	Prompt        string   `json:"prompt,omitempty"`
+	Options       []string `json:"options,omitempty"`
+	ApproveOption string   `json:"approve_option,omitempty"`
+	RejectOption  string   `json:"reject_option,omitempty"`
+	ManifestHash  string   `json:"manifest_hash,omitempty"`
+	ExpiresAt     string   `json:"expires_at,omitempty"`
+	Presence      string   `json:"presence,omitempty"`
+	Outcome       string   `json:"outcome,omitempty"`
+	Option        string   `json:"option,omitempty"`
+}
+
+// answerRecord is the answers/<hash>.json contract (see answerName). Subject
+// is reserved: revision 4 never checks it, and this adapter leaves it out.
+type answerRecord struct {
+	Protocol      string `json:"protocol"`
+	Ref           string `json:"ref"`
+	InteractionID string `json:"interaction_id"`
+	ManifestHash  string `json:"manifest_hash"`
+	Option        string `json:"option"`
+	Subject       string `json:"subject,omitempty"`
+	At            string `json:"at"`
+}
+
+// validInteractionID reports whether id is 1 to 128 of [A-Za-z0-9._-]
+// (protocol: bridge revision 4). An interaction line with another id is
+// ignored. Case is significant.
+func validInteractionID(id string) bool {
+	if id == "" || len(id) > 128 {
+		return false
+	}
+	for i := 0; i < len(id); i++ {
+		switch c := id[i]; {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '.', c == '_', c == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// validSessionID reports whether id is a pi session id: 1 to 128 of
+// [A-Za-z0-9._-], starting and ending with a letter or digit (protocol:
+// bridge revision 4; pi's own session id grammar).
+func validSessionID(id string) bool {
+	if !validInteractionID(id) {
+		return false
+	}
+	alnum := func(c byte) bool { return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' }
+	return alnum(id[0]) && alnum(id[len(id)-1])
+}
+
+// answerName is the answer file name for one interaction of one ref: the
+// lowercase hex SHA-256 of the ref, a NUL byte, and the interaction id. It
+// is bounded and case-independent, so two interaction ids that differ only
+// in case never share a file on a case-insensitive filesystem.
+func answerName(ref, interactionID string) string {
+	sum := sha256.Sum256([]byte(ref + "\x00" + interactionID))
+	return hex.EncodeToString(sum[:]) + ".json"
+}
+
+// answerPath is the answer file for one interaction of one ref.
+func (b bridgeDir) answerPath(ref, interactionID string) string {
+	return filepath.Join(b.dir, "answers", answerName(ref, interactionID))
+}
+
+// publishAnswer writes one answer create-new (the writeAtomicNew rules). An
+// existing file returns ErrAlreadyDelivered and is never rewritten.
+func (b bridgeDir) publishAnswer(ans answerRecord) error {
+	payload, err := json.Marshal(ans)
+	if err != nil {
+		return fmt.Errorf("pi: marshal answer %s: %v", ans.InteractionID, err)
+	}
+	return writeAtomicNew(b.answerPath(ans.Ref, ans.InteractionID), payload)
+}
+
+// answerPublished reports whether the answer file for ans already holds
+// exactly ans: the same protocol, ref, interaction id, manifest hash and
+// option. An absent file is false; any other answer on disk is false.
+func (b bridgeDir) answerPublished(ans answerRecord) (bool, error) {
+	data, err := os.ReadFile(b.answerPath(ans.Ref, ans.InteractionID))
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("pi: read answer %s: %v", ans.InteractionID, err)
+	}
+	var prior answerRecord
+	if err := json.Unmarshal(data, &prior); err != nil {
+		return false, fmt.Errorf("pi: parse answer %s: %v", ans.InteractionID, err)
+	}
+	return prior.Protocol == ans.Protocol && prior.Ref == ans.Ref && prior.InteractionID == ans.InteractionID &&
+		prior.ManifestHash == ans.ManifestHash && prior.Option == ans.Option, nil
 }
 
 // maxEventText bounds one event line's text to the contract's 256 KiB cap
@@ -133,6 +237,9 @@ type livenessRecord struct {
 	// BridgeRevision is the extension's implementation revision. 0 means
 	// the record carries none (protocol: bridge revision).
 	BridgeRevision int `json:"bridge_revision,omitempty"`
+	// SessionID is pi's own session id (revision 4): stable across reload
+	// and compaction, new on a new session or fork. A relay share pins it.
+	SessionID string `json:"session_id,omitempty"`
 	// Upgrade is the extension's own remedy for an owner whose bridge is too
 	// old, for example the command that updates the pi build that ships it.
 	Upgrade string `json:"upgrade,omitempty"`
@@ -176,13 +283,14 @@ type bridgeDir struct {
 // livenessState is the classified heartbeat: live with the age, or dead with
 // a typed reason ("absent" | "stale" | "malformed" | "unreadable").
 type livenessState struct {
-	live     bool
-	age      time.Duration
-	reason   string
-	pid      int    // the live bridge process (set only when live)
-	gen      string // the live bridge's advisory generation ("" = not published)
-	revision int    // the live bridge's bridge_revision (0 = not published)
-	upgrade  string // the live bridge's own remedy, bounded ("" = not published)
+	live      bool
+	age       time.Duration
+	reason    string
+	pid       int    // the live bridge process (set only when live)
+	gen       string // the live bridge's advisory generation ("" = not published)
+	revision  int    // the live bridge's bridge_revision (0 = not published)
+	sessionID string // the live bridge's pi session id ("" = not published)
+	upgrade   string // the live bridge's own remedy, bounded ("" = not published)
 }
 
 // publishRequest publishes one request: atomic write (unique temp name,
@@ -372,7 +480,7 @@ func (b bridgeDir) liveness(now time.Time) livenessState {
 	if !rec.Live || rec.PID <= 0 {
 		return livenessState{age: age, reason: "malformed"}
 	}
-	return livenessState{live: true, age: age, pid: rec.PID, gen: rec.SessionGeneration, revision: rec.BridgeRevision, upgrade: rec.Upgrade}
+	return livenessState{live: true, age: age, pid: rec.PID, gen: rec.SessionGeneration, revision: rec.BridgeRevision, sessionID: rec.SessionID, upgrade: rec.Upgrade}
 }
 
 // listReceipts returns every parseable receipt, ordered oldest-first by

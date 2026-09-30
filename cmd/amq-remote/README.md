@@ -75,7 +75,7 @@ Each adapter has a unique `target` (the id you pass to `inspect` and
 | --- | --- | --- |
 | `claude` | `pid` (Claude Code process id). Optional `home` overrides the Claude home directory. | `Inspect` and `Submit` over the session's cross-session socket. `CancelRequest` and `Steer` are false. Unsupported on Windows. See [Claude Code](#claude-code). |
 | `codex` | `socket` and `thread`. Optional `approve` advertises `ApproveTool`. | `Inspect`, `Submit`, and `CancelRequest`. `Steer` is false. |
-| `pi` | `handle`; optional `upgrade_hint`, the remedy shown when the live bridge is too old and publishes none. The pi-bridge extension directory for that handle, `agents/<handle>/extensions/pi-bridge/` under the root, must already exist. | `Inspect` and `Submit`. `CancelRequest` is false. Submit evidence is `submitted`. |
+| `pi` | `handle`; optional `upgrade_hint`, the remedy shown when the live bridge is too old and publishes none. The pi-bridge extension directory for that handle, `agents/<handle>/extensions/pi-bridge/` under the root, must already exist. | `Inspect` and `Submit`. `ApproveTool` only while the live bridge advertises `bridge_revision` 4 or higher; the reference bridge is revision 3. `CancelRequest` is false. Submit evidence is `submitted`. |
 | `fake` | none | Test double. `epoch` is accepted only for this kind. |
 
 `epoch` on any kind other than `fake` is exit 2. A duplicate `target` is
@@ -276,13 +276,24 @@ export activity; pi targets do not.
 With `"commands": true`, `"dm_channel_id": "<channel>"` and
 `"native_session_id": "<id>"`, the owner can operate the shared target from
 the Buzz DM channel. `native_session_id` is the native session you approve
-for sharing: the Codex thread id (the `thread` in `--discover` output) or
-the Claude `sessionId` in `~/.claude/sessions/<pid>.json`. Commands run only while the target's attached session
+for sharing: the Codex thread id (the `thread` in `--discover` output), the
+Claude `sessionId` in `~/.claude/sessions/<pid>.json`, or the pi session id
+that a bridge of revision 4 or later publishes as `session_id` in
+`bridge.liveness`. Commands run only while the target's attached session
 has that id, so a different session under the same target is never shared
 by inheritance. Enroll the DM kinds first with `amq-remote share --session
 <session> --enable buzz-dm`; without them the surface stays closed and no
 command runs. `share --dm-channel <channel> --native-session <id>` writes
 these three fields.
+
+Owner commands submit with evidence floor `admitted` by default. A target
+whose adapter proves only delivery, such as pi (`submitted`), refuses those
+submits. `"min_evidence": "submitted"` on the share, written by `share
+--min-evidence submitted`, accepts the weaker evidence. Until the request
+ends, the result row says so: once the request runs, that it reached the
+session and its start is not proven; before that, only that the share
+accepts submitted evidence. An approval message that stops taking a remote
+answer is edited to say so, and a reaction on it then answers nothing.
 
 | Owner sends | Result |
 | --- | --- |
@@ -290,7 +301,7 @@ these three fields.
 | `/inspect` | The target's session state. |
 | `/status <ref>` | The state of a request that this channel submitted. |
 | `/cancel <ref>`, or ❌ on a result row | Cancels that request. |
-| ✅ or ❌ on an approval message | Approves or rejects that pending approval. ✅ is offered only for a command the message shows whole; a file change, a network or permission grant, or a shortened command is approved in the terminal. The first answer, in Buzz or in the terminal, wins, and the message is edited with the outcome. Codex targets with `approve` only. |
+| ✅ or ❌ on an approval message | Approves or rejects that pending approval. ✅ is offered only for a command the message shows whole; a file change, a network or permission grant, or a shortened command is approved in the terminal. The first answer, in Buzz or in the terminal, wins, and the message is edited with the outcome. Codex targets with `approve`, and pi targets whose bridge is revision 4 or later. |
 
 With `"mention_channels": ["<channel>", ...]` (at most 16, commands
 required), an owner message in one of those channels that mentions the body
@@ -431,6 +442,7 @@ it names this session. The session and the endpoint keep running.
 | `--relay URL` | empty | Relay `wss://` URL written into the manifest relay block. Set with `--target`. The owner public key is copied from the enrolled tags. |
 | `--dm-channel ID` | empty | The owner's Buzz DM channel id. Set with `--native-session` and `--target`. Writes `dm_channel_id`, `native_session_id` and `"commands": true` into the share. Refused unless the tags hold the buzz-dm kinds. |
 | `--native-session ID` | empty | The native session id approved for sharing. Set with `--dm-channel`. |
+| `--min-evidence CLASS` | empty | Submit evidence floor for owner commands: `admitted` (the default when unset) or `submitted`. Writes `min_evidence` into the share. Set with `--target`. |
 | `--enable SURFACE` | empty | Request the kinds of `buzz-dm` (9, 40003) or `buzz-profile` (0) in the new window. Repeatable. |
 | `--dry-run` | false | Print what a real run would do. Writes nothing. |
 

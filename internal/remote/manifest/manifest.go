@@ -89,6 +89,11 @@ type Share struct {
 	// the mentioning channel. Commands require dm_channel_id first.
 	MentionChannels []string `json:"mention_channels,omitempty"`
 	Commands        bool     `json:"commands,omitempty"`
+	// MinEvidence is the submit evidence floor for requests from this
+	// share: "admitted" (the default when empty) or "submitted", for a
+	// target whose adapter proves delivery but not the start of the run.
+	// The owner's result row says so while such a request runs.
+	MinEvidence string `json:"min_evidence,omitempty"`
 	// Presence publishes the body's kind 0 profile and kind 10100 status so
 	// the owner's Buzz Desktop lists it. Name is the display name, published
 	// in clear text; it must not carry a path or prompt data.
@@ -342,6 +347,8 @@ func validateRelay(f File, targets map[string]bool) error {
 			return &ErrInvalidRelay{Reason: fmt.Sprintf("share %q: activity needs native_session_id, the approved native session", sh.Session)}
 		case sh.Presence && !validDisplayName(sh.Name):
 			return &ErrInvalidRelay{Reason: fmt.Sprintf("share %q: presence needs a name of 1 to 64 printable characters with no path separator", sh.Session)}
+		case sh.MinEvidence != "" && sh.MinEvidence != "admitted" && sh.MinEvidence != "submitted":
+			return &ErrInvalidRelay{Reason: fmt.Sprintf("share %q: min_evidence must be admitted or submitted", sh.Session)}
 		case len(sh.MentionChannels) > 0 && !sh.Commands:
 			return &ErrInvalidRelay{Reason: fmt.Sprintf("share %q: mention_channels need commands", sh.Session)}
 		case len(sh.MentionChannels) > maxMentionChannels:

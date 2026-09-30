@@ -289,6 +289,12 @@ func (c *Carrier) ingest(evt nostr.Event, normalize func(nostr.Event, Binding, t
 			return c.answer(evt, "cannot reach the shared session: "+err.Error())
 		}
 		claim.Epoch = s.Epoch
+		// The epoch is now fixed. The approved session must still be the
+		// attached one: a switch before the inspect is refused here, and a
+		// switch after it fails the fixed epoch at dispatch.
+		if err := c.fence(); err != nil {
+			return c.settleAnswer(evt, Settlement{Op: n.Op, State: "refused"}, err.Error())
+		}
 	}
 	claim.Command, _ = json.Marshal(map[string]string{"text": n.Text, "ref": n.Ref})
 	claim, created, err := c.ledger.Claim(claim)
@@ -461,7 +467,7 @@ func (c *Carrier) submit(evt nostr.Event, claim Claim, created bool, text string
 			RequestID: claim.RequestID, TargetID: claim.Target, Epoch: claim.Epoch, NotAfter: claim.NotAfter,
 			Input: &protocol.SubmitInput{
 				Text: text, Busy: protocol.BusyReject, Deliver: protocol.DeliverTurn,
-				MinEvidence: string(protocol.EvidenceAdmitted),
+				MinEvidence: c.minEvidence(),
 			},
 		}
 		out, err := c.handle(cmd, src)
@@ -483,6 +489,22 @@ func (c *Carrier) submit(evt nostr.Event, claim Claim, created bool, text string
 	_, err = c.ledger.Settle(evt.ID.Hex(), Settlement{Op: claim.Op, RequestRef: ref, State: string(reply.Snapshot.State)})
 	return err
 }
+
+// minEvidence is the share's submit evidence floor, admitted by default.
+func (c *Carrier) minEvidence() string {
+	if c.binding.MinEvidence == protocol.EvidenceSubmitted {
+		return protocol.EvidenceSubmitted
+	}
+	return protocol.EvidenceAdmitted
+}
+
+// Notes for a share at submitted evidence, on a request that has not ended.
+// Only a running request has the delivery evidence; in any other state the
+// note states the policy and claims nothing about this request.
+const (
+	submittedRunningNote = "\n\nThe request reached the session; its start is not proven (this share accepts submitted evidence)."
+	submittedPolicyNote  = "\n\nThis share accepts submitted evidence: a request counts once the session has it, and its start is not proven."
+)
 
 // receiptFor is a new request's receipt under this binding.
 func (c *Carrier) receiptFor(ref string, claim Claim) Receipt {
@@ -562,6 +584,13 @@ func (c *Carrier) Publish(snap protocol.Snapshot, origin map[string]string) erro
 		return fmt.Errorf("record %s has no receipt under this share binding", snap.RequestRef)
 	}
 	text := snapshotText(snap, "")
+	if c.minEvidence() == protocol.EvidenceSubmitted && !snap.State.Terminal() {
+		if snap.State == protocol.StateRunning {
+			text += submittedRunningNote
+		} else {
+			text += submittedPolicyNote
+		}
+	}
 	if rc.RootEventID == "" {
 		evt := nostr.Event{CreatedAt: nostr.Timestamp(c.now().Unix()), Kind: KindDM, Tags: c.originTags(origin), Content: text}
 		stored, err := c.prepareRow(rootKey(snap.RequestRef), evt, int(snap.Revision))
@@ -621,10 +650,14 @@ func approvalKey(ref, interactionID string) string {
 }
 
 // prepareApprovals posts one message for a pending approval that the owner
-// can answer, and edits it once with the outcome when the record resolves
-// it. Both are keyed per interaction, so a republished revision changes
+// can answer, edits it when whether a remote answer can apply changes, and
+// edits it once with the outcome when the record resolves it. Every edit is
+// keyed per interaction and revision, so a republished revision changes
 // nothing.
 func (c *Carrier) prepareApprovals(snap protocol.Snapshot, rc Receipt, origin map[string]string) error {
+	if err := c.refreshApproval(snap, rc); err != nil {
+		return err
+	}
 	// An older revision replayed after a newer one never posts its approval:
 	// that interaction may be resolved already.
 	if in := snap.Interaction; in != nil && in.RemoteAnswer && in.Kind == "approval" && int(snap.Revision) >= rc.Revision {
@@ -665,8 +698,13 @@ func (c *Carrier) prepareApprovals(snap protocol.Snapshot, rc Receipt, origin ma
 		if !ok {
 			continue
 		}
+		if appr.Pending != nil {
+			if appr, err = c.finishApprovalEdit(msg, appr); err != nil {
+				return err
+			}
+		}
 		now := c.now().Unix()
-		if now <= int64(msg.CreatedAt) {
+		if now <= int64(msg.CreatedAt) || now <= appr.EditedAt {
 			return ErrClockBehind
 		}
 		edit := nostr.Event{CreatedAt: nostr.Timestamp(now), Kind: KindEdit, Tags: c.editTags(msg.ID.Hex()), Content: approvalText(appr, outcomeText(r, appr))}
@@ -677,6 +715,82 @@ func (c *Carrier) prepareApprovals(snap protocol.Snapshot, rc Receipt, origin ma
 	return nil
 }
 
+// refreshApproval edits a posted approval whose answerability changed: the
+// pending interaction stopped, or started again, taking a remote answer, or
+// offers other options. The message and the reaction mapping change as one
+// recoverable step: the intended edit is recorded on the mapping first, then
+// prepared, then the mapping takes the new view. An edit a crash left
+// unfinished is finished before anything is compared, so the message and the
+// mapping always end in agreement.
+func (c *Carrier) refreshApproval(snap protocol.Snapshot, rc Receipt) error {
+	in := snap.Interaction
+	if in == nil || in.Kind != "approval" || int(snap.Revision) < rc.Revision {
+		return nil
+	}
+	key := approvalKey(snap.RequestRef, in.InteractionID)
+	posted, ok, err := c.ledger.Prepared(key)
+	if err != nil || !ok {
+		return err // never posted: nothing to edit
+	}
+	var msg nostr.Event
+	if err := json.Unmarshal(posted.Event, &msg); err != nil {
+		return err
+	}
+	appr, ok, err := c.ledger.ApprovalFor(msg.ID.Hex())
+	if err != nil || !ok {
+		return err
+	}
+	if appr.Pending != nil {
+		if appr, err = c.finishApprovalEdit(msg, appr); err != nil {
+			return err
+		}
+	}
+	want := appr
+	want.Disabled = !in.RemoteAnswer
+	if in.RemoteAnswer {
+		want.ApproveOption, want.RejectOption = in.ApproveOption, in.RejectOption
+	}
+	if want.Disabled == appr.Disabled && want.ApproveOption == appr.ApproveOption && want.RejectOption == appr.RejectOption {
+		return nil
+	}
+	now := c.now().Unix()
+	if now <= int64(msg.CreatedAt) || now <= appr.EditedAt {
+		return ErrClockBehind
+	}
+	appr.Pending = &ApprovalEdit{View: want, Key: fmt.Sprintf("%s/edit/%08d", key, snap.Revision), At: now}
+	if err := c.ledger.UpdateApproval(msg.ID.Hex(), appr); err != nil {
+		return err
+	}
+	_, err = c.finishApprovalEdit(msg, appr)
+	return err
+}
+
+// finishApprovalEdit prepares the edit recorded on appr, idempotently, and
+// then gives the mapping that edit's view, dated by the stored event.
+func (c *Carrier) finishApprovalEdit(msg nostr.Event, appr Approval) (Approval, error) {
+	p := appr.Pending
+	edit := nostr.Event{CreatedAt: nostr.Timestamp(p.At), Kind: KindEdit, Tags: c.editTags(msg.ID.Hex()), Content: approvalText(p.View, "")}
+	if err := c.prepare(p.Key, edit); err != nil {
+		return appr, err
+	}
+	stored, ok, err := c.ledger.Prepared(p.Key)
+	if err != nil || !ok {
+		return appr, fmt.Errorf("approval edit %s not prepared: %v", p.Key, err)
+	}
+	var evt nostr.Event
+	if err := json.Unmarshal(stored.Event, &evt); err != nil {
+		return appr, err
+	}
+	approvalEditPrepared()
+	done := p.View
+	done.Pending, done.EditedAt = nil, int64(evt.CreatedAt)
+	return done, c.ledger.UpdateApproval(msg.ID.Hex(), done)
+}
+
+// approvalEditPrepared runs between preparing an approval edit and giving
+// the mapping its view; tests replace it to crash there.
+var approvalEditPrepared = func() {}
+
 // approvalText is an approval message: what the harness asks to do and how
 // to answer it, or, once resolved, the outcome instead of the instructions.
 func approvalText(a Approval, outcome string) string {
@@ -685,6 +799,8 @@ func approvalText(a Approval, outcome string) string {
 	switch {
 	case outcome != "":
 		b.WriteString("\n\n" + outcome)
+	case a.Disabled:
+		b.WriteString("\n\nIt can no longer be answered from Buzz. Answer in the terminal.")
 	case a.ApproveOption != "" && a.RejectOption != "":
 		b.WriteString("\n\nReact ✅ to approve or ❌ to reject. The first answer, here or in the terminal, wins.")
 	case a.ApproveOption != "":
@@ -738,6 +854,9 @@ func boundPreview(s string) string {
 // is one decision: it is claimed before the endpoint sees it, and a stale
 // or repeated reaction never answers again.
 func (c *Carrier) answerApproval(evt nostr.Event, messageID string, appr Approval, gesture string) error {
+	if appr.Disabled || appr.Pending != nil {
+		return nil // the message shows no remote answer now, or is changing
+	}
 	option := appr.RejectOption
 	if gesture == approveReaction {
 		option = appr.ApproveOption

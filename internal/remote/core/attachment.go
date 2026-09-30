@@ -118,12 +118,29 @@ type NativeEvent struct {
 	// Remote marks an EventQuestionResolved that the answer AMQ delivered
 	// caused. Without it the resolution came from the harness itself.
 	Remote bool
+	// Outcome and Option, when Outcome is set on an EventQuestionResolved,
+	// are the exact resolution the harness reported; an answer intent
+	// never overrides them. With Interaction set, the event resolves only
+	// that interaction id.
+	Outcome protocol.ResolutionOutcome
+	Option  string
 }
 
 // Attachment is the native seam contract from the design. Implementations
 // serialize Submit and CancelExact against the harness's own input path and
 // never touch the local editor. Every method is exact about the request and
 // epoch it acts on.
+// InteractionResolver is an optional Attachment method for an adapter that
+// keeps how each interaction ended as durable evidence (pi). Reconcile asks
+// it for the record's pending interaction before any state change, so a
+// resolution whose native event was lost still closes that interaction with
+// the outcome the harness recorded, never with the answer intent.
+type InteractionResolver interface {
+	// ResolvedInteraction returns how interaction id of the key's run
+	// ended, or false while it is open or unknown.
+	ResolvedInteraction(key requests.Key, epoch, interactionID string) (protocol.Resolution, bool)
+}
+
 // SubmitBlocker is an optional Attachment method: Inspect plus, when the
 // projection advertises submit false, the adapter's actionable reason, both
 // from one observation. The endpoint's unsupported refusal carries it

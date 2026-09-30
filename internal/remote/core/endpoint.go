@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"time"
 
@@ -949,7 +950,12 @@ func (e *Endpoint) respond(cmd *protocol.Command) (protocol.Reply, error) {
 		e.mu.Unlock()
 		return protocol.Reply{}, protocol.Refuse(protocol.CodeAlreadyResolved, "no such pending interaction")
 	}
-	offered := false
+	// An exact replay of the durable answer intent goes to the attachment,
+	// which recognizes an answer it already published, even when the
+	// interaction no longer offers that option (it expired or its session
+	// went away). Only a fresh answer must be one the interaction offers now.
+	prior, done := rec.Answered[cmd.InteractionID]
+	offered := done && prior == cmd.Option
 	for _, o := range rec.Interaction.Options {
 		if o == cmd.Option {
 			offered = true
@@ -959,7 +965,7 @@ func (e *Endpoint) respond(cmd *protocol.Command) (protocol.Reply, error) {
 		e.mu.Unlock()
 		return protocol.Reply{}, protocol.Refuse(protocol.CodeInvalid, "option %q is not offered by interaction %s", cmd.Option, cmd.InteractionID)
 	}
-	if prior, done := rec.Answered[cmd.InteractionID]; done && prior != cmd.Option {
+	if done && prior != cmd.Option {
 		// An earlier answer may already be with the runtime (in flight, or
 		// sent before a transport error). The runtime applies the first
 		// answer it gets, so a different one never replaces that intent
@@ -1198,21 +1204,30 @@ func (e *Endpoint) onNative(targetID string, ev NativeEvent) {
 			return
 		}
 	case EventQuestion:
-		if rec.State.Terminal() {
+		if rec.State.Terminal() || (ev.Interaction != nil && resolvedIn(rec.Resolved, ev.Interaction.InteractionID)) {
+			// A resolution recorded first (from Lookup evidence) is final:
+			// a late question event never reopens it.
 			e.mu.Unlock()
 			return
 		}
 		// Pro #5: route through transitionLocked.
 		e.transitionLocked(rec, causeNone, nativeEvidence{interaction: ev.Interaction})
 	case EventQuestionResolved:
-		if rec.State.Terminal() {
+		if ev.Interaction != nil && ev.Outcome != "" && owes(rec, ev.Interaction.InteractionID) {
+			// A late exact resolution settles an owed outcome, terminal
+			// record or not; the run's state does not change.
+			settleOwed(rec, protocol.Resolution{InteractionID: ev.Interaction.InteractionID, Outcome: ev.Outcome, Option: ev.Option})
+			break
+		}
+		if rec.State.Terminal() || (ev.Interaction != nil && (rec.Interaction == nil || rec.Interaction.InteractionID != ev.Interaction.InteractionID)) {
+			// An event that names its interaction resolves only that one.
 			e.mu.Unlock()
 			return
 		}
 		// Pro #5: route through transitionLocked. Pro round 2 #21: the
 		// resolution carries no interaction, and causeNone treats a nil
 		// interaction as "unchanged", so the clear is an explicit flag.
-		e.transitionLocked(rec, causeNone, nativeEvidence{clearInteraction: true, resolvedRemotely: ev.Remote})
+		e.transitionLocked(rec, causeNone, nativeEvidence{clearInteraction: true, resolvedRemotely: ev.Remote, outcome: ev.Outcome, option: ev.Option})
 	case EventLocalIntervention:
 		if rec.State.Terminal() {
 			e.mu.Unlock()
@@ -1332,14 +1347,18 @@ const (
 // values mean "no evidence for that field" — transitionLocked preserves the
 // existing value unless the cause dictates otherwise.
 type nativeEvidence struct {
-	runID             string           // NativeRun ("" = no run)
-	result            *protocol.Result // terminal evidence
-	cancel            *protocol.Cancel // cancel metadata from the command/event path
-	code              protocol.Code    // explicit override for refused/attachment_lost
-	reason            string           // adapter refusal text; causeRefused copies it onto the snapshot
-	interaction       *protocol.Interaction
-	clearInteraction  bool // the pending interaction is resolved natively; clear it (nil interaction means unchanged)
-	resolvedRemotely  bool // with clearInteraction: the answer AMQ delivered resolved it
+	runID            string           // NativeRun ("" = no run)
+	result           *protocol.Result // terminal evidence
+	cancel           *protocol.Cancel // cancel metadata from the command/event path
+	code             protocol.Code    // explicit override for refused/attachment_lost
+	reason           string           // adapter refusal text; causeRefused copies it onto the snapshot
+	interaction      *protocol.Interaction
+	clearInteraction bool // the pending interaction is resolved natively; clear it (nil interaction means unchanged)
+	resolvedRemotely bool // with clearInteraction: the answer AMQ delivered resolved it
+	// outcome and option, with clearInteraction, are the exact resolution
+	// the harness reported. Set, they are recorded as given.
+	outcome           protocol.ResolutionOutcome
+	option            string
 	localIntervention bool
 	runTerminal       bool // the run is definitively finished (noop_terminal) — confirm a pending cancel
 }
@@ -1377,16 +1396,157 @@ func (e *Endpoint) transitionLocked(rec *requests.Record, c cause, ev nativeEvid
 	// Only a clear resolves an interaction. A replacement by another
 	// interaction says nothing about the first, which may still be open.
 	if open != nil && rec.Interaction == nil {
+		if t := e.targets[rec.TargetID]; t != nil && !ev.clearInteraction {
+			// An adapter that records how each interaction ended reports
+			// the end itself; the run's end never stands in for it. The
+			// outcome is owed until the adapter or a late exact
+			// resolution supplies it.
+			if _, isResolver := t.att.(InteractionResolver); isResolver {
+				oweOutcome(rec, open.InteractionID)
+				return
+			}
+		}
 		recordResolution(rec, open.InteractionID, ev)
 	}
+}
+
+// oweOutcome records that interaction id's outcome is owed, once. It is
+// never trimmed: dropping an id would break the obligation. A record owes at
+// most one id in practice, since its pending interaction clears once, at the
+// terminal transition.
+func oweOutcome(rec *requests.Record, id string) {
+	if owes(rec, id) || resolvedIn(rec.Resolved, id) {
+		return
+	}
+	rec.OwedOutcomes = append(rec.OwedOutcomes, id)
+}
+
+// owes reports whether interaction id's outcome is owed.
+func owes(rec *requests.Record, id string) bool {
+	return slices.Contains(rec.OwedOutcomes, id)
+}
+
+// settleOwed records an owed outcome as given and clears the obligation.
+// It is idempotent: an id no longer owed changes nothing.
+func settleOwed(rec *requests.Record, r protocol.Resolution) bool {
+	if !owes(rec, r.InteractionID) {
+		return false
+	}
+	rec.OwedOutcomes = slices.DeleteFunc(rec.OwedOutcomes, func(id string) bool { return id == r.InteractionID })
+	recordResolution(rec, r.InteractionID, nativeEvidence{clearInteraction: true, outcome: r.Outcome, option: r.Option})
+	return true
+}
+
+// recoverOwedOutcomes asks the record's resolver for every owed outcome,
+// outside the lock, and records each one it has. It never changes the
+// record's state.
+func (e *Endpoint) recoverOwedOutcomes(rec *requests.Record) error {
+	key := keyOfRecord(rec)
+	e.mu.Lock()
+	t, ok := e.targets[rec.TargetID]
+	e.mu.Unlock()
+	if !ok {
+		return nil
+	}
+	resolver, isResolver := t.att.(InteractionResolver)
+	if !isResolver {
+		return nil
+	}
+	var found []protocol.Resolution
+	for _, id := range rec.OwedOutcomes {
+		if res, done := resolver.ResolvedInteraction(key, rec.Epoch, id); done && res.InteractionID == id {
+			found = append(found, res)
+		}
+	}
+	if len(found) == 0 {
+		return nil
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	cur, exists, err := e.store.Get(key)
+	if err != nil || !exists {
+		return err
+	}
+	changed := false
+	for _, r := range found {
+		changed = settleOwed(cur, r) || changed
+	}
+	if !changed {
+		return nil
+	}
+	// No target: the terminal result's ack intent is not this write's
+	// business; the ack replay below handles it as before.
+	if _, err := e.commitLocked(cur, nil); err != nil {
+		e.notifyStorageFailureLocked(cur, err)
+		return err
+	}
+	return nil
+}
+
+// resolvedIn reports whether id has a recorded resolution.
+func resolvedIn(resolved []protocol.Resolution, id string) bool {
+	for _, r := range resolved {
+		if r.InteractionID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// reconcileInteractionLocked applies an attachment's interaction evidence to
+// a live record, idempotently: the recorded outcome of the record's pending
+// interaction (from InteractionResolver) closes it with that exact outcome,
+// and the attachment's
+// pending interaction fills a record that shows none, or refreshes the same
+// interaction shown differently, unless it is already resolved. A different
+// pending interaction never replaces the record's through this path; the
+// native events own that order. It runs before every state change in reconcileLive, so a lost
+// native event is recovered from Lookup and a terminal result never closes
+// an interaction ahead of the resolution the harness reported. It reports
+// whether the record changed.
+func (e *Endpoint) reconcileInteractionLocked(rec *requests.Record, ev Evidence, outcome *protocol.Resolution) bool {
+	changed := false
+	if r := outcome; r != nil && rec.Interaction != nil && rec.Interaction.InteractionID == r.InteractionID {
+		e.transitionLocked(rec, causeNone, nativeEvidence{
+			clearInteraction: true, resolvedRemotely: r.Outcome == protocol.ResolutionAnswered, outcome: r.Outcome, option: r.Option,
+		})
+		changed = true
+	}
+	if in := ev.Interaction; in != nil && !resolvedIn(rec.Resolved, in.InteractionID) &&
+		(rec.Interaction == nil || rec.Interaction.InteractionID == in.InteractionID && !sameInteraction(*rec.Interaction, *in)) {
+		cp := *in
+		e.transitionLocked(rec, causeNone, nativeEvidence{interaction: &cp})
+		changed = true
+	}
+	return changed
+}
+
+// maxResolveAttempts bounds how often reconcileLive asks an
+// InteractionResolver again when the record's pending interaction changed
+// during the unlocked call.
+const maxResolveAttempts = 3
+
+// sameInteraction reports whether two views of an interaction are equal.
+func sameInteraction(a, b protocol.Interaction) bool {
+	return a.InteractionID == b.InteractionID && a.Kind == b.Kind && a.Prompt == b.Prompt &&
+		slices.Equal(a.Options, b.Options) && a.RemoteAnswer == b.RemoteAnswer &&
+		a.ApproveOption == b.ApproveOption && a.RejectOption == b.RejectOption
 }
 
 // recordResolution appends how the interaction id stopped being pending,
 // keeping the most recent MaxResolutions entries. A clear that is neither
 // an explicit native resolution nor a terminal run records nothing.
 func recordResolution(rec *requests.Record, id string, ev nativeEvidence) {
+	if resolvedIn(rec.Resolved, id) {
+		return // recorded once; a second report of the same end changes nothing
+	}
 	var r protocol.Resolution
 	switch {
+	case ev.clearInteraction && ev.outcome != "":
+		r = protocol.Resolution{InteractionID: id, Outcome: ev.outcome, Option: ev.option}
+		if r.Outcome == protocol.ResolutionAnswered && r.Option == "" {
+			r.Option = rec.Answered[id]
+		}
 	case ev.clearInteraction && ev.resolvedRemotely:
 		r = protocol.Resolution{InteractionID: id, Outcome: protocol.ResolutionAnswered, Option: rec.Answered[id]}
 	case ev.clearInteraction:
@@ -1709,6 +1869,11 @@ func (e *Endpoint) Reconcile() error {
 				rerr = e.replayTerminalAck(rec)
 			}
 		default:
+			if len(rec.OwedOutcomes) > 0 {
+				if rerr = e.recoverOwedOutcomes(rec); rerr != nil {
+					break
+				}
+			}
 			// The retry selector is owesCancel (a cancel we have not
 			// confirmed). If we don't owe a cancel, replay the ack.
 			// replayTerminalAck is idempotent (returns nil if the attachment
@@ -2020,20 +2185,57 @@ func (e *Endpoint) reconcileLive(rec *requests.Record) error {
 	if ok {
 		ev, lookupErr = t.att.Lookup(key, rec.Epoch)
 	}
+	var resolver InteractionResolver
+	if ok {
+		resolver, _ = t.att.(InteractionResolver)
+	}
 
 	// B14a: no defer — every early return below unlocks explicitly, and the
 	// native ack (the slow, untrusted call) runs after the final unlock. A
 	// wedged attachment must never hold the endpoint mutex: the whole
 	// endpoint (every Handle/Reconcile/cancel) deadlocks behind it.
-	e.mu.Lock()
-	rec, exists, err := e.store.Get(key)
-	if err != nil {
+	//
+	// A resolver is asked about the pending interaction of the FRESH record,
+	// outside the lock, and the record is read again after the call: when
+	// its pending interaction changed meanwhile, the question is asked
+	// again, a bounded number of times, and otherwise left to the next
+	// pass. The outcome therefore always belongs to the interaction this
+	// pass applies it to.
+	var outcome *protocol.Resolution
+	queried := ""
+	for attempt := 0; ; attempt++ {
+		e.mu.Lock()
+		fresh, exists, err := e.store.Get(key)
+		if err != nil {
+			e.mu.Unlock()
+			return err
+		}
+		if !exists || fresh.State.Terminal() {
+			e.mu.Unlock()
+			return nil
+		}
+		rec = fresh
+		if resolver == nil || rec.Interaction == nil || rec.Interaction.InteractionID == queried {
+			break // e.mu held
+		}
+		if attempt == maxResolveAttempts {
+			e.mu.Unlock()
+			return nil // the pending interaction keeps moving: next pass
+		}
+		id, epoch := rec.Interaction.InteractionID, rec.Epoch
+		queried = id
 		e.mu.Unlock()
-		return err
+		outcome = nil
+		if res, done := resolver.ResolvedInteraction(key, epoch, id); done {
+			outcome = &res
+		}
 	}
-	if !exists || rec.State.Terminal() {
-		e.mu.Unlock()
-		return nil
+	if ok && lookupErr == nil && e.reconcileInteractionLocked(rec, ev, outcome) {
+		if _, err := e.commitLocked(rec, t); err != nil {
+			e.notifyStorageFailureLocked(rec, err)
+			e.mu.Unlock()
+			return err
+		}
 	}
 	switch {
 	case !ok || lookupErr != nil:

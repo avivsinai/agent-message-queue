@@ -90,7 +90,7 @@ func buildDMEdges(root, stateDir string, r *manifest.Relay, warn io.Writer) *dmE
 			say(warn, "relay share %s: commands disabled: %v", sh.Session, err)
 			continue
 		}
-		b := buzzio.Binding{Owner: sh.OwnerPubKey, Body: creds.Body.PublicKeyHex(), Channel: sh.DMChannelID, Target: sh.Target, RelayHost: r.URL, NativeSession: sh.NativeSessionID}
+		b := buzzio.Binding{Owner: sh.OwnerPubKey, Body: creds.Body.PublicKeyHex(), Channel: sh.DMChannelID, Target: sh.Target, RelayHost: r.URL, NativeSession: sh.NativeSessionID, MinEvidence: sh.MinEvidence}
 		// One body serves one share: two sessions whose key directories hold
 		// the same body are both refused, never merged (codex #866 r1 #2).
 		if prev, dup := d.byBody[b.Body]; dup || dupBodies[b.Body] {

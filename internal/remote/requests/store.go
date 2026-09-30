@@ -71,6 +71,13 @@ type Record struct {
 	// so a replay after a crash cannot answer the same interaction twice.
 	Answered map[string]string `json:"answered,omitempty"`
 
+	// OwedOutcomes is the interaction ids whose pending interaction a
+	// terminal transition cleared before their outcome was recorded, for an
+	// attachment that records outcomes itself. Reconcile asks it for each
+	// one and a late exact resolution settles it; the terminal state never
+	// changes. Compaction waits for it.
+	OwedOutcomes []string `json:"owed_outcomes,omitempty"`
+
 	// AckDigest is the evidence digest of the last acknowledgement sent to the
 	// native attachment for a terminal record, written BEFORE the native
 	// AcknowledgeResult call. It is the digest of the retained evidence being
@@ -721,7 +728,7 @@ func (s *Store) CompactOne(key Key, before time.Time) (bool, error) {
 	// revision is what we owe the CALLER. Compaction erases the only retained
 	// result, so a revision the caller has not received yet must survive it
 	// (Pro r2 #14 / packet 4b, agent-message-queue-611.22.36).
-	if !rec.State.Terminal() || rec.Tombstone || rec.OwesAck() || rec.PublishedRevision < rec.Revision {
+	if !rec.State.Terminal() || rec.Tombstone || rec.OwesAck() || rec.PublishedRevision < rec.Revision || len(rec.OwedOutcomes) > 0 {
 		return false, nil
 	}
 	observed, err := protocol.ParseTime(rec.ObservedAt)

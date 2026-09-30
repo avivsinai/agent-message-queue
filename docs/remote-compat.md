@@ -74,7 +74,8 @@ files from the pi-bridge directory and calls the extension API; a claim marked
 | Completion evidence | `agent_end`/`agent_settled` extension events, or the session JSONL's `message`/`custom` entries | completed (via bridge correlation only) | (source: pi `docs/extensions.md` "Respect the runtime lifecycle"; `docs/session-format.md`) |
 | Exact cancellation gate | `ctx.abort()` aborts the current agent operation; the extension context has no clear-queue or dequeue-by-item method (`hasPendingMessages()` only). The bridge exposes no cancel request, so the adapter answers `unsupported`. **Unverified:** that `ctx.abort()` keeps queued follow-ups | `unsupported` | (source: pi `src/core/extensions/types.ts` `abort`, `hasPendingMessages`) |
 | Steer | `pi.sendUserMessage(text, {deliverAs: "steer"})`, or the `steer` RPC command | submitted | (source: pi `src/core/extensions/types.ts` `sendUserMessage`; `docs/rpc-commands.md` "steer") |
-| Approvals/questions | `ctx.ui.select(...)` is an in-process await and `pi.events` is an in-process bus between extensions; the bridge has no external decision seam | n/a | (source: pi `src/core/extensions/types.ts` `select`, `events`; `docs/extensions.md` "Choose an integration point") |
+| Approvals/questions | `ctx.ui.select(...)` is an in-process await and `pi.events` is an in-process bus between extensions. Stock pi raises no tool approval that an extension can answer from outside, so the reference bridge (revision 3) has no decision seam. Bridge revision 4 adds one for an extension that holds a tool call for an external decision: `interaction` event lines and adapter-written `answers/` files (see the pi bridge protocol, "Bridge revision 4: tool approval"). Questions have no seam | approvals: revision 4 only; questions: n/a | (source: pi `src/core/extensions/types.ts` `select`, `events`; `docs/extensions.md` "Choose an integration point") |
+| Native session identity | `ctx.sessionManager.getSessionId()`: the session header id, kept when a session file is loaded again (reload, resume; compaction only appends entries) and new on `newSession` and on a branched (forked) session. A bridge of revision 4 publishes it as `session_id` in `bridge.liveness`; the adapter reports it as the native session id a relay share pins | delivered (revision 4 only) | (source: pi `src/core/extensions/types.ts` `sessionManager`; `src/core/session-manager.ts` `ReadonlySessionManager`, `getSessionId`, `newSession`) |
 | Session-switch/reload epoch triggers | `session_before_switch`, `session_before_fork`, `session_before_compact`, `session_shutdown`, `session_before_tree` extension events | delivered | (source: pi `src/core/extensions/types.ts` event declarations) |
 | Local draft access (must not submit) | `ctx.ui.getEditorText()` reads the input editor text; the bridge does not read it. The `clear_queue` RPC command returns already-queued text, not an unsent draft | n/a | (source: pi `src/core/extensions/types.ts` `getEditorText`; `docs/rpc-commands.md` "clear_queue") |
 | Inspect/roster | RPC `get_state`, `get_tree`, `get_messages`, `get_session_stats`, and `get_entries` with a `since` entry-id cursor | delivered | (source: pi `docs/rpc-commands.md`) |
@@ -137,7 +138,7 @@ valid value for the runtime `terminal` enum.
 | Harness | inspect | submit | cancel_request | answer_question | approve_tool | steer | terminal |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | Codex | true | true | true | false | opt-in | false | unavailable |
-| pi | true | true | false | false | false | false | unavailable |
+| pi | true | true | false | false | bridge revision 4 | false | unavailable |
 | Claude Code | true | submitted | false | false | false | false | unavailable |
 
 The v1 endpoint masks `steer` to false at the D1 gate even where an
@@ -169,9 +170,16 @@ amq-remote-design.html §Capability per harness):
   aborts the current operation, not one request, and the extension context
   has no dequeue primitive for a queued request that has not started
   (source: §3.2 "Exact cancellation gate").
-- `pi.answer_question` / `pi.approve_tool`: the bridge has no external
-  decision seam for the in-process `ctx.ui.select` await (source: §3.2
-  "Approvals/questions").
+- `pi.approve_tool` is true only while the live bridge advertises
+  `bridge_revision` 4 or higher. That extension raises each approval under a
+  request it owns as an `interaction` line and applies the first decision
+  from a local face or from the adapter's `answers/` file, bound to the
+  interaction id, manifest hash and expiry. A remote approve is offered only
+  for `presence: remote` and a prompt the owner sees whole; otherwise the
+  remote is offered reject only. The reference bridge is revision 3 and
+  advertises no approvals. Not live-verified against a revision-4 extension.
+- `pi.answer_question`: the bridge has no external decision seam for the
+  in-process `ctx.ui.select` await (source: §3.2 "Approvals/questions").
 - `pi.terminal`: no terminal binding is part of this adapter contract.
 - `claude_code.cancel_request`: no user-level interrupt exists at all
   (source: research/r9-cc-codex-attachment.md §A.4 "cancelExact" row).
