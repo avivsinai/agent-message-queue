@@ -246,10 +246,10 @@ func (a *Attachment) applyApprovalsLocked(sessionID string, d approvalDisk, even
 				events = rec.closeApproval(ap.id, protocol.Resolution{InteractionID: ap.id, Outcome: r.Outcome, Option: r.Option}, events)
 				continue
 			}
-			was := ap.uncertain
+			before := projectApproval(ap).ApproveOption
 			a.bindCallLocked(rec, ap)
-			if ap.uncertain && !was && len(rec.open) > 0 && rec.open[0] == ap {
-				events = append(events, rec.questionEvent(ap)) // approve withdrawn
+			if projectApproval(ap).ApproveOption != before && len(rec.open) > 0 && rec.open[0] == ap {
+				events = append(events, rec.questionEvent(ap)) // approve added or withdrawn
 			}
 			if !a.terminalAnswered(rec, ap) && !hookDead(ap.hookPID) {
 				continue
@@ -312,11 +312,13 @@ func (rec *runRecord) questionEvent(ap *approval) core.NativeEvent {
 
 // projectApproval is the endpoint's view of one open approval. Reject is
 // always offered; approve only for an approvable call bound to exactly one
-// tool call candidate or not yet matched.
+// tool_use. An unbound approval is reject-only: without the binding a
+// terminal approve cannot be detected, and a later Buzz allow would be
+// reported as sent for a call that already ran.
 func projectApproval(ap *approval) *protocol.Interaction {
 	in := &protocol.Interaction{InteractionID: ap.id, Kind: "approval", Prompt: ap.preview, Options: []string{optionDeny},
 		RemoteAnswer: true, RejectOption: optionDeny}
-	if ap.approvable && !ap.uncertain {
+	if ap.approvable && ap.toolUseID != "" && !ap.uncertain {
 		in.ApproveOption = optionAllow
 		in.Options = []string{optionAllow, optionDeny}
 	}

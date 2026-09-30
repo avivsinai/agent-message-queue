@@ -535,8 +535,9 @@ a decision only for the owner's answer to that exact call.
 
 ✅ is offered only for a Bash command that the message shows whole, with no
 field beyond `command`, `description`, `timeout` and `run_in_background`,
-and with nothing masked as a secret. Every other call can only be rejected
-from Buzz. ✅ allows that one call; ❌ denies it and the turn goes on. The
+and with nothing masked as a secret, and only once the endpoint has matched
+the call to its `tool_use` line in the transcript. Every other call can only
+be rejected from Buzz. ✅ allows that one call; ❌ denies it and the turn goes on. The
 first answer wins, in Buzz or in the terminal. A terminal reject stops the
 hook at once. A terminal approve does not signal the hook, so the endpoint
 detects it from the call's `tool_result` in the transcript and edits the

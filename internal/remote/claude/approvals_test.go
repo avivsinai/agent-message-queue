@@ -234,3 +234,35 @@ func TestApprovalTwoIdenticalCallsAreUncertain(t *testing.T) {
 		t.Fatalf("hook printed %q, want no decision", f.out.String())
 	}
 }
+
+// Lead review of bead 611.42.3: an approval not bound to a tool_use is
+// reject-only, because a terminal approve of an unbound call is never
+// detected. Once the matching tool_use appears, approve is offered.
+func TestApprovalOffersApproveOnlyOnceBound(t *testing.T) {
+	f := newApprovalFixture(t)
+	f.raise("go test ./...")
+	if q := f.question(); q.ApproveOption != "" || len(q.Options) != 1 || q.Options[0] != optionDeny {
+		t.Fatalf("unbound question = %+v, want reject only", q)
+	}
+	f.append(map[string]any{
+		"type": "assistant", "timestamp": f.stamp(0),
+		"message": map[string]any{"role": "assistant", "content": []map[string]any{bashUse("toolu_1", "go test ./...")}},
+	})
+	for deadline := time.Now().Add(3 * time.Second); ; time.Sleep(time.Millisecond) {
+		f.att.pollConfirmations()
+		f.mu.Lock()
+		offered := false
+		for _, ev := range f.events {
+			offered = offered || ev.Type == core.EventQuestion && ev.Interaction != nil && ev.Interaction.InteractionID == f.id && ev.Interaction.ApproveOption == optionAllow
+		}
+		f.mu.Unlock()
+		if offered {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("approve was never offered after the matching tool_use appeared")
+		}
+	}
+	close(f.done)
+	f.hookExited()
+}
