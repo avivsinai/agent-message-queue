@@ -8,6 +8,18 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.85.0](https://github.com/avivsinai/agent-message-queue/compare/v0.84.0...v0.85.0) (2026-09-30)
+
+
+### Features
+
+* **remote:** name the pi build's own remedy when its bridge is too old ([#927](https://github.com/avivsinai/agent-message-queue/issues/927)) ([1c6f855](https://github.com/avivsinai/agent-message-queue/commit/1c6f8551202bdc14120ef7ffcea52f7e20181674))
+
+
+### Bug Fixes
+
+* **remote:** fence pi bridge revisions and close request-ownership gaps ([#923](https://github.com/avivsinai/agent-message-queue/issues/923)) ([9e83412](https://github.com/avivsinai/agent-message-queue/commit/9e83412d8711de44ec17085f57364b5d09f71b99))
+
 ## [0.84.0](https://github.com/avivsinai/agent-message-queue/compare/v0.83.0...v0.84.0) (2026-09-29)
 
 
