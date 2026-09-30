@@ -263,3 +263,72 @@ func TestApprovalMessageEditedWhenNoLongerAnswerable(t *testing.T) {
 		t.Fatalf("reaction = %v, answered = %v; want nothing answered", err, answered)
 	}
 }
+
+// Pro review of #926 r3, 2026-09-30, #2: a crash between preparing an
+// approval edit and updating its mapping left them apart for good: the
+// next revision matched the old mapping, so no corrective edit followed the
+// queued one. The recorded edit is now finished before anything is compared.
+func TestApprovalEditCrashLeavesMessageAndMappingInAgreement(t *testing.T) {
+	var owner, body [32]byte
+	_, _ = rand.Read(owner[:])
+	_, _ = rand.Read(body[:])
+	b := Binding{Owner: nostr.GetPublicKey(owner).Hex(), Body: nostr.GetPublicKey(body).Hex(), Channel: "dm-1", Target: "pi-1", RelayHost: "relay", NativeSession: "sess-1"}
+	dir := t.TempDir()
+	ledger, _ := OpenLedger(dir)
+	var ref string
+	handle := func(cmd *protocol.Command, src core.Source) (any, error) {
+		switch cmd.Op {
+		case protocol.OpSessionInspect:
+			return protocol.Session{TargetID: "pi-1", Epoch: "e1"}, nil
+		case protocol.OpRequestSubmit:
+			ref = protocol.EncodeRef(src.Host, cmd.TargetID, cmd.RequestID)
+			return protocol.Reply{Snapshot: protocol.Snapshot{RequestRef: ref, Revision: 1, State: protocol.StateRunning}}, nil
+		}
+		return protocol.Reply{}, nil
+	}
+	grant := ownerGrant(t, owner, b.Body, KindDM, KindEdit)
+	c := NewCarrier(ledger, b, body, grant, fixedIdentity("sess-1"), handle)
+	now := time.Now()
+	c.now = func() time.Time { return now }
+	dm := ownerEvent(t, owner, "dm-1", "run the tests", now)
+	if err := c.Ingest(dm); err != nil {
+		t.Fatal(err)
+	}
+	origin := c.source(dm.ID.Hex(), "").Origin
+	open := protocol.Interaction{InteractionID: "tool-1", Kind: "approval", Prompt: "go test ./...", Options: []string{"Allow once", "Block"}, RemoteAnswer: true, ApproveOption: "Allow once", RejectOption: "Block"}
+	closed := protocol.Interaction{InteractionID: "tool-1", Kind: "approval", Prompt: "go test ./...", Options: []string{"Block"}, RejectOption: "Block"}
+	publish := func(c *Carrier, rev int64, in protocol.Interaction) error {
+		now = now.Add(time.Second)
+		return c.Publish(protocol.Snapshot{RequestRef: ref, Epoch: "e1", Revision: rev, State: protocol.StateRunning, Interaction: &in}, origin)
+	}
+	if err := publish(c, 2, open); err != nil {
+		t.Fatal(err)
+	}
+	approvalEditPrepared = func() { panic("crash after the approval edit was prepared") }
+	func() {
+		defer func() { approvalEditPrepared = func() {}; _ = recover() }()
+		_ = publish(c, 3, closed)
+	}()
+	restarted := NewCarrier(ledger, b, body, grant, fixedIdentity("sess-1"), handle)
+	restarted.now = func() time.Time { return now }
+	if err := publish(restarted, 4, open); err != nil {
+		t.Fatal(err)
+	}
+	posted, _, _ := ledger.Prepared(approvalKey(ref, "tool-1"))
+	var msg nostr.Event
+	_ = json.Unmarshal(posted.Event, &msg)
+	var last nostr.Event
+	_ = restarted.Flush(context.Background(), func(_ context.Context, evt nostr.Event) error {
+		if evt.Kind == KindEdit && tagValue(evt, "e") == msg.ID.Hex() && evt.CreatedAt >= last.CreatedAt {
+			last = evt
+		}
+		return nil
+	}, nil)
+	appr, _, err := ledger.ApprovalFor(msg.ID.Hex())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if shows := strings.Contains(last.Content, "React ✅"); appr.Disabled || appr.Pending != nil || !shows {
+		t.Fatalf("mapping disabled=%v pending=%v, last edit %q; want both taking the ✅ answer", appr.Disabled, appr.Pending, last.Content)
+	}
+}

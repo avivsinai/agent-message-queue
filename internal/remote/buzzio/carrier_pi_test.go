@@ -100,9 +100,31 @@ func TestPiApprovalAnsweredFromBuzz(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(bridge, "receipts", want+".json"), []byte(rc), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// Pro review of #926 r3, 2026-09-30, #3: publication runs on whichever
+	// goroutine owns the record, so Reconcile can return before the owed
+	// output is prepared. Each step waits, bounded, until the output it
+	// asserts on is in the outbox, then flushes.
+	await := func(key string) {
+		t.Helper()
+		for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(time.Millisecond) {
+			if _, ok, err := ledger.Prepared(key); err != nil || ok {
+				if err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("%s was never prepared", key)
+			}
+			if err := ep.Reconcile(); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
 	if err := c.Ingest(dm); err != nil {
 		t.Fatal(err)
 	}
+	await(rootKey(want))
 	flush()
 	if len(sent) == 0 || !strings.Contains(sent[0].Content, "running") || !strings.Contains(sent[0].Content, "its start is not proven") {
 		t.Fatalf("result row = %+v, want a running row that says the start is not proven", sent)
@@ -115,9 +137,7 @@ func TestPiApprovalAnsweredFromBuzz(t *testing.T) {
 	line := fmt.Sprintf(`{"protocol":%q,"ref":%q,"event":"interaction","at":"x","interaction_id":"tool-1","kind":"approval","prompt":"run: go test ./...","options":["Allow once","Block"],"approve_option":"Allow once","reject_option":"Block","manifest_hash":"sha256:abc","expires_at":%q,"presence":"remote"}`,
 		pi.ProtocolV1, ref, clock().Add(5*time.Minute).UTC().Format(time.RFC3339))
 	appendLine(t, filepath.Join(bridge, "events", ref+".jsonl"), line)
-	if err := ep.Reconcile(); err != nil {
-		t.Fatal(err)
-	}
+	await(approvalKey(ref, "tool-1"))
 	flush()
 	var msg nostr.Event
 	for _, evt := range sent {
@@ -148,9 +168,7 @@ func TestPiApprovalAnsweredFromBuzz(t *testing.T) {
 
 	appendLine(t, filepath.Join(bridge, "events", ref+".jsonl"),
 		fmt.Sprintf(`{"protocol":%q,"ref":%q,"event":"interaction_resolved","at":"x","interaction_id":"tool-1","outcome":"answered","option":"Allow once"}`, pi.ProtocolV1, ref))
-	if err := ep.Reconcile(); err != nil {
-		t.Fatal(err)
-	}
+	await(approvalKey(ref, "tool-1") + "/outcome")
 	flush()
 	edited := false
 	for _, evt := range sent {

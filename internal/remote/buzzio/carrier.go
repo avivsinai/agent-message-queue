@@ -698,6 +698,11 @@ func (c *Carrier) prepareApprovals(snap protocol.Snapshot, rc Receipt, origin ma
 		if !ok {
 			continue
 		}
+		if appr.Pending != nil {
+			if appr, err = c.finishApprovalEdit(msg, appr); err != nil {
+				return err
+			}
+		}
 		now := c.now().Unix()
 		if now <= int64(msg.CreatedAt) || now <= appr.EditedAt {
 			return ErrClockBehind
@@ -712,10 +717,11 @@ func (c *Carrier) prepareApprovals(snap protocol.Snapshot, rc Receipt, origin ma
 
 // refreshApproval edits a posted approval whose answerability changed: the
 // pending interaction stopped, or started again, taking a remote answer, or
-// offers other options. The message and the reaction mapping change
-// together, so a reaction answers only what the message shows. The edit is
-// prepared before the mapping changes, so a crash between them repeats the
-// same edit.
+// offers other options. The message and the reaction mapping change as one
+// recoverable step: the intended edit is recorded on the mapping first, then
+// prepared, then the mapping takes the new view. An edit a crash left
+// unfinished is finished before anything is compared, so the message and the
+// mapping always end in agreement.
 func (c *Carrier) refreshApproval(snap protocol.Snapshot, rc Receipt) error {
 	in := snap.Interaction
 	if in == nil || in.Kind != "approval" || int(snap.Revision) < rc.Revision {
@@ -734,6 +740,11 @@ func (c *Carrier) refreshApproval(snap protocol.Snapshot, rc Receipt) error {
 	if err != nil || !ok {
 		return err
 	}
+	if appr.Pending != nil {
+		if appr, err = c.finishApprovalEdit(msg, appr); err != nil {
+			return err
+		}
+	}
 	want := appr
 	want.Disabled = !in.RemoteAnswer
 	if in.RemoteAnswer {
@@ -746,13 +757,39 @@ func (c *Carrier) refreshApproval(snap protocol.Snapshot, rc Receipt) error {
 	if now <= int64(msg.CreatedAt) || now <= appr.EditedAt {
 		return ErrClockBehind
 	}
-	want.EditedAt = now
-	edit := nostr.Event{CreatedAt: nostr.Timestamp(now), Kind: KindEdit, Tags: c.editTags(msg.ID.Hex()), Content: approvalText(want, "")}
-	if err := c.prepare(fmt.Sprintf("%s/edit/%08d", key, snap.Revision), edit); err != nil {
+	appr.Pending = &ApprovalEdit{View: want, Key: fmt.Sprintf("%s/edit/%08d", key, snap.Revision), At: now}
+	if err := c.ledger.UpdateApproval(msg.ID.Hex(), appr); err != nil {
 		return err
 	}
-	return c.ledger.UpdateApproval(msg.ID.Hex(), want)
+	_, err = c.finishApprovalEdit(msg, appr)
+	return err
 }
+
+// finishApprovalEdit prepares the edit recorded on appr, idempotently, and
+// then gives the mapping that edit's view, dated by the stored event.
+func (c *Carrier) finishApprovalEdit(msg nostr.Event, appr Approval) (Approval, error) {
+	p := appr.Pending
+	edit := nostr.Event{CreatedAt: nostr.Timestamp(p.At), Kind: KindEdit, Tags: c.editTags(msg.ID.Hex()), Content: approvalText(p.View, "")}
+	if err := c.prepare(p.Key, edit); err != nil {
+		return appr, err
+	}
+	stored, ok, err := c.ledger.Prepared(p.Key)
+	if err != nil || !ok {
+		return appr, fmt.Errorf("approval edit %s not prepared: %v", p.Key, err)
+	}
+	var evt nostr.Event
+	if err := json.Unmarshal(stored.Event, &evt); err != nil {
+		return appr, err
+	}
+	approvalEditPrepared()
+	done := p.View
+	done.Pending, done.EditedAt = nil, int64(evt.CreatedAt)
+	return done, c.ledger.UpdateApproval(msg.ID.Hex(), done)
+}
+
+// approvalEditPrepared runs between preparing an approval edit and giving
+// the mapping its view; tests replace it to crash there.
+var approvalEditPrepared = func() {}
 
 // approvalText is an approval message: what the harness asks to do and how
 // to answer it, or, once resolved, the outcome instead of the instructions.
@@ -817,8 +854,8 @@ func boundPreview(s string) string {
 // is one decision: it is claimed before the endpoint sees it, and a stale
 // or repeated reaction never answers again.
 func (c *Carrier) answerApproval(evt nostr.Event, messageID string, appr Approval, gesture string) error {
-	if appr.Disabled {
-		return nil // the message shows no remote answer now
+	if appr.Disabled || appr.Pending != nil {
+		return nil // the message shows no remote answer now, or is changing
 	}
 	option := appr.RejectOption
 	if gesture == approveReaction {

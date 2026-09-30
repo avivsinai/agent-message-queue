@@ -334,6 +334,16 @@ type Approval struct {
 	// edit is dated, so the next edit is dated strictly later.
 	Disabled bool  `json:"disabled,omitempty"`
 	EditedAt int64 `json:"edited_at,omitempty"`
+	// Pending is an edit recorded but not yet finished: its view, outbox
+	// key and date. The carrier finishes it before any other change.
+	Pending *ApprovalEdit `json:"pending,omitempty"`
+}
+
+// ApprovalEdit is one intended edit of an approval message.
+type ApprovalEdit struct {
+	View Approval `json:"view"`
+	Key  string   `json:"key"`
+	At   int64    `json:"at"`
 }
 
 // PutApproval maps an approval message's event id to what it shows, so an

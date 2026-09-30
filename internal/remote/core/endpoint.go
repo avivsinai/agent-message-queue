@@ -1390,6 +1390,13 @@ func (e *Endpoint) transitionLocked(rec *requests.Record, c cause, ev nativeEvid
 	// Only a clear resolves an interaction. A replacement by another
 	// interaction says nothing about the first, which may still be open.
 	if open != nil && rec.Interaction == nil {
+		if t := e.targets[rec.TargetID]; t != nil && !ev.clearInteraction {
+			// An adapter that records how each interaction ended reports
+			// the end itself; the run's end never stands in for it.
+			if _, isResolver := t.att.(InteractionResolver); isResolver {
+				return
+			}
+		}
 		recordResolution(rec, open.InteractionID, ev)
 	}
 }
@@ -1431,6 +1438,11 @@ func (e *Endpoint) reconcileInteractionLocked(rec *requests.Record, ev Evidence,
 	}
 	return changed
 }
+
+// maxResolveAttempts bounds how often reconcileLive asks an
+// InteractionResolver again when the record's pending interaction changed
+// during the unlocked call.
+const maxResolveAttempts = 3
 
 // sameInteraction reports whether two views of an interaction are equal.
 func sameInteraction(a, b protocol.Interaction) bool {
@@ -2083,29 +2095,53 @@ func (e *Endpoint) reconcileLive(rec *requests.Record) error {
 
 	var ev Evidence
 	var lookupErr error
-	var outcome *protocol.Resolution
 	if ok {
 		ev, lookupErr = t.att.Lookup(key, rec.Epoch)
-		if r, isResolver := t.att.(InteractionResolver); isResolver && rec.Interaction != nil {
-			if res, done := r.ResolvedInteraction(key, rec.Epoch, rec.Interaction.InteractionID); done {
-				outcome = &res
-			}
-		}
+	}
+	var resolver InteractionResolver
+	if ok {
+		resolver, _ = t.att.(InteractionResolver)
 	}
 
 	// B14a: no defer — every early return below unlocks explicitly, and the
 	// native ack (the slow, untrusted call) runs after the final unlock. A
 	// wedged attachment must never hold the endpoint mutex: the whole
 	// endpoint (every Handle/Reconcile/cancel) deadlocks behind it.
-	e.mu.Lock()
-	rec, exists, err := e.store.Get(key)
-	if err != nil {
+	//
+	// A resolver is asked about the pending interaction of the FRESH record,
+	// outside the lock, and the record is read again after the call: when
+	// its pending interaction changed meanwhile, the question is asked
+	// again, a bounded number of times, and otherwise left to the next
+	// pass. The outcome therefore always belongs to the interaction this
+	// pass applies it to.
+	var outcome *protocol.Resolution
+	queried := ""
+	for attempt := 0; ; attempt++ {
+		e.mu.Lock()
+		fresh, exists, err := e.store.Get(key)
+		if err != nil {
+			e.mu.Unlock()
+			return err
+		}
+		if !exists || fresh.State.Terminal() {
+			e.mu.Unlock()
+			return nil
+		}
+		rec = fresh
+		if resolver == nil || rec.Interaction == nil || rec.Interaction.InteractionID == queried {
+			break // e.mu held
+		}
+		if attempt == maxResolveAttempts {
+			e.mu.Unlock()
+			return nil // the pending interaction keeps moving: next pass
+		}
+		id, epoch := rec.Interaction.InteractionID, rec.Epoch
+		queried = id
 		e.mu.Unlock()
-		return err
-	}
-	if !exists || rec.State.Terminal() {
-		e.mu.Unlock()
-		return nil
+		outcome = nil
+		if res, done := resolver.ResolvedInteraction(key, epoch, id); done {
+			outcome = &res
+		}
 	}
 	if ok && lookupErr == nil && e.reconcileInteractionLocked(rec, ev, outcome) {
 		if _, err := e.commitLocked(rec, t); err != nil {

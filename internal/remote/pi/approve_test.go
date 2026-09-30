@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -395,5 +397,60 @@ func TestApprovalReplayThroughEndpointAfterExpiry(t *testing.T) {
 	}
 	if _, err := e.respond("tool-1", "Allow once"); err != nil {
 		t.Fatalf("replay = %v, want delivered", err)
+	}
+}
+
+// barrierAttachment runs arm inside the first Lookup, before delegating, and
+// drops native events once hold is set, so a test can change the record
+// between Reconcile's snapshot and its lookup.
+type barrierAttachment struct {
+	*Attachment
+	arm  func()
+	hold atomic.Bool
+	once sync.Once
+}
+
+func (b *barrierAttachment) Lookup(key requests.Key, epoch string) (core.Evidence, error) {
+	b.once.Do(b.arm)
+	return b.Attachment.Lookup(key, epoch)
+}
+
+func (b *barrierAttachment) Subscribe(fn func(core.NativeEvent)) func() {
+	return b.Attachment.Subscribe(func(ev core.NativeEvent) {
+		if !b.hold.Load() {
+			fn(ev)
+		}
+	})
+}
+
+// Pro review of #926 r3, 2026-09-30, #1: reconcile asked the resolver about
+// the interaction of its earlier snapshot. tool-1 opened and took an Allow
+// once intent after that snapshot, then closed answered_elsewhere (Block)
+// with the run, and the completion recorded answered (Allow once).
+func TestApprovalResolvedFromFreshRecord(t *testing.T) {
+	e := newEndpointRun(t)
+	e.ep.UnregisterAll()
+	b := &barrierAttachment{Attachment: mustAttach(t, e.dir)}
+	b.arm = func() {
+		appendEvents(t, e.dir, e.ref, interactionLine(e.ref))
+		_ = b.Inspect() // raises the question on the live subscription
+		for deadline := time.Now().Add(2 * time.Second); e.get().Interaction == nil; time.Sleep(time.Millisecond) {
+			if time.Now().After(deadline) {
+				t.Fatal("the question never reached the record")
+			}
+		}
+		if _, err := e.respond("tool-1", "Allow once"); err != nil {
+			t.Fatal(err)
+		}
+		b.hold.Store(true) // the resolution and completion events are lost
+		appendEvents(t, e.dir, e.ref, resolvedLine(e.ref, "answered_elsewhere", "Block"), terminalLine(e.ref, "completed"))
+	}
+	e.ep.Register(b)
+	if err := e.ep.Reconcile(); err != nil {
+		t.Fatal(err)
+	}
+	s := e.get()
+	if s.State != protocol.StateCompleted || len(s.Resolved) != 1 || s.Resolved[0].Outcome != protocol.ResolutionElsewhere || s.Resolved[0].Option != "Block" {
+		t.Fatalf("snapshot %s, resolved %+v, want completed with tool-1 answered_elsewhere (Block)", s.State, s.Resolved)
 	}
 }
