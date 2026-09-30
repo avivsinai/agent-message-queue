@@ -187,7 +187,11 @@ this protocol, and has `live: true` and `pid > 0`. `session_generation` is the
 current generation; the adapter addresses first-contact requests to it. On shutdown the extension
 writes `live: false`, so the adapter sees the bridge offline at once.
 `surface` is the pi run mode (`tui`, `rpc`, `json`, or `print`).
-`bridge_revision` is the extension's implementation revision. From revision
+`bridge_revision` is the extension's implementation revision. An extension
+may also publish `upgrade`, its own remedy for an owner whose bridge is too
+old (for example the command that updates the pi build that ships it). The
+adapter shows it, bounded, in the refusal instead of this repository's install
+line. From revision
 4 the record also carries `session_id` (see
 [Session identity](#session-identity)).
 

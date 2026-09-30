@@ -1229,3 +1229,32 @@ func TestE3BRefusalLiftsAfterSeamRewrite(t *testing.T) {
 		t.Fatalf("evidence state = %s; want completed", ev.State)
 	}
 }
+
+// TestOldBridgeNamesItsOwnRemedy: a pi build that ships its own extension
+// publishes its remedy in liveness, or its target declares one, so the owner
+// is not told to install this repo's stock extension.
+func TestOldBridgeNamesItsOwnRemedy(t *testing.T) {
+	for _, tc := range []struct{ name, liveness, hint, want string }{
+		{"published", `,"bridge_revision":2,"upgrade":"run pi-build\nupdate --self"`, "", "run pi-build update --self (suggested by the pi bridge), then reload"},
+		// Pro review of #927, 2026-09-30: invisible-only published text must
+		// not suppress the manifest's remedy.
+		{"manifest hint", `,"upgrade":"\u200b"`, "update the pi build", "update the pi build (suggested by this target's manifest), then reload"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, dir := newTestAttachment(t)
+			a.upgradeHint = tc.hint
+			rec := fmt.Sprintf(`{"protocol":%q,"live":true,"at":%q,"pid":%d,"surface":"tui","session_generation":"gen-1"%s}`,
+				ProtocolV1, fixedNow.UTC().Format(time.RFC3339Nano), os.Getpid(), tc.liveness)
+			if err := os.WriteFile(filepath.Join(dir, "bridge.liveness"), []byte(rec), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chtimes(filepath.Join(dir, "bridge.liveness"), fixedNow, fixedNow); err != nil {
+				t.Fatal(err)
+			}
+			_, reason := a.InspectSubmit()
+			if !strings.Contains(reason, tc.want) || strings.Contains(reason, "pi install git:") {
+				t.Fatalf("reason = %q, want it to carry %q and not the stock install", reason, tc.want)
+			}
+		})
+	}
+}
