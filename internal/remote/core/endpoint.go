@@ -889,7 +889,9 @@ func (e *Endpoint) cancel(cmd *protocol.Command, src Source) (protocol.Reply, er
 // asking agent included, can never answer.
 func answeredByOwnerShare(src Source, rec *requests.Record) bool {
 	o, r := src.Origin, rec.Origin
-	return o["carrier"] == "buzz" && r["carrier"] == "buzz" &&
+	// The creator host is derived from relay, body and owner, so it also
+	// catches a new owner on the same body and channel.
+	return src.Host == rec.CreatorHost && o["carrier"] == "buzz" && r["carrier"] == "buzz" &&
 		o["body"] != "" && o["body"] == r["body"] && o["channel"] == r["channel"]
 }
 
