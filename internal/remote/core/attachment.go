@@ -73,12 +73,6 @@ type Evidence struct {
 	Result            *protocol.Result
 	LocalIntervention bool
 	Interaction       *protocol.Interaction
-	// Resolved is how interactions of this run ended, with the exact
-	// outcome and option, for an adapter that keeps them as durable
-	// evidence (pi). Reconcile applies them before any state change, so a
-	// resolution whose native event was lost still closes the record's
-	// interaction with that outcome. Nil for adapters that keep none.
-	Resolved []protocol.Resolution
 	// RefusalCode is the typed refusal carried by a DEFINITIVE native
 	// refusal (pi-bridge protocol: adapter recovery and evidence; receipt present + refused event
 	// = admission proven, execution refused). When set on terminal evidence,
@@ -136,6 +130,17 @@ type NativeEvent struct {
 // serialize Submit and CancelExact against the harness's own input path and
 // never touch the local editor. Every method is exact about the request and
 // epoch it acts on.
+// InteractionResolver is an optional Attachment method for an adapter that
+// keeps how each interaction ended as durable evidence (pi). Reconcile asks
+// it for the record's pending interaction before any state change, so a
+// resolution whose native event was lost still closes that interaction with
+// the outcome the harness recorded, never with the answer intent.
+type InteractionResolver interface {
+	// ResolvedInteraction returns how interaction id of the key's run
+	// ended, or false while it is open or unknown.
+	ResolvedInteraction(key requests.Key, epoch, interactionID string) (protocol.Resolution, bool)
+}
+
 // SubmitBlocker is an optional Attachment method: Inspect plus, when the
 // projection advertises submit false, the adapter's actionable reason, both
 // from one observation. The endpoint's unsupported refusal carries it

@@ -289,9 +289,11 @@ these three fields.
 Owner commands submit with evidence floor `admitted` by default. A target
 whose adapter proves only delivery, such as pi (`submitted`), refuses those
 submits. `"min_evidence": "submitted"` on the share, written by `share
---min-evidence submitted`, accepts the weaker evidence. The result row then
-says, while the request runs, that the request reached the session and its
-start is not proven.
+--min-evidence submitted`, accepts the weaker evidence. Until the request
+ends, the result row says so: once the request runs, that it reached the
+session and its start is not proven; before that, only that the share
+accepts submitted evidence. An approval message that stops taking a remote
+answer is edited to say so, and a reaction on it then answers nothing.
 
 | Owner sends | Result |
 | --- | --- |

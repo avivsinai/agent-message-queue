@@ -93,11 +93,12 @@ type run struct {
 	// approval the stream raised, open or closed, so a re-read never raises
 	// one twice and a replayed answer is recognized after it closes. open
 	// is the open ones, oldest first; open[0] is the one the endpoint
-	// shows. resolved is how each closed one ended, the evidence Lookup
-	// returns so the endpoint recovers a resolution it never received.
+	// shows. outcomes is how each closed one ended, by id, with no cap:
+	// ResolvedInteraction serves the endpoint a resolution it never
+	// received, however many approvals closed after it.
 	interactions map[string]*openInteraction
 	open         []*openInteraction
-	resolved     []protocol.Resolution
+	outcomes     map[string]protocol.Resolution
 }
 
 // openInteraction is one approval raised by an interaction line. The
@@ -801,10 +802,10 @@ func (a *Attachment) closeInteractionLocked(r *run, id string, res protocol.Reso
 		return
 	}
 	r.open = append(r.open[:idx], r.open[idx+1:]...)
-	r.resolved = append(r.resolved, res)
-	if n := len(r.resolved); n > protocol.MaxResolutions {
-		r.resolved = append([]protocol.Resolution(nil), r.resolved[n-protocol.MaxResolutions:]...)
+	if r.outcomes == nil {
+		r.outcomes = map[string]protocol.Resolution{}
 	}
+	r.outcomes[id] = res
 	if idx != 0 {
 		return // a queued approval the endpoint never showed
 	}
@@ -1282,8 +1283,7 @@ func (a *Attachment) Lookup(key requests.Key, epoch string) (core.Evidence, erro
 		// refusal — it must never silently read as "no events".
 		return core.Evidence{}, r.eventsRefused
 	}
-	ev := core.Evidence{Known: true, RunID: r.runID, State: r.state, Interaction: a.pendingLocked(r),
-		Resolved: append([]protocol.Resolution(nil), r.resolved...)}
+	ev := core.Evidence{Known: true, RunID: r.runID, State: r.state, Interaction: a.pendingLocked(r)}
 	if r.acked {
 		// Result released: nothing retained, admission proven.
 		ev.Class = core.EvidenceNone
@@ -1420,6 +1420,30 @@ func (a *Attachment) Respond(key requests.Key, epoch, interactionID, option stri
 		return "", err
 	}
 	return "", nil
+}
+
+// ResolvedInteraction implements core.InteractionResolver: how one approval
+// of the key's run ended, as the event stream recorded it.
+func (a *Attachment) ResolvedInteraction(key requests.Key, epoch, interactionID string) (protocol.Resolution, bool) {
+	a.consume()     // 9a: seam reads outside a.mu; apply under it
+	a.lateBind(key) // 9a: same, for a key not yet bound
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	r, ok := a.runs[key]
+	if !ok || (r.epoch != "" && r.epoch != epoch) {
+		return protocol.Resolution{}, false
+	}
+	res, done := r.outcomes[interactionID]
+	return res, done
+}
+
+// SetNow replaces the attachment's clock, which dates answers, decides
+// approval expiry, and judges liveness freshness. For in-process harnesses
+// and tests; production uses the wall clock.
+func (a *Attachment) SetNow(now func() time.Time) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.now = now
 }
 
 // NativeSessionID implements core.NativeIdentifier: the live bridge's pi

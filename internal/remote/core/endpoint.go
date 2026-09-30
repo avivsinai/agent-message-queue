@@ -950,7 +950,12 @@ func (e *Endpoint) respond(cmd *protocol.Command) (protocol.Reply, error) {
 		e.mu.Unlock()
 		return protocol.Reply{}, protocol.Refuse(protocol.CodeAlreadyResolved, "no such pending interaction")
 	}
-	offered := false
+	// An exact replay of the durable answer intent goes to the attachment,
+	// which recognizes an answer it already published, even when the
+	// interaction no longer offers that option (it expired or its session
+	// went away). Only a fresh answer must be one the interaction offers now.
+	prior, done := rec.Answered[cmd.InteractionID]
+	offered := done && prior == cmd.Option
 	for _, o := range rec.Interaction.Options {
 		if o == cmd.Option {
 			offered = true
@@ -960,7 +965,7 @@ func (e *Endpoint) respond(cmd *protocol.Command) (protocol.Reply, error) {
 		e.mu.Unlock()
 		return protocol.Reply{}, protocol.Refuse(protocol.CodeInvalid, "option %q is not offered by interaction %s", cmd.Option, cmd.InteractionID)
 	}
-	if prior, done := rec.Answered[cmd.InteractionID]; done && prior != cmd.Option {
+	if done && prior != cmd.Option {
 		// An earlier answer may already be with the runtime (in flight, or
 		// sent before a transport error). The runtime applies the first
 		// answer it gets, so a different one never replaces that intent
@@ -1400,8 +1405,9 @@ func resolvedIn(resolved []protocol.Resolution, id string) bool {
 }
 
 // reconcileInteractionLocked applies an attachment's interaction evidence to
-// a live record, idempotently: a recorded resolution of the record's pending
-// interaction closes it with that exact outcome, and the attachment's
+// a live record, idempotently: the recorded outcome of the record's pending
+// interaction (from InteractionResolver) closes it with that exact outcome,
+// and the attachment's
 // pending interaction fills a record that shows none, or refreshes the same
 // interaction shown differently, unless it is already resolved. A different
 // pending interaction never replaces the record's through this path; the
@@ -1409,15 +1415,13 @@ func resolvedIn(resolved []protocol.Resolution, id string) bool {
 // native event is recovered from Lookup and a terminal result never closes
 // an interaction ahead of the resolution the harness reported. It reports
 // whether the record changed.
-func (e *Endpoint) reconcileInteractionLocked(rec *requests.Record, ev Evidence) bool {
+func (e *Endpoint) reconcileInteractionLocked(rec *requests.Record, ev Evidence, outcome *protocol.Resolution) bool {
 	changed := false
-	for _, r := range ev.Resolved {
-		if rec.Interaction != nil && rec.Interaction.InteractionID == r.InteractionID {
-			e.transitionLocked(rec, causeNone, nativeEvidence{
-				clearInteraction: true, resolvedRemotely: r.Outcome == protocol.ResolutionAnswered, outcome: r.Outcome, option: r.Option,
-			})
-			changed = true
-		}
+	if r := outcome; r != nil && rec.Interaction != nil && rec.Interaction.InteractionID == r.InteractionID {
+		e.transitionLocked(rec, causeNone, nativeEvidence{
+			clearInteraction: true, resolvedRemotely: r.Outcome == protocol.ResolutionAnswered, outcome: r.Outcome, option: r.Option,
+		})
+		changed = true
 	}
 	if in := ev.Interaction; in != nil && !resolvedIn(rec.Resolved, in.InteractionID) &&
 		(rec.Interaction == nil || rec.Interaction.InteractionID == in.InteractionID && !sameInteraction(*rec.Interaction, *in)) {
@@ -2079,8 +2083,14 @@ func (e *Endpoint) reconcileLive(rec *requests.Record) error {
 
 	var ev Evidence
 	var lookupErr error
+	var outcome *protocol.Resolution
 	if ok {
 		ev, lookupErr = t.att.Lookup(key, rec.Epoch)
+		if r, isResolver := t.att.(InteractionResolver); isResolver && rec.Interaction != nil {
+			if res, done := r.ResolvedInteraction(key, rec.Epoch, rec.Interaction.InteractionID); done {
+				outcome = &res
+			}
+		}
 	}
 
 	// B14a: no defer — every early return below unlocks explicitly, and the
@@ -2097,7 +2107,7 @@ func (e *Endpoint) reconcileLive(rec *requests.Record) error {
 		e.mu.Unlock()
 		return nil
 	}
-	if ok && lookupErr == nil && e.reconcileInteractionLocked(rec, ev) {
+	if ok && lookupErr == nil && e.reconcileInteractionLocked(rec, ev, outcome) {
 		if _, err := e.commitLocked(rec, t); err != nil {
 			e.notifyStorageFailureLocked(rec, err)
 			e.mu.Unlock()

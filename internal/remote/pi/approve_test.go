@@ -227,12 +227,8 @@ func TestApprovalClosedWhenRunGoesUncertain(t *testing.T) {
 	a, dir, key, ch := approvalRun(t)
 	ref := clientRef(key)
 	appendEvents(t, dir, ref, interactionLine(ref), fmt.Sprintf(`{"protocol":%q,"ref":%q,"event":"uncertain","error":"shutdown"}`, ProtocolV1, ref))
-	ev, err := a.Lookup(key, "gen-1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(ev.Resolved) != 1 || ev.Resolved[0].Outcome != protocol.ResolutionRunEnded {
-		t.Fatalf("resolved = %+v, want tool-1 run_ended", ev.Resolved)
+	if res, done := a.ResolvedInteraction(key, "gen-1", "tool-1"); !done || res.Outcome != protocol.ResolutionRunEnded {
+		t.Fatalf("resolved = %+v, %v, want tool-1 run_ended", res, done)
 	}
 	nextEvent(t, ch, core.EventQuestion)
 	if r := nextEvent(t, ch, core.EventQuestionResolved); r.Outcome != protocol.ResolutionRunEnded || r.Remote {
@@ -297,5 +293,107 @@ func TestApprovalAnswerNameBounded(t *testing.T) {
 	}
 	if answerName(ref, "tool-A") == answerName(ref, "tool-a") {
 		t.Fatal("ids that differ in case share an answer file")
+	}
+}
+
+// endpointRun is an endpoint over a revision-4 bridge with one running
+// request that host1 submitted; restart re-attaches after appending lines.
+type endpointRun struct {
+	t   *testing.T
+	ep  *core.Endpoint
+	dir string
+	ref string
+	now time.Time
+}
+
+func newEndpointRun(t *testing.T) *endpointRun {
+	t.Helper()
+	dir := newExtDir(t)
+	stampLivenessRevision(t, dir, ApproveBridgeRevision)
+	store, err := requests.Open(filepath.Join(t.TempDir(), "state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := &endpointRun{t: t, ep: core.New(core.Config{Store: store}), dir: dir, now: fixedNow}
+	t.Cleanup(func() { _ = e.ep.Close() })
+	e.ep.Register(mustAttach(t, dir))
+	id := "00000000-0000-4000-8000-000000000042"
+	e.ref = protocol.EncodeRef("host1", "pi-1", id)
+	writeReceipt(t, dir, e.ref, "gen-1", fixedNow)
+	if _, err := e.ep.Handle(&protocol.Command{Schema: protocol.SchemaCommand, Op: protocol.OpRequestSubmit, RequestID: id, TargetID: "pi-1",
+		Epoch: addressEpoch("gen-1"), NotAfter: protocol.FormatTime(time.Now().Add(time.Hour)),
+		Input: &protocol.SubmitInput{Text: "hi", Busy: protocol.BusyReject, Deliver: protocol.DeliverTurn, MinEvidence: protocol.EvidenceSubmitted}}, core.Source{Host: "host1"}); err != nil {
+		t.Fatal(err)
+	}
+	return e
+}
+
+func (e *endpointRun) restart(lines ...string) {
+	e.t.Helper()
+	e.ep.UnregisterAll()
+	appendEvents(e.t, e.dir, e.ref, lines...)
+	stampLivenessRevisionAt(e.t, e.dir, e.now, ApproveBridgeRevision)
+	a := mustAttach(e.t, e.dir)
+	now := e.now
+	a.SetNow(func() time.Time { return now })
+	e.ep.Register(a)
+	if err := e.ep.Reconcile(); err != nil {
+		e.t.Fatal(err)
+	}
+}
+
+func (e *endpointRun) get() protocol.Snapshot {
+	e.t.Helper()
+	out, err := e.ep.Handle(&protocol.Command{Schema: protocol.SchemaCommand, Op: protocol.OpRequestGet, RequestRef: e.ref}, core.Source{Host: "host1"})
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	return out.(protocol.Reply).Snapshot
+}
+
+func (e *endpointRun) respond(id, option string) (any, error) {
+	return e.ep.Handle(&protocol.Command{Schema: protocol.SchemaCommand, Op: protocol.OpInteractionRespond, RequestRef: e.ref, TargetID: "pi-1",
+		Epoch: addressEpoch("gen-1"), InteractionID: id, Option: option}, core.Source{Host: "host1"})
+}
+
+// Pro review of #926 r2, 2026-09-30, #1: the adapter kept only the last
+// MaxResolutions outcomes, so a restart after more approvals closed lost
+// tool-1's outcome and the completion recorded the answer intent instead.
+func TestApprovalOutcomeKeptPastResolutionCap(t *testing.T) {
+	e := newEndpointRun(t)
+	e.restart(interactionLine(e.ref))
+	if _, err := e.respond("tool-1", "Allow once"); err != nil {
+		t.Fatal(err)
+	}
+	lines := []string{resolvedLine(e.ref, "answered_elsewhere", "Block")}
+	for i := 2; i <= protocol.MaxResolutions+2; i++ {
+		id := fmt.Sprintf("tool-%d", i)
+		lines = append(lines, interactionLineID(e.ref, id),
+			fmt.Sprintf(`{"protocol":%q,"ref":%q,"event":"interaction_resolved","interaction_id":%q,"outcome":"answered_elsewhere","option":"Block"}`, ProtocolV1, e.ref, id))
+	}
+	e.restart(append(lines, terminalLine(e.ref, "completed"))...)
+	s := e.get()
+	if s.State != protocol.StateCompleted || len(s.Resolved) != 1 || s.Resolved[0].InteractionID != "tool-1" ||
+		s.Resolved[0].Outcome != protocol.ResolutionElsewhere || s.Resolved[0].Option != "Block" {
+		t.Fatalf("snapshot %s, resolved %+v, want completed with tool-1 answered_elsewhere (Block)", s.State, s.Resolved)
+	}
+}
+
+// Pro review of #926 r2, 2026-09-30, #3: after expiry and a restart the
+// refreshed approval offers only Block, and the endpoint refused a replay
+// of the Allow once answer it had already delivered as invalid.
+func TestApprovalReplayThroughEndpointAfterExpiry(t *testing.T) {
+	e := newEndpointRun(t)
+	e.restart(interactionLine(e.ref))
+	if _, err := e.respond("tool-1", "Allow once"); err != nil {
+		t.Fatal(err)
+	}
+	e.now = fixedNow.Add(10 * time.Minute)
+	e.restart()
+	if in := e.get().Interaction; in == nil || in.RemoteAnswer {
+		t.Fatalf("interaction = %+v, want tool-1 shown with no remote answer", in)
+	}
+	if _, err := e.respond("tool-1", "Allow once"); err != nil {
+		t.Fatalf("replay = %v, want delivered", err)
 	}
 }

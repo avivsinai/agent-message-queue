@@ -154,3 +154,112 @@ func TestApprovalNotAnsweredUnderAnotherBinding(t *testing.T) {
 		t.Fatal("an approval from the old binding was answered under the new one")
 	}
 }
+
+// Pro review of #926 r2, 2026-09-30, #2: the fence saw the approved session,
+// then the session switched before the epoch was read, and the submit went
+// to the unshared session. The identity is checked again with the epoch
+// fixed, and nothing is dispatched.
+func TestSessionSwitchBeforeEpochDispatchesNothing(t *testing.T) {
+	var owner, body [32]byte
+	_, _ = rand.Read(owner[:])
+	_, _ = rand.Read(body[:])
+	b := Binding{Owner: nostr.GetPublicKey(owner).Hex(), Body: nostr.GetPublicKey(body).Hex(), Channel: "dm-1", Target: "pi-1", RelayHost: "relay", NativeSession: "sess-1"}
+	ledger, _ := OpenLedger(t.TempDir())
+	session := "sess-1"
+	submitted := false
+	c := NewCarrier(ledger, b, body, ownerGrant(t, owner, b.Body, KindDM, KindEdit), func(string) string { return session }, func(cmd *protocol.Command, src core.Source) (any, error) {
+		switch cmd.Op {
+		case protocol.OpSessionInspect:
+			session = "sess-2" // /new between the fence and the epoch
+			return protocol.Session{TargetID: "pi-1", Epoch: "unpinned.gen-2"}, nil
+		case protocol.OpRequestSubmit:
+			submitted = true
+		}
+		return protocol.Reply{}, nil
+	})
+	if err := c.Ingest(ownerEvent(t, owner, "dm-1", "run the tests", time.Now())); err != nil {
+		t.Fatal(err)
+	}
+	if submitted {
+		t.Fatal("submitted into a session that was not approved for sharing")
+	}
+}
+
+// Pro review of #926 r2, 2026-09-30, #4 and #5: a posted approval kept
+// "React ✅" after it stopped taking a remote answer, and a share at
+// submitted evidence said a request that had not reached the session had.
+func TestApprovalMessageEditedWhenNoLongerAnswerable(t *testing.T) {
+	var owner, body [32]byte
+	_, _ = rand.Read(owner[:])
+	_, _ = rand.Read(body[:])
+	b := Binding{Owner: nostr.GetPublicKey(owner).Hex(), Body: nostr.GetPublicKey(body).Hex(), Channel: "dm-1", Target: "pi-1", RelayHost: "relay",
+		NativeSession: "sess-1", MinEvidence: protocol.EvidenceSubmitted}
+	ledger, _ := OpenLedger(t.TempDir())
+	var ref string
+	answered := false
+	c := NewCarrier(ledger, b, body, ownerGrant(t, owner, b.Body, KindDM, KindEdit), fixedIdentity("sess-1"), func(cmd *protocol.Command, src core.Source) (any, error) {
+		switch cmd.Op {
+		case protocol.OpSessionInspect:
+			return protocol.Session{TargetID: "pi-1", Epoch: "e1"}, nil
+		case protocol.OpRequestSubmit:
+			ref = protocol.EncodeRef(src.Host, cmd.TargetID, cmd.RequestID)
+			return protocol.Reply{Snapshot: protocol.Snapshot{RequestRef: ref, Revision: 1, State: protocol.StateReceived}}, nil
+		case protocol.OpInteractionRespond:
+			answered = true
+		}
+		return protocol.Reply{}, nil
+	})
+	now := time.Now()
+	c.now = func() time.Time { return now }
+	dm := ownerEvent(t, owner, "dm-1", "run the tests", now)
+	if err := c.Ingest(dm); err != nil {
+		t.Fatal(err)
+	}
+	var sent []nostr.Event
+	flush := func() {
+		sent = nil
+		if err := c.Flush(context.Background(), func(_ context.Context, evt nostr.Event) error { sent = append(sent, evt); return nil }, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	flush()
+	if len(sent) != 1 || !strings.Contains(sent[0].Content, "a request counts once the session has it") || strings.Contains(sent[0].Content, "reached the session") {
+		t.Fatalf("received row = %+v, want the policy and no delivery claim", sent)
+	}
+	origin := c.source(dm.ID.Hex(), "").Origin
+	in := protocol.Interaction{InteractionID: "tool-1", Kind: "approval", Prompt: "go test ./...", Options: []string{"Allow once", "Block"}, RemoteAnswer: true, ApproveOption: "Allow once", RejectOption: "Block"}
+	now = now.Add(time.Second)
+	if err := c.Publish(protocol.Snapshot{RequestRef: ref, Epoch: "e1", Revision: 2, State: protocol.StateRunning, Interaction: &in}, origin); err != nil {
+		t.Fatal(err)
+	}
+	flush()
+	var msg nostr.Event
+	for _, evt := range sent {
+		if strings.Contains(evt.Content, "Approval needed") {
+			msg = evt
+		}
+	}
+	stale := protocol.Interaction{InteractionID: "tool-1", Kind: "approval", Prompt: "go test ./...", Options: []string{"Block"}, RejectOption: "Block"}
+	now = now.Add(time.Second)
+	if err := c.Publish(protocol.Snapshot{RequestRef: ref, Epoch: "e1", Revision: 3, State: protocol.StateRunning, Interaction: &stale}, origin); err != nil {
+		t.Fatal(err)
+	}
+	flush()
+	var edit nostr.Event
+	for _, evt := range sent {
+		if evt.Kind == KindEdit && tagValue(evt, "e") == msg.ID.Hex() {
+			edit = evt
+		}
+	}
+	if edit.Content == "" || strings.Contains(edit.Content, "React ✅") {
+		t.Fatalf("edit = %q, want the approval without the ✅ instruction", edit.Content)
+	}
+	now = now.Add(time.Second)
+	react := nostr.Event{CreatedAt: nostr.Timestamp(now.Unix()), Kind: KindReaction, Content: "✅", Tags: nostr.Tags{{"e", msg.ID.Hex()}}}
+	if err := react.Sign(owner); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.IngestReaction(react); err != nil || answered {
+		t.Fatalf("reaction = %v, answered = %v; want nothing answered", err, answered)
+	}
+}

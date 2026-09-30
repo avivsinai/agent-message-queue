@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -29,6 +28,16 @@ import (
 // evidence submits, the approval posts, a ✅ writes the answer file, and
 // interaction_resolved answered edits the message with the outcome.
 func TestPiApprovalAnsweredFromBuzz(t *testing.T) {
+	// Pro review of #926 r2, 2026-09-30, #6: synthetic clocks only. The pi
+	// adapter, the endpoint and the liveness record stand at base; the
+	// carrier steps one second per call, so its edits are strictly later.
+	// The extension's receipt is laid down before the submit, so nothing
+	// here depends on how fast the machine runs.
+	base := time.Now().Truncate(time.Second)
+	clock := func() time.Time { return base }
+	var tick atomic.Int64
+	advance := func() time.Time { return base.Add(time.Duration(tick.Add(1)) * time.Second) }
+
 	root := t.TempDir()
 	bridge := filepath.Join(root, "agents", "pi-seat", "extensions", "pi-bridge")
 	for _, sub := range []string{"requests", "receipts", "events"} {
@@ -36,53 +45,30 @@ func TestPiApprovalAnsweredFromBuzz(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	stamp := func() {
+	func() {
+		at := base
 		rec := fmt.Sprintf(`{"protocol":%q,"live":true,"at":%q,"pid":%d,"surface":"rpc","session_generation":"gen-1","bridge_revision":4,"session_id":"sess-1"}`,
-			pi.ProtocolV1, time.Now().UTC().Format(time.RFC3339Nano), os.Getpid())
-		if err := os.WriteFile(filepath.Join(bridge, "bridge.liveness"), []byte(rec), 0o600); err != nil {
+			pi.ProtocolV1, at.UTC().Format(time.RFC3339Nano), os.Getpid())
+		path := filepath.Join(bridge, "bridge.liveness")
+		if err := os.WriteFile(path, []byte(rec), 0o600); err != nil {
 			t.Fatal(err)
 		}
-	}
-	stamp()
-	// The extension's delivery: a receipt for every published request.
-	stop := make(chan struct{})
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for {
-			select {
-			case <-stop:
-				return
-			case <-time.After(5 * time.Millisecond):
-			}
-			entries, _ := os.ReadDir(filepath.Join(bridge, "requests"))
-			for _, e := range entries {
-				ref, ok := strings.CutSuffix(e.Name(), ".json")
-				if !ok || strings.HasPrefix(ref, ".") {
-					continue
-				}
-				rc := fmt.Sprintf(`{"protocol":%q,"ref":%q,"session_generation":"gen-1","delivered_at":%q,"pid":%d}`,
-					pi.ProtocolV1, ref, time.Now().UTC().Format(time.RFC3339Nano), os.Getpid())
-				path := filepath.Join(bridge, "receipts", ref+".json")
-				if _, err := os.Stat(path); os.IsNotExist(err) {
-					_ = os.WriteFile(path, []byte(rc), 0o600)
-				}
-			}
+		if err := os.Chtimes(path, at, at); err != nil {
+			t.Fatal(err)
 		}
 	}()
-	defer func() { close(stop); wg.Wait() }()
 
 	att, err := pi.Factory(context.Background(), registry.FactoryConfig{Root: root, Target: "pi-1", Config: json.RawMessage(`{"handle":"pi-seat"}`)})
 	if err != nil {
 		t.Fatal(err)
 	}
+	att.(*pi.Attachment).SetNow(clock)
 	store, err := requests.Open(filepath.Join(root, "state"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	var c *Carrier
-	ep := core.New(core.Config{Store: store, Publish: func(s protocol.Snapshot, origin map[string]string) error { return c.Publish(s, origin) }})
+	ep := core.New(core.Config{Store: store, Now: clock, Publish: func(s protocol.Snapshot, origin map[string]string) error { return c.Publish(s, origin) }})
 	defer func() { _ = ep.Close() }()
 	ep.Register(att)
 
@@ -93,9 +79,7 @@ func TestPiApprovalAnsweredFromBuzz(t *testing.T) {
 		NativeSession: "sess-1", MinEvidence: protocol.EvidenceSubmitted}
 	ledger, _ := OpenLedger(t.TempDir())
 	c = NewCarrier(ledger, b, body, ownerGrant(t, owner, b.Body, KindDM, KindEdit), ep.NativeSessionID, ep.Handle)
-	base := time.Now()
-	var tick atomic.Int64
-	c.now = func() time.Time { return base.Add(time.Duration(tick.Add(1)) * time.Second) }
+	c.now = advance
 	var sent []nostr.Event
 	flush := func() {
 		sent = nil
@@ -104,7 +88,19 @@ func TestPiApprovalAnsweredFromBuzz(t *testing.T) {
 		}
 	}
 
-	if err := c.Ingest(ownerEvent(t, owner, "dm-1", "run the tests", c.now())); err != nil {
+	dm := ownerEvent(t, owner, "dm-1", "run the tests", clock())
+	n, err := Normalize(dm, b, clock())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The extension's delivery of this request, written ahead of the submit.
+	want := protocol.EncodeRef(c.source(dm.ID.Hex(), "").Host, "pi-1", n.RequestID)
+	rc := fmt.Sprintf(`{"protocol":%q,"ref":%q,"session_generation":"gen-1","delivered_at":%q,"pid":%d}`,
+		pi.ProtocolV1, want, clock().UTC().Format(time.RFC3339Nano), os.Getpid())
+	if err := os.WriteFile(filepath.Join(bridge, "receipts", want+".json"), []byte(rc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Ingest(dm); err != nil {
 		t.Fatal(err)
 	}
 	flush()
@@ -112,10 +108,12 @@ func TestPiApprovalAnsweredFromBuzz(t *testing.T) {
 		t.Fatalf("result row = %+v, want a running row that says the start is not proven", sent)
 	}
 	ref := strings.SplitN(sent[0].Content, ":", 2)[0]
+	if ref != want {
+		t.Fatalf("row ref = %s, want %s", ref, want)
+	}
 
-	stamp()
 	line := fmt.Sprintf(`{"protocol":%q,"ref":%q,"event":"interaction","at":"x","interaction_id":"tool-1","kind":"approval","prompt":"run: go test ./...","options":["Allow once","Block"],"approve_option":"Allow once","reject_option":"Block","manifest_hash":"sha256:abc","expires_at":%q,"presence":"remote"}`,
-		pi.ProtocolV1, ref, time.Now().Add(5*time.Minute).UTC().Format(time.RFC3339))
+		pi.ProtocolV1, ref, clock().Add(5*time.Minute).UTC().Format(time.RFC3339))
 	appendLine(t, filepath.Join(bridge, "events", ref+".jsonl"), line)
 	if err := ep.Reconcile(); err != nil {
 		t.Fatal(err)
@@ -131,8 +129,7 @@ func TestPiApprovalAnsweredFromBuzz(t *testing.T) {
 		t.Fatalf("approval message = %q, want the call and how to answer", msg.Content)
 	}
 
-	stamp()
-	react := nostr.Event{CreatedAt: nostr.Timestamp(c.now().Unix()), Kind: KindReaction, Content: "✅", Tags: nostr.Tags{{"e", msg.ID.Hex()}}}
+	react := nostr.Event{CreatedAt: nostr.Timestamp(advance().Unix()), Kind: KindReaction, Content: "✅", Tags: nostr.Tags{{"e", msg.ID.Hex()}}}
 	if err := react.Sign(owner); err != nil {
 		t.Fatal(err)
 	}
@@ -149,7 +146,6 @@ func TestPiApprovalAnsweredFromBuzz(t *testing.T) {
 		t.Fatalf("answer = %s (%v), want Allow once for tool-1 of %s", data, err, ref)
 	}
 
-	stamp()
 	appendLine(t, filepath.Join(bridge, "events", ref+".jsonl"),
 		fmt.Sprintf(`{"protocol":%q,"ref":%q,"event":"interaction_resolved","at":"x","interaction_id":"tool-1","outcome":"answered","option":"Allow once"}`, pi.ProtocolV1, ref))
 	if err := ep.Reconcile(); err != nil {
