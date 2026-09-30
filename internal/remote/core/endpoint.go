@@ -397,7 +397,7 @@ func (e *Endpoint) Handle(cmd *protocol.Command, src Source) (any, error) {
 	case protocol.OpSessionEvents:
 		return e.inspect(cmd.TargetID)
 	case protocol.OpInteractionRespond:
-		return e.respond(cmd)
+		return e.respond(cmd, src)
 	}
 	return nil, protocol.Refuse(protocol.CodeInvalid, "unknown op")
 }
@@ -881,7 +881,19 @@ func (e *Endpoint) cancel(cmd *protocol.Command, src Source) (protocol.Reply, er
 	return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestCancel}}, nil
 }
 
-func (e *Endpoint) respond(cmd *protocol.Command) (protocol.Reply, error) {
+// answeredByOwnerShare reports whether src is the Buzz share that submitted
+// rec. An answer to an interaction is the owner's decision, so only the
+// owner's DM on the share whose body and channel submitted the request may
+// give it (agent-message-queue-611.46). The AMQ mailbox carrier stamps its
+// own origin and the local IPC socket stamps none, so a local sender, the
+// asking agent included, can never answer.
+func answeredByOwnerShare(src Source, rec *requests.Record) bool {
+	o, r := src.Origin, rec.Origin
+	return o["carrier"] == "buzz" && r["carrier"] == "buzz" &&
+		o["body"] != "" && o["body"] == r["body"] && o["channel"] == r["channel"]
+}
+
+func (e *Endpoint) respond(cmd *protocol.Command, src Source) (protocol.Reply, error) {
 	host, targetID, requestID, err := protocol.DecodeRef(cmd.RequestRef)
 	if err != nil {
 		return protocol.Reply{}, err
@@ -896,6 +908,9 @@ func (e *Endpoint) respond(cmd *protocol.Command) (protocol.Reply, error) {
 	}
 	if !exists {
 		return protocol.Reply{}, protocol.Refuse(protocol.CodeNotFound, "no record for request_ref")
+	}
+	if !answeredByOwnerShare(src, rec) {
+		return protocol.Reply{}, protocol.Refuse(protocol.CodeUnshared, "only the owner's Buzz share that submitted this request can answer its interactions")
 	}
 	if t == nil {
 		return protocol.Reply{}, protocol.Refuse(protocol.CodeAttachmentLost, "target is not attached")

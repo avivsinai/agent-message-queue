@@ -87,7 +87,7 @@ func TestReconcileDoesNotHoldLockAcrossNativeCalls(t *testing.T) {
 	ep.Register(rt)
 
 	// One running record for Reconcile to Lookup.
-	if _, err := ep.Handle(submitCmd("11111111-1111-4111-8111-1111111111b1"), core.Source{Host: "local"}); err != nil {
+	if _, err := ep.Handle(submitCmd("11111111-1111-4111-8111-1111111111b1"), ownerShare); err != nil {
 		t.Fatalf("seed submit: %v", err)
 	}
 
@@ -113,7 +113,7 @@ func TestReconcileDoesNotHoldLockAcrossNativeCalls(t *testing.T) {
 
 	handled := make(chan error, 1)
 	go func() {
-		_, err := ep.Handle(&protocol.Command{Schema: protocol.SchemaCommand, Op: protocol.OpSessionList}, core.Source{Host: "local"})
+		_, err := ep.Handle(&protocol.Command{Schema: protocol.SchemaCommand, Op: protocol.OpSessionList}, ownerShare)
 		handled <- err
 	}()
 	select {
@@ -151,7 +151,7 @@ func TestCancelBeforeAdmissionConfirmsDisposition(t *testing.T) {
 	submitReady := rt.NotifySubmitReady()
 	var wg sync.WaitGroup
 	wg.Add(1)
-	go func() { defer wg.Done(); _, _ = ep.Handle(submitCmd(id), core.Source{Host: "local"}) }()
+	go func() { defer wg.Done(); _, _ = ep.Handle(submitCmd(id), ownerShare) }()
 	select {
 	case <-submitReady:
 	case <-time.After(2 * time.Second):
@@ -162,7 +162,7 @@ func TestCancelBeforeAdmissionConfirmsDisposition(t *testing.T) {
 	if _, err := ep.Handle(&protocol.Command{
 		Schema: protocol.SchemaCommand, Op: protocol.OpRequestCancel, RequestRef: ref,
 		TargetID: "fake", Epoch: "e_1", NotAfter: protocol.FormatTime(now().Add(2 * time.Minute)),
-	}, core.Source{Host: "local"}); err != nil {
+	}, ownerShare); err != nil {
 		t.Fatalf("cancel: %v", err)
 	}
 	rt.ReleaseAdmission()
@@ -192,7 +192,7 @@ func TestRespondReplayAnswersOnce(t *testing.T) {
 	ep.Register(rt)
 
 	id := "11111111-1111-4111-8111-1111111111d1"
-	if _, err := ep.Handle(submitCmd(id), core.Source{Host: "local"}); err != nil {
+	if _, err := ep.Handle(submitCmd(id), ownerShare); err != nil {
 		t.Fatal(err)
 	}
 	rt.Question(id, "i_1", []string{"yes", "no"})
@@ -201,11 +201,11 @@ func TestRespondReplayAnswersOnce(t *testing.T) {
 		Schema: protocol.SchemaCommand, Op: protocol.OpInteractionRespond, RequestRef: ref,
 		TargetID: "fake", Epoch: "e_1", InteractionID: "i_1", Option: "yes",
 	}
-	if _, err := ep.Handle(respond, core.Source{Host: "local"}); err != nil {
+	if _, err := ep.Handle(respond, ownerShare); err != nil {
 		t.Fatalf("respond: %v", err)
 	}
 	// Replay the identical answer, as an AMQ re-import would after a crash.
-	if _, err := ep.Handle(respond, core.Source{Host: "local"}); err != nil {
+	if _, err := ep.Handle(respond, ownerShare); err != nil {
 		t.Fatalf("respond replay: %v", err)
 	}
 	answers := rt.Snapshot().Answers
@@ -237,7 +237,7 @@ func TestResultWriteFailureIsVisible(t *testing.T) {
 	})
 
 	id := "11111111-1111-4111-8111-1111111111f1"
-	if _, err := ep.Handle(submitCmd(id), core.Source{Host: "local"}); err != nil {
+	if _, err := ep.Handle(submitCmd(id), ownerShare); err != nil {
 		t.Fatalf("submit: %v", err)
 	}
 	// Make the record's host directory unwritable so the terminal Update fails
@@ -286,7 +286,7 @@ func TestConflictOutcomeLeavesSnapshotByteIdentical(t *testing.T) {
 	ep.Register(fake.New("fake", "e_1"))
 
 	id := "11111111-1111-4111-8111-1111111111a9"
-	first, err := ep.Handle(submitCmd(id), core.Source{Host: "local"})
+	first, err := ep.Handle(submitCmd(id), ownerShare)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -294,7 +294,7 @@ func TestConflictOutcomeLeavesSnapshotByteIdentical(t *testing.T) {
 	// Same id, different bytes -> request_conflict.
 	conflict := submitCmd(id)
 	conflict.Input = &protocol.SubmitInput{Text: "different bytes"}
-	second, err := ep.Handle(conflict, core.Source{Host: "local"})
+	second, err := ep.Handle(conflict, ownerShare)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -326,7 +326,7 @@ func TestCancelWrongEpochDoesNotInterrupt(t *testing.T) {
 	ep.Register(rt)
 
 	id := "11111111-1111-4111-8111-1111111111b4"
-	if _, err := ep.Handle(submitCmd(id), core.Source{Host: "local"}); err != nil {
+	if _, err := ep.Handle(submitCmd(id), ownerShare); err != nil {
 		t.Fatal(err)
 	}
 	ref := protocol.EncodeRef("local", "fake", id)
@@ -334,7 +334,7 @@ func TestCancelWrongEpochDoesNotInterrupt(t *testing.T) {
 	rep, err := ep.Handle(&protocol.Command{
 		Schema: protocol.SchemaCommand, Op: protocol.OpRequestCancel, RequestRef: ref,
 		TargetID: "fake", Epoch: "e_WRONG", NotAfter: protocol.FormatTime(now().Add(2 * time.Minute)),
-	}, core.Source{Host: "local"})
+	}, ownerShare)
 	if err != nil {
 		t.Fatal(err)
 	}

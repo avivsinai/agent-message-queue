@@ -22,7 +22,7 @@ func TestQuestionResolvedClearsDurableInteraction(t *testing.T) {
 	ep.Register(rt)
 
 	id := "11111111-1111-4111-8111-1111111111f1"
-	if _, err := ep.Handle(submitCmd(id), core.Source{Host: "local"}); err != nil {
+	if _, err := ep.Handle(submitCmd(id), ownerShare); err != nil {
 		t.Fatal(err)
 	}
 	rt.Question(id, "i_1", []string{"yes", "no"})
@@ -41,7 +41,7 @@ func TestQuestionResolvedClearsDurableInteraction(t *testing.T) {
 		Schema: protocol.SchemaCommand, Op: protocol.OpInteractionRespond, RequestRef: ref,
 		TargetID: "fake", Epoch: "e_1", InteractionID: "i_1", Option: "yes",
 	}
-	if _, err := ep.Handle(answer, core.Source{Host: "local"}); err != nil {
+	if _, err := ep.Handle(answer, ownerShare); err != nil {
 		t.Fatalf("answer: %v", err)
 	}
 
@@ -57,7 +57,7 @@ func TestQuestionResolvedClearsDurableInteraction(t *testing.T) {
 		t.Fatalf("resolved = %+v, want %+v", rec.Resolved, want)
 	}
 	status := &protocol.Command{Schema: protocol.SchemaCommand, Op: protocol.OpRequestGet, RequestRef: ref}
-	rep, err := ep.Handle(status, core.Source{Host: "local"})
+	rep, err := ep.Handle(status, ownerShare)
 	if err != nil {
 		t.Fatalf("status: %v", err)
 	}
@@ -75,7 +75,7 @@ func TestReplacedInteractionIsNotResolved(t *testing.T) {
 	ep := core.New(core.Config{Store: store, Now: now})
 	ep.Register(rt)
 	id := "11111111-1111-4111-8111-1111111111f2"
-	if _, err := ep.Handle(submitCmd(id), core.Source{Host: "local"}); err != nil {
+	if _, err := ep.Handle(submitCmd(id), ownerShare); err != nil {
 		t.Fatal(err)
 	}
 	rt.Question(id, "i_1", []string{"yes", "no"})
@@ -99,7 +99,7 @@ func TestSecondAnswerDoesNotReplaceLiveIntent(t *testing.T) {
 	ep := core.New(core.Config{Store: store, Now: now})
 	ep.Register(rt)
 	id := "11111111-1111-4111-8111-1111111111f3"
-	if _, err := ep.Handle(submitCmd(id), core.Source{Host: "local"}); err != nil {
+	if _, err := ep.Handle(submitCmd(id), ownerShare); err != nil {
 		t.Fatal(err)
 	}
 	rt.Question(id, "i_1", []string{"yes", "no"})
@@ -107,7 +107,7 @@ func TestSecondAnswerDoesNotReplaceLiveIntent(t *testing.T) {
 		_, err := ep.Handle(&protocol.Command{
 			Schema: protocol.SchemaCommand, Op: protocol.OpInteractionRespond, RequestRef: protocol.EncodeRef("local", "fake", id),
 			TargetID: "fake", Epoch: "e_1", InteractionID: "i_1", Option: option,
-		}, core.Source{Host: "local"})
+		}, ownerShare)
 		return err
 	}
 	rt.FailNextRespond(errors.New("transport lost after write"))
@@ -134,7 +134,7 @@ func TestRunEndAfterSentAnswerRecordsTheAnswer(t *testing.T) {
 	ep := core.New(core.Config{Store: store, Now: now})
 	ep.Register(rt)
 	id := "11111111-1111-4111-8111-1111111111f4"
-	if _, err := ep.Handle(submitCmd(id), core.Source{Host: "local"}); err != nil {
+	if _, err := ep.Handle(submitCmd(id), ownerShare); err != nil {
 		t.Fatal(err)
 	}
 	rt.Question(id, "i_1", []string{"yes", "no"})
@@ -142,7 +142,7 @@ func TestRunEndAfterSentAnswerRecordsTheAnswer(t *testing.T) {
 	if _, err := ep.Handle(&protocol.Command{
 		Schema: protocol.SchemaCommand, Op: protocol.OpInteractionRespond, RequestRef: protocol.EncodeRef("local", "fake", id),
 		TargetID: "fake", Epoch: "e_1", InteractionID: "i_1", Option: "yes",
-	}, core.Source{Host: "local"}); err == nil {
+	}, ownerShare); err == nil {
 		t.Fatal("setup: the answer should fail in transport")
 	}
 	rt.Complete(id, "done")
