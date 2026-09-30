@@ -507,3 +507,71 @@ func TestApprovalOutcomeRecoveredAfterLostResolution(t *testing.T) {
 		t.Fatalf("state %s, want completed unchanged", s.State)
 	}
 }
+
+// holdResolved delivers question-resolved events only when released.
+type holdResolved struct {
+	*Attachment
+	mu   sync.Mutex
+	held []func()
+}
+
+func (h *holdResolved) Subscribe(fn func(core.NativeEvent)) func() {
+	return h.Attachment.Subscribe(func(ev core.NativeEvent) {
+		if ev.Type != core.EventQuestionResolved {
+			fn(ev)
+			return
+		}
+		h.mu.Lock()
+		h.held = append(h.held, func() { fn(ev) })
+		h.mu.Unlock()
+	})
+}
+
+func (h *holdResolved) release() {
+	h.mu.Lock()
+	held := h.held
+	h.held = nil
+	h.mu.Unlock()
+	for _, deliver := range held {
+		deliver()
+	}
+}
+
+// Pro review of #926 r4, 2026-09-30 (late path): a resolution that arrives
+// after the completion settles the owed outcome without Reconcile, and the
+// terminal state does not change.
+func TestApprovalOwedOutcomeSettledByLateResolution(t *testing.T) {
+	e := newEndpointRun(t)
+	e.ep.UnregisterAll()
+	a := mustAttach(t, e.dir)
+	a.SetNow(func() time.Time { return e.now })
+	h := &holdResolved{Attachment: a}
+	e.ep.Register(h)
+	appendEvents(t, e.dir, e.ref, interactionLine(e.ref))
+	_ = a.Inspect()
+	for deadline := time.Now().Add(2 * time.Second); e.get().Interaction == nil; time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the question never reached the record")
+		}
+	}
+	if _, err := e.respond("tool-1", "Allow once"); err != nil {
+		t.Fatal(err)
+	}
+	appendEvents(t, e.dir, e.ref, resolvedLine(e.ref, "answered_elsewhere", "Block"), terminalLine(e.ref, "completed"))
+	_ = a.Inspect()
+	for deadline := time.Now().Add(2 * time.Second); e.get().State != protocol.StateCompleted; time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the completion never reached the record")
+		}
+	}
+	h.release()
+	for deadline := time.Now().Add(2 * time.Second); len(e.get().Resolved) == 0; time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the late resolution never settled the owed outcome")
+		}
+	}
+	s := e.get()
+	if s.Resolved[0].InteractionID != "tool-1" || s.Resolved[0].Outcome != protocol.ResolutionElsewhere || s.Resolved[0].Option != "Block" || s.State != protocol.StateCompleted {
+		t.Fatalf("resolved %+v state %s, want tool-1 answered_elsewhere (Block) and completed", s.Resolved, s.State)
+	}
+}
