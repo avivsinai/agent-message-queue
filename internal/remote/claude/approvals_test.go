@@ -444,9 +444,10 @@ type failWriter struct{}
 
 func (failWriter) Write([]byte) (int, error) { return 0, errors.New("stdout closed") }
 
-// Pro review of #929 r2, 2026-10-01, #2: the hook's claim on the resolved
-// file is not delivery. When its deny cannot be written to stdout, the
-// approval ends answered_elsewhere, never as a reject sent from Buzz.
+// Pro review of #929 r2, 2026-10-01, #2, and r3, 2026-10-01, #1: the
+// hook's claim on the resolved file is not delivery. When its deny cannot
+// be written to stdout, the approval ends delivery_unknown, never as a
+// reject sent from Buzz and never as a terminal answer.
 func TestApprovalDenyNotWrittenIsNotSent(t *testing.T) {
 	f := newApprovalFixture(t, bashUse("toolu_1", "go test ./..."))
 	f.stdout = failWriter{}
@@ -456,10 +457,116 @@ func TestApprovalDenyNotWrittenIsNotSent(t *testing.T) {
 		t.Fatalf("respond = %q, %v; want the answer written", code, err)
 	}
 	f.hookExited()
-	if ev := f.resolution(); ev.Outcome != protocol.ResolutionElsewhere || ev.Remote {
-		t.Fatalf("resolution = %+v, want answered_elsewhere, not sent", ev)
+	if ev := f.resolution(); ev.Outcome != protocol.ResolutionDeliveryUnknown || ev.Remote {
+		t.Fatalf("resolution = %+v, want delivery_unknown", ev)
 	}
-	if res, ok := f.att.ResolvedInteraction(pr2Key(), "", f.id); !ok || res.Outcome != protocol.ResolutionElsewhere {
-		t.Fatalf("kept = %+v (%v), want answered_elsewhere", res, ok)
+	if res, ok := f.att.ResolvedInteraction(pr2Key(), "", f.id); !ok || res.Outcome != protocol.ResolutionDeliveryUnknown {
+		t.Fatalf("kept = %+v (%v), want delivery_unknown", res, ok)
+	}
+}
+
+// writeClaim lays down a request and the hook's claim on it, as a hook
+// with pid hookPID leaves them, plus its delivery record when delivery is
+// not nil.
+func (f *approvalFixture) writeClaim(hookPID int, delivery *bool) {
+	f.t.Helper()
+	hash, _ := actionHash("Bash", json.RawMessage(`{"command":"go test ./..."}`))
+	id, _ := newInteractionID()
+	f.id = id
+	dir, err := ensureApproveSubdir(f.home, approvalSession, "requests")
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	req := approvalRequest{Protocol: approvalProtocol, InteractionID: id, SessionID: approvalSession, PromptID: "p-1",
+		ToolName: "Bash", Preview: "Bash command:\ngo test ./...", ActionHash: hash, HookPID: hookPID,
+		OpenedAt: protocol.FormatTime(f.base), Deadline: protocol.FormatTime(f.base.Add(time.Minute))}
+	if err := createNewJSON(dir, id+".json", req); err != nil {
+		f.t.Fatal(err)
+	}
+	if err := writeResolved(f.home, approvalSession, approvalResolved{InteractionID: id, Outcome: outcomeHookClaim, Option: optionDeny}); err != nil {
+		f.t.Fatal(err)
+	}
+	if delivery != nil {
+		if err := writeDelivery(f.home, approvalSession, id, *delivery); err != nil {
+			f.t.Fatal(err)
+		}
+	}
+}
+
+// Pro review of #929 r3, 2026-10-01, #1: an unfinished claim is delivery
+// unknown. A hook stopped before its stdout write and one stopped after it
+// but before its delivery record leave the same files, a claim and no
+// record; a hook whose record write failed leaves them too. With the hook
+// gone, each settles delivery_unknown, as does a record of a failed write.
+func TestApprovalUnfinishedClaimIsDeliveryUnknown(t *testing.T) {
+	notWritten := false
+	for _, tc := range []struct {
+		name     string
+		delivery *bool
+	}{
+		{"interrupted before stdout", nil},
+		{"interrupted after stdout, before the record", nil},
+		{"delivery record write failed", nil},
+		{"stdout write failed", &notWritten},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newApprovalFixture(t, bashUse("toolu_1", "go test ./..."))
+			f.writeClaim(0, tc.delivery) // pid 0: no live hook
+			if ev := f.resolution(); ev.Outcome != protocol.ResolutionDeliveryUnknown || ev.Remote {
+				t.Fatalf("resolution = %+v, want delivery_unknown", ev)
+			}
+		})
+	}
+}
+
+// Pro review of #929 r3, 2026-10-01, #1: the run ends while a live hook's
+// claim has no delivery record yet. The approval stays open past the run's
+// end and its acknowledgement, and the record written later settles it as
+// answered, the same outcome the files give.
+func TestApprovalRunEndBeforeDeliveryWaitsForTheRecord(t *testing.T) {
+	f := newApprovalFixture(t, bashUse("toolu_1", "go test ./..."))
+	f.writeClaim(os.Getpid(), nil)
+	f.question()
+	appendStopMarker(t, f.home, f.base.Add(2*time.Second).UnixMilli())
+	for deadline := time.Now().Add(3 * time.Second); ; time.Sleep(time.Millisecond) {
+		f.att.pollConfirmations()
+		f.mu.Lock()
+		completed, resolved := false, false
+		for _, e := range f.events {
+			completed = completed || e.Type == core.EventRunCompleted
+			resolved = resolved || e.Type == core.EventQuestionResolved
+		}
+		f.mu.Unlock()
+		if resolved {
+			t.Fatal("a live claim was settled at the run's end")
+		}
+		if completed {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the run never completed")
+		}
+	}
+	f.att.AcknowledgeResult(pr2Key(), "", "")
+	if err := writeDelivery(f.home, approvalSession, f.id, true); err != nil {
+		t.Fatal(err)
+	}
+	if ev := f.resolution(); ev.Outcome != protocol.ResolutionAnswered || ev.Option != optionDeny {
+		t.Fatalf("resolution = %+v, want answered deny", ev)
+	}
+	kept, ok := f.att.ResolvedInteraction(pr2Key(), "", f.id)
+	// Releasing the run removed its files, so the same two records are
+	// written again under a fresh home and settled from there.
+	fresh := &Attachment{home: t.TempDir()}
+	claim := approvalResolved{InteractionID: f.id, Outcome: outcomeHookClaim, Option: optionDeny}
+	if err := writeResolved(fresh.home, approvalSession, claim); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeDelivery(fresh.home, approvalSession, f.id, true); err != nil {
+		t.Fatal(err)
+	}
+	rebuilt, final := fresh.finalOutcomeLocked(approvalSession, &approval{id: f.id, hookPID: os.Getpid()}, claim)
+	if !ok || !final || kept != rebuilt {
+		t.Fatalf("kept %+v (%v), rebuilt from the files %+v (%v): want the same", kept, ok, rebuilt, final)
 	}
 }

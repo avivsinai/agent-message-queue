@@ -829,6 +829,8 @@ func outcomeText(r protocol.Resolution, a Approval) string {
 		return fmt.Sprintf("Answer %q was sent from Buzz.", r.Option) + race
 	case protocol.ResolutionRunEnded:
 		return "The run ended before this was answered."
+	case protocol.ResolutionDeliveryUnknown:
+		return "The block may not have reached the terminal; check the session."
 	}
 	return "Closed outside Buzz: answered in the terminal, or the turn stopped."
 }

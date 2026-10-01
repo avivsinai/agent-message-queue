@@ -32,6 +32,21 @@ func TestApprovalPreviewMasksSecrets(t *testing.T) {
 			t.Fatalf("%s %s = %q, want the value masked", tc.tool, tc.input, preview)
 		}
 	}
+	// Pro review of #929 r3, 2026-10-01, #2: masking keeps shell boundaries,
+	// so a separate command after a masked word stays visible, on the Bash
+	// path and on the JSON fallback path. A value whose quote never closes
+	// labels the preview incomplete.
+	for _, input := range []string{
+		`{"command":"cat /tmp/config | grep 'password: \"' ; rm -rf /tmp/work"}`,
+		`{"command":"cat /tmp/config | grep 'password: \"' ; rm -rf /tmp/work","dangerouslyDisableSandbox":true}`,
+	} {
+		if preview := approvalPreview("Bash", json.RawMessage(input), ""); !strings.Contains(preview, "rm -rf /tmp/work") && !strings.Contains(preview, previewIncomplete) {
+			t.Fatalf("%s = %q, want the rm command visible or the preview labeled incomplete", input, preview)
+		}
+	}
+	if preview := approvalPreview("Bash", json.RawMessage(`{"command":"export TOKEN='unterminated demo value"}`), ""); !strings.HasPrefix(preview, previewIncomplete) {
+		t.Fatalf("unterminated quote = %q, want the incomplete label", preview)
+	}
 }
 
 // Bead 611.42.3, design section 5: install adds one PermissionRequest entry

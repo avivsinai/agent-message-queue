@@ -121,16 +121,20 @@ var bashFields = map[string]bool{"command": true, "description": true, "timeout"
 // approvalPreview renders what the DM shows for one PermissionRequest, with
 // obvious secrets masked. Buzz can only block a Claude tool call (owner
 // ruling on bead 611.42.3: a forged block is only a denial), so the preview
-// grants nothing; it shows the owner what a ❌ would stop.
+// grants nothing; it shows the owner what a ❌ would stop. When masking
+// cannot keep the command's shell boundaries (an unterminated quote), the
+// preview says it is incomplete, so a shown prefix is never taken for the
+// whole action.
 func approvalPreview(toolName string, input json.RawMessage, agentType string) string {
 	var b strings.Builder
-	if agentType != "" {
-		fmt.Fprintf(&b, "Subagent %s asks:\n", oneLine(agentType))
-	}
+	incomplete := false
 	if bash, ok := bashCall(input); toolName == "Bash" && ok {
-		b.WriteString("Bash command:\n" + bash.Command)
-		if bash.Description != "" {
-			b.WriteString("\n\nDescription: " + oneLine(bash.Description))
+		cmd, _, cut := maskSecrets(bash.Command)
+		desc, _, dcut := maskSecrets(oneLine(bash.Description))
+		incomplete = cut || dcut
+		b.WriteString("Bash command:\n" + cmd)
+		if desc != "" {
+			b.WriteString("\n\nDescription: " + desc)
 		}
 		if bash.Timeout != "" {
 			b.WriteString("\nTimeout: " + bash.Timeout + " ms")
@@ -139,12 +143,24 @@ func approvalPreview(toolName string, input json.RawMessage, agentType string) s
 			b.WriteString("\nRuns in the background.")
 		}
 	} else {
-		fmt.Fprintf(&b, "Tool %s:\n%s", oneLine(toolName), maskedJSON(input))
+		raw, cut := maskedJSON(input)
+		incomplete = cut
+		fmt.Fprintf(&b, "Tool %s:\n%s", oneLine(toolName), raw)
 	}
-	masked, _ := maskSecrets(b.String())
-	preview, _ := protocol.TruncateText(masked, protocol.MaxApprovalPreview)
+	head := ""
+	if agentType != "" {
+		head = fmt.Sprintf("Subagent %s asks:\n", oneLine(agentType))
+	}
+	if incomplete {
+		head = previewIncomplete + "\n\n" + head
+	}
+	preview, _ := protocol.TruncateText(head+b.String(), protocol.MaxApprovalPreview)
 	return preview
 }
+
+// previewIncomplete heads a preview whose masking could not keep the
+// command's boundaries.
+const previewIncomplete = "Preview incomplete: check the terminal."
 
 type bashInput struct {
 	Command, Description, Timeout string
@@ -192,32 +208,131 @@ func oneLine(s string) string {
 	return strings.Join(strings.Fields(s), " ")
 }
 
-// secretPatterns are the obvious secret shapes the masker hides: known
-// token prefixes, private key blocks, bearer credentials, credentials in a
-// URL, and a value assigned to a secret-looking name or flag. It is
-// deliberately broad: a false positive hides harmless text, never leaks.
+// secretPatterns are the obvious secret shapes the masker hides wherever
+// they appear: known token prefixes, private key blocks, bearer credentials
+// and credentials in a URL. Each matches only its own characters, so text
+// around it stays visible. Values of secret-looking names and flags are
+// masked by shell word instead (maskSecretWords). It is deliberately broad:
+// a false positive hides harmless text, never leaks.
 var secretPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(-----END [A-Z ]*PRIVATE KEY-----|$)`),
+	regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----`),
 	regexp.MustCompile(`\b(gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35}|glpat-[A-Za-z0-9_-]{20,})`),
 	regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}`),
 	regexp.MustCompile(`(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}`),
 	regexp.MustCompile(`://[^/\s:@]+:[^/\s@]+@`),
-	// Quoted values first, so a value with spaces is masked whole. An
-	// unterminated quote masks to the end of the text.
-	regexp.MustCompile(`(?i)\b` + secretName + `"?\s*[=:]\s*` + quotedValue),
-	regexp.MustCompile(`(?i)\b` + secretName + `"?\s*[=:]\s*[^\s'"]+`),
-	regexp.MustCompile(`(?i)--` + secretFlag + `(=|\s+)` + quotedValue),
-	regexp.MustCompile(`(?i)--` + secretFlag + `(=|\s+)\S+`),
 }
 
-// secretName is a name that holds a secret: an assignment (API_KEY=), a
-// JSON field ("password":), or a config key. secretFlag is such a flag.
-// quotedValue is a double-quoted value with escapes or a single-quoted one.
-const (
-	secretName  = `[A-Z0-9_-]*(password|passwd|pwd|secret|token|api_?key|apikey|access_?key|private_?key|credentials?|auth)[A-Z0-9_-]*`
-	secretFlag  = `(password|passwd|token|secret|api-key|apikey|access-key|auth)`
-	quotedValue = `("(?:[^"\\]|\\.)*("|$)|'[^']*('|$))`
+// unterminatedKey is a private key block with no end line: everything after
+// its start is the key.
+var unterminatedKey = regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*$`)
+
+// secretAssign is a shell word, unquoted, that assigns a secret-looking
+// name (API_KEY=..., password: ..., "token":...); secretAssignBare is one
+// with the value in the next word. secretFlagWord is a secret flag with its
+// value attached (--token=...), secretFlagBare one whose value is the next
+// word.
+var (
+	secretAssign     = regexp.MustCompile(`(?i)^"?[A-Z0-9_.-]*(password|passwd|pwd|secret|token|api_?key|apikey|access_?key|private_?key|credentials?|auth)[A-Z0-9_.-]*"?\s*[=:]\s*\S`)
+	secretAssignBare = regexp.MustCompile(`(?i)^"?[A-Z0-9_.-]*(password|passwd|pwd|secret|token|api_?key|apikey|access_?key|private_?key|credentials?|auth)[A-Z0-9_.-]*"?\s*[=:]$`)
+	secretFlagWord   = regexp.MustCompile(`(?i)^--(password|passwd|token|secret|api-key|apikey|access-key|auth)=`)
+	secretFlagBare   = regexp.MustCompile(`(?i)^--(password|passwd|token|secret|api-key|apikey|access-key|auth)$`)
 )
+
+// shellWord is one word of a command: its span in the text, its value with
+// quotes removed, and whether the text ended inside one of its quotes.
+type shellWord struct {
+	start, end   int
+	value        string
+	unterminated bool
+}
+
+// shellWords splits text into words the way a POSIX shell quotes them:
+// whitespace and the operators ;|&()<> separate words outside quotes,
+// single quotes are literal, double quotes and a backslash escape the next
+// character. A quote still open at the end makes the last word
+// unterminated.
+func shellWords(s string) []shellWord {
+	var words []shellWord
+	var cur strings.Builder
+	start, in := -1, false
+	var quote byte
+	flush := func(end int, open bool) {
+		if in {
+			words = append(words, shellWord{start: start, end: end, value: cur.String(), unterminated: open})
+		}
+		cur.Reset()
+		in = false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case quote == '\'':
+			if c == '\'' {
+				quote = 0
+			} else {
+				cur.WriteByte(c)
+			}
+		case quote == '"':
+			switch {
+			case c == '"':
+				quote = 0
+			case c == '\\' && i+1 < len(s):
+				i++
+				cur.WriteByte(s[i])
+			default:
+				cur.WriteByte(c)
+			}
+		case c == ' ' || c == '\t' || c == '\n' || c == '\r' || strings.IndexByte(";|&()<>", c) >= 0:
+			flush(i, false)
+		default:
+			if !in {
+				start, in = i, true
+			}
+			switch {
+			case c == '\'' || c == '"':
+				quote = c
+			case c == '\\' && i+1 < len(s):
+				i++
+				cur.WriteByte(s[i])
+			default:
+				cur.WriteByte(c)
+			}
+		}
+	}
+	flush(len(s), quote != 0)
+	return words
+}
+
+// maskSecretWords replaces each shell word that holds a secret value with
+// [masked]: the value of a secret-looking assignment or flag, attached or
+// in the next word. Only that word's span changes, so a separate command
+// after it stays visible. incomplete reports a masked word that ran to the
+// end of the text inside an open quote: its boundary is unknown.
+func maskSecretWords(s string) (string, bool) {
+	words := shellWords(s)
+	mask := make([]bool, len(words))
+	for i, w := range words {
+		switch {
+		case secretAssign.MatchString(w.value), secretFlagWord.MatchString(w.value):
+			mask[i] = true
+		case (secretAssignBare.MatchString(w.value) || secretFlagBare.MatchString(w.value)) && i+1 < len(words):
+			mask[i+1] = true
+		}
+	}
+	var b strings.Builder
+	last, incomplete := 0, false
+	for i, w := range words {
+		if !mask[i] {
+			continue
+		}
+		b.WriteString(s[last:w.start])
+		b.WriteString("[masked]")
+		last = w.end
+		incomplete = incomplete || w.unterminated
+	}
+	b.WriteString(s[last:])
+	return b.String(), incomplete
+}
 
 // secretKeyRe is a JSON field name whose value is a secret.
 var secretKeyRe = regexp.MustCompile(`(?i)(password|passwd|pwd|secret|token|api_?key|apikey|access_?key|private_?key|credential|auth)`)
@@ -226,21 +341,22 @@ var secretKeyRe = regexp.MustCompile(`(?i)(password|passwd|pwd|secret|token|api_
 // is encoded: every value under a secret-looking key, at any depth, becomes
 // [masked], and every other string is masked as text. Masking the encoded
 // JSON instead would miss quoted values, whose quotes JSON escapes.
-func maskedJSON(input json.RawMessage) []byte {
+func maskedJSON(input json.RawMessage) ([]byte, bool) {
 	dec := json.NewDecoder(bytes.NewReader(input))
 	dec.UseNumber()
 	var v any
 	if err := dec.Decode(&v); err != nil {
-		return []byte("[input not shown]")
+		return []byte("[input not shown]"), true
 	}
-	out, err := json.Marshal(maskValue(v))
+	incomplete := false
+	out, err := json.Marshal(maskValue(v, &incomplete))
 	if err != nil {
-		return []byte("[input not shown]")
+		return []byte("[input not shown]"), true
 	}
-	return out
+	return out, incomplete
 }
 
-func maskValue(v any) any {
+func maskValue(v any, incomplete *bool) any {
 	switch t := v.(type) {
 	case map[string]any:
 		for k, val := range t {
@@ -248,29 +364,34 @@ func maskValue(v any) any {
 				t[k] = "[masked]"
 				continue
 			}
-			t[k] = maskValue(val)
+			t[k] = maskValue(val, incomplete)
 		}
 		return t
 	case []any:
 		for i, val := range t {
-			t[i] = maskValue(val)
+			t[i] = maskValue(val, incomplete)
 		}
 		return t
 	case string:
-		masked, _ := maskSecrets(t)
+		masked, _, cut := maskSecrets(t)
+		*incomplete = *incomplete || cut
 		return masked
 	}
 	return v
 }
 
-// maskSecrets replaces every secret match with [masked] and reports whether
-// anything changed.
-func maskSecrets(s string) (string, bool) {
+// maskSecrets masks one text: the secret shapes, then secret values by
+// shell word. It reports whether anything changed and whether the masked
+// text may be incomplete (a masked value whose end could not be found).
+func maskSecrets(s string) (string, bool, bool) {
 	out := s
 	for _, re := range secretPatterns {
 		out = re.ReplaceAllString(out, "[masked]")
 	}
-	return out, out != s
+	incomplete := unterminatedKey.MatchString(out)
+	out = unterminatedKey.ReplaceAllString(out, "[masked]")
+	out, cut := maskSecretWords(out)
+	return out, out != s, incomplete || cut
 }
 
 // newInteractionID mints "cc-" and 32 random hex characters.

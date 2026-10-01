@@ -192,7 +192,8 @@
             "enum": [
               "answered",
               "answered_elsewhere",
-              "run_ended"
+              "run_ended",
+              "delivery_unknown"
             ]
           },
           "option": {

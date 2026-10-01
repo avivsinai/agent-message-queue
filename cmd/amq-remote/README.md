@@ -537,8 +537,12 @@ decision is a deny for the owner's ❌ on that exact call, and the turn goes
 on. An answer file with any other option is ignored, so a forged allow
 grants nothing.
 
-The message shows the call with obvious secrets masked. The first answer
-wins, in Buzz or in the terminal. A terminal reject stops the hook at once.
+The message shows the call with obvious secrets masked; text after a masked
+value stays visible, and a preview whose masked value has no closing quote
+starts with "Preview incomplete: check the terminal." The first answer
+wins, in Buzz or in the terminal. When the hook stops before it records
+that its deny was written whole, the message says the block may not have
+reached the terminal (`delivery_unknown`). A terminal reject stops the hook at once.
 A terminal approve does not signal the hook, so the endpoint detects it
 from the call's `tool_result` in the transcript and edits the message to
 say it was answered outside Buzz. When two identical calls are waiting in
