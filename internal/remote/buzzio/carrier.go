@@ -830,7 +830,7 @@ func outcomeText(r protocol.Resolution, a Approval) string {
 	case protocol.ResolutionRunEnded:
 		return "The run ended before this was answered."
 	case protocol.ResolutionDeliveryUnknown:
-		return "The block may not have reached the terminal; check the session."
+		return deliveryUnknownText
 	}
 	return "Closed outside Buzz: answered in the terminal, or the turn stopped."
 }
@@ -886,6 +886,10 @@ func (c *Carrier) answerApproval(evt nostr.Event, messageID string, appr Approva
 	switch {
 	case err == nil && reply.Outcome.Code == protocol.CodeAlreadyResolved && answeredWith(reply.Snapshot, appr.InteractionID, option):
 		// A replay after a crash: this reaction's answer was delivered.
+	case err == nil && reply.Outcome.Code == protocol.CodeAlreadyResolved && resolvedAs(reply.Snapshot, appr.InteractionID) == protocol.ResolutionDeliveryUnknown:
+		// A replay whose answer may or may not have arrived: say exactly
+		// that, never that it was already answered.
+		return c.settleApprovalAnswer(evt, messageID, st, deliveryUnknownText)
 	case err == nil && reply.Outcome.Code == protocol.CodeAlreadyResolved:
 		return c.settleApprovalAnswer(evt, messageID, st, "Not sent: this approval was already answered.")
 	case errors.As(err, &refusal) && refusal.Code == protocol.CodeAlreadyResolved:
@@ -899,6 +903,19 @@ func (c *Carrier) answerApproval(evt nostr.Event, messageID string, appr Approva
 	_, err = c.ledger.Settle(evt.ID.Hex(), st)
 	return err
 }
+
+// resolvedAs is how the record says the interaction ended, or "".
+func resolvedAs(s protocol.Snapshot, interactionID string) protocol.ResolutionOutcome {
+	for _, r := range s.Resolved {
+		if r.InteractionID == interactionID {
+			return r.Outcome
+		}
+	}
+	return ""
+}
+
+// deliveryUnknownText is the owner-facing line for delivery_unknown.
+const deliveryUnknownText = "The block may not have reached the terminal; check the session."
 
 // answeredWith reports whether the record says AMQ delivered option for the
 // interaction.

@@ -124,8 +124,8 @@ func (a *Attachment) arbitrateLocked(sessionID string, want approvalResolved) (a
 // failed, or a hook gone with no record (it stopped before or after its
 // write, or could not record it), is delivery_unknown: nobody can tell
 // whether the deny reached Claude, and no terminal answer is claimed. While
-// the claiming hook lives with no record, the outcome is not final, even
-// after the run ended, so a late record is still seen. Caller holds a.mu.
+// the claiming hook lives with no record, the outcome is not final; the
+// run's end settles it (endApprovalsLocked). Caller holds a.mu.
 func (a *Attachment) finalOutcomeLocked(sessionID string, ap *approval, r approvalResolved) (protocol.Resolution, bool) {
 	if r.Outcome != outcomeHookClaim {
 		return protocol.Resolution{InteractionID: r.InteractionID, Outcome: r.Outcome, Option: r.Option}, true
@@ -148,7 +148,7 @@ func (a *Attachment) finalOutcomeLocked(sessionID string, ap *approval, r approv
 func (a *Attachment) approvalIDsLocked() (map[string]bool, []string) {
 	known := map[string]bool{}
 	var open []string
-	for _, rec := range a.approvalRunsLocked() {
+	for _, rec := range a.runs {
 		for id := range rec.approvals {
 			known[id] = true
 		}
@@ -289,7 +289,7 @@ func (a *Attachment) applyApprovalsLocked(sessionID string, d approvalDisk, caug
 			events = append(events, rec.questionEvent(ap))
 		}
 	}
-	for _, rec := range a.approvalRunsLocked() {
+	for _, rec := range a.runs {
 		for _, ap := range append([]*approval(nil), rec.open...) {
 			if r, ok := d.resolved[ap.id]; ok {
 				if res, final := a.finalOutcomeLocked(sessionID, ap, r); final {
@@ -313,49 +313,7 @@ func (a *Attachment) applyApprovalsLocked(sessionID string, d approvalDisk, caug
 			}
 		}
 	}
-	a.sweepSettlingLocked()
 	return events
-}
-
-// approvalRunsLocked is every run whose approvals the poller follows: the
-// retained runs and the acknowledged ones still settling an approval.
-func (a *Attachment) approvalRunsLocked() []*runRecord {
-	out := make([]*runRecord, 0, len(a.runs)+len(a.settling))
-	for _, rec := range a.runs {
-		out = append(out, rec)
-	}
-	for _, rec := range a.settling {
-		out = append(out, rec)
-	}
-	return out
-}
-
-// sweepSettlingLocked releases each acknowledged run whose approvals have
-// all ended: its outcomes are kept for the endpoint and its files removed.
-func (a *Attachment) sweepSettlingLocked() {
-	for key, rec := range a.settling {
-		if len(rec.open) > 0 {
-			continue
-		}
-		delete(a.settling, key)
-		a.releaseLocked(key, rec)
-	}
-}
-
-// releaseLocked keeps an acknowledged run's approval outcomes and queues the
-// removal of its approval files.
-func (a *Attachment) releaseLocked(key requests.Key, rec *runRecord) {
-	if len(rec.outcomes) > 0 {
-		a.releasedOutcomes[key] = rec.outcomes
-	}
-	var ids []string
-	for id := range rec.approvals {
-		ids = append(ids, id)
-	}
-	home, sessionID, promptID := a.home, a.boundSession, rec.promptID
-	if promptID != "" || len(ids) > 0 {
-		a.pendingOps = append(a.pendingOps, func() { removeApprovalFiles(home, sessionID, promptID, ids) })
-	}
 }
 
 // bindCallLocked binds an unbound, certain approval to its one candidate
@@ -456,22 +414,27 @@ func (rec *runRecord) closeApproval(id string, res protocol.Resolution, events [
 	return events
 }
 
-// endApprovalsLocked closes the open approvals of a run that ended, queued
-// ones first. Each tries run_ended as its resolved file, which also tells a
-// lingering hook to stop, and closes with whatever outcome stands on disk.
-// When neither can be recorded the run's end still closes it as run_ended.
-// A hook's claim still waiting for its delivery record stays open; the
-// poller settles it when the record appears or the hook is gone. Caller
-// holds a.mu.
+// endApprovalsLocked closes every open approval of a run that ended,
+// queued ones first. Each tries run_ended as its resolved file, which also
+// tells a lingering hook to stop, and closes with whatever outcome stands on
+// disk. A hook's claim with no delivery record yet is settled now as
+// delivery_unknown, by taking the delivery record itself: a record the hook
+// writes later loses, so the files and the kept outcome agree. When nothing
+// can be recorded the run's end still closes the approval as run_ended.
+// Caller holds a.mu.
 func (a *Attachment) endApprovalsLocked(rec *runRecord, events []core.NativeEvent) []core.NativeEvent {
-	for i := len(rec.open) - 1; i >= 0; i-- {
-		ap := rec.open[i]
+	for len(rec.open) > 0 {
+		ap := rec.open[len(rec.open)-1]
 		res := protocol.Resolution{InteractionID: ap.id, Outcome: protocol.ResolutionRunEnded}
-		if a.boundSession != "" {
-			if got, ok := a.arbitrateLocked(a.boundSession, approvalResolved{InteractionID: ap.id, Outcome: protocol.ResolutionRunEnded}); ok {
+		if sid := a.boundSession; sid != "" {
+			if got, ok := a.arbitrateLocked(sid, approvalResolved{InteractionID: ap.id, Outcome: protocol.ResolutionRunEnded}); ok {
 				final := false
-				if res, final = a.finalOutcomeLocked(a.boundSession, ap, got); !final {
-					continue
+				if res, final = a.finalOutcomeLocked(sid, ap, got); !final {
+					_ = writeDelivery(a.home, sid, ap.id, false)
+					res, final = a.finalOutcomeLocked(sid, ap, got)
+					if !final {
+						res = protocol.Resolution{InteractionID: ap.id, Outcome: protocol.ResolutionDeliveryUnknown, Option: got.Option}
+					}
 				}
 			}
 		}
@@ -558,10 +521,6 @@ func (a *Attachment) ResolvedInteraction(key requests.Key, _, interactionID stri
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if rec, ok := a.runs[key]; ok {
-		res, done := rec.outcomes[interactionID]
-		return res, done
-	}
-	if rec, ok := a.settling[key]; ok {
 		res, done := rec.outcomes[interactionID]
 		return res, done
 	}

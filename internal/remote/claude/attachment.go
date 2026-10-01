@@ -152,7 +152,6 @@ func Attach(cfg config) (*Attachment, error) {
 		ctx:          context.Background(),
 
 		releasedOutcomes: map[requests.Key]map[string]protocol.Resolution{},
-		settling:         map[requests.Key]*runRecord{},
 	}
 	token, err := bindStopSession(home, reg.SessionID)
 	if err != nil && !errors.Is(err, errUnsupportedPlatform) {
@@ -272,10 +271,6 @@ type Attachment struct {
 	// releasedOutcomes keeps how each approval of an acknowledged run
 	// ended, for an outcome the endpoint still owes. Bounded with released.
 	releasedOutcomes map[requests.Key]map[string]protocol.Resolution
-	// settling holds acknowledged runs with an approval still open (a hook
-	// claim waiting for its delivery record); the poller settles and then
-	// releases them.
-	settling map[requests.Key]*runRecord
 	// pendingOps are approval file writes decided under a.mu, run by the
 	// poller after it releases the lock.
 	pendingOps []func()
@@ -442,23 +437,21 @@ func (a *Attachment) AcknowledgeResult(key requests.Key, _, _ string) {
 		}
 	}
 	a.released[key] = struct{}{}
-	var ops []func()
-	switch {
-	case rec != nil && len(rec.open) > 0:
-		// An approval still waits for its hook's delivery record: the
-		// poller settles it, then releases the run.
-		a.settling[key] = rec
-	case rec != nil:
-		a.releaseLocked(key, rec)
-		ops, a.pendingOps = a.pendingOps, nil
+	var promptID string
+	var ids []string
+	if rec != nil {
+		promptID = rec.promptID
+		for id := range rec.approvals {
+			ids = append(ids, id)
+		}
+		if len(rec.outcomes) > 0 {
+			a.releasedOutcomes[key] = rec.outcomes
+		}
 	}
-	settling := len(a.settling) > 0
+	sessionID := a.boundSession
 	a.mu.Unlock()
-	for _, op := range ops {
-		op()
-	}
-	if settling {
-		a.kickConfirmations()
+	if promptID != "" || len(ids) > 0 {
+		removeApprovalFiles(a.home, sessionID, promptID, ids)
 	}
 }
 

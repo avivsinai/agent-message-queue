@@ -189,6 +189,7 @@
             "maxLength": 128
           },
           "outcome": {
+            "description": "How the interaction ended. The /1 schema grows in place, additively, as resolved itself did: delivery_unknown (AMQ began to deliver an answer and cannot tell whether it arrived) was added after the first three values, so a validator pinned to an older copy of this file rejects it.",
             "enum": [
               "answered",
               "answered_elsewhere",

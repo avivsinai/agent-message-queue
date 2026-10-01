@@ -519,54 +519,25 @@ func TestApprovalUnfinishedClaimIsDeliveryUnknown(t *testing.T) {
 	}
 }
 
-// Pro review of #929 r3, 2026-10-01, #1: the run ends while a live hook's
-// claim has no delivery record yet. The approval stays open past the run's
-// end and its acknowledgement, and the record written later settles it as
-// answered, the same outcome the files give.
-func TestApprovalRunEndBeforeDeliveryWaitsForTheRecord(t *testing.T) {
+// Pro review of #929 r3 and r4, 2026-10-01, #1 and #2: the run ends while
+// a live hook's claim has no delivery record. The run's end records
+// delivery_unknown at once and stops tracking it; a record the hook writes
+// later loses to the one the run's end wrote.
+func TestApprovalRunEndBeforeDeliveryRecordsDeliveryUnknown(t *testing.T) {
 	f := newApprovalFixture(t, bashUse("toolu_1", "go test ./..."))
 	f.writeClaim(os.Getpid(), nil)
 	f.question()
 	appendStopMarker(t, f.home, f.base.Add(2*time.Second).UnixMilli())
-	for deadline := time.Now().Add(3 * time.Second); ; time.Sleep(time.Millisecond) {
-		f.att.pollConfirmations()
-		f.mu.Lock()
-		completed, resolved := false, false
-		for _, e := range f.events {
-			completed = completed || e.Type == core.EventRunCompleted
-			resolved = resolved || e.Type == core.EventQuestionResolved
-		}
-		f.mu.Unlock()
-		if resolved {
-			t.Fatal("a live claim was settled at the run's end")
-		}
-		if completed {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("the run never completed")
-		}
+	if ev := f.resolution(); ev.Outcome != protocol.ResolutionDeliveryUnknown || ev.Remote {
+		t.Fatalf("resolution = %+v, want delivery_unknown", ev)
 	}
-	f.att.AcknowledgeResult(pr2Key(), "", "")
-	if err := writeDelivery(f.home, approvalSession, f.id, true); err != nil {
-		t.Fatal(err)
+	if err := writeDelivery(f.home, approvalSession, f.id, true); err == nil {
+		t.Fatal("a late delivery record was accepted after the run's end settled the approval")
 	}
-	if ev := f.resolution(); ev.Outcome != protocol.ResolutionAnswered || ev.Option != optionDeny {
-		t.Fatalf("resolution = %+v, want answered deny", ev)
+	if d, ok := readDelivery(f.home, approvalSession, f.id); !ok || d.Written {
+		t.Fatalf("delivery = %+v (%v), want the run end's unwritten record", d, ok)
 	}
-	kept, ok := f.att.ResolvedInteraction(pr2Key(), "", f.id)
-	// Releasing the run removed its files, so the same two records are
-	// written again under a fresh home and settled from there.
-	fresh := &Attachment{home: t.TempDir()}
-	claim := approvalResolved{InteractionID: f.id, Outcome: outcomeHookClaim, Option: optionDeny}
-	if err := writeResolved(fresh.home, approvalSession, claim); err != nil {
-		t.Fatal(err)
-	}
-	if err := writeDelivery(fresh.home, approvalSession, f.id, true); err != nil {
-		t.Fatal(err)
-	}
-	rebuilt, final := fresh.finalOutcomeLocked(approvalSession, &approval{id: f.id, hookPID: os.Getpid()}, claim)
-	if !ok || !final || kept != rebuilt {
-		t.Fatalf("kept %+v (%v), rebuilt from the files %+v (%v): want the same", kept, ok, rebuilt, final)
+	if res, ok := f.att.ResolvedInteraction(pr2Key(), "", f.id); !ok || res.Outcome != protocol.ResolutionDeliveryUnknown {
+		t.Fatalf("kept = %+v (%v), want delivery_unknown", res, ok)
 	}
 }

@@ -7,45 +7,33 @@ import (
 	"testing"
 )
 
-// Bead 611.42.3: the DM preview shows the call with obvious secrets masked.
-func TestApprovalPreviewMasksSecrets(t *testing.T) {
-	if preview := approvalPreview("Bash", json.RawMessage(`{"command":"go test ./...","description":"Run the tests"}`), ""); !strings.Contains(preview, "go test ./...") || strings.Contains(preview, "[masked]") {
-		t.Fatalf("plain Bash = %q, want the command shown unmasked", preview)
+// Bead 611.42.3: the DM preview shows a call whole, or not at all. A call
+// that may hold a secret anywhere shows only the hidden note; ❌ still
+// blocks it.
+func TestApprovalPreviewHidesACallThatMayHoldASecret(t *testing.T) {
+	if preview := approvalPreview("Bash", json.RawMessage(`{"command":"go test ./... && rm -rf /tmp/work","description":"Run the tests"}`), ""); !strings.Contains(preview, "go test ./... && rm -rf /tmp/work") {
+		t.Fatalf("plain Bash = %q, want the command shown whole", preview)
 	}
-	// Pro review of #929, 2026-09-30, #4: bearer credentials, quoted
-	// assignment and flag values, an unterminated quote, and string secret
-	// fields of another tool's input.
-	for _, tc := range []struct{ tool, input, secret string }{
-		{"Bash", `{"command":"curl -H 'Authorization: Bearer abcdef0123456789' https://example.test"}`, "abcdef0123456789"},
-		{"Bash", `{"command":"API_KEY=\"ordinary-demo-value\" ./check"}`, "ordinary-demo-value"},
-		{"Bash", `{"command":"DATABASE_PASSWORD='ordinary demo value' ./check"}`, "demo value"},
-		{"Bash", `{"command":"login --password \"ordinary demo value\""}`, "demo value"},
-		{"Bash", `{"command":"export TOKEN='unterminated demo value"}`, "demo value"},
-		{"WebFetch", `{"url":"https://example.test","api_key":"ordinary-demo-value"}`, "ordinary-demo-value"},
-		// Pro review of #929 r2, 2026-10-01, #3: the JSON fallback path, for
-		// a Bash input with an extra field and a non-Bash tool.
-		{"Bash", `{"command":"API_KEY=\"ordinary-demo-value\" ./check","dangerouslyDisableSandbox":true}`, "ordinary-demo-value"},
-		{"Bash", `{"command":"login --password \"ordinary demo value\"","dangerouslyDisableSandbox":true}`, "demo value"},
-		{"WebFetch", `{"url":"https://example.test","config":{"headers":[{"apiToken":"ordinary-demo-value"}]}}`, "ordinary-demo-value"},
+	// Pro review of #929 r4, 2026-10-01, #3 and #5, and the earlier
+	// masking cases: each hides the whole call.
+	for _, tc := range []struct{ tool, input string }{
+		{"Bash", `{"command":"sh -c 'TOKEN=abc; rm -rf /tmp/work'"}`},
+		{"Bash", `{"command":"printf '%s\\n' --token; rm -rf /tmp/work"}`},
+		{"Bash", `{"command":"curl --data '{\"password\":\"demo-long-password\"}' https://example.invalid"}`},
+		{"Bash", `{"command":"curl --data '{\"password\":\"demo-long-password\"}' https://example.invalid","dangerouslyDisableSandbox":true}`},
+		{"Bash", `{"command":"API_KEY=\"ordinary-demo-value\" ./check"}`},
+		{"Bash", `{"command":"DATABASE_PASSWORD='ordinary demo value' ./check"}`},
+		{"Bash", `{"command":"cat /tmp/config | grep 'password: \"' ; rm -rf /tmp/work"}`},
+		{"Bash", `{"command":"curl -H 'Authorization: Bearer abcdef0123456789' https://example.test"}`},
+		{"WebFetch", `{"url":"https://example.test","config":{"headers":[{"apiToken":"ordinary-demo-value"}]}}`},
 	} {
-		if preview := approvalPreview(tc.tool, json.RawMessage(tc.input), ""); strings.Contains(preview, tc.secret) || !strings.Contains(preview, "[masked]") {
-			t.Fatalf("%s %s = %q, want the value masked", tc.tool, tc.input, preview)
+		if preview := approvalPreview(tc.tool, json.RawMessage(tc.input), ""); preview != previewHidden {
+			t.Fatalf("%s %s = %q, want the call hidden", tc.tool, tc.input, preview)
 		}
 	}
-	// Pro review of #929 r3, 2026-10-01, #2: masking keeps shell boundaries,
-	// so a separate command after a masked word stays visible, on the Bash
-	// path and on the JSON fallback path. A value whose quote never closes
-	// labels the preview incomplete.
-	for _, input := range []string{
-		`{"command":"cat /tmp/config | grep 'password: \"' ; rm -rf /tmp/work"}`,
-		`{"command":"cat /tmp/config | grep 'password: \"' ; rm -rf /tmp/work","dangerouslyDisableSandbox":true}`,
-	} {
-		if preview := approvalPreview("Bash", json.RawMessage(input), ""); !strings.Contains(preview, "rm -rf /tmp/work") && !strings.Contains(preview, previewIncomplete) {
-			t.Fatalf("%s = %q, want the rm command visible or the preview labeled incomplete", input, preview)
-		}
-	}
-	if preview := approvalPreview("Bash", json.RawMessage(`{"command":"export TOKEN='unterminated demo value"}`), ""); !strings.HasPrefix(preview, previewIncomplete) {
-		t.Fatalf("unterminated quote = %q, want the incomplete label", preview)
+	long := `{"command":"echo ` + strings.Repeat("x", 3000) + `"}`
+	if preview := approvalPreview("Bash", json.RawMessage(long), ""); preview != previewTooLong {
+		t.Fatalf("long command = %q, want the too-long note", preview)
 	}
 }
 

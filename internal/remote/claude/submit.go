@@ -287,11 +287,11 @@ func (a *Attachment) confirmLoop(ctx context.Context, cancel context.CancelFunc)
 func (a *Attachment) idleStop() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.activitySink != nil || len(a.settling) > 0 {
+	if a.activitySink != nil {
 		return false
 	}
 	for _, rec := range a.runs {
-		if !rec.terminal || len(rec.open) > 0 {
+		if !rec.terminal {
 			return false
 		}
 	}
