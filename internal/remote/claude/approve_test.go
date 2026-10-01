@@ -7,29 +7,24 @@ import (
 	"testing"
 )
 
-// Bead 611.42.3: approve is offered only for a Bash command shown whole
-// with nothing masked. A secret in the command is masked in the DM preview,
-// which makes the call reject-only.
-func TestApprovalPreviewMasksSecretsAndOffersApproveOnlyForPlainBash(t *testing.T) {
-	if preview, ok := approvalPreview("Bash", json.RawMessage(`{"command":"go test ./...","description":"Run the tests"}`), ""); !ok || !strings.Contains(preview, "go test ./...") {
-		t.Fatalf("plain Bash = %q, %v; want approvable with the command shown", preview, ok)
+// Bead 611.42.3: the DM preview shows the call with obvious secrets masked.
+func TestApprovalPreviewMasksSecrets(t *testing.T) {
+	if preview := approvalPreview("Bash", json.RawMessage(`{"command":"go test ./...","description":"Run the tests"}`), ""); !strings.Contains(preview, "go test ./...") || strings.Contains(preview, "[masked]") {
+		t.Fatalf("plain Bash = %q, want the command shown unmasked", preview)
 	}
-	preview, ok := approvalPreview("Bash", json.RawMessage(`{"command":"curl -H 'Authorization: Bearer abcdef0123456789' https://example.test"}`), "")
-	if ok || strings.Contains(preview, "abcdef0123456789") || !strings.Contains(preview, "[masked]") {
-		t.Fatalf("Bash with a token = %q, %v; want the token masked and reject only", preview, ok)
-	}
-	// Pro review of #929, 2026-09-30, #4: quoted assignment and flag values,
-	// and string secret fields of another tool's input.
+	// Pro review of #929, 2026-09-30, #4: bearer credentials, quoted
+	// assignment and flag values, an unterminated quote, and string secret
+	// fields of another tool's input.
 	for _, tc := range []struct{ tool, input, secret string }{
+		{"Bash", `{"command":"curl -H 'Authorization: Bearer abcdef0123456789' https://example.test"}`, "abcdef0123456789"},
 		{"Bash", `{"command":"API_KEY=\"ordinary-demo-value\" ./check"}`, "ordinary-demo-value"},
 		{"Bash", `{"command":"DATABASE_PASSWORD='ordinary demo value' ./check"}`, "demo value"},
 		{"Bash", `{"command":"login --password \"ordinary demo value\""}`, "demo value"},
 		{"Bash", `{"command":"export TOKEN='unterminated demo value"}`, "demo value"},
 		{"WebFetch", `{"url":"https://example.test","api_key":"ordinary-demo-value"}`, "ordinary-demo-value"},
 	} {
-		preview, ok := approvalPreview(tc.tool, json.RawMessage(tc.input), "")
-		if ok || strings.Contains(preview, tc.secret) {
-			t.Fatalf("%s %s = %q, %v; want the value masked and reject only", tc.tool, tc.input, preview, ok)
+		if preview := approvalPreview(tc.tool, json.RawMessage(tc.input), ""); strings.Contains(preview, tc.secret) || !strings.Contains(preview, "[masked]") {
+			t.Fatalf("%s %s = %q, want the value masked", tc.tool, tc.input, preview)
 		}
 	}
 }

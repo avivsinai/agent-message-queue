@@ -25,13 +25,12 @@ import (
 
 // approval is one PermissionRequest bound to a run.
 type approval struct {
-	id         string
-	toolName   string
-	preview    string
-	hash       string
-	approvable bool
-	hookPID    int
-	deadline   time.Time
+	id       string
+	toolName string
+	preview  string
+	hash     string
+	hookPID  int
+	deadline time.Time
 	// openedAt is when the hook raised it (unix ms): a tool_result stamped
 	// earlier belongs to an earlier call.
 	openedAt int64
@@ -251,7 +250,7 @@ func (a *Attachment) applyApprovalsLocked(sessionID string, d approvalDisk, caug
 			continue
 		}
 		preview, _ := protocol.TruncateText(r.Preview, protocol.MaxApprovalPreview)
-		ap := &approval{id: id, toolName: r.ToolName, preview: preview, hash: r.ActionHash, approvable: r.Approvable,
+		ap := &approval{id: id, toolName: r.ToolName, preview: preview, hash: r.ActionHash,
 			hookPID: r.HookPID, deadline: deadline, openedAt: opened.UnixMilli()}
 		if rec.approvals == nil {
 			rec.approvals = map[string]*approval{}
@@ -271,12 +270,8 @@ func (a *Attachment) applyApprovalsLocked(sessionID string, d approvalDisk, caug
 				events = rec.closeApproval(ap.id, protocol.Resolution{InteractionID: ap.id, Outcome: r.Outcome, Option: r.Option}, events)
 				continue
 			}
-			before := projectApproval(ap).ApproveOption
 			if caughtUp {
 				a.bindCallLocked(rec, ap)
-			}
-			if projectApproval(ap).ApproveOption != before && len(rec.open) > 0 && rec.open[0] == ap {
-				events = append(events, rec.questionEvent(ap)) // approve added or withdrawn
 			}
 			if !a.terminalAnswered(rec, ap) && !hookDead(ap.hookPID) {
 				continue
@@ -337,19 +332,13 @@ func (rec *runRecord) questionEvent(ap *approval) core.NativeEvent {
 	return core.NativeEvent{Type: core.EventQuestion, Key: rec.key, RunID: rec.msgID, Interaction: projectApproval(ap)}
 }
 
-// projectApproval is the endpoint's view of one open approval. Reject is
-// always offered; approve only for an approvable call bound to exactly one
-// tool_use. An unbound approval is reject-only: without the binding a
-// terminal approve cannot be detected, and a later Buzz allow would be
-// reported as sent for a call that already ran.
+// projectApproval is the endpoint's view of one open approval: reject only,
+// for every tool. Buzz can block a Claude tool call and cannot allow one
+// (owner ruling on bead 611.42.3: a forged block is only a denial, a forged
+// allow would be a grant); the terminal allows.
 func projectApproval(ap *approval) *protocol.Interaction {
-	in := &protocol.Interaction{InteractionID: ap.id, Kind: "approval", Prompt: ap.preview, Options: []string{optionDeny},
+	return &protocol.Interaction{InteractionID: ap.id, Kind: "approval", Prompt: ap.preview, Options: []string{optionDeny},
 		RemoteAnswer: true, RejectOption: optionDeny}
-	if ap.approvable && ap.toolUseID != "" && !ap.uncertain {
-		in.ApproveOption = optionAllow
-		in.Options = []string{optionAllow, optionDeny}
-	}
-	return in
 }
 
 // pendingApproval is the run's head approval, or nil.
@@ -415,13 +404,17 @@ func (a *Attachment) endApprovalsLocked(rec *runRecord, events []core.NativeEven
 	return events
 }
 
-// Respond implements core.Attachment for DM approvals. An answer already on
-// disk with the same identity is delivered. A fresh answer is written only
-// for the run's head approval, with an option it offers, while its hook is
-// alive, before its deadline, and before anything resolved it. The hook
+// Respond implements core.Attachment for DM approvals. Only deny is an
+// answer: any other option, allow included, is invalid. An answer already
+// on disk with the same identity is delivered. A fresh answer is written
+// only for the run's head approval, while its hook is alive, before its
+// deadline, and before anything resolved it. The hook
 // applies the answer only to the call with the same action hash. The
 // endpoint owns first-answer-wins.
 func (a *Attachment) Respond(key requests.Key, _, interactionID, option string) (protocol.Code, error) {
+	if option != optionDeny {
+		return protocol.CodeInvalid, nil // Buzz can only block a Claude tool call
+	}
 	a.mu.Lock()
 	rec := a.runs[key]
 	var ap *approval
@@ -435,10 +428,6 @@ func (a *Attachment) Respond(key requests.Key, _, interactionID, option string) 
 	}
 	ans := approvalAnswer{InteractionID: interactionID, ActionHash: ap.hash, Option: option, At: protocol.FormatTime(a.now())}
 	head := len(rec.open) > 0 && rec.open[0] == ap
-	offered := false
-	for _, o := range projectApproval(ap).Options {
-		offered = offered || o == option
-	}
 	hookPID, deadline := ap.hookPID, ap.deadline
 	a.mu.Unlock()
 
@@ -454,8 +443,6 @@ func (a *Attachment) Respond(key requests.Key, _, interactionID, option string) 
 		return protocol.CodeAlreadyResolved, nil
 	case !a.now().Before(deadline):
 		return protocol.CodeExpired, nil
-	case !offered:
-		return protocol.CodeInvalid, nil
 	}
 	adir, err := ensureApproveSubdir(a.home, sessionID, "answers")
 	if err != nil {

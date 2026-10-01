@@ -1136,7 +1136,7 @@ func doctor(args []string) (any, int, error) {
 		case serr != nil:
 			fail("native_capability", s.TargetID, "cannot read ~/.claude/settings.json: "+serr.Error(), "repair ~/.claude/settings.json")
 		case state == claude.StopHookMissing:
-			fail("native_capability", s.TargetID, "the PermissionRequest hook is not installed, so approvals are answered only in the terminal", "run `amq-remote claude install-approval-hook`")
+			fail("native_capability", s.TargetID, "the PermissionRequest hook is not installed, so Buzz cannot block a tool call; the terminal decides every approval", "run `amq-remote claude install-approval-hook`")
 		case state == claude.StopHookDisabled:
 			report["claude_approval_hook"] = "~/.claude/settings.json holds the PermissionRequest hook and sets disableAllHooks; project or managed settings decide whether it runs"
 		}
@@ -1730,7 +1730,7 @@ func claudeSubcommand(args []string, stdin io.Reader, stdout io.Writer) int {
 			<-sigs
 			close(done)
 		}()
-		return claude.RunPermissionHook(home, stdin, stdout, done, time.Duration(*wait)*time.Second)
+		return claude.RunPermissionHook(home, stdin, stdout, os.Stderr, done, time.Duration(*wait)*time.Second)
 	case "install-approval-hook":
 		bin, err := os.Executable()
 		if err != nil {
@@ -1740,7 +1740,7 @@ func claudeSubcommand(args []string, stdin io.Reader, stdout io.Writer) int {
 			say(os.Stderr, "install-approval-hook: %v\n", err)
 			return 1
 		}
-		say(stdout, "approval hook installed\n")
+		say(stdout, "approval hook installed: Buzz can block a Claude tool call; allow it in the terminal\n")
 		return 0
 	case "uninstall-approval-hook":
 		if err := claude.UninstallPermissionHook(home); err != nil {

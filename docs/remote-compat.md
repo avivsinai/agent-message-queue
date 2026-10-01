@@ -94,7 +94,7 @@ files from the pi-bridge directory and calls the extension API; a claim marked
 | Completion evidence | Opt-in user-level `Stop` hook reporting `prompt_id`, `transcript_path`, `last_assistant_message`; or `notify_when_idle` one-shot idle/exit notice | completed (Stop hook, requires target's own settings.json), weak/heartbeat (notify_when_idle) | (source: research/r9-cc-codex-attachment.md §A.2 "Stop correlation", §A.4 "lookup/correlate to result" row) |
 | Exact cancellation gate | `unavailable` — confirmed: "there is no user-level way to interrupt a running foreground turn without keystrokes" | n/a | (source: research/r9-cc-codex-attachment.md §A.4 "cancelExact" row; review-verdict.md "Confirmed by verification" bullet) |
 | Steer | `unavailable` — delivery timing ("arrives between tool calls") is not steering semantics | n/a | (source: research/r9-cc-codex-attachment.md §C "Claude Code" verdict paragraph) |
-| Approvals | Opt-in `PermissionRequest` command hook (`amq-remote claude install-approval-hook`). Its stdin carries `session_id`, `prompt_id`, `tool_name` and `tool_input`, but no `tool_use_id`. It prints `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}` or a `deny` with a `message`; no output leaves the terminal dialog to decide. `[live]` 2.1.283: the hook's `prompt_id` equals the `promptId` of the peer delivery line; a terminal reject sends SIGTERM to the hook, then SIGKILL about 1 s later; a terminal approve sends no signal, and the call's `tool_result` line (with `promptId` and `tool_use_id`) is the only trace; parallel decision hooks race and the first decision wins. Questions stay `unavailable`. | delivered (live probe; DM path not live-verified) | (source: https://code.claude.com/docs/en/hooks "PermissionRequest") |
+| Approvals | Opt-in `PermissionRequest` command hook (`amq-remote claude install-approval-hook`). Its stdin carries `session_id`, `prompt_id`, `tool_name` and `tool_input`, but no `tool_use_id`. AMQ's hook prints only `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"…"}}}`, never allow: Buzz can block a tool call and cannot allow one, because the answer file it reads is not owner authorization. No output leaves the terminal dialog to decide. `[live]` 2.1.283: the hook's `prompt_id` equals the `promptId` of the peer delivery line; a terminal reject sends SIGTERM to the hook, then SIGKILL about 1 s later; a terminal approve sends no signal, and the call's `tool_result` line (with `promptId` and `tool_use_id`) is the only trace; parallel decision hooks race and the first decision wins. Questions stay `unavailable`. | delivered (live probe; DM path not live-verified) | (source: https://code.claude.com/docs/en/hooks "PermissionRequest") |
 | Session-switch/reload epoch triggers | `unavailable` documented; `queue-operation` transcript entries mark queued-while-busy messages | delivered (observed in transcript only) | (source: seats/harness-surfaces.md §2.1 "queue-operation... queued user messages while busy") |
 | Local draft access (must not submit) | `unavailable` — no draft/compose primitive found on the messaging socket or CLI surface | n/a | (source: research/p2-cc-socket-probe.md "What the official docs establish"; searched, no draft method found) |
 | Inspect/roster | `claude agents --json` (`status`, `waitingFor`, `state`, `kind`, `pid`) | delivered, session-level polling only | (source: seats/harness-inject-surfaces.md §A.1 `claude agents --help`; research/r9-cc-codex-attachment.md §A.3) |
@@ -139,7 +139,7 @@ valid value for the runtime `terminal` enum.
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | Codex | true | true | true | false | opt-in | false | unavailable |
 | pi | true | true | false | false | bridge revision 4 | false | unavailable |
-| Claude Code | true | submitted | false | false | opt-in | false | unavailable |
+| Claude Code | true | submitted | false | false | opt-in, reject only | false | unavailable |
 
 The v1 endpoint masks `steer` to false at the D1 gate even where an
 attachment declares it (`internal/remote/codex/attachment.go:293`,
@@ -185,9 +185,9 @@ amq-remote-design.html §Capability per harness):
   (source: research/r9-cc-codex-attachment.md §A.4 "cancelExact" row).
 - `claude_code.approve_tool`: opt-in through the manifest `approve` and the
   `PermissionRequest` hook, and only for a tool call of a request that a
-  relay share submitted as its own turn. Approve is offered only for a Bash
-  command the owner sees whole with no secret masked; every other call is
-  reject-only. Not live-verified through the Buzz DM.
+  relay share submitted as its own turn. Buzz can only block the call
+  (reject only, every tool); the terminal allows. Not live-verified
+  through the Buzz DM.
 - `claude_code.answer_question`: no documented way to answer a pending
   question prompt from outside the session (source:
   research/r9-cc-codex-attachment.md §C "Claude Code").

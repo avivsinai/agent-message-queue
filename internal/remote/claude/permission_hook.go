@@ -3,6 +3,7 @@ package claude
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -16,8 +17,9 @@ import (
 // an AMQ run owns in a session that a relay share with approve is serving;
 // everywhere else it exits at once with no output, so the normal dialog
 // decides. It never exits 2 (not honored for this event), and it never
-// allows by default: a decision is printed only for a Buzz answer bound to
-// this exact call.
+// prints allow: Buzz can block a Claude tool call and cannot allow one
+// (owner ruling on bead 611.42.3), so the only decision is a deny for the
+// owner's Buzz answer bound to this exact call.
 
 // permissionHookMarker is the settings.json ownership signal of the
 // PermissionRequest entry, distinct from the Stop hook's.
@@ -57,16 +59,18 @@ type permissionHook struct {
 	markerGrace time.Duration
 	// ticks paces the poll when set; nil uses a ticker of poll.
 	ticks <-chan time.Time
+	// stderr receives the one note about an answer the hook ignored.
+	stderr io.Writer
 }
 
 // RunPermissionHook is the hook body. done closes when the process gets
 // TERM, INT or HUP: Claude sends TERM when the terminal rejects and at the
 // configured timeout. It always returns 0.
-func RunPermissionHook(home string, stdin io.Reader, stdout io.Writer, done <-chan struct{}, wait time.Duration) int {
+func RunPermissionHook(home string, stdin io.Reader, stdout, stderr io.Writer, done <-chan struct{}, wait time.Duration) int {
 	if wait <= 0 {
 		wait = DefaultPermissionWait
 	}
-	h := permissionHook{home: home, now: time.Now, wait: wait, poll: 200 * time.Millisecond, markerGrace: 2 * time.Second}
+	h := permissionHook{home: home, now: time.Now, wait: wait, poll: 200 * time.Millisecond, markerGrace: 2 * time.Second, stderr: stderr}
 	return h.run(stdin, stdout, done)
 }
 
@@ -96,7 +100,7 @@ func (h permissionHook) run(stdin io.Reader, stdout io.Writer, done <-chan struc
 	if !ok {
 		return 0
 	}
-	preview, approvable := approvalPreview(in.ToolName, in.ToolInput, in.AgentType)
+	preview := approvalPreview(in.ToolName, in.ToolInput, in.AgentType)
 	id, err := newInteractionID()
 	if err != nil {
 		return 0
@@ -105,7 +109,7 @@ func (h permissionHook) run(stdin io.Reader, stdout io.Writer, done <-chan struc
 	deadline := opened.Add(h.wait)
 	req := approvalRequest{
 		Protocol: approvalProtocol, InteractionID: id, SessionID: in.SessionID, PromptID: in.PromptID,
-		ToolName: in.ToolName, Preview: preview, Approvable: approvable, ActionHash: hash,
+		ToolName: in.ToolName, Preview: preview, ActionHash: hash,
 		HookPID: os.Getpid(), OpenedAt: protocol.FormatTime(opened), Deadline: protocol.FormatTime(deadline),
 	}
 	dir, err := ensureApproveSubdir(h.home, in.SessionID, "requests")
@@ -121,15 +125,22 @@ func (h permissionHook) run(stdin io.Reader, stdout io.Writer, done <-chan struc
 		defer t.Stop()
 		ticks = t.C
 	}
+	ignored := false
 	for {
-		if option, ok := h.answer(answerPath, req); ok {
+		switch h.answer(answerPath, req) {
+		case answerDeny:
 			// The first create-new of the resolved file decides. The hook
 			// prints only after it won that with answered; when the
 			// terminal's closure won first, it stays silent.
-			if writeResolved(h.home, in.SessionID, approvalResolved{InteractionID: id, Outcome: protocol.ResolutionAnswered, Option: option}) == nil {
-				writeDecision(stdout, option)
+			if writeResolved(h.home, in.SessionID, approvalResolved{InteractionID: id, Outcome: protocol.ResolutionAnswered, Option: optionDeny}) == nil {
+				writeDeny(stdout)
 			}
 			return 0
+		case answerIgnored:
+			if !ignored && h.stderr != nil {
+				_, _ = fmt.Fprintf(h.stderr, "amq-remote: ignored a Buzz answer other than deny for %s; Buzz can only block a Claude tool call\n", id)
+			}
+			ignored = true
 		}
 		if resolvedExists(resolvedPath) {
 			return 0 // closed elsewhere: the terminal decides
@@ -166,24 +177,28 @@ func (h permissionHook) awaitRunMarker(sessionID, promptID string, done <-chan s
 	}
 }
 
-// answer returns the Buzz answer for this exact call, if one is on disk: it
-// must name the interaction and its action hash, and allow counts only for
-// an approvable call.
-func (h permissionHook) answer(path string, req approvalRequest) (string, bool) {
+// Answer file states for one poll.
+const (
+	answerNone = iota
+	answerDeny
+	answerIgnored
+)
+
+// answer reads the Buzz answer for this exact call: it must name the
+// interaction and its action hash. Only deny is ever applied; any other
+// option is ignored, so a forged allow grants nothing.
+func (h permissionHook) answer(path string, req approvalRequest) int {
 	var a approvalAnswer
 	if readApprovalJSON(path, &a) != nil {
-		return "", false
+		return answerNone
 	}
 	if a.InteractionID != req.InteractionID || a.ActionHash != req.ActionHash {
-		return "", false
+		return answerIgnored
 	}
-	switch {
-	case a.Option == optionDeny:
-		return optionDeny, true
-	case a.Option == optionAllow && req.Approvable:
-		return optionAllow, true
+	if a.Option == optionDeny {
+		return answerDeny
 	}
-	return "", false
+	return answerIgnored
 }
 
 func resolvedExists(path string) bool {
@@ -191,16 +206,12 @@ func resolvedExists(path string) bool {
 	return err == nil || !errors.Is(err, os.ErrNotExist)
 }
 
-// writeDecision prints the one PermissionRequest decision. Allow is allow
-// once; deny carries a message and no interrupt, so the turn continues.
-func writeDecision(stdout io.Writer, option string) {
+// writeDeny prints the one decision the hook makes: deny, with a message
+// and no interrupt, so the turn continues. It never prints allow.
+func writeDeny(stdout io.Writer) {
 	type decision struct {
 		Behavior string `json:"behavior"`
-		Message  string `json:"message,omitempty"`
-	}
-	d := decision{Behavior: "allow"}
-	if option == optionDeny {
-		d = decision{Behavior: "deny", Message: "Rejected from Buzz by the owner."}
+		Message  string `json:"message"`
 	}
 	var out struct {
 		HookSpecificOutput struct {
@@ -209,7 +220,7 @@ func writeDecision(stdout io.Writer, option string) {
 		} `json:"hookSpecificOutput"`
 	}
 	out.HookSpecificOutput.HookEventName = permissionHookType
-	out.HookSpecificOutput.Decision = d
+	out.HookSpecificOutput.Decision = decision{Behavior: "deny", Message: "Rejected from Buzz by the owner."}
 	raw, err := json.Marshal(out)
 	if err != nil {
 		return

@@ -65,8 +65,8 @@ command's own message. Do not work around a refusal.
    - `--native`: "A DM sent while this session is busy waits. Buzz Stop cannot
      interrupt a Claude turn."
    - When the approval hook was installed in step 3: "When a Buzz request
-     needs a tool approval, the DM shows it. ✅ allows once; ❌ blocks. The
-     first answer wins, here or in the terminal."
+     needs a tool approval, the DM shows it. ❌ blocks that call. Buzz cannot
+     allow a tool call yet; allow it in the terminal. The first answer wins."
 
 Codex with `--native`: attach needs `CODEX_THREAD_ID` and a thread loaded in
 the Codex app-server daemon. A session started with plain `codex` is not in

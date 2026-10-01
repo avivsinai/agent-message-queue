@@ -12,7 +12,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"unicode"
 
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 )
@@ -35,12 +34,10 @@ import (
 // approvalProtocol names the request file schema.
 const approvalProtocol = "amq-claude-approval/v1"
 
-// Approval options. Allow means allow once: the decision never carries
-// updatedInput, updatedPermissions or interrupt.
-const (
-	optionAllow = "allow"
-	optionDeny  = "deny"
-)
+// optionDeny is the one option a Claude approval offers from Buzz: Buzz can
+// block a tool call and cannot allow one (owner ruling on bead 611.42.3).
+// The deny decision never carries interrupt, so the turn continues.
+const optionDeny = "deny"
 
 // maxApprovalFileBytes bounds every approval file read. A request holds a
 // preview of at most protocol.MaxApprovalPreview bytes plus small fields.
@@ -64,7 +61,6 @@ type approvalRequest struct {
 	PromptID      string `json:"prompt_id"`
 	ToolName      string `json:"tool_name"`
 	Preview       string `json:"preview"`
-	Approvable    bool   `json:"approvable"`
 	ActionHash    string `json:"action_hash"`
 	HookPID       int    `json:"hook_pid"`
 	// OpenedAt is when the hook raised the request; a tool_result stamped
@@ -117,22 +113,20 @@ func canonicalJSON(raw json.RawMessage) ([]byte, bool) {
 	return out, err == nil
 }
 
-// bashFields are the Bash tool_input fields the preview shows. Any other
-// field (dangerouslyDisableSandbox, for example) is a grant the owner would
-// not see, so the call is reject-only.
+// bashFields are the Bash tool_input fields the preview renders by name.
+// A call with any other field (dangerouslyDisableSandbox, for example) is
+// shown as its whole input instead.
 var bashFields = map[string]bool{"command": true, "description": true, "timeout": true, "run_in_background": true}
 
-// approvalPreview renders what the DM shows for one PermissionRequest and
-// reports whether a one-tap approve may be offered. Approve needs a Bash
-// call with only the shown fields, a command shown whole and free of
-// hidden characters, and a preview the secret masker left unchanged.
-// Every other tool is reject-only.
-func approvalPreview(toolName string, input json.RawMessage, agentType string) (string, bool) {
+// approvalPreview renders what the DM shows for one PermissionRequest, with
+// obvious secrets masked. Buzz can only block a Claude tool call (owner
+// ruling on bead 611.42.3: a forged block is only a denial), so the preview
+// grants nothing; it shows the owner what a ❌ would stop.
+func approvalPreview(toolName string, input json.RawMessage, agentType string) string {
 	var b strings.Builder
 	if agentType != "" {
 		fmt.Fprintf(&b, "Subagent %s asks:\n", oneLine(agentType))
 	}
-	approvable := false
 	if bash, ok := bashCall(input); toolName == "Bash" && ok {
 		b.WriteString("Bash command:\n" + bash.Command)
 		if bash.Description != "" {
@@ -144,17 +138,13 @@ func approvalPreview(toolName string, input json.RawMessage, agentType string) (
 		if bash.Background {
 			b.WriteString("\nRuns in the background.")
 		}
-		approvable = bash.Command != "" && !hasHiddenChars(bash.Command)
 	} else {
 		canon, _ := canonicalJSON(input)
 		fmt.Fprintf(&b, "Tool %s:\n%s", oneLine(toolName), canon)
 	}
-	masked, changed := maskSecrets(b.String())
-	if changed || len(masked) > protocol.MaxApprovalPreview {
-		approvable = false
-	}
+	masked, _ := maskSecrets(b.String())
 	preview, _ := protocol.TruncateText(masked, protocol.MaxApprovalPreview)
-	return preview, approvable
+	return preview
 }
 
 type bashInput struct {
@@ -162,7 +152,7 @@ type bashInput struct {
 	Background                    bool
 }
 
-// bashCall decodes a Bash tool_input that holds only the shown fields,
+// bashCall decodes a Bash tool_input that holds only the named fields,
 // with their documented types.
 func bashCall(input json.RawMessage) (bashInput, bool) {
 	var fields map[string]json.RawMessage
@@ -199,17 +189,6 @@ func bashCall(input json.RawMessage) (bashInput, bool) {
 	return out, true
 }
 
-// hasHiddenChars reports a control or format character other than newline
-// and tab: the DM strips those, so the owner would not see them.
-func hasHiddenChars(s string) bool {
-	for _, r := range s {
-		if r != '\n' && r != '\t' && (unicode.IsControl(r) || unicode.Is(unicode.Cf, r)) {
-			return true
-		}
-	}
-	return false
-}
-
 func oneLine(s string) string {
 	return strings.Join(strings.Fields(s), " ")
 }
@@ -217,8 +196,7 @@ func oneLine(s string) string {
 // secretPatterns are the obvious secret shapes the masker hides: known
 // token prefixes, private key blocks, bearer credentials, credentials in a
 // URL, and a value assigned to a secret-looking name or flag. It is
-// deliberately small and conservative: any match makes the call
-// reject-only, so a false positive costs a terminal answer, never a leak.
+// deliberately broad: a false positive hides harmless text, never leaks.
 var secretPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(-----END [A-Z ]*PRIVATE KEY-----|$)`),
 	regexp.MustCompile(`\b(gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35}|glpat-[A-Za-z0-9_-]{20,})`),

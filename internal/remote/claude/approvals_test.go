@@ -177,8 +177,8 @@ func (f *approvalFixture) hookExited() {
 func TestApprovalTerminalRejectFirst(t *testing.T) {
 	f := newApprovalFixture(t, bashUse("toolu_1", "go test ./..."))
 	f.raise("go test ./...")
-	if q := f.question(); q.ApproveOption != optionAllow || !q.RemoteAnswer {
-		t.Fatalf("question = %+v, want approve offered for a Bash command shown whole", q)
+	if q := f.question(); q.ApproveOption != "" || len(q.Options) != 1 || q.Options[0] != optionDeny || !q.RemoteAnswer {
+		t.Fatalf("question = %+v, want a remote reject only", q)
 	}
 	close(f.done)
 	f.hookExited()
@@ -188,14 +188,14 @@ func TestApprovalTerminalRejectFirst(t *testing.T) {
 	if ev := f.resolution(); ev.Outcome != protocol.ResolutionElsewhere || ev.Remote {
 		t.Fatalf("resolution = %+v, want answered_elsewhere", ev)
 	}
-	if code, err := f.att.Respond(pr2Key(), "", f.id, optionAllow); err != nil || code != protocol.CodeAlreadyResolved {
-		t.Fatalf("late approve = %q, %v; want already_resolved", code, err)
+	if code, err := f.att.Respond(pr2Key(), "", f.id, optionDeny); err != nil || code != protocol.CodeAlreadyResolved {
+		t.Fatalf("late reject = %q, %v; want already_resolved", code, err)
 	}
 }
 
 // Live probe 2026-09-30: a terminal approve does not signal the hook. The
 // tool_result of the bound tool_use closes the approval as
-// answered_elsewhere, the hook exits with no decision, and a later ✅ is
+// answered_elsewhere, the hook exits with no decision, and a later ❌ is
 // refused.
 func TestApprovalTerminalApproveFromToolResult(t *testing.T) {
 	f := newApprovalFixture(t, bashUse("toolu_1", "go test ./..."))
@@ -212,22 +212,39 @@ func TestApprovalTerminalApproveFromToolResult(t *testing.T) {
 	if f.out.Len() != 0 {
 		t.Fatalf("hook printed %q, want no decision", f.out.String())
 	}
-	if code, err := f.att.Respond(pr2Key(), "", f.id, optionAllow); err != nil || code != protocol.CodeAlreadyResolved {
-		t.Fatalf("late approve = %q, %v; want already_resolved", code, err)
+	if code, err := f.att.Respond(pr2Key(), "", f.id, optionDeny); err != nil || code != protocol.CodeAlreadyResolved {
+		t.Fatalf("late reject = %q, %v; want already_resolved", code, err)
 	}
 }
 
+// binding is the approval's bound tool_use id and whether it is uncertain.
+func (f *approvalFixture) binding() (string, bool) {
+	f.att.mu.Lock()
+	defer f.att.mu.Unlock()
+	for _, rec := range f.att.runs {
+		if ap := rec.approvals[f.id]; ap != nil {
+			return ap.toolUseID, ap.uncertain
+		}
+	}
+	f.t.Fatalf("no approval %s", f.id)
+	return "", false
+}
+
 // Ruling on design 9.7 (lead, 2026-09-30): two unanswered identical calls
-// in one prompt make the approval uncertain. Approve is not offered, and
-// the first tool_result among them closes it as answered_elsewhere.
+// in one prompt make the approval uncertain: it binds to neither, and the
+// first tool_result among them closes it as answered_elsewhere.
 func TestApprovalTwoIdenticalCallsAreUncertain(t *testing.T) {
 	f := newApprovalFixture(t, bashUse("toolu_1", "make build"), bashUse("toolu_2", "make build"))
 	f.raise("make build")
 	if q := f.question(); q.ApproveOption != "" || len(q.Options) != 1 || q.Options[0] != optionDeny {
 		t.Fatalf("question = %+v, want reject only", q)
 	}
-	if code, _ := f.att.Respond(pr2Key(), "", f.id, optionAllow); code != protocol.CodeInvalid {
-		t.Fatalf("approve on an uncertain approval = %q, want invalid", code)
+	if id, uncertain := f.binding(); id != "" || !uncertain {
+		t.Fatalf("binding = %q uncertain %v, want uncertain", id, uncertain)
+	}
+	// Owner ruling on bead 611.42.3: Buzz can only block a Claude tool call.
+	if code, _ := f.att.Respond(pr2Key(), "", f.id, "allow"); code != protocol.CodeInvalid {
+		t.Fatalf("allow = %q, want invalid", code)
 	}
 	f.append(map[string]any{
 		"type": "user", "promptId": "p-1", "timestamp": f.stamp(1),
@@ -242,14 +259,13 @@ func TestApprovalTwoIdenticalCallsAreUncertain(t *testing.T) {
 	}
 }
 
-// Lead review of bead 611.42.3: an approval not bound to a tool_use is
-// reject-only, because a terminal approve of an unbound call is never
-// detected. Once the matching tool_use appears, approve is offered.
-func TestApprovalOffersApproveOnlyOnceBound(t *testing.T) {
+// Lead review of bead 611.42.3: an approval binds to its tool_use when that
+// line appears after the request opened, and stays reject only.
+func TestApprovalBindsWhenItsToolUseAppears(t *testing.T) {
 	f := newApprovalFixture(t)
 	f.raise("go test ./...")
-	if q := f.question(); q.ApproveOption != "" || len(q.Options) != 1 || q.Options[0] != optionDeny {
-		t.Fatalf("unbound question = %+v, want reject only", q)
+	if id, _ := f.binding(); id != "" {
+		t.Fatalf("bound to %q before any tool_use", id)
 	}
 	f.append(map[string]any{
 		"type": "assistant", "timestamp": f.stamp(0),
@@ -257,18 +273,15 @@ func TestApprovalOffersApproveOnlyOnceBound(t *testing.T) {
 	})
 	for deadline := time.Now().Add(3 * time.Second); ; time.Sleep(time.Millisecond) {
 		f.att.pollConfirmations()
-		f.mu.Lock()
-		offered := false
-		for _, ev := range f.events {
-			offered = offered || ev.Type == core.EventQuestion && ev.Interaction != nil && ev.Interaction.InteractionID == f.id && ev.Interaction.ApproveOption == optionAllow
-		}
-		f.mu.Unlock()
-		if offered {
+		if id, _ := f.binding(); id == "toolu_1" {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("approve was never offered after the matching tool_use appeared")
+			t.Fatal("the approval never bound to its tool_use")
 		}
+	}
+	if q := f.question(); q.ApproveOption != "" || len(q.Options) != 1 {
+		t.Fatalf("question = %+v, want reject only", q)
 	}
 	close(f.done)
 	f.hookExited()
@@ -298,10 +311,8 @@ func TestApprovalTerminalApproveBeatsPendingBuzzAnswer(t *testing.T) {
 	f := newApprovalFixture(t, bashUse("toolu_1", "go test ./..."))
 	ticks := make(chan time.Time)
 	f.raiseWith("go test ./...", ticks)
-	if q := f.question(); q.ApproveOption != optionAllow {
-		t.Fatalf("question = %+v, want approve offered", q)
-	}
-	if code, err := f.att.Respond(pr2Key(), "", f.id, optionAllow); err != nil || code != "" {
+	f.question()
+	if code, err := f.att.Respond(pr2Key(), "", f.id, optionDeny); err != nil || code != "" {
 		t.Fatalf("respond = %q, %v; want the answer written", code, err)
 	}
 	f.append(toolResult(f, "toolu_1", 1))
@@ -320,8 +331,8 @@ func TestApprovalTerminalApproveBeatsPendingBuzzAnswer(t *testing.T) {
 
 // Pro review of #929, 2026-09-30, #2: two identical calls split across the
 // transcript read limit. No binding is decided before the read reaches the
-// end of the file, so approve is never offered.
-func TestApprovalIdenticalCallsSplitAcrossReadNeverOfferApprove(t *testing.T) {
+// end of the file, so the approval never binds to the first call alone.
+func TestApprovalIdenticalCallsSplitAcrossReadStayUncertain(t *testing.T) {
 	f := newApprovalFixture(t)
 	f.raise("make build")
 	filler := strings.Repeat("x", 1<<20)
@@ -336,16 +347,8 @@ func TestApprovalIdenticalCallsSplitAcrossReadNeverOfferApprove(t *testing.T) {
 	for i := 0; i < 4; i++ {
 		f.att.pollConfirmations()
 	}
-	f.mu.Lock()
-	for _, ev := range f.events {
-		if ev.Type == core.EventQuestion && ev.Interaction != nil && ev.Interaction.ApproveOption != "" {
-			f.mu.Unlock()
-			t.Fatalf("approve offered: %+v", ev.Interaction)
-		}
-	}
-	f.mu.Unlock()
-	if code, _ := f.att.Respond(pr2Key(), "", f.id, optionAllow); code != protocol.CodeInvalid {
-		t.Fatalf("approve = %q, want invalid", code)
+	if id, uncertain := f.binding(); id != "" || !uncertain {
+		t.Fatalf("binding = %q uncertain %v, want uncertain", id, uncertain)
 	}
 	close(f.done)
 	f.hookExited()

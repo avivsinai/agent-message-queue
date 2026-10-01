@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -29,23 +30,104 @@ import (
 )
 
 // Bead 611.42.3, design section 7: a Claude tool approval raised during a
-// Buzz request is answered from the DM. Through the real carrier, endpoint
-// and Claude attachment on a temporary home, with the PermissionRequest
-// hook called as a function: ✅ prints allow, ❌ prints deny, and the DM
-// approval message is edited with the answer that was sent.
-func TestClaudeApprovalApprovedFromBuzz(t *testing.T) {
-	claudeApprovalFromBuzz(t, "✅", `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}`, "allow", "Approve was sent from Buzz")
-}
-
+// Buzz request shows in the DM. Through the real carrier, endpoint and
+// Claude attachment on a temporary home, with the PermissionRequest hook
+// called as a function: ❌ prints deny, and the approval message is edited
+// with the answer that was sent.
 func TestClaudeApprovalRejectedFromBuzz(t *testing.T) {
-	claudeApprovalFromBuzz(t, "❌", `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"Rejected from Buzz by the owner."}}}`, "deny", "Reject was sent from Buzz")
+	e := newClaudeApprovalE2E(t)
+	react := nostr.Event{CreatedAt: nostr.Timestamp(e.advance().Unix()), Kind: KindReaction, Content: "❌", Tags: nostr.Tags{{"e", e.msg.ID.Hex()}}}
+	if err := react.Sign(e.owner); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.c.IngestReaction(react); err != nil {
+		t.Fatal(err)
+	}
+	var ans map[string]string
+	if data, err := os.ReadFile(filepath.Join(e.dir, "answers", e.iid+".json")); err != nil || json.Unmarshal(data, &ans) != nil || ans["option"] != "deny" {
+		t.Fatalf("answer file = %v (%v), want deny", ans, err)
+	}
+	e.hookExited()
+	want := `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"Rejected from Buzz by the owner."}}}`
+	if got := strings.TrimSpace(e.out.String()); got != want {
+		t.Fatalf("hook printed %s, want %s", got, want)
+	}
+	if res := e.resolved(); res["outcome"] != "answered" || res["option"] != "deny" {
+		t.Fatalf("resolved = %v, want answered deny", res)
+	}
+	e.await(approvalKey(e.ref, e.iid) + "/outcome")
+	e.flush()
+	if !e.edited("Reject was sent from Buzz") {
+		t.Fatalf("sent = %+v, want the approval message edited with the sent reject", e.sent)
+	}
 }
 
-func claudeApprovalFromBuzz(t *testing.T, gesture, decision, option, outcome string) {
+// Pro review of #929, 2026-09-30, #1 (owner ruling: reject-only): an answer
+// file is not owner authorization, so Buzz can only block a Claude tool
+// call. The DM offers ❌ only, and a forged allow answer file never yields
+// an allow: the hook prints nothing, and the approval does not end as
+// answered.
+func TestClaudeForgedAllowAnswerNeverAllows(t *testing.T) {
+	e := newClaudeApprovalE2E(t)
+	if strings.Contains(e.msg.Content, "✅") || !strings.Contains(e.msg.Content, "React ❌ to reject") {
+		t.Fatalf("approval message = %q, want reject only", e.msg.Content)
+	}
+	var req map[string]any
+	if data, err := os.ReadFile(filepath.Join(e.dir, "requests", e.iid+".json")); err != nil || json.Unmarshal(data, &req) != nil {
+		t.Fatalf("request = %v (%v)", req, err)
+	}
+	forged, _ := json.Marshal(map[string]any{"interaction_id": e.iid, "action_hash": req["action_hash"], "option": "allow", "at": "x"})
+	if err := os.MkdirAll(filepath.Join(e.dir, "answers"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(e.dir, "answers", e.iid+".json"), forged, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for deadline := time.Now().Add(5 * time.Second); !strings.Contains(e.errs.String(), "ignored"); time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the hook never read the forged answer")
+		}
+	}
+	close(e.done) // the terminal decides
+	e.hookExited()
+	if e.out.Len() != 0 {
+		t.Fatalf("hook printed %q, want no decision", e.out.String())
+	}
+	if res := e.resolved(); res["outcome"] == "answered" {
+		t.Fatalf("resolved = %v, want an outcome other than answered", res)
+	}
+	e.await(approvalKey(e.ref, e.iid) + "/outcome")
+	e.flush()
+	if e.edited("was sent from Buzz") || !e.edited("Closed outside Buzz") {
+		t.Fatalf("sent = %+v, want the message edited as closed outside Buzz", e.sent)
+	}
+}
+
+// claudeApprovalE2E is a Buzz request to a fake Claude session whose tool
+// call raised a PermissionRequest, with the approval message posted.
+type claudeApprovalE2E struct {
+	t        *testing.T
+	c        *Carrier
+	ep       *core.Endpoint
+	ledger   *Ledger
+	owner    [32]byte
+	advance  func() time.Time
+	sent     []nostr.Event
+	msg      nostr.Event
+	ref, iid string
+	dir      string
+	out      bytes.Buffer
+	errs     lockedBuffer
+	done     chan struct{}
+	exited   chan struct{}
+}
+
+func newClaudeApprovalE2E(t *testing.T) *claudeApprovalE2E {
 	base := time.Now().Truncate(time.Second)
 	clock := func() time.Time { return base }
 	var tick atomic.Int64
-	advance := func() time.Time { return base.Add(time.Duration(tick.Add(1)) * time.Second) }
+	e := &claudeApprovalE2E{t: t, done: make(chan struct{}), exited: make(chan struct{})}
+	e.advance = func() time.Time { return base.Add(time.Duration(tick.Add(1)) * time.Second) }
 
 	home := t.TempDir()
 	const sid, cwd = "sess-1", "/work/proj"
@@ -53,63 +135,36 @@ func claudeApprovalFromBuzz(t *testing.T, gesture, decision, option, outcome str
 	if _, err := claude.PinApprovals(home, sid, "share-1", os.Getpid()); err != nil {
 		t.Fatal(err)
 	}
-
 	cfg, _ := json.Marshal(map[string]any{"pid": os.Getpid(), "home": home, "approve": true})
 	att, err := claude.Factory(context.Background(), registry.FactoryConfig{Target: "cc-1", Config: cfg})
 	if err != nil {
 		t.Fatal(err)
 	}
 	att.(*claude.Attachment).SetNow(clock)
-	root := t.TempDir()
-	store, err := requests.Open(filepath.Join(root, "state"))
+	store, err := requests.Open(filepath.Join(t.TempDir(), "state"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	var c *Carrier
-	ep := core.New(core.Config{Store: store, Now: clock, Publish: func(s protocol.Snapshot, origin map[string]string) error { return c.Publish(s, origin) }})
-	defer func() { _ = ep.Close() }()
-	ep.Register(att)
+	e.ep = core.New(core.Config{Store: store, Now: clock, Publish: func(s protocol.Snapshot, origin map[string]string) error { return e.c.Publish(s, origin) }})
+	t.Cleanup(func() { _ = e.ep.Close() })
+	e.ep.Register(att)
 
-	var owner, body [32]byte
-	_, _ = rand.Read(owner[:])
+	var body [32]byte
+	_, _ = rand.Read(e.owner[:])
 	_, _ = rand.Read(body[:])
-	b := Binding{Owner: nostr.GetPublicKey(owner).Hex(), Body: nostr.GetPublicKey(body).Hex(), Channel: "dm-1", Target: "cc-1", RelayHost: "relay", NativeSession: sid,
+	b := Binding{Owner: nostr.GetPublicKey(e.owner).Hex(), Body: nostr.GetPublicKey(body).Hex(), Channel: "dm-1", Target: "cc-1", RelayHost: "relay", NativeSession: sid,
 		MinEvidence: protocol.EvidenceSubmitted}
-	ledger, _ := OpenLedger(t.TempDir())
-	c = NewCarrier(ledger, b, body, ownerGrant(t, owner, b.Body, KindDM, KindEdit), ep.NativeSessionID, ep.Handle)
-	c.now = advance
-	var sent []nostr.Event
-	flush := func() {
-		sent = nil
-		if err := c.Flush(context.Background(), func(_ context.Context, evt nostr.Event) error { sent = append(sent, evt); return nil }, nil); err != nil {
-			t.Fatal(err)
-		}
-	}
-	await := func(key string) {
-		t.Helper()
-		for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(time.Millisecond) {
-			if _, ok, err := ledger.Prepared(key); err != nil || ok {
-				if err != nil {
-					t.Fatal(err)
-				}
-				return
-			}
-			if time.Now().After(deadline) {
-				t.Fatalf("%s was never prepared", key)
-			}
-			if err := ep.Reconcile(); err != nil {
-				t.Fatal(err)
-			}
-		}
-	}
+	e.ledger, _ = OpenLedger(t.TempDir())
+	e.c = NewCarrier(e.ledger, b, body, ownerGrant(t, e.owner, b.Body, KindDM, KindEdit), e.ep.NativeSessionID, e.ep.Handle)
+	e.c.now = e.advance
 
-	dm := ownerEvent(t, owner, "dm-1", "run the tests", clock())
+	dm := ownerEvent(t, e.owner, "dm-1", "run the tests", clock())
 	n, err := Normalize(dm, b, clock())
 	if err != nil {
 		t.Fatal(err)
 	}
-	ref := protocol.EncodeRef(c.source(dm.ID.Hex(), "").Host, "cc-1", n.RequestID)
-	if err := c.Ingest(dm); err != nil {
+	e.ref = protocol.EncodeRef(e.c.source(dm.ID.Hex(), "").Host, "cc-1", n.RequestID)
+	if err := e.c.Ingest(dm); err != nil {
 		t.Fatal(err)
 	}
 	var msgID string
@@ -130,71 +185,107 @@ func claudeApprovalFromBuzz(t *testing.T, gesture, decision, option, outcome str
 
 	stdin, _ := json.Marshal(map[string]any{"session_id": sid, "prompt_id": "p-1", "hook_event_name": "PermissionRequest",
 		"tool_name": "Bash", "tool_input": map[string]any{"command": "go test ./..."}})
-	var out bytes.Buffer
-	exited := make(chan struct{})
 	go func() {
-		defer close(exited)
-		claude.RunPermissionHook(home, bytes.NewReader(stdin), &out, make(chan struct{}), time.Minute)
+		defer close(e.exited)
+		claude.RunPermissionHook(home, bytes.NewReader(stdin), &e.out, &e.errs, e.done, time.Minute)
 	}()
-	approveDir := filepath.Join(home, ".claude", "sessions", "amq-approve", sid)
-	iid := ""
-	for deadline := time.Now().Add(5 * time.Second); iid == ""; time.Sleep(time.Millisecond) {
-		entries, _ := os.ReadDir(filepath.Join(approveDir, "requests"))
-		for _, e := range entries {
-			if id, ok := strings.CutSuffix(e.Name(), ".json"); ok && strings.HasPrefix(id, "cc-") {
-				iid = id
+	e.dir = filepath.Join(home, ".claude", "sessions", "amq-approve", sid)
+	for deadline := time.Now().Add(5 * time.Second); e.iid == ""; time.Sleep(time.Millisecond) {
+		entries, _ := os.ReadDir(filepath.Join(e.dir, "requests"))
+		for _, ent := range entries {
+			if id, ok := strings.CutSuffix(ent.Name(), ".json"); ok && strings.HasPrefix(id, "cc-") {
+				e.iid = id
 			}
 		}
 		if time.Now().After(deadline) {
 			t.Fatal("the hook raised no request")
 		}
 	}
-
-	await(approvalKey(ref, iid))
-	flush()
-	var msg nostr.Event
-	for _, evt := range sent {
+	e.await(approvalKey(e.ref, e.iid))
+	e.flush()
+	for _, evt := range e.sent {
 		if strings.Contains(evt.Content, "Approval needed") {
-			msg = evt
+			e.msg = evt
 		}
 	}
-	if !strings.Contains(msg.Content, "go test ./...") || !strings.Contains(msg.Content, "React ✅") {
-		t.Fatalf("approval message = %q, want the command and how to answer", msg.Content)
+	if !strings.Contains(e.msg.Content, "go test ./...") || !strings.Contains(e.msg.Content, "React ❌") {
+		t.Fatalf("approval message = %q, want the command and how to reject", e.msg.Content)
 	}
+	return e
+}
 
-	react := nostr.Event{CreatedAt: nostr.Timestamp(advance().Unix()), Kind: KindReaction, Content: gesture, Tags: nostr.Tags{{"e", msg.ID.Hex()}}}
-	if err := react.Sign(owner); err != nil {
-		t.Fatal(err)
+func (e *claudeApprovalE2E) flush() {
+	e.t.Helper()
+	e.sent = nil
+	if err := e.c.Flush(context.Background(), func(_ context.Context, evt nostr.Event) error { e.sent = append(e.sent, evt); return nil }, nil); err != nil {
+		e.t.Fatal(err)
 	}
-	if err := c.IngestReaction(react); err != nil {
-		t.Fatal(err)
+}
+
+// await waits, bounded, until the outbox holds key, reconciling meanwhile.
+func (e *claudeApprovalE2E) await(key string) {
+	e.t.Helper()
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(time.Millisecond) {
+		if _, ok, err := e.ledger.Prepared(key); err != nil || ok {
+			if err != nil {
+				e.t.Fatal(err)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			e.t.Fatalf("%s was never prepared", key)
+		}
+		if err := e.ep.Reconcile(); err != nil {
+			e.t.Fatal(err)
+		}
 	}
-	var ans map[string]string
-	if data, err := os.ReadFile(filepath.Join(approveDir, "answers", iid+".json")); err != nil || json.Unmarshal(data, &ans) != nil || ans["option"] != option {
-		t.Fatalf("answer file = %v (%v), want %s", ans, err, option)
-	}
+}
+
+func (e *claudeApprovalE2E) hookExited() {
+	e.t.Helper()
 	select {
-	case <-exited:
+	case <-e.exited:
 	case <-time.After(5 * time.Second):
-		t.Fatal("the hook did not exit after the answer")
+		e.t.Fatal("the hook did not exit")
 	}
-	if got := strings.TrimSpace(out.String()); got != decision {
-		t.Fatalf("hook printed %s, want %s", got, decision)
-	}
-	var res map[string]string
-	if data, err := os.ReadFile(filepath.Join(approveDir, "resolved", iid+".json")); err != nil || json.Unmarshal(data, &res) != nil || res["outcome"] != "answered" || res["option"] != option {
-		t.Fatalf("resolved = %v (%v), want answered %s", res, err, option)
-	}
+}
 
-	await(approvalKey(ref, iid) + "/outcome")
-	flush()
-	edited := false
-	for _, evt := range sent {
-		edited = edited || evt.Kind == KindEdit && tagValue(evt, "e") == msg.ID.Hex() && strings.Contains(evt.Content, outcome)
+func (e *claudeApprovalE2E) resolved() map[string]string {
+	e.t.Helper()
+	var res map[string]string
+	data, err := os.ReadFile(filepath.Join(e.dir, "resolved", e.iid+".json"))
+	if err != nil || json.Unmarshal(data, &res) != nil {
+		e.t.Fatalf("resolved = %s (%v)", data, err)
 	}
-	if !edited {
-		t.Fatalf("sent = %+v, want the approval message edited with %q", sent, outcome)
+	return res
+}
+
+// edited reports an edit of the approval message that contains text.
+func (e *claudeApprovalE2E) edited(text string) bool {
+	for _, evt := range e.sent {
+		if evt.Kind == KindEdit && tagValue(evt, "e") == e.msg.ID.Hex() && strings.Contains(evt.Content, text) {
+			return true
+		}
 	}
+	return false
+}
+
+// lockedBuffer is a bytes.Buffer safe for the hook goroutine and the test.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 // fakeClaudeSession lays down what a live interactive Claude session shows
