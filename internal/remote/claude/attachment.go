@@ -276,6 +276,12 @@ type Attachment struct {
 	pendingOps []func()
 	// clock replaces the wall clock in tests (SetNow).
 	clock func() time.Time
+	// pollSeq numbers the poller's passes: an approval binds only in a pass
+	// that read the approval files no earlier than the pass that found it.
+	pollSeq uint64
+	// afterTranscriptRead runs between a pass's transcript read and its
+	// apply; tests set it to write files at that moment.
+	afterTranscriptRead func()
 }
 
 // Inspect implements core.Attachment: the honest projection. Status is

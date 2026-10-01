@@ -361,10 +361,20 @@ func (a *Attachment) pollConfirmations() {
 	// transcript read. Binding while the cursor lags would publish a result
 	// taken from a partial turn and miss a later turn boundary.
 	stops := readStopMarkers(stopMarkerPath(a.home, reg.SessionID), from)
+	// The approval files are read BEFORE the transcript, so this poll's
+	// transcript read covers every request it discovers: a request found
+	// now binds only against lines read after it was found.
 	a.mu.Lock()
 	known, openIDs := a.approvalIDsLocked()
 	approve := a.cfg.Approve
+	a.pollSeq++
+	seq := a.pollSeq
+	after := a.afterTranscriptRead
 	a.mu.Unlock()
+	var disk approvalDisk
+	if approve {
+		disk = a.readApprovalDisk(reg.SessionID, known, openIDs)
+	}
 
 	if cur.off < 0 {
 		// No run knows where its delivery starts: begin at the last chunk,
@@ -388,9 +398,8 @@ func (a *Attachment) pollConfirmations() {
 		truncated = true
 	}
 	cur.off, cur.skipping = rd.next, rd.skipping
-	var disk approvalDisk
-	if approve {
-		disk = a.readApprovalDisk(reg.SessionID, known, openIDs)
+	if after != nil {
+		after()
 	}
 
 	var events []core.NativeEvent
@@ -426,7 +435,7 @@ func (a *Attachment) pollConfirmations() {
 		a.activityPath = path
 		a.activityNext = rd.next
 	}
-	events = a.applyApprovalsLocked(reg.SessionID, disk, caughtUp, events)
+	events = a.applyApprovalsLocked(reg.SessionID, disk, caughtUp, seq, events)
 	if caughtUp {
 		events = a.bindStopsLocked(stops, events)
 	}

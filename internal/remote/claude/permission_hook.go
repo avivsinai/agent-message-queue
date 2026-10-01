@@ -130,10 +130,12 @@ func (h permissionHook) run(stdin io.Reader, stdout io.Writer, done <-chan struc
 		switch h.answer(answerPath, req) {
 		case answerDeny:
 			// The first create-new of the resolved file decides. The hook
-			// prints only after it won that with answered; when the
-			// terminal's closure won first, it stays silent.
-			if writeResolved(h.home, in.SessionID, approvalResolved{InteractionID: id, Outcome: protocol.ResolutionAnswered, Option: optionDeny}) == nil {
-				writeDeny(stdout)
+			// prints only after it won that claim; when the terminal's
+			// closure won first, it stays silent. The claim becomes an
+			// answer only with the delivery record of a whole write.
+			if writeResolved(h.home, in.SessionID, approvalResolved{InteractionID: id, Outcome: outcomeHookClaim, Option: optionDeny}) == nil {
+				err := writeDeny(stdout)
+				_ = writeDelivery(h.home, in.SessionID, id, err == nil)
 			}
 			return 0
 		case answerIgnored:
@@ -207,8 +209,9 @@ func resolvedExists(path string) bool {
 }
 
 // writeDeny prints the one decision the hook makes: deny, with a message
-// and no interrupt, so the turn continues. It never prints allow.
-func writeDeny(stdout io.Writer) {
+// and no interrupt, so the turn continues. It never prints allow. It
+// reports whether the whole decision was written and flushed.
+func writeDeny(stdout io.Writer) error {
 	type decision struct {
 		Behavior string `json:"behavior"`
 		Message  string `json:"message"`
@@ -223,7 +226,15 @@ func writeDeny(stdout io.Writer) {
 	out.HookSpecificOutput.Decision = decision{Behavior: "deny", Message: "Rejected from Buzz by the owner."}
 	raw, err := json.Marshal(out)
 	if err != nil {
-		return
+		return err
 	}
-	_, _ = stdout.Write(append(raw, '\n'))
+	raw = append(raw, '\n')
+	n, err := stdout.Write(raw)
+	if err == nil && n != len(raw) {
+		err = io.ErrShortWrite
+	}
+	if f, ok := stdout.(interface{ Flush() error }); ok && err == nil {
+		err = f.Flush()
+	}
+	return err
 }

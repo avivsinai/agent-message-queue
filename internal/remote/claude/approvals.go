@@ -39,6 +39,9 @@ type approval struct {
 	// tool_result among them closes it.
 	toolUseID string
 	uncertain bool
+	// seenSeq is the poll pass that found the request; only a pass of the
+	// same or a later number read the transcript after it was found.
+	seenSeq uint64
 }
 
 // toolCall is one tool_use of a run's turn and when its tool_result
@@ -103,20 +106,40 @@ func readResolved(home, sessionID, id string) (approvalResolved, bool) {
 }
 
 // arbitrateLocked tries to record want as how the approval ended, create-new,
-// and returns the outcome that stands: want when this write won, the file's
-// outcome when another writer won first. false means neither is known. The
-// file is tiny, so the write runs under a.mu: the outcome in memory and in
-// the events must be the one on disk.
-func (a *Attachment) arbitrateLocked(sessionID string, want approvalResolved) (protocol.Resolution, bool) {
-	err := writeResolved(a.home, sessionID, want)
-	got := want
-	if err != nil {
-		var ok bool
-		if got, ok = readResolved(a.home, sessionID, want.InteractionID); !ok {
-			return protocol.Resolution{}, false
-		}
+// and returns the record that stands: want when this write won, the file
+// when another writer won first. false means neither is known. The file is
+// tiny, so the write runs under a.mu: the outcome in memory and in the
+// events must be the one on disk.
+func (a *Attachment) arbitrateLocked(sessionID string, want approvalResolved) (approvalResolved, bool) {
+	if writeResolved(a.home, sessionID, want) == nil {
+		return want, true
 	}
-	return protocol.Resolution{InteractionID: got.InteractionID, Outcome: got.Outcome, Option: got.Option}, true
+	return readResolved(a.home, sessionID, want.InteractionID)
+}
+
+// finalOutcomeLocked turns the winning resolved record into how the
+// approval ended. A hook claim is the hook's exclusive right to answer, not
+// proof that it answered: it is answered only with the hook's delivery
+// record saying the deny was written whole. A failed write, or a hook gone
+// without a delivery record, is answered_elsewhere: the terminal decided.
+// While the claiming hook lives with no delivery record, the outcome is not
+// final yet, unless the run ended. Caller holds a.mu.
+func (a *Attachment) finalOutcomeLocked(sessionID string, ap *approval, r approvalResolved, runEnded bool) (protocol.Resolution, bool) {
+	if r.Outcome != outcomeHookClaim {
+		return protocol.Resolution{InteractionID: r.InteractionID, Outcome: r.Outcome, Option: r.Option}, true
+	}
+	dead := hookDead(ap.hookPID) // before the delivery read: a live hook writes it before it exits
+	elsewhere := protocol.Resolution{InteractionID: ap.id, Outcome: protocol.ResolutionElsewhere}
+	if d, ok := readDelivery(a.home, sessionID, ap.id); ok {
+		if d.Written {
+			return protocol.Resolution{InteractionID: ap.id, Outcome: protocol.ResolutionAnswered, Option: r.Option}, true
+		}
+		return elsewhere, true
+	}
+	if dead || runEnded {
+		return elsewhere, true
+	}
+	return protocol.Resolution{}, false
 }
 
 // approvalIDsLocked lists the ids bound to any run and the open ones.
@@ -222,7 +245,7 @@ func (rec *runRecord) candidates(ap *approval) []*toolCall {
 // answered. Binding needs the whole transcript: caughtUp reports that this
 // poll's read reached the end of the file, so no candidate call can still
 // be unread. Caller holds a.mu.
-func (a *Attachment) applyApprovalsLocked(sessionID string, d approvalDisk, caughtUp bool, events []core.NativeEvent) []core.NativeEvent {
+func (a *Attachment) applyApprovalsLocked(sessionID string, d approvalDisk, caughtUp bool, seq uint64, events []core.NativeEvent) []core.NativeEvent {
 	if !a.cfg.Approve {
 		return events
 	}
@@ -251,13 +274,13 @@ func (a *Attachment) applyApprovalsLocked(sessionID string, d approvalDisk, caug
 		}
 		preview, _ := protocol.TruncateText(r.Preview, protocol.MaxApprovalPreview)
 		ap := &approval{id: id, toolName: r.ToolName, preview: preview, hash: r.ActionHash,
-			hookPID: r.HookPID, deadline: deadline, openedAt: opened.UnixMilli()}
+			hookPID: r.HookPID, deadline: deadline, openedAt: opened.UnixMilli(), seenSeq: seq}
 		if rec.approvals == nil {
 			rec.approvals = map[string]*approval{}
 		}
 		rec.approvals[id] = ap
 		rec.open = append(rec.open, ap)
-		if caughtUp {
+		if caughtUp && seq >= ap.seenSeq {
 			a.bindCallLocked(rec, ap)
 		}
 		if len(rec.open) == 1 {
@@ -267,10 +290,12 @@ func (a *Attachment) applyApprovalsLocked(sessionID string, d approvalDisk, caug
 	for _, rec := range a.runs {
 		for _, ap := range append([]*approval(nil), rec.open...) {
 			if r, ok := d.resolved[ap.id]; ok {
-				events = rec.closeApproval(ap.id, protocol.Resolution{InteractionID: ap.id, Outcome: r.Outcome, Option: r.Option}, events)
-				continue
+				if res, final := a.finalOutcomeLocked(sessionID, ap, r, false); final {
+					events = rec.closeApproval(ap.id, res, events)
+				}
+				continue // a hook claim still writing its decision: wait
 			}
-			if caughtUp {
+			if caughtUp && seq >= ap.seenSeq {
 				a.bindCallLocked(rec, ap)
 			}
 			if !a.terminalAnswered(rec, ap) && !hookDead(ap.hookPID) {
@@ -279,8 +304,10 @@ func (a *Attachment) applyApprovalsLocked(sessionID string, d approvalDisk, caug
 			// The terminal decided, or the hook is gone. An answer file on
 			// disk is not delivery: only the hook's own answered record,
 			// if it won the create-new first, stands over this one.
-			if res, ok := a.arbitrateLocked(sessionID, approvalResolved{InteractionID: ap.id, Outcome: protocol.ResolutionElsewhere}); ok {
-				events = rec.closeApproval(ap.id, res, events)
+			if r, ok := a.arbitrateLocked(sessionID, approvalResolved{InteractionID: ap.id, Outcome: protocol.ResolutionElsewhere}); ok {
+				if res, final := a.finalOutcomeLocked(sessionID, ap, r, false); final {
+					events = rec.closeApproval(ap.id, res, events)
+				}
 			}
 		}
 	}
@@ -396,7 +423,7 @@ func (a *Attachment) endApprovalsLocked(rec *runRecord, events []core.NativeEven
 		res := protocol.Resolution{InteractionID: id, Outcome: protocol.ResolutionRunEnded}
 		if a.boundSession != "" {
 			if got, ok := a.arbitrateLocked(a.boundSession, approvalResolved{InteractionID: id, Outcome: protocol.ResolutionRunEnded}); ok {
-				res = got
+				res, _ = a.finalOutcomeLocked(a.boundSession, rec.open[len(rec.open)-1], got, true)
 			}
 		}
 		events = rec.closeApproval(id, res, events)
@@ -511,7 +538,7 @@ func removeApprovalFiles(home, sessionID, promptID string, ids []string) {
 		if !interactionIDRe.MatchString(id) {
 			continue
 		}
-		for _, sub := range []string{"requests", "answers", "resolved"} {
+		for _, sub := range []string{"requests", "answers", "resolved", "delivery"} {
 			removeRegular(filepath.Join(dir, sub, id+".json"))
 		}
 	}

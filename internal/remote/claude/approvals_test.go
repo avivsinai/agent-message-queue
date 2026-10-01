@@ -3,6 +3,8 @@ package claude
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,6 +27,8 @@ type approvalFixture struct {
 	mu     sync.Mutex
 	events []core.NativeEvent
 	out    bytes.Buffer
+	// stdout replaces out as the hook's stdout when set.
+	stdout io.Writer
 	done   chan struct{}
 	exited chan struct{}
 	id     string
@@ -106,9 +110,13 @@ func (f *approvalFixture) raiseWith(command string, ticks <-chan time.Time) {
 		"tool_name": "Bash", "tool_input": map[string]any{"command": command},
 	})
 	h := permissionHook{home: f.home, now: func() time.Time { return f.base }, wait: time.Minute, poll: 5 * time.Millisecond, markerGrace: 0, ticks: ticks}
+	var stdout io.Writer = &f.out
+	if f.stdout != nil {
+		stdout = f.stdout
+	}
 	go func() {
 		defer close(f.exited)
-		h.run(bytes.NewReader(in), &f.out, f.done)
+		h.run(bytes.NewReader(in), stdout, f.done)
 	}()
 	dir := filepath.Join(approveDir(f.home, approvalSession), "requests")
 	for deadline := time.Now().Add(3 * time.Second); f.id == ""; time.Sleep(time.Millisecond) {
@@ -387,4 +395,71 @@ func TestApprovalToolResultAndStopInOnePollAgree(t *testing.T) {
 	}
 	close(f.done)
 	f.hookExited()
+}
+
+// Pro review of #929 r2, 2026-10-01, #1: a request found after a transcript
+// read must not bind against that read. Call A runs without a permission
+// request; an identical call B and its request land between a pass's
+// transcript read and its apply. B binds only against a later read, which
+// sees both calls, so it is uncertain, and B's tool_result closes it.
+func TestApprovalRequestAfterSnapshotBindsOnALaterRead(t *testing.T) {
+	f := newApprovalFixture(t, bashUse("toolu_A", "make build"))
+	hash, _ := actionHash("Bash", json.RawMessage(`{"command":"make build"}`))
+	id, _ := newInteractionID()
+	f.id = id
+	var once sync.Once
+	f.att.mu.Lock()
+	f.att.afterTranscriptRead = func() { once.Do(func() { f.writeLateCall(id, hash) }) }
+	f.att.mu.Unlock()
+	f.att.pollConfirmations() // its transcript read precedes B
+	f.question()
+	if bound, uncertain := f.binding(); bound == "toolu_A" || bound == "" && !uncertain {
+		t.Fatalf("binding = %q uncertain %v, want uncertain or toolu_B", bound, uncertain)
+	}
+	f.append(toolResult(f, "toolu_B", 1))
+	if ev := f.resolution(); ev.Outcome != protocol.ResolutionElsewhere {
+		t.Fatalf("resolution = %+v, want answered_elsewhere", ev)
+	}
+}
+
+// writeLateCall writes call B and its request, as the seam between a
+// transcript read and its apply.
+func (f *approvalFixture) writeLateCall(id, hash string) {
+	f.append(map[string]any{"type": "assistant", "timestamp": f.stamp(0),
+		"message": map[string]any{"role": "assistant", "content": []map[string]any{bashUse("toolu_B", "make build")}}})
+	dir, err := ensureApproveSubdir(f.home, approvalSession, "requests")
+	if err != nil {
+		f.t.Error(err)
+		return
+	}
+	req := approvalRequest{Protocol: approvalProtocol, InteractionID: id, SessionID: approvalSession, PromptID: "p-1",
+		ToolName: "Bash", Preview: "Bash command:\nmake build", ActionHash: hash, HookPID: os.Getpid(),
+		OpenedAt: protocol.FormatTime(f.base), Deadline: protocol.FormatTime(f.base.Add(time.Minute))}
+	if err := createNewJSON(dir, id+".json", req); err != nil {
+		f.t.Error(err)
+	}
+}
+
+type failWriter struct{}
+
+func (failWriter) Write([]byte) (int, error) { return 0, errors.New("stdout closed") }
+
+// Pro review of #929 r2, 2026-10-01, #2: the hook's claim on the resolved
+// file is not delivery. When its deny cannot be written to stdout, the
+// approval ends answered_elsewhere, never as a reject sent from Buzz.
+func TestApprovalDenyNotWrittenIsNotSent(t *testing.T) {
+	f := newApprovalFixture(t, bashUse("toolu_1", "go test ./..."))
+	f.stdout = failWriter{}
+	f.raise("go test ./...")
+	f.question()
+	if code, err := f.att.Respond(pr2Key(), "", f.id, optionDeny); err != nil || code != "" {
+		t.Fatalf("respond = %q, %v; want the answer written", code, err)
+	}
+	f.hookExited()
+	if ev := f.resolution(); ev.Outcome != protocol.ResolutionElsewhere || ev.Remote {
+		t.Fatalf("resolution = %+v, want answered_elsewhere, not sent", ev)
+	}
+	if res, ok := f.att.ResolvedInteraction(pr2Key(), "", f.id); !ok || res.Outcome != protocol.ResolutionElsewhere {
+		t.Fatalf("kept = %+v (%v), want answered_elsewhere", res, ok)
+	}
 }

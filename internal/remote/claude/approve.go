@@ -139,8 +139,7 @@ func approvalPreview(toolName string, input json.RawMessage, agentType string) s
 			b.WriteString("\nRuns in the background.")
 		}
 	} else {
-		canon, _ := canonicalJSON(input)
-		fmt.Fprintf(&b, "Tool %s:\n%s", oneLine(toolName), canon)
+		fmt.Fprintf(&b, "Tool %s:\n%s", oneLine(toolName), maskedJSON(input))
 	}
 	masked, _ := maskSecrets(b.String())
 	preview, _ := protocol.TruncateText(masked, protocol.MaxApprovalPreview)
@@ -219,6 +218,50 @@ const (
 	secretFlag  = `(password|passwd|token|secret|api-key|apikey|access-key|auth)`
 	quotedValue = `("(?:[^"\\]|\\.)*("|$)|'[^']*('|$))`
 )
+
+// secretKeyRe is a JSON field name whose value is a secret.
+var secretKeyRe = regexp.MustCompile(`(?i)(password|passwd|pwd|secret|token|api_?key|apikey|access_?key|private_?key|credential|auth)`)
+
+// maskedJSON renders a tool input for the DM with secrets hidden before it
+// is encoded: every value under a secret-looking key, at any depth, becomes
+// [masked], and every other string is masked as text. Masking the encoded
+// JSON instead would miss quoted values, whose quotes JSON escapes.
+func maskedJSON(input json.RawMessage) []byte {
+	dec := json.NewDecoder(bytes.NewReader(input))
+	dec.UseNumber()
+	var v any
+	if err := dec.Decode(&v); err != nil {
+		return []byte("[input not shown]")
+	}
+	out, err := json.Marshal(maskValue(v))
+	if err != nil {
+		return []byte("[input not shown]")
+	}
+	return out
+}
+
+func maskValue(v any) any {
+	switch t := v.(type) {
+	case map[string]any:
+		for k, val := range t {
+			if secretKeyRe.MatchString(k) && val != nil {
+				t[k] = "[masked]"
+				continue
+			}
+			t[k] = maskValue(val)
+		}
+		return t
+	case []any:
+		for i, val := range t {
+			t[i] = maskValue(val)
+		}
+		return t
+	case string:
+		masked, _ := maskSecrets(t)
+		return masked
+	}
+	return v
+}
 
 // maskSecrets replaces every secret match with [masked] and reports whether
 // anything changed.
@@ -333,6 +376,35 @@ func readApprovalJSON(path string, v any) error {
 		return err
 	}
 	return json.Unmarshal(raw, v)
+}
+
+// outcomeHookClaim is the hook's resolved record: its exclusive claim to
+// answer. Only its delivery record makes that claim an answer. It never
+// reaches the endpoint.
+const outcomeHookClaim protocol.ResolutionOutcome = "hook_claimed"
+
+// approvalDelivery is delivery/<iid>.json: whether the hook wrote its whole
+// deny decision to Claude.
+type approvalDelivery struct {
+	InteractionID string `json:"interaction_id"`
+	Written       bool   `json:"written"`
+}
+
+// writeDelivery records, create-new, whether the claiming hook's decision
+// was written whole.
+func writeDelivery(home, sessionID, id string, written bool) error {
+	dir, err := ensureApproveSubdir(home, sessionID, "delivery")
+	if err != nil {
+		return err
+	}
+	return createNewJSON(dir, id+".json", approvalDelivery{InteractionID: id, Written: written})
+}
+
+// readDelivery reads delivery/<iid>.json.
+func readDelivery(home, sessionID, id string) (approvalDelivery, bool) {
+	var d approvalDelivery
+	err := readApprovalJSON(filepath.Join(approveDir(home, sessionID), "delivery", id+".json"), &d)
+	return d, err == nil && d.InteractionID == id
 }
 
 // writeResolved records how one interaction ended, create-new: the first

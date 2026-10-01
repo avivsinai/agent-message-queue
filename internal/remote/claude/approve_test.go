@@ -22,6 +22,11 @@ func TestApprovalPreviewMasksSecrets(t *testing.T) {
 		{"Bash", `{"command":"login --password \"ordinary demo value\""}`, "demo value"},
 		{"Bash", `{"command":"export TOKEN='unterminated demo value"}`, "demo value"},
 		{"WebFetch", `{"url":"https://example.test","api_key":"ordinary-demo-value"}`, "ordinary-demo-value"},
+		// Pro review of #929 r2, 2026-10-01, #3: the JSON fallback path, for
+		// a Bash input with an extra field and a non-Bash tool.
+		{"Bash", `{"command":"API_KEY=\"ordinary-demo-value\" ./check","dangerouslyDisableSandbox":true}`, "ordinary-demo-value"},
+		{"Bash", `{"command":"login --password \"ordinary demo value\"","dangerouslyDisableSandbox":true}`, "demo value"},
+		{"WebFetch", `{"url":"https://example.test","config":{"headers":[{"apiToken":"ordinary-demo-value"}]}}`, "ordinary-demo-value"},
 	} {
 		if preview := approvalPreview(tc.tool, json.RawMessage(tc.input), ""); strings.Contains(preview, tc.secret) || !strings.Contains(preview, "[masked]") {
 			t.Fatalf("%s %s = %q, want the value masked", tc.tool, tc.input, preview)

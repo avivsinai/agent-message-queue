@@ -52,8 +52,12 @@ func TestClaudeApprovalRejectedFromBuzz(t *testing.T) {
 	if got := strings.TrimSpace(e.out.String()); got != want {
 		t.Fatalf("hook printed %s, want %s", got, want)
 	}
-	if res := e.resolved(); res["outcome"] != "answered" || res["option"] != "deny" {
-		t.Fatalf("resolved = %v, want answered deny", res)
+	if res := e.resolved(); res["outcome"] != "hook_claimed" || res["option"] != "deny" {
+		t.Fatalf("resolved = %v, want the hook's claim for deny", res)
+	}
+	var del map[string]any
+	if data, err := os.ReadFile(filepath.Join(e.dir, "delivery", e.iid+".json")); err != nil || json.Unmarshal(data, &del) != nil || del["written"] != true {
+		t.Fatalf("delivery = %v (%v), want the deny written", del, err)
 	}
 	e.await(approvalKey(e.ref, e.iid) + "/outcome")
 	e.flush()
@@ -93,7 +97,7 @@ func TestClaudeForgedAllowAnswerNeverAllows(t *testing.T) {
 	if e.out.Len() != 0 {
 		t.Fatalf("hook printed %q, want no decision", e.out.String())
 	}
-	if res := e.resolved(); res["outcome"] == "answered" {
+	if res := e.resolved(); res["outcome"] == "answered" || res["outcome"] == "hook_claimed" {
 		t.Fatalf("resolved = %v, want an outcome other than answered", res)
 	}
 	e.await(approvalKey(e.ref, e.iid) + "/outcome")
