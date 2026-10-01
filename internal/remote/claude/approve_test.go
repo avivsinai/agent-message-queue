@@ -75,6 +75,15 @@ func TestApprovalPreviewDetectorTable(t *testing.T) {
 		{"session_id key", "WebFetch", `{"url":"https://example.test","state":{"session_id":"ordinary-demo-value"}}`, "", true},
 		{"sessionid key", "WebFetch", `{"url":"https://example.test","state":{"sessionid":"ordinary-demo-value"}}`, "", true},
 		{"session-id assignment", "Bash", bash("session-id=ordinary-demo-value ./check"), "", true},
+		// Pro review of #929 r7, 2026-10-01: sk- tokens attached to short options.
+		{"attached user option", "Bash", bash("curl -usk-AAAAAAAAAAAAAAAAAAAAAAAA1: https://example.test"), "", true},
+		{"fallback attached user option", "Bash", fallback("curl -usk-AAAAAAAAAAAAAAAAAAAAAAAA1: https://example.test"), "", true},
+		{"attached data option", "Bash", bash("curl -dsk-AAAAAAAAAAAAAAAAAAAAAAAA1 https://example.test"), "", true},
+		{"fallback attached data option", "Bash", fallback("curl -dsk-AAAAAAAAAAAAAAAAAAAAAAAA1 https://example.test"), "", true},
+		{"clustered user option", "Bash", bash("curl -vusk-AAAAAAAAAAAAAAAAAAAAAAAA1: https://example.test"), "", true},
+		{"fallback clustered user option", "Bash", fallback("curl -vusk-AAAAAAAAAAAAAAAAAAAAAAAA1: https://example.test"), "", true},
+		{"clustered data option", "Bash", bash("curl -sdsk-AAAAAAAAAAAAAAAAAAAAAAAA1 https://example.test"), "", true},
+		{"fallback clustered data option", "Bash", fallback("curl -sdsk-AAAAAAAAAAAAAAAAAAAAAAAA1 https://example.test"), "", true},
 	} {
 		preview := approvalPreview(tc.tool, json.RawMessage(tc.input), tc.agent)
 		if tc.hidden && preview != previewHidden {

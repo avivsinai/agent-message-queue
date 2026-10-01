@@ -231,11 +231,28 @@ func oneLine(s string) string {
 var secretShapes = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)PRIVATE KEY`),
 	regexp.MustCompile(`(gh[pousr]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,}|xox[abprs]-[A-Za-z0-9-]{8,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{30,}|glpat-[A-Za-z0-9_-]{16,})`),
-	// sk- only where a word starts: task-, disk- and risk- are no tokens.
-	regexp.MustCompile(`(?:^|[^A-Za-z0-9])sk-[A-Za-z0-9_-]{16,}`),
 	regexp.MustCompile(`eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.`),
 	regexp.MustCompile(`(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}`),
 	regexp.MustCompile(`://[^/\s:@]+:[^/\s@]*@`),
+}
+
+// skToken finds an sk- token candidate anywhere, attached options included
+// (-usk-…, -dsk-…). skPayload decides by the payload: a token's has a digit
+// or an uppercase letter, while lowercase words joined by hyphens, such as
+// task-queue-controller or disk-usage-report, have neither.
+var (
+	skToken   = regexp.MustCompile(`sk-([A-Za-z0-9_-]{20,})`)
+	skPayload = regexp.MustCompile(`[0-9A-Z]`)
+)
+
+// hasSKToken reports an sk- token by its payload shape.
+func hasSKToken(t string) bool {
+	for _, m := range skToken.FindAllStringSubmatch(t, -1) {
+		if skPayload.MatchString(m[1]) {
+			return true
+		}
+	}
+	return false
 }
 
 // secretName is a name that may hold a secret, matched anywhere in a JSON
@@ -269,6 +286,9 @@ func mayHoldSecret(text string) bool {
 		return r
 	}, text)
 	for _, t := range []string{spaced, unquote.Replace(spaced)} {
+		if hasSKToken(t) {
+			return true
+		}
 		for _, re := range secretShapes {
 			if re.MatchString(t) {
 				return true
