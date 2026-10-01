@@ -7,47 +7,81 @@ import (
 	"testing"
 )
 
-// Bead 611.42.3: the DM preview shows a call whole, or not at all. A call
-// that may hold a secret anywhere shows only the hidden note; ❌ still
-// blocks it.
-func TestApprovalPreviewHidesACallThatMayHoldASecret(t *testing.T) {
-	if preview := approvalPreview("Bash", json.RawMessage(`{"command":"go test ./... && rm -rf /tmp/work","description":"Run the tests"}`), ""); !strings.Contains(preview, "go test ./... && rm -rf /tmp/work") {
-		t.Fatalf("plain Bash = %q, want the command shown whole", preview)
-	}
-	// Pro review of #929 r4, 2026-10-01, #3 and #5, and the earlier
-	// masking cases: each hides the whole call.
-	for _, tc := range []struct{ tool, input string }{
-		{"Bash", `{"command":"sh -c 'TOKEN=abc; rm -rf /tmp/work'"}`},
-		{"Bash", `{"command":"printf '%s\\n' --token; rm -rf /tmp/work"}`},
-		{"Bash", `{"command":"curl --data '{\"password\":\"demo-long-password\"}' https://example.invalid"}`},
-		{"Bash", `{"command":"curl --data '{\"password\":\"demo-long-password\"}' https://example.invalid","dangerouslyDisableSandbox":true}`},
-		{"Bash", `{"command":"API_KEY=\"ordinary-demo-value\" ./check"}`},
-		{"Bash", `{"command":"DATABASE_PASSWORD='ordinary demo value' ./check"}`},
-		{"Bash", `{"command":"cat /tmp/config | grep 'password: \"' ; rm -rf /tmp/work"}`},
-		{"Bash", `{"command":"curl -H 'Authorization: Bearer abcdef0123456789' https://example.test"}`},
-		{"WebFetch", `{"url":"https://example.test","config":{"headers":[{"apiToken":"ordinary-demo-value"}]}}`},
-	} {
-		if preview := approvalPreview(tc.tool, json.RawMessage(tc.input), ""); preview != previewHidden {
-			t.Fatalf("%s %s = %q, want the call hidden", tc.tool, tc.input, preview)
-		}
-	}
-	// Pro review of #929 r5, 2026-10-01, #2 and #3: identifier suffixes, a
-	// secret word inside a JSON key, a quoted flag spelling, a secret in the
-	// subagent or tool name, and a nonbreaking space after Bearer. The note
-	// stands alone, also after a label too long to show.
+// TestApprovalPreviewDetectorTable is the one table for the DM preview's
+// secret detector (bead 611.42.3). A hidden row returns only the hidden
+// note; a visible row shows the command whole. Rows are only ever added,
+// never removed: every case a review round hid stays hidden, and every
+// benign case stays visible.
+func TestApprovalPreviewDetectorTable(t *testing.T) {
 	ghToken := "ghp_" + strings.Repeat("A", 36)
-	for _, tc := range []struct{ tool, input, agent string }{
-		{"Bash", `{"command":"API_TOKEN_V2=ordinary-demo-value ./check"}`, ""},
-		{"Bash", `{"command":"API_TOKEN_V2=ordinary-demo-value ./check","dangerouslyDisableSandbox":true}`, ""},
-		{"WebFetch", `{"url":"https://example.test","form":{"passwordConfirmation":"ordinary-demo-value"}}`, ""},
-		{"Bash", `{"command":"login --pass\"word\" \"ordinary-demo-value\""}`, ""},
-		{"Bash", `{"command":"go test ./..."}`, "general " + ghToken},
-		{"Bash", `{"command":"go test ./..."}`, strings.Repeat("long-label ", 300) + ghToken},
-		{"mcp__" + ghToken, `{"query":"status"}`, ""},
-		{"Bash", `{"command":"curl https://example.test","description":"Use Bearer abcdef0123456789"}`, ""},
+	bash := func(cmd string) string {
+		raw, _ := json.Marshal(map[string]any{"command": cmd})
+		return string(raw)
+	}
+	fallback := func(cmd string) string {
+		raw, _ := json.Marshal(map[string]any{"command": cmd, "dangerouslyDisableSandbox": true})
+		return string(raw)
+	}
+	for _, tc := range []struct {
+		name, tool, input, agent string
+		hidden                   bool
+	}{
+		// Benign calls stay visible.
+		{"git status", "Bash", bash("git status --short"), "", false},
+		{"ls -la", "Bash", bash("ls -la"), "", false},
+		{"go test", "Bash", bash("go test ./... && rm -rf /tmp/work"), "", false},
+		{"test named token", "Bash", bash("go test -run TestTokenExpiry ./..."), "", false},
+		{"grep for token", "Bash", bash(`grep -R "token" .`), "", false},
+		// Pro review of #929 r6, 2026-10-01: sk- inside a word is no token.
+		{"task- file", "Bash", bash("ls docs/task-queue-controller.md"), "", false},
+		{"task- package", "Bash", bash("go test ./internal/task-scheduler-engine"), "", false},
+		{"disk- file", "Bash", bash("cat /var/log/disk-usage-report-weekly-summary-archive.txt"), "", false},
+		{"risk- file", "Bash", bash("cat docs/risk-assessment-quarterly-review-summary.md"), "", false},
+
+		// Pro review of #929, 2026-09-30, #4: quoted values and secret fields.
+		{"quoted assignment", "Bash", bash(`API_KEY="ordinary-demo-value" ./check`), "", true},
+		{"single-quoted assignment", "Bash", bash(`DATABASE_PASSWORD='ordinary demo value' ./check`), "", true},
+		{"quoted flag value", "Bash", bash(`login --password "ordinary demo value"`), "", true},
+		{"unterminated quote", "Bash", bash(`export TOKEN='unterminated demo value`), "", true},
+		{"secret field", "WebFetch", `{"url":"https://example.test","api_key":"ordinary-demo-value"}`, "", true},
+		{"bearer header", "Bash", bash(`curl -H 'Authorization: Bearer abcdef0123456789' https://example.test`), "", true},
+		// Pro review of #929 r2, 2026-10-01, #3: the JSON fallback path.
+		{"fallback quoted assignment", "Bash", fallback(`API_KEY="ordinary-demo-value" ./check`), "", true},
+		{"fallback quoted flag", "Bash", fallback(`login --password "ordinary demo value"`), "", true},
+		{"nested secret key", "WebFetch", `{"url":"https://example.test","config":{"headers":[{"apiToken":"ordinary-demo-value"}]}}`, "", true},
+		// Pro review of #929 r3, 2026-10-01, #2.
+		{"grep pattern quote", "Bash", bash(`cat /tmp/config | grep 'password: "' ; rm -rf /tmp/work`), "", true},
+		{"fallback grep pattern quote", "Bash", fallback(`cat /tmp/config | grep 'password: "' ; rm -rf /tmp/work`), "", true},
+		// Pro review of #929 r4, 2026-10-01, #3 and #5.
+		{"interpreter program", "Bash", bash(`sh -c 'TOKEN=abc; rm -rf /tmp/work'`), "", true},
+		{"flag before separator", "Bash", bash(`printf '%s\n' --token; rm -rf /tmp/work`), "", true},
+		{"JSON payload", "Bash", bash(`curl --data '{"password":"demo-long-password"}' https://example.invalid`), "", true},
+		{"fallback JSON payload", "Bash", fallback(`curl --data '{"password":"demo-long-password"}' https://example.invalid`), "", true},
+		// Pro review of #929 r5, 2026-10-01, #2 and #3.
+		{"identifier suffix", "Bash", bash("API_TOKEN_V2=ordinary-demo-value ./check"), "", true},
+		{"fallback identifier suffix", "Bash", fallback("API_TOKEN_V2=ordinary-demo-value ./check"), "", true},
+		{"secret word in key", "WebFetch", `{"url":"https://example.test","form":{"passwordConfirmation":"ordinary-demo-value"}}`, "", true},
+		{"quoted flag spelling", "Bash", bash(`login --pass"word" "ordinary-demo-value"`), "", true},
+		{"token in subagent", "Bash", bash("go test ./..."), "general " + ghToken, true},
+		{"token after a long subagent label", "Bash", bash("go test ./..."), strings.Repeat("long-label ", 300) + ghToken, true},
+		{"token in tool name", "mcp__" + ghToken, `{"query":"status"}`, "", true},
+		{"nonbreaking space after bearer", "Bash", `{"command":"curl https://example.test","description":"Use Bearer abcdef0123456789"}`, "", true},
+		// Pro review of #929 r6, 2026-10-01: the restored name families.
+		{"passphrase assignment", "Bash", bash("PASSPHRASE=ordinary-demo-value ./unlock"), "", true},
+		{"passphrase flag", "Bash", bash("gpg --batch --passphrase ordinary-demo-value --decrypt document.gpg"), "", true},
+		{"user flag", "Bash", bash("curl --user alice:ordinary-demo-value https://example.test"), "", true},
+		{"fallback user flag", "Bash", fallback("curl --user alice:ordinary-demo-value https://example.test"), "", true},
+		{"pwd key", "WebFetch", `{"url":"https://example.test","login":{"pwd":"ordinary-demo-value"}}`, "", true},
+		{"session_id key", "WebFetch", `{"url":"https://example.test","state":{"session_id":"ordinary-demo-value"}}`, "", true},
+		{"sessionid key", "WebFetch", `{"url":"https://example.test","state":{"sessionid":"ordinary-demo-value"}}`, "", true},
+		{"session-id assignment", "Bash", bash("session-id=ordinary-demo-value ./check"), "", true},
 	} {
-		if preview := approvalPreview(tc.tool, json.RawMessage(tc.input), tc.agent); preview != previewHidden {
-			t.Fatalf("%s %s (agent %.40q) = %.120q, want only the hidden note", tc.tool, tc.input, tc.agent, preview)
+		preview := approvalPreview(tc.tool, json.RawMessage(tc.input), tc.agent)
+		if tc.hidden && preview != previewHidden {
+			t.Errorf("%s: preview = %.120q, want only the hidden note", tc.name, preview)
+		}
+		if !tc.hidden && (preview == previewHidden || preview == previewTooLong) {
+			t.Errorf("%s: preview = %q, want the call shown", tc.name, preview)
 		}
 	}
 	long := `{"command":"echo ` + strings.Repeat("x", 3000) + `"}`

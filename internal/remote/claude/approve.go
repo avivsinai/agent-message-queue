@@ -230,15 +230,22 @@ func oneLine(s string) string {
 // private keys, bearer or basic credentials, and credentials in a URL.
 var secretShapes = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)PRIVATE KEY`),
-	regexp.MustCompile(`(gh[pousr]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,}|sk-[A-Za-z0-9_-]{16,}|xox[abprs]-[A-Za-z0-9-]{8,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{30,}|glpat-[A-Za-z0-9_-]{16,})`),
+	regexp.MustCompile(`(gh[pousr]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,}|xox[abprs]-[A-Za-z0-9-]{8,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{30,}|glpat-[A-Za-z0-9_-]{16,})`),
+	// sk- only where a word starts: task-, disk- and risk- are no tokens.
+	regexp.MustCompile(`(?:^|[^A-Za-z0-9])sk-[A-Za-z0-9_-]{16,}`),
 	regexp.MustCompile(`eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.`),
 	regexp.MustCompile(`(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}`),
 	regexp.MustCompile(`://[^/\s:@]+:[^/\s@]*@`),
 }
 
 // secretName is a name that may hold a secret, matched anywhere in a JSON
-// key, an assignment identifier or a flag, in any case.
-var secretName = regexp.MustCompile(`(?i)(passw|secret|token|key|auth|credential|bearer|private|cookie)`)
+// key, an assignment identifier or a flag, in any case. credentialFlag is
+// a flag whose value is a credential although its name is common, so it is
+// a flag rule only and never matched in a JSON key.
+var (
+	secretName     = regexp.MustCompile(`(?i)(passw|passphrase|pwd|secret|token|key|auth|credential|bearer|private|cookie|session[_-]?id)`)
+	credentialFlag = regexp.MustCompile(`(?i)^(user|passphrase)$`)
+)
 
 // Names in text: an assignment identifier (NAME=, NAME:) and a flag
 // (--name, -name). They are also read with quotes and backslashes removed,
@@ -269,7 +276,7 @@ func mayHoldSecret(text string) bool {
 		}
 		for _, re := range []*regexp.Regexp{assignName, flagName} {
 			for _, m := range re.FindAllStringSubmatch(t, -1) {
-				if secretName.MatchString(m[1]) {
+				if secretName.MatchString(m[1]) || re == flagName && credentialFlag.MatchString(m[1]) {
 					return true
 				}
 			}
