@@ -22,7 +22,7 @@ func TestRespondTransportErrorIsReplayedNotAlreadyResolved(t *testing.T) {
 	ep.Register(rt)
 
 	id := "11111111-1111-4111-8111-1111111111f2"
-	if _, err := ep.Handle(submitCmd(id), core.Source{Host: "local"}); err != nil {
+	if _, err := ep.Handle(submitCmd(id), ownerShare); err != nil {
 		t.Fatal(err)
 	}
 	rt.Question(id, "i_1", []string{"yes", "no"})
@@ -33,14 +33,14 @@ func TestRespondTransportErrorIsReplayedNotAlreadyResolved(t *testing.T) {
 		TargetID: "fake", Epoch: "e_1", InteractionID: "i_1", Option: "yes",
 	}
 	rt.FailNextRespond(errors.New("app-server: write: broken pipe"))
-	if _, err := ep.Handle(answer, core.Source{Host: "local"}); err == nil {
+	if _, err := ep.Handle(answer, ownerShare); err == nil {
 		t.Fatal("first answer reported success although the native call failed")
 	}
 	if answers := rt.Snapshot().Answers; len(answers) != 0 {
 		t.Fatalf("failed answer reached the runtime: %+v", answers)
 	}
 
-	rep, err := ep.Handle(answer, core.Source{Host: "local"})
+	rep, err := ep.Handle(answer, ownerShare)
 	if err != nil {
 		t.Fatalf("retry: %v", err)
 	}
@@ -53,7 +53,7 @@ func TestRespondTransportErrorIsReplayedNotAlreadyResolved(t *testing.T) {
 		t.Fatalf("retry did not land exactly once at the runtime: %+v", answers)
 	}
 	// A third replay after the answer landed is a genuine replay.
-	rep, err = ep.Handle(answer, core.Source{Host: "local"})
+	rep, err = ep.Handle(answer, ownerShare)
 	if err != nil {
 		t.Fatalf("replay after delivery: %v", err)
 	}

@@ -178,7 +178,7 @@ func TestApprovalRecoveredAcrossRestart(t *testing.T) {
 	ep := core.New(core.Config{Store: store})
 	defer func() { _ = ep.Close() }()
 	ep.Register(mustAttach(t, dir))
-	src := core.Source{Host: "host1"}
+	src := piOwnerShare
 	id := "00000000-0000-4000-8000-000000000042"
 	ref := protocol.EncodeRef(src.Host, "pi-1", id)
 	writeReceipt(t, dir, ref, "gen-1", fixedNow)
@@ -324,7 +324,7 @@ func newEndpointRun(t *testing.T) *endpointRun {
 	writeReceipt(t, dir, e.ref, "gen-1", fixedNow)
 	if _, err := e.ep.Handle(&protocol.Command{Schema: protocol.SchemaCommand, Op: protocol.OpRequestSubmit, RequestID: id, TargetID: "pi-1",
 		Epoch: addressEpoch("gen-1"), NotAfter: protocol.FormatTime(time.Now().Add(time.Hour)),
-		Input: &protocol.SubmitInput{Text: "hi", Busy: protocol.BusyReject, Deliver: protocol.DeliverTurn, MinEvidence: protocol.EvidenceSubmitted}}, core.Source{Host: "host1"}); err != nil {
+		Input: &protocol.SubmitInput{Text: "hi", Busy: protocol.BusyReject, Deliver: protocol.DeliverTurn, MinEvidence: protocol.EvidenceSubmitted}}, piOwnerShare); err != nil {
 		t.Fatal(err)
 	}
 	return e
@@ -346,7 +346,7 @@ func (e *endpointRun) restart(lines ...string) {
 
 func (e *endpointRun) get() protocol.Snapshot {
 	e.t.Helper()
-	out, err := e.ep.Handle(&protocol.Command{Schema: protocol.SchemaCommand, Op: protocol.OpRequestGet, RequestRef: e.ref}, core.Source{Host: "host1"})
+	out, err := e.ep.Handle(&protocol.Command{Schema: protocol.SchemaCommand, Op: protocol.OpRequestGet, RequestRef: e.ref}, piOwnerShare)
 	if err != nil {
 		e.t.Fatal(err)
 	}
@@ -355,7 +355,7 @@ func (e *endpointRun) get() protocol.Snapshot {
 
 func (e *endpointRun) respond(id, option string) (any, error) {
 	return e.ep.Handle(&protocol.Command{Schema: protocol.SchemaCommand, Op: protocol.OpInteractionRespond, RequestRef: e.ref, TargetID: "pi-1",
-		Epoch: addressEpoch("gen-1"), InteractionID: id, Option: option}, core.Source{Host: "host1"})
+		Epoch: addressEpoch("gen-1"), InteractionID: id, Option: option}, piOwnerShare)
 }
 
 // Pro review of #926 r2, 2026-09-30, #1: the adapter kept only the last
@@ -575,3 +575,7 @@ func TestApprovalOwedOutcomeSettledByLateResolution(t *testing.T) {
 		t.Fatalf("resolved %+v state %s, want tool-1 answered_elsewhere (Block) and completed", s.Resolved, s.State)
 	}
 }
+
+// piOwnerShare is the owner's Buzz share, the only source that may answer an
+// interaction (agent-message-queue-611.46).
+var piOwnerShare = core.Source{Host: "host1", Origin: map[string]string{"carrier": "buzz", "body": "body-1", "channel": "dm-1"}}

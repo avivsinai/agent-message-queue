@@ -108,7 +108,9 @@ invariants.
   recorded resolution: `answered` (the answer the companion delivered),
   `answered_elsewhere` (the harness resolved it without that answer), or
   `run_ended`. The companion never reports an answer as applied when the
-  harness resolved the interaction first.
+  harness resolved the interaction first. Only the owner's Buzz share that
+  submitted the request may answer its interactions; the AMQ mailbox and the
+  local socket are refused, so the asking agent cannot answer itself.
 - **Activity divergence is acceptable for a cache, never for execution
   truth.** The live activity projection may lag or differ from the harness's
   own view; it is a convenience. Admission, cancellation and completion are
