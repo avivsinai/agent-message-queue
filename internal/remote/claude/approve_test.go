@@ -75,6 +75,13 @@ func TestApprovalPreviewDetectorTable(t *testing.T) {
 		{"session_id key", "WebFetch", `{"url":"https://example.test","state":{"session_id":"ordinary-demo-value"}}`, "", true},
 		{"sessionid key", "WebFetch", `{"url":"https://example.test","state":{"sessionid":"ordinary-demo-value"}}`, "", true},
 		{"session-id assignment", "Bash", bash("session-id=ordinary-demo-value ./check"), "", true},
+		// Pro review of #929 r8, 2026-10-01: sk- is judged by its context.
+		{"dated risk- file", "Bash", bash("cat docs/risk-assessment-quarterly-review-summary-2026.md"), "", false},
+		{"capitalized Task- file", "Bash", bash("ls Task-Queue-Controller.md"), "", false},
+		{"lowercase sk- token", "Bash", bash("curl -H x-api: sk-abcdefabcdefabcdefabcdefabcdefab https://example.test"), "", true},
+		{"fallback lowercase sk- token", "Bash", fallback("curl -H x-api: sk-abcdefabcdefabcdefabcdefabcdefab https://example.test"), "", true},
+		{"short sk- token", "Bash", bash("export OPENAI=sk-AbCdEf0123456789 && ./run"), "", true},
+		{"fallback short sk- token", "Bash", fallback("export OPENAI=sk-AbCdEf0123456789 && ./run"), "", true},
 		// Pro review of #929 r7, 2026-10-01: sk- tokens attached to short options.
 		{"attached user option", "Bash", bash("curl -usk-AAAAAAAAAAAAAAAAAAAAAAAA1: https://example.test"), "", true},
 		{"fallback attached user option", "Bash", fallback("curl -usk-AAAAAAAAAAAAAAAAAAAAAAAA1: https://example.test"), "", true},

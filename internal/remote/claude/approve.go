@@ -236,23 +236,20 @@ var secretShapes = []*regexp.Regexp{
 	regexp.MustCompile(`://[^/\s:@]+:[^/\s@]*@`),
 }
 
-// skToken finds an sk- token candidate anywhere, attached options included
-// (-usk-…, -dsk-…). skPayload decides by the payload: a token's has a digit
-// or an uppercase letter, while lowercase words joined by hyphens, such as
-// task-queue-controller or disk-usage-report, have neither.
+// sk- tokens are found by context. skAtWordStart is sk- at the start of the
+// text or after a character that is no letter or digit. skInOptions is sk-
+// after letters, only inside a short-option cluster: a word that starts
+// with "-" and holds only letters before sk- (-usk-…, -vusk-…, -sdsk-…).
+// Both take 16 or more token characters. Anywhere else sk- after letters is
+// part of a name, such as task- or risk-, and stays visible.
 var (
-	skToken   = regexp.MustCompile(`sk-([A-Za-z0-9_-]{20,})`)
-	skPayload = regexp.MustCompile(`[0-9A-Z]`)
+	skAtWordStart = regexp.MustCompile(`(?:^|[^A-Za-z0-9])sk-[A-Za-z0-9_-]{16,}`)
+	skInOptions   = regexp.MustCompile(`(?:^|[\s'"=;|&(])-[A-Za-z]*sk-[A-Za-z0-9_-]{16,}`)
 )
 
-// hasSKToken reports an sk- token by its payload shape.
+// hasSKToken reports an sk- token by its context.
 func hasSKToken(t string) bool {
-	for _, m := range skToken.FindAllStringSubmatch(t, -1) {
-		if skPayload.MatchString(m[1]) {
-			return true
-		}
-	}
-	return false
+	return skAtWordStart.MatchString(t) || skInOptions.MatchString(t)
 }
 
 // secretName is a name that may hold a secret, matched anywhere in a JSON
