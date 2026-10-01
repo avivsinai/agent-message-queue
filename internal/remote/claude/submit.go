@@ -72,6 +72,9 @@ type runRecord struct {
 	// its tool calls and PermissionRequests carry. An absorbed delivery has
 	// none, so it gets no DM approval (bead 611.42.3).
 	promptID string
+	// sessionID is the session whose transcript carried the run's delivery
+	// line; its approval files live in that session's directory.
+	sessionID string
 	// DM approvals (approvals.go): every one bound to the run by id, the
 	// open ones oldest first (open[0] is the one the endpoint shows), how
 	// each closed one ended, and the turn's tool calls.

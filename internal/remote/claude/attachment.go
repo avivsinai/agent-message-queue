@@ -439,8 +439,12 @@ func (a *Attachment) AcknowledgeResult(key requests.Key, _, _ string) {
 	a.released[key] = struct{}{}
 	var promptID string
 	var ids []string
+	sessionID := a.boundSession
 	if rec != nil {
 		promptID = rec.promptID
+		if rec.sessionID != "" {
+			sessionID = rec.sessionID
+		}
 		for id := range rec.approvals {
 			ids = append(ids, id)
 		}
@@ -448,7 +452,6 @@ func (a *Attachment) AcknowledgeResult(key requests.Key, _, _ string) {
 			a.releasedOutcomes[key] = rec.outcomes
 		}
 	}
-	sessionID := a.boundSession
 	a.mu.Unlock()
 	if promptID != "" || len(ids) > 0 {
 		removeApprovalFiles(a.home, sessionID, promptID, ids)

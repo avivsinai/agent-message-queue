@@ -42,7 +42,14 @@ type approval struct {
 	// seenSeq is the poll pass that found the request; only a pass of the
 	// same or a later number read the transcript after it was found.
 	seenSeq uint64
+	// sessionID is the session whose directory holds this approval's files.
+	// Its evidence is read and arbitrated there only, also after the
+	// registry moved to another session.
+	sessionID string
 }
+
+// openRef names one open approval and the session its files live in.
+type openRef struct{ id, sessionID string }
 
 // toolCall is one tool_use of a run's turn and when its tool_result
 // appeared (unix ms, 0 while none has).
@@ -67,7 +74,7 @@ type approvalDisk struct {
 // of each open approval and each new request, so a resolution saved while
 // the endpoint was down is adopted when its request is found again. known
 // holds the ids already bound.
-func (a *Attachment) readApprovalDisk(sessionID string, known map[string]bool, open []string) approvalDisk {
+func (a *Attachment) readApprovalDisk(sessionID string, known map[string]bool, open []openRef) approvalDisk {
 	d := approvalDisk{requests: map[string]approvalRequest{}, resolved: map[string]approvalResolved{}}
 	dir := approveDir(a.home, sessionID)
 	if fi, err := os.Lstat(dir); err != nil || !fi.IsDir() {
@@ -87,12 +94,12 @@ func (a *Attachment) readApprovalDisk(sessionID string, known map[string]bool, o
 				continue
 			}
 			d.requests[id] = r
-			open = append(open, id)
+			open = append(open, openRef{id: id, sessionID: sessionID})
 		}
 	}
-	for _, id := range open {
-		if r, ok := readResolved(a.home, sessionID, id); ok {
-			d.resolved[id] = r
+	for _, o := range open {
+		if r, ok := readResolved(a.home, o.sessionID, o.id); ok {
+			d.resolved[o.id] = r
 		}
 	}
 	return d
@@ -145,15 +152,15 @@ func (a *Attachment) finalOutcomeLocked(sessionID string, ap *approval, r approv
 }
 
 // approvalIDsLocked lists the ids bound to any run and the open ones.
-func (a *Attachment) approvalIDsLocked() (map[string]bool, []string) {
+func (a *Attachment) approvalIDsLocked() (map[string]bool, []openRef) {
 	known := map[string]bool{}
-	var open []string
+	var open []openRef
 	for _, rec := range a.runs {
 		for id := range rec.approvals {
 			known[id] = true
 		}
 		for _, ap := range rec.open {
-			open = append(open, ap.id)
+			open = append(open, openRef{id: ap.id, sessionID: ap.sessionID})
 		}
 	}
 	return known, open
@@ -276,7 +283,7 @@ func (a *Attachment) applyApprovalsLocked(sessionID string, d approvalDisk, caug
 		}
 		preview, _ := protocol.TruncateText(r.Preview, protocol.MaxApprovalPreview)
 		ap := &approval{id: id, toolName: r.ToolName, preview: preview, hash: r.ActionHash,
-			hookPID: r.HookPID, deadline: deadline, openedAt: opened.UnixMilli(), seenSeq: seq}
+			hookPID: r.HookPID, deadline: deadline, openedAt: opened.UnixMilli(), seenSeq: seq, sessionID: r.SessionID}
 		if rec.approvals == nil {
 			rec.approvals = map[string]*approval{}
 		}
@@ -292,7 +299,7 @@ func (a *Attachment) applyApprovalsLocked(sessionID string, d approvalDisk, caug
 	for _, rec := range a.runs {
 		for _, ap := range append([]*approval(nil), rec.open...) {
 			if r, ok := d.resolved[ap.id]; ok {
-				if res, final := a.finalOutcomeLocked(sessionID, ap, r); final {
+				if res, final := a.finalOutcomeLocked(ap.sessionID, ap, r); final {
 					events = rec.closeApproval(ap.id, res, events)
 				}
 				continue // a hook claim still writing its decision: wait
@@ -306,8 +313,8 @@ func (a *Attachment) applyApprovalsLocked(sessionID string, d approvalDisk, caug
 			// The terminal decided, or the hook is gone. An answer file on
 			// disk is not delivery: only the hook's own answered record,
 			// if it won the create-new first, stands over this one.
-			if r, ok := a.arbitrateLocked(sessionID, approvalResolved{InteractionID: ap.id, Outcome: protocol.ResolutionElsewhere}); ok {
-				if res, final := a.finalOutcomeLocked(sessionID, ap, r); final {
+			if r, ok := a.arbitrateLocked(ap.sessionID, approvalResolved{InteractionID: ap.id, Outcome: protocol.ResolutionElsewhere}); ok {
+				if res, final := a.finalOutcomeLocked(ap.sessionID, ap, r); final {
 					events = rec.closeApproval(ap.id, res, events)
 				}
 			}
@@ -426,7 +433,7 @@ func (a *Attachment) endApprovalsLocked(rec *runRecord, events []core.NativeEven
 	for len(rec.open) > 0 {
 		ap := rec.open[len(rec.open)-1]
 		res := protocol.Resolution{InteractionID: ap.id, Outcome: protocol.ResolutionRunEnded}
-		if sid := a.boundSession; sid != "" {
+		if sid := ap.sessionID; sid != "" {
 			if got, ok := a.arbitrateLocked(sid, approvalResolved{InteractionID: ap.id, Outcome: protocol.ResolutionRunEnded}); ok {
 				final := false
 				if res, final = a.finalOutcomeLocked(sid, ap, got); !final {
@@ -460,7 +467,10 @@ func (a *Attachment) Respond(key requests.Key, _, interactionID, option string) 
 	if rec != nil {
 		ap = rec.approvals[interactionID]
 	}
-	sessionID := a.boundSession
+	sessionID := ""
+	if ap != nil {
+		sessionID = ap.sessionID
+	}
 	if ap == nil || sessionID == "" || !interactionIDRe.MatchString(interactionID) {
 		a.mu.Unlock()
 		return protocol.CodeAlreadyResolved, nil
@@ -565,7 +575,7 @@ func (a *Attachment) claimPromptLocked(e transcriptEntry, sessionID string) {
 	if rec == nil || e.PromptID == "" || rec.promptID != "" {
 		return
 	}
-	rec.promptID = e.PromptID
+	rec.promptID, rec.sessionID = e.PromptID, sessionID
 	if !a.cfg.Approve {
 		return
 	}
@@ -576,7 +586,7 @@ func (a *Attachment) claimPromptLocked(e transcriptEntry, sessionID string) {
 // queueRunEndLocked queues the removal of an ended run's prompt marker, so
 // the hook decides nothing more for that prompt. Caller holds a.mu.
 func (a *Attachment) queueRunEndLocked(rec *runRecord) {
-	sessionID, home, promptID := a.boundSession, a.home, rec.promptID
+	sessionID, home, promptID := rec.sessionID, a.home, rec.promptID
 	if sessionID == "" || promptID == "" {
 		return
 	}

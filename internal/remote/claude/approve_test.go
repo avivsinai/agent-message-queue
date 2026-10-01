@@ -31,6 +31,25 @@ func TestApprovalPreviewHidesACallThatMayHoldASecret(t *testing.T) {
 			t.Fatalf("%s %s = %q, want the call hidden", tc.tool, tc.input, preview)
 		}
 	}
+	// Pro review of #929 r5, 2026-10-01, #2 and #3: identifier suffixes, a
+	// secret word inside a JSON key, a quoted flag spelling, a secret in the
+	// subagent or tool name, and a nonbreaking space after Bearer. The note
+	// stands alone, also after a label too long to show.
+	ghToken := "ghp_" + strings.Repeat("A", 36)
+	for _, tc := range []struct{ tool, input, agent string }{
+		{"Bash", `{"command":"API_TOKEN_V2=ordinary-demo-value ./check"}`, ""},
+		{"Bash", `{"command":"API_TOKEN_V2=ordinary-demo-value ./check","dangerouslyDisableSandbox":true}`, ""},
+		{"WebFetch", `{"url":"https://example.test","form":{"passwordConfirmation":"ordinary-demo-value"}}`, ""},
+		{"Bash", `{"command":"login --pass\"word\" \"ordinary-demo-value\""}`, ""},
+		{"Bash", `{"command":"go test ./..."}`, "general " + ghToken},
+		{"Bash", `{"command":"go test ./..."}`, strings.Repeat("long-label ", 300) + ghToken},
+		{"mcp__" + ghToken, `{"query":"status"}`, ""},
+		{"Bash", `{"command":"curl https://example.test","description":"Use Bearer abcdef0123456789"}`, ""},
+	} {
+		if preview := approvalPreview(tc.tool, json.RawMessage(tc.input), tc.agent); preview != previewHidden {
+			t.Fatalf("%s %s (agent %.40q) = %.120q, want only the hidden note", tc.tool, tc.input, tc.agent, preview)
+		}
+	}
 	long := `{"command":"echo ` + strings.Repeat("x", 3000) + `"}`
 	if preview := approvalPreview("Bash", json.RawMessage(long), ""); preview != previewTooLong {
 		t.Fatalf("long command = %q, want the too-long note", preview)

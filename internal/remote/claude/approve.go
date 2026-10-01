@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"unicode"
 
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 )
@@ -121,16 +122,15 @@ var bashFields = map[string]bool{"command": true, "description": true, "timeout"
 // approvalPreview renders what the DM shows for one PermissionRequest. Buzz
 // can only block a Claude tool call (owner ruling on bead 611.42.3: a
 // forged block is only a denial, and a block is safe to give blind), so
-// the preview never edits a command: it shows the call whole, or nothing.
-// A call that may hold a secret anywhere, and a call too long to show
-// whole, show only a note sending the owner to the terminal.
+// the preview never edits a call: it shows the call whole, or a fixed note.
+// The whole candidate text is built first, in the form the DM displays,
+// and one detector checks that text and the structured input. On any
+// match only the hidden note is returned; a call too long to show whole
+// returns the too-long note. Every return is within MaxApprovalPreview.
 func approvalPreview(toolName string, input json.RawMessage, agentType string) string {
 	var b strings.Builder
 	if agentType != "" {
 		fmt.Fprintf(&b, "Subagent %s asks:\n", oneLine(agentType))
-	}
-	if inputMayHoldSecret(input) || mayHoldSecret(agentType) {
-		return b.String() + previewHidden
 	}
 	if bash, ok := bashCall(input); toolName == "Bash" && ok {
 		b.WriteString("Bash command:\n" + bash.Command)
@@ -147,10 +147,14 @@ func approvalPreview(toolName string, input json.RawMessage, agentType string) s
 		canon, _ := canonicalJSON(input)
 		fmt.Fprintf(&b, "Tool %s:\n%s", oneLine(toolName), canon)
 	}
-	if len(b.String()) > protocol.MaxApprovalPreview {
-		return previewTooLong
+	candidate := displayForm(b.String())
+	switch {
+	case mayHoldSecret(candidate) || inputMayHoldSecret(input):
+		return bounded(previewHidden)
+	case len(candidate) > protocol.MaxApprovalPreview:
+		return bounded(previewTooLong)
 	}
-	return b.String()
+	return bounded(candidate)
 }
 
 // The notes a preview shows instead of a call it does not show whole.
@@ -158,6 +162,23 @@ const (
 	previewHidden  = "Command hidden: it may contain a secret. Check the terminal."
 	previewTooLong = "Command too long: check the terminal."
 )
+
+// bounded is s cut to MaxApprovalPreview, the bound every preview keeps.
+func bounded(s string) string {
+	out, _ := protocol.TruncateText(s, protocol.MaxApprovalPreview)
+	return out
+}
+
+// displayForm is text as the DM shows it: control and format characters
+// other than newline and tab removed, as the carrier removes them.
+func displayForm(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\t' || !unicode.IsControl(r) && !unicode.Is(unicode.Cf, r) {
+			return r
+		}
+		return -1
+	}, s)
+}
 
 type bashInput struct {
 	Command, Description, Timeout string
@@ -205,51 +226,73 @@ func oneLine(s string) string {
 	return strings.Join(strings.Fields(s), " ")
 }
 
-// secretPatterns detect what may be a secret. A match anywhere hides the
-// whole call, so the patterns are deliberately broad: known token prefixes,
-// private keys, bearer or basic credentials, credentials in a URL, a
-// secret-looking name followed by = or : (API_KEY=, "password":, token: ),
-// and a secret-looking flag (--token, -password). A false positive costs
-// only the preview; the owner can still block the call.
-var secretPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`PRIVATE KEY`),
-	regexp.MustCompile(`\b(gh[pousr]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,}|sk-[A-Za-z0-9_-]{16,}|xox[abprs]-[A-Za-z0-9-]{8,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{30,}|glpat-[A-Za-z0-9_-]{16,})`),
-	regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.`),
+// secretShapes detect secret values by their shape: known token prefixes,
+// private keys, bearer or basic credentials, and credentials in a URL.
+var secretShapes = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)PRIVATE KEY`),
+	regexp.MustCompile(`(gh[pousr]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,}|sk-[A-Za-z0-9_-]{16,}|xox[abprs]-[A-Za-z0-9-]{8,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{30,}|glpat-[A-Za-z0-9_-]{16,})`),
+	regexp.MustCompile(`eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.`),
 	regexp.MustCompile(`(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}`),
 	regexp.MustCompile(`://[^/\s:@]+:[^/\s@]*@`),
-	regexp.MustCompile(`(?i)(password|passwd|passphrase|pwd|secret|token|api[_-]?key|apikey|access[_-]?key|private[_-]?key|client[_-]?key|credentials?|auth[a-z]*|cookie|session[_-]?id)["'\\]*\s*[=:]`),
-	regexp.MustCompile(`(?i)(^|[\s'"=])--?(password|passwd|passphrase|token|secret|api-?key|access-?key|auth[a-z-]*|user|cookie)\b`),
 }
 
-// mayHoldSecret reports whether any secret pattern matches s.
-func mayHoldSecret(s string) bool {
-	for _, re := range secretPatterns {
-		if re.MatchString(s) {
-			return true
+// secretName is a name that may hold a secret, matched anywhere in a JSON
+// key, an assignment identifier or a flag, in any case.
+var secretName = regexp.MustCompile(`(?i)(passw|secret|token|key|auth|credential|bearer|private|cookie)`)
+
+// Names in text: an assignment identifier (NAME=, NAME:) and a flag
+// (--name, -name). They are also read with quotes and backslashes removed,
+// so --pass"word" and pass\word read as the names they spell.
+var (
+	assignName = regexp.MustCompile(`([A-Za-z_][A-Za-z0-9_.-]*)\s*[=:]`)
+	flagName   = regexp.MustCompile(`(?:^|[^A-Za-z0-9_])--?([A-Za-z][A-Za-z0-9_-]*)`)
+	unquote    = strings.NewReplacer(`"`, "", `'`, "", `\`, "", "`", "")
+)
+
+// mayHoldSecret reports whether text may show a secret: a secret shape, or
+// a secret-looking assignment or flag name. Every Unicode space is read as
+// a space, and the text is checked again with quotes and backslashes
+// removed. It is deliberately broad: a false positive costs only the
+// preview, and the owner can still block the call.
+func mayHoldSecret(text string) bool {
+	spaced := strings.Map(func(r rune) rune {
+		if unicode.IsSpace(r) {
+			return ' '
+		}
+		return r
+	}, text)
+	for _, t := range []string{spaced, unquote.Replace(spaced)} {
+		for _, re := range secretShapes {
+			if re.MatchString(t) {
+				return true
+			}
+		}
+		for _, re := range []*regexp.Regexp{assignName, flagName} {
+			for _, m := range re.FindAllStringSubmatch(t, -1) {
+				if secretName.MatchString(m[1]) {
+					return true
+				}
+			}
 		}
 	}
 	return false
 }
 
-// inputMayHoldSecret runs the detector over the raw tool input and over
-// every key and string value it decodes to, so a value JSON escaping would
-// disguise is still seen.
+// inputMayHoldSecret checks the structured input: every decoded key by
+// name, and every key and string value as text.
 func inputMayHoldSecret(input json.RawMessage) bool {
-	if mayHoldSecret(string(input)) {
-		return true
-	}
 	dec := json.NewDecoder(bytes.NewReader(input))
 	dec.UseNumber()
 	var v any
 	if dec.Decode(&v) != nil {
-		return false
+		return mayHoldSecret(string(input))
 	}
 	var walk func(any) bool
 	walk = func(v any) bool {
 		switch t := v.(type) {
 		case map[string]any:
 			for k, val := range t {
-				if mayHoldSecret(k+":") || walk(val) {
+				if secretName.MatchString(unquote.Replace(k)) || mayHoldSecret(k) || walk(val) {
 					return true
 				}
 			}

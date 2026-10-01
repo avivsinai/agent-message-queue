@@ -470,6 +470,20 @@ func TestApprovalDenyNotWrittenIsNotSent(t *testing.T) {
 // not nil.
 func (f *approvalFixture) writeClaim(hookPID int, delivery *bool) {
 	f.t.Helper()
+	f.writeRequest(hookPID)
+	if err := writeResolved(f.home, approvalSession, approvalResolved{InteractionID: f.id, Outcome: outcomeHookClaim, Option: optionDeny}); err != nil {
+		f.t.Fatal(err)
+	}
+	if delivery != nil {
+		if err := writeDelivery(f.home, approvalSession, f.id, *delivery); err != nil {
+			f.t.Fatal(err)
+		}
+	}
+}
+
+// writeRequest lays down a request a hook with pid hookPID raised.
+func (f *approvalFixture) writeRequest(hookPID int) {
+	f.t.Helper()
 	hash, _ := actionHash("Bash", json.RawMessage(`{"command":"go test ./..."}`))
 	id, _ := newInteractionID()
 	f.id = id
@@ -483,13 +497,49 @@ func (f *approvalFixture) writeClaim(hookPID int, delivery *bool) {
 	if err := createNewJSON(dir, id+".json", req); err != nil {
 		f.t.Fatal(err)
 	}
-	if err := writeResolved(f.home, approvalSession, approvalResolved{InteractionID: id, Outcome: outcomeHookClaim, Option: optionDeny}); err != nil {
-		f.t.Fatal(err)
+}
+
+// Pro review of #929 r5, 2026-10-01, #1: the registry moves to session B
+// while an approval of session A is open. The hook writes its deny and its
+// delivery record in A and exits. The approval settles from A's files as
+// answered, and nothing is arbitrated into B's directory.
+func TestApprovalSettlesInItsOwnSessionAfterASwitch(t *testing.T) {
+	f := newApprovalFixture(t, bashUse("toolu_1", "go test ./..."))
+	f.writeRequest(os.Getpid())
+	f.question()
+	regPath := filepath.Join(claudeSessionsDir(f.home), "4242.json")
+	raw, err := os.ReadFile(regPath)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if delivery != nil {
-		if err := writeDelivery(f.home, approvalSession, id, *delivery); err != nil {
-			f.t.Fatal(err)
+	var reg map[string]any
+	if err := json.Unmarshal(raw, &reg); err != nil {
+		t.Fatal(err)
+	}
+	reg["sessionId"] = "sess-b"
+	raw, _ = json.Marshal(reg)
+	if err := os.WriteFile(regPath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.att.pollConfirmations() // the poller now follows B
+	if err := writeResolved(f.home, approvalSession, approvalResolved{InteractionID: f.id, Outcome: outcomeHookClaim, Option: optionDeny}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeDelivery(f.home, approvalSession, f.id, true); err != nil {
+		t.Fatal(err)
+	}
+	f.att.mu.Lock()
+	for _, rec := range f.att.runs {
+		if ap := rec.approvals[f.id]; ap != nil {
+			ap.hookPID = 0 // the hook exited
 		}
+	}
+	f.att.mu.Unlock()
+	if ev := f.resolution(); ev.Outcome != protocol.ResolutionAnswered || ev.Option != optionDeny {
+		t.Fatalf("resolution = %+v, want answered deny from session A's files", ev)
+	}
+	if r, ok := readResolved(f.home, "sess-b", f.id); ok {
+		t.Fatalf("session B holds %+v, want nothing", r)
 	}
 }
 
