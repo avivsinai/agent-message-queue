@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -15,6 +17,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/relay"
 	"github.com/avivsinai/agent-message-queue/internal/remote/bodykey"
 	"github.com/avivsinai/agent-message-queue/internal/remote/buzzio"
+	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/manifest"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
@@ -47,6 +50,8 @@ type dmEdges struct {
 	// identity is the endpoint's in-process native session accessor, bound
 	// with handle.
 	identity func(target string) string
+	// pins are the DM-approval pins this process wrote (pinApprovals).
+	pins []approvalPin
 }
 
 // buildDMEdges opens a carrier per commands share before startup
@@ -126,6 +131,69 @@ func buildDMEdges(root, stateDir string, r *manifest.Relay, warn io.Writer) *dmE
 		d.state[sh.Session] = "configured"
 	}
 	return d
+}
+
+// approvalPin is one written DM-approval pin, removed at teardown.
+type approvalPin struct {
+	home, session, token string
+}
+
+// pinApprovals pins, for each configured commands share whose target is a
+// Claude adapter with approve, the share's native session, so the
+// PermissionRequest hook of that session may answer from the DM. A pin
+// lives while this process does; the hook ignores a pin whose pid is dead.
+func (d *dmEdges) pinApprovals(adapters []manifest.Adapter, warn io.Writer) {
+	byTarget := map[string]manifest.Adapter{}
+	for _, a := range adapters {
+		byTarget[a.Target] = a
+	}
+	d.mu.Lock()
+	shares := make([]manifest.Share, 0, len(d.byBody))
+	for _, ds := range d.byBody {
+		shares = append(shares, ds.share)
+	}
+	d.mu.Unlock()
+	for _, sh := range shares {
+		ad, ok := byTarget[sh.Target]
+		if !ok || ad.Kind != "claude" || sh.NativeSessionID == "" {
+			continue
+		}
+		var cfg struct {
+			Home    string `json:"home"`
+			Approve bool   `json:"approve"`
+		}
+		if len(ad.Config) > 0 && json.Unmarshal(ad.Config, &cfg) != nil || !cfg.Approve {
+			continue
+		}
+		home := cfg.Home
+		if home == "" {
+			h, err := os.UserHomeDir()
+			if err != nil {
+				say(warn, "relay share %s: DM approvals disabled: %v", sh.Session, err)
+				continue
+			}
+			home = h
+		}
+		token, err := claude.PinApprovals(home, sh.NativeSessionID, sh.Session, os.Getpid())
+		if err != nil {
+			say(warn, "relay share %s: DM approvals disabled: %v", sh.Session, err)
+			continue
+		}
+		d.mu.Lock()
+		d.pins = append(d.pins, approvalPin{home: home, session: sh.NativeSessionID, token: token})
+		d.mu.Unlock()
+	}
+}
+
+// unpinApprovals removes every pin this process wrote.
+func (d *dmEdges) unpinApprovals() {
+	d.mu.Lock()
+	pins := d.pins
+	d.pins = nil
+	d.mu.Unlock()
+	for _, p := range pins {
+		claude.UnpinApprovals(p.home, p.session, p.token)
+	}
 }
 
 // enrolledGrant reads the session's current enrolled generation for each

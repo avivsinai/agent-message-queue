@@ -94,10 +94,11 @@ func TestAttachResolvesRegistryAndTarget(t *testing.T) {
 	if s.Capabilities.Terminal != "unavailable" {
 		t.Fatalf("terminal = %q, want unavailable", s.Capabilities.Terminal)
 	}
-	// Nil evidence projection: PR1 issues no submit evidence class at all;
-	// a nil projection fails closed under any caller floor.
-	if s.Evidence != nil {
-		t.Fatalf("evidence projection = %+v, want nil (no class is provable in PR1)", s.Evidence)
+	// Submit proves delivery only, so the projection is submitted, never
+	// admitted: a relay share for Claude sets min_evidence submitted (lead
+	// ruling on bead 611.42.3).
+	if s.Evidence == nil || s.Evidence.Submit != protocol.EvidenceSubmitted {
+		t.Fatalf("evidence projection = %+v, want submit evidence submitted", s.Evidence)
 	}
 }
 

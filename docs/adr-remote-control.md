@@ -106,8 +106,9 @@ invariants.
   a terminal approval by the capture it was shown with. The harness applies
   the first answer it receives, from any side. Each interaction ends with one
   recorded resolution: `answered` (the answer the companion delivered),
-  `answered_elsewhere` (the harness resolved it without that answer), or
-  `run_ended`. The companion never reports an answer as applied when the
+  `answered_elsewhere` (the harness resolved it without that answer),
+  `run_ended`, or `delivery_unknown` (the companion began to deliver an
+  answer and cannot tell whether it arrived). The companion never reports an answer as applied when the
   harness resolved the interaction first. Only the owner's Buzz share that
   submitted the request may answer its interactions; the AMQ mailbox and the
   local socket are refused, so the asking agent cannot answer itself.
