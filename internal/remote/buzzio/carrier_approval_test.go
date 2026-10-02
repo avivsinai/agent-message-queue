@@ -332,3 +332,72 @@ func TestApprovalEditCrashLeavesMessageAndMappingInAgreement(t *testing.T) {
 		t.Fatalf("mapping disabled=%v pending=%v, last edit %q; want both taking the ✅ answer", appr.Disabled, appr.Pending, last.Content)
 	}
 }
+
+// Pro review of #929 r4, 2026-10-01, #4: a reaction replayed after its
+// answer resolved delivery_unknown is told exactly that, never "already
+// answered".
+func TestApprovalReplayKeepsDeliveryUnknown(t *testing.T) {
+	var owner, body [32]byte
+	_, _ = rand.Read(owner[:])
+	_, _ = rand.Read(body[:])
+	b := Binding{Owner: nostr.GetPublicKey(owner).Hex(), Body: nostr.GetPublicKey(body).Hex(), Channel: "dm-1", Target: "cc", RelayHost: "relay", NativeSession: "sess-1"}
+	ledger, _ := OpenLedger(t.TempDir())
+	var ref string
+	c := NewCarrier(ledger, b, body, ownerGrant(t, owner, b.Body, KindDM, KindEdit), fixedIdentity("sess-1"), func(cmd *protocol.Command, src core.Source) (any, error) {
+		switch cmd.Op {
+		case protocol.OpSessionInspect:
+			return protocol.Session{TargetID: "cc", Epoch: "e1"}, nil
+		case protocol.OpRequestSubmit:
+			ref = protocol.EncodeRef(src.Host, cmd.TargetID, cmd.RequestID)
+			return protocol.Reply{Snapshot: protocol.Snapshot{RequestRef: ref, Revision: 1, State: protocol.StateRunning}}, nil
+		case protocol.OpInteractionRespond:
+			resolved := []protocol.Resolution{{InteractionID: "cc-1", Outcome: protocol.ResolutionDeliveryUnknown, Option: "deny"}}
+			return protocol.Reply{Snapshot: protocol.Snapshot{RequestRef: ref, Revision: 3, Resolved: resolved},
+				Outcome: protocol.Outcome{Op: protocol.OpInteractionRespond, Code: protocol.CodeAlreadyResolved}}, nil
+		}
+		t.Fatalf("unexpected op %s", cmd.Op)
+		return nil, nil
+	})
+	now := time.Now()
+	c.now = func() time.Time { return now }
+	dm := ownerEvent(t, owner, "dm-1", "run the tests", now)
+	if err := c.Ingest(dm); err != nil {
+		t.Fatal(err)
+	}
+	origin := c.source(dm.ID.Hex(), "").Origin
+	pending := &protocol.Interaction{InteractionID: "cc-1", Kind: "approval", Prompt: "Bash command:\ngo test ./...", Options: []string{"deny"}, RemoteAnswer: true, RejectOption: "deny"}
+	now = now.Add(time.Second)
+	if err := c.Publish(protocol.Snapshot{RequestRef: ref, Epoch: "e1", Revision: 2, State: protocol.StateRunning, Interaction: pending}, origin); err != nil {
+		t.Fatal(err)
+	}
+	var sent []nostr.Event
+	flush := func() {
+		sent = nil
+		if err := c.Flush(context.Background(), func(_ context.Context, evt nostr.Event) error { sent = append(sent, evt); return nil }, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	flush()
+	var msg nostr.Event
+	for _, evt := range sent {
+		if evt.Kind == KindDM && strings.Contains(evt.Content, "Approval needed") {
+			msg = evt
+		}
+	}
+	now = now.Add(time.Second)
+	react := nostr.Event{CreatedAt: nostr.Timestamp(now.Unix()), Kind: KindReaction, Content: "❌", Tags: nostr.Tags{{"e", msg.ID.Hex()}}}
+	if err := react.Sign(owner); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.IngestReaction(react); err != nil {
+		t.Fatal(err)
+	}
+	flush()
+	reply := ""
+	for _, evt := range sent {
+		reply += evt.Content
+	}
+	if strings.Contains(reply, "already answered") || !strings.Contains(reply, "may not have reached the terminal") {
+		t.Fatalf("sent = %q, want the unknown delivery, not an answer", reply)
+	}
+}
