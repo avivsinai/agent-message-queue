@@ -1,36 +1,49 @@
 package main
 
 import (
+	"errors"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 )
 
-// fakeACPProcess replaces the listACPProcesses and installedTime seams: the
-// installed amq-acp was replaced at installedAt, and the fake list carries
-// one process launched at startedBefore (stale) and one at startedAfter
-// (current). A bare-name launch is included to prove argv[0] matching.
-func fakeACPList(t *testing.T, installedAt, startedBefore, startedAfter time.Time) {
+// fakeACPList replaces the identity seams: the installed amq-acp has
+// identity installed, and the candidate list carries three processes — one
+// running a different executable (stale), one running the installed binary
+// through a symlink (current), one bare-name candidate whose identity read
+// fails (skipped).
+func fakeACPList(t *testing.T, installed execIdentity) {
 	t.Helper()
-	origList, origTime := listACPProcesses, installedTime
-	t.Cleanup(func() { listACPProcesses, installedTime = origList, origTime })
+	origList, origID, origInst := listACPProcesses, processIdentity, installedIdentity
+	t.Cleanup(func() {
+		listACPProcesses, processIdentity, installedIdentity = origList, origID, origInst
+	})
 	listACPProcesses = func() ([]acpProcess, error) {
 		return []acpProcess{
-			{PID: 111, Name: "/opt/homebrew/Cellar/amq/0.84.0/bin/amq-acp", Start: startedBefore},
-			{PID: 222, Name: "amq-acp", Start: startedAfter},
+			{PID: 111, Name: "/opt/homebrew/Cellar/amq/0.84.0/bin/amq-acp"},
+			{PID: 222, Name: "/opt/homebrew/bin/amq-acp"},
+			{PID: 333, Name: "amq-acp"},
 		}, nil
 	}
-	installedTime = func() (time.Time, error) { return installedAt, nil }
+	processIdentity = func(pid int) (execIdentity, error) {
+		switch pid {
+		case 111:
+			return execIdentity{Dev: installed.Dev + 1, Inode: installed.Inode + 1}, nil
+		case 222:
+			return installed, nil
+		default:
+			return execIdentity{}, errors.New("unreadable")
+		}
+	}
+	installedIdentity = func() (execIdentity, error) { return installed, nil }
 }
 
 // bbn: after `brew upgrade amq`, a Buzz agent can keep running the old
 // amq-acp, which answers "Not connected" with no hint. Doctor must name that
 // exact process and say to Stop and Start the agent in Buzz Desktop.
 func TestDoctorNamesAStaleACP(t *testing.T) {
-	installedAt := time.Now()
-	fakeACPList(t, installedAt, installedAt.Add(-time.Hour), installedAt.Add(time.Hour))
+	fakeACPList(t, execIdentity{Dev: 16777232, Inode: 183321562})
 
 	failures, err := staleACPFailures()
 	if err != nil {
@@ -43,10 +56,8 @@ func TestDoctorNamesAStaleACP(t *testing.T) {
 	if f.Boundary != "stale_harness" || f.Subject != "pid 111" || f.Remedy == "" {
 		t.Fatalf("failure = %+v, want stale_harness/pid 111 with a remedy", f)
 	}
-	// The bare-name process (pid 222) started after the install and must not
-	// be named: argv[0] is not executable identity, start time decides.
-	if !strings.Contains(f.Detail, "before the installed amq-acp was replaced") {
-		t.Fatalf("detail = %q, want both timestamps", f.Detail)
+	if !strings.Contains(f.Detail, "runs a different executable") {
+		t.Fatalf("detail = %q, want the executable-identity wording", f.Detail)
 	}
 }
 
@@ -55,7 +66,7 @@ func TestDoctorNamesAStaleACP(t *testing.T) {
 // harness, so the stale check must run on that path too.
 func TestDoctorReportsStaleACPWithoutStateDir(t *testing.T) {
 	root := t.TempDir() // no extensions/remote, so doctor returns early
-	fakeACPList(t, time.Now().Add(-time.Minute), time.Now().Add(-2*time.Hour), time.Now())
+	fakeACPList(t, execIdentity{Dev: 16777232, Inode: 183321562})
 
 	out, code, err := doctor([]string{"--root", root})
 	if err != nil {
@@ -63,34 +74,5 @@ func TestDoctorReportsStaleACPWithoutStateDir(t *testing.T) {
 	}
 	if code != protocol.ExitActionRequired || !doctorHasBoundary(out, "stale_harness", "pid 111") {
 		t.Fatalf("early return missed stale_harness: exit=%d failing=%v", code, out.(map[string]any)["failing"])
-	}
-}
-
-// bbn r3: ps lstart prints LOCAL time; parsing it as UTC put a UTC+3 start
-// three hours late and a stale process looked current. With psLocation at
-// UTC+3, a ps line whose local start is before the install ctime must be
-// reported stale; read as UTC the same line lands later than the install
-// and would be missed. The line also carries a one-digit day ("Sat Oct  4",
-// two spaces before the 4).
-func TestDoctorStaleACPParsesLocalStart(t *testing.T) {
-	idt := time.FixedZone("IDT", 3*3600)
-	installedAt := time.Date(2026, 10, 4, 12, 0, 0, 0, idt) // install at 12:00 local
-
-	origList, origTime, origLoc, origCLI := listACPProcesses, installedTime, psLocation, psListCLI
-	t.Cleanup(func() {
-		listACPProcesses, installedTime, psLocation, psListCLI = origList, origTime, origLoc, origCLI
-	})
-	installedTime = func() (time.Time, error) { return installedAt, nil }
-	psLocation = idt
-	psListCLI = func() ([]byte, error) {
-		return []byte("  111 Sat Oct  4 11:00:00 2026 amq-acp\n"), nil
-	}
-
-	failures, err := staleACPFailures()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(failures) != 1 || failures[0].Subject != "pid 111" {
-		t.Fatalf("failures = %v, want exactly pid 111 stale", failures)
 	}
 }

@@ -4,26 +4,38 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"time"
 )
 
-// acpProcess is one running amq-acp process with its launch name and start
-// time.
-type acpProcess struct {
-	PID   int
-	Name  string
-	Start time.Time
+// execIdentity is one executable's filesystem identity: its device and
+// inode. Two processes run the same binary exactly when dev and inode
+// match; a touch, a chmod, or a symlink retarget cannot forge that pair.
+type execIdentity struct {
+	Dev   uint64
+	Inode uint64
 }
 
-// listACPProcesses lists running amq-acp processes with their start times.
+// acpProcess is one running amq-acp candidate with its launch name.
+type acpProcess struct {
+	PID  int
+	Name string
+}
+
+// listACPProcesses lists running amq-acp candidates by comm basename.
 // Tests replace this seam. Nothing is listed on Windows.
 var listACPProcesses = listACPProcessesOS
 
-// // installedACPPath resolves the amq-acp that the installed amq-remote ships
+// processIdentity reads the executable identity of one running process.
+// Tests replace this seam. A zero identity with an error means the identity
+// could not be read; doctor never guesses.
+var processIdentity = processIdentityOS
+
+// installedACPPath resolves the amq-acp that the installed amq-remote ships
 // with: amq-remote's own real path (symlinks resolved), with amq-acp beside
-// it. The resolved sibling is itself resolved again, so a symlinked install
-// still stats the real file.
-func installedACPPath() (string, error) {
+// it. The sibling is itself resolved again, so a symlinked install still
+// stats the real file.
+var installedACPPath = installedACPPathFn
+
+func installedACPPathFn() (string, error) {
 	self, err := os.Executable()
 	if err != nil {
 		return "", err
@@ -35,17 +47,19 @@ func installedACPPath() (string, error) {
 	return filepath.Join(filepath.Dir(real), "amq-acp"), nil
 }
 
-// installedTime is when the installed amq-acp was last replaced (the file's
-// inode change time). Tests replace this seam.
-var installedTime = installedTimeOS
+// installedIdentity is the (dev, inode) of the resolved installed amq-acp.
+var installedIdentity = installedIdentityOS
 
-// staleACPFailures names every running amq-acp that started before the
-// installed amq-acp was last replaced: an upgrade cannot reach a process
-// that predates it. A process whose start time cannot be read is skipped;
-// doctor never guesses. argv[0] is not executable identity, so the decision
-// is by time, not by path.
+// staleACPFailures names every running amq-acp whose running executable
+// differs from the installed one: an upgrade cannot reach a process that
+// still runs the old binary. A process whose identity cannot be read is
+// skipped; doctor never guesses.
 func staleACPFailures() ([]boundaryFailure, error) {
-	replaced, err := installedTime()
+	path, err := installedACPPath()
+	if err != nil {
+		return nil, err
+	}
+	installed, err := installedIdentity()
 	if err != nil {
 		return nil, err
 	}
@@ -55,18 +69,26 @@ func staleACPFailures() ([]boundaryFailure, error) {
 	}
 	var out []boundaryFailure
 	for _, p := range procs {
-		if p.Start.IsZero() || !p.Start.Before(replaced) {
+		id, err := processIdentity(p.PID)
+		if err != nil {
+			// No readable identity is no evidence; skip the process.
+			continue
+		}
+		if idSame(id, installed) {
 			continue
 		}
 		out = append(out, boundaryFailure{
 			Boundary: "stale_harness",
 			Subject:  fmt.Sprintf("pid %d", p.PID),
-			Detail: fmt.Sprintf("amq-acp pid %d started %s, before the installed amq-acp was replaced at %s",
-				p.PID, p.Start.Format(time.RFC3339), replaced.Format(time.RFC3339)),
-			Remedy: "If this is a Buzz Desktop agent, Stop and Start it so it runs the installed amq-acp",
+			Detail:   fmt.Sprintf("amq-acp pid %d runs a different executable than the installed %s", p.PID, path),
+			Remedy:   "If this is a Buzz Desktop agent, Stop and Start it so it runs the installed amq-acp",
 		})
 	}
 	return out, nil
+}
+
+func idSame(a, b execIdentity) bool {
+	return a.Dev == b.Dev && a.Inode == b.Inode
 }
 
 // failStaleACP feeds staleACPFailures into doctor's fail closure. Both early
