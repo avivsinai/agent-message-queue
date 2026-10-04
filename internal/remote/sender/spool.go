@@ -88,10 +88,6 @@ type Envelope struct {
 	// endpoint IPC state dir ("ipc:<stateDir>"); later waves add a courier
 	// destination. The drainer dispatches through the carrier this names.
 	Destination string `json:"destination"`
-	// Origin is carrier-specific routing carried through to publication, the
-	// same map the endpoint's Handle stores on the record. It is never
-	// authority; it is attribution.
-	Origin map[string]string `json:"origin,omitempty"`
 	// State is the spool-side state: pending, dispatched, expired, failed.
 	State State `json:"state"`
 	// CreatedAt is the persist time (the moment the caller got `submitted`).
@@ -278,6 +274,12 @@ func (s *Spool) List() ([]*Envelope, error) {
 				continue
 			}
 			if !exists {
+				continue
+			}
+			// The drainer dispatches what List returns, so a file another
+			// writer changed must pass the same check as Create: only a
+			// submit is replayed (agent-message-queue-611.47).
+			if validateEnvelope(env) != nil {
 				continue
 			}
 			out = append(out, env)

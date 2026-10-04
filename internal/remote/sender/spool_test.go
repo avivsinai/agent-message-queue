@@ -2,6 +2,7 @@ package sender
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -23,12 +24,14 @@ import (
 // never matched (round-3 B2 dead code).
 type fakeDispatcher struct {
 	calls      int
+	srcs       []core.Source
 	failing    bool
 	refuseCode protocol.Code // if non-empty, return a refusal Reply with this code
 }
 
 func (f *fakeDispatcher) Handle(cmd *protocol.Command, src core.Source) (any, error) {
 	f.calls++
+	f.srcs = append(f.srcs, src)
 	if f.failing {
 		return nil, protocol.Refuse(protocol.CodeEndpointUnreachable, "no endpoint")
 	}
@@ -742,5 +745,57 @@ func TestASDConcurrentDifferentDigestNoOverwrite(t *testing.T) {
 	}
 	if !want[got.Command.Input.Text] {
 		t.Fatalf("surviving envelope text=%q not among attempted payloads", got.Command.Input.Text)
+	}
+}
+
+// TestSenderDrainRefusesEditedSpoolFiles reproduces agent-message-queue-611.47:
+// the drainer replayed a spool file another writer changed, so a file could
+// dispatch interaction.respond with a copied Buzz origin. Only a valid submit
+// is dispatched, and never with an origin.
+func TestSenderDrainRefusesEditedSpoolFiles(t *testing.T) {
+	now := time.Now()
+	clock := func() time.Time { return now }
+	spool := newTestSpool(t, clock)
+	notAfter := protocol.FormatTime(now.Add(2 * time.Minute))
+	edit := func(id string, change func(m map[string]any)) {
+		t.Helper()
+		cmd := testCommand(id, "fake", "e_1", notAfter)
+		env := &Envelope{RequestID: id, CreatorHost: "local", TargetID: "fake", Epoch: "e_1", NotAfter: notAfter, Command: cmd, Destination: "ipc:state"}
+		if err := spool.Create(env); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		name, err := spool.filename(env.key())
+		if err != nil {
+			t.Fatalf("filename: %v", err)
+		}
+		raw, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		var m map[string]any
+		if err := json.Unmarshal(raw, &m); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		change(m)
+		if raw, err = json.Marshal(m); err != nil {
+			t.Fatalf("encode: %v", err)
+		}
+		if err := os.WriteFile(name, raw, 0o600); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+	}
+	origin := map[string]any{"carrier": "buzz", "body": "body-1", "channel": "dm-1"}
+	edit(validUUID(0), func(m map[string]any) {
+		m["command"].(map[string]any)["op"] = string(protocol.OpInteractionRespond)
+		m["origin"] = origin
+	})
+	edit(validUUID(1), func(m map[string]any) { m["origin"] = origin })
+
+	fd := &fakeDispatcher{}
+	if _, err := NewDrainer(spool, fd, clock).Drain(context.Background()); err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	if len(fd.srcs) != 1 || fd.srcs[0].Origin != nil {
+		t.Fatalf("dispatched sources = %+v, want one submit without origin", fd.srcs)
 	}
 }
