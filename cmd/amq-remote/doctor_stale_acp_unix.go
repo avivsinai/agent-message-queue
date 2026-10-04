@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"os"
 	"os/exec"
@@ -12,11 +13,20 @@ import (
 	"syscall"
 )
 
-// psListCLI runs ps with a C locale so comm and its spacing are stable.
-var psListCLI = func() ([]byte, error) {
-	cmd := exec.Command("ps", "-axo", "pid=,comm=")
+// runBounded runs a doctor probe: the probe's total context bounds it, and
+// WaitDelay bounds how long the pipes are waited for after a deadline, so
+// a stalled child that holds the pipe cannot extend the probe.
+func runBounded(ctx context.Context, name string, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.WaitDelay = childWaitDelay
 	cmd.Env = append(os.Environ(), "LC_ALL=C")
 	return cmd.Output()
+}
+
+// psListCLI lists pid and comm with a C locale so comm and its spacing are
+// stable.
+var psListCLI = func(ctx context.Context) ([]byte, error) {
+	return runBounded(ctx, "ps", "-axo", "pid=,comm=")
 }
 
 // listACPProcessesOS lists running amq-acp candidates through ps. comm is
@@ -24,8 +34,8 @@ var psListCLI = func() ([]byte, error) {
 // identity check decides. comm is everything after the pid, so a launch
 // path with spaces stays whole. A ps failure is not a doctor failure:
 // doctor reports only what it can see.
-func listACPProcessesOS() ([]acpProcess, error) {
-	raw, err := psListCLI()
+func listACPProcessesOS(ctx context.Context) ([]acpProcess, error) {
+	raw, err := psListCLI(ctx)
 	if err != nil {
 		return nil, nil
 	}

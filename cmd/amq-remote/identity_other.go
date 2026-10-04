@@ -2,10 +2,13 @@
 
 package main
 
-import "errors"
+import (
+	"context"
+	"errors"
+)
 
 // listACPProcessesOS is unix-only; no process listing on Windows.
-func listACPProcessesOS() ([]acpProcess, error) {
+func listACPProcessesOS(ctx context.Context) ([]acpProcess, error) {
 	return nil, nil
 }
 
@@ -15,6 +18,6 @@ func installedIdentityOS() (execIdentity, error) {
 }
 
 // processIdentityOS is unix-only; no identity on Windows.
-func processIdentityOS(pid int) (execIdentity, error) {
+func processIdentityOS(ctx context.Context, pid int) (execIdentity, error) {
 	return execIdentity{}, errors.New("unsupported on this platform")
 }

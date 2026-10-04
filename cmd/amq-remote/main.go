@@ -1061,7 +1061,7 @@ func doctor(args []string) (any, int, error) {
 	if _, err := os.Stat(stateDir); err != nil {
 		report["endpoint"] = "no state directory; run `amq-remote serve` once"
 		fail("endpoint", "", "no state directory", "run `amq-remote serve` once")
-		failStaleACP(note)
+		noteStaleACP(note)
 		if len(notes) > 0 {
 			report["notes"] = notes
 		}
@@ -1227,7 +1227,7 @@ func doctor(args []string) (any, int, error) {
 	// A different identity can also be a byte-identical copy or another
 	// binary with the same name, so this is advice, not a failure: it lands
 	// in notes and never makes doctor exit non-zero.
-	failStaleACP(note)
+	noteStaleACP(note)
 	if len(notes) > 0 {
 		report["notes"] = notes
 	}
