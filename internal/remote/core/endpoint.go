@@ -128,6 +128,10 @@ type Endpoint struct {
 	// attempt or the owner's chained attempt) and Close's drain waits for the
 	// whole chain (Astra B784-1, 611.22.48 follow-up round 2).
 	pubPending map[requests.Key]int64
+	// failed holds the visible projection of a request whose async durable
+	// write failed, until the store catches up to its revision. Reads serve
+	// it so the owner sees uncertain, not a stale running (611.50).
+	failed map[requests.Key]protocol.Snapshot
 	// B13 lifecycle: state transitions accepting -> draining -> closed.
 	// inFlight counts handlers between entry (registerInFlight) and exit
 	// (releaseInFlight). drained is a condition variable Close waits on.
@@ -177,6 +181,7 @@ func New(cfg Config) *Endpoint {
 		visible:          map[requests.Key]int64{},
 		publishing:       map[requests.Key]bool{},
 		pubPending:       map[requests.Key]int64{},
+		failed:           map[requests.Key]protocol.Snapshot{},
 		drainObligations: map[requests.Key]int64{},
 		state:            stateAccepting,
 		drainTO:          drainTimeout,
@@ -207,8 +212,8 @@ func (e *Endpoint) SetPublish(p Publisher) {
 	e.publish = p
 }
 
-// Observe registers a callback for every record write. Tests use it to
-// collect state history; production uses it for the activity ring.
+// Observe registers a callback for every record write and every storage
+// failure projection. Tests use it to collect state history.
 func (e *Endpoint) Observe(fn func(*requests.Record)) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -755,6 +760,9 @@ func (e *Endpoint) get(cmd *protocol.Command) (protocol.Reply, error) {
 	}
 	if !ok {
 		return protocol.Reply{}, protocol.Refuse(protocol.CodeNotFound, "no record for request_ref")
+	}
+	if snap, ok := e.failedLocked(rec); ok {
+		return protocol.Reply{Snapshot: snap, Outcome: protocol.Outcome{Op: protocol.OpRequestGet}}, nil
 	}
 	out := protocol.Outcome{Op: protocol.OpRequestGet}
 	if rec.State == protocol.StateRejected {
@@ -1343,7 +1351,26 @@ func (e *Endpoint) notifyStorageFailureLocked(rec *requests.Record, err error) {
 	fail.State = protocol.StateUncertain
 	fail.Code = code
 	fail.Result = nil // never advertise a result we could not persist
+	e.failed[keyOfRecord(rec)] = fail.Snapshot
 	e.notifyLocked(&fail)
+}
+
+// failedLocked returns the storage-failure projection for the durable record
+// cur while the store has not yet reached the revision whose write failed.
+// The store accepts only the next revision, so a durable record at that
+// revision or later means a retry landed, and the projection is dropped.
+// The caller holds e.mu.
+func (e *Endpoint) failedLocked(cur *requests.Record) (protocol.Snapshot, bool) {
+	key := keyOfRecord(cur)
+	snap, ok := e.failed[key]
+	if !ok {
+		return protocol.Snapshot{}, false
+	}
+	if cur.Revision >= snap.Revision {
+		delete(e.failed, key)
+		return protocol.Snapshot{}, false
+	}
+	return snap, true
 }
 
 func boundResult(r *protocol.Result) *protocol.Result {
@@ -2751,6 +2778,11 @@ func (e *Endpoint) Wait(ctx context.Context, ref string) (protocol.Snapshot, err
 	for {
 		e.mu.Lock()
 		rec, ok, err := e.store.Get(key)
+		var failed protocol.Snapshot
+		var isFailed bool
+		if err == nil && ok {
+			failed, isFailed = e.failedLocked(rec)
+		}
 		ch := e.changed
 		e.mu.Unlock()
 		if err != nil {
@@ -2758,6 +2790,9 @@ func (e *Endpoint) Wait(ctx context.Context, ref string) (protocol.Snapshot, err
 		}
 		if !ok {
 			return protocol.Snapshot{}, protocol.Refuse(protocol.CodeNotFound, "no record for request_ref")
+		}
+		if isFailed {
+			return failed, nil
 		}
 		if rec.State.Terminal() || rec.State == protocol.StateUncertain {
 			return rec.Snapshot, nil
