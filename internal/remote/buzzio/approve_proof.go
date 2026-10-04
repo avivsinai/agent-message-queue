@@ -134,6 +134,11 @@ func VerifyApproveEvidence(raw json.RawMessage, want ApproveCheck) (nostr.Event,
 // historyTimeout bounds CheckHistory's relay reads.
 const historyTimeout = 10 * time.Second
 
+// maxHistoryEdits bounds the edits read of one approval message. The
+// carrier edits it a few times at most; a full page means the history is
+// not known, because the relay may have cut older edits from it.
+const maxHistoryEdits = 100
+
 // CheckHistory reads the approval message's history from the relay, each
 // read up to the relay's end of stored events, within historyTimeout. It
 // covers every way a Buzz client changes or hides a message: edits (kind
@@ -165,9 +170,14 @@ func CheckHistory(ctx context.Context, conn *relay.Conn, msg nostr.Event, want A
 	}
 	authors := []nostr.PubKey{msg.PubKey, owner}
 	deletionKinds := []nostr.Kind{KindDeletion, KindGroupDeletion}
-	edits, err := readStored(ctx, conn, nostr.Filter{Kinds: []nostr.Kind{KindEdit}, Authors: authors, Tags: nostr.TagMap{"e": {msg.ID.Hex()}}})
+	edits, err := readStored(ctx, conn, nostr.Filter{Kinds: []nostr.Kind{KindEdit}, Authors: authors, Tags: nostr.TagMap{"e": {msg.ID.Hex()}}, Limit: maxHistoryEdits})
 	if err != nil {
 		return fmt.Errorf("read the approval message's edits: %w", err)
+	}
+	// The relay returns its newest page; a full one may hide an older edit
+	// (review of #936 r4).
+	if len(edits) >= maxHistoryEdits {
+		return fmt.Errorf("the approval message has %d or more edits; its history is not known", maxHistoryEdits)
 	}
 	allowed := approvalVariants(ref, want.Prompt)
 	ids := []string{msg.ID.Hex()}

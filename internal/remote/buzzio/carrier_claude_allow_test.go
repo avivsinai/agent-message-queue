@@ -123,6 +123,19 @@ func TestClaudeForgedAllowEvidenceNeverAllows(t *testing.T) {
 			}
 			return []nostr.Event{d}
 		}},
+		// Review of #936 r4, P2: the relay returns its newest page of edits,
+		// so a full page may have cut an older edit that shows another call.
+		{name: "a full page of edits", pinned: true, forge: e2eValid, history: func(e *claudeApprovalE2E) []nostr.Event {
+			var out []nostr.Event
+			for i := range maxHistoryEdits {
+				ed := nostr.Event{CreatedAt: e.msg.CreatedAt + 1 + nostr.Timestamp(i), Kind: KindEdit, Tags: e.c.editTags(e.msg.ID.Hex()), Content: e.trailerEdit()}
+				if err := ed.Sign(e.body); err != nil {
+					e.t.Fatal(err)
+				}
+				out = append(out, ed)
+			}
+			return out
+		}},
 		// Pro review of #936 r2, P1: Buzz lets the owner edit the agent's
 		// message.
 		{name: "owner edit changes the shown command", pinned: true, forge: e2eValid, history: func(e *claudeApprovalE2E) []nostr.Event {
