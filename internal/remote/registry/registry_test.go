@@ -33,87 +33,33 @@ func (s *stubAttachment) Respond(requests.Key, string, string, string) (protocol
 func (s *stubAttachment) AcknowledgeResult(requests.Key, string, string) {}
 func (s *stubAttachment) Subscribe(func(core.NativeEvent)) func()        { return func() {} }
 
-func TestBuildYieldsExpectedAttachmentSet(t *testing.T) {
-	// Register two test factories.
-	Register("test-kind-a", func(ctx context.Context, cfg FactoryConfig) (core.Attachment, error) {
-		return &stubAttachment{target: cfg.Target}, nil
-	})
-	Register("test-kind-b", func(ctx context.Context, cfg FactoryConfig) (core.Attachment, error) {
-		return &stubAttachment{target: cfg.Target}, nil
-	})
-
-	f := manifest.File{
-		SchemaVersion: manifest.SchemaVersion,
-		Adapters: []manifest.Adapter{
-			{Kind: "test-kind-a", Target: "alpha"},
-			{Kind: "test-kind-b", Target: "beta"},
-		},
-	}
-	outcomes := Build(context.Background(), "/tmp/root", "/tmp/state", f)
-	if len(outcomes) != 2 {
-		t.Fatalf("got %d outcomes, want 2", len(outcomes))
-	}
-	if outcomes[0].Attachment == nil || outcomes[0].Refusal != nil {
-		t.Fatalf("outcome[0]: expected attachment, got refusal=%v", outcomes[0].Refusal)
-	}
-	if outcomes[0].Attachment.Inspect().TargetID != "alpha" {
-		t.Fatalf("atts[0] target=%q, want alpha", outcomes[0].Attachment.Inspect().TargetID)
-	}
-	if outcomes[1].Attachment == nil || outcomes[1].Refusal != nil {
-		t.Fatalf("outcome[1]: expected attachment, got refusal=%v", outcomes[1].Refusal)
-	}
-	if outcomes[1].Attachment.Inspect().TargetID != "beta" {
-		t.Fatalf("atts[1] target=%q, want beta", outcomes[1].Attachment.Inspect().TargetID)
-	}
-}
-
-func TestBuildUnknownKindIsRefusal(t *testing.T) {
-	f := manifest.File{
-		SchemaVersion: manifest.SchemaVersion,
-		Adapters: []manifest.Adapter{
-			{Kind: "nonexistent-kind", Target: "x"},
-		},
-	}
-	outcomes := Build(context.Background(), "/tmp/root", "/tmp/state", f)
-	if len(outcomes) != 1 {
-		t.Fatalf("got %d outcomes, want 1", len(outcomes))
-	}
-	if outcomes[0].Attachment != nil {
-		t.Fatal("expected refusal, got attachment")
-	}
-	if outcomes[0].Refusal == nil {
-		t.Fatal("expected refusal, got nil")
-	}
-	e, ok := outcomes[0].Refusal.(*ErrUnknownKind)
-	if !ok {
-		t.Fatalf("got %T, want *ErrUnknownKind", outcomes[0].Refusal)
-	}
-	if e.Kind != "nonexistent-kind" {
-		t.Fatalf("kind=%q, want nonexistent-kind", e.Kind)
-	}
-}
-
-// TestBuildPartialFailureReturnsRefusals (611.13 r1 recut) pins that one bad
-// adapter does not take down the set: a manifest with [fake-OK, claude-refusal]
-// yields one attachment and one typed refusal, not a fatal error.
-func TestBuildPartialFailureReturnsRefusals(t *testing.T) {
+// The test kinds are registered once per process: Register refuses a
+// duplicate kind, so registering in a test body panicked under -count=2.
+func init() {
 	Register("test-ok", func(ctx context.Context, cfg FactoryConfig) (core.Attachment, error) {
 		return &stubAttachment{target: cfg.Target}, nil
 	})
 	Register("test-bad", func(ctx context.Context, cfg FactoryConfig) (core.Attachment, error) {
 		return nil, errTestFactoryRefusal
 	})
+}
 
+// TestBuildPartialFailureReturnsRefusals (611.13 r1 recut) pins that one bad
+// adapter does not take down the set: a manifest with an adapter that builds,
+// one whose factory refuses, and one of an unknown kind yields one attachment
+// and two typed refusals, not a fatal error.
+func TestBuildPartialFailureReturnsRefusals(t *testing.T) {
 	f := manifest.File{
 		SchemaVersion: manifest.SchemaVersion,
 		Adapters: []manifest.Adapter{
 			{Kind: "test-ok", Target: "good"},
 			{Kind: "test-bad", Target: "bad"},
+			{Kind: "nonexistent-kind", Target: "x"},
 		},
 	}
 	outcomes := Build(context.Background(), "/tmp/root", "/tmp/state", f)
-	if len(outcomes) != 2 {
-		t.Fatalf("got %d outcomes, want 2", len(outcomes))
+	if len(outcomes) != 3 {
+		t.Fatalf("got %d outcomes, want 3", len(outcomes))
 	}
 	if outcomes[0].Attachment == nil || outcomes[0].Refusal != nil {
 		t.Fatalf("outcome[0]: expected attachment, got refusal=%v", outcomes[0].Refusal)
@@ -126,6 +72,13 @@ func TestBuildPartialFailureReturnsRefusals(t *testing.T) {
 	}
 	if outcomes[1].Refusal != errTestFactoryRefusal {
 		t.Fatalf("outcome[1] refusal=%v, want errTestFactoryRefusal", outcomes[1].Refusal)
+	}
+	if outcomes[2].Attachment != nil {
+		t.Fatal("outcome[2]: expected refusal, got attachment")
+	}
+	e, ok := outcomes[2].Refusal.(*ErrUnknownKind)
+	if !ok || e.Kind != "nonexistent-kind" {
+		t.Fatalf("outcome[2] refusal=%v (%T), want *ErrUnknownKind for nonexistent-kind", outcomes[2].Refusal, outcomes[2].Refusal)
 	}
 }
 

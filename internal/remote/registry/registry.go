@@ -93,18 +93,6 @@ func RegisterDiscoverer(kind string, d Discoverer) {
 	discs[kind] = d
 }
 
-// Kinds returns the registered factory kinds in sorted order.
-func Kinds() []string {
-	mu.RLock()
-	defer mu.RUnlock()
-	out := make([]string, 0, len(factors))
-	for k := range factors {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
-}
-
 // ErrUnknownKind is returned when a manifest entry names a kind with no
 // registered factory.
 type ErrUnknownKind struct {

@@ -25,23 +25,16 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 )
 
-// Dispatcher is the interface the drainer dispatches through. Endpoint
-// satisfies it. It is an interface so the drainer can be tested without a
-// live endpoint.
-type Dispatcher interface {
-	Handle(cmd *protocol.Command, src core.Source) (any, error)
-}
-
-// Drainer replays pending envelopes through a Dispatcher.
+// Drainer replays pending envelopes through the endpoint.
 type Drainer struct {
 	spool *Spool
-	ep    Dispatcher
+	ep    *core.Endpoint
 	now   func() time.Time
 }
 
 // NewDrainer returns a drainer that replays pending envelopes in spool through
 // ep. now defaults to time.Now.
-func NewDrainer(spool *Spool, ep Dispatcher, now func() time.Time) *Drainer {
+func NewDrainer(spool *Spool, ep *core.Endpoint, now func() time.Time) *Drainer {
 	if now == nil {
 		now = time.Now
 	}

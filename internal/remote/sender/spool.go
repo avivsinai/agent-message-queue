@@ -51,7 +51,7 @@ const (
 // MaxEnvelopeBytes bounds one spool envelope on disk. It is the wire-bound
 // command plus routing bookkeeping; it delegates to the protocol command
 // bound so the spool never accepts more than the endpoint will.
-var MaxEnvelopeBytes = protocol.MaxCommandBytes + 4*1024 // command + overhead
+const MaxEnvelopeBytes = protocol.MaxCommandBytes + 4*1024 // command + overhead
 
 // Envelope is one durable outgoing submit intent.
 //
@@ -193,9 +193,6 @@ func Open(stateDir string, opts ...Option) (*Spool, error) {
 	}
 	return s, nil
 }
-
-// Dir is the spool directory.
-func (s *Spool) Dir() string { return s.dir }
 
 // Create persists one envelope atomically BEFORE returning. A duplicate
 // (same creator host + request id) reconciles: if the existing envelope has
