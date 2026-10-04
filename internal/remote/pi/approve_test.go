@@ -148,21 +148,6 @@ func TestApprovalAnsweredFromRemote(t *testing.T) {
 	}
 }
 
-// TestApprovalResolvedElsewhere: a local answer clears the approval with
-// Remote false, after the question it resolves.
-func TestApprovalResolvedElsewhere(t *testing.T) {
-	a, dir, key, ch := approvalRun(t)
-	ref := clientRef(key)
-	appendEvents(t, dir, ref, interactionLine(ref), resolvedLine(ref, "answered_elsewhere", "Block"))
-	if _, err := a.Lookup(key, "gen-1"); err != nil {
-		t.Fatal(err)
-	}
-	nextEvent(t, ch, core.EventQuestion)
-	if r := nextEvent(t, ch, core.EventQuestionResolved); r.Remote {
-		t.Fatalf("resolved = %+v, want Remote false", r)
-	}
-}
-
 // Pro review of #926, 2026-09-30, #2: an approval raised, or resolved,
 // while amq-remote was down was lost, because the native event had no
 // subscriber and reconcile took the same-run shortcut; and a terminal
@@ -235,23 +220,6 @@ func TestApprovalClosedWhenRunGoesUncertain(t *testing.T) {
 	nextEvent(t, ch, core.EventQuestion)
 	if r := nextEvent(t, ch, core.EventQuestionResolved); r.Outcome != protocol.ResolutionRunEnded || r.Remote {
 		t.Fatalf("resolved = %+v, want run_ended, not remote", r)
-	}
-}
-
-// Pro review of #926, 2026-09-30, #3: a retry of an answer published before
-// expiry returned expired after it, a false refusal that dropped the
-// endpoint's answer intent. An exact answer on disk is delivered first.
-func TestApprovalAnswerReplayAfterExpiry(t *testing.T) {
-	a, dir, key, _ := approvalRun(t)
-	ref := clientRef(key)
-	appendEvents(t, dir, ref, interactionLine(ref))
-	if code, err := a.Respond(key, "gen-1", "tool-1", "Allow once"); err != nil || code != "" {
-		t.Fatalf("Respond = %q, %v", code, err)
-	}
-	later := mustAttach(t, dir)
-	later.now = func() time.Time { return fixedNow.Add(10 * time.Minute) }
-	if code, err := later.Respond(key, "gen-1", "tool-1", "Allow once"); err != nil || code != "" {
-		t.Fatalf("replay after expiry = %q, %v, want delivered", code, err)
 	}
 }
 

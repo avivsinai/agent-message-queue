@@ -81,6 +81,10 @@ func TestGoldenExtensionVector(t *testing.T) {
 	if want, err := os.ReadFile(filepath.Join(src, rel)); err != nil || string(got) != string(want) {
 		t.Fatalf("request bytes = %s, want golden %s (%v)", got, want, err)
 	}
+	// The publish leaves only the request: no temp file is left behind.
+	if entries, err := os.ReadDir(filepath.Join(out, "requests")); err != nil || len(entries) != 1 {
+		t.Fatalf("requests dir = %v (%d entries), want only the published request", err, len(entries))
+	}
 
 	orphan := requests.Key{CreatorHost: "host1", TargetID: "pi-1", RequestID: "00000000-0000-4000-8000-000000000002"}
 	ev, err = a.Lookup(orphan, "")
