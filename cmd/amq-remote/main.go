@@ -1732,6 +1732,8 @@ func claudeSubcommand(args []string, stdin io.Reader, stdout io.Writer) int {
 		fs.SetOutput(io.Discard)
 		wait := fs.Int("wait", int(claude.DefaultPermissionWait/time.Second), "seconds to wait for a Buzz answer")
 		owner := fs.String("owner", "", "pinned owner pubkey (64 lowercase hex) whose signed reaction can allow a call; none means reject-only")
+		root := fs.String("root", "", "AMQ root whose manifest and enrolled share the hook reads to verify an allow")
+		session := fs.String("session", "", "the share session to verify against (default: the share serving the Claude session)")
 		if fs.Parse(args[1:]) != nil {
 			return 0
 		}
@@ -1743,7 +1745,8 @@ func claudeSubcommand(args []string, stdin io.Reader, stdout io.Writer) int {
 			<-sigs
 			close(done)
 		}()
-		return claude.RunPermissionHook(home, stdin, stdout, os.Stderr, done, time.Duration(*wait)*time.Second, *owner, approvalVerifier)
+		allow := allowConfig(claude.HookPin{Owner: *owner, Root: *root, Session: *session})
+		return claude.RunPermissionHook(home, stdin, stdout, os.Stderr, done, time.Duration(*wait)*time.Second, allow)
 	case "install-approval-hook":
 		return installApprovalHook(home, args[1:], stdout, os.Stderr)
 	case "uninstall-approval-hook":

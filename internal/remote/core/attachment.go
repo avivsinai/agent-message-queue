@@ -174,7 +174,9 @@ type Attachment interface {
 // EvidenceResponder is an Attachment whose answers can carry a surface's
 // opaque evidence (protocol.Command.Evidence). The endpoint passes it
 // unread and its trust in the answer is unchanged; the attachment decides
-// what the evidence proves.
+// what the evidence proves. A *protocol.Refusal error is a positive
+// refusal like a returned code, with its message as the reason: the answer
+// intent is cleared, so the answer can be sent again.
 type EvidenceResponder interface {
 	RespondWithEvidence(key requests.Key, epoch, interactionID, option string, evidence json.RawMessage) (protocol.Code, error)
 }

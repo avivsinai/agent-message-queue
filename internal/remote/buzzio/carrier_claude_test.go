@@ -10,8 +10,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,6 +24,9 @@ import (
 
 	"fiatjaf.com/nostr"
 
+	"github.com/avivsinai/agent-message-queue/internal/relay"
+	"github.com/avivsinai/agent-message-queue/internal/relay/relaytest"
+	"github.com/avivsinai/agent-message-queue/internal/remote/bodykey"
 	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
@@ -117,9 +122,12 @@ type claudeApprovalE2E struct {
 	body    [32]byte
 	advance func() time.Time
 	sent    []nostr.Event
-	// published is every event flushed so far: the relay the edit
-	// fetcher reads.
-	published []nostr.Event
+	// relay is the fake relay the carrier publishes to and the verifier
+	// reads; relayDown points the verifier at a closed port instead.
+	relay     *relaytest.Relay
+	relayURL  string
+	relayDown atomic.Bool
+	allow     claude.AllowConfig
 	msg       nostr.Event
 	ref, iid  string
 	dir       string
@@ -135,7 +143,8 @@ func newClaudeApprovalE2E(t *testing.T) *claudeApprovalE2E {
 
 // newClaudeApprovalE2EWith raises the approval for command. pinned installs
 // the hook with the owner's pubkey on its command line, pins the share with
-// that owner, and runs the hook with that owner and the real verifier.
+// that owner, and gives the hook and the attachment the real verifier,
+// which reads the history from the fake relay signed in as the body.
 func newClaudeApprovalE2EWith(t *testing.T, pinned bool, command string) *claudeApprovalE2E {
 	base := time.Now().Truncate(time.Second)
 	clock := func() time.Time { return base }
@@ -148,10 +157,20 @@ func newClaudeApprovalE2EWith(t *testing.T, pinned bool, command string) *claude
 	frames := fakeClaudeSession(t, home, sid, cwd)
 	_, _ = rand.Read(e.owner[:])
 	_, _ = rand.Read(e.body[:])
-	owner, verify := "", claude.AllowVerifier(nil)
+	bodyHex := nostr.GetPublicKey(e.body).Hex()
+	authTag, err := bodykey.SignAuthTag(e.owner, bodyHex, bodykey.ShareConditions(relay.KindAuth, time.Now().Add(time.Hour).Unix()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire := []string{"auth", authTag.OwnerPubKey, authTag.Conditions, authTag.SigHex()}
+	var srv *httptest.Server
+	e.relay, srv, e.relayURL = relaytest.Start(bodyHex, wire)
+	t.Cleanup(srv.Close)
+	owner := ""
 	if pinned {
-		owner, verify = nostr.GetPublicKey(e.owner).Hex(), VerifyApproveEvidence
-		if err := claude.InstallPermissionHook(home, "/opt/amq-remote", claude.DefaultPermissionWait, owner); err != nil {
+		owner = nostr.GetPublicKey(e.owner).Hex()
+		e.allow = e.allowConfig(owner, bodyHex, wire)
+		if err := claude.InstallPermissionHook(home, "/opt/amq-remote", claude.DefaultPermissionWait, claude.HookPin{Owner: owner, Root: "/amq-root"}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -164,6 +183,7 @@ func newClaudeApprovalE2EWith(t *testing.T, pinned bool, command string) *claude
 		t.Fatal(err)
 	}
 	att.(*claude.Attachment).SetNow(clock)
+	att.(*claude.Attachment).SetAllowFactory(func(claude.HookPin) claude.AllowConfig { return e.allow })
 	store, err := requests.Open(filepath.Join(t.TempDir(), "state"))
 	if err != nil {
 		t.Fatal(err)
@@ -178,15 +198,6 @@ func newClaudeApprovalE2EWith(t *testing.T, pinned bool, command string) *claude
 	e.ledger, _ = OpenLedger(t.TempDir())
 	e.c = NewCarrier(e.ledger, b, body, ownerGrant(t, e.owner, b.Body, KindDM, KindEdit), e.ep.NativeSessionID, e.ep.Handle)
 	e.c.now = e.advance
-	e.c.SetEditFetcher(func(_ context.Context, id string) ([]nostr.Event, error) {
-		var edits []nostr.Event
-		for _, evt := range e.published {
-			if evt.Kind == KindEdit && evt.PubKey.Hex() == b.Body && lastETag(evt) == id {
-				edits = append(edits, evt)
-			}
-		}
-		return edits, nil
-	})
 
 	dm := ownerEvent(t, e.owner, "dm-1", "run the tests", clock())
 	n, err := Normalize(dm, b, clock())
@@ -217,7 +228,7 @@ func newClaudeApprovalE2EWith(t *testing.T, pinned bool, command string) *claude
 		"tool_name": "Bash", "tool_input": map[string]any{"command": command}})
 	go func() {
 		defer close(e.exited)
-		claude.RunPermissionHook(home, bytes.NewReader(stdin), &e.out, &e.errs, e.done, time.Minute, owner, verify)
+		claude.RunPermissionHook(home, bytes.NewReader(stdin), &e.out, &e.errs, e.done, time.Minute, e.allow)
 	}()
 	e.dir = filepath.Join(home, ".claude", "sessions", "amq-approve", sid)
 	for deadline := time.Now().Add(5 * time.Second); e.iid == ""; time.Sleep(time.Millisecond) {
@@ -244,11 +255,46 @@ func newClaudeApprovalE2EWith(t *testing.T, pinned bool, command string) *claude
 	return e
 }
 
+// allowConfig is the pinned allow config the hook and the attachment use:
+// this share's identity and the real verifier, which signs in to the fake
+// relay as the body and reads the approval message's history there.
+func (e *claudeApprovalE2E) allowConfig(owner, body string, wire []string) claude.AllowConfig {
+	return claude.AllowConfig{
+		Owner: owner,
+		Share: func(string) (claude.AllowShare, error) {
+			return claude.AllowShare{Owner: owner, Body: body, Channel: "dm-1", Target: "cc-1"}, nil
+		},
+		Verify: func(ctx context.Context, evidence json.RawMessage, want claude.AllowCheck) error {
+			check := ApproveCheck{Owner: want.Share.Owner, Body: want.Share.Body, Channel: want.Share.Channel, Target: want.Share.Target,
+				Prompt: want.Prompt, NotBefore: want.NotBefore, NotAfter: want.NotAfter}
+			msg, err := VerifyApproveEvidence(evidence, check)
+			if err != nil {
+				return err
+			}
+			url := e.relayURL
+			if e.relayDown.Load() {
+				url = "ws://127.0.0.1:1"
+			}
+			conn, err := relay.Connect(ctx, relay.Config{URL: url, Secret: e.body, AuthTag: wire})
+			if err != nil {
+				return err
+			}
+			defer conn.Close()
+			if err := CheckHistory(ctx, conn, msg, check); errors.Is(err, ErrAltered) {
+				return fmt.Errorf("%w: %v", claude.ErrAllowAltered, err)
+			} else {
+				return err
+			}
+		},
+	}
+}
+
 func (e *claudeApprovalE2E) flush() {
 	e.t.Helper()
 	e.sent = nil
 	if err := e.c.Flush(context.Background(), func(_ context.Context, evt nostr.Event) error {
-		e.sent, e.published = append(e.sent, evt), append(e.published, evt)
+		e.sent = append(e.sent, evt)
+		e.relay.Inject(evt)
 		return nil
 	}, nil); err != nil {
 		e.t.Fatal(err)

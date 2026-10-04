@@ -477,10 +477,6 @@ func (ds *dmShare) serveDM(ctx context.Context, conn *relay.Conn, edges *dmEdges
 		defer mentions.Close()
 		mentionEvents, mentionsDone = mentions.Events, mentions.Done()
 	}
-	// An owner ✅ carries the approval message's edits, read on this
-	// connection; without it the evidence is incomplete and allows nothing.
-	ds.carrier.SetEditFetcher(buzzio.RelayEdits(conn, ds.binding.Body))
-	defer ds.carrier.SetEditFetcher(nil)
 	edges.setState(session, "subscription_active")
 
 	var open atomic.Bool

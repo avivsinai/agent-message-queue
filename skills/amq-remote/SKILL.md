@@ -51,9 +51,9 @@ command's own message. Do not work around a refusal.
    sessions that are not shared. It pins your Buzz public key, so only your
    signed ✅ can allow a tool call. Do not allow Claude to edit .claude for a
    session, use bypassPermissions mode, or allow every Bash command: each
-   lets the pin be changed. The check also trusts the relay's edit
-   history and the running amq-remote serve: a relay that hides an edit,
-   or a tampered serve, defeats it. Another decision hook you have can answer
+   lets the pin be changed. The relay is trusted to return the message's
+   full edit and deletion history; replacing the amq-remote binary, or a
+   settings edit you approve, defeats the pin. Another decision hook you have can answer
    first. `amq-remote claude uninstall-approval-hook` removes it." Ask once,
    then run `amq-remote claude install-approval-hook --root "$ROOT"`. If
    doctor reports `claude_approval_pin_warnings`, show them to the user.

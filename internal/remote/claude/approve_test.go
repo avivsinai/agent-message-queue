@@ -121,13 +121,13 @@ func TestApprovalPreviewDetectorTable(t *testing.T) {
 // with no matcher, the AMQ_APPROVAL_HOOK marker, --wait 600 and timeout
 // 630, beside the Stop hook; uninstall removes only that entry. Bead
 // 611.42.4: installing with an owner replaces that entry with one that pins
-// the owner last on its command line.
+// the owner and the AMQ root on its command line, read back whole.
 func TestInstallApprovalHookBesideStopHook(t *testing.T) {
 	home := t.TempDir()
 	if err := InstallStopHook(home, "/opt/amq-remote"); err != nil {
 		t.Fatal(err)
 	}
-	if err := InstallPermissionHook(home, "/opt/amq-remote", DefaultPermissionWait, ""); err != nil {
+	if err := InstallPermissionHook(home, "/opt/amq-remote", DefaultPermissionWait, HookPin{}); err != nil {
 		t.Fatal(err)
 	}
 	raw, err := os.ReadFile(settingsPath(home))
@@ -147,13 +147,13 @@ func TestInstallApprovalHookBesideStopHook(t *testing.T) {
 	if state, err := PermissionHookState(home); err != nil || state != StopHookPresent {
 		t.Fatalf("state = %q, %v; want installed", state, err)
 	}
-	owner := strings.Repeat("ab", 32)
-	if err := InstallPermissionHook(home, "/opt/amq-remote", DefaultPermissionWait, owner); err != nil {
+	pin := HookPin{Owner: strings.Repeat("ab", 32), Root: "/work/it's root", Session: "work"}
+	if err := InstallPermissionHook(home, "/opt/amq-remote", DefaultPermissionWait, pin); err != nil {
 		t.Fatal(err)
 	}
 	cmds, err := installedCommands(home, permissionSpec)
-	if err != nil || len(cmds) != 1 || !strings.HasSuffix(cmds[0], " --wait 600 --owner "+owner) || PermissionHookOwner(home) != owner {
-		t.Fatalf("commands = %q (%v), want one hook pinning %s", cmds, err, owner)
+	if err != nil || len(cmds) != 1 || !strings.Contains(cmds[0], " --wait 600 --owner "+pin.Owner) || PermissionHookPin(home) != pin {
+		t.Fatalf("commands = %q (%v), pin = %+v; want one hook pinning %+v", cmds, err, PermissionHookPin(home), pin)
 	}
 	if err := UninstallPermissionHook(home); err != nil {
 		t.Fatal(err)

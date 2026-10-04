@@ -65,9 +65,6 @@ type Carrier struct {
 	identity func(target string) string
 	now      func() time.Time
 
-	editsMu sync.Mutex
-	edits   EditFetcher // reads an approval message's edits for an owner ✅
-
 	mu sync.Mutex // serializes row preparation (edit dating) and flush
 }
 
@@ -902,6 +899,10 @@ func (c *Carrier) answerApproval(evt nostr.Event, messageID string, appr Approva
 	case errors.As(err, &refusal) && refusal.Code == protocol.CodeAlreadyResolved:
 		// The endpoint says why: resolved, or an earlier answer in flight.
 		return c.settleApprovalAnswer(evt, messageID, st, "Not sent: "+refusal.Message+".")
+	case gesture == approveReaction && errors.As(err, &refusal) && (refusal.Code == protocol.CodeInvalid || refusal.Code == protocol.CodeNativeError):
+		// The harness could not verify the approve: it says why, in the
+		// owner's words. Nothing was answered, so ✅ again or ❌ still works.
+		return c.settleApprovalAnswer(evt, messageID, st, refusal.Message)
 	case err != nil:
 		return c.settleApprovalAnswer(evt, messageID, st, "Not sent: "+err.Error())
 	}

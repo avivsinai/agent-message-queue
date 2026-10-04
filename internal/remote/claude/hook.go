@@ -97,23 +97,24 @@ var (
 // whose installed timeout is wait plus PermissionHookGrace. It is inert in
 // a session no relay share with approve is serving.
 //
-// owner, 64 lowercase hex, pins the owner pubkey on the hook's command
+// pin.Owner, 64 lowercase hex, pins the owner pubkey on the hook's command
 // line: the only key whose signed reaction can allow a call (bead
-// 611.42.4). Claude cannot edit its settings file without a prompt, so it
-// cannot change the pin on its own. "" installs a reject-only hook. A
-// marked entry with another command is replaced; the same one is kept.
-func InstallPermissionHook(home, bin string, wait time.Duration, owner string) error {
-	if owner != "" && !ValidOwner(owner) {
-		return fmt.Errorf("owner %q is not a 64 lowercase hex public key", owner)
+// 611.42.4); pin.Root (and pin.Session) pin where the share is read.
+// Claude cannot edit its settings file without a prompt, so it cannot
+// change the pin on its own. An empty owner installs a reject-only hook.
+// A marked entry with another command is replaced; the same one is kept.
+func InstallPermissionHook(home, bin string, wait time.Duration, pin HookPin) error {
+	if pin.Owner != "" && (!ValidOwner(pin.Owner) || !filepath.IsAbs(pin.Root)) {
+		return fmt.Errorf("an owner pin needs a 64 lowercase hex owner and an absolute AMQ root, got %q and %q", pin.Owner, pin.Root)
 	}
 	cmds, err := installedCommands(home, permissionSpec)
 	if err != nil {
 		return err
 	}
-	if len(cmds) == 1 && cmds[0] == permissionHookCommand(bin, wait, owner) {
+	if len(cmds) == 1 && cmds[0] == permissionHookCommand(bin, wait, pin) {
 		return nil // already installed as asked
 	}
-	entry := permissionHookEntry(bin, wait, owner)
+	entry := permissionHookEntry(bin, wait, pin)
 	// One write: the marked entries out and the new one in.
 	return editSettings(home, true, func(raw []byte) ([]byte, error) {
 		if cut, err := rawRemoveEntries(raw, permissionSpec); err != nil {
@@ -162,21 +163,36 @@ func installedCommands(home string, spec hookSpec) ([]string, error) {
 	return out, nil
 }
 
-// ownerFlagRe finds the pinned owner at the end of the hook command.
-var ownerFlagRe = regexp.MustCompile(` --owner ([0-9a-f]{64})$`)
+// The pin flags as permissionHookCommand writes them.
+var (
+	ownerFlagRe   = regexp.MustCompile(` --owner ([0-9a-f]{64})(?: |$)`)
+	rootFlagRe    = regexp.MustCompile(` --root '((?:[^']|'\\'')*)'`)
+	sessionFlagRe = regexp.MustCompile(` --session '((?:[^']|'\\'')*)'`)
+)
 
-// PermissionHookOwner is the owner pubkey the installed PermissionRequest
-// hook pins, or "" when there is no hook, no pin, or more than one hook.
-func PermissionHookOwner(home string) string {
+// PermissionHookPin is the pin of the installed PermissionRequest hook,
+// empty when there is no hook, no pin, or more than one hook.
+func PermissionHookPin(home string) HookPin {
 	cmds, err := installedCommands(home, permissionSpec)
 	if err != nil || len(cmds) != 1 {
+		return HookPin{}
+	}
+	unquote := func(re *regexp.Regexp) string {
+		if m := re.FindStringSubmatch(cmds[0]); m != nil {
+			return strings.ReplaceAll(m[1], `'\''`, `'`)
+		}
 		return ""
 	}
+	pin := HookPin{Root: unquote(rootFlagRe), Session: unquote(sessionFlagRe)}
 	if m := ownerFlagRe.FindStringSubmatch(cmds[0]); m != nil {
-		return m[1]
+		pin.Owner = m[1]
 	}
-	return ""
+	return pin
 }
+
+// PermissionHookOwner is the owner pubkey the installed PermissionRequest
+// hook pins, or "".
+func PermissionHookOwner(home string) string { return PermissionHookPin(home).Owner }
 
 // PinWarnings names the user settings that defeat the owner pin: a
 // bypassPermissions default mode, or a permissions.allow entry for every
@@ -340,11 +356,14 @@ func shellQuote(s string) string {
 }
 
 // permissionHookCommand runs the PermissionRequest receiver with its wait
-// and, last, the pinned owner.
-func permissionHookCommand(bin string, wait time.Duration, owner string) string {
+// and the pin.
+func permissionHookCommand(bin string, wait time.Duration, pin HookPin) string {
 	cmd := permissionHookMarker + shellQuote(bin) + " claude permission-hook --wait " + strconv.Itoa(int(wait/time.Second))
-	if owner != "" {
-		cmd += " --owner " + owner
+	if pin.Owner != "" {
+		cmd += " --owner " + pin.Owner + " --root " + shellQuote(pin.Root)
+		if pin.Session != "" {
+			cmd += " --session " + shellQuote(pin.Session)
+		}
 	}
 	return cmd
 }
@@ -352,8 +371,8 @@ func permissionHookCommand(bin string, wait time.Duration, owner string) string 
 // permissionHookEntry is the PermissionRequest group: no matcher, and a
 // timeout PermissionHookGrace longer than the hook's own wait, so the hook
 // ends first and the terminal dialog decides.
-func permissionHookEntry(bin string, wait time.Duration, owner string) []byte {
-	return commandHookEntry(permissionHookCommand(bin, wait, owner), int((wait+PermissionHookGrace)/time.Second))
+func permissionHookEntry(bin string, wait time.Duration, pin HookPin) []byte {
+	return commandHookEntry(permissionHookCommand(bin, wait, pin), int((wait+PermissionHookGrace)/time.Second))
 }
 
 // stopHookEntry renders one Stop matcher group in Claude Code's settings

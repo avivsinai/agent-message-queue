@@ -1,6 +1,8 @@
 package claude
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -515,13 +517,18 @@ func (a *Attachment) RespondWithEvidence(key requests.Key, _, interactionID, opt
 	ans := approvalAnswer{InteractionID: interactionID, ActionHash: ap.hash, Option: option, At: protocol.FormatTime(a.now()), Evidence: evidence}
 	head := len(rec.open) > 0 && rec.open[0] == ap
 	hookPID, deadline, allowOffered := ap.hookPID, ap.deadline, ap.offersAllow()
+	want := AllowCheck{Prompt: ap.preview, NotBefore: time.UnixMilli(ap.openedAt).Add(-reactionSkew), NotAfter: ap.deadline}
+	factory := a.allowFactory
 	a.mu.Unlock()
 
 	dir := approveDir(a.home, sessionID)
-	if done, prior := answerOnDisk(filepath.Join(dir, "answers", interactionID+".json"), ans); prior {
-		if done {
-			return "", nil
-		}
+	replace := false
+	switch disk := answerOnDisk(filepath.Join(dir, "answers", interactionID+".json"), ans); disk {
+	case answerSame:
+		return "", nil
+	case answerNewProof:
+		replace = true // an allow whose proof the hook could not verify
+	case answerOther:
 		return protocol.CodeAlreadyResolved, nil
 	}
 	switch {
@@ -532,9 +539,22 @@ func (a *Attachment) RespondWithEvidence(key requests.Key, _, interactionID, opt
 	case !a.now().Before(deadline):
 		return protocol.CodeExpired, nil
 	}
+	if option == optionAllow {
+		// Verified here first, so a proof that fails is a refusal the owner
+		// sees and nothing is answered; the hook verifies again itself.
+		if err := verifyBeforeAnswer(factory, PermissionHookPin(a.home), sessionID, evidence, want); err != nil {
+			return "", err
+		}
+	}
 	adir, err := ensureApproveSubdir(a.home, sessionID, "answers")
 	if err != nil {
 		return "", err
+	}
+	if replace {
+		if err := replaceJSON(adir, interactionID+".json", ans); err != nil {
+			return "", err
+		}
+		return "", nil
 	}
 	if err := createNewJSON(adir, interactionID+".json", ans); err != nil {
 		if !errors.Is(err, errFileExists) {
@@ -542,7 +562,7 @@ func (a *Attachment) RespondWithEvidence(key requests.Key, _, interactionID, opt
 		}
 		// Another writer published first: the same answer is delivered,
 		// any other answer on disk stands as the first.
-		if done, _ := answerOnDisk(filepath.Join(adir, interactionID+".json"), ans); done {
+		if answerOnDisk(filepath.Join(adir, interactionID+".json"), ans) == answerSame {
 			return "", nil
 		}
 		return protocol.CodeAlreadyResolved, nil
@@ -550,18 +570,92 @@ func (a *Attachment) RespondWithEvidence(key requests.Key, _, interactionID, opt
 	return "", nil
 }
 
-// answerOnDisk compares the answer file with ans: prior reports a file is
-// there, done that it holds the same answer.
-func answerOnDisk(path string, ans approvalAnswer) (done, prior bool) {
+// verifyBeforeAnswer runs the pinned verifier on an allow's evidence. A
+// failure is a refusal with the owner-facing reason: an altered message is
+// final, anything else can be retried with a new ✅.
+func verifyBeforeAnswer(factory func(HookPin) AllowConfig, pin HookPin, sessionID string, evidence json.RawMessage, want AllowCheck) error {
+	if factory == nil {
+		return protocol.Refuse(protocol.CodeNativeError, "%s", retryReply("this endpoint cannot verify an allow"))
+	}
+	cfg := factory(pin)
+	if !cfg.usable() {
+		return protocol.Refuse(protocol.CodeNativeError, "%s", retryReply("the approval hook pins no owner and share"))
+	}
+	share, err := cfg.share(sessionID)
+	if err != nil {
+		return protocol.Refuse(protocol.CodeNativeError, "%s", retryReply(err.Error()))
+	}
+	want.Share = share
+	ctx, cancel := context.WithTimeout(context.Background(), allowVerifyTimeout)
+	defer cancel()
+	switch err := cfg.Verify(ctx, evidence, want); {
+	case errors.Is(err, ErrAllowAltered):
+		return protocol.Refuse(protocol.CodeInvalid, "%s", alteredReply)
+	case err != nil:
+		return protocol.Refuse(protocol.CodeNativeError, "%s", retryReply(err.Error()))
+	}
+	return nil
+}
+
+// allowVerifyTimeout bounds one verification, relay reads included.
+const allowVerifyTimeout = 15 * time.Second
+
+// How an answer on disk compares with a new one.
+const (
+	answerAbsent   = iota
+	answerSame     // the same answer: delivered
+	answerNewProof // an allow, now with other evidence: replace it
+	answerOther    // another answer, or unreadable: it stands
+)
+
+// answerOnDisk compares the answer file with ans.
+func answerOnDisk(path string, ans approvalAnswer) int {
 	var got approvalAnswer
 	err := readApprovalJSON(path, &got)
-	if errors.Is(err, os.ErrNotExist) {
-		return false, false
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return answerAbsent
+	case err != nil || got.InteractionID != ans.InteractionID || got.ActionHash != ans.ActionHash || got.Option != ans.Option:
+		return answerOther
+	case ans.Option == optionAllow && !bytes.Equal(got.Evidence, ans.Evidence):
+		return answerNewProof
 	}
+	return answerSame
+}
+
+// replaceJSON replaces dir/name with v, whole: a private temporary file
+// renamed over it.
+func replaceJSON(dir, name string, v any) error {
+	raw, err := json.Marshal(v)
 	if err != nil {
-		return false, true
+		return err
 	}
-	return got.InteractionID == ans.InteractionID && got.ActionHash == ans.ActionHash && got.Option == ans.Option, true
+	f, err := os.CreateTemp(dir, ".tmp-")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	defer func() { _ = os.Remove(tmp) }()
+	if _, err := f.Write(raw); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp, filepath.Join(dir, name))
+}
+
+// SetAllowFactory replaces how this attachment turns the hook pin into an
+// AllowConfig. For tests; production uses RegisterAllowFactory's.
+func (a *Attachment) SetAllowFactory(f func(HookPin) AllowConfig) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.allowFactory = f
 }
 
 // ResolvedInteraction implements core.InteractionResolver: how one approval

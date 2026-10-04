@@ -15,77 +15,39 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 )
 
+// KindDeletion is a NIP-09 deletion request. The carrier never publishes
+// one.
+const KindDeletion = 5
+
 // ApproveEvidence is the proof an owner ✅ carries to a harness that allows
 // a call only with the owner's signature (bead 611.42.4): the owner's signed
-// reaction, the signed approval message it targets, and every edit of that
-// message the relay holds, all as received and stored, never re-encoded
-// from parts. EditsComplete is false when the edits could not be read; such
-// evidence never proves an allow.
+// reaction and the signed approval message it targets, both as received
+// and stored, never re-encoded from parts. The message's edit and deletion
+// history is never taken from the evidence: the verifier reads it from the
+// relay itself (CheckHistory).
 type ApproveEvidence struct {
-	Reaction      nostr.Event   `json:"reaction"`
-	Message       nostr.Event   `json:"message"`
-	Edits         []nostr.Event `json:"edits"`
-	EditsComplete bool          `json:"edits_complete"`
+	Reaction nostr.Event `json:"reaction"`
+	Message  nostr.Event `json:"message"`
 }
 
-// EditFetcher returns every kind 40003 edit of messageID that the relay
-// holds from the body key. An error means the set is not known.
-type EditFetcher func(ctx context.Context, messageID string) ([]nostr.Event, error)
-
-// editFetchTimeout bounds the edit read an owner ✅ waits for.
-const editFetchTimeout = 10 * time.Second
-
-// RelayEdits reads the edits of an approval message from the relay: kind
-// 40003 events by body that name the message in an e tag, up to the
-// relay's end of stored events. A subscription that ends, overflows or
-// times out first is an error, never a partial set.
-func RelayEdits(conn *relay.Conn, body string) EditFetcher {
-	return func(ctx context.Context, messageID string) ([]nostr.Event, error) {
-		author, err := nostr.PubKeyFromHex(body)
-		if err != nil {
-			return nil, fmt.Errorf("body pubkey: %w", err)
-		}
-		sub, err := conn.Subscribe(ctx, fmt.Sprintf("edits-%d", time.Now().UnixNano()),
-			nostr.Filter{Kinds: []nostr.Kind{KindEdit}, Authors: []nostr.PubKey{author}, Tags: nostr.TagMap{"e": {messageID}}})
-		if err != nil {
-			return nil, err
-		}
-		defer sub.Close()
-		var edits []nostr.Event
-		for {
-			select {
-			case evt := <-sub.Events:
-				edits = append(edits, evt)
-			case <-sub.EOSE:
-				// Stored events are queued before EOSE; drain them first.
-				for {
-					select {
-					case evt := <-sub.Events:
-						edits = append(edits, evt)
-					default:
-						return edits, nil
-					}
-				}
-			case <-sub.Done():
-				return nil, fmt.Errorf("edit read ended: %v", sub.Err())
-			case <-ctx.Done():
-				return nil, errors.New("edit read timed out")
-			}
-		}
-	}
+// ApproveCheck is what an allow must prove, all from the verifier's own
+// trusted state, never from the evidence: the pinned owner, the share's
+// body pubkey, DM channel and target, the verifier's own rendering of the
+// call, and the window the reaction must be dated in.
+type ApproveCheck struct {
+	Owner, Body, Channel, Target string
+	Prompt                       string
+	NotBefore, NotAfter          time.Time
 }
 
-// SetEditFetcher sets how an owner ✅ reads the approval message's edits;
-// nil marks every approve's evidence incomplete.
-func (c *Carrier) SetEditFetcher(f EditFetcher) {
-	c.editsMu.Lock()
-	defer c.editsMu.Unlock()
-	c.edits = f
-}
+// ErrAltered is an approval message whose shown call changed after it was
+// posted: an edit that shows another call, or any deletion in the channel
+// since the message. The owner may have approved text other than the call.
+var ErrAltered = errors.New("the approval message was altered after it was posted")
 
 // approveEvidence is the evidence for an owner ✅ on the approval message
 // posted for appr: the original kind 9 message from the outbox, whose id
-// the reaction names, and the edits of it the relay holds.
+// the reaction names.
 func (c *Carrier) approveEvidence(evt nostr.Event, messageID string, appr Approval) (json.RawMessage, error) {
 	posted, ok, err := c.ledger.Prepared(approvalKey(appr.RequestRef, appr.InteractionID))
 	if err != nil || !ok {
@@ -98,92 +60,150 @@ func (c *Carrier) approveEvidence(evt nostr.Event, messageID string, appr Approv
 	if msg.ID.Hex() != messageID {
 		return nil, fmt.Errorf("stored approval message %s is not the reacted message %s", msg.ID.Hex(), messageID)
 	}
-	ev := ApproveEvidence{Reaction: evt, Message: msg}
-	c.editsMu.Lock()
-	fetch := c.edits
-	c.editsMu.Unlock()
-	if fetch != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), editFetchTimeout)
-		edits, err := fetch(ctx, messageID)
-		cancel()
-		if err == nil {
-			ev.Edits, ev.EditsComplete = edits, true
-		}
-	}
-	return json.Marshal(ev)
+	return json.Marshal(ApproveEvidence{Reaction: evt, Message: msg})
 }
 
 // VerifyApproveEvidence checks an owner ✅ as proof that the owner allowed
-// the call that prompt shows. Every check must pass:
+// the call want.Prompt shows, in the share want names, and returns the
+// approval message. Every check must pass:
 //
 //   - the reaction is kind 7, its id is the hash of its content and its
-//     BIP-340 signature verifies under owner (64 lowercase hex);
+//     BIP-340 signature verifies under want.Owner;
 //   - its content is the approve gesture ✅ and its last e tag is the
 //     message's id;
-//   - it is dated within [notBefore, notAfter];
-//   - the message is kind 9, its id and signature verify, and its content
-//     is exactly the approval text this carrier posts for prompt, with
-//     either trailer (an approval offered reject only at first is edited to
-//     offer ✅ when it binds; the edit changes the trailer, not the prompt);
-//   - the edits are complete, and each is a kind 40003 by the message's
-//     author naming the message, whose id and signature verify, and whose
-//     content shows the same prompt under the same ref with one of this
-//     carrier's own trailers. An edit can change what the owner saw, so an
-//     edit that shows anything else refuses.
+//   - it is dated within [want.NotBefore, want.NotAfter];
+//   - the message is kind 9, its id and signature verify, it is signed by
+//     the share's body key and posted in the share's DM channel (h tag);
+//   - its content is exactly the approval text this carrier posts for
+//     want.Prompt, under a request ref of the share's target, with either
+//     trailer (an approval offered reject only at first is edited to offer
+//     ✅ when it binds; the edit changes the trailer, not the prompt).
 //
-// The caller renders prompt itself, so the content checks prove the owner
-// saw exactly that prompt. A relay that hides an edit from the query
-// defeats the edit check; the trust anchor is the owner's reaction plus
-// the relay's honest edit history.
-func VerifyApproveEvidence(raw json.RawMessage, owner, prompt string, notBefore, notAfter time.Time) error {
+// The caller renders the prompt itself, so the content checks prove the
+// owner saw exactly that prompt in the original message. Edits and
+// deletions are CheckHistory's.
+func VerifyApproveEvidence(raw json.RawMessage, want ApproveCheck) (nostr.Event, error) {
 	var ev ApproveEvidence
 	if err := json.Unmarshal(raw, &ev); err != nil {
-		return fmt.Errorf("evidence: %w", err)
+		return nostr.Event{}, fmt.Errorf("evidence: %w", err)
 	}
 	r, m := ev.Reaction, ev.Message
 	switch {
-	case !validHexID(owner):
-		return errors.New("no valid pinned owner")
+	case !validHexID(want.Owner) || !validHexID(want.Body) || want.Channel == "" || want.Target == "":
+		return m, errors.New("no complete pinned owner and share")
 	case r.Kind != KindReaction:
-		return errors.New("reaction is not kind 7")
+		return m, errors.New("reaction is not kind 7")
 	case !r.CheckID() || !r.VerifySignature():
-		return errors.New("reaction id or signature does not verify")
-	case r.PubKey.Hex() != owner:
-		return errors.New("reaction is not signed by the pinned owner")
+		return m, errors.New("reaction id or signature does not verify")
+	case r.PubKey.Hex() != want.Owner:
+		return m, errors.New("reaction is not signed by the pinned owner")
 	case strings.TrimSpace(r.Content) != approveReaction:
-		return errors.New("reaction is not the approve gesture")
+		return m, errors.New("reaction is not the approve gesture")
 	case lastETag(r) != m.ID.Hex():
-		return errors.New("reaction does not target the approval message")
+		return m, errors.New("reaction does not target the approval message")
 	}
 	created := time.Unix(int64(r.CreatedAt), 0)
-	if created.Before(notBefore) || created.After(notAfter) {
-		return errors.New("reaction is outside the approval's window")
+	if created.Before(want.NotBefore) || created.After(want.NotAfter) {
+		return m, errors.New("reaction is outside the approval's window")
 	}
 	switch {
 	case m.Kind != KindDM:
-		return errors.New("approval message is not kind 9")
+		return m, errors.New("approval message is not kind 9")
 	case !m.CheckID() || !m.VerifySignature():
-		return errors.New("approval message id or signature does not verify")
+		return m, errors.New("approval message id or signature does not verify")
+	case m.PubKey.Hex() != want.Body:
+		return m, errors.New("approval message is not from this share's body")
+	case tagValue(m, "h") != want.Channel:
+		return m, errors.New("approval message is not in this share's DM channel")
 	}
-	ref, ok := approvalRef(m.Content, prompt)
-	if !ok || !slices.Contains(approvalVariants(ref, prompt)[:2], m.Content) {
+	ref, ok := approvalRef(m.Content, want.Prompt)
+	if !ok || !slices.Contains(approvalVariants(ref, want.Prompt)[:2], m.Content) {
+		return m, errors.New("approval message does not show this call")
+	}
+	if _, target, _, err := protocol.DecodeRef(ref); err != nil || target != want.Target {
+		return m, errors.New("approval message is for another target")
+	}
+	return m, nil
+}
+
+// historyTimeout bounds CheckHistory's relay reads.
+const historyTimeout = 10 * time.Second
+
+// CheckHistory reads the approval message's history from the relay, each
+// read up to the relay's end of stored events, within historyTimeout:
+//
+//   - kind 40003 edits by the body naming the message: each must show the
+//     same call under the same ref, with only one of this carrier's own
+//     trailers or outcomes;
+//   - kind 5 deletions by the body or the owner in the DM channel since the
+//     message: there must be none. The relay hides a deleted edit, and the
+//     carrier never deletes.
+//
+// An edit or deletion that fails is ErrAltered. A read that errors, ends
+// early, overflows or times out is another error: the history is not
+// known. The relay is trusted to return the full history.
+func CheckHistory(ctx context.Context, conn *relay.Conn, msg nostr.Event, want ApproveCheck) error {
+	ctx, cancel := context.WithTimeout(ctx, historyTimeout)
+	defer cancel()
+	ref, ok := approvalRef(msg.Content, want.Prompt)
+	if !ok {
 		return errors.New("approval message does not show this call")
 	}
-	if !ev.EditsComplete {
-		return errors.New("the approval message's edits could not be read")
+	edits, err := readStored(ctx, conn, nostr.Filter{Kinds: []nostr.Kind{KindEdit}, Authors: []nostr.PubKey{msg.PubKey}, Tags: nostr.TagMap{"e": {msg.ID.Hex()}}})
+	if err != nil {
+		return fmt.Errorf("read the approval message's edits: %w", err)
 	}
-	allowed := approvalVariants(ref, prompt)
-	for _, ed := range ev.Edits {
-		switch {
-		case ed.Kind != KindEdit || ed.PubKey != m.PubKey || lastETag(ed) != m.ID.Hex():
-			return errors.New("an edit is not an edit of the approval message")
-		case !ed.CheckID() || !ed.VerifySignature():
-			return errors.New("an edit's id or signature does not verify")
-		case !slices.Contains(allowed, ed.Content):
-			return errors.New("an edit changed what the approval message shows")
+	allowed := approvalVariants(ref, want.Prompt)
+	for _, ed := range edits {
+		if ed.Kind != KindEdit || ed.PubKey != msg.PubKey || !slices.Contains(allowed, ed.Content) {
+			return fmt.Errorf("%w: an edit shows another call", ErrAltered)
 		}
 	}
+	owner, err := nostr.PubKeyFromHex(want.Owner)
+	if err != nil {
+		return fmt.Errorf("owner pubkey: %w", err)
+	}
+	deletions, err := readStored(ctx, conn, nostr.Filter{Kinds: []nostr.Kind{KindDeletion}, Authors: []nostr.PubKey{msg.PubKey, owner},
+		Tags: nostr.TagMap{"h": {want.Channel}}, Since: msg.CreatedAt})
+	if err != nil {
+		return fmt.Errorf("read the channel's deletions: %w", err)
+	}
+	if len(deletions) > 0 {
+		return fmt.Errorf("%w: %d deletion(s) in the channel since the message", ErrAltered, len(deletions))
+	}
 	return nil
+}
+
+// readStored reads every stored event matching filter, up to EOSE. The
+// relay client delivers only events whose id and signature verify and that
+// match the filter.
+func readStored(ctx context.Context, conn *relay.Conn, filter nostr.Filter) ([]nostr.Event, error) {
+	sub, err := conn.Subscribe(ctx, fmt.Sprintf("approve-history-%d", time.Now().UnixNano()), filter)
+	if err != nil {
+		return nil, err
+	}
+	defer sub.Close()
+	var out []nostr.Event
+	for {
+		select {
+		case evt := <-sub.Events:
+			out = append(out, evt)
+		case <-sub.EOSE:
+			// Stored events are queued before EOSE; drain them first.
+			for {
+				select {
+				case evt := <-sub.Events:
+					out = append(out, evt)
+				default:
+					return out, nil
+				}
+			}
+		case <-sub.Done():
+			return nil, fmt.Errorf("the read ended early: %v", sub.Err())
+		case <-ctx.Done():
+			return nil, errors.New("the read timed out")
+		}
+	}
 }
 
 // lastETag is the event a NIP-25 reaction targets: its last e tag.

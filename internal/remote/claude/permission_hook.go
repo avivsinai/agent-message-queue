@@ -1,6 +1,8 @@
 package claude
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,10 +21,12 @@ import (
 // decides. It never exits 2 (not honored for this event). It prints deny
 // for the owner's Buzz answer bound to this exact call. It prints allow
 // only with proof (bead 611.42.4): its command line pins the owner's
-// pubkey (--owner), the call is shown whole, and the answer carries the
-// owner's signed approve reaction on the approval message whose content is
-// the hook's own rendering of this call. A missing pin, any failed check,
-// an error or a timeout prints no allow.
+// pubkey and the AMQ root whose manifest names the share, the call is
+// shown whole, the answer carries the owner's signed approve reaction on
+// that share's approval message whose content is the hook's own rendering
+// of this call, and the hook's own read of the relay finds no edit that
+// changed the call and no deletion. A missing pin, any failed check, an
+// error, a cancellation or a timeout prints no allow.
 
 // permissionHookMarker is the settings.json ownership signal of the
 // PermissionRequest entry, distinct from the Stop hook's.
@@ -64,11 +68,9 @@ type permissionHook struct {
 	ticks <-chan time.Time
 	// stderr receives the one note about an answer the hook ignored.
 	stderr io.Writer
-	// owner is the pinned owner pubkey from the hook's command line, and
-	// verify checks an allow's evidence against it. Without both, allow is
-	// impossible.
-	owner  string
-	verify AllowVerifier
+	// allow is the pinned owner, share and verifier; without all three,
+	// allow is impossible.
+	allow AllowConfig
 }
 
 // reactionSkew is how much earlier than the request a reaction's signed
@@ -77,20 +79,14 @@ const reactionSkew = 30 * time.Second
 
 // RunPermissionHook is the hook body. done closes when the process gets
 // TERM, INT or HUP: Claude sends TERM when the terminal rejects and at the
-// configured timeout. owner is the pinned owner pubkey ("" for none) and
-// verify checks an allow's evidence; allow is impossible unless both are
-// set and owner is 64 lowercase hex. It always returns 0.
-func RunPermissionHook(home string, stdin io.Reader, stdout, stderr io.Writer, done <-chan struct{}, wait time.Duration, owner string, verify AllowVerifier) int {
+// configured timeout. allow is what an allow needs; a zero AllowConfig
+// makes the hook reject-only. It always returns 0.
+func RunPermissionHook(home string, stdin io.Reader, stdout, stderr io.Writer, done <-chan struct{}, wait time.Duration, allow AllowConfig) int {
 	if wait <= 0 {
 		wait = DefaultPermissionWait
 	}
-	h := permissionHook{home: home, now: time.Now, wait: wait, poll: 200 * time.Millisecond, markerGrace: 2 * time.Second, stderr: stderr, owner: owner, verify: verify}
+	h := permissionHook{home: home, now: time.Now, wait: wait, poll: 200 * time.Millisecond, markerGrace: 2 * time.Second, stderr: stderr, allow: allow}
 	return h.run(stdin, stdout, done)
-}
-
-// canAllow reports whether this hook can ever apply an allow.
-func (h permissionHook) canAllow() bool {
-	return ValidOwner(h.owner) && h.verify != nil
 }
 
 func (h permissionHook) run(stdin io.Reader, stdout io.Writer, done <-chan struct{}) int {
@@ -125,9 +121,13 @@ func (h permissionHook) run(stdin io.Reader, stdout io.Writer, done <-chan struc
 	}
 	preview, whole := approvalView(in.ToolName, in.ToolInput, in.AgentType)
 	approvable := false
-	if whole && h.canAllow() {
-		if p, ok := signedPrompt(preview, id, hash); ok {
-			preview, approvable = p, true
+	var share AllowShare
+	if whole && h.allow.usable() {
+		var err error
+		if share, err = h.allow.share(in.SessionID); err == nil {
+			if p, ok := signedPrompt(preview, id, hash); ok {
+				preview, approvable = p, true
+			}
 		}
 	}
 	opened := h.now()
@@ -154,8 +154,47 @@ func (h permissionHook) run(stdin io.Reader, stdout io.Writer, done <-chan struc
 		ticks = t.C
 	}
 	ignored := false
+	// failed is the evidence of the last allow that did not verify: it is
+	// not read from the relay again, and a new answer replaces it.
+	var failed []byte
+	// over reports that the hook may no longer decide: the terminal or the
+	// endpoint closed the approval, its deadline passed, or Claude ended
+	// the hook. It records how it ended when nothing else did.
+	over := func() bool {
+		if resolvedExists(resolvedPath) {
+			return true
+		}
+		select {
+		case <-done:
+		default:
+			if h.now().Before(deadline) {
+				return false
+			}
+		}
+		_ = writeResolved(h.home, in.SessionID, elsewhere)
+		return true
+	}
 	for {
-		switch option := h.answer(answerPath, req, notBefore, deadline); option {
+		if over() {
+			return 0
+		}
+		option, evidence := h.answer(answerPath, req)
+		if option == optionAllow {
+			want := AllowCheck{Share: share, Prompt: req.Preview, NotBefore: notBefore, NotAfter: deadline}
+			if bytes.Equal(evidence, failed) {
+				option = ""
+			} else if err := h.verifyAllow(evidence, want, done); err != nil {
+				// Not applied and not consumed: no resolved record, so a
+				// new ✅ or a ❌ can still answer.
+				failed, option = evidence, ""
+				if h.stderr != nil {
+					_, _ = fmt.Fprintf(h.stderr, "amq-remote: ignored a Buzz allow for %s: %v\n", id, err)
+				}
+			} else if over() {
+				return 0 // verified too late: never an allow after the end
+			}
+		}
+		switch option {
 		case optionDeny, optionAllow:
 			// The first create-new of the resolved file decides, and it
 			// is the single use of an allow. The hook prints only after it
@@ -172,13 +211,6 @@ func (h permissionHook) run(stdin io.Reader, stdout io.Writer, done <-chan struc
 				_, _ = fmt.Fprintf(h.stderr, "amq-remote: ignored a Buzz answer for %s: not a deny, and not an allow proven by the pinned owner's signed reaction\n", id)
 			}
 			ignored = true
-		}
-		if resolvedExists(resolvedPath) {
-			return 0 // closed elsewhere: the terminal decides
-		}
-		if !h.now().Before(deadline) {
-			_ = writeResolved(h.home, in.SessionID, elsewhere)
-			return 0
 		}
 		select {
 		case <-done:
@@ -212,26 +244,38 @@ func (h permissionHook) awaitRunMarker(sessionID, promptID string, done <-chan s
 const answerIgnored = "ignored"
 
 // answer reads the Buzz answer for this exact call: it must name the
-// interaction and its action hash. A deny is applied as it is. An allow is
-// applied only for an approvable call of a hook that pins an owner, and
-// only when its evidence verifies against that owner, this call's signed
-// prompt and the window [notBefore, deadline]. Anything else is ignored.
-func (h permissionHook) answer(path string, req approvalRequest, notBefore, deadline time.Time) string {
+// interaction and its action hash. A deny is applied as it is. An allow
+// is a candidate only for an approvable call of a hook that can allow; it
+// comes back with its evidence, unverified. Anything else is ignored.
+func (h permissionHook) answer(path string, req approvalRequest) (string, json.RawMessage) {
 	var a approvalAnswer
 	if readApprovalJSON(path, &a) != nil {
-		return ""
-	}
-	if a.InteractionID != req.InteractionID || a.ActionHash != req.ActionHash {
-		return answerIgnored
+		return "", nil
 	}
 	switch {
+	case a.InteractionID != req.InteractionID || a.ActionHash != req.ActionHash:
+		return answerIgnored, nil
 	case a.Option == optionDeny:
-		return optionDeny
-	case a.Option == optionAllow && req.Approvable && h.canAllow() &&
-		h.verify(a.Evidence, h.owner, req.Preview, notBefore, deadline) == nil:
-		return optionAllow
+		return optionDeny, nil
+	case a.Option == optionAllow && req.Approvable && h.allow.usable():
+		return optionAllow, a.Evidence
 	}
-	return answerIgnored
+	return answerIgnored, nil
+}
+
+// verifyAllow runs the verifier on evidence; Claude ending the hook
+// cancels it.
+func (h permissionHook) verifyAllow(evidence json.RawMessage, want AllowCheck, done <-chan struct{}) error {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		select {
+		case <-done:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	return h.allow.Verify(ctx, evidence, want)
 }
 
 func resolvedExists(path string) bool {

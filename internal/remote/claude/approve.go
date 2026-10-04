@@ -2,6 +2,7 @@ package claude
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -607,11 +608,80 @@ var ownerHexRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
 // ValidOwner reports whether owner is a 64 lowercase hex public key.
 func ValidOwner(owner string) bool { return ownerHexRe.MatchString(owner) }
 
-// AllowVerifier checks the evidence of an allow answer: that the pinned
-// owner signed an approve reaction, dated within [notBefore, notAfter], on
-// an approval message whose content shows exactly prompt. A nil error is
-// the only proof the hook accepts.
-type AllowVerifier func(evidence json.RawMessage, owner, prompt string, notBefore, notAfter time.Time) error
+// AllowShare is the trusted identity of the relay share that serves one
+// Claude session, read from the AMQ root the hook command line pins: the
+// owner, the share's body pubkey, DM channel and target, and where the
+// verifier reads the approval message's history.
+type AllowShare struct {
+	Owner, Body, Channel, Target string
+	Session, RelayURL            string
+}
+
+// AllowCheck is what an allow must prove: the share, the hook's own
+// rendering of the call, and the window the owner's reaction must be dated
+// in. None of it comes from the answer file.
+type AllowCheck struct {
+	Share               AllowShare
+	Prompt              string
+	NotBefore, NotAfter time.Time
+}
+
+// AllowVerifier checks the evidence of an allow answer against want: the
+// pinned owner's signed approve reaction on the share's approval message
+// that shows exactly want.Prompt, and that message's history on the relay.
+// A nil error is the only proof the hook accepts. An error that wraps
+// ErrAllowAltered means the message changed after it was posted.
+type AllowVerifier func(ctx context.Context, evidence json.RawMessage, want AllowCheck) error
+
+// ErrAllowAltered is a verification that found the approval message
+// altered after it was posted: an edit that shows another call, or a
+// deletion.
+var ErrAllowAltered = errors.New("the approval message was altered after it was posted")
+
+// AllowConfig is what allow from Buzz needs: the pinned owner, the share
+// that serves a session, and the verifier. Without all three, allow is
+// impossible.
+type AllowConfig struct {
+	Owner  string
+	Share  func(sessionID string) (AllowShare, error)
+	Verify AllowVerifier
+}
+
+func (c AllowConfig) usable() bool { return ValidOwner(c.Owner) && c.Share != nil && c.Verify != nil }
+
+// share resolves the session's share and requires it to name the pinned
+// owner and a whole identity.
+func (c AllowConfig) share(sessionID string) (AllowShare, error) {
+	sh, err := c.Share(sessionID)
+	switch {
+	case err != nil:
+		return sh, err
+	case sh.Owner != c.Owner || !ValidOwner(sh.Body) || sh.Channel == "" || sh.Target == "":
+		return sh, errors.New("the share does not name the pinned owner, its body, DM channel and target")
+	}
+	return sh, nil
+}
+
+// HookPin is what the PermissionRequest hook command line pins: the owner
+// pubkey, and the AMQ root (and optionally the share session) whose
+// manifest and enrolled credentials name the share. Claude cannot edit the
+// settings file that holds it without a prompt.
+type HookPin struct{ Owner, Root, Session string }
+
+// allowFactory builds the AllowConfig for a pin; cmd registers the one
+// that reads the manifest and the relay.
+var allowFactory func(HookPin) AllowConfig
+
+// RegisterAllowFactory sets how a pin becomes an AllowConfig, for the hook
+// and for the attachment, which verifies an allow before it answers.
+func RegisterAllowFactory(f func(HookPin) AllowConfig) { allowFactory = f }
+
+// Owner-facing replies for an allow that did not verify.
+const alteredReply = "The approval message was altered after it was posted; check the terminal."
+
+func retryReply(reason string) string {
+	return "Could not verify the approval: " + reason + ". React again to retry."
+}
 
 // runMarkerPath is runs/<prompt_id>.
 func runMarkerPath(home, sessionID, promptID string) string {

@@ -1002,8 +1002,14 @@ func (e *Endpoint) respond(cmd *protocol.Command, src Source) (protocol.Reply, e
 
 	var code protocol.Code
 	var rerr error
+	reason := "interaction " + cmd.InteractionID
 	if er, ok := t.att.(EvidenceResponder); ok && len(cmd.Evidence) > 0 {
 		code, rerr = er.RespondWithEvidence(key, cmd.Epoch, cmd.InteractionID, cmd.Option, cmd.Evidence)
+		// A refusal is a positive refusal that names its reason.
+		var refusal *protocol.Refusal
+		if errors.As(rerr, &refusal) {
+			code, reason, rerr = refusal.Code, refusal.Message, nil
+		}
 	} else {
 		code, rerr = t.att.Respond(key, cmd.Epoch, cmd.InteractionID, cmd.Option)
 	}
@@ -1030,7 +1036,7 @@ func (e *Endpoint) respond(cmd *protocol.Command, src Source) (protocol.Reply, e
 			}
 		}
 		e.mu.Unlock()
-		return protocol.Reply{}, protocol.Refuse(code, "interaction %s", cmd.InteractionID)
+		return protocol.Reply{}, protocol.Refuse(code, "%s", reason)
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
