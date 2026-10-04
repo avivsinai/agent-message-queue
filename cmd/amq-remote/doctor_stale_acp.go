@@ -47,6 +47,12 @@ type staleInspection struct {
 	IdentErr error  // the installed amq-acp identity could not be read
 }
 
+// staleACPSupported reports whether this platform can run the stale
+// harness inspection at all: process listing and stat identity are
+// unix-only. An unsupported platform is quiet on purpose — not a failed
+// inspection — so the caller skips the WHOLE pass before any lookup.
+var staleACPSupported = staleACPSupportedOS
+
 // probeTimeout is the ONE total deadline for the whole stale probe, ps
 // included. Tests shorten it.
 var probeTimeout = 3 * time.Second
@@ -96,6 +102,9 @@ func idSame(a, b execIdentity) bool {
 // already parsed from a timed-out ps) are still checked.
 func staleACPInspect(ctx context.Context) staleInspection {
 	var insp staleInspection
+	if !staleACPSupported {
+		return insp // quiet by design on unsupported platforms
+	}
 	insp.Path, insp.PathErr = installedACPPath()
 	procs, listErr := listACPProcesses(ctx)
 	insp.ListErr = listErr

@@ -57,6 +57,10 @@ func listACPProcessesOS(ctx context.Context) ([]acpProcess, error) {
 	return out, psErr
 }
 
+// staleACPSupportedOS is true on unix: ps listing and stat identity both
+// work here.
+const staleACPSupportedOS = true
+
 // statIdentity maps a syscall stat record to the executable identity.
 func statIdentity(info os.FileInfo) (execIdentity, bool) {
 	st, ok := info.Sys().(*syscall.Stat_t)

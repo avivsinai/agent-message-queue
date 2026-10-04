@@ -7,6 +7,11 @@ import (
 	"errors"
 )
 
+// staleACPSupportedOS is false on unsupported platforms: the whole stale
+// harness inspection is skipped, and doctor stays quiet about it on
+// purpose.
+const staleACPSupportedOS = false
+
 // listACPProcessesOS is unix-only; no process listing on Windows.
 func listACPProcessesOS(ctx context.Context) ([]acpProcess, error) {
 	return nil, nil
