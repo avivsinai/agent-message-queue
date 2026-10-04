@@ -56,17 +56,24 @@ func newB14aEndpoint(t *testing.T) (*core.Endpoint, *fake.Runtime, *requests.Sto
 // back to a self-deadlock must FAIL (deadline tripped), not hang CI.
 const b14aDeadline = 5 * time.Second
 
-// b14aWait polls until cond() is true or the deadline passes; returns false
-// on timeout.
-func b14aWait(cond func() bool) bool {
-	deadline := time.Now().Add(b14aDeadline)
-	for time.Now().Before(deadline) {
-		if cond() {
-			return true
-		}
-		time.Sleep(10 * time.Millisecond)
+// b14aHandleWithTimeout runs one Handle under the same hard deadline, so a
+// wedged endpoint FAILS instead of hanging CI.
+func b14aHandleWithTimeout(ep *core.Endpoint, cmd *protocol.Command) (any, error) {
+	type reply struct {
+		v   any
+		err error
 	}
-	return cond()
+	done := make(chan reply, 1)
+	go func() {
+		v, err := ep.Handle(cmd, core.Source{Host: "local"})
+		done <- reply{v, err}
+	}()
+	select {
+	case r := <-done:
+		return r.v, r.err
+	case <-time.After(b14aDeadline):
+		return nil, errors.New("handle did not return within deadline — endpoint wedged")
+	}
 }
 
 // TestB14aReconcileUnregisteredTargetNoDeadlock exercises reconcileLive's
@@ -88,7 +95,7 @@ func TestB14aReconcileUnregisteredTargetNoDeadlock(t *testing.T) {
 	// Dispatch, then unregister the target so Lookup is skipped: reconcileLive
 	// hits the `!ok` uncertain sub-branch with an uncertain record — the exact
 	// early return that leaked the lock.
-	if !b14aWait(func() bool { return rt.Snapshot().Dispatches == 1 }) {
+	if !b14cWait(func() bool { return rt.Snapshot().Dispatches == 1 }) {
 		t.Fatal("request never dispatched")
 	}
 	ep.UnregisterAll()
@@ -128,7 +135,7 @@ func TestB14aReconcileLookupErrorNoDeadlock(t *testing.T) {
 	if _, err := ep.Handle(submitCmd("11111111-1111-4111-8111-1111111111a1"), core.Source{Host: "local"}); err != nil {
 		t.Fatal(err)
 	}
-	if !b14aWait(func() bool { return rt.Snapshot().Dispatches == 1 }) {
+	if !b14cWait(func() bool { return rt.Snapshot().Dispatches == 1 }) {
 		t.Fatal("request never dispatched")
 	}
 	rt.FailNextLookup(errors.New("fake lookup down"))
@@ -164,11 +171,8 @@ func TestB14aOnNativeStaleStateNoDeadlock(t *testing.T) {
 		t.Fatal(err)
 	}
 	rt.Complete(id, "done") // emits EventRunCompleted against a `received` record
-	if !b14aWait(func() bool { return true }) {
-		t.Fatal("unreachable")
-	}
 	// The endpoint must still answer commands.
-	repAny, err := ep.Handle(cancelCmd(id), core.Source{Host: "local"})
+	repAny, err := b14aHandleWithTimeout(ep, cancelCmd(id))
 	if err != nil {
 		t.Fatalf("endpoint wedged after stale-state native event: %v", err)
 	}
@@ -177,10 +181,11 @@ func TestB14aOnNativeStaleStateNoDeadlock(t *testing.T) {
 	}
 }
 
-// TestB14aReplayTerminalAckUnderWedgedAttachment pins recut #2: the native
-// ack in replayTerminalAck runs OUTSIDE e.mu — a wedged AcknowledgeResult
-// must not prevent subsequent commands on the endpoint.
-func TestB14aReplayTerminalAckUnderWedgedAttachment(t *testing.T) {
+// TestB14aNativeAckUnderWedgedAttachment pins recut #2: the native ack runs
+// OUTSIDE e.mu — a wedged AcknowledgeResult (here the direct ack onNative
+// sends for a terminal event) must not prevent subsequent commands on the
+// endpoint.
+func TestB14aNativeAckUnderWedgedAttachment(t *testing.T) {
 	store, now := openStore(t)
 	rt := fake.New("fake", "e_1")
 	ep := core.New(core.Config{Store: store, Now: now})
@@ -199,17 +204,15 @@ func TestB14aReplayTerminalAckUnderWedgedAttachment(t *testing.T) {
 	completeDone := make(chan struct{})
 	go func() { rt.Complete(id, "done"); close(completeDone) }()
 	// Wait until the ack is provably stuck (fake saw the call).
-	if !b14aWait(func() bool { return rt.AckCalls() >= 1 }) {
+	if !b14cWait(func() bool { return rt.AckCalls() >= 1 }) {
 		t.Fatal("ack never reached the fake")
 	}
 	// While the ack is wedged, the endpoint must still serve commands.
-	repAny, err := ep.Handle(cancelCmd(id), core.Source{Host: "local"})
-	if err != nil {
+	if _, err := b14aHandleWithTimeout(ep, cancelCmd(id)); err != nil {
 		t.Fatalf("endpoint wedged while ack blocked: %v", err)
 	}
-	_, _ = repAny.(protocol.Reply)
 	rt.ReleaseAcknowledge()
-	if !b14aWait(func() bool {
+	if !b14cWait(func() bool {
 		select {
 		case <-completeDone:
 			return true

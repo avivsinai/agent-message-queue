@@ -646,58 +646,10 @@ func normalizeRecord(rec *Record) {
 	}
 }
 
-// Compact replaces the result and input of terminal records whose evidence
-// is older than before with a deduplication tombstone. The request identity,
-// digest, epoch and disposition survive, so a replay answers result_expired
-// instead of dispatching again.
-// Compact reaps terminal, settled, old records into tombstones. It lists
-// candidates with NO lock held (safe: store.write commits through
-// fsq.WriteFileAtomic, so a concurrent reader sees the old record or the new
-// one, never a torn one), then re-reads+re-gates+writes each candidate via
-// CompactOne. The caller (the endpoint) holds e.mu per candidate, so a
-// concurrent Handle cannot interleave. limit bounds the sweep so e.mu is
-// held for one record, never across the full list (Pro B7).
-//
-// The tombstone is local dedup state, not a caller-visible revision:
-// Compact does rec.Revision++ and never publishes, so a receiver never
-// learns the record became a tombstone. This is intended — the tombstone
-// exists so an identical resubmit is re-admittable, not so a caller sees it.
-func (s *Store) Compact(before time.Time, limit int) (int, error) {
-	if err := s.checkClosed(); err != nil {
-		return 0, err
-	}
-	recs, err := s.List()
-	if err != nil {
-		return 0, err
-	}
-	n := 0
-	for _, rec := range recs {
-		if n >= limit {
-			break
-		}
-		if !rec.State.Terminal() || rec.Tombstone {
-			continue
-		}
-		observed, err := protocol.ParseTime(rec.ObservedAt)
-		if err != nil || !observed.Before(before) {
-			continue
-		}
-		// CompactOne re-reads under the caller's lock and re-gates — the
-		// List snapshot may be stale (Pro B5).
-		compacted, err := s.CompactOne(Key{CreatorHost: rec.CreatorHost, TargetID: rec.TargetID, RequestID: rec.RequestID}, before)
-		if err != nil {
-			return n, err
-		}
-		if compacted {
-			n++
-		}
-	}
-	return n, nil
-}
-
-// CompactOne re-reads a single candidate under s.mu, re-gates
-// (terminal + !tombstone + old + !OwesAck), and writes the
-// tombstone. Returns true if the record was compacted.
+// CompactOne re-reads a single candidate under s.mu, re-gates (terminal, not
+// a tombstone, old, nothing owed to the runtime or the caller), and writes the
+// tombstone. Returns true if the record was compacted. The endpoint's
+// Reconcile sweep is the only production caller.
 //
 // 611.22.19 BK4 round-2 B1: the whole read-mutate-write runs under s.mu.
 // The previous doc claimed the caller holds the endpoint mutex (e.mu),

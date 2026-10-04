@@ -50,69 +50,6 @@ func makeCurEntry(t *testing.T, root, handle string) (path, id string) {
 	return path, id
 }
 
-// TestB46UnreadableSourceStopsResweeping reproduces agent-message-queue-611.22.46
-// at the correct boundary: a cur entry whose SOURCE FILE cannot be read
-// (EACCES — the file is present on disk but unreadable) keeps curRecovered
-// false and forces a full O(cur) rescan every tick. The fix caps only this
-// source-read failure class (errCurSourceReadFailed) after curFailureCap
-// identical failures; receipt/ledger/reply obligations are NOT suppressed.
-//
-// Mutation RED: remove the curFailureCapped skip in recoverCur -> the entry
-// is re-read every tick and ImportOnce keeps returning its read error past
-// the cap, so the "no error after cap" assertion fails.
-func TestB46UnreadableSourceStopsResweeping(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root bypasses filesystem permissions; EACCES cannot be simulated")
-	}
-	if runtime.GOOS == "windows" {
-		t.Skip("Windows chmod does not enforce read denial; EACCES cannot be simulated")
-	}
-	root := t.TempDir()
-	if err := fsq.EnsureRootDirs(root); err != nil {
-		t.Fatalf("EnsureRootDirs: %v", err)
-	}
-	if err := fsq.EnsureAgentDirs(root, DefaultHandle); err != nil {
-		t.Fatalf("EnsureAgentDirs: %v", err)
-	}
-	path, _ := makeCurEntry(t, root, DefaultHandle)
-	// Make the source file unreadable so format.ReadMessageFileRoot fails with
-	// EACCES — a source-read failure (readFailed == true), the exact boundary
-	// the bead names. NOT a reply-route failure.
-	if err := os.Chmod(path, 0o000); err != nil {
-		t.Fatalf("chmod: %v", err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(path, 0o600) })
-
-	store, err := requests.Open(filepath.Join(root, "extensions", "remote"))
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
-	ep := core.New(core.Config{Store: store})
-	carrier, err := New(root, DefaultHandle, ep)
-	if err != nil {
-		t.Fatalf("carrier: %v", err)
-	}
-	// A router that WOULD succeed for a real project; irrelevant here because
-	// the source read fails before routing is reached.
-	carrier.SetReplyRouter(func(project, replyTo string) (string, string, error) {
-		return filepath.Dir(root), "codex", nil
-	})
-
-	// Ticks 1..curFailureCap: the source read fails each time (EACCES).
-	for i := 1; i <= curFailureCap; i++ {
-		if _, err := carrier.ImportOnce(); err == nil {
-			t.Fatalf("tick %d: expected a source-read error, got nil", i)
-		}
-	}
-	// Tick curFailureCap+1: the entry is quarantined (source-read failure cap
-	// reached). recoverOne is NOT called, so ImportOnce no longer reports the
-	// entry's read error.
-	if _, err := carrier.ImportOnce(); err != nil {
-		t.Fatalf("tick %d (post-cap): expected no error once the entry is quarantined, got %v (611.22.46)", curFailureCap+1, err)
-	}
-}
-
 // TestB46ReplyRouteFailureIsNotSuppressed proves the P1 correction: a
 // reply-routing failure is NOT a source-read failure, so it must NOT be
 // capped. Three identical reply-route failures must NOT quarantine the entry
@@ -159,116 +96,17 @@ func TestB46ReplyRouteFailureIsNotSuppressed(t *testing.T) {
 	}
 }
 
-// TestB46SourceReadFailsThenRouteRecoversDeliversReply is the regression codex
-// required: a cur entry whose source read fails identically curFailureCap
-// times (EACCES), then the file is repaired (chmod restored), must deliver
-// its pending reply on the next tick. The cap quarantined the source-read
-// failure; once the file is readable, the entry is no longer failing, so the
-// cap must not prevent the now-succeeding recovery from running.
-//
-// Codex P2 spec: leave the source unreadable through tick 4 (the capped
-// branch skips it and returns nil, so ImportOnce sets curRecovered=true);
-// repair afterward; use a separately prepared t.TempDir caller mailbox;
-// check ImportOnce errors; assert the actual reply arrives.
-//
-// Mutation RED: without the recoverCappedCur path (the 611.22.46 NO-GO
-// re-fix), once curRecovered=true the capped entry is never re-probed and the
-// reply never arrives — the assertion on the reply file fails.
-func TestB46SourceReadFailsThenRouteRecoversDeliversReply(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root bypasses filesystem permissions; EACCES cannot be simulated")
-	}
-	if runtime.GOOS == "windows" {
-		t.Skip("Windows chmod does not enforce read denial; EACCES cannot be simulated")
-	}
-	root := t.TempDir()
-	if err := fsq.EnsureRootDirs(root); err != nil {
-		t.Fatalf("EnsureRootDirs: %v", err)
-	}
-	if err := fsq.EnsureAgentDirs(root, DefaultHandle); err != nil {
-		t.Fatalf("EnsureAgentDirs: %v", err)
-	}
-	path, _ := makeCurEntry(t, root, DefaultHandle)
-	if err := os.Chmod(path, 0o000); err != nil {
-		t.Fatalf("chmod: %v", err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(path, 0o600) })
-
-	store, err := requests.Open(filepath.Join(root, "extensions", "remote"))
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
-	ep := core.New(core.Config{Store: store})
-	carrier, err := New(root, DefaultHandle, ep)
-	if err != nil {
-		t.Fatalf("carrier: %v", err)
-	}
-
-	// A separately prepared caller mailbox: the router resolves the cross-
-	// session reply to THIS root + handle, so the reply is actually written
-	// (not filepath.Dir(root), which is not a prepared AMQ root).
-	callerRoot := t.TempDir()
-	if err := fsq.EnsureRootDirs(callerRoot); err != nil {
-		t.Fatalf("EnsureRootDirs caller: %v", err)
-	}
-	if err := fsq.EnsureAgentDirs(callerRoot, "codex"); err != nil {
-		t.Fatalf("EnsureAgentDirs caller: %v", err)
-	}
-	callerNewDir := filepath.Join(callerRoot, "agents", "codex", "inbox", "new")
-
-	carrier.SetReplyRouter(func(project, replyTo string) (string, string, error) {
-		return callerRoot, "codex", nil
-	})
-
-	// Ticks 1..curFailureCap (3): source read fails (EACCES). recoverCur runs
-	// (firstSweep) and reports the error; curRecovered stays false.
-	for i := 1; i <= curFailureCap; i++ {
-		if _, err := carrier.ImportOnce(); err == nil {
-			t.Fatalf("tick %d: expected source-read error, got nil (611.22.46)", i)
-		}
-	}
-	// Tick 4: the entry is now capped (count >= curFailureCap). The capped
-	// branch skips it and returns nil, so ImportOnce sets curRecovered=true.
-	if _, err := carrier.ImportOnce(); err != nil {
-		t.Fatalf("tick 4: expected capped entry to be skipped (nil error), got: %v (611.22.46)", err)
-	}
-	if !carrier.curRecovered {
-		t.Fatal("tick 4: curRecovered should be true after the capped pass")
-	}
-
-	// Repair the source file AFTER the silent capped pass.
-	if err := os.Chmod(path, 0o600); err != nil {
-		t.Fatalf("chmod restore: %v", err)
-	}
-
-	// Tick 5: curRecovered=true, so recoverCur no longer runs. recoverCappedCur
-	// (the 611.22.46 NO-GO re-fix) re-probes the capped entry, finds it
-	// readable, clears the cap, and runs the full recoverOne — delivering the
-	// pending reply. Check the error and assert the reply actually arrives.
-	if _, err := carrier.ImportOnce(); err != nil {
-		t.Fatalf("tick 5: expected recovery to succeed after repair, got: %v (611.22.46: capped entry must be retried once the source read succeeds)", err)
-	}
-
-	// Assert the actual reply landed in the prepared caller mailbox.
-	replies, err := os.ReadDir(callerNewDir)
-	if err != nil {
-		t.Fatalf("read caller inbox/new: %v", err)
-	}
-	if len(replies) == 0 {
-		t.Fatal("no reply delivered to the caller mailbox after recovery (611.22.46: a capped entry whose source is repaired must deliver its pending reply)")
-	}
-}
-
-// TestB46LateRepairDownstreamReplyFailureStaysPending is the 3rd-NO-GO
-// regression: during late repair (after curRecovered=true), if the source is
-// readable but a DOWNSTREAM step (receipt/ledger/reply routing) fails, the
-// entry must STAY pending — not be dropped because clearCurFailure ran before
-// recoverOne completed. The next tick (route restored) must deliver the reply.
-//
-// Mutation RED: clear pendingRecovery before recoverOne (the 3rd-NO-GO bug)
-// -> the downstream failure drops the entry; the restored route never gets a
-// retry; the reply never arrives and the assertion fails.
+// TestB46LateRepairDownstreamReplyFailureStaysPending walks one cur entry
+// through the agent-message-queue-611.22.46 sweep cap:
+//   - ticks 1..curFailureCap: its source file is unreadable (EACCES), and
+//     each tick reports the read error (a failed read is never "recovered");
+//   - the next tick: the entry is capped, skipped, and the sweep is done;
+//   - repaired source, failing route: recoverCappedCur re-probes the capped
+//     entry (NO-GO 2) and the downstream reply failure keeps it pending
+//     (NO-GO 3);
+//   - restored route: the reply lands exactly once;
+//   - one more tick: success cleared the entry, so recovery and the router
+//     do not run again (NO-GO 4).
 func TestB46LateRepairDownstreamReplyFailureStaysPending(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root bypasses filesystem permissions; EACCES cannot be simulated")
@@ -309,13 +147,11 @@ func TestB46LateRepairDownstreamReplyFailureStaysPending(t *testing.T) {
 	}
 	callerNewDir := filepath.Join(callerRoot, "agents", "codex", "inbox", "new")
 
-	// Phase 1: route fails (downstream reply-routing failure). Phase 2: route
-	// restored. routeFailures counts downstream failures; once >0, route
-	// succeeds.
-	var routeFailures int32
+	// The first route attempt fails (a downstream reply-routing failure);
+	// every later one succeeds.
+	var routeCalls int32
 	carrier.SetReplyRouter(func(project, replyTo string) (string, string, error) {
-		if atomic.LoadInt32(&routeFailures) == 0 {
-			atomic.AddInt32(&routeFailures, 1)
+		if atomic.AddInt32(&routeCalls, 1) == 1 {
 			return "", "", errNoRouteForTest
 		}
 		return callerRoot, "codex", nil
@@ -359,105 +195,17 @@ func TestB46LateRepairDownstreamReplyFailureStaysPending(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read caller inbox/new: %v", err)
 	}
-	if len(replies) == 0 {
-		t.Fatal("no reply delivered after route restore (611.22.46 3rd NO-GO: downstream failure must keep the entry pending for the next tick)")
-	}
-}
-
-// TestB46LateRepairSuccessClearsMembership is the 4th-NO-GO regression: after
-// a capped entry is repaired and recoverOne SUCCEEDS, the entry must leave
-// pendingRecovery — not repeat full recovery every tick. Codex found that
-// recoverCappedCur claimed recoverOne cleared membership on success, but
-// recoverOne has no such call; the entry stayed pending and re-ran full
-// recovery (re-emitting the reply) every tick after delivery.
-//
-// Mutation RED: remove the clearCurFailure(name) after successful recoverOne
-// in recoverCappedCur -> the entry stays pending; the next tick re-runs
-// recoverOne and emits a SECOND reply; the duplicate-reply assertion fails.
-func TestB46LateRepairSuccessClearsMembership(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root bypasses filesystem permissions; EACCES cannot be simulated")
-	}
-	if runtime.GOOS == "windows" {
-		t.Skip("Windows chmod does not enforce read denial; EACCES cannot be simulated")
-	}
-	root := t.TempDir()
-	if err := fsq.EnsureRootDirs(root); err != nil {
-		t.Fatalf("EnsureRootDirs: %v", err)
-	}
-	if err := fsq.EnsureAgentDirs(root, DefaultHandle); err != nil {
-		t.Fatalf("EnsureAgentDirs: %v", err)
-	}
-	path, _ := makeCurEntry(t, root, DefaultHandle)
-	if err := os.Chmod(path, 0o000); err != nil {
-		t.Fatalf("chmod: %v", err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(path, 0o600) })
-
-	store, err := requests.Open(filepath.Join(root, "extensions", "remote"))
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
-	ep := core.New(core.Config{Store: store})
-	carrier, err := New(root, DefaultHandle, ep)
-	if err != nil {
-		t.Fatalf("carrier: %v", err)
-	}
-
-	callerRoot := t.TempDir()
-	if err := fsq.EnsureRootDirs(callerRoot); err != nil {
-		t.Fatalf("EnsureRootDirs caller: %v", err)
-	}
-	if err := fsq.EnsureAgentDirs(callerRoot, "codex"); err != nil {
-		t.Fatalf("EnsureAgentDirs caller: %v", err)
-	}
-	callerNewDir := filepath.Join(callerRoot, "agents", "codex", "inbox", "new")
-	var routeCalls int32
-	carrier.SetReplyRouter(func(project, replyTo string) (string, string, error) {
-		atomic.AddInt32(&routeCalls, 1)
-		return callerRoot, "codex", nil
-	})
-
-	// Cap the entry (ticks 1..curFailureCap), then tick 4 sets curRecovered.
-	for i := 1; i <= curFailureCap; i++ {
-		_, _ = carrier.ImportOnce()
-	}
-	if _, err := carrier.ImportOnce(); err != nil {
-		t.Fatalf("tick 4: expected capped skip (nil), got: %v", err)
-	}
-	if !carrier.curRecovered {
-		t.Fatal("curRecovered should be true")
-	}
-
-	// Repair the source.
-	if err := os.Chmod(path, 0o600); err != nil {
-		t.Fatalf("chmod restore: %v", err)
-	}
-
-	// Tick 5: recoverCappedCur retries, recoverOne succeeds, reply lands,
-	// membership cleared.
-	if _, err := carrier.ImportOnce(); err != nil {
-		t.Fatalf("tick 5: expected recovery success, got: %v", err)
-	}
-	replies, err := os.ReadDir(callerNewDir)
-	if err != nil {
-		t.Fatalf("read caller inbox/new: %v", err)
-	}
 	if len(replies) != 1 {
-		t.Fatalf("tick 5: expected exactly 1 reply, got %d", len(replies))
+		t.Fatalf("%d replies after route restore, want 1 (611.22.46 3rd NO-GO: downstream failure must keep the entry pending for the next tick)", len(replies))
 	}
 	routeAfterSuccess := atomic.LoadInt32(&routeCalls)
 
-	// Tick 6: the entry is no longer pending, so recoverCappedCur must NOT
-	// re-run recoverOne — the router is not called again. (4th NO-GO: without
-	// the clearCurFailure on success, the entry stays pending and recoverOne
-	// re-runs, calling the router again.)
+	// Tick 7: the entry is no longer pending, so recovery must not run again.
 	if _, err := carrier.ImportOnce(); err != nil {
-		t.Fatalf("tick 6: expected nil, got: %v", err)
+		t.Fatalf("tick 7: expected nil, got: %v", err)
 	}
 	if got := atomic.LoadInt32(&routeCalls); got != routeAfterSuccess {
-		t.Fatalf("tick 6: router called again after successful recovery (routeCalls %d -> %d) (611.22.46 4th NO-GO: successful recovery must clear pendingRecovery membership so recovery does not repeat)", routeAfterSuccess, got)
+		t.Fatalf("tick 7: router called again after successful recovery (routeCalls %d -> %d) (611.22.46 4th NO-GO: success must clear pendingRecovery)", routeAfterSuccess, got)
 	}
 }
 

@@ -160,38 +160,7 @@ func newClient(ws *wsConn, h Handlers) *Client {
 // app-server has at most one in-flight approval per live run — but if it
 // ever does, the request is FAILED EXPLICITLY (Respond with an error) so
 // the app-server never waits for an answer that never comes.
-// testDispatchGate, when non-nil (tests only), is invoked inside
-// dispatchServerRequest BEFORE the reqQ send attempt. Production leaves it
-// nil; the call is a single predictable branch, never on the hot-path cost
-// that matters. It exists so a test can park the read pump at the exact
-// decode-vs-enqueue boundary (F761-2 r3 spec: a two-way barrier, not an
-// observation).
-//
-// BEAD jb7: held in an atomic.Pointer. This is package-level state written
-// by tests and read by the read pump on every server request — as a plain
-// package var it was synchronisation-free (safe only while no parallel
-// test touched it), and -race fires on any concurrent writer. The
-// setTestDispatchGate helper is the single write path.
-var testDispatchGate atomic.Pointer[func(sr ServerRequest)]
-
-// setTestDispatchGate installs (or, with nil, clears) the test-only park
-// point. Tests save the previous pointer and restore it via Cleanup.
-func setTestDispatchGate(fn func(sr ServerRequest)) (prev func(sr ServerRequest)) {
-	if p := testDispatchGate.Load(); p != nil {
-		prev = *p
-	}
-	if fn == nil {
-		testDispatchGate.Store(nil)
-		return prev
-	}
-	testDispatchGate.Store(&fn)
-	return prev
-}
-
 func (c *Client) dispatchServerRequest(sr ServerRequest) {
-	if gate := testDispatchGate.Load(); gate != nil {
-		(*gate)(sr) // test-only park point, pre-send (F761-2 r3)
-	}
 	select {
 	case c.reqQ <- sr:
 		return
@@ -233,23 +202,6 @@ func (c *Client) reqWorker() {
 				c.onServerRequest(sr)
 			}
 		}()
-	}
-}
-
-// waitCallbacks drains both queues and waits for the in-flight callbacks,
-// so Close does not return while callbacks still touch app state. Bounded:
-// the deadline keeps Close responsive if a handler is wedged.
-func (c *Client) waitCallbacks() {
-	deadline := time.After(2 * time.Second)
-	for {
-		if len(c.reqQ) == 0 && c.reqInFlight.Load() == 0 {
-			return
-		}
-		select {
-		case <-deadline:
-			return
-		case <-time.After(5 * time.Millisecond):
-		}
 	}
 }
 

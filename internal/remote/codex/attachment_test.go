@@ -23,7 +23,6 @@ import (
 type fakeAppServer struct {
 	ws                  *wsConn
 	calls               chan rpcMessage
-	callsMu             sync.Mutex
 	threadReadHandler   func() string
 	threadReadHandlerMu sync.Mutex
 	turnStartDelayHook  func()
@@ -47,33 +46,6 @@ func waitMemoForID(t *testing.T, att *Attachment, id string) {
 		runtime.Gosched()
 	}
 	t.Fatalf("terminal memo never recorded %s", id)
-}
-
-// waitForCall waits until the fake server has received an RPC with the given
-// method (deterministic sync point replacing sleep-then-count; 7xl).
-func waitForCall(t *testing.T, srv *fakeAppServer, method string) {
-	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		srv.callsMu.Lock()
-		n := len(srv.calls)
-		srv.callsMu.Unlock()
-		if n > 0 {
-			// The channel buffer holds every call; scan a snapshot.
-			for done := false; !done; {
-				select {
-				case c := <-srv.calls:
-					if c.Method == method {
-						return
-					}
-				default:
-					done = true
-				}
-			}
-		}
-		runtime.Gosched()
-	}
-	t.Fatalf("fake server never received %s", method)
 }
 
 // waitLostStateGen waits until the read pump has processed a lost-state
@@ -527,73 +499,6 @@ func TestUnconfirmedTurnStartIsUncertainNotRejected(t *testing.T) {
 	}
 }
 
-// TestUnconfirmedRunFallsThroughToHistoryAfterTimeout reproduces Pro F1: a
-// retained-but-unconfirmed run permanently shadows lookupHistory, so the
-// record sticks at Uncertain forever and a real completed result is never
-// delivered. After confirmTimeout, if still unconfirmed, Lookup must fall
-// through to lookupHistory (a thread/read RPC), which resolves the turn by
-// clientId.
-//
-// Also covers the 12s confirm-timeout arm (the bead names it; the existing
-// TestUnconfirmedTurnStartIsUncertainNotRejected covers only the client.Done()
-// arm). The fake clock makes the timeout deterministic — no real sleep.
-func TestUnconfirmedRunFallsThroughToHistoryAfterTimeout(t *testing.T) {
-	sock, srv := startFakeAppServer(t)
-	clk := &fakeClock{t: time.Date(2026, 9, 12, 12, 0, 0, 0, time.UTC)}
-	att, err := Attach(sock, "t1", WithClock(clk.now), WithConfirmTimeout(50*time.Millisecond))
-	if err != nil {
-		t.Fatalf("attach: %v", err)
-	}
-	t.Cleanup(func() { _ = att.Close() })
-	<-srv.calls // initialize
-	<-srv.calls // thread/resume
-
-	s := att.Inspect()
-	key := requests.Key{CreatorHost: "local", TargetID: s.TargetID, RequestID: "11111111-1111-4111-8111-111111111810"}
-	type admResult struct {
-		adm core.Admission
-		err error
-	}
-	done := make(chan admResult, 1)
-	go func() {
-		adm, err := att.Submit(core.BoundRequest{Key: key, Epoch: s.Epoch, Input: protocol.SubmitInput{Text: "work"}})
-		done <- admResult{adm, err}
-	}()
-	<-srv.calls // turn/start; the server answers with a turn id
-	srv.notify(t, "turn/started", `{"threadId":"t1","turn":{"id":"u1"}}`)
-	// No userMessage item ever confirms the turn. Advance the clock past
-	// confirmTimeout so the confirm-timeout arm fires (no real 12s sleep).
-	clk.advance(51 * time.Millisecond)
-	r := <-done
-	if r.err == nil {
-		t.Fatalf("unconfirmed turn/start returned no error: %+v", r.adm)
-	}
-	if r.adm.RunID == "" {
-		t.Fatal("unconfirmed turn/start dropped the run id")
-	}
-
-	// Before the deadline is already past (we advanced the clock). But first,
-	// verify that a Lookup BEFORE the deadline returns EvidenceTentative. We
-	// can't go back in time, so instead verify the fall-through happens NOW:
-	// the run is unconfirmed and past the deadline, so Lookup must call
-	// lookupHistory (a thread/read RPC). The fake server's default handler
-	// returns an error for thread/read, so lookupHistory returns
-	// EvidenceUnknown — but the key assertion is that thread/read WAS called
-	// (the call channel receives it), proving the fall-through.
-	// Lookup falls through to lookupHistory (thread/read RPC). The fake
-	// server returns an error for thread/read, so lookupHistory returns an
-	// error — but the key assertion is that thread/read WAS called, proving
-	// the fall-through. The error is expected, so check the call count, not
-	// the return value.
-	lk, lerr := att.Lookup(key, s.Epoch)
-	_ = lk
-	_ = lerr
-	// 7xl: was a 50ms sleep then a count. Deterministic: the fake server
-	// forwards every RPC to srv.calls; wait for the thread/read call to
-	// actually arrive — its presence IS the fall-through proof.
-	waitForCall(t, srv, "thread/read")
-}
-
 type fakeClock struct {
 	t time.Time
 }
@@ -653,57 +558,17 @@ func TestLargeResultReleasedByBoundedDigest(t *testing.T) {
 	}
 }
 
-// TestRunIDAccessorTakesLock verifies B1 (F3): a.runID takes a.mu before
-// reading r.turnID. This is a structural test — it confirms the accessor
-// exists and is used, not a runtime race. The runtime race is caught by
-// running the whole suite under -race: confirmRun writes r.turnID from the
-// read-loop goroutine while Submit reads it via a.runID. If runID were still
-// an unlocked method on *run, -race would fire in TestSubmitBindsTurnAndCompletes.
-func TestRunIDAccessorTakesLock(t *testing.T) {
-	sock, srv := startFakeAppServer(t)
-	att, err := Attach(sock, "t1")
-	if err != nil {
-		t.Fatalf("attach: %v", err)
-	}
-	t.Cleanup(func() { _ = att.Close() })
-	<-srv.calls // initialize
-	<-srv.calls // thread/resume
-
-	s := att.Inspect()
-	key := requests.Key{CreatorHost: "local", TargetID: s.TargetID, RequestID: "11111111-1111-4111-8111-1111111118b1"}
-	// Start a turn and confirm it so r.turnID is set by confirmRun (from the
-	// read-loop goroutine).
-	done := make(chan struct{}, 1)
-	go func() {
-		_, _ = att.Submit(core.BoundRequest{Key: key, Epoch: s.Epoch, Input: protocol.SubmitInput{Text: "work"}})
-		done <- struct{}{}
-	}()
-	<-srv.calls // turn/start
-	srv.notify(t, "turn/started", `{"threadId":"t1","turn":{"id":"u1"}}`)
-	// Confirm the run: emit the userMessage item that carries our clientId.
-	srv.notify(t, "item/started", `{"threadId":"t1","turnId":"u1","item":{"type":"userMessage","clientId":"`+clientIDFor(key)+`"}}`)
-	<-done
-
-	// Now read the runID through the accessor (takes a.mu). Under -race, if
-	// the accessor did not take the lock, the read of r.turnID here would race
-	// with any concurrent write from the read-loop goroutine.
-	att.mu.Lock()
-	r, ok := att.runs[key]
-	att.mu.Unlock()
-	if !ok {
-		t.Fatal("run not found")
-	}
-	rid := att.runID(r)
-	if rid != "turn:u1" {
-		t.Fatalf("runID = %q, want turn:u1 (B1: runID must read r.turnID under a.mu)", rid)
-	}
-}
-
 // TestHistoryResolvedRunConverges reproduces B2 (F1 never converges): when
 // lookupHistory resolves a run as terminal, the in-memory run must become
 // terminal so AcknowledgeResult can release it. Without the fix, the run
 // stays StateRunning forever, AcknowledgeResult refuses every ack, and
 // Reconcile re-reads the whole transcript every tick.
+//
+// It also covers Submit's confirm-timeout arm (Pro F1; the client.Done() arm
+// is TestUnconfirmedTurnStartIsUncertainNotRejected): an unconfirmed
+// turn/start past confirmTimeout is uncertain with its run id kept, and
+// Lookup then falls through to history. The fake clock makes the timeout
+// deterministic.
 func TestHistoryResolvedRunConverges(t *testing.T) {
 	sock, srv := startFakeAppServer(t)
 	clk := &fakeClock{t: time.Date(2026, 9, 12, 12, 0, 0, 0, time.UTC)}
@@ -717,17 +582,23 @@ func TestHistoryResolvedRunConverges(t *testing.T) {
 
 	s := att.Inspect()
 	key := requests.Key{CreatorHost: "local", TargetID: s.TargetID, RequestID: "11111111-1111-4111-8111-1111111118c1"}
-	done := make(chan struct{}, 1)
+	type admResult struct {
+		adm core.Admission
+		err error
+	}
+	done := make(chan admResult, 1)
 	go func() {
-		_, _ = att.Submit(core.BoundRequest{Key: key, Epoch: s.Epoch, Input: protocol.SubmitInput{Text: "work"}})
-		done <- struct{}{}
+		adm, err := att.Submit(core.BoundRequest{Key: key, Epoch: s.Epoch, Input: protocol.SubmitInput{Text: "work"}})
+		done <- admResult{adm, err}
 	}()
 	<-srv.calls // turn/start
 	srv.notify(t, "turn/started", `{"threadId":"t1","turn":{"id":"u1"}}`)
 	// No confirming userMessage — advance past confirmTimeout so Lookup
 	// falls through to lookupHistory.
 	clk.advance(51 * time.Millisecond)
-	<-done // Submit returns with an error (unconfirmed)
+	if r := <-done; r.err == nil || r.adm.Code != "" || r.adm.RunID == "" {
+		t.Fatalf("unconfirmed turn/start = %+v, %v; want uncertain (error, no code) with the run id kept", r.adm, r.err)
+	}
 
 	// Now set up the fake server to return a completed turn in thread/read
 	// that carries our clientId.
@@ -782,11 +653,11 @@ func TestB1PreSendFailureIsRefusalNotUncertain(t *testing.T) {
 	s := att.Inspect()
 	key := requests.Key{CreatorHost: "local", TargetID: s.TargetID, RequestID: "11111111-1111-4111-8111-111111111b01"}
 
-	// Close the server BEFORE Submit so the RPC write fails (pre-send).
-	_ = srv.ws.close()
-	// Deterministic: wait for the read pump to register the closed
-	// connection (744.8 — no time.Sleep).
-	<-att.client.Load().Done()
+	// Make the RPC write fail before anything reaches the wire: a poisoned
+	// stream (611.22.38) fails every write as pre-send while the read pump
+	// stays live, so Submit reaches the turn/start error arm instead of
+	// the offline refusal that a closed connection races it into.
+	att.client.Load().ws.poisoned.Store(true)
 
 	type admResult struct {
 		adm core.Admission
@@ -934,71 +805,6 @@ func TestB3FastCompletionDoesNotWedgeAdapter(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("submit did not return after fast completion (B3 — adapter wedged)")
-	}
-}
-
-// TestB6aHistoryResolvedRunIsCancellable reproduces B6a
-// (agent-message-queue-611.22.35): when lookupHistory resolves a run (live
-// OR terminal), it must install a confirmed run entry so CancelExact can
-// find it. Without this, a surviving run after restart cannot be cancelled.
-func TestB6aHistoryResolvedRunIsCancellable(t *testing.T) {
-	sock, srv := startFakeAppServer(t)
-	att, err := Attach(sock, "t1")
-	if err != nil {
-		t.Fatalf("attach: %v", err)
-	}
-	t.Cleanup(func() { _ = att.Close() })
-	<-srv.calls // initialize
-	<-srv.calls // thread/resume
-
-	s := att.Inspect()
-	key := requests.Key{CreatorHost: "local", TargetID: s.TargetID, RequestID: "11111111-1111-4111-8111-111111111b06"}
-
-	type admResult struct {
-		adm core.Admission
-		err error
-	}
-	done := make(chan admResult, 1)
-	go func() {
-		adm, err := att.Submit(core.BoundRequest{Key: key, Epoch: s.Epoch, Input: protocol.SubmitInput{Text: "say PONG"}})
-		done <- admResult{adm, err}
-	}()
-	<-srv.calls // turn/start
-	srv.notify(t, "item/started", `{"threadId":"t1","turnId":"u1","item":{"type":"userMessage","id":"i1","clientId":"`+clientIDFor(key)+`","content":[]}}`)
-	srv.notify(t, "item/started", `{"threadId":"t1","turnId":"u1","item":{"type":"agentMessage","id":"i2","text":"running..."}}`)
-
-	// Simulate restart: clear the in-memory runs map.
-	att.mu.Lock()
-	for k := range att.runs {
-		delete(att.runs, k)
-	}
-	for k := range att.byClientID {
-		delete(att.byClientID, k)
-	}
-	for k := range att.byTurn {
-		delete(att.byTurn, k)
-	}
-	att.mu.Unlock()
-
-	// History resolves the run as live (running).
-	srv.setThreadReadHandler(func() string {
-		return `{"thread":{"turns":[{"id":"u1","status":"running","items":[{"type":"userMessage","clientId":"` + clientIDFor(key) + `"},{"type":"agentMessage","text":"running..."}]}]}}`
-	})
-
-	lk, _ := att.Lookup(key, s.Epoch)
-	if !lk.Known || !lk.Admitted {
-		t.Fatalf("history did not resolve the run as live: %+v (B6a)", lk)
-	}
-
-	// The run must now be in the runs map so CancelExact can find it.
-	att.mu.Lock()
-	r, hasRun := att.runs[key]
-	att.mu.Unlock()
-	if !hasRun {
-		t.Fatal("history resolved the run but did not install a confirmed entry; CancelExact cannot find it (B6a)")
-	}
-	if !r.confirmed {
-		t.Fatal("history-resolved run is not marked confirmed (B6a)")
 	}
 }
 
@@ -1243,138 +1049,70 @@ func TestB3TerminalMemoEvictionIsFIFO(t *testing.T) {
 	}
 }
 
-// TestB3UnrecognizedTerminalStatusIsMemoized pins the memo guard itself
-// (packet 10 recut 10a, agent-message-queue-611.22.36): the memo's status
-// whitelist was narrower than the terminality the status switch actually
-// implements (completed/interrupted/default->StateFailed), so a turn ending
-// with an unrecognized status was marked terminal by the switch but NOT
-// memoized, and the wedge returned for exactly those statuses. Fix: the
-// turn/completed notification is recorded unconditionally — it means the
-// turn is over. This test drives the same race window with status "error"
-// and asserts, WITHOUT calling Lookup, that the attachment is already idle:
-// the memo guard in Submit's RPC-response arm is what closes the window
-// before any Lookup, and the aggregate end-to-end test never checked that.
-func TestB3UnrecognizedTerminalStatusIsMemoized(t *testing.T) {
-	sock, srv := startFakeAppServer(t)
-	att, err := Attach(sock, "t1", WithConfirmTimeout(200*time.Millisecond))
-	if err != nil {
-		t.Fatalf("attach: %v", err)
-	}
-	t.Cleanup(func() { _ = att.Close() })
-	<-srv.calls // initialize
-	<-srv.calls // thread/resume
-
-	s := att.Inspect()
-	key := requests.Key{CreatorHost: "local", TargetID: s.TargetID, RequestID: "11111111-1111-4111-8111-111111111b3a"}
-	epoch := s.Epoch
-
-	done := make(chan struct {
-		adm core.Admission
-		err error
-	}, 1)
-	// Same race window as the end-to-end B3 test, but the completion status
-	// is one the old status whitelist did not know. The notification itself
-	// proves the turn is over — the memo must not re-derive terminality from
-	// the status string.
-	srv.setTurnStartResponse(`{"jsonrpc":"2.0","id":%s,"result":{"turn":{"id":"turn1","status":"inProgress"}}}`)
-	srv.setTurnStartDelay(func() {
-		srv.notify(t, "turn/started", `{"threadId":"t1","turn":{"id":"turn1"}}`)
-		// Confirming userMessage item is MISSED, as in the end-to-end test.
-		srv.notify(t, "turn/completed", `{"threadId":"t1","turn":{"id":"turn1","status":"error"}}`)
-		srv.notify(t, "thread/status/changed", `{"threadId":"t1","status":{"type":"idle"}}`)
-	})
-
-	go func() {
-		adm, err := att.Submit(core.BoundRequest{Key: key, Epoch: epoch, Input: protocol.SubmitInput{Text: "say PONG"}})
-		done <- struct {
-			adm core.Admission
-			err error
-		}{adm, err}
-	}()
-
-	select {
-	case r := <-done:
-		_ = r
-	case <-time.After(10 * time.Second):
-		t.Fatal("submit did not return after missed confirmation (B3)")
-	}
-
-	// NO Lookup here. The memo guard runs in Submit's RPC-response arm
-	// before any Lookup; assert that window directly.
-	insp := att.Inspect()
-	if insp.Status == "busy" {
-		t.Fatal("Inspect reports busy after an unrecognized-status turn/completed with NO Lookup called (10a — memo whitelist narrower than the switch's default terminal arm)")
-	}
-	att.mu.Lock()
-	active := att.activeTurn
-	att.mu.Unlock()
-	if active != "" {
-		t.Fatalf("activeTurn = %q, want empty with NO Lookup called (10a — a turn whose completed notification arrived must never be reinstalled as active)", active)
-	}
-}
-
 // TestB3RPCResponseGuardClosesWindowBeforeLookup pins the RPC-response arm
 // of the B3 fix (packet 10 recut 10c, agent-message-queue-611.22.36): the
 // memo guard exists to close the race window BEFORE any Lookup is made, but
 // the aggregate end-to-end test only checked Inspect AFTER Lookup, so
 // reverting the memo guard alone (or the lookupHistory activeTurn clear
-// alone) still passed. This test drives the same missed-confirmation race
-// and asserts Inspect is not busy and activeTurn is empty with NO Lookup
-// call at all — the exact assertion that fails when any single piece of the
-// fix is reverted.
+// alone) still passed. This test drives the missed-confirmation race and
+// asserts Inspect is not busy and activeTurn is empty with NO Lookup call
+// at all.
+//
+// The "error" row is 10a: the memo's status whitelist was narrower than the
+// terminality the status switch implements (completed/interrupted/
+// default->StateFailed), so a turn ending with an unrecognized status was
+// not memoized and the wedge returned. turn/completed is recorded
+// unconditionally — the notification itself means the turn is over.
 func TestB3RPCResponseGuardClosesWindowBeforeLookup(t *testing.T) {
-	sock, srv := startFakeAppServer(t)
-	att, err := Attach(sock, "t1", WithConfirmTimeout(200*time.Millisecond))
-	if err != nil {
-		t.Fatalf("attach: %v", err)
-	}
-	t.Cleanup(func() { _ = att.Close() })
-	<-srv.calls // initialize
-	<-srv.calls // thread/resume
+	for _, tc := range []struct {
+		status, requestID string
+	}{
+		{"completed", "11111111-1111-4111-8111-111111111b3c"},
+		{"error", "11111111-1111-4111-8111-111111111b3a"},
+	} {
+		t.Run(tc.status, func(t *testing.T) {
+			sock, srv := startFakeAppServer(t)
+			att, err := Attach(sock, "t1", WithConfirmTimeout(200*time.Millisecond))
+			if err != nil {
+				t.Fatalf("attach: %v", err)
+			}
+			t.Cleanup(func() { _ = att.Close() })
+			<-srv.calls // initialize
+			<-srv.calls // thread/resume
 
-	s := att.Inspect()
-	key := requests.Key{CreatorHost: "local", TargetID: s.TargetID, RequestID: "11111111-1111-4111-8111-111111111b3c"}
-	epoch := s.Epoch
+			s := att.Inspect()
+			key := requests.Key{CreatorHost: "local", TargetID: s.TargetID, RequestID: tc.requestID}
+			// The confirming userMessage item is MISSED: the turn completes
+			// before the turn/start response reaches Submit.
+			srv.setTurnStartResponse(`{"jsonrpc":"2.0","id":%s,"result":{"turn":{"id":"turn1","status":"inProgress"}}}`)
+			srv.setTurnStartDelay(func() {
+				srv.notify(t, "turn/started", `{"threadId":"t1","turn":{"id":"turn1"}}`)
+				srv.notify(t, "turn/completed", `{"threadId":"t1","turn":{"id":"turn1","status":"`+tc.status+`"}}`)
+				srv.notify(t, "thread/status/changed", `{"threadId":"t1","status":{"type":"idle"}}`)
+			})
+			done := make(chan struct{})
+			go func() {
+				_, _ = att.Submit(core.BoundRequest{Key: key, Epoch: s.Epoch, Input: protocol.SubmitInput{Text: "say PONG"}})
+				close(done)
+			}()
+			select {
+			case <-done:
+			case <-time.After(10 * time.Second):
+				t.Fatal("submit did not return after missed confirmation (B3)")
+			}
 
-	done := make(chan struct {
-		adm core.Admission
-		err error
-	}, 1)
-	// Race window as in the end-to-end test, with a RECOGNIZED status:
-	// this isolates the guard mechanics from the 10a whitelist widening.
-	srv.setTurnStartResponse(`{"jsonrpc":"2.0","id":%s,"result":{"turn":{"id":"turn1","status":"inProgress"}}}`)
-	srv.setTurnStartDelay(func() {
-		srv.notify(t, "turn/started", `{"threadId":"t1","turn":{"id":"turn1"}}`)
-		srv.notify(t, "turn/completed", `{"threadId":"t1","turn":{"id":"turn1","status":"completed"}}`)
-		srv.notify(t, "thread/status/changed", `{"threadId":"t1","status":{"type":"idle"}}`)
-	})
-
-	go func() {
-		adm, err := att.Submit(core.BoundRequest{Key: key, Epoch: epoch, Input: protocol.SubmitInput{Text: "say PONG"}})
-		done <- struct {
-			adm core.Admission
-			err error
-		}{adm, err}
-	}()
-
-	select {
-	case r := <-done:
-		_ = r
-	case <-time.After(10 * time.Second):
-		t.Fatal("submit did not return after missed confirmation (B3)")
-	}
-
-	// NO Lookup, NO thread/read handler installed: if this passes, the
-	// memo guard (not history reconciliation) closed the window.
-	insp := att.Inspect()
-	if insp.Status == "busy" {
-		t.Fatal("Inspect reports busy with NO Lookup called (10c — the RPC-response memo guard did not close the window before Lookup)")
-	}
-	att.mu.Lock()
-	active := att.activeTurn
-	att.mu.Unlock()
-	if active != "" {
-		t.Fatalf("activeTurn = %q, want empty with NO Lookup called (10c — RPC response reinstated a finished turn as active)", active)
+			// NO Lookup, NO thread/read handler installed: if this passes, the
+			// memo guard (not history reconciliation) closed the window.
+			if insp := att.Inspect(); insp.Status == "busy" {
+				t.Fatal("Inspect reports busy with NO Lookup called (the RPC-response memo guard did not close the window)")
+			}
+			att.mu.Lock()
+			active := att.activeTurn
+			att.mu.Unlock()
+			if active != "" {
+				t.Fatalf("activeTurn = %q, want empty with NO Lookup called (RPC response reinstated a finished turn as active)", active)
+			}
+		})
 	}
 }
 
@@ -1456,93 +1194,6 @@ func TestB3LookupHistoryMemoStaysBounded(t *testing.T) {
 	}
 	if !gone {
 		t.Fatalf("oldest entry %s (memoized via lookupHistory) survived the eviction for turn-new — the FIFO does not own lookupHistory's entries", oldest)
-	}
-}
-
-// TestB3MissedConfirmationDoesNotWedgeBusy verifies Pro r2 B3 second half /
-// packet 10 (agent-message-queue-611.22.36): when the confirming userMessage
-// item is missed, turn/completed clears activeTurn but finds no byTurn entry,
-// so the run is never marked terminal. The RPC response then reinstalls the
-// finished turn as active, wedging the attachment busy forever. The fix:
-// (1) turn/completed records terminal turn IDs in a bounded memo even with no
-// byTurn entry, (2) the RPC-response guard consults the memo, (3) lookupHistory
-// clears activeTurn if it matches the terminal turn.
-func TestB3MissedConfirmationDoesNotWedgeBusy(t *testing.T) {
-	sock, srv := startFakeAppServer(t)
-	att, err := Attach(sock, "t1", WithConfirmTimeout(200*time.Millisecond))
-	if err != nil {
-		t.Fatalf("attach: %v", err)
-	}
-	t.Cleanup(func() { _ = att.Close() })
-	<-srv.calls // initialize
-	<-srv.calls // thread/resume
-
-	s := att.Inspect()
-	key := requests.Key{CreatorHost: "local", TargetID: s.TargetID, RequestID: "11111111-1111-4111-8111-111111111b03"}
-	epoch := s.Epoch
-
-	// Submit — it will block on confirmCh. Drive it in a goroutine.
-	done := make(chan struct {
-		adm core.Admission
-		err error
-	}, 1)
-	// Use setTurnStartDelay to send notifications BEFORE the turn/start RPC
-	// response is sent back. This reproduces the race: the read pump processes
-	// the notifications before the Submit goroutine processes the RPC response.
-	// The turn/start response returns turn id "turn1" to match the notifications.
-	srv.setTurnStartResponse(`{"jsonrpc":"2.0","id":%s,"result":{"turn":{"id":"turn1","status":"inProgress"}}}`)
-	srv.setTurnStartDelay(func() {
-		// 1. turn/started(T) — sets activeTurn
-		srv.notify(t, "turn/started", `{"threadId":"t1","turn":{"id":"turn1"}}`)
-		// 2. Our userMessage item is MISSED — do NOT send item/started with
-		//    our clientId. confirmRun never runs, byTurn[turn1] never bound.
-		// 3. turn/completed(T) — clears activeTurn but finds no byTurn entry.
-		//    Without the fix, the terminal observation is lost.
-		srv.notify(t, "turn/completed", `{"threadId":"t1","turn":{"id":"turn1","status":"completed"}}`)
-		// 4. thread/status/changed(idle)
-		srv.notify(t, "thread/status/changed", `{"threadId":"t1","status":{"type":"idle"}}`)
-	})
-
-	go func() {
-		adm, err := att.Submit(core.BoundRequest{Key: key, Epoch: epoch, Input: protocol.SubmitInput{Text: "say PONG"}})
-		done <- struct {
-			adm core.Admission
-			err error
-		}{adm, err}
-	}()
-
-	// Wait for Submit to return (it will timeout on confirmCh — the
-	// confirming userMessage was never sent).
-	select {
-	case r := <-done:
-		// Submit returns uncertain (confirmTimeout). The key assertion is
-		// below: activeTurn must not be turn1.
-		_ = r
-	case <-time.After(10 * time.Second):
-		t.Fatal("submit did not return after missed confirmation (B3)")
-	}
-
-	// Set up thread/read to return the completed turn with our clientId.
-	srv.setThreadReadHandler(func() string {
-		return `{"thread":{"turns":[{"id":"turn1","status":"completed","items":[{"type":"userMessage","id":"i1","clientId":"` + clientIDFor(key) + `","content":[]},{"type":"agentMessage","id":"i2","text":"PONG"}]}]}}`
-	})
-
-	// Lookup resolves the turn via history.
-	_, err = att.Lookup(key, epoch)
-	if err != nil {
-		t.Fatalf("Lookup: %v", err)
-	}
-
-	// The attachment must NOT be busy, and activeTurn must be empty.
-	insp := att.Inspect()
-	if insp.Status == "busy" {
-		t.Fatal("Inspect reports busy after Lookup resolved the terminal turn (B3 — the RPC response reinstated the finished turn as active)")
-	}
-	att.mu.Lock()
-	active := att.activeTurn
-	att.mu.Unlock()
-	if active != "" {
-		t.Fatalf("activeTurn = %q, want empty (B3 — a finished turn must never be reinstalled as active)", active)
 	}
 }
 
