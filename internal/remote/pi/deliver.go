@@ -276,7 +276,6 @@ type bridgeDir struct {
 	// Injectable for tests. Zero funcs fall through to the real files.
 	publish func(deliverRequest) error
 	receipt func(ref string) (*receipt, error)
-	events  func(ref string) ([]event, error)
 	live    func(now time.Time) livenessState
 }
 
@@ -405,9 +404,6 @@ func (b bridgeDir) readReceipt(ref string) (*receipt, error) {
 // tolerance: only the LAST rotation segment is read (the current file); a
 // missing file yields no events, never an error.
 func (b bridgeDir) readEvents(ref string) ([]event, error) {
-	if b.events != nil {
-		return b.events(ref)
-	}
 	data, err := os.ReadFile(filepath.Join(b.dir, "events", refSanitize(ref)+".jsonl"))
 	if os.IsNotExist(err) {
 		return nil, nil

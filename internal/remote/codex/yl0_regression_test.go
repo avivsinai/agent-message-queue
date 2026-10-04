@@ -145,24 +145,9 @@ func TestYl0PendingInteractionIsDeterministicOldest(t *testing.T) {
 		}
 	}
 
-	// And it must be the oldest run's interaction id, not an arbitrary one.
-	att.mu.Lock()
-	var oldest string
-	var oldestAt time.Time
-	for _, r := range att.runs {
-		if r.interaction == nil {
-			continue
-		}
-		if oldest == "" || r.createdAt.Before(oldestAt) || (r.createdAt.Equal(oldestAt) && r.interaction.InteractionID < oldest) {
-			oldestAt = r.createdAt
-			oldest = r.interaction.InteractionID
-		}
-	}
-	att.mu.Unlock()
-	if oldest == "" {
-		t.Fatal("no pending interaction found in runs")
-	}
-	if *first != oldest {
-		t.Fatalf("published %s, want oldest interaction %s (yl0)", *first, oldest)
+	// And it must be the oldest run's interaction: the first submit raised
+	// toolA.
+	if *first != "toolA" {
+		t.Fatalf("published %s, want the oldest interaction toolA (yl0)", *first)
 	}
 }
