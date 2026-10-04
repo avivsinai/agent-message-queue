@@ -494,7 +494,17 @@ remedy. Doctor exits 6 exactly when `failing` is not empty.
 `authenticated` means the relay accepted this body's AUTH. It does not prove
 that the relay materialized the owner binding or that any viewer is ready.
 
-## Claude Code
+`stale_harness` is advice, not a failure: it is reported under `notes` and
+never makes doctor exit non-zero. A different identity can also be a
+byte-identical copy or another binary with the same name, so the note asks
+the operator to decide, naming the running process and the installed path.
+A process whose executable identity cannot be read (lsof unavailable, a
+2-second probe timeout, or a first text record that is not a readable
+amq-acp path) is *unknown*, not current: it never counts as fine, and a
+single `stale_harness` note names every affected pid with the reason, so a
+stale process never just vanishes from the report. The whole probe runs
+under one 3-second total deadline (ps included) with a 500ms WaitDelay, so
+a stalled child cannot extend it.
 
 Submit writes one frame to the target session's cross-session socket. The
 socket answers nothing, so the ladder comes from the session's transcript:

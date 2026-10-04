@@ -1046,9 +1046,19 @@ func doctor(args []string) (any, int, error) {
 		report["failing"] = []boundaryFailure{}
 		return report, 0, nil
 	}
+	// notes carry non-failing advice in the same shape as failing entries;
+	// doctor exits 0 when only notes are present.
+	var notes []boundaryFailure
+	note := func(boundary, subject, detail, remedy string) {
+		notes = append(notes, boundaryFailure{Boundary: boundary, Subject: subject, Detail: detail, Remedy: remedy})
+	}
 	if _, err := os.Stat(stateDir); err != nil {
 		report["endpoint"] = "no state directory; run `amq-remote serve` once"
 		fail("endpoint", "", "no state directory", "run `amq-remote serve` once")
+		noteStaleACP(note)
+		if len(notes) > 0 {
+			report["notes"] = notes
+		}
 		return finish()
 	}
 	if detail := amqRouteDetail(c.root, *me); detail != "" {
@@ -1205,6 +1215,15 @@ func doctor(args []string) (any, int, error) {
 	case !errors.Is(rerr, os.ErrNotExist):
 		report["relay_error"] = rerr.Error()
 		fail("relay_auth", "relay-status.json", rerr.Error(), "restart serve; it rewrites relay-status.json")
+	}
+	// Stale harness (bbn): a Buzz agent can keep running an amq-acp that an
+	// upgrade replaced, so it answers from the removed binding contract.
+	// A different identity can also be a byte-identical copy or another
+	// binary with the same name, so this is advice, not a failure: it lands
+	// in notes and never makes doctor exit non-zero.
+	noteStaleACP(note)
+	if len(notes) > 0 {
+		report["notes"] = notes
 	}
 	return finish()
 }
