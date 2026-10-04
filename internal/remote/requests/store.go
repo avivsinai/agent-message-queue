@@ -298,6 +298,14 @@ func safeSegment(seg string) bool {
 // never disagree about a record's state. A present-but-undecodable file is
 // returned as an error (poison), not as absent, so a caller does not create a
 // conflicting revision-1 over a corrupt file.
+//
+// Creator hosts and target ids are case-sensitive protocol values, but on a
+// case-insensitive filesystem two keys that differ only by case share one
+// file (agent-message-queue-611.49). The record body carries its own key, so
+// a file that holds a different key is a conflict, never this key's record.
+// Create, Update, the markers, and compaction read through Get first, and
+// WriteMemo writes only a record its caller just read through Get, so the
+// conflict also stops every writer from overwriting the other key.
 func (s *Store) Get(k Key) (*Record, bool, error) {
 	p, err := s.path(k)
 	if err != nil {
@@ -306,6 +314,10 @@ func (s *Store) Get(k Key) (*Record, bool, error) {
 	rec, exists, err := s.readRecord(p)
 	if err != nil {
 		return nil, false, err
+	}
+	if exists && keyOf(rec) != k {
+		return nil, false, protocol.Refuse(protocol.CodeRequestConflict,
+			"record file for %s is held by %s", protocol.EncodeRef(k.CreatorHost, k.TargetID, k.RequestID), rec.RequestRef)
 	}
 	return rec, exists, nil
 }

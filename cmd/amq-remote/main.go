@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -124,10 +125,10 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	switch cmd {
 	case "serve":
 		code, err = serve(rest, stdout, stderr)
-		return finish(stderr, nil, false, code, err)
+		return finish(stdout, stderr, nil, false, code, err)
 	case "up":
-		code, err = up(rest, stdout, stderr)
-		return finish(stderr, nil, false, code, err)
+		code, err = up(rest, stdout, stderr, newExecSpawner)
+		return finish(stdout, stderr, nil, false, code, err)
 	case "sessions":
 		out, code, err = clientSimple(rest, protocol.OpSessionList, "")
 	case "inspect":
@@ -144,13 +145,13 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		out, code, err = listRequests(rest)
 	case "share":
 		code, err = share(rest, stdout, stderr)
-		return finish(stderr, nil, false, code, err)
+		return finish(stdout, stderr, nil, false, code, err)
 	case "attach":
 		code, err = attach(rest, stdout, stderr)
-		return finish(stderr, nil, false, code, err)
+		return finish(stdout, stderr, nil, false, code, err)
 	case "detach":
 		code, err = detach(rest, stdout, stderr)
-		return finish(stderr, nil, false, code, err)
+		return finish(stdout, stderr, nil, false, code, err)
 	case "doctor":
 		out, code, err = doctor(rest)
 	case "claude":
@@ -164,7 +165,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return protocol.ExitUsage
 	}
 	wantJSON := hasFlag(rest, "json")
-	return finish(stdout, out, wantJSON, code, err)
+	return finish(stdout, stderr, out, wantJSON, code, err)
 }
 
 // parseInterleaved accepts flags before or after positional arguments, the
@@ -197,8 +198,9 @@ func hasFlag(args []string, name string) bool {
 	return false
 }
 
-// finish prints the reply and maps the outcome to the AMQ exit contract.
-func finish(w io.Writer, out any, asJSON bool, code int, err error) int {
+// finish prints the reply and maps the outcome to the AMQ exit contract. The
+// result and a JSON error go to stdout; a human-readable error goes to stderr.
+func finish(stdout, stderr io.Writer, out any, asJSON bool, code int, err error) int {
 	if err != nil {
 		if asJSON {
 			body := map[string]any{"error": err.Error()}
@@ -206,9 +208,9 @@ func finish(w io.Writer, out any, asJSON bool, code int, err error) int {
 			if errors.As(err, &r) {
 				body["code"] = string(r.Code)
 			}
-			_ = json.NewEncoder(w).Encode(body)
+			_ = json.NewEncoder(stdout).Encode(body)
 		} else {
-			fmt.Fprintln(os.Stderr, "amq-remote:", err)
+			_, _ = fmt.Fprintln(stderr, "amq-remote:", err)
 		}
 		if code != 0 {
 			return code
@@ -217,11 +219,11 @@ func finish(w io.Writer, out any, asJSON bool, code int, err error) int {
 	}
 	if out != nil {
 		if asJSON {
-			enc := json.NewEncoder(w)
+			enc := json.NewEncoder(stdout)
 			enc.SetIndent("", "  ")
 			_ = enc.Encode(out)
 		} else {
-			printHuman(w, out)
+			printHuman(stdout, out)
 		}
 	}
 	return code
@@ -315,14 +317,6 @@ type serveFlags struct {
 	poll         *time.Duration
 }
 
-// serveFlagNames is the set of flag names defineServeFlags registers (plus
-// the common root/json). up validates forwarded flags against it.
-var serveFlagNames = map[string]bool{
-	"root": true, "json": true, "me": true, "fake": true,
-	"codex-socket": true, "codex-thread": true, "codex-approve": true,
-	"manifest": true, "discover": true, "poll": true,
-}
-
 // defineServeFlags registers serve's flags on fs exactly once and returns
 // their pointers. meDefault differs per command: serve defaults the endpoint
 // handle to amqio.DefaultHandle, up to its own supervisor default.
@@ -396,10 +390,10 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 		},
 	})
 	// .13: the manifest load, flag-sugar append (--fake, --codex-socket),
-	// validation and owned startup are ONE production path, serveStartup —
+	// validation and owned startup are ONE production path, serveStartupFrom —
 	// shared verbatim by the focused regressions (611.13 r4). Flag sugar is
 	// built here (it needs LoadedThreads/flags) and handed in as entries; a
-	// duplicate target is exit 2 via the typed validation error. serveStartup
+	// duplicate target is exit 2 via the typed validation error. serveStartupFrom
 	// returns Load/Validate failures classified: validation -> exit 2, I/O or
 	// parse -> runtime error.
 	var sugar []manifest.Adapter
@@ -506,7 +500,7 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 		printSession(stdout, s)
 	}
 	// Relay surface (611.15): one authenticated client per share. The
-	// manifest was already loaded and validated by serveStartup.
+	// manifest was already loaded and validated by serveStartupFrom.
 	var relays *sync.WaitGroup
 	if relayCfg != nil {
 		// Fresh remote commands are admitted only now, after attachment and
@@ -1263,7 +1257,7 @@ func errSuffix(e string) string {
 
 func newUUID() (string, error) {
 	var b [16]byte
-	if _, err := io.ReadFull(randReader, b[:]); err != nil {
+	if _, err := io.ReadFull(rand.Reader, b[:]); err != nil {
 		return "", err
 	}
 	b[6] = (b[6] & 0x0f) | 0x40
@@ -1359,9 +1353,10 @@ func loadRefusals(stateDir string) ([]refusalEntry, error) {
 }
 
 // wireCarrier installs the shipped durability-warning handler and the
-// cross-project reply router on the carrier. serveStartup calls it inside
-// startupSequence, between amqio.New and Reconcile, so the startup revision
-// publishes through the fully-configured carrier (w4x, review-a13 parity).
+// cross-project reply router on the carrier. serve hands it to
+// serveStartupFrom, which runs it inside startupSequence between amqio.New and
+// Reconcile, so the startup revision publishes through the fully-configured
+// carrier (w4x, review-a13 parity).
 func wireCarrier(root string, warn io.Writer) func(*amqio.Carrier) {
 	return func(c *amqio.Carrier) {
 		if warn != nil {
@@ -1402,42 +1397,25 @@ func replyRouterFor(root string) amqio.ReplyRouter {
 // TestBK4ServeWiringCompactionNonVacuous. Reconcile is NOT called here;
 // serve calls it after SetPublish + Register + attachments are wired
 // (round-4 P0: running it here marks every running record attachment_lost).
-func openServeStore(stateDir string, now func() time.Time) (*requests.Store, *core.Endpoint, error) {
+func openServeStore(stateDir string) (*requests.Store, *core.Endpoint, error) {
 	store, err := requests.Open(stateDir, requests.WithMaxStoreBytes(protocol.DefaultMaxStoreBytes))
 	if err != nil {
 		return nil, nil, err
 	}
-	cfg := core.Config{
+	ep := core.New(core.Config{
 		Store:          store,
 		CompactHorizon: protocol.DefaultCompactHorizon,
-	}
-	if now != nil {
-		cfg.Now = now
-	}
-	ep := core.New(cfg)
+	})
 	return store, ep, nil
 }
 
-// startupSequence is the construction-plus-reconcile order serve runs, as
-// ONE callable sequence so tests can pin it (611.22.19 round-4 P0): open
-// store, SetPublish, carrier publish callback, Register attachments, and
-// ONLY THEN Reconcile. Moving Reconcile before SetPublish/Register marks
-// every running record attachment_lost and loses the first reconcile
-// revision to a no-op publisher — both round-5 P0 regressions in main_test.go
-// go red on exactly that inversion. The carrier is constructed INSIDE this
-// sequence (round-6: store, SetPublish, carrier, Register, Reconcile) so the
-// carrier is assigned before Reconcile runs — the startup revision reaches
-// the carrier, not a no-op publisher. The carrierOut parameter (if non-nil)
-// is assigned the carrier before Reconcile, so the caller's publish closure
-// (which captures the same carrier pointer) sees it during Reconcile. serve
-// passes its attachments; the returned store is closed by the caller on error.
-// serveStartup is the ONE production startup path serve runs, and the one
-// the focused regressions call (611.22.19 round-4 P0 made startup one
-// callable sequence; 611.13 r4 extends the same rule to the whole
-// manifest->validate->Build->persist->sequence chain): it loads the manifest
-// from manifestFile, appends the caller's flag-sugar entries, validates, and
-// owns the startup. Validation failures come back typed so serve maps them
-// to exit 2; the tests assert them through this same path.
+// serveStartupFrom is the ONE production startup path serve runs (611.22.19
+// round-4 P0 made startup one callable sequence; 611.13 r4 extends the same
+// rule to the whole validate->Build->persist->sequence chain): it appends the
+// caller's flag-sugar entries to the loaded manifest, validates, and owns the
+// startup. serve loads the manifest once and hands the snapshot in, so target
+// attachment and the relay use one validated file (codex slice 1 review #8).
+// Validation failures come back typed so serve maps them to exit 2.
 //
 // Order matters: Build runs BEFORE startupSequence, so a refusing adapter is
 // a typed outcome, not a lost start; generated diagnostics (refusals.json,
@@ -1448,20 +1426,7 @@ func openServeStore(stateDir string, now func() time.Time) (*requests.Store, *co
 // failures are warnings on the warn writer: doctor reads what exists, and
 // losing startup keeps its own exit code. Refusals are rewritten EVERY owned
 // start, including empty — a removed adapter must not persist as 'refused'
-// forever. The caller owns the returned endpoint: Close it when done, even
-// on test assertion failure (the lock and listener must not outlive the
-// caller).
-func serveStartup(stateDir, root, handle, manifestFile string, sugar []manifest.Adapter, publish core.Publisher, carrierOut **amqio.Carrier, warn io.Writer, wire func(*amqio.Carrier)) (*requests.Store, *core.Endpoint, *amqio.Carrier, []registry.Outcome, error) {
-	mf, err := manifest.Load(manifestFile)
-	if err != nil {
-		return nil, nil, nil, nil, err
-	}
-	return serveStartupFrom(stateDir, root, handle, mf, sugar, publish, carrierOut, warn, wire)
-}
-
-// serveStartupFrom is serveStartup over an already loaded manifest, so serve
-// can use one validated snapshot for both target attachment and the relay
-// (codex slice 1 review #8).
+// forever. The caller owns the returned endpoint: Close it when done.
 func serveStartupFrom(stateDir, root, handle string, mf manifest.File, sugar []manifest.Adapter, publish core.Publisher, carrierOut **amqio.Carrier, warn io.Writer, wire func(*amqio.Carrier)) (*requests.Store, *core.Endpoint, *amqio.Carrier, []registry.Outcome, error) {
 	mf.Adapters = append(append([]manifest.Adapter(nil), mf.Adapters...), sugar...)
 	if verr := manifest.Validate(mf); verr != nil {
@@ -1481,16 +1446,7 @@ func serveStartupFrom(stateDir, root, handle string, mf manifest.File, sugar []m
 			}
 		}
 	}
-	// w4x (review-a13 parity): the durability-warning handler and the
-	// cross-project reply router must be installed on the carrier BEFORE
-	// Reconcile runs, not after serveStartup returns. Reconcile publishes
-	// through the carrier, so a warning or a reply routed during the
-	// startup revision must already see the shipped handlers. serve passes
-	// its wireCarrier closure in; tests pass nil (or a recorder) directly.
-	if wire == nil {
-		wire = wireCarrier(root, warn)
-	}
-	store, ep, carrier, err := startupSequence(stateDir, root, handle, nil, publish, carrierOut, wire, attachments...)
+	store, ep, carrier, err := startupSequence(stateDir, root, handle, publish, carrierOut, wire, attachments...)
 	if err != nil {
 		return store, ep, carrier, refusals, err
 	}
@@ -1503,8 +1459,19 @@ func serveStartupFrom(stateDir, root, handle string, mf manifest.File, sugar []m
 	return store, ep, carrier, refusals, nil
 }
 
-func startupSequence(stateDir, root, handle string, now func() time.Time, publish core.Publisher, carrierOut **amqio.Carrier, wire func(*amqio.Carrier), attachments ...core.Attachment) (*requests.Store, *core.Endpoint, *amqio.Carrier, error) {
-	store, ep, err := openServeStore(stateDir, now)
+// startupSequence is the construction-plus-reconcile order serve runs, as
+// ONE callable sequence so tests can pin it (611.22.19 round-4 P0): open
+// store, SetPublish, construct the carrier, wire it, Register attachments,
+// and ONLY THEN Reconcile. Moving Reconcile before SetPublish/Register marks
+// every running record attachment_lost and loses the first reconcile
+// revision to a no-op publisher (round-5 P0). The carrier is constructed and
+// wired INSIDE this sequence (round-6, w4x) so the startup revision reaches
+// the fully-configured carrier, not a no-op publisher. carrierOut is assigned
+// the carrier before Reconcile, so the caller's publish closure (which
+// captures the same pointer) sees it during Reconcile. The returned store is
+// closed by the caller on error.
+func startupSequence(stateDir, root, handle string, publish core.Publisher, carrierOut **amqio.Carrier, wire func(*amqio.Carrier), attachments ...core.Attachment) (*requests.Store, *core.Endpoint, *amqio.Carrier, error) {
+	store, ep, err := openServeStore(stateDir)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -1524,9 +1491,7 @@ func startupSequence(stateDir, root, handle string, now func() time.Time, publis
 	// w4x: wire the shipped warn handler + reply router BEFORE Reconcile so
 	// the startup revision already publishes through the fully-configured
 	// carrier (ordering parity with pre-#800 main).
-	if wire != nil {
-		wire(carrier)
-	}
+	wire(carrier)
 	if carrierOut != nil {
 		*carrierOut = carrier
 	}

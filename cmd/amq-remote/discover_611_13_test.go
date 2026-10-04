@@ -29,7 +29,7 @@ func TestUpDiscoverListsCandidatesWithoutSupervising(t *testing.T) {
 	root := t.TempDir()
 	regPath := filepath.Join(root, "supervisor", "registry.json")
 	var out, errOut bytes.Buffer
-	code, err := up([]string{"--root", root, "--discover", "--registry", regPath}, &out, &errOut)
+	code, err := up([]string{"--root", root, "--discover", "--registry", regPath}, &out, &errOut, newExecSpawner)
 	if err != nil || code != 0 {
 		t.Fatalf("up --discover: code=%d err=%v stderr=%s", code, err, errOut.String())
 	}
@@ -65,7 +65,7 @@ func TestDiscoverKeepsClaudeCandidateWhenCodexSocketIsStale(t *testing.T) {
 	}
 	_ = l.Close() // leaves the socket file with no listener
 	var out, errOut bytes.Buffer
-	code, err := up([]string{"--root", t.TempDir(), "--discover", "--codex-socket", stale}, &out, &errOut)
+	code, err := up([]string{"--root", t.TempDir(), "--discover", "--codex-socket", stale}, &out, &errOut, newExecSpawner)
 	if err != nil || code != 0 {
 		t.Fatalf("code=%d err=%v stderr=%s", code, err, errOut.String())
 	}
@@ -83,7 +83,7 @@ func TestDiscoverRefusesExplicitNonSocket(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out, errOut bytes.Buffer
-	code, err := up([]string{"--root", t.TempDir(), "--discover", "--codex-socket", notSock}, &out, &errOut)
+	code, err := up([]string{"--root", t.TempDir(), "--discover", "--codex-socket", notSock}, &out, &errOut, newExecSpawner)
 	if code != 2 || err == nil {
 		t.Fatalf("code=%d err=%v, want usage refusal for a non-socket --codex-socket", code, err)
 	}

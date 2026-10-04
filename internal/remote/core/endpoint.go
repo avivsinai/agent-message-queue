@@ -128,6 +128,13 @@ type Endpoint struct {
 	// attempt or the owner's chained attempt) and Close's drain waits for the
 	// whole chain (Astra B784-1, 611.22.48 follow-up round 2).
 	pubPending map[requests.Key]int64
+	// failed holds the visible projection of a request whose async durable
+	// write failed. Reads serve it so the owner sees uncertain, not a stale
+	// running (611.50). It ends at the next durable write of the key, or
+	// when a Reconcile pass over the key returns without error and no newer
+	// failure was set meanwhile (failSeq tells them apart).
+	failed  map[requests.Key]failure
+	failSeq int64
 	// B13 lifecycle: state transitions accepting -> draining -> closed.
 	// inFlight counts handlers between entry (registerInFlight) and exit
 	// (releaseInFlight). drained is a condition variable Close waits on.
@@ -177,6 +184,7 @@ func New(cfg Config) *Endpoint {
 		visible:          map[requests.Key]int64{},
 		publishing:       map[requests.Key]bool{},
 		pubPending:       map[requests.Key]int64{},
+		failed:           map[requests.Key]failure{},
 		drainObligations: map[requests.Key]int64{},
 		state:            stateAccepting,
 		drainTO:          drainTimeout,
@@ -207,8 +215,8 @@ func (e *Endpoint) SetPublish(p Publisher) {
 	e.publish = p
 }
 
-// Observe registers a callback for every record write. Tests use it to
-// collect state history; production uses it for the activity ring.
+// Observe registers a callback for every record write and every storage
+// failure projection. Tests use it to collect state history.
 func (e *Endpoint) Observe(fn func(*requests.Record)) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -755,6 +763,9 @@ func (e *Endpoint) get(cmd *protocol.Command) (protocol.Reply, error) {
 	}
 	if !ok {
 		return protocol.Reply{}, protocol.Refuse(protocol.CodeNotFound, "no record for request_ref")
+	}
+	if snap, ok := e.failedLocked(rec); ok {
+		return protocol.Reply{Snapshot: snap, Outcome: protocol.Outcome{Op: protocol.OpRequestGet}}, nil
 	}
 	out := protocol.Outcome{Op: protocol.OpRequestGet}
 	if rec.State == protocol.StateRejected {
@@ -1363,7 +1374,36 @@ func (e *Endpoint) notifyStorageFailureLocked(rec *requests.Record, err error) {
 	fail.State = protocol.StateUncertain
 	fail.Code = code
 	fail.Result = nil // never advertise a result we could not persist
+	fail.Interaction = nil
+	e.failSeq++
+	e.failed[keyOfRecord(rec)] = failure{snap: fail.Snapshot, seq: e.failSeq}
 	e.notifyLocked(&fail)
+}
+
+// failure is a storage-failure projection and the order in which it was set.
+type failure struct {
+	snap protocol.Snapshot
+	seq  int64
+}
+
+// failedLocked returns the storage-failure projection for the durable record
+// cur. A durable terminal state is final, so it wins over the projection.
+// The projection carries cur's revisions: a revision that was never stored
+// must not reach a carrier that tracks revisions (Pro review of #941).
+// The caller holds e.mu.
+func (e *Endpoint) failedLocked(cur *requests.Record) (protocol.Snapshot, bool) {
+	key := keyOfRecord(cur)
+	f, ok := e.failed[key]
+	if !ok {
+		return protocol.Snapshot{}, false
+	}
+	if cur.State.Terminal() {
+		delete(e.failed, key)
+		return protocol.Snapshot{}, false
+	}
+	snap := f.snap
+	snap.Revision = cur.Revision
+	return snap, true
 }
 
 func boundResult(r *protocol.Result) *protocol.Result {
@@ -1883,6 +1923,7 @@ func (e *Endpoint) commitLocked(rec *requests.Record, t *target) (string, error)
 	if err := e.store.Update(rec); err != nil {
 		return "", err
 	}
+	delete(e.failed, keyOfRecord(rec))
 	e.notifyLocked(rec)
 	ackDigest := ""
 	if rec.State.Terminal() && t != nil {
@@ -1916,6 +1957,9 @@ func (e *Endpoint) Reconcile() error {
 	}
 	var firstErr error
 	for _, rec := range recs {
+		e.mu.Lock()
+		seen := e.failed[keyOfRecord(rec)].seq
+		e.mu.Unlock()
 		var rerr error
 		switch rec.State {
 		case protocol.StateDispatching, protocol.StateRunning, protocol.StateUncertain:
@@ -1946,6 +1990,15 @@ func (e *Endpoint) Reconcile() error {
 			default:
 				rerr = e.replayTerminalAck(rec)
 			}
+		}
+		if rerr == nil {
+			// The pass retried the write a storage failure lost and nothing
+			// failed, so the durable record is the truth again (611.50).
+			e.mu.Lock()
+			if f, ok := e.failed[keyOfRecord(rec)]; ok && f.seq == seen {
+				delete(e.failed, keyOfRecord(rec))
+			}
+			e.mu.Unlock()
 		}
 		if rerr != nil && firstErr == nil {
 			firstErr = rerr
@@ -2212,7 +2265,13 @@ func (e *Endpoint) reconcileCancelRetry(rec *requests.Record) error {
 	ev, nerr := t.att.CancelExact(key, epoch)
 	e.mu.Lock()
 	rec, exists, err := e.store.Get(key)
-	if err != nil || !exists {
+	if err != nil {
+		// The cancel outcome is not saved: report it so Reconcile keeps any
+		// failure projection (Pro review of #941).
+		e.mu.Unlock()
+		return err
+	}
+	if !exists {
 		e.mu.Unlock()
 		return nil
 	}
@@ -2221,6 +2280,7 @@ func (e *Endpoint) reconcileCancelRetry(rec *requests.Record) error {
 		runID = *rec.NativeRun
 	}
 	if _, cerr := e.applyCancelOutcomeLocked(rec, t, key, epoch, runID, ev, nerr); cerr != nil {
+		e.notifyStorageFailureLocked(rec, cerr)
 		e.mu.Unlock()
 		return cerr
 	}
@@ -2771,6 +2831,11 @@ func (e *Endpoint) Wait(ctx context.Context, ref string) (protocol.Snapshot, err
 	for {
 		e.mu.Lock()
 		rec, ok, err := e.store.Get(key)
+		var failed protocol.Snapshot
+		var isFailed bool
+		if err == nil && ok {
+			failed, isFailed = e.failedLocked(rec)
+		}
 		ch := e.changed
 		e.mu.Unlock()
 		if err != nil {
@@ -2778,6 +2843,9 @@ func (e *Endpoint) Wait(ctx context.Context, ref string) (protocol.Snapshot, err
 		}
 		if !ok {
 			return protocol.Snapshot{}, protocol.Refuse(protocol.CodeNotFound, "no record for request_ref")
+		}
+		if isFailed {
+			return failed, nil
 		}
 		if rec.State.Terminal() || rec.State == protocol.StateUncertain {
 			return rec.Snapshot, nil

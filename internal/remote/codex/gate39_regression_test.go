@@ -2,6 +2,7 @@ package codex
 
 import (
 	"runtime"
+	"sync"
 	"testing"
 	"time"
 
@@ -168,12 +169,22 @@ func TestGate3UnrecognisedStatusKeepsActiveTurn(t *testing.T) {
 
 	// A status type this client does not know — today meaning unknown, but
 	// plausibly "still running" in a future Codex release — must not clear
-	// the live turn.
+	// the live turn. Observers run on the read pump after the adapter's own
+	// handling, so seeing the frame means the handler already ran.
+	handled := make(chan struct{})
+	var handledOnce sync.Once
+	stop := att.ObserveNotifications(func(n Notification) {
+		if n.Method == "thread/status/changed" {
+			handledOnce.Do(func() { close(handled) })
+		}
+	})
+	defer stop()
 	srv.notify(t, "thread/status/changed", `{"threadId":"t1","status":{"type":"definitelyRunning"}}`)
-	// Negative assertion: an unrecognised status must NOT clear a live
-	// activeTurn. The wait window is the assertion (500ms), not a poll;
-	// time.After fires exactly once.
-	<-time.After(500 * time.Millisecond)
+	select {
+	case <-handled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the status notification was never handled")
+	}
 	att.mu.Lock()
 	if att.activeTurn != liveTurn {
 		att.mu.Unlock()
