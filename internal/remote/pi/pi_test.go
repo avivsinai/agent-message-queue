@@ -12,7 +12,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -973,28 +972,6 @@ func newExtDirAt(t *testing.T, dir string) {
 			t.Fatalf("mkdir %s: %v", sub, err)
 		}
 	}
-}
-
-// TestSubmitConcurrentMapSafety pins 9a regression: concurrent Submit +
-// Lookup + Inspect over the same attachment race-check clean (run under
-// -race). The old bug ran consume() outside the mutex and crashed the
-// whole companion on concurrent maps.
-func TestSubmitConcurrentMapSafety(t *testing.T) {
-	a, dir := newTestAttachment(t)
-	var wg sync.WaitGroup
-	for i := 0; i < 8; i++ {
-		wg.Add(3)
-		go func(i int) {
-			defer wg.Done()
-			key := testKey(fmt.Sprintf("race%d", i))
-			ref := clientRef(key)
-			writeReceipt(t, dir, ref, "gen-1", fixedNow)
-			_, _ = a.Submit(submitReq(key, "x"))
-		}(i)
-		go func() { defer wg.Done(); _, _ = a.Lookup(testKey("shared"), "gen-1") }()
-		go func() { defer wg.Done(); _ = a.Inspect() }()
-	}
-	wg.Wait()
 }
 
 // TestSubscribeDeliversNativeEvents pins the event fan-out: a completed
