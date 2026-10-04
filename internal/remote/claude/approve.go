@@ -519,6 +519,39 @@ func writeResolved(home, sessionID string, r approvalResolved) error {
 	return createNewJSON(dir, r.InteractionID+".json", r)
 }
 
+// rejected/<iid>-<proof> records that the hook could not verify one allow
+// answer, named by the hash of its evidence: that answer never applies,
+// a deny or a new proof replaces it, and the endpoint drops its intent
+// (Pro review of #936 r2). A record names one exact proof, so it never
+// retires a newer one.
+
+// proofName is the rejected record's name for an allow's evidence.
+func proofName(interactionID string, evidence json.RawMessage) string {
+	sum := sha256.Sum256(evidence)
+	return interactionID + "-" + hex.EncodeToString(sum[:16])
+}
+
+// markRejected records, create-new, that the hook could not verify this
+// allow's evidence.
+func markRejected(home, sessionID, interactionID string, evidence json.RawMessage, reason string) error {
+	dir, err := ensureApproveSubdir(home, sessionID, "rejected")
+	if err != nil {
+		return err
+	}
+	err = createNewJSON(dir, proofName(interactionID, evidence), map[string]string{"reason": reason})
+	if errors.Is(err, errFileExists) {
+		return nil
+	}
+	return err
+}
+
+// rejected reports whether the hook recorded that it could not verify
+// this allow's evidence.
+func rejected(home, sessionID, interactionID string, evidence json.RawMessage) bool {
+	fi, err := os.Lstat(filepath.Join(approveDir(home, sessionID), "rejected", proofName(interactionID, evidence)))
+	return err == nil && fi.Mode().IsRegular()
+}
+
 // ApprovalPin is the DM edge's pin file content. Owner is the share's owner
 // pubkey: the attachment offers allow only when the installed hook pins the
 // same owner. It decides the offer only; the hook's own pin decides allow.
@@ -587,15 +620,15 @@ func livePins(home, sessionID string) []approvalPin {
 }
 
 // allowPinned reports whether an allow can reach this session's calls: the
-// installed hook pins an owner, and a live share pin names the same owner.
-// It decides only whether the DM offers allow.
+// installed hook pins a whole share, and a live share pin names the same
+// owner and share session. It decides only whether the DM offers allow.
 func allowPinned(home, sessionID string) bool {
-	owner := PermissionHookOwner(home)
-	if owner == "" {
+	pin := PermissionHookPin(home)
+	if !pin.Complete() {
 		return false
 	}
 	for _, p := range livePins(home, sessionID) {
-		if p.Owner == owner {
+		if p.Owner == pin.Owner && p.Share == pin.Session {
 			return true
 		}
 	}
@@ -663,10 +696,22 @@ func (c AllowConfig) share(sessionID string) (AllowShare, error) {
 }
 
 // HookPin is what the PermissionRequest hook command line pins: the owner
-// pubkey, and the AMQ root (and optionally the share session) whose
-// manifest and enrolled credentials name the share. Claude cannot edit the
-// settings file that holds it without a prompt.
-type HookPin struct{ Owner, Root, Session string }
+// pubkey and the share an allow must come from, as install-approval-hook
+// read it at install time: its relay URL, body pubkey, DM channel and
+// target. Root and Session only locate the enrolled body secret, which must
+// match Body. Claude cannot edit the settings file that holds the pin
+// without a prompt, and no file outside the pin changes what an allow must
+// prove.
+type HookPin struct {
+	Owner, Root, Session         string
+	Relay, Body, Channel, Target string
+}
+
+// Complete reports whether the pin names everything an allow needs.
+func (p HookPin) Complete() bool {
+	return ValidOwner(p.Owner) && ValidOwner(p.Body) && filepath.IsAbs(p.Root) &&
+		p.Session != "" && p.Relay != "" && p.Channel != "" && p.Target != ""
+}
 
 // allowFactory builds the AllowConfig for a pin; cmd registers the one
 // that reads the manifest and the relay.

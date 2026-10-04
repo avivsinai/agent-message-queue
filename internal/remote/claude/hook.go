@@ -104,8 +104,8 @@ var (
 // change the pin on its own. An empty owner installs a reject-only hook.
 // A marked entry with another command is replaced; the same one is kept.
 func InstallPermissionHook(home, bin string, wait time.Duration, pin HookPin) error {
-	if pin.Owner != "" && (!ValidOwner(pin.Owner) || !filepath.IsAbs(pin.Root)) {
-		return fmt.Errorf("an owner pin needs a 64 lowercase hex owner and an absolute AMQ root, got %q and %q", pin.Owner, pin.Root)
+	if pin != (HookPin{}) && !pin.Complete() {
+		return fmt.Errorf("an owner pin needs the owner, an absolute AMQ root, the share session, its relay, body, DM channel and target: %+v", pin)
 	}
 	cmds, err := installedCommands(home, permissionSpec)
 	if err != nil {
@@ -163,12 +163,9 @@ func installedCommands(home string, spec hookSpec) ([]string, error) {
 	return out, nil
 }
 
-// The pin flags as permissionHookCommand writes them.
-var (
-	ownerFlagRe   = regexp.MustCompile(` --owner ([0-9a-f]{64})(?: |$)`)
-	rootFlagRe    = regexp.MustCompile(` --root '((?:[^']|'\\'')*)'`)
-	sessionFlagRe = regexp.MustCompile(` --session '((?:[^']|'\\'')*)'`)
-)
+// pinFlagRe is one pin flag as permissionHookCommand writes it: a name and
+// a single-quoted value.
+var pinFlagRe = regexp.MustCompile(` --([a-z]+) '((?:[^']|'\\'')*)'`)
 
 // PermissionHookPin is the pin of the installed PermissionRequest hook,
 // empty when there is no hook, no pin, or more than one hook.
@@ -177,22 +174,37 @@ func PermissionHookPin(home string) HookPin {
 	if err != nil || len(cmds) != 1 {
 		return HookPin{}
 	}
-	unquote := func(re *regexp.Regexp) string {
-		if m := re.FindStringSubmatch(cmds[0]); m != nil {
-			return strings.ReplaceAll(m[1], `'\''`, `'`)
+	var pin HookPin
+	for _, m := range pinFlagRe.FindAllStringSubmatch(cmds[0], -1) {
+		if f := pin.field(m[1]); f != nil {
+			*f = strings.ReplaceAll(m[2], `'\''`, `'`)
 		}
-		return ""
-	}
-	pin := HookPin{Root: unquote(rootFlagRe), Session: unquote(sessionFlagRe)}
-	if m := ownerFlagRe.FindStringSubmatch(cmds[0]); m != nil {
-		pin.Owner = m[1]
 	}
 	return pin
 }
 
-// PermissionHookOwner is the owner pubkey the installed PermissionRequest
-// hook pins, or "".
-func PermissionHookOwner(home string) string { return PermissionHookPin(home).Owner }
+// pinFlags are the pin's command line flags, in the order written.
+var pinFlags = []string{"owner", "root", "session", "relay", "body", "channel", "target"}
+
+func (p *HookPin) field(name string) *string {
+	switch name {
+	case "owner":
+		return &p.Owner
+	case "root":
+		return &p.Root
+	case "session":
+		return &p.Session
+	case "relay":
+		return &p.Relay
+	case "body":
+		return &p.Body
+	case "channel":
+		return &p.Channel
+	case "target":
+		return &p.Target
+	}
+	return nil
+}
 
 // PinWarnings names the user settings that defeat the owner pin: a
 // bypassPermissions default mode, or a permissions.allow entry for every
@@ -359,10 +371,9 @@ func shellQuote(s string) string {
 // and the pin.
 func permissionHookCommand(bin string, wait time.Duration, pin HookPin) string {
 	cmd := permissionHookMarker + shellQuote(bin) + " claude permission-hook --wait " + strconv.Itoa(int(wait/time.Second))
-	if pin.Owner != "" {
-		cmd += " --owner " + pin.Owner + " --root " + shellQuote(pin.Root)
-		if pin.Session != "" {
-			cmd += " --session " + shellQuote(pin.Session)
+	if pin != (HookPin{}) {
+		for _, name := range pinFlags {
+			cmd += " --" + name + " " + shellQuote(*pin.field(name))
 		}
 	}
 	return cmd

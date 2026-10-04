@@ -127,14 +127,16 @@ type claudeApprovalE2E struct {
 	relay     *relaytest.Relay
 	relayURL  string
 	relayDown atomic.Bool
-	allow     claude.AllowConfig
-	msg       nostr.Event
-	ref, iid  string
-	dir       string
-	out       bytes.Buffer
-	errs      lockedBuffer
-	done      chan struct{}
-	exited    chan struct{}
+	// hookDown fails only the hook's own relay read.
+	hookDown atomic.Bool
+	allow    claude.AllowConfig
+	msg      nostr.Event
+	ref, iid string
+	dir      string
+	out      bytes.Buffer
+	errs     lockedBuffer
+	done     chan struct{}
+	exited   chan struct{}
 }
 
 func newClaudeApprovalE2E(t *testing.T) *claudeApprovalE2E {
@@ -167,10 +169,13 @@ func newClaudeApprovalE2EWith(t *testing.T, pinned bool, command string) *claude
 	e.relay, srv, e.relayURL = relaytest.Start(bodyHex, wire)
 	t.Cleanup(srv.Close)
 	owner := ""
+	var hookAllow claude.AllowConfig
 	if pinned {
 		owner = nostr.GetPublicKey(e.owner).Hex()
-		e.allow = e.allowConfig(owner, bodyHex, wire)
-		if err := claude.InstallPermissionHook(home, "/opt/amq-remote", claude.DefaultPermissionWait, claude.HookPin{Owner: owner, Root: "/amq-root"}); err != nil {
+		e.allow = e.allowConfig(owner, bodyHex, wire, &e.relayDown)
+		hookAllow = e.allowConfig(owner, bodyHex, wire, &e.hookDown)
+		pin := claude.HookPin{Owner: owner, Root: "/amq-root", Session: "share-1", Relay: e.relayURL, Body: bodyHex, Channel: "dm-1", Target: "cc-1"}
+		if err := claude.InstallPermissionHook(home, "/opt/amq-remote", claude.DefaultPermissionWait, pin); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -228,7 +233,7 @@ func newClaudeApprovalE2EWith(t *testing.T, pinned bool, command string) *claude
 		"tool_name": "Bash", "tool_input": map[string]any{"command": command}})
 	go func() {
 		defer close(e.exited)
-		claude.RunPermissionHook(home, bytes.NewReader(stdin), &e.out, &e.errs, e.done, time.Minute, e.allow)
+		claude.RunPermissionHook(home, bytes.NewReader(stdin), &e.out, &e.errs, e.done, time.Minute, hookAllow)
 	}()
 	e.dir = filepath.Join(home, ".claude", "sessions", "amq-approve", sid)
 	for deadline := time.Now().Add(5 * time.Second); e.iid == ""; time.Sleep(time.Millisecond) {
@@ -258,7 +263,7 @@ func newClaudeApprovalE2EWith(t *testing.T, pinned bool, command string) *claude
 // allowConfig is the pinned allow config the hook and the attachment use:
 // this share's identity and the real verifier, which signs in to the fake
 // relay as the body and reads the approval message's history there.
-func (e *claudeApprovalE2E) allowConfig(owner, body string, wire []string) claude.AllowConfig {
+func (e *claudeApprovalE2E) allowConfig(owner, body string, wire []string, down *atomic.Bool) claude.AllowConfig {
 	return claude.AllowConfig{
 		Owner: owner,
 		Share: func(string) (claude.AllowShare, error) {
@@ -272,7 +277,7 @@ func (e *claudeApprovalE2E) allowConfig(owner, body string, wire []string) claud
 				return err
 			}
 			url := e.relayURL
-			if e.relayDown.Load() {
+			if down.Load() {
 				url = "ws://127.0.0.1:1"
 			}
 			conn, err := relay.Connect(ctx, relay.Config{URL: url, Secret: e.body, AuthTag: wire})

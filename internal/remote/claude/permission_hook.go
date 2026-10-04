@@ -1,7 +1,6 @@
 package claude
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -154,9 +153,6 @@ func (h permissionHook) run(stdin io.Reader, stdout io.Writer, done <-chan struc
 		ticks = t.C
 	}
 	ignored := false
-	// failed is the evidence of the last allow that did not verify: it is
-	// not read from the relay again, and a new answer replaces it.
-	var failed []byte
 	// over reports that the hook may no longer decide: the terminal or the
 	// endpoint closed the approval, its deadline passed, or Claude ended
 	// the hook. It records how it ended when nothing else did.
@@ -181,12 +177,14 @@ func (h permissionHook) run(stdin io.Reader, stdout io.Writer, done <-chan struc
 		option, evidence := h.answer(answerPath, req)
 		if option == optionAllow {
 			want := AllowCheck{Share: share, Prompt: req.Preview, NotBefore: notBefore, NotAfter: deadline}
-			if bytes.Equal(evidence, failed) {
-				option = ""
+			if rejected(h.home, in.SessionID, id, evidence) {
+				option = "" // already refused: wait for a deny or a new proof
 			} else if err := h.verifyAllow(evidence, want, done); err != nil {
-				// Not applied and not consumed: no resolved record, so a
-				// new ✅ or a ❌ can still answer.
-				failed, option = evidence, ""
+				// Not applied and not consumed: no resolved record. The
+				// rejected record retires exactly this proof, so a ❌ or a
+				// new ✅ can still answer.
+				option = ""
+				_ = markRejected(h.home, in.SessionID, id, evidence, err.Error())
 				if h.stderr != nil {
 					_, _ = fmt.Fprintf(h.stderr, "amq-remote: ignored a Buzz allow for %s: %v\n", id, err)
 				}

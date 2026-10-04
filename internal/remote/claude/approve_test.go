@@ -147,12 +147,13 @@ func TestInstallApprovalHookBesideStopHook(t *testing.T) {
 	if state, err := PermissionHookState(home); err != nil || state != StopHookPresent {
 		t.Fatalf("state = %q, %v; want installed", state, err)
 	}
-	pin := HookPin{Owner: strings.Repeat("ab", 32), Root: "/work/it's root", Session: "work"}
+	pin := HookPin{Owner: strings.Repeat("ab", 32), Root: "/work/it's root", Session: "work",
+		Relay: "wss://relay.example", Body: strings.Repeat("cd", 32), Channel: "dm-1", Target: "cc-1"}
 	if err := InstallPermissionHook(home, "/opt/amq-remote", DefaultPermissionWait, pin); err != nil {
 		t.Fatal(err)
 	}
 	cmds, err := installedCommands(home, permissionSpec)
-	if err != nil || len(cmds) != 1 || !strings.Contains(cmds[0], " --wait 600 --owner "+pin.Owner) || PermissionHookPin(home) != pin {
+	if err != nil || len(cmds) != 1 || !strings.Contains(cmds[0], " --wait 600 --owner '"+pin.Owner+"'") || PermissionHookPin(home) != pin {
 		t.Fatalf("commands = %q (%v), pin = %+v; want one hook pinning %+v", cmds, err, PermissionHookPin(home), pin)
 	}
 	if err := UninstallPermissionHook(home); err != nil {

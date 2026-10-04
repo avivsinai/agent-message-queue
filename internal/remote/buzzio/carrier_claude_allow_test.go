@@ -103,17 +103,32 @@ func TestClaudeForgedAllowEvidenceNeverAllows(t *testing.T) {
 		}},
 		// 611.42.4 edit-check: an edit on the relay shows another command.
 		{name: "edit changes the shown command", pinned: true, forge: e2eValid, history: func(e *claudeApprovalE2E) []nostr.Event {
-			return []nostr.Event{e.edit(strings.Replace(e.msg.Content, "go test ./...", "go vet ./...", 1))}
+			return []nostr.Event{e.edit(e.body, strings.Replace(e.msg.Content, "go test ./...", "go vet ./...", 1))}
 		}},
 		// 611.42.4 edit-check: an edit of the trailer only still allows.
 		{name: "edit changes only the trailer", pinned: true, allows: true, forge: e2eValid, history: func(e *claudeApprovalE2E) []nostr.Event {
-			head, _, _ := strings.Cut(e.msg.Content, "\n\nReact ")
-			return []nostr.Event{e.edit(head + "\n\nReact ❌ to reject, or answer in the terminal. The first answer wins.")}
+			return []nostr.Event{e.edit(e.body, e.trailerEdit())}
 		}},
 		// 611.42.4 edit-check: the relay hides a deleted edit, so any
 		// deletion in the channel since the message refuses.
 		{name: "deletion after the message", pinned: true, forge: e2eValid, history: func(e *claudeApprovalE2E) []nostr.Event {
-			return []nostr.Event{e.deletion()}
+			return []nostr.Event{e.deletion(e.body, KindDeletion, nostr.Tags{{"h", "dm-1"}, {"e", strings.Repeat("0", 64)}})}
+		}},
+		// Pro review of #936 r2, P1: Buzz lets the owner edit the agent's
+		// message.
+		{name: "owner edit changes the shown command", pinned: true, forge: e2eValid, history: func(e *claudeApprovalE2E) []nostr.Event {
+			return []nostr.Event{e.edit(e.owner, strings.Replace(e.msg.Content, "go test ./...", "go vet ./...", 1))}
+		}},
+		// Pro review of #936 r2, P1: a deletion with only an e tag, of an
+		// edit, as the mobile client sends it.
+		{name: "e-only deletion of an edit", pinned: true, forge: e2eValid, history: func(e *claudeApprovalE2E) []nostr.Event {
+			ed := e.edit(e.body, e.trailerEdit())
+			return []nostr.Event{ed, e.deletion(e.owner, KindDeletion, nostr.Tags{{"e", ed.ID.Hex()}})}
+		}},
+		// Pro review of #936 r2, P1: the Buzz-native delete-event hides the
+		// message like kind 5.
+		{name: "Buzz-native deletion of the message", pinned: true, forge: e2eValid, history: func(e *claudeApprovalE2E) []nostr.Event {
+			return []nostr.Event{e.deletion(e.owner, KindGroupDeletion, nostr.Tags{{"h", "dm-1"}, {"e", e.msg.ID.Hex()}})}
 		}},
 	}
 	for _, tc := range cases {
@@ -178,11 +193,34 @@ func TestClaudeAllowRetriesAfterAFailedVerification(t *testing.T) {
 	}
 }
 
+// Pro review of #936 r2, P2: the endpoint verified an allow, then the
+// hook's own verification failed, and a ❌ could no longer land. The hook
+// retires exactly that proof, so the ❌ that follows denies.
+func TestClaudeDenyLandsAfterTheHookRefusesAnAllow(t *testing.T) {
+	e := newClaudeApprovalE2EWith(t, true, "go test ./...")
+	e.hookDown.Store(true)
+	if err := e.c.IngestReaction(e.reaction(e.owner, "✅", e.msg.ID.Hex(), e.advance())); err != nil {
+		t.Fatal(err)
+	}
+	for deadline := time.Now().Add(4 * time.Second); !strings.Contains(e.errs.String(), "ignored a Buzz allow"); time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the hook never refused the allow")
+		}
+	}
+	if err := e.c.IngestReaction(e.reaction(e.owner, "❌", e.msg.ID.Hex(), e.advance())); err != nil {
+		t.Fatal(err)
+	}
+	e.hookExited()
+	if got := strings.TrimSpace(e.out.String()); !strings.Contains(got, `"behavior":"deny"`) {
+		t.Fatalf("hook printed %q, want deny", got)
+	}
+}
+
 // 611.42.4 edit-check: a ✅ on an altered approval message is refused with
 // the altered reply, nothing is answered, and ❌ still blocks the call.
 func TestClaudeAlteredApprovalRefusesAllowAndKeepsReject(t *testing.T) {
 	e := newClaudeApprovalE2EWith(t, true, "go test ./...")
-	e.relay.Inject(e.deletion())
+	e.relay.Inject(e.deletion(e.body, KindDeletion, nostr.Tags{{"h", "dm-1"}, {"e", strings.Repeat("0", 64)}}))
 	if err := e.c.IngestReaction(e.reaction(e.owner, "✅", e.msg.ID.Hex(), e.advance())); err != nil {
 		t.Fatal(err)
 	}
@@ -234,25 +272,32 @@ func e2eValid(e *claudeApprovalE2E) (nostr.Event, nostr.Event) {
 	return e.reaction(e.owner, "✅", e.msg.ID.Hex(), time.Now()), e.msg
 }
 
-// edit is a kind 40003 of the approval message with content, signed by the
-// body key, as the carrier signs its edits.
-func (e *claudeApprovalE2E) edit(content string) nostr.Event {
+// edit is a kind 40003 of the approval message with content, signed by
+// key: the body key, as the carrier signs its edits, or the owner's.
+func (e *claudeApprovalE2E) edit(key [32]byte, content string) nostr.Event {
 	e.t.Helper()
 	ed := nostr.Event{CreatedAt: e.msg.CreatedAt + 1, Kind: KindEdit, Tags: e.c.editTags(e.msg.ID.Hex()), Content: content}
-	if err := ed.Sign(e.body); err != nil {
+	if err := ed.Sign(key); err != nil {
 		e.t.Fatal(err)
 	}
 	return ed
 }
 
-// deletion is a kind 5 by the body in the DM channel, after the message.
-func (e *claudeApprovalE2E) deletion() nostr.Event {
+// deletion is a deletion of kind with tags, signed by key, after the
+// message.
+func (e *claudeApprovalE2E) deletion(key [32]byte, kind nostr.Kind, tags nostr.Tags) nostr.Event {
 	e.t.Helper()
-	d := nostr.Event{CreatedAt: e.msg.CreatedAt + 1, Kind: KindDeletion, Tags: nostr.Tags{{"h", "dm-1"}, {"e", strings.Repeat("0", 64)}}}
-	if err := d.Sign(e.body); err != nil {
+	d := nostr.Event{CreatedAt: e.msg.CreatedAt + 1, Kind: kind, Tags: tags}
+	if err := d.Sign(key); err != nil {
 		e.t.Fatal(err)
 	}
 	return d
+}
+
+// trailerEdit is the approval message with only its trailer changed.
+func (e *claudeApprovalE2E) trailerEdit() string {
+	head, _, _ := strings.Cut(e.msg.Content, "\n\nReact ")
+	return head + "\n\nReact ❌ to reject, or answer in the terminal. The first answer wins."
 }
 
 // replied reports a sent DM row that contains text.

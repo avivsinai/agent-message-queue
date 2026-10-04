@@ -954,6 +954,14 @@ func (e *Endpoint) respond(cmd *protocol.Command, src Source) (protocol.Reply, e
 	if rec.Interaction == nil || rec.Interaction.InteractionID != cmd.InteractionID {
 		return protocol.Reply{}, protocol.Refuse(protocol.CodeAlreadyResolved, "no such pending interaction")
 	}
+	// A recorded answer that the runtime refused never applied: another
+	// answer may replace it (611.42.4). Asked outside the lock.
+	retired := false
+	if prior, done := rec.Answered[cmd.InteractionID]; done && prior != cmd.Option {
+		if r, ok := t.att.(AnswerRetirer); ok {
+			retired = r.AnswerRetired(key, cmd.InteractionID, prior)
+		}
+	}
 	// Answer-INTENT contract (bead 611.22.12): the pending interaction is
 	// revalidated under the lock that owns the persist (changed since the
 	// first read), the offered option is validated against the pending
@@ -1001,7 +1009,7 @@ func (e *Endpoint) respond(cmd *protocol.Command, src Source) (protocol.Reply, e
 		e.mu.Unlock()
 		return protocol.Reply{}, protocol.Refuse(protocol.CodeInvalid, "option %q is not offered by interaction %s", cmd.Option, cmd.InteractionID)
 	}
-	if done && prior != cmd.Option {
+	if done && prior != cmd.Option && !retired {
 		// An earlier answer may already be with the runtime (in flight, or
 		// sent before a transport error). The runtime applies the first
 		// answer it gets, so a different one never replaces that intent

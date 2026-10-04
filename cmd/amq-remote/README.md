@@ -529,14 +529,17 @@ amq-remote claude uninstall-approval-hook                                       
 
 Without `--owner` the installer pins the one owner of the relay shares in
 the manifest (`--root` or `AM_ROOT`, or `--manifest`). With no owner found
-it installs a reject-only hook. The pin is the hook's command line,
-`... claude permission-hook --wait 600 --owner <64 hex> --root '<AMQ root>'`,
-plus `--session '<name>'` when given. Claude Code asks before Claude edits
-its own settings file, so Claude cannot change the pin on its own. The
-hook reads the share serving the Claude session from that root: the
-manifest share whose `native_session_id` is the session (or the pinned
-session), owned by the pinned owner, with its DM channel, and the share's
-enrolled body key.
+it installs a reject-only hook. With an owner it pins that owner's one
+relay share with a DM channel (or the `--session` one), as the manifest and
+the enrolled credentials name it at install time, on the hook's command
+line: `... claude permission-hook --wait 600 --owner '<64 hex>' --root
+'<AMQ root>' --session '<name>' --relay '<relay URL>' --body '<body
+pubkey>' --channel '<DM channel>' --target '<target>'`. Claude Code asks
+before Claude edits its own settings file, so Claude cannot change the pin
+on its own. The hook never reads the manifest: the root and session only
+locate the enrolled body secret it signs in with, whose pubkey must be the
+pinned body. A pin that misses any flag is reject-only. Run the installer
+again after the share's relay, channel or body changes.
 
 The hook has no matcher, a 600 second wait, and a 630 second timeout. It
 exits at once with no output, so the terminal dialog decides, unless every
@@ -549,7 +552,7 @@ exact call, and the turn goes on.
 Any same-user process can write the answer file, so an allow in it proves
 nothing by itself. The hook prints allow only when all of these hold:
 
-- its command line pins an owner;
+- its command line pins an owner and a whole share;
 - the call is a Bash call with only `command`, `description`, `timeout` and
   `run_in_background`, shown whole: nothing hidden, shortened, or removed
   for display;
@@ -562,12 +565,15 @@ nothing by itself. The hook prints allow only when all of these hold:
   rendering of the call under a request of the share's target: the
   command preview, then `Interaction: <id>` and `Action: <sha256 of the
   call>`;
-- the hook's own read of the share's relay, signed in with the share's
-  body key as `amq-remote serve` is, to the end of stored events within
-  10 seconds, finds no edit of the message that shows anything but the
-  same call with another answer line or outcome, and no deletion (kind 5)
-  by the body or the owner in the DM channel since the message. The relay
-  hides a deleted edit, and AMQ never deletes;
+- the hook's own read of the pinned relay, signed in with the share's
+  body key as `amq-remote serve` is, each read to the end of stored events
+  within 10 seconds, finds every way a Buzz client changes or hides the
+  message harmless: each edit (kind 40003, by the body or by the owner,
+  whom Buzz lets edit an agent's message) shows the same call with only
+  another answer line or outcome, no deletion (kind 5, or the Buzz-native
+  kind 9005) names the message or one of its edits, and the body and the
+  owner sent no deletion at all since the message, with or without an `h`
+  tag. The relay hides a deleted edit, and AMQ never deletes;
 - the approval is still open when the hook checks, both before and after
   it verifies: its deadline has not passed, Claude has not ended the hook,
   and nothing else closed it. One allow applies once.
@@ -578,7 +584,12 @@ the hook. When it fails, nothing is answered and the DM says why:
 "The approval message was altered after it was posted; check the
 terminal." for an edit that changed the call or a deletion, and "Could not
 verify the approval: <reason>. React again to retry." otherwise (a relay
-error or timeout, for example). A later ✅ or a ❌ still works. The DM offers ✅ only when the call can pass these checks, the
+error or timeout, for example). A later ✅ or a ❌ still works. When the
+endpoint's check passes and the hook's own check then fails, the hook
+records that it refused exactly that proof: the answer never applies, and
+a later ❌ or a new ✅ replaces it.
+
+The DM offers ✅ only when the call can pass these checks, the
 installed hook pins the share's owner, and the approval is bound to one
 tool call in the transcript; otherwise it offers ❌ only.
 
@@ -586,7 +597,7 @@ The pin holds only while Claude cannot change settings or run commands
 without a prompt. Each of these defeats it: a click on "allow Claude to edit
 .claude for this session", `bypassPermissions` mode, or a `permissions.allow`
 rule that allows every Bash command. `amq-remote doctor` reports the pinned
-owner and warns on the last two in `~/.claude/settings.json`.
+owner and share and warns on the last two in `~/.claude/settings.json`.
 
 The relay is trusted to return the full edit and deletion history of the
 message. A same-user process that can replace the installed `amq-remote`

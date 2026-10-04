@@ -180,3 +180,10 @@ type Attachment interface {
 type EvidenceResponder interface {
 	RespondWithEvidence(key requests.Key, epoch, interactionID, option string, evidence json.RawMessage) (protocol.Code, error)
 }
+
+// AnswerRetirer is an Attachment that can report that the runtime refused a
+// recorded answer intent: the answer never applied, so a different answer
+// may replace it.
+type AnswerRetirer interface {
+	AnswerRetired(key requests.Key, interactionID, option string) bool
+}

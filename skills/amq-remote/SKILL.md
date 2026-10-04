@@ -48,13 +48,15 @@ command's own message. Do not work around a refusal.
    If a `native_capability` entry says the PermissionRequest hook is not
    installed (a Claude target with `approve`, shared through a relay share),
    tell the user: "This adds one PermissionRequest hook. It exits at once in
-   sessions that are not shared. It pins your Buzz public key, so only your
-   signed ✅ can allow a tool call. Do not allow Claude to edit .claude for a
+   sessions that are not shared. It pins your Buzz public key and this
+   share's relay, body, DM channel and target, so only your signed ✅ in
+   this DM can allow a tool call. Do not allow Claude to edit .claude for a
    session, use bypassPermissions mode, or allow every Bash command: each
    lets the pin be changed. The relay is trusted to return the message's
    full edit and deletion history; replacing the amq-remote binary, or a
-   settings edit you approve, defeats the pin. Another decision hook you have can answer
-   first. `amq-remote claude uninstall-approval-hook` removes it." Ask once,
+   settings edit you approve, defeats the pin. Run the install again if the
+   share's relay or channel changes. Another decision hook you have can
+   answer first. `amq-remote claude uninstall-approval-hook` removes it." Ask once,
    then run `amq-remote claude install-approval-hook --root "$ROOT"`. If
    doctor reports `claude_approval_pin_warnings`, show them to the user.
 4. **This session's Buzz agent.** Attach printed the session name `<name>`.

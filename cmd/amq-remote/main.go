@@ -1143,10 +1143,10 @@ func doctor(args []string) (any, int, error) {
 		// Allow from Buzz needs the owner pinned on the hook's command line,
 		// and the pin holds only while Claude cannot change it unprompted.
 		if serr == nil && state != claude.StopHookMissing {
-			if owner := claude.PermissionHookOwner(home); owner == "" {
-				report["claude_approval_pin"] = "the PermissionRequest hook pins no owner, so Buzz can only block a tool call; run `amq-remote claude install-approval-hook --owner <pubkey>` to allow from Buzz"
+			if pin := claude.PermissionHookPin(home); !pin.Complete() {
+				report["claude_approval_pin"] = "the PermissionRequest hook pins no complete owner and share, so Buzz can only block a tool call; run `amq-remote claude install-approval-hook --owner <pubkey>` to allow from Buzz"
 			} else {
-				report["claude_approval_pin"] = owner
+				report["claude_approval_pin"] = map[string]string{"owner": pin.Owner, "session": pin.Session, "relay": pin.Relay, "channel": pin.Channel, "target": pin.Target}
 			}
 			if warns, werr := claude.PinWarnings(home); werr == nil && len(warns) > 0 {
 				report["claude_approval_pin_warnings"] = warns
@@ -1731,9 +1731,14 @@ func claudeSubcommand(args []string, stdin io.Reader, stdout io.Writer) int {
 		fs := flag.NewFlagSet("permission-hook", flag.ContinueOnError)
 		fs.SetOutput(io.Discard)
 		wait := fs.Int("wait", int(claude.DefaultPermissionWait/time.Second), "seconds to wait for a Buzz answer")
-		owner := fs.String("owner", "", "pinned owner pubkey (64 lowercase hex) whose signed reaction can allow a call; none means reject-only")
-		root := fs.String("root", "", "AMQ root whose manifest and enrolled share the hook reads to verify an allow")
-		session := fs.String("session", "", "the share session to verify against (default: the share serving the Claude session)")
+		var pin claude.HookPin
+		fs.StringVar(&pin.Owner, "owner", "", "pinned owner pubkey (64 lowercase hex) whose signed reaction can allow a call; none means reject-only")
+		fs.StringVar(&pin.Root, "root", "", "AMQ root holding the pinned share's enrolled body key")
+		fs.StringVar(&pin.Session, "session", "", "pinned share session")
+		fs.StringVar(&pin.Relay, "relay", "", "pinned relay URL the hook reads the approval message's history from")
+		fs.StringVar(&pin.Body, "body", "", "pinned body pubkey (64 lowercase hex) of the share")
+		fs.StringVar(&pin.Channel, "channel", "", "pinned DM channel id of the share")
+		fs.StringVar(&pin.Target, "target", "", "pinned target id of the share")
 		if fs.Parse(args[1:]) != nil {
 			return 0
 		}
@@ -1745,7 +1750,7 @@ func claudeSubcommand(args []string, stdin io.Reader, stdout io.Writer) int {
 			<-sigs
 			close(done)
 		}()
-		allow := allowConfig(claude.HookPin{Owner: *owner, Root: *root, Session: *session})
+		allow := allowConfig(pin)
 		return claude.RunPermissionHook(home, stdin, stdout, os.Stderr, done, time.Duration(*wait)*time.Second, allow)
 	case "install-approval-hook":
 		return installApprovalHook(home, args[1:], stdout, os.Stderr)

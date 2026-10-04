@@ -523,11 +523,14 @@ func (a *Attachment) RespondWithEvidence(key requests.Key, _, interactionID, opt
 
 	dir := approveDir(a.home, sessionID)
 	replace := false
-	switch disk := answerOnDisk(filepath.Join(dir, "answers", interactionID+".json"), ans); disk {
+	isRejected := func(ev json.RawMessage) bool { return rejected(a.home, sessionID, interactionID, ev) }
+	switch disk := answerOnDisk(filepath.Join(dir, "answers", interactionID+".json"), ans, isRejected); disk {
 	case answerSame:
 		return "", nil
-	case answerNewProof:
-		replace = true // an allow whose proof the hook could not verify
+	case answerNewProof, answerRetired:
+		replace = true // an allow with other evidence, or one the hook refused
+	case answerRefusedProof:
+		return "", protocol.Refuse(protocol.CodeNativeError, "%s", retryReply("the approval hook could not verify it"))
 	case answerOther:
 		return protocol.CodeAlreadyResolved, nil
 	}
@@ -562,7 +565,7 @@ func (a *Attachment) RespondWithEvidence(key requests.Key, _, interactionID, opt
 		}
 		// Another writer published first: the same answer is delivered,
 		// any other answer on disk stands as the first.
-		if answerOnDisk(filepath.Join(adir, interactionID+".json"), ans) == answerSame {
+		if answerOnDisk(filepath.Join(adir, interactionID+".json"), ans, isRejected) == answerSame {
 			return "", nil
 		}
 		return protocol.CodeAlreadyResolved, nil
@@ -602,25 +605,57 @@ const allowVerifyTimeout = 15 * time.Second
 
 // How an answer on disk compares with a new one.
 const (
-	answerAbsent   = iota
-	answerSame     // the same answer: delivered
-	answerNewProof // an allow, now with other evidence: replace it
-	answerOther    // another answer, or unreadable: it stands
+	answerAbsent       = iota
+	answerSame         // the same answer: delivered
+	answerNewProof     // an allow, now with other evidence: replace it
+	answerRetired      // an allow the hook refused, now another answer: replace it
+	answerRefusedProof // the same allow proof the hook refused
+	answerOther        // another answer, or unreadable: it stands
 )
 
-// answerOnDisk compares the answer file with ans.
-func answerOnDisk(path string, ans approvalAnswer) int {
+// answerOnDisk compares the answer file with ans. isRejected reports
+// whether the hook refused an allow's evidence.
+func answerOnDisk(path string, ans approvalAnswer, isRejected func(json.RawMessage) bool) int {
 	var got approvalAnswer
 	err := readApprovalJSON(path, &got)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
 		return answerAbsent
-	case err != nil || got.InteractionID != ans.InteractionID || got.ActionHash != ans.ActionHash || got.Option != ans.Option:
+	case err != nil || got.InteractionID != ans.InteractionID || got.ActionHash != ans.ActionHash:
+		return answerOther
+	case got.Option == optionAllow && isRejected(got.Evidence):
+		if ans.Option == optionAllow && bytes.Equal(got.Evidence, ans.Evidence) {
+			return answerRefusedProof
+		}
+		return answerRetired
+	case got.Option != ans.Option:
 		return answerOther
 	case ans.Option == optionAllow && !bytes.Equal(got.Evidence, ans.Evidence):
 		return answerNewProof
 	}
 	return answerSame
+}
+
+// AnswerRetired implements core.AnswerRetirer: the recorded answer for the
+// interaction is an allow whose proof the hook refused, so it never
+// applied and another answer may replace it.
+func (a *Attachment) AnswerRetired(key requests.Key, interactionID, option string) bool {
+	a.mu.Lock()
+	sessionID := ""
+	if rec := a.runs[key]; rec != nil {
+		if ap := rec.approvals[interactionID]; ap != nil {
+			sessionID = ap.sessionID
+		}
+	}
+	a.mu.Unlock()
+	if option != optionAllow || sessionID == "" || !interactionIDRe.MatchString(interactionID) {
+		return false
+	}
+	var got approvalAnswer
+	if readApprovalJSON(filepath.Join(approveDir(a.home, sessionID), "answers", interactionID+".json"), &got) != nil {
+		return false
+	}
+	return got.InteractionID == interactionID && got.Option == optionAllow && rejected(a.home, sessionID, interactionID, got.Evidence)
 }
 
 // replaceJSON replaces dir/name with v, whole: a private temporary file
@@ -695,6 +730,13 @@ func removeApprovalFiles(home, sessionID, promptID string, ids []string) {
 		}
 		for _, sub := range []string{"requests", "answers", "resolved", "delivery"} {
 			removeRegular(filepath.Join(dir, sub, id+".json"))
+		}
+		if entries, err := os.ReadDir(filepath.Join(dir, "rejected")); err == nil {
+			for _, e := range entries {
+				if strings.HasPrefix(e.Name(), id+"-") {
+					removeRegular(filepath.Join(dir, "rejected", e.Name()))
+				}
+			}
 		}
 	}
 }

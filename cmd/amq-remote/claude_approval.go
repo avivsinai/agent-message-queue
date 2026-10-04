@@ -24,42 +24,35 @@ import (
 func init() { claude.RegisterAllowFactory(allowConfig) }
 
 // allowConfig is what an allow from Buzz needs for one hook pin (bead
-// 611.42.4): the share serving a Claude session, read from the pinned
-// root's manifest and enrolled credentials, and a verifier that checks the
-// owner's signed ✅ against that share and then reads the approval
-// message's edits and deletions from the share's relay, signed in with the
-// share's body key as serve is. A pin without an owner and a root allows
-// nothing.
+// 611.42.4): the share the pin names (relay, body, DM channel, target), and
+// a verifier that checks the owner's signed ✅ against that share and then
+// reads the approval message's edits and deletions from the pinned relay,
+// signed in with the share's enrolled body key as serve is. The manifest is
+// never read: a rewritten manifest changes nothing an allow must prove.
+// The root and session only locate the body secret, whose pubkey must be
+// the pinned body. A pin missing any flag allows nothing.
 func allowConfig(pin claude.HookPin) claude.AllowConfig {
 	cfg := claude.AllowConfig{Owner: pin.Owner}
-	if !claude.ValidOwner(pin.Owner) || !filepath.IsAbs(pin.Root) {
+	if !pin.Complete() {
 		return cfg
 	}
-	cfg.Share = func(sessionID string) (claude.AllowShare, error) {
-		sh, url, err := pinnedShare(pin, sessionID)
-		if err != nil {
-			return claude.AllowShare{}, err
-		}
-		creds, err := sharestate.Load(pin.Root, sh.Session)
-		if err != nil {
-			return claude.AllowShare{}, fmt.Errorf("share %s credentials: %w", sh.Session, err)
-		}
-		if creds.Owner != pin.Owner {
-			return claude.AllowShare{}, fmt.Errorf("share %s is enrolled to another owner", sh.Session)
-		}
-		return claude.AllowShare{Owner: sh.OwnerPubKey, Body: creds.Body.PublicKeyHex(), Channel: sh.DMChannelID, Target: sh.Target,
-			Session: sh.Session, RelayURL: url}, nil
+	cfg.Share = func(string) (claude.AllowShare, error) {
+		return claude.AllowShare{Owner: pin.Owner, Body: pin.Body, Channel: pin.Channel, Target: pin.Target,
+			Session: pin.Session, RelayURL: pin.Relay}, nil
 	}
 	cfg.Verify = func(ctx context.Context, evidence json.RawMessage, want claude.AllowCheck) error {
-		check := buzzio.ApproveCheck{Owner: want.Share.Owner, Body: want.Share.Body, Channel: want.Share.Channel, Target: want.Share.Target,
+		check := buzzio.ApproveCheck{Owner: pin.Owner, Body: pin.Body, Channel: pin.Channel, Target: pin.Target,
 			Prompt: want.Prompt, NotBefore: want.NotBefore, NotAfter: want.NotAfter}
 		msg, err := buzzio.VerifyApproveEvidence(evidence, check)
 		if err != nil {
 			return err
 		}
-		rc, err := relayConfigFor(pin.Root, want.Share.RelayURL, manifest.Share{Session: want.Share.Session, OwnerPubKey: want.Share.Owner})()
+		rc, err := relayConfigFor(pin.Root, pin.Relay, manifest.Share{Session: pin.Session, OwnerPubKey: pin.Owner})()
 		if err != nil {
 			return fmt.Errorf("relay sign-in: %w", err)
+		}
+		if nostr.GetPublicKey(rc.Secret).Hex() != pin.Body {
+			return errors.New("the enrolled body key is not the pinned body")
 		}
 		conn, err := relay.Connect(ctx, rc)
 		if err != nil {
@@ -80,35 +73,43 @@ func historyError(err error) error {
 	return err
 }
 
-// pinnedShare is the relay share of the pinned root's manifest that serves
-// sessionID: the pinned session when the pin names one, else the share
-// whose native session is sessionID. It must be owned by the pinned owner,
-// name a DM channel, and serve exactly that Claude session.
-func pinnedShare(pin claude.HookPin, sessionID string) (manifest.Share, string, error) {
-	path := manifest.DefaultPath(filepath.Join(pin.Root, stateDirName))
-	mf, err := manifest.Load(path)
-	if err != nil {
-		return manifest.Share{}, "", fmt.Errorf("manifest %s: %w", path, err)
+// sharePin completes an owner pin at install time, run by the owner in
+// the terminal: the manifest's relay share owned by owner with a DM
+// channel (the --session one when given), its relay URL, DM channel and
+// target, and the enrolled body pubkey of that session.
+func sharePin(owner, root, session, manifestPath string) (claude.HookPin, error) {
+	abs, err := filepath.Abs(root)
+	if err != nil || root == "" {
+		return claude.HookPin{}, errors.New("an owner pin needs the AMQ root: pass --root or set AM_ROOT")
 	}
-	if mf.Relay == nil {
-		return manifest.Share{}, "", fmt.Errorf("manifest %s has no relay", path)
+	if manifestPath == "" {
+		manifestPath = manifest.DefaultPath(filepath.Join(abs, stateDirName))
+	}
+	mf, err := manifest.Load(manifestPath)
+	if err != nil {
+		return claude.HookPin{}, fmt.Errorf("manifest %s: %w", manifestPath, err)
 	}
 	var found []manifest.Share
-	for _, sh := range mf.Relay.Shares {
-		if pin.Session != "" && sh.Session != pin.Session || sh.NativeSessionID != sessionID {
-			continue
+	if mf.Relay != nil {
+		for _, sh := range mf.Relay.Shares {
+			if sh.OwnerPubKey == owner && sh.DMChannelID != "" && (session == "" || sh.Session == session) {
+				found = append(found, sh)
+			}
 		}
-		found = append(found, sh)
 	}
-	switch {
-	case len(found) != 1:
-		return manifest.Share{}, "", fmt.Errorf("manifest %s has %d share(s) for this Claude session", path, len(found))
-	case found[0].OwnerPubKey != pin.Owner:
-		return manifest.Share{}, "", fmt.Errorf("share %s is not owned by the pinned owner", found[0].Session)
-	case found[0].DMChannelID == "":
-		return manifest.Share{}, "", fmt.Errorf("share %s has no DM channel", found[0].Session)
+	if len(found) != 1 {
+		return claude.HookPin{}, fmt.Errorf("manifest %s has %d relay share(s) with a DM channel for owner %s; pass --session to pick one", manifestPath, len(found), owner)
 	}
-	return found[0], mf.Relay.URL, nil
+	sh := found[0]
+	creds, err := sharestate.Load(abs, sh.Session)
+	if err != nil {
+		return claude.HookPin{}, fmt.Errorf("share %s: %w", sh.Session, err)
+	}
+	if creds.Owner != owner {
+		return claude.HookPin{}, fmt.Errorf("share %s is enrolled to another owner", sh.Session)
+	}
+	return claude.HookPin{Owner: owner, Root: abs, Session: sh.Session, Relay: mf.Relay.URL,
+		Body: creds.Body.PublicKeyHex(), Channel: sh.DMChannelID, Target: sh.Target}, nil
 }
 
 // installApprovalHook writes the PermissionRequest hook, pinning the owner
@@ -118,8 +119,8 @@ func installApprovalHook(home string, args []string, stdout, stderr io.Writer) i
 	fs := flag.NewFlagSet("install-approval-hook", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	ownerFlag := fs.String("owner", "", "owner public key (64 hex or npub) whose signed ✅ in Buzz can allow a tool call (default: the relay shares' owner in the manifest)")
-	root := fs.String("root", os.Getenv("AM_ROOT"), "AMQ root whose manifest and enrolled shares the hook reads to verify an allow (default AM_ROOT)")
-	session := fs.String("session", "", "pin one share session (default: the share whose native session is the Claude session)")
+	root := fs.String("root", os.Getenv("AM_ROOT"), "AMQ root whose manifest names the share to pin and whose enrolled body key the hook signs in with (default AM_ROOT)")
+	session := fs.String("session", "", "the share session to pin (default: the one relay share of the owner with a DM channel)")
 	manifestPath := fs.String("manifest", "", "path to the adapter manifest (default: <root>/"+stateDirName+"/manifest.json)")
 	if fs.Parse(args) != nil {
 		return 2
@@ -129,13 +130,12 @@ func installApprovalHook(home string, args []string, stdout, stderr io.Writer) i
 		say(stderr, "install-approval-hook: %v\n", err)
 		return 1
 	}
-	pin := claude.HookPin{Owner: owner}
+	var pin claude.HookPin
 	if owner != "" {
-		if pin.Root, err = filepath.Abs(*root); err != nil || *root == "" {
-			say(stderr, "install-approval-hook: an owner pin needs the AMQ root: pass --root or set AM_ROOT\n")
+		if pin, err = sharePin(owner, *root, *session, *manifestPath); err != nil {
+			say(stderr, "install-approval-hook: %v\n", err)
 			return 1
 		}
-		pin.Session = *session
 	}
 	bin, err := os.Executable()
 	if err != nil {
@@ -149,7 +149,7 @@ func installApprovalHook(home string, args []string, stdout, stderr io.Writer) i
 		say(stdout, "approval hook installed without an owner pin: Buzz can block a Claude tool call; allow it in the terminal\n")
 		return 0
 	}
-	say(stdout, "approval hook installed: the owner %s can allow a Claude tool call with ✅ in Buzz, or block it with ❌\n", owner)
+	say(stdout, "approval hook installed: the owner %s can allow a Claude tool call of share %s with ✅ in Buzz, or block it with ❌\n", owner, pin.Session)
 	say(stdout, "the pin holds only while Claude cannot edit ~/.claude/settings.json or run any Bash command without a prompt: never allow edits to .claude for a session, bypassPermissions mode, or a Bash(*) allow rule\n")
 	return 0
 }

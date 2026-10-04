@@ -15,9 +15,14 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 )
 
-// KindDeletion is a NIP-09 deletion request. The carrier never publishes
-// one.
-const KindDeletion = 5
+// Deletion kinds Buzz clients apply to a message: a NIP-09 deletion request
+// and the Buzz-native NIP-29 delete-event, after which the relay hides the
+// target (Buzz desktop formatTimelineMessages and mobile formatTimeline
+// treat both alike, by their e tags). The carrier never publishes either.
+const (
+	KindDeletion      = 5
+	KindGroupDeletion = 9005
+)
 
 // ApproveEvidence is the proof an owner ✅ carries to a harness that allows
 // a call only with the owner's signature (bead 611.42.4): the owner's signed
@@ -130,14 +135,18 @@ func VerifyApproveEvidence(raw json.RawMessage, want ApproveCheck) (nostr.Event,
 const historyTimeout = 10 * time.Second
 
 // CheckHistory reads the approval message's history from the relay, each
-// read up to the relay's end of stored events, within historyTimeout:
+// read up to the relay's end of stored events, within historyTimeout. It
+// covers every way a Buzz client changes or hides a message: edits (kind
+// 40003, by the body or by the owner, whom Buzz lets edit the agent's
+// messages) and deletions (kinds 5 and 9005, by e tag):
 //
-//   - kind 40003 edits by the body naming the message: each must show the
-//     same call under the same ref, with only one of this carrier's own
-//     trailers or outcomes;
-//   - kind 5 deletions by the body or the owner in the DM channel since the
-//     message: there must be none. The relay hides a deleted edit, and the
-//     carrier never deletes.
+//   - every edit naming the message must show the same call under the same
+//     ref, with only one of this carrier's own trailers or outcomes, and
+//     carry no imeta attachment;
+//   - no deletion may name the message or any of its edits, from anyone;
+//   - no deletion by the body or the owner may exist since the message,
+//     wherever it points: the relay hides a deleted edit, so a deletion of
+//     an edit no read returns cannot be told apart from an unrelated one.
 //
 // An edit or deletion that fails is ErrAltered. A read that errors, ends
 // early, overflows or times out is another error: the history is not
@@ -149,29 +158,49 @@ func CheckHistory(ctx context.Context, conn *relay.Conn, msg nostr.Event, want A
 	if !ok {
 		return errors.New("approval message does not show this call")
 	}
-	edits, err := readStored(ctx, conn, nostr.Filter{Kinds: []nostr.Kind{KindEdit}, Authors: []nostr.PubKey{msg.PubKey}, Tags: nostr.TagMap{"e": {msg.ID.Hex()}}})
-	if err != nil {
-		return fmt.Errorf("read the approval message's edits: %w", err)
-	}
-	allowed := approvalVariants(ref, want.Prompt)
-	for _, ed := range edits {
-		if ed.Kind != KindEdit || ed.PubKey != msg.PubKey || !slices.Contains(allowed, ed.Content) {
-			return fmt.Errorf("%w: an edit shows another call", ErrAltered)
-		}
-	}
 	owner, err := nostr.PubKeyFromHex(want.Owner)
 	if err != nil {
 		return fmt.Errorf("owner pubkey: %w", err)
 	}
-	deletions, err := readStored(ctx, conn, nostr.Filter{Kinds: []nostr.Kind{KindDeletion}, Authors: []nostr.PubKey{msg.PubKey, owner},
-		Tags: nostr.TagMap{"h": {want.Channel}}, Since: msg.CreatedAt})
+	authors := []nostr.PubKey{msg.PubKey, owner}
+	deletionKinds := []nostr.Kind{KindDeletion, KindGroupDeletion}
+	edits, err := readStored(ctx, conn, nostr.Filter{Kinds: []nostr.Kind{KindEdit}, Authors: authors, Tags: nostr.TagMap{"e": {msg.ID.Hex()}}})
 	if err != nil {
-		return fmt.Errorf("read the channel's deletions: %w", err)
+		return fmt.Errorf("read the approval message's edits: %w", err)
 	}
-	if len(deletions) > 0 {
-		return fmt.Errorf("%w: %d deletion(s) in the channel since the message", ErrAltered, len(deletions))
+	allowed := approvalVariants(ref, want.Prompt)
+	ids := []string{msg.ID.Hex()}
+	for _, ed := range edits {
+		if ed.Kind != KindEdit || !slices.Contains(allowed, ed.Content) || hasTagName(ed, "imeta") {
+			return fmt.Errorf("%w: an edit shows another call", ErrAltered)
+		}
+		ids = append(ids, ed.ID.Hex())
+	}
+	targeted, err := readStored(ctx, conn, nostr.Filter{Kinds: deletionKinds, Tags: nostr.TagMap{"e": ids}})
+	if err != nil {
+		return fmt.Errorf("read the deletions of the message and its edits: %w", err)
+	}
+	if len(targeted) > 0 {
+		return fmt.Errorf("%w: the message or an edit of it was deleted", ErrAltered)
+	}
+	since, err := readStored(ctx, conn, nostr.Filter{Kinds: deletionKinds, Authors: authors, Since: msg.CreatedAt})
+	if err != nil {
+		return fmt.Errorf("read the deletions since the message: %w", err)
+	}
+	if len(since) > 0 {
+		return fmt.Errorf("%w: %d deletion(s) by the body or the owner since the message", ErrAltered, len(since))
 	}
 	return nil
+}
+
+// hasTagName reports a tag named name.
+func hasTagName(evt nostr.Event, name string) bool {
+	for _, t := range evt.Tags {
+		if len(t) > 0 && t[0] == name {
+			return true
+		}
+	}
+	return false
 }
 
 // readStored reads every stored event matching filter, up to EOSE. The
