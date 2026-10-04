@@ -32,13 +32,12 @@ var psListCLI = func(ctx context.Context) ([]byte, error) {
 // listACPProcessesOS lists running amq-acp candidates through ps. comm is
 // argv[0], not executable identity, so it only decides candidacy; the
 // identity check decides. comm is everything after the pid, so a launch
-// path with spaces stays whole. A ps failure is not a doctor failure:
-// doctor reports only what it can see.
+// path with spaces stays whole. A ps failure is not a doctor failure, but
+// it is never silent either: the error comes back together with every
+// complete candidate row already parsed from the partial stdout, so the
+// caller can report both the failed collection and the outcomes it saw.
 func listACPProcessesOS(ctx context.Context) ([]acpProcess, error) {
-	raw, err := psListCLI(ctx)
-	if err != nil {
-		return nil, nil
-	}
+	raw, psErr := psListCLI(ctx)
 	var out []acpProcess
 	for _, line := range strings.Split(string(raw), "\n") {
 		pidStr, comm, ok := strings.Cut(strings.TrimSpace(line), " ")
@@ -55,7 +54,7 @@ func listACPProcessesOS(ctx context.Context) ([]acpProcess, error) {
 		}
 		out = append(out, acpProcess{PID: pid, Name: comm})
 	}
-	return out, nil
+	return out, psErr
 }
 
 // statIdentity maps a syscall stat record to the executable identity.

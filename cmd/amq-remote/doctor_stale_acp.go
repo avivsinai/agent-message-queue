@@ -35,6 +35,18 @@ type staleProbe struct {
 	Reason string // set when the identity could not be read
 }
 
+// staleInspection is what one pass of the stale harness check collected,
+// including what it could NOT collect. A failed step is recorded as an
+// error and the pass is never empty: advice must survive a failed ps or
+// an unresolvable installed path.
+type staleInspection struct {
+	Probes   []staleProbe
+	Path     string // the resolved installed amq-acp, when it resolved
+	ListErr  error  // the process-list collection failed
+	PathErr  error  // the installed amq-acp path could not be resolved
+	IdentErr error  // the installed amq-acp identity could not be read
+}
+
 // probeTimeout is the ONE total deadline for the whole stale probe, ps
 // included. Tests shorten it.
 var probeTimeout = 3 * time.Second
@@ -75,36 +87,49 @@ func idSame(a, b execIdentity) bool {
 	return a.Dev == b.Dev && a.Inode == b.Inode
 }
 
-// staleACPProbe checks every running amq-acp against the installed one
-// under one total deadline, ps included: a single context bounds the whole
-// probe, and every exec uses exec.CommandContext with WaitDelay, so a
-// stalled child cannot extend the probe. A process whose identity cannot
-// be read is unknown, not current, and is reported by the caller.
+// staleACPInspect runs one full inspection pass under one total deadline,
+// ps included: a single context bounds the whole pass, and every exec uses
+// exec.CommandContext with WaitDelay, so a stalled child cannot extend it.
+// A process whose identity cannot be read is unknown, not current. A
+// failed step is recorded on the inspection, never swallowed: the caller
+// reports it as advice, and partial results (complete candidate rows
+// already parsed from a timed-out ps) are still checked.
+func staleACPInspect(ctx context.Context) staleInspection {
+	var insp staleInspection
+	insp.Path, insp.PathErr = installedACPPath()
+	procs, listErr := listACPProcesses(ctx)
+	insp.ListErr = listErr
+	installed, identErr := installedIdentity()
+	insp.IdentErr = identErr
+	for _, p := range procs {
+		probe := staleProbe{PID: p.PID}
+		switch {
+		case insp.IdentErr != nil:
+			probe.Reason = "the installed amq-acp could not be resolved"
+		default:
+			id, err := processIdentity(ctx, p.PID)
+			switch {
+			case err != nil:
+				probe.Reason = err.Error()
+			case !idSame(id, installed):
+				probe.Stale = true
+			}
+		}
+		insp.Probes = append(insp.Probes, probe)
+	}
+	return insp
+}
+
+// staleACPProbe is the deadline wrapper the direct callers use: it bounds
+// one inspection pass with the probe's total deadline.
 func staleACPProbe() ([]staleProbe, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
 	defer cancel()
-
-	installed, err := installedIdentity()
-	if err != nil {
-		return nil, err
+	insp := staleACPInspect(ctx)
+	if insp.IdentErr != nil && insp.ListErr == nil && len(insp.Probes) == 0 {
+		return nil, insp.IdentErr
 	}
-	procs, err := listACPProcesses(ctx)
-	if err != nil {
-		return nil, err
-	}
-	var out []staleProbe
-	for _, p := range procs {
-		probe := staleProbe{PID: p.PID}
-		id, err := processIdentity(ctx, p.PID)
-		switch {
-		case err != nil:
-			probe.Reason = err.Error()
-		case !idSame(id, installed):
-			probe.Stale = true
-		}
-		out = append(out, probe)
-	}
-	return out, nil
+	return insp.Probes, nil
 }
 
 // staleACPNotes turns probe outcomes into advice notes: one per stale
@@ -150,20 +175,56 @@ func staleACPNotes(probes []staleProbe, path string) []boundaryFailure {
 	return notes
 }
 
+// staleInspectionNotes adds the incomplete-inspection advice: one
+// non-failing note per failed step, naming the step. It never invents
+// PIDs and never turns an incomplete inspection into a doctor failure.
+func staleInspectionNotes(insp staleInspection) []boundaryFailure {
+	var notes []boundaryFailure
+	if insp.ListErr != nil {
+		notes = append(notes, boundaryFailure{
+			Boundary: "stale_harness",
+			Subject:  "process list",
+			Detail:   fmt.Sprintf("could not list amq-acp processes: %v", insp.ListErr),
+			Remedy:   "Re-run doctor; if it repeats, run `ps -axo pid=,comm=` and look for amq-acp",
+		})
+	}
+	if insp.PathErr != nil {
+		notes = append(notes, boundaryFailure{
+			Boundary: "stale_harness",
+			Subject:  "installed amq-acp",
+			Detail:   fmt.Sprintf("could not resolve the installed amq-acp: %v", insp.PathErr),
+			Remedy:   "Reinstall amq so the amq-acp companion sits beside amq-remote, then re-run doctor",
+		})
+	} else if insp.IdentErr != nil {
+		notes = append(notes, boundaryFailure{
+			Boundary: "stale_harness",
+			Subject:  "installed amq-acp",
+			Detail:   fmt.Sprintf("could not stat the installed amq-acp: %v", insp.IdentErr),
+			Remedy:   "Reinstall amq so the amq-acp companion sits beside amq-remote, then re-run doctor",
+		})
+	}
+	return notes
+}
+
 // noteStaleACP feeds the stale probe's advice into doctor's note closure.
 // Both early and full doctor paths call it: a mailbox-only setup that never
 // ran serve takes the early return, and that is exactly the setup that
-// hits a stale harness.
+// hits a stale harness. It never returns silently: a failed ps, an
+// unresolvable installed amq-acp, or an unreadable identity each surface
+// as one non-failing note, and the outcomes already collected are still
+// reported. No doctor failure is ever added.
 func noteStaleACP(note func(boundary, subject, detail, remedy string)) {
-	probes, err := staleACPProbe()
-	if err != nil {
-		return
+	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
+	defer cancel()
+	insp := staleACPInspect(ctx)
+	path := insp.Path
+	if insp.PathErr != nil {
+		path = "the installed amq-acp"
 	}
-	path, err := installedACPPath()
-	if err != nil {
-		return
+	for _, n := range staleInspectionNotes(insp) {
+		note(n.Boundary, n.Subject, n.Detail, n.Remedy)
 	}
-	for _, n := range staleACPNotes(probes, path) {
+	for _, n := range staleACPNotes(insp.Probes, path) {
 		note(n.Boundary, n.Subject, n.Detail, n.Remedy)
 	}
 }
