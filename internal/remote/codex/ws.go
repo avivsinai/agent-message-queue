@@ -16,7 +16,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -121,12 +120,6 @@ func (w *wsConn) lockWriteCtx(ctx context.Context) error {
 	}
 }
 
-// lockWrite acquires the writer slot without a context (unbounded wait,
-// used only by pings/close-frames which must always land).
-func (w *wsConn) lockWrite() {
-	w.wmu <- struct{}{}
-}
-
 // unlockWrite releases the writer slot.
 func (w *wsConn) unlockWrite() { <-w.wmu }
 
@@ -188,11 +181,6 @@ func (w *wsConn) writeTextBounded(payload []byte) error {
 	return w.writeFrameBody(opText, payload)
 }
 
-// writeText sends one masked text frame.
-func (w *wsConn) writeText(payload []byte) error {
-	return w.writeFrame(opText, payload)
-}
-
 // writeTextCtx sends one masked text frame bounded by ctx in BOTH phases:
 // acquiring the writer slot (select on ctx.Done) and the write itself
 // (deadline installed+cleared under the slot, so concurrent writers cannot
@@ -212,15 +200,6 @@ func (w *wsConn) writeTextCtx(ctx context.Context, payload []byte) error {
 	return w.writeFrameBody(opText, payload)
 }
 
-// writeFrame sends one frame, acquiring the writer slot without a context.
-// 611.22.40 verifier note: writeFrame/lockWrite have zero production
-// callers since every production frame path (pong, close reply, Respond)
-// went through a bounded variant — keep for tests only.
-func (w *wsConn) writeFrame(opcode byte, payload []byte) error {
-	w.lockWrite()
-	defer w.unlockWrite()
-	return w.writeFrameBody(opcode, payload)
-}
 func (w *wsConn) writeFrameBody(opcode byte, payload []byte) error {
 	if w.poisoned.Load() {
 		return errStreamPoisoned
@@ -345,25 +324,4 @@ func (w *wsConn) close() error {
 	var err error
 	w.closeOnce.Do(func() { err = w.conn.Close() })
 	return err
-}
-
-// acceptServerWS performs the server side of the upgrade on an accepted
-// connection. It exists for tests that stand in for the app-server.
-func acceptServerWS(conn net.Conn) (*wsConn, error) {
-	br := bufio.NewReaderSize(conn, 64*1024)
-	req, err := http.ReadRequest(br)
-	if err != nil {
-		return nil, err
-	}
-	key := req.Header.Get("Sec-WebSocket-Key")
-	if !strings.EqualFold(req.Header.Get("Upgrade"), "websocket") || key == "" {
-		return nil, errors.New("not a websocket upgrade")
-	}
-	sum := sha1.Sum([]byte(key + wsGUID)) //nolint:gosec // protocol-mandated
-	resp := "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n" +
-		"Sec-WebSocket-Accept: " + base64.StdEncoding.EncodeToString(sum[:]) + "\r\n\r\n"
-	if _, err := io.WriteString(conn, resp); err != nil {
-		return nil, err
-	}
-	return newWSConn(conn, br), nil
 }

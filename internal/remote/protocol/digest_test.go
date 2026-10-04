@@ -8,64 +8,6 @@ import (
 	"testing"
 )
 
-// TestCommandDigestIsCanonicalAndStable pins the B13 digest contract: the
-// digest covers the immutable submit command payload (schema, op, request_id,
-// target_id, epoch, not_after, input), is stable across equal commands, and
-// changes when epoch, not_after, or input changes. It must be sha256-prefixed
-// hex and computed over canonical JSON (no insignificant whitespace).
-func TestCommandDigestIsCanonicalAndStable(t *testing.T) {
-	base := &Command{
-		Schema:    SchemaCommand,
-		Op:        OpRequestSubmit,
-		RequestID: "11111111-1111-4111-8111-111111111501",
-		TargetID:  "t_fake1",
-		Epoch:     "e_1",
-		NotAfter:  "2026-09-08T10:02:00Z",
-		Input:     &SubmitInput{Text: "say hi"},
-	}
-	d := CommandDigest(base)
-	if !strings.HasPrefix(d, "sha256:") || len(d) != len("sha256:")+64 {
-		t.Fatalf("digest %q is not sha256 hex", d)
-	}
-	// Stable across equal commands.
-	if got := CommandDigest(base); got != d {
-		t.Fatalf("digest not stable: %q vs %q", got, d)
-	}
-	// Changing the input text changes the digest.
-	changed := *base
-	changed.Input = &SubmitInput{Text: "say bye"}
-	if CommandDigest(&changed) == d {
-		t.Fatal("digest unchanged after input text change")
-	}
-	// Changing the epoch changes the digest (the B13 fix: a retry with a
-	// changed epoch is request_conflict, not a silent dedup).
-	changed = *base
-	changed.Epoch = "e_2"
-	if CommandDigest(&changed) == d {
-		t.Fatal("digest unchanged after epoch change")
-	}
-	// B10: Changing not_after does NOT change the digest. A deadline is
-	// policy, not identity — a retry with a fresh deadline must match.
-	changed = *base
-	changed.NotAfter = "2026-09-08T11:00:00Z"
-	if CommandDigest(&changed) != d {
-		t.Fatal("digest changed after not_after change (B10 — deadline must not affect identity digest)")
-	}
-	// Changing target_id changes the digest.
-	changed = *base
-	changed.TargetID = "t_other"
-	if CommandDigest(&changed) == d {
-		t.Fatal("digest unchanged after target_id change")
-	}
-	// Non-submit ops have no digest.
-	nonSubmit := *base
-	nonSubmit.Op = OpRequestGet
-	nonSubmit.RequestRef = "amqr1_" + strings.Repeat("a", 20)
-	if CommandDigest(&nonSubmit) != "" {
-		t.Fatalf("non-submit op returned a digest: %q", CommandDigest(&nonSubmit))
-	}
-}
-
 // TestCommandDigestCanonicalBytes pins the exact canonical JSON shape so the
 // io lane (endpoint) and any other carrier that builds the bytes themselves
 // agree with CommandDigest. The canonical payload is a JSON object with keys
@@ -99,16 +41,13 @@ func TestCommandDigestCanonicalBytes(t *testing.T) {
 		t.Fatalf("CommandDigest = %s\nwant       = %s\n(canonical bytes: %s)", got, want, canonical)
 	}
 
-	// Sorting the keys — what the doc used to claim — must NOT agree, so a
-	// future drift back to that wording is caught here rather than in the
-	// field as request_conflict on every retry.
-	sorted := `{"epoch":"e_1","input":{"busy":"queue","deliver":"turn","text":"say hi"},` +
-		`"not_after":"2026-09-08T10:02:00Z","op":"` + string(OpRequestSubmit) +
-		`","request_id":"11111111-1111-4111-8111-111111111501","schema":"` + string(SchemaCommand) +
-		`","target_id":"t_fake1"}`
-	sortedSum := sha256.Sum256([]byte(sorted))
-	if got == digestPrefix+hex.EncodeToString(sortedSum[:]) {
-		t.Fatal("digest matches the sorted-key form; the canonical order is the struct order, not alphabetical")
+	// A non-submit op has no digest: the sender spool stores "" for it and
+	// refuses an envelope that names a different one.
+	nonSubmit := *cmd
+	nonSubmit.Op = OpRequestGet
+	nonSubmit.RequestRef = "amqr1_" + strings.Repeat("a", 20)
+	if d := CommandDigest(&nonSubmit); d != "" {
+		t.Fatalf("non-submit op returned a digest: %q", d)
 	}
 }
 

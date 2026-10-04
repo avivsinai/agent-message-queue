@@ -878,7 +878,7 @@ func (l *leafRead) readable() bool { return l.State == leafOK }
 // confinedErr renders the leaf's confinement as the refusal the mutating
 // path prints (the same refusal refuseSymlinkedState produced).
 func (l *leafRead) confinedErr() error {
-	return protocol.RefuseWrap(protocol.CodeInvalid, l.Confinement, "%s", l.Confinement)
+	return protocol.Refuse(protocol.CodeInvalid, "%s", l.Confinement)
 }
 
 // shareState is the read-validated snapshot of all five state leaves.

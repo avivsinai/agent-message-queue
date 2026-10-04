@@ -1,6 +1,6 @@
 {
   "schema": "amq.remote.corpus/1",
-  "description": "Contract corpus for the amq-remote request core. One fixture per scenario. The fake runtime, the endpoint, the CLI and the Buzz edge all consume this file. Steps run in order on a deterministic clock; 'client' steps send a command and check the reply, 'native' steps drive the fake runtime, 'crash' stops the endpoint at a named boundary, 'restart' brings it back and reconciles, 'expect' asserts the durable record.",
+  "description": "Contract corpus for the amq-remote request core. One fixture per scenario. The endpoint harness (internal/remote/core) runs every fixture against the fake runtime; the protocol tests decode and schema-check every client command. Steps run in order on a deterministic clock; 'client' steps send a command and check the reply, 'native' steps drive the fake runtime, 'crash' stops the endpoint at a named boundary, 'restart' brings it back and reconciles, 'expect' asserts the durable record.",
   "defaults": {
     "target_id": "t_fake1",
     "epoch": "e_1",
@@ -435,6 +435,12 @@
           }
         },
         {
+          "expect": {
+            "request_id": "11111111-1111-4111-8111-111111111113",
+            "records": 0
+          }
+        },
+        {
           "client": {
             "op": "session.inspect"
           },
@@ -452,6 +458,7 @@
     {
       "id": "Q13",
       "title": "Local and remote both answer one question; second gets already_resolved",
+      "carrier": "buzz",
       "steps": [
         {
           "client": {
@@ -779,6 +786,44 @@
             "request_id": "11111111-1111-4111-8111-111111111120",
             "creator_host": "hostA",
             "records": 1
+          }
+        }
+      ]
+    },
+    {
+      "id": "Q21",
+      "title": "Only the owner's Buzz share cancels its request; another peer is refused",
+      "carrier": "buzz",
+      "steps": [
+        {
+          "client": {
+            "op": "request.submit",
+            "request_id": "11111111-1111-4111-8111-111111111121",
+            "input": {
+              "text": "x"
+            }
+          },
+          "reply": {
+            "state": "running"
+          }
+        },
+        {
+          "client": {
+            "op": "request.cancel",
+            "request_ref_for": "11111111-1111-4111-8111-111111111121",
+            "creator_host": "hostB"
+          },
+          "reply": {
+            "code": "unshared"
+          }
+        },
+        {
+          "client": {
+            "op": "request.cancel",
+            "request_ref_for": "11111111-1111-4111-8111-111111111121"
+          },
+          "reply": {
+            "state": "cancelled"
           }
         }
       ]

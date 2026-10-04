@@ -157,17 +157,12 @@ func (q *liveQueue) push(sink *Sink, body string, evt nostr.Event, n int) {
 
 func (q *liveQueue) trimLocked(body string) {
 	for q.overLocked(body) && len(q.body[body]) > 0 {
-		q.dropLocked(body, 0)
+		q.takeLocked(body, 0)
 	}
 }
 
 func (q *liveQueue) overLocked(body string) bool {
 	return len(q.body[body]) > ringCap || q.bodyBytes[body] > bodyQueueBytes || q.processBytes > processQueueMax
-}
-
-func (q *liveQueue) dropLocked(body string, i int) {
-	item := q.takeLocked(body, i)
-	item.sink.noteDrop()
 }
 
 // takeLocked removes one queued frame and drops the backing-array slot.
@@ -199,7 +194,7 @@ func (q *liveQueue) evictStaleLocked(now time.Time) {
 	for body, items := range q.body {
 		for i := 0; i < len(items); {
 			if staleFrame(items[i].evt, now) {
-				q.dropLocked(body, i)
+				q.takeLocked(body, i)
 				items = q.body[body]
 				continue
 			}
@@ -234,7 +229,7 @@ func (q *liveQueue) release(sink *Sink, body string) {
 	items := q.body[body]
 	for i := 0; i < len(items); {
 		if items[i].sink == sink {
-			q.dropLocked(body, i)
+			q.takeLocked(body, i)
 			items = q.body[body]
 			continue
 		}

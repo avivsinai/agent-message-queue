@@ -2,6 +2,7 @@ package sender
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -11,51 +12,10 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
+	"github.com/avivsinai/agent-message-queue/internal/remote/fake"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
+	"github.com/avivsinai/agent-message-queue/internal/remote/requests"
 )
-
-// fakeDispatcher is a test Dispatcher that records Handle calls and can be
-// toggled between unreachable (returns CodeEndpointUnreachable), accepting
-// (returns a running snapshot), and refusing (returns a Reply with a
-// refusal Outcome.Code and nil error, exactly as the real endpoint does).
-// It returns protocol.Reply VALUES, not pointers — matching the real
-// Endpoint.Handle return type, which the pointer assertion in classifyReply
-// never matched (round-3 B2 dead code).
-type fakeDispatcher struct {
-	calls      int
-	failing    bool
-	refuseCode protocol.Code // if non-empty, return a refusal Reply with this code
-}
-
-func (f *fakeDispatcher) Handle(cmd *protocol.Command, src core.Source) (any, error) {
-	f.calls++
-	if f.failing {
-		return nil, protocol.Refuse(protocol.CodeEndpointUnreachable, "no endpoint")
-	}
-	if f.refuseCode != "" {
-		return protocol.Reply{
-			Outcome: protocol.Outcome{
-				Op:   protocol.OpRequestSubmit,
-				Code: f.refuseCode,
-			},
-		}, nil
-	}
-	return protocol.Reply{
-		Snapshot: protocol.Snapshot{
-			Schema:      protocol.SchemaRequest,
-			RequestRef:  protocol.EncodeRef(src.Host, cmd.TargetID, cmd.RequestID),
-			RequestID:   cmd.RequestID,
-			CreatorHost: src.Host,
-			TargetID:    cmd.TargetID,
-			Epoch:       cmd.Epoch,
-			Revision:    1,
-			State:       protocol.StateDispatching,
-			InputDigest: protocol.CommandDigest(cmd),
-			NotAfter:    cmd.NotAfter,
-			ObservedAt:  protocol.FormatTime(time.Now()),
-		},
-	}, nil
-}
 
 func testCommand(id, target, epoch, notAfter string) *protocol.Command {
 	return &protocol.Command{
@@ -89,6 +49,94 @@ func newTestSpool(t *testing.T, now func() time.Time) *Spool {
 	return s
 }
 
+// drainRig drains a spool through the real endpoint and the fake runtime,
+// the pair serve wires together, so the drainer classifies the replies the
+// endpoint really returns.
+type drainRig struct {
+	t         *testing.T
+	stateDir  string
+	spool     *Spool
+	store     *requests.Store
+	ep        *core.Endpoint
+	rt        *fake.Runtime
+	published []map[string]string
+}
+
+func newDrainRig(t *testing.T, now time.Time) *drainRig {
+	t.Helper()
+	r := &drainRig{t: t, stateDir: t.TempDir()}
+	spool, err := Open(r.stateDir, WithClock(func() time.Time { return now }))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	r.spool = spool
+	r.start()
+	return r
+}
+
+// start opens the endpoint over the rig's store; after ep.Close it is an
+// endpoint restart.
+func (r *drainRig) start() {
+	r.t.Helper()
+	store, err := requests.Open(filepath.Join(r.stateDir, "endpoint"))
+	if err != nil {
+		r.t.Fatalf("open store: %v", err)
+	}
+	r.store = store
+	r.ep = core.New(core.Config{Store: store, Publish: func(_ protocol.Snapshot, origin map[string]string) error {
+		r.published = append(r.published, origin)
+		return nil
+	}})
+	r.rt = fake.New("fake", "e_1")
+	r.ep.Register(r.rt)
+	ep := r.ep
+	r.t.Cleanup(func() { _ = ep.Close() })
+}
+
+// enqueue persists a pending envelope the way the CLI does when the endpoint
+// is down.
+func (r *drainRig) enqueue(id, epoch, notAfter string) *protocol.Command {
+	r.t.Helper()
+	cmd := testCommand(id, "fake", epoch, notAfter)
+	env := &Envelope{RequestID: id, CreatorHost: "local", TargetID: "fake", Epoch: epoch, NotAfter: notAfter, Command: cmd, Destination: "ipc:state"}
+	if err := r.spool.Create(env); err != nil {
+		r.t.Fatalf("Create: %v", err)
+	}
+	return cmd
+}
+
+func (r *drainRig) drain(now time.Time) int {
+	r.t.Helper()
+	n, err := NewDrainer(r.spool, r.ep, func() time.Time { return now }).Drain(context.Background())
+	if err != nil {
+		r.t.Fatalf("Drain: %v", err)
+	}
+	return n
+}
+
+func (r *drainRig) envelope(id string) *Envelope {
+	r.t.Helper()
+	env, ok, err := r.spool.Get("local", id)
+	if err != nil || !ok {
+		r.t.Fatalf("Get %s: ok=%v err=%v", id, ok, err)
+	}
+	return env
+}
+
+// recordPath is where the endpoint store keeps a local request's record.
+func (r *drainRig) recordPath(id string) string {
+	return filepath.Join(r.stateDir, "endpoint", "v1", "requests", "local", "fake__"+id+".json")
+}
+
+func (r *drainRig) hasRecord(host, id string) bool {
+	r.t.Helper()
+	_, ok, err := r.store.Get(requests.Key{CreatorHost: host, TargetID: "fake", RequestID: id})
+	if err != nil {
+		r.t.Fatalf("store get: %v", err)
+	}
+	return ok
+}
+
 // TestSenderDurablePersistAndDispatch is the happy path: the CLI persists an
 // envelope (the endpoint is down), then the drainer replays it (the endpoint
 // is up) and the envelope is settled as dispatched. This proves the durable
@@ -96,29 +144,11 @@ func newTestSpool(t *testing.T, now func() time.Time) *Spool {
 // submitted, and the drainer retries the same identity+bytes after restart.
 func TestSenderDurablePersistAndDispatch(t *testing.T) {
 	now := time.Now()
-	clock := func() time.Time { return now }
-	spool := newTestSpool(t, clock)
-	cmd := testCommand(validUUID(0), "fake", "e_1", protocol.FormatTime(now.Add(2*time.Minute)))
-
-	// Persist while the endpoint is down (the CLI got a `submitted` receipt).
-	env := &Envelope{
-		RequestID:   cmd.RequestID,
-		CreatorHost: "local",
-		TargetID:    "fake",
-		Epoch:       "e_1",
-		NotAfter:    cmd.NotAfter,
-		Command:     cmd,
-		Destination: "ipc:/tmp/state",
-	}
-	if err := spool.Create(env); err != nil {
-		t.Fatalf("Create: %v", err)
-	}
+	r := newDrainRig(t, now)
+	cmd := r.enqueue(validUUID(0), "e_1", protocol.FormatTime(now.Add(2*time.Minute)))
 
 	// The persisted envelope has the digest and starts pending.
-	got, ok, err := spool.Get("local", cmd.RequestID)
-	if err != nil || !ok {
-		t.Fatalf("Get: err=%v ok=%v", err, ok)
-	}
+	got := r.envelope(cmd.RequestID)
 	if got.State != StatePending {
 		t.Fatalf("state=%s, want pending", got.State)
 	}
@@ -129,10 +159,9 @@ func TestSenderDurablePersistAndDispatch(t *testing.T) {
 		t.Fatalf("CreatedAt not set")
 	}
 
-	// Restart: a fresh spool opens the same dir and recovers the envelope.
-	// spool.Dir() is <stateDir>/sender, so reopen from its parent (stateDir).
-	stateDir := filepath.Dir(spool.dir)
-	reopened, err := Open(stateDir, WithClock(clock))
+	// Restart: a fresh spool opens the same dir and recovers the envelope
+	// with the target and epoch the caller supplied, never a substitute.
+	reopened, err := Open(r.stateDir, WithClock(func() time.Time { return now }))
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
@@ -140,22 +169,24 @@ func TestSenderDurablePersistAndDispatch(t *testing.T) {
 	if err != nil || len(envs) != 1 {
 		t.Fatalf("List: err=%v len=%d", err, len(envs))
 	}
-	if envs[0].RequestID != cmd.RequestID || envs[0].State != StatePending {
-		t.Fatalf("recovered envelope mismatch: %+v", envs[0])
+	env := envs[0]
+	if env.RequestID != cmd.RequestID || env.State != StatePending {
+		t.Fatalf("recovered envelope mismatch: %+v", env)
+	}
+	if env.TargetID != "fake" || env.Epoch != "e_1" || env.Command.Epoch != "e_1" {
+		t.Fatalf("recovered target=%s epoch=%s command epoch=%s, want fake/e_1/e_1", env.TargetID, env.Epoch, env.Command.Epoch)
 	}
 
-	// Drainer dispatches through the (now-up) endpoint and settles the envelope.
-	d := NewDrainer(reopened, &fakeDispatcher{failing: false}, clock)
-	n, err := d.Drain(context.Background())
-	if err != nil {
-		t.Fatalf("Drain: %v", err)
-	}
-	if n != 1 {
+	// The drainer dispatches through the (now-up) endpoint and settles it.
+	r.spool = reopened
+	if n := r.drain(now); n != 1 {
 		t.Fatalf("drained n=%d, want 1", n)
 	}
-	got, _, _ = reopened.Get("local", cmd.RequestID)
-	if got.State != StateDispatched {
+	if got := r.envelope(cmd.RequestID); got.State != StateDispatched {
 		t.Fatalf("after drain state=%s, want dispatched", got.State)
+	}
+	if !r.rt.HasRun(cmd.RequestID) {
+		t.Fatal("the endpoint never ran the replayed command")
 	}
 }
 
@@ -165,92 +196,18 @@ func TestSenderDurablePersistAndDispatch(t *testing.T) {
 // dispatched late.
 func TestSenderExpireWithoutDispatch(t *testing.T) {
 	now := time.Now()
-	spool := newTestSpool(t, func() time.Time { return now })
-	cmd := testCommand(validUUID(1), "fake", "e_1", protocol.FormatTime(now.Add(time.Second)))
-	env := &Envelope{
-		RequestID:   cmd.RequestID,
-		CreatorHost: "local",
-		TargetID:    "fake",
-		Epoch:       "e_1",
-		NotAfter:    cmd.NotAfter,
-		Command:     cmd,
-		Destination: "ipc:/tmp/state",
-	}
-	if err := spool.Create(env); err != nil {
-		t.Fatalf("Create: %v", err)
-	}
+	r := newDrainRig(t, now)
+	cmd := r.enqueue(validUUID(1), "e_1", protocol.FormatTime(now.Add(time.Second)))
 
 	// The deadline passed while the envelope was waiting.
-	d := NewDrainer(spool, &fakeDispatcher{failing: false}, func() time.Time {
-		return now.Add(2 * time.Minute)
-	})
-	n, err := d.Drain(context.Background())
-	if err != nil {
-		t.Fatalf("Drain: %v", err)
-	}
-	if n != 1 {
+	if n := r.drain(now.Add(2 * time.Minute)); n != 1 {
 		t.Fatalf("drained n=%d, want 1 (expired)", n)
 	}
-	got, _, _ := spool.Get("local", cmd.RequestID)
-	if got.State != StateExpired {
+	if got := r.envelope(cmd.RequestID); got.State != StateExpired {
 		t.Fatalf("state=%s, want expired", got.State)
 	}
-	// The dispatcher was never called: no dispatch happened.
-	fd := &fakeDispatcher{}
-	_ = fd
-}
-
-// TestSenderRetryOnTransient proves a transient endpoint failure (unreachable)
-// leaves the envelope pending for the next tick, and the dispatch succeeds on
-// the next attempt.
-func TestSenderRetryOnTransient(t *testing.T) {
-	now := time.Now()
-	spool := newTestSpool(t, func() time.Time { return now })
-	cmd := testCommand(validUUID(2), "fake", "e_1", protocol.FormatTime(now.Add(2*time.Minute)))
-	env := &Envelope{
-		RequestID:   cmd.RequestID,
-		CreatorHost: "local",
-		TargetID:    "fake",
-		Epoch:       "e_1",
-		NotAfter:    cmd.NotAfter,
-		Command:     cmd,
-		Destination: "ipc:/tmp/state",
-	}
-	if err := spool.Create(env); err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-
-	// First drain: endpoint unreachable. Envelope stays pending.
-	down := &fakeDispatcher{failing: true}
-	d1 := NewDrainer(spool, down, func() time.Time { return now })
-	n, err := d1.Drain(context.Background())
-	if err != nil {
-		t.Fatalf("Drain (down): %v", err)
-	}
-	if n != 1 {
-		t.Fatalf("drained n=%d, want 1", n)
-	}
-	got, _, _ := spool.Get("local", cmd.RequestID)
-	if got.State != StatePending {
-		t.Fatalf("after transient state=%s, want pending", got.State)
-	}
-	if got.Attempt != 1 {
-		t.Fatalf("attempt=%d, want 1", got.Attempt)
-	}
-
-	// Second drain: endpoint up. Dispatch succeeds.
-	up := &fakeDispatcher{failing: false}
-	d2 := NewDrainer(spool, up, func() time.Time { return now })
-	n, err = d2.Drain(context.Background())
-	if err != nil {
-		t.Fatalf("Drain (up): %v", err)
-	}
-	if n != 1 {
-		t.Fatalf("drained n=%d, want 1", n)
-	}
-	got, _, _ = spool.Get("local", cmd.RequestID)
-	if got.State != StateDispatched {
-		t.Fatalf("after retry state=%s, want dispatched", got.State)
+	if d := r.rt.Snapshot().Dispatches; d != 0 || r.hasRecord("local", cmd.RequestID) {
+		t.Fatalf("expired envelope reached the endpoint: dispatches=%d", d)
 	}
 }
 
@@ -354,304 +311,132 @@ func TestSenderReapSettled(t *testing.T) {
 	}
 }
 
-// TestSenderOfflineEnqueueNoRetarget proves the spool stores exactly the
-// target+epoch the caller supplied: it never retargets or substitutes a fresh
-// epoch. An offline enqueue with an explicit epoch keeps that epoch on replay.
-func TestSenderOfflineEnqueueNoRetarget(t *testing.T) {
-	now := time.Now()
-	spool := newTestSpool(t, func() time.Time { return now })
-	// Offline enqueue: the caller supplies a previously-verified epoch.
-	cmd := testCommand(validUUID(0), "fake", "previously_verified_e7", protocol.FormatTime(now.Add(2*time.Minute)))
-	env := &Envelope{
-		RequestID:   cmd.RequestID,
-		CreatorHost: "local",
-		TargetID:    "fake",
-		Epoch:       "previously_verified_e7",
-		NotAfter:    cmd.NotAfter,
-		Command:     cmd,
-		Destination: "ipc:/tmp/state",
-	}
-	if err := spool.Create(env); err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	got, _, _ := spool.Get("local", cmd.RequestID)
-	if got.Epoch != "previously_verified_e7" {
-		t.Fatalf("epoch=%s, want previously_verified_e7 (no retarget)", got.Epoch)
-	}
-	if got.TargetID != "fake" {
-		t.Fatalf("target=%s, want fake", got.TargetID)
-	}
-	// The command on the envelope is the exact bytes to retry.
-	if got.Command.Epoch != "previously_verified_e7" {
-		t.Fatalf("command epoch=%s, want previously_verified_e7", got.Command.Epoch)
-	}
-	// The file is on disk so it survives a restart.
-	name, err := filepath.Abs(filepath.Join(spool.Dir(), "local__"+cmd.RequestID+".json"))
-	if err != nil {
-		t.Fatalf("abs: %v", err)
-	}
-	if _, err := os.Stat(name); err != nil {
-		t.Fatalf("envelope file not on disk: %v", err)
-	}
-}
-
 // TestSenderB2RefusalClassification (round-3) is the core B2 regression: the
-// drainer must classify refusals by Outcome.Code from a protocol.Reply VALUE
-// (not a pointer assertion). Before the fix, classifyReply used
-// reply.(*protocol.Reply) which never matched — every refusal became
-// MarkDispatched. This test goes RED when the value-type assertion is
-// reverted to a pointer assertion.
-//
-// Three cases in one test:
-//  1. stale_epoch: drains to failed/stale_epoch (not dispatched)
-//  2. unsupported: --min-evidence floor at drain → failed/unsupported
-//  3. expired: expiry straddle → failed/expired with zero records
+// endpoint returns a refusal as a protocol.Reply VALUE with Outcome.Code and
+// a nil error. Before the fix, classifyReply asserted reply.(*protocol.Reply),
+// which never matched, so every refusal became MarkDispatched. A terminal
+// refusal (stale epoch, or a mode the endpoint does not support) must drain
+// to failed with its code, never retry.
 func TestSenderB2RefusalClassification(t *testing.T) {
-	cases := []struct {
-		name string
-		code protocol.Code
+	for _, tc := range []struct {
+		name  string
+		epoch string
+		busy  protocol.Busy
+		want  protocol.Code
 	}{
-		{"stale_epoch", protocol.CodeStaleEpoch},
-		{"unsupported", protocol.CodeUnsupported},
-		{"expired", protocol.CodeExpired},
-	}
-	for _, tc := range cases {
+		{"stale epoch", "e_stale", protocol.BusyReject, protocol.CodeStaleEpoch},
+		{"unsupported", "e_1", protocol.BusyQueue, protocol.CodeUnsupported},
+	} {
 		t.Run(tc.name, func(t *testing.T) {
 			now := time.Now()
-			clock := func() time.Time { return now }
-			spool := newTestSpool(t, clock)
-			cmd := testCommand(validUUID(0), "fake", "e_stale", protocol.FormatTime(now.Add(2*time.Minute)))
-			env := &Envelope{
-				RequestID:   cmd.RequestID,
-				CreatorHost: "local",
-				TargetID:    "fake",
-				Epoch:       cmd.Epoch,
-				NotAfter:    cmd.NotAfter,
-				Command:     cmd,
-				Destination: "ipc:/tmp/state",
-			}
-			if err := spool.Create(env); err != nil {
+			r := newDrainRig(t, now)
+			notAfter := protocol.FormatTime(now.Add(2 * time.Minute))
+			cmd := testCommand(validUUID(0), "fake", tc.epoch, notAfter)
+			cmd.Input.Busy = tc.busy
+			env := &Envelope{RequestID: cmd.RequestID, CreatorHost: "local", TargetID: "fake", Epoch: tc.epoch, NotAfter: notAfter, Command: cmd, Destination: "ipc:state"}
+			if err := r.spool.Create(env); err != nil {
 				t.Fatalf("Create: %v", err)
 			}
-			fd := &fakeDispatcher{refuseCode: tc.code}
-			d := NewDrainer(spool, fd, clock)
-			n, err := d.Drain(context.Background())
-			if err != nil {
-				t.Fatalf("Drain: %v", err)
-			}
-			if n != 1 {
+			if n := r.drain(now); n != 1 {
 				t.Fatalf("drained n=%d, want 1", n)
 			}
-			got, _, _ := spool.Get("local", cmd.RequestID)
-			if got.State != StateFailed {
-				t.Fatalf("%s: state=%s, want failed (refusal classified as success — B2 dead code)", tc.name, got.State)
+			got := r.envelope(cmd.RequestID)
+			if got.State != StateFailed || got.LastError != string(tc.want) {
+				t.Fatalf("state=%s last_error=%s, want failed/%s", got.State, got.LastError, tc.want)
 			}
-			if got.LastError != string(tc.code) {
-				t.Fatalf("%s: last_error=%s, want %s", tc.name, got.LastError, tc.code)
+			if r.hasRecord("local", cmd.RequestID) {
+				t.Fatal("the refused submit left a record")
 			}
 		})
 	}
 }
 
-// TestSenderB2BusyStaysPendingForRetry (round-4) pins the busy semantics
-// Claude ruled: busy IS transient. A target busy ONCE is not a permanent
-// failure of the caller's command. The envelope stays pending (MarkAttempt),
-// retrying next tick, bounded by NotAfter — only expiry ends it. This
-// preserves the spool's purpose: an offline-enqueued submit that meets one
-// busy tick must not die as failed.
-//
-// RED when CodeBusy is removed from isTransientCode (busy settles as
-// failed/refusal instead of pending+retry).
-func TestSenderB2BusyStaysPendingForRetry(t *testing.T) {
-	now := time.Now()
-	clock := func() time.Time { return now }
-	spool := newTestSpool(t, clock)
-	cmd := testCommand(validUUID(0), "fake", "e_1", protocol.FormatTime(now.Add(2*time.Minute)))
-	env := &Envelope{
-		RequestID:   cmd.RequestID,
-		CreatorHost: "local",
-		TargetID:    "fake",
-		Epoch:       cmd.Epoch,
-		NotAfter:    cmd.NotAfter,
-		Command:     cmd,
-		Destination: "ipc:/tmp/state",
+// TestSenderTransientRefusalRetriesNextTick pins round-4 N2: a transient
+// refusal keeps the envelope pending (MarkAttempt) and the same envelope
+// dispatches on a later tick, bounded only by NotAfter. Busy IS transient: an
+// offline-enqueued submit that meets one busy tick must not die as failed.
+// An endpoint shutting down refuses with draining, and the envelope waits
+// for the restarted endpoint.
+func TestSenderTransientRefusalRetriesNextTick(t *testing.T) {
+	cases := []struct {
+		name       string
+		code       protocol.Code
+		makeBusy   func(r *drainRig, notAfter string)
+		makeUnbusy func(r *drainRig)
+	}{
+		{
+			name: "busy",
+			code: protocol.CodeBusy,
+			makeBusy: func(r *drainRig, notAfter string) {
+				// Another local request holds the target.
+				if _, err := r.ep.Handle(testCommand(validUUID(2), "fake", "e_1", notAfter), core.Source{Host: "local"}); err != nil {
+					r.t.Fatalf("occupy target: %v", err)
+				}
+			},
+			makeUnbusy: func(r *drainRig) {
+				r.rt.Complete(validUUID(2), "done")
+				if err := r.ep.Tick(); err != nil {
+					r.t.Fatalf("tick: %v", err)
+				}
+			},
+		},
+		{
+			name:       "draining",
+			code:       protocol.CodeDraining,
+			makeBusy:   func(r *drainRig, _ string) { _ = r.ep.Close() },
+			makeUnbusy: func(r *drainRig) { r.start() },
+		},
+		{
+			// A store read that fails without a typed refusal is the
+			// endpoint being unreachable for now, not a refusal of the
+			// request (Pro review of the carrier cull).
+			name: "endpoint unreachable",
+			code: protocol.CodeEndpointUnreachable,
+			makeBusy: func(r *drainRig, _ string) {
+				if err := os.MkdirAll(r.recordPath(validUUID(0)), 0o700); err != nil {
+					r.t.Fatalf("obstruct record: %v", err)
+				}
+			},
+			makeUnbusy: func(r *drainRig) {
+				if err := os.Remove(r.recordPath(validUUID(0))); err != nil {
+					r.t.Fatalf("clear record: %v", err)
+				}
+			},
+		},
 	}
-	if err := spool.Create(env); err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	fd := &fakeDispatcher{refuseCode: protocol.CodeBusy}
-	d := NewDrainer(spool, fd, clock)
-	n, err := d.Drain(context.Background())
-	if err != nil {
-		t.Fatalf("Drain: %v", err)
-	}
-	if n != 1 {
-		t.Fatalf("drained n=%d, want 1", n)
-	}
-	got, _, _ := spool.Get("local", cmd.RequestID)
-	if got.State != StatePending {
-		t.Fatalf("busy: state=%s, want pending (busy must stay pending for next-tick retry, not settle as failed)", got.State)
-	}
-	if got.LastError != string(protocol.CodeBusy) {
-		t.Fatalf("busy: last_error=%s, want %s", got.LastError, protocol.CodeBusy)
-	}
-	if got.Attempt != 1 {
-		t.Fatalf("busy: attempt=%d, want 1 (MarkAttempt should record the transient failure)", got.Attempt)
-	}
-}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			now := time.Now()
+			r := newDrainRig(t, now)
+			notAfter := protocol.FormatTime(now.Add(2 * time.Minute))
+			cmd := r.enqueue(validUUID(0), "e_1", notAfter)
+			tc.makeBusy(r, notAfter)
 
-// TestSenderB7PersistBeforeDispatch (round-3) proves the envelope is durable
-// on disk BEFORE the endpoint's Handle is called. The CLI test observes the
-// spool after submit returns, so ordering is invisible; round 1's exact
-// inversion (persist after dispatch via a deferred create) and a second
-// literal reorder both left the suite green.
-//
-// FIX: a test dispatcher that records whether the envelope file existed at
-// Handle call time. RED on a deferred-create inversion (Create moved after
-// the Handle call).
-func TestSenderB7PersistBeforeDispatch(t *testing.T) {
-	now := time.Now()
-	clock := func() time.Time { return now }
-	spool := newTestSpool(t, clock)
-	cmd := testCommand(validUUID(0), "fake", "e_1", protocol.FormatTime(now.Add(2*time.Minute)))
-	env := &Envelope{
-		RequestID:   cmd.RequestID,
-		CreatorHost: "local",
-		TargetID:    "fake",
-		Epoch:       cmd.Epoch,
-		NotAfter:    cmd.NotAfter,
-		Command:     cmd,
-		Destination: "ipc:/tmp/state",
-	}
-
-	// dispatchCheck records whether the envelope file existed when Handle
-	// was called.
-	type dispatchCheck struct {
-		existedAtHandle bool
-		checked         bool
-	}
-	dc := &dispatchCheck{}
-	fd := &checkingDispatcher{
-		check: func() {
-			dc.checked = true
-			path := filepath.Join(spool.Dir(), env.CreatorHost+"__"+env.RequestID+".json")
-			if _, err := os.Stat(path); err == nil {
-				dc.existedAtHandle = true
+			// Tick 1: refused, still pending.
+			if n := r.drain(now); n != 1 {
+				t.Fatalf("tick 1: drained n=%d, want 1", n)
 			}
-		},
-	}
+			got := r.envelope(cmd.RequestID)
+			if got.State != StatePending || got.Attempt != 1 || got.LastError != string(tc.code) {
+				t.Fatalf("tick 1: state=%s attempt=%d last_error=%s, want pending/1/%s", got.State, got.Attempt, got.LastError, tc.code)
+			}
+			if r.rt.HasRun(cmd.RequestID) {
+				t.Fatal("tick 1: the refused submit ran")
+			}
 
-	// Persist, then drain. The drainer calls Handle; the dispatcher checks
-	// the file exists at that moment.
-	if err := spool.Create(env); err != nil {
-		t.Fatalf("Create: %v", err)
+			// Tick 2: the target is free; the same envelope dispatches.
+			tc.makeUnbusy(r)
+			if n := r.drain(now); n != 1 {
+				t.Fatalf("tick 2: drained n=%d, want 1", n)
+			}
+			if got := r.envelope(cmd.RequestID); got.State != StateDispatched {
+				t.Fatalf("tick 2: state=%s, want dispatched", got.State)
+			}
+			if !r.rt.HasRun(cmd.RequestID) {
+				t.Fatal("tick 2: the endpoint never ran the command")
+			}
+		})
 	}
-	d := NewDrainer(spool, fd, clock)
-	n, err := d.Drain(context.Background())
-	if err != nil {
-		t.Fatalf("Drain: %v", err)
-	}
-	if n != 1 {
-		t.Fatalf("drained n=%d, want 1", n)
-	}
-	if !dc.checked {
-		t.Fatal("dispatcher was never called")
-	}
-	if !dc.existedAtHandle {
-		t.Fatal("B7: envelope file did NOT exist at Handle call time (persist-after-dispatch inversion)")
-	}
-}
-
-// checkingDispatcher wraps a callback that fires before Handle returns a
-// success reply. It lets a test observe state at the dispatch boundary.
-type checkingDispatcher struct {
-	check func()
-}
-
-func (c *checkingDispatcher) Handle(cmd *protocol.Command, src core.Source) (any, error) {
-	c.check()
-	return protocol.Reply{
-		Snapshot: protocol.Snapshot{
-			Schema:      protocol.SchemaRequest,
-			RequestRef:  protocol.EncodeRef(src.Host, cmd.TargetID, cmd.RequestID),
-			RequestID:   cmd.RequestID,
-			CreatorHost: src.Host,
-			TargetID:    cmd.TargetID,
-			Epoch:       cmd.Epoch,
-			Revision:    1,
-			State:       protocol.StateDispatching,
-			InputDigest: protocol.CommandDigest(cmd),
-			NotAfter:    cmd.NotAfter,
-			ObservedAt:  protocol.FormatTime(time.Now()),
-		},
-	}, nil
-}
-
-// TestSenderB2BusyThenDispatchesNextTick (round-4 N2) is the verifier's busy
-// probe: an offline-enqueued envelope (2-min window) meets a busy target on
-// tick 1, the target is freed+idle on tick 2, and the command dispatches on
-// tick 2. After tick 1 the envelope is pending (not failed); after tick 2 it
-// is dispatched; the native dispatch count is exactly ONE (tick 1's busy
-// refusal did not execute work).
-//
-// RED when busy is classified terminal (CodeBusy removed from
-// isTransientCode): tick 1 settles the envelope as failed, so tick 2 never
-// dispatches it.
-func TestSenderB2BusyThenDispatchesNextTick(t *testing.T) {
-	t0 := time.Now()
-	clock := func() time.Time { return t0 }
-	spool := newTestSpool(t, clock)
-	cmd := testCommand(validUUID(0), "fake", "e_1", protocol.FormatTime(t0.Add(2*time.Minute)))
-	env := &Envelope{
-		RequestID:   cmd.RequestID,
-		CreatorHost: "local",
-		TargetID:    "fake",
-		Epoch:       cmd.Epoch,
-		NotAfter:    cmd.NotAfter,
-		Command:     cmd,
-		Destination: "ipc:/tmp/state",
-	}
-	if err := spool.Create(env); err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-
-	// Tick 1: target is busy.
-	fd := &fakeDispatcher{refuseCode: protocol.CodeBusy}
-	d := NewDrainer(spool, fd, clock)
-	n, err := d.Drain(context.Background())
-	if err != nil {
-		t.Fatalf("drain tick 1: %v", err)
-	}
-	if n != 1 {
-		t.Fatalf("tick 1: drained n=%d, want 1", n)
-	}
-	got, _, _ := spool.Get("local", cmd.RequestID)
-	if got.State != StatePending {
-		t.Fatalf("tick 1: state=%s, want pending (busy must not settle as failed)", got.State)
-	}
-	if got.Attempt != 1 {
-		t.Fatalf("tick 1: attempt=%d, want 1", got.Attempt)
-	}
-
-	// Tick 2: target is freed + idle. The same envelope dispatches.
-	fd.refuseCode = ""
-	n2, err := d.Drain(context.Background())
-	if err != nil {
-		t.Fatalf("drain tick 2: %v", err)
-	}
-	if n2 != 1 {
-		t.Fatalf("tick 2: drained n=%d, want 1", n2)
-	}
-	got2, _, _ := spool.Get("local", cmd.RequestID)
-	if got2.State != StateDispatched {
-		t.Fatalf("tick 2: state=%s, want dispatched (busy-then-idle must dispatch on tick 2)", got2.State)
-	}
-	// Exactly ONE native dispatch: tick 1's busy refusal did not execute work.
-	if fd.calls != 2 {
-		t.Fatalf("dispatch count: fakeDispatcher.Handle called %d times, want 2 (1 busy refusal + 1 dispatch)", fd.calls)
-	}
-	// The first call was a busy refusal (no work), the second was a dispatch.
-	// A dispatch sets MarkDispatched, so the envelope is settled after tick 2.
 }
 
 // TestASDConcurrentDifferentDigestNoOverwrite (bead asd, #802 round-3) is the
@@ -742,5 +527,62 @@ func TestASDConcurrentDifferentDigestNoOverwrite(t *testing.T) {
 	}
 	if !want[got.Command.Input.Text] {
 		t.Fatalf("surviving envelope text=%q not among attempted payloads", got.Command.Input.Text)
+	}
+}
+
+// TestSenderDrainRefusesEditedSpoolFiles reproduces agent-message-queue-611.47:
+// the drainer replayed a spool file another writer changed, so a file could
+// dispatch interaction.respond, or a submit as a Buzz share, with a copied
+// origin or host. Only a valid local submit is dispatched, never with an origin.
+func TestSenderDrainRefusesEditedSpoolFiles(t *testing.T) {
+	now := time.Now()
+	r := newDrainRig(t, now)
+	notAfter := protocol.FormatTime(now.Add(2 * time.Minute))
+	edit := func(id string, change func(m map[string]any)) {
+		t.Helper()
+		cmd := r.enqueue(id, "e_1", notAfter)
+		name, err := r.spool.filename(Key{CreatorHost: "local", RequestID: cmd.RequestID})
+		if err != nil {
+			t.Fatalf("filename: %v", err)
+		}
+		raw, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		var m map[string]any
+		if err := json.Unmarshal(raw, &m); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		change(m)
+		if raw, err = json.Marshal(m); err != nil {
+			t.Fatalf("encode: %v", err)
+		}
+		if err := os.WriteFile(name, raw, 0o600); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+	}
+	origin := map[string]any{"carrier": "buzz", "body": "body-1", "channel": "dm-1"}
+	edit(validUUID(0), func(m map[string]any) {
+		m["command"].(map[string]any)["op"] = string(protocol.OpInteractionRespond)
+		m["origin"] = origin
+	})
+	edit(validUUID(1), func(m map[string]any) { m["origin"] = origin })
+	edit(validUUID(2), func(m map[string]any) { m["creator_host"] = "buzz-0123456789abcdef" })
+
+	// Only the submit with a copied origin field is still a valid local
+	// submit; the respond and the foreign host are never handed over.
+	if n := r.drain(now); n != 1 {
+		t.Fatalf("drained n=%d, want 1 (only the valid local submit)", n)
+	}
+	if !r.rt.HasRun(validUUID(1)) || r.rt.HasRun(validUUID(2)) || r.hasRecord("buzz-0123456789abcdef", validUUID(2)) {
+		t.Fatal("dispatched set is not exactly the valid local submit")
+	}
+	if len(r.published) == 0 {
+		t.Fatal("the dispatched submit published no revision")
+	}
+	for _, o := range r.published {
+		if o != nil {
+			t.Fatalf("dispatched submit carries origin %v, want none", o)
+		}
 	}
 }

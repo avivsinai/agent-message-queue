@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcec/v2/schnorr"
 )
 
@@ -90,8 +91,10 @@ func TestNIPAOVector_Interoperable(t *testing.T) {
 	}
 }
 
-// TestNIPAOVector_Parse verifies ParseAuthTag on the vector's tag array and
-// the malformed rejections the NIP lists.
+// TestNIPAOVector_Parse verifies ParseAuthTag on the vector's tag array, the
+// structural rejections the NIP lists, and that Verify refuses a tag whose
+// owner signature is valid but whose conditions are malformed or whose owner
+// is the body itself (self-attestation).
 func TestNIPAOVector_Parse(t *testing.T) {
 	tag, err := ParseAuthTag([]string{"auth", vecOwnerPub, vecConditions, vecSig})
 	if err != nil {
@@ -102,36 +105,42 @@ func TestNIPAOVector_Parse(t *testing.T) {
 	}
 
 	for name, tt := range map[string][]string{
-		"three elements":   {"auth", vecOwnerPub, vecConditions, vecSig[:64]},
-		"five elements":    {"auth", vecOwnerPub, vecConditions, vecSig, "extra"},
-		"wrong name":       {"aut", vecOwnerPub, vecConditions, vecSig},
-		"bad sig hex":      {"auth", vecOwnerPub, vecConditions, strings.Repeat("zz", 64)},
-		"trailing &":       {"auth", vecOwnerPub, "kind=1&", vecSig},
-		"leading zero":     {"auth", vecOwnerPub, "kind=01", vecSig},
-		"self attestation": {"auth", vecAgentPubkey, vecConditions, vecSig},
+		"three elements": {"auth", vecOwnerPub, vecConditions, vecSig[:64]},
+		"five elements":  {"auth", vecOwnerPub, vecConditions, vecSig, "extra"},
+		"wrong name":     {"aut", vecOwnerPub, vecConditions, vecSig},
+		"bad sig hex":    {"auth", vecOwnerPub, vecConditions, strings.Repeat("zz", 64)},
 	} {
-		_, err := ParseAuthTag(tt)
-		if name == "three elements" || name == "five elements" || name == "wrong name" || name == "bad sig hex" {
-			if err == nil {
-				t.Fatalf("%s: ParseAuthTag accepted, want error", name)
-			}
-			continue
+		if _, err := ParseAuthTag(tt); err == nil {
+			t.Fatalf("%s: ParseAuthTag accepted, want error", name)
 		}
-		// Structural parse succeeds for condition/self-attestation cases;
-		// Verify/ParseConditions must reject them.
-		parsed, perr := ParseAuthTag(tt)
-		if perr != nil {
-			continue
-		}
-		if name == "self attestation" {
-			if verr := parsed.Verify(vecAgentPubkey); verr == nil {
-				t.Fatalf("%s: Verify accepted, want error", name)
-			}
-			continue
-		}
-		if verr := parsed.Verify(vecAgentPubkey); verr == nil {
-			t.Fatalf("%s: Verify accepted, want error", name)
-		}
+	}
+
+	// A valid owner signature over malformed conditions must never verify.
+	// SignAuthTag refuses malformed conditions, so sign the preimage directly.
+	malformed := AuthTag{OwnerPubKey: vecOwnerPub, Conditions: "kind=01"}
+	ownerSecret := mustHexSecret(t, vecOwnerSecret)
+	priv, _ := btcec.PrivKeyFromBytes(ownerSecret[:])
+	sig, err := schnorr.Sign(priv, malformed.Preimage(vecAgentPubkey))
+	if err != nil {
+		t.Fatal(err)
+	}
+	copy(malformed.Sig[:], sig.Serialize())
+	if err := malformed.Verify(vecAgentPubkey); err == nil {
+		t.Fatal("malformed conditions: Verify accepted a validly signed tag, want error")
+	}
+
+	// The vector's agent key is 2·G: its own secret signs a valid tag naming
+	// itself as owner, which is self-attestation.
+	agentSecret := mustHexSecret(t, "0000000000000000000000000000000000000000000000000000000000000002")
+	self, err := SignAuthTag(agentSecret, vecAgentPubkey, vecConditions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if self.OwnerPubKey != vecAgentPubkey {
+		t.Fatalf("setup: owner pubkey %s is not the agent key", self.OwnerPubKey)
+	}
+	if err := self.Verify(vecAgentPubkey); err == nil {
+		t.Fatal("self attestation: Verify accepted, want error")
 	}
 }
 
@@ -216,38 +225,6 @@ func TestBodyKeyFileLifecycle(t *testing.T) {
 	}
 }
 
-// TestShareConditionsAndRenew covers the share tag shape and renewal:
-// a renewed tag (later bound) satisfies events the old one rejects.
-func TestShareConditionsAndRenew(t *testing.T) {
-	owner := mustHexSecret(t, vecOwnerSecret)
-	dir := t.TempDir()
-	k, err := LoadOrMint(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	oldTag, err := SignAuthTag(owner, k.PublicKeyHex(), ShareConditions(20003, 1713957000))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := oldTag.Satisfies(20003, 1713956999); err != nil {
-		t.Fatalf("courier kind within window: %v", err)
-	}
-	if err := oldTag.Satisfies(20003, 1713957000); err == nil {
-		t.Fatal("event at the bound accepted; want strict <")
-	}
-	if err := oldTag.Satisfies(1, 1713956999); err == nil {
-		t.Fatal("kind=1 accepted; share tag does not authorize it")
-	}
-	// Renewal re-prints the preimage with a later bound.
-	newTag, err := SignAuthTag(owner, k.PublicKeyHex(), ShareConditions(24200, 1713999999))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := newTag.Satisfies(24200, 1713957000); err != nil {
-		t.Fatalf("renewed tag admits the event the old one refused: %v", err)
-	}
-}
-
 // TestPerKindCredential pins the architect ruling (2026-09-22): one NIP-OA
 // condition string per kind; Satisfies is fully conjunctive; a multi-kind
 // string is satisfiable by no event and is rejected as a credential; a
@@ -267,8 +244,11 @@ func TestPerKindCredential(t *testing.T) {
 		if err := tag.Satisfies(kind, 1713956999); err != nil {
 			t.Fatalf("kind %d within window: %v", kind, err)
 		}
-		if err := tag.Satisfies(20003, 1713957000); err == nil {
-			t.Fatalf("kind %d tag accepted kind 20003 at the bound", kind)
+		if err := tag.Satisfies(kind, 1713957000); err == nil {
+			t.Fatalf("kind %d tag accepted an event at the bound; want strict <", kind)
+		}
+		if err := tag.Satisfies(1, 1713956999); err == nil {
+			t.Fatalf("kind %d tag accepted kind 1; a share tag authorizes only its own kind", kind)
 		}
 	}
 	// A multi-kind string is a local reinterpretation and must never be a

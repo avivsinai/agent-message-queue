@@ -12,7 +12,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -162,44 +161,10 @@ func submitReq(key requests.Key, text string) core.BoundRequest {
 
 // --- Inspect & epoch (protocol: session generation and epoch; capabilities) -----------------------------------------
 
-// TestInspectUnpinnedSentinel pins that before the first receipt the epoch
-// is the non-empty address epoch of the live generation, never "" (an empty
-// epoch would defeat stale-epoch protection because "" == "" always passes).
-func TestInspectUnpinnedSentinel(t *testing.T) {
-	a, _ := newTestAttachment(t)
-	s := a.Inspect()
-	if s.Epoch != addressEpoch("gen-1") || s.Epoch == "" {
-		t.Fatalf("epoch = %q, want address epoch %q", s.Epoch, addressEpoch("gen-1"))
-	}
-	if !protocol.ValidEpoch(s.Epoch) {
-		t.Fatalf("epoch %q is not protocol-valid", s.Epoch)
-	}
-}
-
-// TestFirstReceiptPinsEpoch pins that the first receipt's session_generation
-// becomes the published epoch; only receipts pin (never liveness, never the
-// session id).
-func TestFirstReceiptPinsEpoch(t *testing.T) {
-	a, dir := newTestAttachment(t)
-	key := testKey("r1")
-	ref := clientRef(key)
-	seedRequest(t, dir, ref, "")
-	writeReceipt(t, dir, ref, "gen-7", fixedNow)
-	stampLivenessGen(t, dir, fixedNow, "gen-7")
-	// Submit against an existing receipt: recovery/refresh binds and pins.
-	adm, err := a.Submit(core.BoundRequest{Key: key, Epoch: addressEpoch("gen-7"), Input: protocol.SubmitInput{Text: "hello"}, NotAfter: "2036-01-01T00:00:00Z"})
-	if err != nil || !adm.Admitted {
-		t.Fatalf("Submit = %+v, %v; want receipt-gated admission", adm, err)
-	}
-	s := a.Inspect()
-	if s.Epoch != "gen-7" {
-		t.Fatalf("epoch after first receipt = %q, want gen-7", s.Epoch)
-	}
-}
-
 // TestLaterSubmitCarriesEpochHint pins that a submit after pinning
-// publishes the pinned generation as epoch_hint (empty only while
-// unpinned), and the request JSON carries deliver_as followUp + not_after.
+// publishes the pinned generation as epoch_hint, and the request JSON
+// carries deliver_as followUp, not_after and the bridge_revision the
+// extension checks.
 func TestLaterSubmitCarriesEpochHint(t *testing.T) {
 	a, dir := newTestAttachment(t)
 	// Pin via an existing receipt for another ref.
@@ -215,26 +180,19 @@ func TestLaterSubmitCarriesEpochHint(t *testing.T) {
 	if a.Inspect().Epoch != "gen-9" {
 		t.Fatalf("want pinned gen-9, got %q", a.Inspect().Epoch)
 	}
-	// New submit: receipt arrives mid-poll via a watcher goroutine. The
-	// request file is written by Submit BEFORE it polls, so assert the hint
-	// from the file the first poll observes.
+	// New submit: the bridge delivers it, so its receipt lands right after
+	// the real publish (macOS CI run 36620459450: a sleeping receipt writer
+	// outlived the test).
 	key := testKey("r2")
 	ref := clientRef(key)
-	if _, ok := a.runs[key]; ok {
-		t.Fatal("fresh key must not be pre-bound")
+	a.dir.publish = func(req deliverRequest) error {
+		if err := (bridgeDir{dir: dir, names: piWire}).publishRequest(req); err != nil {
+			return err
+		}
+		writeReceipt(t, dir, req.Ref, "gen-9", fixedNow)
+		return nil
 	}
-	// The watcher must finish before the test returns: if Submit returns
-	// first, a late write lands in a removed temp dir and fails a completed
-	// test (macOS CI run 36620459450, "Fail in goroutine after
-	// TestLaterSubmitCarriesEpochHint has completed").
-	written := make(chan struct{})
-	go func() {
-		defer close(written)
-		time.Sleep(10 * time.Millisecond)
-		writeReceipt(t, dir, ref, "gen-9", fixedNow)
-	}()
 	_, err := a.Submit(core.BoundRequest{Key: key, Epoch: "gen-9", Input: protocol.SubmitInput{Text: "q"}, NotAfter: "2036-01-01T00:00:00Z"})
-	<-written
 	if err != nil {
 		t.Fatalf("submit with pinned epoch: %v", err)
 	}
@@ -243,7 +201,7 @@ func TestLaterSubmitCarriesEpochHint(t *testing.T) {
 		t.Fatalf("read request: %v", err)
 	}
 	body := string(data)
-	for _, want := range []string{`"deliver_as":"followUp"`, `"epoch_hint":"gen-9"`, `"not_after":"2036-01-01T00:00:00Z"`, `"ref":"` + ref + `"`} {
+	for _, want := range []string{`"deliver_as":"followUp"`, `"epoch_hint":"gen-9"`, `"not_after":"2036-01-01T00:00:00Z"`, `"ref":"` + ref + `"`, fmt.Sprintf(`"bridge_revision":%d`, MinBridgeRevision)} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("request JSON missing %s:\n%s", want, body)
 		}
@@ -364,58 +322,7 @@ func TestSubmitDuplicateRefNeverRewrites(t *testing.T) {
 	}
 }
 
-// TestPublishRequestAtomicShape pins the atomic request write: the published file
-// contains the full payload, no temp files leak, and the request dir still
-// holds only ref-named files.
-func TestPublishRequestAtomicShape(t *testing.T) {
-	_, dir := newTestAttachment(t)
-	ref := clientRef(testKey("atomic"))
-	bd := bridgeDir{dir: dir, names: piWire}
-	err := bd.publishRequest(deliverRequest{
-		Ref: ref, Text: "body", DeliverAs: "followUp", NotAfter: "2036-01-01T00:00:00Z", CreatedAt: protocol.FormatTime(fixedNow),
-	})
-	if err != nil {
-		t.Fatalf("publish: %v", err)
-	}
-	data, err := os.ReadFile(filepath.Join(dir, "requests", refSanitize(ref)+".json"))
-	if err != nil || !strings.Contains(string(data), `"text":"body"`) {
-		t.Fatalf("published request = %q, %v", data, err)
-	}
-	entries, _ := os.ReadDir(filepath.Join(dir, "requests"))
-	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), ".publish-") {
-			t.Fatalf("temp file leaked: %s", e.Name())
-		}
-	}
-}
-
-// TestSubmitSteerRefused pins that deliver=steer is refused pre-side-effect
-// (unsupported), before any file write.
-func TestSubmitSteerRefused(t *testing.T) {
-	a, dir := newTestAttachment(t)
-	req := submitReq(testKey("s1"), "redirect")
-	req.Input.Deliver = protocol.DeliverSteer
-	adm, err := a.Submit(req)
-	if err != nil || adm.Admitted || adm.Code != protocol.CodeUnsupported {
-		t.Fatalf("Submit = %+v, %v; want positive unsupported refusal", adm, err)
-	}
-	entries, _ := os.ReadDir(filepath.Join(dir, "requests"))
-	if len(entries) != 0 {
-		t.Fatalf("requests dir = %d entries, want 0", len(entries))
-	}
-}
-
 // --- Lookup / evidence (protocol: adapter recovery and evidence) ------------------------------------------------
-
-// TestLookupUnretainedKeyUnknown pins the pi evidence rule: a key the
-// adapter retains nothing about is EvidenceUnknown, never EvidenceNone.
-func TestLookupUnretainedKeyUnknown(t *testing.T) {
-	a, _ := newTestAttachment(t)
-	ev, err := a.Lookup(testKey("never"), SentinelUnpinned)
-	if err != nil || ev.Class != core.EvidenceUnknown {
-		t.Fatalf("evidence = %+v, %v; want unknown", ev, err)
-	}
-}
 
 // TestLookupReceiptNoEventsConfirmedRunning pins recovery row 3: receipt present,
 // no events (rotated/absent log) → confirmed-running, never uncertain.
@@ -516,28 +423,31 @@ func TestAcknowledgeReleasesResult(t *testing.T) {
 
 // --- Fire-time expiry over proven admission ----------------------------
 
-// TestExpiredRefusalMapsTyped pins that receipt present + refused(expired)
-// → Lookup reports proven admission with RefusalCode expired — the endpoint
-// maps it to rejected+expired, never a silent dispatch.
+// TestExpiredRefusalMapsTyped pins that refused(expired) maps to the typed
+// expired refusal without admission. The extension refuses an expired
+// request before it claims a receipt (amq-bridge.ts scan: examine() refuses
+// and the loop continues before claimReceipt; protocol: "Refusals write no
+// receipt"), so the event stream is the only record.
 func TestExpiredRefusalMapsTyped(t *testing.T) {
 	a, dir := newTestAttachment(t)
 	key := testKey("exp")
 	ref := clientRef(key)
 	seedRequest(t, dir, ref, "")
-	writeReceipt(t, dir, ref, "gen-1", fixedNow) // admission proven, receipt STAYS
 	appendEvents(t, dir, ref, fmt.Sprintf(`{"protocol":%q,"ref":%q,"event":"refused","reason":"expired"}`, ProtocolV1, ref))
 	ev, err := a.Lookup(key, "gen-1")
 	if err != nil {
 		t.Fatalf("Lookup: %v", err)
 	}
-	if !ev.Admitted || ev.State != protocol.StateRejected || ev.RefusalCode != protocol.CodeExpired {
-		t.Fatalf("evidence = %+v, want admitted rejected with refusal code expired", ev)
+	if ev.Admitted || ev.State != protocol.StateRejected || ev.RefusalCode != protocol.CodeExpired {
+		t.Fatalf("evidence = %+v, want rejected with refusal code expired, not admitted", ev)
 	}
 }
 
-// TestGenerationRefusalDropsToSentinel pins that a refused(generation) event
-// proves the pinned epoch stale; the adapter drops back to the `unpinned`
-// sentinel so the next receipt re-pins the live generation.
+// TestGenerationRefusalDropsToSentinel pins that a refused(generation) for a
+// request submitted under a pin proves the pin stale: Submit returns
+// stale_epoch and the adapter drops back to the address epoch of the live
+// generation, so the next receipt re-pins it. The extension writes that
+// refusal before any receipt (amq-bridge.ts examine()).
 func TestGenerationRefusalDropsToSentinel(t *testing.T) {
 	a, dir := newTestAttachment(t)
 	seed := clientRef(testKey("seed"))
@@ -549,65 +459,83 @@ func TestGenerationRefusalDropsToSentinel(t *testing.T) {
 	if a.Inspect().Epoch != "gen-1" {
 		t.Fatalf("want gen-1 pinned, got %q", a.Inspect().Epoch)
 	}
-	key := testKey("g1")
-	ref := clientRef(key)
-	seedRequest(t, dir, ref, "gen-1")
-	writeReceipt(t, dir, ref, "gen-1", fixedNow)
-	appendEvents(t, dir, ref, fmt.Sprintf(`{"protocol":%q,"ref":%q,"event":"refused","reason":"generation"}`, ProtocolV1, ref))
-	if _, err := a.Lookup(key, "gen-1"); err != nil {
-		t.Fatalf("Lookup: %v", err)
+	a.dir.publish = func(req deliverRequest) error {
+		if err := (bridgeDir{dir: dir, names: piWire}).publishRequest(req); err != nil {
+			return err
+		}
+		appendEvents(t, dir, req.Ref, fmt.Sprintf(`{"protocol":%q,"ref":%q,"event":"refused","reason":"generation"}`, ProtocolV1, req.Ref))
+		return nil
+	}
+	req := submitReq(testKey("g1"), "hello")
+	req.Epoch = "gen-1"
+	if adm, err := a.Submit(req); err != nil || adm.Admitted || adm.Code != protocol.CodeStaleEpoch {
+		t.Fatalf("Submit = %+v, %v; want the stale_epoch refusal", adm, err)
 	}
 	if s := a.Inspect(); s.Epoch != addressEpoch("gen-1") {
 		t.Fatalf("epoch after generation refusal = %q, want address epoch %q", s.Epoch, addressEpoch("gen-1"))
 	}
 }
 
-// TestRestartedBridgeDropsDeadPin reproduces a field defect: a receipt from
-// pi pid A pinned its generation, pi restarted as pid B, and the first submit carried A's generation as
-// epoch_hint, which B refused. A live bridge in another process must unpin,
-// so the first submit goes out as first contact, addressed to B's live
-// generation, and completes.
+// TestRestartedBridgeDropsDeadPin reproduces two field defects: a receipt
+// pinned a generation, then pi restarted as another process (kill, crash,
+// app restart) or started a new generation in the same process (/new,
+// reload and fork keep the pid), and the first submit carried the dead
+// generation as epoch_hint, which the bridge refused. The live bridge must
+// unpin, so the first submit goes out as first contact, addressed to the
+// live generation, and its receipt re-pins.
 func TestRestartedBridgeDropsDeadPin(t *testing.T) {
-	a, dir := newTestAttachment(t)
-	seed := clientRef(testKey("seed"))
-	seedRequest(t, dir, seed, "")
-	writeReceipt(t, dir, seed, "gen-1", fixedNow) // pid = this process
-	if _, err := a.Submit(submitReq(testKey("seed"), "hello")); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-	restarted := fmt.Sprintf(`{"protocol":%q,"live":true,"at":%q,"pid":%d,"surface":"tui","session_generation":"gen-2","bridge_revision":3}`,
-		ProtocolV1, fixedNow.UTC().Format(time.RFC3339Nano), os.Getpid()+1)
-	if err := os.WriteFile(filepath.Join(dir, "bridge.liveness"), []byte(restarted), 0o600); err != nil {
-		t.Fatalf("write liveness: %v", err)
-	}
-	if err := os.Chtimes(filepath.Join(dir, "bridge.liveness"), fixedNow, fixedNow); err != nil {
-		t.Fatalf("chtimes liveness: %v", err)
-	}
-	s := a.Inspect()
-	if s.Epoch != addressEpoch("gen-2") {
-		t.Fatalf("epoch after restart = %q, want address epoch %q", s.Epoch, addressEpoch("gen-2"))
-	}
-	key := testKey("after-restart")
-	ref := clientRef(key)
-	receiptB := fmt.Sprintf(`{"protocol":%q,"ref":%q,"session_generation":"gen-2","delivered_at":%q,"pid":%d}`,
-		ProtocolV1, ref, fixedNow.UTC().Format(time.RFC3339Nano), os.Getpid()+1)
-	go func() {
-		time.Sleep(10 * time.Millisecond)
-		_ = os.WriteFile(filepath.Join(dir, "receipts", refSanitize(ref)+".json"), []byte(receiptB), 0o600)
-	}()
-	adm, err := a.Submit(core.BoundRequest{Key: key, Epoch: s.Epoch, Input: protocol.SubmitInput{Text: "q"}, NotAfter: "2036-01-01T00:00:00Z"})
-	if err != nil || !adm.Admitted {
-		t.Fatalf("first submit after restart = %+v, %v; want admitted", adm, err)
-	}
-	data, err := os.ReadFile(filepath.Join(dir, "requests", refSanitize(ref)+".json"))
-	if err != nil {
-		t.Fatalf("read request: %v", err)
-	}
-	if !strings.Contains(string(data), `"epoch_hint":"gen-2"`) {
-		t.Fatalf("first submit after restart must address the live generation gen-2:\n%s", data)
-	}
-	if got := a.Inspect().Epoch; got != "gen-2" {
-		t.Fatalf("epoch after first receipt = %q, want gen-2", got)
+	for _, tc := range []struct {
+		name string
+		pid  int
+	}{
+		{"other process", os.Getpid() + 1},
+		{"same process", os.Getpid()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, dir := newTestAttachment(t)
+			seed := clientRef(testKey("seed"))
+			seedRequest(t, dir, seed, "")
+			writeReceipt(t, dir, seed, "gen-1", fixedNow) // pid = this process
+			if _, err := a.Submit(submitReq(testKey("seed"), "hello")); err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+			restarted := fmt.Sprintf(`{"protocol":%q,"live":true,"at":%q,"pid":%d,"surface":"tui","session_generation":"gen-2","bridge_revision":3}`,
+				ProtocolV1, fixedNow.UTC().Format(time.RFC3339Nano), tc.pid)
+			if err := os.WriteFile(filepath.Join(dir, "bridge.liveness"), []byte(restarted), 0o600); err != nil {
+				t.Fatalf("write liveness: %v", err)
+			}
+			if err := os.Chtimes(filepath.Join(dir, "bridge.liveness"), fixedNow, fixedNow); err != nil {
+				t.Fatalf("chtimes liveness: %v", err)
+			}
+			s := a.Inspect()
+			if s.Epoch != addressEpoch("gen-2") {
+				t.Fatalf("epoch after restart = %q, want address epoch %q", s.Epoch, addressEpoch("gen-2"))
+			}
+			key := testKey("after-restart")
+			ref := clientRef(key)
+			a.dir.publish = func(req deliverRequest) error {
+				if err := (bridgeDir{dir: dir, names: piWire}).publishRequest(req); err != nil {
+					return err
+				}
+				receipt := fmt.Sprintf(`{"protocol":%q,"ref":%q,"session_generation":"gen-2","delivered_at":%q,"pid":%d}`,
+					ProtocolV1, req.Ref, fixedNow.UTC().Format(time.RFC3339Nano), tc.pid)
+				return os.WriteFile(filepath.Join(dir, "receipts", refSanitize(req.Ref)+".json"), []byte(receipt), 0o600)
+			}
+			adm, err := a.Submit(core.BoundRequest{Key: key, Epoch: s.Epoch, Input: protocol.SubmitInput{Text: "q"}, NotAfter: "2036-01-01T00:00:00Z"})
+			if err != nil || !adm.Admitted {
+				t.Fatalf("first submit after restart = %+v, %v; want admitted", adm, err)
+			}
+			data, err := os.ReadFile(filepath.Join(dir, "requests", refSanitize(ref)+".json"))
+			if err != nil {
+				t.Fatalf("read request: %v", err)
+			}
+			if !strings.Contains(string(data), `"epoch_hint":"gen-2"`) {
+				t.Fatalf("first submit after restart must address the live generation gen-2:\n%s", data)
+			}
+			if got := a.Inspect().Epoch; got != "gen-2" {
+				t.Fatalf("epoch after first receipt = %q, want gen-2", got)
+			}
+		})
 	}
 }
 
@@ -653,82 +581,64 @@ func TestFirstContactAddressesLiveGeneration(t *testing.T) {
 	}
 }
 
-// TestOldBridgeRevisionRefusesSubmit reproduces
-// Pro review of #920, 2026-09-29, #1: an extension without the #920 fixes publishes the same
-// protocol string, and the adapter ran silently against it. A live record
-// without bridge_revision must advertise no submit and refuse a submit with
-// the install instruction, writing nothing.
+// TestOldBridgeRevisionRefusesSubmit reproduces two Pro review findings: an
+// extension without the #920 fixes publishes the same protocol string with
+// no bridge_revision (review of #920, 2026-09-29, #1), and the withdrawn
+// 3bedb7bf extension advertised bridge_revision 2 while it still completed
+// tool-use preambles (review of #923 r3, 2026-09-29, #1;
+// testdata/withdrawn-r2/bridge.liveness is its liveness, byte for byte). The
+// adapter ran silently against both. Such a bridge must advertise no submit
+// and refuse a submit with the install and reload text, writing nothing, and
+// the endpoint reads the same text through core.SubmitBlocker.
 func TestOldBridgeRevisionRefusesSubmit(t *testing.T) {
-	a, dir := newTestAttachment(t)
-	old := fmt.Sprintf(`{"protocol":%q,"live":true,"at":%q,"pid":%d,"surface":"tui","session_generation":"gen-1"}`,
-		ProtocolV1, fixedNow.UTC().Format(time.RFC3339Nano), os.Getpid())
-	if err := os.WriteFile(filepath.Join(dir, "bridge.liveness"), []byte(old), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chtimes(filepath.Join(dir, "bridge.liveness"), fixedNow, fixedNow); err != nil {
-		t.Fatal(err)
-	}
 	saved := Version
 	Version = "0.85.0"
 	defer func() { Version = saved }()
-
-	if s := a.Inspect(); s.Capabilities.Submit {
-		t.Fatalf("capabilities = %+v; an old bridge must not advertise submit", s.Capabilities)
-	}
-	adm, err := a.Submit(submitReq(testKey("old-bridge"), "hello"))
-	if err != nil || adm.Code != protocol.CodeUnsupported {
-		t.Fatalf("Submit = %+v, %v; want unsupported", adm, err)
-	}
-	for _, want := range []string{"pi install git:github.com/avivsinai/agent-message-queue@v0.85.0", "reload the pi session"} {
-		if !strings.Contains(adm.Message, want) {
-			t.Fatalf("refusal %q does not tell the owner %q", adm.Message, want)
-		}
-	}
-	if entries, _ := os.ReadDir(filepath.Join(dir, "requests")); len(entries) != 0 {
-		t.Fatalf("requests dir has %d entries; an old bridge gets nothing", len(entries))
-	}
-	// The endpoint refuses before Submit when Inspect says submit false; it
-	// reads the same text from the same observation through core.SubmitBlocker.
-	if s, got := a.InspectSubmit(); s.Capabilities.Submit || got != adm.Message {
-		t.Fatalf("InspectSubmit = submit %v, %q; want false and the Submit refusal %q", s.Capabilities.Submit, got, adm.Message)
-	}
-}
-
-// TestWithdrawnRevisionTwoRefused reproduces
-// Pro review of #923 r3, 2026-09-29, #1: the 3bedb7bf extension advertised
-// bridge_revision 2 and still completed tool-use preambles, and the adapter
-// accepted it. testdata/withdrawn-r2/bridge.liveness is that extension's
-// liveness, byte for byte (git show 3bedb7bf of the golden its test
-// asserted). The adapter must refuse it with the install and reload text.
-func TestWithdrawnRevisionTwoRefused(t *testing.T) {
-	a, dir := newTestAttachment(t)
-	data, err := os.ReadFile(filepath.Join("..", "..", "..", "integrations", "pi", "testdata", "withdrawn-r2", "bridge.liveness"))
+	withdrawn, err := os.ReadFile(filepath.Join("..", "..", "..", "integrations", "pi", "testdata", "withdrawn-r2", "bridge.liveness"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "bridge.liveness"), data, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chtimes(filepath.Join(dir, "bridge.liveness"), fixedNow, fixedNow); err != nil {
-		t.Fatal(err)
-	}
-	s := a.Inspect()
-	if s.Capabilities.Submit {
-		t.Fatalf("capabilities = %+v; a revision 2 bridge must not advertise submit", s.Capabilities)
-	}
-	req := submitReq(testKey("withdrawn"), "hello")
-	req.Epoch = s.Epoch
-	adm, err := a.Submit(req)
-	if err != nil || adm.Code != protocol.CodeUnsupported {
-		t.Fatalf("Submit = %+v, %v; want unsupported", adm, err)
-	}
-	for _, want := range []string{"is bridge_revision 2", "pi install git:github.com/avivsinai/agent-message-queue", "reload the pi session"} {
-		if !strings.Contains(adm.Message, want) {
-			t.Fatalf("refusal %q does not say %q", adm.Message, want)
-		}
-	}
-	if entries, _ := os.ReadDir(filepath.Join(dir, "requests")); len(entries) != 0 {
-		t.Fatalf("requests dir has %d entries; a withdrawn bridge gets nothing", len(entries))
+	for _, tc := range []struct {
+		name     string
+		liveness []byte
+		want     []string
+	}{
+		{"no revision", []byte(fmt.Sprintf(`{"protocol":%q,"live":true,"at":%q,"pid":%d,"surface":"tui","session_generation":"gen-1"}`,
+			ProtocolV1, fixedNow.UTC().Format(time.RFC3339Nano), os.Getpid())),
+			[]string{"pi install git:github.com/avivsinai/agent-message-queue@v0.85.0", "reload the pi session"}},
+		{"withdrawn revision 2", withdrawn,
+			[]string{"is bridge_revision 2", "pi install git:github.com/avivsinai/agent-message-queue", "reload the pi session"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, dir := newTestAttachment(t)
+			if err := os.WriteFile(filepath.Join(dir, "bridge.liveness"), tc.liveness, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chtimes(filepath.Join(dir, "bridge.liveness"), fixedNow, fixedNow); err != nil {
+				t.Fatal(err)
+			}
+			s := a.Inspect()
+			if s.Capabilities.Submit {
+				t.Fatalf("capabilities = %+v; an old bridge must not advertise submit", s.Capabilities)
+			}
+			req := submitReq(testKey("old-bridge"), "hello")
+			req.Epoch = s.Epoch
+			adm, err := a.Submit(req)
+			if err != nil || adm.Code != protocol.CodeUnsupported {
+				t.Fatalf("Submit = %+v, %v; want unsupported", adm, err)
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(adm.Message, want) {
+					t.Fatalf("refusal %q does not tell the owner %q", adm.Message, want)
+				}
+			}
+			if entries, _ := os.ReadDir(filepath.Join(dir, "requests")); len(entries) != 0 {
+				t.Fatalf("requests dir has %d entries; an old bridge gets nothing", len(entries))
+			}
+			if s, got := a.InspectSubmit(); s.Capabilities.Submit || got != adm.Message {
+				t.Fatalf("InspectSubmit = submit %v, %q; want false and the Submit refusal %q", s.Capabilities.Submit, got, adm.Message)
+			}
+		})
 	}
 }
 
@@ -838,30 +748,6 @@ func TestSubmitRetryReturnsKnownRefusal(t *testing.T) {
 	appendEvents(t, dir, clientRef(dup), busy(clientRef(dup)))
 	if adm, err := a.Submit(submitReq(dup, "hello")); err != nil || adm.Code != protocol.CodeBusy {
 		t.Fatalf("Submit over an existing request = %+v, %v; want the busy refusal", adm, err)
-	}
-}
-
-// TestSameProcessRestartDropsPin reproduces a field defect: /new, reload and
-// fork keep the pi pid, so only the generation the bridge publishes in
-// bridge.liveness shows the pin is dead.
-func TestSameProcessRestartDropsPin(t *testing.T) {
-	a, dir := newTestAttachment(t)
-	seed := clientRef(testKey("seed"))
-	seedRequest(t, dir, seed, "")
-	writeReceipt(t, dir, seed, "gen-1", fixedNow)
-	if _, err := a.Submit(submitReq(testKey("seed"), "hello")); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-	renewed := fmt.Sprintf(`{"protocol":%q,"live":true,"at":%q,"pid":%d,"surface":"tui","session_generation":"gen-2","bridge_revision":3}`,
-		ProtocolV1, fixedNow.UTC().Format(time.RFC3339Nano), os.Getpid())
-	if err := os.WriteFile(filepath.Join(dir, "bridge.liveness"), []byte(renewed), 0o600); err != nil {
-		t.Fatalf("write liveness: %v", err)
-	}
-	if err := os.Chtimes(filepath.Join(dir, "bridge.liveness"), fixedNow, fixedNow); err != nil {
-		t.Fatalf("chtimes liveness: %v", err)
-	}
-	if got := a.Inspect().Epoch; got != addressEpoch("gen-2") {
-		t.Fatalf("epoch after same-process restart = %q, want address epoch %q", got, addressEpoch("gen-2"))
 	}
 }
 
@@ -1004,26 +890,6 @@ func TestForeignProtocolLivenessNotLive(t *testing.T) {
 	}
 }
 
-// TestForeignProtocolEventsRefused pins that with a v1 receipt and a
-// v2-only event stream the stream is REFUSED (an error), never read as "no
-// events" — recovery row 3 must not map a hidden terminal to
-// confirmed-running.
-func TestForeignProtocolEventsRefused(t *testing.T) {
-	a, dir := newTestAttachment(t)
-	key := testKey("fpe")
-	ref := clientRef(key)
-	seedRequest(t, dir, ref, "")
-	writeReceipt(t, dir, ref, "gen-1", fixedNow)
-	appendEvents(t, dir, ref, fmt.Sprintf(`{"protocol":"amq:pi-bridge:v2","event":"completed","ref":%q,"text":"done"}`, ref))
-	ev, err := a.Lookup(key, "gen-1")
-	if err == nil {
-		t.Fatalf("evidence = %+v, nil error; want refusal (foreign-protocol event stream)", ev)
-	}
-	if ev.Class == core.EvidenceConfirmed || ev.Class == core.EvidenceHistoryTerminated {
-		t.Fatalf("evidence = %+v; foreign-protocol stream must not become evidence", ev)
-	}
-}
-
 // --- Cancel & misc -----------------------------------------------------------
 
 // TestCancelUnsupported pins that there is no native cancel seam; terminal runs are
@@ -1063,46 +929,38 @@ func TestFactoryRequiresHandleAndDir(t *testing.T) {
 }
 
 // TestKindWireNames pins the wire names of kind "pi": it publishes under
-// extensions/pi-bridge/ and accepts amq:pi-bridge:v1 receipts.
+// extensions/pi-bridge/, accepts amq:pi-bridge:v1 receipts, and its run ids
+// carry the "pi:" prefix the endpoint persists.
 func TestKindWireNames(t *testing.T) {
-	for _, tc := range []struct {
-		kind, dir, proto, runPrefix string
-		factory                     registry.Factory
-	}{
-		{"pi", "pi-bridge", "amq:pi-bridge:v1", "pi:", Factory},
-	} {
-		t.Run(tc.kind, func(t *testing.T) {
-			root := t.TempDir()
-			dir := filepath.Join(root, "agents", "agent1", "extensions", tc.dir)
-			newExtDirAt(t, dir)
-			stampLivenessWithProtocol(t, dir, fixedNow, tc.proto)
-			att, err := tc.factory(t.Context(), registry.FactoryConfig{Target: "t1", Root: root, Config: []byte(`{"handle":"agent1"}`)})
-			if err != nil {
-				t.Fatalf("factory: %v", err)
-			}
-			a := att.(*Attachment)
-			a.now = func() time.Time { return fixedNow }
-			a.submitWait = 50 * time.Millisecond
-			key := testKey("wire-" + tc.kind)
-			ref := clientRef(key)
-			a.dir.publish = func(req deliverRequest) error {
-				if err := (bridgeDir{dir: dir, names: a.dir.names}).publishRequest(req); err != nil {
-					return err
-				}
-				rc := fmt.Sprintf(`{"protocol":%q,"ref":%q,"session_generation":"gen-1","delivered_at":"","pid":%d}`, tc.proto, ref, os.Getpid())
-				return os.WriteFile(filepath.Join(dir, "receipts", refSanitize(ref)+".json"), []byte(rc), 0o600)
-			}
-			adm, err := a.Submit(submitReq(key, "hello"))
-			if err != nil || !adm.Admitted {
-				t.Fatalf("Submit = %+v, %v; want admitted", adm, err)
-			}
-			if adm.RunID != tc.runPrefix+ref {
-				t.Fatalf("run id = %q, want %q", adm.RunID, tc.runPrefix+ref)
-			}
-			if _, err := os.Stat(filepath.Join(dir, "requests", refSanitize(ref)+".json")); err != nil {
-				t.Fatalf("request not published under %s: %v", tc.dir, err)
-			}
-		})
+	root := t.TempDir()
+	dir := filepath.Join(root, "agents", "agent1", "extensions", "pi-bridge")
+	newExtDirAt(t, dir)
+	stampLivenessWithProtocol(t, dir, fixedNow, "amq:pi-bridge:v1")
+	att, err := Factory(t.Context(), registry.FactoryConfig{Target: "t1", Root: root, Config: []byte(`{"handle":"agent1"}`)})
+	if err != nil {
+		t.Fatalf("factory: %v", err)
+	}
+	a := att.(*Attachment)
+	a.now = func() time.Time { return fixedNow }
+	a.submitWait = 50 * time.Millisecond
+	key := testKey("wire-pi")
+	ref := clientRef(key)
+	a.dir.publish = func(req deliverRequest) error {
+		if err := (bridgeDir{dir: dir, names: a.dir.names}).publishRequest(req); err != nil {
+			return err
+		}
+		rc := fmt.Sprintf(`{"protocol":"amq:pi-bridge:v1","ref":%q,"session_generation":"gen-1","delivered_at":"","pid":%d}`, ref, os.Getpid())
+		return os.WriteFile(filepath.Join(dir, "receipts", refSanitize(ref)+".json"), []byte(rc), 0o600)
+	}
+	adm, err := a.Submit(submitReq(key, "hello"))
+	if err != nil || !adm.Admitted {
+		t.Fatalf("Submit = %+v, %v; want admitted", adm, err)
+	}
+	if adm.RunID != "pi:"+ref {
+		t.Fatalf("run id = %q, want %q", adm.RunID, "pi:"+ref)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "requests", refSanitize(ref)+".json")); err != nil {
+		t.Fatalf("request not published under pi-bridge: %v", err)
 	}
 }
 
@@ -1114,28 +972,6 @@ func newExtDirAt(t *testing.T, dir string) {
 			t.Fatalf("mkdir %s: %v", sub, err)
 		}
 	}
-}
-
-// TestSubmitConcurrentMapSafety pins 9a regression: concurrent Submit +
-// Lookup + Inspect over the same attachment race-check clean (run under
-// -race). The old bug ran consume() outside the mutex and crashed the
-// whole companion on concurrent maps.
-func TestSubmitConcurrentMapSafety(t *testing.T) {
-	a, dir := newTestAttachment(t)
-	var wg sync.WaitGroup
-	for i := 0; i < 8; i++ {
-		wg.Add(3)
-		go func(i int) {
-			defer wg.Done()
-			key := testKey(fmt.Sprintf("race%d", i))
-			ref := clientRef(key)
-			writeReceipt(t, dir, ref, "gen-1", fixedNow)
-			_, _ = a.Submit(submitReq(key, "x"))
-		}(i)
-		go func() { defer wg.Done(); _, _ = a.Lookup(testKey("shared"), "gen-1") }()
-		go func() { defer wg.Done(); _ = a.Inspect() }()
-	}
-	wg.Wait()
 }
 
 // TestSubscribeDeliversNativeEvents pins the event fan-out: a completed

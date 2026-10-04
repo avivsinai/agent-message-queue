@@ -269,6 +269,13 @@ demonstrations, guard tests about tests, or tests for existing behavior with
 no observed defect. A slow or flaky test is deleted or rewritten to this bar,
 not tuned.
 
+Before you add a test, name the contract it protects, the regression that
+makes it fail, and why existing coverage misses it. Each contract has one
+keeper at its strongest boundary: add a row to that table, not a near
+duplicate. A test that needs an export, flag, env var, or wrapper that no
+production caller uses belongs at the real boundary instead. A regression
+test must fail on the pre-fix code; check that privately before it ships.
+
 ## Security
 
 - Queue directories use mode 0700 and files use mode 0600.

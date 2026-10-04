@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -781,7 +782,14 @@ func (e *Endpoint) cancel(cmd *protocol.Command, src Source) (protocol.Reply, er
 	}
 	if !exists {
 		// Cancel arrived before its submit: leave a tombstone that a later
-		// submit cannot execute past.
+		// submit cannot execute past. Only the Buzz carrier creates buzz-
+		// hosts, so a tombstone on one must come from that same share
+		// (agent-message-queue-611.48). The match ignores case: on a
+		// case-insensitive filesystem a BUZZ- tombstone is the same file.
+		if strings.HasPrefix(strings.ToLower(host), buzzHostPrefix) && (src.Origin["carrier"] != "buzz" || src.Host != host) {
+			e.mu.Unlock()
+			return protocol.Reply{}, protocol.Refuse(protocol.CodeUnshared, "only the owner's Buzz share can cancel its requests")
+		}
 		rec = &requests.Record{
 			Snapshot: protocol.Snapshot{
 				Schema:      protocol.SchemaRequest,
@@ -807,6 +815,13 @@ func (e *Endpoint) cancel(cmd *protocol.Command, src Source) (protocol.Reply, er
 		e.mu.Unlock()
 		e.publishRevision(rec)
 		return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestCancel}}, nil
+	}
+	if rec.Origin["carrier"] == "buzz" && !fromOwnerShare(src, rec) {
+		// A Buzz-submitted request is the owner's; a local sender cannot
+		// stop it (agent-message-queue-611.48). Other requests keep the
+		// local rule: local senders carry no authenticated identity.
+		e.mu.Unlock()
+		return protocol.Reply{}, protocol.Refuse(protocol.CodeUnshared, "only the owner's Buzz share can cancel its requests")
 	}
 	// Validate the cancel command against the original request binding rather
 	// than silently substituting the record's trusted values (Pro B04). A
@@ -881,13 +896,17 @@ func (e *Endpoint) cancel(cmd *protocol.Command, src Source) (protocol.Reply, er
 	return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestCancel}}, nil
 }
 
-// answeredByOwnerShare reports whether src is the Buzz share that submitted
-// rec. An answer to an interaction is the owner's decision, so only the
+// buzzHostPrefix starts every creator host the Buzz carrier derives.
+const buzzHostPrefix = "buzz-"
+
+// fromOwnerShare reports whether src is the Buzz share that submitted rec.
+// An answer to an interaction (agent-message-queue-611.46) and a cancel of a
+// Buzz-submitted request (611.48) are the owner's decisions, so only the
 // owner's DM on the share whose body and channel submitted the request may
-// give it (agent-message-queue-611.46). The AMQ mailbox carrier stamps its
-// own origin and the local IPC socket stamps none, so a local sender, the
-// asking agent included, can never answer.
-func answeredByOwnerShare(src Source, rec *requests.Record) bool {
+// make them. The AMQ mailbox carrier stamps its own origin and the local IPC
+// socket stamps none, so a local sender, the asking agent included, can
+// never pass.
+func fromOwnerShare(src Source, rec *requests.Record) bool {
 	o, r := src.Origin, rec.Origin
 	// The creator host is derived from relay, body and owner, so it also
 	// catches a new owner on the same body and channel.
@@ -911,7 +930,7 @@ func (e *Endpoint) respond(cmd *protocol.Command, src Source) (protocol.Reply, e
 	if !exists {
 		return protocol.Reply{}, protocol.Refuse(protocol.CodeNotFound, "no record for request_ref")
 	}
-	if !answeredByOwnerShare(src, rec) {
+	if !fromOwnerShare(src, rec) {
 		return protocol.Reply{}, protocol.Refuse(protocol.CodeUnshared, "only the owner's Buzz share that submitted this request can answer its interactions")
 	}
 	if t == nil {
@@ -2749,24 +2768,6 @@ func (e *Endpoint) Wait(ctx context.Context, ref string) (protocol.Snapshot, err
 			return rec.Snapshot, ctx.Err()
 		}
 	}
-}
-
-// Snapshot returns the current record for ref without waiting.
-func (e *Endpoint) Snapshot(ref string) (protocol.Snapshot, error) {
-	host, targetID, requestID, err := protocol.DecodeRef(ref)
-	if err != nil {
-		return protocol.Snapshot{}, err
-	}
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	rec, ok, err := e.store.Get(requests.Key{CreatorHost: host, TargetID: targetID, RequestID: requestID})
-	if err != nil {
-		return protocol.Snapshot{}, err
-	}
-	if !ok {
-		return protocol.Snapshot{}, protocol.Refuse(protocol.CodeNotFound, "no record for request_ref")
-	}
-	return rec.Snapshot, nil
 }
 
 func (e *Endpoint) notifyLocked(rec *requests.Record) {

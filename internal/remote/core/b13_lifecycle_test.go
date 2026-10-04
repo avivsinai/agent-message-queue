@@ -122,14 +122,7 @@ func TestB13HandleDuringDrainingRefusedWithActionRequiredCode(t *testing.T) {
 		closeDone <- ep.Close()
 	}()
 
-	// Give Close time to transition to draining. The drain wait is under
-	// e.mu, so we cannot observe it directly; a short yield is the barrier.
-	// This is NOT a sleep-based assertion — it is a scheduling yield so the
-	// Close goroutine acquires e.mu and sets state=draining before the next
-	// Handle tries. The test's correctness does not depend on the yield
-	// length; it depends on the state check being correct. If the check is
-	// missing, the second Handle will succeed regardless of timing.
-	time.Sleep(50 * time.Millisecond)
+	waitForDraining(t, ep)
 
 	// A second Handle arriving during draining must be refused with
 	// CodeDraining.
