@@ -557,11 +557,11 @@ func loadBundle(session, keyDir, bundlePath string, k *bodykey.BodyKey, st *shar
 // publishes the bundle and the relay block. A refusal leaves the enrolled
 // generation untouched.
 func bindBundle(root, session string, bind relayBinding, keyDir string, tags, pending []shareTagFile) (int, error) {
-	if err := bind.requireDMGrants(session, tags); err != nil {
+	if err := bind.requireGrants(session, tags); err != nil {
 		return protocol.ExitActionRequired, err
 	}
 	if !lock.AdvisoryLockAvailable() {
-		return protocol.ExitActionRequired, fmt.Errorf("refusing to update the manifest without an advisory file lock")
+		return protocol.ExitActionRequired, errNoManifestLock
 	}
 	path := manifest.DefaultPath(filepath.Join(root, stateDirName))
 	var code int
@@ -721,7 +721,7 @@ func writeRelayShare(root, session string, bind relayBinding, keyDir string) (in
 		return protocol.ExitActionRequired, err
 	}
 	if !lock.AdvisoryLockAvailable() {
-		return protocol.ExitActionRequired, fmt.Errorf("refusing to update the manifest without an advisory file lock")
+		return protocol.ExitActionRequired, errNoManifestLock
 	}
 	path := manifest.DefaultPath(filepath.Join(root, stateDirName))
 	var code int
@@ -743,6 +743,9 @@ func previewRelayShare(root, session string, bind relayBinding, st *shareState, 
 	owner, err := bind.enrolledOwner(session, st)
 	if err != nil {
 		return protocol.ExitActionRequired, err
+	}
+	if !lock.AdvisoryLockAvailable() {
+		return protocol.ExitActionRequired, errNoManifestLock // the bind would refuse (Pro review of #947 r1)
 	}
 	if _, code, err := prepareManifest(manifest.DefaultPath(filepath.Join(root, stateDirName)), session, bind, owner); err != nil {
 		return code, err
@@ -766,7 +769,7 @@ func (b relayBinding) enrolledOwner(session string, st *shareState) (string, err
 			return "", fmt.Errorf("enrolled tags name more than one owner")
 		}
 	}
-	return owner, b.requireDMGrants(session, st.Enrolled.Gen.Tags)
+	return owner, b.requireGrants(session, st.Enrolled.Gen.Tags)
 }
 
 // bindManifest loads, updates, and publishes the relay block. The caller
@@ -793,16 +796,25 @@ type relayBinding struct {
 	presence                 string // display name; turns on presence
 }
 
-// requireDMGrants refuses a DM binding when the tags lack the buzz-dm kinds:
-// serve would keep that surface closed.
-func (b relayBinding) requireDMGrants(session string, tags []shareTagFile) error {
-	if b.dmChannel == "" {
-		return nil
-	}
+// errNoManifestLock refuses a manifest bind on a platform without an
+// advisory file lock.
+var errNoManifestLock = errors.New("refusing to update the manifest without an advisory file lock")
+
+// requireGrants refuses a DM or presence binding when the tags lack that
+// surface's kinds: serve would keep that surface closed.
+func (b relayBinding) requireGrants(session string, tags []shareTagFile) error {
 	have := byKind(tags)
-	for _, kind := range shareSurfaces["buzz-dm"] {
-		if _, ok := have[kind]; !ok {
-			return fmt.Errorf("--dm-channel needs the buzz-dm grants (kind %d is not signed); run `amq-remote share --session %s --renew --enable buzz-dm` and sign that output", kind, session)
+	for _, need := range []struct{ flag, surface, value string }{
+		{"--dm-channel", "buzz-dm", b.dmChannel},
+		{"--presence", "buzz-profile", b.presence}, // Pro review of #947 r1
+	} {
+		if need.value == "" {
+			continue
+		}
+		for _, kind := range shareSurfaces[need.surface] {
+			if _, ok := have[kind]; !ok {
+				return fmt.Errorf("%s needs the %s grants (kind %d is not signed); run `amq-remote share --session %s --renew --enable %s` and sign that output", need.flag, need.surface, kind, session, need.surface)
+			}
 		}
 	}
 	return nil
