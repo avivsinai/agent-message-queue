@@ -33,6 +33,7 @@ type corpusFile struct {
 type fixture struct {
 	ID         string           `json:"id"`
 	Title      string           `json:"title"`
+	Carrier    string           `json:"carrier"`
 	Boundaries []string         `json:"boundaries"`
 	Steps      []map[string]any `json:"steps"`
 }
@@ -72,6 +73,7 @@ type harness struct {
 	crashPoint string
 	crashArmed bool
 	initialSID string
+	carrier    string
 
 	mu          sync.Mutex
 	history     map[string][]protocol.State
@@ -145,6 +147,7 @@ func (h *harness) open() {
 }
 
 func (h *harness) run(f fixture) {
+	h.carrier = f.Carrier
 	for i, step := range f.Steps {
 		h.step(fmt.Sprintf("%s step %d", f.ID, i), step)
 	}
@@ -224,9 +227,13 @@ func (h *harness) command(raw map[string]any) (*protocol.Command, core.Source) {
 	if err != nil {
 		h.t.Fatalf("decode command %s: %v", data, err)
 	}
-	// Every step comes from the owner's Buzz share, the only source that
-	// may answer an interaction (agent-message-queue-611.46).
-	return decoded, core.Source{Host: host, Origin: ownerShare.Origin}
+	// In a Buzz fixture the default host is the owner's Buzz share, the only
+	// source that may answer an interaction or cancel the request
+	// (agent-message-queue-611.46, 611.48). Every other step is a local peer.
+	if h.carrier == "buzz" && host == h.c.Defaults.CreatorHost {
+		return decoded, core.Source{Host: host, Origin: ownerShare.Origin}
+	}
+	return decoded, core.Source{Host: host}
 }
 
 func setDefault(m map[string]any, key, value string) {
