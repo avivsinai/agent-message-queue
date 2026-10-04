@@ -784,8 +784,9 @@ func (e *Endpoint) cancel(cmd *protocol.Command, src Source) (protocol.Reply, er
 		// Cancel arrived before its submit: leave a tombstone that a later
 		// submit cannot execute past. Only the Buzz carrier creates buzz-
 		// hosts, so a tombstone on one must come from that same share
-		// (agent-message-queue-611.48).
-		if strings.HasPrefix(host, buzzHostPrefix) && (src.Origin["carrier"] != "buzz" || src.Host != host) {
+		// (agent-message-queue-611.48). The match ignores case: on a
+		// case-insensitive filesystem a BUZZ- tombstone is the same file.
+		if strings.HasPrefix(strings.ToLower(host), buzzHostPrefix) && (src.Origin["carrier"] != "buzz" || src.Host != host) {
 			e.mu.Unlock()
 			return protocol.Reply{}, protocol.Refuse(protocol.CodeUnshared, "only the owner's Buzz share can cancel its requests")
 		}
