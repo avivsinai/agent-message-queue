@@ -336,6 +336,92 @@ func TestReplyRouterForTransientPeerAbsent(t *testing.T) {
 	}
 }
 
+// TestReplyRouterForSameProjectSessionReply reproduces B7
+// (agent-message-queue-611.22.35): a caller in another SESSION of the same
+// project sets reply_to=<handle>@<session> and no reply_project. The reply
+// must land in that session's root — from an endpoint at the base root and
+// from one inside a session root. While the session does not exist the route
+// is transient (the command stays in new); it is never a silent delivery to
+// the endpoint's own root.
+func TestReplyRouterForSameProjectSessionReply(t *testing.T) {
+	for _, tc := range []struct{ name, endpointRel string }{{"base root", ".agent-mail"}, {"session root", ".agent-mail/s1"}} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("AM_BASE_ROOT", "")
+			t.Setenv("AM_ROOT", "")
+			t.Setenv("AM_SESSION", "")
+			base := t.TempDir()
+			baseRoot := filepath.Join(base, ".agent-mail")
+			endpointRoot := filepath.Join(base, tc.endpointRel)
+			for _, r := range []string{baseRoot, endpointRoot} {
+				if err := fsq.EnsureRootDirs(r); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := fsq.EnsureAgentDirs(endpointRoot, amqio.DefaultHandle); err != nil {
+				t.Fatal(err)
+			}
+			store, err := requests.Open(filepath.Join(endpointRoot, "extensions", "remote"))
+			if err != nil {
+				t.Fatalf("open store: %v", err)
+			}
+			var carrier *amqio.Carrier
+			ep := core.New(core.Config{Store: store, Publish: func(s protocol.Snapshot, origin map[string]string) error {
+				return carrier.Publish(s, origin)
+			}})
+			carrier, err = amqio.New(endpointRoot, amqio.DefaultHandle, ep)
+			if err != nil {
+				t.Fatalf("carrier: %v", err)
+			}
+			carrier.SetReplyRouter(replyRouterFor(endpointRoot))
+			ep.Register(fake.New("fake", "e_1"))
+			t.Cleanup(func() { _ = ep.Close() })
+
+			identity, _ := fsq.SnapshotDeliveryRoot(endpointRoot)
+			droot, _ := fsq.OpenDeliveryRoot(endpointRoot, identity)
+			defer func() { _ = droot.Close() }()
+			now := time.Now()
+			id, _ := format.NewMessageID(now)
+			body := `{"schema":"amq.remote.command/1","op":"request.submit","request_id":"11111111-1111-4111-8111-1111111111b7","target_id":"fake","epoch":"e_1","not_after":"` + protocol.FormatTime(now.Add(time.Minute)) + `","input":{"text":"hi"}}`
+			msg := format.Message{Header: format.Header{
+				Schema: format.CurrentSchema, ID: id, From: "codex", To: []string{amqio.DefaultHandle},
+				Thread: "p2p/codex__remote", Subject: "submit", Created: now.UTC().Format(time.RFC3339Nano), Kind: "todo",
+				ReplyTo: "codex@qa",
+			}, Body: body}
+			data, _ := msg.Marshal()
+			if _, err := fsq.DeliverToInboxes(droot, []string{amqio.DefaultHandle}, id+".md", data); err != nil {
+				t.Fatalf("deliver: %v", err)
+			}
+
+			// TICK 1: session qa does not exist yet. Transient: the command stays in new.
+			if n, _ := carrier.ImportOnce(); n != 0 {
+				t.Fatalf("TICK1: command handled (%d) although the caller session does not exist (B7 — must be transient)", n)
+			}
+			if entries, _ := os.ReadDir(fsq.AgentInboxNew(endpointRoot, amqio.DefaultHandle)); len(entries) != 1 {
+				t.Fatalf("TICK1: command should stay in new, found %d", len(entries))
+			}
+
+			qa := filepath.Join(baseRoot, "qa")
+			if err := fsq.EnsureRootDirs(qa); err != nil {
+				t.Fatal(err)
+			}
+			if err := fsq.EnsureAgentDirs(qa, "codex"); err != nil {
+				t.Fatal(err)
+			}
+			// TICK 2: the session exists. The reply lands in ITS codex inbox.
+			n, err := carrier.ImportOnce()
+			if err != nil || n != 1 {
+				t.Fatalf("TICK2: n=%d err=%v, want the command handled", n, err)
+			}
+			if entries, _ := os.ReadDir(fsq.AgentInboxNew(qa, "codex")); len(entries) == 0 {
+				t.Fatal("TICK2: no reply in the caller session's codex inbox (B7)")
+			}
+			if _, err := os.Stat(filepath.Join(endpointRoot, "agents", "codex")); err == nil {
+				t.Fatal("reply went to a codex mailbox in the endpoint's own root instead of the caller's session (B7)")
+			}
+		})
+	}
+}
+
 // TestCLICancelUsesStoredEpochAfterAttachmentRestart reproduces B6b
 // (agent-message-queue-611.22.35): a fresh attachment mints a fresh epoch,
 // and `cancel` used to send that epoch, so every cancel of a request stored
