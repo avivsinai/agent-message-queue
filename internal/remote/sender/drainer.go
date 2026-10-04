@@ -78,7 +78,10 @@ func (d *Drainer) Drain(_ context.Context) (int, error) {
 			continue
 		}
 		n++
-		reply, herr := d.ep.Handle(env.Command, core.Source{Host: env.CreatorHost, Origin: env.Origin})
+		// A spooled submit carries no origin: the spool is a local file, and
+		// an origin is a carrier's claim that only the carrier may make
+		// (agent-message-queue-611.47).
+		reply, herr := d.ep.Handle(env.Command, core.Source{Host: env.CreatorHost})
 		// B2: classify by Outcome.Code, NOT by error. The endpoint returns
 		// busy, request_conflict, expired, stale_epoch, unshared, invalid and
 		// unsupported as a Reply with Outcome.Code and a nil error. Checking

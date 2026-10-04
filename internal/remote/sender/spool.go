@@ -35,6 +35,7 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/remote/ipc"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 )
 
@@ -88,10 +89,6 @@ type Envelope struct {
 	// endpoint IPC state dir ("ipc:<stateDir>"); later waves add a courier
 	// destination. The drainer dispatches through the carrier this names.
 	Destination string `json:"destination"`
-	// Origin is carrier-specific routing carried through to publication, the
-	// same map the endpoint's Handle stores on the record. It is never
-	// authority; it is attribution.
-	Origin map[string]string `json:"origin,omitempty"`
 	// State is the spool-side state: pending, dispatched, expired, failed.
 	State State `json:"state"`
 	// CreatedAt is the persist time (the moment the caller got `submitted`).
@@ -278,6 +275,12 @@ func (s *Spool) List() ([]*Envelope, error) {
 				continue
 			}
 			if !exists {
+				continue
+			}
+			// The drainer dispatches what List returns, so a file another
+			// writer changed must pass the same check as Create: only a
+			// submit is replayed (agent-message-queue-611.47).
+			if validateEnvelope(env) != nil {
 				continue
 			}
 			out = append(out, env)
@@ -564,8 +567,11 @@ func validateEnvelope(env *Envelope) error {
 	if env.RequestID != env.Command.RequestID {
 		return protocol.Refuse(protocol.CodeInvalid, "envelope request_id must match command request_id")
 	}
-	if !safeSegment(env.CreatorHost) {
-		return protocol.Refuse(protocol.CodeInvalid, "creator_host is not a safe segment")
+	// The spool holds the local CLI's submits, so a file that names another
+	// host, such as a Buzz share's, is not one the CLI wrote
+	// (agent-message-queue-611.47).
+	if env.CreatorHost != ipc.LocalHost {
+		return protocol.Refuse(protocol.CodeInvalid, "creator_host must be %s", ipc.LocalHost)
 	}
 	if env.Command.TargetID == "" || env.Command.Epoch == "" {
 		return protocol.Refuse(protocol.CodeInvalid, "command target_id and epoch are required")

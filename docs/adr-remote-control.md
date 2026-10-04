@@ -58,7 +58,9 @@ invariants.
    boundary compares the bound run before signalling. A cancel that arrives
    before its submit leaves a tombstone. A late cancel for one request never
    aborts another. A harness that offers only a session-wide abort does not
-   advertise exact cancellation.
+   advertise exact cancellation. A request that a Buzz share submitted is
+   cancelled only from that share; the AMQ mailbox and the local socket are
+   refused.
 5. **Capabilities are observed, not inferred.** Each attachment publishes a
    projection (`inspect`, `submit`, `cancel_request`, `answer_question`,
    `approve_tool`, `steer`, `terminal`). Values come from the installed
