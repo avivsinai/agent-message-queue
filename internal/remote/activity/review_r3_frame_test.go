@@ -29,7 +29,7 @@ func TestReviewR3ToolResultFitsRelayFrame(t *testing.T) {
 		return nil
 	})
 	defer s.Close()
-	if err := s.AcceptClaude(context.Background(), string(line)); err != nil {
+	if err := deliverClaude(context.Background(), s, string(line)); err != nil {
 		t.Fatal(err)
 	}
 }

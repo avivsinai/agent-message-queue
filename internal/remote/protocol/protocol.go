@@ -432,12 +432,7 @@ type Session struct {
 type Refusal struct {
 	Code    Code
 	Message string
-	cause   error
 }
-
-// Unwrap exposes the underlying cause so errors.As can reach typed errors
-// wrapped beneath a Refusal.
-func (r *Refusal) Unwrap() error { return r.cause }
 
 func (r *Refusal) Error() string {
 	if r.Message == "" {
@@ -449,13 +444,6 @@ func (r *Refusal) Error() string {
 // Refuse builds a Refusal.
 func Refuse(code Code, format string, args ...any) error {
 	return &Refusal{Code: code, Message: fmt.Sprintf(format, args...)}
-}
-
-// RefuseWrap builds a Refusal whose Message is fmt.Sprintf(format, args...)
-// and which unwraps to cause, so errors.As/errors.Is can traverse the typed
-// errors beneath the protocol wrapper (r5 review P2-2).
-func RefuseWrap(code Code, err error, format string, args ...any) error {
-	return &Refusal{Code: code, Message: fmt.Sprintf(format, args...), cause: err}
 }
 
 // Exit codes follow the AMQ contract; see internal/cli/exitcode.go.

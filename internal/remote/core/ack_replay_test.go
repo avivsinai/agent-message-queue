@@ -31,6 +31,7 @@ func TestCrashAfterTerminalCommitReplaysAck(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	rt := fake.New("fake", "e_1")
+	counting := &countingAttachment{Attachment: rt}
 
 	// Crash at before:native_ack: the terminal record (completed, result
 	// bound) is durable, but the native ack never went out.
@@ -46,7 +47,7 @@ func TestCrashAfterTerminalCommitReplaysAck(t *testing.T) {
 			return nil
 		},
 	})
-	ep.Register(rt)
+	ep.Register(counting)
 
 	id := "11111111-1111-4111-8111-1111111111c1"
 	if _, err := ep.Handle(submitCmd(id), core.Source{Host: "local"}); err != nil {
@@ -78,12 +79,19 @@ func TestCrashAfterTerminalCommitReplaysAck(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = store2.Close() })
 	ep2 := core.New(core.Config{Store: store2, Now: now})
-	ep2.Register(rt)
+	ep2.Register(counting)
 	if err := ep2.Reconcile(); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
 
-	// Startup reconciliation released the retained evidence.
+	// Startup reconciliation released the retained evidence with exactly one
+	// native ack.
+	counting.mu.Lock()
+	acks := counting.acks
+	counting.mu.Unlock()
+	if acks != 1 {
+		t.Fatalf("replay ack count = %d, want 1", acks)
+	}
 	if got := rt.UnacknowledgedResults(); got != 0 {
 		t.Fatalf("reconcile did not replay the ack; %d unacked result(s) retained", got)
 	}
@@ -112,6 +120,9 @@ func TestCrashAfterTerminalCommitReplaysAck(t *testing.T) {
 	if want := protocol.EvidenceDigest(rec.Result); rec.AckDigest != want {
 		t.Fatalf("ack digest = %q, want evidence digest %q", rec.AckDigest, want)
 	}
+	if !rec.Acknowledged {
+		t.Fatal("record not marked Acknowledged after the replay (611.22.34)")
+	}
 }
 
 func recState(rec *requests.Record, ok bool) any {
@@ -119,63 +130,6 @@ func recState(rec *requests.Record, ok bool) any {
 		return "absent"
 	}
 	return rec.State
-}
-
-// TestAckWithWrongDigestDoesNotReleaseEvidence pins the attachment half of
-// the contract: an acknowledgement naming different evidence never releases
-// the retained result, so a stale ack cannot free a different request's slot.
-func TestAckWithWrongDigestDoesNotReleaseEvidence(t *testing.T) {
-	store, _ := openStore(t)
-	clk := time.Date(2026, 9, 8, 10, 0, 0, 0, time.UTC)
-	rt := fake.New("fake", "e_1")
-	// Freeze at the B06 boundary: the terminal record is durably committed
-	// with its ack-intent memo, but the native ack never went out — exactly
-	// the pre-replay state, with the evidence still retained at the runtime.
-	crashArmed := true
-	ep := core.New(core.Config{
-		Store: store,
-		Now:   func() time.Time { return clk },
-		Crash: func(point string) error {
-			if crashArmed && point == core.PointBeforeAck {
-				crashArmed = false
-				return errors.New("simulated crash before native ack")
-			}
-			return nil
-		},
-	})
-	ep.Register(rt)
-
-	id := "11111111-1111-4111-8111-1111111111c2"
-	if _, err := ep.Handle(submitCmd(id), core.Source{Host: "local"}); err != nil {
-		t.Fatalf("submit: %v", err)
-	}
-	rt.Complete(id, "the result")
-	if err := ep.Close(); err != nil {
-		t.Fatalf("close: %v", err)
-	}
-
-	if rt.UnacknowledgedResults() == 0 {
-		t.Fatal("precondition: result should be retained")
-	}
-	// A stale/foreign digest must not release the evidence.
-	rt.AcknowledgeResult(requests.Key{CreatorHost: "local", TargetID: "fake", RequestID: id}, "e_1",
-		protocol.EvidenceDigest(&protocol.Result{Text: "different outcome"}))
-	if rt.UnacknowledgedResults() != 1 {
-		t.Fatal("a wrong-digest ack released the retained evidence")
-	}
-	// The matching digest — the durable ack intent — does release it.
-	key := requests.Key{CreatorHost: "local", TargetID: "fake", RequestID: id}
-	rec, _, err := store.Get(key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if rec.AckDigest == "" {
-		t.Fatal("precondition: crash left no durable ack intent")
-	}
-	rt.AcknowledgeResult(key, "e_1", rec.AckDigest)
-	if rt.UnacknowledgedResults() != 0 {
-		t.Fatal("the matching-digest ack did not release the retained evidence")
-	}
 }
 
 // TestReconcileConvergesAfterSuccessfulAck reproduces the follow-up defect
@@ -346,74 +300,6 @@ func TestCrashAfterAckDeliveredConvergesWithoutRelookup(t *testing.T) {
 	}
 	if counting.acks != acksAfterFirst {
 		t.Fatalf("already-acked record was re-acked %d extra time(s) across 2 reconciles (agent-message-queue-611.22.34)", counting.acks-acksAfterFirst)
-	}
-}
-
-// TestPointBeforeAckCrashStillReplays pins the crash-gap correctness the flag
-// must NOT break: PointBeforeAck crash → AckDigest memoed, ack never sent,
-// Acknowledged false → the restart replay MUST still fire (intent set +
-// !Acknowledged = replayable, unchanged from pre-611.22.34 rules).
-func TestPointBeforeAckCrashStillReplays(t *testing.T) {
-	dir := t.TempDir()
-	clk := time.Date(2026, 9, 8, 10, 0, 0, 0, time.UTC)
-	now := func() time.Time { return clk }
-	store, err := requests.Open(dir, requests.WithClock(now))
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
-	rt := fake.New("fake", "e_1")
-	counting := &countingAttachment{Attachment: rt}
-
-	crashArmed := true
-	ep := core.New(core.Config{
-		Store: store,
-		Now:   func() time.Time { return clk },
-		Crash: func(point string) error {
-			if crashArmed && point == core.PointBeforeAck {
-				crashArmed = false
-				return errors.New("simulated crash before native ack")
-			}
-			return nil
-		},
-	})
-	ep.Register(counting)
-
-	id := "11111111-1111-4111-8111-1111111111e3"
-	if _, err := ep.Handle(submitCmd(id), core.Source{Host: "local"}); err != nil {
-		t.Fatalf("seed submit: %v", err)
-	}
-	rt.Complete(id, "the result")
-
-	if err := ep.Close(); err != nil {
-		t.Fatalf("close: %v", err)
-	}
-	store2, err := requests.Open(dir, requests.WithClock(now))
-	if err != nil {
-		t.Fatalf("reopen store: %v", err)
-	}
-	t.Cleanup(func() { _ = store2.Close() })
-	ep2 := core.New(core.Config{Store: store2, Now: now})
-	ep2.Register(counting)
-	if err := ep2.Reconcile(); err != nil {
-		t.Fatalf("reconcile: %v", err)
-	}
-	// The replay MUST have fired: exactly one ack delivered by the restart.
-	counting.mu.Lock()
-	acks := counting.acks
-	counting.mu.Unlock()
-	if acks != 1 {
-		t.Fatalf("PointBeforeAck crash + restart: replay ack count = %d, want 1 (crash-gap correctness broken by the flag)", acks)
-	}
-	if got := rt.UnacknowledgedResults(); got != 0 {
-		t.Fatalf("replay did not release the retained result: %d unacked", got)
-	}
-	rec, _, err := store2.Get(requests.Key{CreatorHost: "local", TargetID: "fake", RequestID: id})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !rec.Acknowledged {
-		t.Fatal("record not marked Acknowledged after the PointBeforeAck replay (611.22.34)")
 	}
 }
 

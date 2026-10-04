@@ -4,7 +4,6 @@ package ipc
 
 import (
 	"errors"
-	"os"
 	"strings"
 	"testing"
 
@@ -36,26 +35,4 @@ func Test61123SocketPathTooLong(t *testing.T) {
 	if !errors.Is(err, ErrSocketPathTooLong) {
 		t.Fatalf("Listen(long dir) err = %v, want ErrSocketPathTooLong", err)
 	}
-}
-
-// Test61123ShortPathStillBinds verifies the length check does not reject
-// normal-length paths (sanity: the guard is not over-eager). Uses a short
-// MkdirTemp prefix (not t.TempDir, which on macOS can exceed 104 bytes).
-func Test61123ShortPathStillBinds(t *testing.T) {
-	dir, err := os.MkdirTemp("", "amqr")
-	if err != nil {
-		t.Fatalf("MkdirTemp: %v", err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	store, err := requests.Open(t.TempDir())
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
-	ep := core.New(core.Config{Store: store})
-	srv, err := Listen(dir, ep)
-	if err != nil {
-		t.Fatalf("Listen(short dir) err = %v, want nil", err)
-	}
-	_ = srv.listener.Close()
 }

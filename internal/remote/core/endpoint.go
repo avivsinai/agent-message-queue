@@ -2790,24 +2790,6 @@ func (e *Endpoint) Wait(ctx context.Context, ref string) (protocol.Snapshot, err
 	}
 }
 
-// Snapshot returns the current record for ref without waiting.
-func (e *Endpoint) Snapshot(ref string) (protocol.Snapshot, error) {
-	host, targetID, requestID, err := protocol.DecodeRef(ref)
-	if err != nil {
-		return protocol.Snapshot{}, err
-	}
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	rec, ok, err := e.store.Get(requests.Key{CreatorHost: host, TargetID: targetID, RequestID: requestID})
-	if err != nil {
-		return protocol.Snapshot{}, err
-	}
-	if !ok {
-		return protocol.Snapshot{}, protocol.Refuse(protocol.CodeNotFound, "no record for request_ref")
-	}
-	return rec.Snapshot, nil
-}
-
 func (e *Endpoint) notifyLocked(rec *requests.Record) {
 	for _, fn := range e.observers {
 		fn(rec)

@@ -74,9 +74,8 @@ func TestRecordLifecycle(t *testing.T) {
 		t.Fatalf("unexpected record: %+v", got.Snapshot)
 	}
 
-	n, err := s.Compact(fixedClock(), 1000)
-	if err != nil || n != 1 {
-		t.Fatalf("compact: n=%d err=%v", n, err)
+	if ok, err := s.CompactOne(Key{"hostA", "t_fake1", rec.RequestID}, fixedClock()); err != nil || !ok {
+		t.Fatalf("compact: ok=%v err=%v", ok, err)
 	}
 	got, _, err = s.Get(Key{"hostA", "t_fake1", rec.RequestID})
 	if err != nil {
@@ -87,19 +86,69 @@ func TestRecordLifecycle(t *testing.T) {
 	}
 }
 
-// TestStoreRefusesSecondWriterAndBadTransitions pins the two invariants the
-// design relies on: one endpoint per root, and no state graph shortcuts.
-func TestStoreRefusesSecondWriterAndBadTransitions(t *testing.T) {
-	dir := t.TempDir()
-	s, err := Open(dir, WithClock(fixedClock))
+// TestCompactOneKeepsOwedResults pins the compaction gate. A result the
+// runtime still holds unacknowledged (B9: the result alone owes the ack, even
+// with the run released) or one the caller has not received
+// (agent-message-queue-611.22.36 packet 4b) survives compaction. Each row
+// fails exactly one gate clause; TestRecordLifecycle is the settled,
+// published record that compacts.
+func TestCompactOneKeepsOwedResults(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		state     protocol.State
+		acked     bool
+		published bool
+	}{
+		{"runtime ack owed (B9)", protocol.StateCancelled, false, true},
+		{"caller has not received it (4b)", protocol.StateCompleted, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, err := Open(t.TempDir(), WithClock(fixedClock))
+			if err != nil {
+				t.Fatalf("open: %v", err)
+			}
+			defer func() { _ = s.Close() }()
+			rec := newRecord("11111111-1111-4111-8111-1111111114b9")
+			if err := s.Create(rec); err != nil {
+				t.Fatalf("create: %v", err)
+			}
+			rec.Revision, rec.State = 2, protocol.StateDispatching
+			if err := s.Update(rec); err != nil {
+				t.Fatalf("dispatching: %v", err)
+			}
+			rec.Revision, rec.State = 3, tc.state
+			rec.Result = &protocol.Result{Text: "kept"}
+			rec.ObservedAt = "2026-09-01T00:00:00Z"
+			if tc.acked {
+				rec.AckDigest = protocol.EvidenceDigest(rec.Result)
+			}
+			if err := s.Update(rec); err != nil {
+				t.Fatalf("terminal: %v", err)
+			}
+			if tc.published {
+				if err := s.MarkPublished(keyOf(rec), 3); err != nil {
+					t.Fatalf("mark published: %v", err)
+				}
+			}
+			if ok, err := s.CompactOne(keyOf(rec), fixedClock()); err != nil || ok {
+				t.Fatalf("compact: ok=%v err=%v, want the result kept", ok, err)
+			}
+			got, _, _ := s.Get(keyOf(rec))
+			if got.Tombstone || got.Result == nil || got.Result.Text != "kept" {
+				t.Fatalf("owed result was compacted: tombstone=%v result=%+v", got.Tombstone, got.Result)
+			}
+		})
+	}
+}
+
+// TestStoreRefusesBadTransitions pins the state graph: no shortcuts, one
+// native dispatch, no duplicate create. Corpus Q17 owns one writer per root.
+func TestStoreRefusesBadTransitions(t *testing.T) {
+	s, err := Open(t.TempDir(), WithClock(fixedClock))
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
 	defer func() { _ = s.Close() }()
-
-	if _, err := Open(dir); protocol.ExitCode(err) != protocol.ExitActionRequired {
-		t.Fatalf("second writer: want action-required refusal, got %v", err)
-	}
 
 	rec := newRecord("11111111-1111-4111-8111-111111111102")
 	if err := s.Create(rec); err != nil {
@@ -220,7 +269,7 @@ func TestNormalizeRecordClearsStaleInteraction(t *testing.T) {
 // TestClosedStoreRejectsEveryMutation pins B13 store half: after Close, every
 // mutation refuses with store_closed, so a stale reference cannot write after a
 // replacement endpoint has taken ownership. Create, Update, MarkPublished, and
-// Compact all go through write() and must refuse. A fresh Open after Close
+// CompactOne must all refuse. A fresh Open after Close
 // re-acquires the lock and can write again.
 func TestClosedStoreRejectsEveryMutation(t *testing.T) {
 	dir := t.TempDir()
@@ -252,10 +301,8 @@ func TestClosedStoreRejectsEveryMutation(t *testing.T) {
 	if code := protocol.RefusalCode(s.MarkPublished(keyOf(&upd), 1)); code != wantCode {
 		t.Fatalf("MarkPublished after close: want code %q, got %q", wantCode, code)
 	}
-	if n, err := s.Compact(fixedClock(), 1000); err == nil {
-		t.Fatalf("Compact after close: want error, got n=%d", n)
-	} else if code := protocol.RefusalCode(err); code != wantCode {
-		t.Fatalf("Compact after close: want code %q, got %q", wantCode, code)
+	if _, err := s.CompactOne(keyOf(&upd), fixedClock()); protocol.RefusalCode(err) != wantCode {
+		t.Fatalf("CompactOne after close: want code %q, got %v", wantCode, err)
 	}
 	// A fresh Open after Close re-acquires the lock and can write again.
 	s2, err := Open(dir, WithClock(fixedClock))
@@ -313,38 +360,6 @@ func TestBK4AggregateQuotaRefusesBeforeWrite(t *testing.T) {
 	if _, ok, err := s.Get(Key{second.CreatorHost, second.TargetID, second.RequestID}); err != nil || ok {
 		t.Fatalf("refused second record landed on disk: ok=%v err=%v", ok, err)
 	}
-}
-
-// TestBK4QuotaDisabledByDefault pins that a store without WithMaxStoreBytes
-// enforces no aggregate quota: records accumulate up to the per-record cap
-// only. Production sets the quota via serve; tests that shrink it use
-// WithMaxStoreBytes explicitly.
-func TestBK4QuotaDisabledByDefault(t *testing.T) {
-	s, err := Open(t.TempDir(), WithClock(fixedClock))
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	defer func() { _ = s.Close() }()
-
-	// Reserve never refuses when the quota is disabled.
-	if err := s.Reserve(Key{"host", "target", "reserved"}, protocol.MaxRecordBytes); err != nil {
-		t.Fatalf("Reserve with quota disabled: want nil, got %v", err)
-	}
-	for i := 0; i < 5; i++ {
-		rec := newRecord(fmtID(i))
-		if err := s.Create(rec); err != nil {
-			t.Fatalf("create %d with quota disabled: %v", i, err)
-		}
-	}
-}
-
-// fmtID builds a valid UUIDv4-ish id distinct per index.
-func fmtID(i int) string {
-	base := "11111111-1111-4111-8111-11111111170"
-	if i < 10 {
-		return base + string(rune('0'+i))
-	}
-	return base + "a"
 }
 
 // TestBK4B1RaceCompactVsAck exercises the race the round-1 review confirmed

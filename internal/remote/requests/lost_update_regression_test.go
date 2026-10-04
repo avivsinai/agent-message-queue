@@ -12,10 +12,10 @@ import (
 // under the store write lock. With raw Get->mutate->write (the shape this PR
 // first shipped) one marker silently reverts the other: losing
 // PublishedRevision republishes a delivered revision; losing Acknowledged
-// puts the record back on the non-converging replay path. Deterministic:
-// 200/200 losses on the reverted shape (verifier probe, three runs).
+// puts the record back on the non-converging replay path. The reverted shape
+// lost 200/200 rounds (verifier probe, three runs), so 20 rounds are enough.
 func TestMarkerWritesDoNotLoseUpdates(t *testing.T) {
-	for round := 0; round < 200; round++ {
+	for round := 0; round < 20; round++ {
 		s, err := Open(t.TempDir())
 		if err != nil {
 			t.Fatal(err)
