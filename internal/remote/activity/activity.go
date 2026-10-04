@@ -7,7 +7,6 @@ import (
 	"context"
 	"fmt"
 	"sync"
-	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -57,16 +56,6 @@ type Sink struct {
 	mu         sync.Mutex
 	sawSession bool
 	stream     streamState
-	dropped    atomic.Uint64
-}
-
-// Drops is the number of queued frames this sink discarded for age or budget.
-func (s *Sink) Drops() uint64 {
-	return s.dropped.Load()
-}
-
-func (s *Sink) noteDrop() {
-	s.dropped.Add(1)
 }
 
 // Close drops this sink's queued frames and releases their body and process
@@ -122,17 +111,6 @@ func (s *Sink) Drain(ctx context.Context) error {
 			return err
 		}
 	}
-}
-
-// Accept maps one Codex notification, queues the frames, and publishes those
-// the process-wide per-body rate allows. A notification for another thread
-// is ignored. An ambiguous publish is not retried.
-func (s *Sink) Accept(ctx context.Context, n codex.Notification) error {
-	queued, err := s.enqueue(n)
-	if err != nil || !queued {
-		return err
-	}
-	return s.Drain(ctx)
 }
 
 func (s *Sink) enqueue(n codex.Notification) (bool, error) {

@@ -63,10 +63,15 @@ func TestReviewCloseCannotReleaseOwnershipBeforeSettlementWrite(t *testing.T) {
 			t.Fatal(err)
 		}
 	case <-time.After(time.Second):
+		// Close waits for the writer: the serialized shape, no ownership gap.
 		unblock()
-		<-writerDone
-		<-closeDone
-		return // A serialized Close prevents the ownership gap.
+		if err := <-writerDone; err != nil {
+			t.Fatalf("writer: %v", err)
+		}
+		if err := <-closeDone; err != nil {
+			t.Fatalf("close after the writer finished: %v", err)
+		}
+		return
 	}
 	replacement, err := Open(dir)
 	if err != nil {
