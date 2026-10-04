@@ -129,10 +129,7 @@ func TestPiApprovalAnsweredFromBuzz(t *testing.T) {
 	if len(sent) == 0 || !strings.Contains(sent[0].Content, "running") || !strings.Contains(sent[0].Content, "its start is not proven") {
 		t.Fatalf("result row = %+v, want a running row that says the start is not proven", sent)
 	}
-	ref := strings.SplitN(sent[0].Content, ":", 2)[0]
-	if ref != want {
-		t.Fatalf("row ref = %s, want %s", ref, want)
-	}
+	ref := want
 
 	line := fmt.Sprintf(`{"protocol":%q,"ref":%q,"event":"interaction","at":"x","interaction_id":"tool-1","kind":"approval","prompt":"run: go test ./...","options":["Allow once","Block"],"approve_option":"Allow once","reject_option":"Block","manifest_hash":"sha256:abc","expires_at":%q,"presence":"remote"}`,
 		pi.ProtocolV1, ref, clock().Add(5*time.Minute).UTC().Format(time.RFC3339))

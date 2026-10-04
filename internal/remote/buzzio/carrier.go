@@ -1080,11 +1080,12 @@ func sessionText(s protocol.Session) string {
 	return fmt.Sprintf("%s (%s): %s, %s; can %s; observed %s", s.TargetID, s.Harness, s.Attachment, s.Status, strings.Join(caps, ", "), s.ObservedAt)
 }
 
-// snapshotText renders one revision of a request for its row: ref, state,
-// code and reason, then the result, shortened with an explicit marker.
+// snapshotText renders one revision of a request for its row: target, state,
+// code and reason, then the result, shortened with an explicit marker. The
+// request ref is an internal id and never shown to the owner (611.52).
 func snapshotText(s protocol.Snapshot, reason string) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s: %s", s.RequestRef, s.State)
+	fmt.Fprintf(&b, "%s: %s", s.TargetID, s.State)
 	if s.Code != "" {
 		fmt.Fprintf(&b, " (%s)", s.Code)
 	}
@@ -1097,7 +1098,7 @@ func snapshotText(s protocol.Snapshot, reason string) string {
 			for len(text) > maxRowText || !utf8.ValidString(text) {
 				text = text[:len(text)-1]
 			}
-			text += "\n[shortened; run amq-remote status " + s.RequestRef + " for the full result]"
+			text += "\n[shortened]"
 		}
 		b.WriteString("\n\n" + text)
 	}
