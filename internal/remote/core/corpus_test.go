@@ -577,8 +577,14 @@ func (h *harness) cli(where string, step map[string]any) {
 func (h *harness) endpointControl(where string, step map[string]any) {
 	switch step["endpoint"] {
 	case "compact_results":
-		if _, err := h.store.Compact(h.clock.Add(time.Second), 1000); err != nil {
-			h.t.Fatalf("%s: compact: %v", where, err)
+		recs, err := h.store.List()
+		if err != nil {
+			h.t.Fatalf("%s: list: %v", where, err)
+		}
+		for _, rec := range recs {
+			if _, err := h.store.CompactOne(requests.Key{CreatorHost: rec.CreatorHost, TargetID: rec.TargetID, RequestID: rec.RequestID}, h.clock.Add(time.Second)); err != nil {
+				h.t.Fatalf("%s: compact: %v", where, err)
+			}
 		}
 	case "storage_fail_next_write":
 		dir := filepath.Join(h.store.Dir(), "requests", h.c.Defaults.CreatorHost)

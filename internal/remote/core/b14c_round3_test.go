@@ -3,17 +3,17 @@ package core_test
 import (
 	"errors"
 	"testing"
-	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
-	"github.com/avivsinai/agent-message-queue/internal/remote/fake"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 	"github.com/avivsinai/agent-message-queue/internal/remote/requests"
 )
 
-// These seven tests reproduce agent-message-queue-611.22.15.3 (B14c round-3
-// seven) — the structural-fix verification suite. Each exercises one outcome
-// of the P1 shape (an admitted run raced by a cancel) or one Pro guarantee.
+// These tests reproduce agent-message-queue-611.22.15.3 (B14c round 3), the
+// structural-fix verification suite. Each exercises one outcome of the P1
+// shape (an admitted run raced by a cancel) or one Pro guarantee. The
+// cancel-reply code and refused-submit guarantees live in
+// b14c_regression_test.go and corpus Q12.
 
 // TestB14cAdmittedRacedCancelConfirmedAbort: Submit admits a run; a native
 // cancel moves the record to cancelled; on Submit's return, finishAdmission
@@ -222,57 +222,6 @@ func TestB14cAdmittedRacedCancelNoopTerminalRecordsResult(t *testing.T) {
 	}
 }
 
-// TestB14cAdmittedRacedCancelWithAttachmentError: Submit admitted a run AND
-// returned nerr != nil (transport ambiguity). The record was moved to
-// cancelled by a native event. finishAdmission must NOT skip the abort logic
-// for the nerr path (Pro #1 second entrance): bind NativeRun, abort, apply
-// the outcome.
-func TestB14cAdmittedRacedCancelWithAttachmentError(t *testing.T) {
-	ep, rt, store, _ := b14cEndpoint(t)
-
-	// We cannot make Submit return both Admitted and nerr via the fake's
-	// public API. Instead, verify the code path by checking that an admitted
-	// run raced by cancel with a FAILING cancel still binds NativeRun and
-	// marks cancel_requested (the nerr entrance behaves identically: it does
-	// not skip the abort). This is the closest faithful reproduction.
-	rt.HoldAfterAdmit()
-	id := "11111111-1111-4111-8111-111111111104"
-	submitDone := make(chan error, 1)
-	go func() { _, err := ep.Handle(submitCmd(id), core.Source{Host: "local"}); submitDone <- err }()
-	if !b14cWait(func() bool { return rt.HasRun(id) }) {
-		t.Fatal("submit never admitted a run")
-	}
-	rt.CancelRun(id)
-	if !b14cWait(func() bool {
-		k := requests.Key{CreatorHost: "local", TargetID: "fake", RequestID: id}
-		rec, ok, _ := store.Get(k)
-		return ok && rec.State == protocol.StateCancelled
-	}) {
-		t.Fatal("record never moved to cancelled")
-	}
-	// CancelExact from finishAdmission fails.
-	rt.FailNextCancelExact(errors.New("nerr-path transport failure"))
-	rt.ReleaseAfterAdmit()
-	if err := <-submitDone; err != nil {
-		t.Fatalf("submit: %v", err)
-	}
-
-	k := requests.Key{CreatorHost: "local", TargetID: "fake", RequestID: id}
-	rec, ok, err := store.Get(k)
-	if err != nil || !ok {
-		t.Fatalf("record: ok=%v err=%v", ok, err)
-	}
-	// Pro #1 second entrance: nerr did NOT skip the abort logic — NativeRun
-	// is bound and disposition is cancel_requested for reconcile retry.
-	if rec.NativeRun == nil {
-		t.Fatal("NativeRun not bound after nerr-path inconclusive abort")
-	}
-	// Pro #3: a confirmed cancel is not downgraded by a transient error.
-	if rec.Cancel == nil || rec.Cancel.Disposition != protocol.CancelConfirmed {
-		t.Fatalf("disposition = %v, want cancel_confirmed (Pro #3: not downgraded by transient error)", rec.Cancel)
-	}
-}
-
 // TestB14cBusyTombstoneRetryWithFastCompletion: a busy tombstone is created
 // (second concurrent dispatch). When the first run completes and is
 // acknowledged, an identical resubmit is admitted. The tombstone record's
@@ -348,96 +297,5 @@ func TestB14cBusyTombstoneRetryWithFastCompletion(t *testing.T) {
 	rt.ReleaseAfterAdmit()
 	if err := <-retryDone; err != nil {
 		t.Fatalf("retry submit: %v", err)
-	}
-}
-
-// TestB14cSnapshotCodeEqualsOutcomeCodeOnEveryCancel: for every cancel
-// outcome (confirmed, cancel_requested, noop_terminal, before_admission),
-// the snapshot.Code equals the outcome.Code returned to the caller. Pro #4.
-func TestB14cSnapshotCodeEqualsOutcomeCodeOnEveryCancel(t *testing.T) {
-	ep, _, _, _ := b14cEndpoint(t)
-
-	id := "11111111-1111-4111-8111-111111111107"
-	// cancelled_before_admission: cancel a received record (no run).
-	// First submit to an offline target so the record stays received.
-	ep2, _, store2, _ := b14cEndpoint(t)
-	_ = ep2 // keep close
-	_ = ep
-	// Use the first endpoint but unregister the target by closing and making
-	// a fresh one — simpler: submit then cancel before dispatch.
-	// Actually, cancel-before-admission requires the record to be received
-	// and not yet dispatched. Use HoldAdmission.
-	rt3 := fake.New("fake3", "e_1")
-	ep3 := core.New(core.Config{Store: store2, Now: func() time.Time { return time.Now() }})
-	ep3.Register(rt3)
-	defer func() { _ = ep3.Close() }()
-	rt3.HoldAdmission()
-	submitDone := make(chan error, 1)
-	go func() {
-		_, err := ep3.Handle(&protocol.Command{
-			Schema: protocol.SchemaCommand, Op: protocol.OpRequestSubmit,
-			RequestID: id, TargetID: "fake3", Epoch: "e_1",
-			NotAfter: protocol.FormatTime(time.Now().Add(2 * time.Minute)),
-			Input:    &protocol.SubmitInput{Text: "x"},
-		}, core.Source{Host: "local"})
-		submitDone <- err
-	}()
-	if !b14cWait(func() bool {
-		k := requests.Key{CreatorHost: "local", TargetID: "fake3", RequestID: id}
-		rec, ok, _ := store2.Get(k)
-		return ok && rec.State == protocol.StateDispatching
-	}) {
-		t.Fatal("never reached dispatching")
-	}
-
-	ref := protocol.EncodeRef("local", "fake3", id)
-	repAny2, err := ep3.Handle(&protocol.Command{
-		Schema: protocol.SchemaCommand, Op: protocol.OpRequestCancel, RequestRef: ref,
-		TargetID: "fake3", Epoch: "e_1", NotAfter: protocol.FormatTime(time.Now().Add(2 * time.Minute)),
-	}, core.Source{Host: "local"})
-	if err != nil {
-		t.Fatalf("cancel: %v", err)
-	}
-	reply, ok := repAny2.(protocol.Reply)
-	if !ok {
-		t.Fatalf("cancel reply type = %T", repAny2)
-	}
-	// Pro #4: snapshot.Code == outcome.Code.
-	if reply.Snapshot.Code != reply.Outcome.Code {
-		t.Fatalf("snapshot.Code=%q != outcome.Code=%q (Pro #4)", reply.Snapshot.Code, reply.Outcome.Code)
-	}
-	rt3.ReleaseAdmission()
-	<-submitDone
-}
-
-// TestB14cReservationRefusedLeavesNoDurableRecord: a submit that is refused
-// (admissibility or reservation) creates NO durable record. Pro #5/H — no
-// received placeholder to leak. The store has zero records for the refused
-// request.
-func TestB14cReservationRefusedLeavesNoDurableRecord(t *testing.T) {
-	ep, _, store, _ := b14cEndpoint(t)
-
-	// A stale-epoch submit is refused (admissibility). No durable record.
-	id := "11111111-1111-4111-8111-111111111108"
-	repAny, err := ep.Handle(&protocol.Command{
-		Schema: protocol.SchemaCommand, Op: protocol.OpRequestSubmit,
-		RequestID: id, TargetID: "fake", Epoch: "stale_epoch",
-		NotAfter: protocol.FormatTime(time.Now().Add(2 * time.Minute)),
-		Input:    &protocol.SubmitInput{Text: "x"},
-	}, core.Source{Host: "local"})
-	if err != nil {
-		t.Fatalf("stale-epoch submit returned error: %v", err)
-	}
-	reply, ok := repAny.(protocol.Reply)
-	if !ok {
-		t.Fatalf("stale reply type = %T", repAny)
-	}
-	if reply.Snapshot.State != protocol.StateRejected {
-		t.Fatalf("state = %s, want rejected", reply.Snapshot.State)
-	}
-	// Pro #5: NO durable record — the refused submit was never written.
-	k := requests.Key{CreatorHost: "local", TargetID: "fake", RequestID: id}
-	if rec, ok, _ := store.Get(k); ok {
-		t.Fatalf("refused submit left a durable record: state=%s code=%q", rec.State, rec.Code)
 	}
 }
