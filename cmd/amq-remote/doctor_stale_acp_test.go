@@ -4,8 +4,6 @@ import (
 	"errors"
 	"strings"
 	"testing"
-
-	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 )
 
 // fakeACPList replaces the identity seams: the installed amq-acp has
@@ -68,11 +66,31 @@ func TestDoctorReportsStaleACPWithoutStateDir(t *testing.T) {
 	root := t.TempDir() // no extensions/remote, so doctor returns early
 	fakeACPList(t, execIdentity{Dev: 16777232, Inode: 183321562})
 
-	out, code, err := doctor([]string{"--root", root})
+	out, _, err := doctor([]string{"--root", root})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if code != protocol.ExitActionRequired || !doctorHasBoundary(out, "stale_harness", "pid 111") {
-		t.Fatalf("early return missed stale_harness: exit=%d failing=%v", code, out.(map[string]any)["failing"])
+	// stale_harness is advice now: it must appear in notes, never in
+	// failing. The exit code stays whatever the real failures (the endpoint
+	// failure here) make it; the note itself must not add one.
+	report, _ := out.(map[string]any)
+	for _, f := range toFailures(report["failing"]) {
+		if f.Boundary == "stale_harness" {
+			t.Fatalf("stale_harness must not be a failure: %v", f)
+		}
 	}
+	found := false
+	for _, n := range toFailures(report["notes"]) {
+		if n.Boundary == "stale_harness" && n.Subject == "pid 111" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("early return missed the stale_harness note: notes=%v", report["notes"])
+	}
+}
+
+func toFailures(v any) []boundaryFailure {
+	fs, _ := v.([]boundaryFailure)
+	return fs
 }

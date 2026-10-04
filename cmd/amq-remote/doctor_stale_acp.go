@@ -9,10 +9,15 @@ import (
 // execIdentity is one executable's filesystem identity: its device and
 // inode. Two processes run the same binary exactly when dev and inode
 // match; a touch, a chmod, or a symlink retarget cannot forge that pair.
+// A reader that cannot learn the device sets Dev to anyDevice and the
+// comparison falls back to the inode alone.
 type execIdentity struct {
 	Dev   uint64
 	Inode uint64
 }
+
+// anyDevice marks an identity read without device evidence.
+const anyDevice = 0
 
 // acpProcess is one running amq-acp candidate with its launch name.
 type acpProcess struct {
@@ -80,7 +85,7 @@ func staleACPFailures() ([]boundaryFailure, error) {
 		out = append(out, boundaryFailure{
 			Boundary: "stale_harness",
 			Subject:  fmt.Sprintf("pid %d", p.PID),
-			Detail:   fmt.Sprintf("amq-acp pid %d runs a different executable than the installed %s", p.PID, path),
+			Detail:   fmt.Sprintf("amq-acp pid %d runs a different executable than the installed %s; if this is a Buzz Desktop agent, Stop and Start it", p.PID, path),
 			Remedy:   "If this is a Buzz Desktop agent, Stop and Start it so it runs the installed amq-acp",
 		})
 	}
@@ -88,6 +93,10 @@ func staleACPFailures() ([]boundaryFailure, error) {
 }
 
 func idSame(a, b execIdentity) bool {
+	if a.Dev == anyDevice || b.Dev == anyDevice {
+		// One side had no device evidence; inode decides alone.
+		return a.Inode == b.Inode
+	}
 	return a.Dev == b.Dev && a.Inode == b.Inode
 }
 

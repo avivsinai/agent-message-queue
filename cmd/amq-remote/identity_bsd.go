@@ -3,66 +3,73 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
-// lsofCLI runs lsof for one pid's txt records with a C locale. The field
-// output (-FpfDin) carries pid, file descriptor, device, inode, and name.
+// lsofCLI runs lsof for one pid's txt records with a C locale, bounded the
+// same way as the other doctor probes. The field output (-Fpfin) carries
+// pid, file descriptor, inode, and name.
 var lsofCLI = func(pid int) ([]byte, error) {
-	cmd := exec.Command("lsof", "-a", "-p", strconv.Itoa(pid), "-d", "txt", "-FpfDin")
+	ctx, cancel := context.WithTimeout(context.Background(), lsofTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "lsof", "-a", "-p", strconv.Itoa(pid), "-d", "txt", "-Fpfin")
 	cmd.Env = append(os.Environ(), "LC_ALL=C")
 	return cmd.Output()
 }
 
+// lsofTimeout bounds each lsof probe; a probe that outlives it yields no
+// identity and the process is skipped, never guessed.
+const lsofTimeout = 2 * time.Second
+
 // processIdentityOS reads a running process's executable identity on macOS
-// (and the BSDs, which share lsof):
-// the txt record of lsof, whose n field is the executable vnode path and
-// whose i and D fields carry its inode and device. A record whose name
-// basename is not amq-acp is ignored, so dyld and other text records never
-// decide. No matching record means the identity is unknown, and doctor
-// skips the process.
+// (and the BSDs, which share lsof): the FIRST txt record of the process is
+// the program text, whose n field names the running executable and whose i
+// field carries its inode. Matching is by full path, never by basename
+// across records: if the first txt record's basename is not amq-acp, the
+// process is not an amq-acp candidate and is skipped, no matter what other
+// records name. No readable first record means the identity is unknown, and
+// doctor skips the process.
 func processIdentityOS(pid int) (execIdentity, error) {
 	raw, err := lsofCLI(pid)
 	if err != nil || len(raw) == 0 {
 		return execIdentity{}, errors.New("no lsof txt record")
 	}
-	var dev, ino uint64
-	var haveDev, haveIno bool
 	name := ""
+	var ino uint64
+	haveIno := false
 	for _, line := range strings.Split(string(raw), "\n") {
 		if line == "" {
 			continue
 		}
 		switch line[0] {
 		case 'f':
-			// New file record: a txt record is complete when its name,
-			// device, and inode were all seen for this f-block.
-			if haveDev && haveIno && strings.EqualFold(filepath.Base(name), "amq-acp") {
-				return execIdentity{Dev: dev, Inode: ino}, nil
+			if name != "" || haveIno {
+				// The first txt record is the program text; later records
+				// (dyld and other text) are never searched.
+				if strings.EqualFold(filepath.Base(name), "amq-acp") {
+					return execIdentity{Dev: anyDevice, Inode: ino}, nil
+				}
+				return execIdentity{}, errors.New("first txt record is not amq-acp")
 			}
-			dev, ino = 0, 0
-			haveDev, haveIno = false, false
-			name = ""
-		case 'D':
-			if v, err := strconv.ParseUint(strings.TrimPrefix(line, "D"), 0, 64); err == nil {
-				dev, haveDev = v, true
-			}
+			name, ino, haveIno = "", 0, false
 		case 'i':
-			if v, err := strconv.ParseUint(strings.TrimPrefix(line, "i"), 10, 64); err == nil {
+			if v, perr := strconv.ParseUint(strings.TrimPrefix(line, "i"), 10, 64); perr == nil {
 				ino, haveIno = v, true
 			}
 		case 'n':
 			name = strings.TrimPrefix(line, "n")
 		}
 	}
-	// The last record may still be complete.
-	if haveDev && haveIno && strings.EqualFold(filepath.Base(name), "amq-acp") {
-		return execIdentity{Dev: dev, Inode: ino}, nil
+	// The first record may end without a following f line.
+	if strings.EqualFold(filepath.Base(name), "amq-acp") && haveIno {
+		return execIdentity{Dev: anyDevice, Inode: ino}, nil
 	}
-	return execIdentity{}, errors.New("no amq-acp txt record")
+	return execIdentity{}, errors.New("first txt record is not amq-acp")
 }

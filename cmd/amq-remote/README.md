@@ -490,12 +490,14 @@ remedy. Doctor exits 6 exactly when `failing` is not empty.
 | `presence` | A presence share has not published `online` or `away`. |
 | `activity` | An activity share is not `exporting`. |
 | `discovery` | The owner has not published the kind 30177 policy for the body. |
-| `stale_harness` | A running `amq-acp` process executes a path other than the installed one, which follows a `brew upgrade` (a dev build can do this too): if it is a Buzz Desktop agent, Stop and Start it. |
 
 `authenticated` means the relay accepted this body's AUTH. It does not prove
 that the relay materialized the owner binding or that any viewer is ready.
 
-## Claude Code
+`stale_harness` is advice, not a failure: it is reported under `notes` and
+never makes doctor exit non-zero. A different identity can also be a
+byte-identical copy or another binary with the same name, so the note asks
+the operator to decide, naming the running process and the installed path.
 
 Submit writes one frame to the target session's cross-session socket. The
 socket answers nothing, so the ladder comes from the session's transcript:
