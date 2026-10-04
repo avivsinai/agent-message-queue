@@ -123,6 +123,11 @@ func (r *drainRig) envelope(id string) *Envelope {
 	return env
 }
 
+// recordPath is where the endpoint store keeps a local request's record.
+func (r *drainRig) recordPath(id string) string {
+	return filepath.Join(r.stateDir, "endpoint", "v1", "requests", "local", "fake__"+id+".json")
+}
+
 func (r *drainRig) hasRecord(host, id string) bool {
 	r.t.Helper()
 	_, ok, err := r.store.Get(requests.Key{CreatorHost: host, TargetID: "fake", RequestID: id})
@@ -380,6 +385,23 @@ func TestSenderTransientRefusalRetriesNextTick(t *testing.T) {
 			code:       protocol.CodeDraining,
 			makeBusy:   func(r *drainRig, _ string) { _ = r.ep.Close() },
 			makeUnbusy: func(r *drainRig) { r.start() },
+		},
+		{
+			// A store read that fails without a typed refusal is the
+			// endpoint being unreachable for now, not a refusal of the
+			// request (Pro review of the carrier cull).
+			name: "endpoint unreachable",
+			code: protocol.CodeEndpointUnreachable,
+			makeBusy: func(r *drainRig, _ string) {
+				if err := os.MkdirAll(r.recordPath(validUUID(0)), 0o700); err != nil {
+					r.t.Fatalf("obstruct record: %v", err)
+				}
+			},
+			makeUnbusy: func(r *drainRig) {
+				if err := os.Remove(r.recordPath(validUUID(0))); err != nil {
+					r.t.Fatalf("clear record: %v", err)
+				}
+			},
 		},
 	}
 	for _, tc := range cases {
