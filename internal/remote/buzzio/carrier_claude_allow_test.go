@@ -114,6 +114,15 @@ func TestClaudeForgedAllowEvidenceNeverAllows(t *testing.T) {
 		{name: "deletion after the message", pinned: true, forge: e2eValid, history: func(e *claudeApprovalE2E) []nostr.Event {
 			return []nostr.Event{e.deletion(e.body, KindDeletion, nostr.Tags{{"h", "dm-1"}, {"e", strings.Repeat("0", 64)}})}
 		}},
+		// Review of #936 r3, P1: the body deletes a hidden edit with a
+		// created_at before the message; a time-bounded read missed it.
+		{name: "backdated body deletion", pinned: true, forge: e2eValid, history: func(e *claudeApprovalE2E) []nostr.Event {
+			d := nostr.Event{CreatedAt: e.msg.CreatedAt - 60, Kind: KindDeletion, Tags: nostr.Tags{{"e", strings.Repeat("1", 64)}}}
+			if err := d.Sign(e.body); err != nil {
+				e.t.Fatal(err)
+			}
+			return []nostr.Event{d}
+		}},
 		// Pro review of #936 r2, P1: Buzz lets the owner edit the agent's
 		// message.
 		{name: "owner edit changes the shown command", pinned: true, forge: e2eValid, history: func(e *claudeApprovalE2E) []nostr.Event {

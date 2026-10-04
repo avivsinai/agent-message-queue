@@ -136,12 +136,6 @@ func canonicalJSON(raw json.RawMessage) ([]byte, bool) {
 // shown as its whole input instead.
 var bashFields = map[string]bool{"command": true, "description": true, "timeout": true, "run_in_background": true}
 
-// approvalPreview renders what the DM shows for one PermissionRequest.
-func approvalPreview(toolName string, input json.RawMessage, agentType string) string {
-	preview, _ := approvalView(toolName, input, agentType)
-	return preview
-}
-
 // approvalView renders what the DM shows for one PermissionRequest. The
 // preview never edits a call: it shows the call whole, or a fixed note.
 // The whole candidate text is built first, in the form the DM displays,

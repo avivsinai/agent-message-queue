@@ -571,9 +571,10 @@ nothing by itself. The hook prints allow only when all of these hold:
   message harmless: each edit (kind 40003, by the body or by the owner,
   whom Buzz lets edit an agent's message) shows the same call with only
   another answer line or outcome, no deletion (kind 5, or the Buzz-native
-  kind 9005) names the message or one of its edits, and the body and the
-  owner sent no deletion at all since the message, with or without an `h`
-  tag. The relay hides a deleted edit, and AMQ never deletes;
+  kind 9005) names the message or one of its edits, the body sent no
+  deletion ever, and the owner sent no deletion since the message, with or
+  without an `h` tag. The relay hides a deleted edit, AMQ never deletes,
+  and a deletion's time is what its signer claims;
 - the approval is still open when the hook checks, both before and after
   it verifies: its deadline has not passed, Claude has not ended the hook,
   and nothing else closed it. One allow applies once.

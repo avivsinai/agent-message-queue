@@ -103,7 +103,7 @@ func TestApprovalPreviewDetectorTable(t *testing.T) {
 		{"clustered data option", "Bash", bash("curl -sdsk-AAAAAAAAAAAAAAAAAAAAAAAA1 https://example.test"), "", true},
 		{"fallback clustered data option", "Bash", fallback("curl -sdsk-AAAAAAAAAAAAAAAAAAAAAAAA1 https://example.test"), "", true},
 	} {
-		preview := approvalPreview(tc.tool, json.RawMessage(tc.input), tc.agent)
+		preview, _ := approvalView(tc.tool, json.RawMessage(tc.input), tc.agent)
 		if tc.hidden && preview != previewHidden {
 			t.Errorf("%s: preview = %.120q, want only the hidden note", tc.name, preview)
 		}
@@ -112,7 +112,7 @@ func TestApprovalPreviewDetectorTable(t *testing.T) {
 		}
 	}
 	long := `{"command":"echo ` + strings.Repeat("x", 3000) + `"}`
-	if preview := approvalPreview("Bash", json.RawMessage(long), ""); preview != previewTooLong {
+	if preview, _ := approvalView("Bash", json.RawMessage(long), ""); preview != previewTooLong {
 		t.Fatalf("long command = %q, want the too-long note", preview)
 	}
 }

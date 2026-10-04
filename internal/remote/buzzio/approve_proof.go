@@ -46,8 +46,8 @@ type ApproveCheck struct {
 }
 
 // ErrAltered is an approval message whose shown call changed after it was
-// posted: an edit that shows another call, or any deletion in the channel
-// since the message. The owner may have approved text other than the call.
+// posted: an edit that shows another call, any deletion by the body, or
+// any deletion by the owner since the message. The owner may have approved text other than the call.
 var ErrAltered = errors.New("the approval message was altered after it was posted")
 
 // approveEvidence is the evidence for an owner ✅ on the approval message
@@ -144,9 +144,10 @@ const historyTimeout = 10 * time.Second
 //     ref, with only one of this carrier's own trailers or outcomes, and
 //     carry no imeta attachment;
 //   - no deletion may name the message or any of its edits, from anyone;
-//   - no deletion by the body or the owner may exist since the message,
-//     wherever it points: the relay hides a deleted edit, so a deletion of
-//     an edit no read returns cannot be told apart from an unrelated one.
+//   - no deletion by the body may exist at all, and no deletion by the
+//     owner since the message, wherever it points: the relay hides a
+//     deleted edit, so a deletion of an edit no read returns cannot be told
+//     apart from an unrelated one.
 //
 // An edit or deletion that fails is ErrAltered. A read that errors, ends
 // early, overflows or times out is another error: the history is not
@@ -183,12 +184,22 @@ func CheckHistory(ctx context.Context, conn *relay.Conn, msg nostr.Event, want A
 	if len(targeted) > 0 {
 		return fmt.Errorf("%w: the message or an edit of it was deleted", ErrAltered)
 	}
-	since, err := readStored(ctx, conn, nostr.Filter{Kinds: deletionKinds, Authors: authors, Since: msg.CreatedAt})
+	// A deletion's created_at is its signer's claim, so the body's
+	// deletions are read with no time bound: AMQ never deletes, and a
+	// backdated one would otherwise hide a deleted edit (review of #936 r3).
+	byBody, err := readStored(ctx, conn, nostr.Filter{Kinds: deletionKinds, Authors: []nostr.PubKey{msg.PubKey}})
 	if err != nil {
-		return fmt.Errorf("read the deletions since the message: %w", err)
+		return fmt.Errorf("read the body's deletions: %w", err)
 	}
-	if len(since) > 0 {
-		return fmt.Errorf("%w: %d deletion(s) by the body or the owner since the message", ErrAltered, len(since))
+	if len(byBody) > 0 {
+		return fmt.Errorf("%w: %d deletion(s) by the body", ErrAltered, len(byBody))
+	}
+	byOwner, err := readStored(ctx, conn, nostr.Filter{Kinds: deletionKinds, Authors: []nostr.PubKey{owner}, Since: msg.CreatedAt})
+	if err != nil {
+		return fmt.Errorf("read the owner's deletions since the message: %w", err)
+	}
+	if len(byOwner) > 0 {
+		return fmt.Errorf("%w: %d deletion(s) by the owner since the message", ErrAltered, len(byOwner))
 	}
 	return nil
 }
