@@ -309,24 +309,40 @@ func TestSenderReapSettled(t *testing.T) {
 // TestSenderB2RefusalClassification (round-3) is the core B2 regression: the
 // endpoint returns a refusal as a protocol.Reply VALUE with Outcome.Code and
 // a nil error. Before the fix, classifyReply asserted reply.(*protocol.Reply),
-// which never matched, so every refusal became MarkDispatched. A stale epoch
-// must drain to failed/stale_epoch.
+// which never matched, so every refusal became MarkDispatched. A terminal
+// refusal (stale epoch, or a mode the endpoint does not support) must drain
+// to failed with its code, never retry.
 func TestSenderB2RefusalClassification(t *testing.T) {
-	now := time.Now()
-	r := newDrainRig(t, now)
-	cmd := r.enqueue(validUUID(0), "e_stale", protocol.FormatTime(now.Add(2*time.Minute)))
-	if n := r.drain(now); n != 1 {
-		t.Fatalf("drained n=%d, want 1", n)
-	}
-	got := r.envelope(cmd.RequestID)
-	if got.State != StateFailed {
-		t.Fatalf("state=%s, want failed (refusal classified as success — B2 dead code)", got.State)
-	}
-	if got.LastError != string(protocol.CodeStaleEpoch) {
-		t.Fatalf("last_error=%s, want %s", got.LastError, protocol.CodeStaleEpoch)
-	}
-	if r.hasRecord("local", cmd.RequestID) {
-		t.Fatal("the refused submit left a record")
+	for _, tc := range []struct {
+		name  string
+		epoch string
+		busy  protocol.Busy
+		want  protocol.Code
+	}{
+		{"stale epoch", "e_stale", protocol.BusyReject, protocol.CodeStaleEpoch},
+		{"unsupported", "e_1", protocol.BusyQueue, protocol.CodeUnsupported},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			now := time.Now()
+			r := newDrainRig(t, now)
+			notAfter := protocol.FormatTime(now.Add(2 * time.Minute))
+			cmd := testCommand(validUUID(0), "fake", tc.epoch, notAfter)
+			cmd.Input.Busy = tc.busy
+			env := &Envelope{RequestID: cmd.RequestID, CreatorHost: "local", TargetID: "fake", Epoch: tc.epoch, NotAfter: notAfter, Command: cmd, Destination: "ipc:state"}
+			if err := r.spool.Create(env); err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			if n := r.drain(now); n != 1 {
+				t.Fatalf("drained n=%d, want 1", n)
+			}
+			got := r.envelope(cmd.RequestID)
+			if got.State != StateFailed || got.LastError != string(tc.want) {
+				t.Fatalf("state=%s last_error=%s, want failed/%s", got.State, got.LastError, tc.want)
+			}
+			if r.hasRecord("local", cmd.RequestID) {
+				t.Fatal("the refused submit left a record")
+			}
+		})
 	}
 }
 
