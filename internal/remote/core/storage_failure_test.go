@@ -51,8 +51,14 @@ func TestAsyncStorageFailureIsVisibleToTheOwner(t *testing.T) {
 		if !rt.Complete(id, "done") {
 			t.Fatal("no running run to complete")
 		}
-		if s := get(t, ep, id); s.State != protocol.StateUncertain || s.Code != protocol.CodeStorageFull {
-			t.Fatalf("get = %s/%s, want uncertain/storage_full", s.State, s.Code)
+		durable, _, err := store.Get(requests.Key{CreatorHost: "local", TargetID: "fake", RequestID: id})
+		if err != nil {
+			t.Fatalf("store get: %v", err)
+		}
+		// A carrier tracks revisions, so the projection must not carry the
+		// revision whose write failed (Pro review of #941, P1).
+		if s := get(t, ep, id); s.State != protocol.StateUncertain || s.Code != protocol.CodeStorageFull || s.Revision != durable.Revision {
+			t.Fatalf("get = %s/%s rev %d, want uncertain/storage_full at the stored rev %d", s.State, s.Code, s.Revision, durable.Revision)
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()

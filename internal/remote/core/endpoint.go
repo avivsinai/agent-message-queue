@@ -1368,6 +1368,8 @@ type failure struct {
 
 // failedLocked returns the storage-failure projection for the durable record
 // cur. A durable terminal state is final, so it wins over the projection.
+// The projection carries cur's revisions: a revision that was never stored
+// must not reach a carrier that tracks revisions (Pro review of #941).
 // The caller holds e.mu.
 func (e *Endpoint) failedLocked(cur *requests.Record) (protocol.Snapshot, bool) {
 	key := keyOfRecord(cur)
@@ -1379,7 +1381,9 @@ func (e *Endpoint) failedLocked(cur *requests.Record) (protocol.Snapshot, bool) 
 		delete(e.failed, key)
 		return protocol.Snapshot{}, false
 	}
-	return f.snap, true
+	snap := f.snap
+	snap.Revision = cur.Revision
+	return snap, true
 }
 
 func boundResult(r *protocol.Result) *protocol.Result {
@@ -2241,7 +2245,13 @@ func (e *Endpoint) reconcileCancelRetry(rec *requests.Record) error {
 	ev, nerr := t.att.CancelExact(key, epoch)
 	e.mu.Lock()
 	rec, exists, err := e.store.Get(key)
-	if err != nil || !exists {
+	if err != nil {
+		// The cancel outcome is not saved: report it so Reconcile keeps any
+		// failure projection (Pro review of #941).
+		e.mu.Unlock()
+		return err
+	}
+	if !exists {
 		e.mu.Unlock()
 		return nil
 	}
