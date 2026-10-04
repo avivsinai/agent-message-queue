@@ -750,8 +750,8 @@ func TestASDConcurrentDifferentDigestNoOverwrite(t *testing.T) {
 
 // TestSenderDrainRefusesEditedSpoolFiles reproduces agent-message-queue-611.47:
 // the drainer replayed a spool file another writer changed, so a file could
-// dispatch interaction.respond with a copied Buzz origin. Only a valid submit
-// is dispatched, and never with an origin.
+// dispatch interaction.respond, or a submit as a Buzz share, with a copied
+// origin or host. Only a valid local submit is dispatched, never with an origin.
 func TestSenderDrainRefusesEditedSpoolFiles(t *testing.T) {
 	now := time.Now()
 	clock := func() time.Time { return now }
@@ -790,6 +790,7 @@ func TestSenderDrainRefusesEditedSpoolFiles(t *testing.T) {
 		m["origin"] = origin
 	})
 	edit(validUUID(1), func(m map[string]any) { m["origin"] = origin })
+	edit(validUUID(2), func(m map[string]any) { m["creator_host"] = "buzz-0123456789abcdef" })
 
 	fd := &fakeDispatcher{}
 	if _, err := NewDrainer(spool, fd, clock).Drain(context.Background()); err != nil {

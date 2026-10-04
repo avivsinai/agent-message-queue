@@ -35,6 +35,7 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/remote/ipc"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 )
 
@@ -566,8 +567,11 @@ func validateEnvelope(env *Envelope) error {
 	if env.RequestID != env.Command.RequestID {
 		return protocol.Refuse(protocol.CodeInvalid, "envelope request_id must match command request_id")
 	}
-	if !safeSegment(env.CreatorHost) {
-		return protocol.Refuse(protocol.CodeInvalid, "creator_host is not a safe segment")
+	// The spool holds the local CLI's submits, so a file that names another
+	// host, such as a Buzz share's, is not one the CLI wrote
+	// (agent-message-queue-611.47).
+	if env.CreatorHost != ipc.LocalHost {
+		return protocol.Refuse(protocol.CodeInvalid, "creator_host must be %s", ipc.LocalHost)
 	}
 	if env.Command.TargetID == "" || env.Command.Epoch == "" {
 		return protocol.Refuse(protocol.CodeInvalid, "command target_id and epoch are required")
