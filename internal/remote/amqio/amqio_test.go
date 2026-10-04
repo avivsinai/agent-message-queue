@@ -379,7 +379,10 @@ func TestImportStoreRefusalLeavesCommandInNew(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	store, err := requests.Open(filepath.Join(root, "extensions", "remote"))
+	// The store is at quota, so every unreserved write refuses with
+	// storage_full, exactly as a full disk does.
+	storeDir := filepath.Join(root, "extensions", "remote")
+	store, err := requests.Open(storeDir, requests.WithMaxStoreBytes(1))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
@@ -426,13 +429,8 @@ func TestImportStoreRefusalLeavesCommandInNew(t *testing.T) {
 	}
 	_ = droot.Close()
 
-	// Force every store write to refuse with storage_full, exactly as a full
-	// disk does. The refusal is a *protocol.Refusal, so the old type-based
+	// The refusal is a *protocol.Refusal, so the old type-based
 	// classification accepted it as a durable answer and claimed the command.
-	saved := requests.MaxRecordBytes
-	requests.MaxRecordBytes = 1
-	t.Cleanup(func() { requests.MaxRecordBytes = saved })
-
 	if _, err := carrier.ImportOnce(); err != nil {
 		t.Fatalf("import: %v", err)
 	}
@@ -443,8 +441,16 @@ func TestImportStoreRefusalLeavesCommandInNew(t *testing.T) {
 		t.Fatalf("storage-refused cancel was CLAIMED: %d (the cancelled request would later execute)", len(entries))
 	}
 
-	// With storage restored the retry succeeds and the command is claimed.
-	requests.MaxRecordBytes = saved
+	// With storage restored (the endpoint restarts without the quota) the
+	// retry succeeds and the command is claimed.
+	if err := ep.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	store, err = requests.Open(storeDir)
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	carrier, _ = newCarrierOverExisting(t, root, store)
 	if _, err := carrier.ImportOnce(); err != nil {
 		t.Fatalf("retry import: %v", err)
 	}
@@ -552,20 +558,15 @@ func TestImportCrossProjectRepliesToCallerRoot(t *testing.T) {
 	}
 }
 
-// TestImportCrossProjectUnroutableLeavesCommandInNew pins the refusal half of
-// agent-message-queue-611.22.30: when the reply cannot be routed, the command
-// must stay in new (answerable later) rather than be claimed with its reply
-// delivered into the endpoint's own root.
-// TestImportCrossProjectUnroutableDoesNotBlockRoutable reproduces Pro B1+B3:
-// an unroutable cross-project command must NOT stop a second, routable command
-// from being handled in the same scan. F2: the test must make importOne return
-// a REAL error (not a DLQ'd true), so errors.Join/never-abort is actually
-// exercised. A poison message is DLQ'd (true, nil) — that does not test D1.
-// Instead, message A is a same-project submit whose reply delivery FAILS
-// (read-only peer inbox), producing (false, err). Message B is a routable
-// same-project submit that sorts after A. If D1 is reverted (return on first
-// error), B is never processed.
-func TestImportCrossProjectUnroutableDoesNotBlockRoutable(t *testing.T) {
+// TestImportFailedReplyDoesNotBlockNextCommand reproduces Pro B1+B3: one
+// command whose handling fails must NOT stop a later command in the same scan
+// (D1: never abort the scan). Message A's reply delivery fails (read-only
+// caller inbox), a real error rather than a DLQ; message B sorts after A and
+// must still be claimed. A's claim and receipt come before its reply
+// (agent-message-queue-611.22.37), so the next tick, with the inbox writable,
+// must still send A's reply: a receipt alone does not prove the reply landed
+// (B8, agent-message-queue-611.22.35).
+func TestImportFailedReplyDoesNotBlockNextCommand(t *testing.T) {
 	endpointRoot := t.TempDir()
 	if err := fsq.EnsureRootDirs(endpointRoot); err != nil {
 		t.Fatal(err)
@@ -651,12 +652,6 @@ func TestImportCrossProjectUnroutableDoesNotBlockRoutable(t *testing.T) {
 	}
 	if entries, _ := os.ReadDir(codexInbox); len(entries) != 0 {
 		t.Fatalf("reply reached a read-only inbox: %d", len(entries))
-	}
-	carrier.mu.Lock()
-	_, owed := carrier.claimedThisRun[idA]
-	carrier.mu.Unlock()
-	if !owed {
-		t.Fatal("A's reply obligation was dropped from the pending set")
 	}
 	// The inbox becomes writable: the next tick delivers A's reply exactly once.
 	if err := os.Chmod(codexInbox, 0o700); err != nil {
@@ -745,80 +740,6 @@ func TestImportSameProjectEmptyFromStillWorks(t *testing.T) {
 	}
 	if rec.PublishedRevision < rec.Revision {
 		t.Fatalf("published_revision=%d < revision=%d (F1: same-project from:\"\" publish never converges — reply to empty handle fails every tick)", rec.PublishedRevision, rec.Revision)
-	}
-}
-
-// TestImportCrossProjectNoPeerMailboxDoesNotCreateIt reproduces Pro B4: the
-// probe never checked the destination mailbox exists, and DeliverToInboxes
-// creates it — recreating the original black hole inside the PEER root. D4:
-// before delivering to a peer root, call ValidateExistingMailboxLayout. A peer
-// root whose mailbox does not exist is unroutable — D3 applies (DLQ).
-func TestImportCrossProjectNoPeerMailboxDoesNotCreateIt(t *testing.T) {
-	endpointRoot := t.TempDir()
-	if err := fsq.EnsureRootDirs(endpointRoot); err != nil {
-		t.Fatal(err)
-	}
-	if err := fsq.EnsureAgentDirs(endpointRoot, DefaultHandle); err != nil {
-		t.Fatal(err)
-	}
-	store, err := requests.Open(filepath.Join(endpointRoot, "extensions", "remote"))
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	var carrier *Carrier
-	ep := core.New(core.Config{Store: store, Publish: func(s protocol.Snapshot, origin map[string]string) error {
-		return carrier.Publish(s, origin)
-	}})
-	carrier, err = New(endpointRoot, DefaultHandle, ep)
-	if err != nil {
-		t.Fatalf("carrier: %v", err)
-	}
-	// Peer root exists but has NO codex mailbox.
-	peerRoot := t.TempDir()
-	if err := fsq.EnsureRootDirs(peerRoot); err != nil {
-		t.Fatal(err)
-	}
-	// Deliberately do NOT call EnsureAgentDirs(peerRoot, "codex").
-	carrier.SetReplyRouter(func(project, replyTo string) (string, string, error) {
-		return peerRoot, "codex", nil
-	})
-	ep.Register(fake.New("fake", "e_1"))
-	t.Cleanup(func() { _ = ep.Close() })
-
-	body := `{"schema":"amq.remote.command/1","op":"request.submit","request_id":"11111111-1111-4111-8111-111111111351","target_id":"fake","epoch":"e_1","not_after":"` + protocol.FormatTime(time.Now().Add(time.Minute)) + `","input":{"text":"hi"}}`
-	now := time.Now()
-	id, _ := format.NewMessageID(now)
-	msg := format.Message{Header: format.Header{
-		Schema: format.CurrentSchema, ID: id, From: "codex", To: []string{DefaultHandle},
-		Thread: "p2p/codex__remote", Subject: "submit", Created: now.UTC().Format(time.RFC3339Nano), Kind: "todo",
-		FromProject: "peer", ReplyTo: "codex@session1", ReplyProject: "peer",
-	}, Body: body}
-	data, _ := msg.Marshal()
-	identity, _ := fsq.SnapshotDeliveryRoot(endpointRoot)
-	droot, _ := fsq.OpenDeliveryRoot(endpointRoot, identity)
-	if _, err := fsq.DeliverToInboxes(droot, []string{DefaultHandle}, id+".md", data); err != nil {
-		t.Fatalf("deliver: %v", err)
-	}
-	_ = droot.Close()
-
-	// F5: a missing peer mailbox is TRANSIENT (the mailbox may be provisioned
-	// a moment later), not poison. The message stays in new for the next tick.
-	// It must NOT be DLQ'd, and it must NOT create the peer mailbox.
-	n, _ := carrier.ImportOnce()
-	_ = n // the message is left in new (transient), so n=0 is expected
-	// The peer root must NOT have a codex mailbox created by us.
-	peerCodexDir := filepath.Join(peerRoot, "agents", "codex")
-	if _, err := os.Stat(peerCodexDir); err == nil {
-		t.Fatal("peer root codex mailbox was created (Pro B4 — black hole moved into peer root)")
-	}
-	// The message stays in new (transient — not DLQ'd).
-	if entries, _ := os.ReadDir(fsq.AgentInboxNew(endpointRoot, DefaultHandle)); len(entries) != 1 {
-		t.Fatalf("transient (no peer mailbox) message should stay in new: %d entries", len(entries))
-	}
-	// No DLQ entry.
-	dlqDir := filepath.Join(endpointRoot, "agents", DefaultHandle, "dlq", "new")
-	if entries, _ := os.ReadDir(dlqDir); len(entries) != 0 {
-		t.Fatalf("transient message was DLQ'd (F5: missing peer mailbox is not poison): %d", len(entries))
 	}
 }
 

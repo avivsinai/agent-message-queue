@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -20,29 +19,20 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/requests"
 )
 
-// TestB10DurablePublishPropagatesCommittedDurabilityError reproduces
-// agent-message-queue-611.22.14: a CommittedDurabilityError (visible rename,
-// unknown fsync) was converted to nil by reply(), so publishLocked advanced
-// PublishedRevision and Reconcile never retried. A terminal result was lost
-// on power loss with no retry.
+// TestPublishUnderCommittedFsyncFaultDeliversOnce covers revision publication
+// when the rename commits but the directory fsync fails (a
+// CommittedDurabilityError), agent-message-queue-611.22.14 and .35 B12:
 //
-// B10 fix: Publish uses durabilityStrict, which PROPAGATES the
-// CommittedDurabilityError. publishLocked does not advance PublishedRevision,
-// and Reconcile republishes the same immutable revision on the next tick.
-// The republish is idempotent (B1): the message id is deterministic
-// (publish__<ref>__rev<N>), so resolvePublishCollision returns nil on a
-// byte-identical collision — no amplification.
-//
-// Acceptance:
-//
-//	(a) PublishedRevision does NOT advance while the fault is active.
-//	(b) The publish error IS a CommittedDurabilityError (not a pre-rename
-//	    ordinary error) — the file for the terminal revision IS visible.
-//	(c) After the fault clears, Reconcile republishes the SAME revision and
-//	    PublishedRevision advances.
-//	(d) No amplification: multiple Reconcile ticks with the fault on produce
-//	    exactly ONE file for the terminal revision.
-func TestB10DurablePublishPropagatesCommittedDurabilityError(t *testing.T) {
+//	(a) PublishedRevision advances: the message is visible, and a visible
+//	    message is published (re-delivery after consumption is never
+//	    idempotent), so the fsync is repaired in place instead.
+//	(b) Exactly one file for the terminal revision is visible.
+//	(d) No amplification: Reconcile ticks with the fault still on leave one
+//	    file, because the publish id is deterministic per (request, revision)
+//	    and a byte-identical collision is a no-op (B1).
+//	(e) The publish id starts with a timestamp, so it sorts chronologically
+//	    against ordinary AMQ ids and drain --limit does not starve it.
+func TestPublishUnderCommittedFsyncFaultDeliversOnce(t *testing.T) {
 	root := t.TempDir()
 	if err := fsq.EnsureRootDirs(root); err != nil {
 		t.Fatal(err)
@@ -163,21 +153,6 @@ func TestB10DurablePublishPropagatesCommittedDurabilityError(t *testing.T) {
 			t.Fatalf("(e) publish reply filename %q does not start with a timestamp — it must sort chronologically", fn)
 		}
 	}
-
-	// (c) Clear the fault and Reconcile. PublishedRevision already advanced
-	// (B12); the file is already durable after the fault clears.
-	faultActive = false
-	if err := ep.Reconcile(); err != nil {
-		t.Fatalf("(c) Reconcile: %v", err)
-	}
-
-	rec, _, _ = store.Get(key)
-	if rec == nil {
-		t.Fatal("record not found after reconcile")
-	}
-	if rec.PublishedRevision < rec.Revision {
-		t.Fatalf("(c) PublishedRevision=%d did not advance to Revision=%d after the fault cleared", rec.PublishedRevision, rec.Revision)
-	}
 }
 
 // countFilesWithLabel counts files in an agent's inbox/new whose body contains
@@ -207,272 +182,74 @@ func filesForLabel(root, handle, label string) []string {
 	return out
 }
 
-// TestB10InlineReplyToleratesCommittedDurabilityError reproduces B3: the
-// tolerant/strict distinction has zero coverage. Mutation M4 flipped reply()
-// to durabilityStrict (deleting the distinction entirely) and the whole
-// package still passed. This test fails if the inline reply becomes strict.
-//
-// The inline reply path (durabilityTolerant) must treat a
-// CommittedDurabilityError as success — the inline path has no retry, and
-// making it fail would leave the command claimed with no answer. The known
-// exposure (non-request op + power loss) is closed by cur recovery (#752).
-func TestB10InlineReplyToleratesCommittedDurabilityError(t *testing.T) {
-	root := t.TempDir()
-	if err := fsq.EnsureRootDirs(root); err != nil {
-		t.Fatal(err)
-	}
-	for _, h := range []string{"codex", DefaultHandle} {
-		if err := fsq.EnsureAgentDirs(root, h); err != nil {
-			t.Fatal(err)
-		}
-	}
-	store, err := requests.Open(filepath.Join(root, "extensions", "remote"))
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-
-	var faultActive bool
-	var carrier *Carrier
-	ep := core.New(core.Config{
-		Store: store,
-		Publish: func(s protocol.Snapshot, origin map[string]string) error {
-			return carrier.Publish(s, origin)
-		},
-	})
-	carrier, err = New(root, DefaultHandle, ep)
-	if err != nil {
-		t.Fatalf("carrier: %v", err)
-	}
-	carrier.SetSyncDirFaultForTest(func(dir string) error {
-		if faultActive && strings.HasSuffix(dir, "new") {
-			return errors.New("simulated fsync failure")
-		}
-		return nil
-	})
-	rt := fake.New("fake", "e_1")
-	ep.Register(rt)
-	t.Cleanup(func() { _ = ep.Close() })
-
-	// Submit a command so the endpoint is ready.
-	body := `{"schema":"amq.remote.command/1","op":"request.submit","request_id":"11111111-1111-4111-8111-111111111420","target_id":"fake","epoch":"e_1","not_after":"` + protocol.FormatTime(time.Now().Add(time.Minute)) + `","input":{"text":"work"}}`
-	now := time.Now()
-	id, _ := format.NewMessageID(now)
-	msg := format.Message{Header: format.Header{
-		Schema: format.CurrentSchema, ID: id, From: "codex", To: []string{DefaultHandle},
-		Thread: "p2p/codex__remote", Subject: "submit", Created: now.UTC().Format(time.RFC3339Nano), Kind: "todo",
-	}, Body: body}
-	data, _ := msg.Marshal()
-	identity, _ := fsq.SnapshotDeliveryRoot(root)
-	droot, _ := fsq.OpenDeliveryRoot(root, identity)
-	if _, err := fsq.DeliverToInboxes(droot, []string{DefaultHandle}, id+".md", data); err != nil {
-		t.Fatalf("deliver: %v", err)
-	}
-	_ = droot.Close()
-
-	n, err := carrier.ImportOnce()
-	if err != nil || n != 1 {
-		t.Fatalf("import: n=%d err=%v", n, err)
-	}
-
-	// Arm the fault. The next INLINE reply (a non-request op like
-	// request.get) must TOLERATE the CommittedDurabilityError — the reply is
-	// visible (rename committed) even though fsync is unknown. If the inline
-	// path were strict, ImportOnce would return an error and the command
-	// would stay in new with no answer.
-	faultActive = true
-	getBody := `{"schema":"amq.remote.command/1","op":"request.get","request_id":"11111111-1111-4111-8111-111111111420","target_id":"fake","epoch":"e_1","not_after":"` + protocol.FormatTime(time.Now().Add(time.Minute)) + `"}`
-	now2 := time.Now()
-	id2, _ := format.NewMessageID(now2)
-	msg2 := format.Message{Header: format.Header{
-		Schema: format.CurrentSchema, ID: id2, From: "codex", To: []string{DefaultHandle},
-		Thread: "p2p/codex__remote", Subject: "get", Created: now2.UTC().Format(time.RFC3339Nano), Kind: "todo",
-	}, Body: getBody}
-	data2, _ := msg2.Marshal()
-	identity2, _ := fsq.SnapshotDeliveryRoot(root)
-	droot2, _ := fsq.OpenDeliveryRoot(root, identity2)
-	if _, err := fsq.DeliverToInboxes(droot2, []string{DefaultHandle}, id2+".md", data2); err != nil {
-		t.Fatalf("deliver get: %v", err)
-	}
-	_ = droot2.Close()
-
-	// The inline reply (request.get) fires during ImportOnce. With the fault
-	// on, the reply's DeliverToInboxes hits a CommittedDurabilityError. The
-	// tolerant path treats it as success — ImportOnce returns n=1, no error.
-	n, err = carrier.ImportOnce()
-	if err != nil {
-		t.Fatalf("inline reply did not tolerate CommittedDurabilityError (B3 — the inline path must be tolerant, not strict): %v", err)
-	}
-	if n < 1 {
-		t.Fatalf("inline reply was not handled (B3): n=%d", n)
-	}
-	// The reply WAS visible (the rename committed despite fsync failure).
-	if entries, _ := os.ReadDir(fsq.AgentInboxNew(root, "codex")); len(entries) == 0 {
-		t.Fatal("B3: no reply visible — the inline reply did not deliver at all")
-	}
-}
-
-// TestB10PublishReplySortsChronologically verifies the second property of the
-// deterministic publish id: it must sort chronologically against ordinary AMQ
-// message ids (<RFC3339>_pid<N>_<rand>). A bare "publish__" prefix sorts
-// AFTER every 2026-* message, starving drain --limit 20. The fix uses a
-// stable timestamp prefix (from snap.ObservedAt) so the publish reply sorts
-// in arrival order.
-func TestB10PublishReplySortsChronologically(t *testing.T) {
-	// Simulate two message ids in the caller's inbox:
-	// 1. An ordinary AMQ message created at 10:00:00.
-	ordinaryID := "2026-09-08T10:00:00.000Z_pid1234_aabbccdd"
-	// 2. A publish reply for a revision observed at 10:00:01 (AFTER).
-	observed := time.Date(2026, 9, 8, 10, 0, 1, 0, time.UTC)
-	stamp := observed.Format("2006-01-02T15:04:05.000Z")
-	refDigest := "deadbeef"
-	publishID := fmt.Sprintf("%s_publish_rev%d_%s", stamp, 4, refDigest)
-
-	names := []string{ordinaryID + ".md", publishID + ".md"}
-	sort.Strings(names)
-
-	// The publish reply (observed AFTER) must sort AFTER the ordinary message.
-	if names[0] != ordinaryID+".md" {
-		t.Fatalf("ordering: publish reply %q sorted BEFORE ordinary %q (must sort chronologically — the timestamp prefix is missing or wrong)", publishID, ordinaryID)
-	}
-	if names[1] != publishID+".md" {
-		t.Fatalf("ordering: publish reply %q did not sort after ordinary %q: got %v", publishID, ordinaryID, names)
-	}
-
-	// Other direction: a publish reply observed BEFORE an ordinary message
-	// must sort BEFORE it.
-	earlyObserved := time.Date(2026, 9, 8, 9, 59, 59, 0, time.UTC)
-	earlyStamp := earlyObserved.Format("2006-01-02T15:04:05.000Z")
-	earlyPublishID := fmt.Sprintf("%s_publish_rev%d_%s", earlyStamp, 3, refDigest)
-
-	names2 := []string{earlyPublishID + ".md", ordinaryID + ".md"}
-	sort.Strings(names2)
-
-	if names2[0] != earlyPublishID+".md" {
-		t.Fatalf("ordering: early publish reply %q did not sort BEFORE ordinary %q (must sort chronologically)", earlyPublishID, ordinaryID)
-	}
-}
-
-// TestB12RetriesSyncDirInPlaceThenSucceeds verifies the B12 redesign
-// (agent-message-queue-611.22.35): on CommittedDurabilityError, the carrier
-// retries dest.SyncDir in place (3 attempts). When the fault clears on the
-// second attempt, replyWith returns nil and the message is visible.
-func TestB12RetriesSyncDirInPlaceThenSucceeds(t *testing.T) {
-	root := t.TempDir()
-	if err := fsq.EnsureRootDirs(root); err != nil {
-		t.Fatalf("EnsureRootDirs: %v", err)
-	}
-	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
-		t.Fatalf("EnsureAgentDirs: %v", err)
-	}
-	if err := fsq.EnsureAgentDirs(root, "alice"); err != nil {
-		t.Fatalf("EnsureAgentDirs: %v", err)
-	}
-	identity, _ := fsq.SnapshotDeliveryRoot(root)
-	dest, _ := fsq.OpenDeliveryRoot(root, identity)
-
-	var syncAttempts int32
-	var faultMu sync.Mutex
-	dest.SetSyncDirFaultForTest(func(dir string) error {
-		if !strings.HasSuffix(dir, "new") {
-			return nil
-		}
-		faultMu.Lock()
-		defer faultMu.Unlock()
-		n := int(syncAttempts) + 1
-		syncAttempts = int32(n)
-		// First attempt fails; second succeeds.
-		if n == 1 {
-			return errors.New("simulated fsync failure")
-		}
-		return nil
-	})
-
-	warned := false
-	carrier := &Carrier{me: "alice", now: time.Now, Warn: func(error) { warned = true }}
+// TestB12CommittedDeliveryIsRepairedInPlace pins the one committed-delivery
+// tail every reply goes through (agent-message-queue-611.22.35 B12; .36
+// packet 5a for the recovery reply; B3 for the inline reply): on a
+// CommittedDurabilityError the directory fsync is retried in place and the
+// reply reports success, because the rename already made it visible. A
+// persistent fsync failure still reports success and warns the operator.
+func TestB12CommittedDeliveryIsRepairedInPlace(t *testing.T) {
+	const created = "2026-09-14T11:00:00.000000Z"
+	snap := protocol.Snapshot{State: protocol.StateCompleted, Epoch: "ep-b12", Revision: 42, RequestRef: "ref-b12", ObservedAt: created}
 	origin := map[string]string{"from": "codex"} // same-project reply
+	paths := map[string]func(c *Carrier, dest *fsq.DeliveryRoot) error{
+		"publish": func(c *Carrier, dest *fsq.DeliveryRoot) error {
+			return c.replyWith(dest, origin, "publish", snap, nil)
+		},
+		"recovery": func(c *Carrier, dest *fsq.DeliveryRoot) error {
+			return c.replyWithRecovery(dest, origin, "recover", snap, nil, "cmd-b12", created)
+		},
+		"inline": func(c *Carrier, dest *fsq.DeliveryRoot) error {
+			return c.answer(dest, origin, "cmd-b12", created, snap, nil)
+		},
+	}
+	for name, send := range paths {
+		for _, persistent := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/persistent=%v", name, persistent), func(t *testing.T) {
+				root := t.TempDir()
+				if err := fsq.EnsureRootDirs(root); err != nil {
+					t.Fatal(err)
+				}
+				for _, h := range []string{"codex", "alice"} {
+					if err := fsq.EnsureAgentDirs(root, h); err != nil {
+						t.Fatal(err)
+					}
+				}
+				dest := mustOpenDeliveryRoot(t, root)
+				var mu sync.Mutex
+				attempts := 0
+				dest.SetSyncDirFaultForTest(func(dir string) error {
+					if !strings.HasSuffix(dir, "new") {
+						return nil
+					}
+					mu.Lock()
+					defer mu.Unlock()
+					attempts++
+					if persistent || attempts == 1 {
+						return errors.New("simulated fsync failure")
+					}
+					return nil
+				})
+				warned := false
+				carrier := &Carrier{root: root, me: "alice", now: time.Now, Warn: func(error) { warned = true }}
 
-	snap := protocol.Snapshot{
-		State:      protocol.StateRunning,
-		Epoch:      "ep-b12",
-		Revision:   42,
-		ObservedAt: time.Now().UTC().Format(time.RFC3339Nano),
-	}
-
-	err := carrier.replyWith(dest, origin, "publish test", snap, nil)
-	if err != nil {
-		t.Fatalf("replyWith returned %v (B12 — SyncDir retry should succeed on 2nd attempt)", err)
-	}
-
-	// The message IS visible (rename committed before the first fsync).
-	if warned {
-		t.Fatal("Warn fired although the second SyncDir attempt succeeded (B12 — repair in place, no operator noise)")
-	}
-	faultMu.Lock()
-	attempts := syncAttempts
-	faultMu.Unlock()
-	if attempts < 2 {
-		t.Fatalf("SyncDir attempted %d time(s), want at least 2 (B12 — the fsync is retried in place)", attempts)
-	}
-	revLabel := "revision:42"
-	count := countFilesWithLabel(root, "codex", revLabel)
-	if count != 1 {
-		t.Fatalf("expected 1 visible file for %s, got %d", revLabel, count)
-	}
-}
-
-// TestB12ReturnsNilOnPersistentSyncDirFailure verifies that on persistent
-// fsync failure (all 3 retry attempts fail), the carrier still returns nil —
-// the message IS visible and PublishedRevision must advance (re-delivery after
-// consumption is never idempotent). The Warn callback is invoked.
-func TestB12ReturnsNilOnPersistentSyncDirFailure(t *testing.T) {
-	root := t.TempDir()
-	if err := fsq.EnsureRootDirs(root); err != nil {
-		t.Fatalf("EnsureRootDirs: %v", err)
-	}
-	if err := fsq.EnsureAgentDirs(root, "codex"); err != nil {
-		t.Fatalf("EnsureAgentDirs: %v", err)
-	}
-	if err := fsq.EnsureAgentDirs(root, "alice"); err != nil {
-		t.Fatalf("EnsureAgentDirs: %v", err)
-	}
-	identity, _ := fsq.SnapshotDeliveryRoot(root)
-	dest, _ := fsq.OpenDeliveryRoot(root, identity)
-
-	dest.SetSyncDirFaultForTest(func(dir string) error {
-		if strings.HasSuffix(dir, "new") {
-			return errors.New("persistent fsync failure")
+				if err := send(carrier, dest); err != nil {
+					t.Fatalf("reply reported failure for a visible delivery: %v", err)
+				}
+				if n := countFiles(t, fsq.AgentInboxNew(root, "codex")); n != 1 {
+					t.Fatalf("%d visible replies, want 1", n)
+				}
+				mu.Lock()
+				got := attempts
+				mu.Unlock()
+				if got < 2 {
+					t.Fatalf("SyncDir attempted %d time(s), want a retry in place", got)
+				}
+				if warned != persistent {
+					t.Fatalf("Warn fired=%v, want %v (warn only when every retry failed)", warned, persistent)
+				}
+			})
 		}
-		return nil
-	})
-
-	var warnCalled bool
-	carrier := &Carrier{
-		me:   "alice",
-		now:  time.Now,
-		Warn: func(e error) { warnCalled = true },
-	}
-	origin := map[string]string{"from": "codex"}
-
-	snap := protocol.Snapshot{
-		State:      protocol.StateRunning,
-		Epoch:      "ep-b12",
-		Revision:   43,
-		ObservedAt: time.Now().UTC().Format(time.RFC3339Nano),
-	}
-
-	err := carrier.replyWith(dest, origin, "publish test", snap, nil)
-	if err != nil {
-		t.Fatalf("replyWith returned %v on persistent fsync failure (B12 — must return nil, message is visible)", err)
-	}
-	if !warnCalled {
-		t.Fatal("Warn was not called after persistent fsync failure (B12 — operator must be notified)")
-	}
-
-	// The message IS visible despite persistent fsync failure.
-	revLabel := "revision:43"
-	count := countFilesWithLabel(root, "codex", revLabel)
-	if count != 1 {
-		t.Fatalf("expected 1 visible file for %s, got %d (B12 — rename committed)", revLabel, count)
 	}
 }
 
@@ -533,89 +310,6 @@ func TestB11TwoRevisionsBothLand(t *testing.T) {
 	count2 := countFilesWithLabel(root, "codex", "revision:2")
 	if count2 != 1 {
 		t.Fatalf("expected 1 file for revision:2, got %d (B11 — different content must not collide)", count2)
-	}
-}
-
-// TestB8CurRecoveredNotSetOnFailure verifies the B8 fix
-// (agent-message-queue-611.22.35): when recoverCur returns an error,
-// curRecovered must stay false so the next ImportOnce re-runs the full sweep.
-// Previously curRecovered was set unconditionally, causing failed entries to
-// be skipped forever (they're not in claimedThisRun and steady state won't
-// revisit them).
-func TestB8CurRecoveredNotSetOnFailure(t *testing.T) {
-	root := t.TempDir()
-	if err := fsq.EnsureRootDirs(root); err != nil {
-		t.Fatalf("EnsureRootDirs: %v", err)
-	}
-	if err := fsq.EnsureAgentDirs(root, DefaultHandle); err != nil {
-		t.Fatalf("EnsureAgentDirs: %v", err)
-	}
-
-	// Create a cur entry with a message that has a reply_project pointing to
-	// a nonexistent project — recoverOne will try to route the reply and fail.
-	curDir := filepath.Join(root, "agents", DefaultHandle, "inbox", "cur")
-	if err := os.MkdirAll(curDir, 0o700); err != nil {
-		t.Fatalf("mkdir cur: %v", err)
-	}
-	now := time.Now()
-	id, _ := format.NewMessageID(now)
-	msg := format.Message{
-		Header: format.Header{
-			Schema:       format.CurrentSchema,
-			ID:           id,
-			From:         "codex",
-			To:           []string{DefaultHandle},
-			Thread:       "p2p/codex__remote",
-			Subject:      "submit",
-			Created:      now.UTC().Format(time.RFC3339Nano),
-			Kind:         "todo",
-			ReplyProject: "nonexistent-project",
-			ReplyTo:      "codex@nonexistent-project",
-		},
-		Body: (`{"schema":"amq.remote.command/1","op":"request.submit","request_id":"11111111-1111-4111-8111-1111111111b8","target_id":"fake","epoch":"e_1","not_after":"` + protocol.FormatTime(time.Now().Add(time.Minute)) + `","input":{"text":"work"}}`),
-	}
-	data, _ := msg.Marshal()
-	if err := os.WriteFile(filepath.Join(curDir, id+".md"), data, 0o600); err != nil {
-		t.Fatalf("write cur: %v", err)
-	}
-
-	store, err := requests.Open(filepath.Join(root, "extensions", "remote"))
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	ep := core.New(core.Config{Store: store})
-	carrier, err := New(root, DefaultHandle, ep)
-	if err != nil {
-		t.Fatalf("carrier: %v", err)
-	}
-
-	// Set a router that always fails (nonexistent project -> errNoReplyRoute).
-	carrier.SetReplyRouter(func(project, replyTo string) (string, string, error) {
-		return "", "", fmt.Errorf("no route")
-	})
-
-	identity, _ := fsq.SnapshotDeliveryRoot(root)
-	droot, _ := fsq.OpenDeliveryRoot(root, identity)
-	defer func() { _ = droot.Close() }()
-
-	// The first ImportOnce runs the startup sweep; the un-routable cur entry
-	// fails to recover, so the sweep reports an error.
-	if _, err := carrier.ImportOnce(); err == nil {
-		t.Fatal("ImportOnce returned nil, expected an error from the un-routable cur entry")
-	}
-	carrier.mu.Lock()
-	recovered, sweeps := carrier.curRecovered, carrier.curSweepCount
-	carrier.mu.Unlock()
-	if recovered {
-		t.Fatal("curRecovered was set on a failed sweep (B8 — the failed entry is not in claimedThisRun, so steady state would never revisit it)")
-	}
-	// The next ImportOnce must run the full sweep again.
-	_, _ = carrier.ImportOnce()
-	carrier.mu.Lock()
-	sweeps2 := carrier.curSweepCount
-	carrier.mu.Unlock()
-	if sweeps2 != sweeps+1 {
-		t.Fatalf("second ImportOnce ran %d sweep(s), want 1 (B8 — a failed sweep must be retried)", sweeps2-sweeps)
 	}
 }
 

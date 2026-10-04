@@ -85,9 +85,6 @@ type Carrier struct {
 	// startup's full sweep catches exactly those.
 	claimedThisRun map[string]claimedEntry
 	mu             sync.Mutex
-	// curSweepCount is a test seam: counts full cur sweeps (recoverCur).
-	// Steady-state calls go through recoverClaimed and do NOT increment this.
-	curSweepCount int
 	// syncDirFaultForTest is a test hook that injects a fault into every
 	// DeliveryRoot the carrier opens, so Publish (which opens its own root)
 	// can be tested for CommittedDurabilityError propagation (B10).
@@ -197,9 +194,6 @@ func New(root, me string, ep *core.Endpoint) (*Carrier, error) {
 	}
 	return &Carrier{root: root, me: me, identity: identity, ep: ep, now: time.Now}, nil
 }
-
-// Handle is the endpoint's mailbox handle.
-func (c *Carrier) Handle() string { return c.me }
 
 // SourceHost derives the authenticated creator host of a command from the
 // message header. The handle is attribution inside this root; a cross-project
@@ -390,9 +384,6 @@ func (c *Carrier) ImportOnce() (int, error) {
 // entry sorted after it, and re-run the full O(cur) scan every tick. Skip
 // the entry, accumulate the error, finish the sweep.
 func (c *Carrier) recoverCur(root *fsq.DeliveryRoot) error {
-	c.mu.Lock()
-	c.curSweepCount++
-	c.mu.Unlock()
 	curDir := filepath.Join("agents", c.me, "inbox", "cur")
 	entries, err := root.ReadDir(curDir)
 	if err != nil {

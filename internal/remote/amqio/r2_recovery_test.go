@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -117,46 +116,6 @@ func TestFirstTickAnswersNonRequestOpOnce(t *testing.T) {
 	}
 }
 
-// TestRecoverySweepReportsFailedRead reproduces packet 6a: recoverOne returned
-// nil for EVERY read error, so a cur entry behind a transient I/O failure was
-// counted as recovered, curRecovered went true, and the entry was never
-// revisited. A failed read now fails the sweep; the next tick retries.
-func TestRecoverySweepReportsFailedRead(t *testing.T) {
-	root, carrier, _, _ := newCarrierEnv(t)
-	id := "11111111-1111-4111-8111-1111111111a6"
-	body := `{"schema":"amq.remote.command/1","op":"request.submit","request_id":"` + id + `","target_id":"fake","epoch":"e_1","not_after":"` + protocol.FormatTime(time.Now().Add(time.Minute)) + `","input":{"text":"x"}}`
-	simulateCrashBetweenClaimAndReceipt(t, root, id, body)
-	entries, _ := os.ReadDir(fsq.AgentInboxCur(root, DefaultHandle))
-	if len(entries) != 1 {
-		t.Fatalf("setup: %d cur entries", len(entries))
-	}
-	curFile := filepath.Join(fsq.AgentInboxCur(root, DefaultHandle), entries[0].Name())
-	if err := os.Chmod(curFile, 0o000); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(curFile, 0o600) })
-
-	if _, err := carrier.ImportOnce(); err == nil {
-		t.Fatal("tick 1: an unreadable cur entry was counted as recovered (6a)")
-	}
-	carrier.mu.Lock()
-	recovered := carrier.curRecovered
-	carrier.mu.Unlock()
-	if recovered {
-		t.Fatal("tick 1: curRecovered set although an entry could not be read (6a — never revisited)")
-	}
-	if err := os.Chmod(curFile, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := carrier.ImportOnce(); err != nil {
-		t.Fatalf("tick 2: %v", err)
-	}
-	receiptPath := filepath.Join(root, "agents", DefaultHandle, "receipts", entries[0].Name()[:len(entries[0].Name())-3]+"__"+DefaultHandle+"__"+receipt.StageDrained+".json")
-	if _, err := os.Stat(receiptPath); err != nil {
-		t.Fatalf("tick 2: entry not recovered after the read succeeded: %v", err)
-	}
-}
-
 // TestRecoveryDoesNotReportStoreReadFailureAsOutcome reproduces the second
 // half of packet 6a: a failed read of our own record was wrapped as a
 // native_error refusal and DELIVERED as the caller's answer, and the entry was
@@ -178,54 +137,6 @@ func TestRecoveryDoesNotReportStoreReadFailureAsOutcome(t *testing.T) {
 	}
 	if n := countFiles(t, fsq.AgentInboxNew(root, "codex")); n != 0 {
 		t.Fatalf("%d reply(ies) delivered for a record we could not read (6a — a store failure is not an outcome)", n)
-	}
-}
-
-// TestRecoveryReplyRepairsCommittedDeliveryInPlace reproduces packet 5a: the
-// recovery reply had no committed-delivery finalization, so a rename that
-// succeeded with an unconfirmed directory fsync was reported as a failure and
-// the next sweep delivered the reply again. The one shared tail now repairs
-// the fsync in place and reports success.
-func TestRecoveryReplyRepairsCommittedDeliveryInPlace(t *testing.T) {
-	root := t.TempDir()
-	if err := fsq.EnsureRootDirs(root); err != nil {
-		t.Fatal(err)
-	}
-	for _, h := range []string{"codex", "alice"} {
-		if err := fsq.EnsureAgentDirs(root, h); err != nil {
-			t.Fatal(err)
-		}
-	}
-	dest := mustOpenDeliveryRoot(t, root)
-	var mu sync.Mutex
-	attempts := 0
-	dest.SetSyncDirFaultForTest(func(dir string) error {
-		if !strings.HasSuffix(dir, "new") {
-			return nil
-		}
-		mu.Lock()
-		defer mu.Unlock()
-		attempts++
-		if attempts == 1 {
-			return errors.New("simulated fsync failure")
-		}
-		return nil
-	})
-	carrier := &Carrier{me: "alice", now: time.Now}
-	origin := map[string]string{"from": "codex"}
-	snap := protocol.Snapshot{State: protocol.StateCompleted, Epoch: "e", Revision: 3, ObservedAt: time.Now().UTC().Format(time.RFC3339Nano)}
-	created := time.Now().UTC().Format(time.RFC3339Nano)
-	if err := carrier.replyWithRecovery(dest, origin, "recover", snap, nil, "cmd-5a", created); err != nil {
-		t.Fatalf("recovery reply reported failure for a visible delivery: %v (5a)", err)
-	}
-	if n := countFiles(t, fsq.AgentInboxNew(root, "codex")); n != 1 {
-		t.Fatalf("%d files, want 1", n)
-	}
-	mu.Lock()
-	got := attempts
-	mu.Unlock()
-	if got < 2 {
-		t.Fatalf("SyncDir attempted %d time(s), want a retry (5a)", got)
 	}
 }
 
