@@ -556,6 +556,10 @@ nothing by itself. The hook prints allow only when all of these hold:
   signature verify, and whose content is the approval text for the hook's
   own rendering of the call: the command preview, then
   `Interaction: <id>` and `Action: <sha256 of the call>`;
+- every edit of that message that the relay holds, read when the ✅
+  arrives, is signed by the same key and shows the same call with only
+  another answer line or outcome. When the edits cannot be read (a relay
+  error or a timeout), the proof is incomplete and allows nothing;
 - no earlier answer closed the approval. One allow applies once.
 
 On a missing pin, any failed check, an error, or a timeout the hook prints
@@ -567,9 +571,13 @@ The pin holds only while Claude cannot change settings or run commands
 without a prompt. Each of these defeats it: a click on "allow Claude to edit
 .claude for this session", `bypassPermissions` mode, or a `permissions.allow`
 rule that allows every Bash command. `amq-remote doctor` reports the pinned
-owner and warns on the last two in `~/.claude/settings.json`. The proof
-binds the original approval message; a later edit of that message is not
-part of it.
+owner and warns on the last two in `~/.claude/settings.json`.
+
+The edit check trusts the relay and `amq-remote serve`. A relay that hides
+an edit from the query, or a tampered running `amq-remote serve`, defeats
+it: an edit could then show a harmless command while the message holds
+another one. The trust anchor is the owner's signed reaction plus the
+relay's honest edit history.
 
 The message shows the call whole, or not at all: a call that may contain
 a secret anywhere shows "Command hidden: it may contain a secret. Check the

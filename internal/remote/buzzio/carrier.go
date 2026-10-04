@@ -65,6 +65,9 @@ type Carrier struct {
 	identity func(target string) string
 	now      func() time.Time
 
+	editsMu sync.Mutex
+	edits   EditFetcher // reads an approval message's edits for an owner ✅
+
 	mu sync.Mutex // serializes row preparation (edit dating) and flush
 }
 
@@ -867,6 +870,10 @@ func (c *Carrier) answerApproval(evt nostr.Event, messageID string, appr Approva
 	if rc, owned, err := c.ledger.ReceiptFor(appr.RequestRef); err != nil || !owned || !c.ownsReceipt(rc) {
 		return err
 	}
+	cmd, _ := json.Marshal(map[string]string{"ref": appr.RequestRef, "interaction_id": appr.InteractionID, "option": option})
+	if _, ok, err := c.claimReaction(evt, OpRespond, appr.Epoch, cmd); err != nil || !ok {
+		return err
+	}
 	// An approve carries its proof: a harness that allows a call only with
 	// the owner's signature (Claude, bead 611.42.4) verifies it itself.
 	var evidence json.RawMessage
@@ -875,10 +882,6 @@ func (c *Carrier) answerApproval(evt nostr.Event, messageID string, appr Approva
 		if evidence, err = c.approveEvidence(evt, messageID, appr); err != nil {
 			return err
 		}
-	}
-	cmd, _ := json.Marshal(map[string]string{"ref": appr.RequestRef, "interaction_id": appr.InteractionID, "option": option})
-	if _, ok, err := c.claimReaction(evt, OpRespond, appr.Epoch, cmd); err != nil || !ok {
-		return err
 	}
 	st := Settlement{Op: OpRespond, RequestRef: appr.RequestRef}
 	out, err := c.handle(&protocol.Command{

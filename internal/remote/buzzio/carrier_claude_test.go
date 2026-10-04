@@ -109,21 +109,24 @@ func TestClaudeForgedAllowAnswerNeverAllows(t *testing.T) {
 // claudeApprovalE2E is a Buzz request to a fake Claude session whose tool
 // call raised a PermissionRequest, with the approval message posted.
 type claudeApprovalE2E struct {
-	t        *testing.T
-	c        *Carrier
-	ep       *core.Endpoint
-	ledger   *Ledger
-	owner    [32]byte
-	body     [32]byte
-	advance  func() time.Time
-	sent     []nostr.Event
-	msg      nostr.Event
-	ref, iid string
-	dir      string
-	out      bytes.Buffer
-	errs     lockedBuffer
-	done     chan struct{}
-	exited   chan struct{}
+	t       *testing.T
+	c       *Carrier
+	ep      *core.Endpoint
+	ledger  *Ledger
+	owner   [32]byte
+	body    [32]byte
+	advance func() time.Time
+	sent    []nostr.Event
+	// published is every event flushed so far: the relay the edit
+	// fetcher reads.
+	published []nostr.Event
+	msg       nostr.Event
+	ref, iid  string
+	dir       string
+	out       bytes.Buffer
+	errs      lockedBuffer
+	done      chan struct{}
+	exited    chan struct{}
 }
 
 func newClaudeApprovalE2E(t *testing.T) *claudeApprovalE2E {
@@ -175,6 +178,15 @@ func newClaudeApprovalE2EWith(t *testing.T, pinned bool, command string) *claude
 	e.ledger, _ = OpenLedger(t.TempDir())
 	e.c = NewCarrier(e.ledger, b, body, ownerGrant(t, e.owner, b.Body, KindDM, KindEdit), e.ep.NativeSessionID, e.ep.Handle)
 	e.c.now = e.advance
+	e.c.SetEditFetcher(func(_ context.Context, id string) ([]nostr.Event, error) {
+		var edits []nostr.Event
+		for _, evt := range e.published {
+			if evt.Kind == KindEdit && evt.PubKey.Hex() == b.Body && lastETag(evt) == id {
+				edits = append(edits, evt)
+			}
+		}
+		return edits, nil
+	})
 
 	dm := ownerEvent(t, e.owner, "dm-1", "run the tests", clock())
 	n, err := Normalize(dm, b, clock())
@@ -235,7 +247,10 @@ func newClaudeApprovalE2EWith(t *testing.T, pinned bool, command string) *claude
 func (e *claudeApprovalE2E) flush() {
 	e.t.Helper()
 	e.sent = nil
-	if err := e.c.Flush(context.Background(), func(_ context.Context, evt nostr.Event) error { e.sent = append(e.sent, evt); return nil }, nil); err != nil {
+	if err := e.c.Flush(context.Background(), func(_ context.Context, evt nostr.Event) error {
+		e.sent, e.published = append(e.sent, evt), append(e.published, evt)
+		return nil
+	}, nil); err != nil {
 		e.t.Fatal(err)
 	}
 }

@@ -3,8 +3,10 @@
 package buzzio
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -55,10 +57,13 @@ func TestClaudeForgedAllowEvidenceNeverAllows(t *testing.T) {
 		command string
 		allows  bool
 		forge   func(e *claudeApprovalE2E) (reaction, message nostr.Event)
+		// edits, when set, replaces the evidence's complete edit set.
+		edits func(e *claudeApprovalE2E) []nostr.Event
+		// fetchFails runs the ✅ through the carrier with an edit read
+		// that fails, instead of writing the answer file.
+		fetchFails bool
 	}{
-		{name: "valid owner reaction (control)", pinned: true, allows: true, forge: func(e *claudeApprovalE2E) (nostr.Event, nostr.Event) {
-			return e.reaction(e.owner, "✅", e.msg.ID.Hex(), time.Now()), e.msg
-		}},
+		{name: "valid owner reaction (control)", pinned: true, allows: true, forge: e2eValid},
 		{name: "unsigned", pinned: true, forge: func(e *claudeApprovalE2E) (nostr.Event, nostr.Event) {
 			r := e.reaction(e.owner, "✅", e.msg.ID.Hex(), time.Now())
 			r.Sig = [64]byte{}
@@ -91,6 +96,19 @@ func TestClaudeForgedAllowEvidenceNeverAllows(t *testing.T) {
 		{name: "no owner pin", pinned: false, forge: func(e *claudeApprovalE2E) (nostr.Event, nostr.Event) {
 			return e.reaction(e.owner, "✅", e.msg.ID.Hex(), time.Now()), e.msg
 		}},
+		// 611.42.4 edit-check: an edit that shows a harmless command while
+		// the original holds the real one.
+		{name: "edit changes the shown command", pinned: true, forge: e2eValid, edits: func(e *claudeApprovalE2E) []nostr.Event {
+			return []nostr.Event{e.edit(strings.Replace(e.msg.Content, "go test ./...", "go vet ./...", 1))}
+		}},
+		// 611.42.4 edit-check: an edit of the trailer only still allows.
+		{name: "edit changes only the trailer", pinned: true, allows: true, forge: e2eValid, edits: func(e *claudeApprovalE2E) []nostr.Event {
+			head, _, _ := strings.Cut(e.msg.Content, "\n\nReact ")
+			return []nostr.Event{e.edit(head + "\n\nReact ❌ to reject, or answer in the terminal. The first answer wins.")}
+		}},
+		// 611.42.4 edit-check: the edits cannot be read, so the evidence is
+		// incomplete.
+		{name: "edit fetch fails", pinned: true, fetchFails: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -100,8 +118,19 @@ func TestClaudeForgedAllowEvidenceNeverAllows(t *testing.T) {
 				command = "go test ./..."
 			}
 			e := newClaudeApprovalE2EWith(t, tc.pinned, command)
-			r, m := tc.forge(e)
-			e.writeAllow(r, m)
+			if tc.fetchFails {
+				e.c.SetEditFetcher(func(context.Context, string) ([]nostr.Event, error) { return nil, errors.New("relay closed") })
+				if err := e.c.IngestReaction(e.reaction(e.owner, "✅", e.msg.ID.Hex(), e.advance())); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				r, m := tc.forge(e)
+				var edits []nostr.Event
+				if tc.edits != nil {
+					edits = tc.edits(e)
+				}
+				e.writeAllow(ApproveEvidence{Reaction: r, Message: m, Edits: edits, EditsComplete: true})
+			}
 			if tc.allows {
 				e.hookExited()
 				if got := strings.TrimSpace(e.out.String()); got != allowDecision {
@@ -153,11 +182,27 @@ func (e *claudeApprovalE2E) request() map[string]any {
 	return req
 }
 
-// writeAllow writes the allow answer a same-user process could write, with
-// the reaction and message as its evidence.
-func (e *claudeApprovalE2E) writeAllow(r, m nostr.Event) {
+// e2eValid is the owner's ✅ on the posted approval message.
+func e2eValid(e *claudeApprovalE2E) (nostr.Event, nostr.Event) {
+	return e.reaction(e.owner, "✅", e.msg.ID.Hex(), time.Now()), e.msg
+}
+
+// edit is a kind 40003 of the approval message with content, signed by the
+// body key, as the carrier signs its edits.
+func (e *claudeApprovalE2E) edit(content string) nostr.Event {
 	e.t.Helper()
-	evidence, _ := json.Marshal(ApproveEvidence{Reaction: r, Message: m})
+	ed := nostr.Event{CreatedAt: e.msg.CreatedAt + 1, Kind: KindEdit, Tags: e.c.editTags(e.msg.ID.Hex()), Content: content}
+	if err := ed.Sign(e.body); err != nil {
+		e.t.Fatal(err)
+	}
+	return ed
+}
+
+// writeAllow writes the allow answer a same-user process could write, with
+// ev as its evidence.
+func (e *claudeApprovalE2E) writeAllow(ev ApproveEvidence) {
+	e.t.Helper()
+	evidence, _ := json.Marshal(ev)
 	ans, _ := json.Marshal(map[string]any{"interaction_id": e.iid, "action_hash": e.request()["action_hash"], "option": "allow", "at": "x",
 		"evidence": json.RawMessage(evidence)})
 	if err := os.MkdirAll(filepath.Join(e.dir, "answers"), 0o700); err != nil {
