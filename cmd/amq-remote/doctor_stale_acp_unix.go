@@ -11,6 +11,10 @@ import (
 	"time"
 )
 
+// psLocation is the zone ps lstart prints in: the machine's local time.
+// Tests replace it to prove the parse reads local, not UTC.
+var psLocation = time.Local
+
 // psList runs ps with a C locale so the lstart date format is stable.
 var psListCLI = func() ([]byte, error) {
 	cmd := exec.Command("ps", "-axo", "pid=,lstart=,comm=")
@@ -44,8 +48,10 @@ func listACPProcessesOS() ([]acpProcess, error) {
 		if err != nil {
 			continue
 		}
-		// time.ANSIC is exactly the LC_ALL=C lstart format.
-		start, err := time.Parse(time.ANSIC, strings.Join(fields[1:6], " "))
+		// time.ANSIC is exactly the LC_ALL=C lstart format, which prints the
+		// process's LOCAL time; read it in psLocation, not UTC, or a start
+		// time east of UTC lands late and a stale process looks current.
+		start, err := time.ParseInLocation(time.ANSIC, strings.Join(fields[1:6], " "), psLocation)
 		if err != nil {
 			continue
 		}

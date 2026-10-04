@@ -65,3 +65,32 @@ func TestDoctorReportsStaleACPWithoutStateDir(t *testing.T) {
 		t.Fatalf("early return missed stale_harness: exit=%d failing=%v", code, out.(map[string]any)["failing"])
 	}
 }
+
+// bbn r3: ps lstart prints LOCAL time; parsing it as UTC put a UTC+3 start
+// three hours late and a stale process looked current. With psLocation at
+// UTC+3, a ps line whose local start is before the install ctime must be
+// reported stale; read as UTC the same line lands later than the install
+// and would be missed. The line also carries a one-digit day ("Sat Oct  4",
+// two spaces before the 4).
+func TestDoctorStaleACPParsesLocalStart(t *testing.T) {
+	idt := time.FixedZone("IDT", 3*3600)
+	installedAt := time.Date(2026, 10, 4, 12, 0, 0, 0, idt) // install at 12:00 local
+
+	origList, origTime, origLoc, origCLI := listACPProcesses, installedTime, psLocation, psListCLI
+	t.Cleanup(func() {
+		listACPProcesses, installedTime, psLocation, psListCLI = origList, origTime, origLoc, origCLI
+	})
+	installedTime = func() (time.Time, error) { return installedAt, nil }
+	psLocation = idt
+	psListCLI = func() ([]byte, error) {
+		return []byte("  111 Sat Oct  4 11:00:00 2026 amq-acp\n"), nil
+	}
+
+	failures, err := staleACPFailures()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(failures) != 1 || failures[0].Subject != "pid 111" {
+		t.Fatalf("failures = %v, want exactly pid 111 stale", failures)
+	}
+}
