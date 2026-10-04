@@ -1055,6 +1055,7 @@ func doctor(args []string) (any, int, error) {
 	if _, err := os.Stat(stateDir); err != nil {
 		report["endpoint"] = "no state directory; run `amq-remote serve` once"
 		fail("endpoint", "", "no state directory", "run `amq-remote serve` once")
+		failStaleACP(fail)
 		return finish()
 	}
 	if detail := amqRouteDetail(c.root, *me); detail != "" {
@@ -1215,11 +1216,7 @@ func doctor(args []string) (any, int, error) {
 	// Stale harness (bbn): a Buzz agent can keep running an amq-acp that an
 	// upgrade replaced, so it answers from the removed binding contract.
 	// Doctor names the exact process and the restart remedy.
-	if stale, serr := staleACPFailures(); serr == nil {
-		for _, f := range stale {
-			fail(f.Boundary, f.Subject, f.Detail, f.Remedy)
-		}
-	}
+	failStaleACP(fail)
 	return finish()
 }
 

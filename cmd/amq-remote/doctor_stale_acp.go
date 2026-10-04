@@ -51,9 +51,23 @@ func staleACPFailures() ([]boundaryFailure, error) {
 		out = append(out, boundaryFailure{
 			Boundary: "stale_harness",
 			Subject:  fmt.Sprintf("pid %d", p.PID),
-			Detail:   fmt.Sprintf("amq-acp %s is older than the installed %s", p.Path, current),
-			Remedy:   "Stop and Start this agent in Buzz Desktop so it runs the installed amq-acp",
+			Detail:   fmt.Sprintf("amq-acp %s is not the installed %s", p.Path, current),
+			Remedy:   "If this is a Buzz Desktop agent, Stop and Start it so it runs the installed amq-acp",
 		})
 	}
 	return out, nil
+}
+
+// failStaleACP feeds staleACPFailures into doctor's fail closure. Both early
+// and full doctor paths call it: a mailbox-only setup that never ran serve
+// takes the early return, and that is exactly the setup that hits a stale
+// harness.
+func failStaleACP(fail func(boundary, subject, detail, remedy string)) {
+	stale, err := staleACPFailures()
+	if err != nil {
+		return
+	}
+	for _, f := range stale {
+		fail(f.Boundary, f.Subject, f.Detail, f.Remedy)
+	}
 }
