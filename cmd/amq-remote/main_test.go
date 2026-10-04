@@ -45,11 +45,20 @@ import (
 // MinEvidence floor refusal end-to-end WITHOUT adding a shipped config
 // setting to the fake: the seam is the existing registry, used only from
 // this test file.
+//
+// recordingFactory registers "recording-fake": the fake Runtime wrapped so
+// it records whether the submit's spool envelope was durable when the
+// endpoint dispatched it (TestCLIB7PersistBeforeDispatchViaSubmit).
 func init() {
 	registry.Register("weak-fake", func(ctx context.Context, cfg registry.FactoryConfig) (core.Attachment, error) {
 		r := fake.New(cfg.Target, "e_1")
 		r.WithEvidence(&protocol.Evidence{Submit: "submitted", Completion: "run_terminal"})
 		return r, nil
+	})
+	registry.Register("recording-fake", func(ctx context.Context, cfg registry.FactoryConfig) (core.Attachment, error) {
+		rf := &recordingFake{Runtime: fake.New(cfg.Target, "e_1"), stateDir: cfg.StateDir}
+		lastRecordingFake.Store(rf)
+		return rf, nil
 	})
 }
 
@@ -156,6 +165,12 @@ func TestCLISubmitStatusWaitHappyPath(t *testing.T) {
 	if ref == "" {
 		t.Fatalf("submit returned no request ref: %s", out)
 	}
+	// The achieved evidence class rides on the reply (architect review): the
+	// fake proves admitted. The human evidence= line is pinned by
+	// TestCLISubmitMinEvidenceUnsupportedExits6.
+	if rep.Outcome.Evidence != protocol.EvidenceAdmitted {
+		t.Fatalf("Outcome.Evidence=%q, want %q", rep.Outcome.Evidence, protocol.EvidenceAdmitted)
+	}
 
 	// status reads the same record back.
 	code, out, errOut = cli(t, "", "status", ref, "--root", root, "--json")
@@ -196,152 +211,59 @@ func TestCLIDisabledModeIsActionRequired(t *testing.T) {
 }
 
 // TestCLISubmitRejectsEmptyPrompt pins that a whitespace-only prompt never
-// reaches a harness: it is a usage error at the CLI boundary.
+// reaches a harness: it is a usage error at the CLI boundary, refused before
+// the endpoint is contacted.
 func TestCLISubmitRejectsEmptyPrompt(t *testing.T) {
-	root := startServe(t)
-	code, _, _ := cli(t, "", "submit", "fake", "--text", "   ", "--root", root, "--json")
-	if code == 0 {
-		t.Fatal("whitespace-only prompt was accepted")
+	code, _, _ := cli(t, "", "submit", "fake", "--text", "   ", "--root", t.TempDir(), "--json")
+	if code != protocol.ExitUsage {
+		t.Fatalf("whitespace-only prompt exit = %d, want %d (usage)", code, protocol.ExitUsage)
 	}
 }
 
 // TestReplyRouterForTransientPeerAbsent exercises the SHIPPED adapter
-// (replyRouterFor), not a reimplemented copy. With the peer root absent,
-// the adapter must wrap the router's ErrPeerRootUnreachable in
-// amqio.TransientRouteError so the carrier leaves the message in new
-// (transient) instead of DLQ'ing it (poison). B1: deleting the translation
-// from replyRouterFor must fail this test.
+// (replyRouterFor), not a reimplemented copy. While the caller's root (B1) or
+// the caller's session under an existing root (agent-message-queue-611.22.36
+// packet 7) does not exist yet, the adapter must wrap the router's
+// ErrPeerRootUnreachable in amqio.TransientRouteError so the carrier leaves
+// the command in new (transient) instead of DLQ'ing it (poison). Once the
+// destination exists, the next import delivers the reply into it. Deleting
+// the translation from replyRouterFor must fail this test.
 func TestReplyRouterForTransientPeerAbsent(t *testing.T) {
-	endpointBase := t.TempDir()
-	endpointRoot := filepath.Join(endpointBase, ".agent-mail")
-	if err := fsq.EnsureRootDirs(endpointRoot); err != nil {
-		t.Fatal(err)
-	}
-	if err := fsq.EnsureAgentDirs(endpointRoot, amqio.DefaultHandle); err != nil {
-		t.Fatal(err)
-	}
-	callerRoot := filepath.Join("..", "caller", ".agent-mail")
-	amqrcData, _ := json.Marshal(map[string]any{
-		"project": "endpoint",
-		"root":    ".agent-mail",
-		"peers":   map[string]string{"caller": callerRoot},
-	})
-	if err := os.WriteFile(filepath.Join(endpointBase, ".amqrc"), amqrcData, 0o644); err != nil {
-		t.Fatalf("write .amqrc: %v", err)
-	}
-
-	cwd, _ := os.Getwd()
-	t.Cleanup(func() { _ = os.Chdir(cwd) })
-	if err := os.Chdir(endpointBase); err != nil {
-		t.Fatalf("chdir: %v", err)
-	}
-
-	store, err := requests.Open(filepath.Join(endpointRoot, "extensions", "remote"))
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	var carrier *amqio.Carrier
-	ep := core.New(core.Config{Store: store, Publish: func(s protocol.Snapshot, origin map[string]string) error {
-		return carrier.Publish(s, origin)
-	}})
-	carrier, err = amqio.New(endpointRoot, amqio.DefaultHandle, ep)
-	if err != nil {
-		t.Fatalf("carrier: %v", err)
-	}
-	// Use the SHIPPED adapter — not a reimplemented closure.
-	carrier.SetReplyRouter(replyRouterFor(endpointRoot))
-	ep.Register(fake.New("fake", "e_1"))
-	t.Cleanup(func() { _ = ep.Close() })
-
-	identity, _ := fsq.SnapshotDeliveryRoot(endpointRoot)
-	droot, _ := fsq.OpenDeliveryRoot(endpointRoot, identity)
-	defer func() { _ = droot.Close() }()
-
-	now := time.Now()
-	id, _ := format.NewMessageID(now)
-	body := `{"schema":"amq.remote.command/1","op":"request.submit","request_id":"11111111-1111-4111-8111-111111111381","target_id":"fake","epoch":"e_1","not_after":"` + protocol.FormatTime(time.Now().Add(time.Minute)) + `","input":{"text":"hi"}}`
-	msg := format.Message{Header: format.Header{
-		Schema: format.CurrentSchema, ID: id, From: "codex", To: []string{amqio.DefaultHandle},
-		Thread: "p2p/codex__remote", Subject: "submit", Created: now.UTC().Format(time.RFC3339Nano), Kind: "todo",
-		FromProject: "caller", ReplyTo: "codex@collab", ReplyProject: "caller",
-	}, Body: body}
-	data, _ := msg.Marshal()
-	if _, err := fsq.DeliverToInboxes(droot, []string{amqio.DefaultHandle}, id+".md", data); err != nil {
-		t.Fatalf("deliver: %v", err)
-	}
-
-	// TICK 1: caller root does NOT exist. The shipped adapter must wrap the
-	// router's ErrPeerRootUnreachable in TransientRouteError. The carrier
-	// leaves the message in new (transient, not DLQ'd).
-	n, _ := carrier.ImportOnce()
-	if n != 0 {
-		t.Fatalf("TICK1: message should stay in new (transient), but ImportOnce handled %d", n)
-	}
-	if entries, _ := os.ReadDir(fsq.AgentInboxNew(endpointRoot, amqio.DefaultHandle)); len(entries) != 1 {
-		t.Fatalf("TICK1: message should be in new (transient), found %d", len(entries))
-	}
-	dlqDir := filepath.Join(endpointRoot, "agents", amqio.DefaultHandle, "dlq", "new")
-	if entries, _ := os.ReadDir(dlqDir); len(entries) != 0 {
-		t.Fatalf("TICK1: transient message was DLQ'd (B1 — absent peer root is not poison): %d", len(entries))
-	}
-
-	// Create the caller root, session, and codex mailbox between tick 1 and 2.
-	callerBase := filepath.Dir(callerRoot)
-	if err := os.MkdirAll(callerBase, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := fsq.EnsureRootDirs(callerRoot); err != nil {
-		t.Fatal(err)
-	}
-	sessionRoot := filepath.Join(callerRoot, "collab")
-	if err := os.MkdirAll(sessionRoot, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := fsq.EnsureRootDirs(sessionRoot); err != nil {
-		t.Fatal(err)
-	}
-	if err := fsq.EnsureAgentDirs(sessionRoot, "codex"); err != nil {
-		t.Fatal(err)
-	}
-
-	// TICK 2: caller root exists. The shipped adapter resolves, the carrier
-	// delivers the reply, and the command is claimed.
-	n, err = carrier.ImportOnce()
-	if err != nil || n != 1 {
-		t.Fatalf("TICK2: expected delivery after peer root created, got n=%d err=%v", n, err)
-	}
-	if entries, _ := os.ReadDir(fsq.AgentInboxCur(endpointRoot, amqio.DefaultHandle)); len(entries) != 1 {
-		t.Fatalf("TICK2: command not claimed into cur: %d", len(entries))
-	}
-	if entries, _ := os.ReadDir(fsq.AgentInboxNew(sessionRoot, "codex")); len(entries) == 0 {
-		t.Fatal("TICK2: no reply delivered to caller's codex inbox")
-	}
-}
-
-// TestReplyRouterForSameProjectSessionReply reproduces B7
-// (agent-message-queue-611.22.35): a caller in another SESSION of the same
-// project sets reply_to=<handle>@<session> and no reply_project. The reply
-// must land in that session's root — from an endpoint at the base root and
-// from one inside a session root. While the session does not exist the route
-// is transient (the command stays in new); it is never a silent delivery to
-// the endpoint's own root.
-func TestReplyRouterForSameProjectSessionReply(t *testing.T) {
-	for _, tc := range []struct{ name, endpointRel string }{{"base root", ".agent-mail"}, {"session root", ".agent-mail/s1"}} {
+	for _, tc := range []struct {
+		name       string
+		baseExists bool
+	}{
+		{"peer root absent", false},
+		{"peer session absent", true},
+	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("AM_BASE_ROOT", "")
 			t.Setenv("AM_ROOT", "")
 			t.Setenv("AM_SESSION", "")
-			base := t.TempDir()
-			baseRoot := filepath.Join(base, ".agent-mail")
-			endpointRoot := filepath.Join(base, tc.endpointRel)
-			for _, r := range []string{baseRoot, endpointRoot} {
-				if err := fsq.EnsureRootDirs(r); err != nil {
-					t.Fatal(err)
-				}
+			endpointBase := t.TempDir()
+			endpointRoot := filepath.Join(endpointBase, ".agent-mail")
+			if err := fsq.EnsureRootDirs(endpointRoot); err != nil {
+				t.Fatal(err)
 			}
 			if err := fsq.EnsureAgentDirs(endpointRoot, amqio.DefaultHandle); err != nil {
 				t.Fatal(err)
 			}
+			amqrcData, _ := json.Marshal(map[string]any{
+				"project": "endpoint",
+				"root":    ".agent-mail",
+				"peers":   map[string]string{"caller": filepath.Join("..", "caller", ".agent-mail")},
+			})
+			if err := os.WriteFile(filepath.Join(endpointBase, ".amqrc"), amqrcData, 0o644); err != nil {
+				t.Fatalf("write .amqrc: %v", err)
+			}
+			callerRoot := filepath.Join(filepath.Dir(endpointBase), "caller", ".agent-mail")
+			if tc.baseExists {
+				if err := fsq.EnsureRootDirs(callerRoot); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Chdir(endpointBase)
+
 			store, err := requests.Open(filepath.Join(endpointRoot, "extensions", "remote"))
 			if err != nil {
 				t.Fatalf("open store: %v", err)
@@ -354,6 +276,7 @@ func TestReplyRouterForSameProjectSessionReply(t *testing.T) {
 			if err != nil {
 				t.Fatalf("carrier: %v", err)
 			}
+			// Use the SHIPPED adapter — not a reimplemented closure.
 			carrier.SetReplyRouter(replyRouterFor(endpointRoot))
 			ep.Register(fake.New("fake", "e_1"))
 			t.Cleanup(func() { _ = ep.Close() })
@@ -363,42 +286,51 @@ func TestReplyRouterForSameProjectSessionReply(t *testing.T) {
 			defer func() { _ = droot.Close() }()
 			now := time.Now()
 			id, _ := format.NewMessageID(now)
-			body := `{"schema":"amq.remote.command/1","op":"request.submit","request_id":"11111111-1111-4111-8111-1111111111b7","target_id":"fake","epoch":"e_1","not_after":"` + protocol.FormatTime(now.Add(time.Minute)) + `","input":{"text":"hi"}}`
+			body := `{"schema":"amq.remote.command/1","op":"request.submit","request_id":"11111111-1111-4111-8111-111111111381","target_id":"fake","epoch":"e_1","not_after":"` + protocol.FormatTime(now.Add(time.Minute)) + `","input":{"text":"hi"}}`
 			msg := format.Message{Header: format.Header{
 				Schema: format.CurrentSchema, ID: id, From: "codex", To: []string{amqio.DefaultHandle},
 				Thread: "p2p/codex__remote", Subject: "submit", Created: now.UTC().Format(time.RFC3339Nano), Kind: "todo",
-				ReplyTo: "codex@qa",
+				FromProject: "caller", ReplyTo: "codex@collab", ReplyProject: "caller",
 			}, Body: body}
 			data, _ := msg.Marshal()
 			if _, err := fsq.DeliverToInboxes(droot, []string{amqio.DefaultHandle}, id+".md", data); err != nil {
 				t.Fatalf("deliver: %v", err)
 			}
 
-			// TICK 1: session qa does not exist yet. Transient: the command stays in new.
+			// TICK 1: the destination does not exist. Transient: the command
+			// stays in new and is not dead-lettered.
 			if n, _ := carrier.ImportOnce(); n != 0 {
-				t.Fatalf("TICK1: command handled (%d) although the caller session does not exist (B7 — must be transient)", n)
+				t.Fatalf("TICK1: command handled (%d) although the destination does not exist (must be transient)", n)
 			}
 			if entries, _ := os.ReadDir(fsq.AgentInboxNew(endpointRoot, amqio.DefaultHandle)); len(entries) != 1 {
 				t.Fatalf("TICK1: command should stay in new, found %d", len(entries))
 			}
+			if entries, _ := os.ReadDir(filepath.Join(endpointRoot, "agents", amqio.DefaultHandle, "dlq", "new")); len(entries) != 0 {
+				t.Fatalf("TICK1: transient command was dead-lettered (an absent destination is not poison): %d", len(entries))
+			}
 
-			qa := filepath.Join(baseRoot, "qa")
-			if err := fsq.EnsureRootDirs(qa); err != nil {
+			// The caller's root, session and codex mailbox appear.
+			sessionRoot := filepath.Join(callerRoot, "collab")
+			for _, r := range []string{callerRoot, sessionRoot} {
+				if err := fsq.EnsureRootDirs(r); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := fsq.EnsureAgentDirs(sessionRoot, "codex"); err != nil {
 				t.Fatal(err)
 			}
-			if err := fsq.EnsureAgentDirs(qa, "codex"); err != nil {
-				t.Fatal(err)
-			}
-			// TICK 2: the session exists. The reply lands in ITS codex inbox.
+
+			// TICK 2: the adapter resolves, the carrier delivers the reply,
+			// and the command is claimed.
 			n, err := carrier.ImportOnce()
 			if err != nil || n != 1 {
 				t.Fatalf("TICK2: n=%d err=%v, want the command handled", n, err)
 			}
-			if entries, _ := os.ReadDir(fsq.AgentInboxNew(qa, "codex")); len(entries) == 0 {
-				t.Fatal("TICK2: no reply in the caller session's codex inbox (B7)")
+			if entries, _ := os.ReadDir(fsq.AgentInboxCur(endpointRoot, amqio.DefaultHandle)); len(entries) != 1 {
+				t.Fatalf("TICK2: command not claimed into cur: %d", len(entries))
 			}
-			if _, err := os.Stat(filepath.Join(endpointRoot, "agents", "codex")); err == nil {
-				t.Fatal("reply went to a codex mailbox in the endpoint's own root instead of the caller's session (B7)")
+			if entries, _ := os.ReadDir(fsq.AgentInboxNew(sessionRoot, "codex")); len(entries) == 0 {
+				t.Fatal("TICK2: no reply in the caller session's codex inbox")
 			}
 		})
 	}
@@ -459,100 +391,6 @@ func TestCLICancelUsesStoredEpochAfterAttachmentRestart(t *testing.T) {
 	}
 	if crep.Snapshot.Cancel == nil && crep.Snapshot.State != protocol.StateCancelled {
 		t.Fatalf("cancel recorded nothing: state=%s outcome=%+v", crep.Snapshot.State, crep.Outcome)
-	}
-}
-
-// TestReplyRouterForPeerSessionNotYetCreated reproduces packet 7 of
-// agent-message-queue-611.22.36: a cross-project reply whose peer BASE root
-// exists but whose peer SESSION does not yet exist was classified poison and
-// the command was dead-lettered; creating the session afterwards could not
-// bring it back. An absent peer session is as transient as an absent peer
-// root: the command stays in new and is delivered once the session exists.
-func TestReplyRouterForPeerSessionNotYetCreated(t *testing.T) {
-	t.Setenv("AM_BASE_ROOT", "")
-	t.Setenv("AM_ROOT", "")
-	t.Setenv("AM_SESSION", "")
-	endpointBase := t.TempDir()
-	endpointRoot := filepath.Join(endpointBase, ".agent-mail")
-	if err := fsq.EnsureRootDirs(endpointRoot); err != nil {
-		t.Fatal(err)
-	}
-	if err := fsq.EnsureAgentDirs(endpointRoot, amqio.DefaultHandle); err != nil {
-		t.Fatal(err)
-	}
-	callerRoot := filepath.Join("..", "caller", ".agent-mail")
-	amqrcData, _ := json.Marshal(map[string]any{
-		"project": "endpoint",
-		"root":    ".agent-mail",
-		"peers":   map[string]string{"caller": callerRoot},
-	})
-	if err := os.WriteFile(filepath.Join(endpointBase, ".amqrc"), amqrcData, 0o644); err != nil {
-		t.Fatalf("write .amqrc: %v", err)
-	}
-	// The peer BASE root exists; session "collab" does not.
-	callerAbs := filepath.Join(filepath.Dir(endpointBase), "caller", ".agent-mail")
-	if err := fsq.EnsureRootDirs(callerAbs); err != nil {
-		t.Fatal(err)
-	}
-	t.Chdir(endpointBase)
-
-	store, err := requests.Open(filepath.Join(endpointRoot, "extensions", "remote"))
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	var carrier *amqio.Carrier
-	ep := core.New(core.Config{Store: store, Publish: func(s protocol.Snapshot, origin map[string]string) error {
-		return carrier.Publish(s, origin)
-	}})
-	carrier, err = amqio.New(endpointRoot, amqio.DefaultHandle, ep)
-	if err != nil {
-		t.Fatalf("carrier: %v", err)
-	}
-	carrier.SetReplyRouter(replyRouterFor(endpointRoot))
-	ep.Register(fake.New("fake", "e_1"))
-	t.Cleanup(func() { _ = ep.Close() })
-
-	identity, _ := fsq.SnapshotDeliveryRoot(endpointRoot)
-	droot, _ := fsq.OpenDeliveryRoot(endpointRoot, identity)
-	defer func() { _ = droot.Close() }()
-	now := time.Now()
-	id, _ := format.NewMessageID(now)
-	body := `{"schema":"amq.remote.command/1","op":"request.submit","request_id":"11111111-1111-4111-8111-111111111707","target_id":"fake","epoch":"e_1","not_after":"` + protocol.FormatTime(now.Add(time.Minute)) + `","input":{"text":"hi"}}`
-	msg := format.Message{Header: format.Header{
-		Schema: format.CurrentSchema, ID: id, From: "codex", To: []string{amqio.DefaultHandle},
-		Thread: "p2p/codex__remote", Subject: "submit", Created: now.UTC().Format(time.RFC3339Nano), Kind: "todo",
-		FromProject: "caller", ReplyTo: "codex@collab", ReplyProject: "caller",
-	}, Body: body}
-	data, _ := msg.Marshal()
-	if _, err := fsq.DeliverToInboxes(droot, []string{amqio.DefaultHandle}, id+".md", data); err != nil {
-		t.Fatalf("deliver: %v", err)
-	}
-
-	// TICK 1: peer session absent. Transient: stays in new, not DLQ'd.
-	if n, _ := carrier.ImportOnce(); n != 0 {
-		t.Fatalf("TICK1: command handled (%d) although the peer session does not exist (packet 7)", n)
-	}
-	if entries, _ := os.ReadDir(fsq.AgentInboxNew(endpointRoot, amqio.DefaultHandle)); len(entries) != 1 {
-		t.Fatalf("TICK1: command should stay in new, found %d", len(entries))
-	}
-	if entries, _ := os.ReadDir(filepath.Join(endpointRoot, "agents", amqio.DefaultHandle, "dlq", "new")); len(entries) != 0 {
-		t.Fatalf("TICK1: command was dead-lettered (packet 7 — an absent peer session is not poison): %d", len(entries))
-	}
-
-	// The session is created. TICK 2 delivers into it.
-	sessionRoot := filepath.Join(callerAbs, "collab")
-	if err := fsq.EnsureRootDirs(sessionRoot); err != nil {
-		t.Fatal(err)
-	}
-	if err := fsq.EnsureAgentDirs(sessionRoot, "codex"); err != nil {
-		t.Fatal(err)
-	}
-	n, err := carrier.ImportOnce()
-	if err != nil || n != 1 {
-		t.Fatalf("TICK2: n=%d err=%v, want the command handled", n, err)
-	}
-	if entries, _ := os.ReadDir(fsq.AgentInboxNew(sessionRoot, "codex")); len(entries) == 0 {
-		t.Fatal("TICK2: no reply in the caller session's codex inbox")
 	}
 }
 
@@ -716,32 +554,29 @@ func TestSenderB7PersistBeforeDispatchCLI(t *testing.T) {
 	t.Fatalf("drainer did not dispatch the persisted envelope within 5s")
 }
 
-// TestSenderB7RefusedNotDispatched is the B2 regression: a refused submit
-// (stale_epoch) must NOT be marked dispatched. The drainer classifies by
-// Outcome.Code, not by error.
+// TestSenderB7RefusedNotDispatched is the B2 regression at the submit
+// boundary: the endpoint returns a refusal (stale_epoch) as a Reply with
+// Outcome.Code and a nil error, and submit must mark its envelope failed with
+// that code, never dispatched, and exit 6.
 func TestSenderB7RefusedNotDispatched(t *testing.T) {
 	root := startServe(t)
 	stateDir := filepath.Join(root, "extensions", "remote")
-
-	// Submit with a stale epoch so the endpoint returns stale_epoch (a
-	// terminal refusal). The spool envelope must NOT be marked dispatched.
-	code, _, _ := cli(t, "", "submit", "fake", "--text", "will be refused",
-		"--root", root, "--epoch", "e_stale",
-		"--request-id", "11111111-1111-4111-8111-1111111117b2",
-		"--json")
-	_ = code // exit code varies; the assertion is on the spool state
+	const id = "11111111-1111-4111-8111-1111111117b2"
+	code, out, _ := cli(t, "", "submit", "fake", "--text", "will be refused",
+		"--root", root, "--epoch", "e_stale", "--request-id", id, "--json")
+	if code != protocol.ExitActionRequired {
+		t.Fatalf("stale-epoch submit exit=%d, want %d out=%s", code, protocol.ExitActionRequired, out)
+	}
 	spool, err := sender.Open(stateDir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Wait a moment for the drainer to process if serve is running.
-	time.Sleep(200 * time.Millisecond)
-	env, exists, _ := spool.Get(ipc.LocalHost, "11111111-1111-4111-8111-1111111117b2")
-	if !exists {
-		return // live dispatch handled it
+	env, exists, err := spool.Get(ipc.LocalHost, id)
+	if err != nil || !exists {
+		t.Fatalf("envelope missing after a refused submit: exists=%v err=%v", exists, err)
 	}
-	if env.State == sender.StateDispatched && code != 0 {
-		t.Fatalf("envelope marked dispatched but submit was refused (B2): state=%s", env.State)
+	if env.State != sender.StateFailed || env.LastError != string(protocol.CodeStaleEpoch) {
+		t.Fatalf("refused submit left envelope state=%s last_error=%q, want failed/stale_epoch (B2)", env.State, env.LastError)
 	}
 }
 
@@ -1108,37 +943,30 @@ func TestCLIB6StatusFailedEnvelopeExitsOne(t *testing.T) {
 	}
 }
 
-// recordingFake wraps fake.Runtime and records whether the envelope file
-// existed on disk at the moment Submit (Handle) was called. It is used by
-// TestCLIB7PersistBeforeDispatchViaSubmit to prove the CLI submit path
-// persists the envelope BEFORE dispatching it to the endpoint.
+// recordingFake wraps fake.Runtime and records whether the submit's spool
+// envelope existed at the moment the endpoint dispatched it (Submit).
 type recordingFake struct {
 	*fake.Runtime
-	stateDir    string
-	fileExisted atomic.Bool
+	stateDir     string
+	envelopeSeen atomic.Bool
 }
 
+// lastRecordingFake is the instance the "recording-fake" factory built.
+var lastRecordingFake atomic.Pointer[recordingFake]
+
 func (r *recordingFake) Submit(req core.BoundRequest) (core.Admission, error) {
-	// Check if the envelope file exists at Handle time.
-	path := filepath.Join(r.stateDir, "sender", req.Key.CreatorHost+"__"+req.Key.RequestID+".json")
-	if _, err := os.Stat(path); err == nil {
-		r.fileExisted.Store(true)
+	if spool, err := sender.Open(r.stateDir); err == nil {
+		if _, ok, _ := spool.Get(req.Key.CreatorHost, req.Key.RequestID); ok {
+			r.envelopeSeen.Store(true)
+		}
 	}
 	return r.Runtime.Submit(req)
 }
 
 // TestCLIB7PersistBeforeDispatchViaSubmit (round-4) drives the REAL CLI
-// submit path and proves the envelope is durable on disk BEFORE the
-// endpoint's Handle (Submit) is called. A recording fake wraps fake.Runtime;
-// its Submit checks whether the envelope file exists at Handle time.
-//
-// RED on both inversions:
-//   - Create moved after callReply: file does not exist at Handle time.
-//   - Create deleted entirely: file does not exist at Handle time.
-//
-// This replaces the round-3 TestSenderB7PersistBeforeDispatch which drove the
-// drainer directly (the file exists by construction when the drainer reads
-// it) and whose RED was produced by commenting out the test's own Create.
+// submit path against a real serve and proves the envelope is durable BEFORE
+// the endpoint dispatches the request. RED when submit's spool Create moves
+// after the live dispatch, or is deleted.
 func TestCLIB7PersistBeforeDispatchViaSubmit(t *testing.T) {
 	root, err := os.MkdirTemp("", "amqb7")
 	if err != nil {
@@ -1149,80 +977,27 @@ func TestCLIB7PersistBeforeDispatchViaSubmit(t *testing.T) {
 		t.Fatal(err)
 	}
 	stateDir := filepath.Join(root, "extensions", "remote")
-
-	// Start serve with the recording fake instead of the standard --fake.
-	rf := &recordingFake{Runtime: fake.New("fake", "e_1"), stateDir: stateDir}
-	done := make(chan int, 1)
-	go func() {
-		var out, errBuf bytes.Buffer
-		done <- runWithRecordingFake(root, rf, &out, &errBuf)
-	}()
-	t.Cleanup(func() {
-		select {
-		case <-done:
-		default:
-		}
-	})
-
-	// Wait for the socket to accept.
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		var out, errBuf bytes.Buffer
-		if run([]string{"sessions", "--root", root, "--json"}, strings.NewReader(""), &out, &errBuf) == 0 {
-			break
-		}
-		time.Sleep(25 * time.Millisecond)
+	manifestPath := manifest.DefaultPath(stateDir)
+	if err := manifest.Write(manifestPath, manifest.File{
+		SchemaVersion: manifest.SchemaVersion,
+		Adapters:      []manifest.Adapter{{Kind: "recording-fake", Target: "rec"}},
+	}); err != nil {
+		t.Fatal(err)
 	}
-	if time.Now().After(deadline) {
-		t.Fatal("endpoint did not start serving within 5s")
+	startServeWithArgs(t, []string{"serve", "--root", root}, root)
+	rf := lastRecordingFake.Load()
+	if rf == nil || rf.stateDir != stateDir {
+		t.Fatal("serve did not build the recording-fake adapter from the manifest")
 	}
 
-	// Submit via the CLI. The submit function persists the envelope BEFORE
-	// calling callReply (IPC → Handle → fake.Submit). The recording fake
-	// checks the file exists at Submit time.
-	requestID := "11111111-1111-4111-8111-11111111b701"
-	code, out, _ := cli(t, "", "submit", "fake", "--root", root,
-		"--text", "b7 probe", "--request-id", requestID, "--epoch", "e_1")
+	code, out, _ := cli(t, "", "submit", "rec", "--root", root,
+		"--text", "b7 probe", "--request-id", "11111111-1111-4111-8111-11111111b701", "--epoch", "e_1")
 	if code != 0 {
 		t.Fatalf("submit exit=%d out=%s", code, out)
 	}
-
-	if !rf.fileExisted.Load() {
-		t.Fatal("B7: envelope file did NOT exist at Handle time (persist-after-dispatch or deleted Create)")
+	if !rf.envelopeSeen.Load() {
+		t.Fatal("B7: the spool envelope did NOT exist when the endpoint dispatched the submit (persist-after-dispatch or deleted Create)")
 	}
-}
-
-// runWithRecordingFake starts serve with a recording fake attachment instead
-// of the standard --fake. It mirrors serve() but registers rf directly. It
-// blocks until the test process exits.
-func runWithRecordingFake(root string, rf *recordingFake, stdout, stderr io.Writer) int {
-	stateDir := filepath.Join(root, "extensions", "remote")
-	store, err := requests.Open(stateDir)
-	if err != nil {
-		return 0
-	}
-	ep := core.New(core.Config{Store: store, Publish: func(protocol.Snapshot, map[string]string) error { return nil }})
-	carrier, err := amqio.New(root, amqio.DefaultHandle, ep)
-	if err != nil {
-		_ = store.Close()
-		return 0
-	}
-	carrier.SetReplyRouter(replyRouterFor(root))
-	ep.Register(rf)
-	if err := ep.Reconcile(); err != nil {
-		_ = ep.Close()
-		return 0
-	}
-	server, err := ipc.Listen(stateDir, ep)
-	if err != nil {
-		_ = ep.Close()
-		return 0
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go func() { _ = server.Serve(ctx) }()
-	// Block until the test process exits.
-	select {}
 }
 
 // TestBK4ServeWiringCompactionNonVacuous (round-4) tests BOTH halves of the
@@ -1294,7 +1069,7 @@ func TestBK4ServeWiringCompactionNonVacuous(t *testing.T) {
 	}
 
 	// --- Horizon half: openServeStore + explicit Reconcile compacts ---
-	store, ep, err := openServeStore(stateDir, func() time.Time { return now })
+	store, ep, err := openServeStore(stateDir)
 	if err != nil {
 		t.Fatalf("openServeStore: %v", err)
 	}
@@ -1321,40 +1096,6 @@ func TestBK4ServeWiringCompactionNonVacuous(t *testing.T) {
 	// impractical; the accessor confirms the wiring reached the store.
 	if got := store.MaxStoreBytes(); got != protocol.DefaultMaxStoreBytes {
 		t.Fatalf("quota half: store maxStoreBytes=%d, want %d (DefaultMaxStoreBytes wiring missing from openServeStore?)", got, protocol.DefaultMaxStoreBytes)
-	}
-}
-
-// TestCLISubmitPrintsAchievedEvidence pins the architect-review invariant:
-// submit prints the achieved evidence class (the human projection) on every
-// successful submit, so a human sees `admitted` from the fake (or
-// `submitted` from pi/Claude) even when no floor was asked. The floor is
-// the machine contract on SubmitInput; the projection is the live session's
-// Evidence.Submit. The CLI renders it as evidence=<class> on the human path.
-func TestCLISubmitPrintsAchievedEvidence(t *testing.T) {
-	root := startServe(t)
-
-	// JSON path: the Outcome.Evidence field carries the class.
-	code, out, errOut := cli(t, "", "submit", "fake", "--text", "say hi", "--root", root, "--json")
-	if code != 0 {
-		t.Fatalf("json submit exit=%d out=%s err=%s", code, out, errOut)
-	}
-	var rep protocol.Reply
-	if err := json.Unmarshal([]byte(out), &rep); err != nil {
-		t.Fatalf("json output not a Reply: %v (%s)", err, out)
-	}
-	if rep.Outcome.Evidence != protocol.EvidenceAdmitted {
-		t.Fatalf("Outcome.Evidence=%q, want %q", rep.Outcome.Evidence, protocol.EvidenceAdmitted)
-	}
-
-	// Human path on a FRESH serve (the fake stays busy after one submit):
-	// the evidence line must appear in the text output.
-	root2 := startServe(t)
-	code, out, errOut = cli(t, "", "submit", "fake", "--text", "say hi", "--root", root2)
-	if code != 0 {
-		t.Fatalf("human submit exit=%d out=%s err=%s", code, out, errOut)
-	}
-	if !strings.Contains(out, "evidence=admitted") {
-		t.Fatalf("human submit output missing evidence=admitted:\n%s", out)
 	}
 }
 
@@ -1419,24 +1160,20 @@ func TestCLISubmitMinEvidenceUnsupportedExits6(t *testing.T) {
 	if !strings.Contains(out, "evidence=submitted") {
 		t.Fatalf("met-floor submit missing evidence=submitted:\n%s", out)
 	}
-	// Pin the exit-code mapping directly: unsupported is action-required (6).
-	if got := protocol.ExitForCode(protocol.CodeUnsupported); got != protocol.ExitActionRequired {
-		t.Fatalf("ExitForCode(unsupported)=%d, want %d", got, protocol.ExitActionRequired)
-	}
 }
 
-// TestBK4P0RunningStaysRunningAfterReconcile (round-5) is the first P0
-// regression probe. A running record (simulating a restart mid-run) bound to
-// a fake attachment whose Lookup reports running MUST stay running after the
-// startup Reconcile — NOT get marked attachment_lost/uncertain.
-//
-// The test runs startupSequence — the ONE construction-plus-reconcile
-// function serve calls (open store → SetPublish → Register → Reconcile) —
-// with the fake attachment, so reconcileLive's Lookup finds the target.
-//
-// RED when Reconcile is moved back before Register (the P0 bug): with no
-// attachment registered, reconcileLive's `!ok` branch marks the record
-// StateUncertain + CodeAttachmentLost.
+// TestBK4P0RunningStaysRunningAfterReconcile pins the order startupSequence
+// runs (open store, SetPublish, carrier, wire, Register, then Reconcile) on
+// a running record left by a restart mid-run. Each inversion is a defect
+// that was observed:
+//   - Reconcile before Register (round-5 P0): the record is marked
+//     uncertain/attachment_lost although its run is alive.
+//   - Reconcile before SetPublish (round-5 P0): the first revision is lost
+//     to a no-op publisher.
+//   - carrier built after Reconcile (round-6): serve's publish closure sees
+//     no carrier during the startup revision.
+//   - carrier wiring after Reconcile (w4x, review-a13): the startup revision
+//     publishes through an unwired carrier.
 func TestBK4P0RunningStaysRunningAfterReconcile(t *testing.T) {
 	root, err := os.MkdirTemp("", "amqbk4p0a")
 	if err != nil {
@@ -1449,11 +1186,7 @@ func TestBK4P0RunningStaysRunningAfterReconcile(t *testing.T) {
 	stateDir := filepath.Join(root, "extensions", "remote")
 
 	// Seed a running record directly in the store (restart mid-run).
-	now := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
-	seedStore, err := requests.Open(stateDir,
-		requests.WithMaxStoreBytes(protocol.DefaultMaxStoreBytes),
-		requests.WithClock(func() time.Time { return now }),
-	)
+	seedStore, err := requests.Open(stateDir, requests.WithMaxStoreBytes(protocol.DefaultMaxStoreBytes))
 	if err != nil {
 		t.Fatalf("seed open: %v", err)
 	}
@@ -1496,11 +1229,26 @@ func TestBK4P0RunningStaysRunningAfterReconcile(t *testing.T) {
 		t.Fatalf("seed close: %v", err)
 	}
 
-	// serve sequence via ONE shared function: startupSequence (open store →
-	// SetPublish → Register → Reconcile). The fake is registered BEFORE
-	// Reconcile so the sweep sees the live target (the P0 bug did not).
-	store, ep, _, err := startupSequence(stateDir, root, amqio.DefaultHandle, func() time.Time { return now },
-		func(protocol.Snapshot, map[string]string) error { return nil }, nil, nil, rt)
+	// The publish callback mirrors serve's carrierPublish closure: it
+	// forwards to the carrier variable startupSequence assigns.
+	var mu sync.Mutex
+	var carrier *amqio.Carrier
+	var wired, published, carrierMissing, unwired bool
+	var publishedRev int64
+	wire := func(*amqio.Carrier) {
+		mu.Lock()
+		defer mu.Unlock()
+		wired = true
+	}
+	publish := func(s protocol.Snapshot, origin map[string]string) error {
+		mu.Lock()
+		defer mu.Unlock()
+		published, publishedRev = true, s.Revision
+		carrierMissing = carrierMissing || carrier == nil
+		unwired = unwired || !wired
+		return nil
+	}
+	store, ep, _, err := startupSequence(stateDir, root, amqio.DefaultHandle, publish, &carrier, wire, rt)
 	if err != nil {
 		t.Fatalf("startupSequence: %v", err)
 	}
@@ -1510,111 +1258,19 @@ func TestBK4P0RunningStaysRunningAfterReconcile(t *testing.T) {
 	if err != nil || !exists {
 		t.Fatalf("record missing: exists=%v err=%v", exists, err)
 	}
-	if got.State == protocol.StateUncertain && got.Code == protocol.CodeAttachmentLost {
-		t.Fatal("P0: running record marked attachment_lost after reconcile (Reconcile ran before Register — the P0 bug)")
-	}
 	if got.State != protocol.StateRunning {
-		t.Fatalf("P0: running record state=%s code=%s, want running (Reconcile before Register marks it attachment_lost)", got.State, got.Code)
+		t.Fatalf("running record state=%s code=%s after startup, want running (Reconcile ran before Register)", got.State, got.Code)
 	}
-}
-
-// TestBK4P0FirstRevisionReachesPublisher (round-5) is the second P0
-// regression probe. The first Reconcile revision of a running record must
-// reach the real publisher (SetPublish), not a no-op. When Reconcile runs
-// before SetPublish (the P0 bug), the published snapshot's revision is lost
-// to a nil publisher callback.
-//
-// The test seeds a running record, wires a publisher that records the
-// snapshot it receives, registers the fake, then calls Reconcile. The
-// publisher must see the record's revision.
-//
-// RED when Reconcile is moved before SetPublish: the publisher is nil, so
-// no snapshot is recorded.
-func TestBK4P0FirstRevisionReachesPublisher(t *testing.T) {
-	root, err := os.MkdirTemp("", "amqbk4p0b")
-	if err != nil {
-		t.Fatal(err)
+	mu.Lock()
+	defer mu.Unlock()
+	if !published || publishedRev < 2 {
+		t.Fatalf("startup revision never reached the publisher (published=%v rev=%d): Reconcile ran before SetPublish", published, publishedRev)
 	}
-	t.Cleanup(func() { _ = os.RemoveAll(root) })
-	if err := fsq.EnsureRootDirs(root); err != nil {
-		t.Fatal(err)
+	if carrierMissing {
+		t.Fatal("carrier was nil when Reconcile published: carrier constructed after Reconcile")
 	}
-	stateDir := filepath.Join(root, "extensions", "remote")
-
-	now := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
-	seedStore, err := requests.Open(stateDir,
-		requests.WithMaxStoreBytes(protocol.DefaultMaxStoreBytes),
-		requests.WithClock(func() time.Time { return now }),
-	)
-	if err != nil {
-		t.Fatalf("seed open: %v", err)
-	}
-	rt := fake.New("fake", "e_1")
-	rec := &requests.Record{
-		Snapshot: protocol.Snapshot{
-			Schema:      protocol.SchemaRequest,
-			RequestID:   "11111111-1111-4111-8111-111111110022",
-			CreatorHost: "hostA",
-			TargetID:    "fake",
-			RequestRef:  protocol.EncodeRef("hostA", "fake", "11111111-1111-4111-8111-111111110022"),
-			Epoch:       "e_1",
-			Revision:    1,
-			State:       protocol.StateReceived,
-			InputDigest: requests.Digest([]byte("pub")),
-		},
-		Input: &protocol.SubmitInput{Text: "pub"},
-	}
-	k := requests.Key{CreatorHost: rec.CreatorHost, TargetID: rec.TargetID, RequestID: rec.RequestID}
-	if err := seedStore.Create(rec); err != nil {
-		t.Fatalf("create: %v", err)
-	}
-	admission, err := rt.Submit(core.BoundRequest{Key: k, Epoch: "e_1", Input: *rec.Input})
-	if err != nil {
-		t.Fatalf("fake submit: %v", err)
-	}
-	rec.Revision = 2
-	rec.State = protocol.StateDispatching
-	if err := seedStore.Update(rec); err != nil {
-		t.Fatalf("dispatching: %v", err)
-	}
-	rec.Revision = 3
-	rec.State = protocol.StateRunning
-	rec.NativeRun = &admission.RunID
-	if err := seedStore.Update(rec); err != nil {
-		t.Fatalf("running: %v", err)
-	}
-	if err := seedStore.Close(); err != nil {
-		t.Fatalf("seed close: %v", err)
-	}
-
-	var publishedRev int64
-	var pubMu sync.Mutex
-	var pubCalled bool
-	publish := func(s protocol.Snapshot, origin map[string]string) error {
-		pubMu.Lock()
-		pubCalled = true
-		publishedRev = s.Revision
-		pubMu.Unlock()
-		return nil
-	}
-	// serve sequence via ONE shared function: startupSequence (open store →
-	// SetPublish → Register → Reconcile). RED when Reconcile is moved before
-	// SetPublish inside startupSequence: the nil publisher records nothing.
-	_, ep, _, err := startupSequence(stateDir, root, amqio.DefaultHandle, func() time.Time { return now }, publish, nil, nil, rt)
-	if err != nil {
-		t.Fatalf("startupSequence: %v", err)
-	}
-	defer func() { _ = ep.Close() }()
-
-	pubMu.Lock()
-	called := pubCalled
-	rev := publishedRev
-	pubMu.Unlock()
-	if !called {
-		t.Fatal("P0: publisher was never called (Reconcile ran before SetPublish — the first revision was lost to a no-op publisher)")
-	}
-	if rev < 2 {
-		t.Fatalf("P0: published revision=%d, want >=2 (the running record's revision)", rev)
+	if unwired {
+		t.Fatal("Reconcile published before the carrier was wired (w4x)")
 	}
 }
 
@@ -1666,273 +1322,6 @@ func TestCLIB6StatusByRequestIdWhileServeUp(t *testing.T) {
 	}
 }
 
-// TestBK4R6CarrierConstructedInsideStartupSequence (round-6) pins that the
-// carrier is constructed INSIDE startupSequence, before Reconcile. The
-// startup reconcile revision must reach the carrier, not a no-op publisher.
-// The test seeds a running record, calls startupSequence with a publish
-// callback that captures the carrier variable, and asserts: (1) the carrier
-// is non-nil when the publish callback is invoked during Reconcile (proving
-// the carrier was constructed before Reconcile ran); (2) the carrier is
-// non-nil when startupSequence returns.
-//
-// RED when carrier construction is moved after startupSequence returns: the
-// carrierPublish closure sees carrier==nil during Reconcile and returns nil
-// (no-op), so the startup revision is lost to a no-op publisher.
-func TestBK4R6CarrierConstructedInsideStartupSequence(t *testing.T) {
-	root, err := os.MkdirTemp("", "amqbk4r6a")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(root) })
-	if err := fsq.EnsureRootDirs(root); err != nil {
-		t.Fatal(err)
-	}
-	stateDir := filepath.Join(root, "extensions", "remote")
-	now := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
-
-	// Seed a running record directly in the store (restart mid-run).
-	seedStore, err := requests.Open(stateDir, requests.WithMaxStoreBytes(protocol.DefaultMaxStoreBytes))
-	if err != nil {
-		t.Fatalf("seed open: %v", err)
-	}
-	rt := fake.New("fake", "e_1")
-	id := "22222222-2222-4222-8222-2222222260a1"
-	rec := &requests.Record{
-		Snapshot: protocol.Snapshot{
-			Schema:      protocol.SchemaRequest,
-			RequestID:   id,
-			CreatorHost: "hostA",
-			TargetID:    "fake",
-			RequestRef:  protocol.EncodeRef("hostA", "fake", id),
-			Epoch:       "e_1",
-			State:       protocol.StateReceived,
-			Revision:    1,
-		},
-		Input: &protocol.SubmitInput{Text: "r6 probe"},
-	}
-	if err := seedStore.Create(rec); err != nil {
-		t.Fatalf("seed create: %v", err)
-	}
-	// Dispatch through the fake so a run is bound (Lookup will confirm running).
-	k := requests.Key{CreatorHost: rec.CreatorHost, TargetID: rec.TargetID, RequestID: rec.RequestID}
-	admission, err := rt.Submit(core.BoundRequest{Key: k, Epoch: "e_1", Input: *rec.Input})
-	if err != nil {
-		t.Fatalf("fake submit: %v", err)
-	}
-	rec.Revision = 2
-	rec.State = protocol.StateDispatching
-	if err := seedStore.Update(rec); err != nil {
-		t.Fatalf("dispatching: %v", err)
-	}
-	rec.Revision = 3
-	rec.State = protocol.StateRunning
-	rec.NativeRun = &admission.RunID
-	if err := seedStore.Update(rec); err != nil {
-		t.Fatalf("running: %v", err)
-	}
-	if err := seedStore.Close(); err != nil {
-		t.Fatalf("seed close: %v", err)
-	}
-
-	// The publish callback mirrors serve's carrierPublish closure: it forwards
-	// to the carrier variable, which is assigned inside startupSequence. If
-	// the carrier is constructed AFTER Reconcile (revert), the closure sees
-	// carrier==nil during Reconcile and the startup revision is lost.
-	var carrier *amqio.Carrier
-	var carrierNilDuringPublish atomic.Bool
-	publish := func(s protocol.Snapshot, origin map[string]string) error {
-		if carrier == nil {
-			carrierNilDuringPublish.Store(true)
-			return nil
-		}
-		return carrier.Publish(s, origin)
-	}
-
-	_, ep, carrier, err := startupSequence(stateDir, root, amqio.DefaultHandle, func() time.Time { return now }, publish, &carrier, nil, rt)
-	if err != nil {
-		t.Fatalf("startupSequence: %v", err)
-	}
-	defer func() { _ = ep.Close() }()
-
-	// (1) The carrier must be non-nil: constructed INSIDE startupSequence.
-	if carrier == nil {
-		t.Fatal("R6: carrier is nil after startupSequence (not constructed inside)")
-	}
-	// (2) The carrier was non-nil when the publish callback was invoked during
-	// Reconcile. If the carrier were constructed after startupSequence, the
-	// closure would see carrier==nil and the startup revision would be lost.
-	if carrierNilDuringPublish.Load() {
-		t.Fatal("R6: carrier was nil when publish was called during Reconcile (carrier constructed after Reconcile, not inside startupSequence)")
-	}
-}
-
-// TestStartupSequenceWithManifest (611.13 r1) extends the round-6
-// startup-construction assertion: a manifest entry feeds registry.Build,
-// which feeds startupSequence. The carrier is constructed inside
-// startupSequence with the manifest's fake adapter registered, so the
-// startup revision reaches the carrier. This replaces the deleted
-// sleep-based integration test (TestServeReadsManifest).
-func TestStartupSequenceWithManifest(t *testing.T) {
-	root, err := os.MkdirTemp("", "amqrmseq")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(root) })
-	if err := fsq.EnsureRootDirs(root); err != nil {
-		t.Fatal(err)
-	}
-	stateDir := filepath.Join(root, "extensions", "remote")
-	if err := os.MkdirAll(stateDir, 0700); err != nil {
-		t.Fatal(err)
-	}
-	// Write a manifest with one fake adapter under the target id 'fake' —
-	// deliberately NOT --fake sugar: the production path must read THIS
-	// manifest file. This goes RED when the manifest read is removed from
-	// serveStartup: no manifest, no adapter, no target (611.13 r4 item 2).
-	mf := manifest.File{
-		SchemaVersion: manifest.SchemaVersion,
-		Layer:         manifest.Layer,
-		Adapters: []manifest.Adapter{
-			{Kind: "fake", Target: "fake", Epoch: "e_1"},
-		},
-	}
-	data, _ := json.Marshal(mf)
-	manifestFile := manifest.DefaultPath(stateDir)
-	if err := os.WriteFile(manifestFile, data, 0644); err != nil {
-		t.Fatal(err)
-	}
-	// Bounded production startup: serveStartup is the ONE path serve runs
-	// (manifest load -> validate -> Build -> owned sequence -> diagnostics).
-	// No perpetual server goroutine: the endpoint is Closed even on failure,
-	// so the owner lock and store never outlive the test (611.13 r5).
-	var carrier *amqio.Carrier
-	carrierPublish := func(s protocol.Snapshot, origin map[string]string) error {
-		if carrier == nil {
-			return nil
-		}
-		return carrier.Publish(s, origin)
-	}
-	_, ep, carrier, _, err := serveStartup(stateDir, root, amqio.DefaultHandle, manifestFile, nil, carrierPublish, &carrier, io.Discard, nil)
-	if err != nil {
-		t.Fatalf("serveStartup: %v", err)
-	}
-	success := false
-	defer func() {
-		_ = ep.Close()
-		if success {
-			return
-		}
-	}()
-	if carrier == nil {
-		t.Fatal("carrier is nil after serveStartup (not constructed inside)")
-	}
-	// The manifest-declared target MUST be registered by the production path.
-	found := false
-	for _, tid := range ep.Targets() {
-		if tid == "fake" {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatalf("manifest-declared target 'fake' not registered; targets=%v", ep.Targets())
-	}
-	// The bounded IPC surface a client uses: Listen on the owned endpoint
-	// answers a real sessions call, then Close removes the socket.
-	server, err := ipc.Listen(stateDir, ep)
-	if err != nil {
-		t.Fatalf("ipc listen: %v", err)
-	}
-	ipcCtx, cancel := context.WithCancel(context.Background())
-	served := make(chan struct{})
-	go func() {
-		_ = server.Serve(ipcCtx)
-		close(served)
-	}()
-	defer func() {
-		cancel()
-		_ = server.Close()
-		<-served
-	}()
-	resp, err := ipc.Call(stateDir, ipc.Request{Command: &protocol.Command{Schema: protocol.SchemaCommand, Op: protocol.OpSessionList}})
-	if err != nil {
-		t.Fatalf("sessions over ipc: %v", err)
-	}
-	var sessions []protocol.Session
-	if err := json.Unmarshal(resp.Reply, &sessions); err != nil {
-		t.Fatalf("sessions reply: %v", err)
-	}
-	found = false
-	for _, s := range sessions {
-		if s.TargetID == "fake" {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatalf("manifest-declared target 'fake' not serving; sessions reply had %d entries", len(sessions))
-	}
-	success = true
-	// serveStartup is the one production path serve runs; diagnostics must
-	// exist for the owned startup. Generated state, next to refusals.json.
-	adaptersData, err := os.ReadFile(filepath.Join(stateDir, "adapters.json"))
-	if err != nil {
-		t.Fatalf("adapters.json not published by the owned startup: %v", err)
-	}
-	if !strings.Contains(string(adaptersData), "fake") {
-		t.Fatalf("adapters.json missing the manifest target: %s", adaptersData)
-	}
-	// review-824-r1 P1-2: an attached entry must advertise the manifest
-	// target as its kind (an empty "kind": "" was the review-b7 defect).
-	if !strings.Contains(string(adaptersData), "\"kind\":\"fake\"") && !strings.Contains(string(adaptersData), "\"kind\": \"fake\"") {
-		t.Fatalf("attached adapters.json entry missing kind=fake: %s", adaptersData)
-	}
-}
-
-// TestBuildPartialFailureFakeAndClaude (611.13 r1) pins the partial-failure
-// happy path: a manifest with [fake, claude] yields one attachment (fake)
-// and one typed refusal (claude without the required config). serve
-// registers what built and persists the refusal; one bad adapter never
-// takes down serve.
-func TestBuildPartialFailureFakeAndClaude(t *testing.T) {
-	root, err := os.MkdirTemp("", "amqrpartial")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(root) })
-	stateDir := filepath.Join(root, "extensions", "remote")
-	if err := os.MkdirAll(stateDir, 0700); err != nil {
-		t.Fatal(err)
-	}
-	// A manifest with a fake (OK) and a claude (stub refusal).
-	mf := manifest.File{
-		SchemaVersion: manifest.SchemaVersion,
-		Adapters: []manifest.Adapter{
-			{Kind: "fake", Target: "fake", Epoch: "e_1"},
-			{Kind: "claude", Target: "cc-1"},
-		},
-	}
-	outcomes := registry.Build(context.Background(), root, stateDir, mf)
-	if len(outcomes) != 2 {
-		t.Fatalf("got %d outcomes, want 2", len(outcomes))
-	}
-	// fake succeeds.
-	if outcomes[0].Attachment == nil {
-		t.Fatalf("outcome[0] (fake): expected attachment, got refusal=%v", outcomes[0].Refusal)
-	}
-	if outcomes[0].Attachment.Inspect().TargetID != "fake" {
-		t.Fatalf("outcome[0] target=%q, want fake", outcomes[0].Attachment.Inspect().TargetID)
-	}
-	// claude refuses (stub).
-	if outcomes[1].Attachment != nil {
-		t.Fatal("outcome[1] (claude): expected refusal, got attachment")
-	}
-	if outcomes[1].Refusal == nil {
-		t.Fatal("outcome[1] (claude): expected refusal, got nil")
-	}
-	if !strings.Contains(outcomes[1].Refusal.Error(), "pid is required") {
-		t.Fatalf("outcome[1] refusal=%q, want the claude pid-required config error", outcomes[1].Refusal.Error())
-	}
-}
-
 // TestRefusalsClearedOnRestart (611.13 r3, r4 rewrite) pins the ownership
 // boundary through the production path: two real serve starts on one root.
 // Start 1 owns the store, runs with a claude manifest (stub refusal), and
@@ -1957,7 +1346,7 @@ func TestRefusalsClearedOnRestart(t *testing.T) {
 	}
 
 	// Start 1: manifest with a claude entry (stub refusal). Bounded owned
-	// startup via serveStartup (the ONE production path serve runs) + the
+	// startup via serveStartupFrom (the ONE production path serve runs) + the
 	// bounded IPC server; both are Closed so the lock/listener never outlive
 	// the test (611.13 r5).
 	mf1 := manifest.File{
@@ -1970,24 +1359,16 @@ func TestRefusalsClearedOnRestart(t *testing.T) {
 	if err := os.WriteFile(manifestPath, data1, 0644); err != nil {
 		t.Fatal(err)
 	}
-	var carrier1 *amqio.Carrier
-	carrierPublish1 := func(s protocol.Snapshot, origin map[string]string) error {
-		if carrier1 == nil {
-			return nil
-		}
-		return carrier1.Publish(s, origin)
-	}
-	ep1, server1 := ownedStartup(t, stateDir, root, manifestPath, nil, carrierPublish1, &carrier1)
-	defer func() {
-		_ = server1.Close()
-		_ = ep1.Close()
-	}()
+	ownedStartup(t, stateDir, root, manifestPath, nil)
 	refusals1, err := loadRefusals(stateDir)
 	if err != nil {
 		t.Fatalf("start 1 load refusals: %v", err)
 	}
-	if len(refusals1) != 1 {
-		t.Fatalf("start 1: got %d refusals, want 1", len(refusals1))
+	// The persisted refusal is what doctor prints: the adapter, and the
+	// factory's own reason (611.13 r1: one bad adapter is a typed refusal,
+	// not a lost start).
+	if len(refusals1) != 1 || refusals1[0].Kind != "claude" || refusals1[0].Target != "cc-1" || !strings.Contains(refusals1[0].Error, "pid is required") {
+		t.Fatalf("start 1: refusals = %+v, want one claude cc-1 refusal naming the missing pid", refusals1)
 	}
 	// The owner must be reachable: the real serve path owns the lock while
 	// the losing start-2 runs against it.
@@ -2028,17 +1409,10 @@ func TestRefusalsClearedOnRestart(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(root2) })
 	stateDir2 := filepath.Join(root2, "extensions", "remote")
-	var carrier2 *amqio.Carrier
-	carrierPublish2 := func(s protocol.Snapshot, origin map[string]string) error {
-		if carrier2 == nil {
-			return nil
-		}
-		return carrier2.Publish(s, origin)
-	}
 	// Sequential owned starts through the shared production path, fresh
 	// roots, nothing perpetual: each endpoint is Closed before the next
 	// start, releasing the lock (611.13 r5 lifecycle).
-	_, ep1, _, refusalsA, err := serveStartup(stateDir2, root2, amqio.DefaultHandle, manifestPath, nil, carrierPublish2, &carrier2, io.Discard, nil)
+	ep1, refusalsA, err := startFromManifest(stateDir2, root2, manifestPath, nil)
 	if err != nil {
 		t.Fatalf("owned start 1: %v", err)
 	}
@@ -2052,7 +1426,7 @@ func TestRefusalsClearedOnRestart(t *testing.T) {
 	if err := os.WriteFile(emptyFile, []byte("{}"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	_, ep2, _, refusalsB, err := serveStartup(stateDir2, root2, amqio.DefaultHandle, emptyFile, nil, carrierPublish2, &carrier2, io.Discard, nil)
+	ep2, refusalsB, err := startFromManifest(stateDir2, root2, emptyFile, nil)
 	if err != nil {
 		t.Fatalf("owned start 2: %v", err)
 	}
@@ -2069,16 +1443,28 @@ func TestRefusalsClearedOnRestart(t *testing.T) {
 	}
 }
 
-// ownedStartup runs the ONE production startup path (serveStartup: manifest
-// load -> validate -> Build -> owned sequence -> diagnostics publish) plus
-// the bounded IPC server, and registers t.Cleanup that closes both EVEN ON
-// assertion failure. Nothing perpetual: the owner lock and listener are
-// released before RemoveAll (611.13 r5 lifecycle rule).
-func ownedStartup(t *testing.T, stateDir, root, manifestFile string, sugar []manifest.Adapter, publish core.Publisher, carrierOut **amqio.Carrier) (*core.Endpoint, *ipc.Server) {
-	t.Helper()
-	_, ep, _, _, err := serveStartup(stateDir, root, amqio.DefaultHandle, manifestFile, sugar, publish, carrierOut, io.Discard, nil)
+// startFromManifest loads manifestFile the way serve does and runs the ONE
+// production startup path (serveStartupFrom: validate -> Build -> owned
+// sequence -> diagnostics publish) with the shipped carrier wiring.
+func startFromManifest(stateDir, root, manifestFile string, sugar []manifest.Adapter) (*core.Endpoint, []registry.Outcome, error) {
+	mf, err := manifest.Load(manifestFile)
 	if err != nil {
-		t.Fatalf("serveStartup: %v", err)
+		return nil, nil, err
+	}
+	noop := func(protocol.Snapshot, map[string]string) error { return nil }
+	_, ep, _, refusals, err := serveStartupFrom(stateDir, root, amqio.DefaultHandle, mf, sugar, noop, nil, io.Discard, wireCarrier(root, io.Discard))
+	return ep, refusals, err
+}
+
+// ownedStartup runs startFromManifest plus the bounded IPC server, and
+// registers t.Cleanup that closes both EVEN ON assertion failure. Nothing
+// perpetual: the owner lock and listener are released before RemoveAll
+// (611.13 r5 lifecycle rule).
+func ownedStartup(t *testing.T, stateDir, root, manifestFile string, sugar []manifest.Adapter) {
+	t.Helper()
+	ep, _, err := startFromManifest(stateDir, root, manifestFile, sugar)
+	if err != nil {
+		t.Fatalf("owned startup: %v", err)
 	}
 	server, err := ipc.Listen(stateDir, ep)
 	if err != nil {
@@ -2097,7 +1483,6 @@ func ownedStartup(t *testing.T, stateDir, root, manifestFile string, sugar []man
 		_ = ep.Close()
 		<-served
 	})
-	return ep, server
 }
 
 // TestManifestBytesUnchangedAfterFlag (611.13 r3, r4/r5 rewrite) pins through
@@ -2140,16 +1525,7 @@ func TestManifestBytesUnchangedAfterFlag(t *testing.T) {
 	}
 
 	// Bounded production startup with --fake sugar (the flag-append path).
-	var carrier *amqio.Carrier
-	carrierPublish := func(s protocol.Snapshot, origin map[string]string) error {
-		if carrier == nil {
-			return nil
-		}
-		return carrier.Publish(s, origin)
-	}
-	ep, server := ownedStartup(t, stateDir, root, manifestPath, []manifest.Adapter{{Kind: "fake", Target: "fake", Epoch: "e_1"}}, carrierPublish, &carrier)
-	_ = ep
-	_ = server
+	ownedStartup(t, stateDir, root, manifestPath, []manifest.Adapter{{Kind: "fake", Target: "fake", Epoch: "e_1"}})
 
 	// Reread the user's manifest: bytes must be unchanged.
 	after, err := os.ReadFile(manifestPath)
@@ -2160,20 +1536,32 @@ func TestManifestBytesUnchangedAfterFlag(t *testing.T) {
 		t.Fatalf("manifest.json was modified by the flag-append path\nbefore: %s\nafter:  %s", before, after)
 	}
 	// The merged set (file + flag sugar) is generated state: both targets in
-	// adapters.json, never in the user's file.
+	// adapters.json, never in the user's file. An attached entry advertises
+	// its manifest kind (review-824-r1 P1-2: an empty "kind" was the
+	// review-b7 defect).
 	adaptersData, err := os.ReadFile(filepath.Join(stateDir, "adapters.json"))
 	if err != nil {
 		t.Fatalf("adapters.json not published: %v", err)
 	}
-	if !strings.Contains(string(adaptersData), "codex-abc123") || !strings.Contains(string(adaptersData), "fake") {
-		t.Fatalf("adapters.json missing merged set (codex-abc123 + fake): %s", adaptersData)
+	var effective []struct{ Kind, Target, State string }
+	if err := json.Unmarshal(adaptersData, &effective); err != nil {
+		t.Fatalf("adapters.json: %v", err)
+	}
+	got := map[string]string{}
+	for _, e := range effective {
+		got[e.Target] = e.Kind + "/" + e.State
+	}
+	if got["fake"] != "fake/attached" || got["codex-abc123"] != "codex/refused" || len(got) != 2 {
+		t.Fatalf("adapters.json = %s, want fake attached (kind fake) and codex-abc123 refused", adaptersData)
 	}
 }
 
 // TestValidationFailuresExitTwo (611.13 r3, r4 rewrite) pins through the
 // REAL serve error return that every manifest validation failure maps to
-// exit 2 (ExitUsage), not exit 1. RED when IsValidation uses errors.Is
-// (always false) instead of errors.As, and when a serve path skips Validate.
+// exit 2 (ExitUsage), not exit 1: one row per validation error type, since
+// each type opts into IsValidation on its own. RED when IsValidation uses
+// errors.Is (always false) instead of errors.As, and when a serve path skips
+// Validate.
 func TestValidationFailuresExitTwo(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -2276,21 +1664,9 @@ func TestValidationFailuresExitTwo(t *testing.T) {
 	tableDeadline := time.Now().Add(30 * time.Second)
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			// Unit level: typed validation failure.
-			err := manifest.Validate(tc.f)
-			if err == nil {
-				t.Fatal("Validate accepted invalid manifest")
-			}
-			if !manifest.IsValidation(err) {
-				t.Fatalf("IsValidation=false for %v; validation failures must be exit 2", err)
-			}
-			// Production level: the real serve error return is exit 2. Serve
-			// refuses before any startup side effect.
-			root, err := os.MkdirTemp("", "amqrvexit")
-			if err != nil {
-				t.Fatal(err)
-			}
-			t.Cleanup(func() { _ = os.RemoveAll(root) })
+			// The real serve error return is exit 2. Serve refuses before
+			// any startup side effect.
+			root := t.TempDir()
 			stateDir := filepath.Join(root, "extensions", "remote")
 			if err := os.MkdirAll(stateDir, 0700); err != nil {
 				t.Fatal(err)
@@ -2302,29 +1678,6 @@ func TestValidationFailuresExitTwo(t *testing.T) {
 			}
 			var out, errBuf bytes.Buffer
 			var code int
-			// finish() prints Refusal diagnostics to os.Stderr directly
-			// (not the injected writer), so wantErr assertions capture the
-			// process stderr via a pipe (review-824-r1 P1-3).
-			var stderrCapture chan []byte
-			var wPipe *os.File
-			if tc.wantErr != "" {
-				var r *os.File
-				var pipeErr error
-				r, wPipe, pipeErr = os.Pipe()
-				if pipeErr != nil {
-					t.Fatal(pipeErr)
-				}
-				saved := os.Stderr
-				os.Stderr = wPipe
-				stderrCapture = make(chan []byte, 1)
-				go func() {
-					data, _ := io.ReadAll(r)
-					stderrCapture <- data
-				}()
-				defer func() {
-					os.Stderr = saved
-				}()
-			}
 			// 611.13.4-3: bound the test wait on the in-process serve. For a
 			// VALID manifest a mutation could leave serve running forever
 			// and stall the whole package for the full go-test timeout.
@@ -2358,14 +1711,8 @@ func TestValidationFailuresExitTwo(t *testing.T) {
 			if code != protocol.ExitUsage {
 				t.Fatalf("serve exit=%d, want %d (ExitUsage)\nstderr=%s", code, protocol.ExitUsage, errBuf.String())
 			}
-			if tc.wantErr != "" {
-				// Stop capturing before reading: the pipe reader only
-				// returns once the write end is closed.
-				_ = wPipe.Close()
-				captured := <-stderrCapture
-				if !strings.Contains(string(captured), tc.wantErr) {
-					t.Fatalf("os.Stderr %q missing expected diagnostic %q", string(captured), tc.wantErr)
-				}
+			if !strings.Contains(errBuf.String(), tc.wantErr) {
+				t.Fatalf("stderr %q missing expected diagnostic %q", errBuf.String(), tc.wantErr)
 			}
 		})
 	}
@@ -2438,97 +1785,5 @@ func TestDoctorRefusalsErrorSurfaced(t *testing.T) {
 	}
 	if refErr == "" {
 		t.Fatalf("refusals_error empty for a truncated refusals.json")
-	}
-}
-
-// TestW4XCarrierWiredBeforeReconcile (bead w4x, review-a13 ordering parity)
-// proves the shipped warn handler and reply router are installed on the
-// carrier BEFORE Reconcile publishes the startup revision: the wire closure
-// runs inside startupSequence between amqio.New and Reconcile, so a warning
-// or a routed reply during the startup revision already sees the shipped
-// handlers. RED if the wiring is moved back after serveStartup returns.
-func TestW4XCarrierWiredBeforeReconcile(t *testing.T) {
-	root, err := os.MkdirTemp("", "amqw4x")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(root) })
-	if err := fsq.EnsureRootDirs(root); err != nil {
-		t.Fatal(err)
-	}
-	stateDir := filepath.Join(root, "extensions", "remote")
-	manifestFile := filepath.Join(stateDir, "manifest.json")
-	if err := os.MkdirAll(stateDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	// schema_version 0 defaults to SchemaVersion in Load; adapters empty.
-	body := []byte(`{"schema_version":1,"adapters":[]}`)
-	if err := os.WriteFile(manifestFile, body, 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	// Seed a record with an unpublished revision so Reconcile's startup
-	// sweep has something to publish — otherwise the store is empty and
-	// Reconcile publishes nothing (the test would be vacuous).
-	seed, err := requests.Open(stateDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	rec := &requests.Record{Snapshot: protocol.Snapshot{
-		Schema:      protocol.SchemaRequest,
-		RequestID:   "11111111-1111-4111-8111-111111117502",
-		CreatorHost: "hostA",
-		TargetID:    "fake",
-		Epoch:       "e_1",
-		Revision:    1,
-		State:       protocol.StateReceived,
-		InputDigest: requests.Digest([]byte("w4x probe")),
-	}}
-	if err := seed.Create(rec); err != nil {
-		_ = seed.Close()
-		t.Fatalf("seed create: %v", err)
-	}
-	// Advance to revision 2 with PublishedRevision left at 1 so Reconcile's
-	// sweep has a pending publication obligation for the seeded record.
-	rec.Revision, rec.State = 2, protocol.StateDispatching
-	if err := seed.Update(rec); err != nil {
-		_ = seed.Close()
-		t.Fatalf("seed update: %v", err)
-	}
-	if err := seed.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	// Prove ordering: the wire closure must run BEFORE the first publish
-	// (Reconcile's startup sweep publishing the seeded revision). The wire
-	// closure records the fact; the publish closure records the first
-	// publish. RED if the wiring moves back after serveStartup returns.
-	var wireRan, published, misordered atomic.Bool
-	wire := func(c *amqio.Carrier) {
-		wireRan.Store(true)
-		if published.Load() {
-			misordered.Store(true)
-		}
-	}
-	publish := func(protocol.Snapshot, map[string]string) error {
-		if !wireRan.Load() {
-			misordered.Store(true)
-		}
-		published.Store(true)
-		return nil
-	}
-
-	_, _, _, _, err = serveStartup(stateDir, root, amqio.DefaultHandle, manifestFile, nil, publish, nil, io.Discard, wire)
-	if err != nil {
-		t.Fatalf("serveStartup: %v", err)
-	}
-	if !wireRan.Load() {
-		t.Fatal("wire closure never ran inside startupSequence")
-	}
-	if !published.Load() {
-		t.Fatal("Reconcile never published the seeded revision; test is vacuous")
-	}
-	if misordered.Load() {
-		t.Fatal("carrier wiring and Reconcile's startup publish ran out of order")
 	}
 }

@@ -41,10 +41,10 @@ const presencePublishTimeout = 10 * time.Second
 
 // presenceTick is how often a live connection re-derives the status from
 // the target's attachment and republishes it on change.
-var presenceTick = 10 * time.Second
+const presenceTick = 10 * time.Second
 
 // discoveryRecheck is how often the owner's 30177 policy is read again.
-var discoveryRecheck = 5 * time.Minute
+const discoveryRecheck = 5 * time.Minute
 
 func (ps *presenceShare) set(state, discovery string) {
 	ps.mu.Lock()

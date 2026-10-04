@@ -112,13 +112,10 @@ func executablePath() string {
 	return path
 }
 
-// errUpUnsupportedFlag marks a forwarded-flag set the parser accepted but
-// serve does not define. It keeps the usage refusal typed for tests.
-var errUpUnsupportedFlag = errors.New("up: unsupported flag(s): only serve's flags are forwarded")
-
 // up runs serve under supervision: spawn, respawn on non-zero exit with
 // exponential backoff (reusing keepalive's failure-backoff constants), and
-// stop on clean exit 0.
+// stop on clean exit 0. newSpawner builds the spawner from the --self path;
+// run passes newExecSpawner.
 //
 // Lifetime ownership (codex P1): the registry's per-write flock protects one
 // WRITE, not the process lifetime — two sequential Upserts from two ups both
@@ -128,7 +125,7 @@ var errUpUnsupportedFlag = errors.New("up: unsupported flag(s): only serve's fla
 // the up process dies; a second up on the same root fails the non-blocking
 // flock and refuses. Only the owner removes the registration (its deferred
 // Forget runs under the lifetime lock it still holds).
-func up(args []string, stdout, stderr io.Writer) (int, error) {
+func up(args []string, stdout, stderr io.Writer, newSpawner func(self string) spawner) (int, error) {
 	// ONE FlagSet declares up's flags plus serve's forwardable set. The
 	// previous recut re-registered root/json/me after newUpFlagSet had
 	// already added them, panicking "flag redefined: root" on every real
@@ -141,21 +138,11 @@ func up(args []string, stdout, stderr io.Writer) (int, error) {
 	registryPath := fs.String("registry", mustDefaultRegistryPath(), "keepalive companion registry file path")
 	maxRestarts := fs.Int("max-restarts", 0, "maximum respawns before giving up (0 = unlimited)")
 	self := fs.String("self", executablePath(), "amq-remote executable path to spawn serve")
-	selfFlag = self
 	if err := fs.Parse(args); err != nil {
 		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", err)
 	}
 	if len(fs.Args()) > 0 {
 		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "up takes no positional arguments (got %q)", fs.Args()[0])
-	}
-	var unknown []string
-	fs.Visit(func(f *flag.Flag) {
-		if !serveFlagNames[f.Name] && f.Name != "self" && f.Name != "registry" && f.Name != "max-restarts" {
-			unknown = append(unknown, "--"+f.Name)
-		}
-	})
-	if len(unknown) > 0 {
-		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v: %v", errUpUnsupportedFlag, unknown)
 	}
 	if *sf.discover {
 		// Discovery never supervises: it returns before the registry dir,
@@ -278,7 +265,7 @@ func up(args []string, stdout, stderr io.Writer) (int, error) {
 	// forwarded bare as --fake, flipping an explicit opt-out back on).
 	serveArgs := buildServeArgs(fs, c.root, *me)
 
-	sp := newUpSpawner()
+	sp := newSpawner(*self)
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
@@ -288,21 +275,14 @@ func up(args []string, stdout, stderr io.Writer) (int, error) {
 		backoffMax:  supervisor.DefaultFailureBackoffMax,
 		serveArgs:   serveArgs,
 	}
-	return runUpLoop(ctx, cfg, sp)
+	return runUpLoop(ctx, cfg, sp, stderr)
 }
 
-// upSpawnerFactory lets tests override the spawner used by the real up
-// entry point (default: an execSpawner running the --self binary with the
-// default SIGTERM grace, B4 611.13.2).
-var upSpawnerFactory = func(self string) spawner {
+// newExecSpawner runs the --self binary as the serve child with the default
+// SIGTERM grace (B4, 611.13.2).
+func newExecSpawner(self string) spawner {
 	return &execSpawner{binary: self, waitDelay: upWaitDelay}
 }
-
-func newUpSpawner() spawner { return upSpawnerFactory(*selfFlag) }
-
-// selfFlag is bound in up(); it lives at package scope so the factory can
-// read it without threading a parameter through every call site.
-var selfFlag *string
 
 // prepareSecureDir creates dir (and parents) with 0700 and tightens an
 // EXISTING directory to 0700 as well (N6, review-b5): the creation-only
@@ -457,8 +437,9 @@ type upConfig struct {
 
 // runUpLoop is the supervision loop: spawn, respawn on non-zero exit with
 // exponential backoff (reusing keepalive's constants), stop on clean exit 0.
-// The spawner interface lets tests inject a fake (no real process).
-func runUpLoop(ctx context.Context, cfg upConfig, sp spawner) (int, error) {
+// The spawner interface lets tests inject a fake (no real process). The
+// supervisor's log lines go to stderr.
+func runUpLoop(ctx context.Context, cfg upConfig, sp spawner, stderr io.Writer) (int, error) {
 	now := cfg.now
 	if now == nil {
 		now = time.Now
@@ -473,51 +454,51 @@ func runUpLoop(ctx context.Context, cfg upConfig, sp spawner) (int, error) {
 		start := now()
 		proc, err := sp.Spawn(ctx, cfg.serveArgs)
 		if err != nil {
-			say(os.Stderr, "amq-remote up: spawn failed: %v\n", err)
+			say(stderr, "amq-remote up: spawn failed: %v\n", err)
 		} else {
 			code, werr := proc.Wait()
 			if ctx.Err() != nil {
 				// Context cancelled (SIGINT/SIGTERM to up): exit.
-				say(os.Stderr, "amq-remote up: shutting down\n")
+				say(stderr, "amq-remote up: shutting down\n")
 				return 0, nil
 			}
 			if werr != nil {
-				say(os.Stderr, "amq-remote up: serve wait error: %v\n", werr)
+				say(stderr, "amq-remote up: serve wait error: %v\n", werr)
 			}
 			if code == 0 {
 				// Clean exit: up ends.
-				say(os.Stderr, "amq-remote up: serve exited cleanly (0)\n")
+				say(stderr, "amq-remote up: serve exited cleanly (0)\n")
 				return 0, nil
 			}
 			if code == upUsageExitCode {
 				// B6 (611.13.2): serve refused its arguments. Respawning
 				// replays the same refusal forever - observed 'respawning in
 				// 1m0s' for a child exiting 2. Propagate the code; up ends.
-				say(os.Stderr, "amq-remote up: serve exited %d (usage error); not respawning\n", code)
+				say(stderr, "amq-remote up: serve exited %d (usage error); not respawning\n", code)
 				return code, nil
 			}
 			uptime := now().Sub(start)
-			say(os.Stderr, "amq-remote up: serve exited %d (ran %s)\n", code, uptime.Round(time.Millisecond))
+			say(stderr, "amq-remote up: serve exited %d (ran %s)\n", code, uptime.Round(time.Millisecond))
 			// B5 (611.13.2): a child that ran healthy-long did not fail
 			// immediately - the crash it just suffered starts a fresh failure
 			// series, so the counter resets and the next wait is the base
 			// step, not an escalated one.
 			if uptime >= upHealthyUptime(cfg.backoffBase) {
-				say(os.Stderr, "amq-remote up: healthy uptime %s; resetting backoff series\n", uptime.Round(time.Second))
+				say(stderr, "amq-remote up: healthy uptime %s; resetting backoff series\n", uptime.Round(time.Second))
 				restart = 0
 			}
 		}
 		restart++
 		budget++
 		if cfg.maxRestarts > 0 && budget > cfg.maxRestarts {
-			say(os.Stderr, "amq-remote up: max-restarts (%d) exceeded\n", cfg.maxRestarts)
+			say(stderr, "amq-remote up: max-restarts (%d) exceeded\n", cfg.maxRestarts)
 			return 1, fmt.Errorf("max-restarts exceeded")
 		}
 		// Backoff: reuse keepalive's failure-backoff constants (exponential,
 		// capped). Do not invent a second table. The index (restart), not
 		// the budget, drives escalation.
 		delay := backoff(restart, cfg.backoffBase, cfg.backoffMax)
-		say(os.Stderr, "amq-remote up: respawning in %s (attempt %d)\n", delay, restart)
+		say(stderr, "amq-remote up: respawning in %s (attempt %d)\n", delay, restart)
 		select {
 		case <-ctx.Done():
 			return 0, nil
