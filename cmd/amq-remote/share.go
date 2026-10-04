@@ -114,6 +114,7 @@ func share(args []string, stdout, stderr io.Writer) (int, error) {
 	dmChannel := fs.String("dm-channel", "", "owner's Buzz DM channel id; with --native-session, turns on owner DM commands in the relay block")
 	nativeSession := fs.String("native-session", "", "native session id approved for sharing (see amq-remote inspect); set with --dm-channel")
 	minEvidence := fs.String("min-evidence", "", "submit evidence floor for this share: admitted (default) or submitted; requires --target and --relay")
+	presence := fs.String("presence", "", "display name for the body's Buzz profile and status; turns on presence; requires --target and --relay")
 	dryRun := fs.Bool("dry-run", false, "print preimages without writing or changing anything")
 	var enable []uint16
 	fs.Func("enable", "opt in to an extra share surface for a new window (repeatable): buzz-dm (kinds 9, 40003), buzz-profile (kind 0)", func(v string) error {
@@ -164,12 +165,14 @@ func share(args []string, stdout, stderr io.Writer) (int, error) {
 		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "--dm-channel needs --target and --relay")
 	}
 	switch {
+	case *presence != "" && *target == "":
+		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "--presence needs --target and --relay")
 	case *minEvidence != "" && *target == "":
 		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "--min-evidence needs --target and --relay")
 	case *minEvidence != "" && *minEvidence != protocol.EvidenceAdmitted && *minEvidence != protocol.EvidenceSubmitted:
 		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "--min-evidence must be admitted or submitted, got %q", *minEvidence)
 	}
-	bind := relayBinding{target: *target, relayURL: *relayURL, dmChannel: *dmChannel, nativeSession: *nativeSession, minEvidence: *minEvidence}
+	bind := relayBinding{target: *target, relayURL: *relayURL, dmChannel: *dmChannel, nativeSession: *nativeSession, minEvidence: *minEvidence, presence: *presence}
 
 	keyDir, err := shareKeyDir(*root, *session)
 	if err != nil {
@@ -209,6 +212,9 @@ func share(args []string, stdout, stderr io.Writer) (int, error) {
 				return protocol.ExitActionRequired, stagedCorruptRefusal(*session, l)
 			}
 			return protocol.ExitActionRequired, l.Err
+		}
+		if *bundle == "" && *tagFile == "" && *target != "" {
+			return previewRelayShare(*root, *session, bind, st, stdout)
 		}
 		if loadErr != nil {
 			if errors.Is(loadErr, os.ErrNotExist) {
@@ -643,6 +649,9 @@ func publishBundle(session, keyDir string, tags, pending []shareTagFile) error {
 // heals crash leftovers first, and refuses a missing or unreadable window.
 func enrollablePending(session, keyDir string, st *shareState) ([]shareTagFile, int, error) {
 	if st.Pending.State == leafAbsent {
+		if st.Enrolled.Gen != nil && len(st.Enrolled.Gen.Tags) > 0 {
+			return nil, protocol.ExitActionRequired, fmt.Errorf("no pending window: the enrolled grants are current; to change the binding, run share --target --relay without --bundle")
+		}
 		return nil, protocol.ExitActionRequired, fmt.Errorf("no pending window: run `amq-remote share --session %s --renew` first", session)
 	}
 	if st.Pending.Err != nil {
@@ -707,19 +716,8 @@ func writeRelayShare(root, session string, bind relayBinding, keyDir string) (in
 	if err := st.refuseIfConfined(); err != nil {
 		return protocol.ExitActionRequired, err
 	}
-	if st.Enrolled.Err != nil {
-		return protocol.ExitActionRequired, st.Enrolled.Err
-	}
-	if st.Enrolled.Gen == nil || len(st.Enrolled.Gen.Tags) == 0 {
-		return protocol.ExitActionRequired, fmt.Errorf("no enrolled generation for session %s", session)
-	}
-	owner := st.Enrolled.Gen.Tags[0].OwnerPubKey
-	for _, t := range st.Enrolled.Gen.Tags[1:] {
-		if t.OwnerPubKey != owner {
-			return protocol.ExitActionRequired, fmt.Errorf("enrolled tags name more than one owner")
-		}
-	}
-	if err := bind.requireDMGrants(session, st.Enrolled.Gen.Tags); err != nil {
+	owner, err := bind.enrolledOwner(session, st)
+	if err != nil {
 		return protocol.ExitActionRequired, err
 	}
 	if !lock.AdvisoryLockAvailable() {
@@ -736,6 +734,39 @@ func writeRelayShare(root, session string, bind relayBinding, keyDir string) (in
 		return protocol.ExitActionRequired, err
 	}
 	return code, err
+}
+
+// previewRelayShare is the --dry-run of a bind: the same checks as
+// writeRelayShare, with no write. A bind needs no owner signature, so it
+// prints no window.
+func previewRelayShare(root, session string, bind relayBinding, st *shareState, stdout io.Writer) (int, error) {
+	owner, err := bind.enrolledOwner(session, st)
+	if err != nil {
+		return protocol.ExitActionRequired, err
+	}
+	if _, code, err := prepareManifest(manifest.DefaultPath(filepath.Join(root, stateDirName)), session, bind, owner); err != nil {
+		return code, err
+	}
+	say(stdout, "dry-run: would bind target %s to session %s in the manifest; the enrolled grants cover it, so there is nothing to sign", bind.target, session)
+	return 0, nil
+}
+
+// enrolledOwner is the one owner of the enrolled generation, which must
+// hold every grant the binding needs.
+func (b relayBinding) enrolledOwner(session string, st *shareState) (string, error) {
+	if st.Enrolled.Err != nil {
+		return "", st.Enrolled.Err
+	}
+	if st.Enrolled.Gen == nil || len(st.Enrolled.Gen.Tags) == 0 {
+		return "", fmt.Errorf("no enrolled generation for session %s", session)
+	}
+	owner := st.Enrolled.Gen.Tags[0].OwnerPubKey
+	for _, t := range st.Enrolled.Gen.Tags[1:] {
+		if t.OwnerPubKey != owner {
+			return "", fmt.Errorf("enrolled tags name more than one owner")
+		}
+	}
+	return owner, b.requireDMGrants(session, st.Enrolled.Gen.Tags)
 }
 
 // bindManifest loads, updates, and publishes the relay block. The caller
@@ -759,6 +790,7 @@ type relayBinding struct {
 	target, relayURL         string
 	dmChannel, nativeSession string
 	minEvidence              string
+	presence                 string // display name; turns on presence
 }
 
 // requireDMGrants refuses a DM binding when the tags lack the buzz-dm kinds:
@@ -776,17 +808,19 @@ func (b relayBinding) requireDMGrants(session string, tags []shareTagFile) error
 	return nil
 }
 
-// apply sets the evidence floor and the DM command fields on a share when
-// the binding names them.
+// apply sets the evidence floor, the DM command fields, and presence on a
+// share when the binding names them.
 // Without them the share keeps its existing fields.
 func (b relayBinding) apply(sh *manifest.Share) {
 	if b.minEvidence != "" {
 		sh.MinEvidence = b.minEvidence
 	}
-	if b.dmChannel == "" {
-		return
+	if b.presence != "" {
+		sh.Presence, sh.Name = true, b.presence
 	}
-	sh.DMChannelID, sh.NativeSessionID, sh.Commands = b.dmChannel, b.nativeSession, true
+	if b.dmChannel != "" {
+		sh.DMChannelID, sh.NativeSessionID, sh.Commands = b.dmChannel, b.nativeSession, true
+	}
 }
 
 // prepareManifest is the read-only half of a relay bind. It refuses a rebind

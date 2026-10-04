@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -115,5 +116,64 @@ func TestStrictShareBundleEnrollsAndDoctorIsClean(t *testing.T) {
 		case "relay_auth", "dm_surface", "publication", "body_key", "tag_expiry":
 			t.Fatalf("doctor fails %s: %s", f.Boundary, f.Detail)
 		}
+	}
+}
+
+// 611.53 (field, 2026-10-04): the owner opens the DM only after the bundle
+// is enrolled. The bind's dry-run printed a fresh window to sign, and
+// presence had no flag, so the owner hand-edited the manifest. Binding the
+// DM channel and presence after enrollment needs no signature and no edit.
+func TestShareBindsDMAndPresenceAfterEnrollment(t *testing.T) {
+	root := t.TempDir()
+	stateDir := filepath.Join(root, "extensions", "remote")
+	manifestPath := manifest.DefaultPath(stateDir)
+	if err := manifest.Write(manifestPath, manifest.File{
+		SchemaVersion: manifest.SchemaVersion, Layer: manifest.Layer,
+		Adapters: []manifest.Adapter{{Kind: "fake", Target: "fake", Epoch: "e_1"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	out, _, _ := runShare(t, "--root", root, "--session", "work", "--enable", "buzz-dm", "--enable", "buzz-profile")
+	keyDir := filepath.Join(stateDir, "keys", "work")
+	body, err := bodykey.Load(filepath.Join(keyDir, "body.key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tags []shareTagFile
+	var wire []string
+	for kind, conds := range pendingConditions(t, out) {
+		tf := shareTagFile{Kind: kind, OwnerPubKey: ownerPubHex, Conditions: conds, Sig: ownerSignFor(t, body.PublicKeyHex(), conds)}
+		tags = append(tags, tf)
+		if kind == authKind {
+			wire = []string{"auth", tf.OwnerPubKey, tf.Conditions, tf.Sig}
+		}
+	}
+	raw, _ := json.Marshal(tags)
+	bundle := filepath.Join(t.TempDir(), "bundle.json")
+	if err := os.WriteFile(bundle, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, srv, url := relaytest.Start(body.PublicKeyHex(), wire)
+	defer srv.Close()
+	runShare(t, "--root", root, "--session", "work", "--bundle", bundle, "--target", "fake", "--relay", url)
+
+	bind := []string{"--root", root, "--session", "work", "--target", "fake", "--relay", url,
+		"--dm-channel", "dm-1", "--native-session", "thread-1", "--presence", "Codex work"}
+	preview, _, _ := runShare(t, append(bind, "--dry-run")...)
+	if !strings.Contains(preview, "nothing to sign") {
+		t.Fatalf("dry-run of a bind = %q, want no window to sign", preview)
+	}
+	runShare(t, bind...)
+
+	if _, err := os.Stat(filepath.Join(keyDir, "share.pending.json")); !os.IsNotExist(err) {
+		t.Fatalf("binding minted a new window to sign (stat err %v)", err)
+	}
+	mf, err := manifest.Load(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sh := mf.Relay.Shares[0]
+	if sh.DMChannelID != "dm-1" || sh.NativeSessionID != "thread-1" || !sh.Commands || !sh.Presence || sh.Name != "Codex work" {
+		t.Fatalf("share = %+v, want the DM binding and presence as Codex work", sh)
 	}
 }
