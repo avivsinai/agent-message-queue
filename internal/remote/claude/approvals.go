@@ -1,6 +1,7 @@
 package claude
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -46,6 +47,17 @@ type approval struct {
 	// Its evidence is read and arbitrated there only, also after the
 	// registry moved to another session.
 	sessionID string
+	// approvable is the hook's word that it can apply a proven allow for
+	// this call; pinned that the installed hook and the serving share name
+	// the same owner. Both decide only whether the DM offers allow.
+	approvable, pinned bool
+}
+
+// offersAllow reports whether the DM offers allow for ap: the hook can
+// apply one, the owner is pinned, and the approval is bound to its one
+// tool_use. Otherwise the approval is reject only.
+func (ap *approval) offersAllow() bool {
+	return ap.approvable && ap.pinned && ap.toolUseID != "" && !ap.uncertain
 }
 
 // openRef names one open approval and the session its files live in.
@@ -68,6 +80,8 @@ const maxRunToolCalls = 1024
 type approvalDisk struct {
 	requests map[string]approvalRequest
 	resolved map[string]approvalResolved
+	// pinned is allowPinned for the session, read when a request is new.
+	pinned bool
 }
 
 // readApprovalDisk reads every request not yet known and the resolved file
@@ -101,6 +115,9 @@ func (a *Attachment) readApprovalDisk(sessionID string, known map[string]bool, o
 		if r, ok := readResolved(a.home, o.sessionID, o.id); ok {
 			d.resolved[o.id] = r
 		}
+	}
+	if len(d.requests) > 0 {
+		d.pinned = allowPinned(a.home, sessionID)
 	}
 	return d
 }
@@ -283,7 +300,8 @@ func (a *Attachment) applyApprovalsLocked(sessionID string, d approvalDisk, caug
 		}
 		preview, _ := protocol.TruncateText(r.Preview, protocol.MaxApprovalPreview)
 		ap := &approval{id: id, toolName: r.ToolName, preview: preview, hash: r.ActionHash,
-			hookPID: r.HookPID, deadline: deadline, openedAt: opened.UnixMilli(), seenSeq: seq, sessionID: r.SessionID}
+			hookPID: r.HookPID, deadline: deadline, openedAt: opened.UnixMilli(), seenSeq: seq, sessionID: r.SessionID,
+			approvable: r.Approvable && preview == r.Preview, pinned: d.pinned}
 		if rec.approvals == nil {
 			rec.approvals = map[string]*approval{}
 		}
@@ -305,7 +323,11 @@ func (a *Attachment) applyApprovalsLocked(sessionID string, d approvalDisk, caug
 				continue // a hook claim still writing its decision: wait
 			}
 			if caughtUp && seq >= ap.seenSeq {
+				offered := ap.offersAllow()
 				a.bindCallLocked(rec, ap)
+				if ap.offersAllow() != offered && rec.open[0] == ap {
+					events = append(events, rec.questionEvent(ap)) // bound late: allow is offered now
+				}
 			}
 			if !a.terminalAnswered(rec, ap) && !hookDead(ap.hookPID) {
 				continue
@@ -368,13 +390,16 @@ func (rec *runRecord) questionEvent(ap *approval) core.NativeEvent {
 	return core.NativeEvent{Type: core.EventQuestion, Key: rec.key, RunID: rec.msgID, Interaction: projectApproval(ap)}
 }
 
-// projectApproval is the endpoint's view of one open approval: reject only,
-// for every tool. Buzz can block a Claude tool call and cannot allow one
-// (owner ruling on bead 611.42.3: a forged block is only a denial, a forged
-// allow would be a grant); the terminal allows.
+// projectApproval is the endpoint's view of one open approval. It offers
+// allow only when ap.offersAllow (bead 611.42.4); otherwise it is reject
+// only, and the terminal allows.
 func projectApproval(ap *approval) *protocol.Interaction {
-	return &protocol.Interaction{InteractionID: ap.id, Kind: "approval", Prompt: ap.preview, Options: []string{optionDeny},
+	in := &protocol.Interaction{InteractionID: ap.id, Kind: "approval", Prompt: ap.preview, Options: []string{optionDeny},
 		RemoteAnswer: true, RejectOption: optionDeny}
+	if ap.offersAllow() {
+		in.Options, in.ApproveOption = []string{optionAllow, optionDeny}, optionAllow
+	}
+	return in
 }
 
 // pendingApproval is the run's head approval, or nil.
@@ -450,16 +475,28 @@ func (a *Attachment) endApprovalsLocked(rec *runRecord, events []core.NativeEven
 	return events
 }
 
-// Respond implements core.Attachment for DM approvals. Only deny is an
-// answer: any other option, allow included, is invalid. An answer already
-// on disk with the same identity is delivered. A fresh answer is written
-// only for the run's head approval, while its hook is alive, before its
-// deadline, and before anything resolved it. The hook
-// applies the answer only to the call with the same action hash. The
-// endpoint owns first-answer-wins.
-func (a *Attachment) Respond(key requests.Key, _, interactionID, option string) (protocol.Code, error) {
-	if option != optionDeny {
-		return protocol.CodeInvalid, nil // Buzz can only block a Claude tool call
+// Respond implements core.Attachment for DM approvals: a deny. An allow
+// needs evidence, so it comes through RespondWithEvidence.
+func (a *Attachment) Respond(key requests.Key, epoch, interactionID, option string) (protocol.Code, error) {
+	return a.RespondWithEvidence(key, epoch, interactionID, option, nil)
+}
+
+// RespondWithEvidence implements core.EvidenceResponder. A deny is an answer
+// on its own. An allow is an answer only for an approval that offers it,
+// with evidence, which the answer file carries to the hook unread: the hook
+// verifies it against its pinned owner and applies nothing else. An answer
+// already on disk with the same identity is delivered. A fresh answer is
+// written only for the run's head approval, while its hook is alive,
+// before its deadline, and before anything resolved it. The hook applies
+// the answer only to the call with the same action hash. The endpoint owns
+// first-answer-wins.
+func (a *Attachment) RespondWithEvidence(key requests.Key, _, interactionID, option string, evidence json.RawMessage) (protocol.Code, error) {
+	switch {
+	case option == optionDeny:
+		evidence = nil
+	case option == optionAllow && len(evidence) > 0 && len(evidence) <= maxEvidenceBytes && json.Valid(evidence):
+	default:
+		return protocol.CodeInvalid, nil
 	}
 	a.mu.Lock()
 	rec := a.runs[key]
@@ -475,9 +512,9 @@ func (a *Attachment) Respond(key requests.Key, _, interactionID, option string) 
 		a.mu.Unlock()
 		return protocol.CodeAlreadyResolved, nil
 	}
-	ans := approvalAnswer{InteractionID: interactionID, ActionHash: ap.hash, Option: option, At: protocol.FormatTime(a.now())}
+	ans := approvalAnswer{InteractionID: interactionID, ActionHash: ap.hash, Option: option, At: protocol.FormatTime(a.now()), Evidence: evidence}
 	head := len(rec.open) > 0 && rec.open[0] == ap
-	hookPID, deadline := ap.hookPID, ap.deadline
+	hookPID, deadline, allowOffered := ap.hookPID, ap.deadline, ap.offersAllow()
 	a.mu.Unlock()
 
 	dir := approveDir(a.home, sessionID)
@@ -488,6 +525,8 @@ func (a *Attachment) Respond(key requests.Key, _, interactionID, option string) 
 		return protocol.CodeAlreadyResolved, nil
 	}
 	switch {
+	case option == optionAllow && !allowOffered:
+		return protocol.CodeInvalid, nil
 	case resolvedExists(filepath.Join(dir, "resolved", interactionID+".json")), !head, hookDead(hookPID):
 		return protocol.CodeAlreadyResolved, nil
 	case !a.now().Before(deadline):

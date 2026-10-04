@@ -1,6 +1,8 @@
 package core
 
 import (
+	"encoding/json"
+
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 	"github.com/avivsinai/agent-message-queue/internal/remote/requests"
 )
@@ -167,4 +169,12 @@ type Attachment interface {
 	AcknowledgeResult(key requests.Key, epoch, digest string)
 	// Subscribe delivers native events until the returned function is called.
 	Subscribe(func(NativeEvent)) func()
+}
+
+// EvidenceResponder is an Attachment whose answers can carry a surface's
+// opaque evidence (protocol.Command.Evidence). The endpoint passes it
+// unread and its trust in the answer is unchanged; the attachment decides
+// what the evidence proves.
+type EvidenceResponder interface {
+	RespondWithEvidence(key requests.Key, epoch, interactionID, option string, evidence json.RawMessage) (protocol.Code, error)
 }

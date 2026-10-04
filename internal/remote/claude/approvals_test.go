@@ -56,7 +56,7 @@ func newApprovalFixture(t *testing.T, toolUses ...map[string]any) *approvalFixtu
 		t.Fatalf("submit = %+v, %v", adm, err)
 	}
 	waitRecv(t, ft)
-	if _, err := PinApprovals(f.home, approvalSession, "share-1", os.Getpid()); err != nil {
+	if _, err := PinApprovals(f.home, approvalSession, "share-1", "", os.Getpid()); err != nil {
 		t.Fatal(err)
 	}
 	f.append(map[string]any{

@@ -1000,7 +1000,13 @@ func (e *Endpoint) respond(cmd *protocol.Command, src Source) (protocol.Reply, e
 	}
 	e.mu.Unlock()
 
-	code, rerr := t.att.Respond(key, cmd.Epoch, cmd.InteractionID, cmd.Option)
+	var code protocol.Code
+	var rerr error
+	if er, ok := t.att.(EvidenceResponder); ok && len(cmd.Evidence) > 0 {
+		code, rerr = er.RespondWithEvidence(key, cmd.Epoch, cmd.InteractionID, cmd.Option, cmd.Evidence)
+	} else {
+		code, rerr = t.att.Respond(key, cmd.Epoch, cmd.InteractionID, cmd.Option)
+	}
 	if rerr != nil {
 		// The native call itself errored without a disposition: the intent
 		// stays (the answer may have landed), so the replay path — not a

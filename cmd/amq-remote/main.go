@@ -1140,6 +1140,18 @@ func doctor(args []string) (any, int, error) {
 		case state == claude.StopHookDisabled:
 			report["claude_approval_hook"] = "~/.claude/settings.json holds the PermissionRequest hook and sets disableAllHooks; project or managed settings decide whether it runs"
 		}
+		// Allow from Buzz needs the owner pinned on the hook's command line,
+		// and the pin holds only while Claude cannot change it unprompted.
+		if serr == nil && state != claude.StopHookMissing {
+			if owner := claude.PermissionHookOwner(home); owner == "" {
+				report["claude_approval_pin"] = "the PermissionRequest hook pins no owner, so Buzz can only block a tool call; run `amq-remote claude install-approval-hook --owner <pubkey>` to allow from Buzz"
+			} else {
+				report["claude_approval_pin"] = owner
+			}
+			if warns, werr := claude.PinWarnings(home); werr == nil && len(warns) > 0 {
+				report["claude_approval_pin_warnings"] = warns
+			}
+		}
 		break
 	}
 	// Body identity (611.15): per-session body keys, attestations, expiry
@@ -1719,6 +1731,7 @@ func claudeSubcommand(args []string, stdin io.Reader, stdout io.Writer) int {
 		fs := flag.NewFlagSet("permission-hook", flag.ContinueOnError)
 		fs.SetOutput(io.Discard)
 		wait := fs.Int("wait", int(claude.DefaultPermissionWait/time.Second), "seconds to wait for a Buzz answer")
+		owner := fs.String("owner", "", "pinned owner pubkey (64 lowercase hex) whose signed reaction can allow a call; none means reject-only")
 		if fs.Parse(args[1:]) != nil {
 			return 0
 		}
@@ -1730,18 +1743,9 @@ func claudeSubcommand(args []string, stdin io.Reader, stdout io.Writer) int {
 			<-sigs
 			close(done)
 		}()
-		return claude.RunPermissionHook(home, stdin, stdout, os.Stderr, done, time.Duration(*wait)*time.Second)
+		return claude.RunPermissionHook(home, stdin, stdout, os.Stderr, done, time.Duration(*wait)*time.Second, *owner, approvalVerifier)
 	case "install-approval-hook":
-		bin, err := os.Executable()
-		if err != nil {
-			bin = "amq-remote"
-		}
-		if err := claude.InstallPermissionHook(home, bin, claude.DefaultPermissionWait); err != nil {
-			say(os.Stderr, "install-approval-hook: %v\n", err)
-			return 1
-		}
-		say(stdout, "approval hook installed: Buzz can block a Claude tool call; allow it in the terminal\n")
-		return 0
+		return installApprovalHook(home, args[1:], stdout, os.Stderr)
 	case "uninstall-approval-hook":
 		if err := claude.UninstallPermissionHook(home); err != nil {
 			say(os.Stderr, "uninstall-approval-hook: %v\n", err)

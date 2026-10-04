@@ -48,9 +48,13 @@ command's own message. Do not work around a refusal.
    If a `native_capability` entry says the PermissionRequest hook is not
    installed (a Claude target with `approve`, shared through a relay share),
    tell the user: "This adds one PermissionRequest hook. It exits at once in
-   sessions that are not shared. Another decision hook you have can answer
+   sessions that are not shared. It pins your Buzz public key, so only your
+   signed ✅ can allow a tool call. Do not allow Claude to edit .claude for a
+   session, use bypassPermissions mode, or allow every Bash command: each
+   lets the pin be changed. Another decision hook you have can answer
    first. `amq-remote claude uninstall-approval-hook` removes it." Ask once,
-   then run `amq-remote claude install-approval-hook`.
+   then run `amq-remote claude install-approval-hook --root "$ROOT"`. If
+   doctor reports `claude_approval_pin_warnings`, show them to the user.
 4. **This session's Buzz agent.** Attach printed the session name `<name>`.
    Run `amq-acp setup --session <name> --out "$HOME/Downloads/AMQ <name>.agent.json"`
    and show its printed steps: in Buzz Desktop, Agents, then + then Import,
@@ -65,8 +69,9 @@ command's own message. Do not work around a refusal.
    - `--native`: "A DM sent while this session is busy waits. Buzz Stop cannot
      interrupt a Claude turn."
    - When the approval hook was installed in step 3: "When a Buzz request
-     needs a tool approval, the DM shows it. ❌ blocks that call. Buzz cannot
-     allow a tool call yet; allow it in the terminal. The first answer wins."
+     needs a tool approval, the DM shows it. ❌ blocks that call. ✅ allows
+     it when the DM offers ✅: a Bash command shown whole. Otherwise allow it
+     in the terminal. The first answer wins."
 
 Codex with `--native`: attach needs `CODEX_THREAD_ID` and a thread loaded in
 the Codex app-server daemon. A session started with plain `codex` is not in

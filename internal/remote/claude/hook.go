@@ -95,9 +95,123 @@ var (
 // approvals: one entry with no matcher (every tool, so a reject can reach
 // any call), marked AMQ_APPROVAL_HOOK=1, whose own deadline is wait and
 // whose installed timeout is wait plus PermissionHookGrace. It is inert in
-// a session no relay share with approve is serving. Idempotent.
-func InstallPermissionHook(home, bin string, wait time.Duration) error {
-	return mutateHook(home, permissionSpec, permissionHookEntry(bin, wait))
+// a session no relay share with approve is serving.
+//
+// owner, 64 lowercase hex, pins the owner pubkey on the hook's command
+// line: the only key whose signed reaction can allow a call (bead
+// 611.42.4). Claude cannot edit its settings file without a prompt, so it
+// cannot change the pin on its own. "" installs a reject-only hook. A
+// marked entry with another command is replaced; the same one is kept.
+func InstallPermissionHook(home, bin string, wait time.Duration, owner string) error {
+	if owner != "" && !ValidOwner(owner) {
+		return fmt.Errorf("owner %q is not a 64 lowercase hex public key", owner)
+	}
+	cmds, err := installedCommands(home, permissionSpec)
+	if err != nil {
+		return err
+	}
+	if len(cmds) == 1 && cmds[0] == permissionHookCommand(bin, wait, owner) {
+		return nil // already installed as asked
+	}
+	entry := permissionHookEntry(bin, wait, owner)
+	// One write: the marked entries out and the new one in.
+	return editSettings(home, true, func(raw []byte) ([]byte, error) {
+		if cut, err := rawRemoveEntries(raw, permissionSpec); err != nil {
+			return nil, err
+		} else if cut != nil {
+			raw = cut
+		}
+		return rawInsertEntry(raw, permissionSpec, entry)
+	})
+}
+
+// installedCommands lists the commands of spec's marked hooks in the user
+// settings file.
+func installedCommands(home string, spec hookSpec) ([]string, error) {
+	raw, err := readRegularBounded(settingsPath(home), maxSettingsBytes)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	loc, err := locateSettings(raw, spec.event)
+	if err != nil || loc.stop == nil {
+		return nil, err
+	}
+	groups, err := arrayElements(raw, *loc.stop)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, g := range groups {
+		var group struct {
+			Hooks []struct {
+				Command string `json:"command"`
+			} `json:"hooks"`
+		}
+		if json.Unmarshal(raw[g[0]:g[1]], &group) != nil {
+			continue
+		}
+		for _, h := range group.Hooks {
+			if strings.HasPrefix(h.Command, spec.marker) {
+				out = append(out, h.Command)
+			}
+		}
+	}
+	return out, nil
+}
+
+// ownerFlagRe finds the pinned owner at the end of the hook command.
+var ownerFlagRe = regexp.MustCompile(` --owner ([0-9a-f]{64})$`)
+
+// PermissionHookOwner is the owner pubkey the installed PermissionRequest
+// hook pins, or "" when there is no hook, no pin, or more than one hook.
+func PermissionHookOwner(home string) string {
+	cmds, err := installedCommands(home, permissionSpec)
+	if err != nil || len(cmds) != 1 {
+		return ""
+	}
+	if m := ownerFlagRe.FindStringSubmatch(cmds[0]); m != nil {
+		return m[1]
+	}
+	return ""
+}
+
+// PinWarnings names the user settings that defeat the owner pin: a
+// bypassPermissions default mode, or a permissions.allow entry for every
+// Bash command. Either lets Claude rewrite its settings, or run
+// install-approval-hook with another owner, without a prompt. Only
+// ~/.claude/settings.json is read; project and managed settings can add
+// the same.
+func PinWarnings(home string) ([]string, error) {
+	raw, err := readRegularBounded(settingsPath(home), maxSettingsBytes)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var st struct {
+		Permissions struct {
+			DefaultMode string   `json:"defaultMode"`
+			Allow       []string `json:"allow"`
+		} `json:"permissions"`
+	}
+	if err := json.Unmarshal(raw, &st); err != nil {
+		return nil, err
+	}
+	var out []string
+	if st.Permissions.DefaultMode == "bypassPermissions" {
+		out = append(out, "permissions.defaultMode is bypassPermissions: Claude can rewrite the approval hook's owner pin without a prompt")
+	}
+	for _, a := range st.Permissions.Allow {
+		if a := strings.TrimSpace(a); a == "Bash" || a == "Bash(*)" {
+			out = append(out, fmt.Sprintf("permissions.allow holds %q: Claude can rewrite the approval hook's owner pin without a prompt", a))
+			break
+		}
+	}
+	return out, nil
 }
 
 // UninstallPermissionHook removes only the marked PermissionRequest entry.
@@ -172,13 +286,25 @@ func settingsPath(home string) string {
 // entries when entry is nil.
 func mutateHook(home string, spec hookSpec, entry []byte) error {
 	install := entry != nil
+	return editSettings(home, install, func(raw []byte) ([]byte, error) {
+		if install {
+			return rawInsertEntry(raw, spec, entry)
+		}
+		return rawRemoveEntries(raw, spec)
+	})
+}
+
+// editSettings applies edit to the user settings file's bytes and writes
+// the result atomically; a nil result writes nothing. A missing file is
+// started as {} when create is set, and is left alone otherwise.
+func editSettings(home string, create bool, edit func([]byte) ([]byte, error)) error {
 	path := settingsPath(home)
 	raw, err := readRegularBounded(path, maxSettingsBytes)
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("settings %s: %w", path, err)
 		}
-		if !install {
+		if !create {
 			return nil
 		}
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
@@ -186,12 +312,7 @@ func mutateHook(home string, spec hookSpec, entry []byte) error {
 		}
 		raw = []byte("{}\n")
 	}
-	var out []byte
-	if install {
-		out, err = rawInsertEntry(raw, spec, entry)
-	} else {
-		out, err = rawRemoveEntries(raw, spec)
-	}
+	out, err := edit(raw)
 	if err != nil {
 		return fmt.Errorf("settings %s: %w", path, err)
 	}
@@ -218,16 +339,21 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
-// permissionHookCommand runs the PermissionRequest receiver with its wait.
-func permissionHookCommand(bin string, wait time.Duration) string {
-	return permissionHookMarker + shellQuote(bin) + " claude permission-hook --wait " + strconv.Itoa(int(wait/time.Second))
+// permissionHookCommand runs the PermissionRequest receiver with its wait
+// and, last, the pinned owner.
+func permissionHookCommand(bin string, wait time.Duration, owner string) string {
+	cmd := permissionHookMarker + shellQuote(bin) + " claude permission-hook --wait " + strconv.Itoa(int(wait/time.Second))
+	if owner != "" {
+		cmd += " --owner " + owner
+	}
+	return cmd
 }
 
 // permissionHookEntry is the PermissionRequest group: no matcher, and a
 // timeout PermissionHookGrace longer than the hook's own wait, so the hook
 // ends first and the terminal dialog decides.
-func permissionHookEntry(bin string, wait time.Duration) []byte {
-	return commandHookEntry(permissionHookCommand(bin, wait), int((wait+PermissionHookGrace)/time.Second))
+func permissionHookEntry(bin string, wait time.Duration, owner string) []byte {
+	return commandHookEntry(permissionHookCommand(bin, wait, owner), int((wait+PermissionHookGrace)/time.Second))
 }
 
 // stopHookEntry renders one Stop matcher group in Claude Code's settings

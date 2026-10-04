@@ -66,11 +66,10 @@ func TestClaudeApprovalRejectedFromBuzz(t *testing.T) {
 	}
 }
 
-// Pro review of #929, 2026-09-30, #1 (owner ruling: reject-only): an answer
-// file is not owner authorization, so Buzz can only block a Claude tool
-// call. The DM offers ❌ only, and a forged allow answer file never yields
-// an allow: the hook prints nothing, and the approval does not end as
-// answered.
+// Pro review of #929, 2026-09-30, #1: an answer file is not owner
+// authorization. Without an owner pin the DM offers ❌ only, and a forged
+// allow answer file never yields an allow: the hook prints nothing, and the
+// approval does not end as answered.
 func TestClaudeForgedAllowAnswerNeverAllows(t *testing.T) {
 	e := newClaudeApprovalE2E(t)
 	if strings.Contains(e.msg.Content, "✅") || !strings.Contains(e.msg.Content, "React ❌ to reject") {
@@ -115,6 +114,7 @@ type claudeApprovalE2E struct {
 	ep       *core.Endpoint
 	ledger   *Ledger
 	owner    [32]byte
+	body     [32]byte
 	advance  func() time.Time
 	sent     []nostr.Event
 	msg      nostr.Event
@@ -127,6 +127,13 @@ type claudeApprovalE2E struct {
 }
 
 func newClaudeApprovalE2E(t *testing.T) *claudeApprovalE2E {
+	return newClaudeApprovalE2EWith(t, false, "go test ./...")
+}
+
+// newClaudeApprovalE2EWith raises the approval for command. pinned installs
+// the hook with the owner's pubkey on its command line, pins the share with
+// that owner, and runs the hook with that owner and the real verifier.
+func newClaudeApprovalE2EWith(t *testing.T, pinned bool, command string) *claudeApprovalE2E {
 	base := time.Now().Truncate(time.Second)
 	clock := func() time.Time { return base }
 	var tick atomic.Int64
@@ -136,7 +143,16 @@ func newClaudeApprovalE2E(t *testing.T) *claudeApprovalE2E {
 	home := t.TempDir()
 	const sid, cwd = "sess-1", "/work/proj"
 	frames := fakeClaudeSession(t, home, sid, cwd)
-	if _, err := claude.PinApprovals(home, sid, "share-1", os.Getpid()); err != nil {
+	_, _ = rand.Read(e.owner[:])
+	_, _ = rand.Read(e.body[:])
+	owner, verify := "", claude.AllowVerifier(nil)
+	if pinned {
+		owner, verify = nostr.GetPublicKey(e.owner).Hex(), VerifyApproveEvidence
+		if err := claude.InstallPermissionHook(home, "/opt/amq-remote", claude.DefaultPermissionWait, owner); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := claude.PinApprovals(home, sid, "share-1", owner, os.Getpid()); err != nil {
 		t.Fatal(err)
 	}
 	cfg, _ := json.Marshal(map[string]any{"pid": os.Getpid(), "home": home, "approve": true})
@@ -153,9 +169,7 @@ func newClaudeApprovalE2E(t *testing.T) *claudeApprovalE2E {
 	t.Cleanup(func() { _ = e.ep.Close() })
 	e.ep.Register(att)
 
-	var body [32]byte
-	_, _ = rand.Read(e.owner[:])
-	_, _ = rand.Read(body[:])
+	body := e.body
 	b := Binding{Owner: nostr.GetPublicKey(e.owner).Hex(), Body: nostr.GetPublicKey(body).Hex(), Channel: "dm-1", Target: "cc-1", RelayHost: "relay", NativeSession: sid,
 		MinEvidence: protocol.EvidenceSubmitted}
 	e.ledger, _ = OpenLedger(t.TempDir())
@@ -185,13 +199,13 @@ func newClaudeApprovalE2E(t *testing.T) *claudeApprovalE2E {
 			"origin":  map[string]any{"kind": "peer", "msg_id": msgID}},
 		map[string]any{"type": "assistant", "timestamp": base.UTC().Format(time.RFC3339Nano),
 			"message": map[string]any{"role": "assistant", "content": []map[string]any{
-				{"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": map[string]any{"command": "go test ./..."}}}}})
+				{"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": map[string]any{"command": command}}}}})
 
 	stdin, _ := json.Marshal(map[string]any{"session_id": sid, "prompt_id": "p-1", "hook_event_name": "PermissionRequest",
-		"tool_name": "Bash", "tool_input": map[string]any{"command": "go test ./..."}})
+		"tool_name": "Bash", "tool_input": map[string]any{"command": command}})
 	go func() {
 		defer close(e.exited)
-		claude.RunPermissionHook(home, bytes.NewReader(stdin), &e.out, &e.errs, e.done, time.Minute)
+		claude.RunPermissionHook(home, bytes.NewReader(stdin), &e.out, &e.errs, e.done, time.Minute, owner, verify)
 	}()
 	e.dir = filepath.Join(home, ".claude", "sessions", "amq-approve", sid)
 	for deadline := time.Now().Add(5 * time.Second); e.iid == ""; time.Sleep(time.Millisecond) {
@@ -212,7 +226,7 @@ func newClaudeApprovalE2E(t *testing.T) *claudeApprovalE2E {
 			e.msg = evt
 		}
 	}
-	if !strings.Contains(e.msg.Content, "go test ./...") || !strings.Contains(e.msg.Content, "React ❌") {
+	if !strings.Contains(e.msg.Content, "Approval needed") || !strings.Contains(e.msg.Content, "❌ to reject") {
 		t.Fatalf("approval message = %q, want the command and how to reject", e.msg.Content)
 	}
 	return e
