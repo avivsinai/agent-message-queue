@@ -136,8 +136,9 @@ const historyTimeout = 10 * time.Second
 
 // maxHistoryEdits bounds the edits read of one approval message. The
 // carrier edits it a few times at most; a full page means the history is
-// not known, because the relay may have cut older edits from it.
-const maxHistoryEdits = 100
+// not known, because the relay may have cut older edits from it. The bound
+// stays below common relay page caps, so a capped page is a full one.
+const maxHistoryEdits = 20
 
 // CheckHistory reads the approval message's history from the relay, each
 // read up to the relay's end of stored events, within historyTimeout. It
