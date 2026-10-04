@@ -300,6 +300,11 @@ const (
 	// ResolutionRunEnded: the run reached a terminal state while the
 	// interaction was open.
 	ResolutionRunEnded ResolutionOutcome = "run_ended"
+	// ResolutionDeliveryUnknown: AMQ began to deliver an answer, and whether
+	// it reached the harness is not known (the delivering process stopped,
+	// or its write failed, before it recorded delivery). Neither an answer
+	// nor a terminal resolution is claimed.
+	ResolutionDeliveryUnknown ResolutionOutcome = "delivery_unknown"
 )
 
 // MaxApprovalPreview is the longest prompt a surface shows whole. An

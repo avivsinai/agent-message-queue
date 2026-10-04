@@ -56,6 +56,9 @@ type config struct {
 	Target string `json:"target,omitempty"`
 	// Home overrides the Claude home for tests; empty = os.UserHomeDir().
 	Home string `json:"home,omitempty"`
+	// Approve lets the owner answer tool approvals of AMQ runs from the
+	// Buzz DM, through the PermissionRequest hook (bead 611.42.3).
+	Approve bool `json:"approve,omitempty"`
 }
 
 // sessionRegistry is the subset of ~/.claude/sessions/<pid>.json the
@@ -147,6 +150,8 @@ func Attach(cfg config) (*Attachment, error) {
 		recoverFrom:  map[requests.Key]recoverScan{},
 		released:     map[requests.Key]struct{}{},
 		ctx:          context.Background(),
+
+		releasedOutcomes: map[requests.Key]map[string]protocol.Resolution{},
 	}
 	token, err := bindStopSession(home, reg.SessionID)
 	if err != nil && !errors.Is(err, errUnsupportedPlatform) {
@@ -260,6 +265,23 @@ type Attachment struct {
 	// restarted; the attachment is being replaced or shut down.
 	closed bool
 	ctx    context.Context
+	// turnPrompt is the promptId of the turn the cursor is inside; tool_use
+	// lines carry none, so they belong to this prompt's run.
+	turnPrompt string
+	// releasedOutcomes keeps how each approval of an acknowledged run
+	// ended, for an outcome the endpoint still owes. Bounded with released.
+	releasedOutcomes map[requests.Key]map[string]protocol.Resolution
+	// pendingOps are approval file writes decided under a.mu, run by the
+	// poller after it releases the lock.
+	pendingOps []func()
+	// clock replaces the wall clock in tests (SetNow).
+	clock func() time.Time
+	// pollSeq numbers the poller's passes: an approval binds only in a pass
+	// that read the approval files no earlier than the pass that found it.
+	pollSeq uint64
+	// afterTranscriptRead runs between a pass's transcript read and its
+	// apply; tests set it to write files at that moment.
+	afterTranscriptRead func()
 }
 
 // Inspect implements core.Attachment: the honest projection. Status is
@@ -269,9 +291,8 @@ type Attachment struct {
 // left by a crashed session must not read "live" forever). PR2: submit
 // is advertised TRUE — the pinned 611.2 socket wire is wired (submit.go);
 // the interrupt-family seams remain false (no keystroke seam,
-// docs/remote-compat.md §3). Evidence is nil on the projection: per-run
-// evidence is carried by Lookup, and the projection fails closed under
-// any caller floor.
+// docs/remote-compat.md §3). The projection's submit evidence is
+// submitted; per-run evidence is carried by Lookup.
 func (a *Attachment) Inspect() protocol.Session {
 	status, _ := a.observe()
 	att := "live"
@@ -288,12 +309,18 @@ func (a *Attachment) Inspect() protocol.Session {
 		Status:      status,
 		// PR2: submit true over the pinned socket wire; the rest stay
 		// false — no interrupt seam without keystrokes.
+		// ApproveTool: DM approvals through the PermissionRequest hook, when
+		// the manifest opts in (bead 611.42.3).
 		Capabilities: protocol.Capabilities{
 			Inspect: true, Submit: true, CancelRequest: false,
-			ApproveTool: false, AnswerQuestion: false, Steer: false,
+			ApproveTool: a.cfg.Approve && noFollowSupported, AnswerQuestion: false, Steer: false,
 			Terminal: "unavailable",
 		},
-		Evidence:   nil, // per-run evidence is Lookup's answer; fails closed under a floor
+		// Submit proves socket delivery; the transcript delivery line proves
+		// submitted and the assistant line the run, per request, through
+		// Lookup. So the projection is submitted: a relay share for Claude
+		// sets min_evidence submitted, and an admitted floor is refused.
+		Evidence:   &protocol.Evidence{Submit: protocol.EvidenceSubmitted, Completion: "run_terminal"},
 		ObservedAt: protocol.FormatTime(a.now()),
 	}
 }
@@ -345,7 +372,12 @@ func (a *Attachment) observe() (string, string) {
 	return normalizeStatus(reg.Status), reg.SessionID
 }
 
-func (a *Attachment) now() time.Time { return time.Now() }
+func (a *Attachment) now() time.Time {
+	if a.clock != nil {
+		return a.clock()
+	}
+	return time.Now()
+}
 
 // trackBoundSession publishes sessionID for the Stop-hook receiver when the
 // live registry session changes. File IO stays under a.mu: the files are
@@ -385,13 +417,7 @@ func (a *Attachment) CancelExact(key requests.Key, _ string) (core.CancelEvidenc
 	}, nil
 }
 
-// Respond implements core.Attachment: no approval/question seam exists
-// (docs/remote-compat.md §3; Remote Control is policy-disabled). The
-// typed already_resolved code (P2-3 — an empty code reads as success at
-// the endpoint) mirrors pi.
-func (a *Attachment) Respond(_ requests.Key, _, _, _ string) (protocol.Code, error) {
-	return protocol.CodeAlreadyResolved, nil
-}
+// Respond and ResolvedInteraction are in approvals.go.
 
 // AcknowledgeResult implements core.Attachment: nothing is retained, so
 // the release is a no-op.
@@ -400,16 +426,36 @@ func (a *Attachment) Respond(_ requests.Key, _, _, _ string) (protocol.Code, err
 // adapter drops its record, so a restarted attachment's Unknown is honest.
 func (a *Attachment) AcknowledgeResult(key requests.Key, _, _ string) {
 	a.mu.Lock()
+	rec := a.runs[key]
 	delete(a.runs, key)
 	delete(a.recoverFrom, key)
 	if len(a.released) >= maxReleased {
 		for k := range a.released { // drop an arbitrary old entry
 			delete(a.released, k)
+			delete(a.releasedOutcomes, k)
 			break
 		}
 	}
 	a.released[key] = struct{}{}
+	var promptID string
+	var ids []string
+	sessionID := a.boundSession
+	if rec != nil {
+		promptID = rec.promptID
+		if rec.sessionID != "" {
+			sessionID = rec.sessionID
+		}
+		for id := range rec.approvals {
+			ids = append(ids, id)
+		}
+		if len(rec.outcomes) > 0 {
+			a.releasedOutcomes[key] = rec.outcomes
+		}
+	}
 	a.mu.Unlock()
+	if promptID != "" || len(ids) > 0 {
+		removeApprovalFiles(a.home, sessionID, promptID, ids)
+	}
 }
 
 // maxReleased bounds the released-key set; the endpoint acknowledges each

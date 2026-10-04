@@ -45,6 +45,12 @@ command's own message. Do not work around a refusal.
    `amq-remote claude uninstall-stop-hook` removes it). Ask once, then run
    `amq-remote claude install-stop-hook`. The default mailbox path never
    needs this.
+   If a `native_capability` entry says the PermissionRequest hook is not
+   installed (a Claude target with `approve`, shared through a relay share),
+   tell the user: "This adds one PermissionRequest hook. It exits at once in
+   sessions that are not shared. Another decision hook you have can answer
+   first. `amq-remote claude uninstall-approval-hook` removes it." Ask once,
+   then run `amq-remote claude install-approval-hook`.
 4. **This session's Buzz agent.** Attach printed the session name `<name>`.
    Run `amq-acp setup --session <name> --out "$HOME/Downloads/AMQ <name>.agent.json"`
    and show its printed steps: in Buzz Desktop, Agents, then + then Import,
@@ -58,6 +64,9 @@ command's own message. Do not work around a refusal.
      waiting; a delivered message may still be acted on."
    - `--native`: "A DM sent while this session is busy waits. Buzz Stop cannot
      interrupt a Claude turn."
+   - When the approval hook was installed in step 3: "When a Buzz request
+     needs a tool approval, the DM shows it. ❌ blocks that call. Buzz cannot
+     allow a tool call yet; allow it in the terminal. The first answer wins."
 
 Codex with `--native`: attach needs `CODEX_THREAD_ID` and a thread loaded in
 the Codex app-server daemon. A session started with plain `codex` is not in
