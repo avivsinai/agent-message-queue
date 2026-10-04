@@ -129,8 +129,9 @@ type Endpoint struct {
 	// whole chain (Astra B784-1, 611.22.48 follow-up round 2).
 	pubPending map[requests.Key]int64
 	// failed holds the visible projection of a request whose async durable
-	// write failed, until the store catches up to its revision. Reads serve
-	// it so the owner sees uncertain, not a stale running (611.50).
+	// write failed. Reads serve it so the owner sees uncertain, not a stale
+	// running (611.50). It ends at the next durable write of the key or the
+	// next Reconcile pass over it; a pass that fails again sets it again.
 	failed map[requests.Key]protocol.Snapshot
 	// B13 lifecycle: state transitions accepting -> draining -> closed.
 	// inFlight counts handlers between entry (registerInFlight) and exit
@@ -1351,14 +1352,13 @@ func (e *Endpoint) notifyStorageFailureLocked(rec *requests.Record, err error) {
 	fail.State = protocol.StateUncertain
 	fail.Code = code
 	fail.Result = nil // never advertise a result we could not persist
+	fail.Interaction = nil
 	e.failed[keyOfRecord(rec)] = fail.Snapshot
 	e.notifyLocked(&fail)
 }
 
 // failedLocked returns the storage-failure projection for the durable record
-// cur while the store has not yet reached the revision whose write failed.
-// The store accepts only the next revision, so a durable record at that
-// revision or later means a retry landed, and the projection is dropped.
+// cur. A durable terminal state is final, so it wins over the projection.
 // The caller holds e.mu.
 func (e *Endpoint) failedLocked(cur *requests.Record) (protocol.Snapshot, bool) {
 	key := keyOfRecord(cur)
@@ -1366,7 +1366,7 @@ func (e *Endpoint) failedLocked(cur *requests.Record) (protocol.Snapshot, bool) 
 	if !ok {
 		return protocol.Snapshot{}, false
 	}
-	if cur.Revision >= snap.Revision {
+	if cur.State.Terminal() {
 		delete(e.failed, key)
 		return protocol.Snapshot{}, false
 	}
@@ -1890,6 +1890,7 @@ func (e *Endpoint) commitLocked(rec *requests.Record, t *target) (string, error)
 	if err := e.store.Update(rec); err != nil {
 		return "", err
 	}
+	delete(e.failed, keyOfRecord(rec))
 	e.notifyLocked(rec)
 	ackDigest := ""
 	if rec.State.Terminal() && t != nil {
@@ -1923,6 +1924,11 @@ func (e *Endpoint) Reconcile() error {
 	}
 	var firstErr error
 	for _, rec := range recs {
+		// This pass retries the write a storage failure lost; if it fails
+		// again, the failure path sets the projection again (611.50).
+		e.mu.Lock()
+		delete(e.failed, keyOfRecord(rec))
+		e.mu.Unlock()
 		var rerr error
 		switch rec.State {
 		case protocol.StateDispatching, protocol.StateRunning, protocol.StateUncertain:
