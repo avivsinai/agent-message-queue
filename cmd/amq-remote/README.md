@@ -490,6 +490,7 @@ remedy. Doctor exits 6 exactly when `failing` is not empty.
 | `presence` | A presence share has not published `online` or `away`. |
 | `activity` | An activity share is not `exporting`. |
 | `discovery` | The owner has not published the kind 30177 policy for the body. |
+| `stale_harness` | A running `amq-acp` process executes a path other than the installed one, which follows a `brew upgrade`: Stop and Start that agent in Buzz Desktop. |
 
 `authenticated` means the relay accepted this body's AUTH. It does not prove
 that the relay materialized the owner binding or that any viewer is ready.

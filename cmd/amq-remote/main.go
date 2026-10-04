@@ -1212,6 +1212,14 @@ func doctor(args []string) (any, int, error) {
 		report["relay_error"] = rerr.Error()
 		fail("relay_auth", "relay-status.json", rerr.Error(), "restart serve; it rewrites relay-status.json")
 	}
+	// Stale harness (bbn): a Buzz agent can keep running an amq-acp that an
+	// upgrade replaced, so it answers from the removed binding contract.
+	// Doctor names the exact process and the restart remedy.
+	if stale, serr := staleACPFailures(); serr == nil {
+		for _, f := range stale {
+			fail(f.Boundary, f.Subject, f.Detail, f.Remedy)
+		}
+	}
 	return finish()
 }
 
