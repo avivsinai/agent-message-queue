@@ -88,6 +88,33 @@ func TestAsyncStorageFailureIsVisibleToTheOwner(t *testing.T) {
 		}
 	})
 
+	t.Run("stays visible while reconcile waits on the harness", func(t *testing.T) {
+		ep, rt, store, _ := b14cEndpoint(t)
+		const id = "11111111-1111-4111-8111-111111111153"
+		if _, err := ep.Handle(submitCmd(id), core.Source{Host: "local"}); err != nil {
+			t.Fatalf("submit: %v", err)
+		}
+		readOnly(t, store)
+		if !rt.Complete(id, "done") {
+			t.Fatal("no running run to complete")
+		}
+		rt.HoldLookup()
+		t.Cleanup(rt.ReleaseLookup)
+		asked := rt.NotifyLookupReady()
+		done := make(chan error, 1)
+		go func() { done <- ep.Reconcile() }()
+		select {
+		case <-asked:
+		case <-time.After(5 * time.Second):
+			t.Fatal("reconcile never asked the harness")
+		}
+		if s := get(t, ep, id); s.State != protocol.StateUncertain {
+			t.Fatalf("get during reconcile = %s, want uncertain", s.State)
+		}
+		rt.ReleaseLookup()
+		<-done
+	})
+
 	t.Run("durable terminal state wins", func(t *testing.T) {
 		ep, rt, store, _ := b14cEndpoint(t)
 		const id = "11111111-1111-4111-8111-111111111152"

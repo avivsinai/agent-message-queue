@@ -130,9 +130,11 @@ type Endpoint struct {
 	pubPending map[requests.Key]int64
 	// failed holds the visible projection of a request whose async durable
 	// write failed. Reads serve it so the owner sees uncertain, not a stale
-	// running (611.50). It ends at the next durable write of the key or the
-	// next Reconcile pass over it; a pass that fails again sets it again.
-	failed map[requests.Key]protocol.Snapshot
+	// running (611.50). It ends at the next durable write of the key, or
+	// when a Reconcile pass over the key returns without error and no newer
+	// failure was set meanwhile (failSeq tells them apart).
+	failed  map[requests.Key]failure
+	failSeq int64
 	// B13 lifecycle: state transitions accepting -> draining -> closed.
 	// inFlight counts handlers between entry (registerInFlight) and exit
 	// (releaseInFlight). drained is a condition variable Close waits on.
@@ -182,7 +184,7 @@ func New(cfg Config) *Endpoint {
 		visible:          map[requests.Key]int64{},
 		publishing:       map[requests.Key]bool{},
 		pubPending:       map[requests.Key]int64{},
-		failed:           map[requests.Key]protocol.Snapshot{},
+		failed:           map[requests.Key]failure{},
 		drainObligations: map[requests.Key]int64{},
 		state:            stateAccepting,
 		drainTO:          drainTimeout,
@@ -1353,8 +1355,15 @@ func (e *Endpoint) notifyStorageFailureLocked(rec *requests.Record, err error) {
 	fail.Code = code
 	fail.Result = nil // never advertise a result we could not persist
 	fail.Interaction = nil
-	e.failed[keyOfRecord(rec)] = fail.Snapshot
+	e.failSeq++
+	e.failed[keyOfRecord(rec)] = failure{snap: fail.Snapshot, seq: e.failSeq}
 	e.notifyLocked(&fail)
+}
+
+// failure is a storage-failure projection and the order in which it was set.
+type failure struct {
+	snap protocol.Snapshot
+	seq  int64
 }
 
 // failedLocked returns the storage-failure projection for the durable record
@@ -1362,7 +1371,7 @@ func (e *Endpoint) notifyStorageFailureLocked(rec *requests.Record, err error) {
 // The caller holds e.mu.
 func (e *Endpoint) failedLocked(cur *requests.Record) (protocol.Snapshot, bool) {
 	key := keyOfRecord(cur)
-	snap, ok := e.failed[key]
+	f, ok := e.failed[key]
 	if !ok {
 		return protocol.Snapshot{}, false
 	}
@@ -1370,7 +1379,7 @@ func (e *Endpoint) failedLocked(cur *requests.Record) (protocol.Snapshot, bool) 
 		delete(e.failed, key)
 		return protocol.Snapshot{}, false
 	}
-	return snap, true
+	return f.snap, true
 }
 
 func boundResult(r *protocol.Result) *protocol.Result {
@@ -1924,10 +1933,8 @@ func (e *Endpoint) Reconcile() error {
 	}
 	var firstErr error
 	for _, rec := range recs {
-		// This pass retries the write a storage failure lost; if it fails
-		// again, the failure path sets the projection again (611.50).
 		e.mu.Lock()
-		delete(e.failed, keyOfRecord(rec))
+		seen := e.failed[keyOfRecord(rec)].seq
 		e.mu.Unlock()
 		var rerr error
 		switch rec.State {
@@ -1959,6 +1966,15 @@ func (e *Endpoint) Reconcile() error {
 			default:
 				rerr = e.replayTerminalAck(rec)
 			}
+		}
+		if rerr == nil {
+			// The pass retried the write a storage failure lost and nothing
+			// failed, so the durable record is the truth again (611.50).
+			e.mu.Lock()
+			if f, ok := e.failed[keyOfRecord(rec)]; ok && f.seq == seen {
+				delete(e.failed, keyOfRecord(rec))
+			}
+			e.mu.Unlock()
 		}
 		if rerr != nil && firstErr == nil {
 			firstErr = rerr
@@ -2234,6 +2250,7 @@ func (e *Endpoint) reconcileCancelRetry(rec *requests.Record) error {
 		runID = *rec.NativeRun
 	}
 	if _, cerr := e.applyCancelOutcomeLocked(rec, t, key, epoch, runID, ev, nerr); cerr != nil {
+		e.notifyStorageFailureLocked(rec, cerr)
 		e.mu.Unlock()
 		return cerr
 	}
