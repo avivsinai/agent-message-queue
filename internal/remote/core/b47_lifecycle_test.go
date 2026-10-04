@@ -1,7 +1,6 @@
 package core_test
 
 import (
-	"errors"
 	"testing"
 	"time"
 
@@ -128,8 +127,6 @@ func TestB47TickRegistersInFlightForDrain(t *testing.T) {
 	// not leave the gate held (goroutine leak under -race). Idempotent:
 	// release no-ops once the gate channel is closed.
 	t.Cleanup(worker.ReleaseLookup)
-	// Ensure held operations are released on failure too (611.22.47 P2).
-	t.Cleanup(worker.ReleaseLookup)
 
 	// Seed a non-terminal record so reconcileLive has something to Lookup.
 	// Create as Received (the only non-terminal seed the store accepts for a
@@ -204,8 +201,3 @@ func waitForDraining(t *testing.T, ep *core.Endpoint) {
 	}
 	t.Fatal("timed out waiting for endpoint to enter draining")
 }
-
-// Ensure the errors import is used (the test package references Refusal via
-// errors.As in sibling tests; this keeps the import stable if this file is
-// the only consumer in a trimmed build).
-var _ = errors.As

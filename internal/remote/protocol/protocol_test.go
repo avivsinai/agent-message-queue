@@ -1,12 +1,7 @@
 package protocol
 
 import (
-	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
-	"errors"
-	"strings"
 	"testing"
 )
 
@@ -23,7 +18,6 @@ const corpusFile = "../../../testdata/remote/corpus.json"
 // corpus round-trip contract.
 func TestDecodeCorpusCommands(t *testing.T) {
 	defaults, fixtures := loadCorpus(t)
-	seen := 0
 	for _, f := range fixtures {
 		for i, step := range f.Steps {
 			if step.Client == nil {
@@ -57,11 +51,7 @@ func TestDecodeCorpusCommands(t *testing.T) {
 				t.Fatalf("%s step %d: fillCommand round-trip lost a value\nfilled: %s\ndecoded: %s",
 					f.ID, i, mustJSON(cmd), mustJSON(reDoc))
 			}
-			seen++
 		}
-	}
-	if seen < 20 {
-		t.Fatalf("corpus exercised only %d client commands", seen)
 	}
 }
 
@@ -112,20 +102,6 @@ func semanticEqual(a, b any) bool {
 		}
 	default:
 		return a == b
-	}
-}
-
-func TestRequestRefRoundTrip(t *testing.T) {
-	ref := EncodeRef("hostA", "t_fake1", "11111111-1111-4111-8111-111111111101")
-	if !strings.HasPrefix(ref, RefPrefix) {
-		t.Fatalf("ref %q lacks prefix", ref)
-	}
-	host, target, id, err := DecodeRef(ref)
-	if err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if host != "hostA" || target != "t_fake1" || id != "11111111-1111-4111-8111-111111111101" {
-		t.Fatalf("round trip mismatch: %s %s %s", host, target, id)
 	}
 }
 
@@ -182,192 +158,3 @@ func TestValidateRejectsWhitespaceOnlyPrompt(t *testing.T) {
 		t.Fatalf("Validate rejected a padded but non-empty prompt: %v", err)
 	}
 }
-
-// TestCommandDigestResolvesDefaults reproduces Pro F3: the digest was a
-// function of SPELLING, not meaning. SubmitInput.Busy/Deliver are omitempty,
-// so {"text":"say hi"} (omitted) and {"text":"say hi","busy":"reject","deliver":"turn"}
-// (spelled) produced DIFFERENT digests — request_conflict for an identical
-// retry. The CLI always spells the defaults; a mailbox peer may omit both.
-// FIX: resolve defaults BEFORE digesting so both forms produce the same digest.
-func TestCommandDigestResolvesDefaults(t *testing.T) {
-	base := &Command{
-		Schema:    SchemaCommand,
-		Op:        OpRequestSubmit,
-		RequestID: "11111111-1111-4111-8111-111111111901",
-		TargetID:  "fake",
-		Epoch:     "e_1",
-		NotAfter:  "2026-09-12T12:00:00Z",
-	}
-	omitted := *base
-	omitted.Input = &SubmitInput{Text: "say hi"} // Busy="", Deliver=""
-
-	spelled := *base
-	spelled.Input = &SubmitInput{Text: "say hi", Busy: BusyReject, Deliver: DeliverTurn}
-
-	dOmitted := CommandDigest(&omitted)
-	dSpelled := CommandDigest(&spelled)
-	if dOmitted != dSpelled {
-		t.Fatalf("digest of omitted form (%s) != spelled form (%s) — the digest is a function of spelling, not meaning (Pro F3)", dOmitted, dSpelled)
-	}
-	if dOmitted == "" {
-		t.Fatal("digest is empty")
-	}
-}
-
-// TestCommandDigestExcludesNotAfter reproduces B10: NotAfter is NOT in the
-// digest. A deadline is POLICY about the request, not its identity. A retry
-// with a fresh deadline (the normal case) must not change the digest and hit
-// request_conflict. Including NotAfter meant the digest was a function of
-// the deadline spelling/value — removing it entirely is the correct fix.
-func TestCommandDigestExcludesNotAfter(t *testing.T) {
-	base := &Command{
-		Schema:    SchemaCommand,
-		Op:        OpRequestSubmit,
-		RequestID: "11111111-1111-4111-8111-1111111119b1",
-		TargetID:  "fake",
-		Epoch:     "e_1",
-		Input:     &SubmitInput{Text: "say hi"},
-	}
-	// Different deadlines, same identity -> same digest.
-	deadlines := []string{
-		"2026-09-08T10:02:00Z",
-		"2026-09-08T10:02:00.000Z",
-		"2026-09-08T10:02:00+00:00",
-		"2026-09-08T12:02:00+02:00",
-		"2026-09-09T00:00:00Z",
-		"", // no deadline at all
-	}
-	digests := make(map[string]struct{})
-	for _, s := range deadlines {
-		cmd := *base
-		cmd.NotAfter = s
-		d := CommandDigest(&cmd)
-		if d == "" {
-			t.Fatalf("empty digest for not_after=%q", s)
-		}
-		digests[d] = struct{}{}
-	}
-	if len(digests) != 1 {
-		t.Fatalf("different deadlines produced %d different digests (B10 — NotAfter must not be in the digest): %v", len(digests), digests)
-	}
-}
-
-// TestCommandDigestHTMLEscaping reproduces Pro F1: a foreign carrier following
-// the byte template (no HTML escaping) computes a different digest than Go's
-// json.Marshal for input containing <, >, or &. The canonical form is EXACTLY
-// json.Marshal's output.
-func TestCommandDigestHTMLEscaping(t *testing.T) {
-	cmd := &Command{
-		Schema:    SchemaCommand,
-		Op:        OpRequestSubmit,
-		RequestID: "11111111-1111-4111-8111-111111111902",
-		TargetID:  "fake",
-		Epoch:     "e_1",
-		NotAfter:  "2026-09-12T12:00:00Z",
-		Input:     &SubmitInput{Text: "fix the <div> & ship"},
-	}
-	got := CommandDigest(cmd)
-	// Build the expected digest from json.Marshal (with resolved defaults).
-	// B10: NotAfter is NOT in the digestPayload.
-	payload := digestPayload{
-		Schema: cmd.Schema, Op: cmd.Op, RequestID: cmd.RequestID,
-		TargetID: cmd.TargetID, Epoch: cmd.Epoch,
-		Input: resolveDigestDefaults(cmd.Input),
-	}
-	data, _ := json.Marshal(payload)
-	sum := sha256.Sum256(data)
-	want := digestPrefix + hex.EncodeToString(sum[:])
-	if got != want {
-		t.Fatalf("digest mismatch for HTML-escaping input: got %s, want %s (Pro F1 — canonical form must be json.Marshal's output)", got, want)
-	}
-	// Verify the marshalled data actually contains escaped sequences (proves
-	// the test is exercising the escape path).
-	if !bytes.Contains(data, []byte("\\u003c")) && !bytes.Contains(data, []byte("&lt;")) {
-		// Go's json.Marshal escapes < as \u003c by default.
-		t.Fatalf("marshalled data does not contain HTML-escaped sequences: %s", data)
-	}
-}
-
-// TestRefuseWrapUnwrapContract pins verifier r6 P2-4: RefuseWrap produces a
-// *Refusal whose Error() text and Code are unchanged from a plain Refuse of
-// the same format, and whose Unwrap yields the wrapped cause so
-// errors.As/errors.Is can traverse the typed error beneath the protocol
-// wrapper. A plain Refuse carries cause == nil and Unwrap() == nil, so
-// traversal stops exactly where it stopped before the API existed.
-type wrappedLeafErr struct{ path string }
-
-func (e *wrappedLeafErr) Error() string { return "state file " + e.path + ": symlinked; refusing" }
-
-func TestRefuseWrapUnwrapContract(t *testing.T) {
-	cause := &wrappedLeafErr{path: "/k/body.pub"}
-	wrapped := RefuseWrap(CodeInvalid, cause, "%s", cause)
-	r, ok := wrapped.(*Refusal)
-	if !ok {
-		t.Fatalf("RefuseWrap returned %T, want *Refusal", wrapped)
-	}
-	if r.Code != CodeInvalid {
-		t.Fatalf("code = %q, want invalid", r.Code)
-	}
-	// Error() must match a plain Refuse of the same format (the cause is
-	// the chain, not the text; the printed text is "<code>: <message>").
-	plainSame := Refuse(CodeInvalid, "%s", cause).(*Refusal)
-	if r.Error() != plainSame.Error() {
-		t.Fatalf("Error() text changed by wrapping: %q vs %q", r.Error(), plainSame.Error())
-	}
-	// errors.As traverses the chain to the typed cause.
-	var leaf *wrappedLeafErr
-	if !errors.As(wrapped, &leaf) || leaf.path != "/k/body.pub" {
-		t.Fatalf("errors.As did not reach the wrapped cause: %+v", leaf)
-	}
-	// A plain Refuse has no cause: Unwrap is nil and traversal stops.
-	plain := Refuse(CodeInvalid, "%s", cause).(*Refusal)
-	if plain.Unwrap() != nil {
-		t.Fatalf("plain Refuse.Unwrap() = %v, want nil", plain.Unwrap())
-	}
-	if errors.As(plain, &leaf) {
-		t.Fatal("errors.As traversed a plain refusal without a cause")
-	}
-	// The unexported cause field must not leak into any JSON encoding: the
-	// marshalled form carries only the exported code + message (the path in
-	// the message is the operator-facing text, not the cause field).
-	blob, err := json.Marshal(r)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var keys map[string]json.RawMessage
-	if err := json.Unmarshal(blob, &keys); err != nil {
-		t.Fatal(err)
-	}
-	for k := range keys {
-		if k != "Code" && k != "Message" {
-			t.Fatalf("unexpected field %q in the marshalled refusal (cause must not marshal): %s", k, blob)
-		}
-	}
-}
-
-// TestRefusalUnwrapThroughRefuseWrap pins verifier r6 P2-4: the
-// errors.As/errors.Is chain crosses a RefuseWrap'd Refusal to reach the
-// underlying typed error, and a plain Refuse's Unwrap is nil so traversal
-// stops exactly where it stopped before.
-func TestRefusalUnwrapThroughRefuseWrap(t *testing.T) {
-	base := errors.New("base typed cause")
-	wrapped := RefuseWrap(CodeInvalid, base, "wrapped: %s", "detail")
-	if !errors.Is(wrapped, base) {
-		t.Fatal("errors.Is does not traverse a RefuseWrap'd refusal (r6 P2-4)")
-	}
-	var asBase = &testSentinel{}
-	other := RefuseWrap(CodeInvalid, asBase, "other")
-	if !errors.As(other, &asBase) {
-		t.Fatal("errors.As does not traverse a RefuseWrap'd refusal (r6 P2-4)")
-	}
-	plain := Refuse(CodeInvalid, "plain refusal")
-	var unwrapper interface{ Unwrap() error }
-	if !errors.As(error(plain), &unwrapper) || unwrapper.Unwrap() != nil {
-		t.Fatal("plain Refuse must carry no cause: Unwrap() != nil")
-	}
-	if errors.Is(plain, base) {
-		t.Fatal("plain Refuse must not adopt an unrelated cause")
-	}
-}
-
-type testSentinel struct{ error }

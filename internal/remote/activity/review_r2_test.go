@@ -22,7 +22,7 @@ func TestR2AmbiguousSendsConsumeRate(t *testing.T) {
 		return errors.New("written but OK lost")
 	})
 	for range 120 {
-		_ = sink.Accept(context.Background(), reviewNote("hello"))
+		_ = deliver(context.Background(), sink, reviewNote("hello"))
 	}
 	if sent > 100 {
 		t.Fatalf("%d ambiguous attempts in one second, want at most 100", sent)
@@ -37,7 +37,7 @@ func TestR2ConcurrentSinksReserveRate(t *testing.T) {
 		return nil
 	})
 	for range 98 {
-		if err := first.Accept(context.Background(), reviewNote("hello")); err != nil {
+		if err := deliver(context.Background(), first, reviewNote("hello")); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -52,28 +52,33 @@ func TestR2ConcurrentSinksReserveRate(t *testing.T) {
 		<-release
 		return nil
 	}
+	returned := make(chan struct{}, 2)
 	var wg sync.WaitGroup
 	for range 2 {
 		wg.Add(1)
 		sink := testSink(body, owner, pub)
 		go func() {
 			defer wg.Done()
-			_ = sink.Accept(context.Background(), reviewNote("tail"))
+			_ = deliver(context.Background(), sink, reviewNote("tail"))
+			returned <- struct{}{}
 		}()
 	}
-	// The review barrier waits for both Publish calls before releasing the
-	// first. Holding the reservation across Publish stops the second call,
-	// so that wait cannot complete. The cap is the assertion.
-	done := make(chan struct{})
-	go func() {
-		wg.Wait()
-		close(done)
-	}()
+	defer wg.Wait()
+	defer close(release)
+	// One sink takes the last slot and parks in Publish. The reservation
+	// counts that in-flight send, so the other sink must drop its frame and
+	// return, not reach Publish too.
 	select {
-	case <-done:
-	case <-time.After(time.Second):
-		close(release)
-		<-done
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no sink reached Publish")
+	}
+	select {
+	case <-returned:
+	case <-entered:
+		t.Fatal("both sinks reached Publish: the in-flight send did not hold its rate slot")
+	case <-time.After(5 * time.Second):
+		t.Fatal("the second sink neither dropped its frame nor published")
 	}
 	if sent.Load() > 100 {
 		t.Fatalf("%d sends in one second across sinks", sent.Load())
@@ -94,7 +99,7 @@ func TestR2ExpiryCheckedBetweenSends(t *testing.T) {
 		return nil
 	})
 	sink.Now = func() time.Time { return now }
-	if err := sink.Accept(context.Background(), reviewNote(strings.Repeat("a", 50000))); err != nil {
+	if err := deliver(context.Background(), sink, reviewNote(strings.Repeat("a", 50000))); err != nil {
 		t.Fatal(err)
 	}
 	if stale > 0 {
@@ -120,7 +125,7 @@ func TestR2NativeEnqueueAndConsumer(t *testing.T) {
 		defer wg.Done()
 		<-start
 		for range 30 {
-			_ = sink.Accept(context.Background(), reviewNote("consumer"))
+			_ = deliver(context.Background(), sink, reviewNote("consumer"))
 		}
 	}()
 	close(start)

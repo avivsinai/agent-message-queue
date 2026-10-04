@@ -8,6 +8,14 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.86.1](https://github.com/avivsinai/agent-message-queue/compare/v0.86.0...v0.86.1) (2026-10-04)
+
+
+### Bug Fixes
+
+* **remote:** only the owner's Buzz share cancels its request ([#934](https://github.com/avivsinai/agent-message-queue/issues/934)) ([8608a69](https://github.com/avivsinai/agent-message-queue/commit/8608a69998a25388cc50586e3bdb196a34ac2b7d))
+* **remote:** the spool drainer replays only a valid local submit ([#935](https://github.com/avivsinai/agent-message-queue/issues/935)) ([917dbfa](https://github.com/avivsinai/agent-message-queue/commit/917dbfadfabd31a4319ab25f157c3aa3dbc4d555))
+
 ## [0.86.0](https://github.com/avivsinai/agent-message-queue/compare/v0.85.0...v0.86.0) (2026-10-04)
 
 

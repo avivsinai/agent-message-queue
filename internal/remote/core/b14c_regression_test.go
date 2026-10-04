@@ -196,11 +196,16 @@ func TestB14cCancelRacesAdmission(t *testing.T) {
 	// consumed by Submit when the gate releases, returning
 	// cancelled_before_admission. This is the exact codex shape.
 	ref := protocol.EncodeRef("local", "fake", id)
-	if _, err := ep.Handle(&protocol.Command{
+	cancelAny, err := ep.Handle(&protocol.Command{
 		Schema: protocol.SchemaCommand, Op: protocol.OpRequestCancel, RequestRef: ref,
 		TargetID: "fake", Epoch: "e_1", NotAfter: protocol.FormatTime(now().Add(2 * time.Minute)),
-	}, core.Source{Host: "local"}); err != nil {
+	}, core.Source{Host: "local"})
+	if err != nil {
 		t.Fatalf("cancel: %v", err)
+	}
+	// Pro #4: the cancel reply's snapshot code equals its outcome code.
+	if cancelRep := cancelAny.(protocol.Reply); cancelRep.Snapshot.Code != cancelRep.Outcome.Code {
+		t.Fatalf("cancel reply snapshot.Code=%q != outcome.Code=%q (Pro #4)", cancelRep.Snapshot.Code, cancelRep.Outcome.Code)
 	}
 
 	rt.ReleaseAdmission()

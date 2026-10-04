@@ -63,18 +63,6 @@ func (s *Sink) AcceptParsed(ctx context.Context, note claude.ActivityNote) error
 	return s.Drain(ctx)
 }
 
-// AcceptClaude parses one transcript line with the adapter's parser and
-// projects it. Production delivery uses AcceptParsed on the note the
-// poller already decoded, so the JSONL is not read a second time. A raw
-// line carries no turn; the line UUID stays the message identity.
-func (s *Sink) AcceptClaude(ctx context.Context, line string) error {
-	parsed, ok := claude.ParseTranscriptLine(line)
-	if !ok {
-		return nil
-	}
-	return s.AcceptParsed(ctx, claude.ActivityNote{Line: parsed, SessionID: parsed.SessionID})
-}
-
 func projectClaudeBlock(session, turnID string, line claude.TranscriptLine, block claude.TranscriptBlock) (observation, bool) {
 	obs := observation{
 		Kind:      "acp_read",

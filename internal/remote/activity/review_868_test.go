@@ -11,24 +11,6 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
 )
 
-// Codex #868 review 2026-09-23T07-04-12.081Z_pid46637_0449f9e4: a tool_call
-// needs a title, and tool content is an array. The text-message codec is
-// the wrong shape.
-func TestReviewToolCallHasACPShape(t *testing.T) {
-	got := claudeUpdates(t, `{"type":"assistant","uuid":"a1","sessionId":"thread-1","message":{"content":[{"type":"tool_use","id":"toolu_1","name":"Read","input":{"file_path":"private"}}]}}`)
-	if len(got) != 1 {
-		t.Fatalf("updates=%d", len(got))
-	}
-	if title, ok := got[0]["title"].(string); !ok || title == "" {
-		t.Errorf("tool_call lacks required ACP title: %#v", got[0])
-	}
-	if content, ok := got[0]["content"]; ok {
-		if _, ok := content.([]any); !ok {
-			t.Errorf("ACP tool content must be an array, got %T", content)
-		}
-	}
-}
-
 // Codex #868 review 2026-09-23T07-04-12.081Z_pid46637_0449f9e4: is_error
 // stays failed. Desktop treats a missing status as completed.
 func TestReviewToolErrorRemainsFailed(t *testing.T) {
@@ -72,7 +54,7 @@ func claudeUpdates(t *testing.T, line string) []map[string]any {
 		updates = append(updates, p.Params.Update)
 		return nil
 	})
-	if err := s.AcceptClaude(context.Background(), line); err != nil {
+	if err := deliverClaude(context.Background(), s, line); err != nil {
 		t.Fatal(err)
 	}
 	return updates

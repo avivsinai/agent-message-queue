@@ -16,7 +16,8 @@ import (
 )
 
 // Regression tests for Pro round-2 findings on the endpoint
-// (agent-message-queue-611.22.36 packets 4a, 4b, 4c). Each fails against the
+// (agent-message-queue-611.22.36 packets 4a and 4c; 4b is the store's
+// compaction gate, TestCompactOneKeepsOwedResults). Each fails against the
 // endpoint as it was before the fix.
 
 // TestPublishedRevisionMarkerFailureRetriesMarkerNotDelivery reproduces
@@ -93,63 +94,6 @@ func TestPublishedRevisionMarkerFailureRetriesMarkerNotDelivery(t *testing.T) {
 	}
 	if n := countTerminal(); n != 1 {
 		t.Fatalf("terminal revision delivered %d times (4a — reconcile re-delivered instead of re-marking)", n)
-	}
-}
-
-// TestCompactionKeepsResultTheCallerHasNotReceived reproduces packet 4b: the
-// compaction gate checked only the runtime obligation (OwesAck). A result
-// whose AMQ publication never succeeded but whose native acknowledgement was
-// memoed was compacted away — the only retained copy of an answer the caller
-// had not received.
-func TestCompactionKeepsResultTheCallerHasNotReceived(t *testing.T) {
-	store, now := openStore(t)
-	id := "11111111-1111-4111-8111-11111111114b"
-	rec := &requests.Record{
-		Snapshot: protocol.Snapshot{
-			Schema: protocol.SchemaRequest, RequestID: id, CreatorHost: "amq:codex", TargetID: "fake",
-			Epoch: "e_1", Revision: 1, State: protocol.StateReceived, InputDigest: requests.Digest([]byte("hi")),
-			ObservedAt: "2026-09-01T00:00:00Z",
-		},
-		Input:  &protocol.SubmitInput{Text: "hi"},
-		Origin: map[string]string{"carrier": "amq", "from": "codex"},
-	}
-	if err := store.Create(rec); err != nil {
-		t.Fatalf("create: %v", err)
-	}
-	run := "run_1"
-	rec.Revision, rec.State = 2, protocol.StateDispatching
-	if err := store.Update(rec); err != nil {
-		t.Fatalf("dispatching: %v", err)
-	}
-	rec.Revision, rec.State, rec.NativeRun, rec.NativeDispatches = 3, protocol.StateRunning, &run, 1
-	if err := store.Update(rec); err != nil {
-		t.Fatalf("running: %v", err)
-	}
-	rec.Revision, rec.State = 4, protocol.StateCompleted
-	rec.Result = &protocol.Result{Text: "the answer"}
-	rec.AckDigest = protocol.EvidenceDigest(rec.Result) // runtime released; caller never got it
-	rec.ObservedAt = "2026-09-01T00:00:00Z"
-	if err := store.Update(rec); err != nil {
-		t.Fatalf("completed: %v", err)
-	}
-	k := requests.Key{CreatorHost: "amq:codex", TargetID: "fake", RequestID: id}
-
-	n, err := store.Compact(now().Add(time.Second), 1000)
-	if err != nil || n != 0 {
-		t.Fatalf("compact: n=%d err=%v, want 0 (4b — the caller has not received this result)", n, err)
-	}
-	got, _, _ := store.Get(k)
-	if got.Result == nil || got.Result.Text != "the answer" {
-		t.Fatalf("result erased before publication: %+v", got.Result)
-	}
-
-	// Once published, the same record is compactable.
-	if err := store.MarkPublished(k, got.Revision); err != nil {
-		t.Fatalf("mark published: %v", err)
-	}
-	n, err = store.Compact(now().Add(time.Second), 1000)
-	if err != nil || n != 1 {
-		t.Fatalf("compact after publication: n=%d err=%v, want 1", n, err)
 	}
 }
 

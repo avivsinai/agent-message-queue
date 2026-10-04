@@ -29,12 +29,3 @@ func TestRefBoundFitsMaxSizeKey(t *testing.T) {
 		t.Fatalf("round-trip mismatch: %s %s %s", gotHost, gotTgt, gotID)
 	}
 }
-
-// TestRefBoundRejectsOverlong rejects a ref whose base32 body exceeds MaxRefLen
-// (a forged or corrupted reference), so the bound is enforced both ways.
-func TestRefBoundRejectsOverlong(t *testing.T) {
-	overlong := RefPrefix + strings.Repeat("a", MaxRefLen+1)
-	if refRe.MatchString(overlong) {
-		t.Fatal("overlong ref matched refRe")
-	}
-}

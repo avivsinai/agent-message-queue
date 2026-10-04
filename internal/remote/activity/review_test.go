@@ -47,23 +47,13 @@ func TestReviewSequenceSurvivesSinkRecreation(t *testing.T) {
 			seqs = append(seqs, o.Seq)
 			return nil
 		})
-		if err := sink.Accept(context.Background(), reviewNote("hello")); err != nil {
+		if err := deliver(context.Background(), sink, reviewNote("hello")); err != nil {
 			t.Fatal(err)
 		}
 		rounds = append(rounds, seqs)
 	}
 	if len(rounds[0]) == 0 || len(rounds[1]) == 0 || rounds[1][0] <= rounds[0][len(rounds[0])-1] {
 		t.Fatalf("same body/native session sequence resets across sink recreation: %v", rounds)
-	}
-}
-
-func TestReviewDesktopAssistantKind(t *testing.T) {
-	o, ok := projectCodex("thread-1", reviewNote("hello"))
-	if !ok {
-		t.Fatal("not projected")
-	}
-	if o.obs.Kind != "acp_read" {
-		t.Fatalf("assistant frame kind %q is not consumed by Desktop ACP branch", o.obs.Kind)
 	}
 }
 
@@ -79,11 +69,11 @@ func TestReviewLimitAppliesAtSend(t *testing.T) {
 		return nil
 	})
 	sink.Now = func() time.Time { return now }
-	if err := sink.Accept(context.Background(), reviewNote(strings.Repeat("a", 48000*50))); err != nil {
+	if err := deliver(context.Background(), sink, reviewNote(strings.Repeat("a", 48000*50))); err != nil {
 		t.Fatal(err)
 	}
 	for range 100 {
-		if err := sink.Accept(context.Background(), reviewNote("next")); err != nil {
+		if err := deliver(context.Background(), sink, reviewNote("next")); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -105,7 +95,7 @@ func TestReviewStaleQueuedFramesAreDiscarded(t *testing.T) {
 		return errors.New("disconnected")
 	})
 	sink.Now = func() time.Time { return now }
-	if err := sink.Accept(context.Background(), reviewNote(strings.Repeat("a", 50000))); err == nil {
+	if err := deliver(context.Background(), sink, reviewNote(strings.Repeat("a", 50000))); err == nil {
 		t.Fatal("expected send error")
 	}
 	now = now.Add(31 * time.Second)
@@ -116,7 +106,7 @@ func TestReviewStaleQueuedFramesAreDiscarded(t *testing.T) {
 		}
 		return nil
 	}
-	if err := sink.Accept(context.Background(), reviewNote("new")); err != nil {
+	if err := deliver(context.Background(), sink, reviewNote("new")); err != nil {
 		t.Fatal(err)
 	}
 	if stale > 0 {

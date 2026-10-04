@@ -12,6 +12,7 @@ import (
 	"fiatjaf.com/nostr"
 	"fiatjaf.com/nostr/nip44"
 
+	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
 	"github.com/avivsinai/agent-message-queue/internal/remote/codex"
 )
 
@@ -29,7 +30,7 @@ func TestCodexNotificationsPublishDecryptableFrames(t *testing.T) {
 		{Method: "turn/completed", Params: json.RawMessage(`{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed"}}`)},
 	}
 	for _, n := range notes {
-		if err := sink.Accept(context.Background(), n); err != nil {
+		if err := deliver(context.Background(), sink, n); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -95,7 +96,7 @@ func TestLimiterCapsOneHundredFramesPerSecond(t *testing.T) {
 	sink.Now = func() time.Time { return now }
 	note := codex.Notification{Method: "turn/started", Params: json.RawMessage(`{"threadId":"thread-1","turn":{"id":"turn-1"}}`)}
 	for range 101 {
-		if err := sink.Accept(context.Background(), note); err != nil {
+		if err := deliver(context.Background(), sink, note); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -112,7 +113,7 @@ func TestPublishErrorIsNotRetried(t *testing.T) {
 		calls++
 		return errors.New("ambiguous delivery")
 	})
-	err := sink.Accept(context.Background(), codex.Notification{
+	err := deliver(context.Background(), sink, codex.Notification{
 		Method: "turn/started", Params: json.RawMessage(`{"threadId":"thread-1","turn":{"id":"turn-1"}}`),
 	})
 	if err == nil || calls != 1 {
@@ -129,7 +130,7 @@ func TestLongTextIsResplitUnder64KiB(t *testing.T) {
 		got = append(got, evt)
 		return nil
 	})
-	err := sink.Accept(context.Background(), codex.Notification{
+	err := deliver(context.Background(), sink, codex.Notification{
 		Method: "item/completed",
 		Params: json.RawMessage(`{"threadId":"thread-1","turnId":"turn-1","item":{"type":"agentMessage","id":"item-1","text":"` + text + `"}}`),
 	})
@@ -199,7 +200,7 @@ func TestClaudeTranscriptPublishesDecryptableFrames(t *testing.T) {
 		`{"type":"user","uuid":"r1","sessionId":"thread-1","timestamp":"2026-09-23T06:00:02.000000000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"package claude"}]}}`,
 	}
 	for _, line := range lines {
-		if err := sink.AcceptClaude(context.Background(), line); err != nil {
+		if err := deliverClaude(context.Background(), sink, line); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -308,6 +309,25 @@ func TestClaudeTranscriptPublishesDecryptableFrames(t *testing.T) {
 	}
 }
 
+// deliver runs the production path for one Codex notification: the native
+// callback enqueues and the drainer publishes.
+func deliver(ctx context.Context, s *Sink, n codex.Notification) error {
+	if err := s.Enqueue(n); err != nil {
+		return err
+	}
+	return s.Drain(ctx)
+}
+
+// deliverClaude parses one transcript line the way the Claude poller does and
+// delivers it through AcceptParsed.
+func deliverClaude(ctx context.Context, s *Sink, line string) error {
+	parsed, ok := claude.ParseTranscriptLine(line)
+	if !ok {
+		return nil
+	}
+	return s.AcceptParsed(ctx, claude.ActivityNote{Line: parsed, SessionID: parsed.SessionID})
+}
+
 func testSink(body, owner nostr.SecretKey, publish Publish) *Sink {
 	return &Sink{
 		ThreadID: "thread-1",
@@ -370,7 +390,7 @@ func TestCodexTurnStreamsCoalescedFrames(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := sink.Accept(context.Background(), codex.Notification{Method: method, Params: raw}); err != nil {
+		if err := deliver(context.Background(), sink, codex.Notification{Method: method, Params: raw}); err != nil {
 			t.Fatal(err)
 		}
 		now = now.Add(time.Millisecond)
@@ -406,13 +426,11 @@ func TestCodexTurnStreamsCoalescedFrames(t *testing.T) {
 	if now.Sub(time.Date(2026, 9, 28, 5, 0, 0, 0, time.UTC)) >= time.Second || len(got) >= ratePerBody {
 		t.Fatalf("%d frames in %s: the burst must stay under the cap inside one second", len(got), now.Sub(time.Date(2026, 9, 28, 5, 0, 0, 0, time.UTC)))
 	}
-	if sink.Drops() != 0 {
-		t.Fatalf("drops = %d", sink.Drops())
-	}
 	var kinds []string
 	var text, lastOutput, lastStatus string
 	var toolUpdates, textFrames int
 	for i, f := range got {
+		// Frames take their seq when queued, so a dropped frame leaves a gap.
 		if f.seq != uint64(i+1) {
 			t.Fatalf("frame %d has seq %d", i, f.seq)
 		}
