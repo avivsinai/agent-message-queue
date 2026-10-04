@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -13,14 +12,10 @@ import (
 	"testing"
 	"time"
 
-	"flag"
-
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/keepalive/registry"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 )
-
-type stdFlag = flag.Flag
 
 // fakeProc is a process that exits with a configured code after a delay.
 type fakeProc struct {
@@ -70,15 +65,6 @@ func (s *fakeSpawner) Spawn(ctx context.Context, args []string) (process, error)
 // after a non-zero exit, then stops on a clean exit 0. Uses an injected
 // spawner (no real process). The backoff is bypassed via a short base.
 func TestUpRespawnsOnceAfterNonZeroExit(t *testing.T) {
-	root, err := os.MkdirTemp("", "amqup")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(root) })
-	if err := fsq.EnsureRootDirs(root); err != nil {
-		t.Fatal(err)
-	}
-
 	// Injected spawner: first serve exits 1 (crash), second exits 0 (clean).
 	sp := &fakeSpawner{
 		procs: []fakeProc{
@@ -96,9 +82,9 @@ func TestUpRespawnsOnceAfterNonZeroExit(t *testing.T) {
 		maxRestarts: 5,
 		backoffBase: time.Millisecond, // short for the test
 		backoffMax:  10 * time.Millisecond,
-		serveArgs:   []string{"serve", "--root", root},
+		serveArgs:   []string{"serve"},
 	}
-	code, err := runUpLoop(ctx, upCfg, sp)
+	code, err := runUpLoop(ctx, upCfg, sp, io.Discard)
 	if err != nil {
 		t.Fatalf("runUpLoop: %v", err)
 	}
@@ -107,125 +93,6 @@ func TestUpRespawnsOnceAfterNonZeroExit(t *testing.T) {
 	}
 	if sp.spawns != 2 {
 		t.Fatalf("spawns=%d, want 2 (one crash + one clean)", sp.spawns)
-	}
-
-	// Verify the loop spawned twice (one crash + one clean).
-}
-
-// TestUpSecondProcessRefusedWhileFirstHoldsLifetimeLock pins the observed
-// defect (codex P1): the registry flock protects one write, not the process
-// lifetime, so two ups on the same root both registered and the second exit
-// emptied the registry under the live first endpoint. The lifetime flock
-// makes the second up refuse before any spawn.
-func TestUpSecondProcessRefusedWhileFirstHoldsLifetimeLock(t *testing.T) {
-	root := t.TempDir()
-	regPath := filepath.Join(root, "registry.json")
-	entryID := registry.EntryID(root, "amq-remote", "remote", root)
-
-	first, err := acquireLifetimeLock(regPath, entryID)
-	if err != nil {
-		t.Fatalf("first acquireLifetimeLock: %v", err)
-	}
-	defer func() { _ = first.Close() }()
-
-	second, lockErr := acquireLifetimeLock(regPath, entryID)
-	if lockErr == nil {
-		_ = second.Close()
-		t.Fatal("second acquireLifetimeLock succeeded, want refusal while first holds the lock")
-	}
-	if !errors.Is(lockErr, errLifetimeHeld) {
-		t.Fatalf("second lock error = %v, want errLifetimeHeld", lockErr)
-	}
-
-	// The first owner can still re-acquire its own lock file handle (idempotent
-	// within the same process/fd) and the registry path derivation is stable.
-	if got := lockFilePath(regPath, entryID); got != regPath+".up-"+entryID+".lock" {
-		t.Fatalf("lockFilePath = %q", got)
-	}
-}
-
-// TestUpForwardsServeFlagsAndRejectsUnknown pins the observed defects
-// (codex P1+P2): the complete FlagSet must parse without redefinition
-// panics, accept serve's flags, reject unknown flags as usage errors, and
-// forward values verbatim.
-func TestUpForwardsServeFlagsAndRejectsUnknown(t *testing.T) {
-	// The REAL entry-point shape: one FlagSet, addCommon + defineServeFlags +
-	// up-specific flags, exactly as up() builds it. Reproducing the
-	// construction here is what catches "flag redefined" panics that
-	// helper-only tests miss (codex reproduced the panic with the binary).
-	fs := flag.NewFlagSet("up", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	addCommon(fs)
-	defineServeFlags(fs, "remote")
-	fs.String("registry", "", "")
-	fs.Int("max-restarts", 0, "")
-	fs.String("self", "", "")
-	args := []string{"--root", "/tmp/r", "--fake", "--poll", "250ms", "--me", "amq-remote"}
-	if err := fs.Parse(args); err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	var unknown []string
-	fs.Visit(func(f *stdFlag) {
-		if !serveFlagNames[f.Name] && f.Name != "self" && f.Name != "registry" && f.Name != "max-restarts" {
-			unknown = append(unknown, "--"+f.Name)
-		}
-	})
-	if len(unknown) != 0 {
-		t.Fatalf("serve flags rejected as unknown: %v", unknown)
-	}
-	got := buildServeArgs(fs, "/tmp/r", "amq-remote")
-	want := []string{"serve", "--root", "/tmp/r", "--me", "amq-remote", "--fake=true", "--poll=250ms"}
-	if !slices.Equal(got, want) {
-		t.Fatalf("buildServeArgs = %v, want %v", got, want)
-	}
-
-	// A flag serve does not define is a parse-time usage error (ContinueOnError
-	// refuses "flag provided but not defined"), never forwarded or dropped.
-	fs2 := flag.NewFlagSet("up", flag.ContinueOnError)
-	fs2.SetOutput(io.Discard)
-	addCommon(fs2)
-	defineServeFlags(fs2, "remote")
-	if err := fs2.Parse([]string{"--no-such-flag"}); err == nil {
-		t.Fatal("parse of unknown flag succeeded, want usage error")
-	}
-}
-
-// TestUpBooleanValuesPreserved pins the observed defect (codex P1): explicit
-// boolean values were dropped and the flag sent bare, so --fake=false turned
-// INTO --fake and --codex-approve=false silently opted INTO approval. Go's
-// flag package accepts --flag=false, so values must be forwarded verbatim.
-func TestUpBooleanValuesPreserved(t *testing.T) {
-	fs := flag.NewFlagSet("up", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	addCommon(fs)
-	defineServeFlags(fs, "remote")
-	if err := fs.Parse([]string{"--root", "/tmp/r", "--fake=false", "--discover=false", "--codex-approve=false"}); err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	got := buildServeArgs(fs, "/tmp/r", "amq-remote")
-	want := []string{"serve", "--root", "/tmp/r", "--me", "amq-remote", "--codex-approve=false", "--discover=false", "--fake=false"}
-	if !slices.Equal(got, want) {
-		t.Fatalf("buildServeArgs = %v, want %v", got, want)
-	}
-}
-
-// TestUpLifetimeLockCreatesMissingRegistryDir pins the observed defect
-// (codex P2): the lifetime-lock file was opened before the registry created
-// its parent directory, so a first use pointed at a fresh directory failed
-// with ENOENT reported as "another up already supervises".
-func TestUpLifetimeLockCreatesMissingRegistryDir(t *testing.T) {
-	root := t.TempDir()
-	regPath := filepath.Join(root, "fresh-dir", "registry.json")
-	entryID := registry.EntryID(root, "amq-remote", "remote", root)
-
-	f, err := acquireLifetimeLock(regPath, entryID)
-	if err != nil {
-		t.Fatalf("acquireLifetimeLock on missing parent dir: %v", err)
-	}
-	defer func() { _ = f.Close() }()
-
-	if _, err := os.Stat(filepath.Join(root, "fresh-dir")); err != nil {
-		t.Fatalf("parent dir not created: %v", err)
 	}
 }
 
@@ -291,7 +158,10 @@ func (s *upEntryFakeSpawner) releaseProc() {
 // corrupt / entry id does not match identity" instead of the ownership
 // refusal. The fix prepares + canonicalizes the root BEFORE deriving the
 // lifetime key or persisting the entry. The regression drives the REAL up()
-// with the spawner hook (no real child process).
+// with an injected spawner (no real child process). The second up also pins
+// codex P1 (the lifetime flock, not the per-write registry lock, refuses a
+// second up on the root) and the registry directory starts absent, which
+// pins codex P2 (a fresh registry directory was mislabeled "another owner").
 func TestUpFreshRootStableIdentityRealEntryPath(t *testing.T) {
 	base := t.TempDir()
 	// A symlinked fresh path makes the lexical/canonical divergence
@@ -310,8 +180,7 @@ func TestUpFreshRootStableIdentityRealEntryPath(t *testing.T) {
 	regPath := filepath.Join(base, "fresh-registry", "registry.json")
 
 	sp := newUpEntryFakeSpawner(0)
-	prevFactory := upSpawnerFactory
-	upSpawnerFactory = func(self string) spawner { return sp }
+	spawnFake := func(string) spawner { return sp }
 
 	firstDone := make(chan error, 1)
 	go func() {
@@ -319,8 +188,7 @@ func TestUpFreshRootStableIdentityRealEntryPath(t *testing.T) {
 			"--root", root,
 			"--registry", regPath,
 			"--fake",
-			"--self", "unused-by-fake-spawner",
-		}, io.Discard, io.Discard)
+		}, io.Discard, io.Discard, spawnFake)
 		if code != 0 {
 			firstDone <- fmt.Errorf("first up: code %d err %v", code, err)
 			return
@@ -357,7 +225,6 @@ func TestUpFreshRootStableIdentityRealEntryPath(t *testing.T) {
 		return fmt.Errorf("up goroutine result unknown (join not completed)")
 	}
 	t.Cleanup(func() {
-		upSpawnerFactory = prevFactory
 		sp.releaseProc()
 		_ = join("first up goroutine did not exit within 5s of release")
 	})
@@ -409,8 +276,7 @@ func TestUpFreshRootStableIdentityRealEntryPath(t *testing.T) {
 		"--root", root,
 		"--registry", regPath,
 		"--fake",
-		"--self", "unused-by-fake-spawner",
-	}, io.Discard, io.Discard)
+	}, io.Discard, io.Discard, spawnFake)
 	if secondCode != protocol.ExitActionRequired {
 		t.Fatalf("second up: code %d err %v, want %d (endpoint_already_running)", secondCode, secondErr, protocol.ExitActionRequired)
 	}
@@ -438,9 +304,12 @@ func TestUpFreshRootStableIdentityRealEntryPath(t *testing.T) {
 
 // TestUpForwardedServeArgsThroughRealEntryPoint pins the forwarded serve
 // arguments as observed at the spawner boundary of the REAL up() entry point
-// (the spawner hook was previously unused by any test — codex r3 note): the
-// supervision loop must receive serve + root + me + the user's flags with
-// parsed values preserved.
+// (codex r3 note): the supervision loop must receive serve + root + me + the
+// user's flags with parsed values preserved, including an explicit false
+// (codex P1: --fake=false and --codex-approve=false were forwarded bare,
+// flipping an opt-out into an opt-in). One FlagSet registers up's and serve's
+// flags (codex P1: a redefinition panicked every real up); a flag neither
+// defines is a usage error.
 func TestUpForwardedServeArgsThroughRealEntryPoint(t *testing.T) {
 	base := t.TempDir()
 	root := filepath.Join(base, "args-root")
@@ -449,19 +318,20 @@ func TestUpForwardedServeArgsThroughRealEntryPoint(t *testing.T) {
 		t.Fatalf("ensure root: %v", err)
 	}
 
-	sp := newUpEntryFakeSpawner(0)
-	prevFactory := upSpawnerFactory
-	upSpawnerFactory = func(self string) spawner { return sp }
+	if code, err := up([]string{"--root", root, "--registry", regPath, "--no-such-flag"}, io.Discard, io.Discard, newExecSpawner); code != protocol.ExitUsage {
+		t.Fatalf("up --no-such-flag: code %d err %v, want %d (usage)", code, err, protocol.ExitUsage)
+	}
 
+	sp := newUpEntryFakeSpawner(0)
 	done := make(chan error, 1)
 	go func() {
 		code, err := up([]string{
 			"--root", root,
 			"--registry", regPath,
 			"--fake=false",
+			"--codex-approve=false",
 			"--poll", "2s",
-			"--self", "unused-by-fake-spawner",
-		}, io.Discard, io.Discard)
+		}, io.Discard, io.Discard, func(string) spawner { return sp })
 		if code != 0 {
 			done <- fmt.Errorf("up: code %d err %v", code, err)
 			return
@@ -495,7 +365,6 @@ func TestUpForwardedServeArgsThroughRealEntryPoint(t *testing.T) {
 		return fmt.Errorf("up goroutine result unknown (join not completed)")
 	}
 	t.Cleanup(func() {
-		upSpawnerFactory = prevFactory
 		sp.releaseProc()
 		_ = join("up goroutine did not exit within 5s of release")
 	})
@@ -526,7 +395,7 @@ func TestUpForwardedServeArgsThroughRealEntryPoint(t *testing.T) {
 		t.Fatalf("canonicalize root: %v", err)
 	}
 	got := sp.forwardedArgs()
-	want := []string{"serve", "--root", canonical, "--me", "remote", "--fake=false", "--poll=2s"}
+	want := []string{"serve", "--root", canonical, "--me", "remote", "--codex-approve=false", "--fake=false", "--poll=2s"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("serve args = %v, want %v (canonical root, verbatim values)", got, want)
 	}
@@ -671,16 +540,11 @@ func TestUpTargetOwnedByAnotherRegistryEntryExitsActionRequired(t *testing.T) {
 	defer func() { _ = otherLock.Close() }()
 
 	sp := newUpEntryFakeSpawner(0)
-	prevFactory := upSpawnerFactory
-	upSpawnerFactory = func(self string) spawner { return sp }
-	t.Cleanup(func() { upSpawnerFactory = prevFactory })
-
 	code, upErr := up([]string{
 		"--root", root,
 		"--registry", regPath,
 		"--fake",
-		"--self", "unused-by-fake-spawner",
-	}, io.Discard, io.Discard)
+	}, io.Discard, io.Discard, func(string) spawner { return sp })
 	if code != protocol.ExitActionRequired {
 		t.Fatalf("target-owned up: code %d err %v, want %d (N2: same refusal shape as the lifetime path)", code, upErr, protocol.ExitActionRequired)
 	}

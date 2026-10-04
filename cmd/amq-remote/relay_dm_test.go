@@ -63,16 +63,17 @@ func TestDMEdgeSubmitsOwnerMessageAndPublishesRow(t *testing.T) {
 	// The relay's own key signs the channel's NIP-29 membership (39002) and
 	// metadata (39000): exactly owner and body, private, type dm.
 	relayKey := nostr.Generate()
-	groupEvent := func(kind nostr.Kind, tags nostr.Tags) {
+	created := nostr.Now()
+	groupEvent := func(kind nostr.Kind, createdAt nostr.Timestamp, tags nostr.Tags) {
 		t.Helper()
-		evt := nostr.Event{CreatedAt: nostr.Now(), Kind: kind, Tags: append(nostr.Tags{{"d", "dm-1"}}, tags...)}
+		evt := nostr.Event{CreatedAt: createdAt, Kind: kind, Tags: append(nostr.Tags{{"d", "dm-1"}}, tags...)}
 		if err := evt.Sign(relayKey); err != nil {
 			t.Fatal(err)
 		}
 		lr.Inject(evt)
 	}
-	groupEvent(39000, nostr.Tags{{"private"}, {"t", "dm"}})
-	groupEvent(39002, nostr.Tags{{"p", ownerHex}, {"p", body.PublicKeyHex()}})
+	groupEvent(39000, created, nostr.Tags{{"private"}, {"t", "dm"}})
+	groupEvent(39002, created, nostr.Tags{{"p", ownerHex}, {"p", body.PublicKeyHex()}})
 	r := &manifest.Relay{URL: url, Self: nostr.GetPublicKey(relayKey).Hex(), Shares: []manifest.Share{{Target: "fake", Session: "work", OwnerPubKey: ownerHex, DMChannelID: "dm-1", NativeSessionID: "thread-1", Commands: true}}}
 
 	stateDir := filepath.Join(root, "extensions", "remote")
@@ -124,9 +125,9 @@ func TestDMEdgeSubmitsOwnerMessageAndPublishesRow(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 published:
-	// A third member joins: the next membership re-read closes the surface.
-	time.Sleep(1100 * time.Millisecond) // a strictly newer created_at second
-	groupEvent(39002, nostr.Tags{{"p", ownerHex}, {"p", body.PublicKeyHex()}, {"p", nostr.GetPublicKey(nostr.Generate()).Hex()}})
+	// A third member joins in a strictly newer membership event: the next
+	// re-read closes the surface.
+	groupEvent(39002, created+1, nostr.Tags{{"p", ownerHex}, {"p", body.PublicKeyHex()}, {"p", nostr.GetPublicKey(nostr.Generate()).Hex()}})
 	for !strings.HasPrefix(edges.stateOf("work"), "closed:") {
 		if time.Now().After(deadline.Add(10 * time.Second)) {
 			t.Fatalf("DM surface state = %q after a third member joined, want closed", edges.stateOf("work"))

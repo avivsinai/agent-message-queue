@@ -27,7 +27,7 @@ import (
 )
 
 // attachReadyTimeout bounds the wait for an endpoint that attach started.
-var attachReadyTimeout = 20 * time.Second
+const attachReadyTimeout = 20 * time.Second
 
 // attach binds the per-user Buzz agent to the session the owner is typing
 // in (bead agent-message-queue-611.31). Typing the command is the sharing

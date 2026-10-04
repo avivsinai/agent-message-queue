@@ -217,7 +217,6 @@ func TestActivityCallbackAfterCleanupDoesNothing(t *testing.T) {
 	fn := src.fn
 	src.mu.Unlock()
 	fn(reviewNote())
-	time.Sleep(100 * time.Millisecond)
 	if entries, err := os.ReadDir(as.stateDir); err == nil && len(entries) > 0 {
 		t.Fatal("a callback after cleanup wrote sequence state")
 	}
