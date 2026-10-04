@@ -325,6 +325,7 @@ func TestB14bCloseConcurrentWithInboundServerRequest(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = l.Close() })
 
+	const approval = `{"jsonrpc":"2.0","id":"srv-1","method":"item/commandExecution/requestApproval","params":{}}`
 	peerSawClose := make(chan struct{})
 	go func() {
 		conn, err := l.Accept()
@@ -338,7 +339,7 @@ func TestB14bCloseConcurrentWithInboundServerRequest(t *testing.T) {
 		var frames []byte
 		for _, p := range []string{
 			`{"jsonrpc":"2.0","method":"park","params":{}}`,
-			`{"jsonrpc":"2.0","id":"srv-1","method":"item/commandExecution/requestApproval","params":{}}`,
+			approval,
 		} {
 			frames = append(append(frames, 0x80|opText, byte(len(p))), p...) // unmasked, < 126 bytes
 		}
@@ -376,8 +377,8 @@ func TestB14bCloseConcurrentWithInboundServerRequest(t *testing.T) {
 	case <-time.After(b14bDeadline):
 		t.Fatal("pump never parked on the notification")
 	}
-	if w.br.Buffered() == 0 {
-		t.Fatal("setup: the approval frame is not buffered behind the parked pump")
+	if got, want := w.br.Buffered(), 2+len(approval); got != want {
+		t.Fatalf("setup: %d bytes buffered behind the parked pump, want the whole approval frame (%d)", got, want)
 	}
 
 	closeDone := make(chan struct{})
