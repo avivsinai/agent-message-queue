@@ -1787,3 +1787,12 @@ func TestDoctorRefusalsErrorSurfaced(t *testing.T) {
 		t.Fatalf("refusals_error empty for a truncated refusals.json")
 	}
 }
+
+// TestFinishExitsNonzeroOnAPlainError (bead 75u) keeps the serve exit
+// contract: serve returns code 0 with ep.Close's drain-incomplete error,
+// and finish must turn an error that is not a refusal into exit 1.
+func TestFinishExitsNonzeroOnAPlainError(t *testing.T) {
+	if code := finish(io.Discard, io.Discard, nil, false, 0, errors.New("drain incomplete: 1 handler in flight")); code != protocol.ExitError {
+		t.Fatalf("exit = %d, want %d", code, protocol.ExitError)
+	}
+}
