@@ -149,3 +149,12 @@ func TestDetachNeedsAScope(t *testing.T) {
 		t.Fatalf("%d bindings after detach --all; want 0", len(all))
 	}
 }
+
+// Pro review of 94w: a whitespace-only native --name picked the default name
+// but counted as explicit, so it replaced another session's binding.
+func TestNativeBlankNameIsNotExplicit(t *testing.T) {
+	name, explicit := nativeBindingName("  ", "claude:7")
+	if explicit || name == "" {
+		t.Fatalf("name=%q explicit=%v; want the default name, not explicit", name, explicit)
+	}
+}

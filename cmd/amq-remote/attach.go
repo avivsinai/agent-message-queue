@@ -90,8 +90,9 @@ func attach(args []string, stdout, stderr io.Writer) (int, error) {
 	if display == "" {
 		display = session.DisplayName
 	}
-	nb := binding.Binding{Root: c.root, Target: cand.Target, NativeSession: native, Display: display, Name: nonEmpty(strings.TrimSpace(*name), binding.SanitizeName(cand.Target))}
-	if err := writeBinding(nb, *name != ""); err != nil {
+	bindName, explicit := nativeBindingName(*name, cand.Target)
+	nb := binding.Binding{Root: c.root, Target: cand.Target, NativeSession: native, Display: display, Name: bindName}
+	if err := writeBinding(nb, explicit); err != nil {
 		return protocol.ExitActionRequired, err
 	}
 	say(stdout, "Connected: %s (%s) as session %s. DM its Buzz agent \"AMQ: %s\".", nonEmpty(display, cand.Target), cand.Target, nb.Name, nb.Name)
@@ -127,6 +128,14 @@ func attachMailbox(root, handle, name string, stdout io.Writer) (int, error) {
 	}
 	say(stdout, "Connected: AMQ handle %s at %s as session %s. DM its Buzz agent \"AMQ: %s\".", handle, root, name, name)
 	return 0, nil
+}
+
+// nativeBindingName is the binding name for a native attach and whether the
+// caller chose it. The name and the choice come from one trimmed value, so a
+// whitespace-only --name is the default, never an explicit replacement.
+func nativeBindingName(flagValue, target string) (string, bool) {
+	trimmed := strings.TrimSpace(flagValue)
+	return nonEmpty(trimmed, binding.SanitizeName(target)), trimmed != ""
 }
 
 // writeBinding adds the named binding and removes any other binding for the
