@@ -15,7 +15,6 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/lock"
 	"github.com/avivsinai/agent-message-queue/internal/receipt"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
-	"github.com/avivsinai/agent-message-queue/internal/thread"
 )
 
 // mailboxSender is the AMQ handle Buzz prompts come from in a mailbox
@@ -94,6 +93,8 @@ func (s *Server) runMailbox(sessionID, text, eventID string, b binding.Binding, 
 	defer deadline.Stop()
 	poll := time.NewTicker(s.cfg.PollInterval)
 	defer poll.Stop()
+	heartbeat := time.NewTicker(s.cfg.HeartbeatInterval)
+	defer heartbeat.Stop()
 	read := false
 	seen := map[string]bool{}
 	for {
@@ -130,6 +131,10 @@ func (s *Server) runMailbox(sessionID, text, eventID string, b binding.Binding, 
 			r.meta.Reason = "reply_timeout"
 			return r.say("reply_timeout", StopReasonRefusal, fmt.Sprintf("No final reply from %s yet. The message stays in its AMQ inbox and may still be answered.", b.Handle))
 		case <-poll.C:
+		case <-heartbeat.C:
+			if err := emitText(emit, sessionID, "agent_thought_chunk", fmt.Sprintf("Still waiting for a reply from %s.", b.Handle)); err != nil {
+				return nil, newRPCError(codeInternalError, "emit ACP heartbeat: %v", err)
+			}
 		}
 	}
 }
@@ -298,33 +303,101 @@ func publishOnce(b binding.Binding, threadID, id string, created time.Time, text
 	return nil
 }
 
-// drained reports whether the handle recorded a drained receipt for id.
+// drained reports whether the handle recorded a drained receipt for id. It
+// stats the one receipt file instead of reading the receipts directory.
 func drained(b binding.Binding, id string) bool {
-	rs, err := receipt.List(b.Root, b.Handle, receipt.ListFilter{MsgID: id, Stage: receipt.StageDrained})
-	return err == nil && len(rs) > 0
+	info, err := os.Lstat(filepath.Join(fsq.AgentReceipts(b.Root, b.Handle), id+"__"+b.Handle+"__"+receipt.StageDrained+".json"))
+	return err == nil && info.Mode().IsRegular()
 }
 
-// mailboxReplies scans the thread for replies from the handle that ref the
-// prompt and were created no earlier than it. A status reply is progress,
-// reported once; the newest other reply is the final answer.
+// replyHit is one inbox file whose header answers a prompt.
+type replyHit struct {
+	filename string
+	header   format.Header
+	created  time.Time
+}
+
+// scanReplies reads only dir (one inbox box) and returns, oldest first, the
+// files from handle on threadID that ref promptID and were created no earlier
+// than since. It reads headers only; the caller reads the body of a hit. A
+// file whose header cannot be read is skipped and left in place for drain and
+// the DLQ. A missing dir has no replies.
+func scanReplies(dir, handle, threadID, promptID string, since time.Time) ([]replyHit, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var hits []replyHit
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".md") {
+			continue
+		}
+		header, err := format.ReadHeaderFile(filepath.Join(dir, name))
+		if err != nil {
+			continue
+		}
+		if header.From != handle || header.Thread != threadID || !slices.Contains(header.Refs, promptID) {
+			continue
+		}
+		created, err := time.Parse(time.RFC3339Nano, header.Created)
+		if err != nil || created.Before(since) {
+			continue
+		}
+		hits = append(hits, replyHit{filename: name, header: header, created: created})
+	}
+	slices.SortStableFunc(hits, func(a, b replyHit) int { return a.created.Compare(b.created) })
+	return hits, nil
+}
+
+// mailboxReplies claims the replies from the handle in buzz/inbox/new that
+// ref the prompt and were created no earlier than it, the way drain does: a
+// move to cur and a drained receipt for consumer buzz. Unmatched files are
+// never moved, because several bindings share the buzz mailbox. A status
+// reply is progress, reported once; the newest other reply is the final
+// answer. Mailbox mode needs no cur fallback: it claims its own matches.
 func mailboxReplies(b binding.Binding, threadID, promptID string, created time.Time, seen map[string]bool) (string, []string, error) {
-	entries, err := thread.Collect(b.Root, threadID, []string{mailboxSender, b.Handle}, true, func(_ string, _ error) error { return nil })
+	hits, err := scanReplies(fsq.AgentInboxNew(b.Root, mailboxSender), b.Handle, threadID, promptID, created)
+	if err != nil || len(hits) == 0 {
+		return "", nil, err
+	}
+	identity, err := fsq.SnapshotDeliveryRoot(b.Root)
 	if err != nil {
 		return "", nil, err
 	}
+	root, err := fsq.OpenDeliveryRoot(b.Root, identity)
+	if err != nil {
+		return "", nil, err
+	}
+	defer func() { _ = root.Close() }()
 	var progress []string
 	final := ""
-	for _, e := range entries {
-		if e.From != b.Handle || e.RawTime.IsZero() || e.RawTime.Before(created) || !slices.Contains(e.Refs, promptID) {
-			continue
+	for _, hit := range hits {
+		// A failed rename with ENOENT means another process claimed the file
+		// first; it is then read from cur like an own claim.
+		var committed *fsq.CommittedDurabilityError
+		if err := fsq.MoveNewToCur(root, mailboxSender, hit.filename); err != nil && !errors.As(err, &committed) && !os.IsNotExist(err) {
+			return "", nil, err
 		}
-		body := strings.TrimSpace(e.Body)
+		msg, err := format.ReadMessageFileRoot(root, filepath.Join("agents", mailboxSender, "inbox", "cur", hit.filename))
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return "", nil, err
+		}
+		// The receipt is best effort, as in drain: the claim already holds.
+		_ = receipt.EmitDeliveryRoot(root, receipt.New(msg.Header.ID, msg.Header.Thread, b.Handle, mailboxSender, receipt.StageDrained, ""))
+		body := strings.TrimSpace(msg.Body)
 		if body == "" {
 			continue
 		}
-		if e.Kind == string(format.KindStatus) {
-			if !seen[e.ID] {
-				seen[e.ID] = true
+		if msg.Header.Kind == string(format.KindStatus) {
+			if !seen[msg.Header.ID] {
+				seen[msg.Header.ID] = true
 				progress = append(progress, b.Handle+": "+body)
 			}
 			continue

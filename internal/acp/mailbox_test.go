@@ -39,8 +39,9 @@ func inboxPrompts(t *testing.T, root string) []string {
 	return ids
 }
 
-// replyAs delivers a reply from the agent to buzz that refs prompt.
-func replyAs(t *testing.T, root, thread, prompt, kind, body string) {
+// replyAs delivers a reply from the agent to buzz that refs prompt and
+// returns its id.
+func replyAs(t *testing.T, root, thread, prompt, kind, body string) string {
 	t.Helper()
 	cfg := Config{Root: root, Me: mailboxSender, To: "agent"}
 	now := time.Now()
@@ -59,14 +60,19 @@ func replyAs(t *testing.T, root, thread, prompt, kind, body string) {
 	if _, err := fsq.DeliverToInboxes(dr, []string{mailboxSender}, id+".md", data); err != nil {
 		t.Fatal(err)
 	}
+	return id
 }
 
 // Bead agent-message-queue-611.36: a mailbox binding delivers the DM to the
 // handle and ends the turn on its final reply. A status reply is progress
-// and does not end the turn (codex 611.36 research, final-answer gap).
+// and does not end the turn (codex 611.36 research, final-answer gap). The
+// turn claims its replies like drain (move to cur, drained receipt) and
+// leaves other messages in buzz/inbox/new.
 func TestMailboxBindingDeliversAndEndsOnTheFinalReply(t *testing.T) {
 	s, root := mailboxServer(t)
+	other := replyAs(t, root, cockpitThread("session/s"), "another-prompt", format.KindAnswer, "not for this turn")
 	var thoughts []string
+	var answer string
 	replied := false
 	result, rpcErr := s.runRemote("s", "say hi", strings.Repeat("1", 64), newTurn(), func(v any) error {
 		note := v.(sessionUpdateNotification)
@@ -77,7 +83,7 @@ func TestMailboxBindingDeliversAndEndsOnTheFinalReply(t *testing.T) {
 			if ids := inboxPrompts(t, root); len(ids) == 1 {
 				replied = true
 				replyAs(t, root, cockpitThread("session/s"), ids[0], format.KindStatus, "working on it")
-				replyAs(t, root, cockpitThread("session/s"), ids[0], format.KindAnswer, "hi from the agent")
+				answer = replyAs(t, root, cockpitThread("session/s"), ids[0], format.KindAnswer, "hi from the agent")
 			}
 		}
 		return nil
@@ -88,6 +94,38 @@ func TestMailboxBindingDeliversAndEndsOnTheFinalReply(t *testing.T) {
 	got := result.(remotePromptResult)
 	if got.StopReason != StopReasonEndTurn || !strings.Contains(strings.Join(thoughts, "|"), "agent: working on it") {
 		t.Fatalf("result=%+v thoughts=%q", got, thoughts)
+	}
+	for _, path := range []string{
+		filepath.Join(fsq.AgentInboxCur(root, mailboxSender), answer+".md"),
+		filepath.Join(fsq.AgentReceipts(root, mailboxSender), answer+"__"+mailboxSender+"__drained.json"),
+		filepath.Join(fsq.AgentInboxNew(root, mailboxSender), other+".md"),
+	} {
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("want %s: %v", path, err)
+		}
+	}
+}
+
+// Bead agent-message-queue-ee7 (review F2): every poll read every file in
+// six folders, so a big mailbox cost a core per open turn. The wait reads
+// only buzz/inbox/new; a reply already in cur is not read again.
+func TestMailboxRepliesReadOnlyNew(t *testing.T) {
+	_, root := mailboxServer(t)
+	thread := cockpitThread("session/s")
+	since := time.Now().Add(-time.Minute)
+	id := replyAs(t, root, thread, "prompt", format.KindAnswer, "already consumed")
+	identity, _ := fsq.SnapshotDeliveryRoot(root)
+	dr, err := fsq.OpenDeliveryRoot(root, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = dr.Close() }()
+	if err := fsq.MoveNewToCur(dr, mailboxSender, id+".md"); err != nil {
+		t.Fatal(err)
+	}
+	final, _, err := mailboxReplies(binding.Binding{Root: root, Handle: "agent"}, thread, "prompt", since, map[string]bool{})
+	if err != nil || final != "" {
+		t.Fatalf("final=%q err=%v; want no reply read from cur", final, err)
 	}
 }
 

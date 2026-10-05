@@ -9,14 +9,13 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
-	"github.com/avivsinai/agent-message-queue/internal/thread"
 )
 
 // ProtocolVersion is the live ACP bridge version. Prompt turns remain open
@@ -776,8 +775,13 @@ func (s *Server) waitForReply(sessionID string, delivery Delivery, turn *turnSta
 		turn.settleLocked(outcome)
 		return turn.outcome
 	}
+	// The poll reads only inbox/new. Another consumer of cfg.Me may drain the
+	// reply to cur first, so each heartbeat also reads cur.
+	newDir, curDir := fsq.AgentInboxNew(s.cfg.Root, s.cfg.Me), fsq.AgentInboxCur(s.cfg.Root, s.cfg.Me)
+	dir := newDir
 	for {
-		reply, found, err := s.replyForDelivery(delivery)
+		reply, found, err := s.replyForDelivery(delivery, dir)
+		dir = newDir
 		if err != nil {
 			return nil, newRPCError(codeInternalError, "poll AMQ thread %s: %v", delivery.Thread, err)
 		}
@@ -800,6 +804,7 @@ func (s *Server) waitForReply(sessionID string, delivery Delivery, turn *turnSta
 			return turnResult(delivery, settle("reply_timeout"), ""), nil
 		case <-poll.C:
 		case <-heartbeat.C:
+			dir = curDir
 			if err := emitText(emit, sessionID, "agent_thought_chunk", fmt.Sprintf("Still waiting for a reply from %s on AMQ thread %s.", s.cfg.To, delivery.Thread)); err != nil {
 				return nil, newRPCError(codeInternalError, "emit ACP heartbeat: %v", err)
 			}
@@ -835,33 +840,27 @@ func turnResult(delivery Delivery, outcome, reply string) promptResult {
 	}
 }
 
-// replyForDelivery returns the freshest reply from the configured peer that
-// refs this prompt and was created no earlier than it. Stale or thread-rent messages are
-// never picked up; a malformed unrelated mailbox item does not fail the poll.
-func (s *Server) replyForDelivery(delivery Delivery) (string, bool, error) {
-	entries, err := thread.Collect(s.cfg.Root, delivery.Thread, []string{s.cfg.Me, s.cfg.To}, true, func(_ string, _ error) error {
-		return nil
-	})
+// replyForDelivery returns the freshest reply from the configured peer in
+// one box of cfg.Me's inbox that refs this prompt and was created no earlier
+// than it. It never moves a file: other consumers drain cfg.Me. Stale or
+// thread-rent messages are never picked up; a malformed unrelated mailbox
+// item does not fail the poll.
+func (s *Server) replyForDelivery(delivery Delivery, dir string) (string, bool, error) {
+	// Only a reply that refs this turn's prompt answers it. Time and thread
+	// alone let a late answer to a cancelled prompt complete the next one
+	// (codex ebo PR2 consult). amq reply sets refs to the answered message
+	// plus its refs, so a reply to an in-turn steer, which refs the prompt,
+	// also qualifies.
+	hits, err := scanReplies(dir, s.cfg.To, delivery.Thread, delivery.MessageID, delivery.Created)
 	if err != nil {
 		return "", false, err
 	}
-	for index := len(entries) - 1; index >= 0; index-- {
-		entry := entries[index]
-		if entry.From != s.cfg.To || entry.RawTime.IsZero() || entry.RawTime.Before(delivery.Created) {
+	for index := len(hits) - 1; index >= 0; index-- {
+		msg, err := format.ReadMessageFile(filepath.Join(dir, hits[index].filename))
+		if err != nil || strings.TrimSpace(msg.Body) == "" {
 			continue
 		}
-		// Only a reply that refs this turn's prompt answers it. Time and
-		// thread alone let a late answer to a cancelled prompt complete the
-		// next one (codex ebo PR2 consult). amq reply sets refs to the
-		// answered message plus its refs, so a reply to an in-turn steer,
-		// which refs the prompt, also qualifies.
-		if !slices.Contains(entry.Refs, delivery.MessageID) {
-			continue
-		}
-		if strings.TrimSpace(entry.Body) == "" {
-			continue
-		}
-		return strings.TrimRight(entry.Body, "\n"), true, nil
+		return strings.TrimRight(msg.Body, "\n"), true, nil
 	}
 	return "", false, nil
 }

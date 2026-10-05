@@ -35,6 +35,10 @@ than silently dropped.
   `refs` name the prompt can answer the turn. `amq reply --id <prompt id>` sets
   those refs, and so does a reply to an in-turn steer. A stale reply, or a late
   answer to a cancelled prompt, never answers a later turn.
+- The peer check is **not authentication**. Agents of the same user are not
+  an isolation boundary ([SECURITY.md](../../SECURITY.md)), so any agent on
+  the queue root can write a reply that answers the turn and is posted to the
+  DM.
 - A turn settles **once**: the first of reply, `session/cancel`, stream close
   and timeout decides it, and the others cannot overturn it.
 - The turn is **bounded**. If no fresh reply arrives within
