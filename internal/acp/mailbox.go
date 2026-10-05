@@ -490,28 +490,38 @@ type ownedReply struct {
 // is the final answer, returned with its id.
 func (w *mailboxWatch) poll(withCur bool) (string, string, []string, error) {
 	var owned []ownedReply
+	var root *fsq.DeliveryRoot
+	defer func() {
+		if root != nil {
+			_ = root.Close()
+		}
+	}()
+	openRoot := func() (*fsq.DeliveryRoot, error) {
+		if root != nil {
+			return root, nil
+		}
+		identity, err := fsq.SnapshotDeliveryRoot(w.b.Root)
+		if err != nil {
+			return nil, err
+		}
+		root, err = fsq.OpenDeliveryRoot(w.b.Root, identity)
+		return root, err
+	}
 	hits, err := w.inboxNew.replies(w.b.Handle, w.threadID, w.promptID, w.created)
 	if err != nil {
 		return "", "", nil, err
 	}
-	if len(hits) > 0 {
-		identity, err := fsq.SnapshotDeliveryRoot(w.b.Root)
+	for _, hit := range hits {
+		dr, err := openRoot()
 		if err != nil {
 			return "", "", nil, err
 		}
-		root, err := fsq.OpenDeliveryRoot(w.b.Root, identity)
+		msg, ok, err := w.claimNew(dr, hit)
 		if err != nil {
 			return "", "", nil, err
 		}
-		defer func() { _ = root.Close() }()
-		for _, hit := range hits {
-			msg, ok, err := w.claimNew(root, hit.filename)
-			if err != nil {
-				return "", "", nil, err
-			}
-			if ok {
-				owned = append(owned, ownedReply{strings.TrimSuffix(hit.filename, ".md"), msg})
-			}
+		if ok {
+			owned = append(owned, ownedReply{strings.TrimSuffix(hit.filename, ".md"), msg})
 		}
 	}
 	if withCur {
@@ -525,6 +535,11 @@ func (w *mailboxWatch) poll(withCur bool) (string, string, []string, error) {
 				return "", "", nil, err
 			}
 			if ok {
+				dr, err := openRoot()
+				if err != nil {
+					return "", "", nil, err
+				}
+				drainedReceipt(dr, w.b.Handle, hit.header)
 				owned = append(owned, ownedReply{strings.TrimSuffix(hit.filename, ".md"), msg})
 			}
 		}
@@ -551,21 +566,26 @@ func (w *mailboxWatch) poll(withCur bool) (string, string, []string, error) {
 // claimNew moves one reply from new to cur and forwards it. Only a
 // successful move (or this move's own committed-durability error) owns the
 // file: ENOENT means another consumer moved it first, and that reply is
-// recovered from cur, by whichever watch wins the forwarding claim.
-func (w *mailboxWatch) claimNew(root *fsq.DeliveryRoot, filename string) (format.Message, bool, error) {
+// recovered from cur, by whichever watch wins the forwarding claim. The
+// mover emits the drained receipt whoever wins forwarding, so a reply that
+// a concurrent cur recovery forwards first still gets one.
+func (w *mailboxWatch) claimNew(root *fsq.DeliveryRoot, hit replyHit) (format.Message, bool, error) {
 	var committed *fsq.CommittedDurabilityError
-	if err := fsq.MoveNewToCur(root, mailboxSender, filename); err != nil && !errors.As(err, &committed) {
+	if err := fsq.MoveNewToCur(root, mailboxSender, hit.filename); err != nil && !errors.As(err, &committed) {
 		if os.IsNotExist(err) {
 			return format.Message{}, false, nil
 		}
 		return format.Message{}, false, err
 	}
-	msg, ok, err := w.recover(filename)
-	if ok {
-		// The receipt is best effort, as in drain: the claim already holds.
-		_ = receipt.EmitDeliveryRoot(root, receipt.New(msg.Header.ID, msg.Header.Thread, w.b.Handle, mailboxSender, receipt.StageDrained, ""))
-	}
-	return msg, ok, err
+	drainedReceipt(root, w.b.Handle, hit.header)
+	return w.recover(hit.filename)
+}
+
+// drainedReceipt records that consumer buzz drained a reply. It is
+// idempotent (one file per message id) and best effort, as in drain: the
+// claim already holds.
+func drainedReceipt(root *fsq.DeliveryRoot, sender string, h format.Header) {
+	_ = receipt.EmitDeliveryRoot(root, receipt.New(h.ID, h.Thread, sender, mailboxSender, receipt.StageDrained, ""))
 }
 
 // recover forwards one reply in buzz/inbox/cur if this watch wins its

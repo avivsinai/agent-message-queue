@@ -154,11 +154,42 @@ func TestMailboxTwoPollersReturnOneReply(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = dr.Close() }()
-	if _, owned, err := second.claimNew(dr, id+".md"); err != nil || owned {
+	if _, owned, err := second.claimNew(dr, replyHit{filename: id + ".md"}); err != nil || owned {
 		t.Fatalf("second poller owns the reply too (err=%v)", err)
 	}
 	if _, final, _, err := second.poll(true); err != nil || final != "" {
 		t.Fatalf("second poller recovered final=%q err=%v", final, err)
+	}
+}
+
+// Bead agent-message-queue-ee7, review of #957 r2 (P2): the mover emitted
+// the drained receipt only if it also won forwarding. When another watch's
+// cur recovery won first, no drained receipt was ever written.
+func TestMailboxMoverEmitsTheDrainedReceipt(t *testing.T) {
+	s, root := mailboxServer(t)
+	thread := cockpitThread("session/s")
+	b := binding.Binding{Root: root, Handle: "agent"}
+	since := time.Now().Add(-time.Minute)
+	id := replyAs(t, root, thread, "prompt", format.KindAnswer, "one answer")
+	mover, other := s.watchMailbox(b, thread, "prompt", since), s.watchMailbox(b, thread, "prompt", since)
+	if _, _, err := other.recover(id + ".md"); err != nil { // other wins forwarding first
+		t.Fatal(err)
+	}
+	hits, err := mover.inboxNew.replies("agent", thread, "prompt", since)
+	if err != nil || len(hits) != 1 {
+		t.Fatalf("hits=%v err=%v", hits, err)
+	}
+	identity, _ := fsq.SnapshotDeliveryRoot(root)
+	dr, err := fsq.OpenDeliveryRoot(root, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = dr.Close() }()
+	if _, owned, err := mover.claimNew(dr, hits[0]); err != nil || owned {
+		t.Fatalf("owned=%v err=%v; want the move without forwarding", owned, err)
+	}
+	if _, err := os.Stat(filepath.Join(fsq.AgentReceipts(root, mailboxSender), id+"__"+mailboxSender+"__drained.json")); err != nil {
+		t.Fatalf("no drained receipt: %v", err)
 	}
 }
 
