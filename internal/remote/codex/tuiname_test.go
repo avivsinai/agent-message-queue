@@ -66,6 +66,25 @@ func TestSpawnedTUINamerRefusals(t *testing.T) {
 	}
 }
 
+// Review of #950 r2, P2: the launch's own thread renamed between two polls
+// ends the search; it is not renamed, and a later TUI is never named instead.
+func TestSpawnedTUINamerKeepsANameGivenMeanwhile(t *testing.T) {
+	d := newFakeNamingDaemon(t)
+	now := time.Now()
+	d.add("ours", now.Unix(), nil)
+	n := NewSpawnedTUINamer(SpawnedTUI{Cwd: d.cwd, Since: now}, "session1/codex", time.Minute)
+	_ = n.Poll(context.Background(), d.sock)
+	mine := "my name"
+	d.add("ours", now.Unix(), &mine)
+	d.add("later", now.Unix(), nil)
+	if err := n.Poll(context.Background(), d.sock); err != nil {
+		t.Fatalf("poll = %v, want the search to end", err)
+	}
+	if d.name("ours") != mine || d.name("later") != "" {
+		t.Fatalf("names: ours=%q later=%q", d.name("ours"), d.name("later"))
+	}
+}
+
 // fakeNamingDaemon serves app-server connections that list, read, and
 // rename threads in one directory.
 type fakeNamingDaemon struct {

@@ -75,7 +75,7 @@ func (t tuiThread) name() string {
 }
 
 // Poll checks the daemon once. It returns nil when the launch's thread
-// carries the name, ErrTUIThreadNotLoaded to poll again, or another error.
+// carries the name or one given meanwhile, ErrTUIThreadNotLoaded to poll again, or another error.
 // A thread is named only when it is the sole candidate on two polls in a
 // row, and a thread that has any name is never renamed (review of #950).
 func (n *SpawnedTUINamer) Poll(ctx context.Context, sock string) error {
@@ -106,8 +106,13 @@ func (n *SpawnedTUINamer) Poll(ctx context.Context, sock string) error {
 			continue
 		}
 		// Before its first turn only this launch names its thread, so a
-		// thread named otherwise belongs to another launch.
+		// thread named otherwise belongs to another launch, unless it is the
+		// candidate this launch already saw: then it was named meanwhile and
+		// keeps that name, and the search ends (review of #950 r2).
 		if th.name() != "" && th.name() != n.name {
+			if th.ID == n.seen {
+				return nil
+			}
 			continue
 		}
 		candidates = append(candidates, th)
