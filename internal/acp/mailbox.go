@@ -494,7 +494,12 @@ func (w *mailboxWatch) claimNew(root *fsq.DeliveryRoot, filename string) (format
 // so each reply is returned at most once across turns and processes.
 func (w *mailboxWatch) recover(filename string) (format.Message, bool, error) {
 	key := sha256.Sum256([]byte(w.b.Root + "\x00" + filename))
-	won, err := createExclusive(filepath.Join(w.stateDir, "forwarded", hex.EncodeToString(key[:])), []byte(w.promptID+"\n"))
+	record := filepath.Join(w.stateDir, "forwarded", hex.EncodeToString(key[:]))
+	// A reply forwarded earlier costs one stat on each heartbeat.
+	if _, err := os.Lstat(record); err == nil {
+		return format.Message{}, false, nil
+	}
+	won, err := createExclusive(record, []byte(w.promptID+"\n"))
 	if err != nil || !won {
 		return format.Message{}, false, err
 	}
