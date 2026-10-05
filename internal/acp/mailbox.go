@@ -157,7 +157,7 @@ func (s *Server) runMailbox(sessionID, text, eventID string, b binding.Binding, 
 				return s.mailboxStopped(r, outcome, b)
 			}
 			r.meta.State = DeliveryStateReplied
-			return r.sayReply(finalID, final)
+			return s.sayReply(r, b, finalID, final)
 		}
 		select {
 		case <-turn.done:
@@ -288,33 +288,47 @@ func (s *Server) eventChannel(eventID, claimed, turn string) string {
 }
 
 // sayReply posts the final reply once per event and emits it. The event's
-// DM is resolved now, from the claim or the recorded channel. Without one,
-// nothing is decided, so the sweep posts the reply once a delivery names a
-// channel. Otherwise the reply becomes the event's outcome before it is
-// posted; if a cancel won instead, the turn ends cancelled (review of #961).
-func (r *remoteTurn) sayReply(replyID, text string) (any, *rpcError) {
+// DM is resolved now, from the claim or the recorded channel. If the event
+// already has an outcome, or another reply or a cancel wins it now, the turn
+// returns that outcome. Without a DM nothing is decided, so the sweep posts
+// the reply once a delivery names a channel. A won outcome is posted before
+// the ACP emission, so a failed emission never skips the post (review of
+// #961).
+func (s *Server) sayReply(r *remoteTurn, b binding.Binding, replyID, text string) (any, *rpcError) {
 	dest := r.postChannel()
-	if dest != "" && r.eventID != "" {
-		final, won, err := r.s.decideOutcome(r.eventID, mailboxOutcome{ReplyID: replyID})
-		switch {
-		case err != nil:
-			r.meta.Posted = "error: record post marker: " + err.Error()
-			dest = ""
-		case !won && final.Cancelled:
-			r.meta.Reason = "session_cancelled"
-			return r.say(postStatus, "session_cancelled", StopReasonCancelled, fmt.Sprintf("Stopped waiting. The message stays in %s's AMQ inbox; %s may still act on it.", r.meta.Target, r.meta.Target))
-		case !won:
-			r.meta.Posted = "duplicate: this event already has its final outcome"
-			dest = ""
+	if r.eventID != "" {
+		if dest == "" {
+			if out, ok := s.mailboxAnswered(r.eventID); ok {
+				return s.adoptOutcome(r, b, out)
+			}
+		} else {
+			final, won, err := s.decideOutcome(r.eventID, mailboxOutcome{ReplyID: replyID})
+			switch {
+			case err != nil:
+				r.meta.Posted = "error: record post marker: " + err.Error()
+				dest = ""
+			case !won:
+				return s.adoptOutcome(r, b, final)
+			}
 		}
-	}
-	if err := emitText(r.emit, r.sessionID, "agent_message_chunk", text); err != nil {
-		return nil, newRPCError(codeInternalError, "emit ACP reply update: %v", err)
 	}
 	if dest != "" {
 		r.meta.Posted = publish(dest, text)
 	}
+	if err := emitText(r.emit, r.sessionID, "agent_message_chunk", text); err != nil {
+		return nil, newRPCError(codeInternalError, "emit ACP reply update: %v", err)
+	}
 	return remotePromptResult{StopReason: StopReasonEndTurn, Meta: remotePromptMeta{Remote: r.meta}}, nil
+}
+
+// adoptOutcome ends a turn whose own reply lost the event's outcome: it
+// returns the winning reply, or ends cancelled when a cancel won.
+func (s *Server) adoptOutcome(r *remoteTurn, b binding.Binding, out mailboxOutcome) (any, *rpcError) {
+	if out.Cancelled {
+		r.meta.Reason = "session_cancelled"
+		return r.say(postStatus, "session_cancelled", StopReasonCancelled, fmt.Sprintf("Stopped waiting. The message stays in %s's AMQ inbox; %s may still act on it.", b.Handle, b.Handle))
+	}
+	return s.answeredResult(r, b, out)
 }
 
 // mailboxAnswered returns the event's outcome once its final-answer marker

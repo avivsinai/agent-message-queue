@@ -130,6 +130,10 @@ func (s *Server) runRemote(sessionID, text, eventID string, turn *turnState, emi
 		if b.Mailbox() {
 			return s.runMailbox(sessionID, text, eventID, b, turn, emit)
 		}
+		// A native turn's cancel goes to the endpoint, not to the outcome.
+		s.mu.Lock()
+		turn.mailboxEvent = ""
+		s.mu.Unlock()
 		root, target, native = b.Root, b.Target, b.NativeSession
 	}
 	r := &remoteTurn{

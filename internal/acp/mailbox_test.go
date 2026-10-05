@@ -728,3 +728,96 @@ func TestReplyWithoutAChannelWaitsForOne(t *testing.T) {
 		t.Fatalf("posts=%q; want the answer once, to the DM", got)
 	}
 }
+
+// Bead agent-message-queue-bdq, review of #961 r3 (P1): the turn won the
+// event's outcome, then a failed ACP emission returned before the Buzz
+// post, and nothing ever posted the reply. The post comes first.
+func TestFailedEmissionStillPostsTheReply(t *testing.T) {
+	const chanA = "6eff60e4-32ab-48ec-bd3d-f4c97872f370"
+	s, root := mailboxServer(t)
+	posts := recordPosts(t)
+	turn := newTurn()
+	turn.channel = chanA
+	replied := false
+	_, rpcErr := s.runRemote("s", "hi", strings.Repeat("2", 63)+"a", turn, func(v any) error {
+		update := v.(sessionUpdateNotification).Params.Update
+		if update.SessionUpdate == "agent_message_chunk" {
+			return fmt.Errorf("client gone")
+		}
+		if ids := inboxPrompts(t, root); !replied && len(ids) == 1 {
+			replied = true
+			replyAs(t, root, cockpitThread("session/s"), ids[0], format.KindAnswer, "the answer")
+		}
+		return nil
+	})
+	if rpcErr == nil {
+		t.Fatal("want the emission error")
+	}
+	if got := posts(); len(got) != 1 || got[0] != chanA+": the answer" {
+		t.Fatalf("posts=%q; want the answer posted once", got)
+	}
+}
+
+// Bead agent-message-queue-bdq, review of #961 r3 (P2): a cancel that
+// arrived before the turn loaded its claim settled only in memory, so a
+// sweep could still post the event's late reply.
+func TestEarlyCancelIsDecidedBeforeTheSweep(t *testing.T) {
+	const chanA = "6eff60e4-32ab-48ec-bd3d-f4c97872f370"
+	s, root := mailboxServer(t)
+	s.cfg.TurnTimeout = 300 * time.Millisecond
+	posts := recordPosts(t)
+	eventID := strings.Repeat("2", 63) + "b"
+	prompt := "<context>\nScope: dm\nChannel: DM (#" + chanA + ")\n</context>\nhi"
+	first := newTurn()
+	first.channel = chanA
+	if _, rpcErr := s.runRemote("s", prompt, eventID, first, func(any) error { return nil }); rpcErr != nil {
+		t.Fatal(rpcErr)
+	}
+	replyAs(t, root, cockpitThread("session/s"), inboxPrompts(t, root)[0], format.KindAnswer, "the answer")
+	s.mu.Lock()
+	s.ready = true
+	s.sessions["s"] = &sessionState{ID: "s"}
+	s.mu.Unlock()
+	run, _, rpcErr := s.beginPrompt(json.RawMessage(`{"sessionId":"s","prompt":[{"type":"text","text":` + mustJSONString(t, prompt) + `}],"_meta":{"nostr":{"eventId":"` + eventID + `"}}}`))
+	if rpcErr != nil || run == nil {
+		t.Fatalf("begin prompt: %v", rpcErr)
+	}
+	if _, rpcErr := s.cancel(json.RawMessage(`{"sessionId":"s"}`)); rpcErr != nil {
+		t.Fatal(rpcErr)
+	}
+	s.sweepLateReplies(time.Now().Add(time.Hour))
+	if got := strings.Join(posts(), "|"); strings.Contains(got, "the answer") {
+		t.Fatalf("posted after an accepted cancel: %q", got)
+	}
+	if res, rpcErr := run(func(any) error { return nil }); rpcErr != nil || res.(remotePromptResult).StopReason != StopReasonCancelled {
+		t.Fatalf("result=%+v err=%v; want cancelled", res, rpcErr)
+	}
+}
+
+// Bead agent-message-queue-bdq, review of #961 r3 (P2): when the sweep had
+// posted reply B, a turn that then decided its own reply A lost and still
+// showed A. It returns the winner, B.
+func TestLosingReplyReturnsTheWinner(t *testing.T) {
+	const chanA = "6eff60e4-32ab-48ec-bd3d-f4c97872f370"
+	s, root := mailboxServer(t)
+	posts := recordPosts(t)
+	eventID := strings.Repeat("2", 63) + "c"
+	winner := replyAs(t, root, cockpitThread("session/s"), "prompt", format.KindAnswer, "reply B")
+	moveToCur(t, root, winner)
+	if _, won, err := s.decideOutcome(eventID, mailboxOutcome{ReplyID: winner}); err != nil || !won {
+		t.Fatalf("won=%v err=%v", won, err)
+	}
+	var shown []string
+	turn := newTurn()
+	turn.channel = chanA
+	r := &remoteTurn{s: s, eventID: eventID, turn: turn, mailbox: true, claimChannel: chanA, meta: remoteMeta{Target: "agent"}, emit: func(v any) error {
+		shown = append(shown, v.(sessionUpdateNotification).Params.Update.Content.Text)
+		return nil
+	}}
+	if _, rpcErr := s.sayReply(r, binding.Binding{Root: root, Handle: "agent"}, "own", "reply A"); rpcErr != nil {
+		t.Fatal(rpcErr)
+	}
+	if strings.Join(shown, "|") != "reply B" || len(posts()) != 0 {
+		t.Fatalf("shown=%q posts=%q; want reply B shown and nothing posted", shown, posts())
+	}
+}

@@ -119,8 +119,11 @@ type turnState struct {
 	// channel is the Buzz channel the prompt came from ("" when it did not
 	// come from Buzz); the owner-facing text is posted there.
 	channel string
-	// mailboxEvent is the event id of a mailbox turn once it is claimed; a
-	// cancel decides that event's durable outcome before it settles.
+	// mailboxEvent is the event id of a binding-mode turn, registered when
+	// the prompt is accepted and cleared once the turn routes to a native
+	// binding. A cancel decides that event's durable outcome before it
+	// settles the turn, so a mailbox Stop is never acknowledged before it is
+	// recorded.
 	mailboxEvent string
 }
 
@@ -701,6 +704,9 @@ func (s *Server) beginPrompt(params json.RawMessage) (func(emit func(any) error)
 	session, turn, rpcErr := s.beginTurnLocked(parsed.SessionID)
 	if turn != nil {
 		turn.channel = buzzChannel(text)
+		if s.cfg.RemoteBinding {
+			turn.mailboxEvent = eventID
+		}
 	}
 	s.mu.Unlock()
 	if rpcErr != nil {
