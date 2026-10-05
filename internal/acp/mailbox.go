@@ -1,9 +1,12 @@
 package acp
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -96,7 +99,9 @@ func (s *Server) runMailbox(sessionID, text, eventID string, b binding.Binding, 
 	heartbeat := time.NewTicker(s.cfg.HeartbeatInterval)
 	defer heartbeat.Stop()
 	read := false
-	seen := map[string]bool{}
+	// The turn start and each heartbeat also recover replies another
+	// consumer moved to cur; other polls read only new.
+	watch, withCur := s.watchMailbox(b, threadID, claim.MessageID, created), true
 	for {
 		if !read && drained(b, claim.MessageID) {
 			read = true
@@ -105,7 +110,8 @@ func (s *Server) runMailbox(sessionID, text, eventID string, b binding.Binding, 
 				return nil, newRPCError(codeInternalError, "emit ACP session update: %v", err)
 			}
 		}
-		final, progress, err := mailboxReplies(b, threadID, claim.MessageID, created, seen)
+		final, progress, err := watch.poll(withCur)
+		withCur = false
 		if err != nil {
 			return nil, newRPCError(codeInternalError, "poll AMQ thread %s: %v", threadID, err)
 		}
@@ -132,6 +138,7 @@ func (s *Server) runMailbox(sessionID, text, eventID string, b binding.Binding, 
 			return r.say("reply_timeout", StopReasonRefusal, fmt.Sprintf("No final reply from %s yet. The message stays in its AMQ inbox and may still be answered.", b.Handle))
 		case <-poll.C:
 		case <-heartbeat.C:
+			withCur = true
 			if err := emitText(emit, sessionID, "agent_thought_chunk", fmt.Sprintf("Still waiting for a reply from %s.", b.Handle)); err != nil {
 				return nil, newRPCError(codeInternalError, "emit ACP heartbeat: %v", err)
 			}
@@ -317,92 +324,186 @@ type replyHit struct {
 	created  time.Time
 }
 
-// scanReplies reads only dir (one inbox box) and returns, oldest first, the
-// files from handle on threadID that ref promptID and were created no earlier
-// than since. It reads headers only; the caller reads the body of a hit. A
-// file whose header cannot be read is skipped and left in place for drain and
-// the DLQ. A missing dir has no replies.
-func scanReplies(dir, handle, threadID, promptID string, since time.Time) ([]replyHit, error) {
-	entries, err := os.ReadDir(dir)
+// inboxScan lists one inbox box and keeps each file's header by name. A
+// delivered maildir file never changes, so each name's header is read once:
+// a poll costs one directory listing plus the headers of names it has not
+// seen, not a read of every file (review F2). A header that cannot be parsed
+// is remembered as nil and the file is left for drain and the DLQ.
+type inboxScan struct {
+	dir     string
+	headers map[string]*format.Header
+}
+
+func newInboxScan(dir string) *inboxScan {
+	return &inboxScan{dir: dir, headers: map[string]*format.Header{}}
+}
+
+// replies returns, oldest first, the files from handle on threadID that ref
+// promptID and were created no earlier than since. A missing dir has none.
+func (sc *inboxScan) replies(handle, threadID, promptID string, since time.Time) ([]replyHit, error) {
+	entries, err := os.ReadDir(sc.dir)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
 		return nil, err
 	}
+	listed := make(map[string]bool, len(entries))
 	var hits []replyHit
 	for _, e := range entries {
 		name := e.Name()
 		if e.IsDir() || !strings.HasSuffix(name, ".md") {
 			continue
 		}
-		header, err := format.ReadHeaderFile(filepath.Join(dir, name))
-		if err != nil {
-			continue
+		listed[name] = true
+		header, known := sc.headers[name]
+		if !known {
+			h, err := format.ReadHeaderFile(filepath.Join(sc.dir, name))
+			var pathErr *fs.PathError
+			switch {
+			case err == nil:
+				header = &h
+			case errors.As(err, &pathErr):
+				continue // gone or unreadable now; try again next poll
+			}
+			sc.headers[name] = header
 		}
-		if header.From != handle || header.Thread != threadID || !slices.Contains(header.Refs, promptID) {
+		if header == nil || header.From != handle || header.Thread != threadID || !slices.Contains(header.Refs, promptID) {
 			continue
 		}
 		created, err := time.Parse(time.RFC3339Nano, header.Created)
 		if err != nil || created.Before(since) {
 			continue
 		}
-		hits = append(hits, replyHit{filename: name, header: header, created: created})
+		hits = append(hits, replyHit{filename: name, header: *header, created: created})
+	}
+	for name := range sc.headers {
+		if !listed[name] {
+			delete(sc.headers, name)
+		}
 	}
 	slices.SortStableFunc(hits, func(a, b replyHit) int { return a.created.Compare(b.created) })
 	return hits, nil
 }
 
-// mailboxReplies claims the replies from the handle in buzz/inbox/new that
-// ref the prompt and were created no earlier than it, the way drain does: a
-// move to cur and a drained receipt for consumer buzz. Unmatched files are
-// never moved, because several bindings share the buzz mailbox. A status
-// reply is progress, reported once; the newest other reply is the final
-// answer. Mailbox mode needs no cur fallback: it claims its own matches.
-func mailboxReplies(b binding.Binding, threadID, promptID string, created time.Time, seen map[string]bool) (string, []string, error) {
-	hits, err := scanReplies(fsq.AgentInboxNew(b.Root, mailboxSender), b.Handle, threadID, promptID, created)
-	if err != nil || len(hits) == 0 {
-		return "", nil, err
+// mailboxWatch reads one prompt's replies from the buzz inbox. Several
+// bindings, processes and redeliveries share that inbox, so a reply is
+// returned only by the watch that wins its forwarding claim.
+type mailboxWatch struct {
+	stateDir           string
+	b                  binding.Binding
+	threadID, promptID string
+	created            time.Time
+	inboxNew, inboxCur *inboxScan
+}
+
+func (s *Server) watchMailbox(b binding.Binding, threadID, promptID string, created time.Time) *mailboxWatch {
+	return &mailboxWatch{
+		stateDir: s.cfg.StateDir, b: b, threadID: threadID, promptID: promptID, created: created,
+		inboxNew: newInboxScan(fsq.AgentInboxNew(b.Root, mailboxSender)),
+		inboxCur: newInboxScan(fsq.AgentInboxCur(b.Root, mailboxSender)),
 	}
-	identity, err := fsq.SnapshotDeliveryRoot(b.Root)
+}
+
+// poll claims the prompt's replies in buzz/inbox/new the way drain does (a
+// move to cur and a drained receipt for consumer buzz) and never moves other
+// files. withCur also recovers replies another consumer moved to cur before
+// this watch saw them. A status reply is progress; the newest other reply
+// is the final answer.
+func (w *mailboxWatch) poll(withCur bool) (string, []string, error) {
+	var owned []format.Message
+	hits, err := w.inboxNew.replies(w.b.Handle, w.threadID, w.promptID, w.created)
 	if err != nil {
 		return "", nil, err
 	}
-	root, err := fsq.OpenDeliveryRoot(b.Root, identity)
-	if err != nil {
-		return "", nil, err
-	}
-	defer func() { _ = root.Close() }()
-	var progress []string
-	final := ""
-	for _, hit := range hits {
-		// A failed rename with ENOENT means another process claimed the file
-		// first; it is then read from cur like an own claim.
-		var committed *fsq.CommittedDurabilityError
-		if err := fsq.MoveNewToCur(root, mailboxSender, hit.filename); err != nil && !errors.As(err, &committed) && !os.IsNotExist(err) {
-			return "", nil, err
-		}
-		msg, err := format.ReadMessageFileRoot(root, filepath.Join("agents", mailboxSender, "inbox", "cur", hit.filename))
+	if len(hits) > 0 {
+		identity, err := fsq.SnapshotDeliveryRoot(w.b.Root)
 		if err != nil {
-			if os.IsNotExist(err) {
-				continue
-			}
 			return "", nil, err
 		}
-		// The receipt is best effort, as in drain: the claim already holds.
-		_ = receipt.EmitDeliveryRoot(root, receipt.New(msg.Header.ID, msg.Header.Thread, b.Handle, mailboxSender, receipt.StageDrained, ""))
+		root, err := fsq.OpenDeliveryRoot(w.b.Root, identity)
+		if err != nil {
+			return "", nil, err
+		}
+		defer func() { _ = root.Close() }()
+		for _, hit := range hits {
+			msg, ok, err := w.claimNew(root, hit.filename)
+			if err != nil {
+				return "", nil, err
+			}
+			if ok {
+				owned = append(owned, msg)
+			}
+		}
+	}
+	if withCur {
+		hits, err := w.inboxCur.replies(w.b.Handle, w.threadID, w.promptID, w.created)
+		if err != nil {
+			return "", nil, err
+		}
+		for _, hit := range hits {
+			msg, ok, err := w.recover(hit.filename)
+			if err != nil {
+				return "", nil, err
+			}
+			if ok {
+				owned = append(owned, msg)
+			}
+		}
+	}
+	var progress []string
+	final, newest := "", time.Time{}
+	for _, msg := range owned {
 		body := strings.TrimSpace(msg.Body)
 		if body == "" {
 			continue
 		}
 		if msg.Header.Kind == string(format.KindStatus) {
-			if !seen[msg.Header.ID] {
-				seen[msg.Header.ID] = true
-				progress = append(progress, b.Handle+": "+body)
-			}
+			progress = append(progress, w.b.Handle+": "+body)
 			continue
 		}
-		final = body
+		if created, _ := time.Parse(time.RFC3339Nano, msg.Header.Created); final == "" || !created.Before(newest) {
+			final, newest = body, created
+		}
 	}
 	return final, progress, nil
+}
+
+// claimNew moves one reply from new to cur and forwards it. Only a
+// successful move (or this move's own committed-durability error) owns the
+// file: ENOENT means another consumer moved it first, and that reply is
+// recovered from cur, by whichever watch wins the forwarding claim.
+func (w *mailboxWatch) claimNew(root *fsq.DeliveryRoot, filename string) (format.Message, bool, error) {
+	var committed *fsq.CommittedDurabilityError
+	if err := fsq.MoveNewToCur(root, mailboxSender, filename); err != nil && !errors.As(err, &committed) {
+		if os.IsNotExist(err) {
+			return format.Message{}, false, nil
+		}
+		return format.Message{}, false, err
+	}
+	msg, ok, err := w.recover(filename)
+	if ok {
+		// The receipt is best effort, as in drain: the claim already holds.
+		_ = receipt.EmitDeliveryRoot(root, receipt.New(msg.Header.ID, msg.Header.Thread, w.b.Handle, mailboxSender, receipt.StageDrained, ""))
+	}
+	return msg, ok, err
+}
+
+// recover forwards one reply in buzz/inbox/cur if this watch wins its
+// forwarding claim: an exclusive record keyed by queue root and file name,
+// so each reply is returned at most once across turns and processes.
+func (w *mailboxWatch) recover(filename string) (format.Message, bool, error) {
+	key := sha256.Sum256([]byte(w.b.Root + "\x00" + filename))
+	won, err := createExclusive(filepath.Join(w.stateDir, "forwarded", hex.EncodeToString(key[:])), []byte(w.promptID+"\n"))
+	if err != nil || !won {
+		return format.Message{}, false, err
+	}
+	msg, err := format.ReadMessageFile(filepath.Join(fsq.AgentInboxCur(w.b.Root, mailboxSender), filename))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return format.Message{}, false, nil
+		}
+		return format.Message{}, false, err
+	}
+	return msg, true, nil
 }

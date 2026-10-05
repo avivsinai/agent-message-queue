@@ -777,11 +777,11 @@ func (s *Server) waitForReply(sessionID string, delivery Delivery, turn *turnSta
 	}
 	// The poll reads only inbox/new. Another consumer of cfg.Me may drain the
 	// reply to cur first, so each heartbeat also reads cur.
-	newDir, curDir := fsq.AgentInboxNew(s.cfg.Root, s.cfg.Me), fsq.AgentInboxCur(s.cfg.Root, s.cfg.Me)
-	dir := newDir
+	inboxNew, inboxCur := newInboxScan(fsq.AgentInboxNew(s.cfg.Root, s.cfg.Me)), newInboxScan(fsq.AgentInboxCur(s.cfg.Root, s.cfg.Me))
+	scan := inboxNew
 	for {
-		reply, found, err := s.replyForDelivery(delivery, dir)
-		dir = newDir
+		reply, found, err := s.replyForDelivery(delivery, scan)
+		scan = inboxNew
 		if err != nil {
 			return nil, newRPCError(codeInternalError, "poll AMQ thread %s: %v", delivery.Thread, err)
 		}
@@ -804,7 +804,7 @@ func (s *Server) waitForReply(sessionID string, delivery Delivery, turn *turnSta
 			return turnResult(delivery, settle("reply_timeout"), ""), nil
 		case <-poll.C:
 		case <-heartbeat.C:
-			dir = curDir
+			scan = inboxCur
 			if err := emitText(emit, sessionID, "agent_thought_chunk", fmt.Sprintf("Still waiting for a reply from %s on AMQ thread %s.", s.cfg.To, delivery.Thread)); err != nil {
 				return nil, newRPCError(codeInternalError, "emit ACP heartbeat: %v", err)
 			}
@@ -845,18 +845,18 @@ func turnResult(delivery Delivery, outcome, reply string) promptResult {
 // than it. It never moves a file: other consumers drain cfg.Me. Stale or
 // thread-rent messages are never picked up; a malformed unrelated mailbox
 // item does not fail the poll.
-func (s *Server) replyForDelivery(delivery Delivery, dir string) (string, bool, error) {
+func (s *Server) replyForDelivery(delivery Delivery, scan *inboxScan) (string, bool, error) {
 	// Only a reply that refs this turn's prompt answers it. Time and thread
 	// alone let a late answer to a cancelled prompt complete the next one
 	// (codex ebo PR2 consult). amq reply sets refs to the answered message
 	// plus its refs, so a reply to an in-turn steer, which refs the prompt,
 	// also qualifies.
-	hits, err := scanReplies(dir, s.cfg.To, delivery.Thread, delivery.MessageID, delivery.Created)
+	hits, err := scan.replies(s.cfg.To, delivery.Thread, delivery.MessageID, delivery.Created)
 	if err != nil {
 		return "", false, err
 	}
 	for index := len(hits) - 1; index >= 0; index-- {
-		msg, err := format.ReadMessageFile(filepath.Join(dir, hits[index].filename))
+		msg, err := format.ReadMessageFile(filepath.Join(scan.dir, hits[index].filename))
 		if err != nil || strings.TrimSpace(msg.Body) == "" {
 			continue
 		}
