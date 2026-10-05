@@ -107,6 +107,26 @@ func TestMailboxRedeliveryPublishesOnce(t *testing.T) {
 	}
 }
 
+// Field report 2026-10-05: a `coop exec --session` root has no config.json,
+// so `amq reply` to buzz refused with `mailbox for "buzz" is incomplete`.
+// Delivery must leave buzz a complete mailbox to answer.
+func TestMailboxDeliveryLeavesBuzzAMailbox(t *testing.T) {
+	s, root := mailboxServer(t)
+	s.cfg.TurnTimeout = 50 * time.Millisecond
+	if _, rpcErr := s.runRemote("s", "say hi", strings.Repeat("3", 64), newTurn(), func(any) error { return nil }); rpcErr != nil {
+		t.Fatal(rpcErr)
+	}
+	identity, _ := fsq.SnapshotDeliveryRoot(root)
+	dr, err := fsq.OpenDeliveryRoot(root, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = dr.Close() }()
+	if err := fsq.ValidateExistingMailboxLayout(dr, mailboxSender); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // Codex 611.36 research, honest stop: a cancel says the message stays and
 // may still run, and the message is not recalled.
 func TestMailboxCancelSaysTheMessageStays(t *testing.T) {

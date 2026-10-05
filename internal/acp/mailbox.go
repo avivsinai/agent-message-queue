@@ -289,6 +289,11 @@ func publishOnce(b binding.Binding, threadID, id string, created time.Time, text
 		return err
 	}
 	defer func() { _ = root.Close() }()
+	// The handle answers buzz with `amq reply`, which cannot create a missing
+	// mailbox in a root without config.json, so the sender ensures its own.
+	if err := root.EnsureAgentDirs(mailboxSender); err != nil {
+		return err
+	}
 	if _, err := fsq.DeliverToInboxes(root, []string{b.Handle}, name, data); err != nil {
 		var uncertain *fsq.CommittedDurabilityError
 		if !errors.As(err, &uncertain) {
