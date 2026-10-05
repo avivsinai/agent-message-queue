@@ -19,6 +19,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/avivsinai/agent-message-queue/internal/remote/codex"
 )
 
 const (
@@ -33,6 +35,7 @@ const (
 var (
 	errCodexThreadNotReady    = errors.New("codex thread is not yet persisted")
 	errCodexNamingTargetEnded = errors.New("spawned Codex process ended")
+	errCodexNamedOnDaemon     = errors.New("codex thread named on the managed daemon")
 )
 
 var (
@@ -50,6 +53,10 @@ type codexNamingTarget struct {
 	InitialIdentity   codexFileIdentity
 	ProviderBinary    string
 	ProviderIdentity  codexFileIdentity
+	// Daemon, when set, finds the TUI's thread on the shared app-server
+	// daemon (codex-cli 0.160): its rollout says source vscode and the
+	// daemon, not the TUI, holds it (4ip).
+	Daemon *codex.SpawnedTUI
 }
 
 type codexFileIdentity struct {
@@ -250,8 +257,14 @@ func locateCodexProcessThread(ctx context.Context, target codexNamingTarget) (co
 	}
 }
 
-func waitForCodexProcessThread(ctx context.Context, target codexNamingTarget) (codexProcessThread, error) {
+func waitForCodexProcessThread(ctx context.Context, target codexNamingTarget, name string) (codexProcessThread, error) {
 	for {
+		if named, err := nameCodexTUIOnDaemon(ctx, target, name); err != nil || named {
+			if named {
+				err = errCodexNamedOnDaemon
+			}
+			return codexProcessThread{}, err
+		}
 		probeCtx, cancelProbe := context.WithTimeout(ctx, codexNamedProbeTimeout)
 		thread, err := locateCodexProcessThreadForWait(probeCtx, target)
 		cancelProbe()
@@ -269,6 +282,30 @@ func waitForCodexProcessThread(ctx context.Context, target codexNamingTarget) (c
 		case <-timer.C:
 		}
 	}
+}
+
+// nameCodexTUIOnDaemon names the spawned TUI's thread through the daemon the
+// TUI is connected to, so the TUI shows the name at once, before the first
+// turn and so before Codex names the thread itself. named is false while the
+// TUI or its thread is not up yet, or no daemon runs (older Codex).
+func nameCodexTUIOnDaemon(ctx context.Context, target codexNamingTarget, name string) (bool, error) {
+	if target.Daemon == nil {
+		return false, nil
+	}
+	if ready, err := validateCodexNamingTarget(target); err != nil || !ready {
+		return false, err
+	}
+	sock, err := codex.ControlSocket()
+	if err != nil {
+		return false, nil
+	}
+	rpcCtx, cancel := context.WithTimeout(ctx, codexNamedRPCTimeout)
+	defer cancel()
+	found, err := codex.NameSpawnedTUIThread(rpcCtx, sock, *target.Daemon, name)
+	if errors.Is(err, codex.ErrAmbiguousTUIThread) || found {
+		return found, err
+	}
+	return false, nil // a daemon that is starting or restarting is retried
 }
 
 func revalidateCodexProcessThread(ctx context.Context, target codexNamingTarget, expected codexProcessThread) error {
@@ -648,8 +685,8 @@ func runCodexNamedSidecar(name string, target codexNamingTarget) error {
 	// Codex defers persistence until the first user turn. An idle composer has
 	// no naming target yet, regardless of how long it has been open. Each probe
 	// is bounded, and process identity checks end the wait when this CLI exits.
-	thread, err := waitForCodexProcessThread(context.Background(), target)
-	if errors.Is(err, errCodexNamingTargetEnded) {
+	thread, err := waitForCodexProcessThread(context.Background(), target, name)
+	if errors.Is(err, errCodexNamingTargetEnded) || errors.Is(err, errCodexNamedOnDaemon) {
 		return nil
 	}
 	if err != nil {
