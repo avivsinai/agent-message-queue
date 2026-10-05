@@ -16,6 +16,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -190,13 +191,30 @@ func say(w io.Writer, format string, args ...any) {
 	_, _ = fmt.Fprintf(w, format+"\n", args...)
 }
 
+// hasFlag reports the value of the boolean flag name the way the flag
+// package reads it: -name and --name mean true, -name=v and --name=v take
+// the value v, the last occurrence wins, and nothing after "--" counts. It
+// lets the error path agree with the parsed flag, including for failures
+// raised before or during parsing.
 func hasFlag(args []string, name string) bool {
+	set := false
 	for _, a := range args {
-		if a == "--"+name || a == "-"+name || strings.HasPrefix(a, "--"+name+"=") {
-			return true
+		if a == "--" {
+			break
+		}
+		for _, prefix := range []string{"--", "-"} {
+			if a == prefix+name {
+				set = true
+				break
+			}
+			if v, ok := strings.CutPrefix(a, prefix+name+"="); ok {
+				b, err := strconv.ParseBool(v)
+				set = err == nil && b
+				break
+			}
 		}
 	}
-	return false
+	return set
 }
 
 // finish prints the reply and maps the outcome to the AMQ exit contract. The
