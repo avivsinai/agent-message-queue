@@ -119,6 +119,9 @@ type turnState struct {
 	// channel is the Buzz channel the prompt came from ("" when it did not
 	// come from Buzz); the owner-facing text is posted there.
 	channel string
+	// mailboxEvent is the event id of a mailbox turn once it is claimed; a
+	// cancel decides that event's durable outcome before it settles.
+	mailboxEvent string
 }
 
 // settleLocked decides the turn's outcome if it is still open; it reports
@@ -269,7 +272,6 @@ func (s *Server) Serve(in io.Reader, out io.Writer) error {
 	// intact; the scanner error itself is returned below.
 	s.cancelAll()
 	pending.Wait()
-	s.late.running.Wait()
 	errMu.Lock()
 	deferredWriteErr := writeErr
 	errMu.Unlock()
@@ -921,12 +923,30 @@ func (s *Server) cancel(params json.RawMessage) (any, *rpcError) {
 		return nil, err
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	session, ok := s.sessions[parsed.SessionID]
 	if !ok {
+		s.mu.Unlock()
 		return nil, newRPCError(codeInvalidParams, "unknown sessionId %q", parsed.SessionID)
 	}
-	if t := session.turn; t != nil && t.settleLocked("session_cancelled") {
+	t, event := session.turn, ""
+	if t != nil && t.outcome == "" {
+		event = t.mailboxEvent
+	}
+	s.mu.Unlock()
+	// A mailbox cancel is accepted only once it is the event's durable
+	// outcome; if a reply already is, the turn returns that reply.
+	if event != "" {
+		final, _, err := s.decideOutcome(event, mailboxOutcome{Cancelled: true})
+		if err != nil {
+			return nil, newRPCError(codeInternalError, "record cancel: %v", err)
+		}
+		if !final.Cancelled {
+			return struct{}{}, nil
+		}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if t != nil && session.turn == t && t.settleLocked("session_cancelled") {
 		close(t.done)
 	}
 	return struct{}{}, nil

@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
@@ -24,27 +23,29 @@ const lateReplyHorizon = 24 * time.Hour
 // discover claims this process did not make.
 const lateReplyBudget = 512
 
-// lateReplySweep is the late-reply sweep state of one server.
+// lateReplyPosts caps the posts of one sweep; the rest wait for the next.
+const lateReplyPosts = 8
+
+// lateReplySweep is the late-reply sweep state of one server. One worker
+// runs every sweep; the ticker and prompt starts only kick it, so at most
+// one sweep waits behind a running one.
 //
 // One sweep costs: one listing read of at most lateReplyBudget entries of
 // remote-events, a few small state reads per pending claim, one listing of
-// buzz inbox/new and inbox/cur per queue root with an eligible claim, and
-// the headers of names not seen by an earlier sweep. Pending claims are the
-// ones this process made plus those discovered by the rolling listing, so a
-// dead peer's claim is found within entries/lateReplyBudget sweeps. A claim
-// leaves the set once it has an outcome, is cancelled, or passes the
-// horizon.
+// buzz inbox/new and inbox/cur per queue root with an eligible claim, the
+// headers of names not seen before, one pass over each root's cached
+// headers, and at most lateReplyPosts posts. Pending claims are the ones
+// this process made plus those found by the rolling listing, so a dead
+// peer's claim is found within entries/lateReplyBudget sweeps. A claim
+// leaves the set once it has an outcome or passes the horizon; a root's
+// header cache is dropped when it has no eligible claim.
 type lateReplySweep struct {
-	// mu is held for a whole sweep; queued coalesces prompt-triggered
-	// sweeps, so at most one waits behind a running one.
-	mu      sync.Mutex
-	queued  atomic.Bool
-	running sync.WaitGroup
+	kick chan struct{}
 
 	pendingMu sync.Mutex
 	pending   map[string]struct{}
 
-	// Guarded by mu.
+	// Owned by the worker (or a test calling sweepLateReplies).
 	cursor *os.File
 	scans  map[string][2]*inboxScan
 }
@@ -78,9 +79,13 @@ func (l *lateReplySweep) pendingIDs() []string {
 	return ids
 }
 
-// startLateReplySweep sweeps on a slow tick until the returned stop is
+// startLateReplySweep runs the sweep worker until the returned stop is
 // called; stop waits for a running sweep, so a post is never cut off.
 func (s *Server) startLateReplySweep() (stop func()) {
+	kick := make(chan struct{}, 1)
+	s.mu.Lock()
+	s.late.kick = kick
+	s.mu.Unlock()
 	done, quit := make(chan struct{}), make(chan struct{})
 	go func() {
 		defer close(done)
@@ -90,16 +95,18 @@ func (s *Server) startLateReplySweep() (stop func()) {
 			select {
 			case <-quit:
 				return
-			case now := <-tick.C:
-				s.sweepLateReplies(now)
+			case <-tick.C:
+			case <-kick:
 			}
+			s.sweepLateReplies(time.Now())
 		}
 	}()
 	return func() {
 		close(quit)
 		<-done
-		s.late.mu.Lock()
-		defer s.late.mu.Unlock()
+		s.mu.Lock()
+		s.late.kick = nil
+		s.mu.Unlock()
 		if s.late.cursor != nil {
 			_ = s.late.cursor.Close()
 			s.late.cursor = nil
@@ -107,73 +114,110 @@ func (s *Server) startLateReplySweep() (stop func()) {
 	}
 }
 
-// requestSweep starts a sweep at a prompt start without holding the turn.
-// A sweep already queued covers this request.
+// requestSweep asks the worker for a sweep at a prompt start without
+// holding the turn. A kick already waiting covers this one; without a
+// running worker it does nothing.
 func (s *Server) requestSweep() {
-	if !s.late.queued.CompareAndSwap(false, true) {
+	s.mu.Lock()
+	kick := s.late.kick
+	s.mu.Unlock()
+	if kick == nil {
 		return
 	}
-	s.late.running.Add(1)
-	go func() {
-		defer s.late.running.Done()
-		s.sweepLateReplies(time.Now())
-	}()
+	select {
+	case kick <- struct{}{}:
+	default:
+	}
 }
 
 // sweepLateReplies posts the final reply of each recent mailbox event whose
 // turn ended without one, for example on a timeout or a client that left
 // (review F1). An event waits while its turn can still be open (younger
-// than the turn timeout) and leaves the sweep once it has an outcome, is
-// cancelled, or passes the horizon. The final post and a cancel both take
-// the exclusive final-answer marker, so exactly one of them happens, and
-// each event's reply is posted at most once.
+// than the turn timeout) or while it has no DM channel, and leaves the
+// sweep once it has an outcome or passes the horizon. The post and a cancel
+// both decide the event's outcome through one exclusive record, so exactly
+// one of them happens and each reply is posted at most once.
 func (s *Server) sweepLateReplies(now time.Time) {
 	l := &s.late
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.queued.Store(false)
 	s.discoverClaims(now)
-	byRoot := map[string][]lateClaim{}
+	byRoot := map[string]map[string]*lateClaim{}
 	for _, eventID := range l.pendingIDs() {
 		c, keep := s.loadLateClaim(eventID, now)
 		switch {
 		case !keep:
 			l.drop(eventID)
 		case c != nil:
-			byRoot[c.b.Root] = append(byRoot[c.b.Root], *c)
+			if byRoot[c.b.Root] == nil {
+				byRoot[c.b.Root] = map[string]*lateClaim{}
+			}
+			byRoot[c.b.Root][c.claim.MessageID] = c
 		}
 	}
-	if l.scans == nil {
-		l.scans = map[string][2]*inboxScan{}
-	}
-	for root, claims := range byRoot {
-		scans, ok := l.scans[root]
+	scans := map[string][2]*inboxScan{}
+	posts := 0
+	for root, index := range byRoot {
+		if posts == lateReplyPosts {
+			break
+		}
+		sc, ok := l.scans[root]
 		if !ok {
-			scans = [2]*inboxScan{newInboxScan(fsq.AgentInboxNew(root, mailboxSender)), newInboxScan(fsq.AgentInboxCur(root, mailboxSender))}
-			l.scans[root] = scans
+			sc = [2]*inboxScan{newInboxScan(fsq.AgentInboxNew(root, mailboxSender)), newInboxScan(fsq.AgentInboxCur(root, mailboxSender))}
 		}
-		if scans[0].refresh() != nil || scans[1].refresh() != nil {
+		scans[root] = sc
+		if sc[0].refresh() != nil || sc[1].refresh() != nil {
 			continue
 		}
-		for _, c := range claims {
-			w := &mailboxWatch{stateDir: s.cfg.StateDir, b: c.b, threadID: c.claim.Thread, promptID: c.claim.MessageID, created: c.created, inboxNew: scans[0], inboxCur: scans[1], adopt: true, refreshed: true}
-			replyID, text, _, err := w.poll(true)
+		newHits, curHits := matchClaims(sc[0], index), matchClaims(sc[1], index)
+		for promptID, c := range index {
+			if posts == lateReplyPosts {
+				break
+			}
+			w := &mailboxWatch{stateDir: s.cfg.StateDir, b: c.b, threadID: c.claim.Thread, promptID: promptID, created: c.created, adopt: true}
+			replyID, text, _, err := w.forward(newHits[promptID], curHits[promptID])
 			if err != nil || text == "" {
 				continue
 			}
-			raw, err := json.Marshal(mailboxOutcome{ReplyID: replyID})
+			posts++
+			final, won, err := s.decideOutcome(c.eventID, mailboxOutcome{ReplyID: replyID})
 			if err != nil {
 				continue
 			}
-			s.postOnce(c.eventID, postFinal, raw, c.channel, text)
+			if won && !final.Cancelled {
+				_ = publish(c.channel, text)
+			}
 			l.drop(c.eventID)
 		}
 	}
+	l.scans = scans // a root with no eligible claim loses its cache
+}
+
+// matchClaims makes one pass over a box's cached headers and returns, per
+// prompt id in index, the replies to it, oldest first.
+func matchClaims(sc *inboxScan, index map[string]*lateClaim) map[string][]replyHit {
+	hits := map[string][]replyHit{}
+	for name, header := range sc.headers {
+		if header == nil {
+			continue
+		}
+		for _, ref := range header.Refs {
+			c, ok := index[ref]
+			if !ok {
+				continue
+			}
+			if hit, ok := replyTo(name, header, c.b.Handle, c.claim.Thread, c.created); ok {
+				hits[ref] = append(hits[ref], hit)
+			}
+		}
+	}
+	for _, h := range hits {
+		sortHits(h)
+	}
+	return hits
 }
 
 // discoverClaims lists the next lateReplyBudget entries of remote-events
 // and adds the recent mailbox claims among them. The listing resumes where
-// the last sweep stopped and starts over after its end. Caller holds mu.
+// the last sweep stopped and starts over after its end.
 func (s *Server) discoverClaims(now time.Time) {
 	l := &s.late
 	if l.cursor == nil {
@@ -210,9 +254,6 @@ type lateClaim struct {
 // loadLateClaim returns the event's claim when the sweep may post for it
 // now; keep is false when the event leaves the sweep for good.
 func (s *Server) loadLateClaim(eventID string, now time.Time) (*lateClaim, bool) {
-	if s.eventCancelled(eventID) {
-		return nil, false
-	}
 	if _, ok := s.mailboxAnswered(eventID); ok {
 		return nil, false
 	}

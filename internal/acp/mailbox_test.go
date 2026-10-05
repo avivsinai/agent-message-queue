@@ -1,6 +1,7 @@
 package acp
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -550,12 +551,8 @@ func TestRedeliveryPostsTheAnswerToTheFirstChannel(t *testing.T) {
 			}
 			deliver(chanA) // times out
 			replyAs(t, root, cockpitThread("session/s"), inboxPrompts(t, root)[0], format.KindAnswer, "the answer")
-			// A long turn budget keeps the prompt-start sweep off the event,
-			// so the redelivered turn itself posts the answer.
-			s.late.running.Wait()
 			s.cfg.TurnTimeout = time.Minute
 			deliver(redelivered)
-			s.late.running.Wait()
 			mu.Lock()
 			defer mu.Unlock()
 			var answers []post
@@ -591,5 +588,143 @@ func TestCancelBeforeTheFinalPostWins(t *testing.T) {
 	s.postOnce(eventID, postFinal, []byte(`{"reply_id":"r"}`), "6eff60e4-32ab-48ec-bd3d-f4c97872f370", "late answer")
 	if posts != 0 {
 		t.Fatalf("posted %d times after a cancel", posts)
+	}
+}
+
+// parkedTurn runs a mailbox turn for session "s" that the cancel handler can
+// find, and parks it once its prompt is delivered until release is closed.
+type parkedTurn struct {
+	prompt  string
+	release chan struct{}
+	result  chan remotePromptResult
+}
+
+func startParkedTurn(t *testing.T, s *Server, root, eventID, channel string) *parkedTurn {
+	t.Helper()
+	turn := newTurn()
+	turn.channel = channel
+	s.mu.Lock()
+	s.sessions["s"] = &sessionState{ID: "s", turn: turn}
+	s.mu.Unlock()
+	p := &parkedTurn{release: make(chan struct{}), result: make(chan remotePromptResult, 1)}
+	parked := make(chan string, 1)
+	go func() {
+		res, rpcErr := s.runRemote("s", "hi", eventID, turn, func(v any) error {
+			if strings.HasPrefix(v.(sessionUpdateNotification).Params.Update.Content.Text, "Delivered to") {
+				parked <- inboxPrompts(t, root)[0]
+				<-p.release
+			}
+			return nil
+		})
+		if rpcErr != nil {
+			t.Error(rpcErr)
+		}
+		p.result <- res.(remotePromptResult)
+	}()
+	select {
+	case p.prompt = <-parked:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the turn never delivered its prompt")
+	}
+	return p
+}
+
+func (p *parkedTurn) finish(t *testing.T) remotePromptResult {
+	t.Helper()
+	close(p.release)
+	select {
+	case res := <-p.result:
+		return res
+	case <-time.After(3 * time.Second):
+		t.Fatal("the turn did not end")
+	}
+	return remotePromptResult{}
+}
+
+// recordPosts swaps the Buzz poster for a recorder.
+func recordPosts(t *testing.T) func() []string {
+	var mu sync.Mutex
+	var posts []string
+	saved := postAnswer
+	t.Cleanup(func() { postAnswer = saved })
+	postAnswer = func(channel, content string) error {
+		mu.Lock()
+		defer mu.Unlock()
+		posts = append(posts, channel+": "+content)
+		return nil
+	}
+	return func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), posts...)
+	}
+}
+
+// Bead agent-message-queue-bdq, review of #961 r2: a cancel was accepted in
+// memory before it was recorded, so a sweep could post in between, and it
+// wrote .cancelled even when a reply had already won. The cancel handler
+// now decides the event's one durable outcome before it settles the turn.
+func TestCancelDecidesTheEventOutcome(t *testing.T) {
+	const chanA = "6eff60e4-32ab-48ec-bd3d-f4c97872f370"
+	cancel := json.RawMessage(`{"sessionId":"s"}`)
+	t.Run("cancel first", func(t *testing.T) {
+		s, root := mailboxServer(t)
+		posts := recordPosts(t)
+		eventID := strings.Repeat("1", 63) + "a"
+		p := startParkedTurn(t, s, root, eventID, chanA)
+		if _, rpcErr := s.cancel(cancel); rpcErr != nil {
+			t.Fatal(rpcErr)
+		}
+		if out, ok := s.mailboxAnswered(eventID); !ok || !out.Cancelled {
+			t.Fatalf("outcome=%+v recorded=%v when the cancel was accepted; want cancelled", out, ok)
+		}
+		if res := p.finish(t); res.StopReason != StopReasonCancelled {
+			t.Fatalf("result=%+v; want cancelled", res)
+		}
+		replyAs(t, root, cockpitThread("session/s"), p.prompt, format.KindAnswer, "too late")
+		s.sweepLateReplies(time.Now().Add(time.Hour))
+		if got := strings.Join(posts(), "|"); strings.Contains(got, "too late") {
+			t.Fatalf("posted after the cancel: %q", got)
+		}
+	})
+	t.Run("reply first", func(t *testing.T) {
+		s, root := mailboxServer(t)
+		posts := recordPosts(t)
+		eventID := strings.Repeat("1", 63) + "b"
+		p := startParkedTurn(t, s, root, eventID, chanA)
+		replyAs(t, root, cockpitThread("session/s"), p.prompt, format.KindAnswer, "the answer")
+		s.sweepLateReplies(time.Now().Add(time.Hour))
+		if _, rpcErr := s.cancel(cancel); rpcErr != nil {
+			t.Fatal(rpcErr)
+		}
+		if res := p.finish(t); res.StopReason != StopReasonEndTurn {
+			t.Fatalf("result=%+v; want the answer", res)
+		}
+		if s.eventCancelled(eventID) {
+			t.Fatal(".cancelled written although the reply won")
+		}
+		if got := posts(); len(got) != 1 || got[0] != chanA+": the answer" {
+			t.Fatalf("posts=%q; want the answer once", got)
+		}
+	})
+}
+
+// Bead agent-message-queue-bdq, review of #961 r2 (P1): a turn with no DM
+// channel consumed the final-answer record without a post, so the sweep
+// never posted the reply once a later delivery named a channel.
+func TestReplyWithoutAChannelWaitsForOne(t *testing.T) {
+	const chanA = "6eff60e4-32ab-48ec-bd3d-f4c97872f370"
+	s, root := mailboxServer(t)
+	posts := recordPosts(t)
+	eventID := strings.Repeat("1", 63) + "c"
+	p := startParkedTurn(t, s, root, eventID, "")
+	replyAs(t, root, cockpitThread("session/s"), p.prompt, format.KindAnswer, "the answer")
+	if res := p.finish(t); res.StopReason != StopReasonEndTurn || len(posts()) != 0 {
+		t.Fatalf("result=%+v posts=%q; want the answer to the client only", res, posts())
+	}
+	s.eventChannel(eventID, "", chanA) // a later delivery names the DM
+	s.sweepLateReplies(time.Now().Add(time.Hour))
+	if got := posts(); len(got) != 1 || got[0] != chanA+": the answer" {
+		t.Fatalf("posts=%q; want the answer once, to the DM", got)
 	}
 }

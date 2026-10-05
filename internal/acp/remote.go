@@ -82,15 +82,17 @@ type remoteTurn struct {
 	emit      func(any) error
 	turn      *turnState
 	meta      remoteMeta
-	// channel, when set, is the event's recorded DM channel (mailbox mode);
-	// it wins over the delivering prompt's channel.
-	channel string
+	// mailbox marks a mailbox turn; claimChannel is its claim's channel.
+	mailbox      bool
+	claimChannel string
 }
 
-// postChannel is the Buzz channel the turn posts to.
+// postChannel is the Buzz channel the turn posts to. A mailbox event posts
+// to its persisted DM, resolved at the moment of the post: the claim's
+// channel, else the one a delivery recorded later.
 func (r *remoteTurn) postChannel() string {
-	if r.channel != "" {
-		return r.channel
+	if r.mailbox && r.eventID != "" {
+		return r.s.eventChannel(r.eventID, r.claimChannel, "")
 	}
 	return r.turn.channel
 }
@@ -281,21 +283,7 @@ func (s *Server) eventCancelled(eventID string) bool {
 }
 
 func (s *Server) recordEventCancel(eventID string) error {
-	path, err := s.eventCancelPath(eventID)
-	if err != nil {
-		return err
-	}
-	if _, err := createExclusive(path, []byte("cancelled\n")); err != nil {
-		return err
-	}
-	// The cancel also takes the final-answer marker, so exactly one of the
-	// cancel and a final post (a turn's or the late-reply sweep's) wins,
-	// across processes (review of #961).
-	raw, err := json.Marshal(mailboxOutcome{Cancelled: true})
-	if err != nil {
-		return err
-	}
-	_, err = createExclusive(filepath.Join(filepath.Dir(path), eventID+".posted."+postFinal), raw)
+	_, _, err := s.decideOutcome(eventID, mailboxOutcome{Cancelled: true})
 	return err
 }
 
@@ -657,10 +645,10 @@ func (r *remoteTurn) say(kind, outcome, stopReason, text string) (any, *rpcError
 // posts that kind again, and a post that failed is not retried: the post
 // has no idempotency key. The event id is 64 lowercase hex, checked when the
 // prompt is parsed (event.go eventIDsFromMeta), so it cannot leave the state
-// dir. Without an event id it just posts. The marker is created also
-// without a channel: the final-answer marker is the event's outcome record.
+// dir. Without an event id it just posts; without a channel it posts
+// nothing and records nothing.
 func (s *Server) postOnce(eventID, kind string, record []byte, channel, text string) string {
-	if eventID == "" || strings.TrimSpace(text) == "" {
+	if eventID == "" || channel == "" || strings.TrimSpace(text) == "" {
 		return publish(channel, text)
 	}
 	path := filepath.Join(s.cfg.StateDir, "remote-events", eventID+".posted."+kind)
