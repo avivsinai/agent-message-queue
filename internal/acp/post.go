@@ -95,13 +95,11 @@ func postWithBuzzCLI(channel, content string) error {
 	return nil
 }
 
-// buzzCLI finds the buzz binary: AMQ_ACP_BUZZ_CLI, then PATH, then the one
-// bundled with Buzz Desktop.
+// buzzCLI finds the buzz binary: AMQ_ACP_BUZZ_CLI, then the one bundled with
+// Buzz Desktop, then PATH. The bundle paths come before PATH so a stray buzz
+// on PATH cannot receive the owner key (agent-message-queue-37m).
 func buzzCLI() (string, error) {
 	if p := strings.TrimSpace(os.Getenv(envBuzzCLI)); p != "" {
-		return p, nil
-	}
-	if p, err := exec.LookPath("buzz"); err == nil {
 		return p, nil
 	}
 	home, _ := os.UserHomeDir()
@@ -112,6 +110,9 @@ func buzzCLI() (string, error) {
 		if fi, err := os.Stat(p); err == nil && fi.Mode().IsRegular() {
 			return p, nil
 		}
+	}
+	if p, err := exec.LookPath("buzz"); err == nil {
+		return p, nil
 	}
 	return "", errors.New("buzz CLI not found; set " + envBuzzCLI)
 }
