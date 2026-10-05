@@ -121,7 +121,7 @@ BUZZ_* variables are read to refuse agents!=1 and non-owner inbound, then
 stripped from the environment. The managed agent identity (BUZZ_PRIVATE_KEY,
 BUZZ_AUTH_TAG, BUZZ_RELAY_URL) stays in process memory only to post each
 owner-facing answer into its Buzz channel with the buzz CLI
-(AMQ_ACP_BUZZ_CLI, else the buzz inside Buzz.app; never PATH). It never
+(AMQ_ACP_BUZZ_CLI, else the buzz inside Buzz.app; no implicit PATH fallback). It never
 enters an AMQ message. A lease-based gate that would relax
 this refusal is tracked in bead agent-message-queue-1xl; upstream Buzz has no
 deployment lease profile today, and this binary does not treat an env string

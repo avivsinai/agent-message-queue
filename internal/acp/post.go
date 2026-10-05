@@ -118,24 +118,21 @@ func buzzCLI() (string, error) {
 	return "", errors.New("buzz CLI not found in Buzz.app; set " + envBuzzCLI + " to the buzz executable")
 }
 
-// bundledBuzz returns the CLI inside one Buzz.app, or "" unless every
-// component from the bundle root down is a real directory (no symlink) and
-// the CLI is a regular file the user can execute.
+// bundledBuzz returns the CLI inside one Buzz.app, or "" unless the whole path
+// from the filesystem root down contains no symlink (so an ancestor such as a
+// symlinked home or Applications cannot redirect the key to another tree), the
+// CLI is a regular file, and this process can execute it. The installation and
+// its parent directories are trusted against concurrent replacement: pathname
+// validation is not atomic with exec.
 func bundledBuzz(app string) string {
-	path := app
-	for _, part := range []string{"", "Contents", "MacOS", "buzz"} {
-		path = filepath.Join(path, part)
-		fi, err := os.Lstat(path)
-		if err != nil || fi.Mode()&os.ModeSymlink != 0 {
-			return ""
-		}
-		if part == "buzz" {
-			if !fi.Mode().IsRegular() || fi.Mode().Perm()&0o100 == 0 {
-				return ""
-			}
-		} else if !fi.IsDir() {
-			return ""
-		}
+	path := filepath.Join(app, "Contents", "MacOS", "buzz")
+	real, err := filepath.EvalSymlinks(path)
+	if err != nil || real != filepath.Clean(path) {
+		return ""
+	}
+	fi, err := os.Lstat(path)
+	if err != nil || !fi.Mode().IsRegular() || !canExecute(path) {
+		return ""
 	}
 	return path
 }

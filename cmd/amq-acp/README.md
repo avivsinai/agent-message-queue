@@ -223,8 +223,11 @@ only; the environment is still stripped and no AMQ message carries it.
 `_meta.remote.posted` (or `_meta.amq.posted`) is `posted` or the error. The
 binary is `AMQ_ACP_BUZZ_CLI`, else the CLI inside `Buzz.app` (under
 `/Applications` or the absolute home's `Applications`, real directories only,
-executable). There is no `PATH` fallback: an unrelated `buzz` never receives
-the key.
+executable). There is no implicit `PATH` fallback: an unrelated `buzz` never receives
+the key (`AMQ_ACP_BUZZ_CLI=buzz` still resolves through `PATH` by your choice).
+A bundle candidate is skipped if any path component is a symlink. The
+installation and its parent directories are trusted against concurrent
+replacement: pathname validation is not atomic with exec.
 
 ### Trust limits
 

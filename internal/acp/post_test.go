@@ -24,11 +24,20 @@ func TestBuzzCLIOnlyVerifiedBundle(t *testing.T) {
 		}
 		return bin
 	}
+	// Temp dirs on macOS sit under a symlinked /var; resolve so the rows
+	// exercise only the symlinks they create.
+	realDir := func(t *testing.T) string {
+		d, err := filepath.EvalSymlinks(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return d
+	}
 	setup := func(t *testing.T) (home string) {
-		home = t.TempDir()
+		home = realDir(t)
 		t.Setenv("HOME", home)
 		t.Setenv(envBuzzCLI, "")
-		systemApplications = t.TempDir()
+		systemApplications = realDir(t)
 		t.Cleanup(func() { systemApplications = "/Applications" })
 		return home
 	}
@@ -58,7 +67,7 @@ func TestBuzzCLIOnlyVerifiedBundle(t *testing.T) {
 	})
 	t.Run("symlinked Buzz.app is not selected", func(t *testing.T) {
 		home := setup(t)
-		real := t.TempDir()
+		real := realDir(t)
 		writeBundle(t, real)
 		apps := filepath.Join(home, "Applications")
 		if err := os.MkdirAll(apps, 0o700); err != nil {
@@ -89,6 +98,42 @@ func TestBuzzCLIOnlyVerifiedBundle(t *testing.T) {
 		}
 		if got, err := buzzCLI(); err == nil {
 			t.Fatalf("buzzCLI() = %q for a file without an execute bit", got)
+		}
+	})
+	// Pro review of #962: symlinks above the bundle root redirect the key.
+	t.Run("symlinked home Applications is not selected", func(t *testing.T) {
+		home := setup(t)
+		real := realDir(t)
+		writeBundle(t, real)
+		if err := os.Symlink(real, filepath.Join(home, "Applications")); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := buzzCLI(); err == nil {
+			t.Fatalf("buzzCLI() = %q through a symlinked Applications", got)
+		}
+	})
+	t.Run("symlinked home is not selected", func(t *testing.T) {
+		setup(t)
+		real := realDir(t)
+		writeBundle(t, filepath.Join(real, "Applications"))
+		link := filepath.Join(realDir(t), "home")
+		if err := os.Symlink(real, link); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("HOME", link)
+		if got, err := buzzCLI(); err == nil {
+			t.Fatalf("buzzCLI() = %q through a symlinked home", got)
+		}
+	})
+	t.Run("unusable system candidate falls through to home", func(t *testing.T) {
+		home := setup(t)
+		sys := writeBundle(t, systemApplications)
+		if err := os.Chmod(sys, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		want := writeBundle(t, filepath.Join(home, "Applications"))
+		if got, err := buzzCLI(); err != nil || got != want {
+			t.Fatalf("buzzCLI() = %q, %v; want %q", got, err, want)
 		}
 	})
 }
