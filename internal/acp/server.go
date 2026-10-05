@@ -145,14 +145,8 @@ type Server struct {
 	// begins after this point never had a connected client, so it refuses
 	// immediately instead of waiting out the bounded timeout.
 	streamClosed bool
-	// sweepMu serializes late-reply sweeps (binding mode only); sweeps
-	// tracks the ones prompts started, so Serve waits for their posts.
-	sweepMu sync.Mutex
-	sweeps  sync.WaitGroup
-	// sweepScans keeps the sweep's buzz inbox scans (new, cur) per queue
-	// root across sweeps, so a tick reads only headers of new names.
-	// Guarded by sweepMu.
-	sweepScans map[string][2]*inboxScan
+	// late is the late-reply sweep state (binding mode only).
+	late lateReplySweep
 }
 
 // NewServer builds a server bound to one already authenticated routing context.
@@ -275,7 +269,7 @@ func (s *Server) Serve(in io.Reader, out io.Writer) error {
 	// intact; the scanner error itself is returned below.
 	s.cancelAll()
 	pending.Wait()
-	s.sweeps.Wait()
+	s.late.running.Wait()
 	errMu.Lock()
 	deferredWriteErr := writeErr
 	errMu.Unlock()

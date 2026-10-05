@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -516,5 +517,79 @@ func TestModelSelectsEachAgentsSession(t *testing.T) {
 		if ids := inboxPrompts(t, root); len(ids) != 1 {
 			t.Fatalf("session %s inbox holds %d prompts; want 1", name, len(ids))
 		}
+	}
+}
+
+// Bead agent-message-queue-bdq, review of #961 (P1): a redelivery reused
+// the claim but posted the answer to its own channel, or with no channel
+// recorded the answer without sending it. The event's first channel wins.
+func TestRedeliveryPostsTheAnswerToTheFirstChannel(t *testing.T) {
+	const chanA, chanB = "6eff60e4-32ab-48ec-bd3d-f4c97872f370", "0b2c39a1-6f1e-4d0a-9b3a-5c1d2e3f4a5b"
+	for _, redelivered := range []string{chanB, ""} {
+		t.Run("redelivered from "+redelivered, func(t *testing.T) {
+			s, root := mailboxServer(t)
+			s.cfg.TurnTimeout = 300 * time.Millisecond
+			type post struct{ channel, content string }
+			var mu sync.Mutex
+			var posts []post
+			saved := postAnswer
+			t.Cleanup(func() { postAnswer = saved })
+			postAnswer = func(channel, content string) error {
+				mu.Lock()
+				defer mu.Unlock()
+				posts = append(posts, post{channel, content})
+				return nil
+			}
+			eventID := strings.Repeat("9", 64)
+			deliver := func(channel string) {
+				turn := newTurn()
+				turn.channel = channel
+				if _, rpcErr := s.runRemote("s", "hi", eventID, turn, func(any) error { return nil }); rpcErr != nil {
+					t.Fatal(rpcErr)
+				}
+			}
+			deliver(chanA) // times out
+			replyAs(t, root, cockpitThread("session/s"), inboxPrompts(t, root)[0], format.KindAnswer, "the answer")
+			// A long turn budget keeps the prompt-start sweep off the event,
+			// so the redelivered turn itself posts the answer.
+			s.late.running.Wait()
+			s.cfg.TurnTimeout = time.Minute
+			deliver(redelivered)
+			s.late.running.Wait()
+			mu.Lock()
+			defer mu.Unlock()
+			var answers []post
+			for _, p := range posts {
+				if p.content == "the answer" {
+					answers = append(answers, p)
+				}
+			}
+			if len(answers) != 1 || answers[0].channel != chanA {
+				t.Fatalf("answer posts=%+v; want one, to the first channel", answers)
+			}
+		})
+	}
+}
+
+// Bead agent-message-queue-bdq, review of #961 (P2): the sweep checked the
+// cancel only before its scan, so a cancel landing between that check and
+// the post was posted over. The cancel and the final post share one
+// exclusive marker; this is the step that follows the sweep's check.
+func TestCancelBeforeTheFinalPostWins(t *testing.T) {
+	s, _ := mailboxServer(t)
+	posts := 0
+	saved := postAnswer
+	t.Cleanup(func() { postAnswer = saved })
+	postAnswer = func(string, string) error {
+		posts++
+		return nil
+	}
+	eventID := strings.Repeat("a", 64)
+	if err := s.recordEventCancel(eventID); err != nil {
+		t.Fatal(err)
+	}
+	s.postOnce(eventID, postFinal, []byte(`{"reply_id":"r"}`), "6eff60e4-32ab-48ec-bd3d-f4c97872f370", "late answer")
+	if posts != 0 {
+		t.Fatalf("posted %d times after a cancel", posts)
 	}
 }

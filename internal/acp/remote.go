@@ -82,6 +82,17 @@ type remoteTurn struct {
 	emit      func(any) error
 	turn      *turnState
 	meta      remoteMeta
+	// channel, when set, is the event's recorded DM channel (mailbox mode);
+	// it wins over the delivering prompt's channel.
+	channel string
+}
+
+// postChannel is the Buzz channel the turn posts to.
+func (r *remoteTurn) postChannel() string {
+	if r.channel != "" {
+		return r.channel
+	}
+	return r.turn.channel
 }
 
 // runRemote submits the prompt to the pinned amq-remote target and holds the
@@ -104,11 +115,7 @@ func (s *Server) runRemote(sessionID, text, eventID string, turn *turnState, emi
 	if s.cfg.RemoteBinding {
 		// A prompt start also posts late replies of earlier turns; a post can
 		// take up to postTimeout, so it never holds this turn.
-		s.sweeps.Add(1)
-		go func() {
-			defer s.sweeps.Done()
-			s.sweepLateReplies(time.Now())
-		}()
+		s.requestSweep()
 		b, err := s.turnBinding(sessionID, eventID)
 		if err != nil {
 			r := &remoteTurn{s: s, sessionID: sessionID, eventID: eventID, emit: emit, turn: turn, meta: remoteMeta{State: "not_connected", Reason: err.Error()}}
@@ -272,7 +279,17 @@ func (s *Server) recordEventCancel(eventID string) error {
 	if err != nil {
 		return err
 	}
-	_, err = createExclusive(path, []byte("cancelled\n"))
+	if _, err := createExclusive(path, []byte("cancelled\n")); err != nil {
+		return err
+	}
+	// The cancel also takes the final-answer marker, so exactly one of the
+	// cancel and a final post (a turn's or the late-reply sweep's) wins,
+	// across processes (review of #961).
+	raw, err := json.Marshal(mailboxOutcome{Cancelled: true})
+	if err != nil {
+		return err
+	}
+	_, err = createExclusive(filepath.Join(filepath.Dir(path), eventID+".posted."+postFinal), raw)
 	return err
 }
 
@@ -617,7 +634,7 @@ func (r *remoteTurn) say(kind, outcome, stopReason, text string) (any, *rpcError
 		if err := emitText(r.emit, r.sessionID, "agent_message_chunk", text); err != nil {
 			return nil, newRPCError(codeInternalError, "emit ACP reply update: %v", err)
 		}
-		r.meta.Posted = r.s.postOnce(r.eventID, kind, []byte(time.Now().UTC().Format(time.RFC3339Nano)+"\n"), r.turn.channel, text)
+		r.meta.Posted = r.s.postOnce(r.eventID, kind, []byte(time.Now().UTC().Format(time.RFC3339Nano)+"\n"), r.postChannel(), text)
 	}
 	return remotePromptResult{StopReason: stopReason, Meta: remotePromptMeta{Remote: r.meta}}, nil
 }

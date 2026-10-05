@@ -44,12 +44,14 @@ type mailboxClaim struct {
 	Channel string `json:"channel,omitempty"`
 }
 
-// mailboxReplied is the outcome of a mailbox event: the buzz inbox message
-// whose body was posted as the final reply. It is the content of the
-// final-answer marker <event>.posted.final, created before the post by the
-// turn or by the late-reply sweep.
-type mailboxReplied struct {
-	ReplyID string `json:"reply_id"`
+// mailboxOutcome is the content of an event's final-answer marker
+// <event>.posted.final. The turn or the late-reply sweep creates it before
+// it posts the final reply (ReplyID names that buzz inbox message), and a
+// cancel creates it with Cancelled set. The exclusive create decides which
+// of the two happens, once, across processes.
+type mailboxOutcome struct {
+	ReplyID   string `json:"reply_id,omitempty"`
+	Cancelled bool   `json:"cancelled,omitempty"`
 }
 
 // runMailbox delivers the prompt as an AMQ message to the bound handle and
@@ -86,10 +88,14 @@ func (s *Server) runMailbox(sessionID, text, eventID string, b binding.Binding, 
 		return nil, newRPCError(codeInternalError, "mailbox claim time: %v", err)
 	}
 	r.meta.RequestRef = claim.MessageID
+	// The first known channel of the event is its DM; a redelivery from
+	// another channel, or from none, never moves the answer (review of #961).
+	r.channel = s.eventChannel(eventID, claim.Channel, turn.channel)
+	s.late.add(eventID)
 	// A redelivered event that is already answered returns that answer and
 	// posts nothing.
-	if replyID, ok := s.mailboxAnswered(eventID); ok {
-		return s.mailboxAnsweredTurn(r, b, replyID)
+	if out, ok := s.mailboxAnswered(eventID); ok {
+		return s.mailboxAnsweredTurn(r, b, out)
 	}
 	if err := s.publishClaimed(r, budget, b, threadID, claim.MessageID, created, text); err != nil {
 		if errors.Is(err, errStoppedBeforePublish) {
@@ -128,8 +134,8 @@ func (s *Server) runMailbox(sessionID, text, eventID string, b binding.Binding, 
 			}
 		}
 		// The sweep or another process may have claimed and posted the reply.
-		if replyID, ok := s.mailboxAnswered(eventID); ok {
-			return s.mailboxAnsweredTurn(r, b, replyID)
+		if out, ok := s.mailboxAnswered(eventID); ok {
+			return s.mailboxAnsweredTurn(r, b, out)
 		}
 		finalID, final, progress, err := watch.poll(withCur)
 		withCur = false
@@ -183,13 +189,18 @@ func (s *Server) mailboxStopped(r *remoteTurn, outcome string, b binding.Binding
 	return r.say(postStatus, outcome, StopReasonCancelled, fmt.Sprintf("Stopped waiting. The message stays in %s's AMQ inbox; %s may still act on it.", b.Handle, b.Handle))
 }
 
-// mailboxAnsweredTurn ends a turn whose event already has a posted reply:
-// the client sees that reply again and nothing is posted.
-func (s *Server) mailboxAnsweredTurn(r *remoteTurn, b binding.Binding, replyID string) (any, *rpcError) {
+// mailboxAnsweredTurn ends a turn whose event already has an outcome. A
+// cancelled event ends as cancelled. An answered one shows the client that
+// reply again and posts nothing.
+func (s *Server) mailboxAnsweredTurn(r *remoteTurn, b binding.Binding, out mailboxOutcome) (any, *rpcError) {
+	if out.Cancelled {
+		return s.mailboxStopped(r, r.settle("session_cancelled"), b)
+	}
 	if outcome := r.settle("replied"); outcome != "replied" {
 		return s.mailboxStopped(r, outcome, b)
 	}
 	r.meta.State = DeliveryStateReplied
+	replyID := out.ReplyID
 	text := fmt.Sprintf("%s already answered; the reply is in the DM.", b.Handle)
 	if replyID != "" && replyID == filepath.Base(replyID) {
 		if msg, err := format.ReadMessageFile(filepath.Join(fsq.AgentInboxCur(b.Root, mailboxSender), replyID+".md")); err == nil && strings.TrimSpace(msg.Body) != "" {
@@ -197,6 +208,26 @@ func (s *Server) mailboxAnsweredTurn(r *remoteTurn, b binding.Binding, replyID s
 		}
 	}
 	return r.sayReply(replyID, text)
+}
+
+// eventChannel returns the event's DM channel: the claim's, else the one a
+// later delivery recorded, else this delivery's, recorded exclusively so
+// the first writer wins. "" means no delivery named a channel yet.
+func (s *Server) eventChannel(eventID, claimed, turn string) string {
+	if claimed != "" || eventID == "" {
+		return claimed
+	}
+	path := filepath.Join(s.cfg.StateDir, "remote-events", eventID+".channel")
+	if turn != "" {
+		if _, err := createExclusive(path, []byte(turn)); err != nil {
+			return ""
+		}
+	}
+	raw, err := readSmallRegular(path)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(raw))
 }
 
 // sayReply emits the final reply and posts it once per event under the
@@ -207,27 +238,27 @@ func (r *remoteTurn) sayReply(replyID, text string) (any, *rpcError) {
 	if err := emitText(r.emit, r.sessionID, "agent_message_chunk", text); err != nil {
 		return nil, newRPCError(codeInternalError, "emit ACP reply update: %v", err)
 	}
-	raw, err := json.Marshal(mailboxReplied{ReplyID: replyID})
+	raw, err := json.Marshal(mailboxOutcome{ReplyID: replyID})
 	if err != nil {
 		return nil, newRPCError(codeInternalError, "mailbox outcome: %v", err)
 	}
-	r.meta.Posted = r.s.postOnce(r.eventID, postFinal, raw, r.turn.channel, text)
+	r.meta.Posted = r.s.postOnce(r.eventID, postFinal, raw, r.postChannel(), text)
 	return remotePromptResult{StopReason: StopReasonEndTurn, Meta: remotePromptMeta{Remote: r.meta}}, nil
 }
 
-// mailboxAnswered reports whether the event has a posted final reply, and
-// that reply's id ("" when the record cannot be read).
-func (s *Server) mailboxAnswered(eventID string) (string, bool) {
+// mailboxAnswered returns the event's outcome once its final-answer marker
+// exists. An unreadable marker counts as an outcome with no reply id.
+func (s *Server) mailboxAnswered(eventID string) (mailboxOutcome, bool) {
 	if eventID == "" {
-		return "", false
+		return mailboxOutcome{}, false
 	}
 	raw, err := readSmallRegular(filepath.Join(s.cfg.StateDir, "remote-events", eventID+".posted."+postFinal))
 	if err != nil {
-		return "", !errors.Is(err, os.ErrNotExist)
+		return mailboxOutcome{}, !errors.Is(err, os.ErrNotExist)
 	}
-	var rec mailboxReplied
-	_ = json.Unmarshal(raw, &rec)
-	return rec.ReplyID, true
+	var out mailboxOutcome
+	_ = json.Unmarshal(raw, &out)
+	return out, true
 }
 
 // mailboxClaim returns the message id and time for this prompt. With an
@@ -406,36 +437,56 @@ func newInboxScan(dir string) *inboxScan {
 	return &inboxScan{dir: dir, headers: map[string]*format.Header{}}
 }
 
-// replies returns, oldest first, the files from handle on threadID that ref
-// promptID and were created no earlier than since. A missing dir has none.
+// replies refreshes the scan and returns its matches.
 func (sc *inboxScan) replies(handle, threadID, promptID string, since time.Time) ([]replyHit, error) {
-	entries, err := os.ReadDir(sc.dir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
+	if err := sc.refresh(); err != nil {
 		return nil, err
 	}
+	return sc.match(handle, threadID, promptID, since), nil
+}
+
+// refresh lists the box once, reads the headers of names not seen yet, and
+// forgets names that are gone. A missing dir is empty.
+func (sc *inboxScan) refresh() error {
+	entries, err := os.ReadDir(sc.dir)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
 	listed := make(map[string]bool, len(entries))
-	var hits []replyHit
 	for _, e := range entries {
 		name := e.Name()
 		if e.IsDir() || !strings.HasSuffix(name, ".md") {
 			continue
 		}
 		listed[name] = true
-		header, known := sc.headers[name]
-		if !known {
-			h, err := format.ReadHeaderFile(filepath.Join(sc.dir, name))
-			var pathErr *fs.PathError
-			switch {
-			case err == nil:
-				header = &h
-			case errors.As(err, &pathErr):
-				continue // gone or unreadable now; try again next poll
-			}
-			sc.headers[name] = header
+		if _, known := sc.headers[name]; known {
+			continue
 		}
+		h, err := format.ReadHeaderFile(filepath.Join(sc.dir, name))
+		var pathErr *fs.PathError
+		switch {
+		case err == nil:
+			sc.headers[name] = &h
+		case errors.As(err, &pathErr):
+			// gone or unreadable now; try again on the next refresh
+		default:
+			sc.headers[name] = nil
+		}
+	}
+	for name := range sc.headers {
+		if !listed[name] {
+			delete(sc.headers, name)
+		}
+	}
+	return nil
+}
+
+// match returns, oldest first, the files from the last refresh that come
+// from handle on threadID, ref promptID, and were created no earlier than
+// since.
+func (sc *inboxScan) match(handle, threadID, promptID string, since time.Time) []replyHit {
+	var hits []replyHit
+	for name, header := range sc.headers {
 		if header == nil || header.From != handle || header.Thread != threadID || !slices.Contains(header.Refs, promptID) {
 			continue
 		}
@@ -445,13 +496,13 @@ func (sc *inboxScan) replies(handle, threadID, promptID string, since time.Time)
 		}
 		hits = append(hits, replyHit{filename: name, header: *header, created: created})
 	}
-	for name := range sc.headers {
-		if !listed[name] {
-			delete(sc.headers, name)
+	slices.SortFunc(hits, func(a, b replyHit) int {
+		if c := a.created.Compare(b.created); c != 0 {
+			return c
 		}
-	}
-	slices.SortStableFunc(hits, func(a, b replyHit) int { return a.created.Compare(b.created) })
-	return hits, nil
+		return strings.Compare(a.filename, b.filename)
+	})
+	return hits
 }
 
 // mailboxWatch reads one prompt's replies from the buzz inbox. Several
@@ -465,8 +516,11 @@ type mailboxWatch struct {
 	inboxNew, inboxCur *inboxScan
 	// adopt makes a reply already forwarded for this prompt count as this
 	// watch's own: the late-reply sweep posts a reply whose turn forwarded
-	// it but never posted it (a crash before the post).
+	// it but never posted it (a crash before the post). An adopting watch
+	// skips status replies in cur, so no body is read on every sweep.
 	adopt bool
+	// refreshed means the caller refreshed both scans; poll only matches.
+	refreshed bool
 }
 
 func (s *Server) watchMailbox(b binding.Binding, threadID, promptID string, created time.Time) *mailboxWatch {
@@ -507,7 +561,13 @@ func (w *mailboxWatch) poll(withCur bool) (string, string, []string, error) {
 		root, err = fsq.OpenDeliveryRoot(w.b.Root, identity)
 		return root, err
 	}
-	hits, err := w.inboxNew.replies(w.b.Handle, w.threadID, w.promptID, w.created)
+	lookup := func(sc *inboxScan) ([]replyHit, error) {
+		if w.refreshed {
+			return sc.match(w.b.Handle, w.threadID, w.promptID, w.created), nil
+		}
+		return sc.replies(w.b.Handle, w.threadID, w.promptID, w.created)
+	}
+	hits, err := lookup(w.inboxNew)
 	if err != nil {
 		return "", "", nil, err
 	}
@@ -525,11 +585,14 @@ func (w *mailboxWatch) poll(withCur bool) (string, string, []string, error) {
 		}
 	}
 	if withCur {
-		hits, err := w.inboxCur.replies(w.b.Handle, w.threadID, w.promptID, w.created)
+		hits, err := lookup(w.inboxCur)
 		if err != nil {
 			return "", "", nil, err
 		}
 		for _, hit := range hits {
+			if w.adopt && hit.header.Kind == string(format.KindStatus) {
+				continue
+			}
 			msg, ok, err := w.recover(hit.filename)
 			if err != nil {
 				return "", "", nil, err
