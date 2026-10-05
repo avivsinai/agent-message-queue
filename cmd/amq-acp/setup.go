@@ -23,7 +23,9 @@ with mode 0600. Its env is only AMQ_ACP_REMOTE=binding. A file this command did
 not write is left unchanged.
 
 The import file is "AMQ Remote.agent.json" in the current directory, or --out.
-Import it in Buzz Desktop, then Start. Then run /amq-remote in a session.
+Import it in Buzz Desktop, then Start; turn on Auto-start. A Desktop that is
+open sees a new harness after Settings, Agents, Check again. Then run
+/amq-remote in a session.
 `
 
 const (
@@ -105,6 +107,8 @@ func runSetup(args []string) int {
 		return exitGeneral
 	}
 	harnessPath := filepath.Join(buzzHarnessDir(home), remoteHarnessID+".json")
+	_, statErr := os.Stat(harnessPath)
+	newHarness := errors.Is(statErr, os.ErrNotExist)
 	if err := writeHarness(harnessPath, remoteHarness(command)); err != nil {
 		fmt.Fprintln(os.Stderr, "amq-acp setup:", err)
 		return exitGeneral
@@ -118,8 +122,22 @@ func runSetup(args []string) int {
 		fmt.Fprintln(os.Stderr, "amq-acp setup:", err)
 		return exitGeneral
 	}
-	fmt.Printf("In Buzz Desktop: Agents, then + then Import, pick %s, then Start. Then run /amq-remote in a session.\n", snapshotPath)
+	fmt.Print(setupSteps(snapshotPath, newHarness))
 	return 0
+}
+
+// setupSteps is what the owner does in Buzz Desktop. Desktop caches its
+// harness list, so a running Desktop sees a new harness file only after a
+// forced discovery: Settings, Agents, Check again (Buzz 0.5.26
+// HarnessesSettingsPanel). No restart is needed.
+func setupSteps(snapshotPath string, newHarness bool) string {
+	var b strings.Builder
+	b.WriteString("In Buzz Desktop: ")
+	if newHarness {
+		b.WriteString("if it is open, click Settings, then Agents, then Check again, so it sees AMQ Remote. Then ")
+	}
+	fmt.Fprintf(&b, "Agents, then + then Import, pick %s, then Start. Turn on Auto-start in the agent's menu so it starts with Desktop. Then run /amq-remote in a session.\n", snapshotPath)
+	return b.String()
 }
 
 func remoteHarness(command string) buzzHarness {
