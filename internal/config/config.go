@@ -32,26 +32,34 @@ func WriteConfig(path string, cfg Config, force bool) error {
 		return fmt.Errorf("open root: %w", err)
 	}
 	defer func() { _ = root.Close() }()
-	return root.WithConfigLock(func(*fsq.DeliveryRoot) error { return writeConfigLocked(path, cfg, force) })
+	return writeConfigOn(root, cfg, force)
 }
 
-func writeConfigLocked(path string, cfg Config, force bool) error {
-	if !force {
-		if _, err := os.Stat(path); err == nil {
-			return fmt.Errorf("config already exists at %s (use --force to overwrite)", path)
+// writeConfigOn writes config.json through the root capability, under the
+// config lock, for both the existence check and the write, so a directory
+// swapped in at the path after the root was opened is never touched.
+func writeConfigOn(root *fsq.DeliveryRoot, cfg Config, force bool) error {
+	return root.WithConfigLock(func(r *fsq.DeliveryRoot) error {
+		if !force {
+			_, err := r.ReadFile("meta/config.json")
+			if err == nil {
+				return fmt.Errorf("config already exists at %s (use --force to overwrite)", filepath.Join(r.Base(), "meta", "config.json"))
+			}
+			if !os.IsNotExist(err) {
+				return fmt.Errorf("read config: %w", err)
+			}
 		}
-	}
-	// Review-823-r1 P2-1: every config.json writer emits the SAME layout
-	// (sorted keys via MarshalPreservingUnknowns with an empty original),
-	// so `amq init` then `amq setup` is not a phantom roster change from
-	// struct-order vs sorted-order bytes alone.
-	data, err := MarshalPreservingUnknowns(nil, cfg)
-	if err != nil {
+		// Review-823-r1 P2-1: every config.json writer emits the SAME layout
+		// (sorted keys via MarshalPreservingUnknowns with an empty original),
+		// so `amq init` then `amq setup` is not a phantom roster change from
+		// struct-order vs sorted-order bytes alone.
+		data, err := MarshalPreservingUnknowns(nil, cfg)
+		if err != nil {
+			return err
+		}
+		_, err = r.WriteFileAtomic("meta", "config.json", append(data, '\n'), 0o600)
 		return err
-	}
-	data = append(data, '\n')
-	_, err = fsq.WriteFileAtomic(filepath.Dir(path), filepath.Base(path), data, 0o600)
-	return err
+	})
 }
 
 func LoadConfig(path string) (Config, error) {
