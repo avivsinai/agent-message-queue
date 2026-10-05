@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -114,6 +115,88 @@ func TestStrictShareBundleEnrollsAndDoctorIsClean(t *testing.T) {
 		switch f.Boundary {
 		case "relay_auth", "dm_surface", "publication", "body_key", "tag_expiry":
 			t.Fatalf("doctor fails %s: %s", f.Boundary, f.Detail)
+		}
+	}
+}
+
+// enrolledStrictShare enrolls session work with the surfaces in enable
+// through one signed bundle bound to target fake, as the owner step does.
+// It returns the root, the session's key dir, and the relay URL.
+func enrolledStrictShare(t *testing.T, enable ...string) (string, string, string) {
+	t.Helper()
+	root := t.TempDir()
+	stateDir := filepath.Join(root, "extensions", "remote")
+	if err := manifest.Write(manifest.DefaultPath(stateDir), manifest.File{
+		SchemaVersion: manifest.SchemaVersion, Layer: manifest.Layer,
+		Adapters: []manifest.Adapter{{Kind: "fake", Target: "fake", Epoch: "e_1"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"--root", root, "--session", "work"}
+	for _, e := range enable {
+		args = append(args, "--enable", e)
+	}
+	out, _, _ := runShare(t, args...)
+	keyDir := filepath.Join(stateDir, "keys", "work")
+	body, err := bodykey.Load(filepath.Join(keyDir, "body.key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tags []shareTagFile
+	var wire []string
+	for kind, conds := range pendingConditions(t, out) {
+		tf := shareTagFile{Kind: kind, OwnerPubKey: ownerPubHex, Conditions: conds, Sig: ownerSignFor(t, body.PublicKeyHex(), conds)}
+		tags = append(tags, tf)
+		if kind == authKind {
+			wire = []string{"auth", tf.OwnerPubKey, tf.Conditions, tf.Sig}
+		}
+	}
+	raw, _ := json.Marshal(tags)
+	bundle := filepath.Join(t.TempDir(), "bundle.json")
+	if err := os.WriteFile(bundle, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, srv, url := relaytest.Start(body.PublicKeyHex(), wire)
+	t.Cleanup(srv.Close)
+	runShare(t, "--root", root, "--session", "work", "--bundle", bundle, "--target", "fake", "--relay", url)
+	return root, keyDir, url
+}
+
+// 611.53 (field, 2026-10-04): the owner opens the DM only after the bundle
+// is enrolled. The bind's dry-run printed a fresh window to sign, and
+// presence had no flag, so the owner hand-edited the manifest. Binding the
+// DM channel and presence after enrollment needs no signature and no edit.
+func TestShareBindsDMAndPresenceAfterEnrollment(t *testing.T) {
+	root, keyDir, url := enrolledStrictShare(t, "buzz-dm", "buzz-profile")
+	bind := []string{"--root", root, "--session", "work", "--target", "fake", "--relay", url,
+		"--dm-channel", "dm-1", "--native-session", "thread-1", "--presence", "Codex work"}
+	preview, _, _ := runShare(t, append(bind, "--dry-run")...)
+	if !strings.Contains(preview, "nothing to sign") {
+		t.Fatalf("dry-run of a bind = %q, want no window to sign", preview)
+	}
+	runShare(t, bind...)
+
+	if _, err := os.Stat(filepath.Join(keyDir, "share.pending.json")); !os.IsNotExist(err) {
+		t.Fatalf("binding minted a new window to sign (stat err %v)", err)
+	}
+	mf, err := manifest.Load(manifest.DefaultPath(filepath.Join(root, "extensions", "remote")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sh := mf.Relay.Shares[0]
+	if sh.DMChannelID != "dm-1" || sh.NativeSessionID != "thread-1" || !sh.Commands || !sh.Presence || sh.Name != "Codex work" {
+		t.Fatalf("share = %+v, want the DM binding and presence as Codex work", sh)
+	}
+}
+
+// Pro review of #947 r1, P2: presence was bound without the owner's kind 0
+// grant, and the dry-run said the enrolled grants covered it.
+func TestSharePresenceNeedsTheProfileGrant(t *testing.T) {
+	root, _, url := enrolledStrictShare(t, "buzz-dm")
+	bind := []string{"--root", root, "--session", "work", "--target", "fake", "--relay", url, "--presence", "Codex work"}
+	for _, args := range [][]string{append(bind, "--dry-run"), bind} {
+		if _, stderr, code := runShareLoose(args...); code == 0 || !strings.Contains(stderr, "--enable buzz-profile") {
+			t.Fatalf("share %v: exit %d, stderr %q, want a refusal naming --enable buzz-profile", args, code, stderr)
 		}
 	}
 }

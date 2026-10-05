@@ -217,7 +217,15 @@ amq-remote up
    writes the relay block in the same locked step. It copies the owner
    public key from the tags. `--dm-channel` and `--native-session` turn on
    [owner DM commands](#owner-dm-commands); they need the buzz-dm grants in
-   the bundle.
+   the bundle. `--presence <name>` turns on
+   [presence](#presence-in-buzz-desktop).
+
+The owner can open the DM only after the bundle is enrolled. Then run
+`share --session work --target codex-work --relay wss://relay.example
+--dm-channel <channel> --native-session <id>` without `--bundle`. It writes
+the binding under the enrolled grants: nothing to sign, and `--dry-run`
+shows the bind without writing it. `--presence` and `--min-evidence` work
+the same way.
 
 Renewal is the same owner step: `share --session work --renew > share.txt`,
 one `amq-owner-sign` run, and one `share --bundle` with the same `--target`
@@ -233,8 +241,8 @@ channel id with `--dm-channel`.
 
 ### Presence in Buzz Desktop
 
-With `"presence": true` and a `"name"` (1 to 64 printable characters, no
-path separator), `serve` publishes the body's Buzz profile and status so
+With `share --presence <name>` (1 to 64 printable characters, no path
+separator), which writes `"presence": true` and `"name"`, `serve` publishes the body's Buzz profile and status so
 the owner's Buzz Desktop can list it as an owned agent.
 
 - Enroll the profile kind first with `amq-remote share --session <session>
