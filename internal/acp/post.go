@@ -95,19 +95,23 @@ func postWithBuzzCLI(channel, content string) error {
 	return nil
 }
 
-// systemApplications is the machine-wide Applications directory.
-var systemApplications = "/Applications"
-
 // buzzCLI finds the buzz binary that receives the owner key: AMQ_ACP_BUZZ_CLI,
-// else the CLI inside Buzz.app under the system Applications directory or an
-// absolute home's. There is no PATH fallback: an unrelated buzz on PATH must
-// never receive BUZZ_PRIVATE_KEY (agent-message-queue-fa4).
+// else the CLI inside Buzz.app under /Applications or the user's Applications.
+// There is no PATH fallback: an unrelated buzz on PATH must never receive
+// BUZZ_PRIVATE_KEY (agent-message-queue-fa4).
 func buzzCLI() (string, error) {
 	if p := strings.TrimSpace(os.Getenv(envBuzzCLI)); p != "" {
 		return p, nil
 	}
-	dirs := []string{systemApplications}
-	if home, err := os.UserHomeDir(); err == nil && filepath.IsAbs(home) {
+	home, _ := os.UserHomeDir()
+	return buzzCLIFrom("/Applications", home)
+}
+
+// buzzCLIFrom selects the first usable Buzz.app CLI: systemApps first, then
+// home/Applications. A home that is not absolute yields no candidate.
+func buzzCLIFrom(systemApps, home string) (string, error) {
+	dirs := []string{systemApps}
+	if filepath.IsAbs(home) {
 		dirs = append(dirs, filepath.Join(home, "Applications"))
 	}
 	for _, d := range dirs {
