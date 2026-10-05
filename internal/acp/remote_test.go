@@ -672,3 +672,56 @@ func TestDeferredRefusalReasonReachesTheDM(t *testing.T) {
 		t.Fatalf("result=%+v said=%q; want the rejection DM to carry %q", got.Meta.Remote, said, reason)
 	}
 }
+
+// Bead agent-message-queue-1kc, review of #959: one post marker per event
+// let a timeout notice suppress the answer a later delivery brought, and a
+// "Not connected" turn carried no event id, so it posted on every delivery.
+func TestRedeliveryPostsEachKindOnce(t *testing.T) {
+	prompt := "<context>\nScope: dm\nChannel: DM (#6eff60e4-32ab-48ec-bd3d-f4c97872f370)\n</context>\nhi"
+	record := func(t *testing.T) *[]string {
+		var posts []string
+		saved := postAnswer
+		t.Cleanup(func() { postAnswer = saved })
+		postAnswer = func(_, content string) error {
+			posts = append(posts, content)
+			return nil
+		}
+		return &posts
+	}
+	deliver := func(t *testing.T, s *Server, eventID string, emit func(any) error) {
+		turn := newTurn()
+		turn.channel = buzzChannel(prompt)
+		if _, rpcErr := s.runRemote("s", prompt, eventID, turn, emit); rpcErr != nil {
+			t.Fatal(rpcErr)
+		}
+	}
+	t.Run("native timeout, then the answer", func(t *testing.T) {
+		rt := fake.New("fake", "e_1")
+		s := remoteServer(t, rt, nil)
+		s.cfg.TurnTimeout = 100 * time.Millisecond
+		posts := record(t)
+		eventID := strings.Repeat("d", 64)
+		id, _ := remoteRequestID(eventID)
+		deliver(t, s, eventID, func(any) error { return nil })
+		if !rt.Complete(id, "native answer") {
+			t.Fatal("request was not running after the timeout")
+		}
+		for range 2 {
+			deliver(t, s, eventID, func(any) error { return nil })
+		}
+		if got := strings.Count(strings.Join(*posts, "|"), "native answer"); got != 1 || len(*posts) != 2 {
+			t.Fatalf("posts=%q; want the timeout notice and the answer once each", *posts)
+		}
+	})
+	t.Run("not connected", func(t *testing.T) {
+		t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
+		s := NewServer(Config{RemoteBinding: true, StateDir: canonicalTempDir(t), TurnTimeout: time.Second}, "test")
+		posts := record(t)
+		for range 2 {
+			deliver(t, s, strings.Repeat("e", 64), func(any) error { return nil })
+		}
+		if len(*posts) != 1 {
+			t.Fatalf("posts=%q; want one Not connected", *posts)
+		}
+	})
+}
