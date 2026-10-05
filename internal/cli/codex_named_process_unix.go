@@ -20,6 +20,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/pelletier/go-toml/v2"
+
 	"github.com/avivsinai/agent-message-queue/internal/remote/codex"
 )
 
@@ -53,10 +55,10 @@ type codexNamingTarget struct {
 	InitialIdentity   codexFileIdentity
 	ProviderBinary    string
 	ProviderIdentity  codexFileIdentity
-	// Daemon, when set, finds the TUI's thread on the shared app-server
+	// Daemon, when set, names a TUI that runs on the shared app-server
 	// daemon (codex-cli 0.160): its rollout says source vscode and the
-	// daemon, not the TUI, holds it (4ip).
-	Daemon *codex.SpawnedTUI
+	// daemon, not the TUI, holds it, so the rollout path never finds it (4ip).
+	Daemon *codexDaemonSpawn
 }
 
 type codexFileIdentity struct {
@@ -260,7 +262,7 @@ func locateCodexProcessThread(ctx context.Context, target codexNamingTarget) (co
 func waitForCodexProcessThread(ctx context.Context, target codexNamingTarget, name string) (codexProcessThread, error) {
 	daemon := codexDaemonNaming{target: target, name: name}
 	for {
-		if err := daemon.poll(ctx); !errors.Is(err, codex.ErrTUIThreadNotLoaded) {
+		if err := daemon.poll(ctx); !errors.Is(err, errCodexThreadNotReady) {
 			if err == nil {
 				err = errCodexNamedOnDaemon
 			}
@@ -285,53 +287,142 @@ func waitForCodexProcessThread(ctx context.Context, target codexNamingTarget, na
 	}
 }
 
-// codexDaemonWindow bounds the search for the spawned TUI's thread on the
-// daemon; the TUI loads its thread at start. After it the daemon is no
-// longer probed, so a later TUI in this directory is never named for this
-// launch (review of #950).
-const codexDaemonWindow = time.Minute
-
-// codexDaemonNaming names the spawned TUI's thread through the daemon the TUI
-// is connected to, so the TUI shows the name at once, before the first turn
-// and so before Codex names the thread itself (4ip).
-type codexDaemonNaming struct {
-	target codexNamingTarget
-	name   string
-	namer  *codex.SpawnedTUINamer
-	closed bool
+// codexDaemonSpawn is where and when the spawned TUI started.
+type codexDaemonSpawn struct {
+	Cwd   string
+	Since time.Time
 }
 
-// poll returns nil once the thread is named, codex.ErrTUIThreadNotLoaded to
-// keep polling (also with no daemon, so the rollout path can name an older
-// Codex), and any other error to stop with the manual reminder.
+// codexDaemonWindow bounds the daemon naming from the moment the spawned
+// Codex runs: the TUI loads its thread at start.
+const codexDaemonWindow = time.Minute
+
+// errCodexDaemonNamingOver ends the helper after the daemon path printed its
+// own manual reminder.
+var errCodexDaemonNamingOver = errors.New("codex daemon naming ended with a reminder")
+
+// codexDaemonNaming names a TUI on the shared daemon by typing /rename into
+// its own terminal: only that TUI reads it, while the daemon cannot say which
+// process owns a thread (review of #950). The daemon is read only, to see a
+// new TUI thread in the directory before typing and to confirm the name.
+// Nothing is typed unless Codex trusts the directory, so a trust prompt
+// never receives the keys.
+type codexDaemonNaming struct {
+	target    codexNamingTarget
+	name      string
+	deadline  time.Time
+	sawThread bool
+	injected  bool
+	closed    bool
+}
+
+// poll returns nil once the name is confirmed, errCodexThreadNotReady to keep
+// polling (with no daemon the rollout path can still name an older Codex),
+// or another error to stop.
 func (d *codexDaemonNaming) poll(ctx context.Context) error {
 	if d.target.Daemon == nil || d.closed {
-		return codex.ErrTUIThreadNotLoaded
+		return errCodexThreadNotReady
 	}
 	ready, err := validateCodexNamingTarget(d.target)
 	if err != nil {
 		return err
 	}
 	if !ready {
-		return codex.ErrTUIThreadNotLoaded
+		return errCodexThreadNotReady
 	}
-	if d.namer == nil {
-		d.namer = codex.NewSpawnedTUINamer(*d.target.Daemon, d.name, codexDaemonWindow)
+	if d.deadline.IsZero() {
+		d.deadline = time.Now().Add(codexDaemonWindow)
+	}
+	if time.Now().After(d.deadline) {
+		reason := "no new Codex TUI thread appeared on the daemon"
+		if d.injected {
+			reason = "rename was not confirmed"
+		}
+		return d.stop(reason)
 	}
 	sock, err := codex.ControlSocket()
 	if err != nil {
-		return codex.ErrTUIThreadNotLoaded // no daemon (yet)
+		return errCodexThreadNotReady // no daemon (yet)
 	}
 	rpcCtx, cancel := context.WithTimeout(ctx, codexNamedRPCTimeout)
 	defer cancel()
-	err = d.namer.Poll(rpcCtx, sock)
-	if errors.Is(err, codex.ErrTUIThreadWindowClosed) {
-		// An older Codex beside a newer daemon still has the rollout path.
-		d.closed = true
-		_ = writeStderr("%s\n", coopNamedTUIManualReminder(d.name, "codex", err.Error()))
-		return codex.ErrTUIThreadNotLoaded
+	threads, err := codex.NewTUIThreads(rpcCtx, sock, d.target.Daemon.Cwd, d.target.Daemon.Since)
+	if err != nil {
+		return errCodexThreadNotReady
 	}
-	return err
+	unnamed := false
+	for _, th := range threads {
+		if th.Name == d.name {
+			return nil
+		}
+		unnamed = unnamed || th.Name == ""
+	}
+	if d.injected || !unnamed {
+		return errCodexThreadNotReady
+	}
+	d.sawThread = true
+	trusted, err := codexTrustsDir(d.target.Daemon.Cwd)
+	if err != nil {
+		return d.stop(err.Error())
+	}
+	if !trusted {
+		return d.stop("Codex does not trust this directory yet")
+	}
+	if err := coopNamedTTYInject(d.name, "codex"); err != nil {
+		return d.stop(err.Error())
+	}
+	d.injected = true
+	return errCodexThreadNotReady
+}
+
+// codexTrustsDir reports whether Codex's config marks dir trusted, so its
+// TUI starts without the trust prompt.
+func codexTrustsDir(dir string) (bool, error) {
+	codexHome, err := codexHomeDir()
+	if err != nil {
+		return false, err
+	}
+	raw, err := os.ReadFile(filepath.Join(codexHome, "config.toml"))
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read Codex config: %w", err)
+	}
+	var config struct {
+		Projects map[string]struct {
+			TrustLevel string `toml:"trust_level"`
+		} `toml:"projects"`
+	}
+	if err := toml.Unmarshal(raw, &config); err != nil {
+		return false, fmt.Errorf("parse Codex config: %w", err)
+	}
+	want := codexRealPath(dir)
+	for path, project := range config.Projects {
+		if codexRealPath(path) == want {
+			return project.TrustLevel == "trusted", nil
+		}
+	}
+	return false, nil
+}
+
+func codexRealPath(p string) string {
+	if r, err := filepath.EvalSymlinks(p); err == nil {
+		return r
+	}
+	return filepath.Clean(p)
+}
+
+// stop prints the manual reminder once and ends the daemon path. A TUI seen
+// on the daemon ends the helper; otherwise the rollout path goes on, for an
+// older Codex that runs beside a newer daemon.
+func (d *codexDaemonNaming) stop(reason string) error {
+	d.closed = true
+	_ = writeStderr("%s\n", coopNamedTUIManualReminder(d.name, "codex", reason))
+	if d.sawThread || d.injected {
+		return errCodexDaemonNamingOver
+	}
+	return errCodexThreadNotReady
 }
 
 func revalidateCodexProcessThread(ctx context.Context, target codexNamingTarget, expected codexProcessThread) error {
@@ -712,7 +803,7 @@ func runCodexNamedSidecar(name string, target codexNamingTarget) error {
 	// no naming target yet, regardless of how long it has been open. Each probe
 	// is bounded, and process identity checks end the wait when this CLI exits.
 	thread, err := waitForCodexProcessThread(context.Background(), target, name)
-	if errors.Is(err, errCodexNamingTargetEnded) || errors.Is(err, errCodexNamedOnDaemon) {
+	if errors.Is(err, errCodexNamingTargetEnded) || errors.Is(err, errCodexNamedOnDaemon) || errors.Is(err, errCodexDaemonNamingOver) {
 		return nil
 	}
 	if err != nil {

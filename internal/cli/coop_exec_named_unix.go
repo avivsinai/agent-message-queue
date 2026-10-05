@@ -3,7 +3,6 @@
 package cli
 
 import (
-	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -15,7 +14,6 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/launch"
-	"github.com/avivsinai/agent-message-queue/internal/remote/codex"
 )
 
 const coopNamedTUIStartupDelay = 3 * time.Second
@@ -71,16 +69,6 @@ func startCoopNamedTUIInjectorProcess(name, cmdName string, execStart time.Time)
 			"--provider-binary-device", strconv.FormatUint(target.ProviderIdentity.Device, 10),
 			"--provider-binary-inode", strconv.FormatUint(target.ProviderIdentity.Inode, 10),
 		)
-		// The threads already loaded on a running daemon are never this
-		// launch's thread (4ip).
-		if sock, err := codex.ControlSocket(); err == nil {
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			ids, err := codex.LoadedThreadIDs(ctx, sock)
-			cancel()
-			if err == nil && len(ids) > 0 {
-				args = append(args, "--codex-daemon-baseline", strings.Join(ids, ","))
-			}
-		}
 	}
 	cmd := exec.Command(args[0], args[1:]...)
 	// Leave stdin/stdout on the null device so the helper does not steal the
@@ -123,7 +111,6 @@ func runCoopNamedInject(args []string) error {
 	providerBinaryFlag := fs.String("provider-binary", "", "Internal resolved provider executable")
 	providerBinaryDeviceFlag := fs.Uint64("provider-binary-device", 0, "Internal provider executable device")
 	providerBinaryInodeFlag := fs.Uint64("provider-binary-inode", 0, "Internal provider executable inode")
-	daemonBaselineFlag := fs.String("codex-daemon-baseline", "", "Internal Codex daemon threads loaded before the spawn")
 	usage := func() {
 		_ = writeStderr("usage: amq coop named-inject --name <session/name> --binary <basename>\n")
 	}
@@ -178,13 +165,7 @@ func runCoopNamedInject(args []string) error {
 		if err != nil {
 			return fmt.Errorf("resolve coop named spawn cwd: %w", err)
 		}
-		spawn := codex.SpawnedTUI{Baseline: map[string]bool{}, Cwd: cwd, Since: execStart}
-		for _, id := range strings.Split(*daemonBaselineFlag, ",") {
-			if id != "" {
-				spawn.Baseline[id] = true
-			}
-		}
-		target.Daemon = &spawn
+		target.Daemon = &codexDaemonSpawn{Cwd: cwd, Since: execStart}
 		if err := runCodexNamedSidecar(name, target); err != nil {
 			_ = writeStderr("%s\n", coopNamedTUIManualReminder(name, binaryBase, err.Error()))
 		}
