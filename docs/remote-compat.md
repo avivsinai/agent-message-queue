@@ -112,13 +112,18 @@ contract:
   that the caller's input was admitted; the matching `userMessage` item is.
   (source: research/p1-codex-probe.md; internal/remote/codex/attachment.go)
 - **Codex transport and fanout:** the Unix socket is a WebSocket control
-  socket; only `--stdio`/`stdio://` uses plain framing. The socket was
-  observed to require a path under `$HOME`; treat that as pinned evidence to
+  socket; only `--stdio`/`stdio://` uses plain framing. In codex-cli 0.160,
+  `codex app-server daemon start` makes the default control socket
+  `~/.codex/app-server-control/app-server-control.sock` a symlink to the
+  daemon's socket at `/private/tmp/codex-daemon-<uid>/<hash>`. Discovery
+  follows that symlink only to a socket the current user owns and keeps the
+  symlink path in the attach config. Treat this layout as pinned evidence to
   re-check on upgrades, not as a timeless platform rule. Server notifications
   and non-owning `turn/interrupt` were observed to fan out to connected
   clients. Approval-request fanout is source-read at `rust-v0.156.1`, not
   observed live (§5).
-  (source: research/p1-codex-probe.md)
+  (source: research/p1-codex-probe.md; live `ls -la ~/.codex/app-server-control`
+  with codex-cli 0.160.0; internal/remote/codex/discover.go)
 - **Claude Code delivery:** a message delivered to a busy session is read at
   a tool boundary and does not interrupt a running tool; an idle session
   starts a new turn. No documented user-level interrupt exists over the
