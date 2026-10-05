@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -40,20 +41,21 @@ func TestBuzzCLIOnlyVerifiedBundle(t *testing.T) {
 		}
 	}
 
-	t.Run("override wins and PATH is never consulted", func(t *testing.T) {
+	t.Run("override is returned as given", func(t *testing.T) {
+		t.Setenv(envBuzzCLI, "/opt/custom/buzz")
+		if got, err := buzzCLI(); err != nil || got != "/opt/custom/buzz" {
+			t.Fatalf("buzzCLI() = %q, %v; want the override", got, err)
+		}
+	})
+	t.Run("PATH buzz is never selected", func(t *testing.T) {
 		binDir := t.TempDir()
 		if err := os.WriteFile(filepath.Join(binDir, "buzz"), []byte("#!/bin/sh\n"), 0o700); err != nil {
 			t.Fatal(err)
 		}
 		t.Setenv("PATH", binDir)
-		t.Setenv("HOME", realDir(t))
-		t.Setenv(envBuzzCLI, "")
-		if got, err := buzzCLI(); err == nil {
-			t.Fatalf("buzzCLI() = %q from PATH; want an error naming %s", got, envBuzzCLI)
-		}
-		t.Setenv(envBuzzCLI, "/opt/custom/buzz")
-		if got, err := buzzCLI(); err != nil || got != "/opt/custom/buzz" {
-			t.Fatalf("buzzCLI() = %q, %v; want the override", got, err)
+		got, err := buzzCLIFrom(realDir(t), realDir(t))
+		if err == nil || !strings.Contains(err.Error(), envBuzzCLI) {
+			t.Fatalf("buzzCLIFrom = %q, %v; want an error naming %s", got, err, envBuzzCLI)
 		}
 	})
 	t.Run("system bundle is preferred over home", func(t *testing.T) {
