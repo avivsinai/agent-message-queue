@@ -101,3 +101,55 @@ func TestStopHookAllowsSessionBoundUnderBindingsDir(t *testing.T) {
 		t.Fatalf("session bound under bindings/ was denied: %v", err)
 	}
 }
+
+// Bead agent-message-queue-7wq, Pro review of #952: an odd bindings entry is
+// binding presence and is never followed, so a stale sentinel cannot write.
+func TestStopHookDeniesOddBindingsEntries(t *testing.T) {
+	if !noFollowSupported {
+		t.Skip("stop hook receiver needs a no-follow open")
+	}
+	const sid = "session-y"
+	match := []byte("{\"root\":\"/r\",\"target\":\"t\",\"native_session\":\"session-y\"}\n")
+	other := []byte("{\"root\":\"/r\",\"target\":\"t\",\"native_session\":\"session-x\"}\n")
+	rows := map[string]func(t *testing.T, home string){
+		"symlinked bindings dir to a match": func(t *testing.T, home string) {
+			real := filepath.Join(t.TempDir(), "real")
+			if err := os.Mkdir(real, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(real, "y.json"), match, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(home, "binding.json"), other, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(real, filepath.Join(home, "bindings")); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"dangling bindings symlink": func(t *testing.T, home string) {
+			if err := os.Symlink(filepath.Join(home, "gone"), filepath.Join(home, "bindings")); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"bindings entry is a directory": func(t *testing.T, home string) {
+			if err := os.MkdirAll(filepath.Join(home, "bindings", "y.json"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+		},
+	}
+	for name, setup := range rows {
+		t.Run(name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("AMQ_REMOTE_BINDING", filepath.Join(home, "binding.json"))
+			setup(t, home)
+			if _, err := bindStopSession(home, sid); err != nil {
+				t.Fatal(err)
+			}
+			RunStopHookReceiver(home, strings.NewReader(`{"session_id":"session-y","hook_event_name":"Stop"}`), io.Discard)
+			if _, err := os.Stat(stopMarkerPath(home, sid)); !os.IsNotExist(err) {
+				t.Fatal("an odd bindings entry let a stale sentinel write")
+			}
+		})
+	}
+}
