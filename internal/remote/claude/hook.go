@@ -797,27 +797,48 @@ const (
 	bindingDeny
 )
 
-// bindingDecision reads the per-user binding. The hook process has only the
-// Claude home, so an unset AMQ_REMOTE_BINDING resolves under that home.
+// bindingDecision reads every binding file: the legacy binding.json and each
+// bindings/*.json beside it. Any readable file naming this session allows.
+// Otherwise any binding file at all denies, readable or not. The hook
+// process has only the Claude home, so an unset AMQ_REMOTE_BINDING resolves
+// under that home.
 func bindingDecision(home, sessionID string) int {
 	path := filepath.Join(home, ".amq", "remote", "binding.json")
 	if p := strings.TrimSpace(os.Getenv(binding.EnvPath)); p != "" && filepath.IsAbs(p) {
 		path = filepath.Clean(p)
 	}
-	raw, err := readRegularBounded(path, bindingMaxBytes)
-	if errors.Is(err, os.ErrNotExist) {
-		return bindingAbsent
+	paths := []string{path}
+	exists := false
+	dir := filepath.Join(filepath.Dir(path), "bindings")
+	if entries, err := os.ReadDir(dir); err == nil {
+		for _, e := range entries {
+			if !e.IsDir() && strings.HasSuffix(e.Name(), ".json") {
+				paths = append(paths, filepath.Join(dir, e.Name()))
+			}
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		exists = true // an unreadable bindings directory is not "no binding"
 	}
-	if err != nil {
+	for _, p := range paths {
+		raw, err := readRegularBounded(p, bindingMaxBytes)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		exists = true
+		if err != nil {
+			continue
+		}
+		var b struct {
+			NativeSession string `json:"native_session"`
+		}
+		if json.Unmarshal(raw, &b) == nil && b.NativeSession == sessionID {
+			return bindingAllow
+		}
+	}
+	if exists {
 		return bindingDeny
 	}
-	var b struct {
-		NativeSession string `json:"native_session"`
-	}
-	if json.Unmarshal(raw, &b) != nil || b.NativeSession != sessionID {
-		return bindingDeny
-	}
-	return bindingAllow
+	return bindingAbsent
 }
 
 // bindingMaxBytes matches the binding package's read bound.

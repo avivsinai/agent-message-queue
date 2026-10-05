@@ -75,3 +75,29 @@ func TestReview894MailboxBindingIgnoresStaleSentinel(t *testing.T) {
 		t.Fatal("a mailbox binding wrote a marker from a stale sentinel")
 	}
 }
+
+// Bead agent-message-queue-7wq (Ben review F8): a leftover legacy
+// binding.json for another session must not deny a session bound under
+// bindings/.
+func TestStopHookAllowsSessionBoundUnderBindingsDir(t *testing.T) {
+	if !noFollowSupported {
+		t.Skip("stop hook receiver needs a no-follow open")
+	}
+	const sid = "session-y"
+	home := t.TempDir()
+	path := filepath.Join(home, "binding.json")
+	if err := os.WriteFile(path, []byte("{\"root\":\"/r\",\"target\":\"t\",\"native_session\":\"session-x\"}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(home, "bindings"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "bindings", "y.json"), []byte("{\"root\":\"/r\",\"target\":\"t\",\"native_session\":\"session-y\"}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AMQ_REMOTE_BINDING", path)
+	RunStopHookReceiver(home, strings.NewReader(`{"session_id":"session-y","hook_event_name":"Stop"}`), io.Discard)
+	if _, err := os.Stat(stopMarkerPath(home, sid)); err != nil {
+		t.Fatalf("session bound under bindings/ was denied: %v", err)
+	}
+}
