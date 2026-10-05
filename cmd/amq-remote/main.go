@@ -69,7 +69,8 @@ Commands:
                            --tag-file enrolls the signed tag)
   attach --self            Bind your AMQ Remote Buzz agent to the session this
                            runs in (starts the endpoint when none runs)
-  detach [--self]          Unbind it; the session keeps running
+  detach --self|--name N|--all
+                           Unbind; the session keeps running
   doctor                   Diagnose the endpoint chain
   version                  Print the version
 
