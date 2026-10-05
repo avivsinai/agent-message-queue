@@ -754,3 +754,61 @@ func TestUncertainNoticeDoesNotHideTheAnswer(t *testing.T) {
 		t.Fatalf("posts=%q; want one uncertainty notice and one answer", posts)
 	}
 }
+
+// Bead agent-message-queue-1kc, review of #959 r3: a lost reply to a busy
+// resubmit was recovered from the stored busy tombstone and posted as the
+// final answer, so the answer a later delivery brought was suppressed.
+func TestRecoveredBusyRefusalDoesNotHideTheAnswer(t *testing.T) {
+	rt := fake.New("fake", "e_1")
+	var loseReply sync.Mutex
+	lose := false
+	s := remoteServer(t, rt, func(point string) error {
+		loseReply.Lock()
+		defer loseReply.Unlock()
+		if point == core.PointBeforeDispatching && lose {
+			lose = false
+			return fmt.Errorf("reply lost")
+		}
+		return nil
+	})
+	s.cfg.StateDir = canonicalTempDir(t)
+	s.cfg.TurnTimeout = 4 * time.Second
+	var posts []string
+	saved := postAnswer
+	t.Cleanup(func() { postAnswer = saved })
+	postAnswer = func(_, content string) error {
+		posts = append(posts, content)
+		return nil
+	}
+	busyID := "d2c80e1d-feb7-4c10-959e-23456789abcf"
+	resp, err := ipc.Call(filepath.Join(s.cfg.Root, remoteStateDir), ipc.Request{Command: &protocol.Command{Schema: protocol.SchemaCommand, Op: protocol.OpRequestSubmit, RequestID: busyID, TargetID: "fake", Epoch: "e_1", NotAfter: protocol.FormatTime(time.Now().Add(time.Minute)), Input: &protocol.SubmitInput{Text: "occupy", Busy: protocol.BusyReject, Deliver: protocol.DeliverTurn}}})
+	if err != nil || resp.AsError() != nil {
+		t.Fatal(err, resp.AsError())
+	}
+	eventID := strings.Repeat("b", 64)
+	id, _ := remoteRequestID(eventID)
+	emit := func(v any) error {
+		text := v.(sessionUpdateNotification).Params.Update.Content.Text
+		switch {
+		case strings.HasPrefix(text, "Queued:"):
+			// The session frees up, and the reply to the next submit is lost.
+			rt.Complete(busyID, "occupied")
+			loseReply.Lock()
+			lose = true
+			loseReply.Unlock()
+		case strings.HasPrefix(text, "Submitted to"):
+			rt.Complete(id, "the answer")
+		}
+		return nil
+	}
+	for range 3 {
+		turn := newTurn()
+		turn.channel = "6eff60e4-32ab-48ec-bd3d-f4c97872f370"
+		if _, rpcErr := s.runRemote("s", "hello", eventID, turn, emit); rpcErr != nil {
+			t.Fatal(rpcErr)
+		}
+	}
+	if got := strings.Count(strings.Join(posts, "|"), "the answer"); got != 1 {
+		t.Fatalf("posts=%q; want the answer once", posts)
+	}
+}

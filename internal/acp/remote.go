@@ -153,7 +153,7 @@ func (s *Server) runRemote(sessionID, text, eventID string, turn *turnState, emi
 	if eventID != "" {
 		rep, err := r.get()
 		switch {
-		case err == nil && rep.Snapshot.State == protocol.StateRejected && rep.Snapshot.Code == protocol.CodeBusy:
+		case err == nil && retryableBusy(rep.Snapshot):
 			epoch = rep.Snapshot.Epoch
 		case err == nil:
 			return r.follow(rep.Snapshot)
@@ -199,6 +199,12 @@ func (s *Server) runRemote(sessionID, text, eventID string, turn *turnState, emi
 			}
 			stored, gerr := r.get()
 			switch {
+			case gerr == nil && retryableBusy(stored.Snapshot):
+				// A lost reply to a submit the endpoint refused as busy: the
+				// stored tombstone is retried like a busy reply (review of
+				// #959 r3).
+				rep = stored
+				rep.Outcome.Code = protocol.CodeBusy
 			case gerr == nil:
 				return r.follow(stored.Snapshot)
 			case hasCode(gerr, protocol.CodeNotFound):
@@ -542,11 +548,17 @@ func (r *remoteTurn) settled(outcome string, snap protocol.Snapshot) (any, *rpcE
 	}
 }
 
-// snapKind is postFinal only for a terminal request state. An uncertain
+// retryableBusy reports a busy refusal, which a later delivery retries.
+func retryableBusy(snap protocol.Snapshot) bool {
+	return snap.State == protocol.StateRejected && snap.Code == protocol.CodeBusy
+}
+
+// snapKind is postFinal only for a terminal request state that no later
+// delivery retries (a busy refusal is retried). An uncertain
 // request can still resolve to an answer, so its notice is a status text
 // and never takes the final-answer marker (review of #959 r2).
 func snapKind(snap protocol.Snapshot) string {
-	if snap.State.Terminal() {
+	if snap.State.Terminal() && !retryableBusy(snap) {
 		return postFinal
 	}
 	return postStatus
