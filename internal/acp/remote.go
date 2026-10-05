@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
@@ -52,7 +53,8 @@ type remoteMeta struct {
 	Cancel     string `json:"cancel,omitempty"`
 	Truncated  bool   `json:"truncated,omitempty"`
 	// Posted is "posted" when the owner-facing text was published into the
-	// Buzz channel, or the post error (bead agent-message-queue-611.38).
+	// Buzz channel, "duplicate: ..." when an earlier delivery of the event
+	// already posted, or the post error (bead agent-message-queue-611.38).
 	Posted string `json:"posted,omitempty"`
 }
 
@@ -588,9 +590,28 @@ func (r *remoteTurn) say(outcome, stopReason, text string) (any, *rpcError) {
 		if err := emitText(r.emit, r.sessionID, "agent_message_chunk", text); err != nil {
 			return nil, newRPCError(codeInternalError, "emit ACP reply update: %v", err)
 		}
-		r.meta.Posted = publish(r.turn.channel, text)
+		r.meta.Posted = r.postOnce(text)
 	}
 	return remotePromptResult{StopReason: stopReason, Meta: remotePromptMeta{Remote: r.meta}}, nil
+}
+
+// postOnce publishes text into the turn's Buzz channel at most once per
+// event. The exclusive marker is created before the post, so a redelivered
+// event never posts again, and a post that failed is not retried: the post
+// has no idempotency key (review F7).
+func (r *remoteTurn) postOnce(text string) string {
+	if r.eventID == "" || r.turn.channel == "" || strings.TrimSpace(text) == "" {
+		return publish(r.turn.channel, text)
+	}
+	path := filepath.Join(r.s.cfg.StateDir, "remote-events", r.eventID+".posted")
+	won, err := createExclusive(path, []byte(time.Now().UTC().Format(time.RFC3339Nano)+"\n"))
+	switch {
+	case err != nil:
+		return "error: record post marker: " + err.Error()
+	case !won:
+		return "duplicate: this event was already posted"
+	}
+	return publish(r.turn.channel, text)
 }
 
 func (r *remoteTurn) statusText(snap protocol.Snapshot) string {
