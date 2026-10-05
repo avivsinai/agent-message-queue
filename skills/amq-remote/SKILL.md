@@ -54,9 +54,9 @@ command's own message. Do not work around a refusal.
 4. **This session's Buzz agent.** Attach printed the session name `<name>`.
    Run `amq-acp setup --session <name> --out "$HOME/Downloads/AMQ <name>.agent.json"`
    and show its printed steps as they are: in Buzz Desktop, Agents, then +
-   then Import, pick that file, then Start, and turn on Auto-start. When the
-   harness file is new, the steps first say to click Settings, then Agents,
-   then Check again; a Desktop that is open needs no restart. Skip this step
+   then Import, pick that file, then Start, and turn on Auto-start. If AMQ
+   Remote is new and Desktop was open, the owner first clicks Settings, then
+   Agents, then Check again; Desktop needs no restart. Skip this step
    when the agent "AMQ: <name>" already exists in Desktop.
 5. Tell the user: "Connected. DM **AMQ: <name>** from the Buzz app or
    Desktop."

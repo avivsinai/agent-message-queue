@@ -107,8 +107,6 @@ func runSetup(args []string) int {
 		return exitGeneral
 	}
 	harnessPath := filepath.Join(buzzHarnessDir(home), remoteHarnessID+".json")
-	_, statErr := os.Stat(harnessPath)
-	newHarness := errors.Is(statErr, os.ErrNotExist)
 	if err := writeHarness(harnessPath, remoteHarness(command)); err != nil {
 		fmt.Fprintln(os.Stderr, "amq-acp setup:", err)
 		return exitGeneral
@@ -122,22 +120,19 @@ func runSetup(args []string) int {
 		fmt.Fprintln(os.Stderr, "amq-acp setup:", err)
 		return exitGeneral
 	}
-	fmt.Print(setupSteps(snapshotPath, newHarness))
+	fmt.Print(setupSteps(snapshotPath))
 	return 0
 }
 
 // setupSteps is what the owner does in Buzz Desktop. Desktop caches its
-// harness list, so a running Desktop sees a new harness file only after a
-// forced discovery: Settings, Agents, Check again (Buzz 0.5.26
-// HarnessesSettingsPanel). No restart is needed.
-func setupSteps(snapshotPath string, newHarness bool) string {
-	var b strings.Builder
-	b.WriteString("In Buzz Desktop: ")
-	if newHarness {
-		b.WriteString("if it is open, click Settings, then Agents, then Check again, so it sees AMQ Remote. Then ")
-	}
-	fmt.Fprintf(&b, "Agents, then + then Import, pick %s, then Start. Turn on Auto-start in the agent's menu so it starts with Desktop. Then run /amq-remote in a session.\n", snapshotPath)
-	return b.String()
+// harness list, so a Desktop that was open when the harness file appeared
+// sees it only after a forced discovery: Settings, Agents, Check again (Buzz
+// 0.5.26 HarnessesSettingsPanel). No restart is needed. The step is always
+// printed: a file on disk does not show that Desktop has discovered it.
+func setupSteps(snapshotPath string) string {
+	return fmt.Sprintf("In Buzz Desktop: if AMQ Remote is new and Desktop was open, click Settings, then Agents, then Check again. "+
+		"Then Agents, then + then Import, pick %s, then Start. Turn on Auto-start in the agent's menu so it starts with Desktop. "+
+		"Then run /amq-remote in a session.\n", snapshotPath)
 }
 
 func remoteHarness(command string) buzzHarness {
