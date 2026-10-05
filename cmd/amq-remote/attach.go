@@ -49,7 +49,7 @@ func attach(args []string, stdout, stderr io.Writer) (int, error) {
 		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "attach needs --self")
 	}
 	if !*nativeMode {
-		return attachMailbox(c.root, strings.TrimSpace(*me), strings.TrimSpace(*name), stdout)
+		return attachMailbox(c.root, strings.TrimSpace(*me), strings.TrimSpace(*name), c.json, stdout)
 	}
 	stateDir, err := c.stateDir()
 	if err != nil {
@@ -95,6 +95,10 @@ func attach(args []string, stdout, stderr io.Writer) (int, error) {
 	if err := writeBinding(nb, *name != ""); err != nil {
 		return protocol.ExitActionRequired, err
 	}
+	if c.json {
+		emitJSON(stdout, map[string]any{"connected": true, "name": nb.Name, "root": nb.Root, "target": nb.Target})
+		return 0, nil
+	}
 	say(stdout, "Connected: %s (%s) as session %s. DM its Buzz agent \"AMQ: %s\".", nonEmpty(display, cand.Target), cand.Target, nb.Name, nb.Name)
 	return 0, nil
 }
@@ -103,7 +107,7 @@ func attach(args []string, stdout, stderr io.Writer) (int, error) {
 // agent-message-queue-611.36). Each DM becomes an AMQ message to the handle;
 // no endpoint, hook, or wake is required, because noticing the message is
 // the handle owner's business.
-func attachMailbox(root, handle, name string, stdout io.Writer) (int, error) {
+func attachMailbox(root, handle, name string, asJSON bool, stdout io.Writer) (int, error) {
 	if root == "" || handle == "" {
 		return protocol.ExitActionRequired, errors.New("this session is not an AMQ participant (AM_ROOT and AM_ME are unset); join AMQ, or use attach --self --native")
 	}
@@ -129,8 +133,18 @@ func attachMailbox(root, handle, name string, stdout io.Writer) (int, error) {
 	if err := writeBinding(b, explicit); err != nil {
 		return protocol.ExitActionRequired, err
 	}
+	if asJSON {
+		emitJSON(stdout, map[string]any{"connected": true, "name": name, "root": root, "handle": handle})
+		return 0, nil
+	}
 	say(stdout, "Connected: AMQ handle %s at %s as session %s. DM its Buzz agent \"AMQ: %s\".", handle, root, name, name)
 	return 0, nil
+}
+
+func emitJSON(w io.Writer, v any) {
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	_ = enc.Encode(v)
 }
 
 // listBuzzInRoster adds the Buzz agent's handle to the root's config.json
@@ -239,6 +253,13 @@ func detach(args []string, stdout, stderr io.Writer) (int, error) {
 	removed, err := binding.RemoveMatching(match)
 	if err != nil {
 		return protocol.ExitActionRequired, err
+	}
+	if c.json {
+		if removed == nil {
+			removed = []string{}
+		}
+		emitJSON(stdout, map[string]any{"removed": removed})
+		return 0, nil
 	}
 	if len(removed) == 0 {
 		say(stdout, "Not connected.")

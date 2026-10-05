@@ -149,10 +149,10 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return finish(stdout, stderr, nil, false, code, err)
 	case "attach":
 		code, err = attach(rest, stdout, stderr)
-		return finish(stdout, stderr, nil, false, code, err)
+		return finish(stdout, stderr, nil, hasFlag(rest, "json"), code, err)
 	case "detach":
 		code, err = detach(rest, stdout, stderr)
-		return finish(stdout, stderr, nil, false, code, err)
+		return finish(stdout, stderr, nil, hasFlag(rest, "json"), code, err)
 	case "doctor":
 		out, code, err = doctor(rest)
 	case "claude":

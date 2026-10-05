@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"io"
@@ -177,5 +179,25 @@ func TestAttachListsBuzzInTheRosterOnce(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(bare, "meta", "config.json")); err == nil {
 		t.Fatal("attach created a config.json in a root that had none")
+	}
+}
+
+// Bead agent-message-queue-5re (review F13): attach and detach parsed --json
+// and ignored it.
+func TestDetachAllJSONPrintsTheRemovedNames(t *testing.T) {
+	dir := canonicalTempDir(t)
+	t.Setenv(binding.EnvPath, filepath.Join(dir, "binding.json"))
+	if err := binding.WriteNamed(binding.Binding{Carrier: binding.CarrierMailbox, Root: dir, Handle: "one", Name: "one"}); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if code := run([]string{"detach", "--all", "--json"}, nil, &out, io.Discard); code != 0 {
+		t.Fatalf("exit %d: %s", code, out.String())
+	}
+	var got struct {
+		Removed []string `json:"removed"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil || len(got.Removed) != 1 || got.Removed[0] != "one" {
+		t.Fatalf("output %q (%v); want JSON removed [one]", out.String(), err)
 	}
 }
