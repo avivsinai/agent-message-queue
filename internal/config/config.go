@@ -41,12 +41,14 @@ func WriteConfig(path string, cfg Config, force bool) error {
 func writeConfigOn(root *fsq.DeliveryRoot, cfg Config, force bool) error {
 	return root.WithConfigLock(func(r *fsq.DeliveryRoot) error {
 		if !force {
-			_, err := r.ReadFile("meta/config.json")
+			// Stat, not a read: a FIFO or device at the path must not block
+			// the writer while it holds the config lock.
+			_, err := r.Stat("meta/config.json")
 			if err == nil {
 				return fmt.Errorf("config already exists at %s (use --force to overwrite)", filepath.Join(r.Base(), "meta", "config.json"))
 			}
 			if !os.IsNotExist(err) {
-				return fmt.Errorf("read config: %w", err)
+				return fmt.Errorf("stat config: %w", err)
 			}
 		}
 		// Review-823-r1 P2-1: every config.json writer emits the SAME layout
