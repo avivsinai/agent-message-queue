@@ -325,3 +325,54 @@ func TestModelSelectsEachAgentsSession(t *testing.T) {
 		}
 	}
 }
+
+// Bead agent-message-queue-iqh (Ben review F9): a session whose model names a
+// missing binding must not fall back to the only binding left.
+func TestMissingModelNeverReachesAnotherBinding(t *testing.T) {
+	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
+	rootB := canonicalTempDir(t)
+	if err := binding.WriteNamed(binding.Binding{Carrier: binding.CarrierMailbox, Root: rootB, Handle: "agent", Name: "b"}); err != nil {
+		t.Fatal(err)
+	}
+	live := startServer(t, Config{RemoteBinding: true, StateDir: canonicalTempDir(t), TurnTimeout: 100 * time.Millisecond, PollInterval: 5 * time.Millisecond, HeartbeatInterval: 20 * time.Millisecond})
+	live.send(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":2}}`)
+	live.read()
+	live.send(`{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/tmp"}}`)
+	sid := live.read()["result"].(map[string]any)["sessionId"].(string)
+	live.send(fmt.Sprintf(`{"jsonrpc":"2.0","id":3,"method":"session/set_model","params":{"sessionId":%q,"modelId":"amq-remote:a"}}`, sid))
+	if reply := live.read(); reply["error"] == nil {
+		t.Fatalf("set_model accepted a missing binding: %v", reply)
+	}
+	live.send(fmt.Sprintf(`{"jsonrpc":"2.0","id":4,"method":"session/prompt","params":{"sessionId":%q,"prompt":[{"type":"text","text":"for a"}]}}`, sid))
+	live.readUntilResult()
+	if ids := inboxPrompts(t, rootB); len(ids) != 0 {
+		t.Fatalf("a prompt for missing binding a reached binding b: %d prompts", len(ids))
+	}
+}
+
+// Bead agent-message-queue-iqh, Pro review of #954: the model session/new
+// advertises pins the session, so removing that binding never falls back to
+// the one that remains.
+func TestAdvertisedModelPinsSessionWithoutSetModel(t *testing.T) {
+	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
+	rootA, rootB := canonicalTempDir(t), canonicalTempDir(t)
+	if err := binding.WriteNamed(binding.Binding{Carrier: binding.CarrierMailbox, Root: rootA, Handle: "agent", Name: "a"}); err != nil {
+		t.Fatal(err)
+	}
+	live := startServer(t, Config{RemoteBinding: true, StateDir: canonicalTempDir(t), TurnTimeout: 100 * time.Millisecond, PollInterval: 5 * time.Millisecond, HeartbeatInterval: 20 * time.Millisecond})
+	live.send(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":2}}`)
+	live.read()
+	live.send(`{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/tmp"}}`)
+	sid := live.read()["result"].(map[string]any)["sessionId"].(string)
+	if _, err := binding.RemoveMatching(func(b binding.Binding) bool { return b.Name == "a" }); err != nil {
+		t.Fatal(err)
+	}
+	if err := binding.WriteNamed(binding.Binding{Carrier: binding.CarrierMailbox, Root: rootB, Handle: "agent", Name: "b"}); err != nil {
+		t.Fatal(err)
+	}
+	live.send(fmt.Sprintf(`{"jsonrpc":"2.0","id":4,"method":"session/prompt","params":{"sessionId":%q,"prompt":[{"type":"text","text":"for a"}]}}`, sid))
+	live.readUntilResult()
+	if ids := inboxPrompts(t, rootB); len(ids) != 0 {
+		t.Fatalf("a session advertised as a reached binding b: %d prompts", len(ids))
+	}
+}

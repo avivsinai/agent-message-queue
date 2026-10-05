@@ -547,6 +547,16 @@ func (s *Server) setModel(params json.RawMessage) (any, *rpcError) {
 		s.mu.Unlock()
 		return struct{}{}, nil
 	}
+	// A named model that matches nothing still pins the session to that name,
+	// so a prompt reads it, finds no binding and says Not connected instead
+	// of falling back to the only binding left.
+	if name := strings.TrimPrefix(parsed.ModelID, bindingModelPrefix); name != parsed.ModelID && name != "" {
+		s.mu.Lock()
+		if session, ok := s.sessions[parsed.SessionID]; ok {
+			session.binding = name
+		}
+		s.mu.Unlock()
+	}
 	return nil, newRPCError(codeInvalidParams, "model %q is not available here", parsed.ModelID)
 }
 
@@ -578,6 +588,8 @@ func (s *Server) newSession(params json.RawMessage) (any, *rpcError) {
 		channelID = "session/" + id
 	}
 	now := time.Now()
+	models := s.models()
+	current := models[0].ModelID
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -598,15 +610,22 @@ func (s *Server) newSession(params json.RawMessage) (any, *rpcError) {
 	if err := s.store.put(channelID, threadID, now); err != nil {
 		return nil, newRPCError(codeInternalError, "persist ACP session mapping: %v", err)
 	}
+	// The advertised default model pins the session, so removing that binding
+	// later never falls back to another one. The plain model pins nothing.
+	pinned := ""
+	if s.cfg.RemoteBinding && strings.HasPrefix(current, bindingModelPrefix) {
+		pinned = strings.TrimPrefix(current, bindingModelPrefix)
+	}
 	s.sessions[id] = &sessionState{
 		ID:        id,
 		ChannelID: channelID,
 		Thread:    threadID,
+		binding:   pinned,
 	}
 	return newSessionResult{
 		SessionID: id,
 		Meta:      sessionMetaInfo{ChannelID: channelID, Thread: threadID},
-		Models:    sessionModels{CurrentModelID: s.models()[0].ModelID, AvailableModels: s.models()},
+		Models:    sessionModels{CurrentModelID: current, AvailableModels: models},
 	}, nil
 }
 
