@@ -67,10 +67,13 @@ func (b Binding) Same(o Binding) bool {
 	if b.Mailbox() != o.Mailbox() {
 		return false
 	}
+	// A root is an identity, so spelling (a trailing slash) does not matter,
+	// including for values read back from an older file.
+	sameRoot := filepath.Clean(b.Root) == filepath.Clean(o.Root)
 	if b.Mailbox() {
-		return b.Root == o.Root && b.Handle == o.Handle
+		return sameRoot && b.Handle == o.Handle
 	}
-	return b.Root == o.Root && b.Target == o.Target && b.NativeSession == o.NativeSession
+	return sameRoot && b.Target == o.Target && b.NativeSession == o.NativeSession
 }
 
 // Valid reports whether b is complete for its carrier.
