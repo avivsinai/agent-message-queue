@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/acp"
+	"github.com/avivsinai/agent-message-queue/internal/config"
 	"github.com/avivsinai/agent-message-queue/internal/lock"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
@@ -122,11 +123,26 @@ func attachMailbox(root, handle, name string, stdout io.Writer) (int, error) {
 		name = binding.SanitizeName(handle + "-" + projectOf(root))
 	}
 	b := binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: handle, Display: handle, Name: name}
+	if err := listBuzzInRoster(root); err != nil {
+		return protocol.ExitActionRequired, err
+	}
 	if err := writeBinding(b, explicit); err != nil {
 		return protocol.ExitActionRequired, err
 	}
 	say(stdout, "Connected: AMQ handle %s at %s as session %s. DM its Buzz agent \"AMQ: %s\".", handle, root, name, name)
 	return 0, nil
+}
+
+// listBuzzInRoster adds the Buzz agent's handle to the root's config.json
+// agents list, so a reply to a Buzz DM routes without a "may not be read"
+// warning or a --strict refusal (bead agent-message-queue-za4). A root with
+// no config.json is left as it is, and a handle already listed is a no-op.
+func listBuzzInRoster(root string) error {
+	if _, err := os.Lstat(filepath.Join(root, "meta", "config.json")); errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	_, err := config.EnsureAgent(root, "buzz")
+	return err
 }
 
 // writeBinding adds the named binding and removes any other binding for the
