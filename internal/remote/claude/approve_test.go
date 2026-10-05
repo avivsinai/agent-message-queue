@@ -103,7 +103,7 @@ func TestApprovalPreviewDetectorTable(t *testing.T) {
 		{"clustered data option", "Bash", bash("curl -sdsk-AAAAAAAAAAAAAAAAAAAAAAAA1 https://example.test"), "", true},
 		{"fallback clustered data option", "Bash", fallback("curl -sdsk-AAAAAAAAAAAAAAAAAAAAAAAA1 https://example.test"), "", true},
 	} {
-		preview := approvalPreview(tc.tool, json.RawMessage(tc.input), tc.agent)
+		preview, _ := approvalView(tc.tool, json.RawMessage(tc.input), tc.agent)
 		if tc.hidden && preview != previewHidden {
 			t.Errorf("%s: preview = %.120q, want only the hidden note", tc.name, preview)
 		}
@@ -112,20 +112,22 @@ func TestApprovalPreviewDetectorTable(t *testing.T) {
 		}
 	}
 	long := `{"command":"echo ` + strings.Repeat("x", 3000) + `"}`
-	if preview := approvalPreview("Bash", json.RawMessage(long), ""); preview != previewTooLong {
+	if preview, _ := approvalView("Bash", json.RawMessage(long), ""); preview != previewTooLong {
 		t.Fatalf("long command = %q, want the too-long note", preview)
 	}
 }
 
 // Bead 611.42.3, design section 5: install adds one PermissionRequest entry
 // with no matcher, the AMQ_APPROVAL_HOOK marker, --wait 600 and timeout
-// 630, beside the Stop hook; uninstall removes only that entry.
+// 630, beside the Stop hook; uninstall removes only that entry. Bead
+// 611.42.4: installing with an owner replaces that entry with one that pins
+// the owner and the AMQ root on its command line, read back whole.
 func TestInstallApprovalHookBesideStopHook(t *testing.T) {
 	home := t.TempDir()
 	if err := InstallStopHook(home, "/opt/amq-remote"); err != nil {
 		t.Fatal(err)
 	}
-	if err := InstallPermissionHook(home, "/opt/amq-remote", DefaultPermissionWait); err != nil {
+	if err := InstallPermissionHook(home, "/opt/amq-remote", DefaultPermissionWait, HookPin{}); err != nil {
 		t.Fatal(err)
 	}
 	raw, err := os.ReadFile(settingsPath(home))
@@ -144,6 +146,15 @@ func TestInstallApprovalHookBesideStopHook(t *testing.T) {
 	}
 	if state, err := PermissionHookState(home); err != nil || state != StopHookPresent {
 		t.Fatalf("state = %q, %v; want installed", state, err)
+	}
+	pin := HookPin{Owner: strings.Repeat("ab", 32), Root: "/work/it's root", Session: "work",
+		Relay: "wss://relay.example", Body: strings.Repeat("cd", 32), Channel: "dm-1", Target: "cc-1"}
+	if err := InstallPermissionHook(home, "/opt/amq-remote", DefaultPermissionWait, pin); err != nil {
+		t.Fatal(err)
+	}
+	cmds, err := installedCommands(home, permissionSpec)
+	if err != nil || len(cmds) != 1 || !strings.Contains(cmds[0], " --wait 600 --owner '"+pin.Owner+"'") || PermissionHookPin(home) != pin {
+		t.Fatalf("commands = %q (%v), pin = %+v; want one hook pinning %+v", cmds, err, PermissionHookPin(home), pin)
 	}
 	if err := UninstallPermissionHook(home); err != nil {
 		t.Fatal(err)

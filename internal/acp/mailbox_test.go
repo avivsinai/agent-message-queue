@@ -326,6 +326,41 @@ func TestBuzzAnswerIsPostedIntoTheDMChannel(t *testing.T) {
 	}
 }
 
+// Bead agent-message-queue-1kc (review F7): a redelivered event posted the
+// same reply into the Buzz DM a second time. The event posts once.
+func TestRedeliveredEventPostsOnce(t *testing.T) {
+	s, root := mailboxServer(t)
+	s.cfg.TurnTimeout = 300 * time.Millisecond
+	posts := 0
+	saved := postAnswer
+	t.Cleanup(func() { postAnswer = saved })
+	postAnswer = func(string, string) error {
+		posts++
+		return nil
+	}
+	prompt := "<context>\nScope: dm\nChannel: DM (#6eff60e4-32ab-48ec-bd3d-f4c97872f370)\n</context>\nhi"
+	eventID := strings.Repeat("7", 64)
+	replied := false
+	for range 2 {
+		turn := newTurn()
+		turn.channel = buzzChannel(prompt)
+		if _, rpcErr := s.runRemote("s", prompt, eventID, turn, func(any) error {
+			if !replied {
+				if ids := inboxPrompts(t, root); len(ids) == 1 {
+					replied = true
+					replyAs(t, root, cockpitThread("session/s"), ids[0], format.KindAnswer, "hi back")
+				}
+			}
+			return nil
+		}); rpcErr != nil {
+			t.Fatal(rpcErr)
+		}
+	}
+	if posts != 1 {
+		t.Fatalf("posts=%d after a redelivery; want 1", posts)
+	}
+}
+
 // Bead agent-message-queue-611.39: two sessions, each with its own named
 // binding. Each Buzz agent's model selects its binding, so each prompt lands
 // in its own session's inbox.
