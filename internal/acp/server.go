@@ -547,6 +547,16 @@ func (s *Server) setModel(params json.RawMessage) (any, *rpcError) {
 		s.mu.Unlock()
 		return struct{}{}, nil
 	}
+	// A named model that matches nothing still pins the session to that name,
+	// so a prompt reads it, finds no binding and says Not connected instead
+	// of falling back to the only binding left.
+	if name := strings.TrimPrefix(parsed.ModelID, bindingModelPrefix); name != parsed.ModelID && name != "" {
+		s.mu.Lock()
+		if session, ok := s.sessions[parsed.SessionID]; ok {
+			session.binding = name
+		}
+		s.mu.Unlock()
+	}
 	return nil, newRPCError(codeInvalidParams, "model %q is not available here", parsed.ModelID)
 }
 
