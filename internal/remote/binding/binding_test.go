@@ -90,3 +90,12 @@ func TestWriteNamedNewRefusesAnotherSessionsName(t *testing.T) {
 		t.Fatalf("binding = %+v %v; want session a kept", got, err)
 	}
 }
+
+// Pro review of 94w: a trailing slash on the same root was refused as a
+// collision when the same session attached again.
+func TestSameIgnoresRootSpelling(t *testing.T) {
+	a := Binding{Carrier: CarrierMailbox, Root: "/p/.agent-mail/a", Handle: "claude"}
+	if !a.Same(Binding{Carrier: CarrierMailbox, Root: "/p/.agent-mail/a/", Handle: "claude"}) {
+		t.Fatal("trailing-slash root not Same as the clean root")
+	}
+}
