@@ -106,14 +106,9 @@ func TestMailboxBindingDeliversAndEndsOnTheFinalReply(t *testing.T) {
 	}
 }
 
-// Bead agent-message-queue-ee7 (review F2): every poll read every file in
-// six folders, so a big mailbox cost a core per open turn. The wait reads
-// only buzz/inbox/new; a reply already in cur is not read again.
-func TestMailboxRepliesReadOnlyNew(t *testing.T) {
-	_, root := mailboxServer(t)
-	thread := cockpitThread("session/s")
-	since := time.Now().Add(-time.Minute)
-	id := replyAs(t, root, thread, "prompt", format.KindAnswer, "already consumed")
+// moveToCur moves a buzz inbox file to cur, the way a manual drain would.
+func moveToCur(t *testing.T, root, id string) {
+	t.Helper()
 	identity, _ := fsq.SnapshotDeliveryRoot(root)
 	dr, err := fsq.OpenDeliveryRoot(root, identity)
 	if err != nil {
@@ -123,9 +118,72 @@ func TestMailboxRepliesReadOnlyNew(t *testing.T) {
 	if err := fsq.MoveNewToCur(dr, mailboxSender, id+".md"); err != nil {
 		t.Fatal(err)
 	}
-	_, final, _, err := mailboxReplies(binding.Binding{Root: root, Handle: "agent"}, thread, "prompt", since, map[string]bool{})
-	if err != nil || final != "" {
+}
+
+// Bead agent-message-queue-ee7 (review F2): every poll read every file in
+// six folders, so a big mailbox cost a core per open turn. A poll reads only
+// buzz/inbox/new; cur is read at the turn start and on the heartbeat.
+func TestMailboxRepliesReadOnlyNew(t *testing.T) {
+	s, root := mailboxServer(t)
+	thread := cockpitThread("session/s")
+	id := replyAs(t, root, thread, "prompt", format.KindAnswer, "already consumed")
+	moveToCur(t, root, id)
+	watch := s.watchMailbox(binding.Binding{Root: root, Handle: "agent"}, thread, "prompt", time.Now().Add(-time.Minute))
+	if _, final, _, err := watch.poll(false); err != nil || final != "" {
 		t.Fatalf("final=%q err=%v; want no reply read from cur", final, err)
+	}
+}
+
+// Bead agent-message-queue-ee7, review of #957 (P1): two pollers both found
+// one reply in new; the one whose move failed with ENOENT also read it from
+// cur, so both returned it. Only one poller returns a reply.
+func TestMailboxTwoPollersReturnOneReply(t *testing.T) {
+	s, root := mailboxServer(t)
+	thread := cockpitThread("session/s")
+	b := binding.Binding{Root: root, Handle: "agent"}
+	since := time.Now().Add(-time.Minute)
+	id := replyAs(t, root, thread, "prompt", format.KindAnswer, "one answer")
+	first, second := s.watchMailbox(b, thread, "prompt", since), s.watchMailbox(b, thread, "prompt", since)
+	if _, final, _, err := first.poll(false); err != nil || final != "one answer" {
+		t.Fatalf("first poller: final=%q err=%v", final, err)
+	}
+	// The second poller listed the reply before the first one moved it.
+	identity, _ := fsq.SnapshotDeliveryRoot(root)
+	dr, err := fsq.OpenDeliveryRoot(root, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = dr.Close() }()
+	if _, owned, err := second.claimNew(dr, id+".md"); err != nil || owned {
+		t.Fatalf("second poller owns the reply too (err=%v)", err)
+	}
+	if _, final, _, err := second.poll(true); err != nil || final != "" {
+		t.Fatalf("second poller recovered final=%q err=%v", final, err)
+	}
+}
+
+// Bead agent-message-queue-ee7, review of #957 (P2): a reply another
+// consumer moved to buzz/inbox/cur before the turn saw it was never read, and
+// the turn timed out. The turn recovers it, once.
+func TestMailboxRecoversAReplyDrainedToCur(t *testing.T) {
+	s, root := mailboxServer(t)
+	prompt := ""
+	result, rpcErr := s.runRemote("s", "say hi", strings.Repeat("3", 64), newTurn(), func(any) error {
+		if ids := inboxPrompts(t, root); prompt == "" && len(ids) == 1 {
+			prompt = ids[0]
+			moveToCur(t, root, replyAs(t, root, cockpitThread("session/s"), prompt, format.KindAnswer, "drained elsewhere"))
+		}
+		return nil
+	})
+	if rpcErr != nil {
+		t.Fatal(rpcErr)
+	}
+	if got := result.(remotePromptResult); got.StopReason != StopReasonEndTurn {
+		t.Fatalf("result=%+v; want the reply from cur", got)
+	}
+	watch := s.watchMailbox(binding.Binding{Root: root, Handle: "agent"}, cockpitThread("session/s"), prompt, time.Now().Add(-time.Minute))
+	if _, final, _, err := watch.poll(true); err != nil || final != "" {
+		t.Fatalf("recovered again: final=%q err=%v", final, err)
 	}
 }
 
