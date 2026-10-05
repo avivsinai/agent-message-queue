@@ -83,28 +83,34 @@ func coopNamedSessionLabel(session, handle string) string {
 	return session + "/" + handle
 }
 
-func resolveCoopNamedEnabled(fsFlagVisited bool, flagValue bool) (bool, error) {
+// coopNamedChoice is whether coop exec names the spawned CLI session, and
+// whether the flag, the environment, or the launch config asked for it.
+type coopNamedChoice struct {
+	enabled, explicit bool
+}
+
+func resolveCoopNamedEnabled(fsFlagVisited bool, flagValue bool) (coopNamedChoice, error) {
 	if fsFlagVisited {
-		return flagValue, nil
+		return coopNamedChoice{enabled: flagValue, explicit: true}, nil
 	}
 	if raw, ok := os.LookupEnv("AMQ_COOP_NAMED"); ok {
 		switch strings.ToLower(strings.TrimSpace(raw)) {
 		case "0", "false", "off", "no":
-			return false, nil
+			return coopNamedChoice{explicit: true}, nil
 		case "1", "true", "on", "yes":
-			return true, nil
+			return coopNamedChoice{enabled: true, explicit: true}, nil
 		default:
-			return false, UsageError("AMQ_COOP_NAMED must be 0 or 1")
+			return coopNamedChoice{}, UsageError("AMQ_COOP_NAMED must be 0 or 1")
 		}
 	}
 	config, present, err := loadProjectLaunchConfig()
 	if err != nil {
-		return false, err
+		return coopNamedChoice{}, err
 	}
 	if present && config.Named != nil {
-		return *config.Named, nil
+		return coopNamedChoice{enabled: *config.Named, explicit: true}, nil
 	}
-	return true, nil
+	return coopNamedChoice{enabled: true}, nil
 }
 
 func coopNamedTUICommand(binaryBase, me string) string {
@@ -125,13 +131,13 @@ func coopNamedUnknownReminder(me, binary string) string {
 }
 
 func applyCoopNamedBeforeExecAt(
-	named bool,
+	named coopNamedChoice,
 	cmdName string,
 	agentArgs []string,
 	name string,
 	execStart time.Time,
 ) ([]string, error) {
-	if !named {
+	if !named.enabled {
 		return agentArgs, nil
 	}
 	if agentArgsPreventAutoNameFor(cmdName, agentArgs) {
@@ -146,7 +152,11 @@ func applyCoopNamedBeforeExecAt(
 		}
 		return agentArgs, nil
 	case coopNamedModeUnknown:
-		_ = writeStderr("%s\n", coopNamedUnknownReminder(name, cmdName))
+		// Default naming is best effort: an unknown CLI starts quietly. Only
+		// an explicit request is owed the manual step (7ja).
+		if named.explicit {
+			_ = writeStderr("%s\n", coopNamedUnknownReminder(name, cmdName))
+		}
 		return agentArgs, nil
 	default:
 		return agentArgs, nil
