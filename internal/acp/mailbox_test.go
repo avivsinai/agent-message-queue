@@ -123,7 +123,7 @@ func TestMailboxRepliesReadOnlyNew(t *testing.T) {
 	if err := fsq.MoveNewToCur(dr, mailboxSender, id+".md"); err != nil {
 		t.Fatal(err)
 	}
-	final, _, err := mailboxReplies(binding.Binding{Root: root, Handle: "agent"}, thread, "prompt", since, map[string]bool{})
+	_, final, _, err := mailboxReplies(binding.Binding{Root: root, Handle: "agent"}, thread, "prompt", since, map[string]bool{})
 	if err != nil || final != "" {
 		t.Fatalf("final=%q err=%v; want no reply read from cur", final, err)
 	}
@@ -358,6 +358,37 @@ func TestRedeliveredEventPostsOnce(t *testing.T) {
 	}
 	if posts != 1 {
 		t.Fatalf("posts=%d after a redelivery; want 1", posts)
+	}
+}
+
+// Bead agent-message-queue-bdq (review F1): a reply written after the turn
+// timed out never reached the DM. The sweep posts it once and records it.
+func TestLateReplyIsPostedOnceAfterTheTurn(t *testing.T) {
+	s, root := mailboxServer(t)
+	s.cfg.TurnTimeout = 100 * time.Millisecond
+	var posts []string
+	saved := postAnswer
+	t.Cleanup(func() { postAnswer = saved })
+	postAnswer = func(_, content string) error {
+		posts = append(posts, content)
+		return nil
+	}
+	prompt := "<context>\nScope: dm\nChannel: DM (#6eff60e4-32ab-48ec-bd3d-f4c97872f370)\n</context>\nhi"
+	eventID := strings.Repeat("8", 64)
+	turn := newTurn()
+	turn.channel = buzzChannel(prompt)
+	if _, rpcErr := s.runRemote("s", prompt, eventID, turn, func(any) error { return nil }); rpcErr != nil {
+		t.Fatal(rpcErr)
+	}
+	replyAs(t, root, cockpitThread("session/s"), inboxPrompts(t, root)[0], format.KindAnswer, "late answer")
+	for range 2 {
+		s.sweepLateReplies(time.Now().Add(time.Hour))
+	}
+	if got := strings.Count(strings.Join(posts, "|"), "late answer"); got != 1 {
+		t.Fatalf("late answer posted %d times; posts=%q", got, posts)
+	}
+	if _, err := os.Stat(filepath.Join(s.cfg.StateDir, "remote-events", eventID+".replied")); err != nil {
+		t.Fatalf("no outcome recorded: %v", err)
 	}
 }
 

@@ -145,6 +145,10 @@ type Server struct {
 	// begins after this point never had a connected client, so it refuses
 	// immediately instead of waiting out the bounded timeout.
 	streamClosed bool
+	// sweepMu serializes late-reply sweeps (binding mode only); sweeps
+	// tracks the ones prompts started, so Serve waits for their posts.
+	sweepMu sync.Mutex
+	sweeps  sync.WaitGroup
 }
 
 // NewServer builds a server bound to one already authenticated routing context.
@@ -205,6 +209,9 @@ func (s *Server) Serve(in io.Reader, out io.Writer) error {
 	s.mu.Lock()
 	s.streamClosed = false
 	s.mu.Unlock()
+	if s.cfg.RemoteBinding {
+		defer s.startLateReplySweep()()
+	}
 	scanner := bufio.NewScanner(in)
 	scanner.Buffer(make([]byte, 0, 64*1024), format.MaxMessageSize+1024)
 	writer := newResponseWriter(out)
@@ -264,6 +271,7 @@ func (s *Server) Serve(in io.Reader, out io.Writer) error {
 	// intact; the scanner error itself is returned below.
 	s.cancelAll()
 	pending.Wait()
+	s.sweeps.Wait()
 	errMu.Lock()
 	deferredWriteErr := writeErr
 	errMu.Unlock()

@@ -53,8 +53,9 @@ type remoteMeta struct {
 	Cancel     string `json:"cancel,omitempty"`
 	Truncated  bool   `json:"truncated,omitempty"`
 	// Posted is "posted" when the owner-facing text was published into the
-	// Buzz channel, "duplicate: ..." when an earlier delivery of the event
-	// already posted, or the post error (bead agent-message-queue-611.38).
+	// Buzz channel, "duplicate: ..." when an earlier delivery or the
+	// late-reply sweep already posted it, or the post error (bead
+	// agent-message-queue-611.38).
 	Posted string `json:"posted,omitempty"`
 }
 
@@ -101,6 +102,13 @@ func (s *Server) runRemote(sessionID, text, eventID string, turn *turnState, emi
 	}
 	root, target, native := s.cfg.Root, s.cfg.RemoteTarget, s.cfg.RemoteNative
 	if s.cfg.RemoteBinding {
+		// A prompt start also posts late replies of earlier turns; a post can
+		// take up to postTimeout, so it never holds this turn.
+		s.sweeps.Add(1)
+		go func() {
+			defer s.sweeps.Done()
+			s.sweepLateReplies(time.Now())
+		}()
 		b, err := s.turnBinding(sessionID, eventID)
 		if err != nil {
 			r := &remoteTurn{s: s, sessionID: sessionID, emit: emit, turn: turn, meta: remoteMeta{State: "not_connected", Reason: err.Error()}}
@@ -596,22 +604,28 @@ func (r *remoteTurn) say(outcome, stopReason, text string) (any, *rpcError) {
 }
 
 // postOnce publishes text into the turn's Buzz channel at most once per
-// event. The exclusive marker is created before the post, so a redelivered
-// event never posts again, and a post that failed is not retried: the post
-// has no idempotency key (review F7).
+// event (review F7).
 func (r *remoteTurn) postOnce(text string) string {
-	if r.eventID == "" || r.turn.channel == "" || strings.TrimSpace(text) == "" {
-		return publish(r.turn.channel, text)
+	return r.s.postMarked(r.eventID, ".posted", []byte(time.Now().UTC().Format(time.RFC3339Nano)+"\n"), r.turn.channel, text)
+}
+
+// postMarked publishes text into channel at most once per event and marker
+// suffix. The exclusive marker (content raw) is created before the post, so
+// a redelivered event never posts again, and a post that failed is not
+// retried: the post has no idempotency key. Without an event id it posts.
+func (s *Server) postMarked(eventID, suffix string, raw []byte, channel, text string) string {
+	if eventID == "" || channel == "" || strings.TrimSpace(text) == "" {
+		return publish(channel, text)
 	}
-	path := filepath.Join(r.s.cfg.StateDir, "remote-events", r.eventID+".posted")
-	won, err := createExclusive(path, []byte(time.Now().UTC().Format(time.RFC3339Nano)+"\n"))
+	path := filepath.Join(s.cfg.StateDir, "remote-events", eventID+suffix)
+	won, err := createExclusive(path, raw)
 	switch {
 	case err != nil:
 		return "error: record post marker: " + err.Error()
 	case !won:
 		return "duplicate: this event was already posted"
 	}
-	return publish(r.turn.channel, text)
+	return publish(channel, text)
 }
 
 func (r *remoteTurn) statusText(snap protocol.Snapshot) string {

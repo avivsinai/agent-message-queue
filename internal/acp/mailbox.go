@@ -35,6 +35,17 @@ type mailboxClaim struct {
 	// new ACP session publishes and waits there, never on its own thread
 	// (codex #895 P1 #1).
 	Thread string `json:"thread"`
+	// Channel is the Buzz channel of the first delivery, so the late-reply
+	// sweep can post a reply that arrives after the turn ended. An older
+	// claim has none and is not swept.
+	Channel string `json:"channel,omitempty"`
+}
+
+// mailboxReplied is the outcome of a mailbox event: the buzz inbox message
+// whose body was posted as the final reply. It is created exclusively before
+// the post, at <event>.replied, by the turn or by the late-reply sweep.
+type mailboxReplied struct {
+	ReplyID string `json:"reply_id"`
 }
 
 // runMailbox delivers the prompt as an AMQ message to the bound handle and
@@ -61,9 +72,14 @@ func (s *Server) runMailbox(sessionID, text, eventID string, b binding.Binding, 
 	// The turn budget starts before the claim, so a publish-lock wait counts
 	// against it (codex #895 r2 P1).
 	budget := time.Now().Add(s.cfg.TurnTimeout)
-	claim, err := s.mailboxClaim(eventID, threadID)
+	claim, err := s.mailboxClaim(eventID, threadID, turn.channel)
 	if err != nil {
 		return r.failed(remoteUncertain, err)
+	}
+	// A redelivered event that is already answered returns that answer and
+	// posts nothing.
+	if replyID, ok := s.mailboxAnswered(eventID); ok {
+		return s.mailboxAnsweredTurn(r, b, replyID)
 	}
 	threadID = claim.Thread
 	created, err := time.Parse(time.RFC3339Nano, claim.Created)
@@ -105,7 +121,11 @@ func (s *Server) runMailbox(sessionID, text, eventID string, b binding.Binding, 
 				return nil, newRPCError(codeInternalError, "emit ACP session update: %v", err)
 			}
 		}
-		final, progress, err := mailboxReplies(b, threadID, claim.MessageID, created, seen)
+		// The sweep or another process may have claimed and posted the reply.
+		if replyID, ok := s.mailboxAnswered(eventID); ok {
+			return s.mailboxAnsweredTurn(r, b, replyID)
+		}
+		finalID, final, progress, err := mailboxReplies(b, threadID, claim.MessageID, created, seen)
 		if err != nil {
 			return nil, newRPCError(codeInternalError, "poll AMQ thread %s: %v", threadID, err)
 		}
@@ -119,7 +139,7 @@ func (s *Server) runMailbox(sessionID, text, eventID string, b binding.Binding, 
 				return s.mailboxStopped(r, outcome, b)
 			}
 			r.meta.State = DeliveryStateReplied
-			return r.say("replied", StopReasonEndTurn, final)
+			return r.sayReply(finalID, final)
 		}
 		select {
 		case <-turn.done:
@@ -155,16 +175,62 @@ func (s *Server) mailboxStopped(r *remoteTurn, outcome string, b binding.Binding
 	return r.say(outcome, StopReasonCancelled, fmt.Sprintf("Stopped waiting. The message stays in %s's AMQ inbox; %s may still act on it.", b.Handle, b.Handle))
 }
 
+// mailboxAnsweredTurn ends a turn whose event already has a posted reply:
+// the client sees that reply again and nothing is posted.
+func (s *Server) mailboxAnsweredTurn(r *remoteTurn, b binding.Binding, replyID string) (any, *rpcError) {
+	if outcome := r.settle("replied"); outcome != "replied" {
+		return s.mailboxStopped(r, outcome, b)
+	}
+	r.meta.State = DeliveryStateReplied
+	text := fmt.Sprintf("%s already answered; the reply is in the DM.", b.Handle)
+	if replyID != "" && replyID == filepath.Base(replyID) {
+		if msg, err := format.ReadMessageFile(filepath.Join(fsq.AgentInboxCur(b.Root, mailboxSender), replyID+".md")); err == nil && strings.TrimSpace(msg.Body) != "" {
+			text = strings.TrimSpace(msg.Body)
+		}
+	}
+	return r.sayReply(replyID, text)
+}
+
+// sayReply emits the final reply and posts it once per event under the
+// .replied outcome record, apart from the .posted notices: a timeout notice
+// does not stop a late reply from reaching the DM (review F1).
+func (r *remoteTurn) sayReply(replyID, text string) (any, *rpcError) {
+	if err := emitText(r.emit, r.sessionID, "agent_message_chunk", text); err != nil {
+		return nil, newRPCError(codeInternalError, "emit ACP reply update: %v", err)
+	}
+	raw, err := json.Marshal(mailboxReplied{ReplyID: replyID})
+	if err != nil {
+		return nil, newRPCError(codeInternalError, "mailbox outcome: %v", err)
+	}
+	r.meta.Posted = r.s.postMarked(r.eventID, ".replied", raw, r.turn.channel, text)
+	return remotePromptResult{StopReason: StopReasonEndTurn, Meta: remotePromptMeta{Remote: r.meta}}, nil
+}
+
+// mailboxAnswered reports whether the event has a posted final reply, and
+// that reply's id ("" when the record cannot be read).
+func (s *Server) mailboxAnswered(eventID string) (string, bool) {
+	if eventID == "" {
+		return "", false
+	}
+	raw, err := readSmallRegular(filepath.Join(s.cfg.StateDir, "remote-events", eventID+".replied"))
+	if err != nil {
+		return "", !errors.Is(err, os.ErrNotExist)
+	}
+	var rec mailboxReplied
+	_ = json.Unmarshal(raw, &rec)
+	return rec.ReplyID, true
+}
+
 // mailboxClaim returns the message id and time for this prompt. With an
 // event id it is claimed exclusively before any publish, and a redelivery
 // reuses it.
-func (s *Server) mailboxClaim(eventID, threadID string) (mailboxClaim, error) {
+func (s *Server) mailboxClaim(eventID, threadID, channel string) (mailboxClaim, error) {
 	now := time.Now()
 	id, err := format.NewMessageID(now)
 	if err != nil {
 		return mailboxClaim{}, err
 	}
-	fresh := mailboxClaim{MessageID: id, Created: now.UTC().Format(time.RFC3339Nano), Thread: threadID}
+	fresh := mailboxClaim{MessageID: id, Created: now.UTC().Format(time.RFC3339Nano), Thread: threadID, Channel: channel}
 	if eventID == "" {
 		return fresh, nil
 	}
@@ -358,36 +424,37 @@ func scanReplies(dir, handle, threadID, promptID string, since time.Time) ([]rep
 // move to cur and a drained receipt for consumer buzz. Unmatched files are
 // never moved, because several bindings share the buzz mailbox. A status
 // reply is progress, reported once; the newest other reply is the final
-// answer. Mailbox mode needs no cur fallback: it claims its own matches.
-func mailboxReplies(b binding.Binding, threadID, promptID string, created time.Time, seen map[string]bool) (string, []string, error) {
+// answer, returned with its message id. Mailbox mode needs no cur fallback
+// in a turn: it claims its own matches.
+func mailboxReplies(b binding.Binding, threadID, promptID string, created time.Time, seen map[string]bool) (string, string, []string, error) {
 	hits, err := scanReplies(fsq.AgentInboxNew(b.Root, mailboxSender), b.Handle, threadID, promptID, created)
 	if err != nil || len(hits) == 0 {
-		return "", nil, err
+		return "", "", nil, err
 	}
 	identity, err := fsq.SnapshotDeliveryRoot(b.Root)
 	if err != nil {
-		return "", nil, err
+		return "", "", nil, err
 	}
 	root, err := fsq.OpenDeliveryRoot(b.Root, identity)
 	if err != nil {
-		return "", nil, err
+		return "", "", nil, err
 	}
 	defer func() { _ = root.Close() }()
 	var progress []string
-	final := ""
+	finalID, final := "", ""
 	for _, hit := range hits {
 		// A failed rename with ENOENT means another process claimed the file
 		// first; it is then read from cur like an own claim.
 		var committed *fsq.CommittedDurabilityError
 		if err := fsq.MoveNewToCur(root, mailboxSender, hit.filename); err != nil && !errors.As(err, &committed) && !os.IsNotExist(err) {
-			return "", nil, err
+			return "", "", nil, err
 		}
 		msg, err := format.ReadMessageFileRoot(root, filepath.Join("agents", mailboxSender, "inbox", "cur", hit.filename))
 		if err != nil {
 			if os.IsNotExist(err) {
 				continue
 			}
-			return "", nil, err
+			return "", "", nil, err
 		}
 		// The receipt is best effort, as in drain: the claim already holds.
 		_ = receipt.EmitDeliveryRoot(root, receipt.New(msg.Header.ID, msg.Header.Thread, b.Handle, mailboxSender, receipt.StageDrained, ""))
@@ -402,7 +469,7 @@ func mailboxReplies(b binding.Binding, threadID, promptID string, created time.T
 			}
 			continue
 		}
-		final = body
+		finalID, final = strings.TrimSuffix(hit.filename, ".md"), body
 	}
-	return final, progress, nil
+	return finalID, final, progress, nil
 }
