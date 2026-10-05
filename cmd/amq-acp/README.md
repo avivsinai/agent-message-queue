@@ -132,6 +132,23 @@ then Agents, then Check again first (setup always prints this step). No
 restart is needed. Then run `/amq-remote` in the session. A harness file this command
 did not write is left unchanged.
 
+## Remote-events cleanup
+
+Every inbound event leaves records under the state dir's `remote-events/`
+directory (`<event>.json`, `<event>.mailbox.json`, `<event>.mailbox.lock`,
+`<event>.cancelled`); nothing removes them on a schedule. The explicit path is:
+
+```sh
+amq-acp cleanup --older-than 7d            # remove records older than 7 days
+amq-acp cleanup --older-than 7d --dry-run  # print them, remove nothing
+```
+
+The state dir is `AMQ_ACP_STATE_DIR` when set, else `$AM_ROOT/meta/acp`. Only
+regular files directly in that directory whose mtime is older than the cutoff
+are removed; symlinks and subdirectories are never touched, and a
+`*.mailbox.lock` newer than the cutoff is skipped and named in the output
+because the writer may still hold it.
+
 ## Buzz BYOH
 
 This is a custom harness, not a Buzz preset. `amq-acp install` writes the
