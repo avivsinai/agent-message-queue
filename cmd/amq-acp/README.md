@@ -126,7 +126,10 @@ path): a `buzz-agent-snapshot` version 1 named `AMQ: <name>`, runtime
 session only. A bare `setup` writes `AMQ Remote.agent.json` with model
 `amq-remote`, which drives the only binding and refuses when several exist.
 Import the file in Buzz Desktop: Agents, then + then Import, pick the file,
-then Start. Then run `/amq-remote` in the session. A harness file this command
+then Start, and turn on Auto-start in the agent's menu. Desktop caches its
+harness list: if AMQ Remote is new and Desktop was open, click Settings,
+then Agents, then Check again first (setup always prints this step). No
+restart is needed. Then run `/amq-remote` in the session. A harness file this command
 did not write is left unchanged.
 
 ## Buzz BYOH

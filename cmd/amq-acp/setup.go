@@ -23,7 +23,9 @@ with mode 0600. Its env is only AMQ_ACP_REMOTE=binding. A file this command did
 not write is left unchanged.
 
 The import file is "AMQ Remote.agent.json" in the current directory, or --out.
-Import it in Buzz Desktop, then Start. Then run /amq-remote in a session.
+Import it in Buzz Desktop, then Start; turn on Auto-start. A Desktop that is
+open sees a new harness after Settings, Agents, Check again. Then run
+/amq-remote in a session.
 `
 
 const (
@@ -118,8 +120,19 @@ func runSetup(args []string) int {
 		fmt.Fprintln(os.Stderr, "amq-acp setup:", err)
 		return exitGeneral
 	}
-	fmt.Printf("In Buzz Desktop: Agents, then + then Import, pick %s, then Start. Then run /amq-remote in a session.\n", snapshotPath)
+	fmt.Print(setupSteps(snapshotPath))
 	return 0
+}
+
+// setupSteps is what the owner does in Buzz Desktop. Desktop caches its
+// harness list, so a Desktop that was open when the harness file appeared
+// sees it only after a forced discovery: Settings, Agents, Check again (Buzz
+// 0.5.26 HarnessesSettingsPanel). No restart is needed. The step is always
+// printed: a file on disk does not show that Desktop has discovered it.
+func setupSteps(snapshotPath string) string {
+	return fmt.Sprintf("In Buzz Desktop: if AMQ Remote is new and Desktop was open, click Settings, then Agents, then Check again. "+
+		"Then Agents, then + then Import, pick %s, then Start. Turn on Auto-start in the agent's menu so it starts with Desktop. "+
+		"Then run /amq-remote in a session.\n", snapshotPath)
 }
 
 func remoteHarness(command string) buzzHarness {
