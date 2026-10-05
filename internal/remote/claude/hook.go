@@ -814,65 +814,14 @@ func bindingDecision(home, sessionID string) int {
 			return bindingAllow
 		}
 	}
-	dir := filepath.Join(filepath.Dir(path), "bindings")
-	fi, err := os.Lstat(dir)
-	switch {
-	case errors.Is(err, os.ErrNotExist):
-	case err != nil || !fi.IsDir():
-		// A symlink, a file or an unreadable entry is not "no binding", and
-		// is never followed.
-		exists = true
-	default:
-		if bindingsDirAllows(dir, sessionID, &exists) {
-			return bindingAllow
-		}
+	allow, present := bindingsDirState(filepath.Join(filepath.Dir(path), "bindings"), sessionID)
+	if allow {
+		return bindingAllow
 	}
-	if exists {
+	if exists || present {
 		return bindingDeny
 	}
 	return bindingAbsent
-}
-
-// bindingsDirAllows reads bindings/*.json through one root handle on the
-// verified directory, so a path swap cannot redirect the reads. Every
-// .json-named entry counts as a binding file whatever its type; only a
-// regular file can allow.
-func bindingsDirAllows(dir, sessionID string, exists *bool) bool {
-	root, err := os.OpenRoot(dir)
-	if err != nil {
-		*exists = true
-		return false
-	}
-	defer func() { _ = root.Close() }()
-	d, err := root.Open(".")
-	if err != nil {
-		*exists = true
-		return false
-	}
-	entries, err := d.ReadDir(-1)
-	_ = d.Close()
-	if err != nil {
-		*exists = true
-	}
-	for _, e := range entries {
-		if !strings.HasSuffix(e.Name(), ".json") {
-			continue
-		}
-		*exists = true
-		if fi, err := root.Lstat(e.Name()); err != nil || !fi.Mode().IsRegular() || fi.Size() > bindingMaxBytes {
-			continue
-		}
-		f, err := root.Open(e.Name())
-		if err != nil {
-			continue
-		}
-		raw, err := io.ReadAll(io.LimitReader(f, bindingMaxBytes+1))
-		_ = f.Close()
-		if err == nil && int64(len(raw)) <= bindingMaxBytes && nativeSessionIs(raw, sessionID) {
-			return true
-		}
-	}
-	return false
 }
 
 func nativeSessionIs(raw []byte, sessionID string) bool {
