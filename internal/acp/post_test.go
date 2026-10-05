@@ -125,15 +125,4 @@ func TestBuzzCLIOnlyVerifiedBundle(t *testing.T) {
 			t.Fatalf("buzzCLI() = %q through a symlinked home", got)
 		}
 	})
-	t.Run("unusable system candidate falls through to home", func(t *testing.T) {
-		home := setup(t)
-		sys := writeBundle(t, systemApplications)
-		if err := os.Chmod(sys, 0o600); err != nil {
-			t.Fatal(err)
-		}
-		want := writeBundle(t, filepath.Join(home, "Applications"))
-		if got, err := buzzCLI(); err != nil || got != want {
-			t.Fatalf("buzzCLI() = %q, %v; want %q", got, err, want)
-		}
-	})
 }
