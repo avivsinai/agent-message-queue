@@ -93,11 +93,94 @@ type common struct {
 	json bool
 }
 
-func addCommon(fs *flag.FlagSet) *common {
+// addCommon registers --root and --json. A handler that run() calls passes
+// the run's probe, which records the parsed --json value so the result and
+// the error are printed in one mode.
+func addCommon(fs *flag.FlagSet, probe ...*jsonProbe) *common {
 	c := &common{}
 	fs.StringVar(&c.root, "root", os.Getenv("AM_ROOT"), "AMQ root directory (default AM_ROOT)")
-	fs.BoolVar(&c.json, "json", false, "emit JSON")
+	jv := &jsonValue{c: c}
+	if len(probe) > 0 && probe[0] != nil {
+		jv.p = probe[0]
+		jv.p.fs, jv.p.c = fs, c
+	}
+	fs.Var(jv, "json", "emit JSON")
 	return c
+}
+
+// jsonValue is the --json boolean flag; it reports to the run's probe when
+// the flag package sets it.
+type jsonValue struct {
+	c *common
+	p *jsonProbe
+}
+
+func (v *jsonValue) IsBoolFlag() bool { return true }
+
+func (v *jsonValue) String() string {
+	if v == nil || v.c == nil {
+		return "false"
+	}
+	return strconv.FormatBool(v.c.json)
+}
+
+func (v *jsonValue) Set(s string) error {
+	b, err := strconv.ParseBool(s)
+	if err != nil {
+		return err
+	}
+	v.c.json = b
+	if v.p != nil {
+		v.p.seen = true
+	}
+	return nil
+}
+
+// jsonProbe carries one command's --json decision from its own flag parse to
+// the output step, so a result and an error never disagree.
+type jsonProbe struct {
+	fs   *flag.FlagSet
+	c    *common
+	seen bool
+}
+
+// wantJSON is the parsed --json value. When the parse failed before it
+// reached --json, it walks the remaining arguments by the command's own flag
+// definitions, so the value of a string option is never read as a flag.
+func (p *jsonProbe) wantJSON(args []string) bool {
+	if p == nil || p.fs == nil {
+		return false
+	}
+	if p.seen {
+		return p.c.json
+	}
+	on := false
+	for i := 0; i < len(args); i++ {
+		tok := args[i]
+		if tok == "--" {
+			break
+		}
+		if len(tok) < 2 || tok[0] != '-' {
+			continue
+		}
+		name, val, hasVal := strings.Cut(strings.TrimPrefix(strings.TrimPrefix(tok, "-"), "-"), "=")
+		f := p.fs.Lookup(name)
+		if f == nil {
+			continue
+		}
+		if name == "json" {
+			on = true
+			if hasVal {
+				b, err := strconv.ParseBool(val)
+				on = err == nil && b
+			}
+			continue
+		}
+		if bf, ok := f.Value.(interface{ IsBoolFlag() bool }); !hasVal && !(ok && bf.IsBoolFlag()) {
+			i++
+		}
+	}
+	return on
 }
 
 func (c *common) stateDir() (string, error) {
@@ -124,6 +207,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	var err error
 	var out any
 	var code int
+	probe := &jsonProbe{}
 	switch cmd {
 	case "serve":
 		code, err = serve(rest, stdout, stderr)
@@ -132,30 +216,30 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		code, err = up(rest, stdout, stderr, newExecSpawner)
 		return finish(stdout, stderr, nil, false, code, err)
 	case "sessions":
-		out, code, err = clientSimple(rest, protocol.OpSessionList, "")
+		out, code, err = clientSimple(rest, protocol.OpSessionList, "", probe)
 	case "inspect":
-		out, code, err = clientSimple(rest, protocol.OpSessionInspect, "TARGET")
+		out, code, err = clientSimple(rest, protocol.OpSessionInspect, "TARGET", probe)
 	case "submit":
-		out, code, err = submit(rest, stdin)
+		out, code, err = submit(rest, stdin, probe)
 	case "status":
-		out, code, err = status(rest)
+		out, code, err = status(rest, probe)
 	case "wait":
-		out, code, err = wait(rest)
+		out, code, err = wait(rest, probe)
 	case "cancel":
-		out, code, err = cancel(rest)
+		out, code, err = cancel(rest, probe)
 	case "requests":
-		out, code, err = listRequests(rest)
+		out, code, err = listRequests(rest, probe)
 	case "share":
 		code, err = share(rest, stdout, stderr)
 		return finish(stdout, stderr, nil, false, code, err)
 	case "attach":
-		code, err = attach(rest, stdout, stderr)
-		return finish(stdout, stderr, nil, hasFlag(rest, "json"), code, err)
+		code, err = attach(rest, stdout, stderr, probe)
+		return finish(stdout, stderr, nil, probe.wantJSON(rest), code, err)
 	case "detach":
-		code, err = detach(rest, stdout, stderr)
-		return finish(stdout, stderr, nil, hasFlag(rest, "json"), code, err)
+		code, err = detach(rest, stdout, stderr, probe)
+		return finish(stdout, stderr, nil, probe.wantJSON(rest), code, err)
 	case "doctor":
-		out, code, err = doctor(rest)
+		out, code, err = doctor(rest, probe)
 	case "claude":
 		// PR2 Stop-hook bridge: the receiver subcommand is FAIL-OPEN by
 		// contract — exit 0 on ANY error, any parse failure, any panic —
@@ -166,8 +250,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		say(stderr, "unknown command %q\n%s", cmd, usageText)
 		return protocol.ExitUsage
 	}
-	wantJSON := hasFlag(rest, "json")
-	return finish(stdout, stderr, out, wantJSON, code, err)
+	return finish(stdout, stderr, out, probe.wantJSON(rest), code, err)
 }
 
 // parseInterleaved accepts flags before or after positional arguments, the
@@ -189,32 +272,6 @@ func parseInterleaved(fs *flag.FlagSet, args []string) ([]string, error) {
 
 func say(w io.Writer, format string, args ...any) {
 	_, _ = fmt.Fprintf(w, format+"\n", args...)
-}
-
-// hasFlag reports the value of the boolean flag name the way the flag
-// package reads it: -name and --name mean true, -name=v and --name=v take
-// the value v, the last occurrence wins, and nothing after "--" counts. It
-// lets the error path agree with the parsed flag, including for failures
-// raised before or during parsing.
-func hasFlag(args []string, name string) bool {
-	set := false
-	for _, a := range args {
-		if a == "--" {
-			break
-		}
-		for _, prefix := range []string{"--", "-"} {
-			if a == prefix+name {
-				set = true
-				break
-			}
-			if v, ok := strings.CutPrefix(a, prefix+name+"="); ok {
-				b, err := strconv.ParseBool(v)
-				set = err == nil && b
-				break
-			}
-		}
-	}
-	return set
 }
 
 // finish prints the reply and maps the outcome to the AMQ exit contract. The
@@ -568,10 +625,10 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	return 0, err
 }
 
-func clientSimple(args []string, op protocol.Op, positional string) (any, int, error) {
+func clientSimple(args []string, op protocol.Op, positional string, probe ...*jsonProbe) (any, int, error) {
 	fs := flag.NewFlagSet(string(op), flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	c := addCommon(fs)
+	c := addCommon(fs, probe...)
 	pos, err := parseInterleaved(fs, args)
 	if err != nil {
 		return nil, protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", err)
@@ -608,10 +665,10 @@ func clientSimple(args []string, op protocol.Op, positional string) (any, int, e
 	return out, 0, nil
 }
 
-func submit(args []string, stdin io.Reader) (any, int, error) {
+func submit(args []string, stdin io.Reader, probe ...*jsonProbe) (any, int, error) {
 	fs := flag.NewFlagSet("submit", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	c := addCommon(fs)
+	c := addCommon(fs, probe...)
 	text := fs.String("text", "", "prompt text")
 	textFile := fs.String("text-file", "", "read prompt text from a file")
 	useStdin := fs.Bool("stdin", false, "read prompt text from stdin")
@@ -813,10 +870,10 @@ func exitForReply(snap protocol.Snapshot, waiting bool) int {
 	return protocol.ExitSuccess
 }
 
-func status(args []string) (any, int, error) {
+func status(args []string, probe ...*jsonProbe) (any, int, error) {
 	fs := flag.NewFlagSet("status", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	c := addCommon(fs)
+	c := addCommon(fs, probe...)
 	pos, perr := parseInterleaved(fs, args)
 	if perr != nil || len(pos) != 1 {
 		return nil, protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "REQUEST_REF is required")
@@ -860,10 +917,10 @@ func status(args []string) (any, int, error) {
 	return rep, exitForOutcome(rep), nil
 }
 
-func wait(args []string) (any, int, error) {
+func wait(args []string, probe ...*jsonProbe) (any, int, error) {
 	fs := flag.NewFlagSet("wait", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	c := addCommon(fs)
+	c := addCommon(fs, probe...)
 	timeout := fs.Duration("timeout", 0, "give up after this long; the work continues (0 = no limit)")
 	pos, perr := parseInterleaved(fs, args)
 	if perr != nil || len(pos) != 1 {
@@ -906,10 +963,10 @@ func wait(args []string) (any, int, error) {
 	}
 }
 
-func cancel(args []string) (any, int, error) {
+func cancel(args []string, probe ...*jsonProbe) (any, int, error) {
 	fs := flag.NewFlagSet("cancel", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	c := addCommon(fs)
+	c := addCommon(fs, probe...)
 	pos, perr := parseInterleaved(fs, args)
 	if perr != nil || len(pos) != 1 {
 		return nil, protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "REQUEST_REF is required")
@@ -957,10 +1014,10 @@ func cancel(args []string) (any, int, error) {
 	return rep, exitForOutcome(rep), nil
 }
 
-func listRequests(args []string) (any, int, error) {
+func listRequests(args []string, probe ...*jsonProbe) (any, int, error) {
 	fs := flag.NewFlagSet("requests", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	c := addCommon(fs)
+	c := addCommon(fs, probe...)
 	limit := fs.Int("limit", 20, "most recent records to show")
 	if err := fs.Parse(args); err != nil {
 		return nil, protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", err)
@@ -1032,10 +1089,10 @@ func listRequests(args []string) (any, int, error) {
 	return out, 0, nil
 }
 
-func doctor(args []string) (any, int, error) {
+func doctor(args []string, probe ...*jsonProbe) (any, int, error) {
 	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	c := addCommon(fs)
+	c := addCommon(fs, probe...)
 	me := fs.String("me", amqio.DefaultHandle, "endpoint mailbox handle in the root")
 	if err := fs.Parse(args); err != nil {
 		return nil, protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", err)

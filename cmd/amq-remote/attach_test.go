@@ -237,4 +237,21 @@ func TestJSONFlagValueDecidesSuccessAndErrorOutput(t *testing.T) {
 	if out.Len() != 0 {
 		t.Fatalf("--json=false error went to stdout as %q; want human text on stderr", out.String())
 	}
+	// Pro review of 5re r2: a string option's value is never a flag, so a
+	// value of "--" or "--json=false" must not change the JSON decision.
+	for _, args := range [][]string{
+		{"detach", "--name", "--", "--json", "--all"},
+		{"submit", "--root", dir, "--text", "--", "--json", "T"},
+		{"submit", "--root", dir, "--json", "--text", "--json=false", "T"},
+	} {
+		out.Reset()
+		errOut.Reset()
+		if code := run(args, nil, &out, &errOut); code == 0 {
+			t.Fatalf("%v succeeded", args)
+		}
+		var body map[string]any
+		if err := json.Unmarshal(out.Bytes(), &body); err != nil || body["error"] == nil {
+			t.Fatalf("%v printed %q (%v); want a JSON error on stdout", args, out.String(), err)
+		}
+	}
 }
