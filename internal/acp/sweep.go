@@ -7,8 +7,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/avivsinai/agent-message-queue/internal/format"
-	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 )
 
@@ -45,12 +43,11 @@ func (s *Server) startLateReplySweep() (stop func()) {
 // sweepLateReplies posts the final reply of each recent mailbox event whose
 // turn ended without one, for example on a timeout or a client that left
 // (review F1). An event is skipped while its turn can still be open (younger
-// than the turn timeout), once it has a .replied outcome, or when it was
-// cancelled. The .replied record is created before the post, so each reply
-// is posted at most once. A failure skips that event until the next sweep.
-// Each eligible event costs one scan of buzz inbox/new and one of inbox/cur;
-// eligible events are few, because each one either gets its reply or ages
-// out of the horizon.
+// than the turn timeout), once it has a final-answer marker, or when it was
+// cancelled. The marker is created before the post, so each event's reply is
+// posted at most once. A failure skips that event until the next sweep. The
+// buzz inbox scans are kept per root across sweeps, so a tick costs one
+// listing of new and cur per root plus the headers of names not seen yet.
 func (s *Server) sweepLateReplies(now time.Time) {
 	s.sweepMu.Lock()
 	defer s.sweepMu.Unlock()
@@ -70,7 +67,8 @@ func (s *Server) sweepLateReplies(now time.Time) {
 	}
 }
 
-// sweepEvent posts one event's late final reply, if it has one.
+// sweepEvent posts one event's late final reply, if it has one. Caller
+// holds sweepMu.
 func (s *Server) sweepEvent(eventID string, now time.Time) {
 	if s.eventCancelled(eventID) {
 		return
@@ -91,38 +89,24 @@ func (s *Server) sweepEvent(eventID string, now time.Time) {
 	if raw, err := readSmallRegular(filepath.Join(dir, eventID+".json")); err != nil || json.Unmarshal(raw, &b) != nil || b.Valid() != nil || !b.Mailbox() {
 		return
 	}
-	// Claim new replies into cur, then read cur: it also holds a reply a
-	// turn claimed but never posted.
-	if _, _, _, err := mailboxReplies(b, claim.Thread, claim.MessageID, created, map[string]bool{}); err != nil {
-		return
+	watch := s.watchMailbox(b, claim.Thread, claim.MessageID, created)
+	watch.adopt = true
+	if s.sweepScans == nil {
+		s.sweepScans = map[string][2]*inboxScan{}
 	}
-	replyID, text := claimedReply(b, claim.Thread, claim.MessageID, created)
-	if text == "" {
+	scans, ok := s.sweepScans[b.Root]
+	if !ok {
+		scans = [2]*inboxScan{watch.inboxNew, watch.inboxCur}
+		s.sweepScans[b.Root] = scans
+	}
+	watch.inboxNew, watch.inboxCur = scans[0], scans[1]
+	replyID, text, _, err := watch.poll(true)
+	if err != nil || text == "" {
 		return
 	}
 	raw, err := json.Marshal(mailboxReplied{ReplyID: replyID})
 	if err != nil {
 		return
 	}
-	s.postMarked(eventID, ".replied", raw, claim.Channel, text)
-}
-
-// claimedReply returns the newest final reply to the prompt in buzz
-// inbox/cur, with its message id.
-func claimedReply(b binding.Binding, threadID, promptID string, created time.Time) (string, string) {
-	dir := fsq.AgentInboxCur(b.Root, mailboxSender)
-	hits, err := scanReplies(dir, b.Handle, threadID, promptID, created)
-	if err != nil {
-		return "", ""
-	}
-	for i := len(hits) - 1; i >= 0; i-- {
-		if hits[i].header.Kind == string(format.KindStatus) {
-			continue
-		}
-		msg, err := format.ReadMessageFile(filepath.Join(dir, hits[i].filename))
-		if body := strings.TrimSpace(msg.Body); err == nil && body != "" {
-			return strings.TrimSuffix(hits[i].filename, ".md"), body
-		}
-	}
-	return "", ""
+	s.postOnce(eventID, postFinal, raw, claim.Channel, text)
 }

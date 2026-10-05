@@ -45,8 +45,9 @@ type mailboxClaim struct {
 }
 
 // mailboxReplied is the outcome of a mailbox event: the buzz inbox message
-// whose body was posted as the final reply. It is created exclusively before
-// the post, at <event>.replied, by the turn or by the late-reply sweep.
+// whose body was posted as the final reply. It is the content of the
+// final-answer marker <event>.posted.final, created before the post by the
+// turn or by the late-reply sweep.
 type mailboxReplied struct {
 	ReplyID string `json:"reply_id"`
 }
@@ -99,7 +100,7 @@ func (s *Server) runMailbox(sessionID, text, eventID string, b binding.Binding, 
 				return s.mailboxNotDelivered(r, outcome)
 			}
 			r.meta.Reason = "reply_timeout"
-			return r.say("reply_timeout", StopReasonRefusal, fmt.Sprintf("Not delivered to %s: the turn ran out of time before the message could be published.", b.Handle))
+			return r.say(postStatus, "reply_timeout", StopReasonRefusal, fmt.Sprintf("Not delivered to %s: the turn ran out of time before the message could be published.", b.Handle))
 		}
 		return r.failed(remoteUncertain, err)
 	}
@@ -155,7 +156,7 @@ func (s *Server) runMailbox(sessionID, text, eventID string, b binding.Binding, 
 				return s.mailboxStopped(r, outcome, b)
 			}
 			r.meta.Reason = "reply_timeout"
-			return r.say("reply_timeout", StopReasonRefusal, fmt.Sprintf("No final reply from %s yet. The message stays in its AMQ inbox and may still be answered.", b.Handle))
+			return r.say(postStatus, "reply_timeout", StopReasonRefusal, fmt.Sprintf("No final reply from %s yet. The message stays in its AMQ inbox and may still be answered.", b.Handle))
 		case <-poll.C:
 		case <-heartbeat.C:
 			withCur = true
@@ -179,7 +180,7 @@ func (s *Server) mailboxStopped(r *remoteTurn, outcome string, b binding.Binding
 			return nil, newRPCError(codeInternalError, "record cancel: %v", err)
 		}
 	}
-	return r.say(outcome, StopReasonCancelled, fmt.Sprintf("Stopped waiting. The message stays in %s's AMQ inbox; %s may still act on it.", b.Handle, b.Handle))
+	return r.say(postStatus, outcome, StopReasonCancelled, fmt.Sprintf("Stopped waiting. The message stays in %s's AMQ inbox; %s may still act on it.", b.Handle, b.Handle))
 }
 
 // mailboxAnsweredTurn ends a turn whose event already has a posted reply:
@@ -199,8 +200,9 @@ func (s *Server) mailboxAnsweredTurn(r *remoteTurn, b binding.Binding, replyID s
 }
 
 // sayReply emits the final reply and posts it once per event under the
-// .replied outcome record, apart from the .posted notices: a timeout notice
-// does not stop a late reply from reaching the DM (review F1).
+// final-answer marker, which also records the reply id as the event's
+// outcome. A status notice such as a timeout has its own marker, so it does
+// not stop a late reply from reaching the DM (review F1).
 func (r *remoteTurn) sayReply(replyID, text string) (any, *rpcError) {
 	if err := emitText(r.emit, r.sessionID, "agent_message_chunk", text); err != nil {
 		return nil, newRPCError(codeInternalError, "emit ACP reply update: %v", err)
@@ -209,7 +211,7 @@ func (r *remoteTurn) sayReply(replyID, text string) (any, *rpcError) {
 	if err != nil {
 		return nil, newRPCError(codeInternalError, "mailbox outcome: %v", err)
 	}
-	r.meta.Posted = r.s.postMarked(r.eventID, ".replied", raw, r.turn.channel, text)
+	r.meta.Posted = r.s.postOnce(r.eventID, postFinal, raw, r.turn.channel, text)
 	return remotePromptResult{StopReason: StopReasonEndTurn, Meta: remotePromptMeta{Remote: r.meta}}, nil
 }
 
@@ -219,7 +221,7 @@ func (s *Server) mailboxAnswered(eventID string) (string, bool) {
 	if eventID == "" {
 		return "", false
 	}
-	raw, err := readSmallRegular(filepath.Join(s.cfg.StateDir, "remote-events", eventID+".replied"))
+	raw, err := readSmallRegular(filepath.Join(s.cfg.StateDir, "remote-events", eventID+".posted."+postFinal))
 	if err != nil {
 		return "", !errors.Is(err, os.ErrNotExist)
 	}
@@ -461,6 +463,10 @@ type mailboxWatch struct {
 	threadID, promptID string
 	created            time.Time
 	inboxNew, inboxCur *inboxScan
+	// adopt makes a reply already forwarded for this prompt count as this
+	// watch's own: the late-reply sweep posts a reply whose turn forwarded
+	// it but never posted it (a crash before the post).
+	adopt bool
 }
 
 func (s *Server) watchMailbox(b binding.Binding, threadID, promptID string, created time.Time) *mailboxWatch {
@@ -568,13 +574,19 @@ func (w *mailboxWatch) claimNew(root *fsq.DeliveryRoot, filename string) (format
 func (w *mailboxWatch) recover(filename string) (format.Message, bool, error) {
 	key := sha256.Sum256([]byte(w.b.Root + "\x00" + filename))
 	record := filepath.Join(w.stateDir, "forwarded", hex.EncodeToString(key[:]))
-	// A reply forwarded earlier costs one stat on each heartbeat.
-	if _, err := os.Lstat(record); err == nil {
-		return format.Message{}, false, nil
-	}
-	won, err := createExclusive(record, []byte(w.promptID+"\n"))
-	if err != nil || !won {
+	// A reply forwarded earlier costs one small read on each heartbeat.
+	owned := false
+	if raw, err := readSmallRegular(record); err == nil {
+		owned = w.adopt && strings.TrimSpace(string(raw)) == w.promptID
+	} else if errors.Is(err, os.ErrNotExist) {
+		if owned, err = createExclusive(record, []byte(w.promptID+"\n")); err != nil {
+			return format.Message{}, false, err
+		}
+	} else {
 		return format.Message{}, false, err
+	}
+	if !owned {
+		return format.Message{}, false, nil
 	}
 	msg, err := format.ReadMessageFile(filepath.Join(fsq.AgentInboxCur(w.b.Root, mailboxSender), filename))
 	if err != nil {

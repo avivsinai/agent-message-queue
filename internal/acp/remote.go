@@ -111,12 +111,12 @@ func (s *Server) runRemote(sessionID, text, eventID string, turn *turnState, emi
 		}()
 		b, err := s.turnBinding(sessionID, eventID)
 		if err != nil {
-			r := &remoteTurn{s: s, sessionID: sessionID, emit: emit, turn: turn, meta: remoteMeta{State: "not_connected", Reason: err.Error()}}
+			r := &remoteTurn{s: s, sessionID: sessionID, eventID: eventID, emit: emit, turn: turn, meta: remoteMeta{State: "not_connected", Reason: err.Error()}}
 			text := "Not connected. Run /amq-remote in a Claude Code or Codex session."
 			if !errors.Is(err, binding.ErrNone) {
 				text = "Not connected: " + err.Error()
 			}
-			return r.say(r.settle("replied"), StopReasonRefusal, text)
+			return r.say(postStatus, r.settle("replied"), StopReasonRefusal, text)
 		}
 		if b.Mailbox() {
 			return s.runMailbox(sessionID, text, eventID, b, turn, emit)
@@ -226,7 +226,7 @@ func (s *Server) runRemote(sessionID, text, eventID string, turn *turnState, emi
 			if outcome := r.settle("replied"); outcome != "replied" {
 				return r.settled(outcome, rep.Snapshot)
 			}
-			return r.say("replied", StopReasonRefusal, r.statusText(rep.Snapshot))
+			return r.say(postFinal, "replied", StopReasonRefusal, r.statusText(rep.Snapshot))
 		}
 		return r.follow(rep.Snapshot)
 	}
@@ -502,7 +502,7 @@ func (r *remoteTurn) settled(outcome string, snap protocol.Snapshot) (any, *rpcE
 		return remotePromptResult{StopReason: StopReasonRefusal, Meta: remotePromptMeta{Remote: r.meta}}, nil
 	case "reply_timeout":
 		r.meta.Reason = outcome
-		return r.say(outcome, StopReasonRefusal, fmt.Sprintf("%s: request %s is still %s and the work continues. Check it with `amq-remote status %s`.", r.meta.Target, snap.RequestRef, snap.State, snap.RequestRef))
+		return r.say(postStatus, outcome, StopReasonRefusal, fmt.Sprintf("%s: request %s is still %s and the work continues. Check it with `amq-remote status %s`.", r.meta.Target, snap.RequestRef, snap.State, snap.RequestRef))
 	}
 	switch snap.State {
 	case protocol.StateCompleted:
@@ -510,9 +510,9 @@ func (r *remoteTurn) settled(outcome string, snap protocol.Snapshot) (any, *rpcE
 		if snap.Result != nil {
 			text, r.meta.Truncated = snap.Result.Text, snap.Result.Truncated
 		}
-		return r.say(outcome, StopReasonEndTurn, text)
+		return r.say(postFinal, outcome, StopReasonEndTurn, text)
 	case protocol.StateCancelled:
-		return r.say(outcome, StopReasonCancelled, r.statusText(snap))
+		return r.say(postFinal, outcome, StopReasonCancelled, r.statusText(snap))
 	default: // failed, rejected, uncertain
 		if snap.State == protocol.StateRejected && r.meta.Reason == "" {
 			// A deferred refusal keeps the adapter's text on the record,
@@ -521,7 +521,7 @@ func (r *remoteTurn) settled(outcome string, snap protocol.Snapshot) (any, *rpcE
 				r.meta.Reason = rep.Outcome.Message
 			}
 		}
-		return r.say(outcome, StopReasonRefusal, r.statusText(snap))
+		return r.say(postFinal, outcome, StopReasonRefusal, r.statusText(snap))
 	}
 }
 
@@ -560,7 +560,7 @@ func (r *remoteTurn) cancel(snap protocol.Snapshot) (any, *rpcError) {
 	if r.meta.State == string(protocol.StateCancelled) {
 		return remotePromptResult{StopReason: StopReasonCancelled, Meta: remotePromptMeta{Remote: r.meta}}, nil
 	}
-	return r.say("session_cancelled", StopReasonCancelled, fmt.Sprintf("%s: cancel %s; request %s is still %s and the work continues.", r.meta.Target, r.meta.Cancel, snap.RequestRef, r.meta.State))
+	return r.say(postStatus, "session_cancelled", StopReasonCancelled, fmt.Sprintf("%s: cancel %s; request %s is still %s and the work continues.", r.meta.Target, r.meta.Cancel, snap.RequestRef, r.meta.State))
 }
 
 // failed ends a turn whose request is absent (not_submitted) or unknown
@@ -588,44 +588,49 @@ func (r *remoteTurn) failed(state string, err error) (any, *rpcError) {
 	if state == remoteUncertain {
 		text = fmt.Sprintf("%s: the outcome of request %s is unknown: %s. Do not resend; check it with `amq-remote status %s`.", r.meta.Target, r.meta.RequestRef, r.meta.Reason, r.meta.RequestRef)
 	}
-	return r.say(outcome, stopReason, text)
+	return r.say(postStatus, outcome, stopReason, text)
 }
 
+// Post kinds: each event posts at most one status text (a timeout, a stop
+// that leaves work running, a failure to submit) and at most one final
+// answer. Separate markers keep an earlier status post from suppressing the
+// answer that a later delivery of the event brings.
+const (
+	postStatus = "status"
+	postFinal  = "final"
+)
+
 // say emits text as the agent message and returns the result. A client that
-// left gets no message.
-func (r *remoteTurn) say(outcome, stopReason, text string) (any, *rpcError) {
+// left gets no message. kind is postStatus or postFinal.
+func (r *remoteTurn) say(kind, outcome, stopReason, text string) (any, *rpcError) {
 	if outcome != "client_disconnected" && text != "" {
 		if err := emitText(r.emit, r.sessionID, "agent_message_chunk", text); err != nil {
 			return nil, newRPCError(codeInternalError, "emit ACP reply update: %v", err)
 		}
-		r.meta.Posted = r.postOnce(text)
+		r.meta.Posted = r.s.postOnce(r.eventID, kind, []byte(time.Now().UTC().Format(time.RFC3339Nano)+"\n"), r.turn.channel, text)
 	}
 	return remotePromptResult{StopReason: stopReason, Meta: remotePromptMeta{Remote: r.meta}}, nil
 }
 
-// postOnce publishes text into the turn's Buzz channel at most once per
-// event (review F7).
-func (r *remoteTurn) postOnce(text string) string {
-	return r.s.postMarked(r.eventID, ".posted", []byte(time.Now().UTC().Format(time.RFC3339Nano)+"\n"), r.turn.channel, text)
-}
-
-// postMarked publishes text into channel at most once per event and marker
-// suffix. The exclusive marker (content raw) is created before the post, so
-// a redelivered event never posts again, and a post that failed is not
-// retried: the post has no idempotency key. Without an event id it posts.
-// The marker is created also without a channel, because the .replied marker
-// is the event's outcome record, not only a post guard.
-func (s *Server) postMarked(eventID, suffix string, raw []byte, channel, text string) string {
+// postOnce publishes text into channel at most once per event and kind
+// (review F7). The exclusive marker remote-events/<event>.posted.<kind>,
+// holding record, is created before the post, so a redelivered event never
+// posts that kind again, and a post that failed is not retried: the post
+// has no idempotency key. The event id is 64 lowercase hex, checked when the
+// prompt is parsed (event.go eventIDsFromMeta), so it cannot leave the state
+// dir. Without an event id it just posts. The marker is created also
+// without a channel: the final-answer marker is the event's outcome record.
+func (s *Server) postOnce(eventID, kind string, record []byte, channel, text string) string {
 	if eventID == "" || strings.TrimSpace(text) == "" {
 		return publish(channel, text)
 	}
-	path := filepath.Join(s.cfg.StateDir, "remote-events", eventID+suffix)
-	won, err := createExclusive(path, raw)
+	path := filepath.Join(s.cfg.StateDir, "remote-events", eventID+".posted."+kind)
+	won, err := createExclusive(path, record)
 	switch {
 	case err != nil:
 		return "error: record post marker: " + err.Error()
 	case !won:
-		return "duplicate: this event was already posted"
+		return "duplicate: this event already posted its " + kind + " text"
 	}
 	return publish(channel, text)
 }

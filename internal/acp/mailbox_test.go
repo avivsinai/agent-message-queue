@@ -445,7 +445,7 @@ func TestLateReplyIsPostedOnceAfterTheTurn(t *testing.T) {
 	if got := strings.Count(strings.Join(posts, "|"), "late answer"); got != 1 {
 		t.Fatalf("late answer posted %d times; posts=%q", got, posts)
 	}
-	if _, err := os.Stat(filepath.Join(s.cfg.StateDir, "remote-events", eventID+".replied")); err != nil {
+	if _, err := os.Stat(filepath.Join(s.cfg.StateDir, "remote-events", eventID+".posted.final")); err != nil {
 		t.Fatalf("no outcome recorded: %v", err)
 	}
 }

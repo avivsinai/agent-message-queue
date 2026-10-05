@@ -149,6 +149,10 @@ type Server struct {
 	// tracks the ones prompts started, so Serve waits for their posts.
 	sweepMu sync.Mutex
 	sweeps  sync.WaitGroup
+	// sweepScans keeps the sweep's buzz inbox scans (new, cur) per queue
+	// root across sweeps, so a tick reads only headers of new names.
+	// Guarded by sweepMu.
+	sweepScans map[string][2]*inboxScan
 }
 
 // NewServer builds a server bound to one already authenticated routing context.
