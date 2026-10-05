@@ -174,7 +174,7 @@ func (d *dmEdges) pinApprovals(adapters []manifest.Adapter, warn io.Writer) {
 			}
 			home = h
 		}
-		token, err := claude.PinApprovals(home, sh.NativeSessionID, sh.Session, os.Getpid())
+		token, err := claude.PinApprovals(home, sh.NativeSessionID, sh.Session, sh.OwnerPubKey, os.Getpid())
 		if err != nil {
 			say(warn, "relay share %s: DM approvals disabled: %v", sh.Session, err)
 			continue

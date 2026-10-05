@@ -39,7 +39,7 @@ func TestCarrierSubmitsOnceAndKeepsOneEditableRow(t *testing.T) {
 				t.Fatalf("submit command = %+v origin = %v", cmd, src.Origin)
 			}
 			ref = protocol.EncodeRef(src.Host, cmd.TargetID, cmd.RequestID)
-			return protocol.Reply{Snapshot: protocol.Snapshot{RequestRef: ref, Revision: 1, State: protocol.StateRunning}}, nil
+			return protocol.Reply{Snapshot: protocol.Snapshot{RequestRef: ref, TargetID: cmd.TargetID, Revision: 1, State: protocol.StateRunning}}, nil
 		}
 		t.Fatalf("unexpected op %s", cmd.Op)
 		return nil, nil
@@ -61,7 +61,7 @@ func TestCarrierSubmitsOnceAndKeepsOneEditableRow(t *testing.T) {
 	}
 	now = now.Add(2 * time.Second)
 	origin := c.source(dm.ID.Hex(), "").Origin
-	if err := c.Publish(protocol.Snapshot{RequestRef: ref, Revision: 2, State: protocol.StateCompleted, Result: &protocol.Result{Text: "done"}}, origin); err != nil {
+	if err := c.Publish(protocol.Snapshot{RequestRef: ref, TargetID: "cx", Revision: 2, State: protocol.StateCompleted, Result: &protocol.Result{Text: "done"}}, origin); err != nil {
 		t.Fatal(err)
 	}
 
@@ -77,6 +77,11 @@ func TestCarrierSubmitsOnceAndKeepsOneEditableRow(t *testing.T) {
 	}
 	if tagValue(sent[1], "e") != sent[0].ID.Hex() || sent[1].CreatedAt <= sent[0].CreatedAt {
 		t.Fatalf("edit does not name its row or is not strictly later: %+v", sent[1])
+	}
+	// 611.52 (field, 0.86.1): the row named the opaque request ref; it
+	// names the target and the state.
+	if sent[0].Content != "cx: running" || sent[1].Content != "cx: completed\n\ndone" {
+		t.Fatalf("row texts = %q, %q", sent[0].Content, sent[1].Content)
 	}
 	// The row replies to the owner's input (h, p=owner, e input "reply"),
 	// and both events carry the owner's grant for their kind.

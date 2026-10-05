@@ -32,6 +32,9 @@ type approvalFixture struct {
 	done   chan struct{}
 	exited chan struct{}
 	id     string
+	// hookNow and allow, when set, are the hook's clock and allow config.
+	hookNow func() time.Time
+	allow   AllowConfig
 }
 
 const approvalSession = "sess-abc"
@@ -56,7 +59,7 @@ func newApprovalFixture(t *testing.T, toolUses ...map[string]any) *approvalFixtu
 		t.Fatalf("submit = %+v, %v", adm, err)
 	}
 	waitRecv(t, ft)
-	if _, err := PinApprovals(f.home, approvalSession, "share-1", os.Getpid()); err != nil {
+	if _, err := PinApprovals(f.home, approvalSession, "share-1", "", os.Getpid()); err != nil {
 		t.Fatal(err)
 	}
 	f.append(map[string]any{
@@ -109,7 +112,10 @@ func (f *approvalFixture) raiseWith(command string, ticks <-chan time.Time) {
 		"session_id": approvalSession, "prompt_id": "p-1", "hook_event_name": "PermissionRequest",
 		"tool_name": "Bash", "tool_input": map[string]any{"command": command},
 	})
-	h := permissionHook{home: f.home, now: func() time.Time { return f.base }, wait: time.Minute, poll: 5 * time.Millisecond, markerGrace: 0, ticks: ticks}
+	h := permissionHook{home: f.home, now: func() time.Time { return f.base }, wait: time.Minute, poll: 5 * time.Millisecond, markerGrace: 0, ticks: ticks, allow: f.allow}
+	if f.hookNow != nil {
+		h.now = f.hookNow
+	}
 	var stdout io.Writer = &f.out
 	if f.stdout != nil {
 		stdout = f.stdout

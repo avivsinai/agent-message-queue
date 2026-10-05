@@ -2,6 +2,7 @@ package claude
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -12,7 +13,9 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 )
@@ -35,10 +38,15 @@ import (
 // approvalProtocol names the request file schema.
 const approvalProtocol = "amq-claude-approval/v1"
 
-// optionDeny is the one option a Claude approval offers from Buzz: Buzz can
-// block a tool call and cannot allow one (owner ruling on bead 611.42.3).
-// The deny decision never carries interrupt, so the turn continues.
+// optionDeny blocks a Claude tool call from Buzz. Its decision never
+// carries interrupt, so the turn continues. A forged deny is only a denial,
+// so a deny needs no proof beyond the answer file (bead 611.42.3).
 const optionDeny = "deny"
+
+// optionAllow lets a Claude tool call run from Buzz. The hook applies it only
+// with the owner's signed reaction on the approval message that showed this
+// exact call (bead 611.42.4), never on the answer file alone.
+const optionAllow = "allow"
 
 // maxApprovalFileBytes bounds every approval file read. A request holds a
 // preview of at most protocol.MaxApprovalPreview bytes plus small fields.
@@ -63,20 +71,29 @@ type approvalRequest struct {
 	ToolName      string `json:"tool_name"`
 	Preview       string `json:"preview"`
 	ActionHash    string `json:"action_hash"`
-	HookPID       int    `json:"hook_pid"`
+	// Approvable means the hook can apply an allow for this call: it pins
+	// an owner, and Preview is the signed prompt that shows the whole call.
+	Approvable bool `json:"approvable,omitempty"`
+	HookPID    int  `json:"hook_pid"`
 	// OpenedAt is when the hook raised the request; a tool_result stamped
 	// earlier answers an earlier call.
 	OpenedAt string `json:"opened_at"`
 	Deadline string `json:"deadline"`
 }
 
-// approvalAnswer is answers/<iid>.json.
+// approvalAnswer is answers/<iid>.json. Evidence is the surface's proof
+// for an allow, opaque here: the hook's verifier reads it.
 type approvalAnswer struct {
-	InteractionID string `json:"interaction_id"`
-	ActionHash    string `json:"action_hash"`
-	Option        string `json:"option"`
-	At            string `json:"at"`
+	InteractionID string          `json:"interaction_id"`
+	ActionHash    string          `json:"action_hash"`
+	Option        string          `json:"option"`
+	At            string          `json:"at"`
+	Evidence      json.RawMessage `json:"evidence,omitempty"`
 }
+
+// maxEvidenceBytes bounds the evidence an answer carries, so the answer
+// file stays within maxApprovalFileBytes.
+const maxEvidenceBytes = 48 << 10
 
 // approvalResolved is resolved/<iid>.json.
 type approvalResolved struct {
@@ -119,20 +136,26 @@ func canonicalJSON(raw json.RawMessage) ([]byte, bool) {
 // shown as its whole input instead.
 var bashFields = map[string]bool{"command": true, "description": true, "timeout": true, "run_in_background": true}
 
-// approvalPreview renders what the DM shows for one PermissionRequest. Buzz
-// can only block a Claude tool call (owner ruling on bead 611.42.3: a
-// forged block is only a denial, and a block is safe to give blind), so
-// the preview never edits a call: it shows the call whole, or a fixed note.
+// approvalView renders what the DM shows for one PermissionRequest. The
+// preview never edits a call: it shows the call whole, or a fixed note.
 // The whole candidate text is built first, in the form the DM displays,
 // and one detector checks that text and the structured input. On any
 // match only the hidden note is returned; a call too long to show whole
 // returns the too-long note. Every return is within MaxApprovalPreview.
-func approvalPreview(toolName string, input json.RawMessage, agentType string) string {
+//
+// whole reports that the preview is a Bash call with only the named
+// fields, shown exactly as it runs: nothing hidden, nothing shortened, and
+// no character removed for display or replaced in decoding. Only such a
+// call can be allowed from Buzz (bead 611.42.4): the owner approves the
+// text they saw, so that text must be the call.
+func approvalView(toolName string, input json.RawMessage, agentType string) (preview string, whole bool) {
 	var b strings.Builder
 	if agentType != "" {
 		fmt.Fprintf(&b, "Subagent %s asks:\n", oneLine(agentType))
 	}
-	if bash, ok := bashCall(input); toolName == "Bash" && ok {
+	bash, isBash := bashCall(input)
+	isBash = isBash && toolName == "Bash"
+	if isBash {
 		b.WriteString("Bash command:\n" + bash.Command)
 		if bash.Description != "" {
 			b.WriteString("\n\nDescription: " + oneLine(bash.Description))
@@ -147,14 +170,26 @@ func approvalPreview(toolName string, input json.RawMessage, agentType string) s
 		canon, _ := canonicalJSON(input)
 		fmt.Fprintf(&b, "Tool %s:\n%s", oneLine(toolName), canon)
 	}
-	candidate := displayForm(b.String())
+	raw := b.String()
+	candidate := displayForm(raw)
 	switch {
 	case mayHoldSecret(candidate) || inputMayHoldSecret(input):
-		return bounded(previewHidden)
+		return bounded(previewHidden), false
 	case len(candidate) > protocol.MaxApprovalPreview:
-		return bounded(previewTooLong)
+		return bounded(previewTooLong), false
 	}
-	return bounded(candidate)
+	whole = isBash && candidate == raw && !strings.ContainsRune(raw, utf8.RuneError)
+	return bounded(candidate), whole
+}
+
+// signedPrompt is the prompt an approvable call shows: its whole preview,
+// then the interaction id and the action hash. The approval message the
+// owner reacts to carries it, and the hook compares that message with its
+// own rendering, so the owner's signature covers this exact call. ok is
+// false when it would not fit MaxApprovalPreview, which would cut it.
+func signedPrompt(preview, interactionID, hash string) (string, bool) {
+	p := preview + "\n\nInteraction: " + interactionID + "\nAction: " + hash
+	return p, len(p) <= protocol.MaxApprovalPreview
 }
 
 // The notes a preview shows instead of a call it does not show whole.
@@ -445,7 +480,7 @@ func readApprovalJSON(path string, v any) error {
 const outcomeHookClaim protocol.ResolutionOutcome = "hook_claimed"
 
 // approvalDelivery is delivery/<iid>.json: whether the hook wrote its whole
-// deny decision to Claude.
+// decision to Claude.
 type approvalDelivery struct {
 	InteractionID string `json:"interaction_id"`
 	Written       bool   `json:"written"`
@@ -478,16 +513,52 @@ func writeResolved(home, sessionID string, r approvalResolved) error {
 	return createNewJSON(dir, r.InteractionID+".json", r)
 }
 
-// ApprovalPin is the DM edge's pin file content.
+// rejected/<iid>-<proof> records that the hook could not verify one allow
+// answer, named by the hash of its evidence: that answer never applies,
+// a deny or a new proof replaces it, and the endpoint drops its intent
+// (Pro review of #936 r2). A record names one exact proof, so it never
+// retires a newer one.
+
+// proofName is the rejected record's name for an allow's evidence.
+func proofName(interactionID string, evidence json.RawMessage) string {
+	sum := sha256.Sum256(evidence)
+	return interactionID + "-" + hex.EncodeToString(sum[:16])
+}
+
+// markRejected records, create-new, that the hook could not verify this
+// allow's evidence.
+func markRejected(home, sessionID, interactionID string, evidence json.RawMessage, reason string) error {
+	dir, err := ensureApproveSubdir(home, sessionID, "rejected")
+	if err != nil {
+		return err
+	}
+	err = createNewJSON(dir, proofName(interactionID, evidence), map[string]string{"reason": reason})
+	if errors.Is(err, errFileExists) {
+		return nil
+	}
+	return err
+}
+
+// rejected reports whether the hook recorded that it could not verify
+// this allow's evidence.
+func rejected(home, sessionID, interactionID string, evidence json.RawMessage) bool {
+	fi, err := os.Lstat(filepath.Join(approveDir(home, sessionID), "rejected", proofName(interactionID, evidence)))
+	return err == nil && fi.Mode().IsRegular()
+}
+
+// ApprovalPin is the DM edge's pin file content. Owner is the share's owner
+// pubkey: the attachment offers allow only when the installed hook pins the
+// same owner. It decides the offer only; the hook's own pin decides allow.
 type approvalPin struct {
 	PID   int    `json:"pid"`
 	Share string `json:"share"`
+	Owner string `json:"owner,omitempty"`
 }
 
 // PinApprovals marks the session as served by a relay share that answers
 // approvals from the DM: the PermissionRequest hook decides nothing without
 // a pin whose pid is alive. It returns the pin's token for UnpinApprovals.
-func PinApprovals(home, sessionID, share string, pid int) (string, error) {
+func PinApprovals(home, sessionID, share, owner string, pid int) (string, error) {
 	dir, err := ensureApproveSubdir(home, sessionID, "")
 	if err != nil {
 		return "", err
@@ -497,7 +568,7 @@ func PinApprovals(home, sessionID, share string, pid int) (string, error) {
 		return "", err
 	}
 	token := hex.EncodeToString(b[:])
-	if err := createNewJSON(dir, "pin-"+token, approvalPin{PID: pid, Share: share}); err != nil {
+	if err := createNewJSON(dir, "pin-"+token, approvalPin{PID: pid, Share: share, Owner: owner}); err != nil {
 		return "", err
 	}
 	return token, nil
@@ -513,14 +584,20 @@ func UnpinApprovals(home, sessionID, token string) {
 
 // pinLive reports whether the session has a pin whose serving pid is alive.
 func pinLive(home, sessionID string) bool {
+	return len(livePins(home, sessionID)) > 0
+}
+
+// livePins are the session's pins whose serving pid is alive.
+func livePins(home, sessionID string) []approvalPin {
 	dir := approveDir(home, sessionID)
 	if fi, err := os.Lstat(dir); err != nil || !fi.IsDir() {
-		return false
+		return nil
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return false
+		return nil
 	}
+	var out []approvalPin
 	for _, e := range entries {
 		if !e.Type().IsRegular() || !strings.HasPrefix(e.Name(), "pin-") {
 			continue
@@ -530,10 +607,119 @@ func pinLive(home, sessionID string) bool {
 			continue
 		}
 		if alive, err := pidAlive(p.PID); err == nil && alive {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// allowPinned reports whether an allow can reach this session's calls: the
+// installed hook pins a whole share, and a live share pin names the same
+// owner and share session. It decides only whether the DM offers allow.
+func allowPinned(home, sessionID string) bool {
+	pin := PermissionHookPin(home)
+	if !pin.Complete() {
+		return false
+	}
+	for _, p := range livePins(home, sessionID) {
+		if p.Owner == pin.Owner && p.Share == pin.Session {
 			return true
 		}
 	}
 	return false
+}
+
+// ownerHexRe is a pinned owner: a 64 lowercase hex x-only public key.
+var ownerHexRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// ValidOwner reports whether owner is a 64 lowercase hex public key.
+func ValidOwner(owner string) bool { return ownerHexRe.MatchString(owner) }
+
+// AllowShare is the trusted identity of the relay share that serves one
+// Claude session, read from the AMQ root the hook command line pins: the
+// owner, the share's body pubkey, DM channel and target, and where the
+// verifier reads the approval message's history.
+type AllowShare struct {
+	Owner, Body, Channel, Target string
+	Session, RelayURL            string
+}
+
+// AllowCheck is what an allow must prove: the share, the hook's own
+// rendering of the call, and the window the owner's reaction must be dated
+// in. None of it comes from the answer file.
+type AllowCheck struct {
+	Share               AllowShare
+	Prompt              string
+	NotBefore, NotAfter time.Time
+}
+
+// AllowVerifier checks the evidence of an allow answer against want: the
+// pinned owner's signed approve reaction on the share's approval message
+// that shows exactly want.Prompt, and that message's history on the relay.
+// A nil error is the only proof the hook accepts. An error that wraps
+// ErrAllowAltered means the message changed after it was posted.
+type AllowVerifier func(ctx context.Context, evidence json.RawMessage, want AllowCheck) error
+
+// ErrAllowAltered is a verification that found the approval message
+// altered after it was posted: an edit that shows another call, or a
+// deletion.
+var ErrAllowAltered = errors.New("the approval message was altered after it was posted")
+
+// AllowConfig is what allow from Buzz needs: the pinned owner, the share
+// that serves a session, and the verifier. Without all three, allow is
+// impossible.
+type AllowConfig struct {
+	Owner  string
+	Share  func(sessionID string) (AllowShare, error)
+	Verify AllowVerifier
+}
+
+func (c AllowConfig) usable() bool { return ValidOwner(c.Owner) && c.Share != nil && c.Verify != nil }
+
+// share resolves the session's share and requires it to name the pinned
+// owner and a whole identity.
+func (c AllowConfig) share(sessionID string) (AllowShare, error) {
+	sh, err := c.Share(sessionID)
+	switch {
+	case err != nil:
+		return sh, err
+	case sh.Owner != c.Owner || !ValidOwner(sh.Body) || sh.Channel == "" || sh.Target == "":
+		return sh, errors.New("the share does not name the pinned owner, its body, DM channel and target")
+	}
+	return sh, nil
+}
+
+// HookPin is what the PermissionRequest hook command line pins: the owner
+// pubkey and the share an allow must come from, as install-approval-hook
+// read it at install time: its relay URL, body pubkey, DM channel and
+// target. Root and Session only locate the enrolled body secret, which must
+// match Body. Claude cannot edit the settings file that holds the pin
+// without a prompt, and no file outside the pin changes what an allow must
+// prove.
+type HookPin struct {
+	Owner, Root, Session         string
+	Relay, Body, Channel, Target string
+}
+
+// Complete reports whether the pin names everything an allow needs.
+func (p HookPin) Complete() bool {
+	return ValidOwner(p.Owner) && ValidOwner(p.Body) && filepath.IsAbs(p.Root) &&
+		p.Session != "" && p.Relay != "" && p.Channel != "" && p.Target != ""
+}
+
+// allowFactory builds the AllowConfig for a pin; cmd registers the one
+// that reads the manifest and the relay.
+var allowFactory func(HookPin) AllowConfig
+
+// RegisterAllowFactory sets how a pin becomes an AllowConfig, for the hook
+// and for the attachment, which verifies an allow before it answers.
+func RegisterAllowFactory(f func(HookPin) AllowConfig) { allowFactory = f }
+
+// Owner-facing replies for an allow that did not verify.
+const alteredReply = "The approval message was altered after it was posted; check the terminal."
+
+func retryReply(reason string) string {
+	return "Could not verify the approval: " + reason + ". React again to retry."
 }
 
 // runMarkerPath is runs/<prompt_id>.

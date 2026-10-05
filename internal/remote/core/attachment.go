@@ -1,6 +1,8 @@
 package core
 
 import (
+	"encoding/json"
+
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 	"github.com/avivsinai/agent-message-queue/internal/remote/requests"
 )
@@ -167,4 +169,21 @@ type Attachment interface {
 	AcknowledgeResult(key requests.Key, epoch, digest string)
 	// Subscribe delivers native events until the returned function is called.
 	Subscribe(func(NativeEvent)) func()
+}
+
+// EvidenceResponder is an Attachment whose answers can carry a surface's
+// opaque evidence (protocol.Command.Evidence). The endpoint passes it
+// unread and its trust in the answer is unchanged; the attachment decides
+// what the evidence proves. A *protocol.Refusal error is a positive
+// refusal like a returned code, with its message as the reason: the answer
+// intent is cleared, so the answer can be sent again.
+type EvidenceResponder interface {
+	RespondWithEvidence(key requests.Key, epoch, interactionID, option string, evidence json.RawMessage) (protocol.Code, error)
+}
+
+// AnswerRetirer is an Attachment that can report that the runtime refused a
+// recorded answer intent: the answer never applied, so a different answer
+// may replace it.
+type AnswerRetirer interface {
+	AnswerRetired(key requests.Key, interactionID, option string) bool
 }

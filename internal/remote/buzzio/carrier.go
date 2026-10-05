@@ -179,12 +179,7 @@ func (c *Carrier) IngestReaction(evt nostr.Event) error {
 	if evt.Kind != KindReaction || evt.PubKey.Hex() != c.binding.Owner {
 		return nil
 	}
-	target := ""
-	for _, t := range evt.Tags {
-		if len(t) >= 2 && t[0] == "e" {
-			target = t[1] // NIP-25: the last e tag is the reacted-to event
-		}
-	}
+	target := lastETag(evt) // NIP-25: the last e tag is the reacted-to event
 	gesture := strings.TrimSpace(evt.Content)
 	if target == "" || gesture != approveReaction && !rejectReaction(gesture) {
 		return nil
@@ -876,10 +871,19 @@ func (c *Carrier) answerApproval(evt nostr.Event, messageID string, appr Approva
 	if _, ok, err := c.claimReaction(evt, OpRespond, appr.Epoch, cmd); err != nil || !ok {
 		return err
 	}
+	// An approve carries its proof: a harness that allows a call only with
+	// the owner's signature (Claude, bead 611.42.4) verifies it itself.
+	var evidence json.RawMessage
+	if gesture == approveReaction {
+		var err error
+		if evidence, err = c.approveEvidence(evt, messageID, appr); err != nil {
+			return err
+		}
+	}
 	st := Settlement{Op: OpRespond, RequestRef: appr.RequestRef}
 	out, err := c.handle(&protocol.Command{
 		Schema: protocol.SchemaCommand, Op: protocol.OpInteractionRespond, RequestRef: appr.RequestRef,
-		TargetID: appr.Target, Epoch: appr.Epoch, InteractionID: appr.InteractionID, Option: option,
+		TargetID: appr.Target, Epoch: appr.Epoch, InteractionID: appr.InteractionID, Option: option, Evidence: evidence,
 	}, c.source(evt.ID.Hex(), ""))
 	var refusal *protocol.Refusal
 	reply, _ := out.(protocol.Reply)
@@ -895,6 +899,10 @@ func (c *Carrier) answerApproval(evt nostr.Event, messageID string, appr Approva
 	case errors.As(err, &refusal) && refusal.Code == protocol.CodeAlreadyResolved:
 		// The endpoint says why: resolved, or an earlier answer in flight.
 		return c.settleApprovalAnswer(evt, messageID, st, "Not sent: "+refusal.Message+".")
+	case gesture == approveReaction && errors.As(err, &refusal) && (refusal.Code == protocol.CodeInvalid || refusal.Code == protocol.CodeNativeError):
+		// The harness could not verify the approve: it says why, in the
+		// owner's words. Nothing was answered, so ✅ again or ❌ still works.
+		return c.settleApprovalAnswer(evt, messageID, st, refusal.Message)
 	case err != nil:
 		return c.settleApprovalAnswer(evt, messageID, st, "Not sent: "+err.Error())
 	}
@@ -915,7 +923,7 @@ func resolvedAs(s protocol.Snapshot, interactionID string) protocol.ResolutionOu
 }
 
 // deliveryUnknownText is the owner-facing line for delivery_unknown.
-const deliveryUnknownText = "The block may not have reached the terminal; check the session."
+const deliveryUnknownText = "The answer may not have reached the terminal; check the session."
 
 // answeredWith reports whether the record says AMQ delivered option for the
 // interaction.
@@ -1080,11 +1088,12 @@ func sessionText(s protocol.Session) string {
 	return fmt.Sprintf("%s (%s): %s, %s; can %s; observed %s", s.TargetID, s.Harness, s.Attachment, s.Status, strings.Join(caps, ", "), s.ObservedAt)
 }
 
-// snapshotText renders one revision of a request for its row: ref, state,
-// code and reason, then the result, shortened with an explicit marker.
+// snapshotText renders one revision of a request for its row: target, state,
+// code and reason, then the result, shortened with an explicit marker. The
+// request ref is an internal id and never shown to the owner (611.52).
 func snapshotText(s protocol.Snapshot, reason string) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s: %s", s.RequestRef, s.State)
+	fmt.Fprintf(&b, "%s: %s", s.TargetID, s.State)
 	if s.Code != "" {
 		fmt.Fprintf(&b, " (%s)", s.Code)
 	}
@@ -1097,7 +1106,7 @@ func snapshotText(s protocol.Snapshot, reason string) string {
 			for len(text) > maxRowText || !utf8.ValidString(text) {
 				text = text[:len(text)-1]
 			}
-			text += "\n[shortened; run amq-remote status " + s.RequestRef + " for the full result]"
+			text += "\n[shortened]"
 		}
 		b.WriteString("\n\n" + text)
 	}

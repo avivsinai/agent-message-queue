@@ -31,7 +31,7 @@ func TestMain(m *testing.M) {
 func TestPermissionHookSIGTERMRecordsAnsweredElsewhere(t *testing.T) {
 	home := t.TempDir()
 	const sid = "sess-1"
-	if _, err := claude.PinApprovals(home, sid, "share-1", os.Getpid()); err != nil {
+	if _, err := claude.PinApprovals(home, sid, "share-1", "", os.Getpid()); err != nil {
 		t.Fatal(err)
 	}
 	dir := filepath.Join(home, ".claude", "sessions", "amq-approve", sid)
