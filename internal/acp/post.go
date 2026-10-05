@@ -95,26 +95,49 @@ func postWithBuzzCLI(channel, content string) error {
 	return nil
 }
 
-// buzzCLI finds the buzz binary: AMQ_ACP_BUZZ_CLI, then the one bundled with
-// Buzz Desktop, then PATH. The bundle paths come before PATH so a stray buzz
-// on PATH cannot receive the owner key (agent-message-queue-37m).
+// systemApplications is the machine-wide Applications directory.
+var systemApplications = "/Applications"
+
+// buzzCLI finds the buzz binary that receives the owner key: AMQ_ACP_BUZZ_CLI,
+// else the CLI inside Buzz.app under the system Applications directory or an
+// absolute home's. There is no PATH fallback: an unrelated buzz on PATH must
+// never receive BUZZ_PRIVATE_KEY (agent-message-queue-fa4).
 func buzzCLI() (string, error) {
 	if p := strings.TrimSpace(os.Getenv(envBuzzCLI)); p != "" {
 		return p, nil
 	}
-	home, _ := os.UserHomeDir()
-	for _, p := range []string{
-		"/Applications/Buzz.app/Contents/MacOS/buzz",
-		filepath.Join(home, "Applications", "Buzz.app", "Contents", "MacOS", "buzz"),
-	} {
-		if fi, err := os.Stat(p); err == nil && fi.Mode().IsRegular() {
+	dirs := []string{systemApplications}
+	if home, err := os.UserHomeDir(); err == nil && filepath.IsAbs(home) {
+		dirs = append(dirs, filepath.Join(home, "Applications"))
+	}
+	for _, d := range dirs {
+		if p := bundledBuzz(filepath.Join(d, "Buzz.app")); p != "" {
 			return p, nil
 		}
 	}
-	if p, err := exec.LookPath("buzz"); err == nil {
-		return p, nil
+	return "", errors.New("buzz CLI not found in Buzz.app; set " + envBuzzCLI + " to the buzz executable")
+}
+
+// bundledBuzz returns the CLI inside one Buzz.app, or "" unless every
+// component from the bundle root down is a real directory (no symlink) and
+// the CLI is a regular file the user can execute.
+func bundledBuzz(app string) string {
+	path := app
+	for _, part := range []string{"", "Contents", "MacOS", "buzz"} {
+		path = filepath.Join(path, part)
+		fi, err := os.Lstat(path)
+		if err != nil || fi.Mode()&os.ModeSymlink != 0 {
+			return ""
+		}
+		if part == "buzz" {
+			if !fi.Mode().IsRegular() || fi.Mode().Perm()&0o100 == 0 {
+				return ""
+			}
+		} else if !fi.IsDir() {
+			return ""
+		}
 	}
-	return "", errors.New("buzz CLI not found; set " + envBuzzCLI)
+	return path
 }
 
 // publish posts text for the owner when the prompt came from Buzz. It

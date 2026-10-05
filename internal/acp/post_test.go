@@ -2,45 +2,93 @@ package acp
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strings"
+	"runtime"
 	"testing"
 )
 
-// TestBuzzCLIPrefersAppBundleOverPATH: with a buzz on PATH and a Buzz.app
-// bundle both present, the bundle must win — the owner key is passed only to
-// the Buzz.app CLI (agent-message-queue-37m, Ben review F11).
-func TestBuzzCLIPrefersAppBundleOverPATH(t *testing.T) {
-	tmp := t.TempDir()
-	t.Setenv("HOME", tmp)
-	bundleBin := filepath.Join(tmp, "Applications", "Buzz.app", "Contents", "MacOS", "buzz")
-	if err := os.MkdirAll(filepath.Dir(bundleBin), 0o700); err != nil {
-		t.Fatal(err)
+// Bead agent-message-queue-fa4 (Pro review of #956): the owner key goes only
+// to AMQ_ACP_BUZZ_CLI or a verified Buzz.app CLI, never to a PATH buzz, a
+// symlinked bundle, or a path made from an empty HOME.
+func TestBuzzCLIOnlyVerifiedBundle(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Buzz.app is a macOS bundle")
 	}
-	if err := os.WriteFile(bundleBin, []byte("#!/bin/sh\n"), 0o700); err != nil {
-		t.Fatal(err)
+	writeBundle := func(t *testing.T, apps string) string {
+		bin := filepath.Join(apps, "Buzz.app", "Contents", "MacOS", "buzz")
+		if err := os.MkdirAll(filepath.Dir(bin), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(bin, []byte("#!/bin/sh\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		return bin
 	}
-	binDir := filepath.Join(tmp, "bin")
-	if err := os.MkdirAll(binDir, 0o700); err != nil {
-		t.Fatal(err)
+	setup := func(t *testing.T) (home string) {
+		home = t.TempDir()
+		t.Setenv("HOME", home)
+		t.Setenv(envBuzzCLI, "")
+		systemApplications = t.TempDir()
+		t.Cleanup(func() { systemApplications = "/Applications" })
+		return home
 	}
-	pathBin := filepath.Join(binDir, "buzz")
-	if err := os.WriteFile(pathBin, []byte("#!/bin/sh\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	if p, err := exec.LookPath("buzz"); err != nil || p != pathBin {
-		t.Fatalf("setup: fake PATH buzz not first on PATH (got %q, %v)", p, err)
-	}
-	got, err := buzzCLI()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got == pathBin {
-		t.Fatalf("buzzCLI() = %q; a PATH buzz must not win over the Buzz.app bundle", got)
-	}
-	if !strings.Contains(got, "Buzz.app") || !strings.HasSuffix(got, filepath.Join("MacOS", "buzz")) {
-		t.Fatalf("buzzCLI() = %q; want a Buzz.app bundle path", got)
-	}
+
+	t.Run("valid bundle wins over PATH", func(t *testing.T) {
+		home := setup(t)
+		want := writeBundle(t, filepath.Join(home, "Applications"))
+		binDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(binDir, "buzz"), []byte("#!/bin/sh\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("PATH", binDir)
+		if got, err := buzzCLI(); err != nil || got != want {
+			t.Fatalf("buzzCLI() = %q, %v; want %q", got, err, want)
+		}
+	})
+	t.Run("PATH buzz without a bundle is refused", func(t *testing.T) {
+		setup(t)
+		binDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(binDir, "buzz"), []byte("#!/bin/sh\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("PATH", binDir)
+		if got, err := buzzCLI(); err == nil {
+			t.Fatalf("buzzCLI() = %q; want an error naming %s", got, envBuzzCLI)
+		}
+	})
+	t.Run("symlinked Buzz.app is not selected", func(t *testing.T) {
+		home := setup(t)
+		real := t.TempDir()
+		writeBundle(t, real)
+		apps := filepath.Join(home, "Applications")
+		if err := os.MkdirAll(apps, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(filepath.Join(real, "Buzz.app"), filepath.Join(apps, "Buzz.app")); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := buzzCLI(); err == nil {
+			t.Fatalf("buzzCLI() = %q through a symlinked Buzz.app", got)
+		}
+	})
+	t.Run("empty HOME makes no relative candidate", func(t *testing.T) {
+		setup(t)
+		cwd := t.TempDir()
+		writeBundle(t, filepath.Join(cwd, "Applications"))
+		t.Chdir(cwd)
+		t.Setenv("HOME", "")
+		if got, err := buzzCLI(); err == nil {
+			t.Fatalf("buzzCLI() = %q from a relative path", got)
+		}
+	})
+	t.Run("non-executable CLI is skipped", func(t *testing.T) {
+		home := setup(t)
+		bin := writeBundle(t, filepath.Join(home, "Applications"))
+		if err := os.Chmod(bin, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := buzzCLI(); err == nil {
+			t.Fatalf("buzzCLI() = %q for a file without an execute bit", got)
+		}
+	})
 }
