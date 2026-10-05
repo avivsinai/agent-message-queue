@@ -17,7 +17,25 @@ type Config struct {
 	Agents     []string `json:"agents"`
 }
 
+// WriteConfig writes <root>/meta/config.json (path), taking the same config
+// lock EnsureAgent holds, so the existence check and the write cannot
+// interleave with a concurrent roster registration: without it, an
+// `amq init --force` could land between a registration's read and write and
+// be silently undone.
 func WriteConfig(path string, cfg Config, force bool) error {
+	identity, err := fsq.SnapshotDeliveryRoot(filepath.Dir(filepath.Dir(path)))
+	if err != nil {
+		return fmt.Errorf("snapshot root: %w", err)
+	}
+	root, err := fsq.OpenDeliveryRoot(filepath.Dir(filepath.Dir(path)), identity)
+	if err != nil {
+		return fmt.Errorf("open root: %w", err)
+	}
+	defer func() { _ = root.Close() }()
+	return root.WithConfigLock(func(*fsq.DeliveryRoot) error { return writeConfigLocked(path, cfg, force) })
+}
+
+func writeConfigLocked(path string, cfg Config, force bool) error {
 	if !force {
 		if _, err := os.Stat(path); err == nil {
 			return fmt.Errorf("config already exists at %s (use --force to overwrite)", path)
@@ -77,6 +95,17 @@ func EnsureAgent(rootDir, handle string) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("open root: %w", err)
 	}
+	defer func() { _ = root.Close() }()
+	return EnsureAgentOn(root, handle)
+}
+
+// EnsureAgentOn is EnsureAgent through an already-authenticated root
+// capability, so a caller that checked the capability against a session pin
+// updates exactly the directory it checked.
+func EnsureAgentOn(root *fsq.DeliveryRoot, handle string) (bool, error) {
+	if err := fsq.ValidateHandle(handle); err != nil {
+		return false, fmt.Errorf("invalid handle %q: %w", handle, err)
+	}
 	// B2: guarded RMW via an exclusive advisory lock on meta/config.lock.
 	// The lock is held for the entire read-modify-write, so two concurrent
 	// EnsureAgent calls cannot lose a registration. This is the same
@@ -88,7 +117,7 @@ func EnsureAgent(rootDir, handle string) (bool, error) {
 		added bool
 		err   error
 	}
-	err = root.WithConfigLock(func(r *fsq.DeliveryRoot) error {
+	err := root.WithConfigLock(func(r *fsq.DeliveryRoot) error {
 		result.added, result.err = ensureAgentLocked(r, handle)
 		return result.err
 	})
