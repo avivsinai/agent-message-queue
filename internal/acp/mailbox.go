@@ -74,6 +74,15 @@ func (s *Server) runMailbox(sessionID, text, eventID string, b binding.Binding, 
 		return nil, newRPCError(codeInternalError, "mailbox claim time: %v", err)
 	}
 	r.meta.RequestRef = claim.MessageID
+	// A redelivered event whose final answer was already posted says so and
+	// posts nothing: the first turn claimed that reply into cur.
+	if s.eventAnswered(eventID) {
+		if outcome := r.settle("replied"); outcome != "replied" {
+			return s.mailboxStopped(r, outcome, b)
+		}
+		r.meta.State = DeliveryStateReplied
+		return r.say(postFinal, "replied", StopReasonEndTurn, fmt.Sprintf("%s already answered; the reply is in the DM.", b.Handle))
+	}
 	if err := s.publishClaimed(r, budget, b, threadID, claim.MessageID, created, text); err != nil {
 		if errors.Is(err, errStoppedBeforePublish) {
 			return s.mailboxNotDelivered(r, r.settle(""))
@@ -144,6 +153,15 @@ func (s *Server) runMailbox(sessionID, text, eventID string, b binding.Binding, 
 			}
 		}
 	}
+}
+
+// eventAnswered reports whether the event already posted its final answer.
+func (s *Server) eventAnswered(eventID string) bool {
+	if eventID == "" {
+		return false
+	}
+	_, err := os.Lstat(filepath.Join(s.cfg.StateDir, "remote-events", eventID+".posted."+postFinal))
+	return err == nil
 }
 
 // mailboxStopped ends a turn the client cancelled or left. A mailbox cannot
