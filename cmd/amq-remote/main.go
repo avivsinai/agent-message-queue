@@ -176,7 +176,7 @@ func (p *jsonProbe) wantJSON(args []string) bool {
 			}
 			continue
 		}
-		if bf, ok := f.Value.(interface{ IsBoolFlag() bool }); !hasVal && !(ok && bf.IsBoolFlag()) {
+		if bf, ok := f.Value.(interface{ IsBoolFlag() bool }); !hasVal && (!ok || !bf.IsBoolFlag()) {
 			i++
 		}
 	}
