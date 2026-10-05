@@ -130,7 +130,10 @@ path): a `buzz-agent-snapshot` version 1 named `AMQ: <name>`, runtime
 session only. A bare `setup` writes `AMQ Remote.agent.json` with model
 `amq-remote`, which drives the only binding and refuses when several exist.
 Import the file in Buzz Desktop: Agents, then + then Import, pick the file,
-then Start. Then run `/amq-remote` in the session. A harness file this command
+then Start, and turn on Auto-start in the agent's menu. Desktop caches its
+harness list: if AMQ Remote is new and Desktop was open, click Settings,
+then Agents, then Check again first (setup always prints this step). No
+restart is needed. Then run `/amq-remote` in the session. A harness file this command
 did not write is left unchanged.
 
 ## Buzz BYOH
@@ -222,8 +225,13 @@ notice) into the channel named by the prompt's `<context>` block with
 `BUZZ_AUTH_TAG`, `BUZZ_RELAY_URL`) is kept in process memory for that child
 only; the environment is still stripped and no AMQ message carries it.
 `_meta.remote.posted` (or `_meta.amq.posted`) is `posted` or the error. The
-binary is `AMQ_ACP_BUZZ_CLI`, else `buzz` on `PATH`, else the one bundled
-with Buzz Desktop.
+binary is `AMQ_ACP_BUZZ_CLI`, else the CLI inside `Buzz.app` (under
+`/Applications` or the absolute home's `Applications`, real directories only,
+executable). There is no implicit `PATH` fallback: an unrelated `buzz` never receives
+the key (`AMQ_ACP_BUZZ_CLI=buzz` still resolves through `PATH` by your choice).
+A bundle candidate is skipped if any path component is a symlink. The
+installation and its parent directories are trusted against concurrent
+replacement: pathname validation is not atomic with exec.
 
 ### Trust limits
 

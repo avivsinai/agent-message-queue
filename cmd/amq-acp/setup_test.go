@@ -13,7 +13,8 @@ func TestSetupWritesRemoteHarnessAndSnapshot(t *testing.T) {
 	stdout := captureStdout(t, func() int {
 		return run([]string{"setup", "--out", out})
 	})
-	want := "In Buzz Desktop: Agents, then + then Import, pick " + out + ", then Start. Then run /amq-remote in a session.\n"
+	want := "In Buzz Desktop: if AMQ Remote is new and Desktop was open, click Settings, then Agents, then Check again. " +
+		"Then Agents, then + then Import, pick " + out + ", then Start. Turn on Auto-start in the agent's menu so it starts with Desktop. Then run /amq-remote in a session.\n"
 	if stdout != want {
 		t.Fatalf("stdout = %q", stdout)
 	}

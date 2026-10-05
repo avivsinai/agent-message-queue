@@ -83,7 +83,7 @@ func (s *Server) runMailbox(sessionID, text, eventID string, b binding.Binding, 
 				return s.mailboxNotDelivered(r, outcome)
 			}
 			r.meta.Reason = "reply_timeout"
-			return r.say("reply_timeout", StopReasonRefusal, fmt.Sprintf("Not delivered to %s: the turn ran out of time before the message could be published.", b.Handle))
+			return r.say(postStatus, "reply_timeout", StopReasonRefusal, fmt.Sprintf("Not delivered to %s: the turn ran out of time before the message could be published.", b.Handle))
 		}
 		return r.failed(remoteUncertain, err)
 	}
@@ -125,7 +125,7 @@ func (s *Server) runMailbox(sessionID, text, eventID string, b binding.Binding, 
 				return s.mailboxStopped(r, outcome, b)
 			}
 			r.meta.State = DeliveryStateReplied
-			return r.say("replied", StopReasonEndTurn, final)
+			return r.say(postFinal, "replied", StopReasonEndTurn, final)
 		}
 		select {
 		case <-turn.done:
@@ -135,7 +135,7 @@ func (s *Server) runMailbox(sessionID, text, eventID string, b binding.Binding, 
 				return s.mailboxStopped(r, outcome, b)
 			}
 			r.meta.Reason = "reply_timeout"
-			return r.say("reply_timeout", StopReasonRefusal, fmt.Sprintf("No final reply from %s yet. The message stays in its AMQ inbox and may still be answered.", b.Handle))
+			return r.say(postStatus, "reply_timeout", StopReasonRefusal, fmt.Sprintf("No final reply from %s yet. The message stays in its AMQ inbox and may still be answered.", b.Handle))
 		case <-poll.C:
 		case <-heartbeat.C:
 			withCur = true
@@ -159,7 +159,7 @@ func (s *Server) mailboxStopped(r *remoteTurn, outcome string, b binding.Binding
 			return nil, newRPCError(codeInternalError, "record cancel: %v", err)
 		}
 	}
-	return r.say(outcome, StopReasonCancelled, fmt.Sprintf("Stopped waiting. The message stays in %s's AMQ inbox; %s may still act on it.", b.Handle, b.Handle))
+	return r.say(postStatus, outcome, StopReasonCancelled, fmt.Sprintf("Stopped waiting. The message stays in %s's AMQ inbox; %s may still act on it.", b.Handle, b.Handle))
 }
 
 // mailboxClaim returns the message id and time for this prompt. With an

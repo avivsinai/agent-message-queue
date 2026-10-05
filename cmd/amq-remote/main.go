@@ -69,7 +69,8 @@ Commands:
                            --tag-file enrolls the signed tag)
   attach --self            Bind your AMQ Remote Buzz agent to the session this
                            runs in (starts the endpoint when none runs)
-  detach [--self]          Unbind it; the session keeps running
+  detach --self|--name N|--all
+                           Unbind; the session keeps running
   doctor                   Diagnose the endpoint chain
   version                  Print the version
 
@@ -1144,6 +1145,18 @@ func doctor(args []string) (any, int, error) {
 		case state == claude.StopHookDisabled:
 			report["claude_approval_hook"] = "~/.claude/settings.json holds the PermissionRequest hook and sets disableAllHooks; project or managed settings decide whether it runs"
 		}
+		// Allow from Buzz needs the owner pinned on the hook's command line,
+		// and the pin holds only while Claude cannot change it unprompted.
+		if serr == nil && state != claude.StopHookMissing {
+			if pin := claude.PermissionHookPin(home); !pin.Complete() {
+				report["claude_approval_pin"] = "the PermissionRequest hook pins no complete owner and share, so Buzz can only block a tool call; run `amq-remote claude install-approval-hook --owner <pubkey>` to allow from Buzz"
+			} else {
+				report["claude_approval_pin"] = map[string]string{"owner": pin.Owner, "session": pin.Session, "relay": pin.Relay, "channel": pin.Channel, "target": pin.Target}
+			}
+			if warns, werr := claude.PinWarnings(home); werr == nil && len(warns) > 0 {
+				report["claude_approval_pin_warnings"] = warns
+			}
+		}
 		break
 	}
 	// Body identity (611.15): per-session body keys, attestations, expiry
@@ -1703,6 +1716,14 @@ func claudeSubcommand(args []string, stdin io.Reader, stdout io.Writer) int {
 		fs := flag.NewFlagSet("permission-hook", flag.ContinueOnError)
 		fs.SetOutput(io.Discard)
 		wait := fs.Int("wait", int(claude.DefaultPermissionWait/time.Second), "seconds to wait for a Buzz answer")
+		var pin claude.HookPin
+		fs.StringVar(&pin.Owner, "owner", "", "pinned owner pubkey (64 lowercase hex) whose signed reaction can allow a call; none means reject-only")
+		fs.StringVar(&pin.Root, "root", "", "AMQ root holding the pinned share's enrolled body key")
+		fs.StringVar(&pin.Session, "session", "", "pinned share session")
+		fs.StringVar(&pin.Relay, "relay", "", "pinned relay URL the hook reads the approval message's history from")
+		fs.StringVar(&pin.Body, "body", "", "pinned body pubkey (64 lowercase hex) of the share")
+		fs.StringVar(&pin.Channel, "channel", "", "pinned DM channel id of the share")
+		fs.StringVar(&pin.Target, "target", "", "pinned target id of the share")
 		if fs.Parse(args[1:]) != nil {
 			return 0
 		}
@@ -1714,18 +1735,10 @@ func claudeSubcommand(args []string, stdin io.Reader, stdout io.Writer) int {
 			<-sigs
 			close(done)
 		}()
-		return claude.RunPermissionHook(home, stdin, stdout, os.Stderr, done, time.Duration(*wait)*time.Second)
+		allow := allowConfig(pin)
+		return claude.RunPermissionHook(home, stdin, stdout, os.Stderr, done, time.Duration(*wait)*time.Second, allow)
 	case "install-approval-hook":
-		bin, err := os.Executable()
-		if err != nil {
-			bin = "amq-remote"
-		}
-		if err := claude.InstallPermissionHook(home, bin, claude.DefaultPermissionWait); err != nil {
-			say(os.Stderr, "install-approval-hook: %v\n", err)
-			return 1
-		}
-		say(stdout, "approval hook installed: Buzz can block a Claude tool call; allow it in the terminal\n")
-		return 0
+		return installApprovalHook(home, args[1:], stdout, os.Stderr)
 	case "uninstall-approval-hook":
 		if err := claude.UninstallPermissionHook(home); err != nil {
 			say(os.Stderr, "uninstall-approval-hook: %v\n", err)

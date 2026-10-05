@@ -42,18 +42,15 @@ func (d discoverer) Discover(_ context.Context, req registry.DiscoverRequest) ([
 		}
 		sock = defaultControlSocket(home)
 	}
-	fi, err := os.Lstat(sock)
-	switch {
-	case err != nil && errors.Is(err, os.ErrNotExist) && !explicit:
-		return nil, nil // no daemon at the default path: nothing to discover
-	case err != nil && explicit:
-		return nil, fmt.Errorf("%w: --codex-socket %s: %v", registry.ErrBadHint, sock, err)
-	case err != nil:
-		return nil, fmt.Errorf("stat %s: %w", sock, err)
-	case fi.Mode()&os.ModeSocket == 0 && explicit:
-		return nil, fmt.Errorf("%w: --codex-socket %s is not a unix socket (mode %s)", registry.ErrBadHint, sock, fi.Mode())
-	case fi.Mode()&os.ModeSocket == 0:
-		return nil, fmt.Errorf("%s is not a unix socket (mode %s)", sock, fi.Mode())
+	if err := checkControlSocket(sock); err != nil {
+		switch {
+		case errors.Is(err, os.ErrNotExist) && !explicit:
+			return nil, nil // no daemon at the default path: nothing to discover
+		case explicit:
+			return nil, fmt.Errorf("%w: --codex-socket: %v", registry.ErrBadHint, err)
+		default:
+			return nil, err
+		}
 	}
 	threads, err := LoadedThreads(sock)
 	if err != nil {
@@ -67,6 +64,35 @@ func (d discoverer) Discover(_ context.Context, req registry.DiscoverRequest) ([
 		out = append(out, registry.Candidate{Kind: "codex", Target: TargetID(th), Config: cfg})
 	}
 	return out, nil
+}
+
+// checkControlSocket accepts sock when it is a unix socket, or a symlink to a
+// unix socket owned by the current user. codex-cli 0.160 makes the default
+// path a symlink to /private/tmp/codex-daemon-<uid>/<hash> (bead 611.51); the
+// target sits under a shared directory, so a symlink is followed only to a
+// socket this user owns. A dangling link reports os.ErrNotExist.
+func checkControlSocket(sock string) error {
+	fi, err := os.Lstat(sock)
+	if err != nil {
+		return err
+	}
+	if fi.Mode()&os.ModeSymlink == 0 {
+		if fi.Mode()&os.ModeSocket == 0 {
+			return fmt.Errorf("%s is not a unix socket (mode %s)", sock, fi.Mode())
+		}
+		return nil
+	}
+	target, err := os.Stat(sock)
+	if err != nil {
+		return err
+	}
+	if target.Mode()&os.ModeSocket == 0 {
+		return fmt.Errorf("%s links to a non-socket (mode %s)", sock, target.Mode())
+	}
+	if !ownedByCurrentUser(target) {
+		return fmt.Errorf("%s links to a socket the current user does not own", sock)
+	}
+	return nil
 }
 
 func init() {

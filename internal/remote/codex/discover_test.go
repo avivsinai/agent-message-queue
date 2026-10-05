@@ -14,11 +14,37 @@ import (
 // 611.13: discovery lists each loaded thread of a running app-server daemon
 // with the manifest config needed to attach it.
 func TestDiscoverListsLoadedThreads(t *testing.T) {
+	sock := fakeLoadedDaemon(t, "")
+	// The socket arrives as the --codex-socket hint (codex 611.13 consult).
+	cands, err := discoverer{}.Discover(context.Background(), registry.DiscoverRequest{Hints: map[string]string{HintSocket: sock}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cands) != 1 || cands[0].Kind != "codex" || cands[0].Target != "codex:0198a1b2c3d47e5f8a9b0c1d2e3f4a5b" {
+		t.Fatalf("candidates = %+v", cands)
+	}
+	var cfg map[string]string
+	if err := json.Unmarshal(cands[0].Config, &cfg); err != nil || cfg["socket"] != sock || cfg["thread"] != "0198a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b" {
+		t.Fatalf("config = %s", cands[0].Config)
+	}
+}
+
+// fakeLoadedDaemon serves one app-server connection on a unix socket under a
+// short temp dir (sub, when set, is a subdirectory) and answers
+// thread/loaded/list with one thread. It returns the socket path.
+func fakeLoadedDaemon(t *testing.T, sub string) string {
+	t.Helper()
 	dir, err := os.MkdirTemp("", "amqcxd")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	if sub != "" {
+		dir = filepath.Join(dir, sub)
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
 	sock := filepath.Join(dir, "d.sock")
 	l, err := net.Listen("unix", sock)
 	if err != nil {
@@ -50,16 +76,5 @@ func TestDiscoverListsLoadedThreads(t *testing.T) {
 			_ = ws.writeText([]byte(`{"jsonrpc":"2.0","id":` + string(*msg.ID) + `,"result":` + result + `}`))
 		}
 	}()
-	// The socket arrives as the --codex-socket hint (codex 611.13 consult).
-	cands, err := discoverer{}.Discover(context.Background(), registry.DiscoverRequest{Hints: map[string]string{HintSocket: sock}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(cands) != 1 || cands[0].Kind != "codex" || cands[0].Target != "codex:0198a1b2c3d47e5f8a9b0c1d2e3f4a5b" {
-		t.Fatalf("candidates = %+v", cands)
-	}
-	var cfg map[string]string
-	if err := json.Unmarshal(cands[0].Config, &cfg); err != nil || cfg["socket"] != sock || cfg["thread"] != "0198a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b" {
-		t.Fatalf("config = %s", cands[0].Config)
-	}
+	return sock
 }
