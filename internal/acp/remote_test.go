@@ -725,3 +725,32 @@ func TestRedeliveryPostsEachKindOnce(t *testing.T) {
 		}
 	})
 }
+
+// Bead agent-message-queue-1kc, review of #959 r2: an uncertain request
+// posted its notice as the final answer, so the answer it later resolved to
+// was suppressed on the next delivery.
+func TestUncertainNoticeDoesNotHideTheAnswer(t *testing.T) {
+	var posts []string
+	saved := postAnswer
+	t.Cleanup(func() { postAnswer = saved })
+	postAnswer = func(_, content string) error {
+		posts = append(posts, content)
+		return nil
+	}
+	s := NewServer(Config{StateDir: canonicalTempDir(t)}, "test")
+	deliver := func(snap protocol.Snapshot) {
+		turn := newTurn()
+		turn.channel = "6eff60e4-32ab-48ec-bd3d-f4c97872f370"
+		r := &remoteTurn{s: s, eventID: strings.Repeat("f", 64), emit: func(any) error { return nil }, turn: turn, meta: remoteMeta{Target: "fake"}}
+		if _, rpcErr := r.settled("replied", snap); rpcErr != nil {
+			t.Fatal(rpcErr)
+		}
+	}
+	deliver(protocol.Snapshot{State: protocol.StateUncertain, RequestRef: "ref"})
+	for range 2 {
+		deliver(protocol.Snapshot{State: protocol.StateCompleted, RequestRef: "ref", Result: &protocol.Result{Text: "the answer"}})
+	}
+	if len(posts) != 2 || posts[1] != "the answer" {
+		t.Fatalf("posts=%q; want one uncertainty notice and one answer", posts)
+	}
+}

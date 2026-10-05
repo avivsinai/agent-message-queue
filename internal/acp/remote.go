@@ -226,7 +226,7 @@ func (s *Server) runRemote(sessionID, text, eventID string, turn *turnState, emi
 			if outcome := r.settle("replied"); outcome != "replied" {
 				return r.settled(outcome, rep.Snapshot)
 			}
-			return r.say(postFinal, "replied", StopReasonRefusal, r.statusText(rep.Snapshot))
+			return r.say(snapKind(rep.Snapshot), "replied", StopReasonRefusal, r.statusText(rep.Snapshot))
 		}
 		return r.follow(rep.Snapshot)
 	}
@@ -521,8 +521,18 @@ func (r *remoteTurn) settled(outcome string, snap protocol.Snapshot) (any, *rpcE
 				r.meta.Reason = rep.Outcome.Message
 			}
 		}
-		return r.say(postFinal, outcome, StopReasonRefusal, r.statusText(snap))
+		return r.say(snapKind(snap), outcome, StopReasonRefusal, r.statusText(snap))
 	}
+}
+
+// snapKind is postFinal only for a terminal request state. An uncertain
+// request can still resolve to an answer, so its notice is a status text
+// and never takes the final-answer marker (review of #959 r2).
+func snapKind(snap protocol.Snapshot) string {
+	if snap.State.Terminal() {
+		return postFinal
+	}
+	return postStatus
 }
 
 // cancel asks the endpoint to cancel the exact request under the epoch it was
