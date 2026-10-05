@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -73,7 +74,10 @@ func startCoopNamedTUIInjectorProcess(name, cmdName string, execStart time.Time)
 		// The threads already loaded on a running daemon are never this
 		// launch's thread (4ip).
 		if sock, err := codex.ControlSocket(); err == nil {
-			if ids, err := codex.LoadedThreads(sock); err == nil && len(ids) > 0 {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			ids, err := codex.LoadedThreadIDs(ctx, sock)
+			cancel()
+			if err == nil && len(ids) > 0 {
 				args = append(args, "--codex-daemon-baseline", strings.Join(ids, ","))
 			}
 		}

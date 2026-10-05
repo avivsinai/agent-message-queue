@@ -258,9 +258,10 @@ func locateCodexProcessThread(ctx context.Context, target codexNamingTarget) (co
 }
 
 func waitForCodexProcessThread(ctx context.Context, target codexNamingTarget, name string) (codexProcessThread, error) {
+	daemon := codexDaemonNaming{target: target, name: name}
 	for {
-		if named, err := nameCodexTUIOnDaemon(ctx, target, name); err != nil || named {
-			if named {
+		if err := daemon.poll(ctx); !errors.Is(err, codex.ErrTUIThreadNotLoaded) {
+			if err == nil {
 				err = errCodexNamedOnDaemon
 			}
 			return codexProcessThread{}, err
@@ -284,28 +285,53 @@ func waitForCodexProcessThread(ctx context.Context, target codexNamingTarget, na
 	}
 }
 
-// nameCodexTUIOnDaemon names the spawned TUI's thread through the daemon the
-// TUI is connected to, so the TUI shows the name at once, before the first
-// turn and so before Codex names the thread itself. named is false while the
-// TUI or its thread is not up yet, or no daemon runs (older Codex).
-func nameCodexTUIOnDaemon(ctx context.Context, target codexNamingTarget, name string) (bool, error) {
-	if target.Daemon == nil {
-		return false, nil
+// codexDaemonWindow bounds the search for the spawned TUI's thread on the
+// daemon; the TUI loads its thread at start. After it the daemon is no
+// longer probed, so a later TUI in this directory is never named for this
+// launch (review of #950).
+const codexDaemonWindow = time.Minute
+
+// codexDaemonNaming names the spawned TUI's thread through the daemon the TUI
+// is connected to, so the TUI shows the name at once, before the first turn
+// and so before Codex names the thread itself (4ip).
+type codexDaemonNaming struct {
+	target codexNamingTarget
+	name   string
+	namer  *codex.SpawnedTUINamer
+	closed bool
+}
+
+// poll returns nil once the thread is named, codex.ErrTUIThreadNotLoaded to
+// keep polling (also with no daemon, so the rollout path can name an older
+// Codex), and any other error to stop with the manual reminder.
+func (d *codexDaemonNaming) poll(ctx context.Context) error {
+	if d.target.Daemon == nil || d.closed {
+		return codex.ErrTUIThreadNotLoaded
 	}
-	if ready, err := validateCodexNamingTarget(target); err != nil || !ready {
-		return false, err
+	ready, err := validateCodexNamingTarget(d.target)
+	if err != nil {
+		return err
+	}
+	if !ready {
+		return codex.ErrTUIThreadNotLoaded
+	}
+	if d.namer == nil {
+		d.namer = codex.NewSpawnedTUINamer(*d.target.Daemon, d.name, codexDaemonWindow)
 	}
 	sock, err := codex.ControlSocket()
 	if err != nil {
-		return false, nil
+		return codex.ErrTUIThreadNotLoaded // no daemon (yet)
 	}
 	rpcCtx, cancel := context.WithTimeout(ctx, codexNamedRPCTimeout)
 	defer cancel()
-	found, err := codex.NameSpawnedTUIThread(rpcCtx, sock, *target.Daemon, name)
-	if errors.Is(err, codex.ErrAmbiguousTUIThread) || found {
-		return found, err
+	err = d.namer.Poll(rpcCtx, sock)
+	if errors.Is(err, codex.ErrTUIThreadWindowClosed) {
+		// An older Codex beside a newer daemon still has the rollout path.
+		d.closed = true
+		_ = writeStderr("%s\n", coopNamedTUIManualReminder(d.name, "codex", err.Error()))
+		return codex.ErrTUIThreadNotLoaded
 	}
-	return false, nil // a daemon that is starting or restarting is retried
+	return err
 }
 
 func revalidateCodexProcessThread(ctx context.Context, target codexNamingTarget, expected codexProcessThread) error {
