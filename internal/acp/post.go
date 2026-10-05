@@ -95,25 +95,50 @@ func postWithBuzzCLI(channel, content string) error {
 	return nil
 }
 
-// buzzCLI finds the buzz binary: AMQ_ACP_BUZZ_CLI, then PATH, then the one
-// bundled with Buzz Desktop.
+// buzzCLI finds the buzz binary that receives the owner key: AMQ_ACP_BUZZ_CLI,
+// else the CLI inside Buzz.app under /Applications or the user's Applications.
+// There is no PATH fallback: an unrelated buzz on PATH must never receive
+// BUZZ_PRIVATE_KEY (agent-message-queue-fa4).
 func buzzCLI() (string, error) {
 	if p := strings.TrimSpace(os.Getenv(envBuzzCLI)); p != "" {
 		return p, nil
 	}
-	if p, err := exec.LookPath("buzz"); err == nil {
-		return p, nil
-	}
 	home, _ := os.UserHomeDir()
-	for _, p := range []string{
-		"/Applications/Buzz.app/Contents/MacOS/buzz",
-		filepath.Join(home, "Applications", "Buzz.app", "Contents", "MacOS", "buzz"),
-	} {
-		if fi, err := os.Stat(p); err == nil && fi.Mode().IsRegular() {
+	return buzzCLIFrom("/Applications", home)
+}
+
+// buzzCLIFrom selects the first usable Buzz.app CLI: systemApps first, then
+// home/Applications. A home that is not absolute yields no candidate.
+func buzzCLIFrom(systemApps, home string) (string, error) {
+	dirs := []string{systemApps}
+	if filepath.IsAbs(home) {
+		dirs = append(dirs, filepath.Join(home, "Applications"))
+	}
+	for _, d := range dirs {
+		if p := bundledBuzz(filepath.Join(d, "Buzz.app")); p != "" {
 			return p, nil
 		}
 	}
-	return "", errors.New("buzz CLI not found; set " + envBuzzCLI)
+	return "", errors.New("buzz CLI not found in Buzz.app; set " + envBuzzCLI + " to the buzz executable")
+}
+
+// bundledBuzz returns the CLI inside one Buzz.app, or "" unless the whole path
+// from the filesystem root down contains no symlink (so an ancestor such as a
+// symlinked home or Applications cannot redirect the key to another tree), the
+// CLI is a regular file, and this process can execute it. The installation and
+// its parent directories are trusted against concurrent replacement: pathname
+// validation is not atomic with exec.
+func bundledBuzz(app string) string {
+	path := filepath.Join(app, "Contents", "MacOS", "buzz")
+	real, err := filepath.EvalSymlinks(path)
+	if err != nil || real != filepath.Clean(path) {
+		return ""
+	}
+	fi, err := os.Lstat(path)
+	if err != nil || !fi.Mode().IsRegular() || !canExecute(path) {
+		return ""
+	}
+	return path
 }
 
 // publish posts text for the owner when the prompt came from Buzz. It

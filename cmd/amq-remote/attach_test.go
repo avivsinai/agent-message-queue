@@ -12,6 +12,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/ipc"
 	"github.com/avivsinai/agent-message-queue/internal/remote/manifest"
+	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 	"github.com/avivsinai/agent-message-queue/internal/remote/requests"
 )
 
@@ -115,5 +116,45 @@ func TestDetachOutsideAMQUsesTheBoundRoot(t *testing.T) {
 	}
 	if _, err := binding.Read(); !errors.Is(err, binding.ErrNone) {
 		t.Fatalf("binding still present after detach: %v", err)
+	}
+}
+
+// Bead agent-message-queue-94w (review F13): detach with no scope removed
+// every binding; it needs --self, --name or --all.
+func TestDetachNeedsAScope(t *testing.T) {
+	dir := canonicalTempDir(t)
+	t.Setenv(binding.EnvPath, filepath.Join(dir, "binding.json"))
+	for _, n := range []string{"one", "two", "three"} {
+		b := binding.Binding{Carrier: binding.CarrierMailbox, Root: dir, Handle: n, Name: n}
+		if err := binding.WriteNamed(b); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if code, err := detach(nil, io.Discard, io.Discard); code != protocol.ExitUsage || err == nil {
+		t.Fatalf("detach with no scope: code=%d err=%v; want usage error", code, err)
+	}
+	if all, _ := binding.List(); len(all) != 3 {
+		t.Fatalf("%d bindings after a refused detach; want 3", len(all))
+	}
+	if code, err := detach([]string{"--name", "two"}, io.Discard, io.Discard); code != 0 || err != nil {
+		t.Fatalf("detach --name: code=%d err=%v", code, err)
+	}
+	if all, _ := binding.List(); len(all) != 2 {
+		t.Fatalf("%d bindings after detach --name; want 2", len(all))
+	}
+	if code, err := detach([]string{"--all"}, io.Discard, io.Discard); code != 0 || err != nil {
+		t.Fatalf("detach --all: code=%d err=%v", code, err)
+	}
+	if all, _ := binding.List(); len(all) != 0 {
+		t.Fatalf("%d bindings after detach --all; want 0", len(all))
+	}
+}
+
+// Pro review of 94w: a whitespace-only native --name picked the default name
+// but counted as explicit, so it replaced another session's binding.
+func TestNativeBlankNameIsNotExplicit(t *testing.T) {
+	name, explicit := nativeBindingName("  ", "claude:7")
+	if explicit || name == "" {
+		t.Fatalf("name=%q explicit=%v; want the default name, not explicit", name, explicit)
 	}
 }

@@ -434,8 +434,13 @@ connected at once. Each has its own Buzz agent, whose ACP model
 `amq-remote:<name>` selects that binding (`amq-acp setup --session <name>`
 writes its Import file).
 
-`amq-remote detach` removes the binding. `detach --self` removes it only when
-it names this session. The session and the endpoint keep running.
+`amq-remote detach` needs one scope: `--self` removes the binding that names
+this session, `--name <name>` removes the binding of that name, and `--all`
+removes every binding. The session and the endpoint keep running.
+
+A defaulted name that another session already holds is refused, naming
+`--name <unique>` as the remedy; attaching the same session again is
+idempotent. An explicit `--name` replaces the binding of that name.
 
 ### `share`
 
