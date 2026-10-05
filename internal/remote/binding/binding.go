@@ -367,8 +367,24 @@ func ReadNamed(name string) (Binding, error) {
 	return b, nil
 }
 
+// NameTakenError is returned by WriteNamedNew when another destination
+// already holds the binding name.
+type NameTakenError struct{ Name string }
+
+func (e *NameTakenError) Error() string {
+	return fmt.Sprintf("binding name %q already names another session; attach with --name <unique-name>", e.Name)
+}
+
 // WriteNamed adds or replaces only the binding called b.Name.
-func WriteNamed(b Binding) error {
+func WriteNamed(b Binding) error { return writeNamed(b, false) }
+
+// WriteNamedNew writes the binding called b.Name, refusing with
+// *NameTakenError when a binding of that name names a different destination.
+// The check and the write share one transaction. Writing the same
+// destination again stays idempotent.
+func WriteNamedNew(b Binding) error { return writeNamed(b, true) }
+
+func writeNamed(b Binding, refuseTaken bool) error {
 	if err := ValidName(b.Name); err != nil {
 		return err
 	}
@@ -386,6 +402,15 @@ func WriteNamed(b Binding) error {
 		dir, err := namedDir(true)
 		if err != nil {
 			return err
+		}
+		if refuseTaken {
+			switch old, err := read(filepath.Join(dir, b.Name+".json")); {
+			case errors.Is(err, ErrNone):
+			case err != nil:
+				return err
+			case !old.Same(b):
+				return &NameTakenError{Name: b.Name}
+			}
 		}
 		_, err = fsq.WriteFileAtomic(dir, b.Name+".json", append(raw, '\n'), 0o600)
 		return err

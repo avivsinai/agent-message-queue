@@ -91,7 +91,7 @@ func attach(args []string, stdout, stderr io.Writer) (int, error) {
 		display = session.DisplayName
 	}
 	nb := binding.Binding{Root: c.root, Target: cand.Target, NativeSession: native, Display: display, Name: nonEmpty(strings.TrimSpace(*name), binding.SanitizeName(cand.Target))}
-	if err := writeBinding(nb); err != nil {
+	if err := writeBinding(nb, *name != ""); err != nil {
 		return protocol.ExitActionRequired, err
 	}
 	say(stdout, "Connected: %s (%s) as session %s. DM its Buzz agent \"AMQ: %s\".", nonEmpty(display, cand.Target), cand.Target, nb.Name, nb.Name)
@@ -117,11 +117,12 @@ func attachMailbox(root, handle, name string, stdout io.Writer) (int, error) {
 	if err := acp.VerifySessionPin(filepath.Clean(root)); err != nil {
 		return protocol.ExitActionRequired, err
 	}
-	if name == "" {
+	explicit := name != ""
+	if !explicit {
 		name = binding.SanitizeName(handle + "-" + projectOf(root))
 	}
 	b := binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: handle, Display: handle, Name: name}
-	if err := writeBinding(b); err != nil {
+	if err := writeBinding(b, explicit); err != nil {
 		return protocol.ExitActionRequired, err
 	}
 	say(stdout, "Connected: AMQ handle %s at %s as session %s. DM its Buzz agent \"AMQ: %s\".", handle, root, name, name)
@@ -130,9 +131,15 @@ func attachMailbox(root, handle, name string, stdout io.Writer) (int, error) {
 
 // writeBinding adds the named binding and removes any other binding for the
 // same session, so one session is one Buzz agent (bead
-// agent-message-queue-611.39).
-func writeBinding(b binding.Binding) error {
-	if err := binding.WriteNamed(b); err != nil {
+// agent-message-queue-611.39). A defaulted name never replaces another
+// session's binding (bead agent-message-queue-94w); an explicit --name
+// is the caller's choice and replaces.
+func writeBinding(b binding.Binding, explicitName bool) error {
+	write := binding.WriteNamedNew
+	if explicitName {
+		write = binding.WriteNamed
+	}
+	if err := write(b); err != nil {
 		return err
 	}
 	_, err := binding.RemoveMatching(func(o binding.Binding) bool { return o.Same(b) && o.Name != b.Name })
@@ -150,15 +157,28 @@ func projectOf(root string) string {
 	return filepath.Base(root)
 }
 
-// detach ends the binding. With --self it unbinds only when the binding
-// names this session, so one session's off never unbinds another.
+// detach ends bindings. It needs a scope: --self unbinds only the binding
+// that names this session, so one session's off never unbinds another;
+// --name unbinds the binding of that name; --all unbinds every binding.
 func detach(args []string, stdout, stderr io.Writer) (int, error) {
 	fs := flag.NewFlagSet("detach", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	c := addCommon(fs)
 	self := fs.Bool("self", false, "unbind only if this session is the bound one")
+	name := fs.String("name", "", "unbind only the binding with this name")
+	all := fs.Bool("all", false, "unbind every binding")
 	if err := fs.Parse(args); err != nil {
 		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", err)
+	}
+	*name = strings.TrimSpace(*name)
+	scopes := 0
+	for _, set := range []bool{*self, *name != "", *all} {
+		if set {
+			scopes++
+		}
+	}
+	if scopes != 1 {
+		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "detach needs exactly one of --self, --name <name> or --all")
 	}
 	var match func(binding.Binding) bool
 	// A native binding made outside AMQ used a fallback root; detach finds it
@@ -195,7 +215,9 @@ func detach(args []string, stdout, stderr io.Writer) (int, error) {
 		mine := binding.Binding{Root: c.root, Target: target, NativeSession: native}
 		match = mine.Same
 	}
-	if match == nil {
+	if *name != "" {
+		match = func(b binding.Binding) bool { return b.Name == *name }
+	} else if match == nil {
 		match = func(binding.Binding) bool { return true }
 	}
 	removed, err := binding.RemoveMatching(match)
