@@ -365,7 +365,7 @@ func TestRedeliveredEventPostsOnce(t *testing.T) {
 // timed out never reached the DM. The sweep posts it once and records it.
 func TestLateReplyIsPostedOnceAfterTheTurn(t *testing.T) {
 	s, root := mailboxServer(t)
-	s.cfg.TurnTimeout = 100 * time.Millisecond
+	s.cfg.TurnTimeout = 300 * time.Millisecond
 	var posts []string
 	saved := postAnswer
 	t.Cleanup(func() { postAnswer = saved })

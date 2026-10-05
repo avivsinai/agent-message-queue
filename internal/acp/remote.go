@@ -613,8 +613,10 @@ func (r *remoteTurn) postOnce(text string) string {
 // suffix. The exclusive marker (content raw) is created before the post, so
 // a redelivered event never posts again, and a post that failed is not
 // retried: the post has no idempotency key. Without an event id it posts.
+// The marker is created also without a channel, because the .replied marker
+// is the event's outcome record, not only a post guard.
 func (s *Server) postMarked(eventID, suffix string, raw []byte, channel, text string) string {
-	if eventID == "" || channel == "" || strings.TrimSpace(text) == "" {
+	if eventID == "" || strings.TrimSpace(text) == "" {
 		return publish(channel, text)
 	}
 	path := filepath.Join(s.cfg.StateDir, "remote-events", eventID+suffix)

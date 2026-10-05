@@ -76,17 +76,17 @@ func (s *Server) runMailbox(sessionID, text, eventID string, b binding.Binding, 
 	if err != nil {
 		return r.failed(remoteUncertain, err)
 	}
-	// A redelivered event that is already answered returns that answer and
-	// posts nothing.
-	if replyID, ok := s.mailboxAnswered(eventID); ok {
-		return s.mailboxAnsweredTurn(r, b, replyID)
-	}
 	threadID = claim.Thread
 	created, err := time.Parse(time.RFC3339Nano, claim.Created)
 	if err != nil {
 		return nil, newRPCError(codeInternalError, "mailbox claim time: %v", err)
 	}
 	r.meta.RequestRef = claim.MessageID
+	// A redelivered event that is already answered returns that answer and
+	// posts nothing.
+	if replyID, ok := s.mailboxAnswered(eventID); ok {
+		return s.mailboxAnsweredTurn(r, b, replyID)
+	}
 	if err := s.publishClaimed(r, budget, b, threadID, claim.MessageID, created, text); err != nil {
 		if errors.Is(err, errStoppedBeforePublish) {
 			return s.mailboxNotDelivered(r, r.settle(""))
