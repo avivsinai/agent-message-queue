@@ -672,3 +672,143 @@ func TestDeferredRefusalReasonReachesTheDM(t *testing.T) {
 		t.Fatalf("result=%+v said=%q; want the rejection DM to carry %q", got.Meta.Remote, said, reason)
 	}
 }
+
+// Bead agent-message-queue-1kc, review of #959: one post marker per event
+// let a timeout notice suppress the answer a later delivery brought, and a
+// "Not connected" turn carried no event id, so it posted on every delivery.
+func TestRedeliveryPostsEachKindOnce(t *testing.T) {
+	prompt := "<context>\nScope: dm\nChannel: DM (#6eff60e4-32ab-48ec-bd3d-f4c97872f370)\n</context>\nhi"
+	record := func(t *testing.T) *[]string {
+		var posts []string
+		saved := postAnswer
+		t.Cleanup(func() { postAnswer = saved })
+		postAnswer = func(_, content string) error {
+			posts = append(posts, content)
+			return nil
+		}
+		return &posts
+	}
+	deliver := func(t *testing.T, s *Server, eventID string, emit func(any) error) {
+		turn := newTurn()
+		turn.channel = buzzChannel(prompt)
+		if _, rpcErr := s.runRemote("s", prompt, eventID, turn, emit); rpcErr != nil {
+			t.Fatal(rpcErr)
+		}
+	}
+	t.Run("native timeout, then the answer", func(t *testing.T) {
+		rt := fake.New("fake", "e_1")
+		s := remoteServer(t, rt, nil)
+		s.cfg.TurnTimeout = 100 * time.Millisecond
+		posts := record(t)
+		eventID := strings.Repeat("d", 64)
+		id, _ := remoteRequestID(eventID)
+		deliver(t, s, eventID, func(any) error { return nil })
+		if !rt.Complete(id, "native answer") {
+			t.Fatal("request was not running after the timeout")
+		}
+		for range 2 {
+			deliver(t, s, eventID, func(any) error { return nil })
+		}
+		if got := strings.Count(strings.Join(*posts, "|"), "native answer"); got != 1 || len(*posts) != 2 {
+			t.Fatalf("posts=%q; want the timeout notice and the answer once each", *posts)
+		}
+	})
+	t.Run("not connected", func(t *testing.T) {
+		t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
+		s := NewServer(Config{RemoteBinding: true, StateDir: canonicalTempDir(t), TurnTimeout: time.Second}, "test")
+		posts := record(t)
+		for range 2 {
+			deliver(t, s, strings.Repeat("e", 64), func(any) error { return nil })
+		}
+		if len(*posts) != 1 {
+			t.Fatalf("posts=%q; want one Not connected", *posts)
+		}
+	})
+}
+
+// Bead agent-message-queue-1kc, review of #959 r2: an uncertain request
+// posted its notice as the final answer, so the answer it later resolved to
+// was suppressed on the next delivery.
+func TestUncertainNoticeDoesNotHideTheAnswer(t *testing.T) {
+	var posts []string
+	saved := postAnswer
+	t.Cleanup(func() { postAnswer = saved })
+	postAnswer = func(_, content string) error {
+		posts = append(posts, content)
+		return nil
+	}
+	s := NewServer(Config{StateDir: canonicalTempDir(t)}, "test")
+	deliver := func(snap protocol.Snapshot) {
+		turn := newTurn()
+		turn.channel = "6eff60e4-32ab-48ec-bd3d-f4c97872f370"
+		r := &remoteTurn{s: s, eventID: strings.Repeat("f", 64), emit: func(any) error { return nil }, turn: turn, meta: remoteMeta{Target: "fake"}}
+		if _, rpcErr := r.settled("replied", snap); rpcErr != nil {
+			t.Fatal(rpcErr)
+		}
+	}
+	deliver(protocol.Snapshot{State: protocol.StateUncertain, RequestRef: "ref"})
+	for range 2 {
+		deliver(protocol.Snapshot{State: protocol.StateCompleted, RequestRef: "ref", Result: &protocol.Result{Text: "the answer"}})
+	}
+	if len(posts) != 2 || posts[1] != "the answer" {
+		t.Fatalf("posts=%q; want one uncertainty notice and one answer", posts)
+	}
+}
+
+// Bead agent-message-queue-1kc, review of #959 r3: a lost reply to a busy
+// resubmit was recovered from the stored busy tombstone and posted as the
+// final answer, so the answer a later delivery brought was suppressed.
+func TestRecoveredBusyRefusalDoesNotHideTheAnswer(t *testing.T) {
+	rt := fake.New("fake", "e_1")
+	var loseReply sync.Mutex
+	lose := false
+	s := remoteServer(t, rt, func(point string) error {
+		loseReply.Lock()
+		defer loseReply.Unlock()
+		if point == core.PointBeforeDispatching && lose {
+			lose = false
+			return fmt.Errorf("reply lost")
+		}
+		return nil
+	})
+	s.cfg.StateDir = canonicalTempDir(t)
+	s.cfg.TurnTimeout = 4 * time.Second
+	var posts []string
+	saved := postAnswer
+	t.Cleanup(func() { postAnswer = saved })
+	postAnswer = func(_, content string) error {
+		posts = append(posts, content)
+		return nil
+	}
+	busyID := "d2c80e1d-feb7-4c10-959e-23456789abcf"
+	resp, err := ipc.Call(filepath.Join(s.cfg.Root, remoteStateDir), ipc.Request{Command: &protocol.Command{Schema: protocol.SchemaCommand, Op: protocol.OpRequestSubmit, RequestID: busyID, TargetID: "fake", Epoch: "e_1", NotAfter: protocol.FormatTime(time.Now().Add(time.Minute)), Input: &protocol.SubmitInput{Text: "occupy", Busy: protocol.BusyReject, Deliver: protocol.DeliverTurn}}})
+	if err != nil || resp.AsError() != nil {
+		t.Fatal(err, resp.AsError())
+	}
+	eventID := strings.Repeat("b", 64)
+	id, _ := remoteRequestID(eventID)
+	emit := func(v any) error {
+		text := v.(sessionUpdateNotification).Params.Update.Content.Text
+		switch {
+		case strings.HasPrefix(text, "Queued:"):
+			// The session frees up, and the reply to the next submit is lost.
+			rt.Complete(busyID, "occupied")
+			loseReply.Lock()
+			lose = true
+			loseReply.Unlock()
+		case strings.HasPrefix(text, "Submitted to"):
+			rt.Complete(id, "the answer")
+		}
+		return nil
+	}
+	for range 3 {
+		turn := newTurn()
+		turn.channel = "6eff60e4-32ab-48ec-bd3d-f4c97872f370"
+		if _, rpcErr := s.runRemote("s", "hello", eventID, turn, emit); rpcErr != nil {
+			t.Fatal(rpcErr)
+		}
+	}
+	if got := strings.Count(strings.Join(posts, "|"), "the answer"); got != 1 {
+		t.Fatalf("posts=%q; want the answer once", posts)
+	}
+}
