@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Bead agent-message-queue-fa4 (Pro review of #956, #962): the owner key goes
@@ -127,4 +128,48 @@ func TestBuzzCLIOnlyVerifiedBundle(t *testing.T) {
 		}
 		refused(t, link, home)
 	})
+}
+
+// Review of #961 r8 (agent-message-queue-bdq): a Buzz CLI whose child kept
+// stderr open held cmd.Run, and with it the event's post lock, past the
+// post budget, so finals, cancels and the sweep blocked. The CLI runs in its
+// own process group, which is killed at the budget.
+func TestStuckBuzzCLIReleasesThePostLock(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("needs a POSIX shell")
+	}
+	dir := canonicalTempDir(t)
+	started := filepath.Join(dir, "started")
+	cli := filepath.Join(dir, "buzz")
+	if err := os.WriteFile(cli, []byte("#!/bin/sh\n: > '"+started+"'\nsleep 30 &\nsleep 30\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(envBuzzCLI, cli)
+	savedID, savedTimeout := buzzIdentity, postTimeout
+	t.Cleanup(func() { buzzIdentity, postTimeout = savedID, savedTimeout })
+	buzzIdentity, postTimeout = []string{"BUZZ_PRIVATE_KEY=test"}, time.Second
+
+	s, _ := mailboxServer(t)
+	eventID := strings.Repeat("8", 63) + "a"
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.postOnce(eventID, postStatus, []byte("x\n"), "6eff60e4-32ab-48ec-bd3d-f4c97872f370", "status")
+	}()
+	for deadline := time.Now().Add(2 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		if _, err := os.Stat(started); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the fake CLI never started")
+		}
+	}
+	begin := time.Now()
+	if _, err := s.reserveFinal(eventID, []byte(`{"reply_id":"r"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if took := time.Since(begin); took > postTimeout+time.Second {
+		t.Fatalf("the final waited %v for the status post's lock", took)
+	}
+	<-done
 }

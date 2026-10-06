@@ -30,8 +30,9 @@ var buzzIdentity []string
 // envBuzzCLI overrides the buzz binary used to post.
 const envBuzzCLI = "AMQ_ACP_BUZZ_CLI"
 
-// postTimeout bounds one post.
-const postTimeout = 30 * time.Second
+// postTimeout bounds one post, including the wait for the CLI's output
+// pipes to close. A variable so a test can shorten it.
+var postTimeout = 30 * time.Second
 
 // postAnswer publishes content into channel. A variable so tests can record
 // posts without a relay.
@@ -78,9 +79,15 @@ func postWithBuzzCLI(channel, content string) error {
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), postTimeout)
+	// The budget covers the run and the pipe drain: a CLI whose child keeps
+	// stderr open must not hold a status post (and its event post lock)
+	// past postTimeout (review of #961 r8).
+	waitDelay := postTimeout / 10
+	ctx, cancel := context.WithTimeout(context.Background(), postTimeout-waitDelay)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, bin, "messages", "send", "--channel", channel, "--content", "-")
+	cmd.WaitDelay = waitDelay
+	ownProcessGroup(cmd)
 	cmd.Env = append([]string{"PATH=" + os.Getenv("PATH"), "HOME=" + os.Getenv("HOME")}, buzzIdentity...)
 	cmd.Stdin = strings.NewReader(content)
 	var stderr bytes.Buffer

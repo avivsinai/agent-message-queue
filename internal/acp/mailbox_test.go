@@ -950,3 +950,42 @@ func TestStatusNeverPostsAfterTheFinal(t *testing.T) {
 		t.Fatalf("posts=%q; want only the final", got)
 	}
 }
+
+// Review of #961 r8 (agent-message-queue-bdq): a Stop recorded the cancel
+// as the event's final outcome, then its "Stopped waiting" confirmation was
+// skipped as superseded, so the DM never confirmed the Stop.
+func TestStopConfirmsOnceInTheDM(t *testing.T) {
+	const chanA = "6eff60e4-32ab-48ec-bd3d-f4c97872f370"
+	t.Run("stop, then a redelivery", func(t *testing.T) {
+		s, root := mailboxServer(t)
+		posts := recordPosts(t)
+		eventID := strings.Repeat("7", 63) + "a"
+		p := startParkedTurn(t, s, root, eventID, chanA)
+		if _, rpcErr := s.cancel(json.RawMessage(`{"sessionId":"s"}`)); rpcErr != nil {
+			t.Fatal(rpcErr)
+		}
+		if res := p.finish(t); res.StopReason != StopReasonCancelled {
+			t.Fatalf("result=%+v; want cancelled", res)
+		}
+		turn := newTurn()
+		turn.channel = chanA
+		if _, rpcErr := s.runRemote("s", "hi", eventID, turn, func(any) error { return nil }); rpcErr != nil {
+			t.Fatal(rpcErr)
+		}
+		if got := posts(); len(got) != 1 || !strings.HasPrefix(got[0], chanA+": Stopped waiting") {
+			t.Fatalf("posts=%q; want one Stop confirmation", got)
+		}
+	})
+	t.Run("a winning reply suppresses it", func(t *testing.T) {
+		s, _ := mailboxServer(t)
+		posts := recordPosts(t)
+		eventID := strings.Repeat("7", 63) + "b"
+		if _, _, err := s.decideOutcome(eventID, mailboxOutcome{ReplyID: "r"}); err != nil {
+			t.Fatal(err)
+		}
+		s.postOnce(eventID, postCancel, []byte("x\n"), chanA, "Stopped waiting.")
+		if got := posts(); len(got) != 0 {
+			t.Fatalf("posts=%q; want no Stop confirmation after a reply won", got)
+		}
+	})
+}

@@ -201,7 +201,7 @@ func (s *Server) mailboxStopped(r *remoteTurn, outcome string, b binding.Binding
 			return s.answeredResult(r, b, final)
 		}
 	}
-	return r.say(postStatus, outcome, StopReasonCancelled, fmt.Sprintf("Stopped waiting. The message stays in %s's AMQ inbox; %s may still act on it.", b.Handle, b.Handle))
+	return r.say(postCancel, outcome, StopReasonCancelled, fmt.Sprintf("Stopped waiting. The message stays in %s's AMQ inbox; %s may still act on it.", b.Handle, b.Handle))
 }
 
 // mailboxAnsweredTurn ends a turn whose event already has an outcome. A
@@ -331,7 +331,7 @@ func (s *Server) sayReply(r *remoteTurn, b binding.Binding, replyID, text string
 func (s *Server) adoptOutcome(r *remoteTurn, b binding.Binding, out mailboxOutcome) (any, *rpcError) {
 	if out.Cancelled {
 		r.meta.Reason = "session_cancelled"
-		return r.say(postStatus, "session_cancelled", StopReasonCancelled, fmt.Sprintf("Stopped waiting. The message stays in %s's AMQ inbox; %s may still act on it.", b.Handle, b.Handle))
+		return r.say(postCancel, "session_cancelled", StopReasonCancelled, fmt.Sprintf("Stopped waiting. The message stays in %s's AMQ inbox; %s may still act on it.", b.Handle, b.Handle))
 	}
 	return s.answeredResult(r, b, out)
 }

@@ -626,10 +626,13 @@ func (r *remoteTurn) failed(state string, err error) (any, *rpcError) {
 // Post kinds: each event posts at most one status text (a timeout, a stop
 // that leaves work running, a failure to submit) and at most one final
 // answer. Separate markers keep an earlier status post from suppressing the
-// answer that a later delivery of the event brings.
+// answer that a later delivery of the event brings. A cancel confirmation
+// ("Stopped waiting") is the one status allowed after the final marker, and
+// only when that marker records a cancel; it posts at most once.
 const (
 	postStatus = "status"
 	postFinal  = "final"
+	postCancel = "cancel"
 )
 
 // say emits text as the agent message and returns the result. A client that
@@ -654,6 +657,8 @@ func (r *remoteTurn) say(kind, outcome, stopReason, text string) (any, *rpcError
 //   - status: under the lock, skip if the final marker exists or the status
 //     was already posted; post to Buzz; then create the status marker;
 //     release. While a status post holds the lock, no final can reserve.
+//     A cancel confirmation is the reverse: it posts only when the final
+//     marker records a cancel.
 //     postTimeout bounds the hold, and a crash releases the flock.
 //
 // A post that failed is not retried: the post has no idempotency key. The
@@ -677,7 +682,12 @@ func (s *Server) postOnce(eventID, kind string, record []byte, channel, text str
 	dir := filepath.Join(s.cfg.StateDir, "remote-events")
 	result := ""
 	err := s.withPostLock(eventID, func() error {
-		if _, err := os.Lstat(filepath.Join(dir, eventID+".posted."+postFinal)); err == nil {
+		out, final := s.mailboxAnswered(eventID)
+		switch {
+		case kind == postCancel && !(final && out.Cancelled):
+			result = "superseded: this event was not cancelled"
+			return nil
+		case kind != postCancel && final:
 			result = "superseded: this event already has its final text"
 			return nil
 		}
