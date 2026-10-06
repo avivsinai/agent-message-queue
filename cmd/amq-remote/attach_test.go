@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"io"
@@ -180,11 +182,76 @@ func TestAttachListsBuzzInTheRosterOnce(t *testing.T) {
 	}
 }
 
+// Bead agent-message-queue-5re (review F13): attach and detach parsed --json
+// and ignored it.
+func TestDetachAllJSONPrintsTheRemovedNames(t *testing.T) {
+	dir := canonicalTempDir(t)
+	t.Setenv(binding.EnvPath, filepath.Join(dir, "binding.json"))
+	if err := binding.WriteNamed(binding.Binding{Carrier: binding.CarrierMailbox, Root: dir, Handle: "one", Name: "one"}); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if code := run([]string{"detach", "--all", "--json"}, nil, &out, io.Discard); code != 0 {
+		t.Fatalf("exit %d: %s", code, out.String())
+	}
+	var got struct {
+		Removed []string `json:"removed"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil || len(got.Removed) != 1 || got.Removed[0] != "one" {
+		t.Fatalf("output %q (%v); want JSON removed [one]", out.String(), err)
+	}
+}
+
 // Pro review of 94w: a whitespace-only native --name picked the default name
 // but counted as explicit, so it replaced another session's binding.
 func TestNativeBlankNameIsNotExplicit(t *testing.T) {
 	name, explicit := nativeBindingName("  ", "claude:7")
 	if explicit || name == "" {
 		t.Fatalf("name=%q explicit=%v; want the default name, not explicit", name, explicit)
+	}
+}
+
+// Pro review of 5re: the error path scanned for the token while the success
+// path used the parsed value, so --json=false gave a JSON error but human
+// success, and -json=true gave a human error.
+func TestJSONFlagValueDecidesSuccessAndErrorOutput(t *testing.T) {
+	dir := canonicalTempDir(t)
+	t.Setenv(binding.EnvPath, filepath.Join(dir, "binding.json"))
+	var out, errOut bytes.Buffer
+	if code := run([]string{"detach", "-json=true"}, nil, &out, &errOut); code != protocol.ExitUsage {
+		t.Fatalf("exit %d; want usage", code)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(out.Bytes(), &body); err != nil || body["error"] == nil {
+		t.Fatalf("-json=true error output %q (%v); want a JSON error on stdout", out.String(), err)
+	}
+	out.Reset()
+	if code := run([]string{"detach", "--all", "--json=false"}, nil, &out, &errOut); code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	if json.Valid(out.Bytes()) {
+		t.Fatalf("--json=false printed JSON: %q", out.String())
+	}
+	out.Reset()
+	_ = run([]string{"detach", "--json=false"}, nil, &out, &errOut)
+	if out.Len() != 0 {
+		t.Fatalf("--json=false error went to stdout as %q; want human text on stderr", out.String())
+	}
+	// Pro review of 5re r2: a string option's value is never a flag, so a
+	// value of "--" or "--json=false" must not change the JSON decision.
+	for _, args := range [][]string{
+		{"detach", "--name", "--", "--json", "--all"},
+		{"submit", "--root", dir, "--text", "--", "--json", "T"},
+		{"submit", "--root", dir, "--json", "--text", "--json=false", "T"},
+	} {
+		out.Reset()
+		errOut.Reset()
+		if code := run(args, nil, &out, &errOut); code == 0 {
+			t.Fatalf("%v succeeded", args)
+		}
+		var body map[string]any
+		if err := json.Unmarshal(out.Bytes(), &body); err != nil || body["error"] == nil {
+			t.Fatalf("%v printed %q (%v); want a JSON error on stdout", args, out.String(), err)
+		}
 	}
 }
