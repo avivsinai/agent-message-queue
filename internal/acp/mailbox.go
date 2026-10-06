@@ -171,8 +171,14 @@ func (s *Server) runMailbox(sessionID, text, eventID string, b binding.Binding, 
 			if outcome := r.settle("reply_timeout"); outcome != "reply_timeout" {
 				return s.mailboxStopped(r, outcome, b)
 			}
+			// The timeout is shown to the client only. Posting it could race a
+			// final reply decided after the check above; the sweep posts the
+			// real answer to the DM.
 			r.meta.Reason = "reply_timeout"
-			return r.say(postStatus, "reply_timeout", StopReasonRefusal, fmt.Sprintf("No final reply from %s yet. The message stays in its AMQ inbox and may still be answered.", b.Handle))
+			if err := emitText(emit, sessionID, "agent_message_chunk", fmt.Sprintf("No final reply from %s yet. The message stays in its AMQ inbox and may still be answered.", b.Handle)); err != nil {
+				return nil, newRPCError(codeInternalError, "emit ACP reply update: %v", err)
+			}
+			return remotePromptResult{StopReason: StopReasonRefusal, Meta: remotePromptMeta{Remote: r.meta}}, nil
 		case <-poll.C:
 		case <-heartbeat.C:
 			withCur = true

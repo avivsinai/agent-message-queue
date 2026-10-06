@@ -908,10 +908,36 @@ func TestDeadlineAdoptsAnOutcomeDecidedMeanwhile(t *testing.T) {
 	if rpcErr != nil {
 		t.Fatal(rpcErr)
 	}
-	if got := strings.Join(posts(), "|"); strings.Contains(got, "No final reply") {
-		t.Fatalf("posted a timeout notice: %q", got)
+	if got := posts(); len(got) != 0 {
+		t.Fatalf("posted to the DM: %q", got)
 	}
 	if last := shown[len(shown)-1]; last != "reply B" {
 		t.Fatalf("shown=%q; want the adopted reply B", shown)
+	}
+}
+
+// Review of #961 r5 (agent-message-queue-bdq): the timeout notice was
+// posted to the DM after the deadline check, so a final reply decided in
+// between was followed by a false "No final reply". The timeout is shown to
+// the ACP client only.
+func TestMailboxTimeoutIsNotPostedToTheDM(t *testing.T) {
+	s, _ := mailboxServer(t)
+	s.cfg.TurnTimeout = 200 * time.Millisecond
+	posts := recordPosts(t)
+	var shown []string
+	turn := newTurn()
+	turn.channel = "6eff60e4-32ab-48ec-bd3d-f4c97872f370"
+	result, rpcErr := s.runRemote("s", "hi", strings.Repeat("4", 64), turn, func(v any) error {
+		shown = append(shown, v.(sessionUpdateNotification).Params.Update.Content.Text)
+		return nil
+	})
+	if rpcErr != nil {
+		t.Fatal(rpcErr)
+	}
+	if got := result.(remotePromptResult); got.Meta.Remote.Reason != "reply_timeout" || !strings.HasPrefix(shown[len(shown)-1], "No final reply") {
+		t.Fatalf("result=%+v shown=%q; want the timeout shown to the client", got, shown)
+	}
+	if got := posts(); len(got) != 0 {
+		t.Fatalf("posted to the DM: %q", got)
 	}
 }
