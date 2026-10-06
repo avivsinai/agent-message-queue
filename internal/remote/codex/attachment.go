@@ -1448,7 +1448,10 @@ func (a *Attachment) onServerRequest(req ServerRequest) {
 		Command            any      `json:"command"`
 		Cwd                string   `json:"cwd"`
 		Reason             string   `json:"reason"`
-		AvailableDecisions []string `json:"availableDecisions"`
+		// Codex 0.160 mixes plain decisions with object decisions such as
+		// {"acceptWithExecpolicyAmendment": ...}; a []string decode failed
+		// on the object and dropped the whole request (611.57).
+		AvailableDecisions []json.RawMessage `json:"availableDecisions"`
 		// Fields a one-tap approve cannot show; any of them withholds it.
 		Kind                  string          `json:"kind"`
 		GrantRoot             string          `json:"grantRoot"`
@@ -1473,9 +1476,22 @@ func (a *Attachment) onServerRequest(req ServerRequest) {
 	if id == "" {
 		id = p.ItemID
 	}
-	options := p.AvailableDecisions
-	if len(options) == 0 {
+	// Only a plain decision can be sent back as {"decision": option}.
+	var options []string
+	for _, raw := range p.AvailableDecisions {
+		var o string
+		if json.Unmarshal(raw, &o) == nil {
+			options = append(options, o)
+		}
+	}
+	if len(p.AvailableDecisions) == 0 {
 		options = []string{"accept", "decline"}
+	}
+	// Reject declines when Codex offers it; otherwise cancel, which declines
+	// and stops the turn (Codex 0.160 offers no decline for some commands).
+	reject := offered(options, "decline")
+	if reject == "" {
+		reject = offered(options, "cancel")
 	}
 	prompt := approvalPrompt(req.Method, p.Command, p.Cwd, p.Reason)
 	// Approve is offered only for a plain command whose whole grant the
@@ -1489,7 +1505,7 @@ func (a *Attachment) onServerRequest(req ServerRequest) {
 		approve = offered(options, "accept")
 	}
 	inter := &protocol.Interaction{InteractionID: id, Kind: "approval", Prompt: prompt, Options: options, RemoteAnswer: true,
-		ApproveOption: approve, RejectOption: offered(options, "decline")}
+		ApproveOption: approve, RejectOption: reject}
 	r.approvalReqs[id] = req.ID
 	if r.interaction != nil {
 		r.queuedApprovals = append(r.queuedApprovals, inter)

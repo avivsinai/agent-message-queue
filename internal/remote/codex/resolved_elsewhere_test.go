@@ -105,6 +105,15 @@ func TestApprovalWithholdsApproveForUnseenGrants(t *testing.T) {
 	if in := pending(); in.ApproveOption != "accept" {
 		t.Fatalf("plain command approve = %q, want accept", in.ApproveOption)
 	}
+	srv.notify(t, "serverRequest/resolved", `{"threadId":"t1","requestId":"9"}`)
+	waitNoInteraction(t, att)
+	// agent-message-queue-611.57: the live Codex 0.160 request mixes an
+	// object decision into availableDecisions and offers cancel, not
+	// decline. It was dropped whole, so the DM never saw the approval.
+	srv.sendServerRequest(t, "10", "item/commandExecution/requestApproval", `{"kind":"command","threadId":"t1","turnId":"u1","itemId":"exec-1","command":"/bin/zsh -lc 'touch approval-test2.txt'","cwd":"/w","availableDecisions":["accept",{"acceptWithExecpolicyAmendment":{"execpolicy_amendment":["touch","approval-test2.txt"]}},"cancel"]}`)
+	if in := pending(); in.ApproveOption != "accept" || in.RejectOption != "cancel" {
+		t.Fatalf("codex 0.160 command = approve %q reject %q, want accept and cancel", in.ApproveOption, in.RejectOption)
+	}
 }
 
 // PR #919 review round 2: a second approval replaced a pending one, and the
