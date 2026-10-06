@@ -107,6 +107,12 @@ func (s *Server) runMailbox(sessionID, text, eventID string, b binding.Binding, 
 			if outcome := r.settle("reply_timeout"); outcome != "reply_timeout" {
 				return s.mailboxNotDelivered(r, outcome)
 			}
+			// This attempt published nothing, but a replay may follow an
+			// earlier delivery. A timeout before acquiring the lock has not
+			// even read the claim, so absence is never proven for an event.
+			if eventID != "" {
+				return r.failed(remoteUncertain, errors.New("the turn ran out of time before delivery could be confirmed"))
+			}
 			r.meta.Reason = "reply_timeout"
 			return r.say(postStatus, "reply_timeout", StopReasonRefusal, fmt.Sprintf("Not delivered to %s: the turn ran out of time before the message could be published.", b.Handle))
 		}
