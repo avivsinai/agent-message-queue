@@ -70,6 +70,7 @@ func (s *Server) runMailbox(sessionID, text, eventID string, b binding.Binding, 
 	if threadID == "" {
 		threadID = cockpitThread("session/" + sessionID)
 	}
+	r.mailboxThread = threadID
 
 	// A turn cancelled before delivery delivers nothing (codex #895 P1 #3).
 	if outcome := r.settle(""); outcome == "session_cancelled" || outcome == "client_disconnected" {
@@ -78,11 +79,12 @@ func (s *Server) runMailbox(sessionID, text, eventID string, b binding.Binding, 
 	// The turn budget starts before the claim, so a publish-lock wait counts
 	// against it (codex #895 r2 P1).
 	budget := time.Now().Add(s.cfg.TurnTimeout)
-	claim, err := s.mailboxClaim(eventID, threadID, turn.channel)
+	claim, fresh, err := s.mailboxClaim(eventID, threadID, turn.channel)
 	if err != nil {
 		return r.failed(remoteUncertain, err)
 	}
 	threadID = claim.Thread
+	r.mailboxThread = threadID
 	created, err := time.Parse(time.RFC3339Nano, claim.Created)
 	if err != nil {
 		return nil, newRPCError(codeInternalError, "mailbox claim time: %v", err)
@@ -112,6 +114,13 @@ func (s *Server) runMailbox(sessionID, text, eventID string, b binding.Binding, 
 			}
 			r.meta.Reason = "reply_timeout"
 			return r.say(postStatus, "reply_timeout", StopReasonRefusal, fmt.Sprintf("Not delivered to %s: the turn ran out of time before the message could be published.", b.Handle))
+		}
+		// This call claimed the message id, so no earlier delivery published
+		// it, and publishOnce reports only failures before the message
+		// reached the inbox: nothing was delivered. A redelivery's earlier
+		// attempt may have published it, so its outcome stays unknown.
+		if fresh {
+			return r.failed(remoteNotSubmitted, err)
 		}
 		return r.failed(remoteUncertain, err)
 	}
@@ -351,39 +360,41 @@ func (s *Server) mailboxAnswered(eventID string) (mailboxOutcome, bool) {
 	return out, true
 }
 
-// mailboxClaim returns the message id and time for this prompt. With an
-// event id it is claimed exclusively before any publish, and a redelivery
-// reuses it.
-func (s *Server) mailboxClaim(eventID, threadID, channel string) (mailboxClaim, error) {
+// mailboxClaim returns the message id and time for this prompt, and whether
+// this call created the claim (fresh) rather than found an earlier
+// delivery's. With an event id it is claimed exclusively before any publish,
+// and a redelivery reuses it.
+func (s *Server) mailboxClaim(eventID, threadID, channel string) (mailboxClaim, bool, error) {
 	now := time.Now()
 	id, err := format.NewMessageID(now)
 	if err != nil {
-		return mailboxClaim{}, err
+		return mailboxClaim{}, false, err
 	}
 	fresh := mailboxClaim{MessageID: id, Created: now.UTC().Format(time.RFC3339Nano), Thread: threadID, Channel: channel}
 	if eventID == "" {
-		return fresh, nil
+		return fresh, true, nil
 	}
 	path := filepath.Join(s.cfg.StateDir, "remote-events", eventID+".mailbox.json")
 	raw, err := json.Marshal(fresh)
 	if err != nil {
-		return mailboxClaim{}, err
+		return mailboxClaim{}, false, err
 	}
-	if _, err := createExclusive(path, raw); err != nil {
-		return mailboxClaim{}, err
+	created, err := createExclusive(path, raw)
+	if err != nil {
+		return mailboxClaim{}, false, err
 	}
 	stored, err := readSmallRegular(path)
 	if err != nil {
-		return mailboxClaim{}, err
+		return mailboxClaim{}, false, err
 	}
 	if err := fsq.SyncDir(filepath.Dir(path)); err != nil {
-		return mailboxClaim{}, err
+		return mailboxClaim{}, false, err
 	}
 	var claim mailboxClaim
 	if err := json.Unmarshal(stored, &claim); err != nil || claim.MessageID == "" || claim.Thread == "" {
-		return mailboxClaim{}, fmt.Errorf("event %s has an unreadable mailbox claim; refusing to publish", eventID)
+		return mailboxClaim{}, false, fmt.Errorf("event %s has an unreadable mailbox claim; refusing to publish", eventID)
 	}
-	return claim, nil
+	return claim, created, nil
 }
 
 // errStoppedBeforePublish means the turn was cancelled or left before the
@@ -448,6 +459,9 @@ func (s *Server) mailboxNotDelivered(r *remoteTurn, outcome string) (any, *rpcEr
 
 // publishOnce delivers the prompt to the handle unless the claimed message
 // is already in its inbox (new or cur), so a redelivery never duplicates it.
+// It never creates the handle's mailbox: a missing root or mailbox is a
+// failure before delivery, not a message nobody reads. An error means the
+// message did not reach the inbox in this call.
 func publishOnce(b binding.Binding, threadID, id string, created time.Time, text string) error {
 	identity, err := fsq.SnapshotDeliveryRoot(b.Root)
 	if err != nil {
@@ -497,7 +511,7 @@ func publishOnce(b binding.Binding, threadID, id string, created time.Time, text
 	if len(data) > format.MaxMessageSize {
 		return fmt.Errorf("prompt exceeds the maximum AMQ message size")
 	}
-	if _, err := fsq.DeliverToInboxes(root, []string{b.Handle}, name, data); err != nil {
+	if _, err := fsq.DeliverToExistingInbox(root, b.Handle, name, data); err != nil {
 		var uncertain *fsq.CommittedDurabilityError
 		if !errors.As(err, &uncertain) {
 			return err

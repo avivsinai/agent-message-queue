@@ -22,6 +22,9 @@ func mailboxServer(t *testing.T) (*Server, string) {
 	t.Helper()
 	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
 	root := canonicalTempDir(t)
+	if err := fsq.EnsureAgentDirs(root, "agent"); err != nil {
+		t.Fatal(err)
+	}
 	if err := binding.Write(binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: "agent"}); err != nil {
 		t.Fatal(err)
 	}
@@ -284,6 +287,42 @@ func TestRedeliveredPromptStillGetsTheBuzzMailbox(t *testing.T) {
 	}
 }
 
+// Bead agent-message-queue-qff (review F4): a first delivery to a deleted
+// root or handle mailbox said the outcome was unknown, or recreated the
+// mailbox and reported Delivered. It must say not delivered, resend safe,
+// and never create the mailbox.
+func TestMailboxFirstDeliveryFailureSaysNotDelivered(t *testing.T) {
+	for name, root := range map[string]string{
+		"missing root":    filepath.Join(canonicalTempDir(t), "gone"),
+		"missing mailbox": canonicalTempDir(t),
+	} {
+		t.Run(name, func(t *testing.T) {
+			s, _ := mailboxServer(t)
+			s.cfg.TurnTimeout = 200 * time.Millisecond
+			if err := binding.Write(binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: "agent"}); err != nil {
+				t.Fatal(err)
+			}
+			var said []string
+			result, rpcErr := s.runRemote("s", "say hi", strings.Repeat("5", 64), newTurn(), func(v any) error {
+				if note := v.(sessionUpdateNotification); note.Params.Update.SessionUpdate == "agent_message_chunk" {
+					said = append(said, note.Params.Update.Content.Text)
+				}
+				return nil
+			})
+			if rpcErr != nil {
+				t.Fatal(rpcErr)
+			}
+			got := result.(remotePromptResult)
+			if got.Meta.Remote.State != remoteNotSubmitted || len(said) != 1 || !strings.HasPrefix(said[0], "Not delivered to agent: ") || !strings.HasSuffix(said[0], "Resending is safe.") {
+				t.Fatalf("result=%+v said=%q", got, said)
+			}
+			if _, err := os.Lstat(filepath.Join(root, "agents", "agent")); !os.IsNotExist(err) {
+				t.Fatalf("the handle mailbox was created: %v", err)
+			}
+		})
+	}
+}
+
 // Codex 611.36 research, honest stop: a cancel says the message stays and
 // may still run, and the message is not recalled.
 func TestMailboxCancelSaysTheMessageStays(t *testing.T) {
@@ -541,6 +580,9 @@ func TestModelSelectsEachAgentsSession(t *testing.T) {
 		{Carrier: binding.CarrierMailbox, Root: rootA, Handle: "agent", Name: "a"},
 		{Carrier: binding.CarrierMailbox, Root: rootB, Handle: "agent", Name: "b"},
 	} {
+		if err := fsq.EnsureAgentDirs(b.Root, b.Handle); err != nil {
+			t.Fatal(err)
+		}
 		if err := binding.WriteNamed(b); err != nil {
 			t.Fatal(err)
 		}
