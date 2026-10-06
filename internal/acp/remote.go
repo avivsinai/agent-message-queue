@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
@@ -52,7 +53,8 @@ type remoteMeta struct {
 	Cancel     string `json:"cancel,omitempty"`
 	Truncated  bool   `json:"truncated,omitempty"`
 	// Posted is "posted" when the owner-facing text was published into the
-	// Buzz channel, or the post error (bead agent-message-queue-611.38).
+	// Buzz channel, "duplicate: ..." when an earlier delivery of the event
+	// already posted, or the post error (bead agent-message-queue-611.38).
 	Posted string `json:"posted,omitempty"`
 }
 
@@ -101,12 +103,12 @@ func (s *Server) runRemote(sessionID, text, eventID string, turn *turnState, emi
 	if s.cfg.RemoteBinding {
 		b, err := s.turnBinding(sessionID, eventID)
 		if err != nil {
-			r := &remoteTurn{s: s, sessionID: sessionID, emit: emit, turn: turn, meta: remoteMeta{State: "not_connected", Reason: err.Error()}}
+			r := &remoteTurn{s: s, sessionID: sessionID, eventID: eventID, emit: emit, turn: turn, meta: remoteMeta{State: "not_connected", Reason: err.Error()}}
 			text := "Not connected. Run /amq-remote in a Claude Code or Codex session."
 			if !errors.Is(err, binding.ErrNone) {
 				text = "Not connected: " + err.Error()
 			}
-			return r.say(r.settle("replied"), StopReasonRefusal, text)
+			return r.say(postStatus, r.settle("replied"), StopReasonRefusal, text)
 		}
 		if b.Mailbox() {
 			return s.runMailbox(sessionID, text, eventID, b, turn, emit)
@@ -136,7 +138,7 @@ func (s *Server) runRemote(sessionID, text, eventID string, turn *turnState, emi
 	if eventID != "" {
 		rep, err := r.get()
 		switch {
-		case err == nil && rep.Snapshot.State == protocol.StateRejected && rep.Snapshot.Code == protocol.CodeBusy:
+		case err == nil && retryableBusy(rep.Snapshot):
 			epoch = rep.Snapshot.Epoch
 		case err == nil:
 			return r.follow(rep.Snapshot)
@@ -182,6 +184,12 @@ func (s *Server) runRemote(sessionID, text, eventID string, turn *turnState, emi
 			}
 			stored, gerr := r.get()
 			switch {
+			case gerr == nil && retryableBusy(stored.Snapshot):
+				// A lost reply to a submit the endpoint refused as busy: the
+				// stored tombstone is retried like a busy reply (review of
+				// #959 r3).
+				rep = stored
+				rep.Outcome.Code = protocol.CodeBusy
 			case gerr == nil:
 				return r.follow(stored.Snapshot)
 			case hasCode(gerr, protocol.CodeNotFound):
@@ -216,7 +224,7 @@ func (s *Server) runRemote(sessionID, text, eventID string, turn *turnState, emi
 			if outcome := r.settle("replied"); outcome != "replied" {
 				return r.settled(outcome, rep.Snapshot)
 			}
-			return r.say("replied", StopReasonRefusal, r.statusText(rep.Snapshot))
+			return r.say(snapKind(rep.Snapshot), "replied", StopReasonRefusal, r.statusText(rep.Snapshot))
 		}
 		return r.follow(rep.Snapshot)
 	}
@@ -492,7 +500,7 @@ func (r *remoteTurn) settled(outcome string, snap protocol.Snapshot) (any, *rpcE
 		return remotePromptResult{StopReason: StopReasonRefusal, Meta: remotePromptMeta{Remote: r.meta}}, nil
 	case "reply_timeout":
 		r.meta.Reason = outcome
-		return r.say(outcome, StopReasonRefusal, fmt.Sprintf("%s: request %s is still %s and the work continues. Check it with `amq-remote status %s`.", r.meta.Target, snap.RequestRef, snap.State, snap.RequestRef))
+		return r.say(postStatus, outcome, StopReasonRefusal, fmt.Sprintf("%s: request %s is still %s and the work continues. Check it with `amq-remote status %s`.", r.meta.Target, snap.RequestRef, snap.State, snap.RequestRef))
 	}
 	switch snap.State {
 	case protocol.StateCompleted:
@@ -500,9 +508,9 @@ func (r *remoteTurn) settled(outcome string, snap protocol.Snapshot) (any, *rpcE
 		if snap.Result != nil {
 			text, r.meta.Truncated = snap.Result.Text, snap.Result.Truncated
 		}
-		return r.say(outcome, StopReasonEndTurn, text)
+		return r.say(postFinal, outcome, StopReasonEndTurn, text)
 	case protocol.StateCancelled:
-		return r.say(outcome, StopReasonCancelled, r.statusText(snap))
+		return r.say(postFinal, outcome, StopReasonCancelled, r.statusText(snap))
 	default: // failed, rejected, uncertain
 		if snap.State == protocol.StateRejected && r.meta.Reason == "" {
 			// A deferred refusal keeps the adapter's text on the record,
@@ -511,8 +519,24 @@ func (r *remoteTurn) settled(outcome string, snap protocol.Snapshot) (any, *rpcE
 				r.meta.Reason = rep.Outcome.Message
 			}
 		}
-		return r.say(outcome, StopReasonRefusal, r.statusText(snap))
+		return r.say(snapKind(snap), outcome, StopReasonRefusal, r.statusText(snap))
 	}
+}
+
+// retryableBusy reports a busy refusal, which a later delivery retries.
+func retryableBusy(snap protocol.Snapshot) bool {
+	return snap.State == protocol.StateRejected && snap.Code == protocol.CodeBusy
+}
+
+// snapKind is postFinal only for a terminal request state that no later
+// delivery retries (a busy refusal is retried). An uncertain
+// request can still resolve to an answer, so its notice is a status text
+// and never takes the final-answer marker (review of #959 r2).
+func snapKind(snap protocol.Snapshot) string {
+	if snap.State.Terminal() && !retryableBusy(snap) {
+		return postFinal
+	}
+	return postStatus
 }
 
 // cancel asks the endpoint to cancel the exact request under the epoch it was
@@ -550,7 +574,7 @@ func (r *remoteTurn) cancel(snap protocol.Snapshot) (any, *rpcError) {
 	if r.meta.State == string(protocol.StateCancelled) {
 		return remotePromptResult{StopReason: StopReasonCancelled, Meta: remotePromptMeta{Remote: r.meta}}, nil
 	}
-	return r.say("session_cancelled", StopReasonCancelled, fmt.Sprintf("%s: cancel %s; request %s is still %s and the work continues.", r.meta.Target, r.meta.Cancel, snap.RequestRef, r.meta.State))
+	return r.say(postStatus, "session_cancelled", StopReasonCancelled, fmt.Sprintf("%s: cancel %s; request %s is still %s and the work continues.", r.meta.Target, r.meta.Cancel, snap.RequestRef, r.meta.State))
 }
 
 // failed ends a turn whose request is absent (not_submitted) or unknown
@@ -578,19 +602,50 @@ func (r *remoteTurn) failed(state string, err error) (any, *rpcError) {
 	if state == remoteUncertain {
 		text = fmt.Sprintf("%s: the outcome of request %s is unknown: %s. Do not resend; check it with `amq-remote status %s`.", r.meta.Target, r.meta.RequestRef, r.meta.Reason, r.meta.RequestRef)
 	}
-	return r.say(outcome, stopReason, text)
+	return r.say(postStatus, outcome, stopReason, text)
 }
 
+// Post kinds: each event posts at most one status text (a timeout, a stop
+// that leaves work running, a failure to submit) and at most one final
+// answer. Separate markers keep an earlier status post from suppressing the
+// answer that a later delivery of the event brings.
+const (
+	postStatus = "status"
+	postFinal  = "final"
+)
+
 // say emits text as the agent message and returns the result. A client that
-// left gets no message.
-func (r *remoteTurn) say(outcome, stopReason, text string) (any, *rpcError) {
+// left gets no message. kind is postStatus or postFinal.
+func (r *remoteTurn) say(kind, outcome, stopReason, text string) (any, *rpcError) {
 	if outcome != "client_disconnected" && text != "" {
 		if err := emitText(r.emit, r.sessionID, "agent_message_chunk", text); err != nil {
 			return nil, newRPCError(codeInternalError, "emit ACP reply update: %v", err)
 		}
-		r.meta.Posted = publish(r.turn.channel, text)
+		r.meta.Posted = r.s.postOnce(r.eventID, kind, []byte(time.Now().UTC().Format(time.RFC3339Nano)+"\n"), r.turn.channel, text)
 	}
 	return remotePromptResult{StopReason: stopReason, Meta: remotePromptMeta{Remote: r.meta}}, nil
+}
+
+// postOnce publishes text into channel at most once per event and kind
+// (review F7). The exclusive marker remote-events/<event>.posted.<kind>,
+// holding record, is created before the post, so a redelivered event never
+// posts that kind again, and a post that failed is not retried: the post
+// has no idempotency key. The event id is 64 lowercase hex, checked when the
+// prompt is parsed (event.go eventIDsFromMeta), so it cannot leave the state
+// dir. Without an event id it just posts.
+func (s *Server) postOnce(eventID, kind string, record []byte, channel, text string) string {
+	if eventID == "" || channel == "" || strings.TrimSpace(text) == "" {
+		return publish(channel, text)
+	}
+	path := filepath.Join(s.cfg.StateDir, "remote-events", eventID+".posted."+kind)
+	won, err := createExclusive(path, record)
+	switch {
+	case err != nil:
+		return "error: record post marker: " + err.Error()
+	case !won:
+		return "duplicate: this event already posted its " + kind + " text"
+	}
+	return publish(channel, text)
 }
 
 func (r *remoteTurn) statusText(snap protocol.Snapshot) string {

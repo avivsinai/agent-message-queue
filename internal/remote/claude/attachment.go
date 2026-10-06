@@ -145,6 +145,7 @@ func Attach(cfg config) (*Attachment, error) {
 		cfg:          cfg,
 		home:         home,
 		boundSession: reg.SessionID,
+		allowFactory: allowFactory,
 		runs:         map[requests.Key]*runRecord{},
 		cancelIntent: map[requests.Key]bool{},
 		recoverFrom:  map[requests.Key]recoverScan{},
@@ -276,6 +277,9 @@ type Attachment struct {
 	pendingOps []func()
 	// clock replaces the wall clock in tests (SetNow).
 	clock func() time.Time
+	// allowFactory turns the hook pin into what verifies an allow from
+	// Buzz (RegisterAllowFactory; SetAllowFactory in tests).
+	allowFactory func(HookPin) AllowConfig
 	// pollSeq numbers the poller's passes: an approval binds only in a pass
 	// that read the approval files no earlier than the pass that found it.
 	pollSeq uint64

@@ -95,9 +95,151 @@ var (
 // approvals: one entry with no matcher (every tool, so a reject can reach
 // any call), marked AMQ_APPROVAL_HOOK=1, whose own deadline is wait and
 // whose installed timeout is wait plus PermissionHookGrace. It is inert in
-// a session no relay share with approve is serving. Idempotent.
-func InstallPermissionHook(home, bin string, wait time.Duration) error {
-	return mutateHook(home, permissionSpec, permissionHookEntry(bin, wait))
+// a session no relay share with approve is serving.
+//
+// pin.Owner, 64 lowercase hex, pins the owner pubkey on the hook's command
+// line: the only key whose signed reaction can allow a call (bead
+// 611.42.4); pin.Root (and pin.Session) pin where the share is read.
+// Claude cannot edit its settings file without a prompt, so it cannot
+// change the pin on its own. An empty owner installs a reject-only hook.
+// A marked entry with another command is replaced; the same one is kept.
+func InstallPermissionHook(home, bin string, wait time.Duration, pin HookPin) error {
+	if pin != (HookPin{}) && !pin.Complete() {
+		return fmt.Errorf("an owner pin needs the owner, an absolute AMQ root, the share session, its relay, body, DM channel and target: %+v", pin)
+	}
+	cmds, err := installedCommands(home, permissionSpec)
+	if err != nil {
+		return err
+	}
+	if len(cmds) == 1 && cmds[0] == permissionHookCommand(bin, wait, pin) {
+		return nil // already installed as asked
+	}
+	entry := permissionHookEntry(bin, wait, pin)
+	// One write: the marked entries out and the new one in.
+	return editSettings(home, true, func(raw []byte) ([]byte, error) {
+		if cut, err := rawRemoveEntries(raw, permissionSpec); err != nil {
+			return nil, err
+		} else if cut != nil {
+			raw = cut
+		}
+		return rawInsertEntry(raw, permissionSpec, entry)
+	})
+}
+
+// installedCommands lists the commands of spec's marked hooks in the user
+// settings file.
+func installedCommands(home string, spec hookSpec) ([]string, error) {
+	raw, err := readRegularBounded(settingsPath(home), maxSettingsBytes)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	loc, err := locateSettings(raw, spec.event)
+	if err != nil || loc.stop == nil {
+		return nil, err
+	}
+	groups, err := arrayElements(raw, *loc.stop)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, g := range groups {
+		var group struct {
+			Hooks []struct {
+				Command string `json:"command"`
+			} `json:"hooks"`
+		}
+		if json.Unmarshal(raw[g[0]:g[1]], &group) != nil {
+			continue
+		}
+		for _, h := range group.Hooks {
+			if strings.HasPrefix(h.Command, spec.marker) {
+				out = append(out, h.Command)
+			}
+		}
+	}
+	return out, nil
+}
+
+// pinFlagRe is one pin flag as permissionHookCommand writes it: a name and
+// a single-quoted value.
+var pinFlagRe = regexp.MustCompile(` --([a-z]+) '((?:[^']|'\\'')*)'`)
+
+// PermissionHookPin is the pin of the installed PermissionRequest hook,
+// empty when there is no hook, no pin, or more than one hook.
+func PermissionHookPin(home string) HookPin {
+	cmds, err := installedCommands(home, permissionSpec)
+	if err != nil || len(cmds) != 1 {
+		return HookPin{}
+	}
+	var pin HookPin
+	for _, m := range pinFlagRe.FindAllStringSubmatch(cmds[0], -1) {
+		if f := pin.field(m[1]); f != nil {
+			*f = strings.ReplaceAll(m[2], `'\''`, `'`)
+		}
+	}
+	return pin
+}
+
+// pinFlags are the pin's command line flags, in the order written.
+var pinFlags = []string{"owner", "root", "session", "relay", "body", "channel", "target"}
+
+func (p *HookPin) field(name string) *string {
+	switch name {
+	case "owner":
+		return &p.Owner
+	case "root":
+		return &p.Root
+	case "session":
+		return &p.Session
+	case "relay":
+		return &p.Relay
+	case "body":
+		return &p.Body
+	case "channel":
+		return &p.Channel
+	case "target":
+		return &p.Target
+	}
+	return nil
+}
+
+// PinWarnings names the user settings that defeat the owner pin: a
+// bypassPermissions default mode, or a permissions.allow entry for every
+// Bash command. Either lets Claude rewrite its settings, or run
+// install-approval-hook with another owner, without a prompt. Only
+// ~/.claude/settings.json is read; project and managed settings can add
+// the same.
+func PinWarnings(home string) ([]string, error) {
+	raw, err := readRegularBounded(settingsPath(home), maxSettingsBytes)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var st struct {
+		Permissions struct {
+			DefaultMode string   `json:"defaultMode"`
+			Allow       []string `json:"allow"`
+		} `json:"permissions"`
+	}
+	if err := json.Unmarshal(raw, &st); err != nil {
+		return nil, err
+	}
+	var out []string
+	if st.Permissions.DefaultMode == "bypassPermissions" {
+		out = append(out, "permissions.defaultMode is bypassPermissions: Claude can rewrite the approval hook's owner pin without a prompt")
+	}
+	for _, a := range st.Permissions.Allow {
+		if a := strings.TrimSpace(a); a == "Bash" || a == "Bash(*)" {
+			out = append(out, fmt.Sprintf("permissions.allow holds %q: Claude can rewrite the approval hook's owner pin without a prompt", a))
+			break
+		}
+	}
+	return out, nil
 }
 
 // UninstallPermissionHook removes only the marked PermissionRequest entry.
@@ -172,13 +314,25 @@ func settingsPath(home string) string {
 // entries when entry is nil.
 func mutateHook(home string, spec hookSpec, entry []byte) error {
 	install := entry != nil
+	return editSettings(home, install, func(raw []byte) ([]byte, error) {
+		if install {
+			return rawInsertEntry(raw, spec, entry)
+		}
+		return rawRemoveEntries(raw, spec)
+	})
+}
+
+// editSettings applies edit to the user settings file's bytes and writes
+// the result atomically; a nil result writes nothing. A missing file is
+// started as {} when create is set, and is left alone otherwise.
+func editSettings(home string, create bool, edit func([]byte) ([]byte, error)) error {
 	path := settingsPath(home)
 	raw, err := readRegularBounded(path, maxSettingsBytes)
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("settings %s: %w", path, err)
 		}
-		if !install {
+		if !create {
 			return nil
 		}
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
@@ -186,12 +340,7 @@ func mutateHook(home string, spec hookSpec, entry []byte) error {
 		}
 		raw = []byte("{}\n")
 	}
-	var out []byte
-	if install {
-		out, err = rawInsertEntry(raw, spec, entry)
-	} else {
-		out, err = rawRemoveEntries(raw, spec)
-	}
+	out, err := edit(raw)
 	if err != nil {
 		return fmt.Errorf("settings %s: %w", path, err)
 	}
@@ -218,16 +367,23 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
-// permissionHookCommand runs the PermissionRequest receiver with its wait.
-func permissionHookCommand(bin string, wait time.Duration) string {
-	return permissionHookMarker + shellQuote(bin) + " claude permission-hook --wait " + strconv.Itoa(int(wait/time.Second))
+// permissionHookCommand runs the PermissionRequest receiver with its wait
+// and the pin.
+func permissionHookCommand(bin string, wait time.Duration, pin HookPin) string {
+	cmd := permissionHookMarker + shellQuote(bin) + " claude permission-hook --wait " + strconv.Itoa(int(wait/time.Second))
+	if pin != (HookPin{}) {
+		for _, name := range pinFlags {
+			cmd += " --" + name + " " + shellQuote(*pin.field(name))
+		}
+	}
+	return cmd
 }
 
 // permissionHookEntry is the PermissionRequest group: no matcher, and a
 // timeout PermissionHookGrace longer than the hook's own wait, so the hook
 // ends first and the terminal dialog decides.
-func permissionHookEntry(bin string, wait time.Duration) []byte {
-	return commandHookEntry(permissionHookCommand(bin, wait), int((wait+PermissionHookGrace)/time.Second))
+func permissionHookEntry(bin string, wait time.Duration, pin HookPin) []byte {
+	return commandHookEntry(permissionHookCommand(bin, wait, pin), int((wait+PermissionHookGrace)/time.Second))
 }
 
 // stopHookEntry renders one Stop matcher group in Claude Code's settings
@@ -797,27 +953,38 @@ const (
 	bindingDeny
 )
 
-// bindingDecision reads the per-user binding. The hook process has only the
-// Claude home, so an unset AMQ_REMOTE_BINDING resolves under that home.
+// bindingDecision reads every binding file: the legacy binding.json and each
+// bindings/*.json beside it. Any readable file naming this session allows.
+// Otherwise any binding file at all denies, readable or not. The hook
+// process has only the Claude home, so an unset AMQ_REMOTE_BINDING resolves
+// under that home.
 func bindingDecision(home, sessionID string) int {
 	path := filepath.Join(home, ".amq", "remote", "binding.json")
 	if p := strings.TrimSpace(os.Getenv(binding.EnvPath)); p != "" && filepath.IsAbs(p) {
 		path = filepath.Clean(p)
 	}
-	raw, err := readRegularBounded(path, bindingMaxBytes)
-	if errors.Is(err, os.ErrNotExist) {
-		return bindingAbsent
+	exists := false
+	if raw, err := readRegularBounded(path, bindingMaxBytes); !errors.Is(err, os.ErrNotExist) {
+		exists = true
+		if err == nil && nativeSessionIs(raw, sessionID) {
+			return bindingAllow
+		}
 	}
-	if err != nil {
+	allow, present := bindingsDirState(filepath.Join(filepath.Dir(path), "bindings"), sessionID)
+	if allow {
+		return bindingAllow
+	}
+	if exists || present {
 		return bindingDeny
 	}
+	return bindingAbsent
+}
+
+func nativeSessionIs(raw []byte, sessionID string) bool {
 	var b struct {
 		NativeSession string `json:"native_session"`
 	}
-	if json.Unmarshal(raw, &b) != nil || b.NativeSession != sessionID {
-		return bindingDeny
-	}
-	return bindingAllow
+	return json.Unmarshal(raw, &b) == nil && b.NativeSession == sessionID
 }
 
 // bindingMaxBytes matches the binding package's read bound.
