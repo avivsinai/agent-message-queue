@@ -84,32 +84,22 @@ func (s *Server) runMailbox(sessionID, text, eventID string, b binding.Binding, 
 	// The turn budget starts before the claim, so a publish-lock wait counts
 	// against it (codex #895 r2 P1).
 	budget := time.Now().Add(s.cfg.TurnTimeout)
-	claim, err := s.mailboxClaim(eventID, threadID, turn.channel)
+	claim, err := s.publishClaimed(r, budget, b, threadID, text)
+	if claim.MessageID != "" {
+		threadID = claim.Thread
+		r.mailboxThread = threadID
+		r.meta.RequestRef = claim.MessageID
+		// The first known channel of the event is its DM; a redelivery from
+		// another channel, or from none, never moves the answer. A delivery
+		// that names one records it if none is known yet (review of #961).
+		s.eventChannel(eventID, claim.Channel, turn.channel)
+		r.mailbox, r.claimChannel = true, claim.Channel
+		s.mu.Lock()
+		turn.mailboxEvent = eventID
+		s.mu.Unlock()
+		s.late.add(eventID)
+	}
 	if err != nil {
-		return r.failed(remoteUncertain, err)
-	}
-	threadID = claim.Thread
-	r.mailboxThread = threadID
-	created, err := time.Parse(time.RFC3339Nano, claim.Created)
-	if err != nil {
-		return nil, newRPCError(codeInternalError, "mailbox claim time: %v", err)
-	}
-	r.meta.RequestRef = claim.MessageID
-	// The first known channel of the event is its DM; a redelivery from
-	// another channel, or from none, never moves the answer. A delivery that
-	// names one records it if none is known yet (review of #961).
-	s.eventChannel(eventID, claim.Channel, turn.channel)
-	r.mailbox, r.claimChannel = true, claim.Channel
-	s.mu.Lock()
-	turn.mailboxEvent = eventID
-	s.mu.Unlock()
-	s.late.add(eventID)
-	// A redelivered event that is already answered returns that answer and
-	// posts nothing.
-	if out, ok := s.mailboxAnswered(eventID); ok {
-		return s.mailboxAnsweredTurn(r, b, out)
-	}
-	if err := s.publishClaimed(r, budget, b, threadID, claim.MessageID, created, text); err != nil {
 		if errors.Is(err, errStoppedBeforePublish) {
 			return s.mailboxNotDelivered(r, r.settle(""))
 		}
@@ -124,12 +114,18 @@ func (s *Server) runMailbox(sessionID, text, eventID string, b binding.Binding, 
 		if errors.As(err, &refused) {
 			return s.mailboxRefused(r, b, refused.reason)
 		}
+		// A redelivered event that is already answered returns that answer
+		// and posts nothing.
 		if errors.Is(err, errEventDecided) {
 			if out, ok := s.mailboxAnswered(eventID); ok {
 				return s.mailboxAnsweredTurn(r, b, out)
 			}
 		}
 		return r.failed(remoteUncertain, err)
+	}
+	created, err := time.Parse(time.RFC3339Nano, claim.Created)
+	if err != nil {
+		return nil, newRPCError(codeInternalError, "mailbox claim time: %v", err)
 	}
 	r.meta.State = DeliveryStateQueued
 	if err := emitText(emit, sessionID, "agent_thought_chunk", fmt.Sprintf("Delivered to %s's AMQ inbox.", b.Handle)); err != nil {
@@ -376,39 +372,40 @@ func (s *Server) mailboxAnswered(eventID string) (mailboxOutcome, bool) {
 	return out, true
 }
 
-// mailboxClaim returns the message id and time for this prompt. With an
-// event id it is claimed exclusively before any publish, and a redelivery
-// reuses it.
-func (s *Server) mailboxClaim(eventID, threadID, channel string) (mailboxClaim, error) {
+// mailboxClaim returns the message id and time for this prompt, and whether
+// this call created the claim. With an event id it is claimed exclusively
+// under the publish lock, and a redelivery reuses it.
+func (s *Server) mailboxClaim(eventID, threadID, channel string) (mailboxClaim, bool, error) {
 	now := time.Now()
 	id, err := format.NewMessageID(now)
 	if err != nil {
-		return mailboxClaim{}, err
+		return mailboxClaim{}, false, err
 	}
 	fresh := mailboxClaim{MessageID: id, Created: now.UTC().Format(time.RFC3339Nano), Thread: threadID, Channel: channel}
 	if eventID == "" {
-		return fresh, nil
+		return fresh, true, nil
 	}
 	path := filepath.Join(s.cfg.StateDir, "remote-events", eventID+".mailbox.json")
 	raw, err := json.Marshal(fresh)
 	if err != nil {
-		return mailboxClaim{}, err
+		return mailboxClaim{}, false, err
 	}
-	if _, err := createExclusive(path, raw); err != nil {
-		return mailboxClaim{}, err
+	created, err := createExclusive(path, raw)
+	if err != nil {
+		return mailboxClaim{}, false, err
 	}
 	stored, err := readSmallRegular(path)
 	if err != nil {
-		return mailboxClaim{}, err
+		return mailboxClaim{}, false, err
 	}
 	if err := fsq.SyncDir(filepath.Dir(path)); err != nil {
-		return mailboxClaim{}, err
+		return mailboxClaim{}, false, err
 	}
 	var claim mailboxClaim
 	if err := json.Unmarshal(stored, &claim); err != nil || claim.MessageID == "" || claim.Thread == "" {
-		return mailboxClaim{}, fmt.Errorf("event %s has an unreadable mailbox claim; refusing to publish", eventID)
+		return mailboxClaim{}, false, fmt.Errorf("event %s has an unreadable mailbox claim; refusing to publish", eventID)
 	}
-	return claim, nil
+	return claim, created, nil
 }
 
 // errStoppedBeforePublish means the turn was cancelled or left before the
@@ -425,13 +422,32 @@ type notDeliveredError struct{ reason string }
 
 func (e *notDeliveredError) Error() string { return e.reason }
 
-// publishClaimed publishes an event's claimed message under a per-event
-// lock, so two retries cannot both pass the absence check and publish the
-// same message twice (codex #895 P1 #2). The lock wait gives up on cancel,
-// disconnect or the turn budget, and cancellation is checked again once the
-// lock is held, so a cancelled prompt is never published (codex #895 r2 P1).
-func (s *Server) publishClaimed(r *remoteTurn, budget time.Time, b binding.Binding, threadID, id string, created time.Time, text string) error {
+// publishClaimed claims the event's message and publishes it under a
+// per-event lock, so two retries cannot both pass the absence check and
+// publish the same message twice (codex #895 P1 #2). It returns the claim
+// once it was read. The lock wait gives up on cancel, disconnect or the turn
+// budget, and cancellation is checked again once the lock is held, so a
+// cancelled prompt is never published (codex #895 r2 P1).
+func (s *Server) publishClaimed(r *remoteTurn, budget time.Time, b binding.Binding, threadID, text string) (mailboxClaim, error) {
+	var claim mailboxClaim
 	publish := func() error {
+		// The claim is created under the lock, so only the attempt that
+		// created it can know no earlier attempt published it
+		// (bead agent-message-queue-qff).
+		c, fresh, err := s.mailboxClaim(r.eventID, threadID, r.turn.channel)
+		if err != nil {
+			return err
+		}
+		claim = c
+		created, err := time.Parse(time.RFC3339Nano, c.Created)
+		if err != nil {
+			return fmt.Errorf("mailbox claim time: %w", err)
+		}
+		// An outcome recorded before this turn held the lock stands: a
+		// refused delivery is never published by a later redelivery.
+		if _, ok := s.mailboxAnswered(r.eventID); ok {
+			return errEventDecided
+		}
 		if outcome := r.settle(""); outcome == "session_cancelled" || outcome == "client_disconnected" {
 			return errStoppedBeforePublish
 		}
@@ -440,16 +456,15 @@ func (s *Server) publishClaimed(r *remoteTurn, budget time.Time, b binding.Bindi
 		if !time.Now().Before(budget) {
 			return lock.ErrStopped
 		}
-		// An outcome recorded while this turn waited for the lock stands: a
-		// refused delivery is never published by a later redelivery
-		// (bead agent-message-queue-qff).
-		if _, ok := s.mailboxAnswered(r.eventID); ok {
-			return errEventDecided
-		}
-		err := publishOnce(b, threadID, id, created, text)
+		err = publishOnce(b, c.Thread, c.MessageID, created, text)
 		var refused *notDeliveredError
 		if !errors.As(err, &refused) {
 			return err
+		}
+		// An earlier attempt may have delivered the message before the
+		// mailbox went away, so a redelivery's refusal stays unknown.
+		if !fresh {
+			return errors.New(refused.reason)
 		}
 		// Record the refusal as the event's outcome under the publish lock,
 		// so no redelivery can publish between the check and the record.
@@ -463,10 +478,10 @@ func (s *Server) publishClaimed(r *remoteTurn, budget time.Time, b binding.Bindi
 		return err
 	}
 	if r.eventID == "" {
-		return publish()
+		return claim, publish()
 	}
 	if !lock.AdvisoryLockAvailable() {
-		return errors.New("refusing to publish a Buzz event without an advisory file lock")
+		return claim, errors.New("refusing to publish a Buzz event without an advisory file lock")
 	}
 	stopped := func() bool {
 		select {
@@ -477,13 +492,16 @@ func (s *Server) publishClaimed(r *remoteTurn, budget time.Time, b binding.Bindi
 		return !time.Now().Before(budget)
 	}
 	path := filepath.Join(s.cfg.StateDir, "remote-events", r.eventID+".mailbox.lock")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return claim, err
+	}
 	err := lock.WithExclusiveFileLockUntil(path, stopped, publish)
 	if errors.Is(err, lock.ErrStopped) {
 		if outcome := r.settle(""); outcome == "session_cancelled" || outcome == "client_disconnected" {
-			return errStoppedBeforePublish
+			return claim, errStoppedBeforePublish
 		}
 	}
-	return err
+	return claim, err
 }
 
 // mailboxNotDelivered ends a turn stopped before its message was published:
@@ -555,13 +573,8 @@ func publishOnce(b binding.Binding, threadID, id string, created time.Time, text
 	if len(data) > format.MaxMessageSize {
 		return fmt.Errorf("prompt exceeds the maximum AMQ message size")
 	}
-	if err := mailboxAnchored(b.Root, b.Handle); err != nil {
+	if err := completeMailbox(b.Root, b.Handle); err != nil {
 		return err
-	}
-	// A mailbox made by an older amq lacks leaves such as receipts/ that
-	// delivery requires; its inbox exists, so complete the layout.
-	if err := root.EnsureAgentDirs(b.Handle); err != nil {
-		return &notDeliveredError{reason: "its mailbox could not be completed: " + err.Error()}
 	}
 	if _, err := fsq.DeliverToExistingInbox(root, b.Handle, name, data); err != nil {
 		var uncertain *fsq.CommittedDurabilityError
@@ -572,24 +585,77 @@ func publishOnce(b binding.Binding, threadID, id string, created time.Time, text
 	return nil
 }
 
-// mailboxAnchored refuses delivery unless the handle's mailbox and inbox
-// already exist as real directories (not symlinks), so the layout repair
-// that follows never writes through a link. Like the absence check, it reads
-// the bound root path; delivery rechecks the whole layout through the
-// pinned root.
-func mailboxAnchored(rootPath, handle string) error {
-	for _, anchor := range []struct{ path, missing string }{
-		{filepath.Join("agents", handle), "no mailbox in its AMQ root"},
-		{filepath.Join("agents", handle, "inbox"), "its mailbox has no inbox"},
-	} {
-		info, err := os.Lstat(filepath.Join(rootPath, anchor.path))
-		switch {
-		case errors.Is(err, fs.ErrNotExist):
-			return &notDeliveredError{reason: anchor.missing}
-		case err != nil:
-			return &notDeliveredError{reason: err.Error()}
-		case !info.IsDir():
-			return &notDeliveredError{reason: anchor.path + " is not a directory"}
+// completeMailbox refuses delivery unless the handle's mailbox and inbox
+// already exist as real directories (not symlinks), and creates the other
+// leaves an older amq did not make, such as receipts/. Like the absence
+// check it reads the bound root path; delivery then rechecks the whole
+// layout through the pinned root.
+func completeMailbox(rootPath, handle string) error {
+	dir := filepath.Join(rootPath, "agents", handle)
+	before, err := os.Lstat(dir)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return &notDeliveredError{reason: "no mailbox in its AMQ root"}
+	case err != nil:
+		return &notDeliveredError{reason: err.Error()}
+	case !before.IsDir():
+		return &notDeliveredError{reason: "its mailbox is not a directory"}
+	}
+	mailbox, err := os.OpenRoot(dir)
+	if err != nil {
+		return &notDeliveredError{reason: err.Error()}
+	}
+	defer func() { _ = mailbox.Close() }()
+	if opened, err := mailbox.Stat("."); err != nil || !os.SameFile(before, opened) {
+		return &notDeliveredError{reason: "its mailbox was replaced during delivery"}
+	}
+	before, err = mailbox.Lstat("inbox")
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return &notDeliveredError{reason: "its mailbox has no inbox"}
+	case err != nil:
+		return &notDeliveredError{reason: err.Error()}
+	case !before.IsDir():
+		return &notDeliveredError{reason: "its inbox is not a directory"}
+	}
+	inbox, err := mailbox.OpenRoot("inbox")
+	if err != nil {
+		return &notDeliveredError{reason: err.Error()}
+	}
+	defer func() { _ = inbox.Close() }()
+	if opened, err := inbox.Stat("."); err != nil || !os.SameFile(before, opened) {
+		return &notDeliveredError{reason: "its inbox was replaced during delivery"}
+	}
+	if err := repairMailbox(mailbox, inbox, dir); err != nil {
+		return &notDeliveredError{reason: err.Error()}
+	}
+	return nil
+}
+
+// repairMailbox creates the missing leaves of the handle mailbox at dir,
+// opened as mailbox and its inbox as inbox. It never creates either one:
+// leaves are made through the opened directories, so one removed meanwhile
+// makes this fail instead of reappearing.
+func repairMailbox(mailbox, inbox *os.Root, dir string) error {
+	for _, leaf := range fsq.RequiredMailboxLeaves() {
+		in, base, path := mailbox, dir, filepath.FromSlash(string(leaf))
+		if rest, ok := strings.CutPrefix(string(leaf), "inbox/"); ok {
+			in, base, path = inbox, filepath.Join(dir, "inbox"), filepath.FromSlash(rest)
+		}
+		if _, err := in.Lstat(path); !errors.Is(err, fs.ErrNotExist) {
+			continue // present, or refused by the layout check that follows
+		}
+		if err := in.MkdirAll(path, 0o700); err != nil {
+			return fmt.Errorf("complete its mailbox: %w", err)
+		}
+		// Make the new directory entries durable before a message lands.
+		for p := filepath.Dir(path); ; p = filepath.Dir(p) {
+			if err := fsq.SyncDir(filepath.Join(base, p)); err != nil {
+				return fmt.Errorf("complete its mailbox: %w", err)
+			}
+			if p == "." {
+				break
+			}
 		}
 	}
 	return nil

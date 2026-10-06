@@ -203,9 +203,10 @@ wrote (`~/.amq/remote/bindings/<name>.json`).
   of an event claims one message id, and a redelivery reuses it and publishes
   only if the message is absent. Delivery never creates the handle's mailbox
   or inbox; it completes the other folders of an existing one. When the
-  message is absent and the mailbox refuses it, the event ends as not
-  delivered and a redelivery never publishes it; send the DM again. Any other
-  publish error is uncertain and points at `amq thread --id`. Progress shows
+  first delivery of an event is refused by the mailbox, the event ends as not
+  delivered and a redelivery never publishes it; send the DM again. A refused
+  redelivery, or any other publish error, is uncertain and points at
+  `amq thread --id`. Progress shows
   "Delivered", then "Read by" (the handle's drained receipt), then the reply.
   Stop ends the wait and says the message stays in the inbox; it is never
   recalled. A final reply that

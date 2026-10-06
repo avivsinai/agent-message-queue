@@ -2,6 +2,7 @@ package acp
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -334,6 +335,71 @@ func TestMailboxMissingMailboxIsNotDelivered(t *testing.T) {
 	}
 }
 
+// Pro review r2 of #964 (P1): a message was delivered, then the handle's
+// mailbox was deleted; a redelivery found it absent and recorded "not
+// delivered, send it again". Only the attempt that created the claim may.
+func TestMailboxRedeliveryAfterTheMailboxWentIsUncertain(t *testing.T) {
+	s, root := mailboxServer(t)
+	s.cfg.TurnTimeout = 50 * time.Millisecond
+	eventID := strings.Repeat("7", 64)
+	if _, rpcErr := s.runRemote("s", "say hi", eventID, newTurn(), func(any) error { return nil }); rpcErr != nil {
+		t.Fatal(rpcErr)
+	}
+	if err := os.RemoveAll(filepath.Join(root, "agents", "agent")); err != nil {
+		t.Fatal(err)
+	}
+	var said []string
+	result, rpcErr := s.runRemote("s", "say hi", eventID, newTurn(), func(v any) error {
+		if note := v.(sessionUpdateNotification); note.Params.Update.SessionUpdate == "agent_message_chunk" {
+			said = append(said, note.Params.Update.Content.Text)
+		}
+		return nil
+	})
+	if rpcErr != nil {
+		t.Fatal(rpcErr)
+	}
+	got := result.(remotePromptResult)
+	if got.Meta.Remote.State != remoteUncertain || len(said) != 1 || !strings.Contains(said[0], "amq thread --id") {
+		t.Fatalf("result=%+v said=%q", got, said)
+	}
+	if _, ok := s.mailboxAnswered(eventID); ok {
+		t.Fatal("a redelivery recorded the delivered event as not delivered")
+	}
+}
+
+// Pro review r2 of #964 (P2): the layout repair must never recreate a
+// mailbox or inbox that vanished after the anchor check.
+func TestMailboxRepairNeverRecreatesItsAnchors(t *testing.T) {
+	for name, gone := range map[string]string{"mailbox": ".", "inbox": "inbox"} {
+		t.Run(name, func(t *testing.T) {
+			root := canonicalTempDir(t)
+			if err := fsq.EnsureAgentDirs(root, "agent"); err != nil {
+				t.Fatal(err)
+			}
+			dir := fsq.AgentBase(root, "agent")
+			mailbox, err := os.OpenRoot(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = mailbox.Close() }()
+			inbox, err := mailbox.OpenRoot("inbox")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = inbox.Close() }()
+			if err := os.RemoveAll(filepath.Join(dir, gone)); err != nil {
+				t.Fatal(err)
+			}
+			if err := repairMailbox(mailbox, inbox, dir); err == nil {
+				t.Fatal("repair succeeded without its anchor")
+			}
+			if _, err := os.Lstat(filepath.Join(dir, gone)); !os.IsNotExist(err) {
+				t.Fatalf("the %s was recreated: %v", name, err)
+			}
+		})
+	}
+}
+
 // Pro review of #964 (P2): a mailbox an older amq made has an inbox but no
 // receipts/; delivery completes its layout instead of refusing it.
 func TestMailboxDeliveryCompletesAnOlderMailbox(t *testing.T) {
@@ -430,53 +496,21 @@ func TestMailboxCancelBeforeDeliveryPublishesNothing(t *testing.T) {
 }
 
 // Codex #895 r2 P1: a cancel while the publish lock was held still
-// delivered the prompt once the lock was released.
+// delivered the prompt once the lock was released. The claim is now created
+// inside the locked operation, so the re-check is exercised there.
 func TestMailboxCancelWhilePublishLockHeldPublishesNothing(t *testing.T) {
 	s, root := mailboxServer(t)
-	eventID := strings.Repeat("6", 64)
 	turn := newTurn()
-	lockPath := filepath.Join(s.cfg.StateDir, "remote-events", eventID+".mailbox.lock")
-	claimPath := filepath.Join(s.cfg.StateDir, "remote-events", eventID+".mailbox.json")
-	if err := os.MkdirAll(filepath.Dir(lockPath), 0o700); err != nil {
-		t.Fatal(err)
+	s.mu.Lock()
+	if turn.settleLocked("session_cancelled") {
+		close(turn.done)
 	}
-	finished := make(chan *rpcError, 1)
-	if err := lock.WithExclusiveFileLock(lockPath, func() error {
-		go func() {
-			_, rpcErr := s.runRemote("s", "hello", eventID, turn, func(any) error { return nil })
-			finished <- rpcErr
-		}()
-		deadline := time.After(time.Second)
-		for {
-			if _, err := os.Lstat(claimPath); err == nil {
-				break
-			}
-			select {
-			case <-deadline:
-				t.Fatal("claim not created")
-			default:
-				time.Sleep(time.Millisecond)
-			}
-		}
-		if ids := inboxPrompts(t, root); len(ids) != 0 {
-			t.Fatalf("message published while lock held")
-		}
-		s.mu.Lock()
-		if turn.settleLocked("session_cancelled") {
-			close(turn.done)
-		}
-		s.mu.Unlock()
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case rpcErr := <-finished:
-		if rpcErr != nil {
-			t.Fatal(rpcErr)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("prompt did not finish")
+	s.mu.Unlock()
+	r := &remoteTurn{s: s, sessionID: "s", eventID: strings.Repeat("6", 64), turn: turn, meta: remoteMeta{Target: "agent"}}
+	b := binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: "agent"}
+	claim, err := s.publishClaimed(r, time.Now().Add(time.Second), b, "t", "hello")
+	if !errors.Is(err, errStoppedBeforePublish) || claim.MessageID == "" {
+		t.Fatalf("claim=%+v err=%v", claim, err)
 	}
 	if ids := inboxPrompts(t, root); len(ids) != 0 {
 		t.Fatalf("cancelled before publication, but inbox has %d prompt(s)", len(ids))
