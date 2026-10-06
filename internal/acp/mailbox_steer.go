@@ -99,7 +99,9 @@ func (s *Server) mailboxSteering(params json.RawMessage) (any, *rpcError) {
 	}
 	s.mu.Unlock()
 
-	// A replayed steer event follows its claim, whatever turn is open now.
+	// The first look picks the lock: a replayed steer event follows its
+	// claim's parent, whatever turn is open now. Every decision is taken
+	// again from state read under that lock.
 	claim, replay, err := s.loadSteerClaim(eventID)
 	if err != nil {
 		return nil, newRPCError(codeInternalError, "steer claim: %v", err)
@@ -112,22 +114,21 @@ func (s *Server) mailboxSteering(params json.RawMessage) (any, *rpcError) {
 		parent = target.event
 	}
 	var delivery Delivery
-	err = s.withEventPostLock(parent, func() error {
-		if !replay {
-			if s.eventFinal(parent) {
-				return errSteerTurnOver
-			}
-			if claim, replay, err = s.claimSteer(eventID, *target); err != nil {
-				return err
-			}
+	next := parent
+	// A claim never changes once created, so the parent moves at most once.
+	for range 2 {
+		parent = next
+		err = s.withEventPostLock(parent, func() error {
+			delivery, claim, replay, next, err = s.decideSteer(parent, eventID, text, target)
+			return err
+		})
+		if err != nil || next == parent {
+			break
 		}
-		// A replay whose message is missing writes it only while its
-		// event is still open.
-		stillOpen := func() bool { return !replay || !s.eventFinal(claim.ParentEvent) }
-		delivery, err = writeSteerOnce(claim, eventID, text, stillOpen)
-		return err
-	})
+	}
 	switch {
+	case err == nil && next != parent:
+		return nil, newRPCError(codeInternalError, "steer event %s changed its parent event", eventID)
 	case errors.Is(err, errSteerTurnOver):
 		return nil, errMailboxSteering()
 	case err != nil:
@@ -139,6 +140,33 @@ func (s *Server) mailboxSteering(params json.RawMessage) (any, *rpcError) {
 		outcome = SteeringDuplicate
 	}
 	return newSteeringResult(outcome, delivery), nil
+}
+
+// decideSteer decides a steer under parent's post lock, from state read
+// under it (review of #965 r2). It reloads the steer event's claim: when the
+// claim names another parent, it returns that parent and decides nothing,
+// so the caller retakes the right lock. A claimed message already in the
+// handle's inbox is a duplicate even once the parent is final; a missing
+// one is written only while the parent has no final marker. Only with no
+// claim is the steer fresh, and then it needs this turn's target.
+func (s *Server) decideSteer(parent, eventID, text string, target *mailboxSteerTarget) (Delivery, steerClaim, bool, string, error) {
+	claim, replay, err := s.loadSteerClaim(eventID)
+	if err != nil {
+		return Delivery{}, claim, replay, parent, err
+	}
+	if !replay {
+		if target == nil || target.event != parent || s.eventFinal(parent) {
+			return Delivery{}, claim, false, parent, errSteerTurnOver
+		}
+		if claim, replay, err = s.claimSteer(eventID, *target); err != nil {
+			return Delivery{}, claim, replay, parent, err
+		}
+	}
+	if replay && claim.ParentEvent != parent {
+		return Delivery{}, claim, replay, claim.ParentEvent, nil
+	}
+	delivery, err := writeSteerOnce(claim, eventID, text, func() bool { return !s.eventFinal(parent) })
+	return delivery, claim, replay, parent, err
 }
 
 // withEventPostLock runs fn under the event's post lock (remote-events/
