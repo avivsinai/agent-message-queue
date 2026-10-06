@@ -93,6 +93,9 @@ func TestReplayedSteerStaysWithItsFirstBinding(t *testing.T) {
 		{Carrier: binding.CarrierMailbox, Root: rootA, Handle: "agent", Name: "a"},
 		{Carrier: binding.CarrierMailbox, Root: rootB, Handle: "agent", Name: "b"},
 	} {
+		if err := fsq.EnsureAgentDirs(b.Root, b.Handle); err != nil {
+			t.Fatal(err)
+		}
 		if err := binding.WriteNamed(b); err != nil {
 			t.Fatal(err)
 		}
