@@ -4,8 +4,10 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Bead agent-message-queue-fa4 (Pro review of #956, #962): the owner key goes
@@ -127,4 +129,77 @@ func TestBuzzCLIOnlyVerifiedBundle(t *testing.T) {
 		}
 		refused(t, link, home)
 	})
+}
+
+// Review of #961 r8 (agent-message-queue-bdq): a Buzz CLI whose child kept
+// stderr open held cmd.Run, and with it the event's post lock, past the
+// post budget, so finals, cancels and the sweep blocked. WaitDelay ends the
+// wait inside the budget.
+func TestStuckBuzzCLIReleasesThePostLock(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("needs a POSIX shell")
+	}
+	dir := canonicalTempDir(t)
+	started, pids := filepath.Join(dir, "started"), filepath.Join(dir, "pids")
+	cli := filepath.Join(dir, "buzz")
+	// Both sleeps inherit stderr and outlive the killed shell. Cleanup kills
+	// the ones it knows; a sleep the shell could not record ends by itself.
+	script := "#!/bin/sh\nsleep 5 &\necho $! >> '" + pids + "'\nsleep 5 &\necho $! >> '" + pids + "'\n: > '" + started + "'\nwait\n"
+	if err := os.WriteFile(cli, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		raw, _ := os.ReadFile(pids)
+		for _, field := range strings.Fields(string(raw)) {
+			if pid, err := strconv.Atoi(field); err == nil {
+				if p, err := os.FindProcess(pid); err == nil {
+					_ = p.Kill()
+				}
+			}
+		}
+	})
+	t.Setenv(envBuzzCLI, cli)
+	saved := buzzIdentity
+	buzzIdentity = []string{"BUZZ_PRIVATE_KEY=test"}
+
+	s, _ := mailboxServer(t)
+	s.cfg.PostTimeout = time.Second
+	eventID := strings.Repeat("8", 63) + "a"
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.postOnce(eventID, postStatus, []byte("x\n"), "6eff60e4-32ab-48ec-bd3d-f4c97872f370", "status")
+	}()
+	// The post reads buzzIdentity, so it is restored only after the post
+	// returns.
+	t.Cleanup(func() {
+		<-done
+		buzzIdentity = saved
+	})
+
+	// Measure from the moment the fake CLI runs, so start latency under load
+	// is not part of the bound. If the post ends before the CLI ever runs,
+	// the lock is already free and the bound holds from then.
+	deadline, hasDeadline := t.Deadline()
+	for {
+		if _, err := os.Stat(started); err == nil {
+			break
+		}
+		select {
+		case <-done:
+		case <-time.After(10 * time.Millisecond):
+			if hasDeadline && time.Now().After(deadline.Add(-5*time.Second)) {
+				t.Fatal("the fake CLI never started")
+			}
+			continue
+		}
+		break
+	}
+	begin := time.Now()
+	if _, err := s.reserveFinal(eventID, []byte(`{"reply_id":"r"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if took := time.Since(begin); took > s.cfg.PostTimeout+time.Second {
+		t.Fatalf("the final waited %v for the status post's lock", took)
+	}
 }

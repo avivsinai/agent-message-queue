@@ -682,7 +682,7 @@ func TestRedeliveryPostsEachKindOnce(t *testing.T) {
 		var posts []string
 		saved := postAnswer
 		t.Cleanup(func() { postAnswer = saved })
-		postAnswer = func(_, content string) error {
+		postAnswer = func(_, content string, _ time.Duration) error {
 			posts = append(posts, content)
 			return nil
 		}
@@ -733,7 +733,7 @@ func TestUncertainNoticeDoesNotHideTheAnswer(t *testing.T) {
 	var posts []string
 	saved := postAnswer
 	t.Cleanup(func() { postAnswer = saved })
-	postAnswer = func(_, content string) error {
+	postAnswer = func(_, content string, _ time.Duration) error {
 		posts = append(posts, content)
 		return nil
 	}
@@ -776,7 +776,7 @@ func TestRecoveredBusyRefusalDoesNotHideTheAnswer(t *testing.T) {
 	var posts []string
 	saved := postAnswer
 	t.Cleanup(func() { postAnswer = saved })
-	postAnswer = func(_, content string) error {
+	postAnswer = func(_, content string, _ time.Duration) error {
 		posts = append(posts, content)
 		return nil
 	}

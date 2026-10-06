@@ -9,14 +9,13 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
-	"github.com/avivsinai/agent-message-queue/internal/thread"
 )
 
 // ProtocolVersion is the live ACP bridge version. Prompt turns remain open
@@ -120,6 +119,12 @@ type turnState struct {
 	// channel is the Buzz channel the prompt came from ("" when it did not
 	// come from Buzz); the owner-facing text is posted there.
 	channel string
+	// mailboxEvent is the event id of a binding-mode turn, registered when
+	// the prompt is accepted and cleared once the turn routes to a native
+	// binding. A cancel decides that event's durable outcome before it
+	// settles the turn, so a mailbox Stop is never acknowledged before it is
+	// recorded.
+	mailboxEvent string
 }
 
 // settleLocked decides the turn's outcome if it is still open; it reports
@@ -146,6 +151,8 @@ type Server struct {
 	// begins after this point never had a connected client, so it refuses
 	// immediately instead of waiting out the bounded timeout.
 	streamClosed bool
+	// late is the late-reply sweep state (binding mode only).
+	late lateReplySweep
 }
 
 // NewServer builds a server bound to one already authenticated routing context.
@@ -166,6 +173,9 @@ func NewServer(cfg Config, version string) *Server {
 	}
 	if cfg.HeartbeatInterval <= 0 {
 		cfg.HeartbeatInterval = defaultHeartbeatInterval
+	}
+	if cfg.PostTimeout <= 0 {
+		cfg.PostTimeout = defaultPostTimeout
 	}
 	return &Server{
 		cfg:      cfg,
@@ -206,6 +216,9 @@ func (s *Server) Serve(in io.Reader, out io.Writer) error {
 	s.mu.Lock()
 	s.streamClosed = false
 	s.mu.Unlock()
+	if s.cfg.RemoteBinding {
+		defer s.startLateReplySweep()()
+	}
 	scanner := bufio.NewScanner(in)
 	scanner.Buffer(make([]byte, 0, 64*1024), format.MaxMessageSize+1024)
 	writer := newResponseWriter(out)
@@ -713,6 +726,9 @@ func (s *Server) beginPrompt(params json.RawMessage) (func(emit func(any) error)
 	session, turn, rpcErr := s.beginTurnLocked(parsed.SessionID)
 	if turn != nil {
 		turn.channel = buzzChannel(text)
+		if s.cfg.RemoteBinding {
+			turn.mailboxEvent = eventID
+		}
 	}
 	s.mu.Unlock()
 	if rpcErr != nil {
@@ -795,8 +811,13 @@ func (s *Server) waitForReply(sessionID string, delivery Delivery, turn *turnSta
 		turn.settleLocked(outcome)
 		return turn.outcome
 	}
+	// The poll reads only inbox/new. Another consumer of cfg.Me may drain the
+	// reply to cur first, so each heartbeat also reads cur.
+	inboxNew, inboxCur := newInboxScan(fsq.AgentInboxNew(s.cfg.Root, s.cfg.Me)), newInboxScan(fsq.AgentInboxCur(s.cfg.Root, s.cfg.Me))
+	scan := inboxNew
 	for {
-		reply, found, err := s.replyForDelivery(delivery)
+		reply, found, err := s.replyForDelivery(delivery, scan)
+		scan = inboxNew
 		if err != nil {
 			return nil, newRPCError(codeInternalError, "poll AMQ thread %s: %v", delivery.Thread, err)
 		}
@@ -808,7 +829,7 @@ func (s *Server) waitForReply(sessionID string, delivery Delivery, turn *turnSta
 				return nil, newRPCError(codeInternalError, "emit ACP reply update: %v", err)
 			}
 			result := turnResult(delivery, "replied", reply)
-			result.Meta.AMQ.Posted = publish(turn.channel, reply)
+			result.Meta.AMQ.Posted = s.publish(turn.channel, reply)
 			return result, nil
 		}
 
@@ -819,6 +840,7 @@ func (s *Server) waitForReply(sessionID string, delivery Delivery, turn *turnSta
 			return turnResult(delivery, settle("reply_timeout"), ""), nil
 		case <-poll.C:
 		case <-heartbeat.C:
+			scan = inboxCur
 			if err := emitText(emit, sessionID, "agent_thought_chunk", fmt.Sprintf("Still waiting for a reply from %s on AMQ thread %s.", s.cfg.To, delivery.Thread)); err != nil {
 				return nil, newRPCError(codeInternalError, "emit ACP heartbeat: %v", err)
 			}
@@ -854,33 +876,27 @@ func turnResult(delivery Delivery, outcome, reply string) promptResult {
 	}
 }
 
-// replyForDelivery returns the freshest reply from the configured peer that
-// refs this prompt and was created no earlier than it. Stale or thread-rent messages are
-// never picked up; a malformed unrelated mailbox item does not fail the poll.
-func (s *Server) replyForDelivery(delivery Delivery) (string, bool, error) {
-	entries, err := thread.Collect(s.cfg.Root, delivery.Thread, []string{s.cfg.Me, s.cfg.To}, true, func(_ string, _ error) error {
-		return nil
-	})
+// replyForDelivery returns the freshest reply from the configured peer in
+// one box of cfg.Me's inbox that refs this prompt and was created no earlier
+// than it. It never moves a file: other consumers drain cfg.Me. Stale or
+// thread-rent messages are never picked up; a malformed unrelated mailbox
+// item does not fail the poll.
+func (s *Server) replyForDelivery(delivery Delivery, scan *inboxScan) (string, bool, error) {
+	// Only a reply that refs this turn's prompt answers it. Time and thread
+	// alone let a late answer to a cancelled prompt complete the next one
+	// (codex ebo PR2 consult). amq reply sets refs to the answered message
+	// plus its refs, so a reply to an in-turn steer, which refs the prompt,
+	// also qualifies.
+	hits, err := scan.replies(s.cfg.To, delivery.Thread, delivery.MessageID, delivery.Created)
 	if err != nil {
 		return "", false, err
 	}
-	for index := len(entries) - 1; index >= 0; index-- {
-		entry := entries[index]
-		if entry.From != s.cfg.To || entry.RawTime.IsZero() || entry.RawTime.Before(delivery.Created) {
+	for index := len(hits) - 1; index >= 0; index-- {
+		msg, err := format.ReadMessageFile(filepath.Join(scan.dir, hits[index].filename))
+		if err != nil || strings.TrimSpace(msg.Body) == "" {
 			continue
 		}
-		// Only a reply that refs this turn's prompt answers it. Time and
-		// thread alone let a late answer to a cancelled prompt complete the
-		// next one (codex ebo PR2 consult). amq reply sets refs to the
-		// answered message plus its refs, so a reply to an in-turn steer,
-		// which refs the prompt, also qualifies.
-		if !slices.Contains(entry.Refs, delivery.MessageID) {
-			continue
-		}
-		if strings.TrimSpace(entry.Body) == "" {
-			continue
-		}
-		return strings.TrimRight(entry.Body, "\n"), true, nil
+		return strings.TrimRight(msg.Body, "\n"), true, nil
 	}
 	return "", false, nil
 }
@@ -935,12 +951,30 @@ func (s *Server) cancel(params json.RawMessage) (any, *rpcError) {
 		return nil, err
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	session, ok := s.sessions[parsed.SessionID]
 	if !ok {
+		s.mu.Unlock()
 		return nil, newRPCError(codeInvalidParams, "unknown sessionId %q", parsed.SessionID)
 	}
-	if t := session.turn; t != nil && t.settleLocked("session_cancelled") {
+	t, event := session.turn, ""
+	if t != nil && t.outcome == "" {
+		event = t.mailboxEvent
+	}
+	s.mu.Unlock()
+	// A mailbox cancel is accepted only once it is the event's durable
+	// outcome; if a reply already is, the turn returns that reply.
+	if event != "" {
+		final, _, err := s.decideOutcome(event, mailboxOutcome{Cancelled: true})
+		if err != nil {
+			return nil, newRPCError(codeInternalError, "record cancel: %v", err)
+		}
+		if !final.Cancelled {
+			return struct{}{}, nil
+		}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if t != nil && session.turn == t && t.settleLocked("session_cancelled") {
 		close(t.done)
 	}
 	return struct{}{}, nil
