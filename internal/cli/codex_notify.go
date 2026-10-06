@@ -105,14 +105,22 @@ func defaultRunOperatorCodexNotify(ctx context.Context, name string, args []stri
 	return command.Run()
 }
 
+// codexHomeDir is CODEX_HOME, or ~/.codex.
+func codexHomeDir() (string, error) {
+	if codexHome := strings.TrimSpace(os.Getenv("CODEX_HOME")); codexHome != "" {
+		return codexHome, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve Codex home: %w", err)
+	}
+	return filepath.Join(home, ".codex"), nil
+}
+
 func loadOperatorCodexNotify() ([]string, error) {
-	codexHome := strings.TrimSpace(os.Getenv("CODEX_HOME"))
-	if codexHome == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return nil, fmt.Errorf("resolve Codex home: %w", err)
-		}
-		codexHome = filepath.Join(home, ".codex")
+	codexHome, err := codexHomeDir()
+	if err != nil {
+		return nil, err
 	}
 	raw, err := os.ReadFile(filepath.Join(codexHome, "config.toml"))
 	if os.IsNotExist(err) {
