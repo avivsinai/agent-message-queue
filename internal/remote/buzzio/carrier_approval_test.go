@@ -97,6 +97,59 @@ func TestApprovalMessageAnsweredByReaction(t *testing.T) {
 	}
 }
 
+// 611.42.7: the owner typed ✅ as a message; it became a new prompt and was
+// refused busy while the approval waited (live, 2026-10-06). A typed yes or
+// no answers the target's one pending approval, as the reaction does.
+func TestApprovalAnsweredByTypedReply(t *testing.T) {
+	var owner, body [32]byte
+	_, _ = rand.Read(owner[:])
+	_, _ = rand.Read(body[:])
+	b := Binding{Owner: nostr.GetPublicKey(owner).Hex(), Body: nostr.GetPublicKey(body).Hex(), Channel: "dm-1", Target: "cx", RelayHost: "relay", NativeSession: "thread-1"}
+	ledger, _ := OpenLedger(t.TempDir())
+	var ref string
+	var answered *protocol.Command
+	pendingID := ""
+	c := NewCarrier(ledger, b, body, ownerGrant(t, owner, b.Body, KindDM, KindEdit), fixedIdentity("thread-1"), func(cmd *protocol.Command, src core.Source) (any, error) {
+		switch cmd.Op {
+		case protocol.OpSessionInspect:
+			s := protocol.Session{TargetID: "cx", Epoch: "e1"}
+			if pendingID != "" {
+				s.ActiveRequestRef, s.PendingInteraction = &ref, &pendingID
+			}
+			return s, nil
+		case protocol.OpRequestSubmit:
+			ref = protocol.EncodeRef(src.Host, cmd.TargetID, cmd.RequestID)
+			return protocol.Reply{Snapshot: protocol.Snapshot{RequestRef: ref, Revision: 1, State: protocol.StateRunning}}, nil
+		case protocol.OpInteractionRespond:
+			answered = cmd
+			return protocol.Reply{Outcome: protocol.Outcome{Op: protocol.OpInteractionRespond}}, nil
+		}
+		t.Fatalf("unexpected op %s", cmd.Op)
+		return nil, nil
+	})
+	now := time.Now()
+	c.now = func() time.Time { return now }
+	dm := ownerEvent(t, owner, "dm-1", "touch a file", now)
+	if err := c.Ingest(dm); err != nil {
+		t.Fatal(err)
+	}
+	pending := &protocol.Interaction{InteractionID: "item-7", Kind: "approval", Prompt: "touch a\nin /repo", Options: []string{"accept", "cancel"}, RemoteAnswer: true, ApproveOption: "accept", RejectOption: "cancel"}
+	now = now.Add(time.Second)
+	if err := c.Publish(protocol.Snapshot{RequestRef: ref, Epoch: "e1", Revision: 2, State: protocol.StateRunning, Interaction: pending}, c.source(dm.ID.Hex(), "").Origin); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Flush(context.Background(), func(context.Context, nostr.Event) error { return nil }, nil); err != nil {
+		t.Fatal(err)
+	}
+	pendingID = "item-7"
+	if err := c.Ingest(ownerEvent(t, owner, "dm-1", "yes", now)); err != nil {
+		t.Fatal(err)
+	}
+	if answered == nil || answered.RequestRef != ref || answered.InteractionID != "item-7" || answered.Option != "accept" {
+		t.Fatalf("respond command = %+v, want accept for item-7 of %s", answered, ref)
+	}
+}
+
 // PR #919 review: the ledger outlives a share binding, and an approval
 // posted under the old binding was answered by a reaction under the new
 // one. Only the binding that submitted the request answers its approvals.

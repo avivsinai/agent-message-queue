@@ -275,6 +275,17 @@ func (c *Carrier) ingest(evt nostr.Event, normalize func(nostr.Event, Binding, t
 	if err := c.fence(); err != nil {
 		return c.settleAnswer(evt, Settlement{Op: n.Op, State: "refused"}, err.Error())
 	}
+	if n.Op == OpSubmit {
+		if gesture := typedAnswer(n.Text); gesture != "" {
+			if msgID, appr, ok, err := c.openApproval(); err != nil {
+				return err
+			} else if ok {
+				// A typed answer is the same decision as the reaction on the
+				// approval message (611.42.7).
+				return c.answerApproval(evt, msgID, appr, gesture)
+			}
+		}
+	}
 	claim := c.claimFor(evt, n.Op, n.RequestID, "", n.NotAfter, nil)
 	if n.Op == OpSubmit {
 		// The epoch is fixed at first sight and stored in the claim, so a
@@ -634,6 +645,39 @@ func (c *Carrier) Publish(snap protocol.Snapshot, origin map[string]string) erro
 // fails safe and takes any of the usual refusals.
 const approveReaction = "✅"
 
+// typedAnswer maps an owner's typed reply to an approval gesture, or "".
+func typedAnswer(text string) string {
+	switch strings.ToLower(strings.TrimSpace(text)) {
+	case "✅", "yes", "y", "approve":
+		return approveReaction
+	case "❌", "no", "n", "reject":
+		return "❌"
+	}
+	return ""
+}
+
+// openApproval is the approval message of the target's one pending
+// interaction, when this carrier posted one that can still be answered.
+func (c *Carrier) openApproval() (string, Approval, bool, error) {
+	s, err := c.inspect()
+	if err != nil || s.ActiveRequestRef == nil || s.PendingInteraction == nil {
+		return "", Approval{}, false, nil
+	}
+	posted, ok, err := c.ledger.Prepared(approvalKey(*s.ActiveRequestRef, *s.PendingInteraction))
+	if err != nil || !ok {
+		return "", Approval{}, false, err
+	}
+	var msg nostr.Event
+	if err := json.Unmarshal(posted.Event, &msg); err != nil {
+		return "", Approval{}, false, err
+	}
+	appr, ok, err := c.ledger.ApprovalFor(msg.ID.Hex())
+	if err != nil || !ok || appr.Disabled {
+		return "", Approval{}, false, err
+	}
+	return msg.ID.Hex(), appr, true, nil
+}
+
 func rejectReaction(gesture string) bool {
 	return gesture == "❌" || gesture == "👎" || gesture == "-"
 }
@@ -797,11 +841,11 @@ func approvalText(a Approval, outcome string) string {
 	case a.Disabled:
 		b.WriteString("\n\nIt can no longer be answered from Buzz. Answer in the terminal.")
 	case a.ApproveOption != "" && a.RejectOption != "":
-		b.WriteString("\n\nReact ✅ to approve or ❌ to reject. The first answer, here or in the terminal, wins.")
+		b.WriteString("\n\nReact ✅ or reply yes to approve; react ❌ or reply no to reject. The first answer, here or in the terminal, wins.")
 	case a.ApproveOption != "":
-		b.WriteString("\n\nReact ✅ to approve, or answer in the terminal. The first answer wins.")
+		b.WriteString("\n\nReact ✅ or reply yes to approve, or answer in the terminal. The first answer wins.")
 	case a.RejectOption != "":
-		b.WriteString("\n\nReact ❌ to reject, or answer in the terminal. The first answer wins.")
+		b.WriteString("\n\nReact ❌ or reply no to reject, or answer in the terminal. The first answer wins.")
 	default:
 		b.WriteString("\n\nAnswer in the terminal.")
 	}

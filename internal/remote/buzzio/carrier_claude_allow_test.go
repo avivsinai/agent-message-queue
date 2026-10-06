@@ -24,7 +24,7 @@ const allowDecision = `{"hookSpecificOutput":{"hookEventName":"PermissionRequest
 // approval ends answered with allow.
 func TestClaudeApprovalAllowedWithOwnerSignedReaction(t *testing.T) {
 	e := newClaudeApprovalE2EWith(t, true, "go test ./...")
-	if !strings.Contains(e.msg.Content, "React ✅ to approve") || !strings.Contains(e.msg.Content, "Interaction: "+e.iid) {
+	if !strings.Contains(e.msg.Content, "React ✅ or reply yes to approve") || !strings.Contains(e.msg.Content, "Interaction: "+e.iid) {
 		t.Fatalf("approval message = %q, want ✅ offered and the interaction shown", e.msg.Content)
 	}
 	if err := e.c.IngestReaction(e.reaction(e.owner, "✅", e.msg.ID.Hex(), e.advance())); err != nil {
@@ -319,7 +319,7 @@ func (e *claudeApprovalE2E) deletion(key [32]byte, kind nostr.Kind, tags nostr.T
 // trailerEdit is the approval message with only its trailer changed.
 func (e *claudeApprovalE2E) trailerEdit() string {
 	head, _, _ := strings.Cut(e.msg.Content, "\n\nReact ")
-	return head + "\n\nReact ❌ to reject, or answer in the terminal. The first answer wins."
+	return head + "\n\nReact ❌ or reply no to reject, or answer in the terminal. The first answer wins."
 }
 
 // replied reports a sent DM row that contains text.
