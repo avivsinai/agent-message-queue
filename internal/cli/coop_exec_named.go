@@ -162,6 +162,13 @@ func startCodexOnNamedDaemonThread(cmdName string, agentArgs []string, name stri
 	if !codexTrustsDir(codexHome, cwd) {
 		return nil, false
 	}
+	// With the feature off the TUI's thread/resume carries no developer
+	// instructions (tui/src/app_server_session.rs:2130-2132,
+	// terminal_visualization_instructions.rs:14-19), so a thread AMQ created
+	// matches a TUI start whether the daemon reloads it or not.
+	if codexTerminalInstructionsEnabled(codexHome, cwd) {
+		return nil, false
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), codexDaemonNamingTimeout)
 	defer cancel()
 	id, err := codex.StartNamedThread(ctx, sock, cwd, name)

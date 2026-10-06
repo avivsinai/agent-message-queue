@@ -40,6 +40,40 @@ func codexTrustsDir(codexHome, dir string) bool {
 	return false
 }
 
+// codexTerminalInstructionsEnabled reports whether Codex may turn on the
+// terminal_visualization_instructions feature (codex-cli 0.160
+// features/src/lib.rs:1643-1647, off by default; read from the [features]
+// table of the merged config, core/src/config/mod.rs:3393-3401). With it on,
+// the TUI's thread/resume carries developer instructions that a daemon thread
+// AMQ created may not take. It checks $CODEX_HOME/config.toml and every
+// .codex/config.toml from dir up, a superset of the project layers Codex
+// merges; an unreadable file counts as enabled.
+func codexTerminalInstructionsEnabled(codexHome, dir string) bool {
+	files := []string{filepath.Join(codexHome, "config.toml")}
+	for d := dir; ; d = filepath.Dir(d) {
+		files = append(files, filepath.Join(d, ".codex", "config.toml"))
+		if filepath.Dir(d) == d {
+			break
+		}
+	}
+	for _, file := range files {
+		raw, err := os.ReadFile(file)
+		if os.IsNotExist(err) {
+			continue
+		}
+		var config struct {
+			Features map[string]any `toml:"features"`
+		}
+		if err != nil || toml.Unmarshal(raw, &config) != nil {
+			return true
+		}
+		if enabled, _ := config.Features["terminal_visualization_instructions"].(bool); enabled {
+			return true
+		}
+	}
+	return false
+}
+
 func codexTrustKeys(path string) []string {
 	if canonical, err := filepath.EvalSymlinks(path); err == nil && canonical != path {
 		return []string{canonical, path}
@@ -165,7 +199,7 @@ func codexReadGitMetadata(path string) string {
 	if err != nil || len(raw) > codexMaxGitMetadataBytes {
 		return ""
 	}
-	return string(bytes.TrimSpace(raw))
+	return string(codexTrimASCII(raw))
 }
 
 // codexReadGitdirFile reads a "gitdir: <path>" pointer, relative to the
@@ -176,11 +210,18 @@ func codexReadGitdirFile(path string) string {
 	if !ok {
 		return ""
 	}
-	target = bytes.TrimSpace(target)
+	target = codexTrimASCII(target)
 	if len(target) == 0 {
 		return ""
 	}
 	return codexJoinNative(filepath.Dir(path), string(target))
+}
+
+// codexTrimASCII trims what Rust's trim_ascii trims (u8::is_ascii_whitespace:
+// space, \t, \n, \x0C, \r) and nothing else, as Codex does when it reads git
+// metadata.
+func codexTrimASCII(b []byte) []byte {
+	return bytes.Trim(b, " \t\n\x0c\r")
 }
 
 func codexJoinNative(base, path string) string {
