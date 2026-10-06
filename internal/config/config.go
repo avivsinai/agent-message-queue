@@ -17,23 +17,51 @@ type Config struct {
 	Agents     []string `json:"agents"`
 }
 
+// WriteConfig writes <root>/meta/config.json (path), taking the same config
+// lock EnsureAgent holds, so the existence check and the write cannot
+// interleave with a concurrent roster registration: without it, an
+// `amq init --force` could land between a registration's read and write and
+// be silently undone.
 func WriteConfig(path string, cfg Config, force bool) error {
-	if !force {
-		if _, err := os.Stat(path); err == nil {
-			return fmt.Errorf("config already exists at %s (use --force to overwrite)", path)
-		}
-	}
-	// Review-823-r1 P2-1: every config.json writer emits the SAME layout
-	// (sorted keys via MarshalPreservingUnknowns with an empty original),
-	// so `amq init` then `amq setup` is not a phantom roster change from
-	// struct-order vs sorted-order bytes alone.
-	data, err := MarshalPreservingUnknowns(nil, cfg)
+	identity, err := fsq.SnapshotDeliveryRoot(filepath.Dir(filepath.Dir(path)))
 	if err != nil {
-		return err
+		return fmt.Errorf("snapshot root: %w", err)
 	}
-	data = append(data, '\n')
-	_, err = fsq.WriteFileAtomic(filepath.Dir(path), filepath.Base(path), data, 0o600)
-	return err
+	root, err := fsq.OpenDeliveryRoot(filepath.Dir(filepath.Dir(path)), identity)
+	if err != nil {
+		return fmt.Errorf("open root: %w", err)
+	}
+	defer func() { _ = root.Close() }()
+	return writeConfigOn(root, cfg, force)
+}
+
+// writeConfigOn writes config.json through the root capability, under the
+// config lock, for both the existence check and the write, so a directory
+// swapped in at the path after the root was opened is never touched.
+func writeConfigOn(root *fsq.DeliveryRoot, cfg Config, force bool) error {
+	return root.WithConfigLock(func(r *fsq.DeliveryRoot) error {
+		if !force {
+			// Stat, not a read: a FIFO or device at the path must not block
+			// the writer while it holds the config lock.
+			_, err := r.Stat("meta/config.json")
+			if err == nil {
+				return fmt.Errorf("config already exists at %s (use --force to overwrite)", filepath.Join(r.Base(), "meta", "config.json"))
+			}
+			if !os.IsNotExist(err) {
+				return fmt.Errorf("stat config: %w", err)
+			}
+		}
+		// Review-823-r1 P2-1: every config.json writer emits the SAME layout
+		// (sorted keys via MarshalPreservingUnknowns with an empty original),
+		// so `amq init` then `amq setup` is not a phantom roster change from
+		// struct-order vs sorted-order bytes alone.
+		data, err := MarshalPreservingUnknowns(nil, cfg)
+		if err != nil {
+			return err
+		}
+		_, err = r.WriteFileAtomic("meta", "config.json", append(data, '\n'), 0o600)
+		return err
+	})
 }
 
 func LoadConfig(path string) (Config, error) {
@@ -77,6 +105,17 @@ func EnsureAgent(rootDir, handle string) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("open root: %w", err)
 	}
+	defer func() { _ = root.Close() }()
+	return EnsureAgentOn(root, handle)
+}
+
+// EnsureAgentOn is EnsureAgent through an already-authenticated root
+// capability, so a caller that checked the capability against a session pin
+// updates exactly the directory it checked.
+func EnsureAgentOn(root *fsq.DeliveryRoot, handle string) (bool, error) {
+	if err := fsq.ValidateHandle(handle); err != nil {
+		return false, fmt.Errorf("invalid handle %q: %w", handle, err)
+	}
 	// B2: guarded RMW via an exclusive advisory lock on meta/config.lock.
 	// The lock is held for the entire read-modify-write, so two concurrent
 	// EnsureAgent calls cannot lose a registration. This is the same
@@ -88,7 +127,7 @@ func EnsureAgent(rootDir, handle string) (bool, error) {
 		added bool
 		err   error
 	}
-	err = root.WithConfigLock(func(r *fsq.DeliveryRoot) error {
+	err := root.WithConfigLock(func(r *fsq.DeliveryRoot) error {
 		result.added, result.err = ensureAgentLocked(r, handle)
 		return result.err
 	})

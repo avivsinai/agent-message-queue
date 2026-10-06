@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/acp"
+	"github.com/avivsinai/agent-message-queue/internal/config"
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/lock"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
@@ -123,11 +125,41 @@ func attachMailbox(root, handle, name string, stdout io.Writer) (int, error) {
 		name = binding.SanitizeName(handle + "-" + projectOf(root))
 	}
 	b := binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: handle, Display: handle, Name: name}
+	if err := listBuzzInRoster(root); err != nil {
+		return protocol.ExitActionRequired, err
+	}
 	if err := writeBinding(b, explicit); err != nil {
 		return protocol.ExitActionRequired, err
 	}
 	say(stdout, "Connected: AMQ handle %s at %s as session %s. DM its Buzz agent \"AMQ: %s\".", handle, root, name, name)
 	return 0, nil
+}
+
+// listBuzzInRoster adds the Buzz agent's handle to the root's config.json
+// agents list, so a reply to a Buzz DM routes without a "may not be read"
+// warning or a --strict refusal (bead agent-message-queue-za4). A root with
+// no config.json is left as it is, and a handle already listed is a no-op.
+// Only the mailbox attach calls it. The root is opened once as a capability,
+// authenticated against the inherited session pin, and updated through that
+// same capability, so a directory swapped in after the check is never written.
+func listBuzzInRoster(root string) error {
+	identity, err := fsq.SnapshotDeliveryRoot(root)
+	if err != nil {
+		return err
+	}
+	dr, err := fsq.OpenDeliveryRoot(root, identity)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = dr.Close() }()
+	if err := acp.VerifySessionPinOn(dr); err != nil {
+		return err
+	}
+	if _, err := dr.ReadFile("meta/config.json"); errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	_, err = config.EnsureAgentOn(dr, "buzz")
+	return err
 }
 
 // nativeBindingName is the binding name for a native attach and whether the

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/avivsinai/agent-message-queue/internal/config"
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/ipc"
 	"github.com/avivsinai/agent-message-queue/internal/remote/manifest"
@@ -147,6 +148,35 @@ func TestDetachNeedsAScope(t *testing.T) {
 	}
 	if all, _ := binding.List(); len(all) != 0 {
 		t.Fatalf("%d bindings after detach --all; want 0", len(all))
+	}
+}
+
+// Bead agent-message-queue-za4 (review F12): a reply to a Buzz DM warned
+// "may not be read" because attach never listed buzz in the root's roster.
+func TestAttachListsBuzzInTheRosterOnce(t *testing.T) {
+	root := canonicalTempDir(t)
+	if err := os.MkdirAll(filepath.Join(root, "meta"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := filepath.Join(root, "meta", "config.json")
+	if err := os.WriteFile(cfg, []byte(`{"version":1,"created_utc":"2026-01-01T00:00:00Z","agents":["claude"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if err := listBuzzInRoster(root); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := config.LoadConfig(cfg)
+	if err != nil || len(got.Agents) != 2 || got.Agents[1] != "buzz" {
+		t.Fatalf("agents = %v err=%v; want [claude buzz]", got.Agents, err)
+	}
+	bare := canonicalTempDir(t)
+	if err := listBuzzInRoster(bare); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(bare, "meta", "config.json")); err == nil {
+		t.Fatal("attach created a config.json in a root that had none")
 	}
 }
 
