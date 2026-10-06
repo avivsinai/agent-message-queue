@@ -134,6 +134,7 @@ func (s *Server) runMailbox(sessionID, text, eventID string, b binding.Binding, 
 		return nil, newRPCError(codeInternalError, "mailbox claim time: %v", err)
 	}
 	r.meta.State = DeliveryStateQueued
+	s.openMailboxSteering(turn, b, threadID, claim.MessageID)
 	if err := emitText(emit, sessionID, "agent_thought_chunk", fmt.Sprintf("Delivered to %s's AMQ inbox.", b.Handle)); err != nil {
 		return nil, newRPCError(codeInternalError, "emit ACP session update: %v", err)
 	}
