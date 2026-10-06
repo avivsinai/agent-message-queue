@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/acp"
+	"github.com/avivsinai/agent-message-queue/internal/config"
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/lock"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
@@ -33,10 +35,10 @@ const attachReadyTimeout = 20 * time.Second
 // in (bead agent-message-queue-611.31). Typing the command is the sharing
 // choice, so the invoking session is found exactly, never guessed from a
 // discovery list: Claude by its process ancestry, Codex by CODEX_THREAD_ID.
-func attach(args []string, stdout, stderr io.Writer) (int, error) {
+func attach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, error) {
 	fs := flag.NewFlagSet("attach", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	c := addCommon(fs)
+	c := addCommon(fs, probe...)
 	self := fs.Bool("self", false, "bind the session this command runs in")
 	nativeMode := fs.Bool("native", false, "drive the exact native session through amq-remote, not the AMQ mailbox")
 	me := fs.String("me", os.Getenv("AM_ME"), "AMQ handle of this session (default AM_ME)")
@@ -48,7 +50,7 @@ func attach(args []string, stdout, stderr io.Writer) (int, error) {
 		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "attach needs --self")
 	}
 	if !*nativeMode {
-		return attachMailbox(c.root, strings.TrimSpace(*me), strings.TrimSpace(*name), stdout)
+		return attachMailbox(c.root, strings.TrimSpace(*me), strings.TrimSpace(*name), c.json, stdout)
 	}
 	stateDir, err := c.stateDir()
 	if err != nil {
@@ -90,9 +92,14 @@ func attach(args []string, stdout, stderr io.Writer) (int, error) {
 	if display == "" {
 		display = session.DisplayName
 	}
-	nb := binding.Binding{Root: c.root, Target: cand.Target, NativeSession: native, Display: display, Name: nonEmpty(strings.TrimSpace(*name), binding.SanitizeName(cand.Target))}
-	if err := writeBinding(nb); err != nil {
+	bindName, explicit := nativeBindingName(*name, cand.Target)
+	nb := binding.Binding{Root: c.root, Target: cand.Target, NativeSession: native, Display: display, Name: bindName}
+	if err := writeBinding(nb, explicit); err != nil {
 		return protocol.ExitActionRequired, err
+	}
+	if c.json {
+		emitJSON(stdout, map[string]any{"connected": true, "name": nb.Name, "root": nb.Root, "target": nb.Target})
+		return 0, nil
 	}
 	say(stdout, "Connected: %s (%s) as session %s. DM its Buzz agent \"AMQ: %s\".", nonEmpty(display, cand.Target), cand.Target, nb.Name, nb.Name)
 	return 0, nil
@@ -102,7 +109,7 @@ func attach(args []string, stdout, stderr io.Writer) (int, error) {
 // agent-message-queue-611.36). Each DM becomes an AMQ message to the handle;
 // no endpoint, hook, or wake is required, because noticing the message is
 // the handle owner's business.
-func attachMailbox(root, handle, name string, stdout io.Writer) (int, error) {
+func attachMailbox(root, handle, name string, asJSON bool, stdout io.Writer) (int, error) {
 	if root == "" || handle == "" {
 		return protocol.ExitActionRequired, errors.New("this session is not an AMQ participant (AM_ROOT and AM_ME are unset); join AMQ, or use attach --self --native")
 	}
@@ -117,22 +124,77 @@ func attachMailbox(root, handle, name string, stdout io.Writer) (int, error) {
 	if err := acp.VerifySessionPin(filepath.Clean(root)); err != nil {
 		return protocol.ExitActionRequired, err
 	}
-	if name == "" {
+	explicit := name != ""
+	if !explicit {
 		name = binding.SanitizeName(handle + "-" + projectOf(root))
 	}
 	b := binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: handle, Display: handle, Name: name}
-	if err := writeBinding(b); err != nil {
+	if err := listBuzzInRoster(root); err != nil {
 		return protocol.ExitActionRequired, err
+	}
+	if err := writeBinding(b, explicit); err != nil {
+		return protocol.ExitActionRequired, err
+	}
+	if asJSON {
+		emitJSON(stdout, map[string]any{"connected": true, "name": name, "root": root, "handle": handle})
+		return 0, nil
 	}
 	say(stdout, "Connected: AMQ handle %s at %s as session %s. DM its Buzz agent \"AMQ: %s\".", handle, root, name, name)
 	return 0, nil
 }
 
+func emitJSON(w io.Writer, v any) {
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	_ = enc.Encode(v)
+}
+
+// listBuzzInRoster adds the Buzz agent's handle to the root's config.json
+// agents list, so a reply to a Buzz DM routes without a "may not be read"
+// warning or a --strict refusal (bead agent-message-queue-za4). A root with
+// no config.json is left as it is, and a handle already listed is a no-op.
+// Only the mailbox attach calls it. The root is opened once as a capability,
+// authenticated against the inherited session pin, and updated through that
+// same capability, so a directory swapped in after the check is never written.
+func listBuzzInRoster(root string) error {
+	identity, err := fsq.SnapshotDeliveryRoot(root)
+	if err != nil {
+		return err
+	}
+	dr, err := fsq.OpenDeliveryRoot(root, identity)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = dr.Close() }()
+	if err := acp.VerifySessionPinOn(dr); err != nil {
+		return err
+	}
+	if _, err := dr.ReadFile("meta/config.json"); errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	_, err = config.EnsureAgentOn(dr, "buzz")
+	return err
+}
+
+// nativeBindingName is the binding name for a native attach and whether the
+// caller chose it. The name and the choice come from one trimmed value, so a
+// whitespace-only --name is the default, never an explicit replacement.
+func nativeBindingName(flagValue, target string) (string, bool) {
+	trimmed := strings.TrimSpace(flagValue)
+	return nonEmpty(trimmed, binding.SanitizeName(target)), trimmed != ""
+}
+
 // writeBinding adds the named binding and removes any other binding for the
 // same session, so one session is one Buzz agent (bead
-// agent-message-queue-611.39).
-func writeBinding(b binding.Binding) error {
-	if err := binding.WriteNamed(b); err != nil {
+// agent-message-queue-611.39). A defaulted name never replaces another
+// session's binding (bead agent-message-queue-94w); an explicit --name
+// is the caller's choice and replaces.
+func writeBinding(b binding.Binding, explicitName bool) error {
+	write := binding.WriteNamedNew
+	if explicitName {
+		write = binding.WriteNamed
+	}
+	if err := write(b); err != nil {
 		return err
 	}
 	_, err := binding.RemoveMatching(func(o binding.Binding) bool { return o.Same(b) && o.Name != b.Name })
@@ -150,15 +212,28 @@ func projectOf(root string) string {
 	return filepath.Base(root)
 }
 
-// detach ends the binding. With --self it unbinds only when the binding
-// names this session, so one session's off never unbinds another.
-func detach(args []string, stdout, stderr io.Writer) (int, error) {
+// detach ends bindings. It needs a scope: --self unbinds only the binding
+// that names this session, so one session's off never unbinds another;
+// --name unbinds the binding of that name; --all unbinds every binding.
+func detach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, error) {
 	fs := flag.NewFlagSet("detach", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	c := addCommon(fs)
+	c := addCommon(fs, probe...)
 	self := fs.Bool("self", false, "unbind only if this session is the bound one")
+	name := fs.String("name", "", "unbind only the binding with this name")
+	all := fs.Bool("all", false, "unbind every binding")
 	if err := fs.Parse(args); err != nil {
 		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", err)
+	}
+	*name = strings.TrimSpace(*name)
+	scopes := 0
+	for _, set := range []bool{*self, *name != "", *all} {
+		if set {
+			scopes++
+		}
+	}
+	if scopes != 1 {
+		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "detach needs exactly one of --self, --name <name> or --all")
 	}
 	var match func(binding.Binding) bool
 	// A native binding made outside AMQ used a fallback root; detach finds it
@@ -195,12 +270,21 @@ func detach(args []string, stdout, stderr io.Writer) (int, error) {
 		mine := binding.Binding{Root: c.root, Target: target, NativeSession: native}
 		match = mine.Same
 	}
-	if match == nil {
+	if *name != "" {
+		match = func(b binding.Binding) bool { return b.Name == *name }
+	} else if match == nil {
 		match = func(binding.Binding) bool { return true }
 	}
 	removed, err := binding.RemoveMatching(match)
 	if err != nil {
 		return protocol.ExitActionRequired, err
+	}
+	if c.json {
+		if removed == nil {
+			removed = []string{}
+		}
+		emitJSON(stdout, map[string]any{"removed": removed})
+		return 0, nil
 	}
 	if len(removed) == 0 {
 		say(stdout, "Not connected.")

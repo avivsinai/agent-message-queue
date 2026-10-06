@@ -109,13 +109,13 @@ func runCoopExec(args []string) error {
 	} else if handled {
 		return nil
 	}
-	namedEnabled, err := resolveCoopNamedEnabled(flagWasVisited(fs, "named"), *namedFlag)
+	named, err := resolveCoopNamedEnabled(flagWasVisited(fs, "named"), *namedFlag)
 	if err != nil {
 		return err
 	}
 	if managedLaunchNonce != "" {
 		// Managed launches use the ticket's exact provider argv for naming.
-		namedEnabled = false
+		named.enabled = false
 	}
 	remaining := fs.Args()
 	if len(remaining) == 0 {
@@ -729,7 +729,7 @@ func runCoopExec(args []string) error {
 	// root has no session prefix and therefore uses only the agent handle.
 	namedLabel := coopNamedSessionLabel(sessionIdentity, agentHandle)
 	execStart := time.Now()
-	agentArgs, err = applyCoopNamedBeforeExecAt(namedEnabled, binaryPath, agentArgs, namedLabel, execStart)
+	agentArgs, err = applyCoopNamedBeforeExecAt(named, binaryPath, agentArgs, namedLabel, execStart)
 	if err != nil {
 		return err
 	}

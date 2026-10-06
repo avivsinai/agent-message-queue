@@ -8,6 +8,35 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.87.0](https://github.com/avivsinai/agent-message-queue/compare/v0.86.1...v0.87.0) (2026-10-06)
+
+
+### Features
+
+* **remote:** allow a Claude tool call from Buzz with the owner's signed reaction ([#936](https://github.com/avivsinai/agent-message-queue/issues/936)) ([2f2420d](https://github.com/avivsinai/agent-message-queue/commit/2f2420d4b8abb24b836b876656c46caa471e0f36))
+
+
+### Bug Fixes
+
+* **acp:** a late Buzz DM reply still reaches the DM once ([5f691c1](https://github.com/avivsinai/agent-message-queue/commit/5f691c13a0eaef586f44cccdc68864bdd045a6c2))
+* **acp:** a missing amq-remote model never falls back to another binding ([#954](https://github.com/avivsinai/agent-message-queue/issues/954)) ([007d14f](https://github.com/avivsinai/agent-message-queue/commit/007d14f86d3f2382b6a54037e2fe71fa9d7c5f9c))
+* **acp:** a redelivered Buzz event posts its reply once ([#959](https://github.com/avivsinai/agent-message-queue/issues/959)) ([6fa6174](https://github.com/avivsinai/agent-message-queue/commit/6fa6174700384922cdfa5b74c6d2a0b03d8d36fa))
+* **acp:** an open Buzz DM turn polls only new replies ([5f691c1](https://github.com/avivsinai/agent-message-queue/commit/5f691c13a0eaef586f44cccdc68864bdd045a6c2))
+* **acp:** give the owner's Buzz key only to a verified Buzz.app CLI or the explicit override ([#962](https://github.com/avivsinai/agent-message-queue/issues/962)) ([665a8a8](https://github.com/avivsinai/agent-message-queue/commit/665a8a842820ada75452ac2d8bf001628c7e2f33))
+* **acp:** prefer the Buzz.app CLI over PATH for the owner key ([#956](https://github.com/avivsinai/agent-message-queue/issues/956)) ([ba96347](https://github.com/avivsinai/agent-message-queue/commit/ba9634780272189dbec7d069a10cc26bc1753624))
+* **coop:** start an unknown CLI quietly when naming is only the default ([#949](https://github.com/avivsinai/agent-message-queue/issues/949)) ([0018a7d](https://github.com/avivsinai/agent-message-queue/commit/0018a7de343e2feeeea0ec04381fa0bca496e0f1))
+* **remote:** attach and detach honour --json ([#958](https://github.com/avivsinai/agent-message-queue/issues/958)) ([afa1de5](https://github.com/avivsinai/agent-message-queue/commit/afa1de575b99e8dd3deca63a2f446a313ebc9e4b))
+* **remote:** attach lists buzz in the root roster ([#955](https://github.com/avivsinai/agent-message-queue/issues/955)) ([4fdd058](https://github.com/avivsinai/agent-message-queue/commit/4fdd0583fb446027111f0345a964b324d29d4e69))
+* **remote:** attach refuses a taken binding name; detach needs a scope ([#953](https://github.com/avivsinai/agent-message-queue/issues/953)) ([d25b791](https://github.com/avivsinai/agent-message-queue/commit/d25b791b5978f7a4615585d9db2101c21dac1b6a))
+* **remote:** bind the Buzz DM and presence by flag after enrollment ([#947](https://github.com/avivsinai/agent-message-queue/issues/947)) ([fd8c323](https://github.com/avivsinai/agent-message-queue/commit/fd8c323fe279e50970018eeff05432d4a3ada9c6))
+* **remote:** Buzz setup steps need no Desktop restart ([#948](https://github.com/avivsinai/agent-message-queue/issues/948)) ([5c90f57](https://github.com/avivsinai/agent-message-queue/commit/5c90f579058e1576642f40c7d277992cf768b12f))
+* **remote:** discover the codex 0.160 symlinked control socket ([#945](https://github.com/avivsinai/agent-message-queue/issues/945)) ([6d5928d](https://github.com/avivsinai/agent-message-queue/commit/6d5928d5ab6f1c7354698a7ce7b0459f8ca12486))
+* **remote:** doctor names a stale amq-acp after an upgrade ([#933](https://github.com/avivsinai/agent-message-queue/issues/933)) ([9c5b824](https://github.com/avivsinai/agent-message-queue/commit/9c5b824264a228be632ad61861953f13fef9e631))
+* **remote:** refuse a request record held by a case-variant key ([#943](https://github.com/avivsinai/agent-message-queue/issues/943)) ([43845f5](https://github.com/avivsinai/agent-message-queue/commit/43845f560629161e8c6f70fe1d98b53699de6b1d))
+* **remote:** Stop hook allows a session bound under bindings/ ([#952](https://github.com/avivsinai/agent-message-queue/issues/952)) ([184b05c](https://github.com/avivsinai/agent-message-queue/commit/184b05c12844e19d66bcc077d345468e34214fd2))
+* **remote:** the Buzz DM row names the target, not the request ref ([#946](https://github.com/avivsinai/agent-message-queue/issues/946)) ([c20f00c](https://github.com/avivsinai/agent-message-queue/commit/c20f00c184d8274a35b12b4cbad16c29df9c627d))
+* **remote:** the owner sees a failed result write as uncertain ([#941](https://github.com/avivsinai/agent-message-queue/issues/941)) ([eaf3c5f](https://github.com/avivsinai/agent-message-queue/commit/eaf3c5f4adf387029ffd15b239c5851c186cc3e6))
+
 ## [0.86.1](https://github.com/avivsinai/agent-message-queue/compare/v0.86.0...v0.86.1) (2026-10-04)
 
 

@@ -77,6 +77,8 @@ type Config struct {
 	TurnTimeout       time.Duration
 	PollInterval      time.Duration
 	HeartbeatInterval time.Duration
+	// PostTimeout bounds one Buzz post (default 30 s).
+	PostTimeout time.Duration
 }
 
 // LoadConfig resolves the routing context from the environment. An absent root,
@@ -222,11 +224,31 @@ func durationEnv(name string, fallback time.Duration) (time.Duration, error) {
 // mailbox from the environment use it so a foreign AM_ROOT is refused.
 func VerifySessionPin(root string) error { return verifySessionPin(root) }
 
+// VerifySessionPinOn authenticates the pin against an already-open root
+// capability: the root's identity token is compared with the capability's own
+// directory, not a fresh lookup of the path, so the caller then writes into
+// exactly the directory that was authenticated.
+func VerifySessionPinOn(root *fsq.DeliveryRoot) error {
+	info := root.FileInfo()
+	if info == nil {
+		return contextError("no root identity to authenticate")
+	}
+	tree, err := fsq.StableTreeIdentityInfo(info)
+	if err != nil {
+		return contextError("cannot authenticate %s: %v", EnvRootID, err)
+	}
+	return verifySessionPinWith(root.Base(), tree)
+}
+
 // verifySessionPin authenticates an inherited pin against the target root. Pin
 // evidence without an exact base root, a root that disagrees with the pinned
 // base and session, and identity tokens that no longer name the same physical
 // directories are all refusals.
-func verifySessionPin(root string) error {
+func verifySessionPin(root string) error { return verifySessionPinWith(root, "") }
+
+// verifySessionPinWith is verifySessionPin with the root's live identity
+// token supplied by a capability; empty means look the path up.
+func verifySessionPinWith(root, rootTree string) error {
 	session, sessionPresent := os.LookupEnv(EnvSession)
 	rootID, rootIDPresent := os.LookupEnv(EnvRootID)
 	baseRootID, baseRootIDPresent := os.LookupEnv(EnvBaseRootID)
@@ -275,7 +297,11 @@ func verifySessionPin(root string) error {
 			EnvRootID, EnvBaseRootID,
 		)
 	}
-	if err := verifyTreeIdentity(root, rootID, EnvRootID); err != nil {
+	if rootTree != "" {
+		if rootTree != rootID {
+			return contextError("%s no longer identifies %s; refusing to deliver into a replaced tree", EnvRootID, root)
+		}
+	} else if err := verifyTreeIdentity(root, rootID, EnvRootID); err != nil {
 		return err
 	}
 	return verifyTreeIdentity(base, baseRootID, EnvBaseRootID)

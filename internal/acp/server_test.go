@@ -506,6 +506,10 @@ func TestUnknownMethodReturnsMethodNotFound(t *testing.T) {
 // thought update, and a fresh reply completes the turn with its text.
 func TestPromptRoundTripAndThreadState(t *testing.T) {
 	cfg := testConfig(t)
+	// The turn must stay open until the test delivers the reply; the 40ms
+	// package default expired first when five packages ran in parallel
+	// under -race (review of #961 r10).
+	cfg.TurnTimeout = 5 * time.Second
 	live, sessionID, threadID := newLiveSession(t, cfg, "cockpit-42")
 	live.send(promptRequest(3, sessionID, "please inspect the bridge"))
 	thought := live.readUntilUpdate("agent_thought_chunk")

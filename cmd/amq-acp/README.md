@@ -35,6 +35,10 @@ than silently dropped.
   `refs` name the prompt can answer the turn. `amq reply --id <prompt id>` sets
   those refs, and so does a reply to an in-turn steer. A stale reply, or a late
   answer to a cancelled prompt, never answers a later turn.
+- The peer check is **not authentication**. Agents of the same user are not
+  an isolation boundary ([SECURITY.md](../../SECURITY.md)), so any agent on
+  the queue root can write a reply that answers the turn and is posted to the
+  DM.
 - A turn settles **once**: the first of reply, `session/cancel`, stream close
   and timeout decides it, and the others cannot overturn it.
 - The turn is **bounded**. If no fresh reply arrives within
@@ -199,7 +203,10 @@ wrote (`~/.amq/remote/bindings/<name>.json`).
   of an event claims one message id, and a redelivery reuses it and publishes
   only if the message is absent. Progress shows "Delivered", then "Read by"
   (the handle's drained receipt), then the reply. Stop ends the wait and says
-  the message stays in the inbox; it is never recalled.
+  the message stays in the inbox; it is never recalled. A final reply that
+  arrives after the turn timed out or the client left is still posted to the
+  DM, once, by a sweep at the next prompt and every 30 s while a stream is
+  open, for up to 24 h. A reply after Stop is not posted.
 - A native binding (`attach --self --native`) submits there with that
   binding's native pin.
 With no binding, the agent answers "Not connected. Run /amq-remote in a
@@ -221,8 +228,18 @@ notice) into the channel named by the prompt's `<context>` block with
 `BUZZ_AUTH_TAG`, `BUZZ_RELAY_URL`) is kept in process memory for that child
 only; the environment is still stripped and no AMQ message carries it.
 `_meta.remote.posted` (or `_meta.amq.posted`) is `posted` or the error. The
-binary is `AMQ_ACP_BUZZ_CLI`, else `buzz` on `PATH`, else the one bundled
-with Buzz Desktop.
+binary is `AMQ_ACP_BUZZ_CLI`, else the CLI inside `Buzz.app` (under
+`/Applications` or the absolute home's `Applications`, real directories only,
+executable). There is no implicit `PATH` fallback: an unrelated `buzz` never receives
+the key (`AMQ_ACP_BUZZ_CLI=buzz` still resolves through `PATH` by your choice).
+The post budget (30 s) bounds how long `amq-acp` waits for the Buzz CLI. A
+CLI that keeps running after its budget, for example a wrapper that
+backgrounds the send, is outside the guarantee that no status text is posted
+after the final answer; the bundled `Buzz.app` CLI completes its send before
+it exits (observed in live use).
+A bundle candidate is skipped if any path component is a symlink. The
+installation and its parent directories are trusted against concurrent
+replacement: pathname validation is not atomic with exec.
 
 ### Trust limits
 
