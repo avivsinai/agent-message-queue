@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -8,6 +9,7 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/launch"
+	"github.com/avivsinai/agent-message-queue/internal/remote/codex"
 )
 
 type coopNamedMode int
@@ -122,6 +124,86 @@ func coopNamedTUICommand(binaryBase, me string) string {
 	}
 }
 
+func coopNamedTUIManualReminder(name, binaryBase, reason string) string {
+	return fmt.Sprintf(
+		"warning: unable to set or confirm the %s CLI display name %q (%s); this affects only the CLI display name; enter %q manually",
+		filepath.Base(binaryBase), name, reason, coopNamedTUICommand(binaryBase, name),
+	)
+}
+
+// codexDaemonNamingTimeout bounds the daemon calls made before exec.
+const codexDaemonNamingTimeout = 10 * time.Second
+
+// startCodexOnNamedDaemonThread names a Codex TUI that will run on the
+// managed app-server daemon (codex-cli 0.160): it creates and names a thread
+// on the daemon, then returns args that resume it (4ip). ok is false when
+// the TUI would not join the daemon, Codex does not already trust the
+// directory, or a daemon call failed; the caller then takes the rollout path,
+// which names an embedded Codex.
+func startCodexOnNamedDaemonThread(cmdName string, agentArgs []string, name string) (args []string, ok bool) {
+	if launch.ProviderForExecutable(cmdName) != launch.CodexProvider || !codexJoinsDaemon(agentArgs) {
+		return nil, false
+	}
+	codexHome, err := codexHomeDir()
+	if err != nil {
+		return nil, false
+	}
+	sock, err := codex.ControlSocket(codexHome)
+	if err != nil {
+		return nil, false // no daemon: Codex runs embedded
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return nil, false
+	}
+	// thread/start records trust for a directory Codex has no decision for,
+	// before the TUI asks the user. Only an already trusted directory is
+	// started on the daemon.
+	if !codexTrustsDir(codexHome, cwd) {
+		return nil, false
+	}
+	// With the feature off the TUI's thread/resume carries no developer
+	// instructions (tui/src/app_server_session.rs:2130-2132,
+	// terminal_visualization_instructions.rs:14-19), so the model's
+	// instructions match a TUI start whether the daemon reloads the thread or
+	// not. One setting differs, as for any `codex resume` of a thread with no
+	// turns: a fresh TUI start forces model_reasoning_summary to "none" unless
+	// the user set it, while a resume keeps the model default.
+	if codexTerminalInstructionsEnabled(codexHome, cwd) {
+		return nil, false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), codexDaemonNamingTimeout)
+	defer cancel()
+	id, err := codex.StartNamedThread(ctx, sock, cwd, name)
+	if err != nil {
+		_ = writeStderr("%s\n", coopNamedTUIManualReminder(name, cmdName, "Codex daemon: "+err.Error()))
+		return nil, false
+	}
+	_ = writeStderr("named %s\n", name)
+	return append([]string{"resume", id}, agentArgs...), true
+}
+
+// codexJoinsDaemon reports whether a Codex TUI started with args, in this
+// environment, runs on the managed daemon and so can resume a thread the
+// daemon holds. Only no arguments or --no-alt-screen, a display option
+// (codex-cli 0.160 tui/src/cli.rs), qualify; every other option may change
+// the thread or make Codex run its own app-server (tui/src/daemon_startup.rs
+// exclusion). Codex also runs its own app-server when CODEX_EXEC_SERVER_URL
+// or a workload identity variable is set at all.
+func codexJoinsDaemon(args []string) bool {
+	for _, arg := range args {
+		if arg != "--no-alt-screen" {
+			return false
+		}
+	}
+	for _, key := range []string{"CODEX_EXEC_SERVER_URL", "OPENAI_FEDERATION_RULE_ID", "OPENAI_IDENTITY_TOKEN_FILE"} {
+		if _, set := os.LookupEnv(key); set {
+			return false
+		}
+	}
+	return true
+}
+
 func coopNamedUnknownReminder(me, binary string) string {
 	return fmt.Sprintf(
 		"amq coop exec --named: name this CLI session %q manually (unknown binary %q)",
@@ -147,6 +229,9 @@ func applyCoopNamedBeforeExecAt(
 	case coopNamedModeArgv:
 		return injectCoopNamedArgv(cmdName, agentArgs, name), nil
 	case coopNamedModeTUI:
+		if args, ok := startCodexOnNamedDaemonThread(cmdName, agentArgs, name); ok {
+			return args, nil
+		}
 		if err := startCoopNamedTUIInjector(name, cmdName, execStart); err != nil {
 			_ = writeStderr("warning: coop named inject: %v\n", err)
 		}
