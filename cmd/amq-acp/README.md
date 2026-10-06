@@ -212,8 +212,8 @@ wrote (`~/.amq/remote/bindings/<name>.json`).
   binding mode, so Buzz sends a follow-up as `_session/steering`. Once the
   turn's prompt is in the handle's inbox, the follow-up is delivered from
   `buzz` to the bound handle on the same thread, `urgent` with the
-  `buzz-steer` label and refs to the prompt, and returns `outcome:
-  "injected"`. A reply to it also answers the turn, which keeps waiting for
+  `buzz-steer` label and refs to the prompt, and returns
+  `outcome: "injected"`. A reply to it also answers the turn, which keeps waiting for
   the final reply. With no open mailbox turn, or on a native binding, the
   steer is refused as in remote mode.
 - A native binding (`attach --self --native`) submits there with that

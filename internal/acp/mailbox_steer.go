@@ -26,9 +26,9 @@ func (s *Server) openMailboxSteering(turn *turnState, b binding.Binding, thread,
 
 // errMailboxSteering is the refusal for a steer in binding mode that has no
 // open, published mailbox turn to join: an idle session, a native binding,
-// or a prompt not yet delivered. It is the same refusal as amq-remote mode.
+// or a prompt not yet delivered. It keeps the amq-remote refusal code.
 func errMailboxSteering() *rpcError {
-	return newRPCError(codeMethodNotFound, "steering is not supported in amq-remote mode")
+	return newRPCError(codeMethodNotFound, "steering needs an open mailbox turn in amq-remote mode")
 }
 
 // mailboxSteering delivers a follow-up DM into an open mailbox turn
