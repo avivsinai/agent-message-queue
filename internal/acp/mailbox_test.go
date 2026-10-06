@@ -872,3 +872,46 @@ func TestAdvertisedModelPinsSessionWithoutSetModel(t *testing.T) {
 		t.Fatalf("a session advertised as a reached binding b: %d prompts", len(ids))
 	}
 }
+
+// Review of #957 r4 (agent-message-queue-bdq): another turn or the sweep
+// decided the event's outcome after this turn's last loop check, and the
+// turn still timed out and posted a timeout notice. It adopts the outcome.
+func TestDeadlineAdoptsAnOutcomeDecidedMeanwhile(t *testing.T) {
+	const chanA = "6eff60e4-32ab-48ec-bd3d-f4c97872f370"
+	s, root := mailboxServer(t)
+	s.cfg.TurnTimeout = 300 * time.Millisecond
+	s.cfg.PollInterval, s.cfg.HeartbeatInterval = time.Hour, time.Hour // only the deadline wakes the loop
+	posts := recordPosts(t)
+	eventID := strings.Repeat("3", 64)
+	thread := cockpitThread("session/s")
+	var shown []string
+	turn := newTurn()
+	turn.channel = chanA
+	_, rpcErr := s.runRemote("s", "hi", eventID, turn, func(v any) error {
+		text := v.(sessionUpdateNotification).Params.Update.Content.Text
+		shown = append(shown, text)
+		switch {
+		case strings.HasPrefix(text, "Delivered to"):
+			replyAs(t, root, thread, inboxPrompts(t, root)[0], format.KindStatus, "working")
+		case text == "agent: working":
+			// After the loop's check: the other turn decides reply B, then
+			// this turn's deadline passes.
+			winner := replyAs(t, root, thread, "other", format.KindAnswer, "reply B")
+			moveToCur(t, root, winner)
+			if _, _, err := s.decideOutcome(eventID, mailboxOutcome{ReplyID: winner}); err != nil {
+				t.Error(err)
+			}
+			time.Sleep(400 * time.Millisecond)
+		}
+		return nil
+	})
+	if rpcErr != nil {
+		t.Fatal(rpcErr)
+	}
+	if got := strings.Join(posts(), "|"); strings.Contains(got, "No final reply") {
+		t.Fatalf("posted a timeout notice: %q", got)
+	}
+	if last := shown[len(shown)-1]; last != "reply B" {
+		t.Fatalf("shown=%q; want the adopted reply B", shown)
+	}
+}

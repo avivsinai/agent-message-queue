@@ -163,6 +163,11 @@ func (s *Server) runMailbox(sessionID, text, eventID string, b binding.Binding, 
 		case <-turn.done:
 			return s.mailboxStopped(r, r.settle(""), b)
 		case <-deadline.C:
+			// Another turn or the sweep may have decided the event after this
+			// loop's last check.
+			if out, ok := s.mailboxAnswered(eventID); ok {
+				return s.mailboxAnsweredTurn(r, b, out)
+			}
 			if outcome := r.settle("reply_timeout"); outcome != "reply_timeout" {
 				return s.mailboxStopped(r, outcome, b)
 			}
@@ -216,7 +221,7 @@ func (s *Server) mailboxAnsweredTurn(r *remoteTurn, b binding.Binding, out mailb
 // was posted by whoever decided that outcome; this turn posts nothing.
 func (s *Server) answeredResult(r *remoteTurn, b binding.Binding, out mailboxOutcome) (any, *rpcError) {
 	r.meta.State, r.meta.Reason = DeliveryStateReplied, ""
-	text := fmt.Sprintf("%s already answered; the reply is in the DM.", b.Handle)
+	text := fmt.Sprintf("%s already answered; its final post was already made or attempted.", b.Handle)
 	if id := out.ReplyID; id != "" && id == filepath.Base(id) {
 		if msg, err := format.ReadMessageFile(filepath.Join(fsq.AgentInboxCur(b.Root, mailboxSender), id+".md")); err == nil && strings.TrimSpace(msg.Body) != "" {
 			text = strings.TrimSpace(msg.Body)
