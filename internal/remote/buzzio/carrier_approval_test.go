@@ -99,7 +99,9 @@ func TestApprovalMessageAnsweredByReaction(t *testing.T) {
 
 // 611.42.7: the owner typed ✅ as a message; it became a new prompt and was
 // refused busy while the approval waited (live, 2026-10-06). A typed yes or
-// no answers the target's one pending approval, as the reaction does.
+// no answers the target's one pending approval, as the reaction does. The
+// Codex session names only the pending interaction id, never the request,
+// and the live yes was a reply in the approval message's thread.
 func TestApprovalAnsweredByTypedReply(t *testing.T) {
 	var owner, body [32]byte
 	_, _ = rand.Read(owner[:])
@@ -114,7 +116,7 @@ func TestApprovalAnsweredByTypedReply(t *testing.T) {
 		case protocol.OpSessionInspect:
 			s := protocol.Session{TargetID: "cx", Epoch: "e1"}
 			if pendingID != "" {
-				s.ActiveRequestRef, s.PendingInteraction = &ref, &pendingID
+				s.PendingInteraction = &pendingID
 			}
 			return s, nil
 		case protocol.OpRequestSubmit:
@@ -138,9 +140,26 @@ func TestApprovalAnsweredByTypedReply(t *testing.T) {
 	if err := c.Publish(protocol.Snapshot{RequestRef: ref, Epoch: "e1", Revision: 2, State: protocol.StateRunning, Interaction: pending}, c.source(dm.ID.Hex(), "").Origin); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.Flush(context.Background(), func(context.Context, nostr.Event) error { return nil }, nil); err != nil {
+	var msg nostr.Event
+	if err := c.Flush(context.Background(), func(_ context.Context, evt nostr.Event) error {
+		if strings.Contains(evt.Content, "Approval needed") {
+			msg = evt
+		}
+		return nil
+	}, nil); err != nil {
 		t.Fatal(err)
 	}
+	inThread := nostr.Event{CreatedAt: nostr.Timestamp(now.Unix()), Kind: 9, Content: "no", Tags: nostr.Tags{{"h", "dm-1"}, {"e", msg.ID.Hex(), "", "root"}}}
+	if err := inThread.Sign(owner); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Ingest(inThread); err != nil {
+		t.Fatal(err)
+	}
+	if answered == nil || answered.InteractionID != "item-7" || answered.Option != "cancel" {
+		t.Fatalf("respond command = %+v, want cancel for item-7 from the thread reply", answered)
+	}
+	answered = nil
 	pendingID = "item-7"
 	if err := c.Ingest(ownerEvent(t, owner, "dm-1", "yes", now)); err != nil {
 		t.Fatal(err)

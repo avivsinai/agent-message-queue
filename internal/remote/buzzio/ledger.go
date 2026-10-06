@@ -389,6 +389,31 @@ func (l *Ledger) ApprovalFor(eventID string) (Approval, bool, error) {
 	return a, true, nil
 }
 
+// PutApprovalMessage records which message shows one interaction of a
+// target, so a typed answer finds it by the interaction id alone.
+func (l *Ledger) PutApprovalMessage(target, interactionID, eventID string) error {
+	if !validHexID(eventID) {
+		return fmt.Errorf("approval event id %q is not a hex id", eventID)
+	}
+	_, _, err := createOnce(filepath.Join(l.dir, "receipts"), keyFile("approval-of/"+target+"/"+interactionID), []byte(eventID))
+	return err
+}
+
+// ApprovalMessage returns the message id that shows the interaction.
+func (l *Ledger) ApprovalMessage(target, interactionID string) (string, bool, error) {
+	raw, err := readBounded(filepath.Join(l.dir, "receipts", keyFile("approval-of/"+target+"/"+interactionID)))
+	if errors.Is(err, os.ErrNotExist) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	if id := string(raw); validHexID(id) {
+		return id, true, nil
+	}
+	return "", false, fmt.Errorf("approval index for %s is unreadable", interactionID)
+}
+
 // ReceiptFor returns the receipt for a request, if one exists.
 func (l *Ledger) ReceiptFor(requestRef string) (Receipt, bool, error) {
 	raw, err := readBounded(filepath.Join(l.dir, "receipts", keyFile("ref/"+requestRef)))

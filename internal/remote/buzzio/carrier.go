@@ -277,7 +277,7 @@ func (c *Carrier) ingest(evt nostr.Event, normalize func(nostr.Event, Binding, t
 	}
 	if n.Op == OpSubmit {
 		if gesture := typedAnswer(n.Text); gesture != "" {
-			if msgID, appr, ok, err := c.openApproval(); err != nil {
+			if msgID, appr, ok, err := c.openApproval(evt); err != nil {
 				return err
 			} else if ok {
 				// A typed answer is the same decision as the reaction on the
@@ -656,26 +656,27 @@ func typedAnswer(text string) string {
 	return ""
 }
 
-// openApproval is the approval message of the target's one pending
-// interaction, when this carrier posted one that can still be answered.
-func (c *Carrier) openApproval() (string, Approval, bool, error) {
-	s, err := c.inspect()
-	if err != nil || s.ActiveRequestRef == nil || s.PendingInteraction == nil {
-		return "", Approval{}, false, nil
+// openApproval is the approval message a typed answer refers to: the one
+// whose thread the owner replied in, or else the target's one pending
+// interaction. The session names only the interaction id (the Codex
+// adapter sets no active request), so the message is found by that id.
+func (c *Carrier) openApproval(evt nostr.Event) (string, Approval, bool, error) {
+	msgID := threadRoot(evt)
+	if msgID == "" {
+		s, err := c.inspect()
+		if err != nil || s.PendingInteraction == nil {
+			return "", Approval{}, false, nil
+		}
+		var ok bool
+		if msgID, ok, err = c.ledger.ApprovalMessage(c.binding.Target, *s.PendingInteraction); err != nil || !ok {
+			return "", Approval{}, false, err
+		}
 	}
-	posted, ok, err := c.ledger.Prepared(approvalKey(*s.ActiveRequestRef, *s.PendingInteraction))
-	if err != nil || !ok {
-		return "", Approval{}, false, err
-	}
-	var msg nostr.Event
-	if err := json.Unmarshal(posted.Event, &msg); err != nil {
-		return "", Approval{}, false, err
-	}
-	appr, ok, err := c.ledger.ApprovalFor(msg.ID.Hex())
+	appr, ok, err := c.ledger.ApprovalFor(msgID)
 	if err != nil || !ok || appr.Disabled {
 		return "", Approval{}, false, err
 	}
-	return msg.ID.Hex(), appr, true, nil
+	return msgID, appr, true, nil
 }
 
 func rejectReaction(gesture string) bool {
@@ -708,6 +709,9 @@ func (c *Carrier) prepareApprovals(snap protocol.Snapshot, rc Receipt, origin ma
 			return err
 		}
 		if err := c.ledger.PutApproval(stored.ID.Hex(), appr); err != nil {
+			return err
+		}
+		if err := c.ledger.PutApprovalMessage(rc.Target, in.InteractionID, stored.ID.Hex()); err != nil {
 			return err
 		}
 	}
