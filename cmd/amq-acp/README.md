@@ -18,7 +18,7 @@ Implemented methods:
 | `session/new` | Returns a `sessionId`, `_meta.thread` (the durable AMQ cockpit thread for the session's channel), and `models` with exactly one model, the fixed destination. Requires a completed `initialize`. |
 | `session/set_model` | Accepts only a model that `session/new` advertises in `models`: `amq:<AMQ_ACP_TO>`, `amq-remote:<target>` in remote mode, or `amq-remote:<name>` for a named binding in binding mode, which selects that binding for the session. This bridge runs no model; the destination answers with its own. Any other id is refused. |
 | `session/prompt` | Delivers the prompt text to `AMQ_ACP_TO` on the session's cockpit thread, then holds the turn open. The client receives `session/update` notifications as the turn progresses and the reply text as an `agent_message_chunk`; the final result is `stopReason: "end_turn"` with the reply in `_meta.amq`, or the typed refusal `stopReason: "refusal"` with `_meta.amq.state: "no_reply"` when the bounded wait expires. |
-| `_session/steering` | Delivers owner steering on the session's cockpit thread, framed as untrusted task guidance. During an in-flight prompt it is AMQ `urgent` with the `buzz-steer` label and returns `outcome: "injected"`; while idle it is `normal` priority and returns `outcome: "startedNewTurn"`. A redelivered steer event returns `outcome: "duplicate"` with the original message id and delivers nothing new. The outcome names the delivery mode only: `_meta.amq` reports the prompt committed to the inbox, not drained or started, so neither outcome proves the peer acted. An in-turn steer refs the turn's prompt. A Nostr event id in `_meta` makes a redelivered steer idempotent. `initialize` advertises it as `_meta.steering.supported: true`. |
+| `_session/steering` | Delivers owner steering on the session's cockpit thread, framed as untrusted task guidance. During an in-flight prompt it is AMQ `urgent` with the `buzz-steer` label and returns `outcome: "injected"`; while idle it is `normal` priority and returns `outcome: "startedNewTurn"`. A redelivered steer event returns `outcome: "duplicate"` with the original message id and delivers nothing new. The outcome names the delivery mode only: `_meta.amq` reports the prompt committed to the inbox, not drained or started, so neither outcome proves the peer acted. An in-turn steer refs the turn's prompt. A Nostr event id in `_meta` makes a redelivered steer idempotent. `initialize` advertises it as `_meta.steering.supported: true`, except in remote mode with a pinned target (binding mode: see below). |
 | `session/cancel` | Ends the session's in-flight prompt turn: that `session/prompt` returns `stopReason: "cancelled"` with `_meta.amq.state: "cancelled"` and `reason: "session_cancelled"`. The queued AMQ prompt is not retracted and the peer is not notified; a later reply on the thread cannot answer a new prompt. With no turn in flight it is a no-op. |
 
 Everything else returns JSON-RPC `-32601`. There is no `session/load`, no
@@ -186,8 +186,8 @@ can pin it; the identity is not part of the session schema.
   completes later.
 - A Nostr event id maps to a fixed request id. A redelivered event follows its
   stored request, also after the endpoint reattached under a new epoch.
-- `_session/steering` is not available, and `initialize` reports
-  `_meta.steering.supported: false`.
+- With a pinned target, `_session/steering` is not available, and
+  `initialize` reports `_meta.steering.supported: false`.
 - `_meta.remote` reports `target`, `requestRef`, `state`, `code`, `reason`,
   `cancel`, and `truncated`.
 
@@ -207,6 +207,15 @@ wrote (`~/.amq/remote/bindings/<name>.json`).
   arrives after the turn timed out or the client left is still posted to the
   DM, once, by a sweep at the next prompt and every 30 s while a stream is
   open, for up to 24 h. A reply after Stop is not posted.
+- Follow-up DMs: a second `session/prompt` while a turn is open is still
+  refused, but `initialize` advertises `_meta.steering.supported: true` in
+  binding mode, so Buzz sends a follow-up as `_session/steering`. Once the
+  turn's prompt is in the handle's inbox, the follow-up is delivered from
+  `buzz` to the bound handle on the same thread, `urgent` with the
+  `buzz-steer` label and refs to the prompt, and returns `outcome:
+  "injected"`. A reply to it also answers the turn, which keeps waiting for
+  the final reply. With no open mailbox turn, or on a native binding, the
+  steer is refused as in remote mode.
 - A native binding (`attach --self --native`) submits there with that
   binding's native pin.
 With no binding, the agent answers "Not connected. Run /amq-remote in a
