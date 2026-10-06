@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -132,18 +133,31 @@ func TestBuzzCLIOnlyVerifiedBundle(t *testing.T) {
 
 // Review of #961 r8 (agent-message-queue-bdq): a Buzz CLI whose child kept
 // stderr open held cmd.Run, and with it the event's post lock, past the
-// post budget, so finals, cancels and the sweep blocked. The CLI runs in its
-// own process group, which is killed at the budget.
+// post budget, so finals, cancels and the sweep blocked. WaitDelay ends the
+// wait inside the budget.
 func TestStuckBuzzCLIReleasesThePostLock(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("needs a POSIX shell")
 	}
 	dir := canonicalTempDir(t)
-	started := filepath.Join(dir, "started")
+	started, pids := filepath.Join(dir, "started"), filepath.Join(dir, "pids")
 	cli := filepath.Join(dir, "buzz")
-	if err := os.WriteFile(cli, []byte("#!/bin/sh\n: > '"+started+"'\nsleep 30 &\nsleep 30\n"), 0o700); err != nil {
+	// Both sleeps inherit stderr and outlive the killed shell; cleanup kills
+	// them so no process outlives the test.
+	script := "#!/bin/sh\nsleep 30 &\necho $! >> '" + pids + "'\nsleep 30 &\necho $! >> '" + pids + "'\n: > '" + started + "'\nwait\n"
+	if err := os.WriteFile(cli, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		raw, _ := os.ReadFile(pids)
+		for _, field := range strings.Fields(string(raw)) {
+			if pid, err := strconv.Atoi(field); err == nil {
+				if p, err := os.FindProcess(pid); err == nil {
+					_ = p.Kill()
+				}
+			}
+		}
+	})
 	t.Setenv(envBuzzCLI, cli)
 	saved := buzzIdentity
 	t.Cleanup(func() { buzzIdentity = saved })

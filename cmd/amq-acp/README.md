@@ -232,6 +232,11 @@ binary is `AMQ_ACP_BUZZ_CLI`, else the CLI inside `Buzz.app` (under
 `/Applications` or the absolute home's `Applications`, real directories only,
 executable). There is no implicit `PATH` fallback: an unrelated `buzz` never receives
 the key (`AMQ_ACP_BUZZ_CLI=buzz` still resolves through `PATH` by your choice).
+The post budget (30 s) bounds how long `amq-acp` waits for the Buzz CLI. A
+CLI that keeps running after its budget, for example a wrapper that
+backgrounds the send, is outside the guarantee that no status text is posted
+after the final answer; the bundled `Buzz.app` CLI completes its send before
+it exits (observed in live use).
 A bundle candidate is skipped if any path component is a symlink. The
 installation and its parent directories are trusted against concurrent
 replacement: pathname validation is not atomic with exec.

@@ -81,13 +81,13 @@ func postWithBuzzCLI(channel, content string, budget time.Duration) error {
 	}
 	// The budget covers the run and the pipe drain: a CLI whose child keeps
 	// stderr open must not hold a status post (and its event post lock)
-	// past the budget (review of #961 r8).
+	// past the budget (review of #961 r8). A CLI that keeps sending after
+	// its budget is outside the status/final ordering (README).
 	waitDelay := budget / 10
 	ctx, cancel := context.WithTimeout(context.Background(), budget-waitDelay)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, bin, "messages", "send", "--channel", channel, "--content", "-")
 	cmd.WaitDelay = waitDelay
-	ownProcessGroup(cmd)
 	cmd.Env = append([]string{"PATH=" + os.Getenv("PATH"), "HOME=" + os.Getenv("HOME")}, buzzIdentity...)
 	cmd.Stdin = strings.NewReader(content)
 	var stderr bytes.Buffer
