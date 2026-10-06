@@ -4,23 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
-	"strings"
 )
 
 // ControlSocket is the managed app-server daemon's control socket under
-// CODEX_HOME (default ~/.codex), checked the way discovery checks it. An
-// error wrapping os.ErrNotExist means no daemon is running.
-func ControlSocket() (string, error) {
-	codexHome := strings.TrimSpace(os.Getenv("CODEX_HOME"))
-	if codexHome == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", fmt.Errorf("resolve home: %w", err)
-		}
-		codexHome = filepath.Join(home, ".codex")
-	}
+// codexHome, checked the way discovery checks it. An error wrapping
+// os.ErrNotExist means no daemon is running.
+func ControlSocket(codexHome string) (string, error) {
 	sock := filepath.Join(codexHome, "app-server-control", "app-server-control.sock")
 	return sock, checkControlSocket(sock)
 }
@@ -71,6 +61,14 @@ func StartNamedThread(ctx context.Context, sock, cwd, name string) (string, erro
 	}
 	if err := client.Call(ctx, "thread/inject_items", map[string]any{"threadId": id, "items": []any{item}}, nil); err != nil {
 		return "", fmt.Errorf("persist thread %s: %w", id, err)
+	}
+	// Leave the idle thread with no subscriber. The TUI's thread/resume then
+	// shuts it down and loads it again with the TUI's own overrides and
+	// developer instructions (codex-cli 0.160 app-server
+	// thread_processor.rs resume_running_thread); with a subscriber left the
+	// daemon ignores those overrides.
+	if err := client.Call(ctx, "thread/unsubscribe", map[string]any{"threadId": id}, nil); err != nil {
+		return "", fmt.Errorf("unsubscribe thread %s: %w", id, err)
 	}
 	return id, nil
 }

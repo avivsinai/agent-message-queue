@@ -137,20 +137,29 @@ const codexDaemonNamingTimeout = 10 * time.Second
 // startCodexOnNamedDaemonThread names a Codex TUI that will run on the
 // managed app-server daemon (codex-cli 0.160): it creates and names a thread
 // on the daemon, then returns args that resume it (4ip). ok is false when
-// the TUI would not join the daemon or a daemon call failed; the caller then
-// takes the rollout path, which names an embedded Codex.
+// the TUI would not join the daemon, Codex does not already trust the
+// directory, or a daemon call failed; the caller then takes the rollout path,
+// which names an embedded Codex.
 func startCodexOnNamedDaemonThread(cmdName string, agentArgs []string, name string) (args []string, ok bool) {
-	if launch.ProviderForExecutable(cmdName) != launch.CodexProvider || !codexArgsJoinDaemon(agentArgs) ||
-		os.Getenv("CODEX_EXEC_SERVER_URL") != "" {
+	if launch.ProviderForExecutable(cmdName) != launch.CodexProvider || !codexJoinsDaemon(agentArgs) {
 		return nil, false
 	}
-	sock, err := codex.ControlSocket()
+	codexHome, err := codexHomeDir()
+	if err != nil {
+		return nil, false
+	}
+	sock, err := codex.ControlSocket(codexHome)
 	if err != nil {
 		return nil, false // no daemon: Codex runs embedded
 	}
 	cwd, err := os.Getwd()
 	if err != nil {
-		_ = writeStderr("%s\n", coopNamedTUIManualReminder(name, cmdName, err.Error()))
+		return nil, false
+	}
+	// thread/start records trust for a directory Codex has no decision for,
+	// before the TUI asks the user. Only an already trusted directory is
+	// started on the daemon.
+	if !codexTrustsDir(codexHome, cwd) {
 		return nil, false
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), codexDaemonNamingTimeout)
@@ -164,23 +173,21 @@ func startCodexOnNamedDaemonThread(cmdName string, agentArgs []string, name stri
 	return append([]string{"resume", id}, agentArgs...), true
 }
 
-// codexArgsJoinDaemon reports whether a Codex TUI started with args reuses
-// the managed daemon. Config overrides (-c, --enable, --disable, --search),
-// --profile, --oss, --no-daemon, --strict-config,
-// --dangerously-bypass-hook-trust and --remote make Codex run another
-// app-server, which cannot open a thread the daemon holds (codex-cli 0.160
-// tui daemon_startup). A positional argument, a prompt or a subcommand, is
-// not rewritten into a resume either.
-func codexArgsJoinDaemon(args []string) bool {
+// codexJoinsDaemon reports whether a Codex TUI started with args, in this
+// environment, runs on the managed daemon and so can resume a thread the
+// daemon holds. Only no arguments or --no-alt-screen, a display option
+// (codex-cli 0.160 tui/src/cli.rs), qualify; every other option may change
+// the thread or make Codex run its own app-server (tui/src/daemon_startup.rs
+// exclusion). Codex also runs its own app-server when CODEX_EXEC_SERVER_URL
+// or a workload identity variable is set at all.
+func codexJoinsDaemon(args []string) bool {
 	for _, arg := range args {
-		if !strings.HasPrefix(arg, "-") || arg == "--" ||
-			strings.HasPrefix(arg, "-c") || strings.HasPrefix(arg, "-p") {
+		if arg != "--no-alt-screen" {
 			return false
 		}
-		flag, _, _ := strings.Cut(arg, "=")
-		switch flag {
-		case "--config", "--enable", "--disable", "--search", "--no-daemon", "--oss", "--profile",
-			"--strict-config", "--dangerously-bypass-hook-trust", "--remote":
+	}
+	for _, key := range []string{"CODEX_EXEC_SERVER_URL", "OPENAI_FEDERATION_RULE_ID", "OPENAI_IDENTITY_TOKEN_FILE"} {
+		if _, set := os.LookupEnv(key); set {
 			return false
 		}
 	}
