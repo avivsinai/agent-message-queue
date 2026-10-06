@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/lock"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"github.com/avivsinai/agent-message-queue/internal/remote/ipc"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
@@ -619,9 +620,6 @@ func (r *remoteTurn) failed(state string, err error) (any, *rpcError) {
 	if state == remoteUncertain {
 		text = fmt.Sprintf("%s: the outcome of request %s is unknown: %s. Do not resend; check it with `amq-remote status %s`.", r.meta.Target, r.meta.RequestRef, r.meta.Reason, r.meta.RequestRef)
 	}
-	if r.mailbox {
-		return r.showOnly(outcome, stopReason, text)
-	}
 	return r.say(postStatus, outcome, stopReason, text)
 }
 
@@ -638,35 +636,85 @@ const (
 // left gets no message. kind is postStatus or postFinal.
 func (r *remoteTurn) say(kind, outcome, stopReason, text string) (any, *rpcError) {
 	if outcome != "client_disconnected" && text != "" {
+		// Buzz first: a failed ACP emission never skips the post.
+		r.meta.Posted = r.s.postOnce(r.eventID, kind, []byte(time.Now().UTC().Format(time.RFC3339Nano)+"\n"), r.postChannel(), text)
 		if err := emitText(r.emit, r.sessionID, "agent_message_chunk", text); err != nil {
 			return nil, newRPCError(codeInternalError, "emit ACP reply update: %v", err)
 		}
-		r.meta.Posted = r.s.postOnce(r.eventID, kind, []byte(time.Now().UTC().Format(time.RFC3339Nano)+"\n"), r.postChannel(), text)
 	}
 	return remotePromptResult{StopReason: stopReason, Meta: remotePromptMeta{Remote: r.meta}}, nil
 }
 
 // postOnce publishes text into channel at most once per event and kind
-// (review F7). The exclusive marker remote-events/<event>.posted.<kind>,
-// holding record, is created before the post, so a redelivered event never
-// posts that kind again, and a post that failed is not retried: the post
-// has no idempotency key. The event id is 64 lowercase hex, checked when the
-// prompt is parsed (event.go eventIDsFromMeta), so it cannot leave the state
-// dir. Without an event id it just posts; without a channel it posts
-// nothing and records nothing.
+// (review F7), and never posts a status after the event's final text
+// (review of #961). Both go through the per-event post lock
+// remote-events/<event>.post.lock:
+//   - final: under the lock, reserve the final marker; release; then post.
+//     The lock is not held across the network.
+//   - status: under the lock, skip if the final marker exists or the status
+//     was already posted; post to Buzz; then create the status marker;
+//     release. While a status post holds the lock, no final can reserve.
+//     postTimeout bounds the hold, and a crash releases the flock.
+//
+// A post that failed is not retried: the post has no idempotency key. The
+// event id is 64 lowercase hex, checked when the prompt is parsed (event.go
+// eventIDsFromMeta), so it cannot leave the state dir. Without an event id
+// it just posts; without a channel it posts nothing and records nothing.
 func (s *Server) postOnce(eventID, kind string, record []byte, channel, text string) string {
 	if eventID == "" || channel == "" || strings.TrimSpace(text) == "" {
 		return publish(channel, text)
 	}
-	path := filepath.Join(s.cfg.StateDir, "remote-events", eventID+".posted."+kind)
-	won, err := createExclusive(path, record)
-	switch {
-	case err != nil:
-		return "error: record post marker: " + err.Error()
-	case !won:
-		return "duplicate: this event already posted its " + kind + " text"
+	if kind == postFinal {
+		won, err := s.reserveFinal(eventID, record)
+		switch {
+		case err != nil:
+			return "error: record post marker: " + err.Error()
+		case !won:
+			return "duplicate: this event already posted its " + kind + " text"
+		}
+		return publish(channel, text)
 	}
-	return publish(channel, text)
+	dir := filepath.Join(s.cfg.StateDir, "remote-events")
+	result := ""
+	err := s.withPostLock(eventID, func() error {
+		if _, err := os.Lstat(filepath.Join(dir, eventID+".posted."+postFinal)); err == nil {
+			result = "superseded: this event already has its final text"
+			return nil
+		}
+		marker := filepath.Join(dir, eventID+".posted."+kind)
+		if _, err := os.Lstat(marker); err == nil {
+			result = "duplicate: this event already posted its " + kind + " text"
+			return nil
+		}
+		result = publish(channel, text)
+		_, err := createExclusive(marker, record)
+		return err
+	})
+	if err != nil {
+		return "error: record post marker: " + err.Error()
+	}
+	return result
+}
+
+// reserveFinal creates the event's final marker exclusively under the post
+// lock, so it never lands while a status post is in flight.
+func (s *Server) reserveFinal(eventID string, record []byte) (bool, error) {
+	won := false
+	err := s.withPostLock(eventID, func() error {
+		var err error
+		won, err = createExclusive(filepath.Join(s.cfg.StateDir, "remote-events", eventID+".posted."+postFinal), record)
+		return err
+	})
+	return won, err
+}
+
+// withPostLock runs fn under the event's post lock.
+func (s *Server) withPostLock(eventID string, fn func() error) error {
+	dir := filepath.Join(s.cfg.StateDir, "remote-events")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	return lock.WithExclusiveFileLock(filepath.Join(dir, eventID+".post.lock"), fn)
 }
 
 func (r *remoteTurn) statusText(snap protocol.Snapshot) string {

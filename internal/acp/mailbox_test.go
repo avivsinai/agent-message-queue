@@ -916,74 +916,37 @@ func TestDeadlineAdoptsAnOutcomeDecidedMeanwhile(t *testing.T) {
 	}
 }
 
-// Review of #961 r5 (agent-message-queue-bdq): the timeout notice was
-// posted to the DM after the deadline check, so a final reply decided in
-// between was followed by a false "No final reply". The timeout is shown to
-// the ACP client only.
-func TestMailboxTimeoutIsNotPostedToTheDM(t *testing.T) {
+// Review of #961 r7 (agent-message-queue-bdq): a status notice could be
+// posted after the event's final text was reserved and posted. A status post
+// takes the event's post lock and is skipped once the final marker exists.
+func TestStatusNeverPostsAfterTheFinal(t *testing.T) {
+	if !lock.AdvisoryLockAvailable() {
+		t.Skip("no advisory file lock on this platform")
+	}
+	const chanA = "6eff60e4-32ab-48ec-bd3d-f4c97872f370"
 	s, _ := mailboxServer(t)
-	s.cfg.TurnTimeout = 200 * time.Millisecond
 	posts := recordPosts(t)
-	var shown []string
-	turn := newTurn()
-	turn.channel = "6eff60e4-32ab-48ec-bd3d-f4c97872f370"
-	result, rpcErr := s.runRemote("s", "hi", strings.Repeat("4", 64), turn, func(v any) error {
-		shown = append(shown, v.(sessionUpdateNotification).Params.Update.Content.Text)
-		return nil
+	eventID := strings.Repeat("6", 64)
+	dir := filepath.Join(s.cfg.StateDir, "remote-events")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	status := make(chan string, 1)
+	err := lock.WithExclusiveFileLock(filepath.Join(dir, eventID+".post.lock"), func() error {
+		go func() { status <- s.postOnce(eventID, postStatus, []byte("x\n"), chanA, "No final reply yet") }()
+		_, err := createExclusive(filepath.Join(dir, eventID+".posted."+postFinal), []byte(`{"reply_id":"r"}`))
+		return err
 	})
-	if rpcErr != nil {
-		t.Fatal(rpcErr)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got := result.(remotePromptResult); got.Meta.Remote.Reason != "reply_timeout" || !strings.HasPrefix(shown[len(shown)-1], "No final reply") {
-		t.Fatalf("result=%+v shown=%q; want the timeout shown to the client", got, shown)
+	publish(chanA, "the answer") // the final path posts after it releases the lock
+	select {
+	case <-status:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the status post never finished")
 	}
-	if got := posts(); len(got) != 0 {
-		t.Fatalf("posted to the DM: %q", got)
-	}
-}
-
-// Review of #961 r6 (agent-message-queue-bdq): a mailbox turn whose
-// publication timed out or failed posted its status notice to the DM. Like
-// the wait timeout, these notices are shown to the ACP client only.
-func TestMailboxPublicationNoticesStayOffTheDM(t *testing.T) {
-	for _, tc := range []struct {
-		name  string
-		setup func(t *testing.T, s *Server, root string)
-	}{
-		{"publication timeout", func(t *testing.T, s *Server, _ string) { s.cfg.TurnTimeout = time.Nanosecond }},
-		{"publication error", func(t *testing.T, _ *Server, root string) {
-			// The handle's inbox/new is a file, so the publish fails.
-			if err := os.MkdirAll(filepath.Join(root, "agents", "agent", "inbox"), 0o700); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(fsq.AgentInboxNew(root, "agent"), nil, 0o600); err != nil {
-				t.Fatal(err)
-			}
-		}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			s, root := mailboxServer(t)
-			tc.setup(t, s, root)
-			posts := recordPosts(t)
-			var shown []string
-			turn := newTurn()
-			turn.channel = "6eff60e4-32ab-48ec-bd3d-f4c97872f370"
-			eventID := strings.Repeat("5", 64)
-			if _, rpcErr := s.runRemote("s", "hi", eventID, turn, func(v any) error {
-				shown = append(shown, v.(sessionUpdateNotification).Params.Update.Content.Text)
-				return nil
-			}); rpcErr != nil {
-				t.Fatal(rpcErr)
-			}
-			if len(shown) == 0 {
-				t.Fatal("the client saw no notice")
-			}
-			if got := posts(); len(got) != 0 {
-				t.Fatalf("posted to the DM: %q", got)
-			}
-			if _, err := os.Lstat(filepath.Join(s.cfg.StateDir, "remote-events", eventID+".posted."+postStatus)); !os.IsNotExist(err) {
-				t.Fatalf("status marker exists (err=%v)", err)
-			}
-		})
+	if got := posts(); len(got) != 1 || got[0] != chanA+": the answer" {
+		t.Fatalf("posts=%q; want only the final", got)
 	}
 }

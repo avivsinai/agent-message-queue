@@ -60,7 +60,7 @@ type mailboxOutcome struct {
 // the handle notices the message (a wake, a built-in consumer, monitor, or
 // its next drain) is the handle owner's business, not this bridge's.
 func (s *Server) runMailbox(sessionID, text, eventID string, b binding.Binding, turn *turnState, emit func(any) error) (any, *rpcError) {
-	r := &remoteTurn{s: s, sessionID: sessionID, eventID: eventID, emit: emit, turn: turn, meta: remoteMeta{Target: b.Handle}, mailbox: true}
+	r := &remoteTurn{s: s, sessionID: sessionID, eventID: eventID, emit: emit, turn: turn, meta: remoteMeta{Target: b.Handle}}
 	s.mu.Lock()
 	threadID := ""
 	if session, ok := s.sessions[sessionID]; ok {
@@ -92,7 +92,7 @@ func (s *Server) runMailbox(sessionID, text, eventID string, b binding.Binding, 
 	// another channel, or from none, never moves the answer. A delivery that
 	// names one records it if none is known yet (review of #961).
 	s.eventChannel(eventID, claim.Channel, turn.channel)
-	r.claimChannel = claim.Channel
+	r.mailbox, r.claimChannel = true, claim.Channel
 	s.mu.Lock()
 	turn.mailboxEvent = eventID
 	s.mu.Unlock()
@@ -111,7 +111,7 @@ func (s *Server) runMailbox(sessionID, text, eventID string, b binding.Binding, 
 				return s.mailboxNotDelivered(r, outcome)
 			}
 			r.meta.Reason = "reply_timeout"
-			return r.showOnly("reply_timeout", StopReasonRefusal, fmt.Sprintf("Not delivered to %s: the turn ran out of time before the message could be published.", b.Handle))
+			return r.say(postStatus, "reply_timeout", StopReasonRefusal, fmt.Sprintf("Not delivered to %s: the turn ran out of time before the message could be published.", b.Handle))
 		}
 		return r.failed(remoteUncertain, err)
 	}
@@ -172,7 +172,7 @@ func (s *Server) runMailbox(sessionID, text, eventID string, b binding.Binding, 
 				return s.mailboxStopped(r, outcome, b)
 			}
 			r.meta.Reason = "reply_timeout"
-			return r.showOnly("reply_timeout", StopReasonRefusal, fmt.Sprintf("No final reply from %s yet. The message stays in its AMQ inbox and may still be answered.", b.Handle))
+			return r.say(postStatus, "reply_timeout", StopReasonRefusal, fmt.Sprintf("No final reply from %s yet. The message stays in its AMQ inbox and may still be answered.", b.Handle))
 		case <-poll.C:
 		case <-heartbeat.C:
 			withCur = true
@@ -181,19 +181,6 @@ func (s *Server) runMailbox(sessionID, text, eventID string, b binding.Binding, 
 			}
 		}
 	}
-}
-
-// showOnly ends a mailbox turn with a status text (a timeout or a
-// publication failure) shown to the ACP client only. Only the final reply
-// goes to Buzz: a status post could race a final reply decided meanwhile,
-// and the late-reply sweep posts the real answer (review of #961).
-func (r *remoteTurn) showOnly(outcome, stopReason, text string) (any, *rpcError) {
-	if outcome != "client_disconnected" {
-		if err := emitText(r.emit, r.sessionID, "agent_message_chunk", text); err != nil {
-			return nil, newRPCError(codeInternalError, "emit ACP reply update: %v", err)
-		}
-	}
-	return remotePromptResult{StopReason: stopReason, Meta: remotePromptMeta{Remote: r.meta}}, nil
 }
 
 // mailboxStopped ends a turn the client cancelled or left. A mailbox cannot
@@ -261,7 +248,7 @@ func (s *Server) decideOutcome(eventID string, proposed mailboxOutcome) (mailbox
 	if err != nil {
 		return mailboxOutcome{}, false, err
 	}
-	won, err := createExclusive(filepath.Join(s.cfg.StateDir, "remote-events", eventID+".posted."+postFinal), raw)
+	won, err := s.reserveFinal(eventID, raw)
 	if err != nil {
 		return mailboxOutcome{}, false, err
 	}
