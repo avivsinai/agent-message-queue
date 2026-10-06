@@ -51,7 +51,7 @@ func TestMarshalPreservingUnknownsEmptyOriginalIsSortedAndStable(t *testing.T) {
 // MarshalPreservingUnknowns — `amq setup`'s raw-byte comparison then reports
 // no phantom "update compatible roster" change after `amq init`.
 func TestWriteConfigMatchesPreservingLayout(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.json")
+	path := filepath.Join(t.TempDir(), "meta", "config.json")
 	cfg := Config{Version: 1, CreatedUTC: "2026-09-20T00:00:00Z", Agents: []string{"claude", "codex"}}
 	if err := WriteConfig(path, cfg, false); err != nil {
 		t.Fatal(err)
