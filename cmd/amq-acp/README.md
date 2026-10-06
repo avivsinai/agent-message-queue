@@ -214,8 +214,11 @@ wrote (`~/.amq/remote/bindings/<name>.json`).
   `buzz` to the bound handle on the same thread, `urgent` with the
   `buzz-steer` label and refs to the prompt, and returns
   `outcome: "injected"`. A reply to it also answers the turn, which keeps waiting for
-  the final reply. With no open mailbox turn, or on a native binding, the
-  steer is refused as in remote mode.
+  the final reply. With no open mailbox turn, on a native binding, or once
+  the event has its final answer, the steer is refused as in remote mode. A
+  steer event's first delivery claims its message id and destination, so a
+  redelivery returns `outcome: "duplicate"` and never reaches a later turn
+  or another binding.
 - A native binding (`attach --self --native`) submits there with that
   binding's native pin.
 With no binding, the agent answers "Not connected. Run /amq-remote in a
