@@ -449,6 +449,22 @@ func (s *Server) mailboxNotDelivered(r *remoteTurn, outcome string) (any, *rpcEr
 // publishOnce delivers the prompt to the handle unless the claimed message
 // is already in its inbox (new or cur), so a redelivery never duplicates it.
 func publishOnce(b binding.Binding, threadID, id string, created time.Time, text string) error {
+	identity, err := fsq.SnapshotDeliveryRoot(b.Root)
+	if err != nil {
+		return err
+	}
+	root, err := fsq.OpenDeliveryRoot(b.Root, identity)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
+	// The handle answers buzz with `amq reply`, which cannot create a missing
+	// mailbox in a root without config.json, so the sender ensures its own.
+	// This runs before the redelivery check: a prompt an older amq-acp
+	// delivered still needs the mailbox for its reply (#951).
+	if err := root.EnsureAgentDirs(mailboxSender); err != nil {
+		return err
+	}
 	name := id + ".md"
 	for _, dir := range []string{fsq.AgentInboxNew(b.Root, b.Handle), fsq.AgentInboxCur(b.Root, b.Handle)} {
 		if _, err := os.Lstat(filepath.Join(dir, name)); err == nil {
@@ -481,15 +497,6 @@ func publishOnce(b binding.Binding, threadID, id string, created time.Time, text
 	if len(data) > format.MaxMessageSize {
 		return fmt.Errorf("prompt exceeds the maximum AMQ message size")
 	}
-	identity, err := fsq.SnapshotDeliveryRoot(b.Root)
-	if err != nil {
-		return err
-	}
-	root, err := fsq.OpenDeliveryRoot(b.Root, identity)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = root.Close() }()
 	if _, err := fsq.DeliverToInboxes(root, []string{b.Handle}, name, data); err != nil {
 		var uncertain *fsq.CommittedDurabilityError
 		if !errors.As(err, &uncertain) {
