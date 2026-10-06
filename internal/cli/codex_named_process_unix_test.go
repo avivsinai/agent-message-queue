@@ -5,8 +5,6 @@ package cli
 import (
 	"context"
 	"errors"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -53,22 +51,5 @@ func TestValidateCodexNamingTargetRejectsReplacedProcess(t *testing.T) {
 	_, err := validateCodexNamingTarget(codexNamingTarget{PID: 42, ProcessStart: "original", BootID: "boot"})
 	if err == nil || !strings.Contains(err.Error(), "identity changed") {
 		t.Fatalf("validateCodexNamingTarget error = %v, want replacement refusal", err)
-	}
-}
-
-// Review of #950 (Pro r1 redesign): coop exec types /rename into the spawned
-// Codex TUI only when Codex trusts the directory; at the trust prompt the
-// typed keys would answer it.
-func TestCodexTrustsDirReadsTheProjectTrustLevel(t *testing.T) {
-	home, trusted, other := t.TempDir(), t.TempDir(), t.TempDir()
-	t.Setenv("CODEX_HOME", home)
-	config := "[projects.\"" + trusted + "\"]\ntrust_level = \"trusted\"\n"
-	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(config), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	for dir, want := range map[string]bool{trusted: true, other: false} {
-		if got, err := codexTrustsDir(dir); err != nil || got != want {
-			t.Fatalf("codexTrustsDir(%s) = %v, %v; want %v", dir, got, err, want)
-		}
 	}
 }

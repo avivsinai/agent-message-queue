@@ -161,11 +161,6 @@ func runCoopNamedInject(args []string) error {
 			target.ProviderIdentity.Device == 0 || target.ProviderIdentity.Inode == 0 {
 			return UsageError("Codex named-inject requires complete parent process identity and provider binary")
 		}
-		cwd, err := os.Getwd()
-		if err != nil {
-			return fmt.Errorf("resolve coop named spawn cwd: %w", err)
-		}
-		target.Daemon = &codexDaemonSpawn{Cwd: cwd, Since: execStart}
 		if err := runCodexNamedSidecar(name, target); err != nil {
 			_ = writeStderr("%s\n", coopNamedTUIManualReminder(name, binaryBase, err.Error()))
 		}
@@ -201,13 +196,6 @@ func validateCoopNamedSessionLabel(name string) error {
 	default:
 		return fmt.Errorf("must be <handle> or <session>/<handle>")
 	}
-}
-
-func coopNamedTUIManualReminder(name, binaryBase, reason string) string {
-	return fmt.Sprintf(
-		"warning: unable to set or confirm the %s CLI display name %q (%s); this affects only the CLI display name; enter %q manually",
-		filepath.Base(binaryBase), name, reason, coopNamedTUICommand(binaryBase, name),
-	)
 }
 
 func runCoopNamedTUI(reader coopNamedStoreReader, name, binaryBase, cwd string, execStart time.Time) error {

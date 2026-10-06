@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -8,6 +9,7 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/launch"
+	"github.com/avivsinai/agent-message-queue/internal/remote/codex"
 )
 
 type coopNamedMode int
@@ -122,6 +124,69 @@ func coopNamedTUICommand(binaryBase, me string) string {
 	}
 }
 
+func coopNamedTUIManualReminder(name, binaryBase, reason string) string {
+	return fmt.Sprintf(
+		"warning: unable to set or confirm the %s CLI display name %q (%s); this affects only the CLI display name; enter %q manually",
+		filepath.Base(binaryBase), name, reason, coopNamedTUICommand(binaryBase, name),
+	)
+}
+
+// codexDaemonNamingTimeout bounds the daemon calls made before exec.
+const codexDaemonNamingTimeout = 10 * time.Second
+
+// startCodexOnNamedDaemonThread names a Codex TUI that will run on the
+// managed app-server daemon (codex-cli 0.160): it creates and names a thread
+// on the daemon, then returns args that resume it (4ip). ok is false when
+// the TUI would not join the daemon or a daemon call failed; the caller then
+// takes the rollout path, which names an embedded Codex.
+func startCodexOnNamedDaemonThread(cmdName string, agentArgs []string, name string) (args []string, ok bool) {
+	if launch.ProviderForExecutable(cmdName) != launch.CodexProvider || !codexArgsJoinDaemon(agentArgs) ||
+		os.Getenv("CODEX_EXEC_SERVER_URL") != "" {
+		return nil, false
+	}
+	sock, err := codex.ControlSocket()
+	if err != nil {
+		return nil, false // no daemon: Codex runs embedded
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		_ = writeStderr("%s\n", coopNamedTUIManualReminder(name, cmdName, err.Error()))
+		return nil, false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), codexDaemonNamingTimeout)
+	defer cancel()
+	id, err := codex.StartNamedThread(ctx, sock, cwd, name)
+	if err != nil {
+		_ = writeStderr("%s\n", coopNamedTUIManualReminder(name, cmdName, "Codex daemon: "+err.Error()))
+		return nil, false
+	}
+	_ = writeStderr("named %s\n", name)
+	return append([]string{"resume", id}, agentArgs...), true
+}
+
+// codexArgsJoinDaemon reports whether a Codex TUI started with args reuses
+// the managed daemon. Config overrides (-c, --enable, --disable, --search),
+// --profile, --oss, --no-daemon, --strict-config,
+// --dangerously-bypass-hook-trust and --remote make Codex run another
+// app-server, which cannot open a thread the daemon holds (codex-cli 0.160
+// tui daemon_startup). A positional argument, a prompt or a subcommand, is
+// not rewritten into a resume either.
+func codexArgsJoinDaemon(args []string) bool {
+	for _, arg := range args {
+		if !strings.HasPrefix(arg, "-") || arg == "--" ||
+			strings.HasPrefix(arg, "-c") || strings.HasPrefix(arg, "-p") {
+			return false
+		}
+		flag, _, _ := strings.Cut(arg, "=")
+		switch flag {
+		case "--config", "--enable", "--disable", "--search", "--no-daemon", "--oss", "--profile",
+			"--strict-config", "--dangerously-bypass-hook-trust", "--remote":
+			return false
+		}
+	}
+	return true
+}
+
 func coopNamedUnknownReminder(me, binary string) string {
 	return fmt.Sprintf(
 		"amq coop exec --named: name this CLI session %q manually (unknown binary %q)",
@@ -147,6 +212,9 @@ func applyCoopNamedBeforeExecAt(
 	case coopNamedModeArgv:
 		return injectCoopNamedArgv(cmdName, agentArgs, name), nil
 	case coopNamedModeTUI:
+		if args, ok := startCodexOnNamedDaemonThread(cmdName, agentArgs, name); ok {
+			return args, nil
+		}
 		if err := startCoopNamedTUIInjector(name, cmdName, execStart); err != nil {
 			_ = writeStderr("warning: coop named inject: %v\n", err)
 		}
