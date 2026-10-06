@@ -619,6 +619,9 @@ func (r *remoteTurn) failed(state string, err error) (any, *rpcError) {
 	if state == remoteUncertain {
 		text = fmt.Sprintf("%s: the outcome of request %s is unknown: %s. Do not resend; check it with `amq-remote status %s`.", r.meta.Target, r.meta.RequestRef, r.meta.Reason, r.meta.RequestRef)
 	}
+	if r.mailbox {
+		return r.showOnly(outcome, stopReason, text)
+	}
 	return r.say(postStatus, outcome, stopReason, text)
 }
 

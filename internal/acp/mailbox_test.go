@@ -941,3 +941,49 @@ func TestMailboxTimeoutIsNotPostedToTheDM(t *testing.T) {
 		t.Fatalf("posted to the DM: %q", got)
 	}
 }
+
+// Review of #961 r6 (agent-message-queue-bdq): a mailbox turn whose
+// publication timed out or failed posted its status notice to the DM. Like
+// the wait timeout, these notices are shown to the ACP client only.
+func TestMailboxPublicationNoticesStayOffTheDM(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, s *Server, root string)
+	}{
+		{"publication timeout", func(t *testing.T, s *Server, _ string) { s.cfg.TurnTimeout = time.Nanosecond }},
+		{"publication error", func(t *testing.T, _ *Server, root string) {
+			// The handle's inbox/new is a file, so the publish fails.
+			if err := os.MkdirAll(filepath.Join(root, "agents", "agent", "inbox"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(fsq.AgentInboxNew(root, "agent"), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, root := mailboxServer(t)
+			tc.setup(t, s, root)
+			posts := recordPosts(t)
+			var shown []string
+			turn := newTurn()
+			turn.channel = "6eff60e4-32ab-48ec-bd3d-f4c97872f370"
+			eventID := strings.Repeat("5", 64)
+			if _, rpcErr := s.runRemote("s", "hi", eventID, turn, func(v any) error {
+				shown = append(shown, v.(sessionUpdateNotification).Params.Update.Content.Text)
+				return nil
+			}); rpcErr != nil {
+				t.Fatal(rpcErr)
+			}
+			if len(shown) == 0 {
+				t.Fatal("the client saw no notice")
+			}
+			if got := posts(); len(got) != 0 {
+				t.Fatalf("posted to the DM: %q", got)
+			}
+			if _, err := os.Lstat(filepath.Join(s.cfg.StateDir, "remote-events", eventID+".posted."+postStatus)); !os.IsNotExist(err) {
+				t.Fatalf("status marker exists (err=%v)", err)
+			}
+		})
+	}
+}
