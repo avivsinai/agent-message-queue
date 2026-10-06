@@ -684,7 +684,7 @@ func (s *Server) postOnce(eventID, kind string, record []byte, channel, text str
 	err := s.withPostLock(eventID, func() error {
 		out, final := s.mailboxAnswered(eventID)
 		switch {
-		case kind == postCancel && !(final && out.Cancelled):
+		case kind == postCancel && (!final || !out.Cancelled):
 			result = "superseded: this event was not cancelled"
 			return nil
 		case kind != postCancel && final:
