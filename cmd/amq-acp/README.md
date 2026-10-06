@@ -205,9 +205,10 @@ wrote (`~/.amq/remote/bindings/<name>.json`).
   or inbox; it completes the other folders of an existing one. When the
   message is absent and the mailbox refuses it, the event ends as not
   delivered and a redelivery never publishes it; send the DM again. Any other
-  failure is uncertain and points at `amq thread --id`. Progress shows "Delivered", then "Read by"
-  (the handle's drained receipt), then the reply. Stop ends the wait and says
-  the message stays in the inbox; it is never recalled. A final reply that
+  publish error is uncertain and points at `amq thread --id`. Progress shows
+  "Delivered", then "Read by" (the handle's drained receipt), then the reply.
+  Stop ends the wait and says the message stays in the inbox; it is never
+  recalled. A final reply that
   arrives after the turn timed out or the client left is still posted to the
   DM, once, by a sweep at the next prompt and every 30 s while a stream is
   open, for up to 24 h. A reply after Stop is not posted.

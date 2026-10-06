@@ -555,7 +555,7 @@ func publishOnce(b binding.Binding, threadID, id string, created time.Time, text
 	if len(data) > format.MaxMessageSize {
 		return fmt.Errorf("prompt exceeds the maximum AMQ message size")
 	}
-	if err := mailboxAnchored(root, b.Handle); err != nil {
+	if err := mailboxAnchored(b.Root, b.Handle); err != nil {
 		return err
 	}
 	// A mailbox made by an older amq lacks leaves such as receipts/ that
@@ -573,13 +573,16 @@ func publishOnce(b binding.Binding, threadID, id string, created time.Time, text
 }
 
 // mailboxAnchored refuses delivery unless the handle's mailbox and inbox
-// already exist as directories in the pinned root.
-func mailboxAnchored(root *fsq.DeliveryRoot, handle string) error {
+// already exist as real directories (not symlinks), so the layout repair
+// that follows never writes through a link. Like the absence check, it reads
+// the bound root path; delivery rechecks the whole layout through the
+// pinned root.
+func mailboxAnchored(rootPath, handle string) error {
 	for _, anchor := range []struct{ path, missing string }{
 		{filepath.Join("agents", handle), "no mailbox in its AMQ root"},
 		{filepath.Join("agents", handle, "inbox"), "its mailbox has no inbox"},
 	} {
-		info, err := root.Stat(anchor.path)
+		info, err := os.Lstat(filepath.Join(rootPath, anchor.path))
 		switch {
 		case errors.Is(err, fs.ErrNotExist):
 			return &notDeliveredError{reason: anchor.missing}
