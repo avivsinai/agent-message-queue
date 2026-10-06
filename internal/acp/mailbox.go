@@ -573,7 +573,7 @@ func publishOnce(b binding.Binding, threadID, id string, created time.Time, text
 	if len(data) > format.MaxMessageSize {
 		return fmt.Errorf("prompt exceeds the maximum AMQ message size")
 	}
-	if err := completeMailbox(b.Root, b.Handle); err != nil {
+	if err := completeMailbox(root, b.Handle); err != nil {
 		return err
 	}
 	if _, err := fsq.DeliverToExistingInbox(root, b.Handle, name, data); err != nil {
@@ -586,79 +586,69 @@ func publishOnce(b binding.Binding, threadID, id string, created time.Time, text
 }
 
 // completeMailbox refuses delivery unless the handle's mailbox and inbox
-// already exist as real directories (not symlinks), and creates the other
-// leaves an older amq did not make, such as receipts/. Like the absence
-// check it reads the bound root path; delivery then rechecks the whole
-// layout through the pinned root.
-func completeMailbox(rootPath, handle string) error {
-	dir := filepath.Join(rootPath, "agents", handle)
-	before, err := os.Lstat(dir)
-	switch {
-	case errors.Is(err, fs.ErrNotExist):
-		return &notDeliveredError{reason: "no mailbox in its AMQ root"}
-	case err != nil:
-		return &notDeliveredError{reason: err.Error()}
-	case !before.IsDir():
-		return &notDeliveredError{reason: "its mailbox is not a directory"}
-	}
-	mailbox, err := os.OpenRoot(dir)
+// already exist as direct directories, and creates only their missing leaves.
+// Every anchor is opened from the authorized delivery capability: reopening
+// its ambient path could repair a replacement tree before delivery refuses it.
+func completeMailbox(root *fsq.DeliveryRoot, handle string) error {
+	agents, err := root.OpenDirectChild("agents")
 	if err != nil {
+		return &notDeliveredError{reason: err.Error()}
+	}
+	defer func() { _ = agents.Close() }()
+	mailbox, err := agents.OpenDirectChild(handle)
+	if errors.Is(err, fs.ErrNotExist) {
+		return &notDeliveredError{reason: "no mailbox in its AMQ root"}
+	} else if err != nil {
 		return &notDeliveredError{reason: err.Error()}
 	}
 	defer func() { _ = mailbox.Close() }()
-	if opened, err := mailbox.Stat("."); err != nil || !os.SameFile(before, opened) {
-		return &notDeliveredError{reason: "its mailbox was replaced during delivery"}
-	}
-	before, err = mailbox.Lstat("inbox")
-	switch {
-	case errors.Is(err, fs.ErrNotExist):
+	inbox, err := mailbox.OpenDirectChild("inbox")
+	if errors.Is(err, fs.ErrNotExist) {
 		return &notDeliveredError{reason: "its mailbox has no inbox"}
-	case err != nil:
-		return &notDeliveredError{reason: err.Error()}
-	case !before.IsDir():
-		return &notDeliveredError{reason: "its inbox is not a directory"}
-	}
-	inbox, err := mailbox.OpenRoot("inbox")
-	if err != nil {
+	} else if err != nil {
 		return &notDeliveredError{reason: err.Error()}
 	}
 	defer func() { _ = inbox.Close() }()
-	if opened, err := inbox.Stat("."); err != nil || !os.SameFile(before, opened) {
-		return &notDeliveredError{reason: "its inbox was replaced during delivery"}
-	}
-	if err := repairMailbox(mailbox, inbox, dir); err != nil {
+	if err := repairMailbox(mailbox, inbox); err != nil {
 		return &notDeliveredError{reason: err.Error()}
 	}
 	return nil
 }
 
-// repairMailbox creates the missing leaves of the handle mailbox at dir,
-// opened as mailbox and its inbox as inbox. It never creates either one:
-// leaves are made through the opened directories, so one removed meanwhile
-// makes this fail instead of reappearing.
-func repairMailbox(mailbox, inbox *os.Root, dir string) error {
+// repairMailbox creates only leaves beneath the existing pinned mailbox and
+// inbox. Removing either anchor fails closed rather than recreating it, and
+// replacement of any ambient ancestor cannot redirect creation or syncing.
+func repairMailbox(mailbox, inbox *fsq.DeliveryRoot) error {
 	for _, leaf := range fsq.RequiredMailboxLeaves() {
-		in, base, path := mailbox, dir, filepath.FromSlash(string(leaf))
-		if rest, ok := strings.CutPrefix(string(leaf), "inbox/"); ok {
-			in, base, path = inbox, filepath.Join(dir, "inbox"), filepath.FromSlash(rest)
+		in, path := mailbox, string(leaf)
+		if rest, ok := strings.CutPrefix(path, "inbox/"); ok {
+			in, path = inbox, rest
 		}
-		if _, err := in.Lstat(path); !errors.Is(err, fs.ErrNotExist) {
-			continue // present, or refused by the layout check that follows
-		}
-		if err := in.MkdirAll(path, 0o700); err != nil {
+		if err := repairMailboxLeaf(in, path); err != nil {
 			return fmt.Errorf("complete its mailbox: %w", err)
-		}
-		// Make the new directory entries durable before a message lands.
-		for p := filepath.Dir(path); ; p = filepath.Dir(p) {
-			if err := fsq.SyncDir(filepath.Join(base, p)); err != nil {
-				return fmt.Errorf("complete its mailbox: %w", err)
-			}
-			if p == "." {
-				break
-			}
 		}
 	}
 	return nil
+}
+
+// repairMailboxLeaf opens or creates each direct component without following
+// symlinks, then syncs the child and its parent through those same capabilities.
+func repairMailboxLeaf(parent *fsq.DeliveryRoot, path string) error {
+	name, rest, nested := strings.Cut(path, "/")
+	child, err := parent.OpenOrCreateDirectChild(name, 0o700)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = child.Close() }()
+	if nested {
+		if err := repairMailboxLeaf(child, rest); err != nil {
+			return err
+		}
+	}
+	if err := child.SyncDir("."); err != nil {
+		return err
+	}
+	return parent.SyncDir(".")
 }
 
 // notDeliveredText is the reply for an event whose message never reached

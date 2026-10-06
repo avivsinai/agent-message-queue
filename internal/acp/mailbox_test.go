@@ -377,12 +377,16 @@ func TestMailboxRepairNeverRecreatesItsAnchors(t *testing.T) {
 				t.Fatal(err)
 			}
 			dir := fsq.AgentBase(root, "agent")
-			mailbox, err := os.OpenRoot(dir)
+			identity, err := fsq.SnapshotDeliveryRoot(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			mailbox, err := fsq.OpenDeliveryRoot(dir, identity)
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer func() { _ = mailbox.Close() }()
-			inbox, err := mailbox.OpenRoot("inbox")
+			inbox, err := mailbox.OpenDirectChild("inbox")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -390,7 +394,7 @@ func TestMailboxRepairNeverRecreatesItsAnchors(t *testing.T) {
 			if err := os.RemoveAll(filepath.Join(dir, gone)); err != nil {
 				t.Fatal(err)
 			}
-			if err := repairMailbox(mailbox, inbox, dir); err == nil {
+			if err := repairMailbox(mailbox, inbox); err == nil {
 				t.Fatal("repair succeeded without its anchor")
 			}
 			if _, err := os.Lstat(filepath.Join(dir, gone)); !os.IsNotExist(err) {
