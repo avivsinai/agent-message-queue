@@ -164,8 +164,11 @@ func startCodexOnNamedDaemonThread(cmdName string, agentArgs []string, name stri
 	}
 	// With the feature off the TUI's thread/resume carries no developer
 	// instructions (tui/src/app_server_session.rs:2130-2132,
-	// terminal_visualization_instructions.rs:14-19), so a thread AMQ created
-	// matches a TUI start whether the daemon reloads it or not.
+	// terminal_visualization_instructions.rs:14-19), so the model's
+	// instructions match a TUI start whether the daemon reloads the thread or
+	// not. One setting differs, as for any `codex resume` of a thread with no
+	// turns: a fresh TUI start forces model_reasoning_summary to "none" unless
+	// the user set it, while a resume keeps the model default.
 	if codexTerminalInstructionsEnabled(codexHome, cwd) {
 		return nil, false
 	}
