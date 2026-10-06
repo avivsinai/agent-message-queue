@@ -318,7 +318,7 @@ func (s *Server) sayReply(r *remoteTurn, b binding.Binding, replyID, text string
 		}
 	}
 	if dest != "" {
-		r.meta.Posted = publish(dest, text)
+		r.meta.Posted = s.publish(dest, text)
 	}
 	if err := emitText(r.emit, r.sessionID, "agent_message_chunk", text); err != nil {
 		return nil, newRPCError(codeInternalError, "emit ACP reply update: %v", err)

@@ -117,7 +117,7 @@ func (s *Server) runRemote(sessionID, text, eventID string, turn *turnState, emi
 	root, target, native := s.cfg.Root, s.cfg.RemoteTarget, s.cfg.RemoteNative
 	if s.cfg.RemoteBinding {
 		// A prompt start also posts late replies of earlier turns; a post can
-		// take up to postTimeout, so it never holds this turn.
+		// take up to the post budget, so it never holds this turn.
 		s.requestSweep()
 		b, err := s.turnBinding(sessionID, eventID)
 		if err != nil {
@@ -659,7 +659,7 @@ func (r *remoteTurn) say(kind, outcome, stopReason, text string) (any, *rpcError
 //     release. While a status post holds the lock, no final can reserve.
 //     A cancel confirmation is the reverse: it posts only when the final
 //     marker records a cancel.
-//     postTimeout bounds the hold, and a crash releases the flock.
+//     Config.PostTimeout bounds the hold, and a crash releases the flock.
 //
 // A post that failed is not retried: the post has no idempotency key. The
 // event id is 64 lowercase hex, checked when the prompt is parsed (event.go
@@ -667,7 +667,7 @@ func (r *remoteTurn) say(kind, outcome, stopReason, text string) (any, *rpcError
 // it just posts; without a channel it posts nothing and records nothing.
 func (s *Server) postOnce(eventID, kind string, record []byte, channel, text string) string {
 	if eventID == "" || channel == "" || strings.TrimSpace(text) == "" {
-		return publish(channel, text)
+		return s.publish(channel, text)
 	}
 	if kind == postFinal {
 		won, err := s.reserveFinal(eventID, record)
@@ -677,7 +677,7 @@ func (s *Server) postOnce(eventID, kind string, record []byte, channel, text str
 		case !won:
 			return "duplicate: this event already posted its " + kind + " text"
 		}
-		return publish(channel, text)
+		return s.publish(channel, text)
 	}
 	dir := filepath.Join(s.cfg.StateDir, "remote-events")
 	result := ""
@@ -696,7 +696,7 @@ func (s *Server) postOnce(eventID, kind string, record []byte, channel, text str
 			result = "duplicate: this event already posted its " + kind + " text"
 			return nil
 		}
-		result = publish(channel, text)
+		result = s.publish(channel, text)
 		_, err := createExclusive(marker, record)
 		return err
 	})

@@ -183,7 +183,7 @@ func (s *Server) sweepLateReplies(now time.Time) {
 				continue
 			}
 			if won && !final.Cancelled {
-				_ = publish(c.channel, text)
+				_ = s.publish(c.channel, text)
 			}
 			l.drop(c.eventID)
 		}

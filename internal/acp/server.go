@@ -174,6 +174,9 @@ func NewServer(cfg Config, version string) *Server {
 	if cfg.HeartbeatInterval <= 0 {
 		cfg.HeartbeatInterval = defaultHeartbeatInterval
 	}
+	if cfg.PostTimeout <= 0 {
+		cfg.PostTimeout = defaultPostTimeout
+	}
 	return &Server{
 		cfg:      cfg,
 		version:  version,
@@ -826,7 +829,7 @@ func (s *Server) waitForReply(sessionID string, delivery Delivery, turn *turnSta
 				return nil, newRPCError(codeInternalError, "emit ACP reply update: %v", err)
 			}
 			result := turnResult(delivery, "replied", reply)
-			result.Meta.AMQ.Posted = publish(turn.channel, reply)
+			result.Meta.AMQ.Posted = s.publish(turn.channel, reply)
 			return result, nil
 		}
 

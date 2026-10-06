@@ -77,6 +77,8 @@ type Config struct {
 	TurnTimeout       time.Duration
 	PollInterval      time.Duration
 	HeartbeatInterval time.Duration
+	// PostTimeout bounds one Buzz post (default 30 s).
+	PostTimeout time.Duration
 }
 
 // LoadConfig resolves the routing context from the environment. An absent root,

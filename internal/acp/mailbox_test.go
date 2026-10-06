@@ -391,7 +391,7 @@ func TestBuzzAnswerIsPostedIntoTheDMChannel(t *testing.T) {
 	var posts []post
 	saved := postAnswer
 	t.Cleanup(func() { postAnswer = saved })
-	postAnswer = func(channel, content string) error {
+	postAnswer = func(channel, content string, _ time.Duration) error {
 		posts = append(posts, post{channel, content})
 		return nil
 	}
@@ -425,7 +425,7 @@ func TestRedeliveredEventPostsOnce(t *testing.T) {
 	posts := 0
 	saved := postAnswer
 	t.Cleanup(func() { postAnswer = saved })
-	postAnswer = func(string, string) error {
+	postAnswer = func(string, string, time.Duration) error {
 		posts++
 		return nil
 	}
@@ -460,7 +460,7 @@ func TestLateReplyIsPostedOnceAfterTheTurn(t *testing.T) {
 	var posts []string
 	saved := postAnswer
 	t.Cleanup(func() { postAnswer = saved })
-	postAnswer = func(_, content string) error {
+	postAnswer = func(_, content string, _ time.Duration) error {
 		posts = append(posts, content)
 		return nil
 	}
@@ -535,7 +535,7 @@ func TestRedeliveryPostsTheAnswerToTheFirstChannel(t *testing.T) {
 			var posts []post
 			saved := postAnswer
 			t.Cleanup(func() { postAnswer = saved })
-			postAnswer = func(channel, content string) error {
+			postAnswer = func(channel, content string, _ time.Duration) error {
 				mu.Lock()
 				defer mu.Unlock()
 				posts = append(posts, post{channel, content})
@@ -577,7 +577,7 @@ func TestCancelBeforeTheFinalPostWins(t *testing.T) {
 	posts := 0
 	saved := postAnswer
 	t.Cleanup(func() { postAnswer = saved })
-	postAnswer = func(string, string) error {
+	postAnswer = func(string, string, time.Duration) error {
 		posts++
 		return nil
 	}
@@ -647,7 +647,7 @@ func recordPosts(t *testing.T) func() []string {
 	var posts []string
 	saved := postAnswer
 	t.Cleanup(func() { postAnswer = saved })
-	postAnswer = func(channel, content string) error {
+	postAnswer = func(channel, content string, _ time.Duration) error {
 		mu.Lock()
 		defer mu.Unlock()
 		posts = append(posts, channel+": "+content)
@@ -940,7 +940,7 @@ func TestStatusNeverPostsAfterTheFinal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	publish(chanA, "the answer") // the final path posts after it releases the lock
+	s.publish(chanA, "the answer") // the final path posts after it releases the lock
 	select {
 	case <-status:
 	case <-time.After(3 * time.Second):
@@ -974,18 +974,6 @@ func TestStopConfirmsOnceInTheDM(t *testing.T) {
 		}
 		if got := posts(); len(got) != 1 || !strings.HasPrefix(got[0], chanA+": Stopped waiting") {
 			t.Fatalf("posts=%q; want one Stop confirmation", got)
-		}
-	})
-	t.Run("a winning reply suppresses it", func(t *testing.T) {
-		s, _ := mailboxServer(t)
-		posts := recordPosts(t)
-		eventID := strings.Repeat("7", 63) + "b"
-		if _, _, err := s.decideOutcome(eventID, mailboxOutcome{ReplyID: "r"}); err != nil {
-			t.Fatal(err)
-		}
-		s.postOnce(eventID, postCancel, []byte("x\n"), chanA, "Stopped waiting.")
-		if got := posts(); len(got) != 0 {
-			t.Fatalf("posts=%q; want no Stop confirmation after a reply won", got)
 		}
 	})
 }

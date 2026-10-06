@@ -30,9 +30,9 @@ var buzzIdentity []string
 // envBuzzCLI overrides the buzz binary used to post.
 const envBuzzCLI = "AMQ_ACP_BUZZ_CLI"
 
-// postTimeout bounds one post, including the wait for the CLI's output
-// pipes to close. A variable so a test can shorten it.
-var postTimeout = 30 * time.Second
+// defaultPostTimeout bounds one post, including the wait for the CLI's
+// output pipes to close (Config.PostTimeout).
+const defaultPostTimeout = 30 * time.Second
 
 // postAnswer publishes content into channel. A variable so tests can record
 // posts without a relay.
@@ -71,7 +71,7 @@ func captureBuzzIdentity() {
 
 // postWithBuzzCLI runs `buzz messages send --channel <channel> --content -`
 // with only the agent identity and a minimal environment.
-func postWithBuzzCLI(channel, content string) error {
+func postWithBuzzCLI(channel, content string, budget time.Duration) error {
 	if len(buzzIdentity) == 0 {
 		return errNoBuzzIdentity
 	}
@@ -81,9 +81,9 @@ func postWithBuzzCLI(channel, content string) error {
 	}
 	// The budget covers the run and the pipe drain: a CLI whose child keeps
 	// stderr open must not hold a status post (and its event post lock)
-	// past postTimeout (review of #961 r8).
-	waitDelay := postTimeout / 10
-	ctx, cancel := context.WithTimeout(context.Background(), postTimeout-waitDelay)
+	// past the budget (review of #961 r8).
+	waitDelay := budget / 10
+	ctx, cancel := context.WithTimeout(context.Background(), budget-waitDelay)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, bin, "messages", "send", "--channel", channel, "--content", "-")
 	cmd.WaitDelay = waitDelay
@@ -151,11 +151,11 @@ func bundledBuzz(app string) string {
 // publish posts text for the owner when the prompt came from Buzz. It
 // reports the outcome for the result meta: "posted", "" when there is no
 // Buzz channel or identity, or the error.
-func publish(channel, text string) string {
+func (s *Server) publish(channel, text string) string {
 	if channel == "" || strings.TrimSpace(text) == "" {
 		return ""
 	}
-	err := postAnswer(channel, text)
+	err := postAnswer(channel, text, s.cfg.PostTimeout)
 	switch {
 	case err == nil:
 		return "posted"

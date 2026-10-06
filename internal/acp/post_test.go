@@ -145,11 +145,12 @@ func TestStuckBuzzCLIReleasesThePostLock(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv(envBuzzCLI, cli)
-	savedID, savedTimeout := buzzIdentity, postTimeout
-	t.Cleanup(func() { buzzIdentity, postTimeout = savedID, savedTimeout })
-	buzzIdentity, postTimeout = []string{"BUZZ_PRIVATE_KEY=test"}, time.Second
+	saved := buzzIdentity
+	t.Cleanup(func() { buzzIdentity = saved })
+	buzzIdentity = []string{"BUZZ_PRIVATE_KEY=test"}
 
 	s, _ := mailboxServer(t)
+	s.cfg.PostTimeout = time.Second
 	eventID := strings.Repeat("8", 63) + "a"
 	done := make(chan struct{})
 	go func() {
@@ -168,7 +169,7 @@ func TestStuckBuzzCLIReleasesThePostLock(t *testing.T) {
 	if _, err := s.reserveFinal(eventID, []byte(`{"reply_id":"r"}`)); err != nil {
 		t.Fatal(err)
 	}
-	if took := time.Since(begin); took > postTimeout+time.Second {
+	if took := time.Since(begin); took > s.cfg.PostTimeout+time.Second {
 		t.Fatalf("the final waited %v for the status post's lock", took)
 	}
 	<-done
