@@ -621,8 +621,6 @@ func (r *remoteTurn) failed(state string, err error) (any, *rpcError) {
 	}
 	text := fmt.Sprintf("%s: not submitted (%s): %s", r.meta.Target, r.meta.Code, r.meta.Reason)
 	switch {
-	case r.mailboxThread != "" && state == remoteNotSubmitted:
-		text = fmt.Sprintf("Not delivered to %s: %s. Resending is safe.", r.meta.Target, r.meta.Reason)
 	case r.mailboxThread != "" && state == remoteUncertain:
 		text = fmt.Sprintf("%s: the delivery outcome is unknown: %s. Do not resend; check it with `amq thread --id %s`.", r.meta.Target, r.meta.Reason, r.mailboxThread)
 	case state == remoteUncertain:

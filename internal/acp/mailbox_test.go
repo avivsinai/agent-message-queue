@@ -287,39 +287,66 @@ func TestRedeliveredPromptStillGetsTheBuzzMailbox(t *testing.T) {
 	}
 }
 
-// Bead agent-message-queue-qff (review F4): a first delivery to a deleted
-// root or handle mailbox said the outcome was unknown, or recreated the
-// mailbox and reported Delivered. It must say not delivered, resend safe,
-// and never create the mailbox.
-func TestMailboxFirstDeliveryFailureSaysNotDelivered(t *testing.T) {
-	for name, root := range map[string]string{
-		"missing root":    filepath.Join(canonicalTempDir(t), "gone"),
-		"missing mailbox": canonicalTempDir(t),
-	} {
-		t.Run(name, func(t *testing.T) {
-			s, _ := mailboxServer(t)
-			s.cfg.TurnTimeout = 200 * time.Millisecond
-			if err := binding.Write(binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: "agent"}); err != nil {
-				t.Fatal(err)
-			}
-			var said []string
-			result, rpcErr := s.runRemote("s", "say hi", strings.Repeat("5", 64), newTurn(), func(v any) error {
-				if note := v.(sessionUpdateNotification); note.Params.Update.SessionUpdate == "agent_message_chunk" {
-					said = append(said, note.Params.Update.Content.Text)
-				}
-				return nil
-			})
-			if rpcErr != nil {
-				t.Fatal(rpcErr)
-			}
-			got := result.(remotePromptResult)
-			if got.Meta.Remote.State != remoteNotSubmitted || len(said) != 1 || !strings.HasPrefix(said[0], "Not delivered to agent: ") || !strings.HasSuffix(said[0], "Resending is safe.") {
-				t.Fatalf("result=%+v said=%q", got, said)
-			}
-			if _, err := os.Lstat(filepath.Join(root, "agents", "agent")); !os.IsNotExist(err) {
-				t.Fatalf("the handle mailbox was created: %v", err)
-			}
-		})
+// Bead agent-message-queue-qff (review F4, Pro review of #964): a delivery
+// to a deleted handle mailbox recreated it and reported Delivered, and a
+// refused delivery could still be published by a later redelivery. It must
+// say not delivered, record that as the event's outcome, and never publish
+// the event afterwards.
+func TestMailboxMissingMailboxIsNotDelivered(t *testing.T) {
+	s, _ := mailboxServer(t)
+	s.cfg.TurnTimeout = 200 * time.Millisecond
+	root := canonicalTempDir(t)
+	if err := binding.Write(binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: "agent"}); err != nil {
+		t.Fatal(err)
+	}
+	eventID := strings.Repeat("5", 64)
+	var said []string
+	emit := func(v any) error {
+		if note := v.(sessionUpdateNotification); note.Params.Update.SessionUpdate == "agent_message_chunk" {
+			said = append(said, note.Params.Update.Content.Text)
+		}
+		return nil
+	}
+	result, rpcErr := s.runRemote("s", "say hi", eventID, newTurn(), emit)
+	if rpcErr != nil {
+		t.Fatal(rpcErr)
+	}
+	got := result.(remotePromptResult)
+	if got.Meta.Remote.State != remoteNotSubmitted || len(said) != 1 || !strings.HasPrefix(said[0], "Not delivered to agent: ") {
+		t.Fatalf("result=%+v said=%q", got, said)
+	}
+	if _, err := os.Lstat(filepath.Join(root, "agents", "agent")); !os.IsNotExist(err) {
+		t.Fatalf("the handle mailbox was created: %v", err)
+	}
+	if _, ok := s.mailboxAnswered(eventID); !ok {
+		t.Fatal("the refusal is not the event's outcome")
+	}
+	// The owner restores the mailbox; a redelivery of the event still
+	// publishes nothing.
+	if err := fsq.EnsureAgentDirs(root, "agent"); err != nil {
+		t.Fatal(err)
+	}
+	if _, rpcErr := s.runRemote("s", "say hi", eventID, newTurn(), emit); rpcErr != nil {
+		t.Fatal(rpcErr)
+	}
+	if ids := inboxPrompts(t, root); len(ids) != 0 {
+		t.Fatalf("a redelivery published the refused event: %v", ids)
+	}
+}
+
+// Pro review of #964 (P2): a mailbox an older amq made has an inbox but no
+// receipts/; delivery completes its layout instead of refusing it.
+func TestMailboxDeliveryCompletesAnOlderMailbox(t *testing.T) {
+	s, root := mailboxServer(t)
+	s.cfg.TurnTimeout = 50 * time.Millisecond
+	if err := os.Remove(fsq.AgentReceipts(root, "agent")); err != nil {
+		t.Fatal(err)
+	}
+	if _, rpcErr := s.runRemote("s", "say hi", strings.Repeat("6", 64), newTurn(), func(any) error { return nil }); rpcErr != nil {
+		t.Fatal(rpcErr)
+	}
+	if ids := inboxPrompts(t, root); len(ids) != 1 {
+		t.Fatalf("inbox holds %d prompts; want 1", len(ids))
 	}
 }
 

@@ -52,6 +52,11 @@ type mailboxClaim struct {
 type mailboxOutcome struct {
 	ReplyID   string `json:"reply_id,omitempty"`
 	Cancelled bool   `json:"cancelled,omitempty"`
+	// NotSubmitted records that the handle's inbox refused the message after
+	// the publish lock proved it absent: nothing was delivered, and a
+	// redelivery of the event ends here instead of publishing it later.
+	NotSubmitted bool   `json:"not_submitted,omitempty"`
+	Reason       string `json:"reason,omitempty"`
 }
 
 // runMailbox delivers the prompt as an AMQ message to the bound handle and
@@ -79,7 +84,7 @@ func (s *Server) runMailbox(sessionID, text, eventID string, b binding.Binding, 
 	// The turn budget starts before the claim, so a publish-lock wait counts
 	// against it (codex #895 r2 P1).
 	budget := time.Now().Add(s.cfg.TurnTimeout)
-	claim, fresh, err := s.mailboxClaim(eventID, threadID, turn.channel)
+	claim, err := s.mailboxClaim(eventID, threadID, turn.channel)
 	if err != nil {
 		return r.failed(remoteUncertain, err)
 	}
@@ -115,12 +120,14 @@ func (s *Server) runMailbox(sessionID, text, eventID string, b binding.Binding, 
 			r.meta.Reason = "reply_timeout"
 			return r.say(postStatus, "reply_timeout", StopReasonRefusal, fmt.Sprintf("Not delivered to %s: the turn ran out of time before the message could be published.", b.Handle))
 		}
-		// This call claimed the message id, so no earlier delivery published
-		// it, and publishOnce reports only failures before the message
-		// reached the inbox: nothing was delivered. A redelivery's earlier
-		// attempt may have published it, so its outcome stays unknown.
-		if fresh {
-			return r.failed(remoteNotSubmitted, err)
+		var refused *notDeliveredError
+		if errors.As(err, &refused) {
+			return s.mailboxRefused(r, b, refused.reason)
+		}
+		if errors.Is(err, errEventDecided) {
+			if out, ok := s.mailboxAnswered(eventID); ok {
+				return s.mailboxAnsweredTurn(r, b, out)
+			}
 		}
 		return r.failed(remoteUncertain, err)
 	}
@@ -226,9 +233,18 @@ func (s *Server) mailboxAnsweredTurn(r *remoteTurn, b binding.Binding, out mailb
 	return s.answeredResult(r, b, out)
 }
 
-// answeredResult shows the client the reply that is the event's outcome. It
-// was posted by whoever decided that outcome; this turn posts nothing.
+// answeredResult shows the client the reply that is the event's outcome, or
+// that its message was not delivered. It was posted by whoever decided that
+// outcome; this turn posts nothing.
 func (s *Server) answeredResult(r *remoteTurn, b binding.Binding, out mailboxOutcome) (any, *rpcError) {
+	if out.NotSubmitted {
+		r.meta.State, r.meta.Code, r.meta.Reason, r.meta.RequestRef = remoteNotSubmitted, "not_delivered", out.Reason, ""
+		if err := emitText(r.emit, r.sessionID, "agent_message_chunk", notDeliveredText(b.Handle, out.Reason)); err != nil {
+			return nil, newRPCError(codeInternalError, "emit ACP reply update: %v", err)
+		}
+		r.meta.Posted = "duplicate: this event already has its final outcome"
+		return remotePromptResult{StopReason: StopReasonRefusal, Meta: remotePromptMeta{Remote: r.meta}}, nil
+	}
 	r.meta.State, r.meta.Reason = DeliveryStateReplied, ""
 	text := fmt.Sprintf("%s already answered; its final post was already made or attempted.", b.Handle)
 	if id := out.ReplyID; id != "" && id == filepath.Base(id) {
@@ -360,46 +376,54 @@ func (s *Server) mailboxAnswered(eventID string) (mailboxOutcome, bool) {
 	return out, true
 }
 
-// mailboxClaim returns the message id and time for this prompt, and whether
-// this call created the claim (fresh) rather than found an earlier
-// delivery's. With an event id it is claimed exclusively before any publish,
-// and a redelivery reuses it.
-func (s *Server) mailboxClaim(eventID, threadID, channel string) (mailboxClaim, bool, error) {
+// mailboxClaim returns the message id and time for this prompt. With an
+// event id it is claimed exclusively before any publish, and a redelivery
+// reuses it.
+func (s *Server) mailboxClaim(eventID, threadID, channel string) (mailboxClaim, error) {
 	now := time.Now()
 	id, err := format.NewMessageID(now)
 	if err != nil {
-		return mailboxClaim{}, false, err
+		return mailboxClaim{}, err
 	}
 	fresh := mailboxClaim{MessageID: id, Created: now.UTC().Format(time.RFC3339Nano), Thread: threadID, Channel: channel}
 	if eventID == "" {
-		return fresh, true, nil
+		return fresh, nil
 	}
 	path := filepath.Join(s.cfg.StateDir, "remote-events", eventID+".mailbox.json")
 	raw, err := json.Marshal(fresh)
 	if err != nil {
-		return mailboxClaim{}, false, err
+		return mailboxClaim{}, err
 	}
-	created, err := createExclusive(path, raw)
-	if err != nil {
-		return mailboxClaim{}, false, err
+	if _, err := createExclusive(path, raw); err != nil {
+		return mailboxClaim{}, err
 	}
 	stored, err := readSmallRegular(path)
 	if err != nil {
-		return mailboxClaim{}, false, err
+		return mailboxClaim{}, err
 	}
 	if err := fsq.SyncDir(filepath.Dir(path)); err != nil {
-		return mailboxClaim{}, false, err
+		return mailboxClaim{}, err
 	}
 	var claim mailboxClaim
 	if err := json.Unmarshal(stored, &claim); err != nil || claim.MessageID == "" || claim.Thread == "" {
-		return mailboxClaim{}, false, fmt.Errorf("event %s has an unreadable mailbox claim; refusing to publish", eventID)
+		return mailboxClaim{}, fmt.Errorf("event %s has an unreadable mailbox claim; refusing to publish", eventID)
 	}
-	return claim, created, nil
+	return claim, nil
 }
 
 // errStoppedBeforePublish means the turn was cancelled or left before the
 // message was published; nothing was delivered.
 var errStoppedBeforePublish = errors.New("stopped before publish")
+
+// errEventDecided means the event already had its outcome when the publish
+// lock was held, so nothing was published; the turn adopts that outcome.
+var errEventDecided = errors.New("event already has its outcome")
+
+// notDeliveredError means publishOnce found the message absent from the
+// handle's inbox and the inbox then refused it: nothing was delivered.
+type notDeliveredError struct{ reason string }
+
+func (e *notDeliveredError) Error() string { return e.reason }
 
 // publishClaimed publishes an event's claimed message under a per-event
 // lock, so two retries cannot both pass the absence check and publish the
@@ -416,7 +440,27 @@ func (s *Server) publishClaimed(r *remoteTurn, budget time.Time, b binding.Bindi
 		if !time.Now().Before(budget) {
 			return lock.ErrStopped
 		}
-		return publishOnce(b, threadID, id, created, text)
+		// An outcome recorded while this turn waited for the lock stands: a
+		// refused delivery is never published by a later redelivery
+		// (bead agent-message-queue-qff).
+		if _, ok := s.mailboxAnswered(r.eventID); ok {
+			return errEventDecided
+		}
+		err := publishOnce(b, threadID, id, created, text)
+		var refused *notDeliveredError
+		if !errors.As(err, &refused) {
+			return err
+		}
+		// Record the refusal as the event's outcome under the publish lock,
+		// so no redelivery can publish between the check and the record.
+		_, won, decideErr := s.decideOutcome(r.eventID, mailboxOutcome{NotSubmitted: true, Reason: refused.reason})
+		switch {
+		case decideErr != nil:
+			return decideErr
+		case !won:
+			return errEventDecided
+		}
+		return err
 	}
 	if r.eventID == "" {
 		return publish()
@@ -459,9 +503,9 @@ func (s *Server) mailboxNotDelivered(r *remoteTurn, outcome string) (any, *rpcEr
 
 // publishOnce delivers the prompt to the handle unless the claimed message
 // is already in its inbox (new or cur), so a redelivery never duplicates it.
-// It never creates the handle's mailbox: a missing root or mailbox is a
-// failure before delivery, not a message nobody reads. An error means the
-// message did not reach the inbox in this call.
+// It never creates the handle's mailbox or inbox. Once the message is known
+// absent, a refusal by the handle's mailbox is a *notDeliveredError; any
+// other error leaves the outcome unknown.
 func publishOnce(b binding.Binding, threadID, id string, created time.Time, text string) error {
 	identity, err := fsq.SnapshotDeliveryRoot(b.Root)
 	if err != nil {
@@ -511,13 +555,65 @@ func publishOnce(b binding.Binding, threadID, id string, created time.Time, text
 	if len(data) > format.MaxMessageSize {
 		return fmt.Errorf("prompt exceeds the maximum AMQ message size")
 	}
+	if err := mailboxAnchored(root, b.Handle); err != nil {
+		return err
+	}
+	// A mailbox made by an older amq lacks leaves such as receipts/ that
+	// delivery requires; its inbox exists, so complete the layout.
+	if err := root.EnsureAgentDirs(b.Handle); err != nil {
+		return &notDeliveredError{reason: "its mailbox could not be completed: " + err.Error()}
+	}
 	if _, err := fsq.DeliverToExistingInbox(root, b.Handle, name, data); err != nil {
 		var uncertain *fsq.CommittedDurabilityError
 		if !errors.As(err, &uncertain) {
-			return err
+			return &notDeliveredError{reason: "its inbox refused the message: " + err.Error()}
 		}
 	}
 	return nil
+}
+
+// mailboxAnchored refuses delivery unless the handle's mailbox and inbox
+// already exist as directories in the pinned root.
+func mailboxAnchored(root *fsq.DeliveryRoot, handle string) error {
+	for _, anchor := range []struct{ path, missing string }{
+		{filepath.Join("agents", handle), "no mailbox in its AMQ root"},
+		{filepath.Join("agents", handle, "inbox"), "its mailbox has no inbox"},
+	} {
+		info, err := root.Stat(anchor.path)
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			return &notDeliveredError{reason: anchor.missing}
+		case err != nil:
+			return &notDeliveredError{reason: err.Error()}
+		case !info.IsDir():
+			return &notDeliveredError{reason: anchor.path + " is not a directory"}
+		}
+	}
+	return nil
+}
+
+// notDeliveredText is the reply for an event whose message never reached
+// the handle's inbox.
+func notDeliveredText(handle, reason string) string {
+	return fmt.Sprintf("Not delivered to %s: %s. Nothing reached its inbox; send it again.", handle, reason)
+}
+
+// mailboxRefused ends the turn that recorded the event's not-submitted
+// outcome. That record is the at-most-once guard for the post, as for a
+// final reply.
+func (s *Server) mailboxRefused(r *remoteTurn, b binding.Binding, reason string) (any, *rpcError) {
+	r.meta.State, r.meta.Code, r.meta.Reason, r.meta.RequestRef = remoteNotSubmitted, "not_delivered", reason, ""
+	text := notDeliveredText(b.Handle, reason)
+	if dest := r.postChannel(); dest != "" {
+		r.meta.Posted = s.publish(dest, text)
+	}
+	if r.settle("replied") == "client_disconnected" {
+		return remotePromptResult{StopReason: StopReasonRefusal, Meta: remotePromptMeta{Remote: r.meta}}, nil
+	}
+	if err := emitText(r.emit, r.sessionID, "agent_message_chunk", text); err != nil {
+		return nil, newRPCError(codeInternalError, "emit ACP reply update: %v", err)
+	}
+	return remotePromptResult{StopReason: StopReasonRefusal, Meta: remotePromptMeta{Remote: r.meta}}, nil
 }
 
 // drained reports whether the handle recorded a drained receipt for id. It
