@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"io"
@@ -9,9 +11,11 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/avivsinai/agent-message-queue/internal/config"
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/ipc"
 	"github.com/avivsinai/agent-message-queue/internal/remote/manifest"
+	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 	"github.com/avivsinai/agent-message-queue/internal/remote/requests"
 )
 
@@ -115,5 +119,139 @@ func TestDetachOutsideAMQUsesTheBoundRoot(t *testing.T) {
 	}
 	if _, err := binding.Read(); !errors.Is(err, binding.ErrNone) {
 		t.Fatalf("binding still present after detach: %v", err)
+	}
+}
+
+// Bead agent-message-queue-94w (review F13): detach with no scope removed
+// every binding; it needs --self, --name or --all.
+func TestDetachNeedsAScope(t *testing.T) {
+	dir := canonicalTempDir(t)
+	t.Setenv(binding.EnvPath, filepath.Join(dir, "binding.json"))
+	for _, n := range []string{"one", "two", "three"} {
+		b := binding.Binding{Carrier: binding.CarrierMailbox, Root: dir, Handle: n, Name: n}
+		if err := binding.WriteNamed(b); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if code, err := detach(nil, io.Discard, io.Discard); code != protocol.ExitUsage || err == nil {
+		t.Fatalf("detach with no scope: code=%d err=%v; want usage error", code, err)
+	}
+	if all, _ := binding.List(); len(all) != 3 {
+		t.Fatalf("%d bindings after a refused detach; want 3", len(all))
+	}
+	if code, err := detach([]string{"--name", "two"}, io.Discard, io.Discard); code != 0 || err != nil {
+		t.Fatalf("detach --name: code=%d err=%v", code, err)
+	}
+	if all, _ := binding.List(); len(all) != 2 {
+		t.Fatalf("%d bindings after detach --name; want 2", len(all))
+	}
+	if code, err := detach([]string{"--all"}, io.Discard, io.Discard); code != 0 || err != nil {
+		t.Fatalf("detach --all: code=%d err=%v", code, err)
+	}
+	if all, _ := binding.List(); len(all) != 0 {
+		t.Fatalf("%d bindings after detach --all; want 0", len(all))
+	}
+}
+
+// Bead agent-message-queue-za4 (review F12): a reply to a Buzz DM warned
+// "may not be read" because attach never listed buzz in the root's roster.
+func TestAttachListsBuzzInTheRosterOnce(t *testing.T) {
+	root := canonicalTempDir(t)
+	if err := os.MkdirAll(filepath.Join(root, "meta"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := filepath.Join(root, "meta", "config.json")
+	if err := os.WriteFile(cfg, []byte(`{"version":1,"created_utc":"2026-01-01T00:00:00Z","agents":["claude"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if err := listBuzzInRoster(root); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := config.LoadConfig(cfg)
+	if err != nil || len(got.Agents) != 2 || got.Agents[1] != "buzz" {
+		t.Fatalf("agents = %v err=%v; want [claude buzz]", got.Agents, err)
+	}
+	bare := canonicalTempDir(t)
+	if err := listBuzzInRoster(bare); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(bare, "meta", "config.json")); err == nil {
+		t.Fatal("attach created a config.json in a root that had none")
+	}
+}
+
+// Bead agent-message-queue-5re (review F13): attach and detach parsed --json
+// and ignored it.
+func TestDetachAllJSONPrintsTheRemovedNames(t *testing.T) {
+	dir := canonicalTempDir(t)
+	t.Setenv(binding.EnvPath, filepath.Join(dir, "binding.json"))
+	if err := binding.WriteNamed(binding.Binding{Carrier: binding.CarrierMailbox, Root: dir, Handle: "one", Name: "one"}); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if code := run([]string{"detach", "--all", "--json"}, nil, &out, io.Discard); code != 0 {
+		t.Fatalf("exit %d: %s", code, out.String())
+	}
+	var got struct {
+		Removed []string `json:"removed"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil || len(got.Removed) != 1 || got.Removed[0] != "one" {
+		t.Fatalf("output %q (%v); want JSON removed [one]", out.String(), err)
+	}
+}
+
+// Pro review of 94w: a whitespace-only native --name picked the default name
+// but counted as explicit, so it replaced another session's binding.
+func TestNativeBlankNameIsNotExplicit(t *testing.T) {
+	name, explicit := nativeBindingName("  ", "claude:7")
+	if explicit || name == "" {
+		t.Fatalf("name=%q explicit=%v; want the default name, not explicit", name, explicit)
+	}
+}
+
+// Pro review of 5re: the error path scanned for the token while the success
+// path used the parsed value, so --json=false gave a JSON error but human
+// success, and -json=true gave a human error.
+func TestJSONFlagValueDecidesSuccessAndErrorOutput(t *testing.T) {
+	dir := canonicalTempDir(t)
+	t.Setenv(binding.EnvPath, filepath.Join(dir, "binding.json"))
+	var out, errOut bytes.Buffer
+	if code := run([]string{"detach", "-json=true"}, nil, &out, &errOut); code != protocol.ExitUsage {
+		t.Fatalf("exit %d; want usage", code)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(out.Bytes(), &body); err != nil || body["error"] == nil {
+		t.Fatalf("-json=true error output %q (%v); want a JSON error on stdout", out.String(), err)
+	}
+	out.Reset()
+	if code := run([]string{"detach", "--all", "--json=false"}, nil, &out, &errOut); code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	if json.Valid(out.Bytes()) {
+		t.Fatalf("--json=false printed JSON: %q", out.String())
+	}
+	out.Reset()
+	_ = run([]string{"detach", "--json=false"}, nil, &out, &errOut)
+	if out.Len() != 0 {
+		t.Fatalf("--json=false error went to stdout as %q; want human text on stderr", out.String())
+	}
+	// Pro review of 5re r2: a string option's value is never a flag, so a
+	// value of "--" or "--json=false" must not change the JSON decision.
+	for _, args := range [][]string{
+		{"detach", "--name", "--", "--json", "--all"},
+		{"submit", "--root", dir, "--text", "--", "--json", "T"},
+		{"submit", "--root", dir, "--json", "--text", "--json=false", "T"},
+	} {
+		out.Reset()
+		errOut.Reset()
+		if code := run(args, nil, &out, &errOut); code == 0 {
+			t.Fatalf("%v succeeded", args)
+		}
+		var body map[string]any
+		if err := json.Unmarshal(out.Bytes(), &body); err != nil || body["error"] == nil {
+			t.Fatalf("%v printed %q (%v); want a JSON error on stdout", args, out.String(), err)
+		}
 	}
 }

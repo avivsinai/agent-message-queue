@@ -434,8 +434,13 @@ connected at once. Each has its own Buzz agent, whose ACP model
 `amq-remote:<name>` selects that binding (`amq-acp setup --session <name>`
 writes its Import file).
 
-`amq-remote detach` removes the binding. `detach --self` removes it only when
-it names this session. The session and the endpoint keep running.
+`amq-remote detach` needs one scope: `--self` removes the binding that names
+this session, `--name <name>` removes the binding of that name, and `--all`
+removes every binding. The session and the endpoint keep running.
+
+A defaulted name that another session already holds is refused, naming
+`--name <unique>` as the remedy; attaching the same session again is
+idempotent. An explicit `--name` replaces the binding of that name.
 
 ### `share`
 
@@ -534,37 +539,107 @@ reads `uncertain`.
 
 ### Approvals from the Buzz DM
 
-Buzz can block a Claude tool call. It cannot allow one yet: the terminal
-allows. A Claude target with `"approve": true`, shared by a relay share with
+A Claude target with `"approve": true`, shared by a relay share with
 commands and `native_session_id`, shows a tool approval of a request that
-the share submitted in the owner's DM, and ❌ on it denies that one call. It
-needs one more hook:
+the share submitted in the owner's DM. ❌ on it denies that one call. ✅
+allows it, but only when the hook pins the owner's public key. It needs one
+more hook:
 
 ```text
-amq-remote claude install-approval-hook     # adds a PermissionRequest hook to ~/.claude/settings.json
-amq-remote claude uninstall-approval-hook   # removes only that hook
+amq-remote claude install-approval-hook [--owner <hex|npub>] [--root <dir>] [--session <name>]   # adds a PermissionRequest hook to ~/.claude/settings.json
+amq-remote claude uninstall-approval-hook                                                     # removes only that hook
 ```
+
+Without `--owner` the installer pins the one owner of the relay shares in
+the manifest (`--root` or `AM_ROOT`, or `--manifest`). With no owner found
+it installs a reject-only hook. With an owner it pins that owner's one
+relay share with a DM channel (or the `--session` one), as the manifest and
+the enrolled credentials name it at install time, on the hook's command
+line: `... claude permission-hook --wait 600 --owner '<64 hex>' --root
+'<AMQ root>' --session '<name>' --relay '<relay URL>' --body '<body
+pubkey>' --channel '<DM channel>' --target '<target>'`. Claude Code asks
+before Claude edits its own settings file, so Claude cannot change the pin
+on its own. The hook never reads the manifest: the root and session only
+locate the enrolled body secret it signs in with, whose pubkey must be the
+pinned body. A pin that misses any flag is reject-only. Run the installer
+again after the share's relay, channel or body changes.
 
 The hook has no matcher, a 600 second wait, and a 630 second timeout. It
 exits at once with no output, so the terminal dialog decides, unless every
 check passes: the session has a pin that a live `amq-remote serve` wrote for
 that share, and the call belongs to a prompt that an AMQ request delivered
 as its own turn. A request that Claude absorbed into a running turn gets no
-DM approval. The hook never exits 2 and never prints allow. Its only
-decision is a deny for the owner's ❌ on that exact call, and the turn goes
-on. An answer file with any other option is ignored, so a forged allow
-grants nothing.
+DM approval. The hook never exits 2. It denies for the owner's ❌ on that
+exact call, and the turn goes on.
+
+Any same-user process can write the answer file, so an allow in it proves
+nothing by itself. The hook prints allow only when all of these hold:
+
+- its command line pins an owner and a whole share;
+- the call is a Bash call with only `command`, `description`, `timeout` and
+  `run_in_background`, shown whole: nothing hidden, shortened, or removed
+  for display;
+- the answer carries the owner's kind 7 reaction ✅, whose id and BIP-340
+  signature verify under the pinned key, dated from 30 seconds before the
+  request to its deadline;
+- the reaction's last `e` tag is the approval message, whose id and
+  signature verify, which the share's body key signed in the share's DM
+  channel, and whose content is the approval text for the hook's own
+  rendering of the call under a request of the share's target: the
+  command preview, then `Interaction: <id>` and `Action: <sha256 of the
+  call>`;
+- the hook's own read of the pinned relay, signed in with the share's
+  body key as `amq-remote serve` is, each read to the end of stored events
+  within 10 seconds, finds every way a Buzz client changes or hides the
+  message harmless: each edit (kind 40003, by the body or by the owner,
+  whom Buzz lets edit an agent's message) shows the same call with only
+  another answer line or outcome, no deletion (kind 5, or the Buzz-native
+  kind 9005) names the message or one of its edits, the body sent no
+  deletion ever, and the owner sent no deletion since the message, with or
+  without an `h` tag. The relay hides a deleted edit, AMQ never deletes,
+  and a deletion's time is what its signer claims;
+- the approval is still open when the hook checks, both before and after
+  it verifies: its deadline has not passed, Claude has not ended the hook,
+  and nothing else closed it. One allow applies once.
+
+On a missing pin, any failed check, an error, or a timeout the hook prints
+no allow. The endpoint runs the same verification before it passes a ✅ to
+the hook. When it fails, nothing is answered and the DM says why:
+"The approval message was altered after it was posted; check the
+terminal." for an edit that changed the call or a deletion, and "Could not
+verify the approval: <reason>. React again to retry." otherwise (a relay
+error or timeout, for example). A later ✅ or a ❌ still works. When the
+endpoint's check passes and the hook's own check then fails, the hook
+records that it refused exactly that proof: the answer never applies, and
+a later ❌ or a new ✅ replaces it.
+
+The DM offers ✅ only when the call can pass these checks, the
+installed hook pins the share's owner, and the approval is bound to one
+tool call in the transcript; otherwise it offers ❌ only.
+
+The pin holds only while Claude cannot change settings or run commands
+without a prompt. Each of these defeats it: a click on "allow Claude to edit
+.claude for this session", `bypassPermissions` mode, or a `permissions.allow`
+rule that allows every Bash command. `amq-remote doctor` reports the pinned
+owner and share and warns on the last two in `~/.claude/settings.json`.
+
+The relay is trusted to return the full edit and deletion history of the
+message. A same-user process that can replace the installed `amq-remote`
+binary, or edit the Claude settings with the owner's consent, defeats this
+protection.
 
 The message shows the call whole, or not at all: a call that may contain
 a secret anywhere shows "Command hidden: it may contain a secret. Check the
 terminal.", and a call too long to show whole shows "Command too long:
-check the terminal." ❌ still blocks either. The first answer
-wins, in Buzz or in the terminal. When the hook stops before it records
-that its deny was written whole, the message says the block may not have
-reached the terminal (`delivery_unknown`). A terminal reject stops the hook at once.
+check the terminal." ❌ still blocks either; ✅ is never offered. The first
+answer wins, in Buzz or in the terminal. When the hook stops before it
+records that its decision was written whole, the message says the answer
+may not have reached the terminal (`delivery_unknown`). A terminal reject
+stops the hook at once.
 A terminal approve does not signal the hook, so the endpoint detects it
 from the call's `tool_result` in the transcript and edits the message to
 say it was answered outside Buzz. When two identical calls are waiting in
-one turn, the approval cannot be bound to one of them, and the first
-`tool_result` among them closes it. Another PermissionRequest hook that
-decides can answer first; AMQ reports only what its own hook printed.
+one turn, the approval cannot be bound to one of them, ✅ is not offered,
+and the first `tool_result` among them closes it. Another PermissionRequest
+hook that decides can answer first; AMQ reports only what its own hook
+printed.

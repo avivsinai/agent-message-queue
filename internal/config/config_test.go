@@ -1,6 +1,9 @@
 package config
 
 import (
+	"time"
+
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"os"
 	"path/filepath"
 	"sync"
@@ -193,5 +196,45 @@ func TestEnsureAgentB2ConcurrentNoLostRegistration(t *testing.T) {
 	}
 	if !has("remote") {
 		t.Fatalf("remote lost in concurrent registration: %v", loaded.Agents)
+	}
+}
+
+// Pro review of za4 (P2-1): `amq init --force` wrote config.json without the
+// config lock, so it could interleave with a roster registration and be
+// undone. WriteConfig must wait for the lock EnsureAgent holds. The wait is
+// one-sided: a slow machine can only make this pass late, never fail.
+func TestWriteConfigWaitsForTheConfigLock(t *testing.T) {
+	rootDir := t.TempDir()
+	identity, err := fsq.SnapshotDeliveryRoot(rootDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dr, err := fsq.OpenDeliveryRoot(rootDir, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = dr.Close() }()
+	done := make(chan error, 1)
+	err = dr.WithConfigLock(func(*fsq.DeliveryRoot) error {
+		go func() {
+			done <- WriteConfig(filepath.Join(rootDir, "meta", "config.json"), Config{Version: 1, Agents: []string{"a"}}, true)
+		}()
+		select {
+		case <-done:
+			t.Error("WriteConfig finished while another writer held the config lock")
+		case <-time.After(300 * time.Millisecond):
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("WriteConfig did not finish after the lock was released")
 	}
 }

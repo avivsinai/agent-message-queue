@@ -1,6 +1,9 @@
 package claude
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -46,6 +49,17 @@ type approval struct {
 	// Its evidence is read and arbitrated there only, also after the
 	// registry moved to another session.
 	sessionID string
+	// approvable is the hook's word that it can apply a proven allow for
+	// this call; pinned that the installed hook and the serving share name
+	// the same owner. Both decide only whether the DM offers allow.
+	approvable, pinned bool
+}
+
+// offersAllow reports whether the DM offers allow for ap: the hook can
+// apply one, the owner is pinned, and the approval is bound to its one
+// tool_use. Otherwise the approval is reject only.
+func (ap *approval) offersAllow() bool {
+	return ap.approvable && ap.pinned && ap.toolUseID != "" && !ap.uncertain
 }
 
 // openRef names one open approval and the session its files live in.
@@ -68,6 +82,8 @@ const maxRunToolCalls = 1024
 type approvalDisk struct {
 	requests map[string]approvalRequest
 	resolved map[string]approvalResolved
+	// pinned is allowPinned for the session, read when a request is new.
+	pinned bool
 }
 
 // readApprovalDisk reads every request not yet known and the resolved file
@@ -101,6 +117,9 @@ func (a *Attachment) readApprovalDisk(sessionID string, known map[string]bool, o
 		if r, ok := readResolved(a.home, o.sessionID, o.id); ok {
 			d.resolved[o.id] = r
 		}
+	}
+	if len(d.requests) > 0 {
+		d.pinned = allowPinned(a.home, sessionID)
 	}
 	return d
 }
@@ -283,7 +302,8 @@ func (a *Attachment) applyApprovalsLocked(sessionID string, d approvalDisk, caug
 		}
 		preview, _ := protocol.TruncateText(r.Preview, protocol.MaxApprovalPreview)
 		ap := &approval{id: id, toolName: r.ToolName, preview: preview, hash: r.ActionHash,
-			hookPID: r.HookPID, deadline: deadline, openedAt: opened.UnixMilli(), seenSeq: seq, sessionID: r.SessionID}
+			hookPID: r.HookPID, deadline: deadline, openedAt: opened.UnixMilli(), seenSeq: seq, sessionID: r.SessionID,
+			approvable: r.Approvable && preview == r.Preview, pinned: d.pinned}
 		if rec.approvals == nil {
 			rec.approvals = map[string]*approval{}
 		}
@@ -305,7 +325,11 @@ func (a *Attachment) applyApprovalsLocked(sessionID string, d approvalDisk, caug
 				continue // a hook claim still writing its decision: wait
 			}
 			if caughtUp && seq >= ap.seenSeq {
+				offered := ap.offersAllow()
 				a.bindCallLocked(rec, ap)
+				if ap.offersAllow() != offered && rec.open[0] == ap {
+					events = append(events, rec.questionEvent(ap)) // bound late: allow is offered now
+				}
 			}
 			if !a.terminalAnswered(rec, ap) && !hookDead(ap.hookPID) {
 				continue
@@ -368,13 +392,16 @@ func (rec *runRecord) questionEvent(ap *approval) core.NativeEvent {
 	return core.NativeEvent{Type: core.EventQuestion, Key: rec.key, RunID: rec.msgID, Interaction: projectApproval(ap)}
 }
 
-// projectApproval is the endpoint's view of one open approval: reject only,
-// for every tool. Buzz can block a Claude tool call and cannot allow one
-// (owner ruling on bead 611.42.3: a forged block is only a denial, a forged
-// allow would be a grant); the terminal allows.
+// projectApproval is the endpoint's view of one open approval. It offers
+// allow only when ap.offersAllow (bead 611.42.4); otherwise it is reject
+// only, and the terminal allows.
 func projectApproval(ap *approval) *protocol.Interaction {
-	return &protocol.Interaction{InteractionID: ap.id, Kind: "approval", Prompt: ap.preview, Options: []string{optionDeny},
+	in := &protocol.Interaction{InteractionID: ap.id, Kind: "approval", Prompt: ap.preview, Options: []string{optionDeny},
 		RemoteAnswer: true, RejectOption: optionDeny}
+	if ap.offersAllow() {
+		in.Options, in.ApproveOption = []string{optionAllow, optionDeny}, optionAllow
+	}
+	return in
 }
 
 // pendingApproval is the run's head approval, or nil.
@@ -450,16 +477,28 @@ func (a *Attachment) endApprovalsLocked(rec *runRecord, events []core.NativeEven
 	return events
 }
 
-// Respond implements core.Attachment for DM approvals. Only deny is an
-// answer: any other option, allow included, is invalid. An answer already
-// on disk with the same identity is delivered. A fresh answer is written
-// only for the run's head approval, while its hook is alive, before its
-// deadline, and before anything resolved it. The hook
-// applies the answer only to the call with the same action hash. The
-// endpoint owns first-answer-wins.
-func (a *Attachment) Respond(key requests.Key, _, interactionID, option string) (protocol.Code, error) {
-	if option != optionDeny {
-		return protocol.CodeInvalid, nil // Buzz can only block a Claude tool call
+// Respond implements core.Attachment for DM approvals: a deny. An allow
+// needs evidence, so it comes through RespondWithEvidence.
+func (a *Attachment) Respond(key requests.Key, epoch, interactionID, option string) (protocol.Code, error) {
+	return a.RespondWithEvidence(key, epoch, interactionID, option, nil)
+}
+
+// RespondWithEvidence implements core.EvidenceResponder. A deny is an answer
+// on its own. An allow is an answer only for an approval that offers it,
+// with evidence, which the answer file carries to the hook unread: the hook
+// verifies it against its pinned owner and applies nothing else. An answer
+// already on disk with the same identity is delivered. A fresh answer is
+// written only for the run's head approval, while its hook is alive,
+// before its deadline, and before anything resolved it. The hook applies
+// the answer only to the call with the same action hash. The endpoint owns
+// first-answer-wins.
+func (a *Attachment) RespondWithEvidence(key requests.Key, _, interactionID, option string, evidence json.RawMessage) (protocol.Code, error) {
+	switch {
+	case option == optionDeny:
+		evidence = nil
+	case option == optionAllow && len(evidence) > 0 && len(evidence) <= maxEvidenceBytes && json.Valid(evidence):
+	default:
+		return protocol.CodeInvalid, nil
 	}
 	a.mu.Lock()
 	rec := a.runs[key]
@@ -475,27 +514,50 @@ func (a *Attachment) Respond(key requests.Key, _, interactionID, option string) 
 		a.mu.Unlock()
 		return protocol.CodeAlreadyResolved, nil
 	}
-	ans := approvalAnswer{InteractionID: interactionID, ActionHash: ap.hash, Option: option, At: protocol.FormatTime(a.now())}
+	ans := approvalAnswer{InteractionID: interactionID, ActionHash: ap.hash, Option: option, At: protocol.FormatTime(a.now()), Evidence: evidence}
 	head := len(rec.open) > 0 && rec.open[0] == ap
-	hookPID, deadline := ap.hookPID, ap.deadline
+	hookPID, deadline, allowOffered := ap.hookPID, ap.deadline, ap.offersAllow()
+	want := AllowCheck{Prompt: ap.preview, NotBefore: time.UnixMilli(ap.openedAt).Add(-reactionSkew), NotAfter: ap.deadline}
+	factory := a.allowFactory
 	a.mu.Unlock()
 
 	dir := approveDir(a.home, sessionID)
-	if done, prior := answerOnDisk(filepath.Join(dir, "answers", interactionID+".json"), ans); prior {
-		if done {
-			return "", nil
-		}
+	replace := false
+	isRejected := func(ev json.RawMessage) bool { return rejected(a.home, sessionID, interactionID, ev) }
+	switch disk := answerOnDisk(filepath.Join(dir, "answers", interactionID+".json"), ans, isRejected); disk {
+	case answerSame:
+		return "", nil
+	case answerNewProof, answerRetired:
+		replace = true // an allow with other evidence, or one the hook refused
+	case answerRefusedProof:
+		return "", protocol.Refuse(protocol.CodeNativeError, "%s", retryReply("the approval hook could not verify it"))
+	case answerOther:
 		return protocol.CodeAlreadyResolved, nil
 	}
 	switch {
+	case option == optionAllow && !allowOffered:
+		return protocol.CodeInvalid, nil
 	case resolvedExists(filepath.Join(dir, "resolved", interactionID+".json")), !head, hookDead(hookPID):
 		return protocol.CodeAlreadyResolved, nil
 	case !a.now().Before(deadline):
 		return protocol.CodeExpired, nil
 	}
+	if option == optionAllow {
+		// Verified here first, so a proof that fails is a refusal the owner
+		// sees and nothing is answered; the hook verifies again itself.
+		if err := verifyBeforeAnswer(factory, PermissionHookPin(a.home), sessionID, evidence, want); err != nil {
+			return "", err
+		}
+	}
 	adir, err := ensureApproveSubdir(a.home, sessionID, "answers")
 	if err != nil {
 		return "", err
+	}
+	if replace {
+		if err := replaceJSON(adir, interactionID+".json", ans); err != nil {
+			return "", err
+		}
+		return "", nil
 	}
 	if err := createNewJSON(adir, interactionID+".json", ans); err != nil {
 		if !errors.Is(err, errFileExists) {
@@ -503,7 +565,7 @@ func (a *Attachment) Respond(key requests.Key, _, interactionID, option string) 
 		}
 		// Another writer published first: the same answer is delivered,
 		// any other answer on disk stands as the first.
-		if done, _ := answerOnDisk(filepath.Join(adir, interactionID+".json"), ans); done {
+		if answerOnDisk(filepath.Join(adir, interactionID+".json"), ans, isRejected) == answerSame {
 			return "", nil
 		}
 		return protocol.CodeAlreadyResolved, nil
@@ -511,18 +573,124 @@ func (a *Attachment) Respond(key requests.Key, _, interactionID, option string) 
 	return "", nil
 }
 
-// answerOnDisk compares the answer file with ans: prior reports a file is
-// there, done that it holds the same answer.
-func answerOnDisk(path string, ans approvalAnswer) (done, prior bool) {
+// verifyBeforeAnswer runs the pinned verifier on an allow's evidence. A
+// failure is a refusal with the owner-facing reason: an altered message is
+// final, anything else can be retried with a new ✅.
+func verifyBeforeAnswer(factory func(HookPin) AllowConfig, pin HookPin, sessionID string, evidence json.RawMessage, want AllowCheck) error {
+	if factory == nil {
+		return protocol.Refuse(protocol.CodeNativeError, "%s", retryReply("this endpoint cannot verify an allow"))
+	}
+	cfg := factory(pin)
+	if !cfg.usable() {
+		return protocol.Refuse(protocol.CodeNativeError, "%s", retryReply("the approval hook pins no owner and share"))
+	}
+	share, err := cfg.share(sessionID)
+	if err != nil {
+		return protocol.Refuse(protocol.CodeNativeError, "%s", retryReply(err.Error()))
+	}
+	want.Share = share
+	ctx, cancel := context.WithTimeout(context.Background(), allowVerifyTimeout)
+	defer cancel()
+	switch err := cfg.Verify(ctx, evidence, want); {
+	case errors.Is(err, ErrAllowAltered):
+		return protocol.Refuse(protocol.CodeInvalid, "%s", alteredReply)
+	case err != nil:
+		return protocol.Refuse(protocol.CodeNativeError, "%s", retryReply(err.Error()))
+	}
+	return nil
+}
+
+// allowVerifyTimeout bounds one verification, relay reads included.
+const allowVerifyTimeout = 15 * time.Second
+
+// How an answer on disk compares with a new one.
+const (
+	answerAbsent       = iota
+	answerSame         // the same answer: delivered
+	answerNewProof     // an allow, now with other evidence: replace it
+	answerRetired      // an allow the hook refused, now another answer: replace it
+	answerRefusedProof // the same allow proof the hook refused
+	answerOther        // another answer, or unreadable: it stands
+)
+
+// answerOnDisk compares the answer file with ans. isRejected reports
+// whether the hook refused an allow's evidence.
+func answerOnDisk(path string, ans approvalAnswer, isRejected func(json.RawMessage) bool) int {
 	var got approvalAnswer
 	err := readApprovalJSON(path, &got)
-	if errors.Is(err, os.ErrNotExist) {
-		return false, false
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return answerAbsent
+	case err != nil || got.InteractionID != ans.InteractionID || got.ActionHash != ans.ActionHash:
+		return answerOther
+	case got.Option == optionAllow && isRejected(got.Evidence):
+		if ans.Option == optionAllow && bytes.Equal(got.Evidence, ans.Evidence) {
+			return answerRefusedProof
+		}
+		return answerRetired
+	case got.Option != ans.Option:
+		return answerOther
+	case ans.Option == optionAllow && !bytes.Equal(got.Evidence, ans.Evidence):
+		return answerNewProof
 	}
+	return answerSame
+}
+
+// AnswerRetired implements core.AnswerRetirer: the recorded answer for the
+// interaction is an allow whose proof the hook refused, so it never
+// applied and another answer may replace it.
+func (a *Attachment) AnswerRetired(key requests.Key, interactionID, option string) bool {
+	a.mu.Lock()
+	sessionID := ""
+	if rec := a.runs[key]; rec != nil {
+		if ap := rec.approvals[interactionID]; ap != nil {
+			sessionID = ap.sessionID
+		}
+	}
+	a.mu.Unlock()
+	if option != optionAllow || sessionID == "" || !interactionIDRe.MatchString(interactionID) {
+		return false
+	}
+	var got approvalAnswer
+	if readApprovalJSON(filepath.Join(approveDir(a.home, sessionID), "answers", interactionID+".json"), &got) != nil {
+		return false
+	}
+	return got.InteractionID == interactionID && got.Option == optionAllow && rejected(a.home, sessionID, interactionID, got.Evidence)
+}
+
+// replaceJSON replaces dir/name with v, whole: a private temporary file
+// renamed over it.
+func replaceJSON(dir, name string, v any) error {
+	raw, err := json.Marshal(v)
 	if err != nil {
-		return false, true
+		return err
 	}
-	return got.InteractionID == ans.InteractionID && got.ActionHash == ans.ActionHash && got.Option == ans.Option, true
+	f, err := os.CreateTemp(dir, ".tmp-")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	defer func() { _ = os.Remove(tmp) }()
+	if _, err := f.Write(raw); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp, filepath.Join(dir, name))
+}
+
+// SetAllowFactory replaces how this attachment turns the hook pin into an
+// AllowConfig. For tests; production uses RegisterAllowFactory's.
+func (a *Attachment) SetAllowFactory(f func(HookPin) AllowConfig) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.allowFactory = f
 }
 
 // ResolvedInteraction implements core.InteractionResolver: how one approval
@@ -562,6 +730,13 @@ func removeApprovalFiles(home, sessionID, promptID string, ids []string) {
 		}
 		for _, sub := range []string{"requests", "answers", "resolved", "delivery"} {
 			removeRegular(filepath.Join(dir, sub, id+".json"))
+		}
+		if entries, err := os.ReadDir(filepath.Join(dir, "rejected")); err == nil {
+			for _, e := range entries {
+				if strings.HasPrefix(e.Name(), id+"-") {
+					removeRegular(filepath.Join(dir, "rejected", e.Name()))
+				}
+			}
 		}
 	}
 }
