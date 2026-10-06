@@ -1441,13 +1441,13 @@ func (a *Attachment) onServerRequest(req ServerRequest) {
 	a.questionMu.Lock()
 	defer a.questionMu.Unlock()
 	var p struct {
-		ThreadID           string   `json:"threadId"`
-		TurnID             string   `json:"turnId"`
-		ItemID             string   `json:"itemId"`
-		ApprovalID         string   `json:"approvalId"`
-		Command            any      `json:"command"`
-		Cwd                string   `json:"cwd"`
-		Reason             string   `json:"reason"`
+		ThreadID   string `json:"threadId"`
+		TurnID     string `json:"turnId"`
+		ItemID     string `json:"itemId"`
+		ApprovalID string `json:"approvalId"`
+		Command    any    `json:"command"`
+		Cwd        string `json:"cwd"`
+		Reason     string `json:"reason"`
 		// Codex 0.160 mixes plain decisions with object decisions such as
 		// {"acceptWithExecpolicyAmendment": ...}; a []string decode failed
 		// on the object and dropped the whole request (611.57).
