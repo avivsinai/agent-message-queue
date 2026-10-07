@@ -187,12 +187,18 @@ function start(pi: ExtensionAPI, ctx: ExtensionContext): Bridge | null {
 	}
 	const dir = path.join(root, "agents", handle, "extensions", "pi-bridge");
 	try {
-		for (const sub of ["requests", "receipts", "events", "activity"]) {
+		for (const sub of ["requests", "receipts", "events"]) {
 			fs.mkdirSync(path.join(dir, sub), { recursive: true, mode: 0o700 });
 		}
 	} catch (err) {
 		notify(ctx, `amq-bridge inactive: cannot create ${dir}: ${String(err)}`);
 		return null;
+	}
+	try {
+		fs.mkdirSync(path.join(dir, "activity"), { recursive: true, mode: 0o700 });
+	} catch {
+		// Activity is optional: without its directory no activity is
+		// recorded, and requests run as before.
 	}
 	const b: Bridge = {
 		dir,
@@ -546,7 +552,7 @@ type ActivityFields = { kind: string; id?: string; text?: string; tool?: string;
 // the record.
 function appendActivity(b: Bridge, f: ActivityFields): void {
 	if (!b.sessionId) return;
-	const rec: Record<string, string | number> = { protocol: PROTOCOL, seq: ++b.seq, at: new Date().toISOString(), turn: b.turn, kind: f.kind };
+	const rec: Record<string, string | number> = { protocol: PROTOCOL, seq: ++b.seq, at: new Date().toISOString(), session: b.sessionId, turn: b.turn, kind: f.kind };
 	if (f.id) rec.id = f.id;
 	if (f.text) rec.text = f.text;
 	if (f.tool) rec.tool = f.tool;

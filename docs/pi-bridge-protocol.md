@@ -171,14 +171,17 @@ never fabricates a state.
 
 The extension records the whole pi session, not only remote requests, for the
 relay's read-only session panel. `<session_id>` is pi's own session id. One
-JSON object per line: `protocol`, `seq`, `at`, `turn`, `kind`, and optional
+JSON object per line: `protocol`, `seq`, `at`, `session` (the same session
+id), `turn`, `kind`, and optional
 `id`, `text`, `tool`, `status`. `kind` is `turn_start`, `turn_end`, `user`,
 `assistant`, `tool_start`, or `tool_end`. Messages are whole, never deltas.
 `text` is at most 48000 bytes; a longer tool result is cut and ends with
 `[truncated]`. The extension truncates the file when it passes 4 MiB.
 
-The adapter tails the file from its end when it starts observing, skips lines
-that do not parse or carry another protocol, and never writes it. A bridge
+The adapter tails the file from its end when it starts observing, reads it
+only as a regular file in a plain `activity/` directory (never through a
+symlink), skips lines that do not parse, carry another protocol, or name
+another session, and never writes it. A bridge
 without this file simply exports no activity. The stream is evidence of
 nothing: it never decides a request outcome.
 

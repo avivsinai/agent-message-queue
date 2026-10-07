@@ -3,7 +3,9 @@ package pi
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sync"
@@ -28,6 +30,7 @@ type ActivityNote struct {
 type activityRecord struct {
 	Protocol string `json:"protocol"`
 	At       string `json:"at"`
+	Session  string `json:"session"`
 	Turn     string `json:"turn"`
 	Kind     string `json:"kind"`
 	ID       string `json:"id"`
@@ -85,18 +88,14 @@ func (a *Attachment) ObservePiActivity(cb func(ActivityNote)) (stop func()) {
 // tailActivity delivers the complete lines after off and returns the new
 // offset. off < 0 means the current end. A file that shrank restarts at 0.
 func (a *Attachment) tailActivity(session string, off int64, cb func(ActivityNote)) int64 {
-	f, err := os.Open(filepath.Join(a.dir.dir, "activity", session+".jsonl"))
+	f, st, err := a.openActivity(session)
 	if err != nil {
-		if off < 0 {
+		if off < 0 && errors.Is(err, fs.ErrNotExist) {
 			return 0 // a file that appears later is read from its start
 		}
-		return off
+		return off // any other failure establishes no position
 	}
 	defer func() { _ = f.Close() }()
-	st, err := f.Stat()
-	if err != nil {
-		return off
-	}
 	if off < 0 {
 		return st.Size()
 	}
@@ -121,8 +120,8 @@ func (a *Attachment) tailActivity(session string, off int64, cb func(ActivityNot
 		if len(line) == 0 || json.Unmarshal(line, &rec) != nil {
 			continue
 		}
-		if rec.Protocol != "" && rec.Protocol != a.dir.names.protocol {
-			continue
+		if rec.Protocol != "" && rec.Protocol != a.dir.names.protocol || rec.Session != session {
+			continue // only the pinned session's own records
 		}
 		note := ActivityNote{SessionID: session, TurnID: rec.Turn, Kind: rec.Kind, ID: rec.ID,
 			Text: rec.Text, Tool: rec.Tool, Status: rec.Status}
@@ -132,4 +131,39 @@ func (a *Attachment) tailActivity(session string, off int64, cb func(ActivityNot
 		cb(note)
 	}
 	return off + int64(end)
+}
+
+// errNotActivityFile refuses an activity path that is not a plain file in a
+// plain directory: a symlink could make another session's file read as the
+// pinned one.
+var errNotActivityFile = errors.New("pi activity file is not a regular file")
+
+// openActivity opens activity/<session>.jsonl without following a symlink at
+// the directory or the file, and checks that the open file is the one
+// inspected.
+func (a *Attachment) openActivity(session string) (*os.File, os.FileInfo, error) {
+	dir := filepath.Join(a.dir.dir, "activity")
+	if info, err := os.Lstat(dir); err != nil {
+		return nil, nil, err
+	} else if !info.IsDir() {
+		return nil, nil, errNotActivityFile
+	}
+	path := filepath.Join(dir, session+".jsonl")
+	before, err := os.Lstat(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !before.Mode().IsRegular() {
+		return nil, nil, errNotActivityFile
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	after, err := f.Stat()
+	if err != nil || !os.SameFile(before, after) {
+		_ = f.Close()
+		return nil, nil, errNotActivityFile
+	}
+	return f, after, nil
 }
