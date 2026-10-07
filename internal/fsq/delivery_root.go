@@ -91,6 +91,29 @@ func SetPackageSyncDirFaultForTest(fn func(dir string) error) {
 	packageSyncDirFaultForTest = fn
 }
 
+// packageFileSyncFaultForTest, when set, makes every file Sync through a
+// DeliveryRoot fail with the injected error (out-of-package regression hook
+// for durability barriers that must prove a claim file is fsynced before
+// publishing; nil is the normal path).
+var packageFileSyncFaultForTest func() error
+
+// SetPackageFileSyncFaultForTest installs a process-wide file-sync fault
+// that applies to every Sync through every DeliveryRoot in this process.
+// Restore with a nil fn in t.Cleanup.
+func SetPackageFileSyncFaultForTest(fn func() error) {
+	packageFileSyncFaultForTest = fn
+}
+
+// FileSyncFaultForTest reports the package file-sync fault (nil = none) so
+// out-of-package durability barriers can route their own file syncs through
+// the same fault under test.
+func FileSyncFaultForTest() error {
+	if packageFileSyncFaultForTest == nil {
+		return nil
+	}
+	return packageFileSyncFaultForTest()
+}
+
 // beforeCreateDirectChildExclusiveForTest runs after VerifyBase and before
 // Mkdir so tests can inject a racing creator.
 var beforeCreateDirectChildExclusiveForTest func(r *DeliveryRoot, name string)

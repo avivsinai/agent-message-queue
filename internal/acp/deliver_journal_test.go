@@ -228,6 +228,149 @@ func TestInboxProofRefusesNonMessageEntries(t *testing.T) {
 	}
 }
 
+// Review of #976 r3 P1 (fresh claim): a first delivery whose claim file and
+// acp-events sync succeed but whose PARENT outbox sync fails must refuse
+// with an empty inbox — a freshly created acp-events directory needs its
+// parent synced, or a crash can keep the message and lose the journal
+// directory, and a replay would allocate a new id and deliver a second
+// copy.
+func TestFreshClaimRefusesWhenParentOutboxSyncFails(t *testing.T) {
+	root := canonicalTempDir(t)
+	for _, handle := range []string{"buzz", "agent"} {
+		if err := fsq.EnsureAgentDirs(root, handle); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := Config{Root: root, Me: "buzz", To: "agent"}
+	event := strings.Repeat("7", 64)
+	thread := cockpitThread("session/s1")
+
+	fsq.SetPackageSyncDirFaultForTest(func(dir string) error {
+		// Fail only the parent outbox directory, not acp-events itself.
+		if strings.HasSuffix(filepath.Clean(dir), filepath.Join("agents", "buzz", "outbox")) {
+			return fmt.Errorf("injected outbox sync failure")
+		}
+		return nil
+	})
+	t.Cleanup(func() { fsq.SetPackageSyncDirFaultForTest(nil) })
+
+	if _, err := DeliverCockpitPrompt(cfg, "build the thing", thread, event); err == nil {
+		t.Fatal("first delivery with a failing parent-outbox sync delivered anyway; want a refusal")
+	}
+	if n := len(inboxPrompts(t, root)); n != 0 {
+		t.Fatalf("inbox holds %d messages after the refusal; want none", n)
+	}
+
+	fsq.SetPackageSyncDirFaultForTest(nil)
+	delivery, err := DeliverCockpitPrompt(cfg, "build the thing", thread, event)
+	if err != nil {
+		t.Fatalf("replay after the sync healed: %v", err)
+	}
+	ids := inboxPrompts(t, root)
+	if len(ids) != 1 || ids[0] != delivery.MessageID {
+		t.Fatalf("inbox holds %v; want exactly [%s]", ids, delivery.MessageID)
+	}
+}
+
+// Review of #976 r3 P1 (adopted claim): a claim written by a creator killed
+// after its write but before its file sync has unsynced content; the adopt
+// barrier must fsync the claim FILE itself — not just directories — before
+// publishing an absent message. With the claim file's sync failing, the
+// replay refuses with an empty inbox; once the fault clears it delivers
+// exactly once under the claimed id.
+func TestAdoptedUnsyncedClaimIsSyncedBeforePublishing(t *testing.T) {
+	root := canonicalTempDir(t)
+	for _, handle := range []string{"buzz", "agent"} {
+		if err := fsq.EnsureAgentDirs(root, handle); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := Config{Root: root, Me: "buzz", To: "agent"}
+	event := strings.Repeat("8", 64)
+	thread := cockpitThread("session/s1")
+
+	// An orphan claim from a crashed first attempt.
+	claim := eventRecord{
+		Schema:    1,
+		EventID:   event,
+		MessageID: "2026-10-07T10-30-00.000Z_pid1_bead0000",
+		To:        "agent",
+		Thread:    thread,
+		Created:   time.Now().Add(-time.Minute).UTC().Format(time.RFC3339Nano),
+	}
+	if err := rememberEvent(cfg, claim); err != nil {
+		t.Fatal(err)
+	}
+
+	// The claim FILE sync fails on the adopt barrier; the attempt must
+	// refuse before the inbox write.
+	fsq.SetPackageFileSyncFaultForTest(func() error {
+		return fmt.Errorf("injected claim-file sync failure")
+	})
+	t.Cleanup(func() { fsq.SetPackageFileSyncFaultForTest(nil) })
+
+	if _, err := DeliverCockpitPrompt(cfg, "build the thing", thread, event); err == nil {
+		t.Fatal("adopt of an unsynced claim published without a successful file sync; want a refusal")
+	}
+	if n := len(inboxPrompts(t, root)); n != 0 {
+		t.Fatalf("inbox holds %d messages while the claim file cannot be synced; want none", n)
+	}
+
+	// The fault clears: the replay repairs the claim's durability and
+	// delivers exactly one copy under the claimed id.
+	fsq.SetPackageFileSyncFaultForTest(nil)
+	delivery, err := DeliverCockpitPrompt(cfg, "build the thing", thread, event)
+	if err != nil {
+		t.Fatalf("adopt after the fault cleared: %v", err)
+	}
+	if delivery.Duplicate || delivery.MessageID != claim.MessageID {
+		t.Fatalf("adopt = %+v; want a first delivery of %s", delivery, claim.MessageID)
+	}
+	ids := inboxPrompts(t, root)
+	if len(ids) != 1 || ids[0] != claim.MessageID {
+		t.Fatalf("inbox holds %v; want exactly [%s]", ids, claim.MessageID)
+	}
+}
+
+// Review of #976 r3 P1 (inbox-first): a journal sync fault on replay of an
+// ALREADY DELIVERED event must not turn the committed delivery into an
+// error — the inbox proof runs before the durability barrier, and the
+// replay reports Duplicate/Committed with no inbox change.
+func TestDeliveredThenSyncFaultReplayReportsDuplicate(t *testing.T) {
+	root := canonicalTempDir(t)
+	for _, handle := range []string{"buzz", "agent"} {
+		if err := fsq.EnsureAgentDirs(root, handle); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := Config{Root: root, Me: "buzz", To: "agent"}
+	event := strings.Repeat("9", 64)
+	thread := cockpitThread("session/s1")
+
+	first, err := DeliverCockpitPrompt(cfg, "build the thing", thread, event)
+	if err != nil {
+		t.Fatalf("first delivery: %v", err)
+	}
+
+	// Every journal sync now fails: the replay must still find the
+	// delivered message in the inbox and report a duplicate.
+	fsq.SetPackageSyncDirFaultForTest(func(dir string) error {
+		return fmt.Errorf("injected sync failure")
+	})
+	t.Cleanup(func() { fsq.SetPackageSyncDirFaultForTest(nil) })
+
+	again, err := DeliverCockpitPrompt(cfg, "build the thing", thread, event)
+	if err != nil {
+		t.Fatalf("replay of a delivered event with a sync fault reported an error: %v", err)
+	}
+	if !again.Duplicate || !again.Committed || again.MessageID != first.MessageID {
+		t.Fatalf("replay = %+v; want a committed duplicate of %s", again, first.MessageID)
+	}
+	if n := len(inboxPrompts(t, root)); n != 1 {
+		t.Fatalf("inbox holds %d messages after the duplicate replay; want one", n)
+	}
+}
+
 // Review of #976 P1 b: the inbox absence check and the write are one
 // critical section under the event's post lock. When the first copy was
 // drained to cur/ before the replay ran, the replay still finds it (in

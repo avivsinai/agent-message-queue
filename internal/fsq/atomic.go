@@ -64,6 +64,9 @@ func writeAllAndSync(file writeSyncer, data []byte) error {
 	if n != len(data) {
 		return io.ErrShortWrite
 	}
+	if packageFileSyncFaultForTest != nil {
+		return packageFileSyncFaultForTest()
+	}
 	return file.Sync()
 }
 

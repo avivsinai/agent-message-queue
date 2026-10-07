@@ -152,11 +152,17 @@ func deliver(cfg Config, body, thread, subject, priority string, labels, refs []
 }
 
 // deliverLocked serves one event-keyed delivery attempt while holding the
-// event's post lock. It claims the event (creating or loading the journal),
-// checks the inbox, and either reports the proven delivery or writes one
-// copy under the claimed identity.
+// event's post lock. Ordering rule (review of #976 r3): under the lock, a
+// claim that exists is proven against the inbox FIRST — a delivered event
+// reports Duplicate/Committed even if its journal is not yet durable,
+// because the delivery already happened and must never be reported as an
+// error — and the claim's durability is required ONLY before an ABSENT
+// message is written (fresh create and adopt alike): fsync of the claim
+// file itself through the pinned root, then the full directory chain
+// acp-events -> outbox -> agent dir, so the journal survives a crash before
+// anything names it.
 func deliverLocked(cfg Config, root *fsq.DeliveryRoot, build func(messageID, created string) ([]byte, error), thread, eventID string) (Delivery, error) {
-	claim, err := claimEvent(cfg, root, build, thread, eventID)
+	claim, durable, err := claimEvent(cfg, root, build, thread, eventID)
 	if err != nil {
 		return Delivery{}, err
 	}
@@ -193,6 +199,11 @@ func deliverLocked(cfg Config, root *fsq.DeliveryRoot, build func(messageID, cre
 			Duplicate: true,
 		}, nil
 	}
+	// The message is absent: the claim must be durable before the inbox
+	// write names it. A failure refuses the attempt; a replay retries.
+	if err := durable(); err != nil {
+		return Delivery{}, err
+	}
 
 	// A legacy journal with no created time and no delivered message takes
 	// its header time from the delivered message too (review of #976 P2 d).
@@ -221,29 +232,25 @@ func deliverLocked(cfg Config, root *fsq.DeliveryRoot, build func(messageID, cre
 	return writeToInbox(cfg, root, &claim, created, data)
 }
 
-// claimEvent loads the event's claim or creates it exclusively, durably. A
-// created claim is written through a synced temp linked into place
-// (createExclusiveFile, the mailbox claim pattern) and the journal
-// directory is fsynced before any inbox write can name it (review of
-// #976 P1 c): the claim must be durable before delivery.
-//
-// Durability holds on EVERY path that can precede an inbox write (review of
-// #976 r2 P1): an adopted claim — this attempt lost the exclusive create to
-// a concurrent winner or found a claim from an earlier crashed attempt —
-// may not yet be durable (the winner's journal-dir sync can have failed),
-// so the adopt path re-syncs the claim file and the journal directory chain
-// under the post lock before any inbox write names it. A claim that cannot
-// be made durable refuses the attempt; a replay retries the sync.
-func claimEvent(cfg Config, root *fsq.DeliveryRoot, build func(messageID, created string) ([]byte, error), thread, eventID string) (eventRecord, error) {
+// claimEvent loads the event's claim or creates it exclusively. It returns
+// a durability callback the caller runs ONLY before writing an absent inbox
+// message (review of #976 r3): on EVERY path — fresh create and adopt
+// alike — it fsyncs the claim file itself through the pinned root
+// (CreateExclusiveFile writes the final name directly; a creator killed
+// between write and sync leaves unsynced content) and the full directory
+// chain acp-events -> outbox -> agent dir (a freshly created acp-events
+// needs its parent synced). A claim that cannot be made durable refuses
+// the attempt; a replay retries the sync.
+func claimEvent(cfg Config, root *fsq.DeliveryRoot, build func(messageID, created string) ([]byte, error), thread, eventID string) (eventRecord, func() error, error) {
 	if rec, err := readEventClaim(cfg, root, eventID); err != nil {
-		return eventRecord{}, err
+		return eventRecord{}, nil, err
 	} else if rec != nil {
-		return *rec, syncEventClaim(root, cfg.Me, eventID)
+		return *rec, func() error { return syncEventClaim(root, cfg.Me, rec.EventID) }, nil
 	}
 	now := time.Now()
 	id, err := format.NewMessageID(now)
 	if err != nil {
-		return eventRecord{}, err
+		return eventRecord{}, nil, err
 	}
 	rec := eventRecord{
 		Schema:    format.CurrentSchema,
@@ -255,35 +262,55 @@ func claimEvent(cfg Config, root *fsq.DeliveryRoot, build func(messageID, create
 	}
 	if err := writeEventClaimExclusive(root, cfg.Me, rec); err != nil {
 		if !errors.Is(err, os.ErrExist) {
-			return eventRecord{}, err
+			return eventRecord{}, nil, err
 		}
 		// A concurrent winner claimed first under the same post lock (a
 		// legacy process may not hold it); follow its claim.
 		winner, err := readEventClaim(cfg, root, eventID)
 		if err != nil {
-			return eventRecord{}, err
+			return eventRecord{}, nil, err
 		}
 		if winner == nil {
-			return eventRecord{}, fmt.Errorf("event %s lost its claim and the claim is unreadable", eventID)
+			return eventRecord{}, nil, fmt.Errorf("event %s lost its claim and the claim is unreadable", eventID)
 		}
-		return *winner, syncEventClaim(root, cfg.Me, eventID)
+		return *winner, func() error { return syncEventClaim(root, cfg.Me, winner.EventID) }, nil
 	}
-	return rec, nil
+	return rec, func() error { return syncEventClaim(root, cfg.Me, rec.EventID) }, nil
 }
 
-// syncEventClaim makes an existing claim durable before anything is
-// delivered under it: the claim file's content is already synced by its
-// write (writeAndSync), so what remains is the journal directory chain —
-// the claim file's directory and, because the acp-events directory may
-// itself be new, the outbox directory above it. A failure here leaves the
-// attempt refused: the next attempt retries the sync, and nothing is
+// syncEventClaim makes an existing claim durable before an absent message
+// is delivered under it: the claim file's own content is fsynced through
+// the pinned root (a creator killed after its write but before its sync
+// leaves unsynced content a replay must repair), then the journal
+// directory chain — acp-events, its parent outbox, and the agent dir — so
+// a freshly created journal directory survives too. A failure here leaves
+// the attempt refused: the next attempt retries the sync, and nothing is
 // published until one succeeds.
 func syncEventClaim(root *fsq.DeliveryRoot, me, eventID string) error {
-	if err := root.SyncDir(filepath.Join("agents", me, "outbox", "acp-events")); err != nil {
+	journalPath := eventJournalPath(me, eventID)
+	file, _, err := root.OpenRegularNoFollow(journalPath)
+	if err != nil {
+		return fmt.Errorf("reopen the event claim for sync: %w", err)
+	}
+	syncErr := file.Sync()
+	closeErr := file.Close()
+	if syncErr == nil {
+		syncErr = fsq.FileSyncFaultForTest()
+	}
+	if syncErr != nil {
+		return fmt.Errorf("sync the event claim file: %w", syncErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close the event claim after sync: %w", closeErr)
+	}
+	if err := root.SyncDir(filepath.Dir(journalPath)); err != nil {
 		return fmt.Errorf("sync the event claim directory: %w", err)
 	}
 	if err := root.SyncDir(filepath.Join("agents", me, "outbox")); err != nil {
 		return fmt.Errorf("sync the outbox directory: %w", err)
+	}
+	if err := root.SyncDir(filepath.Join("agents", me)); err != nil {
+		return fmt.Errorf("sync the agent directory: %w", err)
 	}
 	return nil
 }
@@ -316,8 +343,9 @@ func readEventClaim(cfg Config, root *fsq.DeliveryRoot, eventID string) (*eventR
 // createExclusiveFile publishes raw at relPath only if nothing is there
 // yet: CreateExclusiveFile creates the name with O_EXCL and fsyncs the
 // content before the name is visible, then the journal directory is fsynced
-// so the claim survives a crash before the inbox write that follows it
-// (review of #976 P1 c).
+// (review of #976 P1 c). The parent chain (outbox, agent dir) is synced by
+// the adopt barrier (syncEventClaim) before any inbox write names the
+// claim, which also covers a freshly created acp-events directory.
 func createExclusiveFile(root *fsq.DeliveryRoot, relPath string, raw []byte) error {
 	if err := root.CreateExclusiveFile(relPath, raw, 0o600); err != nil {
 		if errors.Is(err, os.ErrExist) {
