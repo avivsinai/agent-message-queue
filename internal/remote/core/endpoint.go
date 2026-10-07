@@ -1523,7 +1523,6 @@ func owes(rec *requests.Record, id string) bool {
 	return slices.Contains(rec.OwedOutcomes, id)
 }
 
-
 // owedOutcomeRetention is how long an owed outcome stays recoverable. The
 // normal case settles on the next Reconcile, because the bridge event file
 // still holds interaction_resolved. The unsettleable case — a bridge that
