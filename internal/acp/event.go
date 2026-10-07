@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
@@ -20,17 +22,18 @@ const (
 
 var nostrEventIDRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
+// The event record is a claim, not a receipt: like the mailbox steer claim
+// it fixes only what a replay must not re-decide (message id, created time,
+// destination, thread). It records no delivery outcome — what was delivered
+// is what the recipient inbox proves at replay time, never what the first
+// attempt wrote here.
 type eventRecord struct {
 	Schema    int    `json:"schema"`
 	EventID   string `json:"event_id"`
 	MessageID string `json:"message_id"`
 	To        string `json:"to"`
 	Thread    string `json:"thread"`
-	Committed bool   `json:"committed"`
-	Drained   bool   `json:"drained"`
-	Started   bool   `json:"started"`
-	Completed bool   `json:"completed"`
-	Egress    string `json:"egress"`
+	Created   string `json:"created"`
 }
 
 func eventIDsFromMeta(meta json.RawMessage) ([]string, *rpcError) {
@@ -98,6 +101,7 @@ func eventJournalPath(me, eventID string) string {
 	return filepath.Join("agents", me, "outbox", "acp-events", eventID+".json")
 }
 
+// loadEventRecord reads the claim of an event, if one exists.
 func loadEventRecord(cfg Config, eventID string) (*eventRecord, error) {
 	identity, err := fsq.SnapshotDeliveryRoot(cfg.Root)
 	if err != nil {
@@ -119,6 +123,12 @@ func loadEventRecord(cfg Config, eventID string) (*eventRecord, error) {
 	var rec eventRecord
 	if err := json.Unmarshal(data, &rec); err != nil {
 		return nil, err
+	}
+	if rec.MessageID == "" || rec.To == "" || rec.Thread == "" || fsq.ValidateHandle(rec.To) != nil {
+		return nil, fmt.Errorf("event %s has an unreadable claim; refusing to deliver", eventID)
+	}
+	if _, err := time.Parse(time.RFC3339Nano, rec.Created); err != nil {
+		return nil, fmt.Errorf("event %s has an unreadable claim time", eventID)
 	}
 	return &rec, nil
 }
@@ -143,8 +153,4 @@ func rememberEvent(cfg Config, rec eventRecord) error {
 		return os.ErrExist
 	}
 	return err
-}
-
-func (r eventRecord) delivery() Delivery {
-	return Delivery{MessageID: r.MessageID, To: r.To, Thread: r.Thread}
 }
