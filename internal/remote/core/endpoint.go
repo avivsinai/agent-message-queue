@@ -1523,18 +1523,6 @@ func owes(rec *requests.Record, id string) bool {
 	return slices.Contains(rec.OwedOutcomes, id)
 }
 
-// settleOwed records an owed outcome as given and clears the obligation.
-// It is idempotent: an id no longer owed changes nothing. The native-event
-// path uses it; recovery's late corrections go through settleOwedNative,
-// which also accepts retired ids.
-func settleOwed(rec *requests.Record, r protocol.Resolution) bool {
-	if !owes(rec, r.InteractionID) {
-		return false
-	}
-	rec.OwedOutcomes = slices.DeleteFunc(rec.OwedOutcomes, func(id string) bool { return id == r.InteractionID })
-	recordResolution(rec, r.InteractionID, nativeEvidence{clearInteraction: true, outcome: r.Outcome, option: r.Option})
-	return true
-}
 
 // owedOutcomeRetention is how long an owed outcome stays recoverable. The
 // normal case settles on the next Reconcile, because the bridge event file
