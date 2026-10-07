@@ -237,7 +237,15 @@ func Attach(socketPath, threadID string, opts ...Option) (*Attachment, error) {
 	a.client.Store(client)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := client.Call(ctx, "initialize", map[string]any{"clientInfo": map[string]string{"name": ClientName, "version": Version, "title": "AMQ Remote"}}, nil); err != nil {
+	init := map[string]any{"clientInfo": map[string]string{"name": ClientName, "version": Version, "title": "AMQ Remote"}}
+	if a.approve {
+		// Codex 0.160 strips additionalPermissions from approval requests
+		// sent to a client without the experimental API, and the approve
+		// guard reads that field: without it a command that also asks for
+		// more access would get a one-tap approve (Pro review of #969).
+		init["capabilities"] = map[string]bool{"experimentalApi": true}
+	}
+	if err := client.Call(ctx, "initialize", init, nil); err != nil {
 		_ = client.Close()
 		return nil, fmt.Errorf("initialize: %w", err)
 	}
@@ -1441,14 +1449,17 @@ func (a *Attachment) onServerRequest(req ServerRequest) {
 	a.questionMu.Lock()
 	defer a.questionMu.Unlock()
 	var p struct {
-		ThreadID           string   `json:"threadId"`
-		TurnID             string   `json:"turnId"`
-		ItemID             string   `json:"itemId"`
-		ApprovalID         string   `json:"approvalId"`
-		Command            any      `json:"command"`
-		Cwd                string   `json:"cwd"`
-		Reason             string   `json:"reason"`
-		AvailableDecisions []string `json:"availableDecisions"`
+		ThreadID   string `json:"threadId"`
+		TurnID     string `json:"turnId"`
+		ItemID     string `json:"itemId"`
+		ApprovalID string `json:"approvalId"`
+		Command    any    `json:"command"`
+		Cwd        string `json:"cwd"`
+		Reason     string `json:"reason"`
+		// Codex 0.160 mixes plain decisions with object decisions such as
+		// {"acceptWithExecpolicyAmendment": ...}; a []string decode failed
+		// on the object and dropped the whole request (611.57).
+		AvailableDecisions []json.RawMessage `json:"availableDecisions"`
 		// Fields a one-tap approve cannot show; any of them withholds it.
 		Kind                  string          `json:"kind"`
 		GrantRoot             string          `json:"grantRoot"`
@@ -1473,11 +1484,27 @@ func (a *Attachment) onServerRequest(req ServerRequest) {
 	if id == "" {
 		id = p.ItemID
 	}
-	options := p.AvailableDecisions
-	if len(options) == 0 {
+	// Only a plain decision can be sent back as {"decision": option}.
+	var options []string
+	for _, raw := range p.AvailableDecisions {
+		var o string
+		if json.Unmarshal(raw, &o) == nil {
+			options = append(options, o)
+		}
+	}
+	if len(p.AvailableDecisions) == 0 {
 		options = []string{"accept", "decline"}
 	}
+	// Reject declines when Codex offers it; otherwise cancel, which declines
+	// and stops the turn (Codex 0.160 offers no decline for some commands).
+	reject := offered(options, "decline")
+	if reject == "" {
+		reject = offered(options, "cancel")
+	}
 	prompt := approvalPrompt(req.Method, p.Command, p.Cwd, p.Reason)
+	if reject == "cancel" {
+		prompt += "\nReject also stops this turn."
+	}
 	// Approve is offered only for a plain command whose whole grant the
 	// prompt shows. A file change shows no paths or diff here, and a
 	// network, permission or write-root grant is not in the prompt, so those
@@ -1489,7 +1516,7 @@ func (a *Attachment) onServerRequest(req ServerRequest) {
 		approve = offered(options, "accept")
 	}
 	inter := &protocol.Interaction{InteractionID: id, Kind: "approval", Prompt: prompt, Options: options, RemoteAnswer: true,
-		ApproveOption: approve, RejectOption: offered(options, "decline")}
+		ApproveOption: approve, RejectOption: reject}
 	r.approvalReqs[id] = req.ID
 	if r.interaction != nil {
 		r.queuedApprovals = append(r.queuedApprovals, inter)
