@@ -74,7 +74,11 @@ func TestApprovalWithholdsApproveForUnseenGrants(t *testing.T) {
 		t.Fatalf("attach: %v", err)
 	}
 	t.Cleanup(func() { _ = att.Close() })
-	<-srv.calls // initialize
+	// Pro review of #969: Codex 0.160 sends additionalPermissions, which the
+	// approve guard reads, only to a client with the experimental API.
+	if init := <-srv.calls; !strings.Contains(string(init.Params), `"experimentalApi":true`) {
+		t.Fatalf("initialize params = %s, want the experimental API with approvals on", init.Params)
+	}
 	<-srv.calls // thread/resume
 	s := att.Inspect()
 	key := requests.Key{CreatorHost: "local", TargetID: s.TargetID, RequestID: "11111111-1111-4111-8111-111111111443"}
@@ -104,6 +108,15 @@ func TestApprovalWithholdsApproveForUnseenGrants(t *testing.T) {
 	srv.sendServerRequest(t, "9", "item/commandExecution/requestApproval", `{"threadId":"t1","turnId":"u1","itemId":"c1","command":"ls"}`)
 	if in := pending(); in.ApproveOption != "accept" {
 		t.Fatalf("plain command approve = %q, want accept", in.ApproveOption)
+	}
+	srv.notify(t, "serverRequest/resolved", `{"threadId":"t1","requestId":"9"}`)
+	waitNoInteraction(t, att)
+	// agent-message-queue-611.57: the live Codex 0.160 request mixes an
+	// object decision into availableDecisions and offers cancel, not
+	// decline. It was dropped whole, so the DM never saw the approval.
+	srv.sendServerRequest(t, "10", "item/commandExecution/requestApproval", `{"kind":"command","threadId":"t1","turnId":"u1","itemId":"exec-1","command":"/bin/zsh -lc 'touch approval-test2.txt'","cwd":"/w","availableDecisions":["accept",{"acceptWithExecpolicyAmendment":{"execpolicy_amendment":["touch","approval-test2.txt"]}},"cancel"]}`)
+	if in := pending(); in.ApproveOption != "accept" || in.RejectOption != "cancel" || !strings.HasSuffix(in.Prompt, "Reject also stops this turn.") {
+		t.Fatalf("codex 0.160 command = approve %q reject %q prompt %q, want accept, cancel and the stop note", in.ApproveOption, in.RejectOption, in.Prompt)
 	}
 }
 

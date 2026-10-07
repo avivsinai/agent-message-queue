@@ -2,6 +2,7 @@ package acp
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -22,6 +23,9 @@ func mailboxServer(t *testing.T) (*Server, string) {
 	t.Helper()
 	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
 	root := canonicalTempDir(t)
+	if err := fsq.EnsureAgentDirs(root, "agent"); err != nil {
+		t.Fatal(err)
+	}
 	if err := binding.Write(binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: "agent"}); err != nil {
 		t.Fatal(err)
 	}
@@ -284,6 +288,199 @@ func TestRedeliveredPromptStillGetsTheBuzzMailbox(t *testing.T) {
 	}
 }
 
+// Bead agent-message-queue-qff (review F4, Pro review of #964): a delivery
+// to a deleted handle mailbox recreated it and reported Delivered, and a
+// refused delivery could still be published by a later redelivery. It must
+// say not delivered, record that as the event's outcome, and never publish
+// the event afterwards.
+func TestMailboxMissingMailboxIsNotDelivered(t *testing.T) {
+	s, _ := mailboxServer(t)
+	s.cfg.TurnTimeout = 200 * time.Millisecond
+	root := canonicalTempDir(t)
+	if err := binding.Write(binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: "agent"}); err != nil {
+		t.Fatal(err)
+	}
+	eventID := strings.Repeat("5", 64)
+	var said []string
+	emit := func(v any) error {
+		if note := v.(sessionUpdateNotification); note.Params.Update.SessionUpdate == "agent_message_chunk" {
+			said = append(said, note.Params.Update.Content.Text)
+		}
+		return nil
+	}
+	result, rpcErr := s.runRemote("s", "say hi", eventID, newTurn(), emit)
+	if rpcErr != nil {
+		t.Fatal(rpcErr)
+	}
+	got := result.(remotePromptResult)
+	if got.Meta.Remote.State != remoteNotSubmitted || len(said) != 1 || !strings.HasPrefix(said[0], "Not delivered to agent: ") {
+		t.Fatalf("result=%+v said=%q", got, said)
+	}
+	if _, err := os.Lstat(filepath.Join(root, "agents", "agent")); !os.IsNotExist(err) {
+		t.Fatalf("the handle mailbox was created: %v", err)
+	}
+	if _, ok := s.mailboxAnswered(eventID); !ok {
+		t.Fatal("the refusal is not the event's outcome")
+	}
+	// The owner restores the mailbox; a redelivery of the event still
+	// publishes nothing.
+	if err := fsq.EnsureAgentDirs(root, "agent"); err != nil {
+		t.Fatal(err)
+	}
+	if _, rpcErr := s.runRemote("s", "say hi", eventID, newTurn(), emit); rpcErr != nil {
+		t.Fatal(rpcErr)
+	}
+	if ids := inboxPrompts(t, root); len(ids) != 0 {
+		t.Fatalf("a redelivery published the refused event: %v", ids)
+	}
+}
+
+// Pro review r2 of #964 (P1): a message was delivered, then the handle's
+// mailbox was deleted; a redelivery found it absent and recorded "not
+// delivered, send it again". Only the attempt that created the claim may.
+func TestMailboxRedeliveryAfterTheMailboxWentIsUncertain(t *testing.T) {
+	s, root := mailboxServer(t)
+	s.cfg.TurnTimeout = 50 * time.Millisecond
+	eventID := strings.Repeat("7", 64)
+	if _, rpcErr := s.runRemote("s", "say hi", eventID, newTurn(), func(any) error { return nil }); rpcErr != nil {
+		t.Fatal(rpcErr)
+	}
+	if err := os.RemoveAll(filepath.Join(root, "agents", "agent")); err != nil {
+		t.Fatal(err)
+	}
+	var said []string
+	result, rpcErr := s.runRemote("s", "say hi", eventID, newTurn(), func(v any) error {
+		if note := v.(sessionUpdateNotification); note.Params.Update.SessionUpdate == "agent_message_chunk" {
+			said = append(said, note.Params.Update.Content.Text)
+		}
+		return nil
+	})
+	if rpcErr != nil {
+		t.Fatal(rpcErr)
+	}
+	got := result.(remotePromptResult)
+	if got.Meta.Remote.State != remoteUncertain || len(said) != 1 || !strings.Contains(said[0], "amq thread --id") {
+		t.Fatalf("result=%+v said=%q", got, said)
+	}
+	if _, ok := s.mailboxAnswered(eventID); ok {
+		t.Fatal("a redelivery recorded the delivered event as not delivered")
+	}
+}
+
+// Pro review r2 of #964 (P2): the layout repair must never recreate a
+// mailbox or inbox that vanished after the anchor check.
+func TestMailboxRepairNeverRecreatesItsAnchors(t *testing.T) {
+	for name, gone := range map[string]string{"mailbox": ".", "inbox": "inbox"} {
+		t.Run(name, func(t *testing.T) {
+			root := pinnedTestRoot(t)
+			agents, err := root.OpenDirectChild("agents")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = agents.Close() }()
+			mailbox, err := agents.OpenDirectChild("agent")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = mailbox.Close() }()
+			inbox, err := mailbox.OpenDirectChild("inbox")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = inbox.Close() }()
+			dir := mailbox.Base()
+			if err := os.RemoveAll(filepath.Join(dir, gone)); err != nil {
+				t.Fatal(err)
+			}
+			if err := repairMailbox(mailbox, inbox); err == nil {
+				t.Fatal("repair succeeded without its anchor")
+			}
+			if _, err := os.Lstat(filepath.Join(dir, gone)); !os.IsNotExist(err) {
+				t.Fatalf("the %s was recreated: %v", name, err)
+			}
+		})
+	}
+}
+
+// Pro review r3 of #964 (P1): the repair re-resolved the bound root path, so
+// a root replaced, or an agents/ swapped for an outside symlink, after the
+// root was pinned had its mailbox completed.
+func TestMailboxRepairStaysInThePinnedRoot(t *testing.T) {
+	for name, swap := range map[string]func(root, other string) error{
+		"root replaced": func(root, other string) error {
+			if err := os.Rename(root, filepath.Join(canonicalTempDir(t), "old")); err != nil {
+				return err
+			}
+			return os.Rename(other, root)
+		},
+		"agents symlinked": func(root, other string) error {
+			if err := os.RemoveAll(filepath.Join(root, "agents")); err != nil {
+				return err
+			}
+			return os.Symlink(filepath.Join(other, "agents"), filepath.Join(root, "agents"))
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := pinnedTestRoot(t)
+			other := canonicalTempDir(t)
+			if err := fsq.EnsureAgentDirs(other, "agent"); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(fsq.AgentReceipts(other, "agent")); err != nil {
+				t.Fatal(err)
+			}
+			if err := swap(root.Base(), other); err != nil {
+				t.Fatal(err)
+			}
+			var refused *notDeliveredError
+			if err := completeMailbox(root, "agent"); !errors.As(err, &refused) {
+				t.Fatalf("repair after the swap = %v, want a refusal", err)
+			}
+			if _, err := os.Lstat(fsq.AgentReceipts(root.Base(), "agent")); !os.IsNotExist(err) {
+				t.Fatalf("the swapped-in mailbox was completed: %v", err)
+			}
+		})
+	}
+}
+
+// pinnedTestRoot pins a fresh root whose agent mailbox lacks receipts/.
+func pinnedTestRoot(t *testing.T) *fsq.DeliveryRoot {
+	t.Helper()
+	dir := canonicalTempDir(t)
+	if err := fsq.EnsureAgentDirs(dir, "agent"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(fsq.AgentReceipts(dir, "agent")); err != nil {
+		t.Fatal(err)
+	}
+	identity, err := fsq.SnapshotDeliveryRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := fsq.OpenDeliveryRoot(dir, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = root.Close() })
+	return root
+}
+
+// Pro review of #964 (P2): a mailbox an older amq made has an inbox but no
+// receipts/; delivery completes its layout instead of refusing it.
+func TestMailboxDeliveryCompletesAnOlderMailbox(t *testing.T) {
+	s, root := mailboxServer(t)
+	s.cfg.TurnTimeout = 50 * time.Millisecond
+	if err := os.Remove(fsq.AgentReceipts(root, "agent")); err != nil {
+		t.Fatal(err)
+	}
+	if _, rpcErr := s.runRemote("s", "say hi", strings.Repeat("6", 64), newTurn(), func(any) error { return nil }); rpcErr != nil {
+		t.Fatal(rpcErr)
+	}
+	if ids := inboxPrompts(t, root); len(ids) != 1 {
+		t.Fatalf("inbox holds %d prompts; want 1", len(ids))
+	}
+}
+
 // Codex 611.36 research, honest stop: a cancel says the message stays and
 // may still run, and the message is not recalled.
 func TestMailboxCancelSaysTheMessageStays(t *testing.T) {
@@ -364,53 +561,21 @@ func TestMailboxCancelBeforeDeliveryPublishesNothing(t *testing.T) {
 }
 
 // Codex #895 r2 P1: a cancel while the publish lock was held still
-// delivered the prompt once the lock was released.
+// delivered the prompt once the lock was released. The claim is now created
+// inside the locked operation, so the re-check is exercised there.
 func TestMailboxCancelWhilePublishLockHeldPublishesNothing(t *testing.T) {
 	s, root := mailboxServer(t)
-	eventID := strings.Repeat("6", 64)
 	turn := newTurn()
-	lockPath := filepath.Join(s.cfg.StateDir, "remote-events", eventID+".mailbox.lock")
-	claimPath := filepath.Join(s.cfg.StateDir, "remote-events", eventID+".mailbox.json")
-	if err := os.MkdirAll(filepath.Dir(lockPath), 0o700); err != nil {
-		t.Fatal(err)
+	s.mu.Lock()
+	if turn.settleLocked("session_cancelled") {
+		close(turn.done)
 	}
-	finished := make(chan *rpcError, 1)
-	if err := lock.WithExclusiveFileLock(lockPath, func() error {
-		go func() {
-			_, rpcErr := s.runRemote("s", "hello", eventID, turn, func(any) error { return nil })
-			finished <- rpcErr
-		}()
-		deadline := time.After(time.Second)
-		for {
-			if _, err := os.Lstat(claimPath); err == nil {
-				break
-			}
-			select {
-			case <-deadline:
-				t.Fatal("claim not created")
-			default:
-				time.Sleep(time.Millisecond)
-			}
-		}
-		if ids := inboxPrompts(t, root); len(ids) != 0 {
-			t.Fatalf("message published while lock held")
-		}
-		s.mu.Lock()
-		if turn.settleLocked("session_cancelled") {
-			close(turn.done)
-		}
-		s.mu.Unlock()
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case rpcErr := <-finished:
-		if rpcErr != nil {
-			t.Fatal(rpcErr)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("prompt did not finish")
+	s.mu.Unlock()
+	r := &remoteTurn{s: s, sessionID: "s", eventID: strings.Repeat("6", 64), turn: turn, meta: remoteMeta{Target: "agent"}}
+	b := binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: "agent"}
+	claim, err := s.publishClaimed(r, time.Now().Add(time.Second), b, "t", "hello")
+	if !errors.Is(err, errStoppedBeforePublish) || claim.MessageID == "" {
+		t.Fatalf("claim=%+v err=%v", claim, err)
 	}
 	if ids := inboxPrompts(t, root); len(ids) != 0 {
 		t.Fatalf("cancelled before publication, but inbox has %d prompt(s)", len(ids))
@@ -541,6 +706,9 @@ func TestModelSelectsEachAgentsSession(t *testing.T) {
 		{Carrier: binding.CarrierMailbox, Root: rootA, Handle: "agent", Name: "a"},
 		{Carrier: binding.CarrierMailbox, Root: rootB, Handle: "agent", Name: "b"},
 	} {
+		if err := fsq.EnsureAgentDirs(b.Root, b.Handle); err != nil {
+			t.Fatal(err)
+		}
 		if err := binding.WriteNamed(b); err != nil {
 			t.Fatal(err)
 		}

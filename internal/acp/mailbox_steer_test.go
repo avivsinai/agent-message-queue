@@ -89,6 +89,11 @@ func TestFollowUpDMSteersAnOpenMailboxTurn(t *testing.T) {
 func TestReplayedSteerStaysWithItsFirstBinding(t *testing.T) {
 	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
 	rootA, rootB := canonicalTempDir(t), canonicalTempDir(t)
+	for _, root := range []string{rootA, rootB} {
+		if err := fsq.EnsureAgentDirs(root, "agent"); err != nil {
+			t.Fatal(err)
+		}
+	}
 	for _, b := range []binding.Binding{
 		{Carrier: binding.CarrierMailbox, Root: rootA, Handle: "agent", Name: "a"},
 		{Carrier: binding.CarrierMailbox, Root: rootB, Handle: "agent", Name: "b"},
