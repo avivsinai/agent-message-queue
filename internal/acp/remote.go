@@ -619,12 +619,12 @@ func (r *remoteTurn) failed(state string, err error) (any, *rpcError) {
 	if outcome == "session_cancelled" {
 		stopReason = StopReasonCancelled
 	}
-	text := fmt.Sprintf("%s: not submitted (%s): %s", r.meta.Target, r.meta.Code, r.meta.Reason)
+	text := fmt.Sprintf("%s: not submitted (%s): %s", r.meta.Target, r.meta.Code, protocol.InertInline(r.meta.Reason))
 	switch {
 	case r.mailboxThread != "" && state == remoteUncertain:
-		text = fmt.Sprintf("%s: the delivery outcome is unknown: %s. Do not resend; check it with `amq thread --id %s`.", r.meta.Target, r.meta.Reason, r.mailboxThread)
+		text = fmt.Sprintf("%s: the delivery outcome is unknown: %s. Do not resend; check it with `amq thread --id %s`.", r.meta.Target, protocol.InertInline(r.meta.Reason), r.mailboxThread)
 	case state == remoteUncertain:
-		text = fmt.Sprintf("%s: the outcome of request %s is unknown: %s. Do not resend; check it with `amq-remote status %s`.", r.meta.Target, r.meta.RequestRef, r.meta.Reason, r.meta.RequestRef)
+		text = fmt.Sprintf("%s: the outcome of request %s is unknown: %s. Do not resend; check it with `amq-remote status %s`.", r.meta.Target, r.meta.RequestRef, protocol.InertInline(r.meta.Reason), r.meta.RequestRef)
 	}
 	return r.say(postStatus, outcome, stopReason, text)
 }
@@ -739,9 +739,9 @@ func (r *remoteTurn) statusText(snap protocol.Snapshot) string {
 		text += " (" + r.meta.Code + ")"
 	}
 	if r.meta.Reason != "" {
-		text += ": " + r.meta.Reason
+		text += ": " + protocol.InertInline(r.meta.Reason)
 	} else if snap.Result != nil && snap.Result.Error != "" {
-		text += ": " + snap.Result.Error
+		text += ": " + protocol.InertInline(snap.Result.Error)
 	}
 	return text
 }
