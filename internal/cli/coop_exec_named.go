@@ -208,6 +208,17 @@ func codexConfigKeepsDaemon(flag, value string) (keeps, known bool) {
 	return raw == "true" || raw == "false", raw == "true" || raw == "false"
 }
 
+// codexSubcommands are codex-cli 0.160's subcommands (codex --help). As the
+// first positional argument one is not a prompt and runs no ordinary TUI
+// start, so AMQ cannot tell where it runs.
+var codexSubcommands = map[string]bool{
+	"agents": true, "exec": true, "e": true, "review": true, "login": true, "logout": true, "mcp": true,
+	"plugin": true, "app-server": true, "remote-control": true, "app": true, "completion": true,
+	"update": true, "doctor": true, "sandbox": true, "debug": true, "apply": true, "a": true,
+	"resume": true, "queue": true, "archive": true, "delete": true, "migrate-rollouts": true,
+	"unarchive": true, "fork": true, "cloud": true, "exec-server": true, "features": true, "help": true,
+}
+
 // codexLaunchBackend reports where a Codex TUI started with args in wd runs
 // (codex-cli 0.160 tui/src/startup_orchestration.rs:176-540), with the
 // effective features for its directory. A Codex that reports no
@@ -217,7 +228,7 @@ func codexLaunchBackend(cmdName string, args []string, wd, codexHome string) (co
 	// The whole command line is read before deciding: --remote, an option
 	// AMQ does not know, or an unclassified override outranks every reason
 	// to call the TUI embedded.
-	embedded, unknown := false, false
+	embedded, unknown, prompt := false, false, false
 	for _, key := range []string{"CODEX_EXEC_SERVER_URL", "OPENAI_FEDERATION_RULE_ID", "OPENAI_IDENTITY_TOKEN_FILE"} {
 		if _, set := os.LookupEnv(key); set {
 			embedded = true
@@ -228,7 +239,11 @@ func codexLaunchBackend(cmdName string, args []string, wd, codexHome string) (co
 			break // the rest is the prompt
 		}
 		if !strings.HasPrefix(args[i], "-") {
-			continue // a positional prompt
+			if !prompt && codexSubcommands[args[i]] {
+				return codexBackendUnknown, nil
+			}
+			prompt = true
+			continue
 		}
 		flag, value, inline := strings.Cut(args[i], "=")
 		switch {

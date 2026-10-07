@@ -150,6 +150,7 @@ func TestCodexDaemonThreadDir(t *testing.T) {
 //   - Review of #975 r5 (Pro): an embedded option before --remote, an
 //     exclusion env var with --remote, and an allowed key with a commented
 //     TOML boolean do not establish an embedded Codex either.
+//   - Review of #975 r6 (Pro): a subcommand such as agents is not a prompt.
 func TestCodexNamingFollowsWhereCodexRuns(t *testing.T) {
 	const plain = "daemon_auto_start x true\nbedrock_setup_wizard x false\nterminal_visualization_instructions x false\n"
 	for name, tc := range map[string]struct {
@@ -183,6 +184,7 @@ func TestCodexNamingFollowsWhereCodexRuns(t *testing.T) {
 		"option text after --":                   {plain, true, []string{"--", "--no-daemon"}, nil, false},
 		"search then remote":                     {plain, true, []string{"--search", "--remote", "ws://127.0.0.1:1"}, nil, false},
 		"exec server env then remote":            {plain, true, []string{"--remote", "ws://127.0.0.1:1"}, nil, false},
+		"agents subcommand":                      {plain, true, []string{"--search", "agents"}, nil, false},
 		"commented TOML boolean":                 {plain, true, []string{"-c", "suppress_unstable_features_warning=true # quiet"}, nil, false},
 	} {
 		t.Run(name, func(t *testing.T) {
