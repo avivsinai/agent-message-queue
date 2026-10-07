@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 )
@@ -16,8 +17,6 @@ import (
 //     directory with no trust decision, before the TUI asks the user.
 //   - Review of #950 r6 (Pro, P1): Codex trims git pointers with trim_ascii;
 //     a pointer ending in U+00A0 resolves to nothing in Codex.
-//   - Review of #950 r6 (Pro, P2): with terminal_visualization_instructions
-//     on, the TUI resumes with developer instructions.
 func TestCodexDaemonNamingSkipsWhereCodexWouldDiffer(t *testing.T) {
 	for name, setup := range map[string]func(t *testing.T, codexHome string) string{
 		"unfamiliar repo": func(t *testing.T, codexHome string) string {
@@ -32,11 +31,6 @@ func TestCodexDaemonNamingSkipsWhereCodexWouldDiffer(t *testing.T) {
 			main, worktree := makeLinkedWorktree(t, " ")
 			writeCodexConfig(t, codexHome, "[projects.\""+main+"\"]\ntrust_level = \"trusted\"\n")
 			return worktree
-		},
-		"terminal instructions feature on": func(t *testing.T, codexHome string) string {
-			repo := t.TempDir()
-			writeCodexConfig(t, codexHome, "[features]\nterminal_visualization_instructions = true\n\n[projects.\""+repo+"\"]\ntrust_level = \"trusted\"\n")
-			return repo
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -132,15 +126,26 @@ func makeLinkedWorktree(t *testing.T, pointerSuffix string) (main, worktree stri
 // its own app-server, or that resume refuses, keep the original path.
 func TestCodexDaemonThreadDir(t *testing.T) {
 	wd := t.TempDir()
+	sub := filepath.Join(wd, "sub")
+	if err := os.Mkdir(sub, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	for _, tc := range []struct {
 		args []string
 		dir  string
 		ok   bool
 	}{
 		{nil, wd, true},
-		{[]string{"-m", "gpt-5", "-a", "untrusted", "--sandbox=workspace-write", "--yolo", "--add-dir", "/x", "--no-alt-screen"}, wd, true},
-		{[]string{"-C", "sub"}, filepath.Join(wd, "sub"), true},
-		{[]string{"--cd=/abs/dir"}, "/abs/dir", true},
+		{[]string{"-m", "gpt-5", "-a", "on-request", "--sandbox=workspace-write", "--add-dir", "/x", "--add-dir", "/y", "--no-alt-screen"}, wd, true},
+		{[]string{"--yolo", "-m", "gpt-5"}, wd, true},
+		{[]string{"-C", "sub"}, sub, true},
+		{[]string{"--cd=" + sub}, sub, true},
+		// Review of #975 (Pro, P2): Codex refuses these at argument parsing,
+		// after AMQ would have started and named a thread.
+		{[]string{"--yolo", "-a", "on-request"}, "", false},
+		{[]string{"-a", "untrusted"}, "", false},
+		{[]string{"-m", "a", "-m", "b"}, "", false},
+		{[]string{"-C", "missing"}, "", false},
 		{[]string{"-p", "work"}, "", false},
 		{[]string{"-c", "model=x"}, "", false},
 		{[]string{"--search"}, "", false},
@@ -152,5 +157,48 @@ func TestCodexDaemonThreadDir(t *testing.T) {
 		if dir != tc.dir || ok != tc.ok {
 			t.Errorf("codexDaemonThreadDir(%q) = %q, %v; want %q, %v", tc.args, dir, ok, tc.dir, tc.ok)
 		}
+	}
+}
+
+// AMQ reads Codex's effective features through `codex features list` and
+// starts the managed daemon exactly when the TUI would.
+//   - Review of #950 r6 (Pro, P2): with terminal_visualization_instructions
+//     on, the TUI resumes with developer instructions.
+//   - Bead agent-message-queue-38l: with no daemon running, the TUI starts
+//     one, so AMQ starts it first.
+//   - Review of #975 (Pro, P1): a layer AMQ did not read turned
+//     daemon_auto_start off, and AMQ started a daemon the TUI would not.
+func TestCodexDaemonStartFollowsCodexFeatures(t *testing.T) {
+	for name, tc := range map[string]struct {
+		features string
+		daemon   bool
+		started  bool
+	}{
+		"terminal instructions on":  {"daemon_auto_start stable true\nterminal_visualization_instructions under development true\n", true, false},
+		"no daemon, auto-start on":  {"daemon_auto_start stable true\n", false, true},
+		"no daemon, auto-start off": {"daemon_auto_start stable false\n", false, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			codexHome, contacts := t.TempDir(), new(atomic.Int32)
+			if tc.daemon {
+				codexHome, contacts = startFakeCodexDaemon(t)
+			}
+			repo := t.TempDir()
+			writeCodexConfig(t, codexHome, "[projects.\""+repo+"\"]\ntrust_level = \"trusted\"\n")
+			marker := filepath.Join(t.TempDir(), "daemon-start")
+			bin := filepath.Join(t.TempDir(), "codex")
+			script := "#!/bin/sh\ncase \"$1 $2 $3\" in\n\"features list \") printf '" + strings.ReplaceAll(tc.features, "\n", "\\n") + "' ;;\n\"app-server daemon start\") : > " + marker + " ;;\nesac\n"
+			if err := os.WriteFile(bin, []byte(script), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("CODEX_HOME", codexHome)
+			t.Chdir(repo)
+			if _, ok := startCodexOnNamedDaemonThread(bin, nil, "s1/codex"); ok || contacts.Load() != 0 {
+				t.Fatalf("daemon path taken = %v, daemon contacts = %d; want neither", ok, contacts.Load())
+			}
+			if _, err := os.Stat(marker); (err == nil) != tc.started {
+				t.Fatalf("daemon start ran = %v, want %v", err == nil, tc.started)
+			}
+		})
 	}
 }

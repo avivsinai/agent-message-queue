@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -166,6 +167,10 @@ func startCodexOnNamedDaemonThread(cmdName string, agentArgs []string, name stri
 	if !codexTrustsDir(codexHome, cwd) {
 		return nil, false
 	}
+	features, err := codexEffectiveFeatures(cmdName, cwd)
+	if err != nil {
+		return nil, false
+	}
 	// With the feature off the TUI's thread/resume carries no developer
 	// instructions (tui/src/app_server_session.rs:2130-2132,
 	// terminal_visualization_instructions.rs:14-19), so the model's
@@ -173,10 +178,10 @@ func startCodexOnNamedDaemonThread(cmdName string, agentArgs []string, name stri
 	// not. One setting differs, as for any `codex resume` of a thread with no
 	// turns: a fresh TUI start forces model_reasoning_summary to "none" unless
 	// the user set it, while a resume keeps the model default.
-	if codexTerminalInstructionsEnabled(codexHome, cwd) {
+	if features["terminal_visualization_instructions"] {
 		return nil, false
 	}
-	sock, err := codexControlSocket(cmdName, codexHome, cwd)
+	sock, err := codexControlSocket(cmdName, codexHome, cwd, features["daemon_auto_start"])
 	if err != nil {
 		if !errors.Is(err, errCodexNoDaemon) {
 			_ = writeStderr("%s\n", coopNamedTUIManualReminder(name, cmdName, "Codex daemon: "+err.Error()))
@@ -208,12 +213,14 @@ const codexDaemonStartTimeout = 30 * time.Second
 // `codex app-server daemon start` starts it with no overrides and saves that
 // (app-server-daemon/src/lib.rs:392, 405-438), so AMQ runs it only when no
 // overrides are saved: then both starts are the same. Otherwise, or when
-// Codex may not auto-start, it returns errCodexNoDaemon.
-func codexControlSocket(cmdName, codexHome, dir string) (string, error) {
+// autoStart is off, it returns errCodexNoDaemon. One interleaving remains: a
+// concurrent Codex launch that saves overrides and then fails to start the
+// daemon between this check and the child's lifecycle lock loses them.
+func codexControlSocket(cmdName, codexHome, dir string, autoStart bool) (string, error) {
 	if sock, err := codex.ControlSocket(codexHome); err == nil {
 		return sock, nil
 	}
-	if codexDaemonAutoStartMayBeOff(codexHome, dir) || codexDaemonHasSavedFeatures(codexHome) {
+	if !autoStart || codexDaemonHasSavedFeatures(codexHome) {
 		return "", errCodexNoDaemon
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), codexDaemonStartTimeout)
@@ -224,6 +231,38 @@ func codexControlSocket(cmdName, codexHome, dir string) (string, error) {
 		return "", fmt.Errorf("codex app-server daemon start: %w: %s", err, bytes.TrimSpace(output))
 	}
 	return codex.ControlSocket(codexHome)
+}
+
+// codexEffectiveFeatures returns Codex's effective feature flags for dir as
+// `codex features list` prints them: one "<name> <stage> <true|false>" row
+// per feature, from the same layers the TUI loads (codex-cli 0.160
+// cli/src/main.rs FeaturesSubcommand::List, cloud_config::load_config).
+func codexEffectiveFeatures(cmdName, dir string) (map[string]bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), codexDaemonNamingTimeout)
+	defer cancel()
+	list := exec.CommandContext(ctx, cmdName, "features", "list")
+	list.Dir = dir
+	output, err := list.Output()
+	if err != nil {
+		return nil, fmt.Errorf("codex features list: %w", err)
+	}
+	features := make(map[string]bool)
+	for _, line := range strings.Split(string(output), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 3 {
+			continue
+		}
+		switch fields[len(fields)-1] {
+		case "true":
+			features[fields[0]] = true
+		case "false":
+			features[fields[0]] = false
+		}
+	}
+	if _, ok := features["daemon_auto_start"]; !ok {
+		return nil, errors.New("codex features list did not report daemon_auto_start")
+	}
+	return features, nil
 }
 
 // codexDaemonHasSavedFeatures reports whether the managed daemon's settings
@@ -241,17 +280,38 @@ func codexDaemonHasSavedFeatures(codexHome string) bool {
 	return err != nil || json.Unmarshal(raw, &settings) != nil || len(settings.FeatureOverrides) > 0
 }
 
+// codexDaemonOptions maps each option that keeps a Codex TUI on the managed
+// daemon and takes effect on `codex resume <id>` as on a fresh start to its
+// canonical name and the values Codex accepts (codex-cli 0.160: daemon
+// exclusion in tui/src/daemon_startup.rs, resume merge in cli/src/main.rs,
+// resume permissions and model overrides in tui/src/resume_permissions.rs and
+// app/config_persistence.rs, value enums in utils/cli). nil values take any
+// argument; a missing entry is a flag without one.
+var codexDaemonOptions = map[string]struct {
+	name   string
+	values []string
+	arg    bool
+}{
+	"-m": {name: "model", arg: true}, "--model": {name: "model", arg: true},
+	"-a": {name: "approval", arg: true, values: []string{"on-request", "never"}}, "--ask-for-approval": {name: "approval", arg: true, values: []string{"on-request", "never"}},
+	"-s": {name: "sandbox", arg: true, values: []string{"read-only", "workspace-write", "danger-full-access"}}, "--sandbox": {name: "sandbox", arg: true, values: []string{"read-only", "workspace-write", "danger-full-access"}},
+	"-C": {name: "cd", arg: true}, "--cd": {name: "cd", arg: true},
+	"--add-dir":       {name: "add-dir", arg: true},
+	"--no-alt-screen": {name: "no-alt-screen"},
+	"--yolo":          {name: "yolo"}, "--dangerously-bypass-approvals-and-sandbox": {name: "yolo"},
+}
+
 // codexDaemonThreadDir reports whether a Codex TUI started with args, in
 // this environment, runs on the managed daemon and takes every option on
 // `codex resume <id>` as it would on a fresh start, and returns the thread
-// directory: the -C/--cd directory resolved against wd, or wd. Only the
-// options listed here qualify (codex-cli 0.160 daemon_startup.rs exclusion;
-// resume merge in cli/src/main.rs; resume permissions and model overrides in
-// tui/src/resume_permissions.rs and app/config_persistence.rs). Others either
-// make Codex run its own app-server (-p, -c, --search, --oss), are refused by
-// resume (--worktree), or were not checked; they keep the original path.
-// Codex also runs its own app-server when CODEX_EXEC_SERVER_URL or a
-// workload identity variable is set at all.
+// directory: the -C/--cd directory resolved against wd, or wd. Only options
+// in codexDaemonOptions qualify, each once (--add-dir may repeat), with a
+// value Codex accepts, and --yolo never with an approval policy, so Codex
+// refuses no launch that AMQ already started a thread for. Others make Codex
+// run its own app-server (-p, -c, --search, --oss), are refused by resume
+// (--worktree), or were not checked; they keep the original path. Codex also
+// runs its own app-server when CODEX_EXEC_SERVER_URL or a workload identity
+// variable is set at all.
 func codexDaemonThreadDir(args []string, wd string) (string, bool) {
 	for _, key := range []string{"CODEX_EXEC_SERVER_URL", "OPENAI_FEDERATION_RULE_ID", "OPENAI_IDENTITY_TOKEN_FILE"} {
 		if _, set := os.LookupEnv(key); set {
@@ -259,17 +319,16 @@ func codexDaemonThreadDir(args []string, wd string) (string, bool) {
 		}
 	}
 	dir := wd
+	seen := make(map[string]bool)
 	for i := 0; i < len(args); i++ {
 		flag, value, inline := strings.Cut(args[i], "=")
-		switch flag {
-		case "--no-alt-screen", "--dangerously-bypass-approvals-and-sandbox", "--yolo":
-			if inline {
-				return "", false
-			}
-			continue
-		case "-m", "--model", "-a", "--ask-for-approval", "-s", "--sandbox", "--add-dir", "-C", "--cd":
-		default:
+		option, ok := codexDaemonOptions[flag]
+		if !ok || inline && !option.arg || seen[option.name] && option.name != "add-dir" {
 			return "", false
+		}
+		seen[option.name] = true
+		if !option.arg {
+			continue
 		}
 		if !inline {
 			if i+1 >= len(args) || strings.HasPrefix(args[i+1], "-") {
@@ -278,15 +337,21 @@ func codexDaemonThreadDir(args []string, wd string) (string, bool) {
 			i++
 			value = args[i]
 		}
-		if value == "" {
+		if value == "" || option.values != nil && !slices.Contains(option.values, value) {
 			return "", false
 		}
-		if flag == "-C" || flag == "--cd" {
+		if option.name == "cd" {
 			dir = value
 			if !filepath.IsAbs(dir) {
 				dir = filepath.Join(wd, dir)
 			}
 		}
+	}
+	if seen["yolo"] && seen["approval"] {
+		return "", false
+	}
+	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+		return "", false
 	}
 	return filepath.Clean(dir), true
 }
