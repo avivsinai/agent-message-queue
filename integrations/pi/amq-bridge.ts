@@ -21,6 +21,12 @@ const HEARTBEAT_MS = 2000; // the adapter treats a liveness file older than 5 s 
 const POLL_MS = 200; // the adapter waits 2 s for a receipt after it publishes a request
 const START_GRACE_MS = 5000; // an idle pi that has not started a follow-up by then dropped it
 const MAX_EVENT_TEXT = 256 * 1024;
+// Activity records are a bounded, best-effort view of the whole session for
+// the relay's session panel (docs/pi-bridge-protocol.md, activity). Text is
+// cut to the relay frame's plaintext cap; the file is truncated at 4 MiB.
+const MAX_ACTIVITY_TEXT = 48000;
+const MAX_ACTIVITY_FILE = 4 * 1024 * 1024;
+const SESSION_ID = /^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,126}[A-Za-z0-9])?$/;
 const REQUEST_FILE = /^(amqr1_[a-z2-7]{16,472})\.json$/;
 const HANDLE = /^[a-z0-9_][a-z0-9_-]*$/;
 const TERMINAL = new Set(["completed", "failed", "cancelled", "refused", "uncertain"]);
@@ -45,6 +51,13 @@ type Bridge = {
 	orphanRetry: Set<string>;
 	// revisionNoticeShown limits the old-adapter notice to once per runtime.
 	revisionNoticeShown: boolean;
+	// sessionId is pi's own session id; "" disables activity records.
+	sessionId: string;
+	// turn is the id of the open turn, "" outside one. turns counts turns.
+	turn: string;
+	turns: number;
+	// seq numbers activity records within this runtime.
+	seq: number;
 };
 
 type Inflight = {
@@ -121,6 +134,8 @@ export default function amqPiBridge(pi: ExtensionAPI): void {
 		if (f?.started) noteAssistant(f, event.message);
 	});
 
+	activityHooks(pi, () => bridge);
+
 	pi.on("agent_end", (event) => {
 		const f = active();
 		if (!f?.started) return;
@@ -172,7 +187,7 @@ function start(pi: ExtensionAPI, ctx: ExtensionContext): Bridge | null {
 	}
 	const dir = path.join(root, "agents", handle, "extensions", "pi-bridge");
 	try {
-		for (const sub of ["requests", "receipts", "events"]) {
+		for (const sub of ["requests", "receipts", "events", "activity"]) {
 			fs.mkdirSync(path.join(dir, sub), { recursive: true, mode: 0o700 });
 		}
 	} catch (err) {
@@ -191,6 +206,10 @@ function start(pi: ExtensionAPI, ctx: ExtensionContext): Bridge | null {
 		orphansPending: false,
 		orphanRetry: new Set(),
 		revisionNoticeShown: false,
+		sessionId: sessionIdOf(ctx),
+		turn: "",
+		turns: 0,
+		seq: 0,
 	};
 	writeLiveness(b, true);
 	b.orphansPending = !closeOrphanedReceipts(b);
@@ -383,18 +402,6 @@ function claimReceipt(b: Bridge, ref: string): "claimed" | "taken" | "error" {
 	return "claimed";
 }
 
-// sessionID is pi's own session id (ReadonlySessionManager.getSessionId),
-// which a relay share pins (protocol: session identity). It is left out when
-// pi gives none.
-function sessionID(ctx: ExtensionContext): string | undefined {
-	try {
-		const id = ctx.sessionManager.getSessionId();
-		return typeof id === "string" && id !== "" ? id : undefined;
-	} catch {
-		return undefined;
-	}
-}
-
 function writeLiveness(b: Bridge, live: boolean): void {
 	const body = JSON.stringify({
 		protocol: PROTOCOL,
@@ -404,7 +411,7 @@ function writeLiveness(b: Bridge, live: boolean): void {
 		surface: b.surface,
 		session_generation: b.generation,
 		bridge_revision: BRIDGE_REVISION,
-		session_id: sessionID(b.ctx),
+		session_id: sessionIdOf(b.ctx) || undefined,
 	});
 	try {
 		const tmp = writeTemp(b.dir, body);
@@ -482,14 +489,24 @@ function appendEvent(dir: string, ref: string, fields: EventFields): boolean {
 	if (fields.error) ev.error = truncateUtf8(fields.error, MAX_EVENT_TEXT);
 	if (fields.reason) ev.reason = fields.reason;
 	ev.at = new Date().toISOString();
-	const file = path.join(dir, "events", `${ref}.jsonl`);
+	return appendLine(path.join(dir, "events", `${ref}.jsonl`), `${JSON.stringify(ev)}\n`, 0);
+}
+
+// appendLine appends one fsynced line and reports whether it is durable. A
+// file already past maxSize (when set) is truncated first: the history is
+// not evidence.
+function appendLine(file: string, line: string, maxSize: number): boolean {
 	let fd: number | undefined;
 	try {
 		fd = fs.openSync(file, "a+", 0o600);
-		const size = fs.fstatSync(fd).size;
+		let size = fs.fstatSync(fd).size;
+		if (maxSize > 0 && size > maxSize) {
+			fs.ftruncateSync(fd, 0);
+			size = 0;
+		}
 		const last = Buffer.alloc(1);
 		if (size > 0 && fs.readSync(fd, last, 0, 1, size - 1) === 1 && last[0] !== 0x0a) writeAll(fd, "\n");
-		writeAll(fd, `${JSON.stringify(ev)}\n`);
+		writeAll(fd, line);
 		fs.fsyncSync(fd);
 		return true;
 	} catch {
@@ -508,6 +525,76 @@ function appendEvent(dir: string, ref: string, fields: EventFields): boolean {
 function writeAll(fd: number, text: string): void {
 	const buf = Buffer.from(text, "utf8");
 	if (fs.writeSync(fd, buf) !== buf.length) throw new Error("short write");
+}
+
+// sessionIdOf is pi's own session id, which a relay share pins and which
+// names the activity file; "" when pi gives none that is safe as a file name.
+function sessionIdOf(ctx: ExtensionContext): string {
+	try {
+		// ReadonlySessionManager.getSessionId: pi session-manager.d.ts:178,246.
+		const id = ctx.sessionManager.getSessionId();
+		return SESSION_ID.test(id) ? id : "";
+	} catch {
+		return "";
+	}
+}
+
+type ActivityFields = { kind: string; id?: string; text?: string; tool?: string; status?: string };
+
+// appendActivity appends one record to activity/<session_id>.jsonl. The
+// stream is best effort and never affects a request: a failed append drops
+// the record.
+function appendActivity(b: Bridge, f: ActivityFields): void {
+	if (!b.sessionId) return;
+	const rec: Record<string, string | number> = { protocol: PROTOCOL, seq: ++b.seq, at: new Date().toISOString(), turn: b.turn, kind: f.kind };
+	if (f.id) rec.id = f.id;
+	if (f.text) rec.text = f.text;
+	if (f.tool) rec.tool = f.tool;
+	if (f.status) rec.status = f.status;
+	appendLine(path.join(b.dir, "activity", `${b.sessionId}.jsonl`), `${JSON.stringify(rec)}\n`, MAX_ACTIVITY_FILE);
+}
+
+// activityHooks records the whole session, not only remote requests: turn
+// boundaries, whole user and assistant messages, and tool calls with their
+// results. Event names and payloads are pi-coding-agent
+// dist/core/extensions/types.d.ts: turn_start/turn_end :790-:802,
+// message_end :816, tool_execution_start :821, tool_execution_end :840.
+// Streaming deltas are not recorded.
+function activityHooks(pi: ExtensionAPI, get: () => Bridge | null): void {
+	pi.on("turn_start", () => {
+		const b = get();
+		if (!b) return;
+		b.turn = `${b.generation.slice(0, 8)}-${++b.turns}`;
+		appendActivity(b, { kind: "turn_start" });
+	});
+	pi.on("turn_end", () => {
+		const b = get();
+		if (!b) return;
+		appendActivity(b, { kind: "turn_end" });
+		b.turn = "";
+	});
+	pi.on("message_end", (event) => {
+		const b = get();
+		if (!b) return;
+		const msg = event.message as { role?: string; content?: unknown };
+		if (msg.role !== "user" && msg.role !== "assistant") return;
+		const text = truncateUtf8(textOf(msg.content), MAX_ACTIVITY_TEXT);
+		if (text) appendActivity(b, { kind: msg.role, text });
+	});
+	pi.on("tool_execution_start", (event) => {
+		const b = get();
+		if (b) appendActivity(b, { kind: "tool_start", id: event.toolCallId, tool: event.toolName });
+	});
+	pi.on("tool_execution_end", (event) => {
+		const b = get();
+		if (!b) return;
+		// result is an AgentToolResult: pi-agent-core dist/types.d.ts:370,
+		// content is text or image parts.
+		const text = textOf((event.result as { content?: unknown } | undefined)?.content);
+		const cap = MAX_ACTIVITY_TEXT - 12;
+		const bounded = Buffer.byteLength(text, "utf8") > cap ? `${truncateUtf8(text, cap)}\n[truncated]` : text;
+		appendActivity(b, { kind: "tool_end", id: event.toolCallId, tool: event.toolName, text: bounded, status: event.isError ? "failed" : "completed" });
+	});
 }
 
 function noteAssistant(f: Inflight, message: unknown): void {

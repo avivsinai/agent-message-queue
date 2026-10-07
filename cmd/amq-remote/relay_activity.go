@@ -20,12 +20,15 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/codex"
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/manifest"
+	"github.com/avivsinai/agent-message-queue/internal/remote/pi"
 	"github.com/avivsinai/agent-message-queue/internal/remote/sharestate"
 )
 
 // notificationSource is the Codex attachment's read-only notification
 // observer; claudeSource is the Claude attachment's parsed-transcript
-// observer. Activity export reads either one.
+// observer; piSource is the pi attachment's bridge activity tail (a distinct
+// method name keeps the type switch unambiguous). Activity export reads any
+// one.
 type notificationSource interface {
 	ObserveNotifications(fn func(codex.Notification)) (stop func())
 }
@@ -34,10 +37,15 @@ type claudeSource interface {
 	ObserveActivity(fn func(claude.ActivityNote)) (stop func())
 }
 
+type piSource interface {
+	ObservePiActivity(fn func(pi.ActivityNote)) (stop func())
+}
+
 // activityItem is one queued native observation: exactly one field is set.
 type activityItem struct {
 	codex  *codex.Notification
 	claude *claude.ActivityNote
+	pi     *pi.ActivityNote
 }
 
 // blockSize is one Claude block's in-memory size; the note retains its whole
@@ -50,6 +58,10 @@ var blockSize = int64(unsafe.Sizeof(claude.TranscriptBlock{}))
 func (it activityItem) size() int64 {
 	if it.codex != nil {
 		return int64(len(it.codex.Params)) // the method is an allowlisted name
+	}
+	if it.pi != nil {
+		n := it.pi
+		return int64(len(n.SessionID) + len(n.TurnID) + len(n.Kind) + len(n.ID) + len(n.Text) + len(n.Tool) + len(n.Status))
 	}
 	n := it.claude
 	total := int64(len(n.SessionID) + len(n.TurnID) + len(n.Line.Type) + len(n.Line.SessionID) + len(n.Line.UUID))
@@ -78,6 +90,10 @@ func observerOf(att any) observeFunc {
 	case claudeSource:
 		return func(offer func(activityItem)) func() {
 			return src.ObserveActivity(func(n claude.ActivityNote) { offer(activityItem{claude: &n}) })
+		}
+	case piSource:
+		return func(offer func(activityItem)) func() {
+			return src.ObservePiActivity(func(n pi.ActivityNote) { offer(activityItem{pi: &n}) })
 		}
 	}
 	return nil
@@ -273,6 +289,12 @@ func (as *activityShare) export(ctx context.Context, conn *relay.Conn, observe o
 				var err error
 				if it.codex != nil {
 					err = sink.Enqueue(*it.codex)
+				} else if it.pi != nil {
+					pctx, cancel := context.WithTimeout(wctx, activityPublishTimeout)
+					drainMu.Lock()
+					err = sink.AcceptPi(pctx, *it.pi)
+					drainMu.Unlock()
+					cancel()
 				} else {
 					// AcceptParsed also drains, through the fenced Publish;
 					// drainMu keeps it and the tick's Drain from publishing
