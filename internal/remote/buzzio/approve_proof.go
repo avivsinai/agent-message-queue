@@ -54,18 +54,28 @@ var ErrAltered = errors.New("the approval message was altered after it was poste
 // posted for appr: the original kind 9 message from the outbox, whose id
 // the reaction names.
 func (c *Carrier) approveEvidence(evt nostr.Event, messageID string, appr Approval) (json.RawMessage, error) {
+	msg, err := c.storedApproval(messageID, appr)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(ApproveEvidence{Reaction: evt, Message: msg})
+}
+
+// storedApproval is the kind 9 message posted for appr, read from the
+// outbox; its id must be messageID.
+func (c *Carrier) storedApproval(messageID string, appr Approval) (nostr.Event, error) {
 	posted, ok, err := c.ledger.Prepared(approvalKey(appr.RequestRef, appr.InteractionID))
 	if err != nil || !ok {
-		return nil, fmt.Errorf("approval message for %s not stored: %v", appr.InteractionID, err)
+		return nostr.Event{}, fmt.Errorf("approval message for %s not stored: %v", appr.InteractionID, err)
 	}
 	var msg nostr.Event
 	if err := json.Unmarshal(posted.Event, &msg); err != nil {
-		return nil, err
+		return nostr.Event{}, err
 	}
 	if msg.ID.Hex() != messageID {
-		return nil, fmt.Errorf("stored approval message %s is not the reacted message %s", msg.ID.Hex(), messageID)
+		return nostr.Event{}, fmt.Errorf("stored approval message %s is not the reacted message %s", msg.ID.Hex(), messageID)
 	}
-	return json.Marshal(ApproveEvidence{Reaction: evt, Message: msg})
+	return msg, nil
 }
 
 // VerifyApproveEvidence checks an owner ✅ as proof that the owner allowed

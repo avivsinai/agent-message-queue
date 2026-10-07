@@ -201,9 +201,15 @@ wrote (`~/.amq/remote/bindings/<name>.json`).
   `buzz` to the bound handle, then waits for a reply that refs it. A `status`
   reply is progress; any other reply is the final answer. The first delivery
   of an event claims one message id, and a redelivery reuses it and publishes
-  only if the message is absent. Progress shows "Delivered", then "Read by"
-  (the handle's drained receipt), then the reply. Stop ends the wait and says
-  the message stays in the inbox; it is never recalled. A final reply that
+  only if the message is absent. Delivery never creates the handle's mailbox
+  or inbox; it completes the other folders of an existing one. When the
+  first delivery of an event is refused by the mailbox, the event ends as not
+  delivered and a redelivery never publishes it; send the DM again. A refused
+  redelivery, or any other publish error, is uncertain and points at
+  `amq thread --id`. Progress shows
+  "Delivered", then "Read by" (the handle's drained receipt), then the reply.
+  Stop ends the wait and says the message stays in the inbox; it is never
+  recalled. A final reply that
   arrives after the turn timed out or the client left is still posted to the
   DM, once, by a sweep at the next prompt and every 30 s while a stream is
   open, for up to 24 h. A reply after Stop is not posted.

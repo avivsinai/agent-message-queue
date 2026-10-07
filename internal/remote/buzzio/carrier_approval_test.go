@@ -97,6 +97,152 @@ func TestApprovalMessageAnsweredByReaction(t *testing.T) {
 	}
 }
 
+// 611.42.7: the owner typed ✅ as a message; it became a new prompt and was
+// refused busy while the approval waited (live, 2026-10-06). A typed yes or
+// no answers the pending approval, as the reaction does: in the approval's
+// thread, or in the main DM once its message reached the relay. The other
+// rows are Pro's review of #970: an approval not yet delivered is never
+// answered, and a replayed answer keeps its first decision.
+func TestApprovalAnsweredByTypedReply(t *testing.T) {
+	var owner, body [32]byte
+	_, _ = rand.Read(owner[:])
+	_, _ = rand.Read(body[:])
+	b := Binding{Owner: nostr.GetPublicKey(owner).Hex(), Body: nostr.GetPublicKey(body).Hex(), Channel: "dm-1", Target: "cx", RelayHost: "relay", NativeSession: "thread-1"}
+	ledger, _ := OpenLedger(t.TempDir())
+	var ref string
+	var answered *protocol.Command
+	submits := 0
+	pendingID := ""
+	c := NewCarrier(ledger, b, body, ownerGrant(t, owner, b.Body, KindDM, KindEdit), fixedIdentity("thread-1"), func(cmd *protocol.Command, src core.Source) (any, error) {
+		switch cmd.Op {
+		case protocol.OpSessionInspect:
+			s := protocol.Session{TargetID: "cx", Epoch: "e1"}
+			if pendingID != "" {
+				s.PendingInteraction, s.ActiveRequestRef = &pendingID, &ref
+			}
+			return s, nil
+		case protocol.OpRequestSubmit:
+			submits++
+			r := protocol.EncodeRef(src.Host, cmd.TargetID, cmd.RequestID)
+			if ref == "" {
+				ref = r
+			}
+			return protocol.Reply{Snapshot: protocol.Snapshot{RequestRef: r, Revision: 1, State: protocol.StateRunning}}, nil
+		case protocol.OpInteractionRespond:
+			answered = cmd
+			return protocol.Reply{Outcome: protocol.Outcome{Op: protocol.OpInteractionRespond}}, nil
+		}
+		t.Fatalf("unexpected op %s", cmd.Op)
+		return nil, nil
+	})
+	now := time.Now()
+	c.now = func() time.Time { return now }
+	dm := ownerEvent(t, owner, "dm-1", "touch a file", now)
+	if err := c.Ingest(dm); err != nil {
+		t.Fatal(err)
+	}
+	origin := c.source(dm.ID.Hex(), "").Origin
+	show := func(rev int64, id string) nostr.Event {
+		t.Helper()
+		now = now.Add(time.Second)
+		in := &protocol.Interaction{InteractionID: id, Kind: "approval", Prompt: "touch a\nin /repo", Options: []string{"accept", "cancel"}, RemoteAnswer: true, ApproveOption: "accept", RejectOption: "cancel"}
+		if err := c.Publish(protocol.Snapshot{RequestRef: ref, Epoch: "e1", Revision: rev, State: protocol.StateRunning, Interaction: in}, origin); err != nil {
+			t.Fatal(err)
+		}
+		pendingID = id
+		posted, _, _ := ledger.Prepared(approvalKey(ref, id))
+		var msg nostr.Event
+		_ = json.Unmarshal(posted.Event, &msg)
+		return msg
+	}
+	flush := func() {
+		if err := c.Flush(context.Background(), func(context.Context, nostr.Event) error { return nil }, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	typed := func(text string, tags ...nostr.Tag) nostr.Event {
+		now = now.Add(time.Second)
+		evt := nostr.Event{CreatedAt: nostr.Timestamp(now.Unix()), Kind: 9, Content: text, Tags: append(nostr.Tags{{"h", "dm-1"}}, tags...)}
+		if err := evt.Sign(owner); err != nil {
+			t.Fatal(err)
+		}
+		return evt
+	}
+
+	// Typed before the relay accepted the approval: the owner cannot have
+	// seen it, so yes is a prompt even when it arrives after delivery.
+	show(2, "item-7")
+	early := typed("yes")
+	now = now.Add(time.Second)
+	flush()
+	if err := c.Ingest(early); err != nil {
+		t.Fatal(err)
+	}
+	if answered != nil || submits != 2 {
+		t.Fatalf("approval not yet delivered when typed: answered %+v, submits %d; want a prompt", answered, submits)
+	}
+	msgA, _, _ := ledger.Prepared(approvalKey(ref, "item-7"))
+	var a nostr.Event
+	_ = json.Unmarshal(msgA.Event, &a)
+
+	// In the approval's thread (root is the prompt, reply is the approval,
+	// as Buzz threads it), no rejects that approval.
+	if err := c.Ingest(typed("no", nostr.Tag{"e", dm.ID.Hex(), "", "root"}, nostr.Tag{"e", a.ID.Hex(), "", "reply"})); err != nil {
+		t.Fatal(err)
+	}
+	if answered == nil || answered.InteractionID != "item-7" || answered.Option != "cancel" {
+		t.Fatalf("thread reply answered %+v, want cancel for item-7", answered)
+	}
+
+	// In the main DM, yes approves the delivered pending approval.
+	answered = nil
+	if err := c.Ingest(typed("yes")); err != nil {
+		t.Fatal(err)
+	}
+	if answered == nil || answered.InteractionID != "item-7" || answered.Option != "accept" {
+		t.Fatalf("main-DM yes answered %+v, want accept for item-7", answered)
+	}
+
+	// A yes claimed for item-7 but never settled is replayed after item-8
+	// is pending: it still answers item-7 only.
+	replay := typed("yes")
+	cmd, _ := json.Marshal(map[string]string{"message": a.ID.Hex(), "ref": ref, "interaction_id": "item-7", "option": "accept"})
+	if _, _, err := ledger.Claim(c.claimFor(replay, OpRespond, "", "e1", now.Add(MutationWindow), cmd)); err != nil {
+		t.Fatal(err)
+	}
+	show(3, "item-8")
+	flush()
+	answered = nil
+	if err := c.Ingest(replay); err != nil {
+		t.Fatal(err)
+	}
+	if answered == nil || answered.InteractionID != "item-7" {
+		t.Fatalf("replay answered %+v, want only its first decision for item-7", answered)
+	}
+
+	// An e tag that names no approval, even malformed or with an unknown
+	// marker, never selects the pending approval (Pro review of #970, round 3).
+	for _, tag := range []nostr.Tag{{"e", dm.ID.Hex(), "", "mention"}, {"e", "not-an-id", "", "reply"}, {"e"}} {
+		answered = nil
+		if err := c.Ingest(typed("yes", tag)); err != nil {
+			t.Fatal(err)
+		}
+		if answered != nil {
+			t.Fatalf("yes with tag %v answered %+v, want a prompt", tag, answered)
+		}
+	}
+
+	// A reply in the old approval's thread still names that approval; it
+	// never selects item-8, which is pending now.
+	answered = nil
+	if err := c.Ingest(typed("yes", nostr.Tag{"e", dm.ID.Hex(), "", "root"}, nostr.Tag{"e", a.ID.Hex(), "", "reply"})); err != nil {
+		t.Fatal(err)
+	}
+	if answered == nil || answered.InteractionID != "item-7" {
+		t.Fatalf("reply to the old approval answered %+v, want item-7 only", answered)
+	}
+}
+
 // PR #919 review: the ledger outlives a share binding, and an approval
 // posted under the old binding was answered by a reaction under the new
 // one. Only the binding that submitted the request answers its approvals.

@@ -86,6 +86,9 @@ type remoteTurn struct {
 	// mailbox marks a mailbox turn; claimChannel is its claim's channel.
 	mailbox      bool
 	claimChannel string
+	// mailboxThread is a mailbox turn's AMQ thread, set before its claim. A
+	// failure text points at it, not at amq-remote status.
+	mailboxThread string
 }
 
 // postChannel is the Buzz channel the turn posts to. A mailbox event posts
@@ -617,7 +620,10 @@ func (r *remoteTurn) failed(state string, err error) (any, *rpcError) {
 		stopReason = StopReasonCancelled
 	}
 	text := fmt.Sprintf("%s: not submitted (%s): %s", r.meta.Target, r.meta.Code, protocol.InertInline(r.meta.Reason))
-	if state == remoteUncertain {
+	switch {
+	case r.mailboxThread != "" && state == remoteUncertain:
+		text = fmt.Sprintf("%s: the delivery outcome is unknown: %s. Do not resend; check it with `amq thread --id %s`.", r.meta.Target, protocol.InertInline(r.meta.Reason), r.mailboxThread)
+	case state == remoteUncertain:
 		text = fmt.Sprintf("%s: the outcome of request %s is unknown: %s. Do not resend; check it with `amq-remote status %s`.", r.meta.Target, r.meta.RequestRef, protocol.InertInline(r.meta.Reason), r.meta.RequestRef)
 	}
 	return r.say(postStatus, outcome, stopReason, text)

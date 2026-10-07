@@ -18,6 +18,17 @@ import (
 
 const wakeSelfUpgradePTYOwnerHelperEnv = "AMQ_TEST_WAKE_SELF_UPGRADE_PTY_OWNER"
 
+// The real-PTY self-upgrade E2E drives a live wake daemon through a real PTY
+// replacement and takes ~35-45 s — far over the repo test bar (under 5 s, no
+// child process) — so it runs only behind this opt-in switch, like the
+// AMQ_*_LIVE proofs in CONTRIBUTING.md, and CI never runs it. The observed
+// failure class it guards (CI run 37481134450, bead
+// agent-message-queue-4sc) was an environment flake, not a code defect.
+const (
+	wakeSelfUpgradePTYLiveEnv  = "AMQ_WAKE_SELF_UPGRADE_PTY_LIVE"
+	wakeSelfUpgradePTYLiveSkip = "AMQ_WAKE_SELF_UPGRADE_PTY_LIVE=1 required; run in an isolated environment per CONTRIBUTING.md live proofs"
+)
+
 func prepareWakeSelfUpgradeE2E(t *testing.T) (stable, oldBinary, newBinary, root, oldVersion, newVersion string) {
 	t.Helper()
 	temp := t.TempDir()

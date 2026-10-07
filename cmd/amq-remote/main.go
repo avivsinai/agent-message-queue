@@ -27,6 +27,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/relay"
 	"github.com/avivsinai/agent-message-queue/internal/remote/amqio"
+	"github.com/avivsinai/agent-message-queue/internal/remote/buzzio"
 	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
 	"github.com/avivsinai/agent-message-queue/internal/remote/codex"
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
@@ -1299,6 +1300,7 @@ func doctor(args []string, probe ...*jsonProbe) (any, int, error) {
 			if sh.Discovery != "" && sh.Discovery != "policy_present" {
 				fail("discovery", sh.Session, sh.Discovery, "the owner publishes the kind 30177 policy for this body from their Buzz client")
 			}
+			noteRefusedRows(note, stateDir, sh.Session)
 		}
 	case !errors.Is(rerr, os.ErrNotExist):
 		report["relay_error"] = rerr.Error()
@@ -1314,6 +1316,35 @@ func doctor(args []string, probe ...*jsonProbe) (any, int, error) {
 		report["notes"] = notes
 	}
 	return finish()
+}
+
+// maxRefusedNotes bounds the refused rows doctor lists per share.
+const maxRefusedNotes = 5
+
+// noteRefusedRows names the share's owed outputs the relay refused on
+// their last attempt, with the relay's reason. They stay owed and are
+// retried, and other requests' outputs still go out
+// (agent-message-queue-611.58), so they are advice, not a failure.
+func noteRefusedRows(note func(boundary, subject, detail, remedy string), stateDir, session string) {
+	refused, err := buzzio.RefusedOutputs(filepath.Join(stateDir, "shares", session))
+	if err != nil {
+		note("publication_refused", session, "cannot read the outbox: "+err.Error(), "")
+		return
+	}
+	for i, o := range refused {
+		if i == maxRefusedNotes {
+			note("publication_refused", session, fmt.Sprintf("%d more refused outputs in the outbox", len(refused)-i), "each stays owed and is retried")
+			return
+		}
+		r := o.Refused
+		detail := fmt.Sprintf("%s: the relay refused %d attempt(s), last with %q; next try %s", o.Key, r.Attempts, r.Reason, time.Unix(r.NextTry, 0).UTC().Format(time.RFC3339))
+		see := "check the session in the terminal"
+		if rest, ok := strings.CutPrefix(o.Key, "row/"); ok {
+			ref, _, _ := strings.Cut(rest, "/")
+			see = "see the request's state with `amq-remote status " + ref + "` or in the terminal"
+		}
+		note("publication_refused", session, detail, "the output stays owed and is retried; "+see+". Do not send the message again from Buzz: that would run the request a second time")
+	}
 }
 
 // amqRouteDetail reports why other agents cannot route to the endpoint

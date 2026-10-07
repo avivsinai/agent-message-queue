@@ -26,6 +26,7 @@ and never from its own environment.
   receipts/<ref>.json    extension -> adapter: admission proof
   events/<ref>.jsonl     extension -> adapter: lifecycle and terminal evidence
   answers/<hash>.json    adapter -> extension: one tool-approval answer (revision 4)
+  activity/<session_id>.jsonl  extension -> adapter: whole-session activity
   bridge.liveness        extension -> adapter: heartbeat
 ```
 
@@ -166,6 +167,24 @@ A missing events file means "no events yet", never an error. The adapter
 reads only the current file, so rotating or truncating it loses history but
 never fabricates a state.
 
+## `activity/<session_id>.jsonl`
+
+The extension records the whole pi session, not only remote requests, for the
+relay's read-only session panel. `<session_id>` is pi's own session id. One
+JSON object per line: `protocol`, `seq`, `at`, `session` (the same session
+id), `turn`, `kind`, and optional
+`id`, `text`, `tool`, `status`. `kind` is `turn_start`, `turn_end`, `user`,
+`assistant`, `tool_start`, or `tool_end`. Messages are whole, never deltas.
+`text` is at most 48000 bytes; a longer tool result is cut and ends with
+`[truncated]`. The extension truncates the file when it passes 4 MiB.
+
+The adapter tails the file from its end when it starts observing, reads it
+only as a regular file in a plain `activity/` directory (never through a
+symlink), skips lines that do not parse, carry another protocol, or name
+another session, and never writes it. A bridge
+without this file simply exports no activity. The stream is evidence of
+nothing: it never decides a request outcome.
+
 ## `bridge.liveness`
 
 ```json
@@ -191,9 +210,8 @@ writes `live: false`, so the adapter sees the bridge offline at once.
 may also publish `upgrade`, its own remedy for an owner whose bridge is too
 old (for example the command that updates the pi build that ships it). The
 adapter shows it, bounded, in the refusal instead of this repository's install
-line. From revision
-4 the record also carries `session_id` (see
-[Session identity](#session-identity)).
+line. The record may also carry `session_id` (see
+[Session identity](#session-identity)); from revision 4 it must.
 
 ## Bridge revision
 
@@ -245,7 +263,7 @@ revision.
 
 ## Bridge revision 4: tool approval
 
-Revision 4 is revision 3 plus a session identity in liveness and one seam:
+Revision 4 is revision 3 plus a required session identity in liveness and one seam:
 the extension raises a tool approval under a ref it owns, and the adapter
 answers it from a remote face. Nothing in
 revision 3 changes, and the protocol string stays `amq:pi-bridge:v1`.
@@ -257,13 +275,15 @@ in this repository is revision 3.
 
 ### Session identity
 
-A revision-4 liveness record carries `session_id`: pi's own session id, from
+A liveness record may carry `session_id`, and a revision-4 record must: pi's
+own session id, from
 `ctx.sessionManager.getSessionId()`. It stays the same across a reload and a
 compaction, and it changes on a new session and on a fork. It matches
 `^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$`, at most 128 characters. The
 adapter reports it as the target's native session id, which a relay share
 pins; without a live record carrying a valid `session_id` the adapter reports
-none, and a share that needs one is refused.
+none, and a share that needs one is refused. The reference extension in this
+repository publishes it.
 
 ### Interaction lines
 

@@ -326,7 +326,10 @@ func writeSteerOnce(claim steerClaim, eventID, text string, mayWrite func() bool
 	if len(data) > format.MaxMessageSize {
 		return Delivery{}, fmt.Errorf("steer exceeds the maximum AMQ message size")
 	}
-	if _, err := fsq.DeliverToInboxes(root, []string{claim.Handle}, name, data); err != nil {
+	if err := completeMailbox(root, claim.Handle); err != nil {
+		return Delivery{}, err
+	}
+	if _, err := fsq.DeliverToExistingInbox(root, claim.Handle, name, data); err != nil {
 		var uncertain *fsq.CommittedDurabilityError
 		if !errors.As(err, &uncertain) {
 			return Delivery{}, err

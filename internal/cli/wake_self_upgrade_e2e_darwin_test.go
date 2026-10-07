@@ -15,8 +15,8 @@ import (
 )
 
 func TestDarwinWakeSelfUpgradeRealPTYStableSymlink(t *testing.T) {
-	if testing.Short() {
-		t.Skip("real Darwin PTY self-upgrade E2E")
+	if os.Getenv(wakeSelfUpgradePTYLiveEnv) != "1" {
+		t.Skip(wakeSelfUpgradePTYLiveSkip)
 	}
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	stable, oldBinary, newBinary, root, oldVersion, newVersion := prepareWakeSelfUpgradeE2E(t)
