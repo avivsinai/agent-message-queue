@@ -97,7 +97,7 @@ func VerifyDMMembership(ctx context.Context, conn *relay.Conn, relaySelf string,
 			}
 			done = true
 		case <-sub.Done():
-			return fmt.Errorf("%w: membership read ended: %v", ErrMembership, sub.Err())
+			return fmt.Errorf("%w: membership read ended: %w", ErrMembership, sub.Err())
 		case <-ctx.Done():
 			return fmt.Errorf("%w: membership read timed out", ErrMembership)
 		}

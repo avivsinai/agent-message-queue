@@ -542,7 +542,7 @@ func (ds *dmShare) serveDM(ctx context.Context, conn *relay.Conn, edges *dmEdges
 		case <-ctx.Done():
 			return nil
 		case err := <-changed:
-			return fmt.Errorf("%w: %v", errMembershipChanged, err)
+			return fmt.Errorf("%w: %w", errMembershipChanged, err)
 		case <-sub.Done():
 			return fmt.Errorf("dm subscription ended: %w", sub.Err())
 		case evt := <-sub.Events:
