@@ -25,7 +25,7 @@ not write is left unchanged.
 The import file is "AMQ Remote.agent.json" in the current directory, or --out.
 Import it in Buzz Desktop, then Start; turn on Auto-start. A Desktop that is
 open sees a new harness after Settings, Agents, Check again. Then run
-/amq-remote in a session.
+/amq-remote in a Claude Code session, or $amq-remote in Codex.
 `
 
 const (
@@ -132,7 +132,7 @@ func runSetup(args []string) int {
 func setupSteps(snapshotPath string) string {
 	return fmt.Sprintf("In Buzz Desktop: if AMQ Remote is new and Desktop was open, click Settings, then Agents, then Check again. "+
 		"Then Agents, then + then Import, pick %s, then Start. Turn on Auto-start in the agent's menu so it starts with Desktop. "+
-		"Then run /amq-remote in a session.\n", snapshotPath)
+		"Then run /amq-remote in a Claude Code session, or $amq-remote in Codex.\n", snapshotPath)
 }
 
 func remoteHarness(command string) buzzHarness {

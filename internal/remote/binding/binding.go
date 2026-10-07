@@ -99,7 +99,7 @@ func (b Binding) Valid() error {
 }
 
 // ErrNone is returned when no session is bound.
-var ErrNone = errors.New("no session is bound; run /amq-remote in a session")
+var ErrNone = errors.New("no session is bound; run /amq-remote (Claude Code) or $amq-remote (Codex) in a session")
 
 // Path is the binding file: $AMQ_REMOTE_BINDING, or ~/.amq/remote/binding.json.
 func Path() (string, error) {

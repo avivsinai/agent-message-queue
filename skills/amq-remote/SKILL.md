@@ -1,7 +1,7 @@
 ---
 name: amq-remote
 version: 0.89.1 # x-release-please-version
-description: Let the owner reach this running agent from Buzz, on the phone or in Buzz Desktop. Use when the user types /amq-remote, /amq-remote --native, /amq-remote off, or /amq-remote status, or asks to control this session from Buzz. Not for AMQ messaging between agents (use amq-cli).
+description: Let the owner reach this running agent from Buzz, on the phone or in Buzz Desktop. Use when the user types /amq-remote (Claude Code) or $amq-remote (Codex), /amq-remote --native, /amq-remote off, or /amq-remote status, or asks to control this session from Buzz. Not for AMQ messaging between agents (use amq-cli).
 metadata:
   short-description: Reach this agent from Buzz
   compatibility: claude-code, codex-cli
@@ -12,6 +12,12 @@ metadata:
 `/amq-remote` gives this session its own Buzz agent, "AMQ: <name>", with its
 own DM. The owner DMs that agent from the Buzz phone app or Buzz Desktop.
 Several sessions can be connected at once; each has its own agent.
+
+In Codex the skill is invoked as `$amq-remote` (Codex does not register `/`
+commands for skills); the commands below are the same. Codex runs sandboxed:
+attach writes `~/.amq/remote`, so the first attach may be refused until the
+user reruns it with approval — ask for that one approval, do not work around
+it.
 
 - **Default (AMQ mailbox).** Each DM arrives as an AMQ message from `buzz` in
   this agent's inbox. This agent answers with `amq reply --id <id>`, and that
