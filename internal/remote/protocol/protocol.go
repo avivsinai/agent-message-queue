@@ -411,20 +411,24 @@ type Evidence struct {
 
 // Session is the projection of one registered runtime.
 type Session struct {
-	Schema             string       `json:"schema"`
-	TargetID           string       `json:"target_id"`
-	Epoch              string       `json:"epoch"`
-	Harness            string       `json:"harness"`
-	DisplayName        string       `json:"display_name,omitempty"`
-	Host               string       `json:"host,omitempty"`
-	Project            string       `json:"project,omitempty"`
-	Attachment         string       `json:"attachment"`
-	Status             string       `json:"status"`
-	PendingInteraction *string      `json:"pending_interaction,omitempty"`
-	ActiveRequestRef   *string      `json:"active_request_ref,omitempty"`
-	Capabilities       Capabilities `json:"capabilities"`
-	Evidence           *Evidence    `json:"evidence,omitempty"`
-	ObservedAt         string       `json:"observed_at"`
+	Schema             string  `json:"schema"`
+	TargetID           string  `json:"target_id"`
+	Epoch              string  `json:"epoch"`
+	Harness            string  `json:"harness"`
+	DisplayName        string  `json:"display_name,omitempty"`
+	Host               string  `json:"host,omitempty"`
+	Project            string  `json:"project,omitempty"`
+	Attachment         string  `json:"attachment"`
+	Status             string  `json:"status"`
+	PendingInteraction *string `json:"pending_interaction,omitempty"`
+	ActiveRequestRef   *string `json:"active_request_ref,omitempty"`
+	// ApprovalReviewer names the harness's own automatic reviewer of tool
+	// approvals, which answers them before any client sees them. Empty
+	// when approvals go to the user or the harness does not say.
+	ApprovalReviewer string       `json:"approval_reviewer,omitempty"`
+	Capabilities     Capabilities `json:"capabilities"`
+	Evidence         *Evidence    `json:"evidence,omitempty"`
+	ObservedAt       string       `json:"observed_at"`
 }
 
 // Refusal is a typed protocol-level refusal. It carries the code a client can

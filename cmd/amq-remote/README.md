@@ -486,6 +486,13 @@ With a relay configured, doctor also reports each share's connection state
 as `serve` last wrote it (`auth_pending`, `authenticated` or `unavailable`),
 its DM surface under `commands`, and its `presence` and `discovery`.
 
+A Codex target with `approve` whose thread runs Codex's automatic approvals
+reviewer (`approvals_reviewer` `auto_review` or `guardian_subagent`) is
+listed under `approval_reviewer`: that reviewer answers the thread's
+approvals before a remote client sees them. It is the owner's setting, so
+doctor reports it and does not fail. A new thread started with
+`approvals_reviewer = "user"` sends its approvals to Buzz.
+
 `failing` lists each broken boundary with a subject, the detail, and a
 remedy. Doctor exits 6 exactly when `failing` is not empty.
 
