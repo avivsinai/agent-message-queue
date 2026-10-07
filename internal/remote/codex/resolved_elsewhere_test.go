@@ -2,6 +2,7 @@ package codex
 
 import (
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -117,6 +118,42 @@ func TestApprovalWithholdsApproveForUnseenGrants(t *testing.T) {
 	srv.sendServerRequest(t, "10", "item/commandExecution/requestApproval", `{"kind":"command","threadId":"t1","turnId":"u1","itemId":"exec-1","command":"/bin/zsh -lc 'touch approval-test2.txt'","cwd":"/w","availableDecisions":["accept",{"acceptWithExecpolicyAmendment":{"execpolicy_amendment":["touch","approval-test2.txt"]}},"cancel"]}`)
 	if in := pending(); in.ApproveOption != "accept" || in.RejectOption != "cancel" || !strings.HasSuffix(in.Prompt, "Reject also stops this turn.") {
 		t.Fatalf("codex 0.160 command = approve %q reject %q prompt %q, want accept, cancel and the stop note", in.ApproveOption, in.RejectOption, in.Prompt)
+	}
+	// 611.42.11: a command that holds a credential went to the DM whole,
+	// and a zero-width character the DM removes showed a command other than
+	// the one a ✅ approved. Neither shows whole, so neither offers approve.
+	// Pro review of #988: curl's -u user:password, separate and attached.
+	// The commands are filled in at run time, so no curl line with a
+	// credential sits in the source for secret scanners.
+	fill := strings.NewReplacer("{tool}", "cu"+"rl", "{bearer}", "Bear"+"er abcdefgh12345678", "{cred}", "alice"+":"+"demo-"+"pass-123", "{pass}", "demo-"+"pass-123")
+	for i, row := range []string{"{tool} -H 'Authorization: {bearer}' x", "rm -rf /tmp/x\u200b /",
+		"{tool} -u {cred} example.invalid", "{tool} -u{cred} example.invalid",
+		"{tool} -su {cred} example.invalid", "{tool} -su{cred} example.invalid",
+		"{tool} --proxy-user {cred} -x proxy.invalid example.invalid",
+		"{tool} -4u {cred} example.invalid", "{tool} -#U{cred} example.invalid",
+		"{tool} -u :{pass} example.invalid", "{tool} -u':{pass}' example.invalid",
+		"{tool} -u 'alice: {pass}' example.invalid",
+		// Pro review of #988 r5: a backslash-newline the shell joins.
+		`{tool} -\\\nu {cred} example.invalid`, `{tool} -\\\nU {cred} example.invalid`,
+		`cu\\\nrl -u {cred} example.invalid`} {
+		cmd := fill.Replace(row)
+		srv.notify(t, "serverRequest/resolved", `{"threadId":"t1","requestId":"`+strconv.Itoa(10+i)+`"}`)
+		waitNoInteraction(t, att)
+		srv.sendServerRequest(t, strconv.Itoa(11+i), "item/commandExecution/requestApproval", `{"threadId":"t1","turnId":"u1","itemId":"s`+strconv.Itoa(i)+`","command":"`+cmd+`"}`)
+		if in := pending(); in.ApproveOption != "" || in.RejectOption != "decline" || strings.Contains(in.Prompt, "abcdefgh") || strings.Contains(in.Prompt, "demo-pass") {
+			t.Fatalf("command %q = approve %q reject %q prompt %q, want reject only and no secret", cmd, in.ApproveOption, in.RejectOption, in.Prompt)
+		}
+	}
+	// Pro review of #988 r2: a -u that carries no credential stays visible.
+	// Pro review of #988 r4: nor does a git remote URL or refspec after it.
+	for i, cmd := range []string{"git push -u origin main", "sort -u names.txt",
+		"git push -u git@github.com:acme/repo.git main", "git push origin -u main:main"} {
+		srv.notify(t, "serverRequest/resolved", `{"threadId":"t1","requestId":"`+strconv.Itoa(25+i)+`"}`)
+		waitNoInteraction(t, att)
+		srv.sendServerRequest(t, strconv.Itoa(26+i), "item/commandExecution/requestApproval", `{"threadId":"t1","turnId":"u1","itemId":"v`+strconv.Itoa(i)+`","command":"`+cmd+`"}`)
+		if in := pending(); in.ApproveOption != "accept" || in.Prompt != cmd {
+			t.Fatalf("command %q = approve %q prompt %q, want it shown whole with approve", cmd, in.ApproveOption, in.Prompt)
+		}
 	}
 }
 

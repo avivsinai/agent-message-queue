@@ -1544,7 +1544,15 @@ func (a *Attachment) onServerRequest(req ServerRequest) {
 	if reject == "" {
 		reject = offered(options, "cancel")
 	}
-	prompt := approvalPrompt(req.Method, p.Command, p.Cwd, p.Reason)
+	// The DM shows the display form, so that form is screened too, and an
+	// approval that may hold a secret shows only that it waits (611.42.11).
+	// Approve needs the shown text to be what runs.
+	raw := approvalPrompt(req.Method, p.Command, p.Cwd, p.Reason)
+	prompt := secretscan.DisplayForm(raw)
+	shownWhole := prompt == raw
+	if secretscan.MayHold(raw) || secretscan.MayHold(prompt) {
+		prompt, shownWhole = "Codex asks for approval; it may hold a secret, so only the terminal shows it.", false
+	}
 	if reject == "cancel" {
 		prompt += "\nReject also stops this turn."
 	}
@@ -1555,7 +1563,7 @@ func (a *Attachment) onServerRequest(req ServerRequest) {
 	approve := ""
 	if _, isText := p.Command.(string); req.Method == methodCommandApproval && isText &&
 		(p.Kind == "" || p.Kind == "command") && p.GrantRoot == "" && isAbsent(p.NetworkContext) && isAbsent(p.AdditionalPermissions) &&
-		len(prompt) <= protocol.MaxApprovalPreview {
+		shownWhole && len(prompt) <= protocol.MaxApprovalPreview {
 		approve = offered(options, "accept")
 	}
 	a.raiseApproval(p.TurnID, req.ID, &protocol.Interaction{InteractionID: id, Kind: "approval", Prompt: prompt, Options: options,
