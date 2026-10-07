@@ -120,6 +120,70 @@ func TestApprovalWithholdsApproveForUnseenGrants(t *testing.T) {
 	}
 }
 
+// agent-message-queue-611.42.8 (Pro review of #969): permission, user-input
+// and MCP elicitation requests were dropped, so a DM turn waited for a
+// terminal answer the owner never saw. The DM shows what is asked, bounded,
+// with no one-tap answer, and the terminal's answer clears it.
+func TestTerminalOnlyRequestsShowInTheDM(t *testing.T) {
+	sock, srv := startFakeAppServer(t)
+	att, err := Attach(sock, "t1", WithApprovals(true))
+	if err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	t.Cleanup(func() { _ = att.Close() })
+	<-srv.calls // initialize
+	<-srv.calls // thread/resume
+	s := att.Inspect()
+	key := requests.Key{CreatorHost: "local", TargetID: s.TargetID, RequestID: "11111111-1111-4111-8111-111111111446"}
+	done := make(chan error, 1)
+	go func() {
+		_, err := att.Submit(core.BoundRequest{Key: key, Epoch: s.Epoch, Input: protocol.SubmitInput{Text: "ask me"}})
+		done <- err
+	}()
+	<-srv.calls // turn/start
+	srv.notify(t, "turn/started", `{"threadId":"t1","turn":{"id":"u1"}}`)
+	srv.notify(t, "item/started", `{"threadId":"t1","turnId":"u1","item":{"type":"userMessage","id":"i1","clientId":"`+clientIDFor(key)+`","content":[]}}`)
+	if err := <-done; err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	// Payloads follow the Codex 0.160.1 generated JSON schema, not a live
+	// capture.
+	long := strings.Repeat("x", protocol.MaxApprovalPreview)
+	for _, tc := range []struct{ reqID, method, params, wantID, wantPrompt string }{
+		{"20", "item/permissions/requestApproval",
+			`{"threadId":"t1","turnId":"u1","itemId":"perm1","cwd":"/w","startedAtMs":1,"reason":"write the cache","permissions":{"fileSystem":{"entries":[{"access":"write","path":{"type":"path","path":"/w/.cache"}}]},"network":{"enabled":true}}}`,
+			"perm1", "Codex asks for permissions:\nwrite /w/.cache\nnetwork\nin /w\nreason: write the cache"},
+		{"21", "item/tool/requestUserInput",
+			`{"threadId":"t1","turnId":"u1","itemId":"ask1","isBlocking":true,"questions":[{"id":"q1","header":"Branch","question":"Which branch?","options":[{"label":"main","description":"default"}]}]}`,
+			"ask1", "Codex asks for input:\nBranch: Which branch?"},
+		{"22", "mcpServer/elicitation/request",
+			`{"threadId":"t1","turnId":"u1","serverName":"docs","mode":"form","message":"Pick a space ` + long + `","requestedSchema":{"type":"object","properties":{}}}`,
+			"22", "MCP server docs asks: Pick a space x"},
+		// Pro review of #985: an asked text that echoes a credential.
+		{"23", "mcpServer/elicitation/request",
+			`{"threadId":"t1","turnId":"u1","serverName":"docs","mode":"form","message":"Confirm Authorization: Bearer abcdefgh12345678","requestedSchema":{"type":"object","properties":{}}}`,
+			"23", "An MCP server asks for input; it may hold a secret, so only the terminal shows it."},
+		// Pro review of #985 r2: a zero-width space the DM removes hid the
+		// credential from the screen.
+		{"24", "mcpServer/elicitation/request",
+			`{"threadId":"t1","turnId":"u1","serverName":"docs","mode":"form","message":"Confirm Bearer\u200b abcdefgh12345678","requestedSchema":{"type":"object","properties":{}}}`,
+			"24", "An MCP server asks for input; it may hold a secret, so only the terminal shows it."},
+	} {
+		srv.sendServerRequest(t, tc.reqID, tc.method, tc.params)
+		waitInteraction(t, att, key)
+		att.mu.Lock()
+		in := *att.runs[key].interaction
+		att.mu.Unlock()
+		if in.InteractionID != tc.wantID || in.Kind != "approval" || !in.RemoteAnswer || len(in.Options) != 0 ||
+			in.ApproveOption != "" || in.RejectOption != "" ||
+			!strings.HasPrefix(in.Prompt, tc.wantPrompt) || len(in.Prompt) > protocol.MaxApprovalPreview+len(" …[shortened]") {
+			t.Fatalf("%s interaction = %+v, want %s shown with no answer option and prompt %q, bounded", tc.method, in, tc.wantID, tc.wantPrompt)
+		}
+		srv.notify(t, "serverRequest/resolved", `{"threadId":"t1","requestId":"`+tc.reqID+`"}`)
+		waitNoInteraction(t, att)
+	}
+}
+
 // PR #919 review round 2: a second approval replaced a pending one, and the
 // first one's resolution then cleared the second at the endpoint, which
 // holds one pending interaction. Approvals are reported one at a time: the
