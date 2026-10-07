@@ -126,7 +126,9 @@ func TestApprovalWithholdsApproveForUnseenGrants(t *testing.T) {
 	for i, cmd := range []string{`curl -H 'Authorization: Bearer abcdefgh12345678' x`, "rm -rf /tmp/x\u200b /",
 		"curl -u alice:demo-pass-123 example.invalid", "curl -ualice:demo-pass-123 example.invalid",
 		"curl -su alice:demo-pass-123 example.invalid", "curl -sualice:demo-pass-123 example.invalid",
-		"curl --proxy-user alice:demo-pass-123 -x proxy.invalid example.invalid"} {
+		"curl --proxy-user alice:demo-pass-123 -x proxy.invalid example.invalid",
+		"curl -4u alice:demo-pass-123 example.invalid", "curl -#Ualice:demo-pass-123 example.invalid",
+		"curl -u :demo-pass-123 example.invalid", "curl -u':demo-pass-123' example.invalid"} {
 		srv.notify(t, "serverRequest/resolved", `{"threadId":"t1","requestId":"`+strconv.Itoa(10+i)+`"}`)
 		waitNoInteraction(t, att)
 		srv.sendServerRequest(t, strconv.Itoa(11+i), "item/commandExecution/requestApproval", `{"threadId":"t1","turnId":"u1","itemId":"s`+strconv.Itoa(i)+`","command":"`+cmd+`"}`)
@@ -136,9 +138,9 @@ func TestApprovalWithholdsApproveForUnseenGrants(t *testing.T) {
 	}
 	// Pro review of #988 r2: a -u that carries no credential stays visible.
 	for i, cmd := range []string{"git push -u origin main", "sort -u names.txt"} {
-		srv.notify(t, "serverRequest/resolved", `{"threadId":"t1","requestId":"`+strconv.Itoa(17+i)+`"}`)
+		srv.notify(t, "serverRequest/resolved", `{"threadId":"t1","requestId":"`+strconv.Itoa(21+i)+`"}`)
 		waitNoInteraction(t, att)
-		srv.sendServerRequest(t, strconv.Itoa(18+i), "item/commandExecution/requestApproval", `{"threadId":"t1","turnId":"u1","itemId":"v`+strconv.Itoa(i)+`","command":"`+cmd+`"}`)
+		srv.sendServerRequest(t, strconv.Itoa(22+i), "item/commandExecution/requestApproval", `{"threadId":"t1","turnId":"u1","itemId":"v`+strconv.Itoa(i)+`","command":"`+cmd+`"}`)
 		if in := pending(); in.ApproveOption != "accept" || in.Prompt != cmd {
 			t.Fatalf("command %q = approve %q prompt %q, want it shown whole with approve", cmd, in.ApproveOption, in.Prompt)
 		}
