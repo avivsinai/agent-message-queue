@@ -152,8 +152,28 @@ const (
 var codexEmbeddedOptions = map[string]bool{
 	"--no-daemon": true, "--oss": true, "-p": true, "--profile": true, "--search": true,
 	"--approve-for-me": true, "--not-so-yolo": true, "--strict-config": true,
-	"--dangerously-bypass-hook-trust": true, "--remote": true, "--remote-auth-token-env": true,
+	"--dangerously-bypass-hook-trust": true,
 }
+
+// codexValueOptions take a value (tui/src/cli.rs, utils/cli shared_options.rs
+// and config_override.rs); codexFlagOptions take none. Any other option, -i
+// (one or more values), and --remote (an app-server AMQ does not see) leave
+// the backend unknown.
+var (
+	codexValueOptions = map[string]bool{
+		"-m": true, "--model": true, "-a": true, "--ask-for-approval": true, "-s": true, "--sandbox": true,
+		"-C": true, "--cd": true, "--add-dir": true, "-p": true, "--profile": true, "--local-provider": true,
+		"-c": true, "--config": true, "--enable": true, "--disable": true,
+	}
+	codexFlagOptions = map[string]bool{
+		"--no-alt-screen": true, "--yolo": true, "--dangerously-bypass-approvals-and-sandbox": true,
+	}
+	// codexGatingFeatures decide the backend or the daemon path; an override
+	// of one on the command line is not in the effective-feature probe.
+	codexGatingFeatures = map[string]bool{
+		"daemon_auto_start": true, "bedrock_setup_wizard": true, "terminal_visualization_instructions": true,
+	}
+)
 
 // codexDaemonFeatures are the features a -c, --enable or --disable may set
 // with the TUI still on the daemon (codex-cli 0.160 daemon_startup.rs:84-105).
@@ -188,35 +208,59 @@ func codexConfigKeepsDaemon(flag, value string) (keeps, known bool) {
 // codexLaunchBackend reports where a Codex TUI started with args in wd runs
 // (codex-cli 0.160 tui/src/startup_orchestration.rs:176-540), with the
 // effective features for its directory. A Codex that reports no
-// daemon_auto_start feature predates the daemon and runs embedded.
+// daemon_auto_start feature predates the daemon and runs embedded; a
+// failed feature probe establishes nothing.
 func codexLaunchBackend(cmdName string, args []string, wd, codexHome string) (codexBackend, map[string]bool) {
 	for _, key := range []string{"CODEX_EXEC_SERVER_URL", "OPENAI_FEDERATION_RULE_ID", "OPENAI_IDENTITY_TOKEN_FILE"} {
 		if _, set := os.LookupEnv(key); set {
 			return codexEmbedded, nil
 		}
 	}
-	unclassified := false
-	for i, arg := range args {
-		flag, value, inline := strings.Cut(arg, "=")
+	unknown := false
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--" {
+			break // the rest is the prompt
+		}
+		if !strings.HasPrefix(args[i], "-") {
+			continue // a positional prompt
+		}
+		flag, value, inline := strings.Cut(args[i], "=")
 		if codexEmbeddedOptions[flag] {
 			return codexEmbedded, nil
+		}
+		if codexFlagOptions[flag] && !inline {
+			continue
+		}
+		if !codexValueOptions[flag] {
+			return codexBackendUnknown, nil
+		}
+		if !inline {
+			if i+1 >= len(args) {
+				return codexBackendUnknown, nil
+			}
+			i++
+			value = args[i]
 		}
 		if flag != "-c" && flag != "--config" && flag != "--enable" && flag != "--disable" {
 			continue
 		}
-		if !inline && i+1 < len(args) {
-			value = args[i+1]
+		feature := strings.TrimSpace(value)
+		if flag == "-c" || flag == "--config" {
+			key, _, _ := strings.Cut(value, "=")
+			feature = strings.TrimPrefix(strings.TrimSpace(key), "features.")
 		}
 		keeps, known := codexConfigKeepsDaemon(flag, value)
-		if known && !keeps {
+		switch {
+		case codexGatingFeatures[feature] || !known:
+			unknown = true
+		case !keeps:
 			return codexEmbedded, nil
 		}
-		unclassified = unclassified || !known
 	}
 	dir := codexLaunchDir(args, wd)
 	features, err := codexEffectiveFeatures(cmdName, dir)
 	if err != nil {
-		return codexEmbedded, nil
+		return codexBackendUnknown, nil
 	}
 	if _, daemon := features["daemon_auto_start"]; !daemon {
 		return codexEmbedded, features
@@ -224,7 +268,7 @@ func codexLaunchBackend(cmdName string, args []string, wd, codexHome string) (co
 	// With bedrock_setup_wizard on, a signed-out TUI runs embedded even when
 	// a daemon runs (startup_orchestration.rs:494-519, lib.rs:2305-2323);
 	// AMQ does not read the sign-in state.
-	if unclassified || features["bedrock_setup_wizard"] {
+	if unknown || features["bedrock_setup_wizard"] {
 		return codexBackendUnknown, features
 	}
 	if _, err := codex.ControlSocket(codexHome); err != nil && !features["daemon_auto_start"] {
@@ -238,6 +282,9 @@ func codexLaunchBackend(cmdName string, args []string, wd, codexHome string) (co
 func codexLaunchDir(args []string, wd string) string {
 	dir := wd
 	for i, arg := range args {
+		if arg == "--" {
+			break
+		}
 		flag, value, inline := strings.Cut(arg, "=")
 		if flag != "-C" && flag != "--cd" {
 			continue

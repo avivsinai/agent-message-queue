@@ -144,6 +144,9 @@ func TestCodexDaemonThreadDir(t *testing.T) {
 //   - Review of #975 r2-r3 (Pro): bedrock_setup_wizard makes the backend
 //     depend on sign-in, and a daemon that refuses the thread still runs
 //     the TUI; neither may start the watcher.
+//   - Review of #975 r4 (Pro): a command-line override of a gating feature,
+//     --remote, a failed feature probe, and an option after "--" (a prompt)
+//     do not establish an embedded Codex.
 func TestCodexNamingFollowsWhereCodexRuns(t *testing.T) {
 	const plain = "daemon_auto_start x true\nbedrock_setup_wizard x false\nterminal_visualization_instructions x false\n"
 	for name, tc := range map[string]struct {
@@ -165,12 +168,16 @@ func TestCodexNamingFollowsWhereCodexRuns(t *testing.T) {
 			writeCodexConfig(t, codexHome, "[projects.\""+main+"\"]\ntrust_level = \"trusted\"\n")
 			return worktree
 		}, false},
-		"terminal instructions on":  {"daemon_auto_start x true\nbedrock_setup_wizard x false\nterminal_visualization_instructions x true\n", true, nil, nil, false},
-		"bedrock wizard on":         {"daemon_auto_start x true\nbedrock_setup_wizard x true\nterminal_visualization_instructions x false\n", true, nil, nil, false},
-		"daemon refuses the thread": {plain, true, nil, nil, false},
-		"no daemon, auto-start on":  {plain, false, nil, nil, false},
-		"no daemon, auto-start off": {"daemon_auto_start x false\nbedrock_setup_wizard x false\n", false, nil, nil, true},
-		"embedded by a -c override": {plain, true, []string{"-c", "approvals_reviewer=user"}, nil, true},
+		"terminal instructions on":               {"daemon_auto_start x true\nbedrock_setup_wizard x false\nterminal_visualization_instructions x true\n", true, nil, nil, false},
+		"bedrock wizard on":                      {"daemon_auto_start x true\nbedrock_setup_wizard x true\nterminal_visualization_instructions x false\n", true, nil, nil, false},
+		"daemon refuses the thread":              {plain, true, nil, nil, false},
+		"no daemon, auto-start on":               {plain, false, nil, nil, false},
+		"no daemon, auto-start off":              {"daemon_auto_start x false\nbedrock_setup_wizard x false\n", false, nil, nil, true},
+		"embedded by a -c override":              {plain, true, []string{"-c", "approvals_reviewer=user"}, nil, true},
+		"auto-start enabled on the command line": {"daemon_auto_start x false\nbedrock_setup_wizard x false\n", false, []string{"--enable", "daemon_auto_start"}, nil, false},
+		"remote app-server":                      {plain, true, []string{"--remote", "ws://127.0.0.1:1"}, nil, false},
+		"feature probe fails":                    {"exit 1", true, nil, nil, false},
+		"option text after --":                   {plain, true, []string{"--", "--no-daemon"}, nil, false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			codexHome, contacts := t.TempDir(), new(atomic.Int32)
@@ -185,6 +192,9 @@ func TestCodexNamingFollowsWhereCodexRuns(t *testing.T) {
 			}
 			bin := filepath.Join(t.TempDir(), "codex")
 			script := "#!/bin/sh\n[ \"$1 $2\" = \"features list\" ] && printf '" + strings.ReplaceAll(tc.features, "\n", "\\n") + "'\n"
+			if tc.features == "exit 1" {
+				script = "#!/bin/sh\nexit 1\n"
+			}
 			if err := os.WriteFile(bin, []byte(script), 0o700); err != nil {
 				t.Fatal(err)
 			}
