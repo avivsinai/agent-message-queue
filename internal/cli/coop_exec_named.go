@@ -343,7 +343,7 @@ func codexLaunchDir(args []string, wd string) string {
 // which the caller then names that way. Otherwise naming is settled here:
 // the thread is named, or AMQ says once why it is not and args are the
 // user's unchanged.
-func startCodexOnNamedDaemonThread(cmdName string, agentArgs []string, name string) (args []string, done bool) {
+func startCodexOnNamedDaemonThread(cmdName string, agentArgs []string, name string, record func(thread string) error) (args []string, done bool) {
 	if launch.ProviderForExecutable(cmdName) != launch.CodexProvider {
 		return nil, false
 	}
@@ -395,11 +395,20 @@ func startCodexOnNamedDaemonThread(cmdName string, agentArgs []string, name stri
 		// TUI's own start keeps.
 		return report("no Codex daemon is running yet; this Codex starts one, so the next launch is named")
 	}
+	// Tool commands of a daemon thread run in the daemon's environment, not
+	// the TUI's, so the thread is handed to the TUI only with its AMQ
+	// identity recorded (agent-message-queue-611.61).
+	if record == nil {
+		return report("AMQ cannot record this session's identity for Codex tool commands")
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), codexDaemonNamingTimeout)
 	defer cancel()
 	id, err := codex.StartNamedThread(ctx, sock, cwd, name)
 	if err != nil {
 		return report("Codex daemon: " + err.Error())
+	}
+	if err := record(id); err != nil {
+		return report("AMQ could not record this session's identity for Codex tool commands: " + err.Error())
 	}
 	_ = writeStderr("named %s\n", name)
 	return append([]string{"resume", id}, agentArgs...), true
@@ -516,6 +525,7 @@ func applyCoopNamedBeforeExecAt(
 	agentArgs []string,
 	name string,
 	execStart time.Time,
+	record func(thread string) error,
 ) ([]string, error) {
 	if !named.enabled {
 		return agentArgs, nil
@@ -527,7 +537,7 @@ func applyCoopNamedBeforeExecAt(
 	case coopNamedModeArgv:
 		return injectCoopNamedArgv(cmdName, agentArgs, name), nil
 	case coopNamedModeTUI:
-		if args, done := startCodexOnNamedDaemonThread(cmdName, agentArgs, name); done {
+		if args, done := startCodexOnNamedDaemonThread(cmdName, agentArgs, name, record); done {
 			return args, nil
 		}
 		if err := startCoopNamedTUIInjector(name, cmdName, execStart); err != nil {

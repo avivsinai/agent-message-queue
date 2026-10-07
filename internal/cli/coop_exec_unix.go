@@ -729,7 +729,7 @@ func runCoopExec(args []string) error {
 	// root has no session prefix and therefore uses only the agent handle.
 	namedLabel := coopNamedSessionLabel(sessionIdentity, agentHandle)
 	execStart := time.Now()
-	agentArgs, err = applyCoopNamedBeforeExecAt(named, binaryPath, agentArgs, namedLabel, execStart)
+	agentArgs, err = applyCoopNamedBeforeExecAt(named, binaryPath, agentArgs, namedLabel, execStart, codexThreadIdentityRecorder(env))
 	if err != nil {
 		return err
 	}
