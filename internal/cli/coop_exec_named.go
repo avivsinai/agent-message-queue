@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -358,6 +359,10 @@ func startCodexOnNamedDaemonThread(cmdName string, agentArgs []string, name stri
 	backend, features := codexLaunchBackend(cmdName, agentArgs, wd, codexHome)
 	report := func(reason string) ([]string, bool) {
 		_ = writeStderr("%s\n", coopNamedTUIManualReminder(name, cmdName, reason))
+		// The TUI may still run on the daemon, whose tool commands carry
+		// no AM_* (agent-message-queue-611.61); amq there then has no
+		// handle and refuses until one is given.
+		_ = writeStderr("warning: amq commands inside this Codex session have no AMQ identity; pass --me %s, or export AM_ROOT and AM_ME in that command\n", strings.TrimPrefix(name, path.Dir(name)+"/"))
 		return agentArgs, true
 	}
 	switch backend {

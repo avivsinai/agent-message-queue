@@ -14,8 +14,9 @@ import (
 // Review of #993 (Pro, P1): the first publication created the store's
 // directories without syncing them into their parents, so a crash could
 // lose a published thread and its commands would fall back to default
-// identity. A directory that cannot be synced into its parent fails the
-// publication.
+// identity. Round 2: a retry after a failed sync skipped it, because the
+// directory then existed. Every publication syncs the store's directories
+// into their parents, so a sync that keeps failing keeps failing it.
 func TestPublishSyncsTheDirectoriesItCreates(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -32,6 +33,9 @@ func TestPublishSyncsTheDirectoriesItCreates(t *testing.T) {
 		Root: filepath.Join(home, "q"), BaseRoot: filepath.Join(home, "q"), Me: "codex", RootID: "r", BaseRootID: "b"}
 	if err := Publish(rec); err == nil {
 		t.Fatal("publication succeeded although the new store directory could not be synced into the home")
+	}
+	if err := Publish(rec); err == nil {
+		t.Fatal("a retry succeeded although the home still could not be synced")
 	}
 	if len(synced) == 0 || synced[0] != home {
 		t.Fatalf("synced %v, want the home synced first", synced)

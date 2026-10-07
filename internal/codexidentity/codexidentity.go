@@ -60,8 +60,8 @@ func ValidThread(id string) bool { return threadRe.MatchString(id) }
 // Publish durably records r, then makes r.Thread the current thread of its
 // (root identity, handle), under the store lock so the record and its
 // current marker change together. Both writes are atomic and synced, and
-// every directory it created is synced into its parent, so a thread is
-// current only after its record is durable. The newest publication for a
+// the store's directories are synced into their parents first, so a thread
+// is current only after its record is durable. The newest publication for a
 // handle wins; a caller publishes a launch's thread once.
 func Publish(r Record) error {
 	r.Schema = schema
@@ -81,6 +81,15 @@ func Publish(r Record) error {
 		return err
 	}
 	return lock.WithExclusiveFileLock(filepath.Join(dir, ".lock"), func() error {
+		// Make every directory of the store durable in its parent on every
+		// publication, not only when this call created it: an earlier
+		// publication may have failed after mkdir, or another may still be
+		// between its mkdir and its sync.
+		for _, d := range []string{filepath.Dir(filepath.Dir(dir)), filepath.Dir(dir), dir} {
+			if err := fsq.SyncDir(d); err != nil {
+				return fmt.Errorf("sync %s: %w", d, err)
+			}
+		}
 		if _, err := fsq.WriteFileAtomic(filepath.Join(dir, "threads"), r.Thread+".json", append(raw, '\n'), 0o600); err != nil {
 			return fmt.Errorf("record the Codex thread identity: %w", err)
 		}
@@ -160,33 +169,25 @@ func currentKey(r Record) string {
 
 // storeDir is $HOME/.amq/codex-threads with its threads/ and current/
 // directories. Every directory below the home must be a plain directory,
-// not a symlink. With create, missing ones are made with mode 0700 and each
-// is synced into its parent before use; without, a missing store returns "".
+// not a symlink. With create, missing ones are made with mode 0700 (Publish
+// then syncs them); without, a missing store returns "".
 func storeDir(create bool) (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-	cur := home
-	for _, part := range []string{".amq", "codex-threads", "threads", "current"} {
-		parent := cur
-		if part == "current" {
-			parent = filepath.Dir(cur)
-		}
-		cur = filepath.Join(parent, part)
+	store := filepath.Join(home, ".amq", "codex-threads")
+	for _, cur := range []string{filepath.Dir(store), store, filepath.Join(store, "threads"), filepath.Join(store, "current")} {
 		fi, err := os.Lstat(cur)
 		if errors.Is(err, os.ErrNotExist) {
 			if !create {
-				if part == "threads" || part == "current" {
-					return filepath.Dir(cur), nil
+				if cur == filepath.Dir(store) || cur == store {
+					return "", nil
 				}
-				return "", nil
+				return store, nil
 			}
 			if err := os.Mkdir(cur, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
 				return "", err
-			}
-			if err := fsq.SyncDir(parent); err != nil {
-				return "", fmt.Errorf("sync %s: %w", parent, err)
 			}
 			fi, err = os.Lstat(cur)
 		}
@@ -197,7 +198,7 @@ func storeDir(create bool) (string, error) {
 			return "", fmt.Errorf("%s is not a plain directory; refusing", cur)
 		}
 	}
-	return filepath.Dir(cur), nil
+	return store, nil
 }
 
 // readStrict decodes a small regular 0600 file at path into v, opened
