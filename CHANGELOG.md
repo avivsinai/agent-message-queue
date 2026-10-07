@@ -8,6 +8,22 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.89.0](https://github.com/avivsinai/agent-message-queue/compare/v0.88.0...v0.89.0) (2026-10-07)
+
+
+### Features
+
+* **remote:** doctor names Codex's automatic approvals reviewer ([#982](https://github.com/avivsinai/agent-message-queue/issues/982)) ([b24b69d](https://github.com/avivsinai/agent-message-queue/commit/b24b69d476670490b0294b0ee2f12acd31103d8b))
+* **remote:** pi targets publish live activity to the Buzz session panel ([#978](https://github.com/avivsinai/agent-message-queue/issues/978)) ([32a78c3](https://github.com/avivsinai/agent-message-queue/commit/32a78c32ac62fc87525a17d72548c689fc4f9fec))
+
+
+### Bug Fixes
+
+* **remote:** a Codex thread with no turn yet says to send one prompt first ([#983](https://github.com/avivsinai/agent-message-queue/issues/983)) ([2c26a10](https://github.com/avivsinai/agent-message-queue/commit/2c26a1096044f87daaf624f4cf192d9a3305d8bc))
+* **remote:** a stored DM row whose relay OK was lost no longer stalls its request ([#984](https://github.com/avivsinai/agent-message-queue/issues/984)) ([ef1934a](https://github.com/avivsinai/agent-message-queue/commit/ef1934ad902d22649fe56b5a6fa990ba127038f4))
+* **remote:** claude hook installers refuse --help instead of running ([#981](https://github.com/avivsinai/agent-message-queue/issues/981)) ([c15fd0a](https://github.com/avivsinai/agent-message-queue/commit/c15fd0a3790233bd677f0d6d15e40c9ee6dea8b9))
+* **remote:** render adapter refusal text inert in the DM ([#972](https://github.com/avivsinai/agent-message-queue/issues/972)) ([0829b92](https://github.com/avivsinai/agent-message-queue/commit/0829b921c3a2ee538f4dfaa347002455fd997d6f))
+
 ## [0.88.0](https://github.com/avivsinai/agent-message-queue/compare/v0.87.0...v0.88.0) (2026-10-07)
 
 
