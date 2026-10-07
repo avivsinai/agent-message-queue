@@ -396,8 +396,8 @@ func startCodexOnNamedDaemonThread(cmdName string, agentArgs []string, name stri
 		return report("no Codex daemon is running yet; this Codex starts one, so the next launch is named")
 	}
 	// Tool commands of a daemon thread run in the daemon's environment, not
-	// the TUI's, so the thread is handed to the TUI only with its AMQ
-	// identity recorded (agent-message-queue-611.61).
+	// the TUI's, so a thread is created only when its AMQ identity can be
+	// recorded (agent-message-queue-611.61).
 	if record == nil {
 		return report("AMQ cannot record this session's identity for Codex tool commands")
 	}
@@ -407,9 +407,9 @@ func startCodexOnNamedDaemonThread(cmdName string, agentArgs []string, name stri
 	if err != nil {
 		return report("Codex daemon: " + err.Error())
 	}
-	if err := record(id); err != nil {
-		return report("AMQ could not record this session's identity for Codex tool commands: " + err.Error())
-	}
+	// The resume arguments go back to coop exec, which records the
+	// identity for this thread before exec and stops the launch if it
+	// cannot (recordResumedCodexThread).
 	_ = writeStderr("named %s\n", name)
 	return append([]string{"resume", id}, agentArgs...), true
 }

@@ -53,7 +53,7 @@ func Run(args []string, version string) error {
 	if cmd == nil {
 		return UsageError("unknown command: %s. Run 'amq --help' for available commands", args[0])
 	}
-	if err := adoptCodexThreadIdentity(); err != nil && !identityRecoveryCommands[args[0]] {
+	if err := adoptCodexThreadIdentity(); err != nil {
 		return err
 	}
 	return cmd.Handler(args[1:])

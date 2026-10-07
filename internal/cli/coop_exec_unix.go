@@ -734,7 +734,9 @@ func runCoopExec(args []string) error {
 	if err != nil {
 		return err
 	}
-	recordResumedCodexThread(binaryPath, agentArgs, recordIdentity)
+	if err := recordResumedCodexThread(binaryPath, agentArgs, recordIdentity); err != nil {
+		return err
+	}
 
 	// Build argv: command name + agent args.
 	argv := append([]string{cmdName}, agentArgs...)

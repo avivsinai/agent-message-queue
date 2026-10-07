@@ -81,7 +81,9 @@ func TestResumedCodexThreadTakesTheSessionIdentity(t *testing.T) {
 	t.Setenv("CODEX_HOME", filepath.Join(t.TempDir(), "codex"))
 	base := secureTempDirForTest(t)
 	const thread = "01a1166e-dd8e-77c0-bc3b-a4b7e24e91a9"
-	recordResumedCodexThread("codex", []string{"resume", thread, "--yolo"}, codexThreadIdentityRecorder(buildCoopExecEnvironment(nil, base, "codex", "")))
+	if err := recordResumedCodexThread("codex", []string{"resume", thread, "--yolo"}, codexThreadIdentityRecorder(buildCoopExecEnvironment(nil, base, "codex", ""))); err != nil {
+		t.Fatal(err)
+	}
 	for _, key := range identityEnvKeys {
 		t.Setenv(key, "")
 		_ = os.Unsetenv(key)
@@ -89,5 +91,15 @@ func TestResumedCodexThreadTakesTheSessionIdentity(t *testing.T) {
 	t.Setenv("CODEX_THREAD_ID", thread)
 	if err := adoptCodexThreadIdentity(); err != nil || os.Getenv(envRoot) != base || os.Getenv(envMe) != "codex" {
 		t.Fatalf("resumed thread: err=%v root=%q me=%q", err, os.Getenv(envRoot), os.Getenv(envMe))
+	}
+}
+
+// Review of #993 (Pro, P1): a record that cannot be written stopped nothing;
+// the launch resumed the thread without an identity.
+func TestUnrecordableThreadStopsTheLaunch(t *testing.T) {
+	err := recordResumedCodexThread("codex", []string{"resume", "01a1166e-dd8e-77c0-bc3b-a4b7e24e91aa"}, func(string) error { return errors.New("disk full") })
+	var mismatch *ExitCodeError
+	if !errors.As(err, &mismatch) || mismatch.Code != ExitContextMismatch {
+		t.Fatalf("record failure: err=%v, want the launch stopped with a context mismatch", err)
 	}
 }

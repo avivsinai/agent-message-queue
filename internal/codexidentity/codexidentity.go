@@ -27,6 +27,7 @@ import (
 	"strings"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/lock"
 )
 
 // Record is the identity coop exec put in the environment of the TUI it
@@ -57,8 +58,11 @@ var threadRe = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]
 func ValidThread(id string) bool { return threadRe.MatchString(id) }
 
 // Publish durably records r, then makes r.Thread the current thread of its
-// (root identity, handle). Both writes are atomic and synced, so a thread is
-// current only after its record exists.
+// (root identity, handle), under the store lock so the record and its
+// current marker change together. Both writes are atomic and synced, and
+// every directory it created is synced into its parent, so a thread is
+// current only after its record is durable. The newest publication for a
+// handle wins; a caller publishes a launch's thread once.
 func Publish(r Record) error {
 	r.Schema = schema
 	if err := r.check(); err != nil {
@@ -72,17 +76,19 @@ func Publish(r Record) error {
 	if err != nil {
 		return err
 	}
-	if _, err := fsq.WriteFileAtomic(filepath.Join(dir, "threads"), r.Thread+".json", append(raw, '\n'), 0o600); err != nil {
-		return fmt.Errorf("record the Codex thread identity: %w", err)
-	}
 	current, err := json.Marshal(currentRecord{Schema: schema, Thread: r.Thread})
 	if err != nil {
 		return err
 	}
-	if _, err := fsq.WriteFileAtomic(filepath.Join(dir, "current"), currentKey(r)+".json", append(current, '\n'), 0o600); err != nil {
-		return fmt.Errorf("record the current Codex thread: %w", err)
-	}
-	return nil
+	return lock.WithExclusiveFileLock(filepath.Join(dir, ".lock"), func() error {
+		if _, err := fsq.WriteFileAtomic(filepath.Join(dir, "threads"), r.Thread+".json", append(raw, '\n'), 0o600); err != nil {
+			return fmt.Errorf("record the Codex thread identity: %w", err)
+		}
+		if _, err := fsq.WriteFileAtomic(filepath.Join(dir, "current"), currentKey(r)+".json", append(current, '\n'), 0o600); err != nil {
+			return fmt.Errorf("record the current Codex thread: %w", err)
+		}
+		return nil
+	})
 }
 
 // Lookup returns the identity recorded for thread under codexHome. It
@@ -152,24 +158,35 @@ func currentKey(r Record) string {
 	return hex.EncodeToString(sum[:16])
 }
 
-// storeDir is $HOME/.amq/codex-threads. Every directory below the home must
-// be a plain directory, not a symlink. With create, missing ones are made
-// with mode 0700; without, a missing store returns "".
+// storeDir is $HOME/.amq/codex-threads with its threads/ and current/
+// directories. Every directory below the home must be a plain directory,
+// not a symlink. With create, missing ones are made with mode 0700 and each
+// is synced into its parent before use; without, a missing store returns "".
 func storeDir(create bool) (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
 	cur := home
-	for _, part := range []string{".amq", "codex-threads"} {
-		cur = filepath.Join(cur, part)
+	for _, part := range []string{".amq", "codex-threads", "threads", "current"} {
+		parent := cur
+		if part == "current" {
+			parent = filepath.Dir(cur)
+		}
+		cur = filepath.Join(parent, part)
 		fi, err := os.Lstat(cur)
 		if errors.Is(err, os.ErrNotExist) {
 			if !create {
+				if part == "threads" || part == "current" {
+					return filepath.Dir(cur), nil
+				}
 				return "", nil
 			}
 			if err := os.Mkdir(cur, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
 				return "", err
+			}
+			if err := fsq.SyncDir(parent); err != nil {
+				return "", fmt.Errorf("sync %s: %w", parent, err)
 			}
 			fi, err = os.Lstat(cur)
 		}
@@ -180,7 +197,7 @@ func storeDir(create bool) (string, error) {
 			return "", fmt.Errorf("%s is not a plain directory; refusing", cur)
 		}
 	}
-	return cur, nil
+	return filepath.Dir(cur), nil
 }
 
 // readStrict decodes a small regular 0600 file at path into v, opened

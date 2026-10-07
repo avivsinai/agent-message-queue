@@ -14,11 +14,6 @@ import (
 // identity. Presence of any one, even empty, is an explicit context.
 var identityEnvKeys = []string{envRoot, envBaseRoot, envSession, envMe, envRootID, envBaseRootID}
 
-// identityRecoveryCommands may run when a recorded Codex thread identity
-// cannot be adopted: they diagnose context themselves and report through
-// their own structured output.
-var identityRecoveryCommands = map[string]bool{"doctor": true, "route": true}
-
 // adoptCodexThreadIdentity gives an amq command run inside a Codex thread the
 // identity amq coop exec recorded for that thread (agent-message-queue-611.61).
 // On Codex 0.160 tool commands run in the shared daemon's environment and see
@@ -27,8 +22,9 @@ var identityRecoveryCommands = map[string]bool{"doctor": true, "route": true}
 // validated before any of it becomes visible, and then the usual pin checks
 // run on it. A thread AMQ never recorded keeps today's behavior. A recorded
 // but unusable identity (damaged, foreign CODEX_HOME, replaced by a later
-// coop exec, or a root that changed) is a context mismatch, never a fallback
-// to default resolution.
+// coop exec, or a root that changed) is a context mismatch for every command,
+// never a fallback to default resolution; setting the identity variables
+// explicitly is the way out.
 func adoptCodexThreadIdentity() error {
 	thread, ok := os.LookupEnv("CODEX_THREAD_ID")
 	if !ok || strings.TrimSpace(thread) == "" {
@@ -92,8 +88,8 @@ func validateRecordedIdentity(rec codexidentity.Record) error {
 	return verifyRootUnderBase(rec.BaseRoot, rec.BaseRootID, rec.Session, rec.Root, rec.RootID)
 }
 
-// codexThreadIdentityRecorder returns the function coop exec calls once it
-// has created a Codex thread for the TUI: it records the identity in env for
+// codexThreadIdentityRecorder returns the function coop exec calls once, for
+// the Codex thread the TUI will resume: it records the identity in env for
 // that thread. Without complete root identity tokens it returns nil, so no
 // thread is handed to a TUI with an identity AMQ could not record.
 func codexThreadIdentityRecorder(env []string) func(thread string) error {
@@ -126,17 +122,20 @@ func codexThreadIdentityRecorder(env []string) func(thread string) error {
 }
 
 // recordResumedCodexThread records the identity for a Codex thread the user
-// resumes by id (codex resume <id>, as amq session resume runs it): that
-// thread's tool commands run on the daemon too. Naming already recorded a
-// thread it created; recording it again writes the same values. A failure
-// is a warning: the session still starts, without an identity for its
-// tool commands.
-func recordResumedCodexThread(binaryPath string, args []string, record func(thread string) error) {
-	if record == nil || launch.ProviderForExecutable(binaryPath) != launch.CodexProvider ||
+// resumes by id: the one AMQ named and created, or one the user resumes
+// (codex resume <id>, as amq session resume runs it). Its tool commands run
+// on the daemon. If the identity cannot be recorded the launch stops: a
+// thread is never resumed without it.
+func recordResumedCodexThread(binaryPath string, args []string, record func(thread string) error) error {
+	if launch.ProviderForExecutable(binaryPath) != launch.CodexProvider ||
 		len(args) < 2 || args[0] != "resume" || !codexidentity.ValidThread(args[1]) {
-		return
+		return nil
+	}
+	if record == nil {
+		return ContextMismatchError("AMQ cannot record this session's identity for Codex thread %s", args[1])
 	}
 	if err := record(args[1]); err != nil {
-		_ = writeStderr("warning: AMQ could not record this session's identity for Codex tool commands: %v\n", err)
+		return ContextMismatchError("AMQ could not record this session's identity for Codex thread %s: %v", args[1], err)
 	}
+	return nil
 }
