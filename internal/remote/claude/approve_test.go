@@ -111,6 +111,9 @@ func TestApprovalPreviewDetectorTable(t *testing.T) {
 		{"redirect after an option", "Bash", bash("ls -l>docs/task-queue-controller.md"), "", false},
 		{"fallback redirect after an option", "Bash", fallback("ls -l>docs/task-queue-controller.md"), "", false},
 		{"fallback tab after an option", "Bash", fallback("cc -v\t--flag=task-queue-controller"), "", false},
+		// Review of #987 (Pro, P1): a substitution rebuilds -vusk-… in Bash.
+		{"substitution inside an option", "Bash", bash("curl -v$(true)usk-AAAAAAAAAAAAAAAAAAAAAAAA1: example.test"), "", true},
+		{"fallback substitution inside an option", "Bash", fallback("curl -v$(true)usk-AAAAAAAAAAAAAAAAAAAAAAAA1: example.test"), "", true},
 	} {
 		preview, _ := approvalView(tc.tool, json.RawMessage(tc.input), tc.agent)
 		if tc.hidden && preview != previewHidden {
