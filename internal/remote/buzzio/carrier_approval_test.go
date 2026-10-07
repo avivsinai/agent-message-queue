@@ -99,9 +99,10 @@ func TestApprovalMessageAnsweredByReaction(t *testing.T) {
 
 // 611.42.7: the owner typed ✅ as a message; it became a new prompt and was
 // refused busy while the approval waited (live, 2026-10-06). A typed yes or
-// no answers the target's one pending approval, as the reaction does. The
-// Codex session names only the pending interaction id, never the request,
-// and the live yes was a reply in the approval message's thread.
+// no answers the pending approval, as the reaction does: in the approval's
+// thread, or in the main DM once its message reached the relay. The other
+// rows are Pro's review of #970: an approval not yet delivered is never
+// answered, and a replayed answer keeps its first decision.
 func TestApprovalAnsweredByTypedReply(t *testing.T) {
 	var owner, body [32]byte
 	_, _ = rand.Read(owner[:])
@@ -110,18 +111,23 @@ func TestApprovalAnsweredByTypedReply(t *testing.T) {
 	ledger, _ := OpenLedger(t.TempDir())
 	var ref string
 	var answered *protocol.Command
+	submits := 0
 	pendingID := ""
 	c := NewCarrier(ledger, b, body, ownerGrant(t, owner, b.Body, KindDM, KindEdit), fixedIdentity("thread-1"), func(cmd *protocol.Command, src core.Source) (any, error) {
 		switch cmd.Op {
 		case protocol.OpSessionInspect:
 			s := protocol.Session{TargetID: "cx", Epoch: "e1"}
 			if pendingID != "" {
-				s.PendingInteraction = &pendingID
+				s.PendingInteraction, s.ActiveRequestRef = &pendingID, &ref
 			}
 			return s, nil
 		case protocol.OpRequestSubmit:
-			ref = protocol.EncodeRef(src.Host, cmd.TargetID, cmd.RequestID)
-			return protocol.Reply{Snapshot: protocol.Snapshot{RequestRef: ref, Revision: 1, State: protocol.StateRunning}}, nil
+			submits++
+			r := protocol.EncodeRef(src.Host, cmd.TargetID, cmd.RequestID)
+			if ref == "" {
+				ref = r
+			}
+			return protocol.Reply{Snapshot: protocol.Snapshot{RequestRef: r, Revision: 1, State: protocol.StateRunning}}, nil
 		case protocol.OpInteractionRespond:
 			answered = cmd
 			return protocol.Reply{Outcome: protocol.Outcome{Op: protocol.OpInteractionRespond}}, nil
@@ -135,37 +141,79 @@ func TestApprovalAnsweredByTypedReply(t *testing.T) {
 	if err := c.Ingest(dm); err != nil {
 		t.Fatal(err)
 	}
-	pending := &protocol.Interaction{InteractionID: "item-7", Kind: "approval", Prompt: "touch a\nin /repo", Options: []string{"accept", "cancel"}, RemoteAnswer: true, ApproveOption: "accept", RejectOption: "cancel"}
-	now = now.Add(time.Second)
-	if err := c.Publish(protocol.Snapshot{RequestRef: ref, Epoch: "e1", Revision: 2, State: protocol.StateRunning, Interaction: pending}, c.source(dm.ID.Hex(), "").Origin); err != nil {
-		t.Fatal(err)
-	}
-	var msg nostr.Event
-	if err := c.Flush(context.Background(), func(_ context.Context, evt nostr.Event) error {
-		if strings.Contains(evt.Content, "Approval needed") {
-			msg = evt
+	origin := c.source(dm.ID.Hex(), "").Origin
+	show := func(rev int64, id string) nostr.Event {
+		t.Helper()
+		now = now.Add(time.Second)
+		in := &protocol.Interaction{InteractionID: id, Kind: "approval", Prompt: "touch a\nin /repo", Options: []string{"accept", "cancel"}, RemoteAnswer: true, ApproveOption: "accept", RejectOption: "cancel"}
+		if err := c.Publish(protocol.Snapshot{RequestRef: ref, Epoch: "e1", Revision: rev, State: protocol.StateRunning, Interaction: in}, origin); err != nil {
+			t.Fatal(err)
 		}
-		return nil
-	}, nil); err != nil {
+		pendingID = id
+		posted, _, _ := ledger.Prepared(approvalKey(ref, id))
+		var msg nostr.Event
+		_ = json.Unmarshal(posted.Event, &msg)
+		return msg
+	}
+	flush := func() {
+		if err := c.Flush(context.Background(), func(context.Context, nostr.Event) error { return nil }, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	typed := func(text string, tags ...nostr.Tag) nostr.Event {
+		now = now.Add(time.Second)
+		evt := nostr.Event{CreatedAt: nostr.Timestamp(now.Unix()), Kind: 9, Content: text, Tags: append(nostr.Tags{{"h", "dm-1"}}, tags...)}
+		if err := evt.Sign(owner); err != nil {
+			t.Fatal(err)
+		}
+		return evt
+	}
+
+	// Not yet delivered: the owner cannot have seen it, so yes is a prompt.
+	show(2, "item-7")
+	if err := c.Ingest(typed("yes")); err != nil {
 		t.Fatal(err)
 	}
-	inThread := nostr.Event{CreatedAt: nostr.Timestamp(now.Unix()), Kind: 9, Content: "no", Tags: nostr.Tags{{"h", "dm-1"}, {"e", msg.ID.Hex(), "", "root"}}}
-	if err := inThread.Sign(owner); err != nil {
-		t.Fatal(err)
+	if answered != nil || submits != 2 {
+		t.Fatalf("undelivered approval: answered %+v, submits %d; want a prompt", answered, submits)
 	}
-	if err := c.Ingest(inThread); err != nil {
+	flush()
+	msgA, _, _ := ledger.Prepared(approvalKey(ref, "item-7"))
+	var a nostr.Event
+	_ = json.Unmarshal(msgA.Event, &a)
+
+	// In the approval's thread, no rejects that approval.
+	if err := c.Ingest(typed("no", nostr.Tag{"e", a.ID.Hex(), "", "root"})); err != nil {
 		t.Fatal(err)
 	}
 	if answered == nil || answered.InteractionID != "item-7" || answered.Option != "cancel" {
-		t.Fatalf("respond command = %+v, want cancel for item-7 from the thread reply", answered)
+		t.Fatalf("thread reply answered %+v, want cancel for item-7", answered)
 	}
+
+	// In the main DM, yes approves the delivered pending approval.
 	answered = nil
-	pendingID = "item-7"
-	if err := c.Ingest(ownerEvent(t, owner, "dm-1", "yes", now)); err != nil {
+	if err := c.Ingest(typed("yes")); err != nil {
 		t.Fatal(err)
 	}
-	if answered == nil || answered.RequestRef != ref || answered.InteractionID != "item-7" || answered.Option != "accept" {
-		t.Fatalf("respond command = %+v, want accept for item-7 of %s", answered, ref)
+	if answered == nil || answered.InteractionID != "item-7" || answered.Option != "accept" {
+		t.Fatalf("main-DM yes answered %+v, want accept for item-7", answered)
+	}
+
+	// A yes claimed for item-7 but never settled is replayed after item-8
+	// is pending: it still answers item-7 only.
+	replay := typed("yes")
+	cmd, _ := json.Marshal(map[string]string{"message": a.ID.Hex(), "ref": ref, "interaction_id": "item-7", "option": "accept"})
+	if _, _, err := ledger.Claim(c.claimFor(replay, OpRespond, "", "e1", now.Add(MutationWindow), cmd)); err != nil {
+		t.Fatal(err)
+	}
+	show(3, "item-8")
+	flush()
+	answered = nil
+	if err := c.Ingest(replay); err != nil {
+		t.Fatal(err)
+	}
+	if answered == nil || answered.InteractionID != "item-7" {
+		t.Fatalf("replay answered %+v, want only its first decision for item-7", answered)
 	}
 }
 

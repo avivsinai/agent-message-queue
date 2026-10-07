@@ -65,7 +65,7 @@ func TestAllowConfigVerifiesOnThePinnedShare(t *testing.T) {
 	}
 	prompt := "Bash command:\ngo test ./...\n\nInteraction: cc-" + hex32() + "\nAction: sha256:" + hex32() + hex32()
 	ref := protocol.EncodeRef("buzz-host", "fake", "123e4567-e89b-12d3-a456-426614174000")
-	content := "Approval needed (" + ref + "):\n\n" + prompt + "\n\nReact ✅ or reply yes to approve; react ❌ or reply no to reject. The first answer, here or in the terminal, wins."
+	content := "Approval needed (" + ref + "):\n\n" + prompt + "\n\nReact ✅ to approve or ❌ to reject. The first answer, here or in the terminal, wins."
 	msg := nostr.Event{CreatedAt: nostr.Now(), Kind: 9, Tags: nostr.Tags{{"h", "dm-1"}}, Content: content}
 	if err := msg.Sign(body.Secret()); err != nil {
 		t.Fatal(err)

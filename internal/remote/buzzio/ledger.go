@@ -88,6 +88,25 @@ func (l *Ledger) Claim(c Claim) (Claim, bool, error) {
 	return out, created, nil
 }
 
+// ClaimFor returns the stored claim for an event, if one exists.
+func (l *Ledger) ClaimFor(eventID string) (Claim, bool, error) {
+	if !validHexID(eventID) {
+		return Claim{}, false, nil
+	}
+	raw, err := readBounded(filepath.Join(l.dir, "ingress", eventID+".json"))
+	if errors.Is(err, os.ErrNotExist) {
+		return Claim{}, false, nil
+	}
+	if err != nil {
+		return Claim{}, false, err
+	}
+	var out Claim
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return Claim{}, false, fmt.Errorf("claim %s is unreadable: %w", eventID, err)
+	}
+	return out, true, nil
+}
+
 // Settlement is the decision an owner command reached, recorded once after
 // the endpoint answered it. A redelivered event with a settlement is never
 // sent to the endpoint again, so a busy rejection the owner already saw
@@ -427,31 +446,6 @@ func (l *Ledger) ApprovalFor(eventID string) (Approval, bool, error) {
 		return Approval{}, false, fmt.Errorf("approval record is unreadable: %w", err)
 	}
 	return a, true, nil
-}
-
-// PutApprovalMessage records which message shows one interaction of a
-// target, so a typed answer finds it by the interaction id alone.
-func (l *Ledger) PutApprovalMessage(target, interactionID, eventID string) error {
-	if !validHexID(eventID) {
-		return fmt.Errorf("approval event id %q is not a hex id", eventID)
-	}
-	_, _, err := createOnce(filepath.Join(l.dir, "receipts"), keyFile("approval-of/"+target+"/"+interactionID), []byte(eventID))
-	return err
-}
-
-// ApprovalMessage returns the message id that shows the interaction.
-func (l *Ledger) ApprovalMessage(target, interactionID string) (string, bool, error) {
-	raw, err := readBounded(filepath.Join(l.dir, "receipts", keyFile("approval-of/"+target+"/"+interactionID)))
-	if errors.Is(err, os.ErrNotExist) {
-		return "", false, nil
-	}
-	if err != nil {
-		return "", false, err
-	}
-	if id := string(raw); validHexID(id) {
-		return id, true, nil
-	}
-	return "", false, fmt.Errorf("approval index for %s is unreadable", interactionID)
 }
 
 // ReceiptFor returns the receipt for a request, if one exists.

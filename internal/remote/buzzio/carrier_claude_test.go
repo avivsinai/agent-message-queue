@@ -77,7 +77,7 @@ func TestClaudeApprovalRejectedFromBuzz(t *testing.T) {
 // approval does not end as answered.
 func TestClaudeForgedAllowAnswerNeverAllows(t *testing.T) {
 	e := newClaudeApprovalE2E(t)
-	if strings.Contains(e.msg.Content, "✅") || !strings.Contains(e.msg.Content, "React ❌ or reply no to reject") {
+	if strings.Contains(e.msg.Content, "✅") || !strings.Contains(e.msg.Content, "React ❌ to reject") {
 		t.Fatalf("approval message = %q, want reject only", e.msg.Content)
 	}
 	var req map[string]any
@@ -254,7 +254,7 @@ func newClaudeApprovalE2EWith(t *testing.T, pinned bool, command string) *claude
 			e.msg = evt
 		}
 	}
-	if !strings.Contains(e.msg.Content, "Approval needed") || !strings.Contains(e.msg.Content, "reply no to reject") {
+	if !strings.Contains(e.msg.Content, "Approval needed") || !strings.Contains(e.msg.Content, "❌ to reject") {
 		t.Fatalf("approval message = %q, want the command and how to reject", e.msg.Content)
 	}
 	return e
