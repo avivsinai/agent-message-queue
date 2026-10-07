@@ -894,20 +894,20 @@ func ParseTime(s string) (time.Time, error) {
 
 // BoundReason strips characters a DM must never carry — control and format
 // characters (bidi overrides, zero-width), Unicode line and paragraph
-// separators — collapses each whitespace run to one space, and neutralizes
-// the inline constructs a DM renderer acts on: Markdown link and image
-// brackets, raw HTML and autolink angle brackets, and '@' at the start of a
-// word (a mention). Underscores, parens, '#' and other emphasis or
-// line-start markup stay: reasons are always embedded mid-line and every
-// line break is already removed, so those cannot render, and mangling them
-// would corrupt normal adapter text like turn_in_progress or a file path.
-// It trims space and caps the result at MaxReasonBytes on a UTF-8 boundary.
-// An empty result means the refusal has no printable message.
+// separators — collapses each whitespace run to one space, and trims space.
+// It caps the result at MaxReasonBytes on a UTF-8 boundary. An empty result
+// means the refusal has no printable message.
+//
+// Filtering alone cannot make text inert: the DM renderer (Buzz uses remark
+// with remark-gfm) re-interprets what survives, decoding HTML entities and
+// autolinking URLs. Rendering sites that embed adapter text in DM text
+// (internal/acp statusText and oldBridgeMessage's remedy) must pass it
+// through an inert code span; see inertInline in internal/acp and
+// oldBridgeMessage in internal/remote/pi.
 func BoundReason(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
 	space := false
-	wordStart := true // a non-space, non-invisible rune updates it
 	for _, r := range s {
 		switch {
 		case unicode.Is(unicode.Cf, r), unicode.Is(unicode.Zl, r), unicode.Is(unicode.Zp, r):
@@ -915,24 +915,15 @@ func BoundReason(s string) string {
 
 		case unicode.IsSpace(r):
 			space = b.Len() > 0
-			wordStart = true
 			continue
 		case unicode.IsControl(r):
 			continue
-		case r == '[' || r == ']' || r == '<' || r == '>' || (r == '@' && wordStart):
-			r = ' '
 		}
 		if space {
 			b.WriteByte(' ')
 			space = false
 		}
 		b.WriteRune(r)
-		// '@' must only survive between a letter or digit and itself
-		// (user@host); after punctuation, a bracket or space it starts a
-		// mention. Setting this from the written rune (not the source one)
-		// also makes '(@everyone)' inert, since the replaced bracket reads
-		// as punctuation.
-		wordStart = !unicode.IsLetter(r) && !unicode.IsDigit(r)
 	}
 	out := strings.TrimSpace(b.String())
 	if len(out) <= MaxReasonBytes {
