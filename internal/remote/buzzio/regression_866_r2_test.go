@@ -236,7 +236,7 @@ func TestInspectRefusesAReplacementNativeSession(t *testing.T) {
 	for _, p := range pending {
 		var evt nostr.Event
 		_ = json.Unmarshal(p.Event, &evt)
-		if evt.Content != ErrNotShared.Error() {
+		if evt.Content != protocol.InertInline(ErrNotShared.Error()) {
 			t.Fatalf("answered a replacement session: %q", evt.Content)
 		}
 	}

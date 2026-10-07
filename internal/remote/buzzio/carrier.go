@@ -293,13 +293,13 @@ func (c *Carrier) ingest(evt nostr.Event, normalize func(nostr.Event, Binding, t
 		return serr
 	}
 	if err != nil {
-		return c.answer(evt, err.Error())
+		return c.answer(evt, protocol.InertInline(err.Error()))
 	}
 	// Every command, not only submit, runs only against the approved native
 	// session: /inspect of a replacement session is never answered (codex
 	// #866 r2 #7).
 	if err := c.fence(); err != nil {
-		return c.settleAnswer(evt, Settlement{Op: n.Op, State: "refused"}, err.Error())
+		return c.settleAnswer(evt, Settlement{Op: n.Op, State: "refused"}, protocol.InertInline(err.Error()))
 	}
 	// A typed answer in the owner DM is the same decision as the reaction on
 	// the approval message (611.42.7). A replay keeps its first decision: an
@@ -333,14 +333,14 @@ func (c *Carrier) ingest(evt nostr.Event, normalize func(nostr.Event, Binding, t
 		// later import never retargets a new epoch.
 		s, err := c.inspect()
 		if err != nil {
-			return c.answer(evt, "cannot reach the shared session: "+err.Error())
+			return c.answer(evt, "cannot reach the shared session: "+protocol.InertInline(err.Error()))
 		}
 		claim.Epoch = s.Epoch
 		// The epoch is now fixed. The approved session must still be the
 		// attached one: a switch before the inspect is refused here, and a
 		// switch after it fails the fixed epoch at dispatch.
 		if err := c.fence(); err != nil {
-			return c.settleAnswer(evt, Settlement{Op: n.Op, State: "refused"}, err.Error())
+			return c.settleAnswer(evt, Settlement{Op: n.Op, State: "refused"}, protocol.InertInline(err.Error()))
 		}
 	}
 	claim.Command, _ = json.Marshal(map[string]string{"text": n.Text, "ref": n.Ref})
@@ -357,7 +357,7 @@ func (c *Carrier) ingest(evt nostr.Event, normalize func(nostr.Event, Binding, t
 	case OpInspect:
 		s, err := c.inspect()
 		if err != nil {
-			return c.settleAnswer(evt, Settlement{Op: claim.Op}, "inspect failed: "+err.Error())
+			return c.settleAnswer(evt, Settlement{Op: claim.Op}, "inspect failed: "+protocol.InertInline(err.Error()))
 		}
 		return c.settleAnswer(evt, Settlement{Op: claim.Op}, sessionText(s))
 	case OpStatus, OpCancel:
@@ -519,7 +519,7 @@ func (c *Carrier) submit(evt nostr.Event, claim Claim, created bool, text string
 		}
 		out, err := c.handle(cmd, src)
 		if err != nil {
-			return c.settleAnswer(evt, Settlement{Op: claim.Op, RequestRef: ref, State: "refused"}, "submit refused: "+err.Error())
+			return c.settleAnswer(evt, Settlement{Op: claim.Op, RequestRef: ref, State: "refused"}, "submit refused: "+protocol.InertInline(err.Error()))
 		}
 		r, ok := out.(protocol.Reply)
 		if !ok {
@@ -579,7 +579,7 @@ func (c *Carrier) statusOrCancel(evt nostr.Event, op, ref string, notAfter time.
 	}
 	out, err := c.handle(cmd, c.source(evt.ID.Hex(), ""))
 	if err != nil {
-		return c.settleAnswer(evt, Settlement{Op: op, RequestRef: ref, State: "refused"}, op+" failed: "+err.Error())
+		return c.settleAnswer(evt, Settlement{Op: op, RequestRef: ref, State: "refused"}, op+" failed: "+protocol.InertInline(err.Error()))
 	}
 	reply, ok := out.(protocol.Reply)
 	if !ok {
@@ -1039,13 +1039,13 @@ func (c *Carrier) answerApproval(evt nostr.Event, messageID string, appr Approva
 		return c.settleApprovalAnswer(evt, messageID, st, "Not sent: this approval was already answered.")
 	case errors.As(err, &refusal) && refusal.Code == protocol.CodeAlreadyResolved:
 		// The endpoint says why: resolved, or an earlier answer in flight.
-		return c.settleApprovalAnswer(evt, messageID, st, "Not sent: "+refusal.Message+".")
+		return c.settleApprovalAnswer(evt, messageID, st, "Not sent: "+protocol.InertInline(refusal.Message)+".")
 	case gesture == approveReaction && errors.As(err, &refusal) && (refusal.Code == protocol.CodeInvalid || refusal.Code == protocol.CodeNativeError):
 		// The harness could not verify the approve: it says why, in the
 		// owner's words. Nothing was answered, so ✅ again or ❌ still works.
-		return c.settleApprovalAnswer(evt, messageID, st, refusal.Message)
+		return c.settleApprovalAnswer(evt, messageID, st, protocol.InertInline(refusal.Message))
 	case err != nil:
-		return c.settleApprovalAnswer(evt, messageID, st, "Not sent: "+err.Error())
+		return c.settleApprovalAnswer(evt, messageID, st, "Not sent: "+protocol.InertInline(err.Error()))
 	}
 	// The outcome shows as an edit of the approval message when the record
 	// resolves the interaction.
@@ -1297,7 +1297,10 @@ func snapshotText(s protocol.Snapshot, reason string) string {
 		fmt.Fprintf(&b, " (%s)", s.Code)
 	}
 	if reason != "" {
-		fmt.Fprintf(&b, ": %s", reason)
+		// The reason is adapter text (a stored refusal); render it inert so
+		// the DM renderer cannot decode entities or autolink URLs inside it
+		// (review of #972 r2).
+		fmt.Fprintf(&b, ": %s", protocol.InertInline(reason))
 	}
 	if s.Result != nil && s.Result.Text != "" {
 		text := s.Result.Text
