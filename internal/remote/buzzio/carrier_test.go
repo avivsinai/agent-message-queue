@@ -284,33 +284,44 @@ func busyCarrier(t *testing.T) (c *Carrier, owner [32]byte, stateDir string) {
 // agent-message-queue-611.58 (field, Buzz relay 2026-10-06): Buzz tags an
 // owner's direct reply to a thread's first message with a reply e tag only.
 // The result row named the owner event but no root, and the relay refused
-// it: "invalid: root tag does not match thread ancestry".
+// it: "invalid: root tag does not match thread ancestry". Pro review of #971
+// added the legacy positional forms, which named no root either.
 func TestRowForThreadReplyNamesTheThreadRoot(t *testing.T) {
-	c, owner, _ := busyCarrier(t)
-	root := strings.Repeat("ab", 32)
-	reply := nostr.Event{CreatedAt: nostr.Now(), Kind: KindDM, Content: "yes", Tags: nostr.Tags{{"h", "dm-1"}, {"e", root, "", "reply"}}}
-	if err := reply.Sign(owner); err != nil {
-		t.Fatal(err)
-	}
-	if err := c.Ingest(reply); err != nil {
-		t.Fatal(err)
-	}
-	var sent []nostr.Event
-	if err := c.Flush(context.Background(), func(_ context.Context, evt nostr.Event) error { sent = append(sent, evt); return nil }, nil); err != nil {
-		t.Fatal(err)
-	}
-	if len(sent) != 1 || !hasTag(sent[0], "e", root, "", "root") || !hasTag(sent[0], "e", reply.ID.Hex(), "", "reply") {
-		t.Fatalf("sent = %+v, want one row naming the thread root and replying to the owner event", sent)
+	root, parent := strings.Repeat("ab", 32), strings.Repeat("cd", 32)
+	for name, tags := range map[string]nostr.Tags{
+		"reply-only to the root": {{"h", "dm-1"}, {"e", root, "", "reply"}},
+		"positional, root only":  {{"h", "dm-1"}, {"e", root}},
+		"positional, root first": {{"h", "dm-1"}, {"e", root}, {"e", parent}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c, owner, _ := busyCarrier(t)
+			reply := nostr.Event{CreatedAt: nostr.Now(), Kind: KindDM, Content: "yes", Tags: tags}
+			if err := reply.Sign(owner); err != nil {
+				t.Fatal(err)
+			}
+			if err := c.Ingest(reply); err != nil {
+				t.Fatal(err)
+			}
+			var sent []nostr.Event
+			if err := c.Flush(context.Background(), func(_ context.Context, evt nostr.Event) error { sent = append(sent, evt); return nil }, nil); err != nil {
+				t.Fatal(err)
+			}
+			if len(sent) != 1 || !hasTag(sent[0], "e", root, "", "root") || !hasTag(sent[0], "e", reply.ID.Hex(), "", "reply") {
+				t.Fatalf("sent = %+v, want one row naming the thread root and replying to the owner event", sent)
+			}
+		})
 	}
 }
 
 // agent-message-queue-611.58 (field, Buzz relay 2026-10-06): Flush stopped
 // at the first refused row, so every later row, a new approval message
-// included, never reached the owner. A row the relay refuses is set aside
-// with the relay's reason and the next row is still sent.
+// included, never reached the owner. A refused row stays owed with the
+// relay's reason: other requests' rows still go out, its own edit waits
+// behind it, and both are sent in order once its backoff has passed.
 func TestRefusedRowDoesNotBlockLaterRows(t *testing.T) {
 	c, owner, stateDir := busyCarrier(t)
 	now := time.Now()
+	c.now = func() time.Time { return now }
 	for i, text := range []string{"first", "second"} {
 		if err := c.Ingest(ownerEvent(t, owner, "dm-1", text, now.Add(time.Duration(i)*time.Second))); err != nil {
 			t.Fatal(err)
@@ -318,21 +329,38 @@ func TestRefusedRowDoesNotBlockLaterRows(t *testing.T) {
 	}
 	const reason = "invalid: root tag does not match thread ancestry"
 	var sent []nostr.Event
-	err := c.Flush(context.Background(), func(_ context.Context, evt nostr.Event) error {
+	refuseFirst := func(_ context.Context, evt nostr.Event) error {
 		sent = append(sent, evt)
 		if len(sent) == 1 {
 			return &relay.RemoteError{Kind: relay.ErrRejected, Reason: reason}
 		}
 		return nil
-	}, nil)
-	if err != nil || len(sent) != 2 {
-		t.Fatalf("flush err = %v after %d sends, want both rows sent", err, len(sent))
+	}
+	if err := c.Flush(context.Background(), refuseFirst, nil); err != nil || len(sent) != 2 {
+		t.Fatalf("flush err = %v after %d sends, want both requests' rows tried", err, len(sent))
+	}
+	refused, err := RefusedOutputs(stateDir)
+	if err != nil || len(refused) != 1 || refused[0].Refused.Reason != reason {
+		t.Fatalf("refused outputs = %+v (err %v), want the first row owed with the relay's reason", refused, err)
+	}
+	// The refused request's next revision is an edit of its row: it waits
+	// behind the row, which waits out its backoff.
+	ref := strings.TrimSuffix(strings.TrimPrefix(refused[0].Key, "row/"), "/00000000")
+	now = now.Add(2 * time.Second)
+	origin := c.source(tagValue(sent[0], "e"), "").Origin
+	if err := c.Publish(protocol.Snapshot{RequestRef: ref, TargetID: "cx", Revision: 2, State: protocol.StateCompleted, Result: &protocol.Result{Text: "done"}}, origin); err != nil {
+		t.Fatal(err)
+	}
+	sent = nil
+	accept := func(_ context.Context, evt nostr.Event) error { sent = append(sent, evt); return nil }
+	if err := c.Flush(context.Background(), accept, nil); err != nil || len(sent) != 0 {
+		t.Fatalf("flush during backoff: err = %v, sent = %d, want nothing sent", err, len(sent))
+	}
+	now = now.Add(time.Minute)
+	if err := c.Flush(context.Background(), accept, nil); err != nil || len(sent) != 2 || sent[0].Kind != KindDM || sent[1].Kind != KindEdit || tagValue(sent[1], "e") != sent[0].ID.Hex() {
+		t.Fatalf("flush after backoff: err = %v, sent = %+v, want the row then its edit", err, sent)
 	}
 	if pending, _ := c.ledger.Pending(); len(pending) != 0 {
 		t.Fatalf("pending after flush = %d, want 0", len(pending))
-	}
-	refused, err := RefusedOutputs(stateDir)
-	if err != nil || len(refused) != 1 || !strings.Contains(refused[0].Refused, reason) {
-		t.Fatalf("refused outputs = %+v (err %v), want the first row with the relay's reason", refused, err)
 	}
 }

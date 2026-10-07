@@ -153,24 +153,37 @@ func (c *Carrier) originTags(origin map[string]string) nostr.Tags {
 	return c.rowTags(origin["event"], origin["root"])
 }
 
-// threadRoot is the NIP-10 root an owner event replies within, if any: its
-// root-marked e tag, or else its reply-marked one. Buzz marks a direct reply
-// to a thread's first message with only a reply tag, so that parent is the
-// root; a reply to such an event that names no root is refused by the relay
-// ("root tag does not match thread ancestry", agent-message-queue-611.58).
+// threadRoot is the NIP-10 root an owner event replies within, if any. A
+// root-marked e tag wins. Buzz marks a direct reply to a thread's first
+// message with a single reply-marked e tag, so that parent is the root;
+// a reply-marked tag beside other e tags names an intermediate parent and
+// proves no root. With no markers, the legacy positional form names the
+// root first. A reply to a threaded event that names no root is refused by
+// the relay ("root tag does not match thread ancestry",
+// agent-message-queue-611.58).
 func threadRoot(evt nostr.Event) string {
-	if root := markedID(evt, "root"); root != "" {
-		return root
-	}
-	return markedID(evt, "reply")
-}
-
-// markedID is the event id of evt's first e tag with marker, or "".
-func markedID(evt nostr.Event, marker string) string {
+	var es []nostr.Tag
+	marked := false
 	for _, t := range evt.Tags {
-		if len(t) >= 4 && t[0] == "e" && t[3] == marker && validHexID(t[1]) {
+		if len(t) >= 2 && t[0] == "e" {
+			es = append(es, t)
+			marked = marked || len(t) >= 4 && t[3] != ""
+		}
+	}
+	for _, t := range es {
+		if len(t) >= 4 && t[3] == "root" && validHexID(t[1]) {
 			return t[1]
 		}
+	}
+	switch {
+	case len(es) == 0:
+		return ""
+	case !marked:
+		if validHexID(es[0][1]) {
+			return es[0][1]
+		}
+	case len(es) == 1 && es[0][3] == "reply" && validHexID(es[0][1]):
+		return es[0][1]
 	}
 	return ""
 }
@@ -1031,15 +1044,15 @@ const (
 // share (body and DM channel), that the enrolled generation still grants
 // its kind, and that gate (the verified membership) still admits export;
 // an output that fails stays owed and is never re-signed (codex #866 r1 #3,
-// #6). An unknown result, a lost connection or a transient refusal
-// (rate-limited, auth-required, error) stops the pass and leaves the output
-// owed: the same stored bytes are sent again next time, still in order. A
-// final refusal (any other negative OK) is recorded on the output with the
-// relay's reason and the pass goes on, so one refused row never holds back
-// later rows (agent-message-queue-611.58). An edit of a refused message is
-// refused without a send: the message it edits does not exist on the
-// relay. Row keys sort a request's root row before its edits, so an edit is
-// never sent before its row. The ledger lock is not held while a send waits.
+// #6). An unknown result or a lost connection stops the pass: the same
+// stored bytes are sent again next time, in order. A negative OK describes
+// that attempt only, so the output stays owed: its refusal and reason are
+// recorded and it is retried after a backoff (agent-message-queue-611.58).
+// Order is kept per request: a request's root row sorts before its edits
+// and approval messages, and while an earlier output of a request is owed
+// (refused or not yet due), that request's later outputs wait; other
+// requests' outputs still go out. The ledger lock is not held while a send
+// waits.
 func (c *Carrier) Flush(ctx context.Context, pub Publisher, gate func() error) error {
 	c.mu.Lock()
 	pending, err := c.ledger.Pending()
@@ -1048,9 +1061,18 @@ func (c *Carrier) Flush(ctx context.Context, pub Publisher, gate func() error) e
 		return err
 	}
 	sent := 0
+	waiting := map[string]bool{} // requests whose earlier output is still owed
 	for _, o := range pending {
 		if o.Binding != c.share() {
 			continue // another binding's output: owed, never redirected
+		}
+		group := outputGroup(o.Key)
+		if waiting[group] {
+			continue
+		}
+		if !o.Due(c.now()) {
+			waiting[group] = true
+			continue
 		}
 		if sent == flushBatch {
 			return nil // only eligible sends count (codex #866 r2 #8)
@@ -1058,18 +1080,6 @@ func (c *Carrier) Flush(ctx context.Context, pub Publisher, gate func() error) e
 		var evt nostr.Event
 		if err := json.Unmarshal(o.Event, &evt); err != nil {
 			return fmt.Errorf("outbox %s: %w", o.Key, err)
-		}
-		if evt.Kind == KindEdit {
-			refused, err := c.refusedMessage(tagValue(evt, "e"))
-			if err != nil {
-				return err
-			}
-			if refused {
-				if err := c.settle(o.Key, "not sent: the message it edits was refused by the relay"); err != nil {
-					return err
-				}
-				continue
-			}
 		}
 		if _, err := c.grant(uint16(evt.Kind), c.now()); err != nil {
 			return fmt.Errorf("%w: kind %d: %v", ErrNoGrant, evt.Kind, err)
@@ -1086,68 +1096,36 @@ func (c *Carrier) Flush(ctx context.Context, pub Publisher, gate func() error) e
 		err := pub(pctx, evt)
 		cancel()
 		sent++
-		refusal := ""
-		if err != nil {
-			reason, final := finalRefusal(err)
-			if !final {
-				return fmt.Errorf("publish %s: %w", o.Key, err)
-			}
-			refusal = fmt.Sprintf("the relay refused it: %q", reason)
+		var remote *relay.RemoteError
+		switch {
+		case err == nil:
+			c.mu.Lock()
+			err = c.ledger.MarkAccepted(o.Key)
+			c.mu.Unlock()
+		case errors.As(err, &remote) && errors.Is(remote.Kind, relay.ErrRejected):
+			waiting[group] = true
+			c.mu.Lock()
+			err = c.ledger.MarkRefused(o.Key, remote.Reason, c.now())
+			c.mu.Unlock()
+		default:
+			return fmt.Errorf("publish %s: %w", o.Key, err)
 		}
-		if err := c.settle(o.Key, refusal); err != nil {
+		if err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// settle records an output's final outcome: accepted when refusal is "",
-// otherwise refused for that reason.
-func (c *Carrier) settle(key, refusal string) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if refusal == "" {
-		return c.ledger.MarkAccepted(key)
-	}
-	return c.ledger.MarkRefused(key, refusal)
-}
-
-// finalRefusal reports whether err is the relay's final refusal of an
-// event, and the relay's reason. NIP-01 marks a negative OK that may pass
-// on a later try with the rate-limited, auth-required or error prefix.
-func finalRefusal(err error) (string, bool) {
-	var remote *relay.RemoteError
-	if !errors.As(err, &remote) || !errors.Is(remote.Kind, relay.ErrRejected) {
-		return "", false
-	}
-	for _, p := range []string{"rate-limited:", "auth-required:", "error:"} {
-		if strings.HasPrefix(remote.Reason, p) {
-			return "", false
+// outputGroup is the ordering scope of an outbox key: one request's rows
+// and approval messages ("row/<ref>/..."), or the key itself.
+func outputGroup(key string) string {
+	if rest, ok := strings.CutPrefix(key, "row/"); ok {
+		if ref, _, ok := strings.Cut(rest, "/"); ok {
+			return "row/" + ref
 		}
 	}
-	return remote.Reason, true
-}
-
-// refusedMessage reports whether the relay refused the message with event
-// id: a request's result row or an approval message this edge prepared.
-func (c *Carrier) refusedMessage(id string) (bool, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	key := ""
-	if ref, ok, err := c.ledger.RequestForRow(id); err != nil {
-		return false, err
-	} else if ok {
-		key = rootKey(ref)
-	} else if appr, ok, err := c.ledger.ApprovalFor(id); err != nil {
-		return false, err
-	} else if ok {
-		key = approvalKey(appr.RequestRef, appr.InteractionID)
-	}
-	if key == "" {
-		return false, nil
-	}
-	o, ok, err := c.ledger.Prepared(key)
-	return ok && o.Refused != "", err
+	return key
 }
 
 // rowTags and editTags are the only place row tags are built (relay design

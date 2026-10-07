@@ -151,11 +151,10 @@ type Outbound struct {
 	// only while the current share is the same (codex #866 r2 #4).
 	Binding  ShareBinding `json:"binding"`
 	Accepted bool         `json:"accepted"`
-	// Refused is set when the relay refused the event for good (a negative
-	// OK): the relay's reason, quoted as its words. A refused output is
-	// never sent again and no longer holds back later ones; its record stays
-	// in the outbox, so a prepared answer still counts as given.
-	Refused string `json:"refused,omitempty"`
+	// Refused is the relay's last negative OK for an output still owed:
+	// a refusal describes that attempt only, so the output is retried after
+	// a backoff and is never given up (agent-message-queue-611.58).
+	Refused *Refusal `json:"refused,omitempty"`
 }
 
 // ShareBinding is the full identity of a share: an output, claim or
@@ -191,27 +190,58 @@ func (l *Ledger) PrepareRevision(key string, event json.RawMessage, revision int
 	return readOutbound(stored)
 }
 
+// Refusal is an owed output's refusal history: how many attempts the relay
+// refused, its last reason (relay words), and when the next attempt is due.
+type Refusal struct {
+	Attempts int    `json:"attempts"`
+	Reason   string `json:"reason"`
+	NextTry  int64  `json:"next_try"`
+}
+
+// Retry backoff after a refusal: refuseBackoff, doubling per attempt, at
+// most maxRefuseBackoff.
+const (
+	refuseBackoff    = 30 * time.Second
+	maxRefuseBackoff = 10 * time.Minute
+)
+
+// Due reports whether the output may be sent at now.
+func (o Outbound) Due(now time.Time) bool {
+	return o.Refused == nil || now.Unix() >= o.Refused.NextTry
+}
+
 // MarkAccepted records the relay's matching positive OK for key.
 func (l *Ledger) MarkAccepted(key string) error {
-	return l.settleOutput(key, func(o *Outbound) { o.Accepted = true })
+	return l.updateOwed(key, func(o *Outbound) { o.Accepted = true })
 }
 
 // maxRefusedReason bounds the relay reason kept on a refused output.
 const maxRefusedReason = 512
 
-// MarkRefused records the relay's final refusal of key with its reason.
-func (l *Ledger) MarkRefused(key, reason string) error {
+// MarkRefused records a negative OK for key at now: the output stays owed
+// and its next attempt waits out the backoff.
+func (l *Ledger) MarkRefused(key, reason string, now time.Time) error {
 	if len(reason) > maxRefusedReason {
 		reason = strings.ToValidUTF8(reason[:maxRefusedReason], "") + "…"
 	}
-	if reason == "" {
-		reason = "no reason given"
-	}
-	return l.settleOutput(key, func(o *Outbound) { o.Refused = reason })
+	return l.updateOwed(key, func(o *Outbound) {
+		r := Refusal{Reason: reason}
+		if o.Refused != nil {
+			r.Attempts = o.Refused.Attempts
+		}
+		r.Attempts++
+		wait := refuseBackoff
+		for i := 1; i < r.Attempts && wait < maxRefuseBackoff; i++ {
+			wait *= 2
+		}
+		r.NextTry = now.Add(min(wait, maxRefuseBackoff)).Unix()
+		o.Refused = &r
+	})
 }
 
-// settleOutput applies a final relay outcome to key's record once.
-func (l *Ledger) settleOutput(key string, set func(*Outbound)) error {
+// updateOwed changes key's record while it is owed; an accepted output
+// never changes again.
+func (l *Ledger) updateOwed(key string, set func(*Outbound)) error {
 	dir := filepath.Join(l.dir, "outbox")
 	stored, err := readBounded(filepath.Join(dir, keyFile(key)))
 	if err != nil {
@@ -221,7 +251,7 @@ func (l *Ledger) settleOutput(key string, set func(*Outbound)) error {
 	if err != nil {
 		return err
 	}
-	if o.Accepted || o.Refused != "" {
+	if o.Accepted {
 		return nil
 	}
 	set(&o)
@@ -233,17 +263,16 @@ func (l *Ledger) settleOutput(key string, set func(*Outbound)) error {
 	return err
 }
 
-// Pending returns prepared outputs neither accepted nor refused, in key
-// order.
+// Pending returns prepared outputs not yet accepted, in key order.
 func (l *Ledger) Pending() ([]Outbound, error) {
-	return scanOutbox(filepath.Join(l.dir, "outbox"), func(o Outbound) bool { return !o.Accepted && o.Refused == "" })
+	return scanOutbox(filepath.Join(l.dir, "outbox"), func(o Outbound) bool { return !o.Accepted })
 }
 
-// RefusedOutputs lists the outputs the relay refused for good in the
-// ledger under stateDir, in key order, without creating anything; a ledger
-// that does not exist has none.
+// RefusedOutputs lists the owed outputs the relay refused on their last
+// attempt in the ledger under stateDir, in key order, without creating
+// anything; a ledger that does not exist has none.
 func RefusedOutputs(stateDir string) ([]Outbound, error) {
-	out, err := scanOutbox(filepath.Join(stateDir, "buzz", "outbox"), func(o Outbound) bool { return o.Refused != "" })
+	out, err := scanOutbox(filepath.Join(stateDir, "buzz", "outbox"), func(o Outbound) bool { return !o.Accepted && o.Refused != nil })
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
