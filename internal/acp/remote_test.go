@@ -3,6 +3,7 @@ package acp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -839,15 +840,32 @@ func (c claudeApproval) Subscribe(fn func(core.NativeEvent)) func() {
 // shows its pending tool approval in the DM once, says it can deny only,
 // and relays the owner's ❌ as the approval's reject option.
 func TestRemoteApprovalOwnerDenyFromTheDM(t *testing.T) {
+	for _, failFirst := range []bool{false, true} {
+		t.Run(fmt.Sprintf("failFirst=%v", failFirst), func(t *testing.T) { remoteApprovalOwnerDeny(t, failFirst) })
+	}
+}
+
+// remoteApprovalOwnerDeny drives one Desktop deny. With failFirst the first
+// post and the first deny fail (review of #995: a failure left the owner's
+// ❌ unanswered); the approval is still posted once and denied once.
+func remoteApprovalOwnerDeny(t *testing.T, failFirst bool) {
 	owner := strings.Repeat("0b", 32)
-	savedOwner, savedPost, savedRead := buzzOwner, postAnswer, readReactions
-	t.Cleanup(func() { buzzOwner, postAnswer, readReactions = savedOwner, savedPost, savedRead })
+	savedOwner, savedPost, savedRead, savedPoll := buzzOwner, postAnswer, readReactions, reactionPollInterval
+	t.Cleanup(func() {
+		buzzOwner, postAnswer, readReactions, reactionPollInterval = savedOwner, savedPost, savedRead, savedPoll
+	})
+	reactionPollInterval = 20 * time.Millisecond
 	buzzOwner = owner
 	var mu sync.Mutex
 	var posts []string
+	postFailed := false
 	postAnswer = func(_, content string, _ time.Duration) (string, error) {
 		mu.Lock()
 		defer mu.Unlock()
+		if failFirst && !postFailed && strings.Contains(content, "rm -rf build") {
+			postFailed = true
+			return "", errors.New("relay unreachable")
+		}
 		posts = append(posts, content)
 		return fmt.Sprintf("%064x", len(posts)), nil
 	}
@@ -856,6 +874,9 @@ func TestRemoteApprovalOwnerDenyFromTheDM(t *testing.T) {
 	}
 
 	rt := fake.New("fake", "e_1")
+	if failFirst {
+		rt.FailNextRespond(errors.New("session busy"))
+	}
 	s := remoteServer(t, claudeApproval{rt}, nil)
 	s.cfg.StateDir = canonicalTempDir(t)
 	eventID := strings.Repeat("c", 64)
@@ -867,7 +888,7 @@ func TestRemoteApprovalOwnerDenyFromTheDM(t *testing.T) {
 		defer close(done)
 		_, _ = s.runRemote("s", "clean up", eventID, turn, func(any) error { return nil })
 	}()
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(4 * time.Second)
 	for !rt.HasRun(id) && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)
 	}

@@ -32,9 +32,13 @@ const allowRefusedText = "Allow is not available from Buzz here; answer in Claud
 // deniedText says the owner's ❌ blocked the tool call.
 const deniedText = "Denied from Buzz: the tool call was blocked."
 
+// denyRetryText says a ❌ could not be handed to the session yet; AMQ keeps
+// trying while the approval is pending.
+const denyRetryText = "Your ❌ could not reach the session yet; AMQ keeps trying while the approval is pending."
+
 // reactionPollInterval is the gap between reads of the owner's reactions on
 // a posted approval: every few seconds while it is pending.
-const reactionPollInterval = 3 * time.Second
+var reactionPollInterval = 3 * time.Second
 
 // buzzOwner is the managed agent's owner pubkey (64 lowercase hex), or ""
 // when it cannot be established. Only its reactions answer an approval.
@@ -223,28 +227,39 @@ func (a *approvals) close() {
 }
 
 // watch posts one approval and relays the owner's ❌ as its reject option.
+// A failed post or deny is retried on the next poll, so a network error
+// never leaves the owner's ❌ unanswered (review of #995); the approval is
+// posted once, and the watcher ends when the deny is handed over or the
+// approval is no longer pending (observe closes stop).
 func (a *approvals) watch(snap protocol.Snapshot, in protocol.Interaction, stop chan struct{}) {
 	defer a.wg.Done()
 	budget := a.r.s.cfg.PostTimeout
-	posted, err := postAnswer(a.channel, approvalText(in.Prompt), budget)
-	if err != nil || posted == "" {
-		return
-	}
-	allowAnswered := false
+	posted, allowAnswered, denyFailed := "", false, false
 	for {
 		select {
 		case <-stop:
 			return
 		default:
 		}
-		if rs, err := readReactions(posted, budget); err == nil {
-			if reacted(rs, a.owner, "❌") {
-				a.deny(snap, in)
-				return
+		if posted == "" {
+			if id, err := postAnswer(a.channel, approvalText(in.Prompt), budget); err == nil {
+				posted = id
 			}
-			if !allowAnswered && reacted(rs, a.owner, "✅") {
-				allowAnswered = true
-				a.r.s.publish(a.channel, allowRefusedText)
+		}
+		if posted != "" {
+			if rs, err := readReactions(posted, budget); err == nil {
+				if reacted(rs, a.owner, "❌") {
+					if a.deny(snap, in) {
+						return
+					}
+					if !denyFailed {
+						denyFailed = true
+						a.r.s.publish(a.channel, denyRetryText)
+					}
+				} else if !allowAnswered && reacted(rs, a.owner, "✅") {
+					allowAnswered = true
+					a.r.s.publish(a.channel, allowRefusedText)
+				}
 			}
 		}
 		select {
@@ -255,9 +270,10 @@ func (a *approvals) watch(snap protocol.Snapshot, in protocol.Interaction, stop 
 	}
 }
 
-// deny answers the approval with its reject option. already_resolved means
-// another answer came first: not an error, and nothing to report.
-func (a *approvals) deny(snap protocol.Snapshot, in protocol.Interaction) {
+// deny answers the approval with its reject option and reports whether the
+// answer was handed over. already_resolved means another answer came first:
+// handed over, nothing to report. Any other failure is retried by watch.
+func (a *approvals) deny(snap protocol.Snapshot, in protocol.Interaction) bool {
 	rep, err := a.r.call(&protocol.Command{
 		Schema:        protocol.SchemaCommand,
 		Op:            protocol.OpInteractionRespond,
@@ -267,12 +283,16 @@ func (a *approvals) deny(snap protocol.Snapshot, in protocol.Interaction) {
 		InteractionID: in.InteractionID,
 		Option:        in.RejectOption,
 	})
+	if hasCode(err, protocol.CodeAlreadyResolved) {
+		return true
+	}
 	if err != nil {
-		return
+		return false
 	}
 	a.mu.Lock()
 	a.denied[in.InteractionID] = in.RejectOption
 	denials := a.claimReportsLocked(rep.Snapshot)
 	a.mu.Unlock()
 	a.report(denials)
+	return true
 }
