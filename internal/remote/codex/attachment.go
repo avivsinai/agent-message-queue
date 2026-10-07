@@ -2,6 +2,7 @@ package codex
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -29,12 +30,18 @@ var Version = "dev"
 // turn is refused, never admitted.
 const confirmTimeout = 12 * time.Second
 
-// Approval methods the app-server sends as server requests. Only the
-// command-execution family is answered; the rest stay local-only.
+// Approval methods the app-server sends as server requests. The DM answers
+// the decision approvals and shows the requests below them, which only the
+// terminal answers; the rest stay local-only.
 const (
 	methodCommandApproval    = "item/commandExecution/requestApproval"
 	methodFileChangeApproval = "item/fileChange/requestApproval"
 	methodLegacyExecApproval = "execCommand/approval"
+	// Requests answered with a shape other than {"decision": option}. The
+	// DM shows them, but only the terminal answers them (611.42.8).
+	methodPermissionsApproval = "item/permissions/requestApproval"
+	methodToolUserInput       = "item/tool/requestUserInput"
+	methodMcpElicitation      = "mcpServer/elicitation/request"
 	// methodServerRequestResolved tells every client on the thread that a
 	// server request was answered, by whichever client answered first.
 	methodServerRequestResolved = "serverRequest/resolved"
@@ -1447,6 +1454,15 @@ func (a *Attachment) onItem(n Notification) {
 func (a *Attachment) onServerRequest(req ServerRequest) {
 	switch req.Method {
 	case methodCommandApproval, methodFileChangeApproval, methodLegacyExecApproval:
+	case methodPermissionsApproval, methodToolUserInput, methodMcpElicitation:
+		// 611.42.8: these were dropped, so a turn from the DM waited for a
+		// terminal answer the owner never heard of.
+		a.questionMu.Lock()
+		defer a.questionMu.Unlock()
+		if turnID, inter := a.terminalQuestion(req); inter != nil {
+			a.raiseApproval(turnID, req.ID, inter)
+		}
+		return
 	default:
 		return
 	}
@@ -1472,17 +1488,6 @@ func (a *Attachment) onServerRequest(req ServerRequest) {
 	}
 	if json.Unmarshal(req.Params, &p) != nil || p.ThreadID != a.threadID {
 		return
-	}
-	a.mu.Lock()
-	r, ok := a.byTurn[p.TurnID]
-	if !ok || !a.approve {
-		// Not our run, or approvals not advertised: the local TUI answers.
-		a.mu.Unlock()
-		return
-	}
-	if key := compactID(req.ID); a.resolvedEarly[key] {
-		a.mu.Unlock()
-		return // another client answered it before it reached us
 	}
 	id := p.ApprovalID
 	if id == "" {
@@ -1519,9 +1524,25 @@ func (a *Attachment) onServerRequest(req ServerRequest) {
 		len(prompt) <= protocol.MaxApprovalPreview {
 		approve = offered(options, "accept")
 	}
-	inter := &protocol.Interaction{InteractionID: id, Kind: "approval", Prompt: prompt, Options: options, RemoteAnswer: true,
-		ApproveOption: approve, RejectOption: reject}
-	r.approvalReqs[id] = req.ID
+	a.raiseApproval(p.TurnID, req.ID, &protocol.Interaction{InteractionID: id, Kind: "approval", Prompt: prompt, Options: options,
+		RemoteAnswer: true, ApproveOption: approve, RejectOption: reject})
+}
+
+// raiseApproval makes inter the pending interaction of the run that owns
+// turnID, or queues it behind the pending one. The caller holds questionMu.
+func (a *Attachment) raiseApproval(turnID string, reqID json.RawMessage, inter *protocol.Interaction) {
+	a.mu.Lock()
+	r, ok := a.byTurn[turnID]
+	if !ok || !a.approve {
+		// Not our run, or approvals not advertised: the local TUI answers.
+		a.mu.Unlock()
+		return
+	}
+	if key := compactID(reqID); a.resolvedEarly[key] {
+		a.mu.Unlock()
+		return // another client answered it before it reached us
+	}
+	r.approvalReqs[inter.InteractionID] = reqID
 	if r.interaction != nil {
 		r.queuedApprovals = append(r.queuedApprovals, inter)
 		a.mu.Unlock()
@@ -1531,6 +1552,98 @@ func (a *Attachment) onServerRequest(req ServerRequest) {
 	key, runID := r.key, r.runIDLocked()
 	a.mu.Unlock()
 	a.emit(core.NativeEvent{Type: core.EventQuestion, Key: key, RunID: runID, Interaction: inter})
+}
+
+// terminalQuestion is the interaction for a request only the terminal can
+// answer: what Codex asks, bounded, with no option, so the DM says to answer
+// in the terminal and a remote answer is refused as not offered. It is nil
+// for another thread or an unreadable request. Only the reason, question and
+// message text is shown: a URL or a requested schema may hold more than the
+// owner should see in a DM.
+func (a *Attachment) terminalQuestion(req ServerRequest) (string, *protocol.Interaction) {
+	var p struct {
+		ThreadID string `json:"threadId"`
+		TurnID   string `json:"turnId"`
+		ItemID   string `json:"itemId"`
+		// item/permissions/requestApproval
+		Cwd         string `json:"cwd"`
+		Reason      string `json:"reason"`
+		Permissions struct {
+			FileSystem *struct {
+				Entries []struct {
+					Access string `json:"access"`
+					Path   struct {
+						Path    string `json:"path"`
+						Pattern string `json:"pattern"`
+						Value   struct {
+							Kind string `json:"kind"`
+						} `json:"value"`
+					} `json:"path"`
+				} `json:"entries"`
+				Read  []string `json:"read"`
+				Write []string `json:"write"`
+			} `json:"fileSystem"`
+			Network *struct {
+				Enabled bool `json:"enabled"`
+			} `json:"network"`
+		} `json:"permissions"`
+		// item/tool/requestUserInput
+		Questions []struct {
+			Header   string `json:"header"`
+			Question string `json:"question"`
+		} `json:"questions"`
+		// mcpServer/elicitation/request
+		ServerName string `json:"serverName"`
+		Message    string `json:"message"`
+	}
+	if json.Unmarshal(req.Params, &p) != nil || p.ThreadID != a.threadID {
+		return "", nil
+	}
+	id := p.ItemID
+	var prompt string
+	switch req.Method {
+	case methodPermissionsApproval:
+		var grants []string
+		if fs := p.Permissions.FileSystem; fs != nil {
+			for _, e := range fs.Entries {
+				grants = append(grants, e.Access+" "+cmp.Or(e.Path.Path, e.Path.Pattern, e.Path.Value.Kind))
+			}
+			for _, path := range fs.Read {
+				grants = append(grants, "read "+path)
+			}
+			for _, path := range fs.Write {
+				grants = append(grants, "write "+path)
+			}
+		}
+		if n := p.Permissions.Network; n != nil && n.Enabled {
+			grants = append(grants, "network")
+		}
+		prompt = "Codex asks for permissions:\n" + approvalPrompt(req.Method, strings.Join(grants, "\n"), p.Cwd, p.Reason)
+	case methodToolUserInput:
+		prompt = "Codex asks for input:"
+		for _, q := range p.Questions {
+			if q.Header != "" {
+				prompt += "\n" + q.Header + ": " + q.Question
+			} else {
+				prompt += "\n" + q.Question
+			}
+		}
+	case methodMcpElicitation:
+		// An elicitation has no item id, and its url-mode elicitationId is
+		// the MCP server's own; the JSON-RPC request id is unique here.
+		if json.Unmarshal(req.ID, &id) != nil {
+			id = compactID(req.ID)
+		}
+		prompt = "MCP server " + p.ServerName + " asks: " + p.Message
+	}
+	if id == "" {
+		return "", nil
+	}
+	// The owner sees that a long request was cut, as boundPreview shows it.
+	if text, cut := protocol.TruncateText(prompt, protocol.MaxApprovalPreview); cut {
+		prompt = text + " …[shortened]"
+	}
+	return p.TurnID, &protocol.Interaction{InteractionID: id, Kind: "approval", Prompt: prompt, RemoteAnswer: true}
 }
 
 // result returns the BOUNDED terminal evidence. The bound is owned HERE,
