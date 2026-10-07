@@ -74,7 +74,7 @@ func TestPreparedRootBeforeReceiptStopsResubmit(t *testing.T) {
 		}
 		sent++
 		return nil
-	}, nil); err != nil {
+	}, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if sent != 1 {

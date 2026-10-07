@@ -156,7 +156,7 @@ func TestOutputIsNotSentUnderAnotherRelay(t *testing.T) {
 	moved := r.b
 	moved.RelayHost = "another-relay"
 	sent := 0
-	if err := r.carrier(t, moved).Flush(context.Background(), func(context.Context, nostr.Event) error { sent++; return nil }, nil); err != nil {
+	if err := r.carrier(t, moved).Flush(context.Background(), func(context.Context, nostr.Event) error { sent++; return nil }, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if sent != 0 {
@@ -198,7 +198,7 @@ func TestEditAfterCrashIsDatedStrictlyLater(t *testing.T) {
 			edits = append(edits, evt)
 		}
 		return nil
-	}, nil)
+	}, nil, nil)
 	if len(edits) != 2 || edits[1].CreatedAt <= edits[0].CreatedAt {
 		t.Fatalf("edits = %d, want two strictly later edits", len(edits))
 	}
@@ -260,7 +260,7 @@ func TestOldBindingOutputDoesNotStarveFlush(t *testing.T) {
 		t.Fatal(err)
 	}
 	sent := 0
-	if err := c2.Flush(context.Background(), func(context.Context, nostr.Event) error { sent++; return nil }, nil); err != nil {
+	if err := c2.Flush(context.Background(), func(context.Context, nostr.Event) error { sent++; return nil }, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if sent != 1 {
