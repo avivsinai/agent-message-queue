@@ -616,9 +616,9 @@ func (r *remoteTurn) failed(state string, err error) (any, *rpcError) {
 	if outcome == "session_cancelled" {
 		stopReason = StopReasonCancelled
 	}
-	text := fmt.Sprintf("%s: not submitted (%s): %s", r.meta.Target, r.meta.Code, r.meta.Reason)
+	text := fmt.Sprintf("%s: not submitted (%s): %s", r.meta.Target, r.meta.Code, protocol.InertInline(r.meta.Reason))
 	if state == remoteUncertain {
-		text = fmt.Sprintf("%s: the outcome of request %s is unknown: %s. Do not resend; check it with `amq-remote status %s`.", r.meta.Target, r.meta.RequestRef, r.meta.Reason, r.meta.RequestRef)
+		text = fmt.Sprintf("%s: the outcome of request %s is unknown: %s. Do not resend; check it with `amq-remote status %s`.", r.meta.Target, r.meta.RequestRef, protocol.InertInline(r.meta.Reason), r.meta.RequestRef)
 	}
 	return r.say(postStatus, outcome, stopReason, text)
 }
@@ -733,42 +733,11 @@ func (r *remoteTurn) statusText(snap protocol.Snapshot) string {
 		text += " (" + r.meta.Code + ")"
 	}
 	if r.meta.Reason != "" {
-		text += ": " + inertInline(r.meta.Reason)
+		text += ": " + protocol.InertInline(r.meta.Reason)
 	} else if snap.Result != nil && snap.Result.Error != "" {
-		text += ": " + inertInline(snap.Result.Error)
+		text += ": " + protocol.InertInline(snap.Result.Error)
 	}
 	return text
-}
-
-// inertInline renders adapter-supplied text inert inside a DM body. The DM
-// renderer (Buzz uses remark with remark-gfm) re-interprets plain text:
-// it decodes HTML entities ("&#x202E;" becomes a bidi override) and
-// autolinks URLs (review of #972 r3), so character filtering alone cannot
-// make text safe. A code span is: entities are not decoded and autolinks
-// are not recognized inside one. The fence is a backtick run one longer
-// than the longest run inside the text, padded with one space between the
-// fence and a text that starts or ends with a backtick (CommonMark code
-// span rules). Newlines would end the span's line, but
-// BoundReason and remedyText already removed them from their outputs.
-func inertInline(s string) string {
-	longest := 0
-	run := 0
-	for _, r := range s {
-		if r == '`' {
-			run++
-			if run > longest {
-				longest = run
-			}
-			continue
-		}
-		run = 0
-	}
-	fence := strings.Repeat("`", longest+1)
-	pad := ""
-	if strings.HasPrefix(s, "`") || strings.HasSuffix(s, "`") {
-		pad = " "
-	}
-	return fence + pad + s + pad + fence
 }
 
 func (r *remoteTurn) get() (protocol.Reply, error) {

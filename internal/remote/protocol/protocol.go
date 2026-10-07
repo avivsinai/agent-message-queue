@@ -936,6 +936,39 @@ func BoundReason(s string) string {
 	return out
 }
 
+// InertInline renders adapter-supplied text inert inside a DM body. The DM
+// renderer (Buzz uses remark with remark-gfm) re-interprets plain text: it
+// decodes HTML entities ("&#x202E;" becomes a bidi override) and autolinks
+// URLs, so character filtering alone cannot make text safe. A code span is:
+// entities are not decoded and autolinks are not recognized inside one. The
+// fence is a backtick run one longer than the longest run inside the text,
+// padded with one space between the fence and a text that starts or ends
+// with a backtick (CommonMark code span rules). Newlines would end the
+// span's line, so callers must pass BoundReason output or otherwise
+// newline-free text. Rendering sites that embed adapter text in DM text —
+// snapshot statuses, approval refusals, failed prompt summaries — wrap the
+// fragment; ordinary result bodies stay Markdown.
+func InertInline(s string) string {
+	longest := 0
+	run := 0
+	for _, r := range s {
+		if r == '`' {
+			run++
+			if run > longest {
+				longest = run
+			}
+			continue
+		}
+		run = 0
+	}
+	fence := strings.Repeat("`", longest+1)
+	pad := ""
+	if strings.HasPrefix(s, "`") || strings.HasSuffix(s, "`") {
+		pad = " "
+	}
+	return fence + pad + s + pad + fence
+}
+
 // TruncateText bounds text to at most max bytes on a UTF-8 rune boundary, so
 // no multi-byte rune is split. It reports whether truncation happened. A
 // truncated result must keep its native reference so the full text stays
