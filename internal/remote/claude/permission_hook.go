@@ -184,7 +184,7 @@ func (h permissionHook) run(stdin io.Reader, stdout io.Writer, done <-chan struc
 				// rejected record retires exactly this proof, so a ❌ or a
 				// new ✅ can still answer.
 				option = ""
-				_ = markRejected(h.home, in.SessionID, id, evidence, err)
+				_ = markRejected(h.home, in.SessionID, id, evidence, err.Error())
 				if h.stderr != nil {
 					_, _ = fmt.Fprintf(h.stderr, "amq-remote: ignored a Buzz allow for %s: %v\n", id, err)
 				}

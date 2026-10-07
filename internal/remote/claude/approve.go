@@ -525,33 +525,18 @@ func proofName(interactionID string, evidence json.RawMessage) string {
 	return interactionID + "-" + hex.EncodeToString(sum[:16])
 }
 
-// rejectedRecord is why the hook could not verify one allow: the owner
-// reads it in the DM (611.42.6).
-type rejectedRecord struct {
-	Reason  string `json:"reason"`
-	Altered bool   `json:"altered,omitempty"`
-}
-
 // markRejected records, create-new, that the hook could not verify this
-// allow's evidence, and why.
-func markRejected(home, sessionID, interactionID string, evidence json.RawMessage, why error) error {
+// allow's evidence.
+func markRejected(home, sessionID, interactionID string, evidence json.RawMessage, reason string) error {
 	dir, err := ensureApproveSubdir(home, sessionID, "rejected")
 	if err != nil {
 		return err
 	}
-	err = createNewJSON(dir, proofName(interactionID, evidence), rejectedRecord{Reason: why.Error(), Altered: errors.Is(why, ErrAllowAltered)})
+	err = createNewJSON(dir, proofName(interactionID, evidence), map[string]string{"reason": reason})
 	if errors.Is(err, errFileExists) {
 		return nil
 	}
 	return err
-}
-
-// readRejected reads the hook's record that it could not verify this
-// allow's evidence.
-func readRejected(home, sessionID, interactionID string, evidence json.RawMessage) (rejectedRecord, bool) {
-	var r rejectedRecord
-	err := readApprovalJSON(filepath.Join(approveDir(home, sessionID), "rejected", proofName(interactionID, evidence)), &r)
-	return r, err == nil
 }
 
 // rejected reports whether the hook recorded that it could not verify

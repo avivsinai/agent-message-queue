@@ -197,7 +197,7 @@ func TestApprovalAllowAndDenyAfterARefusedAllowAgree(t *testing.T) {
 	if err := replaceJSON(adir, f.id+".json", approvalAnswer{InteractionID: f.id, ActionHash: req.ActionHash, Option: optionAllow, Evidence: refused}); err != nil {
 		t.Fatal(err)
 	}
-	if err := markRejected(f.home, approvalSession, f.id, refused, context.DeadlineExceeded); err != nil {
+	if err := markRejected(f.home, approvalSession, f.id, refused, context.DeadlineExceeded.Error()); err != nil {
 		t.Fatal(err)
 	}
 	allowed := make(chan protocol.Code, 1)

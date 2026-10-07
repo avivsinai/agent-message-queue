@@ -550,10 +550,7 @@ func (a *Attachment) RespondWithEvidence(key requests.Key, _, interactionID, opt
 	if err != nil {
 		return "", err
 	}
-	if code, err := a.publishAnswer(adir, ans, isRejected); code != "" || err != nil || option != optionAllow {
-		return code, err
-	}
-	return "", a.awaitHookVerdict(sessionID, ans, hookPID)
+	return a.publishAnswer(adir, ans, isRejected)
 }
 
 // publishAnswer writes ans as the answer file. The file on disk is read
@@ -591,30 +588,6 @@ func (a *Attachment) publishAnswer(adir string, ans approvalAnswer, isRejected f
 	return "", nil
 }
 
-// hookVerdictPoll is how often awaitHookVerdict reads the hook's files.
-const hookVerdictPoll = 50 * time.Millisecond
-
-// awaitHookVerdict waits for the hook to take the allow just written: it
-// claims the call, or it refuses the proof, which is the owner's reply in
-// the DM with why and that a new ✅ can retry (611.42.6, independent review
-// of #936 r3); the endpoint then drops the answer intent. The hook reads
-// answers every poll and verifies within allowVerifyTimeout, so the wait
-// ends by then, or when the hook is gone; a nil error leaves the outcome to
-// the resolved file.
-func (a *Attachment) awaitHookVerdict(sessionID string, ans approvalAnswer, hookPID int) error {
-	resolved := filepath.Join(approveDir(a.home, sessionID), "resolved", ans.InteractionID+".json")
-	until := time.Now().Add(allowVerifyTimeout + time.Second)
-	for {
-		if r, ok := readRejected(a.home, sessionID, ans.InteractionID, ans.Evidence); ok {
-			return verifyRefusal(r.Reason, r.Altered)
-		}
-		if resolvedExists(resolved) || hookDead(hookPID) || !time.Now().Before(until) {
-			return nil
-		}
-		time.Sleep(hookVerdictPoll)
-	}
-}
-
 // verifyBeforeAnswer runs the pinned verifier on an allow's evidence. A
 // failure is a refusal with the owner-facing reason: an altered message is
 // final, anything else can be retried with a new ✅.
@@ -633,20 +606,13 @@ func verifyBeforeAnswer(factory func(HookPin) AllowConfig, pin HookPin, sessionI
 	want.Share = share
 	ctx, cancel := context.WithTimeout(context.Background(), allowVerifyTimeout)
 	defer cancel()
-	if err := cfg.Verify(ctx, evidence, want); err != nil {
-		return verifyRefusal(err.Error(), errors.Is(err, ErrAllowAltered))
+	switch err := cfg.Verify(ctx, evidence, want); {
+	case errors.Is(err, ErrAllowAltered):
+		return protocol.Refuse(protocol.CodeInvalid, "%s", alteredReply)
+	case err != nil:
+		return protocol.Refuse(protocol.CodeNativeError, "%s", retryReply(err.Error()))
 	}
 	return nil
-}
-
-// verifyRefusal is the owner-facing refusal of an allow that did not
-// verify: an altered message is final, anything else can be retried with a
-// new ✅.
-func verifyRefusal(reason string, altered bool) error {
-	if altered {
-		return protocol.Refuse(protocol.CodeInvalid, "%s", alteredReply)
-	}
-	return protocol.Refuse(protocol.CodeNativeError, "%s", retryReply(reason))
 }
 
 // allowVerifyTimeout bounds one verification, relay reads included.

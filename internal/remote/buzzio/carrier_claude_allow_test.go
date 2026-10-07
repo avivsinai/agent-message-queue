@@ -217,9 +217,7 @@ func TestClaudeAllowRetriesAfterAFailedVerification(t *testing.T) {
 
 // Pro review of #936 r2, P2: the endpoint verified an allow, then the
 // hook's own verification failed, and a ❌ could no longer land. The hook
-// retires exactly that proof, so the ❌ that follows denies. 611.42.6
-// (independent review of #936 r3): the owner got no DM about the refusal;
-// the DM now says why and to react again.
+// retires exactly that proof, so the ❌ that follows denies.
 func TestClaudeDenyLandsAfterTheHookRefusesAnAllow(t *testing.T) {
 	e := newClaudeApprovalE2EWith(t, true, "go test ./...")
 	e.hookDown.Store(true)
@@ -230,10 +228,6 @@ func TestClaudeDenyLandsAfterTheHookRefusesAnAllow(t *testing.T) {
 		if time.Now().After(deadline) {
 			t.Fatal("the hook never refused the allow")
 		}
-	}
-	e.flush()
-	if !e.replied("Could not verify the approval: ") || !e.replied("React again to retry.") {
-		t.Fatalf("sent = %+v, want the hook's refusal and the retry reply in the DM", e.sent)
 	}
 	if err := e.c.IngestReaction(e.reaction(e.owner, "❌", e.msg.ID.Hex(), e.advance())); err != nil {
 		t.Fatal(err)
