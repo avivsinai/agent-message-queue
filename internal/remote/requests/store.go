@@ -78,6 +78,14 @@ type Record struct {
 	// changes. Compaction waits for it.
 	OwedOutcomes []string `json:"owed_outcomes,omitempty"`
 
+	// RetiredOutcomes is the interaction ids whose owed outcome the
+	// retention horizon retired (bead 611.45): no resolver produced it, so
+	// the record shows the explicit uncertain delivery_unknown resolution
+	// and compaction no longer waits. A retired outcome stays correctable
+	// until the record compacts: an exact native resolution replaces the
+	// uncertain one, and recovery keeps asking the resolver for retired ids.
+	RetiredOutcomes []string `json:"retired_outcomes,omitempty"`
+
 	// AckDigest is the evidence digest of the last acknowledgement sent to the
 	// native attachment for a terminal record, written BEFORE the native
 	// AcknowledgeResult call. It is the digest of the retained evidence being
@@ -695,6 +703,9 @@ func (s *Store) CompactOne(key Key, before time.Time) (bool, error) {
 	if !rec.State.Terminal() || rec.Tombstone || rec.OwesAck() || rec.PublishedRevision < rec.Revision || len(rec.OwedOutcomes) > 0 {
 		return false, nil
 	}
+	// A retired outcome no longer gates compaction (611.45 r2 P1): the
+	// record already shows the explicit uncertain resolution, and a late
+	// exact native resolution still corrects it while the record lives.
 	observed, err := protocol.ParseTime(rec.ObservedAt)
 	if err != nil || !observed.Before(before) {
 		return false, nil

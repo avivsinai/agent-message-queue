@@ -101,6 +101,140 @@ func TestOwedOutcomeRetention(t *testing.T) {
 	}
 }
 
+// The horizon retires even when the target is GONE or its attachment has no
+// InteractionResolver (611.45 r2 P2): a record that survives a restart after
+// its target disappeared must not stay pinned forever.
+func TestOwedOutcomeRetiresWithUnregisteredTarget(t *testing.T) {
+	store, now := openStore(t)
+	clk := now()
+	rt := fake.New("fake", "e_1")
+	att := &silentResolver{Attachment: rt, res: map[string]protocol.Resolution{}}
+	ep := core.New(core.Config{Store: store, Now: func() time.Time { return clk }})
+	ep.Register(att)
+
+	id := "11111111-1111-4111-8111-111111111147"
+	if _, err := ep.Handle(submitCmd(id), ownerShare); err != nil {
+		t.Fatal(err)
+	}
+	rt.Question(id, "i_3", []string{"yes", "no"})
+	rt.Complete(id, "done")
+	if err := ep.Reconcile(); err != nil {
+		t.Fatal(err)
+	}
+
+	// The target disappears entirely: unregistered, no resolver anywhere.
+	ep.UnregisterAll()
+	key := requests.Key{CreatorHost: "local", TargetID: "fake", RequestID: id}
+	clk = clk.Add(protocol.DefaultCompactHorizon + time.Minute)
+	if err := ep.Reconcile(); err != nil {
+		t.Fatal(err)
+	}
+	rec, _, err := store.Get(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rec.OwedOutcomes) != 0 || len(rec.RetiredOutcomes) != 1 {
+		t.Fatalf("after the horizon with no target: owed=%v retired=%v, want the obligation retired", rec.OwedOutcomes, rec.RetiredOutcomes)
+	}
+	if ok, err := store.CompactOne(key, clk.Add(time.Minute)); err != nil || !ok {
+		t.Fatalf("compact after retirement without a target: ok=%v err=%v, want compacted", ok, err)
+	}
+}
+
+// A resolution that arrives between recovery's unlocked resolver lookup and
+// its locked update is not retired behind its own resolution, and a
+// resolution that arrives after retirement still corrects the record: the
+// resolver-reported answered outcome replaces the uncertain one (611.45 r2
+// P1, resolver-only correction).
+func TestOwedOutcomeCorrectableAfterRetirement(t *testing.T) {
+	store, now := openStore(t)
+	clk := now()
+	rt := fake.New("fake", "e_1")
+	att := &silentResolver{Attachment: rt, res: map[string]protocol.Resolution{}}
+	ep := core.New(core.Config{Store: store, Now: func() time.Time { return clk }})
+	ep.Register(att)
+
+	id := "11111111-1111-4111-8111-111111111148"
+	if _, err := ep.Handle(submitCmd(id), ownerShare); err != nil {
+		t.Fatal(err)
+	}
+	rt.Question(id, "i_4", []string{"yes", "no"})
+	rt.Complete(id, "done")
+	key := requests.Key{CreatorHost: "local", TargetID: "fake", RequestID: id}
+
+	// Past the horizon the obligation retires as delivery_unknown.
+	clk = clk.Add(protocol.DefaultCompactHorizon + time.Minute)
+	if err := ep.Reconcile(); err != nil {
+		t.Fatal(err)
+	}
+	rec, _, err := store.Get(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rec.RetiredOutcomes) != 1 || rec.RetiredOutcomes[0] != "i_4" {
+		t.Fatalf("retired outcomes = %v, want [i_4]", rec.RetiredOutcomes)
+	}
+	want := protocol.Resolution{InteractionID: "i_4", Outcome: protocol.ResolutionDeliveryUnknown}
+	if len(rec.Resolved) == 0 || rec.Resolved[len(rec.Resolved)-1] != want {
+		t.Fatalf("resolved = %+v, want the retention resolution", rec.Resolved)
+	}
+
+	// The resolver gains the exact outcome afterwards; recovery corrects.
+	att.resolve("i_4", protocol.Resolution{InteractionID: "i_4", Outcome: protocol.ResolutionAnswered, Option: "yes"})
+	if err := ep.Reconcile(); err != nil {
+		t.Fatal(err)
+	}
+	rec, _, _ = store.Get(key)
+	want = protocol.Resolution{InteractionID: "i_4", Outcome: protocol.ResolutionAnswered, Option: "yes"}
+	if len(rec.RetiredOutcomes) != 0 || len(rec.Resolved) == 0 || rec.Resolved[len(rec.Resolved)-1] != want {
+		t.Fatalf("after a correcting reconcile: retired=%v resolved=%+v, want %+v", rec.RetiredOutcomes, rec.Resolved, want)
+	}
+}
+
+// A late native EventQuestionResolved after retirement corrects the record
+// even though recovery no longer owes the id (611.45 r2 P1, native-event
+// correction): the answered outcome replaces the uncertain one.
+func TestRetiredOutcomeCorrectedByLateNativeResolution(t *testing.T) {
+	store, now := openStore(t)
+	clk := now()
+	rt := fake.New("fake", "e_1")
+	att := &silentResolver{Attachment: rt, res: map[string]protocol.Resolution{}}
+	ep := core.New(core.Config{Store: store, Now: func() time.Time { return clk }})
+	ep.Register(att)
+
+	id := "11111111-1111-4111-8111-111111111149"
+	if _, err := ep.Handle(submitCmd(id), ownerShare); err != nil {
+		t.Fatal(err)
+	}
+	rt.Question(id, "i_5", []string{"yes", "no"})
+	rt.Complete(id, "done")
+	key := requests.Key{CreatorHost: "local", TargetID: "fake", RequestID: id}
+
+	// Retire past the horizon with a silent resolver.
+	clk = clk.Add(protocol.DefaultCompactHorizon + time.Minute)
+	if err := ep.Reconcile(); err != nil {
+		t.Fatal(err)
+	}
+	rec, _, _ := store.Get(key)
+	if len(rec.RetiredOutcomes) != 1 || rec.RetiredOutcomes[0] != "i_5" {
+		t.Fatalf("retired outcomes = %v, want [i_5]", rec.RetiredOutcomes)
+	}
+
+	// The harness then reports how the interaction really ended: a native
+	// exact resolution must replace the uncertain one, not be dropped.
+	if !rt.ResolveOutcome(id, "i_5", protocol.ResolutionAnswered, "yes") {
+		t.Fatal("fake could not emit the late resolution")
+	}
+	rec, _, _ = store.Get(key)
+	want := protocol.Resolution{InteractionID: "i_5", Outcome: protocol.ResolutionAnswered, Option: "yes"}
+	if len(rec.RetiredOutcomes) != 0 || len(rec.Resolved) == 0 || rec.Resolved[len(rec.Resolved)-1] != want {
+		t.Fatalf("after the late native event: retired=%v resolved=%+v, want %+v", rec.RetiredOutcomes, rec.Resolved, want)
+	}
+	if rec.State != protocol.StateCompleted || rec.Result == nil || rec.Result.Text != "done" {
+		t.Fatalf("the correction changed the terminal record: state=%s result=%+v", rec.State, rec.Result)
+	}
+}
+
 // The resolvable case is unchanged: an outcome the resolver reports settles
 // normally on Reconcile, inside the horizon, with the exact resolution.
 func TestOwedOutcomeStillSettlesNormally(t *testing.T) {

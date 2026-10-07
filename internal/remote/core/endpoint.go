@@ -1280,10 +1280,11 @@ func (e *Endpoint) onNative(targetID string, ev NativeEvent) {
 		// Pro #5: route through transitionLocked.
 		e.transitionLocked(rec, causeNone, nativeEvidence{interaction: ev.Interaction})
 	case EventQuestionResolved:
-		if ev.Interaction != nil && ev.Outcome != "" && owes(rec, ev.Interaction.InteractionID) {
-			// A late exact resolution settles an owed outcome, terminal
-			// record or not; the run's state does not change.
-			settleOwed(rec, protocol.Resolution{InteractionID: ev.Interaction.InteractionID, Outcome: ev.Outcome, Option: ev.Option})
+		if ev.Interaction != nil && ev.Outcome != "" && (owes(rec, ev.Interaction.InteractionID) || slices.Contains(rec.RetiredOutcomes, ev.Interaction.InteractionID)) {
+			// A late exact resolution settles an owed outcome — or corrects a
+			// retention-retired one (611.45 r2 P1) — terminal record or not;
+			// the run's state does not change.
+			settleOwedNative(rec, protocol.Resolution{InteractionID: ev.Interaction.InteractionID, Outcome: ev.Outcome, Option: ev.Option})
 			break
 		}
 		if rec.State.Terminal() || (ev.Interaction != nil && (rec.Interaction == nil || rec.Interaction.InteractionID != ev.Interaction.InteractionID)) {
@@ -1523,7 +1524,9 @@ func owes(rec *requests.Record, id string) bool {
 }
 
 // settleOwed records an owed outcome as given and clears the obligation.
-// It is idempotent: an id no longer owed changes nothing.
+// It is idempotent: an id no longer owed changes nothing. The native-event
+// path uses it; recovery's late corrections go through settleOwedNative,
+// which also accepts retired ids.
 func settleOwed(rec *requests.Record, r protocol.Resolution) bool {
 	if !owes(rec, r.InteractionID) {
 		return false
@@ -1544,62 +1547,143 @@ func settleOwed(rec *requests.Record, r protocol.Resolution) bool {
 // silently. A resolvable owed outcome still settles normally on Reconcile.
 const owedOutcomeRetention = protocol.DefaultCompactHorizon
 
-// recoverOwedOutcomes asks the record's resolver for every owed outcome,
-// outside the lock, and records each one it has. It never changes the
-// record's state. An owed outcome whose record has been terminal longer
-// than owedOutcomeRetention and that no resolver ever produced is retired:
-// it is recorded as delivery_unknown and the obligation clears, so
-// compaction can proceed.
+// retireOutcomeLocked replaces an owed outcome's obligation with an explicit
+// uncertain resolution (bead 611.45). It runs inside the locked update that
+// retires: the obligation moves to RetiredOutcomes (so recovery keeps asking
+// the resolver and a late exact resolution can still correct this), and the
+// record shows delivery_unknown with a visible provenance instead of pinning
+// compaction forever. It is idempotent and refuses an id that a native
+// resolution already settled between the unlocked lookup and this lock.
+func retireOutcomeLocked(rec *requests.Record, id string) bool {
+	if resolvedIn(rec.Resolved, id) {
+		return false
+	}
+	rec.OwedOutcomes = slices.DeleteFunc(rec.OwedOutcomes, func(owed string) bool { return owed == id })
+	if !slices.Contains(rec.RetiredOutcomes, id) {
+		rec.RetiredOutcomes = append(rec.RetiredOutcomes, id)
+	}
+	recordRetainedResolution(rec, id)
+	return true
+}
+
+// recordRetainedResolution records the retention outcome for a retired id.
+// Unlike recordResolution it REPLACES an earlier retention resolution for
+// the same id in place (it is provisional, not final); a native resolution
+// never routes through here.
+func recordRetainedResolution(rec *requests.Record, id string) {
+	r := protocol.Resolution{InteractionID: id, Outcome: protocol.ResolutionDeliveryUnknown}
+	for i, cur := range rec.Resolved {
+		if cur.InteractionID == id && cur.Outcome == protocol.ResolutionDeliveryUnknown {
+			rec.Resolved[i] = r
+			return
+		}
+	}
+	rec.Resolved = append(rec.Resolved, r)
+	if n := len(rec.Resolved); n > protocol.MaxResolutions {
+		rec.Resolved = append([]protocol.Resolution(nil), rec.Resolved[n-protocol.MaxResolutions:]...)
+	}
+}
+
+// settleOwedNative records an exact native resolution for an owed OR retired
+// outcome (bead 611.45 r2 P1): a retired outcome stays correctable until the
+// record compacts, so a real answered/elsewhere outcome arriving after the
+// horizon replaces the uncertain one. Returns false when the id was never
+// owed or retired, or a native resolution already recorded it.
+func settleOwedNative(rec *requests.Record, r protocol.Resolution) bool {
+	if !owes(rec, r.InteractionID) && !slices.Contains(rec.RetiredOutcomes, r.InteractionID) {
+		return false
+	}
+	for _, cur := range rec.Resolved {
+		if cur.InteractionID == r.InteractionID && cur.Outcome != protocol.ResolutionDeliveryUnknown {
+			// A native resolution already recorded for this id (e.g. a
+			// duplicate event): nothing to correct.
+			return false
+		}
+	}
+	// Drop the provisional retention resolution, then record the exact one.
+	rec.Resolved = slices.DeleteFunc(rec.Resolved, func(cur protocol.Resolution) bool {
+		return cur.InteractionID == r.InteractionID && cur.Outcome == protocol.ResolutionDeliveryUnknown
+	})
+	rec.OwedOutcomes = slices.DeleteFunc(rec.OwedOutcomes, func(id string) bool { return id == r.InteractionID })
+	rec.RetiredOutcomes = slices.DeleteFunc(rec.RetiredOutcomes, func(id string) bool { return id == r.InteractionID })
+	recordResolution(rec, r.InteractionID, nativeEvidence{clearInteraction: true, outcome: r.Outcome, option: r.Option})
+	return true
+}
+
+// recoverOwedOutcomes settles every outcome the record's resolver can
+// produce and retires every one the retention horizon has outrun. It never
+// changes the record's state.
+//
+// The resolver is OPTIONAL (611.45 r2 P2): a target that is unregistered or
+// whose attachment implements no InteractionResolver can never settle an
+// owed outcome, so the horizon still retires it — the exact case the bead
+// exists for is a record that survives a restart after its target
+// disappeared. With a resolver, each owed id is asked outside the lock; the
+// final ask for an id about to be retired runs again INSIDE the locked
+// update, so an outcome the resolver gains between the two cannot be
+// retired behind its own resolution.
+//
+// A retired outcome stays correctable (611.45 r2 P1): recovery keeps asking
+// the resolver for retired ids until the record compacts, and a late exact
+// native resolution replaces the uncertain one. Compaction no longer waits
+// on retired ids.
 func (e *Endpoint) recoverOwedOutcomes(rec *requests.Record) error {
 	key := keyOfRecord(rec)
 	e.mu.Lock()
 	t, ok := e.targets[rec.TargetID]
 	e.mu.Unlock()
-	if !ok {
-		return nil
+	var resolver InteractionResolver
+	if ok {
+		resolver, _ = t.att.(InteractionResolver)
 	}
-	resolver, isResolver := t.att.(InteractionResolver)
-	if !isResolver {
-		return nil
-	}
-	var found []protocol.Resolution
-	var expired []string
-	for _, id := range rec.OwedOutcomes {
-		if res, done := resolver.ResolvedInteraction(key, rec.Epoch, id); done && res.InteractionID == id {
-			found = append(found, res)
-			continue
-		}
-		// No resolution yet: past the retention horizon the seam's silence
-		// becomes the durable answer — an explicit uncertain resolution, so
-		// the obligation is retired with a visible reason instead of pinning
-		// the record against compaction forever.
-		observed, err := protocol.ParseTime(rec.ObservedAt)
-		if err == nil && e.now().Sub(observed) >= owedOutcomeRetention {
-			expired = append(expired, id)
+
+	// One unlocked ask per id (owed and retired: retired ids stay
+	// correctable), then a locked pass that settles what the asks found and
+	// retires what the horizon has outrun, re-checking the resolver inside
+	// the lock for each id it is about to retire.
+	resolutions := make(map[string]protocol.Resolution, len(rec.OwedOutcomes)+len(rec.RetiredOutcomes))
+	if resolver != nil {
+		for _, id := range append(slices.Clone(rec.OwedOutcomes), rec.RetiredOutcomes...) {
+			if res, done := resolver.ResolvedInteraction(key, rec.Epoch, id); done && res.InteractionID == id {
+				resolutions[id] = res
+			}
 		}
 	}
-	if len(found) == 0 && len(expired) == 0 {
-		return nil
-	}
+
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	cur, exists, err := e.store.Get(key)
 	if err != nil || !exists {
 		return err
 	}
+	observed, perr := protocol.ParseTime(rec.ObservedAt)
+	pastHorizon := perr == nil && e.now().Sub(observed) >= owedOutcomeRetention
 	changed := false
-	for _, r := range found {
-		changed = settleOwed(cur, r) || changed
+	for _, r := range resolutions {
+		// settleOwedNative re-checks against the fresh record: a concurrent
+		// write may have settled the obligation already.
+		if settleOwedNative(cur, r) {
+			changed = true
+		}
 	}
-	for _, id := range expired {
-		// Re-check against the fresh record: a concurrent write may have
-		// settled the obligation; only retire what is still owed.
-		if !owes(cur, id) || resolvedIn(cur.Resolved, id) {
+	for _, id := range append(slices.Clone(cur.OwedOutcomes), cur.RetiredOutcomes...) {
+		if !pastHorizon || resolvedIn(cur.Resolved, id) {
 			continue
 		}
-		cur.OwedOutcomes = slices.DeleteFunc(cur.OwedOutcomes, func(owed string) bool { return owed == id })
-		recordResolution(cur, id, nativeEvidence{clearInteraction: true, outcome: protocol.ResolutionDeliveryUnknown})
-		changed = true
+		if resolver != nil {
+			// Final ask inside the locked update: the resolver may have
+			// gained the outcome between the unlocked lookup and now.
+			if res, done := resolver.ResolvedInteraction(key, rec.Epoch, id); done && res.InteractionID == id {
+				if settleOwedNative(cur, res) {
+					changed = true
+				}
+				continue
+			}
+		}
+		if owes(cur, id) && retireOutcomeLocked(cur, id) {
+			changed = true
+		}
+		// An already-retired id with no resolution has nothing to change.
 	}
 	if !changed {
 		return nil
@@ -2003,7 +2087,9 @@ func (e *Endpoint) Reconcile() error {
 				rerr = e.replayTerminalAck(rec)
 			}
 		default:
-			if len(rec.OwedOutcomes) > 0 {
+			if len(rec.OwedOutcomes) > 0 || len(rec.RetiredOutcomes) > 0 {
+				// Retired outcomes stay correctable until compaction (611.45
+				// r2 P1), so recovery keeps asking the resolver for them too.
 				if rerr = e.recoverOwedOutcomes(rec); rerr != nil {
 					break
 				}
