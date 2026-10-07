@@ -289,12 +289,13 @@ func writeSteerOnce(claim steerClaim, eventID, text string, mayWrite func() bool
 	}
 	defer func() { _ = root.Close() }()
 	name := claim.MessageID + ".md"
-	for _, dir := range []string{fsq.AgentInboxNew(claim.Root, claim.Handle), fsq.AgentInboxCur(claim.Root, claim.Handle)} {
-		if _, err := os.Lstat(filepath.Join(dir, name)); err == nil {
-			return out, nil
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return Delivery{}, err
-		}
+	// Only a readable message with this id, read through the pinned root,
+	// proves the earlier delivery: a directory or a dangling link at the
+	// name is not one (agent-message-queue-u1e).
+	if held, err := inboxHasMessage(root, claim.Handle, claim.MessageID); err != nil {
+		return Delivery{}, err
+	} else if held {
+		return out, nil
 	}
 	if !mayWrite() {
 		return Delivery{}, errSteerTurnOver
