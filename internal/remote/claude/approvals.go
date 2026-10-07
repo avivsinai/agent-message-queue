@@ -522,13 +522,10 @@ func (a *Attachment) RespondWithEvidence(key requests.Key, _, interactionID, opt
 	a.mu.Unlock()
 
 	dir := approveDir(a.home, sessionID)
-	replace := false
 	isRejected := func(ev json.RawMessage) bool { return rejected(a.home, sessionID, interactionID, ev) }
 	switch disk := answerOnDisk(filepath.Join(dir, "answers", interactionID+".json"), ans, isRejected); disk {
 	case answerSame:
 		return "", nil
-	case answerNewProof, answerRetired:
-		replace = true // an allow with other evidence, or one the hook refused
 	case answerRefusedProof:
 		return "", protocol.Refuse(protocol.CodeNativeError, "%s", retryReply("the approval hook could not verify it"))
 	case answerOther:
@@ -553,19 +550,37 @@ func (a *Attachment) RespondWithEvidence(key requests.Key, _, interactionID, opt
 	if err != nil {
 		return "", err
 	}
-	if replace {
-		if err := replaceJSON(adir, interactionID+".json", ans); err != nil {
-			return "", err
-		}
+	return a.publishAnswer(adir, ans, isRejected)
+}
+
+// publishAnswer writes ans as the answer file. The file on disk is read
+// again and written under a.mu, after the allow's verification: of a ✅ and
+// a ❌ that both found an allow the hook refused, the first write stands
+// and the other is already_resolved, so the endpoint keeps the answer that
+// is on disk (611.42.6, independent review of #936 r3). The file is tiny,
+// as in arbitrateLocked.
+func (a *Attachment) publishAnswer(adir string, ans approvalAnswer, isRejected func(json.RawMessage) bool) (protocol.Code, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	name := ans.InteractionID + ".json"
+	switch answerOnDisk(filepath.Join(adir, name), ans, isRejected) {
+	case answerSame:
 		return "", nil
+	case answerNewProof, answerRetired:
+		// An allow with other evidence, or one the hook refused.
+		return "", replaceJSON(adir, name, ans)
+	case answerRefusedProof:
+		return "", protocol.Refuse(protocol.CodeNativeError, "%s", retryReply("the approval hook could not verify it"))
+	case answerOther:
+		return protocol.CodeAlreadyResolved, nil
 	}
-	if err := createNewJSON(adir, interactionID+".json", ans); err != nil {
+	if err := createNewJSON(adir, name, ans); err != nil {
 		if !errors.Is(err, errFileExists) {
 			return "", err
 		}
 		// Another writer published first: the same answer is delivered,
 		// any other answer on disk stands as the first.
-		if answerOnDisk(filepath.Join(adir, interactionID+".json"), ans, isRejected) == answerSame {
+		if answerOnDisk(filepath.Join(adir, name), ans, isRejected) == answerSame {
 			return "", nil
 		}
 		return protocol.CodeAlreadyResolved, nil

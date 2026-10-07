@@ -261,10 +261,11 @@ func (h permissionHook) answer(path string, req approvalRequest) (string, json.R
 	return answerIgnored, nil
 }
 
-// verifyAllow runs the verifier on evidence; Claude ending the hook
-// cancels it.
+// verifyAllow runs the verifier on evidence within allowVerifyTimeout,
+// relay sign-in and history read included, so an unreachable relay never
+// holds the hook while a ❌ waits; Claude ending the hook cancels it too.
 func (h permissionHook) verifyAllow(evidence json.RawMessage, want AllowCheck, done <-chan struct{}) error {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), allowVerifyTimeout)
 	defer cancel()
 	go func() {
 		select {
