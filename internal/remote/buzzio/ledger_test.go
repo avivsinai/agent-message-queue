@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 )
 
 // 611.16: a claim and a prepared output are created once and replayed
@@ -35,7 +36,7 @@ func TestLedgerReplaysClaimsAndPreparedOutputVerbatim(t *testing.T) {
 	if err != nil || len(pending) != 1 {
 		t.Fatalf("pending = %v err=%v, want one", pending, err)
 	}
-	if err := l.MarkAccepted("row/ref-1/1"); err != nil {
+	if err := l.MarkAccepted("row/ref-1/1", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	if pending, _ := l.Pending(); len(pending) != 0 {

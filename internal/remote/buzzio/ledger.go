@@ -170,6 +170,9 @@ type Outbound struct {
 	// only while the current share is the same (codex #866 r2 #4).
 	Binding  ShareBinding `json:"binding"`
 	Accepted bool         `json:"accepted"`
+	// AcceptedAt is the second the relay's positive OK was seen: a typed
+	// answer must be later to refer to this output (611.42.7).
+	AcceptedAt int64 `json:"accepted_at,omitempty"`
 	// Refused is the relay's last negative OK for an output still owed:
 	// a refusal describes that attempt only, so the output is retried after
 	// a backoff and is never given up (agent-message-queue-611.58).
@@ -230,8 +233,8 @@ func (o Outbound) Due(now time.Time) bool {
 }
 
 // MarkAccepted records the relay's matching positive OK for key.
-func (l *Ledger) MarkAccepted(key string) error {
-	return l.updateOwed(key, func(o *Outbound) { o.Accepted = true })
+func (l *Ledger) MarkAccepted(key string, at time.Time) error {
+	return l.updateOwed(key, func(o *Outbound) { o.Accepted, o.AcceptedAt = true, at.Unix() })
 }
 
 // maxRefusedReason bounds the relay reason kept on a refused output.

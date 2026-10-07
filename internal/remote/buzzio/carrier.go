@@ -703,22 +703,44 @@ func typedAnswer(text string) string {
 // approval the owner could not yet have seen is never answered (Pro review
 // of #970).
 func (c *Carrier) openApproval(evt nostr.Event) (string, Approval, bool, error) {
-	msgID := threadRoot(evt)
-	if _, ok, err := c.ledger.ApprovalFor(msgID); err != nil || !ok {
+	// A threaded reply refers only to the message it names: the parent it
+	// replies to first, then its thread root. It never falls back to another
+	// pending approval (Pro review of #970, round 2).
+	msgID := ""
+	threaded := false
+	for _, marker := range []string{"reply", "root", ""} {
+		for _, t := range evt.Tags {
+			if len(t) < 2 || t[0] != "e" || !validHexID(t[1]) || len(t) >= 4 && t[3] != marker || len(t) < 4 && marker != "" {
+				continue
+			}
+			threaded = true
+			if _, ok, err := c.ledger.ApprovalFor(t[1]); err != nil {
+				return "", Approval{}, false, err
+			} else if ok && msgID == "" {
+				msgID = t[1]
+			}
+		}
+	}
+	if threaded && msgID == "" {
+		return "", Approval{}, false, nil
+	}
+	if !threaded {
 		s, err := c.inspect()
 		if err != nil || s.PendingInteraction == nil || s.ActiveRequestRef == nil {
 			return "", Approval{}, false, nil
 		}
 		posted, ok, err := c.ledger.Prepared(approvalKey(*s.ActiveRequestRef, *s.PendingInteraction))
-		if err != nil || !ok || !posted.Accepted {
+		if err != nil || !ok || !posted.Accepted || posted.AcceptedAt == 0 {
 			return "", Approval{}, false, err
+		}
+		// Typed after the relay accepted the message, so the owner could
+		// have seen it; one second covers the timestamps' precision.
+		if int64(evt.CreatedAt) <= posted.AcceptedAt {
+			return "", Approval{}, false, nil
 		}
 		var msg nostr.Event
 		if err := json.Unmarshal(posted.Event, &msg); err != nil {
 			return "", Approval{}, false, err
-		}
-		if evt.CreatedAt < msg.CreatedAt {
-			return "", Approval{}, false, nil
 		}
 		msgID = msg.ID.Hex()
 	}
@@ -1188,7 +1210,7 @@ func (c *Carrier) Flush(ctx context.Context, pub Publisher, gate func() error) e
 		switch {
 		case err == nil:
 			c.mu.Lock()
-			err = c.ledger.MarkAccepted(o.Key)
+			err = c.ledger.MarkAccepted(o.Key, c.now())
 			c.mu.Unlock()
 		case errors.As(err, &remote) && errors.Is(remote.Kind, relay.ErrRejected):
 			waiting[group] = true

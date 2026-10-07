@@ -169,21 +169,25 @@ func TestApprovalAnsweredByTypedReply(t *testing.T) {
 		return evt
 	}
 
-	// Not yet delivered: the owner cannot have seen it, so yes is a prompt.
+	// Typed before the relay accepted the approval: the owner cannot have
+	// seen it, so yes is a prompt even when it arrives after delivery.
 	show(2, "item-7")
-	if err := c.Ingest(typed("yes")); err != nil {
+	early := typed("yes")
+	now = now.Add(time.Second)
+	flush()
+	if err := c.Ingest(early); err != nil {
 		t.Fatal(err)
 	}
 	if answered != nil || submits != 2 {
-		t.Fatalf("undelivered approval: answered %+v, submits %d; want a prompt", answered, submits)
+		t.Fatalf("approval not yet delivered when typed: answered %+v, submits %d; want a prompt", answered, submits)
 	}
-	flush()
 	msgA, _, _ := ledger.Prepared(approvalKey(ref, "item-7"))
 	var a nostr.Event
 	_ = json.Unmarshal(msgA.Event, &a)
 
-	// In the approval's thread, no rejects that approval.
-	if err := c.Ingest(typed("no", nostr.Tag{"e", a.ID.Hex(), "", "root"})); err != nil {
+	// In the approval's thread (root is the prompt, reply is the approval,
+	// as Buzz threads it), no rejects that approval.
+	if err := c.Ingest(typed("no", nostr.Tag{"e", dm.ID.Hex(), "", "root"}, nostr.Tag{"e", a.ID.Hex(), "", "reply"})); err != nil {
 		t.Fatal(err)
 	}
 	if answered == nil || answered.InteractionID != "item-7" || answered.Option != "cancel" {
@@ -214,6 +218,16 @@ func TestApprovalAnsweredByTypedReply(t *testing.T) {
 	}
 	if answered == nil || answered.InteractionID != "item-7" {
 		t.Fatalf("replay answered %+v, want only its first decision for item-7", answered)
+	}
+
+	// A reply in the old approval's thread still names that approval; it
+	// never selects item-8, which is pending now.
+	answered = nil
+	if err := c.Ingest(typed("yes", nostr.Tag{"e", dm.ID.Hex(), "", "root"}, nostr.Tag{"e", a.ID.Hex(), "", "reply"})); err != nil {
+		t.Fatal(err)
+	}
+	if answered == nil || answered.InteractionID != "item-7" {
+		t.Fatalf("reply to the old approval answered %+v, want item-7 only", answered)
 	}
 }
 
