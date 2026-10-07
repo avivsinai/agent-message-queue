@@ -136,14 +136,133 @@ func coopNamedTUIManualReminder(name, binaryBase, reason string) string {
 // codexDaemonNamingTimeout bounds the daemon calls made before exec.
 const codexDaemonNamingTimeout = 10 * time.Second
 
+// codexBackend is where a Codex TUI runs: on its own embedded app-server,
+// on the shared managed daemon, or where AMQ cannot tell.
+type codexBackend int
+
+const (
+	codexEmbedded codexBackend = iota
+	codexOnDaemon
+	codexBackendUnknown
+)
+
+// codexEmbeddedOptions make a codex-cli 0.160 TUI run its own app-server
+// (tui/src/daemon_startup.rs exclusion; --search becomes a -c override,
+// startup_orchestration.rs:54-58), so the rollout path can name it.
+var codexEmbeddedOptions = map[string]bool{
+	"--no-daemon": true, "--oss": true, "-p": true, "--profile": true, "--search": true,
+	"--approve-for-me": true, "--not-so-yolo": true, "--strict-config": true,
+	"--dangerously-bypass-hook-trust": true, "--remote": true, "--remote-auth-token-env": true,
+}
+
+// codexDaemonFeatures are the features a -c, --enable or --disable may set
+// with the TUI still on the daemon (codex-cli 0.160 daemon_startup.rs:84-105).
+var codexDaemonFeatures = map[string]bool{
+	"daemon_auto_start": true, "worktrees": true, "transcript_v2": true, "realtime_conversation": true,
+	"standalone_web_search": true, "api_key_model_discovery": true, "code_mode_host": true,
+	"auth_elicitation": true, "mcp_oauth_refresh_coordination": true, "remote_models": true,
+	"request_rule": true, "responses_websockets_v2": true, "workspace_owner_usage_nudge": true,
+	"tool_search_always_defer_mcp_tools": true, "remote_compaction_v2": true, "multi_agent_mode": true,
+}
+
+// codexConfigKeepsDaemon reports whether one configuration override keeps
+// the TUI on the daemon (daemon_startup.rs config_exclusion): flag is -c,
+// --config, --enable or --disable and value its argument. known is false
+// for a form AMQ does not classify, such as a features table.
+func codexConfigKeepsDaemon(flag, value string) (keeps, known bool) {
+	if flag == "--enable" || flag == "--disable" {
+		return codexDaemonFeatures[value], true
+	}
+	key, raw, ok := strings.Cut(value, "=")
+	key = strings.TrimSpace(key)
+	if !ok || key == "features" || key == "tui" {
+		return false, false
+	}
+	if raw = strings.TrimSpace(raw); raw != "true" && raw != "false" {
+		return false, true
+	}
+	feature, isFeature := strings.CutPrefix(key, "features.")
+	return key == "suppress_unstable_features_warning" || key == "tui.fullscreen_transcript" || isFeature && codexDaemonFeatures[feature], true
+}
+
+// codexLaunchBackend reports where a Codex TUI started with args in wd runs
+// (codex-cli 0.160 tui/src/startup_orchestration.rs:176-540), with the
+// effective features for its directory. A Codex that reports no
+// daemon_auto_start feature predates the daemon and runs embedded.
+func codexLaunchBackend(cmdName string, args []string, wd, codexHome string) (codexBackend, map[string]bool) {
+	for _, key := range []string{"CODEX_EXEC_SERVER_URL", "OPENAI_FEDERATION_RULE_ID", "OPENAI_IDENTITY_TOKEN_FILE"} {
+		if _, set := os.LookupEnv(key); set {
+			return codexEmbedded, nil
+		}
+	}
+	unclassified := false
+	for i, arg := range args {
+		flag, value, inline := strings.Cut(arg, "=")
+		if codexEmbeddedOptions[flag] {
+			return codexEmbedded, nil
+		}
+		if flag != "-c" && flag != "--config" && flag != "--enable" && flag != "--disable" {
+			continue
+		}
+		if !inline && i+1 < len(args) {
+			value = args[i+1]
+		}
+		keeps, known := codexConfigKeepsDaemon(flag, value)
+		if known && !keeps {
+			return codexEmbedded, nil
+		}
+		unclassified = unclassified || !known
+	}
+	dir := codexLaunchDir(args, wd)
+	features, err := codexEffectiveFeatures(cmdName, dir)
+	if err != nil {
+		return codexEmbedded, nil
+	}
+	if _, daemon := features["daemon_auto_start"]; !daemon {
+		return codexEmbedded, features
+	}
+	// With bedrock_setup_wizard on, a signed-out TUI runs embedded even when
+	// a daemon runs (startup_orchestration.rs:494-519, lib.rs:2305-2323);
+	// AMQ does not read the sign-in state.
+	if unclassified || features["bedrock_setup_wizard"] {
+		return codexBackendUnknown, features
+	}
+	if _, err := codex.ControlSocket(codexHome); err != nil && !features["daemon_auto_start"] {
+		return codexEmbedded, features
+	}
+	return codexOnDaemon, features
+}
+
+// codexLaunchDir is the directory a Codex TUI started with args in wd runs
+// in: the last -C/--cd value resolved against wd, or wd.
+func codexLaunchDir(args []string, wd string) string {
+	dir := wd
+	for i, arg := range args {
+		flag, value, inline := strings.Cut(arg, "=")
+		if flag != "-C" && flag != "--cd" {
+			continue
+		}
+		if !inline {
+			if i+1 >= len(args) {
+				break
+			}
+			value = args[i+1]
+		}
+		dir = value
+		if !filepath.IsAbs(dir) {
+			dir = filepath.Join(wd, dir)
+		}
+	}
+	return filepath.Clean(dir)
+}
+
 // startCodexOnNamedDaemonThread names a Codex TUI that will run on the
 // managed app-server daemon (codex-cli 0.160): it creates and names a thread
-// on the daemon, then returns args that resume it (4ip). done is true when
-// naming is settled: the thread is named, or the TUI will run on a daemon AMQ
-// cannot name it on, which it reports; args are then the arguments to exec.
-// done is false when the TUI would not join the daemon, Codex does not
-// already trust the directory, or a daemon call failed; the caller then takes
-// the rollout path, which names an embedded Codex.
+// on the daemon, then returns args that resume it (4ip). The rollout path
+// cannot see a daemon thread, so done is false only for an embedded Codex,
+// which the caller then names that way. Otherwise naming is settled here:
+// the thread is named, or AMQ says once why it is not and args are the
+// user's unchanged.
 func startCodexOnNamedDaemonThread(cmdName string, agentArgs []string, name string) (args []string, done bool) {
 	if launch.ProviderForExecutable(cmdName) != launch.CodexProvider {
 		return nil, false
@@ -152,23 +271,30 @@ func startCodexOnNamedDaemonThread(cmdName string, agentArgs []string, name stri
 	if err != nil {
 		return nil, false
 	}
-	cwd, ok := codexDaemonThreadDir(agentArgs, wd)
-	if !ok {
-		return nil, false
-	}
 	codexHome, err := codexHomeDir()
 	if err != nil {
 		return nil, false
+	}
+	backend, features := codexLaunchBackend(cmdName, agentArgs, wd, codexHome)
+	report := func(reason string) ([]string, bool) {
+		_ = writeStderr("%s\n", coopNamedTUIManualReminder(name, cmdName, reason))
+		return agentArgs, true
+	}
+	switch backend {
+	case codexEmbedded:
+		return nil, false
+	case codexBackendUnknown:
+		return report("AMQ cannot tell whether this Codex runs on its shared daemon")
+	}
+	cwd, ok := codexDaemonThreadDir(agentArgs, wd)
+	if !ok {
+		return report("these Codex options cannot carry over to a thread AMQ names")
 	}
 	// thread/start records trust for a directory Codex has no decision for,
 	// before the TUI asks the user. Only an already trusted directory is
 	// started on the daemon.
 	if !codexTrustsDir(codexHome, cwd) {
-		return nil, false
-	}
-	features, err := codexEffectiveFeatures(cmdName, cwd)
-	if err != nil {
-		return nil, false
+		return report("Codex does not trust " + cwd + " yet")
 	}
 	// With terminal_visualization_instructions off the TUI's thread/resume
 	// carries no developer instructions (tui/src/app_server_session.rs:
@@ -177,32 +303,23 @@ func startCodexOnNamedDaemonThread(cmdName string, agentArgs []string, name stri
 	// thread or not. One setting differs, as for any `codex resume` of a
 	// thread with no turns: a fresh TUI start forces model_reasoning_summary
 	// to "none" unless the user set it, while a resume keeps the model
-	// default. With bedrock_setup_wizard on, a signed-out TUI runs embedded
-	// even when a daemon runs (tui/src/startup_orchestration.rs:494-519,
-	// lib.rs:2305-2323).
-	if features["terminal_visualization_instructions"] || features["bedrock_setup_wizard"] {
-		return nil, false
+	// default.
+	if features["terminal_visualization_instructions"] {
+		return report("terminal_visualization_instructions is on")
 	}
 	sock, err := codex.ControlSocket(codexHome)
 	if err != nil {
-		if !features["daemon_auto_start"] {
-			return nil, false // the TUI runs embedded
-		}
-		// The TUI starts a daemon and runs on it
-		// (startup_orchestration.rs:494-540), where the rollout path cannot
-		// find its thread. AMQ does not start the daemon itself: `codex
+		// The TUI starts a daemon and runs on it. AMQ does not start it: `codex
 		// app-server daemon start` replaces the daemon's saved feature
 		// overrides (app-server-daemon/src/lib.rs:392, 405-438), which the
 		// TUI's own start keeps.
-		_ = writeStderr("%s\n", coopNamedTUIManualReminder(name, cmdName, "no Codex daemon is running yet; this Codex starts one, so the next launch is named"))
-		return agentArgs, true
+		return report("no Codex daemon is running yet; this Codex starts one, so the next launch is named")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), codexDaemonNamingTimeout)
 	defer cancel()
 	id, err := codex.StartNamedThread(ctx, sock, cwd, name)
 	if err != nil {
-		_ = writeStderr("%s\n", coopNamedTUIManualReminder(name, cmdName, "Codex daemon: "+err.Error()))
-		return nil, false
+		return report("Codex daemon: " + err.Error())
 	}
 	_ = writeStderr("named %s\n", name)
 	return append([]string{"resume", id}, agentArgs...), true
@@ -234,11 +351,6 @@ func codexEffectiveFeatures(cmdName, dir string) (map[string]bool, error) {
 			features[fields[0]] = false
 		}
 	}
-	for _, required := range []string{"daemon_auto_start", "bedrock_setup_wizard"} {
-		if _, ok := features[required]; !ok {
-			return nil, fmt.Errorf("codex features list did not report %s", required)
-		}
-	}
 	return features, nil
 }
 
@@ -263,23 +375,15 @@ var codexDaemonOptions = map[string]struct {
 	"--yolo":          {name: "yolo"}, "--dangerously-bypass-approvals-and-sandbox": {name: "yolo"},
 }
 
-// codexDaemonThreadDir reports whether a Codex TUI started with args, in
-// this environment, runs on the managed daemon and takes every option on
-// `codex resume <id>` as it would on a fresh start, and returns the thread
+// codexDaemonThreadDir reports whether a Codex TUI on the managed daemon
+// takes every option in args on `codex resume <id>` as it would on a fresh
+// start, and returns the thread
 // directory: the -C/--cd directory resolved against wd, or wd. Only options
 // in codexDaemonOptions qualify, each once (--add-dir may repeat), with a
 // value Codex accepts, and --yolo never with an approval policy, so Codex
-// refuses no launch that AMQ already started a thread for. Others make Codex
-// run its own app-server (-p, -c, --search, --oss), are refused by resume
-// (--worktree), or were not checked; they keep the original path. Codex also
-// runs its own app-server when CODEX_EXEC_SERVER_URL or a workload identity
-// variable is set at all.
+// refuses no launch that AMQ already started a thread for. Others are
+// refused by resume (--worktree) or were not checked.
 func codexDaemonThreadDir(args []string, wd string) (string, bool) {
-	for _, key := range []string{"CODEX_EXEC_SERVER_URL", "OPENAI_FEDERATION_RULE_ID", "OPENAI_IDENTITY_TOKEN_FILE"} {
-		if _, set := os.LookupEnv(key); set {
-			return "", false
-		}
-	}
 	dir := wd
 	seen := make(map[string]bool)
 	for i := 0; i < len(args); i++ {

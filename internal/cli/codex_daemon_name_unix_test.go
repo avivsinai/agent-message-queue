@@ -10,41 +10,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
-
-// coop exec must not start a Codex daemon thread where the TUI start would
-// differ from a plain Codex start.
-//   - Review of #950 r5 (Pro, P1 trust): thread/start records trust for a
-//     directory with no trust decision, before the TUI asks the user.
-//   - Review of #950 r6 (Pro, P1): Codex trims git pointers with trim_ascii;
-//     a pointer ending in U+00A0 resolves to nothing in Codex.
-func TestCodexDaemonNamingSkipsWhereCodexWouldDiffer(t *testing.T) {
-	for name, setup := range map[string]func(t *testing.T, codexHome string) string{
-		"unfamiliar repo": func(t *testing.T, codexHome string) string {
-			writeCodexConfig(t, codexHome, "model = \"x\"\n")
-			repo := t.TempDir()
-			if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o700); err != nil {
-				t.Fatal(err)
-			}
-			return repo
-		},
-		"worktree pointer with a non-ASCII space": func(t *testing.T, codexHome string) string {
-			main, worktree := makeLinkedWorktree(t, " ")
-			writeCodexConfig(t, codexHome, "[projects.\""+main+"\"]\ntrust_level = \"trusted\"\n")
-			return worktree
-		},
-	} {
-		t.Run(name, func(t *testing.T) {
-			codexHome, contacts := startFakeCodexDaemon(t)
-			dir := setup(t, codexHome)
-			t.Setenv("CODEX_HOME", codexHome)
-			t.Chdir(dir)
-			if _, ok := startCodexOnNamedDaemonThread("codex", nil, "s1/codex"); ok || contacts.Load() != 0 {
-				t.Fatalf("daemon path taken = %v, daemon contacts = %d; want neither", ok, contacts.Load())
-			}
-		})
-	}
-}
 
 // A linked worktree takes its trust from the main checkout, as Codex does.
 func TestCodexTrustsALinkedWorktreeOfATrustedCheckout(t *testing.T) {
@@ -161,28 +128,49 @@ func TestCodexDaemonThreadDir(t *testing.T) {
 	}
 }
 
-// AMQ reads Codex's effective features through `codex features list` and
-// takes the daemon path only where the TUI runs on the daemon.
+// coop exec names a Codex TUI on the managed daemon only where the resumed
+// TUI starts like a plain launch, runs the rollout watcher only for an
+// embedded Codex (it cannot see a daemon thread), and otherwise says once why
+// the session is not named.
+//   - Review of #950 r5 (Pro, P1 trust): thread/start records trust for a
+//     directory with no trust decision, before the TUI asks the user.
+//   - Review of #950 r6 (Pro, P1): Codex trims git pointers with trim_ascii;
+//     a pointer ending in U+00A0 resolves to nothing in Codex.
 //   - Review of #950 r6 (Pro, P2): with terminal_visualization_instructions
 //     on, the TUI resumes with developer instructions.
-//   - Review of #975 r2 (Pro, P1): with bedrock_setup_wizard on, a
-//     signed-out TUI runs embedded even when a daemon runs.
 //   - Bead agent-message-queue-38l: with no daemon running and auto-start on,
-//     the TUI starts one, where the rollout path can never find its thread;
-//     AMQ reports that at once and never starts the daemon itself (review of
-//     #975 r1-r2, Pro P1: `codex app-server daemon start` replaces saved
-//     feature overrides).
-func TestCodexDaemonNamingFollowsCodexFeatures(t *testing.T) {
-	const off = "terminal_visualization_instructions x false\nbedrock_setup_wizard x false\n"
+//     the TUI starts one; AMQ never starts it itself (review of #975 r1-r2,
+//     Pro P1: `codex app-server daemon start` replaces saved overrides).
+//   - Review of #975 r2-r3 (Pro): bedrock_setup_wizard makes the backend
+//     depend on sign-in, and a daemon that refuses the thread still runs
+//     the TUI; neither may start the watcher.
+func TestCodexNamingFollowsWhereCodexRuns(t *testing.T) {
+	const plain = "daemon_auto_start x true\nbedrock_setup_wizard x false\nterminal_visualization_instructions x false\n"
 	for name, tc := range map[string]struct {
 		features string
 		daemon   bool
-		done     bool
+		args     []string
+		repo     func(t *testing.T, codexHome string) string
+		watcher  bool
 	}{
-		"terminal instructions on":  {"daemon_auto_start x true\nbedrock_setup_wizard x false\nterminal_visualization_instructions x true\n", true, false},
-		"bedrock wizard on":         {"daemon_auto_start x true\nterminal_visualization_instructions x false\nbedrock_setup_wizard x true\n", true, false},
-		"no daemon, auto-start on":  {"daemon_auto_start x true\n" + off, false, true},
-		"no daemon, auto-start off": {"daemon_auto_start x false\n" + off, false, false},
+		"untrusted repo": {plain, true, nil, func(t *testing.T, codexHome string) string {
+			repo := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			return repo
+		}, false},
+		"worktree pointer with a non-ASCII space": {plain, true, nil, func(t *testing.T, codexHome string) string {
+			main, worktree := makeLinkedWorktree(t, "\u00a0")
+			writeCodexConfig(t, codexHome, "[projects.\""+main+"\"]\ntrust_level = \"trusted\"\n")
+			return worktree
+		}, false},
+		"terminal instructions on":  {"daemon_auto_start x true\nbedrock_setup_wizard x false\nterminal_visualization_instructions x true\n", true, nil, nil, false},
+		"bedrock wizard on":         {"daemon_auto_start x true\nbedrock_setup_wizard x true\nterminal_visualization_instructions x false\n", true, nil, nil, false},
+		"daemon refuses the thread": {plain, true, nil, nil, false},
+		"no daemon, auto-start on":  {plain, false, nil, nil, false},
+		"no daemon, auto-start off": {"daemon_auto_start x false\nbedrock_setup_wizard x false\n", false, nil, nil, true},
+		"embedded by a -c override": {plain, true, []string{"-c", "approvals_reviewer=user"}, nil, true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			codexHome, contacts := t.TempDir(), new(atomic.Int32)
@@ -190,21 +178,36 @@ func TestCodexDaemonNamingFollowsCodexFeatures(t *testing.T) {
 				codexHome, contacts = startFakeCodexDaemon(t)
 			}
 			repo := t.TempDir()
-			writeCodexConfig(t, codexHome, "[projects.\""+repo+"\"]\ntrust_level = \"trusted\"\n")
-			marker := filepath.Join(t.TempDir(), "daemon-start")
+			if tc.repo != nil {
+				repo = tc.repo(t, codexHome)
+			} else {
+				writeCodexConfig(t, codexHome, "[projects.\""+repo+"\"]\ntrust_level = \"trusted\"\n")
+			}
 			bin := filepath.Join(t.TempDir(), "codex")
-			script := "#!/bin/sh\ncase \"$1 $2\" in\n\"features list\") printf '" + strings.ReplaceAll(tc.features, "\n", "\\n") + "' ;;\n*) : > " + marker + " ;;\nesac\n"
+			script := "#!/bin/sh\n[ \"$1 $2\" = \"features list\" ] && printf '" + strings.ReplaceAll(tc.features, "\n", "\\n") + "'\n"
 			if err := os.WriteFile(bin, []byte(script), 0o700); err != nil {
 				t.Fatal(err)
 			}
 			t.Setenv("CODEX_HOME", codexHome)
 			t.Chdir(repo)
-			args, done := startCodexOnNamedDaemonThread(bin, []string{"-m", "x"}, "s1/codex")
-			if done != tc.done || contacts.Load() != 0 || done && !slices.Equal(args, []string{"-m", "x"}) {
-				t.Fatalf("done = %v args = %q, daemon contacts = %d; want done %v, unchanged args, no contact", done, args, contacts.Load(), tc.done)
+			watchers := 0
+			original := startCoopNamedTUIInjector
+			startCoopNamedTUIInjector = func(string, string, time.Time) error { watchers++; return nil }
+			t.Cleanup(func() { startCoopNamedTUIInjector = original })
+			var args []string
+			_, stderr, err := captureEnvOutput(t, func() error {
+				var err error
+				args, err = applyCoopNamedBeforeExecAt(coopNamedChoice{enabled: true}, bin, tc.args, "s1/codex", time.Now())
+				return err
+			})
+			if err != nil {
+				t.Fatal(err)
 			}
-			if _, err := os.Stat(marker); err == nil {
-				t.Fatal("AMQ ran a Codex command other than features list")
+			reminders := strings.Count(stderr, "enter \"/rename s1/codex\" manually")
+			wantContact := name == "daemon refuses the thread"
+			if !slices.Equal(args, tc.args) || (watchers == 1) != tc.watcher || watchers > 1 || (reminders == 1) == tc.watcher || reminders > 1 || (contacts.Load() > 0) != wantContact {
+				t.Fatalf("args = %q, watchers = %d, reminders = %d, daemon contacts = %d; want unchanged args, watcher %v, one reminder otherwise, contact %v\n%s",
+					args, watchers, reminders, contacts.Load(), tc.watcher, wantContact, stderr)
 			}
 		})
 	}
