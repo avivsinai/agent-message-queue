@@ -63,17 +63,19 @@ func deliver(cfg Config, body, thread, subject, priority string, labels, refs []
 	}
 
 	if eventID != "" {
-		if existing, ok, err := loadEventRecord(cfg, eventID); err != nil {
+		claim, err := loadEventRecord(cfg, eventID)
+		if err != nil {
 			return Delivery{}, err
-		} else if ok {
-			out := existing.delivery()
-			out.EventID = existing.EventID
+		}
+		if claim != nil {
+			out := claim.delivery()
+			out.EventID = claim.EventID
 			out.State = DeliveryDuplicate
-			out.Committed = existing.Committed
-			out.Drained = existing.Drained
-			out.Started = existing.Started
-			out.Completed = existing.Completed
-			out.Egress = existing.Egress
+			out.Committed = claim.Committed
+			out.Drained = claim.Drained
+			out.Started = claim.Started
+			out.Completed = claim.Completed
+			out.Egress = claim.Egress
 			out.Duplicate = true
 			// A replayed turn polls only for replies newer than this call.
 			out.Created = time.Now()
@@ -122,6 +124,29 @@ func deliver(cfg Config, body, thread, subject, priority string, labels, refs []
 	}
 	defer func() { _ = root.Close() }()
 
+	// The event journal is a claim taken before delivery, not a receipt
+	// after it: it fixes the message id once, so a replay follows the claim
+	// and never delivers a second copy (review of #965, modeled on the
+	// mailbox steer claim). With an event id it is created exclusively; a
+	// concurrent first delivery that loses reads the winner's record and
+	// reports a duplicate. From here the delivery outcome is what the
+	// inbox write proves, never the journal: a committed write is a
+	// delivery whatever happens after it.
+	if eventID != "" {
+		rec := eventRecord{
+			Schema:    1,
+			EventID:   eventID,
+			MessageID: id,
+			To:        cfg.To,
+			Thread:    thread,
+			Committed: true,
+			Egress:    EgressConfirmed,
+		}
+		if rememberErr := rememberEvent(cfg, rec); rememberErr != nil && !errors.Is(rememberErr, os.ErrExist) {
+			return Delivery{}, rememberErr
+		}
+	}
+
 	_, err = fsq.DeliverToInboxes(root, []string{cfg.To}, id+".md", data)
 	egress := EgressConfirmed
 	if err != nil {
@@ -132,7 +157,7 @@ func deliver(cfg Config, body, thread, subject, priority string, labels, refs []
 		egress = EgressUncertain
 	}
 
-	out := Delivery{
+	return Delivery{
 		MessageID: id,
 		To:        cfg.To,
 		Thread:    thread,
@@ -144,24 +169,5 @@ func deliver(cfg Config, body, thread, subject, priority string, labels, refs []
 		Started:   false,
 		Completed: false,
 		Egress:    egress,
-	}
-	if eventID == "" {
-		return out, nil
-	}
-	rec := eventRecord{
-		Schema:    1,
-		EventID:   eventID,
-		MessageID: id,
-		To:        cfg.To,
-		Thread:    thread,
-		Committed: true,
-		Drained:   false,
-		Started:   false,
-		Completed: false,
-		Egress:    egress,
-	}
-	if rememberErr := rememberEvent(cfg, rec); rememberErr != nil && !errors.Is(rememberErr, os.ErrExist) {
-		return Delivery{}, rememberErr
-	}
-	return out, nil
+	}, nil
 }

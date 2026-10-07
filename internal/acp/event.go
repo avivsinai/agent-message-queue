@@ -98,29 +98,29 @@ func eventJournalPath(me, eventID string) string {
 	return filepath.Join("agents", me, "outbox", "acp-events", eventID+".json")
 }
 
-func loadEventRecord(cfg Config, eventID string) (eventRecord, bool, error) {
+func loadEventRecord(cfg Config, eventID string) (*eventRecord, error) {
 	identity, err := fsq.SnapshotDeliveryRoot(cfg.Root)
 	if err != nil {
-		return eventRecord{}, false, err
+		return nil, err
 	}
 	root, err := fsq.OpenDeliveryRoot(cfg.Root, identity)
 	if err != nil {
-		return eventRecord{}, false, err
+		return nil, err
 	}
 	defer func() { _ = root.Close() }()
 
 	data, err := root.ReadRegularNoFollow(eventJournalPath(cfg.Me, eventID))
 	if err != nil {
 		if os.IsNotExist(err) {
-			return eventRecord{}, false, nil
+			return nil, nil
 		}
-		return eventRecord{}, false, err
+		return nil, err
 	}
 	var rec eventRecord
 	if err := json.Unmarshal(data, &rec); err != nil {
-		return eventRecord{}, false, err
+		return nil, err
 	}
-	return rec, true, nil
+	return &rec, nil
 }
 
 func rememberEvent(cfg Config, rec eventRecord) error {
