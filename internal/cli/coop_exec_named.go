@@ -134,8 +134,14 @@ func coopNamedTUIManualReminder(name, binaryBase, reason string) string {
 	)
 }
 
-// codexDaemonNamingTimeout bounds the daemon calls made before exec.
-const codexDaemonNamingTimeout = 10 * time.Second
+// codexDaemonNamingTimeout bounds the daemon calls made before exec. They
+// take about 2 s, and up to 30 s while the daemon starts other sessions
+// (measured on codex-cli 0.160.1, agent-message-queue-611.63).
+const codexDaemonNamingTimeout = 60 * time.Second
+
+// codexDaemonNamingNotice is how long naming runs before coop exec says why
+// the launch waits.
+const codexDaemonNamingNotice = 3 * time.Second
 
 // codexBackend is where a Codex TUI runs: on its own embedded app-server,
 // on the shared managed daemon, or where AMQ cannot tell.
@@ -408,7 +414,11 @@ func startCodexOnNamedDaemonThread(cmdName string, agentArgs []string, name stri
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), codexDaemonNamingTimeout)
 	defer cancel()
+	notice := time.AfterFunc(codexDaemonNamingNotice, func() {
+		_ = writeStderr("naming %s on the Codex daemon; it is busy, this can take up to a minute\n", name)
+	})
 	id, err := codex.StartNamedThread(ctx, sock, cwd, name)
+	notice.Stop()
 	if err != nil {
 		return report("Codex daemon: " + err.Error())
 	}

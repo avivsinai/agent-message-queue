@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"time"
 )
 
 // ControlSocket is the managed app-server daemon's control socket under
@@ -52,6 +53,17 @@ func StartNamedThread(ctx context.Context, sock, cwd, name string) (string, erro
 	if id == "" {
 		return "", errors.New("start thread: no thread id")
 	}
+	// From here a failure leaves a thread the user never sees: archive it,
+	// on a fresh deadline since ctx may be what ran out
+	// (agent-message-queue-611.63).
+	ok := false
+	defer func() {
+		if !ok {
+			actx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = client.Call(actx, "thread/archive", map[string]any{"threadId": id}, nil)
+		}
+	}()
 	if err := client.Call(ctx, "thread/name/set", map[string]any{"threadId": id, "name": name}, nil); err != nil {
 		return "", fmt.Errorf("name thread %s: %w", id, err)
 	}
@@ -70,5 +82,6 @@ func StartNamedThread(ctx context.Context, sock, cwd, name string) (string, erro
 	if err := client.Call(ctx, "thread/unsubscribe", map[string]any{"threadId": id}, nil); err != nil {
 		return "", fmt.Errorf("unsubscribe thread %s: %w", id, err)
 	}
+	ok = true
 	return id, nil
 }
