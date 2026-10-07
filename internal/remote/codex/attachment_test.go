@@ -29,6 +29,10 @@ type fakeAppServer struct {
 	turnStartDelayMu    sync.Mutex
 	turnStartResponse   string
 	turnStartResponseMu sync.Mutex
+	// resumeError, when set, is the JSON-RPC error object thread/resume
+	// answers with.
+	resumeError   string
+	resumeErrorMu sync.Mutex
 }
 
 // waitMemoForID waits until the terminal memo records id (deterministic sync
@@ -128,6 +132,13 @@ func startFakeAppServer(t *testing.T) (string, *fakeAppServer) {
 			case "initialize":
 				_ = ws.writeText([]byte(`{"jsonrpc":"2.0","id":` + string(*msg.ID) + `,"result":{"userAgent":"fake"}}`))
 			case "thread/resume":
+				srv.resumeErrorMu.Lock()
+				resumeErr := srv.resumeError
+				srv.resumeErrorMu.Unlock()
+				if resumeErr != "" {
+					_ = ws.writeText([]byte(`{"jsonrpc":"2.0","id":` + string(*msg.ID) + `,"error":` + resumeErr + `}`))
+					continue
+				}
 				_ = ws.writeText([]byte(`{"jsonrpc":"2.0","id":` + string(*msg.ID) + `,"result":{"thread":{"id":"t1","cwd":"/work","status":{"type":"idle"}}}}`))
 			case "turn/start":
 				srv.turnStartDelayMu.Lock()

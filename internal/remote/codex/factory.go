@@ -3,7 +3,9 @@ package codex
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/registry"
@@ -42,10 +44,23 @@ func Factory(ctx context.Context, cfg registry.FactoryConfig) (core.Attachment, 
 		opts = append(opts, WithTarget(cfg.Target))
 	}
 	att, err := Attach(c.Socket, c.Thread, opts...)
+	if threadHasNoTurn(err) {
+		return nil, fmt.Errorf("codex thread %s has no turn yet, so Codex has not saved it: send one prompt in that Codex session, then attach again: %w", c.Thread, err)
+	}
 	if err != nil {
 		return nil, err
 	}
 	return att, nil
+}
+
+// threadHasNoTurn reports codex-cli 0.160's refusal to resume a loaded thread
+// whose rollout Codex has not written yet: it writes the rollout at the first
+// turn, and thread/resume without one fails ThreadNotFound, "no rollout
+// found" (app-server thread_processor.rs). AMQ does not write into the
+// user's thread to create it.
+func threadHasNoTurn(err error) bool {
+	var rerr *rpcError
+	return errors.As(err, &rerr) && strings.Contains(rerr.Message, "no rollout found")
 }
 
 func init() {
