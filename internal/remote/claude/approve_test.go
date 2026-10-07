@@ -102,6 +102,15 @@ func TestApprovalPreviewDetectorTable(t *testing.T) {
 		{"fallback clustered user option", "Bash", fallback("curl -vusk-AAAAAAAAAAAAAAAAAAAAAAAA1: https://example.test"), "", true},
 		{"clustered data option", "Bash", bash("curl -sdsk-AAAAAAAAAAAAAAAAAAAAAAAA1 https://example.test"), "", true},
 		{"fallback clustered data option", "Bash", fallback("curl -sdsk-AAAAAAAAAAAAAAAAAAAAAAAA1 https://example.test"), "", true},
+		// Bead agent-message-queue-611.42.5 (Pro review of #929 r10): the
+		// option context ends at a path, redirect, "=" value or JSON escape.
+		{"attached include path", "Bash", bash("cc -I./task-queue-controller -c app.c"), "", false},
+		{"fallback attached include path", "Bash", fallback("cc -I./task-queue-controller -c app.c"), "", false},
+		{"test name with a path", "Bash", bash("go test -run=Test/task-queue-controller ./..."), "", false},
+		{"fallback test name with a path", "Bash", fallback("go test -run=Test/task-queue-controller ./..."), "", false},
+		{"redirect after an option", "Bash", bash("ls -l>docs/task-queue-controller.md"), "", false},
+		{"fallback redirect after an option", "Bash", fallback("ls -l>docs/task-queue-controller.md"), "", false},
+		{"fallback tab after an option", "Bash", fallback("cc -v\t--flag=task-queue-controller"), "", false},
 	} {
 		preview, _ := approvalView(tc.tool, json.RawMessage(tc.input), tc.agent)
 		if tc.hidden && preview != previewHidden {

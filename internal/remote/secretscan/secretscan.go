@@ -21,13 +21,17 @@ var secretShapes = []*regexp.Regexp{
 
 // sk- tokens are found by context. skAtWordStart is sk- at the start of the
 // text or after a character that is no letter or digit. skInOptions is sk-
-// inside a word that starts with a single dash, whatever stands between the
-// dash and sk- (-usk-…, -vusk-…, -4usk-…, -#usk-…). Both take 16 or more
-// token characters. Anywhere else sk- inside a word is part of a name, such
-// as task- or risk-, and stays visible: names almost never start with "-".
+// inside a word that starts with a single dash, whatever option characters
+// stand between the dash and sk- (-usk-…, -vusk-…, -4usk-…, -#usk-…). Those
+// characters stay inside the option itself: a path, redirect, separator,
+// "=" value, another dash or a JSON escape ends it, so an attached path such
+// as -I./task-queue-controller is a name (Pro review of #929 r10). Both take
+// 16 or more token characters. Anywhere else sk- inside a word is part of a
+// name, such as task- or risk-, and stays visible: names almost never start
+// with "-".
 var (
 	skAtWordStart = regexp.MustCompile(`(?:^|[^A-Za-z0-9])sk-[A-Za-z0-9_-]{16,}`)
-	skInOptions   = regexp.MustCompile(`(?:^|[\s'"=;|&(])-[^\s'"-][^\s'"]*sk-[A-Za-z0-9_-]{16,}`)
+	skInOptions   = regexp.MustCompile(`(?:^|[\s'"=;|&(])-[^\s'"\\/.<>|;&=()-]*sk-[A-Za-z0-9_-]{16,}`)
 )
 
 // hasSKToken reports an sk- token by its context.
