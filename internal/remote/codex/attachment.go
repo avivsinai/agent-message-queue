@@ -336,7 +336,7 @@ func (a *Attachment) Inspect() protocol.Session {
 	// the interaction that has been waiting the longest: pick the OLDEST
 	// interaction by run createdAt, ties broken by interaction id for full
 	// determinism.
-	var pending *string
+	var pending, active *string
 	var pendingAt time.Time
 	for _, r := range a.runs {
 		if r.interaction == nil {
@@ -345,7 +345,10 @@ func (a *Attachment) Inspect() protocol.Session {
 		id := r.interaction.InteractionID
 		if pending == nil || r.createdAt.Before(pendingAt) ||
 			(r.createdAt.Equal(pendingAt) && id < *pending) {
-			pending = &id
+			// The request that waits on it, so a surface can name the
+			// approval it shows (611.42.7).
+			ref := protocol.EncodeRef(r.key.CreatorHost, r.key.TargetID, r.key.RequestID)
+			pending, active = &id, &ref
 			pendingAt = r.createdAt
 		}
 	}
@@ -359,6 +362,7 @@ func (a *Attachment) Inspect() protocol.Session {
 		Attachment:         att,
 		Status:             status,
 		PendingInteraction: pending,
+		ActiveRequestRef:   active,
 		Capabilities: protocol.Capabilities{
 			Inspect: true, Submit: true, CancelRequest: true, Steer: false,
 			ApproveTool: a.approve, AnswerQuestion: false, Terminal: "unavailable",

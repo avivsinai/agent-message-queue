@@ -225,7 +225,7 @@ func (c *Carrier) IngestReaction(evt nostr.Event) error {
 		return err
 	}
 	cmd, _ := json.Marshal(map[string]string{"ref": ref})
-	notAfter, ok, err := c.claimReaction(evt, OpCancel, "", cmd)
+	notAfter, _, ok, err := c.claimReaction(evt, OpCancel, "", cmd)
 	if err != nil || !ok {
 		return err
 	}
@@ -237,27 +237,27 @@ func (c *Carrier) IngestReaction(evt nostr.Event) error {
 // session unchanged, and the claim made under this binding. ok is false
 // when the reaction must be ignored. notAfter is the reaction's signed
 // deadline.
-func (c *Carrier) claimReaction(evt nostr.Event, op, epoch string, cmd json.RawMessage) (time.Time, bool, error) {
+func (c *Carrier) claimReaction(evt nostr.Event, op, epoch string, cmd json.RawMessage) (time.Time, Claim, bool, error) {
 	now := c.now()
 	created := time.Unix(int64(evt.CreatedAt), 0)
 	notAfter := created.Add(MutationWindow)
 	if created.After(now.Add(maxFutureSkew)) || now.After(notAfter) {
-		return notAfter, false, nil // a stale gesture never executes
+		return notAfter, Claim{}, false, nil // a stale gesture never executes
 	}
 	if err := c.eligible(now); err != nil {
-		return notAfter, false, err
+		return notAfter, Claim{}, false, err
 	}
 	if _, settled, err := c.ledger.Settled(evt.ID.Hex()); err != nil || settled {
-		return notAfter, false, err
+		return notAfter, Claim{}, false, err
 	}
 	if err := c.fence(); err != nil {
-		return notAfter, false, nil // a replacement native session is never acted on for a reaction
+		return notAfter, Claim{}, false, nil // a replacement native session is never acted on for a reaction
 	}
 	claim, _, err := c.ledger.Claim(c.claimFor(evt, op, "", epoch, notAfter, cmd))
 	if err != nil || !c.owns(claim) {
-		return notAfter, false, err
+		return notAfter, Claim{}, false, err
 	}
-	return notAfter, true, nil
+	return notAfter, claim, true, nil
 }
 
 // Ingest handles one verified owner event from the subscription. The claim
@@ -300,6 +300,32 @@ func (c *Carrier) ingest(evt nostr.Event, normalize func(nostr.Event, Binding, t
 	// #866 r2 #7).
 	if err := c.fence(); err != nil {
 		return c.settleAnswer(evt, Settlement{Op: n.Op, State: "refused"}, err.Error())
+	}
+	// A typed answer in the owner DM is the same decision as the reaction on
+	// the approval message (611.42.7). A replay keeps its first decision: an
+	// event claimed as a prompt stays a prompt, and one claimed as an answer
+	// answers only the approval it named (Pro review of #970).
+	if gesture := typedAnswer(n.Text); n.Op == OpSubmit && gesture != "" && tagValue(evt, "h") == c.binding.Channel {
+		prior, claimed, err := c.ledger.ClaimFor(evt.ID.Hex())
+		if err != nil {
+			return err
+		}
+		switch {
+		case claimed && prior.Op == OpRespond:
+			var first struct{ Message string }
+			_ = json.Unmarshal(prior.Command, &first)
+			appr, ok, err := c.ledger.ApprovalFor(first.Message)
+			if err != nil || !ok {
+				return err
+			}
+			return c.answerApproval(evt, first.Message, appr, gesture)
+		case !claimed:
+			if msgID, appr, ok, err := c.openApproval(evt); err != nil {
+				return err
+			} else if ok {
+				return c.answerApproval(evt, msgID, appr, gesture)
+			}
+		}
 	}
 	claim := c.claimFor(evt, n.Op, n.RequestID, "", n.NotAfter, nil)
 	if n.Op == OpSubmit {
@@ -660,6 +686,75 @@ func (c *Carrier) Publish(snap protocol.Snapshot, origin map[string]string) erro
 // fails safe and takes any of the usual refusals.
 const approveReaction = "✅"
 
+// typedAnswer maps an owner's typed reply to an approval gesture, or "".
+func typedAnswer(text string) string {
+	switch strings.ToLower(strings.TrimSpace(text)) {
+	case "✅", "yes", "y", "approve":
+		return approveReaction
+	case "❌", "no", "n", "reject":
+		return "❌"
+	}
+	return ""
+}
+
+// openApproval is the approval message a typed answer refers to: the one
+// whose thread the owner replied in, or else the target's one pending
+// approval, when its message reached the relay before the owner typed. An
+// approval the owner could not yet have seen is never answered (Pro review
+// of #970).
+func (c *Carrier) openApproval(evt nostr.Event) (string, Approval, bool, error) {
+	// A threaded reply refers only to the message it names: the parent it
+	// replies to first, then its thread root. It never falls back to another
+	// pending approval (Pro review of #970, round 2).
+	msgID := ""
+	threaded := false
+	for _, t := range evt.Tags {
+		if len(t) > 0 && t[0] == "e" {
+			threaded = true // any e tag, valid or not, rules out the fallback
+		}
+	}
+	for _, marker := range []string{"reply", "root", ""} {
+		for _, t := range evt.Tags {
+			if len(t) < 2 || t[0] != "e" || !validHexID(t[1]) || len(t) >= 4 && t[3] != marker || len(t) < 4 && marker != "" {
+				continue
+			}
+			if _, ok, err := c.ledger.ApprovalFor(t[1]); err != nil {
+				return "", Approval{}, false, err
+			} else if ok && msgID == "" {
+				msgID = t[1]
+			}
+		}
+	}
+	if threaded && msgID == "" {
+		return "", Approval{}, false, nil
+	}
+	if !threaded {
+		s, err := c.inspect()
+		if err != nil || s.PendingInteraction == nil || s.ActiveRequestRef == nil {
+			return "", Approval{}, false, nil
+		}
+		posted, ok, err := c.ledger.Prepared(approvalKey(*s.ActiveRequestRef, *s.PendingInteraction))
+		if err != nil || !ok || !posted.Accepted || posted.AcceptedAt == 0 {
+			return "", Approval{}, false, err
+		}
+		// Typed after the relay accepted the message, so the owner could
+		// have seen it; one second covers the timestamps' precision.
+		if int64(evt.CreatedAt) <= posted.AcceptedAt {
+			return "", Approval{}, false, nil
+		}
+		var msg nostr.Event
+		if err := json.Unmarshal(posted.Event, &msg); err != nil {
+			return "", Approval{}, false, err
+		}
+		msgID = msg.ID.Hex()
+	}
+	appr, ok, err := c.ledger.ApprovalFor(msgID)
+	if err != nil || !ok || appr.Disabled {
+		return "", Approval{}, false, err
+	}
+	return msgID, appr, true, nil
+}
+
 func rejectReaction(gesture string) bool {
 	return gesture == "❌" || gesture == "👎" || gesture == "-"
 }
@@ -894,9 +989,28 @@ func (c *Carrier) answerApproval(evt nostr.Event, messageID string, appr Approva
 	if rc, owned, err := c.ledger.ReceiptFor(appr.RequestRef); err != nil || !owned || !c.ownsReceipt(rc) {
 		return err
 	}
-	cmd, _ := json.Marshal(map[string]string{"ref": appr.RequestRef, "interaction_id": appr.InteractionID, "option": option})
-	if _, ok, err := c.claimReaction(evt, OpRespond, appr.Epoch, cmd); err != nil || !ok {
+	cmd, _ := json.Marshal(map[string]string{"message": messageID, "ref": appr.RequestRef, "interaction_id": appr.InteractionID, "option": option})
+	_, claim, ok, err := c.claimReaction(evt, OpRespond, appr.Epoch, cmd)
+	if err != nil || !ok {
 		return err
+	}
+	// The stored claim is the decision. A replay after a crash answers only
+	// the approval and option first claimed, never whatever is pending now
+	// (Pro review of #970).
+	if claim.Op != OpRespond {
+		return nil
+	}
+	var first struct {
+		Message, Ref, Option string
+		InteractionID        string `json:"interaction_id"`
+	}
+	if json.Unmarshal(claim.Command, &first) != nil || first.InteractionID != appr.InteractionID || first.Option != option ||
+		first.Message != "" && first.Message != messageID {
+		stored, found, err := c.ledger.ApprovalFor(first.Message)
+		if err != nil || !found || stored.InteractionID != first.InteractionID {
+			return err
+		}
+		messageID, appr, option = first.Message, stored, first.Option
 	}
 	// An approve carries its proof: a harness that allows a call only with
 	// the owner's signature (Claude, bead 611.42.4) verifies it itself.
@@ -1113,7 +1227,7 @@ func (c *Carrier) Flush(ctx context.Context, pub Publisher, gate func() error) e
 		switch {
 		case err == nil:
 			c.mu.Lock()
-			err = c.ledger.MarkAccepted(o.Key)
+			err = c.ledger.MarkAccepted(o.Key, c.now())
 			c.mu.Unlock()
 		case errors.As(err, &remote) && errors.Is(remote.Kind, relay.ErrRejected):
 			waiting[group] = true
