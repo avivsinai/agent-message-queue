@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/avivsinai/agent-message-queue/internal/codexidentity"
@@ -131,6 +132,12 @@ func codexResumeSelection(args []string) (thread string, selected, unresolved bo
 	if len(args) == 0 || args[0] != "resume" {
 		return "", false, false
 	}
+	// With --last anywhere Codex takes the most recent session and reads a
+	// leading id as the prompt (codex-cli 0.160 cli/src/main.rs
+	// finalize_resume_interactive), so no id names the thread.
+	if slices.Contains(args, "--last") {
+		return "", true, true
+	}
 	for i := 1; i < len(args); i++ {
 		arg := args[i]
 		if arg == "--" {
@@ -170,8 +177,14 @@ func recordResumedCodexThread(binaryPath string, args []string, record func(thre
 		return nil
 	}
 	thread, selected, unresolved := codexResumeSelection(args)
-	if !selected || unresolved {
+	if !selected {
 		return nil
+	}
+	// Codex would choose the thread itself (--last, a name, the picker), and
+	// that thread may carry another session's or handle's identity: AMQ
+	// starts nothing it cannot bind first.
+	if unresolved {
+		return ContextMismatchError("cannot bind the requested AMQ identity before this Codex resume launch: the selection (--last, a session name, the picker, or an option AMQ does not parse) could resume a thread recorded for another session or handle. Pass a concrete thread id: amq coop exec ... codex -- resume <thread-id>, or use amq session resume. Codex was not started")
 	}
 	if record == nil {
 		return ContextMismatchError("AMQ cannot record this session's identity for Codex thread %s", thread)

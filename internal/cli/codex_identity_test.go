@@ -104,3 +104,60 @@ func TestUnrecordableThreadStopsTheLaunch(t *testing.T) {
 		t.Fatalf("record failure: err=%v, want the launch stopped with a context mismatch", err)
 	}
 }
+
+// Review of #993 r3 (Pro, P1): a resume that names no thread id let Codex
+// pick a thread, possibly one recorded for another session or handle, and
+// amq there took that other identity. AMQ refuses it before exec. With
+// --last, Codex reads a leading id as the prompt, so that id binds nothing.
+func TestUnresolvedCodexResumeIsRefused(t *testing.T) {
+	const id = "01a1166e-dd8e-77c0-bc3b-a4b7e24e91ac"
+	recorded := 0
+	record := func(string) error { recorded++; return nil }
+	for _, args := range [][]string{
+		{"resume", "--last"},
+		{"resume", id, "--last"},
+		{"resume", "s1/codex"},
+		{"resume", "--all"},
+		{"resume", "-i", "shot.png", id},
+	} {
+		err := recordResumedCodexThread("codex", args, nil)
+		var mismatch *ExitCodeError
+		if !errors.As(err, &mismatch) || mismatch.Code != ExitContextMismatch {
+			t.Errorf("%q: err=%v, want the launch refused", args, err)
+		}
+		if err := recordResumedCodexThread("codex", args, record); err == nil {
+			t.Errorf("%q with a recorder: launch allowed", args)
+		}
+	}
+	if recorded != 0 {
+		t.Fatalf("recorded %d unresolved selections", recorded)
+	}
+}
+
+// Review of #993 r3 (Pro): session s2 resuming by id a thread recorded for
+// s1 must act as s2, not take s1's identity from the old record.
+func TestResumeByIDTakesTheLaunchingSession(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CODEX_HOME", filepath.Join(t.TempDir(), "codex"))
+	base := secureTempDirForTest(t)
+	for _, s := range []string{"s1", "s2"} {
+		if err := os.Mkdir(filepath.Join(base, s), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const thread = "01a1166e-dd8e-77c0-bc3b-a4b7e24e91ad"
+	for _, s := range []string{"s1", "s2"} {
+		env := buildCoopExecEnvironment(nil, filepath.Join(base, s), "codex", s)
+		if err := recordResumedCodexThread("codex", []string{"resume", thread}, codexThreadIdentityRecorder(env)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, key := range identityEnvKeys {
+		t.Setenv(key, "")
+		_ = os.Unsetenv(key)
+	}
+	t.Setenv("CODEX_THREAD_ID", thread)
+	if err := adoptCodexThreadIdentity(); err != nil || os.Getenv(envSession) != "s2" {
+		t.Fatalf("err=%v session=%q, want s2", err, os.Getenv(envSession))
+	}
+}
