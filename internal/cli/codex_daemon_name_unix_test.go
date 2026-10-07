@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -161,22 +162,27 @@ func TestCodexDaemonThreadDir(t *testing.T) {
 }
 
 // AMQ reads Codex's effective features through `codex features list` and
-// starts the managed daemon exactly when the TUI would.
+// takes the daemon path only where the TUI runs on the daemon.
 //   - Review of #950 r6 (Pro, P2): with terminal_visualization_instructions
 //     on, the TUI resumes with developer instructions.
-//   - Bead agent-message-queue-38l: with no daemon running, the TUI starts
-//     one, so AMQ starts it first.
-//   - Review of #975 (Pro, P1): a layer AMQ did not read turned
-//     daemon_auto_start off, and AMQ started a daemon the TUI would not.
-func TestCodexDaemonStartFollowsCodexFeatures(t *testing.T) {
+//   - Review of #975 r2 (Pro, P1): with bedrock_setup_wizard on, a
+//     signed-out TUI runs embedded even when a daemon runs.
+//   - Bead agent-message-queue-38l: with no daemon running and auto-start on,
+//     the TUI starts one, where the rollout path can never find its thread;
+//     AMQ reports that at once and never starts the daemon itself (review of
+//     #975 r1-r2, Pro P1: `codex app-server daemon start` replaces saved
+//     feature overrides).
+func TestCodexDaemonNamingFollowsCodexFeatures(t *testing.T) {
+	const off = "terminal_visualization_instructions x false\nbedrock_setup_wizard x false\n"
 	for name, tc := range map[string]struct {
 		features string
 		daemon   bool
-		started  bool
+		done     bool
 	}{
-		"terminal instructions on":  {"daemon_auto_start stable true\nterminal_visualization_instructions under development true\n", true, false},
-		"no daemon, auto-start on":  {"daemon_auto_start stable true\n", false, true},
-		"no daemon, auto-start off": {"daemon_auto_start stable false\n", false, false},
+		"terminal instructions on":  {"daemon_auto_start x true\nbedrock_setup_wizard x false\nterminal_visualization_instructions x true\n", true, false},
+		"bedrock wizard on":         {"daemon_auto_start x true\nterminal_visualization_instructions x false\nbedrock_setup_wizard x true\n", true, false},
+		"no daemon, auto-start on":  {"daemon_auto_start x true\n" + off, false, true},
+		"no daemon, auto-start off": {"daemon_auto_start x false\n" + off, false, false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			codexHome, contacts := t.TempDir(), new(atomic.Int32)
@@ -187,17 +193,18 @@ func TestCodexDaemonStartFollowsCodexFeatures(t *testing.T) {
 			writeCodexConfig(t, codexHome, "[projects.\""+repo+"\"]\ntrust_level = \"trusted\"\n")
 			marker := filepath.Join(t.TempDir(), "daemon-start")
 			bin := filepath.Join(t.TempDir(), "codex")
-			script := "#!/bin/sh\ncase \"$1 $2 $3\" in\n\"features list \") printf '" + strings.ReplaceAll(tc.features, "\n", "\\n") + "' ;;\n\"app-server daemon start\") : > " + marker + " ;;\nesac\n"
+			script := "#!/bin/sh\ncase \"$1 $2\" in\n\"features list\") printf '" + strings.ReplaceAll(tc.features, "\n", "\\n") + "' ;;\n*) : > " + marker + " ;;\nesac\n"
 			if err := os.WriteFile(bin, []byte(script), 0o700); err != nil {
 				t.Fatal(err)
 			}
 			t.Setenv("CODEX_HOME", codexHome)
 			t.Chdir(repo)
-			if _, ok := startCodexOnNamedDaemonThread(bin, nil, "s1/codex"); ok || contacts.Load() != 0 {
-				t.Fatalf("daemon path taken = %v, daemon contacts = %d; want neither", ok, contacts.Load())
+			args, done := startCodexOnNamedDaemonThread(bin, []string{"-m", "x"}, "s1/codex")
+			if done != tc.done || contacts.Load() != 0 || done && !slices.Equal(args, []string{"-m", "x"}) {
+				t.Fatalf("done = %v args = %q, daemon contacts = %d; want done %v, unchanged args, no contact", done, args, contacts.Load(), tc.done)
 			}
-			if _, err := os.Stat(marker); (err == nil) != tc.started {
-				t.Fatalf("daemon start ran = %v, want %v", err == nil, tc.started)
+			if _, err := os.Stat(marker); err == nil {
+				t.Fatal("AMQ ran a Codex command other than features list")
 			}
 		})
 	}

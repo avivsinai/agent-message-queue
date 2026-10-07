@@ -1,10 +1,7 @@
 package cli
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -141,11 +138,13 @@ const codexDaemonNamingTimeout = 10 * time.Second
 
 // startCodexOnNamedDaemonThread names a Codex TUI that will run on the
 // managed app-server daemon (codex-cli 0.160): it creates and names a thread
-// on the daemon, then returns args that resume it (4ip). ok is false when
-// the TUI would not join the daemon, Codex does not already trust the
-// directory, or a daemon call failed; the caller then takes the rollout path,
-// which names an embedded Codex.
-func startCodexOnNamedDaemonThread(cmdName string, agentArgs []string, name string) (args []string, ok bool) {
+// on the daemon, then returns args that resume it (4ip). done is true when
+// naming is settled: the thread is named, or the TUI will run on a daemon AMQ
+// cannot name it on, which it reports; args are then the arguments to exec.
+// done is false when the TUI would not join the daemon, Codex does not
+// already trust the directory, or a daemon call failed; the caller then takes
+// the rollout path, which names an embedded Codex.
+func startCodexOnNamedDaemonThread(cmdName string, agentArgs []string, name string) (args []string, done bool) {
 	if launch.ProviderForExecutable(cmdName) != launch.CodexProvider {
 		return nil, false
 	}
@@ -171,22 +170,32 @@ func startCodexOnNamedDaemonThread(cmdName string, agentArgs []string, name stri
 	if err != nil {
 		return nil, false
 	}
-	// With the feature off the TUI's thread/resume carries no developer
-	// instructions (tui/src/app_server_session.rs:2130-2132,
-	// terminal_visualization_instructions.rs:14-19), so the model's
-	// instructions match a TUI start whether the daemon reloads the thread or
-	// not. One setting differs, as for any `codex resume` of a thread with no
-	// turns: a fresh TUI start forces model_reasoning_summary to "none" unless
-	// the user set it, while a resume keeps the model default.
-	if features["terminal_visualization_instructions"] {
+	// With terminal_visualization_instructions off the TUI's thread/resume
+	// carries no developer instructions (tui/src/app_server_session.rs:
+	// 2130-2132, terminal_visualization_instructions.rs:14-19), so the
+	// model's instructions match a TUI start whether the daemon reloads the
+	// thread or not. One setting differs, as for any `codex resume` of a
+	// thread with no turns: a fresh TUI start forces model_reasoning_summary
+	// to "none" unless the user set it, while a resume keeps the model
+	// default. With bedrock_setup_wizard on, a signed-out TUI runs embedded
+	// even when a daemon runs (tui/src/startup_orchestration.rs:494-519,
+	// lib.rs:2305-2323).
+	if features["terminal_visualization_instructions"] || features["bedrock_setup_wizard"] {
 		return nil, false
 	}
-	sock, err := codexControlSocket(cmdName, codexHome, cwd, features["daemon_auto_start"])
+	sock, err := codex.ControlSocket(codexHome)
 	if err != nil {
-		if !errors.Is(err, errCodexNoDaemon) {
-			_ = writeStderr("%s\n", coopNamedTUIManualReminder(name, cmdName, "Codex daemon: "+err.Error()))
+		if !features["daemon_auto_start"] {
+			return nil, false // the TUI runs embedded
 		}
-		return nil, false
+		// The TUI starts a daemon and runs on it
+		// (startup_orchestration.rs:494-540), where the rollout path cannot
+		// find its thread. AMQ does not start the daemon itself: `codex
+		// app-server daemon start` replaces the daemon's saved feature
+		// overrides (app-server-daemon/src/lib.rs:392, 405-438), which the
+		// TUI's own start keeps.
+		_ = writeStderr("%s\n", coopNamedTUIManualReminder(name, cmdName, "no Codex daemon is running yet; this Codex starts one, so the next launch is named"))
+		return agentArgs, true
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), codexDaemonNamingTimeout)
 	defer cancel()
@@ -197,40 +206,6 @@ func startCodexOnNamedDaemonThread(cmdName string, agentArgs []string, name stri
 	}
 	_ = writeStderr("named %s\n", name)
 	return append([]string{"resume", id}, agentArgs...), true
-}
-
-// errCodexNoDaemon means no daemon runs and AMQ does not start one; the
-// rollout path then names the TUI.
-var errCodexNoDaemon = errors.New("no Codex daemon to name the session on")
-
-// codexDaemonStartTimeout bounds `codex app-server daemon start`.
-const codexDaemonStartTimeout = 30 * time.Second
-
-// codexControlSocket returns the managed daemon's control socket. A TUI that
-// finds no daemon starts one and runs on it (codex-cli 0.160
-// tui/src/startup_orchestration.rs:494-540, start_with_features with the
-// saved feature overrides plus its own, none for the options AMQ allows).
-// `codex app-server daemon start` starts it with no overrides and saves that
-// (app-server-daemon/src/lib.rs:392, 405-438), so AMQ runs it only when no
-// overrides are saved: then both starts are the same. Otherwise, or when
-// autoStart is off, it returns errCodexNoDaemon. One interleaving remains: a
-// concurrent Codex launch that saves overrides and then fails to start the
-// daemon between this check and the child's lifecycle lock loses them.
-func codexControlSocket(cmdName, codexHome, dir string, autoStart bool) (string, error) {
-	if sock, err := codex.ControlSocket(codexHome); err == nil {
-		return sock, nil
-	}
-	if !autoStart || codexDaemonHasSavedFeatures(codexHome) {
-		return "", errCodexNoDaemon
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), codexDaemonStartTimeout)
-	defer cancel()
-	start := exec.CommandContext(ctx, cmdName, "app-server", "daemon", "start")
-	start.Dir = dir
-	if output, err := start.CombinedOutput(); err != nil {
-		return "", fmt.Errorf("codex app-server daemon start: %w: %s", err, bytes.TrimSpace(output))
-	}
-	return codex.ControlSocket(codexHome)
 }
 
 // codexEffectiveFeatures returns Codex's effective feature flags for dir as
@@ -259,25 +234,12 @@ func codexEffectiveFeatures(cmdName, dir string) (map[string]bool, error) {
 			features[fields[0]] = false
 		}
 	}
-	if _, ok := features["daemon_auto_start"]; !ok {
-		return nil, errors.New("codex features list did not report daemon_auto_start")
+	for _, required := range []string{"daemon_auto_start", "bedrock_setup_wizard"} {
+		if _, ok := features[required]; !ok {
+			return nil, fmt.Errorf("codex features list did not report %s", required)
+		}
 	}
 	return features, nil
-}
-
-// codexDaemonHasSavedFeatures reports whether the managed daemon's settings
-// (codex-cli 0.160 app-server-daemon/src/settings.rs, featureOverrides in
-// $CODEX_HOME/app-server-daemon/settings.json) may hold feature overrides.
-// An unreadable file counts as holding some.
-func codexDaemonHasSavedFeatures(codexHome string) bool {
-	raw, err := os.ReadFile(filepath.Join(codexHome, "app-server-daemon", "settings.json"))
-	if os.IsNotExist(err) {
-		return false
-	}
-	var settings struct {
-		FeatureOverrides map[string]bool `json:"featureOverrides"`
-	}
-	return err != nil || json.Unmarshal(raw, &settings) != nil || len(settings.FeatureOverrides) > 0
 }
 
 // codexDaemonOptions maps each option that keeps a Codex TUI on the managed
@@ -381,7 +343,7 @@ func applyCoopNamedBeforeExecAt(
 	case coopNamedModeArgv:
 		return injectCoopNamedArgv(cmdName, agentArgs, name), nil
 	case coopNamedModeTUI:
-		if args, ok := startCodexOnNamedDaemonThread(cmdName, agentArgs, name); ok {
+		if args, done := startCodexOnNamedDaemonThread(cmdName, agentArgs, name); done {
 			return args, nil
 		}
 		if err := startCoopNamedTUIInjector(name, cmdName, execStart); err != nil {
