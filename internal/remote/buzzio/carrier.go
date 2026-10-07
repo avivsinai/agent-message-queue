@@ -1067,6 +1067,14 @@ func (c *Carrier) Flush(ctx context.Context, pub Publisher, gate func() error) e
 	}
 	sent := 0
 	waiting := map[string]bool{} // requests whose earlier output is still owed
+	// Outputs written before sequence numbers (Seq 0) have no provable order
+	// within their request: while any of them is refused and waiting out its
+	// backoff, the request's other old outputs wait too (Pro review of #971).
+	for _, o := range pending {
+		if o.Seq == 0 && o.Binding == c.share() && !o.Due(c.now()) {
+			waiting[outputGroup(o.Key)] = true
+		}
+	}
 	for _, o := range pending {
 		if o.Binding != c.share() {
 			continue // another binding's output: owed, never redirected
