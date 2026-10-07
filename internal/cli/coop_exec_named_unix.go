@@ -198,13 +198,6 @@ func validateCoopNamedSessionLabel(name string) error {
 	}
 }
 
-func coopNamedTUIManualReminder(name, binaryBase, reason string) string {
-	return fmt.Sprintf(
-		"warning: unable to set or confirm the %s CLI display name %q (%s); this affects only the CLI display name; enter %q manually",
-		filepath.Base(binaryBase), name, reason, coopNamedTUICommand(binaryBase, name),
-	)
-}
-
 func runCoopNamedTUI(reader coopNamedStoreReader, name, binaryBase, cwd string, execStart time.Time) error {
 	candidate, err := reader.locate(cwd, execStart)
 	if err != nil {

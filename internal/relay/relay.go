@@ -49,15 +49,28 @@ var ErrGrantExpired = errors.New("enrolled grant expired")
 var ErrRejected = errors.New("relay rejected event")
 
 // RemoteError carries a relay's refusal. Kind is the stable category;
-// Reason is relay-controlled text, kept for local debugging and never
-// written to status files or shown as AMQ's own words (codex slice 1 review
-// #9). Error() returns only the category.
+// Reason is relay-controlled text. Error() adds the reason as quoted relay
+// words, so a log or doctor names why the relay refused
+// (agent-message-queue-611.58); status files take Category or StatusText,
+// which never carry it (codex slice 1 review #9).
 type RemoteError struct {
 	Kind   error
 	Reason string
 }
 
-func (e *RemoteError) Error() string { return e.Kind.Error() }
+// maxReasonText bounds the relay reason Error() shows.
+const maxReasonText = 256
+
+func (e *RemoteError) Error() string {
+	if e.Reason == "" {
+		return e.Kind.Error()
+	}
+	reason := e.Reason
+	if len(reason) > maxReasonText {
+		reason = strings.ToValidUTF8(reason[:maxReasonText], "") + "…"
+	}
+	return fmt.Sprintf("%s: relay said %q", e.Kind, reason)
+}
 func (e *RemoteError) Unwrap() error { return e.Kind }
 
 // Config is one connection's identity and bounds.

@@ -15,6 +15,7 @@ import (
 
 	"fiatjaf.com/nostr"
 
+	"github.com/avivsinai/agent-message-queue/internal/relay"
 	"github.com/avivsinai/agent-message-queue/internal/remote/bodykey"
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
@@ -152,10 +153,22 @@ func (c *Carrier) originTags(origin map[string]string) nostr.Tags {
 	return c.rowTags(origin["event"], origin["root"])
 }
 
-// threadRoot is the NIP-10 root an owner event replies within, if any.
+// threadRoot is the NIP-10 root an owner event replies within, if any: its
+// root-marked e tag, or else its reply-marked one. Buzz marks a direct reply
+// to a thread's first message with only a reply tag, so that parent is the
+// root; a reply to such an event that names no root is refused by the relay
+// ("root tag does not match thread ancestry", agent-message-queue-611.58).
 func threadRoot(evt nostr.Event) string {
+	if root := markedID(evt, "root"); root != "" {
+		return root
+	}
+	return markedID(evt, "reply")
+}
+
+// markedID is the event id of evt's first e tag with marker, or "".
+func markedID(evt nostr.Event, marker string) string {
 	for _, t := range evt.Tags {
-		if len(t) >= 4 && t[0] == "e" && t[3] == "root" && validHexID(t[1]) {
+		if len(t) >= 4 && t[0] == "e" && t[3] == marker && validHexID(t[1]) {
 			return t[1]
 		}
 	}
@@ -985,12 +998,24 @@ func answeredWith(s protocol.Snapshot, interactionID, option string) bool {
 }
 
 // settleApprovalAnswer replies under the approval message, then settles the
-// reaction.
+// reaction. The approval message sits in the owner input's thread, so the
+// reply names that thread's root (agent-message-queue-611.58).
 func (c *Carrier) settleApprovalAnswer(evt nostr.Event, messageID string, st Settlement, text string) error {
-	if err := c.reply(evt, c.rowTags(messageID, ""), text); err != nil {
+	appr, ok, err := c.ledger.ApprovalFor(messageID)
+	if err != nil {
 		return err
 	}
-	_, err := c.ledger.Settle(evt.ID.Hex(), st)
+	if !ok {
+		return fmt.Errorf("approval message %s not stored", messageID)
+	}
+	msg, err := c.storedApproval(messageID, appr)
+	if err != nil {
+		return err
+	}
+	if err := c.reply(evt, c.replyTags(msg), text); err != nil {
+		return err
+	}
+	_, err = c.ledger.Settle(evt.ID.Hex(), st)
 	return err
 }
 
@@ -1054,9 +1079,15 @@ const (
 // share (body and DM channel), that the enrolled generation still grants
 // its kind, and that gate (the verified membership) still admits export;
 // an output that fails stays owed and is never re-signed (codex #866 r1 #3,
-// #6). An explicit rejection or an unknown result leaves it owed; the same
-// stored bytes are sent again next time. The ledger lock is not held while
-// a send waits.
+// #6). An unknown result, a lost connection or a transient refusal
+// (rate-limited, auth-required, error) stops the pass and leaves the output
+// owed: the same stored bytes are sent again next time, still in order. A
+// final refusal (any other negative OK) is recorded on the output with the
+// relay's reason and the pass goes on, so one refused row never holds back
+// later rows (agent-message-queue-611.58). An edit of a refused message is
+// refused without a send: the message it edits does not exist on the
+// relay. Row keys sort a request's root row before its edits, so an edit is
+// never sent before its row. The ledger lock is not held while a send waits.
 func (c *Carrier) Flush(ctx context.Context, pub Publisher, gate func() error) error {
 	c.mu.Lock()
 	pending, err := c.ledger.Pending()
@@ -1076,6 +1107,18 @@ func (c *Carrier) Flush(ctx context.Context, pub Publisher, gate func() error) e
 		if err := json.Unmarshal(o.Event, &evt); err != nil {
 			return fmt.Errorf("outbox %s: %w", o.Key, err)
 		}
+		if evt.Kind == KindEdit {
+			refused, err := c.refusedMessage(tagValue(evt, "e"))
+			if err != nil {
+				return err
+			}
+			if refused {
+				if err := c.settle(o.Key, "not sent: the message it edits was refused by the relay"); err != nil {
+					return err
+				}
+				continue
+			}
+		}
 		if _, err := c.grant(uint16(evt.Kind), c.now()); err != nil {
 			return fmt.Errorf("%w: kind %d: %v", ErrNoGrant, evt.Kind, err)
 		}
@@ -1090,18 +1133,69 @@ func (c *Carrier) Flush(ctx context.Context, pub Publisher, gate func() error) e
 		pctx, cancel := context.WithTimeout(ctx, publishTimeout)
 		err := pub(pctx, evt)
 		cancel()
-		if err != nil {
-			return fmt.Errorf("publish %s: %w", o.Key, err)
-		}
 		sent++
-		c.mu.Lock()
-		err = c.ledger.MarkAccepted(o.Key)
-		c.mu.Unlock()
+		refusal := ""
 		if err != nil {
+			reason, final := finalRefusal(err)
+			if !final {
+				return fmt.Errorf("publish %s: %w", o.Key, err)
+			}
+			refusal = fmt.Sprintf("the relay refused it: %q", reason)
+		}
+		if err := c.settle(o.Key, refusal); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// settle records an output's final outcome: accepted when refusal is "",
+// otherwise refused for that reason.
+func (c *Carrier) settle(key, refusal string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if refusal == "" {
+		return c.ledger.MarkAccepted(key)
+	}
+	return c.ledger.MarkRefused(key, refusal)
+}
+
+// finalRefusal reports whether err is the relay's final refusal of an
+// event, and the relay's reason. NIP-01 marks a negative OK that may pass
+// on a later try with the rate-limited, auth-required or error prefix.
+func finalRefusal(err error) (string, bool) {
+	var remote *relay.RemoteError
+	if !errors.As(err, &remote) || !errors.Is(remote.Kind, relay.ErrRejected) {
+		return "", false
+	}
+	for _, p := range []string{"rate-limited:", "auth-required:", "error:"} {
+		if strings.HasPrefix(remote.Reason, p) {
+			return "", false
+		}
+	}
+	return remote.Reason, true
+}
+
+// refusedMessage reports whether the relay refused the message with event
+// id: a request's result row or an approval message this edge prepared.
+func (c *Carrier) refusedMessage(id string) (bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	key := ""
+	if ref, ok, err := c.ledger.RequestForRow(id); err != nil {
+		return false, err
+	} else if ok {
+		key = rootKey(ref)
+	} else if appr, ok, err := c.ledger.ApprovalFor(id); err != nil {
+		return false, err
+	} else if ok {
+		key = approvalKey(appr.RequestRef, appr.InteractionID)
+	}
+	if key == "" {
+		return false, nil
+	}
+	o, ok, err := c.ledger.Prepared(key)
+	return ok && o.Refused != "", err
 }
 
 // rowTags and editTags are the only place row tags are built (relay design

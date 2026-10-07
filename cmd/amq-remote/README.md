@@ -507,6 +507,12 @@ remedy. Doctor exits 6 exactly when `failing` is not empty.
 `authenticated` means the relay accepted this body's AUTH. It does not prove
 that the relay materialized the owner binding or that any viewer is ready.
 
+`publication_refused` is advice, not a failure: it names each DM output the
+relay refused for good, with the relay's reason. The flush sets such an
+output aside, so later output still goes out; an edit of a refused message
+is set aside without a send. A refusal the relay marks `rate-limited:`,
+`auth-required:` or `error:` is not final: the output stays owed.
+
 `stale_harness` is advice, not a failure: it is reported under `notes` and
 never makes doctor exit non-zero. A different identity can also be a
 byte-identical copy or another binary with the same name, so the note asks

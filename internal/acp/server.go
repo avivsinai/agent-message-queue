@@ -125,6 +125,9 @@ type turnState struct {
 	// settles the turn, so a mailbox Stop is never acknowledged before it is
 	// recorded.
 	mailboxEvent string
+	// mailboxSteer is set once a mailbox turn's prompt is published; a
+	// follow-up DM steers the turn only then.
+	mailboxSteer *mailboxSteerTarget
 }
 
 // settleLocked decides the turn's outcome if it is still open; it reports
@@ -362,6 +365,11 @@ func (s *Server) dispatchWithNotify(method string, params json.RawMessage, emit 
 	case "session/set_model":
 		return s.setModel(params)
 	case "_session/steering":
+		// A mailbox-binding turn takes follow-up DMs (bead
+		// agent-message-queue-cfy); every other remote turn refuses.
+		if s.cfg.RemoteBinding {
+			return s.mailboxSteering(params)
+		}
 		if s.remote() {
 			return nil, newRPCError(codeMethodNotFound, "steering is not supported in amq-remote mode")
 		}
@@ -443,7 +451,10 @@ func (s *Server) initialize(params json.RawMessage) (any, *rpcError) {
 			Version: s.version,
 		},
 		AuthMethods: []any{},
-		Meta:        initializeMeta{Steering: steeringCapability{Supported: !s.remote()}},
+		// Binding mode advertises steering before any binding is chosen: a
+		// mailbox turn (the default carrier) takes it, and a native-binding
+		// turn refuses it at call time.
+		Meta: initializeMeta{Steering: steeringCapability{Supported: !s.remote() || s.cfg.RemoteBinding}},
 	}, nil
 }
 
@@ -1162,6 +1173,10 @@ func (s *Server) steering(params json.RawMessage) (any, *rpcError) {
 	case turnPrompt != "":
 		outcome = SteeringInjected
 	}
+	return newSteeringResult(outcome, delivery), nil
+}
+
+func newSteeringResult(outcome string, delivery Delivery) steeringResult {
 	return steeringResult{
 		Outcome: outcome,
 		Meta: promptMeta{AMQ: amqDelivery{
@@ -1177,7 +1192,7 @@ func (s *Server) steering(params json.RawMessage) (any, *rpcError) {
 			Egress:    delivery.Egress,
 			Duplicate: delivery.Duplicate,
 		}},
-	}, nil
+	}
 }
 
 // formatSteeringBody frames owner text as untrusted task guidance.

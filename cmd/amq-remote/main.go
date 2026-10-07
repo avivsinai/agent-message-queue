@@ -27,6 +27,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/relay"
 	"github.com/avivsinai/agent-message-queue/internal/remote/amqio"
+	"github.com/avivsinai/agent-message-queue/internal/remote/buzzio"
 	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
 	"github.com/avivsinai/agent-message-queue/internal/remote/codex"
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
@@ -1299,6 +1300,7 @@ func doctor(args []string, probe ...*jsonProbe) (any, int, error) {
 			if sh.Discovery != "" && sh.Discovery != "policy_present" {
 				fail("discovery", sh.Session, sh.Discovery, "the owner publishes the kind 30177 policy for this body from their Buzz client")
 			}
+			noteRefusedRows(note, stateDir, sh.Session)
 		}
 	case !errors.Is(rerr, os.ErrNotExist):
 		report["relay_error"] = rerr.Error()
@@ -1314,6 +1316,28 @@ func doctor(args []string, probe ...*jsonProbe) (any, int, error) {
 		report["notes"] = notes
 	}
 	return finish()
+}
+
+// maxRefusedNotes bounds the refused rows doctor lists per share.
+const maxRefusedNotes = 5
+
+// noteRefusedRows names the share's outputs the relay refused for good,
+// with the relay's reason. The flush sets them aside so later rows still go
+// out (agent-message-queue-611.58), so they are advice, not a failure.
+func noteRefusedRows(note func(boundary, subject, detail, remedy string), stateDir, session string) {
+	const remedy = "the row is set aside and later rows still go out; fix the cause the relay names, then send the message again from Buzz"
+	refused, err := buzzio.RefusedOutputs(filepath.Join(stateDir, "shares", session))
+	if err != nil {
+		note("publication_refused", session, "cannot read the outbox: "+err.Error(), "")
+		return
+	}
+	for i, o := range refused {
+		if i == maxRefusedNotes {
+			note("publication_refused", session, fmt.Sprintf("%d more refused rows in the outbox", len(refused)-i), remedy)
+			return
+		}
+		note("publication_refused", session, o.Key+": "+o.Refused, remedy)
+	}
 }
 
 // amqRouteDetail reports why other agents cannot route to the endpoint

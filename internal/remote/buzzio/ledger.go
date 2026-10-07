@@ -151,6 +151,11 @@ type Outbound struct {
 	// only while the current share is the same (codex #866 r2 #4).
 	Binding  ShareBinding `json:"binding"`
 	Accepted bool         `json:"accepted"`
+	// Refused is set when the relay refused the event for good (a negative
+	// OK): the relay's reason, quoted as its words. A refused output is
+	// never sent again and no longer holds back later ones; its record stays
+	// in the outbox, so a prepared answer still counts as given.
+	Refused string `json:"refused,omitempty"`
 }
 
 // ShareBinding is the full identity of a share: an output, claim or
@@ -183,24 +188,43 @@ func (l *Ledger) PrepareRevision(key string, event json.RawMessage, revision int
 	if err != nil {
 		return Outbound{}, err
 	}
-	return l.readOutbound(stored)
+	return readOutbound(stored)
 }
 
 // MarkAccepted records the relay's matching positive OK for key.
 func (l *Ledger) MarkAccepted(key string) error {
+	return l.settleOutput(key, func(o *Outbound) { o.Accepted = true })
+}
+
+// maxRefusedReason bounds the relay reason kept on a refused output.
+const maxRefusedReason = 512
+
+// MarkRefused records the relay's final refusal of key with its reason.
+func (l *Ledger) MarkRefused(key, reason string) error {
+	if len(reason) > maxRefusedReason {
+		reason = strings.ToValidUTF8(reason[:maxRefusedReason], "") + "…"
+	}
+	if reason == "" {
+		reason = "no reason given"
+	}
+	return l.settleOutput(key, func(o *Outbound) { o.Refused = reason })
+}
+
+// settleOutput applies a final relay outcome to key's record once.
+func (l *Ledger) settleOutput(key string, set func(*Outbound)) error {
 	dir := filepath.Join(l.dir, "outbox")
 	stored, err := readBounded(filepath.Join(dir, keyFile(key)))
 	if err != nil {
 		return err
 	}
-	o, err := l.readOutbound(stored)
+	o, err := readOutbound(stored)
 	if err != nil {
 		return err
 	}
-	if o.Accepted {
+	if o.Accepted || o.Refused != "" {
 		return nil
 	}
-	o.Accepted = true
+	set(&o)
 	raw, err := json.Marshal(o)
 	if err != nil {
 		return err
@@ -209,9 +233,25 @@ func (l *Ledger) MarkAccepted(key string) error {
 	return err
 }
 
-// Pending returns prepared outputs not yet accepted, in key order.
+// Pending returns prepared outputs neither accepted nor refused, in key
+// order.
 func (l *Ledger) Pending() ([]Outbound, error) {
-	dir := filepath.Join(l.dir, "outbox")
+	return scanOutbox(filepath.Join(l.dir, "outbox"), func(o Outbound) bool { return !o.Accepted && o.Refused == "" })
+}
+
+// RefusedOutputs lists the outputs the relay refused for good in the
+// ledger under stateDir, in key order, without creating anything; a ledger
+// that does not exist has none.
+func RefusedOutputs(stateDir string) ([]Outbound, error) {
+	out, err := scanOutbox(filepath.Join(stateDir, "buzz", "outbox"), func(o Outbound) bool { return o.Refused != "" })
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	return out, err
+}
+
+// scanOutbox returns the records in dir that keep selects, in key order.
+func scanOutbox(dir string, keep func(Outbound) bool) ([]Outbound, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err
@@ -225,11 +265,11 @@ func (l *Ledger) Pending() ([]Outbound, error) {
 		if err != nil {
 			return nil, err
 		}
-		o, err := l.readOutbound(raw)
+		o, err := readOutbound(raw)
 		if err != nil {
 			return nil, err
 		}
-		if !o.Accepted {
+		if keep(o) {
 			out = append(out, o)
 		}
 	}
@@ -246,11 +286,11 @@ func (l *Ledger) Prepared(key string) (Outbound, bool, error) {
 	if err != nil {
 		return Outbound{}, false, err
 	}
-	o, err := l.readOutbound(raw)
+	o, err := readOutbound(raw)
 	return o, err == nil, err
 }
 
-func (l *Ledger) readOutbound(raw []byte) (Outbound, error) {
+func readOutbound(raw []byte) (Outbound, error) {
 	var o Outbound
 	if err := json.Unmarshal(raw, &o); err != nil {
 		return Outbound{}, fmt.Errorf("outbox record is unreadable: %w", err)
