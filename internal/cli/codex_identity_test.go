@@ -119,6 +119,9 @@ func TestUnresolvedCodexResumeIsRefused(t *testing.T) {
 		{"resume", "s1/codex"},
 		{"resume", "--all"},
 		{"resume", "-i", "shot.png", id},
+		// Review of #993 r4 (Pro, P1): options before the subcommand.
+		{"--no-alt-screen", "resume", "--last"},
+		{"-c", "model=x", "resume"},
 	} {
 		err := recordResumedCodexThread("codex", args, nil)
 		var mismatch *ExitCodeError

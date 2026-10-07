@@ -129,9 +129,26 @@ func codexThreadIdentityRecorder(env []string) func(thread string) error {
 // a launch that is not a resume, and unresolved is true for a resume that
 // names no thread id (--last, a name, the picker) or that AMQ cannot parse.
 func codexResumeSelection(args []string) (thread string, selected, unresolved bool) {
-	if len(args) == 0 || args[0] != "resume" {
+	// resume is the first positional; options may stand before it.
+	start := -1
+	for i := 0; i < len(args) && start < 0; i++ {
+		flag, _, inline := strings.Cut(args[i], "=")
+		switch {
+		case args[i] == "--":
+			return "", false, false
+		case !strings.HasPrefix(args[i], "-"):
+			if args[i] != "resume" {
+				return "", false, false
+			}
+			start = i
+		case codexValueOptions[flag] && !inline:
+			i++
+		}
+	}
+	if start < 0 {
 		return "", false, false
 	}
+	args = args[start:]
 	// With --last anywhere Codex takes the most recent session and reads a
 	// leading id as the prompt (codex-cli 0.160 cli/src/main.rs
 	// finalize_resume_interactive), so no id names the thread.
