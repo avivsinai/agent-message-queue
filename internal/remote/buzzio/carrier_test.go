@@ -4,11 +4,13 @@ import (
 	"context"
 	"crypto/rand"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
 	"fiatjaf.com/nostr"
 
+	"github.com/avivsinai/agent-message-queue/internal/relay"
 	"github.com/avivsinai/agent-message-queue/internal/remote/bodykey"
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
@@ -252,3 +254,85 @@ func TestMentionSubmitsAndAnswersInDM(t *testing.T) {
 
 // fixedIdentity is a native session accessor that always reports id.
 func fixedIdentity(id string) func(string) string { return func(string) string { return id } }
+
+// busyCarrier is a carrier whose target refuses every submit as busy, the
+// endpoint answer behind the rows of agent-message-queue-611.58.
+func busyCarrier(t *testing.T) (c *Carrier, owner [32]byte, stateDir string) {
+	t.Helper()
+	var body [32]byte
+	_, _ = rand.Read(owner[:])
+	_, _ = rand.Read(body[:])
+	b := Binding{Owner: nostr.GetPublicKey(owner).Hex(), Body: nostr.GetPublicKey(body).Hex(), Channel: "dm-1", Target: "cx", RelayHost: "relay", NativeSession: "thread-1"}
+	stateDir = t.TempDir()
+	ledger, err := OpenLedger(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c = NewCarrier(ledger, b, body, ownerGrant(t, owner, b.Body, KindDM, KindEdit), fixedIdentity("thread-1"), func(cmd *protocol.Command, src core.Source) (any, error) {
+		switch cmd.Op {
+		case protocol.OpSessionInspect:
+			return protocol.Session{TargetID: "cx", Epoch: "e1"}, nil
+		case protocol.OpRequestSubmit:
+			ref := protocol.EncodeRef(src.Host, cmd.TargetID, cmd.RequestID)
+			return protocol.Reply{Snapshot: protocol.Snapshot{RequestRef: ref, TargetID: cmd.TargetID, Revision: 1, State: protocol.StateRejected, Code: protocol.CodeBusy}}, nil
+		}
+		return nil, nil
+	})
+	return c, owner, stateDir
+}
+
+// agent-message-queue-611.58 (field, Buzz relay 2026-10-06): Buzz tags an
+// owner's direct reply to a thread's first message with a reply e tag only.
+// The result row named the owner event but no root, and the relay refused
+// it: "invalid: root tag does not match thread ancestry".
+func TestRowForThreadReplyNamesTheThreadRoot(t *testing.T) {
+	c, owner, _ := busyCarrier(t)
+	root := strings.Repeat("ab", 32)
+	reply := nostr.Event{CreatedAt: nostr.Now(), Kind: KindDM, Content: "yes", Tags: nostr.Tags{{"h", "dm-1"}, {"e", root, "", "reply"}}}
+	if err := reply.Sign(owner); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Ingest(reply); err != nil {
+		t.Fatal(err)
+	}
+	var sent []nostr.Event
+	if err := c.Flush(context.Background(), func(_ context.Context, evt nostr.Event) error { sent = append(sent, evt); return nil }, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(sent) != 1 || !hasTag(sent[0], "e", root, "", "root") || !hasTag(sent[0], "e", reply.ID.Hex(), "", "reply") {
+		t.Fatalf("sent = %+v, want one row naming the thread root and replying to the owner event", sent)
+	}
+}
+
+// agent-message-queue-611.58 (field, Buzz relay 2026-10-06): Flush stopped
+// at the first refused row, so every later row, a new approval message
+// included, never reached the owner. A row the relay refuses is set aside
+// with the relay's reason and the next row is still sent.
+func TestRefusedRowDoesNotBlockLaterRows(t *testing.T) {
+	c, owner, stateDir := busyCarrier(t)
+	now := time.Now()
+	for i, text := range []string{"first", "second"} {
+		if err := c.Ingest(ownerEvent(t, owner, "dm-1", text, now.Add(time.Duration(i)*time.Second))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const reason = "invalid: root tag does not match thread ancestry"
+	var sent []nostr.Event
+	err := c.Flush(context.Background(), func(_ context.Context, evt nostr.Event) error {
+		sent = append(sent, evt)
+		if len(sent) == 1 {
+			return &relay.RemoteError{Kind: relay.ErrRejected, Reason: reason}
+		}
+		return nil
+	}, nil)
+	if err != nil || len(sent) != 2 {
+		t.Fatalf("flush err = %v after %d sends, want both rows sent", err, len(sent))
+	}
+	if pending, _ := c.ledger.Pending(); len(pending) != 0 {
+		t.Fatalf("pending after flush = %d, want 0", len(pending))
+	}
+	refused, err := RefusedOutputs(stateDir)
+	if err != nil || len(refused) != 1 || !strings.Contains(refused[0].Refused, reason) {
+		t.Fatalf("refused outputs = %+v (err %v), want the first row with the relay's reason", refused, err)
+	}
+}

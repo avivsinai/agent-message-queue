@@ -182,6 +182,20 @@ func Category(err error) string {
 	}
 }
 
+// StatusText is err's text for a status file: a wrapped relay refusal
+// shows only its category, so relay-controlled words never reach the file
+// (codex slice 1 review #9).
+func StatusText(err error) string {
+	if err == nil {
+		return ""
+	}
+	var remote *RemoteError
+	if !errors.As(err, &remote) {
+		return err.Error()
+	}
+	return strings.ReplaceAll(err.Error(), remote.Error(), remote.Kind.Error())
+}
+
 // Run connects and stays connected until ctx ends. It returns nil on
 // cancellation; it never returns on transport failure, only backs off.
 func (c *Client) Run(ctx context.Context) error {
