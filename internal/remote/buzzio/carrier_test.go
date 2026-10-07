@@ -3,12 +3,18 @@ package buzzio
 import (
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"fiatjaf.com/nostr"
 
+	"github.com/avivsinai/agent-message-queue/internal/relay"
 	"github.com/avivsinai/agent-message-queue/internal/remote/bodykey"
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
@@ -252,3 +258,207 @@ func TestMentionSubmitsAndAnswersInDM(t *testing.T) {
 
 // fixedIdentity is a native session accessor that always reports id.
 func fixedIdentity(id string) func(string) string { return func(string) string { return id } }
+
+// busyCarrier is a carrier whose target refuses every submit as busy, the
+// endpoint answer behind the rows of agent-message-queue-611.58.
+func busyCarrier(t *testing.T) (c *Carrier, owner [32]byte, stateDir string) {
+	t.Helper()
+	var body [32]byte
+	_, _ = rand.Read(owner[:])
+	_, _ = rand.Read(body[:])
+	b := Binding{Owner: nostr.GetPublicKey(owner).Hex(), Body: nostr.GetPublicKey(body).Hex(), Channel: "dm-1", Target: "cx", RelayHost: "relay", NativeSession: "thread-1"}
+	stateDir = t.TempDir()
+	ledger, err := OpenLedger(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c = NewCarrier(ledger, b, body, ownerGrant(t, owner, b.Body, KindDM, KindEdit), fixedIdentity("thread-1"), func(cmd *protocol.Command, src core.Source) (any, error) {
+		switch cmd.Op {
+		case protocol.OpSessionInspect:
+			return protocol.Session{TargetID: "cx", Epoch: "e1"}, nil
+		case protocol.OpRequestSubmit:
+			ref := protocol.EncodeRef(src.Host, cmd.TargetID, cmd.RequestID)
+			return protocol.Reply{Snapshot: protocol.Snapshot{RequestRef: ref, TargetID: cmd.TargetID, Revision: 1, State: protocol.StateRejected, Code: protocol.CodeBusy}}, nil
+		}
+		return nil, nil
+	})
+	return c, owner, stateDir
+}
+
+// agent-message-queue-611.58 (field, Buzz relay 2026-10-06): Buzz tags an
+// owner's direct reply to a thread's first message with a reply e tag only.
+// The result row named the owner event but no root, and the relay refused
+// it: "invalid: root tag does not match thread ancestry". Pro review of #971
+// added the legacy positional forms, which named no root either.
+func TestRowForThreadReplyNamesTheThreadRoot(t *testing.T) {
+	root, parent := strings.Repeat("ab", 32), strings.Repeat("cd", 32)
+	for name, tags := range map[string]nostr.Tags{
+		"reply-only to the root": {{"h", "dm-1"}, {"e", root, "", "reply"}},
+		"positional, root only":  {{"h", "dm-1"}, {"e", root}},
+		"positional, root first": {{"h", "dm-1"}, {"e", root}, {"e", parent}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c, owner, _ := busyCarrier(t)
+			reply := nostr.Event{CreatedAt: nostr.Now(), Kind: KindDM, Content: "yes", Tags: tags}
+			if err := reply.Sign(owner); err != nil {
+				t.Fatal(err)
+			}
+			if err := c.Ingest(reply); err != nil {
+				t.Fatal(err)
+			}
+			var sent []nostr.Event
+			if err := c.Flush(context.Background(), func(_ context.Context, evt nostr.Event) error { sent = append(sent, evt); return nil }, nil); err != nil {
+				t.Fatal(err)
+			}
+			if len(sent) != 1 || !hasTag(sent[0], "e", root, "", "root") || !hasTag(sent[0], "e", reply.ID.Hex(), "", "reply") {
+				t.Fatalf("sent = %+v, want one row naming the thread root and replying to the owner event", sent)
+			}
+		})
+	}
+}
+
+// agent-message-queue-611.58 (field, Buzz relay 2026-10-06): Flush stopped
+// at the first refused row, so every later row, a new approval message
+// included, never reached the owner. A refused row stays owed with the
+// relay's reason: other requests' rows still go out, its own edit waits
+// behind it, and both are sent in order once its backoff has passed.
+func TestRefusedRowDoesNotBlockLaterRows(t *testing.T) {
+	c, owner, stateDir := busyCarrier(t)
+	now := time.Now()
+	c.now = func() time.Time { return now }
+	for i, text := range []string{"first", "second"} {
+		if err := c.Ingest(ownerEvent(t, owner, "dm-1", text, now.Add(time.Duration(i)*time.Second))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const reason = "invalid: root tag does not match thread ancestry"
+	var sent []nostr.Event
+	refuseFirst := func(_ context.Context, evt nostr.Event) error {
+		sent = append(sent, evt)
+		if len(sent) == 1 {
+			return &relay.RemoteError{Kind: relay.ErrRejected, Reason: reason}
+		}
+		return nil
+	}
+	if err := c.Flush(context.Background(), refuseFirst, nil); err != nil || len(sent) != 2 {
+		t.Fatalf("flush err = %v after %d sends, want both requests' rows tried", err, len(sent))
+	}
+	refused, err := RefusedOutputs(stateDir)
+	if err != nil || len(refused) != 1 || refused[0].Refused.Reason != reason {
+		t.Fatalf("refused outputs = %+v (err %v), want the first row owed with the relay's reason", refused, err)
+	}
+	// The refused request's next revision is an edit of its row: it waits
+	// behind the row, which waits out its backoff.
+	ref := strings.TrimSuffix(strings.TrimPrefix(refused[0].Key, "row/"), "/00000000")
+	now = now.Add(2 * time.Second)
+	origin := c.source(tagValue(sent[0], "e"), "").Origin
+	if err := c.Publish(protocol.Snapshot{RequestRef: ref, TargetID: "cx", Revision: 2, State: protocol.StateCompleted, Result: &protocol.Result{Text: "done"}}, origin); err != nil {
+		t.Fatal(err)
+	}
+	sent = nil
+	accept := func(_ context.Context, evt nostr.Event) error { sent = append(sent, evt); return nil }
+	if err := c.Flush(context.Background(), accept, nil); err != nil || len(sent) != 0 {
+		t.Fatalf("flush during backoff: err = %v, sent = %d, want nothing sent", err, len(sent))
+	}
+	now = now.Add(time.Minute)
+	if err := c.Flush(context.Background(), accept, nil); err != nil || len(sent) != 2 || sent[0].Kind != KindDM || sent[1].Kind != KindEdit || tagValue(sent[1], "e") != sent[0].ID.Hex() {
+		t.Fatalf("flush after backoff: err = %v, sent = %+v, want the row then its edit", err, sent)
+	}
+	if pending, _ := c.ledger.Pending(); len(pending) != 0 {
+		t.Fatalf("pending after flush = %d, want 0", len(pending))
+	}
+}
+
+// Pro review of #971 round 2 (agent-message-queue-611.58): Flush ordered a
+// request's outputs by key text, so a newer revision ("row/R/00000003")
+// sorted before a refused approval message ("row/R/approval/ffff…") and
+// went out first, also after the ledger was reopened. A request's outputs
+// go out in the order they were prepared. Round 3: outputs written before
+// sequence numbers (seq 0) have no provable order, so a refused one holds
+// its request's other old outputs.
+func TestRefusedApprovalHoldsItsRequestsNewerRows(t *testing.T) {
+	for _, legacy := range []bool{false, true} {
+		t.Run(fmt.Sprintf("legacy=%v", legacy), func(t *testing.T) { refusedApprovalHoldsNewerRows(t, legacy) })
+	}
+}
+
+func refusedApprovalHoldsNewerRows(t *testing.T, legacy bool) {
+	c, owner, stateDir := busyCarrier(t)
+	now := time.Now()
+	c.now = func() time.Time { return now }
+	if err := c.Ingest(ownerEvent(t, owner, "dm-1", "go", now)); err != nil {
+		t.Fatal(err)
+	}
+	var sent []nostr.Event
+	accept := func(_ context.Context, evt nostr.Event) error { sent = append(sent, evt); return nil }
+	if err := c.Flush(context.Background(), accept, nil); err != nil || len(sent) != 1 {
+		t.Fatalf("flush root: err = %v, sent = %d", err, len(sent))
+	}
+	pending, _ := c.ledger.Pending()
+	ref, _, _ := c.ledger.RequestForRow(sent[0].ID.Hex())
+	origin := c.source(tagValue(sent[0], "e"), "").Origin
+	if len(pending) != 0 || ref == "" {
+		t.Fatalf("root not accepted: pending = %d, ref = %q", len(pending), ref)
+	}
+	interaction := strings.Repeat("f", 32)
+	now = now.Add(2 * time.Second)
+	if err := c.Publish(protocol.Snapshot{RequestRef: ref, TargetID: "cx", Revision: 2, State: protocol.StateRunning,
+		Interaction: &protocol.Interaction{InteractionID: interaction, Kind: "approval", Prompt: "run ls", Options: []string{"yes", "no"}, RemoteAnswer: true, ApproveOption: "yes", RejectOption: "no"}}, origin); err != nil {
+		t.Fatal(err)
+	}
+	sent = nil
+	refuseApproval := func(_ context.Context, evt nostr.Event) error {
+		sent = append(sent, evt)
+		if evt.Kind == KindDM {
+			return &relay.RemoteError{Kind: relay.ErrRejected, Reason: "rate-limited"}
+		}
+		return nil
+	}
+	if err := c.Flush(context.Background(), refuseApproval, nil); err != nil {
+		t.Fatal(err)
+	}
+	// The terminal resolves the interaction; the newer revision is prepared
+	// by a reopened ledger while the approval waits out its backoff.
+	reopened, err := OpenLedger(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.ledger = reopened
+	now = now.Add(2 * time.Second)
+	if err := c.Publish(protocol.Snapshot{RequestRef: ref, TargetID: "cx", Revision: 3, State: protocol.StateCompleted, Result: &protocol.Result{Text: "done"},
+		Resolved: []protocol.Resolution{{InteractionID: interaction, Outcome: protocol.ResolutionElsewhere}}}, origin); err != nil {
+		t.Fatal(err)
+	}
+	if legacy {
+		// Rewrite the owed outputs as an earlier build wrote them: no seq.
+		files, _ := filepath.Glob(filepath.Join(stateDir, "buzz", "outbox", "*.json"))
+		if len(files) == 0 {
+			t.Fatal("no outbox files to rewrite")
+		}
+		for _, f := range files {
+			raw, _ := os.ReadFile(f)
+			var o map[string]any
+			if json.Unmarshal(raw, &o) == nil {
+				delete(o, "seq")
+				raw, _ = json.Marshal(o)
+				_ = os.WriteFile(f, raw, 0o600)
+			}
+		}
+		if c.ledger, err = OpenLedger(stateDir); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sent = nil
+	if err := c.Flush(context.Background(), accept, nil); err != nil || len(sent) != 0 {
+		t.Fatalf("flush during the approval's backoff: err = %v, sent = %+v, want nothing sent", err, sent)
+	}
+	now = now.Add(time.Minute)
+	// Old outputs have no provable order, so after the backoff only their
+	// delivery is guaranteed, not the approval going first.
+	if err := c.Flush(context.Background(), accept, nil); err != nil || len(sent) == 0 || !legacy && sent[0].Kind != KindDM {
+		t.Fatalf("flush after backoff: err = %v, sent = %+v, want the approval message first", err, sent)
+	}
+	if pending, _ := c.ledger.Pending(); len(pending) != 0 {
+		t.Fatalf("pending after flush = %d, want 0", len(pending))
+	}
+}

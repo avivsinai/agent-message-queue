@@ -410,14 +410,14 @@ func (ds *dmShare) runDM(ctx context.Context, conn *relay.Conn, edges *dmEdges, 
 					select {
 					case <-conn.Done():
 					default:
-						edges.setState(session, "closed: "+fmt.Sprint(err)+"; reconnecting")
+						edges.setState(session, "closed: "+relay.StatusText(err)+"; reconnecting")
 						conn.Close()
 					}
 				}
 				return
 			}
 		}
-		edges.setState(session, "closed: "+err.Error())
+		edges.setState(session, "closed: "+relay.StatusText(err))
 		select {
 		case <-ctx.Done():
 			return
@@ -521,7 +521,7 @@ func (ds *dmShare) serveDM(ctx context.Context, conn *relay.Conn, edges *dmEdges
 			case <-t.C:
 				if err := ds.carrier.Flush(lctx, conn.Publish, gate); err != nil {
 					if open.Load() {
-						edges.setState(session, "publish_pending: "+err.Error())
+						edges.setState(session, "publish_pending: "+relay.StatusText(err))
 					}
 				} else if open.Load() && edges.stateOf(session) != "subscription_active" {
 					edges.setState(session, "subscription_active")
@@ -542,17 +542,17 @@ func (ds *dmShare) serveDM(ctx context.Context, conn *relay.Conn, edges *dmEdges
 		case <-ctx.Done():
 			return nil
 		case err := <-changed:
-			return fmt.Errorf("%w: %v", errMembershipChanged, err)
+			return fmt.Errorf("%w: %w", errMembershipChanged, err)
 		case <-sub.Done():
-			return fmt.Errorf("dm subscription ended: %v", sub.Err())
+			return fmt.Errorf("dm subscription ended: %w", sub.Err())
 		case evt := <-sub.Events:
 			ingest("ingest", evt, ds.carrier.Ingest)
 		case <-reactions.Done():
-			return fmt.Errorf("reaction subscription ended: %v", reactions.Err())
+			return fmt.Errorf("reaction subscription ended: %w", reactions.Err())
 		case evt := <-reactions.Events:
 			ingest("reaction", evt, ds.carrier.IngestReaction)
 		case <-mentionsDone:
-			return fmt.Errorf("mention subscription ended: %v", mentions.Err())
+			return fmt.Errorf("mention subscription ended: %w", mentions.Err())
 		case evt := <-mentionEvents:
 			ingest("mention", evt, ds.carrier.IngestMention)
 		}

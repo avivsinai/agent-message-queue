@@ -507,6 +507,15 @@ remedy. Doctor exits 6 exactly when `failing` is not empty.
 `authenticated` means the relay accepted this body's AUTH. It does not prove
 that the relay materialized the owner binding or that any viewer is ready.
 
+`publication_refused` is advice, not a failure: it names each owed DM
+output whose last attempt the relay refused, with the relay's reason, the
+number of refused attempts and the next try. A refusal describes one
+attempt, so the output stays owed and is retried with a backoff (30 seconds,
+doubling to 10 minutes). Order is kept per request: while a request's
+earlier output is owed, its later outputs wait; other requests' outputs
+still go out. Do not send the message again from Buzz: that starts a new
+request.
+
 `stale_harness` is advice, not a failure: it is reported under `notes` and
 never makes doctor exit non-zero. A different identity can also be a
 byte-identical copy or another binary with the same name, so the note asks

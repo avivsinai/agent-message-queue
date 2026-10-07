@@ -15,6 +15,7 @@ import (
 
 	"fiatjaf.com/nostr"
 
+	"github.com/avivsinai/agent-message-queue/internal/relay"
 	"github.com/avivsinai/agent-message-queue/internal/remote/bodykey"
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
@@ -152,12 +153,37 @@ func (c *Carrier) originTags(origin map[string]string) nostr.Tags {
 	return c.rowTags(origin["event"], origin["root"])
 }
 
-// threadRoot is the NIP-10 root an owner event replies within, if any.
+// threadRoot is the NIP-10 root an owner event replies within, if any. A
+// root-marked e tag wins. Buzz marks a direct reply to a thread's first
+// message with a single reply-marked e tag, so that parent is the root;
+// a reply-marked tag beside other e tags names an intermediate parent and
+// proves no root. With no markers, the legacy positional form names the
+// root first. A reply to a threaded event that names no root is refused by
+// the relay ("root tag does not match thread ancestry",
+// agent-message-queue-611.58).
 func threadRoot(evt nostr.Event) string {
+	var es []nostr.Tag
+	marked := false
 	for _, t := range evt.Tags {
-		if len(t) >= 4 && t[0] == "e" && t[3] == "root" && validHexID(t[1]) {
+		if len(t) >= 2 && t[0] == "e" {
+			es = append(es, t)
+			marked = marked || len(t) >= 4 && t[3] != ""
+		}
+	}
+	for _, t := range es {
+		if len(t) >= 4 && t[3] == "root" && validHexID(t[1]) {
 			return t[1]
 		}
+	}
+	switch {
+	case len(es) == 0:
+		return ""
+	case !marked:
+		if validHexID(es[0][1]) {
+			return es[0][1]
+		}
+	case len(es) == 1 && es[0][3] == "reply" && validHexID(es[0][1]):
+		return es[0][1]
 	}
 	return ""
 }
@@ -639,7 +665,8 @@ func rejectReaction(gesture string) bool {
 }
 
 // approvalKey is the outbox key of the message that shows one interaction.
-// It sorts after the request's row events, so Flush sends the row first.
+// It is in its request's ordering group, after the root row, which is
+// always prepared first.
 func approvalKey(ref, interactionID string) string {
 	return fmt.Sprintf("row/%s/approval/%s", ref, interactionID)
 }
@@ -937,12 +964,24 @@ func answeredWith(s protocol.Snapshot, interactionID, option string) bool {
 }
 
 // settleApprovalAnswer replies under the approval message, then settles the
-// reaction.
+// reaction. The approval message sits in the owner input's thread, so the
+// reply names that thread's root (agent-message-queue-611.58).
 func (c *Carrier) settleApprovalAnswer(evt nostr.Event, messageID string, st Settlement, text string) error {
-	if err := c.reply(evt, c.rowTags(messageID, ""), text); err != nil {
+	appr, ok, err := c.ledger.ApprovalFor(messageID)
+	if err != nil {
 		return err
 	}
-	_, err := c.ledger.Settle(evt.ID.Hex(), st)
+	if !ok {
+		return fmt.Errorf("approval message %s not stored", messageID)
+	}
+	msg, err := c.storedApproval(messageID, appr)
+	if err != nil {
+		return err
+	}
+	if err := c.reply(evt, c.replyTags(msg), text); err != nil {
+		return err
+	}
+	_, err = c.ledger.Settle(evt.ID.Hex(), st)
 	return err
 }
 
@@ -950,8 +989,9 @@ func (c *Carrier) settleApprovalAnswer(evt nostr.Event, messageID string, st Set
 // crash the edge there.
 var editPrepared = func() {}
 
-// rootKey is a request's one root-row obligation; it sorts before every
-// edit key of the same request, so Flush sends the root first.
+// rootKey is a request's one root-row obligation. It is prepared before
+// any edit or approval message of the same request, so Flush sends it
+// first.
 func rootKey(ref string) string { return fmt.Sprintf("row/%s/%08d", ref, 0) }
 
 // preparedRow is a stored row event and the revision it shows.
@@ -1006,9 +1046,18 @@ const (
 // share (body and DM channel), that the enrolled generation still grants
 // its kind, and that gate (the verified membership) still admits export;
 // an output that fails stays owed and is never re-signed (codex #866 r1 #3,
-// #6). An explicit rejection or an unknown result leaves it owed; the same
-// stored bytes are sent again next time. The ledger lock is not held while
-// a send waits.
+// #6). An unknown result or a lost connection stops the pass: the same
+// stored bytes are sent again next time, in order. A negative OK describes
+// that attempt only, so the output stays owed: its refusal and reason are
+// recorded and it is retried after a backoff (agent-message-queue-611.58).
+// Order is kept per request: a request's root row, edits, approval
+// messages and their edits go out in the order they were prepared (the
+// outbox sequence, never key text), and while an earlier output of a
+// request is owed (refused or not yet due), that request's later outputs
+// wait; other requests' outputs still go out. A root whose positive OK was
+// lost and whose retry the relay refuses as too old stays owed and holds
+// its request's later outputs (agent-message-queue-611.59). The ledger lock
+// is not held while a send waits.
 func (c *Carrier) Flush(ctx context.Context, pub Publisher, gate func() error) error {
 	c.mu.Lock()
 	pending, err := c.ledger.Pending()
@@ -1017,9 +1066,26 @@ func (c *Carrier) Flush(ctx context.Context, pub Publisher, gate func() error) e
 		return err
 	}
 	sent := 0
+	waiting := map[string]bool{} // requests whose earlier output is still owed
+	// Outputs written before sequence numbers (Seq 0) have no provable order
+	// within their request: while any of them is refused and waiting out its
+	// backoff, the request's other old outputs wait too (Pro review of #971).
+	for _, o := range pending {
+		if o.Seq == 0 && o.Binding == c.share() && !o.Due(c.now()) {
+			waiting[outputGroup(o.Key)] = true
+		}
+	}
 	for _, o := range pending {
 		if o.Binding != c.share() {
 			continue // another binding's output: owed, never redirected
+		}
+		group := outputGroup(o.Key)
+		if waiting[group] {
+			continue
+		}
+		if !o.Due(c.now()) {
+			waiting[group] = true
+			continue
 		}
 		if sent == flushBatch {
 			return nil // only eligible sends count (codex #866 r2 #8)
@@ -1042,18 +1108,37 @@ func (c *Carrier) Flush(ctx context.Context, pub Publisher, gate func() error) e
 		pctx, cancel := context.WithTimeout(ctx, publishTimeout)
 		err := pub(pctx, evt)
 		cancel()
-		if err != nil {
+		sent++
+		var remote *relay.RemoteError
+		switch {
+		case err == nil:
+			c.mu.Lock()
+			err = c.ledger.MarkAccepted(o.Key)
+			c.mu.Unlock()
+		case errors.As(err, &remote) && errors.Is(remote.Kind, relay.ErrRejected):
+			waiting[group] = true
+			c.mu.Lock()
+			err = c.ledger.MarkRefused(o.Key, remote.Reason, c.now())
+			c.mu.Unlock()
+		default:
 			return fmt.Errorf("publish %s: %w", o.Key, err)
 		}
-		sent++
-		c.mu.Lock()
-		err = c.ledger.MarkAccepted(o.Key)
-		c.mu.Unlock()
 		if err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// outputGroup is the ordering scope of an outbox key: one request's rows
+// and approval messages ("row/<ref>/..."), or the key itself.
+func outputGroup(key string) string {
+	if rest, ok := strings.CutPrefix(key, "row/"); ok {
+		if ref, _, ok := strings.Cut(rest, "/"); ok {
+			return "row/" + ref
+		}
+	}
+	return key
 }
 
 // rowTags and editTags are the only place row tags are built (relay design
