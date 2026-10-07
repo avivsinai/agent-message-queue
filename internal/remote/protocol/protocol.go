@@ -907,7 +907,7 @@ func BoundReason(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
 	space := false
-	wordStart := true // only a non-space, non-invisible rune clears it
+	wordStart := true // a non-space, non-invisible rune updates it
 	for _, r := range s {
 		switch {
 		case unicode.Is(unicode.Cf, r), unicode.Is(unicode.Zl, r), unicode.Is(unicode.Zp, r):
@@ -927,7 +927,12 @@ func BoundReason(s string) string {
 			space = false
 		}
 		b.WriteRune(r)
-		wordStart = false
+		// '@' must only survive between a letter or digit and itself
+		// (user@host); after punctuation, a bracket or space it starts a
+		// mention. Setting this from the written rune (not the source one)
+		// also makes '(@everyone)' inert, since the replaced bracket reads
+		// as punctuation.
+		wordStart = !unicode.IsLetter(r) && !unicode.IsDigit(r)
 	}
 	out := strings.TrimSpace(b.String())
 	if len(out) <= MaxReasonBytes {

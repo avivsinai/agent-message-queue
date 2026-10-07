@@ -24,6 +24,10 @@ func TestBoundReasonRendersInertInDM(t *testing.T) {
 	if strings.ContainsAny(out, "\n\r") {
 		t.Fatalf("BoundReason kept a line break: %q", out)
 	}
+	// '@' after punctuation starts a mention, not an address.
+	if out := BoundReason("retrying (@everyone) now"); strings.Contains(out, "@everyone") {
+		t.Fatalf("BoundReason kept a punctuated mention: %q", out)
+	}
 }
 
 // TestBoundReasonKeepsOrdinaryText is the counterpart regression: the
