@@ -166,7 +166,6 @@ func (a *approvals) observe(snap protocol.Snapshot) {
 		return
 	}
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	current := ""
 	if in := snap.Interaction; denyApproval(in) {
 		current = in.InteractionID
@@ -183,18 +182,30 @@ func (a *approvals) observe(snap protocol.Snapshot) {
 			a.stops[id] = nil
 		}
 	}
-	a.reportLocked(snap)
+	denials := a.claimReportsLocked(snap)
+	a.mu.Unlock()
+	a.report(denials)
 }
 
-// reportLocked posts the outcome line once for each deny of this turn that
-// the record shows answered with the reject option.
-func (a *approvals) reportLocked(snap protocol.Snapshot) {
+// claimReportsLocked claims, once each, the denies of this turn that the
+// record shows answered with the reject option.
+func (a *approvals) claimReportsLocked(snap protocol.Snapshot) int {
+	n := 0
 	for _, res := range snap.Resolved {
 		option, sent := a.denied[res.InteractionID]
 		if sent && !a.reported[res.InteractionID] && res.Outcome == protocol.ResolutionAnswered && res.Option == option {
 			a.reported[res.InteractionID] = true
-			a.r.s.publish(a.channel, deniedText)
+			n++
 		}
+	}
+	return n
+}
+
+// report posts the outcome line for each claimed deny. It runs outside
+// a.mu: the lock is not held across the network.
+func (a *approvals) report(denials int) {
+	for range denials {
+		a.r.s.publish(a.channel, deniedText)
 	}
 }
 
@@ -260,7 +271,8 @@ func (a *approvals) deny(snap protocol.Snapshot, in protocol.Interaction) {
 		return
 	}
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	a.denied[in.InteractionID] = in.RejectOption
-	a.reportLocked(rep.Snapshot)
+	denials := a.claimReportsLocked(rep.Snapshot)
+	a.mu.Unlock()
+	a.report(denials)
 }

@@ -473,6 +473,9 @@ func persistAdapter(stateDir string, a manifest.Adapter) error {
 					f.Adapters[i].Config = a.Config
 				}
 			}
+			if err := manifest.Validate(f); err != nil {
+				return err
+			}
 			return manifest.Write(path, f)
 		}
 		f.Adapters = append(f.Adapters, a)
