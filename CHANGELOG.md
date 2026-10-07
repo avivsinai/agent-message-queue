@@ -8,6 +8,15 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.89.2](https://github.com/avivsinai/agent-message-queue/compare/v0.89.1...v0.89.2) (2026-10-07)
+
+
+### Bug Fixes
+
+* **coop:** amq inside a Codex 0.160 session knows its AMQ identity ([#993](https://github.com/avivsinai/agent-message-queue/issues/993)) ([33f151d](https://github.com/avivsinai/agent-message-queue/commit/33f151d92f389a7e2f9672d859eb756c561505cb))
+* **coop:** name a Codex session on a busy daemon ([#994](https://github.com/avivsinai/agent-message-queue/issues/994)) ([385555b](https://github.com/avivsinai/agent-message-queue/commit/385555b739d81615e10762810826da9d0bf1d7b0))
+* **remote:** tell Codex users the $amq-remote invocation ([2ae7753](https://github.com/avivsinai/agent-message-queue/commit/2ae7753fb07c575e6aa662ff55eac31fff3ee792))
+
 ## [0.89.1](https://github.com/avivsinai/agent-message-queue/compare/v0.89.0...v0.89.1) (2026-10-07)
 
 
