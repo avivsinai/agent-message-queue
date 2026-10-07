@@ -1321,11 +1321,11 @@ func doctor(args []string, probe ...*jsonProbe) (any, int, error) {
 // maxRefusedNotes bounds the refused rows doctor lists per share.
 const maxRefusedNotes = 5
 
-// noteRefusedRows names the share's outputs the relay refused for good,
-// with the relay's reason. The flush sets them aside so later rows still go
-// out (agent-message-queue-611.58), so they are advice, not a failure.
+// noteRefusedRows names the share's owed outputs the relay refused on
+// their last attempt, with the relay's reason. They stay owed and are
+// retried, and other requests' outputs still go out
+// (agent-message-queue-611.58), so they are advice, not a failure.
 func noteRefusedRows(note func(boundary, subject, detail, remedy string), stateDir, session string) {
-	const remedy = "the row is set aside and later rows still go out; fix the cause the relay names, then send the message again from Buzz"
 	refused, err := buzzio.RefusedOutputs(filepath.Join(stateDir, "shares", session))
 	if err != nil {
 		note("publication_refused", session, "cannot read the outbox: "+err.Error(), "")
@@ -1333,10 +1333,17 @@ func noteRefusedRows(note func(boundary, subject, detail, remedy string), stateD
 	}
 	for i, o := range refused {
 		if i == maxRefusedNotes {
-			note("publication_refused", session, fmt.Sprintf("%d more refused rows in the outbox", len(refused)-i), remedy)
+			note("publication_refused", session, fmt.Sprintf("%d more refused outputs in the outbox", len(refused)-i), "each stays owed and is retried")
 			return
 		}
-		note("publication_refused", session, o.Key+": "+o.Refused, remedy)
+		r := o.Refused
+		detail := fmt.Sprintf("%s: the relay refused %d attempt(s), last with %q; next try %s", o.Key, r.Attempts, r.Reason, time.Unix(r.NextTry, 0).UTC().Format(time.RFC3339))
+		see := "check the session in the terminal"
+		if rest, ok := strings.CutPrefix(o.Key, "row/"); ok {
+			ref, _, _ := strings.Cut(rest, "/")
+			see = "see the request's state with `amq-remote status " + ref + "` or in the terminal"
+		}
+		note("publication_refused", session, detail, "the output stays owed and is retried; "+see+". Do not send the message again from Buzz: that would run the request a second time")
 	}
 }
 
