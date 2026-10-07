@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -343,7 +344,7 @@ func codexLaunchDir(args []string, wd string) string {
 // which the caller then names that way. Otherwise naming is settled here:
 // the thread is named, or AMQ says once why it is not and args are the
 // user's unchanged.
-func startCodexOnNamedDaemonThread(cmdName string, agentArgs []string, name string) (args []string, done bool) {
+func startCodexOnNamedDaemonThread(cmdName string, agentArgs []string, name string, record func(thread string) error) (args []string, done bool) {
 	if launch.ProviderForExecutable(cmdName) != launch.CodexProvider {
 		return nil, false
 	}
@@ -358,6 +359,10 @@ func startCodexOnNamedDaemonThread(cmdName string, agentArgs []string, name stri
 	backend, features := codexLaunchBackend(cmdName, agentArgs, wd, codexHome)
 	report := func(reason string) ([]string, bool) {
 		_ = writeStderr("%s\n", coopNamedTUIManualReminder(name, cmdName, reason))
+		// The TUI may still run on the daemon, whose tool commands carry
+		// no AM_* (agent-message-queue-611.61); amq there then has no
+		// handle and refuses until one is given.
+		_ = writeStderr("warning: amq commands inside this Codex session have no AMQ identity; pass --me %s, or export AM_ROOT and AM_ME in that command\n", strings.TrimPrefix(name, path.Dir(name)+"/"))
 		return agentArgs, true
 	}
 	switch backend {
@@ -395,12 +400,21 @@ func startCodexOnNamedDaemonThread(cmdName string, agentArgs []string, name stri
 		// TUI's own start keeps.
 		return report("no Codex daemon is running yet; this Codex starts one, so the next launch is named")
 	}
+	// Tool commands of a daemon thread run in the daemon's environment, not
+	// the TUI's, so a thread is created only when its AMQ identity can be
+	// recorded (agent-message-queue-611.61).
+	if record == nil {
+		return report("AMQ cannot record this session's identity for Codex tool commands")
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), codexDaemonNamingTimeout)
 	defer cancel()
 	id, err := codex.StartNamedThread(ctx, sock, cwd, name)
 	if err != nil {
 		return report("Codex daemon: " + err.Error())
 	}
+	// The resume arguments go back to coop exec, which records the
+	// identity for this thread before exec and stops the launch if it
+	// cannot (recordResumedCodexThread).
 	_ = writeStderr("named %s\n", name)
 	return append([]string{"resume", id}, agentArgs...), true
 }
@@ -516,6 +530,7 @@ func applyCoopNamedBeforeExecAt(
 	agentArgs []string,
 	name string,
 	execStart time.Time,
+	record func(thread string) error,
 ) ([]string, error) {
 	if !named.enabled {
 		return agentArgs, nil
@@ -527,7 +542,7 @@ func applyCoopNamedBeforeExecAt(
 	case coopNamedModeArgv:
 		return injectCoopNamedArgv(cmdName, agentArgs, name), nil
 	case coopNamedModeTUI:
-		if args, done := startCodexOnNamedDaemonThread(cmdName, agentArgs, name); done {
+		if args, done := startCodexOnNamedDaemonThread(cmdName, agentArgs, name, record); done {
 			return args, nil
 		}
 		if err := startCoopNamedTUIInjector(name, cmdName, execStart); err != nil {

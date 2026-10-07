@@ -218,7 +218,7 @@ func TestCodexNamingFollowsWhereCodexRuns(t *testing.T) {
 			var args []string
 			_, stderr, err := captureEnvOutput(t, func() error {
 				var err error
-				args, err = applyCoopNamedBeforeExecAt(coopNamedChoice{enabled: true}, bin, tc.args, "s1/codex", time.Now())
+				args, err = applyCoopNamedBeforeExecAt(coopNamedChoice{enabled: true}, bin, tc.args, "s1/codex", time.Now(), func(string) error { return nil })
 				return err
 			})
 			if err != nil {
