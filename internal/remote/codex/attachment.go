@@ -237,7 +237,15 @@ func Attach(socketPath, threadID string, opts ...Option) (*Attachment, error) {
 	a.client.Store(client)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := client.Call(ctx, "initialize", map[string]any{"clientInfo": map[string]string{"name": ClientName, "version": Version, "title": "AMQ Remote"}}, nil); err != nil {
+	init := map[string]any{"clientInfo": map[string]string{"name": ClientName, "version": Version, "title": "AMQ Remote"}}
+	if a.approve {
+		// Codex 0.160 strips additionalPermissions from approval requests
+		// sent to a client without the experimental API, and the approve
+		// guard reads that field: without it a command that also asks for
+		// more access would get a one-tap approve (Pro review of #969).
+		init["capabilities"] = map[string]bool{"experimentalApi": true}
+	}
+	if err := client.Call(ctx, "initialize", init, nil); err != nil {
 		_ = client.Close()
 		return nil, fmt.Errorf("initialize: %w", err)
 	}
@@ -1494,6 +1502,9 @@ func (a *Attachment) onServerRequest(req ServerRequest) {
 		reject = offered(options, "cancel")
 	}
 	prompt := approvalPrompt(req.Method, p.Command, p.Cwd, p.Reason)
+	if reject == "cancel" {
+		prompt += "\nReject also stops this turn."
+	}
 	// Approve is offered only for a plain command whose whole grant the
 	// prompt shows. A file change shows no paths or diff here, and a
 	// network, permission or write-root grant is not in the prompt, so those
