@@ -700,6 +700,34 @@ func (r *Runtime) Question(requestID, interactionID string, options []string) {
 	r.emit(ev)
 }
 
+// ResolveOutcome reports how the harness resolved interactionID (bead
+// 611.45 r2): it emits the exact-resolution EventQuestionResolved the real
+// seams (pi, claude approvals) send, with or without a pending interaction.
+// Tests use it for late corrections of retired outcomes and for resolutions
+// the resolver never offers.
+func (r *Runtime) ResolveOutcome(requestID, interactionID string, outcome protocol.ResolutionOutcome, option string) bool {
+	r.mu.Lock()
+	var target *run
+	for _, rn := range r.runsByKey {
+		if rn.key.RequestID == requestID {
+			target = rn
+		}
+	}
+	if target == nil {
+		r.mu.Unlock()
+		return false
+	}
+	ev := core.NativeEvent{Type: core.EventQuestionResolved, Key: target.key, RunID: target.id, Outcome: outcome, Option: option}
+	if target.interaction != nil && target.interaction.InteractionID == interactionID {
+		ev.Interaction = target.interaction
+		delete(r.runsByInteraction, interactionID)
+		target.interaction = nil
+	}
+	r.mu.Unlock()
+	r.emit(ev)
+	return true
+}
+
 // LocalAnswer answers a pending interaction from the local UI.
 func (r *Runtime) LocalAnswer(interactionID, option string) {
 	r.mu.Lock()
