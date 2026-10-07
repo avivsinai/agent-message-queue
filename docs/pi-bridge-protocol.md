@@ -191,9 +191,8 @@ writes `live: false`, so the adapter sees the bridge offline at once.
 may also publish `upgrade`, its own remedy for an owner whose bridge is too
 old (for example the command that updates the pi build that ships it). The
 adapter shows it, bounded, in the refusal instead of this repository's install
-line. From revision
-4 the record also carries `session_id` (see
-[Session identity](#session-identity)).
+line. The record may also carry `session_id` (see
+[Session identity](#session-identity)); from revision 4 it must.
 
 ## Bridge revision
 
@@ -245,7 +244,7 @@ revision.
 
 ## Bridge revision 4: tool approval
 
-Revision 4 is revision 3 plus a session identity in liveness and one seam:
+Revision 4 is revision 3 plus a required session identity in liveness and one seam:
 the extension raises a tool approval under a ref it owns, and the adapter
 answers it from a remote face. Nothing in
 revision 3 changes, and the protocol string stays `amq:pi-bridge:v1`.
@@ -257,13 +256,15 @@ in this repository is revision 3.
 
 ### Session identity
 
-A revision-4 liveness record carries `session_id`: pi's own session id, from
+A liveness record may carry `session_id`, and a revision-4 record must: pi's
+own session id, from
 `ctx.sessionManager.getSessionId()`. It stays the same across a reload and a
 compaction, and it changes on a new session and on a fork. It matches
 `^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$`, at most 128 characters. The
 adapter reports it as the target's native session id, which a relay share
 pins; without a live record carrying a valid `session_id` the adapter reports
-none, and a share that needs one is refused.
+none, and a share that needs one is refused. The reference extension in this
+repository publishes it.
 
 ### Interaction lines
 

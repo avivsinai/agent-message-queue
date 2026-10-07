@@ -383,6 +383,18 @@ function claimReceipt(b: Bridge, ref: string): "claimed" | "taken" | "error" {
 	return "claimed";
 }
 
+// sessionID is pi's own session id (ReadonlySessionManager.getSessionId),
+// which a relay share pins (protocol: session identity). It is left out when
+// pi gives none.
+function sessionID(ctx: ExtensionContext): string | undefined {
+	try {
+		const id = ctx.sessionManager.getSessionId();
+		return typeof id === "string" && id !== "" ? id : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
 function writeLiveness(b: Bridge, live: boolean): void {
 	const body = JSON.stringify({
 		protocol: PROTOCOL,
@@ -392,6 +404,7 @@ function writeLiveness(b: Bridge, live: boolean): void {
 		surface: b.surface,
 		session_generation: b.generation,
 		bridge_revision: BRIDGE_REVISION,
+		session_id: sessionID(b.ctx),
 	});
 	try {
 		const tmp = writeTemp(b.dir, body);

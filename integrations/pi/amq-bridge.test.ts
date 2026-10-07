@@ -65,6 +65,7 @@ function harness() {
 			return state.idle;
 		},
 		hasPendingMessages: () => state.pending,
+		sessionManager: { getSessionId: () => "pi-session-1" },
 	};
 	const dir = path.join(root, "agents", "pi-seat", "extensions", "pi-bridge");
 	amqPiBridge(pi as never);
@@ -130,6 +131,16 @@ const toolUseMessage = (text: string) => ({
 		],
 		stopReason: "toolUse",
 	},
+});
+
+// Bead agent-message-queue-611.60: a relay share pins pi's session id, so the
+// reference bridge publishes it in liveness.
+test("the liveness record carries pi's session id", async () => {
+	const h = harness();
+	await h.start();
+	const live = JSON.parse(fs.readFileSync(path.join(h.dir, "bridge.liveness"), "utf8"));
+	assert.equal(live.session_id, "pi-session-1");
+	await h.emit("session_shutdown", { reason: "quit" });
 });
 
 test("a request file becomes a pi follow-up with a receipt and a terminal event", async () => {
