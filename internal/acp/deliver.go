@@ -69,7 +69,7 @@ func deliver(cfg Config, body, thread, subject, priority string, labels, refs []
 			return Delivery{}, err
 		}
 		if claim != nil {
-			return deliverClaimed(cfg, *claim, body, subject, priority, refs)
+			return deliverClaimed(cfg, *claim, body, subject, priority, labels, refs)
 		}
 	}
 
@@ -141,7 +141,7 @@ func deliver(cfg Config, body, thread, subject, priority string, labels, refs []
 			if claim == nil {
 				return Delivery{}, fmt.Errorf("event %s lost its claim and the claim is unreadable", eventID)
 			}
-			return deliverClaimed(cfg, *claim, body, subject, priority, refs)
+			return deliverClaimed(cfg, *claim, body, subject, priority, labels, refs)
 		}
 	}
 
@@ -174,7 +174,7 @@ func inboxHasMessage(root *fsq.DeliveryRoot, handle, messageID string) (bool, er
 // (a duplicate on a replay); when it is absent the first attempt never
 // reached the inbox, so the replay delivers with the claimed id and created
 // time and reports what that write proves.
-func deliverClaimed(cfg Config, claim eventRecord, body, subject, priority string, refs []string) (Delivery, error) {
+func deliverClaimed(cfg Config, claim eventRecord, body, subject, priority string, labels, refs []string) (Delivery, error) {
 	created, err := time.Parse(time.RFC3339Nano, claim.Created)
 	if err != nil {
 		return Delivery{}, fmt.Errorf("event %s has an unreadable claim time", claim.EventID)
@@ -217,7 +217,7 @@ func deliverClaimed(cfg Config, claim eventRecord, body, subject, priority strin
 			Subject:  subject,
 			Created:  claim.Created,
 			Priority: priority,
-			Labels:   []string{"nostr:" + claim.EventID},
+			Labels:   append(append([]string(nil), labels...), "nostr:"+claim.EventID),
 			Refs:     refs,
 		},
 		Body: body,
@@ -239,8 +239,11 @@ func writeToInbox(cfg Config, root *fsq.DeliveryRoot, claim *eventRecord, create
 	if claim == nil {
 		return Delivery{}, fmt.Errorf("writeToInbox requires a claim")
 	}
-	id, thread, eventID := claim.MessageID, claim.Thread, claim.EventID
-	_, err := fsq.DeliverToInboxes(root, []string{cfg.To}, id+".md", data)
+	id, thread, to, eventID := claim.MessageID, claim.Thread, claim.To, claim.EventID
+	if to == "" {
+		to = cfg.To
+	}
+	_, err := fsq.DeliverToInboxes(root, []string{to}, id+".md", data)
 	egress := EgressConfirmed
 	if err != nil {
 		var uncertain *fsq.CommittedDurabilityError
@@ -251,7 +254,7 @@ func writeToInbox(cfg Config, root *fsq.DeliveryRoot, claim *eventRecord, create
 	}
 	return Delivery{
 		MessageID: id,
-		To:        cfg.To,
+		To:        to,
 		Thread:    thread,
 		Created:   created,
 		EventID:   eventID,
