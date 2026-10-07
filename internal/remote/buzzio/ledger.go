@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
@@ -27,14 +28,18 @@ import (
 const maxRecordBytes = 128 << 10
 
 // Ledger is the edge's on-disk state under <stateDir>/buzz. The endpoint's
-// single-writer lock owns the directory; the ledger adds no lock of its own.
+// single-writer lock owns the directory; the ledger adds no file lock of
+// its own, only seqMu, which serializes outbox sequence numbers in process.
 type Ledger struct {
 	dir string
+
+	seqMu   sync.Mutex
+	lastSeq int64 // highest outbox sequence handed out; -1 until loaded
 }
 
 // OpenLedger creates or opens <stateDir>/buzz/{ingress,outbox,receipts}.
 func OpenLedger(stateDir string) (*Ledger, error) {
-	l := &Ledger{dir: filepath.Join(stateDir, "buzz")}
+	l := &Ledger{dir: filepath.Join(stateDir, "buzz"), lastSeq: -1}
 	for _, sub := range []string{"ingress", "outbox", "receipts"} {
 		if err := os.MkdirAll(filepath.Join(l.dir, sub), 0o700); err != nil {
 			return nil, err
@@ -166,6 +171,9 @@ type Outbound struct {
 	Key      string          `json:"key"`
 	Event    json.RawMessage `json:"event"`
 	Revision int             `json:"revision,omitempty"`
+	// Seq is the output's place in preparation order, fixed when it is
+	// first prepared; zero is a record from a build before sequences.
+	Seq int64 `json:"seq,omitempty"`
 	// Binding is the share the output was prepared under; Flush sends it
 	// only while the current share is the same (codex #866 r2 #4).
 	Binding  ShareBinding `json:"binding"`
@@ -200,7 +208,14 @@ func (l *Ledger) Prepare(key string, event json.RawMessage, b ShareBinding) (Out
 
 // PrepareRevision is Prepare for a row event that shows revision.
 func (l *Ledger) PrepareRevision(key string, event json.RawMessage, revision int, b ShareBinding) (Outbound, error) {
-	o := Outbound{Key: key, Event: event, Revision: revision, Binding: b}
+	if stored, ok, err := l.Prepared(key); err != nil || ok {
+		return stored, err
+	}
+	seq, err := l.nextSeq()
+	if err != nil {
+		return Outbound{}, err
+	}
+	o := Outbound{Key: key, Event: event, Revision: revision, Binding: b, Seq: seq}
 	raw, err := json.Marshal(o)
 	if err != nil {
 		return Outbound{}, err
@@ -212,12 +227,45 @@ func (l *Ledger) PrepareRevision(key string, event json.RawMessage, revision int
 	return readOutbound(stored)
 }
 
+// nextSeq returns the next outbox sequence number. The outbox records are
+// its durable state: the first call after open continues after the highest
+// stored one.
+func (l *Ledger) nextSeq() (int64, error) {
+	l.seqMu.Lock()
+	defer l.seqMu.Unlock()
+	if l.lastSeq < 0 {
+		all, err := scanOutbox(filepath.Join(l.dir, "outbox"), func(Outbound) bool { return true })
+		if err != nil {
+			return 0, err
+		}
+		l.lastSeq = 0
+		for _, o := range all {
+			l.lastSeq = max(l.lastSeq, o.Seq)
+		}
+	}
+	l.lastSeq++
+	return l.lastSeq, nil
+}
+
 // Refusal is an owed output's refusal history: how many attempts the relay
 // refused, its last reason (relay words), and when the next attempt is due.
 type Refusal struct {
 	Attempts int    `json:"attempts"`
 	Reason   string `json:"reason"`
 	NextTry  int64  `json:"next_try"`
+}
+
+// UnmarshalJSON also reads the bare reason string an earlier build of
+// agent-message-queue-611.58 stored (Pro review of #971 round 2): that is
+// one refused attempt, due now, so one old record never stops a scan.
+func (r *Refusal) UnmarshalJSON(raw []byte) error {
+	var reason string
+	if json.Unmarshal(raw, &reason) == nil {
+		*r = Refusal{Attempts: 1, Reason: reason}
+		return nil
+	}
+	type wire Refusal
+	return json.Unmarshal(raw, (*wire)(r))
 }
 
 // Retry backoff after a refusal: refuseBackoff, doubling per attempt, at
@@ -285,14 +333,14 @@ func (l *Ledger) updateOwed(key string, set func(*Outbound)) error {
 	return err
 }
 
-// Pending returns prepared outputs not yet accepted, in key order.
+// Pending returns prepared outputs not yet accepted, in preparation order.
 func (l *Ledger) Pending() ([]Outbound, error) {
 	return scanOutbox(filepath.Join(l.dir, "outbox"), func(o Outbound) bool { return !o.Accepted })
 }
 
 // RefusedOutputs lists the owed outputs the relay refused on their last
-// attempt in the ledger under stateDir, in key order, without creating
-// anything; a ledger that does not exist has none.
+// attempt in the ledger under stateDir, in preparation order, without
+// creating anything; a ledger that does not exist has none.
 func RefusedOutputs(stateDir string) ([]Outbound, error) {
 	out, err := scanOutbox(filepath.Join(stateDir, "buzz", "outbox"), func(o Outbound) bool { return !o.Accepted && o.Refused != nil })
 	if errors.Is(err, os.ErrNotExist) {
@@ -301,7 +349,8 @@ func RefusedOutputs(stateDir string) ([]Outbound, error) {
 	return out, err
 }
 
-// scanOutbox returns the records in dir that keep selects, in key order.
+// scanOutbox returns the records in dir that keep selects, in preparation
+// order: records from before sequences first, in key order, then by Seq.
 func scanOutbox(dir string, keep func(Outbound) bool) ([]Outbound, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -324,7 +373,12 @@ func scanOutbox(dir string, keep func(Outbound) bool) ([]Outbound, error) {
 			out = append(out, o)
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Seq != out[j].Seq {
+			return out[i].Seq < out[j].Seq
+		}
+		return out[i].Key < out[j].Key
+	})
 	return out, nil
 }
 
