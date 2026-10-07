@@ -106,15 +106,17 @@ func hex32() string {
 }
 
 // Bead 611.42.9 (observed 2026-10-07): install-stop-hook --help wrote the
-// Stop hook into ~/.claude/settings.json. It is a usage error now and
-// writes nothing.
+// Stop hook into ~/.claude/settings.json; a lone -- did too (Pro review of
+// #981). Both are usage errors now and write nothing.
 func TestInstallStopHookHelpChangesNothing(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	if code := claudeSubcommand([]string{"install-stop-hook", "--help"}, nil, io.Discard); code != protocol.ExitUsage {
-		t.Fatalf("exit %d, want usage %d", code, protocol.ExitUsage)
-	}
-	if _, err := os.Stat(filepath.Join(home, ".claude", "settings.json")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("settings.json written: %v", err)
+	for _, arg := range []string{"--help", "--"} {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		if code := claudeSubcommand([]string{"install-stop-hook", arg}, nil, io.Discard); code != protocol.ExitUsage {
+			t.Fatalf("%s: exit %d, want usage %d", arg, code, protocol.ExitUsage)
+		}
+		if _, err := os.Stat(filepath.Join(home, ".claude", "settings.json")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%s: settings.json written: %v", arg, err)
+		}
 	}
 }
