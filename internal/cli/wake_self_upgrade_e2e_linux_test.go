@@ -12,8 +12,8 @@ import (
 )
 
 func TestLinuxWakeSelfUpgradeRealPTYStableSymlink(t *testing.T) {
-	if testing.Short() {
-		t.Skip("real Linux PTY self-upgrade E2E")
+	if os.Getenv(wakeSelfUpgradePTYLiveEnv) != "1" {
+		t.Skip(wakeSelfUpgradePTYLiveSkip)
 	}
 	legacyTIOCSTI, err := os.ReadFile("/proc/sys/dev/tty/legacy_tiocsti")
 	if err != nil {
