@@ -364,3 +364,68 @@ func TestRefusedRowDoesNotBlockLaterRows(t *testing.T) {
 		t.Fatalf("pending after flush = %d, want 0", len(pending))
 	}
 }
+
+// Pro review of #971 round 2 (agent-message-queue-611.58): Flush ordered a
+// request's outputs by key text, so a newer revision ("row/R/00000003")
+// sorted before a refused approval message ("row/R/approval/ffff…") and
+// went out first, also after the ledger was reopened. A request's outputs
+// go out in the order they were prepared.
+func TestRefusedApprovalHoldsItsRequestsNewerRows(t *testing.T) {
+	c, owner, stateDir := busyCarrier(t)
+	now := time.Now()
+	c.now = func() time.Time { return now }
+	if err := c.Ingest(ownerEvent(t, owner, "dm-1", "go", now)); err != nil {
+		t.Fatal(err)
+	}
+	var sent []nostr.Event
+	accept := func(_ context.Context, evt nostr.Event) error { sent = append(sent, evt); return nil }
+	if err := c.Flush(context.Background(), accept, nil); err != nil || len(sent) != 1 {
+		t.Fatalf("flush root: err = %v, sent = %d", err, len(sent))
+	}
+	pending, _ := c.ledger.Pending()
+	ref, _, _ := c.ledger.RequestForRow(sent[0].ID.Hex())
+	origin := c.source(tagValue(sent[0], "e"), "").Origin
+	if len(pending) != 0 || ref == "" {
+		t.Fatalf("root not accepted: pending = %d, ref = %q", len(pending), ref)
+	}
+	interaction := strings.Repeat("f", 32)
+	now = now.Add(2 * time.Second)
+	if err := c.Publish(protocol.Snapshot{RequestRef: ref, TargetID: "cx", Revision: 2, State: protocol.StateRunning,
+		Interaction: &protocol.Interaction{InteractionID: interaction, Kind: "approval", Prompt: "run ls", Options: []string{"yes", "no"}, RemoteAnswer: true, ApproveOption: "yes", RejectOption: "no"}}, origin); err != nil {
+		t.Fatal(err)
+	}
+	sent = nil
+	refuseApproval := func(_ context.Context, evt nostr.Event) error {
+		sent = append(sent, evt)
+		if evt.Kind == KindDM {
+			return &relay.RemoteError{Kind: relay.ErrRejected, Reason: "rate-limited"}
+		}
+		return nil
+	}
+	if err := c.Flush(context.Background(), refuseApproval, nil); err != nil {
+		t.Fatal(err)
+	}
+	// The terminal resolves the interaction; the newer revision is prepared
+	// by a reopened ledger while the approval waits out its backoff.
+	reopened, err := OpenLedger(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.ledger = reopened
+	now = now.Add(2 * time.Second)
+	if err := c.Publish(protocol.Snapshot{RequestRef: ref, TargetID: "cx", Revision: 3, State: protocol.StateCompleted, Result: &protocol.Result{Text: "done"},
+		Resolved: []protocol.Resolution{{InteractionID: interaction, Outcome: protocol.ResolutionElsewhere}}}, origin); err != nil {
+		t.Fatal(err)
+	}
+	sent = nil
+	if err := c.Flush(context.Background(), accept, nil); err != nil || len(sent) != 0 {
+		t.Fatalf("flush during the approval's backoff: err = %v, sent = %+v, want nothing sent", err, sent)
+	}
+	now = now.Add(time.Minute)
+	if err := c.Flush(context.Background(), accept, nil); err != nil || len(sent) == 0 || sent[0].Kind != KindDM {
+		t.Fatalf("flush after backoff: err = %v, sent = %+v, want the approval message first", err, sent)
+	}
+	if pending, _ := c.ledger.Pending(); len(pending) != 0 {
+		t.Fatalf("pending after flush = %d, want 0", len(pending))
+	}
+}

@@ -665,7 +665,8 @@ func rejectReaction(gesture string) bool {
 }
 
 // approvalKey is the outbox key of the message that shows one interaction.
-// It sorts after the request's row events, so Flush sends the row first.
+// It is in its request's ordering group, after the root row, which is
+// always prepared first.
 func approvalKey(ref, interactionID string) string {
 	return fmt.Sprintf("row/%s/approval/%s", ref, interactionID)
 }
@@ -988,8 +989,9 @@ func (c *Carrier) settleApprovalAnswer(evt nostr.Event, messageID string, st Set
 // crash the edge there.
 var editPrepared = func() {}
 
-// rootKey is a request's one root-row obligation; it sorts before every
-// edit key of the same request, so Flush sends the root first.
+// rootKey is a request's one root-row obligation. It is prepared before
+// any edit or approval message of the same request, so Flush sends it
+// first.
 func rootKey(ref string) string { return fmt.Sprintf("row/%s/%08d", ref, 0) }
 
 // preparedRow is a stored row event and the revision it shows.
@@ -1048,11 +1050,14 @@ const (
 // stored bytes are sent again next time, in order. A negative OK describes
 // that attempt only, so the output stays owed: its refusal and reason are
 // recorded and it is retried after a backoff (agent-message-queue-611.58).
-// Order is kept per request: a request's root row sorts before its edits
-// and approval messages, and while an earlier output of a request is owed
-// (refused or not yet due), that request's later outputs wait; other
-// requests' outputs still go out. The ledger lock is not held while a send
-// waits.
+// Order is kept per request: a request's root row, edits, approval
+// messages and their edits go out in the order they were prepared (the
+// outbox sequence, never key text), and while an earlier output of a
+// request is owed (refused or not yet due), that request's later outputs
+// wait; other requests' outputs still go out. A root whose positive OK was
+// lost and whose retry the relay refuses as too old stays owed and holds
+// its request's later outputs (agent-message-queue-611.59). The ledger lock
+// is not held while a send waits.
 func (c *Carrier) Flush(ctx context.Context, pub Publisher, gate func() error) error {
 	c.mu.Lock()
 	pending, err := c.ledger.Pending()
