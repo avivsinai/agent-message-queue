@@ -8,6 +8,18 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.89.1](https://github.com/avivsinai/agent-message-queue/compare/v0.89.0...v0.89.1) (2026-10-07)
+
+
+### Bug Fixes
+
+* **acp:** a non-message inbox entry is no proof of a Buzz delivery ([#990](https://github.com/avivsinai/agent-message-queue/issues/990)) ([404397d](https://github.com/avivsinai/agent-message-queue/commit/404397df6b37e1c15a6165e0813b5d8e5e142db3))
+* **acp:** make the cockpit event journal a claim before delivery ([#976](https://github.com/avivsinai/agent-message-queue/issues/976)) ([dc5a0d3](https://github.com/avivsinai/agent-message-queue/commit/dc5a0d3e2049c0c6d4886c80d1583e34fa87b6b9))
+* **remote:** ask the current attachment when retiring owed outcomes ([8511631](https://github.com/avivsinai/agent-message-queue/commit/8511631ba45da30ecc2a09a070eda43ba0b6ea58))
+* **remote:** bound the Claude hook's allow check and serialize answer writes ([#986](https://github.com/avivsinai/agent-message-queue/issues/986)) ([35fc50b](https://github.com/avivsinai/agent-message-queue/commit/35fc50baaed65db42da77f7dc9cdd8e4e9816a70))
+* **remote:** Codex permission and input requests show in the DM ([#985](https://github.com/avivsinai/agent-message-queue/issues/985)) ([427b00e](https://github.com/avivsinai/agent-message-queue/commit/427b00e652665921344ec0b4b5c7177813b7b8b6))
+* **remote:** retire an unsettleable owed outcome at the horizon ([8511631](https://github.com/avivsinai/agent-message-queue/commit/8511631ba45da30ecc2a09a070eda43ba0b6ea58))
+
 ## [0.89.0](https://github.com/avivsinai/agent-message-queue/compare/v0.88.0...v0.89.0) (2026-10-07)
 
 
