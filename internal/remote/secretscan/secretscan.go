@@ -17,9 +17,10 @@ var secretShapes = []*regexp.Regexp{
 	regexp.MustCompile(`eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.`),
 	regexp.MustCompile(`(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}`),
 	regexp.MustCompile(`://[^/\s:@]+:[^/\s@]*@`),
-	// user:password after a -u or -U option, separate or attached, as curl
-	// takes it (Pro review of #988).
-	regexp.MustCompile(`(?:^|[\s'"=;|&(])-[uU]\s*['"]?[^\s'":]+:[^\s'"]`),
+	// user:password after a -u or -U option, separate or attached, alone or
+	// in a short-option cluster such as -su, as curl takes it (Pro review of
+	// #988).
+	regexp.MustCompile(`(?:^|[\s'"=;|&(])-[A-Za-z]*[uU]\s*['"]?[^\s'":]+:[^\s'"]`),
 }
 
 // sk- tokens are found by context. skAtWordStart is sk- at the start of the
@@ -44,7 +45,7 @@ func hasSKToken(t string) bool {
 // a flag rule only and never matched in a JSON key.
 var (
 	secretName     = regexp.MustCompile(`(?i)(passw|passphrase|pwd|secret|token|key|auth|credential|bearer|private|cookie|session[_-]?id)`)
-	credentialFlag = regexp.MustCompile(`(?i)^(user|passphrase)$`)
+	credentialFlag = regexp.MustCompile(`(?i)^(user|proxy-user|passphrase)$`)
 )
 
 // Names in text: an assignment identifier (NAME=, NAME:) and a flag
