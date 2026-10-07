@@ -16,6 +16,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 	"github.com/avivsinai/agent-message-queue/internal/remote/requests"
+	"github.com/avivsinai/agent-message-queue/internal/remote/secretscan"
 )
 
 // ClientName is what the attachment reports to the app-server.
@@ -1554,6 +1555,13 @@ func (a *Attachment) raiseApproval(turnID string, reqID json.RawMessage, inter *
 	a.emit(core.NativeEvent{Type: core.EventQuestion, Key: key, RunID: runID, Interaction: inter})
 }
 
+// asks names what each terminal-only request asks for, without its text.
+var asks = map[string]string{
+	methodPermissionsApproval: "Codex asks for permissions",
+	methodToolUserInput:       "Codex asks for input",
+	methodMcpElicitation:      "An MCP server asks for input",
+}
+
 // terminalQuestion is the interaction for a request only the terminal can
 // answer: what Codex asks, bounded, with no option, so the DM says to answer
 // in the terminal and a remote answer is refused as not offered. It is nil
@@ -1638,6 +1646,12 @@ func (a *Attachment) terminalQuestion(req ServerRequest) (string, *protocol.Inte
 	}
 	if id == "" {
 		return "", nil
+	}
+	// The asked text is the harness's or an MCP server's own words and may
+	// echo a credential: then the DM shows only that something waits (Pro
+	// review of #985).
+	if secretscan.MayHold(prompt) {
+		prompt = asks[req.Method] + "; it may hold a secret, so only the terminal shows it."
 	}
 	// The owner sees that a long request was cut, as boundPreview shows it.
 	if text, cut := protocol.TruncateText(prompt, protocol.MaxApprovalPreview); cut {

@@ -159,6 +159,10 @@ func TestTerminalOnlyRequestsShowInTheDM(t *testing.T) {
 		{"22", "mcpServer/elicitation/request",
 			`{"threadId":"t1","turnId":"u1","serverName":"docs","mode":"form","message":"Pick a space ` + long + `","requestedSchema":{"type":"object","properties":{}}}`,
 			"22", "MCP server docs asks: Pick a space x"},
+		// Pro review of #985: an asked text that echoes a credential.
+		{"23", "mcpServer/elicitation/request",
+			`{"threadId":"t1","turnId":"u1","serverName":"docs","mode":"form","message":"Confirm Authorization: Bearer abcdefgh12345678","requestedSchema":{"type":"object","properties":{}}}`,
+			"23", "An MCP server asks for input; it may hold a secret, so only the terminal shows it."},
 	} {
 		srv.sendServerRequest(t, tc.reqID, tc.method, tc.params)
 		waitInteraction(t, att, key)
