@@ -73,3 +73,21 @@ func TestCodexThreadTakesItsRecordedIdentity(t *testing.T) {
 		t.Fatalf("current thread lookup: %v", err)
 	}
 }
+
+// Bead agent-message-queue-611.61: a thread the user resumes by id through
+// coop exec (codex resume <id>) carries the session's identity too.
+func TestResumedCodexThreadTakesTheSessionIdentity(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CODEX_HOME", filepath.Join(t.TempDir(), "codex"))
+	base := secureTempDirForTest(t)
+	const thread = "01a1166e-dd8e-77c0-bc3b-a4b7e24e91a9"
+	recordResumedCodexThread("codex", []string{"resume", thread, "--yolo"}, codexThreadIdentityRecorder(buildCoopExecEnvironment(nil, base, "codex", "")))
+	for _, key := range identityEnvKeys {
+		t.Setenv(key, "")
+		_ = os.Unsetenv(key)
+	}
+	t.Setenv("CODEX_THREAD_ID", thread)
+	if err := adoptCodexThreadIdentity(); err != nil || os.Getenv(envRoot) != base || os.Getenv(envMe) != "codex" {
+		t.Fatalf("resumed thread: err=%v root=%q me=%q", err, os.Getenv(envRoot), os.Getenv(envMe))
+	}
+}

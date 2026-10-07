@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/avivsinai/agent-message-queue/internal/codexidentity"
+	"github.com/avivsinai/agent-message-queue/internal/launch"
 )
 
 // identityEnvKeys are the variables that make up an AMQ participant
@@ -121,5 +122,21 @@ func codexThreadIdentityRecorder(env []string) func(thread string) error {
 		r.Thread = thread
 		r.CodexHome = absPath(filepath.Clean(codexHome))
 		return codexidentity.Publish(r)
+	}
+}
+
+// recordResumedCodexThread records the identity for a Codex thread the user
+// resumes by id (codex resume <id>, as amq session resume runs it): that
+// thread's tool commands run on the daemon too. Naming already recorded a
+// thread it created; recording it again writes the same values. A failure
+// is a warning: the session still starts, without an identity for its
+// tool commands.
+func recordResumedCodexThread(binaryPath string, args []string, record func(thread string) error) {
+	if record == nil || launch.ProviderForExecutable(binaryPath) != launch.CodexProvider ||
+		len(args) < 2 || args[0] != "resume" || !codexidentity.ValidThread(args[1]) {
+		return
+	}
+	if err := record(args[1]); err != nil {
+		_ = writeStderr("warning: AMQ could not record this session's identity for Codex tool commands: %v\n", err)
 	}
 }
