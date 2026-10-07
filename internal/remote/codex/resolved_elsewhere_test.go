@@ -122,11 +122,13 @@ func TestApprovalWithholdsApproveForUnseenGrants(t *testing.T) {
 	// 611.42.11: a command that holds a credential went to the DM whole,
 	// and a zero-width character the DM removes showed a command other than
 	// the one a ✅ approved. Neither shows whole, so neither offers approve.
-	for i, cmd := range []string{`curl -H 'Authorization: Bearer abcdefgh12345678' x`, "rm -rf /tmp/x\u200b /"} {
+	// Pro review of #988: curl's -u user:password, separate and attached.
+	for i, cmd := range []string{`curl -H 'Authorization: Bearer abcdefgh12345678' x`, "rm -rf /tmp/x\u200b /",
+		"curl -u alice:demo-pass-123 example.invalid", "curl -ualice:demo-pass-123 example.invalid"} {
 		srv.notify(t, "serverRequest/resolved", `{"threadId":"t1","requestId":"`+strconv.Itoa(10+i)+`"}`)
 		waitNoInteraction(t, att)
 		srv.sendServerRequest(t, strconv.Itoa(11+i), "item/commandExecution/requestApproval", `{"threadId":"t1","turnId":"u1","itemId":"s`+strconv.Itoa(i)+`","command":"`+cmd+`"}`)
-		if in := pending(); in.ApproveOption != "" || in.RejectOption != "decline" || strings.Contains(in.Prompt, "abcdefgh") {
+		if in := pending(); in.ApproveOption != "" || in.RejectOption != "decline" || strings.Contains(in.Prompt, "abcdefgh") || strings.Contains(in.Prompt, "demo-pass") {
 			t.Fatalf("command %q = approve %q reject %q prompt %q, want reject only and no secret", cmd, in.ApproveOption, in.RejectOption, in.Prompt)
 		}
 	}

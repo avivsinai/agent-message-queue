@@ -17,6 +17,9 @@ var secretShapes = []*regexp.Regexp{
 	regexp.MustCompile(`eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.`),
 	regexp.MustCompile(`(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}`),
 	regexp.MustCompile(`://[^/\s:@]+:[^/\s@]*@`),
+	// user:password after a -u or -U option, separate or attached, as curl
+	// takes it (Pro review of #988).
+	regexp.MustCompile(`(?:^|[\s'"=;|&(])-[uU]\s*['"]?[^\s'":]+:[^\s'"]`),
 }
 
 // sk- tokens are found by context. skAtWordStart is sk- at the start of the
