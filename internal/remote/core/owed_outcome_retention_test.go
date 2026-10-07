@@ -275,3 +275,93 @@ func TestOwedOutcomeStillSettlesNormally(t *testing.T) {
 		t.Fatalf("resolved = %+v, want %+v", rec.Resolved, want)
 	}
 }
+
+// barrierResolver blocks its first ResolvedInteraction until released, then
+// answers from its own map, so the test can reattach a replacement while
+// the unlocked lookup of a Reconcile is in flight (bead 611.45 r3: the
+// locked retirement must ask the CURRENT target, not the attachment
+// captured before the lock).
+type barrierResolver struct {
+	core.Attachment
+	mu      sync.Mutex
+	res     map[string]protocol.Resolution
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (b *barrierResolver) ResolvedInteraction(_ requests.Key, _, interactionID string) (protocol.Resolution, bool) {
+	b.mu.Lock()
+	res, ok := b.res[interactionID]
+	entered, release := b.entered, b.release
+	b.mu.Unlock()
+	if entered != nil {
+		close(entered)
+		<-release
+		b.mu.Lock()
+		b.entered, b.release = nil, nil
+		b.mu.Unlock()
+	}
+	return res, ok
+}
+
+// A replacement attachment that reports the exact outcome for the same
+// key/epoch/interaction: the shape of a live reattach whose fresh seam
+// already knows how the interaction ended.
+func TestRetirementAsksTheCurrentAttachment(t *testing.T) {
+	store, now := openStore(t)
+	clk := now()
+	rt := fake.New("fake", "e_1")
+	old := &barrierResolver{
+		Attachment: rt,
+		res:        map[string]protocol.Resolution{},
+		entered:    make(chan struct{}),
+		release:    make(chan struct{}),
+	}
+	ep := core.New(core.Config{Store: store, Now: func() time.Time { return clk }})
+	ep.Register(old)
+
+	id := "11111111-1111-4111-8111-111111111150"
+	if _, err := ep.Handle(submitCmd(id), ownerShare); err != nil {
+		t.Fatal(err)
+	}
+	rt.Question(id, "i_6", []string{"yes", "no"})
+	rt.Complete(id, "done")
+
+	// Past the horizon, with the old attachment silent.
+	clk = clk.Add(protocol.DefaultCompactHorizon + time.Minute)
+
+	// The old attachment's first ResolvedInteraction (the unlocked lookup
+	// of the Reconcile) blocks; while it is blocked, a reattach replaces it
+	// with a replacement that already reports the exact outcome. The old
+	// attachment stays silent: the locked retirement pass must consult the
+	// CURRENT target to see the resolution.
+	go func() {
+		<-old.entered
+		replacement := &barrierResolver{
+			Attachment: fake.New("fake", "e_1"),
+			res: map[string]protocol.Resolution{
+				"i_6": {InteractionID: "i_6", Outcome: protocol.ResolutionAnswered, Option: "yes"},
+			},
+		}
+		ep.Register(replacement)
+		close(old.release)
+	}()
+
+	if err := ep.Reconcile(); err != nil {
+		t.Fatal(err)
+	}
+
+	key := requests.Key{CreatorHost: "local", TargetID: "fake", RequestID: id}
+	rec, _, err := store.Get(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The replacement's exact resolution was recorded; nothing was retired.
+	want := protocol.Resolution{InteractionID: "i_6", Outcome: protocol.ResolutionAnswered, Option: "yes"}
+	if len(rec.RetiredOutcomes) != 0 || len(rec.Resolved) == 0 || rec.Resolved[len(rec.Resolved)-1] != want {
+		t.Fatalf("after the reattach: retired=%v resolved=%+v, want %+v recorded with no retirement", rec.RetiredOutcomes, rec.Resolved, want)
+	}
+	if rec.State != protocol.StateCompleted || rec.Result == nil || rec.Result.Text != "done" {
+		t.Fatalf("the correction changed the terminal record: state=%s result=%+v", rec.State, rec.Result)
+	}
+}

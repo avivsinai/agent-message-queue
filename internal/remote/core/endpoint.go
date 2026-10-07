@@ -1657,10 +1657,21 @@ func (e *Endpoint) recoverOwedOutcomes(rec *requests.Record) error {
 		if !pastHorizon || resolvedIn(cur.Resolved, id) {
 			continue
 		}
-		if resolver != nil {
+		// Final ask inside the locked update, against the CURRENT target:
+		// a live reattach may have replaced the attachment since the
+		// unlocked lookup, and the replacement may already resolve this
+		// key (review of #979 r3). Never retire an outcome a resolver can
+		// settle at this moment.
+		curResolver := resolver
+		if t, ok := e.targets[rec.TargetID]; ok {
+			if r, isResolver := t.att.(InteractionResolver); isResolver {
+				curResolver = r
+			}
+		}
+		if curResolver != nil {
 			// Final ask inside the locked update: the resolver may have
 			// gained the outcome between the unlocked lookup and now.
-			if res, done := resolver.ResolvedInteraction(key, rec.Epoch, id); done && res.InteractionID == id {
+			if res, done := curResolver.ResolvedInteraction(key, rec.Epoch, id); done && res.InteractionID == id {
 				if settleOwedNative(cur, res) {
 					changed = true
 				}
