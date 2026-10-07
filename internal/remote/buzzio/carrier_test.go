@@ -75,7 +75,7 @@ func TestCarrierSubmitsOnceAndKeepsOneEditableRow(t *testing.T) {
 	if err := c.Flush(context.Background(), func(_ context.Context, evt nostr.Event) error {
 		sent = append(sent, evt)
 		return nil
-	}, nil); err != nil {
+	}, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if len(sent) != 2 || sent[0].Kind != KindDM || sent[1].Kind != KindEdit {
@@ -105,7 +105,7 @@ func TestCarrierSubmitsOnceAndKeepsOneEditableRow(t *testing.T) {
 		t.Fatal(err)
 	}
 	var answer []nostr.Event
-	_ = c.Flush(context.Background(), func(_ context.Context, evt nostr.Event) error { answer = append(answer, evt); return nil }, nil)
+	_ = c.Flush(context.Background(), func(_ context.Context, evt nostr.Event) error { answer = append(answer, evt); return nil }, nil, nil)
 	if len(answer) != 1 || !hasTag(answer[0], "e", threadRootID, "", "root") || !hasTag(answer[0], "e", inThread.ID.Hex(), "", "reply") {
 		t.Fatalf("threaded answer = %+v, want root and reply tags", answer)
 	}
@@ -250,7 +250,7 @@ func TestMentionSubmitsAndAnswersInDM(t *testing.T) {
 		t.Fatalf("submitted prompt = %q, want the text after the mention", prompt)
 	}
 	var sent []nostr.Event
-	_ = c.Flush(context.Background(), func(_ context.Context, evt nostr.Event) error { sent = append(sent, evt); return nil }, nil)
+	_ = c.Flush(context.Background(), func(_ context.Context, evt nostr.Event) error { sent = append(sent, evt); return nil }, nil, nil)
 	if len(sent) != 1 || tagValue(sent[0], "h") != "dm-1" || tagValue(sent[0], "e") != "" {
 		t.Fatalf("sent = %+v, want one DM row with no reference into the mention channel", sent)
 	}
@@ -307,7 +307,7 @@ func TestRowForThreadReplyNamesTheThreadRoot(t *testing.T) {
 				t.Fatal(err)
 			}
 			var sent []nostr.Event
-			if err := c.Flush(context.Background(), func(_ context.Context, evt nostr.Event) error { sent = append(sent, evt); return nil }, nil); err != nil {
+			if err := c.Flush(context.Background(), func(_ context.Context, evt nostr.Event) error { sent = append(sent, evt); return nil }, nil, nil); err != nil {
 				t.Fatal(err)
 			}
 			if len(sent) != 1 || !hasTag(sent[0], "e", root, "", "root") || !hasTag(sent[0], "e", reply.ID.Hex(), "", "reply") {
@@ -340,7 +340,7 @@ func TestRefusedRowDoesNotBlockLaterRows(t *testing.T) {
 		}
 		return nil
 	}
-	if err := c.Flush(context.Background(), refuseFirst, nil); err != nil || len(sent) != 2 {
+	if err := c.Flush(context.Background(), refuseFirst, nil, nil); err != nil || len(sent) != 2 {
 		t.Fatalf("flush err = %v after %d sends, want both requests' rows tried", err, len(sent))
 	}
 	refused, err := RefusedOutputs(stateDir)
@@ -357,11 +357,11 @@ func TestRefusedRowDoesNotBlockLaterRows(t *testing.T) {
 	}
 	sent = nil
 	accept := func(_ context.Context, evt nostr.Event) error { sent = append(sent, evt); return nil }
-	if err := c.Flush(context.Background(), accept, nil); err != nil || len(sent) != 0 {
+	if err := c.Flush(context.Background(), accept, nil, nil); err != nil || len(sent) != 0 {
 		t.Fatalf("flush during backoff: err = %v, sent = %d, want nothing sent", err, len(sent))
 	}
 	now = now.Add(time.Minute)
-	if err := c.Flush(context.Background(), accept, nil); err != nil || len(sent) != 2 || sent[0].Kind != KindDM || sent[1].Kind != KindEdit || tagValue(sent[1], "e") != sent[0].ID.Hex() {
+	if err := c.Flush(context.Background(), accept, nil, nil); err != nil || len(sent) != 2 || sent[0].Kind != KindDM || sent[1].Kind != KindEdit || tagValue(sent[1], "e") != sent[0].ID.Hex() {
 		t.Fatalf("flush after backoff: err = %v, sent = %+v, want the row then its edit", err, sent)
 	}
 	if pending, _ := c.ledger.Pending(); len(pending) != 0 {
@@ -391,7 +391,7 @@ func refusedApprovalHoldsNewerRows(t *testing.T, legacy bool) {
 	}
 	var sent []nostr.Event
 	accept := func(_ context.Context, evt nostr.Event) error { sent = append(sent, evt); return nil }
-	if err := c.Flush(context.Background(), accept, nil); err != nil || len(sent) != 1 {
+	if err := c.Flush(context.Background(), accept, nil, nil); err != nil || len(sent) != 1 {
 		t.Fatalf("flush root: err = %v, sent = %d", err, len(sent))
 	}
 	pending, _ := c.ledger.Pending()
@@ -414,7 +414,7 @@ func refusedApprovalHoldsNewerRows(t *testing.T, legacy bool) {
 		}
 		return nil
 	}
-	if err := c.Flush(context.Background(), refuseApproval, nil); err != nil {
+	if err := c.Flush(context.Background(), refuseApproval, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	// The terminal resolves the interaction; the newer revision is prepared
@@ -449,16 +449,51 @@ func refusedApprovalHoldsNewerRows(t *testing.T, legacy bool) {
 		}
 	}
 	sent = nil
-	if err := c.Flush(context.Background(), accept, nil); err != nil || len(sent) != 0 {
+	if err := c.Flush(context.Background(), accept, nil, nil); err != nil || len(sent) != 0 {
 		t.Fatalf("flush during the approval's backoff: err = %v, sent = %+v, want nothing sent", err, sent)
 	}
 	now = now.Add(time.Minute)
 	// Old outputs have no provable order, so after the backoff only their
 	// delivery is guaranteed, not the approval going first.
-	if err := c.Flush(context.Background(), accept, nil); err != nil || len(sent) == 0 || !legacy && sent[0].Kind != KindDM {
+	if err := c.Flush(context.Background(), accept, nil, nil); err != nil || len(sent) == 0 || !legacy && sent[0].Kind != KindDM {
 		t.Fatalf("flush after backoff: err = %v, sent = %+v, want the approval message first", err, sent)
 	}
 	if pending, _ := c.ledger.Pending(); len(pending) != 0 {
 		t.Fatalf("pending after flush = %d, want 0", len(pending))
+	}
+}
+
+// Bead agent-message-queue-611.59 (Pro review of #971 round 2): a root row
+// the relay stored, but whose positive OK was lost, is refused as too old on
+// every retry and held its request's later outputs forever. Finding the
+// exact signed event on the relay accepts it; a failed lookup keeps it owed.
+func TestStoredRowWhoseOKWasLostIsAccepted(t *testing.T) {
+	for _, lookupWorks := range []bool{true, false} {
+		t.Run(fmt.Sprintf("lookup=%v", lookupWorks), func(t *testing.T) {
+			c, owner, _ := busyCarrier(t)
+			now := time.Now()
+			c.now = func() time.Time { return now }
+			if err := c.Ingest(ownerEvent(t, owner, "dm-1", "go", now)); err != nil {
+				t.Fatal(err)
+			}
+			var root nostr.Event
+			tooOld := func(_ context.Context, evt nostr.Event) error {
+				root = evt
+				return &relay.RemoteError{Kind: relay.ErrRejected, Reason: "invalid: event too old"}
+			}
+			has := func(_ context.Context, id nostr.ID) (bool, error) {
+				if !lookupWorks {
+					return false, errors.New("the read timed out")
+				}
+				return id == root.ID, nil
+			}
+			if err := c.Flush(context.Background(), tooOld, has, nil); err != nil {
+				t.Fatal(err)
+			}
+			pending, _ := c.ledger.Pending()
+			if owed := len(pending) == 1; owed == lookupWorks {
+				t.Fatalf("pending = %d after the lookup (works: %v); want the row accepted only when the relay holds it", len(pending), lookupWorks)
+			}
+		})
 	}
 }

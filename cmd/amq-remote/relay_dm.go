@@ -519,7 +519,7 @@ func (ds *dmShare) serveDM(ctx context.Context, conn *relay.Conn, edges *dmEdges
 			case <-lctx.Done():
 				return
 			case <-t.C:
-				if err := ds.carrier.Flush(lctx, conn.Publish, gate); err != nil {
+				if err := ds.carrier.Flush(lctx, conn.Publish, buzzio.StoredEventLookup(conn), gate); err != nil {
 					if open.Load() {
 						edges.setState(session, "publish_pending: "+relay.StatusText(err))
 					}

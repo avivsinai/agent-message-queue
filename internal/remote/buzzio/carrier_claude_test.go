@@ -301,7 +301,7 @@ func (e *claudeApprovalE2E) flush() {
 		e.sent = append(e.sent, evt)
 		e.relay.Inject(evt)
 		return nil
-	}, nil); err != nil {
+	}, nil, nil); err != nil {
 		e.t.Fatal(err)
 	}
 }

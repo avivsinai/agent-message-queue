@@ -1170,9 +1170,12 @@ const (
 // request is owed (refused or not yet due), that request's later outputs
 // wait; other requests' outputs still go out. A root whose positive OK was
 // lost and whose retry the relay refuses as too old stays owed and holds
-// its request's later outputs (agent-message-queue-611.59). The ledger lock
-// is not held while a send waits.
-func (c *Carrier) Flush(ctx context.Context, pub Publisher, gate func() error) error {
+// its request's later outputs until has, when given, finds the exact signed
+// event on the relay: verified presence proves the earlier send was stored,
+// so the output is accepted and its request's later outputs go out; a lookup
+// that fails or finds nothing leaves it owed (agent-message-queue-611.59).
+// The ledger lock is not held while a send waits.
+func (c *Carrier) Flush(ctx context.Context, pub Publisher, has EventLookup, gate func() error) error {
 	c.mu.Lock()
 	pending, err := c.ledger.Pending()
 	c.mu.Unlock()
@@ -1229,6 +1232,10 @@ func (c *Carrier) Flush(ctx context.Context, pub Publisher, gate func() error) e
 			c.mu.Lock()
 			err = c.ledger.MarkAccepted(o.Key, c.now())
 			c.mu.Unlock()
+		case errors.As(err, &remote) && errors.Is(remote.Kind, relay.ErrRejected) && c.storedOnRelay(ctx, has, evt.ID):
+			c.mu.Lock()
+			err = c.ledger.MarkAccepted(o.Key, c.now())
+			c.mu.Unlock()
 		case errors.As(err, &remote) && errors.Is(remote.Kind, relay.ErrRejected):
 			waiting[group] = true
 			c.mu.Lock()
@@ -1242,6 +1249,39 @@ func (c *Carrier) Flush(ctx context.Context, pub Publisher, gate func() error) e
 		}
 	}
 	return nil
+}
+
+// EventLookup reports whether the relay holds the event with this exact id.
+type EventLookup func(ctx context.Context, id nostr.ID) (bool, error)
+
+// StoredEventLookup looks an event up by id among conn's stored events. The
+// relay client delivers only events whose id and signature verify, so a
+// match is the exact signed event.
+func StoredEventLookup(conn *relay.Conn) EventLookup {
+	return func(ctx context.Context, id nostr.ID) (bool, error) {
+		events, err := readStored(ctx, conn, nostr.Filter{IDs: []nostr.ID{id}, Limit: 1})
+		if err != nil {
+			return false, err
+		}
+		for _, evt := range events {
+			if evt.ID == id {
+				return true, nil
+			}
+		}
+		return false, nil
+	}
+}
+
+// storedOnRelay is whether has finds the refused event on the relay. A
+// failed or absent lookup proves nothing.
+func (c *Carrier) storedOnRelay(ctx context.Context, has EventLookup, id nostr.ID) bool {
+	if has == nil {
+		return false
+	}
+	lctx, cancel := context.WithTimeout(ctx, publishTimeout)
+	defer cancel()
+	found, err := has(lctx, id)
+	return err == nil && found
 }
 
 // outputGroup is the ordering scope of an outbox key: one request's rows

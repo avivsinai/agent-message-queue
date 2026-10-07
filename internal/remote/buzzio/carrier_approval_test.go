@@ -54,7 +54,7 @@ func TestApprovalMessageAnsweredByReaction(t *testing.T) {
 	var sent []nostr.Event
 	flush := func() {
 		sent = nil
-		if err := c.Flush(context.Background(), func(_ context.Context, evt nostr.Event) error { sent = append(sent, evt); return nil }, nil); err != nil {
+		if err := c.Flush(context.Background(), func(_ context.Context, evt nostr.Event) error { sent = append(sent, evt); return nil }, nil, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -156,7 +156,7 @@ func TestApprovalAnsweredByTypedReply(t *testing.T) {
 		return msg
 	}
 	flush := func() {
-		if err := c.Flush(context.Background(), func(context.Context, nostr.Event) error { return nil }, nil); err != nil {
+		if err := c.Flush(context.Background(), func(context.Context, nostr.Event) error { return nil }, nil, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -364,7 +364,7 @@ func TestApprovalMessageEditedWhenNoLongerAnswerable(t *testing.T) {
 	var sent []nostr.Event
 	flush := func() {
 		sent = nil
-		if err := c.Flush(context.Background(), func(_ context.Context, evt nostr.Event) error { sent = append(sent, evt); return nil }, nil); err != nil {
+		if err := c.Flush(context.Background(), func(_ context.Context, evt nostr.Event) error { sent = append(sent, evt); return nil }, nil, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -469,7 +469,7 @@ func TestApprovalEditCrashLeavesMessageAndMappingInAgreement(t *testing.T) {
 			last = evt
 		}
 		return nil
-	}, nil)
+	}, nil, nil)
 	appr, _, err := ledger.ApprovalFor(msg.ID.Hex())
 	if err != nil {
 		t.Fatal(err)
@@ -519,7 +519,7 @@ func TestApprovalReplayKeepsDeliveryUnknown(t *testing.T) {
 	var sent []nostr.Event
 	flush := func() {
 		sent = nil
-		if err := c.Flush(context.Background(), func(_ context.Context, evt nostr.Event) error { sent = append(sent, evt); return nil }, nil); err != nil {
+		if err := c.Flush(context.Background(), func(_ context.Context, evt nostr.Event) error { sent = append(sent, evt); return nil }, nil, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
