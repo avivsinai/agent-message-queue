@@ -124,6 +124,21 @@ contract:
   observed live (§5).
   (source: research/p1-codex-probe.md; live `ls -la ~/.codex/app-server-control`
   with codex-cli 0.160.0; internal/remote/codex/discover.go)
+- **Codex approvals reviewer:** in codex-cli 0.160, a thread's
+  `approvalsReviewer` (`user`, `auto_review`, or the legacy
+  `guardian_subagent`) comes from `approvals_reviewer` in
+  `~/.codex/config.toml` when the thread starts. An automatic reviewer
+  answers approval requests itself, so few or none reach a remote client.
+  `thread/resume` returns the thread's reviewer and
+  `thread/settings/updated` reports a change; the adapter publishes an
+  automatic one as the session's `approval_reviewer`, and doctor reports it
+  for a target with `approve`. A `-c approvals_reviewer=user` on a resumed
+  TUI did not change the reviewer of turns submitted remotely; a thread
+  started with it did. An `approvalsReviewer` override on `turn/start`
+  applies to that turn and every later one, the terminal's included, so the
+  adapter never sends one.
+  (source: live test 2026-10-06 with codex-cli 0.160.0; `codex app-server
+  generate-json-schema` of codex-cli 0.160.1; internal/remote/codex/attachment.go)
 - **Claude Code delivery:** a message delivered to a busy session is read at
   a tool boundary and does not interrupt a running tool; an idle session
   starts a new turn. No documented user-level interrupt exists over the

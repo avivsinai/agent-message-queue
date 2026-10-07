@@ -18,6 +18,7 @@
     "status": { "enum": ["idle", "busy", "waiting_input", "offline", "unknown"] },
     "pending_interaction": { "type": ["string", "null"], "maxLength": 128 },
     "active_request_ref": { "type": ["string", "null"], "pattern": "^amqr1_[a-z2-7]{16,512}$" },
+    "approval_reviewer": { "type": "string", "maxLength": 64 },
     "capabilities": {
       "type": "object",
       "additionalProperties": false,

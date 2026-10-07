@@ -83,7 +83,7 @@ func TestPiApprovalAnsweredFromBuzz(t *testing.T) {
 	var sent []nostr.Event
 	flush := func() {
 		sent = nil
-		if err := c.Flush(context.Background(), func(_ context.Context, evt nostr.Event) error { sent = append(sent, evt); return nil }, nil); err != nil {
+		if err := c.Flush(context.Background(), func(_ context.Context, evt nostr.Event) error { sent = append(sent, evt); return nil }, nil, nil); err != nil {
 			t.Fatal(err)
 		}
 	}

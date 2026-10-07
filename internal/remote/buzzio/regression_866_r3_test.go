@@ -74,7 +74,7 @@ func TestShownRefusalIsNotResubmitted(t *testing.T) {
 		}
 		sent++
 		return nil
-	}, nil); err != nil {
+	}, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if sent != 1 {
@@ -108,7 +108,7 @@ func TestNativeRebindDoesNotAdoptPriorReceipt(t *testing.T) {
 		return
 	}
 	sent := 0
-	if err := c2.Flush(context.Background(), func(context.Context, nostr.Event) error { sent++; return nil }, nil); err != nil {
+	if err := c2.Flush(context.Background(), func(context.Context, nostr.Event) error { sent++; return nil }, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if sent != 0 {

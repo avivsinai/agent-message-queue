@@ -103,9 +103,14 @@ type Attachment struct {
 	// Overridable for tests.
 	confirmTimeout time.Duration
 
-	mu           sync.Mutex
-	status       string
-	activeTurn   string
+	mu         sync.Mutex
+	status     string
+	activeTurn string
+	// reviewer is the thread's approvals reviewer when it is not the user
+	// (611.56), from thread/resume and then thread/settings/updated;
+	// reviewerSeen keeps an update newer than the resume snapshot.
+	reviewer     string
+	reviewerSeen bool
 	runs         map[requests.Key]*run
 	byTurn       map[string]*run
 	byClientID   map[string]*run // keyed by clientIDFor(key), not bare RequestID
@@ -257,6 +262,7 @@ func Attach(socketPath, threadID string, opts ...Option) (*Attachment, error) {
 				Type string `json:"type"`
 			} `json:"status"`
 		} `json:"thread"`
+		ApprovalsReviewer string `json:"approvalsReviewer"`
 	}
 	if err := client.Call(ctx, "thread/resume", map[string]any{"threadId": threadID}, &resumed); err != nil {
 		_ = client.Close()
@@ -283,6 +289,9 @@ func Attach(socketPath, threadID string, opts ...Option) (*Attachment, error) {
 	if a.activeTurn == "" {
 		a.status = threadStatus(resumed.Thread.Status.Type)
 	}
+	if !a.reviewerSeen {
+		a.reviewer = autoReviewer(resumed.ApprovalsReviewer)
+	}
 	a.mu.Unlock()
 	go func() {
 		<-client.Done()
@@ -292,6 +301,16 @@ func Attach(socketPath, threadID string, opts ...Option) (*Attachment, error) {
 		a.emit(core.NativeEvent{Type: core.EventStatus, Attachment: "offline"})
 	}()
 	return a, nil
+}
+
+// autoReviewer is Codex's approvalsReviewer when it is an automatic
+// reviewer (auto_review, or the legacy guardian_subagent), which answers
+// approvals itself so they never reach a client; "" for the user.
+func autoReviewer(v string) string {
+	if v == "user" {
+		return ""
+	}
+	return v
 }
 
 // TargetID derives the stable target id for a thread.
@@ -363,6 +382,7 @@ func (a *Attachment) Inspect() protocol.Session {
 		Status:             status,
 		PendingInteraction: pending,
 		ActiveRequestRef:   active,
+		ApprovalReviewer:   a.reviewer,
 		Capabilities: protocol.Capabilities{
 			Inspect: true, Submit: true, CancelRequest: true, Steer: false,
 			ApproveTool: a.approve, AnswerQuestion: false, Terminal: "unavailable",
@@ -1301,6 +1321,19 @@ func (a *Attachment) onNotification(n Notification) {
 		a.mu.Lock()
 		a.activeTurn = p.Turn.ID
 		a.status = "busy"
+		a.mu.Unlock()
+	case "thread/settings/updated":
+		var p struct {
+			ThreadID       string `json:"threadId"`
+			ThreadSettings struct {
+				ApprovalsReviewer string `json:"approvalsReviewer"`
+			} `json:"threadSettings"`
+		}
+		if json.Unmarshal(n.Params, &p) != nil || p.ThreadID != a.threadID {
+			return
+		}
+		a.mu.Lock()
+		a.reviewer, a.reviewerSeen = autoReviewer(p.ThreadSettings.ApprovalsReviewer), true
 		a.mu.Unlock()
 	case "item/started", "item/completed":
 		a.onItem(n)

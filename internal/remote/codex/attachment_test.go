@@ -29,6 +29,8 @@ type fakeAppServer struct {
 	turnStartDelayMu    sync.Mutex
 	turnStartResponse   string
 	turnStartResponseMu sync.Mutex
+	resumeReviewer      string
+	resumeReviewerMu    sync.Mutex
 	// resumeError, when set, is the JSON-RPC error object thread/resume
 	// answers with.
 	resumeError   string
@@ -139,7 +141,13 @@ func startFakeAppServer(t *testing.T) (string, *fakeAppServer) {
 					_ = ws.writeText([]byte(`{"jsonrpc":"2.0","id":` + string(*msg.ID) + `,"error":` + resumeErr + `}`))
 					continue
 				}
-				_ = ws.writeText([]byte(`{"jsonrpc":"2.0","id":` + string(*msg.ID) + `,"result":{"thread":{"id":"t1","cwd":"/work","status":{"type":"idle"}}}}`))
+				srv.resumeReviewerMu.Lock()
+				reviewer := srv.resumeReviewer
+				srv.resumeReviewerMu.Unlock()
+				if reviewer == "" {
+					reviewer = "user"
+				}
+				_ = ws.writeText([]byte(`{"jsonrpc":"2.0","id":` + string(*msg.ID) + `,"result":{"thread":{"id":"t1","cwd":"/work","status":{"type":"idle"}},"approvalsReviewer":"` + reviewer + `"}}`))
 			case "turn/start":
 				srv.turnStartDelayMu.Lock()
 				hook := srv.turnStartDelayHook
@@ -202,6 +210,14 @@ func (s *fakeAppServer) setThreadReadHandler(fn func() string) {
 	s.threadReadHandlerMu.Lock()
 	defer s.threadReadHandlerMu.Unlock()
 	s.threadReadHandler = fn
+}
+
+// setResumeReviewer sets the approvalsReviewer thread/resume answers with
+// (default "user").
+func (s *fakeAppServer) setResumeReviewer(v string) {
+	s.resumeReviewerMu.Lock()
+	defer s.resumeReviewerMu.Unlock()
+	s.resumeReviewer = v
 }
 
 // setTurnStartDelay installs a hook that fires BEFORE the turn/start RPC
@@ -1277,5 +1293,32 @@ func TestBK4AckedRunsAreBounded(t *testing.T) {
 	}
 	if lk.Class != core.EvidenceNone {
 		t.Fatalf("pruned acked run Lookup: want EvidenceNone, got class=%s", lk.Class)
+	}
+}
+
+// 611.56 (live 2026-10-06, codex-cli 0.160): a thread under the owner's
+// approvals_reviewer = guardian_subagent had its approvals answered by the
+// reviewer, and none reached the Buzz DM. Inspect names the reviewer from
+// thread/resume and follows thread/settings/updated.
+func TestInspectNamesTheAutomaticApprovalsReviewer(t *testing.T) {
+	sock, srv := startFakeAppServer(t)
+	srv.setResumeReviewer("guardian_subagent")
+	att, err := Attach(sock, "t1")
+	if err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	t.Cleanup(func() { _ = att.Close() })
+	<-srv.calls // initialize
+	<-srv.calls // thread/resume
+	if got := att.Inspect().ApprovalReviewer; got != "guardian_subagent" {
+		t.Fatalf("after resume: approval reviewer %q, want guardian_subagent", got)
+	}
+	srv.notify(t, "thread/settings/updated", `{"threadId":"t1","threadSettings":{"approvalsReviewer":"user"}}`)
+	deadline := time.Now().Add(5 * time.Second)
+	for att.Inspect().ApprovalReviewer != "" {
+		if time.Now().After(deadline) {
+			t.Fatalf("after settings update to user: approval reviewer %q, want empty", att.Inspect().ApprovalReviewer)
+		}
+		runtime.Gosched()
 	}
 }

@@ -142,7 +142,7 @@ func TestRootRowRecoveredAfterCrashBeforeReceipt(t *testing.T) {
 		t.Fatal(err)
 	}
 	var sent []nostr.Event
-	if err := c.Flush(context.Background(), func(_ context.Context, evt nostr.Event) error { sent = append(sent, evt); return nil }, nil); err != nil {
+	if err := c.Flush(context.Background(), func(_ context.Context, evt nostr.Event) error { sent = append(sent, evt); return nil }, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if len(sent) != 2 || sent[0].Kind != KindDM || sent[1].Kind != KindEdit || tagValue(sent[1], "e") != sent[0].ID.Hex() {

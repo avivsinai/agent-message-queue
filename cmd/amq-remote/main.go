@@ -1202,6 +1202,19 @@ func doctor(args []string, probe ...*jsonProbe) (any, int, error) {
 		}
 		break
 	}
+	// A Codex target with approve whose thread runs Codex's automatic
+	// approvals reviewer gets few or no DM approvals: the reviewer answers
+	// them first (611.56). That is the owner's choice, so it is reported,
+	// not failed.
+	reviewers := map[string]string{}
+	for _, s := range sessions {
+		if s.Harness == "codex" && s.Capabilities.ApproveTool && s.ApprovalReviewer != "" {
+			reviewers[s.TargetID] = "Codex's approvals reviewer " + s.ApprovalReviewer + " answers this thread's approvals itself, so few or none reach a remote client; for approvals from Buzz, start a new Codex thread with approvals_reviewer = \"user\" (config.toml or -c)"
+		}
+	}
+	if len(reviewers) > 0 {
+		report["approval_reviewer"] = reviewers
+	}
 	// DM approvals of a Claude target with approve need the PermissionRequest
 	// hook; without it every approval is answered in the terminal.
 	for _, s := range sessions {
@@ -1794,6 +1807,20 @@ func claudeSubcommand(args []string, stdin io.Reader, stdout io.Writer) int {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return 0 // fail-open even on home resolution failure
+	}
+	switch args[0] {
+	case "install-stop-hook", "uninstall-stop-hook", "uninstall-approval-hook":
+		// They take no options: --help or a stray argument changes nothing
+		// (611.42.9: install-stop-hook --help installed the hook).
+		// Only the bare command acts; a lone -- parses clean (Pro review of #981).
+		if len(args) > 1 {
+			fs := flag.NewFlagSet(args[0], flag.ContinueOnError)
+			fs.SetOutput(os.Stderr)
+			if fs.Parse(args[1:]) == nil {
+				say(os.Stderr, "%s takes no arguments\n", args[0])
+			}
+			return protocol.ExitUsage
+		}
 	}
 	switch args[0] {
 	case "stop-hook":
