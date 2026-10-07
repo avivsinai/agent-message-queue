@@ -1796,6 +1796,19 @@ func claudeSubcommand(args []string, stdin io.Reader, stdout io.Writer) int {
 		return 0 // fail-open even on home resolution failure
 	}
 	switch args[0] {
+	case "install-stop-hook", "uninstall-stop-hook", "uninstall-approval-hook":
+		// They take no options: --help or a stray argument changes nothing
+		// (611.42.9: install-stop-hook --help installed the hook).
+		fs := flag.NewFlagSet(args[0], flag.ContinueOnError)
+		fs.SetOutput(os.Stderr)
+		if fs.Parse(args[1:]) != nil || fs.NArg() > 0 {
+			if fs.NArg() > 0 {
+				say(os.Stderr, "%s takes no arguments\n", args[0])
+			}
+			return protocol.ExitUsage
+		}
+	}
+	switch args[0] {
 	case "stop-hook":
 		return claude.RunStopHookReceiver(home, stdin, stdout)
 	case "install-stop-hook":
