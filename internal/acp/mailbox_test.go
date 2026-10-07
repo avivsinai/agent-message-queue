@@ -270,7 +270,13 @@ func TestRedeliveredPromptStillGetsTheBuzzMailbox(t *testing.T) {
 	if err := os.MkdirAll(inbox, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(inbox, id+".md"), []byte("delivered by an older amq-acp"), 0o600); err != nil {
+	// A prompt an older amq-acp delivered: a real message with this id.
+	older, err := format.Message{Header: format.Header{Schema: format.CurrentSchema, ID: id, From: mailboxSender, To: []string{"agent"},
+		Thread: "t", Created: time.Now().UTC().Format(time.RFC3339Nano)}, Body: "say hi"}.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(inbox, id+".md"), older, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	b := binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: "agent"}

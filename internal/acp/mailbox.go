@@ -549,12 +549,13 @@ func publishOnce(b binding.Binding, threadID, id string, created time.Time, text
 		return err
 	}
 	name := id + ".md"
-	for _, dir := range []string{fsq.AgentInboxNew(b.Root, b.Handle), fsq.AgentInboxCur(b.Root, b.Handle)} {
-		if _, err := os.Lstat(filepath.Join(dir, name)); err == nil {
-			return nil
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
+	// Only a readable message with this id, read through the pinned root,
+	// proves the earlier delivery: a directory or a dangling link at the
+	// name is not one (agent-message-queue-u1e).
+	if held, err := inboxHasMessage(root, b.Handle, id); err != nil {
+		return err
+	} else if held {
+		return nil
 	}
 	body := strings.TrimRight(text, "\n") + "\n\n" +
 		"This came from the owner's Buzz DM. Answer with `amq reply --id " + id + "`; your reply is shown in that DM. " +
