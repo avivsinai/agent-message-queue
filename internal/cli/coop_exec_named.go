@@ -208,7 +208,8 @@ func codexConfigKeepsDaemon(flag, value string) (keeps, known bool) {
 	return raw == "true" || raw == "false", raw == "true" || raw == "false"
 }
 
-// codexSubcommands are codex-cli 0.160's subcommands (codex --help). As the
+// codexSubcommands are codex-cli 0.160's subcommands (codex --help, plus the
+// hidden ones and aliases cli/src/main.rs accepts). As the
 // first positional argument one is not a prompt and runs no ordinary TUI
 // start, so AMQ cannot tell where it runs.
 var codexSubcommands = map[string]bool{
@@ -216,7 +217,8 @@ var codexSubcommands = map[string]bool{
 	"plugin": true, "app-server": true, "remote-control": true, "app": true, "completion": true,
 	"update": true, "doctor": true, "sandbox": true, "debug": true, "apply": true, "a": true,
 	"resume": true, "queue": true, "archive": true, "delete": true, "migrate-rollouts": true,
-	"unarchive": true, "fork": true, "cloud": true, "exec-server": true, "features": true, "help": true,
+	"unarchive": true, "fork": true, "cloud": true, "cloud-tasks": true, "exec-server": true, "features": true,
+	"help": true, "stdio-to-uds": true, "responses-api-proxy": true, "tcp-tunnel": true, "execpolicy": true,
 }
 
 // codexLaunchBackend reports where a Codex TUI started with args in wd runs
