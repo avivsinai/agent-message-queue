@@ -114,6 +114,14 @@ func TestApprovalPreviewDetectorTable(t *testing.T) {
 		// Review of #987 (Pro, P1): a substitution rebuilds -vusk-… in Bash.
 		{"substitution inside an option", "Bash", bash("curl -v$(true)usk-AAAAAAAAAAAAAAAAAAAAAAAA1: example.test"), "", true},
 		{"fallback substitution inside an option", "Bash", fallback("curl -v$(true)usk-AAAAAAAAAAAAAAAAAAAAAAAA1: example.test"), "", true},
+		// Review of #987 r2 (Pro, P1): a quoted backtick substitution, a
+		// spaced substitution and a brace expansion rebuild it too.
+		{"quoted backtick substitution", "Bash", bash("curl -v`'/bin/true'`usk-AAAAAAAAAAAAAAAAAAAAAAAA1: example.test"), "", true},
+		{"fallback quoted backtick substitution", "Bash", fallback("curl -v`'/bin/true'`usk-AAAAAAAAAAAAAAAAAAAAAAAA1: example.test"), "", true},
+		{"spaced substitution", "Bash", bash("curl -v$( true )usk-AAAAAAAAAAAAAAAAAAAAAAAA1: example.test"), "", true},
+		{"fallback spaced substitution", "Bash", fallback("curl -v$( true )usk-AAAAAAAAAAAAAAAAAAAAAAAA1: example.test"), "", true},
+		{"brace expansion", "Bash", bash("curl -v{/,}usk-AAAAAAAAAAAAAAAAAAAAAAAA1: example.test"), "", true},
+		{"fallback brace expansion", "Bash", fallback("curl -v{/,}usk-AAAAAAAAAAAAAAAAAAAAAAAA1: example.test"), "", true},
 	} {
 		preview, _ := approvalView(tc.tool, json.RawMessage(tc.input), tc.agent)
 		if tc.hidden && preview != previewHidden {
