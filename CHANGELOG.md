@@ -8,6 +8,26 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.88.0](https://github.com/avivsinai/agent-message-queue/compare/v0.87.0...v0.88.0) (2026-10-07)
+
+
+### Features
+
+* **acp:** follow-up Buzz DMs steer an open mailbox turn ([#965](https://github.com/avivsinai/agent-message-queue/issues/965)) ([1412b89](https://github.com/avivsinai/agent-message-queue/commit/1412b89fd895891c2eee5ef72d33678c2440a0b4))
+* **remote:** answer a Buzz DM approval by typing yes or no ([#970](https://github.com/avivsinai/agent-message-queue/issues/970)) ([b95a84b](https://github.com/avivsinai/agent-message-queue/commit/b95a84bac4ca5c310347be881df2db8fa20675e7))
+
+
+### Bug Fixes
+
+* **acp:** a Buzz steer never recreates a removed mailbox ([#974](https://github.com/avivsinai/agent-message-queue/issues/974)) ([4098eb3](https://github.com/avivsinai/agent-message-queue/commit/4098eb3783b0be7446840141896e6299b1e1742b))
+* **acp:** a mailbox DM that fails before delivery says not delivered ([#964](https://github.com/avivsinai/agent-message-queue/issues/964)) ([22312f6](https://github.com/avivsinai/agent-message-queue/commit/22312f6592afe95b56bb797ce2efac11156d3dc0))
+* **coop:** name a Codex 0.160 session through the managed daemon ([#950](https://github.com/avivsinai/agent-message-queue/issues/950)) ([3cddfc7](https://github.com/avivsinai/agent-message-queue/commit/3cddfc71089a1843cfc3ee687f2607dff1d875bb))
+* **coop:** name Codex 0.160 sessions launched with options ([#975](https://github.com/avivsinai/agent-message-queue/issues/975)) ([8a9ff75](https://github.com/avivsinai/agent-message-queue/commit/8a9ff7513b58ffd52cc11cae0b304f6c1616243f))
+* **remote:** amq-acp ensures the buzz sender mailbox ([#951](https://github.com/avivsinai/agent-message-queue/issues/951)) ([27b4792](https://github.com/avivsinai/agent-message-queue/commit/27b4792ffca22403413125048af611fabe1caa14))
+* **remote:** Buzz thread replies keep their root; refused rows stop blocking ([#971](https://github.com/avivsinai/agent-message-queue/issues/971)) ([3a71c12](https://github.com/avivsinai/agent-message-queue/commit/3a71c1261aadb7a33f93604567ba47e197bff863))
+* **remote:** Codex 0.160 approvals reach the DM ([#969](https://github.com/avivsinai/agent-message-queue/issues/969)) ([d44c3ab](https://github.com/avivsinai/agent-message-queue/commit/d44c3abf166b7d1e1bd7d2b7294a853a374435fe))
+* **remote:** the pi reference bridge publishes its session id ([#977](https://github.com/avivsinai/agent-message-queue/issues/977)) ([f290adb](https://github.com/avivsinai/agent-message-queue/commit/f290adbcc64f6041779a6ac68853ab7e10cf20c2))
+
 ## [0.87.0](https://github.com/avivsinai/agent-message-queue/compare/v0.86.1...v0.87.0) (2026-10-06)
 
 

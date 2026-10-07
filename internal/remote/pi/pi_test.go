@@ -1075,6 +1075,15 @@ func TestOldBridgeNamesItsOwnRemedy(t *testing.T) {
 		// Pro review of #927, 2026-09-30: invisible-only published text must
 		// not suppress the manifest's remedy.
 		{"manifest hint", `,"upgrade":"\u200b"`, "update the pi build", "update the pi build (suggested by this target's manifest), then reload"},
+		// Bead agent-message-queue-lfd: a default-ignorable-only remedy
+		// (U+034F combining grapheme joiner) falls through to the manifest's
+		// hint, like the U+200B case above.
+		{"bridge CGJ", `,"bridge_revision":2,"upgrade":"\u034f"`, "update the pi build", "update the pi build (suggested by this target's manifest), then reload"},
+		// Review of #972 r3 P2: the full Other_Default_Ignorable_Code_Point
+		// property, not a hand list: U+180B Mongolian free variation selector
+		// and U+3164 Hangul filler fall through the same way.
+		{"bridge MVS", `,"bridge_revision":2,"upgrade":"\u180b"`, "update the pi build", "update the pi build (suggested by this target's manifest), then reload"},
+		{"bridge Hangul filler", `,"bridge_revision":2,"upgrade":"\u3164"`, "update the pi build", "update the pi build (suggested by this target's manifest), then reload"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a, dir := newTestAttachment(t)

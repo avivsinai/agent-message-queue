@@ -191,9 +191,20 @@ func oldBridgeMessage(handle string, live livenessState, hint string) string {
 // cut, so a truncated command is never shown.
 const maxRemedyBytes = 256
 
+// isDefaultIgnorable reports whether r is invisible in every rendering:
+// format characters (bidi overrides, zero-width), variation selectors and
+// the rest of the Other_Default_Ignorable_Code_Point property (U+034F
+// combining grapheme joiner, U+180B-180F Mongolian separators, U+3164
+// Hangul filler, tag characters). A remedy of only these carries no usable
+// command and must fall through to the next remedy source, not suppress it.
+func isDefaultIgnorable(r rune) bool {
+	return unicode.Is(unicode.Cf, r) || unicode.Is(unicode.Variation_Selector, r) || unicode.Is(unicode.Other_Default_Ignorable_Code_Point, r)
+}
+
 // remedyText normalizes a supplied remedy: whitespace runs become one space,
-// control and format characters (bidi overrides, zero-width) are removed,
-// and text that is empty after that, or longer than maxRemedyBytes, is "".
+// control characters, format characters (bidi overrides, zero-width) and
+// other default-ignorable code points are removed, and text that is empty
+// after that, or longer than maxRemedyBytes, is "".
 func remedyText(s string) string {
 	var b strings.Builder
 	space := false
@@ -201,6 +212,8 @@ func remedyText(s string) string {
 		switch {
 		case unicode.IsSpace(r):
 			space = b.Len() > 0
+			continue
+		case isDefaultIgnorable(r):
 			continue
 		case unicode.IsControl(r), unicode.Is(unicode.Cf, r):
 			continue

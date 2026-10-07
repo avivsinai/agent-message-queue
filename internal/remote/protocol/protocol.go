@@ -892,15 +892,36 @@ func ParseTime(s string) (time.Time, error) {
 	return time.Parse(time.RFC3339Nano, s)
 }
 
-// BoundReason strips control characters, trims space, and caps the adapter
-// refusal text at MaxReasonBytes on a UTF-8 boundary. An empty result means
-// the refusal has no printable message.
+// BoundReason strips characters a DM must never carry — control and format
+// characters (bidi overrides, zero-width), Unicode line and paragraph
+// separators — collapses each whitespace run to one space, and trims space.
+// It caps the result at MaxReasonBytes on a UTF-8 boundary. An empty result
+// means the refusal has no printable message.
+//
+// Filtering alone cannot make text inert: the DM renderer (Buzz uses remark
+// with remark-gfm) re-interprets what survives, decoding HTML entities and
+// autolinking URLs. Rendering sites that embed adapter text in DM text
+// (internal/acp statusText and oldBridgeMessage's remedy) must pass it
+// through an inert code span; see inertInline in internal/acp and
+// oldBridgeMessage in internal/remote/pi.
 func BoundReason(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
+	space := false
 	for _, r := range s {
-		if unicode.IsControl(r) {
+		switch {
+		case unicode.Is(unicode.Cf, r), unicode.Is(unicode.Zl, r), unicode.Is(unicode.Zp, r):
+			continue // invisible or line-breaking: render as nothing
+
+		case unicode.IsSpace(r):
+			space = b.Len() > 0
 			continue
+		case unicode.IsControl(r):
+			continue
+		}
+		if space {
+			b.WriteByte(' ')
+			space = false
 		}
 		b.WriteRune(r)
 	}
@@ -913,6 +934,50 @@ func BoundReason(s string) string {
 		out = out[:len(out)-1]
 	}
 	return out
+}
+
+// InertInline renders adapter-supplied text inert inside a DM body. The DM
+// renderer (Buzz uses remark with remark-gfm) re-interprets plain text: it
+// decodes HTML entities ("&#x202E;" becomes a bidi override) and autolinks
+// URLs, so character filtering alone cannot make text safe. The text is
+// first passed through BoundReason — filtering alone cannot make text inert
+// (review of #972 r3): an ASCII "&#x202E;" passes filtering and the renderer
+// decodes it back into a bidi override, and a URL survives to be
+// GFM-autolinked — but it strips controls, invisible and line-breaking
+// runes and collapses whitespace, which a code span needs anyway: a newline
+// would end the span's line, and a blank line plus a link would let
+// CommonMark's block structure beat the inline span. The survivor is then
+// wrapped in a code span, where entities are not decoded and autolinks are
+// not recognized. The fence is a backtick run one longer than the longest
+// run inside the text, padded with one space between the fence and a text
+// that starts or ends with a backtick (CommonMark code span rules). Text
+// that filters to nothing renders as a harmless placeholder, never an empty
+// span. Rendering sites that embed adapter text in DM text — snapshot
+// statuses, approval refusals, failed prompt summaries — wrap the fragment;
+// ordinary result bodies stay Markdown.
+func InertInline(s string) string {
+	s = BoundReason(s)
+	if s == "" {
+		s = "(no detail)"
+	}
+	longest := 0
+	run := 0
+	for _, r := range s {
+		if r == '`' {
+			run++
+			if run > longest {
+				longest = run
+			}
+			continue
+		}
+		run = 0
+	}
+	fence := strings.Repeat("`", longest+1)
+	pad := ""
+	if strings.HasPrefix(s, "`") || strings.HasSuffix(s, "`") {
+		pad = " "
+	}
+	return fence + pad + s + pad + fence
 }
 
 // TruncateText bounds text to at most max bytes on a UTF-8 rune boundary, so
