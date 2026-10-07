@@ -4,12 +4,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
-	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
@@ -99,43 +97,6 @@ func resolveEventID(meta json.RawMessage) (string, *rpcError) {
 
 func eventJournalPath(me, eventID string) string {
 	return filepath.Join("agents", me, "outbox", "acp-events", eventID+".json")
-}
-
-// loadEventRecord reads the claim of an event, if one exists. A record
-// without a created field is a legacy schema-1 journal written by the
-// current release; it is a valid claim (review of #976 P2 d) whose time a
-// replay proves from the delivered message's header instead of refusing.
-func loadEventRecord(cfg Config, eventID string) (*eventRecord, error) {
-	identity, err := fsq.SnapshotDeliveryRoot(cfg.Root)
-	if err != nil {
-		return nil, err
-	}
-	root, err := fsq.OpenDeliveryRoot(cfg.Root, identity)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = root.Close() }()
-
-	data, err := root.ReadRegularNoFollow(eventJournalPath(cfg.Me, eventID))
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	var rec eventRecord
-	if err := json.Unmarshal(data, &rec); err != nil {
-		return nil, err
-	}
-	if rec.MessageID == "" || rec.To == "" || rec.Thread == "" || fsq.ValidateHandle(rec.To) != nil {
-		return nil, fmt.Errorf("event %s has an unreadable claim; refusing to deliver", eventID)
-	}
-	if rec.Created != "" {
-		if _, err := time.Parse(time.RFC3339Nano, rec.Created); err != nil {
-			return nil, fmt.Errorf("event %s has an unreadable claim time", eventID)
-		}
-	}
-	return &rec, nil
 }
 
 func rememberEvent(cfg Config, rec eventRecord) error {
