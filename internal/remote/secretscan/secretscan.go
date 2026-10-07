@@ -68,13 +68,19 @@ var (
 // removed. It is deliberately broad: a false positive costs only the
 // preview, and the owner can still block the call.
 func MayHold(text string) bool {
-	spaced := strings.Map(func(r rune) rune {
-		if unicode.IsSpace(r) {
-			return ' '
-		}
-		return r
-	}, text)
-	for _, t := range []string{spaced, unquote.Replace(spaced)} {
+	spaced := func(s string) string {
+		return strings.Map(func(r rune) rune {
+			if unicode.IsSpace(r) {
+				return ' '
+			}
+			return r
+		}, s)
+	}
+	// The shell joins a backslash-newline before it splits words, so the
+	// text is also read joined: curl -\<newline>u runs as curl -u (Pro
+	// review of #988).
+	joined := spaced(strings.ReplaceAll(text, "\\\n", ""))
+	for _, t := range []string{spaced(text), unquote.Replace(spaced(text)), joined, unquote.Replace(joined)} {
 		if hasSKToken(t) || curlCommand.MatchString(t) && curlUserOpt.MatchString(t) {
 			return true
 		}
