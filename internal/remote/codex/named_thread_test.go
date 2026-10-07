@@ -26,6 +26,22 @@ func TestStartNamedThreadCreatesNamesAndPersistsTheThread(t *testing.T) {
 	}
 }
 
+// Bead agent-message-queue-611.63 (live, codex-cli 0.160.1): naming that
+// failed after thread/start left a named thread nobody resumes. The thread
+// is archived when a later step fails.
+func TestStartNamedThreadArchivesAThreadItCouldNotFinish(t *testing.T) {
+	d := newFakeNamingDaemon(t)
+	d.failInject = true
+	if _, err := StartNamedThread(context.Background(), d.sock, "/work", "session1/codex"); err == nil {
+		t.Fatal("naming succeeded although persisting the thread failed")
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if !d.archived {
+		t.Fatal("the half-created thread was not archived")
+	}
+}
+
 // fakeNamingDaemon serves app-server connections that start, name, and
 // persist one thread.
 type fakeNamingDaemon struct {
@@ -33,6 +49,9 @@ type fakeNamingDaemon struct {
 	mu        sync.Mutex
 	cwd, name string
 	persisted bool
+	// failInject makes thread/inject_items fail; archived records a
+	// thread/archive of the started thread.
+	failInject, archived bool
 }
 
 func newFakeNamingDaemon(t *testing.T) *fakeNamingDaemon {
@@ -92,7 +111,14 @@ func (d *fakeNamingDaemon) serve(conn net.Conn) {
 				d.name = p.Name
 			}
 		case "thread/inject_items":
+			if d.failInject {
+				d.mu.Unlock()
+				_ = ws.writeText([]byte(`{"jsonrpc":"2.0","id":` + string(*msg.ID) + `,"error":{"code":-32603,"message":"busy"}}`))
+				continue
+			}
 			d.persisted = p.ThreadID == "t1" && len(p.Items) == 1
+		case "thread/archive":
+			d.archived = p.ThreadID == "t1"
 		}
 		raw, _ := json.Marshal(result)
 		d.mu.Unlock()
