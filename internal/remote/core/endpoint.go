@@ -1533,9 +1533,23 @@ func settleOwed(rec *requests.Record, r protocol.Resolution) bool {
 	return true
 }
 
+// owedOutcomeRetention is how long an owed outcome stays recoverable. The
+// normal case settles on the next Reconcile, because the bridge event file
+// still holds interaction_resolved. The unsettleable case — a bridge that
+// never wrote it, or a removed or rotated seam — would otherwise block
+// compaction forever (advisor review of #926, bead 611.45). The horizon is
+// the request-retention horizon: once a terminal record is old enough to
+// compact anyway, an outcome no resolver has produced is recorded as an
+// explicit uncertain resolution with a visible reason, never dropped
+// silently. A resolvable owed outcome still settles normally on Reconcile.
+const owedOutcomeRetention = protocol.DefaultCompactHorizon
+
 // recoverOwedOutcomes asks the record's resolver for every owed outcome,
 // outside the lock, and records each one it has. It never changes the
-// record's state.
+// record's state. An owed outcome whose record has been terminal longer
+// than owedOutcomeRetention and that no resolver ever produced is retired:
+// it is recorded as delivery_unknown and the obligation clears, so
+// compaction can proceed.
 func (e *Endpoint) recoverOwedOutcomes(rec *requests.Record) error {
 	key := keyOfRecord(rec)
 	e.mu.Lock()
@@ -1549,12 +1563,22 @@ func (e *Endpoint) recoverOwedOutcomes(rec *requests.Record) error {
 		return nil
 	}
 	var found []protocol.Resolution
+	var expired []string
 	for _, id := range rec.OwedOutcomes {
 		if res, done := resolver.ResolvedInteraction(key, rec.Epoch, id); done && res.InteractionID == id {
 			found = append(found, res)
+			continue
+		}
+		// No resolution yet: past the retention horizon the seam's silence
+		// becomes the durable answer — an explicit uncertain resolution, so
+		// the obligation is retired with a visible reason instead of pinning
+		// the record against compaction forever.
+		observed, err := protocol.ParseTime(rec.ObservedAt)
+		if err == nil && e.now().Sub(observed) >= owedOutcomeRetention {
+			expired = append(expired, id)
 		}
 	}
-	if len(found) == 0 {
+	if len(found) == 0 && len(expired) == 0 {
 		return nil
 	}
 	e.mu.Lock()
@@ -1566,6 +1590,16 @@ func (e *Endpoint) recoverOwedOutcomes(rec *requests.Record) error {
 	changed := false
 	for _, r := range found {
 		changed = settleOwed(cur, r) || changed
+	}
+	for _, id := range expired {
+		// Re-check against the fresh record: a concurrent write may have
+		// settled the obligation; only retire what is still owed.
+		if !owes(cur, id) || resolvedIn(cur.Resolved, id) {
+			continue
+		}
+		cur.OwedOutcomes = slices.DeleteFunc(cur.OwedOutcomes, func(owed string) bool { return owed == id })
+		recordResolution(cur, id, nativeEvidence{clearInteraction: true, outcome: protocol.ResolutionDeliveryUnknown})
+		changed = true
 	}
 	if !changed {
 		return nil
