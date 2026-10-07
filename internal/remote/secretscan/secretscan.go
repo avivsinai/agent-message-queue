@@ -17,11 +17,16 @@ var secretShapes = []*regexp.Regexp{
 	regexp.MustCompile(`eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.`),
 	regexp.MustCompile(`(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}`),
 	regexp.MustCompile(`://[^/\s:@]+:[^/\s@]*@`),
-	// user:password (the user may be empty) after a -u or -U option,
-	// separate or attached, alone or in a short-option cluster such as -su
-	// or -4u, as curl takes it (Pro review of #988).
-	regexp.MustCompile(`(?:^|[\s'"=;|&(])-[^\s'"-]*[uU]\s*['"]?[^\s'":]*:[^\s'"]`),
 }
+
+// curl's -u and -U always take user:password, so a curl command with
+// either, alone, in a short-option cluster or attached, may show one,
+// whatever its value looks like (Pro review of #988: value shapes did not
+// converge). Other tools' -u, as in git push -u, stays visible.
+var (
+	curlCommand = regexp.MustCompile(`(?:^|[^A-Za-z0-9_.-])curl(?:$|[^A-Za-z0-9_.-])`)
+	curlUserOpt = regexp.MustCompile(`(?:^|[\s'"=;|&(])-[^\s'"-]*[uU]`)
+)
 
 // sk- tokens are found by context. skAtWordStart is sk- at the start of the
 // text or after a character that is no letter or digit. skInOptions is sk-
@@ -70,7 +75,7 @@ func MayHold(text string) bool {
 		return r
 	}, text)
 	for _, t := range []string{spaced, unquote.Replace(spaced)} {
-		if hasSKToken(t) {
+		if hasSKToken(t) || curlCommand.MatchString(t) && curlUserOpt.MatchString(t) {
 			return true
 		}
 		for _, re := range secretShapes {
