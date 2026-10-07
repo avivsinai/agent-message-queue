@@ -10,7 +10,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode"
 	"unicode/utf8"
 
 	"fiatjaf.com/nostr"
@@ -912,7 +911,7 @@ var approvalEditPrepared = func() {}
 // to answer it, or, once resolved, the outcome instead of the instructions.
 func approvalText(a Approval, outcome string) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "Approval needed (%s):\n\n%s", a.RequestRef, boundPreview(a.Prompt))
+	fmt.Fprintf(&b, "Approval needed (%s):\n\n%s", a.RequestRef, protocol.BoundPreview(a.Prompt))
 	switch {
 	case outcome != "":
 		b.WriteString("\n\n" + outcome)
@@ -950,22 +949,6 @@ func outcomeText(r protocol.Resolution, a Approval) string {
 		return deliveryUnknownText
 	}
 	return "Closed outside Buzz: answered in the terminal, or the turn stopped."
-}
-
-// boundPreview shortens a prompt for display and removes control
-// characters other than newline and tab, so the message shows what will run
-// and nothing hidden.
-func boundPreview(s string) string {
-	s = strings.Map(func(r rune) rune {
-		if r == '\n' || r == '\t' || !unicode.IsControl(r) && !unicode.Is(unicode.Cf, r) {
-			return r
-		}
-		return -1
-	}, s)
-	if text, cut := protocol.TruncateText(s, protocol.MaxApprovalPreview); cut {
-		return text + " …[shortened]"
-	}
-	return s
 }
 
 // answerApproval turns an owner reaction on an approval message into the

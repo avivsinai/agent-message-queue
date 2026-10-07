@@ -439,30 +439,43 @@ func readSmallRegular(path string) ([]byte, error) {
 // follow waits on the endpoint until the request is terminal or uncertain,
 // the client cancels or leaves, or the turn times out.
 func (r *remoteTurn) follow(snap protocol.Snapshot) (any, *rpcError) {
-	if snap.State.Terminal() || snap.State == protocol.StateUncertain {
+	if settledState(snap) {
 		return r.settled(r.settle("replied"), snap)
 	}
 	if err := emitText(r.emit, r.sessionID, "agent_thought_chunk", fmt.Sprintf("Submitted to %s as %s.", r.meta.Target, snap.RequestRef)); err != nil {
 		return nil, newRPCError(codeInternalError, "emit ACP session update: %v", err)
 	}
 
-	// The goroutine reads only this immutable reference; snap belongs to the
-	// consumer loop below (codex #876 r2 P1 #1).
-	ref, native, timeout := snap.RequestRef, r.native, r.s.cfg.HeartbeatInterval.Milliseconds()
+	// Pending tool approvals are shown in the DM while the turn runs
+	// (611.42.2). Deferred first, so watchers stop after the wait loop.
+	approvals := newApprovals(r, r.postChannel(), buzzOwner)
+	defer approvals.close()
+	approvals.observe(snap)
+
+	// The goroutine reads only these immutable values; snap belongs to the
+	// consumer loop below (codex #876 r2 P1 #1). It waits past each revision
+	// it saw, so a pending interaction ends a wait, and stops once the
+	// request is terminal or uncertain.
+	ref, native, timeout, after := snap.RequestRef, r.native, r.s.cfg.HeartbeatInterval.Milliseconds(), snap.Revision
 	waits := make(chan remoteWait, 1)
 	stop := make(chan struct{})
 	defer close(stop)
 	go func() {
 		for {
-			resp, err := ipc.Call(r.dir, ipc.Request{Wait: &ipc.WaitRequest{RequestRef: ref, TimeoutMS: timeout}, NativeSession: native})
+			resp, err := ipc.Call(r.dir, ipc.Request{Wait: &ipc.WaitRequest{RequestRef: ref, TimeoutMS: timeout, AfterRevision: &after}, NativeSession: native})
 			select {
 			case waits <- remoteWait{resp, err}:
 			case <-stop:
 				return
 			}
-			if err != nil || resp.Error != nil || !resp.TimedOut {
+			if err != nil || resp.Error != nil {
 				return
 			}
+			var current protocol.Snapshot
+			if json.Unmarshal(resp.Reply, &current) != nil || !resp.TimedOut && settledState(current) {
+				return
+			}
+			after = max(after, current.Revision)
 		}
 	}()
 
@@ -486,15 +499,25 @@ func (r *remoteTurn) follow(snap protocol.Snapshot) (any, *rpcError) {
 				return nil, newRPCError(codeInternalError, "decode request snapshot: %v", err)
 			}
 			snap = current
+			approvals.observe(snap)
 			if w.resp.TimedOut {
 				if err := emitText(r.emit, r.sessionID, "agent_thought_chunk", fmt.Sprintf("Still running on %s.", r.meta.Target)); err != nil {
 					return nil, newRPCError(codeInternalError, "emit ACP heartbeat: %v", err)
 				}
 				continue
 			}
+			if !settledState(snap) {
+				continue // a newer revision of a running request
+			}
 			return r.settled(r.settle("replied"), snap)
 		}
 	}
+}
+
+// settledState reports a terminal or uncertain request: no later revision
+// changes what the turn reports.
+func settledState(snap protocol.Snapshot) bool {
+	return snap.State.Terminal() || snap.State == protocol.StateUncertain
 }
 
 // settle decides the turn's outcome if it is still open and returns the

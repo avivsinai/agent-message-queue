@@ -1005,6 +1005,22 @@ func TruncateText(text string, max int) (string, bool) {
 	return text[:end], true
 }
 
+// BoundPreview shortens an approval prompt for display and removes control
+// characters other than newline and tab, so a surface shows what will run
+// and nothing hidden. Every surface that shows an approval bounds it here.
+func BoundPreview(s string) string {
+	s = strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\t' || !unicode.IsControl(r) && !unicode.Is(unicode.Cf, r) {
+			return r
+		}
+		return -1
+	}, s)
+	if text, cut := TruncateText(s, MaxApprovalPreview); cut {
+		return text + " …[shortened]"
+	}
+	return s
+}
+
 // FormatTime renders a timestamp in the one form the protocol emits.
 func FormatTime(t time.Time) string {
 	return t.UTC().Format(time.RFC3339Nano)
