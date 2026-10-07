@@ -184,7 +184,7 @@ func (h permissionHook) run(stdin io.Reader, stdout io.Writer, done <-chan struc
 				// rejected record retires exactly this proof, so a ❌ or a
 				// new ✅ can still answer.
 				option = ""
-				_ = markRejected(h.home, in.SessionID, id, evidence, err.Error())
+				_ = markRejected(h.home, in.SessionID, id, evidence, err)
 				if h.stderr != nil {
 					_, _ = fmt.Fprintf(h.stderr, "amq-remote: ignored a Buzz allow for %s: %v\n", id, err)
 				}
@@ -261,10 +261,11 @@ func (h permissionHook) answer(path string, req approvalRequest) (string, json.R
 	return answerIgnored, nil
 }
 
-// verifyAllow runs the verifier on evidence; Claude ending the hook
-// cancels it.
+// verifyAllow runs the verifier on evidence within allowVerifyTimeout,
+// relay sign-in and history read included, so an unreachable relay never
+// holds the hook while a ❌ waits; Claude ending the hook cancels it too.
 func (h permissionHook) verifyAllow(evidence json.RawMessage, want AllowCheck, done <-chan struct{}) error {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), allowVerifyTimeout)
 	defer cancel()
 	go func() {
 		select {

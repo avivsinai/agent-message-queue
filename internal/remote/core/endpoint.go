@@ -1028,6 +1028,12 @@ func (e *Endpoint) respond(cmd *protocol.Command, src Source) (protocol.Reply, e
 		e.mu.Unlock()
 		return protocol.Reply{}, protocol.Refuse(protocol.CodeAlreadyResolved, "an earlier answer (%s) is still being delivered; send it again or answer in the terminal", prior)
 	}
+	// A retired answer this one replaces comes back if the runtime refuses
+	// this one: another answer may have replaced it there first (611.42.6).
+	replaced := ""
+	if done && prior != cmd.Option {
+		replaced = prior
+	}
 	if rec.Answered == nil {
 		rec.Answered = map[string]string{}
 	}
@@ -1065,6 +1071,9 @@ func (e *Endpoint) respond(cmd *protocol.Command, src Source) (protocol.Reply, e
 		if cur, ok, gerr := e.store.Get(key); gerr == nil && ok {
 			if opt, done := cur.Answered[cmd.InteractionID]; !done || opt == cmd.Option {
 				delete(cur.Answered, cmd.InteractionID)
+				if done && replaced != "" {
+					cur.Answered[cmd.InteractionID] = replaced
+				}
 				// Pro #4: route through commitLocked — single persist path.
 				if _, uerr := e.commitLocked(cur, nil); uerr != nil {
 					e.mu.Unlock()

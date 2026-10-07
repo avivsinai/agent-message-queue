@@ -522,13 +522,10 @@ func (a *Attachment) RespondWithEvidence(key requests.Key, _, interactionID, opt
 	a.mu.Unlock()
 
 	dir := approveDir(a.home, sessionID)
-	replace := false
 	isRejected := func(ev json.RawMessage) bool { return rejected(a.home, sessionID, interactionID, ev) }
 	switch disk := answerOnDisk(filepath.Join(dir, "answers", interactionID+".json"), ans, isRejected); disk {
 	case answerSame:
 		return "", nil
-	case answerNewProof, answerRetired:
-		replace = true // an allow with other evidence, or one the hook refused
 	case answerRefusedProof:
 		return "", protocol.Refuse(protocol.CodeNativeError, "%s", retryReply("the approval hook could not verify it"))
 	case answerOther:
@@ -553,24 +550,69 @@ func (a *Attachment) RespondWithEvidence(key requests.Key, _, interactionID, opt
 	if err != nil {
 		return "", err
 	}
-	if replace {
-		if err := replaceJSON(adir, interactionID+".json", ans); err != nil {
-			return "", err
-		}
-		return "", nil
+	if code, err := a.publishAnswer(adir, ans, isRejected); code != "" || err != nil || option != optionAllow {
+		return code, err
 	}
-	if err := createNewJSON(adir, interactionID+".json", ans); err != nil {
+	return "", a.awaitHookVerdict(sessionID, ans, hookPID)
+}
+
+// publishAnswer writes ans as the answer file. The file on disk is read
+// again and written under a.mu, after the allow's verification: of a ✅ and
+// a ❌ that both found an allow the hook refused, the first write stands
+// and the other is already_resolved, so the endpoint keeps the answer that
+// is on disk (611.42.6, independent review of #936 r3). The file is tiny,
+// as in arbitrateLocked.
+func (a *Attachment) publishAnswer(adir string, ans approvalAnswer, isRejected func(json.RawMessage) bool) (protocol.Code, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	name := ans.InteractionID + ".json"
+	switch answerOnDisk(filepath.Join(adir, name), ans, isRejected) {
+	case answerSame:
+		return "", nil
+	case answerNewProof, answerRetired:
+		// An allow with other evidence, or one the hook refused.
+		return "", replaceJSON(adir, name, ans)
+	case answerRefusedProof:
+		return "", protocol.Refuse(protocol.CodeNativeError, "%s", retryReply("the approval hook could not verify it"))
+	case answerOther:
+		return protocol.CodeAlreadyResolved, nil
+	}
+	if err := createNewJSON(adir, name, ans); err != nil {
 		if !errors.Is(err, errFileExists) {
 			return "", err
 		}
 		// Another writer published first: the same answer is delivered,
 		// any other answer on disk stands as the first.
-		if answerOnDisk(filepath.Join(adir, interactionID+".json"), ans, isRejected) == answerSame {
+		if answerOnDisk(filepath.Join(adir, name), ans, isRejected) == answerSame {
 			return "", nil
 		}
 		return protocol.CodeAlreadyResolved, nil
 	}
 	return "", nil
+}
+
+// hookVerdictPoll is how often awaitHookVerdict reads the hook's files.
+const hookVerdictPoll = 50 * time.Millisecond
+
+// awaitHookVerdict waits for the hook to take the allow just written: it
+// claims the call, or it refuses the proof, which is the owner's reply in
+// the DM with why and that a new ✅ can retry (611.42.6, independent review
+// of #936 r3); the endpoint then drops the answer intent. The hook reads
+// answers every poll and verifies within allowVerifyTimeout, so the wait
+// ends by then, or when the hook is gone; a nil error leaves the outcome to
+// the resolved file.
+func (a *Attachment) awaitHookVerdict(sessionID string, ans approvalAnswer, hookPID int) error {
+	resolved := filepath.Join(approveDir(a.home, sessionID), "resolved", ans.InteractionID+".json")
+	until := time.Now().Add(allowVerifyTimeout + time.Second)
+	for {
+		if r, ok := readRejected(a.home, sessionID, ans.InteractionID, ans.Evidence); ok {
+			return verifyRefusal(r.Reason, r.Altered)
+		}
+		if resolvedExists(resolved) || hookDead(hookPID) || !time.Now().Before(until) {
+			return nil
+		}
+		time.Sleep(hookVerdictPoll)
+	}
 }
 
 // verifyBeforeAnswer runs the pinned verifier on an allow's evidence. A
@@ -591,13 +633,20 @@ func verifyBeforeAnswer(factory func(HookPin) AllowConfig, pin HookPin, sessionI
 	want.Share = share
 	ctx, cancel := context.WithTimeout(context.Background(), allowVerifyTimeout)
 	defer cancel()
-	switch err := cfg.Verify(ctx, evidence, want); {
-	case errors.Is(err, ErrAllowAltered):
-		return protocol.Refuse(protocol.CodeInvalid, "%s", alteredReply)
-	case err != nil:
-		return protocol.Refuse(protocol.CodeNativeError, "%s", retryReply(err.Error()))
+	if err := cfg.Verify(ctx, evidence, want); err != nil {
+		return verifyRefusal(err.Error(), errors.Is(err, ErrAllowAltered))
 	}
 	return nil
+}
+
+// verifyRefusal is the owner-facing refusal of an allow that did not
+// verify: an altered message is final, anything else can be retried with a
+// new ✅.
+func verifyRefusal(reason string, altered bool) error {
+	if altered {
+		return protocol.Refuse(protocol.CodeInvalid, "%s", alteredReply)
+	}
+	return protocol.Refuse(protocol.CodeNativeError, "%s", retryReply(reason))
 }
 
 // allowVerifyTimeout bounds one verification, relay reads included.
