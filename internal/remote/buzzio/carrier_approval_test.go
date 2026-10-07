@@ -220,6 +220,18 @@ func TestApprovalAnsweredByTypedReply(t *testing.T) {
 		t.Fatalf("replay answered %+v, want only its first decision for item-7", answered)
 	}
 
+	// An e tag that names no approval, even malformed or with an unknown
+	// marker, never selects the pending approval (Pro review of #970, round 3).
+	for _, tag := range []nostr.Tag{{"e", dm.ID.Hex(), "", "mention"}, {"e", "not-an-id", "", "reply"}, {"e"}} {
+		answered = nil
+		if err := c.Ingest(typed("yes", tag)); err != nil {
+			t.Fatal(err)
+		}
+		if answered != nil {
+			t.Fatalf("yes with tag %v answered %+v, want a prompt", tag, answered)
+		}
+	}
+
 	// A reply in the old approval's thread still names that approval; it
 	// never selects item-8, which is pending now.
 	answered = nil

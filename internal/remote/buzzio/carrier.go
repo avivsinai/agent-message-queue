@@ -708,12 +708,16 @@ func (c *Carrier) openApproval(evt nostr.Event) (string, Approval, bool, error) 
 	// pending approval (Pro review of #970, round 2).
 	msgID := ""
 	threaded := false
+	for _, t := range evt.Tags {
+		if len(t) > 0 && t[0] == "e" {
+			threaded = true // any e tag, valid or not, rules out the fallback
+		}
+	}
 	for _, marker := range []string{"reply", "root", ""} {
 		for _, t := range evt.Tags {
 			if len(t) < 2 || t[0] != "e" || !validHexID(t[1]) || len(t) >= 4 && t[3] != marker || len(t) < 4 && marker != "" {
 				continue
 			}
-			threaded = true
 			if _, ok, err := c.ledger.ApprovalFor(t[1]); err != nil {
 				return "", Approval{}, false, err
 			} else if ok && msgID == "" {
