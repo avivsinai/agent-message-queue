@@ -147,6 +147,9 @@ func TestCodexDaemonThreadDir(t *testing.T) {
 //   - Review of #975 r4 (Pro): a command-line override of a gating feature,
 //     --remote, a failed feature probe, and an option after "--" (a prompt)
 //     do not establish an embedded Codex.
+//   - Review of #975 r5 (Pro): an embedded option before --remote, an
+//     exclusion env var with --remote, and an allowed key with a commented
+//     TOML boolean do not establish an embedded Codex either.
 func TestCodexNamingFollowsWhereCodexRuns(t *testing.T) {
 	const plain = "daemon_auto_start x true\nbedrock_setup_wizard x false\nterminal_visualization_instructions x false\n"
 	for name, tc := range map[string]struct {
@@ -178,6 +181,9 @@ func TestCodexNamingFollowsWhereCodexRuns(t *testing.T) {
 		"remote app-server":                      {plain, true, []string{"--remote", "ws://127.0.0.1:1"}, nil, false},
 		"feature probe fails":                    {"exit 1", true, nil, nil, false},
 		"option text after --":                   {plain, true, []string{"--", "--no-daemon"}, nil, false},
+		"search then remote":                     {plain, true, []string{"--search", "--remote", "ws://127.0.0.1:1"}, nil, false},
+		"exec server env then remote":            {plain, true, []string{"--remote", "ws://127.0.0.1:1"}, nil, false},
+		"commented TOML boolean":                 {plain, true, []string{"-c", "suppress_unstable_features_warning=true # quiet"}, nil, false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			codexHome, contacts := t.TempDir(), new(atomic.Int32)
@@ -199,6 +205,9 @@ func TestCodexNamingFollowsWhereCodexRuns(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Setenv("CODEX_HOME", codexHome)
+			if name == "exec server env then remote" {
+				t.Setenv("CODEX_EXEC_SERVER_URL", "none")
+			}
 			t.Chdir(repo)
 			watchers := 0
 			original := startCoopNamedTUIInjector

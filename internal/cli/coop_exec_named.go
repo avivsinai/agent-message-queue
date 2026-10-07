@@ -146,13 +146,12 @@ const (
 	codexBackendUnknown
 )
 
-// codexEmbeddedOptions make a codex-cli 0.160 TUI run its own app-server
-// (tui/src/daemon_startup.rs exclusion; --search becomes a -c override,
-// startup_orchestration.rs:54-58), so the rollout path can name it.
-var codexEmbeddedOptions = map[string]bool{
-	"--no-daemon": true, "--oss": true, "-p": true, "--profile": true, "--search": true,
-	"--approve-for-me": true, "--not-so-yolo": true, "--strict-config": true,
-	"--dangerously-bypass-hook-trust": true,
+// codexEmbeddedFlags and -p/--profile make a codex-cli 0.160 TUI run its own
+// app-server (tui/src/daemon_startup.rs exclusion; --search becomes a -c
+// override, startup_orchestration.rs:54-58), so the rollout path can name it.
+var codexEmbeddedFlags = map[string]bool{
+	"--no-daemon": true, "--oss": true, "--search": true, "--approve-for-me": true,
+	"--not-so-yolo": true, "--strict-config": true, "--dangerously-bypass-hook-trust": true,
 }
 
 // codexValueOptions take a value (tui/src/cli.rs, utils/cli shared_options.rs
@@ -198,11 +197,15 @@ func codexConfigKeepsDaemon(flag, value string) (keeps, known bool) {
 	if !ok || key == "features" || key == "tui" {
 		return false, false
 	}
-	if raw = strings.TrimSpace(raw); raw != "true" && raw != "false" {
+	feature, isFeature := strings.CutPrefix(key, "features.")
+	allowed := key == "suppress_unstable_features_warning" || key == "tui.fullscreen_transcript" || isFeature && codexDaemonFeatures[feature]
+	if !allowed {
 		return false, true
 	}
-	feature, isFeature := strings.CutPrefix(key, "features.")
-	return key == "suppress_unstable_features_warning" || key == "tui.fullscreen_transcript" || isFeature && codexDaemonFeatures[feature], true
+	// An allowed key keeps the daemon only with a boolean; AMQ reads only
+	// the bare TOML spellings of one.
+	raw = strings.TrimSpace(raw)
+	return raw == "true" || raw == "false", raw == "true" || raw == "false"
 }
 
 // codexLaunchBackend reports where a Codex TUI started with args in wd runs
@@ -211,12 +214,15 @@ func codexConfigKeepsDaemon(flag, value string) (keeps, known bool) {
 // daemon_auto_start feature predates the daemon and runs embedded; a
 // failed feature probe establishes nothing.
 func codexLaunchBackend(cmdName string, args []string, wd, codexHome string) (codexBackend, map[string]bool) {
+	// The whole command line is read before deciding: --remote, an option
+	// AMQ does not know, or an unclassified override outranks every reason
+	// to call the TUI embedded.
+	embedded, unknown := false, false
 	for _, key := range []string{"CODEX_EXEC_SERVER_URL", "OPENAI_FEDERATION_RULE_ID", "OPENAI_IDENTITY_TOKEN_FILE"} {
 		if _, set := os.LookupEnv(key); set {
-			return codexEmbedded, nil
+			embedded = true
 		}
 	}
-	unknown := false
 	for i := 0; i < len(args); i++ {
 		if args[i] == "--" {
 			break // the rest is the prompt
@@ -225,14 +231,14 @@ func codexLaunchBackend(cmdName string, args []string, wd, codexHome string) (co
 			continue // a positional prompt
 		}
 		flag, value, inline := strings.Cut(args[i], "=")
-		if codexEmbeddedOptions[flag] {
-			return codexEmbedded, nil
-		}
-		if codexFlagOptions[flag] && !inline {
-			continue
-		}
-		if !codexValueOptions[flag] {
+		switch {
+		case (codexFlagOptions[flag] || codexEmbeddedFlags[flag]) && inline, !codexFlagOptions[flag] && !codexEmbeddedFlags[flag] && !codexValueOptions[flag]:
 			return codexBackendUnknown, nil
+		case codexFlagOptions[flag]:
+			continue
+		case codexEmbeddedFlags[flag]:
+			embedded = true
+			continue
 		}
 		if !inline {
 			if i+1 >= len(args) {
@@ -240,6 +246,10 @@ func codexLaunchBackend(cmdName string, args []string, wd, codexHome string) (co
 			}
 			i++
 			value = args[i]
+		}
+		if flag == "-p" || flag == "--profile" {
+			embedded = true
+			continue
 		}
 		if flag != "-c" && flag != "--config" && flag != "--enable" && flag != "--disable" {
 			continue
@@ -254,8 +264,14 @@ func codexLaunchBackend(cmdName string, args []string, wd, codexHome string) (co
 		case codexGatingFeatures[feature] || !known:
 			unknown = true
 		case !keeps:
-			return codexEmbedded, nil
+			embedded = true
 		}
+	}
+	if unknown {
+		return codexBackendUnknown, nil
+	}
+	if embedded {
+		return codexEmbedded, nil
 	}
 	dir := codexLaunchDir(args, wd)
 	features, err := codexEffectiveFeatures(cmdName, dir)
@@ -268,7 +284,7 @@ func codexLaunchBackend(cmdName string, args []string, wd, codexHome string) (co
 	// With bedrock_setup_wizard on, a signed-out TUI runs embedded even when
 	// a daemon runs (startup_orchestration.rs:494-519, lib.rs:2305-2323);
 	// AMQ does not read the sign-in state.
-	if unknown || features["bedrock_setup_wizard"] {
+	if features["bedrock_setup_wizard"] {
 		return codexBackendUnknown, features
 	}
 	if _, err := codex.ControlSocket(codexHome); err != nil && !features["daemon_auto_start"] {
