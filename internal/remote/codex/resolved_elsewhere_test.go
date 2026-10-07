@@ -2,6 +2,7 @@ package codex
 
 import (
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -117,6 +118,17 @@ func TestApprovalWithholdsApproveForUnseenGrants(t *testing.T) {
 	srv.sendServerRequest(t, "10", "item/commandExecution/requestApproval", `{"kind":"command","threadId":"t1","turnId":"u1","itemId":"exec-1","command":"/bin/zsh -lc 'touch approval-test2.txt'","cwd":"/w","availableDecisions":["accept",{"acceptWithExecpolicyAmendment":{"execpolicy_amendment":["touch","approval-test2.txt"]}},"cancel"]}`)
 	if in := pending(); in.ApproveOption != "accept" || in.RejectOption != "cancel" || !strings.HasSuffix(in.Prompt, "Reject also stops this turn.") {
 		t.Fatalf("codex 0.160 command = approve %q reject %q prompt %q, want accept, cancel and the stop note", in.ApproveOption, in.RejectOption, in.Prompt)
+	}
+	// 611.42.11: a command that holds a credential went to the DM whole,
+	// and a zero-width character the DM removes showed a command other than
+	// the one a ✅ approved. Neither shows whole, so neither offers approve.
+	for i, cmd := range []string{`curl -H 'Authorization: Bearer abcdefgh12345678' x`, "rm -rf /tmp/x\u200b /"} {
+		srv.notify(t, "serverRequest/resolved", `{"threadId":"t1","requestId":"`+strconv.Itoa(10+i)+`"}`)
+		waitNoInteraction(t, att)
+		srv.sendServerRequest(t, strconv.Itoa(11+i), "item/commandExecution/requestApproval", `{"threadId":"t1","turnId":"u1","itemId":"s`+strconv.Itoa(i)+`","command":"`+cmd+`"}`)
+		if in := pending(); in.ApproveOption != "" || in.RejectOption != "decline" || strings.Contains(in.Prompt, "abcdefgh") {
+			t.Fatalf("command %q = approve %q reject %q prompt %q, want reject only and no secret", cmd, in.ApproveOption, in.RejectOption, in.Prompt)
+		}
 	}
 }
 
