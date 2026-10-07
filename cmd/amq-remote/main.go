@@ -1202,6 +1202,19 @@ func doctor(args []string, probe ...*jsonProbe) (any, int, error) {
 		}
 		break
 	}
+	// A Codex target with approve whose thread runs Codex's automatic
+	// approvals reviewer gets few or no DM approvals: the reviewer answers
+	// them first (611.56). That is the owner's choice, so it is reported,
+	// not failed.
+	reviewers := map[string]string{}
+	for _, s := range sessions {
+		if s.Harness == "codex" && s.Capabilities.ApproveTool && s.ApprovalReviewer != "" {
+			reviewers[s.TargetID] = "Codex's approvals reviewer " + s.ApprovalReviewer + " answers this thread's approvals itself, so few or none reach a remote client; for approvals from Buzz, start a new Codex thread with approvals_reviewer = \"user\" (config.toml or -c)"
+		}
+	}
+	if len(reviewers) > 0 {
+		report["approval_reviewer"] = reviewers
+	}
 	// DM approvals of a Claude target with approve need the PermissionRequest
 	// hook; without it every approval is answered in the terminal.
 	for _, s := range sessions {
