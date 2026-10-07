@@ -40,40 +40,6 @@ func codexTrustsDir(codexHome, dir string) bool {
 	return false
 }
 
-// codexTerminalInstructionsEnabled reports whether Codex may turn on the
-// terminal_visualization_instructions feature (codex-cli 0.160
-// features/src/lib.rs:1643-1647, off by default; read from the [features]
-// table of the merged config, core/src/config/mod.rs:3393-3401). With it on,
-// the TUI's thread/resume carries developer instructions that a daemon thread
-// AMQ created may not take. It checks $CODEX_HOME/config.toml and every
-// .codex/config.toml from dir up, a superset of the project layers Codex
-// merges; an unreadable file counts as enabled.
-func codexTerminalInstructionsEnabled(codexHome, dir string) bool {
-	files := []string{filepath.Join(codexHome, "config.toml")}
-	for d := dir; ; d = filepath.Dir(d) {
-		files = append(files, filepath.Join(d, ".codex", "config.toml"))
-		if filepath.Dir(d) == d {
-			break
-		}
-	}
-	for _, file := range files {
-		raw, err := os.ReadFile(file)
-		if os.IsNotExist(err) {
-			continue
-		}
-		var config struct {
-			Features map[string]any `toml:"features"`
-		}
-		if err != nil || toml.Unmarshal(raw, &config) != nil {
-			return true
-		}
-		if enabled, _ := config.Features["terminal_visualization_instructions"].(bool); enabled {
-			return true
-		}
-	}
-	return false
-}
-
 func codexTrustKeys(path string) []string {
 	if canonical, err := filepath.EvalSymlinks(path); err == nil && canonical != path {
 		return []string{canonical, path}
