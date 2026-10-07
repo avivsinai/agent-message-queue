@@ -42,13 +42,26 @@ func codexTrustsDir(codexHome, dir string) bool {
 
 // codexTerminalInstructionsEnabled reports whether Codex may turn on the
 // terminal_visualization_instructions feature (codex-cli 0.160
-// features/src/lib.rs:1643-1647, off by default; read from the [features]
-// table of the merged config, core/src/config/mod.rs:3393-3401). With it on,
-// the TUI's thread/resume carries developer instructions that a daemon thread
-// AMQ created may not take. It checks $CODEX_HOME/config.toml and every
-// .codex/config.toml from dir up, a superset of the project layers Codex
-// merges; an unreadable file counts as enabled.
+// features/src/lib.rs:1643-1647, off by default). With it on, the TUI's
+// thread/resume carries developer instructions that a daemon thread AMQ
+// created may not take.
 func codexTerminalInstructionsEnabled(codexHome, dir string) bool {
+	return codexFeatureMaySet(codexHome, dir, "terminal_visualization_instructions", true)
+}
+
+// codexDaemonAutoStartMayBeOff reports whether Codex may have its
+// daemon_auto_start feature off (codex-cli 0.160 features/src/lib.rs:948-951,
+// on by default). With it on, a TUI that finds no daemon starts one and runs
+// on it (tui/src/startup_orchestration.rs:494-540).
+func codexDaemonAutoStartMayBeOff(codexHome, dir string) bool {
+	return codexFeatureMaySet(codexHome, dir, "daemon_auto_start", false)
+}
+
+// codexFeatureMaySet reports whether a Codex config layer may set feature to
+// value: the [features] table of $CODEX_HOME/config.toml or of any
+// .codex/config.toml from dir up, a superset of the layers Codex merges
+// (core/src/config/mod.rs:3393-3401). An unreadable file counts as setting it.
+func codexFeatureMaySet(codexHome, dir, feature string, value bool) bool {
 	files := []string{filepath.Join(codexHome, "config.toml")}
 	for d := dir; ; d = filepath.Dir(d) {
 		files = append(files, filepath.Join(d, ".codex", "config.toml"))
@@ -67,7 +80,7 @@ func codexTerminalInstructionsEnabled(codexHome, dir string) bool {
 		if err != nil || toml.Unmarshal(raw, &config) != nil {
 			return true
 		}
-		if enabled, _ := config.Features["terminal_visualization_instructions"].(bool); enabled {
+		if set, ok := config.Features[feature].(bool); ok && set == value {
 			return true
 		}
 	}

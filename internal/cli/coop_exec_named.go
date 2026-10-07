@@ -1,9 +1,13 @@
 package cli
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -141,18 +145,18 @@ const codexDaemonNamingTimeout = 10 * time.Second
 // directory, or a daemon call failed; the caller then takes the rollout path,
 // which names an embedded Codex.
 func startCodexOnNamedDaemonThread(cmdName string, agentArgs []string, name string) (args []string, ok bool) {
-	if launch.ProviderForExecutable(cmdName) != launch.CodexProvider || !codexJoinsDaemon(agentArgs) {
+	if launch.ProviderForExecutable(cmdName) != launch.CodexProvider {
+		return nil, false
+	}
+	wd, err := os.Getwd()
+	if err != nil {
+		return nil, false
+	}
+	cwd, ok := codexDaemonThreadDir(agentArgs, wd)
+	if !ok {
 		return nil, false
 	}
 	codexHome, err := codexHomeDir()
-	if err != nil {
-		return nil, false
-	}
-	sock, err := codex.ControlSocket(codexHome)
-	if err != nil {
-		return nil, false // no daemon: Codex runs embedded
-	}
-	cwd, err := os.Getwd()
 	if err != nil {
 		return nil, false
 	}
@@ -172,6 +176,13 @@ func startCodexOnNamedDaemonThread(cmdName string, agentArgs []string, name stri
 	if codexTerminalInstructionsEnabled(codexHome, cwd) {
 		return nil, false
 	}
+	sock, err := codexControlSocket(cmdName, codexHome, cwd)
+	if err != nil {
+		if !errors.Is(err, errCodexNoDaemon) {
+			_ = writeStderr("%s\n", coopNamedTUIManualReminder(name, cmdName, "Codex daemon: "+err.Error()))
+		}
+		return nil, false
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), codexDaemonNamingTimeout)
 	defer cancel()
 	id, err := codex.StartNamedThread(ctx, sock, cwd, name)
@@ -183,25 +194,101 @@ func startCodexOnNamedDaemonThread(cmdName string, agentArgs []string, name stri
 	return append([]string{"resume", id}, agentArgs...), true
 }
 
-// codexJoinsDaemon reports whether a Codex TUI started with args, in this
-// environment, runs on the managed daemon and so can resume a thread the
-// daemon holds. Only no arguments or --no-alt-screen, a display option
-// (codex-cli 0.160 tui/src/cli.rs), qualify; every other option may change
-// the thread or make Codex run its own app-server (tui/src/daemon_startup.rs
-// exclusion). Codex also runs its own app-server when CODEX_EXEC_SERVER_URL
-// or a workload identity variable is set at all.
-func codexJoinsDaemon(args []string) bool {
-	for _, arg := range args {
-		if arg != "--no-alt-screen" {
-			return false
-		}
+// errCodexNoDaemon means no daemon runs and AMQ does not start one; the
+// rollout path then names the TUI.
+var errCodexNoDaemon = errors.New("no Codex daemon to name the session on")
+
+// codexDaemonStartTimeout bounds `codex app-server daemon start`.
+const codexDaemonStartTimeout = 30 * time.Second
+
+// codexControlSocket returns the managed daemon's control socket. A TUI that
+// finds no daemon starts one and runs on it (codex-cli 0.160
+// tui/src/startup_orchestration.rs:494-540, start_with_features with the
+// saved feature overrides plus its own, none for the options AMQ allows).
+// `codex app-server daemon start` starts it with no overrides and saves that
+// (app-server-daemon/src/lib.rs:392, 405-438), so AMQ runs it only when no
+// overrides are saved: then both starts are the same. Otherwise, or when
+// Codex may not auto-start, it returns errCodexNoDaemon.
+func codexControlSocket(cmdName, codexHome, dir string) (string, error) {
+	if sock, err := codex.ControlSocket(codexHome); err == nil {
+		return sock, nil
 	}
+	if codexDaemonAutoStartMayBeOff(codexHome, dir) || codexDaemonHasSavedFeatures(codexHome) {
+		return "", errCodexNoDaemon
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), codexDaemonStartTimeout)
+	defer cancel()
+	start := exec.CommandContext(ctx, cmdName, "app-server", "daemon", "start")
+	start.Dir = dir
+	if output, err := start.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("codex app-server daemon start: %w: %s", err, bytes.TrimSpace(output))
+	}
+	return codex.ControlSocket(codexHome)
+}
+
+// codexDaemonHasSavedFeatures reports whether the managed daemon's settings
+// (codex-cli 0.160 app-server-daemon/src/settings.rs, featureOverrides in
+// $CODEX_HOME/app-server-daemon/settings.json) may hold feature overrides.
+// An unreadable file counts as holding some.
+func codexDaemonHasSavedFeatures(codexHome string) bool {
+	raw, err := os.ReadFile(filepath.Join(codexHome, "app-server-daemon", "settings.json"))
+	if os.IsNotExist(err) {
+		return false
+	}
+	var settings struct {
+		FeatureOverrides map[string]bool `json:"featureOverrides"`
+	}
+	return err != nil || json.Unmarshal(raw, &settings) != nil || len(settings.FeatureOverrides) > 0
+}
+
+// codexDaemonThreadDir reports whether a Codex TUI started with args, in
+// this environment, runs on the managed daemon and takes every option on
+// `codex resume <id>` as it would on a fresh start, and returns the thread
+// directory: the -C/--cd directory resolved against wd, or wd. Only the
+// options listed here qualify (codex-cli 0.160 daemon_startup.rs exclusion;
+// resume merge in cli/src/main.rs; resume permissions and model overrides in
+// tui/src/resume_permissions.rs and app/config_persistence.rs). Others either
+// make Codex run its own app-server (-p, -c, --search, --oss), are refused by
+// resume (--worktree), or were not checked; they keep the original path.
+// Codex also runs its own app-server when CODEX_EXEC_SERVER_URL or a
+// workload identity variable is set at all.
+func codexDaemonThreadDir(args []string, wd string) (string, bool) {
 	for _, key := range []string{"CODEX_EXEC_SERVER_URL", "OPENAI_FEDERATION_RULE_ID", "OPENAI_IDENTITY_TOKEN_FILE"} {
 		if _, set := os.LookupEnv(key); set {
-			return false
+			return "", false
 		}
 	}
-	return true
+	dir := wd
+	for i := 0; i < len(args); i++ {
+		flag, value, inline := strings.Cut(args[i], "=")
+		switch flag {
+		case "--no-alt-screen", "--dangerously-bypass-approvals-and-sandbox", "--yolo":
+			if inline {
+				return "", false
+			}
+			continue
+		case "-m", "--model", "-a", "--ask-for-approval", "-s", "--sandbox", "--add-dir", "-C", "--cd":
+		default:
+			return "", false
+		}
+		if !inline {
+			if i+1 >= len(args) || strings.HasPrefix(args[i+1], "-") {
+				return "", false
+			}
+			i++
+			value = args[i]
+		}
+		if value == "" {
+			return "", false
+		}
+		if flag == "-C" || flag == "--cd" {
+			dir = value
+			if !filepath.IsAbs(dir) {
+				dir = filepath.Join(wd, dir)
+			}
+		}
+	}
+	return filepath.Clean(dir), true
 }
 
 func coopNamedUnknownReminder(me, binary string) string {

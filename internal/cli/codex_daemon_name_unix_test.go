@@ -125,3 +125,32 @@ func makeLinkedWorktree(t *testing.T, pointerSuffix string) (main, worktree stri
 	}
 	return main, worktree
 }
+
+// Bead agent-message-queue-38l: options that keep Codex on the managed daemon
+// and take effect on resume (-m, -a, -s, --yolo, --add-dir, -C) still name
+// the session, and -C sets the thread directory. Options that make Codex run
+// its own app-server, or that resume refuses, keep the original path.
+func TestCodexDaemonThreadDir(t *testing.T) {
+	wd := t.TempDir()
+	for _, tc := range []struct {
+		args []string
+		dir  string
+		ok   bool
+	}{
+		{nil, wd, true},
+		{[]string{"-m", "gpt-5", "-a", "untrusted", "--sandbox=workspace-write", "--yolo", "--add-dir", "/x", "--no-alt-screen"}, wd, true},
+		{[]string{"-C", "sub"}, filepath.Join(wd, "sub"), true},
+		{[]string{"--cd=/abs/dir"}, "/abs/dir", true},
+		{[]string{"-p", "work"}, "", false},
+		{[]string{"-c", "model=x"}, "", false},
+		{[]string{"--search"}, "", false},
+		{[]string{"--worktree"}, "", false},
+		{[]string{"fix the build"}, "", false},
+		{[]string{"-m"}, "", false},
+	} {
+		dir, ok := codexDaemonThreadDir(tc.args, wd)
+		if dir != tc.dir || ok != tc.ok {
+			t.Errorf("codexDaemonThreadDir(%q) = %q, %v; want %q, %v", tc.args, dir, ok, tc.dir, tc.ok)
+		}
+	}
+}
