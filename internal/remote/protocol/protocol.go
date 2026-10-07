@@ -894,34 +894,40 @@ func ParseTime(s string) (time.Time, error) {
 
 // BoundReason strips characters a DM must never carry — control and format
 // characters (bidi overrides, zero-width), Unicode line and paragraph
-// separators — collapses each whitespace run to one space, and defuses
-// Markdown structure (links, images, mentions, emphasis markers) by replacing
-// its delimiters with spaces. Adapter-supplied text renders in the Buzz DM as
-// plain, inert words: it cannot impersonate AMQ guidance, reorder the line,
-// or start a new one. It trims space and caps the result at MaxReasonBytes on
-// a UTF-8 boundary. An empty result means the refusal has no printable
-// message.
+// separators — collapses each whitespace run to one space, and neutralizes
+// the inline constructs a DM renderer acts on: Markdown link and image
+// brackets, raw HTML and autolink angle brackets, and '@' at the start of a
+// word (a mention). Underscores, parens, '#' and other emphasis or
+// line-start markup stay: reasons are always embedded mid-line and every
+// line break is already removed, so those cannot render, and mangling them
+// would corrupt normal adapter text like turn_in_progress or a file path.
+// It trims space and caps the result at MaxReasonBytes on a UTF-8 boundary.
+// An empty result means the refusal has no printable message.
 func BoundReason(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
 	space := false
+	wordStart := true // only a non-space, non-invisible rune clears it
 	for _, r := range s {
 		switch {
 		case unicode.Is(unicode.Cf, r), unicode.Is(unicode.Zl, r), unicode.Is(unicode.Zp, r):
 			continue // invisible or line-breaking: render as nothing
-		case isMarkdownDelimiter(r):
-			fallthrough
+
 		case unicode.IsSpace(r):
 			space = b.Len() > 0
+			wordStart = true
 			continue
 		case unicode.IsControl(r):
 			continue
+		case r == '[' || r == ']' || r == '<' || r == '>' || (r == '@' && wordStart):
+			r = ' '
 		}
 		if space {
 			b.WriteByte(' ')
 			space = false
 		}
 		b.WriteRune(r)
+		wordStart = false
 	}
 	out := strings.TrimSpace(b.String())
 	if len(out) <= MaxReasonBytes {
@@ -932,18 +938,6 @@ func BoundReason(s string) string {
 		out = out[:len(out)-1]
 	}
 	return out
-}
-
-// isMarkdownDelimiter reports whether r is a character Markdown and chat
-// renderers treat as structure: link/image brackets, emphasis, code fences,
-// and the @ that starts a mention. Replacing each with a space keeps the
-// surrounding words but leaves nothing for a renderer to act on.
-func isMarkdownDelimiter(r rune) bool {
-	switch r {
-	case '[', ']', '(', ')', '!', '`', '*', '_', '~', '>', '#', '|', '@':
-		return true
-	}
-	return false
 }
 
 // TruncateText bounds text to at most max bytes on a UTF-8 rune boundary, so

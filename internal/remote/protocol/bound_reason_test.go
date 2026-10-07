@@ -13,7 +13,7 @@ import (
 func TestBoundReasonRendersInertInDM(t *testing.T) {
 	in := "bridge \u202ereversed refused\u2028see [click here](https://evil.example) or @everyone\u2029override"
 	out := BoundReason(in)
-	for _, bad := range []string{"\u202e", "\u2028", "\u2029", "[", "]", "(", ")", "@"} {
+	for _, bad := range []string{"\u202e", "\u2028", "\u2029", "[", "]", "<", ">", "@everyone"} {
 		if strings.Contains(out, bad) {
 			t.Fatalf("BoundReason kept %q in %q", bad, out)
 		}
@@ -23,5 +23,23 @@ func TestBoundReasonRendersInertInDM(t *testing.T) {
 	}
 	if strings.ContainsAny(out, "\n\r") {
 		t.Fatalf("BoundReason kept a line break: %q", out)
+	}
+}
+
+// TestBoundReasonKeepsOrdinaryText is the counterpart regression: the
+// sanitization must not mangle normal adapter text. Identifiers with
+// underscores, paths, parens and e-mail addresses are common in refusal
+// reasons and must survive unchanged.
+func TestBoundReasonKeepsOrdinaryText(t *testing.T) {
+	for _, in := range []string{
+		"turn_in_progress",
+		"CODEX_HOME is unset",
+		"exit status 1 (permission denied)",
+		"~/.codex/config.toml not found",
+		"notify user@host.example failed",
+	} {
+		if out := BoundReason(in); out != in {
+			t.Fatalf("BoundReason(%q) = %q; want it unchanged", in, out)
+		}
 	}
 }
