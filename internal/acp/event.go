@@ -101,7 +101,10 @@ func eventJournalPath(me, eventID string) string {
 	return filepath.Join("agents", me, "outbox", "acp-events", eventID+".json")
 }
 
-// loadEventRecord reads the claim of an event, if one exists.
+// loadEventRecord reads the claim of an event, if one exists. A record
+// without a created field is a legacy schema-1 journal written by the
+// current release; it is a valid claim (review of #976 P2 d) whose time a
+// replay proves from the delivered message's header instead of refusing.
 func loadEventRecord(cfg Config, eventID string) (*eventRecord, error) {
 	identity, err := fsq.SnapshotDeliveryRoot(cfg.Root)
 	if err != nil {
@@ -127,8 +130,10 @@ func loadEventRecord(cfg Config, eventID string) (*eventRecord, error) {
 	if rec.MessageID == "" || rec.To == "" || rec.Thread == "" || fsq.ValidateHandle(rec.To) != nil {
 		return nil, fmt.Errorf("event %s has an unreadable claim; refusing to deliver", eventID)
 	}
-	if _, err := time.Parse(time.RFC3339Nano, rec.Created); err != nil {
-		return nil, fmt.Errorf("event %s has an unreadable claim time", eventID)
+	if rec.Created != "" {
+		if _, err := time.Parse(time.RFC3339Nano, rec.Created); err != nil {
+			return nil, fmt.Errorf("event %s has an unreadable claim time", eventID)
+		}
 	}
 	return &rec, nil
 }

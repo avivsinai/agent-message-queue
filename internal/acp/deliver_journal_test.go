@@ -1,12 +1,14 @@
 package acp
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
@@ -109,5 +111,115 @@ func TestReplayDeliversWhenClaimExistsButInboxEmpty(t *testing.T) {
 	}
 	if n := len(inboxPrompts(t, root)); n != 1 {
 		t.Fatalf("inbox holds %d messages after the duplicate replay; want one", n)
+	}
+}
+
+// Review of #976 P1 b: the inbox absence check and the write are one
+// critical section under the event's post lock. When the first copy was
+// drained to cur/ before the replay ran, the replay still finds it (in
+// cur) and reports a duplicate instead of writing a second copy into new/.
+func TestReplayFindsACopyDrainedToCur(t *testing.T) {
+	root := canonicalTempDir(t)
+	for _, handle := range []string{"buzz", "agent"} {
+		if err := fsq.EnsureAgentDirs(root, handle); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := Config{Root: root, Me: "buzz", To: "agent"}
+	event := strings.Repeat("c", 64)
+	thread := cockpitThread("session/s1")
+
+	first, err := DeliverCockpitPrompt(cfg, "build the thing", thread, event)
+	if err != nil {
+		t.Fatalf("first delivery: %v", err)
+	}
+
+	// The consumer drains new/ to cur/, the normal maildir path.
+	if err := os.Rename(
+		filepath.Join(fsq.AgentInboxNew(root, "agent"), first.MessageID+".md"),
+		filepath.Join(fsq.AgentInboxCur(root, "agent"), first.MessageID+".md"),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	again, err := DeliverCockpitPrompt(cfg, "build the thing", thread, event)
+	if err != nil {
+		t.Fatalf("replay after drain: %v", err)
+	}
+	if !again.Duplicate || again.MessageID != first.MessageID {
+		t.Fatalf("replay after drain = %+v; want a duplicate of %s", again, first.MessageID)
+	}
+	ids := inboxPrompts(t, root)
+	if n := len(ids); n != 1 || ids[0] != first.MessageID {
+		t.Fatalf("inbox holds %v after the drained replay; want exactly [%s]", ids, first.MessageID)
+	}
+}
+
+// Review of #976 P2 d: schema-1 journals written by the current release
+// have no created field. A replay proves delivery from the inbox by the
+// message id, takes created from the delivered message's header, and
+// reports a duplicate — it must not refuse.
+func TestLegacyJournalWithoutCreatedIsProvenFromTheInbox(t *testing.T) {
+	root := canonicalTempDir(t)
+	for _, handle := range []string{"buzz", "agent"} {
+		if err := fsq.EnsureAgentDirs(root, handle); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := Config{Root: root, Me: "buzz", To: "agent"}
+	event := strings.Repeat("d", 64)
+	thread := cockpitThread("session/s1")
+
+	// The exact pre-upgrade journal bytes: identity only, no created.
+	created := time.Now().Add(-time.Minute).UTC().Truncate(time.Second)
+	messageID, err := format.NewMessageID(created)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := fmt.Sprintf(
+		`{"schema":1,"event_id":%q,"message_id":%q,"to":%q,"thread":%q}`+"\n",
+		event, messageID, "agent", thread,
+	)
+	journalDir := filepath.Join(root, "agents", "buzz", "outbox", "acp-events")
+	if err := os.MkdirAll(journalDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(journalDir, event+".json"), []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// The delivered message exists in cur/ (drained long ago).
+	message := format.Message{
+		Header: format.Header{
+			Schema:  format.CurrentSchema,
+			ID:      messageID,
+			From:    "buzz",
+			To:      []string{"agent"},
+			Thread:  thread,
+			Created: created.Format(time.RFC3339Nano),
+			Labels:  []string{"acp", "cockpit", "nostr:" + event},
+		},
+		Body: "build the thing",
+	}
+	raw, err := message.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fsq.AgentInboxCur(root, "agent"), messageID+".md"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	delivery, err := DeliverCockpitPrompt(cfg, "build the thing", thread, event)
+	if err != nil {
+		t.Fatalf("replay of a legacy journal refused: %v", err)
+	}
+	if !delivery.Duplicate || delivery.MessageID != messageID {
+		t.Fatalf("replay of a legacy journal = %+v; want a duplicate of %s", delivery, messageID)
+	}
+	if !delivery.Created.Equal(created) {
+		t.Fatalf("replay created = %v; want the delivered message's header time %v", delivery.Created, created)
+	}
+	if n := len(inboxPrompts(t, root)); n != 1 {
+		t.Fatalf("inbox holds %d messages after the legacy replay; want one", n)
 	}
 }

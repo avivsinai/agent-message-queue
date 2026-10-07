@@ -1,6 +1,7 @@
 package acp
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/lock"
 )
 
 // CockpitPromptSubject labels prompts delivered on the durable cockpit thread.
@@ -63,45 +65,69 @@ func deliver(cfg Config, body, thread, subject, priority string, labels, refs []
 		return Delivery{}, fmt.Errorf("message thread is empty")
 	}
 
+	// One canonical builder appends the nostr label exactly once (review of
+	// #976 P1 a): the first attempt and a replay must serialize identical
+	// bytes, or the no-replace inbox write refuses one of them as a
+	// collision.
+	build := func(messageID, created string) ([]byte, error) {
+		all := append(append([]string(nil), labels...), "nostr:"+eventID)
+		data, err := format.Message{
+			Header: format.Header{
+				Schema:   format.CurrentSchema,
+				ID:       messageID,
+				From:     cfg.Me,
+				To:       []string{cfg.To},
+				Thread:   thread,
+				Subject:  subject,
+				Created:  created,
+				Priority: priority,
+				Labels:   all,
+				Refs:     refs,
+			},
+			Body: body,
+		}.Marshal()
+		if err != nil {
+			return nil, err
+		}
+		if len(data) > format.MaxMessageSize {
+			return nil, fmt.Errorf("prompt exceeds the maximum AMQ message size")
+		}
+		return data, nil
+	}
+
+	// With an event id the whole claim-check-write sequence runs under one
+	// cross-process per-event lock (review of #976 P1 b): claim
+	// create/load, the inbox absence check and the inbox write are one
+	// critical section, so a paused winner cannot write a second copy into
+	// new/ after a replay's copy was drained to cur/, and two processes
+	// cannot both pass the absence check. The lock shape is the mailbox
+	// path's per-event post lock (publishClaimed); the journal lives under
+	// the outbox acp-events dir.
 	if eventID != "" {
-		claim, err := loadEventRecord(cfg, eventID)
+		if !lock.AdvisoryLockAvailable() {
+			return Delivery{}, fmt.Errorf("refusing to deliver a Buzz event without an advisory file lock")
+		}
+		identity, err := fsq.SnapshotDeliveryRoot(cfg.Root)
 		if err != nil {
 			return Delivery{}, err
 		}
-		if claim != nil {
-			return deliverClaimed(cfg, *claim, body, subject, priority, labels, refs)
+		root, err := fsq.OpenDeliveryRoot(cfg.Root, identity)
+		if err != nil {
+			return Delivery{}, err
 		}
-	}
-
-	now := time.Now()
-	id, err := format.NewMessageID(now)
-	if err != nil {
-		return Delivery{}, err
-	}
-	if eventID != "" {
-		labels = append(append([]string(nil), labels...), "nostr:"+eventID)
-	}
-	message := format.Message{
-		Header: format.Header{
-			Schema:   format.CurrentSchema,
-			ID:       id,
-			From:     cfg.Me,
-			To:       []string{cfg.To},
-			Thread:   thread,
-			Subject:  subject,
-			Created:  now.UTC().Format(time.RFC3339Nano),
-			Priority: priority,
-			Labels:   labels,
-			Refs:     refs,
-		},
-		Body: body,
-	}
-	data, err := message.Marshal()
-	if err != nil {
-		return Delivery{}, err
-	}
-	if len(data) > format.MaxMessageSize {
-		return Delivery{}, fmt.Errorf("prompt exceeds the maximum AMQ message size")
+		defer func() { _ = root.Close() }()
+		dir := filepath.Dir(eventJournalPath(cfg.Me, eventID))
+		lockFile, err := root.OpenLockFile(dir, eventID+".post.lock", 0o600)
+		if err != nil {
+			return Delivery{}, fmt.Errorf("open event post lock: %w", err)
+		}
+		defer func() { _ = lockFile.Close() }()
+		var out Delivery
+		err = fsq.WithExclusiveFileLock(lockFile, func() error {
+			out, err = deliverLocked(cfg, root, build, thread, eventID)
+			return err
+		})
+		return out, err
 	}
 
 	identity, err := fsq.SnapshotDeliveryRoot(cfg.Root)
@@ -113,39 +139,198 @@ func deliver(cfg Config, body, thread, subject, priority string, labels, refs []
 		return Delivery{}, err
 	}
 	defer func() { _ = root.Close() }()
+	now := time.Now()
+	id, err := format.NewMessageID(now)
+	if err != nil {
+		return Delivery{}, err
+	}
+	data, err := build(id, now.UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return Delivery{}, err
+	}
+	return writeToInbox(cfg, root, claimIdentity("", id, cfg.To, thread), now, data)
+}
 
-	// The event journal is a claim taken before delivery, not a receipt
-	// after it: like the mailbox steer claim it fixes the message id,
-	// created time, and destination once, and records no delivery outcome.
-	// With an event id it is created exclusively; a concurrent first
-	// delivery that loses reads the winner's claim and follows the same
-	// check-then-deliver path as a replay.
-	if eventID != "" {
-		rec := eventRecord{
-			Schema:    1,
-			EventID:   eventID,
-			MessageID: id,
-			To:        cfg.To,
-			Thread:    thread,
-			Created:   now.UTC().Format(time.RFC3339Nano),
+// deliverLocked serves one event-keyed delivery attempt while holding the
+// event's post lock. It claims the event (creating or loading the journal),
+// checks the inbox, and either reports the proven delivery or writes one
+// copy under the claimed identity.
+func deliverLocked(cfg Config, root *fsq.DeliveryRoot, build func(messageID, created string) ([]byte, error), thread, eventID string) (Delivery, error) {
+	claim, err := claimEvent(cfg, root, build, thread, eventID)
+	if err != nil {
+		return Delivery{}, err
+	}
+	created := time.Time{}
+	if claim.Created != "" {
+		parsed, err := time.Parse(time.RFC3339Nano, claim.Created)
+		if err != nil {
+			return Delivery{}, fmt.Errorf("event %s has an unreadable claim time", eventID)
 		}
-		if err := rememberEvent(cfg, rec); err != nil {
-			if !errors.Is(err, os.ErrExist) {
-				return Delivery{}, err
-			}
-			// os.ErrExist: a concurrent winner claimed first; follow its claim
-			claim, err := loadEventRecord(cfg, eventID)
+		created = parsed
+	}
+	delivered, err := inboxHasMessage(root, claim.To, claim.MessageID)
+	if err != nil {
+		return Delivery{}, err
+	}
+	if delivered {
+		// A legacy journal (no created) proves its time from the delivered
+		// message header before reporting the duplicate (review of #976 P2 d).
+		if created.IsZero() {
+			created, err = provenCreated(root, claim.To, claim.MessageID)
 			if err != nil {
 				return Delivery{}, err
 			}
-			if claim == nil {
-				return Delivery{}, fmt.Errorf("event %s lost its claim and the claim is unreadable", eventID)
-			}
-			return deliverClaimed(cfg, *claim, body, subject, priority, labels, refs)
 		}
+		return Delivery{
+			MessageID: claim.MessageID,
+			To:        claim.To,
+			Thread:    claim.Thread,
+			Created:   created,
+			EventID:   claim.EventID,
+			State:     DeliveryDuplicate,
+			Committed: true,
+			Egress:    EgressConfirmed,
+			Duplicate: true,
+		}, nil
 	}
 
-	return writeToInbox(cfg, root, claimIdentity(eventID, id, cfg.To, thread), now, data)
+	// A legacy journal with no created time and no delivered message takes
+	// its header time from the delivered message too (review of #976 P2 d).
+	if claim.Created == "" {
+		data, err := build(claim.MessageID, "")
+		if err != nil {
+			return Delivery{}, err
+		}
+		msg, err := format.ParseMessage(data)
+		if err != nil {
+			return Delivery{}, err
+		}
+		claim.Created = msg.Header.Created
+		created, _ = time.Parse(time.RFC3339Nano, claim.Created)
+		data, err = build(claim.MessageID, claim.Created)
+		if err != nil {
+			return Delivery{}, err
+		}
+		return writeToInbox(cfg, root, &claim, created, data)
+	}
+
+	data, err := build(claim.MessageID, claim.Created)
+	if err != nil {
+		return Delivery{}, err
+	}
+	return writeToInbox(cfg, root, &claim, created, data)
+}
+
+// claimEvent loads the event's claim or creates it exclusively, durably. A
+// created claim is written through a synced temp linked into place
+// (createExclusiveFile, the mailbox claim pattern) and the journal
+// directory is fsynced before any inbox write can name it (review of
+// #976 P1 c): the claim must be durable before delivery.
+func claimEvent(cfg Config, root *fsq.DeliveryRoot, build func(messageID, created string) ([]byte, error), thread, eventID string) (eventRecord, error) {
+	if rec, err := readEventClaim(cfg, root, eventID); err != nil {
+		return eventRecord{}, err
+	} else if rec != nil {
+		return *rec, nil
+	}
+	now := time.Now()
+	id, err := format.NewMessageID(now)
+	if err != nil {
+		return eventRecord{}, err
+	}
+	rec := eventRecord{
+		Schema:    format.CurrentSchema,
+		EventID:   eventID,
+		MessageID: id,
+		To:        cfg.To,
+		Thread:    thread,
+		Created:   now.UTC().Format(time.RFC3339Nano),
+	}
+	if err := writeEventClaimExclusive(root, cfg.Me, rec); err != nil {
+		if !errors.Is(err, os.ErrExist) {
+			return eventRecord{}, err
+		}
+		// A concurrent winner claimed first under the same post lock (a
+		// legacy process may not hold it); follow its claim.
+		winner, err := readEventClaim(cfg, root, eventID)
+		if err != nil {
+			return eventRecord{}, err
+		}
+		if winner == nil {
+			return eventRecord{}, fmt.Errorf("event %s lost its claim and the claim is unreadable", eventID)
+		}
+		return *winner, nil
+	}
+	return rec, nil
+}
+
+// readEventClaim reads the claim of an event, if one exists, through the
+// already-open delivery root.
+func readEventClaim(cfg Config, root *fsq.DeliveryRoot, eventID string) (*eventRecord, error) {
+	data, err := root.ReadRegularNoFollow(eventJournalPath(cfg.Me, eventID))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var rec eventRecord
+	if err := json.Unmarshal(data, &rec); err != nil {
+		return nil, err
+	}
+	if rec.MessageID == "" || rec.To == "" || rec.Thread == "" || fsq.ValidateHandle(rec.To) != nil {
+		return nil, fmt.Errorf("event %s has an unreadable claim; refusing to deliver", eventID)
+	}
+	if rec.Created != "" {
+		if _, err := time.Parse(time.RFC3339Nano, rec.Created); err != nil {
+			return nil, fmt.Errorf("event %s has an unreadable claim time", eventID)
+		}
+	}
+	return &rec, nil
+}
+
+// createExclusiveFile publishes raw at relPath only if nothing is there
+// yet: CreateExclusiveFile creates the name with O_EXCL and fsyncs the
+// content before the name is visible, then the journal directory is fsynced
+// so the claim survives a crash before the inbox write that follows it
+// (review of #976 P1 c).
+func createExclusiveFile(root *fsq.DeliveryRoot, relPath string, raw []byte) error {
+	if err := root.CreateExclusiveFile(relPath, raw, 0o600); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return os.ErrExist
+		}
+		return err
+	}
+	return root.SyncDir(filepath.Dir(relPath))
+}
+
+// writeEventClaimExclusive durably creates the event's claim journal.
+func writeEventClaimExclusive(root *fsq.DeliveryRoot, me string, rec eventRecord) error {
+	data, err := json.Marshal(rec)
+	if err != nil {
+		return err
+	}
+	return createExclusiveFile(root, eventJournalPath(me, rec.EventID), append(data, '\n'))
+}
+
+// provenCreated reads the delivered message's header Created time from the
+// recipient inbox. A legacy schema-1 journal records no created field; its
+// replay proves the time from the message it delivered (review of #976
+// P2 d).
+func provenCreated(root *fsq.DeliveryRoot, handle, messageID string) (time.Time, error) {
+	name := messageID + ".md"
+	for _, rel := range []string{
+		filepath.Join("agents", handle, "inbox", "new", name),
+		filepath.Join("agents", handle, "inbox", "cur", name),
+	} {
+		msg, err := format.ReadMessageFileRoot(root, rel)
+		if err == nil {
+			return time.Parse(time.RFC3339Nano, msg.Header.Created)
+		}
+		if !os.IsNotExist(err) {
+			return time.Time{}, err
+		}
+	}
+	return time.Time{}, fmt.Errorf("message %s is in %s's inbox but its header is unreadable", messageID, handle)
 }
 
 // claimIdentity builds the in-memory identity of a message being delivered
@@ -166,70 +351,6 @@ func inboxHasMessage(root *fsq.DeliveryRoot, handle, messageID string) (bool, er
 		}
 	}
 	return false, nil
-}
-
-// deliverClaimed serves a replay (or a concurrent loser) that follows an
-// existing claim. The claim carries no outcome: delivery is what the
-// recipient inbox proves. When the message is present the replay reports it
-// (a duplicate on a replay); when it is absent the first attempt never
-// reached the inbox, so the replay delivers with the claimed id and created
-// time and reports what that write proves.
-func deliverClaimed(cfg Config, claim eventRecord, body, subject, priority string, labels, refs []string) (Delivery, error) {
-	created, err := time.Parse(time.RFC3339Nano, claim.Created)
-	if err != nil {
-		return Delivery{}, fmt.Errorf("event %s has an unreadable claim time", claim.EventID)
-	}
-	identity, err := fsq.SnapshotDeliveryRoot(cfg.Root)
-	if err != nil {
-		return Delivery{}, err
-	}
-	root, err := fsq.OpenDeliveryRoot(cfg.Root, identity)
-	if err != nil {
-		return Delivery{}, err
-	}
-	defer func() { _ = root.Close() }()
-
-	delivered, err := inboxHasMessage(root, claim.To, claim.MessageID)
-	if err != nil {
-		return Delivery{}, err
-	}
-	if delivered {
-		return Delivery{
-			MessageID: claim.MessageID,
-			To:        claim.To,
-			Thread:    claim.Thread,
-			Created:   created,
-			EventID:   claim.EventID,
-			State:     DeliveryDuplicate,
-			Committed: true,
-			Egress:    EgressConfirmed,
-			Duplicate: true,
-		}, nil
-	}
-
-	message := format.Message{
-		Header: format.Header{
-			Schema:   format.CurrentSchema,
-			ID:       claim.MessageID,
-			From:     cfg.Me,
-			To:       []string{claim.To},
-			Thread:   claim.Thread,
-			Subject:  subject,
-			Created:  claim.Created,
-			Priority: priority,
-			Labels:   append(append([]string(nil), labels...), "nostr:"+claim.EventID),
-			Refs:     refs,
-		},
-		Body: body,
-	}
-	data, err := message.Marshal()
-	if err != nil {
-		return Delivery{}, err
-	}
-	if len(data) > format.MaxMessageSize {
-		return Delivery{}, fmt.Errorf("prompt exceeds the maximum AMQ message size")
-	}
-	return writeToInbox(cfg, root, &claim, created, data)
 }
 
 // writeToInbox delivers an already-serialized message into the recipient
