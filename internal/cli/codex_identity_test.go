@@ -81,7 +81,8 @@ func TestResumedCodexThreadTakesTheSessionIdentity(t *testing.T) {
 	t.Setenv("CODEX_HOME", filepath.Join(t.TempDir(), "codex"))
 	base := secureTempDirForTest(t)
 	const thread = "01a1166e-dd8e-77c0-bc3b-a4b7e24e91a9"
-	if err := recordResumedCodexThread("codex", []string{"resume", thread, "--yolo"}, codexThreadIdentityRecorder(buildCoopExecEnvironment(nil, base, "codex", ""))); err != nil {
+	// AMQ's own session resume shape: options first, the id last.
+	if err := recordResumedCodexThread("codex", []string{"resume", "--yolo", "-c", "notify=[\"x\"]", thread}, codexThreadIdentityRecorder(buildCoopExecEnvironment(nil, base, "codex", ""))); err != nil {
 		t.Fatal(err)
 	}
 	for _, key := range identityEnvKeys {

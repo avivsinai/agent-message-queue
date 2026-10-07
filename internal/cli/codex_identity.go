@@ -121,21 +121,63 @@ func codexThreadIdentityRecorder(env []string) func(thread string) error {
 	}
 }
 
-// recordResumedCodexThread records the identity for a Codex thread the user
-// resumes by id: the one AMQ named and created, or one the user resumes
-// (codex resume <id>, as amq session resume runs it). Its tool commands run
-// on the daemon. If the identity cannot be recorded the launch stops: a
-// thread is never resumed without it.
+// codexResumeSelection reads the thread a Codex resume launch selects:
+// codex resume [OPTIONS] [SESSION_ID] [PROMPT] (codex-cli 0.160), where
+// AMQ's own session resume puts its options first and the id last. thread
+// is the id when the first positional is a thread id; selected is false for
+// a launch that is not a resume, and unresolved is true for a resume that
+// names no thread id (--last, a name, the picker) or that AMQ cannot parse.
+func codexResumeSelection(args []string) (thread string, selected, unresolved bool) {
+	if len(args) == 0 || args[0] != "resume" {
+		return "", false, false
+	}
+	for i := 1; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			if i+1 < len(args) && codexidentity.ValidThread(args[i+1]) {
+				return args[i+1], true, false
+			}
+			return "", true, true
+		}
+		if !strings.HasPrefix(arg, "-") {
+			if codexidentity.ValidThread(arg) {
+				return arg, true, false
+			}
+			return "", true, true
+		}
+		flag, _, inline := strings.Cut(arg, "=")
+		switch {
+		case codexFlagOptions[flag] || codexEmbeddedFlags[flag] || flag == "--all" || flag == "--include-non-interactive":
+		case codexValueOptions[flag]:
+			if !inline {
+				i++
+			}
+		default:
+			return "", true, true // --last, -i, or an option AMQ does not know
+		}
+	}
+	return "", true, true // the picker
+}
+
+// recordResumedCodexThread records the identity for the Codex thread a
+// resume launch selects by id: the one AMQ named and created, or one the
+// user resumes (codex resume <id>, or AMQ session resume's
+// codex resume [options] <id>). Its tool commands may run on the daemon. If
+// the identity cannot be recorded the launch stops: a thread is never
+// resumed without it.
 func recordResumedCodexThread(binaryPath string, args []string, record func(thread string) error) error {
-	if launch.ProviderForExecutable(binaryPath) != launch.CodexProvider ||
-		len(args) < 2 || args[0] != "resume" || !codexidentity.ValidThread(args[1]) {
+	if launch.ProviderForExecutable(binaryPath) != launch.CodexProvider {
+		return nil
+	}
+	thread, selected, unresolved := codexResumeSelection(args)
+	if !selected || unresolved {
 		return nil
 	}
 	if record == nil {
-		return ContextMismatchError("AMQ cannot record this session's identity for Codex thread %s", args[1])
+		return ContextMismatchError("AMQ cannot record this session's identity for Codex thread %s", thread)
 	}
-	if err := record(args[1]); err != nil {
-		return ContextMismatchError("AMQ could not record this session's identity for Codex thread %s: %v", args[1], err)
+	if err := record(thread); err != nil {
+		return ContextMismatchError("AMQ could not record this session's identity for Codex thread %s: %v", thread, err)
 	}
 	return nil
 }
