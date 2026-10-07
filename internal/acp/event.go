@@ -20,17 +20,18 @@ const (
 
 var nostrEventIDRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
+// The event record is a claim, not a receipt: like the mailbox steer claim
+// it fixes only what a replay must not re-decide (message id, created time,
+// destination, thread). It records no delivery outcome — what was delivered
+// is what the recipient inbox proves at replay time, never what the first
+// attempt wrote here.
 type eventRecord struct {
 	Schema    int    `json:"schema"`
 	EventID   string `json:"event_id"`
 	MessageID string `json:"message_id"`
 	To        string `json:"to"`
 	Thread    string `json:"thread"`
-	Committed bool   `json:"committed"`
-	Drained   bool   `json:"drained"`
-	Started   bool   `json:"started"`
-	Completed bool   `json:"completed"`
-	Egress    string `json:"egress"`
+	Created   string `json:"created"`
 }
 
 func eventIDsFromMeta(meta json.RawMessage) ([]string, *rpcError) {
@@ -98,31 +99,6 @@ func eventJournalPath(me, eventID string) string {
 	return filepath.Join("agents", me, "outbox", "acp-events", eventID+".json")
 }
 
-func loadEventRecord(cfg Config, eventID string) (eventRecord, bool, error) {
-	identity, err := fsq.SnapshotDeliveryRoot(cfg.Root)
-	if err != nil {
-		return eventRecord{}, false, err
-	}
-	root, err := fsq.OpenDeliveryRoot(cfg.Root, identity)
-	if err != nil {
-		return eventRecord{}, false, err
-	}
-	defer func() { _ = root.Close() }()
-
-	data, err := root.ReadRegularNoFollow(eventJournalPath(cfg.Me, eventID))
-	if err != nil {
-		if os.IsNotExist(err) {
-			return eventRecord{}, false, nil
-		}
-		return eventRecord{}, false, err
-	}
-	var rec eventRecord
-	if err := json.Unmarshal(data, &rec); err != nil {
-		return eventRecord{}, false, err
-	}
-	return rec, true, nil
-}
-
 func rememberEvent(cfg Config, rec eventRecord) error {
 	identity, err := fsq.SnapshotDeliveryRoot(cfg.Root)
 	if err != nil {
@@ -143,8 +119,4 @@ func rememberEvent(cfg Config, rec eventRecord) error {
 		return os.ErrExist
 	}
 	return err
-}
-
-func (r eventRecord) delivery() Delivery {
-	return Delivery{MessageID: r.MessageID, To: r.To, Thread: r.Thread}
 }
