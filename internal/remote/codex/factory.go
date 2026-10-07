@@ -60,7 +60,7 @@ func Factory(ctx context.Context, cfg registry.FactoryConfig) (core.Attachment, 
 // user's thread to create it.
 func threadHasNoTurn(err error) bool {
 	var rerr *rpcError
-	return errors.As(err, &rerr) && strings.Contains(rerr.Message, "no rollout found")
+	return errors.As(err, &rerr) && rerr.Code == -32600 && strings.Contains(rerr.Message, "no rollout found")
 }
 
 func init() {
