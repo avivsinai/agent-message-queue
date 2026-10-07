@@ -939,16 +939,27 @@ func BoundReason(s string) string {
 // InertInline renders adapter-supplied text inert inside a DM body. The DM
 // renderer (Buzz uses remark with remark-gfm) re-interprets plain text: it
 // decodes HTML entities ("&#x202E;" becomes a bidi override) and autolinks
-// URLs, so character filtering alone cannot make text safe. A code span is:
-// entities are not decoded and autolinks are not recognized inside one. The
-// fence is a backtick run one longer than the longest run inside the text,
-// padded with one space between the fence and a text that starts or ends
-// with a backtick (CommonMark code span rules). Newlines would end the
-// span's line, so callers must pass BoundReason output or otherwise
-// newline-free text. Rendering sites that embed adapter text in DM text —
-// snapshot statuses, approval refusals, failed prompt summaries — wrap the
-// fragment; ordinary result bodies stay Markdown.
+// URLs, so character filtering alone cannot make text safe. The text is
+// first passed through BoundReason — filtering alone cannot make text inert
+// (review of #972 r3): an ASCII "&#x202E;" passes filtering and the renderer
+// decodes it back into a bidi override, and a URL survives to be
+// GFM-autolinked — but it strips controls, invisible and line-breaking
+// runes and collapses whitespace, which a code span needs anyway: a newline
+// would end the span's line, and a blank line plus a link would let
+// CommonMark's block structure beat the inline span. The survivor is then
+// wrapped in a code span, where entities are not decoded and autolinks are
+// not recognized. The fence is a backtick run one longer than the longest
+// run inside the text, padded with one space between the fence and a text
+// that starts or ends with a backtick (CommonMark code span rules). Text
+// that filters to nothing renders as a harmless placeholder, never an empty
+// span. Rendering sites that embed adapter text in DM text — snapshot
+// statuses, approval refusals, failed prompt summaries — wrap the fragment;
+// ordinary result bodies stay Markdown.
 func InertInline(s string) string {
+	s = BoundReason(s)
+	if s == "" {
+		s = "(no detail)"
+	}
 	longest := 0
 	run := 0
 	for _, r := range s {

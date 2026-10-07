@@ -15,6 +15,13 @@ func TestInertInline(t *testing.T) {
 		{"leading backtick", "`quoted", "`` `quoted ``"},
 		{"trailing backtick", "quoted`", "`` quoted` ``"},
 		{"backtick run", "a ``` b", "````a ``` b````"},
+		// Review of #972 r3: InertInline must call BoundReason itself. A raw
+		// err.Error() with U+202E escaped the code span (the bidi override
+		// survives outside one) and a "line1\n\n[x](https://e.x)" payload let
+		// CommonMark block structure beat the inline span.
+		{"bidi override raw", "bad\u202Ecode", "`badcode`"},
+		{"newline and link", "line1\n\n[x](https://e.x)", "`line1 [x](https://e.x)`"},
+		{"filters to empty", "\u202E\u200B", "`(no detail)`"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := InertInline(tc.in); got != tc.want {
