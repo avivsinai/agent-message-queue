@@ -114,6 +114,120 @@ func TestReplayDeliversWhenClaimExistsButInboxEmpty(t *testing.T) {
 	}
 }
 
+// Review of #976 r2 P1: a claim that exists but was never fsynced (the
+// winner's exclusive create succeeded, its journal-dir sync failed, and the
+// attempt refused) must not let a replay publish until durability holds:
+// the adopt path re-syncs the journal directory chain under the post lock,
+// and a replay with a still-failing sync refuses BEFORE writing the inbox
+// message. Only a replay whose claim sync succeeds publishes, so a crash
+// can never keep the message and lose the claim (the seed of a second copy
+// under a fresh id).
+func TestReplayWithFailingJournalSyncRefusesBeforePublishing(t *testing.T) {
+	root := canonicalTempDir(t)
+	for _, handle := range []string{"buzz", "agent"} {
+		if err := fsq.EnsureAgentDirs(root, handle); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := Config{Root: root, Me: "buzz", To: "agent"}
+	event := strings.Repeat("e", 64)
+	thread := cockpitThread("session/s1")
+
+	// A claim already on disk from a crashed first attempt.
+	claim := eventRecord{
+		Schema:    1,
+		EventID:   event,
+		MessageID: "2026-10-07T09-30-00.000Z_pid1_cafe0000",
+		To:        "agent",
+		Thread:    thread,
+		Created:   time.Now().Add(-time.Minute).UTC().Format(time.RFC3339Nano),
+	}
+	if err := rememberEvent(cfg, claim); err != nil {
+		t.Fatal(err)
+	}
+
+	// Every journal-directory sync fails: the claim stays non-durable.
+	// Package-wide fault so it reaches the root the deliver path opens.
+	fsq.SetPackageSyncDirFaultForTest(func(dir string) error {
+		return fmt.Errorf("injected sync failure")
+	})
+	t.Cleanup(func() { fsq.SetPackageSyncDirFaultForTest(nil) })
+
+	if _, err := DeliverCockpitPrompt(cfg, "build the thing", thread, event); err == nil {
+		t.Fatal("replay with an unsyncable claim delivered anyway; want a refusal")
+	}
+	if n := len(inboxPrompts(t, root)); n != 0 {
+		t.Fatalf("inbox holds %d messages while the claim is non-durable; want none", n)
+	}
+
+	// The sync heals: clear the fault; the replay now delivers under the
+	// claimed id, and the inbox never held a copy whose delivery was
+	// refused.
+	fsq.SetPackageSyncDirFaultForTest(nil)
+	delivery, err := DeliverCockpitPrompt(cfg, "build the thing", thread, event)
+	if err != nil {
+		t.Fatalf("replay after the sync healed: %v", err)
+	}
+	if delivery.Duplicate || delivery.MessageID != claim.MessageID {
+		t.Fatalf("replay = %+v; want a first delivery of %s", delivery, claim.MessageID)
+	}
+	ids := inboxPrompts(t, root)
+	if len(ids) != 1 || ids[0] != claim.MessageID {
+		t.Fatalf("inbox holds %v; want exactly [%s]", ids, claim.MessageID)
+	}
+}
+
+// Review of #976 r2 P2: the inbox proof reads both inbox locations through
+// the pinned root and requires a readable regular message whose header id
+// matches the claim. A directory or a dangling symlink at <id>.md is not a
+// delivery; the attempt refuses instead of reporting a proven duplicate.
+func TestInboxProofRefusesNonMessageEntries(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		plant func(t *testing.T, path string)
+	}{
+		{"directory", func(t *testing.T, path string) {
+			if err := os.MkdirAll(path, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"dangling symlink", func(t *testing.T, path string) {
+			if err := os.Symlink(filepath.Join("..", "..", "gone", "target"), path); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := canonicalTempDir(t)
+			for _, handle := range []string{"buzz", "agent"} {
+				if err := fsq.EnsureAgentDirs(root, handle); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cfg := Config{Root: root, Me: "buzz", To: "agent"}
+			event := strings.Repeat("f", 64)
+			thread := cockpitThread("session/s1")
+
+			claim := eventRecord{
+				Schema:    1,
+				EventID:   event,
+				MessageID: "2026-10-07T09-45-00.000Z_pid1_face0000",
+				To:        "agent",
+				Thread:    thread,
+				Created:   time.Now().Add(-time.Minute).UTC().Format(time.RFC3339Nano),
+			}
+			if err := rememberEvent(cfg, claim); err != nil {
+				t.Fatal(err)
+			}
+			tc.plant(t, filepath.Join(fsq.AgentInboxNew(root, "agent"), claim.MessageID+".md"))
+
+			if _, err := DeliverCockpitPrompt(cfg, "build the thing", thread, event); err == nil {
+				t.Fatalf("a %s at the claimed inbox name reported delivery; want a refusal", tc.name)
+			}
+		})
+	}
+}
+
 // Review of #976 P1 b: the inbox absence check and the write are one
 // critical section under the event's post lock. When the first copy was
 // drained to cur/ before the replay ran, the replay still finds it (in

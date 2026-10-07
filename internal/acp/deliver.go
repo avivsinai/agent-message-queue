@@ -226,11 +226,19 @@ func deliverLocked(cfg Config, root *fsq.DeliveryRoot, build func(messageID, cre
 // (createExclusiveFile, the mailbox claim pattern) and the journal
 // directory is fsynced before any inbox write can name it (review of
 // #976 P1 c): the claim must be durable before delivery.
+//
+// Durability holds on EVERY path that can precede an inbox write (review of
+// #976 r2 P1): an adopted claim — this attempt lost the exclusive create to
+// a concurrent winner or found a claim from an earlier crashed attempt —
+// may not yet be durable (the winner's journal-dir sync can have failed),
+// so the adopt path re-syncs the claim file and the journal directory chain
+// under the post lock before any inbox write names it. A claim that cannot
+// be made durable refuses the attempt; a replay retries the sync.
 func claimEvent(cfg Config, root *fsq.DeliveryRoot, build func(messageID, created string) ([]byte, error), thread, eventID string) (eventRecord, error) {
 	if rec, err := readEventClaim(cfg, root, eventID); err != nil {
 		return eventRecord{}, err
 	} else if rec != nil {
-		return *rec, nil
+		return *rec, syncEventClaim(root, cfg.Me, eventID)
 	}
 	now := time.Now()
 	id, err := format.NewMessageID(now)
@@ -258,9 +266,26 @@ func claimEvent(cfg Config, root *fsq.DeliveryRoot, build func(messageID, create
 		if winner == nil {
 			return eventRecord{}, fmt.Errorf("event %s lost its claim and the claim is unreadable", eventID)
 		}
-		return *winner, nil
+		return *winner, syncEventClaim(root, cfg.Me, eventID)
 	}
 	return rec, nil
+}
+
+// syncEventClaim makes an existing claim durable before anything is
+// delivered under it: the claim file's content is already synced by its
+// write (writeAndSync), so what remains is the journal directory chain —
+// the claim file's directory and, because the acp-events directory may
+// itself be new, the outbox directory above it. A failure here leaves the
+// attempt refused: the next attempt retries the sync, and nothing is
+// published until one succeeds.
+func syncEventClaim(root *fsq.DeliveryRoot, me, eventID string) error {
+	if err := root.SyncDir(filepath.Join("agents", me, "outbox", "acp-events")); err != nil {
+		return fmt.Errorf("sync the event claim directory: %w", err)
+	}
+	if err := root.SyncDir(filepath.Join("agents", me, "outbox")); err != nil {
+		return fmt.Errorf("sync the outbox directory: %w", err)
+	}
+	return nil
 }
 
 // readEventClaim reads the claim of an event, if one exists, through the
@@ -340,15 +365,29 @@ func claimIdentity(eventID, messageID, to, thread string) *eventRecord {
 }
 
 // inboxHasMessage reports whether the recipient's inbox (new or cur) already
-// holds the claimed message id — the only delivery proof a replay trusts.
+// holds the claimed message: the only delivery proof a replay trusts. Both
+// locations are inspected through the pinned delivery root with a no-follow
+// regular-file read (review of #976 r2 P2): a directory or a symlink named
+// <id>.md is not a delivery, and the entry must parse as the claimed message
+// (header id equals the claimed id) — anything else refuses instead of
+// reporting a delivery that is not one.
 func inboxHasMessage(root *fsq.DeliveryRoot, handle, messageID string) (bool, error) {
 	name := messageID + ".md"
-	for _, dir := range []string{fsq.AgentInboxNew(root.Base(), handle), fsq.AgentInboxCur(root.Base(), handle)} {
-		if _, err := os.Lstat(filepath.Join(dir, name)); err == nil {
+	for _, rel := range []string{
+		filepath.Join("agents", handle, "inbox", "new", name),
+		filepath.Join("agents", handle, "inbox", "cur", name),
+	} {
+		msg, err := format.ReadMessageFileRoot(root, rel)
+		if err == nil {
+			if msg.Header.ID != messageID {
+				return false, fmt.Errorf("inbox holds %s under the claimed name but its header id is %s", rel, msg.Header.ID)
+			}
 			return true, nil
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return false, err
 		}
+		if os.IsNotExist(err) {
+			continue
+		}
+		return false, fmt.Errorf("the claimed inbox entry %s is not a readable message: %w", rel, err)
 	}
 	return false, nil
 }
