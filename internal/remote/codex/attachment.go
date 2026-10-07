@@ -1649,8 +1649,10 @@ func (a *Attachment) terminalQuestion(req ServerRequest) (string, *protocol.Inte
 	}
 	// The asked text is the harness's or an MCP server's own words and may
 	// echo a credential: then the DM shows only that something waits (Pro
-	// review of #985).
-	if secretscan.MayHold(prompt) {
+	// review of #985). The DM shows the display form, so both are screened.
+	raw := prompt
+	prompt = secretscan.DisplayForm(raw)
+	if secretscan.MayHold(raw) || secretscan.MayHold(prompt) {
 		prompt = asks[req.Method] + "; it may hold a secret, so only the terminal shows it."
 	}
 	// The owner sees that a long request was cut, as boundPreview shows it.

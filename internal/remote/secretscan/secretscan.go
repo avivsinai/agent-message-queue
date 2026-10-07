@@ -90,3 +90,15 @@ func MayHold(text string) bool {
 func NameMayHold(name string) bool {
 	return secretName.MatchString(unquote.Replace(name))
 }
+
+// DisplayForm is text as the DM shows it: control and format characters
+// other than newline and tab removed, as the carrier removes them. Screen
+// this form too: a removed character can hide a secret from MayHold.
+func DisplayForm(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\t' || !unicode.IsControl(r) && !unicode.Is(unicode.Cf, r) {
+			return r
+		}
+		return -1
+	}, s)
+}

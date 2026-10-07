@@ -163,6 +163,11 @@ func TestTerminalOnlyRequestsShowInTheDM(t *testing.T) {
 		{"23", "mcpServer/elicitation/request",
 			`{"threadId":"t1","turnId":"u1","serverName":"docs","mode":"form","message":"Confirm Authorization: Bearer abcdefgh12345678","requestedSchema":{"type":"object","properties":{}}}`,
 			"23", "An MCP server asks for input; it may hold a secret, so only the terminal shows it."},
+		// Pro review of #985 r2: a zero-width space the DM removes hid the
+		// credential from the screen.
+		{"24", "mcpServer/elicitation/request",
+			`{"threadId":"t1","turnId":"u1","serverName":"docs","mode":"form","message":"Confirm Bearer\u200b abcdefgh12345678","requestedSchema":{"type":"object","properties":{}}}`,
+			"24", "An MCP server asks for input; it may hold a secret, so only the terminal shows it."},
 	} {
 		srv.sendServerRequest(t, tc.reqID, tc.method, tc.params)
 		waitInteraction(t, att, key)

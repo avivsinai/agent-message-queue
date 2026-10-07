@@ -14,7 +14,6 @@ import (
 	"regexp"
 	"strings"
 	"time"
-	"unicode"
 	"unicode/utf8"
 
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
@@ -172,7 +171,7 @@ func approvalView(toolName string, input json.RawMessage, agentType string) (pre
 		fmt.Fprintf(&b, "Tool %s:\n%s", oneLine(toolName), canon)
 	}
 	raw := b.String()
-	candidate := displayForm(raw)
+	candidate := secretscan.DisplayForm(raw)
 	switch {
 	case secretscan.MayHold(candidate) || inputMayHoldSecret(input):
 		return bounded(previewHidden), false
@@ -203,17 +202,6 @@ const (
 func bounded(s string) string {
 	out, _ := protocol.TruncateText(s, protocol.MaxApprovalPreview)
 	return out
-}
-
-// displayForm is text as the DM shows it: control and format characters
-// other than newline and tab removed, as the carrier removes them.
-func displayForm(s string) string {
-	return strings.Map(func(r rune) rune {
-		if r == '\n' || r == '\t' || !unicode.IsControl(r) && !unicode.Is(unicode.Cf, r) {
-			return r
-		}
-		return -1
-	}, s)
 }
 
 type bashInput struct {
