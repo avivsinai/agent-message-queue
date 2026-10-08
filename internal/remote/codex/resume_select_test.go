@@ -65,7 +65,11 @@ func TestResolveResumeThreadSelectsTheLatestThreadAsCodexDoes(t *testing.T) {
 // naming both ids.
 func TestResolveResumeThreadRefusesAnAmbiguousName(t *testing.T) {
 	d := newFakeNamingDaemon(t)
-	home := t.TempDir()
+	// Codex lists paths under the real home; macOS temp dirs are symlinks.
+	home, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	one := writeRollout(t, filepath.Join(home, "sessions", "a.jsonl"))
 	two := writeRollout(t, filepath.Join(home, "sessions", "b.jsonl"))
 	d.pages = []string{fmt.Sprintf(`{"data":[{"id":%q,"name":"s1/codex","preview":"","path":%q},{"id":%q,"name":"s1/codex","preview":"","path":%q}],"nextCursor":null}`, resumeT1, one, resumeT2, two)}
