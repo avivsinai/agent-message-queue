@@ -135,7 +135,10 @@ func TestApprovalWithholdsApproveForUnseenGrants(t *testing.T) {
 		"{tool} -u 'alice: {pass}' example.invalid",
 		// Pro review of #988 r5: a backslash-newline the shell joins.
 		`{tool} -\\\nu {cred} example.invalid`, `{tool} -\\\nU {cred} example.invalid`,
-		`cu\\\nrl -u {cred} example.invalid`} {
+		`cu\\\nrl -u {cred} example.invalid`,
+		// 611.42.13 (Pro review of #988 r6): words the shell rebuilds.
+		`{tool} $'\\x2du' {cred} example.invalid`, `c$'u'rl -u {cred} example.invalid`,
+		`{tool} -$(printf u) {cred} example.invalid`} {
 		cmd := fill.Replace(row)
 		srv.notify(t, "serverRequest/resolved", `{"threadId":"t1","requestId":"`+strconv.Itoa(10+i)+`"}`)
 		waitNoInteraction(t, att)
@@ -148,9 +151,9 @@ func TestApprovalWithholdsApproveForUnseenGrants(t *testing.T) {
 	// Pro review of #988 r4: nor does a git remote URL or refspec after it.
 	for i, cmd := range []string{"git push -u origin main", "sort -u names.txt",
 		"git push -u git@github.com:acme/repo.git main", "git push origin -u main:main"} {
-		srv.notify(t, "serverRequest/resolved", `{"threadId":"t1","requestId":"`+strconv.Itoa(25+i)+`"}`)
+		srv.notify(t, "serverRequest/resolved", `{"threadId":"t1","requestId":"`+strconv.Itoa(28+i)+`"}`)
 		waitNoInteraction(t, att)
-		srv.sendServerRequest(t, strconv.Itoa(26+i), "item/commandExecution/requestApproval", `{"threadId":"t1","turnId":"u1","itemId":"v`+strconv.Itoa(i)+`","command":"`+cmd+`"}`)
+		srv.sendServerRequest(t, strconv.Itoa(29+i), "item/commandExecution/requestApproval", `{"threadId":"t1","turnId":"u1","itemId":"v`+strconv.Itoa(i)+`","command":"`+cmd+`"}`)
 		if in := pending(); in.ApproveOption != "accept" || in.Prompt != cmd {
 			t.Fatalf("command %q = approve %q prompt %q, want it shown whole with approve", cmd, in.ApproveOption, in.Prompt)
 		}

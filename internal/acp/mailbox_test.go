@@ -475,12 +475,14 @@ func pinnedTestRoot(t *testing.T) *fsq.DeliveryRoot {
 // receipts/; delivery completes its layout instead of refusing it.
 func TestMailboxDeliveryCompletesAnOlderMailbox(t *testing.T) {
 	s, root := mailboxServer(t)
-	s.cfg.TurnTimeout = 50 * time.Millisecond
 	if err := os.Remove(fsq.AgentReceipts(root, "agent")); err != nil {
 		t.Fatal(err)
 	}
-	if _, rpcErr := s.runRemote("s", "say hi", strings.Repeat("6", 64), newTurn(), func(any) error { return nil }); rpcErr != nil {
-		t.Fatal(rpcErr)
+	// The turn is answered once its prompt is in the inbox, so the test
+	// never races a turn timeout (it failed under full-suite load with a
+	// 50 ms timeout).
+	if result := runSteeredTurn(t, s, "s", strings.Repeat("6", 64), root, func(string) {}); result.StopReason != StopReasonEndTurn {
+		t.Fatalf("result = %+v, want the delivered prompt answered", result)
 	}
 	if ids := inboxPrompts(t, root); len(ids) != 1 {
 		t.Fatalf("inbox holds %d prompts; want 1", len(ids))
