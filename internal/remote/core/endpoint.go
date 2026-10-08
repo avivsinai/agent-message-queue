@@ -162,9 +162,10 @@ type Endpoint struct {
 	drainObligations map[requests.Key]int64
 	// answering serializes the answers to one interaction of one request:
 	// respond holds its lock from the first read through the refusal
-	// rollback, so a rollback only ever undoes its own intent (611.42.6,
-	// Pro review of #986 r1). An entry lives while a respond holds or waits
-	// for it.
+	// rollback, so a rollback never erases a later answer with another
+	// option (611.42.6, Pro review of #986 r1). Two answers with the same
+	// option share one intent, and the refused one's rollback clears it. An
+	// entry lives while a respond holds or waits for it.
 	answering map[answerKey]*answerLock
 }
 
