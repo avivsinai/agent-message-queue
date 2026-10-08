@@ -26,8 +26,9 @@ const (
 
 // ApproveEvidence is the proof an owner ✅ carries to a harness that allows
 // a call only with the owner's signature (bead 611.42.4): the owner's signed
-// reaction and the signed approval message it targets, both as received
-// and stored, never re-encoded from parts. The message's edit and deletion
+// reaction, or approve typed in the message's thread (611.42.10), and the
+// signed approval message it names, both as received and stored, never
+// re-encoded from parts. The message's edit and deletion
 // history is never taken from the evidence: the verifier reads it from the
 // relay itself (CheckHistory).
 type ApproveEvidence struct {
@@ -82,10 +83,13 @@ func (c *Carrier) storedApproval(messageID string, appr Approval) (nostr.Event, 
 // the call want.Prompt shows, in the share want names, and returns the
 // approval message. Every check must pass:
 //
-//   - the reaction is kind 7, its id is the hash of its content and its
-//     BIP-340 signature verifies under want.Owner;
-//   - its content is the approve gesture ✅ and its last e tag is the
-//     message's id;
+//   - the reaction's id is the hash of its content and its BIP-340
+//     signature verifies under want.Owner;
+//   - it is a kind 7 whose content is the approve gesture ✅ and whose last
+//     e tag is the message's id, or a kind 9 in the share's DM channel
+//     whose content is a typed approve and that replies in the message's
+//     thread (611.42.10): the message is among the events it names as its
+//     parent, root or unmarked e tag;
 //   - it is dated within [want.NotBefore, want.NotAfter];
 //   - the message is kind 9, its id and signature verify, it is signed by
 //     the share's body key and posted in the share's DM channel (h tag);
@@ -106,16 +110,22 @@ func VerifyApproveEvidence(raw json.RawMessage, want ApproveCheck) (nostr.Event,
 	switch {
 	case !validHexID(want.Owner) || !validHexID(want.Body) || want.Channel == "" || want.Target == "":
 		return m, errors.New("no complete pinned owner and share")
-	case r.Kind != KindReaction:
-		return m, errors.New("reaction is not kind 7")
+	case r.Kind != KindReaction && r.Kind != KindDM:
+		return m, errors.New("approve is neither a reaction nor a typed reply")
 	case !r.CheckID() || !r.VerifySignature():
 		return m, errors.New("reaction id or signature does not verify")
 	case r.PubKey.Hex() != want.Owner:
 		return m, errors.New("reaction is not signed by the pinned owner")
-	case strings.TrimSpace(r.Content) != approveReaction:
+	case r.Kind == KindReaction && strings.TrimSpace(r.Content) != approveReaction:
 		return m, errors.New("reaction is not the approve gesture")
-	case lastETag(r) != m.ID.Hex():
+	case r.Kind == KindReaction && lastETag(r) != m.ID.Hex():
 		return m, errors.New("reaction does not target the approval message")
+	case r.Kind == KindDM && typedAnswer(r.Content) != approveReaction:
+		return m, errors.New("typed reply is not an approve")
+	case r.Kind == KindDM && tagValue(r, "h") != want.Channel:
+		return m, errors.New("typed reply is not in this share's DM channel")
+	case r.Kind == KindDM && !slices.Contains(threadRefs(r), m.ID.Hex()):
+		return m, errors.New("typed reply is not in the approval message's thread")
 	}
 	created := time.Unix(int64(r.CreatedAt), 0)
 	if created.Before(want.NotBefore) || created.After(want.NotAfter) {

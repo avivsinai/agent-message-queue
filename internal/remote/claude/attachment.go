@@ -303,14 +303,19 @@ func (a *Attachment) Inspect() protocol.Session {
 	if status == "offline" {
 		att = "offline"
 	}
+	a.mu.Lock()
+	pending, active := a.pendingApprovalLocked()
+	a.mu.Unlock()
 	return protocol.Session{
-		Schema:      protocol.SchemaSession,
-		TargetID:    a.target,
-		Epoch:       SentinelUnpinned,
-		Harness:     "claude_code",
-		DisplayName: "claude " + a.target,
-		Attachment:  att,
-		Status:      status,
+		Schema:             protocol.SchemaSession,
+		TargetID:           a.target,
+		Epoch:              SentinelUnpinned,
+		Harness:            "claude_code",
+		DisplayName:        "claude " + a.target,
+		Attachment:         att,
+		Status:             status,
+		PendingInteraction: pending,
+		ActiveRequestRef:   active,
 		// PR2: submit true over the pinned socket wire; the rest stay
 		// false — no interrupt seam without keystrokes.
 		// ApproveTool: DM approvals through the PermissionRequest hook, when
