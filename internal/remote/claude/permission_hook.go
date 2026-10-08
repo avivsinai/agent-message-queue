@@ -192,8 +192,11 @@ func (h permissionHook) run(stdin io.Reader, stdout io.Writer, done <-chan struc
 				}
 			} else if over() {
 				return 0 // verified too late: never an allow after the end
-			} else if claimVerdict(h.home, in.SessionID, id, evidence, approvalVerdict{Verdict: verdictAllow}) != nil {
-				option = "" // a verdict on this proof stands already
+			} else if err := claimVerdict(h.home, in.SessionID, id, evidence, approvalVerdict{Verdict: verdictAllow}); err != nil {
+				option = "" // a verdict on this proof stands already, or none could be written
+				if !errors.Is(err, errFileExists) && h.stderr != nil {
+					_, _ = fmt.Fprintf(h.stderr, "amq-remote: ignored a Buzz allow for %s: %v\n", id, err)
+				}
 			} else if _, refused := rejectedRecord(h.home, in.SessionID, id, evidence); refused {
 				// A refusal of this proof, forged or not, came before the
 				// allow verdict: the endpoint may have dropped the intent

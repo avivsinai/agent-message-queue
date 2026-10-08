@@ -274,4 +274,9 @@ func TestApprovalHookNeverAllowsAProofRefusedDuringItsVerify(t *testing.T) {
 	if got := f.out.String(); strings.Contains(got, `"behavior":"allow"`) || !strings.Contains(got, `"behavior":"deny"`) {
 		t.Fatalf("hook printed %q, want the ❌ the endpoint took as deny", got)
 	}
+	// Advisor review of #1000: the endpoint read the allow verdict beside
+	// the refusal as allowed, so the DM said nothing about the refusal.
+	if v, ok := hookVerdict(f.home, approvalSession, f.id, proof); !ok || v.Verdict != verdictRefused {
+		t.Fatalf("verdict = %+v, %v; want the proof refused", v, ok)
+	}
 }

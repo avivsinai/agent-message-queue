@@ -505,16 +505,17 @@ func claimVerdict(home, sessionID, interactionID string, evidence json.RawMessag
 
 // hookVerdict reads the hook's verdict on this allow's evidence: its
 // verdict record, or, from a hook that writes none, its rejected record as
-// a refusal, altered when its reason says so. false means the hook has not
-// decided.
+// a refusal, altered when its reason says so. A rejected record also
+// overrides an allow verdict: the hook never applies that proof. false
+// means the hook has not decided.
 func hookVerdict(home, sessionID, interactionID string, evidence json.RawMessage) (approvalVerdict, bool) {
 	reason, refused := rejectedRecord(home, sessionID, interactionID, evidence)
 	var v approvalVerdict
 	err := readApprovalJSON(filepath.Join(approveDir(home, sessionID), "verdicts", proofName(interactionID, evidence)), &v)
 	switch {
-	case err == nil && (v.Verdict == verdictAllow || v.Verdict == verdictRefused):
+	case err == nil && v.Verdict == verdictRefused, err == nil && v.Verdict == verdictAllow && !refused:
 		return v, true
-	case refused:
+	case refused: // an allow verdict beside a rejected record never applied
 		return approvalVerdict{Verdict: verdictRefused, Reason: reason, Altered: strings.Contains(reason, ErrAllowAltered.Error())}, true
 	}
 	return approvalVerdict{}, false
