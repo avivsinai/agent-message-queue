@@ -1,14 +1,19 @@
 package cli
 
 import (
+	"context"
 	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 
 	"github.com/avivsinai/agent-message-queue/internal/codexidentity"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
+	"github.com/avivsinai/agent-message-queue/internal/remote/codex"
 )
 
 // identityEnvKeys are the variables that make up an AMQ participant
@@ -122,65 +127,258 @@ func codexThreadIdentityRecorder(env []string) func(thread string) error {
 	}
 }
 
-// codexResumeSelection reads the thread a Codex resume launch selects:
-// codex resume [OPTIONS] [SESSION_ID] [PROMPT] (codex-cli 0.160), where
-// AMQ's own session resume puts its options first and the id last. thread
-// is the id when the first positional is a thread id; selected is false for
-// a launch that is not a resume, and unresolved is true for a resume that
-// names no thread id (--last, a name, the picker) or that AMQ cannot parse.
-func codexResumeSelection(args []string) (thread string, selected, unresolved bool) {
+// codexResume is a parsed codex resume [OPTIONS] [SESSION_ID] [PROMPT]
+// launch (codex-cli 0.160), where AMQ's own session resume puts its options
+// first and the id last.
+type codexResume struct {
+	// start is the index of resume in args; opts are the options after it,
+	// less --last, --all and --include-non-interactive.
+	start int
+	opts  []string
+	pos   []codexPositional
+	// last, all and includeNonInteractive are the selection-only flags.
+	last, all, includeNonInteractive bool
+	// unparsed is an option AMQ does not know (or -i), or more than two
+	// positionals; parsing stops at such an option.
+	unparsed bool
+}
+
+type codexPositional struct {
+	value     string
+	afterDash bool
+}
+
+// parseCodexResume parses args; ok is false for a launch that is not a resume.
+func parseCodexResume(args []string) (r codexResume, ok bool) {
 	// resume is the first positional; options may stand before it.
-	start := -1
-	for i := 0; i < len(args) && start < 0; i++ {
+	r.start = -1
+	for i := 0; i < len(args) && r.start < 0; i++ {
 		flag, _, inline := strings.Cut(args[i], "=")
 		switch {
 		case args[i] == "--":
-			return "", false, false
+			return r, false
 		case !strings.HasPrefix(args[i], "-"):
 			if args[i] != "resume" {
-				return "", false, false
+				return r, false
 			}
-			start = i
+			r.start = i
 		case codexValueOptions[flag] && !inline:
 			i++
 		}
 	}
-	if start < 0 {
-		return "", false, false
+	if r.start < 0 {
+		return r, false
 	}
-	args = args[start:]
-	// With --last anywhere Codex takes the most recent session and reads a
-	// leading id as the prompt (codex-cli 0.160 cli/src/main.rs
-	// finalize_resume_interactive), so no id names the thread.
-	if slices.Contains(args, "--last") {
-		return "", true, true
-	}
-	for i := 1; i < len(args); i++ {
+	dash := false
+	for i := r.start + 1; i < len(args); i++ {
 		arg := args[i]
-		if arg == "--" {
-			if i+1 < len(args) && codexidentity.ValidThread(args[i+1]) {
-				return args[i+1], true, false
-			}
-			return "", true, true
-		}
-		if !strings.HasPrefix(arg, "-") {
-			if codexidentity.ValidThread(arg) {
-				return arg, true, false
-			}
-			return "", true, true
+		if dash || arg != "--" && !strings.HasPrefix(arg, "-") {
+			r.pos = append(r.pos, codexPositional{arg, dash})
+			continue
 		}
 		flag, _, inline := strings.Cut(arg, "=")
 		switch {
-		case codexFlagOptions[flag] || codexEmbeddedFlags[flag] || flag == "--all" || flag == "--include-non-interactive":
-		case codexValueOptions[flag]:
+		case arg == "--":
+			dash = true
+		case arg == "--last":
+			r.last = true
+		case arg == "--all":
+			r.all = true
+		case arg == "--include-non-interactive":
+			r.includeNonInteractive = true
+		case codexFlagOptions[flag] || codexEmbeddedFlags[flag]:
+			r.opts = append(r.opts, arg)
+		case codexValueOptions[flag] && (inline || i+1 < len(args)):
+			r.opts = append(r.opts, arg)
 			if !inline {
 				i++
+				r.opts = append(r.opts, args[i])
 			}
 		default:
-			return "", true, true // --last, -i, or an option AMQ does not know
+			// With --last anywhere Codex takes the most recent session and
+			// reads a leading id as the prompt.
+			r.unparsed = true
+			r.last = r.last || slices.Contains(args[i:], "--last")
+			return r, true
 		}
 	}
-	return "", true, true // the picker
+	r.unparsed = r.unparsed || len(r.pos) > 2
+	return r, true
+}
+
+// selection applies codex-cli 0.160's argument mapping (cli/src/main.rs
+// finalize_resume_interactive): with --last and one positional, it is the
+// prompt; otherwise the first positional selects the thread and wins over
+// --last. last reports whether the most recent thread is selected.
+func (r codexResume) selection() (selector, prompt *codexPositional, last bool) {
+	switch {
+	case r.last && len(r.pos) == 1:
+		return nil, &r.pos[0], true
+	case len(r.pos) == 0:
+		return nil, nil, r.last
+	case len(r.pos) == 1:
+		return &r.pos[0], nil, false
+	}
+	return &r.pos[0], &r.pos[1], false
+}
+
+// codexResumeSelection reads the thread a Codex resume launch selects.
+// thread is the id when the first positional is a thread id; selected is
+// false for a launch that is not a resume, and unresolved is true for a
+// resume that names no thread id (--last, a name, the picker) or that AMQ
+// cannot parse.
+func codexResumeSelection(args []string) (thread string, selected, unresolved bool) {
+	r, ok := parseCodexResume(args)
+	if !ok {
+		return "", false, false
+	}
+	if !r.last && len(r.pos) > 0 && codexidentity.ValidThread(r.pos[0].value) {
+		return r.pos[0].value, true, false
+	}
+	return "", true, true
+}
+
+// codexResumeRefusal stops a resume launch whose thread AMQ cannot select.
+func codexResumeRefusal(format string, args ...any) error {
+	return ContextMismatchError("cannot bind the requested AMQ identity before this Codex resume launch: %s. Pass a concrete thread id: amq coop exec ... codex -- resume <thread-id>, or use amq session resume. Codex was not started", fmt.Sprintf(format, args...))
+}
+
+// resolveCodexResumeLaunch turns `codex resume --last` and `codex resume
+// <name>` on the Codex daemon into `codex resume <thread-id>`, so the thread
+// coop exec binds is the thread the TUI opens (agent-message-queue-611.64).
+// AMQ selects once, with the TUI's own daemon requests, and the id travels in
+// argv; recordResumedCodexThread then records it. AMQ ports no Codex
+// heuristic: where Codex's cwd or provider choice could differ from AMQ's
+// (-C, a symlinked cwd, linked worktrees, a profile's provider) --last or a
+// name refuses. Every other resume passes through unchanged, and
+// recordResumedCodexThread refuses those it cannot bind.
+func resolveCodexResumeLaunch(binaryPath string, args []string) ([]string, error) {
+	if launch.ProviderForExecutable(binaryPath) != launch.CodexProvider {
+		return args, nil
+	}
+	r, ok := parseCodexResume(args)
+	if !ok || r.unparsed {
+		return args, nil
+	}
+	selector, prompt, last := r.selection()
+	if selector == nil && !last {
+		return args, nil // the picker
+	}
+	if selector != nil && codexidentity.ValidThread(selector.value) {
+		if !r.last {
+			return args, nil
+		}
+		return rewriteCodexResume(args, r, selector.value, prompt), nil
+	}
+	if selector != nil && codex.ParsesAsUUID(selector.value) {
+		return nil, codexResumeRefusal("pass the thread id %s in lowercase hyphenated form", selector.value)
+	}
+	// syscall.Getwd, not os.Getwd: the TUI's cwd is getcwd, not $PWD.
+	wd, err := syscall.Getwd()
+	if err != nil {
+		return nil, codexResumeRefusal("cannot read the working directory: %v", err)
+	}
+	codexHome, err := codexHomeDir()
+	if err != nil {
+		return nil, codexResumeRefusal("cannot resolve CODEX_HOME: %v", err)
+	}
+	opts := append(slices.Clone(args[:r.start]), r.opts...)
+	backend, features := codexLaunchBackend(binaryPath, opts, wd, codexHome)
+	switch backend {
+	case codexEmbedded:
+		return nil, codexResumeRefusal("this Codex runs its own app-server, where AMQ cannot select the thread")
+	case codexBackendUnknown:
+		return nil, codexResumeRefusal("AMQ cannot tell whether this Codex runs on its shared daemon")
+	}
+	sock, err := codex.ControlSocket(codexHome)
+	if err != nil {
+		return nil, codexResumeRefusal("no Codex daemon is running")
+	}
+	query := codex.ResumeQuery{ConfigCwd: codexLaunchDir(opts, wd), IncludeNonInteractive: r.includeNonInteractive, CodexHome: codexHome}
+	if selector != nil {
+		query.Name = selector.value
+	} else if !r.all {
+		if reason := codexLastCwdChanges(opts, wd, features); reason != "" {
+			return nil, codexResumeRefusal("%s changes which thread Codex calls last", reason)
+		}
+		query.Cwd = wd
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), codexDaemonNamingTimeout)
+	defer cancel()
+	thread, err := codex.ResolveResumeThread(ctx, sock, query)
+	switch {
+	case errors.Is(err, codex.ErrNoResumeThread) && selector != nil:
+		return nil, codexResumeRefusal("no saved Codex session is named %q", selector.value)
+	case errors.Is(err, codex.ErrNoResumeThread):
+		return nil, codexResumeRefusal("no Codex session to resume for %s; start without resume", wd)
+	case err != nil:
+		return nil, codexResumeRefusal("Codex daemon: %v", err)
+	case !codexidentity.ValidThread(thread):
+		return nil, codexResumeRefusal("Codex daemon returned thread id %q", thread)
+	}
+	return rewriteCodexResume(args, r, thread, prompt), nil
+}
+
+// codexLastCwdChanges names what makes the TUI filter --last by another cwd
+// than wd, or "": -C (canonicalized by Codex), a symlinked cwd, or linked
+// worktrees while the worktrees feature is on (tui/src/resume_picker.rs
+// repository_cwd_filter).
+func codexLastCwdChanges(opts []string, wd string, features map[string]bool) string {
+	worktrees := features["worktrees"]
+	for i := 0; i < len(opts); i++ {
+		flag, value, inline := strings.Cut(opts[i], "=")
+		if !codexValueOptions[flag] {
+			continue
+		}
+		if !inline && i+1 < len(opts) {
+			i++
+			value = opts[i]
+		}
+		key, raw, _ := strings.Cut(value, "=")
+		switch {
+		case flag == "-C" || flag == "--cd":
+			return "-C"
+		case (flag == "--enable" || flag == "--disable") && value == "worktrees":
+			worktrees = flag == "--enable"
+		case (flag == "-c" || flag == "--config") && strings.TrimSpace(key) == "features.worktrees":
+			worktrees = strings.TrimSpace(raw) == "true"
+		}
+	}
+	if real, err := filepath.EvalSymlinks(wd); err != nil || real != wd {
+		return "a symlinked working directory"
+	}
+	if worktrees && codexHasLinkedWorktrees(wd) {
+		return "a repository with linked worktrees"
+	}
+	return ""
+}
+
+// codexHasLinkedWorktrees reports whether dir's checkout is a linked
+// worktree or has one.
+func codexHasLinkedWorktrees(dir string) bool {
+	root := codexNearestGitAncestor(dir)
+	if root == "" {
+		return false
+	}
+	if info, err := os.Lstat(filepath.Join(root, ".git")); err != nil || !info.IsDir() {
+		return true
+	}
+	entries, err := os.ReadDir(filepath.Join(root, ".git", "worktrees"))
+	return len(entries) > 0 || err != nil && !errors.Is(err, fs.ErrNotExist)
+}
+
+// rewriteCodexResume returns args resuming thread: the options before and
+// after resume, the id, and the prompt (after -- if it was).
+func rewriteCodexResume(args []string, r codexResume, thread string, prompt *codexPositional) []string {
+	out := append(slices.Clone(args[:r.start+1]), r.opts...)
+	out = append(out, thread)
+	if prompt != nil {
+		if prompt.afterDash {
+			out = append(out, "--")
+		}
+		out = append(out, prompt.value)
+	}
+	return out
 }
 
 // recordResumedCodexThread records the identity for the Codex thread a

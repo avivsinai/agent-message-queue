@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/avivsinai/agent-message-queue/internal/codexidentity"
@@ -107,20 +108,16 @@ func TestUnrecordableThreadStopsTheLaunch(t *testing.T) {
 
 // Review of #993 r3 (Pro, P1): a resume that names no thread id let Codex
 // pick a thread, possibly one recorded for another session or handle, and
-// amq there took that other identity. AMQ refuses it before exec. With
-// --last, Codex reads a leading id as the prompt, so that id binds nothing.
+// amq there took that other identity. AMQ refuses it before exec; --last and
+// a name are resolved to an id first (resolveCodexResumeLaunch).
 func TestUnresolvedCodexResumeIsRefused(t *testing.T) {
 	const id = "01a1166e-dd8e-77c0-bc3b-a4b7e24e91ac"
 	recorded := 0
 	record := func(string) error { recorded++; return nil }
 	for _, args := range [][]string{
-		{"resume", "--last"},
-		{"resume", id, "--last"},
-		{"resume", "s1/codex"},
 		{"resume", "--all"},
 		{"resume", "-i", "shot.png", id},
 		// Review of #993 r4 (Pro, P1): options before the subcommand.
-		{"--no-alt-screen", "resume", "--last"},
 		{"-c", "model=x", "resume"},
 	} {
 		err := recordResumedCodexThread("codex", args, nil)
@@ -134,6 +131,31 @@ func TestUnresolvedCodexResumeIsRefused(t *testing.T) {
 	}
 	if recorded != 0 {
 		t.Fatalf("recorded %d unresolved selections", recorded)
+	}
+}
+
+// Bead agent-message-queue-611.64 acceptance rows 1 and 2: a resume --last
+// carries the thread AMQ selected (T1) in argv, so a thread that becomes
+// latest later is not the one Codex opens, and a leading id U is the prompt,
+// never the thread. AMQ binds T1 and Codex gets no --last.
+func TestCodexResumeLastCarriesTheSelectedThread(t *testing.T) {
+	const t1, u = "01a1166e-dd8e-77c0-bc3b-a4b7e24e91b1", "01a1166e-dd8e-77c0-bc3b-a4b7e24e91b9"
+	for _, tc := range []struct{ args, want []string }{
+		{[]string{"resume", "--last"}, []string{"resume", t1}},
+		{[]string{"resume", u, "--last"}, []string{"resume", t1, u}},
+		{[]string{"--no-alt-screen", "resume", "--last", "-m", "x", "--", "-fix it"}, []string{"--no-alt-screen", "resume", "-m", "x", t1, "--", "-fix it"}},
+	} {
+		r, ok := parseCodexResume(tc.args)
+		selector, prompt, last := r.selection()
+		if !ok || r.unparsed || selector != nil || !last {
+			t.Fatalf("%q: parsed %+v, selector %v, last %v; want --last with no selector", tc.args, r, selector, last)
+		}
+		args := rewriteCodexResume(tc.args, r, t1, prompt)
+		var recorded []string
+		err := recordResumedCodexThread("codex", args, func(thread string) error { recorded = append(recorded, thread); return nil })
+		if err != nil || !slices.Equal(args, tc.want) || !slices.Equal(recorded, []string{t1}) {
+			t.Fatalf("%q: argv %q, recorded %q, err %v; want %q bound to %s", tc.args, args, recorded, err, tc.want, t1)
+		}
 	}
 }
 

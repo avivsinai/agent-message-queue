@@ -32,13 +32,8 @@ func StartNamedThread(ctx context.Context, sock, cwd, name string) (string, erro
 		return "", err
 	}
 	defer func() { _ = client.Close() }()
-	// historyMode is an experimental thread/start field.
-	initParams := map[string]any{
-		"clientInfo":   map[string]string{"name": "amq", "version": Version},
-		"capabilities": map[string]any{"experimentalApi": true},
-	}
-	if err := client.Call(ctx, "initialize", initParams, nil); err != nil {
-		return "", fmt.Errorf("initialize: %w", err)
+	if err := initializeAMQ(ctx, client); err != nil {
+		return "", err
 	}
 	var started struct {
 		Thread struct {
@@ -84,4 +79,17 @@ func StartNamedThread(ctx context.Context, sock, cwd, name string) (string, erro
 	}
 	ok = true
 	return id, nil
+}
+
+// initializeAMQ opens an app-server session as AMQ, with the experimental
+// API on (historyMode is an experimental thread/start field).
+func initializeAMQ(ctx context.Context, client *Client) error {
+	initParams := map[string]any{
+		"clientInfo":   map[string]string{"name": "amq", "version": Version},
+		"capabilities": map[string]any{"experimentalApi": true},
+	}
+	if err := client.Call(ctx, "initialize", initParams, nil); err != nil {
+		return fmt.Errorf("initialize: %w", err)
+	}
+	return nil
 }
