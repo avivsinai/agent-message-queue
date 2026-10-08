@@ -43,7 +43,7 @@ func TestStartNamedThreadArchivesAThreadItCouldNotFinish(t *testing.T) {
 }
 
 // fakeNamingDaemon serves app-server connections that start, name, and
-// persist one thread.
+// persist one thread, and list and read threads for a resume selection.
 type fakeNamingDaemon struct {
 	sock      string
 	mu        sync.Mutex
@@ -52,6 +52,14 @@ type fakeNamingDaemon struct {
 	// failInject makes thread/inject_items fail; archived records a
 	// thread/archive of the started thread.
 	failInject, archived bool
+	// pages answer thread/list in turn; calls records every request.
+	pages []string
+	calls []fakeCall
+}
+
+type fakeCall struct {
+	method string
+	params json.RawMessage
 }
 
 func newFakeNamingDaemon(t *testing.T) *fakeNamingDaemon {
@@ -102,7 +110,20 @@ func (d *fakeNamingDaemon) serve(conn net.Conn) {
 		_ = json.Unmarshal(msg.Params, &p)
 		var result any = map[string]any{}
 		d.mu.Lock()
+		d.calls = append(d.calls, fakeCall{msg.Method, msg.Params})
 		switch msg.Method {
+		case "config/read":
+			result = map[string]any{"config": map[string]any{"model_provider": nil}, "origins": map[string]any{}, "layers": []any{}}
+		case "thread/list":
+			result = json.RawMessage(`{"data":[],"nextCursor":null}`)
+			if len(d.pages) > 0 {
+				result, d.pages = json.RawMessage(d.pages[0]), d.pages[1:]
+			}
+		case "thread/read":
+			// A daemon has not loaded a thread no client opened.
+			d.mu.Unlock()
+			_ = ws.writeText([]byte(`{"jsonrpc":"2.0","id":` + string(*msg.ID) + `,"error":{"code":-32600,"message":"thread not loaded: ` + p.ThreadID + `"}}`))
+			continue
 		case "thread/start":
 			d.cwd = p.Cwd
 			result = map[string]any{"thread": map[string]any{"id": "t1"}}

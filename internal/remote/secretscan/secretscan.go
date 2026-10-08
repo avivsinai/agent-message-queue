@@ -19,6 +19,15 @@ var secretShapes = []*regexp.Regexp{
 	regexp.MustCompile(`://[^/\s:@]+:[^/\s@]*@`),
 }
 
+// curl's -u and -U always take user:password, so a curl command with
+// either, alone, in a short-option cluster or attached, may show one,
+// whatever its value looks like (Pro review of #988: value shapes did not
+// converge). Other tools' -u, as in git push -u, stays visible.
+var (
+	curlCommand = regexp.MustCompile(`(?:^|[^A-Za-z0-9_.-])curl(?:$|[^A-Za-z0-9_.-])`)
+	curlUserOpt = regexp.MustCompile(`(?:^|[\s'"=;|&(])-[^\s'"-]*[uU]`)
+)
+
 // sk- tokens are found by context. skAtWordStart is sk- at the start of the
 // text or after a character that is no letter or digit. skInOptions is sk-
 // inside a word that starts with a single dash, whatever stands between the
@@ -41,7 +50,7 @@ func hasSKToken(t string) bool {
 // a flag rule only and never matched in a JSON key.
 var (
 	secretName     = regexp.MustCompile(`(?i)(passw|passphrase|pwd|secret|token|key|auth|credential|bearer|private|cookie|session[_-]?id)`)
-	credentialFlag = regexp.MustCompile(`(?i)^(user|passphrase)$`)
+	credentialFlag = regexp.MustCompile(`(?i)^(user|proxy-user|passphrase)$`)
 )
 
 // Names in text: an assignment identifier (NAME=, NAME:) and a flag
@@ -59,14 +68,20 @@ var (
 // removed. It is deliberately broad: a false positive costs only the
 // preview, and the owner can still block the call.
 func MayHold(text string) bool {
-	spaced := strings.Map(func(r rune) rune {
-		if unicode.IsSpace(r) {
-			return ' '
-		}
-		return r
-	}, text)
-	for _, t := range []string{spaced, unquote.Replace(spaced)} {
-		if hasSKToken(t) {
+	spaced := func(s string) string {
+		return strings.Map(func(r rune) rune {
+			if unicode.IsSpace(r) {
+				return ' '
+			}
+			return r
+		}, s)
+	}
+	// The shell joins a backslash-newline before it splits words, so the
+	// text is also read joined: curl -\<newline>u runs as curl -u (Pro
+	// review of #988).
+	joined := spaced(strings.ReplaceAll(text, "\\\n", ""))
+	for _, t := range []string{spaced(text), unquote.Replace(spaced(text)), joined, unquote.Replace(joined)} {
+		if hasSKToken(t) || curlCommand.MatchString(t) && curlUserOpt.MatchString(t) {
 			return true
 		}
 		for _, re := range secretShapes {

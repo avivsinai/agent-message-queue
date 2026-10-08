@@ -1,6 +1,6 @@
 ---
 name: amq-remote
-version: 0.89.2 # x-release-please-version
+version: 0.91.0 # x-release-please-version
 description: Let the owner reach this running agent from Buzz, on the phone or in Buzz Desktop. Use when the user types /amq-remote (Claude Code) or $amq-remote (Codex), /amq-remote --native, /amq-remote off, or /amq-remote status, or asks to control this session from Buzz. Not for AMQ messaging between agents (use amq-cli).
 metadata:
   short-description: Reach this agent from Buzz
@@ -95,7 +95,9 @@ command's own message. Do not work around a refusal.
 Codex with `--native`: attach needs `CODEX_THREAD_ID` and a thread loaded in
 the Codex app-server daemon. A session started with plain `codex` is not in
 the daemon; start it with `codex app-server daemon start`, then
-`codex --remote unix://`.
+`codex --remote unix://`. Run `amq-remote` and `amq-acp` outside Codex's
+sandbox (request escalation): the sandbox blocks the daemon socket, and
+`amq-acp setup` writes files outside the workspace.
 
 ## Answering a Buzz DM (default mailbox)
 
