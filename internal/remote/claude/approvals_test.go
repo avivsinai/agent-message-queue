@@ -472,18 +472,12 @@ func TestApprovalDenyNotWrittenIsNotSent(t *testing.T) {
 }
 
 // writeClaim lays down a request and the hook's claim on it, as a hook
-// with pid hookPID leaves them, plus its delivery record when delivery is
-// not nil.
-func (f *approvalFixture) writeClaim(hookPID int, delivery *bool) {
+// with pid hookPID leaves them before its delivery record.
+func (f *approvalFixture) writeClaim(hookPID int) {
 	f.t.Helper()
 	f.writeRequest(hookPID)
 	if err := writeResolved(f.home, approvalSession, approvalResolved{InteractionID: f.id, Outcome: outcomeHookClaim, Option: optionDeny}); err != nil {
 		f.t.Fatal(err)
-	}
-	if delivery != nil {
-		if err := writeDelivery(f.home, approvalSession, f.id, *delivery); err != nil {
-			f.t.Fatal(err)
-		}
 	}
 }
 
@@ -550,28 +544,16 @@ func TestApprovalSettlesInItsOwnSessionAfterASwitch(t *testing.T) {
 }
 
 // Pro review of #929 r3, 2026-10-01, #1: an unfinished claim is delivery
-// unknown. A hook stopped before its stdout write and one stopped after it
-// but before its delivery record leave the same files, a claim and no
-// record; a hook whose record write failed leaves them too. With the hook
-// gone, each settles delivery_unknown, as does a record of a failed write.
+// unknown. A hook stopped before its stdout write, one stopped after it but
+// before its delivery record, and one whose record write failed all leave
+// the same files: a claim and no record. With the hook gone, it settles
+// delivery_unknown. A record of a failed write is
+// TestApprovalDenyNotWrittenIsNotSent.
 func TestApprovalUnfinishedClaimIsDeliveryUnknown(t *testing.T) {
-	notWritten := false
-	for _, tc := range []struct {
-		name     string
-		delivery *bool
-	}{
-		{"interrupted before stdout", nil},
-		{"interrupted after stdout, before the record", nil},
-		{"delivery record write failed", nil},
-		{"stdout write failed", &notWritten},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			f := newApprovalFixture(t, bashUse("toolu_1", "go test ./..."))
-			f.writeClaim(0, tc.delivery) // pid 0: no live hook
-			if ev := f.resolution(); ev.Outcome != protocol.ResolutionDeliveryUnknown || ev.Remote {
-				t.Fatalf("resolution = %+v, want delivery_unknown", ev)
-			}
-		})
+	f := newApprovalFixture(t, bashUse("toolu_1", "go test ./..."))
+	f.writeClaim(0) // pid 0: no live hook
+	if ev := f.resolution(); ev.Outcome != protocol.ResolutionDeliveryUnknown || ev.Remote {
+		t.Fatalf("resolution = %+v, want delivery_unknown", ev)
 	}
 }
 
@@ -581,7 +563,7 @@ func TestApprovalUnfinishedClaimIsDeliveryUnknown(t *testing.T) {
 // later loses to the one the run's end wrote.
 func TestApprovalRunEndBeforeDeliveryRecordsDeliveryUnknown(t *testing.T) {
 	f := newApprovalFixture(t, bashUse("toolu_1", "go test ./..."))
-	f.writeClaim(os.Getpid(), nil)
+	f.writeClaim(os.Getpid())
 	f.question()
 	appendStopMarker(t, f.home, f.base.Add(2*time.Second).UnixMilli())
 	if ev := f.resolution(); ev.Outcome != protocol.ResolutionDeliveryUnknown || ev.Remote {

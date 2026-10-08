@@ -75,7 +75,7 @@ type settingsShape struct {
 // nested command runs the quoted amq-remote binary (the marker is an env
 // assignment in front of it, not the command word).
 func TestInstalledStopHookShapeAndCommandWord(t *testing.T) {
-	_, installed := installSettings(t, "")
+	home, installed := installSettings(t, "")
 	var s settingsShape
 	if err := json.Unmarshal([]byte(installed), &s); err != nil {
 		t.Fatalf("installed settings is not valid JSON: %v\n%s", err, installed)
@@ -89,24 +89,39 @@ func TestInstalledStopHookShapeAndCommandWord(t *testing.T) {
 	if cmd != want {
 		t.Fatalf("command = %q, want %q", cmd, want)
 	}
+	// A second install of the same hook is a no-op.
+	if err := InstallStopHook(home, "/opt/amq bin/amq-remote"); err != nil {
+		t.Fatal(err)
+	}
+	if again, _ := os.ReadFile(settingsPath(home)); string(again) != installed {
+		t.Fatalf("second install rewrote settings.json:\n%s", again)
+	}
 }
 
 // codex #855 r1 item 5 and r2 item 3: install into existing hooks without
-// Stop, and into an operator's existing empty Stop array. Install yields
-// valid JSON with one hooks object and the prior hooks intact. Uninstall
-// removes our hook and never an operator container: the file with its own
-// Stop array round-trips byte for byte; the other keeps the Stop array we
-// had to create, empty.
+// Stop, into an operator's existing empty Stop array, and in front of an
+// operator's own Stop hook. Install yields valid JSON with one hooks object
+// and the prior hooks intact. Uninstall removes our hook and never an
+// operator container: a file with its own Stop array round-trips byte for
+// byte, including a 2^53 number a float decode would corrupt; the other
+// keeps the Stop array we had to create, empty.
 func TestInstallIntoExistingHooksRoundTrips(t *testing.T) {
-	for name, tc := range map[string]struct{ original, afterUninstall string }{
+	operatorStop := "{\n  \"hooks\": {\n    \"Stop\": [\n      {\n        \"type\": \"command\",\n        \"command\": \"echo unrelated\"\n      }\n    ]\n  },\n  \"precision_fixture\": 9007199254740993\n}\n"
+	for name, tc := range map[string]struct {
+		original, afterUninstall string
+		stopGroups               int
+	}{
 		"hooks without Stop": {
 			original:       "{\n  \"hooks\": {\n    \"PreToolUse\": [{\"matcher\": \"*\", \"hooks\": [{\"type\": \"command\", \"command\": \"echo pre\"}]}]\n  }\n}\n",
 			afterUninstall: "{\n  \"hooks\": {\"Stop\":[],\n    \"PreToolUse\": [{\"matcher\": \"*\", \"hooks\": [{\"type\": \"command\", \"command\": \"echo pre\"}]}]\n  }\n}\n",
+			stopGroups:     1,
 		},
 		"operator's empty Stop": {
 			original:       "{\"hooks\":{\"Stop\":[]},\"x\":1}\n",
 			afterUninstall: "{\"hooks\":{\"Stop\":[]},\"x\":1}\n",
+			stopGroups:     1,
 		},
+		"operator's Stop hook": {original: operatorStop, afterUninstall: operatorStop, stopGroups: 2},
 	} {
 		t.Run(name, func(t *testing.T) {
 			home, installed := installSettings(t, tc.original)
@@ -118,8 +133,8 @@ func TestInstallIntoExistingHooksRoundTrips(t *testing.T) {
 			}
 			var s settingsShape
 			_ = json.Unmarshal([]byte(installed), &s)
-			if len(s.Hooks["Stop"]) != 1 {
-				t.Fatalf("Stop chain has %d groups, want 1:\n%s", len(s.Hooks["Stop"]), installed)
+			if len(s.Hooks["Stop"]) != tc.stopGroups {
+				t.Fatalf("Stop chain has %d groups, want %d:\n%s", len(s.Hooks["Stop"]), tc.stopGroups, installed)
 			}
 			if strings.Contains(tc.original, "PreToolUse") && len(s.Hooks["PreToolUse"]) != 1 {
 				t.Fatalf("prior PreToolUse hooks lost:\n%s", installed)
@@ -164,9 +179,14 @@ func TestUninstallFromMixedGroupKeepsForeignHook(t *testing.T) {
 }
 
 // codex #855 r1 receiver boundary: a session id with separators must not
-// become a path outside the marker directory.
+// become a path outside the marker directory, even when a binding names it.
 func TestReceiverRefusesTraversalSessionID(t *testing.T) {
 	home := t.TempDir()
+	bindingPath := filepath.Join(home, "binding.json")
+	if err := os.WriteFile(bindingPath, []byte(`{"native_session":"../escape"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AMQ_REMOTE_BINDING", bindingPath)
 	if code := RunStopHookReceiver(home, strings.NewReader(`{"session_id":"../escape"}`), os.Stderr); code != 0 {
 		t.Fatalf("exit = %d, want 0", code)
 	}

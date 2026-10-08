@@ -63,36 +63,10 @@ func TestAttachResolvesRegistryAndTarget(t *testing.T) {
 	if s.Epoch != SentinelUnpinned {
 		t.Fatalf("epoch = %q, want the unpinned sentinel (PR1 binds nothing)", s.Epoch)
 	}
-	// Honest projection: inspect true, submit true (PR2 wired the socket),
-	// the interrupt family false.
-	if !s.Capabilities.Inspect {
-		t.Fatal("inspect capability must be true")
-	}
-	if !s.Capabilities.Submit {
-		t.Fatal("submit must be TRUE: PR2 wired the pinned 611.2 socket wire")
-	}
-	for _, cap := range []string{"cancel_request", "approve_tool", "answer_question", "steer"} {
-		switch cap {
-		case "cancel_request":
-			if s.Capabilities.CancelRequest {
-				t.Fatalf("%s must be false (no interrupt seam without keystrokes)", cap)
-			}
-		case "approve_tool":
-			if s.Capabilities.ApproveTool {
-				t.Fatalf("%s must be false", cap)
-			}
-		case "answer_question":
-			if s.Capabilities.AnswerQuestion {
-				t.Fatalf("%s must be false", cap)
-			}
-		case "steer":
-			if s.Capabilities.Steer {
-				t.Fatalf("%s must be false", cap)
-			}
-		}
-	}
-	if s.Capabilities.Terminal != "unavailable" {
-		t.Fatalf("terminal = %q, want unavailable", s.Capabilities.Terminal)
+	// Honest projection: inspect and submit (the socket wire), nothing in
+	// the interrupt family, and no approvals without cfg.Approve.
+	if want := (protocol.Capabilities{Inspect: true, Submit: true, Terminal: "unavailable"}); s.Capabilities != want {
+		t.Fatalf("capabilities = %+v, want %+v", s.Capabilities, want)
 	}
 	// Submit proves delivery only, so the projection is submitted, never
 	// admitted: a relay share for Claude sets min_evidence submitted (lead
