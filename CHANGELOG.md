@@ -8,6 +8,13 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.90.0](https://github.com/avivsinai/agent-message-queue/compare/v0.89.2...v0.90.0) (2026-10-08)
+
+
+### Features
+
+* **remote:** deny a Claude tool call from the Buzz Desktop DM ([#995](https://github.com/avivsinai/agent-message-queue/issues/995)) ([76302ee](https://github.com/avivsinai/agent-message-queue/commit/76302eeaf5ac98d8ee722e35b84229e60cf74a41))
+
 ## [0.89.2](https://github.com/avivsinai/agent-message-queue/compare/v0.89.1...v0.89.2) (2026-10-07)
 
 
