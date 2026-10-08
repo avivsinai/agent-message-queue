@@ -42,6 +42,9 @@ type wakeDoorbellState struct {
 	nextTransientAttention       time.Time
 	recoveryPending              bool
 	recoveryAttentionUndelivered bool
+	// holdUntil is the cohort's doorbell deadline while hold-by-priority
+	// delays its first doorbell. Zero means no hold (today's behavior).
+	holdUntil time.Time
 }
 
 type wakeDoorbellPlan struct {
@@ -56,12 +59,28 @@ func (state *wakeDoorbellState) plan(
 	now time.Time,
 	current map[string]os.FileInfo,
 ) wakeDoorbellPlan {
+	return state.planHeld(now, current, nil)
+}
+
+// planHeld is plan with hold-by-priority. holds maps an inbox file name to
+// its hold; nil means no holds, which is exactly plan().
+func (state *wakeDoorbellState) planHeld(
+	now time.Time,
+	current map[string]os.FileInfo,
+	holds map[string]wakeHold,
+) wakeDoorbellPlan {
 	if len(current) == 0 {
 		state.reset()
 		return wakeDoorbellPlan{}
 	}
 	if state.phase == wakeDoorbellAnnounced {
+		previous := state.cohort
 		if state.reconcileAnnouncedCohort(current) {
+			state.holdUntil = earliestWakeHold(holds, current, previous)
+			if state.holdActive(now) {
+				return wakeDoorbellPlan{}
+			}
+			state.holdUntil = time.Time{}
 			return wakeDoorbellPlan{attempt: true, prompt: coopWakeDoorbell}
 		}
 		return wakeDoorbellPlan{}
@@ -73,26 +92,56 @@ func (state *wakeDoorbellState) plan(
 		state.reset()
 	} else if state.phase != wakeDoorbellIdle && wakeCohortExpanded(state.cohort, current) {
 		contentChange = true
+		added := earliestWakeHold(holds, current, state.cohort)
+		urgent := wakeAdditionUrgent(holds, current, state.cohort)
 		// Additions extend the pending obligation without resetting its retry
 		// ladder, but pull its deadline forward to the delivery floor because
 		// the new information has not been announced yet. One outstanding
 		// "drain everything" doorbell covers the whole current cohort, so N
 		// unread messages do not need N doorbells.
-		if state.phase == wakeDoorbellParked {
+		//
+		// Hold-by-priority: before the first doorbell an addition may only
+		// pull the hold deadline earlier. After a doorbell, a held addition
+		// rides on the retry ladder; only urgent mail (or mail whose hold is
+		// over, or no hold at all) pulls the ladder forward. Urgent mail
+		// also revives a parked cohort past the attempt budget.
+		switch {
+		case state.phase == wakeDoorbellParked && urgent:
+			state.reviveParkedCohortForUrgent(current)
+			state.nextAttempt = now
+		case state.phase == wakeDoorbellParked:
 			if state.reviveParkedCohort(current) {
+				if state.holdsAddition(added, now) {
+					state.nextAttempt = added
+				} else {
+					state.pullForwardForAddition(now)
+				}
+			}
+		default:
+			state.arm(current)
+			switch {
+			case state.attempts == 0:
+				if !state.holdUntil.IsZero() && !added.IsZero() && added.Before(state.holdUntil) {
+					state.holdUntil = added
+				}
+			case urgent:
+				state.nextAttempt = now
+			case !state.holdsAddition(added, now):
 				state.pullForwardForAddition(now)
 			}
-		} else {
-			state.arm(current)
-			state.pullForwardForAddition(now)
 		}
 	}
 	if state.phase == wakeDoorbellIdle {
 		state.arm(current)
+		state.holdUntil = earliestWakeHold(holds, current, nil)
 	}
 	if state.phase == wakeDoorbellParked {
 		return wakeDoorbellPlan{}
 	}
+	if state.attempts == 0 && state.holdActive(now) {
+		return wakeDoorbellPlan{}
+	}
+	state.holdUntil = time.Time{}
 	if state.attempts > 0 && now.Before(state.nextAttempt) {
 		return wakeDoorbellPlan{}
 	}
@@ -104,6 +153,17 @@ func (state *wakeDoorbellState) plan(
 		contentChange: contentChange,
 		progress:      progress,
 	}
+}
+
+// holdActive reports whether hold-by-priority still delays the first doorbell.
+func (state *wakeDoorbellState) holdActive(now time.Time) bool {
+	return !state.holdUntil.IsZero() && now.Before(state.holdUntil)
+}
+
+// holdsAddition reports whether an addition's hold (zero = none) has not
+// elapsed, so the addition should wait for the existing retry ladder.
+func (state *wakeDoorbellState) holdsAddition(added, now time.Time) bool {
+	return !added.IsZero() && now.Before(added)
 }
 
 func (state *wakeDoorbellState) arm(current map[string]os.FileInfo) {
@@ -160,6 +220,17 @@ func (state *wakeDoorbellState) reviveParkedCohort(current map[string]os.FileInf
 	state.attemptBudget++
 	state.phase = wakeDoorbellRetrying
 	return true
+}
+
+// reviveParkedCohortForUrgent revives a parked cohort for new urgent mail
+// regardless of the lifetime attempt cap, with exactly one more attempt. The
+// urgent message joins the cohort snapshot, so seeing it again is not an
+// addition and cannot revive the cohort again.
+func (state *wakeDoorbellState) reviveParkedCohortForUrgent(current map[string]os.FileInfo) {
+	state.cohort = snapshotWakeFileIdentities(current)
+	state.presentationConfirmed = false
+	state.attemptBudget = state.reminderAttempts + 1
+	state.phase = wakeDoorbellRetrying
 }
 
 // reconcileDeferredCohort applies plan()'s announced/parked cohort rules for
@@ -334,6 +405,9 @@ func (state wakeDoorbellState) parkedReminderAttempts() (uint, bool) {
 func (state *wakeDoorbellState) nextDeadline() (time.Time, bool) {
 	switch state.phase {
 	case wakeDoorbellRetrying:
+		if state.attempts == 0 && !state.holdUntil.IsZero() {
+			return state.holdUntil, true
+		}
 		return state.nextAttempt, !state.nextAttempt.IsZero()
 	case wakeDoorbellRecoveryRequired:
 		return state.nextAttempt,

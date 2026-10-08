@@ -662,6 +662,16 @@ Input deferral (default on): wake samples terminal input only after
   Linux tty atime is updated at ~8s granularity, so it cannot establish
   a precise 1200ms idle window. On Linux this heuristic is advisory.
 
+Hold by priority (default off): with --hold-normal and --hold-low, the
+  first undrained message sets one doorbell deadline = its arrival time
+  (the inbox file's mtime) + the hold for its priority (urgent 0; a
+  missing priority is normal). A later message can only pull the deadline
+  earlier. At the deadline wake rings once and the drain takes everything;
+  a drain before the deadline cancels the doorbell. Urgent mail rings at
+  once, even behind a parked cohort. Nothing is acked or deleted by the
+  hold. Recommended: --hold-normal 5m --hold-low 30m, and senders use
+  --priority urgent for verdicts and unblocking requests.
+
 Interrupt notices (default on): urgent messages tagged with label "interrupt"
   trigger an interrupt notice. Ctrl+C injection is opt-in with
   --interrupt-cmd ctrl-c; it sends real SIGINT to the foreground process
@@ -689,6 +699,10 @@ Options:
         Log injection diagnostics to stderr
   -defer-while-input
         Best-effort: defer non-interrupt injection while terminal input appears active (default true)
+  -hold-low duration
+        Hold the first doorbell for low-priority mail up to this long (0 = ring at once)
+  -hold-normal duration
+        Hold the first doorbell for normal-priority mail up to this long (0 = ring at once)
   -inject-arg value
         Argument for --inject-via before the payload (repeatable)
   -inject-cmd string

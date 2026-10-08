@@ -63,6 +63,8 @@ type wakeConfig struct {
 	inputDelivery                 wakeInputDeliveryState
 	inputRecoveryRequired         bool
 	doorbell                      wakeDoorbellState
+	holdPolicy                    wakeHoldPolicy
+	holds                         map[string]wakeHold // set by each inbox scan for the doorbell plan
 	doorbellNow                   func() time.Time
 	lastAttemptAttention          bool
 	lastAttemptTransientAttention bool
@@ -593,6 +595,11 @@ func notifyNewMessages(cfg *wakeConfig) error {
 	var interruptMessages []wakeMsgInfo
 	interruptCounts := make(map[string]int)
 	currentPending := make(map[string]os.FileInfo)
+	var holds map[string]wakeHold
+	if cfg.holdPolicy.enabled() {
+		holds = make(map[string]wakeHold)
+	}
+	scanTime := cfg.wakeDoorbellNow()
 
 	for _, entry := range entries {
 		if entry.IsDir() {
@@ -630,6 +637,14 @@ func notifyNewMessages(cfg *wakeConfig) error {
 			continue
 		}
 		currentPending[name] = pendingInfo
+		if holds != nil {
+			// A corrupt header has no priority and counts as normal.
+			priority := ""
+			if err == nil {
+				priority = header.Priority
+			}
+			holds[name] = newWakeHold(cfg.holdPolicy, priority, pendingInfo, scanTime)
+		}
 		if err != nil {
 			// Count corrupt messages too
 			messages = append(messages, wakeMsgInfo{id: strings.TrimSuffix(name, filepath.Ext(name)), from: "unknown", subject: "(parse error)"})
@@ -661,6 +676,7 @@ func notifyNewMessages(cfg *wakeConfig) error {
 		}
 	}
 
+	cfg.holds = holds
 	if cfg.inputRecoveryRequired &&
 		dischargeWakeInputRecoveryAfterProgress(cfg, currentPending) &&
 		len(messages) == 0 {
@@ -1076,7 +1092,7 @@ func deliverNewMessageNotification(
 		clearWakeInputState(cfg)
 	}
 	now := cfg.wakeDoorbellNow()
-	plan := cfg.doorbell.plan(now, currentPending)
+	plan := cfg.doorbell.planHeld(now, currentPending, cfg.holds)
 	persistWakeDoorbellStatusBestEffort(cfg)
 	if !plan.attempt {
 		return nil

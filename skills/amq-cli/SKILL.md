@@ -41,6 +41,11 @@ watcher under that live wake. A blocking wait holds your turn while the
 doorbell queues behind it. When your work is done, finish the turn; do not
 keep a tool running or send idle check-ins just to wait for mail.
 
+A wake started with `--hold-normal` / `--hold-low` (recommended `5m` / `30m`)
+rings once per burst: normal and low mail wait up to the hold, and one drain
+takes everything. Urgent mail rings at once, so send verdicts (APPROVE, BLOCK)
+and unblocking requests with `--priority urgent`; everything else may wait.
+
 Without an injecting wake, use the receive methods in the operations guide.
 A notify-only wake (`--inject-mode none`) paired with a supervisor `monitor`
 service is a separate supported setup.

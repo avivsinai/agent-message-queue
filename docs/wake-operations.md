@@ -18,6 +18,37 @@ A non-TTY agent must preserve a live wake unless the check reports
 command revalidates the current process, target, generation, root, and owner
 state before it changes anything.
 
+## Hold by priority
+
+Each doorbell can start a full-context turn, and mail comes in bursts. Two
+opt-in flags let `amq wake` hold the first doorbell of a burst:
+
+```bash
+amq wake --me claude --hold-normal 5m --hold-low 30m
+```
+
+- `--hold-normal` and `--hold-low` set how long `normal` and `low` mail may
+  wait before the doorbell. A message without a priority counts as `normal`.
+  `urgent` mail never waits. Both default to `0`, which keeps the doorbell
+  schedule unchanged.
+- The first undrained message sets one deadline: its arrival time plus the hold
+  for its priority. A later message can pull the deadline earlier, never later.
+  At the deadline wake rings once and the drain takes every message, held mail
+  included. A drain before the deadline cancels the doorbell.
+- Arrival time is the modification time of the file in `inbox/new` (local
+  time), not the sender's header clock. A wake restart reads the same file, so
+  it does not restart the hold. No wake state is added.
+- Urgent mail rings at once, even while a hold is pending and even when the
+  current cohort is parked or has used its retry budget. Each distinct urgent
+  message gets one further attempt, so seeing it again does not loop.
+- The hold changes only when the first doorbell rings. Retry and backoff,
+  input-quiet deferral, interrupts, injection modes and recovery are unchanged,
+  and the hold never acks or deletes a message.
+
+Recommended: `--hold-normal 5m --hold-low 30m`, and senders mark verdicts and
+unblocking requests with `amq send --priority urgent`. A normal message can
+wait up to the hold.
+
 ## Doctor
 
 `amq doctor --ops` reports queue depth, sibling-session backlog, DLQ age,
