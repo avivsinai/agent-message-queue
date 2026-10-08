@@ -626,8 +626,11 @@ terminal." for an edit that changed the call or a deletion, and "Could not
 verify the approval: <reason>. React again to retry." otherwise (a relay
 error or timeout, for example). A later ✅ or a ❌ still works. When the
 endpoint's check passes and the hook's own check then fails, the hook
-records that it refused exactly that proof: the answer never applies, and
-a later ❌ or a new ✅ replaces it.
+records that it refused exactly that proof: the answer never applies, the
+DM gives the same reply with the hook's reason, and a later ❌ or a new ✅
+replaces it. The hook allows a proof only when no refusal of it is
+recorded. While one answer to an approval is checked, a second one waits
+for it.
 
 The DM offers ✅ only when the call can pass these checks, the
 installed hook pins the share's owner, and the approval is bound to one

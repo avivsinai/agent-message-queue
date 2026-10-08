@@ -30,6 +30,8 @@ import (
 //	  requests/<iid>.json  hook: one open PermissionRequest
 //	  answers/<iid>.json   attachment (Respond): the Buzz answer
 //	  resolved/<iid>.json  whoever closed it first: hook or attachment
+//	  rejected/<iid>-<proof>  hook: it refused one allow proof
+//	  verdicts/<iid>-<proof>  hook: its one verdict on one allow proof
 //
 // Every directory is 0700 and every file 0600. Every read is no-follow and
 // bounded; every write is create-new with its whole content, so the first
@@ -452,11 +454,70 @@ func markRejected(home, sessionID, interactionID string, evidence json.RawMessag
 	return err
 }
 
-// rejected reports whether the hook recorded that it could not verify
-// this allow's evidence.
+// rejectedRecord reads the rejected record of this allow's evidence.
+func rejectedRecord(home, sessionID, interactionID string, evidence json.RawMessage) (reason string, ok bool) {
+	path := filepath.Join(approveDir(home, sessionID), "rejected", proofName(interactionID, evidence))
+	fi, err := os.Lstat(path)
+	if err != nil || !fi.Mode().IsRegular() {
+		return "", false
+	}
+	var r struct {
+		Reason string `json:"reason"`
+	}
+	_ = readApprovalJSON(path, &r)
+	return r.Reason, true
+}
+
+// rejected reports whether the hook refused this allow's evidence.
 func rejected(home, sessionID, interactionID string, evidence json.RawMessage) bool {
-	fi, err := os.Lstat(filepath.Join(approveDir(home, sessionID), "rejected", proofName(interactionID, evidence)))
-	return err == nil && fi.Mode().IsRegular()
+	v, ok := hookVerdict(home, sessionID, interactionID, evidence)
+	return ok && v.Verdict == verdictRefused
+}
+
+// verdicts/<iid>-<proof> is the hook's one verdict on one allow proof,
+// written create-new beside the rejected record (611.42.6, Pro review of
+// #986 r1). The hook allows a proof only after it created the allow
+// verdict and then found no rejected record for it. It records a refusal
+// as a refused verdict and still as the rejected record, which an older
+// endpoint reads. A reader of both reads the rejected record first and the
+// verdict second, the reverse of the hook's order, so any refusal the
+// endpoint acts on, forged or not, is one the hook sees before it allows.
+type approvalVerdict struct {
+	Verdict string `json:"verdict"`
+	Reason  string `json:"reason,omitempty"`
+	Altered bool   `json:"altered,omitempty"`
+}
+
+const (
+	verdictAllow   = "allow"
+	verdictRefused = "refused"
+)
+
+// claimVerdict records v as the hook's verdict on this allow's evidence,
+// create-new: errFileExists means a verdict stands already.
+func claimVerdict(home, sessionID, interactionID string, evidence json.RawMessage, v approvalVerdict) error {
+	dir, err := ensureApproveSubdir(home, sessionID, "verdicts")
+	if err != nil {
+		return err
+	}
+	return createNewJSON(dir, proofName(interactionID, evidence), v)
+}
+
+// hookVerdict reads the hook's verdict on this allow's evidence: its
+// verdict record, or, from a hook that writes none, its rejected record as
+// a refusal, altered when its reason says so. false means the hook has not
+// decided.
+func hookVerdict(home, sessionID, interactionID string, evidence json.RawMessage) (approvalVerdict, bool) {
+	reason, refused := rejectedRecord(home, sessionID, interactionID, evidence)
+	var v approvalVerdict
+	err := readApprovalJSON(filepath.Join(approveDir(home, sessionID), "verdicts", proofName(interactionID, evidence)), &v)
+	switch {
+	case err == nil && (v.Verdict == verdictAllow || v.Verdict == verdictRefused):
+		return v, true
+	case refused:
+		return approvalVerdict{Verdict: verdictRefused, Reason: reason, Altered: strings.Contains(reason, ErrAllowAltered.Error())}, true
+	}
+	return approvalVerdict{}, false
 }
 
 // ApprovalPin is the DM edge's pin file content. Owner is the share's owner
