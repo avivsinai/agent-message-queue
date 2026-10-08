@@ -151,3 +151,54 @@ func TestRunEndAfterSentAnswerRecordsTheAnswer(t *testing.T) {
 		t.Fatalf("resolved = %+v, want %+v", rec.Resolved, want)
 	}
 }
+
+// 611.42.14 (code-run review of #1000): a second ✅ replayed the first
+// one's delivered intent, the runtime said already resolved, and the
+// rollback erased that intent; the owner read "Not sent: interaction
+// cc-…" and the run's end lost the answer. The replay now hears already
+// resolved and the first answer stands.
+func TestReplayAfterAHeldAnswerKeepsIt(t *testing.T) {
+	store, now := openStore(t)
+	rt := &heldAnswer{Runtime: fake.New("fake", "e_1")}
+	ep := core.New(core.Config{Store: store, Now: now})
+	ep.Register(rt)
+	id := "11111111-1111-4111-8111-1111111111f5"
+	if _, err := ep.Handle(submitCmd(id), ownerShare); err != nil {
+		t.Fatal(err)
+	}
+	rt.Question(id, "i_1", []string{"yes", "no"})
+	answer := &protocol.Command{
+		Schema: protocol.SchemaCommand, Op: protocol.OpInteractionRespond, RequestRef: protocol.EncodeRef("local", "fake", id),
+		TargetID: "fake", Epoch: "e_1", InteractionID: "i_1", Option: "yes",
+	}
+	if _, err := ep.Handle(answer, ownerShare); err != nil {
+		t.Fatal(err)
+	}
+	out, err := ep.Handle(answer, ownerShare)
+	if err != nil {
+		t.Fatalf("second answer: %v, want already resolved", err)
+	}
+	if reply, _ := out.(protocol.Reply); reply.Outcome.Code != protocol.CodeAlreadyResolved {
+		t.Fatalf("second answer = %+v, want already resolved", out)
+	}
+	rt.Complete(id, "done")
+	rec, _, _ := store.Get(requests.Key{CreatorHost: "local", TargetID: "fake", RequestID: id})
+	if want := (protocol.Resolution{InteractionID: "i_1", Outcome: protocol.ResolutionAnswered, Option: "yes"}); len(rec.Resolved) != 1 || rec.Resolved[0] != want {
+		t.Fatalf("resolved = %+v, want %+v", rec.Resolved, want)
+	}
+}
+
+// heldAnswer holds the first answer, as Claude's hook does until it
+// applies it, and calls every later one already resolved.
+type heldAnswer struct {
+	*fake.Runtime
+	held bool
+}
+
+func (h *heldAnswer) Respond(_ requests.Key, _, _, _ string) (protocol.Code, error) {
+	if !h.held {
+		h.held = true
+		return "", nil
+	}
+	return protocol.CodeAlreadyResolved, nil
+}

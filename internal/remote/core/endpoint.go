@@ -163,9 +163,9 @@ type Endpoint struct {
 	// answering serializes the answers to one interaction of one request:
 	// respond holds its lock from the first read through the refusal
 	// rollback, so a rollback never erases a later answer with another
-	// option (611.42.6, Pro review of #986 r1). Two answers with the same
-	// option share one intent, and the refused one's rollback clears it. An
-	// entry lives while a respond holds or waits for it.
+	// option (611.42.6, Pro review of #986 r1). A rollback undoes only the
+	// intent its own respond recorded: a replay of an earlier intent keeps it
+	// (611.42.14). An entry lives while a respond holds or waits for it.
 	answering map[answerKey]*answerLock
 }
 
@@ -1075,7 +1075,8 @@ func (e *Endpoint) respond(cmd *protocol.Command, src Source) (protocol.Reply, e
 	// interaction no longer offers that option (it expired or its session
 	// went away). Only a fresh answer must be one the interaction offers now.
 	prior, done := rec.Answered[cmd.InteractionID]
-	offered := done && prior == cmd.Option
+	replay := done && prior == cmd.Option
+	offered := replay
 	for _, o := range rec.Interaction.Options {
 		if o == cmd.Option {
 			offered = true
@@ -1121,6 +1122,21 @@ func (e *Endpoint) respond(cmd *protocol.Command, src Source) (protocol.Reply, e
 		// stays (the answer may have landed), so the replay path — not a
 		// fresh answer — decides. Surface the failure.
 		return protocol.Reply{}, rerr
+	}
+	if code != "" && replay {
+		// A replay never clears the intent it found: the earlier answer may
+		// have landed, as a second ✅ after an allow (611.42.14, code-run
+		// review of #1000). Already resolved then is that answer's end.
+		if code != protocol.CodeAlreadyResolved {
+			return protocol.Reply{}, protocol.Refuse(code, "%s", reason)
+		}
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		rec, _, err = e.store.Get(key)
+		if err != nil {
+			return protocol.Reply{}, err
+		}
+		return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpInteractionRespond, Code: protocol.CodeAlreadyResolved}}, nil
 	}
 	if code != "" {
 		// A positive native refusal: clear the durable intent so the refused
