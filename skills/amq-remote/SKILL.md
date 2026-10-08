@@ -61,8 +61,8 @@ command's own message. Do not work around a refusal.
    If the entry is for a Claude target shared through a relay share, tell
    the user: "This adds one PermissionRequest hook. It exits at once in
    sessions that are not shared. It pins your Buzz public key and this
-   share's relay, body, DM channel and target, so only your signed ✅ in
-   this DM can allow a tool call. Do not allow Claude to edit .claude for a
+   share's relay, body, DM channel and target, so only your signed ✅, or
+   your yes in the approval's thread, in this DM can allow a tool call. Do not allow Claude to edit .claude for a
    session, use bypassPermissions mode, or allow every Bash command: each
    lets the pin be changed. The relay is trusted to return the message's
    full edit and deletion history; replacing the amq-remote binary, or a
@@ -85,9 +85,9 @@ command's own message. Do not work around a refusal.
    - `--native`: "A DM sent while this session is busy waits. Buzz Stop cannot
      interrupt a Claude turn."
    - When the approval hook was installed in step 3: "When a Buzz request
-     needs a tool approval, the DM shows it. ❌ blocks that call. ✅ allows
-     it when the DM offers ✅: a Bash command shown whole. Otherwise allow it
-     in the terminal. The first answer wins." Without a relay share, say
+     needs a tool approval, the DM shows it. ❌ blocks that call. ✅, or yes
+     replied in the approval's thread, allows it when the DM offers ✅: a
+     Bash command shown whole. Otherwise allow it in the terminal. The first answer wins." Without a relay share, say
      instead: "When a Buzz request needs a tool approval, the DM shows it.
      ❌ denies that call; allow it in Claude's terminal. The first answer
      wins."

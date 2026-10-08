@@ -91,6 +91,11 @@ func TestClaudeForgedAllowEvidenceNeverAllows(t *testing.T) {
 			return e.reaction(e.owner, "✅", m.ID.Hex(), time.Now()), m
 		}},
 		{name: "no owner pin", pinned: false, forge: e2eValid},
+		// 611.42.10 acceptance: a typed yes in the approval's thread that
+		// the owner did not sign.
+		{name: "typed yes by another key", pinned: true, forge: func(e *claudeApprovalE2E) (nostr.Event, nostr.Event) {
+			return e.message(randomKey(), nostr.Tags{{"h", "dm-1"}, {"e", e.msg.ID.Hex(), "", "reply"}}, "yes"), e.msg
+		}},
 		// Pro review of #936, P1 (611.42.4): a real signed pair from another
 		// share, or another channel, moved into this session's answer file.
 		{name: "message from another share's body", pinned: true, forge: func(e *claudeApprovalE2E) (nostr.Event, nostr.Event) {
@@ -186,6 +191,49 @@ func TestClaudeForgedAllowEvidenceNeverAllows(t *testing.T) {
 				t.Fatalf("hook printed %q, want no decision", e.out.String())
 			}
 		})
+	}
+}
+
+// 611.42.10: a typed yes reached the Claude hook as a kind 9 and the owner
+// saw "reaction is not kind 7". Now yes typed in the approval message's
+// thread allows once, and an unthreaded yes in the main DM is not sent: the
+// DM says how to allow.
+func TestClaudeTypedYesAllowsInTheApprovalThread(t *testing.T) {
+	e := newClaudeApprovalE2EWith(t, true, "go test ./...")
+	if err := e.c.Ingest(e.typed("yes")); err != nil {
+		t.Fatal(err)
+	}
+	e.flush()
+	if !e.replied(typedApproveHint) {
+		t.Fatalf("sent = %+v, want how to allow", e.sent)
+	}
+	if _, err := os.Lstat(filepath.Join(e.dir, "answers", e.iid+".json")); err == nil {
+		t.Fatal("the unthreaded yes was sent")
+	}
+	if err := e.c.Ingest(e.typed("yes", nostr.Tag{"e", e.msg.ID.Hex(), "", "reply"})); err != nil {
+		t.Fatal(err)
+	}
+	e.hookExited()
+	if got := strings.TrimSpace(e.out.String()); got != allowDecision {
+		t.Fatalf("hook printed %q, want %s", got, allowDecision)
+	}
+	e.await(approvalKey(e.ref, e.iid) + "/outcome")
+	e.flush()
+	if !e.edited("Approve was sent from Buzz") {
+		t.Fatalf("sent = %+v, want the approval message edited with the sent approve", e.sent)
+	}
+}
+
+// 611.42.10: Claude's inspect named no pending approval, so a typed no in
+// the main DM became a prompt. It now rejects the call, as ❌ does.
+func TestClaudeTypedNoInTheMainDMDenies(t *testing.T) {
+	e := newClaudeApprovalE2EWith(t, true, "go test ./...")
+	if err := e.c.Ingest(e.typed("no")); err != nil {
+		t.Fatal(err)
+	}
+	e.hookExited()
+	if got := e.out.String(); !strings.Contains(got, `"behavior":"deny"`) {
+		t.Fatalf("hook printed %q, want deny", got)
 	}
 }
 
@@ -351,6 +399,17 @@ func (e *claudeApprovalE2E) writeAllow(ev ApproveEvidence) {
 	if err := os.WriteFile(filepath.Join(e.dir, "answers", e.iid+".json"), ans, 0o600); err != nil {
 		e.t.Fatal(err)
 	}
+}
+
+// typed is the owner's kind 9 in the DM with text and extra tags, dated
+// after everything before it.
+func (e *claudeApprovalE2E) typed(text string, tags ...nostr.Tag) nostr.Event {
+	e.t.Helper()
+	evt := nostr.Event{CreatedAt: nostr.Timestamp(e.advance().Unix()), Kind: KindDM, Content: text, Tags: append(nostr.Tags{{"h", "dm-1"}}, tags...)}
+	if err := evt.Sign(e.owner); err != nil {
+		e.t.Fatal(err)
+	}
+	return evt
 }
 
 func randomKey() [32]byte {

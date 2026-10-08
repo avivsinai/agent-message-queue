@@ -399,9 +399,27 @@ func projectApproval(ap *approval) *protocol.Interaction {
 	in := &protocol.Interaction{InteractionID: ap.id, Kind: "approval", Prompt: ap.preview, Options: []string{optionDeny},
 		RemoteAnswer: true, RejectOption: optionDeny}
 	if ap.offersAllow() {
-		in.Options, in.ApproveOption = []string{optionAllow, optionDeny}, optionAllow
+		in.Options, in.ApproveOption, in.ApproveProof = []string{optionAllow, optionDeny}, optionAllow, true
 	}
 	return in
+}
+
+// pendingApprovalLocked is the oldest approval the endpoint shows, of any
+// run, and the request that waits on it, so a surface can name the approval
+// a typed answer refers to (611.42.10, as Codex does for 611.42.7).
+func (a *Attachment) pendingApprovalLocked() (pending, active *string) {
+	var at int64
+	for _, rec := range a.runs {
+		if len(rec.open) == 0 {
+			continue
+		}
+		ap := rec.open[0]
+		if pending == nil || ap.openedAt < at || ap.openedAt == at && ap.id < *pending {
+			id, ref := ap.id, protocol.EncodeRef(rec.key.CreatorHost, rec.key.TargetID, rec.key.RequestID)
+			pending, active, at = &id, &ref, ap.openedAt
+		}
+	}
+	return pending, active
 }
 
 // pendingApproval is the run's head approval, or nil.

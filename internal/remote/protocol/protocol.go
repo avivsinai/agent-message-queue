@@ -289,6 +289,10 @@ type Interaction struct {
 	// without knowing the harness's vocabulary. Empty means none.
 	ApproveOption string `json:"approve_option,omitempty"`
 	RejectOption  string `json:"reject_option,omitempty"`
+	// ApproveProof means the harness approves only with the owner's signed
+	// proof bound to the approval message: a reaction on it, or an approve
+	// typed in its thread. An unthreaded typed approve cannot prove it.
+	ApproveProof bool `json:"approve_proof,omitempty"`
 }
 
 // ResolutionOutcome is how a pending interaction stopped being pending.

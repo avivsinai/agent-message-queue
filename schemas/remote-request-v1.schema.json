@@ -164,6 +164,10 @@
           "maxLength": 256,
           "description": "The offered option that approves, when a one-tap approve is safe to offer."
         },
+        "approve_proof": {
+          "type": "boolean",
+          "description": "The harness approves only with the owner's signed proof bound to the approval message: a reaction on it, or an approve typed in its thread."
+        },
         "reject_option": {
           "type": "string",
           "maxLength": 256,

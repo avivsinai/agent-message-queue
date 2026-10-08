@@ -73,7 +73,7 @@ Each adapter has a unique `target` (the id you pass to `inspect` and
 
 | Kind | Required `config` | What `inspect` advertises on this tree |
 | --- | --- | --- |
-| `claude` | `pid` (Claude Code process id). Optional `home` overrides the Claude home directory. Optional `approve` advertises `ApproveTool`: the Buzz DM can block a tool call through the PermissionRequest hook, never allow one. | `Inspect` and `Submit` over the session's cross-session socket. Submit evidence is `submitted`, so a relay share for Claude sets `min_evidence` `submitted`. `CancelRequest` and `Steer` are false. Unsupported on Windows. See [Claude Code](#claude-code). |
+| `claude` | `pid` (Claude Code process id). Optional `home` overrides the Claude home directory. Optional `approve` advertises `ApproveTool`: the Buzz DM can deny a tool call through the PermissionRequest hook, and allow one when the hook pins the owner (see [Approvals from the Buzz DM](#approvals-from-the-buzz-dm)). | `Inspect` and `Submit` over the session's cross-session socket. Submit evidence is `submitted`, so a relay share for Claude sets `min_evidence` `submitted`. `CancelRequest` and `Steer` are false. Unsupported on Windows. See [Claude Code](#claude-code). |
 | `codex` | `socket` and `thread`. Optional `approve` advertises `ApproveTool`. | `Inspect`, `Submit`, and `CancelRequest`. `Steer` is false. |
 | `pi` | `handle`; optional `upgrade_hint`, the remedy shown when the live bridge is too old and publishes none. The pi-bridge extension directory for that handle, `agents/<handle>/extensions/pi-bridge/` under the root, must already exist. | `Inspect` and `Submit`. `ApproveTool` only while the live bridge advertises `bridge_revision` 4 or higher; the reference bridge is revision 3. `CancelRequest` is false. Submit evidence is `submitted`. |
 | `fake` | none | Test double. `epoch` is accepted only for this kind. |
@@ -309,7 +309,8 @@ answer is edited to say so, and a reaction on it then answers nothing.
 | `/inspect` | The target's session state. |
 | `/status <ref>` | The state of a request that this channel submitted. |
 | `/cancel <ref>`, or ❌ on a result row | Cancels that request. |
-| ✅ or ❌ on an approval message | Approves or rejects that pending approval. ✅ is offered only for a command the message shows whole; a file change, a network or permission grant, or a shortened command is approved in the terminal. The first answer, in Buzz or in the terminal, wins, and the message is edited with the outcome. A Codex permission, input or MCP elicitation request shows with no reaction to take: answer it in the terminal. Codex targets with `approve`, and pi targets whose bridge is revision 4 or later. Claude targets with `approve` and the PermissionRequest hook take ❌ only: Buzz can block a Claude tool call, and the terminal allows it. |
+| ✅ or ❌ on an approval message | Approves or rejects that pending approval. ✅ is offered only for a command the message shows whole; a file change, a network or permission grant, or a shortened command is approved in the terminal. The first answer, in Buzz or in the terminal, wins, and the message is edited with the outcome. A Codex permission, input or MCP elicitation request shows with no reaction to take: answer it in the terminal. Codex targets with `approve`, and pi targets whose bridge is revision 4 or later. Claude targets with `approve` and the PermissionRequest hook; ✅ only when the hook pins the owner. |
+| `yes` or `no` typed in the DM (also `y`, `n`, `approve`, `reject`, ✅, ❌) | Answers a pending approval as ✅ or ❌ does. In the approval message's thread it answers that approval; in the main DM it answers the target's pending approval once the owner could have seen it. A Claude approval takes a typed yes only in its thread; a yes in the main DM is not sent, and the reply says how to allow. |
 
 With `"mention_channels": ["<channel>", ...]` (at most 16, commands
 required), an owner message in one of those channels that mentions the body
@@ -595,10 +596,12 @@ nothing by itself. The hook prints allow only when all of these hold:
 - the call is a Bash call with only `command`, `description`, `timeout` and
   `run_in_background`, shown whole: nothing hidden, shortened, or removed
   for display;
-- the answer carries the owner's kind 7 reaction ✅, whose id and BIP-340
-  signature verify under the pinned key, dated from 30 seconds before the
-  request to its deadline;
-- the reaction's last `e` tag is the approval message, whose id and
+- the answer carries the owner's kind 7 reaction ✅, or the owner's kind 9
+  typed approve (`yes`, `y`, `approve` or ✅) in the share's DM channel,
+  whose id and BIP-340 signature verify under the pinned key, dated from 30
+  seconds before the request to its deadline;
+- the reaction's last `e` tag, or one of the typed reply's `reply`, `root`
+  or unmarked `e` tags, is the approval message, whose id and
   signature verify, which the share's body key signed in the share's DM
   channel, and whose content is the approval text for the hook's own
   rendering of the call under a request of the share's target: the

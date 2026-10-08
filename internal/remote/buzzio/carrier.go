@@ -321,6 +321,11 @@ func (c *Carrier) ingest(evt nostr.Event, normalize func(nostr.Event, Binding, t
 		case !claimed:
 			if msgID, appr, ok, err := c.openApproval(evt); err != nil {
 				return err
+			} else if ok && gesture == approveReaction && appr.ApproveProof && appr.ApproveOption != "" && !hasTagName(evt, "e") {
+				// An unthreaded yes names no approval message in what the
+				// owner signed, so it cannot prove the allow: it is not
+				// sent, and the owner learns how to allow (611.42.10).
+				return c.settleAnswer(evt, Settlement{Op: n.Op, State: "refused"}, typedApproveHint)
 			} else if ok {
 				return c.answerApproval(evt, msgID, appr, gesture)
 			}
@@ -712,16 +717,12 @@ func (c *Carrier) openApproval(evt nostr.Event) (string, Approval, bool, error) 
 			threaded = true // any e tag, valid or not, rules out the fallback
 		}
 	}
-	for _, marker := range []string{"reply", "root", ""} {
-		for _, t := range evt.Tags {
-			if len(t) < 2 || t[0] != "e" || !validHexID(t[1]) || len(t) >= 4 && t[3] != marker || len(t) < 4 && marker != "" {
-				continue
-			}
-			if _, ok, err := c.ledger.ApprovalFor(t[1]); err != nil {
-				return "", Approval{}, false, err
-			} else if ok && msgID == "" {
-				msgID = t[1]
-			}
+	for _, id := range threadRefs(evt) {
+		if _, ok, err := c.ledger.ApprovalFor(id); err != nil {
+			return "", Approval{}, false, err
+		} else if ok {
+			msgID = id
+			break
 		}
 	}
 	if threaded && msgID == "" {
@@ -754,6 +755,26 @@ func (c *Carrier) openApproval(evt nostr.Event) (string, Approval, bool, error) 
 	return msgID, appr, true, nil
 }
 
+// threadRefs are the events an owner reply names, in the order a typed
+// answer resolves them: the parent it replies to, then its thread root,
+// then unmarked e tags. A mention names none.
+func threadRefs(evt nostr.Event) []string {
+	var ids []string
+	for _, marker := range []string{"reply", "root", ""} {
+		for _, t := range evt.Tags {
+			if len(t) < 2 || t[0] != "e" || !validHexID(t[1]) || len(t) >= 4 && t[3] != marker || len(t) < 4 && marker != "" {
+				continue
+			}
+			ids = append(ids, t[1])
+		}
+	}
+	return ids
+}
+
+// typedApproveHint answers an unthreaded typed approve for a harness that
+// approves only with proof bound to the approval message (611.42.10).
+const typedApproveHint = "To allow, react ✅ on the approval or reply yes in its thread."
+
 func rejectReaction(gesture string) bool {
 	return gesture == "❌" || gesture == "👎" || gesture == "-"
 }
@@ -778,7 +799,7 @@ func (c *Carrier) prepareApprovals(snap protocol.Snapshot, rc Receipt, origin ma
 	// that interaction may be resolved already.
 	if in := snap.Interaction; in != nil && in.RemoteAnswer && in.Kind == "approval" && int(snap.Revision) >= rc.Revision {
 		appr := Approval{RequestRef: snap.RequestRef, InteractionID: in.InteractionID, Target: rc.Target, Epoch: snap.Epoch,
-			Prompt: in.Prompt, ApproveOption: in.ApproveOption, RejectOption: in.RejectOption}
+			Prompt: in.Prompt, ApproveOption: in.ApproveOption, RejectOption: in.RejectOption, ApproveProof: in.ApproveProof}
 		evt := nostr.Event{CreatedAt: nostr.Timestamp(c.now().Unix()), Kind: KindDM, Tags: c.originTags(origin), Content: approvalText(appr, "")}
 		stored, err := c.prepareRow(approvalKey(snap.RequestRef, in.InteractionID), evt, 0)
 		if err != nil {
@@ -864,7 +885,9 @@ func (c *Carrier) refreshApproval(snap protocol.Snapshot, rc Receipt) error {
 	want := appr
 	want.Disabled = !in.RemoteAnswer
 	if in.RemoteAnswer {
-		want.ApproveOption, want.RejectOption = in.ApproveOption, in.RejectOption
+		// An approval posted reject only takes ApproveProof with its ✅
+		// (advisor review of 611.42.10).
+		want.ApproveOption, want.RejectOption, want.ApproveProof = in.ApproveOption, in.RejectOption, in.ApproveProof
 	}
 	if want.Disabled == appr.Disabled && want.ApproveOption == appr.ApproveOption && want.RejectOption == appr.RejectOption {
 		return nil

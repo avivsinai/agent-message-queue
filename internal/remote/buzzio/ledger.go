@@ -474,6 +474,9 @@ type Approval struct {
 	Prompt        string `json:"prompt"`
 	ApproveOption string `json:"approve_option,omitempty"`
 	RejectOption  string `json:"reject_option,omitempty"`
+	// ApproveProof is the interaction's: an approve must be bound to this
+	// message in what the owner signed.
+	ApproveProof bool `json:"approve_proof,omitempty"`
 	// Disabled means the message now shows that a remote answer cannot
 	// apply; a reaction answers nothing. EditedAt is the second its latest
 	// edit is dated, so the next edit is dated strictly later.
