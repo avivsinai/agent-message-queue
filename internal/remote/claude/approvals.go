@@ -550,8 +550,42 @@ func (a *Attachment) RespondWithEvidence(key requests.Key, _, interactionID, opt
 	if err != nil {
 		return "", err
 	}
-	return a.publishAnswer(adir, ans, isRejected)
+	code, err := a.publishAnswer(adir, ans, isRejected)
+	if code != "" || err != nil || option != optionAllow {
+		return code, err
+	}
+	return "", a.awaitHookVerdict(sessionID, ans, hookPID)
 }
+
+// awaitHookVerdict waits, bounded, for the hook's verdict on the allow just
+// published, so a proof the hook's own check refuses reaches the owner as
+// the same refusal the endpoint's check gives, and the endpoint drops the
+// intent (611.42.6, independent review of #936 r3). It is nil when the hook
+// allowed, the approval closed, the hook is gone, or the bound passed: the
+// hook's verification plus a second. It never holds a.mu.
+func (a *Attachment) awaitHookVerdict(sessionID string, ans approvalAnswer, hookPID int) error {
+	resolvedPath := filepath.Join(approveDir(a.home, sessionID), "resolved", ans.InteractionID+".json")
+	for until := time.Now().Add(allowVerifyTimeout + time.Second); ; time.Sleep(verdictPoll) {
+		if resolvedExists(resolvedPath) {
+			return nil // closed: its resolution tells the owner how
+		}
+		if v, ok := hookVerdict(a.home, sessionID, ans.InteractionID, ans.Evidence); ok {
+			if v.Verdict != verdictRefused {
+				return nil
+			}
+			if v.Reason == "" {
+				v.Reason = "the approval hook could not verify it"
+			}
+			return allowRefusal(v.Reason, v.Altered)
+		}
+		if hookDead(hookPID) || !time.Now().Before(until) {
+			return nil
+		}
+	}
+}
+
+// verdictPoll is how often awaitHookVerdict reads the hook's verdict.
+const verdictPoll = 50 * time.Millisecond
 
 // publishAnswer writes ans as the answer file. The file on disk is read
 // again and written under a.mu, after the allow's verification: of a ✅ and
@@ -606,13 +640,20 @@ func verifyBeforeAnswer(factory func(HookPin) AllowConfig, pin HookPin, sessionI
 	want.Share = share
 	ctx, cancel := context.WithTimeout(context.Background(), allowVerifyTimeout)
 	defer cancel()
-	switch err := cfg.Verify(ctx, evidence, want); {
-	case errors.Is(err, ErrAllowAltered):
-		return protocol.Refuse(protocol.CodeInvalid, "%s", alteredReply)
-	case err != nil:
-		return protocol.Refuse(protocol.CodeNativeError, "%s", retryReply(err.Error()))
+	if err := cfg.Verify(ctx, evidence, want); err != nil {
+		return allowRefusal(err.Error(), errors.Is(err, ErrAllowAltered))
 	}
 	return nil
+}
+
+// allowRefusal is the owner-facing refusal of an allow whose proof did not
+// verify: an altered message is final, anything else can be retried with a
+// new ✅.
+func allowRefusal(reason string, altered bool) error {
+	if altered {
+		return protocol.Refuse(protocol.CodeInvalid, "%s", alteredReply)
+	}
+	return protocol.Refuse(protocol.CodeNativeError, "%s", retryReply(reason))
 }
 
 // allowVerifyTimeout bounds one verification, relay reads included.
@@ -746,10 +787,12 @@ func removeApprovalFiles(home, sessionID, promptID string, ids []string) {
 		for _, sub := range []string{"requests", "answers", "resolved", "delivery"} {
 			removeRegular(filepath.Join(dir, sub, id+".json"))
 		}
-		if entries, err := os.ReadDir(filepath.Join(dir, "rejected")); err == nil {
-			for _, e := range entries {
-				if strings.HasPrefix(e.Name(), id+"-") {
-					removeRegular(filepath.Join(dir, "rejected", e.Name()))
+		for _, sub := range []string{"rejected", "verdicts"} {
+			if entries, err := os.ReadDir(filepath.Join(dir, sub)); err == nil {
+				for _, e := range entries {
+					if strings.HasPrefix(e.Name(), id+"-") {
+						removeRegular(filepath.Join(dir, sub, e.Name()))
+					}
 				}
 			}
 		}

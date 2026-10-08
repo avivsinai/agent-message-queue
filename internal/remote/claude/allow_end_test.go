@@ -220,3 +220,63 @@ func TestApprovalAllowAndDenyAfterARefusedAllowAgree(t *testing.T) {
 	}
 	f.hookExited()
 }
+
+// 611.42.6 (Pro review of #986 r1): a refused record for a proof the hook
+// was still verifying made the endpoint drop the allow and take a ❌, and
+// the hook's verify of that genuine proof then succeeded and printed
+// allow. The hook now records its allow verdict first and then requires
+// no refusal of that proof, so the ❌ the endpoint took is what applies.
+func TestApprovalHookNeverAllowsAProofRefusedDuringItsVerify(t *testing.T) {
+	f := newApprovalFixture(t, bashUse("toolu_1", "go test ./..."))
+	owner := strings.Repeat("ab", 32)
+	entered, release := make(chan struct{}), make(chan struct{})
+	f.allow = AllowConfig{
+		Owner: owner,
+		Share: func(string) (AllowShare, error) {
+			return AllowShare{Owner: owner, Body: strings.Repeat("cd", 32), Channel: "dm-1", Target: "cc-1"}, nil
+		},
+		Verify: func(context.Context, json.RawMessage, AllowCheck) error {
+			close(entered)
+			<-release
+			return nil // the genuine ✅ verifies
+		},
+	}
+	ticks := make(chan time.Time)
+	f.raiseWith("go test ./...", ticks)
+	f.question()
+	var req approvalRequest
+	if err := readApprovalJSON(filepath.Join(approveDir(f.home, approvalSession), "requests", f.id+".json"), &req); err != nil || !req.Approvable {
+		t.Fatalf("request = %+v (%v), want an approvable call", req, err)
+	}
+	dir, err := ensureApproveSubdir(f.home, approvalSession, "answers")
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof := json.RawMessage(`{"proof":1}`)
+	ans, _ := json.Marshal(approvalAnswer{InteractionID: f.id, ActionHash: req.ActionHash, Option: optionAllow, Evidence: proof})
+	if err := os.WriteFile(filepath.Join(dir, f.id+".json"), ans, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ticks <- time.Now()
+	<-entered
+	if err := markRejected(f.home, approvalSession, f.id, proof, "forged"); err != nil {
+		t.Fatal(err)
+	}
+	if code, err := f.att.Respond(pr2Key(), "", f.id, optionDeny); err != nil || code != "" {
+		t.Fatalf("❌ = %q, %v; want it written over the refused allow", code, err)
+	}
+	close(release)
+	select {
+	case ticks <- time.Now():
+	case <-f.exited:
+	}
+	f.hookExited()
+	if got := f.out.String(); strings.Contains(got, `"behavior":"allow"`) || !strings.Contains(got, `"behavior":"deny"`) {
+		t.Fatalf("hook printed %q, want the ❌ the endpoint took as deny", got)
+	}
+	// Advisor review of #1000: the endpoint read the allow verdict beside
+	// the refusal as allowed, so the DM said nothing about the refusal.
+	if v, ok := hookVerdict(f.home, approvalSession, f.id, proof); !ok || v.Verdict != verdictRefused {
+		t.Fatalf("verdict = %+v, %v; want the proof refused", v, ok)
+	}
+}

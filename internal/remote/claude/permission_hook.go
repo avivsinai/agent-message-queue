@@ -177,19 +177,32 @@ func (h permissionHook) run(stdin io.Reader, stdout io.Writer, done <-chan struc
 		option, evidence := h.answer(answerPath, req)
 		if option == optionAllow {
 			want := AllowCheck{Share: share, Prompt: req.Preview, NotBefore: notBefore, NotAfter: deadline}
-			if rejected(h.home, in.SessionID, id, evidence) {
-				option = "" // already refused: wait for a deny or a new proof
+			if _, decided := hookVerdict(h.home, in.SessionID, id, evidence); decided {
+				option = "" // decided and not applied: wait for a deny or a new proof
 			} else if err := h.verifyAllow(evidence, want, done); err != nil {
 				// Not applied and not consumed: no resolved record. The
-				// rejected record retires exactly this proof, so a ❌ or a
-				// new ✅ can still answer.
+				// refused verdict tells the endpoint why, and the rejected
+				// record retires exactly this proof, so a ❌ or a new ✅
+				// can still answer.
 				option = ""
+				_ = claimVerdict(h.home, in.SessionID, id, evidence, approvalVerdict{Verdict: verdictRefused, Reason: err.Error(), Altered: errors.Is(err, ErrAllowAltered)})
 				_ = markRejected(h.home, in.SessionID, id, evidence, err.Error())
 				if h.stderr != nil {
 					_, _ = fmt.Fprintf(h.stderr, "amq-remote: ignored a Buzz allow for %s: %v\n", id, err)
 				}
 			} else if over() {
 				return 0 // verified too late: never an allow after the end
+			} else if err := claimVerdict(h.home, in.SessionID, id, evidence, approvalVerdict{Verdict: verdictAllow}); err != nil {
+				option = "" // a verdict on this proof stands already, or none could be written
+				if !errors.Is(err, errFileExists) && h.stderr != nil {
+					_, _ = fmt.Fprintf(h.stderr, "amq-remote: ignored a Buzz allow for %s: %v\n", id, err)
+				}
+			} else if _, refused := rejectedRecord(h.home, in.SessionID, id, evidence); refused {
+				// A refusal of this proof, forged or not, came before the
+				// allow verdict: the endpoint may have dropped the intent
+				// and taken a ❌ (611.42.6, Pro review of #986 r1). The
+				// proof never applies.
+				option = ""
 			}
 		}
 		switch option {

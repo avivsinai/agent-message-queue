@@ -160,6 +160,24 @@ type Endpoint struct {
 	// is NOT an obligation: the attempt ran and was counted; the durable
 	// unpublished state persists for Reconcile recovery.
 	drainObligations map[requests.Key]int64
+	// answering serializes the answers to one interaction of one request:
+	// respond holds its lock from the first read through the refusal
+	// rollback, so a rollback only ever undoes its own intent (611.42.6,
+	// Pro review of #986 r1). An entry lives while a respond holds or waits
+	// for it.
+	answering map[answerKey]*answerLock
+}
+
+// answerKey names one interaction of one request.
+type answerKey struct {
+	key           requests.Key
+	interactionID string
+}
+
+// answerLock is one interaction's answer lock and its holders and waiters.
+type answerLock struct {
+	mu    sync.Mutex
+	users int
 }
 
 // Config configures New.
@@ -192,6 +210,7 @@ func New(cfg Config) *Endpoint {
 		pubPending:       map[requests.Key]int64{},
 		failed:           map[requests.Key]failure{},
 		drainObligations: map[requests.Key]int64{},
+		answering:        map[answerKey]*answerLock{},
 		state:            stateAccepting,
 		drainTO:          drainTimeout,
 	}
@@ -965,6 +984,7 @@ func (e *Endpoint) respond(cmd *protocol.Command, src Source) (protocol.Reply, e
 		return protocol.Reply{}, err
 	}
 	key := requests.Key{CreatorHost: host, TargetID: targetID, RequestID: requestID}
+	defer e.lockAnswer(key, cmd.InteractionID)()
 	e.mu.Lock()
 	rec, exists, err := e.store.Get(key)
 	t := e.targets[targetID]
@@ -1127,6 +1147,31 @@ func (e *Endpoint) respond(cmd *protocol.Command, src Source) (protocol.Reply, e
 		return protocol.Reply{}, err
 	}
 	return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpInteractionRespond}}, nil
+}
+
+// lockAnswer takes the answer lock of one interaction and returns its
+// release. Another answer to the same interaction waits for this one to
+// finish, its native call and rollback included; e.mu is held only to
+// find the lock.
+func (e *Endpoint) lockAnswer(key requests.Key, interactionID string) func() {
+	k := answerKey{key: key, interactionID: interactionID}
+	e.mu.Lock()
+	l := e.answering[k]
+	if l == nil {
+		l = &answerLock{}
+		e.answering[k] = l
+	}
+	l.users++
+	e.mu.Unlock()
+	l.mu.Lock()
+	return func() {
+		l.mu.Unlock()
+		e.mu.Lock()
+		if l.users--; l.users == 0 {
+			delete(e.answering, k)
+		}
+		e.mu.Unlock()
+	}
 }
 
 // answerSettled reports whether a recorded answer intent for cmd.InteractionID
