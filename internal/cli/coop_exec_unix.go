@@ -734,6 +734,10 @@ func runCoopExec(args []string) error {
 	if err != nil {
 		return err
 	}
+	agentArgs, err = resolveCodexResumeLaunch(binaryPath, agentArgs)
+	if err != nil {
+		return err
+	}
 	if err := recordResumedCodexThread(binaryPath, agentArgs, recordIdentity); err != nil {
 		return err
 	}
