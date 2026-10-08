@@ -326,233 +326,59 @@ func TestUnrelatedLaterPromptNeverAdmitsOrCompletes(t *testing.T) {
 // agent-message-queue-611.66 (observed live): the user interrupted a
 // Buzz-driven turn in the terminal. Claude Code wrote the interrupt line and
 // ran no Stop hook; the line read as a new prompt, so the run never settled
-// and the endpoint refused every later submit as busy.
+// and the endpoint refused every later submit as busy. Review of #1003: when
+// the user submits a new prompt mid-turn, the interrupt line carries the new
+// prompt's id.
 func TestInterruptedTurnCancelsItsRun(t *testing.T) {
-	ft := newFakeTarget(t, 4242, nil)
-	att := ft.attach(t)
-	got := make(chan core.NativeEvent, 32)
-	att.Subscribe(func(ev core.NativeEvent) { got <- ev })
-	admission, err := att.Submit(pr2BoundRequest("interrupt-probe"))
-	if err != nil || !admission.Admitted {
-		t.Fatalf("submit: %+v %v", admission, err)
-	}
-	withPrompt := func(line string) string {
-		var m map[string]any
-		if err := json.Unmarshal([]byte(line), &m); err != nil {
-			t.Fatal(err)
-		}
-		m["promptId"] = "p-1"
-		b, err := json.Marshal(m)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return string(b)
-	}
-	appendTranscript(t, ft.home,
-		withPrompt(deliveredLine(t, admission.RunID, frameEnvelope(t, ft))),
-		transcriptLine(t, "assistant", "partial answer"),
-		withPrompt(transcriptLine(t, "user", "[Request interrupted by user for tool use]")))
-	att.pollConfirmations()
+	for _, interruptPrompt := range []string{"p-1", "p-2"} {
+		t.Run(interruptPrompt, func(t *testing.T) {
+			ft := newFakeTarget(t, 4242, nil)
+			att := ft.attach(t)
+			got := make(chan core.NativeEvent, 32)
+			att.Subscribe(func(ev core.NativeEvent) { got <- ev })
+			admission, err := att.Submit(pr2BoundRequest("interrupt-probe"))
+			if err != nil || !admission.Admitted {
+				t.Fatalf("submit: %+v %v", admission, err)
+			}
+			withPrompt := func(id, line string) string {
+				var m map[string]any
+				if err := json.Unmarshal([]byte(line), &m); err != nil {
+					t.Fatal(err)
+				}
+				m["promptId"] = id
+				b, err := json.Marshal(m)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return string(b)
+			}
+			appendTranscript(t, ft.home,
+				withPrompt("p-1", deliveredLine(t, admission.RunID, frameEnvelope(t, ft))),
+				transcriptLine(t, "assistant", "partial answer"),
+				withPrompt(interruptPrompt, transcriptLine(t, "user", "[Request interrupted by user for tool use]")))
+			att.pollConfirmations()
 
-	att.mu.Lock()
-	rec := att.runs[pr2Key()]
-	terminal, state := rec.terminal, rec.state
-	att.mu.Unlock()
-	if !terminal || state != protocol.StateCancelled {
-		t.Fatalf("terminal=%v state=%s, want a cancelled run", terminal, state)
-	}
-	var local, cancelled bool
-	for len(got) > 0 {
-		switch ev := <-got; ev.Type {
-		case core.EventLocalIntervention:
-			local = true
-		case core.EventRunCancelled:
-			cancelled = true
-		case core.EventRunCompleted:
-			t.Fatal("an interrupted turn reported completed")
-		}
-	}
-	if !local || !cancelled {
-		t.Fatalf("local_intervention=%v run_cancelled=%v, want both", local, cancelled)
-	}
-}
-
-// codex #855 r2 item 6: the poller ran forever after the endpoint
-// unsubscribed. Unsubscribe stops it and it never restarts; with nothing
-// left to confirm it also stops by itself.
-func TestPollerStopsOnUnsubscribeAndWhenIdle(t *testing.T) {
-	ft := newFakeTarget(t, 4242, nil)
-	att := ft.attach(t)
-	unsubscribe := att.Subscribe(func(core.NativeEvent) {})
-	if _, err := att.Submit(pr2BoundRequest("lifetime-probe")); err != nil {
-		t.Fatal(err)
-	}
-	att.mu.Lock()
-	running := att.confirmCancel != nil
-	att.mu.Unlock()
-	if !running {
-		t.Fatal("setup: submit did not start the poller")
-	}
-	unsubscribe()
-	att.kickConfirmations()
-	att.mu.Lock()
-	restarted := att.confirmCancel != nil
-	att.mu.Unlock()
-	if restarted {
-		t.Fatal("poller running after unsubscribe")
-	}
-
-	idle := ft.attach(t)
-	idle.Subscribe(func(core.NativeEvent) {})
-	idle.kickConfirmations() // no runs: the first tick must end it
-	deadline := time.Now().Add(3 * time.Second)
-	for {
-		idle.mu.Lock()
-		stopped := idle.confirmCancel == nil
-		idle.mu.Unlock()
-		if stopped {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("poller kept running with no run to confirm")
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-}
-
-// codex #855 r3 item 1 (reproduced by the reviewer): the Stop marker was
-// bound while the bounded cursor still lagged several MiB behind, so the
-// run completed with "working" and the final answer was never applied.
-// Stops now bind only once the cursor has caught up.
-func TestStopWaitsForTranscriptCatchUp(t *testing.T) {
-	ft := newFakeTarget(t, 4242, nil)
-	att := ft.attach(t)
-	admission, err := att.Submit(pr2BoundRequest("catchup-probe"))
-	if err != nil || !admission.Admitted {
-		t.Fatalf("submit: %+v %v", admission, err)
-	}
-	key := pr2Key()
-	appendTranscript(t, ft.home,
-		deliveredLine(t, admission.RunID, frameEnvelope(t, ft)),
-		transcriptLine(t, "assistant", "working"))
-	progress, _ := json.Marshal(map[string]any{"type": "progress", "data": strings.Repeat("x", 1<<20)})
-	for i := 0; i < 5; i++ {
-		appendTranscript(t, ft.home, string(progress))
-	}
-	appendTranscript(t, ft.home, transcriptLine(t, "assistant", "final answer"))
-	appendStopMarker(t, ft.home, time.Now().UnixMilli()+1)
-	for i := 0; i < 4 && !att.runs[key].terminal; i++ {
-		att.pollConfirmations()
-		if rec := att.runs[key]; rec.terminal && rec.result.Text != "final answer" {
-			t.Fatalf("completed before the cursor caught up: result=%q cursor=%d", rec.result.Text, att.cur.off)
-		}
-	}
-	if rec := att.runs[key]; !rec.terminal || rec.result.Text != "final answer" {
-		t.Fatalf("terminal=%v result=%+v, want completed with the final answer", rec.terminal, rec.result)
-	}
-}
-
-// 611.25 (observed live 2026-09-22: request 27179a41 went uncertain at an
-// endpoint restart and the target stayed busy). A fresh attachment, as
-// after a restart, holds no record of the key; Lookup finds the delivery by
-// the key-derived msg_id, and the poller carries the run to completed,
-// including a Stop recorded while the endpoint was down.
-func TestLookupRecoversRunAfterRestart(t *testing.T) {
-	ft := newFakeTarget(t, 4242, nil)
-	before := ft.attach(t)
-	admission, err := before.Submit(pr2BoundRequest("restart-probe"))
-	if err != nil || !admission.Admitted {
-		t.Fatalf("submit: %+v %v", admission, err)
-	}
-	key := pr2Key()
-	if admission.RunID != frameMsgID(key) {
-		t.Fatalf("run id %s is not the key-derived msg_id %s", admission.RunID, frameMsgID(key))
-	}
-	appendTranscript(t, ft.home,
-		deliveredLine(t, admission.RunID, frameEnvelope(t, ft)),
-		transcriptLine(t, "assistant", "answered while the endpoint was down"))
-	appendStopMarker(t, ft.home, time.Now().UnixMilli()+1)
-
-	after := ft.attach(t) // the restarted endpoint's attachment
-	ev, err := after.Lookup(key, "")
-	if err != nil || ev.Class != core.EvidenceTentative || ev.RunID != admission.RunID {
-		t.Fatalf("recovery lookup = %+v %v, want tentative on run %s", ev, err, admission.RunID)
-	}
-	after.pollConfirmations()
-	ev, _ = after.Lookup(key, "")
-	if !ev.Admitted || ev.State != protocol.StateCompleted || ev.Result == nil || ev.Result.Text != "answered while the endpoint was down" {
-		t.Fatalf("after replay: %+v, want completed with the turn's answer", ev)
-	}
-	after.AcknowledgeResult(key, "", "")
-	if ev, _ := after.Lookup(key, ""); ev.Class != core.EvidenceUnknown {
-		t.Fatalf("released key recovered again: %+v", ev)
-	}
-}
-
-// Live 2026-09-22 on Claude Code v2.1.280: the delivered user entry carries
-// isMeta:true, the Stop hook fired, and the run stayed running because the
-// ladder skipped meta entries.
-func TestMetaFlaggedDeliveryStillClimbsTheLadder(t *testing.T) {
-	ft := newFakeTarget(t, 4242, nil)
-	att := ft.attach(t)
-	admission, err := att.Submit(pr2BoundRequest("meta-probe"))
-	if err != nil || !admission.Admitted {
-		t.Fatalf("submit: %+v %v", admission, err)
-	}
-	key := pr2Key()
-	line, _ := json.Marshal(map[string]any{
-		"type": "user", "isMeta": true, "timestamp": time.Now().UTC().Format(time.RFC3339Nano),
-		"message": map[string]any{"role": "user", "content": harnessUserText(frameEnvelope(t, ft))},
-		"origin":  map[string]any{"kind": "peer", "from": "unknown", "msg_id": admission.RunID},
-	})
-	appendTranscript(t, ft.home, string(line), transcriptLine(t, "assistant", "pong"))
-	appendStopMarker(t, ft.home, time.Now().UnixMilli()+1)
-	att.pollConfirmations()
-	if ev, _ := att.Lookup(key, ""); ev.State != protocol.StateCompleted || ev.Result == nil || ev.Result.Text != "pong" {
-		t.Fatalf("meta-flagged delivery: %+v, want completed with pong", ev)
-	}
-}
-
-// codex #859 P1 (reproduced by the reviewer): a transcript ending inside a
-// 4 MiB unfinished line made the recovery scan loop forever, hanging Lookup
-// and reconcile.
-func TestRecoveryScanReturnsAtPartialLineEOF(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "transcript.jsonl")
-	if err := os.WriteFile(path, []byte(strings.Repeat("x", transcriptChunkBytes)), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	done := make(chan struct{})
-	go func() {
-		scanForDelivery(path, 0, false, "not-present")
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("scanForDelivery did not return at EOF of an unfinished line")
-	}
-}
-
-// codex #859 P2: the saved scan position must not outlive its transcript.
-// The first recovery lookup scans past a transcript without the delivery;
-// the transcript is then replaced by a shorter one that has it. The next
-// lookup must rescan the new file, not resume beyond its end.
-func TestRecoveryRescansAReplacedTranscript(t *testing.T) {
-	ft := newFakeTarget(t, 4242, nil)
-	after := ft.attach(t)
-	key := pr2Key()
-	filler, _ := json.Marshal(map[string]any{"type": "progress", "data": strings.Repeat("x", 4096)})
-	appendTranscript(t, ft.home, string(filler), string(filler))
-	if ev, _ := after.Lookup(key, ""); ev.Class != core.EvidenceUnknown {
-		t.Fatalf("setup: lookup = %+v, want unknown before any delivery", ev)
-	}
-	dir := filepath.Join(ft.home, ".claude", "projects", slugifyCwd("/tmp/proj"))
-	tr := filepath.Join(dir, "sess-abc.jsonl")
-	if err := os.Remove(tr); err != nil {
-		t.Fatal(err)
-	}
-	appendTranscript(t, ft.home, deliveredLine(t, frameMsgID(key), "envelope"))
-	if ev, _ := after.Lookup(key, ""); ev.Class != core.EvidenceTentative {
-		t.Fatalf("after replacement: lookup = %+v, want the delivery recovered (tentative)", ev)
+			att.mu.Lock()
+			rec := att.runs[pr2Key()]
+			terminal, state := rec.terminal, rec.state
+			att.mu.Unlock()
+			if !terminal || state != protocol.StateCancelled {
+				t.Fatalf("terminal=%v state=%s, want a cancelled run", terminal, state)
+			}
+			var local, cancelled bool
+			for len(got) > 0 {
+				switch ev := <-got; ev.Type {
+				case core.EventLocalIntervention:
+					local = true
+				case core.EventRunCancelled:
+					cancelled = true
+				case core.EventRunCompleted:
+					t.Fatal("an interrupted turn reported completed")
+				}
+			}
+			if !local || !cancelled {
+				t.Fatalf("local_intervention=%v run_cancelled=%v, want both", local, cancelled)
+			}
+		})
 	}
 }

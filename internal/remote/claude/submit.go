@@ -507,11 +507,9 @@ func (a *Attachment) applyEntryLocked(e transcriptEntry, events []core.NativeEve
 			return events
 		}
 		if !e.Absorbed {
-			if rec := a.owner; rec != nil && interrupts(rec, e) {
-				// A matching promptId proves the harness opened the run's turn.
-				if rec.promptID != "" {
-					rec.admitted = true
-				}
+			if rec := a.owner; rec != nil && !rec.terminal && strings.HasPrefix(e.Text, interruptPrefix) {
+				// The harness took the run's prompt and closed its turn.
+				rec.admitted = true
 				rec.local = true
 				events = append(events, core.NativeEvent{Type: core.EventLocalIntervention, Key: rec.key, RunID: rec.msgID})
 				return a.settleRunLocked(rec, protocol.StateCancelled, core.EventRunCancelled, events)
@@ -536,14 +534,11 @@ func (a *Attachment) applyEntryLocked(e transcriptEntry, events []core.NativeEve
 }
 
 // interruptPrefix opens the user line Claude Code writes when the user
-// interrupts a turn, plain or "for tool use".
+// interrupts a turn, plain or "for tool use". The line carries the
+// interrupted turn's promptId, or the next prompt's when the user submits
+// one mid-turn; either way it can only end the current owner's turn, since
+// any earlier prompt already cleared the owner.
 const interruptPrefix = "[Request interrupted by user"
-
-// interrupts reports whether e is the interrupt line of rec's turn.
-func interrupts(rec *runRecord, e transcriptEntry) bool {
-	return !rec.terminal && strings.HasPrefix(e.Text, interruptPrefix) &&
-		(rec.promptID == "" || rec.promptID == e.PromptID)
-}
 
 func (a *Attachment) setActivityTurn(id string, ts int64) {
 	if id == "" {
