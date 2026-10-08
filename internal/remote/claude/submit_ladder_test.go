@@ -323,6 +323,60 @@ func TestUnrelatedLaterPromptNeverAdmitsOrCompletes(t *testing.T) {
 	}
 }
 
+// agent-message-queue-611.66 (observed live): the user interrupted a
+// Buzz-driven turn in the terminal. Claude Code wrote the interrupt line and
+// ran no Stop hook; the line read as a new prompt, so the run never settled
+// and the endpoint refused every later submit as busy.
+func TestInterruptedTurnCancelsItsRun(t *testing.T) {
+	ft := newFakeTarget(t, 4242, nil)
+	att := ft.attach(t)
+	got := make(chan core.NativeEvent, 32)
+	att.Subscribe(func(ev core.NativeEvent) { got <- ev })
+	admission, err := att.Submit(pr2BoundRequest("interrupt-probe"))
+	if err != nil || !admission.Admitted {
+		t.Fatalf("submit: %+v %v", admission, err)
+	}
+	withPrompt := func(line string) string {
+		var m map[string]any
+		if err := json.Unmarshal([]byte(line), &m); err != nil {
+			t.Fatal(err)
+		}
+		m["promptId"] = "p-1"
+		b, err := json.Marshal(m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+	appendTranscript(t, ft.home,
+		withPrompt(deliveredLine(t, admission.RunID, frameEnvelope(t, ft))),
+		transcriptLine(t, "assistant", "partial answer"),
+		withPrompt(transcriptLine(t, "user", "[Request interrupted by user for tool use]")))
+	att.pollConfirmations()
+
+	att.mu.Lock()
+	rec := att.runs[pr2Key()]
+	terminal, state := rec.terminal, rec.state
+	att.mu.Unlock()
+	if !terminal || state != protocol.StateCancelled {
+		t.Fatalf("terminal=%v state=%s, want a cancelled run", terminal, state)
+	}
+	var local, cancelled bool
+	for len(got) > 0 {
+		switch ev := <-got; ev.Type {
+		case core.EventLocalIntervention:
+			local = true
+		case core.EventRunCancelled:
+			cancelled = true
+		case core.EventRunCompleted:
+			t.Fatal("an interrupted turn reported completed")
+		}
+	}
+	if !local || !cancelled {
+		t.Fatalf("local_intervention=%v run_cancelled=%v, want both", local, cancelled)
+	}
+}
+
 // codex #855 r2 item 6: the poller ran forever after the endpoint
 // unsubscribed. Unsubscribe stops it and it never restarts; with nothing
 // left to confirm it also stops by itself.

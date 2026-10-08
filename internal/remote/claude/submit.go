@@ -52,7 +52,9 @@ type runRecord struct {
 	admitted bool
 	// terminal: the turn ended (Stop hook or transcript evidence).
 	terminal bool
-	result   *protocol.Result
+	// local: the user interrupted the run's turn in the terminal.
+	local  bool
+	result *protocol.Result
 	// userTS is the transcript timestamp (unix ms) of the entry that
 	// delivered our msg_id; 0 until observed or when the entry has none.
 	userTS int64
@@ -215,13 +217,13 @@ func sanitizeAddr(s string) string {
 func evidenceFor(rec *runRecord) core.Evidence {
 	switch {
 	case rec.admitted:
-		ev := core.Evidence{Known: true, Class: core.EvidenceConfirmed, Admitted: true, RunID: rec.msgID, State: rec.state, Interaction: rec.pendingApproval()}
+		ev := core.Evidence{Known: true, Class: core.EvidenceConfirmed, Admitted: true, RunID: rec.msgID, State: rec.state, LocalIntervention: rec.local, Interaction: rec.pendingApproval()}
 		if rec.terminal && rec.result != nil {
 			ev.Result = rec.result
 		}
 		return ev
 	default:
-		return core.Evidence{Known: true, Class: core.EvidenceTentative, RunID: rec.msgID, State: rec.state, Interaction: rec.pendingApproval()}
+		return core.Evidence{Known: true, Class: core.EvidenceTentative, RunID: rec.msgID, State: rec.state, LocalIntervention: rec.local, Interaction: rec.pendingApproval()}
 	}
 }
 
@@ -474,6 +476,8 @@ func (a *Attachment) pollConfirmations() {
 //     someone else (codex #855 r2 item 2).
 //   - An assistant entry while a run owns the turn admits it and records
 //     the turn's newest text as the result.
+//   - The interrupt line of the owner's prompt cancels the owner: Claude
+//     Code runs no Stop hook when the user interrupts a turn.
 //
 // Caller holds a.mu.
 func (a *Attachment) applyEntryLocked(e transcriptEntry, events []core.NativeEvent) []core.NativeEvent {
@@ -503,6 +507,15 @@ func (a *Attachment) applyEntryLocked(e transcriptEntry, events []core.NativeEve
 			return events
 		}
 		if !e.Absorbed {
+			if rec := a.owner; rec != nil && interrupts(rec, e) {
+				// A matching promptId proves the harness opened the run's turn.
+				if rec.promptID != "" {
+					rec.admitted = true
+				}
+				rec.local = true
+				events = append(events, core.NativeEvent{Type: core.EventLocalIntervention, Key: rec.key, RunID: rec.msgID})
+				return a.settleRunLocked(rec, protocol.StateCancelled, core.EventRunCancelled, events)
+			}
 			if a.owner != nil {
 				a.owner.endTurn(e.TS)
 			}
@@ -520,6 +533,16 @@ func (a *Attachment) applyEntryLocked(e transcriptEntry, events []core.NativeEve
 		}
 	}
 	return events
+}
+
+// interruptPrefix opens the user line Claude Code writes when the user
+// interrupts a turn, plain or "for tool use".
+const interruptPrefix = "[Request interrupted by user"
+
+// interrupts reports whether e is the interrupt line of rec's turn.
+func interrupts(rec *runRecord, e transcriptEntry) bool {
+	return !rec.terminal && strings.HasPrefix(e.Text, interruptPrefix) &&
+		(rec.promptID == "" || rec.promptID == e.PromptID)
 }
 
 func (a *Attachment) setActivityTurn(id string, ts int64) {
@@ -625,19 +648,25 @@ func (a *Attachment) bindStopsLocked(stops stopMarkers, events []core.NativeEven
 		if done == nil {
 			continue
 		}
-		// The run's end closes its open approvals first, so the endpoint sees
-		// each resolution before the terminal outcome.
-		events = a.endApprovalsLocked(done, events)
-		a.queueRunEndLocked(done)
-		done.terminal = true
-		done.state = protocol.StateCompleted
-		done.result = &protocol.Result{Text: done.lastText, NativeRef: done.msgID}
-		if a.owner == done {
-			a.owner = nil
-		}
-		events = append(events, core.NativeEvent{Type: core.EventRunCompleted, Key: done.key, RunID: done.msgID, Result: done.result})
+		events = a.settleRunLocked(done, protocol.StateCompleted, core.EventRunCompleted, events)
 	}
 	return events
+}
+
+// settleRunLocked ends rec in state with its turn's newest assistant text as
+// the result and emits typ. The run's end closes its open approvals first,
+// so the endpoint sees each resolution before the terminal outcome. Caller
+// holds a.mu.
+func (a *Attachment) settleRunLocked(rec *runRecord, state protocol.State, typ core.NativeEventType, events []core.NativeEvent) []core.NativeEvent {
+	events = a.endApprovalsLocked(rec, events)
+	a.queueRunEndLocked(rec)
+	rec.terminal = true
+	rec.state = state
+	rec.result = &protocol.Result{Text: rec.lastText, NativeRef: rec.msgID}
+	if a.owner == rec {
+		a.owner = nil
+	}
+	return append(events, core.NativeEvent{Type: typ, Key: rec.key, RunID: rec.msgID, Result: rec.result})
 }
 
 // stopObs is one decoded Stop-marker line: the receiver's wall-clock
