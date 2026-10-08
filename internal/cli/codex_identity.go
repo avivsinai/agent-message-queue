@@ -164,6 +164,17 @@ func parseCodexResume(args []string) (r codexResume, ok bool) {
 			r.start = i
 		case codexValueOptions[flag] && !inline:
 			i++
+		case !codexFlagOptions[flag] && !codexEmbeddedFlags[flag] && !codexValueOptions[flag]:
+			// An option AMQ does not know may take a value, so the resume
+			// after it cannot be parsed (review of #1001: --remote unix://
+			// resume --last bound nothing).
+			at := slices.Index(args[i+1:], "resume")
+			if at < 0 {
+				return r, false
+			}
+			r.start, r.unparsed = i+1+at, true
+			r.last = slices.Contains(args[r.start:], "--last")
+			return r, true
 		}
 	}
 	if r.start < 0 {
@@ -181,10 +192,13 @@ func parseCodexResume(args []string) (r codexResume, ok bool) {
 		case arg == "--":
 			dash = true
 		case arg == "--last":
+			r.unparsed = r.unparsed || r.last
 			r.last = true
 		case arg == "--all":
+			r.unparsed = r.unparsed || r.all
 			r.all = true
 		case arg == "--include-non-interactive":
+			r.unparsed = r.unparsed || r.includeNonInteractive
 			r.includeNonInteractive = true
 		case codexFlagOptions[flag] || codexEmbeddedFlags[flag]:
 			r.opts = append(r.opts, arg)
@@ -202,14 +216,16 @@ func parseCodexResume(args []string) (r codexResume, ok bool) {
 			return r, true
 		}
 	}
-	r.unparsed = r.unparsed || len(r.pos) > 2
+	// Codex refuses --last with two positionals, and a repeated flag, as an
+	// argument conflict (cli/src/main.rs SessionTuiCli; review of #1001).
+	r.unparsed = r.unparsed || len(r.pos) > 2 || r.last && len(r.pos) > 1
 	return r, true
 }
 
 // selection applies codex-cli 0.160's argument mapping (cli/src/main.rs
-// finalize_resume_interactive): with --last and one positional, it is the
-// prompt; otherwise the first positional selects the thread and wins over
-// --last. last reports whether the most recent thread is selected.
+// finalize_resume_interactive): with --last, the one positional is the
+// prompt; otherwise the first positional selects the thread. last reports
+// whether the most recent thread is selected.
 func (r codexResume) selection() (selector, prompt *codexPositional, last bool) {
 	switch {
 	case r.last && len(r.pos) == 1:
@@ -265,10 +281,7 @@ func resolveCodexResumeLaunch(binaryPath string, args []string) ([]string, error
 		return args, nil // the picker
 	}
 	if selector != nil && codexidentity.ValidThread(selector.value) {
-		if !r.last {
-			return args, nil
-		}
-		return rewriteCodexResume(args, r, selector.value, prompt), nil
+		return args, nil
 	}
 	if selector != nil && codex.ParsesAsUUID(selector.value) {
 		return nil, codexResumeRefusal("pass the thread id %s in lowercase hyphenated form", selector.value)

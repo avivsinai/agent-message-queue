@@ -74,3 +74,24 @@ func TestResolveResumeThreadRefusesAnAmbiguousName(t *testing.T) {
 		t.Fatalf("id=%q err=%v, want a refusal naming both threads", id, err)
 	}
 }
+
+// Review of #1001 (P1): with CODEX_HOME set to a symlink, Codex lists thread
+// paths under the real home, and AMQ refused every name.
+func TestResolveResumeThreadNamesUnderASymlinkedCodexHome(t *testing.T) {
+	d := newFakeNamingDaemon(t)
+	home := t.TempDir()
+	rollout := writeRollout(t, filepath.Join(home, "sessions", "a.jsonl"))
+	link := filepath.Join(t.TempDir(), "codex-home")
+	if err := os.Symlink(home, link); err != nil {
+		t.Fatal(err)
+	}
+	real, err := filepath.EvalSymlinks(rollout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.pages = []string{fmt.Sprintf(`{"data":[{"id":%q,"name":"s1/codex","preview":"","path":%q}],"nextCursor":null}`, resumeT1, real)}
+	id, err := ResolveResumeThread(context.Background(), d.sock, ResumeQuery{Name: "s1/codex", ConfigCwd: "/work", CodexHome: link})
+	if err != nil || id != resumeT1 {
+		t.Fatalf("id=%q err=%v, want %s", id, err, resumeT1)
+	}
+}

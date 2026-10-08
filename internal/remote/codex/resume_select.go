@@ -177,7 +177,13 @@ func threadByName(ctx context.Context, client *Client, q ResumeQuery, provider [
 	if strings.TrimSpace(q.Name) == "" {
 		return "", ErrNoResumeThread
 	}
-	sessions := filepath.Join(q.CodexHome, "sessions")
+	// Codex canonicalizes CODEX_HOME, so thread paths are under its real
+	// path (utils/home-dir find_codex_home; review of #1001).
+	home := q.CodexHome
+	if real, err := filepath.EvalSymlinks(home); err == nil {
+		home = real
+	}
+	sessions := filepath.Join(home, "sessions")
 	matched, paginated := "", false
 	var cursor *string
 	for {
@@ -260,7 +266,7 @@ func metadataMismatch(message string, thread resumeThread) bool {
 func rolloutExists(path string) bool {
 	plain := strings.TrimSuffix(path, ".zst")
 	for _, candidate := range []string{plain, plain + ".zst"} {
-		if _, err := os.Stat(candidate); err == nil {
+		if info, err := os.Stat(candidate); err == nil && info.Mode().IsRegular() {
 			return true
 		}
 	}

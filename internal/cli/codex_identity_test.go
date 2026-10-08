@@ -119,14 +119,18 @@ func TestUnresolvedCodexResumeIsRefused(t *testing.T) {
 		{"resume", "-i", "shot.png", id},
 		// Review of #993 r4 (Pro, P1): options before the subcommand.
 		{"-c", "model=x", "resume"},
+		// Review of #1001: --last with two positionals is Codex's argument
+		// conflict, and an option AMQ does not know hides the resume.
+		{"resume", "--last", id, "continue here"},
+		{"--remote", "unix://", "resume", "--last"},
 	} {
-		err := recordResumedCodexThread("codex", args, nil)
+		launch, err := resolveCodexResumeLaunch("codex", args)
+		if err == nil {
+			err = recordResumedCodexThread("codex", launch, record)
+		}
 		var mismatch *ExitCodeError
 		if !errors.As(err, &mismatch) || mismatch.Code != ExitContextMismatch {
 			t.Errorf("%q: err=%v, want the launch refused", args, err)
-		}
-		if err := recordResumedCodexThread("codex", args, record); err == nil {
-			t.Errorf("%q with a recorder: launch allowed", args)
 		}
 	}
 	if recorded != 0 {
