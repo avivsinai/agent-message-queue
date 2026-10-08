@@ -8,6 +8,20 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.91.0](https://github.com/avivsinai/agent-message-queue/compare/v0.90.0...v0.91.0) (2026-10-08)
+
+
+### Features
+
+* **cli:** resume a Codex --last or named thread under coop exec ([#1001](https://github.com/avivsinai/agent-message-queue/issues/1001)) ([089aeb8](https://github.com/avivsinai/agent-message-queue/commit/089aeb822baade6aeb514360a34df8956e95596b))
+
+
+### Bug Fixes
+
+* **remote:** an interrupted Claude turn cancels its request ([#1003](https://github.com/avivsinai/agent-message-queue/issues/1003)) ([6a85f22](https://github.com/avivsinai/agent-message-queue/commit/6a85f2283112b89cc2aa2ec308b83568fdb3709b))
+* **remote:** attach names a Codex daemon socket the sandbox blocks ([#1002](https://github.com/avivsinai/agent-message-queue/issues/1002)) ([89c902c](https://github.com/avivsinai/agent-message-queue/commit/89c902c4ee5136b475caa909d87aebea192e4343))
+* **remote:** Codex approvals hide secrets and approve only what shows ([#996](https://github.com/avivsinai/agent-message-queue/issues/996)) ([27150b5](https://github.com/avivsinai/agent-message-queue/commit/27150b54f7e9934ea9f7e3f7754a522645eee648))
+
 ## [0.90.0](https://github.com/avivsinai/agent-message-queue/compare/v0.89.2...v0.90.0) (2026-10-08)
 
 
