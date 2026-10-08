@@ -95,7 +95,9 @@ command's own message. Do not work around a refusal.
 Codex with `--native`: attach needs `CODEX_THREAD_ID` and a thread loaded in
 the Codex app-server daemon. A session started with plain `codex` is not in
 the daemon; start it with `codex app-server daemon start`, then
-`codex --remote unix://`.
+`codex --remote unix://`. Run `amq-remote` and `amq-acp` outside Codex's
+sandbox (request escalation): the sandbox blocks the daemon socket, and
+`amq-acp setup` writes files outside the workspace.
 
 ## Answering a Buzz DM (default mailbox)
 

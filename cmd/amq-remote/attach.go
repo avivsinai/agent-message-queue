@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -303,7 +304,7 @@ func detach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 
 // selfCandidate finds the invoking native session among discovered ones.
 func selfCandidate(root, stateDir string) (registry.Candidate, error) {
-	cands, _ := registry.Discover(context.Background(), registry.DiscoverRequest{Root: root, StateDir: stateDir})
+	cands, diags := registry.Discover(context.Background(), registry.DiscoverRequest{Root: root, StateDir: stateDir})
 	if thread := strings.TrimSpace(os.Getenv("CODEX_THREAD_ID")); thread != "" {
 		for _, cand := range cands {
 			if cand.Kind != "codex" {
@@ -314,6 +315,18 @@ func selfCandidate(root, stateDir string) (registry.Candidate, error) {
 			}
 			if json.Unmarshal(cand.Config, &cfg) == nil && cfg.Thread == thread {
 				return cand, nil
+			}
+		}
+		// A daemon AMQ cannot reach says nothing about the thread: name the
+		// failure, not "not loaded". Codex's sandbox denies the daemon socket
+		// to a tool call (agent-message-queue-611.65).
+		for _, d := range diags {
+			switch {
+			case d.Kind != "codex":
+			case errors.Is(d.Err, fs.ErrPermission):
+				return registry.Candidate{}, fmt.Errorf("cannot reach the Codex app-server daemon: %v; a Codex sandbox blocks its socket, so run this command outside the sandbox", d.Err)
+			default:
+				return registry.Candidate{}, fmt.Errorf("cannot reach the Codex app-server daemon: %v; start it with `codex app-server daemon start`, then Codex with `codex --remote unix://`", d.Err)
 			}
 		}
 		return registry.Candidate{}, fmt.Errorf("codex thread %s is not loaded in the app-server daemon; start Codex with `codex --remote unix://`", thread)
