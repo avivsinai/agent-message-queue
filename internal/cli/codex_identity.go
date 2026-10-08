@@ -309,6 +309,8 @@ func resolveCodexResumeLaunch(binaryPath string, args []string) ([]string, error
 	switch {
 	case errors.Is(err, codex.ErrNoResumeThread) && selector != nil:
 		return nil, codexResumeRefusal("no saved Codex session is named %q", selector.value)
+	case errors.Is(err, codex.ErrNoResumeThread) && r.all:
+		return nil, codexResumeRefusal("no Codex session to resume; start without resume")
 	case errors.Is(err, codex.ErrNoResumeThread):
 		return nil, codexResumeRefusal("no Codex session to resume for %s; start without resume", wd)
 	case err != nil:
