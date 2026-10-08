@@ -10,6 +10,7 @@ package cli
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -310,5 +311,31 @@ func TestWakeHoldZeroPolicyKeepsTodaysSchedule(t *testing.T) {
 	h.scan(h.cfg)
 	if got := h.rings(); got != 1 {
 		t.Fatalf("retry rings = %d, want 1", got)
+	}
+}
+
+// A file dated in the future has no trustworthy arrival time. Clamping it to
+// the scan time moved the deadline later at every waker restart, so the
+// doorbell could be postponed forever. Such mail gets no hold: it rings at once
+// and a restart mid-hold rings again at once.
+func TestWakeHoldFutureMtimeIsNeverPostponedByRestart(t *testing.T) {
+	h := newWakeHoldHarness(t, wakeHoldRecommended)
+	start := h.now
+	h.send("a", format.PriorityNormal)
+	future := start.Add(time.Hour)
+	path := filepath.Join(h.root, "agents", "codex", "inbox", "new", "a.md")
+	if err := os.Chtimes(path, future, future); err != nil {
+		t.Fatal(err)
+	}
+	h.scan(h.cfg)
+	if got := h.rings(); got != 1 {
+		t.Fatalf("rings for a future-dated normal message = %d, want 1 at once", got)
+	}
+
+	h.advance(4 * time.Minute)
+	restarted := h.newConfig(wakeHoldRecommended)
+	h.scan(restarted)
+	if got := h.rings(); got != 1 {
+		t.Fatalf("rings after a mid-hold restart = %d, want 1 at once, not postponed", got)
 	}
 }

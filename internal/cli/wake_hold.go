@@ -40,16 +40,19 @@ func (policy wakeHoldPolicy) forPriority(priority string) time.Duration {
 
 // newWakeHold builds a message's hold from the inbox file's own modification
 // time, not the sender's header clock. A restarted waker reads the same file
-// and gets the same due time, so a restart does not restart the hold. A time
-// in the future is clamped to now.
+// and gets the same due time, so a restart does not restart the hold.
+//
+// A file with no mtime, or one dated after now, has no trustworthy arrival
+// time. Clamping it to now would move the deadline later at every restart, so
+// such a message gets no hold: it is due now and rings like today's wake.
 func newWakeHold(policy wakeHoldPolicy, priority string, info os.FileInfo, now time.Time) wakeHold {
-	arrival := now
-	if info != nil && info.ModTime().Before(now) {
-		arrival = info.ModTime()
+	urgent := strings.TrimSpace(priority) == format.PriorityUrgent
+	if info == nil || info.ModTime().After(now) {
+		return wakeHold{due: now, urgent: urgent}
 	}
 	return wakeHold{
-		due:    arrival.Add(policy.forPriority(priority)),
-		urgent: strings.TrimSpace(priority) == format.PriorityUrgent,
+		due:    info.ModTime().Add(policy.forPriority(priority)),
+		urgent: urgent,
 	}
 }
 
