@@ -8,6 +8,18 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.92.0](https://github.com/avivsinai/agent-message-queue/compare/v0.91.0...v0.92.0) (2026-10-08)
+
+
+### Features
+
+* **remote:** a yes typed in a Claude approval's thread allows it ([#1004](https://github.com/avivsinai/agent-message-queue/issues/1004)) ([68d7f2a](https://github.com/avivsinai/agent-message-queue/commit/68d7f2a4f79fc23c02c7ba136f53cf183d3d615b))
+
+
+### Bug Fixes
+
+* **remote:** one verdict per Claude allow proof, and the DM hears a refusal ([#1000](https://github.com/avivsinai/agent-message-queue/issues/1000)) ([5a1135a](https://github.com/avivsinai/agent-message-queue/commit/5a1135a0c7f12a0c1f0719944e7e0032dc1600e8))
+
 ## [0.91.0](https://github.com/avivsinai/agent-message-queue/compare/v0.90.0...v0.91.0) (2026-10-08)
 
 
