@@ -326,7 +326,7 @@ func selfCandidate(root, stateDir string) (registry.Candidate, error) {
 			case errors.Is(d.Err, fs.ErrPermission):
 				return registry.Candidate{}, fmt.Errorf("cannot reach the Codex app-server daemon: %v; a Codex sandbox blocks its socket, so run this command outside the sandbox", d.Err)
 			default:
-				return registry.Candidate{}, fmt.Errorf("cannot reach the Codex app-server daemon: %v", d.Err)
+				return registry.Candidate{}, fmt.Errorf("cannot reach the Codex app-server daemon: %v; start it with `codex app-server daemon start`, then Codex with `codex --remote unix://`", d.Err)
 			}
 		}
 		return registry.Candidate{}, fmt.Errorf("codex thread %s is not loaded in the app-server daemon; start Codex with `codex --remote unix://`", thread)
