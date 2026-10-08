@@ -301,7 +301,6 @@ func TestRedeliveredPromptStillGetsTheBuzzMailbox(t *testing.T) {
 // the event afterwards.
 func TestMailboxMissingMailboxIsNotDelivered(t *testing.T) {
 	s, _ := mailboxServer(t)
-	s.cfg.TurnTimeout = 200 * time.Millisecond
 	root := canonicalTempDir(t)
 	if err := binding.Write(binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: "agent"}); err != nil {
 		t.Fatal(err)
