@@ -50,8 +50,11 @@ type dmEdges struct {
 	// identity is the endpoint's in-process native session accessor, bound
 	// with handle.
 	identity func(target string) string
-	// pins are the DM-approval pins this process wrote (pinApprovals).
+	// pins are the DM-approval pins this process wrote (pinApprovals,
+	// pinNative).
 	pins []approvalPin
+	// shared names every target a relay share serves.
+	shared map[string]bool
 }
 
 // buildDMEdges opens a carrier per commands share before startup
@@ -59,9 +62,12 @@ type dmEdges struct {
 // during reconcile. A share whose enrolled credentials cannot load keeps its
 // commands surface closed and is reported, never silently attached.
 func buildDMEdges(root, stateDir string, r *manifest.Relay, warn io.Writer) *dmEdges {
-	d := &dmEdges{byBody: map[string]*dmShare{}, state: map[string]string{}, presence: map[string]*presenceShare{}}
+	d := &dmEdges{byBody: map[string]*dmShare{}, state: map[string]string{}, presence: map[string]*presenceShare{}, shared: map[string]bool{}}
 	if r == nil {
 		return d
+	}
+	for _, sh := range r.Shares {
+		d.shared[sh.Target] = true
 	}
 	d.relay, d.self = r.URL, r.Self
 	dupBodies := map[string]bool{}
@@ -158,31 +164,52 @@ func (d *dmEdges) pinApprovals(adapters []manifest.Adapter, warn io.Writer) {
 		if !ok || ad.Kind != "claude" || sh.NativeSessionID == "" {
 			continue
 		}
-		var cfg struct {
-			Home    string `json:"home"`
-			Approve bool   `json:"approve"`
-		}
-		if len(ad.Config) > 0 && json.Unmarshal(ad.Config, &cfg) != nil || !cfg.Approve {
-			continue
-		}
-		home := cfg.Home
-		if home == "" {
-			h, err := os.UserHomeDir()
-			if err != nil {
-				say(warn, "relay share %s: DM approvals disabled: %v", sh.Session, err)
-				continue
-			}
-			home = h
-		}
-		token, err := claude.PinApprovals(home, sh.NativeSessionID, sh.Session, sh.OwnerPubKey, os.Getpid())
-		if err != nil {
+		if err := d.pin(ad, sh.NativeSessionID, sh.Session, sh.OwnerPubKey); err != nil {
 			say(warn, "relay share %s: DM approvals disabled: %v", sh.Session, err)
-			continue
 		}
-		d.mu.Lock()
-		d.pins = append(d.pins, approvalPin{home: home, session: sh.NativeSessionID, token: token})
-		d.mu.Unlock()
 	}
+}
+
+// pinNative pins, for a Claude adapter with approve that no relay share
+// serves, its native session with no owner, so its PermissionRequest hook
+// can take a deny from the Buzz Desktop agent (amq-acp) and never an allow
+// (bead agent-message-queue-611.42.2). Like a share pin it lives while this
+// process does.
+func (d *dmEdges) pinNative(ad manifest.Adapter, native string, warn io.Writer) {
+	if ad.Kind != "claude" || native == "" || d.shared[ad.Target] {
+		return
+	}
+	if err := d.pin(ad, native, "", ""); err != nil {
+		say(warn, "%s: Buzz Desktop approvals disabled: %v", ad.Target, err)
+	}
+}
+
+// pin writes one approval pin for a Claude adapter with approve, and
+// records it for unpinApprovals. An adapter without approve pins nothing.
+func (d *dmEdges) pin(ad manifest.Adapter, native, share, owner string) error {
+	var cfg struct {
+		Home    string `json:"home"`
+		Approve bool   `json:"approve"`
+	}
+	if len(ad.Config) > 0 && json.Unmarshal(ad.Config, &cfg) != nil || !cfg.Approve {
+		return nil
+	}
+	home := cfg.Home
+	if home == "" {
+		h, err := os.UserHomeDir()
+		if err != nil {
+			return err
+		}
+		home = h
+	}
+	token, err := claude.PinApprovals(home, native, share, owner, os.Getpid())
+	if err != nil {
+		return err
+	}
+	d.mu.Lock()
+	d.pins = append(d.pins, approvalPin{home: home, session: native, token: token})
+	d.mu.Unlock()
+	return nil
 }
 
 // unpinApprovals removes every pin this process wrote.

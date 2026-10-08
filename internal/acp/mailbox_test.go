@@ -610,9 +610,9 @@ func TestBuzzAnswerIsPostedIntoTheDMChannel(t *testing.T) {
 	var posts []post
 	saved := postAnswer
 	t.Cleanup(func() { postAnswer = saved })
-	postAnswer = func(channel, content string, _ time.Duration) error {
+	postAnswer = func(channel, content string, _ time.Duration) (string, error) {
 		posts = append(posts, post{channel, content})
-		return nil
+		return "", nil
 	}
 	prompt := "<context>\nScope: dm\nChannel: DM (#6eff60e4-32ab-48ec-bd3d-f4c97872f370)\n</context>\nhi"
 	turn := newTurn()
@@ -644,9 +644,9 @@ func TestRedeliveredEventPostsOnce(t *testing.T) {
 	posts := 0
 	saved := postAnswer
 	t.Cleanup(func() { postAnswer = saved })
-	postAnswer = func(string, string, time.Duration) error {
+	postAnswer = func(string, string, time.Duration) (string, error) {
 		posts++
-		return nil
+		return "", nil
 	}
 	prompt := "<context>\nScope: dm\nChannel: DM (#6eff60e4-32ab-48ec-bd3d-f4c97872f370)\n</context>\nhi"
 	eventID := strings.Repeat("7", 64)
@@ -679,9 +679,9 @@ func TestLateReplyIsPostedOnceAfterTheTurn(t *testing.T) {
 	var posts []string
 	saved := postAnswer
 	t.Cleanup(func() { postAnswer = saved })
-	postAnswer = func(_, content string, _ time.Duration) error {
+	postAnswer = func(_, content string, _ time.Duration) (string, error) {
 		posts = append(posts, content)
-		return nil
+		return "", nil
 	}
 	prompt := "<context>\nScope: dm\nChannel: DM (#6eff60e4-32ab-48ec-bd3d-f4c97872f370)\n</context>\nhi"
 	eventID := strings.Repeat("8", 64)
@@ -757,11 +757,11 @@ func TestRedeliveryPostsTheAnswerToTheFirstChannel(t *testing.T) {
 			var posts []post
 			saved := postAnswer
 			t.Cleanup(func() { postAnswer = saved })
-			postAnswer = func(channel, content string, _ time.Duration) error {
+			postAnswer = func(channel, content string, _ time.Duration) (string, error) {
 				mu.Lock()
 				defer mu.Unlock()
 				posts = append(posts, post{channel, content})
-				return nil
+				return "", nil
 			}
 			eventID := strings.Repeat("9", 64)
 			deliver := func(channel string) {
@@ -799,9 +799,9 @@ func TestCancelBeforeTheFinalPostWins(t *testing.T) {
 	posts := 0
 	saved := postAnswer
 	t.Cleanup(func() { postAnswer = saved })
-	postAnswer = func(string, string, time.Duration) error {
+	postAnswer = func(string, string, time.Duration) (string, error) {
 		posts++
-		return nil
+		return "", nil
 	}
 	eventID := strings.Repeat("a", 64)
 	if err := s.recordEventCancel(eventID); err != nil {
@@ -869,11 +869,11 @@ func recordPosts(t *testing.T) func() []string {
 	var posts []string
 	saved := postAnswer
 	t.Cleanup(func() { postAnswer = saved })
-	postAnswer = func(channel, content string, _ time.Duration) error {
+	postAnswer = func(channel, content string, _ time.Duration) (string, error) {
 		mu.Lock()
 		defer mu.Unlock()
 		posts = append(posts, channel+": "+content)
-		return nil
+		return "", nil
 	}
 	return func() []string {
 		mu.Lock()

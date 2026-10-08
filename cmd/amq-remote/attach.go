@@ -61,6 +61,13 @@ func attach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 		return protocol.ExitActionRequired, err
 	}
 	reg := ipc.RegisterRequest{Kind: cand.Kind, Target: cand.Target, Config: cand.Config}
+	if cand.Kind == "claude" {
+		// A Claude session shows its tool approvals in the Buzz DM, where
+		// the owner can deny them (bead agent-message-queue-611.42.2).
+		if reg.Config, err = withApprove(cand.Config); err != nil {
+			return protocol.ExitActionRequired, err
+		}
+	}
 	session, err := registerTarget(stateDir, reg)
 	if isEndpointUnreachable(err) {
 		// No endpoint yet: record the target where startup reads it, then
@@ -450,10 +457,26 @@ func persistAdapter(stateDir string, a manifest.Adapter) error {
 			}
 			// The same target name with another kind or config names another
 			// session; it is refused, never silently kept (codex #885 P1 #2).
-			if existing.Kind != a.Kind || !sameJSON(existing.Config, a.Config) || existing.Epoch != a.Epoch {
+			if existing.Kind != a.Kind || existing.Epoch != a.Epoch {
 				return protocol.Refuse(protocol.CodeInvalid, "manifest already declares %s for another session; refusing", a.Target)
 			}
-			return nil
+			if sameJSON(existing.Config, a.Config) {
+				return nil
+			}
+			// The same Claude session attached before approvals existed
+			// gains approve; anything else names another session.
+			if upgraded, err := withApprove(existing.Config); a.Kind != "claude" || err != nil || !sameJSON(upgraded, a.Config) {
+				return protocol.Refuse(protocol.CodeInvalid, "manifest already declares %s for another session; refusing", a.Target)
+			}
+			for i := range f.Adapters {
+				if f.Adapters[i].Target == a.Target {
+					f.Adapters[i].Config = a.Config
+				}
+			}
+			if err := manifest.Validate(f); err != nil {
+				return err
+			}
+			return manifest.Write(path, f)
 		}
 		f.Adapters = append(f.Adapters, a)
 		if err := manifest.Validate(f); err != nil {
@@ -465,7 +488,8 @@ func persistAdapter(stateDir string, a manifest.Adapter) error {
 
 // liveRegistrar attaches one adapter to the running endpoint the way startup
 // attaches manifest entries, after persisting it for restarts.
-func liveRegistrar(root, stateDir string, ep *core.Endpoint) ipc.Registrar {
+// A Claude target gets its native approval pin from pin when non-nil.
+func liveRegistrar(root, stateDir string, ep *core.Endpoint, pin func(manifest.Adapter)) ipc.Registrar {
 	var mu sync.Mutex
 	return func(r ipc.RegisterRequest) (protocol.Session, error) {
 		mu.Lock()
@@ -484,6 +508,9 @@ func liveRegistrar(root, stateDir string, ep *core.Endpoint) ipc.Registrar {
 				return protocol.Session{}, protocol.Refuse(protocol.CodeUnsupported, "attach %s: %s", r.Target, reason)
 			}
 			ep.Register(out[0].Attachment)
+			if pin != nil {
+				pin(a)
+			}
 		}
 		for _, s := range ep.Sessions() {
 			if s.TargetID == r.Target {
@@ -492,6 +519,18 @@ func liveRegistrar(root, stateDir string, ep *core.Endpoint) ipc.Registrar {
 		}
 		return protocol.Session{}, protocol.Refuse(protocol.CodeNotFound, "target %s did not attach", r.Target)
 	}
+}
+
+// withApprove is a Claude adapter config with approve set.
+func withApprove(config json.RawMessage) (json.RawMessage, error) {
+	cfg := map[string]any{}
+	if len(config) > 0 {
+		if err := json.Unmarshal(config, &cfg); err != nil {
+			return nil, fmt.Errorf("claude adapter config: %w", err)
+		}
+	}
+	cfg["approve"] = true
+	return json.Marshal(cfg)
 }
 
 // sameJSON compares two config blocks by value.

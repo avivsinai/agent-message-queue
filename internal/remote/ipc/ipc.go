@@ -33,7 +33,7 @@ var callReadDeadline = 30 * time.Second
 
 // LocalHost is the authenticated source recorded for commands that arrive
 // over the local socket: the OS user owning the socket.
-const LocalHost = "local"
+const LocalHost = core.LocalHost
 
 // Request is one IPC record from a client.
 type Request struct {
@@ -84,6 +84,10 @@ type NativeReply struct {
 type WaitRequest struct {
 	RequestRef string `json:"request_ref"`
 	TimeoutMS  int64  `json:"timeout_ms"`
+	// AfterRevision, when set, also ends the wait once the request's
+	// revision is past it, so a follower sees each pending interaction.
+	// Absent keeps the terminal or uncertain wait. Local-only.
+	AfterRevision *int64 `json:"after_revision,omitempty"`
 }
 
 // Response is one IPC record from the endpoint.
@@ -211,7 +215,7 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 		}
 		wctx, cancel := context.WithTimeout(ctx, timeout)
 		defer cancel()
-		snap, err := s.ep.Wait(wctx, req.Wait.RequestRef)
+		snap, err := s.ep.WaitAfter(wctx, req.Wait.RequestRef, req.Wait.AfterRevision)
 		// Wait never cancels work, so NO context error may be reported as
 		// failure. DeadlineExceeded is the caller's own timeout; Canceled is
 		// the endpoint shutting down underneath a live wait. Both mean "not

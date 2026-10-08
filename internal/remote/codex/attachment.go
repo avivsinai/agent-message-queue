@@ -1688,7 +1688,7 @@ func (a *Attachment) terminalQuestion(req ServerRequest) (string, *protocol.Inte
 	if secretscan.MayHold(raw) || secretscan.MayHold(prompt) {
 		prompt = asks[req.Method] + "; it may hold a secret, so only the terminal shows it."
 	}
-	// The owner sees that a long request was cut, as boundPreview shows it.
+	// The owner sees that a long request was cut, as protocol.BoundPreview shows it.
 	if text, cut := protocol.TruncateText(prompt, protocol.MaxApprovalPreview); cut {
 		prompt = text + " …[shortened]"
 	}

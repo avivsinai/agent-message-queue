@@ -3,8 +3,10 @@ package acp
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -34,8 +36,8 @@ const envBuzzCLI = "AMQ_ACP_BUZZ_CLI"
 // output pipes to close (Config.PostTimeout).
 const defaultPostTimeout = 30 * time.Second
 
-// postAnswer publishes content into channel. A variable so tests can record
-// posts without a relay.
+// postAnswer publishes content into channel and returns the posted event
+// id. A variable so tests can record posts without a relay.
 var postAnswer = postWithBuzzCLI
 
 // errNoBuzzIdentity means this process runs outside a Buzz managed agent, so
@@ -59,7 +61,8 @@ func buzzChannel(prompt string) string {
 	return ""
 }
 
-// captureBuzzIdentity records the credentials the buzz CLI needs.
+// captureBuzzIdentity records the credentials the buzz CLI needs, and the
+// agent's owner (approval.go).
 func captureBuzzIdentity() {
 	buzzIdentity = nil
 	for _, key := range buzzIdentityKeys {
@@ -67,17 +70,35 @@ func captureBuzzIdentity() {
 			buzzIdentity = append(buzzIdentity, key+"="+v)
 		}
 	}
+	buzzOwner = agentOwner(os.Getenv("BUZZ_AUTH_TAG"), os.Getenv("BUZZ_PRIVATE_KEY"), os.Getenv("BUZZ_ACP_AGENT_OWNER"))
 }
 
 // postWithBuzzCLI runs `buzz messages send --channel <channel> --content -`
-// with only the agent identity and a minimal environment.
-func postWithBuzzCLI(channel, content string, budget time.Duration) error {
+// with only the agent identity and a minimal environment, and returns the
+// event_id the CLI prints.
+func postWithBuzzCLI(channel, content string, budget time.Duration) (string, error) {
+	out, err := runBuzzCLI(budget, strings.NewReader(content), "messages", "send", "--channel", channel, "--content", "-")
+	if err != nil {
+		return "", err
+	}
+	var sent struct {
+		EventID string `json:"event_id"`
+	}
+	if err := json.Unmarshal(out, &sent); err != nil || sent.EventID == "" {
+		return "", fmt.Errorf("buzz messages send: no event_id in its output")
+	}
+	return sent.EventID, nil
+}
+
+// runBuzzCLI runs the buzz CLI with only the agent identity and a minimal
+// environment and returns its stdout.
+func runBuzzCLI(budget time.Duration, stdin io.Reader, args ...string) ([]byte, error) {
 	if len(buzzIdentity) == 0 {
-		return errNoBuzzIdentity
+		return nil, errNoBuzzIdentity
 	}
 	bin, err := buzzCLI()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	// The budget covers the run and the pipe drain: a CLI whose child keeps
 	// stderr open must not hold a status post (and its event post lock)
@@ -86,20 +107,21 @@ func postWithBuzzCLI(channel, content string, budget time.Duration) error {
 	waitDelay := budget / 10
 	ctx, cancel := context.WithTimeout(context.Background(), budget-waitDelay)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, bin, "messages", "send", "--channel", channel, "--content", "-")
+	cmd := exec.CommandContext(ctx, bin, args...)
 	cmd.WaitDelay = waitDelay
 	cmd.Env = append([]string{"PATH=" + os.Getenv("PATH"), "HOME=" + os.Getenv("HOME")}, buzzIdentity...)
-	cmd.Stdin = strings.NewReader(content)
-	var stderr bytes.Buffer
+	cmd.Stdin = stdin
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		msg := strings.TrimSpace(stderr.String())
 		if len(msg) > 300 {
 			msg = msg[:300]
 		}
-		return fmt.Errorf("buzz messages send: %v: %s", err, msg)
+		return nil, fmt.Errorf("buzz %s: %v: %s", strings.Join(args[:2], " "), err, msg)
 	}
-	return nil
+	return stdout.Bytes(), nil
 }
 
 // buzzCLI finds the buzz binary that receives the owner key: AMQ_ACP_BUZZ_CLI,
@@ -155,7 +177,7 @@ func (s *Server) publish(channel, text string) string {
 	if channel == "" || strings.TrimSpace(text) == "" {
 		return ""
 	}
-	err := postAnswer(channel, text, s.cfg.PostTimeout)
+	_, err := postAnswer(channel, text, s.cfg.PostTimeout)
 	switch {
 	case err == nil:
 		return "posted"

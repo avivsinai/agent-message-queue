@@ -37,7 +37,7 @@ func TestLiveRegisterAttachesAndPersistsTheTarget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv.SetRegistrar(liveRegistrar(root, stateDir, ep))
+	srv.SetRegistrar(liveRegistrar(root, stateDir, ep, nil))
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { defer close(done); _ = srv.Serve(ctx) }()

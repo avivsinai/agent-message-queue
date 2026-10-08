@@ -19,13 +19,19 @@ import (
 )
 
 // Source is the authenticated origin of a command. Host is the peer host from
-// the AMQ carrier or "local" for the CLI; it is never a claimed handle.
+// the AMQ carrier or LocalHost for the CLI; it is never a claimed handle.
 type Source struct {
 	Host string
 	// Origin is carrier routing kept on the record so publication can find
 	// its way back after a restart. It carries no authority.
 	Origin map[string]string
 }
+
+// LocalHost is the source host the local IPC socket stamps on every command
+// it carries, and so the creator host of every request submitted over it.
+// No carrier derives it: the AMQ carrier's hosts start "amq:" and the Buzz
+// carrier's "buzz-".
+const LocalHost = "local"
 
 // Publisher receives every new revision with the record's carrier origin. A
 // returned error leaves the revision unpublished; Reconcile republishes it
@@ -925,6 +931,34 @@ func fromOwnerShare(src Source, rec *requests.Record) bool {
 		o["body"] != "" && o["body"] == r["body"] && o["channel"] == r["channel"]
 }
 
+// localSubmitted reports whether src is the local socket (LocalHost, no
+// carrier origin) and rec is a request that socket submitted.
+func localSubmitted(src Source, rec *requests.Record) bool {
+	return src.Host == LocalHost && len(src.Origin) == 0 && rec.CreatorHost == LocalHost && len(rec.Origin) == 0
+}
+
+// localDeny reports whether src may answer cmd as a local deny (bead
+// agent-message-queue-611.42.2): the Buzz Desktop agent (amq-acp) relays the
+// owner's ❌ over the local socket, which has no owner share. It holds only
+// for a local request answered from the local socket, while t is the
+// Claude attachment the request runs on, its pending interaction is exactly
+// cmd.InteractionID, a Claude approval that takes a remote answer, and the
+// option is that approval's reject option. Allow from a local client stays
+// refused: only the owner's signed reaction on a share can allow. The
+// caller reads rec and t together under e.mu.
+func localDeny(src Source, rec *requests.Record, t *target, cmd *protocol.Command) bool {
+	if !localSubmitted(src, rec) || t == nil {
+		return false
+	}
+	in := rec.Interaction
+	if in == nil || in.InteractionID != cmd.InteractionID || in.Kind != "approval" || !in.RemoteAnswer ||
+		in.RejectOption == "" || in.RejectOption == in.ApproveOption || cmd.Option != in.RejectOption {
+		return false
+	}
+	s := t.att.Inspect()
+	return s.Harness == "claude_code" && s.Epoch == rec.Epoch
+}
+
 func (e *Endpoint) respond(cmd *protocol.Command, src Source) (protocol.Reply, error) {
 	host, targetID, requestID, err := protocol.DecodeRef(cmd.RequestRef)
 	if err != nil {
@@ -941,7 +975,11 @@ func (e *Endpoint) respond(cmd *protocol.Command, src Source) (protocol.Reply, e
 	if !exists {
 		return protocol.Reply{}, protocol.Refuse(protocol.CodeNotFound, "no record for request_ref")
 	}
-	if !fromOwnerShare(src, rec) {
+	// A local request may reach the reads below, which change nothing, so
+	// an answer that lost the race hears already_resolved; whether it may
+	// answer is decided under the lock, before the intent is recorded.
+	owner := fromOwnerShare(src, rec)
+	if !owner && !localSubmitted(src, rec) {
 		return protocol.Reply{}, protocol.Refuse(protocol.CodeUnshared, "only the owner's Buzz share that submitted this request can answer its interactions")
 	}
 	if t == nil {
@@ -1004,6 +1042,12 @@ func (e *Endpoint) respond(cmd *protocol.Command, src Source) (protocol.Reply, e
 		// first read (resolved locally, superseded, or reaped).
 		e.mu.Unlock()
 		return protocol.Reply{}, protocol.Refuse(protocol.CodeAlreadyResolved, "no such pending interaction")
+	}
+	if !owner && (e.targets[targetID] != t || !localDeny(src, rec, t, cmd)) {
+		// A local deny is rechecked on this read: the attachment or the
+		// interaction may have been replaced since the first.
+		e.mu.Unlock()
+		return protocol.Reply{}, protocol.Refuse(protocol.CodeUnshared, "only the owner's Buzz share that submitted this request can answer its interactions")
 	}
 	// An exact replay of the durable answer intent goes to the attachment,
 	// which recognizes an answer it already published, even when the
@@ -2941,6 +2985,12 @@ func (e *Endpoint) abortAdmittedRacedRun(rec *requests.Record, t *target, adm Ad
 // Wait blocks until the record for ref reaches a terminal or uncertain state
 // or ctx ends. It never cancels work. Callers map ctx errors to exit 4 or 130.
 func (e *Endpoint) Wait(ctx context.Context, ref string) (protocol.Snapshot, error) {
+	return e.WaitAfter(ctx, ref, nil)
+}
+
+// WaitAfter is Wait that also returns once the record's revision is past
+// *after, so a follower sees each pending interaction. A nil after is Wait.
+func (e *Endpoint) WaitAfter(ctx context.Context, ref string, after *int64) (protocol.Snapshot, error) {
 	host, targetID, requestID, err := protocol.DecodeRef(ref)
 	if err != nil {
 		return protocol.Snapshot{}, err
@@ -2965,7 +3015,7 @@ func (e *Endpoint) Wait(ctx context.Context, ref string) (protocol.Snapshot, err
 		if isFailed {
 			return failed, nil
 		}
-		if rec.State.Terminal() || rec.State == protocol.StateUncertain {
+		if rec.State.Terminal() || rec.State == protocol.StateUncertain || after != nil && rec.Revision > *after {
 			return rec.Snapshot, nil
 		}
 		select {

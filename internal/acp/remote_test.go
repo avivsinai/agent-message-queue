@@ -3,6 +3,7 @@ package acp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -682,9 +683,9 @@ func TestRedeliveryPostsEachKindOnce(t *testing.T) {
 		var posts []string
 		saved := postAnswer
 		t.Cleanup(func() { postAnswer = saved })
-		postAnswer = func(_, content string, _ time.Duration) error {
+		postAnswer = func(_, content string, _ time.Duration) (string, error) {
 			posts = append(posts, content)
-			return nil
+			return "", nil
 		}
 		return &posts
 	}
@@ -733,9 +734,9 @@ func TestUncertainNoticeDoesNotHideTheAnswer(t *testing.T) {
 	var posts []string
 	saved := postAnswer
 	t.Cleanup(func() { postAnswer = saved })
-	postAnswer = func(_, content string, _ time.Duration) error {
+	postAnswer = func(_, content string, _ time.Duration) (string, error) {
 		posts = append(posts, content)
-		return nil
+		return "", nil
 	}
 	s := NewServer(Config{StateDir: canonicalTempDir(t)}, "test")
 	deliver := func(snap protocol.Snapshot) {
@@ -776,9 +777,9 @@ func TestRecoveredBusyRefusalDoesNotHideTheAnswer(t *testing.T) {
 	var posts []string
 	saved := postAnswer
 	t.Cleanup(func() { postAnswer = saved })
-	postAnswer = func(_, content string, _ time.Duration) error {
+	postAnswer = func(_, content string, _ time.Duration) (string, error) {
 		posts = append(posts, content)
-		return nil
+		return "", nil
 	}
 	busyID := "d2c80e1d-feb7-4c10-959e-23456789abcf"
 	resp, err := ipc.Call(filepath.Join(s.cfg.Root, remoteStateDir), ipc.Request{Command: &protocol.Command{Schema: protocol.SchemaCommand, Op: protocol.OpRequestSubmit, RequestID: busyID, TargetID: "fake", Epoch: "e_1", NotAfter: protocol.FormatTime(time.Now().Add(time.Minute)), Input: &protocol.SubmitInput{Text: "occupy", Busy: protocol.BusyReject, Deliver: protocol.DeliverTurn}}})
@@ -810,5 +811,109 @@ func TestRecoveredBusyRefusalDoesNotHideTheAnswer(t *testing.T) {
 	}
 	if got := strings.Count(strings.Join(posts, "|"), "the answer"); got != 1 {
 		t.Fatalf("posts=%q; want the answer once", posts)
+	}
+}
+
+// claudeApproval is the fake runtime presented as a Claude session whose
+// questions are deny-only tool approvals, as the Claude attachment projects
+// them without an owner pin.
+type claudeApproval struct{ *fake.Runtime }
+
+func (c claudeApproval) Inspect() protocol.Session {
+	s := c.Runtime.Inspect()
+	s.Harness = "claude_code"
+	return s
+}
+
+func (c claudeApproval) Subscribe(fn func(core.NativeEvent)) func() {
+	return c.Runtime.Subscribe(func(ev core.NativeEvent) {
+		if ev.Type == core.EventQuestion && ev.Interaction != nil {
+			in := *ev.Interaction
+			in.Kind, in.Prompt, in.RejectOption = "approval", "rm -rf build", "deny"
+			ev.Interaction = &in
+		}
+		fn(ev)
+	})
+}
+
+// Bead agent-message-queue-611.42.2: a native Claude turn from Buzz Desktop
+// shows its pending tool approval in the DM once, says it can deny only,
+// and relays the owner's ❌ as the approval's reject option.
+func TestRemoteApprovalOwnerDenyFromTheDM(t *testing.T) {
+	for _, failFirst := range []bool{false, true} {
+		t.Run(fmt.Sprintf("failFirst=%v", failFirst), func(t *testing.T) { remoteApprovalOwnerDeny(t, failFirst) })
+	}
+}
+
+// remoteApprovalOwnerDeny drives one Desktop deny. With failFirst the first
+// post and the first deny fail (review of #995: a failure left the owner's
+// ❌ unanswered); the approval is still posted once and denied once.
+func remoteApprovalOwnerDeny(t *testing.T, failFirst bool) {
+	owner := strings.Repeat("0b", 32)
+	savedOwner, savedPost, savedRead, savedPoll := buzzOwner, postAnswer, readReactions, reactionPollInterval
+	t.Cleanup(func() {
+		buzzOwner, postAnswer, readReactions, reactionPollInterval = savedOwner, savedPost, savedRead, savedPoll
+	})
+	reactionPollInterval = 20 * time.Millisecond
+	buzzOwner = owner
+	var mu sync.Mutex
+	var posts []string
+	postFailed := false
+	postAnswer = func(_, content string, _ time.Duration) (string, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if failFirst && !postFailed && strings.Contains(content, "rm -rf build") {
+			postFailed = true
+			return "", errors.New("relay unreachable")
+		}
+		posts = append(posts, content)
+		return fmt.Sprintf("%064x", len(posts)), nil
+	}
+	readReactions = func(string, time.Duration) ([]reaction, error) {
+		return []reaction{{Emoji: "❌", PubKeys: []string{owner}}}, nil
+	}
+
+	rt := fake.New("fake", "e_1")
+	if failFirst {
+		rt.FailNextRespond(errors.New("session busy"))
+	}
+	s := remoteServer(t, claudeApproval{rt}, nil)
+	s.cfg.StateDir = canonicalTempDir(t)
+	eventID := strings.Repeat("c", 64)
+	id, _ := remoteRequestID(eventID)
+	turn := newTurn()
+	turn.channel = "6eff60e4-32ab-48ec-bd3d-f4c97872f370"
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = s.runRemote("s", "clean up", eventID, turn, func(any) error { return nil })
+	}()
+	deadline := time.Now().Add(4 * time.Second)
+	for !rt.HasRun(id) && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	rt.Question(id, "i_1", []string{"deny"})
+	for len(rt.Snapshot().Answers) == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	rt.Complete(id, "stopped")
+	<-done
+
+	if answers := rt.Snapshot().Answers; len(answers) != 1 || answers[0].InteractionID != "i_1" || answers[0].Option != "deny" {
+		t.Fatalf("answers = %v; want one deny of i_1", answers)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	approvals := 0
+	for _, p := range posts {
+		if strings.Contains(p, "rm -rf build") {
+			approvals++
+			if !strings.HasSuffix(p, "\n\nBuzz can deny this request only. ❌ denies; to allow, answer in Claude's terminal. ✅ here cannot approve.") {
+				t.Fatalf("approval post = %q; want the deny-only text", p)
+			}
+		}
+	}
+	if approvals != 1 {
+		t.Fatalf("posts = %q; want the approval posted once", posts)
 	}
 }

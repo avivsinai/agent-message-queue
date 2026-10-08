@@ -282,7 +282,7 @@ func lastETag(evt nostr.Event) string {
 // whole, or false.
 func approvalRef(content, prompt string) (string, bool) {
 	rest, ok := strings.CutPrefix(content, "Approval needed (")
-	if !ok || boundPreview(prompt) != prompt {
+	if !ok || protocol.BoundPreview(prompt) != prompt {
 		return "", false
 	}
 	ref, _, ok := strings.Cut(rest, "):\n\n")

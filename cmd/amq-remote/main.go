@@ -566,7 +566,14 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 		_ = ep.Close()
 		return 0, err
 	}
-	server.SetRegistrar(liveRegistrar(c.root, stateDir, ep))
+	// Claude targets no relay share serves take Buzz Desktop denies
+	// through an owner-less pin (611.42.2): those attached at startup now,
+	// those attached later as they register.
+	pinNative := func(a manifest.Adapter) { edges.pinNative(a, ep.NativeSessionID(a.Target), stderr) }
+	for _, a := range mfSnap.Adapters {
+		pinNative(a)
+	}
+	server.SetRegistrar(liveRegistrar(c.root, stateDir, ep, pinNative))
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	say(stdout, "amq-remote %s serving root=%s handle=%s socket=%s targets=%d", version, c.root, *me, server.Path(), len(ep.Targets()))
@@ -1238,7 +1245,7 @@ func doctor(args []string, probe ...*jsonProbe) (any, int, error) {
 		// and the pin holds only while Claude cannot change it unprompted.
 		if serr == nil && state != claude.StopHookMissing {
 			if pin := claude.PermissionHookPin(home); !pin.Complete() {
-				report["claude_approval_pin"] = "the PermissionRequest hook pins no complete owner and share, so Buzz can only block a tool call; run `amq-remote claude install-approval-hook --owner <pubkey>` to allow from Buzz"
+				report["claude_approval_pin"] = "the PermissionRequest hook pins no complete owner and share, so Buzz can only deny a tool call and allow stays in the terminal; for a relay share, run `amq-remote claude install-approval-hook --owner <pubkey>` to allow from Buzz"
 			} else {
 				report["claude_approval_pin"] = map[string]string{"owner": pin.Owner, "session": pin.Session, "relay": pin.Relay, "channel": pin.Channel, "target": pin.Target}
 			}
