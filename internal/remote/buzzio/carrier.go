@@ -885,7 +885,9 @@ func (c *Carrier) refreshApproval(snap protocol.Snapshot, rc Receipt) error {
 	want := appr
 	want.Disabled = !in.RemoteAnswer
 	if in.RemoteAnswer {
-		want.ApproveOption, want.RejectOption = in.ApproveOption, in.RejectOption
+		// An approval posted reject only takes ApproveProof with its ✅
+		// (advisor review of 611.42.10).
+		want.ApproveOption, want.RejectOption, want.ApproveProof = in.ApproveOption, in.RejectOption, in.ApproveProof
 	}
 	if want.Disabled == appr.Disabled && want.ApproveOption == appr.ApproveOption && want.RejectOption == appr.RejectOption {
 		return nil

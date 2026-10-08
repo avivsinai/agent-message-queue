@@ -241,6 +241,33 @@ func TestApprovalAnsweredByTypedReply(t *testing.T) {
 	if answered == nil || answered.InteractionID != "item-7" {
 		t.Fatalf("reply to the old approval answered %+v, want item-7 only", answered)
 	}
+
+	// Advisor review of 611.42.10: a Claude approval posted reject only and
+	// then edited to offer ✅ kept no ApproveProof, so an unthreaded yes was
+	// sent and refused as unverified instead of saying how to allow.
+	in := &protocol.Interaction{InteractionID: "item-9", Kind: "approval", Prompt: "touch b\nin /repo", Options: []string{"deny"}, RemoteAnswer: true, RejectOption: "deny"}
+	for rev := int64(4); rev <= 5; rev++ {
+		if rev == 5 {
+			in.Options, in.ApproveOption, in.ApproveProof = []string{"allow", "deny"}, "allow", true
+		}
+		now = now.Add(time.Second)
+		if err := c.Publish(protocol.Snapshot{RequestRef: ref, Epoch: "e1", Revision: rev, State: protocol.StateRunning, Interaction: in}, origin); err != nil {
+			t.Fatal(err)
+		}
+		pendingID = "item-9"
+		flush()
+	}
+	answered = nil
+	yes := typed("yes")
+	if err := c.Ingest(yes); err != nil {
+		t.Fatal(err)
+	}
+	hint, _, _ := ledger.Prepared("direct/" + yes.ID.Hex())
+	var reply nostr.Event
+	_ = json.Unmarshal(hint.Event, &reply)
+	if answered != nil || reply.Content != typedApproveHint {
+		t.Fatalf("main-DM yes answered %+v, replied %q; want not sent and how to allow", answered, reply.Content)
+	}
 }
 
 // PR #919 review: the ledger outlives a share binding, and an approval

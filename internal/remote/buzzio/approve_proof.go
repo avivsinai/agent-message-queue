@@ -113,9 +113,9 @@ func VerifyApproveEvidence(raw json.RawMessage, want ApproveCheck) (nostr.Event,
 	case r.Kind != KindReaction && r.Kind != KindDM:
 		return m, errors.New("approve is neither a reaction nor a typed reply")
 	case !r.CheckID() || !r.VerifySignature():
-		return m, errors.New("reaction id or signature does not verify")
+		return m, errors.New("approve id or signature does not verify")
 	case r.PubKey.Hex() != want.Owner:
-		return m, errors.New("reaction is not signed by the pinned owner")
+		return m, errors.New("approve is not signed by the pinned owner")
 	case r.Kind == KindReaction && strings.TrimSpace(r.Content) != approveReaction:
 		return m, errors.New("reaction is not the approve gesture")
 	case r.Kind == KindReaction && lastETag(r) != m.ID.Hex():
