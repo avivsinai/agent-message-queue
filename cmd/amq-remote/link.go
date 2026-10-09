@@ -15,11 +15,13 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/lock"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
@@ -115,6 +117,9 @@ func (ls *linkSet) tick() {
 	for _, r := range runs {
 		r.carrier.Tick()
 		st := r.carrier.Status()
+		// The watchdog refreshes LastPing every few seconds; the file is
+		// rewritten only when it moved by a minute or anything else changed.
+		st.LastPing = st.LastPing.Truncate(time.Minute)
 		if prev, ok := ls.statuses[r.link.Name]; !ok || prev != st {
 			ls.statuses[r.link.Name] = st
 			writeLinkStatus(ls.stateDir, r.link.Name, st)
@@ -123,20 +128,30 @@ func (ls *linkSet) tick() {
 }
 
 // sync starts a carrier for each manifest link that has a device key and is
-// not retired, and stops carriers whose link is gone.
+// not retired, and stops carriers whose link is gone. Disk reads happen
+// outside the lock that core's publish path and every carrier's bindings
+// wait on; only the map swap holds it.
 func (ls *linkSet) sync(mf manifest.File) {
 	ls.mu.Lock()
-	defer ls.mu.Unlock()
-	if ls.ctx == nil {
+	ready := ls.ctx != nil
+	ls.mu.Unlock()
+	if !ready {
 		return
 	}
-	if retired, err := linkio.Retired(ls.stateDir); err == nil {
-		ls.retired = retired
+	retired, err := linkio.Retired(ls.stateDir)
+	if err != nil {
+		say(ls.stderr, "link: read retired sinks: %v", err)
+		retired = nil
 	}
 	want := map[string]manifest.Link{}
 	for _, l := range mf.Links {
 		want[l.Name] = l
 	}
+	ls.mu.Lock()
+	if retired != nil {
+		ls.retired = retired
+	}
+	var missing []manifest.Link
 	for name, r := range ls.running {
 		if l, ok := want[name]; !ok || ls.retired[r.carrier.Host()] {
 			r.cancel()
@@ -147,20 +162,30 @@ func (ls *linkSet) sync(mf manifest.File) {
 		}
 	}
 	for name, l := range want {
-		if ls.running[name] != nil {
-			continue
+		if ls.running[name] == nil {
+			missing = append(missing, l)
 		}
+	}
+	ls.mu.Unlock()
+	for _, l := range missing {
 		run, err := ls.newRun(l)
 		if err != nil {
 			if !errors.Is(err, os.ErrNotExist) {
-				say(ls.stderr, "link %s: %v", name, err)
+				say(ls.stderr, "link %s: %v", l.Name, err)
 			}
+			continue
+		}
+		ls.mu.Lock()
+		if ls.running[l.Name] != nil || ls.retired[run.carrier.Host()] {
+			ls.mu.Unlock()
 			continue
 		}
 		ctx, cancel := context.WithCancel(ls.ctx)
 		run.cancel = cancel
-		ls.running[name] = run
+		ls.running[l.Name] = run
 		ls.byHost[run.carrier.Host()] = run.carrier
+		ls.mu.Unlock()
+		name := l.Name
 		go func() {
 			if err := run.carrier.Run(ctx); errors.Is(err, linkio.ErrRevoked) {
 				say(ls.stderr, "link %s: the server revoked this device; the link is retired", name)
@@ -174,9 +199,6 @@ func (ls *linkSet) newRun(l manifest.Link) (*linkRun, error) {
 	if err != nil {
 		return nil, err
 	}
-	if ls.retired[key.Host()] {
-		return nil, fmt.Errorf("sink %s is retired", key.Host())
-	}
 	pin, err := linkio.LoadPin(ls.stateDir, l.Name)
 	if err != nil {
 		return nil, err
@@ -189,7 +211,7 @@ func (ls *linkSet) newRun(l manifest.Link) (*linkRun, error) {
 	run := &linkRun{link: l}
 	name := l.Name
 	c, err := linkio.New(linkio.Config{
-		Name: name, Pin: pin, StoreID: storeID, Key: key, Version: version,
+		Name: name, Pin: pin, StoreID: storeID, Key: key, Version: ls.version,
 		Bindings: func() []linkio.Binding { return ls.bindings(run, pin) },
 		ConsentKeyRevoked: func(id string) {
 			if _, err := linkio.DropConsentKey(ls.stateDir, name, id); err != nil {
@@ -218,8 +240,10 @@ func (ls *linkSet) retire(name string) {
 		ls.retired[host] = true
 		delete(ls.byHost, host)
 	}
+	if r := ls.running[name]; r != nil && r.cancel != nil {
+		r.cancel()
+	}
 	delete(ls.running, name)
-	writeLinkStatus(ls.stateDir, name, linkio.Status{State: "revoked"})
 }
 
 // bindings are the link's shares as this machine sees them now. A share is
@@ -264,14 +288,15 @@ func (ls *linkSet) bindings(run *linkRun, pin linkio.Pin) []linkio.Binding {
 	return out
 }
 
+// writeLinkStatus records a link's status for `link status`, atomically so a
+// reader never sees half a file.
 func writeLinkStatus(stateDir, name string, st linkio.Status) {
 	dir := linkio.LinkDir(stateDir, name)
 	if _, err := os.Stat(dir); err != nil {
 		return // a retired link keeps no state dir
 	}
-	data, err := json.Marshal(st)
-	if err == nil {
-		_ = os.WriteFile(filepath.Join(dir, "status.json"), data, 0o600)
+	if data, err := json.Marshal(st); err == nil {
+		_, _ = fsq.WriteFileAtomic(dir, "status.json", data, 0o600)
 	}
 }
 
@@ -390,7 +415,7 @@ func linkAdd(args []string, stdin io.Reader, stdout io.Writer, probe *jsonProbe)
 	say(stdout, "Type the passkey fingerprint shown in your browser:")
 	typed, _ := bufio.NewReader(stdin).ReadString('\n')
 	if !linkio.SameFingerprint(typed, want) {
-		return nil, protocol.ExitActionRequired, errors.New("the fingerprint does not match the key the server sent; nothing was linked")
+		return nil, protocol.ExitActionRequired, fmt.Errorf("the fingerprint does not match the key the server sent; nothing was linked here. The server already registered device %s: remove it in the server's connectors, then run link add with a new code", key.Host())
 	}
 	pin := linkio.Pin{URL: info.LinkURL, ServerID: info.ServerID, DeviceID: rep.DeviceID, User: rep.User,
 		DeviceName: *deviceName, RPID: ck.RPID, Origin: ck.Origin}
@@ -402,8 +427,9 @@ func linkAdd(args []string, stdin io.Reader, stdout io.Writer, probe *jsonProbe)
 	}
 	if err := editManifest(stateDir, func(mf *manifest.File) {
 		mf.SchemaVersion = manifest.RelaySchemaVersion
-		for _, l := range mf.Links {
-			if l.Name == name {
+		for i := range mf.Links {
+			if mf.Links[i].Name == name {
+				mf.Links[i].URL = info.LinkURL // a link added again keeps its shares, takes the server's URL
 				return
 			}
 		}
@@ -489,7 +515,24 @@ func linkRemove(args []string, stdout io.Writer, probe *jsonProbe) (any, int, er
 	}
 	host, err := linkio.Retire(stateDir, name)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil, protocol.ExitNotFound, protocol.Refuse(protocol.CodeNotFound, "no link named %q in this root", name)
+		// No device key: either no such link, or the server revoked it (close
+		// 4010) and the endpoint already retired its sink. The manifest entry
+		// is all that is left; drop it.
+		mf, merr := manifest.Load(manifest.DefaultPath(stateDir))
+		if merr != nil {
+			return nil, protocol.ExitError, merr
+		}
+		if !slices.ContainsFunc(mf.Links, func(l manifest.Link) bool { return l.Name == name }) {
+			return nil, protocol.ExitNotFound, protocol.Refuse(protocol.CodeNotFound, "no link named %q in this root", name)
+		}
+		if err := dropManifestLink(stateDir, name); err != nil {
+			return nil, protocol.ExitError, err
+		}
+		if c.json {
+			return map[string]any{"removed": name, "already_retired": true}, 0, nil
+		}
+		say(stdout, "Removed link %s. Its sink was already retired: the server revoked this device.", name)
+		return nil, 0, nil
 	}
 	if err != nil {
 		return nil, protocol.ExitError, err
@@ -567,7 +610,23 @@ func shareWithLink(stateDir, name string, share manifest.LinkShare) error {
 // linkStatusOut is what `link status` prints.
 type linkStatusOut struct {
 	Links        []linkStatusRow `json:"links"`
-	RetiredSinks []string        `json:"retired_sinks"`
+	RetiredSinks []retiredSink   `json:"retired_sinks"`
+}
+
+// retiredSink is a sink that will never dial again, and the link it served.
+type retiredSink struct {
+	Sink string `json:"sink"`
+	Link string `json:"link"`
+}
+
+// retiredHostOf returns a retired sink that served the link name, or "".
+func retiredHostOf(retired map[string]string, name string) string {
+	for h, n := range retired {
+		if n == name {
+			return h
+		}
+	}
+	return ""
 }
 
 func printLinkStatus(w io.Writer, v linkStatusOut) {
@@ -577,7 +636,7 @@ func printLinkStatus(w io.Writer, v linkStatusOut) {
 	for _, l := range v.Links {
 		say(w, "%s  %s  %s", l.Name, l.Status.State, l.URL)
 		if l.Sink != "" {
-			say(w, "  sink=%s gen=%d owed=%d", l.Sink, l.Status.Gen, l.Status.Owed)
+			say(w, "  sink=%s gen=%d owed=%d conflicts=%d", l.Sink, l.Status.Gen, l.Status.Owed, l.Status.Conflicts)
 		}
 		if !l.Status.LastPing.IsZero() {
 			say(w, "  last ping %s", l.Status.LastPing.Format(time.RFC3339))
@@ -587,8 +646,8 @@ func printLinkStatus(w io.Writer, v linkStatusOut) {
 		}
 		say(w, "  shared: %v", l.Shares)
 	}
-	for _, h := range v.RetiredSinks {
-		say(w, "retired %s: its records are abandoned on this link", h)
+	for _, r := range v.RetiredSinks {
+		say(w, "retired %s (link %s): abandoned; its records settle without network", r.Sink, r.Link)
 	}
 }
 
@@ -616,6 +675,10 @@ func linkStatus(args []string, probe *jsonProbe) (any, int, error) {
 	if err != nil {
 		return nil, protocol.ExitError, err
 	}
+	retiredNames, err := linkio.RetiredLinks(stateDir)
+	if err != nil {
+		return nil, protocol.ExitError, err
+	}
 	rows := []linkStatusRow{}
 	for _, l := range mf.Links {
 		row := linkStatusRow{Name: l.Name, URL: l.URL, Status: linkio.Status{State: "offline"}, Shares: []string{}}
@@ -624,6 +687,8 @@ func linkStatus(args []string, probe *jsonProbe) (any, int, error) {
 		}
 		if key, err := linkio.LoadDeviceKey(stateDir, l.Name); err == nil {
 			row.Sink = key.Host()
+		} else if host := retiredHostOf(retiredNames, l.Name); host != "" {
+			row.Sink, row.Status.State = host, "retired"
 		} else {
 			row.Status.State = "not linked"
 		}
@@ -632,14 +697,10 @@ func linkStatus(args []string, probe *jsonProbe) (any, int, error) {
 		}
 		rows = append(rows, row)
 	}
-	retired, err := linkio.Retired(stateDir)
-	if err != nil {
-		return nil, protocol.ExitError, err
+	sinks := make([]retiredSink, 0, len(retiredNames))
+	for h, n := range retiredNames {
+		sinks = append(sinks, retiredSink{Sink: h, Link: n})
 	}
-	sinks := make([]string, 0, len(retired))
-	for h := range retired {
-		sinks = append(sinks, h)
-	}
-	sort.Strings(sinks)
+	sort.Slice(sinks, func(i, j int) bool { return sinks[i].Sink < sinks[j].Sink })
 	return linkStatusOut{Links: rows, RetiredSinks: sinks}, 0, nil
 }

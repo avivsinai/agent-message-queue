@@ -136,6 +136,12 @@ func MintDeviceKey(stateDir, name string) (DeviceKey, error) {
 // LoadDeviceKey reads a link's device key. A key readable by group or
 // others is refused.
 func LoadDeviceKey(stateDir, name string) (DeviceKey, error) {
+	return loadDeviceKey(stateDir, name, true)
+}
+
+// loadDeviceKey reads the key; private refuses a key readable by others,
+// which retiring does not need: it only reads the public host.
+func loadDeviceKey(stateDir, name string, private bool) (DeviceKey, error) {
 	path := filepath.Join(LinkDir(stateDir, name), deviceKeyFile)
 	info, err := os.Lstat(path)
 	if err != nil {
@@ -144,7 +150,7 @@ func LoadDeviceKey(stateDir, name string) (DeviceKey, error) {
 	if !info.Mode().IsRegular() {
 		return DeviceKey{}, fmt.Errorf("%s is not a regular file", path)
 	}
-	if info.Mode().Perm()&0o077 != 0 {
+	if private && info.Mode().Perm()&0o077 != 0 {
 		return DeviceKey{}, fmt.Errorf("%s is readable by others (mode %o); it must be 0600", path, info.Mode().Perm())
 	}
 	data, err := os.ReadFile(path)
@@ -251,7 +257,7 @@ func DropConsentKey(stateDir, name, credentialID string) (bool, error) {
 // caller-delivery part without network. A link created again under the same
 // name gets a new key, so a new host that never receives the old records.
 func Retire(stateDir, name string) (string, error) {
-	key, err := LoadDeviceKey(stateDir, name)
+	key, err := loadDeviceKey(stateDir, name, false)
 	if err != nil {
 		return "", err
 	}
@@ -271,18 +277,31 @@ func Retire(stateDir, name string) (string, error) {
 
 // Retired lists the retired sinks of one root.
 func Retired(stateDir string) (map[string]bool, error) {
-	entries, err := os.ReadDir(filepath.Join(Dir(stateDir), retiredDir))
+	named, err := RetiredLinks(stateDir)
+	out := make(map[string]bool, len(named))
+	for host := range named {
+		out[host] = true
+	}
+	return out, err
+}
+
+// RetiredLinks maps each retired sink to the link name it had.
+func RetiredLinks(stateDir string) (map[string]string, error) {
+	dir := filepath.Join(Dir(stateDir), retiredDir)
+	entries, err := os.ReadDir(dir)
 	if errors.Is(err, os.ErrNotExist) {
-		return map[string]bool{}, nil
+		return map[string]string{}, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	out := make(map[string]bool, len(entries))
+	out := make(map[string]string, len(entries))
 	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), "link-") {
-			out[e.Name()] = true
+		if !strings.HasPrefix(e.Name(), "link-") {
+			continue
 		}
+		name, _ := os.ReadFile(filepath.Join(dir, e.Name()))
+		out[e.Name()] = strings.TrimSpace(string(name))
 	}
 	return out, nil
 }

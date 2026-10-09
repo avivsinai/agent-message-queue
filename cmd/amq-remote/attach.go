@@ -54,8 +54,17 @@ func attach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 	if !*self {
 		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "attach needs --self")
 	}
+	linkFlags := false
+	fs.Visit(func(f *flag.Flag) { linkFlags = linkFlags || f.Name == "consent" || f.Name == "tools" })
+	if *linkName == "" && linkFlags {
+		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "--consent and --tools apply only with --link")
+	}
 	if *linkName != "" {
 		if err := linkio.ValidName(*linkName); err != nil {
+			return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", err)
+		}
+		// Check the share before anything is attached or written.
+		if err := manifest.ValidLinkShare(manifest.LinkShare{Binding: "session", Consent: *consent, Tools: *tools}); err != nil {
 			return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", err)
 		}
 		*nativeMode = true // a linked server reaches a native session only

@@ -108,3 +108,61 @@ func TestLinkAddPinsTypedFingerprint(t *testing.T) {
 		t.Fatalf("manifest links %+v, %v", mf.Links, err)
 	}
 }
+
+// Regression (#1026 review B1): after the server revoked the device (close
+// 4010), the endpoint retired the sink and deleted the link dir, so `link
+// remove` said "no link" and the manifest kept the dead link forever. Now
+// `link status` shows the link as retired, and `link remove` drops it.
+func TestLinkRemoveAfterServerRevoke(t *testing.T) {
+	root := t.TempDir()
+	stateDir := filepath.Join(root, stateDirName)
+	key, err := linkio.MintDeviceKey(stateDir, "example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mf := manifest.File{SchemaVersion: manifest.RelaySchemaVersion, Layer: manifest.Layer,
+		Links: []manifest.Link{{Name: "example", URL: "wss://link.example.test/link"}}}
+	if err := manifest.Write(manifest.DefaultPath(stateDir), mf); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := linkio.Retire(stateDir, "example"); err != nil { // what close 4010 does
+		t.Fatal(err)
+	}
+	out, _, err := linkStatus([]string{"--root", root}, &jsonProbe{})
+	st, _ := out.(linkStatusOut)
+	if err != nil || len(st.Links) != 1 || st.Links[0].Status.State != "retired" || st.Links[0].Sink != key.Host() {
+		t.Fatalf("link status = %+v, %v; want the link shown retired with its sink", out, err)
+	}
+	if _, code, err := linkRemove([]string{"--root", root, "example"}, io.Discard, &jsonProbe{}); err != nil || code != 0 {
+		t.Fatalf("link remove = %d, %v", code, err)
+	}
+	if got, err := manifest.Load(manifest.DefaultPath(stateDir)); err != nil || len(got.Links) != 0 {
+		t.Fatalf("manifest links %+v, %v; want none", got.Links, err)
+	}
+}
+
+// Sharing a session with a link puts its share, with consent and tools, on
+// that link in the manifest; sharing it again replaces the share. (attach
+// --self --link needs a live harness session to resolve, so this drives the
+// manifest step it ends with.)
+func TestShareWithLinkRecordsTheShare(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), stateDirName)
+	mf := manifest.File{SchemaVersion: manifest.RelaySchemaVersion, Layer: manifest.Layer,
+		Links: []manifest.Link{{Name: "example", URL: "wss://link.example.test/link"}}}
+	if err := manifest.Write(manifest.DefaultPath(stateDir), mf); err != nil {
+		t.Fatal(err)
+	}
+	if err := shareWithLink(stateDir, "example", manifest.LinkShare{Binding: "pi-demo", Consent: "passkey", Tools: "read"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := shareWithLink(stateDir, "example", manifest.LinkShare{Binding: "pi-demo", Consent: "local"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := manifest.Load(manifest.DefaultPath(stateDir))
+	if err != nil || len(got.Links[0].Shares) != 1 || got.Links[0].Shares[0] != (manifest.LinkShare{Binding: "pi-demo", Consent: "local"}) {
+		t.Fatalf("shares %+v, %v; want the one replaced share", got.Links, err)
+	}
+	if err := shareWithLink(stateDir, "other", manifest.LinkShare{Binding: "pi-demo", Consent: "passkey"}); err == nil {
+		t.Fatal("sharing with an unknown link succeeded")
+	}
+}
