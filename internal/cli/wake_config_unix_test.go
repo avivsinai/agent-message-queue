@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
@@ -89,5 +90,52 @@ func TestWakeConfigRoundTrip(t *testing.T) {
 	}
 	if _, statErr := os.Lstat(fsq.AgentBase(root, "nosuch")); !os.IsNotExist(statErr) {
 		t.Fatalf("wake config --me nosuch created the mailbox: %v", statErr)
+	}
+}
+
+// #1014 round-3 review findings 2 and 4b: with a valid wake lock, no status
+// sidecar and an absent file, set exits 6 only after the startup grace and
+// writes nothing.
+func TestWakeConfigSetRefusesUnreportedWakeAfterGrace(t *testing.T) {
+	const wakePID = 4242
+	root := secureTempDirForTest(t)
+	writeWakeLockForTest(t, root, "codex", wakeLock{
+		PID:          wakePID,
+		TTY:          "tty",
+		ProcessStart: "start-1",
+		BootID:       "1783327533.465308000",
+		Executable:   "/opt/homebrew/bin/amq",
+		Generation:   "gen-1",
+	})
+	stubInspectWakeProcess(t, func(pid int) wakeProcessInfo {
+		if pid == wakePID {
+			return wakeProcessInfo{
+				PID:          pid,
+				Running:      true,
+				StartToken:   "start-1",
+				BootID:       "9C0682F4-901B-4243-8B5C-287FAFB9AD0E",
+				LegacyBootID: "1783327533.407566000",
+				Executable:   "/opt/homebrew/bin/amq",
+				Args:         []string{"/opt/homebrew/bin/amq", "wake", "--root", root, "--me", "codex"},
+			}
+		}
+		return wakeProcessInfo{PID: pid}
+	})
+	old := wakeConfigUnreportedGrace
+	wakeConfigUnreportedGrace = 50 * time.Millisecond
+	t.Cleanup(func() { wakeConfigUnreportedGrace = old })
+
+	start := time.Now()
+	_, err := captureStdout(t, func() error {
+		return runWakeConfig([]string{"--root", root, "--me", "codex", "--hold-low", "10m"})
+	})
+	if GetExitCode(err) != ExitActionRequired {
+		t.Fatalf("set on unreported wake exit = %d (%v), want action required", GetExitCode(err), err)
+	}
+	if time.Since(start) < wakeConfigUnreportedGrace {
+		t.Fatalf("set refused after %s, before the %s grace", time.Since(start), wakeConfigUnreportedGrace)
+	}
+	if _, statErr := os.Lstat(filepath.Join(fsq.AgentBase(root, "codex"), wakeSettingsFileName)); !os.IsNotExist(statErr) {
+		t.Fatalf("refused set wrote the settings file: %v", statErr)
 	}
 }

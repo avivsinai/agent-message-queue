@@ -217,7 +217,7 @@ func unseededWakeSettingsResume(
 // resume still has to store for the wake generation in inspection: while the
 // file is absent each read retries the guarded seed without waiting long for
 // the guard, and returns the stored bytes once it lands. A file that appears
-// otherwise, or a read error, ends the seeding and is read as it is.
+// otherwise is read as it is; only one read without error ends the seeding.
 func wakeSettingsSourceInDir(
 	agentDir *wakeAgentDir,
 	inspection wakeLockInspection,
@@ -234,10 +234,10 @@ func wakeSettingsSourceInDir(
 		if seedErr != nil {
 			raw, exists, readErr = readWakeSettingsFile(agentDir)
 		}
-		// As at startup, a file or a read error at the path wins over the
-		// seed; a read that a concurrent rename changed is read again.
-		var snapshotChanged *wakeSnapshotReadChangedError
-		if exists || (readErr != nil && !errors.As(readErr, &snapshotChanged)) {
+		// Only a file read without error ends the seeding. A refused or
+		// changed file keeps the argv settings, and the guarded seed does
+		// not write over it; once it is removed the next read seeds again.
+		if exists && readErr == nil {
 			seed = nil
 		}
 		return raw, exists, readErr
