@@ -58,9 +58,15 @@ func TestGenerateFixtures(t *testing.T) {
 	authData = binary.BigEndian.AppendUint32(authData, 0)
 	clientSum := sha256.Sum256(clientData)
 	signed := sha256.Sum256(append(append([]byte{}, authData...), clientSum[:]...))
-	sig, err := ecdsa.SignASN1(rand.Reader, ck, signed[:])
-	if err != nil {
-		t.Fatal(err)
+	// ECDSA signatures are randomized: keep the committed one while it still
+	// verifies over these exact bytes, so adding a frame never churns the
+	// files a mirror already copied.
+	sig := previousSignature(t, &ck.PublicKey, signed[:])
+	if sig == nil {
+		var err error
+		if sig, err = ecdsa.SignASN1(rand.Reader, ck, signed[:]); err != nil {
+			t.Fatal(err)
+		}
 	}
 	assertion := map[string]any{
 		"credential_id": credID, "spki": b64.EncodeToString(consentSPKI), "alg": -7,
@@ -267,6 +273,8 @@ func TestGenerateFixtures(t *testing.T) {
 			env(map[string]any{"schema": "amq.remote.link.call_get/1", "call_id": "c_82", "wait_ms": 30000}, "id", "m_c7", "gen", gen)},
 		{"call_get_reply", "server_to_endpoint", "call_reply", "The final state of a write the owner rejected: status error, with the reason as error.code (rejected, expired, unknown or refused).",
 			env(map[string]any{"call_id": "c_82", "status": "error", "error": map[string]any{"code": "rejected", "message": "the owner rejected this call"}}, "re", "m_c7", "gen", gen)},
+		{"revision_conflict", "server_to_endpoint", "error_reply", "The server already holds another digest for this (store, request, revision) and never overwrites it. The endpoint marks that revision terminal: no resend, one log line, counted in link status.",
+			env(map[string]any{"error": map[string]any{"code": "conflict", "message": "revision 6 is stored with another digest"}}, "re", "m_e9", "gen", gen)},
 	}
 	// Write the frames beside the old ones, then swap, so an aborted rewrite
 	// never leaves an empty folder.
@@ -291,6 +299,27 @@ func mustJCS(t *testing.T, v any) []byte {
 		t.Fatal(err)
 	}
 	return b
+}
+
+// previousSignature returns the committed ES256 signature when it verifies
+// over hash under pub, or nil.
+func previousSignature(t *testing.T, pub *ecdsa.PublicKey, hash []byte) []byte {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(linkDir, "consent", "assertion.json"))
+	if err != nil {
+		return nil
+	}
+	var a struct {
+		Signature string `json:"signature"`
+	}
+	if json.Unmarshal(raw, &a) != nil {
+		return nil
+	}
+	sig, err := b64.DecodeString(a.Signature)
+	if err != nil || !ecdsa.VerifyASN1(pub, hash, sig) {
+		return nil
+	}
+	return sig
 }
 
 func mustUnmarshalJSON(t *testing.T, raw []byte, v any) {
