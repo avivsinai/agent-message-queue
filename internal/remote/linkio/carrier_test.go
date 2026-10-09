@@ -430,3 +430,55 @@ func TestFingerprintMatchesContract(t *testing.T) {
 		t.Fatalf("Fingerprint = %s, %v; the contract says %s", got, err, a.Fingerprint)
 	}
 }
+
+// busy keeps the work: the revision is not offered again before the server's
+// retry_after_ms, and is offered again after it.
+func TestBusyRevisionWaitsForRetryAfter(t *testing.T) {
+	fs, clk := newFakeServer(t), newClock()
+	c, _ := startCarrier(t, fs, clk, nil)
+	fs.waitWelcome()
+	waitOnline(t, c)
+	snaps, _ := goldenSnapshots(t)
+	_ = c.Publish(snaps[1], nil)
+	f := fs.next()
+	fs.send(Frame{Schema: SchemaFrame, Re: f.ID, Gen: f.Gen, Body: mustJSON(errorReply{Error: ErrorBody{Code: "busy", RetryAfterMS: 5000}})})
+	waitFor(t, func() bool { return c.offerExpiry(snaps[1]).Sub(clk.now()) == 5*time.Second })
+	clk.advance(4 * time.Second)
+	if err := c.Publish(snaps[1], nil); !errors.Is(err, ErrPublishPending) {
+		t.Fatalf("Publish during retry_after = %v, want pending", err)
+	}
+	fs.none()
+	clk.advance(2 * time.Second)
+	_ = c.Publish(snaps[1], nil)
+	if r := revisionOf(t, fs.next()); r.Revision != 6 {
+		t.Fatalf("re-offered revision %d, want 6", r.Revision)
+	}
+}
+
+// A conflict (the server holds this revision with another digest) is
+// terminal: the revision stays owed and is never sent again.
+func TestConflictIsNeverResent(t *testing.T) {
+	fs, clk := newFakeServer(t), newClock()
+	c, _ := startCarrier(t, fs, clk, nil)
+	fs.waitWelcome()
+	waitOnline(t, c)
+	snaps, _ := goldenSnapshots(t)
+	_ = c.Publish(snaps[1], nil)
+	f := fs.next()
+	fs.send(Frame{Schema: SchemaFrame, Re: f.ID, Gen: f.Gen, Body: mustJSON(errorReply{Error: ErrorBody{Code: "conflict"}})})
+	waitFor(t, func() bool { return c.Status().Conflicts == 1 })
+	clk.advance(DefaultOfferTTL + time.Second)
+	if err := c.Publish(snaps[1], nil); !errors.Is(err, ErrPublishPending) {
+		t.Fatalf("Publish after a conflict = %v, want pending (owed, not sent)", err)
+	}
+	fs.none()
+}
+
+func waitFor(t *testing.T, cond func() bool) {
+	t.Helper()
+	for deadline := time.Now().Add(5 * time.Second); !cond(); time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("condition never held")
+		}
+	}
+}

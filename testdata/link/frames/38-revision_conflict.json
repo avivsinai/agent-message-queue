@@ -1,0 +1,16 @@
+{
+  "body_def": "error_reply",
+  "description": "The server already holds another digest for this (store, request, revision) and never overwrites it. The endpoint marks that revision terminal: no resend, one log line, counted in link status.",
+  "direction": "server_to_endpoint",
+  "frame": {
+    "body": {
+      "error": {
+        "code": "conflict",
+        "message": "revision 6 is stored with another digest"
+      }
+    },
+    "gen": 12,
+    "re": "m_e9",
+    "schema": "amq.remote.link/1"
+  }
+}

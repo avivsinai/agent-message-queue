@@ -366,6 +366,20 @@ var (
 	toolProfileRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,31}$`)
 )
 
+// ValidLinkShare checks one share on its own: a binding name, a consent
+// policy and a tool profile name.
+func ValidLinkShare(sh LinkShare) error {
+	switch {
+	case !validSession(sh.Binding):
+		return fmt.Errorf("share binding %q must be one path component", sh.Binding)
+	case sh.Consent != "passkey" && sh.Consent != "local":
+		return fmt.Errorf("share %q consent must be passkey or local", sh.Binding)
+	case sh.Tools != "" && !toolProfileRe.MatchString(sh.Tools):
+		return fmt.Errorf("share %q tools %q is not a profile name", sh.Binding, sh.Tools)
+	}
+	return nil
+}
+
 func validateLinks(f File) error {
 	if len(f.Links) == 0 {
 		return nil
@@ -387,15 +401,11 @@ func validateLinks(f File) error {
 		names[l.Name] = true
 		bound := map[string]bool{}
 		for _, sh := range l.Shares {
-			switch {
-			case !validSession(sh.Binding):
-				return &ErrInvalidLink{Reason: fmt.Sprintf("link %q: share binding %q must be one path component", l.Name, sh.Binding)}
-			case bound[sh.Binding]:
+			if bound[sh.Binding] {
 				return &ErrInvalidLink{Reason: fmt.Sprintf("link %q: binding %q is shared twice", l.Name, sh.Binding)}
-			case sh.Consent != "passkey" && sh.Consent != "local":
-				return &ErrInvalidLink{Reason: fmt.Sprintf("link %q: share %q consent must be passkey or local", l.Name, sh.Binding)}
-			case sh.Tools != "" && !toolProfileRe.MatchString(sh.Tools):
-				return &ErrInvalidLink{Reason: fmt.Sprintf("link %q: share %q tools %q is not a profile name", l.Name, sh.Binding, sh.Tools)}
+			}
+			if err := ValidLinkShare(sh); err != nil {
+				return &ErrInvalidLink{Reason: fmt.Sprintf("link %q: %v", l.Name, err)}
 			}
 			bound[sh.Binding] = true
 		}

@@ -54,8 +54,17 @@ func attach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 	if !*self {
 		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "attach needs --self")
 	}
+	linkFlags := false
+	fs.Visit(func(f *flag.Flag) { linkFlags = linkFlags || f.Name == "consent" || f.Name == "tools" })
+	if *linkName == "" && linkFlags {
+		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "--consent and --tools apply only with --link")
+	}
 	if *linkName != "" {
 		if err := linkio.ValidName(*linkName); err != nil {
+			return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", err)
+		}
+		// Check the share before anything is attached or written.
+		if err := manifest.ValidLinkShare(manifest.LinkShare{Binding: "session", Consent: *consent, Tools: *tools}); err != nil {
 			return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", err)
 		}
 		*nativeMode = true // a linked server reaches a native session only
@@ -72,9 +81,11 @@ func attach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 		return protocol.ExitActionRequired, err
 	}
 	reg := ipc.RegisterRequest{Kind: cand.Kind, Target: cand.Target, Config: cand.Config}
-	if cand.Kind == "claude" {
+	if cand.Kind == "claude" && *linkName == "" {
 		// A Claude session shows its tool approvals in the Buzz DM, where
-		// the owner can deny them (bead agent-message-queue-611.42.2).
+		// the owner can deny them (bead agent-message-queue-611.42.2). A
+		// session shared with a link never gains answering authority: no
+		// remote source answers the agent's prompts.
 		if reg.Config, err = withApprove(cand.Config); err != nil {
 			return protocol.ExitActionRequired, err
 		}

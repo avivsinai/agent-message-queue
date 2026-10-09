@@ -163,7 +163,8 @@ A remote endpoint is optional. It does not replace co-op messaging.
 4. Use `submit`, `status`, `wait`, and `cancel` against that endpoint. `doctor` reports whether the endpoint is reachable.
 5. `share --session <id>` mints the session body key the owner signs. It does not start the endpoint.
 6. To reach a target from Buzz, add a `relay` object (manifest `schema_version` 2) with one share per target. Pin its `native_session_id`: DM commands require it, and presence honors it. Buzz DM content is readable by the relay operator.
-7. `doctor` lists each broken boundary under `failing`, with a remedy, and exits 6 while any remains.
+7. To let a server you linked reach a target, run `amq-remote link add NAME URL --code CODE`, then `amq-remote attach --self --link NAME` in that session. The manifest gains a `links` entry (`schema_version` 2) with one share per binding (`consent` `passkey` or `local`, `tools` a profile name). The device key is `<root>/extensions/remote/link/NAME/device.key` (0600).
+8. `doctor` lists each broken boundary under `failing`, with a remedy, and exits 6 while any remains.
 
 Flags and exit codes: [amq-remote](cmd/amq-remote/README.md). The design is [the remote-control ADR](docs/adr-remote-control.md). Pinned harness seams are [the compatibility manifest](docs/remote-compat.md).
 

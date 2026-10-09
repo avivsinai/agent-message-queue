@@ -54,6 +54,8 @@ const (
 	maxOffers           = 64
 	maxOfferBytes       = 8 << 20
 	maxAcked            = 4096
+	minBusyRetry        = time.Second
+	codeConflict        = "conflict"
 	handshakeTimeout    = 15 * time.Second
 	writeTimeout        = 15 * time.Second
 	controlQueue        = 256
@@ -92,8 +94,15 @@ type Status struct {
 	State    string    `json:"state"` // connecting, online, offline, revoked
 	Gen      int64     `json:"gen,omitempty"`
 	LastPing time.Time `json:"last_ping,omitzero"`
-	Owed     int       `json:"owed"`
-	Error    string    `json:"error,omitempty"`
+	// Owed counts the requests whose latest offered revision the server has
+	// not acknowledged in this process. It is a view of what this carrier
+	// offered, not of the store: a record core stopped owing (compacted)
+	// stays counted until the process restarts.
+	Owed int `json:"owed"`
+	// Conflicts counts revisions the server holds with another digest. They
+	// are terminal: never sent again.
+	Conflicts int    `json:"conflicts,omitempty"`
+	Error     string `json:"error,omitempty"`
 }
 
 type offer struct {
@@ -122,6 +131,9 @@ type Carrier struct {
 	owed       map[string]int64
 	status     Status
 	sentBind   []byte                          // JCS of the last bindings the server was told
+	bindFrame  string                          // id of the bindings frame awaiting a possible refusal
+	conflicts  map[string]int64                // request_ref -> a revision the server holds with another digest
+	frameLimit int                             // the smaller of MaxFrameBytes and the server's limit
 	liveKeys   atomic.Pointer[map[string]bool] // consent credential ids accepted now
 }
 
@@ -161,13 +173,14 @@ func New(cfg Config) (*Carrier, error) {
 		cfg.RestartDelay = DefaultRestartDelay
 	}
 	c := &Carrier{
-		cfg:     cfg,
-		host:    cfg.Key.Host(),
-		acked:   map[string]int64{},
-		offers:  map[string]map[int64]*offer{},
-		byFrame: map[string]*offer{},
-		owed:    map[string]int64{},
-		status:  Status{State: "offline"},
+		cfg:       cfg,
+		host:      cfg.Key.Host(),
+		acked:     map[string]int64{},
+		offers:    map[string]map[int64]*offer{},
+		byFrame:   map[string]*offer{},
+		owed:      map[string]int64{},
+		conflicts: map[string]int64{},
+		status:    Status{State: "offline"},
 	}
 	c.refreshKeys() // the consent snapshot exists before the first handoff check
 	return c, nil
@@ -182,6 +195,7 @@ func (c *Carrier) Status() Status {
 	defer c.mu.Unlock()
 	s := c.status
 	s.Owed = len(c.owed)
+	s.Conflicts = len(c.conflicts)
 	if c.sess != nil {
 		s.LastPing = time.Unix(0, c.sess.lastPing.Load())
 	}
@@ -205,6 +219,10 @@ func (c *Carrier) Publish(s protocol.Snapshot, _ map[string]string) error {
 	}
 	if c.owed[ref] < s.Revision {
 		c.owed[ref] = s.Revision
+	}
+	if c.conflicts[ref] == s.Revision {
+		c.mu.Unlock()
+		return ErrPublishPending // terminal conflict: owed, never sent again
 	}
 	if c.inFlightLocked(ref, s.Revision) {
 		c.mu.Unlock()
@@ -253,6 +271,12 @@ func (c *Carrier) Publish(s protocol.Snapshot, _ map[string]string) error {
 	frame, err := json.Marshal(Frame{Schema: SchemaFrame, ID: id, Gen: sess.gen, Body: body})
 	if err != nil {
 		return err
+	}
+	if c.frameLimit > 0 && len(frame) > c.frameLimit {
+		// The server would close the socket on it, and the reconnect would
+		// offer it again: one revision must not take the link down.
+		c.cfg.Logf("link %s: revision %s/%d is %d bytes, over the server's %d-byte frame limit; it stays owed", c.cfg.Name, ref, s.Revision, len(frame), c.frameLimit)
+		return ErrUnavailable
 	}
 	if !sess.send(sess.data, frame) {
 		return ErrUnavailable
@@ -342,9 +366,10 @@ func (c *Carrier) Tick() {
 	if err != nil {
 		return
 	}
-	frame, err := json.Marshal(Frame{Schema: SchemaFrame, ID: c.sess.nextID(), Gen: c.sess.gen, Body: body})
+	id := c.sess.nextID()
+	frame, err := json.Marshal(Frame{Schema: SchemaFrame, ID: id, Gen: c.sess.gen, Body: body})
 	if err == nil && c.sess.send(c.sess.data, frame) {
-		c.sentBind = canon
+		c.sentBind, c.bindFrame = canon, id
 	}
 }
 
@@ -386,10 +411,12 @@ func (c *Carrier) Run(ctx context.Context) error {
 		if code == closeServerRestart {
 			wait = time.Duration(mrand.Int64N(int64(c.cfg.RestartDelay) + 1))
 		}
+		timer := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return nil
-		case <-time.After(wait):
+		case <-timer.C:
 		}
 		if backoff *= 2; backoff > c.cfg.MaxBackoff {
 			backoff = c.cfg.MaxBackoff
@@ -430,10 +457,11 @@ func (c *Carrier) serveOnce(ctx context.Context) error {
 	defer func() { _ = ws.CloseNow() }()
 	ws.SetReadLimit(MaxFrameBytes)
 
-	gen, err := c.handshake(ctx, ws)
+	welcome, sentBind, err := c.handshake(ctx, ws)
 	if err != nil {
 		return err
 	}
+	gen := welcome.ConnectionGeneration
 	connCtx, connCancel := context.WithCancel(ctx)
 	defer connCancel()
 	sess := &session{
@@ -451,7 +479,11 @@ func (c *Carrier) serveOnce(ctx context.Context) error {
 	c.offers = map[string]map[int64]*offer{}
 	c.byFrame = map[string]*offer{}
 	c.offerBytes = 0
-	c.sentBind = nil
+	c.sentBind, c.bindFrame = sentBind, ""
+	c.frameLimit = MaxFrameBytes
+	if l := int(welcome.Limits.FrameBytes); l > 0 && l < c.frameLimit {
+		c.frameLimit = l
+	}
 	c.status = Status{State: "online", Gen: gen}
 	c.mu.Unlock()
 	defer func() {
@@ -461,13 +493,6 @@ func (c *Carrier) serveOnce(ctx context.Context) error {
 		}
 		c.mu.Unlock()
 	}()
-	// The bindings hello carried are what the server knows now.
-	if canon, err := jcs.Marshal(c.cfg.Bindings()); err == nil {
-		c.mu.Lock()
-		c.sentBind = canon
-		c.mu.Unlock()
-	}
-
 	go sess.writeLoop(connCtx, connCancel)
 	go c.watchdog(connCtx, connCancel, sess, &lastPing)
 	return c.readLoop(connCtx, sess)
@@ -494,53 +519,60 @@ func (c *Carrier) watchdog(ctx context.Context, cancel context.CancelFunc, sess 
 	}
 }
 
-func (c *Carrier) handshake(ctx context.Context, ws *websocket.Conn) (int64, error) {
+// handshake answers the challenge and returns the welcome and the JCS form of
+// the bindings hello carried: what the server knows now.
+func (c *Carrier) handshake(ctx context.Context, ws *websocket.Conn) (welcomeBody, []byte, error) {
 	hctx, cancel := context.WithTimeout(ctx, handshakeTimeout)
 	defer cancel()
 	ch, err := readFrame(hctx, ws)
 	if err != nil {
-		return 0, fmt.Errorf("challenge: %w", err)
+		return welcomeBody{}, nil, fmt.Errorf("challenge: %w", err)
 	}
 	var body challengeBody
 	if err := decodeStrict(ch.Body, SchemaChallenge, &body); err != nil || ch.ID == "" || ch.Gen != 0 {
-		return 0, fmt.Errorf("challenge: malformed: %v", err)
+		return welcomeBody{}, nil, fmt.Errorf("challenge: malformed: %v", err)
 	}
 	if body.ServerID != c.cfg.Pin.ServerID {
 		_ = ws.Close(websocket.StatusPolicyViolation, "unexpected server")
-		return 0, fmt.Errorf("challenge: the server says it is %q, this link is pinned to %q", body.ServerID, c.cfg.Pin.ServerID)
+		return welcomeBody{}, nil, fmt.Errorf("challenge: the server says it is %q, this link is pinned to %q", body.ServerID, c.cfg.Pin.ServerID)
 	}
 	if body.Nonce == "" {
-		return 0, errors.New("challenge: empty nonce")
+		return welcomeBody{}, nil, errors.New("challenge: empty nonce")
 	}
 	helloID := "h_" + newPrefix()
+	bindings := nonNil(c.cfg.Bindings())
+	sentBind, err := jcs.Marshal(bindings)
+	if err != nil {
+		return welcomeBody{}, nil, err
+	}
 	hello := helloBody{
 		Schema: SchemaHello, DeviceKey: b64.EncodeToString(c.cfg.Key.SPKI), StoreID: c.cfg.StoreID,
-		AMQVersion: c.cfg.Version, Bindings: nonNil(c.cfg.Bindings()), PendingLocal: []string{},
+		AMQVersion: c.cfg.Version, Bindings: bindings, PendingLocal: []string{},
 		Signature: b64.EncodeToString(c.cfg.Key.Sign(HelloMessage(body.ServerID, body.Nonce, c.cfg.StoreID))),
 	}
 	raw, err := json.Marshal(hello)
 	if err != nil {
-		return 0, err
+		return welcomeBody{}, nil, err
 	}
 	frame, err := json.Marshal(Frame{Schema: SchemaFrame, ID: helloID, Re: ch.ID, Body: raw})
 	if err != nil {
-		return 0, err
+		return welcomeBody{}, nil, err
 	}
 	if err := ws.Write(hctx, websocket.MessageText, frame); err != nil {
-		return 0, fmt.Errorf("hello: %w", err)
+		return welcomeBody{}, nil, fmt.Errorf("hello: %w", err)
 	}
 	wf, err := readFrame(hctx, ws)
 	if err != nil {
-		return 0, fmt.Errorf("welcome: %w", err)
+		return welcomeBody{}, nil, fmt.Errorf("welcome: %w", err)
 	}
 	var welcome welcomeBody
 	if err := decodeStrict(wf.Body, SchemaWelcome, &welcome); err != nil {
-		return 0, fmt.Errorf("welcome: malformed: %w", err)
+		return welcomeBody{}, nil, fmt.Errorf("welcome: malformed: %w", err)
 	}
 	if wf.Re != helloID || welcome.ConnectionGeneration < 1 || wf.Gen != welcome.ConnectionGeneration {
-		return 0, errors.New("welcome: does not answer this hello or has no generation")
+		return welcomeBody{}, nil, errors.New("welcome: does not answer this hello or has no generation")
 	}
-	return welcome.ConnectionGeneration, nil
+	return welcome, sentBind, nil
 }
 
 // HelloMessage is the byte string the device key signs in hello.
@@ -593,6 +625,13 @@ func (c *Carrier) handleReply(f Frame) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if f.Re == c.bindFrame && f.Re != "" {
+		if r.Error != nil {
+			c.sentBind = nil // refused (busy): the next sweep pushes the bindings again
+		}
+		c.bindFrame = ""
+		return
+	}
 	o := c.byFrame[f.Re]
 	if o == nil {
 		return // an answer to an expired or older offer
@@ -605,22 +644,30 @@ func (c *Carrier) handleReply(f Frame) {
 		}
 		c.ackLocked(o.ref, o.rev)
 	case r.Error != nil && r.Error.Code == string(protocol.CodeBusy):
-		// The server keeps nothing; offer again after it asked to wait.
-		o.expires = c.cfg.Now().Add(time.Duration(r.Error.RetryAfterMS) * time.Millisecond)
+		// The server keeps nothing; offer again after it asked to wait, and
+		// never sooner than a second.
+		o.expires = c.cfg.Now().Add(max(time.Duration(r.Error.RetryAfterMS)*time.Millisecond, minBusyRetry))
+	case r.Error != nil && r.Error.Code == codeConflict:
+		// The server holds this revision with another digest and never
+		// overwrites it: terminal for this revision, no resend.
+		c.conflicts[o.ref] = o.rev
+		c.dropOfferLocked(o)
+		c.cfg.Logf("link %s: the server holds %s/%d with another digest; it will not be sent again", c.cfg.Name, o.ref, o.rev)
 	case r.Error != nil:
 		c.cfg.Logf("link %s: server refused %s/%d: %s %s", c.cfg.Name, o.ref, o.rev, r.Error.Code, r.Error.Message)
 	}
 }
 
 // handleRequest answers a frame the server sends. key_revoked drops the key
-// inline; a signed submit is queued behind earlier commands for the same
-// request; every other request is refused until its handler exists.
+// off the reader. A signed submit is queued behind earlier requests for the
+// same request id on bounded workers; every other request is refused inline
+// until its handler exists (command/1 joins the queue with 9dx.3, ruling k).
 func (c *Carrier) handleRequest(sess *session, f Frame) {
 	switch bodySchema(f.Body) {
 	case SchemaKeyRevoked:
 		var b keyRevokedBody
 		if err := decodeStrict(f.Body, SchemaKeyRevoked, &b); err == nil && c.cfg.ConsentKeyRevoked != nil {
-			c.cfg.ConsentKeyRevoked(b.CredentialID)
+			go c.cfg.ConsentKeyRevoked(b.CredentialID) // disk work stays off the reader
 		}
 		return
 	case SchemaSignedSubmit:

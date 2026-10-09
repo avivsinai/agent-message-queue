@@ -151,6 +151,14 @@ the Stop hook on that path.
 One Buzz agent serves one session. A named binding selects it: the ACP model
 id is `amq-remote:<name>`.
 
+A link is the carrier to a server the user linked with `amq-remote link add`.
+The machine dials it (`wss://`, `ws://` only to loopback) and answers only
+the server id it pinned at linking. A revision counts as published only after
+the server acknowledged that it committed it; until then the store owes it.
+The link's sink is its creator host, `link-` and 16 hex digits of the device
+key's hash. Removing the link, or a server revoke, retires the sink: its
+device key is deleted and its records settle without network.
+
 The relay below — `share`, a body key, and per-kind grants — is an advanced
 path. It is not how a session is connected. The relay enforces the owner
 signature and, when it implements NIP-OA time bounds, the grant expiry; it
