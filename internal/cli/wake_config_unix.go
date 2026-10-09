@@ -15,10 +15,10 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
-const (
-	wakeConfigWaitPollInterval = 500 * time.Millisecond
-	wakeConfigUnreportedGrace  = 5 * time.Second
-)
+const wakeConfigWaitPollInterval = 500 * time.Millisecond
+
+// wakeConfigUnreportedGrace is a var only so a test can shorten it.
+var wakeConfigUnreportedGrace = 5 * time.Second
 
 type wakeConfigSettingJSON struct {
 	Value  any    `json:"value"`
@@ -96,7 +96,9 @@ func runWakeConfig(args []string) error {
 		"An invalid file is shown as refused and cannot be changed with set or --unset;",
 		"--reset replaces it with exactly the given setting flags (none = all defaults).",
 		"While the file is absent and the running wake does not report live settings",
-		"(unreported), set and --unset exit 6; restart the wake or use --reset with the full set.")
+		"(unreported) past a short startup grace, set and --unset exit 6; the wake may be an older",
+		"image, have a failed status write, or be a resume still storing its command-line settings",
+		"in the file. Restart the wake or use --reset with the full set.")
 	if handled, err := parseFlags(fs, args, usage); err != nil {
 		return err
 	} else if handled {
@@ -217,49 +219,78 @@ func runWakeConfig(args []string) error {
 	return waitErr
 }
 
-// waitWakeSettingsApplied polls until the running wake reports the file
-// digest applied or refused, or no wake runs. The generation is read from
-// the lock on every poll, so a wake replaced during the wait is followed.
-func waitWakeSettingsApplied(
+// pollWakeSettings reads the run state of the wake every poll interval until
+// decide reports done, or the timeout (0 means none) passes. The generation is
+// read from the lock on every poll, so a wake replaced during the poll is
+// followed. graceOver is true once the state has stayed unreported for
+// wakeConfigUnreportedGrace: a starting wake records its first status just
+// after it takes the lock, and a failed status write retries on the next
+// tick, so only a wake that stays silent past that window is unreported for
+// good.
+func pollWakeSettings(
 	agentDir *wakeAgentDir,
 	root, me, digest string,
 	timeout time.Duration,
-) (wakeSettingsRunState, error) {
+	decide func(state wakeSettingsRunState, graceOver bool) (bool, error),
+) (state wakeSettingsRunState, timedOut bool, err error) {
 	var deadline time.Time
 	if timeout > 0 {
 		deadline = time.Now().Add(timeout)
 	}
 	var unreportedSince time.Time
 	for {
-		state, err := inspectWakeSettingsRunState(agentDir, root, me, digest)
+		state, err = inspectWakeSettingsRunState(agentDir, root, me, digest)
 		if err != nil {
-			return state, err
+			return state, false, err
 		}
-		switch state.Status {
-		case wakeSettingsRunApplied, wakeSettingsRunNone:
-			return state, nil
-		case wakeSettingsRunRefused:
-			return state, fmt.Errorf("wake refused the settings file: %s", state.Error)
-		case wakeSettingsRunUnreported:
-			// A starting wake records its first status just after it takes
-			// the lock, and a failed status write retries on the next tick.
-			// Only a wake that stays silent past that window is an older image.
+		graceOver := false
+		if state.Status == wakeSettingsRunUnreported {
 			if unreportedSince.IsZero() {
 				unreportedSince = time.Now()
-			} else if time.Since(unreportedSince) >= wakeConfigUnreportedGrace {
-				return state, ActionRequiredError("%s", wakeConfigUnreportedText)
+			} else {
+				graceOver = time.Since(unreportedSince) >= wakeConfigUnreportedGrace
 			}
-		default:
+		} else {
 			unreportedSince = time.Time{}
 		}
+		if done, derr := decide(state, graceOver); done {
+			return state, false, derr
+		}
 		if !deadline.IsZero() && !time.Now().Before(deadline) {
-			return state, TimeoutError("wake config --wait timed out after %s; the running wake has not applied the settings", timeout)
+			return state, true, nil
 		}
 		time.Sleep(wakeConfigWaitPollInterval)
 	}
 }
 
-const wakeConfigUnreportedText = "running wake does not report live settings (an older image, or its status write failed); restart it to use live settings"
+// waitWakeSettingsApplied polls until the running wake reports the file
+// digest applied or refused, or no wake runs.
+func waitWakeSettingsApplied(
+	agentDir *wakeAgentDir,
+	root, me, digest string,
+	timeout time.Duration,
+) (wakeSettingsRunState, error) {
+	state, timedOut, err := pollWakeSettings(agentDir, root, me, digest, timeout,
+		func(state wakeSettingsRunState, graceOver bool) (bool, error) {
+			switch state.Status {
+			case wakeSettingsRunApplied, wakeSettingsRunNone:
+				return true, nil
+			case wakeSettingsRunRefused:
+				return true, fmt.Errorf("wake refused the settings file: %s", state.Error)
+			case wakeSettingsRunUnreported:
+				if graceOver {
+					return true, ActionRequiredError("%s", wakeConfigUnreportedText)
+				}
+			}
+			return false, nil
+		})
+	if timedOut {
+		return state, TimeoutError("wake config --wait timed out after %s; the running wake has not applied the settings", timeout)
+	}
+	return state, err
+}
+
+const wakeConfigUnreportedText = "running wake does not report live settings (an older image, or its status write failed, or a resumed wake is still storing its command-line settings in the file); restart it to use live settings, or wait a moment if it just resumed"
 
 // openExistingWakeAgentDir opens agents/<me> without creating it, so a typo
 // handle is a not-found error and not a new mailbox directory.
@@ -307,14 +338,20 @@ func refuseSetOnUnreportedWake(agentDir *wakeAgentDir, root, me string) error {
 	if err != nil || exists {
 		return err
 	}
-	state, err := inspectWakeSettingsRunState(agentDir, root, me, wakeSettingsDigest(nil, false))
-	if err != nil {
-		return err
-	}
-	if state.Status == wakeSettingsRunUnreported {
-		return ActionRequiredError("the running wake does not report live settings and may run command-line settings that are not in the file; restart it first (a resume seeds the file from its flags), or use amq wake config --reset with the full set")
-	}
-	return nil
+	// Poll for the startup grace first: a wake just started records its
+	// first status, and a resume seeds the file, a moment after the lock.
+	digest := wakeSettingsDigest(nil, false)
+	_, _, err = pollWakeSettings(agentDir, root, me, digest, 0,
+		func(state wakeSettingsRunState, graceOver bool) (bool, error) {
+			if state.Status != wakeSettingsRunUnreported {
+				return true, nil
+			}
+			if graceOver {
+				return true, ActionRequiredError("the running wake does not report live settings and may run command-line settings that are not in the file (an older image, a failed status write, or a resume still storing them in the file); restart it first or wait for a resume to finish (a resume seeds the file from its flags), or use amq wake config --reset with the full set")
+			}
+			return false, nil
+		})
+	return err
 }
 
 // resetWakeSettingsFileInDir replaces the file with exactly the given keys,

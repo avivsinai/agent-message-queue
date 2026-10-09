@@ -64,8 +64,10 @@ amq wake config --me <handle> --reset --hold-low 30m    # replace the file
 A refused file shows `file: refused: <err>` with default rows (the wake keeps
 its last applied settings); `set` and `--unset` exit 1 and point at `--reset`.
 A running wake that reports no live settings shows `unreported`: `--wait` exits
-6 after 5 s, and `set`/`--unset` on an absent file exit 6; restart that wake
-(a resume seeds the file) or `--reset` with the full set. A missing
+6 after 5 s, and `set`/`--unset` on an absent file exit 6 after the same 5 s.
+Causes: an older image, a failed status write, or a resumed wake still storing
+its command-line settings in the file (wait a moment). Otherwise restart that
+wake (a resume seeds the file) or `--reset` with the full set. A missing
 mailbox exits 3.
 
 Flags fixed for a running wake (`--inject-mode`, `--inject-via`, `--inject-arg`,
