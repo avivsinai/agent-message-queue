@@ -93,7 +93,7 @@ func (d *dispatcher) work(ctx context.Context) {
 // A worker may wait for room on the data lane; the reader never does. The
 // control lane stays for acknowledgements and the reader's own refusals.
 func answer(ctx context.Context, sess *session, re string, out any, err error) {
-	var body any = out
+	body := out
 	if err != nil {
 		e := ErrorBody{Code: string(protocol.CodeInvalid), Message: err.Error()}
 		var lr *Refusal
