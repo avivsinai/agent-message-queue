@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/avivsinai/agent-message-queue/schemas/remote-link-v1.schema.json",
   "title": "AMQ Remote link frame v1",
-  "description": "One frame of amq.remote.link/1, the WebSocket an amq-remote endpoint dials to a linked server. The envelope ignores unknown fields; every body is strict. A frame that expects a reply has id; a reply has re; hello has both. gen is absent on challenge and hello and present on every frame from welcome on. Golden frames: testdata/link/frames.",
+  "description": "One frame of amq.remote.link/1, the WebSocket an amq-remote endpoint dials to a linked server. The envelope ignores unknown fields; every body is strict. A frame that expects a reply has id; a reply has re; hello has both. gen is absent on challenge and hello and present on every frame from welcome on. A frame is at most 4 MiB. Transport rules and golden frames: testdata/link/README.md.",
   "type": "object",
   "required": ["schema", "body"],
   "properties": {
@@ -15,7 +15,7 @@
   "anyOf": [{ "required": ["id"] }, { "required": ["re"] }],
   "$defs": {
     "frame_id": { "type": "string", "pattern": "^[A-Za-z0-9_.:-]{1,64}$" },
-    "b64url": { "type": "string", "pattern": "^[A-Za-z0-9_-]*$", "description": "base64url without padding (RFC 4648 section 5)." },
+    "b64url": { "type": "string", "pattern": "^[A-Za-z0-9_-]+$", "description": "base64url without padding (RFC 4648 section 5), never empty." },
     "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$", "description": "sha256 of the RFC 8785 (JCS) form of the snapshot." },
     "opaque": { "type": "string", "pattern": "^[A-Za-z0-9_.:-]{1,128}$" },
     "code": { "type": "string", "pattern": "^[a-z][a-z_]{0,63}$" },
@@ -32,7 +32,7 @@
     },
     "binding": {
       "type": "object",
-      "description": "One AMQ binding shared with this link. The machine's own values; a consent document must equal them.",
+      "description": "One AMQ binding shared with this link, as the machine sees it now: its target, epoch, native session and labels are the values a consent document must equal. approve_tool and answer_question are always false: a link never answers the agent's prompts.",
       "required": ["binding", "target_id", "epoch", "native_session_id", "labels", "harness", "display_name", "attachment", "consent", "tools", "capabilities"],
       "additionalProperties": false,
       "properties": {
@@ -250,7 +250,7 @@
       "additionalProperties": false,
       "properties": {
         "call_id": { "$ref": "#/$defs/opaque" },
-        "status": { "enum": ["ok", "pending", "pending_approval", "rejected", "expired", "unknown", "error"] },
+        "status": { "enum": ["ok", "pending", "pending_approval", "error"], "description": "A call that ended without a result is error, with error.code rejected, expired, unknown or refused." },
         "result": {},
         "review_url": { "type": "string", "pattern": "^https://" },
         "error": { "$ref": "#/$defs/error" }

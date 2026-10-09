@@ -1,12 +1,12 @@
 {
   "body_def": "error_reply",
-  "description": "A refusal before admission. The request ends with this reason.",
+  "description": "A refusal before admission: the passkey, the assertion or the document is not acceptable.",
   "direction": "endpoint_to_server",
   "frame": {
     "body": {
       "error": {
-        "code": "session_changed",
-        "message": "the native session behind pi-demo changed since you signed"
+        "code": "consent_invalid",
+        "message": "the passkey signed other bytes"
       }
     },
     "gen": 12,

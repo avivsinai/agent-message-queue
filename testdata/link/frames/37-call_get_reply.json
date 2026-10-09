@@ -1,0 +1,18 @@
+{
+  "body_def": "call_reply",
+  "description": "The final state of a write the owner rejected: status error, with the reason as error.code (rejected, expired, unknown or refused).",
+  "direction": "server_to_endpoint",
+  "frame": {
+    "body": {
+      "call_id": "c_82",
+      "error": {
+        "code": "rejected",
+        "message": "the owner rejected this call"
+      },
+      "status": "error"
+    },
+    "gen": 12,
+    "re": "m_c7",
+    "schema": "amq.remote.link/1"
+  }
+}
