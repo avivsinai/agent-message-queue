@@ -72,9 +72,11 @@ func attach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 		return protocol.ExitActionRequired, err
 	}
 	reg := ipc.RegisterRequest{Kind: cand.Kind, Target: cand.Target, Config: cand.Config}
-	if cand.Kind == "claude" {
+	if cand.Kind == "claude" && *linkName == "" {
 		// A Claude session shows its tool approvals in the Buzz DM, where
-		// the owner can deny them (bead agent-message-queue-611.42.2).
+		// the owner can deny them (bead agent-message-queue-611.42.2). A
+		// session shared with a link never gains answering authority: no
+		// remote source answers the agent's prompts.
 		if reg.Config, err = withApprove(cand.Config); err != nil {
 			return protocol.ExitActionRequired, err
 		}
