@@ -4,7 +4,7 @@
   "direction": "server_to_endpoint",
   "frame": {
     "body": {
-      "call_id": "c_81",
+      "call_id": "c_k_81",
       "result": {
         "key": "REL-4410",
         "summary": "Ingest fails on empty batch"

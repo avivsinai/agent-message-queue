@@ -4,7 +4,7 @@
   "direction": "server_to_endpoint",
   "frame": {
     "body": {
-      "call_id": "c_83",
+      "call_id": "c_k_83",
       "error": {
         "code": "not_allowed",
         "message": "get_salary is not in this link's tool profile"
