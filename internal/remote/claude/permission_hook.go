@@ -121,7 +121,8 @@ func (h permissionHook) run(stdin io.Reader, stdout io.Writer, done <-chan struc
 	}
 	preview, whole := approvalView(in.ToolName, in.ToolInput, in.AgentType)
 	// Only observing pins: the request is raised so the run shows it, and
-	// no answer file is ever applied. The terminal decides.
+	// no answer file is ever applied. The terminal decides. Read once per
+	// request, like pinLive: a pin that appears later answers later requests.
 	answering := answeringPinLive(h.home, in.SessionID)
 	approvable := false
 	var share AllowShare

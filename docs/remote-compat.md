@@ -212,11 +212,13 @@ amq-remote-design.html §Capability per harness):
   `approve`) shows the pending approval as the request's interaction with
   `remote_answer` false: `approve_tool` stays false, a remote answer is
   refused `unsupported`, and the hook, pinned by an observe-only pin, raises
-  the request and applies no answer file. The terminal decides.
+  the request and applies no answer file. The terminal decides. One adapter
+  entry has one mode: with both `approve` and `observe_approvals`, `approve`
+  wins.
 - Discovery (`up --discover`) lists a live pi chat under the root as
   target `pi:<handle>` with its manifest entry, from the handle's
-  `bridge.liveness`, and carries the chat's pi `session_id` when the bridge
-  publishes one.
+  `bridge.liveness`, and prints the chat's pi `session_id` as
+  `native_session_id=` when the bridge publishes one.
 - `claude_code.answer_question`: no documented way to answer a pending
   question prompt from outside the session (source:
   research/r9-cc-codex-attachment.md §C "Claude Code").

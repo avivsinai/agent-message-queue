@@ -10,11 +10,11 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/registry"
 )
 
-// A live Amit chat under the root is listed with its pi session id and a
+// A live pi chat under the root is listed with its pi session id and a
 // manifest entry that attaches it (agent-message-queue-9dx.7).
 func TestDiscoverListsLiveChatWithItsSessionID(t *testing.T) {
 	root := t.TempDir()
-	dir := filepath.Join(root, "agents", "amit-ada", "extensions", "pi-bridge")
+	dir := filepath.Join(root, "agents", "chat-1", "extensions", "pi-bridge")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -25,7 +25,7 @@ func TestDiscoverListsLiveChatWithItsSessionID(t *testing.T) {
 		t.Fatalf("Discover = %+v, %v; want one candidate", cands, err)
 	}
 	c := cands[0]
-	if c.Kind != "pi" || c.Target != "pi:amit-ada" || c.NativeSession != "sess-1" || string(c.Config) != `{"handle":"amit-ada"}` {
+	if c.Kind != "pi" || c.Target != "pi:chat-1" || c.NativeSession != "sess-1" || string(c.Config) != `{"handle":"chat-1"}` {
 		t.Fatalf("candidate = %+v", c)
 	}
 	att, err := Factory(context.Background(), registry.FactoryConfig{Root: root, Target: c.Target, Config: c.Config})
