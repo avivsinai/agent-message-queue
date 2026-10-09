@@ -58,9 +58,16 @@ invariants.
    boundary compares the bound run before signalling. A cancel that arrives
    before its submit leaves a tombstone. A late cancel for one request never
    aborts another. A harness that offers only a session-wide abort does not
-   advertise exact cancellation. A request that a Buzz share submitted is
-   cancelled only from that share; the AMQ mailbox and the local socket are
-   refused.
+   advertise exact cancellation. Ownership extends to every remote carrier
+   and every read path: a request that a remote source submitted (a Buzz
+   share or a link) is read and cancelled only by that source, and the AMQ
+   mailbox and the local socket are refused. A link sees only the requests
+   it created and the sessions shared with it, with other sources' request
+   and interaction references removed; it never answers an interaction and
+   never reads session events. A link creates no tombstones: its cancel of
+   an absent request is refused, and its busy request ends as an ordinary
+   refused record that compacts and is never admitted again. A link holds
+   at most four open requests.
 5. **Capabilities are observed, not inferred.** Each attachment publishes a
    projection (`inspect`, `submit`, `cancel_request`, `answer_question`,
    `approve_tool`, `steer`, `terminal`). Values come from the installed
@@ -72,8 +79,9 @@ invariants.
    user per root holds a process lock; a second exits with a diagnostic.
 7. **AMQ carries durable intent and evidence.** Commands and results travel
    as ordinary AMQ messages to a dedicated handle in the same root. Local
-   CLI requests, AMQ-delivered requests, and Buzz-delivered requests end in
-   the same handler. Live activity is a projection and never mutates.
+   CLI requests, AMQ-delivered requests, Buzz-delivered requests, and
+   link-delivered requests (a server the machine itself dialed) end in the
+   same handler. Live activity is a projection and never mutates.
 8. **Exit codes follow the AMQ contract.** `0` success, `1` native work
    failed or cancelled, `2` usage, `3` not found, `4` timeout, `6` action
    required (busy, unsupported, unshared, expired, or

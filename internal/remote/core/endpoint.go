@@ -25,7 +25,27 @@ type Source struct {
 	// Origin is carrier routing kept on the record so publication can find
 	// its way back after a restart. It carries no authority.
 	Origin map[string]string
+	// Shared is the target ids shared with this source. Nil means unfiltered
+	// (local socket, mailbox, Buzz). A link source always carries a non-nil
+	// list, possibly empty: session list and inspect show only these targets.
+	Shared []string
 }
+
+// CarrierLink is the Origin "carrier" value of a link source: a server the
+// user's machine dialed. Its Host is the link's creator host, link-<id>.
+const CarrierLink = "link"
+
+// OriginSink is the Origin key naming the link sink (its creator host) every
+// record the link creates is published to.
+const OriginSink = "sink"
+
+// linkHostPrefix starts every creator host a link carrier uses.
+const linkHostPrefix = "link-"
+
+// maxLinkInFlight bounds the open (non-terminal) requests of one link. Each
+// holds a store reservation of up to protocol.MaxRecordBytes, so the bound
+// keeps a linked server from filling the machine's store.
+const maxLinkInFlight = 4
 
 // LocalHost is the source host the local IPC socket stamps on every command
 // it carries, and so the creator host of every request submitted over it.
@@ -422,14 +442,17 @@ func (e *Endpoint) Handle(cmd *protocol.Command, src Source) (any, error) {
 	case protocol.OpRequestSubmit:
 		return e.submit(cmd, src)
 	case protocol.OpRequestGet:
-		return e.get(cmd)
+		return e.get(cmd, src)
 	case protocol.OpRequestCancel:
 		return e.cancel(cmd, src)
 	case protocol.OpSessionList:
-		return e.list(), nil
+		return e.listFor(src), nil
 	case protocol.OpSessionInspect:
-		return e.inspect(cmd.TargetID)
+		return e.inspectFor(cmd.TargetID, src)
 	case protocol.OpSessionEvents:
+		if isLink(src) {
+			return nil, protocol.Refuse(protocol.CodeUnsupported, "session events are not offered over a link")
+		}
 		return e.inspect(cmd.TargetID)
 	case protocol.OpInteractionRespond:
 		return e.respond(cmd, src)
@@ -468,8 +491,11 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 		// not answered from the tombstone (B14 minimal tombstone semantics —
 		// full B2/B11 safety/reset belongs to B14d). Recognizable as a
 		// tombstoned rejected record with no dispatch behind it and the same
-		// digest; only a DIFFERENT digest is a conflict.
-		retryable := rec.Tombstone &&
+		// digest; only a DIFFERENT digest is a conflict. A link request is
+		// never re-admitted: its busy refusal is a terminal record, which
+		// compaction later turns into this same tombstone shape.
+		retryable := rec.Origin["carrier"] != CarrierLink &&
+			rec.Tombstone &&
 			rec.State == protocol.StateRejected &&
 			rec.Code == protocol.CodeBusy &&
 			rec.NativeDispatches == 0 &&
@@ -571,6 +597,19 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 	// about to refuse is never written (no durable placeholder to leak on a
 	// failed rejection write, and nothing for Tick to dispatch). Only Create
 	// when we will dispatch or deliberately defer.
+	if isLink(src) {
+		// The per-link bound refuses before any side effect, so unlike the
+		// per-target busy below it leaves no record: nothing was asked yet.
+		full, ferr := e.linkFullLocked(src.Host)
+		if ferr != nil {
+			e.mu.Unlock()
+			return protocol.Reply{}, ferr
+		}
+		if full {
+			e.mu.Unlock()
+			return protocol.Reply{Snapshot: e.unpersisted(rec, protocol.StateRejected, protocol.CodeBusy), Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: protocol.CodeBusy, Message: fmt.Sprintf("this link already has %d requests open", maxLinkInFlight)}}, nil
+		}
+	}
 	t, code, reason := e.admissibleLocked(cmd.TargetID, cmd.Epoch, cmd.NotAfter, cmd.Input.MinEvidence)
 	if code != "" {
 		// Refused (unshared/expired/stale_epoch): no durable record.
@@ -610,8 +649,14 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 	if reserved {
 		// Persist a TERMINAL rejected+busy tombstone directly (one write, no
 		// received-then-reject window). The tombstone keeps dedup and makes an
-		// identical resubmit re-admittable.
-		e.transitionLocked(rec, causeBusyTombstone, nativeEvidence{})
+		// identical resubmit re-admittable. A link gets an ordinary refused
+		// record instead: it compacts after the horizon and is never
+		// re-admitted; sending again is a new request id.
+		if isLink(src) {
+			e.transitionLocked(rec, causeRefused, nativeEvidence{code: protocol.CodeBusy})
+		} else {
+			e.transitionLocked(rec, causeBusyTombstone, nativeEvidence{})
+		}
 		rec.Revision = 1
 		rec.ObservedAt = protocol.FormatTime(e.now())
 		if err := e.store.Create(rec); err != nil {
@@ -776,10 +821,13 @@ func (e *Endpoint) unpersisted(rec *requests.Record, state protocol.State, code 
 	return s
 }
 
-func (e *Endpoint) get(cmd *protocol.Command) (protocol.Reply, error) {
+func (e *Endpoint) get(cmd *protocol.Command, src Source) (protocol.Reply, error) {
 	host, targetID, requestID, err := protocol.DecodeRef(cmd.RequestRef)
 	if err != nil {
 		return protocol.Reply{}, err
+	}
+	if outsideNamespace(src, host) {
+		return protocol.Reply{}, noRecord()
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -788,7 +836,10 @@ func (e *Endpoint) get(cmd *protocol.Command) (protocol.Reply, error) {
 		return protocol.Reply{}, err
 	}
 	if !ok {
-		return protocol.Reply{}, protocol.Refuse(protocol.CodeNotFound, "no record for request_ref")
+		return protocol.Reply{}, noRecord()
+	}
+	if !ownedBy(src, rec) {
+		return protocol.Reply{}, notOwned(src, rec)
 	}
 	if snap, ok := e.failedLocked(rec); ok {
 		return protocol.Reply{Snapshot: snap, Outcome: protocol.Outcome{Op: protocol.OpRequestGet}}, nil
@@ -810,6 +861,9 @@ func (e *Endpoint) cancel(cmd *protocol.Command, src Source) (protocol.Reply, er
 	}
 	key := requests.Key{CreatorHost: host, TargetID: targetID, RequestID: requestID}
 	now := protocol.FormatTime(e.now())
+	if outsideNamespace(src, host) {
+		return protocol.Reply{}, noRecord()
+	}
 
 	e.mu.Lock()
 	rec, exists, err := e.store.Get(key)
@@ -826,6 +880,18 @@ func (e *Endpoint) cancel(cmd *protocol.Command, src Source) (protocol.Reply, er
 		if strings.HasPrefix(strings.ToLower(host), buzzHostPrefix) && (src.Origin["carrier"] != "buzz" || src.Host != host) {
 			e.mu.Unlock()
 			return protocol.Reply{}, protocol.Refuse(protocol.CodeUnshared, "only the owner's Buzz share can cancel its requests")
+		}
+		// A link creates no tombstones: it cancels only after its submit's
+		// outcome, and its commands for one request run in order, so an
+		// absent request is one it never sent. Nobody else may plant one in
+		// a link's namespace either.
+		if isLink(src) {
+			e.mu.Unlock()
+			return protocol.Reply{}, noRecord()
+		}
+		if strings.HasPrefix(strings.ToLower(host), linkHostPrefix) {
+			e.mu.Unlock()
+			return protocol.Reply{}, protocol.Refuse(protocol.CodeUnshared, "only the link that submitted a request can cancel it")
 		}
 		rec = &requests.Record{
 			Snapshot: protocol.Snapshot{
@@ -853,12 +919,9 @@ func (e *Endpoint) cancel(cmd *protocol.Command, src Source) (protocol.Reply, er
 		e.publishRevision(rec)
 		return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestCancel}}, nil
 	}
-	if rec.Origin["carrier"] == "buzz" && !fromOwnerShare(src, rec) {
-		// A Buzz-submitted request is the owner's; a local sender cannot
-		// stop it (agent-message-queue-611.48). Other requests keep the
-		// local rule: local senders carry no authenticated identity.
+	if !ownedBy(src, rec) {
 		e.mu.Unlock()
-		return protocol.Reply{}, protocol.Refuse(protocol.CodeUnshared, "only the owner's Buzz share can cancel its requests")
+		return protocol.Reply{}, notOwned(src, rec)
 	}
 	// Validate the cancel command against the original request binding rather
 	// than silently substituting the record's trusted values (Pro B04). A
@@ -951,6 +1014,78 @@ func fromOwnerShare(src Source, rec *requests.Record) bool {
 		o["body"] != "" && o["body"] == r["body"] && o["channel"] == r["channel"]
 }
 
+// isLink reports whether src arrived over a link carrier.
+func isLink(src Source) bool { return src.Origin["carrier"] == CarrierLink }
+
+// outsideNamespace reports whether a link source names a request another
+// source created. It is checked before any lookup, so a link learns nothing
+// about request ids outside its own creator host: it hears not_found, as for
+// an absent request.
+func outsideNamespace(src Source, refHost string) bool {
+	return isLink(src) && refHost != src.Host
+}
+
+// ownedBy is the one ownership rule for reading and cancelling a record. A
+// record a remote source created is read and cancelled only by that source:
+// a link record by the same link, a Buzz record by the owner's share. A link
+// source sees only its own records. Local socket and mailbox records keep
+// the local rule: local senders carry no authenticated identity.
+func ownedBy(src Source, rec *requests.Record) bool {
+	if isLink(src) {
+		return rec.Origin["carrier"] == CarrierLink && rec.CreatorHost == src.Host
+	}
+	switch rec.Origin["carrier"] {
+	case "buzz":
+		return fromOwnerShare(src, rec)
+	case CarrierLink:
+		return false
+	default:
+		return true
+	}
+}
+
+// noRecord is the refusal for an absent request, and for a link naming a
+// request it does not own: the two are indistinguishable to the link.
+func noRecord() error {
+	return protocol.Refuse(protocol.CodeNotFound, "no record for request_ref")
+}
+
+// notOwned is the refusal when ownedBy fails.
+func notOwned(src Source, rec *requests.Record) error {
+	switch {
+	case isLink(src):
+		return noRecord()
+	case rec.Origin["carrier"] == "buzz":
+		return protocol.Refuse(protocol.CodeUnshared, "only the owner's Buzz share can read or cancel its requests")
+	default:
+		return protocol.Refuse(protocol.CodeUnshared, "only the link that submitted this request can read or cancel it")
+	}
+}
+
+// linkFullLocked reports whether the link with creator host host already
+// has maxLinkInFlight open requests. Every non-terminal record holds a store
+// reservation (requests.Store reseeds one for each at Open), received ones
+// included, so all of them count. An unreadable record of this link makes
+// the count undeterminable and fails closed. The caller holds e.mu.
+func (e *Endpoint) linkFullLocked(host string) (bool, error) {
+	recs, poison, err := e.store.ListWithPoison()
+	if err != nil {
+		return false, err
+	}
+	for _, p := range poison {
+		if p.Key.CreatorHost == "" || p.Key.CreatorHost == host {
+			return false, fmt.Errorf("link %s has an unreadable record %s: %w", host, p.Path, errUndeterminableReservation)
+		}
+	}
+	open := 0
+	for _, r := range recs {
+		if r.CreatorHost == host && !r.State.Terminal() {
+			open++
+		}
+	}
+	return open >= maxLinkInFlight, nil
+}
+
 // localSubmitted reports whether src is the local socket (LocalHost, no
 // carrier origin) and rec is a request that socket submitted.
 func localSubmitted(src Source, rec *requests.Record) bool {
@@ -983,6 +1118,11 @@ func (e *Endpoint) respond(cmd *protocol.Command, src Source) (protocol.Reply, e
 	host, targetID, requestID, err := protocol.DecodeRef(cmd.RequestRef)
 	if err != nil {
 		return protocol.Reply{}, err
+	}
+	if isLink(src) {
+		// No link ever answers a tool prompt, and it is refused before any
+		// lookup, so the answer path tells it nothing about other requests.
+		return protocol.Reply{}, protocol.Refuse(protocol.CodeUnshared, "a link never answers an interaction")
 	}
 	key := requests.Key{CreatorHost: host, TargetID: targetID, RequestID: requestID}
 	defer e.lockAnswer(key, cmd.InteractionID)()
@@ -1323,6 +1463,56 @@ func (e *Endpoint) NativeSessionID(targetID string) string {
 
 func (e *Endpoint) inspect(targetID string) (any, error) {
 	return e.sessionProjection(targetID)
+}
+
+// listFor is session.list as src may see it: every target for an unfiltered
+// source, only the shared ones for a link (see linkView).
+func (e *Endpoint) listFor(src Source) []protocol.Session {
+	all := e.list()
+	if src.Shared == nil {
+		return all
+	}
+	out := make([]protocol.Session, 0, len(src.Shared))
+	for _, s := range all {
+		if slices.Contains(src.Shared, s.TargetID) {
+			out = append(out, linkView(s, src))
+		}
+	}
+	return out
+}
+
+// inspectFor is session.inspect as src may see it. A target not shared with
+// a link is not_found, the same as an unregistered one.
+func (e *Endpoint) inspectFor(targetID string, src Source) (any, error) {
+	if src.Shared == nil {
+		return e.inspect(targetID)
+	}
+	if !slices.Contains(src.Shared, targetID) {
+		return nil, protocol.Refuse(protocol.CodeNotFound, "target %s is not registered", targetID)
+	}
+	s, err := e.sessionProjection(targetID)
+	if err != nil {
+		return nil, err
+	}
+	return linkView(s, src), nil
+}
+
+// linkView removes from a session what a link may not see: the active request
+// and pending interaction unless the link created that request, and the
+// answering capabilities, since no link answers a tool prompt.
+func linkView(s protocol.Session, src Source) protocol.Session {
+	own := false
+	if s.ActiveRequestRef != nil {
+		host, _, _, err := protocol.DecodeRef(*s.ActiveRequestRef)
+		own = err == nil && host == src.Host
+	}
+	if !own {
+		s.ActiveRequestRef = nil
+		s.PendingInteraction = nil
+	}
+	s.Capabilities.ApproveTool = false
+	s.Capabilities.AnswerQuestion = false
+	return s
 }
 
 // onNative applies one native observation to the bound record.
@@ -3090,7 +3280,12 @@ func (e *Endpoint) WaitAfter(ctx context.Context, ref string, after *int64) (pro
 			return protocol.Snapshot{}, err
 		}
 		if !ok {
-			return protocol.Snapshot{}, protocol.Refuse(protocol.CodeNotFound, "no record for request_ref")
+			return protocol.Snapshot{}, noRecord()
+		}
+		// Only the local socket waits (ipc), so the reader is the local
+		// source; ownership holds here as on every other read path.
+		if local := (Source{Host: LocalHost}); !ownedBy(local, rec) {
+			return protocol.Snapshot{}, notOwned(local, rec)
 		}
 		if isFailed {
 			return failed, nil
