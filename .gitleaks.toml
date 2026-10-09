@@ -12,3 +12,17 @@ regexes = [
   '''^MCowBQYDK2VwAyEA[A-Za-z0-9_-]{43}$''',
   '''^MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE[A-Za-z0-9_-]{86}$''',
 ]
+
+# The link contract consent fixtures carry a WebAuthn authenticator_data
+# value: base64url of SHA-256("sign.example.test") || flags 0x05 ||
+# sign counter 0 (37 bytes, 50 characters). It is public test data, not a
+# secret, but generic high-entropy rules (and GitGuardian incident
+# 38056537) flag it. Allow only that field with that exact shape (a
+# global allowlist with a paths entry would skip whole files, even with
+# condition = "AND", so this one is regex-only).
+[[allowlists]]
+description = "amq.remote.link/1 fixtures: WebAuthn authenticator_data is not a secret"
+regexTarget = "line"
+regexes = [
+  '''"authenticator_data":\s*"[A-Za-z0-9_-]{50}"''',
+]

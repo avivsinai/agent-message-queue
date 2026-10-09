@@ -1,0 +1,7 @@
+version: 2
+# testdata/link holds the amq.remote.link/1 golden fixtures: public keys
+# and WebAuthn authenticator_data derived from public seeds
+# (testdata/link/README.md). GitGuardian incident 38056537 was a false
+# positive on that authenticator_data.
+paths-ignore:
+  - "testdata/link/**"
