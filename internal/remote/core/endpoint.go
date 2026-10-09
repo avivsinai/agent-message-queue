@@ -603,7 +603,7 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 		full, ferr := e.linkFullLocked(src.Host)
 		if ferr != nil {
 			e.mu.Unlock()
-			return protocol.Reply{}, ferr
+			return protocol.Reply{Snapshot: e.unpersisted(rec, protocol.StateRejected, protocol.CodeAttachmentLost), Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: protocol.CodeAttachmentLost}}, protocol.Refuse(protocol.CodeAttachmentLost, "%s", ferr.Error())
 		}
 		if full {
 			e.mu.Unlock()
