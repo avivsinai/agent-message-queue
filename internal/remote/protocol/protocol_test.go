@@ -158,3 +158,17 @@ func TestValidateRejectsWhitespaceOnlyPrompt(t *testing.T) {
 		t.Fatalf("Validate rejected a padded but non-empty prompt: %v", err)
 	}
 }
+
+// Regression (#1025 review S1): encoding/json matches keys case-insensitively,
+// so "OP" decoded as op and, with both spellings, the last one won. A command
+// key that is not lowercase is refused.
+func TestDecodeCommandRefusesCaseFoldedKeys(t *testing.T) {
+	for _, doc := range []string{
+		`{"schema":"amq.remote.command/1","OP":"session.list"}`,
+		`{"schema":"amq.remote.command/1","op":"session.list","Op":"request.get"}`,
+	} {
+		if _, err := DecodeCommand([]byte(doc)); err == nil {
+			t.Errorf("%s decoded, want refused", doc)
+		}
+	}
+}

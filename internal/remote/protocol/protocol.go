@@ -1075,6 +1075,12 @@ func rejectDuplicateKeys(data []byte) error {
 			if _, dup := top.keys[key]; dup {
 				return Refuse(CodeInvalid, "duplicate key %q", key)
 			}
+			// encoding/json matches a key to a field case-insensitively, so
+			// "OP" or "TEXT" would decode into op or text, and with both
+			// spellings the last one wins. Every command key is lowercase.
+			if strings.ToLower(key) != key {
+				return Refuse(CodeInvalid, "key %q: command keys are lowercase", key)
+			}
 			top.keys[key] = struct{}{}
 			top.expectKey = false
 			continue
