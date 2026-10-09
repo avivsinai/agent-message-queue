@@ -27,7 +27,8 @@ import (
 	"unicode/utf8"
 )
 
-// maxDepth bounds nesting so a hostile document cannot exhaust the stack.
+// maxDepth bounds nesting so a hostile document cannot exhaust the stack: at
+// most 64 nested objects and arrays.
 const maxDepth = 64
 
 // maxSafeInteger is 2^53-1, the largest integer every JSON implementation
@@ -82,11 +83,11 @@ func (p *parser) skipSpace() {
 }
 
 func (p *parser) value(out *bytes.Buffer, depth int) error {
-	if depth > maxDepth {
-		return p.fail("nesting deeper than %d", maxDepth)
-	}
 	if p.pos >= len(p.data) {
 		return p.fail("unexpected end of input")
+	}
+	if c := p.data[p.pos]; (c == '{' || c == '[') && depth >= maxDepth {
+		return p.fail("more than %d nested objects and arrays", maxDepth)
 	}
 	switch c := p.data[p.pos]; {
 	case c == '{':

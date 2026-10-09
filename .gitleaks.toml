@@ -1,0 +1,14 @@
+[extend]
+useDefault = true
+
+# testdata/link holds the amq.remote.link/1 golden fixtures. The only
+# key-shaped strings there are SPKI public keys (Ed25519, P-256); every
+# private key behind them is derived in tests from a public seed string
+# (testdata/link/README.md).
+[[allowlists]]
+description = "amq.remote.link/1 fixtures: SPKI public keys are not secrets"
+regexTarget = "secret"
+regexes = [
+  '''^MCowBQYDK2VwAyEA[A-Za-z0-9_-]{43}$''',
+  '''^MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE[A-Za-z0-9_-]{86}$''',
+]

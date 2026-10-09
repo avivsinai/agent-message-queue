@@ -1,0 +1,16 @@
+{
+  "body_def": "error_reply",
+  "description": "The refusal of session.events from a link.",
+  "direction": "endpoint_to_server",
+  "frame": {
+    "body": {
+      "error": {
+        "code": "unsupported",
+        "message": "session events are not shared with a link"
+      }
+    },
+    "gen": 12,
+    "re": "m_v1",
+    "schema": "amq.remote.link/1"
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "body_def": "command",
+  "description": "session.events: never accepted from a link.",
+  "direction": "server_to_endpoint",
+  "frame": {
+    "body": {
+      "op": "session.events",
+      "schema": "amq.remote.command/1",
+      "target_id": "pi:demo-5b9d0c1e"
+    },
+    "gen": 12,
+    "id": "m_v1",
+    "schema": "amq.remote.link/1"
+  }
+}

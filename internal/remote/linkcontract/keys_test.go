@@ -22,6 +22,9 @@ const (
 	consentKeySeed   = "amq.remote.link/1 test consent key"
 	deviceKeySeed    = "amq.remote.link/1 test device key"
 	credentialIDSeed = "amq.remote.link/1 test credential"
+	// The Ed25519 (alg -8) consent passkey.
+	consentKeyEdSeed   = "amq.remote.link/1 test consent key ed25519"
+	credentialIDEdSeed = "amq.remote.link/1 test credential ed25519"
 )
 
 // Fixed values of the golden exchange. None names a real server.
@@ -68,6 +71,11 @@ func deviceKey() ed25519.PrivateKey {
 }
 
 func credentialID() string { return b64.EncodeToString(seed(credentialIDSeed)[:16]) }
+
+// consentKeyEd25519 is the Ed25519 consent passkey: seed = SHA-256(seed string).
+func consentKeyEd25519() ed25519.PrivateKey { return ed25519.NewKeyFromSeed(seed(consentKeyEdSeed)) }
+
+func credentialIDEd25519() string { return b64.EncodeToString(seed(credentialIDEdSeed)[:16]) }
 
 func helloNonce() string { return b64.EncodeToString(seed(helloNonceID)) }
 
