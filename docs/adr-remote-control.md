@@ -72,8 +72,9 @@ invariants.
    user per root holds a process lock; a second exits with a diagnostic.
 7. **AMQ carries durable intent and evidence.** Commands and results travel
    as ordinary AMQ messages to a dedicated handle in the same root. Local
-   CLI requests, AMQ-delivered requests, and Buzz-delivered requests end in
-   the same handler. Live activity is a projection and never mutates.
+   CLI requests, AMQ-delivered requests, Buzz-delivered requests, and
+   link-delivered requests (a server the machine itself dialed) end in the
+   same handler. Live activity is a projection and never mutates.
 8. **Exit codes follow the AMQ contract.** `0` success, `1` native work
    failed or cancelled, `2` usage, `3` not found, `4` timeout, `6` action
    required (busy, unsupported, unshared, expired, or
