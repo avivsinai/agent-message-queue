@@ -1884,8 +1884,8 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 	retryUntilFlag := fs.String("retry-until", wakeRetryUntilDrained, "Doorbell acknowledgement: drained or injected")
 	bellFlag := fs.Bool("bell", false, "Ring terminal bell on new messages")
 	debounceFlag := fs.Duration("debounce", 250*time.Millisecond, "Debounce window for batching messages")
-	holdNormalFlag := fs.Duration("hold-normal", 0, "Hold the first doorbell for normal-priority mail up to this long (0 = ring at once)")
-	holdLowFlag := fs.Duration("hold-low", 0, "Hold the first doorbell for low-priority mail up to this long (0 = ring at once)")
+	holdNormalFlag := fs.Duration("hold-normal", 0, "Hold the first doorbell for normal-priority mail up to this long (0 = no priority hold)")
+	holdLowFlag := fs.Duration("hold-low", 0, "Hold the first doorbell for low-priority mail up to this long (0 = no priority hold)")
 	previewLenFlag := fs.Int("preview-len", 48, "Max subject preview length")
 	injectModeFlag := fs.String("inject-mode", wakeInjectModeAuto, "Injection mode: auto, raw, paste, none (auto detects CLI type)")
 	deferWhileInputFlag := fs.Bool("defer-while-input", true, "Best-effort: defer non-interrupt injection while terminal input appears active")
@@ -1962,6 +1962,7 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 		"  Direct amq wake only: setup, launch, and managed coop exec do not pass",
 		"  these flags through. Example: --hold-normal 5m --hold-low 30m; use",
 		"  --priority urgent for time-critical unblocking requests or verdicts.",
+		"  Manual restarts must repeat hold flags; wake repair does not save them.",
 		"",
 		"Interrupt notices (default on): urgent messages tagged with label \"interrupt\"",
 		"  trigger an interrupt notice. Ctrl+C injection is opt-in with",

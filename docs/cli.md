@@ -674,6 +674,7 @@ Hold by priority (default off): --hold-normal and --hold-low delay the
   Direct amq wake only: setup, launch, and managed coop exec do not pass
   these flags through. Example: --hold-normal 5m --hold-low 30m; use
   --priority urgent for time-critical unblocking requests or verdicts.
+  Manual restarts must repeat hold flags; wake repair does not save them.
 
 Interrupt notices (default on): urgent messages tagged with label "interrupt"
   trigger an interrupt notice. Ctrl+C injection is opt-in with
@@ -703,9 +704,9 @@ Options:
   -defer-while-input
         Best-effort: defer non-interrupt injection while terminal input appears active (default true)
   -hold-low duration
-        Hold the first doorbell for low-priority mail up to this long (0 = ring at once)
+        Hold the first doorbell for low-priority mail up to this long (0 = no priority hold)
   -hold-normal duration
-        Hold the first doorbell for normal-priority mail up to this long (0 = ring at once)
+        Hold the first doorbell for normal-priority mail up to this long (0 = no priority hold)
   -inject-arg value
         Argument for --inject-via before the payload (repeatable)
   -inject-cmd string

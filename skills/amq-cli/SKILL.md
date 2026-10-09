@@ -50,6 +50,7 @@ interrupt label follows the interrupt path.
 Use `--priority urgent` on `send` or `reply` for time-critical verdicts and
 unblocking requests. Other review responses remain normal by default. Managed
 `amq launch` / `coop exec` wakes do not accept these hold flags yet.
+Manual restarts must repeat the flags; `amq wake repair` does not preserve them.
 
 Without an injecting wake, use the receive methods in the operations guide.
 A notify-only wake (`--inject-mode none`) paired with a supervisor `monitor`
