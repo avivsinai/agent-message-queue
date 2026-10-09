@@ -78,6 +78,8 @@ Commands:
                            fingerprint your browser shows
   attach --self --link N   Share the session this runs in with linked server N
                            (--consent passkey|local, --tools PROFILE)
+  link keys add NAME --code CODE
+                           Accept one more consent passkey (type its fingerprint)
   link remove NAME         Retire link NAME's sink and delete its device key
   link status              Links, their sockets and owed revisions, retired sinks
   doctor                   Diagnose the endpoint chain

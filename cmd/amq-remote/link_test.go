@@ -166,3 +166,49 @@ func TestShareWithLinkRecordsTheShare(t *testing.T) {
 		t.Fatal("sharing with an unknown link succeeded")
 	}
 }
+
+// link keys add accepts one more consent passkey: the device redeems the
+// code with its signature over the pinned server id, and the key is kept only
+// when the user types its fingerprint.
+func TestLinkKeysAddAcceptsTheTypedKey(t *testing.T) {
+	first := linkio.ConsentKey{CredentialID: "C32Z2-E6ARE-BkrOVOybpw", SPKI: "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE", Alg: -7,
+		RPID: "sign.example.test", Origin: "https://sign.example.test"}
+	second := first
+	second.CredentialID, second.Alg = "D43a3-F7BSF-ClsPWPzcqx", -8
+	redeem := func(ck linkio.ConsentKey) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			var req redeemRequest
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			spki, _ := base64.RawURLEncoding.DecodeString(req.DeviceKey)
+			pub, err := x509.ParsePKIXPublicKey(spki)
+			sig, _ := base64.RawURLEncoding.DecodeString(req.Signature)
+			if err != nil || !ed25519.Verify(pub.(ed25519.PublicKey), linkio.RedeemMessage("srv_example", req.Code, req.TS), sig) {
+				http.Error(w, "bad redeem", http.StatusForbidden)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(redeemReply{DeviceID: linkio.HostOf(spki), ServerID: "srv_example", User: "Example User", ConsentKeys: []linkio.ConsentKey{ck}})
+		}
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v1/link/info", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(linkInfo{ServerID: "srv_example", LinkURL: "wss://link.example.test/api/v1/link"})
+	})
+	mux.HandleFunc("POST /api/v1/link/redeem", redeem(first))
+	mux.HandleFunc("POST /api/v1/link/consent-keys/redeem", redeem(second))
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	root := t.TempDir()
+	fp1, _ := linkio.Fingerprint(first)
+	if _, code, err := linkAdd([]string{"--root", root, "example", srv.URL, "--code", "K7Q4-M2XD"}, strings.NewReader(fp1+"\n"), io.Discard, &jsonProbe{}); err != nil || code != 0 {
+		t.Fatalf("link add = %d, %v", code, err)
+	}
+	fp2, _ := linkio.Fingerprint(second)
+	if _, code, err := linkKeysAdd([]string{"--root", root, "example", "--code", "P9R2-X4KD"}, strings.NewReader(fp2+"\n"), io.Discard, &jsonProbe{}); err != nil || code != 0 {
+		t.Fatalf("link keys add = %d, %v", code, err)
+	}
+	keys, err := linkio.LoadConsentKeys(filepath.Join(root, stateDirName), "example")
+	if err != nil || len(keys) != 2 || keys[1] != second {
+		t.Fatalf("consent keys %+v, %v; want the first and the added one", keys, err)
+	}
+}
