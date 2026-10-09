@@ -838,7 +838,7 @@ func (e *Endpoint) get(cmd *protocol.Command, src Source) (protocol.Reply, error
 	if !ok {
 		return protocol.Reply{}, noRecord()
 	}
-	if !ownedBy(src, rec) {
+	if !readableBy(src, rec) {
 		return protocol.Reply{}, notOwned(src, rec)
 	}
 	if snap, ok := e.failedLocked(rec); ok {
@@ -1025,23 +1025,24 @@ func outsideNamespace(src Source, refHost string) bool {
 	return isLink(src) && refHost != src.Host
 }
 
-// ownedBy is the one ownership rule for reading and cancelling a record. A
-// record a remote source created is read and cancelled only by that source:
-// a link record by the same link, a Buzz record by the owner's share. A link
-// source sees only its own records. Local socket and mailbox records keep
-// the local rule: local senders carry no authenticated identity.
-func ownedBy(src Source, rec *requests.Record) bool {
+// readableBy is the read rule (get, wait): a link record is read only by the
+// link that created it, and a link source reads only its own records. Every
+// other record keeps the local rule: local senders carry no authenticated
+// identity, so the local terminal still reads Buzz requests.
+func readableBy(src Source, rec *requests.Record) bool {
 	if isLink(src) {
 		return rec.Origin["carrier"] == CarrierLink && rec.CreatorHost == src.Host
 	}
-	switch rec.Origin["carrier"] {
-	case "buzz":
-		return fromOwnerShare(src, rec)
-	case CarrierLink:
+	return rec.Origin["carrier"] != CarrierLink
+}
+
+// ownedBy is the cancel rule: the read rule, plus a Buzz record is cancelled
+// only from the owner's share that submitted it (agent-message-queue-611.48).
+func ownedBy(src Source, rec *requests.Record) bool {
+	if rec.Origin["carrier"] == "buzz" && !fromOwnerShare(src, rec) {
 		return false
-	default:
-		return true
 	}
+	return readableBy(src, rec)
 }
 
 // noRecord is the refusal for an absent request, and for a link naming a
@@ -1050,13 +1051,13 @@ func noRecord() error {
 	return protocol.Refuse(protocol.CodeNotFound, "no record for request_ref")
 }
 
-// notOwned is the refusal when ownedBy fails.
+// notOwned is the refusal when readableBy or ownedBy fails.
 func notOwned(src Source, rec *requests.Record) error {
 	switch {
 	case isLink(src):
 		return noRecord()
 	case rec.Origin["carrier"] == "buzz":
-		return protocol.Refuse(protocol.CodeUnshared, "only the owner's Buzz share can read or cancel its requests")
+		return protocol.Refuse(protocol.CodeUnshared, "only the owner's Buzz share can cancel its requests")
 	default:
 		return protocol.Refuse(protocol.CodeUnshared, "only the link that submitted this request can read or cancel it")
 	}
@@ -3283,8 +3284,8 @@ func (e *Endpoint) WaitAfter(ctx context.Context, ref string, after *int64) (pro
 			return protocol.Snapshot{}, noRecord()
 		}
 		// Only the local socket waits (ipc), so the reader is the local
-		// source; ownership holds here as on every other read path.
-		if local := (Source{Host: LocalHost}); !ownedBy(local, rec) {
+		// source; the read rule holds here as on get.
+		if local := (Source{Host: LocalHost}); !readableBy(local, rec) {
 			return protocol.Snapshot{}, notOwned(local, rec)
 		}
 		if isFailed {

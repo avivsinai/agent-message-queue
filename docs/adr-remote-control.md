@@ -58,12 +58,12 @@ invariants.
    boundary compares the bound run before signalling. A cancel that arrives
    before its submit leaves a tombstone. A late cancel for one request never
    aborts another. A harness that offers only a session-wide abort does not
-   advertise exact cancellation. Ownership extends to every remote carrier
-   and every read path: a request that a remote source submitted (a Buzz
-   share or a link) is read and cancelled only by that source, and the AMQ
-   mailbox and the local socket are refused. A link sees only the requests
-   it created and the sessions shared with it, with other sources' request
-   and interaction references removed; it never answers an interaction and
+   advertise exact cancellation. A request that a Buzz share submitted is
+   cancelled only from that share; the AMQ mailbox and the local socket are
+   refused. A request that a link submitted is read and cancelled only by
+   that link, on every read path. A link sees only the requests it created
+   and the sessions shared with it, with other sources' request and
+   interaction references removed; it never answers an interaction and
    never reads session events. A link creates no tombstones: its cancel of
    an absent request is refused, and its busy request ends as an ordinary
    refused record that compacts and is never admitted again. A link holds
