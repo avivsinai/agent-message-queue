@@ -410,11 +410,6 @@ func (r *Response) AsError() error {
 	return &protocol.Refusal{Code: protocol.Code(r.Error.Code), Message: r.Error.Message}
 }
 
-func readRecord[T any](r io.Reader) (*T, error) {
-	v, _, err := readRecordLimit[T](r, MaxRecordBytes)
-	return v, err
-}
-
 // readRecordLimit reads one newline-terminated record of at most limit
 // bytes and returns its length.
 func readRecordLimit[T any](r io.Reader, limit int) (*T, int, error) {
