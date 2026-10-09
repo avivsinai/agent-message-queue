@@ -63,7 +63,9 @@ A server's parity test takes `rp_id` and `origin` from
   committed the revision. Until then the endpoint still owes the revision
   and offers it again on a later sweep (at most once per 30 s per offer, and
   again on every new connection). The same revision with the same digest is
-  acknowledged again; another digest is a conflict.
+  acknowledged again. Another digest is a conflict: the server never
+  overwrites, and answers `error{code: conflict}`. The endpoint then marks that
+  revision terminal: no resend, one log line, counted in `link status`.
 
 ## Bindings
 
