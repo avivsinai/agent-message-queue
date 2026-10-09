@@ -8,6 +8,18 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.93.0](https://github.com/avivsinai/agent-message-queue/compare/v0.92.0...v0.93.0) (2026-10-09)
+
+
+### Features
+
+* **wake:** hold the doorbell by message priority ([#1008](https://github.com/avivsinai/agent-message-queue/issues/1008)) ([0407203](https://github.com/avivsinai/agent-message-queue/commit/0407203e0f999c0012c49b0eb29307d1c4db9d5a))
+
+
+### Bug Fixes
+
+* **build:** use Go 1.26.9 security toolchain ([#1010](https://github.com/avivsinai/agent-message-queue/issues/1010)) ([0f117b1](https://github.com/avivsinai/agent-message-queue/commit/0f117b19883f56e8f61894d868ff8b744ff5d3f3))
+
 ## [0.92.0](https://github.com/avivsinai/agent-message-queue/compare/v0.91.0...v0.92.0) (2026-10-08)
 
 
