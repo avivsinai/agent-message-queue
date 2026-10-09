@@ -60,7 +60,9 @@ Wake treats a terminal notification as an attempt, not delivery, and retries
 on a capped backoff until the inbox makes durable progress. There is no
 give-up while the cohort remains unread.
 
-- The first notification for a newly pending cohort is immediate.
+- By default, the first notification for a newly pending cohort is eligible
+  immediately after debounce. Optional `--hold-normal` and `--hold-low` delay
+  that first attempt by priority; see [Wake operations](wake-operations.md#hold-by-priority).
 - Doorbell (input-injecting) attempts start at 5s and double up to a 2-minute
   cap, because they drive the agent directly.
 - Attention-only attempts (terminal output, no input) start at 30s and

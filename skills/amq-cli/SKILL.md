@@ -41,10 +41,15 @@ watcher under that live wake. A blocking wait holds your turn while the
 doorbell queues behind it. When your work is done, finish the turn; do not
 keep a tool running or send idle check-ins just to wait for mail.
 
-A wake started with `--hold-normal` / `--hold-low` (recommended `5m` / `30m`)
-rings once per burst: normal and low mail wait up to the hold, and one drain
-takes everything. Urgent mail rings at once, so send verdicts (APPROVE, BLOCK)
-and unblocking requests with `--priority urgent`; everything else may wait.
+A standalone wake started with `--hold-normal` / `--hold-low` can delay the
+first doorbell for routine mail; `5m` / `30m` is an opt-in example. One drain
+takes all pending mail, and the configured retry policy applies after the
+first attempt. Urgent priority skips the hold. Ordinary urgent mail still
+passes through debounce and input deferral; urgent mail with the configured
+interrupt label follows the interrupt path.
+Use `--priority urgent` on `send` or `reply` for time-critical verdicts and
+unblocking requests. Other review responses remain normal by default. Managed
+`amq launch` / `coop exec` wakes do not accept these hold flags yet.
 
 Without an injecting wake, use the receive methods in the operations guide.
 A notify-only wake (`--inject-mode none`) paired with a supervisor `monitor`
