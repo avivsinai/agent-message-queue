@@ -195,6 +195,9 @@ func (ls *linkSet) newRun(l manifest.Link) (*linkRun, error) {
 			if _, err := linkio.DropConsentKey(ls.stateDir, name, id); err != nil {
 				say(ls.stderr, "link %s: drop consent key: %v", name, err)
 			}
+			if run.carrier != nil {
+				run.carrier.RefreshConsentKeys()
+			}
 		},
 		Revoked: func() { ls.retire(name) },
 		Handle:  func(cmd *protocol.Command, src core.Source) (any, error) { return ls.handle(cmd, src) },
@@ -212,6 +215,15 @@ func (ls *linkSet) newRun(l manifest.Link) (*linkRun, error) {
 	}
 	run.carrier = c
 	return run, nil
+}
+
+// consentLive is core's handoff check: the link with that creator host still
+// accepts the consent key. A retired or unknown link accepts none.
+func (ls *linkSet) consentLive(host, credential string) bool {
+	ls.mu.Lock()
+	c := ls.byHost[host]
+	ls.mu.Unlock()
+	return c != nil && c.ConsentLive(credential)
 }
 
 // handle runs a link's admitted command on the endpoint.

@@ -258,6 +258,12 @@ const (
 	CodeEndpointUnreachable      Code = "endpoint_unreachable"
 	CodeStoreClosed              Code = "store_closed"
 	CodeDraining                 Code = "draining"
+	// CodeSessionChanged: a signed request names a native session that is
+	// not the one attached when the task would be handed off.
+	CodeSessionChanged Code = "session_changed"
+	// CodeConsentInvalid: the consent that authorized a request is no longer
+	// accepted (its key was removed) when the task would be handed off.
+	CodeConsentInvalid Code = "consent_invalid"
 )
 
 // CancelDisposition is the recorded outcome of a cancel command.
@@ -498,7 +504,7 @@ func ExitForCode(code Code) int {
 	case CodeBusy, CodeUnsupported, CodeUnshared, CodeExpired, CodeStaleEpoch,
 		CodeRequestConflict, CodeStorageFull, CodeAttachmentLost, CodeResultExpired,
 		CodeAlreadyResolved, CodeEndpointAlreadyRunning, CodeEndpointUnreachable,
-		CodeStoreClosed, CodeDraining:
+		CodeStoreClosed, CodeDraining, CodeSessionChanged, CodeConsentInvalid:
 		return ExitActionRequired
 	}
 	return ExitError

@@ -29,7 +29,18 @@ type Source struct {
 	// (local socket, mailbox, Buzz). A link source always carries a non-nil
 	// list, possibly empty: session list and inspect show only these targets.
 	Shared []string
+	// NativeSession and Credential come only from a link's verified signed
+	// submit: the native session the user signed for and the consent key
+	// that signed. Core stores both on the record and checks them again right
+	// before the handoff to the harness.
+	NativeSession string
+	Credential    string
 }
+
+// ConsentCheck reports whether the consent key credential of the link with
+// creator host is still accepted. It runs under the endpoint lock, so it
+// reads an immutable snapshot and never waits.
+type ConsentCheck func(creatorHost, credential string) bool
 
 // CarrierLink is the Origin "carrier" value of a link source: a server the
 // user's machine dialed. Its Host is the link's creator host, link-<id>.
@@ -187,6 +198,7 @@ type Endpoint struct {
 	// intent its own respond recorded: a replay of an earlier intent keeps it
 	// (611.42.14). An entry lives while a respond holds or waits for it.
 	answering map[answerKey]*answerLock
+	consent   ConsentCheck
 }
 
 // answerKey names one interaction of one request.
@@ -213,6 +225,9 @@ type Config struct {
 	// DrainTimeout overrides the default Close drain timeout. Tests use a
 	// short value to prove the bound without sleeping 30s.
 	DrainTimeout time.Duration
+	// Consent checks a signed request's consent key at the handoff. Nil
+	// refuses every signed request at the handoff.
+	Consent ConsentCheck
 }
 
 // New builds an endpoint over an open store. Attachments register through
@@ -232,6 +247,7 @@ func New(cfg Config) *Endpoint {
 		failed:           map[requests.Key]failure{},
 		drainObligations: map[requests.Key]int64{},
 		answering:        map[answerKey]*answerLock{},
+		consent:          cfg.Consent,
 		state:            stateAccepting,
 		drainTO:          drainTimeout,
 	}
@@ -246,6 +262,15 @@ func New(cfg Config) *Endpoint {
 		e.publish = func(protocol.Snapshot, map[string]string) error { return nil }
 	}
 	return e
+}
+
+// SetConsent installs the consent check signed requests pass at the handoff.
+// Until it is set, a deferred signed request keeps waiting rather than being
+// refused, so startup reconciliation never ends one for lack of a check.
+func (e *Endpoint) SetConsent(c ConsentCheck) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.consent = c
 }
 
 // SetPublish replaces the publisher after construction. Serve uses this
@@ -590,13 +615,19 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 			NotAfter:    cmd.NotAfter,
 			ObservedAt:  protocol.FormatTime(e.now()),
 		},
-		Input:  cmd.Input,
-		Origin: src.Origin,
+		Input:               cmd.Input,
+		Origin:              src.Origin,
+		SignedNativeSession: src.NativeSession,
+		ConsentCredential:   src.Credential,
 	}
 	// Decide admissibility + reservation BEFORE Create: a request we are
 	// about to refuse is never written (no durable placeholder to leak on a
 	// failed rejection write, and nothing for Tick to dispatch). Only Create
 	// when we will dispatch or deliberately defer.
+	if isLink(src) && (src.NativeSession == "" || src.Credential == "") {
+		e.mu.Unlock()
+		return protocol.Reply{}, protocol.Refuse(protocol.CodeConsentInvalid, "a link submit runs only from verified signed bytes")
+	}
 	if isLink(src) {
 		// The per-link bound refuses before any side effect, so unlike the
 		// per-target busy below it leaves no record: nothing was asked yet.
@@ -634,6 +665,13 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 		e.notifyLocked(rec)
 		e.mu.Unlock()
 		return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit}}, nil
+	}
+	// A link request runs only on the native session it was signed for, with
+	// a consent key still accepted. This check and the dispatching commit
+	// below share one critical section; the handoff is the cutoff.
+	if code := e.signedHandoffLocked(rec, t); code != "" {
+		e.mu.Unlock()
+		return protocol.Reply{Snapshot: e.unpersisted(rec, protocol.StateRejected, code), Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: code}}, nil
 	}
 	// B14 per-runtime reservation (B10): refuse a second concurrent dispatch
 	// for the same target. Fail-closed — an undeterminable reservation state
@@ -1016,6 +1054,27 @@ func fromOwnerShare(src Source, rec *requests.Record) bool {
 
 // isLink reports whether src arrived over a link carrier.
 func isLink(src Source) bool { return src.Origin["carrier"] == CarrierLink }
+
+// signedHandoffLocked decides, right before the handoff, whether a signed
+// request may still run: its consent key is still accepted and the target is
+// attached to the exact native session it was signed for. An unknown (empty)
+// native session refuses too. A request that was not signed passes.
+func (e *Endpoint) signedHandoffLocked(rec *requests.Record, t *target) protocol.Code {
+	if rec.SignedNativeSession == "" && rec.Origin["carrier"] != CarrierLink {
+		return ""
+	}
+	if e.consent == nil || !e.consent(rec.CreatorHost, rec.ConsentCredential) {
+		return protocol.CodeConsentInvalid
+	}
+	native := ""
+	if n, ok := t.att.(NativeIdentifier); ok {
+		native = n.NativeSessionID()
+	}
+	if native == "" || native != rec.SignedNativeSession {
+		return protocol.CodeSessionChanged
+	}
+	return ""
+}
 
 // outsideNamespace reports whether a link source names a request another
 // source created. It is checked before any lookup, so a link learns nothing
@@ -2955,6 +3014,21 @@ func (e *Endpoint) admitDeferred(rec *requests.Record) error {
 		// admitted, or already terminal). Release this attempt's
 		// reservation; a later retry re-reserves idempotently.
 		e.store.ReleaseReservation(key)
+		e.mu.Unlock()
+		return err
+	}
+	// A deferred link request is checked again here, in the same critical
+	// section as its dispatching commit: a session or key that changed while
+	// it waited stops it before the harness sees it.
+	if rec.SignedNativeSession != "" && e.consent == nil {
+		e.store.ReleaseReservation(key)
+		e.mu.Unlock()
+		return nil // the consent check is not installed yet; retry on the next tick
+	}
+	if code := e.signedHandoffLocked(rec, t); code != "" {
+		e.store.ReleaseReservation(key)
+		e.transitionLocked(rec, causeRefused, nativeEvidence{code: code})
+		_, err = e.commitLocked(rec, nil)
 		e.mu.Unlock()
 		return err
 	}

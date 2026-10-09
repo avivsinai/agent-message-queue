@@ -121,7 +121,8 @@ type Carrier struct {
 	offerBytes int
 	owed       map[string]int64
 	status     Status
-	sentBind   []byte // JCS of the last bindings the server was told
+	sentBind   []byte                          // JCS of the last bindings the server was told
+	liveKeys   atomic.Pointer[map[string]bool] // consent credential ids accepted now
 }
 
 // New builds a carrier. It does not dial until Run.
@@ -159,7 +160,7 @@ func New(cfg Config) (*Carrier, error) {
 	if cfg.RestartDelay <= 0 {
 		cfg.RestartDelay = DefaultRestartDelay
 	}
-	return &Carrier{
+	c := &Carrier{
 		cfg:     cfg,
 		host:    cfg.Key.Host(),
 		acked:   map[string]int64{},
@@ -167,7 +168,9 @@ func New(cfg Config) (*Carrier, error) {
 		byFrame: map[string]*offer{},
 		owed:    map[string]int64{},
 		status:  Status{State: "offline"},
-	}, nil
+	}
+	c.refreshKeys() // the consent snapshot exists before the first handoff check
+	return c, nil
 }
 
 // Host is the link's creator host and sink.
@@ -651,11 +654,12 @@ func (c *Carrier) admitSigned(m SignedSubmit) (any, error) {
 	if c.cfg.Handle == nil {
 		return nil, refuse(string(protocol.CodeUnsupported), "this endpoint runs no commands")
 	}
-	cmd, native, err := VerifySignedSubmit(c.view(), m, c.cfg.Now())
+	view := c.view()
+	cmd, native, err := VerifySignedSubmit(view, m, c.cfg.Now())
 	if err != nil {
 		return nil, err
 	}
-	out, err := c.cfg.Handle(cmd, c.source(native))
+	out, err := c.cfg.Handle(cmd, c.source(view, native, m.CredentialID))
 	if err != nil {
 		return nil, err
 	}
@@ -670,19 +674,53 @@ func (c *Carrier) admitSigned(m SignedSubmit) (any, error) {
 // submit, so a removed key or a changed binding takes effect at once.
 func (c *Carrier) view() *ConsentView {
 	v := &ConsentView{ServerID: c.cfg.Pin.ServerID, StoreID: c.cfg.StoreID, Keys: map[string]ConsentKey{}, Bindings: map[string]Binding{}}
-	for _, k := range c.cfg.ConsentKeys() {
-		v.Keys[k.CredentialID] = k
-	}
+	v.Keys = c.refreshKeys()
 	for _, b := range c.cfg.Bindings() {
 		v.Bindings[b.Binding] = b
 	}
 	return v
 }
 
-// source is the authenticated source of every command this link runs. The
-// origin routes its revisions back to this sink.
-func (c *Carrier) source(native string) core.Source {
-	return core.Source{Host: c.host, Origin: map[string]string{"carrier": "link", "sink": c.host}}
+// ConsentLive reports whether this link still accepts a consent key. Core
+// asks it right before a handoff, under its own lock, so it reads only the
+// snapshot the last signed submit or key removal stored.
+func (c *Carrier) ConsentLive(credentialID string) bool {
+	live := c.liveKeys.Load()
+	return live != nil && (*live)[credentialID]
+}
+
+// RefreshConsentKeys re-reads the consent keys into the snapshot, after a
+// key was removed.
+func (c *Carrier) RefreshConsentKeys() { c.refreshKeys() }
+
+// refreshKeys reads the consent keys this machine trusts and stores the
+// snapshot ConsentLive reads.
+func (c *Carrier) refreshKeys() map[string]ConsentKey {
+	keys := map[string]ConsentKey{}
+	live := map[string]bool{}
+	for _, k := range c.cfg.ConsentKeys() {
+		keys[k.CredentialID] = k
+		live[k.CredentialID] = true
+	}
+	c.liveKeys.Store(&live)
+	return keys
+}
+
+// source is the authenticated source of a signed submit: this link's sink,
+// the native session and consent key it was signed with, and the targets
+// shared with the link. The origin routes its revisions back to this sink.
+func (c *Carrier) source(view *ConsentView, native, credential string) core.Source {
+	shared := make([]string, 0, len(view.Bindings))
+	for _, b := range view.Bindings {
+		shared = append(shared, b.TargetID)
+	}
+	return core.Source{
+		Host:          c.host,
+		Origin:        map[string]string{"carrier": core.CarrierLink, core.OriginSink: c.host},
+		Shared:        shared,
+		NativeSession: native,
+		Credential:    credential,
+	}
 }
 
 // refuse answers on the control lane. A full control lane drops the answer;

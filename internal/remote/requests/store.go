@@ -59,6 +59,13 @@ type Record struct {
 	// show what was asked. It is never re-dispatched from here.
 	Input *protocol.SubmitInput `json:"input,omitempty"`
 
+	// SignedNativeSession is the native session a link request was signed
+	// for, and ConsentCredential the consent key that signed it. Both are
+	// written with the record and compared again right before the task is
+	// handed to the harness. Empty on every other request.
+	SignedNativeSession string `json:"signed_native_session,omitempty"`
+	ConsentCredential   string `json:"consent_credential,omitempty"`
+
 	// PublishedRevision is the last revision known to have left through AMQ.
 	PublishedRevision int64 `json:"published_revision"`
 

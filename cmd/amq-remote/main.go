@@ -607,6 +607,7 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 		relays = startRelays(ctx, c.root, stateDir, relayCfg, edges, stderr)
 		say(stdout, "relay %s: %d shared session(s)", relayCfg.URL, len(relayCfg.Shares))
 	}
+	ep.SetConsent(links.consentLive)
 	links.start(ctx, ep, mfSnap)
 	go func() {
 		t := time.NewTicker(*poll)
