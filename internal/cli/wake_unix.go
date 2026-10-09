@@ -1950,12 +1950,14 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 		"  time-critical unblocking requests or verdicts.",
 		"",
 		"Settings (hold, debounce, preview, bell, input deferral, interrupt notice,",
-		"  inject timeout) live in <root>/agents/<me>/.wake.settings. Explicit settings",
-		"  flags on a fresh start write their keys to that file. A resume (self-upgrade",
-		"  or restart) reads the file and ignores settings flags in argv; if the file",
-		"  is absent it writes them once. Repair, coop exec and keepalive pass no",
-		"  settings flags and use the stored file. Change a running wake with",
-		"  amq wake config.",
+		"  inject timeout) live in <root>/agents/<me>/.wake.settings, over the machine",
+		"  file ~/.amq/wake.settings (every wake of this user on this machine), over",
+		"  the built-in defaults, key by key. Explicit settings flags on a fresh start",
+		"  write their keys to the agent file. A resume (self-upgrade or restart) reads",
+		"  the file and ignores settings flags in argv; if the file is absent it writes",
+		"  them once. Repair, coop exec and keepalive pass no settings flags and use",
+		"  the stored files. A refused machine file never stops a start; the wake runs",
+		"  without it. Change running wakes with amq wake config (--machine for all).",
 		"",
 		"Interrupt notices (default on): urgent messages tagged with label \"interrupt\"",
 		"  trigger an interrupt notice. Ctrl+C injection is opt-in with",
@@ -2450,11 +2452,29 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 	if err != nil {
 		return err
 	}
-	if startupSettings.refused != nil {
+	machineSettingsPath, err := machineWakeSettingsPath()
+	if err != nil {
+		machineSettingsPath = wakeMachineSettingsDisplayPath
+	}
+	if startupSettings.layers.agentErr != nil {
 		_ = writeStderr(
-			"amq wake: %s refused: %v; running with default settings\n",
+			"amq wake: %s refused: %v; running without it\n",
 			wakeSettingsFileName,
-			startupSettings.refused,
+			startupSettings.layers.agentErr,
+		)
+	}
+	if startupSettings.layers.machineErr != nil {
+		_ = writeStderr(
+			"amq wake: %s refused: %v; running without the machine settings\n",
+			machineSettingsPath,
+			startupSettings.layers.machineErr,
+		)
+	}
+	if startupSettings.layers.machineMerge != nil {
+		_ = writeStderr(
+			"amq wake: %s refused: %v; running without the machine settings\n",
+			machineSettingsPath,
+			startupSettings.layers.machineMerge,
 		)
 	}
 	if startupSettings.unseeded != nil {
@@ -2595,9 +2615,14 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 		recordDoorbellStatus: func(parked bool, attempts uint) error {
 			return setWakeDoorbellStatusInDir(activeAgentDir, me, parked, attempts)
 		},
-		settingsSource:         wakeSettingsSourceInDir(activeAgentDir, currentWake, startupSettings.seed),
-		settingsObserved:       startupSettings.observed,
-		pendingSettingsApplied: pendingStartupSettingsApplied,
+		settingsSource:          wakeSettingsSourceInDir(activeAgentDir, currentWake, startupSettings.seed),
+		settingsObserved:        startupSettings.observed,
+		machineSettingsSource:   readMachineWakeSettings,
+		machineSettingsObserved: startupSettings.machineObserved,
+		machineSettingsPath:     machineSettingsPath,
+		settingsLayers:          startupSettings.layers,
+		settingsUnseeded:        startupSettings.unseeded != nil,
+		pendingSettingsApplied:  pendingStartupSettingsApplied,
 		recordSettingsApplied: func(status wakeSettingsAppliedStatus) error {
 			return recordWakeSettingsApplied(
 				activeAgentDir,

@@ -676,12 +676,14 @@ Hold by priority (default off): --hold-normal and --hold-low delay the
   time-critical unblocking requests or verdicts.
 
 Settings (hold, debounce, preview, bell, input deferral, interrupt notice,
-  inject timeout) live in <root>/agents/<me>/.wake.settings. Explicit settings
-  flags on a fresh start write their keys to that file. A resume (self-upgrade
-  or restart) reads the file and ignores settings flags in argv; if the file
-  is absent it writes them once. Repair, coop exec and keepalive pass no
-  settings flags and use the stored file. Change a running wake with
-  amq wake config.
+  inject timeout) live in <root>/agents/<me>/.wake.settings, over the machine
+  file ~/.amq/wake.settings (every wake of this user on this machine), over
+  the built-in defaults, key by key. Explicit settings flags on a fresh start
+  write their keys to the agent file. A resume (self-upgrade or restart) reads
+  the file and ignores settings flags in argv; if the file is absent it writes
+  them once. Repair, coop exec and keepalive pass no settings flags and use
+  the stored files. A refused machine file never stops a start; the wake runs
+  without it. Change running wakes with amq wake config (--machine for all).
 
 Interrupt notices (default on): urgent messages tagged with label "interrupt"
   trigger an interrupt notice. Ctrl+C injection is opt-in with
@@ -1237,18 +1239,27 @@ Options:
 ```text
 $ amq wake config --help
 Usage:
-  amq wake config [--me <agent>] [setting flags] [--unset <key>]... [--reset] [--wait] [options]
+  amq wake config [--me <agent>] [--machine] [setting flags] [--unset <key>]... [--reset] [--wait] [options]
 
 Show or change the live settings of the agent's wake.
 
-With no setting flag and no --unset, print each setting, its value, and whether it
-comes from the file or the default, then what the running wake did with the file.
-Otherwise validate the whole new set and store it in .wake.settings. A running wake
-applies the file within a few seconds. Flags fixed for a running wake (--inject-via,
---inject-mode, --inject-arg, --inject-cmd, --interrupt-cmd, --retry-until) are refused.
+Each setting comes from the agent's file (.wake.settings), else the machine file
+(~/.amq/wake.settings, shared by every wake of this user on this machine), else the
+built-in default. With no setting flag and no --unset, print each setting, its value,
+and which layer it comes from, then what the running wake did with the files.
+Otherwise validate the whole new set and store it. A running wake applies a change
+within a few seconds. Flags fixed for a running wake (--inject-via, --inject-mode,
+--inject-arg, --inject-cmd, --interrupt-cmd, --retry-until) are refused.
 An invalid file is shown as refused and cannot be changed with set or --unset;
---reset replaces it with exactly the given setting flags (none = all defaults).
-While the file is absent and the running wake does not report live settings
+--reset replaces it with exactly the given setting flags. --reset with no setting
+flag means no overrides: the agent's file then falls through to the machine file and
+the defaults. --unset returns a key to the next layer (machine or default).
+
+With --machine, set, --unset and --reset change the machine file; --me is optional
+there and, when given, adds that agent's wake status. --machine --wait needs --me and
+waits on that one wake; other wakes are not tracked.
+
+While the agent file is absent and the running wake does not report live settings
 (unreported) past a short startup grace, set and --unset exit 6; the wake may be an older
 image, have a failed status write, or be a resume still storing its command-line settings
 in the file. Restart the wake or use --reset with the full set.
@@ -1284,12 +1295,14 @@ Options:
         Priority required to trigger interrupt (default "urgent")
   -json
         Emit JSON output
+  -machine
+        Show or change the machine settings (~/.amq/wake.settings) shared by every wake of this user
   -me string
         Agent handle (or AM_ME)
   -preview-len int
         Max subject preview length (default 48)
   -reset
-        Replace the settings file with exactly the given setting flags (none = all defaults)
+        Replace the settings file with exactly the given setting flags (none = no overrides)
   -root string
         Root directory for the queue (default ".agent-mail")
   -strict
@@ -1297,9 +1310,9 @@ Options:
   -timeout duration
         Maximum time for --wait (0 = wait forever) (default 1m0s)
   -unset value
-        Return a setting to its default by key, e.g. hold_normal (repeatable)
+        Return a setting to the next layer (machine, then default) by key, e.g. hold_normal (repeatable)
   -wait
-        Wait until the running wake has applied the settings file
+        Wait until the running wake has applied the settings files
 ```
 
 ## amq wake repair

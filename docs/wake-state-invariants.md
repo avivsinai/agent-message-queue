@@ -196,6 +196,27 @@ partial wake state.
 
 Source anchors: `wake_settings.go` and `wake_settings_unix.go`.
 
+## `~/.amq/wake.settings`: machine policy defaults
+
+**Owns:** default policy values for every wake of this user on this machine, in
+the same canonical JSON and mode 0600 as `.wake.settings`. It sits below the
+agent file in precedence, per key. It holds no identity, generation, or
+transport state.
+
+**Commit domain:** the operator writes it through `amq wake config --machine`,
+under an exclusive lock on `~/.amq/wake.settings.lock`. Wakes only read it
+(each inbox scan and every 2 seconds), with the same trust checks as the agent
+file, and never write it. A refused file keeps the last good machine layer in a
+running wake and is skipped by a start. No wake cleanup (release, retire,
+repair, self-upgrade, `doctor --fix-wake-locks`, or `amq cleanup`) removes it.
+
+**Independence invariant:** it is per user and host and never travels with a
+root. Its commit domain is separate from the lock and target, so a machine-wide
+policy change implies no owner or injector transition in any wake, and a
+refused machine file cannot block a lifecycle change.
+
+Source anchor: `wake_machine_settings_unix.go`.
+
 ## `.wake.settings.applied`: applied-settings record
 
 **Owns:** the status (`applied` or `refused`), the digest of the settings file
@@ -209,6 +230,13 @@ never blocks or rolls back a settings swap, and is retried on the next check.
 Lock release, owner-claim removal, and restart-residue repair remove it with the
 other generation-bound diagnostics. `retire` leaves it; the generation binding
 makes a stale record inert. `amq wake config --wait` reads it.
+
+The record also carries `machine_status` and `machine_digest`: the status of
+the machine layer (`applied` or `refused`, with the error) and the digest of
+the `~/.amq/wake.settings` bytes the wake observed (the `"absent"` token when
+the file is missing). They are additive under schema 1, so an older reader
+ignores them, and the `digest` field keeps its meaning. A sidecar without them
+comes from an older image.
 
 **Independence invariant:** the record reports what a generation applied; it
 does not decide what the settings are. Putting it in the settings file would let

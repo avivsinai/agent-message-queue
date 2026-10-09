@@ -93,7 +93,8 @@ file that is not, one with an unknown key or a newer schema, or one with a
 value that fails validation. A refused file never changes the running settings.
 Use `amq wake config` to edit it. For a hand edit, keep mode 0600.
 
-**Precedence.** Effective settings are the defaults overlaid by the file.
+**Precedence.** Effective settings are the defaults overlaid by the machine
+file, then by the agent file.
 Explicit settings flags on a fresh `amq wake` write their keys into the file,
 including a value equal to the default. A resume (self-upgrade or
 `amq wake restart`) ignores settings flags in argv when the file exists, so a
@@ -108,6 +109,25 @@ logs the error, and records `refused`. A self-upgrade or restart candidate is
 refused at preflight while the file is refused, and the refusal is remembered
 for the generation: fix the file, then request `amq wake restart`.
 
+**Machine layer.** `~/.amq/wake.settings` holds defaults for every wake of
+this user on this machine. It has the same JSON shape and trust rules as the
+agent file (`~/.amq` is a real directory, the file is mode 0600, and neither is
+a symlink), and it never travels with a root. Per key, the effective value is
+the first of: the agent file, the machine file, the built-in default. A key the
+agent file sets, including a value equal to the default, pins that key against
+the machine layer. Every running wake re-reads the machine file with the agent
+file and applies a change within 2 seconds.
+
+A refused machine file never blocks a start or an upgrade. A running wake keeps
+the last good machine layer and reports `refused` once. A start or resume that
+finds a refused machine file runs without the machine layer (agent file over
+built-in defaults), because a start has no last good value. A self-upgrade
+under a refused machine file therefore can change the effective settings.
+Resume preflight does not read the machine file. If the machine layer is valid
+alone but the merge with the agent file is not (the interrupt keys depend on
+each other), that wake runs without the machine layer and the applied record
+names the merge error.
+
 **Apply timing.** The wake checks the file at the start of each inbox scan and
 every 2 seconds. The 2-second check rescans only when a hold changes; every
 other key applies at its next use, so a change is in force for the next message. An armed debounce
@@ -118,10 +138,26 @@ amq wake config --me claude                       # show values, source, wake st
 amq wake config --me claude --hold-low 10m --wait # set, then wait for the wake
 amq wake config --me claude --unset hold_low      # return a key to its default
 amq wake config --me claude --reset --hold-low 10m # replace the file with exactly these keys
+amq wake config --machine --hold-normal 5m --hold-low 30m  # machine default
+amq wake config --machine --unset hold_low        # back to the next layer
+amq wake config --machine --reset --hold-low 10m  # replace the machine file
 ```
 
-`wake config` shows each setting with its source (`file` or `default`) and the
-wake status: `applied`, `pending`, `refused: <error>`, `unreported`, or
+`--machine` edits `~/.amq/wake.settings` instead of an agent file. It needs no
+`--me`, opens no mailbox, and creates `~/.amq` with mode 0700 when it is
+missing. Edits take an exclusive lock, so two edits do not interleave. The
+machine file must be valid on its own over the built-in defaults. `--unset`
+removes a key so the next layer applies (for an agent key, the machine value or
+default; for a machine key, the default). `--reset` with no flags means no
+overrides: an empty agent file, or an empty machine file. With `--me`
+resolved, `--machine` also shows that agent's wake status, and `--machine
+--wait` waits on that one wake; without a resolved `--me`, `--wait` is a usage
+error. There is no list of wakes, so a machine-scope edit does not check
+whether other wakes report.
+
+`wake config` shows each setting with its source (`default`, `machine`, or
+`file`, where `file` is the agent file) and a `machine_file` block (path,
+status, error) beside the agent `file` block. The wake status is: `applied`, `pending`, `refused: <error>`, `unreported`, or
 `no running wake`. A refused file shows `file: refused: <error>` and the rows
 show defaults, not the running wake's values; the running wake keeps its last
 applied settings. The JSON status `unreported` (text: `running wake does not
@@ -137,7 +173,9 @@ and `--unset` exit 6: the wake may run command-line settings the file lacks. Res
 file from its flags) or use `--reset` with the full set. A bad
 value exits 2 and writes nothing. A restart-only flag exits 2 with the restart
 instruction. `--wait` waits until the running wake records the new file digest
-in `.wake.settings.applied`; `--timeout` bounds it (default 60s, `0` waits
+in `.wake.settings.applied`, and for the machine layer its digest as well (a
+wake that records no machine fields and sees a machine file shows
+`unreported`); `--timeout` bounds it (default 60s, `0` waits
 forever), exit 4 on timeout, exit 1 when the wake refuses the file, exit 6
 when the wake stays `unreported` for 5 s, and exit 0 at once when no wake runs. `--json` prints the same data. The wake records its
 state in `.wake.settings.applied`; the file is not a receipt of message

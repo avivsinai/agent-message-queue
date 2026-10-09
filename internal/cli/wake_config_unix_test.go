@@ -57,6 +57,39 @@ func TestWakeConfigRoundTrip(t *testing.T) {
 		t.Fatalf("after unset hold_normal = %+v, want 0s from default", s)
 	}
 
+	// --machine sets the layer below the agent file; --me only
+	// adds that agent's wake block.
+	machine := func(extra ...string) wakeConfigJSON {
+		t.Helper()
+		out, err := captureStdout(t, func() error {
+			return runWakeConfig(append([]string{"--machine", "--root", root, "--me", "claude", "--json"}, extra...))
+		})
+		if err != nil {
+			t.Fatalf("wake config --machine %v: %v", extra, err)
+		}
+		var got wakeConfigJSON
+		if err := json.Unmarshal([]byte(out), &got); err != nil {
+			t.Fatalf("decode %q: %v", out, err)
+		}
+		return got
+	}
+	got = machine("--hold-normal", "10m")
+	if s := got.Settings["hold_normal"]; s.Value != "10m0s" || s.Source != "machine" || got.MachineFile.Status != "ok" || got.Wake == nil {
+		t.Fatalf("machine set hold_normal = %+v, machine_file %+v, wake %+v, want 10m0s from machine, ok, a wake block", s, got.MachineFile, got.Wake)
+	}
+	if s := show().Settings["hold_normal"]; s.Value != "10m0s" || s.Source != "machine" {
+		t.Fatalf("agent show hold_normal = %+v, want 10m0s from machine", s)
+	}
+	if s := show("--hold-normal", "1m").Settings["hold_normal"]; s.Value != "1m0s" || s.Source != "file" {
+		t.Fatalf("agent set over machine hold_normal = %+v, want 1m0s from file", s)
+	}
+	if s := show("--unset", "hold_normal").Settings["hold_normal"]; s.Value != "10m0s" || s.Source != "machine" {
+		t.Fatalf("agent unset hold_normal = %+v, want 10m0s from machine", s)
+	}
+	if s := machine("--unset", "hold_normal").Settings["hold_normal"]; s.Value != "0s" || s.Source != "default" {
+		t.Fatalf("machine unset hold_normal = %+v, want 0s from default", s)
+	}
+
 	before, err := os.ReadFile(settingsPath)
 	if err != nil {
 		t.Fatal(err)

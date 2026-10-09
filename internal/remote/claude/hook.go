@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/amqhome"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 )
@@ -959,7 +960,7 @@ const (
 // process has only the Claude home, so an unset AMQ_REMOTE_BINDING resolves
 // under that home.
 func bindingDecision(home, sessionID string) int {
-	path := filepath.Join(home, ".amq", "remote", "binding.json")
+	path := filepath.Join(amqhome.Under(home), "remote", "binding.json")
 	if p := strings.TrimSpace(os.Getenv(binding.EnvPath)); p != "" && filepath.IsAbs(p) {
 		path = filepath.Clean(p)
 	}
