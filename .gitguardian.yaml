@@ -1,0 +1,5 @@
+version: 2
+secret:
+  ignored_matches:
+    - name: Ed25519 public device key of the link contract fixtures (testdata/link); a public key, not a secret
+      match: b7c025d41b88035a91d68b7d9e76da00943e497201a9272614c92181e8bea087

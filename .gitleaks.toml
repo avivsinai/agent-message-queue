@@ -1,0 +1,8 @@
+# Repository additions to gitleaks' default rules.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Ed25519 public keys (SPKI DER, base64url). A public key is never a secret; the link contract fixtures (testdata/link) carry one."
+regexTarget = "match"
+regexes = ['''MCowBQYDK2VwAyEA[A-Za-z0-9_-]{43}''']
