@@ -60,7 +60,14 @@ invariants.
    aborts another. A harness that offers only a session-wide abort does not
    advertise exact cancellation. A request that a Buzz share submitted is
    cancelled only from that share; the AMQ mailbox and the local socket are
-   refused.
+   refused. A request that a link submitted is read and cancelled only by
+   that link, on every read path. A link sees only the requests it created
+   and the sessions shared with it, with other sources' request and
+   interaction references removed; it never answers an interaction and
+   never reads session events. A link creates no tombstones: its cancel of
+   an absent request is refused, and its busy request ends as an ordinary
+   refused record that compacts and is never admitted again. A link holds
+   at most four open requests.
 5. **Capabilities are observed, not inferred.** Each attachment publishes a
    projection (`inspect`, `submit`, `cancel_request`, `answer_question`,
    `approve_tool`, `steer`, `terminal`). Values come from the installed
@@ -72,8 +79,9 @@ invariants.
    user per root holds a process lock; a second exits with a diagnostic.
 7. **AMQ carries durable intent and evidence.** Commands and results travel
    as ordinary AMQ messages to a dedicated handle in the same root. Local
-   CLI requests, AMQ-delivered requests, and Buzz-delivered requests end in
-   the same handler. Live activity is a projection and never mutates.
+   CLI requests, AMQ-delivered requests, Buzz-delivered requests, and
+   link-delivered requests (a server the machine itself dialed) end in the
+   same handler. Live activity is a projection and never mutates.
 8. **Exit codes follow the AMQ contract.** `0` success, `1` native work
    failed or cancelled, `2` usage, `3` not found, `4` timeout, `6` action
    required (busy, unsupported, unshared, expired, or
@@ -114,6 +122,16 @@ invariants.
   harness resolved the interaction first. Only the owner's Buzz share that
   submitted the request may answer its interactions; the AMQ mailbox and the
   local socket are refused, so the asking agent cannot answer itself.
+- **A link submit runs only from verified signed bytes.** The command a link
+  carries is the one decoded from the bytes the owner signed, never a second
+  copy beside them. The record keeps the signed native session, and core
+  compares it with the attachment's native session at native admission, just
+  before the handoff. A mismatch or an unknown session is refused
+  `session_changed` and nothing runs.
+- **A revision is published when its sink acknowledged it.** A carrier counts
+  a revision as published only after the sink confirms that it committed that
+  revision or a newer one. Until then the revision stays owed and the
+  reconcile sweep offers it again.
 - **Activity divergence is acceptable for a cache, never for execution
   truth.** The live activity projection may lag or differ from the harness's
   own view; it is a convenience. Admission, cancellation and completion are
