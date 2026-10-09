@@ -27,7 +27,9 @@ func TestCodexTrustsALinkedWorktreeOfATrustedCheckout(t *testing.T) {
 // home and counts connections.
 func startFakeCodexDaemon(t *testing.T) (string, *atomic.Int32) {
 	t.Helper()
-	codexHome, err := os.MkdirTemp("", "cx") // short: unix socket paths are limited
+	// Under /tmp, not os.TempDir(): TestMain moves TMPDIR under a fake home, and
+	// a unix socket path over the 104-byte macOS limit fails to bind.
+	codexHome, err := os.MkdirTemp("/tmp", "cx")
 	if err != nil {
 		t.Fatal(err)
 	}
