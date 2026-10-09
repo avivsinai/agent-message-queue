@@ -73,6 +73,13 @@ Commands:
                            runs in (starts the endpoint when none runs)
   detach --self|--name N|--all
                            Unbind; the session keeps running
+  link add NAME URL --code CODE
+                           Link this root to a server; type the passkey
+                           fingerprint your browser shows
+  attach --self --link N   Share the session this runs in with linked server N
+                           (--consent passkey|local, --tools PROFILE)
+  link remove NAME         Retire link NAME's sink and delete its device key
+  link status              Links, their sockets and owed revisions, retired sinks
   doctor                   Diagnose the endpoint chain
   version                  Print the version
 
@@ -241,6 +248,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return finish(stdout, stderr, nil, probe.wantJSON(rest), code, err)
 	case "doctor":
 		out, code, err = doctor(rest, probe)
+	case "link":
+		out, code, err = link(rest, stdin, stdout, probe)
 	case "claude":
 		// PR2 Stop-hook bridge: the receiver subcommand is FAIL-OPEN by
 		// contract — exit 0 on ANY error, any parse failure, any panic —
@@ -351,6 +360,8 @@ func printHuman(w io.Writer, out any) {
 		}
 	case protocol.Session:
 		printSession(w, v)
+	case linkStatusOut:
+		printLinkStatus(w, v)
 	default:
 		enc := json.NewEncoder(w)
 		enc.SetIndent("", "  ")
@@ -452,7 +463,9 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	// known and before startup reconciliation.
 	var relayCfg *manifest.Relay
 	var edges *dmEdges
+	links := newLinkSet(c.root, stateDir, manifestFile, version, stderr)
 	carrierPublish := publishRouter(map[string]publishFunc{
+		"link": links.publish,
 		"amq": func(s protocol.Snapshot, origin map[string]string) error {
 			if carrier == nil {
 				return errCarrierUnavailable
@@ -594,6 +607,7 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 		relays = startRelays(ctx, c.root, stateDir, relayCfg, edges, stderr)
 		say(stdout, "relay %s: %d shared session(s)", relayCfg.URL, len(relayCfg.Shares))
 	}
+	links.start(ctx, ep, mfSnap)
 	go func() {
 		t := time.NewTicker(*poll)
 		defer t.Stop()
@@ -608,6 +622,7 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 				if err := ep.Tick(); err != nil {
 					say(stderr, "tick: %v", err)
 				}
+				links.tick()
 				// Replay durable sender envelopes (CLI submits persisted while the
 				// companion was down), then reap settled ones older than the reap
 				// horizon so the spool is bounded. B4: Reap on every tick,
