@@ -78,7 +78,10 @@ type LinkHandler func(ctx context.Context, req LinkRequest) (json.RawMessage, er
 
 // LinkRecordBytes bounds one complete link.v1 record, envelope included: a
 // tool result as large as a link frame (4 MiB) plus room for the envelope.
-// Every other operation keeps MaxRecordBytes.
+// Every other operation keeps MaxRecordBytes, checked after the read: the
+// server reads any record up to this bound before it knows the operation.
+// The socket is the owner's alone (0600), so that larger read is the owner's
+// own cost.
 const LinkRecordBytes = 4<<20 + 64*1024
 
 // linkSlack is added to a link.v1 wait for the client's read deadline.

@@ -142,6 +142,17 @@ The link's sink is its creator host, `link-` and 16 hex digits of the device
 key's hash. Removing the link, or a server revoke, retires the sink: its
 device key is deleted and its records settle without network.
 
+An agent on a linked machine calls the server's tools through the endpoint,
+never with a token of its own: `amq-remote mcp --link NAME` is a stdio MCP
+server for MCP clients, and `amq-remote link call TOOL --args JSON [--wait]`
+serves scripts and agents without MCP. Both reach the endpoint over the local
+socket's versioned `link.v1` operation, whose limit covers the complete
+record (a 4 MiB frame plus 64 KiB of envelope) and whose read deadline is the
+wait plus 10 s; every other operation keeps its 1 MiB and 30 s. A call carries
+a durable key, printed before it is sent, and `link call resume KEY` reads the
+same call again after a client lost its answer. Busy means "try again", and a
+write that waits for the owner returns at once with where to decide.
+
 The relay below — `share`, a body key, and per-kind grants — is an advanced
 path. It is not how a session is connected. The relay enforces the owner
 signature and, when it implements NIP-OA time bounds, the grant expiry; it

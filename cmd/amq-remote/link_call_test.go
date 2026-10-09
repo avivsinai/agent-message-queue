@@ -19,20 +19,23 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/ipc"
 	"github.com/avivsinai/agent-message-queue/internal/remote/linkio"
 	"github.com/avivsinai/agent-message-queue/internal/remote/manifest"
+	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 )
 
 // toolServer is a linked server that offers one tool. A call to "slow"
 // answers pending and finishes on call_get; every other call answers ok with
 // a result of the requested size.
 type toolServer struct {
-	t     *testing.T
-	srv   *httptest.Server
-	mu    sync.Mutex
-	calls map[string]map[string]any // call_id -> final reply
+	t          *testing.T
+	srv        *httptest.Server
+	frameBytes int
+	mu         sync.Mutex
+	calls      map[string]map[string]any // call_id -> final reply
+	busyOnce   map[string]bool           // call_id -> the next call_get answers busy
 }
 
 func newToolServer(t *testing.T) *toolServer {
-	ts := &toolServer{t: t, calls: map[string]map[string]any{}}
+	ts := &toolServer{t: t, frameBytes: linkio.MaxFrameBytes, calls: map[string]map[string]any{}, busyOnce: map[string]bool{}}
 	ts.srv = httptest.NewServer(http.HandlerFunc(ts.serve))
 	t.Cleanup(ts.srv.Close)
 	return ts
@@ -60,7 +63,7 @@ func (ts *toolServer) serve(w http.ResponseWriter, r *http.Request) {
 	hello := read()
 	send(map[string]any{"schema": linkio.SchemaFrame, "re": hello["id"], "gen": 1, "body": map[string]any{
 		"schema": linkio.SchemaWelcome, "user": "example.user", "connection_generation": 1,
-		"limits": map[string]any{"frame_bytes": linkio.MaxFrameBytes, "tasks_in_flight": 4, "tool_calls_in_flight": 8}}})
+		"limits": map[string]any{"frame_bytes": ts.frameBytes, "tasks_in_flight": 4, "tool_calls_in_flight": 8}}})
 	for {
 		f := read()
 		if f == nil {
@@ -80,12 +83,28 @@ func (ts *toolServer) serve(w http.ResponseWriter, r *http.Request) {
 			ts.calls[id] = final
 			ts.mu.Unlock()
 			reply = final
-			if body["tool"] == "slow" {
+			switch body["tool"] {
+			case "slow":
 				reply = map[string]any{"call_id": id, "status": "pending"}
+			case "busy_once":
+				ts.mu.Lock()
+				ts.busyOnce[id] = true
+				ts.mu.Unlock()
+				reply = map[string]any{"call_id": id, "status": "pending"}
+			case "write":
+				reply = map[string]any{"call_id": id, "status": "pending_approval", "review_url": "https://app.example.test/calls/" + id}
+			case "drop":
+				_ = ws.Close(websocket.StatusGoingAway, "test drop")
+				return
 			}
 		case "amq.remote.link.call_get/1":
+			id := body["call_id"].(string)
 			ts.mu.Lock()
-			reply = ts.calls[body["call_id"].(string)]
+			reply = ts.calls[id]
+			if ts.busyOnce[id] {
+				delete(ts.busyOnce, id)
+				reply = map[string]any{"error": map[string]any{"code": "busy", "retry_after_ms": 10}}
+			}
 			ts.mu.Unlock()
 		}
 		send(map[string]any{"schema": linkio.SchemaFrame, "re": f["id"], "gen": 1, "body": reply})
@@ -163,23 +182,83 @@ func TestMCPFaceListsAndCalls(t *testing.T) {
 	if code, err := mcpServe([]string{"--root", root}, strings.NewReader(in), &out, io.Discard); err != nil || code != 0 {
 		t.Fatalf("mcp = %d, %v", code, err)
 	}
-	var replies []map[string]any
+	byID := map[float64]map[string]any{}
 	sc := bufio.NewScanner(strings.NewReader(out.String()))
 	for sc.Scan() {
 		var m map[string]any
 		_ = json.Unmarshal(sc.Bytes(), &m)
-		replies = append(replies, m)
+		id, _ := m["id"].(float64)
+		byID[id] = m
 	}
-	if len(replies) != 3 {
-		t.Fatalf("got %d replies, want 3 (the notification has none): %s", len(replies), out.String())
+	if len(byID) != 3 {
+		t.Fatalf("got %d replies, want 3 (the notification has none): %s", len(byID), out.String())
 	}
-	tools := replies[1]["result"].(map[string]any)["tools"].([]any)
+	tools := byID[2]["result"].(map[string]any)["tools"].([]any)
 	if len(tools) != 1 || tools[0].(map[string]any)["name"] != "get_issue" {
-		t.Fatalf("tools/list = %v", replies[1])
+		t.Fatalf("tools/list = %v", byID[2])
 	}
-	call := replies[2]["result"].(map[string]any)
+	call := byID[3]["result"].(map[string]any)
 	text := call["content"].([]any)[0].(map[string]any)["text"].(string)
 	if call["isError"] != false || !strings.Contains(text, `"xxx"`) {
 		t.Fatalf("tools/call = %v", call)
+	}
+}
+
+// A call over the link's frame limit is refused before it is sent, and the
+// link stays up: one large argument never takes the link down (#1028 B2).
+func TestLinkCallOverTheFrameLimitIsRefused(t *testing.T) {
+	ts := newToolServer(t)
+	ts.frameBytes = 1 << 20
+	root := linkEndpoint(t, ts)
+	_, _, err := linkCall([]string{"--root", root, "get_issue", "--args", `{"blob": "` + strings.Repeat("x", 2<<20) + `"}`}, io.Discard, &jsonProbe{})
+	if protocol.RefusalCode(err) != protocol.CodeInvalid {
+		t.Fatalf("err = %v, want invalid (too large)", err)
+	}
+	out, _, err := linkCall([]string{"--root", root, "get_issue", "--args", `{"size": 2}`}, io.Discard, &jsonProbe{})
+	if r, _ := out.(toolCallReply); err != nil || r.Status != "ok" {
+		t.Fatalf("the next call = %+v, %v; want ok on the same link", out, err)
+	}
+}
+
+// busy is "try again later", never a final answer: --wait reads past it.
+func TestLinkCallWaitReadsPastBusy(t *testing.T) {
+	root := linkEndpoint(t, newToolServer(t))
+	out, code, err := linkCall([]string{"--root", root, "busy_once", "--args", `{"size": 1}`, "--wait"}, io.Discard, &jsonProbe{})
+	if r, _ := out.(toolCallReply); err != nil || code != 0 || r.Status != "ok" {
+		t.Fatalf("--wait = %+v, %d, %v; want ok after the busy", out, code, err)
+	}
+}
+
+// A write that waits for the owner returns at once over MCP: not an error,
+// with where to decide and how to resume.
+func TestMCPReturnsPendingApprovalAtOnce(t *testing.T) {
+	root := linkEndpoint(t, newToolServer(t))
+	in := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"write","arguments":{}}}` + "\n"
+	var out strings.Builder
+	if _, err := mcpServe([]string{"--root", root}, strings.NewReader(in), &out, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	var m struct {
+		Result struct {
+			IsError bool `json:"isError"`
+			Content []struct {
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(out.String()), &m); err != nil || m.Result.IsError ||
+		!strings.Contains(m.Result.Content[0].Text, "https://app.example.test/calls/") || !strings.Contains(m.Result.Content[0].Text, "resume") {
+		t.Fatalf("tools/call = %s; want the review URL and the resume line, not an error", out.String())
+	}
+}
+
+// A connection that drops after a call was sent answers at once that the
+// answer will not come, instead of waiting for the deadline (#1028 S4).
+func TestLinkCallDropAnswersAtOnce(t *testing.T) {
+	root := linkEndpoint(t, newToolServer(t))
+	start := time.Now()
+	_, _, err := linkCall([]string{"--root", root, "drop", "--args", `{}`}, io.Discard, &jsonProbe{})
+	if err == nil || !strings.Contains(err.Error(), "dropped") || time.Since(start) > 5*time.Second {
+		t.Fatalf("err = %v after %s; want 'dropped' at once", err, time.Since(start))
 	}
 }
