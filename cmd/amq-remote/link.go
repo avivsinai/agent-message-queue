@@ -278,7 +278,7 @@ func writeLinkStatus(stateDir, name string, st linkio.Status) {
 // link dispatches `amq-remote link add|remove|status`.
 func link(args []string, stdin io.Reader, stdout io.Writer, probe *jsonProbe) (any, int, error) {
 	if len(args) == 0 {
-		return nil, protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "link needs a subcommand: add, remove or status")
+		return nil, protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "link needs a subcommand: add, remove, status, tools or call")
 	}
 	switch args[0] {
 	case "add":
@@ -287,6 +287,10 @@ func link(args []string, stdin io.Reader, stdout io.Writer, probe *jsonProbe) (a
 		return linkRemove(args[1:], stdout, probe)
 	case "status":
 		return linkStatus(args[1:], probe)
+	case "tools":
+		return linkTools(args[1:], probe)
+	case "call":
+		return linkCall(args[1:], os.Stderr, probe)
 	}
 	return nil, protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "unknown link subcommand %q", args[0])
 }

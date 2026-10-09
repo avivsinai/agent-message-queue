@@ -116,7 +116,9 @@ type Carrier struct {
 	offerBytes int
 	owed       map[string]int64
 	status     Status
-	sentBind   []byte // JCS of the last bindings the server was told
+	sentBind   []byte                          // JCS of the last bindings the server was told
+	waiters    map[string]chan json.RawMessage // frame id -> the request's reply
+	maxCalls   int                             // tool calls in flight, from welcome
 }
 
 // New builds a carrier. It does not dial until Run.
@@ -158,6 +160,7 @@ func New(cfg Config) (*Carrier, error) {
 		offers:  map[string]map[int64]*offer{},
 		byFrame: map[string]*offer{},
 		owed:    map[string]int64{},
+		waiters: map[string]chan json.RawMessage{},
 		status:  Status{State: "offline"},
 	}, nil
 }
@@ -313,6 +316,54 @@ func (c *Carrier) ackLocked(ref string, rev int64) {
 	}
 }
 
+// ErrBusy is a request refused before it was sent: too many tool calls are
+// already in flight on this link.
+var ErrBusy = errors.New("link: too many tool calls in flight")
+
+// Request sends one body to the server (tools, call, call_get) and returns
+// the server's reply body. It waits at most until ctx ends; the reader is
+// never involved beyond handing the reply over.
+func (c *Carrier) Request(ctx context.Context, body any) (json.RawMessage, error) {
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	c.mu.Lock()
+	sess := c.sess
+	if sess == nil {
+		c.mu.Unlock()
+		return nil, ErrUnavailable
+	}
+	if len(c.waiters) >= max(c.maxCalls, 1) {
+		c.mu.Unlock()
+		return nil, ErrBusy
+	}
+	id := sess.nextID()
+	reply := make(chan json.RawMessage, 1)
+	c.waiters[id] = reply
+	c.mu.Unlock()
+	defer func() {
+		c.mu.Lock()
+		delete(c.waiters, id)
+		c.mu.Unlock()
+	}()
+	frame, err := json.Marshal(Frame{Schema: SchemaFrame, ID: id, Gen: sess.gen, Body: raw})
+	if err != nil {
+		return nil, err
+	}
+	select {
+	case sess.data <- frame:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	select {
+	case r := <-reply:
+		return r, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
 // Tick tells the server when the shared bindings changed. serve calls it on
 // every sweep.
 func (c *Carrier) Tick() {
@@ -419,10 +470,11 @@ func (c *Carrier) serveOnce(ctx context.Context) error {
 	defer func() { _ = ws.CloseNow() }()
 	ws.SetReadLimit(MaxFrameBytes)
 
-	gen, err := c.handshake(ctx, ws)
+	welcome, err := c.handshake(ctx, ws)
 	if err != nil {
 		return err
 	}
+	gen := welcome.ConnectionGeneration
 	connCtx, connCancel := context.WithCancel(ctx)
 	defer connCancel()
 	sess := &session{
@@ -440,6 +492,7 @@ func (c *Carrier) serveOnce(ctx context.Context) error {
 	c.byFrame = map[string]*offer{}
 	c.offerBytes = 0
 	c.sentBind = nil
+	c.maxCalls = welcome.Limits.ToolCallsInFlight
 	c.status = Status{State: "online", Gen: gen}
 	c.mu.Unlock()
 	defer func() {
@@ -482,23 +535,23 @@ func (c *Carrier) watchdog(ctx context.Context, cancel context.CancelFunc, sess 
 	}
 }
 
-func (c *Carrier) handshake(ctx context.Context, ws *websocket.Conn) (int64, error) {
+func (c *Carrier) handshake(ctx context.Context, ws *websocket.Conn) (welcomeBody, error) {
 	hctx, cancel := context.WithTimeout(ctx, handshakeTimeout)
 	defer cancel()
 	ch, err := readFrame(hctx, ws)
 	if err != nil {
-		return 0, fmt.Errorf("challenge: %w", err)
+		return welcomeBody{}, fmt.Errorf("challenge: %w", err)
 	}
 	var body challengeBody
 	if err := decodeStrict(ch.Body, SchemaChallenge, &body); err != nil || ch.ID == "" || ch.Gen != 0 {
-		return 0, fmt.Errorf("challenge: malformed: %v", err)
+		return welcomeBody{}, fmt.Errorf("challenge: malformed: %v", err)
 	}
 	if body.ServerID != c.cfg.Pin.ServerID {
 		_ = ws.Close(websocket.StatusPolicyViolation, "unexpected server")
-		return 0, fmt.Errorf("challenge: the server says it is %q, this link is pinned to %q", body.ServerID, c.cfg.Pin.ServerID)
+		return welcomeBody{}, fmt.Errorf("challenge: the server says it is %q, this link is pinned to %q", body.ServerID, c.cfg.Pin.ServerID)
 	}
 	if body.Nonce == "" {
-		return 0, errors.New("challenge: empty nonce")
+		return welcomeBody{}, errors.New("challenge: empty nonce")
 	}
 	helloID := "h_" + newPrefix()
 	hello := helloBody{
@@ -508,27 +561,27 @@ func (c *Carrier) handshake(ctx context.Context, ws *websocket.Conn) (int64, err
 	}
 	raw, err := json.Marshal(hello)
 	if err != nil {
-		return 0, err
+		return welcomeBody{}, err
 	}
 	frame, err := json.Marshal(Frame{Schema: SchemaFrame, ID: helloID, Re: ch.ID, Body: raw})
 	if err != nil {
-		return 0, err
+		return welcomeBody{}, err
 	}
 	if err := ws.Write(hctx, websocket.MessageText, frame); err != nil {
-		return 0, fmt.Errorf("hello: %w", err)
+		return welcomeBody{}, fmt.Errorf("hello: %w", err)
 	}
 	wf, err := readFrame(hctx, ws)
 	if err != nil {
-		return 0, fmt.Errorf("welcome: %w", err)
+		return welcomeBody{}, fmt.Errorf("welcome: %w", err)
 	}
 	var welcome welcomeBody
 	if err := decodeStrict(wf.Body, SchemaWelcome, &welcome); err != nil {
-		return 0, fmt.Errorf("welcome: malformed: %w", err)
+		return welcomeBody{}, fmt.Errorf("welcome: malformed: %w", err)
 	}
 	if wf.Re != helloID || welcome.ConnectionGeneration < 1 || wf.Gen != welcome.ConnectionGeneration {
-		return 0, errors.New("welcome: does not answer this hello or has no generation")
+		return welcomeBody{}, errors.New("welcome: does not answer this hello or has no generation")
 	}
-	return welcome.ConnectionGeneration, nil
+	return welcome, nil
 }
 
 // HelloMessage is the byte string the device key signs in hello.
@@ -581,6 +634,11 @@ func (c *Carrier) handleReply(f Frame) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if w := c.waiters[f.Re]; w != nil {
+		delete(c.waiters, f.Re)
+		w <- f.Body // buffered: never blocks the reader
+		return
+	}
 	o := c.byFrame[f.Re]
 	if o == nil {
 		return // an answer to an expired or older offer
