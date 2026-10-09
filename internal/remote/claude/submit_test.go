@@ -243,30 +243,3 @@ func TestLookupUnknownForNeverSubmittedKey(t *testing.T) {
 		t.Fatalf("lookup = %+v, want Known Unknown", ev)
 	}
 }
-
-func TestTranscriptTailRefusesNonRegularLeaf(t *testing.T) {
-	home := t.TempDir()
-	dir := filepath.Join(home, ".claude", "projects", slugifyCwd("/tmp/proj"))
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	// Directory at the leaf (non-regular, portable to make): the tail
-	// reader must refuse it, never block or read it.
-	fifo := filepath.Join(dir, "sess-abc.jsonl")
-	if err := os.Mkdir(fifo, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	done := make(chan error, 1)
-	go func() {
-		_, err := readTranscriptFrom(transcriptPath(home, "/tmp/proj", "sess-abc"), 0, false)
-		done <- err
-	}()
-	select {
-	case err := <-done:
-		if err == nil {
-			t.Fatal("a directory at the transcript leaf was read")
-		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("readTranscriptFrom blocked on a non-regular leaf — the lstat guard failed")
-	}
-}

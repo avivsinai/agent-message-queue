@@ -137,6 +137,13 @@ func TestFailedAnswerIsRecoveredOnRedelivery(t *testing.T) {
 	if err := r.c.Ingest(dm); !errors.Is(err, ErrNoGrant) {
 		t.Fatalf("first delivery: err=%v, want the signing failure", err)
 	}
+	// The failure came after admission: the command is claimed, not settled.
+	if _, claimed, err := r.l.ClaimFor(dm.ID.Hex()); err != nil || !claimed {
+		t.Fatalf("first delivery left no claim: %v", err)
+	}
+	if _, settled, err := r.l.Settled(dm.ID.Hex()); err != nil || settled {
+		t.Fatalf("failed answer settled the command: settled=%v err=%v", settled, err)
+	}
 	r.c.grant = grant
 	if err := r.c.Ingest(dm); err != nil {
 		t.Fatal(err)
@@ -233,12 +240,13 @@ func TestInspectRefusesAReplacementNativeSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	pending, _ := r.l.Pending()
-	for _, p := range pending {
-		var evt nostr.Event
-		_ = json.Unmarshal(p.Event, &evt)
-		if evt.Content != protocol.InertInline(ErrNotShared.Error()) {
-			t.Fatalf("answered a replacement session: %q", evt.Content)
-		}
+	if len(pending) != 1 {
+		t.Fatalf("owed answers = %d, want the one refusal", len(pending))
+	}
+	var evt nostr.Event
+	_ = json.Unmarshal(pending[0].Event, &evt)
+	if evt.Content != protocol.InertInline(ErrNotShared.Error()) {
+		t.Fatalf("answered a replacement session: %q", evt.Content)
 	}
 }
 

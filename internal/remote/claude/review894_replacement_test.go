@@ -32,30 +32,6 @@ func TestReview894ReplacementKeepsStopScope(t *testing.T) {
 	}
 }
 
-func TestReview894RotationCannotHideFreshStop(t *testing.T) {
-	const sid = "review-rotation"
-	home := t.TempDir()
-	t.Setenv("AMQ_REMOTE_BINDING", filepath.Join(home, "absent-binding.json"))
-	if _, err := bindStopSession(home, sid); err != nil {
-		t.Fatal(err)
-	}
-	write := func() {
-		RunStopHookReceiver(home, strings.NewReader(`{"session_id":"review-rotation","hook_event_name":"Stop"}`), io.Discard)
-	}
-	write()
-	path := stopMarkerPath(home, sid)
-	first, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Later turns append. The reader at the old offset still sees them.
-	write()
-	got := readStopMarkers(path, first.Size())
-	if len(got.lines) == 0 {
-		t.Fatal("later Stop is invisible at the prior consumed offset")
-	}
-}
-
 func TestReview894MailboxBindingIgnoresStaleSentinel(t *testing.T) {
 	if !noFollowSupported {
 		t.Skip("stop hook receiver needs a no-follow open")

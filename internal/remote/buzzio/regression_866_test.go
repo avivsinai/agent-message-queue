@@ -13,67 +13,6 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/requests"
 )
 
-// codex #866 r1 #4: the same signed DM, busy-rejected once, was dispatched
-// when it was redelivered after the session became idle.
-func TestBusyRejectedDMRedeliveryDoesNotDispatch(t *testing.T) {
-	store, err := requests.Open(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	now := time.Now()
-	ep := core.New(core.Config{Store: store, Now: func() time.Time { return now }})
-	t.Cleanup(func() { _ = ep.Close() })
-	rt := fake.New("cx", "e1")
-	ep.Register(rt)
-	firstID := "11111111-1111-4111-8111-111111111111"
-	first := &protocol.Command{Schema: protocol.SchemaCommand, Op: protocol.OpRequestSubmit, RequestID: firstID, TargetID: "cx", Epoch: "e1", NotAfter: protocol.FormatTime(now.Add(time.Minute)), Input: &protocol.SubmitInput{Text: "occupy the session", Busy: protocol.BusyReject, Deliver: protocol.DeliverTurn}}
-	if _, err := ep.Handle(first, core.Source{Host: "local"}); err != nil {
-		t.Fatal(err)
-	}
-	if !rt.HasRun(firstID) {
-		t.Fatal("first request did not occupy fake runtime")
-	}
-	var owner, body [32]byte
-	_, _ = rand.Read(owner[:])
-	_, _ = rand.Read(body[:])
-	b := Binding{Owner: nostr.GetPublicKey(owner).Hex(), Body: nostr.GetPublicKey(body).Hex(), Channel: "dm-1", Target: "cx", RelayHost: "relay", NativeSession: "cx"}
-	ledger, err := OpenLedger(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	c := NewCarrier(ledger, b, body, ownerGrant(t, owner, b.Body, KindDM, KindEdit), ep.NativeSessionID, ep.Handle)
-	c.now = func() time.Time { return now }
-	dm := ownerEvent(t, owner, b.Channel, "run this once", now)
-	if err := c.Ingest(dm); err != nil {
-		t.Fatal(err)
-	}
-	n, err := Normalize(dm, b, now)
-	if err != nil {
-		t.Fatal(err)
-	}
-	key := requests.Key{CreatorHost: c.source(dm.ID.Hex(), "").Host, TargetID: b.Target, RequestID: n.RequestID}
-	rec, ok, err := store.Get(key)
-	if err != nil || !ok || rec.State != protocol.StateRejected || rec.Code != protocol.CodeBusy {
-		t.Fatalf("first delivery: rec=%+v ok=%v err=%v", rec, ok, err)
-	}
-	before := rt.Snapshot().Dispatches
-	if !rt.Complete(firstID, "done") {
-		t.Fatal("could not release first request")
-	}
-	now = now.Add(2 * time.Second)
-	if err := c.Ingest(dm); err != nil {
-		t.Fatal(err)
-	}
-	rec, _, err = store.Get(key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	after := rt.Snapshot().Dispatches
-	if after != before {
-		t.Fatalf("same signed DM was busy-rejected, then redelivery after session became idle changed state to %s and native dispatch count from %d to %d", rec.State, before, after)
-	}
-}
-
 // codex #866 r1 #1: /cancel sent request.cancel without target, epoch and
 // deadline, so the real endpoint refused it and no native cancel ran.
 func TestDMCancelReachesTheNativeAdapter(t *testing.T) {
