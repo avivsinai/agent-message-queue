@@ -14,8 +14,9 @@ import (
 )
 
 // PermissionRequest hook (bead 611.42.3). Claude Code runs it for every
-// tool permission dialog. It decides only for a tool call of a prompt that
-// an AMQ run owns in a session that a relay share with approve is serving;
+// tool permission dialog. It raises a request for a tool call of a prompt
+// that an AMQ run owns in a pinned session, and decides only where a relay
+// share with approve is serving (an observe-only pin shows, never decides);
 // everywhere else it exits at once with no output, so the normal dialog
 // decides. It never exits 2 (not honored for this event). It prints deny
 // for the owner's Buzz answer bound to this exact call. It prints allow
@@ -119,9 +120,12 @@ func (h permissionHook) run(stdin io.Reader, stdout io.Writer, done <-chan struc
 		return 0
 	}
 	preview, whole := approvalView(in.ToolName, in.ToolInput, in.AgentType)
+	// Only observing pins: the request is raised so the run shows it, and
+	// no answer file is ever applied. The terminal decides.
+	answering := answeringPinLive(h.home, in.SessionID)
 	approvable := false
 	var share AllowShare
-	if whole && h.allow.usable() {
+	if answering && whole && h.allow.usable() {
 		var err error
 		if share, err = h.allow.share(in.SessionID); err == nil {
 			if p, ok := signedPrompt(preview, id, hash); ok {
@@ -174,7 +178,11 @@ func (h permissionHook) run(stdin io.Reader, stdout io.Writer, done <-chan struc
 		if over() {
 			return 0
 		}
-		option, evidence := h.answer(answerPath, req)
+		var option string
+		var evidence json.RawMessage
+		if answering {
+			option, evidence = h.answer(answerPath, req)
+		}
 		if option == optionAllow {
 			want := AllowCheck{Share: share, Prompt: req.Preview, NotBefore: notBefore, NotAfter: deadline}
 			if _, decided := hookVerdict(h.home, in.SessionID, id, evidence); decided {

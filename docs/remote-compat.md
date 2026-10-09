@@ -208,7 +208,15 @@ amq-remote-design.html §Capability per harness):
   relay share submitted as its own turn. Buzz blocks any call; it allows
   only a Bash call shown whole, with the owner's signed ✅ verified by the
   hook against the owner key pinned on its command line. Not live-verified
-  through the Buzz DM.
+  through the Buzz DM. The adapter config `observe_approvals` (without
+  `approve`) shows the pending approval as the request's interaction with
+  `remote_answer` false: `approve_tool` stays false, a remote answer is
+  refused `unsupported`, and the hook, pinned by an observe-only pin, raises
+  the request and applies no answer file. The terminal decides.
+- Discovery (`up --discover`) lists a live pi chat under the root as
+  target `pi:<handle>` with its manifest entry, from the handle's
+  `bridge.liveness`, and carries the chat's pi `session_id` when the bridge
+  publishes one.
 - `claude_code.answer_question`: no documented way to answer a pending
   question prompt from outside the session (source:
   research/r9-cc-codex-attachment.md §C "Claude Code").
