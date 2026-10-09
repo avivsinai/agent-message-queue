@@ -56,6 +56,7 @@ const (
 	maxAcked            = 4096
 	minBusyRetry        = time.Second
 	codeConflict        = "conflict"
+	revokeQueue         = 64
 	handshakeTimeout    = 15 * time.Second
 	writeTimeout        = 15 * time.Second
 	controlQueue        = 256
@@ -134,6 +135,8 @@ type Carrier struct {
 	bindFrame  string                          // id of the bindings frame awaiting a possible refusal
 	conflicts  map[string]int64                // request_ref -> a revision the server holds with another digest
 	frameLimit int                             // the smaller of MaxFrameBytes and the server's limit
+	oversize   map[string]int64                // request_ref -> a revision already logged as over the frame limit
+	revokes    chan string                     // consent keys the server removed, for the revoke worker
 	liveKeys   atomic.Pointer[map[string]bool] // consent credential ids accepted now
 }
 
@@ -180,6 +183,8 @@ func New(cfg Config) (*Carrier, error) {
 		byFrame:   map[string]*offer{},
 		owed:      map[string]int64{},
 		conflicts: map[string]int64{},
+		oversize:  map[string]int64{},
+		revokes:   make(chan string, revokeQueue),
 		status:    Status{State: "offline"},
 	}
 	c.refreshKeys() // the consent snapshot exists before the first handoff check
@@ -275,7 +280,10 @@ func (c *Carrier) Publish(s protocol.Snapshot, _ map[string]string) error {
 	if c.frameLimit > 0 && len(frame) > c.frameLimit {
 		// The server would close the socket on it, and the reconnect would
 		// offer it again: one revision must not take the link down.
-		c.cfg.Logf("link %s: revision %s/%d is %d bytes, over the server's %d-byte frame limit; it stays owed", c.cfg.Name, ref, s.Revision, len(frame), c.frameLimit)
+		if c.oversize[ref] != s.Revision {
+			c.oversize[ref] = s.Revision
+			c.cfg.Logf("link %s: revision %s/%d is %d bytes, over the server's %d-byte frame limit; it stays owed", c.cfg.Name, ref, s.Revision, len(frame), c.frameLimit)
+		}
 		return ErrUnavailable
 	}
 	if !sess.send(sess.data, frame) {
@@ -384,6 +392,7 @@ func nonNil(b []Binding) []Binding {
 // revokes the device. It returns nil on cancellation and ErrRevoked after a
 // permanent revoke, which it has already passed to Config.Revoked.
 func (c *Carrier) Run(ctx context.Context) error {
+	go c.revokeWorker(ctx)
 	backoff := c.cfg.MinBackoff
 	for {
 		start := c.cfg.Now()
@@ -658,6 +667,21 @@ func (c *Carrier) handleReply(f Frame) {
 	}
 }
 
+// revokeWorker drops the consent keys the server removed, one at a time, off
+// the reader.
+func (c *Carrier) revokeWorker(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case id := <-c.revokes:
+			if c.cfg.ConsentKeyRevoked != nil {
+				c.cfg.ConsentKeyRevoked(id)
+			}
+		}
+	}
+}
+
 // handleRequest answers a frame the server sends. key_revoked drops the key
 // off the reader. A signed submit is queued behind earlier requests for the
 // same request id on bounded workers; every other request is refused inline
@@ -667,7 +691,11 @@ func (c *Carrier) handleRequest(sess *session, f Frame) {
 	case SchemaKeyRevoked:
 		var b keyRevokedBody
 		if err := decodeStrict(f.Body, SchemaKeyRevoked, &b); err == nil && c.cfg.ConsentKeyRevoked != nil {
-			go c.cfg.ConsentKeyRevoked(b.CredentialID) // disk work stays off the reader
+			select {
+			case c.revokes <- b.CredentialID: // the revoke worker does the disk work
+			default:
+				c.cfg.Logf("link %s: too many key removals at once; dropped %s until the next one", c.cfg.Name, b.CredentialID)
+			}
 		}
 		return
 	case SchemaSignedSubmit:
