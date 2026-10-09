@@ -175,7 +175,8 @@ func TestLinkKeysAddAcceptsTheTypedKey(t *testing.T) {
 		RPID: "sign.example.test", Origin: "https://sign.example.test"}
 	second := first
 	second.CredentialID, second.Alg = "D43a3-F7BSF-ClsPWPzcqx", -8
-	redeem := func(ck linkio.ConsentKey) http.HandlerFunc {
+	next := second
+	redeem := func(ck *linkio.ConsentKey) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
 			var req redeemRequest
 			_ = json.NewDecoder(r.Body).Decode(&req)
@@ -186,15 +187,15 @@ func TestLinkKeysAddAcceptsTheTypedKey(t *testing.T) {
 				http.Error(w, "bad redeem", http.StatusForbidden)
 				return
 			}
-			_ = json.NewEncoder(w).Encode(redeemReply{DeviceID: linkio.HostOf(spki), ServerID: "srv_example", User: "Example User", ConsentKeys: []linkio.ConsentKey{ck}})
+			_ = json.NewEncoder(w).Encode(redeemReply{DeviceID: linkio.HostOf(spki), ServerID: "srv_example", User: "Example User", ConsentKeys: []linkio.ConsentKey{*ck}})
 		}
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v1/link/info", func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(linkInfo{ServerID: "srv_example", LinkURL: "wss://link.example.test/api/v1/link"})
 	})
-	mux.HandleFunc("POST /api/v1/link/redeem", redeem(first))
-	mux.HandleFunc("POST /api/v1/link/consent-keys/redeem", redeem(second))
+	mux.HandleFunc("POST /api/v1/link/redeem", redeem(&first))
+	mux.HandleFunc("POST /api/v1/link/consent-keys/redeem", redeem(&next))
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
@@ -210,5 +211,11 @@ func TestLinkKeysAddAcceptsTheTypedKey(t *testing.T) {
 	keys, err := linkio.LoadConsentKeys(filepath.Join(root, stateDirName), "example")
 	if err != nil || len(keys) != 2 || keys[1] != second {
 		t.Fatalf("consent keys %+v, %v; want the first and the added one", keys, err)
+	}
+	// A key for another signing origin is refused even with its fingerprint.
+	next.CredentialID, next.Origin, next.RPID = "E54b4-G8CTG-DmtQXQadry", "https://other.example.test", "other.example.test"
+	fp3, _ := linkio.Fingerprint(next)
+	if _, _, err := linkKeysAdd([]string{"--root", root, "example", "--code", "Q1S3-Y5LE"}, strings.NewReader(fp3+"\n"), io.Discard, &jsonProbe{}); err == nil {
+		t.Fatal("a key for another origin was accepted")
 	}
 }

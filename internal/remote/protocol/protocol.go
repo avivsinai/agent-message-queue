@@ -1039,6 +1039,8 @@ func FormatTime(t time.Time) string {
 // rejectDuplicateKeys walks the token stream and refuses any object with a
 // repeated key. encoding/json keeps the last value silently, which would let
 // two carriers disagree about the same bytes.
+var commandKeyRe = regexp.MustCompile(`^[a-z0-9_]+$`)
+
 func rejectDuplicateKeys(data []byte) error {
 	type frame struct {
 		object    bool
@@ -1081,11 +1083,12 @@ func rejectDuplicateKeys(data []byte) error {
 			if _, dup := top.keys[key]; dup {
 				return Refuse(CodeInvalid, "duplicate key %q", key)
 			}
-			// encoding/json matches a key to a field case-insensitively, so
-			// "OP" or "TEXT" would decode into op or text, and with both
-			// spellings the last one wins. Every command key is lowercase.
-			if strings.ToLower(key) != key {
-				return Refuse(CodeInvalid, "key %q: command keys are lowercase", key)
+			// encoding/json matches a key to a field with Unicode case
+			// folding, so "OP", or "ſchema" (long s), would decode into op or
+			// schema, and with both spellings the last one wins. Every command
+			// key is ASCII lowercase letters, digits and underscores.
+			if !commandKeyRe.MatchString(key) {
+				return Refuse(CodeInvalid, "key %q: command keys are [a-z0-9_]", key)
 			}
 			top.keys[key] = struct{}{}
 			top.expectKey = false

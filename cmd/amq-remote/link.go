@@ -539,6 +539,9 @@ func linkKeysAdd(args []string, stdin io.Reader, stdout io.Writer, probe *jsonPr
 	if err != nil {
 		return nil, protocol.ExitActionRequired, err
 	}
+	if ck.RPID != pin.RPID || ck.Origin != pin.Origin {
+		return nil, protocol.ExitActionRequired, fmt.Errorf("the key is for %s, this link signs on %s; refused", ck.Origin, pin.Origin)
+	}
 	if slices.ContainsFunc(keys, func(k linkio.ConsentKey) bool { return k.CredentialID == ck.CredentialID }) {
 		return nil, protocol.ExitActionRequired, fmt.Errorf("passkey %s is already accepted on link %q", ck.CredentialID, name)
 	}

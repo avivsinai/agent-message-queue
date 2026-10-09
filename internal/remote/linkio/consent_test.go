@@ -221,3 +221,88 @@ func TestRefusedConsentDocumentsAreRefused(t *testing.T) {
 		}
 	}
 }
+
+// A binding whose consent is local runs nothing on a passkey alone: until the
+// local confirmation exists, the valid golden submit is refused unsupported.
+func TestLocalBindingRefusesAPasskeyAlone(t *testing.T) {
+	view, _ := goldenView(t)
+	b := view.Bindings["pi-demo"]
+	b.Consent = "local"
+	view.Bindings["pi-demo"] = b
+	var frame struct {
+		Frame struct {
+			Body SignedSubmit `json:"body"`
+		} `json:"frame"`
+	}
+	if err := json.Unmarshal(readLinkFixture(t, "frames/04-signed_submit.json"), &frame); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err := VerifySignedSubmit(view, frame.Frame.Body, time.Date(2026, 10, 9, 14, 2, 10, 0, time.UTC))
+	var r *Refusal
+	if !errors.As(err, &r) || r.Code != string(protocol.CodeUnsupported) {
+		t.Fatalf("got %v, want unsupported", err)
+	}
+}
+
+// The golden Ed25519 (alg -8) assertion over the same document is admitted.
+func TestGoldenEd25519AssertionIsAdmitted(t *testing.T) {
+	view, _ := goldenView(t)
+	var a struct {
+		ConsentKey
+		AuthenticatorData string `json:"authenticator_data"`
+		ClientDataJSON    string `json:"client_data_json"`
+		Signature         string `json:"signature"`
+	}
+	if err := json.Unmarshal(readLinkFixture(t, "consent/assertion_ed25519.json"), &a); err != nil {
+		t.Fatal(err)
+	}
+	view.Keys = map[string]ConsentKey{a.CredentialID: a.ConsentKey}
+	m := SignedSubmit{Schema: SchemaSignedSubmit, DocumentB64: b64.EncodeToString(readLinkFixture(t, "consent/document.json")),
+		CredentialID: a.CredentialID, AuthenticatorData: a.AuthenticatorData, ClientDataJSON: a.ClientDataJSON, Signature: a.Signature}
+	if _, _, err := VerifySignedSubmit(view, m, time.Date(2026, 10, 9, 14, 2, 10, 0, time.UTC)); err != nil {
+		t.Fatalf("Ed25519 golden refused: %v", err)
+	}
+}
+
+// A cancel queued behind its own submit runs after it: the server hears the
+// submit's answer first, then the cancel's, never a cancel of an absent id.
+func TestCancelWaitsForItsOwnSubmit(t *testing.T) {
+	view, key := goldenView(t)
+	var frame struct {
+		Frame Frame `json:"frame"`
+	}
+	if err := json.Unmarshal(readLinkFixture(t, "frames/04-signed_submit.json"), &frame); err != nil {
+		t.Fatal(err)
+	}
+	fs, clk := newFakeServer(t), newClock()
+	clk.ns.Store(time.Date(2026, 10, 9, 14, 2, 10, 0, time.UTC).UnixNano())
+	release := make(chan struct{})
+	c, _ := startCarrier(t, fs, clk, func(cfg *Config) {
+		cfg.StoreID = view.StoreID
+		cfg.ConsentKeys = func() []ConsentKey { return []ConsentKey{key} }
+		cfg.Bindings = func() []Binding { return []Binding{view.Bindings["pi-demo"]} }
+		cfg.Handle = func(cmd *protocol.Command, _ core.Source) (any, error) {
+			if cmd.Op == protocol.OpRequestSubmit {
+				<-release // the submit is still running when the cancel arrives
+			}
+			return protocol.Reply{Outcome: protocol.Outcome{Op: cmd.Op}}, nil
+		}
+	})
+	gen := fs.waitWelcome()
+	waitOnline(t, c)
+	var doc ConsentDocument
+	if err := json.Unmarshal(readLinkFixture(t, "consent/document.json"), &doc); err != nil {
+		t.Fatal(err)
+	}
+	ref := protocol.EncodeRef(c.Host(), doc.Command.TargetID, doc.Command.RequestID)
+	fs.send(Frame{Schema: SchemaFrame, ID: "m_s1", Gen: gen, Body: frame.Frame.Body})
+	fs.send(Frame{Schema: SchemaFrame, ID: "m_x1", Gen: gen, Body: mustJSON(protocol.Command{
+		Schema: protocol.SchemaCommand, Op: protocol.OpRequestCancel, RequestRef: ref,
+		TargetID: doc.Command.TargetID, Epoch: doc.Command.Epoch, NotAfter: doc.Command.NotAfter,
+	})})
+	fs.none() // both wait behind the running submit
+	close(release)
+	if first, second := fs.next(), fs.next(); first.Re != "m_s1" || second.Re != "m_x1" {
+		t.Fatalf("answered %s then %s, want the submit then its cancel", first.Re, second.Re)
+	}
+}

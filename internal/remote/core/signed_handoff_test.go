@@ -54,3 +54,49 @@ func TestSignedRequestStopsWhenTheSessionChangedBeforeHandoff(t *testing.T) {
 		t.Fatalf("submit signed for the attached session = %+v, %v; want running", out, err)
 	}
 }
+
+// The same signed submit sent twice (a resend after a lost answer) runs once:
+// the second reply carries the first's record, with no second dispatch.
+func TestSignedSubmitReplayRunsOnce(t *testing.T) {
+	rt := &movingNative{Runtime: fake.New("fake", "e_1"), id: "native-1"}
+	ep, _, clk := newLinkEndpoint(t, rt)
+	src := linkSource(hostA, "fake")
+	src.NativeSession, src.Credential = "native-1", "cred-1"
+	cmd := linkSubmit(clk, "fake", "11111111-1111-4111-8111-1111111111e1")
+	first, err := ep.Handle(cmd, src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := ep.Handle(cmd, src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a, b := first.(protocol.Reply).Snapshot, again.(protocol.Reply).Snapshot; a.RequestRef != b.RequestRef || rt.Snapshot().Dispatches != 1 {
+		t.Fatalf("replay = %+v after %+v, %d dispatches; want the same record and 1 dispatch", b, a, rt.Snapshot().Dispatches)
+	}
+}
+
+// A consent key removed while the request waited for an offline target stops
+// it at the handoff: consent_invalid, and the harness never receives it.
+func TestRemovedKeyStopsAWaitingSignedRequest(t *testing.T) {
+	rt := &movingNative{Runtime: fake.New("fake", "e_1"), id: "native-1"}
+	ep, store, clk := newLinkEndpoint(t, rt)
+	live := true
+	ep.SetConsent(func(string, string) bool { return live })
+	src := linkSource(hostA, "fake")
+	src.NativeSession, src.Credential = "native-1", "cred-1"
+	rt.SetOffline(true)
+	cmd := linkSubmit(clk, "fake", "11111111-1111-4111-8111-1111111111e2")
+	if _, err := ep.Handle(cmd, src); err != nil {
+		t.Fatal(err)
+	}
+	live = false
+	rt.SetOffline(false)
+	if err := ep.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	rec, _, err := store.Get(requests.Key{CreatorHost: hostA, TargetID: "fake", RequestID: cmd.RequestID})
+	if err != nil || rec.Code != protocol.CodeConsentInvalid || rt.Snapshot().Dispatches != 0 {
+		t.Fatalf("record %+v, %v, %d dispatches; want consent_invalid and 0", rec, err, rt.Snapshot().Dispatches)
+	}
+}

@@ -538,7 +538,9 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 			return protocol.Reply{Snapshot: rec.Snapshot, Outcome: out}, nil
 		}
 		// Fall through to the normal admission path with the existing
-		// record: the deferred/Tick machinery owns it from here.
+		// record: the deferred/Tick machinery owns it from here. A link
+		// record never gets here (retryable is false for it), so this third
+		// entrance to native Submit needs no signed-handoff check.
 		t, code, reason := e.admissibleLocked(cmd.TargetID, cmd.Epoch, cmd.NotAfter, cmd.Input.MinEvidence)
 		if code != "" {
 			e.mu.Unlock()

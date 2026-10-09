@@ -127,7 +127,11 @@ invariants.
   copy beside them. The record keeps the signed native session, and core
   compares it with the attachment's native session at native admission, just
   before the handoff. A mismatch or an unknown session is refused
-  `session_changed` and nothing runs.
+  `session_changed` and nothing runs. The consent key is checked again at the
+  same point: a key removed before the handoff ends the request
+  `consent_invalid`, and nothing runs. A key removed after the handoff does
+  not recall the task; it stops every later one. A binding whose consent is
+  `local` runs nothing until the local confirmation exists.
 - **A revision is published when its sink acknowledged it.** A carrier counts
   a revision as published only after the sink confirms that it committed that
   revision or a newer one. Until then the revision stays owed and the

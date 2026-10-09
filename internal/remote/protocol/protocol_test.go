@@ -166,6 +166,7 @@ func TestDecodeCommandRefusesCaseFoldedKeys(t *testing.T) {
 	for _, doc := range []string{
 		`{"schema":"amq.remote.command/1","OP":"session.list"}`,
 		`{"schema":"amq.remote.command/1","op":"session.list","Op":"request.get"}`,
+		`{"ſchema":"amq.remote.command/1","schema":"amq.remote.command/1","op":"session.list"}`,
 	} {
 		if _, err := DecodeCommand([]byte(doc)); err == nil {
 			t.Errorf("%s decoded, want refused", doc)

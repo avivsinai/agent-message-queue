@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/json"
@@ -108,6 +109,11 @@ func VerifySignedSubmit(view *ConsentView, m SignedSubmit, now time.Time) (*prot
 		return nil, "", refuse(string(protocol.CodeStaleEpoch), "the binding changed since you signed; read it again and sign again")
 	case d.NativeSessionID == "" || d.NativeSessionID != b.NativeSessionID:
 		return nil, "", refuse(CodeSessionChanged, "the session behind %s changed since you signed", d.Binding)
+	case b.Consent == "local":
+		// A local binding admits a task only after the confirmation on this
+		// machine (design §7 change 8); a passkey alone never bypasses it.
+		// Until that confirmation exists, such a binding runs nothing.
+		return nil, "", refuse(string(protocol.CodeUnsupported), "binding %q needs local confirmation, which this amq-remote does not have yet", d.Binding)
 	}
 	issued, err := time.Parse(time.RFC3339, d.IssuedAt)
 	if err != nil {
@@ -184,11 +190,11 @@ func verifyAssertion(key ConsentKey, m SignedSubmit, doc []byte) error {
 		return errors.New("the assertion is not base64url")
 	}
 	var cd struct {
-		Type        string  `json:"type"`
-		Challenge   string  `json:"challenge"`
-		Origin      string  `json:"origin"`
-		CrossOrigin bool    `json:"crossOrigin"`
-		TopOrigin   *string `json:"topOrigin"`
+		Type        string          `json:"type"`
+		Challenge   string          `json:"challenge"`
+		Origin      string          `json:"origin"`
+		CrossOrigin bool            `json:"crossOrigin"`
+		TopOrigin   json.RawMessage `json:"topOrigin"`
 	}
 	if err := json.Unmarshal(clientData, &cd); err != nil {
 		return errors.New("clientDataJSON does not decode")
@@ -200,7 +206,7 @@ func verifyAssertion(key ConsentKey, m SignedSubmit, doc []byte) error {
 		return errors.New("the assertion is not a webauthn.get")
 	case cd.Challenge != b64.EncodeToString(docSum[:]):
 		return errors.New("the passkey signed other bytes")
-	case cd.Origin != key.Origin || cd.CrossOrigin || cd.TopOrigin != nil:
+	case cd.Origin != key.Origin || cd.CrossOrigin || len(cd.TopOrigin) != 0:
 		return errors.New("the passkey was used on another origin")
 	case len(authData) < authenticatorDataMin || !bytes.Equal(authData[:32], rpHash[:]):
 		return errors.New("the assertion is for another relying party")
@@ -226,7 +232,7 @@ func verifyAssertion(key ConsentKey, m SignedSubmit, doc []byte) error {
 	case -7:
 		ec, ok := pub.(*ecdsa.PublicKey)
 		sum := sha256.Sum256(signed)
-		if !ok || !ecdsa.VerifyASN1(ec, sum[:], sig) {
+		if !ok || ec.Curve != elliptic.P256() || !ecdsa.VerifyASN1(ec, sum[:], sig) {
 			return errors.New("the signature does not verify")
 		}
 	case -8:
