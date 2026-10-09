@@ -9,6 +9,7 @@ package cli
 // schedule.
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -53,7 +54,7 @@ func (h *wakeHoldHarness) newConfig(policy wakeHoldPolicy) *wakeConfig {
 		session:        "s",
 		wakeOwner:      &wakeOwner{},
 		injectMode:     wakeInjectModeRaw,
-		holdPolicy:     policy,
+		settings:       wakeSettings{holdNormal: policy.normal, holdLow: policy.low},
 		doorbellNow:    func() time.Time { return h.now },
 		attentionIsTTY: func() bool { return false },
 		terminalWrite: func(text string) error {
@@ -400,4 +401,109 @@ func TestWakeHoldAnnouncedReplacementUsesNewArrival(t *testing.T) {
 	if got := h.rings(); got != 1 {
 		t.Fatalf("rings at replacement deadline = %d, want 1", got)
 	}
+}
+
+// useSettingsFile makes the harness wake read .wake.settings from memory: the
+// settingsSource seam the running wake reads through its agent directory.
+// The harness has no terminal to sample, so files here turn input deferral
+// off; it is not under test.
+func (h *wakeHoldHarness) useSettingsFile(raw string) {
+	h.cfg.settingsSource = func() ([]byte, bool, error) {
+		return []byte(raw), true, nil
+	}
+}
+
+// #1014: a live settings change applies to the running wake. A hold set in
+// the file holds the next normal message; a hold removed from the file rings
+// an already-held cohort at the next scan.
+func TestWakeSettingsLiveHoldChange(t *testing.T) {
+	// Review finding (live-apply P2): a read that a concurrent wake config
+	// rename changed was logged and recorded as a refused file.
+	t.Run("read changed by a concurrent write is no observation", func(t *testing.T) {
+		h := newWakeHoldHarness(t, wakeHoldRecommended)
+		h.cfg.settingsSource = func() ([]byte, bool, error) {
+			return nil, false, newWakeSnapshotReadChangedError(errors.New("wake settings changed while opening"))
+		}
+		var recorded []wakeSettingsAppliedStatus
+		h.cfg.recordSettingsApplied = func(status wakeSettingsAppliedStatus) error {
+			recorded = append(recorded, status)
+			return nil
+		}
+		if h.cfg.reloadSettings() || len(recorded) != 0 || h.cfg.settingsObserved.seen {
+			t.Fatalf("recorded = %+v, observed = %+v; want no observation", recorded, h.cfg.settingsObserved)
+		}
+	})
+
+	t.Run("hold set live holds the next message", func(t *testing.T) {
+		h := newWakeHoldHarness(t, wakeHoldPolicy{})
+		h.useSettingsFile(`{"schema":1,"settings":{"hold_normal":"5m","defer_while_input":false}}`)
+		start := h.now
+		h.send("a", format.PriorityNormal)
+		h.scan(h.cfg)
+		if got := h.rings(); got != 0 {
+			t.Fatalf("rings before the live hold = %d, want 0", got)
+		}
+		h.now = start.Add(5*time.Minute - time.Second)
+		h.scan(h.cfg)
+		if got := h.rings(); got != 0 {
+			t.Fatalf("rings one second early = %d, want 0", got)
+		}
+		h.now = start.Add(5 * time.Minute)
+		h.scan(h.cfg)
+		if got := h.rings(); got != 1 {
+			t.Fatalf("rings at the live hold = %d, want 1", got)
+		}
+	})
+
+	t.Run("hold removed live rings a held cohort", func(t *testing.T) {
+		h := newWakeHoldHarness(t, wakeHoldRecommended)
+		h.send("low", format.PriorityLow)
+		h.scan(h.cfg)
+		h.advance(time.Minute)
+		h.scan(h.cfg)
+		if got := h.rings(); got != 0 {
+			t.Fatalf("setup: low mail rang inside its 30m hold: %d", got)
+		}
+		h.useSettingsFile(`{"schema":1,"settings":{"defer_while_input":false}}`)
+		if !h.cfg.reloadSettings() {
+			t.Fatal("reloadSettings did not report the change")
+		}
+		h.scan(h.cfg)
+		if got := h.rings(); got != 1 {
+			t.Fatalf("rings after holds were removed = %d, want 1 at once", got)
+		}
+	})
+
+	// Design review (precedence races P1): the re-time after a policy change
+	// counted the messages an announced cohort already covered, so a held
+	// addition rang at once after any policy change.
+	t.Run("announced cohort addition keeps its hold", func(t *testing.T) {
+		h := newWakeHoldHarness(t, wakeHoldRecommended)
+		h.cfg.retryUntil = wakeRetryUntilInjected
+		h.send("old", format.PriorityUrgent)
+		h.scan(h.cfg)
+		if got := h.rings(); got != 1 {
+			t.Fatalf("setup: urgent rings = %d, want 1", got)
+		}
+		h.advance(time.Minute)
+		arrival := h.now
+		h.send("new", format.PriorityNormal)
+		h.scan(h.cfg)
+		h.useSettingsFile(`{"schema":1,"settings":{"hold_normal":"5m","hold_low":"1h","defer_while_input":false}}`)
+		if !h.cfg.reloadSettings() {
+			t.Fatal("reloadSettings did not report the change")
+		}
+		h.scan(h.cfg)
+		if got := h.rings(); got != 0 {
+			t.Fatalf("rings after a policy change that keeps the normal hold = %d, want 0", got)
+		}
+		if got, want := h.deadline(), arrival.Add(5*time.Minute); !got.Equal(want) {
+			t.Fatalf("deadline = %v, want addition arrival + 5m = %v", got, want)
+		}
+		h.now = arrival.Add(5 * time.Minute)
+		h.scan(h.cfg)
+		if got := h.rings(); got != 1 {
+			t.Fatalf("rings at the addition's hold = %d, want 1", got)
+		}
+	})
 }

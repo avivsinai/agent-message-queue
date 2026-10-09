@@ -149,9 +149,10 @@ agent to check its inbox; it is not evidence that the agent read or completed
 the request. See [routing](docs/session-routing.md) and
 [message tracing](docs/trace.md) for those contracts.
 
-For a standalone `amq wake`, optional [priority holds](docs/wake-operations.md#hold-by-priority)
-can delay the first notification for routine mail while urgent mail skips the
-hold. The setup and launch walkthrough above does not configure these flags.
+Optional [priority holds](docs/wake-operations.md#hold-by-priority) can delay
+the first notification for routine mail while urgent mail skips the hold. Wake
+[live settings](docs/wake-operations.md#live-settings) are stored per agent;
+use `amq wake config --me <handle> --hold-normal 5m` to change a running wake.
 
 AMQ is for local agent coordination, not a distributed broker. The optional
 [bridge companion](cmd/amq-bridge/README.md) exchanges messages between hosts;

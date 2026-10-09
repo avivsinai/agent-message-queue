@@ -17,7 +17,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/presence"
 	"github.com/fsnotify/fsnotify"
@@ -1008,6 +1007,8 @@ func runWake(args []string) error {
 		switch args[0] {
 		case "check":
 			return runWakeCheck(args[1:])
+		case "config":
+			return runWakeConfig(args[1:])
 		case "repair":
 			return runWakeRepair(args[1:])
 		case "restart":
@@ -1876,28 +1877,14 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 
 	fs := flag.NewFlagSet("wake", flag.ContinueOnError)
 	common := addCommonFlags(fs)
+	settingsFlags := registerWakeSettingsFlags(fs)
 	injectCmdFlag := fs.String("inject-cmd", "", "Command to inject (power user mode)")
 	injectViaFlag := fs.String("inject-via", "", "External executable for injection (payload appended as last arg, bypasses TTY requirement)")
 	var injectArgFlags multiStringFlag
 	fs.Var(&injectArgFlags, "inject-arg", "Argument for --inject-via before the payload (repeatable)")
-	injectTimeoutFlag := fs.Duration("inject-timeout", defaultInjectTimeout, "Timeout for one --inject-via command")
 	retryUntilFlag := fs.String("retry-until", wakeRetryUntilDrained, "Doorbell acknowledgement: drained or injected")
-	bellFlag := fs.Bool("bell", false, "Ring terminal bell on new messages")
-	debounceFlag := fs.Duration("debounce", 250*time.Millisecond, "Debounce window for batching messages")
-	holdNormalFlag := fs.Duration("hold-normal", 0, "Hold the first doorbell for normal-priority mail up to this long (0 = no priority hold)")
-	holdLowFlag := fs.Duration("hold-low", 0, "Hold the first doorbell for low-priority mail up to this long (0 = no priority hold)")
-	previewLenFlag := fs.Int("preview-len", 48, "Max subject preview length")
 	injectModeFlag := fs.String("inject-mode", wakeInjectModeAuto, "Injection mode: auto, raw, paste, none (auto detects CLI type)")
-	deferWhileInputFlag := fs.Bool("defer-while-input", true, "Best-effort: defer non-interrupt injection while terminal input appears active")
-	inputQuietForFlag := fs.Duration("input-quiet-for", 1200*time.Millisecond, "Quiet window before deferred injection (advisory only on Linux; tty atime granularity is ~8s)")
-	inputPollIntervalFlag := fs.Duration("input-poll-interval", 200*time.Millisecond, "Polling interval while waiting for quiet terminal input")
-	inputMaxHoldFlag := fs.Duration("input-max-hold", 15*time.Second, "Maximum time to defer one wake injection (0 = no hold)")
-	interruptFlag := fs.Bool("interrupt", true, "Enable interrupt injection for urgent interrupt messages")
-	interruptLabelFlag := fs.String("interrupt-label", "interrupt", "Label required to trigger interrupt")
-	interruptPriorityFlag := fs.String("interrupt-priority", "urgent", "Priority required to trigger interrupt")
 	interruptCmdFlag := fs.String("interrupt-cmd", "none", "Interrupt command to inject: none (default) or ctrl-c (sends real SIGINT to the foreground process group and can interrupt or crash the agent)")
-	interruptNoticeFlag := fs.String("interrupt-notice", "", "Custom interrupt notice (default: auto)")
-	interruptCooldownFlag := fs.Duration("interrupt-cooldown", 7*time.Second, "Minimum time between interrupts")
 	readyFileFlag := fs.String("ready-file", "", "Internal: write this file after wake lock acquisition")
 	debugFlag := fs.Bool("debug", false, "Log injection diagnostics to stderr")
 	acceptExistingWakeFlag := fs.Bool("accept-existing-wake", false, "Internal: allow a usable existing wake to satisfy readiness")
@@ -1959,10 +1946,16 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 		"  with the configured interrupt label uses the interrupt path. After the",
 		"  first attempt, the configured retry policy applies. A drain takes all",
 		"  mail; the hold never acks or deletes it or guarantees consumption time.",
-		"  Direct amq wake only: setup, launch, and managed coop exec do not pass",
-		"  these flags through. Example: --hold-normal 5m --hold-low 30m; use",
-		"  --priority urgent for time-critical unblocking requests or verdicts.",
-		"  Manual restarts must repeat hold flags; wake repair does not save them.",
+		"  Example: --hold-normal 5m --hold-low 30m; use --priority urgent for",
+		"  time-critical unblocking requests or verdicts.",
+		"",
+		"Settings (hold, debounce, preview, bell, input deferral, interrupt notice,",
+		"  inject timeout) live in <root>/agents/<me>/.wake.settings. Explicit settings",
+		"  flags on a fresh start write their keys to that file. A resume (self-upgrade",
+		"  or restart) reads the file and ignores settings flags in argv; if the file",
+		"  is absent it writes them once. Repair, coop exec and keepalive pass no",
+		"  settings flags and use the stored file. Change a running wake with",
+		"  amq wake config.",
 		"",
 		"Interrupt notices (default on): urgent messages tagged with label \"interrupt\"",
 		"  trigger an interrupt notice. Ctrl+C injection is opt-in with",
@@ -1987,34 +1980,6 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 	if *resumePreflightFlag != (resumePreflight != nil) {
 		return fmt.Errorf("wake resume preflight flag and environment must be paired")
 	}
-	if *previewLenFlag < 0 {
-		return UsageError("--preview-len must be >= 0")
-	}
-	if *debounceFlag < 0 {
-		return UsageError("--debounce must be >= 0")
-	}
-	if *holdNormalFlag < 0 {
-		return UsageError("--hold-normal must be >= 0")
-	}
-	if *holdLowFlag < 0 {
-		return UsageError("--hold-low must be >= 0")
-	}
-	if *interruptCooldownFlag < 0 {
-		return UsageError("--interrupt-cooldown must be >= 0")
-	}
-	if *inputQuietForFlag < 0 {
-		return UsageError("--input-quiet-for must be >= 0")
-	}
-	if *inputPollIntervalFlag <= 0 {
-		return UsageError("--input-poll-interval must be > 0")
-	}
-	if *inputMaxHoldFlag < 0 {
-		return UsageError("--input-max-hold must be >= 0")
-	}
-	if *injectTimeoutFlag <= 0 {
-		return UsageError("--inject-timeout must be > 0")
-	}
-
 	injectMode, err := normalizeWakeInjectMode(*injectModeFlag)
 	if err != nil {
 		return UsageError("%v", err)
@@ -2024,18 +1989,11 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 	if err != nil {
 		return UsageError("%v", err)
 	}
-
-	interruptLabel := strings.TrimSpace(*interruptLabelFlag)
-	interruptPriority := strings.ToLower(strings.TrimSpace(*interruptPriorityFlag))
-	if *interruptFlag && interruptLabel == "" {
-		return UsageError("interrupt-label is required when interrupt is enabled")
+	flagSettings, err := settingsFlags.validate()
+	if err != nil {
+		return UsageError("%v", err)
 	}
-	if *interruptFlag && interruptPriority == "" {
-		return UsageError("interrupt-priority is required when interrupt is enabled")
-	}
-	if *interruptFlag && !format.IsValidPriority(interruptPriority) {
-		return UsageError("--interrupt-priority must be one of: urgent, normal, low")
-	}
+	explicitSettings := visitedWakeSettingsKeys(fs)
 
 	if err := requireMe(common.Me); err != nil {
 		return err
@@ -2143,6 +2101,9 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 		}
 		preservedArgv := append([]string{os.Args[0], "wake"}, args[:len(args)-1]...)
 		if err := validateWakeRestartArgv(preservedArgv, canonicalWakeRoot(root), me); err != nil {
+			return err
+		}
+		if err := checkWakeSettingsForResume(root, me); err != nil {
 			return err
 		}
 		return writeStdoutLine(wakeResumePreflightOK)
@@ -2456,6 +2417,13 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 			if *baselineExistingFlag {
 				_ = writeStderr("warning: reusing existing amq wake; this launch did not re-baseline it, so pending backlog may still notify\n")
 			}
+			if len(explicitSettings) > 0 {
+				_ = writeStderr(
+					"warning: reusing existing amq wake; its settings flags were not applied; use amq wake config --root %s --me %s to change the running wake\n",
+					shellQuoteArg(root),
+					shellQuoteArg(me),
+				)
+			}
 			return nil
 		}
 		return err
@@ -2470,6 +2438,50 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 		return nil
 	}); err != nil {
 		return err
+	}
+	// The file owns settings. Only a fresh start that holds the lock stores
+	// its explicit settings flags; every other start reads the file.
+	startupSettings, err := loadWakeSettingsAtStartup(
+		activeAgentDir,
+		flagSettings,
+		explicitSettings,
+		resumeContext != nil,
+	)
+	if err != nil {
+		return err
+	}
+	if startupSettings.refused != nil {
+		_ = writeStderr(
+			"amq wake: %s refused: %v; running with default settings\n",
+			wakeSettingsFileName,
+			startupSettings.refused,
+		)
+	}
+	if startupSettings.unseeded != nil {
+		_ = writeStderr(
+			"amq wake: %v; running with the settings flags in memory\n",
+			startupSettings.unseeded,
+		)
+	}
+	// Publish the startup status before the rest of startup, so wake config
+	// does not read this generation as an image without live settings. A
+	// failure is retried by the loop's reload. An unseeded resume publishes
+	// nothing for the absent file; the loop publishes once its seed lands.
+	var pendingStartupSettingsApplied *wakeSettingsAppliedStatus
+	if startupSettings.unseeded == nil {
+		if err := recordWakeSettingsApplied(
+			activeAgentDir,
+			currentWake,
+			startupSettings.applied,
+			wakeSettingsGuardTimeout,
+		); err != nil {
+			_ = writeStderr(
+				"amq wake: record %s: %v; retrying\n",
+				wakeSettingsAppliedFileName,
+				err,
+			)
+			pendingStartupSettingsApplied = &startupSettings.applied
+		}
 	}
 	if currentWake.Lock.ControlSocket != "" {
 		var controlCleanup func()
@@ -2557,27 +2569,14 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 		injectVia:           injectVia,
 		injectArgs:          []string(injectArgFlags),
 		wakeOwner:           requestedOwner,
-		injectTimeout:       *injectTimeoutFlag,
-		bell:                *bellFlag,
-		debounce:            *debounceFlag,
-		holdPolicy:          wakeHoldPolicy{normal: *holdNormalFlag, low: *holdLowFlag},
-		previewLen:          *previewLenFlag,
+		settings:            startupSettings.settings,
 		strict:              common.Strict,
 		fallbackWarn:        true,
 		injectMode:          injectMode,
 		requestedInjectMode: requestedInjectMode,
 		retryUntil:          retryUntil,
 		debug:               *debugFlag,
-		deferWhileInput:     *deferWhileInputFlag,
-		inputQuietFor:       *inputQuietForFlag,
-		inputPollInterval:   *inputPollIntervalFlag,
-		inputMaxHold:        *inputMaxHoldFlag,
-		interrupt:           *interruptFlag,
-		interruptLabel:      interruptLabel,
-		interruptPriority:   interruptPriority,
 		interruptKey:        interruptKey,
-		interruptNotice:     strings.TrimSpace(*interruptNoticeFlag),
-		interruptCooldown:   *interruptCooldownFlag,
 		controlStop:         controlStop,
 		restartSignals:      restartSignals,
 		inspectTerminalGeneration: func() wakeLockInspection {
@@ -2595,6 +2594,17 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 		},
 		recordDoorbellStatus: func(parked bool, attempts uint) error {
 			return setWakeDoorbellStatusInDir(activeAgentDir, me, parked, attempts)
+		},
+		settingsSource:         wakeSettingsSourceInDir(activeAgentDir, currentWake, startupSettings.seed),
+		settingsObserved:       startupSettings.observed,
+		pendingSettingsApplied: pendingStartupSettingsApplied,
+		recordSettingsApplied: func(status wakeSettingsAppliedStatus) error {
+			return recordWakeSettingsApplied(
+				activeAgentDir,
+				currentWake,
+				status,
+				wakeLifecycleGuardRetryTimeout,
+			)
 		},
 		onPrepared: func(watcher wakeAdmissionWatcher) error {
 			if repairLineage != nil {
@@ -3894,6 +3904,14 @@ func runWakeLoop(cfg wakeConfig) error {
 		maintenanceTicks = maintenanceTicker.C
 		defer maintenanceTicker.Stop()
 	}
+	// Poll .wake.settings: agent-directory watch events are not delivered, so
+	// a live change is seen within one tick even with no inbox activity.
+	settingsTicks := cfg.settingsTicks
+	if settingsTicks == nil && cfg.settingsSource != nil {
+		settingsTicker := time.NewTicker(wakeSettingsPollInterval)
+		settingsTicks = settingsTicker.C
+		defer settingsTicker.Stop()
+	}
 	maintenanceOutputs := cfg.maintenanceOutputs
 	if maintenanceOutputs == nil {
 		maintenanceOutputs = []*os.File{os.Stdout, os.Stderr}
@@ -3966,7 +3984,7 @@ func runWakeLoop(cfg wakeConfig) error {
 				cfg.onPendingNotify()
 			}
 			if debounceTimer == nil {
-				debounceTimer = time.NewTimer(cfg.debounce)
+				debounceTimer = time.NewTimer(cfg.settings.debounce)
 			} else {
 				if !debounceTimer.Stop() {
 					select {
@@ -3975,7 +3993,7 @@ func runWakeLoop(cfg wakeConfig) error {
 					}
 				}
 			}
-			debounceTimer.Reset(cfg.debounce)
+			debounceTimer.Reset(cfg.settings.debounce)
 
 		case err, ok := <-watcherErrors:
 			if !ok {
@@ -4026,6 +4044,18 @@ func runWakeLoop(cfg wakeConfig) error {
 
 		case <-doorbellTimerC:
 			doorbellTimerC = nil
+			if err := attemptNotification(); err != nil {
+				return err
+			}
+
+		case <-settingsTicks:
+			// Only a hold-policy change needs a scan now: it re-times held
+			// cohorts. A scan for any other key could resend an interrupt
+			// key for mail that is still unread; those keys apply at next use.
+			if !cfg.reloadSettings() || !cfg.holdPolicyChanged {
+				continue
+			}
+			pendingNotify = true
 			if err := attemptNotification(); err != nil {
 				return err
 			}

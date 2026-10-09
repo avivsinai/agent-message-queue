@@ -72,10 +72,10 @@ func injectViaCaptureConfig(t *testing.T, fixedArgs ...string) (*wakeConfig, str
 	args = append(args, fixedArgs...)
 
 	return &wakeConfig{
-		injectVia:     copyTestBinaryForInjectVia(t),
-		injectArgs:    args,
-		injectTimeout: 60 * time.Second,
-		debug:         false,
+		injectVia:  copyTestBinaryForInjectVia(t),
+		injectArgs: args,
+		settings:   wakeSettings{injectTimeout: 60 * time.Second},
+		debug:      false,
 	}, outputPath
 }
 
@@ -168,7 +168,7 @@ func TestInjectNotificationNoneWritesOutputWithoutTIOCSTI(t *testing.T) {
 	stderr := captureWakeStderr(t, func() {
 		cfg := &wakeConfig{
 			injectMode:     wakeInjectModeNone,
-			bell:           true,
+			settings:       wakeSettings{bell: true},
 			attentionEnv:   func(string) string { return "" },
 			attentionIsTTY: func() bool { return true },
 		}
@@ -231,7 +231,7 @@ func TestOwnerBoundNotificationUsesFixedDoorbellAndGuardsEveryChunk(t *testing.T
 				me:          tc.me,
 				injectMode:  tc.mode,
 				controlStop: stop,
-				bell:        true,
+				settings:    wakeSettings{bell: true},
 				beforeTerminalWrite: func() error {
 					guardCalls++
 					return nil
@@ -468,7 +468,7 @@ func TestNotifyNewMessagesNormalSuccessUsesFixedInputOnly(t *testing.T) {
 		me:         "alice",
 		root:       root,
 		injectMode: wakeInjectModeRaw,
-		previewLen: 48,
+		settings:   wakeSettings{previewLen: 48},
 	}
 	if err := notifyNewMessages(cfg); err != nil {
 		t.Fatalf("notifyNewMessages: %v", err)
@@ -730,7 +730,7 @@ func TestNotifyNewMessagesInjectedPolicyAcknowledgesSuccessfulInjectVia(t *testi
 	cfg := &wakeConfig{
 		me: "codex", root: root, session: "session1", wakeOwner: &wakeOwner{},
 		injectVia: working.injectVia, injectArgs: working.injectArgs,
-		injectTimeout: working.injectTimeout, retryUntil: wakeRetryUntilInjected,
+		settings: working.settings, retryUntil: wakeRetryUntilInjected,
 		doorbellNow: func() time.Time { return now },
 	}
 
@@ -801,14 +801,16 @@ func TestNotifyNewMessagesCustomInterruptUsesSanitizedOperatorPayloadForInputAnd
 	})
 	var emission wakeAttentionEmission
 	cfg := &wakeConfig{
-		me:                "alice",
-		root:              root,
-		injectMode:        wakeInjectModeRaw,
-		interrupt:         true,
-		interruptPriority: "urgent",
-		interruptLabel:    "interrupt",
-		interruptNotice:   "operator\x1b[31m\nnotice",
-		attentionIsTTY:    func() bool { return false },
+		me:         "alice",
+		root:       root,
+		injectMode: wakeInjectModeRaw,
+		settings: wakeSettings{
+			interrupt:         true,
+			interruptPriority: "urgent",
+			interruptLabel:    "interrupt",
+			interruptNotice:   "operator\x1b[31m\nnotice",
+		},
+		attentionIsTTY: func() bool { return false },
 		recordAttention: func(got wakeAttentionEmission) error {
 			emission = got
 			return nil
@@ -818,7 +820,7 @@ func TestNotifyNewMessagesCustomInterruptUsesSanitizedOperatorPayloadForInputAnd
 	if err := notifyNewMessages(cfg); err != nil {
 		t.Fatalf("successful notifyNewMessages: %v", err)
 	}
-	safeNotice := sanitizeForTTY(cfg.interruptNotice)
+	safeNotice := sanitizeForTTY(cfg.settings.interruptNotice)
 	if got := strings.Join(injected, "|"); !strings.Contains(got, safeNotice) {
 		t.Fatalf("injected bytes = %q, want sanitized operator notice %q", got, safeNotice)
 	}
@@ -879,11 +881,11 @@ func TestNotifyNewMessages_InjectViaInjectCmdPayload(t *testing.T) {
 	}
 
 	cfg := &wakeConfig{
-		me:         "alice",
-		root:       root,
-		injectVia:  scriptPath,
-		injectCmd:  "amq drain\x1b[31m\n--include-body",
-		previewLen: 48,
+		me:        "alice",
+		root:      root,
+		injectVia: scriptPath,
+		injectCmd: "amq drain\x1b[31m\n--include-body",
+		settings:  wakeSettings{previewLen: 48},
 	}
 
 	if err := notifyNewMessages(cfg); err != nil {
@@ -936,7 +938,7 @@ func TestNotifyNewMessagesSkipsBaselineWithoutDraining(t *testing.T) {
 	cfg, outputPath := injectViaCaptureConfig(t)
 	cfg.me = "alice"
 	cfg.root = root
-	cfg.previewLen = 48
+	cfg.settings.previewLen = 48
 	staleInfo, err := os.Stat(filepath.Join(fsq.AgentInboxNew(root, "alice"), "stale.md"))
 	if err != nil {
 		t.Fatalf("stat stale baseline message: %v", err)

@@ -66,7 +66,7 @@ func TestCoopRawDoorbellDoesNotContainMessageDerivedBytes(t *testing.T) {
 			injected = append(injected, chunk)
 			return nil
 		},
-		previewLen: 4096,
+		settings: wakeSettings{previewLen: 4096},
 	}
 	if err := notifyNewMessages(cfg); err != nil {
 		t.Fatalf("notify adversarial pending message: %v", err)

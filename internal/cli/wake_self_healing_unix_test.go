@@ -58,7 +58,7 @@ func TestRunWakeLoopRecoveryProgressStartsFreshDoorbell(t *testing.T) {
 			me:                    "codex",
 			session:               "session1",
 			wakeOwner:             &wakeOwner{},
-			debounce:              5 * time.Millisecond,
+			settings:              wakeSettings{debounce: 5 * time.Millisecond},
 			injectMode:            wakeInjectModeRaw,
 			controlStop:           stop,
 			inputRecoveryRequired: true,

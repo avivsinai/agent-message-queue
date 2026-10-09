@@ -197,8 +197,7 @@ func TestBycRebindableCallerReadmitsOnCanonicalMismatch(t *testing.T) {
 			me:          "codex",
 			session:     "session1",
 			wakeOwner:   &wakeOwner{},
-			debounce:    5 * time.Millisecond,
-			previewLen:  80,
+			settings:    wakeSettings{debounce: 5 * time.Millisecond, previewLen: 80},
 			injectMode:  wakeInjectModeNone,
 			controlStop: stop,
 			onPrepared: func(wakeAdmissionWatcher) error {

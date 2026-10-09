@@ -182,9 +182,9 @@ func assertWakeRepairDescriptorsClosedInInjector(t *testing.T, fds []int) {
 		)
 	}
 	if err := injectVia(&wakeConfig{
-		injectVia:     copyTestBinaryForInjectVia(t),
-		injectArgs:    args,
-		injectTimeout: 2 * time.Second,
+		injectVia:  copyTestBinaryForInjectVia(t),
+		injectArgs: args,
+		settings:   wakeSettings{injectTimeout: 2 * time.Second},
 	}, "ignored wake payload"); err != nil {
 		t.Fatalf("run injector fd inspector: %v", err)
 	}

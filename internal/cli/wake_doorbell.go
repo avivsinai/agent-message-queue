@@ -45,6 +45,10 @@ type wakeDoorbellState struct {
 	// holdUntil delays a new announcement, including an addition that revives
 	// a parked cohort. It is separate from the delivery retry deadline.
 	holdUntil time.Time
+	// holdSkip is the skip set holdUntil was computed with: the cohort an
+	// announced or parked ladder already covered. A live hold-policy change
+	// recomputes holdUntil with it, so covered messages do not count again.
+	holdSkip map[string]*wakeFileIdentity
 }
 
 type wakeDoorbellPlan struct {
@@ -77,6 +81,7 @@ func (state *wakeDoorbellState) planHeld(
 		previous := state.cohort
 		if state.reconcileAnnouncedCohort(current) {
 			state.holdUntil = earliestWakeHold(holds, current, previous)
+			state.holdSkip = previous
 			if state.holdActive(now) {
 				return wakeDoorbellPlan{}
 			}
@@ -110,9 +115,11 @@ func (state *wakeDoorbellState) planHeld(
 			state.reviveParkedCohortForUrgent(current)
 			state.nextAttempt = now
 		case state.phase == wakeDoorbellParked:
+			parked := state.cohort
 			if state.reviveParkedCohort(current) {
 				if state.holdsAddition(added, now) {
 					state.holdUntil = added
+					state.holdSkip = parked
 				} else {
 					state.pullForwardForAddition(now)
 				}
@@ -134,6 +141,7 @@ func (state *wakeDoorbellState) planHeld(
 	if state.phase == wakeDoorbellIdle {
 		state.arm(current)
 		state.holdUntil = earliestWakeHold(holds, current, nil)
+		state.holdSkip = nil
 	}
 	if state.phase == wakeDoorbellParked {
 		return wakeDoorbellPlan{}
@@ -153,6 +161,22 @@ func (state *wakeDoorbellState) planHeld(
 		contentChange: contentChange,
 		progress:      progress,
 	}
+}
+
+// reholdForPolicy re-times a pending hold after a live hold-policy change.
+// holds is the current scan's holds under the new policy. A longer hold
+// extends the deadline from each message's arrival; a shorter or disabled
+// hold can make it due now, and the planHeld call that follows in the same
+// scan rings. Without a pending hold (none set, or an attempt already made)
+// the retry policy owns the schedule and nothing changes.
+func (state *wakeDoorbellState) reholdForPolicy(
+	current map[string]os.FileInfo,
+	holds map[string]wakeHold,
+) {
+	if state.phase != wakeDoorbellRetrying || state.holdUntil.IsZero() {
+		return
+	}
+	state.holdUntil = earliestWakeHold(holds, current, state.holdSkip)
 }
 
 // holdActive reports whether hold-by-priority delays a new announcement.
@@ -317,6 +341,7 @@ func (state *wakeDoorbellState) recordAttemptWithBase(
 	// The interrupt path can attempt delivery before planHeld consumes a hold.
 	// Once an attempt occurs, only the delivery retry deadline applies.
 	state.holdUntil = time.Time{}
+	state.holdSkip = nil
 	state.attempts++
 	state.additionAttemptFloor = now.Add(base)
 	state.nextAttempt = now.Add(cappedExponentialBackoff(
