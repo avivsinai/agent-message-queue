@@ -1106,7 +1106,7 @@ func (e *Endpoint) respond(cmd *protocol.Command, src Source) (protocol.Reply, e
 
 	var code protocol.Code
 	var rerr error
-	reason := "interaction " + cmd.InteractionID
+	var reason string
 	if er, ok := t.att.(EvidenceResponder); ok && len(cmd.Evidence) > 0 {
 		code, rerr = er.RespondWithEvidence(key, cmd.Epoch, cmd.InteractionID, cmd.Option, cmd.Evidence)
 		// A refusal is a positive refusal that names its reason.
@@ -1122,6 +1122,9 @@ func (e *Endpoint) respond(cmd *protocol.Command, src Source) (protocol.Reply, e
 		// stays (the answer may have landed), so the replay path — not a
 		// fresh answer — decides. Surface the failure.
 		return protocol.Reply{}, rerr
+	}
+	if reason == "" {
+		reason = bareReason(code)
 	}
 	if code != "" && replay {
 		// A replay never clears the intent it found: the earlier answer may
@@ -1164,6 +1167,21 @@ func (e *Endpoint) respond(cmd *protocol.Command, src Source) (protocol.Reply, e
 		return protocol.Reply{}, err
 	}
 	return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpInteractionRespond}}, nil
+}
+
+// bareReason says in words why the runtime refused an answer that came back
+// with a code alone. The owner read "Not sent: interaction cc-…" for a late
+// ✅ (611.42.15).
+func bareReason(code protocol.Code) string {
+	switch code {
+	case protocol.CodeExpired:
+		return "the approval expired"
+	case protocol.CodeInvalid:
+		return "the approval does not offer that answer"
+	case protocol.CodeAlreadyResolved:
+		return "the approval was already answered"
+	}
+	return "the session refused the answer"
 }
 
 // lockAnswer takes the answer lock of one interaction and returns its

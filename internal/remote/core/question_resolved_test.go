@@ -202,3 +202,34 @@ func (h *heldAnswer) Respond(_ requests.Key, _, _, _ string) (protocol.Code, err
 	}
 	return protocol.CodeAlreadyResolved, nil
 }
+
+// 611.42.15 (code reading in the #1007 review): a ✅ after Claude's hook
+// deadline came back as a bare expired code, and the DM read "Not sent:
+// expired: interaction cc-…". The refusal now says the approval expired.
+func TestBareExpiredRefusalSaysWhy(t *testing.T) {
+	store, now := openStore(t)
+	rt := &lateAnswer{Runtime: fake.New("fake", "e_1")}
+	ep := core.New(core.Config{Store: store, Now: now})
+	ep.Register(rt)
+	id := "11111111-1111-4111-8111-1111111111f6"
+	if _, err := ep.Handle(submitCmd(id), ownerShare); err != nil {
+		t.Fatal(err)
+	}
+	rt.Question(id, "i_1", []string{"yes", "no"})
+	_, err := ep.Handle(&protocol.Command{
+		Schema: protocol.SchemaCommand, Op: protocol.OpInteractionRespond, RequestRef: protocol.EncodeRef("local", "fake", id),
+		TargetID: "fake", Epoch: "e_1", InteractionID: "i_1", Option: "yes",
+	}, ownerShare)
+	var refusal *protocol.Refusal
+	if !errors.As(err, &refusal) || refusal.Code != protocol.CodeExpired || refusal.Message != "the approval expired" {
+		t.Fatalf("answer = %v, want expired: the approval expired", err)
+	}
+}
+
+// lateAnswer refuses every answer as expired, with no reason, as Claude's
+// approvals do after the hook's deadline.
+type lateAnswer struct{ *fake.Runtime }
+
+func (*lateAnswer) Respond(requests.Key, string, string, string) (protocol.Code, error) {
+	return protocol.CodeExpired, nil
+}
