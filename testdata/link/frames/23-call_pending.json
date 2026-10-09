@@ -1,0 +1,14 @@
+{
+  "body_def": "call_reply",
+  "description": "A read still running after 25 s; finish with call_get.",
+  "direction": "server_to_endpoint",
+  "frame": {
+    "body": {
+      "call_id": "c_81",
+      "status": "pending"
+    },
+    "gen": 12,
+    "re": "m_c4",
+    "schema": "amq.remote.link/1"
+  }
+}

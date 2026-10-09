@@ -1,0 +1,46 @@
+{
+  "body_def": "hello",
+  "description": "Reply to the challenge; it carries its own id because welcome answers it. signature is Ed25519 over helloMessage (README).",
+  "direction": "endpoint_to_server",
+  "frame": {
+    "body": {
+      "amq_version": "0.95.0",
+      "bindings": [
+        {
+          "attachment": "live",
+          "binding": "pi-demo",
+          "capabilities": {
+            "answer_question": false,
+            "approve_tool": false,
+            "cancel_request": false,
+            "inspect": true,
+            "steer": false,
+            "submit": true,
+            "terminal": "unavailable"
+          },
+          "consent": "passkey",
+          "display_name": "pi · demo repo",
+          "epoch": "e_4c0e1a",
+          "harness": "pi",
+          "labels": {
+            "device": "Example MacBook",
+            "harness": "pi",
+            "project": "demo",
+            "session": "pi · demo repo"
+          },
+          "native_session_id": "pi:3f9c2b7a",
+          "target_id": "pi:demo-5b9d0c1e",
+          "tools": "read"
+        }
+      ],
+      "device_key": "MCowBQYDK2VwAyEAsqhUyKZ7g4z2knFy91bLfn7IK1aPGB8l_zeDFrTGv60",
+      "pending_local": [],
+      "schema": "amq.remote.link.hello/1",
+      "signature": "AMWf9vT9FIj1CS9YkDrzxpKC3yk7NrWLBQtvCrW41J8TzggsyujXRQ0ixnfqihsVhox8MEC9c56hLRuUKBmkBw",
+      "store_id": "st_5d1e0c2a"
+    },
+    "id": "m_h1",
+    "re": "m_c1",
+    "schema": "amq.remote.link/1"
+  }
+}

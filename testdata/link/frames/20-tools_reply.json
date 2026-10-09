@@ -1,0 +1,31 @@
+{
+  "body_def": "tools_reply",
+  "description": "The catalog. input_schema is the tool's JSON Schema.",
+  "direction": "server_to_endpoint",
+  "frame": {
+    "body": {
+      "tools": [
+        {
+          "description": "Read one issue by key.",
+          "input_schema": {
+            "additionalProperties": false,
+            "properties": {
+              "key": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "key"
+            ],
+            "type": "object"
+          },
+          "name": "get_issue",
+          "write": false
+        }
+      ]
+    },
+    "gen": 12,
+    "re": "m_t1",
+    "schema": "amq.remote.link/1"
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "body_def": "call_get",
+  "description": "Wait up to wait_ms for the call's final state.",
+  "direction": "endpoint_to_server",
+  "frame": {
+    "body": {
+      "call_id": "c_82",
+      "schema": "amq.remote.link.call_get/1",
+      "wait_ms": 30000
+    },
+    "gen": 12,
+    "id": "m_c7",
+    "schema": "amq.remote.link/1"
+  }
+}

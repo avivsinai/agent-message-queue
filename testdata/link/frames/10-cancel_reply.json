@@ -1,0 +1,41 @@
+{
+  "body_def": "command_reply",
+  "description": "cancel_requested stays until the harness confirms.",
+  "direction": "endpoint_to_server",
+  "frame": {
+    "body": {
+      "outcome": {
+        "disposition": "cancel_requested",
+        "op": "request.cancel"
+      },
+      "snapshot": {
+        "creator_host": "link-efe49c16c8896835",
+        "epoch": "e_4c0e1a",
+        "input_digest": "sha256:c4f9ee2f77322d13333eebf04446bd3a7f41ee3bc6b4de6ad6aec95e96fce7d7",
+        "interaction": {
+          "approve_option": "Allow",
+          "interaction_id": "ix_3",
+          "kind": "approval",
+          "options": [
+            "Allow",
+            "Block"
+          ],
+          "prompt": "git push origin fix/ingest",
+          "reject_option": "Block"
+        },
+        "native_run": "pi-run-81",
+        "not_after": "2026-10-09T14:04:00Z",
+        "observed_at": "2026-10-09T14:03:10Z",
+        "request_id": "7f3a2c1e-5b9d-4e8a-9c21-7d4e5f6a8b90",
+        "request_ref": "amqr1_nruw42znmvtgknbzmmytmyzyha4tmobtguaha2j2mrsw23zngvrdszbqmmywkabxmyzwcmtdgfss2nlchfsc2ndfhbqs2oldgiys2n3egrstkzrwme4geojq",
+        "revision": 4,
+        "schema": "amq.remote.request/1",
+        "state": "running",
+        "target_id": "pi:demo-5b9d0c1e"
+      }
+    },
+    "gen": 12,
+    "re": "m_x1",
+    "schema": "amq.remote.link/1"
+  }
+}

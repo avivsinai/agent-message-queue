@@ -1,0 +1,16 @@
+{
+  "body_def": "error_reply",
+  "description": "A refusal before admission. The request ends with this reason.",
+  "direction": "endpoint_to_server",
+  "frame": {
+    "body": {
+      "error": {
+        "code": "session_changed",
+        "message": "the native session behind pi-demo changed since you signed"
+      }
+    },
+    "gen": 12,
+    "re": "m_s1",
+    "schema": "amq.remote.link/1"
+  }
+}

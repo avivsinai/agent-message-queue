@@ -1,0 +1,15 @@
+{
+  "body_def": "call_reply",
+  "description": "A write waits for the owner's decision on the server.",
+  "direction": "server_to_endpoint",
+  "frame": {
+    "body": {
+      "call_id": "c_82",
+      "review_url": "https://app.example.test/calls/c_82",
+      "status": "pending_approval"
+    },
+    "gen": 12,
+    "re": "m_c5",
+    "schema": "amq.remote.link/1"
+  }
+}

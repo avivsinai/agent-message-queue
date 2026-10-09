@@ -1,0 +1,40 @@
+{
+  "body_def": "bindings_reply",
+  "description": "The shared bindings, approve and answer capabilities masked.",
+  "direction": "endpoint_to_server",
+  "frame": {
+    "body": {
+      "bindings": [
+        {
+          "attachment": "live",
+          "binding": "pi-demo",
+          "capabilities": {
+            "answer_question": false,
+            "approve_tool": false,
+            "cancel_request": false,
+            "inspect": true,
+            "steer": false,
+            "submit": true,
+            "terminal": "unavailable"
+          },
+          "consent": "passkey",
+          "display_name": "pi · demo repo",
+          "epoch": "e_4c0e1a",
+          "harness": "pi",
+          "labels": {
+            "device": "Example MacBook",
+            "harness": "pi",
+            "project": "demo",
+            "session": "pi · demo repo"
+          },
+          "native_session_id": "pi:3f9c2b7a",
+          "target_id": "pi:demo-5b9d0c1e",
+          "tools": "read"
+        }
+      ]
+    },
+    "gen": 12,
+    "re": "m_l1",
+    "schema": "amq.remote.link/1"
+  }
+}
