@@ -122,6 +122,16 @@ invariants.
   harness resolved the interaction first. Only the owner's Buzz share that
   submitted the request may answer its interactions; the AMQ mailbox and the
   local socket are refused, so the asking agent cannot answer itself.
+- **A link submit runs only from verified signed bytes.** The command a link
+  carries is the one decoded from the bytes the owner signed, never a second
+  copy beside them. The record keeps the signed native session, and core
+  compares it with the attachment's native session at native admission, just
+  before the handoff. A mismatch or an unknown session is refused
+  `session_changed` and nothing runs.
+- **A revision is published when its sink acknowledged it.** A carrier counts
+  a revision as published only after the sink confirms that it committed that
+  revision or a newer one. Until then the revision stays owed and the
+  reconcile sweep offers it again.
 - **Activity divergence is acceptable for a cache, never for execution
   truth.** The live activity projection may lag or differ from the harness's
   own view; it is a convenience. Admission, cancellation and completion are
