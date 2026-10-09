@@ -198,8 +198,12 @@ func startCarrier(t *testing.T, fs *fakeServer, clk *clock, tweak func(*Config))
 // the digests the contract assigns them.
 func goldenSnapshots(t *testing.T) (snaps []protocol.Snapshot, digests []string) {
 	t.Helper()
-	for _, name := range []string{"13-revision_interaction.json", "14-revision_completed.json"} {
-		raw, err := os.ReadFile(filepath.Join("..", "..", "..", "testdata", "link", "frames", name))
+	for _, name := range []string{"revision_interaction", "revision_completed"} {
+		paths, err := filepath.Glob(filepath.Join("..", "..", "..", "testdata", "link", "frames", "*-"+name+".json"))
+		if err != nil || len(paths) != 1 {
+			t.Fatalf("golden frame %s: %v", name, err)
+		}
+		raw, err := os.ReadFile(paths[0])
 		if err != nil {
 			t.Fatal(err)
 		}

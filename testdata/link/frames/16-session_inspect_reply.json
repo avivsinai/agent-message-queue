@@ -1,6 +1,6 @@
 {
   "body_def": "bindings_reply",
-  "description": "The shared bindings, approve and answer capabilities masked.",
+  "description": "The one binding behind that target, as session.list shows it.",
   "direction": "endpoint_to_server",
   "frame": {
     "body": {
@@ -34,7 +34,7 @@
       ]
     },
     "gen": 12,
-    "re": "m_l1",
+    "re": "m_i1",
     "schema": "amq.remote.link/1"
   }
 }

@@ -1,0 +1,16 @@
+{
+  "body_def": "error_reply",
+  "description": "The refusal of any interaction.respond from a link.",
+  "direction": "endpoint_to_server",
+  "frame": {
+    "body": {
+      "error": {
+        "code": "unsupported",
+        "message": "a link never answers the agent's prompts; decide on this machine"
+      }
+    },
+    "gen": 12,
+    "re": "m_r1",
+    "schema": "amq.remote.link/1"
+  }
+}

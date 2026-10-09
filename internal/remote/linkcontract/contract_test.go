@@ -8,10 +8,11 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
@@ -75,7 +76,28 @@ func TestFramesMatchSchema(t *testing.T) {
 	if len(frames) == 0 {
 		t.Fatal("no frames")
 	}
+	// Every body the schema defines has at least one golden.
+	var schemaDoc struct {
+		Defs map[string]json.RawMessage `json:"$defs"`
+	}
+	mustUnmarshal(t, readSchema(t), &schemaDoc)
+	shapes := map[string]bool{"frame_id": true, "b64url": true, "digest": true, "opaque": true, "code": true,
+		"labels": true, "binding": true, "error": true, "outcome": true}
+	named := map[string]bool{}
+	for _, ff := range frames {
+		named[ff.BodyDef] = true
+	}
+	for def := range schemaDoc.Defs {
+		if !shapes[def] && !named[def] {
+			t.Errorf("body %q has no golden frame", def)
+		}
+	}
 	for name, ff := range frames {
+		switch ff.Direction {
+		case "server_to_endpoint", "endpoint_to_server", "either":
+		default:
+			t.Errorf("%s: direction %q", name, ff.Direction)
+		}
 		body, err := c.Compile(schemaBase + "remote-link-v1.schema.json#/$defs/" + ff.BodyDef)
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
@@ -95,60 +117,72 @@ func TestFramesMatchSchema(t *testing.T) {
 	}
 }
 
-// TestSignedConsent checks the golden consent document and its assertion the
-// way a verifier does (design section 6), against the derived test keys.
+// TestSignedConsent checks the golden consent document and both of its
+// assertions (ES256 and Ed25519) the way a verifier does (design section 6),
+// against the derived test keys.
 func TestSignedConsent(t *testing.T) {
 	doc := readFile(t, "consent/document.json")
 	canon, err := jcs.Canonicalize(doc)
 	if err != nil || !bytes.Equal(canon, doc) {
 		t.Fatalf("document.json is not its own JCS form: %v", err)
 	}
-	var a assertionFile
-	mustUnmarshal(t, readFile(t, "consent/assertion.json"), &a)
-
 	docSum := sha256.Sum256(doc)
-	if a.Challenge != b64.EncodeToString(docSum[:]) {
-		t.Fatal("challenge is not SHA-256(document bytes)")
-	}
-	clientData := mustB64(t, a.ClientDataJSON)
-	var cd struct {
-		Type        string `json:"type"`
-		Challenge   string `json:"challenge"`
-		Origin      string `json:"origin"`
-		CrossOrigin bool   `json:"crossOrigin"`
-		TopOrigin   string `json:"topOrigin"`
-	}
-	mustUnmarshal(t, clientData, &cd)
-	if cd.Type != "webauthn.get" || cd.Challenge != a.Challenge || cd.Origin != a.Origin || cd.CrossOrigin || cd.TopOrigin != "" {
-		t.Fatalf("clientDataJSON does not match the profile: %+v", cd)
-	}
-	authData := mustB64(t, a.AuthenticatorData)
-	rpHash := sha256.Sum256([]byte(a.RPID))
-	if len(authData) != 37 || !bytes.Equal(authData[:32], rpHash[:]) {
-		t.Fatal("authenticatorData does not start with SHA-256(rp_id)")
-	}
-	if flags := authData[32]; flags&0x05 != 0x05 || (flags&0x08 != 0) != a.BackupEligible {
-		t.Fatalf("flags %#x: want UP and UV, BE as recorded", flags)
-	}
-
-	pub, err := x509.ParsePKIXPublicKey(mustB64(t, a.SPKI))
-	if err != nil {
-		t.Fatal(err)
-	}
-	ecPub, ok := pub.(*ecdsa.PublicKey)
-	if !ok || !ecPub.Equal(&consentKey(t).PublicKey) || a.Alg != -7 {
-		t.Fatal("spki is not the ES256 key derived from the consent seed")
-	}
-	clientSum := sha256.Sum256(clientData)
-	signed := sha256.Sum256(append(append([]byte{}, authData...), clientSum[:]...))
-	if !ecdsa.VerifyASN1(ecPub, signed[:], mustB64(t, a.Signature)) {
-		t.Fatal("ES256 signature does not verify")
-	}
-	if a.CredentialID != credentialID() {
-		t.Fatal("credential_id is not the derived test credential")
-	}
-	if got := fingerprint(t, a.CredentialID, mustB64(t, a.SPKI), a.Alg, a.RPID, a.Origin); got != a.Fingerprint {
-		t.Fatalf("fingerprint = %s, file says %s", got, a.Fingerprint)
+	for _, file := range []string{"consent/assertion.json", "consent/assertion_ed25519.json"} {
+		var a assertionFile
+		mustUnmarshal(t, readFile(t, file), &a)
+		if a.Challenge != b64.EncodeToString(docSum[:]) {
+			t.Fatalf("%s: challenge is not SHA-256(document bytes)", file)
+		}
+		clientData := mustB64(t, a.ClientDataJSON)
+		var cd struct {
+			Type        string `json:"type"`
+			Challenge   string `json:"challenge"`
+			Origin      string `json:"origin"`
+			CrossOrigin bool   `json:"crossOrigin"`
+			TopOrigin   string `json:"topOrigin"`
+		}
+		mustUnmarshal(t, clientData, &cd)
+		if cd.Type != "webauthn.get" || cd.Challenge != a.Challenge || cd.Origin != a.Origin || cd.CrossOrigin || cd.TopOrigin != "" {
+			t.Fatalf("%s: clientDataJSON does not match the profile: %+v", file, cd)
+		}
+		authData := mustB64(t, a.AuthenticatorData)
+		rpHash := sha256.Sum256([]byte(a.RPID))
+		if len(authData) != 37 || !bytes.Equal(authData[:32], rpHash[:]) {
+			t.Fatalf("%s: authenticatorData does not start with SHA-256(rp_id)", file)
+		}
+		if flags := authData[32]; flags&0x05 != 0x05 || (flags&0x08 != 0) != a.BackupEligible {
+			t.Fatalf("%s: flags %#x: want UP and UV, BE as recorded", file, flags)
+		}
+		pub, err := x509.ParsePKIXPublicKey(mustB64(t, a.SPKI))
+		if err != nil {
+			t.Fatal(err)
+		}
+		clientSum := sha256.Sum256(clientData)
+		signed := append(append([]byte{}, authData...), clientSum[:]...)
+		switch a.Alg {
+		case -7:
+			ecPub, ok := pub.(*ecdsa.PublicKey)
+			sum := sha256.Sum256(signed)
+			if !ok || !ecPub.Equal(&consentKey(t).PublicKey) || a.CredentialID != credentialID() {
+				t.Fatalf("%s: not the ES256 key derived from the consent seed", file)
+			}
+			if !ecdsa.VerifyASN1(ecPub, sum[:], mustB64(t, a.Signature)) {
+				t.Fatalf("%s: ES256 signature does not verify", file)
+			}
+		case -8:
+			edPub, ok := pub.(ed25519.PublicKey)
+			if !ok || !edPub.Equal(consentKeyEd25519().Public()) || a.CredentialID != credentialIDEd25519() {
+				t.Fatalf("%s: not the Ed25519 key derived from its consent seed", file)
+			}
+			if !ed25519.Verify(edPub, signed, mustB64(t, a.Signature)) {
+				t.Fatalf("%s: Ed25519 signature does not verify", file)
+			}
+		default:
+			t.Fatalf("%s: alg %d", file, a.Alg)
+		}
+		if got := fingerprint(t, a.CredentialID, mustB64(t, a.SPKI), a.Alg, a.RPID, a.Origin); got != a.Fingerprint {
+			t.Fatalf("%s: fingerprint = %s, file says %s", file, got, a.Fingerprint)
+		}
 	}
 
 	// The command inside the document is an ordinary, valid submit.
@@ -160,7 +194,9 @@ func TestSignedConsent(t *testing.T) {
 		t.Fatalf("document.command: %v", err)
 	}
 
-	// signed_submit carries exactly these bytes and this assertion.
+	// signed_submit carries exactly these bytes and the ES256 assertion.
+	var a assertionFile
+	mustUnmarshal(t, readFile(t, "consent/assertion.json"), &a)
 	var ss struct {
 		DocumentB64       string `json:"document_b64"`
 		CredentialID      string `json:"credential_id"`
@@ -172,6 +208,32 @@ func TestSignedConsent(t *testing.T) {
 	if !bytes.Equal(mustB64(t, ss.DocumentB64), doc) || ss.CredentialID != a.CredentialID ||
 		ss.AuthenticatorData != a.AuthenticatorData || ss.ClientDataJSON != a.ClientDataJSON || ss.Signature != a.Signature {
 		t.Fatal("signed_submit does not carry the golden document and assertion")
+	}
+}
+
+// TestRefusedConsentDocuments pins the JCS half of the strict decoder: the
+// duplicate-key and not-canonical documents fail here; the case-folded and
+// unknown-key documents are canonical JCS, so only the decoder that reads
+// every key exactly can refuse them.
+func TestRefusedConsentDocuments(t *testing.T) {
+	paths, err := filepath.Glob(filepath.Join(linkDir, "consent", "refused", "*.json"))
+	if err != nil || len(paths) != 4 {
+		t.Fatalf("want 4 refused documents, got %d (%v)", len(paths), err)
+	}
+	for _, p := range paths {
+		var r struct {
+			DocumentB64 string `json:"document_b64"`
+			Code        string `json:"code"`
+		}
+		mustUnmarshal(t, readFile(t, filepath.Join("consent", "refused", filepath.Base(p))), &r)
+		doc := mustB64(t, r.DocumentB64)
+		canon, cerr := jcs.Canonicalize(doc)
+		canonical := cerr == nil && bytes.Equal(canon, doc)
+		name := strings.TrimSuffix(filepath.Base(p), ".json")
+		want := name == "case-folded-key" || name == "unknown-key"
+		if canonical != want || r.Code != "consent_invalid" {
+			t.Errorf("%s: canonical JCS = %v, want %v; code %q", name, canonical, want, r.Code)
+		}
 	}
 }
 
@@ -275,26 +337,51 @@ func readFile(t *testing.T, rel string) []byte {
 	return b
 }
 
+var (
+	framesOnce sync.Once
+	framesMap  map[string]frameFile
+	framesErr  error
+)
+
 // readFrames maps each frame's name (file name without the NN- prefix) to it.
+// The files are read once per test binary.
 func readFrames(t *testing.T) map[string]frameFile {
 	t.Helper()
-	paths, err := filepath.Glob(filepath.Join(linkDir, "frames", "*.json"))
+	framesOnce.Do(func() {
+		paths, err := filepath.Glob(filepath.Join(linkDir, "frames", "*.json"))
+		if err != nil {
+			framesErr = err
+			return
+		}
+		framesMap = map[string]frameFile{}
+		for _, p := range paths {
+			raw, err := os.ReadFile(p)
+			if err != nil {
+				framesErr = err
+				return
+			}
+			var ff frameFile
+			if err := json.Unmarshal(raw, &ff); err != nil {
+				framesErr = fmt.Errorf("%s: %w", p, err)
+				return
+			}
+			base := strings.TrimSuffix(filepath.Base(p), ".json")
+			framesMap[base[strings.IndexByte(base, '-')+1:]] = ff
+		}
+	})
+	if framesErr != nil {
+		t.Fatal(framesErr)
+	}
+	return framesMap
+}
+
+func readSchema(t *testing.T) []byte {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("..", "..", "..", "schemas", "remote-link-v1.schema.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	sort.Strings(paths)
-	out := map[string]frameFile{}
-	for _, p := range paths {
-		var ff frameFile
-		raw, err := os.ReadFile(p)
-		if err != nil {
-			t.Fatal(err)
-		}
-		mustUnmarshal(t, raw, &ff)
-		base := strings.TrimSuffix(filepath.Base(p), ".json")
-		out[base[strings.IndexByte(base, '-')+1:]] = ff
-	}
-	return out
+	return b
 }
 
 func envelopeOf(t *testing.T, name string) envelope {
