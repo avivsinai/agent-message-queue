@@ -60,17 +60,25 @@ func TestWakeConfigRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, args := range [][]string{
-		{"--hold-low", "banana"},
-	} {
-		_, err := captureStdout(t, func() error { return runWakeConfig(append(append([]string{}, base...), args...)) })
-		if GetExitCode(err) != ExitUsage {
-			t.Fatalf("wake config %v exit = %d (%v), want usage", args, GetExitCode(err), err)
-		}
-		after, readErr := os.ReadFile(settingsPath)
-		if readErr != nil || string(after) != string(before) {
-			t.Fatalf("wake config %v changed the settings file: %q (%v)", args, after, readErr)
-		}
+	_, err = captureStdout(t, func() error { return runWakeConfig(append(append([]string{}, base...), "--hold-low", "banana")) })
+	if GetExitCode(err) != ExitUsage {
+		t.Fatalf("wake config --hold-low banana exit = %d (%v), want usage", GetExitCode(err), err)
+	}
+	after, readErr := os.ReadFile(settingsPath)
+	if readErr != nil || string(after) != string(before) {
+		t.Fatalf("wake config --hold-low banana changed the settings file: %q (%v)", after, readErr)
+	}
+
+	// --reset replaces a refused file with exactly the given keys.
+	if err := os.WriteFile(settingsPath, []byte("garbage"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := show(); got.File.Status != "refused" {
+		t.Fatalf("garbage file status = %q, want refused", got.File.Status)
+	}
+	got = show("--reset", "--hold-low", "1m")
+	if s := got.Settings["hold_low"]; s.Value != "1m0s" || s.Source != "file" || got.File.Status != "ok" {
+		t.Fatalf("after reset hold_low = %+v, file %+v, want 1m0s from file, ok", s, got.File)
 	}
 
 	// Regression (#1014 live E2E S8): a typo handle exited 1 because the wake

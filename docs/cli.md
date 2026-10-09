@@ -1248,6 +1248,8 @@ applies the file within a few seconds. Flags fixed for a running wake (--inject-
 --inject-mode, --inject-arg, --inject-cmd, --interrupt-cmd, --retry-until) are refused.
 An invalid file is shown as refused and cannot be changed with set or --unset;
 --reset replaces it with exactly the given setting flags (none = all defaults).
+While the file is absent and the running wake does not report live settings
+(unreported), set and --unset exit 6; restart the wake or use --reset with the full set.
 
 Options:
   -bell

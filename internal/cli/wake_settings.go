@@ -492,9 +492,12 @@ type wakeSettingsStartup struct {
 	// refused is a file the wake could not use; it runs with defaults.
 	refused error
 	// unseeded is why a resume could not seed an absent file from its
-	// argv settings; it runs with them in memory.
+	// argv settings; it runs with them in memory and the loop retries.
 	unseeded error
-	applied  wakeSettingsAppliedStatus
+	// seed is the canonical file an unseeded resume still has to store;
+	// nil means nothing to seed.
+	seed    []byte
+	applied wakeSettingsAppliedStatus
 }
 
 // planWakeSettingsStartup merges a start's settings flags with one read of

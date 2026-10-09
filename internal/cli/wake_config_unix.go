@@ -94,7 +94,9 @@ func runWakeConfig(args []string) error {
 		"applies the file within a few seconds. Flags fixed for a running wake (--inject-via,",
 		"--inject-mode, --inject-arg, --inject-cmd, --interrupt-cmd, --retry-until) are refused.",
 		"An invalid file is shown as refused and cannot be changed with set or --unset;",
-		"--reset replaces it with exactly the given setting flags (none = all defaults).")
+		"--reset replaces it with exactly the given setting flags (none = all defaults).",
+		"While the file is absent and the running wake does not report live settings",
+		"(unreported), set and --unset exit 6; restart the wake or use --reset with the full set.")
 	if handled, err := parseFlags(fs, args, usage); err != nil {
 		return err
 	} else if handled {
@@ -151,6 +153,9 @@ func runWakeConfig(args []string) error {
 		exists = true
 	case len(explicit) > 0 || len(unsetKeys) > 0:
 		if err := requireValidWakeSettingsFile(agentDir); err != nil {
+			return err
+		}
+		if err := refuseSetOnUnreportedWake(agentDir, canonicalWakeRoot(root), me); err != nil {
 			return err
 		}
 		raw, _, err = updateWakeSettingsFileInDir(agentDir, func(doc *wakeSettingsDoc) error {
@@ -290,6 +295,24 @@ func requireValidWakeSettingsFile(agentDir *wakeAgentDir) error {
 			"the wake settings file is invalid (%v); fix it by hand (mode 0600) or run 'amq wake config --reset [settings flags]'",
 			err,
 		)
+	}
+	return nil
+}
+
+// refuseSetOnUnreportedWake stops set and --unset from writing a partial file
+// over a live wake that may run command-line settings the absent file does not
+// hold: an unreported wake never seeded the file from its flags.
+func refuseSetOnUnreportedWake(agentDir *wakeAgentDir, root, me string) error {
+	_, exists, err := readWakeSettingsFile(agentDir)
+	if err != nil || exists {
+		return err
+	}
+	state, err := inspectWakeSettingsRunState(agentDir, root, me, wakeSettingsDigest(nil, false))
+	if err != nil {
+		return err
+	}
+	if state.Status == wakeSettingsRunUnreported {
+		return ActionRequiredError("the running wake does not report live settings and may run command-line settings that are not in the file; restart it first (a resume seeds the file from its flags), or use amq wake config --reset with the full set")
 	}
 	return nil
 }

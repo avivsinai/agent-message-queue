@@ -122,13 +122,18 @@ amq wake config --me claude --reset --hold-low 10m # replace the file with exact
 
 `wake config` shows each setting with its source (`file` or `default`) and the
 wake status: `applied`, `pending`, `refused: <error>`, `unreported`, or
-`no running wake`. A refused file also shows `file: refused: <error>` in place
-of values. `unreported` means the running wake does not report live settings
-(an older image); restart it to adopt them. `show` and `set` never create the
+`no running wake`. A refused file shows `file: refused: <error>` and the rows
+show defaults, not the running wake's values; the running wake keeps its last
+applied settings. The JSON status `unreported` (text: `running wake does not
+report live settings`) means the wake runs an older image or its status write
+failed; restart it to adopt live settings. `show` and `set` never create the
 agent directory: a missing mailbox exits 3.
 Any setting flag or `--unset` validates the whole new set and writes it. On a
 refused file, `set` and `--unset` exit 1 and point at `--reset`, which replaces
-the file with exactly the given keys (all defaults when none are given). A bad
+the file with exactly the given keys (all defaults when none are given). While
+the file is absent and the wake is `unreported`, `set` and `--unset` exit 6: the
+wake may run command-line settings the file lacks. Restart it (a resume seeds the
+file from its flags) or use `--reset` with the full set. A bad
 value exits 2 and writes nothing. A restart-only flag exits 2 with the restart
 instruction. `--wait` waits until the running wake records the new file digest
 in `.wake.settings.applied`; `--timeout` bounds it (default 60s, `0` waits

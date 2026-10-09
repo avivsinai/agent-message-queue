@@ -2465,20 +2465,23 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 	}
 	// Publish the startup status before the rest of startup, so wake config
 	// does not read this generation as an image without live settings. A
-	// failure is retried by the loop's reload.
+	// failure is retried by the loop's reload. An unseeded resume publishes
+	// nothing for the absent file; the loop publishes once its seed lands.
 	var pendingStartupSettingsApplied *wakeSettingsAppliedStatus
-	if err := recordWakeSettingsApplied(
-		activeAgentDir,
-		currentWake,
-		startupSettings.applied,
-		wakeSettingsGuardTimeout,
-	); err != nil {
-		_ = writeStderr(
-			"amq wake: record %s: %v; retrying\n",
-			wakeSettingsAppliedFileName,
-			err,
-		)
-		pendingStartupSettingsApplied = &startupSettings.applied
+	if startupSettings.unseeded == nil {
+		if err := recordWakeSettingsApplied(
+			activeAgentDir,
+			currentWake,
+			startupSettings.applied,
+			wakeSettingsGuardTimeout,
+		); err != nil {
+			_ = writeStderr(
+				"amq wake: record %s: %v; retrying\n",
+				wakeSettingsAppliedFileName,
+				err,
+			)
+			pendingStartupSettingsApplied = &startupSettings.applied
+		}
 	}
 	if currentWake.Lock.ControlSocket != "" {
 		var controlCleanup func()
@@ -2592,7 +2595,7 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 		recordDoorbellStatus: func(parked bool, attempts uint) error {
 			return setWakeDoorbellStatusInDir(activeAgentDir, me, parked, attempts)
 		},
-		settingsSource:         wakeSettingsSourceInDir(activeAgentDir),
+		settingsSource:         wakeSettingsSourceInDir(activeAgentDir, currentWake, startupSettings.seed),
 		settingsObserved:       startupSettings.observed,
 		pendingSettingsApplied: pendingStartupSettingsApplied,
 		recordSettingsApplied: func(status wakeSettingsAppliedStatus) error {

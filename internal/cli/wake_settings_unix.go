@@ -182,8 +182,9 @@ func loadWakeSettingsAtStartup(
 // unseededWakeSettingsResume resolves a resume whose guarded seed failed with
 // seedErr. A file that now exists wins as on any resume. With no file the
 // wake runs the argv settings in memory and observes the absent file, so the
-// next reload keeps them until a file appears. The sidecar records refused
-// with the seed error, so wake config shows why the file is still absent.
+// next reload keeps them; the settings source retries the seed from the loop.
+// No status is published for the absent file until the seed lands, so wake
+// config does not report the argv settings as a refused or applied file.
 func unseededWakeSettingsResume(
 	agentDir *wakeAgentDir,
 	flags wakeSettings,
@@ -198,32 +199,84 @@ func unseededWakeSettingsResume(
 	if err == nil && plan.write == nil {
 		return plan, nil
 	}
-	seedErr = fmt.Errorf(
+	plan.unseeded = fmt.Errorf(
 		"store wake settings flags in %s: %w",
 		filepath.Join(agentDir.path, wakeSettingsFileName),
 		seedErr,
 	)
+	plan.seed = plan.write
 	plan.write = nil
-	plan.unseeded = seedErr
 	plan.observed = observeWakeSettings(raw, exists, readErr)
-	plan.applied = wakeSettingsAppliedStatus{
-		status: wakeSettingsStatusRefused,
-		digest: plan.observed.digest(),
-		err:    seedErr.Error(),
-	}
+	plan.applied = wakeSettingsAppliedStatus{}
 	return plan, nil
 }
 
 // wakeSettingsSourceInDir is the running wake's settings source. It reads
 // only through the canonical agent directory; a detached directory is
-// reported unavailable so the reload skips it.
-func wakeSettingsSourceInDir(agentDir *wakeAgentDir) func() ([]byte, bool, error) {
+// reported unavailable so the reload skips it. seed is the file an unseeded
+// resume still has to store for the wake generation in inspection: while the
+// file is absent each read retries the guarded seed without waiting long for
+// the guard, and returns the stored bytes once it lands. A file that appears
+// otherwise, or a read error, ends the seeding and is read as it is.
+func wakeSettingsSourceInDir(
+	agentDir *wakeAgentDir,
+	inspection wakeLockInspection,
+	seed []byte,
+) func() ([]byte, bool, error) {
 	return func() ([]byte, bool, error) {
 		if err := validateCanonicalWakeAgentDir(agentDir); err != nil {
 			return nil, false, &wakeSettingsSourceUnavailableError{err: err}
 		}
-		return readWakeSettingsFile(agentDir)
+		if seed == nil {
+			return readWakeSettingsFile(agentDir)
+		}
+		raw, exists, readErr, seedErr := seedWakeSettingsFile(agentDir, inspection, seed)
+		if seedErr != nil {
+			raw, exists, readErr = readWakeSettingsFile(agentDir)
+		}
+		// As at startup, a file or a read error at the path wins over the
+		// seed; a read that a concurrent rename changed is read again.
+		var snapshotChanged *wakeSnapshotReadChangedError
+		if exists || (readErr != nil && !errors.As(readErr, &snapshotChanged)) {
+			seed = nil
+		}
+		return raw, exists, readErr
 	}
+}
+
+// seedWakeSettingsFile stores seed as .wake.settings when the file is still
+// absent and the wake generation in inspection still holds the lock. It
+// returns the file the guarded read found or the seed it stored; seedErr
+// means the guard, the generation check, or the write failed.
+func seedWakeSettingsFile(
+	agentDir *wakeAgentDir,
+	inspection wakeLockInspection,
+	seed []byte,
+) (raw []byte, exists bool, readErr, seedErr error) {
+	seedErr = withWakeLifecycleGuardModeAndTimeoutInDir(
+		agentDir,
+		unix.LOCK_EX|unix.LOCK_NB,
+		wakeLifecycleGuardRetryTimeout,
+		func(dirfd int) error {
+			current := inspectWakeLockAt(dirfd, agentDir, inspection.Root, inspection.Agent)
+			if !current.Exists ||
+				current.Lock.Generation == "" ||
+				current.Lock.Generation != inspection.Lock.Generation ||
+				current.Root != inspection.Root || current.Agent != inspection.Agent {
+				return fmt.Errorf("wake changed before settings seed")
+			}
+			raw, exists, readErr = readWakeSettingsFileAt(dirfd, agentDir)
+			if exists || readErr != nil {
+				return nil
+			}
+			if err := writeWakeSettingsFileAt(dirfd, agentDir, seed); err != nil {
+				return err
+			}
+			raw, exists = seed, true
+			return nil
+		},
+	)
+	return raw, exists, readErr, seedErr
 }
 
 // wakeSettingsAppliedFile is .wake.settings.applied: what the wake of one
