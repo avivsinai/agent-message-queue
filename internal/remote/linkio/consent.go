@@ -21,7 +21,6 @@ const SchemaConsent = "amq.remote.consent/2"
 // Refusal codes of a signed submit, before admission.
 const (
 	CodeConsentInvalid = "consent_invalid"
-	CodeBindingChanged = "binding_changed"
 	CodeSessionChanged = "session_changed"
 	CodeClockSkew      = "clock_skew"
 )
@@ -102,11 +101,11 @@ func VerifySignedSubmit(view *ConsentView, m SignedSubmit, now time.Time) (*prot
 	b, shared := view.Bindings[d.Binding]
 	switch {
 	case d.ServerID != view.ServerID || d.StoreID != view.StoreID:
-		return nil, "", refuse(CodeBindingChanged, "the consent is for another server or store")
+		return nil, "", refuse(CodeConsentInvalid, "the consent is for another server or store")
 	case !shared:
 		return nil, "", refuse(string(protocol.CodeUnshared), "binding %q is not shared with this link", d.Binding)
 	case d.Command.TargetID != b.TargetID || d.Command.Epoch != b.Epoch || d.Labels != b.Labels:
-		return nil, "", refuse(CodeBindingChanged, "the binding changed since you signed")
+		return nil, "", refuse(string(protocol.CodeStaleEpoch), "the binding changed since you signed; read it again and sign again")
 	case d.NativeSessionID == "" || d.NativeSessionID != b.NativeSessionID:
 		return nil, "", refuse(CodeSessionChanged, "the session behind %s changed since you signed", d.Binding)
 	}
