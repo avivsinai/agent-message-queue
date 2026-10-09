@@ -18,6 +18,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/jcs"
 	"github.com/avivsinai/agent-message-queue/internal/remote/manifest"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
@@ -72,7 +73,11 @@ type Config struct {
 	ConsentKeyRevoked func(credentialID string)
 	// Revoked retires the sink after a permanent revoke (close 4010).
 	Revoked func()
-	Logf    func(format string, args ...any)
+	// Handle runs an admitted command (core.Endpoint.Handle).
+	Handle Handler
+	// ConsentKeys returns the consent keys this machine trusts now.
+	ConsentKeys func() []ConsentKey
+	Logf        func(format string, args ...any)
 
 	Now          func() time.Time
 	OfferTTL     time.Duration
@@ -129,6 +134,9 @@ func New(cfg Config) (*Carrier, error) {
 	}
 	if cfg.Bindings == nil {
 		cfg.Bindings = func() []Binding { return nil }
+	}
+	if cfg.ConsentKeys == nil {
+		cfg.ConsentKeys = func() []ConsentKey { return nil }
 	}
 	if cfg.Logf == nil {
 		cfg.Logf = func(string, ...any) {}
@@ -428,6 +436,7 @@ func (c *Carrier) serveOnce(ctx context.Context) error {
 	sess := &session{
 		ws: ws, gen: gen, prefix: newPrefix(),
 		control: make(chan []byte, controlQueue), data: make(chan []byte, dataQueue),
+		dispatch: newDispatcher(connCtx),
 	}
 	sess.lastPing.Store(lastPing.Load())
 	c.mu.Lock()
@@ -600,8 +609,9 @@ func (c *Carrier) handleReply(f Frame) {
 	}
 }
 
-// handleRequest answers a frame the server sends. key_revoked drops the key;
-// every other request is refused until its handler exists.
+// handleRequest answers a frame the server sends. key_revoked drops the key
+// inline; a signed submit is queued behind earlier commands for the same
+// request; every other request is refused until its handler exists.
 func (c *Carrier) handleRequest(sess *session, f Frame) {
 	switch bodySchema(f.Body) {
 	case SchemaKeyRevoked:
@@ -610,8 +620,69 @@ func (c *Carrier) handleRequest(sess *session, f Frame) {
 			c.cfg.ConsentKeyRevoked(b.CredentialID)
 		}
 		return
+	case SchemaSignedSubmit:
+		var m SignedSubmit
+		if err := decodeStrict(f.Body, SchemaSignedSubmit, &m); err != nil {
+			c.refuse(sess, f.ID, ErrorBody{Code: CodeConsentInvalid, Message: err.Error()})
+			return
+		}
+		key := "submit:" + m.DocumentB64
+		if doc, err := b64.DecodeString(m.DocumentB64); err == nil {
+			var d struct {
+				Command struct {
+					RequestID string `json:"request_id"`
+				} `json:"command"`
+			}
+			if json.Unmarshal(doc, &d) == nil && d.Command.RequestID != "" {
+				key = d.Command.RequestID
+			}
+		}
+		if !sess.dispatch.enqueue(&job{sess: sess, f: f, key: key, run: func() (any, error) { return c.admitSigned(m) }}) {
+			c.refuse(sess, f.ID, ErrorBody{Code: string(protocol.CodeBusy), Message: "too many requests in progress", RetryAfterMS: busyRetryAfterMS})
+		}
+		return
 	}
 	c.refuse(sess, f.ID, ErrorBody{Code: string(protocol.CodeUnsupported), Message: "this endpoint does not accept that request on a link"})
+}
+
+// admitSigned runs a signed submit: the command decoded from the signed
+// bytes, on the native session it was signed for, or a refusal.
+func (c *Carrier) admitSigned(m SignedSubmit) (any, error) {
+	if c.cfg.Handle == nil {
+		return nil, refuse(string(protocol.CodeUnsupported), "this endpoint runs no commands")
+	}
+	cmd, native, err := VerifySignedSubmit(c.view(), m, c.cfg.Now())
+	if err != nil {
+		return nil, err
+	}
+	out, err := c.cfg.Handle(cmd, c.source(native))
+	if err != nil {
+		return nil, err
+	}
+	reply, ok := out.(protocol.Reply)
+	if !ok {
+		return nil, errors.New("the endpoint returned no submit reply")
+	}
+	return outcomeReply{Outcome: reply.Outcome}, nil
+}
+
+// view is what the machine trusts right now. It is rebuilt for each signed
+// submit, so a removed key or a changed binding takes effect at once.
+func (c *Carrier) view() *ConsentView {
+	v := &ConsentView{ServerID: c.cfg.Pin.ServerID, StoreID: c.cfg.StoreID, Keys: map[string]ConsentKey{}, Bindings: map[string]Binding{}}
+	for _, k := range c.cfg.ConsentKeys() {
+		v.Keys[k.CredentialID] = k
+	}
+	for _, b := range c.cfg.Bindings() {
+		v.Bindings[b.Binding] = b
+	}
+	return v
+}
+
+// source is the authenticated source of every command this link runs. The
+// origin routes its revisions back to this sink.
+func (c *Carrier) source(native string) core.Source {
+	return core.Source{Host: c.host, Origin: map[string]string{"carrier": "link", "sink": c.host}}
 }
 
 // refuse answers on the control lane. A full control lane drops the answer;
@@ -636,6 +707,7 @@ type session struct {
 	lastPing atomic.Int64
 	control  chan []byte // acknowledgements and refusals: never waits behind data
 	data     chan []byte
+	dispatch *dispatcher
 }
 
 func (s *session) nextID() string {

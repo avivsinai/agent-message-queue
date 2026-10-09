@@ -361,7 +361,7 @@ func TestUnsupportedRequestIsRefused(t *testing.T) {
 	c, _ := startCarrier(t, fs, clk, nil)
 	gen := fs.waitWelcome()
 	waitOnline(t, c)
-	fs.send(Frame{Schema: SchemaFrame, ID: "m_s1", Gen: gen, Body: mustJSON(map[string]string{"schema": SchemaSignedSubmit})})
+	fs.send(Frame{Schema: SchemaFrame, ID: "m_s1", Gen: gen, Body: mustJSON(map[string]string{"schema": protocol.SchemaCommand, "op": "session.list"})})
 	f := fs.next()
 	var r errorReply
 	if err := decodeStrict(f.Body, "", &r); err != nil || f.Re != "m_s1" || r.Error.Code != string(protocol.CodeUnsupported) {

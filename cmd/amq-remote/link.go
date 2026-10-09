@@ -197,13 +197,32 @@ func (ls *linkSet) newRun(l manifest.Link) (*linkRun, error) {
 			}
 		},
 		Revoked: func() { ls.retire(name) },
-		Logf:    func(f string, a ...any) { say(ls.stderr, f, a...) },
+		Handle:  func(cmd *protocol.Command, src core.Source) (any, error) { return ls.handle(cmd, src) },
+		ConsentKeys: func() []linkio.ConsentKey {
+			keys, err := linkio.LoadConsentKeys(ls.stateDir, name)
+			if err != nil {
+				say(ls.stderr, "link %s: read consent keys: %v", name, err)
+			}
+			return keys
+		},
+		Logf: func(f string, a ...any) { say(ls.stderr, f, a...) },
 	})
 	if err != nil {
 		return nil, err
 	}
 	run.carrier = c
 	return run, nil
+}
+
+// handle runs a link's admitted command on the endpoint.
+func (ls *linkSet) handle(cmd *protocol.Command, src core.Source) (any, error) {
+	ls.mu.Lock()
+	ep := ls.ep
+	ls.mu.Unlock()
+	if ep == nil {
+		return nil, protocol.Refuse(protocol.CodeDraining, "the endpoint is not started")
+	}
+	return ep.Handle(cmd, src)
 }
 
 // retire makes a revoked link's sink history.
