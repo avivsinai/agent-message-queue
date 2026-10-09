@@ -105,7 +105,7 @@ func ioctlTIOCSTI(fd uintptr, ch byte) error {
 }
 
 func waitForTTYInputQuiet(cfg *wakeConfig) bool {
-	if cfg.inputMaxHold <= 0 {
+	if cfg.settings.inputMaxHold <= 0 {
 		return true
 	}
 
@@ -150,9 +150,9 @@ func waitForTTYInputQuiet(cfg *wakeConfig) bool {
 			}
 			time.Sleep(delay)
 		},
-		cfg.inputQuietFor,
-		cfg.inputMaxHold,
-		cfg.inputPollInterval,
+		cfg.settings.inputQuietFor,
+		cfg.settings.inputMaxHold,
+		cfg.settings.inputPollInterval,
 	)
 	if sampleErr != nil && cfg.debug {
 		_ = writeWakeDiagnostic(cfg, "amq wake [debug]: input deferral unavailable: %v\n", sampleErr)

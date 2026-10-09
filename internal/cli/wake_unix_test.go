@@ -455,8 +455,8 @@ func TestRunWakeWithLoopInjectViaSkipsTTYStartupRequirement(t *testing.T) {
 	if strings.Join(got.injectArgs, "|") != "exec|Team Alpha" {
 		t.Fatalf("expected fixed inject args, got %#v", got.injectArgs)
 	}
-	if got.injectTimeout != 250*time.Millisecond {
-		t.Fatalf("expected inject timeout 250ms, got %s", got.injectTimeout)
+	if got.settings.injectTimeout != 250*time.Millisecond {
+		t.Fatalf("expected inject timeout 250ms, got %s", got.settings.injectTimeout)
 	}
 	if got.inspectTerminalGeneration == nil {
 		t.Fatal("--inject-via wake has no maintenance lock-health inspection")
@@ -978,7 +978,7 @@ func TestRunWakeLoopOwnerlessStartupScanAndQueuedEventEmitOnce(t *testing.T) {
 			root:               root,
 			me:                 "codex",
 			session:            "session1",
-			debounce:           5 * time.Millisecond,
+			settings:           wakeSettings{debounce: 5 * time.Millisecond},
 			injectMode:         wakeInjectModeRaw,
 			controlStop:        stop,
 			terminalGeneration: lock.Lock.Generation,
@@ -1064,8 +1064,7 @@ func TestRunWakeLoopRearmsOrdinaryInboxWatcher(t *testing.T) {
 					me:          "codex",
 					session:     "session1",
 					wakeOwner:   &wakeOwner{},
-					debounce:    5 * time.Millisecond,
-					previewLen:  80,
+					settings:    wakeSettings{debounce: 5 * time.Millisecond, previewLen: 80},
 					injectMode:  wakeInjectModeNone,
 					controlStop: stop,
 					onPrepared: func(wakeAdmissionWatcher) error {
@@ -1388,7 +1387,7 @@ func TestRunWakeLoopCoalescesAdditionThenRearmsAfterDrain(t *testing.T) {
 			wakeOwner:   &wakeOwner{},
 			injectMode:  wakeInjectModeRaw,
 			controlStop: stop,
-			debounce:    10 * time.Millisecond,
+			settings:    wakeSettings{debounce: 10 * time.Millisecond},
 			doorbell: wakeDoorbellState{
 				phase:                wakeDoorbellRetrying,
 				cohort:               snapshotWakeFileIdentities(map[string]os.FileInfo{"a.md": aInfo}),
@@ -1748,7 +1747,7 @@ func TestBaselineDLQRetryWithSameFilenameRemainsNotifyEligible(t *testing.T) {
 	cfg, outputPath := injectViaCaptureConfig(t)
 	cfg.me = "alice"
 	cfg.root = root
-	cfg.previewLen = 48
+	cfg.settings.previewLen = 48
 	baseline, err := snapshotWakeExistingMessages(root, "alice")
 	if err != nil {
 		t.Fatalf("snapshot baseline: %v", err)

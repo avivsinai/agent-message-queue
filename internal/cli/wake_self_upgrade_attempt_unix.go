@@ -138,8 +138,15 @@ func removeWakeSelfUpgradeAttemptAt(dirfd int) error {
 	return nil
 }
 
+// removeWakeSelfUpgradeArtifactsAt removes the generation-bound diagnostics
+// that die with a wake lock: the self-upgrade diagnostic and the settings
+// applied status. Callers classify a failure as non-blocking diagnostic
+// residue. .wake.settings itself is operator state and is never removed here.
 func removeWakeSelfUpgradeArtifactsAt(dirfd int) error {
-	return removeWakeSelfUpgradeDiagnosticAt(dirfd)
+	return errors.Join(
+		removeWakeSelfUpgradeDiagnosticAt(dirfd),
+		removeWakeSettingsAppliedAt(dirfd),
+	)
 }
 
 func loadWakeSelfUpgradeAttemptAtStartup(

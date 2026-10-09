@@ -69,7 +69,7 @@ func TestRunWakeWithLoopSeparatesInheritedAttentionFromDiagnostics(t *testing.T)
 				t.Fatalf("emit inherited-FD attention: %v", err)
 			}
 			cfg.session = "session1"
-			cfg.previewLen = 80
+			cfg.settings.previewLen = 80
 			cfg.terminalWrite = func(string) error {
 				inputWrites++
 				return nil

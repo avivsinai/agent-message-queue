@@ -21,14 +21,18 @@ state before it changes anything.
 ## Hold by priority
 
 Each doorbell can start a full-context turn, and mail comes in bursts. Two
-opt-in flags let a standalone `amq wake` hold its first doorbell. For example:
+opt-in settings let a wake hold its first doorbell. For example:
 
 ```bash
 amq wake --me claude --hold-normal 5m --hold-low 30m
+amq wake config --me claude --hold-normal 5m --hold-low 30m
 ```
 
-- `--hold-normal` and `--hold-low` set the hold for `normal` and `low` mail.
-  A message without a priority counts as `normal`. Both flags default to `0`,
+The first command sets the hold on a fresh start. The second changes it on a
+running wake. Both write [`.wake.settings`](#live-settings).
+
+- `hold_normal` and `hold_low` (flags `--hold-normal` and `--hold-low`) set the hold for `normal` and `low` mail.
+  A message without a priority counts as `normal`. Both default to `0`,
   so holds are off unless requested. The example's `5m` / `30m` is a workload
   choice for batching routine mail, not a default.
 - The first undrained message sets one deadline: its inbox arrival time plus
@@ -37,14 +41,15 @@ amq wake --me claude --hold-normal 5m --hold-low 30m
   first doorbell becomes eligible. A drain before then cancels it; a drain
   after any doorbell takes every pending message, including held mail.
 - Arrival time comes from the file's modification time in `inbox/new`, not
-  the sender's header clock. A manual restart with the same hold flags reads
+  the sender's header clock. A restart with the same hold settings reads
   the same file and retains its deadline. A missing or future-dated
   modification time bypasses the hold. No separate hold state is persisted.
-- Hold flags are not stored in wake target metadata. `amq wake repair` starts
-  an `--inject-via` replacement with zero holds, so pending mail may ring
-  sooner. If the hold policy is still needed, the owning terminal or
-  supervisor must restart the repaired wake with the same flags after a
-  `wake check`.
+- The hold is a setting, not target metadata. It lives in `.wake.settings`, so
+  `amq wake repair`, `coop exec`, keepalive, and self-upgrade replacements
+  start with the stored hold. A change to the hold applies to the pending
+  cohort: a shorter hold releases held mail at the next scan or within 2
+  seconds, and a longer hold moves the deadline later from the file's
+  modification time. After the first attempt, holds no longer apply.
 - `urgent` mail skips the priority hold, including when a cohort is parked.
   A distinct urgent message can revive a parked cohort for one further
   attempt. Ordinary urgent mail still passes through watcher debounce and
@@ -58,9 +63,79 @@ amq wake --me claude --hold-normal 5m --hold-low 30m
 
 Use `amq send --priority urgent` or `amq reply --priority urgent` for a
 time-critical verdict or unblocking request that should skip the hold.
-Ordinary review responses remain normal by default. These flags are accepted
-by direct `amq wake` only; `amq setup`, `amq launch`, and managed `coop exec`
-do not pass them through yet.
+Ordinary review responses remain normal by default.
+
+## Live settings
+
+A running wake has two kinds of input.
+
+- Identity and transport are fixed for the life of the process: `--me`,
+  `--root`, `--inject-mode`, `--inject-via`, `--inject-arg`, `--inject-cmd`,
+  `--interrupt-cmd`, `--retry-until`, and `--no-self-upgrade`. They are bound
+  into the lock, the target, or the terminal authority. To change one, restart
+  the wake through its owning terminal or supervisor after a `wake check`.
+- Settings are policy values the wake reads each time it uses them: `debounce`,
+  `hold_normal`, `hold_low`, `preview_len`, `bell`, `defer_while_input`,
+  `input_quiet_for`, `input_poll_interval`, `input_max_hold`, `interrupt`,
+  `interrupt_label`, `interrupt_priority`, `interrupt_notice`,
+  `interrupt_cooldown`, and `inject_timeout`. Each has a flag of the same name
+  with `-` in place of `_`.
+
+The settings file is `<root>/agents/<handle>/.wake.settings`, canonical JSON:
+
+```json
+{"schema":1,"settings":{"hold_normal":"5m0s","hold_low":"30m0s"}}
+```
+
+A key that is absent has its default. Durations are Go duration strings. The
+file must be mode 0600 and owned by the current user, and the wake refuses a
+file that is not, one with an unknown key or a newer schema, or one with a
+value that fails validation. A refused file never changes the running settings.
+Use `amq wake config` to edit it. For a hand edit, keep mode 0600.
+
+**Precedence.** Effective settings are the defaults overlaid by the file.
+Explicit settings flags on a fresh `amq wake` write their keys into the file,
+including a value equal to the default. A resume (self-upgrade or
+`amq wake restart`) ignores settings flags in argv when the file exists, so a
+later `wake config` change is not undone by the original command line. When the
+file is absent, a resume seeds it once from the settings flags in its argv; a
+resume never exits because of the file. Repair, `coop exec`, and keepalive pass
+no settings flags and start fresh on the stored file. A start that loses the
+lock, and `--accept-existing-wake` that adopts a live wake, write nothing. A
+fresh start with explicit flags refuses to start when the file is refused or
+cannot be written. A fresh start without settings flags runs with the defaults,
+logs the error, and records `refused`. A self-upgrade or restart candidate is
+refused at preflight while the file is refused, and the refusal is remembered
+for the generation: fix the file, then request `amq wake restart`.
+
+**Apply timing.** The wake checks the file at the start of each inbox scan and
+every 2 seconds. The 2-second check rescans only when a hold changes; every
+other key applies at its next use, so a change is in force for the next message. An armed debounce
+timer keeps its duration; the new debounce applies from the next inbox event.
+
+```bash
+amq wake config --me claude                       # show values, source, wake status
+amq wake config --me claude --hold-low 10m --wait # set, then wait for the wake
+amq wake config --me claude --unset hold_low      # return a key to its default
+amq wake config --me claude --reset --hold-low 10m # replace the file with exactly these keys
+```
+
+`wake config` shows each setting with its source (`file` or `default`) and the
+wake status: `applied`, `pending`, `refused: <error>`, `unreported`, or
+`no running wake`. A refused file also shows `file: refused: <error>` in place
+of values. `unreported` means the running wake does not report live settings
+(an older image); restart it to adopt them. `show` and `set` never create the
+agent directory: a missing mailbox exits 3.
+Any setting flag or `--unset` validates the whole new set and writes it. On a
+refused file, `set` and `--unset` exit 1 and point at `--reset`, which replaces
+the file with exactly the given keys (all defaults when none are given). A bad
+value exits 2 and writes nothing. A restart-only flag exits 2 with the restart
+instruction. `--wait` waits until the running wake records the new file digest
+in `.wake.settings.applied`; `--timeout` bounds it (default 60s, `0` waits
+forever), exit 4 on timeout, exit 1 when the wake refuses the file, exit 6
+when the wake stays `unreported` for 5 s, and exit 0 at once when no wake runs. `--json` prints the same data. The wake records its
+state in `.wake.settings.applied`; the file is not a receipt of message
+consumption.
 
 ## Doctor
 

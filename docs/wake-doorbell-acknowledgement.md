@@ -65,7 +65,8 @@ urgent addition permits one more attempt even at that cap. Attention-only
 attempts remain on their own cadence while the cohort remains unread.
 
 - By default, the first notification for a newly pending cohort is eligible
-  immediately after debounce. Optional `--hold-normal` and `--hold-low` delay
+  immediately after debounce. The `hold_normal` and `hold_low` settings (`--hold-normal`, `--hold-low`, or
+  `amq wake config`) delay
   that first attempt by priority; see [Wake operations](wake-operations.md#hold-by-priority).
 - Doorbell (input-injecting) attempts start at 5s and double up to a 2-minute
   cap, because they drive the agent directly.

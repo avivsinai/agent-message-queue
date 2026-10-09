@@ -20,7 +20,7 @@ func newGuardedWakeAttentionConfig(
 		me:            "codex",
 		session:       "session1",
 		injectMode:    wakeInjectModeRaw,
-		previewLen:    80,
+		settings:      wakeSettings{previewLen: 80},
 		controlStop:   make(chan struct{}),
 		doorbellNow:   func() time.Time { return time.Unix(1_800_000_000, 0) },
 		terminalWrite: func(string) error { *inputWrites++; return nil },

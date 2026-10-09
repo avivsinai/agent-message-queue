@@ -174,6 +174,48 @@ would make readiness indistinguishable from successful notification delivery.
 
 Source anchors: `wake_ready_unix.go` and `wake_prepared_unix.go`.
 
+## `.wake.settings`: operator policy values
+
+**Owns:** the wake's policy settings (hold, debounce, preview, bell, input
+deferral, interrupt notice, inject timeout) as canonical JSON, mode 0600. It
+holds no identity, generation, or transport state.
+
+**Commit domain:** the file is written atomically on the agent directory
+descriptor, by `amq wake config` (including `--reset`), by a fresh `amq wake` with
+explicit settings flags, or once by a resume that finds no file and has
+explicit settings flags, under the lifecycle guard. A running wake only reads it, at
+each inbox scan and every 2 seconds, and validates it before it swaps the
+settings. A present file always wins over argv on a resume. A refused file never changes the running settings. A wake never
+derives identity from it, and no wake cleanup (release, retire, repair,
+self-upgrade, or `doctor --fix-wake-locks`) removes it.
+
+**Independence invariant:** settings are not ownership. If the file shared a
+commit domain with the lock or target, a policy change would imply an owner or
+injector transition, and a failed settings write would leave an unrepresentable
+partial wake state.
+
+Source anchors: `wake_settings.go` and `wake_settings_unix.go`.
+
+## `.wake.settings.applied`: applied-settings record
+
+**Owns:** the status (`applied` or `refused`), the digest of the settings file
+bytes the wake observed, and the error text, bound to the root, agent, and wake
+generation. It is not a receipt: receipts record message consumption.
+
+**Commit domain:** the running wake writes it under the lifecycle guard after
+it re-inspects the lock and finds the same generation, and skips the write when
+the content is unchanged. The write is best effort: a failure is logged,
+never blocks or rolls back a settings swap, and is retried on the next check.
+Lock release, owner-claim removal, and restart-residue repair remove it with the
+other generation-bound diagnostics. `retire` leaves it; the generation binding
+makes a stale record inert. `amq wake config --wait` reads it.
+
+**Independence invariant:** the record reports what a generation applied; it
+does not decide what the settings are. Putting it in the settings file would let
+a reader mistake a stale record for the operator's intent.
+
+Source anchor: `wake_settings_unix.go`.
+
 ## `.wake.lifecycle.lock`: mutation serialization
 
 **Owns:** exclusion between cooperating mutations and compound validations in

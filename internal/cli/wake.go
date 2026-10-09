@@ -18,53 +18,48 @@ import (
 )
 
 type wakeConfig struct {
-	me                            string
-	root                          string
-	session                       string
-	injectCmd                     string
-	injectVia                     string // external command for injection (replaces TIOCSTI)
-	injectArgs                    []string
-	wakeOwner                     *wakeOwner
-	injectTimeout                 time.Duration
-	injectViaHook                 func(text string) (stderr string, runErr error) // test-only: deterministic inject bypass
-	bell                          bool
-	debounce                      time.Duration
-	previewLen                    int
-	strict                        bool
-	fallbackWarn                  bool
-	injectMode                    string // auto, raw, paste
-	requestedInjectMode           string
-	retryUntil                    string
-	legacyTIOCSTIDemoted          bool
-	debug                         bool
-	deferWhileInput               bool
-	inputQuietFor                 time.Duration
-	inputPollInterval             time.Duration
-	inputMaxHold                  time.Duration
-	interrupt                     bool
-	interruptLabel                string
-	interruptPriority             string
-	interruptKey                  string
-	interruptNotice               string
-	interruptCooldown             time.Duration
-	lastInterrupt                 time.Time
-	controlStop                   <-chan struct{}
-	restartSignals                chan os.Signal
-	beforeTerminalWrite           func() error
-	terminalWrite                 func(string) error
-	inspectTerminalGeneration     func() wakeLockInspection
-	terminalGeneration            string
-	terminalImageVersion          string
-	terminalTTY                   string
-	selfUpgrade                   wakeSelfUpgradeState
-	baselineRequested             bool
-	baselineInherited             bool
-	baselineExisting              map[string]wakeFileIdentity
-	inputDelivery                 wakeInputDeliveryState
-	inputRecoveryRequired         bool
-	doorbell                      wakeDoorbellState
-	holdPolicy                    wakeHoldPolicy
-	holds                         map[string]wakeHold // set by each inbox scan for the doorbell plan
+	me                        string
+	root                      string
+	session                   string
+	injectCmd                 string
+	injectVia                 string // external command for injection (replaces TIOCSTI)
+	injectArgs                []string
+	wakeOwner                 *wakeOwner
+	settings                  wakeSettings                                    // live policy; replaced only by reloadSettings on the loop goroutine
+	injectViaHook             func(text string) (stderr string, runErr error) // test-only: deterministic inject bypass
+	strict                    bool
+	fallbackWarn              bool
+	injectMode                string // auto, raw, paste
+	requestedInjectMode       string
+	retryUntil                string
+	legacyTIOCSTIDemoted      bool
+	debug                     bool
+	interruptKey              string
+	lastInterrupt             time.Time
+	controlStop               <-chan struct{}
+	restartSignals            chan os.Signal
+	beforeTerminalWrite       func() error
+	terminalWrite             func(string) error
+	inspectTerminalGeneration func() wakeLockInspection
+	terminalGeneration        string
+	terminalImageVersion      string
+	terminalTTY               string
+	selfUpgrade               wakeSelfUpgradeState
+	baselineRequested         bool
+	baselineInherited         bool
+	baselineExisting          map[string]wakeFileIdentity
+	inputDelivery             wakeInputDeliveryState
+	inputRecoveryRequired     bool
+	doorbell                  wakeDoorbellState
+	holds                     map[string]wakeHold // set by each inbox scan for the doorbell plan
+	// settingsSource reads .wake.settings (raw bytes, whether it exists). nil
+	// disables live settings: direct loop tests and legacy callers.
+	settingsSource                func() ([]byte, bool, error)
+	settingsObserved              wakeSettingsObservation
+	settingsTicks                 <-chan time.Time
+	holdPolicyChanged             bool // consumed by the next inbox scan that builds holds
+	recordSettingsApplied         func(wakeSettingsAppliedStatus) error
+	pendingSettingsApplied        *wakeSettingsAppliedStatus
 	doorbellNow                   func() time.Time
 	lastAttemptAttention          bool
 	lastAttemptTransientAttention bool
@@ -543,7 +538,7 @@ func waitForInputQuiet(
 }
 
 func shouldDeferBeforeInject(cfg *wakeConfig, deferForInput bool) bool {
-	return deferForInput && cfg.deferWhileInput && cfg.injectVia == "" && cfg.injectMode != wakeInjectModeNone
+	return deferForInput && cfg.settings.deferWhileInput && cfg.injectVia == "" && cfg.injectMode != wakeInjectModeNone
 }
 
 func notifyNewMessages(cfg *wakeConfig) error {
@@ -577,6 +572,8 @@ func notifyNewMessages(cfg *wakeConfig) error {
 			}
 		}
 	}
+	// Only after the canonical check: a change is in force for this scan.
+	cfg.reloadSettings()
 
 	var entries []os.DirEntry
 	var err error
@@ -596,7 +593,7 @@ func notifyNewMessages(cfg *wakeConfig) error {
 	interruptCounts := make(map[string]int)
 	currentPending := make(map[string]os.FileInfo)
 	var holds map[string]wakeHold
-	if cfg.holdPolicy.enabled() {
+	if cfg.settings.holdPolicy().enabled() {
 		holds = make(map[string]wakeHold)
 	}
 	scanTime := cfg.wakeDoorbellNow()
@@ -643,7 +640,7 @@ func notifyNewMessages(cfg *wakeConfig) error {
 			if err == nil {
 				priority = header.Priority
 			}
-			holds[name] = newWakeHold(cfg.holdPolicy, priority, pendingInfo, scanTime)
+			holds[name] = newWakeHold(cfg.settings.holdPolicy(), priority, pendingInfo, scanTime)
 		}
 		if err != nil {
 			// Count corrupt messages too
@@ -670,13 +667,19 @@ func notifyNewMessages(cfg *wakeConfig) error {
 
 		messages = append(messages, info)
 
-		if cfg.interrupt && isInterruptMessage(info, cfg) {
+		if cfg.settings.interrupt && isInterruptMessage(info, cfg) {
 			interruptMessages = append(interruptMessages, info)
 			interruptCounts[from]++
 		}
 	}
 
 	cfg.holds = holds
+	if cfg.holdPolicyChanged {
+		// A live hold change re-times a held cohort from the same scan's holds,
+		// before planHeld reads the deadline.
+		cfg.doorbell.reholdForPolicy(currentPending, holds)
+		cfg.holdPolicyChanged = false
+	}
 	if cfg.inputRecoveryRequired &&
 		dischargeWakeInputRecoveryAfterProgress(cfg, currentPending) &&
 		len(messages) == 0 {
@@ -694,10 +697,10 @@ func notifyNewMessages(cfg *wakeConfig) error {
 		return reconcileWakeInputAfterInboxDrain(cfg)
 	}
 
-	if cfg.interrupt && len(interruptMessages) > 0 {
-		interruptText := buildInterruptText(cfg.session, interruptMessages, interruptCounts, cfg.previewLen, cfg.interruptNotice)
+	if cfg.settings.interrupt && len(interruptMessages) > 0 {
+		interruptText := buildInterruptText(cfg.session, interruptMessages, interruptCounts, cfg.settings.previewLen, cfg.settings.interruptNotice)
 		notice := peerWakeNotification(interruptText)
-		if cfg.interruptNotice != "" {
+		if cfg.settings.interruptNotice != "" {
 			notice = operatorWakeNotification(interruptText)
 		}
 		if cfg.inputRecoveryRequired {
@@ -776,7 +779,7 @@ func notifyNewMessages(cfg *wakeConfig) error {
 		notice = operatorWakeNotification(text)
 	} else {
 		notice = peerWakeNotification(
-			buildNotificationText(cfg.session, messages, cfg.previewLen),
+			buildNotificationText(cfg.session, messages, cfg.settings.previewLen),
 		)
 	}
 
@@ -1543,17 +1546,17 @@ func truncateSubject(subject string, previewLen int) string {
 }
 
 func isInterruptMessage(info wakeMsgInfo, cfg *wakeConfig) bool {
-	if !cfg.interrupt {
+	if !cfg.settings.interrupt {
 		return false
 	}
-	if cfg.interruptPriority != "" && info.priority != cfg.interruptPriority {
+	if cfg.settings.interruptPriority != "" && info.priority != cfg.settings.interruptPriority {
 		return false
 	}
-	if cfg.interruptLabel == "" {
+	if cfg.settings.interruptLabel == "" {
 		return false
 	}
 	for _, label := range info.labels {
-		if strings.TrimSpace(label) == cfg.interruptLabel {
+		if strings.TrimSpace(label) == cfg.settings.interruptLabel {
 			return true
 		}
 	}
@@ -1561,10 +1564,10 @@ func isInterruptMessage(info wakeMsgInfo, cfg *wakeConfig) bool {
 }
 
 func shouldInterruptNow(cfg *wakeConfig, now time.Time) bool {
-	if cfg.interruptCooldown <= 0 {
+	if cfg.settings.interruptCooldown <= 0 {
 		return true
 	}
-	return now.Sub(cfg.lastInterrupt) >= cfg.interruptCooldown
+	return now.Sub(cfg.lastInterrupt) >= cfg.settings.interruptCooldown
 }
 
 func effectiveInjectMode(cfg *wakeConfig) string {
@@ -1647,7 +1650,7 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 	if notice.submitOnly {
 		plainText = "\r"
 	}
-	if cfg.bell && !ownerBound {
+	if cfg.settings.bell && !ownerBound {
 		plainText = "\a" + plainText
 	}
 
@@ -1739,7 +1742,7 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 		// Ink treats multi-char input as paste, not keypresses. Sending text+CR
 		// as one chunk makes Ink see pasted text, not an Enter keypress.
 		injectedText := inputText
-		if cfg.bell && !ownerBound {
+		if cfg.settings.bell && !ownerBound {
 			injectedText = "\a" + injectedText
 		}
 		if notice.submitOnly {
@@ -1757,7 +1760,7 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 		if !ownerBound {
 			pasteText = "\x1b[200~" + inputText + "\x1b[201~"
 		}
-		if cfg.bell && !ownerBound {
+		if cfg.settings.bell && !ownerBound {
 			pasteText = "\a" + pasteText
 		}
 		if notice.submitOnly {
@@ -1789,7 +1792,7 @@ func deliverWakeNotification(cfg *wakeConfig, notice wakeNotification, deferForI
 			}
 		} else {
 			injectedText := inputText + "\r"
-			if cfg.bell {
+			if cfg.settings.bell {
 				injectedText = "\a" + injectedText
 			}
 			inputAccepted, injectErr = writeTerminalChunk(cfg, injectedText)
@@ -2503,7 +2506,7 @@ func injectVia(cfg *wakeConfig, text string) error {
 		return err
 	}
 
-	timeout := cfg.injectTimeout
+	timeout := cfg.settings.injectTimeout
 	if timeout <= 0 {
 		timeout = defaultInjectTimeout
 	}

@@ -44,6 +44,7 @@ options not repeated here.
 - [amq dlq retry](#amq-dlq-retry)
 - [amq dlq purge](#amq-dlq-purge)
 - [amq wake check](#amq-wake-check)
+- [amq wake config](#amq-wake-config)
 - [amq wake repair](#amq-wake-repair)
 - [amq wake restart](#amq-wake-restart)
 - [amq wake recover-owner](#amq-wake-recover-owner)
@@ -671,10 +672,16 @@ Hold by priority (default off): --hold-normal and --hold-low delay the
   with the configured interrupt label uses the interrupt path. After the
   first attempt, the configured retry policy applies. A drain takes all
   mail; the hold never acks or deletes it or guarantees consumption time.
-  Direct amq wake only: setup, launch, and managed coop exec do not pass
-  these flags through. Example: --hold-normal 5m --hold-low 30m; use
-  --priority urgent for time-critical unblocking requests or verdicts.
-  Manual restarts must repeat hold flags; wake repair does not save them.
+  Example: --hold-normal 5m --hold-low 30m; use --priority urgent for
+  time-critical unblocking requests or verdicts.
+
+Settings (hold, debounce, preview, bell, input deferral, interrupt notice,
+  inject timeout) live in <root>/agents/<me>/.wake.settings. Explicit settings
+  flags on a fresh start write their keys to that file. A resume (self-upgrade
+  or restart) reads the file and ignores settings flags in argv; if the file
+  is absent it writes them once. Repair, coop exec and keepalive pass no
+  settings flags and use the stored file. Change a running wake with
+  amq wake config.
 
 Interrupt notices (default on): urgent messages tagged with label "interrupt"
   trigger an interrupt notice. Ctrl+C injection is opt-in with
@@ -1223,6 +1230,72 @@ Options:
         Root directory for the queue (default ".agent-mail")
   -strict
         Error on unknown handles (default: warn)
+```
+
+## amq wake config
+
+```text
+$ amq wake config --help
+Usage:
+  amq wake config [--me <agent>] [setting flags] [--unset <key>]... [--reset] [--wait] [options]
+
+Show or change the live settings of the agent's wake.
+
+With no setting flag and no --unset, print each setting, its value, and whether it
+comes from the file or the default, then what the running wake did with the file.
+Otherwise validate the whole new set and store it in .wake.settings. A running wake
+applies the file within a few seconds. Flags fixed for a running wake (--inject-via,
+--inject-mode, --inject-arg, --inject-cmd, --interrupt-cmd, --retry-until) are refused.
+An invalid file is shown as refused and cannot be changed with set or --unset;
+--reset replaces it with exactly the given setting flags (none = all defaults).
+
+Options:
+  -bell
+        Ring terminal bell on new messages
+  -debounce duration
+        Debounce window for batching messages (default 250ms)
+  -defer-while-input
+        Best-effort: defer non-interrupt injection while terminal input appears active (default true)
+  -hold-low duration
+        Hold the first doorbell for low-priority mail up to this long (0 = no priority hold)
+  -hold-normal duration
+        Hold the first doorbell for normal-priority mail up to this long (0 = no priority hold)
+  -inject-timeout duration
+        Timeout for one --inject-via command (default 5s)
+  -input-max-hold duration
+        Maximum time to defer one wake injection (0 = no hold) (default 15s)
+  -input-poll-interval duration
+        Polling interval while waiting for quiet terminal input (default 200ms)
+  -input-quiet-for duration
+        Quiet window before deferred injection (advisory only on Linux; tty atime granularity is ~8s) (default 1.2s)
+  -interrupt
+        Enable interrupt injection for urgent interrupt messages (default true)
+  -interrupt-cooldown duration
+        Minimum time between interrupts (default 7s)
+  -interrupt-label string
+        Label required to trigger interrupt (default "interrupt")
+  -interrupt-notice string
+        Custom interrupt notice (default: auto)
+  -interrupt-priority string
+        Priority required to trigger interrupt (default "urgent")
+  -json
+        Emit JSON output
+  -me string
+        Agent handle (or AM_ME)
+  -preview-len int
+        Max subject preview length (default 48)
+  -reset
+        Replace the settings file with exactly the given setting flags (none = all defaults)
+  -root string
+        Root directory for the queue (default ".agent-mail")
+  -strict
+        Error on unknown handles (default: warn)
+  -timeout duration
+        Maximum time for --wait (0 = wait forever) (default 1m0s)
+  -unset value
+        Return a setting to its default by key, e.g. hold_normal (repeatable)
+  -wait
+        Wait until the running wake has applied the settings file
 ```
 
 ## amq wake repair
