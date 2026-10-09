@@ -1884,6 +1884,8 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 	retryUntilFlag := fs.String("retry-until", wakeRetryUntilDrained, "Doorbell acknowledgement: drained or injected")
 	bellFlag := fs.Bool("bell", false, "Ring terminal bell on new messages")
 	debounceFlag := fs.Duration("debounce", 250*time.Millisecond, "Debounce window for batching messages")
+	holdNormalFlag := fs.Duration("hold-normal", 0, "Hold the first doorbell for normal-priority mail up to this long (0 = no priority hold)")
+	holdLowFlag := fs.Duration("hold-low", 0, "Hold the first doorbell for low-priority mail up to this long (0 = no priority hold)")
 	previewLenFlag := fs.Int("preview-len", 48, "Max subject preview length")
 	injectModeFlag := fs.String("inject-mode", wakeInjectModeAuto, "Injection mode: auto, raw, paste, none (auto detects CLI type)")
 	deferWhileInputFlag := fs.Bool("defer-while-input", true, "Best-effort: defer non-interrupt injection while terminal input appears active")
@@ -1948,6 +1950,20 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 		"  Linux tty atime is updated at ~8s granularity, so it cannot establish",
 		"  a precise 1200ms idle window. On Linux this heuristic is advisory.",
 		"",
+		"Hold by priority (default off): --hold-normal and --hold-low delay the",
+		"  first doorbell for routine mail. Its deadline is the inbox file's mtime",
+		"  plus its priority's hold; missing priority counts as normal. A later",
+		"  message can only pull the deadline earlier. A future-dated mtime gets",
+		"  no hold. Urgent mail skips the hold, even behind a parked cohort.",
+		"  Ordinary urgent mail still follows debounce and input deferral; mail",
+		"  with the configured interrupt label uses the interrupt path. After the",
+		"  first attempt, the configured retry policy applies. A drain takes all",
+		"  mail; the hold never acks or deletes it or guarantees consumption time.",
+		"  Direct amq wake only: setup, launch, and managed coop exec do not pass",
+		"  these flags through. Example: --hold-normal 5m --hold-low 30m; use",
+		"  --priority urgent for time-critical unblocking requests or verdicts.",
+		"  Manual restarts must repeat hold flags; wake repair does not save them.",
+		"",
 		"Interrupt notices (default on): urgent messages tagged with label \"interrupt\"",
 		"  trigger an interrupt notice. Ctrl+C injection is opt-in with",
 		"  --interrupt-cmd ctrl-c; it sends real SIGINT to the foreground process",
@@ -1976,6 +1992,12 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 	}
 	if *debounceFlag < 0 {
 		return UsageError("--debounce must be >= 0")
+	}
+	if *holdNormalFlag < 0 {
+		return UsageError("--hold-normal must be >= 0")
+	}
+	if *holdLowFlag < 0 {
+		return UsageError("--hold-low must be >= 0")
 	}
 	if *interruptCooldownFlag < 0 {
 		return UsageError("--interrupt-cooldown must be >= 0")
@@ -2538,6 +2560,7 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 		injectTimeout:       *injectTimeoutFlag,
 		bell:                *bellFlag,
 		debounce:            *debounceFlag,
+		holdPolicy:          wakeHoldPolicy{normal: *holdNormalFlag, low: *holdLowFlag},
 		previewLen:          *previewLenFlag,
 		strict:              common.Strict,
 		fallbackWarn:        true,

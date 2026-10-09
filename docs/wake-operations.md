@@ -18,6 +18,50 @@ A non-TTY agent must preserve a live wake unless the check reports
 command revalidates the current process, target, generation, root, and owner
 state before it changes anything.
 
+## Hold by priority
+
+Each doorbell can start a full-context turn, and mail comes in bursts. Two
+opt-in flags let a standalone `amq wake` hold its first doorbell. For example:
+
+```bash
+amq wake --me claude --hold-normal 5m --hold-low 30m
+```
+
+- `--hold-normal` and `--hold-low` set the hold for `normal` and `low` mail.
+  A message without a priority counts as `normal`. Both flags default to `0`,
+  so holds are off unless requested. The example's `5m` / `30m` is a workload
+  choice for batching routine mail, not a default.
+- The first undrained message sets one deadline: its inbox arrival time plus
+  the hold for its priority. Before the first attempt, a later message can
+  pull this deadline earlier, never later. When the deadline passes, the
+  first doorbell becomes eligible. A drain before then cancels it; a drain
+  after any doorbell takes every pending message, including held mail.
+- Arrival time comes from the file's modification time in `inbox/new`, not
+  the sender's header clock. A manual restart with the same hold flags reads
+  the same file and retains its deadline. A missing or future-dated
+  modification time bypasses the hold. No separate hold state is persisted.
+- Hold flags are not stored in wake target metadata. `amq wake repair` starts
+  an `--inject-via` replacement with zero holds, so pending mail may ring
+  sooner. If the hold policy is still needed, the owning terminal or
+  supervisor must restart the repaired wake with the same flags after a
+  `wake check`.
+- `urgent` mail skips the priority hold, including when a cohort is parked.
+  A distinct urgent message can revive a parked cohort for one further
+  attempt. Ordinary urgent mail still passes through watcher debounce and
+  input-quiet deferral; urgent mail with the configured interrupt label follows
+  the interrupt path.
+- The hold changes only the first doorbell's timing. After an attempt, the
+  configured retry and backoff rules apply, including the finite input-attempt
+  budget for an unchanged cohort. Injection modes and recovery are unchanged.
+  A hold does not ack or delete a message, or guarantee when the recipient
+  will drain it.
+
+Use `amq send --priority urgent` or `amq reply --priority urgent` for a
+time-critical verdict or unblocking request that should skip the hold.
+Ordinary review responses remain normal by default. These flags are accepted
+by direct `amq wake` only; `amq setup`, `amq launch`, and managed `coop exec`
+do not pass them through yet.
+
 ## Doctor
 
 `amq doctor --ops` reports queue depth, sibling-session backlog, DLQ age,

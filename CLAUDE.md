@@ -189,8 +189,11 @@ whitespace-only input is a usage error unless `--allow-empty` is explicit.
 | `status` | - | low | Report progress or state. |
 | `todo` | - | normal | Assign work. |
 
-When work starts, reply with `kind=status` and an ETA. Use `urgent` only for
-work that must interrupt the current activity.
+When work starts, reply with `kind=status` and an ETA. Review responses remain
+`normal` by default. Use `--priority urgent` on `send` or `reply` for a
+time-critical verdict or unblocking request that must bypass an optional wake
+hold. Urgent priority alone does not trigger an interrupt notice; that also
+requires the configured interrupt label.
 
 ## Dead Letter Queue
 

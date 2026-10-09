@@ -63,6 +63,8 @@ type wakeConfig struct {
 	inputDelivery                 wakeInputDeliveryState
 	inputRecoveryRequired         bool
 	doorbell                      wakeDoorbellState
+	holdPolicy                    wakeHoldPolicy
+	holds                         map[string]wakeHold // set by each inbox scan for the doorbell plan
 	doorbellNow                   func() time.Time
 	lastAttemptAttention          bool
 	lastAttemptTransientAttention bool
@@ -593,6 +595,11 @@ func notifyNewMessages(cfg *wakeConfig) error {
 	var interruptMessages []wakeMsgInfo
 	interruptCounts := make(map[string]int)
 	currentPending := make(map[string]os.FileInfo)
+	var holds map[string]wakeHold
+	if cfg.holdPolicy.enabled() {
+		holds = make(map[string]wakeHold)
+	}
+	scanTime := cfg.wakeDoorbellNow()
 
 	for _, entry := range entries {
 		if entry.IsDir() {
@@ -630,6 +637,14 @@ func notifyNewMessages(cfg *wakeConfig) error {
 			continue
 		}
 		currentPending[name] = pendingInfo
+		if holds != nil {
+			// A corrupt header has no priority and counts as normal.
+			priority := ""
+			if err == nil {
+				priority = header.Priority
+			}
+			holds[name] = newWakeHold(cfg.holdPolicy, priority, pendingInfo, scanTime)
+		}
 		if err != nil {
 			// Count corrupt messages too
 			messages = append(messages, wakeMsgInfo{id: strings.TrimSuffix(name, filepath.Ext(name)), from: "unknown", subject: "(parse error)"})
@@ -661,6 +676,7 @@ func notifyNewMessages(cfg *wakeConfig) error {
 		}
 	}
 
+	cfg.holds = holds
 	if cfg.inputRecoveryRequired &&
 		dischargeWakeInputRecoveryAfterProgress(cfg, currentPending) &&
 		len(messages) == 0 {
@@ -815,17 +831,29 @@ func deliverWithNotificationLedger(
 	}
 	writer := notificationattempt.NewWriter(cfg.root, cfg.me)
 	if cfg.injectVia == "" || cfg.injectMode == wakeInjectModeNone {
-		prepared, prepareErr := writer.Prepare(messageIDs, notificationAttemptMode(cfg))
-		if notificationattempt.IsRotationOnly(prepareErr) {
-			// The prepared record persisted; only the size-capped rotation
-			// failed. Proceed on the normal path — recording a failure result
-			// here would join a REAL prepared record into a false `failed`.
-			if cfg.debug {
-				_, _ = fmt.Fprintf(os.Stderr, "amq wake [debug]: notification journal rotation: %v\n", prepareErr)
+		var prepared notificationattempt.Record
+		var prepareErr error
+		attempted := false
+		previousAttemptStart := cfg.onNotificationAttemptStart
+		cfg.onNotificationAttemptStart = func() {
+			if previousAttemptStart != nil {
+				previousAttemptStart()
 			}
-			prepareErr = nil
+			attempted = true
+			prepared, prepareErr = writer.Prepare(messageIDs, notificationAttemptMode(cfg))
+			if notificationattempt.IsRotationOnly(prepareErr) {
+				// The prepared record persisted; only journal rotation failed.
+				if cfg.debug {
+					_, _ = fmt.Fprintf(os.Stderr, "amq wake [debug]: notification journal rotation: %v\n", prepareErr)
+				}
+				prepareErr = nil
+			}
 		}
+		defer func() { cfg.onNotificationAttemptStart = previousAttemptStart }()
 		deliverErr := deliverNewMessageNotification(cfg, notice, deferForInput, currentPending)
+		if !attempted {
+			return deliverErr
+		}
 		if prepareErr != nil {
 			// The prepared write failed. Record a failed result so trace can
 			// surface "recording failed" rather than a silent hole.
@@ -1076,7 +1104,7 @@ func deliverNewMessageNotification(
 		clearWakeInputState(cfg)
 	}
 	now := cfg.wakeDoorbellNow()
-	plan := cfg.doorbell.plan(now, currentPending)
+	plan := cfg.doorbell.planHeld(now, currentPending, cfg.holds)
 	persistWakeDoorbellStatusBestEffort(cfg)
 	if !plan.attempt {
 		return nil
@@ -1182,7 +1210,7 @@ func recordWakeAttempt(
 		// the reminder budget or emit attention output. Reconcile an
 		// announced/parked cohort first: the interrupt path records before
 		// plan() runs, and unseen additions must re-arm the ladder.
-		cfg.doorbell.reconcileDeferredCohort(currentPending)
+		cfg.doorbell.reconcileDeferredCohort(currentPending, cfg.holds)
 		cfg.doorbell.recordDeferredInputAttempt(now)
 		persistWakeDoorbellStatusBestEffort(cfg)
 		return

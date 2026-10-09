@@ -1089,3 +1089,43 @@ func TestInjectNotification_InjectVia(t *testing.T) {
 		t.Fatalf("expected %q, got %q", text, string(got))
 	}
 }
+
+// PR #1008 review: held raw and output-only scans recorded "written" before
+// any notification. Existing ledger tests exercised actual attempts only.
+func TestWakeHoldRecordsOnlyAttemptedNotifications(t *testing.T) {
+	for _, mode := range []string{wakeInjectModeRaw, wakeInjectModeNone} {
+		t.Run(mode, func(t *testing.T) {
+			h := newWakeHoldHarness(t, wakeHoldRecommended)
+			h.cfg.injectMode = mode
+			var attentionWrites int
+			h.cfg.attentionWrite = func(data []byte) (int, error) {
+				attentionWrites++
+				return len(data), nil
+			}
+			h.send("held", format.PriorityNormal)
+			h.scan(h.cfg)
+			attempts, err := notificationattempt.List(h.root, "codex", "held")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(attempts) != 0 {
+				t.Fatalf("held message has %d notification attempts before delivery", len(attempts))
+			}
+			h.advance(5 * time.Minute)
+			h.scan(h.cfg)
+			attempts, err = notificationattempt.List(h.root, "codex", "held")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(attempts) != 1 || attempts[0].State != notificationattempt.OutcomeWritten {
+				t.Fatalf("attempts after delivery = %#v, want one written attempt", attempts)
+			}
+			if mode == wakeInjectModeRaw && h.rings() != 1 {
+				t.Fatal("raw delivery wrote no doorbell")
+			}
+			if mode == wakeInjectModeNone && attentionWrites != 1 {
+				t.Fatalf("attention writes = %d, want 1", attentionWrites)
+			}
+		})
+	}
+}
