@@ -8,6 +8,18 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.94.0](https://github.com/avivsinai/agent-message-queue/compare/v0.93.2...v0.94.0) (2026-10-09)
+
+
+### Features
+
+* **wake:** change wake settings live with amq wake config ([#1017](https://github.com/avivsinai/agent-message-queue/issues/1017)) ([3abfd0e](https://github.com/avivsinai/agent-message-queue/commit/3abfd0e7d5bedfe7132e01d5bf3e7f15d6f572a6)), closes [#1014](https://github.com/avivsinai/agent-message-queue/issues/1014)
+
+
+### Bug Fixes
+
+* **wake:** keep seeding argv settings and allow a wake startup grace ([#1019](https://github.com/avivsinai/agent-message-queue/issues/1019)) ([d84df51](https://github.com/avivsinai/agent-message-queue/commit/d84df515318015d02d096e35e3a706278abc9ad6)), closes [#1014](https://github.com/avivsinai/agent-message-queue/issues/1014)
+
 ## [0.93.2](https://github.com/avivsinai/agent-message-queue/compare/v0.93.1...v0.93.2) (2026-10-09)
 
 
