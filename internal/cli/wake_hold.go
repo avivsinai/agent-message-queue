@@ -57,16 +57,23 @@ func newWakeHold(policy wakeHoldPolicy, priority string, info os.FileInfo, now t
 }
 
 // earliestWakeHold is the earliest due time among pending messages that are
-// not in skip; zero when there is none or holds are off.
+// not in skip (or that provably replaced a skipped file); zero when there is
+// none or holds are off.
 func earliestWakeHold(
 	holds map[string]wakeHold,
 	current map[string]os.FileInfo,
 	skip map[string]*wakeFileIdentity,
 ) time.Time {
 	var earliest time.Time
-	for name := range current {
-		if _, seen := skip[name]; seen {
-			continue
+	for name, info := range current {
+		if identity, seen := skip[name]; seen {
+			if identity == nil || info == nil {
+				continue
+			}
+			currentIdentity, known := captureWakeFileIdentity(info)
+			if !known || *identity == currentIdentity {
+				continue
+			}
 		}
 		hold, ok := holds[name]
 		if !ok {

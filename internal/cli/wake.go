@@ -1210,7 +1210,7 @@ func recordWakeAttempt(
 		// the reminder budget or emit attention output. Reconcile an
 		// announced/parked cohort first: the interrupt path records before
 		// plan() runs, and unseen additions must re-arm the ladder.
-		cfg.doorbell.reconcileDeferredCohort(currentPending)
+		cfg.doorbell.reconcileDeferredCohort(currentPending, cfg.holds)
 		cfg.doorbell.recordDeferredInputAttempt(now)
 		persistWakeDoorbellStatusBestEffort(cfg)
 		return

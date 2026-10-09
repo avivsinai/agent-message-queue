@@ -339,3 +339,65 @@ func TestWakeHoldFutureMtimeIsNeverPostponedByRestart(t *testing.T) {
 		t.Fatalf("rings after a mid-hold restart = %d, want 1 at once, not postponed", got)
 	}
 }
+
+// PR #1008 review: a parked cohort revived by low mail stored the hold in
+// the retry deadline. A later normal arrival could then wait 24 minutes past
+// its own deadline because held additions did not pull the retry ladder forward.
+func TestWakeHoldParkedAdditionCanPullHoldEarlier(t *testing.T) {
+	h := newWakeHoldHarness(t, wakeHoldRecommended)
+	h.send("old", format.PriorityUrgent)
+	h.scan(h.cfg)
+	for i := 0; h.cfg.doorbell.phase != wakeDoorbellParked && i < 20; i++ {
+		h.advance(wakeDoorbellRetryMax)
+		h.scan(h.cfg)
+	}
+	if h.cfg.doorbell.phase != wakeDoorbellParked {
+		t.Fatal("setup: cohort did not park")
+	}
+	h.rings()
+	h.send("low", format.PriorityLow)
+	h.scan(h.cfg)
+	h.advance(time.Minute)
+	normalArrival := h.now
+	h.send("normal", format.PriorityNormal)
+	h.scan(h.cfg)
+	if got, want := h.deadline(), normalArrival.Add(5*time.Minute); !got.Equal(want) {
+		t.Fatalf("deadline = %v, want normal arrival + hold = %v", got, want)
+	}
+	h.now = normalArrival.Add(5*time.Minute - time.Second)
+	h.scan(h.cfg)
+	if got := h.rings(); got != 0 {
+		t.Fatalf("rings before normal deadline = %d, want 0", got)
+	}
+	h.advance(time.Second)
+	h.scan(h.cfg)
+	if got := h.rings(); got != 1 {
+		t.Fatalf("rings at normal deadline = %d, want 1", got)
+	}
+}
+
+// PR #1008 review: the announced-cohort hold lookup skipped filenames even
+// when they identified a new physical message, so a replacement bypassed its hold.
+func TestWakeHoldAnnouncedReplacementUsesNewArrival(t *testing.T) {
+	h := newWakeHoldHarness(t, wakeHoldRecommended)
+	h.cfg.retryUntil = wakeRetryUntilInjected
+	h.send("same", format.PriorityUrgent)
+	h.scan(h.cfg)
+	h.rings()
+	// The inbox drains and a new physical file arrives before the next scan.
+	h.drain()
+	h.advance(time.Minute)
+	h.send("same", format.PriorityNormal)
+	h.scan(h.cfg)
+	if got := h.rings(); got != 0 {
+		t.Fatalf("rings for fresh normal replacement = %d, want 0", got)
+	}
+	if got, want := h.deadline(), h.now.Add(5*time.Minute); !got.Equal(want) {
+		t.Fatalf("replacement deadline = %v, want %v", got, want)
+	}
+	h.advance(5 * time.Minute)
+	h.scan(h.cfg)
+	if got := h.rings(); got != 1 {
+		t.Fatalf("rings at replacement deadline = %d, want 1", got)
+	}
+}

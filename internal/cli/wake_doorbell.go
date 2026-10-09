@@ -42,8 +42,8 @@ type wakeDoorbellState struct {
 	nextTransientAttention       time.Time
 	recoveryPending              bool
 	recoveryAttentionUndelivered bool
-	// holdUntil is the cohort's doorbell deadline while hold-by-priority
-	// delays its first doorbell. Zero means no hold (today's behavior).
+	// holdUntil delays a new announcement, including an addition that revives
+	// a parked cohort. It is separate from the delivery retry deadline.
 	holdUntil time.Time
 }
 
@@ -112,7 +112,7 @@ func (state *wakeDoorbellState) planHeld(
 		case state.phase == wakeDoorbellParked:
 			if state.reviveParkedCohort(current) {
 				if state.holdsAddition(added, now) {
-					state.nextAttempt = added
+					state.holdUntil = added
 				} else {
 					state.pullForwardForAddition(now)
 				}
@@ -120,8 +120,8 @@ func (state *wakeDoorbellState) planHeld(
 		default:
 			state.arm(current)
 			switch {
-			case state.attempts == 0:
-				if !state.holdUntil.IsZero() && !added.IsZero() && added.Before(state.holdUntil) {
+			case !state.holdUntil.IsZero():
+				if !added.IsZero() && added.Before(state.holdUntil) {
 					state.holdUntil = added
 				}
 			case urgent:
@@ -138,7 +138,7 @@ func (state *wakeDoorbellState) planHeld(
 	if state.phase == wakeDoorbellParked {
 		return wakeDoorbellPlan{}
 	}
-	if state.attempts == 0 && state.holdActive(now) {
+	if state.holdActive(now) {
 		return wakeDoorbellPlan{}
 	}
 	state.holdUntil = time.Time{}
@@ -155,7 +155,7 @@ func (state *wakeDoorbellState) planHeld(
 	}
 }
 
-// holdActive reports whether hold-by-priority still delays the first doorbell.
+// holdActive reports whether hold-by-priority delays a new announcement.
 func (state *wakeDoorbellState) holdActive(now time.Time) bool {
 	return !state.holdUntil.IsZero() && now.Before(state.holdUntil)
 }
@@ -241,7 +241,7 @@ func (state *wakeDoorbellState) reviveParkedCohortForUrgent(current map[string]o
 // state nextDeadline() never reads and the doorbell stalls until an unrelated
 // inbox event. The caller advances the retry deadline afterwards, so no
 // pull-forward happens here.
-func (state *wakeDoorbellState) reconcileDeferredCohort(current map[string]os.FileInfo) {
+func (state *wakeDoorbellState) reconcileDeferredCohort(current map[string]os.FileInfo, holds map[string]wakeHold) {
 	if len(current) == 0 {
 		return
 	}
@@ -258,7 +258,11 @@ func (state *wakeDoorbellState) reconcileDeferredCohort(current map[string]os.Fi
 			return
 		}
 		if wakeCohortExpanded(state.cohort, current) {
-			state.reviveParkedCohort(current)
+			if wakeAdditionUrgent(holds, current, state.cohort) {
+				state.reviveParkedCohortForUrgent(current)
+			} else {
+				state.reviveParkedCohort(current)
+			}
 		}
 	}
 }
@@ -310,6 +314,9 @@ func (state *wakeDoorbellState) recordAttemptWithBase(
 	now time.Time,
 	base, maximum time.Duration,
 ) {
+	// The interrupt path can attempt delivery before planHeld consumes a hold.
+	// Once an attempt occurs, only the delivery retry deadline applies.
+	state.holdUntil = time.Time{}
 	state.attempts++
 	state.additionAttemptFloor = now.Add(base)
 	state.nextAttempt = now.Add(cappedExponentialBackoff(
@@ -405,7 +412,7 @@ func (state wakeDoorbellState) parkedReminderAttempts() (uint, bool) {
 func (state *wakeDoorbellState) nextDeadline() (time.Time, bool) {
 	switch state.phase {
 	case wakeDoorbellRetrying:
-		if state.attempts == 0 && !state.holdUntil.IsZero() {
+		if !state.holdUntil.IsZero() {
 			return state.holdUntil, true
 		}
 		return state.nextAttempt, !state.nextAttempt.IsZero()
