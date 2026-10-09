@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"sync"
@@ -591,12 +592,23 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 			ObservedAt:  protocol.FormatTime(e.now()),
 		},
 		Input:  cmd.Input,
-		Origin: src.Origin,
+		Origin: maps.Clone(src.Origin),
 	}
 	// Decide admissibility + reservation BEFORE Create: a request we are
 	// about to refuse is never written (no durable placeholder to leak on a
 	// failed rejection write, and nothing for Tick to dispatch). Only Create
 	// when we will dispatch or deliberately defer.
+	if src.Shared != nil && !slices.Contains(src.Shared, cmd.TargetID) {
+		// A link reaches only the targets shared with it.
+		e.mu.Unlock()
+		return protocol.Reply{Snapshot: e.unpersisted(rec, protocol.StateRejected, protocol.CodeUnshared), Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: protocol.CodeUnshared}}, nil
+	}
+	t, code, reason := e.admissibleLocked(cmd.TargetID, cmd.Epoch, cmd.NotAfter, cmd.Input.MinEvidence)
+	if code != "" {
+		// Refused (unshared/expired/stale_epoch): no durable record.
+		e.mu.Unlock()
+		return protocol.Reply{Snapshot: e.unpersisted(rec, protocol.StateRejected, code), Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: code, Message: reason}}, nil
+	}
 	if isLink(src) {
 		// The per-link bound refuses before any side effect, so unlike the
 		// per-target busy below it leaves no record: nothing was asked yet.
@@ -609,12 +621,6 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 			e.mu.Unlock()
 			return protocol.Reply{Snapshot: e.unpersisted(rec, protocol.StateRejected, protocol.CodeBusy), Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: protocol.CodeBusy, Message: fmt.Sprintf("this link already has %d requests open", maxLinkInFlight)}}, nil
 		}
-	}
-	t, code, reason := e.admissibleLocked(cmd.TargetID, cmd.Epoch, cmd.NotAfter, cmd.Input.MinEvidence)
-	if code != "" {
-		// Refused (unshared/expired/stale_epoch): no durable record.
-		e.mu.Unlock()
-		return protocol.Reply{Snapshot: e.unpersisted(rec, protocol.StateRejected, code), Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: code, Message: reason}}, nil
 	}
 	if t == nil {
 		// Target registered but offline: Create received and let Tick admit
@@ -654,6 +660,9 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 		// re-admitted; sending again is a new request id.
 		if isLink(src) {
 			e.transitionLocked(rec, causeRefused, nativeEvidence{code: protocol.CodeBusy})
+			// Nothing reads the input of a request that never runs, and the
+			// record waits for the sink's acknowledgement before it compacts.
+			rec.Input = nil
 		} else {
 			e.transitionLocked(rec, causeBusyTombstone, nativeEvidence{})
 		}
@@ -907,7 +916,7 @@ func (e *Endpoint) cancel(cmd *protocol.Command, src Source) (protocol.Reply, er
 				ObservedAt:  now,
 			},
 			Tombstone: true,
-			Origin:    src.Origin,
+			Origin:    maps.Clone(src.Origin),
 		}
 		err := e.store.Create(rec)
 		if err != nil {
@@ -1025,24 +1034,42 @@ func outsideNamespace(src Source, refHost string) bool {
 	return isLink(src) && refHost != src.Host
 }
 
-// readableBy is the read rule (get, wait): a link record is read only by the
-// link that created it, and a link source reads only its own records. Every
-// other record keeps the local rule: local senders carry no authenticated
-// identity, so the local terminal still reads Buzz requests.
+// isLocal reports whether src is the local socket: the user's own terminal.
+func isLocal(src Source) bool { return src.Host == LocalHost && len(src.Origin) == 0 }
+
+// readableBy is the read rule (get, wait). The local socket, the user's own
+// terminal, reads every record. A Buzz share reads only the records it
+// submitted, and a link only the records it created. Other carriers (the AMQ
+// mailbox) read every record but a link's.
 func readableBy(src Source, rec *requests.Record) bool {
-	if isLink(src) {
+	switch {
+	case isLink(src):
 		return rec.Origin["carrier"] == CarrierLink && rec.CreatorHost == src.Host
+	case src.Origin["carrier"] == "buzz":
+		return fromOwnerShare(src, rec)
+	case isLocal(src):
+		return true
+	default:
+		return rec.Origin["carrier"] != CarrierLink
 	}
-	return rec.Origin["carrier"] != CarrierLink
 }
 
-// ownedBy is the cancel rule: the read rule, plus a Buzz record is cancelled
-// only from the owner's share that submitted it (agent-message-queue-611.48).
+// ownedBy is the cancel rule. A link record is cancelled only by the link
+// that created it, and a link cancels nothing else. A Buzz record is
+// cancelled only from the owner's share that submitted it
+// (agent-message-queue-611.48). Other records keep the local rule: local
+// senders carry no authenticated identity.
 func ownedBy(src Source, rec *requests.Record) bool {
-	if rec.Origin["carrier"] == "buzz" && !fromOwnerShare(src, rec) {
+	switch {
+	case isLink(src):
+		return rec.Origin["carrier"] == CarrierLink && rec.CreatorHost == src.Host
+	case rec.Origin["carrier"] == CarrierLink:
 		return false
+	case rec.Origin["carrier"] == "buzz":
+		return fromOwnerShare(src, rec)
+	default:
+		return true
 	}
-	return readableBy(src, rec)
 }
 
 // noRecord is the refusal for an absent request, and for a link naming a
@@ -1056,10 +1083,12 @@ func notOwned(src Source, rec *requests.Record) error {
 	switch {
 	case isLink(src):
 		return noRecord()
-	case rec.Origin["carrier"] == "buzz":
-		return protocol.Refuse(protocol.CodeUnshared, "only the owner's Buzz share can cancel its requests")
-	default:
+	case src.Origin["carrier"] == "buzz":
+		return protocol.Refuse(protocol.CodeUnshared, "a Buzz share reaches only the requests it submitted")
+	case rec.Origin["carrier"] == CarrierLink:
 		return protocol.Refuse(protocol.CodeUnshared, "only the link that submitted this request can read or cancel it")
+	default:
+		return protocol.Refuse(protocol.CodeUnshared, "only the owner's Buzz share can cancel its requests")
 	}
 }
 
@@ -3261,6 +3290,7 @@ func (e *Endpoint) Wait(ctx context.Context, ref string) (protocol.Snapshot, err
 
 // WaitAfter is Wait that also returns once the record's revision is past
 // *after, so a follower sees each pending interaction. A nil after is Wait.
+// Only the local socket waits (ipc), and it reads every record (readableBy).
 func (e *Endpoint) WaitAfter(ctx context.Context, ref string, after *int64) (protocol.Snapshot, error) {
 	host, targetID, requestID, err := protocol.DecodeRef(ref)
 	if err != nil {
@@ -3282,11 +3312,6 @@ func (e *Endpoint) WaitAfter(ctx context.Context, ref string, after *int64) (pro
 		}
 		if !ok {
 			return protocol.Snapshot{}, noRecord()
-		}
-		// Only the local socket waits (ipc), so the reader is the local
-		// source; the read rule holds here as on get.
-		if local := (Source{Host: LocalHost}); !readableBy(local, rec) {
-			return protocol.Snapshot{}, notOwned(local, rec)
 		}
 		if isFailed {
 			return failed, nil

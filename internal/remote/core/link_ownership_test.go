@@ -1,6 +1,7 @@
 package core_test
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sync"
@@ -116,11 +117,19 @@ func TestLinkReadsAndCancelsOnlyItsOwnRequests(t *testing.T) {
 		{"link B cancel", linkCancel(clk, refA, "fake"), linkSource(hostB, "fake"), protocol.CodeNotFound},
 		{"mailbox get", getCmd(refA), mailboxSource, protocol.CodeUnshared},
 		{"link B cancel of an absent id", linkCancel(clk, protocol.EncodeRef(hostB, "fake", "11111111-1111-4111-8111-1111111111b9"), "fake"), linkSource(hostB, "fake"), protocol.CodeNotFound},
+		{"local cancel of an absent link id", linkCancel(clk, protocol.EncodeRef(hostB, "fake", "11111111-1111-4111-8111-1111111111b8"), "fake"), core.Source{Host: core.LocalHost}, protocol.CodeUnshared},
 	}
 	for _, tc := range cases {
 		if _, err := ep.Handle(tc.cmd, tc.src); refusalCode(err) != tc.want {
 			t.Errorf("%s = %v, want %s", tc.name, err, tc.want)
 		}
+	}
+	if r := submitReply(t, ep, linkSubmit(clk, "fake", "11111111-1111-4111-8111-1111111111b7"), linkSource(hostB)); r.Outcome.Code != protocol.CodeUnshared {
+		t.Errorf("link submit to an unshared target = %q, want unshared", r.Outcome.Code)
+	}
+	// The user's own terminal reads every request, a link's included.
+	if _, err := ep.WaitAfter(context.Background(), refA, new(int64)); err != nil {
+		t.Errorf("local wait on a link request: %v", err)
 	}
 	recs, err := store.List()
 	if err != nil {
@@ -143,9 +152,9 @@ func TestLinkBusyEndsRefusedCompactsAndIsNeverReadmitted(t *testing.T) {
 	if err != nil || rec == nil {
 		t.Fatalf("busy link request left no record: %v", err)
 	}
-	if busy.Outcome.Code != protocol.CodeBusy || rec.State != protocol.StateRejected || rec.Code != protocol.CodeBusy || rec.Tombstone {
-		t.Fatalf("busy link submit = outcome %q, record %s/%s tombstone=%v; want a refused busy record, no tombstone",
-			busy.Outcome.Code, rec.State, rec.Code, rec.Tombstone)
+	if busy.Outcome.Code != protocol.CodeBusy || rec.State != protocol.StateRejected || rec.Code != protocol.CodeBusy || rec.Tombstone || rec.Input != nil {
+		t.Fatalf("busy link submit = outcome %q, record %s/%s tombstone=%v input=%v; want a refused busy record, no tombstone, no input",
+			busy.Outcome.Code, rec.State, rec.Code, rec.Tombstone, rec.Input)
 	}
 
 	rt.Complete(idA, "done")
