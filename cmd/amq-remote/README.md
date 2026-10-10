@@ -370,8 +370,11 @@ Protocol: `amq.remote.link/1` ([contract](../../testdata/link/README.md)).
 6. A share with `--consent local` waits for you on this machine too: the
    signed task is held until you run `amq-remote link confirm ID` in a
    terminal, read the exact text on the page it opens, and confirm with
-   Touch ID. That needs the link's local passkey, created by `link add` when
-   it runs in a terminal, or later by `amq-remote link local-key NAME`. A held
+   Touch ID. That needs the link's local passkey, offered by `link add` when
+   it runs in a terminal, or created later by `amq-remote link local-key NAME`
+   while the endpoint runs. The endpoint serves both pages on one loopback
+   port it records for the root, and the passkey is bound to that address: a
+   look-alike page on another port cannot confirm. A held
    task is dropped at its deadline (10 minutes) or on restart, never resent.
 7. `amq-remote link status` shows each link's socket, generation, owed
    revisions, conflicts and retired sinks. `amq-remote link remove NAME`

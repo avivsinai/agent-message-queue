@@ -133,7 +133,7 @@ invariants.
   not recall the task; it stops every later one. A binding whose consent is
   `local` holds a verified task outside the store until the person confirms
   it on the machine: `amq-remote link confirm ID` (a terminal) opens a page
-  amq-remote serves on localhost that shows the exact text, hidden characters
+  the endpoint itself serves on the one loopback port it records for the root that shows the exact text, hidden characters
   visible, and the link's local passkey (relying party `localhost`) signs a
   challenge bound to the digest shown. The endpoint verifies that assertion
   itself and moves the task into the store once. A held task lives only in
