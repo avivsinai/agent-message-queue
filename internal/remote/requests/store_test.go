@@ -421,7 +421,13 @@ func TestBK4B1RaceCompactVsAck(t *testing.T) {
 		// used must be correct after each round: the in-memory counter must
 		// equal a fresh recomputation of the on-disk sum. A lost update
 		// (CompactOne without s.mu) drifts this counter.
-		want, _ := s.sumUsed()
+		var want int64
+		_ = filepath.Walk(s.Dir(), func(path string, info os.FileInfo, err error) error {
+			if err == nil && strings.HasSuffix(path, recordSuffix) {
+				want += info.Size()
+			}
+			return nil
+		})
 		if got := s.used; got != want {
 			t.Fatalf("round %d: used drifted: got %d want %d (race lost an update)", round, got, want)
 		}

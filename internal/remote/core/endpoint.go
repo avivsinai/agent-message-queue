@@ -2381,7 +2381,7 @@ func (e *Endpoint) applyTransitionLocked(rec *requests.Record, c cause, ev nativ
 // acknowledged (Pro r2 #15 / packet 4c, agent-message-queue-611.22.36).
 // A tombstone owes nothing: compaction erased its result on purpose.
 func owesResult(rec *requests.Record) bool {
-	return rec.State.Terminal() && !rec.Tombstone && rec.NativeRun != nil && rec.Result == nil
+	return rec.OwesResult()
 }
 
 // recoverTerminalResult asks the attachment for the result a terminal record
@@ -2415,9 +2415,7 @@ func (e *Endpoint) recoverTerminalResult(rec *requests.Record) error {
 }
 
 func owesCancel(rec *requests.Record) bool {
-	return rec.Cancel != nil &&
-		rec.Cancel.Disposition == protocol.CancelRequested &&
-		rec.NativeRun != nil
+	return rec.OwesCancel()
 }
 
 // owesAck reports whether the runtime is holding a result for us that we have
@@ -2468,13 +2466,16 @@ func (e *Endpoint) commitLocked(rec *requests.Record, t *target) (string, error)
 	return ackDigest, nil
 }
 
-// Reconcile runs after Open and on every Tick. It re-examines every
-// non-terminal record against exact native evidence, never re-submits, expires
-// deferred requests whose window closed, and republishes unpublished
-// revisions. It also replays native acknowledgements for terminal records:
-// a crash between the terminal commit and the native ack leaves the
-// attachment holding its one unacked-result slot, which would refuse every
-// later submit with busy; replaying the durable ack digest releases it.
+// Reconcile runs after Open and on every Tick. It reads only the records
+// the store's sweep index selects (requests.Record.NeedsSweep, the union of
+// the arms below), so its cost follows open and owed work, not retention.
+// It re-examines every non-terminal record against exact native evidence,
+// never re-submits, expires deferred requests whose window closed, and
+// republishes unpublished revisions. It also replays native
+// acknowledgements for terminal records: a crash between the terminal
+// commit and the native ack leaves the attachment holding its one
+// unacked-result slot, which would refuse every later submit with busy;
+// replaying the durable ack digest releases it.
 // Native attachment calls happen without the endpoint lock held; a single
 // poisoned record is reported, never allowed to abort the whole pass.
 func (e *Endpoint) Reconcile() error {
@@ -2486,11 +2487,8 @@ func (e *Endpoint) Reconcile() error {
 	}
 	defer e.releaseInFlight()
 	e.mu.Lock()
-	recs, err := e.store.List()
+	recs := e.store.ListSweep()
 	e.mu.Unlock()
-	if err != nil {
-		return err
-	}
 	var firstErr error
 	for _, rec := range recs {
 		e.mu.Lock()
@@ -2550,27 +2548,24 @@ func (e *Endpoint) Reconcile() error {
 	// B14e: bounded compaction. Runs once per minute (shouldCompact rate-
 	// limit), reaps terminal+settled+old records into tombstones. e.mu is
 	// held per-record (CompactOne), never across the sweep (Pro B7).
-	// 611.22.19 BK4: reuse the recs snapshot already fetched for the
-	// reconcile pass — CompactOne re-reads each candidate under the store
-	// lock and re-gates (terminal + !tombstone + old + !OwesAck + published),
-	// so a stale snapshot entry is harmless and a whole second history scan
-	// is avoided. This is the bounded incremental work the BK4 finding asked
-	// for: one List per tick, not two.
+	// The candidates are the store's terminal records that are not
+	// tombstones yet (9dx.6), not the sweep's records: a settled record is
+	// exactly what compaction wants and the sweep skips, and a full list
+	// would grow with the tombstones nothing deletes. CompactOne re-reads
+	// each candidate under the store lock and re-gates (terminal +
+	// !tombstone + old + !OwesAck + published), so a stale key is harmless.
 	if e.shouldCompact() {
 		cutoff := e.now().Add(-e.compactHorizon)
 		compacted := 0
-		for _, rec := range recs {
+		for _, key := range e.store.CompactionCandidates() {
 			// Count only successful compactions toward the limit, not every
-			// record the loop looks at (Pro B1: tombstones sort ahead of
-			// live records would starve forever on the i counter).
+			// record the loop looks at (Pro B1: records not old enough yet
+			// would otherwise use it up).
 			if compacted >= 100 {
 				break
 			}
-			if !rec.State.Terminal() || rec.Tombstone {
-				continue
-			}
 			e.mu.Lock()
-			ok, cerr := e.store.CompactOne(keyOfRecord(rec), cutoff)
+			ok, cerr := e.store.CompactOne(key, cutoff)
 			e.mu.Unlock()
 			if cerr != nil {
 				var rf *protocol.Refusal
