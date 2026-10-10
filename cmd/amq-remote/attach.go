@@ -68,6 +68,13 @@ func attach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 			return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", err)
 		}
 		*nativeMode = true // a linked server reaches a native session only
+		stateDir, err := c.stateDir()
+		if err != nil {
+			return protocol.ExitUsage, err
+		}
+		if err := requireLinkEndpoint(stateDir); err != nil {
+			return protocol.ExitActionRequired, err
+		}
 	}
 	if !*nativeMode {
 		return attachMailbox(c.root, strings.TrimSpace(*me), strings.TrimSpace(*name), c.json, stdout)

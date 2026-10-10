@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bufio"
 	"crypto/ed25519"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -14,6 +16,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/avivsinai/agent-message-queue/internal/remote/ipc"
 	"github.com/avivsinai/agent-message-queue/internal/remote/linkio"
 	"github.com/avivsinai/agent-message-queue/internal/remote/manifest"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
@@ -217,5 +220,48 @@ func TestLinkKeysAddAcceptsTheTypedKey(t *testing.T) {
 	fp3, _ := linkio.Fingerprint(next)
 	if _, _, err := linkKeysAdd([]string{"--root", root, "example", "--code", "Q1S3-Y5LE"}, strings.NewReader(fp3+"\n"), io.Discard, &jsonProbe{}); err == nil {
 		t.Fatal("a key for another origin was accepted")
+	}
+}
+
+// Regression (compat pass, ruling rr): an endpoint older than links, still
+// running after an upgrade, would register an attach and rewrite the
+// manifest without the links block. link add and attach --link refuse while
+// one runs, and pass once the running endpoint serves links.
+func TestLinkRefusesAnOlderRunningEndpoint(t *testing.T) {
+	root, err := os.MkdirTemp("", "aro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	stateDir := filepath.Join(root, stateDirName)
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := requireLinkEndpoint(stateDir); err != nil {
+		t.Fatalf("no endpoint running = %v, want ok", err)
+	}
+	l, err := net.Listen("unix", ipc.SocketPath(stateDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = l.Close() }()
+	go func() { // an endpoint that predates the features question
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			_, _ = bufio.NewReader(c).ReadBytes('\n')
+			_, _ = c.Write([]byte(`{"error":{"code":"invalid","message":"request carries neither command nor wait"}}` + "\n"))
+			_ = c.Close()
+		}
+	}()
+	err = requireLinkEndpoint(stateDir)
+	if err == nil || !strings.Contains(err.Error(), "restart amq-remote up first") {
+		t.Fatalf("older endpoint = %v, want the restart refusal", err)
+	}
+	_, _, err = linkAdd([]string{"--root", root, "example", "https://link.example.test", "--code", "K7Q4-M2XD"}, strings.NewReader(""), io.Discard, &jsonProbe{})
+	if err == nil || !strings.Contains(err.Error(), "restart amq-remote up first") {
+		t.Fatalf("link add with an older endpoint = %v, want the restart refusal", err)
 	}
 }
