@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -611,5 +613,42 @@ func TestBK4B3RestartReseedReservation(t *testing.T) {
 	got.AckDigest = protocol.EvidenceDigest(got.Result)
 	if err := s2.Update(got); err != nil {
 		t.Fatalf("B3 restart: result write for running record refused after reopen: %v (reservation must cover it)", err)
+	}
+}
+
+// TestOpenFailsWhenTheQuotaSeedCannotReadARecord reproduces
+// agent-message-queue-9dx.8: Open ignored a failed seed and started with an
+// empty quota, admitting work into room that unread records still held.
+func TestOpenFailsWhenTheQuotaSeedCannotReadARecord(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("file mode 000 does not stop this reader")
+	}
+	dir := t.TempDir()
+	s1, err := Open(dir, WithClock(fixedClock))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if err := s1.Create(newRecord("11111111-1111-4111-8111-11111111b801")); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := s1.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	var path string
+	_ = filepath.Walk(dir, func(p string, info os.FileInfo, err error) error {
+		if err == nil && strings.HasSuffix(p, recordSuffix) {
+			path = p
+		}
+		return nil
+	})
+	if err := os.Chmod(path, 0); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(path, 0o600) })
+
+	s2, err := Open(dir, WithClock(fixedClock), WithMaxStoreBytes(2*protocol.MaxRecordBytes))
+	if err == nil {
+		_ = s2.Close()
+		t.Fatal("Open admitted work with a quota seed that could not read a record")
 	}
 }

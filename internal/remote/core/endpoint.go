@@ -569,17 +569,31 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 			e.publishRevision(rec)
 			return protocol.Reply{Snapshot: snap, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: rec.Code}}, nil
 		}
+		// Same reservation as a fresh admission (611.22.19 BK4): the room
+		// for the result is taken before dispatch, and released on every
+		// exit that does not reach the dispatching write. Storage full
+		// leaves the busy tombstone as it was, still re-admittable.
+		if err := e.store.Reserve(key, protocol.MaxRecordBytes); err != nil {
+			e.mu.Unlock()
+			var r *protocol.Refusal
+			if errors.As(err, &r) && r.Code == protocol.CodeStorageFull {
+				return protocol.Reply{Snapshot: rec.Snapshot, Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: protocol.CodeStorageFull}}, nil
+			}
+			return protocol.Reply{}, err
+		}
 		rec.Revision++
 		rec.NativeDispatches = 1
 		rec.ObservedAt = protocol.FormatTime(e.now())
 		e.transitionLocked(rec, causeDispatching, nativeEvidence{})
 		if err := e.crashAt(PointBeforeDispatching); err != nil {
+			e.store.ReleaseReservation(key)
 			e.mu.Unlock()
 			return protocol.Reply{}, err
 		}
 		// Cannot use commitLocked: crash-point ordering requires Update between
 		// PointBeforeDispatching and PointAfterDispatching.
 		if err := e.store.Update(rec); err != nil {
+			e.store.ReleaseReservation(key)
 			e.mu.Unlock()
 			return protocol.Reply{}, err
 		}
