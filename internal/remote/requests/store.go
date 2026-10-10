@@ -230,17 +230,20 @@ func Open(stateDir string, opts ...Option) (*Store, error) {
 	}
 	// 611.22.19 BK4: seed the aggregate-quota usage from existing records so
 	// a restarted companion knows what it already owes before admitting new
-	// work. A failure to sum is non-fatal: the quota stays enforced per-write
-	// via the size-aware accounting in write; only the seed is approximate.
+	// work. A seed that cannot read the store fails Open: a store that
+	// counts unread records as empty admits work into room it does not have.
 	if s.maxStoreBytes > 0 {
 		// Round-4 fold: one walk sums used AND reseeds reservations for
 		// non-terminal records with no result (received, dispatching,
 		// running). After a restart, running records hold nothing in memory;
 		// without reseeding, fresh submits are admitted into their room and
 		// their results are refused after the work ran.
-		if used, err := s.sumUsed(true); err == nil {
-			s.used = used
+		used, err := s.sumUsed(true)
+		if err != nil {
+			_ = s.Close()
+			return nil, fmt.Errorf("seed store quota: %w", err)
 		}
+		s.used = used
 	}
 	return s, nil
 }
@@ -907,9 +910,11 @@ func (s *Store) releaseReservationLocked(key Key) {
 
 // sumUsed walks the record tree and returns the total bytes of all record
 // files. It is the seed for the aggregate-quota accounting at Open
-// (611.22.19 BK4); per-write deltas keep it current afterward. Read errors
-// on individual files are skipped (a vanished file contributes zero),
-// mirroring List's poison isolation.
+// (611.22.19 BK4); per-write deltas keep it current afterward. A vanished
+// file contributes zero. With reseed, a file the bounded reader refuses
+// (unreadable, not a regular file, oversized) is an error naming its path
+// relative to the store, so Open stops; a file it reads but cannot decode
+// is poison: counted in used, reported by List, skipped.
 //
 // Round-4 fold: reseedReservations is folded into this walk so Open does ONE
 // filepath.Walk + JSON-decode pass, not two. When reseed is true, every
@@ -930,10 +935,22 @@ func (s *Store) sumUsed(reseed ...bool) (int64, error) {
 		}
 		total += info.Size()
 		if doReseed {
-			rec, _, rErr := s.readRecord(path)
-			if rErr != nil || rec == nil {
-				return nil // skip poison records
+			data, rErr := readRegularBounded(path, int64(MaxRecordBytes))
+			if errors.Is(rErr, os.ErrNotExist) {
+				return nil
 			}
+			if rErr != nil {
+				name, relErr := filepath.Rel(s.dir, path)
+				if relErr != nil {
+					name = path
+				}
+				return fmt.Errorf("read %s: %w", name, rErr)
+			}
+			rec, dErr := decodeRecord(data)
+			if dErr != nil {
+				return nil // poison: counted above, reported by List
+			}
+			normalizeRecord(rec)
 			if !rec.State.Terminal() && rec.Result == nil {
 				k := Key{CreatorHost: rec.CreatorHost, TargetID: rec.TargetID, RequestID: rec.RequestID}
 				if _, exists := s.reservedKeys[k]; !exists {
