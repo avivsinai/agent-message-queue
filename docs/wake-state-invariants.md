@@ -206,7 +206,9 @@ transport state.
 **Commit domain:** the operator writes it through `amq wake config --machine`,
 under an exclusive lock on `~/.amq/wake.settings.lock`. Wakes only read it
 (each inbox scan and every 2 seconds), with the same trust checks as the agent
-file, and never write it. A refused file keeps the last good machine layer in a
+file (`~/.amq` must be a real directory owned by the user and not
+group-writable or world-writable; a missing file always means no machine
+layer), and never write it. A refused file keeps the last good machine layer in a
 running wake and is skipped by a start. No wake cleanup (release, retire,
 repair, self-upgrade, `doctor --fix-wake-locks`, or `amq cleanup`) removes it.
 

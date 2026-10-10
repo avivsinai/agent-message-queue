@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -97,5 +98,26 @@ func TestSameIgnoresRootSpelling(t *testing.T) {
 	a := Binding{Carrier: CarrierMailbox, Root: "/p/.agent-mail/a", Handle: "claude"}
 	if !a.Same(Binding{Carrier: CarrierMailbox, Root: "/p/.agent-mail/a/", Handle: "claude"}) {
 		t.Fatal("trailing-slash root not Same as the clean root")
+	}
+}
+
+// review r1: EnsureDir now refuses a group-writable ~/.amq. With umask 0002
+// the amq-remote skill's mkdir -p makes ~/.amq 0775, and attach refused it.
+func TestWriteAcceptsGroupWritableAMQHome(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix mode bits; HOME does not isolate the Windows home")
+	}
+	home := canonicalTempDir(t)
+	t.Setenv("HOME", home)
+	t.Setenv(EnvPath, "")
+	amq := filepath.Join(home, ".amq")
+	if err := os.Mkdir(amq, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(amq, 0o775); err != nil {
+		t.Fatal(err)
+	}
+	if err := Write(Binding{Root: "/r", Target: "claude:1", NativeSession: "s"}); err != nil {
+		t.Fatal(err)
 	}
 }

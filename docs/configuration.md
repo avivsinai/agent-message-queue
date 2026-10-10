@@ -30,7 +30,15 @@ per-key overlay. See [Session routing and safety](session-routing.md).
 
 ## Hot reload
 
-Every long-running AMQ process re-reads its configuration while it runs.
+A long-running AMQ process must re-read its configuration while it runs.
+This is the project rule. The wake reloads the agent and machine wake
+settings files today. Three processes do not yet follow the rule:
+[issue 1022](https://github.com/avivsinai/agent-message-queue/issues/1022)
+(the self-upgrade kill switch in `amq wake` and `amq-keepalive`),
+[issue 1023](https://github.com/avivsinai/agent-message-queue/issues/1023)
+(turn timeout and poll settings in `amq-acp`), and
+[issue 1024](https://github.com/avivsinai/agent-message-queue/issues/1024)
+(relay shares in `amq-remote serve`).
 
 - A change applies without a restart.
 - A refused edit (bad syntax, unknown key, failed validation, failed trust
@@ -43,19 +51,28 @@ Every long-running AMQ process re-reads its configuration while it runs.
 
 A start has no last good value. A start or resume that finds a refused user
 file runs without that layer, so a refused file never blocks a start or a
-self-upgrade. See [Wake operations](wake-operations.md#live-settings).
+self-upgrade. A self-upgrade under a refused machine file can therefore change
+the effective settings. While the machine file is refused, a running wake keeps
+its last good machine settings, and `amq wake config` shows the values without
+the machine layer. See [Wake operations](wake-operations.md#live-settings).
 
 ## The per-user home
 
 `~/.amq` is the one per-user directory. `internal/amqhome` is its only
-resolver: it returns the path and creates the directory with mode 0700. A
-feature takes the path from `amqhome` and never joins its own home path.
+resolver: it returns the path and creates the directory with mode 0700. It
+refuses only a symlink or a non-directory, and it does not check mode or
+owner. A feature takes the path from `amqhome` and never joins its own home
+path.
 
-Trust rules for a user file under `~/.amq`:
+The machine wake settings file, `~/.amq/wake.settings`, has stricter rules for
+read and write:
 
-- `~/.amq` is a real directory (no symlink), owned by the user, mode 0700.
+- `~/.amq` is a real directory (no symlink), owned by the user, and not
+  group-writable or world-writable.
 - The file is a regular file (no symlink), owned by the user, mode 0600.
-- A file that fails a check is refused, not repaired.
+- A file or directory that fails a check is refused, not repaired.
+- A missing `~/.amq/wake.settings` always means no machine layer, even when
+  `~/.amq` fails the checks.
 
 ## Locations outside `~/.amq`
 

@@ -154,11 +154,12 @@ ACP v2 is [the amq-acp companion](cmd/amq-acp/README.md).
   (`<root>/meta/`), project (`.amqrc`, `.amq/launch.json`), and user
   (`~/.amq/`). New per-user files go under `~/.amq` through `internal/amqhome`;
   no feature joins its own home path.
-- A long-running process hot-reloads its configuration. A change applies
-  without a restart, a refused edit keeps the last good value, and identity
-  bound into locks, targets, or resume state (`--me`, `--root`, `--inject-*`)
-  is restart-only. Do not add configuration that a running process reads
-  only at startup.
+- Rule: a long-running process must hot-reload its configuration. A change
+  applies without a restart, a refused edit keeps the last good value, and
+  identity bound into locks, targets, or resume state (`--me`, `--root`,
+  `--inject-*`) is restart-only. Do not add configuration that a running
+  process reads only at startup. The wake follows the rule today; the known
+  gaps are in [Configuration](docs/configuration.md#hot-reload).
 
 See [Configuration](docs/configuration.md).
 

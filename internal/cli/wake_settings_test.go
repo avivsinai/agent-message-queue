@@ -99,3 +99,41 @@ func TestWakeSettingsMachineLayer(t *testing.T) {
 		}
 	}
 }
+
+// review r1: a cached agent refusal is reused when only the machine file
+// changes. The agent file is invalid alone (interrupt is on by default) and
+// valid over a machine file that turns interrupt off; once that machine file
+// appears, the wake must take the agent file.
+func TestWakeSettingsMachineChangeRetriesRefusedAgentFile(t *testing.T) {
+	agent := []byte(`{"schema":1,"settings":{"hold_normal":"5m","interrupt_priority":"bogus"}}`)
+	var machine []byte
+	plan, err := planWakeSettingsStartup(agent, true, nil, observeWakeSettings(nil, false, nil), defaultWakeSettings(), nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.layers.agentErr == nil {
+		t.Fatal("setup: agent file accepted alone, want refused")
+	}
+	var recorded []wakeSettingsAppliedStatus
+	cfg := &wakeConfig{
+		settings:                plan.settings,
+		settingsObserved:        plan.observed,
+		machineSettingsObserved: plan.machineObserved,
+		settingsLayers:          plan.layers,
+		diagnosticIsTTY:         func() bool { return false },
+		settingsSource:          func() ([]byte, bool, error) { return agent, true, nil },
+		machineSettingsSource:   func() ([]byte, bool, error) { return machine, machine != nil, nil },
+		recordSettingsApplied: func(s wakeSettingsAppliedStatus) error {
+			recorded = append(recorded, s)
+			return nil
+		},
+	}
+	machine = []byte(`{"schema":1,"settings":{"interrupt":false}}`)
+	cfg.reloadSettings()
+	if cfg.settings.holdNormal != 5*time.Minute || cfg.settings.interrupt {
+		t.Fatalf("settings = %+v, want the agent hold over the machine interrupt=false", cfg.settings)
+	}
+	if got := recorded[len(recorded)-1]; got.status != wakeSettingsStatusApplied {
+		t.Fatalf("applied status = %+v, want applied", got)
+	}
+}

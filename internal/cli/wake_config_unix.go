@@ -219,7 +219,7 @@ func runWakeConfig(args []string) error {
 		}
 		machineExists = true
 	} else {
-		machineRaw, machineExists, machineErr = readMachineWakeSettings()
+		machineRaw, machineExists, machineErr = readMachineWakeSettingsSettled()
 	}
 	machineDigest := wakeSettingsDigest(machineRaw, machineExists)
 
@@ -241,7 +241,7 @@ func runWakeConfig(args []string) error {
 		if err := requireValidWakeSettingsFile(agentDir); err != nil {
 			return err
 		}
-		if err := refuseSetOnUnreportedWake(agentDir, canonicalRoot, me, machineDigest); err != nil {
+		if err := refuseSetOnUnreportedWake(agentDir, canonicalRoot, me); err != nil {
 			return err
 		}
 		agentRaw, _, err = updateWakeSettingsFileInDir(agentDir, func(doc *wakeSettingsDoc) error {
@@ -288,6 +288,22 @@ func runWakeConfig(args []string) error {
 		}
 	}
 
+	if *machine && agentDir != nil && machineFile.Status == "ok" && machineExists {
+		// A wake layers the machine file over this agent's file, so the
+		// status must match plain --me; the shown keys stay machine-only.
+		var checkDoc wakeSettingsDoc
+		if agentExists && err == nil {
+			if d, derr := decodeWakeSettingsDoc(agentRaw); derr == nil {
+				checkDoc = d
+			}
+		}
+		var scratch wakeConfigFileJSON
+		layerWakeConfig(machineDoc, checkDoc, &machineFile, &scratch)
+		if machineFile.Status == "refused" {
+			machineDoc = wakeSettingsDoc{}
+		}
+	}
+
 	var file *wakeConfigFileJSON
 	var agentDoc wakeSettingsDoc
 	if agentDir != nil && !*machine {
@@ -330,7 +346,7 @@ func runWakeConfig(args []string) error {
 			return err
 		}
 		if *wait && state.Status != wakeSettingsRunNone {
-			state, waitErr = waitWakeSettingsApplied(agentDir, canonicalRoot, me, agentDigest, machineDigest, *timeout)
+			state, waitErr = waitWakeSettingsApplied(agentDir, canonicalRoot, me, agentDigest, machineDigest, *machine, *timeout)
 		}
 		out.Wake = &wakeConfigWakeJSON{
 			Status:       state.Status,
@@ -420,10 +436,12 @@ func pollWakeSettings(
 }
 
 // waitWakeSettingsApplied polls until the running wake reports both file
-// digests applied or refused, or no wake runs.
+// digests applied or refused, or no wake runs. A refused machine file is an
+// error only when the command targeted the machine file.
 func waitWakeSettingsApplied(
 	agentDir *wakeAgentDir,
 	root, me, digest, machineDigest string,
+	machineTarget bool,
 	timeout time.Duration,
 ) (wakeSettingsRunState, error) {
 	state, timedOut, err := pollWakeSettings(agentDir, root, me, digest, machineDigest, timeout,
@@ -431,6 +449,12 @@ func waitWakeSettingsApplied(
 			switch state.Status {
 			case wakeSettingsRunApplied:
 				if state.MachineStatus == wakeConfigMachineRefused {
+					if !machineTarget {
+						// The wake applied the agent change; the refused
+						// machine file is not what this command changed.
+						_ = writeStderr("warning: wake refused the machine settings file: %s\n", state.MachineError)
+						return true, nil
+					}
 					return true, fmt.Errorf("wake refused the machine settings file: %s", state.MachineError)
 				}
 				return true, nil
@@ -494,15 +518,18 @@ func requireValidWakeSettingsFile(agentDir *wakeAgentDir) error {
 // refuseSetOnUnreportedWake stops set and --unset from writing a partial file
 // over a live wake that may run command-line settings the absent file does not
 // hold: an unreported wake never seeded the file from its flags.
-func refuseSetOnUnreportedWake(agentDir *wakeAgentDir, root, me, machineDigest string) error {
+func refuseSetOnUnreportedWake(agentDir *wakeAgentDir, root, me string) error {
 	_, exists, err := readWakeSettingsFile(agentDir)
 	if err != nil || exists {
 		return err
 	}
 	// Poll for the startup grace first: a wake just started records its
 	// first status, and a resume seeds the file, a moment after the lock.
+	// The machine layer is irrelevant here: this gate guards only unseeded
+	// command-line settings, so a sidecar without machine fields (a 0.94.0
+	// wake) that matches the agent digest is not unreported.
 	digest := wakeSettingsDigest(nil, false)
-	_, _, err = pollWakeSettings(agentDir, root, me, digest, machineDigest, 0,
+	_, _, err = pollWakeSettings(agentDir, root, me, digest, wakeSettingsDigestAbsent, 0,
 		func(state wakeSettingsRunState, graceOver bool) (bool, error) {
 			if state.Status != wakeSettingsRunUnreported {
 				return true, nil
@@ -575,6 +602,11 @@ func printWakeConfig(asJSON bool, out wakeConfigJSON) error {
 	}
 	if err := writeStdoutLine(machineLine); err != nil {
 		return err
+	}
+	if out.MachineFile.Status == "refused" {
+		if err := writeStdoutLine("running wakes keep their previous machine settings until the file is repaired"); err != nil {
+			return err
+		}
 	}
 	for _, def := range wakeSettingDefs {
 		setting := out.Settings[def.key]

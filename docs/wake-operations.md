@@ -111,15 +111,17 @@ for the generation: fix the file, then request `amq wake restart`.
 
 **Machine layer.** `~/.amq/wake.settings` holds defaults for every wake of
 this user on this machine. It has the same JSON shape and trust rules as the
-agent file (`~/.amq` is a real directory, the file is mode 0600, and neither is
-a symlink), and it never travels with a root. Per key, the effective value is
+agent file (`~/.amq` is a real directory owned by the user and not group-writable
+or world-writable, the file is mode 0600, and neither is a symlink; a missing
+file always means no machine layer, even when `~/.amq` fails these checks), and it never travels with a root. Per key, the effective value is
 the first of: the agent file, the machine file, the built-in default. A key the
 agent file sets, including a value equal to the default, pins that key against
 the machine layer. Every running wake re-reads the machine file with the agent
 file and applies a change within 2 seconds.
 
 A refused machine file never blocks a start or an upgrade. A running wake keeps
-the last good machine layer and reports `refused` once. A start or resume that
+its last good machine settings and reports `refused` once. While the file is
+refused, `amq wake config` shows the values without the machine layer. A start or resume that
 finds a refused machine file runs without the machine layer (agent file over
 built-in defaults), because a start has no last good value. A self-upgrade
 under a refused machine file therefore can change the effective settings.

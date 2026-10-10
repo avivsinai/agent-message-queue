@@ -548,6 +548,9 @@ type wakeSettingsLayers struct {
 	// machineMerge is set when the machine layer is valid alone but not
 	// under the agent layer; it is left out of this merge.
 	machineMerge error
+	// agentOmitted is set when no agent doc holds over the machine layer:
+	// the settings are the machine layer over the defaults alone.
+	agentOmitted bool
 }
 
 // mergeWakeSettingsLayers resolves one observation of each file against the
@@ -586,6 +589,7 @@ func mergeWakeSettingsLayers(
 		// The last good agent doc held only over an older machine doc; the
 		// machine layer, valid alone, is what remains.
 		settings, _, _ = layerWakeSettings(next.machine, wakeSettingsDoc{})
+		next.agentOmitted = true
 	}
 	return settings, next
 }
@@ -803,16 +807,22 @@ func (cfg *wakeConfig) reloadSettings() bool {
 	}
 	last := cfg.settingsLayers
 	// An unchanged file keeps its last outcome: its last good doc, or the
-	// refusal of its current observation.
+	// refusal of its current observation. A refused agent observation can
+	// hold over a changed machine layer (the interrupt keys depend on each
+	// other), so it is decoded again when the machine file changed. An
+	// accepted one keeps its last good doc: on an unseeded resume that doc
+	// is the argv settings, not the absent file.
 	agentLayer := wakeSettingsLayerRead{doc: last.agent, err: last.agentErr}
 	if agentChanged {
 		cfg.settingsObserved = agent
-		agentLayer = decodeWakeSettingsObservation(agent)
 		// As in the settings source, only a file read without error ends
 		// the seeding of an unseeded resume.
 		if agent.exists && agent.readErr == "" {
 			cfg.settingsUnseeded = false
 		}
+	}
+	if agentChanged || last.agentErr != nil {
+		agentLayer = decodeWakeSettingsObservation(cfg.settingsObserved)
 	}
 	machineLayer := wakeSettingsLayerRead{doc: last.machine, err: last.machineErr}
 	if machineChanged {
@@ -821,12 +831,21 @@ func (cfg *wakeConfig) reloadSettings() bool {
 	}
 	next, layers := mergeWakeSettingsLayers(agentLayer, machineLayer, last)
 	cfg.settingsLayers = layers
-	if layers.agentErr != nil && (agentChanged || last.agentErr == nil) {
+	// agentTaken: this reload took the agent file, changed or newly holding
+	// over the changed machine layer.
+	agentTaken := layers.agentErr == nil && (agentChanged || last.agentErr != nil)
+	if layers.agentErr != nil &&
+		(agentChanged || last.agentErr == nil || layers.agentOmitted != last.agentOmitted) {
+		outcome := "keeping current settings"
+		if layers.agentOmitted {
+			outcome = "running without it"
+		}
 		_ = writeWakeDiagnostic(
 			cfg,
-			"amq wake: %s refused: %v; keeping current settings\n",
+			"amq wake: %s refused: %v; %s\n",
 			wakeSettingsFileName,
 			layers.agentErr,
+			outcome,
 		)
 	}
 	if machineChanged && layers.machineErr != nil {
@@ -848,7 +867,7 @@ func (cfg *wakeConfig) reloadSettings() bool {
 	}
 	// Only a file that was taken can change the settings; a refused one
 	// keeps the running settings as they are.
-	taken := (agentChanged && layers.agentErr == nil) || (machineChanged && layers.machineErr == nil)
+	taken := agentTaken || (machineChanged && layers.machineErr == nil)
 	var changed []string
 	if taken {
 		changed = changedWakeSettingsKeys(cfg.settings, next)
@@ -859,7 +878,7 @@ func (cfg *wakeConfig) reloadSettings() bool {
 		}
 		cfg.settings = next
 		var files []string
-		if agentChanged && layers.agentErr == nil {
+		if agentTaken {
 			files = append(files, wakeSettingsFileName)
 		}
 		if machineChanged && layers.machineErr == nil && layers.machineMerge == nil {

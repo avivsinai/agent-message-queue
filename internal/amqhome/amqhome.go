@@ -28,9 +28,10 @@ func Under(home string) string {
 	return filepath.Join(home, dirName)
 }
 
-// EnsureDir returns ~/.amq after making sure it is a directory the user can
-// trust: created with mode 0700 when missing, and refused when it is a
-// symlink, not a directory, owned by another user, or group/world-writable.
+// EnsureDir returns ~/.amq after making sure it is a plain directory: it is
+// created with mode 0700 when missing and refused when it is a symlink or
+// not a directory. It checks no mode or owner; a writer that needs more
+// trust (the machine wake settings) checks the directory itself.
 func EnsureDir() (string, error) {
 	dir, err := Dir()
 	if err != nil {
@@ -48,12 +49,6 @@ func EnsureDir() (string, error) {
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 		return "", fmt.Errorf("%s is not a plain directory; refusing", dir)
-	}
-	if info.Mode().Perm()&0o022 != 0 {
-		return "", fmt.Errorf("%s is group/world-writable; refusing", dir)
-	}
-	if owner, ok := fileOwnerUID(info); ok && owner != os.Geteuid() {
-		return "", fmt.Errorf("%s is owned by uid %d, not the current user; refusing", dir, owner)
 	}
 	return dir, nil
 }
