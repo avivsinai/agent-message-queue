@@ -371,7 +371,7 @@ func (a *Attachment) pollConfirmations() {
 	// now binds only against lines read after it was found.
 	a.mu.Lock()
 	known, openIDs := a.approvalIDsLocked()
-	approve := a.cfg.Approve
+	approve := a.cfg.approvals()
 	a.pollSeq++
 	seq := a.pollSeq
 	after := a.afterTranscriptRead

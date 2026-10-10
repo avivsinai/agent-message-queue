@@ -49,6 +49,14 @@ type Candidate struct {
 	// candidate needs, so discovery output can be pasted into the manifest.
 	// Discovery never attaches: registration stays an explicit manifest edit.
 	Config json.RawMessage
+	// NativeSession is the harness's own session id (a pi session id), set
+	// when the discoverer reads it from the session itself; empty when the
+	// kind resolves it later or the session publishes none.
+	NativeSession string
+	// PID is the process that runs the session, when the discoverer reads it
+	// from the session itself (the pi bridge's liveness); 0 when unknown.
+	// `attach --self` matches it against its own ancestors.
+	PID int
 }
 
 // Discoverer optionally lists attachable adapters without attaching. .11's

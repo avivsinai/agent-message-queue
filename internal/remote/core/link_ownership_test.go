@@ -138,6 +138,9 @@ func TestLinkReadsAndCancelsOnlyItsOwnRequests(t *testing.T) {
 	if _, err := ep.WaitAfter(context.Background(), refA, new(int64)); err != nil {
 		t.Errorf("local wait on a link request: %v", err)
 	}
+	if _, err := ep.Handle(getCmd(refA), core.Source{Host: core.LocalHost}); err != nil {
+		t.Errorf("local get of a link request: %v", err)
+	}
 	recs, err := store.List()
 	if err != nil {
 		t.Fatal(err)
