@@ -1,0 +1,19 @@
+{
+  "body_def": "call_reply",
+  "description": "The server's tool budget is full: status error with code busy and retry_after_ms. Busy is never final; the endpoint sends the same call again later.",
+  "direction": "server_to_endpoint",
+  "frame": {
+    "body": {
+      "call_id": "c_k_84",
+      "error": {
+        "code": "busy",
+        "message": "too many tool calls in progress",
+        "retry_after_ms": 2000
+      },
+      "status": "error"
+    },
+    "gen": 12,
+    "re": "m_c8",
+    "schema": "amq.remote.link/1"
+  }
+}

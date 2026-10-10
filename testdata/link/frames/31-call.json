@@ -8,7 +8,7 @@
         "key": "REL-4410"
       },
       "binding": "pi-demo",
-      "call_id": "c_81",
+      "call_id": "c_k_81",
       "idempotency_key": "k_81",
       "schema": "amq.remote.link.call/1",
       "tool": "get_issue"

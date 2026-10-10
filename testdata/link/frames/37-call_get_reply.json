@@ -4,7 +4,7 @@
   "direction": "server_to_endpoint",
   "frame": {
     "body": {
-      "call_id": "c_82",
+      "call_id": "c_k_82",
       "error": {
         "code": "rejected",
         "message": "the owner rejected this call"
