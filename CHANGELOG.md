@@ -8,6 +8,13 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.95.0](https://github.com/avivsinai/agent-message-queue/compare/v0.94.0...v0.95.0) (2026-10-10)
+
+
+### Features
+
+* **wake:** set wake settings for the whole machine in ~/.amq/wake.settings ([#1036](https://github.com/avivsinai/agent-message-queue/issues/1036)) ([e2e8e77](https://github.com/avivsinai/agent-message-queue/commit/e2e8e77cae23ec71d448937ac4badd129198d8cb))
+
 ## [0.94.0](https://github.com/avivsinai/agent-message-queue/compare/v0.93.2...v0.94.0) (2026-10-09)
 
 
