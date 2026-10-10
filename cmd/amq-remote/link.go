@@ -659,7 +659,9 @@ func printLinkStatus(w io.Writer, v linkStatusOut) {
 		if l.Status.Error != "" {
 			say(w, "  %s", l.Status.Error)
 		}
-		say(w, "  shared: %v", l.Shares)
+		for _, b := range l.Shares {
+			say(w, "  %s: %s", b, nonEmpty(l.ShareStates[b], "unknown"))
+		}
 	}
 	for _, r := range v.RetiredSinks {
 		say(w, "retired %s (link %s): abandoned; its records settle without network", r.Sink, r.Link)
@@ -672,6 +674,33 @@ type linkStatusRow struct {
 	Sink   string        `json:"sink,omitempty"`
 	Status linkio.Status `json:"status"`
 	Shares []string      `json:"shares"`
+	// ShareStates says, per shared binding, whether the server sees it now:
+	// "shared", or why not, with the step that fixes it.
+	ShareStates map[string]string `json:"share_states,omitempty"`
+}
+
+// linkShareState says whether the server sees a shared binding now. A share is
+// sent only while its binding names this root and its pinned native session
+// is the one attached; otherwise it silently drops off the link, so the
+// reason and the fix are stated here.
+func linkShareState(root, stateDir, name string) string {
+	b, err := binding.ReadNamed(name)
+	switch {
+	case err != nil:
+		return "no such binding: run amq-remote attach --self --link in the session to share"
+	case b.Mailbox():
+		return "a mailbox binding cannot be shared with a link"
+	case filepath.Clean(b.Root) != filepath.Clean(root):
+		return "the binding belongs to another root"
+	}
+	native, err := nativeSessionOf(stateDir, b.Target)
+	switch {
+	case err != nil:
+		return "not attached now (" + err.Error() + ")"
+	case native != b.NativeSession:
+		return "session changed: run amq-remote attach --self --link again in the new session"
+	}
+	return "shared"
 }
 
 // linkStatus lists the links of this root and the retired sinks.
@@ -699,6 +728,10 @@ func linkStatus(args []string, probe *jsonProbe) (any, int, error) {
 		row := linkStatusRow{Name: l.Name, URL: l.URL, Status: linkio.Status{State: "offline"}, Shares: []string{}}
 		for _, sh := range l.Shares {
 			row.Shares = append(row.Shares, sh.Binding)
+			if row.ShareStates == nil {
+				row.ShareStates = map[string]string{}
+			}
+			row.ShareStates[sh.Binding] = linkShareState(c.root, stateDir, sh.Binding)
 		}
 		if key, err := linkio.LoadDeviceKey(stateDir, l.Name); err == nil {
 			row.Sink = key.Host()

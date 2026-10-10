@@ -221,8 +221,11 @@ func confinedPath(create bool) (string, error) {
 		// (codex #885 r2 P2). EvalSymlinks returns a different path exactly
 		// when some component is a symlink.
 		parent := filepath.Dir(dir)
-		if resolved, err := filepath.EvalSymlinks(parent); err != nil || resolved != parent {
-			return "", fmt.Errorf("%s directory %s must have no symlink on its path; refusing", EnvPath, parent)
+		if err := canonicalDir(parent, create); err != nil {
+			if errors.Is(err, os.ErrNotExist) && !create {
+				return path, nil // nothing bound yet; read reports ErrNone
+			}
+			return "", err
 		}
 		cur, parts = parent, []string{filepath.Base(dir)}
 	}
@@ -300,6 +303,36 @@ const LegacyName = "default"
 var nameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
 
 // ValidName reports whether name can name a binding.
+// canonicalDir checks that dir has no symlink anywhere on its path. A missing
+// dir is created (0700) when create is set, below its nearest existing
+// ancestor, which must itself be canonical; otherwise it reports
+// os.ErrNotExist.
+func canonicalDir(dir string, create bool) error {
+	existing := dir
+	for {
+		if _, err := os.Lstat(existing); err == nil {
+			break
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		next := filepath.Dir(existing)
+		if next == existing {
+			break
+		}
+		existing = next
+	}
+	if resolved, err := filepath.EvalSymlinks(existing); err != nil || resolved != existing {
+		return fmt.Errorf("%s directory %s must have no symlink on its path; refusing", EnvPath, existing)
+	}
+	if existing == dir {
+		return nil
+	}
+	if !create {
+		return fmt.Errorf("%s directory %s: %w", EnvPath, dir, os.ErrNotExist)
+	}
+	return os.MkdirAll(dir, 0o700)
+}
+
 func ValidName(name string) error {
 	if !nameRe.MatchString(name) {
 		return fmt.Errorf("binding name %q must match [a-z0-9][a-z0-9_-]{0,63}", name)

@@ -121,3 +121,19 @@ func TestWriteAcceptsGroupWritableAMQHome(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// Regression (merged-code e2e finding 1): an AMQ_REMOTE_BINDING whose
+// directory's parent did not exist yet was refused as "must have no symlink
+// on its path", although no symlink was involved. The missing directories are
+// now created (0700) below a canonical ancestor.
+func TestBindingOverrideCreatesMissingDirectories(t *testing.T) {
+	base := canonicalTempDir(t)
+	t.Setenv(EnvPath, filepath.Join(base, "home", ".amq", "remote", "binding.json"))
+	b := Binding{Root: "/r", Target: "claude:1", NativeSession: "s"}
+	if err := Write(b); err != nil {
+		t.Fatalf("Write = %v, want the missing directories created", err)
+	}
+	if got, err := Read(); err != nil || !got.Same(b) {
+		t.Fatalf("binding = %+v %v", got, err)
+	}
+}
