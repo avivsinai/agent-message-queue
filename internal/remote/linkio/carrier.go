@@ -11,6 +11,7 @@ import (
 	"fmt"
 	mrand "math/rand/v2"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/jcs"
 	"github.com/avivsinai/agent-message-queue/internal/remote/manifest"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
@@ -75,7 +77,13 @@ type Config struct {
 	ConsentKeyRevoked func(credentialID string)
 	// Revoked retires the sink after a permanent revoke (close 4010).
 	Revoked func()
-	Logf    func(format string, args ...any)
+	// Handle runs an admitted command (core.Endpoint.Handle).
+	Handle Handler
+	// ConsentKeys returns the consent keys this machine trusts now.
+	ConsentKeys func() []ConsentKey
+	// LocalKey returns this link's local confirmation passkey, if any.
+	LocalKey func() (ConsentKey, bool)
+	Logf     func(format string, args ...any)
 
 	Now          func() time.Time
 	OfferTTL     time.Duration
@@ -126,14 +134,17 @@ type Carrier struct {
 	offerBytes int
 	owed       map[string]int64
 	status     Status
-	sentBind   []byte            // JCS of the last bindings the server was told
-	bindFrame  string            // id of the bindings frame awaiting a possible refusal
-	conflicts  map[string]int64  // request_ref -> a revision the server holds with another digest
-	frameLimit int               // the smaller of MaxFrameBytes and the server's limit
-	oversize   map[string]int64  // request_ref -> a revision already logged as over the frame limit
-	revokes    chan string       // consent keys the server removed, for the revoke worker
-	waiters    map[string]waiter // frame id -> the request waiting for its reply
-	maxCalls   int               // tool calls in flight, from welcome
+	sentBind   []byte                          // JCS of the last bindings the server was told
+	bindFrame  string                          // id of the bindings frame awaiting a possible refusal
+	conflicts  map[string]int64                // request_ref -> a revision the server holds with another digest
+	frameLimit int                             // the smaller of MaxFrameBytes and the server's limit
+	oversize   map[string]int64                // request_ref -> a revision already logged as over the frame limit
+	revokes    chan string                     // consent keys the server removed, for the revoke worker
+	liveKeys   atomic.Pointer[map[string]bool] // consent credential ids accepted now
+	revoked    atomic.Pointer[map[string]bool] // consent credential ids the server removed in this process
+	held       held                            // signed tasks waiting for the local confirmation
+	waiters    map[string]waiter               // frame id -> the request waiting for its reply
+	maxCalls   int                             // tool calls in flight, from welcome
 }
 
 // New builds a carrier. It does not dial until Run.
@@ -146,6 +157,12 @@ func New(cfg Config) (*Carrier, error) {
 	}
 	if cfg.Bindings == nil {
 		cfg.Bindings = func() []Binding { return nil }
+	}
+	if cfg.ConsentKeys == nil {
+		cfg.ConsentKeys = func() []ConsentKey { return nil }
+	}
+	if cfg.LocalKey == nil {
+		cfg.LocalKey = func() (ConsentKey, bool) { return ConsentKey{}, false }
 	}
 	if cfg.Logf == nil {
 		cfg.Logf = func(string, ...any) {}
@@ -168,7 +185,7 @@ func New(cfg Config) (*Carrier, error) {
 	if cfg.RestartDelay <= 0 {
 		cfg.RestartDelay = DefaultRestartDelay
 	}
-	return &Carrier{
+	c := &Carrier{
 		cfg:       cfg,
 		host:      cfg.Key.Host(),
 		acked:     map[string]int64{},
@@ -180,7 +197,10 @@ func New(cfg Config) (*Carrier, error) {
 		revokes:   make(chan string, revokeQueue),
 		status:    Status{State: "offline"},
 		waiters:   map[string]waiter{},
-	}, nil
+	}
+	c.held.tasks = map[string]*HeldTask{}
+	c.refreshKeys() // the consent snapshot exists before the first handoff check
+	return c, nil
 }
 
 // Host is the link's creator host and sink.
@@ -538,6 +558,7 @@ func (c *Carrier) serveOnce(ctx context.Context) error {
 	sess := &session{
 		ws: ws, gen: gen, prefix: newPrefix(),
 		control: make(chan []byte, controlQueue), data: make(chan []byte, dataQueue),
+		dispatch: newDispatcher(connCtx),
 	}
 	sess.lastPing.Store(lastPing.Load())
 	c.mu.Lock()
@@ -626,7 +647,7 @@ func (c *Carrier) handshake(ctx context.Context, ws *websocket.Conn) (welcomeBod
 	}
 	hello := helloBody{
 		Schema: SchemaHello, DeviceKey: b64.EncodeToString(c.cfg.Key.SPKI), StoreID: c.cfg.StoreID,
-		AMQVersion: c.cfg.Version, Bindings: bindings, PendingLocal: []string{},
+		AMQVersion: c.cfg.Version, Bindings: bindings, PendingLocal: c.held.digests(c.cfg.Now()),
 		Signature: b64.EncodeToString(c.cfg.Key.Sign(HelloMessage(body.ServerID, body.Nonce, c.cfg.StoreID))),
 	}
 	raw, err := json.Marshal(hello)
@@ -757,15 +778,20 @@ func (c *Carrier) revokeWorker(ctx context.Context) {
 	}
 }
 
-// handleRequest answers a frame the server sends. key_revoked drops the key
-// off the reader. Every other request is refused inline until its handler
-// exists; the ordered per-request queue over bounded workers lands with the
-// first bead that serves requests over the link (9dx.3, ruling k).
+// handleRequest answers a frame the server sends. key_revoked stops the key
+// at once and drops it on disk off the reader. A signed submit and a command
+// (get, cancel, session list or inspect) wait in one ordered queue per
+// request id on bounded workers (ruling r), so a cancel runs after the submit
+// it follows. Only the reader's own refusals (undecodable, busy) are answered
+// inline.
 func (c *Carrier) handleRequest(sess *session, f Frame) {
 	switch bodySchema(f.Body) {
 	case SchemaKeyRevoked:
 		var b keyRevokedBody
 		if err := decodeStrict(f.Body, SchemaKeyRevoked, &b); err == nil && c.cfg.ConsentKeyRevoked != nil {
+			// The key stops counting now, before any later frame is read; the
+			// disk write follows on the revoke worker.
+			c.markRevoked(b.CredentialID)
 			select {
 			case c.revokes <- b.CredentialID: // the revoke worker does the disk work
 			default:
@@ -773,8 +799,206 @@ func (c *Carrier) handleRequest(sess *session, f Frame) {
 			}
 		}
 		return
+	case SchemaSignedSubmit:
+		var m SignedSubmit
+		if err := decodeStrict(f.Body, SchemaSignedSubmit, &m); err != nil {
+			c.refuse(sess, f.ID, ErrorBody{Code: CodeConsentInvalid, Message: err.Error()})
+			return
+		}
+		// The queue key is the request id, read before verification. Only the
+		// order of work depends on it, never what runs: a forged id changes
+		// where the frame waits, and verification still decides. A document
+		// whose request id does not decode is refused here, so a submit and
+		// the cancel that follows it always share one key.
+		var d struct {
+			Command struct {
+				RequestID string `json:"request_id"`
+			} `json:"command"`
+		}
+		doc, err := b64.DecodeString(m.DocumentB64)
+		if err != nil || json.Unmarshal(doc, &d) != nil || d.Command.RequestID == "" {
+			c.refuse(sess, f.ID, ErrorBody{Code: CodeConsentInvalid, Message: "the signed document names no request"})
+			return
+		}
+		c.enqueue(sess, f, d.Command.RequestID, func() (any, error) { return c.admitSigned(m) })
+		return
+	case protocol.SchemaCommand:
+		cmd, err := protocol.DecodeCommand(f.Body)
+		if err != nil {
+			c.refuse(sess, f.ID, ErrorBody{Code: string(protocol.CodeInvalid), Message: err.Error()})
+			return
+		}
+		if cmd.Op == protocol.OpRequestSubmit {
+			c.refuse(sess, f.ID, ErrorBody{Code: string(protocol.CodeUnsupported), Message: "a link submits only signed tasks (signed_submit)"})
+			return
+		}
+		key := cmd.RequestID
+		if cmd.RequestRef != "" {
+			// get and cancel queue behind the submit of the same request id.
+			if _, _, id, err := protocol.DecodeRef(cmd.RequestRef); err == nil {
+				key = id
+			}
+		}
+		if key == "" {
+			key = "session:" + cmd.TargetID
+		}
+		c.enqueue(sess, f, key, func() (any, error) { return c.runCommand(cmd) })
+		return
 	}
 	c.refuse(sess, f.ID, ErrorBody{Code: string(protocol.CodeUnsupported), Message: "this endpoint does not accept that request on a link"})
+}
+
+// enqueue queues one server request behind earlier ones with the same key,
+// or answers busy when the queue is full.
+func (c *Carrier) enqueue(sess *session, f Frame, key string, run func() (any, error)) {
+	if !sess.dispatch.enqueue(&job{sess: sess, f: f, key: key, run: run}) {
+		c.refuse(sess, f.ID, ErrorBody{Code: string(protocol.CodeBusy), Message: "too many requests in progress", RetryAfterMS: busyRetryAfterMS})
+	}
+}
+
+// runCommand runs a get, cancel, session list or inspect from the server as
+// this link's source. Core applies the link's ownership; session answers are
+// the link's own bindings for the targets core lets it see.
+func (c *Carrier) runCommand(cmd *protocol.Command) (any, error) {
+	if c.cfg.Handle == nil {
+		return nil, refuse(string(protocol.CodeUnsupported), "this endpoint runs no commands")
+	}
+	view := c.view()
+	out, err := c.cfg.Handle(cmd, c.source(view, "", ""))
+	if err != nil {
+		return nil, err
+	}
+	switch v := out.(type) {
+	case []protocol.Session:
+		targets := map[string]bool{}
+		for _, s := range v {
+			targets[s.TargetID] = true
+		}
+		return bindingsReply{Bindings: bindingsFor(view, targets)}, nil
+	case protocol.Session:
+		return bindingsReply{Bindings: bindingsFor(view, map[string]bool{v.TargetID: true})}, nil
+	}
+	return out, nil
+}
+
+// bindingsFor lists the view's bindings whose target is in targets.
+func bindingsFor(view *ConsentView, targets map[string]bool) []Binding {
+	out := []Binding{}
+	for _, b := range view.Bindings {
+		if targets[b.TargetID] {
+			out = append(out, b)
+		}
+	}
+	slices.SortFunc(out, func(a, b Binding) int { return strings.Compare(a.Binding, b.Binding) })
+	return out
+}
+
+// admitSigned runs a signed submit: the command decoded from the signed
+// bytes, on the native session it was signed for, or a refusal.
+func (c *Carrier) admitSigned(m SignedSubmit) (any, error) {
+	if c.cfg.Handle == nil {
+		return nil, refuse(string(protocol.CodeUnsupported), "this endpoint runs no commands")
+	}
+	view := c.view()
+	v, err := VerifySignedSubmit(view, m, c.cfg.Now())
+	if err != nil {
+		return nil, err
+	}
+	if v.Binding.Consent == "local" {
+		return c.hold(v, m.CredentialID)
+	}
+	out, err := c.cfg.Handle(v.Cmd, c.source(view, v.Native, m.CredentialID))
+	if err != nil {
+		return nil, err
+	}
+	reply, ok := out.(protocol.Reply)
+	if !ok {
+		return nil, errors.New("the endpoint returned no submit reply")
+	}
+	return outcomeReply{Outcome: reply.Outcome}, nil
+}
+
+// view is what the machine trusts right now. It is rebuilt for each signed
+// submit, so a removed key or a changed binding takes effect at once.
+func (c *Carrier) view() *ConsentView {
+	v := &ConsentView{ServerID: c.cfg.Pin.ServerID, StoreID: c.cfg.StoreID, Keys: map[string]ConsentKey{}, Bindings: map[string]Binding{}}
+	v.Keys = c.refreshKeys()
+	for _, b := range c.cfg.Bindings() {
+		v.Bindings[b.Binding] = b
+	}
+	return v
+}
+
+// ConsentLive reports whether this link still accepts a consent key. Core
+// asks it right before a handoff, under its own lock, so it reads only the
+// snapshot the last signed submit or key removal stored.
+func (c *Carrier) ConsentLive(credentialID string) bool {
+	live := c.liveKeys.Load()
+	return live != nil && (*live)[credentialID]
+}
+
+// RefreshConsentKeys re-reads the consent keys into the snapshot, after a
+// key was removed.
+func (c *Carrier) RefreshConsentKeys() { c.refreshKeys() }
+
+// refreshKeys reads the consent keys this machine trusts and stores the
+// snapshot ConsentLive reads.
+func (c *Carrier) refreshKeys() map[string]ConsentKey {
+	keys := map[string]ConsentKey{}
+	live := map[string]bool{}
+	revoked := c.revoked.Load()
+	for _, k := range c.cfg.ConsentKeys() {
+		if revoked != nil && (*revoked)[k.CredentialID] {
+			continue // removed by the server; the disk may not say so yet
+		}
+		keys[k.CredentialID] = k
+		live[k.CredentialID] = true
+	}
+	c.liveKeys.Store(&live)
+	return keys
+}
+
+// markRevoked stops a consent key at once: it joins the revoked set and
+// leaves the live snapshot, both copy-on-write, with no I/O.
+func (c *Carrier) markRevoked(id string) {
+	next := map[string]bool{id: true}
+	if old := c.revoked.Load(); old != nil {
+		for k := range *old {
+			next[k] = true
+		}
+	}
+	c.revoked.Store(&next)
+	live := map[string]bool{}
+	if old := c.liveKeys.Load(); old != nil {
+		for k := range *old {
+			if k != id {
+				live[k] = true
+			}
+		}
+	}
+	c.liveKeys.Store(&live)
+}
+
+// OriginName is the Origin key naming the link (its manifest name), so a
+// harness can show where a task came from (ruling x). It carries no
+// authority.
+const OriginName = "name"
+
+// source is the authenticated source of a signed submit: this link's sink,
+// the native session and consent key it was signed with, and the targets
+// shared with the link. The origin routes its revisions back to this sink.
+func (c *Carrier) source(view *ConsentView, native, credential string) core.Source {
+	shared := make([]string, 0, len(view.Bindings))
+	for _, b := range view.Bindings {
+		shared = append(shared, b.TargetID)
+	}
+	return core.Source{
+		Host:          c.host,
+		Origin:        map[string]string{"carrier": core.CarrierLink, core.OriginSink: c.host, OriginName: c.cfg.Name},
+		Shared:        shared,
+		NativeSession: native,
+		Credential:    credential,
+	}
 }
 
 // refuse answers on the control lane. A full control lane drops the answer;
@@ -799,6 +1023,7 @@ type session struct {
 	lastPing atomic.Int64
 	control  chan []byte // acknowledgements and refusals: never waits behind data
 	data     chan []byte
+	dispatch *dispatcher
 }
 
 func (s *session) nextID() string {
@@ -843,4 +1068,59 @@ func newPrefix() string {
 	raw := make([]byte, 5)
 	_, _ = rand.Read(raw) // crypto/rand.Read never fails on supported platforms
 	return strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(raw))
+}
+
+// hold keeps a verified task on a local binding until the user confirms it on
+// this machine. The reply is AMQ's Outcome with code pending_local; nothing
+// is stored and nothing runs until the confirmation.
+func (c *Carrier) hold(v *Verified, credential string) (any, error) {
+	if _, ok := c.cfg.LocalKey(); !ok {
+		return nil, refuse(string(protocol.CodeUnsupported), "binding %q needs a local confirmation passkey; run amq-remote link local-key %s in a terminal", v.Binding.Binding, c.cfg.Name)
+	}
+	t := &HeldTask{
+		ID: heldID(v.Cmd.RequestID), Digest: v.Digest, Binding: v.Binding.Binding, Session: v.Binding.Labels.Session,
+		Text: v.Text, NotAfter: v.NotAfter, verified: v, credential: credential,
+	}
+	if err := c.held.add(t, c.cfg.Now()); err != nil {
+		return nil, err
+	}
+	return outcomeReply{Outcome: protocol.Outcome{
+		Op: protocol.OpRequestSubmit, Code: protocol.CodePendingLocal,
+		Message: "confirm on your machine: amq-remote link confirm " + t.ID,
+	}}, nil
+}
+
+// HeldTasks lists the tasks waiting for a local confirmation.
+func (c *Carrier) HeldTasks() []HeldTask { return c.held.list(c.cfg.Now()) }
+
+// HeldTask returns the one held task with that id, text included, for the
+// endpoint's own confirm page.
+func (c *Carrier) HeldTask(id string) (HeldTask, error) {
+	t, err := c.held.find(id, c.cfg.Now())
+	if err != nil {
+		return HeldTask{}, err
+	}
+	return *t, nil
+}
+
+// ConfirmLocal runs one held task after the user's local passkey signed the
+// confirm challenge of the digest that was shown. The task moves into the
+// store once; the passkey assertion is checked here, by the endpoint, so a
+// caller that only reaches the local socket cannot confirm without the user.
+func (c *Carrier) ConfirmLocal(id, digest, authenticatorData, clientDataJSON, signature string) (any, error) {
+	key, ok := c.cfg.LocalKey()
+	if !ok {
+		return nil, refuse(string(protocol.CodeUnsupported), "this link has no local confirmation passkey")
+	}
+	if c.cfg.Handle == nil { // checked before take, so a misconfigured endpoint keeps the task
+		return nil, refuse(string(protocol.CodeUnsupported), "this endpoint runs no commands")
+	}
+	if err := VerifyLocalConfirm(key, digest, authenticatorData, clientDataJSON, signature); err != nil {
+		return nil, refuse(CodeConsentInvalid, "the confirmation does not verify: %v", err)
+	}
+	t, err := c.held.take(id, digest, c.cfg.Now())
+	if err != nil {
+		return nil, err
+	}
+	return c.cfg.Handle(t.verified.Cmd, c.source(c.view(), t.verified.Native, t.credential))
 }

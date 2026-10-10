@@ -76,6 +76,15 @@ func attach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 			return protocol.ExitActionRequired, err
 		}
 	}
+	if *linkName != "" && *consent == "local" {
+		stateDir, err := c.stateDir()
+		if err != nil {
+			return protocol.ExitUsage, err
+		}
+		if !linkio.HasLocalKey(stateDir, *linkName) {
+			return protocol.ExitActionRequired, protocol.Refuse(protocol.CodeUnsupported, "consent local needs the link's local passkey: run amq-remote link local-key %s first", *linkName)
+		}
+	}
 	if !*nativeMode {
 		return attachMailbox(c.root, strings.TrimSpace(*me), strings.TrimSpace(*name), c.json, stdout)
 	}

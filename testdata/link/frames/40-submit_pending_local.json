@@ -1,0 +1,17 @@
+{
+  "body_def": "outcome_reply",
+  "description": "A signed task on a binding whose consent is local passed every check and waits for the person to confirm it on the machine. Nothing is stored or run until then; hello's pending_local lists its digest.",
+  "direction": "endpoint_to_server",
+  "frame": {
+    "body": {
+      "outcome": {
+        "code": "pending_local",
+        "message": "confirm on your machine: amq-remote link confirm 7f3a2c1e",
+        "op": "request.submit"
+      }
+    },
+    "gen": 12,
+    "re": "m_s1",
+    "schema": "amq.remote.link/1"
+  }
+}
