@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/amqhome"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/lock"
 )
@@ -109,11 +110,11 @@ func Path() (string, error) {
 		}
 		return filepath.Clean(p), nil
 	}
-	home, err := os.UserHomeDir()
+	dir, err := amqhome.Dir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, ".amq", "remote", "binding.json"), nil
+	return filepath.Join(dir, "remote", "binding.json"), nil
 }
 
 // Read returns the current binding, or ErrNone.
@@ -183,7 +184,8 @@ func transact(fn func(path string) error) error {
 
 // confinedPath returns the binding path after checking that no directory
 // between the home (or the override's parent) and the file is a symlink.
-// With create, missing directories are made one at a time with mode 0700.
+// With create, the AMQ home is made and checked by amqhome and missing
+// directories below it are made one at a time with mode 0700.
 func confinedPath(create bool) (string, error) {
 	path, err := Path()
 	if err != nil {
@@ -192,6 +194,11 @@ func confinedPath(create bool) (string, error) {
 	dir := filepath.Dir(path)
 	base := dir
 	if os.Getenv(EnvPath) == "" {
+		if create {
+			if _, err := amqhome.EnsureDir(); err != nil {
+				return "", err
+			}
+		}
 		home, err := os.UserHomeDir()
 		if err != nil {
 			return "", err

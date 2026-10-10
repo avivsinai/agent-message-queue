@@ -44,13 +44,14 @@ func TestWakeSettingsSeedRetryKeepsArgvSettings(t *testing.T) {
 	flags := defaultWakeSettings()
 	flags.holdNormal = 5 * time.Minute
 	flags.interrupt = false
-	plan, err := planWakeSettingsStartup(nil, false, nil, flags, []string{"hold_normal", "interrupt"}, true)
+	plan, err := planWakeSettingsStartup(nil, false, nil, wakeSettingsObservation{}, flags, []string{"hold_normal", "interrupt"}, true)
 	if err != nil {
 		t.Fatal(err)
 	}
 	cfg := wakeConfig{
 		settings:         plan.settings,
 		settingsObserved: observeWakeSettings(nil, false, nil),
+		settingsLayers:   plan.layers,
 		settingsSource:   wakeSettingsSourceInDir(agentDir, insp, plan.write),
 	}
 	settingsPath := filepath.Join(dir, wakeSettingsFileName)

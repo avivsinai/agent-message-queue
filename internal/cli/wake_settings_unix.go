@@ -140,16 +140,18 @@ func checkWakeSettingsForResume(root, me string) error {
 // command line. On a fresh start they are written to the file under the
 // lifecycle guard, and a refused file or failed write refuses the start. A
 // resume never exits on the file: when its seed fails it runs with the flags
-// in memory.
+// in memory. The machine file is read once, first; a refused machine file
+// never refuses a start, the wake runs without the machine layer.
 func loadWakeSettingsAtStartup(
 	agentDir *wakeAgentDir,
 	flags wakeSettings,
 	explicit []string,
 	resume bool,
 ) (wakeSettingsStartup, error) {
+	machine := observeMachineWakeSettings()
 	if len(explicit) == 0 {
 		raw, exists, readErr := readWakeSettingsFile(agentDir)
-		return planWakeSettingsStartup(raw, exists, readErr, flags, explicit, resume)
+		return planWakeSettingsStartup(raw, exists, readErr, machine, flags, explicit, resume)
 	}
 	var plan wakeSettingsStartup
 	err := withWakeLifecycleGuardModeAndTimeoutInDir(
@@ -159,7 +161,7 @@ func loadWakeSettingsAtStartup(
 		func(dirfd int) error {
 			raw, exists, readErr := readWakeSettingsFileAt(dirfd, agentDir)
 			var err error
-			plan, err = planWakeSettingsStartup(raw, exists, readErr, flags, explicit, resume)
+			plan, err = planWakeSettingsStartup(raw, exists, readErr, machine, flags, explicit, resume)
 			if err != nil || plan.write == nil {
 				return err
 			}
@@ -167,7 +169,7 @@ func loadWakeSettingsAtStartup(
 		},
 	)
 	if err != nil && resume {
-		return unseededWakeSettingsResume(agentDir, flags, explicit, err)
+		return unseededWakeSettingsResume(agentDir, machine, flags, explicit, err)
 	}
 	if err != nil {
 		return wakeSettingsStartup{}, fmt.Errorf(
@@ -185,16 +187,25 @@ func loadWakeSettingsAtStartup(
 // next reload keeps them; the settings source retries the seed from the loop.
 // No status is published for the absent file until the seed lands, so wake
 // config does not report the argv settings as a refused or applied file.
+// The argv settings are the agent layer, over the machine layer.
 func unseededWakeSettingsResume(
 	agentDir *wakeAgentDir,
+	machine wakeSettingsObservation,
 	flags wakeSettings,
 	explicit []string,
 	seedErr error,
 ) (wakeSettingsStartup, error) {
 	raw, exists, readErr := readWakeSettingsFile(agentDir)
-	plan, err := planWakeSettingsStartup(raw, exists, readErr, flags, explicit, true)
+	plan, err := planWakeSettingsStartup(raw, exists, readErr, machine, flags, explicit, true)
 	if err != nil {
-		plan = wakeSettingsStartup{settings: flags}
+		var argv wakeSettingsDoc
+		argv.set(flags, explicit)
+		plan = wakeSettingsStartup{machineObserved: machine}
+		plan.settings, plan.layers = mergeWakeSettingsLayers(
+			wakeSettingsLayerRead{doc: argv},
+			decodeWakeSettingsObservation(machine),
+			wakeSettingsLayers{},
+		)
 	}
 	if err == nil && plan.write == nil {
 		return plan, nil
@@ -280,16 +291,22 @@ func seedWakeSettingsFile(
 }
 
 // wakeSettingsAppliedFile is .wake.settings.applied: what the wake of one
-// lock generation did with one observed settings digest. It is a diagnostic,
-// not a receipt, and is removed with the self-upgrade diagnostic.
+// lock generation did with one observed agent settings digest and one
+// observed machine settings digest. It is a diagnostic, not a receipt, and
+// is removed with the self-upgrade diagnostic. The machine fields were added
+// within schema 1: an older reader decodes without them, and a sidecar
+// without them comes from an image that never reads the machine file.
 type wakeSettingsAppliedFile struct {
-	Schema     int    `json:"schema"`
-	Root       string `json:"root"`
-	Agent      string `json:"agent"`
-	Generation string `json:"generation"`
-	Status     string `json:"status"`
-	Digest     string `json:"digest"`
-	Error      string `json:"error"`
+	Schema        int    `json:"schema"`
+	Root          string `json:"root"`
+	Agent         string `json:"agent"`
+	Generation    string `json:"generation"`
+	Status        string `json:"status"`
+	Digest        string `json:"digest"`
+	Error         string `json:"error"`
+	MachineStatus string `json:"machine_status,omitempty"`
+	MachineDigest string `json:"machine_digest,omitempty"`
+	MachineError  string `json:"machine_error,omitempty"`
 }
 
 func readWakeSettingsAppliedAt(
@@ -338,13 +355,16 @@ func recordWakeSettingsApplied(
 			return fmt.Errorf("wake changed before settings status publication")
 		}
 		applied := wakeSettingsAppliedFile{
-			Schema:     wakeSettingsSchemaV1,
-			Root:       inspection.Root,
-			Agent:      inspection.Agent,
-			Generation: inspection.Lock.Generation,
-			Status:     status.status,
-			Digest:     status.digest,
-			Error:      status.err,
+			Schema:        wakeSettingsSchemaV1,
+			Root:          inspection.Root,
+			Agent:         inspection.Agent,
+			Generation:    inspection.Lock.Generation,
+			Status:        status.status,
+			Digest:        status.digest,
+			Error:         status.err,
+			MachineStatus: status.machineStatus,
+			MachineDigest: status.machineDigest,
+			MachineError:  status.machineErr,
 		}
 		if previous, exists := readWakeSettingsAppliedAt(dirfd, agentDir, inspection); exists && previous == applied {
 			return nil
@@ -390,21 +410,30 @@ const (
 	wakeSettingsRunUnreported = "unreported"
 )
 
-// wakeSettingsRunState is what the running wake did with a settings file.
+// wakeSettingsRunState is what the running wake did with the settings files.
 type wakeSettingsRunState struct {
-	Status     string // one of the wakeSettingsRun* values
+	Status     string // one of the wakeSettingsRun* values, for the agent file
 	Generation string // lock generation; empty when no wake runs
 	Error      string // the wake's refusal text when Status is refused
+	// MachineStatus is what the wake did with the machine file: applied,
+	// refused or absent; "" when the wake did not report it (an image that
+	// predates the machine layer) or Status is not applied or refused.
+	MachineStatus string
+	MachineError  string // the wake's refusal text when MachineStatus is refused
 }
 
-// inspectWakeSettingsRunState reports whether the wake that holds the lock
-// now has applied or refused the settings file whose digest is fileDigest
-// (wakeSettingsDigest of the current bytes). The generation is read from the
-// lock on each call; a sidecar with another digest is pending, and a valid
-// lock whose generation has no sidecar is unreported.
+// inspectWakeSettingsRunState reports what the wake that holds the lock now
+// did with the agent file whose digest is agentDigest and the machine file
+// whose digest is machineDigest (wakeSettingsDigest of each file's current
+// bytes). The generation is read from the lock on each call. A sidecar with
+// another agent or machine digest is pending, and a valid lock whose
+// generation has no sidecar is unreported. When both digests match, Status
+// follows the agent file and MachineStatus carries the machine outcome. A
+// sidecar with no machine fields comes from an image that never reads the
+// machine file: it is unreported unless there is no machine file to apply.
 func inspectWakeSettingsRunState(
 	agentDir *wakeAgentDir,
-	root, me, fileDigest string,
+	root, me, agentDigest, machineDigest string,
 ) (wakeSettingsRunState, error) {
 	var state wakeSettingsRunState
 	err := agentDir.withFD(func(dirfd int) error {
@@ -429,8 +458,19 @@ func inspectWakeSettingsRunState(
 			}
 			return nil
 		}
-		if applied.Digest != fileDigest {
+		if applied.Digest != agentDigest {
 			return nil
+		}
+		switch {
+		case applied.MachineDigest == "" && machineDigest != wakeSettingsDigestAbsent:
+			state.Status = wakeSettingsRunUnreported
+			return nil
+		case applied.MachineDigest == "":
+		case applied.MachineDigest != machineDigest:
+			return nil
+		default:
+			state.MachineStatus = applied.MachineStatus
+			state.MachineError = applied.MachineError
 		}
 		switch applied.Status {
 		case wakeSettingsStatusApplied:
