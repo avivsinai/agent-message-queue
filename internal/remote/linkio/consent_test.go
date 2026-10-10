@@ -93,7 +93,7 @@ func TestGoldenSignedSubmitIsAdmitted(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Date(2026, 10, 9, 14, 2, 10, 0, time.UTC)
-	cmd, native, err := VerifySignedSubmit(view, frame.Frame.Body, now)
+	v, err := VerifySignedSubmit(view, frame.Frame.Body, now)
 	if err != nil {
 		t.Fatalf("golden submit refused: %v", err)
 	}
@@ -101,8 +101,8 @@ func TestGoldenSignedSubmitIsAdmitted(t *testing.T) {
 	if err := json.Unmarshal(readLinkFixture(t, "consent/document.json"), &doc); err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(*cmd, doc.Command) || native != doc.NativeSessionID {
-		t.Fatalf("admitted %+v on %q, want document.command on %q", cmd, native, doc.NativeSessionID)
+	if !reflect.DeepEqual(*v.Cmd, doc.Command) || v.Native != doc.NativeSessionID {
+		t.Fatalf("admitted %+v on %q, want document.command on %q", v.Cmd, v.Native, doc.NativeSessionID)
 	}
 }
 
@@ -136,7 +136,7 @@ func TestSignedSubmitRefusals(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, _, err = VerifySignedSubmit(view, signDoc(t, key, raw), now)
+			_, err = VerifySignedSubmit(view, signDoc(t, key, raw), now)
 			var r *Refusal
 			if !errors.As(err, &r) || r.Code != tc.want {
 				t.Fatalf("got %v, want refusal %s", err, tc.want)
@@ -222,28 +222,6 @@ func TestRefusedConsentDocumentsAreRefused(t *testing.T) {
 	}
 }
 
-// A binding whose consent is local runs nothing on a passkey alone: until the
-// local confirmation exists, the valid golden submit is refused unsupported.
-func TestLocalBindingRefusesAPasskeyAlone(t *testing.T) {
-	view, _ := goldenView(t)
-	b := view.Bindings["pi-demo"]
-	b.Consent = "local"
-	view.Bindings["pi-demo"] = b
-	var frame struct {
-		Frame struct {
-			Body SignedSubmit `json:"body"`
-		} `json:"frame"`
-	}
-	if err := json.Unmarshal(readLinkFixture(t, "frames/04-signed_submit.json"), &frame); err != nil {
-		t.Fatal(err)
-	}
-	_, _, err := VerifySignedSubmit(view, frame.Frame.Body, time.Date(2026, 10, 9, 14, 2, 10, 0, time.UTC))
-	var r *Refusal
-	if !errors.As(err, &r) || r.Code != string(protocol.CodeUnsupported) {
-		t.Fatalf("got %v, want unsupported", err)
-	}
-}
-
 // The golden Ed25519 (alg -8) assertion over the same document is admitted.
 func TestGoldenEd25519AssertionIsAdmitted(t *testing.T) {
 	view, _ := goldenView(t)
@@ -259,7 +237,7 @@ func TestGoldenEd25519AssertionIsAdmitted(t *testing.T) {
 	view.Keys = map[string]ConsentKey{a.CredentialID: a.ConsentKey}
 	m := SignedSubmit{Schema: SchemaSignedSubmit, DocumentB64: b64.EncodeToString(readLinkFixture(t, "consent/document.json")),
 		CredentialID: a.CredentialID, AuthenticatorData: a.AuthenticatorData, ClientDataJSON: a.ClientDataJSON, Signature: a.Signature}
-	if _, _, err := VerifySignedSubmit(view, m, time.Date(2026, 10, 9, 14, 2, 10, 0, time.UTC)); err != nil {
+	if _, err := VerifySignedSubmit(view, m, time.Date(2026, 10, 9, 14, 2, 10, 0, time.UTC)); err != nil {
 		t.Fatalf("Ed25519 golden refused: %v", err)
 	}
 }

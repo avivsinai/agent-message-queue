@@ -264,6 +264,9 @@ const (
 	// CodeConsentInvalid: the consent that authorized a request is no longer
 	// accepted (its key was removed) when the task would be handed off.
 	CodeConsentInvalid Code = "consent_invalid"
+	// CodePendingLocal (an Outcome code, never a record code): a signed task
+	// on a local binding waits for the user's confirmation on the machine.
+	CodePendingLocal Code = "pending_local"
 )
 
 // CancelDisposition is the recorded outcome of a cancel command.
