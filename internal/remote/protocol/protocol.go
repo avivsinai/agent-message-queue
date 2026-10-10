@@ -258,6 +258,12 @@ const (
 	CodeEndpointUnreachable      Code = "endpoint_unreachable"
 	CodeStoreClosed              Code = "store_closed"
 	CodeDraining                 Code = "draining"
+	// CodeSessionChanged: a signed request names a native session that is
+	// not the one attached when the task would be handed off.
+	CodeSessionChanged Code = "session_changed"
+	// CodeConsentInvalid: the consent that authorized a request is no longer
+	// accepted (its key was removed) when the task would be handed off.
+	CodeConsentInvalid Code = "consent_invalid"
 )
 
 // CancelDisposition is the recorded outcome of a cancel command.
@@ -498,7 +504,7 @@ func ExitForCode(code Code) int {
 	case CodeBusy, CodeUnsupported, CodeUnshared, CodeExpired, CodeStaleEpoch,
 		CodeRequestConflict, CodeStorageFull, CodeAttachmentLost, CodeResultExpired,
 		CodeAlreadyResolved, CodeEndpointAlreadyRunning, CodeEndpointUnreachable,
-		CodeStoreClosed, CodeDraining:
+		CodeStoreClosed, CodeDraining, CodeSessionChanged, CodeConsentInvalid:
 		return ExitActionRequired
 	}
 	return ExitError
@@ -1033,6 +1039,8 @@ func FormatTime(t time.Time) string {
 // rejectDuplicateKeys walks the token stream and refuses any object with a
 // repeated key. encoding/json keeps the last value silently, which would let
 // two carriers disagree about the same bytes.
+var commandKeyRe = regexp.MustCompile(`^[a-z0-9_]+$`)
+
 func rejectDuplicateKeys(data []byte) error {
 	type frame struct {
 		object    bool
@@ -1074,6 +1082,13 @@ func rejectDuplicateKeys(data []byte) error {
 			key, _ := tok.(string)
 			if _, dup := top.keys[key]; dup {
 				return Refuse(CodeInvalid, "duplicate key %q", key)
+			}
+			// encoding/json matches a key to a field with Unicode case
+			// folding, so "OP", or "ſchema" (long s), would decode into op or
+			// schema, and with both spellings the last one wins. Every command
+			// key is ASCII lowercase letters, digits and underscores.
+			if !commandKeyRe.MatchString(key) {
+				return Refuse(CodeInvalid, "key %q: command keys are [a-z0-9_]", key)
 			}
 			top.keys[key] = struct{}{}
 			top.expectKey = false

@@ -57,6 +57,8 @@ func LinkDir(stateDir, name string) string { return filepath.Join(Dir(stateDir),
 // Pin is what a link fixed at linking. The endpoint refuses a server whose
 // challenge names another server_id.
 type Pin struct {
+	// API is the server's https base, where link codes are redeemed.
+	API        string `json:"api"`
 	URL        string `json:"url"`
 	ServerID   string `json:"server_id"`
 	DeviceID   string `json:"device_id"`

@@ -218,15 +218,46 @@ func (ls *linkSet) newRun(l manifest.Link) (*linkRun, error) {
 			if _, err := linkio.DropConsentKey(ls.stateDir, name, id); err != nil {
 				say(ls.stderr, "link %s: drop consent key: %v", name, err)
 			}
+			if run.carrier != nil {
+				run.carrier.RefreshConsentKeys()
+			}
 		},
 		Revoked: func() { ls.retire(name) },
-		Logf:    func(f string, a ...any) { say(ls.stderr, f, a...) },
+		Handle:  func(cmd *protocol.Command, src core.Source) (any, error) { return ls.handle(cmd, src) },
+		ConsentKeys: func() []linkio.ConsentKey {
+			keys, err := linkio.LoadConsentKeys(ls.stateDir, name)
+			if err != nil {
+				say(ls.stderr, "link %s: read consent keys: %v", name, err)
+			}
+			return keys
+		},
+		Logf: func(f string, a ...any) { say(ls.stderr, f, a...) },
 	})
 	if err != nil {
 		return nil, err
 	}
 	run.carrier = c
 	return run, nil
+}
+
+// consentLive is core's handoff check: the link with that creator host still
+// accepts the consent key. A retired or unknown link accepts none.
+func (ls *linkSet) consentLive(host, credential string) bool {
+	ls.mu.Lock()
+	c := ls.byHost[host]
+	ls.mu.Unlock()
+	return c != nil && c.ConsentLive(credential)
+}
+
+// handle runs a link's admitted command on the endpoint.
+func (ls *linkSet) handle(cmd *protocol.Command, src core.Source) (any, error) {
+	ls.mu.Lock()
+	ep := ls.ep
+	ls.mu.Unlock()
+	if ep == nil {
+		return nil, protocol.Refuse(protocol.CodeDraining, "the endpoint is not started")
+	}
+	return ep.Handle(cmd, src)
 }
 
 // retire makes a revoked link's sink history.
@@ -304,11 +335,16 @@ func writeLinkStatus(stateDir, name string, st linkio.Status) {
 // link dispatches `amq-remote link add|remove|status`.
 func link(args []string, stdin io.Reader, stdout io.Writer, probe *jsonProbe) (any, int, error) {
 	if len(args) == 0 {
-		return nil, protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "link needs a subcommand: add, remove or status")
+		return nil, protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "link needs a subcommand: add, keys, remove or status")
 	}
 	switch args[0] {
 	case "add":
 		return linkAdd(args[1:], stdin, stdout, probe)
+	case "keys":
+		if len(args) < 2 || args[1] != "add" {
+			return nil, protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "usage: amq-remote link keys add NAME --code CODE")
+		}
+		return linkKeysAdd(args[2:], stdin, stdout, probe)
 	case "remove":
 		return linkRemove(args[1:], stdout, probe)
 	case "status":
@@ -404,35 +440,15 @@ func linkAdd(args []string, stdin io.Reader, stdout io.Writer, probe *jsonProbe)
 			_ = os.RemoveAll(linkio.LinkDir(stateDir, name)) // never redeemed or not confirmed
 		}
 	}()
-	ts := time.Now().Unix()
-	req := redeemRequest{
-		DeviceKey: b64url(key.SPKI), DeviceName: *deviceName, Code: *code, TS: ts,
-		Signature: b64url(key.Sign(linkio.RedeemMessage(info.ServerID, *code, ts))),
+	say(stdout, "Device key %s (0600, new)", filepath.Join(linkio.LinkDir(stateDir, name), "device.key"))
+	rep, ck, err := redeemOneKey(client, base+"/api/v1/link/redeem", key, info.ServerID, *code, *deviceName, stdin, stdout)
+	if errors.Is(err, errFingerprintMismatch) {
+		return nil, protocol.ExitActionRequired, fmt.Errorf("%w; nothing was linked here. The server already registered device %s: remove it in the server's connectors, then run link add with a new code", err, key.Host())
 	}
-	var rep redeemReply
-	if err := postJSON(client, base+"/api/v1/link/redeem", req, &rep); err != nil {
-		return nil, protocol.ExitActionRequired, fmt.Errorf("redeem the code: %w", err)
-	}
-	switch {
-	case rep.ServerID != info.ServerID:
-		return nil, protocol.ExitActionRequired, fmt.Errorf("the server answered as %q after describing itself as %q", rep.ServerID, info.ServerID)
-	case rep.DeviceID != key.Host():
-		return nil, protocol.ExitActionRequired, fmt.Errorf("the server named this device %q; its key says %q", rep.DeviceID, key.Host())
-	case len(rep.ConsentKeys) != 1:
-		return nil, protocol.ExitActionRequired, fmt.Errorf("the server sent %d consent keys; linking pins exactly one", len(rep.ConsentKeys))
-	}
-	ck := rep.ConsentKeys[0]
-	want, err := linkio.Fingerprint(ck)
 	if err != nil {
 		return nil, protocol.ExitActionRequired, err
 	}
-	say(stdout, "Device key %s (0600, new)", filepath.Join(linkio.LinkDir(stateDir, name), "device.key"))
-	say(stdout, "Type the passkey fingerprint shown in your browser:")
-	typed, _ := bufio.NewReader(stdin).ReadString('\n')
-	if !linkio.SameFingerprint(typed, want) {
-		return nil, protocol.ExitActionRequired, fmt.Errorf("the fingerprint does not match the key the server sent; nothing was linked here. The server already registered device %s: remove it in the server's connectors, then run link add with a new code", key.Host())
-	}
-	pin := linkio.Pin{URL: info.LinkURL, ServerID: info.ServerID, DeviceID: rep.DeviceID, User: rep.User,
+	pin := linkio.Pin{API: base, URL: info.LinkURL, ServerID: info.ServerID, DeviceID: rep.DeviceID, User: rep.User,
 		DeviceName: *deviceName, RPID: ck.RPID, Origin: ck.Origin}
 	if err := linkio.WritePin(stateDir, name, pin); err != nil {
 		return nil, protocol.ExitError, err
@@ -458,6 +474,103 @@ func linkAdd(args []string, stdin io.Reader, stdout io.Writer, probe *jsonProbe)
 	}
 	say(stdout, "Matches. Linked to %s on %s.", rep.User, info.ServerID)
 	say(stdout, "Share a session: in it, run  amq-remote attach --self --link %s", name)
+	return nil, 0, nil
+}
+
+// errFingerprintMismatch: the fingerprint the user typed is not the one of
+// the key the server sent.
+var errFingerprintMismatch = errors.New("the fingerprint does not match the key the server sent")
+
+// redeemOneKey redeems a code with the device key's signature over the
+// pinned server id, checks that the server answered as that server, for this
+// device, with exactly one consent key, and accepts the key only when the
+// fingerprint the user types from the browser matches it.
+func redeemOneKey(client *http.Client, endpoint string, key linkio.DeviceKey, serverID, code, deviceName string, stdin io.Reader, stdout io.Writer) (redeemReply, linkio.ConsentKey, error) {
+	ts := time.Now().Unix()
+	req := redeemRequest{
+		DeviceKey: b64url(key.SPKI), DeviceName: deviceName, Code: code, TS: ts,
+		Signature: b64url(key.Sign(linkio.RedeemMessage(serverID, code, ts))),
+	}
+	var rep redeemReply
+	if err := postJSON(client, endpoint, req, &rep); err != nil {
+		return rep, linkio.ConsentKey{}, fmt.Errorf("redeem the code: %w", err)
+	}
+	switch {
+	case rep.ServerID != serverID:
+		return rep, linkio.ConsentKey{}, fmt.Errorf("the server answered as %q, this link is pinned to %q", rep.ServerID, serverID)
+	case rep.DeviceID != key.Host():
+		return rep, linkio.ConsentKey{}, fmt.Errorf("the server named this device %q; its key says %q", rep.DeviceID, key.Host())
+	case len(rep.ConsentKeys) != 1:
+		return rep, linkio.ConsentKey{}, fmt.Errorf("the server sent %d consent keys; a code binds exactly one", len(rep.ConsentKeys))
+	}
+	ck := rep.ConsentKeys[0]
+	want, err := linkio.Fingerprint(ck)
+	if err != nil {
+		return rep, ck, err
+	}
+	say(stdout, "Type the passkey fingerprint shown in your browser:")
+	typed, _ := bufio.NewReader(stdin).ReadString('\n')
+	if !linkio.SameFingerprint(typed, want) {
+		return rep, ck, errFingerprintMismatch
+	}
+	return rep, ck, nil
+}
+
+// linkKeysAdd adds a consent passkey to a linked machine with a code the
+// server issued for it. Like linking, it accepts the key only with the
+// fingerprint the user types here; the server cannot add a key by itself.
+func linkKeysAdd(args []string, stdin io.Reader, stdout io.Writer, probe *jsonProbe) (any, int, error) {
+	fs := flag.NewFlagSet("link keys add", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	c := addCommon(fs, probe)
+	code := fs.String("code", "", "the single-use code the server showed for the new passkey")
+	pos, err := parseInterleaved(fs, args)
+	if err != nil || len(pos) != 1 || *code == "" {
+		return nil, protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "usage: amq-remote link keys add NAME --code CODE")
+	}
+	name := pos[0]
+	if err := linkio.ValidName(name); err != nil {
+		return nil, protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", err)
+	}
+	stateDir, err := c.stateDir()
+	if err != nil {
+		return nil, protocol.ExitUsage, err
+	}
+	key, err := linkio.LoadDeviceKey(stateDir, name)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, protocol.ExitNotFound, protocol.Refuse(protocol.CodeNotFound, "no link named %q in this root", name)
+	}
+	if err != nil {
+		return nil, protocol.ExitActionRequired, err
+	}
+	pin, err := linkio.LoadPin(stateDir, name)
+	if err != nil || pin.API == "" {
+		return nil, protocol.ExitActionRequired, fmt.Errorf("link %q has no server address; remove it and run link add again", name)
+	}
+	keys, err := linkio.LoadConsentKeys(stateDir, name)
+	if err != nil {
+		return nil, protocol.ExitError, err
+	}
+	client := &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error {
+		return errors.New("the server redirected; refusing")
+	}}
+	_, ck, err := redeemOneKey(client, pin.API+"/api/v1/link/consent-keys/redeem", key, pin.ServerID, *code, pin.DeviceName, stdin, stdout)
+	if err != nil {
+		return nil, protocol.ExitActionRequired, err
+	}
+	if ck.RPID != pin.RPID || ck.Origin != pin.Origin {
+		return nil, protocol.ExitActionRequired, fmt.Errorf("the key is for %s, this link signs on %s; refused", ck.Origin, pin.Origin)
+	}
+	if slices.ContainsFunc(keys, func(k linkio.ConsentKey) bool { return k.CredentialID == ck.CredentialID }) {
+		return nil, protocol.ExitActionRequired, fmt.Errorf("passkey %s is already accepted on link %q", ck.CredentialID, name)
+	}
+	if err := linkio.WriteConsentKeys(stateDir, name, append(keys, ck)); err != nil {
+		return nil, protocol.ExitError, err
+	}
+	if c.json {
+		return map[string]any{"link": name, "added": ck.CredentialID, "keys": len(keys) + 1}, 0, nil
+	}
+	say(stdout, "Matches. Link %s now accepts %d consent passkey(s).", name, len(keys)+1)
 	return nil, 0, nil
 }
 

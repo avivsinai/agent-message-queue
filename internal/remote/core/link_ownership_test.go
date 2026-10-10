@@ -52,7 +52,8 @@ func newLinkEndpoint(t *testing.T, atts ...core.Attachment) (*core.Endpoint, *re
 		t.Fatalf("open store: %v", err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	ep := core.New(core.Config{Store: store, Now: clk.now, CompactHorizon: protocol.DefaultCompactHorizon})
+	ep := core.New(core.Config{Store: store, Now: clk.now, CompactHorizon: protocol.DefaultCompactHorizon,
+		Consent: func(string, string) bool { return true }})
 	for _, a := range atts {
 		ep.Register(a)
 	}
@@ -81,8 +82,14 @@ func getCmd(ref string) *protocol.Command {
 	return &protocol.Command{Schema: protocol.SchemaCommand, Op: protocol.OpRequestGet, RequestRef: ref}
 }
 
+// submitReply submits as a verified signed submit does: a link source carries
+// the native session it signed for (the fake's is its target id) and the
+// consent key that signed.
 func submitReply(t *testing.T, ep *core.Endpoint, cmd *protocol.Command, src core.Source) protocol.Reply {
 	t.Helper()
+	if src.Origin["carrier"] == core.CarrierLink {
+		src.NativeSession, src.Credential = cmd.TargetID, "cred-1"
+	}
 	out, err := ep.Handle(cmd, src)
 	if err != nil {
 		t.Fatalf("submit %s: %v", cmd.RequestID, err)
