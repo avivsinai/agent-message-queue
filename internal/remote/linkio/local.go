@@ -183,13 +183,13 @@ func coseToSPKI(v any) ([]byte, int, error) {
 // confirmation. It is immutable and lives only in this process: a restart
 // loses it, and the next hello no longer lists its digest.
 type HeldTask struct {
-	ID        string    `json:"id"` // the first 8 hex of the request id
-	Digest    string    `json:"digest"`
-	Binding   string    `json:"binding"`
-	Session   string    `json:"session"` // the binding's label
-	Text      string    `json:"text"`
-	NotAfter  time.Time `json:"not_after"`
-	verified  *Verified
+	ID         string    `json:"id"` // the first 8 hex of the request id
+	Digest     string    `json:"digest"`
+	Binding    string    `json:"binding"`
+	Session    string    `json:"session"` // the binding's label
+	Text       string    `json:"text"`
+	NotAfter   time.Time `json:"not_after"`
+	verified   *Verified
 	credential string
 }
 
