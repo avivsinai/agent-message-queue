@@ -98,6 +98,7 @@ func TestLocalBindingHoldsUntilConfirmed(t *testing.T) {
 		t.Fatal(err)
 	}
 	var ran []*protocol.Command
+	var refuseNext protocol.Code // the next handoff is refused with this code, without a record
 	clk := newClock()
 	clk.ns.Store(time.Date(2026, 10, 9, 14, 2, 10, 0, time.UTC).UnixNano())
 	newCarrier := func() *Carrier {
@@ -109,6 +110,10 @@ func TestLocalBindingHoldsUntilConfirmed(t *testing.T) {
 			Now: clk.now, ConsentKeys: func() []ConsentKey { return []ConsentKey{key} }, Bindings: func() []Binding { return []Binding{b} },
 			LocalKey: func() (ConsentKey, bool) { return local, true },
 			Handle: func(cmd *protocol.Command, _ core.Source) (any, error) {
+				if code := refuseNext; code != "" {
+					refuseNext = ""
+					return protocol.Reply{Outcome: protocol.Outcome{Op: cmd.Op, Code: code}}, nil
+				}
 				ran = append(ran, cmd)
 				return protocol.Reply{Outcome: protocol.Outcome{Op: cmd.Op, Evidence: "submitted"}}, nil
 			}})
@@ -146,8 +151,8 @@ func TestLocalBindingHoldsUntilConfirmed(t *testing.T) {
 		t.Fatal("a second confirmation ran the task again")
 	}
 	// Regression (9dx.5 N3): a resend of a task already confirmed is not held
-	// again, hello does not list its digest, and the endpoint answers it
-	// (its request id is deduplicated there; nothing runs twice).
+	// again, hello does not list its digest, and it is handed to the endpoint
+	// again; core answers from the record (dedup by request id is core's).
 	if out, err := c.admitSigned(frame.Frame.Body); err != nil || len(ran) != 2 {
 		t.Fatalf("resend = %+v, %v, %d submits; want it handed to the endpoint", out, err, len(ran))
 	} else if r, _ := out.(outcomeReply); r.Outcome.Code == protocol.CodePendingLocal {
@@ -155,6 +160,24 @@ func TestLocalBindingHoldsUntilConfirmed(t *testing.T) {
 	}
 	if d := c.held.digests(clk.now()); len(d) != 0 {
 		t.Fatalf("hello would list %v for a confirmed task", d)
+	}
+	// Review S2 of #1040: a handoff core refused without a record leaves the
+	// digest unconfirmed, so a resend is held again and needs a fresh press.
+	first := c
+	c = newCarrier()
+	if _, err := c.admitSigned(frame.Frame.Body); err != nil {
+		t.Fatal(err)
+	}
+	held = c.HeldTasks()
+	refuseNext = protocol.CodeBusy
+	ad, cdj, sig = a.confirm(held[0].Digest, "http://localhost:4242")
+	if out, err := c.ConfirmLocal(held[0].ID, held[0].Digest, ad, cdj, sig); err != nil || out.(protocol.Reply).Outcome.Code != protocol.CodeBusy || len(ran) != 2 {
+		t.Fatalf("refused confirm = %+v, %v, ran %d; want busy and nothing run", out, err, len(ran))
+	}
+	if out, err := c.admitSigned(frame.Frame.Body); err != nil || len(ran) != 2 {
+		t.Fatalf("resend after a refusal = %+v, %v, ran %d; want it held", out, err, len(ran))
+	} else if r, _ := out.(outcomeReply); r.Outcome.Code != protocol.CodePendingLocal {
+		t.Fatalf("resend after a refusal = %+v; want pending_local", r)
 	}
 	// The deadline drops a held task: no digest, and a confirm finds nothing.
 	c = newCarrier()
@@ -165,6 +188,9 @@ func TestLocalBindingHoldsUntilConfirmed(t *testing.T) {
 	clk.advance(10 * time.Minute)
 	if len(c.held.digests(clk.now())) != 0 {
 		t.Fatal("a held task outlived its deadline")
+	}
+	if first.held.list(clk.now()); len(first.held.confirmed) != 0 {
+		t.Fatal("a confirmed digest outlived its deadline")
 	}
 	ad, cdj, sig = a.confirm(held[0].Digest, "http://localhost:4242")
 	if _, err := c.ConfirmLocal(held[0].ID, held[0].Digest, ad, cdj, sig); err == nil {
