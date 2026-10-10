@@ -244,45 +244,87 @@ func Open(stateDir string, opts ...Option) (*Store, error) {
 	for _, o := range opts {
 		o(s)
 	}
-	// 611.22.19 BK4: seed the aggregate-quota usage from existing records so
-	// a restarted companion knows what it already owes before admitting new
-	// work. A seed that cannot read the store fails Open: a store that
-	// counts unread records as empty admits work into room it does not have.
-	if s.maxStoreBytes > 0 {
-		// Round-4 fold: one walk sums used AND reseeds reservations for
-		// non-terminal records with no result (received, dispatching,
-		// running). After a restart, running records hold nothing in memory;
-		// without reseeding, fresh submits are admitted into their room and
-		// their results are refused after the work ran.
-		used, err := s.sumUsed(true)
-		if err != nil {
-			_ = s.Close()
-			return nil, fmt.Errorf("seed store quota: %w", err)
-		}
-		s.used = used
-	}
-	// An incomplete index would leave an open record unreconciled, so a
-	// store that cannot be listed does not open.
-	if err := s.rebuildIndex(); err != nil {
-		_ = lock.release()
-		return nil, err
+	// One walk over the record files seeds the quota usage, reseeds the
+	// reservations, and builds the sweep index. A store that cannot be read
+	// does not open: counting unread records as empty admits work into room
+	// it does not have (611.22.19 BK4, 9dx.8), and an incomplete index
+	// leaves an open record unreconciled (9dx.6).
+	if err := s.loadRecords(); err != nil {
+		_ = s.Close()
+		return nil, fmt.Errorf("load request store: %w", err)
 	}
 	return s, nil
 }
 
-// rebuildIndex classifies every record on disk into the sweep index. Open
-// calls it before the store is shared, so it needs no lock. An unreadable
-// record is skipped, as List skips it: nothing can act on it until it reads.
-func (s *Store) rebuildIndex() error {
-	recs, err := s.List()
-	if err != nil {
-		return fmt.Errorf("index request store: %w", err)
-	}
+// loadRecords walks the record files once at Open, before the store is
+// shared, so it needs no lock. It sums their bytes into used (per-write
+// deltas keep it current afterward; a vanished file contributes zero),
+// reserves MaxRecordBytes for each non-terminal record with no result when
+// a quota is set (after a restart, running records hold nothing in memory;
+// without the reseed, fresh submits are admitted into their room and their
+// results are refused after the work ran), and classifies every record
+// into the sweep index.
+//
+// A file the bounded reader refuses (unreadable, not a regular file,
+// oversized) is an error naming its path relative to the store, so Open
+// stops (ruling z2). A file it reads but cannot decode is poison: counted
+// in used, reported by List, skipped. Nothing indexes a poison record that
+// an operator repairs while the companion runs; the next Open does.
+func (s *Store) loadRecords() error {
 	s.sweep, s.compactable = map[Key]struct{}{}, map[Key]string{}
-	for _, rec := range recs {
+	var used int64
+	err := filepath.Walk(filepath.Join(s.dir, requestsDir), func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return err
+		}
+		if info.IsDir() || !strings.HasSuffix(path, recordSuffix) {
+			return nil
+		}
+		data, rErr := readRegularBounded(path, int64(MaxRecordBytes))
+		if errors.Is(rErr, os.ErrNotExist) {
+			return nil
+		}
+		if rErr != nil {
+			name, relErr := filepath.Rel(s.dir, path)
+			if relErr != nil {
+				name = path
+			}
+			return fmt.Errorf("read %s: %w", name, rErr)
+		}
+		used += info.Size()
+		rec, dErr := decodeRecord(data)
+		if dErr != nil {
+			return nil // poison: counted above, reported by List
+		}
+		normalizeRecord(rec)
+		if s.maxStoreBytes > 0 && !rec.State.Terminal() && rec.Result == nil {
+			k := keyOf(rec)
+			if _, exists := s.reservedKeys[k]; !exists {
+				s.reserved += int64(MaxRecordBytes)
+				s.reservedKeys[k] = int64(MaxRecordBytes)
+			}
+		}
 		s.indexLocked(rec)
+		return nil
+	})
+	if err != nil && !os.IsNotExist(err) {
+		return err
 	}
+	s.used = used
 	return nil
+}
+
+// reindexFromDiskLocked reclassifies key from its file after a write that
+// returned an error. WriteFileAtomic can fail after the rename (the
+// directory sync), and then the file already holds the new record; the
+// index follows the file, never the attempted write. The caller holds s.mu.
+func (s *Store) reindexFromDiskLocked(key Key) {
+	if cur, ok, err := s.Get(key); err == nil && ok {
+		s.indexLocked(cur)
+	}
 }
 
 // indexLocked reclassifies one record after it was read or durably written.
@@ -913,6 +955,7 @@ func (s *Store) write(rec *Record) error {
 				s.used, s.reserved, delta, s.maxStoreBytes)
 		}
 		if _, err := fsq.WriteFileAtomic(filepath.Dir(p), filepath.Base(p), data, fileMode); err != nil {
+			s.reindexFromDiskLocked(key)
 			if errors.Is(err, os.ErrPermission) || isNoSpace(err) {
 				return protocol.Refuse(protocol.CodeStorageFull, "cannot persist record: %v", err)
 			}
@@ -933,6 +976,7 @@ func (s *Store) write(rec *Record) error {
 		return nil
 	}
 	if _, err := fsq.WriteFileAtomic(filepath.Dir(p), filepath.Base(p), data, fileMode); err != nil {
+		s.reindexFromDiskLocked(keyOf(rec))
 		if errors.Is(err, os.ErrPermission) || isNoSpace(err) {
 			return protocol.Refuse(protocol.CodeStorageFull, "cannot persist record: %v", err)
 		}
@@ -988,6 +1032,7 @@ func (s *Store) writeSettlement(rec *Record) error {
 	}
 	delta := int64(len(data)) - prevSize
 	if _, err := fsq.WriteFileAtomic(filepath.Dir(p), filepath.Base(p), data, fileMode); err != nil {
+		s.reindexFromDiskLocked(keyOf(rec))
 		if errors.Is(err, os.ErrPermission) || isNoSpace(err) {
 			return protocol.Refuse(protocol.CodeStorageFull, "cannot persist record: %v", err)
 		}
@@ -1007,65 +1052,6 @@ func (s *Store) releaseReservationLocked(key Key) {
 		s.reserved -= amt
 		delete(s.reservedKeys, key)
 	}
-}
-
-// sumUsed walks the record tree and returns the total bytes of all record
-// files. It is the seed for the aggregate-quota accounting at Open
-// (611.22.19 BK4); per-write deltas keep it current afterward. A vanished
-// file contributes zero. With reseed, a file the bounded reader refuses
-// (unreadable, not a regular file, oversized) is an error naming its path
-// relative to the store, so Open stops; a file it reads but cannot decode
-// is poison: counted in used, reported by List, skipped.
-//
-// Round-4 fold: reseedReservations is folded into this walk so Open does ONE
-// filepath.Walk + JSON-decode pass, not two. When reseed is true, every
-// non-terminal record with no result reserves MaxRecordBytes.
-func (s *Store) sumUsed(reseed ...bool) (int64, error) {
-	doReseed := len(reseed) > 0 && reseed[0]
-	var total int64
-	base := filepath.Join(s.dir, requestsDir)
-	err := filepath.Walk(base, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			if os.IsNotExist(err) {
-				return nil
-			}
-			return err
-		}
-		if info.IsDir() || !strings.HasSuffix(path, recordSuffix) {
-			return nil
-		}
-		total += info.Size()
-		if doReseed {
-			data, rErr := readRegularBounded(path, int64(MaxRecordBytes))
-			if errors.Is(rErr, os.ErrNotExist) {
-				return nil
-			}
-			if rErr != nil {
-				name, relErr := filepath.Rel(s.dir, path)
-				if relErr != nil {
-					name = path
-				}
-				return fmt.Errorf("read %s: %w", name, rErr)
-			}
-			rec, dErr := decodeRecord(data)
-			if dErr != nil {
-				return nil // poison: counted above, reported by List
-			}
-			normalizeRecord(rec)
-			if !rec.State.Terminal() && rec.Result == nil {
-				k := Key{CreatorHost: rec.CreatorHost, TargetID: rec.TargetID, RequestID: rec.RequestID}
-				if _, exists := s.reservedKeys[k]; !exists {
-					s.reserved += int64(MaxRecordBytes)
-					s.reservedKeys[k] = int64(MaxRecordBytes)
-				}
-			}
-		}
-		return nil
-	})
-	if err != nil && !os.IsNotExist(err) {
-		return 0, err
-	}
-	return total, nil
 }
 
 // Reserve reserves bytes of store capacity for key before dispatch
