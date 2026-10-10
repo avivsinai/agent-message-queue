@@ -6,15 +6,18 @@
 package requests
 
 import (
+	"cmp"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -91,6 +94,7 @@ type Record struct {
 	// and compaction no longer waits. A retired outcome stays correctable
 	// until the record compacts: an exact native resolution replaces the
 	// uncertain one, and recovery keeps asking the resolver for retired ids.
+	// Compaction clears it.
 	RetiredOutcomes []string `json:"retired_outcomes,omitempty"`
 
 	// AckDigest is the evidence digest of the last acknowledgement sent to the
@@ -180,6 +184,18 @@ type Store struct {
 	// Fail closed at the door, never after the work ran.
 	reserved     int64
 	reservedKeys map[Key]int64
+	// The sweep index (agent-message-queue-9dx.6) holds the records the
+	// endpoint's per-tick paths may act on, so a sweep reads those files and
+	// not every retained record. The record files stay the truth: Open
+	// rebuilds the index from them, and write and writeSettlement, the only
+	// paths that change a record, reclassify it under mu.
+	//
+	// sweep is the records Record.NeedsSweep selects. compactable is the
+	// terminal records that are not tombstones yet, with their UpdatedAt;
+	// compaction reads its candidates from it, so neither set grows with
+	// the tombstones nothing deletes.
+	sweep       map[Key]struct{}
+	compactable map[Key]string
 }
 
 // Option configures Open.
@@ -228,24 +244,103 @@ func Open(stateDir string, opts ...Option) (*Store, error) {
 	for _, o := range opts {
 		o(s)
 	}
-	// 611.22.19 BK4: seed the aggregate-quota usage from existing records so
-	// a restarted companion knows what it already owes before admitting new
-	// work. A seed that cannot read the store fails Open: a store that
-	// counts unread records as empty admits work into room it does not have.
-	if s.maxStoreBytes > 0 {
-		// Round-4 fold: one walk sums used AND reseeds reservations for
-		// non-terminal records with no result (received, dispatching,
-		// running). After a restart, running records hold nothing in memory;
-		// without reseeding, fresh submits are admitted into their room and
-		// their results are refused after the work ran.
-		used, err := s.sumUsed(true)
-		if err != nil {
-			_ = s.Close()
-			return nil, fmt.Errorf("seed store quota: %w", err)
-		}
-		s.used = used
+	// One walk over the record files seeds the quota usage, reseeds the
+	// reservations, and builds the sweep index. A store that cannot be read
+	// does not open: counting unread records as empty admits work into room
+	// it does not have (611.22.19 BK4, 9dx.8), and an incomplete index
+	// leaves an open record unreconciled (9dx.6).
+	if err := s.loadRecords(); err != nil {
+		_ = s.Close()
+		return nil, fmt.Errorf("load request store: %w", err)
 	}
 	return s, nil
+}
+
+// loadRecords walks the record files once at Open, before the store is
+// shared, so it needs no lock. It sums their bytes into used (per-write
+// deltas keep it current afterward; a vanished file contributes zero),
+// reserves MaxRecordBytes for each non-terminal record with no result when
+// a quota is set (after a restart, running records hold nothing in memory;
+// without the reseed, fresh submits are admitted into their room and their
+// results are refused after the work ran), and classifies every record
+// into the sweep index.
+//
+// A file the bounded reader refuses (unreadable, not a regular file,
+// oversized) is an error naming its path relative to the store, so Open
+// stops (ruling z2). A file it reads but cannot decode is poison: counted
+// in used, reported by List, skipped. Nothing indexes a poison record that
+// an operator repairs while the companion runs; the next Open does.
+func (s *Store) loadRecords() error {
+	s.sweep, s.compactable = map[Key]struct{}{}, map[Key]string{}
+	var used int64
+	err := filepath.Walk(filepath.Join(s.dir, requestsDir), func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return err
+		}
+		if info.IsDir() || !strings.HasSuffix(path, recordSuffix) {
+			return nil
+		}
+		data, rErr := readRegularBounded(path, int64(MaxRecordBytes))
+		if errors.Is(rErr, os.ErrNotExist) {
+			return nil
+		}
+		if rErr != nil {
+			name, relErr := filepath.Rel(s.dir, path)
+			if relErr != nil {
+				name = path
+			}
+			return fmt.Errorf("read %s: %w", name, rErr)
+		}
+		used += info.Size()
+		rec, dErr := decodeRecord(data)
+		if dErr != nil {
+			return nil // poison: counted above, reported by List
+		}
+		normalizeRecord(rec)
+		if s.maxStoreBytes > 0 && !rec.State.Terminal() && rec.Result == nil {
+			k := keyOf(rec)
+			if _, exists := s.reservedKeys[k]; !exists {
+				s.reserved += int64(MaxRecordBytes)
+				s.reservedKeys[k] = int64(MaxRecordBytes)
+			}
+		}
+		s.indexLocked(rec)
+		return nil
+	})
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	s.used = used
+	return nil
+}
+
+// reindexFromDiskLocked reclassifies key from its file after a write that
+// returned an error. WriteFileAtomic can fail after the rename (the
+// directory sync), and then the file already holds the new record; the
+// index follows the file, never the attempted write. The caller holds s.mu.
+func (s *Store) reindexFromDiskLocked(key Key) {
+	if cur, ok, err := s.Get(key); err == nil && ok {
+		s.indexLocked(cur)
+	}
+}
+
+// indexLocked reclassifies one record after it was read or durably written.
+// The caller holds s.mu, or is Open before the store is shared.
+func (s *Store) indexLocked(rec *Record) {
+	k := keyOf(rec)
+	if rec.NeedsSweep() {
+		s.sweep[k] = struct{}{}
+	} else {
+		delete(s.sweep, k)
+	}
+	if rec.State.Terminal() && !rec.Tombstone {
+		s.compactable[k] = rec.UpdatedAt
+	} else {
+		delete(s.compactable, k)
+	}
 }
 
 // OpenReadOnly returns a store that reads records without taking the owner
@@ -562,13 +657,54 @@ func (s *Store) ListWithPoison() ([]*Record, []Poison, error) {
 			out = append(out, rec)
 		}
 	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].UpdatedAt != out[j].UpdatedAt {
-			return out[i].UpdatedAt < out[j].UpdatedAt
-		}
-		return out[i].RequestRef < out[j].RequestRef
-	})
+	sortRecords(out)
 	return out, poison, nil
+}
+
+// sortRecords orders records oldest write first, then by request ref.
+func sortRecords(recs []*Record) {
+	sort.Slice(recs, func(i, j int) bool {
+		if recs[i].UpdatedAt != recs[j].UpdatedAt {
+			return recs[i].UpdatedAt < recs[j].UpdatedAt
+		}
+		return recs[i].RequestRef < recs[j].RequestRef
+	})
+}
+
+// ListSweep returns the records the reconcile sweep may act on
+// (Record.NeedsSweep), in List's order, reading only those files. Every
+// record that is not terminal is among them. Like List, it skips a record
+// that does not read.
+func (s *Store) ListSweep() []*Record {
+	s.mu.Lock()
+	keys := make([]Key, 0, len(s.sweep))
+	for k := range s.sweep {
+		keys = append(keys, k)
+	}
+	s.mu.Unlock()
+
+	out := make([]*Record, 0, len(keys))
+	for _, k := range keys {
+		if rec, exists, err := s.Get(k); err == nil && exists {
+			out = append(out, rec)
+		}
+	}
+	sortRecords(out)
+	return out
+}
+
+// CompactionCandidates returns the keys of terminal records that are not
+// tombstones yet, oldest write first. CompactOne re-reads and re-gates each.
+func (s *Store) CompactionCandidates() []Key {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	keys := slices.Collect(maps.Keys(s.compactable))
+	slices.SortFunc(keys, func(a, b Key) int {
+		return cmp.Or(cmp.Compare(s.compactable[a], s.compactable[b]),
+			cmp.Compare(protocol.EncodeRef(a.CreatorHost, a.TargetID, a.RequestID),
+				protocol.EncodeRef(b.CreatorHost, b.TargetID, b.RequestID)))
+	})
+	return keys
 }
 
 // readRecord reads and decodes one record file, applying the shared
@@ -738,6 +874,10 @@ func (s *Store) CompactOne(key Key, before time.Time) (bool, error) {
 	rec.Result = nil
 	rec.Input = nil
 	rec.Interaction = nil
+	// A retired outcome stays correctable only until the record compacts:
+	// the tombstone keeps its delivery_unknown resolution, and nothing asks
+	// the resolver about it again (9dx.6, ruling bb).
+	rec.RetiredOutcomes = nil
 	rec.Tombstone = true
 	if rec.State == protocol.StateCompleted {
 		rec.Code = protocol.CodeResultExpired
@@ -815,6 +955,7 @@ func (s *Store) write(rec *Record) error {
 				s.used, s.reserved, delta, s.maxStoreBytes)
 		}
 		if _, err := fsq.WriteFileAtomic(filepath.Dir(p), filepath.Base(p), data, fileMode); err != nil {
+			s.reindexFromDiskLocked(key)
 			if errors.Is(err, os.ErrPermission) || isNoSpace(err) {
 				return protocol.Refuse(protocol.CodeStorageFull, "cannot persist record: %v", err)
 			}
@@ -831,14 +972,17 @@ func (s *Store) write(rec *Record) error {
 		if rec.State.Terminal() {
 			s.releaseReservationLocked(key)
 		}
+		s.indexLocked(rec)
 		return nil
 	}
 	if _, err := fsq.WriteFileAtomic(filepath.Dir(p), filepath.Base(p), data, fileMode); err != nil {
+		s.reindexFromDiskLocked(keyOf(rec))
 		if errors.Is(err, os.ErrPermission) || isNoSpace(err) {
 			return protocol.Refuse(protocol.CodeStorageFull, "cannot persist record: %v", err)
 		}
 		return fmt.Errorf("persist record: %w", err)
 	}
+	s.indexLocked(rec)
 	return nil
 }
 
@@ -888,6 +1032,7 @@ func (s *Store) writeSettlement(rec *Record) error {
 	}
 	delta := int64(len(data)) - prevSize
 	if _, err := fsq.WriteFileAtomic(filepath.Dir(p), filepath.Base(p), data, fileMode); err != nil {
+		s.reindexFromDiskLocked(keyOf(rec))
 		if errors.Is(err, os.ErrPermission) || isNoSpace(err) {
 			return protocol.Refuse(protocol.CodeStorageFull, "cannot persist record: %v", err)
 		}
@@ -896,6 +1041,7 @@ func (s *Store) writeSettlement(rec *Record) error {
 	// Account for the actual delta after a successful write. Settlement
 	// writes are quota-exempt but still keep used honest.
 	s.used += delta
+	s.indexLocked(rec)
 	return nil
 }
 
@@ -906,65 +1052,6 @@ func (s *Store) releaseReservationLocked(key Key) {
 		s.reserved -= amt
 		delete(s.reservedKeys, key)
 	}
-}
-
-// sumUsed walks the record tree and returns the total bytes of all record
-// files. It is the seed for the aggregate-quota accounting at Open
-// (611.22.19 BK4); per-write deltas keep it current afterward. A vanished
-// file contributes zero. With reseed, a file the bounded reader refuses
-// (unreadable, not a regular file, oversized) is an error naming its path
-// relative to the store, so Open stops; a file it reads but cannot decode
-// is poison: counted in used, reported by List, skipped.
-//
-// Round-4 fold: reseedReservations is folded into this walk so Open does ONE
-// filepath.Walk + JSON-decode pass, not two. When reseed is true, every
-// non-terminal record with no result reserves MaxRecordBytes.
-func (s *Store) sumUsed(reseed ...bool) (int64, error) {
-	doReseed := len(reseed) > 0 && reseed[0]
-	var total int64
-	base := filepath.Join(s.dir, requestsDir)
-	err := filepath.Walk(base, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			if os.IsNotExist(err) {
-				return nil
-			}
-			return err
-		}
-		if info.IsDir() || !strings.HasSuffix(path, recordSuffix) {
-			return nil
-		}
-		total += info.Size()
-		if doReseed {
-			data, rErr := readRegularBounded(path, int64(MaxRecordBytes))
-			if errors.Is(rErr, os.ErrNotExist) {
-				return nil
-			}
-			if rErr != nil {
-				name, relErr := filepath.Rel(s.dir, path)
-				if relErr != nil {
-					name = path
-				}
-				return fmt.Errorf("read %s: %w", name, rErr)
-			}
-			rec, dErr := decodeRecord(data)
-			if dErr != nil {
-				return nil // poison: counted above, reported by List
-			}
-			normalizeRecord(rec)
-			if !rec.State.Terminal() && rec.Result == nil {
-				k := Key{CreatorHost: rec.CreatorHost, TargetID: rec.TargetID, RequestID: rec.RequestID}
-				if _, exists := s.reservedKeys[k]; !exists {
-					s.reserved += int64(MaxRecordBytes)
-					s.reservedKeys[k] = int64(MaxRecordBytes)
-				}
-			}
-		}
-		return nil
-	})
-	if err != nil && !os.IsNotExist(err) {
-		return 0, err
-	}
-	return total, nil
 }
 
 // Reserve reserves bytes of store capacity for key before dispatch
@@ -1091,4 +1178,38 @@ func allowed(from, to protocol.State) bool {
 // to this — one predicate, one place.
 func (r *Record) OwesAck() bool {
 	return r.State.Terminal() && r.Result != nil && r.AckDigest == ""
+}
+
+// OwesCancel reports whether we asked the runtime to stop this run and it
+// has not confirmed.
+func (r *Record) OwesCancel() bool {
+	return r.Cancel != nil && r.Cancel.Disposition == protocol.CancelRequested && r.NativeRun != nil
+}
+
+// OwesResult reports whether the record is closed with a run bound but no
+// result persisted: a late result whose write failed. A tombstone owes
+// nothing; compaction erased its result on purpose.
+func (r *Record) OwesResult() bool {
+	return r.State.Terminal() && !r.Tombstone && r.NativeRun != nil && r.Result == nil
+}
+
+// NeedsSweep reports whether the endpoint's reconcile sweep may act on this
+// record. It is the union of what Reconcile (internal/remote/core) does
+// with a record: a record that is not terminal; an unpublished revision;
+// an owed interaction outcome, or a retired one before compaction (a
+// tombstone an older binary compacted with retired outcomes still set
+// owes nothing, ruling ss); a cancel or a result the runtime owes; or an acknowledgement replay, which replayTerminalAck skips only
+// when the ack was delivered (AckDigest set and Acknowledged) or there is
+// no digest to send (no memoed digest and no result). A change to what
+// Reconcile acts on changes this predicate in the same commit.
+func (r *Record) NeedsSweep() bool {
+	switch {
+	case !r.State.Terminal(), r.PublishedRevision < r.Revision,
+		len(r.OwedOutcomes) > 0, len(r.RetiredOutcomes) > 0 && !r.Tombstone,
+		r.OwesCancel(), r.OwesResult():
+		return true
+	case r.AckDigest != "":
+		return !r.Acknowledged
+	}
+	return r.Result != nil
 }
