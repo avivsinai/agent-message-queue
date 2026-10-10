@@ -133,12 +133,16 @@ invariants.
   not recall the task; it stops every later one. A binding whose consent is
   `local` holds a verified task outside the store until the person confirms
   it on the machine: `amq-remote link confirm ID` (a terminal) opens a page
-  the endpoint itself serves on the one loopback port it records for the root that shows the exact text, hidden characters
-  visible, and the link's local passkey (relying party `localhost`) signs a
+  the endpoint itself serves on the one loopback port it records for the
+  root, which shows the exact text with hidden characters visible, and the link's local passkey (relying party `localhost`) signs a
   challenge bound to the digest shown. The endpoint verifies that assertion
   itself and moves the task into the store once. A held task lives only in
   memory: a restart or its deadline drops it, and the next hello no longer
   lists its digest.
+- **A revision is published when its sink acknowledged it.** A carrier counts
+  a revision as published only after the sink confirms that it committed that
+  revision or a newer one. Until then the revision stays owed and the
+  reconcile sweep offers it again.
 - **Activity divergence is acceptable for a cache, never for execution
   truth.** The live activity projection may lag or differ from the harness's
   own view; it is a convenience. Admission, cancellation and completion are
