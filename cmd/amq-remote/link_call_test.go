@@ -93,6 +93,8 @@ func (ts *toolServer) serve(w http.ResponseWriter, r *http.Request) {
 				reply = map[string]any{"call_id": id, "status": "pending"}
 			case "write":
 				reply = map[string]any{"call_id": id, "status": "pending_approval", "review_url": "https://app.example.test/calls/" + id}
+			case "denied":
+				reply = map[string]any{"call_id": id, "status": "error", "error": map[string]any{"code": "not_allowed", "message": "denied is not in this link's tool profile"}}
 			case "drop":
 				_ = ws.Close(websocket.StatusGoingAway, "test drop")
 				return
@@ -260,5 +262,16 @@ func TestLinkCallDropAnswersAtOnce(t *testing.T) {
 	_, _, err := linkCall([]string{"--root", root, "drop", "--args", `{}`}, io.Discard, &jsonProbe{})
 	if err == nil || !strings.Contains(err.Error(), "dropped") || time.Since(start) > 5*time.Second {
 		t.Fatalf("err = %v after %s; want 'dropped' at once", err, time.Since(start))
+	}
+}
+
+// Regression (local e2e N5, ruling pp): a call that ended with status error
+// (not_allowed) exits non-zero, through the real command dispatch.
+func TestLinkCallErrorStatusExitsNonZero(t *testing.T) {
+	root := linkEndpoint(t, newToolServer(t))
+	var out, errOut strings.Builder
+	code := run([]string{"link", "call", "--root", root, "denied", "--args", "{}"}, strings.NewReader(""), &out, &errOut)
+	if code == 0 {
+		t.Fatalf("exit 0 for a not_allowed call; stdout %s stderr %s", out.String(), errOut.String())
 	}
 }
