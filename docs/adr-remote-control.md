@@ -58,9 +58,16 @@ invariants.
    boundary compares the bound run before signalling. A cancel that arrives
    before its submit leaves a tombstone. A late cancel for one request never
    aborts another. A harness that offers only a session-wide abort does not
-   advertise exact cancellation. A request that a Buzz share submitted is
-   cancelled only from that share; the AMQ mailbox and the local socket are
-   refused.
+   advertise exact cancellation. The local socket, the user's own
+   terminal, reads every request. A Buzz share reads and cancels only the
+   requests it submitted; the AMQ mailbox and the local socket cannot cancel
+   them. A link reads and cancels only the requests it created, submits only
+   to the sessions shared with it, and sees only those sessions, with other
+   sources' request and interaction references removed; it never answers an
+   interaction and never reads session events. A link creates no
+   tombstones: its cancel of an absent request is refused, and its busy
+   request ends as an ordinary refused record that compacts and is never
+   admitted again. A link holds at most four open requests.
 5. **Capabilities are observed, not inferred.** Each attachment publishes a
    projection (`inspect`, `submit`, `cancel_request`, `answer_question`,
    `approve_tool`, `steer`, `terminal`). Values come from the installed
