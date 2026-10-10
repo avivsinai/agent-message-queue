@@ -4,7 +4,7 @@
   "direction": "server_to_endpoint",
   "frame": {
     "body": {
-      "call_id": "c_81",
+      "call_id": "c_k_81",
       "status": "pending"
     },
     "gen": 12,
