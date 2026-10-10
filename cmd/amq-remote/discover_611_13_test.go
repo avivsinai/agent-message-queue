@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/avivsinai/agent-message-queue/internal/remote/pi"
 )
 
 // 611.13: `up --discover` lists the running Claude session with a manifest
@@ -39,6 +41,30 @@ func TestUpDiscoverListsCandidatesWithoutSupervising(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Dir(regPath)); !os.IsNotExist(err) {
 		t.Fatalf("up --discover touched the supervisor registry dir: %v", err)
+	}
+}
+
+// agent-message-queue-9dx.7: `up --discover` lists a live pi chat under the
+// root with the manifest entry that attaches it and the pi session id a
+// share pins.
+func TestUpDiscoverListsLivePiChatWithItsSessionID(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := t.TempDir()
+	dir := filepath.Join(root, "agents", "chat-1", "extensions", "pi-bridge")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	rec, _ := json.Marshal(map[string]any{"protocol": pi.ProtocolV1, "live": true, "pid": os.Getpid(), "bridge_revision": 4, "session_id": "pi-sess-1"})
+	if err := os.WriteFile(filepath.Join(dir, "bridge.liveness"), rec, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out, errOut bytes.Buffer
+	if code, err := up([]string{"--root", root, "--discover"}, &out, &errOut, newExecSpawner); err != nil || code != 0 {
+		t.Fatalf("up --discover: code=%d err=%v stderr=%s", code, err, errOut.String())
+	}
+	want := `{"config":{"handle":"chat-1"},"kind":"pi","target":"pi:chat-1"} native_session_id=pi-sess-1`
+	if !strings.Contains(out.String(), want) {
+		t.Fatalf("discover output = %q, want %s", out.String(), want)
 	}
 }
 

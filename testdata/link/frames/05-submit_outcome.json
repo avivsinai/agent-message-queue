@@ -1,0 +1,16 @@
+{
+  "body_def": "outcome_reply",
+  "description": "The reply to signed_submit is AMQ's Outcome, never a revision.",
+  "direction": "endpoint_to_server",
+  "frame": {
+    "body": {
+      "outcome": {
+        "evidence": "submitted",
+        "op": "request.submit"
+      }
+    },
+    "gen": 12,
+    "re": "m_s1",
+    "schema": "amq.remote.link/1"
+  }
+}

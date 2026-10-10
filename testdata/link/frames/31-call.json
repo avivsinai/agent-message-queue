@@ -1,0 +1,20 @@
+{
+  "body_def": "call",
+  "description": "A tool call. idempotency_key makes a retry return the same call.",
+  "direction": "endpoint_to_server",
+  "frame": {
+    "body": {
+      "arguments": {
+        "key": "REL-4410"
+      },
+      "binding": "pi-demo",
+      "call_id": "c_k_81",
+      "idempotency_key": "k_81",
+      "schema": "amq.remote.link.call/1",
+      "tool": "get_issue"
+    },
+    "gen": 12,
+    "id": "m_c4",
+    "schema": "amq.remote.link/1"
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "body_def": "error_reply",
+  "description": "The harness is busy and input.busy is reject: an ordinary refusal with no retry_after_ms. Sending again is a new request and a new signature.",
+  "direction": "endpoint_to_server",
+  "frame": {
+    "body": {
+      "error": {
+        "code": "busy",
+        "message": "pi · demo repo is busy"
+      }
+    },
+    "gen": 12,
+    "re": "m_s1",
+    "schema": "amq.remote.link/1"
+  }
+}

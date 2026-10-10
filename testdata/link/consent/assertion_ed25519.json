@@ -1,0 +1,13 @@
+{
+  "alg": -8,
+  "authenticator_data": "9kvuDAdMLimGnBA2F-3ZzHNmFtGJ7LtJlp44oV4tZHIFAAAAAA",
+  "backup_eligible": false,
+  "challenge": "y2gQt2-IV1F0yksPN4qoYS3Yt6FZytSy1Pqx2yBMofE",
+  "client_data_json": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoieTJnUXQyLUlWMUYweWtzUE40cW9ZUzNZdDZGWnl0U3kxUHF4MnlCTW9mRSIsIm9yaWdpbiI6Imh0dHBzOi8vc2lnbi5leGFtcGxlLnRlc3QiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
+  "credential_id": "GPumfrZCQfsR4RkwkzQGhg",
+  "fingerprint": "DZ7W-JNH7-7QFD-QI2S-HJKF",
+  "origin": "https://sign.example.test",
+  "rp_id": "sign.example.test",
+  "signature": "hI-r7DmZ6k3HJvBrXRHPiBvH-46TWfDxgULq4upfi3snMsm5B8zSeqlbgQXr00Edk_HIoLosX3uxHutuWtL8Bg",
+  "spki": "MCowBQYDK2VwAyEAcdSLYmNJB6Fmh7LFG_j4wL100LS5F3OgxYjjki6gnc8"
+}

@@ -561,12 +561,12 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 			e.mu.Unlock()
 			return protocol.Reply{}, err
 		}
-		input := *cmd.Input
+		input, origin := *cmd.Input, maps.Clone(rec.Origin)
 		e.mu.Unlock()
 		if err := e.crashAt(PointBeforeNative); err != nil {
 			return protocol.Reply{}, err
 		}
-		adm, nerr := t.att.Submit(BoundRequest{Key: key, Epoch: cmd.Epoch, Input: input, NotAfter: cmd.NotAfter})
+		adm, nerr := t.att.Submit(BoundRequest{Key: key, Epoch: cmd.Epoch, Input: input, NotAfter: cmd.NotAfter, Origin: origin})
 		if err := e.crashAt(PointAfterNative); err != nil {
 			return protocol.Reply{}, err
 		}
@@ -733,12 +733,13 @@ func (e *Endpoint) submit(cmd *protocol.Command, src Source) (protocol.Reply, er
 		e.mu.Unlock()
 		return protocol.Reply{}, err
 	}
+	origin := maps.Clone(rec.Origin)
 	e.mu.Unlock()
 
 	if err := e.crashAt(PointBeforeNative); err != nil {
 		return protocol.Reply{}, err
 	}
-	adm, nerr := t.att.Submit(BoundRequest{Key: key, Epoch: cmd.Epoch, Input: *cmd.Input, NotAfter: cmd.NotAfter})
+	adm, nerr := t.att.Submit(BoundRequest{Key: key, Epoch: cmd.Epoch, Input: *cmd.Input, NotAfter: cmd.NotAfter, Origin: origin})
 	if err := e.crashAt(PointAfterNative); err != nil {
 		return protocol.Reply{}, err
 	}
@@ -2997,9 +2998,10 @@ func (e *Endpoint) admitDeferred(rec *requests.Record) error {
 	if rec.Input != nil {
 		input = *rec.Input
 	}
+	origin := maps.Clone(rec.Origin)
 	e.mu.Unlock()
 
-	adm, nerr := t.att.Submit(BoundRequest{Key: key, Epoch: rec.Epoch, Input: input, NotAfter: rec.NotAfter})
+	adm, nerr := t.att.Submit(BoundRequest{Key: key, Epoch: rec.Epoch, Input: input, NotAfter: rec.NotAfter, Origin: origin})
 
 	// No defer: finishAdmissionLocked unlocks exactly once on every return.
 	e.mu.Lock()

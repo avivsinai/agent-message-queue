@@ -1,0 +1,14 @@
+{
+  "body_def": "command",
+  "description": "session.list; only bindings shared with this link are answered.",
+  "direction": "server_to_endpoint",
+  "frame": {
+    "body": {
+      "op": "session.list",
+      "schema": "amq.remote.command/1"
+    },
+    "gen": 12,
+    "id": "m_l1",
+    "schema": "amq.remote.link/1"
+  }
+}

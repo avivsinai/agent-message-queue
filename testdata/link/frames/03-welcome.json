@@ -1,0 +1,20 @@
+{
+  "body_def": "welcome",
+  "description": "Reply to hello. From here every frame carries gen; a frame from an older generation is dropped.",
+  "direction": "server_to_endpoint",
+  "frame": {
+    "body": {
+      "connection_generation": 12,
+      "limits": {
+        "frame_bytes": 4194304,
+        "tasks_in_flight": 4,
+        "tool_calls_in_flight": 8
+      },
+      "schema": "amq.remote.link.welcome/1",
+      "user": "example.user"
+    },
+    "gen": 12,
+    "re": "m_h1",
+    "schema": "amq.remote.link/1"
+  }
+}
