@@ -25,6 +25,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"unicode"
@@ -52,6 +53,31 @@ type File struct {
 	// no relay network traffic. It requires schema_version 2, so an older
 	// binary refuses the file instead of silently ignoring the object.
 	Relay *Relay `json:"relay,omitempty"`
+	// Links are the servers this endpoint dials (amq.remote.link/1). Like
+	// relay they need schema_version 2.
+	Links []Link `json:"links,omitempty"`
+}
+
+// Link is one server this endpoint dials, and the bindings shared with it.
+type Link struct {
+	// Name names the link's state dir and CLI handle.
+	Name string `json:"name"`
+	// URL is the server's link socket: wss://, or ws:// to a loopback host.
+	URL    string      `json:"url"`
+	Shares []LinkShare `json:"shares"`
+}
+
+// LinkShare shares one named binding with a link.
+type LinkShare struct {
+	// Binding names an AMQ binding (amq-remote attach --self --link).
+	Binding string `json:"binding"`
+	// Consent is "passkey" (the server carries a task you signed) or
+	// "local" (you also confirm it on this machine). It is the machine's
+	// own policy, never taken from the server.
+	Consent string `json:"consent"`
+	// Tools names the server tool profile agents on this binding may call;
+	// empty means none.
+	Tools string `json:"tools,omitempty"`
 }
 
 // RelaySchemaVersion is the manifest version that may carry a relay object.
@@ -150,6 +176,11 @@ func Load(path string) (File, error) {
 			return File{}, err
 		}
 	}
+	if f.Links != nil {
+		if err := strictLinks(data); err != nil {
+			return File{}, err
+		}
+	}
 	if err := Validate(f); err != nil {
 		return File{}, err
 	}
@@ -171,6 +202,24 @@ func strictRelay(data []byte) error {
 	var r Relay
 	if err := dec.Decode(&r); err != nil {
 		return &ErrInvalidRelay{Reason: err.Error()}
+	}
+	return nil
+}
+
+// strictLinks re-decodes the links refusing unknown fields, as strictRelay
+// does for the relay object.
+func strictLinks(data []byte) error {
+	var top struct {
+		Links json.RawMessage `json:"links"`
+	}
+	if err := json.Unmarshal(data, &top); err != nil {
+		return err
+	}
+	dec := json.NewDecoder(bytes.NewReader(top.Links))
+	dec.DisallowUnknownFields()
+	var links []Link
+	if err := dec.Decode(&links); err != nil {
+		return &ErrInvalidLink{Reason: err.Error()}
 	}
 	return nil
 }
@@ -298,7 +347,70 @@ func Validate(f File) error {
 			return &ErrEpochOnNonFake{Target: a.Target, Kind: a.Kind}
 		}
 	}
-	return validateRelay(f, seen)
+	if err := validateRelay(f, seen); err != nil {
+		return err
+	}
+	return validateLinks(f)
+}
+
+// ErrInvalidLink is a links entry that cannot be used as written.
+type ErrInvalidLink struct{ Reason string }
+
+func (e *ErrInvalidLink) Error() string { return "manifest links: " + e.Reason }
+
+// ErrInvalidLink is a usage error like the other validation failures.
+func (*ErrInvalidLink) validationError() {}
+
+var (
+	linkNameRe    = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,31}$`)
+	toolProfileRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,31}$`)
+)
+
+// ValidLinkShare checks one share on its own: a binding name, a consent
+// policy and a tool profile name.
+func ValidLinkShare(sh LinkShare) error {
+	switch {
+	case !validSession(sh.Binding):
+		return fmt.Errorf("share binding %q must be one path component", sh.Binding)
+	case sh.Consent != "passkey" && sh.Consent != "local":
+		return fmt.Errorf("share %q consent must be passkey or local", sh.Binding)
+	case sh.Tools != "" && !toolProfileRe.MatchString(sh.Tools):
+		return fmt.Errorf("share %q tools %q is not a profile name", sh.Binding, sh.Tools)
+	}
+	return nil
+}
+
+func validateLinks(f File) error {
+	if len(f.Links) == 0 {
+		return nil
+	}
+	if f.SchemaVersion != RelaySchemaVersion {
+		return &ErrInvalidLink{Reason: fmt.Sprintf("links need schema_version %d", RelaySchemaVersion)}
+	}
+	names := map[string]bool{}
+	for _, l := range f.Links {
+		switch {
+		case !linkNameRe.MatchString(l.Name):
+			return &ErrInvalidLink{Reason: fmt.Sprintf("link name %q: use 1-32 lowercase letters, digits, - or _", l.Name)}
+		case names[l.Name]:
+			return &ErrInvalidLink{Reason: fmt.Sprintf("link %q is declared twice", l.Name)}
+		}
+		if err := validRelayURL(l.URL); err != nil {
+			return &ErrInvalidLink{Reason: fmt.Sprintf("link %q: %v", l.Name, err)}
+		}
+		names[l.Name] = true
+		bound := map[string]bool{}
+		for _, sh := range l.Shares {
+			if bound[sh.Binding] {
+				return &ErrInvalidLink{Reason: fmt.Sprintf("link %q: binding %q is shared twice", l.Name, sh.Binding)}
+			}
+			if err := ValidLinkShare(sh); err != nil {
+				return &ErrInvalidLink{Reason: fmt.Sprintf("link %q: %v", l.Name, err)}
+			}
+			bound[sh.Binding] = true
+		}
+	}
+	return nil
 }
 
 // ErrInvalidRelay is a relay object that cannot be used as written.
@@ -402,6 +514,10 @@ func validHex64(s string) bool {
 // validRelayURL mirrors internal/relay.ValidateURL (kept here so the
 // manifest package stays dependency-free): wss://, or ws:// to loopback,
 // never userinfo.
+// ValidSocketURL accepts wss://, and ws:// only to a loopback host, with no
+// userinfo: the rule for every socket the endpoint dials.
+func ValidSocketURL(raw string) error { return validRelayURL(raw) }
+
 func validRelayURL(raw string) error {
 	u, err := url.Parse(raw)
 	if err != nil {
@@ -428,6 +544,35 @@ func validRelayURL(raw string) error {
 // ("remote", per the extensions/remote ownership) when unset. It creates the
 // parent directory. serve writes the merged (file + flag) set here so the
 // manifest is the single source of truth and `amq doctor` can diagnose it.
+// withUnknownKeys encodes f, carrying over every top-level key of the file
+// at path that this binary does not know. A newer binary may have written
+// such a key (as `links` once was), and a rewrite must not drop it. Keys
+// this binary knows are always f's own, so removing one stays possible.
+func withUnknownKeys(path string, f File) ([]byte, error) {
+	known, err := json.Marshal(f)
+	if err != nil {
+		return nil, err
+	}
+	var out map[string]json.RawMessage
+	if err := json.Unmarshal(known, &out); err != nil {
+		return nil, err
+	}
+	if prev, err := os.ReadFile(path); err == nil {
+		var old map[string]json.RawMessage
+		if json.Unmarshal(prev, &old) == nil {
+			for k, v := range old {
+				if !knownTopLevel[k] {
+					out[k] = v
+				}
+			}
+		}
+	}
+	return json.MarshalIndent(out, "", "  ")
+}
+
+// knownTopLevel lists the manifest keys this binary reads.
+var knownTopLevel = map[string]bool{"schema_version": true, "layer": true, "adapters": true, "relay": true, "links": true}
+
 func Write(path string, f File) error {
 	if f.SchemaVersion == 0 {
 		f.SchemaVersion = SchemaVersion
@@ -435,7 +580,7 @@ func Write(path string, f File) error {
 	if f.Layer == "" {
 		f.Layer = Layer
 	}
-	data, err := json.MarshalIndent(f, "", "  ")
+	data, err := withUnknownKeys(path, f)
 	if err != nil {
 		return fmt.Errorf("encode manifest: %w", err)
 	}

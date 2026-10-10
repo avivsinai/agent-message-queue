@@ -87,3 +87,34 @@ func TestLoadValidManifest(t *testing.T) {
 		t.Fatalf("got %d adapters, want 2", len(f.Adapters))
 	}
 }
+
+// Regression (compat pass, ruling rr): an older binary dropped the `links`
+// block when it rewrote a manifest it did not fully know. A rewrite now keeps
+// every top-level key this binary does not know, while a key it knows (links)
+// can still be removed.
+func TestWriteKeepsUnknownTopLevelKeys(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "manifest.json")
+	if err := os.WriteFile(path, []byte(`{"schema_version":2,"layer":"remote","adapters":[],"links":[{"name":"x","url":"wss://l.example.test/","shares":[]}],"future":{"k":1}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Links = nil // a link removed
+	if err := Write(path, f); err != nil {
+		t.Fatal(err)
+	}
+	var out map[string]json.RawMessage
+	data, _ := os.ReadFile(path)
+	if err := json.Unmarshal(data, &out); err != nil {
+		t.Fatal(err)
+	}
+	var future struct{ K int }
+	if json.Unmarshal(out["future"], &future) != nil || future.K != 1 {
+		t.Fatalf("unknown key lost: %s", data)
+	}
+	if _, kept := out["links"]; kept {
+		t.Fatalf("a removed known key came back: %s", data)
+	}
+}

@@ -24,6 +24,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/ipc"
+	"github.com/avivsinai/agent-message-queue/internal/remote/linkio"
 	"github.com/avivsinai/agent-message-queue/internal/remote/manifest"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 	"github.com/avivsinai/agent-message-queue/internal/remote/registry"
@@ -44,11 +45,36 @@ func attach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 	nativeMode := fs.Bool("native", false, "drive the exact native session through amq-remote, not the AMQ mailbox")
 	me := fs.String("me", os.Getenv("AM_ME"), "AMQ handle of this session (default AM_ME)")
 	name := fs.String("name", "", "binding name, which names this session's Buzz agent (default <handle>-<project>, or the native target)")
+	linkName := fs.String("link", "", "share this session with the linked server of that name (implies --native)")
+	consent := fs.String("consent", "passkey", "with --link: passkey, or local to also confirm each task on this machine")
+	tools := fs.String("tools", "read", "with --link: the server tool profile agents in this session may call; empty for none")
 	if err := fs.Parse(args); err != nil {
 		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", err)
 	}
 	if !*self {
 		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "attach needs --self")
+	}
+	linkFlags := false
+	fs.Visit(func(f *flag.Flag) { linkFlags = linkFlags || f.Name == "consent" || f.Name == "tools" })
+	if *linkName == "" && linkFlags {
+		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "--consent and --tools apply only with --link")
+	}
+	if *linkName != "" {
+		if err := linkio.ValidName(*linkName); err != nil {
+			return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", err)
+		}
+		// Check the share before anything is attached or written.
+		if err := manifest.ValidLinkShare(manifest.LinkShare{Binding: "session", Consent: *consent, Tools: *tools}); err != nil {
+			return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", err)
+		}
+		*nativeMode = true // a linked server reaches a native session only
+		stateDir, err := c.stateDir()
+		if err != nil {
+			return protocol.ExitUsage, err
+		}
+		if err := requireLinkEndpoint(stateDir); err != nil {
+			return protocol.ExitActionRequired, err
+		}
 	}
 	if !*nativeMode {
 		return attachMailbox(c.root, strings.TrimSpace(*me), strings.TrimSpace(*name), c.json, stdout)
@@ -61,10 +87,18 @@ func attach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 	if err != nil {
 		return protocol.ExitActionRequired, err
 	}
+	// The session's own identity is resolved before anything is registered,
+	// written or started, so a refusal leaves no side effect.
+	want, err := selfNativeSession(cand)
+	if err != nil {
+		return protocol.ExitActionRequired, err
+	}
 	reg := ipc.RegisterRequest{Kind: cand.Kind, Target: cand.Target, Config: cand.Config}
-	if cand.Kind == "claude" {
+	if cand.Kind == "claude" && *linkName == "" {
 		// A Claude session shows its tool approvals in the Buzz DM, where
-		// the owner can deny them (bead agent-message-queue-611.42.2).
+		// the owner can deny them (bead agent-message-queue-611.42.2). A
+		// session shared with a link never gains answering authority: no
+		// remote source answers the agent's prompts.
 		if reg.Config, err = withApprove(cand.Config); err != nil {
 			return protocol.ExitActionRequired, err
 		}
@@ -86,13 +120,9 @@ func attach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 	if err != nil {
 		return protocol.ExitActionRequired, err
 	}
-	// The endpoint's answer is checked against the identity resolved here,
+	// The endpoint's answer is checked against the identity resolved above,
 	// independently, so a target name reused for another session is never
 	// pinned as this one (codex #885 P1 #2).
-	want, err := selfNativeSession(cand)
-	if err != nil {
-		return protocol.ExitActionRequired, err
-	}
 	if native != want {
 		return protocol.ExitActionRequired, fmt.Errorf("the endpoint's %s is attached to another session; refusing to bind", cand.Target)
 	}
@@ -104,6 +134,17 @@ func attach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 	nb := binding.Binding{Root: c.root, Target: cand.Target, NativeSession: native, Display: display, Name: bindName}
 	if err := writeBinding(nb, explicit); err != nil {
 		return protocol.ExitActionRequired, err
+	}
+	if *linkName != "" {
+		if err := shareWithLink(stateDir, *linkName, manifest.LinkShare{Binding: nb.Name, Consent: *consent, Tools: *tools}); err != nil {
+			return protocol.ExitActionRequired, err
+		}
+		if c.json {
+			emitJSON(stdout, map[string]any{"connected": true, "name": nb.Name, "root": nb.Root, "target": nb.Target, "link": *linkName})
+			return 0, nil
+		}
+		say(stdout, "Shared %s (%s) with link %s as %s (consent: %s, tools: %s).", nonEmpty(display, cand.Target), cand.Target, *linkName, nb.Name, *consent, nonEmpty(*tools, "none"))
+		return 0, nil
 	}
 	if c.json {
 		emitJSON(stdout, map[string]any{"connected": true, "name": nb.Name, "root": nb.Root, "target": nb.Target})
@@ -336,19 +377,44 @@ func selfCandidate(root, stateDir string) (registry.Candidate, error) {
 		return registry.Candidate{}, err
 	}
 	for _, pid := range ancestors {
+		var matched []registry.Candidate
 		for _, cand := range cands {
-			if cand.Kind != "claude" {
-				continue
-			}
-			var cfg struct {
-				PID int `json:"pid"`
-			}
-			if json.Unmarshal(cand.Config, &cfg) == nil && cfg.PID == pid {
-				return cand, nil
+			if candidatePID(cand) == pid {
+				matched = append(matched, cand)
 			}
 		}
+		switch len(matched) {
+		case 0:
+			continue
+		case 1:
+			return matched[0], nil
+		}
+		// Two sessions report the same process: never guess which one this is.
+		targets := make([]string, len(matched))
+		for i, m := range matched {
+			targets[i] = m.Target
+		}
+		return registry.Candidate{}, fmt.Errorf("ambiguous: %s all report pid %d; refusing to guess", strings.Join(targets, ", "), pid)
 	}
-	return registry.Candidate{}, errors.New("cannot identify the session this runs in; run it from inside a Claude Code or Codex session")
+	return registry.Candidate{}, errors.New("cannot identify the session this runs in; run it from inside a Claude Code, Codex or pi (Amit) session")
+}
+
+// candidatePID is the process that runs a candidate's session: Claude's
+// from its config, a pi (Amit) chat's from its bridge's liveness (its tools
+// run as children of that process); 0 for kinds found another way.
+func candidatePID(cand registry.Candidate) int {
+	switch cand.Kind {
+	case "claude":
+		var cfg struct {
+			PID int `json:"pid"`
+		}
+		if json.Unmarshal(cand.Config, &cfg) == nil {
+			return cfg.PID
+		}
+	case "pi":
+		return cand.PID
+	}
+	return 0
 }
 
 // selfIdentity is the invoking session's target and native session. It is a
@@ -386,6 +452,12 @@ func selfNativeSession(cand registry.Candidate) (string, error) {
 			return "", fmt.Errorf("codex candidate %s has no thread", cand.Target)
 		}
 		return cfg.Thread, nil
+	case "pi":
+		// Read from the chat's own bridge during discovery.
+		if cand.NativeSession == "" {
+			return "", fmt.Errorf("the pi bridge of %s publishes no session id; update the pi bridge extension", cand.Target)
+		}
+		return cand.NativeSession, nil
 	}
 	return "", fmt.Errorf("cannot verify a %s session", cand.Kind)
 }

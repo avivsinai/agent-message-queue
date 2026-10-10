@@ -43,6 +43,10 @@ amq-remote wait REQUEST_REF
 amq-remote cancel REQUEST_REF
 amq-remote requests
 amq-remote share --session ID
+amq-remote attach --self [--native | --link NAME]
+amq-remote link add NAME URL --code CODE
+amq-remote link remove NAME
+amq-remote link status
 amq-remote doctor
 amq-remote version
 ```
@@ -338,6 +342,41 @@ Privacy: Buzz DM content is not end-to-end encrypted. The relay operator can
 read the prompts and the result rows. Do not share a session whose prompts or
 results the relay operator must not see.
 
+## Link
+
+A link connects this root to a server the user signs tasks in (for example a
+web assistant). The machine dials the server; the server never connects in.
+Protocol: `amq.remote.link/1` ([contract](../../testdata/link/README.md)).
+
+1. In the server, create a link code and a consent passkey. It shows a code
+   and the passkey fingerprint.
+2. `amq-remote link add NAME URL --code CODE` mints this root's device key,
+   redeems the code, and asks for the fingerprint. Only a typed match pins the
+   consent key; the server can never add one. The manifest gains a `links`
+   entry (`schema_version` 2).
+3. In the session to share, run `amq-remote attach --self --link NAME`
+   (`--consent passkey` by default, or `local`; `--tools read` by default).
+   The share names the session's binding.
+4. `serve` (under `up`) keeps the link up. A revision counts as published only
+   after the server acknowledged that it committed it; until then the store
+   still owes it and offers it again. A revision the server holds with another
+   digest is a conflict: never sent again, counted in `link status`.
+5. `amq-remote link status` shows each link's socket, generation, owed
+   revisions, conflicts and retired sinks. `amq-remote link remove NAME`
+   retires the link's sink and deletes its device key; the records it created
+   settle without network.
+
+State, per root under `<root>/extensions/remote/link/`: `store_id` (minted
+once), `<name>/device.key` (Ed25519, 0600, never overwritten),
+`<name>/link.json` (the pinned server id, URL and signing origin),
+`<name>/consent_keys.json` (public keys only), `<name>/status.json`, and
+`retired/<sink>`. A server that closes with 4010 revokes the device: the
+endpoint retires the sink and deletes the key. Close 1012 (server restart)
+reconnects after 0-60 s; 45 s without a ping reconnects too.
+
+A session shared with a link never gains answering authority: the server sees
+the agent's prompts and cannot answer them.
+
 ## Flags
 
 Flags may appear before or after the positional argument.
@@ -421,7 +460,9 @@ is not on AMQ is refused and pointed at `--native`.
 
 `amq-remote attach --self --native` binds the exact native session instead. Typing it is the sharing choice, so
 the session is found exactly and never guessed from a discovery list. Claude
-is found by the command's process ancestry. Codex is found by
+is found by the command's process ancestry. A pi (Amit) chat is found the
+same way: its tools run under the pi process whose pid the chat's bridge
+publishes in `bridge.liveness`, with the chat's session id. Codex is found by
 `CODEX_THREAD_ID` among the threads loaded in the app-server daemon. Attach
 registers the target in the running endpoint without a restart and adds it
 to `manifest.json`. When no endpoint runs, it starts `amq-remote up` in the

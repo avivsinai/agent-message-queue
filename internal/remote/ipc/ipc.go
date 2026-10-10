@@ -54,6 +54,9 @@ type Request struct {
 	// Local-only: `amq-remote attach --self` sends it for the session the
 	// owner is typing in.
 	Register *RegisterRequest `json:"register,omitempty"`
+	// Features asks which features the endpoint serves. An endpoint that
+	// predates the question answers it as a request with no operation.
+	Features bool `json:"features,omitempty"`
 }
 
 // RegisterRequest names one adapter by kind, target and config, exactly as
@@ -102,6 +105,31 @@ type Response struct {
 type ErrorBody struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
+}
+
+// Features is the endpoint's answer to a features request.
+type Features struct {
+	// Link: this endpoint serves links and keeps a manifest's links block.
+	Link bool `json:"link"`
+}
+
+// EndpointFeatures asks the endpoint at stateDir which features it serves.
+// An endpoint that predates the question reports none; no endpoint at all is
+// ok=false.
+func EndpointFeatures(stateDir string) (f Features, ok bool, err error) {
+	resp, err := Call(stateDir, Request{Features: true})
+	if err != nil {
+		var r *protocol.Refusal
+		if errors.As(err, &r) && r.Code == protocol.CodeEndpointUnreachable {
+			return Features{}, false, nil
+		}
+		return Features{}, false, err
+	}
+	if resp.Error != nil {
+		return Features{}, true, nil // an older endpoint: it knows no features
+	}
+	err = json.Unmarshal(resp.Reply, &f)
+	return f, true, err
 }
 
 // ErrSocketPathTooLong is returned by Listen when the computed socket path
@@ -232,6 +260,8 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 			return
 		}
 		writeRecord(conn, Response{Reply: mustJSON(snap)})
+	case req.Features:
+		writeRecord(conn, Response{Reply: mustJSON(Features{Link: true})})
 	case req.Register != nil:
 		if s.registrar == nil {
 			writeRecord(conn, errorResponse(protocol.Refuse(protocol.CodeUnsupported, "this endpoint does not accept live registration")))
