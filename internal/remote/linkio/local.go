@@ -10,8 +10,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
-	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -40,20 +38,6 @@ const (
 	maxHeld      = 16
 )
 
-// LocalOrigin reports whether origin is a loopback page any port may serve:
-// http://localhost, http://127.0.0.1 or http://[::1], with a port.
-func LocalOrigin(origin string) bool {
-	u, err := url.Parse(origin)
-	if err != nil || u.Scheme != "http" || u.Path != "" || u.Port() == "" {
-		return false
-	}
-	if u.Hostname() == "localhost" {
-		return true
-	}
-	ip := net.ParseIP(u.Hostname())
-	return ip != nil && ip.IsLoopback()
-}
-
 // ConfirmChallenge is what the local passkey signs to confirm one held task:
 // SHA-256 of "amq.remote.link/1\0confirm\0" and the digest shown.
 func ConfirmChallenge(digest string) []byte {
@@ -81,15 +65,18 @@ func HasLocalKey(stateDir, name string) bool {
 
 // VerifyLocalRegistration checks a WebAuthn registration (navigator.
 // credentials.create) for the local passkey: type webauthn.create, the
-// challenge the page was given, a loopback origin, the localhost relying
-// party, UP and UV, and an attested ES256 (P-256) or Ed25519 key. Attestation
-// is "none": what counts is that the user, at this machine, created it.
-func VerifyLocalRegistration(challenge []byte, clientDataJSON, attestationObject []byte) (ConsentKey, error) {
+// challenge the page was given, the exact origin of the endpoint's own page
+// server, the localhost relying party, UP and UV, and an attested ES256
+// (P-256) or Ed25519 key. Attestation is "none": what counts is that the
+// user, at this machine, created it on the endpoint's page. The key keeps
+// that origin, and every confirmation must come from it.
+func VerifyLocalRegistration(challenge []byte, origin string, clientDataJSON, attestationObject []byte) (ConsentKey, error) {
 	var cd struct {
-		Type        string `json:"type"`
-		Challenge   string `json:"challenge"`
-		Origin      string `json:"origin"`
-		CrossOrigin bool   `json:"crossOrigin"`
+		Type        string          `json:"type"`
+		Challenge   string          `json:"challenge"`
+		Origin      string          `json:"origin"`
+		CrossOrigin bool            `json:"crossOrigin"`
+		TopOrigin   json.RawMessage `json:"topOrigin"`
 	}
 	if err := json.Unmarshal(clientDataJSON, &cd); err != nil {
 		return ConsentKey{}, errors.New("clientDataJSON does not decode")
@@ -99,8 +86,8 @@ func VerifyLocalRegistration(challenge []byte, clientDataJSON, attestationObject
 		return ConsentKey{}, errors.New("not a webauthn.create")
 	case cd.Challenge != b64.EncodeToString(challenge):
 		return ConsentKey{}, errors.New("the registration answers another challenge")
-	case !LocalOrigin(cd.Origin) || cd.CrossOrigin:
-		return ConsentKey{}, errors.New("the registration did not come from a local page")
+	case cd.Origin != origin || cd.CrossOrigin || len(cd.TopOrigin) != 0:
+		return ConsentKey{}, errors.New("the registration did not come from this endpoint's page")
 	}
 	att, err := cborDecode(attestationObject)
 	if err != nil {
@@ -135,14 +122,16 @@ func VerifyLocalRegistration(challenge []byte, clientDataJSON, attestationObject
 	}
 	return ConsentKey{
 		CredentialID: b64.EncodeToString(credID), SPKI: b64.EncodeToString(spki), Alg: alg,
-		RPID: LocalRPID, BackupEligible: flags&webauthnFlagBE != 0,
+		RPID: LocalRPID, Origin: origin, BackupEligible: flags&webauthnFlagBE != 0,
 	}, nil
 }
 
 // VerifyLocalConfirm checks the local passkey's assertion over the confirm
-// challenge of digest, made on a loopback page.
+// challenge of digest, made on the page origin the key was registered on: a
+// look-alike page on another port fails.
 func VerifyLocalConfirm(key ConsentKey, digest, authenticatorData, clientDataJSON, signature string) error {
-	return verifyWebAuthnGet(key, ConfirmChallenge(digest), LocalOrigin, authenticatorData, clientDataJSON, signature)
+	originOK := func(o string) bool { return key.Origin != "" && o == key.Origin }
+	return verifyWebAuthnGet(key, ConfirmChallenge(digest), originOK, authenticatorData, clientDataJSON, signature)
 }
 
 // coseToSPKI converts a COSE_Key (EC2 P-256 / ES256, or OKP Ed25519) to SPKI DER.
@@ -183,7 +172,7 @@ type HeldTask struct {
 	Digest     string    `json:"digest"`
 	Binding    string    `json:"binding"`
 	Session    string    `json:"session"` // the binding's label
-	Text       string    `json:"text"`
+	Text       string    `json:"-"`       // shown only on the endpoint's own page
 	NotAfter   time.Time `json:"not_after"`
 	verified   *Verified
 	credential string
@@ -252,6 +241,28 @@ func (h *held) take(id, digest string, now time.Time) (*HeldTask, error) {
 	}
 	delete(h.tasks, digest)
 	return t, nil
+}
+
+// find returns the one held task with that id. Two tasks sharing the first
+// 8 hex digits (a server chooses request ids) are refused, never guessed.
+func (h *held) find(id string, now time.Time) (*HeldTask, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.expireLocked(now)
+	var found *HeldTask
+	for _, t := range h.tasks {
+		if t.ID != id {
+			continue
+		}
+		if found != nil {
+			return nil, refuse(string(protocol.CodeInvalid), "two waiting tasks share id %s; wait for one to expire", id)
+		}
+		found = t
+	}
+	if found == nil {
+		return nil, refuse(string(protocol.CodeNotFound), "no task %s waits for confirmation (it may have expired)", id)
+	}
+	return found, nil
 }
 
 // heldID is the short id a person types: the first 8 hex of the request id.

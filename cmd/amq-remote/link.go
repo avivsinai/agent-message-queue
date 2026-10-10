@@ -47,6 +47,7 @@ type linkSet struct {
 	retired  map[string]bool
 	mfStamp  time.Time
 	statuses map[string]linkio.Status
+	pages    *pageServer // the endpoint's own local pages (ruling cc)
 }
 
 type linkRun struct {
@@ -66,7 +67,7 @@ func newLinkSet(root, stateDir, manifestFile, version string, stderr io.Writer) 
 	return &linkSet{
 		root: root, stateDir: stateDir, manifestFile: manifestFile, version: version, stderr: stderr,
 		running: map[string]*linkRun{}, byHost: map[string]*linkio.Carrier{}, retired: retired,
-		statuses: map[string]linkio.Status{},
+		statuses: map[string]linkio.Status{}, pages: &pageServer{stateDir: stateDir},
 	}
 }
 
@@ -434,7 +435,8 @@ func linkAdd(args []string, stdin io.Reader, stdout io.Writer, probe *jsonProbe)
 		}
 	}()
 	say(stdout, "Device key %s (0600, new)", filepath.Join(linkio.LinkDir(stateDir, name), "device.key"))
-	rep, ck, err := redeemOneKey(client, base+"/api/v1/link/redeem", key, info.ServerID, *code, *deviceName, stdin, stdout)
+	in := bufio.NewReader(stdin) // one reader: the fingerprint, then the y/N question
+	rep, ck, err := redeemOneKey(client, base+"/api/v1/link/redeem", key, info.ServerID, *code, *deviceName, in, stdout)
 	if errors.Is(err, errFingerprintMismatch) {
 		return nil, protocol.ExitActionRequired, fmt.Errorf("%w; nothing was linked here. The server already registered device %s: remove it in the server's connectors, then run link add with a new code", err, key.Host())
 	}
@@ -467,10 +469,7 @@ func linkAdd(args []string, stdin io.Reader, stdout io.Writer, probe *jsonProbe)
 	}
 	say(stdout, "Matches. Linked to %s on %s.", rep.User, info.ServerID)
 	if stdinIsTerminal(stdin) {
-		// The local passkey lets you also confirm tasks here (consent: local).
-		if err := registerLocalKey(stateDir, name, stdin, stdout); err != nil {
-			say(stdout, "No local passkey yet (%v). Create it later with amq-remote link local-key %s.", err, name)
-		}
+		offerLocalKey(stateDir, name, in, stdin, stdout)
 	}
 	say(stdout, "Share a session: in it, run  amq-remote attach --self --link %s", name)
 	return nil, 0, nil

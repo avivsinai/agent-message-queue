@@ -85,11 +85,12 @@ func refuse(code, format string, args ...any) error {
 // from the exact signed bytes, the native session it was signed for, the
 // binding it targets and the digest of the signed bytes.
 type Verified struct {
-	Cmd     *protocol.Command
-	Native  string
-	Binding Binding
-	Digest  string // "sha256:" + hex of the signed document bytes
-	Text    string // the task text, as signed
+	Cmd      *protocol.Command
+	Native   string
+	Binding  Binding
+	Digest   string // "sha256:" + hex of the signed document bytes
+	Text     string // the task text, as signed
+	NotAfter time.Time
 }
 
 // VerifySignedSubmit decides whether a signed submit may run, and returns
@@ -101,8 +102,12 @@ func VerifySignedSubmit(view *ConsentView, m SignedSubmit, now time.Time) (*Veri
 	if err != nil {
 		return nil, err
 	}
+	notAfter, err := time.Parse(time.RFC3339, cmd.NotAfter)
+	if err != nil {
+		return nil, refuse(CodeConsentInvalid, "not_after is not RFC 3339")
+	}
 	sum := sha256.Sum256(doc)
-	return &Verified{Cmd: cmd, Native: native, Binding: b, Digest: "sha256:" + hex.EncodeToString(sum[:]), Text: cmd.Input.Text}, nil
+	return &Verified{Cmd: cmd, Native: native, Binding: b, Digest: "sha256:" + hex.EncodeToString(sum[:]), Text: cmd.Input.Text, NotAfter: notAfter}, nil
 }
 
 func verifySignedSubmit(view *ConsentView, m SignedSubmit, now time.Time) (*protocol.Command, string, Binding, []byte, error) {

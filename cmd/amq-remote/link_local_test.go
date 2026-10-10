@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/base64"
@@ -9,12 +10,15 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
 
+	"github.com/avivsinai/agent-message-queue/internal/remote/ipc"
 	"github.com/avivsinai/agent-message-queue/internal/remote/linkio"
+	"github.com/avivsinai/agent-message-queue/internal/remote/manifest"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 )
 
@@ -27,18 +31,42 @@ func TestLinkConfirmNeedsATerminal(t *testing.T) {
 	}
 }
 
-// link local-key serves a registration page on localhost; a browser with a
-// passkey answers it, and the link keeps that key for its confirmations.
-func TestLocalKeyRegistrationPage(t *testing.T) {
-	stateDir := filepath.Join(t.TempDir(), stateDirName)
+// The endpoint serves the registration page on its own loopback port: a
+// browser with a passkey answers it, the link keeps that key bound to the
+// page's origin, and a post that does not come from that origin is refused.
+func TestLocalKeyRegistrationOnTheEndpointPage(t *testing.T) {
+	root, err := os.MkdirTemp("", "arp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	stateDir := filepath.Join(root, stateDirName)
 	if _, err := linkio.MintDeviceKey(stateDir, "example"); err != nil {
 		t.Fatal(err)
 	}
+	mf := manifest.File{SchemaVersion: manifest.RelaySchemaVersion, Layer: manifest.Layer,
+		Links: []manifest.Link{{Name: "example", URL: "wss://link.example.test/link"}}}
+	if err := manifest.Write(manifest.DefaultPath(stateDir), mf); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	ls := newLinkSet(root, stateDir, manifest.DefaultPath(stateDir), "test", io.Discard)
+	ls.ctx = ctx
+	srv, err := ipc.Listen(stateDir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.SetLinkHandler(ls.request)
+	go func() { _ = srv.Serve(ctx) }()
+
 	seed := sha256.Sum256([]byte("amq.remote.link/1 test local key"))
 	priv := ed25519.NewKeyFromSeed(seed[:])
-	defer func(f func(io.Reader) bool, o func(string)) { stdinIsTerminal, openBrowser = f, o }(stdinIsTerminal, openBrowser)
+	var origin string
+	defer func(f func(io.Reader) bool, o func(string) error) { stdinIsTerminal, openBrowser = f, o }(stdinIsTerminal, openBrowser)
 	stdinIsTerminal = func(io.Reader) bool { return true }
-	openBrowser = func(url string) { // the browser: load the page, create a passkey, post it
+	openBrowser = func(url string) error { // the browser: load the page, create a passkey, post it
+		origin = url[:strings.Index(url, linkio.ConfirmPathPrefix)]
 		go func() {
 			resp, err := http.Get(url)
 			if err != nil {
@@ -52,21 +80,56 @@ func TestLocalKeyRegistrationPage(t *testing.T) {
 				t.Error("no challenge on the page")
 				return
 			}
-			origin := strings.TrimSuffix(url[:strings.Index(url, linkio.ConfirmPathPrefix)], "/")
 			cd, att := attestLocal(priv, string(m[1]), origin)
 			body, _ := json.Marshal(pageResult{ClientDataJSON: b64(cd), AttestationObject: b64(att)})
-			resp, err = http.Post(url+"done", "application/json", bytes.NewReader(body))
-			if err != nil || resp.StatusCode != http.StatusOK {
-				t.Errorf("post = %v, %v", resp, err)
+			if code := post(url+"done", "http://localhost:1", body); code != http.StatusForbidden {
+				t.Errorf("a post from another origin = %d, want 403", code)
+			}
+			if code := post(url+"done", origin, body); code != http.StatusOK {
+				t.Errorf("the page's own post = %d, want 200", code)
 			}
 		}()
+		return nil
 	}
 	if err := registerLocalKey(stateDir, "example", strings.NewReader(""), io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	key, err := linkio.LoadLocalKey(stateDir, "example")
-	if err != nil || key.Alg != -8 || key.RPID != linkio.LocalRPID {
-		t.Fatalf("local key %+v, %v", key, err)
+	if err != nil || key.Alg != -8 || key.RPID != linkio.LocalRPID || key.Origin != origin {
+		t.Fatalf("local key %+v, %v; want bound to %s", key, err, origin)
+	}
+}
+
+func post(url, origin string, body []byte) int {
+	req, _ := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+	req.Header.Set("Origin", origin)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return 0
+	}
+	_ = resp.Body.Close()
+	return resp.StatusCode
+}
+
+// Every character that can hide or reorder text is shown as U+XXXX, the same
+// set the linked server's card marks; the rest is HTML-escaped.
+func TestVisibleTextMarksHiddenCharacters(t *testing.T) {
+	got := visibleText("a<b>\u202e\u200b\U000E0041\uFE0F\uE000z")
+	want := "a&lt;b&gt;<mark>U+202E</mark><mark>U+200B</mark><mark>U+E0041</mark><mark>U+FE0F</mark><mark>U+E000</mark>z"
+	if got != want {
+		t.Fatalf("visibleText = %q, want %q", got, want)
+	}
+}
+
+// A confirmed task that core refused at the handoff is reported as not
+// handed, with the code, never as handed.
+func TestHandedMessageReportsARefusedHandoff(t *testing.T) {
+	_, err := handedMessage("pi · demo", protocol.Reply{Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit, Code: protocol.CodeSessionChanged}})
+	if err == nil || !strings.Contains(err.Error(), "not handed to pi · demo: session_changed") {
+		t.Fatalf("err = %v", err)
+	}
+	if msg, err := handedMessage("pi · demo", protocol.Reply{Outcome: protocol.Outcome{Op: protocol.OpRequestSubmit}}); err != nil || !strings.Contains(msg, "handed to pi · demo") {
+		t.Fatalf("msg = %q, %v", msg, err)
 	}
 }
 

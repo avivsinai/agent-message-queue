@@ -10,6 +10,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -62,7 +63,7 @@ func TestLocalRegistrationYieldsTheConfirmingKey(t *testing.T) {
 	a := newLocalAuthenticator()
 	challenge := []byte("registration challenge 32 bytes!")
 	cd, att := a.register(challenge, "http://localhost:51234")
-	key, err := VerifyLocalRegistration(challenge, cd, att)
+	key, err := VerifyLocalRegistration(challenge, "http://localhost:51234", cd, att)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,9 +71,15 @@ func TestLocalRegistrationYieldsTheConfirmingKey(t *testing.T) {
 	if key.SPKI != b64.EncodeToString(want) || key.Alg != -8 || key.RPID != LocalRPID {
 		t.Fatalf("registered %+v", key)
 	}
-	ad, cdj, sig := a.confirm("sha256:abc", "http://127.0.0.1:51234")
+	ad, cdj, sig := a.confirm("sha256:abc", "http://localhost:51234")
 	if err := VerifyLocalConfirm(key, "sha256:abc", ad, cdj, sig); err != nil {
 		t.Fatalf("the registered key's confirmation does not verify: %v", err)
+	}
+	// A look-alike page on another port gets a valid assertion over the real
+	// challenge, and it still fails: the origin is the endpoint's own (ruling cc).
+	ad, cdj, sig = a.confirm("sha256:abc", "http://localhost:51235")
+	if err := VerifyLocalConfirm(key, "sha256:abc", ad, cdj, sig); err == nil {
+		t.Fatal("a confirmation made on another port verified")
 	}
 }
 
@@ -85,8 +92,8 @@ func TestLocalBindingHoldsUntilConfirmed(t *testing.T) {
 	b := view.Bindings["pi-demo"]
 	b.Consent = "local"
 	a := newLocalAuthenticator()
-	cd, att := a.register([]byte("c"), "http://localhost:1")
-	local, err := VerifyLocalRegistration([]byte("c"), cd, att)
+	cd, att := a.register([]byte("c"), "http://localhost:4242")
+	local, err := VerifyLocalRegistration([]byte("c"), "http://localhost:4242", cd, att)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,6 +148,16 @@ func TestLocalBindingHoldsUntilConfirmed(t *testing.T) {
 	if _, err := c.admitSigned(frame.Frame.Body); err != nil {
 		t.Fatal(err)
 	}
+	// The deadline drops a held task: no digest, and a confirm finds nothing.
+	held = c.HeldTasks()
+	clk.advance(10 * time.Minute)
+	if len(c.held.digests(clk.now())) != 0 {
+		t.Fatal("a held task outlived its deadline")
+	}
+	ad, cdj, sig = a.confirm(held[0].Digest, "http://localhost:4242")
+	if _, err := c.ConfirmLocal(held[0].ID, held[0].Digest, ad, cdj, sig); err == nil {
+		t.Fatal("an expired task was confirmed")
+	}
 	if restarted := newCarrier(); len(restarted.held.digests(clk.now())) != 0 {
 		t.Fatal("a new process still lists a held digest")
 	}
@@ -175,7 +192,7 @@ func TestLocalRegistrationAcceptsAnES256Key(t *testing.T) {
 	att := []byte{0xa3, 0x63, 'f', 'm', 't', 0x64, 'n', 'o', 'n', 'e', 0x67, 'a', 't', 't', 'S', 't', 'm', 't', 0xa0,
 		0x68, 'a', 'u', 't', 'h', 'D', 'a', 't', 'a', 0x59}
 	att = append(binary.BigEndian.AppendUint16(att, uint16(len(auth))), auth...)
-	key, err := VerifyLocalRegistration([]byte("c"), cd, att)
+	key, err := VerifyLocalRegistration([]byte("c"), "http://localhost:7", cd, att)
 	if err != nil || key.Alg != -7 {
 		t.Fatalf("register = %+v, %v", key, err)
 	}
@@ -189,5 +206,32 @@ func TestLocalRegistrationAcceptsAnES256Key(t *testing.T) {
 	}
 	if err := VerifyLocalConfirm(key, "sha256:ab", b64.EncodeToString(ad), b64.EncodeToString(gcd), b64.EncodeToString(sig)); err != nil {
 		t.Fatalf("ES256 confirmation: %v", err)
+	}
+}
+
+// A local binding without a local passkey runs nothing: the task is refused,
+// not held. A full hold set answers busy.
+func TestLocalHoldNeedsAKeyAndIsBounded(t *testing.T) {
+	h := held{tasks: map[string]*HeldTask{}}
+	now := time.Date(2026, 10, 9, 14, 2, 10, 0, time.UTC)
+	for i := range maxHeld {
+		if err := h.add(&HeldTask{ID: fmt.Sprintf("%08x", i), Digest: fmt.Sprintf("sha256:%d", i), NotAfter: now.Add(time.Minute)}, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var r *Refusal
+	if err := h.add(&HeldTask{ID: "ffffffff", Digest: "sha256:x", NotAfter: now.Add(time.Minute)}, now); !errors.As(err, &r) || r.Code != string(protocol.CodeBusy) {
+		t.Fatalf("the %dth held task = %v, want busy", maxHeld+1, err)
+	}
+	dk, err := MintDeviceKey(t.TempDir(), "example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := New(Config{Name: "example", Pin: Pin{URL: "wss://link.example.test/link", ServerID: testServerID}, StoreID: "st_x", Key: dk})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.hold(&Verified{Cmd: &protocol.Command{RequestID: "7f3a2c1e-5b9d-4e8a-9c21-7d4e5f6a8b90"}, Binding: Binding{Binding: "pi-demo"}}, "cred"); !errors.As(err, &r) || r.Code != string(protocol.CodeUnsupported) {
+		t.Fatalf("hold without a local key = %v, want unsupported", err)
 	}
 }

@@ -65,25 +65,19 @@ type Request struct {
 // server; the client's read deadline is that wait plus slack.
 type LinkRequest struct {
 	Name           string          `json:"name,omitempty"`
-	Op             string          `json:"op"` // tools, call, call_get, held, confirm
+	Op             string          `json:"op"` // tools, call, call_get, held, page, page_result
 	CallID         string          `json:"call_id,omitempty"`
 	Tool           string          `json:"tool,omitempty"`
 	Arguments      json.RawMessage `json:"arguments,omitempty"`
 	IdempotencyKey string          `json:"idempotency_key,omitempty"`
 	WaitMS         int64           `json:"wait_ms,omitempty"`
-	// Confirm carries the local passkey's assertion for op confirm. The
-	// endpoint verifies it itself.
-	Confirm *LocalConfirm `json:"confirm,omitempty"`
-}
-
-// LocalConfirm confirms one held task: its id, the digest that was shown,
-// and the local passkey's assertion over that digest's confirm challenge.
-type LocalConfirm struct {
-	ID                string `json:"id"`
-	Digest            string `json:"digest"`
-	AuthenticatorData string `json:"authenticator_data"`
-	ClientDataJSON    string `json:"client_data_json"`
-	Signature         string `json:"signature"`
+	// Page asks the endpoint for one of its local pages, register or
+	// confirm (ConfirmID names the held task). Token names a page for
+	// page_result. No operation carries an assertion: only the endpoint's own
+	// page takes one.
+	Page      string `json:"page,omitempty"`
+	ConfirmID string `json:"confirm_id,omitempty"`
+	Token     string `json:"token,omitempty"`
 }
 
 // LinkHandler serves link.v1 for the endpoint's links.

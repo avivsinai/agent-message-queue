@@ -1077,13 +1077,9 @@ func (c *Carrier) hold(v *Verified, credential string) (any, error) {
 	if _, ok := c.cfg.LocalKey(); !ok {
 		return nil, refuse(string(protocol.CodeUnsupported), "binding %q needs a local confirmation passkey; run amq-remote link local-key %s in a terminal", v.Binding.Binding, c.cfg.Name)
 	}
-	notAfter, err := time.Parse(time.RFC3339, v.Cmd.NotAfter)
-	if err != nil {
-		return nil, refuse(CodeConsentInvalid, "not_after is not RFC 3339")
-	}
 	t := &HeldTask{
 		ID: heldID(v.Cmd.RequestID), Digest: v.Digest, Binding: v.Binding.Binding, Session: v.Binding.Labels.Session,
-		Text: v.Text, NotAfter: notAfter, verified: v, credential: credential,
+		Text: v.Text, NotAfter: v.NotAfter, verified: v, credential: credential,
 	}
 	if err := c.held.add(t, c.cfg.Now()); err != nil {
 		return nil, err
@@ -1097,6 +1093,16 @@ func (c *Carrier) hold(v *Verified, credential string) (any, error) {
 // HeldTasks lists the tasks waiting for a local confirmation.
 func (c *Carrier) HeldTasks() []HeldTask { return c.held.list(c.cfg.Now()) }
 
+// HeldTask returns the one held task with that id, text included, for the
+// endpoint's own confirm page.
+func (c *Carrier) HeldTask(id string) (HeldTask, error) {
+	t, err := c.held.find(id, c.cfg.Now())
+	if err != nil {
+		return HeldTask{}, err
+	}
+	return *t, nil
+}
+
 // ConfirmLocal runs one held task after the user's local passkey signed the
 // confirm challenge of the digest that was shown. The task moves into the
 // store once; the passkey assertion is checked here, by the endpoint, so a
@@ -1106,15 +1112,15 @@ func (c *Carrier) ConfirmLocal(id, digest, authenticatorData, clientDataJSON, si
 	if !ok {
 		return nil, refuse(string(protocol.CodeUnsupported), "this link has no local confirmation passkey")
 	}
+	if c.cfg.Handle == nil { // checked before take, so a misconfigured endpoint keeps the task
+		return nil, refuse(string(protocol.CodeUnsupported), "this endpoint runs no commands")
+	}
 	if err := VerifyLocalConfirm(key, digest, authenticatorData, clientDataJSON, signature); err != nil {
 		return nil, refuse(CodeConsentInvalid, "the confirmation does not verify: %v", err)
 	}
 	t, err := c.held.take(id, digest, c.cfg.Now())
 	if err != nil {
 		return nil, err
-	}
-	if c.cfg.Handle == nil {
-		return nil, refuse(string(protocol.CodeUnsupported), "this endpoint runs no commands")
 	}
 	return c.cfg.Handle(t.verified.Cmd, c.source(c.view(), t.verified.Native, t.credential))
 }
