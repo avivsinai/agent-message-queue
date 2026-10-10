@@ -145,10 +145,22 @@ func TestLocalBindingHoldsUntilConfirmed(t *testing.T) {
 	if _, err := c.ConfirmLocal(held[0].ID, held[0].Digest, ad, cdj, sig); err == nil || len(ran) != 1 {
 		t.Fatal("a second confirmation ran the task again")
 	}
+	// Regression (9dx.5 N3): a resend of a task already confirmed is not held
+	// again, hello does not list its digest, and the endpoint answers it
+	// (its request id is deduplicated there; nothing runs twice).
+	if out, err := c.admitSigned(frame.Frame.Body); err != nil || len(ran) != 2 {
+		t.Fatalf("resend = %+v, %v, %d submits; want it handed to the endpoint", out, err, len(ran))
+	} else if r, _ := out.(outcomeReply); r.Outcome.Code == protocol.CodePendingLocal {
+		t.Fatal("a confirmed task was held again")
+	}
+	if d := c.held.digests(clk.now()); len(d) != 0 {
+		t.Fatalf("hello would list %v for a confirmed task", d)
+	}
+	// The deadline drops a held task: no digest, and a confirm finds nothing.
+	c = newCarrier()
 	if _, err := c.admitSigned(frame.Frame.Body); err != nil {
 		t.Fatal(err)
 	}
-	// The deadline drops a held task: no digest, and a confirm finds nothing.
 	held = c.HeldTasks()
 	clk.advance(10 * time.Minute)
 	if len(c.held.digests(clk.now())) != 0 {

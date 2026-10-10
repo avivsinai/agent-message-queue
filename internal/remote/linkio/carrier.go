@@ -1077,6 +1077,21 @@ func (c *Carrier) hold(v *Verified, credential string) (any, error) {
 	if _, ok := c.cfg.LocalKey(); !ok {
 		return nil, refuse(string(protocol.CodeUnsupported), "binding %q needs a local confirmation passkey; run amq-remote link local-key %s in a terminal", v.Binding.Binding, c.cfg.Name)
 	}
+	if c.held.wasConfirmed(v.Digest, c.cfg.Now()) {
+		// Already confirmed and handed to core: a resend is answered by core,
+		// which deduplicates by request id and runs nothing twice.
+		if c.cfg.Handle == nil {
+			return nil, refuse(string(protocol.CodeUnsupported), "this endpoint runs no commands")
+		}
+		out, err := c.cfg.Handle(v.Cmd, c.source(c.view(), v.Native, credential))
+		if err != nil {
+			return nil, err
+		}
+		if reply, ok := out.(protocol.Reply); ok {
+			return outcomeReply{Outcome: reply.Outcome}, nil
+		}
+		return nil, errors.New("the endpoint returned no submit reply")
+	}
 	t := &HeldTask{
 		ID: heldID(v.Cmd.RequestID), Digest: v.Digest, Binding: v.Binding.Binding, Session: v.Binding.Labels.Session,
 		Text: v.Text, NotAfter: v.NotAfter, verified: v, credential: credential,

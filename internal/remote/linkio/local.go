@@ -183,6 +183,20 @@ type HeldTask struct {
 type held struct {
 	mu    sync.Mutex
 	tasks map[string]*HeldTask
+	// confirmed remembers, until each one's deadline, the digests already
+	// confirmed: an identical resend is not held again, and hello never lists
+	// a digest whose request already has a record.
+	confirmed map[string]time.Time
+}
+
+// wasConfirmed reports whether that digest was confirmed and its deadline
+// has not passed.
+func (h *held) wasConfirmed(digest string, now time.Time) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.expireLocked(now)
+	_, ok := h.confirmed[digest]
+	return ok
 }
 
 func (h *held) add(t *HeldTask, now time.Time) error {
@@ -203,6 +217,11 @@ func (h *held) expireLocked(now time.Time) {
 	for d, t := range h.tasks {
 		if !now.Before(t.NotAfter) {
 			delete(h.tasks, d)
+		}
+	}
+	for d, deadline := range h.confirmed {
+		if !now.Before(deadline) {
+			delete(h.confirmed, d)
 		}
 	}
 }
@@ -240,6 +259,10 @@ func (h *held) take(id, digest string, now time.Time) (*HeldTask, error) {
 		return nil, refuse(string(protocol.CodeNotFound), "no task %s waits for confirmation with that text; it may have expired", id)
 	}
 	delete(h.tasks, digest)
+	if h.confirmed == nil {
+		h.confirmed = map[string]time.Time{}
+	}
+	h.confirmed[digest] = t.NotAfter // bounded: one per held task, gone at its deadline
 	return t, nil
 }
 
