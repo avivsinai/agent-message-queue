@@ -80,7 +80,7 @@ func (d discoverer) Discover(_ context.Context, req registry.DiscoverRequest) ([
 			native = live.sessionID
 		}
 		cfg, _ := json.Marshal(config{Handle: h})
-		out = append(out, registry.Candidate{Kind: "pi", Target: "pi:" + h, Display: h, Config: cfg, NativeSession: native})
+		out = append(out, registry.Candidate{Kind: "pi", Target: "pi:" + h, Display: h, Config: cfg, NativeSession: native, PID: live.pid})
 	}
 	if incomplete {
 		return out, fmt.Errorf("%w: examined the first %d entries of %s", registry.ErrIncomplete, maxDiscoverHandles, agents)

@@ -337,18 +337,24 @@ func selfCandidate(root, stateDir string) (registry.Candidate, error) {
 	}
 	for _, pid := range ancestors {
 		for _, cand := range cands {
-			if cand.Kind != "claude" {
-				continue
-			}
-			var cfg struct {
-				PID int `json:"pid"`
-			}
-			if json.Unmarshal(cand.Config, &cfg) == nil && cfg.PID == pid {
-				return cand, nil
+			switch cand.Kind {
+			case "claude":
+				var cfg struct {
+					PID int `json:"pid"`
+				}
+				if json.Unmarshal(cand.Config, &cfg) == nil && cfg.PID == pid {
+					return cand, nil
+				}
+			case "pi":
+				// A pi (Amit) chat runs its tools as children of the pi
+				// process whose pid its bridge publishes in bridge.liveness.
+				if cand.PID == pid {
+					return cand, nil
+				}
 			}
 		}
 	}
-	return registry.Candidate{}, errors.New("cannot identify the session this runs in; run it from inside a Claude Code or Codex session")
+	return registry.Candidate{}, errors.New("cannot identify the session this runs in; run it from inside a Claude Code, Codex or pi (Amit) session")
 }
 
 // selfIdentity is the invoking session's target and native session. It is a
@@ -386,6 +392,12 @@ func selfNativeSession(cand registry.Candidate) (string, error) {
 			return "", fmt.Errorf("codex candidate %s has no thread", cand.Target)
 		}
 		return cfg.Thread, nil
+	case "pi":
+		// Read from the chat's own bridge during discovery.
+		if cand.NativeSession == "" {
+			return "", fmt.Errorf("the pi bridge of %s publishes no session id; update the pi bridge extension", cand.Target)
+		}
+		return cand.NativeSession, nil
 	}
 	return "", fmt.Errorf("cannot verify a %s session", cand.Kind)
 }
