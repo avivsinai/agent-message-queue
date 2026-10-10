@@ -8,6 +8,25 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.96.0](https://github.com/avivsinai/agent-message-queue/compare/v0.95.0...v0.96.0) (2026-10-10)
+
+
+### Features
+
+* **remote:** a linked server sees and touches only what it created and what you shared ([#1027](https://github.com/avivsinai/agent-message-queue/issues/1027)) ([dbac923](https://github.com/avivsinai/agent-message-queue/commit/dbac92304ae620f98f8eb8546375367cdadd7b04))
+* **remote:** attach --self finds the pi (Amit) chat it runs in ([#1035](https://github.com/avivsinai/agent-message-queue/issues/1035)) ([a877ac1](https://github.com/avivsinai/agent-message-queue/commit/a877ac17b55407bec0d939ced1deac9be49625ab))
+* **remote:** link this machine to a server over amq.remote.link/1 ([#1026](https://github.com/avivsinai/agent-message-queue/issues/1026)) ([e3d607a](https://github.com/avivsinai/agent-message-queue/commit/e3d607a5de70a2ed1540e6a904eb128cf0538093))
+* **remote:** list live pi chats with their session id on discover ([e1831bc](https://github.com/avivsinai/agent-message-queue/commit/e1831bc4aa9b978d57ddb59e4f1bcdb33bdc6267))
+* **remote:** pin the amq.remote.link/1 contract with golden frames and JCS ([#1025](https://github.com/avivsinai/agent-message-queue/issues/1025)) ([6408615](https://github.com/avivsinai/agent-message-queue/commit/64086153b12356fd9b70c12d648918cda245b141))
+* **remote:** run a task only from bytes you signed, on the session you signed for ([#1030](https://github.com/avivsinai/agent-message-queue/issues/1030)) ([b2dd3b5](https://github.com/avivsinai/agent-message-queue/commit/b2dd3b5d8759c8b6ac5369396084bcb394c53d41))
+* **remote:** show Claude approvals to sources that cannot answer them ([e1831bc](https://github.com/avivsinai/agent-message-queue/commit/e1831bc4aa9b978d57ddb59e4f1bcdb33bdc6267))
+* **remote:** tell the pi bridge which source sent a task ([e1831bc](https://github.com/avivsinai/agent-message-queue/commit/e1831bc4aa9b978d57ddb59e4f1bcdb33bdc6267))
+
+
+### Bug Fixes
+
+* **remote:** keep the store quota true after a busy retry and a failed seed ([#1032](https://github.com/avivsinai/agent-message-queue/issues/1032)) ([66b470e](https://github.com/avivsinai/agent-message-queue/commit/66b470e3e7f58147e14e40b889b8cacaadea0ca9))
+
 ## [0.95.0](https://github.com/avivsinai/agent-message-queue/compare/v0.94.0...v0.95.0) (2026-10-10)
 
 
