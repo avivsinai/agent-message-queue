@@ -58,9 +58,16 @@ invariants.
    boundary compares the bound run before signalling. A cancel that arrives
    before its submit leaves a tombstone. A late cancel for one request never
    aborts another. A harness that offers only a session-wide abort does not
-   advertise exact cancellation. A request that a Buzz share submitted is
-   cancelled only from that share; the AMQ mailbox and the local socket are
-   refused.
+   advertise exact cancellation. The local socket, the user's own
+   terminal, reads every request. A Buzz share reads and cancels only the
+   requests it submitted; the AMQ mailbox and the local socket cannot cancel
+   them. A link reads and cancels only the requests it created, submits only
+   to the sessions shared with it, and sees only those sessions, with other
+   sources' request and interaction references removed; it never answers an
+   interaction and never reads session events. A link creates no
+   tombstones: its cancel of an absent request is refused, and its busy
+   request ends as an ordinary refused record that compacts and is never
+   admitted again. A link holds at most four open requests.
 5. **Capabilities are observed, not inferred.** Each attachment publishes a
    projection (`inspect`, `submit`, `cancel_request`, `answer_question`,
    `approve_tool`, `steer`, `terminal`). Values come from the installed
@@ -115,6 +122,16 @@ invariants.
   harness resolved the interaction first. Only the owner's Buzz share that
   submitted the request may answer its interactions; the AMQ mailbox and the
   local socket are refused, so the asking agent cannot answer itself.
+- **A link submit runs only from verified signed bytes.** The command a link
+  carries is the one decoded from the bytes the owner signed, never a second
+  copy beside them. The record keeps the signed native session, and core
+  compares it with the attachment's native session at native admission, just
+  before the handoff. A mismatch or an unknown session is refused
+  `session_changed` and nothing runs. The consent key is checked again at the
+  same point: a key removed before the handoff ends the request
+  `consent_invalid`, and nothing runs. A key removed after the handoff does
+  not recall the task; it stops every later one. A binding whose consent is
+  `local` runs nothing until the local confirmation exists.
 - **A revision is published when its sink acknowledged it.** A carrier counts
   a revision as published only after the sink confirms that it committed that
   revision or a newer one. Until then the revision stays owed and the

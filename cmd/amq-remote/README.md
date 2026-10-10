@@ -17,6 +17,11 @@ checksum. See [INSTALL.md](../../INSTALL.md). `amq upgrade` leaves these
 binaries unchanged; update them with `brew upgrade amq` or from the release
 asset.
 
+After an upgrade, a running endpoint keeps the old binary: stop its
+`amq-remote up` (Ctrl-C, or SIGTERM to its pid) and run `amq-remote up` again.
+Commands that need a newer endpoint, such as `link add`, say so ("restart
+amq-remote up first").
+
 `make build` also produces a local `amq-remote` and `amq-owner-sign` next to
 `amq`.
 
@@ -45,6 +50,7 @@ amq-remote requests
 amq-remote share --session ID
 amq-remote attach --self [--native | --link NAME]
 amq-remote link add NAME URL --code CODE
+amq-remote link keys add NAME --code CODE
 amq-remote link remove NAME
 amq-remote link status
 amq-remote doctor
@@ -361,7 +367,10 @@ Protocol: `amq.remote.link/1` ([contract](../../testdata/link/README.md)).
    after the server acknowledged that it committed it; until then the store
    still owes it and offers it again. A revision the server holds with another
    digest is a conflict: never sent again, counted in `link status`.
-5. `amq-remote link status` shows each link's socket, generation, owed
+5. To sign with another passkey (a second device), create it in the server
+   and run `amq-remote link keys add NAME --code CODE`, typing its
+   fingerprint. The server can remove a key, never add one.
+6. `amq-remote link status` shows each link's socket, generation, owed
    revisions, conflicts and retired sinks. `amq-remote link remove NAME`
    retires the link's sink and deletes its device key; the records it created
    settle without network.

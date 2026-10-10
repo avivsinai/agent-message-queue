@@ -106,6 +106,11 @@ type bindingsBody struct {
 	Bindings []Binding `json:"bindings"`
 }
 
+// bindingsReply answers session.list and session.inspect from a link.
+type bindingsReply struct {
+	Bindings []Binding `json:"bindings"`
+}
+
 type keyRevokedBody struct {
 	Schema       string `json:"schema"`
 	CredentialID string `json:"credential_id"`
