@@ -56,6 +56,11 @@ type wakeConfig struct {
 	// disables live settings: direct loop tests and legacy callers.
 	settingsSource                func() ([]byte, bool, error)
 	settingsObserved              wakeSettingsObservation
+	machineSettingsSource         func() ([]byte, bool, error) // reads ~/.amq/wake.settings with settingsSource; nil = no machine layer
+	machineSettingsObserved       wakeSettingsObservation
+	machineSettingsPath           string             // resolved machine file path, for messages
+	settingsLayers                wakeSettingsLayers // the last good docs cfg.settings is made of
+	settingsUnseeded              bool               // an unseeded resume runs argv settings until its seed lands
 	settingsTicks                 <-chan time.Time
 	holdPolicyChanged             bool // consumed by the next inbox scan that builds holds
 	recordSettingsApplied         func(wakeSettingsAppliedStatus) error

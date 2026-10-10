@@ -1241,9 +1241,12 @@ func doctor(args []string, probe ...*jsonProbe) (any, int, error) {
 		report["approval_reviewer"] = reviewers
 	}
 	// DM approvals of a Claude target with approve need the PermissionRequest
-	// hook; without it every approval is answered in the terminal.
+	// hook; without it every approval is answered in the terminal. A target
+	// with observe_approvals needs it too: the hook raises the approvals it
+	// shows.
+	observing := observeOnlyTargets(stateDir)
 	for _, s := range sessions {
-		if s.Harness != "claude_code" || !s.Capabilities.ApproveTool {
+		if s.Harness != "claude_code" || !s.Capabilities.ApproveTool && !observing[s.TargetID] {
 			continue
 		}
 		home, herr := os.UserHomeDir()
@@ -1254,6 +1257,8 @@ func doctor(args []string, probe ...*jsonProbe) (any, int, error) {
 		switch {
 		case serr != nil:
 			fail("native_capability", s.TargetID, "cannot read ~/.claude/settings.json: "+serr.Error(), "repair ~/.claude/settings.json")
+		case state == claude.StopHookMissing && !s.Capabilities.ApproveTool:
+			fail("native_capability", s.TargetID, "the PermissionRequest hook is not installed, so a shared source never sees a tool approval", "run `amq-remote claude install-approval-hook`")
 		case state == claude.StopHookMissing:
 			fail("native_capability", s.TargetID, "the PermissionRequest hook is not installed, so Buzz cannot block a tool call; the terminal decides every approval", "run `amq-remote claude install-approval-hook`")
 		case state == claude.StopHookDisabled:
@@ -1261,7 +1266,7 @@ func doctor(args []string, probe ...*jsonProbe) (any, int, error) {
 		}
 		// Allow from Buzz needs the owner pinned on the hook's command line,
 		// and the pin holds only while Claude cannot change it unprompted.
-		if serr == nil && state != claude.StopHookMissing {
+		if serr == nil && state != claude.StopHookMissing && s.Capabilities.ApproveTool {
 			if pin := claude.PermissionHookPin(home); !pin.Complete() {
 				report["claude_approval_pin"] = "the PermissionRequest hook pins no complete owner and share, so Buzz can only deny a tool call and allow stays in the terminal; for a relay share, run `amq-remote claude install-approval-hook --owner <pubkey>` to allow from Buzz"
 			} else {
@@ -1765,7 +1770,8 @@ func exitForState(s protocol.State) int {
 }
 
 // printCandidates prints one discovered candidate per line: kind, target,
-// display name, then a manifest entry to paste. Discovery never attaches
+// display name, then a manifest entry to paste, and the native session id
+// a share entry pins when the discoverer read it. Discovery never attaches
 // (611.13): registration stays an explicit manifest edit, the owner's
 // consent to share the session.
 func printCandidates(w io.Writer, cands []registry.Candidate) {
@@ -1778,6 +1784,10 @@ func printCandidates(w io.Writer, cands []registry.Candidate) {
 		display := cand.Display
 		if display == "" {
 			display = "-"
+		}
+		if cand.NativeSession != "" {
+			say(w, "%-8s %-40s %-20s %s native_session_id=%s", cand.Kind, cand.Target, display, raw, cand.NativeSession)
+			continue
 		}
 		say(w, "%-8s %-40s %-20s %s", cand.Kind, cand.Target, display, raw)
 	}
