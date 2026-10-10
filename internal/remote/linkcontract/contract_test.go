@@ -435,3 +435,16 @@ func mustUnmarshalAny(t *testing.T, raw []byte) any {
 	}
 	return v
 }
+
+// TestCallIDIsTheKeyAlias pins ruling v: the wire call_id of a call is
+// "c_" + its idempotency_key.
+func TestCallIDIsTheKeyAlias(t *testing.T) {
+	var call struct {
+		CallID         string `json:"call_id"`
+		IdempotencyKey string `json:"idempotency_key"`
+	}
+	mustUnmarshal(t, bodyOf(t, "call"), &call)
+	if call.CallID != "c_"+call.IdempotencyKey {
+		t.Fatalf("call_id %q, idempotency_key %q: want call_id = \"c_\" + key", call.CallID, call.IdempotencyKey)
+	}
+}

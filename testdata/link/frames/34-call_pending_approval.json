@@ -4,8 +4,8 @@
   "direction": "server_to_endpoint",
   "frame": {
     "body": {
-      "call_id": "c_82",
-      "review_url": "https://app.example.test/calls/c_82",
+      "call_id": "c_k_82",
+      "review_url": "https://app.example.test/calls/9f1c2e4a-6b3d-4e8f-a1c5-2d7e9b0f4a61",
       "status": "pending_approval"
     },
     "gen": 12,
