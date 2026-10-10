@@ -651,4 +651,36 @@ func TestOpenFailsWhenTheQuotaSeedCannotReadARecord(t *testing.T) {
 		_ = s2.Close()
 		t.Fatal("Open admitted work with a quota seed that could not read a record")
 	}
+	name, _ := filepath.Rel(filepath.Join(dir, layoutVersion), path)
+	if !strings.Contains(err.Error(), name) {
+		t.Fatalf("Open error %q does not name the record %s", err, name)
+	}
+}
+
+// A record that reads but does not decode is poison (ruling z2): Open still
+// starts, and the quota counts its bytes.
+func TestOpenCountsAPoisonRecordAndStarts(t *testing.T) {
+	dir := t.TempDir()
+	s1, err := Open(dir, WithClock(fixedClock))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	poison := filepath.Join(s1.Dir(), requestsDir, "hostA", "t_fake1__11111111-1111-4111-8111-11111111b802"+recordSuffix)
+	if err := os.MkdirAll(filepath.Dir(poison), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(poison, []byte("{not valid json"+strings.Repeat(" ", 4096)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := s1.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	s2, err := Open(dir, WithClock(fixedClock), WithMaxStoreBytes(protocol.MaxRecordBytes))
+	if err != nil {
+		t.Fatalf("Open over a poison record: %v", err)
+	}
+	defer func() { _ = s2.Close() }()
+	if s2.used < 4096 {
+		t.Fatalf("used = %d, want the poison record's bytes counted", s2.used)
+	}
 }

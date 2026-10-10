@@ -911,9 +911,10 @@ func (s *Store) releaseReservationLocked(key Key) {
 // sumUsed walks the record tree and returns the total bytes of all record
 // files. It is the seed for the aggregate-quota accounting at Open
 // (611.22.19 BK4); per-write deltas keep it current afterward. A vanished
-// file contributes zero. With reseed, a record that cannot be read is an
-// error (its reservation is unknown); one that reads but does not decode is
-// skipped like List's poison: its bytes are counted, List reports it.
+// file contributes zero. With reseed, a file the bounded reader refuses
+// (unreadable, not a regular file, oversized) is an error naming its path
+// relative to the store, so Open stops; a file it reads but cannot decode
+// is poison: counted in used, reported by List, skipped.
 //
 // Round-4 fold: reseedReservations is folded into this walk so Open does ONE
 // filepath.Walk + JSON-decode pass, not two. When reseed is true, every
@@ -939,7 +940,11 @@ func (s *Store) sumUsed(reseed ...bool) (int64, error) {
 				return nil
 			}
 			if rErr != nil {
-				return fmt.Errorf("read %s: %w", filepath.Base(path), rErr)
+				name, relErr := filepath.Rel(s.dir, path)
+				if relErr != nil {
+					name = path
+				}
+				return fmt.Errorf("read %s: %w", name, rErr)
 			}
 			rec, dErr := decodeRecord(data)
 			if dErr != nil {
