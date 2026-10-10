@@ -72,8 +72,9 @@ invariants.
    user per root holds a process lock; a second exits with a diagnostic.
 7. **AMQ carries durable intent and evidence.** Commands and results travel
    as ordinary AMQ messages to a dedicated handle in the same root. Local
-   CLI requests, AMQ-delivered requests, and Buzz-delivered requests end in
-   the same handler. Live activity is a projection and never mutates.
+   CLI requests, AMQ-delivered requests, Buzz-delivered requests, and
+   link-delivered requests (a server the machine itself dialed) end in the
+   same handler. Live activity is a projection and never mutates.
 8. **Exit codes follow the AMQ contract.** `0` success, `1` native work
    failed or cancelled, `2` usage, `3` not found, `4` timeout, `6` action
    required (busy, unsupported, unshared, expired, or
@@ -114,6 +115,10 @@ invariants.
   harness resolved the interaction first. Only the owner's Buzz share that
   submitted the request may answer its interactions; the AMQ mailbox and the
   local socket are refused, so the asking agent cannot answer itself.
+- **A revision is published when its sink acknowledged it.** A carrier counts
+  a revision as published only after the sink confirms that it committed that
+  revision or a newer one. Until then the revision stays owed and the
+  reconcile sweep offers it again.
 - **Activity divergence is acceptable for a cache, never for execution
   truth.** The live activity projection may lag or differ from the harness's
   own view; it is a convenience. Admission, cancellation and completion are
@@ -132,6 +137,14 @@ the Stop hook on that path.
 
 One Buzz agent serves one session. A named binding selects it: the ACP model
 id is `amq-remote:<name>`.
+
+A link is the carrier to a server the user linked with `amq-remote link add`.
+The machine dials it (`wss://`, `ws://` only to loopback) and answers only
+the server id it pinned at linking. A revision counts as published only after
+the server acknowledged that it committed it; until then the store owes it.
+The link's sink is its creator host, `link-` and 16 hex digits of the device
+key's hash. Removing the link, or a server revoke, retires the sink: its
+device key is deleted and its records settle without network.
 
 The relay below — `share`, a body key, and per-kind grants — is an advanced
 path. It is not how a session is connected. The relay enforces the owner
