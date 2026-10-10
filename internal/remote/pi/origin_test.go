@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -42,5 +43,8 @@ func TestSubmitDeliversTheRecordOrigin(t *testing.T) {
 	}
 	if err := json.Unmarshal(data, &req); err != nil || string(req.Origin) != `{"carrier":"link","name":"example"}` {
 		t.Fatalf("request origin = %s (%v), want {carrier: link, name: example}", req.Origin, err)
+	}
+	if o := originOf(map[string]string{"carrier": "link", "name": strings.Repeat("n", maxOriginName+1)}); o != nil {
+		t.Fatalf("origin for a %d-byte name = %+v, want none", maxOriginName+1, o)
 	}
 }

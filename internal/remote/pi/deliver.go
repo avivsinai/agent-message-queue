@@ -106,19 +106,26 @@ type deliverRequest struct {
 }
 
 // deliverOrigin is the request's origin: the record's carrier and the
-// carrier's own name for its source. An empty carrier is left out.
+// carrier's own name for its source. Both are always set.
 type deliverOrigin struct {
-	Carrier string `json:"carrier,omitempty"`
+	Carrier string `json:"carrier"`
 	Name    string `json:"name"`
 }
 
-// originOf is the request origin from a record's origin map, nil when the
-// carrier stamped no name (the mailbox carrier stamps carrier "amq" only).
+// maxOriginName bounds origin.name in bytes, which also bounds it in
+// characters and UTF-16 units: an extension refuses a longer name and drops
+// the whole request with it.
+const maxOriginName = 64
+
+// originOf is the request origin from a record's origin map, nil unless the
+// carrier and a name of at most maxOriginName bytes are both set (the
+// mailbox carrier stamps carrier "amq" and no name).
 func originOf(o map[string]string) *deliverOrigin {
-	if o["name"] == "" {
+	carrier, name := o["carrier"], o["name"]
+	if carrier == "" || name == "" || len(name) > maxOriginName {
 		return nil
 	}
-	return &deliverOrigin{Carrier: o["carrier"], Name: o["name"]}
+	return &deliverOrigin{Carrier: carrier, Name: name}
 }
 
 // receipt is the receipt JSON contract.
