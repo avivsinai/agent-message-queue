@@ -185,6 +185,10 @@ brews:
     homepage: "https://github.com/avivsinai/agent-message-queue"
     description: "Agent Message Queue - file-based inter-agent messaging for Claude Code and Codex CLI"
     license: "MIT"
+    caveats: |
+      After an upgrade, an amq-remote endpoint started by the old version keeps
+      running it. Stop its `amq-remote up` (Ctrl-C, or SIGTERM to its pid) and
+      run `amq-remote up --root <root>` again.
     install: |
       bin.install "amq"
       bin.install "amq-acp"

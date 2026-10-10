@@ -22,10 +22,15 @@ func TestSubmitDeliversTheRecordOrigin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ep := core.New(core.Config{Store: store})
+	ep := core.New(core.Config{Store: store, Consent: func(string, string) bool { return true }})
 	defer func() { _ = ep.Close() }()
-	ep.Register(mustAttach(t, dir))
-	src := core.Source{Host: "link-1", Origin: map[string]string{"carrier": "link", "sink": "link-1", "name": "example"}}
+	stampLivenessRevisionAt(t, dir, fixedNow, ApproveBridgeRevision) // a bridge that publishes its session id
+	att := mustAttach(t, dir)
+	ep.Register(att)
+	// A link submit carries what its verified signature named: the native
+	// session it was signed for and the consent key (agent-message-queue-9dx.2).
+	src := core.Source{Host: "link-1", Origin: map[string]string{"carrier": "link", "sink": "link-1", "name": "example"},
+		Shared: []string{"pi-1"}, NativeSession: att.NativeSessionID(), Credential: "cred-1"}
 	id := "00000000-0000-4000-8000-000000000043"
 	ref := protocol.EncodeRef(src.Host, "pi-1", id)
 	writeReceipt(t, dir, ref, "gen-1", fixedNow)

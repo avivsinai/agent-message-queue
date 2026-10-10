@@ -1,6 +1,7 @@
 package core_test
 
 import (
+	"context"
 	"errors"
 	"testing"
 
@@ -30,5 +31,28 @@ func TestCancelBeforeSubmitOnBuzzHostIgnoresCase(t *testing.T) {
 	var r *protocol.Refusal
 	if !errors.As(err, &r) || r.Code != protocol.CodeUnshared {
 		t.Fatalf("cancel = %v, want unshared", err)
+	}
+}
+
+// The user's own terminal keeps amq-remote status and wait on a Buzz
+// request (9dx.3 review S5, ruling s); another Buzz share cannot read it.
+func TestLocalReadsABuzzRequestAndAnotherShareCannot(t *testing.T) {
+	ep, _, _ := newB14aEndpoint(t)
+	id := "11111111-1111-4111-8111-1111111111f6"
+	if _, err := ep.Handle(submitCmd(id), ownerShare); err != nil {
+		t.Fatal(err)
+	}
+	ref := protocol.EncodeRef("local", "fake", id)
+	get := &protocol.Command{Schema: protocol.SchemaCommand, Op: protocol.OpRequestGet, RequestRef: ref}
+	if _, err := ep.Handle(get, core.Source{Host: "local"}); err != nil {
+		t.Fatalf("local get of a Buzz request: %v", err)
+	}
+	if _, err := ep.WaitAfter(context.Background(), ref, new(int64)); err != nil {
+		t.Fatalf("local wait on a Buzz request: %v", err)
+	}
+	other := core.Source{Host: "local", Origin: map[string]string{"carrier": "buzz", "body": "body-2", "channel": "dm-1"}}
+	var r *protocol.Refusal
+	if _, err := ep.Handle(get, other); !errors.As(err, &r) || r.Code != protocol.CodeUnshared {
+		t.Fatalf("another share's get = %v, want unshared", err)
 	}
 }

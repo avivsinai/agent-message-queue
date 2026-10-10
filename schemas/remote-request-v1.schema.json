@@ -76,7 +76,9 @@
         "native_error",
         "storage_full",
         "attachment_lost",
-        "result_expired"
+        "result_expired",
+        "session_changed",
+        "consent_invalid"
       ]
     },
     "input_digest": {
