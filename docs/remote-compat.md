@@ -218,7 +218,9 @@ amq-remote-design.html §Capability per harness):
 - Discovery (`up --discover`) lists a live pi chat under the root as
   target `pi:<handle>` with its manifest entry, from the handle's
   `bridge.liveness`, and prints the chat's pi `session_id` as
-  `native_session_id=` when the bridge publishes one.
+  `native_session_id=` when the bridge publishes one. `attach --self` matches the liveness `pid` against its own process
+  ancestry to find the chat it runs in, refuses when two chats report the
+  same pid, and pins that chat's `session_id`.
 - `claude_code.answer_question`: no documented way to answer a pending
   question prompt from outside the session (source:
   research/r9-cc-codex-attachment.md §C "Claude Code").

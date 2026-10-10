@@ -61,6 +61,12 @@ func attach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 	if err != nil {
 		return protocol.ExitActionRequired, err
 	}
+	// The session's own identity is resolved before anything is registered,
+	// written or started, so a refusal leaves no side effect.
+	want, err := selfNativeSession(cand)
+	if err != nil {
+		return protocol.ExitActionRequired, err
+	}
 	reg := ipc.RegisterRequest{Kind: cand.Kind, Target: cand.Target, Config: cand.Config}
 	if cand.Kind == "claude" {
 		// A Claude session shows its tool approvals in the Buzz DM, where
@@ -86,13 +92,9 @@ func attach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 	if err != nil {
 		return protocol.ExitActionRequired, err
 	}
-	// The endpoint's answer is checked against the identity resolved here,
+	// The endpoint's answer is checked against the identity resolved above,
 	// independently, so a target name reused for another session is never
 	// pinned as this one (codex #885 P1 #2).
-	want, err := selfNativeSession(cand)
-	if err != nil {
-		return protocol.ExitActionRequired, err
-	}
 	if native != want {
 		return protocol.ExitActionRequired, fmt.Errorf("the endpoint's %s is attached to another session; refusing to bind", cand.Target)
 	}
@@ -336,25 +338,44 @@ func selfCandidate(root, stateDir string) (registry.Candidate, error) {
 		return registry.Candidate{}, err
 	}
 	for _, pid := range ancestors {
+		var matched []registry.Candidate
 		for _, cand := range cands {
-			switch cand.Kind {
-			case "claude":
-				var cfg struct {
-					PID int `json:"pid"`
-				}
-				if json.Unmarshal(cand.Config, &cfg) == nil && cfg.PID == pid {
-					return cand, nil
-				}
-			case "pi":
-				// A pi (Amit) chat runs its tools as children of the pi
-				// process whose pid its bridge publishes in bridge.liveness.
-				if cand.PID == pid {
-					return cand, nil
-				}
+			if candidatePID(cand) == pid {
+				matched = append(matched, cand)
 			}
 		}
+		switch len(matched) {
+		case 0:
+			continue
+		case 1:
+			return matched[0], nil
+		}
+		// Two sessions report the same process: never guess which one this is.
+		targets := make([]string, len(matched))
+		for i, m := range matched {
+			targets[i] = m.Target
+		}
+		return registry.Candidate{}, fmt.Errorf("ambiguous: %s all report pid %d; refusing to guess", strings.Join(targets, ", "), pid)
 	}
 	return registry.Candidate{}, errors.New("cannot identify the session this runs in; run it from inside a Claude Code, Codex or pi (Amit) session")
+}
+
+// candidatePID is the process that runs a candidate's session: Claude's
+// from its config, a pi (Amit) chat's from its bridge's liveness (its tools
+// run as children of that process); 0 for kinds found another way.
+func candidatePID(cand registry.Candidate) int {
+	switch cand.Kind {
+	case "claude":
+		var cfg struct {
+			PID int `json:"pid"`
+		}
+		if json.Unmarshal(cand.Config, &cfg) == nil {
+			return cfg.PID
+		}
+	case "pi":
+		return cand.PID
+	}
+	return 0
 }
 
 // selfIdentity is the invoking session's target and native session. It is a
