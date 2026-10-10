@@ -99,6 +99,26 @@ type deliverRequest struct {
 	// extension refuses a request without it, so an adapter that predates
 	// the fence cannot send work (protocol: bridge revision).
 	BridgeRevision int `json:"bridge_revision"`
+	// Origin names where the task came from, so the harness can show it
+	// (protocol: requests). Absent unless the carrier named its
+	// source, so local, mailbox and Buzz requests carry none.
+	Origin *deliverOrigin `json:"origin,omitempty"`
+}
+
+// deliverOrigin is the request's origin: the record's carrier and the
+// carrier's own name for its source. An empty carrier is left out.
+type deliverOrigin struct {
+	Carrier string `json:"carrier,omitempty"`
+	Name    string `json:"name"`
+}
+
+// originOf is the request origin from a record's origin map, nil when the
+// carrier stamped no name (the mailbox carrier stamps carrier "amq" only).
+func originOf(o map[string]string) *deliverOrigin {
+	if o["name"] == "" {
+		return nil
+	}
+	return &deliverOrigin{Carrier: o["carrier"], Name: o["name"]}
 }
 
 // receipt is the receipt JSON contract.

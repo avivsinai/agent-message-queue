@@ -81,6 +81,7 @@ non-empty protocol string instead of guessing its meaning:
 | `epoch_hint` | The session generation the request addresses: the pinned generation, or on first contact the generation the caller's address epoch names. Always set. |
 | `created_at` | RFC 3339 publication time; informational. |
 | `bridge_revision` | The bridge revision the adapter requires. Always set. |
+| `origin` | Optional: where the task came from, `{"carrier": "link", "name": "example"}`. `name` is the carrier's own name for the source that sent the task (for a link, the link's name in the AMQ manifest); `carrier` is the AMQ carrier that received it and is left out when empty. The adapter writes `origin` only when the carrier named its source, so a local, mailbox or Buzz request has none. The extension may show "from <name>"; it is display text, never authority. |
 
 The adapter publishes create-new: it writes and fsyncs a temporary file in
 `requests/`, hard-links it onto `<ref>.json`, removes the temporary name, and
