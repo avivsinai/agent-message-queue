@@ -61,6 +61,15 @@ amq wake config --me <handle> --unset hold_normal       # back to default
 amq wake config --me <handle> --reset --hold-low 30m    # replace the file
 ```
 
+Set a default for every wake of this user on this machine with `--machine`
+(no `--me`); a per-agent value overrides it per key, and `--unset` falls back
+to the next layer:
+
+```bash
+amq wake config --machine --hold-normal 5m --hold-low 30m  # machine default
+amq wake config --machine --unset hold_low                 # back to default
+```
+
 A refused file shows `file: refused: <err>` with default rows (the wake keeps
 its last applied settings); `set` and `--unset` exit 1 and point at `--reset`.
 A running wake that reports no live settings shows `unreported`: `--wait` exits

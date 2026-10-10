@@ -10,6 +10,8 @@ syntax comes from the [generated CLI reference](cli.md).
   platform support, and companion binaries.
 - [Co-op operations](../COOP.md) — launch agents, use sessions, exchange
   messages, and run supervised notifications.
+- [Configuration](configuration.md) — where configuration lives, per-key
+  precedence, and the hot-reload contract.
 - [Session routing](session-routing.md) — identities, roots, cross-session
   access, and worktree isolation.
 - [Wake operations](wake-operations.md) — inspect, repair, recover, and
