@@ -243,11 +243,28 @@ func writeBinding(b binding.Binding, explicitName bool) error {
 	if explicitName {
 		write = binding.WriteNamed
 	}
-	if err := write(b); err != nil {
+	err := write(b)
+	var taken *binding.NameTakenError
+	if errors.As(err, &taken) && sameTargetMoved(b) {
+		// The name already pins this root's target to an earlier native
+		// session, and that target is now attached to b's session (attach
+		// verified it). The earlier session is gone from the target, so the
+		// same name moves to the new one; a share keeps its name.
+		err = binding.WriteNamed(b)
+	}
+	if err != nil {
 		return err
 	}
-	_, err := binding.RemoveMatching(func(o binding.Binding) bool { return o.Same(b) && o.Name != b.Name })
+	_, err = binding.RemoveMatching(func(o binding.Binding) bool { return o.Same(b) && o.Name != b.Name })
 	return err
+}
+
+// sameTargetMoved reports whether the binding named b.Name pins the same root
+// and target as b, under another native session.
+func sameTargetMoved(b binding.Binding) bool {
+	old, err := binding.ReadNamed(b.Name)
+	return err == nil && !old.Mailbox() && !b.Mailbox() &&
+		filepath.Clean(old.Root) == filepath.Clean(b.Root) && old.Target == b.Target && old.NativeSession != b.NativeSession
 }
 
 // projectOf is the project directory name of an AMQ root such as
