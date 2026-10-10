@@ -121,3 +121,50 @@ func TestWriteAcceptsGroupWritableAMQHome(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// Regression (merged-code e2e finding 1): an AMQ_REMOTE_BINDING whose
+// directory's parent did not exist yet was refused as "must have no symlink
+// on its path", although no symlink was involved. The missing directories are
+// now created (0700) below a canonical ancestor.
+func TestBindingOverrideCreatesMissingDirectories(t *testing.T) {
+	base := canonicalTempDir(t)
+	t.Setenv(EnvPath, filepath.Join(base, "home", ".amq", "remote", "binding.json"))
+	b := Binding{Root: "/r", Target: "claude:1", NativeSession: "s"}
+	if err := Write(b); err != nil {
+		t.Fatalf("Write = %v, want the missing directories created", err)
+	}
+	if got, err := Read(); err != nil || !got.Same(b) {
+		t.Fatalf("binding = %+v %v", got, err)
+	}
+}
+
+// Review B1 of #1041: a symlink swapped in for a missing level after the
+// ancestor check must not redirect the binding (MkdirAll followed it): Write
+// refuses and creates nothing under the link's target. An ancestor others can
+// write is refused too.
+func TestBindingOverrideRefusesASymlinkSwappedInAfterTheCheck(t *testing.T) {
+	base, elsewhere := canonicalTempDir(t), canonicalTempDir(t)
+	t.Setenv(EnvPath, filepath.Join(base, "home", ".amq", "remote", "binding.json"))
+	overrideCheckedHook = func() {
+		if err := os.Symlink(elsewhere, filepath.Join(base, "home")); err != nil {
+			t.Error(err)
+		}
+	}
+	t.Cleanup(func() { overrideCheckedHook = nil })
+	b := Binding{Root: "/r", Target: "claude:1", NativeSession: "s"}
+	if err := Write(b); err == nil {
+		t.Fatal("Write followed a symlink swapped in after the check")
+	}
+	if entries, _ := os.ReadDir(elsewhere); len(entries) != 0 {
+		t.Fatalf("created %v under the link's target", entries)
+	}
+	overrideCheckedHook = nil
+	shared := filepath.Join(base, "shared")
+	if err := os.Mkdir(shared, 0o700); err != nil || os.Chmod(shared, 0o777) != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(EnvPath, filepath.Join(shared, "remote", "binding.json"))
+	if err := Write(b); err == nil {
+		t.Fatal("Write created the binding below a world-writable directory")
+	}
+}

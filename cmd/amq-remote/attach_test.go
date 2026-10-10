@@ -255,3 +255,33 @@ func TestJSONFlagValueDecidesSuccessAndErrorOutput(t *testing.T) {
 		}
 	}
 }
+
+// E2E kit F3: after a session change in the same Claude process (same target,
+// new native session), attach --self --link refused the binding's own name,
+// so a link share could not follow it. With --link the same root and target
+// re-pin the name; another target still may not take it, and a plain native
+// attach keeps the --name refusal (ruling ww).
+func TestWriteBindingRepinsTheSameTargetAfterASessionChange(t *testing.T) {
+	dir := canonicalTempDir(t)
+	t.Setenv(binding.EnvPath, filepath.Join(dir, "binding.json"))
+	old := binding.Binding{Root: dir, Target: "claude:7", NativeSession: "session-old", Name: "claude-7"}
+	if err := writeBinding(old, false, true); err != nil {
+		t.Fatal(err)
+	}
+	moved := old
+	moved.NativeSession = "session-new"
+	var taken *binding.NameTakenError
+	if err := writeBinding(moved, false, false); !errors.As(err, &taken) {
+		t.Fatalf("native attach without --link: err=%v; want NameTakenError", err)
+	}
+	if err := writeBinding(moved, false, true); err != nil {
+		t.Fatalf("re-attach with --link after a session change: %v", err)
+	}
+	if got, err := binding.ReadNamed("claude-7"); err != nil || got.NativeSession != "session-new" {
+		t.Fatalf("binding = %+v %v; want it pinned to session-new", got, err)
+	}
+	other := binding.Binding{Root: dir, Target: "claude:8", NativeSession: "session-8", Name: "claude-7"}
+	if err := writeBinding(other, false, true); !errors.As(err, &taken) {
+		t.Fatalf("another target with the same name: err=%v; want NameTakenError", err)
+	}
+}
