@@ -132,7 +132,7 @@ func attach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 	}
 	bindName, explicit := nativeBindingName(*name, cand.Target)
 	nb := binding.Binding{Root: c.root, Target: cand.Target, NativeSession: native, Display: display, Name: bindName}
-	if err := writeBinding(nb, explicit); err != nil {
+	if err := writeBinding(nb, explicit, *linkName != ""); err != nil {
 		return protocol.ExitActionRequired, err
 	}
 	if *linkName != "" {
@@ -181,7 +181,7 @@ func attachMailbox(root, handle, name string, asJSON bool, stdout io.Writer) (in
 	if err := listBuzzInRoster(root); err != nil {
 		return protocol.ExitActionRequired, err
 	}
-	if err := writeBinding(b, explicit); err != nil {
+	if err := writeBinding(b, explicit, false); err != nil {
 		return protocol.ExitActionRequired, err
 	}
 	if asJSON {
@@ -238,19 +238,23 @@ func nativeBindingName(flagValue, target string) (string, bool) {
 // agent-message-queue-611.39). A defaulted name never replaces another
 // session's binding (bead agent-message-queue-94w); an explicit --name
 // is the caller's choice and replaces.
-func writeBinding(b binding.Binding, explicitName bool) error {
-	write := binding.WriteNamedNew
-	if explicitName {
-		write = binding.WriteNamed
-	}
-	err := write(b)
-	var taken *binding.NameTakenError
-	if errors.As(err, &taken) && sameTargetMoved(b) {
-		// The name already pins this root's target to an earlier native
-		// session, and that target is now attached to b's session (attach
-		// verified it). The earlier session is gone from the target, so the
-		// same name moves to the new one; a share keeps its name.
+//
+// With followLink (attach --self --link), the name also moves to b when it
+// pins the same root and target under another native session: the share
+// keeps its name after a session change (E2E kit F3, ruling ww). attach
+// reaches this write only after the endpoint confirmed the target is attached
+// to b's session, and one target reports one native session, so the old
+// session is no longer the attached one. An old session resumed in another
+// process is another target, so another default name.
+func writeBinding(b binding.Binding, explicitName, followLink bool) error {
+	var err error
+	switch {
+	case explicitName:
 		err = binding.WriteNamed(b)
+	case followLink:
+		err = binding.WriteNamedIf(b, func(old binding.Binding) bool { return old.Same(b) || movedTarget(old, b) })
+	default:
+		err = binding.WriteNamedNew(b)
 	}
 	if err != nil {
 		return err
@@ -259,12 +263,11 @@ func writeBinding(b binding.Binding, explicitName bool) error {
 	return err
 }
 
-// sameTargetMoved reports whether the binding named b.Name pins the same root
-// and target as b, under another native session.
-func sameTargetMoved(b binding.Binding) bool {
-	old, err := binding.ReadNamed(b.Name)
-	return err == nil && !old.Mailbox() && !b.Mailbox() &&
-		filepath.Clean(old.Root) == filepath.Clean(b.Root) && old.Target == b.Target && old.NativeSession != b.NativeSession
+// movedTarget reports whether old pins the same root and native target as b
+// under another native session. A mailbox binding pins no native session.
+func movedTarget(old, b binding.Binding) bool {
+	return !old.Mailbox() && !b.Mailbox() && filepath.Clean(old.Root) == filepath.Clean(b.Root) &&
+		old.Target == b.Target && old.NativeSession != b.NativeSession
 }
 
 // projectOf is the project directory name of an AMQ root such as

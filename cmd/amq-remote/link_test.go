@@ -222,6 +222,9 @@ func TestLinkRefusesAnOlderRunningEndpoint(t *testing.T) {
 // session changed (a pi /new or reload), the share silently dropped off the
 // link and `link status` said nothing. It now names the state and the fix.
 func TestLinkStatusNamesAShareWhoseSessionChanged(t *testing.T) {
+	// A unit test of linkShareState, not of the link status row. The root is
+	// short (os.MkdirTemp("")) because the endpoint's unix socket lives under
+	// it and macOS caps socket paths at 104 bytes.
 	root, err := os.MkdirTemp("", "arsc")
 	if err != nil {
 		t.Fatal(err)
@@ -253,10 +256,11 @@ func TestLinkStatusNamesAShareWhoseSessionChanged(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if got := linkShareState(root, stateDir, "now"); got != "shared" {
+	natives := &nativeProbe{stateDir: stateDir}
+	if got := linkShareState(root, natives, "now"); got != "shared" {
 		t.Fatalf("current session = %q, want shared", got)
 	}
-	if got := linkShareState(root, stateDir, "old"); !strings.HasPrefix(got, "session changed") {
+	if got := linkShareState(root, natives, "old"); !strings.HasPrefix(got, "session changed") {
 		t.Fatalf("changed session = %q, want 'session changed: ...'", got)
 	}
 }

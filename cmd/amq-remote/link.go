@@ -659,6 +659,9 @@ func printLinkStatus(w io.Writer, v linkStatusOut) {
 		if l.Status.Error != "" {
 			say(w, "  %s", l.Status.Error)
 		}
+		if len(l.Shares) == 0 {
+			say(w, "  shared: none")
+		}
 		for _, b := range l.Shares {
 			say(w, "  %s: %s", b, nonEmpty(l.ShareStates[b], "unknown"))
 		}
@@ -683,17 +686,19 @@ type linkStatusRow struct {
 // sent only while its binding names this root and its pinned native session
 // is the one attached; otherwise it silently drops off the link, so the
 // reason and the fix are stated here.
-func linkShareState(root, stateDir, name string) string {
+func linkShareState(root string, p *nativeProbe, name string) string {
 	b, err := binding.ReadNamed(name)
 	switch {
-	case err != nil:
+	case errors.Is(err, binding.ErrNone):
 		return "no such binding: run amq-remote attach --self --link in the session to share"
+	case err != nil:
+		return "the binding cannot be read: " + err.Error()
 	case b.Mailbox():
 		return "a mailbox binding cannot be shared with a link"
 	case filepath.Clean(b.Root) != filepath.Clean(root):
 		return "the binding belongs to another root"
 	}
-	native, err := nativeSessionOf(stateDir, b.Target)
+	native, err := p.native(b.Target)
 	switch {
 	case err != nil:
 		return "not attached now (" + err.Error() + ")"
@@ -701,6 +706,44 @@ func linkShareState(root, stateDir, name string) string {
 		return "session changed: run amq-remote attach --self --link again in the new session"
 	}
 	return "shared"
+}
+
+// nativeProbe asks the endpoint for a target's native session once per
+// target, and stops asking after the first failure to reach it, so link
+// status waits for at most one endpoint timeout however many shares it has.
+type nativeProbe struct {
+	stateDir string
+	seen     map[string]string
+	down     error
+}
+
+func (p *nativeProbe) native(target string) (string, error) {
+	if p.down != nil {
+		return "", p.down
+	}
+	if n, ok := p.seen[target]; ok {
+		return n, nil
+	}
+	resp, err := ipc.Call(p.stateDir, ipc.Request{Native: &ipc.NativeQuery{TargetID: target}})
+	if err != nil {
+		p.down = err
+		if isEndpointUnreachable(err) {
+			p.down = errors.New("endpoint not running: run amq-remote up")
+		}
+		return "", p.down
+	}
+	if err := resp.AsError(); err != nil {
+		return "", err
+	}
+	var reply ipc.NativeReply
+	if err := json.Unmarshal(resp.Reply, &reply); err != nil || reply.NativeSession == "" {
+		return "", fmt.Errorf("target %s reports no native session", target)
+	}
+	if p.seen == nil {
+		p.seen = map[string]string{}
+	}
+	p.seen[target] = reply.NativeSession
+	return reply.NativeSession, nil
 }
 
 // linkStatus lists the links of this root and the retired sinks.
@@ -724,6 +767,7 @@ func linkStatus(args []string, probe *jsonProbe) (any, int, error) {
 		return nil, protocol.ExitError, err
 	}
 	rows := []linkStatusRow{}
+	natives := &nativeProbe{stateDir: stateDir}
 	for _, l := range mf.Links {
 		row := linkStatusRow{Name: l.Name, URL: l.URL, Status: linkio.Status{State: "offline"}, Shares: []string{}}
 		for _, sh := range l.Shares {
@@ -731,7 +775,7 @@ func linkStatus(args []string, probe *jsonProbe) (any, int, error) {
 			if row.ShareStates == nil {
 				row.ShareStates = map[string]string{}
 			}
-			row.ShareStates[sh.Binding] = linkShareState(c.root, stateDir, sh.Binding)
+			row.ShareStates[sh.Binding] = linkShareState(c.root, natives, sh.Binding)
 		}
 		if key, err := linkio.LoadDeviceKey(stateDir, l.Name); err == nil {
 			row.Sink = key.Host()
