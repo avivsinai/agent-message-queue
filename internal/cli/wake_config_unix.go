@@ -48,6 +48,9 @@ type wakeConfigMachineFileJSON struct {
 	Path   string `json:"path"`
 	Status string `json:"status"`
 	Error  string `json:"error"`
+	// merge marks a refusal that came from layering the machine file under
+	// the agent file; the file is valid alone. Not part of the JSON.
+	merge bool
 }
 
 // wakeConfigJSON keeps schema 1: machine mode without --me has no agent,
@@ -120,7 +123,9 @@ func runWakeConfig(args []string) error {
 		"",
 		"With --machine, set, --unset and --reset change the machine file; --me is optional",
 		"there and, when given, adds that agent's wake status. --machine --wait needs --me and",
-		"waits on that one wake; other wakes are not tracked.",
+		"waits on that one wake; other wakes are not tracked. --wait exits 1 when the wake",
+		"refuses the file this command changed; a refusal of the other file is a warning",
+		"and exit 0.",
 		"",
 		"While the agent file is absent and the running wake does not report live settings",
 		"(unreported) past a short startup grace, set and --unset exit 6; the wake may be an older",
@@ -378,6 +383,7 @@ func layerWakeConfig(
 	if machineFile.Status == "ok" {
 		if effective, sources, rerr := layerWakeSettings(wakeSettingsDoc{}, agent); rerr == nil {
 			machineFile.Status, machineFile.Error = "refused", err.Error()
+			machineFile.merge = true
 			return effective, sources
 		}
 	}
@@ -436,8 +442,9 @@ func pollWakeSettings(
 }
 
 // waitWakeSettingsApplied polls until the running wake reports both file
-// digests applied or refused, or no wake runs. A refused machine file is an
-// error only when the command targeted the machine file.
+// digests applied or refused, or no wake runs. A refusal of the file the
+// command did not target is a warning; a refusal of the targeted file is an
+// error.
 func waitWakeSettingsApplied(
 	agentDir *wakeAgentDir,
 	root, me, digest, machineDigest string,
@@ -461,6 +468,12 @@ func waitWakeSettingsApplied(
 			case wakeSettingsRunNone:
 				return true, nil
 			case wakeSettingsRunRefused:
+				if machineTarget && state.MachineStatus != wakeConfigMachineRefused {
+					// The wake applied the machine change; the refused agent
+					// file is not what this command changed.
+					_ = writeStderr("warning: wake refused the agent settings file: %s\n", state.Error)
+					return true, nil
+				}
 				return true, fmt.Errorf("wake refused the settings file: %s", state.Error)
 			case wakeSettingsRunUnreported:
 				if graceOver {
@@ -604,7 +617,11 @@ func printWakeConfig(asJSON bool, out wakeConfigJSON) error {
 		return err
 	}
 	if out.MachineFile.Status == "refused" {
-		if err := writeStdoutLine("running wakes keep their previous machine settings until the file is repaired"); err != nil {
+		note := "a running wake keeps its last good machine settings; a wake that starts now runs without them"
+		if out.MachineFile.merge {
+			note = "this agent's wake runs without the machine settings because they conflict with its agent file"
+		}
+		if err := writeStdoutLine(note); err != nil {
 			return err
 		}
 	}

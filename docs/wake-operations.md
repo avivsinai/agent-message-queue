@@ -178,7 +178,7 @@ instruction. `--wait` waits until the running wake records the new file digest
 in `.wake.settings.applied`, and for the machine layer its digest as well (a
 wake that records no machine fields and sees a machine file shows
 `unreported`); `--timeout` bounds it (default 60s, `0` waits
-forever), exit 4 on timeout, exit 1 when the wake refuses the file, exit 6
+forever), exit 4 on timeout, exit 1 when the wake refuses the file the command changed (a refusal of the other file, agent or machine, is a stderr warning and exit 0), exit 6
 when the wake stays `unreported` for 5 s, and exit 0 at once when no wake runs. `--json` prints the same data. The wake records its
 state in `.wake.settings.applied`; the file is not a receipt of message
 consumption.

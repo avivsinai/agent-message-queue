@@ -288,6 +288,60 @@ func TestWakeConfigAgentWaitIgnoresRefusedMachineFile(t *testing.T) {
 	}
 }
 
+// review r2: --machine --wait still exits 1 on a refused agent file although
+// the wake applied the machine change.
+func TestWakeConfigMachineWaitIgnoresRefusedAgentFile(t *testing.T) {
+	root := machineConfigWakeFixture(t)
+	agentPath := filepath.Join(fsq.AgentBase(root, "codex"), wakeSettingsFileName)
+	agentRaw := []byte("garbage")
+	if err := os.WriteFile(agentPath, agentRaw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := captureStdout(t, func() error {
+		return runWakeConfig([]string{"--machine", "--root", root, "--me", "codex", "--hold-normal", "1m"})
+	}); err != nil {
+		t.Fatalf("machine set: %v", err)
+	}
+	machinePath, err := machineWakeSettingsPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	machineRaw, err := os.ReadFile(machinePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeWakeAppliedForTest(t, root, wakeSettingsAppliedFile{
+		Status:        wakeSettingsStatusRefused,
+		Digest:        wakeSettingsDigest(agentRaw, true),
+		Error:         "decode wake settings: bad",
+		MachineStatus: wakeSettingsStatusApplied,
+		MachineDigest: wakeSettingsDigest(machineRaw, true),
+	})
+	if _, err := captureStdout(t, func() error {
+		return runWakeConfig([]string{"--machine", "--root", root, "--me", "codex", "--wait", "--timeout", "5s"})
+	}); err != nil {
+		t.Fatalf("--machine --wait with a refused agent file: %v", err)
+	}
+}
+
+// review r1: with a group-writable ~/.amq and no wake.settings, every wake
+// reported the machine layer as refused for a file nobody made.
+func TestReadMachineWakeSettingsGroupWritableHomeNoFile(t *testing.T) {
+	home := secureTempDirForTest(t)
+	t.Setenv("HOME", home)
+	amqDir := filepath.Join(home, ".amq")
+	if err := os.Mkdir(amqDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(amqDir, 0o775); err != nil {
+		t.Fatal(err)
+	}
+	raw, exists, err := readMachineWakeSettings()
+	if err != nil || exists || raw != nil {
+		t.Fatalf("readMachineWakeSettings = (%q, %v, %v), want no file and no error", raw, exists, err)
+	}
+}
+
 // review r1: --machine --me reported the machine file ok while the agent's
 // wake refused it, because only plain --me layered the two files.
 func TestWakeConfigMachineWithMeReportsLayeredRefusal(t *testing.T) {

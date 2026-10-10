@@ -1257,7 +1257,9 @@ the defaults. --unset returns a key to the next layer (machine or default).
 
 With --machine, set, --unset and --reset change the machine file; --me is optional
 there and, when given, adds that agent's wake status. --machine --wait needs --me and
-waits on that one wake; other wakes are not tracked.
+waits on that one wake; other wakes are not tracked. --wait exits 1 when the wake
+refuses the file this command changed; a refusal of the other file is a warning
+and exit 0.
 
 While the agent file is absent and the running wake does not report live settings
 (unreported) past a short startup grace, set and --unset exit 6; the wake may be an older
