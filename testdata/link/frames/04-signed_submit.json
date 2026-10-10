@@ -1,0 +1,18 @@
+{
+  "body_def": "signed_submit",
+  "description": "The signed document bytes and the assertion of consent/assertion.json.",
+  "direction": "server_to_endpoint",
+  "frame": {
+    "body": {
+      "authenticator_data": "9kvuDAdMLimGnBA2F-3ZzHNmFtGJ7LtJlp44oV4tZHIFAAAAAA",
+      "client_data_json": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoieTJnUXQyLUlWMUYweWtzUE40cW9ZUzNZdDZGWnl0U3kxUHF4MnlCTW9mRSIsIm9yaWdpbiI6Imh0dHBzOi8vc2lnbi5leGFtcGxlLnRlc3QiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
+      "credential_id": "C32Z2-E6ARE-BkrOVOybpw",
+      "document_b64": "eyJiaW5kaW5nIjoicGktZGVtbyIsImNvbW1hbmQiOnsiZXBvY2giOiJlXzRjMGUxYSIsImlucHV0Ijp7ImJ1c3kiOiJyZWplY3QiLCJkZWxpdmVyIjoidHVybiIsIm1pbl9ldmlkZW5jZSI6InN1Ym1pdHRlZCIsInRleHQiOiJSZWJhc2UgZml4L2luZ2VzdCBvbiBtYWluICYgcnVuIHRoZSB1bml0IHRlc3RzIDxmYXN0Pi5cblJlcG9ydCB0aGUgcmVzdWx0LiJ9LCJub3RfYWZ0ZXIiOiIyMDI2LTEwLTA5VDE0OjA0OjAwWiIsIm9wIjoicmVxdWVzdC5zdWJtaXQiLCJyZXF1ZXN0X2lkIjoiN2YzYTJjMWUtNWI5ZC00ZThhLTljMjEtN2Q0ZTVmNmE4YjkwIiwic2NoZW1hIjoiYW1xLnJlbW90ZS5jb21tYW5kLzEiLCJ0YXJnZXRfaWQiOiJwaTpkZW1vLTViOWQwYzFlIn0sImlzc3VlZF9hdCI6IjIwMjYtMTAtMDlUMTQ6MDI6MDBaIiwibGFiZWxzIjp7ImRldmljZSI6IkV4YW1wbGUgTWFjQm9vayIsImhhcm5lc3MiOiJwaSIsInByb2plY3QiOiJkZW1vIiwic2Vzc2lvbiI6InBpIMK3IGRlbW8gcmVwbyJ9LCJuYXRpdmVfc2Vzc2lvbl9pZCI6InBpOjNmOWMyYjdhIiwic2NoZW1hIjoiYW1xLnJlbW90ZS5jb25zZW50LzIiLCJzZXJ2ZXJfaWQiOiJzcnZfZXhhbXBsZSIsInN0b3JlX2lkIjoic3RfNWQxZTBjMmEifQ",
+      "schema": "amq.remote.link.signed_submit/1",
+      "signature": "MEQCIDbfpORzl-nBEZ7XCVLBZ_4_f4-69-iP7bTUsP2OwO2FAiAVHPKg6p0ix-hTf0wpHczXKYj6_tPmgXWI-4ytVuZ8Wg"
+    },
+    "gen": 12,
+    "id": "m_s1",
+    "schema": "amq.remote.link/1"
+  }
+}

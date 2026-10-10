@@ -1,0 +1,18 @@
+{
+  "body_def": "call_reply",
+  "description": "The call failed or was refused.",
+  "direction": "server_to_endpoint",
+  "frame": {
+    "body": {
+      "call_id": "c_k_83",
+      "error": {
+        "code": "not_allowed",
+        "message": "get_salary is not in this link's tool profile"
+      },
+      "status": "error"
+    },
+    "gen": 12,
+    "re": "m_c6",
+    "schema": "amq.remote.link/1"
+  }
+}

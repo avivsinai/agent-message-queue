@@ -1,0 +1,13 @@
+{
+  "body_def": "ack_reply",
+  "description": "Sent only after the insert commits. ok is the acknowledged digest.",
+  "direction": "server_to_endpoint",
+  "frame": {
+    "body": {
+      "ok": "sha256:b33409a7f45df679fbb79af8ee5cd472500c98dd5682b9abb58a4394f00d44bf"
+    },
+    "gen": 12,
+    "re": "m_e9",
+    "schema": "amq.remote.link/1"
+  }
+}

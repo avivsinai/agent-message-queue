@@ -1,0 +1,16 @@
+{
+  "body_def": "error_reply",
+  "description": "A refusal before admission: the passkey, the assertion or the document is not acceptable.",
+  "direction": "endpoint_to_server",
+  "frame": {
+    "body": {
+      "error": {
+        "code": "consent_invalid",
+        "message": "the passkey signed other bytes"
+      }
+    },
+    "gen": 12,
+    "re": "m_s1",
+    "schema": "amq.remote.link/1"
+  }
+}

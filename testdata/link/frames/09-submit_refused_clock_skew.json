@@ -1,0 +1,16 @@
+{
+  "body_def": "error_reply",
+  "description": "A refusal before admission: issued_at is more than 60 s from this machine's clock.",
+  "direction": "endpoint_to_server",
+  "frame": {
+    "body": {
+      "error": {
+        "code": "clock_skew",
+        "message": "check your clock: the consent was issued at 2026-10-09T14:02:00Z, this machine says 2026-10-09T14:05:00Z"
+      }
+    },
+    "gen": 12,
+    "re": "m_s1",
+    "schema": "amq.remote.link/1"
+  }
+}

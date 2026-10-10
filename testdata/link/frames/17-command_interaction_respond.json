@@ -1,0 +1,19 @@
+{
+  "body_def": "command",
+  "description": "interaction.respond: never accepted from a link. No remote source answers the agent's prompts.",
+  "direction": "server_to_endpoint",
+  "frame": {
+    "body": {
+      "epoch": "e_4c0e1a",
+      "interaction_id": "ix_3",
+      "op": "interaction.respond",
+      "option": "Allow",
+      "request_ref": "amqr1_nruw42znmvtgknbzmmytmyzyha4tmobtguaha2j2mrsw23zngvrdszbqmmywkabxmyzwcmtdgfss2nlchfsc2ndfhbqs2oldgiys2n3egrstkzrwme4geojq",
+      "schema": "amq.remote.command/1",
+      "target_id": "pi:demo-5b9d0c1e"
+    },
+    "gen": 12,
+    "id": "m_r1",
+    "schema": "amq.remote.link/1"
+  }
+}

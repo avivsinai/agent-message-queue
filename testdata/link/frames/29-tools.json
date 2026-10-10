@@ -1,0 +1,13 @@
+{
+  "body_def": "tools",
+  "description": "Ask for the tool catalog of this link's profile.",
+  "direction": "endpoint_to_server",
+  "frame": {
+    "body": {
+      "schema": "amq.remote.link.tools/1"
+    },
+    "gen": 12,
+    "id": "m_t1",
+    "schema": "amq.remote.link/1"
+  }
+}
