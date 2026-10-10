@@ -173,8 +173,10 @@ func (d *dmEdges) pinApprovals(adapters []manifest.Adapter, warn io.Writer) {
 // pinNative pins, for a Claude adapter with approve that no relay share
 // serves, its native session with no owner, so its PermissionRequest hook
 // can take a deny from the Buzz Desktop agent (amq-acp) and never an allow
-// (bead agent-message-queue-611.42.2). Like a share pin it lives while this
-// process does.
+// (bead agent-message-queue-611.42.2). An adapter with only
+// observe_approvals gets an observe-only pin instead: its approvals are
+// shown and never answered. Like a share pin it lives while this process
+// does.
 func (d *dmEdges) pinNative(ad manifest.Adapter, native string, warn io.Writer) {
 	if ad.Kind != "claude" || native == "" || d.shared[ad.Target] {
 		return
@@ -184,14 +186,12 @@ func (d *dmEdges) pinNative(ad manifest.Adapter, native string, warn io.Writer) 
 	}
 }
 
-// pin writes one approval pin for a Claude adapter with approve, and
-// records it for unpinApprovals. An adapter without approve pins nothing.
+// pin writes one approval pin for a Claude adapter with approve, or an
+// observe-only pin for one with only observe_approvals, and records it for
+// unpinApprovals. An adapter with neither pins nothing.
 func (d *dmEdges) pin(ad manifest.Adapter, native, share, owner string) error {
-	var cfg struct {
-		Home    string `json:"home"`
-		Approve bool   `json:"approve"`
-	}
-	if len(ad.Config) > 0 && json.Unmarshal(ad.Config, &cfg) != nil || !cfg.Approve {
+	var cfg claudeApprovals
+	if len(ad.Config) > 0 && json.Unmarshal(ad.Config, &cfg) != nil || !cfg.Approve && !cfg.Observe {
 		return nil
 	}
 	home := cfg.Home
@@ -202,7 +202,11 @@ func (d *dmEdges) pin(ad manifest.Adapter, native, share, owner string) error {
 		}
 		home = h
 	}
-	token, err := claude.PinApprovals(home, native, share, owner, os.Getpid())
+	write := func() (string, error) { return claude.PinApprovals(home, native, share, owner, os.Getpid()) }
+	if !cfg.Approve {
+		write = func() (string, error) { return claude.ObserveApprovals(home, native, os.Getpid()) }
+	}
+	token, err := write()
 	if err != nil {
 		return err
 	}
@@ -210,6 +214,30 @@ func (d *dmEdges) pin(ad manifest.Adapter, native, share, owner string) error {
 	d.pins = append(d.pins, approvalPin{home: home, session: native, token: token})
 	d.mu.Unlock()
 	return nil
+}
+
+// claudeApprovals is the approval part of a Claude adapter config.
+type claudeApprovals struct {
+	Home    string `json:"home"`
+	Approve bool   `json:"approve"`
+	Observe bool   `json:"observe_approvals"`
+}
+
+// observeOnlyTargets names the Claude targets of the root's manifest whose
+// approvals are shown and never answered: observe_approvals without approve.
+func observeOnlyTargets(stateDir string) map[string]bool {
+	mf, err := manifest.Load(manifest.DefaultPath(stateDir))
+	if err != nil {
+		return nil
+	}
+	out := map[string]bool{}
+	for _, ad := range mf.Adapters {
+		var cfg claudeApprovals
+		if ad.Kind == "claude" && json.Unmarshal(ad.Config, &cfg) == nil && cfg.Observe && !cfg.Approve {
+			out[ad.Target] = true
+		}
+	}
+	return out
 }
 
 // unpinApprovals removes every pin this process wrote.

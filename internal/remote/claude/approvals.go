@@ -53,6 +53,9 @@ type approval struct {
 	// this call; pinned that the installed hook and the serving share name
 	// the same owner. Both decide only whether the DM offers allow.
 	approvable, pinned bool
+	// observeOnly is an approval the endpoint shows and no remote source
+	// answers (config observe_approvals).
+	observeOnly bool
 }
 
 // offersAllow reports whether the DM offers allow for ap: the hook can
@@ -201,7 +204,7 @@ func (a *Attachment) runByPromptLocked(promptID string) *runRecord {
 // applyToolEntryLocked records the tool_use and tool_result blocks of one
 // transcript line against the run of the prompt the turn belongs to.
 func (a *Attachment) applyToolEntryLocked(e transcriptEntry) {
-	if !a.cfg.Approve {
+	if !a.cfg.approvals() {
 		return
 	}
 	if e.PromptID != "" && len(e.ToolResults) > 0 {
@@ -274,7 +277,7 @@ func (rec *runRecord) candidates(ap *approval) []*toolCall {
 // poll's read reached the end of the file, so no candidate call can still
 // be unread. Caller holds a.mu.
 func (a *Attachment) applyApprovalsLocked(sessionID string, d approvalDisk, caughtUp bool, seq uint64, events []core.NativeEvent) []core.NativeEvent {
-	if !a.cfg.Approve {
+	if !a.cfg.approvals() {
 		return events
 	}
 	ids := make([]string, 0, len(d.requests))
@@ -303,7 +306,7 @@ func (a *Attachment) applyApprovalsLocked(sessionID string, d approvalDisk, caug
 		preview, _ := protocol.TruncateText(r.Preview, protocol.MaxApprovalPreview)
 		ap := &approval{id: id, toolName: r.ToolName, preview: preview, hash: r.ActionHash,
 			hookPID: r.HookPID, deadline: deadline, openedAt: opened.UnixMilli(), seenSeq: seq, sessionID: r.SessionID,
-			approvable: r.Approvable && preview == r.Preview, pinned: d.pinned}
+			approvable: r.Approvable && preview == r.Preview, pinned: d.pinned, observeOnly: a.cfg.observeOnly()}
 		if rec.approvals == nil {
 			rec.approvals = map[string]*approval{}
 		}
@@ -394,10 +397,15 @@ func (rec *runRecord) questionEvent(ap *approval) core.NativeEvent {
 
 // projectApproval is the endpoint's view of one open approval. It offers
 // allow only when ap.offersAllow (bead 611.42.4); otherwise it is reject
-// only, and the terminal allows.
+// only, and the terminal allows. An observe-only approval takes no remote
+// answer at all: the terminal decides (the shape pi uses for an approval it
+// cannot answer).
 func projectApproval(ap *approval) *protocol.Interaction {
 	in := &protocol.Interaction{InteractionID: ap.id, Kind: "approval", Prompt: ap.preview, Options: []string{optionDeny},
-		RemoteAnswer: true, RejectOption: optionDeny}
+		RemoteAnswer: !ap.observeOnly, RejectOption: optionDeny}
+	if ap.observeOnly {
+		return in
+	}
 	if ap.offersAllow() {
 		in.Options, in.ApproveOption, in.ApproveProof = []string{optionAllow, optionDeny}, optionAllow, true
 	}
@@ -511,6 +519,9 @@ func (a *Attachment) Respond(key requests.Key, epoch, interactionID, option stri
 // the answer only to the call with the same action hash. The endpoint owns
 // first-answer-wins.
 func (a *Attachment) RespondWithEvidence(key requests.Key, _, interactionID, option string, evidence json.RawMessage) (protocol.Code, error) {
+	if a.cfg.observeOnly() {
+		return protocol.CodeUnsupported, nil // shown here, answered only in the terminal
+	}
 	switch {
 	case option == optionDeny:
 		evidence = nil
@@ -827,7 +838,7 @@ func (a *Attachment) claimPromptLocked(e transcriptEntry, sessionID string) {
 		return
 	}
 	rec.promptID, rec.sessionID = e.PromptID, sessionID
-	if !a.cfg.Approve {
+	if !a.cfg.approvals() {
 		return
 	}
 	home, promptID, msgID := a.home, e.PromptID, rec.msgID

@@ -41,8 +41,15 @@ const approvalSession = "sess-abc"
 
 func newApprovalFixture(t *testing.T, toolUses ...map[string]any) *approvalFixture {
 	t.Helper()
+	return newPinnedFixture(t, false, toolUses...)
+}
+
+// newPinnedFixture is newApprovalFixture with an answering pin and approve,
+// or, when observe is set, an observe pin and observe_approvals.
+func newPinnedFixture(t *testing.T, observe bool, toolUses ...map[string]any) *approvalFixture {
+	t.Helper()
 	ft := newFakeTarget(t, 4242, nil)
-	att, err := Attach(config{Pid: 4242, Home: ft.home, Target: "cc-1", Approve: true})
+	att, err := Attach(config{Pid: 4242, Home: ft.home, Target: "cc-1", Approve: !observe, ObserveApprovals: observe})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,7 +66,11 @@ func newApprovalFixture(t *testing.T, toolUses ...map[string]any) *approvalFixtu
 		t.Fatalf("submit = %+v, %v", adm, err)
 	}
 	waitRecv(t, ft)
-	if _, err := PinApprovals(f.home, approvalSession, "share-1", "", os.Getpid()); err != nil {
+	pin := func() (string, error) { return PinApprovals(f.home, approvalSession, "share-1", "", os.Getpid()) }
+	if observe {
+		pin = func() (string, error) { return ObserveApprovals(f.home, approvalSession, os.Getpid()) }
+	}
+	if _, err := pin(); err != nil {
 		t.Fatal(err)
 	}
 	f.append(map[string]any{
@@ -204,6 +215,45 @@ func TestApprovalTerminalRejectFirst(t *testing.T) {
 	}
 	if code, err := f.att.Respond(pr2Key(), "", f.id, optionDeny); err != nil || code != protocol.CodeAlreadyResolved {
 		t.Fatalf("late reject = %q, %v; want already_resolved", code, err)
+	}
+}
+
+// An observe-only session (agent-message-queue-9dx.7): the run's snapshot
+// shows the pending approval, no remote source can answer it, and the hook
+// applies no answer file.
+func TestApprovalObserveOnlyShowsAndRefusesAnswers(t *testing.T) {
+	f := newPinnedFixture(t, true, bashUse("toolu_1", "go test ./..."))
+	ticks := make(chan time.Time)
+	f.raiseWith("go test ./...", ticks)
+	if q := f.question(); q.RemoteAnswer || q.ApproveOption != "" || q.Prompt == "" {
+		t.Fatalf("question = %+v, want the prompt shown with no remote answer", q)
+	}
+	if code, err := f.att.Respond(pr2Key(), "", f.id, optionDeny); err != nil || code != protocol.CodeUnsupported {
+		t.Fatalf("remote reject = %q, %v; want unsupported", code, err)
+	}
+	dir, err := ensureApproveSubdir(f.home, approvalSession, "answers")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash, _ := actionHash("Bash", json.RawMessage(`{"command":"go test ./..."}`))
+	if err := createNewJSON(dir, f.id+".json", approvalAnswer{InteractionID: f.id, ActionHash: hash, Option: optionDeny}); err != nil {
+		t.Fatal(err)
+	}
+	// Each tick the hook takes is one more pass over the answer file; the
+	// second is taken only by a hook that read it and decided nothing.
+	for range 2 {
+		select {
+		case ticks <- time.Now():
+		case <-f.exited:
+			t.Fatalf("the hook ended on the answer file; printed %q", f.out.String())
+		case <-time.After(3 * time.Second):
+			t.Fatal("the hook stopped polling")
+		}
+	}
+	close(f.done)
+	f.hookExited()
+	if f.out.Len() != 0 {
+		t.Fatalf("hook printed %q, want no decision", f.out.String())
 	}
 }
 
