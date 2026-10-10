@@ -460,7 +460,9 @@ is not on AMQ is refused and pointed at `--native`.
 
 `amq-remote attach --self --native` binds the exact native session instead. Typing it is the sharing choice, so
 the session is found exactly and never guessed from a discovery list. Claude
-is found by the command's process ancestry. Codex is found by
+is found by the command's process ancestry. A pi (Amit) chat is found the
+same way: its tools run under the pi process whose pid the chat's bridge
+publishes in `bridge.liveness`, with the chat's session id. Codex is found by
 `CODEX_THREAD_ID` among the threads loaded in the app-server daemon. Attach
 registers the target in the running endpoint without a restart and adds it
 to `manifest.json`. When no endpoint runs, it starts `amq-remote up` in the
