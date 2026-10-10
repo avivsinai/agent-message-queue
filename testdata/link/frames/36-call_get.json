@@ -4,7 +4,7 @@
   "direction": "endpoint_to_server",
   "frame": {
     "body": {
-      "call_id": "c_82",
+      "call_id": "c_k_82",
       "schema": "amq.remote.link.call_get/1",
       "wait_ms": 30000
     },
