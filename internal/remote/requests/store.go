@@ -239,10 +239,7 @@ func Open(stateDir string, opts ...Option) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Store{
-		dir: dir, lock: lock, now: time.Now, reservedKeys: map[Key]int64{},
-		sweep: map[Key]struct{}{}, compactable: map[Key]string{},
-	}
+	s := &Store{dir: dir, lock: lock, now: time.Now, reservedKeys: map[Key]int64{}}
 	for _, o := range opts {
 		o(s)
 	}
@@ -277,6 +274,7 @@ func (s *Store) rebuildIndex() error {
 	if err != nil {
 		return fmt.Errorf("index request store: %w", err)
 	}
+	s.sweep, s.compactable = map[Key]struct{}{}, map[Key]string{}
 	for _, rec := range recs {
 		s.indexLocked(rec)
 	}
