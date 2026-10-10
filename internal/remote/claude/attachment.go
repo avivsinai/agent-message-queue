@@ -59,7 +59,20 @@ type config struct {
 	// Approve lets the owner answer tool approvals of AMQ runs from the
 	// Buzz DM, through the PermissionRequest hook (bead 611.42.3).
 	Approve bool `json:"approve,omitempty"`
+	// ObserveApprovals shows the pending tool approval of an AMQ run as the
+	// request's interaction without letting any remote source answer it: the
+	// interaction takes no remote answer and Respond refuses. A session shared
+	// with a source that must never answer tool prompts sets it instead of
+	// Approve; Approve wins when both are set.
+	ObserveApprovals bool `json:"observe_approvals,omitempty"`
 }
+
+// approvals reports whether the attachment follows the hook's approval
+// requests at all: to answer them (Approve) or only to show them.
+func (c config) approvals() bool { return c.Approve || c.ObserveApprovals }
+
+// observeOnly reports whether approvals are shown and never answered.
+func (c config) observeOnly() bool { return c.ObserveApprovals && !c.Approve }
 
 // sessionRegistry is the subset of ~/.claude/sessions/<pid>.json the
 // adapter reads. Unknown fields are ignored (forward-compatible).

@@ -25,6 +25,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/lock"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
+	"github.com/avivsinai/agent-message-queue/internal/remote/ipc"
 	"github.com/avivsinai/agent-message-queue/internal/remote/linkio"
 	"github.com/avivsinai/agent-message-queue/internal/remote/manifest"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
@@ -365,6 +366,21 @@ func link(args []string, stdin io.Reader, stdout io.Writer, probe *jsonProbe) (a
 	return nil, protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "unknown link subcommand %q", args[0])
 }
 
+// requireLinkEndpoint refuses while an endpoint that predates links runs for
+// this root: it would not serve the link, and its manifest writes (a live
+// attach registers through it) would drop the links block. No endpoint at all
+// is fine: the next one started is this binary.
+func requireLinkEndpoint(stateDir string) error {
+	f, running, err := ipc.EndpointFeatures(stateDir)
+	switch {
+	case err != nil:
+		return err
+	case running && !f.Link:
+		return protocol.Refuse(protocol.CodeUnsupported, "the amq-remote endpoint running for this root is older than links: restart amq-remote up first")
+	}
+	return nil
+}
+
 // linkInfo is the server's public description, read before redeeming.
 type linkInfo struct {
 	ServerID string `json:"server_id"`
@@ -410,6 +426,9 @@ func linkAdd(args []string, stdin io.Reader, stdout io.Writer, probe *jsonProbe)
 	stateDir, err := c.stateDir()
 	if err != nil {
 		return nil, protocol.ExitUsage, err
+	}
+	if err := requireLinkEndpoint(stateDir); err != nil {
+		return nil, protocol.ExitActionRequired, err
 	}
 	if *deviceName == "" {
 		*deviceName, _ = os.Hostname()

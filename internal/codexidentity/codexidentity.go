@@ -26,6 +26,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/avivsinai/agent-message-queue/internal/amqhome"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/lock"
 )
@@ -169,14 +170,18 @@ func currentKey(r Record) string {
 
 // storeDir is $HOME/.amq/codex-threads with its threads/ and current/
 // directories. Every directory below the home must be a plain directory,
-// not a symlink. With create, missing ones are made with mode 0700 (Publish
-// then syncs them); without, a missing store returns "".
+// not a symlink. With create, the AMQ home is made and checked by amqhome
+// and missing directories below it are made with mode 0700 (Publish then
+// syncs them); without, a missing store returns "".
 func storeDir(create bool) (string, error) {
-	home, err := os.UserHomeDir()
+	amqDir, err := amqhome.Dir()
+	if create {
+		amqDir, err = amqhome.EnsureDir()
+	}
 	if err != nil {
 		return "", err
 	}
-	store := filepath.Join(home, ".amq", "codex-threads")
+	store := filepath.Join(amqDir, "codex-threads")
 	for _, cur := range []string{filepath.Dir(store), store, filepath.Join(store, "threads"), filepath.Join(store, "current")} {
 		fi, err := os.Lstat(cur)
 		if errors.Is(err, os.ErrNotExist) {

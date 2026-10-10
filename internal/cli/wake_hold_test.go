@@ -455,6 +455,26 @@ func TestWakeSettingsLiveHoldChange(t *testing.T) {
 		}
 	})
 
+	// #1014 machine layer: ~/.amq/wake.settings reaches every running wake.
+	t.Run("machine hold set live holds the next message", func(t *testing.T) {
+		h := newWakeHoldHarness(t, wakeHoldPolicy{})
+		h.useSettingsFile(`{"schema":1,"settings":{"defer_while_input":false}}`)
+		h.cfg.machineSettingsSource = func() ([]byte, bool, error) {
+			return []byte(`{"schema":1,"settings":{"hold_normal":"5m"}}`), true, nil
+		}
+		start := h.now
+		h.send("a", format.PriorityNormal)
+		h.scan(h.cfg)
+		if got := h.rings(); got != 0 {
+			t.Fatalf("rings before the machine hold = %d, want 0", got)
+		}
+		h.now = start.Add(5 * time.Minute)
+		h.scan(h.cfg)
+		if got := h.rings(); got != 1 {
+			t.Fatalf("rings at the machine hold = %d, want 1", got)
+		}
+	})
+
 	t.Run("hold removed live rings a held cohort", func(t *testing.T) {
 		h := newWakeHoldHarness(t, wakeHoldRecommended)
 		h.send("low", format.PriorityLow)
