@@ -17,6 +17,11 @@ checksum. See [INSTALL.md](../../INSTALL.md). `amq upgrade` leaves these
 binaries unchanged; update them with `brew upgrade amq` or from the release
 asset.
 
+After an upgrade, a running endpoint keeps the old binary: stop its
+`amq-remote up` (Ctrl-C, or SIGTERM to its pid) and run `amq-remote up` again.
+Commands that need a newer endpoint, such as `link add`, say so ("restart
+amq-remote up first").
+
 `make build` also produces a local `amq-remote` and `amq-owner-sign` next to
 `amq`.
 
