@@ -528,12 +528,27 @@ type approvalPin struct {
 	PID   int    `json:"pid"`
 	Share string `json:"share"`
 	Owner string `json:"owner,omitempty"`
+	// Observe marks a pin that only shows approvals: the hook raises the
+	// request, so the run's snapshot carries it, and applies no answer.
+	Observe bool `json:"observe,omitempty"`
 }
 
 // PinApprovals marks the session as served by a relay share that answers
 // approvals from the DM: the PermissionRequest hook decides nothing without
 // a pin whose pid is alive. It returns the pin's token for UnpinApprovals.
 func PinApprovals(home, sessionID, share, owner string, pid int) (string, error) {
+	return writePin(home, sessionID, approvalPin{PID: pid, Share: share, Owner: owner})
+}
+
+// ObserveApprovals marks the session as watched by a source that may see
+// its approvals and never answer them: the hook raises each request of an
+// AMQ run while the pid is alive, and applies an answer only when another,
+// answering pin is live too. It returns the pin's token for UnpinApprovals.
+func ObserveApprovals(home, sessionID string, pid int) (string, error) {
+	return writePin(home, sessionID, approvalPin{PID: pid, Observe: true})
+}
+
+func writePin(home, sessionID string, pin approvalPin) (string, error) {
 	dir, err := ensureApproveSubdir(home, sessionID, "")
 	if err != nil {
 		return "", err
@@ -543,7 +558,7 @@ func PinApprovals(home, sessionID, share, owner string, pid int) (string, error)
 		return "", err
 	}
 	token := hex.EncodeToString(b[:])
-	if err := createNewJSON(dir, "pin-"+token, approvalPin{PID: pid, Share: share, Owner: owner}); err != nil {
+	if err := createNewJSON(dir, "pin-"+token, pin); err != nil {
 		return "", err
 	}
 	return token, nil
@@ -560,6 +575,17 @@ func UnpinApprovals(home, sessionID, token string) {
 // pinLive reports whether the session has a pin whose serving pid is alive.
 func pinLive(home, sessionID string) bool {
 	return len(livePins(home, sessionID)) > 0
+}
+
+// answeringPinLive reports whether a live pin may answer the session's
+// approvals: a pin that only observes never does.
+func answeringPinLive(home, sessionID string) bool {
+	for _, p := range livePins(home, sessionID) {
+		if !p.Observe {
+			return true
+		}
+	}
+	return false
 }
 
 // livePins are the session's pins whose serving pid is alive.

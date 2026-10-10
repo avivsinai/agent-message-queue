@@ -544,6 +544,35 @@ func validRelayURL(raw string) error {
 // ("remote", per the extensions/remote ownership) when unset. It creates the
 // parent directory. serve writes the merged (file + flag) set here so the
 // manifest is the single source of truth and `amq doctor` can diagnose it.
+// withUnknownKeys encodes f, carrying over every top-level key of the file
+// at path that this binary does not know. A newer binary may have written
+// such a key (as `links` once was), and a rewrite must not drop it. Keys
+// this binary knows are always f's own, so removing one stays possible.
+func withUnknownKeys(path string, f File) ([]byte, error) {
+	known, err := json.Marshal(f)
+	if err != nil {
+		return nil, err
+	}
+	var out map[string]json.RawMessage
+	if err := json.Unmarshal(known, &out); err != nil {
+		return nil, err
+	}
+	if prev, err := os.ReadFile(path); err == nil {
+		var old map[string]json.RawMessage
+		if json.Unmarshal(prev, &old) == nil {
+			for k, v := range old {
+				if !knownTopLevel[k] {
+					out[k] = v
+				}
+			}
+		}
+	}
+	return json.MarshalIndent(out, "", "  ")
+}
+
+// knownTopLevel lists the manifest keys this binary reads.
+var knownTopLevel = map[string]bool{"schema_version": true, "layer": true, "adapters": true, "relay": true, "links": true}
+
 func Write(path string, f File) error {
 	if f.SchemaVersion == 0 {
 		f.SchemaVersion = SchemaVersion
@@ -551,7 +580,7 @@ func Write(path string, f File) error {
 	if f.Layer == "" {
 		f.Layer = Layer
 	}
-	data, err := json.MarshalIndent(f, "", "  ")
+	data, err := withUnknownKeys(path, f)
 	if err != nil {
 		return fmt.Errorf("encode manifest: %w", err)
 	}

@@ -15,6 +15,9 @@ type BoundRequest struct {
 	Epoch    string
 	Input    protocol.SubmitInput
 	NotAfter string
+	// Origin is a copy of the record's origin (its carrier and routing), so
+	// an adapter can tell the harness where the task came from.
+	Origin map[string]string
 }
 
 // Admission is the attachment's answer to Submit. Admitted means the request
