@@ -1,6 +1,6 @@
 ---
 name: amq-cli
-version: 0.94.0 # x-release-please-version
+version: 0.95.0 # x-release-please-version
 description: Coordinate coding agents through AMQ. Use for agent messages, inboxes, receipts, sessions, wake delivery, cross-project routing, managed launches, or AMQ diagnostics. Use amq-spec for collaborative design; do not use this for general message queues or single-agent work.
 metadata:
   short-description: Inter-agent messaging via AMQ CLI
@@ -59,6 +59,15 @@ amq wake config --me <handle>                           # show
 amq wake config --me <handle> --hold-normal 5m --wait   # set, wait for apply
 amq wake config --me <handle> --unset hold_normal       # back to default
 amq wake config --me <handle> --reset --hold-low 30m    # replace the file
+```
+
+Set a default for every wake of this user on this machine with `--machine`
+(no `--me`); a per-agent value overrides it per key, and `--unset` falls back
+to the next layer:
+
+```bash
+amq wake config --machine --hold-normal 5m --hold-low 30m  # machine default
+amq wake config --machine --unset hold_low                 # back to default
 ```
 
 A refused file shows `file: refused: <err>` with default rows (the wake keeps

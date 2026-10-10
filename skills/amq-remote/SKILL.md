@@ -1,6 +1,6 @@
 ---
 name: amq-remote
-version: 0.94.0 # x-release-please-version
+version: 0.95.0 # x-release-please-version
 description: Let the owner reach this running agent from Buzz, on the phone or in Buzz Desktop. Use when the user types /amq-remote (Claude Code) or $amq-remote (Codex), /amq-remote --native, /amq-remote off, or /amq-remote status, or asks to control this session from Buzz. Not for AMQ messaging between agents (use amq-cli).
 metadata:
   short-description: Reach this agent from Buzz
@@ -40,7 +40,7 @@ command's own message. Do not work around a refusal.
    - Default: run `amq-remote attach --self`. It uses `AM_ROOT` and `AM_ME`.
      If it says this session is not an AMQ participant, offer `--native`.
    - `--native`: use `$AM_ROOT` when set, else `$HOME/.amq/remote/root`
-     (create it with `mkdir -p`). Run
+     (create it private with `(umask 077 && mkdir -p "$HOME/.amq/remote/root")`). Run
      `amq-remote attach --self --native --root "$ROOT"`.
    If it fails, show its message and stop.
 3. **`--native` on Claude Code only: the Stop hook.** Run
