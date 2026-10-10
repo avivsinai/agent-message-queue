@@ -1,7 +1,10 @@
 package linkio
 
 import (
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/binary"
@@ -144,5 +147,47 @@ func TestLocalBindingHoldsUntilConfirmed(t *testing.T) {
 	var r *Refusal
 	if _, err := newCarrier().ConfirmLocal(held[0].ID, held[0].Digest, ad, cdj, sig); !errors.As(err, &r) {
 		t.Fatalf("confirm after a restart = %v, want a refusal", err)
+	}
+}
+
+// Touch ID passkeys are ES256: a P-256 key in an EC2 COSE_Key registers, and
+// its DER signature confirms.
+func TestLocalRegistrationAcceptsAnES256Key(t *testing.T) {
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := priv.PublicKey.Bytes() // 0x04 || X || Y
+	if err != nil {
+		t.Fatal(err)
+	}
+	cd := []byte(`{"type":"webauthn.create","challenge":"` + b64.EncodeToString([]byte("c")) + `","origin":"http://localhost:7","crossOrigin":false}`)
+	rp := sha256.Sum256([]byte(LocalRPID))
+	auth := append(rp[:], webauthnFlagUP|webauthnFlagUV|0x40)
+	auth = binary.BigEndian.AppendUint32(auth, 0)
+	auth = append(auth, make([]byte, 16)...)
+	auth = binary.BigEndian.AppendUint16(auth, 2)
+	auth = append(auth, "id"...)
+	// COSE_Key {1: 2 (EC2), 3: -7 (ES256), -1: 1 (P-256), -2: x, -3: y}
+	auth = append(auth, 0xa5, 0x01, 0x02, 0x03, 0x26, 0x20, 0x01, 0x21, 0x58, 0x20)
+	auth = append(auth, raw[1:33]...)
+	auth = append(append(auth, 0x22, 0x58, 0x20), raw[33:]...)
+	att := []byte{0xa3, 0x63, 'f', 'm', 't', 0x64, 'n', 'o', 'n', 'e', 0x67, 'a', 't', 't', 'S', 't', 'm', 't', 0xa0,
+		0x68, 'a', 'u', 't', 'h', 'D', 'a', 't', 'a', 0x59}
+	att = append(binary.BigEndian.AppendUint16(att, uint16(len(auth))), auth...)
+	key, err := VerifyLocalRegistration([]byte("c"), cd, att)
+	if err != nil || key.Alg != -7 {
+		t.Fatalf("register = %+v, %v", key, err)
+	}
+	gcd := []byte(`{"type":"webauthn.get","challenge":"` + b64.EncodeToString(ConfirmChallenge("sha256:ab")) + `","origin":"http://localhost:7","crossOrigin":false}`)
+	ad := binary.BigEndian.AppendUint32(append(rp[:], webauthnFlagUP|webauthnFlagUV), 0)
+	cs := sha256.Sum256(gcd)
+	h := sha256.Sum256(append(append([]byte{}, ad...), cs[:]...))
+	sig, err := ecdsa.SignASN1(rand.Reader, priv, h[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyLocalConfirm(key, "sha256:ab", b64.EncodeToString(ad), b64.EncodeToString(gcd), b64.EncodeToString(sig)); err != nil {
+		t.Fatalf("ES256 confirmation: %v", err)
 	}
 }

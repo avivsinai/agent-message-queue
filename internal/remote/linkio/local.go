@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math/big"
 	"net"
 	"net/url"
 	"os"
@@ -39,9 +38,6 @@ const ConfirmPathPrefix = "/amq-remote/confirm/"
 const (
 	localKeyFile = "local_key.json"
 	maxHeld      = 16
-	// codePendingLocal answers a signed submit that waits for the local
-	// confirmation.
-	codePendingLocal = "pending_local"
 )
 
 // LocalOrigin reports whether origin is a loopback page any port may serve:
@@ -162,8 +158,8 @@ func coseToSPKI(v any) ([]byte, int, error) {
 		if !okx || !oky || len(x) != 32 || len(y) != 32 {
 			return nil, 0, errors.New("malformed P-256 key")
 		}
-		pub := &ecdsa.PublicKey{Curve: elliptic.P256(), X: new(big.Int).SetBytes(x), Y: new(big.Int).SetBytes(y)}
-		if !pub.Curve.IsOnCurve(pub.X, pub.Y) {
+		pub, err := ecdsa.ParseUncompressedPublicKey(elliptic.P256(), append(append([]byte{4}, x...), y...))
+		if err != nil {
 			return nil, 0, errors.New("the P-256 point is not on the curve")
 		}
 		der, err := x509.MarshalPKIXPublicKey(pub)

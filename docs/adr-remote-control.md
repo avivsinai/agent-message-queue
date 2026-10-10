@@ -131,7 +131,14 @@ invariants.
   same point: a key removed before the handoff ends the request
   `consent_invalid`, and nothing runs. A key removed after the handoff does
   not recall the task; it stops every later one. A binding whose consent is
-  `local` runs nothing until the local confirmation exists.
+  `local` holds a verified task outside the store until the person confirms
+  it on the machine: `amq-remote link confirm ID` (a terminal) opens a page
+  amq-remote serves on localhost that shows the exact text, hidden characters
+  visible, and the link's local passkey (relying party `localhost`) signs a
+  challenge bound to the digest shown. The endpoint verifies that assertion
+  itself and moves the task into the store once. A held task lives only in
+  memory: a restart or its deadline drops it, and the next hello no longer
+  lists its digest.
 - **Activity divergence is acceptable for a cache, never for execution
   truth.** The live activity projection may lag or differ from the harness's
   own view; it is a convenience. Admission, cancellation and completion are

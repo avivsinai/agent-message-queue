@@ -168,7 +168,7 @@ func TestSignedSubmitRunsOverTheLink(t *testing.T) {
 		cfg.ConsentKeys = func() []ConsentKey { return []ConsentKey{key} }
 		cfg.Bindings = func() []Binding { return []Binding{view.Bindings["pi-demo"]} }
 		cfg.Handle = func(cmd *protocol.Command, src core.Source) (any, error) {
-			if src.Host != host || src.Origin["carrier"] != "link" || src.Origin["sink"] != host ||
+			if src.Host != host || src.Origin["carrier"] != "link" || src.Origin["sink"] != host || src.Origin["name"] != "example" ||
 				src.NativeSession != doc.NativeSessionID || src.Credential != key.CredentialID ||
 				len(src.Shared) != 1 || src.Shared[0] != doc.Command.TargetID {
 				t.Errorf("source %+v, want this link's sink %s with the signed session, key and shared target", src, host)

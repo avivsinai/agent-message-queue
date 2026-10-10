@@ -82,6 +82,24 @@ func (ls *linkSet) request(ctx context.Context, req ipc.LinkRequest) (json.RawMe
 		}
 		return nil, protocol.Refuse(protocol.CodeEndpointUnreachable, "no running link %q in this endpoint", req.Name)
 	}
+	switch req.Op {
+	case "held":
+		return json.Marshal(run.carrier.HeldTasks())
+	case "confirm":
+		if req.Confirm == nil {
+			return nil, protocol.Refuse(protocol.CodeInvalid, "confirm needs the passkey's assertion")
+		}
+		c := req.Confirm
+		out, err := run.carrier.ConfirmLocal(c.ID, c.Digest, c.AuthenticatorData, c.ClientDataJSON, c.Signature)
+		if err != nil {
+			var r *linkio.Refusal
+			if errors.As(err, &r) {
+				return nil, protocol.Refuse(protocol.Code(r.Code), "%s", r.Message)
+			}
+			return nil, err
+		}
+		return json.Marshal(out)
+	}
 	var body any
 	switch req.Op {
 	case "tools":

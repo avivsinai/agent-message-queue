@@ -979,6 +979,11 @@ func (c *Carrier) markRevoked(id string) {
 	c.liveKeys.Store(&live)
 }
 
+// OriginName is the Origin key naming the link (its manifest name), so a
+// harness can show where a task came from (ruling x). It carries no
+// authority.
+const OriginName = "name"
+
 // source is the authenticated source of a signed submit: this link's sink,
 // the native session and consent key it was signed with, and the targets
 // shared with the link. The origin routes its revisions back to this sink.
@@ -989,7 +994,7 @@ func (c *Carrier) source(view *ConsentView, native, credential string) core.Sour
 	}
 	return core.Source{
 		Host:          c.host,
-		Origin:        map[string]string{"carrier": core.CarrierLink, core.OriginSink: c.host},
+		Origin:        map[string]string{"carrier": core.CarrierLink, core.OriginSink: c.host, OriginName: c.cfg.Name},
 		Shared:        shared,
 		NativeSession: native,
 		Credential:    credential,

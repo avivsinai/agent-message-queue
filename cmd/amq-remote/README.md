@@ -46,6 +46,8 @@ amq-remote share --session ID
 amq-remote attach --self [--native | --link NAME]
 amq-remote link add NAME URL --code CODE
 amq-remote link keys add NAME --code CODE
+amq-remote link local-key NAME
+amq-remote link confirm ID
 amq-remote link remove NAME
 amq-remote link status
 amq-remote doctor
@@ -365,7 +367,13 @@ Protocol: `amq.remote.link/1` ([contract](../../testdata/link/README.md)).
 5. To sign with another passkey (a second device), create it in the server
    and run `amq-remote link keys add NAME --code CODE`, typing its
    fingerprint. The server can remove a key, never add one.
-6. `amq-remote link status` shows each link's socket, generation, owed
+6. A share with `--consent local` waits for you on this machine too: the
+   signed task is held until you run `amq-remote link confirm ID` in a
+   terminal, read the exact text on the page it opens, and confirm with
+   Touch ID. That needs the link's local passkey, created by `link add` when
+   it runs in a terminal, or later by `amq-remote link local-key NAME`. A held
+   task is dropped at its deadline (10 minutes) or on restart, never resent.
+7. `amq-remote link status` shows each link's socket, generation, owed
    revisions, conflicts and retired sinks. `amq-remote link remove NAME`
    retires the link's sink and deletes its device key; the records it created
    settle without network.

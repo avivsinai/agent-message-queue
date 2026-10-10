@@ -223,6 +223,10 @@ func (ls *linkSet) newRun(l manifest.Link) (*linkRun, error) {
 		},
 		Revoked: func() { ls.retire(name) },
 		Handle:  func(cmd *protocol.Command, src core.Source) (any, error) { return ls.handle(cmd, src) },
+		LocalKey: func() (linkio.ConsentKey, bool) {
+			k, err := linkio.LoadLocalKey(ls.stateDir, name)
+			return k, err == nil
+		},
 		ConsentKeys: func() []linkio.ConsentKey {
 			keys, err := linkio.LoadConsentKeys(ls.stateDir, name)
 			if err != nil {
@@ -334,11 +338,15 @@ func writeLinkStatus(stateDir, name string, st linkio.Status) {
 // link dispatches `amq-remote link add|remove|status`.
 func link(args []string, stdin io.Reader, stdout io.Writer, probe *jsonProbe) (any, int, error) {
 	if len(args) == 0 {
-		return nil, protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "link needs a subcommand: add, keys, remove, status, tools or call")
+		return nil, protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "link needs a subcommand: add, keys, local-key, confirm, remove, status, tools or call")
 	}
 	switch args[0] {
 	case "add":
 		return linkAdd(args[1:], stdin, stdout, probe)
+	case "confirm":
+		return linkConfirm(args[1:], stdin, stdout, probe)
+	case "local-key":
+		return linkLocalKey(args[1:], stdin, stdout, probe)
 	case "keys":
 		if len(args) < 2 || args[1] != "add" {
 			return nil, protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "usage: amq-remote link keys add NAME --code CODE")
@@ -458,6 +466,12 @@ func linkAdd(args []string, stdin io.Reader, stdout io.Writer, probe *jsonProbe)
 		return map[string]any{"linked": name, "server_id": info.ServerID, "user": rep.User, "sink": key.Host()}, 0, nil
 	}
 	say(stdout, "Matches. Linked to %s on %s.", rep.User, info.ServerID)
+	if stdinIsTerminal(stdin) {
+		// The local passkey lets you also confirm tasks here (consent: local).
+		if err := registerLocalKey(stateDir, name, stdin, stdout); err != nil {
+			say(stdout, "No local passkey yet (%v). Create it later with amq-remote link local-key %s.", err, name)
+		}
+	}
 	say(stdout, "Share a session: in it, run  amq-remote attach --self --link %s", name)
 	return nil, 0, nil
 }
