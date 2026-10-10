@@ -6,15 +6,18 @@
 package requests
 
 import (
+	"cmp"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -180,6 +183,18 @@ type Store struct {
 	// Fail closed at the door, never after the work ran.
 	reserved     int64
 	reservedKeys map[Key]int64
+	// The sweep index (agent-message-queue-9dx.6) holds the records the
+	// endpoint's per-tick paths may act on, so a sweep reads those files and
+	// not every retained record. The record files stay the truth: Open
+	// rebuilds the index from them, and write and writeSettlement, the only
+	// paths that change a record, reclassify it under mu.
+	//
+	// sweep is the records Record.NeedsSweep selects. compactable is the
+	// terminal records that are not tombstones yet, with their UpdatedAt;
+	// compaction reads its candidates from it, so neither set grows with
+	// the tombstones nothing deletes.
+	sweep       map[Key]struct{}
+	compactable map[Key]string
 }
 
 // Option configures Open.
@@ -224,7 +239,10 @@ func Open(stateDir string, opts ...Option) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Store{dir: dir, lock: lock, now: time.Now, reservedKeys: map[Key]int64{}}
+	s := &Store{
+		dir: dir, lock: lock, now: time.Now, reservedKeys: map[Key]int64{},
+		sweep: map[Key]struct{}{}, compactable: map[Key]string{},
+	}
 	for _, o := range opts {
 		o(s)
 	}
@@ -242,7 +260,43 @@ func Open(stateDir string, opts ...Option) (*Store, error) {
 			s.used = used
 		}
 	}
+	// An incomplete index would leave an open record unreconciled, so a
+	// store that cannot be listed does not open.
+	if err := s.rebuildIndex(); err != nil {
+		_ = lock.release()
+		return nil, err
+	}
 	return s, nil
+}
+
+// rebuildIndex classifies every record on disk into the sweep index. Open
+// calls it before the store is shared, so it needs no lock. An unreadable
+// record is skipped, as List skips it: nothing can act on it until it reads.
+func (s *Store) rebuildIndex() error {
+	recs, err := s.List()
+	if err != nil {
+		return fmt.Errorf("index request store: %w", err)
+	}
+	for _, rec := range recs {
+		s.indexLocked(rec)
+	}
+	return nil
+}
+
+// indexLocked reclassifies one record after it was read or durably written.
+// The caller holds s.mu, or is Open before the store is shared.
+func (s *Store) indexLocked(rec *Record) {
+	k := keyOf(rec)
+	if rec.NeedsSweep() {
+		s.sweep[k] = struct{}{}
+	} else {
+		delete(s.sweep, k)
+	}
+	if rec.State.Terminal() && !rec.Tombstone {
+		s.compactable[k] = rec.UpdatedAt
+	} else {
+		delete(s.compactable, k)
+	}
 }
 
 // OpenReadOnly returns a store that reads records without taking the owner
@@ -559,13 +613,54 @@ func (s *Store) ListWithPoison() ([]*Record, []Poison, error) {
 			out = append(out, rec)
 		}
 	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].UpdatedAt != out[j].UpdatedAt {
-			return out[i].UpdatedAt < out[j].UpdatedAt
-		}
-		return out[i].RequestRef < out[j].RequestRef
-	})
+	sortRecords(out)
 	return out, poison, nil
+}
+
+// sortRecords orders records oldest write first, then by request ref.
+func sortRecords(recs []*Record) {
+	sort.Slice(recs, func(i, j int) bool {
+		if recs[i].UpdatedAt != recs[j].UpdatedAt {
+			return recs[i].UpdatedAt < recs[j].UpdatedAt
+		}
+		return recs[i].RequestRef < recs[j].RequestRef
+	})
+}
+
+// ListSweep returns the records the reconcile sweep may act on
+// (Record.NeedsSweep), in List's order, reading only those files. Every
+// record that is not terminal is among them. Like List, it skips a record
+// that does not read.
+func (s *Store) ListSweep() []*Record {
+	s.mu.Lock()
+	keys := make([]Key, 0, len(s.sweep))
+	for k := range s.sweep {
+		keys = append(keys, k)
+	}
+	s.mu.Unlock()
+
+	out := make([]*Record, 0, len(keys))
+	for _, k := range keys {
+		if rec, exists, err := s.Get(k); err == nil && exists {
+			out = append(out, rec)
+		}
+	}
+	sortRecords(out)
+	return out
+}
+
+// CompactionCandidates returns the keys of terminal records that are not
+// tombstones yet, oldest write first. CompactOne re-reads and re-gates each.
+func (s *Store) CompactionCandidates() []Key {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	keys := slices.Collect(maps.Keys(s.compactable))
+	slices.SortFunc(keys, func(a, b Key) int {
+		return cmp.Or(cmp.Compare(s.compactable[a], s.compactable[b]),
+			cmp.Compare(protocol.EncodeRef(a.CreatorHost, a.TargetID, a.RequestID),
+				protocol.EncodeRef(b.CreatorHost, b.TargetID, b.RequestID)))
+	})
+	return keys
 }
 
 // readRecord reads and decodes one record file, applying the shared
@@ -828,6 +923,7 @@ func (s *Store) write(rec *Record) error {
 		if rec.State.Terminal() {
 			s.releaseReservationLocked(key)
 		}
+		s.indexLocked(rec)
 		return nil
 	}
 	if _, err := fsq.WriteFileAtomic(filepath.Dir(p), filepath.Base(p), data, fileMode); err != nil {
@@ -836,6 +932,7 @@ func (s *Store) write(rec *Record) error {
 		}
 		return fmt.Errorf("persist record: %w", err)
 	}
+	s.indexLocked(rec)
 	return nil
 }
 
@@ -893,6 +990,7 @@ func (s *Store) writeSettlement(rec *Record) error {
 	// Account for the actual delta after a successful write. Settlement
 	// writes are quota-exempt but still keep used honest.
 	s.used += delta
+	s.indexLocked(rec)
 	return nil
 }
 
@@ -1074,4 +1172,37 @@ func allowed(from, to protocol.State) bool {
 // to this — one predicate, one place.
 func (r *Record) OwesAck() bool {
 	return r.State.Terminal() && r.Result != nil && r.AckDigest == ""
+}
+
+// OwesCancel reports whether we asked the runtime to stop this run and it
+// has not confirmed.
+func (r *Record) OwesCancel() bool {
+	return r.Cancel != nil && r.Cancel.Disposition == protocol.CancelRequested && r.NativeRun != nil
+}
+
+// OwesResult reports whether the record is closed with a run bound but no
+// result persisted: a late result whose write failed. A tombstone owes
+// nothing; compaction erased its result on purpose.
+func (r *Record) OwesResult() bool {
+	return r.State.Terminal() && !r.Tombstone && r.NativeRun != nil && r.Result == nil
+}
+
+// NeedsSweep reports whether the endpoint's reconcile sweep may act on this
+// record. It is the union of what Reconcile (internal/remote/core) does
+// with a record: a record that is not terminal; an unpublished revision;
+// an owed or retired interaction outcome; a cancel or a result the runtime
+// owes; or an acknowledgement replay, which replayTerminalAck skips only
+// when the ack was delivered (AckDigest set and Acknowledged) or there is
+// no digest to send (no memoed digest and no result). A change to what
+// Reconcile acts on changes this predicate in the same commit.
+func (r *Record) NeedsSweep() bool {
+	switch {
+	case !r.State.Terminal(), r.PublishedRevision < r.Revision,
+		len(r.OwedOutcomes) > 0, len(r.RetiredOutcomes) > 0,
+		r.OwesCancel(), r.OwesResult():
+		return true
+	case r.AckDigest != "":
+		return !r.Acknowledged
+	}
+	return r.Result != nil
 }
