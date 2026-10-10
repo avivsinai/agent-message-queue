@@ -1,0 +1,20 @@
+# Kept in the single [allowlist] format: CI runs gitleaks 8.24.3, which does
+# not read [[allowlists]] (added in 8.25).
+#
+# testdata/link holds the amq.remote.link/1 golden fixtures (see
+# testdata/link/README.md). Their key-shaped strings are public: SPKI public
+# keys (Ed25519, P-256) and a WebAuthn authenticator_data
+# (SHA-256("sign.example.test") || flags 0x05 || sign counter 0). Every
+# private key behind them is derived in tests from a public seed string.
+# Only those exact shapes are allowed; other values are still flagged.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "amq.remote.link/1 fixtures: public keys and WebAuthn authenticator_data are not secrets"
+regexTarget = "line"
+regexes = [
+  '''"device_key":\s*"MCowBQYDK2VwAyEA[A-Za-z0-9_-]{43}"''',
+  '''MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE[A-Za-z0-9_-]{86}''',
+  '''"authenticator_data":\s*"[A-Za-z0-9_-]{50}"''',
+]

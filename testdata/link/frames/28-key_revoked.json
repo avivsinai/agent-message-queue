@@ -1,0 +1,14 @@
+{
+  "body_def": "key_revoked",
+  "description": "A consent key was removed; the endpoint drops it. No reply.",
+  "direction": "server_to_endpoint",
+  "frame": {
+    "body": {
+      "credential_id": "C32Z2-E6ARE-BkrOVOybpw",
+      "schema": "amq.remote.link.key_revoked/1"
+    },
+    "gen": 12,
+    "id": "m_k1",
+    "schema": "amq.remote.link/1"
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "body_def": "error_reply",
+  "description": "A budget is full. The sender keeps the work and tries again after retry_after_ms.",
+  "direction": "either",
+  "frame": {
+    "body": {
+      "error": {
+        "code": "busy",
+        "message": "inbound budget full",
+        "retry_after_ms": 2000
+      }
+    },
+    "gen": 12,
+    "re": "m_e9",
+    "schema": "amq.remote.link/1"
+  }
+}

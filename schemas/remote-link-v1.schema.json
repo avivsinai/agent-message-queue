@@ -1,0 +1,260 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/avivsinai/agent-message-queue/schemas/remote-link-v1.schema.json",
+  "title": "AMQ Remote link frame v1",
+  "description": "One frame of amq.remote.link/1, the WebSocket an amq-remote endpoint dials to a linked server. The envelope ignores unknown fields; every body is strict. A frame that expects a reply has id; a reply has re; hello has both. gen is absent on challenge and hello and present on every frame from welcome on. A frame is at most 4 MiB. Transport rules and golden frames: testdata/link/README.md.",
+  "type": "object",
+  "required": ["schema", "body"],
+  "properties": {
+    "schema": { "const": "amq.remote.link/1" },
+    "id": { "$ref": "#/$defs/frame_id" },
+    "re": { "$ref": "#/$defs/frame_id" },
+    "gen": { "type": "integer", "minimum": 1 },
+    "body": { "type": "object" }
+  },
+  "anyOf": [{ "required": ["id"] }, { "required": ["re"] }],
+  "$defs": {
+    "frame_id": { "type": "string", "pattern": "^[A-Za-z0-9_.:-]{1,64}$" },
+    "b64url": { "type": "string", "pattern": "^[A-Za-z0-9_-]+$", "description": "base64url without padding (RFC 4648 section 5), never empty." },
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$", "description": "sha256 of the RFC 8785 (JCS) form of the snapshot." },
+    "opaque": { "type": "string", "pattern": "^[A-Za-z0-9_.:-]{1,128}$" },
+    "code": { "type": "string", "pattern": "^[a-z][a-z_]{0,63}$" },
+    "labels": {
+      "type": "object",
+      "required": ["device", "session", "harness", "project"],
+      "additionalProperties": false,
+      "properties": {
+        "device": { "type": "string", "maxLength": 128 },
+        "session": { "type": "string", "maxLength": 128 },
+        "harness": { "type": "string", "maxLength": 64 },
+        "project": { "type": "string", "maxLength": 128 }
+      }
+    },
+    "binding": {
+      "type": "object",
+      "description": "One AMQ binding shared with this link, as the machine sees it now: its target, epoch, native session and labels are the values a consent document must equal. approve_tool and answer_question are always false: a link never answers the agent's prompts.",
+      "required": ["binding", "target_id", "epoch", "native_session_id", "labels", "harness", "display_name", "attachment", "consent", "tools", "capabilities"],
+      "additionalProperties": false,
+      "properties": {
+        "binding": { "$ref": "#/$defs/opaque" },
+        "target_id": { "$ref": "#/$defs/opaque" },
+        "epoch": { "$ref": "#/$defs/opaque" },
+        "native_session_id": { "type": "string", "maxLength": 256 },
+        "labels": { "$ref": "#/$defs/labels" },
+        "harness": { "type": "string", "maxLength": 64 },
+        "display_name": { "type": "string", "maxLength": 128 },
+        "attachment": { "type": "string", "maxLength": 64 },
+        "consent": { "enum": ["passkey", "local"] },
+        "tools": { "type": "string", "maxLength": 64, "description": "The link's tool profile name; empty means no tools." },
+        "capabilities": { "$ref": "remote-session-v1.schema.json#/properties/capabilities" }
+      }
+    },
+    "error": {
+      "type": "object",
+      "required": ["code"],
+      "additionalProperties": false,
+      "properties": {
+        "code": { "$ref": "#/$defs/code" },
+        "message": { "type": "string", "maxLength": 1024 },
+        "retry_after_ms": { "type": "integer", "minimum": 0, "description": "Present with code busy." }
+      }
+    },
+    "challenge": {
+      "type": "object",
+      "required": ["schema", "server_id", "nonce"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": { "const": "amq.remote.link.challenge/1" },
+        "server_id": { "$ref": "#/$defs/opaque" },
+        "nonce": { "$ref": "#/$defs/b64url", "minLength": 43 }
+      }
+    },
+    "hello": {
+      "type": "object",
+      "required": ["schema", "device_key", "store_id", "amq_version", "signature", "bindings", "pending_local"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": { "const": "amq.remote.link.hello/1" },
+        "device_key": { "$ref": "#/$defs/b64url", "description": "Ed25519 SPKI DER." },
+        "store_id": { "$ref": "#/$defs/opaque" },
+        "amq_version": { "type": "string", "maxLength": 64 },
+        "signature": { "$ref": "#/$defs/b64url", "description": "Ed25519 over \"amq.remote.link/1\\0hello\\0\" + server_id + \"\\0\" + nonce + \"\\0\" + store_id." },
+        "bindings": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/binding" } },
+        "pending_local": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/digest" }, "description": "Digests of consent documents waiting for a local confirmation." }
+      }
+    },
+    "welcome": {
+      "type": "object",
+      "required": ["schema", "user", "connection_generation", "limits"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": { "const": "amq.remote.link.welcome/1" },
+        "user": { "type": "string", "maxLength": 256 },
+        "connection_generation": { "type": "integer", "minimum": 1 },
+        "limits": {
+          "type": "object",
+          "required": ["frame_bytes", "tasks_in_flight", "tool_calls_in_flight"],
+          "additionalProperties": false,
+          "properties": {
+            "frame_bytes": { "type": "integer", "minimum": 1 },
+            "tasks_in_flight": { "type": "integer", "minimum": 1 },
+            "tool_calls_in_flight": { "type": "integer", "minimum": 0 }
+          }
+        }
+      }
+    },
+    "signed_submit": {
+      "type": "object",
+      "required": ["schema", "document_b64", "credential_id", "authenticator_data", "client_data_json", "signature"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": { "const": "amq.remote.link.signed_submit/1" },
+        "document_b64": { "$ref": "#/$defs/b64url", "description": "The exact amq.remote.consent/2 bytes that were signed (their JCS form)." },
+        "credential_id": { "$ref": "#/$defs/b64url" },
+        "authenticator_data": { "$ref": "#/$defs/b64url" },
+        "client_data_json": { "$ref": "#/$defs/b64url", "description": "The raw clientDataJSON bytes; never re-serialized." },
+        "signature": { "$ref": "#/$defs/b64url" }
+      }
+    },
+    "command": { "$ref": "remote-command-v1.schema.json" },
+    "outcome": {
+      "type": "object",
+      "required": ["op"],
+      "additionalProperties": false,
+      "properties": {
+        "op": { "type": "string" },
+        "code": { "$ref": "#/$defs/code" },
+        "message": { "type": "string" },
+        "disposition": { "enum": ["cancel_requested", "cancelled", "noop_already_terminal", "unsupported"] },
+        "evidence": { "enum": ["submitted", "admitted"] }
+      }
+    },
+    "outcome_reply": {
+      "type": "object",
+      "required": ["outcome"],
+      "additionalProperties": false,
+      "properties": { "outcome": { "$ref": "#/$defs/outcome" } }
+    },
+    "command_reply": {
+      "type": "object",
+      "required": ["snapshot", "outcome"],
+      "additionalProperties": false,
+      "properties": {
+        "snapshot": { "$ref": "remote-request-v1.schema.json" },
+        "outcome": { "$ref": "#/$defs/outcome" }
+      }
+    },
+    "error_reply": {
+      "type": "object",
+      "required": ["error"],
+      "additionalProperties": false,
+      "properties": { "error": { "$ref": "#/$defs/error" } }
+    },
+    "bindings_reply": {
+      "type": "object",
+      "required": ["bindings"],
+      "additionalProperties": false,
+      "properties": { "bindings": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/binding" } } }
+    },
+    "bindings": {
+      "type": "object",
+      "required": ["schema", "bindings"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": { "const": "amq.remote.link.bindings/1" },
+        "bindings": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/binding" } }
+      }
+    },
+    "revision": {
+      "type": "object",
+      "required": ["schema", "store_id", "request_ref", "revision", "digest", "snapshot"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": { "const": "amq.remote.link.revision/1" },
+        "store_id": { "$ref": "#/$defs/opaque" },
+        "request_ref": { "type": "string", "pattern": "^amqr1_[a-z2-7]{16,512}$" },
+        "revision": { "type": "integer", "minimum": 1 },
+        "digest": { "$ref": "#/$defs/digest" },
+        "snapshot": { "$ref": "remote-request-v1.schema.json" }
+      }
+    },
+    "ack_reply": {
+      "type": "object",
+      "required": ["ok"],
+      "additionalProperties": false,
+      "properties": { "ok": { "$ref": "#/$defs/digest" } }
+    },
+    "key_revoked": {
+      "type": "object",
+      "required": ["schema", "credential_id"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": { "const": "amq.remote.link.key_revoked/1" },
+        "credential_id": { "$ref": "#/$defs/b64url" }
+      }
+    },
+    "tools": {
+      "type": "object",
+      "required": ["schema"],
+      "additionalProperties": false,
+      "properties": { "schema": { "const": "amq.remote.link.tools/1" } }
+    },
+    "tools_reply": {
+      "type": "object",
+      "required": ["tools"],
+      "additionalProperties": false,
+      "properties": {
+        "tools": {
+          "type": "array",
+          "maxItems": 512,
+          "items": {
+            "type": "object",
+            "required": ["name", "description", "write", "input_schema"],
+            "additionalProperties": false,
+            "properties": {
+              "name": { "type": "string", "pattern": "^[A-Za-z0-9_.-]{1,128}$" },
+              "description": { "type": "string" },
+              "write": { "type": "boolean" },
+              "input_schema": { "type": "object" }
+            }
+          }
+        }
+      }
+    },
+    "call": {
+      "type": "object",
+      "required": ["schema", "call_id", "tool", "arguments", "idempotency_key"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": { "const": "amq.remote.link.call/1" },
+        "call_id": { "$ref": "#/$defs/opaque" },
+        "tool": { "type": "string", "pattern": "^[A-Za-z0-9_.-]{1,128}$" },
+        "arguments": { "type": "object" },
+        "idempotency_key": { "$ref": "#/$defs/opaque" },
+        "binding": { "$ref": "#/$defs/opaque", "description": "The shared binding the calling session runs in, when known." }
+      }
+    },
+    "call_get": {
+      "type": "object",
+      "required": ["schema", "call_id"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": { "const": "amq.remote.link.call_get/1" },
+        "call_id": { "$ref": "#/$defs/opaque" },
+        "wait_ms": { "type": "integer", "minimum": 0, "maximum": 30000 }
+      }
+    },
+    "call_reply": {
+      "type": "object",
+      "required": ["call_id", "status"],
+      "additionalProperties": false,
+      "properties": {
+        "call_id": { "$ref": "#/$defs/opaque" },
+        "status": { "enum": ["ok", "pending", "pending_approval", "error"], "description": "A call that ended without a result is error, with error.code rejected, expired, unknown or refused." },
+        "result": {},
+        "review_url": { "type": "string", "pattern": "^https://" },
+        "error": { "$ref": "#/$defs/error" }
+      }
+    }
+  }
+}

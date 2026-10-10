@@ -1,0 +1,41 @@
+{
+  "body_def": "bindings",
+  "description": "The shared bindings changed (attach, detach, native session, epoch). No reply.",
+  "direction": "endpoint_to_server",
+  "frame": {
+    "body": {
+      "bindings": [
+        {
+          "attachment": "live",
+          "binding": "pi-demo",
+          "capabilities": {
+            "answer_question": false,
+            "approve_tool": false,
+            "cancel_request": false,
+            "inspect": true,
+            "steer": false,
+            "submit": true,
+            "terminal": "unavailable"
+          },
+          "consent": "passkey",
+          "display_name": "pi · demo repo",
+          "epoch": "e_4c0e1a",
+          "harness": "pi",
+          "labels": {
+            "device": "Example MacBook",
+            "harness": "pi",
+            "project": "demo",
+            "session": "pi · demo repo"
+          },
+          "native_session_id": "pi:3f9c2b7a",
+          "target_id": "pi:demo-5b9d0c1e",
+          "tools": "read"
+        }
+      ],
+      "schema": "amq.remote.link.bindings/1"
+    },
+    "gen": 12,
+    "id": "m_b2",
+    "schema": "amq.remote.link/1"
+  }
+}

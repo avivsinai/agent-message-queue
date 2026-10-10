@@ -1,0 +1,14 @@
+{
+  "body_def": "challenge",
+  "description": "First frame after the socket opens. No gen yet.",
+  "direction": "server_to_endpoint",
+  "frame": {
+    "body": {
+      "nonce": "E8auFujRV6ABI-eHvwoNRLpAq1UjiLJIhfdFTPcINNw",
+      "schema": "amq.remote.link.challenge/1",
+      "server_id": "srv_example"
+    },
+    "id": "m_c1",
+    "schema": "amq.remote.link/1"
+  }
+}
