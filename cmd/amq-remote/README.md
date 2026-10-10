@@ -371,7 +371,12 @@ Protocol: `amq.remote.link/1` ([contract](../../testdata/link/README.md)).
    and run `amq-remote link keys add NAME --code CODE`, typing its
    fingerprint. The server can remove a key, never add one.
 6. `amq-remote link status` shows each link's socket, generation, owed
-   revisions, conflicts and retired sinks. `amq-remote link remove NAME`
+   revisions, conflicts and retired sinks, and for each share whether the
+   server sees it now: `shared`, or why not (`session changed`, `not attached
+   now`, `no such binding`) with the step that fixes it. A share is announced
+   only while its session is the one attached; after a session change (a pi
+   `/new`, a reload), run `attach --self --link NAME` again in the new
+   session, which keeps the share's binding name. `amq-remote link remove NAME`
    retires the link's sink and deletes its device key; the records it created
    settle without network.
 
@@ -480,7 +485,13 @@ on this path.
 
 Each attach writes a **named** binding, `~/.amq/remote/bindings/<name>.json`
 (default `<handle>-<project>`, or the native target; `--name` overrides), and
-removes any other binding for the same session. Several sessions can be
+removes any other binding for the same session. A defaulted name that
+already names another session is refused (use `--name`), except under
+`attach --self --link`: when the name pins the same root and target and the
+target now runs a new native session, the name moves to it. The bindings live
+in `$AMQ_REMOTE_BINDING`'s directory when that is set; its missing directories
+are created 0700 below an existing ancestor that has no symlink on its path,
+is owned by you, and is not group- or world-writable. Several sessions can be
 connected at once. Each has its own Buzz agent, whose ACP model
 `amq-remote:<name>` selects that binding (`amq-acp setup --session <name>`
 writes its Import file).

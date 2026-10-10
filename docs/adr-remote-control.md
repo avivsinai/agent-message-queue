@@ -132,6 +132,8 @@ invariants.
   `consent_invalid`, and nothing runs. A key removed after the handoff does
   not recall the task; it stops every later one. A binding whose consent is
   `local` runs nothing until the local confirmation exists.
+  A re-attach or a new native session changes what the binding reports, and
+  every older signature stops matching.
 - **A revision is published when its sink acknowledged it.** A carrier counts
   a revision as published only after the sink confirms that it committed that
   revision or a newer one. Until then the revision stays owed and the
