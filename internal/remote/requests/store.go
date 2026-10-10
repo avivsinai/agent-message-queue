@@ -94,6 +94,7 @@ type Record struct {
 	// and compaction no longer waits. A retired outcome stays correctable
 	// until the record compacts: an exact native resolution replaces the
 	// uncertain one, and recovery keeps asking the resolver for retired ids.
+	// Compaction clears it.
 	RetiredOutcomes []string `json:"retired_outcomes,omitempty"`
 
 	// AckDigest is the evidence digest of the last acknowledgement sent to the
@@ -828,6 +829,10 @@ func (s *Store) CompactOne(key Key, before time.Time) (bool, error) {
 	rec.Result = nil
 	rec.Input = nil
 	rec.Interaction = nil
+	// A retired outcome stays correctable only until the record compacts:
+	// the tombstone keeps its delivery_unknown resolution, and nothing asks
+	// the resolver about it again (9dx.6, ruling bb).
+	rec.RetiredOutcomes = nil
 	rec.Tombstone = true
 	if rec.State == protocol.StateCompleted {
 		rec.Code = protocol.CodeResultExpired
