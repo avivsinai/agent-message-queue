@@ -13,7 +13,8 @@ import (
 // TestSweepReadsOnlyRecordsThatNeedWork is agent-message-queue-9dx.6: with
 // 5,000 settled records and 3 that owe work on disk, Open rebuilds the
 // index from the files and the sweep reads only the 3; a write that settles
-// one takes it out.
+// one takes it out. A tombstone that an older binary compacted with its
+// retired outcomes still set owes nothing (ruling ss).
 func TestSweepReadsOnlyRecordsThatNeedWork(t *testing.T) {
 	dir := t.TempDir()
 	recDir := filepath.Join(dir, layoutVersion, requestsDir, "hostA")
@@ -38,6 +39,11 @@ func TestSweepReadsOnlyRecordsThatNeedWork(t *testing.T) {
 		rec.State, rec.Code, rec.PublishedRevision = protocol.StateRejected, protocol.CodeBusy, 1
 		put(rec)
 	}
+	oldTombstone := newRecord("33333333-3333-4333-8333-000000000001")
+	oldTombstone.Revision, oldTombstone.State, oldTombstone.PublishedRevision = 3, protocol.StateCompleted, 3
+	oldTombstone.Code, oldTombstone.Tombstone, oldTombstone.Input = protocol.CodeResultExpired, true, nil
+	oldTombstone.RetiredOutcomes = []string{"i_1"}
+	put(oldTombstone)
 	running := newRecord("22222222-2222-4222-8222-000000000001")
 	running.Revision, running.State, running.PublishedRevision = 3, protocol.StateRunning, 3
 	put(running)

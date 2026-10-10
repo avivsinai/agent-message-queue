@@ -1196,15 +1196,16 @@ func (r *Record) OwesResult() bool {
 // NeedsSweep reports whether the endpoint's reconcile sweep may act on this
 // record. It is the union of what Reconcile (internal/remote/core) does
 // with a record: a record that is not terminal; an unpublished revision;
-// an owed or retired interaction outcome; a cancel or a result the runtime
-// owes; or an acknowledgement replay, which replayTerminalAck skips only
+// an owed interaction outcome, or a retired one before compaction (a
+// tombstone an older binary compacted with retired outcomes still set
+// owes nothing, ruling ss); a cancel or a result the runtime owes; or an acknowledgement replay, which replayTerminalAck skips only
 // when the ack was delivered (AckDigest set and Acknowledged) or there is
 // no digest to send (no memoed digest and no result). A change to what
 // Reconcile acts on changes this predicate in the same commit.
 func (r *Record) NeedsSweep() bool {
 	switch {
 	case !r.State.Terminal(), r.PublishedRevision < r.Revision,
-		len(r.OwedOutcomes) > 0, len(r.RetiredOutcomes) > 0,
+		len(r.OwedOutcomes) > 0, len(r.RetiredOutcomes) > 0 && !r.Tombstone,
 		r.OwesCancel(), r.OwesResult():
 		return true
 	case r.AckDigest != "":
