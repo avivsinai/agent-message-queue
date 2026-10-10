@@ -54,10 +54,41 @@ type Request struct {
 	// Local-only: `amq-remote attach --self` sends it for the session the
 	// owner is typing in.
 	Register *RegisterRequest `json:"register,omitempty"`
+	// Link calls a linked server's tools (operation link.v1). Local-only:
+	// the endpoint's own link carries it, with the device key that never
+	// leaves the endpoint.
+	Link *LinkRequest `json:"link.v1,omitempty"`
 	// Features asks which features the endpoint serves. An endpoint that
 	// predates the question answers it as a request with no operation.
 	Features bool `json:"features,omitempty"`
 }
+
+// LinkRequest is one link.v1 operation: list the server's tools, call one,
+// or read a call's state. WaitMS bounds how long the endpoint waits for the
+// server; the client's read deadline is that wait plus slack.
+type LinkRequest struct {
+	Name           string          `json:"name,omitempty"`
+	Op             string          `json:"op"` // tools, call, call_get
+	CallID         string          `json:"call_id,omitempty"`
+	Tool           string          `json:"tool,omitempty"`
+	Arguments      json.RawMessage `json:"arguments,omitempty"`
+	IdempotencyKey string          `json:"idempotency_key,omitempty"`
+	WaitMS         int64           `json:"wait_ms,omitempty"`
+}
+
+// LinkHandler serves link.v1 for the endpoint's links.
+type LinkHandler func(ctx context.Context, req LinkRequest) (json.RawMessage, error)
+
+// LinkRecordBytes bounds one complete link.v1 record, envelope included: a
+// tool result as large as a link frame (4 MiB) plus room for the envelope.
+// Every other operation keeps MaxRecordBytes, checked after the read: the
+// server reads any record up to this bound before it knows the operation.
+// The socket is the owner's alone (0600), so that larger read is the owner's
+// own cost.
+const LinkRecordBytes = 4<<20 + 64*1024
+
+// linkSlack is added to a link.v1 wait for the client's read deadline.
+const linkSlack = 10 * time.Second
 
 // RegisterRequest names one adapter by kind, target and config, exactly as
 // a manifest entry does.
@@ -151,7 +182,11 @@ type Server struct {
 	listener  net.Listener
 	path      string
 	registrar Registrar
+	link      LinkHandler
 }
+
+// SetLinkHandler installs the link.v1 handler. Call it before Serve.
+func (s *Server) SetLinkHandler(h LinkHandler) { s.link = h }
 
 // SetRegistrar installs the live registration handler. Call it before Serve.
 func (s *Server) SetRegistrar(r Registrar) { s.registrar = r }
@@ -225,7 +260,10 @@ func (s *Server) Serve(ctx context.Context) error {
 func (s *Server) handle(ctx context.Context, conn net.Conn) {
 	defer func() { _ = conn.Close() }()
 	_ = conn.SetReadDeadline(time.Now().Add(30 * time.Second))
-	req, err := readRecord[Request](conn)
+	req, n, err := readRecordLimit[Request](conn, LinkRecordBytes)
+	if err == nil && req.Link == nil && n > MaxRecordBytes {
+		err = fmt.Errorf("record exceeds %d bytes", MaxRecordBytes)
+	}
 	if err != nil {
 		writeRecord(conn, Response{Error: &ErrorBody{Code: string(protocol.CodeInvalid), Message: err.Error()}})
 		return
@@ -260,6 +298,19 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 			return
 		}
 		writeRecord(conn, Response{Reply: mustJSON(snap)})
+	case req.Link != nil:
+		if s.link == nil {
+			writeRecord(conn, errorResponse(protocol.Refuse(protocol.CodeUnsupported, "this endpoint has no links")))
+			return
+		}
+		lctx, cancel := context.WithTimeout(ctx, time.Duration(req.Link.WaitMS)*time.Millisecond+linkSlack/2)
+		defer cancel()
+		reply, err := s.link(lctx, *req.Link)
+		if err != nil {
+			writeRecord(conn, errorResponse(err))
+			return
+		}
+		writeRecord(conn, Response{Reply: reply})
 	case req.Features:
 		writeRecord(conn, Response{Reply: mustJSON(Features{Link: true})})
 	case req.Register != nil:
@@ -365,11 +416,16 @@ func Call(stateDir string, req Request) (*Response, error) {
 			readBound = time.Duration(req.Wait.TimeoutMS)*time.Millisecond + callReadDeadline
 		}
 	}
+	limit := MaxRecordBytes
+	if req.Link != nil {
+		readBound = time.Duration(req.Link.WaitMS)*time.Millisecond + linkSlack
+		limit = LinkRecordBytes
+	}
 	if readBound > 0 {
 		_ = conn.SetReadDeadline(time.Now().Add(readBound))
 	}
 	writeRecord(conn, req)
-	resp, err := readRecord[Response](conn)
+	resp, _, err := readRecordLimit[Response](conn, limit)
 	if err != nil {
 		return nil, fmt.Errorf("read endpoint response: %w", err)
 	}
@@ -387,25 +443,27 @@ func (r *Response) AsError() error {
 	return &protocol.Refusal{Code: protocol.Code(r.Error.Code), Message: r.Error.Message}
 }
 
-func readRecord[T any](r io.Reader) (*T, error) {
+// readRecordLimit reads one newline-terminated record of at most limit
+// bytes and returns its length.
+func readRecordLimit[T any](r io.Reader, limit int) (*T, int, error) {
 	// Cap at the BOUNDARY, not after the fact: ReadBytes grows without limit,
 	// so a peer streaming megabytes with no newline could allocate freely
 	// inside the read deadline before the size check ever ran. One extra byte
 	// is read so an over-long record is still detected rather than silently
 	// truncated into a parse error.
-	br := bufio.NewReaderSize(io.LimitReader(r, MaxRecordBytes+1), 64*1024)
+	br := bufio.NewReaderSize(io.LimitReader(r, int64(limit)+1), 64*1024)
 	line, err := br.ReadBytes('\n')
 	if err != nil && (!errors.Is(err, io.EOF) || len(line) == 0) {
-		return nil, fmt.Errorf("read record: %w", err)
+		return nil, 0, fmt.Errorf("read record: %w", err)
 	}
-	if len(line) > MaxRecordBytes {
-		return nil, fmt.Errorf("record exceeds %d bytes", MaxRecordBytes)
+	if len(line) > limit {
+		return nil, len(line), fmt.Errorf("record exceeds %d bytes", limit)
 	}
 	var v T
 	if err := json.Unmarshal(line, &v); err != nil {
-		return nil, fmt.Errorf("decode record: %w", err)
+		return nil, len(line), fmt.Errorf("decode record: %w", err)
 	}
-	return &v, nil
+	return &v, len(line), nil
 }
 
 // writeResponseDeadline bounds one response write. A client that sends its

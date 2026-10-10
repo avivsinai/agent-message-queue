@@ -113,8 +113,23 @@ signed submit is refused before admission with one of:
 | `busy` | The harness is busy and `input.busy` is `reject`. No `retry_after_ms`: sending again is a new request and a new signature |
 
 `interaction.respond` and `session.events` from a link are always refused
-with `unsupported`. A tool call that ended without a result is
-`{"status": "error", "error": {"code": "rejected" | "expired" | "unknown" | "refused"}}`.
+with `unsupported`.
+
+## Tool calls
+
+A call that ended without a result is `{"status": "error", "error": {"code"}}`
+with one of `rejected`, `expired`, `unknown`, `refused`, `tool_error`,
+`conflict` (the same idempotency key with another tool or arguments) and
+`not_allowed` (the tool is not in the link's catalog). `busy`, with
+`retry_after_ms`, means "try again later" and is never final: the endpoint
+sends the same call or `call_get` again.
+
+The endpoint sends `call_id = "c_" + idempotency_key`, a client-scoped alias:
+the server echoes that id in every `call_reply` and answers `call_get` for it,
+resolved by the calling subject, the link's device and the key, for 24 hours
+after the call is final; after that a `call_get` answers `error.code` `unknown`.
+A write that waits for the owner answers `pending_approval` with its
+`review_url`.
 
 ## Test keys
 

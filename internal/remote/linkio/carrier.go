@@ -126,12 +126,14 @@ type Carrier struct {
 	offerBytes int
 	owed       map[string]int64
 	status     Status
-	sentBind   []byte           // JCS of the last bindings the server was told
-	bindFrame  string           // id of the bindings frame awaiting a possible refusal
-	conflicts  map[string]int64 // request_ref -> a revision the server holds with another digest
-	frameLimit int              // the smaller of MaxFrameBytes and the server's limit
-	oversize   map[string]int64 // request_ref -> a revision already logged as over the frame limit
-	revokes    chan string      // consent keys the server removed, for the revoke worker
+	sentBind   []byte            // JCS of the last bindings the server was told
+	bindFrame  string            // id of the bindings frame awaiting a possible refusal
+	conflicts  map[string]int64  // request_ref -> a revision the server holds with another digest
+	frameLimit int               // the smaller of MaxFrameBytes and the server's limit
+	oversize   map[string]int64  // request_ref -> a revision already logged as over the frame limit
+	revokes    chan string       // consent keys the server removed, for the revoke worker
+	waiters    map[string]waiter // frame id -> the request waiting for its reply
+	maxCalls   int               // tool calls in flight, from welcome
 }
 
 // New builds a carrier. It does not dial until Run.
@@ -177,6 +179,7 @@ func New(cfg Config) (*Carrier, error) {
 		oversize:  map[string]int64{},
 		revokes:   make(chan string, revokeQueue),
 		status:    Status{State: "offline"},
+		waiters:   map[string]waiter{},
 	}, nil
 }
 
@@ -345,6 +348,76 @@ func (c *Carrier) ackLocked(ref string, rev int64) {
 	}
 }
 
+// Errors of Request.
+var (
+	// ErrBusy: too many tool calls are already in flight on this link.
+	ErrBusy = errors.New("link: too many tool calls in flight")
+	// ErrTooLarge: the request is over the link's frame limit; sending it
+	// would make the server close the link.
+	ErrTooLarge = errors.New("link: the request is over the link's frame limit")
+	// ErrDropped: the connection ended after the request was sent and before
+	// its answer; whether the server acted on it is unknown.
+	ErrDropped = errors.New("link: the connection dropped before the answer")
+)
+
+// waiter is a request waiting for its reply on one connection.
+type waiter struct {
+	sess  *session
+	reply chan json.RawMessage // nil body: the connection dropped
+}
+
+// Request sends one body to the server (tools, call, call_get) and returns
+// the server's reply body. It waits at most until ctx ends; the reader is
+// never involved beyond handing the reply over.
+func (c *Carrier) Request(ctx context.Context, body any) (json.RawMessage, error) {
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	c.mu.Lock()
+	sess := c.sess
+	if sess == nil {
+		c.mu.Unlock()
+		return nil, ErrUnavailable
+	}
+	if len(c.waiters) >= max(c.maxCalls, 1) {
+		c.mu.Unlock()
+		return nil, ErrBusy
+	}
+	id := sess.nextID()
+	frame, err := json.Marshal(Frame{Schema: SchemaFrame, ID: id, Gen: sess.gen, Body: raw})
+	if err != nil {
+		c.mu.Unlock()
+		return nil, err
+	}
+	if c.frameLimit > 0 && len(frame) > c.frameLimit {
+		c.mu.Unlock()
+		return nil, fmt.Errorf("%w: %d bytes, the limit is %d", ErrTooLarge, len(frame), c.frameLimit)
+	}
+	reply := make(chan json.RawMessage, 1)
+	c.waiters[id] = waiter{sess: sess, reply: reply}
+	c.mu.Unlock()
+	defer func() {
+		c.mu.Lock()
+		delete(c.waiters, id)
+		c.mu.Unlock()
+	}()
+	select {
+	case sess.data <- frame:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	select {
+	case r := <-reply:
+		if r == nil {
+			return nil, ErrDropped
+		}
+		return r, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
 // Tick tells the server when the shared bindings changed. serve calls it on
 // every sweep.
 func (c *Carrier) Tick() {
@@ -481,12 +554,21 @@ func (c *Carrier) serveOnce(ctx context.Context) error {
 	if l := int(welcome.Limits.FrameBytes); l > 0 && l < c.frameLimit {
 		c.frameLimit = l
 	}
+	c.maxCalls = welcome.Limits.ToolCallsInFlight
 	c.status = Status{State: "online", Gen: gen}
 	c.mu.Unlock()
 	defer func() {
 		c.mu.Lock()
 		if c.sess == sess {
 			c.sess = nil
+		}
+		// Every request still waiting on this connection learns at once that
+		// its answer will not come, and frees its slot.
+		for id, w := range c.waiters {
+			if w.sess == sess {
+				delete(c.waiters, id)
+				w.reply <- nil
+			}
 		}
 		c.mu.Unlock()
 	}()
@@ -616,12 +698,17 @@ func (c *Carrier) readLoop(ctx context.Context, sess *session) error {
 // handleReply reads the server's answer to a revision: its acknowledgement
 // with the committed digest, or busy.
 func (c *Carrier) handleReply(f Frame) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if w, ok := c.waiters[f.Re]; ok {
+		delete(c.waiters, f.Re)
+		w.reply <- f.Body // buffered: never blocks the reader
+		return
+	}
 	var r reply
 	if err := json.Unmarshal(f.Body, &r); err != nil {
 		return
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	if f.Re == c.bindFrame && f.Re != "" {
 		if r.Error != nil {
 			c.sentBind = nil // refused (busy): the next sweep pushes the bindings again
