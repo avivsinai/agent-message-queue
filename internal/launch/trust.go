@@ -156,7 +156,12 @@ func ensureAMQHomeFor(dir string) error {
 	}
 	resolvedHome, err := resolvedPath(home)
 	if err != nil {
-		return err
+		// An unusual HOME (a file, an unreadable ancestor) matters only
+		// when the store is below it; a legacy store elsewhere is unaffected.
+		if pathWithin(dir, home) {
+			return err
+		}
+		return nil
 	}
 	if !pathWithin(dir, resolvedHome) {
 		return nil

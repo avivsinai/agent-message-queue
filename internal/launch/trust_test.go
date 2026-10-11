@@ -225,3 +225,26 @@ func TestDefaultLaunchStateDirPrefersLegacyLaunchElseAMQHome(t *testing.T) {
 		t.Fatalf("legacy grant: trusted %t, err %v", trusted, err)
 	}
 }
+
+// Review of #1049: with a legacy store, Replace must not fail because HOME
+// is a file (the HOME=/dev/null sandbox pattern), as it did not before.
+func TestReplaceInLegacyStoreIgnoresUnusableHome(t *testing.T) {
+	base := t.TempDir()
+	project := filepath.Join(base, "project")
+	if err := os.Mkdir(project, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	homeFile := filepath.Join(base, "home-file")
+	if err := os.WriteFile(homeFile, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", homeFile)
+	t.Setenv("USERPROFILE", homeFile)
+	store, err := OpenTrustStore(filepath.Join(base, "xdg", "amq"), project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Replace(TrustRecord{SemanticDigest: testDigest('a')}); err != nil {
+		t.Fatalf("Replace in a legacy store with HOME a file: %v", err)
+	}
+}
