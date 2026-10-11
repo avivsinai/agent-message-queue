@@ -93,8 +93,9 @@ func TestStrictShareBundleEnrollsAndDoctorIsClean(t *testing.T) {
 		return protocol.Session{TargetID: "fake", Epoch: "e_1"}, nil
 	}, func(string) string { return "thread-1" })
 	ctx, cancel := context.WithCancel(context.Background())
-	wg := startRelays(ctx, root, stateDir, mf.Relay, edges, io.Discard)
-	defer func() { cancel(); wg.Wait() }()
+	wg := newRelaySet(root, stateDir, "", edges, io.Discard)
+	wg.start(ctx, mf.Relay)
+	defer func() { cancel(); wg.wait() }()
 
 	deadline := time.Now().Add(4 * time.Second)
 	for {

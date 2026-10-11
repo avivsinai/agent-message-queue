@@ -18,7 +18,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -609,14 +608,15 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 		printSession(stdout, s)
 	}
 	// Relay surface (611.15): one authenticated client per share. The
-	// manifest was already loaded and validated by serveStartupFrom.
-	var relays *sync.WaitGroup
+	// manifest was already loaded and validated by serveStartupFrom; the
+	// set follows later manifest edits (#1024). Fresh remote commands are
+	// admitted only now, after attachment and startup reconciliation, and
+	// also for a serve that has no share yet.
+	edges.bind(ep.Handle, ep.NativeSessionID)
+	edges.bindAttachments(ep.AttachmentOf)
+	relays := newRelaySet(c.root, stateDir, manifestFile, edges, stderr)
+	relays.start(ctx, relayCfg)
 	if relayCfg != nil {
-		// Fresh remote commands are admitted only now, after attachment and
-		// startup reconciliation.
-		edges.bind(ep.Handle, ep.NativeSessionID)
-		edges.bindAttachments(ep.AttachmentOf)
-		relays = startRelays(ctx, c.root, stateDir, relayCfg, edges, stderr)
 		say(stdout, "relay %s: %d shared session(s)", relayCfg.URL, len(relayCfg.Shares))
 	}
 	ep.SetConsent(links.consentLive)
@@ -636,6 +636,7 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 					say(stderr, "tick: %v", err)
 				}
 				links.tick()
+				relays.tick()
 				// Replay durable sender envelopes (CLI submits persisted while the
 				// companion was down), then reap settled ones older than the reap
 				// horizon so the spool is bounded. B4: Reap on every tick,
@@ -652,9 +653,7 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	// Cancel before joining (codex slice 1 review #7): Serve can also return
 	// on an accept error with ctx still live, and the relays would never end.
 	stop()
-	if relays != nil {
-		relays.Wait()
-	}
+	relays.wait()
 	if cerr := ep.Close(); cerr != nil && err == nil {
 		err = cerr
 	}

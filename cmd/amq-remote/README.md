@@ -78,7 +78,8 @@ diagnostics to stderr. `serve`, `up`, and `share` do not emit a JSON result.
 
 ## Manifest
 
-`manifest.json` is read when `serve` starts. An absent file is an empty
+`manifest.json` is read when `serve` starts; a running `serve` also follows
+its relay block (see below). An absent file is an empty
 adapter list, which is legal. `schema_version` is `1`. `layer` is `remote`.
 Each adapter has a unique `target` (the id you pass to `inspect` and
 `submit`), a `kind`, and an optional `config` object.
@@ -182,8 +183,26 @@ connect, and every minute while connected, `serve` re-reads the enrolled
 generation, so a renewal is picked up. The connection closes at the grant's
 signed expiry. An enrolled owner that differs from `owner_pubkey` stops
 authentication. The first body `serve` loads stays pinned: a different body
-enrolled under the same owner is refused until `serve` restarts. A lost
+enrolled under the same owner is refused until `serve` restarts or the share
+is removed and added again. A lost
 connection reconnects with backoff of 1 to 30 seconds. Local IPC and AMQ delivery keep working while the relay is down.
+
+A running `serve` follows the relay block. When the manifest bytes change,
+it applies the shares as a restart would:
+- A share added starts, with the same enrollment checks, pins and surfaces
+  as at startup. A share whose target or enrolled body a running share
+  still holds is refused whole until that share is removed or `serve`
+  restarts.
+- A share removed stops. Its approval pins go, and the other shares are not
+  touched.
+- A share whose entry changed in any field keeps its running values. `serve`
+  logs once that you must restart `serve`, or remove and re-add the share,
+  to adopt the change.
+- A changed `url` or `relay_self` needs a restart while a share runs.
+- A manifest that does not load keeps every running share and is reported
+  once.
+- A share surface that was refused at setup is set up again on the next
+  manifest change.
 
 `serve` never mints, renews or enrolls a key. Use `amq-remote share` for
 that.
