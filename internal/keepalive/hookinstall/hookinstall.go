@@ -76,7 +76,7 @@ if [[ "${AMQ_KEEPALIVE_DISABLED:-0}" == "1" ]]; then
     exit 0
 fi
 
-mkdir -p "$(dirname "$LOG_PATH")" 2>/dev/null || true
+(umask 077 && mkdir -p "$(dirname "$LOG_PATH")") 2>/dev/null || true
 
 log() {
     printf '%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >> "$LOG_PATH" 2>/dev/null || true

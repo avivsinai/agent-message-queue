@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/amqhome"
@@ -144,7 +145,12 @@ func DefaultHome() (string, error) {
 	}
 	currentFound, err := homeDirFound(current)
 	if err != nil {
-		return "", err
+		// A legacy home stays usable when ~/.amq is not a directory
+		// (ENOTDIR), since keepalive never needed ~/.amq there.
+		if !legacyFound || !errors.Is(err, syscall.ENOTDIR) {
+			return "", err
+		}
+		currentFound = false
 	}
 	if legacyFound && currentFound {
 		return "", fmt.Errorf("keepalive home: both %s and %s exist; remove %s, which an older amq-keepalive recreated, then retry", legacy, current, legacy)
