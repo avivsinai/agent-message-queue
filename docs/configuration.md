@@ -90,6 +90,21 @@ user config directory on macOS and Windows, else `~/.local/state/amq`. Older
 - Do not delete `<legacy>/launch` by hand. If `~/.amq/state/launch` also
   exists, its older trust records become active again without a new confirm.
 
+## Keepalive home
+
+On a new install, `amq-keepalive` keeps its registry, hook script, hook log,
+and adapter state in `~/.amq/keepalive`. Older binaries use `~/.amq-keepalive`.
+
+- When `~/.amq-keepalive` exists, keepalive continues to use it. Older and
+  newer binaries then share one registry.
+- When both `~/.amq-keepalive` and `~/.amq/keepalive` exist, every command
+  that uses the default path refuses until you remove one. Normally an older
+  binary recreated `~/.amq-keepalive`, and the error tells you to remove it.
+  A supervisor started with `--registry` continues to use that path.
+- A symlink or a non-directory at either path is refused.
+- AMQ does not move an existing `~/.amq-keepalive`. See
+  [issue 1047](https://github.com/avivsinai/agent-message-queue/issues/1047).
+
 ## Locations outside `~/.amq`
 
 These locations predate the rule and stay where they are:
@@ -97,5 +112,3 @@ These locations predate the rule and stay where they are:
 - Darwin wake restart stages live in `<legacy>/wake-stages`, also on a new
   machine. See
   [issue 1046](https://github.com/avivsinai/agent-message-queue/issues/1046).
-- The keepalive registry and adapter state live in `~/.amq-keepalive`. See
-  [issue 1021](https://github.com/avivsinai/agent-message-queue/issues/1021).

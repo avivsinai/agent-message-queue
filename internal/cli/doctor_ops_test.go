@@ -390,8 +390,10 @@ func TestRunOpsChecks_CompanionRegistryAbsentCreatesNothingAndUnreadableWarns(t 
 	if len(result.Companions) != 0 {
 		t.Fatalf("companions for absent registry = %#v, want none", result.Companions)
 	}
-	if _, err := os.Stat(regDir); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("doctor created %s: stat err=%v, want absent", regDir, err)
+	for _, dir := range []string{regDir, filepath.Join(home, ".amq")} {
+		if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("doctor created %s: stat err=%v, want absent", dir, err)
+		}
 	}
 
 	// Corrupt registry: surfaced as a warn hint, not silent emptiness.

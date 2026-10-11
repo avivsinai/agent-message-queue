@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/avivsinai/agent-message-queue/internal/amqhome"
 )
 
 const (
@@ -108,12 +110,86 @@ func New(path string) *Store {
 	return &Store{Path: path, Now: time.Now}
 }
 
+// DefaultPath is the registry file in the keepalive home.
 func DefaultPath() (string, error) {
+	home, err := DefaultHome()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, "registry.json"), nil
+}
+
+// DefaultHome returns the keepalive home and creates nothing. An existing
+// ~/.amq-keepalive stays in use, so older binaries and a supervisor that
+// launchd starts with that path keep one registry. Without it, the home is
+// ~/.amq/keepalive. When both exist, it refuses: registry rows are live
+// authority, and a wrong guess sends new attaches to a registry that no
+// supervisor reads. A symlink or a non-directory at either path is refused.
+func DefaultHome() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, ".amq-keepalive", "registry.json"), nil
+	legacy := filepath.Join(home, ".amq-keepalive")
+	amqHome := amqhome.Under(home)
+	current := filepath.Join(amqHome, "keepalive")
+	legacyFound, err := homeDirFound(legacy)
+	if err != nil {
+		return "", err
+	}
+	if !legacyFound {
+		if _, err := homeDirFound(amqHome); err != nil {
+			return "", err
+		}
+	}
+	currentFound, err := homeDirFound(current)
+	if err != nil {
+		return "", err
+	}
+	if legacyFound && currentFound {
+		return "", fmt.Errorf("keepalive home: both %s and %s exist; remove %s, which an older amq-keepalive recreated, then retry", legacy, current, legacy)
+	}
+	if legacyFound {
+		return legacy, nil
+	}
+	return current, nil
+}
+
+// homeDirFound reports whether dir is a plain directory. A missing dir is
+// not found; a symlink, a non-directory, or any other Lstat error is refused.
+func homeDirFound(dir string) (bool, error) {
+	info, err := os.Lstat(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return false, fmt.Errorf("%s is not a plain directory; refusing", dir)
+	}
+	return true, nil
+}
+
+// EnsureAMQHomeFor creates ~/.amq through amqhome, with its symlink check,
+// when dir is below it, so a later MkdirAll never creates ~/.amq unchecked.
+// The check is lexical: a registry outside ~/.amq never fails on a ~/.amq
+// problem.
+func EnsureAMQHomeFor(dir string) error {
+	home, err := amqhome.Dir()
+	if err != nil {
+		return nil // No home, so dir cannot be below ~/.amq.
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return err
+	}
+	rel, err := filepath.Rel(home, abs)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return nil
+	}
+	_, err = amqhome.EnsureDir()
+	return err
 }
 
 func EntryID(root, agent, adapterName, target string) string {
@@ -823,6 +899,9 @@ func openPinnedLock(path string) (*os.File, error) {
 func ensureRegistryDir(dir string) error {
 	info, err := os.Lstat(dir)
 	if errors.Is(err, os.ErrNotExist) {
+		if err := EnsureAMQHomeFor(dir); err != nil {
+			return err
+		}
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return err
 		}

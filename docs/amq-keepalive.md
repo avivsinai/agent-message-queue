@@ -2,9 +2,11 @@
 
 `amq-keepalive` keeps an AMQ wake bound to a terminal adapter target that an
 operator explicitly registers. It is a companion binary, not a daemon and not
-part of the core `amq` process. Its private registry lives under
-`~/.amq-keepalive/`; wake state is created and retired through the public AMQ
-CLI.
+part of the core `amq` process. Its private registry lives in the keepalive
+home: `~/.amq/keepalive/` on a new install, or an existing `~/.amq-keepalive/`.
+If both exist, keepalive refuses until you remove one. See
+[Configuration](configuration.md#keepalive-home). Wake state is created and
+retired through the public AMQ CLI.
 
 ## Build and version
 
@@ -146,7 +148,8 @@ The installer backs up configuration before modifying it and installs an
 idempotent SessionStart registration. The wrapper selects cmux when
 `CMUX_SURFACE_ID` is present and otherwise selects Ghostty. Discovery and
 reattach are bounded; failures are logged and do not prevent agent startup.
-Read `~/.amq-keepalive/session-start.log` for hook failures.
+Read `session-start.log` in the keepalive home for hook failures.
+`AMQ_KEEPALIVE_LOG` changes the log path.
 
 Useful overrides include `AMQ_KEEPALIVE_BIN`, `AMQ_KEEPALIVE_ADAPTER`,
 `AMQ_KEEPALIVE_TARGET`, `AMQ_KEEPALIVE_CMUX`, `AMQ_KEEPALIVE_REGISTRY`,

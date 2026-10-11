@@ -284,6 +284,9 @@ func (a App) register(ctx context.Context, args []string, replace bool) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	if err := resolveDefaultRegistry(registryPath); err != nil {
+		return err
+	}
 	minCapability, err := parseMinCapability(*minDelivery, *minSession, *acceptRequiresHuman)
 	if err != nil {
 		return err
@@ -760,6 +763,9 @@ func (a App) supervise(ctx context.Context, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	if err := resolveDefaultRegistry(registryPath); err != nil {
+		return err
+	}
 	if *interval <= 0 {
 		return errors.New("--interval must be greater than zero")
 	}
@@ -1211,6 +1217,9 @@ func (a App) doctor(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	if err := resolveDefaultRegistry(registryPath); err != nil {
+		return err
+	}
 	store := registry.New(*registryPath)
 	file, err := store.Load()
 	if err != nil {
@@ -1304,6 +1313,9 @@ func (a App) gc(ctx context.Context, args []string) error {
 	minDetachedAge := fs.Duration("min-detached-age", 24*time.Hour, "minimum proven-detached age before cleanup")
 	apply := fs.Bool("apply", false, "retire proven-detached candidates via amq wake retire and forget confirmed entries")
 	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if err := resolveDefaultRegistry(registryPath); err != nil {
 		return err
 	}
 	if *minDetachedAge < 0 {
@@ -1453,6 +1465,9 @@ func (a App) forget(ctx context.Context, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	if err := resolveDefaultRegistry(registryPath); err != nil {
+		return err
+	}
 	if *id == "" {
 		return errors.New("--id is required")
 	}
@@ -1479,6 +1494,9 @@ func (a App) retireSession(ctx context.Context, args []string) error {
 	amqPath := fs.String("amq", "amq", "amq executable path for retirement")
 	self := fs.String("self", executablePath(), "amq-keepalive executable path expected as each wake's --inject-via")
 	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if err := resolveDefaultRegistry(registryPath); err != nil {
 		return err
 	}
 	if strings.TrimSpace(*rootFlag) == "" {
@@ -1617,6 +1635,9 @@ func (a App) installLaunchd(ctx context.Context, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	if err := resolveDefaultRegistry(registryPath); err != nil {
+		return err
+	}
 	opts := launchd.Options{
 		Label:        *label,
 		PlistPath:    *plistPath,
@@ -1695,6 +1716,22 @@ func mustDefaultRegistryPath() string {
 		return ""
 	}
 	return path
+}
+
+// resolveDefaultRegistry fills an empty --registry with the default path.
+// mustDefaultRegistryPath gives "" when the default refuses (for example,
+// both keepalive homes exist), and this returns that refusal instead of
+// "registry path is required".
+func resolveDefaultRegistry(path *string) error {
+	if *path != "" {
+		return nil
+	}
+	resolved, err := registry.DefaultPath()
+	if err != nil {
+		return err
+	}
+	*path = resolved
+	return nil
 }
 
 func executablePath() string {

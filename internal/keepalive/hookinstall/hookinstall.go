@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/avivsinai/agent-message-queue/internal/keepalive/registry"
 )
 
 const (
@@ -45,7 +47,13 @@ ROOT="${AMQ_KEEPALIVE_ROOT:-}"
 BASE_ROOT="${AMQ_KEEPALIVE_BASE_ROOT:-}"
 SESSION_NAME="${AMQ_KEEPALIVE_SESSION:-}"
 ME="${AMQ_KEEPALIVE_ME:-}"
-LOG_PATH="${AMQ_KEEPALIVE_LOG:-$HOME/.amq-keepalive/session-start.log}"
+if [[ -n "${AMQ_KEEPALIVE_LOG:-}" ]]; then
+    LOG_PATH="$AMQ_KEEPALIVE_LOG"
+elif [[ -d "$HOME/.amq-keepalive" ]]; then
+    LOG_PATH="$HOME/.amq-keepalive/session-start.log"
+else
+    LOG_PATH="$HOME/.amq/keepalive/session-start.log"
+fi
 DEFAULT_TIMEOUT_SECONDS="${AMQ_KEEPALIVE_DEFAULT_TIMEOUT_SECONDS:-10}"
 TIMEOUT_SECONDS="${AMQ_KEEPALIVE_TIMEOUT_SECONDS:-$DEFAULT_TIMEOUT_SECONDS}"
 STDIN_TIMEOUT_SECONDS="${AMQ_KEEPALIVE_STDIN_TIMEOUT_SECONDS:-1}"
@@ -237,11 +245,11 @@ type Result struct {
 }
 
 func DefaultScriptPath() (string, error) {
-	home, err := os.UserHomeDir()
+	home, err := registry.DefaultHome()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, ".amq-keepalive", "hooks", "amq-keepalive-session-start.sh"), nil
+	return filepath.Join(home, "hooks", "amq-keepalive-session-start.sh"), nil
 }
 
 func DefaultClaudeConfig() (string, error) {
