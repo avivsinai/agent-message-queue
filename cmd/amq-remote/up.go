@@ -193,7 +193,7 @@ func up(args []string, stdout, stderr io.Writer, newSpawner func(self string) sp
 
 	// Process-lifetime ownership before anything is spawned or written.
 	// The secure parent directory is prepared first (codex P2): creating the
-	// lock used to fail ENOENT on first use when ~/.amq-keepalive did not
+	// lock used to fail ENOENT on first use when the keepalive home did not
 	// exist yet, and that FS error was mislabeled "another owner".
 	if err := prepareSecureDir(filepath.Dir(regPath)); err != nil {
 		return 0, fmt.Errorf("prepare registry directory: %w", err)
@@ -286,12 +286,17 @@ func newExecSpawner(self string) spawner {
 
 // prepareSecureDir creates dir (and parents) with 0700 and tightens an
 // EXISTING directory to 0700 as well (N6, review-b5): the creation-only
-// chmod left a pre-existing 0755 ~/.amq-keepalive loose, and the later
+// chmod left a pre-existing 0755 keepalive home loose, and the later
 // registry refusal pointed at the registry instead of the directory the
-// caller must fix.
+// caller must fix. A home below ~/.amq (registry.DefaultHome on a fresh
+// install) gets ~/.amq from amqhome first, so MkdirAll never creates it
+// unchecked.
 func prepareSecureDir(dir string) error {
 	info, err := os.Lstat(dir)
 	if errors.Is(err, os.ErrNotExist) {
+		if err := registry.EnsureAMQHomeFor(dir); err != nil {
+			return err
+		}
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return err
 		}

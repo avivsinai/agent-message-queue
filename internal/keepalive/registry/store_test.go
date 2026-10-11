@@ -891,3 +891,53 @@ func registryTestPath(t *testing.T) string {
 	}
 	return filepath.Join(dir, "registry.json")
 }
+
+// TestDefaultPathKeepsLegacyHomeElseAMQHome covers issue 1021: a fresh
+// install keeps the registry under ~/.amq/keepalive, an existing
+// ~/.amq-keepalive stays in use, and both present is refused.
+func TestDefaultPathKeepsLegacyHomeElseAMQHome(t *testing.T) {
+	tests := []struct {
+		name    string
+		dirs    []string
+		files   []string
+		want    []string
+		wantErr bool
+	}{
+		{name: "fresh", want: []string{".amq", "keepalive", "registry.json"}},
+		{name: "legacy", dirs: []string{".amq-keepalive"}, want: []string{".amq-keepalive", "registry.json"}},
+		{name: "both", dirs: []string{".amq-keepalive", filepath.Join(".amq", "keepalive")}, wantErr: true},
+		// Lead review of #1021: a ~/.amq that is a file must not break a
+		// legacy home, which never needed ~/.amq.
+		{name: "legacy with ~/.amq a file", dirs: []string{".amq-keepalive"}, files: []string{".amq"}, want: []string{".amq-keepalive", "registry.json"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("USERPROFILE", home)
+			for _, dir := range tt.dirs {
+				if err := os.MkdirAll(filepath.Join(home, dir), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, file := range tt.files {
+				if err := os.WriteFile(filepath.Join(home, file), nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			got, err := DefaultPath()
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("DefaultPath() = %q, want an error", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("DefaultPath() error = %v", err)
+			}
+			if want := filepath.Join(append([]string{home}, tt.want...)...); got != want {
+				t.Fatalf("DefaultPath() = %q, want %q", got, want)
+			}
+		})
+	}
+}

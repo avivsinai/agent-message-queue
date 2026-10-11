@@ -528,8 +528,14 @@ func checkBaseBacklogHints(root string, agents []string) []opsHint {
 // doctor failure: companion visibility is diagnostic, not a gate.
 func checkCompanions(root string, now time.Time) ([]opsCompanion, []opsHint) {
 	regPath, err := registry.DefaultPath()
-	if err != nil || regPath == "" {
-		return nil, nil
+	if err != nil {
+		// A refused keepalive home (for example, both homes exist) is
+		// shown with its paths, not hidden as "no companions".
+		return nil, []opsHint{{
+			Code:    "companion_registry_unreadable",
+			Status:  "warn",
+			Message: fmt.Sprintf("Cannot resolve companion registry: %v", err),
+		}}
 	}
 	// LoadSnapshot is genuinely read-only: a passive diagnostic must not
 	// create the registry directory or lock (codex P2). A missing file is an

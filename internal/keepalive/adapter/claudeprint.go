@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/keepalive/registry"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 )
 
@@ -302,11 +303,11 @@ func (c ClaudePrint) stateDir() (string, error) {
 	if strings.TrimSpace(c.StateDir) != "" {
 		return c.StateDir, nil
 	}
-	home, err := os.UserHomeDir()
+	home, err := registry.DefaultHome()
 	if err != nil {
 		return "", fmt.Errorf("resolve keepalive state dir: %w", err)
 	}
-	return filepath.Join(home, ".amq-keepalive"), nil
+	return home, nil
 }
 
 func (c ClaudePrint) streamLogPath(uuid string) (string, error) {
