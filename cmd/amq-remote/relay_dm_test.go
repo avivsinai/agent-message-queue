@@ -90,8 +90,9 @@ func TestDMEdgeSubmitsOwnerMessageAndPublishesRow(t *testing.T) {
 		return nil, nil
 	}, func(string) string { return "thread-1" })
 	ctx, cancel := context.WithCancel(context.Background())
-	wg := startRelays(ctx, root, stateDir, r, edges, io.Discard)
-	defer func() { cancel(); wg.Wait() }()
+	wg := newRelaySet(root, stateDir, "", edges, io.Discard)
+	wg.start(ctx, r)
+	defer func() { cancel(); wg.wait() }()
 
 	deadline := time.Now().Add(5 * time.Second)
 	for edges.stateOf("work") != "subscription_active" {

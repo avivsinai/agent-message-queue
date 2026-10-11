@@ -72,8 +72,9 @@ func TestActivityExportsPinnedThreadAndStopsOnReplacement(t *testing.T) {
 	edges.bind(func(*protocol.Command, core.Source) (any, error) { return nil, nil }, func(string) string { return native.Load().(string) })
 	edges.bindAttachments(func(string) (core.Attachment, bool) { return src, true })
 	ctx, cancel := context.WithCancel(context.Background())
-	wg := startRelays(ctx, root, stateDir, r, edges, io.Discard)
-	defer func() { cancel(); wg.Wait() }()
+	wg := newRelaySet(root, stateDir, "", edges, io.Discard)
+	wg.start(ctx, r)
+	defer func() { cancel(); wg.wait() }()
 
 	waitFor := func(what string, ok func() bool) {
 		t.Helper()
@@ -143,8 +144,9 @@ func TestActivityExportsPinnedClaudeSession(t *testing.T) {
 	edges.bind(func(*protocol.Command, core.Source) (any, error) { return nil, nil }, func(string) string { return "sess-1" })
 	edges.bindAttachments(func(string) (core.Attachment, bool) { return src, true })
 	ctx, cancel := context.WithCancel(context.Background())
-	wg := startRelays(ctx, root, stateDir, r, edges, io.Discard)
-	defer func() { cancel(); wg.Wait() }()
+	wg := newRelaySet(root, stateDir, "", edges, io.Discard)
+	wg.start(ctx, r)
+	defer func() { cancel(); wg.wait() }()
 
 	deadline := time.Now().Add(4 * time.Second)
 	for edges.activityView("work") != "exporting" {
@@ -212,8 +214,9 @@ func TestActivityExportsPinnedPiSession(t *testing.T) {
 	edges.bind(func(*protocol.Command, core.Source) (any, error) { return nil, nil }, func(string) string { return "sess-1" })
 	edges.bindAttachments(func(string) (core.Attachment, bool) { return src, true })
 	ctx, cancel := context.WithCancel(context.Background())
-	wg := startRelays(ctx, root, stateDir, r, edges, io.Discard)
-	defer func() { cancel(); wg.Wait() }()
+	wg := newRelaySet(root, stateDir, "", edges, io.Discard)
+	wg.start(ctx, r)
+	defer func() { cancel(); wg.wait() }()
 
 	deadline := time.Now().Add(4 * time.Second)
 	for edges.activityView("work") != "exporting" {

@@ -42,8 +42,9 @@ func TestRelayShareAuthenticatesFromEnrolledCredentials(t *testing.T) {
 	}
 	stateDir := filepath.Join(root, "extensions", "remote")
 	ctx, cancel := context.WithCancel(context.Background())
-	wg := startRelays(ctx, root, stateDir, mf.Relay, nil, io.Discard)
-	defer func() { cancel(); wg.Wait() }()
+	wg := newRelaySet(root, stateDir, "", buildDMEdges(root, stateDir, mf.Relay, io.Discard), io.Discard)
+	wg.start(ctx, mf.Relay)
+	defer func() { cancel(); wg.wait() }()
 
 	deadline := time.Now().Add(4 * time.Second)
 	for {
@@ -56,6 +57,68 @@ func TestRelayShareAuthenticatesFromEnrolledCredentials(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+}
+
+// #1024: a running serve follows the manifest relay block. A share added
+// connects without a restart, an edited share keeps its running values and
+// says to restart, and a removed share stops.
+func TestRelayShareFollowsTheManifest(t *testing.T) {
+	root := t.TempDir()
+	var owner [32]byte
+	if _, err := rand.Read(owner[:]); err != nil {
+		t.Fatal(err)
+	}
+	body, tag := enrollShare(t, filepath.Join(root, "extensions", "remote", "keys", "work"), owner)
+	lr, srv, url := relaytest.Start(body.PublicKeyHex(), []string{"auth", tag.OwnerPubKey, tag.Conditions, tag.SigHex()})
+	defer srv.Close()
+	stateDir := filepath.Join(root, "extensions", "remote")
+	path := manifest.DefaultPath(stateDir)
+	write := func(r *manifest.Relay) {
+		t.Helper()
+		if err := manifest.Write(path, manifest.File{SchemaVersion: manifest.RelaySchemaVersion, Adapters: []manifest.Adapter{{Kind: "fake", Target: "fake", Epoch: "e_1"}}, Relay: r}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(nil)
+	errs := newSyncBuffer()
+	rs := newRelaySet(root, stateDir, path, buildDMEdges(root, stateDir, nil, errs), errs)
+	ctx, cancel := context.WithCancel(context.Background())
+	rs.start(ctx, nil)
+	defer func() { cancel(); rs.wait() }()
+	rs.tick()
+	waitFor := func(what string, ok func(*relayStatusDoc) bool) {
+		t.Helper()
+		for deadline := time.Now().Add(4 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+			if doc, err := loadRelayStatus(stateDir); err == nil && ok(doc) {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("%s; stderr: %s", what, errs.String())
+			}
+		}
+	}
+
+	share := manifest.Share{Target: "fake", Session: "work", OwnerPubKey: tag.OwnerPubKey}
+	write(&manifest.Relay{URL: url, Shares: []manifest.Share{share}})
+	rs.tick()
+	waitFor("the added share never authenticated", func(doc *relayStatusDoc) bool {
+		return len(doc.Shares) == 1 && doc.Shares[0].State == string(relay.StateAuthenticated) && lr.AuthOK.Load() == 1
+	})
+
+	edited := share
+	edited.DMChannelID = "dm-2"
+	write(&manifest.Relay{URL: url, Shares: []manifest.Share{edited}})
+	rs.tick()
+	if !strings.Contains(errs.String(), "relay share work: its manifest entry changed; restart serve, or remove and re-add the share, to adopt it") {
+		t.Fatalf("stderr = %q, want the restart line", errs.String())
+	}
+	if got := rs.running["work"].share; got.DMChannelID != "" || lr.AuthOK.Load() != 1 {
+		t.Fatalf("running share = %+v after %d auths, want the old values on the same connection", got, lr.AuthOK.Load())
+	}
+
+	write(nil) // the last share goes with its relay block
+	rs.tick()
+	waitFor("the removed share is still shown", func(doc *relayStatusDoc) bool { return len(doc.Shares) == 0 })
 }
 
 // codex slice 1 review r2 #1: replacing body.key and its complete

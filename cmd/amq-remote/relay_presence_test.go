@@ -69,7 +69,8 @@ func TestPresencePublishesProfileStatusAndOffline(t *testing.T) {
 		return protocol.Session{TargetID: "fake", Attachment: "live"}, nil
 	}, func(string) string { return "" })
 	ctx, cancel := context.WithCancel(context.Background())
-	wg := startRelays(ctx, root, stateDir, r, edges, io.Discard)
+	wg := newRelaySet(root, stateDir, "", edges, io.Discard)
+	wg.start(ctx, r)
 
 	deadline := time.Now().Add(4 * time.Second)
 	for {
@@ -83,7 +84,7 @@ func TestPresencePublishesProfileStatusAndOffline(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	cancel()
-	wg.Wait()
+	wg.wait()
 
 	var profileOK bool
 	var statuses []string
@@ -136,8 +137,9 @@ func TestPresenceWithoutProfileGrantIsNotReady(t *testing.T) {
 		return protocol.Session{TargetID: "fake", Attachment: "live"}, nil
 	}, func(string) string { return "" })
 	ctx, cancel := context.WithCancel(context.Background())
-	wg := startRelays(ctx, root, stateDir, r, edges, io.Discard)
-	defer func() { cancel(); wg.Wait() }()
+	wg := newRelaySet(root, stateDir, "", edges, io.Discard)
+	wg.start(ctx, r)
+	defer func() { cancel(); wg.wait() }()
 	deadline := time.Now().Add(4 * time.Second)
 	for {
 		st, _ := edges.presenceView("work")

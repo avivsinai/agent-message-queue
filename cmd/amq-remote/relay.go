@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"sync"
 	"time"
@@ -93,100 +95,268 @@ func relayConfigFor(root, url string, sh manifest.Share) relay.ConfigFunc {
 	}
 }
 
-// startRelays runs one authenticated relay client per share until ctx ends,
-// and keeps relay-status.json current. A relay that is down or refusing
-// leaves local IPC and AMQ operation untouched.
-func startRelays(ctx context.Context, root, stateDir string, r *manifest.Relay, edges *dmEdges, stderr io.Writer) *sync.WaitGroup {
-	var wg sync.WaitGroup
-	if r == nil {
-		return &wg
+// relaySet runs one authenticated relay client per manifest share and
+// follows the manifest while serve runs (#1024): a share added starts on the
+// startup path, a share removed stops, and any other change waits for a
+// restart. A relay that is down or refusing leaves local IPC and AMQ
+// operation untouched.
+type relaySet struct {
+	root, stateDir, manifestFile string
+	edges                        *dmEdges
+	stderr                       io.Writer
+
+	// One goroutine runs start and then every tick, and only it changes the
+	// set; mu guards what the status writer reads.
+	mu        sync.Mutex
+	ctx       context.Context
+	url, self string // the adopted relay, fixed once set
+	running   map[string]*relayRun
+	wg        sync.WaitGroup
+
+	raw  []byte            // the manifest bytes last reconciled
+	said map[string]string // what each report key last said
+}
+
+// relayRun is one share's running client.
+type relayRun struct {
+	share  manifest.Share
+	client *relay.Client
+	cancel context.CancelFunc
+	done   chan struct{}
+}
+
+// relayStopWait bounds how long a removed share's client may take to close;
+// its BeforeClose has its own 2 s bound.
+const relayStopWait = 5 * time.Second
+
+func newRelaySet(root, stateDir, manifestFile string, edges *dmEdges, stderr io.Writer) *relaySet {
+	return &relaySet{root: root, stateDir: stateDir, manifestFile: manifestFile, edges: edges, stderr: stderr, running: map[string]*relayRun{}, said: map[string]string{}}
+}
+
+// start runs the startup shares, whose surfaces buildDMEdges built, and
+// the status writer. The first tick reconciles against the file as it is
+// then, so an edit made during startup is not missed.
+func (rs *relaySet) start(ctx context.Context, r *manifest.Relay) {
+	rs.ctx = ctx
+	if r != nil {
+		rs.url, rs.self = r.URL, r.Self
+		for _, sh := range r.Shares {
+			rs.startShare(sh)
+		}
 	}
-	type entry struct {
-		share  manifest.Share
-		client *relay.Client
-	}
-	entries := make([]entry, 0, len(r.Shares))
-	for _, sh := range r.Shares {
-		c := relay.NewClient(relayConfigFor(root, r.URL, sh))
-		var hooks []func(context.Context, *relay.Conn)
-		if edges != nil && sh.Commands {
-			if creds, err := sharestate.Load(root, sh.Session); err == nil {
-				if ds := edges.forBody(creds.Body.PublicKeyHex()); ds != nil {
-					hooks = append(hooks, func(ctx context.Context, conn *relay.Conn) { ds.runDM(ctx, conn, edges, stderr) })
-				}
-			}
-		}
-		if as := edges.activityFor(sh.Session); as != nil {
-			hooks = append(hooks, func(ctx context.Context, conn *relay.Conn) {
-				as.runActivity(ctx, conn, edges.identityLate, edges.attachmentLate, stderr)
-			})
-		}
-		if ps := edges.presenceFor(sh.Session); ps != nil {
-			hooks = append(hooks, func(ctx context.Context, conn *relay.Conn) { ps.runPresence(ctx, conn, edges, stderr) })
-			c.BeforeClose = ps.beforeClose
-		}
-		if len(hooks) > 0 {
-			c.OnConnect = func(ctx context.Context, conn *relay.Conn) {
-				var hw sync.WaitGroup
-				for _, h := range hooks {
-					hw.Add(1)
-					go func() {
-						defer hw.Done()
-						h(ctx, conn)
-					}()
-				}
-				hw.Wait()
-			}
-		}
-		entries = append(entries, entry{sh, c})
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			_ = c.Run(ctx)
-		}()
-	}
-	wg.Add(1)
+	rs.wg.Add(1)
 	go func() {
-		defer wg.Done()
-		last := ""
-		t := time.NewTicker(time.Second)
-		defer t.Stop()
-		for {
-			doc := relayStatusDoc{URL: r.URL}
-			for _, e := range entries {
-				st := e.client.Status()
-				row := relayShareStatus{
-					Session: e.share.Session, Target: e.share.Target, State: string(st.State),
-					Error: st.Err, Since: st.Since.UTC().Format(time.RFC3339),
-				}
-				if edges != nil && e.share.Commands {
-					row.Commands = edges.stateOf(e.share.Session)
-				}
-				if e.share.Activity {
-					row.Activity = edges.activityView(e.share.Session)
-				}
-				if e.share.Presence {
-					row.Presence, row.Discovery = edges.presenceView(e.share.Session)
-				}
-				doc.Shares = append(doc.Shares, row)
-			}
-			sort.Slice(doc.Shares, func(i, j int) bool { return doc.Shares[i].Session < doc.Shares[j].Session })
-			raw, _ := json.MarshalIndent(doc, "", "  ")
-			if string(raw) != last {
-				if _, err := fsq.WriteFileAtomic(stateDir, relayStatusFile, raw, 0o600); err != nil {
-					say(stderr, "relay status: %v", err)
-				} else {
-					last = string(raw)
-				}
-			}
-			select {
-			case <-ctx.Done():
-				return
-			case <-t.C:
+		defer rs.wg.Done()
+		rs.writeStatus(ctx)
+	}()
+}
+
+// wait returns once every client and the status writer ended.
+func (rs *relaySet) wait() { rs.wg.Wait() }
+
+// tick reconciles the relay shares when the manifest bytes changed. The
+// bytes, not the mtime, decide: a same-second edit or a rename that keeps
+// the mtime still counts. A manifest that does not load keeps every running
+// share and is reported once (docs/configuration.md#hot-reload).
+func (rs *relaySet) tick() {
+	raw, err := os.ReadFile(rs.manifestFile)
+	if err != nil && !os.IsNotExist(err) {
+		rs.sayOnce("manifest", fmt.Sprintf("relay: reload manifest: %v", err))
+		return
+	}
+	if rs.raw != nil && bytes.Equal(raw, rs.raw) {
+		return
+	}
+	rs.raw = append([]byte{}, raw...)
+	mf, err := manifest.Load(rs.manifestFile)
+	if err != nil {
+		rs.sayOnce("manifest", fmt.Sprintf("relay: the manifest is refused, so the shares stay as they are: %v", err))
+		return
+	}
+	delete(rs.said, "manifest")
+	rs.reconcile(mf)
+}
+
+// reconcile makes the running shares match the manifest, keyed by share
+// session, with the effect a restart would have and nothing more.
+func (rs *relaySet) reconcile(mf manifest.File) {
+	want := map[string]manifest.Share{}
+	if r := mf.Relay; r != nil {
+		if rs.url == "" {
+			rs.mu.Lock()
+			rs.url, rs.self = r.URL, r.Self
+			rs.mu.Unlock()
+			rs.edges.setRelay(r.URL, r.Self)
+		}
+		if r.URL != rs.url || r.Self != rs.self {
+			rs.sayOnce("relay", "relay: the manifest relay url or relay_self changed; restart serve to adopt it")
+			return
+		}
+		delete(rs.said, "relay")
+		for _, sh := range r.Shares {
+			want[sh.Session] = sh
+		}
+	}
+	for session, run := range rs.running {
+		sh, ok := want[session]
+		switch {
+		case !ok:
+			rs.stopShare(run, mf.Adapters)
+			say(rs.stderr, "relay share %s: removed from the manifest; stopped", session)
+		case !reflect.DeepEqual(sh, run.share):
+			entry, _ := json.Marshal(sh)
+			rs.sayOnce("share:"+session, fmt.Sprintf("relay share %s: its manifest entry changed; restart serve, or remove and re-add the share, to adopt it", session), string(entry))
+		case rs.edges.refused(session):
+			// A refused surface is set up again on a manifest change, never
+			// on every tick (#1024 ruling 3).
+			rs.stopShare(run, mf.Adapters)
+			rs.addShare(sh, mf.Adapters)
+		}
+	}
+	for session, sh := range want {
+		if rs.running[session] == nil {
+			rs.addShare(sh, mf.Adapters)
+			say(rs.stderr, "relay share %s: added from the manifest", session)
+		}
+	}
+}
+
+// addShare sets up a share added to the manifest: the startup surfaces and
+// pins, then its client.
+func (rs *relaySet) addShare(sh manifest.Share, adapters []manifest.Adapter) {
+	rs.edges.addShare(rs.root, rs.stateDir, sh, false, rs.stderr)
+	rs.edges.pinShare(sh, adapters, rs.stderr)
+	rs.startShare(sh)
+}
+
+// stopShare closes a share's client, drops its surfaces and pins, and
+// gives an attached Claude target the owner-less native pin a restart would
+// (#1024 ruling 2a).
+func (rs *relaySet) stopShare(run *relayRun, adapters []manifest.Adapter) {
+	run.cancel()
+	select {
+	case <-run.done:
+	case <-time.After(relayStopWait):
+		say(rs.stderr, "relay share %s: its client did not close within %s", run.share.Session, relayStopWait)
+	}
+	rs.mu.Lock()
+	delete(rs.running, run.share.Session)
+	rs.mu.Unlock()
+	delete(rs.said, "share:"+run.share.Session)
+	rs.edges.removeShare(run.share)
+	for _, ad := range adapters {
+		if ad.Target == run.share.Target {
+			rs.edges.pinNative(ad, rs.edges.identityLate(ad.Target), rs.stderr)
+		}
+	}
+}
+
+// startShare starts one share's client with its surfaces' hooks.
+func (rs *relaySet) startShare(sh manifest.Share) {
+	edges, stderr := rs.edges, rs.stderr
+	c := relay.NewClient(relayConfigFor(rs.root, rs.url, sh))
+	var hooks []func(context.Context, *relay.Conn)
+	if sh.Commands {
+		if creds, err := sharestate.Load(rs.root, sh.Session); err == nil {
+			if ds := edges.forBody(creds.Body.PublicKeyHex()); ds != nil {
+				hooks = append(hooks, func(ctx context.Context, conn *relay.Conn) { ds.runDM(ctx, conn, edges, stderr) })
 			}
 		}
+	}
+	if as := edges.activityFor(sh.Session); as != nil {
+		hooks = append(hooks, func(ctx context.Context, conn *relay.Conn) {
+			as.runActivity(ctx, conn, edges.identityLate, edges.attachmentLate, stderr)
+		})
+	}
+	if ps := edges.presenceFor(sh.Session); ps != nil {
+		hooks = append(hooks, func(ctx context.Context, conn *relay.Conn) { ps.runPresence(ctx, conn, edges, stderr) })
+		c.BeforeClose = ps.beforeClose
+	}
+	if len(hooks) > 0 {
+		c.OnConnect = func(ctx context.Context, conn *relay.Conn) {
+			var hw sync.WaitGroup
+			for _, h := range hooks {
+				hw.Add(1)
+				go func() {
+					defer hw.Done()
+					h(ctx, conn)
+				}()
+			}
+			hw.Wait()
+		}
+	}
+	ctx, cancel := context.WithCancel(rs.ctx)
+	run := &relayRun{share: sh, client: c, cancel: cancel, done: make(chan struct{})}
+	rs.mu.Lock()
+	rs.running[sh.Session] = run
+	rs.mu.Unlock()
+	rs.wg.Add(1)
+	go func() {
+		defer rs.wg.Done()
+		defer close(run.done)
+		_ = c.Run(ctx)
 	}()
-	return &wg
+}
+
+// sayOnce reports msg under key unless the key last reported the same
+// thing; detail, when given, is what makes two reports distinct.
+func (rs *relaySet) sayOnce(key, msg string, detail ...string) {
+	id := msg
+	if len(detail) > 0 {
+		id = detail[0]
+	}
+	if rs.said[key] == id {
+		return
+	}
+	rs.said[key] = id
+	say(rs.stderr, "%s", msg)
+}
+
+// writeStatus keeps relay-status.json current for doctor until ctx ends.
+func (rs *relaySet) writeStatus(ctx context.Context) {
+	last := ""
+	t := time.NewTicker(time.Second)
+	defer t.Stop()
+	for {
+		rs.mu.Lock()
+		doc := relayStatusDoc{URL: rs.url}
+		runs := make([]*relayRun, 0, len(rs.running))
+		for _, run := range rs.running {
+			runs = append(runs, run)
+		}
+		rs.mu.Unlock()
+		for _, run := range runs {
+			st := run.client.Status()
+			row := relayShareStatus{
+				Session: run.share.Session, Target: run.share.Target, State: string(st.State),
+				Error: st.Err, Since: st.Since.UTC().Format(time.RFC3339),
+			}
+			if run.share.Commands {
+				row.Commands = rs.edges.stateOf(run.share.Session)
+			}
+			if run.share.Activity {
+				row.Activity = rs.edges.activityView(run.share.Session)
+			}
+			if run.share.Presence {
+				row.Presence, row.Discovery = rs.edges.presenceView(run.share.Session)
+			}
+			doc.Shares = append(doc.Shares, row)
+		}
+		sort.Slice(doc.Shares, func(i, j int) bool { return doc.Shares[i].Session < doc.Shares[j].Session })
+		raw, _ := json.MarshalIndent(doc, "", "  ")
+		if doc.URL != "" && string(raw) != last {
+			if _, err := fsq.WriteFileAtomic(rs.stateDir, relayStatusFile, raw, 0o600); err != nil {
+				say(rs.stderr, "relay status: %v", err)
+			} else {
+				last = string(raw)
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
 }
 
 // loadRelayStatus reads serve's relay status for doctor.

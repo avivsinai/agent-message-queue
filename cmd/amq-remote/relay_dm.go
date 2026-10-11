@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -55,6 +56,8 @@ type dmEdges struct {
 	pins []approvalPin
 	// shared names every target a relay share serves.
 	shared map[string]bool
+	// dupBodies are the bodies startup found enrolled for two shares.
+	dupBodies map[string]bool
 }
 
 // buildDMEdges opens a carrier per commands share before startup
@@ -62,86 +65,159 @@ type dmEdges struct {
 // during reconcile. A share whose enrolled credentials cannot load keeps its
 // commands surface closed and is reported, never silently attached.
 func buildDMEdges(root, stateDir string, r *manifest.Relay, warn io.Writer) *dmEdges {
-	d := &dmEdges{byBody: map[string]*dmShare{}, state: map[string]string{}, presence: map[string]*presenceShare{}, shared: map[string]bool{}}
+	d := &dmEdges{byBody: map[string]*dmShare{}, state: map[string]string{}, presence: map[string]*presenceShare{}, activity: map[string]*activityShare{}, shared: map[string]bool{}, dupBodies: map[string]bool{}}
 	if r == nil {
 		return d
 	}
+	d.relay, d.self = r.URL, r.Self
 	for _, sh := range r.Shares {
 		d.shared[sh.Target] = true
 	}
-	d.relay, d.self = r.URL, r.Self
-	dupBodies := map[string]bool{}
 	for _, sh := range r.Shares {
-		if sh.Activity {
-			as, err := newActivityShare(root, stateDir, sh)
-			if err != nil {
-				say(warn, "relay share %s: activity disabled: %v", sh.Session, err)
-				as = &activityShare{share: sh, state: "refused: " + err.Error()}
-			}
-			if d.activity == nil {
-				d.activity = map[string]*activityShare{}
-			}
-			d.activity[sh.Session] = as
-		}
-		if sh.Presence {
-			d.addPresence(root, sh, warn)
-		}
-		if !sh.Commands {
-			continue
-		}
-		creds, err := sharestate.Load(root, sh.Session)
-		if err != nil {
-			d.state[sh.Session] = "refused: " + err.Error()
-			say(warn, "relay share %s: commands disabled: %v", sh.Session, err)
-			continue
-		}
-		ledger, err := buzzio.OpenLedger(filepath.Join(stateDir, "shares", sh.Session))
-		if err != nil {
-			d.state[sh.Session] = "refused: " + err.Error()
-			say(warn, "relay share %s: commands disabled: %v", sh.Session, err)
-			continue
-		}
-		b := buzzio.Binding{Owner: sh.OwnerPubKey, Body: creds.Body.PublicKeyHex(), Channel: sh.DMChannelID, Target: sh.Target, RelayHost: r.URL, NativeSession: sh.NativeSessionID, MinEvidence: sh.MinEvidence}
-		// One body serves one share: two sessions whose key directories hold
-		// the same body are both refused, never merged (codex #866 r1 #2).
-		if prev, dup := d.byBody[b.Body]; dup || dupBodies[b.Body] {
-			if prev != nil {
-				d.state[prev.share.Session] = "refused: its body key is also enrolled for another share"
-				delete(d.byBody, b.Body)
-			}
-			dupBodies[b.Body] = true
-			d.state[sh.Session] = "refused: its body key is also enrolled for another share"
-			say(warn, "relay share %s: commands disabled: body key shared with another session", sh.Session)
-			continue
-		}
-		if len(sh.MentionChannels) > 0 {
-			b.Mentions = map[string]bool{}
-			for _, ch := range sh.MentionChannels {
-				b.Mentions[ch] = true
-			}
-		}
-		ds := &dmShare{share: sh, binding: b}
-		grant := enrolledGrant(root, sh.Session, b)
-		for _, kind := range []uint16{buzzio.KindDM, buzzio.KindEdit} {
-			if _, gerr := grant(kind, time.Now()); gerr != nil && err == nil {
-				err = gerr
-			}
-		}
-		if err != nil {
-			d.state[sh.Session] = fmt.Sprintf("refused: buzz-dm is not enrolled (run amq-remote share --session %s --enable buzz-dm): %v", sh.Session, err)
-			say(warn, "relay share %s: commands disabled: buzz-dm is not enrolled", sh.Session)
-			continue
-		}
-		ds.carrier = buzzio.NewCarrier(ledger, b, creds.Body.Secret(), grant, d.identityLate, d.handleLate)
-		d.byBody[b.Body] = ds
-		d.state[sh.Session] = "configured"
+		d.addShare(root, stateDir, sh, true, warn)
 	}
 	return d
+}
+
+// setRelay records the relay that a serve started without one adopts with
+// its first share.
+func (d *dmEdges) setRelay(url, self string) {
+	d.mu.Lock()
+	d.relay, d.self = url, self
+	d.mu.Unlock()
+}
+
+// addShare builds one share's surfaces: activity, presence and the commands
+// carrier. Startup and a share added to the manifest later take this one
+// path (#1024). Only the reconcile goroutine adds or removes shares.
+func (d *dmEdges) addShare(root, stateDir string, sh manifest.Share, startup bool, warn io.Writer) {
+	d.mu.Lock()
+	d.shared[sh.Target] = true
+	url := d.relay
+	d.mu.Unlock()
+	if sh.Activity {
+		as, err := newActivityShare(root, stateDir, sh)
+		if err != nil {
+			say(warn, "relay share %s: activity disabled: %v", sh.Session, err)
+			as = &activityShare{share: sh, state: "refused: " + err.Error()}
+		}
+		d.mu.Lock()
+		d.activity[sh.Session] = as
+		d.mu.Unlock()
+	}
+	if sh.Presence {
+		d.addPresence(root, sh, warn)
+	}
+	if !sh.Commands {
+		return
+	}
+	creds, err := sharestate.Load(root, sh.Session)
+	if err != nil {
+		d.setState(sh.Session, "refused: "+err.Error())
+		say(warn, "relay share %s: commands disabled: %v", sh.Session, err)
+		return
+	}
+	ledger, err := buzzio.OpenLedger(filepath.Join(stateDir, "shares", sh.Session))
+	if err != nil {
+		d.setState(sh.Session, "refused: "+err.Error())
+		say(warn, "relay share %s: commands disabled: %v", sh.Session, err)
+		return
+	}
+	b := buzzio.Binding{Owner: sh.OwnerPubKey, Body: creds.Body.PublicKeyHex(), Channel: sh.DMChannelID, Target: sh.Target, RelayHost: url, NativeSession: sh.NativeSessionID, MinEvidence: sh.MinEvidence}
+	// One body serves one share: two sessions whose key directories hold
+	// the same body are refused, never merged (codex #866 r1 #2). At startup
+	// both are refused; a share added later is refused alone, and the
+	// running one keeps its surface (#1024 ruling 1).
+	const dupRefusal = "refused: its body key is also enrolled for another share"
+	d.mu.Lock()
+	if prev, dup := d.byBody[b.Body]; dup || d.dupBodies[b.Body] {
+		if prev != nil && startup {
+			d.state[prev.share.Session] = dupRefusal
+			delete(d.byBody, b.Body)
+			d.dupBodies[b.Body] = true
+		}
+		d.state[sh.Session] = dupRefusal
+		d.mu.Unlock()
+		say(warn, "relay share %s: commands disabled: body key shared with another session", sh.Session)
+		return
+	}
+	d.mu.Unlock()
+	if len(sh.MentionChannels) > 0 {
+		b.Mentions = map[string]bool{}
+		for _, ch := range sh.MentionChannels {
+			b.Mentions[ch] = true
+		}
+	}
+	ds := &dmShare{share: sh, binding: b}
+	grant := enrolledGrant(root, sh.Session, b)
+	for _, kind := range []uint16{buzzio.KindDM, buzzio.KindEdit} {
+		if _, gerr := grant(kind, time.Now()); gerr != nil && err == nil {
+			err = gerr
+		}
+	}
+	if err != nil {
+		d.setState(sh.Session, fmt.Sprintf("refused: buzz-dm is not enrolled (run amq-remote share --session %s --enable buzz-dm): %v", sh.Session, err))
+		say(warn, "relay share %s: commands disabled: buzz-dm is not enrolled", sh.Session)
+		return
+	}
+	ds.carrier = buzzio.NewCarrier(ledger, b, creds.Body.Secret(), grant, d.identityLate, d.handleLate)
+	d.mu.Lock()
+	d.byBody[b.Body] = ds
+	d.state[sh.Session] = "configured"
+	d.mu.Unlock()
+}
+
+// removeShare drops a share removed from the manifest: its surfaces and
+// the approval pins it wrote. Its owed Buzz records stay owed, as after a
+// restart without it.
+func (d *dmEdges) removeShare(sh manifest.Share) {
+	d.mu.Lock()
+	for body, ds := range d.byBody {
+		if ds.share.Session == sh.Session {
+			delete(d.byBody, body)
+		}
+	}
+	delete(d.presence, sh.Session)
+	delete(d.activity, sh.Session)
+	delete(d.state, sh.Session)
+	delete(d.shared, sh.Target)
+	var gone, kept []approvalPin
+	for _, p := range d.pins {
+		if p.share == sh.Session {
+			gone = append(gone, p)
+		} else {
+			kept = append(kept, p)
+		}
+	}
+	d.pins = kept
+	d.mu.Unlock()
+	for _, p := range gone {
+		claude.UnpinApprovals(p.home, p.session, p.token)
+	}
+}
+
+// refused reports whether a surface of the share was refused at setup.
+func (d *dmEdges) refused(session string) bool {
+	d.mu.Lock()
+	state, ps, as := d.state[session], d.presence[session], d.activity[session]
+	d.mu.Unlock()
+	if strings.HasPrefix(state, "refused") {
+		return true
+	}
+	if ps != nil {
+		if st, _ := ps.view(); strings.HasPrefix(st, "refused") {
+			return true
+		}
+	}
+	return as != nil && strings.HasPrefix(as.view(), "refused")
 }
 
 // approvalPin is one written DM-approval pin, removed at teardown.
 type approvalPin struct {
 	home, session, token string
+	// share is the relay share session that wrote the pin, "" for a
+	// native pin; target is the adapter's target.
+	share, target string
 }
 
 // pinApprovals pins, for each configured commands share whose target is a
@@ -149,10 +225,6 @@ type approvalPin struct {
 // PermissionRequest hook of that session may answer from the DM. A pin
 // lives while this process does; the hook ignores a pin whose pid is dead.
 func (d *dmEdges) pinApprovals(adapters []manifest.Adapter, warn io.Writer) {
-	byTarget := map[string]manifest.Adapter{}
-	for _, a := range adapters {
-		byTarget[a.Target] = a
-	}
 	d.mu.Lock()
 	shares := make([]manifest.Share, 0, len(d.byBody))
 	for _, ds := range d.byBody {
@@ -160,14 +232,51 @@ func (d *dmEdges) pinApprovals(adapters []manifest.Adapter, warn io.Writer) {
 	}
 	d.mu.Unlock()
 	for _, sh := range shares {
-		ad, ok := byTarget[sh.Target]
-		if !ok || ad.Kind != "claude" || sh.NativeSessionID == "" {
+		d.pinShare(sh, adapters, warn)
+	}
+}
+
+// pinShare writes the share's approval pin when it is a configured commands
+// share of a Claude adapter, then removes the target's native pin, which a
+// shared target does not get at startup. The share pin comes first, so the
+// session is never without a pin (#1024 ruling 2b).
+func (d *dmEdges) pinShare(sh manifest.Share, adapters []manifest.Adapter, warn io.Writer) {
+	d.mu.Lock()
+	ds := d.forBodyLocked(sh.Session)
+	d.mu.Unlock()
+	for _, ad := range adapters {
+		if ds == nil || ad.Target != sh.Target || ad.Kind != "claude" || sh.NativeSessionID == "" {
 			continue
 		}
 		if err := d.pin(ad, sh.NativeSessionID, sh.Session, sh.OwnerPubKey); err != nil {
 			say(warn, "relay share %s: DM approvals disabled: %v", sh.Session, err)
 		}
 	}
+	d.mu.Lock()
+	var gone, kept []approvalPin
+	for _, p := range d.pins {
+		if p.share == "" && p.target == sh.Target {
+			gone = append(gone, p)
+		} else {
+			kept = append(kept, p)
+		}
+	}
+	d.pins = kept
+	d.mu.Unlock()
+	for _, p := range gone {
+		claude.UnpinApprovals(p.home, p.session, p.token)
+	}
+}
+
+// forBodyLocked returns the configured DM share of a share session. d.mu is
+// held.
+func (d *dmEdges) forBodyLocked(session string) *dmShare {
+	for _, ds := range d.byBody {
+		if ds.share.Session == session {
+			return ds
+		}
+	}
+	return nil
 }
 
 // pinNative pins, for a Claude adapter with approve that no relay share
@@ -178,7 +287,10 @@ func (d *dmEdges) pinApprovals(adapters []manifest.Adapter, warn io.Writer) {
 // shown and never answered. Like a share pin it lives while this process
 // does.
 func (d *dmEdges) pinNative(ad manifest.Adapter, native string, warn io.Writer) {
-	if ad.Kind != "claude" || native == "" || d.shared[ad.Target] {
+	d.mu.Lock()
+	shared := d.shared[ad.Target]
+	d.mu.Unlock()
+	if ad.Kind != "claude" || native == "" || shared {
 		return
 	}
 	if err := d.pin(ad, native, "", ""); err != nil {
@@ -211,7 +323,7 @@ func (d *dmEdges) pin(ad manifest.Adapter, native, share, owner string) error {
 		return err
 	}
 	d.mu.Lock()
-	d.pins = append(d.pins, approvalPin{home: home, session: native, token: token})
+	d.pins = append(d.pins, approvalPin{home: home, session: native, token: token, share: share, target: ad.Target})
 	d.mu.Unlock()
 	return nil
 }
@@ -281,13 +393,14 @@ func (d *dmEdges) addPresence(root string, sh manifest.Share, warn io.Writer) {
 	if err != nil {
 		ps.state = "refused: " + err.Error()
 		say(warn, "relay share %s: presence disabled: %v", sh.Session, err)
-		d.presence[sh.Session] = ps
-		return
+	} else {
+		b := buzzio.Binding{Owner: sh.OwnerPubKey, Body: creds.Body.PublicKeyHex()}
+		ps.p = buzzio.NewPresence(buzzio.NewSigner(creds.Body.Secret(), enrolledGrant(root, sh.Session, b)), sh.Name)
+		ps.state = "configured"
 	}
-	b := buzzio.Binding{Owner: sh.OwnerPubKey, Body: creds.Body.PublicKeyHex()}
-	ps.p = buzzio.NewPresence(buzzio.NewSigner(creds.Body.Secret(), enrolledGrant(root, sh.Session, b)), sh.Name)
-	ps.state = "configured"
+	d.mu.Lock()
 	d.presence[sh.Session] = ps
+	d.mu.Unlock()
 }
 
 // bindAttachments attaches the endpoint's attachment accessor.
@@ -310,18 +423,30 @@ func (d *dmEdges) attachmentLate(target string) (core.Attachment, bool) {
 
 // activityFor returns a session's activity share when it can export.
 func (d *dmEdges) activityFor(session string) *activityShare {
-	if d == nil || d.activity[session] == nil || d.activity[session].stateDir == "" {
+	if d == nil {
 		return nil
 	}
-	return d.activity[session]
+	d.mu.Lock()
+	as := d.activity[session]
+	d.mu.Unlock()
+	if as == nil || as.stateDir == "" {
+		return nil
+	}
+	return as
 }
 
 // activityView is an activity share's state for status.
 func (d *dmEdges) activityView(session string) string {
-	if d == nil || d.activity[session] == nil {
+	if d == nil {
 		return ""
 	}
-	return d.activity[session].view()
+	d.mu.Lock()
+	as := d.activity[session]
+	d.mu.Unlock()
+	if as == nil {
+		return ""
+	}
+	return as.view()
 }
 
 // presenceFor returns a session's presence share when it can publish.
@@ -329,7 +454,9 @@ func (d *dmEdges) presenceFor(session string) *presenceShare {
 	if d == nil {
 		return nil
 	}
+	d.mu.Lock()
 	ps := d.presence[session]
+	d.mu.Unlock()
 	if ps == nil || ps.p == nil {
 		return nil
 	}
@@ -338,10 +465,16 @@ func (d *dmEdges) presenceFor(session string) *presenceShare {
 
 // presenceView returns a presence share's state and discovery for status.
 func (d *dmEdges) presenceView(session string) (string, string) {
-	if d == nil || d.presence[session] == nil {
+	if d == nil {
 		return "", ""
 	}
-	return d.presence[session].view()
+	d.mu.Lock()
+	ps := d.presence[session]
+	d.mu.Unlock()
+	if ps == nil {
+		return "", ""
+	}
+	return ps.view()
 }
 
 // bind attaches the endpoint: its command handler and its native session
@@ -428,10 +561,13 @@ var errMembershipChanged = errors.New("DM channel membership or shared session c
 // relaySelf returns the pinned relay self key, or reads it from the relay's
 // NIP-11 document.
 func (d *dmEdges) relaySelf(ctx context.Context) (string, error) {
-	if d.self != "" {
-		return d.self, nil
+	d.mu.Lock()
+	url, self := d.relay, d.self
+	d.mu.Unlock()
+	if self != "" {
+		return self, nil
 	}
-	return buzzio.RelaySelf(ctx, d.relay)
+	return buzzio.RelaySelf(ctx, url)
 }
 
 // verify checks, once, that the channel membership is exactly owner and body
