@@ -43,7 +43,7 @@ func TestRenameNoReplaceFallsBackWhenFlagUnsupported(t *testing.T) {
 		t.Fatalf("retained cur = %q, %v; the fallback must not replace it", got, err)
 	}
 
-	// A session directory publishes through the exclusive-placeholder path.
+	// A session directory publishes through the same fallback.
 	child, err := root.PublishInitializedDirectChildExclusive("session", 0o700, func(child *DeliveryRoot) error {
 		return child.EnsureAgentDirs("bob")
 	})

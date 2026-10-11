@@ -18,8 +18,8 @@ var renameat2 = unix.Renameat2
 // check-then-rename: a destination created between the check and the rename
 // is replaced. Message file names are unique, so only the abnormal external
 // reintroduction that ClaimCollisionError describes can hit that window.
-// Directories with chosen names use renameDirectChildNoReplace instead. A
-// genuinely invalid rename fails again on the plain rename, so the fallback
+// Session directories rely on the session creation lock instead (see
+// renameDirectChildNoReplace). A genuinely invalid rename fails again on the plain rename, so the fallback
 // does not hide a real EINVAL.
 func renameatNoReplace(oldDirFD int, oldName string, newDirFD int, newName string) error {
 	err := renameat2(oldDirFD, oldName, newDirFD, newName, unix.RENAME_NOREPLACE)
