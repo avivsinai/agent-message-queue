@@ -7,7 +7,8 @@ EMBED_VERSION := $(patsubst v%,%,$(VERSION))
 GOLANGCI_LINT_CACHE ?= $(CURDIR)/.golangci-cache
 # Keep this in lockstep with the version pinned in .github/workflows/ci.yml.
 GOLANGCI_LINT_VERSION := 2.13.1
-# Use go.mod's toolchain so direct gofmt does not drift from setup-go.
+# Use go.mod's toolchain so gofmt and golangci-lint do not drift from
+# setup-go: a newer local Go writes export data the linter cannot read.
 GO_TOOLCHAIN := $(shell sed -n 's/^toolchain //p' go.mod)
 GOFMT := $(shell GOTOOLCHAIN=$(GO_TOOLCHAIN) go env GOROOT)/bin/gofmt
 
@@ -38,7 +39,7 @@ lint:
 		echo "golangci-lint $(GOLANGCI_LINT_VERSION) required (found $${actual:-unknown}); install that version from https://golangci-lint.run/usage/install/"; \
 		exit 1; \
 	fi
-	GOLANGCI_LINT_CACHE="$(GOLANGCI_LINT_CACHE)" golangci-lint run
+	GOTOOLCHAIN=$(GO_TOOLCHAIN) GOLANGCI_LINT_CACHE="$(GOLANGCI_LINT_CACHE)" golangci-lint run
 
 # Keep this hostile AMQ context tuple aligned with smoke-test.sh's startup scrub.
 smoke:
