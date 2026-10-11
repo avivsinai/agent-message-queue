@@ -87,6 +87,8 @@ user config directory on macOS and Windows, else `~/.local/state/amq`. Older
   `~/.amq/state`.
 - AMQ does not move existing trust to `~/.amq/state`. See
   [issue 1047](https://github.com/avivsinai/agent-message-queue/issues/1047).
+- Do not delete `<legacy>/launch` by hand. If `~/.amq/state/launch` also
+  exists, its older trust records become active again without a new confirm.
 
 ## Locations outside `~/.amq`
 
