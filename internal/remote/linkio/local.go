@@ -183,12 +183,23 @@ type HeldTask struct {
 type held struct {
 	mu    sync.Mutex
 	tasks map[string]*HeldTask
+	// confirmed remembers, until each one's deadline (or a restart), the
+	// digests already confirmed and handed to core: an identical resend is not
+	// held again, and hello never lists a digest whose request has a record.
+	confirmed map[string]time.Time
 }
+
+// errConfirmed answers add for a digest already confirmed and handed to core:
+// the caller hands the resend to core again instead of holding it.
+var errConfirmed = errors.New("already confirmed")
 
 func (h *held) add(t *HeldTask, now time.Time) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.expireLocked(now)
+	if _, ok := h.confirmed[t.Digest]; ok { // checked under the same lock as the add: no window
+		return errConfirmed
+	}
 	if _, dup := h.tasks[t.Digest]; dup {
 		return nil
 	}
@@ -203,6 +214,11 @@ func (h *held) expireLocked(now time.Time) {
 	for d, t := range h.tasks {
 		if !now.Before(t.NotAfter) {
 			delete(h.tasks, d)
+		}
+	}
+	for d, deadline := range h.confirmed {
+		if !now.Before(deadline) {
+			delete(h.confirmed, d)
 		}
 	}
 }
@@ -240,7 +256,16 @@ func (h *held) take(id, digest string, now time.Time) (*HeldTask, error) {
 		return nil, refuse(string(protocol.CodeNotFound), "no task %s waits for confirmation with that text; it may have expired", id)
 	}
 	delete(h.tasks, digest)
+	h.confirmed[digest] = t.NotAfter // bounded: one per held task, gone at its deadline
 	return t, nil
+}
+
+// forget drops a confirmed digest whose handoff core refused without a
+// record, so a resend is held and shown again instead of running on that press.
+func (h *held) forget(digest string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	delete(h.confirmed, digest)
 }
 
 // find returns the one held task with that id. Two tasks sharing the first

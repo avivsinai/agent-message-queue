@@ -199,6 +199,7 @@ func New(cfg Config) (*Carrier, error) {
 		waiters:   map[string]waiter{},
 	}
 	c.held.tasks = map[string]*HeldTask{}
+	c.held.confirmed = map[string]time.Time{}
 	c.refreshKeys() // the consent snapshot exists before the first handoff check
 	return c, nil
 }
@@ -1081,7 +1082,19 @@ func (c *Carrier) hold(v *Verified, credential string) (any, error) {
 		ID: heldID(v.Cmd.RequestID), Digest: v.Digest, Binding: v.Binding.Binding, Session: v.Binding.Labels.Session,
 		Text: v.Text, NotAfter: v.NotAfter, verified: v, credential: credential,
 	}
-	if err := c.held.add(t, c.cfg.Now()); err != nil {
+	switch err := c.held.add(t, c.cfg.Now()); {
+	case errors.Is(err, errConfirmed):
+		// Already confirmed and handed to core: a resend is answered by core,
+		// which deduplicates by request id and runs nothing twice.
+		out, err := c.cfg.Handle(v.Cmd, c.source(c.view(), v.Native, credential))
+		if err != nil {
+			return nil, err
+		}
+		if reply, ok := out.(protocol.Reply); ok {
+			return outcomeReply{Outcome: reply.Outcome}, nil
+		}
+		return nil, errors.New("the endpoint returned no submit reply")
+	case err != nil:
 		return nil, err
 	}
 	return outcomeReply{Outcome: protocol.Outcome{
@@ -1122,5 +1135,11 @@ func (c *Carrier) ConfirmLocal(id, digest, authenticatorData, clientDataJSON, si
 	if err != nil {
 		return nil, err
 	}
-	return c.cfg.Handle(t.verified.Cmd, c.source(c.view(), t.verified.Native, t.credential))
+	out, err := c.cfg.Handle(t.verified.Cmd, c.source(c.view(), t.verified.Native, t.credential))
+	if reply, ok := out.(protocol.Reply); err != nil || (ok && reply.Outcome.Code != "") {
+		// Refused: core keeps no record of an unadmitted link submit, so the
+		// press that was told "not handed to" must not let a resend run.
+		c.held.forget(digest)
+	}
+	return out, err
 }
