@@ -8,6 +8,14 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.96.1](https://github.com/avivsinai/agent-message-queue/compare/v0.96.0...v0.96.1) (2026-10-11)
+
+
+### Bug Fixes
+
+* **fsq:** fall back to a guarded plain rename when RENAME_NOREPLACE is unsupported ([#1042](https://github.com/avivsinai/agent-message-queue/issues/1042)) ([e9e2cec](https://github.com/avivsinai/agent-message-queue/commit/e9e2ceccbffe9871f3511674bdb9629c57b82888))
+* **remote:** install-stop-hook replaces a stop hook on another binary ([#1044](https://github.com/avivsinai/agent-message-queue/issues/1044)) ([51ecd7f](https://github.com/avivsinai/agent-message-queue/commit/51ecd7fe1e2659b9c0c18b5c5687d986c57d2095))
+
 ## [0.96.0](https://github.com/avivsinai/agent-message-queue/compare/v0.95.0...v0.96.0) (2026-10-11)
 
 
