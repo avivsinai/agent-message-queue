@@ -113,13 +113,15 @@ type relaySet struct {
 	running   map[string]*relayRun
 	wg        sync.WaitGroup
 
-	raw  []byte            // the manifest bytes last reconciled
-	said map[string]string // what each report key last said
+	raw     []byte            // the manifest bytes last reconciled
+	started *manifest.Relay   // the relay block serve started from
+	said    map[string]string // what each report key last said
 }
 
 // relayRun is one share's running client.
 type relayRun struct {
 	share  manifest.Share
+	body   string // the enrolled body key, "" when it did not load
 	client *relay.Client
 	cancel context.CancelFunc
 	done   chan struct{}
@@ -138,6 +140,7 @@ func newRelaySet(root, stateDir, manifestFile string, edges *dmEdges, stderr io.
 // then, so an edit made during startup is not missed.
 func (rs *relaySet) start(ctx context.Context, r *manifest.Relay) {
 	rs.ctx = ctx
+	rs.started = r
 	if r != nil {
 		rs.url, rs.self = r.URL, r.Self
 		for _, sh := range r.Shares {
@@ -167,6 +170,7 @@ func (rs *relaySet) tick() {
 	if rs.raw != nil && bytes.Equal(raw, rs.raw) {
 		return
 	}
+	first := rs.raw == nil
 	rs.raw = append([]byte{}, raw...)
 	mf, err := manifest.Load(rs.manifestFile)
 	if err != nil {
@@ -174,6 +178,11 @@ func (rs *relaySet) tick() {
 		return
 	}
 	delete(rs.said, "manifest")
+	if first && reflect.DeepEqual(mf.Relay, rs.started) {
+		// The file serve started from is not a manifest change, so a
+		// share refused at startup is not retried (review #1048 r1).
+		return
+	}
 	rs.reconcile(mf)
 }
 
@@ -199,36 +208,83 @@ func (rs *relaySet) reconcile(mf manifest.File) {
 			want[sh.Session] = sh
 		}
 	}
+	// Plan first, then act: removals free a target or a body before a
+	// retry or an add may take it (review #1048 r1).
+	var removed, retried []*relayRun
 	for session, run := range rs.running {
 		sh, ok := want[session]
 		switch {
 		case !ok:
-			rs.stopShare(run, mf.Adapters)
-			say(rs.stderr, "relay share %s: removed from the manifest; stopped", session)
+			removed = append(removed, run)
 		case !reflect.DeepEqual(sh, run.share):
 			entry, _ := json.Marshal(sh)
 			rs.sayOnce("share:"+session, fmt.Sprintf("relay share %s: its manifest entry changed; restart serve, or remove and re-add the share, to adopt it", session), string(entry))
 		case rs.edges.refused(session):
-			// A refused surface is set up again on a manifest change, never
-			// on every tick (#1024 ruling 3).
-			rs.stopShare(run, mf.Adapters)
-			rs.addShare(sh, mf.Adapters)
+			// A setup refusal is retried on a manifest change, never on
+			// every tick (#1024 ruling 3).
+			retried = append(retried, run)
 		}
 	}
+	for _, run := range removed {
+		rs.stopShare(run, mf.Adapters)
+		say(rs.stderr, "relay share %s: removed from the manifest; stopped", run.share.Session)
+	}
+	for _, run := range retried {
+		// A share that still collides with another running share stays
+		// as a restart leaves it (a startup duplicate pair stays refused).
+		if rs.collision(run.share, run.body, run.share.Session) != "" {
+			continue
+		}
+		rs.stopShare(run, mf.Adapters)
+		rs.addShare(want[run.share.Session], mf.Adapters)
+	}
+	var added []manifest.Share
 	for session, sh := range want {
 		if rs.running[session] == nil {
-			rs.addShare(sh, mf.Adapters)
-			say(rs.stderr, "relay share %s: added from the manifest", session)
+			added = append(added, sh)
+		}
+	}
+	for _, sh := range added {
+		if rs.addShare(sh, mf.Adapters) {
+			say(rs.stderr, "relay share %s: added from the manifest", sh.Session)
 		}
 	}
 }
 
 // addShare sets up a share added to the manifest: the startup surfaces and
-// pins, then its client.
-func (rs *relaySet) addShare(sh manifest.Share, adapters []manifest.Adapter) {
+// pins, then its client. A share whose target or enrolled body a running
+// share already holds is refused whole: no surface, pin or client, so it
+// never takes over the running share's target, profile or presence
+// (#1024 ruling 1, review #1048 r1). It reports false then.
+func (rs *relaySet) addShare(sh manifest.Share, adapters []manifest.Adapter) bool {
+	body := ""
+	if creds, err := sharestate.Load(rs.root, sh.Session); err == nil {
+		body = creds.Body.PublicKeyHex()
+	}
+	if why := rs.collision(sh, body, ""); why != "" {
+		rs.sayOnce("share:"+sh.Session, fmt.Sprintf("relay share %s: refused: %s", sh.Session, why))
+		return false
+	}
+	delete(rs.said, "share:"+sh.Session)
 	rs.edges.addShare(rs.root, rs.stateDir, sh, false, rs.stderr)
 	rs.edges.pinShare(sh, adapters, rs.stderr)
 	rs.startShare(sh)
+	return true
+}
+
+// collision names the running share, other than self, that holds sh's
+// target or enrolled body, or returns "".
+func (rs *relaySet) collision(sh manifest.Share, body, self string) string {
+	for session, run := range rs.running {
+		switch {
+		case session == self:
+		case run.share.Target == sh.Target:
+			return fmt.Sprintf("running share %s still serves target %s; restart serve, or remove and re-add the share, to adopt it", session, sh.Target)
+		case body != "" && run.body == body:
+			return fmt.Sprintf("its body key is also enrolled for running share %s", session)
+		}
+	}
+	return ""
 }
 
 // stopShare closes a share's client, drops its surfaces and pins, and
@@ -245,12 +301,15 @@ func (rs *relaySet) stopShare(run *relayRun, adapters []manifest.Adapter) {
 	delete(rs.running, run.share.Session)
 	rs.mu.Unlock()
 	delete(rs.said, "share:"+run.share.Session)
-	rs.edges.removeShare(run.share)
+	gone := rs.edges.removeShare(run.share, run.body)
+	// The native pin is written before the share's pins go, so the session
+	// is never without a pin (#1024 ruling 2a).
 	for _, ad := range adapters {
 		if ad.Target == run.share.Target {
 			rs.edges.pinNative(ad, rs.edges.identityLate(ad.Target), rs.stderr)
 		}
 	}
+	unpin(gone)
 }
 
 // startShare starts one share's client with its surfaces' hooks.
@@ -287,8 +346,12 @@ func (rs *relaySet) startShare(sh manifest.Share) {
 			hw.Wait()
 		}
 	}
+	body := ""
+	if creds, err := sharestate.Load(rs.root, sh.Session); err == nil {
+		body = creds.Body.PublicKeyHex()
+	}
 	ctx, cancel := context.WithCancel(rs.ctx)
-	run := &relayRun{share: sh, client: c, cancel: cancel, done: make(chan struct{})}
+	run := &relayRun{share: sh, body: body, client: c, cancel: cancel, done: make(chan struct{})}
 	rs.mu.Lock()
 	rs.running[sh.Session] = run
 	rs.mu.Unlock()

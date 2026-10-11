@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -58,6 +57,10 @@ type dmEdges struct {
 	shared map[string]bool
 	// dupBodies are the bodies startup found enrolled for two shares.
 	dupBodies map[string]bool
+	// setupRefused names each share session whose setup refused a surface.
+	// A refusal a surface reports later at run time is not one: only a
+	// setup refusal is retried on a manifest change (#1024 ruling 3).
+	setupRefused map[string]bool
 }
 
 // buildDMEdges opens a carrier per commands share before startup
@@ -65,7 +68,7 @@ type dmEdges struct {
 // during reconcile. A share whose enrolled credentials cannot load keeps its
 // commands surface closed and is reported, never silently attached.
 func buildDMEdges(root, stateDir string, r *manifest.Relay, warn io.Writer) *dmEdges {
-	d := &dmEdges{byBody: map[string]*dmShare{}, state: map[string]string{}, presence: map[string]*presenceShare{}, activity: map[string]*activityShare{}, shared: map[string]bool{}, dupBodies: map[string]bool{}}
+	d := &dmEdges{byBody: map[string]*dmShare{}, state: map[string]string{}, presence: map[string]*presenceShare{}, activity: map[string]*activityShare{}, shared: map[string]bool{}, dupBodies: map[string]bool{}, setupRefused: map[string]bool{}}
 	if r == nil {
 		return d
 	}
@@ -100,6 +103,7 @@ func (d *dmEdges) addShare(root, stateDir string, sh manifest.Share, startup boo
 		if err != nil {
 			say(warn, "relay share %s: activity disabled: %v", sh.Session, err)
 			as = &activityShare{share: sh, state: "refused: " + err.Error()}
+			d.markRefused(sh.Session)
 		}
 		d.mu.Lock()
 		d.activity[sh.Session] = as
@@ -114,12 +118,14 @@ func (d *dmEdges) addShare(root, stateDir string, sh manifest.Share, startup boo
 	creds, err := sharestate.Load(root, sh.Session)
 	if err != nil {
 		d.setState(sh.Session, "refused: "+err.Error())
+		d.markRefused(sh.Session)
 		say(warn, "relay share %s: commands disabled: %v", sh.Session, err)
 		return
 	}
 	ledger, err := buzzio.OpenLedger(filepath.Join(stateDir, "shares", sh.Session))
 	if err != nil {
 		d.setState(sh.Session, "refused: "+err.Error())
+		d.markRefused(sh.Session)
 		say(warn, "relay share %s: commands disabled: %v", sh.Session, err)
 		return
 	}
@@ -133,10 +139,12 @@ func (d *dmEdges) addShare(root, stateDir string, sh manifest.Share, startup boo
 	if prev, dup := d.byBody[b.Body]; dup || d.dupBodies[b.Body] {
 		if prev != nil && startup {
 			d.state[prev.share.Session] = dupRefusal
+			d.setupRefused[prev.share.Session] = true
 			delete(d.byBody, b.Body)
 			d.dupBodies[b.Body] = true
 		}
 		d.state[sh.Session] = dupRefusal
+		d.setupRefused[sh.Session] = true
 		d.mu.Unlock()
 		say(warn, "relay share %s: commands disabled: body key shared with another session", sh.Session)
 		return
@@ -157,6 +165,7 @@ func (d *dmEdges) addShare(root, stateDir string, sh manifest.Share, startup boo
 	}
 	if err != nil {
 		d.setState(sh.Session, fmt.Sprintf("refused: buzz-dm is not enrolled (run amq-remote share --session %s --enable buzz-dm): %v", sh.Session, err))
+		d.markRefused(sh.Session)
 		say(warn, "relay share %s: commands disabled: buzz-dm is not enrolled", sh.Session)
 		return
 	}
@@ -167,19 +176,26 @@ func (d *dmEdges) addShare(root, stateDir string, sh manifest.Share, startup boo
 	d.mu.Unlock()
 }
 
-// removeShare drops a share removed from the manifest: its surfaces and
-// the approval pins it wrote. Its owed Buzz records stay owed, as after a
-// restart without it.
-func (d *dmEdges) removeShare(sh manifest.Share) {
+// removeShare drops a share removed from the manifest: its surfaces, its
+// body's startup duplicate mark (so the other share of the pair can recover
+// on its retry), and its approval pins, which it returns for the caller to
+// unpin once any replacement pin is written (#1024 ruling 2a). Its owed Buzz
+// records stay owed, as after a restart without it. A target serves at most
+// one running share, so its shared mark goes with it.
+func (d *dmEdges) removeShare(sh manifest.Share, body string) []approvalPin {
 	d.mu.Lock()
-	for body, ds := range d.byBody {
+	for b, ds := range d.byBody {
 		if ds.share.Session == sh.Session {
-			delete(d.byBody, body)
+			delete(d.byBody, b)
 		}
+	}
+	if body != "" {
+		delete(d.dupBodies, body)
 	}
 	delete(d.presence, sh.Session)
 	delete(d.activity, sh.Session)
 	delete(d.state, sh.Session)
+	delete(d.setupRefused, sh.Session)
 	delete(d.shared, sh.Target)
 	var gone, kept []approvalPin
 	for _, p := range d.pins {
@@ -191,25 +207,28 @@ func (d *dmEdges) removeShare(sh manifest.Share) {
 	}
 	d.pins = kept
 	d.mu.Unlock()
-	for _, p := range gone {
+	return gone
+}
+
+// unpin removes approval pins that removeShare returned.
+func unpin(pins []approvalPin) {
+	for _, p := range pins {
 		claude.UnpinApprovals(p.home, p.session, p.token)
 	}
+}
+
+// markRefused records that the share's setup refused a surface.
+func (d *dmEdges) markRefused(session string) {
+	d.mu.Lock()
+	d.setupRefused[session] = true
+	d.mu.Unlock()
 }
 
 // refused reports whether a surface of the share was refused at setup.
 func (d *dmEdges) refused(session string) bool {
 	d.mu.Lock()
-	state, ps, as := d.state[session], d.presence[session], d.activity[session]
-	d.mu.Unlock()
-	if strings.HasPrefix(state, "refused") {
-		return true
-	}
-	if ps != nil {
-		if st, _ := ps.view(); strings.HasPrefix(st, "refused") {
-			return true
-		}
-	}
-	return as != nil && strings.HasPrefix(as.view(), "refused")
+	defer d.mu.Unlock()
+	return d.setupRefused[session]
 }
 
 // approvalPin is one written DM-approval pin, removed at teardown.
@@ -392,6 +411,7 @@ func (d *dmEdges) addPresence(root string, sh manifest.Share, warn io.Writer) {
 	}
 	if err != nil {
 		ps.state = "refused: " + err.Error()
+		d.markRefused(sh.Session)
 		say(warn, "relay share %s: presence disabled: %v", sh.Session, err)
 	} else {
 		b := buzzio.Binding{Owner: sh.OwnerPubKey, Body: creds.Body.PublicKeyHex()}
