@@ -16,7 +16,13 @@ ROOT="${AMQ_KEEPALIVE_ROOT:-}"
 BASE_ROOT="${AMQ_KEEPALIVE_BASE_ROOT:-}"
 SESSION_NAME="${AMQ_KEEPALIVE_SESSION:-}"
 ME="${AMQ_KEEPALIVE_ME:-}"
-LOG_PATH="${AMQ_KEEPALIVE_LOG:-$HOME/.amq-keepalive/session-start.log}"
+if [[ -n "${AMQ_KEEPALIVE_LOG:-}" ]]; then
+    LOG_PATH="$AMQ_KEEPALIVE_LOG"
+elif [[ -d "$HOME/.amq-keepalive" ]]; then
+    LOG_PATH="$HOME/.amq-keepalive/session-start.log"
+else
+    LOG_PATH="$HOME/.amq/keepalive/session-start.log"
+fi
 DEFAULT_TIMEOUT_SECONDS="${AMQ_KEEPALIVE_DEFAULT_TIMEOUT_SECONDS:-10}"
 TIMEOUT_SECONDS="${AMQ_KEEPALIVE_TIMEOUT_SECONDS:-$DEFAULT_TIMEOUT_SECONDS}"
 STDIN_TIMEOUT_SECONDS="${AMQ_KEEPALIVE_STDIN_TIMEOUT_SECONDS:-1}"
@@ -39,7 +45,7 @@ if [[ "${AMQ_KEEPALIVE_DISABLED:-0}" == "1" ]]; then
     exit 0
 fi
 
-mkdir -p "$(dirname "$LOG_PATH")" 2>/dev/null || true
+(umask 077 && mkdir -p "$(dirname "$LOG_PATH")") 2>/dev/null || true
 
 log() {
     printf '%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >> "$LOG_PATH" 2>/dev/null || true
