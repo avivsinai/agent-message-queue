@@ -166,3 +166,62 @@ func TestTrustLoadRejectsSymlinkRecord(t *testing.T) {
 		t.Fatalf("symlink record = trusted %t, err %v", trusted, err)
 	}
 }
+
+// Issue #1020: a fresh machine keeps launch trust under ~/.amq/state, and a
+// machine with a legacy launch dir keeps trusting the plans granted there.
+func TestDefaultLaunchStateDirPrefersLegacyLaunchElseAMQHome(t *testing.T) {
+	base := t.TempDir()
+	home := filepath.Join(base, "home")
+	xdg := filepath.Join(base, "xdg")
+	project := filepath.Join(base, "project")
+	for _, dir := range []string{home, project} {
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_STATE_HOME", xdg)
+	grant := TrustRecord{SemanticDigest: testDigest('a')}
+
+	fresh, err := DefaultLaunchStateDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := OpenTrustStore(fresh, project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Replace(grant); err != nil {
+		t.Fatal(err)
+	}
+	wantPrefix, err := filepath.EvalSymlinks(filepath.Join(home, ".amq", "state", "launch"))
+	if err != nil {
+		t.Fatalf("fresh trust is not under ~/.amq/state/launch: %v (path %s)", err, store.Path())
+	}
+	if !strings.HasPrefix(store.Path(), wantPrefix+string(filepath.Separator)) {
+		t.Fatalf("fresh trust path = %s, want under %s", store.Path(), wantPrefix)
+	}
+
+	legacyStore, err := OpenTrustStore(filepath.Join(xdg, "amq"), project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := legacyStore.Replace(grant); err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := DefaultLaunchStateDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err = OpenTrustStore(legacy, project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if store.Path() != legacyStore.Path() {
+		t.Fatalf("trust path with a legacy launch dir = %s, want %s", store.Path(), legacyStore.Path())
+	}
+	if _, trusted, err := store.LoadForDigest(grant.SemanticDigest); err != nil || !trusted {
+		t.Fatalf("legacy grant: trusted %t, err %v", trusted, err)
+	}
+}

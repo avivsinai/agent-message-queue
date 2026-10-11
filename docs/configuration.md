@@ -8,7 +8,7 @@ lives in the narrowest scope that owns it.
 | Agent | `<root>/agents/<me>/` | `.wake.settings` |
 | Root | `<root>/meta/` | `config.json` |
 | Project | the project directory | `.amqrc`, `.amq/launch.json` |
-| User and host | `~/.amq/` | `wake.settings`, `remote/binding.json`, `codex-threads/` |
+| User and host | `~/.amq/` | `wake.settings`, `remote/binding.json`, `codex-threads/`, `state/` |
 
 The user scope belongs to one user on one machine. It never travels with a
 root: a root on shared storage meets each host's own user scope.
@@ -74,13 +74,26 @@ read and write:
 - A missing `~/.amq/wake.settings` always means no machine layer, even when
   `~/.amq` fails the checks.
 
+## Launch trust state
+
+On a new machine, launch trust state lives in `~/.amq/state`. The legacy
+platform state directory (`<legacy>` below) is `$XDG_STATE_HOME/amq`, else the
+user config directory on macOS and Windows, else `~/.local/state/amq`. Older
+`amq` binaries keep trust there.
+
+- When `<legacy>/launch` exists, launch trust stays in the legacy directory.
+  Older and newer `amq` binaries then read and write the same trust records.
+- `XDG_STATE_HOME` only locates the legacy directory. It does not move
+  `~/.amq/state`.
+- AMQ does not move existing trust to `~/.amq/state`. See
+  [issue 1047](https://github.com/avivsinai/agent-message-queue/issues/1047).
+
 ## Locations outside `~/.amq`
 
 These locations predate the rule and stay where they are:
 
-- Launch trust state lives in the platform state directory
-  (`$XDG_STATE_HOME/amq`, else the user config directory on macOS and
-  Windows, else `~/.local/state/amq`). See
-  [issue 1020](https://github.com/avivsinai/agent-message-queue/issues/1020).
+- Darwin wake restart stages live in `<legacy>/wake-stages`, also on a new
+  machine. See
+  [issue 1046](https://github.com/avivsinai/agent-message-queue/issues/1046).
 - The keepalive registry and adapter state live in `~/.amq-keepalive`. See
   [issue 1021](https://github.com/avivsinai/agent-message-queue/issues/1021).

@@ -319,6 +319,12 @@ func newPublicPrepareFixture(t *testing.T, existingSession bool) publicPrepareFi
 		}
 	}
 	executable := buildPrepareTestProvider(t, root)
+	home := filepath.Join(root, "home")
+	if err := os.Mkdir(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
 	t.Setenv("AMQ_PREPARE_PROBE_MARKER", filepath.Join(root, "provider-probed"))
 	canonicalSibling, err := filepath.EvalSymlinks(sibling)

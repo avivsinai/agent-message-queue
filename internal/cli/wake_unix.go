@@ -4370,8 +4370,8 @@ func observeLiveWakeOwner(owner wakeOwner, context string) (wakeOwnerObservation
 //
 // Required OS vars: PATH for exec.LookPath (self-upgrade, restart preflight,
 // recursive amq spawn), HOME for os.UserHomeDir config resolution,
-// XDG_STATE_HOME for launch state directory resolution (wake-stages,
-// self-upgrade staging), TERM_PROGRAM for terminal detection (wake injection),
+// XDG_STATE_HOME for the legacy launch state directory that holds the
+// Darwin wake restart stages (restart and self-upgrade staging), TERM_PROGRAM for terminal detection (wake injection),
 // and CMUX_SURFACE_ID for cmux surface detection (launch backend).
 // All AMQ-internal vars are matched by the AMQ_ / AM_ prefixes
 // (session/identity/state, no-update-check, test re-exec helpers) so future
