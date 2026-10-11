@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/avivsinai/agent-message-queue/internal/amqhome"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
@@ -138,7 +139,34 @@ func (store *TrustStore) Replace(record TrustRecord) error {
 		return err
 	}
 	data = append(data, '\n')
+	if err := ensureAMQHomeFor(store.dir); err != nil {
+		return err
+	}
 	_, err = fsq.WriteFileAtomic(store.dir, "trust.json", data, 0o600)
+	return err
+}
+
+// ensureAMQHomeFor creates ~/.amq through amqhome, with its symlink check,
+// when dir is below it. Without this, the MkdirAll in the atomic write could
+// create ~/.amq unchecked.
+func ensureAMQHomeFor(dir string) error {
+	home, err := amqhome.Dir()
+	if err != nil {
+		return nil // No home, so dir cannot be below ~/.amq.
+	}
+	resolvedHome, err := resolvedPath(home)
+	if err != nil {
+		// An unusual HOME (a file, an unreadable ancestor) matters only
+		// when the store is below it; a legacy store elsewhere is unaffected.
+		if pathWithin(dir, home) {
+			return err
+		}
+		return nil
+	}
+	if !pathWithin(dir, resolvedHome) {
+		return nil
+	}
+	_, err = amqhome.EnsureDir()
 	return err
 }
 

@@ -64,7 +64,7 @@ func planWakeRestartStageForRecordPlatform(record wakeRestartRecord) (string, er
 }
 
 func darwinWakeRestartStageRoot() (string, error) {
-	stateDir, err := launch.DefaultLaunchStateDir()
+	stateDir, err := launch.LegacyStateDir()
 	if err != nil {
 		return "", fmt.Errorf("resolve Darwin wake restart state directory: %w", err)
 	}

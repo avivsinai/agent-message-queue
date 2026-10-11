@@ -13,12 +13,49 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/avivsinai/agent-message-queue/internal/amqhome"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
-// DefaultLaunchStateDir returns the existing platform-specific trust-state
-// root without creating it.
+// DefaultLaunchStateDir returns the launch trust-state root without creating
+// it. A machine with an existing <legacy>/launch keeps the legacy root, so old
+// and new binaries share one trust record and a grant is never split across
+// two roots. Otherwise trust lives in ~/.amq/state. The probe looks at the
+// launch subtree, not the legacy root itself: on darwin every wake restart
+// creates <legacy>/wake-stages, so a probe on the root would never flip.
 func DefaultLaunchStateDir() (string, error) {
+	legacy, err := LegacyStateDir()
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Stat(filepath.Join(legacy, "launch"))
+	switch {
+	case err == nil && info.IsDir():
+		return legacy, nil
+	case err == nil:
+		return "", fmt.Errorf("legacy launch state %s is not a directory; refusing", filepath.Join(legacy, "launch"))
+	case !errors.Is(err, os.ErrNotExist):
+		return "", fmt.Errorf("probe legacy launch state: %w", err)
+	}
+	home, err := amqhome.Dir()
+	if err != nil {
+		return "", err
+	}
+	if info, err := os.Lstat(home); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return "", fmt.Errorf("%s is not a plain directory; refusing", home)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
+	return filepath.Join(home, "state"), nil
+}
+
+// LegacyStateDir returns the platform state root that launch trust used before
+// ~/.amq/state, without creating it. Darwin wake restart stages always live
+// here, because a stage path is a crash-recovery record that must not move
+// when the trust root changes.
+func LegacyStateDir() (string, error) {
 	if value := strings.TrimSpace(os.Getenv("XDG_STATE_HOME")); value != "" {
 		return filepath.Join(value, "amq"), nil
 	}
