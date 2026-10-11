@@ -82,6 +82,10 @@ Commands:
                            Accept one more consent passkey (type its fingerprint)
   link remove NAME         Retire link NAME's sink and delete its device key
   link status              Links, their sockets and owed revisions, retired sinks
+  link tools               The tools a linked server offers this machine
+  link call TOOL --args J  Call a linked server's tool (--wait for the final state,
+                           --idempotency-key K; resume K after a lost answer)
+  mcp --link NAME          Serve a linked server's tools as a stdio MCP server
   doctor                   Diagnose the endpoint chain
   version                  Print the version
 
@@ -252,6 +256,9 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		out, code, err = doctor(rest, probe)
 	case "link":
 		out, code, err = link(rest, stdin, stdout, probe)
+	case "mcp":
+		code, err = mcpServe(rest, stdin, stdout, stderr)
+		return finish(stdout, stderr, nil, false, code, err)
 	case "claude":
 		// PR2 Stop-hook bridge: the receiver subcommand is FAIL-OPEN by
 		// contract — exit 0 on ANY error, any parse failure, any panic —
@@ -589,6 +596,7 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 		pinNative(a)
 	}
 	server.SetRegistrar(liveRegistrar(c.root, stateDir, ep, pinNative))
+	server.SetLinkHandler(links.request)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	say(stdout, "amq-remote %s serving root=%s handle=%s socket=%s targets=%d", version, c.root, *me, server.Path(), len(ep.Targets()))
