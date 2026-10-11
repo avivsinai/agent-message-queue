@@ -218,13 +218,23 @@ func confinedPath(create bool) (string, error) {
 	}
 	if os.Getenv(EnvPath) != "" {
 		// An override must be canonical: no symlink anywhere on its chain
-		// (codex #885 r2 P2). EvalSymlinks returns a different path exactly
-		// when some component is a symlink.
-		parent := filepath.Dir(dir)
-		if resolved, err := filepath.EvalSymlinks(parent); err != nil || resolved != parent {
-			return "", fmt.Errorf("%s directory %s must have no symlink on its path; refusing", EnvPath, parent)
+		// (codex #885 r2 P2), below an ancestor this user owns. The missing
+		// levels are made by the loop below, one Mkdir + Lstat at a time:
+		// MkdirAll would follow a symlink swapped in after this check.
+		existing, err := canonicalAncestor(dir)
+		if err != nil {
+			return "", err
 		}
-		cur, parts = parent, []string{filepath.Base(dir)}
+		if existing != dir && !create {
+			return path, nil // nothing bound yet; read reports ErrNone
+		}
+		cur, parts = existing, []string{}
+		if r, _ := filepath.Rel(existing, dir); r != "." {
+			parts = strings.Split(r, string(filepath.Separator))
+		}
+		if overrideCheckedHook != nil {
+			overrideCheckedHook()
+		}
 	}
 	for _, part := range parts {
 		cur = filepath.Join(cur, part)
@@ -298,6 +308,35 @@ func read(path string) (Binding, error) {
 const LegacyName = "default"
 
 var nameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
+
+// overrideCheckedHook runs between the override's ancestor check and the
+// creation of its missing levels; tests swap a symlink in there.
+var overrideCheckedHook func()
+
+// canonicalAncestor returns dir, or its nearest existing ancestor when dir is
+// missing, after checking that it is a directory with no symlink on its path,
+// owned by this user and not writable by group or others.
+func canonicalAncestor(dir string) (string, error) {
+	existing := dir
+	fi, err := os.Lstat(existing)
+	for errors.Is(err, os.ErrNotExist) && filepath.Dir(existing) != existing {
+		existing = filepath.Dir(existing)
+		fi, err = os.Lstat(existing)
+	}
+	if err != nil {
+		return "", err
+	}
+	if resolved, err := filepath.EvalSymlinks(existing); err != nil || resolved != existing {
+		return "", fmt.Errorf("%s directory %s must have no symlink on its path; refusing", EnvPath, existing)
+	}
+	if !fi.IsDir() {
+		return "", fmt.Errorf("%s directory %s is not a directory; refusing", EnvPath, existing)
+	}
+	if err := ownedByUser(fi); err != nil {
+		return "", fmt.Errorf("%s directory %s %v; refusing", EnvPath, existing, err)
+	}
+	return existing, nil
+}
 
 // ValidName reports whether name can name a binding.
 func ValidName(name string) error {
@@ -386,15 +425,20 @@ func (e *NameTakenError) Error() string {
 }
 
 // WriteNamed adds or replaces only the binding called b.Name.
-func WriteNamed(b Binding) error { return writeNamed(b, false) }
+func WriteNamed(b Binding) error { return writeNamed(b, nil) }
 
 // WriteNamedNew writes the binding called b.Name, refusing with
 // *NameTakenError when a binding of that name names a different destination.
 // The check and the write share one transaction. Writing the same
 // destination again stays idempotent.
-func WriteNamedNew(b Binding) error { return writeNamed(b, true) }
+func WriteNamedNew(b Binding) error { return writeNamed(b, b.Same) }
 
-func writeNamed(b Binding, refuseTaken bool) error {
+// WriteNamedIf writes the binding called b.Name when no binding of that name
+// exists or allow accepts the one that does; otherwise it refuses with
+// *NameTakenError. The check and the write share one transaction.
+func WriteNamedIf(b Binding, allow func(old Binding) bool) error { return writeNamed(b, allow) }
+
+func writeNamed(b Binding, allow func(old Binding) bool) error {
 	if err := ValidName(b.Name); err != nil {
 		return err
 	}
@@ -413,12 +457,12 @@ func writeNamed(b Binding, refuseTaken bool) error {
 		if err != nil {
 			return err
 		}
-		if refuseTaken {
+		if allow != nil {
 			switch old, err := read(filepath.Join(dir, b.Name+".json")); {
 			case errors.Is(err, ErrNone):
 			case err != nil:
 				return err
-			case !old.Same(b):
+			case !allow(old):
 				return &NameTakenError{Name: b.Name}
 			}
 		}

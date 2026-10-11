@@ -19,13 +19,15 @@ import (
 // behavior changes.
 type silentResolver struct {
 	core.Attachment
-	mu  sync.Mutex
-	res map[string]protocol.Resolution
+	mu   sync.Mutex
+	res  map[string]protocol.Resolution
+	asks int
 }
 
 func (s *silentResolver) ResolvedInteraction(_ requests.Key, _, interactionID string) (protocol.Resolution, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.asks++
 	res, ok := s.res[interactionID]
 	return res, ok
 }
@@ -98,6 +100,25 @@ func TestOwedOutcomeRetention(t *testing.T) {
 	// Compaction, which the owed outcome used to block forever, proceeds.
 	if ok, err := store.CompactOne(key, clk.Add(time.Minute)); err != nil || !ok {
 		t.Fatalf("compact after retention: ok=%v err=%v, want the record compacted", ok, err)
+	}
+
+	// A retired outcome is correctable only until the record compacts
+	// (agent-message-queue-9dx.6, ruling bb): the tombstone leaves the
+	// sweep, and recovery no longer asks the resolver about it every tick.
+	if recs := store.ListSweep(); len(recs) != 0 {
+		rec, _, _ = store.Get(key)
+		t.Fatalf("the sweep still reads the tombstone: retired=%v", rec.RetiredOutcomes)
+	}
+	att.mu.Lock()
+	att.asks = 0
+	att.mu.Unlock()
+	if err := ep.Reconcile(); err != nil {
+		t.Fatal(err)
+	}
+	att.mu.Lock()
+	defer att.mu.Unlock()
+	if att.asks != 0 {
+		t.Fatalf("reconcile asked the resolver %d time(s) about a compacted record", att.asks)
 	}
 }
 

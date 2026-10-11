@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"crypto/ed25519"
 	"crypto/x509"
 	"encoding/base64"
@@ -16,10 +17,14 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
+	"github.com/avivsinai/agent-message-queue/internal/remote/core"
+	"github.com/avivsinai/agent-message-queue/internal/remote/fake"
 	"github.com/avivsinai/agent-message-queue/internal/remote/ipc"
 	"github.com/avivsinai/agent-message-queue/internal/remote/linkio"
 	"github.com/avivsinai/agent-message-queue/internal/remote/manifest"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
+	"github.com/avivsinai/agent-message-queue/internal/remote/requests"
 )
 
 // link remove retires the sink and deletes the device key; afterwards the
@@ -263,5 +268,52 @@ func TestLinkRefusesAnOlderRunningEndpoint(t *testing.T) {
 	_, _, err = linkAdd([]string{"--root", root, "example", "https://link.example.test", "--code", "K7Q4-M2XD"}, strings.NewReader(""), io.Discard, &jsonProbe{})
 	if err == nil || !strings.Contains(err.Error(), "restart amq-remote up first") {
 		t.Fatalf("link add with an older endpoint = %v, want the restart refusal", err)
+	}
+}
+
+// Regression (merged-code e2e finding 2): when the shared session's native
+// session changed (a pi /new or reload), the share silently dropped off the
+// link and `link status` said nothing. It now names the state and the fix.
+func TestLinkStatusNamesAShareWhoseSessionChanged(t *testing.T) {
+	// A unit test of linkShareState, not of the link status row. The root is
+	// short (os.MkdirTemp("")) because the endpoint's unix socket lives under
+	// it and macOS caps socket paths at 104 bytes.
+	root, err := os.MkdirTemp("", "arsc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	bindDir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(binding.EnvPath, filepath.Join(bindDir, "remote", "binding.json"))
+	stateDir := filepath.Join(root, stateDirName)
+	store, err := requests.Open(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	ep := core.New(core.Config{Store: store})
+	t.Cleanup(func() { _ = ep.Close() })
+	ep.Register(fake.New("fake", "e_1")) // its native session is "fake"
+	srv, err := ipc.Listen(stateDir, ep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() { _ = srv.Serve(ctx) }()
+	for name, native := range map[string]string{"now": "fake", "old": "an-earlier-session"} {
+		if err := binding.WriteNamed(binding.Binding{Root: root, Target: "fake", NativeSession: native, Name: name}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	natives := &nativeProbe{stateDir: stateDir}
+	if got := linkShareState(root, natives, "now"); got != "shared" {
+		t.Fatalf("current session = %q, want shared", got)
+	}
+	if got := linkShareState(root, natives, "old"); !strings.HasPrefix(got, "session changed") {
+		t.Fatalf("changed session = %q, want 'session changed: ...'", got)
 	}
 }
