@@ -190,7 +190,9 @@ connection reconnects with backoff of 1 to 30 seconds. Local IPC and AMQ deliver
 A running `serve` follows the relay block. When the manifest bytes change,
 it applies the shares as a restart would:
 - A share added starts, with the same enrollment checks, pins and surfaces
-  as at startup.
+  as at startup. A share whose target or enrolled body a running share
+  still holds is refused whole until that share is removed or `serve`
+  restarts.
 - A share removed stops. Its approval pins go, and the other shares are not
   touched.
 - A share whose entry changed in any field keeps its running values. `serve`
@@ -199,8 +201,8 @@ it applies the shares as a restart would:
 - A changed `url` or `relay_self` needs a restart while a share runs.
 - A manifest that does not load keeps every running share and is reported
   once.
-- A share surface that was refused is set up again on the next manifest
-  change.
+- A share surface that was refused at setup is set up again on the next
+  manifest change.
 
 `serve` never mints, renews or enrolls a key. Use `amq-remote share` for
 that.
