@@ -111,6 +111,52 @@ func TestB14cReservationRefusesSecondConcurrentDispatch(t *testing.T) {
 	}
 }
 
+// TestBusyRetryTakesTheStoreReservation reproduces agent-message-queue-9dx.8:
+// the re-admission of a busy tombstone skipped Store.Reserve, so the store
+// counted no room for its result and admitted other work into that room.
+func TestBusyRetryTakesTheStoreReservation(t *testing.T) {
+	now := func() time.Time { return time.Date(2026, 9, 8, 10, 0, 0, 0, time.UTC) }
+	store, err := requests.Open(t.TempDir(), requests.WithClock(now),
+		requests.WithMaxStoreBytes(protocol.MaxRecordBytes+protocol.MaxRecordBytes/2))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	rt := fake.New("fake", "e_1")
+	ep := core.New(core.Config{Store: store, Now: now})
+	ep.Register(rt)
+	ep.Register(fake.New("other", "e_1"))
+	t.Cleanup(func() { _ = ep.Close() })
+	local := core.Source{Host: "local"}
+
+	idA, idB := "11111111-1111-4111-8111-1111111111a7", "11111111-1111-4111-8111-1111111111b7"
+	if _, err := ep.Handle(submitCmd(idA), local); err != nil {
+		t.Fatalf("submit A: %v", err)
+	}
+	if _, err := ep.Handle(submitCmd(idB), local); err != nil {
+		t.Fatalf("submit B (busy): %v", err)
+	}
+	rt.Complete(idA, "done-A")
+	if !b14cWait(func() bool { return rt.UnacknowledgedResults() == 0 && len(rt.Snapshot().RunningKeys) == 0 }) {
+		t.Fatal("A's result was never acknowledged")
+	}
+	out, err := ep.Handle(submitCmd(idB), local)
+	if err != nil || out.(protocol.Reply).Snapshot.State != protocol.StateRunning {
+		t.Fatalf("identical resubmit B = %v, %v; want running", out, err)
+	}
+
+	// B now holds the room for its result: the store has none left for C.
+	c := submitCmd("11111111-1111-4111-8111-1111111111c7")
+	c.TargetID = "other"
+	out, err = ep.Handle(c, local)
+	if err != nil {
+		t.Fatalf("submit C: %v", err)
+	}
+	if got := out.(protocol.Reply).Outcome.Code; got != protocol.CodeStorageFull {
+		t.Fatalf("submit C outcome = %q, want storage_full: the re-admitted B took no reservation", got)
+	}
+}
+
 // TestB14cReservationPoisonFailClosed reproduces the fail-closed poison
 // semantics of agent-message-queue-611.22.15.3 (B14c reservation): a
 // record for the TARGET whose file is unreadable makes the target's

@@ -139,6 +139,8 @@ invariants.
   itself and moves the task into the store once. A held task lives only in
   memory: a restart or its deadline drops it, and the next hello no longer
   lists its digest.
+  A re-attach or a new native session changes what the binding reports, and
+  every older signature stops matching.
 - **A revision is published when its sink acknowledged it.** A carrier counts
   a revision as published only after the sink confirms that it committed that
   revision or a newer one. Until then the revision stays owed and the
