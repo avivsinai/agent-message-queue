@@ -182,7 +182,9 @@ func (rs *relaySet) tick() {
 func (rs *relaySet) reconcile(mf manifest.File) {
 	want := map[string]manifest.Share{}
 	if r := mf.Relay; r != nil {
-		if rs.url == "" {
+		if rs.url == "" || len(rs.running) == 0 {
+			// A relay with no running share holds nothing to keep: adopt
+			// the manifest's, as a restart would.
 			rs.mu.Lock()
 			rs.url, rs.self = r.URL, r.Self
 			rs.mu.Unlock()
