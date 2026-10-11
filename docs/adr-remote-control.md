@@ -131,7 +131,14 @@ invariants.
   same point: a key removed before the handoff ends the request
   `consent_invalid`, and nothing runs. A key removed after the handoff does
   not recall the task; it stops every later one. A binding whose consent is
-  `local` runs nothing until the local confirmation exists.
+  `local` holds a verified task outside the store until the person confirms
+  it on the machine: `amq-remote link confirm ID` (a terminal) opens a page
+  the endpoint itself serves on the one loopback port it records for the
+  root, which shows the exact text with hidden characters visible, and the link's local passkey (relying party `localhost`) signs a
+  challenge bound to the digest shown. The endpoint verifies that assertion
+  itself and moves the task into the store once. A held task lives only in
+  memory: a restart or its deadline drops it, and the next hello no longer
+  lists its digest.
   A re-attach or a new native session changes what the binding reports, and
   every older signature stops matching.
 - **A revision is published when its sink acknowledged it.** A carrier counts

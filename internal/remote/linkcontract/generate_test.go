@@ -277,6 +277,8 @@ func TestGenerateFixtures(t *testing.T) {
 			env(map[string]any{"error": map[string]any{"code": "conflict", "message": "revision 6 is stored with another digest"}}, "re", "m_e9", "gen", gen)},
 		{"call_busy", "server_to_endpoint", "call_reply", "The server's tool budget is full: status error with code busy and retry_after_ms. Busy is never final; the endpoint sends the same call again later.",
 			env(map[string]any{"call_id": "c_k_84", "status": "error", "error": map[string]any{"code": "busy", "message": "too many tool calls in progress", "retry_after_ms": 2000}}, "re", "m_c8", "gen", gen)},
+		{"submit_pending_local", "endpoint_to_server", "outcome_reply", "A signed task on a binding whose consent is local passed every check and waits for the person to confirm it on the machine. Nothing is stored or run until then; hello's pending_local lists its digest.",
+			env(map[string]any{"outcome": map[string]any{"op": "request.submit", "code": "pending_local", "message": "confirm on your machine: amq-remote link confirm 7f3a2c1e"}}, "re", "m_s1", "gen", gen)},
 	}
 	// Write the frames beside the old ones, then swap, so an aborted rewrite
 	// never leaves an empty folder.

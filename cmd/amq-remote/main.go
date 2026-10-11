@@ -80,6 +80,8 @@ Commands:
                            (--consent passkey|local, --tools PROFILE)
   link keys add NAME --code CODE
                            Accept one more consent passkey (type its fingerprint)
+  link local-key NAME      Create the local passkey that confirms consent-local tasks
+  link confirm ID          Show a held task's exact text and confirm it (Touch ID)
   link remove NAME         Retire link NAME's sink and delete its device key
   link status              Links, their sockets and owed revisions, retired sinks
   link tools               The tools a linked server offers this machine

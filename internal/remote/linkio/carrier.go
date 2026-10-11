@@ -81,7 +81,9 @@ type Config struct {
 	Handle Handler
 	// ConsentKeys returns the consent keys this machine trusts now.
 	ConsentKeys func() []ConsentKey
-	Logf        func(format string, args ...any)
+	// LocalKey returns this link's local confirmation passkey, if any.
+	LocalKey func() (ConsentKey, bool)
+	Logf     func(format string, args ...any)
 
 	Now          func() time.Time
 	OfferTTL     time.Duration
@@ -140,6 +142,7 @@ type Carrier struct {
 	revokes    chan string                     // consent keys the server removed, for the revoke worker
 	liveKeys   atomic.Pointer[map[string]bool] // consent credential ids accepted now
 	revoked    atomic.Pointer[map[string]bool] // consent credential ids the server removed in this process
+	held       held                            // signed tasks waiting for the local confirmation
 	waiters    map[string]waiter               // frame id -> the request waiting for its reply
 	maxCalls   int                             // tool calls in flight, from welcome
 }
@@ -157,6 +160,9 @@ func New(cfg Config) (*Carrier, error) {
 	}
 	if cfg.ConsentKeys == nil {
 		cfg.ConsentKeys = func() []ConsentKey { return nil }
+	}
+	if cfg.LocalKey == nil {
+		cfg.LocalKey = func() (ConsentKey, bool) { return ConsentKey{}, false }
 	}
 	if cfg.Logf == nil {
 		cfg.Logf = func(string, ...any) {}
@@ -192,6 +198,7 @@ func New(cfg Config) (*Carrier, error) {
 		status:    Status{State: "offline"},
 		waiters:   map[string]waiter{},
 	}
+	c.held.tasks = map[string]*HeldTask{}
 	c.refreshKeys() // the consent snapshot exists before the first handoff check
 	return c, nil
 }
@@ -640,7 +647,7 @@ func (c *Carrier) handshake(ctx context.Context, ws *websocket.Conn) (welcomeBod
 	}
 	hello := helloBody{
 		Schema: SchemaHello, DeviceKey: b64.EncodeToString(c.cfg.Key.SPKI), StoreID: c.cfg.StoreID,
-		AMQVersion: c.cfg.Version, Bindings: bindings, PendingLocal: []string{},
+		AMQVersion: c.cfg.Version, Bindings: bindings, PendingLocal: c.held.digests(c.cfg.Now()),
 		Signature: b64.EncodeToString(c.cfg.Key.Sign(HelloMessage(body.ServerID, body.Nonce, c.cfg.StoreID))),
 	}
 	raw, err := json.Marshal(hello)
@@ -893,11 +900,14 @@ func (c *Carrier) admitSigned(m SignedSubmit) (any, error) {
 		return nil, refuse(string(protocol.CodeUnsupported), "this endpoint runs no commands")
 	}
 	view := c.view()
-	cmd, native, err := VerifySignedSubmit(view, m, c.cfg.Now())
+	v, err := VerifySignedSubmit(view, m, c.cfg.Now())
 	if err != nil {
 		return nil, err
 	}
-	out, err := c.cfg.Handle(cmd, c.source(view, native, m.CredentialID))
+	if v.Binding.Consent == "local" {
+		return c.hold(v, m.CredentialID)
+	}
+	out, err := c.cfg.Handle(v.Cmd, c.source(view, v.Native, m.CredentialID))
 	if err != nil {
 		return nil, err
 	}
@@ -969,6 +979,11 @@ func (c *Carrier) markRevoked(id string) {
 	c.liveKeys.Store(&live)
 }
 
+// OriginName is the Origin key naming the link (its manifest name), so a
+// harness can show where a task came from (ruling x). It carries no
+// authority.
+const OriginName = "name"
+
 // source is the authenticated source of a signed submit: this link's sink,
 // the native session and consent key it was signed with, and the targets
 // shared with the link. The origin routes its revisions back to this sink.
@@ -979,7 +994,7 @@ func (c *Carrier) source(view *ConsentView, native, credential string) core.Sour
 	}
 	return core.Source{
 		Host:          c.host,
-		Origin:        map[string]string{"carrier": core.CarrierLink, core.OriginSink: c.host},
+		Origin:        map[string]string{"carrier": core.CarrierLink, core.OriginSink: c.host, OriginName: c.cfg.Name},
 		Shared:        shared,
 		NativeSession: native,
 		Credential:    credential,
@@ -1053,4 +1068,59 @@ func newPrefix() string {
 	raw := make([]byte, 5)
 	_, _ = rand.Read(raw) // crypto/rand.Read never fails on supported platforms
 	return strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(raw))
+}
+
+// hold keeps a verified task on a local binding until the user confirms it on
+// this machine. The reply is AMQ's Outcome with code pending_local; nothing
+// is stored and nothing runs until the confirmation.
+func (c *Carrier) hold(v *Verified, credential string) (any, error) {
+	if _, ok := c.cfg.LocalKey(); !ok {
+		return nil, refuse(string(protocol.CodeUnsupported), "binding %q needs a local confirmation passkey; run amq-remote link local-key %s in a terminal", v.Binding.Binding, c.cfg.Name)
+	}
+	t := &HeldTask{
+		ID: heldID(v.Cmd.RequestID), Digest: v.Digest, Binding: v.Binding.Binding, Session: v.Binding.Labels.Session,
+		Text: v.Text, NotAfter: v.NotAfter, verified: v, credential: credential,
+	}
+	if err := c.held.add(t, c.cfg.Now()); err != nil {
+		return nil, err
+	}
+	return outcomeReply{Outcome: protocol.Outcome{
+		Op: protocol.OpRequestSubmit, Code: protocol.CodePendingLocal,
+		Message: "confirm on your machine: amq-remote link confirm " + t.ID,
+	}}, nil
+}
+
+// HeldTasks lists the tasks waiting for a local confirmation.
+func (c *Carrier) HeldTasks() []HeldTask { return c.held.list(c.cfg.Now()) }
+
+// HeldTask returns the one held task with that id, text included, for the
+// endpoint's own confirm page.
+func (c *Carrier) HeldTask(id string) (HeldTask, error) {
+	t, err := c.held.find(id, c.cfg.Now())
+	if err != nil {
+		return HeldTask{}, err
+	}
+	return *t, nil
+}
+
+// ConfirmLocal runs one held task after the user's local passkey signed the
+// confirm challenge of the digest that was shown. The task moves into the
+// store once; the passkey assertion is checked here, by the endpoint, so a
+// caller that only reaches the local socket cannot confirm without the user.
+func (c *Carrier) ConfirmLocal(id, digest, authenticatorData, clientDataJSON, signature string) (any, error) {
+	key, ok := c.cfg.LocalKey()
+	if !ok {
+		return nil, refuse(string(protocol.CodeUnsupported), "this link has no local confirmation passkey")
+	}
+	if c.cfg.Handle == nil { // checked before take, so a misconfigured endpoint keeps the task
+		return nil, refuse(string(protocol.CodeUnsupported), "this endpoint runs no commands")
+	}
+	if err := VerifyLocalConfirm(key, digest, authenticatorData, clientDataJSON, signature); err != nil {
+		return nil, refuse(CodeConsentInvalid, "the confirmation does not verify: %v", err)
+	}
+	t, err := c.held.take(id, digest, c.cfg.Now())
+	if err != nil {
+		return nil, err
+	}
+	return c.cfg.Handle(t.verified.Cmd, c.source(c.view(), t.verified.Native, t.credential))
 }

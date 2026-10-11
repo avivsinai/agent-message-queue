@@ -115,6 +115,17 @@ signed submit is refused before admission with one of:
 `interaction.respond` and `session.events` from a link are always refused
 with `unsupported`.
 
+A signed submit on a binding whose `consent` is `local` that passes every
+check is held on the machine, not admitted. The reply is
+`{"outcome": {"op": "request.submit", "code": "pending_local", "message"}}`,
+and `hello.pending_local` lists the digest (`"sha256:"` + hex of the signed
+document bytes) while the task waits. The person confirms with
+`amq-remote link confirm ID`, ID being the first 8 hex digits of the request
+id; the local passkey signs SHA-256(`"amq.remote.link/1\0confirm\0"` +
+digest). After a confirmation the request has a record and revisions like
+any other. A task whose deadline passes, or that a restart drops, has no
+record and no revision; the next hello omits its digest.
+
 ## Tool calls
 
 A call that ended without a result is `{"status": "error", "error": {"code"}}`

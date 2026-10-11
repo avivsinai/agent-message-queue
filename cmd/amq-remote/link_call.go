@@ -19,6 +19,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/remote/ipc"
 	"github.com/avivsinai/agent-message-queue/internal/remote/linkio"
+	"github.com/avivsinai/agent-message-queue/internal/remote/manifest"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 )
 
@@ -62,6 +63,9 @@ func (r toolCallReply) final() bool {
 // request serves link.v1 on the endpoint: it sends one tool body on the
 // named link (or the only one) and returns the server's reply body.
 func (ls *linkSet) request(ctx context.Context, req ipc.LinkRequest) (json.RawMessage, error) {
+	if req.Op == "page" || req.Op == "page_result" {
+		return ls.pageRequest(req)
+	}
 	ls.mu.Lock()
 	var run *linkRun
 	if req.Name != "" {
@@ -81,6 +85,10 @@ func (ls *linkSet) request(ctx context.Context, req ipc.LinkRequest) (json.RawMe
 			return nil, protocol.Refuse(protocol.CodeEndpointUnreachable, "this endpoint has no running link")
 		}
 		return nil, protocol.Refuse(protocol.CodeEndpointUnreachable, "no running link %q in this endpoint", req.Name)
+	}
+	switch req.Op {
+	case "held":
+		return json.Marshal(run.carrier.HeldTasks())
 	}
 	var body any
 	switch req.Op {
@@ -469,4 +477,30 @@ func (m *mcpServer) toolsCall(ctx context.Context, id json.RawMessage, params js
 
 func mcpText(text string, isError bool) map[string]any {
 	return map[string]any{"content": []map[string]string{{"type": "text", "text": text}}, "isError": isError}
+}
+
+// pageRequest serves the local page operations. A register page needs only
+// the link's state; a confirm page needs the link's running carrier.
+func (ls *linkSet) pageRequest(req ipc.LinkRequest) (json.RawMessage, error) {
+	if req.Op == "page_result" {
+		return ls.localPageRequest(nil, "", req)
+	}
+	name := req.Name
+	if name == "" {
+		mf, err := manifest.Load(ls.manifestFile)
+		if err != nil {
+			return nil, err
+		}
+		if len(mf.Links) != 1 {
+			return nil, protocol.Refuse(protocol.CodeInvalid, "this root has %d links; name one with --link", len(mf.Links))
+		}
+		name = mf.Links[0].Name
+	}
+	if _, err := linkio.LoadDeviceKey(ls.stateDir, name); err != nil {
+		return nil, protocol.Refuse(protocol.CodeNotFound, "no link named %q in this root", name)
+	}
+	ls.mu.Lock()
+	run := ls.running[name]
+	ls.mu.Unlock()
+	return ls.localPageRequest(run, name, req)
 }
