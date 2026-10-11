@@ -31,6 +31,27 @@ editing the release PR.
 * **remote:** keep the store quota true after a busy retry and a failed seed ([#1032](https://github.com/avivsinai/agent-message-queue/issues/1032)) ([66b470e](https://github.com/avivsinai/agent-message-queue/commit/66b470e3e7f58147e14e40b889b8cacaadea0ca9))
 * **remote:** link shares survive a session change ([#1041](https://github.com/avivsinai/agent-message-queue/issues/1041)) ([38f4bd3](https://github.com/avivsinai/agent-message-queue/commit/38f4bd32cecf6fe55712109b053b889998c1dc06))
 
+
+### Upgrade notes
+
+* **Restart `amq-remote up` after upgrading.** An endpoint started by the old version keeps running it. While it
+  runs, `amq-remote link add` and `attach --link` refuse with "restart amq-remote up first".
+* **Buzz `/status` reads only its own share.** A Buzz DM now reads, waits on and cancels only requests from its
+  own share. Your terminal still reads every request.
+* **Mailbox command keys must be `[a-z0-9_]`.** A command sent through the AMQ mailbox with any other key (for
+  example `Op` or `REQUEST_ID`) is refused as `invalid`. AMQ's own clients already send lowercase keys.
+* **An unreadable request file stops the endpoint.** A file in the request store that cannot be read
+  (permissions, a symlink, an oversized file) makes the endpoint refuse to start, and the error names it. A
+  corrupt but readable file is still skipped.
+* **`attach --self` refuses an ambiguous session.** When two sessions report the same process, it refuses
+  instead of picking one.
+* **`AMQ_REMOTE_BINDING` needs a directory you own.** Its directory, or the nearest one that exists above it,
+  must have no symlink on its path, be owned by you and not be group- or world-writable. Missing directories
+  below it are created (0700).
+* **`up --discover` prints `native_session_id=`** after a pi entry.
+* **Downgrading:** run `amq-remote link remove NAME` before you go back to an older version. An older
+  amq-remote does not know links, and it drops the manifest's `links` block if it rewrites the manifest.
+
 ## [0.95.0](https://github.com/avivsinai/agent-message-queue/compare/v0.94.0...v0.95.0) (2026-10-10)
 
 
