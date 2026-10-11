@@ -42,4 +42,16 @@ func TestRenameNoReplaceFallsBackWhenFlagUnsupported(t *testing.T) {
 	if err != nil || string(got) != "hello" {
 		t.Fatalf("retained cur = %q, %v; the fallback must not replace it", got, err)
 	}
+
+	// A session directory publishes through the exclusive-placeholder path.
+	child, err := root.PublishInitializedDirectChildExclusive("session", 0o700, func(child *DeliveryRoot) error {
+		return child.EnsureAgentDirs("bob")
+	})
+	if err != nil {
+		t.Fatalf("publish session directory: %v", err)
+	}
+	_ = child.Close()
+	if info, err := os.Stat(AgentInboxNew(filepath.Join(base, "session"), "bob")); err != nil || !info.IsDir() {
+		t.Fatalf("published session inbox: info=%v err=%v", info, err)
+	}
 }
