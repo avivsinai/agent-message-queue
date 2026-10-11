@@ -96,6 +96,19 @@ func TestInstalledStopHookShapeAndCommandWord(t *testing.T) {
 	if again, _ := os.ReadFile(settingsPath(home)); string(again) != installed {
 		t.Fatalf("second install rewrote settings.json:\n%s", again)
 	}
+	// Field 2026-10-11: a reinstall from a new binary kept the stop hook on
+	// an old worktree build while it printed "stop hook installed".
+	if err := InstallStopHook(home, "/opt/homebrew/bin/amq-remote"); err != nil {
+		t.Fatal(err)
+	}
+	moved, _ := os.ReadFile(settingsPath(home))
+	if err := json.Unmarshal(moved, &s); err != nil {
+		t.Fatal(err)
+	}
+	if groups := s.Hooks["Stop"]; len(groups) != 1 || len(groups[0].Hooks) != 1 ||
+		groups[0].Hooks[0].Command != stopHookCommand("/opt/homebrew/bin/amq-remote") {
+		t.Fatalf("reinstall from another binary = %+v, want one hook on the new binary", groups)
+	}
 }
 
 // codex #855 r1 item 5 and r2 item 3: install into existing hooks without

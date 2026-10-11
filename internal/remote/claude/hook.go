@@ -56,8 +56,9 @@ const maxSettingsBytes = 4 << 20
 // item 3). A file that already had a Stop array round-trips byte for byte.
 
 // InstallStopHook adds the fail-open receiver to the Stop hook chain in
-// home/.claude/settings.json. Idempotent: when an entry carrying the
-// marker exists the file is left untouched. The settings leaf must be a
+// home/.claude/settings.json. Idempotent: the same entry is left untouched,
+// and a marked entry with another command (an older binary) is replaced.
+// The settings leaf must be a
 // regular file (lstat rule — a directory or symlink is refused); the write
 // is fsq atomic-replace.
 //
@@ -71,13 +72,13 @@ const maxSettingsBytes = 4 << 20
 // may hold: the file is one appended line per turn, and it is removed when
 // the attachment unsubscribes. User off removes only the Buzz binding.
 func InstallStopHook(home, bin string) error {
-	return mutateHook(home, stopHook, stopHookEntry(bin))
+	return replaceHook(home, stopHook, stopHookCommand(bin), stopHookEntry(bin))
 }
 
 // UninstallStopHook removes marked entries from the Stop chain. When no
 // marked entry exists the file is untouched (no rewrite, no mtime churn).
 func UninstallStopHook(home string) error {
-	return mutateHook(home, stopHook, nil)
+	return removeHook(home, stopHook)
 }
 
 // hookSpec names one hook event chain in settings.json and the marker that
@@ -108,22 +109,27 @@ func InstallPermissionHook(home, bin string, wait time.Duration, pin HookPin) er
 	if pin != (HookPin{}) && !pin.Complete() {
 		return fmt.Errorf("an owner pin needs the owner, an absolute AMQ root, the share session, its relay, body, DM channel and target: %+v", pin)
 	}
-	cmds, err := installedCommands(home, permissionSpec)
+	return replaceHook(home, permissionSpec, permissionHookCommand(bin, wait, pin), permissionHookEntry(bin, wait, pin))
+}
+
+// replaceHook makes entry, whose hook runs command, the only marked entry
+// of spec's chain. The same single entry is kept untouched; any other marked
+// entry (an older binary path, other flags) is replaced in one write.
+func replaceHook(home string, spec hookSpec, command string, entry []byte) error {
+	cmds, err := installedCommands(home, spec)
 	if err != nil {
 		return err
 	}
-	if len(cmds) == 1 && cmds[0] == permissionHookCommand(bin, wait, pin) {
+	if len(cmds) == 1 && cmds[0] == command {
 		return nil // already installed as asked
 	}
-	entry := permissionHookEntry(bin, wait, pin)
-	// One write: the marked entries out and the new one in.
 	return editSettings(home, true, func(raw []byte) ([]byte, error) {
-		if cut, err := rawRemoveEntries(raw, permissionSpec); err != nil {
+		if cut, err := rawRemoveEntries(raw, spec); err != nil {
 			return nil, err
 		} else if cut != nil {
 			raw = cut
 		}
-		return rawInsertEntry(raw, permissionSpec, entry)
+		return rawInsertEntry(raw, spec, entry)
 	})
 }
 
@@ -245,7 +251,7 @@ func PinWarnings(home string) ([]string, error) {
 
 // UninstallPermissionHook removes only the marked PermissionRequest entry.
 func UninstallPermissionHook(home string) error {
-	return mutateHook(home, permissionSpec, nil)
+	return removeHook(home, permissionSpec)
 }
 
 // PermissionHookState is StopHookState for the PermissionRequest entry.
@@ -311,14 +317,9 @@ func settingsPath(home string) string {
 	return filepath.Join(home, ".claude", "settings.json")
 }
 
-// mutateHook installs entry into spec's chain, or removes spec's marked
-// entries when entry is nil.
-func mutateHook(home string, spec hookSpec, entry []byte) error {
-	install := entry != nil
-	return editSettings(home, install, func(raw []byte) ([]byte, error) {
-		if install {
-			return rawInsertEntry(raw, spec, entry)
-		}
+// removeHook removes spec's marked entries.
+func removeHook(home string, spec hookSpec) error {
+	return editSettings(home, false, func(raw []byte) ([]byte, error) {
 		return rawRemoveEntries(raw, spec)
 	})
 }
