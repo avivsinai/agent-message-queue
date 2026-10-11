@@ -243,11 +243,18 @@ func TestMailboxRedeliveryPublishesOnce(t *testing.T) {
 // Field report 2026-10-05 (#951): a `coop exec --session` root has no
 // config.json, so `amq reply` to buzz refused with `mailbox for "buzz" is
 // incomplete`. Delivery must leave buzz a complete mailbox to answer.
+// It calls publishOnce, where the mailbox is made, without a turn timer: a
+// 50 ms turn budget expired before delivery on slow CI runners (runs
+// 38111619015 and 38141035300), and an expired budget correctly publishes
+// nothing.
 func TestMailboxDeliveryLeavesBuzzAMailbox(t *testing.T) {
-	s, root := mailboxServer(t)
-	s.cfg.TurnTimeout = 50 * time.Millisecond
-	if _, rpcErr := s.runRemote("s", "say hi", strings.Repeat("3", 64), newTurn(), func(any) error { return nil }); rpcErr != nil {
-		t.Fatal(rpcErr)
+	root := canonicalTempDir(t)
+	if err := os.MkdirAll(fsq.AgentInboxNew(root, "agent"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	b := binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: "agent"}
+	if err := publishOnce(b, "t", strings.Repeat("3", 64), time.Now(), "say hi"); err != nil {
+		t.Fatal(err)
 	}
 	identity, _ := fsq.SnapshotDeliveryRoot(root)
 	dr, err := fsq.OpenDeliveryRoot(root, identity)
