@@ -2,13 +2,16 @@
 
 package fsq
 
-import "golang.org/x/sys/unix"
-
+// renameDirectChildNoReplace publishes a staged directory through
+// renameatNoReplace. Where that falls back to check-then-rename (issue
+// #1034), a plain rename could replace an empty directory created inside
+// the window; the callers that create session names exclusively hold
+// launch.WithSessionCreationLock, which closes that window between them.
 func (r *DeliveryRoot) renameDirectChildNoReplace(oldName, newName string) error {
 	dir, err := r.root.Open(".")
 	if err != nil {
 		return err
 	}
 	defer func() { _ = dir.Close() }()
-	return unix.Renameat2(int(dir.Fd()), oldName, int(dir.Fd()), newName, unix.RENAME_NOREPLACE)
+	return renameatNoReplace(int(dir.Fd()), oldName, int(dir.Fd()), newName)
 }
