@@ -37,7 +37,7 @@ injection mode other than `none`, the wake delivers a doorbell for you.
 Run `amq drain --include-body` when it fires, then act on the messages.
 
 The default drain reads at most 20 messages in filename order, including held
-mail. After a full batch, check `amq list --new` and continue with bounded drains
+mail. After a full batch, check `amq list --new --limit 1` and continue with bounded drains
 as needed; do not assume the inbox is empty. Use `--limit 0` only for a known,
 manageable batch. Urgent hold bypass does not change drain order.
 

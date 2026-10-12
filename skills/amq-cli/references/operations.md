@@ -594,7 +594,7 @@ For the live-wake receive rule and notify-only supervisor exception, see
 [Receive under a live wake](../SKILL.md#receive-under-a-live-wake).
 
 Drains select messages in filename order, not priority order. Check `amq list
---new` for remaining mail after a full batch, and handle any drain error before
+--new --limit 1` for remaining mail after a full batch, and handle any drain error before
 continuing. A full batch is not proof that the inbox is empty; `urgent` bypasses
 the wake hold, not the drain limit or ordering. Keep continuation bounded rather
 than accumulating an unlimited backlog in the model context.
