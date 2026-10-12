@@ -670,8 +670,9 @@ Hold by priority (default off): --hold-normal and --hold-low delay the
   no hold. Urgent mail skips the hold, even behind a parked cohort.
   Ordinary urgent mail still follows debounce and input deferral; mail
   with the configured interrupt label uses the interrupt path. After the
-  first attempt, the configured retry policy applies. A drain takes all
-  mail; the hold never acks or deletes it or guarantees consumption time.
+  first attempt, the configured retry policy applies. A drain can take held
+  mail, up to its limit (default 20, filename order). The hold never acks
+  or deletes mail or guarantees consumption time.
   Example: --hold-normal 5m --hold-low 30m; use --priority urgent for
   time-critical unblocking requests or verdicts.
 

@@ -36,14 +36,19 @@ If session-start context says `wake=live(...)`, or
 injection mode other than `none`, the wake delivers a doorbell for you.
 Run `amq drain --include-body` when it fires, then act on the messages.
 
+The default drain reads at most 20 messages in filename order, including held
+mail. After a full batch, check `amq list --new --limit 1` and continue with bounded drains
+as needed; do not assume the inbox is empty. Use `--limit 0` only for a known,
+manageable batch. Urgent hold bypass does not change drain order.
+
 Do not run `amq watch`, `amq monitor`, sleep-poll, or start another inbox
 watcher under that live wake. A blocking wait holds your turn while the
 doorbell queues behind it. When your work is done, finish the turn; do not
 keep a tool running or send idle check-ins just to wait for mail.
 
 A wake can hold its first doorbell for routine mail with the `hold_normal` and
-`hold_low` settings; `5m` / `30m` is an opt-in example. One drain takes all
-pending mail, and the configured retry policy applies after the first attempt.
+`hold_low` settings; `5m` / `30m` is an opt-in example. The configured retry
+policy applies after the first attempt.
 Urgent priority skips the hold. Ordinary urgent mail still passes through
 debounce and input deferral; urgent mail with the configured interrupt label
 follows the interrupt path.
@@ -89,6 +94,18 @@ Without an injecting wake, use the receive methods in the operations guide.
 A notify-only wake (`--inject-mode none`) paired with a supervisor `monitor`
 service is a separate supported setup.
 
+## Send useful handoffs
+
+For one related batch, send one completion handoff with artifact paths, the
+relevant source or digest, checks, failed or pending parts, and the next action
+or actor. Send independent blockers promptly; send a partial result when the
+receiver can act on it before the rest finishes.
+
+Send status when work starts, a state, decision, or result changes, or an agreed
+escalation is due. Avoid file-by-file completion notices and unchanged check-ins.
+Automated callers own duplicate suppression by item, revision, and event;
+AMQ threads correlate messages, but do not deduplicate repeated sends.
+
 ## Route the task
 
 | Need | Read or run |
@@ -127,7 +144,8 @@ are in the [amq-remote reference](https://github.com/avivsinai/agent-message-que
 ## Safety and delivery rules
 
 - A wake notification is attention, not consumption proof. Use receipts or
-  `--wait-for drained` when delivery proof matters.
+  `--wait-for drained` when delivery proof matters. A `drained` receipt proves
+  ingestion, not that the requested work is complete.
 - Preserve the existing thread when replying. Drain again after a doorbell;
   the newest complete message body is authoritative.
 - Cleanup is explicit through `amq cleanup`. Do not add automatic deletion.

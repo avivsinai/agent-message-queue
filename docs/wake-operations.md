@@ -38,8 +38,9 @@ running wake. Both write [`.wake.settings`](#live-settings).
 - The first undrained message sets one deadline: its inbox arrival time plus
   the hold for its priority. Before the first attempt, a later message can
   pull this deadline earlier, never later. When the deadline passes, the
-  first doorbell becomes eligible. A drain before then cancels it; a drain
-  after any doorbell takes every pending message, including held mail.
+  first doorbell becomes eligible. Draining all pending mail before then
+  cancels it. A drain can take held mail, but respects its message limit
+  (default 20, filename order); urgent hold bypass does not change drain order.
 - Arrival time comes from the file's modification time in `inbox/new`, not
   the sender's header clock. A restart with the same hold settings reads
   the same file and retains its deadline. A missing or future-dated
