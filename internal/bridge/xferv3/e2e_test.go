@@ -86,6 +86,36 @@ func TestP2POneSidedResponderHasMail(t *testing.T) {
 	}
 }
 
+func TestRoundClosesWhenFileFailsAfterAdmission(t *testing.T) {
+	mac := newPeerHost(t, "mac", "codex", bytes.Repeat([]byte{0x71}, 32))
+	box := newPeerHost(t, "box", "grok", bytes.Repeat([]byte{0x72}, 32))
+	pinPeers(t, &mac, &box)
+	pinPeers(t, &box, &mac)
+	idText := writeOwed(t, mac, box, "admit-fail", "should not file")
+	rx := filepath.Join(box.root, "bridge", "rx", "mac")
+	if err := os.MkdirAll(filepath.Dir(rx), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(rx, []byte("not-a-dir"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	left, right := net.Pipe()
+	t.Cleanup(func() {
+		_ = left.Close()
+		_ = right.Close()
+	})
+	if err := SyncPipe(left, right, mac.state, box.state); err == nil {
+		t.Fatal("session completed after a post-admission File error")
+	}
+	if got := readInbox(t, box.root, "grok"); len(got) != 0 {
+		t.Fatalf("box inbox = %q", got)
+	}
+	if _, err := os.Stat(filepath.Join(mac.root, "bridge", "tx", "box", idText)); err != nil {
+		t.Fatalf("mac outbox lost %s: %v", idText, err)
+	}
+}
+
 type peerHost struct {
 	root  string
 	host  Host
