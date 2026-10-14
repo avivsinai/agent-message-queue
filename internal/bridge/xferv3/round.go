@@ -25,13 +25,15 @@ func Round(sess *Session, self HostState, initiator bool) error {
 	peerDone := false
 	for !selfDone || !peerDone {
 		if initiator {
-			done, err := offerPage(sess, self)
-			if err != nil {
-				return err
+			if !selfDone {
+				done, err := offerPage(sess, self)
+				if err != nil {
+					return err
+				}
+				selfDone = done
 			}
-			selfDone = done
 			if !peerDone {
-				done, err = answerPage(sess, self)
+				done, err := answerPage(sess, self)
 				if err != nil {
 					return err
 				}
@@ -45,11 +47,13 @@ func Round(sess *Session, self HostState, initiator bool) error {
 				}
 				peerDone = done
 			}
-			done, err := offerPage(sess, self)
-			if err != nil {
-				return err
+			if !selfDone {
+				done, err := offerPage(sess, self)
+				if err != nil {
+					return err
+				}
+				selfDone = done
 			}
-			selfDone = done
 		}
 	}
 	return nil
@@ -102,7 +106,7 @@ func offerPage(sess *Session, self HostState) (bool, error) {
 			if !ok {
 				return false, ErrBadID
 			}
-			if err := VerifyAndConsume(item.Path, self.Snap.PeerKey, receipt); err != nil {
+			if err := VerifyAndConsume(item.Path, self.Snap.PeerKey, receipt, self.Snap.Peer, self.Snap.Local, item.Signed.ID()); err != nil {
 				return false, err
 			}
 		case frameWant:
@@ -136,7 +140,7 @@ func offerPage(sess *Session, self HostState) (bool, error) {
 			if err != nil {
 				return false, err
 			}
-			if err := VerifyAndConsume(item.Path, self.Snap.PeerKey, receipt); err != nil {
+			if err := VerifyAndConsume(item.Path, self.Snap.PeerKey, receipt, self.Snap.Peer, self.Snap.Local, item.Signed.ID()); err != nil {
 				return false, err
 			}
 		case frameNo:
