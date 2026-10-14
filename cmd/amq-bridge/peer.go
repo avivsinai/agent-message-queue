@@ -118,16 +118,20 @@ func runPeerAdd(args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := xferv3.StorePeer(*root, peer); err != nil {
-		return err
-	}
+	wroteTrust := false
 	if *replace {
 		err = bridge.ReplaceTrusted(*root, recordHost, pub, generation)
 	} else {
 		err = bridge.WriteTrusted(*root, recordHost, pub, generation)
+		wroteTrust = err == nil
 	}
 	if err != nil {
-		_ = xferv3.RemovePeer(*root, host)
+		return err
+	}
+	if err := xferv3.StorePeer(*root, peer); err != nil {
+		if wroteTrust {
+			_ = bridge.DeleteTrusted(*root, recordHost)
+		}
 		return err
 	}
 	fmt.Printf("peer host=%s allow_in=%s fingerprint=%s\n", host.String(), *allowIn, lineFP)
