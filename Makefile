@@ -1,4 +1,4 @@
-.PHONY: build test fmt fmt-check vet lint check ci smoke contract-check check-skills check-docs-cli docs-cli hook-env-check check-xferv3 check-xferv3-tx check-xferv3-ring check-xferv3-recv check-xferv3-e2e check-xferv3-pair
+.PHONY: build test fmt fmt-check vet lint check ci smoke contract-check check-skills check-docs-cli docs-cli hook-env-check check-xferv3 check-xferv3-tx check-xferv3-ring check-xferv3-recv check-xferv3-e2e check-xferv3-pair check-xferv3-up
 
 GO_FILES := $(shell find . -name '*.go' -not -path './vendor/*' -not -path './.worktrees/*' -not -path './.agent-mail/*')
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
@@ -75,8 +75,11 @@ check-xferv3-pair:
 	go test -count=1 ./cmd/amq-bridge/ -run '^TestPeerAddWritesNothingUntilFingerprintMatches$$|^TestPeerAddRejectsLineHostMismatch$$|^TestPeerAddReplaceRollsTrustBackWhenStorePeerFails$$|^TestPeerRemoveRequiresConfirmHost$$|^TestPeerLinePrintsFingerprintOfLocalIdentity$$'
 	go test -count=1 ./internal/cli/ -run '^TestPeerPairWritesNothingUntilFingerprintIsSet$$|^TestPeerPairExecsAddThenLine$$'
 
+check-xferv3-up:
+	go test -count=1 ./internal/bridge/xferv3/ -run '^TestUpRefusesEmptyLedgerBesideMail$$|^TestDiscardRemovesOwedAndRecordsFact$$|^TestStatusListsOwedAndHoldPIDIsSingleton$$|^TestLaunchdPlistNamesBridgeUp$$'
+
 # Static gates the pre-push hook runs; tests and smoke run in CI.
-check: check-xferv3 check-xferv3-tx check-xferv3-ring check-xferv3-recv check-xferv3-e2e check-xferv3-pair check-skills check-docs-cli mod-tidy-check fmt-check vet lint
+check: check-xferv3 check-xferv3-tx check-xferv3-ring check-xferv3-recv check-xferv3-e2e check-xferv3-pair check-xferv3-up check-skills check-docs-cli mod-tidy-check fmt-check vet lint
 
 ci: check test smoke contract-check hook-env-check
 

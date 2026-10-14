@@ -40,8 +40,13 @@ amq-bridge peer line --root "$AM_ROOT" --fingerprint
 `amq peer pair --confirm-fingerprint <26-char> --allow-in <handles> '<line>'`
 execs `amq-bridge peer add` and prints the local line. The pin is not
 written until the fingerprint matches. Agents do not run `peer add`,
-`peer remove`, or `peer pair`. On the destination root, pipe the source's
-public record into:
+`peer remove`, or `peer pair`.
+
+`amq-bridge up` is the singleton supervisor: it refuses an empty v3 ledger
+beside a non-empty Maildir, holds `bridge/up.pid`, watches `bridge/tx/`,
+and reprints `status` on a jittered timer. `--ensure` prints the launchd
+plist. `discard --peer P --id ID` logs a discard fact and drops the owed
+file. On the destination root, pipe the source's public record into:
 
 ```sh
 amq-bridge trust add --root "$AM_ROOT" [--host <source_host>]
