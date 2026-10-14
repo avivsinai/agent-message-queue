@@ -193,6 +193,23 @@ func init() {
 				{Name: "resume", Summary: "Resume an existing session through launch reconciliation", Handler: runSession},
 			},
 		},
+		{
+			Name:        "peer",
+			Summary:     "Pair a peer host through amq-bridge",
+			Description: "Operator-only pairing",
+			LongDescription: []string{
+				"amq peer pair execs amq-bridge peer add and prints the local pairing line.",
+				"It writes nothing until --confirm-fingerprint matches the peer line.",
+				"Agents do not run peer pair, peer add, or peer remove.",
+			},
+			Examples: []string{
+				"amq peer pair --confirm-fingerprint abcdefghijklmnopqrstuvwxyz --allow-in codex 'amq1:box:...'",
+			},
+			Handler: runPeer,
+			Children: []CommandInfo{
+				{Name: "pair", Summary: "Pin a peer line and print the local line", Handler: runPeerPair},
+			},
+		},
 		{Name: "who", Summary: "Show sessions and agents in current project", Handler: runWho},
 		{
 			Name:        "route",
