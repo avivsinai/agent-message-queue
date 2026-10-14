@@ -130,10 +130,13 @@ func SetBackoff(root string, peer Host, id ID, reason string, now time.Time) err
 	}
 	delay := 5 * time.Second
 	if raw, err := os.ReadFile(path); err == nil {
-		if n, conv := strconv.ParseInt(strings.TrimSpace(string(raw)), 10, 64); conv == nil && n > 0 {
-			prev := time.Unix(n, 0)
-			if prev.After(now) {
-				delay = prev.Sub(now) * 2
+		fields := strings.Fields(string(raw))
+		if len(fields) > 0 {
+			if n, conv := strconv.ParseInt(fields[0], 10, 64); conv == nil && n > 0 {
+				prev := time.Unix(n, 0)
+				if prev.After(now) {
+					delay = prev.Sub(now) * 2
+				}
 			}
 		}
 	}

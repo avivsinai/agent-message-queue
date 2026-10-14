@@ -92,6 +92,24 @@ func TestStatusListsOwedAndHoldPIDIsSingleton(t *testing.T) {
 	}
 }
 
+func TestSetBackoffDoublesFromReasonedFile(t *testing.T) {
+	root := t.TempDir()
+	peer := mustHost(t, "box")
+	var id ID
+	copy(id.sum[:], bytes.Repeat([]byte{0x11}, 32))
+	now := time.Unix(1_800_000_000, 0)
+	if err := SetBackoff(root, peer, id, "busy", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetBackoff(root, peer, id, "busy", now); err != nil {
+		t.Fatal(err)
+	}
+	next := nextTry(root, peer, id)
+	if !next.Equal(now.Add(10 * time.Second)) {
+		t.Fatalf("next = %s, want %s", next, now.Add(10*time.Second))
+	}
+}
+
 func TestLaunchdPlistNamesBridgeUp(t *testing.T) {
 	text := LaunchdPlist("/usr/local/bin/amq-bridge", "/var/amq")
 	if !strings.Contains(text, "io.github.avivsinai.amq-bridge-up") || !strings.Contains(text, "--root") {

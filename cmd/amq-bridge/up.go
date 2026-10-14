@@ -202,7 +202,25 @@ func tryWake(root string) error {
 	if err != nil {
 		return nil
 	}
-	cmd := exec.Command(amq, "wake", "--root", root)
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	peers, err := xferv3.ListPeers(root)
+	if err != nil {
+		return err
+	}
+	var last error
+	seen := map[string]struct{}{}
+	for _, peer := range peers {
+		for _, handle := range peer.AllowIn() {
+			name := handle.String()
+			if _, ok := seen[name]; ok {
+				continue
+			}
+			seen[name] = struct{}{}
+			cmd := exec.Command(amq, "wake", "--root", root, "--me", name)
+			cmd.Stderr = os.Stderr
+			if err := cmd.Run(); err != nil {
+				last = err
+			}
+		}
+	}
+	return last
 }

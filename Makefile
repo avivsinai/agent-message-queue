@@ -76,7 +76,7 @@ check-xferv3-pair:
 	go test -count=1 ./internal/cli/ -run '^TestPeerPairWritesNothingUntilFingerprintIsSet$$|^TestPeerPairExecsAddThenLine$$'
 
 check-xferv3-up:
-	go test -count=1 ./internal/bridge/xferv3/ -run '^TestUpRefusesEmptyLedgerBesideMail$$|^TestDiscardRemovesOwedAndRecordsFact$$|^TestStatusListsOwedAndHoldPIDIsSingleton$$|^TestLaunchdPlistNamesBridgeUp$$'
+	go test -count=1 ./internal/bridge/xferv3/ -run '^TestUpRefusesEmptyLedgerBesideMail$$|^TestDiscardRemovesOwedAndRecordsFact$$|^TestStatusListsOwedAndHoldPIDIsSingleton$$|^TestSetBackoffDoublesFromReasonedFile$$|^TestLaunchdPlistNamesBridgeUp$$'
 
 # Static gates the pre-push hook runs; tests and smoke run in CI.
 check: check-xferv3 check-xferv3-tx check-xferv3-ring check-xferv3-recv check-xferv3-e2e check-xferv3-pair check-xferv3-up check-skills check-docs-cli mod-tidy-check fmt-check vet lint
