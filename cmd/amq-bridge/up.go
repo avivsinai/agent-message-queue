@@ -130,27 +130,54 @@ func watchUp(ctx context.Context, root string, interval time.Duration) error {
 	if err := os.MkdirAll(tx, 0o700); err != nil {
 		return err
 	}
-	if err := watcher.Add(tx); err != nil {
+	if err := watchTxTree(watcher, tx); err != nil {
 		return err
 	}
 	timer := time.NewTimer(jitter(interval))
 	defer timer.Stop()
 	for {
 		select {
-		case <-ctx.Done():
-			return nil
-		case <-watcher.Events:
+		case ev := <-watcher.Events:
+			if ev.Op&(fsnotify.Create|fsnotify.Rename) != 0 {
+				info, err := os.Stat(ev.Name)
+				if err == nil && info.IsDir() {
+					_ = watcher.Add(ev.Name)
+				}
+			}
+			_ = printStatus(root)
 			_ = tryWake(root)
 			resetTimer(timer, interval)
 		case <-timer.C:
+			_ = watchTxTree(watcher, tx)
+			_ = printStatus(root)
 			_ = tryWake(root)
 			resetTimer(timer, interval)
 		case err := <-watcher.Errors:
 			if err != nil {
 				return err
 			}
+		case <-ctx.Done():
+			return nil
 		}
 	}
+}
+
+func watchTxTree(watcher *fsnotify.Watcher, tx string) error {
+	if err := watcher.Add(tx); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(tx)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			if err := watcher.Add(filepath.Join(tx, entry.Name())); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func resetTimer(timer *time.Timer, interval time.Duration) {
