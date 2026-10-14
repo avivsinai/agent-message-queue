@@ -7,7 +7,6 @@ const (
 	DailyRing  = 24 * time.Hour
 )
 
-// PeerState is the durable facts the start and stale-daily policy reads.
 type PeerState struct {
 	MailPresentAtStart bool
 	StartRang          bool
@@ -15,8 +14,6 @@ type PeerState struct {
 	LastRing           time.Time
 }
 
-// ShouldRing reports whether up should fire a content-free ring now.
-// The normal 5s-to-2m wake ladder stays in amq wake.
 func ShouldRing(now time.Time, state PeerState) bool {
 	if state.MailPresentAtStart && !state.StartRang {
 		return true
