@@ -17,7 +17,17 @@ ENTRY = re.compile(r"^  ([A-Za-z0-9_-]+)\s{2,}(.+?)\s*$")
 # long option reference and does not print a Subcommands section. Keep this
 # small source-backed supplement so the public operator commands are covered.
 SOURCE_SUBCOMMANDS = {
-    "wake": ("check", "config", "repair", "restart", "recover-owner", "retire"),
+    "wake": (
+        "check",
+        "config",
+        "repair",
+        "restart",
+        "recover-owner",
+        "retire",
+        "dialog",
+        "install-dialog-hook",
+        "uninstall-dialog-hook",
+    ),
 }
 
 

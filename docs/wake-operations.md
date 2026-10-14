@@ -66,6 +66,62 @@ Use `amq send --priority urgent` or `amq reply --priority urgent` for a
 time-critical verdict or unblocking request that should skip the hold.
 Ordinary review responses remain normal by default.
 
+## Dialog guard (Claude Code)
+
+Doorbell text and its Enter answer whatever has focus. When Claude Code shows
+AskUserQuestion, ExitPlanMode, or a permission dialog, injected input picks an
+option the person did not choose. The terminal gives no signal that tells an
+open dialog from an idle prompt, so the guard uses Claude Code hooks:
+
+```bash
+amq wake install-dialog-hook
+```
+
+The installer adds marked command hooks (`AMQ_DIALOG_HOOK=1`) to the user
+settings file `~/.claude/settings.json` and leaves other content as it is.
+Running it again changes nothing; `amq wake uninstall-dialog-hook` removes the
+entries. Running sessions pick up the change through the settings watcher; if
+`/hooks` does not list the entries, restart the session. `amq doctor` warns
+when `~/.claude` exists and the hook is missing or runs an amq binary that is
+gone.
+
+- **Marker.** The hooks run `amq wake dialog open|close`, which writes or
+  removes `<root>/agents/<me>/.wake.dialog`. `open` runs on `PreToolUse` for
+  AskUserQuestion and ExitPlanMode, and on every `PermissionRequest`. `close`
+  runs on `PostToolUse` for the same two tools (only for the tool call that
+  opened the marker), and on `UserPromptSubmit`, `Stop`, `SessionStart`, and
+  `SessionEnd`. The receiver always exits 0 and prints nothing, so it never
+  decides a tool call or a permission.
+- **Identity.** The receiver finds the mailbox through `AM_ME` and `AM_ROOT`
+  in the Claude Code environment, which `amq coop exec` and `amq launch` set.
+  A Claude Code process started without them gets no marker, and its wake
+  behaves as it does without the hook.
+- **Hold.** Before each doorbell, reminder, or `--inject-cmd`/`--inject-via`
+  delivery, the wake reads the marker. While it exists, the wake writes no
+  terminal input, checks again every 2 seconds, and rings the full doorbell
+  once the marker is gone. The message stays in `inbox/new`. A hold is not a
+  delivery attempt: it does not use the reminder budget or write the
+  notification ledger. Every terminal write checks the marker again, so a
+  dialog that opens during a doorbell stops its remaining bytes; the held
+  Enter is sent after the dialog closes. Urgent and interrupt mail is held the
+  same way.
+- **Whole-turn hold after a permission dialog.** Permission hook input has no
+  tool call id, so only `Stop` or `UserPromptSubmit` clears a permission
+  marker. A doorbell that would land mid-turn after a permission dialog lands
+  when the turn ends or the person types.
+- **Esc and stale markers.** Esc on a dialog is a user interrupt, and Claude
+  Code runs no `Stop` hook for it. A denied permission is the same. The marker
+  then stays until the person's next prompt. A marker older than 10 minutes,
+  or one the wake cannot read, still blocks input; the wake adds attention
+  output (title, bell, desktop notice) on the attention cadence instead of
+  waiting silently.
+
+The guard does not cover dialogs without a hook: the workspace trust dialog,
+MCP elicitation, slash-command pickers, the `/resume` and `/model` menus, the
+rewind selector, and login or update prompts. It also cannot recall bytes the
+terminal already holds when a dialog opens. Use `--inject-mode none` when AMQ
+must write no terminal input at all.
+
 ## Live settings
 
 A running wake has two kinds of input.

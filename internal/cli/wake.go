@@ -62,7 +62,9 @@ type wakeConfig struct {
 	settingsLayers                wakeSettingsLayers // the last good docs cfg.settings is made of
 	settingsUnseeded              bool               // an unseeded resume runs argv settings until its seed lands
 	settingsTicks                 <-chan time.Time
-	holdPolicyChanged             bool // consumed by the next inbox scan that builds holds
+	holdPolicyChanged             bool                                         // consumed by the next inbox scan that builds holds
+	dialogSource                  func(now time.Time) (wakeDialogState, error) // reads .wake.dialog; nil = no dialog guard (direct loop tests)
+	dialogHold                    wakeDialogState                              // the state last held for, so each change logs once
 	recordSettingsApplied         func(wakeSettingsAppliedStatus) error
 	pendingSettingsApplied        *wakeSettingsAppliedStatus
 	doorbellNow                   func() time.Time
@@ -1125,6 +1127,15 @@ func deliverNewMessageNotification(
 			return nil
 		}
 	}
+	if cfg.injectMode != wakeInjectModeNone {
+		// #1054: hold before the attempt starts, so a hold is neither a
+		// ledger record nor an input attempt.
+		state, readErr := cfg.dialogState()
+		if state != wakeDialogClosed {
+			return holdWakeForDialog(cfg, state, readErr, notice.output)
+		}
+		cfg.dialogHold = wakeDialogClosed
+	}
 	if cfg.onNotificationAttemptStart != nil {
 		cfg.onNotificationAttemptStart()
 	}
@@ -1982,6 +1993,11 @@ func (err *wakeTerminalAuthorityError) Unwrap() error {
 }
 
 func authorizeTerminalWrite(cfg *wakeConfig) (bool, error) {
+	// #1054: a dialog that opened after the doorbell was planned parks the
+	// next byte, even mid-doorbell.
+	if state, _ := cfg.dialogState(); state != wakeDialogClosed {
+		return false, nil
+	}
 	if cfg.controlStop != nil {
 		select {
 		case <-cfg.controlStop:

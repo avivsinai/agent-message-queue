@@ -249,6 +249,44 @@ func PinWarnings(home string) ([]string, error) {
 	return out, nil
 }
 
+// CommandHook is one marked command hook in an event chain of the user
+// settings file: the command starts with marker, and an empty matcher
+// matches every tool or source.
+type CommandHook struct {
+	Event, Matcher, Marker, Command string
+	Timeout                         int
+}
+
+// InstallCommandHooks makes each hook the only entry marked with its marker
+// in its event chain, with replaceHook's rules: the same entry is kept and
+// any other marked entry is replaced.
+func InstallCommandHooks(home string, hooks []CommandHook) error {
+	for _, h := range hooks {
+		spec := hookSpec{event: h.Event, marker: h.Marker}
+		if err := replaceHook(home, spec, h.Command, commandHookEntry(h.Command, h.Matcher, h.Timeout)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// UninstallCommandHooks removes the entries marked with marker from each
+// event chain.
+func UninstallCommandHooks(home, marker string, events []string) error {
+	for _, event := range events {
+		if err := removeHook(home, hookSpec{event: event, marker: marker}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// MarkedHookCommands lists the commands marked with marker in the event
+// chain of the user settings file. A missing file lists none.
+func MarkedHookCommands(home, event, marker string) ([]string, error) {
+	return installedCommands(home, hookSpec{event: event, marker: marker})
+}
+
 // UninstallPermissionHook removes only the marked PermissionRequest entry.
 func UninstallPermissionHook(home string) error {
 	return removeHook(home, permissionSpec)
@@ -385,7 +423,7 @@ func permissionHookCommand(bin string, wait time.Duration, pin HookPin) string {
 // timeout PermissionHookGrace longer than the hook's own wait, so the hook
 // ends first and the terminal dialog decides.
 func permissionHookEntry(bin string, wait time.Duration, pin HookPin) []byte {
-	return commandHookEntry(permissionHookCommand(bin, wait, pin), int((wait+PermissionHookGrace)/time.Second))
+	return commandHookEntry(permissionHookCommand(bin, wait, pin), "", int((wait+PermissionHookGrace)/time.Second))
 }
 
 // stopHookEntry renders one Stop matcher group in Claude Code's settings
@@ -394,19 +432,21 @@ func permissionHookEntry(bin string, wait time.Duration, pin HookPin) []byte {
 // and internal/keepalive/hookinstall's SessionStart entry use the same
 // shape). Stop takes no matcher.
 func stopHookEntry(bin string) []byte {
-	return commandHookEntry(stopHookCommand(bin), 10)
+	return commandHookEntry(stopHookCommand(bin), "", 10)
 }
 
-// commandHookEntry renders one matcher group holding one command hook.
-func commandHookEntry(command string, timeout int) []byte {
+// commandHookEntry renders one matcher group holding one command hook. An
+// empty matcher writes none: the group matches every tool or source.
+func commandHookEntry(command, matcher string, timeout int) []byte {
 	type hook struct {
 		Type    string `json:"type"`
 		Command string `json:"command"`
 		Timeout int    `json:"timeout"`
 	}
 	b, _ := json.Marshal(struct {
-		Hooks []hook `json:"hooks"`
-	}{Hooks: []hook{{Type: "command", Command: command, Timeout: timeout}}})
+		Matcher string `json:"matcher,omitempty"`
+		Hooks   []hook `json:"hooks"`
+	}{Matcher: matcher, Hooks: []hook{{Type: "command", Command: command, Timeout: timeout}}})
 	return b
 }
 

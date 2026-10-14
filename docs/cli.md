@@ -49,6 +49,9 @@ options not repeated here.
 - [amq wake restart](#amq-wake-restart)
 - [amq wake recover-owner](#amq-wake-recover-owner)
 - [amq wake retire](#amq-wake-retire)
+- [amq wake dialog](#amq-wake-dialog)
+- [amq wake install-dialog-hook](#amq-wake-install-dialog-hook)
+- [amq wake uninstall-dialog-hook](#amq-wake-uninstall-dialog-hook)
 - [amq coop init](#amq-coop-init)
 - [amq coop exec](#amq-coop-exec)
 - [amq swarm list](#amq-swarm-list)
@@ -692,8 +695,15 @@ Interrupt notices (default on): urgent messages tagged with label "interrupt"
   group and can interrupt or crash the agent.
 
 Safety: raw, paste, --inject-cmd, --inject-via, and opt-in interrupt Ctrl+C
-  can activate a focused permission/approval dialog. Use none when AMQ
-  must enforce zero synthetic input; stderr output may scribble until redraw.
+  can activate a focused permission/approval dialog. With the Claude Code
+  dialog hook (amq wake install-dialog-hook), the wake writes no input while
+  AskUserQuestion, ExitPlanMode, or a permission dialog is open, and rings
+  about 2s after it closes; after a permission dialog it rings when the turn
+  ends or the person types. A marker older than 10m gets attention output,
+  still no input. Dialogs without a hook (workspace trust, pickers, MCP
+  elicitation) are not guarded. amq wake dialog is the hook receiver; amq wake
+  uninstall-dialog-hook removes the hooks. Use none when AMQ must enforce
+  zero synthetic input; stderr output may scribble until redraw.
 
 Self-upgrade: eligible co-op wakes observe their stable launch symlink and
   replace the running image only with a strictly newer installed AMQ while
@@ -1421,6 +1431,64 @@ Options:
         Error on unknown handles (default: warn)
   -takeover
         Retire a wake another surface started (a take): match the saved target's injector instead of --inject-via; requires --if-generation
+```
+
+## amq wake dialog
+
+```text
+$ amq wake dialog --help
+Usage:
+  amq wake dialog open|close [--me <agent>] [--root <path>]
+
+Claude Code hook receiver for the wake dialog guard; amq wake install-dialog-hook
+installs it. Reads the hook input JSON on stdin.
+
+open writes <root>/agents/<me>/.wake.dialog; the wake writes no terminal input while
+it is present. close removes it; a close with a tool_use_id removes only the marker
+of that tool call, and a close with unreadable input keeps it. A close with empty
+stdin removes it. Always exits 0 once the arguments parse and prints nothing.
+
+Options:
+  -me string
+        Agent handle (or AM_ME)
+  -root string
+        Root directory for the queue (default: AM_ROOT, else .amqrc discovery from the hook's cwd)
+```
+
+## amq wake install-dialog-hook
+
+```text
+$ amq wake install-dialog-hook --help
+Usage:
+  amq wake install-dialog-hook [--dry-run]
+
+Install the wake dialog guard hooks in ~/.claude/settings.json.
+
+While Claude Code shows AskUserQuestion, ExitPlanMode or a permission dialog,
+the hooks keep a marker in the agent's mailbox and every wake of that agent
+holds its doorbell, so injected input cannot answer the dialog. The hooks find
+the agent through AM_ME and AM_ROOT in the Claude Code environment, which
+amq coop exec and amq launch set; without them the guard does nothing.
+
+Running again keeps the same entries and replaces entries of another amq
+binary. Other settings and hooks are not changed. Running Claude Code
+sessions pick the change up through the settings watcher; if /hooks does not
+list the AMQ_DIALOG_HOOK entries, restart the session.
+
+Options:
+  -dry-run
+        Print the hooks without changing the settings file
+```
+
+## amq wake uninstall-dialog-hook
+
+```text
+$ amq wake uninstall-dialog-hook --help
+Usage:
+  amq wake uninstall-dialog-hook
+
+Remove the wake dialog guard hooks (AMQ_DIALOG_HOOK entries) from
+~/.claude/settings.json. Other settings and hooks are not changed.
 ```
 
 ## amq coop init

@@ -166,6 +166,9 @@ func runDoctor(args []string) error {
 
 	// Hook config health: flag AMQ-owned SessionStart hooks whose script is gone.
 	result.Checks = append(result.Checks, checkHookConfigs())
+	if check, ok := checkClaudeDialogHook(); ok {
+		result.Checks = append(result.Checks, check)
+	}
 
 	// Ops checks (runtime health)
 	if *opsFlag && root != "" {

@@ -190,7 +190,10 @@ amq coop exec --require-wake --wake-inject-mode none claude
 
 `none` never writes terminal input. Other input-injecting modes can activate a
 permission or approval dialog; input deferral reduces collisions but cannot
-detect an idle dialog. Use `none` when zero synthetic input is required.
+detect an idle dialog. For Claude Code, `amq wake install-dialog-hook` holds
+the doorbell while AskUserQuestion, ExitPlanMode, or a permission dialog is open;
+see [Dialog guard](docs/wake-operations.md#dialog-guard-claude-code) for the
+dialogs it cannot see. Use `none` when zero synthetic input is required.
 Removing Enter or sanitizing payload text does not prevent single-key approval
 shortcuts. A partially typed prompt already consumed by the app can still be
 submitted after the quiet window. Urgent interrupts bypass input deferral;
