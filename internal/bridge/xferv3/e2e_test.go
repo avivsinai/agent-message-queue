@@ -53,6 +53,39 @@ func TestP2PTwoPeersExchangeOverPipe(t *testing.T) {
 	log.Printf("p2p e2e: both receipts consumed the outbox files")
 }
 
+func TestP2POneSidedResponderHasMail(t *testing.T) {
+	mac := newPeerHost(t, "mac", "codex", bytes.Repeat([]byte{0x61}, 32))
+	box := newPeerHost(t, "box", "grok", bytes.Repeat([]byte{0x62}, 32))
+	pinPeers(t, &mac, &box)
+	pinPeers(t, &box, &mac)
+	idText := writeOwed(t, box, mac, "one-sided", "only box sent this")
+
+	left, right := net.Pipe()
+	t.Cleanup(func() {
+		_ = left.Close()
+		_ = right.Close()
+	})
+	done := make(chan error, 1)
+	go func() {
+		done <- SyncPipe(left, right, mac.state, box.state)
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("one-sided sync: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("one-sided sync hung after the empty initiator sent DONE")
+	}
+	got := readInbox(t, mac.root, "codex")
+	if len(got) != 1 || !bytes.Contains(got[0], []byte("only box sent this")) {
+		t.Fatalf("mac inbox = %q", got)
+	}
+	if _, err := os.Stat(filepath.Join(box.root, "bridge", "tx", "mac", idText)); !os.IsNotExist(err) {
+		t.Fatalf("box outbox still holds %s: %v", idText, err)
+	}
+}
+
 type peerHost struct {
 	root  string
 	host  Host

@@ -57,7 +57,11 @@ func ConsumeTx(path string) error {
 	return os.Remove(path)
 }
 
-func VerifyAndConsume(path string, pub ed25519.PublicKey, receipt SignedReceipt) error {
+func VerifyAndConsume(path string, pub ed25519.PublicKey, receipt SignedReceipt, receiver, sender Host, id ID) error {
+	got := receipt.Receipt()
+	if got.ID() != id || got.Receiver() != receiver || got.Sender() != sender {
+		return ErrBadID
+	}
 	if err := VerifyReceipt(pub, receipt); err != nil {
 		return err
 	}
