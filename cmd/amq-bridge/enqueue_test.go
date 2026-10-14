@@ -325,17 +325,11 @@ func TestRunEnqueueWritesTxForPinnedPeer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	spoolPath := strings.TrimSpace(string(out))
-	wantSpool := filepath.Join(root, "bridge", "outbox", "codex", "new", "pinned-enqueue.md")
-	if spoolPath != wantSpool {
-		t.Fatalf("spool path = %q, want %q", spoolPath, wantSpool)
+	if strings.TrimSpace(string(out)) != "" {
+		t.Fatalf("pinned enqueue wrote a v2 spool path %q", strings.TrimSpace(string(out)))
 	}
-	got, err := os.ReadFile(spoolPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(got) != string(message) {
-		t.Fatalf("spool bytes changed")
+	if _, err := os.Lstat(filepath.Join(root, "bridge", "outbox", "codex", "new", "pinned-enqueue.md")); !os.IsNotExist(err) {
+		t.Fatalf("v2 spool exists: %v", err)
 	}
 	source, err := xferv3.ParseHost("grok-host")
 	if err != nil {
@@ -364,6 +358,57 @@ func TestRunEnqueueWritesTxForPinnedPeer(t *testing.T) {
 	txPath := filepath.Join(root, "bridge", "tx", "mac", rec.ID().String())
 	if _, err := os.Lstat(txPath); err != nil {
 		t.Fatalf("tx file: %v", err)
+	}
+}
+
+func TestRunEnqueuePinnedDestMustBeAllowlisted(t *testing.T) {
+	root := newBridgeRoot(t, "codex")
+	if err := bridge.WriteHostID(root, "grok-host"); err != nil {
+		t.Fatal(err)
+	}
+	key, err := bridge.GenerateHostKey("1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := bridge.WriteIdentity(root, key); err != nil {
+		t.Fatal(err)
+	}
+	host, err := xferv3.ParseHost("mac")
+	if err != nil {
+		t.Fatal(err)
+	}
+	allow, err := xferv3.ParseHandle("claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var xPublic [32]byte
+	peer, err := xferv3.NewPeer(host, []xferv3.Handle{allow}, "", xPublic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := xferv3.StorePeer(root, peer); err != nil {
+		t.Fatal(err)
+	}
+	configPath := writeEnqueueConfigFile(t, root, EnqueueConfigFile{
+		Root:               root,
+		SourceHost:         "grok-host",
+		SourceHandle:       "codex",
+		AllowedDestAliases: []string{"mac/claude"},
+	})
+	message := testMessage(t, "blocked-enqueue", "p2p/codex__other", "codex", "no")
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldStdin := os.Stdin
+	os.Stdin = r
+	t.Cleanup(func() { os.Stdin = oldStdin })
+	go func() {
+		_, _ = w.Write(message)
+		_ = w.Close()
+	}()
+	if err := runEnqueue([]string{"--config", configPath, "--dest-alias", "mac/other"}); err == nil {
+		t.Fatal("pinned dest outside the allowlist was accepted")
 	}
 }
 
