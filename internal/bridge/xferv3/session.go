@@ -23,11 +23,9 @@ const (
 )
 
 type Session struct {
-	rw    io.ReadWriter
-	send  *noise.CipherState
-	recv  *noise.CipherState
-	local Host
-	peer  Host
+	rw   io.ReadWriter
+	send *noise.CipherState
+	recv *noise.CipherState
 }
 
 func Dial(rw io.ReadWriter, local Static, peerPub [32]byte, rng io.Reader) (*Session, error) {
