@@ -1,4 +1,4 @@
-.PHONY: build test fmt fmt-check vet lint check ci smoke contract-check check-skills check-docs-cli docs-cli hook-env-check
+.PHONY: build test fmt fmt-check vet lint check ci smoke contract-check check-skills check-docs-cli docs-cli hook-env-check check-xferv3
 
 GO_FILES := $(shell find . -name '*.go' -not -path './vendor/*' -not -path './.worktrees/*' -not -path './.agent-mail/*')
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
@@ -53,8 +53,12 @@ smoke:
 	AMQ_WAKE_OWNER=smoke-inherited-wake-owner \
 	./scripts/smoke-test.sh
 
+check-xferv3:
+	go test -count=1 ./internal/bridge/xferv3/ -run '^TestVectors$$'
+	go test -count=1 ./internal/bridge/ -run '^TestPackageBridgeDoesNotImportXferv3$$'
+
 # Static gates the pre-push hook runs; tests and smoke run in CI.
-check: check-skills check-docs-cli mod-tidy-check fmt-check vet lint
+check: check-xferv3 check-skills check-docs-cli mod-tidy-check fmt-check vet lint
 
 ci: check test smoke contract-check hook-env-check
 

@@ -315,3 +315,45 @@ actual operator-managed recovery limit of this protocol version.
 artifact's path as `committed_path` (a replayed receipt for a consumer-drained
 transfer reports the drain surface — new/cur/DLQ — where the delivery was
 verified).
+
+### Addendum 5 — Transfer record v3
+
+Envelope v2, `apply-file`, the HTTPS spool, and the v2 transfer ledger stay.
+A v3 transfer is a sibling type in `internal/bridge/xferv3`. Package `bridge`
+does not import it. Core `amq` stays socket-free.
+
+The v3 record, id, signature, receipt, offer page, seed-to-X25519 derivation,
+and Noise IK handshake are the layouts in
+`internal/bridge/xferv3/testdata/vectors.json`. That file is the byte
+authority. `make check-xferv3` fails if any vector drifts.
+
+The record is eight length-prefixed fields in this order: `amq-xfer-v3`,
+source host, handle, dest alias (`host/agent`), source message id, thread id,
+`payload_size` (8-byte big-endian uint64), and `payload_sha256` (32 raw
+bytes). `id` is lowercase unpadded standard base32 of SHA-256 over those
+bytes. The Ed25519 signature is over length-prefixed `amq-env-v3` and the
+52-character id text. The signature sits beside the record, so a re-sign
+keeps the id.
+
+A receipt is length-prefixed `amq-receipt-v1`, receiver host, sender host,
+id text, and `STORED`. An offer page is `amq-offer-v3`, a page index, a
+count of at most 32, then that many record-plus-signature pairs. A disk
+bundle is the record, the signature, and the payload.
+
+v3 host and handle names are 1 to 63 bytes from `[a-z0-9._-]`, and are never
+`.` or `..`. v2 `ParseAlias` and `validateBridgeIdentifier` stay on the
+stricter grammar and still refuse a dot.
+
+The X25519 static is HKDF-SHA256 of the 32-byte Ed25519 seed, salt `amq-v3`,
+info `amq-v3-x25519-static`. It is never stored. The Noise session is
+`Noise_IK_25519_ChaChaPoly_BLAKE2s` with prologue `amq-v3`, using
+`github.com/flynn/noise` v1.1.0.
+
+The v3 outbox is `bridge/tx/<peer>/<id>`. The v1
+`tx/<peer>/{tmp,new,committed,rejected}` tree is not that layout. The v2
+ledger stays beside any later v3 ledger. Already-filed v2 ids are not
+re-hashed. Drain every v2 outbox before a host offers v3 records.
+
+v3 ledger states `intent` and `published`, the power-loss window, and
+`NO <reason>` belong to the receive-path PR. This addendum leaves the v2
+ledger in place.
