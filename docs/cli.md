@@ -32,6 +32,7 @@ options not repeated here.
 - [amq integration](#amq-integration)
 - [amq receipts](#amq-receipts)
 - [amq session](#amq-session)
+- [amq peer](#amq-peer)
 - [amq who](#amq-who)
 - [amq route](#amq-route)
 - [amq doctor](#amq-doctor)
@@ -67,6 +68,7 @@ options not repeated here.
 - [amq session create](#amq-session-create)
 - [amq session list](#amq-session-list)
 - [amq session resume](#amq-session-resume)
+- [amq peer pair](#amq-peer-pair)
 - [amq route explain](#amq-route-explain)
 - [amq integration symphony init](#amq-integration-symphony-init)
 - [amq integration symphony emit](#amq-integration-symphony-emit)
@@ -105,6 +107,7 @@ Commands:
   integration  Optional interoperability adapters
   receipts     Message delivery receipts
   session      Create, list, and resume named AMQ sessions
+  peer         Pair a peer host through amq-bridge
   who          Show sessions and agents in current project
   route        Explain canonical routing
   doctor       Verify installation and configuration
@@ -925,6 +928,25 @@ Examples:
   amq session resume feature-x --json
 
 Use "amq session <subcommand> --help" for details.
+```
+
+## amq peer
+
+```text
+$ amq peer --help
+amq peer - Operator-only pairing
+
+amq peer pair execs amq-bridge peer add and prints the local pairing line.
+It writes nothing until --confirm-fingerprint matches the peer line.
+Agents do not run peer pair, peer add, or peer remove.
+
+Subcommands:
+  pair  Pin a peer line and print the local line
+
+Examples:
+  amq peer pair --confirm-fingerprint abcdefghijklmnopqrstuvwxyz --allow-in codex 'amq1:box:...'
+
+Use "amq peer <subcommand> --help" for details.
 ```
 
 ## amq who
@@ -1907,6 +1929,33 @@ Options:
         Root directory for the queue (default ".agent-mail")
   -session string
         Named session to launch or resume
+  -strict
+        Error on unknown handles (default: warn)
+```
+
+## amq peer pair
+
+```text
+$ amq peer pair --help
+Usage:
+  amq peer pair [line] [options]
+
+Exec amq-bridge peer add, then print the local pairing line.
+Writes nothing until --confirm-fingerprint matches the peer line.
+
+Options:
+  -allow-in string
+        comma-separated inbound handles
+  -confirm-fingerprint string
+        26-character fingerprint that must match before the pin is written
+  -from-line string
+        pairing line from amq-bridge peer line
+  -json
+        Emit JSON output
+  -me string
+        Agent handle (or AM_ME)
+  -root string
+        Root directory for the queue (default ".agent-mail")
   -strict
         Error on unknown handles (default: warn)
 ```

@@ -29,7 +29,18 @@ amq-bridge identity public --root "$AM_ROOT"
 ```
 
 Copy only that public identity record to the peer — or, better, let the
-provisioning command do it. On the destination root, pipe the source's
+provisioning command do it. The pairing line is the public identity plus
+the derived X25519 static and an optional pipe ticket:
+
+```sh
+amq-bridge peer line --root "$AM_ROOT"
+amq-bridge peer line --root "$AM_ROOT" --fingerprint
+```
+
+`amq peer pair --confirm-fingerprint <26-char> --allow-in <handles> '<line>'`
+execs `amq-bridge peer add` and prints the local line. The pin is not
+written until the fingerprint matches. Agents do not run `peer add`,
+`peer remove`, or `peer pair`. On the destination root, pipe the source's
 public record into:
 
 ```sh
