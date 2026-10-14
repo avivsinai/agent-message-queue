@@ -54,6 +54,32 @@ func main() {
 		}
 		return
 	}
+	if len(args) > 0 && args[0] == "sync" {
+		if err := runSync(args[1:]); err != nil {
+			if errors.Is(err, flag.ErrHelp) {
+				return
+			}
+			fmt.Fprintln(os.Stderr, "amq-bridge sync:", err)
+			if isUsageError(err) {
+				os.Exit(2)
+			}
+			os.Exit(1)
+		}
+		return
+	}
+	if len(args) > 0 && args[0] == "listen" {
+		if err := runListen(args[1:]); err != nil {
+			if errors.Is(err, flag.ErrHelp) {
+				return
+			}
+			fmt.Fprintln(os.Stderr, "amq-bridge listen:", err)
+			if isUsageError(err) {
+				os.Exit(2)
+			}
+			os.Exit(1)
+		}
+		return
+	}
 	if len(args) > 0 && args[0] == "ring" {
 		if err := runRing(args[1:]); err != nil {
 			if errors.Is(err, flag.ErrHelp) {
