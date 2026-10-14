@@ -72,7 +72,7 @@ check-xferv3-e2e:
 
 check-xferv3-pair:
 	go test -count=1 ./internal/bridge/xferv3/ -run '^TestLineFingerprintStableAndRequired$$'
-	go test -count=1 ./cmd/amq-bridge/ -run '^TestPeerAddWritesNothingUntilFingerprintMatches$$|^TestPeerLinePrintsFingerprintOfLocalIdentity$$'
+	go test -count=1 ./cmd/amq-bridge/ -run '^TestPeerAddWritesNothingUntilFingerprintMatches$$|^TestPeerAddRejectsLineHostMismatch$$|^TestPeerAddReplaceRollsTrustBackWhenStorePeerFails$$|^TestPeerRemoveRequiresConfirmHost$$|^TestPeerLinePrintsFingerprintOfLocalIdentity$$'
 	go test -count=1 ./internal/cli/ -run '^TestPeerPairWritesNothingUntilFingerprintIsSet$$|^TestPeerPairExecsAddThenLine$$'
 
 # Static gates the pre-push hook runs; tests and smoke run in CI.
