@@ -59,6 +59,16 @@ func TestDiscardRemovesOwedAndRecordsFact(t *testing.T) {
 	if foldState(facts) != StateDiscard {
 		t.Fatalf("state = %q", foldState(facts))
 	}
+	if err := os.WriteFile(filepath.Join(mac.root, "bridge", "tx", "box", idText), []byte("stale"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	owed, err := ListTx(mac.root, box.host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(owed) != 0 {
+		t.Fatalf("discarded id still owed: %+v", owed)
+	}
 }
 
 func TestStatusListsOwedAndHoldPIDIsSingleton(t *testing.T) {
