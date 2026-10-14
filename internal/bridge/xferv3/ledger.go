@@ -146,7 +146,10 @@ func readLedger(path string) (facts []Fact, torn bool, err error) {
 		body := raw[off+4 : off+4+n]
 		sum := binary.BigEndian.Uint32(raw[off+4+n : off+8+n])
 		if crc32.ChecksumIEEE(body) != sum {
-			return facts, true, nil
+			if off+8+n == len(raw) {
+				return facts, true, nil
+			}
+			return facts, false, fmt.Errorf("%w: checksum", ErrUncertain)
 		}
 		fact, parseErr := parseFact(body)
 		if parseErr != nil {

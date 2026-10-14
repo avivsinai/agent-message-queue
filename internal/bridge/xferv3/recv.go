@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
@@ -15,6 +16,7 @@ type Snapshot struct {
 	Local     Host
 	Peer      Host
 	PeerKey   ed25519.PublicKey
+	X25519    [32]byte
 	AllowIn   []Handle
 	PeerBytes uint64
 	PeerFiles int
@@ -219,6 +221,9 @@ func fileLocked(root string, snap Snapshot, sealed Sealed, dest Handle) error {
 	if err := writeSyncedFile(stage, body); err != nil {
 		return err
 	}
+	if err := writeSyncedFile(stage+".dest", []byte(dest.String())); err != nil {
+		return err
+	}
 	if err := syncDir(rxDir); err != nil {
 		return err
 	}
@@ -248,6 +253,7 @@ func publishStaged(root string, snap Snapshot, id ID, dest Handle) error {
 	if err := os.Rename(stage, destPath); err != nil {
 		return err
 	}
+	_ = os.Remove(stage + ".dest")
 	if err := syncDir(filepath.Dir(destPath)); err != nil {
 		return err
 	}
@@ -259,25 +265,17 @@ func publishStaged(root string, snap Snapshot, id ID, dest Handle) error {
 }
 
 func destFromStage(path string, snap Snapshot) (Handle, error) {
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return Handle{}, err
-	}
-	msg, err := format.ParseMessage(raw)
-	if err != nil || len(msg.Header.To) == 0 {
-		if len(snap.AllowIn) == 1 {
-			return snap.AllowIn[0], nil
+	if raw, err := os.ReadFile(path + ".dest"); err == nil {
+		handle, parseErr := ParseHandle(strings.TrimSpace(string(raw)))
+		if parseErr != nil || !allowHandle(snap.AllowIn, handle) {
+			return Handle{}, fmt.Errorf("%w: %s", ErrNO, ReasonDest)
 		}
-		return Handle{}, fmt.Errorf("%w: %s", ErrNO, ReasonDest)
+		return handle, nil
 	}
-	handle, err := ParseHandle(msg.Header.To[0])
-	if err != nil {
-		return Handle{}, fmt.Errorf("%w: %s", ErrNO, ReasonDest)
+	if len(snap.AllowIn) == 1 {
+		return snap.AllowIn[0], nil
 	}
-	if !allowHandle(snap.AllowIn, handle) {
-		return Handle{}, fmt.Errorf("%w: %s", ErrNO, ReasonACL)
-	}
-	return handle, nil
+	return Handle{}, fmt.Errorf("%w: %s", ErrNO, ReasonDest)
 }
 
 func stampFrom(payload []byte, peer Host, handle Handle) ([]byte, error) {
@@ -353,6 +351,24 @@ func measureUnconsumed(root string, snap Snapshot) (uint64, int, error) {
 				continue
 			}
 			name := entry.Name()
+			if !strings.HasSuffix(name, ".md") {
+				continue
+			}
+			id, parseErr := ParseID(strings.TrimSuffix(name, ".md"))
+			if parseErr != nil {
+				continue
+			}
+			facts, torn, readErr := readLedger(ledgerPath(root, id))
+			if readErr != nil || torn || len(facts) == 0 {
+				continue
+			}
+			state := foldState(facts)
+			if state != StateIntent && state != StatePublished {
+				continue
+			}
+			if facts[len(facts)-1].Peer != snap.Peer {
+				continue
+			}
 			if _, ok := seen[name]; ok {
 				continue
 			}

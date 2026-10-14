@@ -3,6 +3,7 @@ package xferv3
 import (
 	"bytes"
 	"crypto/ed25519"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -113,6 +114,99 @@ func TestRecoverStageWithoutIntentDeletes(t *testing.T) {
 	}
 	if got := inboxFiles(t, root, "grok"); len(got) != 0 {
 		t.Fatalf("unexpected filing: %v", got)
+	}
+}
+
+func TestRecoverUsesAdmittedDestNotPayloadTo(t *testing.T) {
+	root, snap, _, signed, _ := setupRecv(t, "m-dest")
+	if err := fsq.EnsureAgentDirs(root, "staff"); err != nil {
+		t.Fatal(err)
+	}
+	snap.AllowIn = []Handle{mustHandle(t, "grok"), mustHandle(t, "staff")}
+	wrong, err := (format.Message{
+		Header: format.Header{
+			Schema:  1,
+			ID:      "m-dest",
+			From:    "codex",
+			To:      []string{"staff"},
+			Thread:  "p2p/codex__grok",
+			Created: time.Date(2026, 10, 14, 0, 0, 0, 0, time.UTC).Format(time.RFC3339Nano),
+		},
+		Body: "misrouted",
+	}).Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rxDir := filepath.Join(root, "bridge", "rx", snap.Peer.String())
+	if err := os.MkdirAll(rxDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stagePath(root, snap.Peer, signed.ID()), wrong, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := appendFact(root, Fact{State: StateIntent, Peer: snap.Peer, ID: signed.ID()}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Recover(root, snap, signed.ID()); err == nil {
+		t.Fatal("recover used payload To without an admitted dest")
+	}
+	if got := inboxFiles(t, root, "staff"); len(got) != 0 {
+		t.Fatalf("staff inbox = %v", got)
+	}
+	if err := os.WriteFile(stagePath(root, snap.Peer, signed.ID())+".dest", []byte("grok\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	state, err := Recover(root, snap, signed.ID())
+	if err != nil {
+		t.Fatalf("recover with dest sidecar: %v", err)
+	}
+	if state != StatePublished {
+		t.Fatalf("state = %q", state)
+	}
+	if got := inboxFiles(t, root, "grok"); len(got) != 1 {
+		t.Fatalf("grok inbox = %v", got)
+	}
+	if got := inboxFiles(t, root, "staff"); len(got) != 0 {
+		t.Fatalf("staff inbox after sidecar = %v", got)
+	}
+}
+
+func TestQuotaCountsOnlyThisPeersInboxFiles(t *testing.T) {
+	root, snap, localKey, signed, payload := setupRecv(t, "m-quota")
+	snap.PeerFiles = 1
+	foreign := filepath.Join(root, "agents", "grok", "inbox", "new", "foreign.md")
+	if err := os.WriteFile(foreign, []byte("other peer mail\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := File(root, snap, signed, payload, localKey); err != nil {
+		t.Fatalf("quota counted a foreign inbox file: %v", err)
+	}
+	if got := inboxFiles(t, root, "grok"); len(got) != 2 {
+		t.Fatalf("inbox = %v", got)
+	}
+}
+
+func TestMiddleChecksumIsUncertain(t *testing.T) {
+	root, snap, _, signed, _ := setupRecv(t, "m-mid")
+	first, err := encodeLedgerRecord(Fact{State: StateIntent, Peer: snap.Peer, ID: signed.ID()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := encodeLedgerRecord(Fact{State: StatePublished, Peer: snap.Peer, ID: signed.ID()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first[4] ^= 0xff
+	path := ledgerPath(root, signed.ID())
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append(first, second...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	facts, torn, err := readLedger(path)
+	if torn || !errors.Is(err, ErrUncertain) {
+		t.Fatalf("middle checksum: torn=%v err=%v facts=%d", torn, err, len(facts))
 	}
 }
 
