@@ -13,8 +13,8 @@ type wakeDialogState uint8
 const (
 	wakeDialogClosed wakeDialogState = iota
 	wakeDialogOpen
-	// wakeDialogUnknown is a marker older than wakeDialogQuietHold or one
-	// that cannot be read. It may still hide an open dialog, so input stays
+	// wakeDialogUnknown is a marker older than wakeDialogQuietHold, dated in
+	// the future, or one that cannot be read. It may still hide an open dialog, so input stays
 	// held, but the wake emits attention output instead of waiting silently.
 	wakeDialogUnknown
 )
@@ -51,6 +51,9 @@ func classifyWakeDialogMarker(
 		return wakeDialogUnknown, readErr
 	case !exists:
 		return wakeDialogClosed, nil
+	case modTime.After(now.Add(wakeDialogRecheck)):
+		// A future mtime (a clock step back, a stray touch) cannot be aged.
+		return wakeDialogUnknown, nil
 	case now.Sub(modTime) >= wakeDialogQuietHold:
 		return wakeDialogUnknown, nil
 	default:

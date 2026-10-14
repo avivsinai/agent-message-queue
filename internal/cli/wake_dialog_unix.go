@@ -29,17 +29,18 @@ const (
 	maxWakeDialogHookInputBytes = 8 << 20
 )
 
-// wakeDialogHookEvents are the events the installer wires, in order. Only
-// long-standing events: a settings file with an event an older Claude Code
-// does not know could cost every other hook in it.
+// wakeDialogHookEvents are the events the installer wires, in order: the
+// closing events first, so an install that fails part way never leaves an
+// open without its close. Only long-standing events: a settings file with an
+// event an older Claude Code does not know could cost every other hook in it.
 var wakeDialogHookEvents = []string{
-	"PreToolUse",
-	"PermissionRequest",
 	"PostToolUse",
 	"UserPromptSubmit",
 	"Stop",
 	"SessionStart",
 	"SessionEnd",
+	"PreToolUse",
+	"PermissionRequest",
 }
 
 // wakeDialogHookInput is the part of Claude Code's hook input the receiver
@@ -163,7 +164,23 @@ func runWakeDialog(args []string, stdin io.Reader) error {
 	return nil
 }
 
+// writeWakeDialogMarker writes the marker for in. A marker without a
+// tool_use_id (a permission dialog) stays without one, so a PostToolUse of
+// a later tool call cannot clear the permission dialog's hold.
 func writeWakeDialogMarker(dirfd int, agentDir *wakeAgentDir, in wakeDialogHookInput) error {
+	if in.ToolUseID != "" {
+		current, _, exists, err := readWakeRepairMetadataAt(
+			dirfd,
+			wakeDialogFileName,
+			"wake dialog marker",
+			filepath.Join(agentDir.path, wakeDialogFileName),
+			maxWakeMetadataFileBytes,
+		)
+		var marker wakeDialogMarker
+		if err == nil && exists && json.Unmarshal(current, &marker) == nil && marker.ToolUseID == "" {
+			in.ToolUseID = ""
+		}
+	}
 	raw, err := json.Marshal(wakeDialogMarker{
 		Schema:    1,
 		Event:     in.Event,
@@ -319,8 +336,8 @@ func runWakeUninstallDialogHook(args []string) error {
 	return writeStdout("dialog hook removed from %s\n", filepath.Join(home, ".claude", "settings.json"))
 }
 
-// checkClaudeDialogHook reports a missing dialog hook, or one whose amq
-// binary is gone, when ~/.claude exists. It is read-only.
+// checkClaudeDialogHook reports a missing or partly installed dialog hook,
+// or one whose amq binary is gone, when ~/.claude exists. It is read-only.
 func checkClaudeDialogHook() (doctorCheck, bool) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -330,13 +347,24 @@ func checkClaudeDialogHook() (doctorCheck, bool) {
 		return doctorCheck{}, false
 	}
 	check := doctorCheck{Name: "Claude dialog hook", Status: "warn"}
-	commands, err := claude.MarkedHookCommands(home, "PreToolUse", wakeDialogHookMarker)
-	if err != nil {
-		check.Message = fmt.Sprintf("read Claude settings: %v", err)
-		return check, true
+	var commands, missing []string
+	for _, event := range wakeDialogHookEvents {
+		found, err := claude.MarkedHookCommands(home, event, wakeDialogHookMarker)
+		if err != nil {
+			check.Message = fmt.Sprintf("read Claude settings: %v", err)
+			return check, true
+		}
+		if len(found) == 0 {
+			missing = append(missing, event)
+		}
+		commands = append(commands, found...)
 	}
 	if len(commands) == 0 {
 		check.Message = "not installed: a wake doorbell can answer an open Claude Code dialog; remedy: amq wake install-dialog-hook"
+		return check, true
+	}
+	if len(missing) > 0 {
+		check.Message = fmt.Sprintf("partly installed, missing %s; remedy: amq wake install-dialog-hook", strings.Join(missing, ", "))
 		return check, true
 	}
 	for _, command := range commands {

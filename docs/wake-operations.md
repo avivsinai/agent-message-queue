@@ -90,8 +90,8 @@ gone.
   AskUserQuestion and ExitPlanMode, and on every `PermissionRequest`. `close`
   runs on `PostToolUse` for the same two tools (only for the tool call that
   opened the marker), and on `UserPromptSubmit`, `Stop`, `SessionStart`, and
-  `SessionEnd`. The receiver always exits 0 and prints nothing, so it never
-  decides a tool call or a permission.
+  `SessionEnd`. The receiver exits 0 once its arguments parse and prints
+  nothing, so it never decides a tool call or a permission.
 - **Identity.** The receiver finds the mailbox through `AM_ME` and `AM_ROOT`
   in the Claude Code environment, which `amq coop exec` and `amq launch` set.
   A Claude Code process started without them gets no marker, and its wake
@@ -112,9 +112,9 @@ gone.
 - **Esc and stale markers.** Esc on a dialog is a user interrupt, and Claude
   Code runs no `Stop` hook for it. A denied permission is the same. The marker
   then stays until the person's next prompt. A marker older than 10 minutes,
-  or one the wake cannot read, still blocks input; the wake adds attention
-  output (title, bell, desktop notice) on the attention cadence instead of
-  waiting silently.
+  dated in the future, or one the wake cannot read, still blocks input. When
+  it blocks a delivery attempt, the wake adds attention output (title, bell,
+  desktop notice) on the attention cadence instead of waiting silently.
 
 The guard does not cover dialogs without a hook: the workspace trust dialog,
 MCP elicitation, slash-command pickers, the `/resume` and `/model` menus, the
