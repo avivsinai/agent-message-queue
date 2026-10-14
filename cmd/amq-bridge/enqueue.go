@@ -67,16 +67,13 @@ func enqueueMessage(cfg bridge.EnqueueConfig, destAlias string, message []byte) 
 		_, peerErr := xferv3.LoadPeer(cfg.Root, dest.Host())
 		switch {
 		case peerErr == nil:
+			if _, ok := cfg.AllowedDestSet()[destAlias]; !ok {
+				return bridge.EnqueueResult{}, fmt.Errorf("dest alias %s is not allowlisted", destAlias)
+			}
 			if err := putPinned(cfg, dest, message); err != nil {
 				return bridge.EnqueueResult{}, err
 			}
-			if _, _, err := bridge.ParseAlias(destAlias); err != nil {
-				return bridge.EnqueueResult{}, nil
-			}
-			if _, ok := cfg.AllowedDestSet()[destAlias]; !ok {
-				return bridge.EnqueueResult{}, nil
-			}
-			return bridge.Enqueue(cfg, destAlias, message)
+			return bridge.EnqueueResult{}, nil
 		case !errors.Is(peerErr, xferv3.ErrNoPeer):
 			return bridge.EnqueueResult{}, peerErr
 		}
