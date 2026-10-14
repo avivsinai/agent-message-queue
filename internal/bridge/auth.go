@@ -236,6 +236,27 @@ func WriteTrusted(root, host string, pub ed25519.PublicKey, generation string) e
 	return writeTrusted(root, host, pub, generation, false)
 }
 
+func DeleteTrusted(root, host string) error {
+	if err := validateBridgeIdentifier("trusted source host", host); err != nil {
+		return fmt.Errorf("trusted source host: %w", err)
+	}
+	path := TrustedPath(root, host)
+	info, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("trusted host %s: %w", host, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("trusted host %s must not be a symlink", host)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("trusted host %s must be a regular file", host)
+	}
+	if err := os.Remove(path); err != nil {
+		return fmt.Errorf("trusted host %s: %w", host, err)
+	}
+	return nil
+}
+
 // ReplaceTrusted atomically overwrites a source host's trusted record with
 // a NEWER generation (rotation). It refuses a downgrade — an operator who
 // re-provisions an older key is almost certainly undoing a rotation by

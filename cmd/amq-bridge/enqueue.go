@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/avivsinai/agent-message-queue/internal/bridge"
+	"github.com/avivsinai/agent-message-queue/internal/bridge/xferv3"
 	"github.com/avivsinai/agent-message-queue/internal/format"
 )
 
@@ -50,12 +51,77 @@ func runEnqueue(args []string) error {
 		return usageError("message exceeds maximum size")
 	}
 
-	result, err := bridge.Enqueue(cfg, *destAlias, message)
+	result, err := enqueueMessage(cfg, *destAlias, message)
 	if err != nil {
 		return err
 	}
-	fmt.Println(result.Path)
+	if result.Path != "" {
+		fmt.Println(result.Path)
+	}
 	return nil
+}
+
+func enqueueMessage(cfg bridge.EnqueueConfig, destAlias string, message []byte) (bridge.EnqueueResult, error) {
+	dest, destErr := xferv3.ParseDest(destAlias)
+	if destErr == nil {
+		_, peerErr := xferv3.LoadPeer(cfg.Root, dest.Host())
+		switch {
+		case peerErr == nil:
+			if err := putPinned(cfg, dest, message); err != nil {
+				return bridge.EnqueueResult{}, err
+			}
+			if _, _, err := bridge.ParseAlias(destAlias); err != nil {
+				return bridge.EnqueueResult{}, nil
+			}
+			if _, ok := cfg.AllowedDestSet()[destAlias]; !ok {
+				return bridge.EnqueueResult{}, nil
+			}
+			return bridge.Enqueue(cfg, destAlias, message)
+		case !errors.Is(peerErr, xferv3.ErrNoPeer):
+			return bridge.EnqueueResult{}, peerErr
+		}
+	}
+	return bridge.Enqueue(cfg, destAlias, message)
+}
+
+func putPinned(cfg bridge.EnqueueConfig, dest xferv3.Dest, message []byte) error {
+	hostID, err := bridge.LoadHostID(cfg.Root)
+	if err != nil {
+		return err
+	}
+	if hostID != cfg.SourceHost {
+		return fmt.Errorf("host-id %q does not match source host %q", hostID, cfg.SourceHost)
+	}
+	key, err := bridge.LoadIdentity(cfg.Root)
+	if err != nil {
+		return err
+	}
+	parsed, err := format.ParseMessage(message)
+	if err != nil {
+		return fmt.Errorf("parse message: %w", err)
+	}
+	source, err := xferv3.ParseHost(cfg.SourceHost)
+	if err != nil {
+		return err
+	}
+	handle, err := xferv3.ParseHandle(cfg.SourceHandle)
+	if err != nil {
+		return err
+	}
+	messageID, err := xferv3.ParseMessageID(parsed.Header.ID)
+	if err != nil {
+		return err
+	}
+	threadID, err := xferv3.ParseThreadID(parsed.Header.Thread)
+	if err != nil {
+		return err
+	}
+	rec, err := xferv3.NewRecord(source, handle, dest, messageID, threadID, message)
+	if err != nil {
+		return err
+	}
+	_, err = xferv3.PutTx(cfg.Root, key.Private, rec, message)
+	return err
 }
 
 func rejectPromptControlledEnqueueFlags(args []string) error {
