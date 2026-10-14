@@ -67,6 +67,45 @@ func main() {
 		}
 		return
 	}
+	if len(args) > 0 && args[0] == "up" {
+		if err := runUp(args[1:]); err != nil {
+			if errors.Is(err, flag.ErrHelp) {
+				return
+			}
+			fmt.Fprintln(os.Stderr, "amq-bridge up:", err)
+			if isUsageError(err) {
+				os.Exit(2)
+			}
+			os.Exit(1)
+		}
+		return
+	}
+	if len(args) > 0 && args[0] == "status" {
+		if err := runStatus(args[1:]); err != nil {
+			if errors.Is(err, flag.ErrHelp) {
+				return
+			}
+			fmt.Fprintln(os.Stderr, "amq-bridge status:", err)
+			if isUsageError(err) {
+				os.Exit(2)
+			}
+			os.Exit(1)
+		}
+		return
+	}
+	if len(args) > 0 && args[0] == "discard" {
+		if err := runDiscard(args[1:]); err != nil {
+			if errors.Is(err, flag.ErrHelp) {
+				return
+			}
+			fmt.Fprintln(os.Stderr, "amq-bridge discard:", err)
+			if isUsageError(err) {
+				os.Exit(2)
+			}
+			os.Exit(1)
+		}
+		return
+	}
 	if len(args) > 0 && args[0] == "listen" {
 		if err := runListen(args[1:]); err != nil {
 			if errors.Is(err, flag.ErrHelp) {
