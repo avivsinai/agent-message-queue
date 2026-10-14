@@ -354,6 +354,11 @@ The v3 outbox is `bridge/tx/<peer>/<id>`. The v1
 ledger stays beside any later v3 ledger. Already-filed v2 ids are not
 re-hashed. Drain every v2 outbox before a host offers v3 records.
 
-v3 ledger states `intent` and `published`, the power-loss window, and
-`NO <reason>` belong to the receive-path PR. This addendum leaves the v2
-ledger in place.
+v3 ledger states `intent` and `published` live in
+`bridge/ledger/v3/<id[:2]>/<id>` as checksummed `O_APPEND` records. Filing
+stages under `bridge/rx/<peer>/<id>`, writes `intent`, renames into
+`inbox/new/<id>.md`, then writes `published`. A pre-admission `NO <reason>`
+writes no record. A torn tail is truncated when the staged copy is still
+present; if it is gone the next fact is `published`. Directory and file
+sync use `fsync` on Linux and `F_FULLFSYNC` on Darwin and fail closed.
+The v2 ledger stays read-only beside this one.
