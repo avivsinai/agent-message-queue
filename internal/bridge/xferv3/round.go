@@ -3,6 +3,7 @@ package xferv3
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -218,7 +219,10 @@ func answerOne(sess *Session, self HostState, entry Signed) error {
 	}
 	receipt, err := File(self.Root, self.Snap, signed, body, self.LocalKey)
 	if err != nil {
-		return sendNo(sess, entry.ID(), noReason(err))
+		if errors.Is(err, ErrNO) || errors.Is(err, ErrBusy) {
+			return sendNo(sess, entry.ID(), noReason(err))
+		}
+		return err
 	}
 	return sendSignedReceipt(sess, receipt)
 }
