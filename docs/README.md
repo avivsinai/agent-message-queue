@@ -24,6 +24,7 @@ syntax comes from the [generated CLI reference](cli.md).
 ## Connect tools and hosts
 
 - [Bridge companion](../cmd/amq-bridge/README.md) — exchange messages between hosts.
+- [Dot onboarding](dot-onboarding.md) — join the peer mesh as an intermittent host.
 - [ACP companion](../cmd/amq-acp/README.md) — deliver ACP prompts to an AMQ inbox.
 - [pi extension](../integrations/pi/README.md) — reach a live pi session from
   `amq-remote`; its wire contract is the [pi bridge protocol](pi-bridge-protocol.md).
