@@ -160,6 +160,13 @@ func recoverLocked(root string, snap Snapshot, id ID) (string, error) {
 				return "", err
 			}
 		} else {
+			prev := foldState(facts)
+			if prev != StateIntent && prev != StatePublished {
+				if err := appendFact(root, Fact{State: StateUncertain, Peer: snap.Peer, ID: id}); err != nil {
+					return "", err
+				}
+				return StateUncertain, ErrUncertain
+			}
 			if err := appendFact(root, Fact{State: StatePublished, Peer: snap.Peer, ID: id}); err != nil {
 				return "", err
 			}

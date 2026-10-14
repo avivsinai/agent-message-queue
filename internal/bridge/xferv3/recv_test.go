@@ -210,6 +210,29 @@ func TestMiddleChecksumIsUncertain(t *testing.T) {
 	}
 }
 
+func TestRecoverTornEmptyPrefixIsUncertain(t *testing.T) {
+	root, snap, _, signed, _ := setupRecv(t, "m-empty")
+	first, err := encodeLedgerRecord(Fact{State: StateIntent, Peer: snap.Peer, ID: signed.ID()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first[4] ^= 0xff
+	path := ledgerPath(root, signed.ID())
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, first, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	state, recErr := Recover(root, snap, signed.ID())
+	if recErr == nil || state != StateUncertain {
+		t.Fatalf("state=%q err=%v, want uncertain", state, recErr)
+	}
+	if got := inboxFiles(t, root, "grok"); len(got) != 0 {
+		t.Fatalf("inbox = %v", got)
+	}
+}
+
 func TestDurableSyncPrimitive(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "one")
