@@ -291,6 +291,15 @@ func (state *wakeDoorbellState) reconcileDeferredCohort(current map[string]os.Fi
 	}
 }
 
+// recordDialogHold re-checks a doorbell held for an open dialog after
+// recheck. It is not an attempt: the backoff, the reminder budget and the
+// presentation state stay as they are.
+func (state *wakeDoorbellState) recordDialogHold(now time.Time, recheck time.Duration) {
+	state.holdUntil = time.Time{}
+	state.holdSkip = nil
+	state.nextAttempt = now.Add(recheck)
+}
+
 func (state *wakeDoorbellState) recordDeferredInputAttempt(now time.Time) {
 	state.recordAttemptWithBase(now, wakeDoorbellRetryBase, wakeDoorbellRetryMax)
 }

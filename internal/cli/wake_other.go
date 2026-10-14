@@ -12,6 +12,10 @@ func runWake(args []string) error {
 	if len(args) > 0 && args[0] == "check" && wakeCheckV2OptInPresent(args[1:]) {
 		return runWakeCheckUnsupported(args[1:])
 	}
+	if len(args) > 0 && args[0] == "dialog" {
+		// A Claude Code hook must never fail; there is no wake to guard here.
+		return nil
+	}
 	return errors.New("amq wake is not supported on this platform (requires macOS or Linux)")
 }
 
@@ -27,4 +31,9 @@ func wakeCheckV2OptInPresent(args []string) bool {
 		return false
 	}
 	return *jsonOutput && *jsonSchema == wakeCheckSchemaV2
+}
+
+// checkClaudeDialogHook has nothing to report where amq wake cannot run.
+func checkClaudeDialogHook() (doctorCheck, bool) {
+	return doctorCheck{}, false
 }

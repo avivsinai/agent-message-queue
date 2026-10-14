@@ -246,6 +246,16 @@ a reader mistake a stale record for the operator's intent.
 
 Source anchor: `wake_settings_unix.go`.
 
+## `.wake.dialog`: open Claude Code dialog
+
+**Owns:** whether a Claude Code dialog is open for this agent, as one JSON
+line, mode 0600. Only the hook receiver (`amq wake dialog open|close`) writes
+or removes it. The wake only reads it, before each delivery attempt and each
+terminal write, never infers it from other wake state, and never writes it; no
+wake cleanup removes it. A marker that is unreadable or older than the quiet
+hold still blocks input. Source anchors: `wake_dialog.go` and
+`wake_dialog_unix.go`.
+
 ## `.wake.lifecycle.lock`: mutation serialization
 
 **Owns:** exclusion between cooperating mutations and compound validations in
