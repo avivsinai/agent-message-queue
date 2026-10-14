@@ -311,7 +311,7 @@ func validateBridgeIdentifier(name, value string) error {
 			}
 			continue
 		}
-		if !isLowerASCII(b) && !isASCIIDigit(b) && b != '_' && b != '-' {
+		if !isLowerASCII(b) && !isASCIIDigit(b) && b != '_' && b != '-' && b != '.' {
 			return fmt.Errorf("%s is invalid", name)
 		}
 	}
