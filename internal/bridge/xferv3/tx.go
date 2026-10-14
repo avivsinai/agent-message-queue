@@ -37,6 +37,10 @@ func ListTx(root string, peer Host) ([]Owed, error) {
 		if err != nil || !info.Mode().IsRegular() {
 			continue
 		}
+		facts, torn, ledErr := readLedger(ledgerPath(root, id))
+		if ledErr == nil && !torn && foldState(facts) == StateDiscard {
+			continue
+		}
 		raw, err := os.ReadFile(path)
 		if err != nil {
 			return nil, err
