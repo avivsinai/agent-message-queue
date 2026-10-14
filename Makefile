@@ -65,7 +65,7 @@ check-xferv3-ring:
 	go test -count=1 ./internal/bridge/ring/ -run '^TestGrokbotWebhookPostsHandleAndPending$$|^TestSlackWebhookPostsConstantText$$|^TestRingPolicyStartAndStaleDaily$$'
 
 check-xferv3-recv:
-	go test -count=1 ./internal/bridge/xferv3/ -run '^TestFileIdempotentAcrossRelock$$|^TestACLRefusalWritesNoFactThenFilesOnce$$|^TestRecoverIntentWithStagePublishes$$|^TestDurableSyncPrimitive$$'
+	go test -count=1 ./internal/bridge/xferv3/ -run '^TestFileIdempotentAcrossRelock$$|^TestACLRefusalWritesNoFactThenFilesOnce$$|^TestRecoverIntentWithStagePublishes$$|^TestRecoverUsesAdmittedDestNotPayloadTo$$|^TestQuotaCountsOnlyThisPeersInboxFiles$$|^TestMiddleChecksumIsUncertain$$|^TestDurableSyncPrimitive$$'
 
 # Static gates the pre-push hook runs; tests and smoke run in CI.
 check: check-xferv3 check-xferv3-tx check-xferv3-ring check-xferv3-recv check-skills check-docs-cli mod-tidy-check fmt-check vet lint
