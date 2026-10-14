@@ -51,10 +51,11 @@ func runPeerAdd(args []string) error {
 		return fmt.Errorf("bridge root is required")
 	}
 	var (
-		data    []byte
-		xPublic [32]byte
-		ticket  = *ticketFlag
-		lineFP  string
+		data     []byte
+		xPublic  [32]byte
+		ticket   = *ticketFlag
+		lineFP   string
+		lineHost string
 	)
 	if strings.TrimSpace(*fromLine) != "" {
 		parsed, err := xferv3.ParseLine(*fromLine)
@@ -67,6 +68,7 @@ func runPeerAdd(args []string) error {
 			ticket = parsed.Ticket
 		}
 		lineFP = parsed.Fingerprint()
+		lineHost = parsed.Host.String()
 	} else {
 		var err error
 		data, err = readTrustInput(*from, nil)
@@ -101,8 +103,11 @@ func runPeerAdd(args []string) error {
 		}
 		lineFP = parsed.Fingerprint()
 	}
+	if lineHost != "" && lineHost != recordHost {
+		return fmt.Errorf("line host %s does not match identity host %s", lineHost, recordHost)
+	}
 	if strings.TrimSpace(*confirm) == "" || *confirm != lineFP {
-		return fmt.Errorf("pin is not written until --confirm-fingerprint matches %s", lineFP)
+		return fmt.Errorf("pin is not written until --confirm-fingerprint matches the line")
 	}
 	var allow []xferv3.Handle
 	if strings.TrimSpace(*allowIn) != "" {
@@ -118,6 +123,8 @@ func runPeerAdd(args []string) error {
 	if err != nil {
 		return err
 	}
+	trustPath := bridge.TrustedPath(*root, recordHost)
+	oldTrust, _ := os.ReadFile(trustPath)
 	wroteTrust := false
 	if *replace {
 		err = bridge.ReplaceTrusted(*root, recordHost, pub, generation)
@@ -129,7 +136,9 @@ func runPeerAdd(args []string) error {
 		return err
 	}
 	if err := xferv3.StorePeer(*root, peer); err != nil {
-		if wroteTrust {
+		if *replace && len(oldTrust) > 0 {
+			_ = os.WriteFile(trustPath, oldTrust, 0o600)
+		} else if wroteTrust {
 			_ = bridge.DeleteTrusted(*root, recordHost)
 		}
 		return err
@@ -170,6 +179,7 @@ func runPeerRemove(args []string) error {
 	fs.SetOutput(os.Stderr)
 	root := fs.String("root", os.Getenv("AM_ROOT"), "local AMQ root")
 	hostFlag := fs.String("host", "", "peer host to remove")
+	confirmHost := fs.String("confirm-host", "", "must match --host before the pin is deleted")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -182,6 +192,9 @@ func runPeerRemove(args []string) error {
 	host, err := xferv3.ParseHost(*hostFlag)
 	if err != nil {
 		return err
+	}
+	if strings.TrimSpace(*confirmHost) == "" || *confirmHost != host.String() {
+		return fmt.Errorf("pin is not removed until --confirm-host matches --host")
 	}
 	if err := xferv3.RemovePeer(*root, host); err != nil && !errors.Is(err, xferv3.ErrNoPeer) {
 		return err
