@@ -121,7 +121,7 @@ func (s *Server) unpinnedReply(e *unpinnedError) string {
 	for _, bd := range e.bindings {
 		var names []string
 		for _, m := range s.agentMarkers(bd.Name) {
-			if m.DisplayName != "" {
+			if m.DisplayName != "" && m.running(time.Now()) {
 				names = append(names, strconv.Quote(m.DisplayName))
 			}
 		}
@@ -149,6 +149,18 @@ type agentMarker struct {
 	// Archived is the state the relay last accepted for this identity.
 	Archived bool   `json:"archived"`
 	Updated  string `json:"updated"`
+}
+
+// agentMarkerFresh is how old a marker may be while its agent still runs.
+// A running agent rewrites it on every tick, but a tick waits behind a
+// sweep whose posts can take minutes on a slow relay.
+const agentMarkerFresh = 10 * time.Minute
+
+// running reports whether the marker's agent rewrote it recently. A stopped
+// or deleted agent stops rewriting it, so it leaves the session list.
+func (m agentMarker) running(now time.Time) bool {
+	updated, err := time.Parse(time.RFC3339, m.Updated)
+	return err == nil && now.Sub(updated) <= agentMarkerFresh
 }
 
 func (s *Server) agentMarkerDir(pin string) string {
