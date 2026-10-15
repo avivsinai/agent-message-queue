@@ -53,3 +53,49 @@ func TestPinnedAgentArchivesAndReturnsWithItsBinding(t *testing.T) {
 		t.Fatalf("buzz calls = %q\nwant %q", calls, want)
 	}
 }
+
+// Review of S3 P1-1: two agents pinned to one session shared one marker, so
+// each reset the other's state. Archive repeated on every tick, and
+// unarchive never ran when the binding came back.
+func TestTwoAgentsOnOnePinEachChangeOnce(t *testing.T) {
+	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
+	bound := binding.Binding{Carrier: binding.CarrierMailbox, Root: canonicalTempDir(t), Handle: "agent", Name: "alpha"}
+	if err := binding.WriteNamed(bound); err != nil {
+		t.Fatal(err)
+	}
+	savedSelf, savedCall := buzzSelf, buzzCall
+	t.Cleanup(func() { buzzSelf, buzzCall = savedSelf, savedCall })
+	var calls []string
+	buzzCall = func(_ time.Duration, args ...string) error {
+		calls = append(calls, buzzSelf[:1]+" "+strings.Join(args[:2], " "))
+		return nil
+	}
+	state := canonicalTempDir(t)
+	a := NewServer(Config{RemoteBinding: true, Pin: "alpha", StateDir: state}, "test")
+	b := NewServer(Config{RemoteBinding: true, Pin: "alpha", StateDir: state}, "test")
+	ticks := func() {
+		buzzSelf = strings.Repeat("a", 64)
+		a.lifecycleTick(time.Now())
+		buzzSelf = strings.Repeat("b", 64)
+		b.lifecycleTick(time.Now())
+	}
+
+	if _, err := binding.RemoveMatching(func(b binding.Binding) bool { return b.Name == "alpha" }); err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		ticks()
+	}
+	if err := binding.WriteNamed(bound); err != nil {
+		t.Fatal(err)
+	}
+	ticks()
+
+	want := []string{
+		"a agents archive", "a users set-status", "b agents archive", "b users set-status",
+		"a agents unarchive", "a users set-status", "b agents unarchive", "b users set-status",
+	}
+	if !slices.Equal(calls, want) {
+		t.Fatalf("buzz calls = %q\nwant %q", calls, want)
+	}
+}

@@ -136,9 +136,6 @@ func (s *Server) runRemote(sessionID, text, eventID string, turn *turnState, emi
 			}
 			return r.say(postStatus, r.settle("replied"), StopReasonRefusal, text)
 		}
-		// A legacy-framed first prompt carries the system prompt; the pin
-		// line is the agent's configuration, not the owner's message.
-		text = stripPinLines(text)
 		if b.Mailbox() {
 			return s.runMailbox(sessionID, text, eventID, b, turn, emit)
 		}
@@ -374,11 +371,17 @@ func (s *Server) turnBinding(sessionID, eventID string) (binding.Binding, error)
 	if eventID == "" {
 		return s.sessionBinding(sessionID)
 	}
+	if s.cfg.PinErr != nil {
+		return binding.Binding{}, s.cfg.PinErr
+	}
 	path := filepath.Join(s.cfg.StateDir, "remote-events", eventID+".json")
 	if raw, err := readSmallRegular(path); err == nil {
-		var b binding.Binding
-		if err := json.Unmarshal(raw, &b); err != nil || b.Valid() != nil {
+		var c eventClaim
+		if err := json.Unmarshal(raw, &c); err != nil || c.Valid() != nil {
 			return binding.Binding{}, fmt.Errorf("event %s has an unreadable recorded binding; refusing to resubmit", eventID)
+		}
+		if !s.ownsClaim(c) {
+			return binding.Binding{}, fmt.Errorf("event %s was claimed by another Buzz agent; it runs there, not here", eventID)
 		}
 		// A claim can be visible before its directory entry is durable. Every
 		// reader makes it durable before it submits, so a crash cannot lose
@@ -386,7 +389,7 @@ func (s *Server) turnBinding(sessionID, eventID string) (binding.Binding, error)
 		if err := fsq.SyncDir(filepath.Dir(path)); err != nil {
 			return binding.Binding{}, err
 		}
-		return b, nil
+		return c.binding(), nil
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return binding.Binding{}, err
 	}
@@ -394,7 +397,7 @@ func (s *Server) turnBinding(sessionID, eventID string) (binding.Binding, error)
 	if err != nil {
 		return b, err
 	}
-	raw, err := json.Marshal(b)
+	raw, err := json.Marshal(eventClaim{Binding: b, Name: b.Name, Agent: buzzSelf})
 	if err != nil {
 		return binding.Binding{}, err
 	}
@@ -410,6 +413,33 @@ func (s *Server) turnBinding(sessionID, eventID string) (binding.Binding, error)
 		return s.turnBinding(sessionID, eventID)
 	}
 	return b, nil
+}
+
+// eventClaim is an event's first-delivery record: the binding it runs
+// under, and the Buzz agent that claimed it. Agents share remote-events, and
+// one Buzz event can reach several agents (a channel they all belong to), so
+// an agent follows and sweeps only its own claims (review of S3 P1-2, P1-3).
+type eventClaim struct {
+	binding.Binding
+	Name  string `json:"name,omitempty"`
+	Agent string `json:"agent,omitempty"`
+}
+
+func (c eventClaim) binding() binding.Binding {
+	b := c.Binding
+	b.Name = c.Name
+	return b
+}
+
+// ownsClaim reports whether this agent made the claim. A claim without an
+// agent (an older one, or one made with no Buzz identity) belongs only to
+// the agent pinned to its binding name; the helper and unpinned agents take
+// none.
+func (s *Server) ownsClaim(c eventClaim) bool {
+	if c.Agent != "" {
+		return c.Agent == buzzSelf
+	}
+	return s.cfg.Pin != "" && !s.cfg.Helper && c.Name == s.cfg.Pin
 }
 
 // createExclusive publishes raw at path only if nothing is there yet. The

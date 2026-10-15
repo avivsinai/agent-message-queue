@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -35,9 +36,6 @@ var pinLineRe = regexp.MustCompile(`(?m)^[ \t]*AMQ Remote session:[ \t]*(\S*)[ \
 // whatever is bound.
 var helperLineRe = regexp.MustCompile(`(?m)^[ \t]*AMQ Remote helper[ \t]*\r?$`)
 
-// pinLineStripRe matches a pin line with its line break, for stripping.
-var pinLineStripRe = regexp.MustCompile(`(?m)^[ \t]*AMQ Remote session:[^\n]*(\n|$)`)
-
 // buzzAgent is the managed agent's record as Desktop passed it, captured
 // before PrepareWorkerEnv strips BUZZ_*.
 var buzzAgent struct{ systemPrompt, model, displayName string }
@@ -52,17 +50,30 @@ func captureBuzzAgent() {
 // Either pin source may name the binding; both naming the same binding is
 // accepted. Two different names, a helper line beside a session pin, or a
 // name that is not a binding name, is an error that refuses every prompt.
+// A pin line or helper line that does not parse fails closed rather than
+// leaving the agent unpinned, where it would drive the only binding.
 func sessionPin(systemPrompt, model string) (pin string, helper bool, err error) {
+	lower := strings.ToLower(systemPrompt)
+	lines := pinLineRe.FindAllStringSubmatch(systemPrompt, -1)
+	if strings.Count(lower, "amq remote session:") != len(lines) {
+		return "", false, errors.New(`invalid session pin: write the system prompt line as "AMQ Remote session: <name>" on its own line`)
+	}
+	if strings.Count(lower, "amq remote helper") != len(helperLineRe.FindAllString(systemPrompt, -1)) {
+		return "", false, errors.New(`invalid helper line: write it as "AMQ Remote helper" on its own line`)
+	}
 	fromPrompt, found := "", false
-	for _, m := range pinLineRe.FindAllStringSubmatch(systemPrompt, -1) {
+	for _, m := range lines {
 		if found && m[1] != fromPrompt {
 			return "", false, conflictingPins("the system prompt", fromPrompt, "the system prompt", m[1])
 		}
 		fromPrompt, found = m[1], true
 	}
-	fromModel := ""
-	if name, ok := strings.CutPrefix(model, bindingModelPrefix); ok {
-		fromModel = name
+	fromModel, modelPin := strings.CutPrefix(model, bindingModelPrefix)
+	switch {
+	case !modelPin:
+		fromModel = ""
+	case fromModel == "":
+		return "", false, fmt.Errorf("invalid session pin: model %q names no binding", model)
 	}
 	if found && fromModel != "" && fromModel != fromPrompt {
 		return "", false, conflictingPins("the system prompt", fromPrompt, "the model", fromModel)
@@ -88,15 +99,6 @@ func conflictingPins(source, name, otherSource, other string) error {
 	return fmt.Errorf("conflicting session pins: %s names %q and %s names %q; make them name one session in Buzz Desktop", source, name, otherSource, other)
 }
 
-// stripPinLines removes pin lines from prompt text. buzz-acp puts the system
-// prompt into the first prompt for agents without system prompt support.
-func stripPinLines(text string) string {
-	if !strings.Contains(text, "AMQ Remote session:") {
-		return text
-	}
-	return pinLineStripRe.ReplaceAllString(text, "")
-}
-
 // unpinnedError is the helper, or an unpinned agent with several bindings.
 // Neither chooses a session, so it lists the bound ones instead.
 type unpinnedError struct {
@@ -117,9 +119,14 @@ func (s *Server) unpinnedReply(e *unpinnedError) string {
 		b.WriteString("Several sessions are bound and this agent names none, so it does not run prompts. Sessions bound on this machine:")
 	}
 	for _, bd := range e.bindings {
-		m, ok := s.readAgentMarker(bd.Name)
-		if ok && m.DisplayName != "" {
-			fmt.Fprintf(&b, "\n- %s: DM %q", bd.Name, m.DisplayName)
+		var names []string
+		for _, m := range s.agentMarkers(bd.Name) {
+			if m.DisplayName != "" {
+				names = append(names, strconv.Quote(m.DisplayName))
+			}
+		}
+		if len(names) > 0 {
+			fmt.Fprintf(&b, "\n- %s: DM %s", bd.Name, strings.Join(names, " or "))
 			continue
 		}
 		fmt.Fprintf(&b, "\n- %s: no agent yet; run `amq-acp setup --session %s` and import the file in Buzz Desktop", bd.Name, bd.Name)
@@ -127,8 +134,11 @@ func (s *Server) unpinnedReply(e *unpinnedError) string {
 	return b.String()
 }
 
-// agentMarker is a pinned agent's record under <state>/agents/<pin>.json.
-// It is rewritten on each tick, so its update time shows the agent runs.
+// agentMarker is a pinned agent's record under
+// <state>/agents/<pin>/<pubkey>.json. Each identity has its own file, so two
+// agents pinned to one session never reset each other's state (review of S3
+// P1-1). It is rewritten on each tick, so its update time shows the agent
+// runs.
 type agentMarker struct {
 	Name        string `json:"name"`
 	PubKey      string `json:"pubkey"`
@@ -141,17 +151,32 @@ type agentMarker struct {
 	Updated  string `json:"updated"`
 }
 
-func (s *Server) agentMarkerPath(name string) string {
-	return filepath.Join(s.cfg.StateDir, "agents", name+".json")
+func (s *Server) agentMarkerDir(pin string) string {
+	return filepath.Join(s.cfg.StateDir, "agents", pin)
 }
 
-func (s *Server) readAgentMarker(name string) (agentMarker, bool) {
+func readAgentMarker(path string) (agentMarker, bool) {
 	var m agentMarker
-	raw, err := readSmallRegular(s.agentMarkerPath(name))
+	raw, err := readSmallRegular(path)
 	if err != nil || json.Unmarshal(raw, &m) != nil {
 		return agentMarker{}, false
 	}
 	return m, true
+}
+
+// agentMarkers returns the record of every identity pinned to pin.
+func (s *Server) agentMarkers(pin string) []agentMarker {
+	entries, _ := os.ReadDir(s.agentMarkerDir(pin))
+	var out []agentMarker
+	for _, e := range entries {
+		if !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		if m, ok := readAgentMarker(filepath.Join(s.agentMarkerDir(pin), e.Name())); ok {
+			out = append(out, m)
+		}
+	}
+	return out
 }
 
 // buzzCall runs one buzz CLI command as the agent. A variable so tests can
@@ -172,11 +197,8 @@ func (s *Server) lifecycleTick(now time.Time) {
 	if s.cfg.Pin == "" || s.cfg.PinErr != nil || buzzSelf == "" {
 		return
 	}
-	m, _ := s.readAgentMarker(s.cfg.Pin)
-	if m.PubKey != buzzSelf {
-		// Another identity's marker: this agent was never archived by it.
-		m = agentMarker{}
-	}
+	dir := s.agentMarkerDir(s.cfg.Pin)
+	m, _ := readAgentMarker(filepath.Join(dir, buzzSelf+".json"))
 	b, err := binding.ReadNamed(s.cfg.Pin)
 	switch {
 	case errors.Is(err, binding.ErrNone):
@@ -197,9 +219,8 @@ func (s *Server) lifecycleTick(now time.Time) {
 	if err != nil {
 		return
 	}
-	dir := filepath.Dir(s.agentMarkerPath(s.cfg.Pin))
 	if os.MkdirAll(dir, 0o700) != nil {
 		return
 	}
-	_, _ = fsq.WriteFileAtomic(dir, s.cfg.Pin+".json", append(raw, '\n'), 0o600)
+	_, _ = fsq.WriteFileAtomic(dir, buzzSelf+".json", append(raw, '\n'), 0o600)
 }

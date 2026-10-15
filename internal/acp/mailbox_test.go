@@ -29,7 +29,7 @@ func mailboxServer(t *testing.T) (*Server, string) {
 	if err := binding.Write(binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: "agent"}); err != nil {
 		t.Fatal(err)
 	}
-	return NewServer(Config{RemoteBinding: true, StateDir: canonicalTempDir(t), TurnTimeout: 2 * time.Second, PollInterval: 5 * time.Millisecond, HeartbeatInterval: 20 * time.Millisecond}, "test"), root
+	return NewServer(Config{RemoteBinding: true, Pin: binding.LegacyName, StateDir: canonicalTempDir(t), TurnTimeout: 2 * time.Second, PollInterval: 5 * time.Millisecond, HeartbeatInterval: 20 * time.Millisecond}, "test"), root
 }
 
 // inboxPrompts lists the prompt ids in the agent's inbox (new and cur).
@@ -705,6 +705,46 @@ func TestLateReplyIsPostedOnceAfterTheTurn(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(s.cfg.StateDir, "remote-events", eventID+".posted.final")); err != nil {
 		t.Fatalf("no outcome recorded: %v", err)
+	}
+}
+
+// Review of S3 P1-2 and P1-3: agents share remote-events, and one Buzz event
+// can reach several agents. Another agent followed the binding the first
+// agent recorded for the event, and its late-reply sweep posted the first
+// agent's reply as itself. Each agent follows and sweeps only its own claims.
+func TestAnotherAgentsClaimIsNeitherFollowedNorSwept(t *testing.T) {
+	alpha, root := mailboxServer(t)
+	alpha.cfg.TurnTimeout = 300 * time.Millisecond
+	posts := recordPosts(t)
+	savedSelf := buzzSelf
+	t.Cleanup(func() { buzzSelf = savedSelf })
+	prompt := "<context>\nScope: dm\nChannel: DM (#6eff60e4-32ab-48ec-bd3d-f4c97872f370)\n</context>\nhi"
+	eventID := strings.Repeat("5", 64)
+	buzzSelf = strings.Repeat("a", 64)
+	turn := newTurn()
+	turn.channel = buzzChannel(prompt)
+	if _, rpcErr := alpha.runRemote("s", prompt, eventID, turn, func(any) error { return nil }); rpcErr != nil {
+		t.Fatal(rpcErr)
+	}
+	replyAs(t, root, cockpitThread("session/s"), inboxPrompts(t, root)[0], format.KindAnswer, "late answer")
+
+	buzzSelf = strings.Repeat("b", 64)
+	for name, other := range map[string]*Server{
+		"beta":   NewServer(Config{RemoteBinding: true, Pin: "beta", StateDir: alpha.cfg.StateDir}, "test"),
+		"helper": NewServer(Config{RemoteBinding: true, Helper: true, StateDir: alpha.cfg.StateDir}, "test"),
+	} {
+		if b, err := other.turnBinding("s", eventID); err == nil {
+			t.Errorf("%s followed alpha's claim to %s", name, b.Root)
+		}
+		other.sweepLateReplies(time.Now().Add(time.Hour))
+	}
+	if got := strings.Join(posts(), "|"); strings.Contains(got, "late answer") {
+		t.Fatalf("another agent posted alpha's late answer: %q", got)
+	}
+	buzzSelf = strings.Repeat("a", 64)
+	alpha.sweepLateReplies(time.Now().Add(time.Hour))
+	if got := strings.Join(posts(), "|"); strings.Count(got, "late answer") != 1 {
+		t.Fatalf("posts=%q; want alpha's own sweep to post the late answer once", got)
 	}
 }
 
