@@ -473,7 +473,9 @@ endpoint retires the sink and deletes the key. Close 1012 (server restart)
 reconnects after 0-60 s; 45 s without a ping reconnects too.
 
 A session shared with a link never gains answering authority: the server sees
-the agent's prompts and cannot answer them.
+the agent's prompts and cannot answer them. A tool permission prompt is
+answered in the session's terminal, and a task that needs one waits there;
+`attach --self --link` says so (JSON `"approvals": "terminal"`).
 
 ## Flags
 
@@ -566,7 +568,9 @@ publishes in `bridge.liveness`, with the chat's session id. Codex is found by
 registers the target in the running endpoint without a restart and adds it
 to `manifest.json`. When no endpoint runs, it starts `amq-remote up` in the
 background (log: `up.log` in the state directory). Claude needs the Stop hook
-on this path.
+on this path: without it a task never finishes, so attach of a Claude session
+(`--native` or `--link`) exits 6 and names `amq-remote claude
+install-stop-hook`. Attach never edits `~/.claude/settings.json` itself.
 
 Each attach writes a **named** binding, `~/.amq/remote/bindings/<name>.json`
 (default `<handle>-<project>-<session>` for a root

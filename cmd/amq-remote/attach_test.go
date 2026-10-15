@@ -10,15 +10,18 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/avivsinai/agent-message-queue/internal/config"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
+	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/ipc"
 	"github.com/avivsinai/agent-message-queue/internal/remote/manifest"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
+	"github.com/avivsinai/agent-message-queue/internal/remote/registry"
 	"github.com/avivsinai/agent-message-queue/internal/remote/requests"
 )
 
@@ -478,5 +481,23 @@ func TestBindingsPrunesACodexThreadTheAppServerUnloaded(t *testing.T) {
 	if len(got.Pruned) != 1 || got.Pruned[0] != "codex-t-gone" || len(got.Bindings) != 1 ||
 		got.Bindings[0].Name != "codex-t-live" || got.Bindings[0].State != string(binding.Live) {
 		t.Fatalf("bindings output %s; want codex-t-gone pruned and codex-t-live live", out.String())
+	}
+}
+
+// A linked server's first live run (amq-remote 0.97.0): attach --self --link
+// in a Claude Code session without the AMQ Stop hook left the run running
+// forever, so every later task was parked busy. attach now refuses and names
+// the command that installs the hook.
+func TestAttachRefusesAClaudeSessionWithoutTheStopHook(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	savedFind, savedHook := findSelf, claudeStopHookState
+	t.Cleanup(func() { findSelf, claudeStopHookState = savedFind, savedHook })
+	findSelf = func(string, string) (registry.Candidate, error) {
+		return registry.Candidate{Kind: "claude", Target: "claude:7", Config: json.RawMessage(`{"pid":7}`)}, nil
+	}
+	claudeStopHookState = func() (string, error) { return claude.StopHookMissing, nil }
+	code, err := attach([]string{"--self", "--link", "srv"}, io.Discard, io.Discard)
+	if code != protocol.ExitActionRequired || err == nil || !strings.Contains(err.Error(), "amq-remote claude install-stop-hook") {
+		t.Fatalf("attach --link without the Stop hook: code=%d err=%v; want exit 6 naming amq-remote claude install-stop-hook", code, err)
 	}
 }

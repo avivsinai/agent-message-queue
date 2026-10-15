@@ -84,9 +84,14 @@ func attach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 			return protocol.ExitUsage, err
 		}
 	}
-	cand, err := selfCandidate(c.root, stateDir)
+	cand, err := findSelf(c.root, stateDir)
 	if err != nil {
 		return protocol.ExitActionRequired, err
+	}
+	if cand.Kind == "claude" {
+		if err := requireStopHook(); err != nil {
+			return protocol.ExitActionRequired, err
+		}
 	}
 	// The session's own identity is resolved before anything is registered,
 	// written or started, so a refusal leaves no side effect.
@@ -188,11 +193,15 @@ func attach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 		if err := shareWithLink(stateDir, *linkName, manifest.LinkShare{Binding: nb.Name, Consent: *consent, Tools: *tools}); err != nil {
 			return protocol.ExitActionRequired, err
 		}
+		// No approval pin is written for a link share (only a Buzz relay
+		// share pins one), so the approval hook leaves every tool permission
+		// prompt to the session's own dialog.
 		if c.json {
-			emitJSON(stdout, map[string]any{"connected": true, "name": nb.Name, "root": nb.Root, "target": nb.Target, "link": *linkName})
+			emitJSON(stdout, map[string]any{"connected": true, "name": nb.Name, "root": nb.Root, "target": nb.Target, "link": *linkName, "approvals": "terminal"})
 			return 0, nil
 		}
 		say(stdout, "Shared %s (%s) with link %s as %s (consent: %s, tools: %s).", nonEmpty(display, cand.Target), cand.Target, *linkName, nb.Name, *consent, nonEmpty(*tools, "none"))
+		say(stdout, "Tool approvals for this share are answered in the session's terminal; the linked server cannot answer them, so a task that needs one waits there.")
 		return 0, nil
 	}
 	if c.json {
@@ -696,6 +705,36 @@ func detach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 	}
 	say(stdout, "Disconnected. The session keeps running; Buzz DMs now answer \"Not connected\".")
 	return 0, nil
+}
+
+// findSelf finds the invoking native session. It is a variable because the
+// real search reads the Claude registry and runs ps; tests replace it.
+var findSelf = selfCandidate
+
+// claudeStopHookState is the state of the AMQ Stop hook in the user's Claude
+// settings. It is a variable so tests never read the real ~/.claude.
+var claudeStopHookState = func() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return claude.StopHookState(home)
+}
+
+// requireStopHook refuses a Claude session whose settings lack the AMQ Stop
+// hook: a remote task there is admitted and never completes, so it stays
+// running and parks every later task as busy (linked server's first live
+// run, amq-remote 0.97.0). attach never edits ~/.claude/settings.json; it
+// names the command that does.
+func requireStopHook() error {
+	state, err := claudeStopHookState()
+	switch {
+	case err != nil:
+		return fmt.Errorf("cannot read ~/.claude/settings.json to check the AMQ Stop hook: %v; repair it, then attach again", err)
+	case state == claude.StopHookMissing:
+		return protocol.Refuse(protocol.CodeUnsupported, "the AMQ Stop hook is not installed, so a remote task in this Claude Code session would never finish; run `amq-remote claude install-stop-hook`, then attach again")
+	}
+	return nil
 }
 
 // selfCandidate finds the invoking native session among discovered ones.
