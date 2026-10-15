@@ -546,9 +546,10 @@ func WriteNamedIf(b Binding, allow func(old Binding) bool) error { return writeN
 // WriteSession writes b under the name b's own destination already holds, else
 // under a name its session identity holds, else under base, else under the
 // first of base-2, base-3, ... that is free or held by the same identity, and
-// returns the name written. A binding of the same identity is taken over only
-// when its holder is b's own or not proven live: a live holder that is not
-// b's is a concurrent session in the same place, which keeps its name.
+// returns the name written. A binding of the same identity with another
+// destination is taken over only when its holder is b's own or proven ended:
+// a live or unknown holder may be a concurrent session in the same place,
+// which keeps its name, so uncertain state is never weakened.
 // Another session's binding is never replaced, so a session never inherits
 // another session's Buzz agent, and the same session always gets back its own
 // name. The choice and the write share one transaction.
@@ -582,11 +583,13 @@ func WriteSession(b Binding, base string) (string, error) {
 			if o.SessionIdentity() != id {
 				return false
 			}
-			if b.Holder.PID > 0 && o.Holder == b.Holder {
+			// A mailbox identity is its destination, so it is never a
+			// concurrent session, whatever spelling its root has.
+			if b.Mailbox() || b.Holder.PID > 0 && o.Holder == b.Holder {
 				return true
 			}
 			state, _ := o.Liveness()
-			return state != Live
+			return state == Ended
 		}
 		held := map[string]Binding{}
 		for _, o := range bound {
