@@ -18,6 +18,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/format"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/remote/amqio"
+	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/fake"
 	"github.com/avivsinai/agent-message-queue/internal/remote/ipc"
@@ -53,8 +54,17 @@ func init() {
 	// The real start runs os.Executable(), which here is this test binary;
 	// a test that needs the start replaces it with a recorder.
 	startEndpoint = func(string, string) error { return errors.New("tests start no endpoint") }
-	// The real detection runs ps and reads the Claude registry under HOME.
+	// The real helpers run ps, read ~/.claude or other processes, or dial the
+	// Codex app-server daemon.
 	detectHarness = func() harnessSession { return harnessSession{} }
+	ancestorPIDs = func(int) ([]int, error) { return nil, nil }
+	claudeSession = func(int) (claude.Session, error) {
+		return claude.Session{}, errors.New("tests read no Claude registry")
+	}
+	processCwd = func(int) (string, error) { return "", errors.New("tests read no process") }
+	codexThreadCwd = func(string, string) (string, error) { return "", errors.New("tests dial no app-server") }
+	codexLoadedThreads = func(string) ([]string, error) { return nil, errors.New("tests dial no app-server") }
+	codexDefaultSocket = func() (string, error) { return "", errors.New("tests read no Codex home") }
 	registry.Register("weak-fake", func(ctx context.Context, cfg registry.FactoryConfig) (core.Attachment, error) {
 		r := fake.New(cfg.Target, "e_1")
 		r.WithEvidence(&protocol.Evidence{Submit: "submitted", Completion: "run_terminal"})

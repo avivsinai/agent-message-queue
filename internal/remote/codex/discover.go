@@ -14,6 +14,16 @@ import (
 // defaultControlSocket is where the Codex CLI's managed app-server daemon
 // listens (`codex app-server daemon version` names this path, codex-cli
 // 0.155.1).
+// DefaultControlSocket is the daemon socket discovery reads when serve names
+// none.
+func DefaultControlSocket() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return defaultControlSocket(home), nil
+}
+
 func defaultControlSocket(home string) string {
 	return filepath.Join(home, ".codex", "app-server-control", "app-server-control.sock")
 }

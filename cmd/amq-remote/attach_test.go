@@ -446,3 +446,37 @@ func TestPrunedNameStaysWithItsSession(t *testing.T) {
 		t.Fatalf("the ended session came back as %q; want its own claude-p-session3", got)
 	}
 }
+
+// Issue #1070: a Codex binding records no session process, so its liveness
+// was always unknown and it was never pruned. Its thread now proves it: a
+// thread the app-server no longer has loaded has ended.
+func TestBindingsPrunesACodexThreadTheAppServerUnloaded(t *testing.T) {
+	dir := canonicalTempDir(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(binding.EnvPath, filepath.Join(dir, "remote", "binding.json"))
+	saved := codexLoadedThreads
+	t.Cleanup(func() { codexLoadedThreads = saved })
+	codexLoadedThreads = func(string) ([]string, error) { return []string{"t-live"}, nil }
+	for _, thread := range []string{"t-live", "t-gone"} {
+		b := binding.Binding{Root: dir, Target: "codex:" + thread, NativeSession: thread, Name: "codex-" + thread,
+			AppServer: binding.AppServerThread{Socket: filepath.Join(dir, "app-server.sock"), Thread: thread}}
+		if err := binding.WriteNamed(b); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var out bytes.Buffer
+	if code := run([]string{"bindings", "--json"}, nil, &out, io.Discard); code != 0 {
+		t.Fatalf("bindings exit %d: %s", code, out.String())
+	}
+	var got struct {
+		Bindings []struct{ Name, State string }
+		Pruned   []string
+	}
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("bindings output %q: %v", out.String(), err)
+	}
+	if len(got.Pruned) != 1 || got.Pruned[0] != "codex-t-gone" || len(got.Bindings) != 1 ||
+		got.Bindings[0].Name != "codex-t-live" || got.Bindings[0].State != string(binding.Live) {
+		t.Fatalf("bindings output %s; want codex-t-gone pruned and codex-t-live live", out.String())
+	}
+}

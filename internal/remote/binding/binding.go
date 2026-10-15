@@ -71,6 +71,9 @@ type Binding struct {
 	Label string `json:"label,omitempty"`
 	// Machine is the short name of the machine that holds the binding.
 	Machine string `json:"machine,omitempty"`
+	// AppServer is the Codex app-server thread that runs the session, which
+	// has no session process to hold; zero for other harnesses.
+	AppServer AppServerThread `json:"app_server,omitzero"`
 	// Name is the binding's name; it is the file name, not stored in it.
 	Name    string `json:"-"`
 	BoundAt string `json:"bound_at"`
@@ -114,6 +117,17 @@ func (b Binding) SessionIdentity() string {
 func NativeIdentity(kind, root, cwd string) string {
 	return "native:" + kind + "\x00" + canonicalRoot(cwd) + "\x00" + canonicalRoot(root)
 }
+
+// AppServerThread names a thread of a Codex app-server daemon.
+type AppServerThread struct {
+	Socket string `json:"socket"`
+	Thread string `json:"thread"`
+}
+
+// Inspector reports a binding's liveness with its evidence. Binding.Liveness
+// is the inspector that needs no harness; a caller that can ask a harness
+// (a Codex app-server) passes its own.
+type Inspector func(Binding) (State, string)
 
 // State is the liveness of a bound session.
 type State string
@@ -555,7 +569,7 @@ func WriteNamedIf(b Binding, allow func(old Binding) bool) error { return writeN
 // Another session's binding is never replaced, so a session never inherits
 // another session's Buzz agent, and the same session always gets back its own
 // name. The choice and the write share one transaction.
-func WriteSession(b Binding, base string) (string, error) {
+func WriteSession(b Binding, base string, inspect Inspector) (string, error) {
 	if err := ValidName(base); err != nil {
 		return "", err
 	}
@@ -594,7 +608,7 @@ func WriteSession(b Binding, base string) (string, error) {
 			if b.Mailbox() || b.Holder.PID > 0 && o.Holder == b.Holder {
 				return true
 			}
-			state, _ := o.Liveness()
+			state, _ := inspect(o)
 			return state == Ended
 		}
 		held := map[string]Binding{}
@@ -713,15 +727,15 @@ func List() ([]Binding, error) {
 // skip it.
 const tombstoneSuffix = ".ended.json"
 
-// PruneEnded removes every binding whose session is proven ended and returns
-// the names removed. Each binding is checked as read under the binding lock,
-// so a session that attached again meanwhile is kept, and an unknown one is
-// kept too. A named binding is renamed to its tombstone, which keeps its name
+// PruneEnded removes every binding whose session inspect proves ended and
+// returns the names removed. Each binding is checked as read under the
+// binding lock, so a session that attached again meanwhile is kept, and an
+// unknown one is kept too. A named binding is renamed to its tombstone, which keeps its name
 // held by its session identity, so a later session never inherits the ended
 // session's Buzz agent through a freed name (review-s2 P1-1). Tombstones are
 // never pruned; their number is bounded by the distinct session identities.
 // The legacy single binding has no name to hold and is removed.
-func PruneEnded() ([]string, error) {
+func PruneEnded(inspect Inspector) ([]string, error) {
 	var removed []string
 	err := transact(func(path string) error {
 		dir, err := namedDir(false)
@@ -733,7 +747,7 @@ func PruneEnded() ([]string, error) {
 			return err
 		}
 		for _, b := range bound {
-			if state, _ := b.Liveness(); state != Ended {
+			if state, _ := inspect(b); state != Ended {
 				continue
 			}
 			if err := os.Rename(filepath.Join(dir, b.Name+".json"), filepath.Join(dir, b.Name+tombstoneSuffix)); err != nil {
@@ -742,7 +756,7 @@ func PruneEnded() ([]string, error) {
 			removed = append(removed, b.Name)
 		}
 		if b, err := read(path); err == nil {
-			if state, _ := b.Liveness(); state == Ended {
+			if state, _ := inspect(b); state == Ended {
 				if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 					return err
 				}

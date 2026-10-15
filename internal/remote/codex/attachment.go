@@ -1732,6 +1732,36 @@ func (r *run) result() *protocol.Result {
 	return res
 }
 
+// ThreadCwd is the working directory the app-server daemon at socketPath
+// captured for thread: the session's own directory, not that of one of its
+// tool calls.
+func ThreadCwd(socketPath, thread string) (string, error) {
+	// Request-only connection: no notifications are consumed.
+	client, err := Dial(socketPath, Handlers{})
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = client.Close() }()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := client.Call(ctx, "initialize", map[string]any{"clientInfo": map[string]string{"name": ClientName, "version": Version}}, nil); err != nil {
+		return "", err
+	}
+	var res struct {
+		Thread struct {
+			ID  string `json:"id"`
+			Cwd string `json:"cwd"`
+		} `json:"thread"`
+	}
+	if err := client.Call(ctx, "thread/read", map[string]any{"threadId": thread}, &res); err != nil {
+		return "", fmt.Errorf("thread/read %s: %w", thread, err)
+	}
+	if res.Thread.ID != thread || res.Thread.Cwd == "" {
+		return "", fmt.Errorf("thread/read %s returned no working directory for it", thread)
+	}
+	return res.Thread.Cwd, nil
+}
+
 // LoadedThreads lists the threads the daemon currently has running, so the
 // endpoint can attach to each of them. It opens a short-lived connection.
 func LoadedThreads(socketPath string) ([]string, error) {

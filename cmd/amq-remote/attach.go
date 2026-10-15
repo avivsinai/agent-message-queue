@@ -24,6 +24,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/lock"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
+	"github.com/avivsinai/agent-message-queue/internal/remote/codex"
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/ipc"
 	"github.com/avivsinai/agent-message-queue/internal/remote/linkio"
@@ -166,12 +167,14 @@ func attach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 	}
 	machine := binding.Machine()
 	nb := binding.Binding{Root: c.root, Target: cand.Target, NativeSession: native, Display: display, Name: bindName,
-		Harness: h.Kind, Holder: h.holder(), Label: sessionLabel(h.Kind, place, machine), Machine: machine}
+		Harness: h.Kind, Holder: h.holder(), Label: sessionLabel(h.Kind, place, machine), Machine: machine, AppServer: h.AppServer}
 	// The session identity is the harness, root and working directory, so the
 	// same session coming back gets its name and agent back (ruling 2). A link
 	// share keeps its target-derived identity: the share names its binding,
-	// and another process must never take that name over.
-	if *linkName == "" && h.Cwd != "" {
+	// and another process must never take that name over. That holds for a
+	// plain attach of a session a link already shares too: it keeps the
+	// share's binding as the share made it.
+	if *linkName == "" && h.Cwd != "" && !linkShared(stateDir, nb) {
 		nb.Identity = binding.NativeIdentity(h.Kind, c.root, h.Cwd)
 		if !explicit {
 			nb.Name = binding.SanitizeName(h.Kind + "-" + filepath.Base(h.Cwd))
@@ -286,7 +289,8 @@ func attachMailbox(root, handle, name string, asJSON bool, stdout io.Writer) (in
 	project, session := amqPlace(root)
 	machine := binding.Machine()
 	b := binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: handle, Display: handle, Name: name,
-		Harness: h.Kind, Holder: h.holder(), Label: sessionLabel(nonEmpty(h.Kind, handle), strings.TrimSuffix(project+"/"+session, "/"), machine), Machine: machine}
+		Harness: h.Kind, Holder: h.holder(), Label: sessionLabel(nonEmpty(h.Kind, handle), strings.TrimSuffix(project+"/"+session, "/"), machine), Machine: machine,
+		AppServer: h.AppServer}
 	if err := listBuzzInRoster(root); err != nil {
 		return protocol.ExitActionRequired, err
 	}
@@ -367,7 +371,7 @@ func writeBinding(b binding.Binding, explicitName, followLink bool) (string, err
 	case followLink:
 		err = binding.WriteNamedIf(b, func(old binding.Binding) bool { return old.Same(b) || movedTarget(old, b) })
 	default:
-		b.Name, err = binding.WriteSession(b, b.Name)
+		b.Name, err = binding.WriteSession(b, b.Name, livenessOf)
 	}
 	if err != nil {
 		return "", err
@@ -429,6 +433,9 @@ type harnessSession struct {
 	Kind string // claude, codex or pi; empty when not detected
 	PID  int    // the harness process; 0 when not known
 	Cwd  string // the session's working directory; empty when not known
+	// AppServer is a Codex session's thread, which proves its liveness in
+	// place of a process.
+	AppServer binding.AppServerThread
 }
 
 // holder is the recorded identity of the harness process, or zero when it
@@ -444,21 +451,81 @@ func (h harnessSession) holder() launch.HolderIdentity {
 	return id
 }
 
-// nativeHarness is the harness of a native session: a Claude session's
-// process and working directory from its registry entry; for another kind,
-// the process discovery reports and this command's working directory, which
-// the harness starts its tool calls in. A Codex thread runs in the
-// app-server daemon, so it has no session process to record.
+// nativeHarness is the harness of a native session, with the session's own
+// working directory, never that of the tool call attach runs in: a Claude
+// session's from its registry entry, a pi session's from its process, and a
+// Codex thread's from the app-server daemon. A Codex thread runs in that
+// daemon, so it has no session process; its thread is recorded instead.
 func nativeHarness(cand registry.Candidate) harnessSession {
 	h := harnessSession{Kind: cand.Kind, PID: candidatePID(cand)}
-	if cand.Kind == "claude" {
-		if s, err := claude.SessionForPID(h.PID); err == nil {
+	switch cand.Kind {
+	case "claude":
+		if s, err := claudeSession(h.PID); err == nil {
 			h.Cwd = s.Cwd
 		}
-		return h
+	case "pi":
+		h.Cwd, _ = processCwd(h.PID)
+	case "codex":
+		var cfg struct {
+			Socket string `json:"socket"`
+			Thread string `json:"thread"`
+		}
+		if json.Unmarshal(cand.Config, &cfg) == nil && cfg.Socket != "" && cfg.Thread != "" {
+			h.AppServer = binding.AppServerThread{Socket: cfg.Socket, Thread: cfg.Thread}
+			h.Cwd, _ = codexThreadCwd(cfg.Socket, cfg.Thread)
+		}
 	}
-	h.Cwd, _ = os.Getwd()
 	return h
+}
+
+// Harness inspection reads ~/.claude, the app-server daemon, and other
+// processes. They are variables so tests read none of them.
+var (
+	claudeSession      = claude.SessionForPID
+	processCwd         = launch.ProcessCwd
+	codexThreadCwd     = codex.ThreadCwd
+	codexLoadedThreads = codex.LoadedThreads
+	codexDefaultSocket = codex.DefaultControlSocket
+)
+
+// livenessOf is a binding's liveness. A Codex thread's comes from its
+// app-server daemon: a thread the daemon no longer has loaded has ended. An
+// unreachable daemon proves nothing, so the thread is unknown.
+func livenessOf(b binding.Binding) (binding.State, string) {
+	state, evidence := b.Liveness()
+	if state == binding.Ended || b.AppServer.Thread == "" {
+		return state, evidence
+	}
+	loaded, err := codexLoadedThreads(b.AppServer.Socket)
+	if err != nil {
+		return binding.Unknown, fmt.Sprintf("app-server unreachable: %v", err)
+	}
+	if slices.Contains(loaded, b.AppServer.Thread) {
+		return binding.Live, "thread is loaded in the app-server"
+	}
+	return binding.Ended, "thread is no longer loaded in the app-server"
+}
+
+// linkShared reports whether a link share of the root at stateDir names a
+// binding of b's own session.
+func linkShared(stateDir string, b binding.Binding) bool {
+	f, err := manifest.Load(manifest.DefaultPath(stateDir))
+	if err != nil {
+		return false
+	}
+	shared := map[string]bool{}
+	for _, l := range f.Links {
+		for _, sh := range l.Shares {
+			shared[sh.Binding] = true
+		}
+	}
+	all, _ := binding.List()
+	for _, o := range all {
+		if shared[o.Name] && o.Same(b) {
+			return true
+		}
+	}
+	return false
 }
 
 // detectHarness finds the harness a mailbox attach runs in: Codex by
@@ -467,13 +534,17 @@ func nativeHarness(cand registry.Candidate) harnessSession {
 // is a variable because it runs ps and reads the Claude registry; tests
 // replace it.
 var detectHarness = func() harnessSession {
-	if os.Getenv("CODEX_THREAD_ID") != "" {
-		cwd, _ := os.Getwd()
-		return harnessSession{Kind: "codex", Cwd: cwd}
+	if thread := strings.TrimSpace(os.Getenv("CODEX_THREAD_ID")); thread != "" {
+		h := harnessSession{Kind: "codex"}
+		if sock, err := codexDefaultSocket(); err == nil {
+			h.AppServer = binding.AppServerThread{Socket: sock, Thread: thread}
+			h.Cwd, _ = codexThreadCwd(sock, thread)
+		}
+		return h
 	}
 	ancestors, _ := ancestorPIDs(os.Getpid())
 	for _, pid := range ancestors {
-		if s, err := claude.SessionForPID(pid); err == nil {
+		if s, err := claudeSession(pid); err == nil {
 			return harnessSession{Kind: "claude", PID: pid, Cwd: s.Cwd}
 		}
 	}
@@ -484,7 +555,7 @@ var detectHarness = func() harnessSession {
 // written its own, so the write sees an ended binding of its own identity
 // and takes its name back (review-s2 P1-1). The attach has succeeded by then,
 // so a failed prune is left to the next attach or `bindings`, which reports it.
-func pruneAfterAttach() { _, _ = binding.PruneEnded() }
+func pruneAfterAttach() { _, _ = binding.PruneEnded(livenessOf) }
 
 // bindingRow is one bound session as `bindings` reports it.
 type bindingRow struct {
@@ -507,7 +578,7 @@ func bindings(args []string, stdout io.Writer, probe ...*jsonProbe) (int, error)
 	if err := fs.Parse(args); err != nil {
 		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", err)
 	}
-	pruned, err := binding.PruneEnded()
+	pruned, err := binding.PruneEnded(livenessOf)
 	if err != nil {
 		return protocol.ExitActionRequired, err
 	}
@@ -518,7 +589,7 @@ func bindings(args []string, stdout io.Writer, probe ...*jsonProbe) (int, error)
 	rows := make([]bindingRow, 0, len(all))
 	width := 0
 	for _, b := range all {
-		state, evidence := b.Liveness()
+		state, evidence := livenessOf(b)
 		rows = append(rows, bindingRow{Name: b.Name, Label: b.Label, State: state, Evidence: evidence, Root: b.Root, Handle: b.Handle, Target: b.Target})
 		width = max(width, len([]rune(nonEmpty(b.Label, b.Name))))
 	}
@@ -746,8 +817,11 @@ func selfNativeSession(cand registry.Candidate) (string, error) {
 	return "", fmt.Errorf("cannot verify a %s session", cand.Kind)
 }
 
-// ancestorPIDs lists the parent chain of pid, nearest first.
-func ancestorPIDs(pid int) ([]int, error) {
+// ancestorPIDs lists the parent chain of pid, nearest first. It runs ps, so
+// it is a variable that tests replace.
+var ancestorPIDs = psAncestorPIDs
+
+func psAncestorPIDs(pid int) ([]int, error) {
 	var out []int
 	for i := 0; i < 64 && pid > 1; i++ {
 		raw, err := exec.Command("ps", "-o", "ppid=", "-p", strconv.Itoa(pid)).Output()
