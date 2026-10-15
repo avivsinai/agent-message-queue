@@ -8,6 +8,28 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.97.0](https://github.com/avivsinai/agent-message-queue/compare/v0.96.1...v0.97.0) (2026-10-15)
+
+
+### Features
+
+* **bridge:** add grokbot and slack wake ring adapters ([#1057](https://github.com/avivsinai/agent-message-queue/issues/1057)) ([4d46fe9](https://github.com/avivsinai/agent-message-queue/commit/4d46fe9c43934c7aa8665cea6e0cf6c249ae0678))
+* **bridge:** add up status and discard ([#1062](https://github.com/avivsinai/agent-message-queue/issues/1062)) ([18ef5fc](https://github.com/avivsinai/agent-message-queue/commit/18ef5fcda0bd79a3c7bfd60530d4a1fa0c8d6800))
+* **bridge:** file v3 transfers through intent and published ([#1059](https://github.com/avivsinai/agent-message-queue/issues/1059)) ([8bcd4cc](https://github.com/avivsinai/agent-message-queue/commit/8bcd4cc3d836bd282ae0e8f3a9a3536421bc2027))
+* **bridge:** freeze v3 transfer record beside Envelope v2 ([#1055](https://github.com/avivsinai/agent-message-queue/issues/1055)) ([0ac4efc](https://github.com/avivsinai/agent-message-queue/commit/0ac4efc1164f014bc3fb189839afa0ddea975125))
+* **bridge:** pair peers only after a fingerprint match ([#1061](https://github.com/avivsinai/agent-message-queue/issues/1061)) ([ed09249](https://github.com/avivsinai/agent-message-queue/commit/ed09249c7afa08305ce8a4654c8fad8041e2aa4b))
+* **bridge:** ship amq-bridge on Homebrew and the plugin ([#1063](https://github.com/avivsinai/agent-message-queue/issues/1063)) ([f459445](https://github.com/avivsinai/agent-message-queue/commit/f4594458484fbbb0fca723648bfcb1ab8cd8a5e5))
+* **bridge:** sync one Noise round over a byte pipe ([#1060](https://github.com/avivsinai/agent-message-queue/issues/1060)) ([6fa7faf](https://github.com/avivsinai/agent-message-queue/commit/6fa7fafca875b52447e3de7389767fcddc2ef6dc))
+* **bridge:** write peers file and durable tx outbox ([#1056](https://github.com/avivsinai/agent-message-queue/issues/1056)) ([8ec24f6](https://github.com/avivsinai/agent-message-queue/commit/8ec24f64aa6d781d29ce4937ee14665186fc1aba))
+* **keepalive:** keep the keepalive home under ~/.amq/keepalive on a fresh install ([#1052](https://github.com/avivsinai/agent-message-queue/issues/1052)) ([f7be6bf](https://github.com/avivsinai/agent-message-queue/commit/f7be6bf843892eb52d76e9df164c5f0e4a252350))
+* **launch:** keep launch trust state under ~/.amq/state on a fresh machine ([#1049](https://github.com/avivsinai/agent-message-queue/issues/1049)) ([7f2c20e](https://github.com/avivsinai/agent-message-queue/commit/7f2c20ed84c6bfa2da6074bf0d8565de4deb8318))
+* **wake:** hold the doorbell while a Claude Code dialog is open ([#1058](https://github.com/avivsinai/agent-message-queue/issues/1058)) ([d375416](https://github.com/avivsinai/agent-message-queue/commit/d375416ea3e5f53da90233b4c75891205a3c1acd))
+
+
+### Bug Fixes
+
+* **remote:** reconcile relay shares from manifest.json in a running serve ([#1048](https://github.com/avivsinai/agent-message-queue/issues/1048)) ([fc23af6](https://github.com/avivsinai/agent-message-queue/commit/fc23af6ebc0f9c71e99df4e9ff84b323c7dedf79))
+
 ## [0.96.1](https://github.com/avivsinai/agent-message-queue/compare/v0.96.0...v0.96.1) (2026-10-11)
 
 
