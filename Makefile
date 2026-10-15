@@ -1,4 +1,4 @@
-.PHONY: build test fmt fmt-check vet lint check ci smoke contract-check check-skills check-docs-cli docs-cli hook-env-check check-xferv3 check-xferv3-tx
+.PHONY: build test fmt fmt-check vet lint check ci smoke contract-check check-skills check-docs-cli docs-cli hook-env-check check-xferv3 check-xferv3-tx check-xferv3-ring
 
 GO_FILES := $(shell find . -name '*.go' -not -path './vendor/*' -not -path './.worktrees/*' -not -path './.agent-mail/*')
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
@@ -61,8 +61,11 @@ check-xferv3-tx:
 	go test -count=1 ./internal/bridge/xferv3/ -run '^TestPutTxWritesIdempotentBundle$$'
 	go test -count=1 ./cmd/amq-bridge/ -run '^TestRunEnqueueWritesTxForPinnedPeer$$'
 
+check-xferv3-ring:
+	go test -count=1 ./internal/bridge/ring/ -run '^TestGrokbotWebhookPostsHandleAndPending$$|^TestSlackWebhookPostsConstantText$$|^TestRingPolicyStartAndStaleDaily$$'
+
 # Static gates the pre-push hook runs; tests and smoke run in CI.
-check: check-xferv3 check-xferv3-tx check-skills check-docs-cli mod-tidy-check fmt-check vet lint
+check: check-xferv3 check-xferv3-tx check-xferv3-ring check-skills check-docs-cli mod-tidy-check fmt-check vet lint
 
 ci: check test smoke contract-check hook-env-check
 
