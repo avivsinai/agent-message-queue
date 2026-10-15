@@ -428,28 +428,37 @@ Protocol: `amq.remote.link/1` ([contract](../../testdata/link/README.md)).
 
 Nothing restarts the endpoint after a reboot unless a login service does.
 `amq-remote service install` writes one that runs `amq-remote up --root ROOT`
-at login (`ROOT` defaults to the machine root) and starts it now:
+at login (`ROOT` defaults to the machine root) and starts it now, replacing a
+running one:
 
 - macOS: the launchd user agent
   `~/Library/LaunchAgents/io.github.avivsinai.amq-remote.plist`, logging to
-  `ROOT/extensions/remote/up.log`.
+  `ROOT/extensions/remote/up.log`. Over SSH, with no login session to start it
+  in, install writes it and it starts at the next login.
 - Linux: the systemd user unit
   `$XDG_CONFIG_HOME/systemd/user/amq-remote.service` (default `~/.config`),
   logging to the journal (`journalctl --user -u amq-remote`). A user unit
   runs while you are logged in; for a machine that must serve its links
   before anyone logs in, run `loginctl enable-linger` once.
 
-The service runs the binary found on `PATH` when it is this binary, so a
-Homebrew upgrade keeps it working. It restarts `up` only when `up` fails, and
-`up` keeps its single-instance lock: a manual `up` for the same root while the
-service runs exits 6, and while a manual `up` runs the service retries every
-10 s and takes over when it stops. `amq-remote service status` reports whether
-the unit is the one install would write now (`current`), was written for
-another binary or root (`stale`: install again), or is missing, and whether
-it is loaded. `amq-remote service uninstall` stops the endpoint it runs and
-removes it. Neither command changes a unit
-it did not write. `doctor` names `service install` when the root has a link
-and no current service.
+There is one login service per user. Installing it for another root replaces
+the old root's service, and install says so.
+
+The service runs the `amq-remote` found on `PATH` when it is this binary, so a
+Homebrew upgrade keeps it working; otherwise install warns which binary the
+service runs. A temporary build (`go run`) is refused. The service restarts
+`up` only when `up` fails, and `up` keeps its single-instance lock: a manual
+`up` for the same root while the service runs exits 6, and while a manual `up`
+runs, the service retries every 10 s and takes over when it stops.
+
+`amq-remote service status` reports the root the installed unit runs and its
+state: `current` (the unit install would write now), `stale` (another
+`amq-remote` binary: install again), `other_root`, or `missing`; and whether
+its process runs now. `amq-remote service uninstall` stops the service and
+removes its unit; when the stop fails (no login session to reach), it still
+removes the unit and says that the running endpoint stops at logout. Neither
+command changes a unit it did not write. `doctor` names `service install` when
+the root has a link and no current service for it.
 
 A link lives in exactly one root, normally the machine root; its state is
 never copied or moved. One link name in two roots is refused.
