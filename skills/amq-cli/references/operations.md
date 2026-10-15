@@ -524,6 +524,9 @@ local-execution lane above; it does not transfer a cloud Maildir.
 - HTTPS courier remains for an operator-provided rendezvous. AMQ does not
   ship a hosted relay. Do not treat a missing rendezvous as a reason to
   remote-drain or copy Maildirs.
+- Agents never run `amq peer pair`, `amq-bridge peer add`, or
+  `amq-bridge peer remove`. Pin writes are operator-only after a
+  fingerprint compare.
 
 See [amq-bridge](https://github.com/avivsinai/agent-message-queue/blob/main/cmd/amq-bridge/README.md).
 
