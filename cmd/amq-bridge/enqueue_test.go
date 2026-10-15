@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/avivsinai/agent-message-queue/internal/bridge"
+	"github.com/avivsinai/agent-message-queue/internal/bridge/xferv3"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
@@ -258,6 +260,110 @@ func TestRunEnqueueUnitReadsStdin(t *testing.T) {
 func TestRunEnqueueUnitRejectsRootFlag(t *testing.T) {
 	if err := runEnqueue([]string{"--config", "/tmp/enqueue.json", "--dest-alias", "mac/claude", "--root", "/tmp"}); err == nil || !strings.Contains(err.Error(), "--root is not allowed") {
 		t.Fatalf("root flag error = %v", err)
+	}
+}
+
+func TestRunEnqueueWritesTxForPinnedPeer(t *testing.T) {
+	root := newBridgeRoot(t, "codex")
+	if err := bridge.WriteHostID(root, "grok-host"); err != nil {
+		t.Fatal(err)
+	}
+	key, err := bridge.GenerateHostKey("1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := bridge.WriteIdentity(root, key); err != nil {
+		t.Fatal(err)
+	}
+	host, err := xferv3.ParseHost("mac")
+	if err != nil {
+		t.Fatal(err)
+	}
+	allow, err := xferv3.ParseHandle("claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var xPublic [32]byte
+	peer, err := xferv3.NewPeer(host, []xferv3.Handle{allow}, "", xPublic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := xferv3.StorePeer(root, peer); err != nil {
+		t.Fatal(err)
+	}
+	configPath := writeEnqueueConfigFile(t, root, EnqueueConfigFile{
+		Root:               root,
+		SourceHost:         "grok-host",
+		SourceHandle:       "codex",
+		AllowedDestAliases: []string{"mac/claude"},
+	})
+	message := testMessage(t, "pinned-enqueue", "p2p/codex__claude", "codex", "tx and spool")
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldStdin := os.Stdin
+	os.Stdin = r
+	t.Cleanup(func() { os.Stdin = oldStdin })
+	go func() {
+		_, _ = w.Write(message)
+		_ = w.Close()
+	}()
+	oldStdout := os.Stdout
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = pw
+	t.Cleanup(func() { os.Stdout = oldStdout })
+	if err := runEnqueue([]string{"--config", configPath, "--dest-alias", "mac/claude"}); err != nil {
+		t.Fatalf("runEnqueue: %v", err)
+	}
+	_ = pw.Close()
+	out, err := io.ReadAll(pr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spoolPath := strings.TrimSpace(string(out))
+	wantSpool := filepath.Join(root, "bridge", "outbox", "codex", "new", "pinned-enqueue.md")
+	if spoolPath != wantSpool {
+		t.Fatalf("spool path = %q, want %q", spoolPath, wantSpool)
+	}
+	got, err := os.ReadFile(spoolPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(message) {
+		t.Fatalf("spool bytes changed")
+	}
+	source, err := xferv3.ParseHost("grok-host")
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := xferv3.ParseHandle("codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dest, err := xferv3.ParseDest("mac/claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	messageID, err := xferv3.ParseMessageID("pinned-enqueue")
+	if err != nil {
+		t.Fatal(err)
+	}
+	threadID, err := xferv3.ParseThreadID("p2p/codex__claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, err := xferv3.NewRecord(source, handle, dest, messageID, threadID, message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	txPath := filepath.Join(root, "bridge", "tx", "mac", rec.ID().String())
+	if _, err := os.Lstat(txPath); err != nil {
+		t.Fatalf("tx file: %v", err)
 	}
 }
 
