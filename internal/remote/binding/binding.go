@@ -89,9 +89,19 @@ func (b Binding) SessionIdentity() string {
 	case b.Identity != "":
 		return b.Identity
 	case b.Mailbox():
-		return "mailbox:" + b.Handle + "@" + filepath.Clean(b.Root)
+		return "mailbox:" + b.Handle + "@" + canonicalRoot(b.Root)
 	}
 	return "native:" + b.Target + "\x00" + b.NativeSession + "\x00" + filepath.Clean(b.Root)
+}
+
+// canonicalRoot is root with its symlinks resolved, so one root reached
+// through two spellings is one identity; the clean path when it does not
+// resolve.
+func canonicalRoot(root string) string {
+	if resolved, err := filepath.EvalSymlinks(root); err == nil {
+		return resolved
+	}
+	return filepath.Clean(root)
 }
 
 // Valid reports whether b is complete for its carrier.
@@ -502,8 +512,13 @@ func WriteSession(b Binding, base string) (string, error) {
 			}
 			// A file that does not read as a binding is taken, never overwritten.
 			h, held := holder[candidate]
+			// Any other Lstat error means the directory cannot be read, so
+			// no name is provably free: fail closed (review-s1 P1).
 			_, statErr := os.Lstat(filepath.Join(dir, candidate+".json"))
-			if held && h == id || !held && errors.Is(statErr, os.ErrNotExist) {
+			if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
+				return statErr
+			}
+			if held && h == id || !held && statErr != nil {
 				name = candidate
 			}
 		}
