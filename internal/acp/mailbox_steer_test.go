@@ -130,7 +130,7 @@ func TestSteerAfterTheFinalAnswerIsRefused(t *testing.T) {
 	event := strings.Repeat("1", 64)
 	var resp response
 	runSteeredTurn(t, s, "s", event, root, func(string) {
-		marker := filepath.Join(s.cfg.StateDir, "remote-events", event+".posted."+postFinal)
+		marker := filepath.Join(s.eventDir(event), event+".posted."+postFinal)
 		if err := os.WriteFile(marker, []byte("{}"), 0o600); err != nil {
 			t.Fatal(err)
 		}

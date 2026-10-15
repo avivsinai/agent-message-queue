@@ -283,7 +283,7 @@ func (s *Server) eventCancelPath(eventID string) (string, error) {
 	if s.cfg.StateDir == "" || eventID == "" || eventID != filepath.Base(eventID) {
 		return "", fmt.Errorf("cancel has no durable event record")
 	}
-	return filepath.Join(s.cfg.StateDir, "remote-events", eventID+".cancelled"), nil
+	return filepath.Join(s.eventDir(eventID), eventID+".cancelled"), nil
 }
 
 func (s *Server) eventCancelled(eventID string) bool {
@@ -374,7 +374,7 @@ func (s *Server) turnBinding(sessionID, eventID string) (binding.Binding, error)
 	if s.cfg.PinErr != nil {
 		return binding.Binding{}, s.cfg.PinErr
 	}
-	path := filepath.Join(s.cfg.StateDir, "remote-events", eventID+".json")
+	path := filepath.Join(s.eventDir(eventID), eventID+".json")
 	if raw, err := readSmallRegular(path); err == nil {
 		var c eventClaim
 		if err := json.Unmarshal(raw, &c); err != nil || c.Valid() != nil {
@@ -447,6 +447,49 @@ func (s *Server) ownsClaim(c eventClaim, sessionID string) bool {
 	}
 	b, err := s.sessionBinding(sessionID)
 	return err == nil && b.Same(c.Binding)
+}
+
+// eventsDir is remote-events, which holds the per-agent event directories
+// and the event state written before them.
+func (s *Server) eventsDir() string { return filepath.Join(s.cfg.StateDir, "remote-events") }
+
+// eventDir is the directory of one event's state. Each Buzz agent keeps its
+// own, remote-events/<agent pubkey>/, because one Buzz event can reach
+// several agents, and each handles it for its own session (#1068). State
+// written before lives in remote-events itself; an event whose claim is
+// there and is this agent's stays there. A process with no Buzz identity
+// uses remote-events itself.
+func (s *Server) eventDir(eventID string) string {
+	if buzzSelf == "" {
+		return s.eventsDir()
+	}
+	own := filepath.Join(s.eventsDir(), buzzSelf)
+	if eventID != "" && s.ownsLegacyEvent(own, eventID) {
+		return s.eventsDir()
+	}
+	return own
+}
+
+// ownsLegacyEvent reports whether the event's state was written before
+// per-agent directories and is this agent's: its own directory has no claim
+// of the event, and remote-events has one this agent owns. A steer event is
+// this agent's when its parent event is.
+func (s *Server) ownsLegacyEvent(own, eventID string) bool {
+	for _, suffix := range []string{".json", ".steer.json"} {
+		if _, err := os.Lstat(filepath.Join(own, eventID+suffix)); err == nil {
+			return false
+		}
+	}
+	if raw, err := readSmallRegular(filepath.Join(s.eventsDir(), eventID+".json")); err == nil {
+		var c eventClaim
+		return json.Unmarshal(raw, &c) == nil && c.Valid() == nil && s.ownsClaim(c, "")
+	}
+	var steer steerClaim
+	if raw, err := readSmallRegular(filepath.Join(s.eventsDir(), eventID+".steer.json")); err == nil &&
+		json.Unmarshal(raw, &steer) == nil && steer.ParentEvent != "" && steer.ParentEvent != eventID {
+		return s.ownsLegacyEvent(own, steer.ParentEvent)
+	}
+	return false
 }
 
 // createExclusive publishes raw at path only if nothing is there yet. The
@@ -766,7 +809,7 @@ func (s *Server) postOnce(eventID, kind string, record []byte, channel, text str
 		}
 		return s.publish(channel, text)
 	}
-	dir := filepath.Join(s.cfg.StateDir, "remote-events")
+	dir := s.eventDir(eventID)
 	result := ""
 	err := s.withPostLock(eventID, func() error {
 		out, final := s.mailboxAnswered(eventID)
@@ -799,7 +842,7 @@ func (s *Server) reserveFinal(eventID string, record []byte) (bool, error) {
 	won := false
 	err := s.withPostLock(eventID, func() error {
 		var err error
-		won, err = createExclusive(filepath.Join(s.cfg.StateDir, "remote-events", eventID+".posted."+postFinal), record)
+		won, err = createExclusive(filepath.Join(s.eventDir(eventID), eventID+".posted."+postFinal), record)
 		return err
 	})
 	return won, err
@@ -807,7 +850,7 @@ func (s *Server) reserveFinal(eventID string, record []byte) (bool, error) {
 
 // withPostLock runs fn under the event's post lock.
 func (s *Server) withPostLock(eventID string, fn func() error) error {
-	dir := filepath.Join(s.cfg.StateDir, "remote-events")
+	dir := s.eventDir(eventID)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -713,7 +714,7 @@ func TestLateReplyIsPostedOnceAfterTheTurn(t *testing.T) {
 	if got := strings.Count(strings.Join(posts, "|"), "late answer"); got != 1 {
 		t.Fatalf("late answer posted %d times; posts=%q", got, posts)
 	}
-	if _, err := os.Stat(filepath.Join(s.cfg.StateDir, "remote-events", eventID+".posted.final")); err != nil {
+	if _, err := os.Stat(filepath.Join(s.eventDir(eventID), eventID+".posted.final")); err != nil {
 		t.Fatalf("no outcome recorded: %v", err)
 	}
 }
@@ -755,6 +756,51 @@ func TestAnotherAgentsClaimIsNeitherFollowedNorSwept(t *testing.T) {
 	alpha.sweepLateReplies(time.Now().Add(time.Hour))
 	if got := strings.Join(posts(), "|"); strings.Count(got, "late answer") != 1 {
 		t.Fatalf("posts=%q; want alpha's own sweep to post the late answer once", got)
+	}
+}
+
+// Issue #1068 (review of S3 r2): one Buzz event that reaches two agents,
+// for example a channel message that mentions both, was claimed by the first
+// agent in the shared event state. The second agent refused it, so its own
+// session never got the message. Each agent now handles the event for its
+// own session and posts its own reply.
+func TestOneEventReachesEachAgentsSession(t *testing.T) {
+	const chanA = "6eff60e4-32ab-48ec-bd3d-f4c97872f370"
+	alpha, alphaRoot := mailboxServer(t)
+	alpha.cfg.Pin = binding.LegacyName
+	betaRoot := canonicalTempDir(t)
+	if err := fsq.EnsureAgentDirs(betaRoot, "agent"); err != nil {
+		t.Fatal(err)
+	}
+	if err := binding.WriteNamed(binding.Binding{Carrier: binding.CarrierMailbox, Root: betaRoot, Handle: "agent", Name: "beta"}); err != nil {
+		t.Fatal(err)
+	}
+	beta := NewServer(Config{RemoteBinding: true, Pin: "beta", StateDir: alpha.cfg.StateDir, TurnTimeout: 2 * time.Second, PollInterval: 5 * time.Millisecond, HeartbeatInterval: 20 * time.Millisecond}, "test")
+	posts := recordPosts(t)
+	eventID := strings.Repeat("4", 64)
+	run := func(s *Server, self, root, answer string) {
+		t.Helper()
+		buzzSelf = strings.Repeat(self, 64)
+		turn := newTurn()
+		turn.channel = chanA
+		if _, rpcErr := s.runRemote("s", "hi both", eventID, turn, func(v any) error {
+			if strings.HasPrefix(v.(sessionUpdateNotification).Params.Update.Content.Text, "Delivered to") {
+				replyAs(t, root, cockpitThread("session/s"), inboxPrompts(t, root)[0], format.KindAnswer, answer)
+			}
+			return nil
+		}); rpcErr != nil {
+			t.Fatal(rpcErr)
+		}
+	}
+	run(alpha, "a", alphaRoot, "reply A")
+	run(beta, "b", betaRoot, "reply B")
+	for name, root := range map[string]string{"alpha": alphaRoot, "beta": betaRoot} {
+		if ids := inboxPrompts(t, root); len(ids) != 1 {
+			t.Errorf("%s session got %d prompts; want 1", name, len(ids))
+		}
+	}
+	if got, want := posts(), []string{chanA + ": reply A", chanA + ": reply B"}; !slices.Equal(got, want) {
+		t.Fatalf("posts=%q; want %q", got, want)
 	}
 }
 
@@ -1249,7 +1295,7 @@ func TestStatusNeverPostsAfterTheFinal(t *testing.T) {
 	s, _ := mailboxServer(t)
 	posts := recordPosts(t)
 	eventID := strings.Repeat("6", 64)
-	dir := filepath.Join(s.cfg.StateDir, "remote-events")
+	dir := s.eventDir(eventID)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
