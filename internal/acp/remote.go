@@ -126,11 +126,19 @@ func (s *Server) runRemote(sessionID, text, eventID string, turn *turnState, emi
 		if err != nil {
 			r := &remoteTurn{s: s, sessionID: sessionID, eventID: eventID, emit: emit, turn: turn, meta: remoteMeta{State: "not_connected", Reason: err.Error()}}
 			text := "Not connected. Run /amq-remote in a Claude Code or Codex session."
-			if !errors.Is(err, binding.ErrNone) {
+			var unpinned *unpinnedError
+			switch {
+			case errors.As(err, &unpinned):
+				r.meta.State = "not_pinned"
+				text = s.unpinnedReply(unpinned.bindings)
+			case !errors.Is(err, binding.ErrNone):
 				text = "Not connected: " + err.Error()
 			}
 			return r.say(postStatus, r.settle("replied"), StopReasonRefusal, text)
 		}
+		// A legacy-framed first prompt carries the system prompt; the pin
+		// line is the agent's configuration, not the owner's message.
+		text = stripPinLines(text)
 		if b.Mailbox() {
 			return s.runMailbox(sessionID, text, eventID, b, turn, emit)
 		}
@@ -318,17 +326,27 @@ func (r *remoteTurn) waitBusy(deadline time.Time) string {
 	}
 }
 
-// sessionBinding is the binding this ACP session drives: the one its model
-// selected (session/set_model), else the only binding there is (bead
-// agent-message-queue-611.39). With several bindings and no selection it
-// refuses rather than guess.
+// sessionBinding is the binding this ACP session drives: the agent's pin
+// (lifecycle.go), else the model the session selected (session/set_model,
+// bead agent-message-queue-611.39). A selection that disagrees with the pin
+// refuses. An agent with neither serves no session and never delivers, even
+// with one binding: it answers with the bound sessions instead.
 func (s *Server) sessionBinding(sessionID string) (binding.Binding, error) {
+	if s.cfg.PinErr != nil {
+		return binding.Binding{}, s.cfg.PinErr
+	}
 	s.mu.Lock()
 	name := ""
 	if session, ok := s.sessions[sessionID]; ok {
 		name = session.binding
 	}
 	s.mu.Unlock()
+	switch {
+	case s.cfg.Pin != "" && name != "" && name != s.cfg.Pin:
+		return binding.Binding{}, conflictingPins("the agent", s.cfg.Pin, "the selected model", name)
+	case s.cfg.Pin != "":
+		name = s.cfg.Pin
+	}
 	if name != "" {
 		return binding.ReadNamed(name)
 	}
@@ -336,13 +354,10 @@ func (s *Server) sessionBinding(sessionID string) (binding.Binding, error) {
 	if err != nil {
 		return binding.Binding{}, err
 	}
-	switch len(all) {
-	case 0:
+	if len(all) == 0 {
 		return binding.Binding{}, binding.ErrNone
-	case 1:
-		return all[0], nil
 	}
-	return binding.Binding{}, errors.New("this agent has no session selected; set its model to one amq-remote:<name> session")
+	return binding.Binding{}, &unpinnedError{bindings: all}
 }
 
 // turnBinding fixes the binding a prompt runs under. A redelivered event

@@ -29,7 +29,7 @@ func mailboxServer(t *testing.T) (*Server, string) {
 	if err := binding.Write(binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: "agent"}); err != nil {
 		t.Fatal(err)
 	}
-	return NewServer(Config{RemoteBinding: true, StateDir: canonicalTempDir(t), TurnTimeout: 2 * time.Second, PollInterval: 5 * time.Millisecond, HeartbeatInterval: 20 * time.Millisecond}, "test"), root
+	return NewServer(Config{RemoteBinding: true, Pin: binding.LegacyName, StateDir: canonicalTempDir(t), TurnTimeout: 2 * time.Second, PollInterval: 5 * time.Millisecond, HeartbeatInterval: 20 * time.Millisecond}, "test"), root
 }
 
 // inboxPrompts lists the prompt ids in the agent's inbox (new and cur).
@@ -731,8 +731,8 @@ func TestModelSelectsEachAgentsSession(t *testing.T) {
 	for i, name := range []string{"a", "b"} {
 		live.send(fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"session/new","params":{"cwd":"/tmp"}}`, 10+i))
 		created := live.read()["result"].(map[string]any)
-		if n := len(created["models"].(map[string]any)["availableModels"].([]any)); n != 2 {
-			t.Fatalf("session/new advertises %d models; want one per binding", n)
+		if n := len(created["models"].(map[string]any)["availableModels"].([]any)); n != 3 {
+			t.Fatalf("session/new advertises %d models; want the plain model plus one per binding", n)
 		}
 		sid := created["sessionId"].(string)
 		live.send(fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"session/set_model","params":{"sessionId":%q,"modelId":"amq-remote:%s"}}`, 20+i, sid, name))
@@ -745,6 +745,50 @@ func TestModelSelectsEachAgentsSession(t *testing.T) {
 	for name, root := range map[string]string{"a": rootA, "b": rootB} {
 		if ids := inboxPrompts(t, root); len(ids) != 1 {
 			t.Fatalf("session %s inbox holds %d prompts; want 1", name, len(ids))
+		}
+	}
+}
+
+// Design AMQ fact 2, found in review of S3: an unpinned agent with two
+// bindings advertised the first binding as its default model, so its DM
+// silently drove the binding that sorts first. It must deliver nowhere and
+// list both sessions.
+func TestUnpinnedAgentNeverDelivers(t *testing.T) {
+	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
+	roots := map[string]string{"alpha": canonicalTempDir(t), "beta": canonicalTempDir(t)}
+	for name, root := range roots {
+		if err := fsq.EnsureAgentDirs(root, "agent"); err != nil {
+			t.Fatal(err)
+		}
+		if err := binding.WriteNamed(binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: "agent", Name: name}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	live := startServer(t, Config{RemoteBinding: true, StateDir: canonicalTempDir(t), TurnTimeout: 100 * time.Millisecond, PollInterval: 5 * time.Millisecond, HeartbeatInterval: 20 * time.Millisecond})
+	live.send(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":2}}`)
+	live.read()
+	live.send(`{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/tmp"}}`)
+	sid := live.read()["result"].(map[string]any)["sessionId"].(string)
+	live.send(fmt.Sprintf(`{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":%q,"prompt":[{"type":"text","text":"hello"}]}}`, sid))
+	said := ""
+	for {
+		value := live.read()
+		if _, ok := value["result"]; ok {
+			break
+		}
+		if value["error"] != nil {
+			t.Fatalf("prompt: %v", value)
+		}
+		if update, ok := value["params"].(map[string]any)["update"].(map[string]any); ok && update["sessionUpdate"] == "agent_message_chunk" {
+			said += update["content"].(map[string]any)["text"].(string)
+		}
+	}
+	for name, root := range roots {
+		if ids := inboxPrompts(t, root); len(ids) != 0 {
+			t.Errorf("an unpinned agent delivered %d prompts to %s", len(ids), name)
+		}
+		if !strings.Contains(said, name) {
+			t.Errorf("reply %q does not list %s", said, name)
 		}
 	}
 }

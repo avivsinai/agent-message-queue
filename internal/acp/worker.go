@@ -33,6 +33,7 @@ func PrepareWorkerEnv() error {
 	// answers (post.go); the environment is still stripped, so no later
 	// child and no AMQ message sees it.
 	captureBuzzIdentity()
+	captureBuzzAgent()
 	stripBuzzSecrets()
 	return nil
 }

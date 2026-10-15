@@ -91,6 +91,9 @@ func (s *Server) startLateReplySweep() (stop func()) {
 		defer close(done)
 		tick := time.NewTicker(lateReplyInterval)
 		defer tick.Stop()
+		// The same worker keeps a pinned agent archived or not; it starts
+		// with a tick, so a restarted agent catches up at once.
+		s.lifecycleTick(time.Now())
 		for {
 			select {
 			case <-quit:
@@ -99,6 +102,7 @@ func (s *Server) startLateReplySweep() (stop func()) {
 			case <-kick:
 			}
 			s.sweepLateReplies(time.Now())
+			s.lifecycleTick(time.Now())
 		}
 	}()
 	return func() {
