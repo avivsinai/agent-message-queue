@@ -14,11 +14,13 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/amqhome"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/lock"
 )
 
@@ -58,6 +60,17 @@ type Binding struct {
 	// Identity is the session identity that decides name reuse (see
 	// SessionIdentity); empty in a binding written before it was recorded.
 	Identity string `json:"identity,omitempty"`
+	// Harness is the harness kind that runs the session (claude, codex, pi);
+	// empty when it was not detected.
+	Harness string `json:"harness,omitempty"`
+	// Holder is the harness process of the session, recorded so that a
+	// session that ended can be proven ended; zero when it is not known.
+	Holder launch.HolderIdentity `json:"holder,omitzero"`
+	// Label is the human name of the session and of its Buzz agent:
+	// "<harness> · <project>/<session> @ <machine>".
+	Label string `json:"label,omitempty"`
+	// Machine is the short name of the machine that holds the binding.
+	Machine string `json:"machine,omitempty"`
 	// Name is the binding's name; it is the file name, not stored in it.
 	Name    string `json:"-"`
 	BoundAt string `json:"bound_at"`
@@ -92,6 +105,76 @@ func (b Binding) SessionIdentity() string {
 		return "mailbox:" + b.Handle + "@" + filepath.Clean(b.Root)
 	}
 	return "native:" + b.Target + "\x00" + b.NativeSession + "\x00" + filepath.Clean(b.Root)
+}
+
+// NativeIdentity is the session identity of a native session: its harness,
+// root and working directory, not its process or native session id, so the
+// same session coming back to the same place is the same identity.
+func NativeIdentity(kind, root, cwd string) string {
+	return "native:" + kind + "\x00" + filepath.Clean(cwd) + "\x00" + filepath.Clean(root)
+}
+
+// State is the liveness of a bound session.
+type State string
+
+// Liveness states. Only Ended is proof; Unknown is never treated as ended.
+const (
+	Live    State = "live"
+	Ended   State = "ended"
+	Unknown State = "unknown"
+)
+
+// Liveness reports whether b's session still runs, with the evidence. It is
+// Ended only when that is proven: the root is gone, or the holder process is
+// not running, runs with another start token, or ran in another boot. A
+// binding without a holder is Unknown, except a native Claude binding from
+// before holders were recorded, which is Ended when the pid in its target is
+// not running.
+func (b Binding) Liveness() (State, string) {
+	if _, err := os.Stat(b.Root); errors.Is(err, os.ErrNotExist) {
+		return Ended, "root is gone"
+	} else if err != nil {
+		return Unknown, err.Error()
+	}
+	h := b.Holder
+	if pid, ok := strings.CutPrefix(b.Target, "claude:"); ok && h.PID <= 0 && !b.Mailbox() {
+		h.PID, _ = strconv.Atoi(pid)
+	}
+	if h.PID <= 0 {
+		return Unknown, "no holder recorded"
+	}
+	switch state, evidence := launch.InspectHolder(h); state {
+	case launch.LeaseStale:
+		return Ended, evidence
+	case launch.LeaseValid:
+		return Live, evidence
+	default:
+		return Unknown, evidence
+	}
+}
+
+// Machine is this machine's short name for labels: the first label of the
+// host name, lowercased, at most 32 characters of [a-z0-9-]; empty when the
+// host name is unknown.
+func Machine() string {
+	host, err := os.Hostname()
+	if err != nil {
+		return ""
+	}
+	first, _, _ := strings.Cut(host, ".")
+	var b strings.Builder
+	for _, r := range strings.ToLower(first) {
+		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' {
+			b.WriteRune(r)
+		} else {
+			b.WriteRune('-')
+		}
+	}
+	out := strings.Trim(b.String(), "-")
+	if len(out) > 32 {
+		out = strings.Trim(out[:32], "-")
+	}
+	return out
 }
 
 // Valid reports whether b is complete for its carrier.
@@ -433,8 +516,8 @@ func ReadNamed(name string) (Binding, error) {
 	return b, nil
 }
 
-// NameTakenError is returned by WriteNamedNew when another destination
-// already holds the binding name.
+// NameTakenError is returned by WriteNamedIf when the binding of that name is
+// not one it may replace.
 type NameTakenError struct{ Name string }
 
 func (e *NameTakenError) Error() string {
@@ -444,23 +527,20 @@ func (e *NameTakenError) Error() string {
 // WriteNamed adds or replaces only the binding called b.Name.
 func WriteNamed(b Binding) error { return writeNamed(b, nil) }
 
-// WriteNamedNew writes the binding called b.Name, refusing with
-// *NameTakenError when a binding of that name names a different destination.
-// The check and the write share one transaction. Writing the same
-// destination again stays idempotent.
-func WriteNamedNew(b Binding) error { return writeNamed(b, b.Same) }
-
 // WriteNamedIf writes the binding called b.Name when no binding of that name
 // exists or allow accepts the one that does; otherwise it refuses with
 // *NameTakenError. The check and the write share one transaction.
 func WriteNamedIf(b Binding, allow func(old Binding) bool) error { return writeNamed(b, allow) }
 
-// WriteSession writes b under the name its session identity already holds,
-// else under base, else under the first of base-2, base-3, ... that is free or
-// held by the same identity, and returns the name written. Another session's
-// binding is never replaced, so a session never inherits another session's
-// Buzz agent, and the same session always gets back its own name. The choice
-// and the write share one transaction.
+// WriteSession writes b under the name b's own destination already holds, else
+// under a name its session identity holds, else under base, else under the
+// first of base-2, base-3, ... that is free or held by the same identity, and
+// returns the name written. A binding of the same identity is taken over only
+// when its holder is b's own or not proven live: a live holder that is not
+// b's is a concurrent session in the same place, which keeps its name.
+// Another session's binding is never replaced, so a session never inherits
+// another session's Buzz agent, and the same session always gets back its own
+// name. The choice and the write share one transaction.
 func WriteSession(b Binding, base string) (string, error) {
 	if err := ValidName(base); err != nil {
 		return "", err
@@ -487,12 +567,27 @@ func WriteSession(b Binding, base string) (string, error) {
 		if err != nil {
 			return err
 		}
-		holder := map[string]string{}
+		reusable := func(o Binding) bool {
+			if o.SessionIdentity() != id {
+				return false
+			}
+			if b.Holder.PID > 0 && o.Holder == b.Holder {
+				return true
+			}
+			state, _ := o.Liveness()
+			return state != Live
+		}
+		held := map[string]Binding{}
 		for _, o := range bound {
-			if o.SessionIdentity() == id && name == "" {
+			held[o.Name] = o
+			if o.Same(b) && name == "" {
 				name = o.Name
 			}
-			holder[o.Name] = o.SessionIdentity()
+		}
+		for _, o := range bound {
+			if name == "" && reusable(o) {
+				name = o.Name
+			}
 		}
 		for n := 1; name == ""; n++ {
 			candidate := base
@@ -501,9 +596,9 @@ func WriteSession(b Binding, base string) (string, error) {
 				candidate = strings.TrimRight(base[:min(len(base), 64-len(suffix))], "-_") + suffix
 			}
 			// A file that does not read as a binding is taken, never overwritten.
-			h, held := holder[candidate]
+			o, taken := held[candidate]
 			_, statErr := os.Lstat(filepath.Join(dir, candidate+".json"))
-			if held && h == id || !held && errors.Is(statErr, os.ErrNotExist) {
+			if taken && reusable(o) || !taken && errors.Is(statErr, os.ErrNotExist) {
 				name = candidate
 			}
 		}

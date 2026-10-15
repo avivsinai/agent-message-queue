@@ -351,15 +351,27 @@ func classifyHolder(recorded HolderIdentity, live processInfo) (LeaseState, stri
 	return LeaseUnverified, "lease lacks process start metadata"
 }
 
-func currentHolder() (HolderIdentity, error) {
-	proc := inspectProcess(os.Getpid())
+func currentHolder() (HolderIdentity, error) { return HolderOf(os.Getpid()) }
+
+// HolderOf is the identity of the running process pid, for a caller that
+// records another process (a harness session) as a holder.
+func HolderOf(pid int) (HolderIdentity, error) {
+	proc := inspectProcess(pid)
 	if !proc.Running {
-		return HolderIdentity{}, fmt.Errorf("current process is not running")
+		return HolderIdentity{}, fmt.Errorf("process %d is not running", pid)
 	}
 	if proc.StartToken == "" {
 		return HolderIdentity{}, fmt.Errorf("process start time unavailable")
 	}
 	return HolderIdentity{PID: proc.PID, ProcessStart: proc.StartToken, BootID: proc.BootID}, nil
+}
+
+// InspectHolder classifies a recorded holder against the live process:
+// LeaseStale only when the holder is proven gone, LeaseValid when it is
+// confirmed, and LeaseUnverified otherwise. A holder with only a pid is stale
+// when that pid is not running and unverified when it is.
+func InspectHolder(h HolderIdentity) (LeaseState, string) {
+	return classifyHolder(h, inspectProcess(h.PID))
 }
 
 func writeLeaseRecord(root *fsq.DeliveryRoot, record leaseRecord) error {

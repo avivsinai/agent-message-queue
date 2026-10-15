@@ -9,10 +9,12 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/avivsinai/agent-message-queue/internal/config"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/ipc"
 	"github.com/avivsinai/agent-message-queue/internal/remote/manifest"
@@ -260,8 +262,9 @@ func TestJSONFlagValueDecidesSuccessAndErrorOutput(t *testing.T) {
 // E2E kit F3: after a session change in the same Claude process (same target,
 // new native session), attach --self --link refused the binding's own name,
 // so a link share could not follow it. With --link the same root and target
-// re-pin the name; another target still may not take it, and a plain native
-// attach keeps the --name refusal (ruling ww).
+// re-pin the name, and another target still may not take it. A plain native
+// attach of another session takes the next free name instead of the --name
+// refusal of ruling ww: Buzz DX ruling 2 gives each session its own name.
 func TestWriteBindingRepinsTheSameTargetAfterASessionChange(t *testing.T) {
 	dir := canonicalTempDir(t)
 	t.Setenv(binding.EnvPath, filepath.Join(dir, "binding.json"))
@@ -271,9 +274,8 @@ func TestWriteBindingRepinsTheSameTargetAfterASessionChange(t *testing.T) {
 	}
 	moved := old
 	moved.NativeSession = "session-new"
-	var taken *binding.NameTakenError
-	if _, err := writeBinding(moved, false, false); !errors.As(err, &taken) {
-		t.Fatalf("native attach without --link: err=%v; want NameTakenError", err)
+	if name, err := writeBinding(moved, false, false); err != nil || name != "claude-7-2" {
+		t.Fatalf("native attach without --link: name=%q err=%v; want claude-7-2", name, err)
 	}
 	if _, err := writeBinding(moved, false, true); err != nil {
 		t.Fatalf("re-attach with --link after a session change: %v", err)
@@ -282,6 +284,7 @@ func TestWriteBindingRepinsTheSameTargetAfterASessionChange(t *testing.T) {
 		t.Fatalf("binding = %+v %v; want it pinned to session-new", got, err)
 	}
 	other := binding.Binding{Root: dir, Target: "claude:8", NativeSession: "session-8", Name: "claude-7"}
+	var taken *binding.NameTakenError
 	if _, err := writeBinding(other, false, true); !errors.As(err, &taken) {
 		t.Fatalf("another target with the same name: err=%v; want NameTakenError", err)
 	}
@@ -354,5 +357,48 @@ func TestMailboxAttachNamesEachSessionOfAProject(t *testing.T) {
 		if want[b.Name] != b.Root {
 			t.Fatalf("binding %s names %s; want %s", b.Name, b.Root, want[b.Name])
 		}
+	}
+}
+
+// Buzz DX S2: /amq-remote status lists the bound sessions. A session proven
+// ended (its holder ran in another boot) is pruned; one with no holder is
+// unknown, listed, and kept.
+func TestBindingsPrunesEndedSessionsAndKeepsUnknownOnes(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("process start times and boot ids are read on darwin and linux only")
+	}
+	dir := canonicalTempDir(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(binding.EnvPath, filepath.Join(dir, "remote", "binding.json"))
+	self, err := launch.HolderOf(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	self.BootID = "another-boot"
+	for _, b := range []binding.Binding{
+		{Carrier: binding.CarrierMailbox, Root: dir, Handle: "codex", Name: "ended", Holder: self},
+		{Carrier: binding.CarrierMailbox, Root: dir, Handle: "claude", Name: "unknown"},
+	} {
+		if err := binding.WriteNamed(b); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var out bytes.Buffer
+	if code := run([]string{"bindings", "--json"}, nil, &out, io.Discard); code != 0 {
+		t.Fatalf("bindings exit %d: %s", code, out.String())
+	}
+	var got struct {
+		Bindings []struct{ Name, State string }
+		Pruned   []string
+	}
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("bindings output %q: %v", out.String(), err)
+	}
+	if len(got.Pruned) != 1 || got.Pruned[0] != "ended" || len(got.Bindings) != 1 ||
+		got.Bindings[0].Name != "unknown" || got.Bindings[0].State != string(binding.Unknown) {
+		t.Fatalf("bindings output %s; want ended pruned and unknown listed", out.String())
+	}
+	if _, err := binding.ReadNamed("ended"); !errors.Is(err, binding.ErrNone) {
+		t.Fatalf("the ended binding is still present: %v", err)
 	}
 }

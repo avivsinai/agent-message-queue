@@ -53,6 +53,8 @@ func init() {
 	// The real start runs os.Executable(), which here is this test binary;
 	// a test that needs the start replaces it with a recorder.
 	startEndpoint = func(string, string) error { return errors.New("tests start no endpoint") }
+	// The real detection runs ps and reads the Claude registry under HOME.
+	detectHarness = func() harnessSession { return harnessSession{} }
 	registry.Register("weak-fake", func(ctx context.Context, cfg registry.FactoryConfig) (core.Attachment, error) {
 		r := fake.New(cfg.Target, "e_1")
 		r.WithEvidence(&protocol.Evidence{Submit: "submitted", Completion: "run_terminal"})
