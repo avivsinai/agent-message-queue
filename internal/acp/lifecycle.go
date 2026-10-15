@@ -147,8 +147,13 @@ type agentMarker struct {
 	// Serves is the binding as last seen bound.
 	Serves *binding.Binding `json:"serves,omitempty"`
 	// Archived is the state the relay last accepted for this identity.
-	Archived bool   `json:"archived"`
-	Updated  string `json:"updated"`
+	Archived bool `json:"archived"`
+	// Channel is where the agent posts on its own: a session agent's latest
+	// DM, or the helper's control channel. OwnerAdded records that the
+	// owner is a member of the control channel.
+	Channel    string `json:"channel,omitempty"`
+	OwnerAdded bool   `json:"owner_added,omitempty"`
+	Updated    string `json:"updated"`
 }
 
 // agentMarkerFresh is how old a marker may be while its agent still runs:
@@ -190,10 +195,15 @@ func (s *Server) agentMarkers(pin string) []agentMarker {
 	return out
 }
 
-// buzzCall runs one buzz CLI command as the agent. A variable so tests can
-// record calls without a relay.
-var buzzCall = func(budget time.Duration, args ...string) error {
-	_, err := runBuzzCLI(budget, nil, args...)
+// buzzCall runs one buzz CLI command as the agent and returns its output. A
+// variable so tests can record calls without a relay.
+var buzzCall = func(budget time.Duration, args ...string) ([]byte, error) {
+	return runBuzzCLI(budget, nil, args...)
+}
+
+// buzzRun is buzzCall when only the outcome matters.
+func buzzRun(budget time.Duration, args ...string) error {
+	_, err := buzzCall(budget, args...)
 	return err
 }
 
@@ -204,27 +214,47 @@ var buzzCall = func(budget time.Duration, args ...string) error {
 // keeps the last state the relay accepted, so each change runs once; a
 // failed call is retried on the next tick. An unreadable binding proves
 // nothing and changes nothing.
+//
+// When it unarchives, it posts "Connected again" to its latest DM.
 func (s *Server) lifecycleTick(now time.Time) {
+	if s.cfg.Helper {
+		s.helperTick(now)
+		return
+	}
 	if s.cfg.Pin == "" || s.cfg.PinErr != nil || buzzSelf == "" {
 		return
 	}
 	dir := s.agentMarkerDir(s.cfg.Pin)
 	m, _ := readAgentMarker(filepath.Join(dir, buzzSelf+".json"))
+	s.mu.Lock()
+	if s.lastChannel != "" {
+		m.Channel = s.lastChannel
+	}
+	s.mu.Unlock()
 	b, err := binding.ReadNamed(s.cfg.Pin)
 	switch {
 	case errors.Is(err, binding.ErrNone):
-		if !m.Archived && buzzCall(s.cfg.PostTimeout, "agents", "archive", buzzSelf, "--reason", "retired") == nil {
+		if !m.Archived && buzzRun(s.cfg.PostTimeout, "agents", "archive", buzzSelf, "--reason", "retired") == nil {
 			m.Archived = true
-			_ = buzzCall(s.cfg.PostTimeout, "users", "set-status", "--text", "session ended")
+			_ = buzzRun(s.cfg.PostTimeout, "users", "set-status", "--text", "session ended")
 		}
 	case err == nil:
-		if m.Archived && buzzCall(s.cfg.PostTimeout, "agents", "unarchive", buzzSelf, "--reason", "returned") == nil {
+		if m.Archived && buzzRun(s.cfg.PostTimeout, "agents", "unarchive", buzzSelf, "--reason", "returned") == nil {
 			m.Archived = false
-			_ = buzzCall(s.cfg.PostTimeout, "users", "set-status", "--clear")
+			_ = buzzRun(s.cfg.PostTimeout, "users", "set-status", "--clear")
+			if m.Channel != "" {
+				_, _ = postAnswer(m.Channel, "Connected again: "+sessionAgentName(b), s.cfg.PostTimeout)
+			}
 		}
 		m.Serves = &b
 	}
-	m.Name, m.PubKey, m.DisplayName, m.PID = s.cfg.Pin, buzzSelf, buzzAgent.displayName, os.Getpid()
+	m.Name, m.DisplayName = s.cfg.Pin, buzzAgent.displayName
+	s.writeAgentMarker(dir, m, now)
+}
+
+// writeAgentMarker stamps m as this process's and writes it under dir.
+func (s *Server) writeAgentMarker(dir string, m agentMarker, now time.Time) {
+	m.PubKey, m.PID = buzzSelf, os.Getpid()
 	m.Updated = now.UTC().Format(time.RFC3339)
 	raw, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
@@ -234,4 +264,122 @@ func (s *Server) lifecycleTick(now time.Time) {
 		return
 	}
 	_, _ = fsq.WriteFileAtomic(dir, buzzSelf+".json", append(raw, '\n'), 0o600)
+}
+
+// The per-machine helper ("AMQ Remote helper" in its system prompt) creates
+// the session agents. It never delivers. On each tick it:
+//   - creates the private control channel "amq-remote @ <machine>" once and
+//     adds the owner: Desktop accepts an agent draft only from a channel
+//     that both the sending agent and the owner belong to, and adds each new
+//     agent to that channel;
+//   - for each binding that no agent has a marker for yet, sends one
+//     draft-create, so Desktop opens "Create agent" with the session's name
+//     and pin filled in. A request is retried at most helperRequestTries
+//     times, helperRequestGap apart; the draft is ephemeral, so a closed
+//     Desktop drops it.
+
+// helperName is the helper's marker directory under agents/. It is not a
+// valid binding name, so it never meets a session's.
+const helperName = "_helper"
+
+const (
+	helperRequestTries = 3
+	helperRequestGap   = 10 * time.Minute
+)
+
+// helperRequest is the bookkeeping of the draft requests for one binding,
+// under <state>/requests/<name>.json.
+type helperRequest struct {
+	Count int    `json:"count"`
+	Last  string `json:"last"`
+}
+
+func (s *Server) helperTick(now time.Time) {
+	if buzzSelf == "" || buzzOwner == "" {
+		return
+	}
+	dir := s.agentMarkerDir(helperName)
+	m, _ := readAgentMarker(filepath.Join(dir, buzzSelf+".json"))
+	m.Name, m.DisplayName = helperName, buzzAgent.displayName
+	defer func() { s.writeAgentMarker(dir, m, now) }()
+	if m.Channel == "" {
+		name := "amq-remote"
+		if machine := machineName(); machine != "" {
+			name += " @ " + machine
+		}
+		out, err := buzzCall(s.cfg.PostTimeout, "channels", "create", "--name", name, "--type", "stream", "--visibility", "private")
+		var created struct {
+			Accepted  bool   `json:"accepted"`
+			ChannelID string `json:"channel_id"`
+		}
+		if err != nil || json.Unmarshal(out, &created) != nil || !created.Accepted || created.ChannelID == "" {
+			return
+		}
+		m.Channel = created.ChannelID
+	}
+	if !m.OwnerAdded {
+		if buzzRun(s.cfg.PostTimeout, "channels", "add-member", "--channel", m.Channel, "--pubkey", buzzOwner) != nil {
+			return
+		}
+		m.OwnerAdded = true
+	}
+	all, err := binding.List()
+	if err != nil {
+		return
+	}
+	for _, b := range all {
+		if len(s.agentMarkers(b.Name)) == 0 {
+			s.requestSessionAgent(m.Channel, b, now)
+		}
+	}
+}
+
+// requestSessionAgent sends one draft-create for b's agent unless the
+// request budget for b is spent or the last request is too recent.
+func (s *Server) requestSessionAgent(channel string, b binding.Binding, now time.Time) {
+	dir := filepath.Join(s.cfg.StateDir, "requests")
+	var req helperRequest
+	if raw, err := readSmallRegular(filepath.Join(dir, b.Name+".json")); err == nil {
+		_ = json.Unmarshal(raw, &req)
+	}
+	if last, err := time.Parse(time.RFC3339, req.Last); req.Count >= helperRequestTries || (err == nil && now.Sub(last) < helperRequestGap) {
+		return
+	}
+	req.Count++
+	req.Last = now.UTC().Format(time.RFC3339)
+	raw, err := json.Marshal(req)
+	if err != nil || os.MkdirAll(dir, 0o700) != nil {
+		return
+	}
+	// The attempt is recorded first, so a failing Desktop or relay never
+	// gets more than helperRequestTries requests.
+	if _, err := fsq.WriteFileAtomic(dir, b.Name+".json", append(raw, '\n'), 0o600); err != nil {
+		return
+	}
+	_ = buzzRun(s.cfg.PostTimeout, "agents", "draft-create", "--channel", channel, "--display-name", sessionAgentName(b), "--system-prompt", "AMQ Remote session: "+b.Name)
+}
+
+// sessionAgentName is the Buzz agent name for b's session.
+func sessionAgentName(b binding.Binding) string {
+	return "AMQ: " + b.Name
+}
+
+// machineName is this machine's short name: the first label of its host
+// name, lowercase, with other characters as '-', at most 32 characters.
+func machineName() string {
+	host, _ := os.Hostname()
+	first, _, _ := strings.Cut(host, ".")
+	var b strings.Builder
+	for _, r := range strings.ToLower(first) {
+		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' {
+			b.WriteRune(r)
+		} else {
+			b.WriteRune('-')
+		}
+	}
+	out := strings.Trim(b.String(), "-")
+	if len(out) > 32 {
+		out = strings.Trim(out[:32], "-")
+	}
+	return out
 }
