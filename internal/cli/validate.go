@@ -46,7 +46,9 @@ func (v *headerValidator) validate(header format.Header) error {
 		return nil
 	}
 	if _, ok := v.known[header.From]; !ok {
-		return fmt.Errorf("unknown sender handle: %s", header.From)
+		if _, _, peer := splitPeerFrom(header.From); !peer {
+			return fmt.Errorf("unknown sender handle: %s", header.From)
+		}
 	}
 	for _, recipient := range header.To {
 		if _, ok := v.known[recipient]; !ok {
@@ -127,6 +129,11 @@ func validateLegacyInspectionHandleValue(label, handle string) error {
 }
 
 func validateHandleValue(label, handle string) error {
+	if label == "sender" {
+		if _, _, ok := splitPeerFrom(handle); ok {
+			return nil
+		}
+	}
 	if strings.TrimSpace(handle) == "" {
 		return fmt.Errorf("%s handle is empty", label)
 	}
@@ -136,6 +143,35 @@ func validateHandleValue(label, handle string) error {
 	}
 	if norm != handle {
 		return fmt.Errorf("invalid %s handle (not normalized): %s", label, handle)
+	}
+	return nil
+}
+
+func splitPeerFrom(from string) (string, string, bool) {
+	from = strings.TrimSpace(from)
+	host, handle, ok := strings.Cut(from, "/")
+	if !ok || host == "" || handle == "" || strings.Contains(handle, "/") {
+		return "", "", false
+	}
+	if err := parsePeerName(host); err != nil {
+		return "", "", false
+	}
+	if err := fsq.ValidateHandle(handle); err != nil {
+		return "", "", false
+	}
+	return host, handle, true
+}
+
+func parsePeerName(s string) error {
+	if len(s) == 0 || len(s) > 63 || s == "." || s == ".." {
+		return fmt.Errorf("invalid peer name")
+	}
+	for i := 0; i < len(s); i++ {
+		b := s[i]
+		if (b >= 'a' && b <= 'z') || (b >= '0' && b <= '9') || b == '.' || b == '_' || b == '-' {
+			continue
+		}
+		return fmt.Errorf("invalid peer name")
 	}
 	return nil
 }
