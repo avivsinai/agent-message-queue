@@ -409,16 +409,19 @@ func amqPlace(root string) (project, session string) {
 const maxLabel = 120
 
 // sessionLabel is the human name of a session and of its Buzz agent,
-// "<harness> · <place> @ <machine>", at most maxLabel characters.
+// "<harness> · <place> @ <machine>", at most maxLabel characters. A long
+// place is cut, never the machine, which tells two machines' agents apart.
 func sessionLabel(harness, place, machine string) string {
-	label := harness + " · " + place
+	head, tail := harness+" · ", ""
 	if machine != "" {
-		label += " @ " + machine
+		tail = " @ " + machine
 	}
-	if r := []rune(label); len(r) > maxLabel {
-		label = string(r[:maxLabel])
+	room := max(maxLabel-len([]rune(head))-len([]rune(tail)), 0)
+	if r := []rune(place); len(r) > room {
+		place = string(r[:room])
 	}
-	return label
+	label := []rune(head + place + tail)
+	return string(label[:min(len(label), maxLabel)])
 }
 
 // harnessSession is what attach knows of the harness a session runs in.

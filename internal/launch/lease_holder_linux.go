@@ -50,3 +50,17 @@ func linuxProcIdentity(stat string) (startToken string, state string, err error)
 	}
 	return fields[startTimeIndex], fields[0], nil
 }
+
+// pidNamespace is the inode of this process's pid namespace, or empty when
+// it cannot be read.
+func pidNamespace() string {
+	link, err := os.Readlink("/proc/self/ns/pid")
+	if err != nil {
+		return ""
+	}
+	inode, ok := strings.CutPrefix(link, "pid:[")
+	if !ok {
+		return ""
+	}
+	return strings.TrimSuffix(inode, "]")
+}

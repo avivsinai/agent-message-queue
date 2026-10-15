@@ -38,6 +38,9 @@ type HolderIdentity struct {
 	PID          int    `json:"pid"`
 	ProcessStart string `json:"process_start,omitempty"`
 	BootID       string `json:"boot_id,omitempty"`
+	// PIDNamespace is the pid namespace the pid was read in (Linux); a pid
+	// means another process in another namespace.
+	PIDNamespace string `json:"pid_namespace,omitempty"`
 }
 
 type leaseRecord struct {
@@ -363,14 +366,22 @@ func HolderOf(pid int) (HolderIdentity, error) {
 	if proc.StartToken == "" {
 		return HolderIdentity{}, fmt.Errorf("process start time unavailable")
 	}
-	return HolderIdentity{PID: proc.PID, ProcessStart: proc.StartToken, BootID: proc.BootID}, nil
+	return HolderIdentity{PID: proc.PID, ProcessStart: proc.StartToken, BootID: proc.BootID, PIDNamespace: pidNamespace()}, nil
 }
 
 // InspectHolder classifies a recorded holder against the live process:
 // LeaseStale only when the holder is proven gone, LeaseValid when it is
 // confirmed, and LeaseUnverified otherwise. A holder with only a pid is stale
-// when that pid is not running and unverified when it is.
+// when that pid is not running and unverified when it is. A holder with no
+// pid, or one read in another pid namespace than this process's (a sandbox),
+// is unverified, never stale.
 func InspectHolder(h HolderIdentity) (LeaseState, string) {
+	if h.PID <= 0 {
+		return LeaseUnverified, "holder has no pid"
+	}
+	if h.PIDNamespace != pidNamespace() {
+		return LeaseUnverified, "holder pid was read in another pid namespace"
+	}
 	return classifyHolder(h, inspectProcess(h.PID))
 }
 

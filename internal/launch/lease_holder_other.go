@@ -11,3 +11,6 @@ func inspectProcessPlatform(pid int) processInfo {
 	}
 	return info
 }
+
+// pidNamespace is empty: this platform has no pid namespaces.
+func pidNamespace() string { return "" }

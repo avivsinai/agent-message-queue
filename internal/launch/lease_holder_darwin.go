@@ -51,3 +51,6 @@ func darwinBootID() string {
 	}
 	return ""
 }
+
+// pidNamespace is empty: this platform has no pid namespaces.
+func pidNamespace() string { return "" }
