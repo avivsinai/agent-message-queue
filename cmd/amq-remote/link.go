@@ -195,7 +195,7 @@ func (ls *linkSet) sync(mf manifest.File) {
 				say(ls.stderr, "link %s: the server revoked this device; the link is retired", name)
 			}
 		}()
-		go ls.refreshToolProfiles(name)
+		go ls.refreshToolProfiles(ctx, name)
 	}
 }
 
@@ -456,20 +456,19 @@ func rootLinks(roots []string) (map[string][]string, error) {
 
 // resolveLink returns the root that holds link name ("" = the only link on
 // this machine) and the link's name. A link lives in exactly one root; one
-// name in two roots is refused, never guessed. --root names the root with no
-// search, and its endpoint picks the only link for an empty name.
+// name in two roots is refused, never guessed. --root names the one root
+// searched. A refusal names the roots searched, because a link an earlier
+// version added under another AM_ROOT is not on this machine's search path.
 func (c *common) resolveLink(name string) (root, link string, err error) {
 	roots, err := c.linkRoots()
 	if err != nil {
 		return "", "", err
 	}
-	if c.rootSet {
-		return c.root, name, nil
-	}
 	held, err := rootLinks(roots)
 	if err != nil {
 		return "", "", err
 	}
+	where := strings.Join(roots, " or ")
 	if name == "" {
 		names := make([]string, 0, len(held))
 		for n := range held {
@@ -478,16 +477,16 @@ func (c *common) resolveLink(name string) (root, link string, err error) {
 		sort.Strings(names)
 		switch len(names) {
 		case 0:
-			return "", "", protocol.Refuse(protocol.CodeNotFound, "no link on this machine; link it first with amq-remote link add NAME URL --code CODE")
+			return "", "", protocol.Refuse(protocol.CodeNotFound, "no link in %s; pass --root for a link in another root, or link it first with amq-remote link add NAME URL --code CODE", where)
 		case 1:
 			name = names[0]
 		default:
-			return "", "", protocol.Refuse(protocol.CodeInvalid, "this machine has %d links (%s); name one with --link", len(names), strings.Join(names, ", "))
+			return "", "", protocol.Refuse(protocol.CodeInvalid, "%s has %d links (%s); name one with --link", where, len(names), strings.Join(names, ", "))
 		}
 	}
 	switch rs := held[name]; len(rs) {
 	case 0:
-		return "", "", protocol.Refuse(protocol.CodeNotFound, "no link named %q on this machine; link it first with amq-remote link add %s URL --code CODE", name, name)
+		return "", "", protocol.Refuse(protocol.CodeNotFound, "no link named %q in %s; pass --root for a link in another root, or link it first with amq-remote link add %s URL --code CODE", name, where, name)
 	case 1:
 		return rs[0], name, nil
 	default:
@@ -543,28 +542,33 @@ func linkHTTPClient() *http.Client {
 
 // refreshToolProfiles rereads the tool profiles the server grants into the
 // link's pin, where attach checks --tools. It runs once per link run, beside
-// the carrier, so a slow server never holds up the link. An answer from
-// another server id, any error, or a link removed meanwhile keeps the pin as
-// it is.
-func (ls *linkSet) refreshToolProfiles(name string) {
+// the carrier, so a slow server never holds up the link, and ends with the
+// run. An answer from another server id, any error, or a link removed or
+// added again meanwhile keeps the pin as it is.
+func (ls *linkSet) refreshToolProfiles(ctx context.Context, name string) {
 	pin, err := linkio.LoadPin(ls.stateDir, name)
 	if err != nil || pin.API == "" {
 		return
 	}
 	var info linkInfo
-	if err := getJSON(linkHTTPClient(), pin.API+"/api/v1/link/info", &info); err != nil {
-		say(ls.stderr, "link %s: read the server's tool profiles: %v", name, err)
+	if err := getJSONCtx(ctx, linkHTTPClient(), pin.API+"/api/v1/link/info", &info); err != nil {
+		if ctx.Err() == nil {
+			say(ls.stderr, "link %s: read the server's tool profiles: %v", name, err)
+		}
 		return
 	}
 	if info.ServerID != pin.ServerID {
 		say(ls.stderr, "link %s: the server's link info names server %q, this link is pinned to %q; tool profiles kept", name, info.ServerID, pin.ServerID)
 		return
 	}
-	pin.ToolProfiles = info.grantedProfiles()
-	if _, err := os.Stat(linkio.LinkDir(ls.stateDir, name)); err != nil {
-		return // removed or revoked meanwhile: keep no state dir
+	// The link may have been removed and added again during the read: only
+	// the same device on the same server takes the answer.
+	now, err := linkio.LoadPin(ls.stateDir, name)
+	if err != nil || now.DeviceID != pin.DeviceID || now.ServerID != pin.ServerID {
+		return
 	}
-	if err := linkio.WritePin(ls.stateDir, name, pin); err != nil {
+	now.ToolProfiles = info.grantedProfiles()
+	if err := linkio.RewritePin(ls.stateDir, name, now); err != nil && !errors.Is(err, os.ErrNotExist) {
 		say(ls.stderr, "link %s: record the server's tool profiles: %v", name, err)
 	}
 }
@@ -838,7 +842,15 @@ func validServerURL(raw string) error {
 }
 
 func getJSON(client *http.Client, u string, out any) error {
-	resp, err := client.Get(u)
+	return getJSONCtx(context.Background(), client, u, out)
+}
+
+func getJSONCtx(ctx context.Context, client *http.Client, u string, out any) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}

@@ -128,6 +128,11 @@ func linkEndpoint(t *testing.T, ts *toolServer) string {
 	if err != nil {
 		t.Fatal(err)
 	}
+	mf := manifest.File{SchemaVersion: manifest.RelaySchemaVersion, Layer: manifest.Layer,
+		Links: []manifest.Link{{Name: "example", URL: "wss://link.example.test/link"}}}
+	if err := manifest.Write(manifest.DefaultPath(stateDir), mf); err != nil {
+		t.Fatal(err)
+	}
 	c, err := linkio.New(linkio.Config{Name: "example", Key: key, StoreID: "st_test",
 		Pin: linkio.Pin{URL: "ws" + strings.TrimPrefix(ts.srv.URL, "http"), ServerID: "srv_example"}})
 	if err != nil {

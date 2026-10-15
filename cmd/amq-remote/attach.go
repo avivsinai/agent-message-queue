@@ -92,7 +92,15 @@ func attach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 	if err != nil {
 		return protocol.ExitActionRequired, err
 	}
-	if *linkName != "" {
+	if *linkName == "" {
+		// A link share binds this session through the link's root; a plain
+		// native attach must not add a second binding through another root.
+		if b, err := boundElsewhere(c.root, cand.Target, want); err != nil {
+			return protocol.ExitActionRequired, err
+		} else if b != nil {
+			return protocol.ExitActionRequired, protocol.Refuse(protocol.CodeUnsupported, "this session is attached through %s (binding %s); run amq-remote detach --name %s, then attach --self --native again", b.Root, b.Name, b.Name)
+		}
+	} else {
 		root, err := linkAttachRoot(c, *linkName, cand, want)
 		if err != nil {
 			return protocol.ExitCode(err), err
@@ -189,14 +197,10 @@ func linkAttachRoot(c *common, link string, cand registry.Candidate, want string
 	if cand.Kind == "pi" && (sessionRoot == "" || !sameRoot(root, sessionRoot)) {
 		return "", protocol.Refuse(protocol.CodeUnsupported, "this pi session is served by the endpoint of its AMQ root %s, and link %s is in %s. Link that root under another name: amq-remote link add OTHER URL --code CODE --root %s", sessionRoot, link, root, sessionRoot)
 	}
-	all, err := binding.List()
-	if err != nil {
+	if b, err := boundElsewhere(root, cand.Target, want); err != nil {
 		return "", err
-	}
-	for _, b := range all {
-		if !b.Mailbox() && b.Target == cand.Target && b.NativeSession == want && !sameRoot(b.Root, root) {
-			return "", protocol.Refuse(protocol.CodeUnsupported, "this session is attached through %s (binding %s); run amq-remote detach --self, then attach --self --link %s again", b.Root, b.Name, link)
-		}
+	} else if b != nil {
+		return "", protocol.Refuse(protocol.CodeUnsupported, "this session is attached through %s (binding %s); run amq-remote detach --self, then attach --self --link %s again", b.Root, b.Name, link)
 	}
 	if m, err := machineRoot(); err == nil && sameRoot(root, m) {
 		if _, err := ensureMachineRoot(); err != nil {
@@ -204,6 +208,23 @@ func linkAttachRoot(c *common, link string, cand registry.Candidate, want string
 		}
 	}
 	return root, nil
+}
+
+// boundElsewhere returns a native binding of this session (target and native
+// session) that names a root other than root, or nil. binding.Same treats
+// two roots as two sessions, so without this check one session would keep
+// two routed bindings, one through each root's endpoint.
+func boundElsewhere(root, target, native string) (*binding.Binding, error) {
+	all, err := binding.List()
+	if err != nil {
+		return nil, err
+	}
+	for _, b := range all {
+		if !b.Mailbox() && b.Target == target && b.NativeSession == native && !sameRoot(b.Root, root) {
+			return &b, nil
+		}
+	}
+	return nil, nil
 }
 
 // checkToolProfile refuses a --tools profile the link's server does not

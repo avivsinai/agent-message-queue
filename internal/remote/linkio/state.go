@@ -212,6 +212,36 @@ func WritePin(stateDir, name string, p Pin) error {
 	return writeJSON(LinkDir(stateDir, name), linkFile, p)
 }
 
+// RewritePin replaces the pin of a link that exists. Unlike WritePin it never
+// creates the link dir, so a link removed or revoked meanwhile stays removed.
+func RewritePin(stateDir, name string, p Pin) error {
+	dir := LinkDir(stateDir, name)
+	data, err := json.MarshalIndent(p, "", "  ")
+	if err != nil {
+		return err
+	}
+	f, err := os.CreateTemp(dir, "."+linkFile+".tmp-*") // 0600; fails when dir is gone
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	_, err = f.Write(append(data, '\n'))
+	if err == nil {
+		err = f.Sync()
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Rename(tmp, filepath.Join(dir, linkFile))
+	}
+	if err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return fsq.SyncDir(dir)
+}
+
 // LoadPin reads a link's pin.
 func LoadPin(stateDir, name string) (Pin, error) {
 	var p Pin

@@ -229,6 +229,8 @@ func TestShareWithLinkRecordsTheShare(t *testing.T) {
 // code with its signature over the pinned server id, and the key is kept only
 // when the user types its fingerprint.
 func TestLinkKeysAddAcceptsTheTypedKey(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // link add checks the machine root and AM_ROOT for the name
+	t.Setenv("AM_ROOT", "")
 	first := linkio.ConsentKey{CredentialID: "C32Z2-E6ARE-BkrOVOybpw", SPKI: "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE", Alg: -7,
 		RPID: "sign.example.test", Origin: "https://sign.example.test"}
 	second := first
@@ -283,6 +285,8 @@ func TestLinkKeysAddAcceptsTheTypedKey(t *testing.T) {
 // manifest without the links block. link add and attach --link refuse while
 // one runs, and pass once the running endpoint serves links.
 func TestLinkRefusesAnOlderRunningEndpoint(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // link add checks the machine root and AM_ROOT for the name
+	t.Setenv("AM_ROOT", "")
 	root, err := os.MkdirTemp("", "aro")
 	if err != nil {
 		t.Fatal(err)
