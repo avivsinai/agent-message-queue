@@ -457,7 +457,7 @@ func TestBindingModeFollowsTheBoundSession(t *testing.T) {
 	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
 	rt := fake.New("fake", "e_1")
 	bound := remoteServer(t, rt, nil)
-	s := NewServer(Config{RemoteBinding: true, Pin: binding.LegacyName, StateDir: t.TempDir(), HeartbeatInterval: 10 * time.Millisecond, TurnTimeout: time.Second}, "test")
+	s := NewServer(Config{RemoteBinding: true, StateDir: t.TempDir(), HeartbeatInterval: 10 * time.Millisecond, TurnTimeout: time.Second}, "test")
 
 	var said []string
 	emit := func(v any) error {
@@ -491,7 +491,7 @@ func TestRedeliveryAfterRebindStaysOnTheFirstSession(t *testing.T) {
 	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
 	a, b := fake.New("fake", "e_1"), fake.New("fake", "e_1")
 	serverA, serverB := remoteServer(t, a, nil), remoteServer(t, b, nil)
-	s := NewServer(Config{RemoteBinding: true, Pin: binding.LegacyName, StateDir: t.TempDir(), TurnTimeout: time.Second, HeartbeatInterval: 10 * time.Millisecond}, "test")
+	s := NewServer(Config{RemoteBinding: true, StateDir: t.TempDir(), TurnTimeout: time.Second, HeartbeatInterval: 10 * time.Millisecond}, "test")
 	eventID := strings.Repeat("a", 64)
 	id, _ := remoteRequestID(eventID)
 	run := func(rt *fake.Runtime, label string) string {

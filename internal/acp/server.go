@@ -495,7 +495,7 @@ const bindingModelPrefix = "amq-remote:"
 // plain "amq-remote" model comes first, then one model per named binding, so
 // an existing agent's configured model still picks its own session (bead
 // agent-message-queue-611.39). The plain model selects nothing: the agent's
-// pin decides, and an unpinned agent never delivers.
+// pin decides, and an unpinned agent drives the only binding or refuses.
 func (s *Server) models() []modelInfo {
 	if !s.cfg.RemoteBinding {
 		return []modelInfo{s.model()}

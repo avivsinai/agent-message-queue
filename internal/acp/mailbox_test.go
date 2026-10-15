@@ -29,7 +29,7 @@ func mailboxServer(t *testing.T) (*Server, string) {
 	if err := binding.Write(binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: "agent"}); err != nil {
 		t.Fatal(err)
 	}
-	return NewServer(Config{RemoteBinding: true, Pin: binding.LegacyName, StateDir: canonicalTempDir(t), TurnTimeout: 2 * time.Second, PollInterval: 5 * time.Millisecond, HeartbeatInterval: 20 * time.Millisecond}, "test"), root
+	return NewServer(Config{RemoteBinding: true, StateDir: canonicalTempDir(t), TurnTimeout: 2 * time.Second, PollInterval: 5 * time.Millisecond, HeartbeatInterval: 20 * time.Millisecond}, "test"), root
 }
 
 // inboxPrompts lists the prompt ids in the agent's inbox (new and cur).

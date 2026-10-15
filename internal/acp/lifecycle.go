@@ -30,6 +30,11 @@ const (
 // pinLineRe matches one pin line and captures the name it gives.
 var pinLineRe = regexp.MustCompile(`(?m)^[ \t]*AMQ Remote session:[ \t]*(\S*)[ \t]*\r?$`)
 
+// helperLineRe matches the system prompt line that makes an agent the
+// per-machine helper. The helper serves no session and never delivers,
+// whatever is bound.
+var helperLineRe = regexp.MustCompile(`(?m)^[ \t]*AMQ Remote helper[ \t]*\r?$`)
+
 // pinLineStripRe matches a pin line with its line break, for stripping.
 var pinLineStripRe = regexp.MustCompile(`(?m)^[ \t]*AMQ Remote session:[^\n]*(\n|$)`)
 
@@ -43,14 +48,15 @@ func captureBuzzAgent() {
 	buzzAgent.displayName = strings.TrimSpace(os.Getenv(envBuzzDisplayName))
 }
 
-// sessionPin resolves the binding an agent serves. Either source may name
-// it; both naming the same binding is accepted. Two different names, or a
+// sessionPin resolves the binding an agent serves, or the helper role.
+// Either pin source may name the binding; both naming the same binding is
+// accepted. Two different names, a helper line beside a session pin, or a
 // name that is not a binding name, is an error that refuses every prompt.
-func sessionPin(systemPrompt, model string) (string, error) {
+func sessionPin(systemPrompt, model string) (pin string, helper bool, err error) {
 	fromPrompt, found := "", false
 	for _, m := range pinLineRe.FindAllStringSubmatch(systemPrompt, -1) {
 		if found && m[1] != fromPrompt {
-			return "", conflictingPins("the system prompt", fromPrompt, "the system prompt", m[1])
+			return "", false, conflictingPins("the system prompt", fromPrompt, "the system prompt", m[1])
 		}
 		fromPrompt, found = m[1], true
 	}
@@ -59,19 +65,23 @@ func sessionPin(systemPrompt, model string) (string, error) {
 		fromModel = name
 	}
 	if found && fromModel != "" && fromModel != fromPrompt {
-		return "", conflictingPins("the system prompt", fromPrompt, "the model", fromModel)
+		return "", false, conflictingPins("the system prompt", fromPrompt, "the model", fromModel)
 	}
-	pin := fromModel
+	pin = fromModel
 	if found {
 		pin = fromPrompt
 	}
-	if !found && pin == "" {
-		return "", nil
+	helper = helperLineRe.MatchString(systemPrompt)
+	switch {
+	case helper && (found || pin != ""):
+		return "", false, fmt.Errorf("conflicting session pins: the system prompt makes this agent the helper and also names session %q; the helper serves no session", pin)
+	case helper || (!found && pin == ""):
+		return "", helper, nil
 	}
 	if err := binding.ValidName(pin); err != nil {
-		return "", fmt.Errorf("invalid session pin %q: %v", pin, err)
+		return "", false, fmt.Errorf("invalid session pin %q: %v", pin, err)
 	}
-	return pin, nil
+	return pin, false, nil
 }
 
 func conflictingPins(source, name, otherSource, other string) error {
@@ -87,20 +97,26 @@ func stripPinLines(text string) string {
 	return pinLineStripRe.ReplaceAllString(text, "")
 }
 
-// unpinnedError is an agent with no pin in binding mode. It serves no
-// session, so it lists the bound ones instead of choosing one.
-type unpinnedError struct{ bindings []binding.Binding }
+// unpinnedError is the helper, or an unpinned agent with several bindings.
+// Neither chooses a session, so it lists the bound ones instead.
+type unpinnedError struct {
+	bindings []binding.Binding
+	helper   bool
+}
 
 func (e *unpinnedError) Error() string {
 	return "this agent serves no session; DM the agent of the session you want"
 }
 
-// unpinnedReply is the answer of an agent that serves no session: each bound
-// session and the agent to DM for it.
-func (s *Server) unpinnedReply(bindings []binding.Binding) string {
+// unpinnedReply lists each bound session and the agent to DM for it.
+func (s *Server) unpinnedReply(e *unpinnedError) string {
 	var b strings.Builder
-	b.WriteString("This agent serves no session, so it does not run prompts. Sessions bound on this machine:")
-	for _, bd := range bindings {
+	if e.helper {
+		b.WriteString("This is the AMQ Remote helper; it does not run prompts. Sessions bound on this machine:")
+	} else {
+		b.WriteString("Several sessions are bound and this agent names none, so it does not run prompts. Sessions bound on this machine:")
+	}
+	for _, bd := range e.bindings {
 		m, ok := s.readAgentMarker(bd.Name)
 		if ok && m.DisplayName != "" {
 			fmt.Fprintf(&b, "\n- %s: DM %q", bd.Name, m.DisplayName)

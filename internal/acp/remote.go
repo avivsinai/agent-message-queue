@@ -130,7 +130,7 @@ func (s *Server) runRemote(sessionID, text, eventID string, turn *turnState, emi
 			switch {
 			case errors.As(err, &unpinned):
 				r.meta.State = "not_pinned"
-				text = s.unpinnedReply(unpinned.bindings)
+				text = s.unpinnedReply(unpinned)
 			case !errors.Is(err, binding.ErrNone):
 				text = "Not connected: " + err.Error()
 			}
@@ -328,9 +328,10 @@ func (r *remoteTurn) waitBusy(deadline time.Time) string {
 
 // sessionBinding is the binding this ACP session drives: the agent's pin
 // (lifecycle.go), else the model the session selected (session/set_model,
-// bead agent-message-queue-611.39). A selection that disagrees with the pin
-// refuses. An agent with neither serves no session and never delivers, even
-// with one binding: it answers with the bound sessions instead.
+// bead agent-message-queue-611.39), else the only binding there is. A
+// selection that disagrees with the pin refuses. An unpinned agent with
+// several bindings never guesses, and the helper never delivers: both answer
+// with the bound sessions instead.
 func (s *Server) sessionBinding(sessionID string) (binding.Binding, error) {
 	if s.cfg.PinErr != nil {
 		return binding.Binding{}, s.cfg.PinErr
@@ -342,6 +343,8 @@ func (s *Server) sessionBinding(sessionID string) (binding.Binding, error) {
 	}
 	s.mu.Unlock()
 	switch {
+	case s.cfg.Helper:
+		name = "" // a selected model never makes the helper deliver
 	case s.cfg.Pin != "" && name != "" && name != s.cfg.Pin:
 		return binding.Binding{}, conflictingPins("the agent", s.cfg.Pin, "the selected model", name)
 	case s.cfg.Pin != "":
@@ -354,10 +357,13 @@ func (s *Server) sessionBinding(sessionID string) (binding.Binding, error) {
 	if err != nil {
 		return binding.Binding{}, err
 	}
-	if len(all) == 0 {
+	switch {
+	case len(all) == 0:
 		return binding.Binding{}, binding.ErrNone
+	case len(all) == 1 && !s.cfg.Helper:
+		return all[0], nil
 	}
-	return binding.Binding{}, &unpinnedError{bindings: all}
+	return binding.Binding{}, &unpinnedError{bindings: all, helper: s.cfg.Helper}
 }
 
 // turnBinding fixes the binding a prompt runs under. A redelivered event
