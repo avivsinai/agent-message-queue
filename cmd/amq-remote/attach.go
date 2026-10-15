@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -68,29 +69,18 @@ func attach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 			return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", err)
 		}
 		*nativeMode = true // a linked server reaches a native session only
-		stateDir, err := c.stateDir()
-		if err != nil {
-			return protocol.ExitUsage, err
-		}
-		if err := requireLinkEndpoint(stateDir); err != nil {
-			return protocol.ExitActionRequired, err
-		}
-	}
-	if *linkName != "" && *consent == "local" {
-		stateDir, err := c.stateDir()
-		if err != nil {
-			return protocol.ExitUsage, err
-		}
-		if !linkio.HasLocalKey(stateDir, *linkName) {
-			return protocol.ExitActionRequired, protocol.Refuse(protocol.CodeUnsupported, "consent local needs the link's local passkey: run amq-remote link local-key %s first", *linkName)
-		}
 	}
 	if !*nativeMode {
 		return attachMailbox(c.root, strings.TrimSpace(*me), strings.TrimSpace(*name), c.json, stdout)
 	}
-	stateDir, err := c.stateDir()
-	if err != nil {
-		return protocol.ExitUsage, err
+	// A linked share runs in the endpoint of the link's root, known once the
+	// session is; discovery reads only the session's root (pi), no state dir.
+	var stateDir string
+	var err error
+	if *linkName == "" {
+		if stateDir, err = c.stateDir(); err != nil {
+			return protocol.ExitUsage, err
+		}
 	}
 	cand, err := selfCandidate(c.root, stateDir)
 	if err != nil {
@@ -101,6 +91,26 @@ func attach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 	want, err := selfNativeSession(cand)
 	if err != nil {
 		return protocol.ExitActionRequired, err
+	}
+	if *linkName != "" {
+		root, err := linkAttachRoot(c, *linkName, cand, want)
+		if err != nil {
+			return protocol.ExitCode(err), err
+		}
+		c.root, stateDir = root, filepath.Join(root, stateDirName)
+		if err := requireLinkEndpoint(stateDir); err != nil {
+			return protocol.ExitActionRequired, err
+		}
+		pin, err := linkio.LoadPin(stateDir, *linkName)
+		if err != nil {
+			return protocol.ExitActionRequired, fmt.Errorf("link %s is not linked on this machine (%v); run amq-remote link add again", *linkName, err)
+		}
+		if err := checkToolProfile(pin, *linkName, *tools); err != nil {
+			return protocol.ExitUsage, err
+		}
+		if *consent == "local" && !linkio.HasLocalKey(stateDir, *linkName) {
+			return protocol.ExitActionRequired, protocol.Refuse(protocol.CodeUnsupported, "consent local needs the link's local passkey: run amq-remote link local-key %s first", *linkName)
+		}
 	}
 	reg := ipc.RegisterRequest{Kind: cand.Kind, Target: cand.Target, Config: cand.Config}
 	if cand.Kind == "claude" && *linkName == "" {
@@ -161,6 +171,52 @@ func attach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 	}
 	say(stdout, "Connected: %s (%s) as session %s. DM its Buzz agent \"AMQ: %s\".", nonEmpty(display, cand.Target), cand.Target, nb.Name, nb.Name)
 	return 0, nil
+}
+
+// linkAttachRoot is the root attach --self --link shares the session through:
+// the root that holds the link, so the target registration, the binding and
+// the share all name the link's own endpoint. It refuses a pi session whose
+// AMQ root is another root, because only the endpoint of a pi session's own
+// root can drive it, and a session already bound natively through another
+// root, because two bindings would route into one session through two
+// endpoints.
+func linkAttachRoot(c *common, link string, cand registry.Candidate, want string) (string, error) {
+	sessionRoot := c.root
+	root, _, err := c.resolveLink(link)
+	if err != nil {
+		return "", err
+	}
+	if cand.Kind == "pi" && (sessionRoot == "" || !sameRoot(root, sessionRoot)) {
+		return "", protocol.Refuse(protocol.CodeUnsupported, "this pi session is served by the endpoint of its AMQ root %s, and link %s is in %s. Link that root under another name: amq-remote link add OTHER URL --code CODE --root %s", sessionRoot, link, root, sessionRoot)
+	}
+	all, err := binding.List()
+	if err != nil {
+		return "", err
+	}
+	for _, b := range all {
+		if !b.Mailbox() && b.Target == cand.Target && b.NativeSession == want && !sameRoot(b.Root, root) {
+			return "", protocol.Refuse(protocol.CodeUnsupported, "this session is attached through %s (binding %s); run amq-remote detach --self, then attach --self --link %s again", b.Root, b.Name, link)
+		}
+	}
+	if m, err := machineRoot(); err == nil && sameRoot(root, m) {
+		if _, err := ensureMachineRoot(); err != nil {
+			return "", err
+		}
+	}
+	return root, nil
+}
+
+// checkToolProfile refuses a --tools profile the link's server does not
+// grant, when its link info lists the profiles it grants. No --tools needs
+// no profile.
+func checkToolProfile(pin linkio.Pin, link, tools string) error {
+	if pin.ToolProfiles == nil || tools == "" || slices.Contains(*pin.ToolProfiles, tools) {
+		return nil
+	}
+	if len(*pin.ToolProfiles) == 0 {
+		return protocol.Refuse(protocol.CodeInvalid, "link %s's server grants no tool profiles; use --tools \"\"", link)
+	}
+	return protocol.Refuse(protocol.CodeInvalid, "link %s's server grants tool profiles %s; --tools %s is not one of them", link, strings.Join(*pin.ToolProfiles, ", "), tools)
 }
 
 // attachMailbox binds the Buzz agent to this session's AMQ handle (bead

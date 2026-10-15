@@ -5,6 +5,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/json"
@@ -73,7 +74,7 @@ Commands:
   detach --self|--name N|--all
                            Unbind; the session keeps running
   link add NAME URL --code CODE
-                           Link this root to a server; type the passkey
+                           Link this machine to a server; type the passkey
                            fingerprint your browser shows
   attach --self --link N   Share the session this runs in with linked server N
                            (--consent passkey|local, --tools PROFILE)
@@ -82,7 +83,8 @@ Commands:
   link local-key NAME      Create the local passkey that confirms consent-local tasks
   link confirm ID          Show a held task's exact text and confirm it (Touch ID)
   link remove NAME         Retire link NAME's sink and delete its device key
-  link status              Links, their sockets and owed revisions, retired sinks
+  link status              Links on this machine, their sockets and owed
+                           revisions, retired sinks
   link tools               The tools a linked server offers this machine
   link call TOOL --args J  Call a linked server's tool (--wait for the final state,
                            --idempotency-key K; resume K after a lost answer)
@@ -91,7 +93,8 @@ Commands:
   version                  Print the version
 
 Common options:
-  --root DIR    AMQ root (default: AM_ROOT)
+  --root DIR    AMQ root (default: AM_ROOT; a link command finds its link in
+                ~/.amq/remote/root or AM_ROOT)
   --json        Machine-readable output on stdout; diagnostics on stderr
 
 Exit codes: 0 ok · 1 work failed or cancelled · 2 usage · 3 not found ·
@@ -106,21 +109,44 @@ func main() {
 type common struct {
 	root string
 	json bool
+	// rootSet: --root was given on the command line, so a link command uses
+	// that root and searches no other.
+	rootSet bool
 }
 
 // addCommon registers --root and --json. A handler that run() calls passes
 // the run's probe, which records the parsed --json value so the result and
-// the error are printed in one mode.
+// the error are printed in one mode, and whether the parse stopped at -h.
 func addCommon(fs *flag.FlagSet, probe ...*jsonProbe) *common {
-	c := &common{}
-	fs.StringVar(&c.root, "root", os.Getenv("AM_ROOT"), "AMQ root directory (default AM_ROOT)")
+	c := &common{root: os.Getenv("AM_ROOT")}
+	fs.Var(&rootValue{c: c}, "root", "AMQ root directory (default AM_ROOT)")
 	jv := &jsonValue{c: c}
 	if len(probe) > 0 && probe[0] != nil {
-		jv.p = probe[0]
-		jv.p.fs, jv.p.c = fs, c
+		p := probe[0]
+		jv.p = p
+		p.fs, p.c = fs, c
+		// The flag package calls Usage for -h and after every other parse
+		// error; only the other errors write a message to the output first.
+		fs.SetOutput(&p.parseOut)
+		fs.Usage = func() { p.help = p.parseOut.Len() == 0 }
 	}
 	fs.Var(jv, "json", "emit JSON")
 	return c
+}
+
+// rootValue is the --root flag; it records that the flag was given.
+type rootValue struct{ c *common }
+
+func (v *rootValue) String() string {
+	if v == nil || v.c == nil {
+		return ""
+	}
+	return v.c.root
+}
+
+func (v *rootValue) Set(s string) error {
+	v.c.root, v.c.rootSet = s, true
+	return nil
 }
 
 // jsonValue is the --json boolean flag; it reports to the run's probe when
@@ -152,11 +178,14 @@ func (v *jsonValue) Set(s string) error {
 }
 
 // jsonProbe carries one command's --json decision from its own flag parse to
-// the output step, so a result and an error never disagree.
+// the output step, so a result and an error never disagree. It also carries
+// whether the parse stopped at -h or --help, so run prints the flags.
 type jsonProbe struct {
-	fs   *flag.FlagSet
-	c    *common
-	seen bool
+	fs       *flag.FlagSet
+	c        *common
+	seen     bool
+	help     bool
+	parseOut bytes.Buffer
 }
 
 // wantJSON is the parsed --json value. When the parse failed before it
@@ -249,17 +278,14 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return finish(stdout, stderr, nil, false, code, err)
 	case "attach":
 		code, err = attach(rest, stdout, stderr, probe)
-		return finish(stdout, stderr, nil, probe.wantJSON(rest), code, err)
 	case "detach":
 		code, err = detach(rest, stdout, stderr, probe)
-		return finish(stdout, stderr, nil, probe.wantJSON(rest), code, err)
 	case "doctor":
 		out, code, err = doctor(rest, probe)
 	case "link":
 		out, code, err = link(rest, stdin, stdout, probe)
 	case "mcp":
-		code, err = mcpServe(rest, stdin, stdout, stderr)
-		return finish(stdout, stderr, nil, false, code, err)
+		code, err = mcpServe(rest, stdin, stdout, stderr, probe)
 	case "claude":
 		// PR2 Stop-hook bridge: the receiver subcommand is FAIL-OPEN by
 		// contract — exit 0 on ANY error, any parse failure, any panic —
@@ -269,6 +295,12 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	default:
 		say(stderr, "unknown command %q\n%s", cmd, usageText)
 		return protocol.ExitUsage
+	}
+	if probe.help {
+		say(stderr, "Usage: amq-remote %s [flags]", probe.fs.Name())
+		probe.fs.SetOutput(stderr)
+		probe.fs.PrintDefaults()
+		return 0
 	}
 	return finish(stdout, stderr, out, probe.wantJSON(rest), code, err)
 }

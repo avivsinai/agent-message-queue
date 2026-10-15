@@ -8,12 +8,14 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"flag"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -24,6 +26,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/linkio"
 	"github.com/avivsinai/agent-message-queue/internal/remote/manifest"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
+	"github.com/avivsinai/agent-message-queue/internal/remote/registry"
 	"github.com/avivsinai/agent-message-queue/internal/remote/requests"
 )
 
@@ -68,6 +71,13 @@ func TestLinkRemoveRetiresSink(t *testing.T) {
 
 // link add redeems the code, pins the consent key whose fingerprint the user
 // typed, and declares the link in the manifest.
+//
+// Regression (first-run audit, finding 1): link add in a plain terminal
+// needed --root or AM_ROOT, and attach --self --link in a session with
+// another root found no link. The link now lives in the machine root, link
+// add starts its endpoint, and a session with its own AM_ROOT shares through
+// the machine root. The pin keeps the tool profiles the server grants, which
+// attach checks --tools against (finding 8).
 func TestLinkAddPinsTypedFingerprint(t *testing.T) {
 	ck := linkio.ConsentKey{CredentialID: "C32Z2-E6ARE-BkrOVOybpw", SPKI: "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE", Alg: -7,
 		RPID: "sign.example.test", Origin: "https://sign.example.test"}
@@ -77,7 +87,8 @@ func TestLinkAddPinsTypedFingerprint(t *testing.T) {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v1/link/info", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(linkInfo{ServerID: "srv_example", LinkURL: "wss://link.example.test/api/v1/link"})
+		profiles := []string{"read"}
+		_ = json.NewEncoder(w).Encode(linkInfo{ServerID: "srv_example", LinkURL: "wss://link.example.test/api/v1/link", ToolProfiles: &profiles})
 	})
 	mux.HandleFunc("POST /api/v1/link/redeem", func(w http.ResponseWriter, r *http.Request) {
 		var req redeemRequest
@@ -97,15 +108,34 @@ func TestLinkAddPinsTypedFingerprint(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	root := t.TempDir()
-	stateDir := filepath.Join(root, stateDirName)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("AM_ROOT", "") // a plain terminal
+	bindDir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(binding.EnvPath, filepath.Join(bindDir, "remote", "binding.json"))
+	var started string
+	prevStart := startEndpoint
+	startEndpoint = func(root, _ string) error { started = root; return nil }
+	t.Cleanup(func() { startEndpoint = prevStart })
+
+	machine := filepath.Join(home, ".amq", "remote", "root")
+	stateDir := filepath.Join(machine, stateDirName)
 	typed := strings.NewReader(strings.ToLower(fp) + "\n")
-	if _, code, err := linkAdd([]string{"--root", root, "example", srv.URL, "--code", "K7Q4-M2XD"}, typed, io.Discard, &jsonProbe{}); err != nil || code != 0 {
+	if _, code, err := linkAdd([]string{"example", srv.URL, "--code", "K7Q4-M2XD"}, typed, io.Discard, &jsonProbe{}); err != nil || code != 0 {
 		t.Fatalf("link add = %d, %v", code, err)
 	}
 	pin, err := linkio.LoadPin(stateDir, "example")
 	if err != nil || pin.ServerID != "srv_example" || pin.URL != "wss://link.example.test/api/v1/link" {
 		t.Fatalf("pin %+v, %v", pin, err)
+	}
+	if pin.ToolProfiles == nil || !slices.Equal(*pin.ToolProfiles, []string{"read"}) {
+		t.Fatalf("pinned tool profiles %v, want [read]", pin.ToolProfiles)
+	}
+	if started != machine {
+		t.Fatalf("endpoint started for %q, want the machine root %q", started, machine)
 	}
 	keys, err := linkio.LoadConsentKeys(stateDir, "example")
 	if err != nil || len(keys) != 1 || keys[0] != ck {
@@ -114,6 +144,26 @@ func TestLinkAddPinsTypedFingerprint(t *testing.T) {
 	mf, err := manifest.Load(manifest.DefaultPath(stateDir))
 	if err != nil || len(mf.Links) != 1 || mf.Links[0].Name != "example" {
 		t.Fatalf("manifest links %+v, %v", mf.Links, err)
+	}
+
+	// attach --self --link example, in a session with its own AMQ root.
+	t.Setenv("AM_ROOT", t.TempDir())
+	c := addCommon(flag.NewFlagSet("attach", flag.ContinueOnError))
+	root, err := linkAttachRoot(c, "example", registry.Candidate{Kind: "claude", Target: "claude-1"}, "session-1")
+	if err != nil || root != machine {
+		t.Fatalf("link root = %q, %v; want the machine root %q", root, err, machine)
+	}
+	if err := shareWithLink(filepath.Join(root, stateDirName), "example", manifest.LinkShare{Binding: "claude-1", Consent: "passkey", Tools: "read"}); err != nil {
+		t.Fatal(err)
+	}
+	if mf, err := manifest.Load(manifest.DefaultPath(stateDir)); err != nil || len(mf.Links[0].Shares) != 1 {
+		t.Fatalf("manifest links %+v, %v; want the share on the machine root's link", mf.Links, err)
+	}
+	if err := checkToolProfile(pin, "example", "read"); err != nil {
+		t.Fatalf("--tools read = %v, want accepted", err)
+	}
+	if err := checkToolProfile(pin, "example", "write"); err == nil || !strings.Contains(err.Error(), "read") {
+		t.Fatalf("--tools write = %v, want a refusal that names read", err)
 	}
 }
 

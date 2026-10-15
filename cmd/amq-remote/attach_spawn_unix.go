@@ -11,8 +11,9 @@ import (
 
 // startEndpoint launches `amq-remote up --root <root>` in its own session so
 // it outlives the command that started it. Its output goes to up.log in the
-// state directory.
-func startEndpoint(root, stateDir string) error {
+// state directory. It is a variable so link add tests record the start
+// instead of running the test binary as the endpoint.
+var startEndpoint = func(root, stateDir string) error {
 	self, err := os.Executable()
 	if err != nil {
 		return err

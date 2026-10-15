@@ -437,11 +437,11 @@ func linkConfirm(args []string, stdin io.Reader, stdout io.Writer, probe *jsonPr
 	if !stdinIsTerminal(stdin) {
 		return nil, protocol.ExitActionRequired, protocol.Refuse(protocol.CodeUnsupported, "link confirm needs a terminal: run it yourself")
 	}
-	stateDir, err := c.stateDir()
+	root, name, err := c.resolveLink(*linkName)
 	if err != nil {
-		return nil, protocol.ExitUsage, err
+		return nil, protocol.ExitCode(err), err
 	}
-	st, err := followPage(stateDir, ipc.LinkRequest{Name: *linkName, Op: "page", Page: "confirm", ConfirmID: pos[0]}, stdout)
+	st, err := followPage(filepath.Join(root, stateDirName), ipc.LinkRequest{Name: name, Op: "page", Page: "confirm", ConfirmID: pos[0]}, stdout)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -462,11 +462,11 @@ func linkLocalKey(args []string, stdin io.Reader, stdout io.Writer, probe *jsonP
 	if err != nil || len(pos) != 1 {
 		return nil, protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "usage: amq-remote link local-key NAME")
 	}
-	stateDir, err := c.stateDir()
+	root, name, err := c.resolveLink(pos[0])
 	if err != nil {
-		return nil, protocol.ExitUsage, err
+		return nil, protocol.ExitCode(err), err
 	}
-	if err := registerLocalKey(stateDir, pos[0], stdin, stdout); err != nil {
+	if err := registerLocalKey(filepath.Join(root, stateDirName), name, stdin, stdout); err != nil {
 		return nil, protocol.ExitActionRequired, err
 	}
 	return nil, 0, nil

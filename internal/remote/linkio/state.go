@@ -66,6 +66,10 @@ type Pin struct {
 	DeviceName string `json:"device_name"`
 	RPID       string `json:"rp_id"`
 	Origin     string `json:"origin"`
+	// ToolProfiles are the tool profile names the server grants, as its link
+	// info last said; nil when it does not say. attach checks --tools
+	// against them.
+	ToolProfiles *[]string `json:"tool_profiles,omitempty"`
 }
 
 // ConsentKey is one consent public key this machine trusts.
