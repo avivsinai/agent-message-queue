@@ -156,7 +156,7 @@ type Server struct {
 	streamClosed bool
 	// late is the late-reply sweep state (binding mode only).
 	late lateReplySweep
-	// lastChannel is the Buzz channel of the latest prompt; a pinned agent
+	// lastChannel is the DM channel of the latest DM prompt; a pinned agent
 	// posts "Connected again" there (lifecycle.go).
 	lastChannel string
 }
@@ -736,7 +736,7 @@ func (s *Server) beginPrompt(params json.RawMessage) (func(emit func(any) error)
 		if s.cfg.RemoteBinding {
 			turn.mailboxEvent = eventID
 		}
-		if turn.channel != "" {
+		if buzzDM(text) {
 			s.lastChannel = turn.channel
 		}
 	}

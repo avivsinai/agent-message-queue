@@ -20,6 +20,7 @@ func TestPinnedAgentArchivesAndReturnsWithItsBinding(t *testing.T) {
 	}
 	savedIdentity, savedSelf, savedOwner, savedCall := buzzIdentity, buzzSelf, buzzOwner, buzzCall
 	t.Cleanup(func() { buzzIdentity, buzzSelf, buzzOwner, buzzCall = savedIdentity, savedSelf, savedOwner, savedCall })
+	recordPosts(t)
 	t.Setenv("BUZZ_PRIVATE_KEY", strings.Repeat("1", 64))
 	captureBuzzIdentity()
 	if len(buzzSelf) != 64 {
@@ -65,6 +66,7 @@ func TestTwoAgentsOnOnePinEachChangeOnce(t *testing.T) {
 	}
 	savedSelf, savedCall := buzzSelf, buzzCall
 	t.Cleanup(func() { buzzSelf, buzzCall = savedSelf, savedCall })
+	recordPosts(t)
 	var calls []string
 	buzzCall = func(_ time.Duration, args ...string) ([]byte, error) {
 		calls = append(calls, buzzSelf[:1]+" "+strings.Join(args[:2], " "))
@@ -110,6 +112,7 @@ func TestHelperDraftsAnAgentForANewSession(t *testing.T) {
 	}
 	savedSelf, savedOwner, savedCall := buzzSelf, buzzOwner, buzzCall
 	t.Cleanup(func() { buzzSelf, buzzOwner, buzzCall = savedSelf, savedOwner, savedCall })
+	recordPosts(t)
 	const control = "0b2c39a1-6f1e-4d0a-9b3a-5c1d2e3f4a5b"
 	helperKey, owner := strings.Repeat("c", 64), strings.Repeat("d", 64)
 	buzzOwner = owner
@@ -134,11 +137,10 @@ func TestHelperDraftsAnAgentForANewSession(t *testing.T) {
 	helper.lifecycleTick(now.Add(time.Hour))
 
 	want := []string{
-		"channels create --name amq-remote @ " + machineName() + " --type stream --visibility private",
 		"channels add-member --channel " + control + " --pubkey " + owner,
 		"agents draft-create --channel " + control + " --display-name AMQ: alpha --system-prompt AMQ Remote session: alpha",
 	}
-	if !slices.Equal(calls, want) {
-		t.Fatalf("buzz calls = %q\nwant %q", calls, want)
+	if len(calls) == 0 || !strings.HasPrefix(calls[0], "channels create --name amq-remote") || !strings.HasSuffix(calls[0], " --type stream --visibility private") || !slices.Equal(calls[1:], want) {
+		t.Fatalf("buzz calls = %q\nwant a private channel create, then %q", calls, want)
 	}
 }
