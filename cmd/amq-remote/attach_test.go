@@ -312,37 +312,13 @@ func TestMailboxAttachNamesEachSessionOfAProject(t *testing.T) {
 	if err := binding.WriteNamed(legacy); err != nil {
 		t.Fatal(err)
 	}
-	attachAs := func(root string) string {
-		t.Helper()
-		rootID, err := fsq.StableTreeIdentity(root)
-		if err != nil {
-			t.Fatal(err)
-		}
-		baseID, err := fsq.StableTreeIdentity(filepath.Dir(root))
-		if err != nil {
-			t.Fatal(err)
-		}
-		for k, v := range map[string]string{"AM_ROOT": root, "AM_ME": "claude", "AM_BASE_ROOT": filepath.Dir(root),
-			"AM_SESSION": filepath.Base(root), "AM_ROOT_ID": rootID, "AM_BASE_ROOT_ID": baseID} {
-			t.Setenv(k, v)
-		}
-		var out bytes.Buffer
-		if code, err := attach([]string{"--self", "--json"}, &out, io.Discard); code != 0 || err != nil {
-			t.Fatalf("attach from %s: code=%d err=%v", root, code, err)
-		}
-		var got struct{ Name string }
-		if err := json.Unmarshal(out.Bytes(), &got); err != nil {
-			t.Fatalf("attach output %q: %v", out.String(), err)
-		}
-		return got.Name
-	}
-	if got := attachAs(root3); got != "claude-p-session3" {
+	if got := attachMailboxAs(t, root3); got != "claude-p-session3" {
 		t.Fatalf("session3 attached as %q; want claude-p-session3", got)
 	}
-	if got := attachAs(other); got != "claude-p-session3-2" {
+	if got := attachMailboxAs(t, other); got != "claude-p-session3-2" {
 		t.Fatalf("another project's session3 attached as %q; want claude-p-session3-2", got)
 	}
-	if got := attachAs(root1); got != "claude-p" {
+	if got := attachMailboxAs(t, root1); got != "claude-p" {
 		t.Fatalf("session1 attached as %q; want its own name claude-p", got)
 	}
 	all, err := binding.List()
@@ -364,17 +340,10 @@ func TestMailboxAttachNamesEachSessionOfAProject(t *testing.T) {
 // ended (its holder ran in another boot) is pruned; one with no holder is
 // unknown, listed, and kept.
 func TestBindingsPrunesEndedSessionsAndKeepsUnknownOnes(t *testing.T) {
-	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
-		t.Skip("process start times and boot ids are read on darwin and linux only")
-	}
+	self := endedHolder(t)
 	dir := canonicalTempDir(t)
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv(binding.EnvPath, filepath.Join(dir, "remote", "binding.json"))
-	self, err := launch.HolderOf(os.Getpid())
-	if err != nil {
-		t.Fatal(err)
-	}
-	self.BootID = "another-boot"
 	for _, b := range []binding.Binding{
 		{Carrier: binding.CarrierMailbox, Root: dir, Handle: "codex", Name: "ended", Holder: self},
 		{Carrier: binding.CarrierMailbox, Root: dir, Handle: "claude", Name: "unknown"},
@@ -400,5 +369,80 @@ func TestBindingsPrunesEndedSessionsAndKeepsUnknownOnes(t *testing.T) {
 	}
 	if _, err := binding.ReadNamed("ended"); !errors.Is(err, binding.ErrNone) {
 		t.Fatalf("the ended binding is still present: %v", err)
+	}
+}
+
+// attachMailboxAs runs attach --self --json as the AMQ handle claude of the
+// session at root, pinned as a real session is, and returns the bound name.
+func attachMailboxAs(t *testing.T, root string) string {
+	t.Helper()
+	rootID, err := fsq.StableTreeIdentity(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseID, err := fsq.StableTreeIdentity(filepath.Dir(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for k, v := range map[string]string{"AM_ROOT": root, "AM_ME": "claude", "AM_BASE_ROOT": filepath.Dir(root),
+		"AM_SESSION": filepath.Base(root), "AM_ROOT_ID": rootID, "AM_BASE_ROOT_ID": baseID} {
+		t.Setenv(k, v)
+	}
+	var out bytes.Buffer
+	if code, err := attach([]string{"--self", "--json"}, &out, io.Discard); code != 0 || err != nil {
+		t.Fatalf("attach from %s: code=%d err=%v", root, code, err)
+	}
+	var got struct{ Name string }
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("attach output %q: %v", out.String(), err)
+	}
+	return got.Name
+}
+
+// endedHolder is this test process as a holder recorded in another boot, so
+// its binding is proven ended; the test skips where the boot id is unreadable.
+func endedHolder(t *testing.T) launch.HolderIdentity {
+	t.Helper()
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("process start times and boot ids are read on darwin and linux only")
+	}
+	self, err := launch.HolderOf(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if self.BootID == "" {
+		t.Skip("boot id unavailable")
+	}
+	self.BootID = "another-boot"
+	return self
+}
+
+// Review-s2 P1-1: pruning an ended binding freed its name, so the next
+// session of another identity that computed the same name took over the
+// ended session's Buzz agent and DM. The name stays held by its identity.
+func TestPrunedNameStaysWithItsSession(t *testing.T) {
+	ended := endedHolder(t)
+	dir := canonicalTempDir(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(binding.EnvPath, filepath.Join(dir, "remote", "binding.json"))
+	mine := filepath.Join(dir, "p", ".agent-mail", "session3")
+	theirs := filepath.Join(dir, "q", "p", ".agent-mail", "session3")
+	for _, r := range []string{mine, theirs} {
+		if err := os.MkdirAll(r, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := binding.Binding{Carrier: binding.CarrierMailbox, Root: theirs, Handle: "claude", Name: "claude-p-session3", Holder: ended}
+	if err := binding.WriteNamed(old); err != nil {
+		t.Fatal(err)
+	}
+	if code := run([]string{"bindings"}, nil, io.Discard, io.Discard); code != 0 {
+		t.Fatalf("bindings exit %d", code)
+	}
+	if got := attachMailboxAs(t, mine); got != "claude-p-session3-2" {
+		t.Fatalf("another session attached as %q after the prune; want claude-p-session3-2", got)
+	}
+	if got := attachMailboxAs(t, theirs); got != "claude-p-session3" {
+		t.Fatalf("the ended session came back as %q; want its own claude-p-session3", got)
 	}
 }

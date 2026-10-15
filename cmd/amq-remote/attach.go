@@ -177,12 +177,10 @@ func attach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 			nb.Name = binding.SanitizeName(h.Kind + "-" + filepath.Base(h.Cwd))
 		}
 	}
-	if _, err := pruneEnded(); err != nil {
-		return protocol.ExitActionRequired, err
-	}
 	if nb.Name, err = writeBinding(nb, explicit, *linkName != ""); err != nil {
 		return protocol.ExitActionRequired, err
 	}
+	pruneAfterAttach()
 	if *linkName != "" {
 		if err := shareWithLink(stateDir, *linkName, manifest.LinkShare{Binding: nb.Name, Consent: *consent, Tools: *tools}); err != nil {
 			return protocol.ExitActionRequired, err
@@ -292,13 +290,11 @@ func attachMailbox(root, handle, name string, asJSON bool, stdout io.Writer) (in
 	if err := listBuzzInRoster(root); err != nil {
 		return protocol.ExitActionRequired, err
 	}
-	if _, err := pruneEnded(); err != nil {
-		return protocol.ExitActionRequired, err
-	}
 	name, err := writeBinding(b, explicit, false)
 	if err != nil {
 		return protocol.ExitActionRequired, err
 	}
+	pruneAfterAttach()
 	if asJSON {
 		emitJSON(stdout, map[string]any{"connected": true, "name": name, "root": root, "handle": handle})
 		return 0, nil
@@ -481,15 +477,11 @@ var detectHarness = func() harnessSession {
 	return harnessSession{}
 }
 
-// pruneEnded removes the bindings whose sessions are proven ended and returns
-// their names. Each binding is checked as read under the binding lock, so a
-// session that attached again meanwhile is kept; an unknown one is kept too.
-func pruneEnded() ([]string, error) {
-	return binding.RemoveMatching(func(b binding.Binding) bool {
-		state, _ := b.Liveness()
-		return state == binding.Ended
-	})
-}
+// pruneAfterAttach prunes the bindings of ended sessions once attach has
+// written its own, so the write sees an ended binding of its own identity
+// and takes its name back (review-s2 P1-1). The attach has succeeded by then,
+// so a failed prune is left to the next attach or `bindings`, which reports it.
+func pruneAfterAttach() { _, _ = binding.PruneEnded() }
 
 // bindingRow is one bound session as `bindings` reports it.
 type bindingRow struct {
@@ -512,7 +504,7 @@ func bindings(args []string, stdout io.Writer, probe ...*jsonProbe) (int, error)
 	if err := fs.Parse(args); err != nil {
 		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", err)
 	}
-	pruned, err := pruneEnded()
+	pruned, err := binding.PruneEnded()
 	if err != nil {
 		return protocol.ExitActionRequired, err
 	}

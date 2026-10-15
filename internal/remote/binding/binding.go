@@ -549,7 +549,9 @@ func WriteNamedIf(b Binding, allow func(old Binding) bool) error { return writeN
 // returns the name written. A binding of the same identity with another
 // destination is taken over only when its holder is b's own or proven ended:
 // a live or unknown holder may be a concurrent session in the same place,
-// which keeps its name, so uncertain state is never weakened.
+// which keeps its name, so uncertain state is never weakened. A name whose
+// binding was pruned stays held by its identity through its tombstone (see
+// PruneEnded): that identity takes it back, and no other identity takes it.
 // Another session's binding is never replaced, so a session never inherits
 // another session's Buzz agent, and the same session always gets back its own
 // name. The choice and the write share one transaction.
@@ -579,6 +581,10 @@ func WriteSession(b Binding, base string) (string, error) {
 		if err != nil {
 			return err
 		}
+		tombs, err := scanTombstones(dir)
+		if err != nil {
+			return err
+		}
 		reusable := func(o Binding) bool {
 			if o.SessionIdentity() != id {
 				return false
@@ -603,13 +609,23 @@ func WriteSession(b Binding, base string) (string, error) {
 				name = o.Name
 			}
 		}
+		for _, t := range tombs {
+			if o, taken := held[t.Name]; name == "" && t.SessionIdentity() == id && (!taken || reusable(o)) {
+				name = t.Name
+			}
+		}
+		tombOf := map[string]string{}
+		for _, t := range tombs {
+			tombOf[t.Name] = t.SessionIdentity()
+		}
 		for n := 1; name == ""; n++ {
 			candidate := base
 			if n > 1 {
 				suffix := fmt.Sprintf("-%d", n)
 				candidate = strings.TrimRight(base[:min(len(base), 64-len(suffix))], "-_") + suffix
 			}
-			// A file that does not read as a binding is taken, never overwritten.
+			// A file that does not read as a binding or a tombstone is
+			// taken, never overwritten.
 			o, taken := held[candidate]
 			// Any other Lstat error means the directory cannot be read, so
 			// no name is provably free: fail closed (review-s1 P1).
@@ -617,12 +633,23 @@ func WriteSession(b Binding, base string) (string, error) {
 			if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
 				return statErr
 			}
-			if taken && reusable(o) || !taken && statErr != nil {
+			_, tombErr := os.Lstat(filepath.Join(dir, candidate+tombstoneSuffix))
+			if tombErr != nil && !errors.Is(tombErr, os.ErrNotExist) {
+				return tombErr
+			}
+			tombID, tombed := tombOf[candidate]
+			free := !taken && statErr != nil && (tombed && tombID == id || !tombed && tombErr != nil)
+			if taken && reusable(o) || free {
 				name = candidate
 			}
 		}
-		_, err = fsq.WriteFileAtomic(dir, name+".json", append(raw, '\n'), 0o600)
-		return err
+		if _, err := fsq.WriteFileAtomic(dir, name+".json", append(raw, '\n'), 0o600); err != nil {
+			return err
+		}
+		if err := os.Remove(filepath.Join(dir, name+tombstoneSuffix)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return nil
 	})
 	if err != nil {
 		return "", err
@@ -675,6 +702,76 @@ func List() ([]Binding, error) {
 	}
 	if b, err := Read(); err == nil {
 		b.Name = LegacyName
+		out = append(out, b)
+	}
+	return out, nil
+}
+
+// tombstoneSuffix names the tombstone a pruned binding leaves:
+// <name>.ended.json, the binding as it was when its session was proven ended.
+// It never reads as a binding (a name has no dot), so List and RemoveMatching
+// skip it.
+const tombstoneSuffix = ".ended.json"
+
+// PruneEnded removes every binding whose session is proven ended and returns
+// the names removed. Each binding is checked as read under the binding lock,
+// so a session that attached again meanwhile is kept, and an unknown one is
+// kept too. A named binding is renamed to its tombstone, which keeps its name
+// held by its session identity, so a later session never inherits the ended
+// session's Buzz agent through a freed name (review-s2 P1-1). Tombstones are
+// never pruned; their number is bounded by the distinct session identities.
+// The legacy single binding has no name to hold and is removed.
+func PruneEnded() ([]string, error) {
+	var removed []string
+	err := transact(func(path string) error {
+		dir, err := namedDir(false)
+		if err != nil {
+			return err
+		}
+		bound, err := scanNamed(dir)
+		if err != nil {
+			return err
+		}
+		for _, b := range bound {
+			if state, _ := b.Liveness(); state != Ended {
+				continue
+			}
+			if err := os.Rename(filepath.Join(dir, b.Name+".json"), filepath.Join(dir, b.Name+tombstoneSuffix)); err != nil {
+				return err
+			}
+			removed = append(removed, b.Name)
+		}
+		if b, err := read(path); err == nil {
+			if state, _ := b.Liveness(); state == Ended {
+				if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+					return err
+				}
+				removed = append(removed, LegacyName)
+			}
+		}
+		return nil
+	})
+	return removed, err
+}
+
+// scanTombstones reads the tombstones in dir, sorted by name. A file that
+// does not read as a binding is skipped.
+func scanTombstones(dir string) ([]Binding, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	var out []Binding
+	for _, e := range entries {
+		name, ok := strings.CutSuffix(e.Name(), tombstoneSuffix)
+		if !ok || e.IsDir() || ValidName(name) != nil {
+			continue
+		}
+		b, err := read(filepath.Join(dir, e.Name()))
+		if err != nil {
+			continue
+		}
+		b.Name = name
 		out = append(out, b)
 	}
 	return out, nil
