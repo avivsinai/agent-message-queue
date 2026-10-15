@@ -472,22 +472,57 @@ func (s *Server) eventDir(eventID string) string {
 
 // ownsLegacyEvent reports whether the event's state was written before
 // per-agent directories and is this agent's: its own directory has no claim
-// of the event, and remote-events has one this agent owns. A steer event is
-// this agent's when its parent event is.
+// of the event, and remote-events has one this agent owns, for its pin or
+// for a model one of its ACP sessions selected. A steer event is this
+// agent's when its parent event is. A yes is recorded once as
+// <own>/<event>.legacy, so the event never changes directory while it runs.
 func (s *Server) ownsLegacyEvent(own, eventID string) bool {
+	marker := filepath.Join(own, eventID+".legacy")
+	if _, err := os.Lstat(marker); err == nil {
+		return true
+	}
 	for _, suffix := range []string{".json", ".steer.json"} {
 		if _, err := os.Lstat(filepath.Join(own, eventID+suffix)); err == nil {
 			return false
 		}
 	}
+	owned := false
 	if raw, err := readSmallRegular(filepath.Join(s.eventsDir(), eventID+".json")); err == nil {
 		var c eventClaim
-		return json.Unmarshal(raw, &c) == nil && c.Valid() == nil && s.ownsClaim(c, "")
+		owned = json.Unmarshal(raw, &c) == nil && c.Valid() == nil && s.ownsClaimInAnySession(c)
+	} else {
+		var steer steerClaim
+		if raw, err := readSmallRegular(filepath.Join(s.eventsDir(), eventID+".steer.json")); err == nil &&
+			json.Unmarshal(raw, &steer) == nil && steer.ParentEvent != "" && steer.ParentEvent != eventID {
+			owned = s.ownsLegacyEvent(own, steer.ParentEvent)
+		}
 	}
-	var steer steerClaim
-	if raw, err := readSmallRegular(filepath.Join(s.eventsDir(), eventID+".steer.json")); err == nil &&
-		json.Unmarshal(raw, &steer) == nil && steer.ParentEvent != "" && steer.ParentEvent != eventID {
-		return s.ownsLegacyEvent(own, steer.ParentEvent)
+	if !owned {
+		return false
+	}
+	// A failed record leaves the decision to the next call; it reaches the
+	// same answer while the flat claim stays.
+	_, _ = createExclusive(marker, nil)
+	return true
+}
+
+// ownsClaimInAnySession is ownsClaim for no session or for any of this
+// process's ACP sessions. Never "any binding": agents that shared state
+// before would then take each other's claims.
+func (s *Server) ownsClaimInAnySession(c eventClaim) bool {
+	if s.ownsClaim(c, "") {
+		return true
+	}
+	s.mu.Lock()
+	ids := make([]string, 0, len(s.sessions))
+	for id := range s.sessions {
+		ids = append(ids, id)
+	}
+	s.mu.Unlock()
+	for _, id := range ids {
+		if s.ownsClaim(c, id) {
+			return true
+		}
 	}
 	return false
 }
