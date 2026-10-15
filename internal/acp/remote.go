@@ -380,7 +380,7 @@ func (s *Server) turnBinding(sessionID, eventID string) (binding.Binding, error)
 		if err := json.Unmarshal(raw, &c); err != nil || c.Valid() != nil {
 			return binding.Binding{}, fmt.Errorf("event %s has an unreadable recorded binding; refusing to resubmit", eventID)
 		}
-		if !s.ownsClaim(c) {
+		if !s.ownsClaim(c, sessionID) {
 			return binding.Binding{}, fmt.Errorf("event %s was claimed by another Buzz agent; it runs there, not here", eventID)
 		}
 		// A claim can be visible before its directory entry is durable. Every
@@ -431,15 +431,22 @@ func (c eventClaim) binding() binding.Binding {
 	return b
 }
 
-// ownsClaim reports whether this agent made the claim. A claim without an
-// agent (an older one, or one made with no Buzz identity) belongs only to
-// the agent pinned to its binding name; the helper and unpinned agents take
-// none.
-func (s *Server) ownsClaim(c eventClaim) bool {
-	if c.Agent != "" {
+// ownsClaim reports whether this agent made the claim. A claim with a name
+// but no agent (made with no Buzz identity) belongs only to the agent pinned
+// to that name. A claim with neither (written before claims recorded them)
+// belongs to the agent whose own session binding is the claim's destination.
+// The helper takes none.
+func (s *Server) ownsClaim(c eventClaim, sessionID string) bool {
+	switch {
+	case c.Agent != "":
 		return c.Agent == buzzSelf
+	case s.cfg.Helper:
+		return false
+	case c.Name != "":
+		return s.cfg.Pin != "" && c.Name == s.cfg.Pin
 	}
-	return s.cfg.Pin != "" && !s.cfg.Helper && c.Name == s.cfg.Pin
+	b, err := s.sessionBinding(sessionID)
+	return err == nil && b.Same(c.Binding)
 }
 
 // createExclusive publishes raw at path only if nothing is there yet. The

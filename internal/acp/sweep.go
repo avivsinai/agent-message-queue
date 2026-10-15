@@ -265,7 +265,7 @@ func (s *Server) loadLateClaim(eventID string, now time.Time) (*lateClaim, bool)
 	c := lateClaim{eventID: eventID}
 	// Only this agent's own claim: another agent posts its own replies.
 	var rec eventClaim
-	if raw, err := readSmallRegular(filepath.Join(dir, eventID+".json")); err != nil || json.Unmarshal(raw, &rec) != nil || rec.Valid() != nil || !rec.Mailbox() || !s.ownsClaim(rec) {
+	if raw, err := readSmallRegular(filepath.Join(dir, eventID+".json")); err != nil || json.Unmarshal(raw, &rec) != nil || rec.Valid() != nil || !rec.Mailbox() || !s.ownsClaim(rec, "") {
 		return nil, false
 	}
 	c.b = rec.binding()

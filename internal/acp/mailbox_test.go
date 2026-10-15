@@ -29,7 +29,17 @@ func mailboxServer(t *testing.T) (*Server, string) {
 	if err := binding.Write(binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: "agent"}); err != nil {
 		t.Fatal(err)
 	}
-	return NewServer(Config{RemoteBinding: true, Pin: binding.LegacyName, StateDir: canonicalTempDir(t), TurnTimeout: 2 * time.Second, PollInterval: 5 * time.Millisecond, HeartbeatInterval: 20 * time.Millisecond}, "test"), root
+	withBuzzSelf(t)
+	return NewServer(Config{RemoteBinding: true, StateDir: canonicalTempDir(t), TurnTimeout: 2 * time.Second, PollInterval: 5 * time.Millisecond, HeartbeatInterval: 20 * time.Millisecond}, "test"), root
+}
+
+// withBuzzSelf gives the test a Buzz agent key, as Desktop gives every
+// agent, so its event claims name it.
+func withBuzzSelf(t *testing.T) {
+	t.Helper()
+	saved := buzzSelf
+	t.Cleanup(func() { buzzSelf = saved })
+	buzzSelf = strings.Repeat("e", 64)
 }
 
 // inboxPrompts lists the prompt ids in the agent's inbox (new and cur).
