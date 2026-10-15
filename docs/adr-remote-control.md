@@ -166,8 +166,11 @@ id is `amq-remote:<name>`.
 
 A link is the carrier to a server the user linked with `amq-remote link add`.
 The machine dials it (`wss://`, `ws://` only to loopback) and answers only
-the server id it pinned at linking. A revision counts as published only after
-the server acknowledged that it committed it; until then the store owes it.
+the server id it pinned at linking. A link identifies the machine: its device
+key and store live in one root, the machine root `~/.amq/remote/root` unless
+`--root` names another, and only that root's endpoint dials it. A revision
+counts as published only after the server acknowledged that it committed it;
+until then the store owes it.
 The link's sink is its creator host, `link-` and 16 hex digits of the device
 key's hash. Removing the link, or a server revoke, retires the sink: its
 device key is deleted and its records settle without network.

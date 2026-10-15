@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -125,9 +126,19 @@ func (ls *linkSet) request(ctx context.Context, req ipc.LinkRequest) (json.RawMe
 	return reply, err
 }
 
-// linkIPC sends one link.v1 operation to this root's endpoint.
+// linkIPC sends one link.v1 operation to the endpoint of the link's root.
+// No endpoint at all is named with the root and the command that starts it;
+// the endpoint's own refusals (a link not connected) pass through.
 func linkIPC(stateDir string, req ipc.LinkRequest) (json.RawMessage, error) {
 	resp, err := ipc.Call(stateDir, ipc.Request{Link: &req})
+	if isEndpointUnreachable(err) {
+		root := filepath.Dir(filepath.Dir(stateDir)) // stateDir is <root>/extensions/remote
+		label := "the link"
+		if req.Name != "" {
+			label = "link " + req.Name
+		}
+		return nil, protocol.Refuse(protocol.CodeEndpointUnreachable, "%s is not connected: no endpoint runs for %s; start it with amq-remote up --root %s", label, root, root)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -230,11 +241,11 @@ func linkCall(args []string, stderr io.Writer, probe *jsonProbe) (any, int, erro
 	if given != "" && !idempotencyKeyRe.MatchString(given) {
 		return nil, protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "the key must be 1-126 of A-Z a-z 0-9 _ . : -")
 	}
-	stateDir, err := c.stateDir()
+	root, name, err := c.resolveLink(*linkName)
 	if err != nil {
-		return nil, protocol.ExitUsage, err
+		return nil, protocol.ExitCode(err), err
 	}
-	cl := caller{stateDir: stateDir, link: *linkName}
+	cl := caller{stateDir: filepath.Join(root, stateDirName), link: name}
 	ctx, cancel := context.WithTimeout(context.Background(), linkCallWait)
 	if *wait {
 		ctx, cancel = context.WithCancel(context.Background())
@@ -243,14 +254,14 @@ func linkCall(args []string, stderr io.Writer, probe *jsonProbe) (any, int, erro
 	key, callID := callKey(given)
 	var reply toolCallReply
 	if pos[0] == "resume" {
-		reply, err = cl.send(ctx, ipc.LinkRequest{Name: *linkName, Op: "call_get", CallID: callID, WaitMS: linkGetWait.Milliseconds()})
+		reply, err = cl.send(ctx, ipc.LinkRequest{Name: name, Op: "call_get", CallID: callID, WaitMS: linkGetWait.Milliseconds()})
 	} else {
 		var arguments map[string]any
 		if err := json.Unmarshal([]byte(*argsJSON), &arguments); err != nil {
 			return nil, protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "--args must be a JSON object: %v", err)
 		}
 		say(stderr, "call key %s (resume with: amq-remote link call resume %s)", key, key)
-		reply, err = cl.send(ctx, ipc.LinkRequest{Name: *linkName, Op: "call", CallID: callID, Tool: pos[0],
+		reply, err = cl.send(ctx, ipc.LinkRequest{Name: name, Op: "call", CallID: callID, Tool: pos[0],
 			Arguments: json.RawMessage(*argsJSON), IdempotencyKey: key, WaitMS: linkCallWait.Milliseconds()})
 	}
 	if err == nil && *wait {
@@ -275,11 +286,11 @@ func linkTools(args []string, probe *jsonProbe) (any, int, error) {
 	if _, err := parseInterleaved(fs, args); err != nil {
 		return nil, protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", err)
 	}
-	stateDir, err := c.stateDir()
+	root, name, err := c.resolveLink(*linkName)
 	if err != nil {
-		return nil, protocol.ExitUsage, err
+		return nil, protocol.ExitCode(err), err
 	}
-	raw, err := linkIPC(stateDir, ipc.LinkRequest{Name: *linkName, Op: "tools", WaitMS: linkCallWait.Milliseconds()})
+	raw, err := linkIPC(filepath.Join(root, stateDirName), ipc.LinkRequest{Name: name, Op: "tools", WaitMS: linkCallWait.Milliseconds()})
 	if err != nil {
 		return nil, 0, err
 	}
@@ -288,22 +299,22 @@ func linkTools(args []string, probe *jsonProbe) (any, int, error) {
 
 // mcpServe is `amq-remote mcp --link NAME`: a stdio MCP server (newline-
 // delimited JSON-RPC 2.0) whose tools are the linked server's tools. It holds
-// no token: every call goes through this root's endpoint and its link. Each
-// request runs on its own goroutine, so a long call never holds up a ping,
-// and notifications/cancelled stops that call's wait.
-func mcpServe(args []string, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
+// no token: every call goes through the endpoint of the link's root and its
+// link. Each request runs on its own goroutine, so a long call never holds up
+// a ping, and notifications/cancelled stops that call's wait.
+func mcpServe(args []string, stdin io.Reader, stdout, stderr io.Writer, probe *jsonProbe) (int, error) {
 	fs := flag.NewFlagSet("mcp", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	c := addCommon(fs)
+	c := addCommon(fs, probe)
 	linkName := fs.String("link", "", "the link whose tools to serve (default: the only one)")
 	if err := fs.Parse(args); err != nil {
 		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", err)
 	}
-	stateDir, err := c.stateDir()
+	root, name, err := c.resolveLink(*linkName)
 	if err != nil {
-		return protocol.ExitUsage, err
+		return protocol.ExitCode(err), err
 	}
-	m := &mcpServer{cl: caller{stateDir: stateDir, link: *linkName}, out: json.NewEncoder(stdout), stderr: stderr,
+	m := &mcpServer{cl: caller{stateDir: filepath.Join(root, stateDirName), link: name}, out: json.NewEncoder(stdout), stderr: stderr,
 		cancels: map[string]context.CancelFunc{}}
 	sc := bufio.NewScanner(stdin)
 	sc.Buffer(make([]byte, 64*1024), ipc.LinkRecordBytes)

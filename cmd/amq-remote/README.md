@@ -32,8 +32,10 @@ extension data. The IPC socket is `<root>/extensions/remote/endpoint.sock`.
 Adapter declarations are `<root>/extensions/remote/manifest.json` unless
 `--manifest` points somewhere else.
 
-`--root` is required for every command that opens that directory. It defaults
-to `AM_ROOT` and must be absolute. A missing or relative root is exit 2.
+`--root` is required for every command that opens that directory, except the
+link commands. It defaults to `AM_ROOT` and must be absolute. A missing or
+relative root is exit 2. A link command without `--root` finds its link in the
+machine root, `~/.amq/remote/root`, or in `AM_ROOT`.
 
 ## Commands
 
@@ -55,6 +57,9 @@ amq-remote link local-key NAME
 amq-remote link confirm ID
 amq-remote link remove NAME
 amq-remote link status
+amq-remote link tools [--link NAME]
+amq-remote link call TOOL --args JSON [--link NAME]
+amq-remote mcp --link NAME
 amq-remote doctor
 amq-remote version
 ```
@@ -371,19 +376,26 @@ results the relay operator must not see.
 
 ## Link
 
-A link connects this root to a server the user signs tasks in (for example a
-web assistant). The machine dials the server; the server never connects in.
+A link connects this machine to a server the user signs tasks in (for example
+a web assistant). The machine dials the server; the server never connects in.
 Protocol: `amq.remote.link/1` ([contract](../../testdata/link/README.md)).
 
 1. In the server, create a link code and a consent passkey. It shows a code
    and the passkey fingerprint.
-2. `amq-remote link add NAME URL --code CODE` mints this root's device key,
-   redeems the code, and asks for the fingerprint. Only a typed match pins the
-   consent key; the server can never add one. The manifest gains a `links`
-   entry (`schema_version` 2).
-3. In the session to share, run `amq-remote attach --self --link NAME`
-   (`--consent passkey` by default, or `local`; `--tools read` by default).
-   The share names the session's binding.
+2. `amq-remote link add NAME URL --code CODE` mints the device key in the
+   machine root, `~/.amq/remote/root`, unless `--root` names another root
+   (`AM_ROOT` does not choose it). It redeems the code and asks for the
+   fingerprint. Only a typed match pins the consent key; the server can never
+   add one. The manifest gains a `links` entry (`schema_version` 2), and the
+   endpoint for that root starts when none runs. It prints the commands that
+   share a session and use the server's tools (`link tools`, `mcp --link`).
+3. In the session to share, from any AMQ root or none, run
+   `amq-remote attach --self --link NAME` (`--consent passkey` by default, or
+   `local`; `--tools read` by default). The share names the session's
+   binding and runs through the endpoint of the link's root. When the server
+   lists the tool profiles it grants in its link info, `--tools` must be one
+   of them. A pi session is driven only by the endpoint of its own AMQ root,
+   so its link must live there: link that root with `--root`.
 4. `serve` (under `up`) keeps the link up. A revision counts as published only
    after the server acknowledged that it committed it; until then the store
    still owes it and offers it again. A revision the server holds with another
@@ -408,11 +420,16 @@ Protocol: `amq.remote.link/1` ([contract](../../testdata/link/README.md)).
    `/new`, a reload), run `attach --self --link NAME` again in the new
    session, which keeps the share's binding name. `amq-remote link remove NAME`
    retires the link's sink and deletes its device key; the records it created
-   settle without network.
+   settle without network. The server keeps the machine until you unlink it
+   on the server's connections page.
 
-State, per root under `<root>/extensions/remote/link/`: `store_id` (minted
+A link lives in exactly one root, normally the machine root; its state is
+never copied or moved. One link name in two roots is refused.
+State, per link root under `<root>/extensions/remote/link/` (normally
+`~/.amq/remote/root/extensions/remote/link/`): `store_id` (minted
 once), `<name>/device.key` (Ed25519, 0600, never overwritten),
-`<name>/link.json` (the pinned server id, URL and signing origin),
+`<name>/link.json` (the pinned server id, URL, signing origin and the tool
+profiles the server grants),
 `<name>/consent_keys.json` (public keys only), `<name>/status.json`, and
 `retired/<sink>`. A server that closes with 4010 revokes the device: the
 endpoint retires the sink and deletes the key. Close 1012 (server restart)
@@ -423,13 +440,14 @@ the agent's prompts and cannot answer them.
 
 ## Flags
 
-Flags may appear before or after the positional argument.
+Flags may appear before or after the positional argument. `amq-remote
+COMMAND --help` prints a command's flags.
 
 ### Common
 
 | Flag | Default | Commands |
 | --- | --- | --- |
-| `--root DIR` | `AM_ROOT` | all except `version` |
+| `--root DIR` | `AM_ROOT`; link commands: the link's root | all except `version` |
 | `--json` | false | `sessions`, `inspect`, `submit`, `status`, `wait`, `cancel`, `requests`, `doctor` |
 
 ### `serve` and `up`

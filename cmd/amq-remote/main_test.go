@@ -50,6 +50,9 @@ import (
 // it records whether the submit's spool envelope was durable when the
 // endpoint dispatched it (TestCLIB7PersistBeforeDispatchViaSubmit).
 func init() {
+	// The real start runs os.Executable(), which here is this test binary;
+	// a test that needs the start replaces it with a recorder.
+	startEndpoint = func(string, string) error { return errors.New("tests start no endpoint") }
 	registry.Register("weak-fake", func(ctx context.Context, cfg registry.FactoryConfig) (core.Attachment, error) {
 		r := fake.New(cfg.Target, "e_1")
 		r.WithEvidence(&protocol.Evidence{Submit: "submitted", Completion: "run_terminal"})
@@ -144,6 +147,25 @@ func TestCLIUsageAndVersion(t *testing.T) {
 	code, out, _ := cli(t, "", "--version")
 	if code != 0 || !strings.Contains(out, "amq-remote") {
 		t.Fatalf("--version exit=%d out=%q", code, out)
+	}
+}
+
+// Regression (first-run audit, finding 4): --help on a subcommand printed
+// "invalid: flag: help requested" and no flags, so --consent, --tools and
+// --root could not be found. It prints the command's flags and exits 0.
+func TestSubcommandHelpListsFlags(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		flag string
+	}{
+		{[]string{"attach", "--help"}, "-consent"},
+		{[]string{"link", "tools", "--help"}, "-link"},
+		{[]string{"link", "status", "--help"}, "-root"},
+		{[]string{"mcp", "--help"}, "-link"},
+	} {
+		if code, _, stderr := cli(t, "", tc.args...); code != 0 || !strings.Contains(stderr, tc.flag) {
+			t.Errorf("%v: exit %d, stderr %q; want 0 and the %s flag", tc.args, code, stderr, tc.flag)
+		}
 	}
 }
 

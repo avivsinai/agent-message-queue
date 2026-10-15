@@ -21,7 +21,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/amqhome"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	karegistry "github.com/avivsinai/agent-message-queue/internal/keepalive/registry"
 	"github.com/avivsinai/agent-message-queue/internal/lock"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
@@ -193,6 +195,7 @@ func (ls *linkSet) sync(mf manifest.File) {
 				say(ls.stderr, "link %s: the server revoked this device; the link is retired", name)
 			}
 		}()
+		go ls.refreshToolProfiles(ctx, name)
 	}
 }
 
@@ -366,6 +369,131 @@ func link(args []string, stdin io.Reader, stdout io.Writer, probe *jsonProbe) (a
 	return nil, protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "unknown link subcommand %q", args[0])
 }
 
+// machineRoot is the per-machine root, ~/.amq/remote/root: the root a link
+// lives in unless --root names another, and the one native attach uses
+// outside AMQ (skills/amq-remote/SKILL.md).
+func machineRoot() (string, error) {
+	home, err := amqhome.Dir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, "remote", "root"), nil
+}
+
+// ensureMachineRoot creates the machine root, each directory 0700, and
+// refuses a symlink or non-directory on the way.
+func ensureMachineRoot() (string, error) {
+	home, err := amqhome.EnsureDir()
+	if err != nil {
+		return "", err
+	}
+	dir := home
+	for _, part := range []string{"remote", "root"} {
+		dir = filepath.Join(dir, part)
+		if err := os.Mkdir(dir, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+			return "", err
+		}
+		info, err := os.Lstat(dir)
+		if err != nil {
+			return "", err
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return "", fmt.Errorf("%s is not a plain directory; refusing", dir)
+		}
+	}
+	return dir, nil
+}
+
+// sameRoot reports whether two roots name one directory, canonicalized the
+// way up canonicalizes a root before it takes the root's lock.
+func sameRoot(a, b string) bool {
+	ca, errA := karegistry.CanonicalRoot(a)
+	cb, errB := karegistry.CanonicalRoot(b)
+	if errA != nil || errB != nil {
+		return filepath.Clean(a) == filepath.Clean(b)
+	}
+	return ca == cb
+}
+
+// linkRoots are the roots a link command looks in: --root alone when given,
+// otherwise the machine root and AM_ROOT when it is another directory.
+func (c *common) linkRoots() ([]string, error) {
+	if c.rootSet {
+		if _, err := c.stateDir(); err != nil {
+			return nil, err
+		}
+		return []string{c.root}, nil
+	}
+	m, err := machineRoot()
+	if err != nil {
+		return nil, err
+	}
+	roots := []string{m}
+	if am := os.Getenv("AM_ROOT"); am != "" && filepath.IsAbs(am) && !sameRoot(am, m) {
+		roots = append(roots, am)
+	}
+	return roots, nil
+}
+
+// rootLinks maps each link name declared in the roots' manifests to the
+// roots that declare it. The manifest is the authority, not the device key,
+// so a retired link is still found.
+func rootLinks(roots []string) (map[string][]string, error) {
+	out := map[string][]string{}
+	for _, r := range roots {
+		mf, err := manifest.Load(manifest.DefaultPath(filepath.Join(r, stateDirName)))
+		if err != nil {
+			return nil, err
+		}
+		for _, l := range mf.Links {
+			if held := out[l.Name]; len(held) == 0 || held[len(held)-1] != r {
+				out[l.Name] = append(held, r)
+			}
+		}
+	}
+	return out, nil
+}
+
+// resolveLink returns the root that holds link name ("" = the only link on
+// this machine) and the link's name. A link lives in exactly one root; one
+// name in two roots is refused, never guessed. --root names the one root
+// searched. A refusal names the roots searched, because a link an earlier
+// version added under another AM_ROOT is not on this machine's search path.
+func (c *common) resolveLink(name string) (root, link string, err error) {
+	roots, err := c.linkRoots()
+	if err != nil {
+		return "", "", err
+	}
+	held, err := rootLinks(roots)
+	if err != nil {
+		return "", "", err
+	}
+	where := strings.Join(roots, " or ")
+	if name == "" {
+		names := make([]string, 0, len(held))
+		for n := range held {
+			names = append(names, n)
+		}
+		sort.Strings(names)
+		switch len(names) {
+		case 0:
+			return "", "", protocol.Refuse(protocol.CodeNotFound, "no link in %s; pass --root for a link in another root, or link it first with amq-remote link add NAME URL --code CODE", where)
+		case 1:
+			name = names[0]
+		default:
+			return "", "", protocol.Refuse(protocol.CodeInvalid, "%s has %d links (%s); name one with --link", where, len(names), strings.Join(names, ", "))
+		}
+	}
+	switch rs := held[name]; len(rs) {
+	case 0:
+		return "", "", protocol.Refuse(protocol.CodeNotFound, "no link named %q in %s; pass --root for a link in another root, or link it first with amq-remote link add %s URL --code CODE", name, where, name)
+	case 1:
+		return rs[0], name, nil
+	default:
+		return "", "", protocol.Refuse(protocol.CodeUnsupported, "link %q exists in two roots, %s and %s; pass --root to pick one, or remove one with amq-remote link remove %s --root <root>", name, rs[0], rs[1], name)
+	}
+}
+
 // requireLinkEndpoint refuses while an endpoint that predates links runs for
 // this root: it would not serve the link, and its manifest writes (a live
 // attach registers through it) would drop the links block. No endpoint at all
@@ -385,6 +513,64 @@ func requireLinkEndpoint(stateDir string) error {
 type linkInfo struct {
 	ServerID string `json:"server_id"`
 	LinkURL  string `json:"link_url"`
+	// ToolProfiles are the tool profile names the server grants; nil when
+	// the server does not say.
+	ToolProfiles *[]string `json:"tool_profiles,omitempty"`
+}
+
+// grantedProfiles is the server's profile list with every name that is not
+// a profile name dropped; nil stays nil (the server does not say).
+func (i linkInfo) grantedProfiles() *[]string {
+	if i.ToolProfiles == nil {
+		return nil
+	}
+	kept := []string{}
+	for _, p := range *i.ToolProfiles {
+		if p != "" && manifest.ValidLinkShare(manifest.LinkShare{Binding: "session", Consent: "passkey", Tools: p}) == nil {
+			kept = append(kept, p)
+		}
+	}
+	return &kept
+}
+
+// linkHTTPClient reads a server's link API; it refuses redirects.
+func linkHTTPClient() *http.Client {
+	return &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error {
+		return errors.New("the server redirected; refusing")
+	}}
+}
+
+// refreshToolProfiles rereads the tool profiles the server grants into the
+// link's pin, where attach checks --tools. It runs once per link run, beside
+// the carrier, so a slow server never holds up the link, and ends with the
+// run. An answer from another server id, any error, or a link removed or
+// added again meanwhile keeps the pin as it is.
+func (ls *linkSet) refreshToolProfiles(ctx context.Context, name string) {
+	pin, err := linkio.LoadPin(ls.stateDir, name)
+	if err != nil || pin.API == "" {
+		return
+	}
+	var info linkInfo
+	if err := getJSONCtx(ctx, linkHTTPClient(), pin.API+"/api/v1/link/info", &info); err != nil {
+		if ctx.Err() == nil {
+			say(ls.stderr, "link %s: read the server's tool profiles: %v", name, err)
+		}
+		return
+	}
+	if info.ServerID != pin.ServerID {
+		say(ls.stderr, "link %s: the server's link info names server %q, this link is pinned to %q; tool profiles kept", name, info.ServerID, pin.ServerID)
+		return
+	}
+	// The link may have been removed and added again during the read: only
+	// the same device on the same server takes the answer.
+	now, err := linkio.LoadPin(ls.stateDir, name)
+	if err != nil || now.DeviceID != pin.DeviceID || now.ServerID != pin.ServerID {
+		return
+	}
+	now.ToolProfiles = info.grantedProfiles()
+	if err := linkio.RewritePin(ls.stateDir, name, now); err != nil && !errors.Is(err, os.ErrNotExist) {
+		say(ls.stderr, "link %s: record the server's tool profiles: %v", name, err)
+	}
 }
 
 type redeemRequest struct {
@@ -402,10 +588,12 @@ type redeemReply struct {
 	ConsentKeys []linkio.ConsentKey `json:"consent_keys"`
 }
 
-// linkAdd links this root to a server with a single-use code the server
+// linkAdd links this machine to a server with a single-use code the server
 // issued, and pins the consent passkey whose fingerprint the user types from
 // the browser that created it. The server cannot add a consent key; only a
-// command typed here, with a fingerprint typed here, can.
+// command typed here, with a fingerprint typed here, can. The link lives in
+// the machine root unless --root names another; AM_ROOT does not choose it,
+// because the terminal a user links from often exports an unrelated one.
 func linkAdd(args []string, stdin io.Reader, stdout io.Writer, probe *jsonProbe) (any, int, error) {
 	fs := flag.NewFlagSet("link add", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -423,19 +611,48 @@ func linkAdd(args []string, stdin io.Reader, stdout io.Writer, probe *jsonProbe)
 	if err := validServerURL(base); err != nil {
 		return nil, protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", err)
 	}
-	stateDir, err := c.stateDir()
-	if err != nil {
+	root := c.root
+	if !c.rootSet {
+		if root, err = machineRoot(); err != nil {
+			return nil, protocol.ExitError, err
+		}
+	} else if _, err := c.stateDir(); err != nil {
 		return nil, protocol.ExitUsage, err
 	}
+	// One name in two roots would be ambiguous for every later command; the
+	// device key's O_EXCL guards only its own root.
+	others := []string{}
+	if m, err := machineRoot(); err == nil {
+		others = append(others, m)
+	}
+	if am := os.Getenv("AM_ROOT"); am != "" && filepath.IsAbs(am) {
+		others = append(others, am)
+	}
+	for _, other := range others {
+		if sameRoot(other, root) {
+			continue
+		}
+		held, err := rootLinks([]string{other})
+		if err != nil {
+			return nil, protocol.ExitError, err
+		}
+		if len(held[name]) > 0 {
+			return nil, protocol.ExitActionRequired, protocol.Refuse(protocol.CodeUnsupported, "link %q already exists in %s; pick another name", name, other)
+		}
+	}
+	if !c.rootSet {
+		if root, err = ensureMachineRoot(); err != nil {
+			return nil, protocol.ExitError, err
+		}
+	}
+	stateDir := filepath.Join(root, stateDirName)
 	if err := requireLinkEndpoint(stateDir); err != nil {
 		return nil, protocol.ExitActionRequired, err
 	}
 	if *deviceName == "" {
 		*deviceName, _ = os.Hostname()
 	}
-	client := &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error {
-		return errors.New("the server redirected; refusing")
-	}}
+	client := linkHTTPClient()
 	var info linkInfo
 	if err := getJSON(client, base+"/api/v1/link/info", &info); err != nil {
 		return nil, protocol.ExitActionRequired, fmt.Errorf("read the server's link info: %w", err)
@@ -457,13 +674,13 @@ func linkAdd(args []string, stdin io.Reader, stdout io.Writer, probe *jsonProbe)
 	in := bufio.NewReader(stdin) // one reader: the fingerprint, then the y/N question
 	rep, ck, err := redeemOneKey(client, base+"/api/v1/link/redeem", key, info.ServerID, *code, *deviceName, in, stdout)
 	if errors.Is(err, errFingerprintMismatch) {
-		return nil, protocol.ExitActionRequired, fmt.Errorf("%w; nothing was linked here. The server already registered device %s: remove it in the server's connectors, then run link add with a new code", err, key.Host())
+		return nil, protocol.ExitActionRequired, fmt.Errorf("%w; nothing was linked here. The server already registered device %s: unlink this machine on the server's connections page (%s), then run link add with a new code", err, key.Host(), base)
 	}
 	if err != nil {
 		return nil, protocol.ExitActionRequired, err
 	}
 	pin := linkio.Pin{API: base, URL: info.LinkURL, ServerID: info.ServerID, DeviceID: rep.DeviceID, User: rep.User,
-		DeviceName: *deviceName, RPID: ck.RPID, Origin: ck.Origin}
+		DeviceName: *deviceName, RPID: ck.RPID, Origin: ck.Origin, ToolProfiles: info.grantedProfiles()}
 	if err := linkio.WritePin(stateDir, name, pin); err != nil {
 		return nil, protocol.ExitError, err
 	}
@@ -483,14 +700,34 @@ func linkAdd(args []string, stdin io.Reader, stdout io.Writer, probe *jsonProbe)
 		return nil, protocol.ExitError, err
 	}
 	linked = true
+	// The endpoint dials the link and serves link tools and mcp, so the
+	// commands printed below work at once. A link that already runs an
+	// endpoint picks the new link up on its next sweep.
+	var startErr error
+	if _, running, err := ipc.EndpointFeatures(stateDir); err == nil && !running {
+		startErr = startEndpoint(root, stateDir)
+	}
 	if c.json {
-		return map[string]any{"linked": name, "server_id": info.ServerID, "user": rep.User, "sink": key.Host()}, 0, nil
+		out := map[string]any{"linked": name, "server_id": info.ServerID, "user": rep.User, "sink": key.Host(), "root": root}
+		if startErr != nil {
+			out["endpoint_error"] = startErr.Error()
+		}
+		return out, 0, nil
 	}
 	say(stdout, "Matches. Linked to %s on %s.", rep.User, info.ServerID)
+	if startErr != nil {
+		say(stdout, "The endpoint did not start (%v); start it with amq-remote up --root %s", startErr, root)
+	}
 	if stdinIsTerminal(stdin) {
 		offerLocalKey(stateDir, name, in, stdin, stdout)
 	}
-	say(stdout, "Share a session: in it, run  amq-remote attach --self --link %s", name)
+	rootArg := ""
+	if m, err := machineRoot(); err != nil || !sameRoot(root, m) {
+		rootArg = " --root " + root
+	}
+	say(stdout, "Share a session: in it, run  amq-remote attach --self --link %s%s", name, rootArg)
+	say(stdout, "Use its tools here:      amq-remote link tools --link %s%s", name, rootArg)
+	say(stdout, "Add them to Claude Code: claude mcp add %s -- amq-remote mcp --link %s%s", name, name, rootArg)
 	return nil, 0, nil
 }
 
@@ -549,13 +786,14 @@ func linkKeysAdd(args []string, stdin io.Reader, stdout io.Writer, probe *jsonPr
 	if err := linkio.ValidName(name); err != nil {
 		return nil, protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", err)
 	}
-	stateDir, err := c.stateDir()
+	root, _, err := c.resolveLink(name)
 	if err != nil {
-		return nil, protocol.ExitUsage, err
+		return nil, protocol.ExitCode(err), err
 	}
+	stateDir := filepath.Join(root, stateDirName)
 	key, err := linkio.LoadDeviceKey(stateDir, name)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil, protocol.ExitNotFound, protocol.Refuse(protocol.CodeNotFound, "no link named %q in this root", name)
+		return nil, protocol.ExitNotFound, protocol.Refuse(protocol.CodeNotFound, "no link named %q in %s", name, root)
 	}
 	if err != nil {
 		return nil, protocol.ExitActionRequired, err
@@ -568,10 +806,7 @@ func linkKeysAdd(args []string, stdin io.Reader, stdout io.Writer, probe *jsonPr
 	if err != nil {
 		return nil, protocol.ExitError, err
 	}
-	client := &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error {
-		return errors.New("the server redirected; refusing")
-	}}
-	_, ck, err := redeemOneKey(client, pin.API+"/api/v1/link/consent-keys/redeem", key, pin.ServerID, *code, pin.DeviceName, stdin, stdout)
+	_, ck, err := redeemOneKey(linkHTTPClient(), pin.API+"/api/v1/link/consent-keys/redeem", key, pin.ServerID, *code, pin.DeviceName, stdin, stdout)
 	if err != nil {
 		return nil, protocol.ExitActionRequired, err
 	}
@@ -607,7 +842,15 @@ func validServerURL(raw string) error {
 }
 
 func getJSON(client *http.Client, u string, out any) error {
-	resp, err := client.Get(u)
+	return getJSONCtx(context.Background(), client, u, out)
+}
+
+func getJSONCtx(ctx context.Context, client *http.Client, u string, out any) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}
@@ -642,6 +885,8 @@ func b64url(b []byte) string { return base64.RawURLEncoding.EncodeToString(b) }
 
 // linkRemove retires a link's sink and deletes its device key, then drops the
 // link from the manifest. A running endpoint stops the link on its next sweep.
+// The server keeps the machine until it is unlinked there, so the message
+// says where.
 func linkRemove(args []string, stdout io.Writer, probe *jsonProbe) (any, int, error) {
 	fs := flag.NewFlagSet("link remove", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -654,10 +899,12 @@ func linkRemove(args []string, stdout io.Writer, probe *jsonProbe) (any, int, er
 	if err := linkio.ValidName(name); err != nil {
 		return nil, protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", err)
 	}
-	stateDir, err := c.stateDir()
+	root, _, err := c.resolveLink(name)
 	if err != nil {
-		return nil, protocol.ExitUsage, err
+		return nil, protocol.ExitCode(err), err
 	}
+	stateDir := filepath.Join(root, stateDirName)
+	pin, _ := linkio.LoadPin(stateDir, name) // read before Retire deletes the link dir
 	host, err := linkio.Retire(stateDir, name)
 	if errors.Is(err, os.ErrNotExist) {
 		// No device key: either no such link, or the server revoked it (close
@@ -668,7 +915,7 @@ func linkRemove(args []string, stdout io.Writer, probe *jsonProbe) (any, int, er
 			return nil, protocol.ExitError, merr
 		}
 		if !slices.ContainsFunc(mf.Links, func(l manifest.Link) bool { return l.Name == name }) {
-			return nil, protocol.ExitNotFound, protocol.Refuse(protocol.CodeNotFound, "no link named %q in this root", name)
+			return nil, protocol.ExitNotFound, protocol.Refuse(protocol.CodeNotFound, "no link named %q in %s", name, root)
 		}
 		if err := dropManifestLink(stateDir, name); err != nil {
 			return nil, protocol.ExitError, err
@@ -687,9 +934,16 @@ func linkRemove(args []string, stdout io.Writer, probe *jsonProbe) (any, int, er
 	}
 	if !c.json {
 		say(stdout, "Removed link %s. Sink %s is retired and its device key is deleted.", name, host)
+		if pin.API != "" {
+			say(stdout, "This machine stays on the server until you unlink it on the server's connections page (%s).", pin.API)
+		}
 		return nil, 0, nil
 	}
-	return map[string]any{"removed": name, "retired_sink": host}, 0, nil
+	out := map[string]any{"removed": name, "retired_sink": host}
+	if pin.API != "" {
+		out["server"] = pin.API
+	}
+	return out, 0, nil
 }
 
 // dropManifestLink removes one link from the manifest under the same lock
@@ -747,7 +1001,7 @@ func shareWithLink(stateDir, name string, share manifest.LinkShare) error {
 		}
 	})
 	if err == nil && !found {
-		return fmt.Errorf("no link named %q in this root; link this machine first with amq-remote link add", name)
+		return fmt.Errorf("no link named %q on this machine; link this machine first with amq-remote link add", name)
 	}
 	return err
 }
@@ -778,8 +1032,12 @@ func printLinkStatus(w io.Writer, v linkStatusOut) {
 	if len(v.Links) == 0 {
 		say(w, "No links. Link this machine with amq-remote link add.")
 	}
+	machine, _ := machineRoot()
 	for _, l := range v.Links {
 		say(w, "%s  %s  %s", l.Name, l.Status.State, l.URL)
+		if machine == "" || !sameRoot(l.Root, machine) {
+			say(w, "  root %s", l.Root)
+		}
 		if l.Sink != "" {
 			say(w, "  sink=%s gen=%d owed=%d conflicts=%d", l.Sink, l.Status.Gen, l.Status.Owed, l.Status.Conflicts)
 		}
@@ -803,6 +1061,7 @@ func printLinkStatus(w io.Writer, v linkStatusOut) {
 
 type linkStatusRow struct {
 	Name   string        `json:"name"`
+	Root   string        `json:"root"`
 	URL    string        `json:"url"`
 	Sink   string        `json:"sink,omitempty"`
 	Status linkio.Status `json:"status"`
@@ -876,7 +1135,8 @@ func (p *nativeProbe) native(target string) (string, error) {
 	return reply.NativeSession, nil
 }
 
-// linkStatus lists the links of this root and the retired sinks.
+// linkStatus lists the links on this machine (or in --root) and the retired
+// sinks.
 func linkStatus(args []string, probe *jsonProbe) (any, int, error) {
 	fs := flag.NewFlagSet("link status", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -884,44 +1144,47 @@ func linkStatus(args []string, probe *jsonProbe) (any, int, error) {
 	if _, err := parseInterleaved(fs, args); err != nil {
 		return nil, protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", err)
 	}
-	stateDir, err := c.stateDir()
+	roots, err := c.linkRoots()
 	if err != nil {
 		return nil, protocol.ExitUsage, err
 	}
-	mf, err := manifest.Load(manifest.DefaultPath(stateDir))
-	if err != nil {
-		return nil, protocol.ExitError, err
-	}
-	retiredNames, err := linkio.RetiredLinks(stateDir)
-	if err != nil {
-		return nil, protocol.ExitError, err
-	}
 	rows := []linkStatusRow{}
-	natives := &nativeProbe{stateDir: stateDir}
-	for _, l := range mf.Links {
-		row := linkStatusRow{Name: l.Name, URL: l.URL, Status: linkio.Status{State: "offline"}, Shares: []string{}}
-		for _, sh := range l.Shares {
-			row.Shares = append(row.Shares, sh.Binding)
-			if row.ShareStates == nil {
-				row.ShareStates = map[string]string{}
+	sinks := []retiredSink{}
+	for _, root := range roots {
+		stateDir := filepath.Join(root, stateDirName)
+		mf, err := manifest.Load(manifest.DefaultPath(stateDir))
+		if err != nil {
+			return nil, protocol.ExitError, err
+		}
+		retiredNames, err := linkio.RetiredLinks(stateDir)
+		if err != nil {
+			return nil, protocol.ExitError, err
+		}
+		natives := &nativeProbe{stateDir: stateDir}
+		for _, l := range mf.Links {
+			row := linkStatusRow{Name: l.Name, Root: root, URL: l.URL, Status: linkio.Status{State: "offline"}, Shares: []string{}}
+			for _, sh := range l.Shares {
+				row.Shares = append(row.Shares, sh.Binding)
+				if row.ShareStates == nil {
+					row.ShareStates = map[string]string{}
+				}
+				row.ShareStates[sh.Binding] = linkShareState(root, natives, sh.Binding)
 			}
-			row.ShareStates[sh.Binding] = linkShareState(c.root, natives, sh.Binding)
+			if key, err := linkio.LoadDeviceKey(stateDir, l.Name); err == nil {
+				row.Sink = key.Host()
+			} else if host := retiredHostOf(retiredNames, l.Name); host != "" {
+				row.Sink, row.Status.State = host, "retired"
+			} else {
+				row.Status.State = "not linked"
+			}
+			if data, err := os.ReadFile(filepath.Join(linkio.LinkDir(stateDir, l.Name), "status.json")); err == nil {
+				_ = json.Unmarshal(data, &row.Status)
+			}
+			rows = append(rows, row)
 		}
-		if key, err := linkio.LoadDeviceKey(stateDir, l.Name); err == nil {
-			row.Sink = key.Host()
-		} else if host := retiredHostOf(retiredNames, l.Name); host != "" {
-			row.Sink, row.Status.State = host, "retired"
-		} else {
-			row.Status.State = "not linked"
+		for h, n := range retiredNames {
+			sinks = append(sinks, retiredSink{Sink: h, Link: n})
 		}
-		if data, err := os.ReadFile(filepath.Join(linkio.LinkDir(stateDir, l.Name), "status.json")); err == nil {
-			_ = json.Unmarshal(data, &row.Status)
-		}
-		rows = append(rows, row)
-	}
-	sinks := make([]retiredSink, 0, len(retiredNames))
-	for h, n := range retiredNames {
-		sinks = append(sinks, retiredSink{Sink: h, Link: n})
 	}
 	sort.Slice(sinks, func(i, j int) bool { return sinks[i].Sink < sinks[j].Sink })
 	return linkStatusOut{Links: rows, RetiredSinks: sinks}, 0, nil

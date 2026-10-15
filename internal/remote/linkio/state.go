@@ -66,6 +66,10 @@ type Pin struct {
 	DeviceName string `json:"device_name"`
 	RPID       string `json:"rp_id"`
 	Origin     string `json:"origin"`
+	// ToolProfiles are the tool profile names the server grants, as its link
+	// info last said; nil when it does not say. attach checks --tools
+	// against them.
+	ToolProfiles *[]string `json:"tool_profiles,omitempty"`
 }
 
 // ConsentKey is one consent public key this machine trusts.
@@ -206,6 +210,36 @@ func StoreID(stateDir string) (string, error) {
 // WritePin records what a link fixed at linking.
 func WritePin(stateDir, name string, p Pin) error {
 	return writeJSON(LinkDir(stateDir, name), linkFile, p)
+}
+
+// RewritePin replaces the pin of a link that exists. Unlike WritePin it never
+// creates the link dir, so a link removed or revoked meanwhile stays removed.
+func RewritePin(stateDir, name string, p Pin) error {
+	dir := LinkDir(stateDir, name)
+	data, err := json.MarshalIndent(p, "", "  ")
+	if err != nil {
+		return err
+	}
+	f, err := os.CreateTemp(dir, "."+linkFile+".tmp-*") // 0600; fails when dir is gone
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	_, err = f.Write(append(data, '\n'))
+	if err == nil {
+		err = f.Sync()
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Rename(tmp, filepath.Join(dir, linkFile))
+	}
+	if err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return fsq.SyncDir(dir)
 }
 
 // LoadPin reads a link's pin.

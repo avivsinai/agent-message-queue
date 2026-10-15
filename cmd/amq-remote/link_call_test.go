@@ -128,6 +128,11 @@ func linkEndpoint(t *testing.T, ts *toolServer) string {
 	if err != nil {
 		t.Fatal(err)
 	}
+	mf := manifest.File{SchemaVersion: manifest.RelaySchemaVersion, Layer: manifest.Layer,
+		Links: []manifest.Link{{Name: "example", URL: "wss://link.example.test/link"}}}
+	if err := manifest.Write(manifest.DefaultPath(stateDir), mf); err != nil {
+		t.Fatal(err)
+	}
 	c, err := linkio.New(linkio.Config{Name: "example", Key: key, StoreID: "st_test",
 		Pin: linkio.Pin{URL: "ws" + strings.TrimPrefix(ts.srv.URL, "http"), ServerID: "srv_example"}})
 	if err != nil {
@@ -181,7 +186,7 @@ func TestMCPFaceListsAndCalls(t *testing.T) {
 		`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get_issue","arguments":{"size":3}}}`,
 	}, "\n") + "\n"
 	var out strings.Builder
-	if code, err := mcpServe([]string{"--root", root}, strings.NewReader(in), &out, io.Discard); err != nil || code != 0 {
+	if code, err := mcpServe([]string{"--root", root}, strings.NewReader(in), &out, io.Discard, &jsonProbe{}); err != nil || code != 0 {
 		t.Fatalf("mcp = %d, %v", code, err)
 	}
 	byID := map[float64]map[string]any{}
@@ -237,7 +242,7 @@ func TestMCPReturnsPendingApprovalAtOnce(t *testing.T) {
 	root := linkEndpoint(t, newToolServer(t))
 	in := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"write","arguments":{}}}` + "\n"
 	var out strings.Builder
-	if _, err := mcpServe([]string{"--root", root}, strings.NewReader(in), &out, io.Discard); err != nil {
+	if _, err := mcpServe([]string{"--root", root}, strings.NewReader(in), &out, io.Discard, &jsonProbe{}); err != nil {
 		t.Fatal(err)
 	}
 	var m struct {
