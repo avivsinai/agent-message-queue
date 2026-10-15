@@ -6,8 +6,8 @@ local `amq` binary and does not open a listener or synchronise Maildirs.
 The signed envelope and local Maildir apply path are
 [the bridge protocol ADR](../../docs/adr-bridge-protocol.md). Every hop uses
 the same `ApplyEnvelope` commit. Install the binary from the matching
-`amq-bridge_*_{linux,darwin}_{amd64,arm64}.tar.gz` release asset; Homebrew
-does not install it. See [INSTALL.md](../../INSTALL.md).
+`amq-bridge_*_{linux,darwin}_{amd64,arm64}.tar.gz` release asset, or from
+the Homebrew `amq` formula. See [INSTALL.md](../../INSTALL.md).
 
 ## Identity initialization
 

@@ -280,8 +280,8 @@ not required for the AMQ onboarding path.
 
 ## Companion binaries
 
-`brew install avivsinai/tap/amq` installs `amq`, `amq-acp`, `amq-remote` and
-`amq-owner-sign`. The other
+`brew install avivsinai/tap/amq` installs `amq`, `amq-acp`, `amq-remote`,
+`amq-owner-sign` and `amq-bridge`. The other
 companions are separate release assets and are not installed by Homebrew:
 
 - `amq-keepalive_*_darwin_{amd64,arm64}.tar.gz` and
@@ -290,8 +290,9 @@ companions are separate release assets and are not installed by Homebrew:
   Windows, use its direct `inject` adapters only; `attach`, `reattach`, and
   `supervise` are not supported. Install it at a stable executable path; do not
   use a versioned package-manager path for a registered macOS wake.
-- `amq-bridge_*_{linux,darwin}_{amd64,arm64}.tar.gz` is the signed cross-host
-  courier. See [amq-bridge](cmd/amq-bridge/README.md).
+- `amq-bridge` is the signed cross-host courier. The `amq` Homebrew formula
+  installs it; `amq-bridge_*_{linux,darwin}_{amd64,arm64}.tar.gz` remains for
+  a direct install. See [amq-bridge](cmd/amq-bridge/README.md).
 - `amq-acp` is the preview ACP v2 stdio companion. The `amq` Homebrew formula
   installs it; `amq-acp_*_{linux,darwin}_{amd64,arm64}.tar.gz` remains for a
   direct install. See [amq-acp](cmd/amq-acp/README.md).

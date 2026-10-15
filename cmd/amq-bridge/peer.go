@@ -202,7 +202,7 @@ func runPeerRemove(args []string) error {
 	if err := bridge.DeleteTrusted(*root, host.String()); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	fmt.Printf("removed peer host=%s\n", host.String())
+	fmt.Printf("removed peer host=%s (v2 trust pin deleted)\n", host.String())
 	return nil
 }
 
