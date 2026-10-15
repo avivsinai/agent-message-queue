@@ -457,6 +457,7 @@ func TestBindingModeFollowsTheBoundSession(t *testing.T) {
 	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
 	rt := fake.New("fake", "e_1")
 	bound := remoteServer(t, rt, nil)
+	withBuzzSelf(t)
 	s := NewServer(Config{RemoteBinding: true, StateDir: t.TempDir(), HeartbeatInterval: 10 * time.Millisecond, TurnTimeout: time.Second}, "test")
 
 	var said []string
@@ -491,6 +492,7 @@ func TestRedeliveryAfterRebindStaysOnTheFirstSession(t *testing.T) {
 	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
 	a, b := fake.New("fake", "e_1"), fake.New("fake", "e_1")
 	serverA, serverB := remoteServer(t, a, nil), remoteServer(t, b, nil)
+	withBuzzSelf(t)
 	s := NewServer(Config{RemoteBinding: true, StateDir: t.TempDir(), TurnTimeout: time.Second, HeartbeatInterval: 10 * time.Millisecond}, "test")
 	eventID := strings.Repeat("a", 64)
 	id, _ := remoteRequestID(eventID)
@@ -538,10 +540,10 @@ func canonicalTempDir(t *testing.T) string {
 // used its own captured binding. The loser must follow the winner.
 func TestEventClaimLoserFollowsTheWinner(t *testing.T) {
 	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
-	s := NewServer(Config{RemoteBinding: true, StateDir: canonicalTempDir(t)}, "test")
+	s := NewServer(Config{RemoteBinding: true, Pin: "winner", StateDir: canonicalTempDir(t)}, "test")
 	eventID := strings.Repeat("b", 64)
 	winner := binding.Binding{Root: "/winner", Target: "claude:1", NativeSession: "s-winner"}
-	raw, _ := json.Marshal(winner)
+	raw, _ := json.Marshal(eventClaim{Binding: winner, Name: "winner"})
 	if won, err := createExclusive(filepath.Join(s.cfg.StateDir, "remote-events", eventID+".json"), raw); err != nil || !won {
 		t.Fatalf("seed claim: won=%v err=%v", won, err)
 	}
@@ -557,10 +559,10 @@ func TestEventClaimLoserFollowsTheWinner(t *testing.T) {
 // Codex #885 r3 P1: a reader used a visible claim before its directory entry
 // was durable. Every returned claim is synced first.
 func TestExistingEventClaimIsMadeDurableBeforeUse(t *testing.T) {
-	s := NewServer(Config{RemoteBinding: true, StateDir: canonicalTempDir(t)}, "test")
+	s := NewServer(Config{RemoteBinding: true, Pin: "r", StateDir: canonicalTempDir(t)}, "test")
 	eventID := strings.Repeat("c", 64)
 	claimDir := filepath.Join(s.cfg.StateDir, "remote-events")
-	raw, _ := json.Marshal(binding.Binding{Root: "/r", Target: "claude:1", NativeSession: "s"})
+	raw, _ := json.Marshal(eventClaim{Binding: binding.Binding{Root: "/r", Target: "claude:1", NativeSession: "s"}, Name: "r"})
 	if won, err := createExclusive(filepath.Join(claimDir, eventID+".json"), raw); err != nil || !won {
 		t.Fatalf("seed claim: %v %v", won, err)
 	}

@@ -91,6 +91,9 @@ func (s *Server) startLateReplySweep() (stop func()) {
 		defer close(done)
 		tick := time.NewTicker(lateReplyInterval)
 		defer tick.Stop()
+		// The same worker keeps a pinned agent archived or not; it starts
+		// with a tick, so a restarted agent catches up at once.
+		s.lifecycleTick(time.Now())
 		for {
 			select {
 			case <-quit:
@@ -99,6 +102,7 @@ func (s *Server) startLateReplySweep() (stop func()) {
 			case <-kick:
 			}
 			s.sweepLateReplies(time.Now())
+			s.lifecycleTick(time.Now())
 		}
 	}()
 	return func() {
@@ -259,6 +263,12 @@ func (s *Server) loadLateClaim(eventID string, now time.Time) (*lateClaim, bool)
 	}
 	dir := filepath.Join(s.cfg.StateDir, "remote-events")
 	c := lateClaim{eventID: eventID}
+	// Only this agent's own claim: another agent posts its own replies.
+	var rec eventClaim
+	if raw, err := readSmallRegular(filepath.Join(dir, eventID+".json")); err != nil || json.Unmarshal(raw, &rec) != nil || rec.Valid() != nil || !rec.Mailbox() || !s.ownsClaim(rec, "") {
+		return nil, false
+	}
+	c.b = rec.binding()
 	if raw, err := readSmallRegular(filepath.Join(dir, eventID+".mailbox.json")); err != nil || json.Unmarshal(raw, &c.claim) != nil || c.claim.MessageID == "" {
 		return nil, false
 	}
@@ -269,9 +279,6 @@ func (s *Server) loadLateClaim(eventID string, now time.Time) (*lateClaim, bool)
 	c.created = created
 	if now.Before(created.Add(s.cfg.TurnTimeout)) {
 		return nil, true // its turn can still be open
-	}
-	if raw, err := readSmallRegular(filepath.Join(dir, eventID+".json")); err != nil || json.Unmarshal(raw, &c.b) != nil || c.b.Valid() != nil || !c.b.Mailbox() {
-		return nil, false
 	}
 	// No delivery named a channel yet: a later one may record it.
 	if c.channel = s.eventChannel(eventID, c.claim.Channel, ""); c.channel == "" {

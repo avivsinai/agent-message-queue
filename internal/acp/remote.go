@@ -126,7 +126,12 @@ func (s *Server) runRemote(sessionID, text, eventID string, turn *turnState, emi
 		if err != nil {
 			r := &remoteTurn{s: s, sessionID: sessionID, eventID: eventID, emit: emit, turn: turn, meta: remoteMeta{State: "not_connected", Reason: err.Error()}}
 			text := "Not connected. Run /amq-remote in a Claude Code or Codex session."
-			if !errors.Is(err, binding.ErrNone) {
+			var unpinned *unpinnedError
+			switch {
+			case errors.As(err, &unpinned):
+				r.meta.State = "not_pinned"
+				text = s.unpinnedReply(unpinned)
+			case !errors.Is(err, binding.ErrNone):
 				text = "Not connected: " + err.Error()
 			}
 			return r.say(postStatus, r.settle("replied"), StopReasonRefusal, text)
@@ -318,17 +323,30 @@ func (r *remoteTurn) waitBusy(deadline time.Time) string {
 	}
 }
 
-// sessionBinding is the binding this ACP session drives: the one its model
-// selected (session/set_model), else the only binding there is (bead
-// agent-message-queue-611.39). With several bindings and no selection it
-// refuses rather than guess.
+// sessionBinding is the binding this ACP session drives: the agent's pin
+// (lifecycle.go), else the model the session selected (session/set_model,
+// bead agent-message-queue-611.39), else the only binding there is. A
+// selection that disagrees with the pin refuses. An unpinned agent with
+// several bindings never guesses, and the helper never delivers: both answer
+// with the bound sessions instead.
 func (s *Server) sessionBinding(sessionID string) (binding.Binding, error) {
+	if s.cfg.PinErr != nil {
+		return binding.Binding{}, s.cfg.PinErr
+	}
 	s.mu.Lock()
 	name := ""
 	if session, ok := s.sessions[sessionID]; ok {
 		name = session.binding
 	}
 	s.mu.Unlock()
+	switch {
+	case s.cfg.Helper:
+		name = "" // a selected model never makes the helper deliver
+	case s.cfg.Pin != "" && name != "" && name != s.cfg.Pin:
+		return binding.Binding{}, conflictingPins("the agent", s.cfg.Pin, "the selected model", name)
+	case s.cfg.Pin != "":
+		name = s.cfg.Pin
+	}
 	if name != "" {
 		return binding.ReadNamed(name)
 	}
@@ -336,13 +354,13 @@ func (s *Server) sessionBinding(sessionID string) (binding.Binding, error) {
 	if err != nil {
 		return binding.Binding{}, err
 	}
-	switch len(all) {
-	case 0:
+	switch {
+	case len(all) == 0:
 		return binding.Binding{}, binding.ErrNone
-	case 1:
+	case len(all) == 1 && !s.cfg.Helper:
 		return all[0], nil
 	}
-	return binding.Binding{}, errors.New("this agent has no session selected; set its model to one amq-remote:<name> session")
+	return binding.Binding{}, &unpinnedError{bindings: all, helper: s.cfg.Helper}
 }
 
 // turnBinding fixes the binding a prompt runs under. A redelivered event
@@ -353,11 +371,17 @@ func (s *Server) turnBinding(sessionID, eventID string) (binding.Binding, error)
 	if eventID == "" {
 		return s.sessionBinding(sessionID)
 	}
+	if s.cfg.PinErr != nil {
+		return binding.Binding{}, s.cfg.PinErr
+	}
 	path := filepath.Join(s.cfg.StateDir, "remote-events", eventID+".json")
 	if raw, err := readSmallRegular(path); err == nil {
-		var b binding.Binding
-		if err := json.Unmarshal(raw, &b); err != nil || b.Valid() != nil {
+		var c eventClaim
+		if err := json.Unmarshal(raw, &c); err != nil || c.Valid() != nil {
 			return binding.Binding{}, fmt.Errorf("event %s has an unreadable recorded binding; refusing to resubmit", eventID)
+		}
+		if !s.ownsClaim(c, sessionID) {
+			return binding.Binding{}, fmt.Errorf("event %s was claimed by another Buzz agent; it runs there, not here", eventID)
 		}
 		// A claim can be visible before its directory entry is durable. Every
 		// reader makes it durable before it submits, so a crash cannot lose
@@ -365,7 +389,7 @@ func (s *Server) turnBinding(sessionID, eventID string) (binding.Binding, error)
 		if err := fsq.SyncDir(filepath.Dir(path)); err != nil {
 			return binding.Binding{}, err
 		}
-		return b, nil
+		return c.binding(), nil
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return binding.Binding{}, err
 	}
@@ -373,7 +397,7 @@ func (s *Server) turnBinding(sessionID, eventID string) (binding.Binding, error)
 	if err != nil {
 		return b, err
 	}
-	raw, err := json.Marshal(b)
+	raw, err := json.Marshal(eventClaim{Binding: b, Name: b.Name, Agent: buzzSelf})
 	if err != nil {
 		return binding.Binding{}, err
 	}
@@ -389,6 +413,40 @@ func (s *Server) turnBinding(sessionID, eventID string) (binding.Binding, error)
 		return s.turnBinding(sessionID, eventID)
 	}
 	return b, nil
+}
+
+// eventClaim is an event's first-delivery record: the binding it runs
+// under, and the Buzz agent that claimed it. Agents share remote-events, and
+// one Buzz event can reach several agents (a channel they all belong to), so
+// an agent follows and sweeps only its own claims (review of S3 P1-2, P1-3).
+type eventClaim struct {
+	binding.Binding
+	Name  string `json:"name,omitempty"`
+	Agent string `json:"agent,omitempty"`
+}
+
+func (c eventClaim) binding() binding.Binding {
+	b := c.Binding
+	b.Name = c.Name
+	return b
+}
+
+// ownsClaim reports whether this agent made the claim. A claim with a name
+// but no agent (made with no Buzz identity) belongs only to the agent pinned
+// to that name. A claim with neither (written before claims recorded them)
+// belongs to the agent whose own session binding is the claim's destination.
+// The helper takes none.
+func (s *Server) ownsClaim(c eventClaim, sessionID string) bool {
+	switch {
+	case c.Agent != "":
+		return c.Agent == buzzSelf
+	case s.cfg.Helper:
+		return false
+	case c.Name != "":
+		return s.cfg.Pin != "" && c.Name == s.cfg.Pin
+	}
+	b, err := s.sessionBinding(sessionID)
+	return err == nil && b.Same(c.Binding)
 }
 
 // createExclusive publishes raw at path only if nothing is there yet. The
