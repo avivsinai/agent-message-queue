@@ -65,6 +65,7 @@ func init() {
 	codexThreadCwd = func(string, string) (string, error) { return "", errors.New("tests dial no app-server") }
 	codexLoadedThreads = func(string) ([]string, error) { return nil, errors.New("tests dial no app-server") }
 	codexDefaultSocket = func() (string, error) { return "", errors.New("tests read no Codex home") }
+	serviceRun = func(string, ...string) error { return errors.New("tests run no service manager") }
 	registry.Register("weak-fake", func(ctx context.Context, cfg registry.FactoryConfig) (core.Attachment, error) {
 		r := fake.New(cfg.Target, "e_1")
 		r.WithEvidence(&protocol.Evidence{Submit: "submitted", Completion: "run_terminal"})

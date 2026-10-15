@@ -60,6 +60,7 @@ amq-remote link status
 amq-remote link tools [--link NAME]
 amq-remote link call TOOL --args JSON [--link NAME]
 amq-remote mcp --link NAME
+amq-remote service install|uninstall|status [--root ROOT]
 amq-remote doctor
 amq-remote version
 ```
@@ -422,6 +423,33 @@ Protocol: `amq.remote.link/1` ([contract](../../testdata/link/README.md)).
    retires the link's sink and deletes its device key; the records it created
    settle without network. The server keeps the machine until you unlink it
    on the server's connections page.
+
+### Restart after a reboot
+
+Nothing restarts the endpoint after a reboot unless a login service does.
+`amq-remote service install` writes one that runs `amq-remote up --root ROOT`
+at login (`ROOT` defaults to the machine root) and starts it now:
+
+- macOS: the launchd user agent
+  `~/Library/LaunchAgents/io.github.avivsinai.amq-remote.plist`, logging to
+  `ROOT/extensions/remote/up.log`.
+- Linux: the systemd user unit
+  `$XDG_CONFIG_HOME/systemd/user/amq-remote.service` (default `~/.config`),
+  logging to the journal (`journalctl --user -u amq-remote`). A user unit
+  runs while you are logged in; for a machine that must serve its links
+  before anyone logs in, run `loginctl enable-linger` once.
+
+The service runs the binary found on `PATH` when it is this binary, so a
+Homebrew upgrade keeps it working. It restarts `up` only when `up` fails, and
+`up` keeps its single-instance lock: a manual `up` for the same root while the
+service runs exits 6, and while a manual `up` runs the service retries every
+10 s and takes over when it stops. `amq-remote service status` reports whether
+the unit is the one install would write now (`current`), was written for
+another binary or root (`stale`: install again), or is missing, and whether
+it is loaded. `amq-remote service uninstall` stops the endpoint it runs and
+removes it. Neither command changes a unit
+it did not write. `doctor` names `service install` when the root has a link
+and no current service.
 
 A link lives in exactly one root, normally the machine root; its state is
 never copied or moved. One link name in two roots is refused.
