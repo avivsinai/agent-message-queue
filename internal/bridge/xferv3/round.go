@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/bridge/xferv3/internal/canon"
 )
@@ -65,6 +66,14 @@ func offerPage(sess *Session, self HostState) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	now := time.Now()
+	due := owed[:0]
+	for _, item := range owed {
+		if Due(self.Root, self.Snap.Peer, item.Signed.ID(), now) {
+			due = append(due, item)
+		}
+	}
+	owed = due
 	start := loadCursor(self.Root, self.Snap.Peer)
 	page := takePage(owed, start)
 	if len(page) == 0 {
@@ -132,7 +141,7 @@ func offerPage(sess *Session, self HostState) (bool, error) {
 			}
 			if kind != frameStored {
 				if kind == frameNo {
-					_ = writeNo(item.Path, payload)
+					_ = writeNo(self.Root, self.Snap.Peer, id, item.Path, payload)
 					continue
 				}
 				return false, fmt.Errorf("xferv3: expected STORED after PUT")
@@ -153,7 +162,7 @@ func offerPage(sess *Session, self HostState) (bool, error) {
 			if !ok {
 				return false, ErrBadID
 			}
-			_ = writeNo(item.Path, payload)
+			_ = writeNo(self.Root, self.Snap.Peer, item.Signed.ID(), item.Path, payload)
 		default:
 			return false, fmt.Errorf("xferv3: unexpected answer frame %d", kind)
 		}
@@ -347,8 +356,15 @@ func saveCursor(root string, peer Host, id ID) {
 	_ = os.WriteFile(cursorPath(root, peer), []byte(id.String()), 0o600)
 }
 
-func writeNo(path string, payload []byte) error {
-	return os.WriteFile(path+".no", payload, 0o600)
+func writeNo(root string, peer Host, id ID, path string, payload []byte) error {
+	if err := os.WriteFile(path+".no", payload, 0o600); err != nil {
+		return err
+	}
+	_, reason, err := parseNo(payload)
+	if err != nil {
+		return nil
+	}
+	return SetBackoff(root, peer, id, reason, time.Now())
 }
 
 func mustSeal(item Owed) Sealed {
