@@ -104,14 +104,15 @@ func (b Binding) SessionIdentity() string {
 	case b.Mailbox():
 		return "mailbox:" + b.Handle + "@" + canonicalRoot(b.Root)
 	}
-	return "native:" + b.Target + "\x00" + b.NativeSession + "\x00" + filepath.Clean(b.Root)
+	return "native:" + b.Target + "\x00" + b.NativeSession + "\x00" + canonicalRoot(b.Root)
 }
 
 // NativeIdentity is the session identity of a native session: its harness,
-// root and working directory, not its process or native session id, so the
-// same session coming back to the same place is the same identity.
+// root and working directory, symlinks resolved, not its process or native
+// session id, so the same session coming back to the same place is the same
+// identity.
 func NativeIdentity(kind, root, cwd string) string {
-	return "native:" + kind + "\x00" + filepath.Clean(cwd) + "\x00" + filepath.Clean(root)
+	return "native:" + kind + "\x00" + canonicalRoot(cwd) + "\x00" + canonicalRoot(root)
 }
 
 // State is the liveness of a bound session.
