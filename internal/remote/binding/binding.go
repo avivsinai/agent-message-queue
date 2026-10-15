@@ -716,12 +716,22 @@ const tombstoneSuffix = ".ended.json"
 // PruneEnded removes every binding whose session is proven ended and returns
 // the names removed. Each binding is checked as read under the binding lock,
 // so a session that attached again meanwhile is kept, and an unknown one is
-// kept too. A named binding is renamed to its tombstone, which keeps its name
-// held by its session identity, so a later session never inherits the ended
-// session's Buzz agent through a freed name (review-s2 P1-1). Tombstones are
-// never pruned; their number is bounded by the distinct session identities.
-// The legacy single binding has no name to hold and is removed.
+// kept too. Like every removal, it leaves tombstones (see Retire).
 func PruneEnded() ([]string, error) {
+	return Retire(func(b Binding) bool {
+		state, _ := b.Liveness()
+		return state == Ended
+	})
+}
+
+// Retire removes every binding match accepts, as read under the binding lock,
+// and returns the names removed. A named binding is renamed to its tombstone,
+// which keeps its name held by its session identity, so a later session never
+// inherits the removed session's Buzz agent through a freed name (review-s2
+// P1-1). Tombstones are never removed; their number is bounded by the
+// distinct session identities. The legacy single binding has no name to hold
+// and is deleted.
+func Retire(match func(Binding) bool) ([]string, error) {
 	var removed []string
 	err := transact(func(path string) error {
 		dir, err := namedDir(false)
@@ -733,7 +743,7 @@ func PruneEnded() ([]string, error) {
 			return err
 		}
 		for _, b := range bound {
-			if state, _ := b.Liveness(); state != Ended {
+			if !match(b) {
 				continue
 			}
 			if err := os.Rename(filepath.Join(dir, b.Name+".json"), filepath.Join(dir, b.Name+tombstoneSuffix)); err != nil {
@@ -742,7 +752,7 @@ func PruneEnded() ([]string, error) {
 			removed = append(removed, b.Name)
 		}
 		if b, err := read(path); err == nil {
-			if state, _ := b.Liveness(); state == Ended {
+			if b.Name = LegacyName; match(b) {
 				if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 					return err
 				}

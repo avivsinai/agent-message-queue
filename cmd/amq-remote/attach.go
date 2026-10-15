@@ -372,7 +372,7 @@ func writeBinding(b binding.Binding, explicitName, followLink bool) (string, err
 	if err != nil {
 		return "", err
 	}
-	_, err = binding.RemoveMatching(func(o binding.Binding) bool { return o.Same(b) && o.Name != b.Name })
+	_, err = binding.Retire(func(o binding.Binding) bool { return o.Same(b) && o.Name != b.Name })
 	return b.Name, err
 }
 
@@ -608,7 +608,7 @@ func detach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 	} else if match == nil {
 		match = func(binding.Binding) bool { return true }
 	}
-	removed, err := binding.RemoveMatching(match)
+	removed, err := binding.Retire(match)
 	if err != nil {
 		return protocol.ExitActionRequired, err
 	}
