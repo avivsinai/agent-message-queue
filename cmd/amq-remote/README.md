@@ -532,9 +532,12 @@ background (log: `up.log` in the state directory). Claude needs the Stop hook
 on this path.
 
 Each attach writes a **named** binding, `~/.amq/remote/bindings/<name>.json`
-(default `<handle>-<project>`, or the native target; `--name` overrides), and
-removes any other binding for the same session. A defaulted name that
-already names another session is refused (use `--name`), except under
+(default `<handle>-<project>-<session>` for a root
+`<project>/.agent-mail/<session>`, or the native target; `--name` overrides),
+and removes any other binding for the same session. A mailbox session keeps
+the name it already holds; when another session holds its default name, it
+takes the first free `<name>-2`, `<name>-3`, and so on. A defaulted native
+name that already names another session is refused (use `--name`), except under
 `attach --self --link`: when the name pins the same root and target and the
 target now runs a new native session, the name moves to it. The bindings live
 in `$AMQ_REMOTE_BINDING`'s directory when that is set; its missing directories

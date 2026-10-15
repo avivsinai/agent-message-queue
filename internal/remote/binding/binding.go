@@ -55,6 +55,9 @@ type Binding struct {
 	NativeSession string `json:"native_session,omitempty"`
 	// Display is human text for replies; never an identity.
 	Display string `json:"display,omitempty"`
+	// Identity is the session identity that decides name reuse (see
+	// SessionIdentity); empty in a binding written before it was recorded.
+	Identity string `json:"identity,omitempty"`
 	// Name is the binding's name; it is the file name, not stored in it.
 	Name    string `json:"-"`
 	BoundAt string `json:"bound_at"`
@@ -75,6 +78,30 @@ func (b Binding) Same(o Binding) bool {
 		return sameRoot && b.Handle == o.Handle
 	}
 	return sameRoot && b.Target == o.Target && b.NativeSession == o.NativeSession
+}
+
+// SessionIdentity is the session b serves, the key that decides whether an
+// attach reuses b's name: the recorded Identity, else one derived from the
+// destination, so a binding written before Identity was recorded keeps its
+// name for the same session.
+func (b Binding) SessionIdentity() string {
+	switch {
+	case b.Identity != "":
+		return b.Identity
+	case b.Mailbox():
+		return "mailbox:" + b.Handle + "@" + canonicalRoot(b.Root)
+	}
+	return "native:" + b.Target + "\x00" + b.NativeSession + "\x00" + filepath.Clean(b.Root)
+}
+
+// canonicalRoot is root with its symlinks resolved, so one root reached
+// through two spellings is one identity; the clean path when it does not
+// resolve.
+func canonicalRoot(root string) string {
+	if resolved, err := filepath.EvalSymlinks(root); err == nil {
+		return resolved
+	}
+	return filepath.Clean(root)
 }
 
 // Valid reports whether b is complete for its carrier.
@@ -438,6 +465,72 @@ func WriteNamedNew(b Binding) error { return writeNamed(b, b.Same) }
 // *NameTakenError. The check and the write share one transaction.
 func WriteNamedIf(b Binding, allow func(old Binding) bool) error { return writeNamed(b, allow) }
 
+// WriteSession writes b under the name its session identity already holds,
+// else under base, else under the first of base-2, base-3, ... that is free or
+// held by the same identity, and returns the name written. Another session's
+// binding is never replaced, so a session never inherits another session's
+// Buzz agent, and the same session always gets back its own name. The choice
+// and the write share one transaction.
+func WriteSession(b Binding, base string) (string, error) {
+	if err := ValidName(base); err != nil {
+		return "", err
+	}
+	if err := b.Valid(); err != nil {
+		return "", err
+	}
+	id := b.SessionIdentity()
+	b.Identity = id
+	if b.BoundAt == "" {
+		b.BoundAt = time.Now().UTC().Format(time.RFC3339)
+	}
+	raw, err := json.MarshalIndent(b, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	var name string
+	err = transact(func(string) error {
+		dir, err := namedDir(true)
+		if err != nil {
+			return err
+		}
+		bound, err := scanNamed(dir)
+		if err != nil {
+			return err
+		}
+		holder := map[string]string{}
+		for _, o := range bound {
+			if o.SessionIdentity() == id && name == "" {
+				name = o.Name
+			}
+			holder[o.Name] = o.SessionIdentity()
+		}
+		for n := 1; name == ""; n++ {
+			candidate := base
+			if n > 1 {
+				suffix := fmt.Sprintf("-%d", n)
+				candidate = strings.TrimRight(base[:min(len(base), 64-len(suffix))], "-_") + suffix
+			}
+			// A file that does not read as a binding is taken, never overwritten.
+			h, held := holder[candidate]
+			// Any other Lstat error means the directory cannot be read, so
+			// no name is provably free: fail closed (review-s1 P1).
+			_, statErr := os.Lstat(filepath.Join(dir, candidate+".json"))
+			if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
+				return statErr
+			}
+			if held && h == id || !held && statErr != nil {
+				name = candidate
+			}
+		}
+		_, err = fsq.WriteFileAtomic(dir, name+".json", append(raw, '\n'), 0o600)
+		return err
+	})
+	if err != nil {
+		return "", err
+	}
+	return name, nil
+}
+
 func writeNamed(b Binding, allow func(old Binding) bool) error {
 	if err := ValidName(b.Name); err != nil {
 		return err
@@ -477,11 +570,25 @@ func List() ([]Binding, error) {
 	if err != nil {
 		return nil, err
 	}
-	var out []Binding
+	out, err := scanNamed(dir)
+	if err != nil {
+		return nil, err
+	}
+	if b, err := Read(); err == nil {
+		b.Name = LegacyName
+		out = append(out, b)
+	}
+	return out, nil
+}
+
+// scanNamed reads the named bindings in dir, sorted by name. A file that does
+// not read as a binding is skipped.
+func scanNamed(dir string) ([]Binding, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
+	var out []Binding
 	for _, e := range entries {
 		name := strings.TrimSuffix(e.Name(), ".json")
 		if e.IsDir() || name == e.Name() || ValidName(name) != nil {
@@ -495,10 +602,6 @@ func List() ([]Binding, error) {
 		out = append(out, b)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
-	if b, err := Read(); err == nil {
-		b.Name = LegacyName
-		out = append(out, b)
-	}
 	return out, nil
 }
 

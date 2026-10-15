@@ -45,7 +45,7 @@ func attach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 	self := fs.Bool("self", false, "bind the session this command runs in")
 	nativeMode := fs.Bool("native", false, "drive the exact native session through amq-remote, not the AMQ mailbox")
 	me := fs.String("me", os.Getenv("AM_ME"), "AMQ handle of this session (default AM_ME)")
-	name := fs.String("name", "", "binding name, which names this session's Buzz agent (default <handle>-<project>, or the native target)")
+	name := fs.String("name", "", "binding name, which names this session's Buzz agent (default <handle>-<project>-<session>, or the native target)")
 	linkName := fs.String("link", "", "share this session with the linked server of that name (implies --native)")
 	consent := fs.String("consent", "passkey", "with --link: passkey, or local to also confirm each task on this machine")
 	tools := fs.String("tools", "read", "with --link: the server tool profile agents in this session may call; empty for none")
@@ -159,7 +159,7 @@ func attach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 	}
 	bindName, explicit := nativeBindingName(*name, cand.Target)
 	nb := binding.Binding{Root: c.root, Target: cand.Target, NativeSession: native, Display: display, Name: bindName}
-	if err := writeBinding(nb, explicit, *linkName != ""); err != nil {
+	if _, err := writeBinding(nb, explicit, *linkName != ""); err != nil {
 		return protocol.ExitActionRequired, err
 	}
 	if *linkName != "" {
@@ -261,13 +261,14 @@ func attachMailbox(root, handle, name string, asJSON bool, stdout io.Writer) (in
 	}
 	explicit := name != ""
 	if !explicit {
-		name = binding.SanitizeName(handle + "-" + projectOf(root))
+		name = mailboxBindingName(handle, root)
 	}
 	b := binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: handle, Display: handle, Name: name}
 	if err := listBuzzInRoster(root); err != nil {
 		return protocol.ExitActionRequired, err
 	}
-	if err := writeBinding(b, explicit, false); err != nil {
+	name, err := writeBinding(b, explicit, false)
+	if err != nil {
 		return protocol.ExitActionRequired, err
 	}
 	if asJSON {
@@ -319,11 +320,13 @@ func nativeBindingName(flagValue, target string) (string, bool) {
 	return nonEmpty(trimmed, binding.SanitizeName(target)), trimmed != ""
 }
 
-// writeBinding adds the named binding and removes any other binding for the
+// writeBinding adds the named binding, removes any other binding for the
 // same session, so one session is one Buzz agent (bead
-// agent-message-queue-611.39). A defaulted name never replaces another
-// session's binding (bead agent-message-queue-94w); an explicit --name
-// is the caller's choice and replaces.
+// agent-message-queue-611.39), and returns the name written. A defaulted name
+// never replaces another session's binding (bead agent-message-queue-94w); an
+// explicit --name is the caller's choice and replaces. A defaulted mailbox
+// name is the session's own: the name its identity already holds, else the
+// first of b.Name, b.Name-2, ... that no other session holds.
 //
 // With followLink (attach --self --link), the name also moves to b when it
 // pins the same root and target under another native session: the share
@@ -332,21 +335,23 @@ func nativeBindingName(flagValue, target string) (string, bool) {
 // to b's session, and one target reports one native session, so the old
 // session is no longer the attached one. An old session resumed in another
 // process is another target, so another default name.
-func writeBinding(b binding.Binding, explicitName, followLink bool) error {
+func writeBinding(b binding.Binding, explicitName, followLink bool) (string, error) {
 	var err error
 	switch {
 	case explicitName:
 		err = binding.WriteNamed(b)
 	case followLink:
 		err = binding.WriteNamedIf(b, func(old binding.Binding) bool { return old.Same(b) || movedTarget(old, b) })
+	case b.Mailbox():
+		b.Name, err = binding.WriteSession(b, b.Name)
 	default:
 		err = binding.WriteNamedNew(b)
 	}
 	if err != nil {
-		return err
+		return "", err
 	}
 	_, err = binding.RemoveMatching(func(o binding.Binding) bool { return o.Same(b) && o.Name != b.Name })
-	return err
+	return b.Name, err
 }
 
 // movedTarget reports whether old pins the same root and native target as b
@@ -356,15 +361,19 @@ func movedTarget(old, b binding.Binding) bool {
 		old.Target == b.Target && old.NativeSession != b.NativeSession
 }
 
-// projectOf is the project directory name of an AMQ root such as
-// <project>/.agent-mail/<session>.
-func projectOf(root string) string {
+// mailboxBindingName is the default binding name of a mailbox session:
+// <handle>-<project>-<session> for an AMQ root <project>/.agent-mail/<session>,
+// so two AMQ sessions of one project never compute the same name, else
+// <handle>-<project>.
+func mailboxBindingName(handle, root string) string {
+	session := ""
 	for dir := filepath.Clean(root); dir != filepath.Dir(dir); dir = filepath.Dir(dir) {
 		if filepath.Base(dir) == ".agent-mail" {
-			return filepath.Base(filepath.Dir(dir))
+			return binding.SanitizeName(strings.Join([]string{handle, filepath.Base(filepath.Dir(dir)), session}, "-"))
 		}
+		session = filepath.Base(dir)
 	}
-	return filepath.Base(root)
+	return binding.SanitizeName(handle + "-" + filepath.Base(root))
 }
 
 // detach ends bindings. It needs a scope: --self unbinds only the binding

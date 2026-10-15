@@ -168,3 +168,27 @@ func TestBindingOverrideRefusesASymlinkSwappedInAfterTheCheck(t *testing.T) {
 		t.Fatal("Write created the binding below a world-writable directory")
 	}
 }
+
+// Review of S1 (review-s1 P1): with the bindings directory readable but not
+// searchable, every Lstat failed, so WriteSession searched for a free name
+// forever while it held the binding lock. It now fails closed.
+func TestWriteSessionFailsOnAnUnsearchableBindingsDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix mode bits")
+	}
+	base := canonicalTempDir(t)
+	t.Setenv(EnvPath, filepath.Join(base, "remote", "binding.json"))
+	held := Binding{Carrier: CarrierMailbox, Root: "/p/.agent-mail/a", Handle: "claude", Name: "claude-p"}
+	if err := WriteNamed(held); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(base, "remote", "bindings")
+	if err := os.Chmod(dir, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	other := Binding{Carrier: CarrierMailbox, Root: "/p/.agent-mail/b", Handle: "claude"}
+	if name, err := WriteSession(other, "claude-p"); err == nil {
+		t.Fatalf("WriteSession wrote %q into an unsearchable bindings directory; want an error", name)
+	}
+}
