@@ -1765,13 +1765,18 @@ func ThreadCwd(socketPath, thread string) (string, error) {
 // LoadedThreads lists the threads the daemon currently has running, so the
 // endpoint can attach to each of them. It opens a short-lived connection.
 func LoadedThreads(socketPath string) ([]string, error) {
+	return LoadedThreadsWithin(socketPath, 10*time.Second)
+}
+
+// LoadedThreadsWithin is LoadedThreads with its calls bounded by timeout.
+func LoadedThreadsWithin(socketPath string, timeout time.Duration) ([]string, error) {
 	// Request-only connection: no notifications are consumed.
 	client, err := Dial(socketPath, Handlers{})
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = client.Close() }()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	if err := client.Call(ctx, "initialize", map[string]any{"clientInfo": map[string]string{"name": ClientName, "version": Version}}, nil); err != nil {
 		return nil, err

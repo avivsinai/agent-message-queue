@@ -452,17 +452,47 @@ func TestPrunedNameStaysWithItsSession(t *testing.T) {
 
 // Issue #1070: a Codex binding records no session process, so its liveness
 // was always unknown and it was never pruned. Its thread now proves it: a
-// thread the app-server no longer has loaded has ended.
+// thread the app-server that had it loaded no longer has loaded has ended.
 func TestBindingsPrunesACodexThreadTheAppServerUnloaded(t *testing.T) {
+	pruned, states := codexBindingsAfter(t, os.Getpid())
+	if len(pruned) != 1 || pruned[0] != "codex-t-gone" || len(states) != 1 || states["codex-t-live"] != string(binding.Live) {
+		t.Fatalf("pruned %v, listed %v; want codex-t-gone pruned and codex-t-live live", pruned, states)
+	}
+}
+
+// Review-1070 P1-B2: a restarted app-server has no thread loaded, and
+// "not loaded" was read as ended, so every live Codex session on that socket
+// was pruned and its agent archived. Only the daemon process the thread was
+// bound in proves it ended; another one leaves it unknown and kept.
+func TestBindingsKeepsACodexThreadAfterTheAppServerRestarted(t *testing.T) {
+	pruned, states := codexBindingsAfter(t, os.Getpid()+1)
+	if len(pruned) != 0 || states["codex-t-gone"] != string(binding.Unknown) {
+		t.Fatalf("pruned %v, listed %v; want codex-t-gone kept as unknown", pruned, states)
+	}
+}
+
+// codexBindingsAfter binds threads t-live and t-gone in an app-server whose
+// process is this test, runs bindings with t-live loaded and the socket
+// served by daemonPID, and returns the pruned names and each listed state.
+func codexBindingsAfter(t *testing.T, daemonPID int) ([]string, map[string]string) {
+	t.Helper()
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("process start times are read on darwin and linux only")
+	}
 	dir := canonicalTempDir(t)
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv(binding.EnvPath, filepath.Join(dir, "remote", "binding.json"))
-	saved := codexLoadedThreads
-	t.Cleanup(func() { codexLoadedThreads = saved })
+	daemon, err := launch.HolderOf(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	savedLoaded, savedPID := codexLoadedThreads, codexDaemonPID
+	t.Cleanup(func() { codexLoadedThreads, codexDaemonPID = savedLoaded, savedPID })
 	codexLoadedThreads = func(string) ([]string, error) { return []string{"t-live"}, nil }
+	codexDaemonPID = func(string) (int, error) { return daemonPID, nil }
 	for _, thread := range []string{"t-live", "t-gone"} {
 		b := binding.Binding{Root: dir, Target: "codex:" + thread, NativeSession: thread, Name: "codex-" + thread,
-			AppServer: binding.AppServerThread{Socket: filepath.Join(dir, "app-server.sock"), Thread: thread}}
+			AppServer: binding.AppServerThread{Socket: filepath.Join(dir, "app-server.sock"), Thread: thread, Daemon: daemon}}
 		if err := binding.WriteNamed(b); err != nil {
 			t.Fatal(err)
 		}
@@ -478,10 +508,11 @@ func TestBindingsPrunesACodexThreadTheAppServerUnloaded(t *testing.T) {
 	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
 		t.Fatalf("bindings output %q: %v", out.String(), err)
 	}
-	if len(got.Pruned) != 1 || got.Pruned[0] != "codex-t-gone" || len(got.Bindings) != 1 ||
-		got.Bindings[0].Name != "codex-t-live" || got.Bindings[0].State != string(binding.Live) {
-		t.Fatalf("bindings output %s; want codex-t-gone pruned and codex-t-live live", out.String())
+	states := map[string]string{}
+	for _, b := range got.Bindings {
+		states[b.Name] = b.State
 	}
+	return got.Pruned, states
 }
 
 // A linked server's first live run (amq-remote 0.97.0): attach --self --link
