@@ -732,9 +732,11 @@ func PruneEnded() ([]string, error) {
 // and returns the names removed. A named binding is renamed to its tombstone,
 // which keeps its name held by its session identity, so a later session never
 // inherits the removed session's Buzz agent through a freed name (review-s2
-// P1-1). Tombstones are never removed; their number is bounded by the
-// distinct session identities. The legacy single binding has no name to hold
-// and is deleted.
+// P1-1). Tombstones are never removed. Their number is bounded by the
+// distinct session identities, and an identity derived from a target (a link
+// share, or a native session whose working directory is unknown) names a
+// process, so each such session leaves one. The legacy single binding has no
+// name to hold and is deleted.
 func Retire(match func(Binding) bool) ([]string, error) {
 	var removed []string
 	err := transact(func(path string) error {
@@ -788,6 +790,7 @@ func scanTombstones(dir string) ([]Binding, error) {
 		b.Name = name
 		out = append(out, b)
 	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out, nil
 }
 

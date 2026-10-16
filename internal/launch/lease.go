@@ -354,10 +354,23 @@ func classifyHolder(recorded HolderIdentity, live processInfo) (LeaseState, stri
 	return LeaseUnverified, "lease lacks process start metadata"
 }
 
-func currentHolder() (HolderIdentity, error) { return HolderOf(os.Getpid()) }
+// currentHolder is this process as a lease holder. A lease record carries no
+// pid namespace: an older amq reads lease records strictly, so a new field
+// would make it refuse the lease.
+func currentHolder() (HolderIdentity, error) {
+	proc := inspectProcess(os.Getpid())
+	if !proc.Running {
+		return HolderIdentity{}, fmt.Errorf("current process is not running")
+	}
+	if proc.StartToken == "" {
+		return HolderIdentity{}, fmt.Errorf("process start time unavailable")
+	}
+	return HolderIdentity{PID: proc.PID, ProcessStart: proc.StartToken, BootID: proc.BootID}, nil
+}
 
-// HolderOf is the identity of the running process pid, for a caller that
-// records another process (a harness session) as a holder.
+// HolderOf is the identity of the running process pid, with the pid
+// namespace it was read in, for a caller that records another process (a
+// harness session) as a holder and checks it with InspectHolder.
 func HolderOf(pid int) (HolderIdentity, error) {
 	proc := inspectProcess(pid)
 	if !proc.Running {
