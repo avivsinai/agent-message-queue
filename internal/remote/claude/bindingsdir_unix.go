@@ -9,6 +9,8 @@ import (
 	"strings"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 )
 
 // bindingsDirState reads bindings/*.json through one directory descriptor,
@@ -18,7 +20,8 @@ import (
 // swapped-in symlink is refused and a swapped-in FIFO cannot hang the hook.
 // present is true for any binding evidence, including a bindings path that
 // is a symlink, a file, or unreadable, and every .json-named entry whatever
-// its type. allow is true only for a regular file naming this session.
+// its type, except a tombstone, which is never a binding. allow is true only
+// for a regular file naming this session.
 func bindingsDirState(dir, sessionID string) (allow, present bool) {
 	fd, err := unix.Open(dir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
@@ -31,7 +34,7 @@ func bindingsDirState(dir, sessionID string) (allow, present bool) {
 		present = true
 	}
 	for _, e := range entries {
-		if !strings.HasSuffix(e.Name(), ".json") {
+		if !strings.HasSuffix(e.Name(), ".json") || binding.IsTombstone(e.Name()) {
 			continue
 		}
 		present = true
