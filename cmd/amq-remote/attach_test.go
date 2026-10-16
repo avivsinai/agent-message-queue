@@ -19,6 +19,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/ipc"
 	"github.com/avivsinai/agent-message-queue/internal/remote/manifest"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
+	"github.com/avivsinai/agent-message-queue/internal/remote/registry"
 	"github.com/avivsinai/agent-message-queue/internal/remote/requests"
 )
 
@@ -510,4 +511,54 @@ func codexBindingsAfter(t *testing.T, daemonPID int) ([]string, map[string]strin
 		states[b.Name] = b.State
 	}
 	return got.Pruned, states
+}
+
+// Review-s2 P2-2: a Codex or pi session's identity used the working
+// directory of the tool call attach ran in, so a call from a subdirectory
+// gave the same session another name and Buzz agent. The identity uses the
+// session's own directory: the Codex thread's from its app-server, the pi
+// session's from its process.
+func TestNativeHarnessUsesTheSessionsOwnCwd(t *testing.T) {
+	savedThread, savedProc := codexThreadCwd, processCwd
+	t.Cleanup(func() { codexThreadCwd, processCwd = savedThread, savedProc })
+	codexThreadCwd = func(string, string) (string, error) { return "/work/codex-proj", nil }
+	processCwd = func(int) (string, error) { return "/work/pi-proj", nil }
+	for _, row := range []struct {
+		cand registry.Candidate
+		want string
+	}{
+		{registry.Candidate{Kind: "codex", Target: "codex:t1", Config: json.RawMessage(`{"socket":"/s.sock","thread":"t1"}`)}, "/work/codex-proj"},
+		{registry.Candidate{Kind: "pi", Target: "pi:chat", PID: 7}, "/work/pi-proj"},
+	} {
+		if got := nativeHarness(row.cand).Cwd; got != row.want {
+			t.Fatalf("%s session cwd = %q; want its own %q", row.cand.Kind, got, row.want)
+		}
+	}
+}
+
+// Review-s2 P2-8: a plain native attach in a link's own root kept the name of
+// the share's binding and rewrote it with a cwd identity, so the share named
+// a binding that another session could take. attach keeps the target
+// identity when a link share already names a binding of this session.
+func TestLinkSharedFindsTheSharesBindingOfThisSession(t *testing.T) {
+	dir := canonicalTempDir(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(binding.EnvPath, filepath.Join(dir, "remote", "binding.json"))
+	stateDir := filepath.Join(dir, stateDirName)
+	if err := manifest.Write(manifest.DefaultPath(stateDir), manifest.File{
+		SchemaVersion: manifest.RelaySchemaVersion, Layer: manifest.Layer,
+		Links: []manifest.Link{{Name: "srv", URL: "wss://example.invalid/link", Shares: []manifest.LinkShare{{Binding: "claude-7", Consent: "passkey", Tools: "read"}}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	shared := binding.Binding{Root: dir, Target: "claude:7", NativeSession: "session-7", Name: "claude-7"}
+	if err := binding.WriteNamed(shared); err != nil {
+		t.Fatal(err)
+	}
+	if !linkShared(stateDir, binding.Binding{Root: dir, Target: "claude:7", NativeSession: "session-7"}) {
+		t.Fatal("a plain attach of the session a link shares did not see the share")
+	}
+	if linkShared(stateDir, binding.Binding{Root: dir, Target: "claude:8", NativeSession: "session-8"}) {
+		t.Fatal("another session counted as shared")
+	}
 }
