@@ -118,10 +118,13 @@ func NativeIdentity(kind, root, cwd string) string {
 	return "native:" + kind + "\x00" + canonicalRoot(cwd) + "\x00" + canonicalRoot(root)
 }
 
-// AppServerThread names a thread of a Codex app-server daemon.
+// AppServerThread names a thread of a Codex app-server daemon, and the
+// daemon process that had it loaded when it was bound: only that same daemon
+// saying the thread is no longer loaded proves the session ended.
 type AppServerThread struct {
-	Socket string `json:"socket"`
-	Thread string `json:"thread"`
+	Socket string                `json:"socket"`
+	Thread string                `json:"thread"`
+	Daemon launch.HolderIdentity `json:"daemon,omitzero"`
 }
 
 // Inspector reports a binding's liveness with its evidence. Binding.Liveness
