@@ -707,11 +707,15 @@ func List() ([]Binding, error) {
 	return out, nil
 }
 
-// tombstoneSuffix names the tombstone a pruned binding leaves:
-// <name>.ended.json, the binding as it was when its session was proven ended.
-// It never reads as a binding (a name has no dot), so List and RemoveMatching
-// skip it.
+// tombstoneSuffix names the tombstone a removed binding leaves:
+// <name>.ended.json, the binding as it was when it was removed.
 const tombstoneSuffix = ".ended.json"
+
+// IsTombstone reports whether a file name in the bindings directory is a
+// tombstone. A tombstone is never a binding, so it is no evidence that a
+// session is bound: every reader of the directory skips it (review-s2r2
+// P1-A1).
+func IsTombstone(fileName string) bool { return strings.HasSuffix(fileName, tombstoneSuffix) }
 
 // PruneEnded removes every binding whose session is proven ended and returns
 // the names removed. Each binding is checked as read under the binding lock,
@@ -773,8 +777,8 @@ func scanTombstones(dir string) ([]Binding, error) {
 	}
 	var out []Binding
 	for _, e := range entries {
-		name, ok := strings.CutSuffix(e.Name(), tombstoneSuffix)
-		if !ok || e.IsDir() || ValidName(name) != nil {
+		name := strings.TrimSuffix(e.Name(), tombstoneSuffix)
+		if !IsTombstone(e.Name()) || e.IsDir() || ValidName(name) != nil {
 			continue
 		}
 		b, err := read(filepath.Join(dir, e.Name()))
@@ -797,7 +801,7 @@ func scanNamed(dir string) ([]Binding, error) {
 	var out []Binding
 	for _, e := range entries {
 		name := strings.TrimSuffix(e.Name(), ".json")
-		if e.IsDir() || name == e.Name() || ValidName(name) != nil {
+		if e.IsDir() || IsTombstone(e.Name()) || name == e.Name() || ValidName(name) != nil {
 			continue
 		}
 		b, err := read(filepath.Join(dir, e.Name()))
@@ -826,7 +830,7 @@ func RemoveMatching(match func(Binding) bool) ([]string, error) {
 		}
 		for _, e := range entries {
 			name := strings.TrimSuffix(e.Name(), ".json")
-			if e.IsDir() || name == e.Name() || ValidName(name) != nil {
+			if e.IsDir() || IsTombstone(e.Name()) || name == e.Name() || ValidName(name) != nil {
 				continue
 			}
 			b, err := read(filepath.Join(dir, e.Name()))
