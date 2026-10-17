@@ -160,7 +160,8 @@ func attach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 		display = session.DisplayName
 	}
 	bindName, explicit := nativeBindingName(*name, cand.Target)
-	h := nativeHarness(cand)
+	codexes := newCodexView()
+	h := nativeHarness(codexes, cand)
 	place := nonEmpty(display, cand.Target)
 	if h.Cwd != "" {
 		place = filepath.Base(h.Cwd)
@@ -180,10 +181,11 @@ func attach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 			nb.Name = binding.SanitizeName(h.Kind + "-" + filepath.Base(h.Cwd))
 		}
 	}
-	if nb.Name, err = writeBinding(nb, explicit, *linkName != ""); err != nil {
+	inspect := inspectOutsideLock(codexes)
+	if nb.Name, err = writeBinding(nb, explicit, *linkName != "", inspect); err != nil {
 		return protocol.ExitActionRequired, err
 	}
-	pruneAfterAttach()
+	pruneAfterAttach(inspect)
 	if *linkName != "" {
 		if err := shareWithLink(stateDir, *linkName, manifest.LinkShare{Binding: nb.Name, Consent: *consent, Tools: *tools}); err != nil {
 			return protocol.ExitActionRequired, err
@@ -285,7 +287,8 @@ func attachMailbox(root, handle, name string, asJSON bool, stdout io.Writer) (in
 	if !explicit {
 		name = mailboxBindingName(handle, root)
 	}
-	h := detectHarness()
+	codexes := newCodexView()
+	h := detectHarness(codexes)
 	project, session := amqPlace(root)
 	machine := binding.Machine()
 	b := binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: handle, Display: handle, Name: name,
@@ -294,11 +297,12 @@ func attachMailbox(root, handle, name string, asJSON bool, stdout io.Writer) (in
 	if err := listBuzzInRoster(root); err != nil {
 		return protocol.ExitActionRequired, err
 	}
-	name, err := writeBinding(b, explicit, false)
+	inspect := inspectOutsideLock(codexes)
+	name, err := writeBinding(b, explicit, false, inspect)
 	if err != nil {
 		return protocol.ExitActionRequired, err
 	}
-	pruneAfterAttach()
+	pruneAfterAttach(inspect)
 	if asJSON {
 		emitJSON(stdout, map[string]any{"connected": true, "name": name, "root": root, "handle": handle})
 		return 0, nil
@@ -363,7 +367,7 @@ func nativeBindingName(flagValue, target string) (string, bool) {
 // to b's session, and one target reports one native session, so the old
 // session is no longer the attached one. An old session resumed in another
 // process is another target, so another default name.
-func writeBinding(b binding.Binding, explicitName, followLink bool) (string, error) {
+func writeBinding(b binding.Binding, explicitName, followLink bool, inspect binding.Inspector) (string, error) {
 	var err error
 	switch {
 	case explicitName:
@@ -371,7 +375,7 @@ func writeBinding(b binding.Binding, explicitName, followLink bool) (string, err
 	case followLink:
 		err = binding.WriteNamedIf(b, func(old binding.Binding) bool { return old.Same(b) || movedTarget(old, b) })
 	default:
-		b.Name, err = binding.WriteSession(b, b.Name, inspectOutsideLock())
+		b.Name, err = binding.WriteSession(b, b.Name, inspect)
 	}
 	if err != nil {
 		return "", err
@@ -456,7 +460,7 @@ func (h harnessSession) holder() launch.HolderIdentity {
 // session's from its registry entry, a pi session's from its process, and a
 // Codex thread's from the app-server daemon. A Codex thread runs in that
 // daemon, so it has no session process; its thread is recorded instead.
-func nativeHarness(cand registry.Candidate) harnessSession {
+func nativeHarness(codexes *codexView, cand registry.Candidate) harnessSession {
 	h := harnessSession{Kind: cand.Kind, PID: candidatePID(cand)}
 	switch cand.Kind {
 	case "claude":
@@ -471,7 +475,7 @@ func nativeHarness(cand registry.Candidate) harnessSession {
 			Thread string `json:"thread"`
 		}
 		if json.Unmarshal(cand.Config, &cfg) == nil && cfg.Socket != "" && cfg.Thread != "" {
-			h.AppServer = loadedThread(cfg.Socket, cfg.Thread)
+			h.AppServer = loadedThread(codexes, cfg.Socket, cfg.Thread)
 			h.Cwd, _ = codexThreadCwd(cfg.Socket, cfg.Thread)
 		}
 	}
@@ -490,25 +494,60 @@ var (
 	processHolder      = launch.HolderOf
 )
 
+// codexView asks each Codex app-server daemon at most once per command:
+// one daemon pid and one loaded-thread list per socket, reused by every
+// binding and by the attaching session (review-stack P2-B6).
+type codexView struct {
+	pids   map[string]codexAnswer[int]
+	loaded map[string]codexAnswer[[]string]
+}
+
+type codexAnswer[T any] struct {
+	v   T
+	err error
+}
+
+func newCodexView() *codexView {
+	return &codexView{pids: map[string]codexAnswer[int]{}, loaded: map[string]codexAnswer[[]string]{}}
+}
+
+func (c *codexView) daemonPID(sock string) (int, error) {
+	a, ok := c.pids[sock]
+	if !ok {
+		a.v, a.err = codexDaemonPID(sock)
+		c.pids[sock] = a
+	}
+	return a.v, a.err
+}
+
+func (c *codexView) loadedThreads(sock string) ([]string, error) {
+	a, ok := c.loaded[sock]
+	if !ok {
+		a.v, a.err = codexLoadedThreads(sock)
+		c.loaded[sock] = a
+	}
+	return a.v, a.err
+}
+
 // loadedThread is the thread to record for a Codex session: the thread with
 // the daemon process that has it loaded now. Unless that daemon confirms the
 // thread is loaded, it records nothing, and the session's liveness stays
 // unknown: the session may run on another app-server, which this daemon
 // does not answer for (review-1070 P1-B1).
-func loadedThread(sock, thread string) binding.AppServerThread {
-	daemon, err := daemonHolder(sock)
+func loadedThread(codexes *codexView, sock, thread string) binding.AppServerThread {
+	daemon, err := daemonHolder(codexes, sock)
 	if err != nil {
 		return binding.AppServerThread{}
 	}
-	if loaded, err := codexLoadedThreads(sock); err != nil || !slices.Contains(loaded, thread) {
+	if loaded, err := codexes.loadedThreads(sock); err != nil || !slices.Contains(loaded, thread) {
 		return binding.AppServerThread{}
 	}
 	return binding.AppServerThread{Socket: sock, Thread: thread, Daemon: daemon}
 }
 
 // daemonHolder is the identity of the daemon process serving sock.
-func daemonHolder(sock string) (launch.HolderIdentity, error) {
-	pid, err := codexDaemonPID(sock)
+func daemonHolder(codexes *codexView, sock string) (launch.HolderIdentity, error) {
+	pid, err := codexes.daemonPID(sock)
 	if err != nil {
 		return launch.HolderIdentity{}, err
 	}
@@ -520,12 +559,12 @@ func daemonHolder(sock string) (launch.HolderIdentity, error) {
 // ended only when that same daemon process, still running, no longer has it
 // loaded. A restarted or other daemon, or an unreachable one, proves nothing,
 // so the thread is unknown (review-1070 P1-B2).
-func livenessOf(b binding.Binding) (binding.State, string) {
+func livenessOf(codexes *codexView, b binding.Binding) (binding.State, string) {
 	state, evidence := b.Liveness()
 	if state == binding.Ended || b.AppServer.Thread == "" {
 		return state, evidence
 	}
-	loaded, err := codexLoadedThreads(b.AppServer.Socket)
+	loaded, err := codexes.loadedThreads(b.AppServer.Socket)
 	if err != nil {
 		return binding.Unknown, fmt.Sprintf("app-server unreachable: %v", err)
 	}
@@ -536,7 +575,7 @@ func livenessOf(b binding.Binding) (binding.State, string) {
 	if recorded.PID <= 0 {
 		return binding.Unknown, "thread is not loaded, and no app-server process was recorded to compare"
 	}
-	if pid, err := codexDaemonPID(b.AppServer.Socket); err != nil || pid != recorded.PID {
+	if pid, err := codexes.daemonPID(b.AppServer.Socket); err != nil || pid != recorded.PID {
 		return binding.Unknown, "thread is not loaded in another app-server process than the one it was bound in"
 	}
 	if st, ev := launch.InspectHolder(recorded); st != launch.LeaseValid {
@@ -551,7 +590,7 @@ func livenessOf(b binding.Binding) (binding.State, string) {
 // that is still exactly as inspected and reads every other binding without
 // a harness, so no daemon is dialed while the lock is held, and a binding
 // that changed meanwhile is unknown.
-func inspectOutsideLock() binding.Inspector {
+func inspectOutsideLock(codexes *codexView) binding.Inspector {
 	type result struct {
 		b        binding.Binding
 		state    binding.State
@@ -561,9 +600,9 @@ func inspectOutsideLock() binding.Inspector {
 	all, _ := binding.List()
 	for _, b := range all {
 		if b.AppServer.Thread != "" {
-			state, evidence := livenessOf(b)
+			state, evidence := livenessOf(codexes, b)
 			if state == binding.Live {
-				b = followDaemon(b)
+				b = followDaemon(codexes, b)
 			}
 			inspected[b.Name] = result{b, state, evidence}
 		}
@@ -584,8 +623,8 @@ func inspectOutsideLock() binding.Inspector {
 // Codex update restarts it), and only the daemon that has the thread can
 // later prove it ended (review-stack P2-B5). The binding is rewritten only if
 // it is still exactly b, and the binding as it is afterwards is returned.
-func followDaemon(b binding.Binding) binding.Binding {
-	pid, err := codexDaemonPID(b.AppServer.Socket)
+func followDaemon(codexes *codexView, b binding.Binding) binding.Binding {
+	pid, err := codexes.daemonPID(b.AppServer.Socket)
 	if err != nil || pid == b.AppServer.Daemon.PID {
 		return b
 	}
@@ -631,11 +670,11 @@ func linkShared(stateDir string, b binding.Binding) bool {
 // session it cannot detect is still attached, with no harness or holder. It
 // is a variable because it runs ps and reads the Claude registry; tests
 // replace it.
-var detectHarness = func() harnessSession {
+var detectHarness = func(codexes *codexView) harnessSession {
 	if thread := strings.TrimSpace(os.Getenv("CODEX_THREAD_ID")); thread != "" {
 		h := harnessSession{Kind: "codex"}
 		if sock, err := codexDefaultSocket(); err == nil {
-			h.AppServer = loadedThread(sock, thread)
+			h.AppServer = loadedThread(codexes, sock, thread)
 			if h.AppServer.Thread != "" {
 				h.Cwd, _ = codexThreadCwd(sock, thread)
 			}
@@ -655,7 +694,7 @@ var detectHarness = func() harnessSession {
 // written its own, so the write sees an ended binding of its own identity
 // and takes its name back (review-s2 P1-1). The attach has succeeded by then,
 // so a failed prune is left to the next attach or `bindings`, which reports it.
-func pruneAfterAttach() { _, _ = binding.PruneEnded(inspectOutsideLock()) }
+func pruneAfterAttach(inspect binding.Inspector) { _, _ = binding.PruneEnded(inspect) }
 
 // bindingRow is one bound session as `bindings` reports it.
 type bindingRow struct {
@@ -678,7 +717,7 @@ func bindings(args []string, stdout io.Writer, probe ...*jsonProbe) (int, error)
 	if err := fs.Parse(args); err != nil {
 		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", err)
 	}
-	inspect := inspectOutsideLock()
+	inspect := inspectOutsideLock(newCodexView())
 	pruned, err := binding.PruneEnded(inspect)
 	if err != nil {
 		return protocol.ExitActionRequired, err

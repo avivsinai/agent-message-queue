@@ -56,7 +56,7 @@ func init() {
 	startEndpoint = func(string, string) error { return errors.New("tests start no endpoint") }
 	// The real helpers run ps, read ~/.claude or other processes, or dial the
 	// Codex app-server daemon.
-	detectHarness = func() harnessSession { return harnessSession{} }
+	detectHarness = func(*codexView) harnessSession { return harnessSession{} }
 	ancestorPIDs = func(int) ([]int, error) { return nil, nil }
 	claudeSession = func(int) (claude.Session, error) {
 		return claude.Session{}, errors.New("tests read no Claude registry")
