@@ -126,7 +126,12 @@ func (s *Server) runRemote(sessionID, text, eventID string, turn *turnState, emi
 		if err != nil {
 			r := &remoteTurn{s: s, sessionID: sessionID, eventID: eventID, emit: emit, turn: turn, meta: remoteMeta{State: "not_connected", Reason: err.Error()}}
 			text := "Not connected. Run /amq-remote in a Claude Code or Codex session."
-			if !errors.Is(err, binding.ErrNone) {
+			var unpinned *unpinnedError
+			switch {
+			case errors.As(err, &unpinned):
+				r.meta.State = "not_pinned"
+				text = s.unpinnedReply(unpinned)
+			case !errors.Is(err, binding.ErrNone):
 				text = "Not connected: " + err.Error()
 			}
 			return r.say(postStatus, r.settle("replied"), StopReasonRefusal, text)
@@ -278,7 +283,7 @@ func (s *Server) eventCancelPath(eventID string) (string, error) {
 	if s.cfg.StateDir == "" || eventID == "" || eventID != filepath.Base(eventID) {
 		return "", fmt.Errorf("cancel has no durable event record")
 	}
-	return filepath.Join(s.cfg.StateDir, "remote-events", eventID+".cancelled"), nil
+	return filepath.Join(s.eventDir(eventID), eventID+".cancelled"), nil
 }
 
 func (s *Server) eventCancelled(eventID string) bool {
@@ -318,17 +323,30 @@ func (r *remoteTurn) waitBusy(deadline time.Time) string {
 	}
 }
 
-// sessionBinding is the binding this ACP session drives: the one its model
-// selected (session/set_model), else the only binding there is (bead
-// agent-message-queue-611.39). With several bindings and no selection it
-// refuses rather than guess.
+// sessionBinding is the binding this ACP session drives: the agent's pin
+// (lifecycle.go), else the model the session selected (session/set_model,
+// bead agent-message-queue-611.39), else the only binding there is. A
+// selection that disagrees with the pin refuses. An unpinned agent with
+// several bindings never guesses, and the helper never delivers: both answer
+// with the bound sessions instead.
 func (s *Server) sessionBinding(sessionID string) (binding.Binding, error) {
+	if s.cfg.PinErr != nil {
+		return binding.Binding{}, s.cfg.PinErr
+	}
 	s.mu.Lock()
 	name := ""
 	if session, ok := s.sessions[sessionID]; ok {
 		name = session.binding
 	}
 	s.mu.Unlock()
+	switch {
+	case s.cfg.Helper:
+		name = "" // a selected model never makes the helper deliver
+	case s.cfg.Pin != "" && name != "" && name != s.cfg.Pin:
+		return binding.Binding{}, conflictingPins("the agent", s.cfg.Pin, "the selected model", name)
+	case s.cfg.Pin != "":
+		name = s.cfg.Pin
+	}
 	if name != "" {
 		return binding.ReadNamed(name)
 	}
@@ -336,13 +354,13 @@ func (s *Server) sessionBinding(sessionID string) (binding.Binding, error) {
 	if err != nil {
 		return binding.Binding{}, err
 	}
-	switch len(all) {
-	case 0:
+	switch {
+	case len(all) == 0:
 		return binding.Binding{}, binding.ErrNone
-	case 1:
+	case len(all) == 1 && !s.cfg.Helper:
 		return all[0], nil
 	}
-	return binding.Binding{}, errors.New("this agent has no session selected; set its model to one amq-remote:<name> session")
+	return binding.Binding{}, &unpinnedError{bindings: all, helper: s.cfg.Helper}
 }
 
 // turnBinding fixes the binding a prompt runs under. A redelivered event
@@ -353,11 +371,17 @@ func (s *Server) turnBinding(sessionID, eventID string) (binding.Binding, error)
 	if eventID == "" {
 		return s.sessionBinding(sessionID)
 	}
-	path := filepath.Join(s.cfg.StateDir, "remote-events", eventID+".json")
+	if s.cfg.PinErr != nil {
+		return binding.Binding{}, s.cfg.PinErr
+	}
+	path := filepath.Join(s.eventDir(eventID), eventID+".json")
 	if raw, err := readSmallRegular(path); err == nil {
-		var b binding.Binding
-		if err := json.Unmarshal(raw, &b); err != nil || b.Valid() != nil {
+		var c eventClaim
+		if err := json.Unmarshal(raw, &c); err != nil || c.Valid() != nil {
 			return binding.Binding{}, fmt.Errorf("event %s has an unreadable recorded binding; refusing to resubmit", eventID)
+		}
+		if !s.ownsClaim(c, sessionID) {
+			return binding.Binding{}, fmt.Errorf("event %s was claimed by another Buzz agent; it runs there, not here", eventID)
 		}
 		// A claim can be visible before its directory entry is durable. Every
 		// reader makes it durable before it submits, so a crash cannot lose
@@ -365,7 +389,7 @@ func (s *Server) turnBinding(sessionID, eventID string) (binding.Binding, error)
 		if err := fsq.SyncDir(filepath.Dir(path)); err != nil {
 			return binding.Binding{}, err
 		}
-		return b, nil
+		return c.binding(), nil
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return binding.Binding{}, err
 	}
@@ -373,7 +397,7 @@ func (s *Server) turnBinding(sessionID, eventID string) (binding.Binding, error)
 	if err != nil {
 		return b, err
 	}
-	raw, err := json.Marshal(b)
+	raw, err := json.Marshal(eventClaim{Binding: b, Name: b.Name, Agent: buzzSelf})
 	if err != nil {
 		return binding.Binding{}, err
 	}
@@ -389,6 +413,118 @@ func (s *Server) turnBinding(sessionID, eventID string) (binding.Binding, error)
 		return s.turnBinding(sessionID, eventID)
 	}
 	return b, nil
+}
+
+// eventClaim is an event's first-delivery record: the binding it runs
+// under, and the Buzz agent that claimed it. Agents share remote-events, and
+// one Buzz event can reach several agents (a channel they all belong to), so
+// an agent follows and sweeps only its own claims (review of S3 P1-2, P1-3).
+type eventClaim struct {
+	binding.Binding
+	Name  string `json:"name,omitempty"`
+	Agent string `json:"agent,omitempty"`
+}
+
+func (c eventClaim) binding() binding.Binding {
+	b := c.Binding
+	b.Name = c.Name
+	return b
+}
+
+// ownsClaim reports whether this agent made the claim. A claim with a name
+// but no agent (made with no Buzz identity) belongs only to the agent pinned
+// to that name. A claim with neither (written before claims recorded them)
+// belongs to the agent whose own session binding is the claim's destination.
+// The helper takes none.
+func (s *Server) ownsClaim(c eventClaim, sessionID string) bool {
+	switch {
+	case c.Agent != "":
+		return c.Agent == buzzSelf
+	case s.cfg.Helper:
+		return false
+	case c.Name != "":
+		return s.cfg.Pin != "" && c.Name == s.cfg.Pin
+	}
+	b, err := s.sessionBinding(sessionID)
+	return err == nil && b.Same(c.Binding)
+}
+
+// eventsDir is remote-events, which holds the per-agent event directories
+// and the event state written before them.
+func (s *Server) eventsDir() string { return filepath.Join(s.cfg.StateDir, "remote-events") }
+
+// eventDir is the directory of one event's state. Each Buzz agent keeps its
+// own, remote-events/<agent pubkey>/, because one Buzz event can reach
+// several agents, and each handles it for its own session (#1068). State
+// written before lives in remote-events itself; an event whose claim is
+// there and is this agent's stays there. A process with no Buzz identity
+// uses remote-events itself.
+func (s *Server) eventDir(eventID string) string {
+	if buzzSelf == "" {
+		return s.eventsDir()
+	}
+	own := filepath.Join(s.eventsDir(), buzzSelf)
+	if eventID != "" && s.ownsLegacyEvent(own, eventID) {
+		return s.eventsDir()
+	}
+	return own
+}
+
+// ownsLegacyEvent reports whether the event's state was written before
+// per-agent directories and is this agent's: its own directory has no claim
+// of the event, and remote-events has one this agent owns, for its pin or
+// for a model one of its ACP sessions selected. A steer event is this
+// agent's when its parent event is. A yes is recorded once as
+// <own>/<event>.legacy, so the event never changes directory while it runs.
+func (s *Server) ownsLegacyEvent(own, eventID string) bool {
+	marker := filepath.Join(own, eventID+".legacy")
+	if _, err := os.Lstat(marker); err == nil {
+		return true
+	}
+	for _, suffix := range []string{".json", ".steer.json"} {
+		if _, err := os.Lstat(filepath.Join(own, eventID+suffix)); err == nil {
+			return false
+		}
+	}
+	owned := false
+	if raw, err := readSmallRegular(filepath.Join(s.eventsDir(), eventID+".json")); err == nil {
+		var c eventClaim
+		owned = json.Unmarshal(raw, &c) == nil && c.Valid() == nil && s.ownsClaimInAnySession(c)
+	} else {
+		var steer steerClaim
+		if raw, err := readSmallRegular(filepath.Join(s.eventsDir(), eventID+".steer.json")); err == nil &&
+			json.Unmarshal(raw, &steer) == nil && steer.ParentEvent != "" && steer.ParentEvent != eventID {
+			owned = s.ownsLegacyEvent(own, steer.ParentEvent)
+		}
+	}
+	if !owned {
+		return false
+	}
+	// A failed record leaves the decision to the next call; it reaches the
+	// same answer while the flat claim stays.
+	_, _ = createExclusive(marker, nil)
+	return true
+}
+
+// ownsClaimInAnySession is ownsClaim for no session or for any of this
+// process's ACP sessions. Never "any binding": agents that shared state
+// before would then take each other's claims.
+func (s *Server) ownsClaimInAnySession(c eventClaim) bool {
+	if s.ownsClaim(c, "") {
+		return true
+	}
+	s.mu.Lock()
+	ids := make([]string, 0, len(s.sessions))
+	for id := range s.sessions {
+		ids = append(ids, id)
+	}
+	s.mu.Unlock()
+	for _, id := range ids {
+		if s.ownsClaim(c, id) {
+			return true
+		}
+	}
+	return false
 }
 
 // createExclusive publishes raw at path only if nothing is there yet. The
@@ -708,7 +844,7 @@ func (s *Server) postOnce(eventID, kind string, record []byte, channel, text str
 		}
 		return s.publish(channel, text)
 	}
-	dir := filepath.Join(s.cfg.StateDir, "remote-events")
+	dir := s.eventDir(eventID)
 	result := ""
 	err := s.withPostLock(eventID, func() error {
 		out, final := s.mailboxAnswered(eventID)
@@ -741,7 +877,7 @@ func (s *Server) reserveFinal(eventID string, record []byte) (bool, error) {
 	won := false
 	err := s.withPostLock(eventID, func() error {
 		var err error
-		won, err = createExclusive(filepath.Join(s.cfg.StateDir, "remote-events", eventID+".posted."+postFinal), record)
+		won, err = createExclusive(filepath.Join(s.eventDir(eventID), eventID+".posted."+postFinal), record)
 		return err
 	})
 	return won, err
@@ -749,7 +885,7 @@ func (s *Server) reserveFinal(eventID string, record []byte) (bool, error) {
 
 // withPostLock runs fn under the event's post lock.
 func (s *Server) withPostLock(eventID string, fn func() error) error {
-	dir := filepath.Join(s.cfg.StateDir, "remote-events")
+	dir := s.eventDir(eventID)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
