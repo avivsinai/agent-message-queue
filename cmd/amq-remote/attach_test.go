@@ -471,6 +471,38 @@ func TestBindingsKeepsACodexThreadAfterTheAppServerRestarted(t *testing.T) {
 	}
 }
 
+// Review-stack P2-B5: a Codex update restarts the daemon, and the thread
+// resumes in the new one. The binding kept the old daemon, so the new
+// daemon's "not loaded" never proved the session ended, and the next session
+// there got <name>-2 and a new agent. While the thread is loaded, the binding
+// now follows the daemon that has it.
+func TestCodexBindingFollowsARestartedAppServer(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("process start times are read on darwin and linux only")
+	}
+	dir := canonicalTempDir(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(binding.EnvPath, filepath.Join(dir, "remote", "binding.json"))
+	savedLoaded, savedPID := codexLoadedThreads, codexDaemonPID
+	t.Cleanup(func() { codexLoadedThreads, codexDaemonPID = savedLoaded, savedPID })
+	codexDaemonPID = func(string) (int, error) { return os.Getpid(), nil }
+	old := launch.HolderIdentity{PID: os.Getpid() + 1, ProcessStart: "1"}
+	b := binding.Binding{Root: dir, Target: "codex:t1", NativeSession: "t1", Name: "codex-t1",
+		AppServer: binding.AppServerThread{Socket: filepath.Join(dir, "app-server.sock"), Thread: "t1", Daemon: old}}
+	if err := binding.WriteNamed(b); err != nil {
+		t.Fatal(err)
+	}
+	for _, loaded := range [][]string{{"t1"}, nil} {
+		codexLoadedThreads = func(string) ([]string, error) { return loaded, nil }
+		if code := run([]string{"bindings"}, nil, io.Discard, io.Discard); code != 0 {
+			t.Fatalf("bindings exit %d", code)
+		}
+	}
+	if _, err := binding.ReadNamed("codex-t1"); !errors.Is(err, binding.ErrNone) {
+		t.Fatalf("the binding outlived its thread in the restarted app-server: %v", err)
+	}
+}
+
 // codexBindingsAfter binds threads t-live and t-gone in an app-server whose
 // process is this test, runs bindings with t-live loaded and the socket
 // served by daemonPID, and returns the pruned names and each listed state.

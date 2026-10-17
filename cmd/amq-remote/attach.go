@@ -571,6 +571,9 @@ func inspectOutsideLock() binding.Inspector {
 	for _, b := range all {
 		if b.AppServer.Thread != "" {
 			state, evidence := livenessOf(b)
+			if state == binding.Live {
+				b = followDaemon(b)
+			}
 			inspected[b.Name] = result{b, state, evidence}
 		}
 	}
@@ -583,6 +586,28 @@ func inspectOutsideLock() binding.Inspector {
 		}
 		return binding.Unknown, "binding changed after it was inspected"
 	}
+}
+
+// followDaemon records the daemon process that has b's thread loaded now,
+// when it is not the recorded one: the thread moved to a restarted daemon (a
+// Codex update restarts it), and only the daemon that has the thread can
+// later prove it ended (review-stack P2-B5). The binding is rewritten only if
+// it is still exactly b, and the binding as it is afterwards is returned.
+func followDaemon(b binding.Binding) binding.Binding {
+	pid, err := codexDaemonPID(b.AppServer.Socket)
+	if err != nil || pid == b.AppServer.Daemon.PID {
+		return b
+	}
+	daemon, err := processHolder(pid)
+	if err != nil {
+		return b
+	}
+	now := b
+	now.AppServer.Daemon = daemon
+	if replaced, err := binding.Replace(b, now); err != nil || !replaced {
+		return b
+	}
+	return now
 }
 
 // linkShared reports whether a link share of the root at stateDir names a
