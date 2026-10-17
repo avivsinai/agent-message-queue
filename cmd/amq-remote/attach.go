@@ -24,6 +24,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/lock"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
+	"github.com/avivsinai/agent-message-queue/internal/remote/codex"
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/ipc"
 	"github.com/avivsinai/agent-message-queue/internal/remote/linkio"
@@ -83,9 +84,15 @@ func attach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 			return protocol.ExitUsage, err
 		}
 	}
-	cand, err := selfCandidate(c.root, stateDir)
+	cand, err := findSelf(c.root, stateDir)
 	if err != nil {
 		return protocol.ExitActionRequired, err
+	}
+	hookWarning := ""
+	if cand.Kind == "claude" {
+		if hookWarning, err = requireStopHook(); err != nil {
+			return protocol.ExitActionRequired, err
+		}
 	}
 	// The session's own identity is resolved before anything is registered,
 	// written or started, so a refusal leaves no side effect.
@@ -159,44 +166,54 @@ func attach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 		display = session.DisplayName
 	}
 	bindName, explicit := nativeBindingName(*name, cand.Target)
-	h := nativeHarness(cand)
+	codexes := newCodexView()
+	h := nativeHarness(codexes, cand)
 	place := nonEmpty(display, cand.Target)
 	if h.Cwd != "" {
 		place = filepath.Base(h.Cwd)
 	}
 	machine := binding.Machine()
 	nb := binding.Binding{Root: c.root, Target: cand.Target, NativeSession: native, Display: display, Name: bindName,
-		Harness: h.Kind, Holder: h.holder(), Label: sessionLabel(h.Kind, place, machine), Machine: machine}
+		Harness: h.Kind, Holder: h.holder(), Label: sessionLabel(h.Kind, place, machine), Machine: machine, AppServer: h.AppServer}
 	// The session identity is the harness, root and working directory, so the
 	// same session coming back gets its name and agent back (ruling 2). A link
 	// share keeps its target-derived identity: the share names its binding,
-	// and another process must never take that name over.
-	if *linkName == "" && h.Cwd != "" {
+	// and another process must never take that name over. That holds for a
+	// plain attach of a session a link already shares too: it keeps the
+	// share's binding as the share made it.
+	if *linkName == "" && h.Cwd != "" && !linkShared(stateDir, nb) {
 		nb.Identity = binding.NativeIdentity(h.Kind, c.root, h.Cwd)
 		if !explicit {
 			nb.Name = binding.SanitizeName(h.Kind + "-" + filepath.Base(h.Cwd))
 		}
 	}
-	if nb.Name, err = writeBinding(nb, explicit, *linkName != ""); err != nil {
+	inspect := inspectOutsideLock(codexes)
+	if nb.Name, err = writeBinding(nb, explicit, *linkName != "", inspect); err != nil {
 		return protocol.ExitActionRequired, err
 	}
-	pruneAfterAttach()
+	pruneAfterAttach(inspect)
 	if *linkName != "" {
 		if err := shareWithLink(stateDir, *linkName, manifest.LinkShare{Binding: nb.Name, Consent: *consent, Tools: *tools}); err != nil {
 			return protocol.ExitActionRequired, err
 		}
+		// No approval pin is written for a link share (only a Buzz relay
+		// share pins one), so the approval hook leaves every tool permission
+		// prompt to the session's own dialog.
 		if c.json {
-			emitJSON(stdout, map[string]any{"connected": true, "name": nb.Name, "root": nb.Root, "target": nb.Target, "link": *linkName})
+			emitJSON(stdout, withWarning(map[string]any{"connected": true, "name": nb.Name, "root": nb.Root, "target": nb.Target, "link": *linkName, "approvals": "terminal"}, hookWarning))
 			return 0, nil
 		}
 		say(stdout, "Shared %s (%s) with link %s as %s (consent: %s, tools: %s).", nonEmpty(display, cand.Target), cand.Target, *linkName, nb.Name, *consent, nonEmpty(*tools, "none"))
+		say(stdout, "Tool approvals for this share are answered in the session's terminal; the linked server cannot answer them, so a task that needs one waits there.")
+		sayWarning(stdout, hookWarning)
 		return 0, nil
 	}
 	if c.json {
-		emitJSON(stdout, map[string]any{"connected": true, "name": nb.Name, "root": nb.Root, "target": nb.Target})
+		emitJSON(stdout, withWarning(map[string]any{"connected": true, "name": nb.Name, "root": nb.Root, "target": nb.Target}, hookWarning))
 		return 0, nil
 	}
 	say(stdout, "Connected: %s (%s) as session %s. DM its Buzz agent \"AMQ: %s\".", nonEmpty(display, cand.Target), cand.Target, nb.Name, nb.Name)
+	sayWarning(stdout, hookWarning)
 	return 0, nil
 }
 
@@ -282,19 +299,22 @@ func attachMailbox(root, handle, name string, asJSON bool, stdout io.Writer) (in
 	if !explicit {
 		name = mailboxBindingName(handle, root)
 	}
-	h := detectHarness()
+	codexes := newCodexView()
+	h := detectHarness(codexes)
 	project, session := amqPlace(root)
 	machine := binding.Machine()
 	b := binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: handle, Display: handle, Name: name,
-		Harness: h.Kind, Holder: h.holder(), Label: sessionLabel(nonEmpty(h.Kind, handle), strings.TrimSuffix(project+"/"+session, "/"), machine), Machine: machine}
+		Harness: h.Kind, Holder: h.holder(), Label: sessionLabel(nonEmpty(h.Kind, handle), strings.TrimSuffix(project+"/"+session, "/"), machine), Machine: machine,
+		AppServer: h.AppServer}
 	if err := listBuzzInRoster(root); err != nil {
 		return protocol.ExitActionRequired, err
 	}
-	name, err := writeBinding(b, explicit, false)
+	inspect := inspectOutsideLock(codexes)
+	name, err := writeBinding(b, explicit, false, inspect)
 	if err != nil {
 		return protocol.ExitActionRequired, err
 	}
-	pruneAfterAttach()
+	pruneAfterAttach(inspect)
 	if asJSON {
 		emitJSON(stdout, map[string]any{"connected": true, "name": name, "root": root, "handle": handle})
 		return 0, nil
@@ -359,7 +379,7 @@ func nativeBindingName(flagValue, target string) (string, bool) {
 // to b's session, and one target reports one native session, so the old
 // session is no longer the attached one. An old session resumed in another
 // process is another target, so another default name.
-func writeBinding(b binding.Binding, explicitName, followLink bool) (string, error) {
+func writeBinding(b binding.Binding, explicitName, followLink bool, inspect binding.Inspector) (string, error) {
 	var err error
 	switch {
 	case explicitName:
@@ -367,7 +387,7 @@ func writeBinding(b binding.Binding, explicitName, followLink bool) (string, err
 	case followLink:
 		err = binding.WriteNamedIf(b, func(old binding.Binding) bool { return old.Same(b) || movedTarget(old, b) })
 	default:
-		b.Name, err = binding.WriteSession(b, b.Name)
+		b.Name, err = binding.WriteSession(b, b.Name, inspect)
 	}
 	if err != nil {
 		return "", err
@@ -429,6 +449,9 @@ type harnessSession struct {
 	Kind string // claude, codex or pi; empty when not detected
 	PID  int    // the harness process; 0 when not known
 	Cwd  string // the session's working directory; empty when not known
+	// AppServer is a Codex session's thread, which proves its liveness in
+	// place of a process.
+	AppServer binding.AppServerThread
 }
 
 // holder is the recorded identity of the harness process, or zero when it
@@ -444,21 +467,214 @@ func (h harnessSession) holder() launch.HolderIdentity {
 	return id
 }
 
-// nativeHarness is the harness of a native session: a Claude session's
-// process and working directory from its registry entry; for another kind,
-// the process discovery reports and this command's working directory, which
-// the harness starts its tool calls in. A Codex thread runs in the
-// app-server daemon, so it has no session process to record.
-func nativeHarness(cand registry.Candidate) harnessSession {
+// nativeHarness is the harness of a native session, with the session's own
+// working directory, never that of the tool call attach runs in: a Claude
+// session's from its registry entry, a pi session's from its process, and a
+// Codex thread's from the app-server daemon. A Codex thread runs in that
+// daemon, so it has no session process; its thread is recorded instead.
+func nativeHarness(codexes *codexView, cand registry.Candidate) harnessSession {
 	h := harnessSession{Kind: cand.Kind, PID: candidatePID(cand)}
-	if cand.Kind == "claude" {
-		if s, err := claude.SessionForPID(h.PID); err == nil {
+	switch cand.Kind {
+	case "claude":
+		if s, err := claudeSession(h.PID); err == nil {
 			h.Cwd = s.Cwd
 		}
-		return h
+	case "pi":
+		h.Cwd, _ = processCwd(h.PID)
+	case "codex":
+		var cfg struct {
+			Socket string `json:"socket"`
+			Thread string `json:"thread"`
+		}
+		if json.Unmarshal(cand.Config, &cfg) == nil && cfg.Socket != "" && cfg.Thread != "" {
+			h.AppServer = loadedThread(codexes, cfg.Socket, cfg.Thread)
+			h.Cwd, _ = codexThreadCwd(cfg.Socket, cfg.Thread)
+		}
 	}
-	h.Cwd, _ = os.Getwd()
 	return h
+}
+
+// Harness inspection reads ~/.claude, the app-server daemon, and other
+// processes. They are variables so tests read none of them.
+var (
+	claudeSession      = claude.SessionForPID
+	processCwd         = launch.ProcessCwd
+	codexThreadCwd     = codex.ThreadCwd
+	codexLoadedThreads = func(sock string) ([]string, error) { return codex.LoadedThreadsWithin(sock, 2*time.Second) }
+	codexDefaultSocket = codex.DefaultControlSocket
+	codexDaemonPID     = codex.DaemonPID
+	processHolder      = launch.HolderOf
+)
+
+// codexView asks each Codex app-server daemon at most once per command:
+// one daemon pid and one loaded-thread list per socket, reused by every
+// binding and by the attaching session (review-stack P2-B6).
+type codexView struct {
+	pids   map[string]codexAnswer[int]
+	loaded map[string]codexAnswer[[]string]
+}
+
+type codexAnswer[T any] struct {
+	v   T
+	err error
+}
+
+func newCodexView() *codexView {
+	return &codexView{pids: map[string]codexAnswer[int]{}, loaded: map[string]codexAnswer[[]string]{}}
+}
+
+func (c *codexView) daemonPID(sock string) (int, error) {
+	a, ok := c.pids[sock]
+	if !ok {
+		a.v, a.err = codexDaemonPID(sock)
+		c.pids[sock] = a
+	}
+	return a.v, a.err
+}
+
+func (c *codexView) loadedThreads(sock string) ([]string, error) {
+	a, ok := c.loaded[sock]
+	if !ok {
+		a.v, a.err = codexLoadedThreads(sock)
+		c.loaded[sock] = a
+	}
+	return a.v, a.err
+}
+
+// loadedThread is the thread to record for a Codex session: the thread with
+// the daemon process that has it loaded now. Unless that daemon confirms the
+// thread is loaded, it records nothing, and the session's liveness stays
+// unknown: the session may run on another app-server, which this daemon
+// does not answer for (review-1070 P1-B1).
+func loadedThread(codexes *codexView, sock, thread string) binding.AppServerThread {
+	daemon, err := daemonHolder(codexes, sock)
+	if err != nil {
+		return binding.AppServerThread{}
+	}
+	if loaded, err := codexes.loadedThreads(sock); err != nil || !slices.Contains(loaded, thread) {
+		return binding.AppServerThread{}
+	}
+	return binding.AppServerThread{Socket: sock, Thread: thread, Daemon: daemon}
+}
+
+// daemonHolder is the identity of the daemon process serving sock.
+func daemonHolder(codexes *codexView, sock string) (launch.HolderIdentity, error) {
+	pid, err := codexes.daemonPID(sock)
+	if err != nil {
+		return launch.HolderIdentity{}, err
+	}
+	return processHolder(pid)
+}
+
+// livenessOf is a binding's liveness. A Codex thread's comes from the
+// app-server daemon that had it loaded when it was bound: the thread has
+// ended only when that same daemon process, still running, no longer has it
+// loaded. A restarted or other daemon, or an unreachable one, proves nothing,
+// so the thread is unknown (review-1070 P1-B2).
+func livenessOf(codexes *codexView, b binding.Binding) (binding.State, string) {
+	state, evidence := b.Liveness()
+	if state == binding.Ended || b.AppServer.Thread == "" {
+		return state, evidence
+	}
+	loaded, err := codexes.loadedThreads(b.AppServer.Socket)
+	if err != nil {
+		return binding.Unknown, fmt.Sprintf("app-server unreachable: %v", err)
+	}
+	if slices.Contains(loaded, b.AppServer.Thread) {
+		return binding.Live, "thread is loaded in the app-server"
+	}
+	recorded := b.AppServer.Daemon
+	if recorded.PID <= 0 {
+		return binding.Unknown, "thread is not loaded, and no app-server process was recorded to compare"
+	}
+	if pid, err := codexes.daemonPID(b.AppServer.Socket); err != nil || pid != recorded.PID {
+		return binding.Unknown, "thread is not loaded in another app-server process than the one it was bound in"
+	}
+	if st, ev := launch.InspectHolder(recorded); st != launch.LeaseValid {
+		return binding.Unknown, "thread is not loaded, and the app-server process is not confirmed: " + ev
+	}
+	return binding.Ended, "thread is no longer loaded in the app-server it was bound in"
+}
+
+// inspectOutsideLock runs livenessOf for each current binding that names a
+// Codex thread, before the binding lock is taken, and returns an inspector
+// for use under the lock. That inspector reuses those results for a binding
+// that is still exactly as inspected and reads every other binding without
+// a harness, so no daemon is dialed while the lock is held, and a binding
+// that changed meanwhile is unknown.
+func inspectOutsideLock(codexes *codexView) binding.Inspector {
+	type result struct {
+		b        binding.Binding
+		state    binding.State
+		evidence string
+	}
+	inspected := map[string]result{}
+	all, _ := binding.List()
+	for _, b := range all {
+		if b.AppServer.Thread != "" {
+			state, evidence := livenessOf(codexes, b)
+			if state == binding.Live {
+				b = followDaemon(codexes, b)
+			}
+			inspected[b.Name] = result{b, state, evidence}
+		}
+	}
+	return func(b binding.Binding) (binding.State, string) {
+		if b.AppServer.Thread == "" {
+			return b.Liveness()
+		}
+		if r, ok := inspected[b.Name]; ok && r.b == b {
+			return r.state, r.evidence
+		}
+		return binding.Unknown, "binding changed after it was inspected"
+	}
+}
+
+// followDaemon records the daemon process that has b's thread loaded now,
+// when it is not the recorded one: the thread moved to a restarted daemon (a
+// Codex update restarts it), and only the daemon that has the thread can
+// later prove it ended (review-stack P2-B5). The binding is rewritten only if
+// it is still exactly b, and the binding as it is afterwards is returned.
+func followDaemon(codexes *codexView, b binding.Binding) binding.Binding {
+	pid, err := codexes.daemonPID(b.AppServer.Socket)
+	if err != nil || pid == b.AppServer.Daemon.PID {
+		return b
+	}
+	daemon, err := processHolder(pid)
+	if err != nil {
+		return b
+	}
+	now := b
+	now.AppServer.Daemon = daemon
+	if replaced, err := binding.Replace(b, now); err != nil || !replaced {
+		return b
+	}
+	return now
+}
+
+// linkShared reports whether a link share of the root at stateDir names a
+// binding of b's own session.
+func linkShared(stateDir string, b binding.Binding) bool {
+	f, err := manifest.Load(manifest.DefaultPath(stateDir))
+	if err != nil {
+		// An unreadable manifest may hold a share of this session (a
+		// missing one loads empty): keep the target identity rather than
+		// move the share's name (review-1070 P2-B3).
+		return true
+	}
+	shared := map[string]bool{}
+	for _, l := range f.Links {
+		for _, sh := range l.Shares {
+			shared[sh.Binding] = true
+		}
+	}
+	all, _ := binding.List()
+	for _, o := range all {
+		if shared[o.Name] && o.Same(b) {
+			return true
+		}
+	}
+	return false
 }
 
 // detectHarness finds the harness a mailbox attach runs in: Codex by
@@ -466,14 +682,20 @@ func nativeHarness(cand registry.Candidate) harnessSession {
 // session it cannot detect is still attached, with no harness or holder. It
 // is a variable because it runs ps and reads the Claude registry; tests
 // replace it.
-var detectHarness = func() harnessSession {
-	if os.Getenv("CODEX_THREAD_ID") != "" {
-		cwd, _ := os.Getwd()
-		return harnessSession{Kind: "codex", Cwd: cwd}
+var detectHarness = func(codexes *codexView) harnessSession {
+	if thread := strings.TrimSpace(os.Getenv("CODEX_THREAD_ID")); thread != "" {
+		h := harnessSession{Kind: "codex"}
+		if sock, err := codexDefaultSocket(); err == nil {
+			h.AppServer = loadedThread(codexes, sock, thread)
+			if h.AppServer.Thread != "" {
+				h.Cwd, _ = codexThreadCwd(sock, thread)
+			}
+		}
+		return h
 	}
 	ancestors, _ := ancestorPIDs(os.Getpid())
 	for _, pid := range ancestors {
-		if s, err := claude.SessionForPID(pid); err == nil {
+		if s, err := claudeSession(pid); err == nil {
 			return harnessSession{Kind: "claude", PID: pid, Cwd: s.Cwd}
 		}
 	}
@@ -484,7 +706,7 @@ var detectHarness = func() harnessSession {
 // written its own, so the write sees an ended binding of its own identity
 // and takes its name back (review-s2 P1-1). The attach has succeeded by then,
 // so a failed prune is left to the next attach or `bindings`, which reports it.
-func pruneAfterAttach() { _, _ = binding.PruneEnded() }
+func pruneAfterAttach(inspect binding.Inspector) { _, _ = binding.PruneEnded(inspect) }
 
 // bindingRow is one bound session as `bindings` reports it.
 type bindingRow struct {
@@ -507,7 +729,8 @@ func bindings(args []string, stdout io.Writer, probe ...*jsonProbe) (int, error)
 	if err := fs.Parse(args); err != nil {
 		return protocol.ExitUsage, protocol.Refuse(protocol.CodeInvalid, "%v", err)
 	}
-	pruned, err := binding.PruneEnded()
+	inspect := inspectOutsideLock(newCodexView())
+	pruned, err := binding.PruneEnded(inspect)
 	if err != nil {
 		return protocol.ExitActionRequired, err
 	}
@@ -518,7 +741,7 @@ func bindings(args []string, stdout io.Writer, probe ...*jsonProbe) (int, error)
 	rows := make([]bindingRow, 0, len(all))
 	width := 0
 	for _, b := range all {
-		state, evidence := b.Liveness()
+		state, evidence := inspect(b)
 		rows = append(rows, bindingRow{Name: b.Name, Label: b.Label, State: state, Evidence: evidence, Root: b.Root, Handle: b.Handle, Target: b.Target})
 		width = max(width, len([]rune(nonEmpty(b.Label, b.Name))))
 	}
@@ -625,6 +848,56 @@ func detach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 	}
 	say(stdout, "Disconnected. The session keeps running; Buzz DMs now answer \"Not connected\".")
 	return 0, nil
+}
+
+// findSelf finds the invoking native session. It is a variable because the
+// real search reads the Claude registry and runs ps; tests replace it.
+var findSelf = selfCandidate
+
+// claudeStopHookState is the state of the AMQ Stop hook in the user's Claude
+// settings. It is a variable so tests never read the real ~/.claude.
+var claudeStopHookState = func() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return claude.StopHookState(home)
+}
+
+// requireStopHook refuses a Claude session whose settings lack the AMQ Stop
+// hook: a remote task there is admitted and never completes, so it stays
+// running and parks every later task as busy (linked server's first live
+// run, amq-remote 0.97.0). attach never edits ~/.claude/settings.json; it
+// names the command that does. A hook that the user settings turn off with
+// disableAllHooks is accepted with a warning: a project or managed setting
+// may turn hooks back on, and only the user file is read (review-stack
+// P2-C1).
+func requireStopHook() (warning string, err error) {
+	state, err := claudeStopHookState()
+	switch {
+	case err != nil:
+		return "", fmt.Errorf("cannot read ~/.claude/settings.json to check the AMQ Stop hook: %v; repair it, then attach again", err)
+	case state == claude.StopHookMissing:
+		return "", protocol.Refuse(protocol.CodeUnsupported, "the AMQ Stop hook is not installed, so a remote task in this Claude Code session would never finish; run `amq-remote claude install-stop-hook`, then attach again")
+	case state == claude.StopHookDisabled:
+		return "~/.claude/settings.json sets disableAllHooks, so the AMQ Stop hook runs only if a project or managed setting turns hooks on; otherwise a remote task never finishes", nil
+	}
+	return "", nil
+}
+
+// withWarning adds a warning to a JSON result when there is one.
+func withWarning(out map[string]any, warning string) map[string]any {
+	if warning != "" {
+		out["warning"] = warning
+	}
+	return out
+}
+
+// sayWarning prints a warning line when there is one.
+func sayWarning(w io.Writer, warning string) {
+	if warning != "" {
+		say(w, "Warning: %s.", warning)
+	}
 }
 
 // selfCandidate finds the invoking native session among discovered ones.
@@ -746,8 +1019,11 @@ func selfNativeSession(cand registry.Candidate) (string, error) {
 	return "", fmt.Errorf("cannot verify a %s session", cand.Kind)
 }
 
-// ancestorPIDs lists the parent chain of pid, nearest first.
-func ancestorPIDs(pid int) ([]int, error) {
+// ancestorPIDs lists the parent chain of pid, nearest first. It runs ps, so
+// it is a variable that tests replace.
+var ancestorPIDs = psAncestorPIDs
+
+func psAncestorPIDs(pid int) ([]int, error) {
 	var out []int
 	for i := 0; i < 64 && pid > 1; i++ {
 		raw, err := exec.Command("ps", "-o", "ppid=", "-p", strconv.Itoa(pid)).Output()

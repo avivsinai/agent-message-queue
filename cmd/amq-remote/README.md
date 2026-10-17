@@ -60,6 +60,7 @@ amq-remote link status
 amq-remote link tools [--link NAME]
 amq-remote link call TOOL --args JSON [--link NAME]
 amq-remote mcp --link NAME
+amq-remote service install|uninstall|status [--root ROOT]
 amq-remote doctor
 amq-remote version
 ```
@@ -423,6 +424,42 @@ Protocol: `amq.remote.link/1` ([contract](../../testdata/link/README.md)).
    settle without network. The server keeps the machine until you unlink it
    on the server's connections page.
 
+### Restart after a reboot
+
+Nothing restarts the endpoint after a reboot unless a login service does.
+`amq-remote service install` writes one that runs `amq-remote up --root ROOT`
+at login (`ROOT` defaults to the machine root) and starts it now, replacing a
+running one:
+
+- macOS: the launchd user agent
+  `~/Library/LaunchAgents/io.github.avivsinai.amq-remote.plist`, logging to
+  `ROOT/extensions/remote/up.log`. Over SSH, with no login session to start it
+  in, install writes it and it starts at the next login.
+- Linux: the systemd user unit
+  `$XDG_CONFIG_HOME/systemd/user/amq-remote.service` (default `~/.config`),
+  logging to the journal (`journalctl --user -u amq-remote`). A user unit
+  runs while you are logged in; for a machine that must serve its links
+  before anyone logs in, run `loginctl enable-linger` once.
+
+There is one login service per user. Installing it for another root replaces
+the old root's service, and install says so.
+
+The service runs the `amq-remote` found on `PATH` when it is this binary, so a
+Homebrew upgrade keeps it working; otherwise install warns which binary the
+service runs. A temporary build (`go run`) is refused. The service restarts
+`up` only when `up` fails, and `up` keeps its single-instance lock: a manual
+`up` for the same root while the service runs exits 6, and while a manual `up`
+runs, the service retries every 10 s and takes over when it stops.
+
+`amq-remote service status` reports the root the installed unit runs and its
+state: `current` (the unit install would write now), `stale` (another
+`amq-remote` binary: install again), `other_root`, or `missing`; and whether
+its process runs now. `amq-remote service uninstall` stops the service and
+removes its unit; when the stop fails (no login session to reach), it still
+removes the unit and says that the running endpoint stops at logout. Neither
+command changes a unit it did not write. `doctor` names `service install` when
+the root has a link and no current service for it.
+
 A link lives in exactly one root, normally the machine root; its state is
 never copied or moved. One link name in two roots is refused.
 State, per link root under `<root>/extensions/remote/link/` (normally
@@ -436,7 +473,9 @@ endpoint retires the sink and deletes the key. Close 1012 (server restart)
 reconnects after 0-60 s; 45 s without a ping reconnects too.
 
 A session shared with a link never gains answering authority: the server sees
-the agent's prompts and cannot answer them.
+the agent's prompts and cannot answer them. A tool permission prompt is
+answered in the session's terminal, and a task that needs one waits there;
+`attach --self --link` says so (JSON `"approvals": "terminal"`).
 
 ## Flags
 
@@ -529,11 +568,18 @@ publishes in `bridge.liveness`, with the chat's session id. Codex is found by
 registers the target in the running endpoint without a restart and adds it
 to `manifest.json`. When no endpoint runs, it starts `amq-remote up` in the
 background (log: `up.log` in the state directory). Claude needs the Stop hook
-on this path.
+on this path: without it a task never finishes, so attach of a Claude session
+(`--native` or `--link`) exits 6 and names `amq-remote claude
+install-stop-hook`. When that file sets `disableAllHooks`, attach goes ahead
+and warns (JSON `warning`), because a project or managed setting decides
+whether the hook runs. Attach never edits `~/.claude/settings.json` itself.
 
 Each attach writes a **named** binding, `~/.amq/remote/bindings/<name>.json`
 (default `<handle>-<project>-<session>` for a root
-`<project>/.agent-mail/<session>`, or the native target; `--name` overrides),
+`<project>/.agent-mail/<session>`; for a native session `<kind>-<project>`,
+from the session's own working directory, or the native target when that
+directory is unknown or the session is shared with a link; `--name`
+overrides),
 and removes any other binding for the same session. A session keeps the name
 it already holds; when another session holds its default name, it takes the
 first free `<name>-2`, `<name>-3`, and so on, and never replaces the other

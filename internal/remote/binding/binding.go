@@ -71,6 +71,9 @@ type Binding struct {
 	Label string `json:"label,omitempty"`
 	// Machine is the short name of the machine that holds the binding.
 	Machine string `json:"machine,omitempty"`
+	// AppServer is the Codex app-server thread that runs the session, which
+	// has no session process to hold; zero for other harnesses.
+	AppServer AppServerThread `json:"app_server,omitzero"`
 	// Name is the binding's name; it is the file name, not stored in it.
 	Name    string `json:"-"`
 	BoundAt string `json:"bound_at"`
@@ -114,6 +117,20 @@ func (b Binding) SessionIdentity() string {
 func NativeIdentity(kind, root, cwd string) string {
 	return "native:" + kind + "\x00" + canonicalRoot(cwd) + "\x00" + canonicalRoot(root)
 }
+
+// AppServerThread names a thread of a Codex app-server daemon, and the
+// daemon process that had it loaded when it was bound: only that same daemon
+// saying the thread is no longer loaded proves the session ended.
+type AppServerThread struct {
+	Socket string                `json:"socket"`
+	Thread string                `json:"thread"`
+	Daemon launch.HolderIdentity `json:"daemon,omitzero"`
+}
+
+// Inspector reports a binding's liveness with its evidence. Binding.Liveness
+// is the inspector that needs no harness; a caller that can ask a harness
+// (a Codex app-server) passes its own.
+type Inspector func(Binding) (State, string)
 
 // State is the liveness of a bound session.
 type State string
@@ -555,7 +572,7 @@ func WriteNamedIf(b Binding, allow func(old Binding) bool) error { return writeN
 // Another session's binding is never replaced, so a session never inherits
 // another session's Buzz agent, and the same session always gets back its own
 // name. The choice and the write share one transaction.
-func WriteSession(b Binding, base string) (string, error) {
+func WriteSession(b Binding, base string, inspect Inspector) (string, error) {
 	if err := ValidName(base); err != nil {
 		return "", err
 	}
@@ -594,7 +611,7 @@ func WriteSession(b Binding, base string) (string, error) {
 			if b.Mailbox() || b.Holder.PID > 0 && o.Holder == b.Holder {
 				return true
 			}
-			state, _ := o.Liveness()
+			state, _ := inspect(o)
 			return state == Ended
 		}
 		held := map[string]Binding{}
@@ -657,6 +674,46 @@ func WriteSession(b Binding, base string) (string, error) {
 	return name, nil
 }
 
+// Replace writes now in place of the binding called was.Name when that
+// binding is still exactly was, and reports whether it wrote. A binding that
+// changed or was removed meanwhile is left as it is. The check and the write
+// share one transaction.
+func Replace(was, now Binding) (bool, error) {
+	if err := ValidName(was.Name); err != nil {
+		return false, err
+	}
+	if err := now.Valid(); err != nil {
+		return false, err
+	}
+	raw, err := json.MarshalIndent(now, "", "  ")
+	if err != nil {
+		return false, err
+	}
+	replaced := false
+	err = transact(func(string) error {
+		dir, err := namedDir(false)
+		if err != nil {
+			return err
+		}
+		old, err := read(filepath.Join(dir, was.Name+".json"))
+		if errors.Is(err, ErrNone) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if old.Name = was.Name; old != was {
+			return nil
+		}
+		if _, err := fsq.WriteFileAtomic(dir, was.Name+".json", append(raw, '\n'), 0o600); err != nil {
+			return err
+		}
+		replaced = true
+		return nil
+	})
+	return replaced, err
+}
+
 func writeNamed(b Binding, allow func(old Binding) bool) error {
 	if err := ValidName(b.Name); err != nil {
 		return err
@@ -717,13 +774,14 @@ const tombstoneSuffix = ".ended.json"
 // P1-A1).
 func IsTombstone(fileName string) bool { return strings.HasSuffix(fileName, tombstoneSuffix) }
 
-// PruneEnded removes every binding whose session is proven ended and returns
-// the names removed. Each binding is checked as read under the binding lock,
-// so a session that attached again meanwhile is kept, and an unknown one is
-// kept too. Like every removal, it leaves tombstones (see Retire).
-func PruneEnded() ([]string, error) {
+// PruneEnded removes every binding whose session inspect proves ended and
+// returns the names removed. Each binding is checked as read under the
+// binding lock, so a session that attached again meanwhile is kept, and an
+// unknown one is kept too. Like every removal, it leaves tombstones (see
+// Retire).
+func PruneEnded(inspect Inspector) ([]string, error) {
 	return Retire(func(b Binding) bool {
-		state, _ := b.Liveness()
+		state, _ := inspect(b)
 		return state == Ended
 	})
 }

@@ -18,6 +18,9 @@ import (
 // boundary of the defect.
 func TestSelfCandidateFindsThePiChatItRunsIn(t *testing.T) {
 	t.Setenv("CODEX_THREAD_ID", "")
+	saved := ancestorPIDs
+	t.Cleanup(func() { ancestorPIDs = saved })
+	ancestorPIDs = psAncestorPIDs
 	root := t.TempDir()
 	stateDir := filepath.Join(root, stateDirName)
 	dir := filepath.Join(root, "agents", "chat-1", "extensions", "pi-bridge")

@@ -74,7 +74,7 @@ jobs:
         # alone with -p 1 instead of inside the parallel suite above.
         run: AMQ_HOOK_SCRIPT_TESTS=1 go test -p 1 -count=1 ./internal/keepalive/hookinstall/
       - name: Set up Node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '24'
       - name: pi extension test
