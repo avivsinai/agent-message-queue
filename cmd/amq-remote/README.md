@@ -570,7 +570,9 @@ to `manifest.json`. When no endpoint runs, it starts `amq-remote up` in the
 background (log: `up.log` in the state directory). Claude needs the Stop hook
 on this path: without it a task never finishes, so attach of a Claude session
 (`--native` or `--link`) exits 6 and names `amq-remote claude
-install-stop-hook`. Attach never edits `~/.claude/settings.json` itself.
+install-stop-hook`. When that file sets `disableAllHooks`, attach goes ahead
+and warns (JSON `warning`), because a project or managed setting decides
+whether the hook runs. Attach never edits `~/.claude/settings.json` itself.
 
 Each attach writes a **named** binding, `~/.amq/remote/bindings/<name>.json`
 (default `<handle>-<project>-<session>` for a root

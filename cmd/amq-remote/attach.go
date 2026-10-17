@@ -88,8 +88,9 @@ func attach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 	if err != nil {
 		return protocol.ExitActionRequired, err
 	}
+	hookWarning := ""
 	if cand.Kind == "claude" {
-		if err := requireStopHook(); err != nil {
+		if hookWarning, err = requireStopHook(); err != nil {
 			return protocol.ExitActionRequired, err
 		}
 	}
@@ -199,18 +200,20 @@ func attach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 		// share pins one), so the approval hook leaves every tool permission
 		// prompt to the session's own dialog.
 		if c.json {
-			emitJSON(stdout, map[string]any{"connected": true, "name": nb.Name, "root": nb.Root, "target": nb.Target, "link": *linkName, "approvals": "terminal"})
+			emitJSON(stdout, withWarning(map[string]any{"connected": true, "name": nb.Name, "root": nb.Root, "target": nb.Target, "link": *linkName, "approvals": "terminal"}, hookWarning))
 			return 0, nil
 		}
 		say(stdout, "Shared %s (%s) with link %s as %s (consent: %s, tools: %s).", nonEmpty(display, cand.Target), cand.Target, *linkName, nb.Name, *consent, nonEmpty(*tools, "none"))
 		say(stdout, "Tool approvals for this share are answered in the session's terminal; the linked server cannot answer them, so a task that needs one waits there.")
+		sayWarning(stdout, hookWarning)
 		return 0, nil
 	}
 	if c.json {
-		emitJSON(stdout, map[string]any{"connected": true, "name": nb.Name, "root": nb.Root, "target": nb.Target})
+		emitJSON(stdout, withWarning(map[string]any{"connected": true, "name": nb.Name, "root": nb.Root, "target": nb.Target}, hookWarning))
 		return 0, nil
 	}
 	say(stdout, "Connected: %s (%s) as session %s. DM its Buzz agent \"AMQ: %s\".", nonEmpty(display, cand.Target), cand.Target, nb.Name, nb.Name)
+	sayWarning(stdout, hookWarning)
 	return 0, nil
 }
 
@@ -865,16 +868,36 @@ var claudeStopHookState = func() (string, error) {
 // hook: a remote task there is admitted and never completes, so it stays
 // running and parks every later task as busy (linked server's first live
 // run, amq-remote 0.97.0). attach never edits ~/.claude/settings.json; it
-// names the command that does.
-func requireStopHook() error {
+// names the command that does. A hook that the user settings turn off with
+// disableAllHooks is accepted with a warning: a project or managed setting
+// may turn hooks back on, and only the user file is read (review-stack
+// P2-C1).
+func requireStopHook() (warning string, err error) {
 	state, err := claudeStopHookState()
 	switch {
 	case err != nil:
-		return fmt.Errorf("cannot read ~/.claude/settings.json to check the AMQ Stop hook: %v; repair it, then attach again", err)
+		return "", fmt.Errorf("cannot read ~/.claude/settings.json to check the AMQ Stop hook: %v; repair it, then attach again", err)
 	case state == claude.StopHookMissing:
-		return protocol.Refuse(protocol.CodeUnsupported, "the AMQ Stop hook is not installed, so a remote task in this Claude Code session would never finish; run `amq-remote claude install-stop-hook`, then attach again")
+		return "", protocol.Refuse(protocol.CodeUnsupported, "the AMQ Stop hook is not installed, so a remote task in this Claude Code session would never finish; run `amq-remote claude install-stop-hook`, then attach again")
+	case state == claude.StopHookDisabled:
+		return "~/.claude/settings.json sets disableAllHooks, so the AMQ Stop hook runs only if a project or managed setting turns hooks on; otherwise a remote task never finishes", nil
 	}
-	return nil
+	return "", nil
+}
+
+// withWarning adds a warning to a JSON result when there is one.
+func withWarning(out map[string]any, warning string) map[string]any {
+	if warning != "" {
+		out["warning"] = warning
+	}
+	return out
+}
+
+// sayWarning prints a warning line when there is one.
+func sayWarning(w io.Writer, warning string) {
+	if warning != "" {
+		say(w, "Warning: %s.", warning)
+	}
 }
 
 // selfCandidate finds the invoking native session among discovered ones.
