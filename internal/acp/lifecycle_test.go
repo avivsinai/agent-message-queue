@@ -1,12 +1,14 @@
 package acp
 
 import (
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 )
 
@@ -107,7 +109,12 @@ func TestTwoAgentsOnOnePinEachChangeOnce(t *testing.T) {
 // the helper asks nothing more.
 func TestHelperDraftsAnAgentForANewSession(t *testing.T) {
 	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
-	if err := binding.WriteNamed(binding.Binding{Carrier: binding.CarrierMailbox, Root: canonicalTempDir(t), Handle: "agent", Name: "alpha"}); err != nil {
+	holder, err := launch.HolderOf(os.Getpid()) // this test is the live session
+	if err != nil {
+		t.Skip("no holder identity on this platform:", err)
+	}
+	const label = "claude · project/alpha @ machine"
+	if err := binding.WriteNamed(binding.Binding{Carrier: binding.CarrierMailbox, Root: canonicalTempDir(t), Handle: "agent", Name: "alpha", Holder: holder, Label: label}); err != nil {
 		t.Fatal(err)
 	}
 	savedSelf, savedOwner, savedCall := buzzSelf, buzzOwner, buzzCall
@@ -138,9 +145,9 @@ func TestHelperDraftsAnAgentForANewSession(t *testing.T) {
 
 	want := []string{
 		"channels add-member --channel " + control + " --pubkey " + owner,
-		"agents draft-create --channel " + control + " --display-name AMQ: alpha --system-prompt AMQ Remote session: alpha",
+		"agents draft-create --channel " + control + " --display-name " + label + " --system-prompt AMQ Remote session: alpha",
 	}
-	if len(calls) == 0 || !strings.HasPrefix(calls[0], "channels create --name amq-remote") || !strings.HasSuffix(calls[0], " --type stream --visibility private") || !slices.Equal(calls[1:], want) {
+	if len(calls) == 0 || calls[0] != "channels create --name amq-remote @ "+binding.Machine()+" --type stream --visibility private" || !slices.Equal(calls[1:], want) {
 		t.Fatalf("buzz calls = %q\nwant a private channel create, then %q", calls, want)
 	}
 }

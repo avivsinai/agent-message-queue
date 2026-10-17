@@ -129,6 +129,10 @@ func (s *Server) unpinnedReply(e *unpinnedError) string {
 			fmt.Fprintf(&b, "\n- %s: DM %s", bd.Name, strings.Join(names, " or "))
 			continue
 		}
+		if e.helper {
+			fmt.Fprintf(&b, "\n- %s: no agent yet; Buzz Desktop opens \"Create agent\" for it", bd.Name)
+			continue
+		}
 		fmt.Fprintf(&b, "\n- %s: no agent yet; run `amq-acp setup --session %s` and import the file in Buzz Desktop", bd.Name, bd.Name)
 	}
 	return b.String()
@@ -273,11 +277,13 @@ func (s *Server) writeAgentMarker(dir string, m agentMarker, now time.Time) {
 //     adds the owner: Desktop accepts an agent draft only from a channel
 //     that both the sending agent and the owner belong to, and adds each new
 //     agent to that channel;
-//   - for each binding that no agent has a marker for yet, sends one
+//   - for each live binding that no agent has a marker for yet, sends one
 //     draft-create, so Desktop opens "Create agent" with the session's name
-//     and pin filled in. A request is retried at most helperRequestTries
-//     times, helperRequestGap apart; the draft is ephemeral, so a closed
-//     Desktop drops it.
+//     and pin filled in. A binding whose session is unknown or ended, and
+//     the legacy unnamed binding, never get one. A request is retried at
+//     most helperRequestTries times, helperRequestGap apart, and a re-attach
+//     (a newer bound_at) starts a new budget; the draft is ephemeral, so a
+//     closed Desktop drops it.
 
 // helperName is the helper's marker directory under agents/. It is not a
 // valid binding name, so it never meets a session's.
@@ -305,7 +311,7 @@ func (s *Server) helperTick(now time.Time) {
 	defer func() { s.writeAgentMarker(dir, m, now) }()
 	if m.Channel == "" {
 		name := "amq-remote"
-		if machine := machineName(); machine != "" {
+		if machine := binding.Machine(); machine != "" {
 			name += " @ " + machine
 		}
 		out, err := buzzCall(s.cfg.PostTimeout, "channels", "create", "--name", name, "--type", "stream", "--visibility", "private")
@@ -329,7 +335,10 @@ func (s *Server) helperTick(now time.Time) {
 		return
 	}
 	for _, b := range all {
-		if len(s.agentMarkers(b.Name)) == 0 {
+		if b.Name == binding.LegacyName || len(s.agentMarkers(b.Name)) > 0 {
+			continue
+		}
+		if state, _ := b.Liveness(); state == binding.Live {
 			s.requestSessionAgent(m.Channel, b, now)
 		}
 	}
@@ -343,7 +352,11 @@ func (s *Server) requestSessionAgent(channel string, b binding.Binding, now time
 	if raw, err := readSmallRegular(filepath.Join(dir, b.Name+".json")); err == nil {
 		_ = json.Unmarshal(raw, &req)
 	}
-	if last, err := time.Parse(time.RFC3339, req.Last); req.Count >= helperRequestTries || (err == nil && now.Sub(last) < helperRequestGap) {
+	last, err := time.Parse(time.RFC3339, req.Last)
+	if bound, berr := time.Parse(time.RFC3339, b.BoundAt); err == nil && berr == nil && bound.After(last) {
+		req = helperRequest{} // a re-attach is a new request
+	}
+	if req.Count >= helperRequestTries || (req.Count > 0 && err == nil && now.Sub(last) < helperRequestGap) {
 		return
 	}
 	req.Count++
@@ -360,27 +373,11 @@ func (s *Server) requestSessionAgent(channel string, b binding.Binding, now time
 	_ = buzzRun(s.cfg.PostTimeout, "agents", "draft-create", "--channel", channel, "--display-name", sessionAgentName(b), "--system-prompt", "AMQ Remote session: "+b.Name)
 }
 
-// sessionAgentName is the Buzz agent name for b's session.
+// sessionAgentName is the Buzz agent name for b's session: its label, else
+// "AMQ: <name>" for a binding written before labels.
 func sessionAgentName(b binding.Binding) string {
+	if b.Label != "" {
+		return b.Label
+	}
 	return "AMQ: " + b.Name
-}
-
-// machineName is this machine's short name: the first label of its host
-// name, lowercase, with other characters as '-', at most 32 characters.
-func machineName() string {
-	host, _ := os.Hostname()
-	first, _, _ := strings.Cut(host, ".")
-	var b strings.Builder
-	for _, r := range strings.ToLower(first) {
-		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' {
-			b.WriteRune(r)
-		} else {
-			b.WriteRune('-')
-		}
-	}
-	out := strings.Trim(b.String(), "-")
-	if len(out) > 32 {
-		out = strings.Trim(out[:32], "-")
-	}
-	return out
 }
