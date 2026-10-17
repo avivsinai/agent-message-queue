@@ -674,6 +674,46 @@ func WriteSession(b Binding, base string, inspect Inspector) (string, error) {
 	return name, nil
 }
 
+// Replace writes now in place of the binding called was.Name when that
+// binding is still exactly was, and reports whether it wrote. A binding that
+// changed or was removed meanwhile is left as it is. The check and the write
+// share one transaction.
+func Replace(was, now Binding) (bool, error) {
+	if err := ValidName(was.Name); err != nil {
+		return false, err
+	}
+	if err := now.Valid(); err != nil {
+		return false, err
+	}
+	raw, err := json.MarshalIndent(now, "", "  ")
+	if err != nil {
+		return false, err
+	}
+	replaced := false
+	err = transact(func(string) error {
+		dir, err := namedDir(false)
+		if err != nil {
+			return err
+		}
+		old, err := read(filepath.Join(dir, was.Name+".json"))
+		if errors.Is(err, ErrNone) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if old.Name = was.Name; old != was {
+			return nil
+		}
+		if _, err := fsq.WriteFileAtomic(dir, was.Name+".json", append(raw, '\n'), 0o600); err != nil {
+			return err
+		}
+		replaced = true
+		return nil
+	})
+	return replaced, err
+}
+
 func writeNamed(b Binding, allow func(old Binding) bool) error {
 	if err := ValidName(b.Name); err != nil {
 		return err
