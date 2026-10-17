@@ -61,13 +61,24 @@ func buzzChannel(prompt string) string {
 	return ""
 }
 
-// captureBuzzIdentity records the credentials the buzz CLI needs, and the
-// agent's owner (approval.go).
+// buzzSelf is the managed agent's own public key (64 lowercase hex), or ""
+// when the secret is absent or unreadable. The agent archives and unarchives
+// itself under it (lifecycle.go).
+var buzzSelf string
+
+// captureBuzzIdentity records the credentials the buzz CLI needs, the agent's
+// own public key, and the agent's owner (approval.go).
 func captureBuzzIdentity() {
 	buzzIdentity = nil
 	for _, key := range buzzIdentityKeys {
 		if v := strings.TrimSpace(os.Getenv(key)); v != "" {
 			buzzIdentity = append(buzzIdentity, key+"="+v)
+		}
+	}
+	buzzSelf = ""
+	if secret := strings.TrimSpace(os.Getenv("BUZZ_PRIVATE_KEY")); secret != "" {
+		if pub, err := agentPubKey(secret); err == nil {
+			buzzSelf = pub
 		}
 	}
 	buzzOwner = agentOwner(os.Getenv("BUZZ_AUTH_TAG"), os.Getenv("BUZZ_PRIVATE_KEY"), os.Getenv("BUZZ_ACP_AGENT_OWNER"))

@@ -72,7 +72,17 @@ type Config struct {
 	RemoteNative string
 	// RemoteBinding reads root, target and native pin from the binding file
 	// on each prompt (AMQ_ACP_REMOTE=binding).
-	RemoteBinding     bool
+	RemoteBinding bool
+	// Pin is the binding this Buzz agent serves in binding mode, named by its
+	// system prompt or its model (lifecycle.go). Empty means unpinned: the
+	// agent drives the only binding and refuses when several exist.
+	Pin string
+	// Helper marks the per-machine helper (system prompt line "AMQ Remote
+	// helper"). It serves no session and never delivers.
+	Helper bool
+	// PinErr refuses every prompt: the two pin sources disagree, or the name
+	// is not a binding name.
+	PinErr            error
 	StateDir          string
 	TurnTimeout       time.Duration
 	PollInterval      time.Duration
@@ -169,6 +179,7 @@ func loadBindingConfig() (Config, error) {
 		return Config{}, contextError("%v", err)
 	}
 	cfg := Config{RemoteBinding: true, StateDir: filepath.Join(filepath.Dir(path), "acp")}
+	cfg.Pin, cfg.Helper, cfg.PinErr = sessionPin(buzzAgent.systemPrompt, buzzAgent.model)
 	if cfg.TurnTimeout, err = durationEnv(EnvTurnTimeout, defaultTurnTimeout); err != nil {
 		return Config{}, err
 	}

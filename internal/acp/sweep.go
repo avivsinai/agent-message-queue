@@ -45,9 +45,11 @@ type lateReplySweep struct {
 	pendingMu sync.Mutex
 	pending   map[string]struct{}
 
-	// Owned by the worker (or a test calling sweepLateReplies).
-	cursor *os.File
-	scans  map[string][2]*inboxScan
+	// Owned by the worker (or a test calling sweepLateReplies). The cursor
+	// lists claimDirs()[cursorDir].
+	cursor    *os.File
+	cursorDir int
+	scans     map[string][2]*inboxScan
 }
 
 // add records a mailbox event this process claimed.
@@ -91,6 +93,9 @@ func (s *Server) startLateReplySweep() (stop func()) {
 		defer close(done)
 		tick := time.NewTicker(lateReplyInterval)
 		defer tick.Stop()
+		// The same worker keeps a pinned agent archived or not; it starts
+		// with a tick, so a restarted agent catches up at once.
+		s.lifecycleTick(time.Now())
 		for {
 			select {
 			case <-quit:
@@ -99,6 +104,7 @@ func (s *Server) startLateReplySweep() (stop func()) {
 			case <-kick:
 			}
 			s.sweepLateReplies(time.Now())
+			s.lifecycleTick(time.Now())
 		}
 	}()
 	return func() {
@@ -215,14 +221,18 @@ func matchClaims(sc *inboxScan, index map[string]*lateClaim) map[string][]replyH
 	return hits
 }
 
-// discoverClaims lists the next lateReplyBudget entries of remote-events
-// and adds the recent mailbox claims among them. The listing resumes where
-// the last sweep stopped and starts over after its end.
+// discoverClaims lists the next lateReplyBudget entries of this agent's
+// claim directories and adds the recent mailbox claims among them. The
+// listing resumes where the last sweep stopped and moves to the next
+// directory after the end of one.
 func (s *Server) discoverClaims(now time.Time) {
 	l := &s.late
 	if l.cursor == nil {
-		f, err := os.Open(filepath.Join(s.cfg.StateDir, "remote-events"))
+		dirs := s.claimDirs()
+		l.cursorDir %= len(dirs)
+		f, err := os.Open(dirs[l.cursorDir])
 		if err != nil {
+			l.cursorDir++
 			return
 		}
 		l.cursor = f
@@ -240,7 +250,17 @@ func (s *Server) discoverClaims(now time.Time) {
 	if err != nil || len(entries) < lateReplyBudget {
 		_ = l.cursor.Close()
 		l.cursor = nil
+		l.cursorDir++
 	}
+}
+
+// claimDirs are the directories that hold this agent's claims: its own, then
+// remote-events for claims written before per-agent directories.
+func (s *Server) claimDirs() []string {
+	if buzzSelf == "" {
+		return []string{s.eventsDir()}
+	}
+	return []string{filepath.Join(s.eventsDir(), buzzSelf), s.eventsDir()}
 }
 
 // lateClaim is one mailbox event the sweep may post for.
@@ -257,8 +277,14 @@ func (s *Server) loadLateClaim(eventID string, now time.Time) (*lateClaim, bool)
 	if _, ok := s.mailboxAnswered(eventID); ok {
 		return nil, false
 	}
-	dir := filepath.Join(s.cfg.StateDir, "remote-events")
+	dir := s.eventDir(eventID)
 	c := lateClaim{eventID: eventID}
+	// Only this agent's own claim: another agent posts its own replies.
+	var rec eventClaim
+	if raw, err := readSmallRegular(filepath.Join(dir, eventID+".json")); err != nil || json.Unmarshal(raw, &rec) != nil || rec.Valid() != nil || !rec.Mailbox() || !s.ownsClaim(rec, "") {
+		return nil, false
+	}
+	c.b = rec.binding()
 	if raw, err := readSmallRegular(filepath.Join(dir, eventID+".mailbox.json")); err != nil || json.Unmarshal(raw, &c.claim) != nil || c.claim.MessageID == "" {
 		return nil, false
 	}
@@ -269,9 +295,6 @@ func (s *Server) loadLateClaim(eventID string, now time.Time) (*lateClaim, bool)
 	c.created = created
 	if now.Before(created.Add(s.cfg.TurnTimeout)) {
 		return nil, true // its turn can still be open
-	}
-	if raw, err := readSmallRegular(filepath.Join(dir, eventID+".json")); err != nil || json.Unmarshal(raw, &c.b) != nil || c.b.Valid() != nil || !c.b.Mailbox() {
-		return nil, false
 	}
 	// No delivery named a channel yet: a later one may record it.
 	if c.channel = s.eventChannel(eventID, c.claim.Channel, ""); c.channel == "" {

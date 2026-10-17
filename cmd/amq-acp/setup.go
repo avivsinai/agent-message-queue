@@ -46,11 +46,12 @@ type agentSnapshot struct {
 }
 
 type agentSnapshotDefinition struct {
-	Name        string `json:"name"`
-	Runtime     string `json:"runtime"`
-	Model       string `json:"model"`
-	Parallelism int    `json:"parallelism"`
-	RespondTo   string `json:"respondTo"`
+	Name         string `json:"name"`
+	SystemPrompt string `json:"systemPrompt,omitempty"`
+	Runtime      string `json:"runtime"`
+	Model        string `json:"model"`
+	Parallelism  int    `json:"parallelism"`
+	RespondTo    string `json:"respondTo"`
 }
 
 type agentSnapshotProfile struct {
@@ -148,22 +149,25 @@ func remoteHarness(command string) buzzHarness {
 }
 
 // remoteSnapshotBody is the Import file. With a session name the agent is
-// "AMQ: <name>" and its model amq-remote:<name> selects that one binding, so
-// each session has its own Buzz agent (bead agent-message-queue-611.39).
+// "AMQ: <name>" and its system prompt line "AMQ Remote session: <name>" pins
+// it to that one binding, so each session has its own Buzz agent. The model
+// stays the plain amq-remote: the pin has one source. Without a session name
+// the agent is unpinned and serves no session.
 func remoteSnapshotBody(session string) ([]byte, error) {
-	agentName, model := "AMQ Remote", remoteModelID
+	agentName, systemPrompt := "AMQ Remote", ""
 	if session != "" {
-		agentName, model = "AMQ: "+session, remoteModelID+":"+session
+		agentName, systemPrompt = "AMQ: "+session, "AMQ Remote session: "+session
 	}
 	body, err := json.MarshalIndent(agentSnapshot{
 		Format:  "buzz-agent-snapshot",
 		Version: 1,
 		Definition: agentSnapshotDefinition{
-			Name:        agentName,
-			Runtime:     remoteHarnessID,
-			Model:       model,
-			Parallelism: 1,
-			RespondTo:   ownerOnlyRespondTo,
+			Name:         agentName,
+			SystemPrompt: systemPrompt,
+			Runtime:      remoteHarnessID,
+			Model:        remoteModelID,
+			Parallelism:  1,
+			RespondTo:    ownerOnlyRespondTo,
 		},
 		Profile: agentSnapshotProfile{DisplayName: agentName},
 		Memory:  agentSnapshotMemory{Level: "none"},

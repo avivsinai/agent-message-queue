@@ -307,7 +307,7 @@ func (s *Server) eventChannel(eventID, claimed, turn string) string {
 	if claimed != "" || eventID == "" {
 		return claimed
 	}
-	path := filepath.Join(s.cfg.StateDir, "remote-events", eventID+".channel")
+	path := filepath.Join(s.eventDir(eventID), eventID+".channel")
 	if turn != "" {
 		if _, err := createExclusive(path, []byte(turn)); err != nil {
 			return ""
@@ -370,7 +370,7 @@ func (s *Server) mailboxAnswered(eventID string) (mailboxOutcome, bool) {
 	if eventID == "" {
 		return mailboxOutcome{}, false
 	}
-	raw, err := readSmallRegular(filepath.Join(s.cfg.StateDir, "remote-events", eventID+".posted."+postFinal))
+	raw, err := readSmallRegular(filepath.Join(s.eventDir(eventID), eventID+".posted."+postFinal))
 	if err != nil {
 		return mailboxOutcome{}, !errors.Is(err, os.ErrNotExist)
 	}
@@ -392,7 +392,7 @@ func (s *Server) mailboxClaim(eventID, threadID, channel string) (mailboxClaim, 
 	if eventID == "" {
 		return fresh, true, nil
 	}
-	path := filepath.Join(s.cfg.StateDir, "remote-events", eventID+".mailbox.json")
+	path := filepath.Join(s.eventDir(eventID), eventID+".mailbox.json")
 	raw, err := json.Marshal(fresh)
 	if err != nil {
 		return mailboxClaim{}, false, err
@@ -498,7 +498,7 @@ func (s *Server) publishClaimed(r *remoteTurn, budget time.Time, b binding.Bindi
 		}
 		return !time.Now().Before(budget)
 	}
-	path := filepath.Join(s.cfg.StateDir, "remote-events", r.eventID+".mailbox.lock")
+	path := filepath.Join(s.eventDir(r.eventID), r.eventID+".mailbox.lock")
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return claim, err
 	}
