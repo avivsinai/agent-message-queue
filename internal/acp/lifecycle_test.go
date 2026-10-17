@@ -124,13 +124,7 @@ func TestHelperDraftsAnAgentForANewSession(t *testing.T) {
 	helperKey, owner := strings.Repeat("c", 64), strings.Repeat("d", 64)
 	buzzOwner = owner
 	var calls []string
-	buzzCall = func(_ time.Duration, args ...string) ([]byte, error) {
-		calls = append(calls, strings.Join(args, " "))
-		if args[0] == "channels" && args[1] == "create" {
-			return []byte(`{"accepted":true,"channel_id":"` + control + `"}`), nil
-		}
-		return nil, nil
-	}
+	buzzCall = recordHelperCalls(&calls, control)
 	state := canonicalTempDir(t)
 	helper := NewServer(Config{RemoteBinding: true, Helper: true, StateDir: state}, "test")
 	agent := NewServer(Config{RemoteBinding: true, Pin: "alpha", StateDir: state}, "test")
@@ -144,10 +138,71 @@ func TestHelperDraftsAnAgentForANewSession(t *testing.T) {
 	helper.lifecycleTick(now.Add(time.Hour))
 
 	want := []string{
+		"channels list --member",
+		"channels create --name amq-remote @ " + binding.Machine() + " --type stream --visibility private",
 		"channels add-member --channel " + control + " --pubkey " + owner,
 		"agents draft-create --channel " + control + " --display-name " + label + " --system-prompt AMQ Remote session: alpha",
 	}
-	if len(calls) == 0 || calls[0] != "channels create --name amq-remote @ "+binding.Machine()+" --type stream --visibility private" || !slices.Equal(calls[1:], want) {
-		t.Fatalf("buzz calls = %q\nwant a private channel create, then %q", calls, want)
+	if !slices.Equal(calls, want) {
+		t.Fatalf("buzz calls = %q\nwant %q", calls, want)
+	}
+}
+
+// recordHelperCalls records the helper's buzz calls and answers them as a
+// relay that accepts: no channel yet, then control as the created channel.
+func recordHelperCalls(calls *[]string, control string) func(time.Duration, ...string) ([]byte, error) {
+	return func(_ time.Duration, args ...string) ([]byte, error) {
+		*calls = append(*calls, strings.Join(args, " "))
+		switch args[0] + " " + args[1] {
+		case "channels list":
+			return []byte(`[]`), nil
+		case "channels create":
+			return []byte(`{"accepted":true,"channel_id":"` + control + `"}`), nil
+		case "channels add-member":
+			return []byte(`{"accepted":true}`), nil
+		}
+		return nil, nil
+	}
+}
+
+// Review of S4 P1-1: Desktop shows one draft at a time and drops a draft
+// that arrives while one is open. The helper drafted every new session in
+// one tick, so only the first opened and the others spent their tries.
+func TestHelperDraftsOneSessionPerWindow(t *testing.T) {
+	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
+	holder, err := launch.HolderOf(os.Getpid())
+	if err != nil {
+		t.Skip("no holder identity on this platform:", err)
+	}
+	for _, name := range []string{"alpha", "beta"} {
+		if err := binding.WriteNamed(binding.Binding{Carrier: binding.CarrierMailbox, Root: canonicalTempDir(t), Handle: "agent", Name: name, Holder: holder}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	savedSelf, savedOwner, savedCall := buzzSelf, buzzOwner, buzzCall
+	t.Cleanup(func() { buzzSelf, buzzOwner, buzzCall = savedSelf, savedOwner, savedCall })
+	recordPosts(t)
+	buzzSelf, buzzOwner = strings.Repeat("c", 64), strings.Repeat("d", 64)
+	var calls []string
+	buzzCall = recordHelperCalls(&calls, "0b2c39a1-6f1e-4d0a-9b3a-5c1d2e3f4a5b")
+	helper := NewServer(Config{RemoteBinding: true, Helper: true, StateDir: canonicalTempDir(t)}, "test")
+	drafts := func() []string {
+		var out []string
+		for _, c := range calls {
+			if strings.HasPrefix(c, "agents draft-create") {
+				out = append(out, c[strings.LastIndex(c, ": ")+2:])
+			}
+		}
+		return out
+	}
+	now := time.Now()
+	helper.lifecycleTick(now)
+	helper.lifecycleTick(now.Add(time.Minute))
+	if got := drafts(); !slices.Equal(got, []string{"alpha"}) {
+		t.Fatalf("drafts in the first window = %q; want only alpha", got)
+	}
+	helper.lifecycleTick(now.Add(helperRequestGap + time.Minute))
+	if got := drafts(); !slices.Equal(got, []string{"alpha", "beta"}) {
+		t.Fatalf("drafts after the next window = %q; want beta next", got)
 	}
 }

@@ -129,13 +129,33 @@ func (s *Server) unpinnedReply(e *unpinnedError) string {
 			fmt.Fprintf(&b, "\n- %s: DM %s", bd.Name, strings.Join(names, " or "))
 			continue
 		}
-		if e.helper {
-			fmt.Fprintf(&b, "\n- %s: no agent yet; Buzz Desktop opens \"Create agent\" for it", bd.Name)
-			continue
-		}
-		fmt.Fprintf(&b, "\n- %s: no agent yet; run `amq-acp setup --session %s` and import the file in Buzz Desktop", bd.Name, bd.Name)
+		fmt.Fprintf(&b, "\n- %s: %s", bd.Name, s.noAgentText(bd, e.helper))
 	}
 	return b.String()
+}
+
+// noAgentText says what to do for a session with no running agent. Only
+// the helper drafts, and only for a live session with tries left.
+func (s *Server) noAgentText(b binding.Binding, helper bool) string {
+	importStep := fmt.Sprintf("run `amq-acp setup --session %s` and import the file in Buzz Desktop", b.Name)
+	if markers := s.agentMarkers(b.Name); len(markers) > 0 {
+		for _, m := range markers {
+			if m.running(time.Now()) {
+				return "its agent runs; DM it in Buzz"
+			}
+		}
+		return "its agent is not running; start it in Buzz Desktop"
+	}
+	if !helper || b.Name == binding.LegacyName {
+		return "no agent yet; " + importStep
+	}
+	if state, _ := b.Liveness(); state != binding.Live {
+		return fmt.Sprintf("session state %s, so no agent is drafted; run /amq-remote in that session, or %s", state, importStep)
+	}
+	if s.helperRequest(b).Count >= helperRequestTries {
+		return "Buzz Desktop did not create its agent; run /amq-remote in that session again, or " + importStep
+	}
+	return "no agent yet; Buzz Desktop opens \"Create agent\" for it"
 }
 
 // agentMarker is a pinned agent's record under
@@ -157,7 +177,11 @@ type agentMarker struct {
 	// owner is a member of the control channel.
 	Channel    string `json:"channel,omitempty"`
 	OwnerAdded bool   `json:"owner_added,omitempty"`
-	Updated    string `json:"updated"`
+	// SetupFailed and LastDraft are the helper's: when its control channel
+	// setup last failed, and when it last sent a draft.
+	SetupFailed string `json:"setup_failed,omitempty"`
+	LastDraft   string `json:"last_draft,omitempty"`
+	Updated     string `json:"updated"`
 }
 
 // agentMarkerFresh is how old a marker may be while its agent still runs.
@@ -277,13 +301,13 @@ func (s *Server) writeAgentMarker(dir string, m agentMarker, now time.Time) {
 //     adds the owner: Desktop accepts an agent draft only from a channel
 //     that both the sending agent and the owner belong to, and adds each new
 //     agent to that channel;
-//   - for each live binding that no agent has a marker for yet, sends one
-//     draft-create, so Desktop opens "Create agent" with the session's name
-//     and pin filled in. A binding whose session is unknown or ended, and
-//     the legacy unnamed binding, never get one. A request is retried at
-//     most helperRequestTries times, helperRequestGap apart, and a re-attach
-//     (a newer bound_at) starts a new budget; the draft is ephemeral, so a
-//     closed Desktop drops it.
+//   - sends one draft-create per helperRequestGap for a live binding that
+//     no agent has a marker for yet (the fewest tries, then the oldest), so
+//     Desktop opens "Create agent" with the session's name and pin filled
+//     in. A binding whose session is unknown or ended, and the legacy
+//     unnamed binding, never get one. A binding gets at most
+//     helperRequestTries drafts, and a re-attach (a newer bound_at) starts a
+//     new budget; the draft is ephemeral, so a closed Desktop drops it.
 
 // helperName is the helper's marker directory under agents/. It is not a
 // valid binding name, so it never meets a session's.
@@ -302,75 +326,141 @@ type helperRequest struct {
 }
 
 func (s *Server) helperTick(now time.Time) {
-	if buzzSelf == "" || buzzOwner == "" {
+	if buzzSelf == "" {
 		return
 	}
 	dir := s.agentMarkerDir(helperName)
 	m, _ := readAgentMarker(filepath.Join(dir, buzzSelf+".json"))
 	m.Name, m.DisplayName = helperName, buzzAgent.displayName
 	defer func() { s.writeAgentMarker(dir, m, now) }()
-	if m.Channel == "" {
-		name := "amq-remote"
-		if machine := binding.Machine(); machine != "" {
-			name += " @ " + machine
+	if buzzOwner == "" || !s.helperChannel(&m, now) {
+		return
+	}
+	// Desktop shows one draft at a time and drops a draft that arrives
+	// while one is open, so the helper sends at most one draft per window
+	// across all sessions (review of S4 P1-1).
+	if last, err := time.Parse(time.RFC3339, m.LastDraft); err == nil && now.Sub(last) < helperRequestGap {
+		return
+	}
+	all, err := binding.List()
+	if err != nil {
+		return
+	}
+	var next *binding.Binding
+	var nextReq helperRequest
+	for i, b := range all {
+		if !s.draftable(b) {
+			continue
 		}
+		req := s.helperRequest(b)
+		if req.Count >= helperRequestTries {
+			continue
+		}
+		if next == nil || req.Count < nextReq.Count || (req.Count == nextReq.Count && req.Last < nextReq.Last) {
+			next, nextReq = &all[i], req
+		}
+	}
+	if next != nil && s.requestSessionAgent(m.Channel, *next, nextReq, now) {
+		m.LastDraft = now.UTC().Format(time.RFC3339)
+	}
+}
+
+// helperChannel makes sure the control channel exists and the owner is in
+// it. It adopts a channel of the same name the helper is already a member
+// of before it creates one, and after a failure waits helperRequestGap, so a
+// failing relay never gets a request every tick and an unclear create never
+// leaves a stream of new channels.
+func (s *Server) helperChannel(m *agentMarker, now time.Time) bool {
+	if m.Channel != "" && m.OwnerAdded {
+		return true
+	}
+	if failed, err := time.Parse(time.RFC3339, m.SetupFailed); err == nil && now.Sub(failed) < helperRequestGap {
+		return false
+	}
+	m.SetupFailed = now.UTC().Format(time.RFC3339)
+	name := "amq-remote"
+	if machine := binding.Machine(); machine != "" {
+		name += " @ " + machine
+	}
+	if m.Channel == "" {
+		out, err := buzzCall(s.cfg.PostTimeout, "channels", "list", "--member")
+		var listed []struct {
+			ChannelID string `json:"channel_id"`
+			Name      string `json:"name"`
+		}
+		if err != nil || json.Unmarshal(out, &listed) != nil {
+			return false
+		}
+		for _, c := range listed {
+			if c.Name == name && c.ChannelID != "" {
+				m.Channel = c.ChannelID
+				break
+			}
+		}
+	}
+	if m.Channel == "" {
 		out, err := buzzCall(s.cfg.PostTimeout, "channels", "create", "--name", name, "--type", "stream", "--visibility", "private")
 		var created struct {
 			Accepted  bool   `json:"accepted"`
 			ChannelID string `json:"channel_id"`
 		}
 		if err != nil || json.Unmarshal(out, &created) != nil || !created.Accepted || created.ChannelID == "" {
-			return
+			return false
 		}
 		m.Channel = created.ChannelID
 	}
-	if !m.OwnerAdded {
-		if buzzRun(s.cfg.PostTimeout, "channels", "add-member", "--channel", m.Channel, "--pubkey", buzzOwner) != nil {
-			return
-		}
-		m.OwnerAdded = true
+	out, err := buzzCall(s.cfg.PostTimeout, "channels", "add-member", "--channel", m.Channel, "--pubkey", buzzOwner)
+	var added struct {
+		Accepted bool `json:"accepted"`
 	}
-	all, err := binding.List()
-	if err != nil {
-		return
+	if err != nil || json.Unmarshal(out, &added) != nil || !added.Accepted {
+		return false
 	}
-	for _, b := range all {
-		if b.Name == binding.LegacyName || len(s.agentMarkers(b.Name)) > 0 {
-			continue
-		}
-		if state, _ := b.Liveness(); state == binding.Live {
-			s.requestSessionAgent(m.Channel, b, now)
-		}
-	}
+	m.OwnerAdded, m.SetupFailed = true, ""
+	return true
 }
 
-// requestSessionAgent sends one draft-create for b's agent unless the
-// request budget for b is spent or the last request is too recent.
-func (s *Server) requestSessionAgent(channel string, b binding.Binding, now time.Time) {
-	dir := filepath.Join(s.cfg.StateDir, "requests")
+// draftable reports whether the helper may draft an agent for b: a named
+// binding whose session is proven live and that no agent has a marker for.
+func (s *Server) draftable(b binding.Binding) bool {
+	if b.Name == binding.LegacyName || len(s.agentMarkers(b.Name)) > 0 {
+		return false
+	}
+	state, _ := b.Liveness()
+	return state == binding.Live
+}
+
+// helperRequest returns b's draft bookkeeping. A re-attach (a bound_at newer
+// than the last request) is a new request with a full budget.
+func (s *Server) helperRequest(b binding.Binding) helperRequest {
 	var req helperRequest
-	if raw, err := readSmallRegular(filepath.Join(dir, b.Name+".json")); err == nil {
+	if raw, err := readSmallRegular(filepath.Join(s.cfg.StateDir, "requests", b.Name+".json")); err == nil {
 		_ = json.Unmarshal(raw, &req)
 	}
 	last, err := time.Parse(time.RFC3339, req.Last)
 	if bound, berr := time.Parse(time.RFC3339, b.BoundAt); err == nil && berr == nil && bound.After(last) {
-		req = helperRequest{} // a re-attach is a new request
+		return helperRequest{}
 	}
-	if req.Count >= helperRequestTries || (req.Count > 0 && err == nil && now.Sub(last) < helperRequestGap) {
-		return
-	}
+	return req
+}
+
+// requestSessionAgent records one more attempt for b and sends its
+// draft-create. It reports whether the request went out.
+func (s *Server) requestSessionAgent(channel string, b binding.Binding, req helperRequest, now time.Time) bool {
+	dir := filepath.Join(s.cfg.StateDir, "requests")
 	req.Count++
 	req.Last = now.UTC().Format(time.RFC3339)
 	raw, err := json.Marshal(req)
 	if err != nil || os.MkdirAll(dir, 0o700) != nil {
-		return
+		return false
 	}
 	// The attempt is recorded first, so a failing Desktop or relay never
 	// gets more than helperRequestTries requests.
 	if _, err := fsq.WriteFileAtomic(dir, b.Name+".json", append(raw, '\n'), 0o600); err != nil {
-		return
+		return false
 	}
 	_ = buzzRun(s.cfg.PostTimeout, "agents", "draft-create", "--channel", channel, "--display-name", sessionAgentName(b), "--system-prompt", "AMQ Remote session: "+b.Name)
+	return true
 }
 
 // sessionAgentName is the Buzz agent name for b's session: its label, else
