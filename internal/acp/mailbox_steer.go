@@ -193,7 +193,7 @@ func (s *Server) eventFinal(eventID string) bool {
 }
 
 func (s *Server) steerClaimPath(eventID string) string {
-	return filepath.Join(s.cfg.StateDir, "remote-events", eventID+".steer.json")
+	return filepath.Join(s.eventDir(eventID), eventID+".steer.json")
 }
 
 // loadSteerClaim reads the claim of a steer event, if one exists.

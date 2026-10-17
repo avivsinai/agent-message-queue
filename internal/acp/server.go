@@ -491,25 +491,23 @@ func (s *Server) remote() bool { return s.cfg.RemoteTarget != "" || s.cfg.Remote
 // bindingModelPrefix names a binding as an ACP model: amq-remote:<name>.
 const bindingModelPrefix = "amq-remote:"
 
-// models lists the destinations this process can serve. In binding mode it
-// is one model per named binding, so each Buzz agent's configured model picks
-// its own session (bead agent-message-queue-611.39); with no binding it is
-// the plain "amq-remote" model, which answers "Not connected".
+// models lists the destinations this process can serve. In binding mode the
+// plain "amq-remote" model comes first, then one model per named binding, so
+// an existing agent's configured model still picks its own session (bead
+// agent-message-queue-611.39). The plain model selects nothing: the agent's
+// pin decides, and an unpinned agent drives the only binding or refuses.
 func (s *Server) models() []modelInfo {
 	if !s.cfg.RemoteBinding {
 		return []modelInfo{s.model()}
 	}
+	out := []modelInfo{s.model()}
 	all, _ := binding.List()
-	var out []modelInfo
 	for _, b := range all {
 		out = append(out, modelInfo{
 			ModelID:     bindingModelPrefix + b.Name,
 			Name:        "Session " + b.Name,
 			Description: "Runs in the session bound as " + b.Name + " by /amq-remote, with that session's own model.",
 		})
-	}
-	if len(out) == 0 {
-		out = append(out, s.model())
 	}
 	return out
 }
@@ -634,17 +632,12 @@ func (s *Server) newSession(params json.RawMessage) (any, *rpcError) {
 	if err := s.store.put(channelID, threadID, now); err != nil {
 		return nil, newRPCError(codeInternalError, "persist ACP session mapping: %v", err)
 	}
-	// The advertised default model pins the session, so removing that binding
-	// later never falls back to another one. The plain model pins nothing.
-	pinned := ""
-	if s.cfg.RemoteBinding && strings.HasPrefix(current, bindingModelPrefix) {
-		pinned = strings.TrimPrefix(current, bindingModelPrefix)
-	}
+	// The advertised default is the plain model, which selects no binding:
+	// the first binding in sort order never becomes the session's by default.
 	s.sessions[id] = &sessionState{
 		ID:        id,
 		ChannelID: channelID,
 		Thread:    threadID,
-		binding:   pinned,
 	}
 	return newSessionResult{
 		SessionID: id,
