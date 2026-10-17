@@ -138,7 +138,7 @@ func TestHelperDraftsAnAgentForANewSession(t *testing.T) {
 	helper.lifecycleTick(now.Add(time.Hour))
 
 	want := []string{
-		"channels list --member",
+		"channels list --member --visibility private",
 		"channels create --name amq-remote @ " + binding.Machine() + " --type stream --visibility private",
 		"channels add-member --channel " + control + " --pubkey " + owner,
 		"agents draft-create --channel " + control + " --display-name " + label + " --system-prompt AMQ Remote session: alpha",

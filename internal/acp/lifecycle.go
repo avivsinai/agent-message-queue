@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -177,11 +178,14 @@ type agentMarker struct {
 	// owner is a member of the control channel.
 	Channel    string `json:"channel,omitempty"`
 	OwnerAdded bool   `json:"owner_added,omitempty"`
-	// SetupFailed and LastDraft are the helper's: when its control channel
-	// setup last failed, and when it last sent a draft.
-	SetupFailed string `json:"setup_failed,omitempty"`
-	LastDraft   string `json:"last_draft,omitempty"`
-	Updated     string `json:"updated"`
+	// The rest are the helper's: when its control channel setup last
+	// failed, control channels it gave up on, and when and for which
+	// session it last sent a draft.
+	SetupFailed  string   `json:"setup_failed,omitempty"`
+	Dropped      []string `json:"dropped_channels,omitempty"`
+	LastDraft    string   `json:"last_draft,omitempty"`
+	LastDraftFor string   `json:"last_draft_for,omitempty"`
+	Updated      string   `json:"updated"`
 }
 
 // agentMarkerFresh is how old a marker may be while its agent still runs.
@@ -338,8 +342,10 @@ func (s *Server) helperTick(now time.Time) {
 	}
 	// Desktop shows one draft at a time and drops a draft that arrives
 	// while one is open, so the helper sends at most one draft per window
-	// across all sessions (review of S4 P1-1).
-	if last, err := time.Parse(time.RFC3339, m.LastDraft); err == nil && now.Sub(last) < helperRequestGap {
+	// across all sessions (review of S4 P1-1). The window ends early once
+	// the drafted session's agent runs: the owner closed that dialog.
+	if last, err := time.Parse(time.RFC3339, m.LastDraft); err == nil && now.Sub(last) < helperRequestGap &&
+		(m.LastDraftFor == "" || len(s.agentMarkers(m.LastDraftFor)) == 0) {
 		return
 	}
 	all, err := binding.List()
@@ -360,16 +366,42 @@ func (s *Server) helperTick(now time.Time) {
 			next, nextReq = &all[i], req
 		}
 	}
-	if next != nil && s.requestSessionAgent(m.Channel, *next, nextReq, now) {
-		m.LastDraft = now.UTC().Format(time.RFC3339)
+	if next == nil {
+		return
+	}
+	sent, err := s.requestSessionAgent(m.Channel, *next, nextReq, now)
+	if sent {
+		m.LastDraft, m.LastDraftFor = now.UTC().Format(time.RFC3339), next.Name
+	}
+	if err != nil && s.channelGone(m.Channel, err.Error()) {
+		// Set a new control channel up after the backoff.
+		dropChannel(&m, now)
 	}
 }
 
+// helperDroppedMax bounds the control channels the helper remembers giving
+// up on.
+const helperDroppedMax = 8
+
+// dropChannel gives up on the helper's control channel: the next setup,
+// after the backoff, adopts or creates another one.
+func dropChannel(m *agentMarker, now time.Time) {
+	if m.Channel != "" {
+		m.Dropped = append(m.Dropped, m.Channel)
+		if len(m.Dropped) > helperDroppedMax {
+			m.Dropped = m.Dropped[len(m.Dropped)-helperDroppedMax:]
+		}
+	}
+	m.Channel, m.OwnerAdded = "", false
+	m.SetupFailed = now.UTC().Format(time.RFC3339)
+}
+
 // helperChannel makes sure the control channel exists and the owner is in
-// it. It adopts a channel of the same name the helper is already a member
-// of before it creates one, and after a failure waits helperRequestGap, so a
-// failing relay never gets a request every tick and an unclear create never
-// leaves a stream of new channels.
+// it. Before it creates one, it adopts a private channel of the same name
+// that the helper owns, unless it gave up on that channel. After a failure
+// it waits helperRequestGap, so a failing relay never gets a request every
+// tick and an unclear create never leaves a stream of new channels. A
+// channel that refuses the owner is given up.
 func (s *Server) helperChannel(m *agentMarker, now time.Time) bool {
 	if m.Channel != "" && m.OwnerAdded {
 		return true
@@ -383,7 +415,7 @@ func (s *Server) helperChannel(m *agentMarker, now time.Time) bool {
 		name += " @ " + machine
 	}
 	if m.Channel == "" {
-		out, err := buzzCall(s.cfg.PostTimeout, "channels", "list", "--member")
+		out, err := buzzCall(s.cfg.PostTimeout, "channels", "list", "--member", "--visibility", "private")
 		var listed []struct {
 			ChannelID string `json:"channel_id"`
 			Name      string `json:"name"`
@@ -392,7 +424,7 @@ func (s *Server) helperChannel(m *agentMarker, now time.Time) bool {
 			return false
 		}
 		for _, c := range listed {
-			if c.Name == name && c.ChannelID != "" {
+			if c.Name == name && c.ChannelID != "" && !slices.Contains(m.Dropped, c.ChannelID) && s.ownsChannel(c.ChannelID) {
 				m.Channel = c.ChannelID
 				break
 			}
@@ -414,10 +446,58 @@ func (s *Server) helperChannel(m *agentMarker, now time.Time) bool {
 		Accepted bool `json:"accepted"`
 	}
 	if err != nil || json.Unmarshal(out, &added) != nil || !added.Accepted {
+		failure := string(out)
+		if err != nil {
+			failure = err.Error()
+		}
+		if s.channelGone(m.Channel, failure) {
+			dropChannel(m, now)
+		}
 		return false
 	}
 	m.OwnerAdded, m.SetupFailed = true, ""
 	return true
+}
+
+// ownsChannel reports whether the helper is the owner of channel, so it
+// never adopts a channel someone else made with the same name.
+func (s *Server) ownsChannel(channel string) bool {
+	owner, ok := s.channelOwner(channel)
+	return ok && owner
+}
+
+// channelOwner reports whether the helper owns channel; ok is false when
+// the members could not be read, which proves nothing.
+func (s *Server) channelOwner(channel string) (owner, ok bool) {
+	out, err := buzzCall(s.cfg.PostTimeout, "channels", "members", "--channel", channel)
+	var members []struct {
+		PubKey string `json:"pubkey"`
+		Role   string `json:"role"`
+	}
+	if err != nil || json.Unmarshal(out, &members) != nil {
+		return false, false
+	}
+	for _, mb := range members {
+		if mb.PubKey == buzzSelf && mb.Role == "owner" {
+			return true, true
+		}
+	}
+	return false, true
+}
+
+// channelGone reports whether a refused call shows the control channel is
+// unusable: the refusal says it is archived, or the relay lists the helper
+// no longer as its owner. A failure that proves neither, such as a timeout,
+// keeps the channel.
+func (s *Server) channelGone(channel, failure string) bool {
+	if channel == "" {
+		return false
+	}
+	if strings.Contains(strings.ToLower(failure), "archived") {
+		return true
+	}
+	owner, ok := s.channelOwner(channel)
+	return ok && !owner
 }
 
 // draftable reports whether the helper may draft an agent for b: a named
@@ -445,22 +525,22 @@ func (s *Server) helperRequest(b binding.Binding) helperRequest {
 }
 
 // requestSessionAgent records one more attempt for b and sends its
-// draft-create. It reports whether the request went out.
-func (s *Server) requestSessionAgent(channel string, b binding.Binding, req helperRequest, now time.Time) bool {
+// draft-create. It reports whether the attempt was recorded and sent, and
+// the draft-create error.
+func (s *Server) requestSessionAgent(channel string, b binding.Binding, req helperRequest, now time.Time) (bool, error) {
 	dir := filepath.Join(s.cfg.StateDir, "requests")
 	req.Count++
 	req.Last = now.UTC().Format(time.RFC3339)
 	raw, err := json.Marshal(req)
 	if err != nil || os.MkdirAll(dir, 0o700) != nil {
-		return false
+		return false, nil
 	}
 	// The attempt is recorded first, so a failing Desktop or relay never
 	// gets more than helperRequestTries requests.
 	if _, err := fsq.WriteFileAtomic(dir, b.Name+".json", append(raw, '\n'), 0o600); err != nil {
-		return false
+		return false, nil
 	}
-	_ = buzzRun(s.cfg.PostTimeout, "agents", "draft-create", "--channel", channel, "--display-name", sessionAgentName(b), "--system-prompt", "AMQ Remote session: "+b.Name)
-	return true
+	return true, buzzRun(s.cfg.PostTimeout, "agents", "draft-create", "--channel", channel, "--display-name", sessionAgentName(b), "--system-prompt", "AMQ Remote session: "+b.Name)
 }
 
 // sessionAgentName is the Buzz agent name for b's session: its label, else
