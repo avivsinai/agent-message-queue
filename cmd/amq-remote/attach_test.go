@@ -9,14 +9,19 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/avivsinai/agent-message-queue/internal/config"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/launch"
+	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/ipc"
 	"github.com/avivsinai/agent-message-queue/internal/remote/manifest"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
+	"github.com/avivsinai/agent-message-queue/internal/remote/registry"
 	"github.com/avivsinai/agent-message-queue/internal/remote/requests"
 )
 
@@ -260,29 +265,30 @@ func TestJSONFlagValueDecidesSuccessAndErrorOutput(t *testing.T) {
 // E2E kit F3: after a session change in the same Claude process (same target,
 // new native session), attach --self --link refused the binding's own name,
 // so a link share could not follow it. With --link the same root and target
-// re-pin the name; another target still may not take it, and a plain native
-// attach keeps the --name refusal (ruling ww).
+// re-pin the name, and another target still may not take it. A plain native
+// attach of another session takes the next free name instead of the --name
+// refusal of ruling ww: Buzz DX ruling 2 gives each session its own name.
 func TestWriteBindingRepinsTheSameTargetAfterASessionChange(t *testing.T) {
 	dir := canonicalTempDir(t)
 	t.Setenv(binding.EnvPath, filepath.Join(dir, "binding.json"))
 	old := binding.Binding{Root: dir, Target: "claude:7", NativeSession: "session-old", Name: "claude-7"}
-	if _, err := writeBinding(old, false, true); err != nil {
+	if _, err := writeBinding(old, false, true, binding.Binding.Liveness); err != nil {
 		t.Fatal(err)
 	}
 	moved := old
 	moved.NativeSession = "session-new"
-	var taken *binding.NameTakenError
-	if _, err := writeBinding(moved, false, false); !errors.As(err, &taken) {
-		t.Fatalf("native attach without --link: err=%v; want NameTakenError", err)
+	if name, err := writeBinding(moved, false, false, binding.Binding.Liveness); err != nil || name != "claude-7-2" {
+		t.Fatalf("native attach without --link: name=%q err=%v; want claude-7-2", name, err)
 	}
-	if _, err := writeBinding(moved, false, true); err != nil {
+	if _, err := writeBinding(moved, false, true, binding.Binding.Liveness); err != nil {
 		t.Fatalf("re-attach with --link after a session change: %v", err)
 	}
 	if got, err := binding.ReadNamed("claude-7"); err != nil || got.NativeSession != "session-new" {
 		t.Fatalf("binding = %+v %v; want it pinned to session-new", got, err)
 	}
 	other := binding.Binding{Root: dir, Target: "claude:8", NativeSession: "session-8", Name: "claude-7"}
-	if _, err := writeBinding(other, false, true); !errors.As(err, &taken) {
+	var taken *binding.NameTakenError
+	if _, err := writeBinding(other, false, true, binding.Binding.Liveness); !errors.As(err, &taken) {
 		t.Fatalf("another target with the same name: err=%v; want NameTakenError", err)
 	}
 }
@@ -309,37 +315,13 @@ func TestMailboxAttachNamesEachSessionOfAProject(t *testing.T) {
 	if err := binding.WriteNamed(legacy); err != nil {
 		t.Fatal(err)
 	}
-	attachAs := func(root string) string {
-		t.Helper()
-		rootID, err := fsq.StableTreeIdentity(root)
-		if err != nil {
-			t.Fatal(err)
-		}
-		baseID, err := fsq.StableTreeIdentity(filepath.Dir(root))
-		if err != nil {
-			t.Fatal(err)
-		}
-		for k, v := range map[string]string{"AM_ROOT": root, "AM_ME": "claude", "AM_BASE_ROOT": filepath.Dir(root),
-			"AM_SESSION": filepath.Base(root), "AM_ROOT_ID": rootID, "AM_BASE_ROOT_ID": baseID} {
-			t.Setenv(k, v)
-		}
-		var out bytes.Buffer
-		if code, err := attach([]string{"--self", "--json"}, &out, io.Discard); code != 0 || err != nil {
-			t.Fatalf("attach from %s: code=%d err=%v", root, code, err)
-		}
-		var got struct{ Name string }
-		if err := json.Unmarshal(out.Bytes(), &got); err != nil {
-			t.Fatalf("attach output %q: %v", out.String(), err)
-		}
-		return got.Name
-	}
-	if got := attachAs(root3); got != "claude-p-session3" {
+	if got := attachMailboxAs(t, root3); got != "claude-p-session3" {
 		t.Fatalf("session3 attached as %q; want claude-p-session3", got)
 	}
-	if got := attachAs(other); got != "claude-p-session3-2" {
+	if got := attachMailboxAs(t, other); got != "claude-p-session3-2" {
 		t.Fatalf("another project's session3 attached as %q; want claude-p-session3-2", got)
 	}
-	if got := attachAs(root1); got != "claude-p" {
+	if got := attachMailboxAs(t, root1); got != "claude-p" {
 		t.Fatalf("session1 attached as %q; want its own name claude-p", got)
 	}
 	all, err := binding.List()
@@ -354,5 +336,313 @@ func TestMailboxAttachNamesEachSessionOfAProject(t *testing.T) {
 		if want[b.Name] != b.Root {
 			t.Fatalf("binding %s names %s; want %s", b.Name, b.Root, want[b.Name])
 		}
+	}
+}
+
+// Buzz DX S2: /amq-remote status lists the bound sessions. A session proven
+// ended (its holder ran in another boot) is pruned; one with no holder is
+// unknown, listed, and kept.
+func TestBindingsPrunesEndedSessionsAndKeepsUnknownOnes(t *testing.T) {
+	self := endedHolder(t)
+	dir := canonicalTempDir(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(binding.EnvPath, filepath.Join(dir, "remote", "binding.json"))
+	for _, b := range []binding.Binding{
+		{Carrier: binding.CarrierMailbox, Root: dir, Handle: "codex", Name: "ended", Holder: self},
+		{Carrier: binding.CarrierMailbox, Root: dir, Handle: "claude", Name: "unknown"},
+	} {
+		if err := binding.WriteNamed(b); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var out bytes.Buffer
+	if code := run([]string{"bindings", "--json"}, nil, &out, io.Discard); code != 0 {
+		t.Fatalf("bindings exit %d: %s", code, out.String())
+	}
+	var got struct {
+		Bindings []struct{ Name, State string }
+		Pruned   []string
+	}
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("bindings output %q: %v", out.String(), err)
+	}
+	if len(got.Pruned) != 1 || got.Pruned[0] != "ended" || len(got.Bindings) != 1 ||
+		got.Bindings[0].Name != "unknown" || got.Bindings[0].State != string(binding.Unknown) {
+		t.Fatalf("bindings output %s; want ended pruned and unknown listed", out.String())
+	}
+	if _, err := binding.ReadNamed("ended"); !errors.Is(err, binding.ErrNone) {
+		t.Fatalf("the ended binding is still present: %v", err)
+	}
+}
+
+// attachMailboxAs runs attach --self --json as the AMQ handle claude of the
+// session at root, pinned as a real session is, and returns the bound name.
+func attachMailboxAs(t *testing.T, root string) string {
+	t.Helper()
+	rootID, err := fsq.StableTreeIdentity(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseID, err := fsq.StableTreeIdentity(filepath.Dir(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for k, v := range map[string]string{"AM_ROOT": root, "AM_ME": "claude", "AM_BASE_ROOT": filepath.Dir(root),
+		"AM_SESSION": filepath.Base(root), "AM_ROOT_ID": rootID, "AM_BASE_ROOT_ID": baseID} {
+		t.Setenv(k, v)
+	}
+	var out bytes.Buffer
+	if code, err := attach([]string{"--self", "--json"}, &out, io.Discard); code != 0 || err != nil {
+		t.Fatalf("attach from %s: code=%d err=%v", root, code, err)
+	}
+	var got struct{ Name string }
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("attach output %q: %v", out.String(), err)
+	}
+	return got.Name
+}
+
+// endedHolder is this test process as a holder recorded in another boot, so
+// its binding is proven ended; the test skips where the boot id is unreadable.
+func endedHolder(t *testing.T) launch.HolderIdentity {
+	t.Helper()
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("process start times and boot ids are read on darwin and linux only")
+	}
+	self, err := launch.HolderOf(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if self.BootID == "" {
+		t.Skip("boot id unavailable")
+	}
+	self.BootID = "another-boot"
+	return self
+}
+
+// Review-s2 P1-1: pruning an ended binding freed its name, so the next
+// session of another identity that computed the same name took over the
+// ended session's Buzz agent and DM. The name stays held by its identity.
+func TestPrunedNameStaysWithItsSession(t *testing.T) {
+	ended := endedHolder(t)
+	dir := canonicalTempDir(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(binding.EnvPath, filepath.Join(dir, "remote", "binding.json"))
+	mine := filepath.Join(dir, "p", ".agent-mail", "session3")
+	theirs := filepath.Join(dir, "q", "p", ".agent-mail", "session3")
+	for _, r := range []string{mine, theirs} {
+		if err := os.MkdirAll(r, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := binding.Binding{Carrier: binding.CarrierMailbox, Root: theirs, Handle: "claude", Name: "claude-p-session3", Holder: ended}
+	if err := binding.WriteNamed(old); err != nil {
+		t.Fatal(err)
+	}
+	if code := run([]string{"bindings"}, nil, io.Discard, io.Discard); code != 0 {
+		t.Fatalf("bindings exit %d", code)
+	}
+	if got := attachMailboxAs(t, mine); got != "claude-p-session3-2" {
+		t.Fatalf("another session attached as %q after the prune; want claude-p-session3-2", got)
+	}
+	if got := attachMailboxAs(t, theirs); got != "claude-p-session3" {
+		t.Fatalf("the ended session came back as %q; want its own claude-p-session3", got)
+	}
+}
+
+// Issue #1070: a Codex binding records no session process, so its liveness
+// was always unknown and it was never pruned. Its thread now proves it: a
+// thread the app-server that had it loaded no longer has loaded has ended.
+func TestBindingsPrunesACodexThreadTheAppServerUnloaded(t *testing.T) {
+	pruned, states := codexBindingsAfter(t, os.Getpid())
+	if len(pruned) != 1 || pruned[0] != "codex-t-gone" || len(states) != 1 || states["codex-t-live"] != string(binding.Live) {
+		t.Fatalf("pruned %v, listed %v; want codex-t-gone pruned and codex-t-live live", pruned, states)
+	}
+}
+
+// Review-1070 P1-B2: a restarted app-server has no thread loaded, and
+// "not loaded" was read as ended, so every live Codex session on that socket
+// was pruned and its agent archived. Only the daemon process the thread was
+// bound in proves it ended; another one leaves it unknown and kept.
+func TestBindingsKeepsACodexThreadAfterTheAppServerRestarted(t *testing.T) {
+	pruned, states := codexBindingsAfter(t, os.Getpid()+1)
+	if len(pruned) != 0 || states["codex-t-gone"] != string(binding.Unknown) {
+		t.Fatalf("pruned %v, listed %v; want codex-t-gone kept as unknown", pruned, states)
+	}
+}
+
+// Review-stack P2-B5: a Codex update restarts the daemon, and the thread
+// resumes in the new one. The binding kept the old daemon, so the new
+// daemon's "not loaded" never proved the session ended, and the next session
+// there got <name>-2 and a new agent. While the thread is loaded, the binding
+// now follows the daemon that has it.
+func TestCodexBindingFollowsARestartedAppServer(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("process start times are read on darwin and linux only")
+	}
+	dir := canonicalTempDir(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(binding.EnvPath, filepath.Join(dir, "remote", "binding.json"))
+	savedLoaded, savedPID := codexLoadedThreads, codexDaemonPID
+	t.Cleanup(func() { codexLoadedThreads, codexDaemonPID = savedLoaded, savedPID })
+	codexDaemonPID = func(string) (int, error) { return os.Getpid(), nil }
+	old := launch.HolderIdentity{PID: os.Getpid() + 1, ProcessStart: "1"}
+	b := binding.Binding{Root: dir, Target: "codex:t1", NativeSession: "t1", Name: "codex-t1",
+		AppServer: binding.AppServerThread{Socket: filepath.Join(dir, "app-server.sock"), Thread: "t1", Daemon: old}}
+	if err := binding.WriteNamed(b); err != nil {
+		t.Fatal(err)
+	}
+	for _, loaded := range [][]string{{"t1"}, nil} {
+		codexLoadedThreads = func(string) ([]string, error) { return loaded, nil }
+		if code := run([]string{"bindings"}, nil, io.Discard, io.Discard); code != 0 {
+			t.Fatalf("bindings exit %d", code)
+		}
+	}
+	if _, err := binding.ReadNamed("codex-t1"); !errors.Is(err, binding.ErrNone) {
+		t.Fatalf("the binding outlived its thread in the restarted app-server: %v", err)
+	}
+}
+
+// codexBindingsAfter binds threads t-live and t-gone in an app-server whose
+// process is this test, runs bindings with t-live loaded and the socket
+// served by daemonPID, and returns the pruned names and each listed state.
+func codexBindingsAfter(t *testing.T, daemonPID int) ([]string, map[string]string) {
+	t.Helper()
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("process start times are read on darwin and linux only")
+	}
+	dir := canonicalTempDir(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(binding.EnvPath, filepath.Join(dir, "remote", "binding.json"))
+	daemon, err := launch.HolderOf(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	savedLoaded, savedPID := codexLoadedThreads, codexDaemonPID
+	t.Cleanup(func() { codexLoadedThreads, codexDaemonPID = savedLoaded, savedPID })
+	codexLoadedThreads = func(string) ([]string, error) { return []string{"t-live"}, nil }
+	codexDaemonPID = func(string) (int, error) { return daemonPID, nil }
+	for _, thread := range []string{"t-live", "t-gone"} {
+		b := binding.Binding{Root: dir, Target: "codex:" + thread, NativeSession: thread, Name: "codex-" + thread,
+			AppServer: binding.AppServerThread{Socket: filepath.Join(dir, "app-server.sock"), Thread: thread, Daemon: daemon}}
+		if err := binding.WriteNamed(b); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var out bytes.Buffer
+	if code := run([]string{"bindings", "--json"}, nil, &out, io.Discard); code != 0 {
+		t.Fatalf("bindings exit %d: %s", code, out.String())
+	}
+	var got struct {
+		Bindings []struct{ Name, State string }
+		Pruned   []string
+	}
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("bindings output %q: %v", out.String(), err)
+	}
+	states := map[string]string{}
+	for _, b := range got.Bindings {
+		states[b.Name] = b.State
+	}
+	return got.Pruned, states
+}
+
+// A linked server's first live run (amq-remote 0.97.0): attach --self --link
+// in a Claude Code session without the AMQ Stop hook left the run running
+// forever, so every later task was parked busy. attach now refuses and names
+// the command that installs the hook.
+func TestAttachRefusesAClaudeSessionWithoutTheStopHook(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	savedFind, savedHook := findSelf, claudeStopHookState
+	t.Cleanup(func() { findSelf, claudeStopHookState = savedFind, savedHook })
+	findSelf = func(string, string) (registry.Candidate, error) {
+		return registry.Candidate{Kind: "claude", Target: "claude:7", Config: json.RawMessage(`{"pid":7}`)}, nil
+	}
+	claudeStopHookState = func() (string, error) { return claude.StopHookMissing, nil }
+	code, err := attach([]string{"--self", "--link", "srv"}, io.Discard, io.Discard)
+	if code != protocol.ExitActionRequired || err == nil || !strings.Contains(err.Error(), "amq-remote claude install-stop-hook") {
+		t.Fatalf("attach --link without the Stop hook: code=%d err=%v; want exit 6 naming amq-remote claude install-stop-hook", code, err)
+	}
+}
+
+// Review-s2 P2-2: a Codex or pi session's identity used the working
+// directory of the tool call attach ran in, so a call from a subdirectory
+// gave the same session another name and Buzz agent. The identity uses the
+// session's own directory: the Codex thread's from its app-server, the pi
+// session's from its process.
+func TestNativeHarnessUsesTheSessionsOwnCwd(t *testing.T) {
+	savedThread, savedProc := codexThreadCwd, processCwd
+	t.Cleanup(func() { codexThreadCwd, processCwd = savedThread, savedProc })
+	codexThreadCwd = func(string, string) (string, error) { return "/work/codex-proj", nil }
+	processCwd = func(int) (string, error) { return "/work/pi-proj", nil }
+	for _, row := range []struct {
+		cand registry.Candidate
+		want string
+	}{
+		{registry.Candidate{Kind: "codex", Target: "codex:t1", Config: json.RawMessage(`{"socket":"/s.sock","thread":"t1"}`)}, "/work/codex-proj"},
+		{registry.Candidate{Kind: "pi", Target: "pi:chat", PID: 7}, "/work/pi-proj"},
+	} {
+		if got := nativeHarness(newCodexView(), row.cand).Cwd; got != row.want {
+			t.Fatalf("%s session cwd = %q; want its own %q", row.cand.Kind, got, row.want)
+		}
+	}
+}
+
+// Review-1070 P1-B1: a Codex attach recorded the app-server thread without
+// proof, so a session on another app-server read as ended and was pruned
+// right after attach. The thread is recorded only when the daemon has it
+// loaded.
+func TestNativeHarnessRecordsOnlyALoadedCodexThread(t *testing.T) {
+	savedLoaded, savedPID, savedHolder := codexLoadedThreads, codexDaemonPID, processHolder
+	t.Cleanup(func() { codexLoadedThreads, codexDaemonPID, processHolder = savedLoaded, savedPID, savedHolder })
+	codexDaemonPID = func(string) (int, error) { return 42, nil }
+	processHolder = func(pid int) (launch.HolderIdentity, error) {
+		return launch.HolderIdentity{PID: pid, ProcessStart: "1"}, nil
+	}
+	cand := registry.Candidate{Kind: "codex", Target: "codex:t1", Config: json.RawMessage(`{"socket":"/s.sock","thread":"t1"}`)}
+	for _, row := range []struct {
+		loaded []string
+		want   string
+	}{{[]string{"t0"}, ""}, {[]string{"t0", "t1"}, "t1"}} {
+		codexLoadedThreads = func(string) ([]string, error) { return row.loaded, nil }
+		if got := nativeHarness(newCodexView(), cand).AppServer; got.Thread != row.want || row.want != "" && got.Daemon.PID != 42 {
+			t.Fatalf("loaded %v: recorded %+v; want thread %q with daemon 42", row.loaded, got, row.want)
+		}
+	}
+}
+
+// Review-s2 P2-8: a plain native attach in a link's own root kept the name of
+// the share's binding and rewrote it with a cwd identity, so the share named
+// a binding that another session could take. attach keeps the target
+// identity when a link share already names a binding of this session.
+func TestLinkSharedFindsTheSharesBindingOfThisSession(t *testing.T) {
+	dir := canonicalTempDir(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(binding.EnvPath, filepath.Join(dir, "remote", "binding.json"))
+	stateDir := filepath.Join(dir, stateDirName)
+	if err := manifest.Write(manifest.DefaultPath(stateDir), manifest.File{
+		SchemaVersion: manifest.RelaySchemaVersion, Layer: manifest.Layer,
+		Links: []manifest.Link{{Name: "srv", URL: "wss://example.invalid/link", Shares: []manifest.LinkShare{{Binding: "claude-7", Consent: "passkey", Tools: "read"}}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	shared := binding.Binding{Root: dir, Target: "claude:7", NativeSession: "session-7", Name: "claude-7"}
+	if err := binding.WriteNamed(shared); err != nil {
+		t.Fatal(err)
+	}
+	if !linkShared(stateDir, binding.Binding{Root: dir, Target: "claude:7", NativeSession: "session-7"}) {
+		t.Fatal("a plain attach of the session a link shares did not see the share")
+	}
+	if linkShared(stateDir, binding.Binding{Root: dir, Target: "claude:8", NativeSession: "session-8"}) {
+		t.Fatal("another session counted as shared")
+	}
+	// Review-stack P2-B4: an unreadable manifest may hold the share, so it
+	// keeps the target identity.
+	unreadable := filepath.Join(t.TempDir(), stateDirName)
+	if err := os.MkdirAll(manifest.DefaultPath(unreadable), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if !linkShared(unreadable, binding.Binding{Root: dir, Target: "claude:8", NativeSession: "session-8"}) {
+		t.Fatal("an unreadable manifest did not keep the target identity")
 	}
 }

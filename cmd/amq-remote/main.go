@@ -73,6 +73,10 @@ Commands:
                            runs in (starts the endpoint when none runs)
   detach --self|--name N|--all
                            Unbind; the session keeps running
+  bindings                 Bound sessions: live, unknown, or ended (pruned)
+  service install|uninstall|status [--root R]
+                           Start amq-remote up for R (default the machine
+                           root) at login: launchd on macOS, systemd on Linux
   link add NAME URL --code CODE
                            Link this machine to a server; type the passkey
                            fingerprint your browser shows
@@ -280,6 +284,10 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		code, err = attach(rest, stdout, stderr, probe)
 	case "detach":
 		code, err = detach(rest, stdout, stderr, probe)
+	case "bindings":
+		code, err = bindings(rest, stdout, probe)
+	case "service":
+		code, err = service(rest, stdout, probe)
 	case "doctor":
 		out, code, err = doctor(rest, probe)
 	case "link":
@@ -1396,6 +1404,7 @@ func doctor(args []string, probe ...*jsonProbe) (any, int, error) {
 	// binary with the same name, so this is advice, not a failure: it lands
 	// in notes and never makes doctor exit non-zero.
 	noteStaleACP(note)
+	noteNoService(note, c.root, stateDir)
 	if len(notes) > 0 {
 		report["notes"] = notes
 	}

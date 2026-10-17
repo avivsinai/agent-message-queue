@@ -542,16 +542,29 @@ func init() {
 // through. amq-remote attach uses it to verify the session it pins is the
 // one it runs in.
 func SessionIDForPID(pid int) (string, error) {
+	s, err := SessionForPID(pid)
+	return s.ID, err
+}
+
+// Session is what the registry entry of a Claude process says about its
+// session: the session id, its working directory, and its name.
+type Session struct {
+	ID, Cwd, Name string
+}
+
+// SessionForPID reads the registry entry of the Claude process pid from
+// ~/.claude/sessions; an error when pid has none.
+func SessionForPID(pid int) (Session, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return "", err
+		return Session{}, err
 	}
 	reg, err := readSessionRegistry(home, pid)
 	if err != nil {
-		return "", err
+		return Session{}, err
 	}
 	if reg == nil {
-		return "", fmt.Errorf("no Claude session registry entry for pid %d", pid)
+		return Session{}, fmt.Errorf("no Claude session registry entry for pid %d", pid)
 	}
-	return reg.SessionID, nil
+	return Session{ID: reg.SessionID, Cwd: reg.Cwd, Name: reg.Name}, nil
 }
