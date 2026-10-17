@@ -536,6 +536,29 @@ func TestNativeHarnessUsesTheSessionsOwnCwd(t *testing.T) {
 	}
 }
 
+// Review-1070 P1-B1: a Codex attach recorded the app-server thread without
+// proof, so a session on another app-server read as ended and was pruned
+// right after attach. The thread is recorded only when the daemon has it
+// loaded.
+func TestNativeHarnessRecordsOnlyALoadedCodexThread(t *testing.T) {
+	savedLoaded, savedPID, savedHolder := codexLoadedThreads, codexDaemonPID, processHolder
+	t.Cleanup(func() { codexLoadedThreads, codexDaemonPID, processHolder = savedLoaded, savedPID, savedHolder })
+	codexDaemonPID = func(string) (int, error) { return 42, nil }
+	processHolder = func(pid int) (launch.HolderIdentity, error) {
+		return launch.HolderIdentity{PID: pid, ProcessStart: "1"}, nil
+	}
+	cand := registry.Candidate{Kind: "codex", Target: "codex:t1", Config: json.RawMessage(`{"socket":"/s.sock","thread":"t1"}`)}
+	for _, row := range []struct {
+		loaded []string
+		want   string
+	}{{[]string{"t0"}, ""}, {[]string{"t0", "t1"}, "t1"}} {
+		codexLoadedThreads = func(string) ([]string, error) { return row.loaded, nil }
+		if got := nativeHarness(cand).AppServer; got.Thread != row.want || row.want != "" && got.Daemon.PID != 42 {
+			t.Fatalf("loaded %v: recorded %+v; want thread %q with daemon 42", row.loaded, got, row.want)
+		}
+	}
+}
+
 // Review-s2 P2-8: a plain native attach in a link's own root kept the name of
 // the share's binding and rewrote it with a cwd identity, so the share named
 // a binding that another session could take. attach keeps the target

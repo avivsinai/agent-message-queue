@@ -533,7 +533,10 @@ on this path.
 
 Each attach writes a **named** binding, `~/.amq/remote/bindings/<name>.json`
 (default `<handle>-<project>-<session>` for a root
-`<project>/.agent-mail/<session>`, or the native target; `--name` overrides),
+`<project>/.agent-mail/<session>`; for a native session `<kind>-<project>`,
+from the session's own working directory, or the native target when that
+directory is unknown or the session is shared with a link; `--name`
+overrides),
 and removes any other binding for the same session. A session keeps the name
 it already holds; when another session holds its default name, it takes the
 first free `<name>-2`, `<name>-3`, and so on, and never replaces the other
