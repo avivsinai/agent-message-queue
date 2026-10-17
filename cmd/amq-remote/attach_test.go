@@ -270,15 +270,15 @@ func TestWriteBindingRepinsTheSameTargetAfterASessionChange(t *testing.T) {
 	dir := canonicalTempDir(t)
 	t.Setenv(binding.EnvPath, filepath.Join(dir, "binding.json"))
 	old := binding.Binding{Root: dir, Target: "claude:7", NativeSession: "session-old", Name: "claude-7"}
-	if _, err := writeBinding(old, false, true); err != nil {
+	if _, err := writeBinding(old, false, true, binding.Binding.Liveness); err != nil {
 		t.Fatal(err)
 	}
 	moved := old
 	moved.NativeSession = "session-new"
-	if name, err := writeBinding(moved, false, false); err != nil || name != "claude-7-2" {
+	if name, err := writeBinding(moved, false, false, binding.Binding.Liveness); err != nil || name != "claude-7-2" {
 		t.Fatalf("native attach without --link: name=%q err=%v; want claude-7-2", name, err)
 	}
-	if _, err := writeBinding(moved, false, true); err != nil {
+	if _, err := writeBinding(moved, false, true, binding.Binding.Liveness); err != nil {
 		t.Fatalf("re-attach with --link after a session change: %v", err)
 	}
 	if got, err := binding.ReadNamed("claude-7"); err != nil || got.NativeSession != "session-new" {
@@ -286,7 +286,7 @@ func TestWriteBindingRepinsTheSameTargetAfterASessionChange(t *testing.T) {
 	}
 	other := binding.Binding{Root: dir, Target: "claude:8", NativeSession: "session-8", Name: "claude-7"}
 	var taken *binding.NameTakenError
-	if _, err := writeBinding(other, false, true); !errors.As(err, &taken) {
+	if _, err := writeBinding(other, false, true, binding.Binding.Liveness); !errors.As(err, &taken) {
 		t.Fatalf("another target with the same name: err=%v; want NameTakenError", err)
 	}
 }
@@ -562,7 +562,7 @@ func TestNativeHarnessUsesTheSessionsOwnCwd(t *testing.T) {
 		{registry.Candidate{Kind: "codex", Target: "codex:t1", Config: json.RawMessage(`{"socket":"/s.sock","thread":"t1"}`)}, "/work/codex-proj"},
 		{registry.Candidate{Kind: "pi", Target: "pi:chat", PID: 7}, "/work/pi-proj"},
 	} {
-		if got := nativeHarness(row.cand).Cwd; got != row.want {
+		if got := nativeHarness(newCodexView(), row.cand).Cwd; got != row.want {
 			t.Fatalf("%s session cwd = %q; want its own %q", row.cand.Kind, got, row.want)
 		}
 	}
@@ -585,7 +585,7 @@ func TestNativeHarnessRecordsOnlyALoadedCodexThread(t *testing.T) {
 		want   string
 	}{{[]string{"t0"}, ""}, {[]string{"t0", "t1"}, "t1"}} {
 		codexLoadedThreads = func(string) ([]string, error) { return row.loaded, nil }
-		if got := nativeHarness(cand).AppServer; got.Thread != row.want || row.want != "" && got.Daemon.PID != 42 {
+		if got := nativeHarness(newCodexView(), cand).AppServer; got.Thread != row.want || row.want != "" && got.Daemon.PID != 42 {
 			t.Fatalf("loaded %v: recorded %+v; want thread %q with daemon 42", row.loaded, got, row.want)
 		}
 	}
@@ -615,5 +615,14 @@ func TestLinkSharedFindsTheSharesBindingOfThisSession(t *testing.T) {
 	}
 	if linkShared(stateDir, binding.Binding{Root: dir, Target: "claude:8", NativeSession: "session-8"}) {
 		t.Fatal("another session counted as shared")
+	}
+	// Review-stack P2-B4: an unreadable manifest may hold the share, so it
+	// keeps the target identity.
+	unreadable := filepath.Join(t.TempDir(), stateDirName)
+	if err := os.MkdirAll(manifest.DefaultPath(unreadable), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if !linkShared(unreadable, binding.Binding{Root: dir, Target: "claude:8", NativeSession: "session-8"}) {
+		t.Fatal("an unreadable manifest did not keep the target identity")
 	}
 }
