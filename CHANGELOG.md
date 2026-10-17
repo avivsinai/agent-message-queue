@@ -8,6 +8,31 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.98.0](https://github.com/avivsinai/agent-message-queue/compare/v0.97.0...v0.98.0) (2026-10-17)
+
+
+### Features
+
+* **acp:** pin by system prompt and archive with the session ([#1069](https://github.com/avivsinai/agent-message-queue/issues/1069)) ([6023d62](https://github.com/avivsinai/agent-message-queue/commit/6023d620ad63be0cc0a22ac2fac3d2eb947a4f83))
+* **remote:** record session liveness and prune ended sessions ([c76bc33](https://github.com/avivsinai/agent-message-queue/commit/c76bc3377b9965c6323b2e9e51b1b60d211527d0))
+* **remote:** restart the endpoint at login with service install ([c76bc33](https://github.com/avivsinai/agent-message-queue/commit/c76bc3377b9965c6323b2e9e51b1b60d211527d0))
+
+
+### Bug Fixes
+
+* **acp:** keep per-event state for each Buzz agent ([#1071](https://github.com/avivsinai/agent-message-queue/issues/1071)) ([0b6c2a1](https://github.com/avivsinai/agent-message-queue/commit/0b6c2a158ff09b45df8fc51750975ae4f7d38f88))
+* **remote:** keep Codex sessions on one name and prune ended threads ([c76bc33](https://github.com/avivsinai/agent-message-queue/commit/c76bc3377b9965c6323b2e9e51b1b60d211527d0))
+* **remote:** keep links in the machine root and find them from any session ([#1065](https://github.com/avivsinai/agent-message-queue/issues/1065)) ([ab81822](https://github.com/avivsinai/agent-message-queue/commit/ab81822b3a606b817b54cfd00114174c9a115136))
+* **remote:** name bindings by session identity ([#1067](https://github.com/avivsinai/agent-message-queue/issues/1067)) ([970e366](https://github.com/avivsinai/agent-message-queue/commit/970e366d303730408a24ba920bbb44c6dd6f5a21))
+* **remote:** refuse a Claude attach without the Stop hook ([c76bc33](https://github.com/avivsinai/agent-message-queue/commit/c76bc3377b9965c6323b2e9e51b1b60d211527d0))
+
+
+### Dependencies
+
+* bump actions/setup-node from 7.0.0 to 7.1.0 ([#1074](https://github.com/avivsinai/agent-message-queue/issues/1074)) ([8a6b782](https://github.com/avivsinai/agent-message-queue/commit/8a6b7827befbc7d90cf1117b831c635e36610be7))
+* bump golang.org/x/crypto from 0.52.0 to 0.58.0 ([#1073](https://github.com/avivsinai/agent-message-queue/issues/1073)) ([37681f0](https://github.com/avivsinai/agent-message-queue/commit/37681f04638cab7774ef8cdcc15c9db7d3a54de0))
+* bump golang.org/x/sys from 0.48.0 to 0.49.0 ([#1072](https://github.com/avivsinai/agent-message-queue/issues/1072)) ([489243b](https://github.com/avivsinai/agent-message-queue/commit/489243b0de89dc0727a3d67ba0ca0bc16ff53640))
+
 ## [0.97.0](https://github.com/avivsinai/agent-message-queue/compare/v0.96.1...v0.97.0) (2026-10-15)
 
 
