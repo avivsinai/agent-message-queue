@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -29,7 +30,17 @@ func mailboxServer(t *testing.T) (*Server, string) {
 	if err := binding.Write(binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: "agent"}); err != nil {
 		t.Fatal(err)
 	}
+	withBuzzSelf(t)
 	return NewServer(Config{RemoteBinding: true, StateDir: canonicalTempDir(t), TurnTimeout: 2 * time.Second, PollInterval: 5 * time.Millisecond, HeartbeatInterval: 20 * time.Millisecond}, "test"), root
+}
+
+// withBuzzSelf gives the test a Buzz agent key, as Desktop gives every
+// agent, so its event claims name it.
+func withBuzzSelf(t *testing.T) {
+	t.Helper()
+	saved := buzzSelf
+	t.Cleanup(func() { buzzSelf = saved })
+	buzzSelf = strings.Repeat("e", 64)
 }
 
 // inboxPrompts lists the prompt ids in the agent's inbox (new and cur).
@@ -703,8 +714,93 @@ func TestLateReplyIsPostedOnceAfterTheTurn(t *testing.T) {
 	if got := strings.Count(strings.Join(posts, "|"), "late answer"); got != 1 {
 		t.Fatalf("late answer posted %d times; posts=%q", got, posts)
 	}
-	if _, err := os.Stat(filepath.Join(s.cfg.StateDir, "remote-events", eventID+".posted.final")); err != nil {
+	if _, err := os.Stat(filepath.Join(s.eventDir(eventID), eventID+".posted.final")); err != nil {
 		t.Fatalf("no outcome recorded: %v", err)
+	}
+}
+
+// Review of S3 P1-2 and P1-3: agents share remote-events, and one Buzz event
+// can reach several agents. Another agent followed the binding the first
+// agent recorded for the event, and its late-reply sweep posted the first
+// agent's reply as itself. Each agent follows and sweeps only its own claims.
+func TestAnotherAgentsClaimIsNeitherFollowedNorSwept(t *testing.T) {
+	alpha, root := mailboxServer(t)
+	alpha.cfg.TurnTimeout = 300 * time.Millisecond
+	posts := recordPosts(t)
+	savedSelf := buzzSelf
+	t.Cleanup(func() { buzzSelf = savedSelf })
+	prompt := "<context>\nScope: dm\nChannel: DM (#6eff60e4-32ab-48ec-bd3d-f4c97872f370)\n</context>\nhi"
+	eventID := strings.Repeat("5", 64)
+	buzzSelf = strings.Repeat("a", 64)
+	turn := newTurn()
+	turn.channel = buzzChannel(prompt)
+	if _, rpcErr := alpha.runRemote("s", prompt, eventID, turn, func(any) error { return nil }); rpcErr != nil {
+		t.Fatal(rpcErr)
+	}
+	replyAs(t, root, cockpitThread("session/s"), inboxPrompts(t, root)[0], format.KindAnswer, "late answer")
+
+	buzzSelf = strings.Repeat("b", 64)
+	for name, other := range map[string]*Server{
+		"beta":   NewServer(Config{RemoteBinding: true, Pin: "beta", StateDir: alpha.cfg.StateDir}, "test"),
+		"helper": NewServer(Config{RemoteBinding: true, Helper: true, StateDir: alpha.cfg.StateDir}, "test"),
+	} {
+		if b, err := other.turnBinding("s", eventID); err == nil {
+			t.Errorf("%s followed alpha's claim to %s", name, b.Root)
+		}
+		other.sweepLateReplies(time.Now().Add(time.Hour))
+	}
+	if got := strings.Join(posts(), "|"); strings.Contains(got, "late answer") {
+		t.Fatalf("another agent posted alpha's late answer: %q", got)
+	}
+	buzzSelf = strings.Repeat("a", 64)
+	alpha.sweepLateReplies(time.Now().Add(time.Hour))
+	if got := strings.Join(posts(), "|"); strings.Count(got, "late answer") != 1 {
+		t.Fatalf("posts=%q; want alpha's own sweep to post the late answer once", got)
+	}
+}
+
+// Issue #1068 (review of S3 r2): one Buzz event that reaches two agents,
+// for example a channel message that mentions both, was claimed by the first
+// agent in the shared event state. The second agent refused it, so its own
+// session never got the message. Each agent now handles the event for its
+// own session and posts its own reply.
+func TestOneEventReachesEachAgentsSession(t *testing.T) {
+	const chanA = "6eff60e4-32ab-48ec-bd3d-f4c97872f370"
+	alpha, alphaRoot := mailboxServer(t)
+	alpha.cfg.Pin = binding.LegacyName
+	betaRoot := canonicalTempDir(t)
+	if err := fsq.EnsureAgentDirs(betaRoot, "agent"); err != nil {
+		t.Fatal(err)
+	}
+	if err := binding.WriteNamed(binding.Binding{Carrier: binding.CarrierMailbox, Root: betaRoot, Handle: "agent", Name: "beta"}); err != nil {
+		t.Fatal(err)
+	}
+	beta := NewServer(Config{RemoteBinding: true, Pin: "beta", StateDir: alpha.cfg.StateDir, TurnTimeout: 2 * time.Second, PollInterval: 5 * time.Millisecond, HeartbeatInterval: 20 * time.Millisecond}, "test")
+	posts := recordPosts(t)
+	eventID := strings.Repeat("4", 64)
+	run := func(s *Server, self, root, answer string) {
+		t.Helper()
+		buzzSelf = strings.Repeat(self, 64)
+		turn := newTurn()
+		turn.channel = chanA
+		if _, rpcErr := s.runRemote("s", "hi both", eventID, turn, func(v any) error {
+			if strings.HasPrefix(v.(sessionUpdateNotification).Params.Update.Content.Text, "Delivered to") {
+				replyAs(t, root, cockpitThread("session/s"), inboxPrompts(t, root)[0], format.KindAnswer, answer)
+			}
+			return nil
+		}); rpcErr != nil {
+			t.Fatal(rpcErr)
+		}
+	}
+	run(alpha, "a", alphaRoot, "reply A")
+	run(beta, "b", betaRoot, "reply B")
+	for name, root := range map[string]string{"alpha": alphaRoot, "beta": betaRoot} {
+		if ids := inboxPrompts(t, root); len(ids) != 1 {
+			t.Errorf("%s session got %d prompts; want 1", name, len(ids))
+		}
+	}
+	if got, want := posts(), []string{chanA + ": reply A", chanA + ": reply B"}; !slices.Equal(got, want) {
+		t.Fatalf("posts=%q; want %q", got, want)
 	}
 }
 
@@ -731,8 +827,8 @@ func TestModelSelectsEachAgentsSession(t *testing.T) {
 	for i, name := range []string{"a", "b"} {
 		live.send(fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"session/new","params":{"cwd":"/tmp"}}`, 10+i))
 		created := live.read()["result"].(map[string]any)
-		if n := len(created["models"].(map[string]any)["availableModels"].([]any)); n != 2 {
-			t.Fatalf("session/new advertises %d models; want one per binding", n)
+		if n := len(created["models"].(map[string]any)["availableModels"].([]any)); n != 3 {
+			t.Fatalf("session/new advertises %d models; want the plain model plus one per binding", n)
 		}
 		sid := created["sessionId"].(string)
 		live.send(fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"session/set_model","params":{"sessionId":%q,"modelId":"amq-remote:%s"}}`, 20+i, sid, name))
@@ -745,6 +841,50 @@ func TestModelSelectsEachAgentsSession(t *testing.T) {
 	for name, root := range map[string]string{"a": rootA, "b": rootB} {
 		if ids := inboxPrompts(t, root); len(ids) != 1 {
 			t.Fatalf("session %s inbox holds %d prompts; want 1", name, len(ids))
+		}
+	}
+}
+
+// Design AMQ fact 2, found in review of S3: an unpinned agent with two
+// bindings advertised the first binding as its default model, so its DM
+// silently drove the binding that sorts first. It must deliver nowhere and
+// list both sessions.
+func TestUnpinnedAgentNeverDelivers(t *testing.T) {
+	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
+	roots := map[string]string{"alpha": canonicalTempDir(t), "beta": canonicalTempDir(t)}
+	for name, root := range roots {
+		if err := fsq.EnsureAgentDirs(root, "agent"); err != nil {
+			t.Fatal(err)
+		}
+		if err := binding.WriteNamed(binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: "agent", Name: name}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	live := startServer(t, Config{RemoteBinding: true, StateDir: canonicalTempDir(t), TurnTimeout: 100 * time.Millisecond, PollInterval: 5 * time.Millisecond, HeartbeatInterval: 20 * time.Millisecond})
+	live.send(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":2}}`)
+	live.read()
+	live.send(`{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/tmp"}}`)
+	sid := live.read()["result"].(map[string]any)["sessionId"].(string)
+	live.send(fmt.Sprintf(`{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":%q,"prompt":[{"type":"text","text":"hello"}]}}`, sid))
+	said := ""
+	for {
+		value := live.read()
+		if _, ok := value["result"]; ok {
+			break
+		}
+		if value["error"] != nil {
+			t.Fatalf("prompt: %v", value)
+		}
+		if update, ok := value["params"].(map[string]any)["update"].(map[string]any); ok && update["sessionUpdate"] == "agent_message_chunk" {
+			said += update["content"].(map[string]any)["text"].(string)
+		}
+	}
+	for name, root := range roots {
+		if ids := inboxPrompts(t, root); len(ids) != 0 {
+			t.Errorf("an unpinned agent delivered %d prompts to %s", len(ids), name)
+		}
+		if !strings.Contains(said, name) {
+			t.Errorf("reply %q does not list %s", said, name)
 		}
 	}
 }
@@ -1155,7 +1295,7 @@ func TestStatusNeverPostsAfterTheFinal(t *testing.T) {
 	s, _ := mailboxServer(t)
 	posts := recordPosts(t)
 	eventID := strings.Repeat("6", 64)
-	dir := filepath.Join(s.cfg.StateDir, "remote-events")
+	dir := s.eventDir(eventID)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
