@@ -9,9 +9,12 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/avivsinai/agent-message-queue/internal/config"
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/remote/core"
 	"github.com/avivsinai/agent-message-queue/internal/remote/ipc"
 	"github.com/avivsinai/agent-message-queue/internal/remote/manifest"
@@ -259,29 +262,187 @@ func TestJSONFlagValueDecidesSuccessAndErrorOutput(t *testing.T) {
 // E2E kit F3: after a session change in the same Claude process (same target,
 // new native session), attach --self --link refused the binding's own name,
 // so a link share could not follow it. With --link the same root and target
-// re-pin the name; another target still may not take it, and a plain native
-// attach keeps the --name refusal (ruling ww).
+// re-pin the name, and another target still may not take it. A plain native
+// attach of another session takes the next free name instead of the --name
+// refusal of ruling ww: Buzz DX ruling 2 gives each session its own name.
 func TestWriteBindingRepinsTheSameTargetAfterASessionChange(t *testing.T) {
 	dir := canonicalTempDir(t)
 	t.Setenv(binding.EnvPath, filepath.Join(dir, "binding.json"))
 	old := binding.Binding{Root: dir, Target: "claude:7", NativeSession: "session-old", Name: "claude-7"}
-	if err := writeBinding(old, false, true); err != nil {
+	if _, err := writeBinding(old, false, true); err != nil {
 		t.Fatal(err)
 	}
 	moved := old
 	moved.NativeSession = "session-new"
-	var taken *binding.NameTakenError
-	if err := writeBinding(moved, false, false); !errors.As(err, &taken) {
-		t.Fatalf("native attach without --link: err=%v; want NameTakenError", err)
+	if name, err := writeBinding(moved, false, false); err != nil || name != "claude-7-2" {
+		t.Fatalf("native attach without --link: name=%q err=%v; want claude-7-2", name, err)
 	}
-	if err := writeBinding(moved, false, true); err != nil {
+	if _, err := writeBinding(moved, false, true); err != nil {
 		t.Fatalf("re-attach with --link after a session change: %v", err)
 	}
 	if got, err := binding.ReadNamed("claude-7"); err != nil || got.NativeSession != "session-new" {
 		t.Fatalf("binding = %+v %v; want it pinned to session-new", got, err)
 	}
 	other := binding.Binding{Root: dir, Target: "claude:8", NativeSession: "session-8", Name: "claude-7"}
-	if err := writeBinding(other, false, true); !errors.As(err, &taken) {
+	var taken *binding.NameTakenError
+	if _, err := writeBinding(other, false, true); !errors.As(err, &taken) {
 		t.Fatalf("another target with the same name: err=%v; want NameTakenError", err)
+	}
+}
+
+// Observed 2026-10-15: attach --self in session3 refused `binding name
+// "claude-agent-message-queue" already names another session`, because the
+// binding of session1 of the same project held the default <handle>-<project>
+// name. Each session now gets its own name: a different session never takes
+// or refuses on another session's name, and the same session keeps the name
+// it already holds.
+func TestMailboxAttachNamesEachSessionOfAProject(t *testing.T) {
+	dir := canonicalTempDir(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(binding.EnvPath, filepath.Join(dir, "remote", "binding.json"))
+	root1 := filepath.Join(dir, "p", ".agent-mail", "session1")
+	root3 := filepath.Join(dir, "p", ".agent-mail", "session3")
+	other := filepath.Join(dir, "q", "p", ".agent-mail", "session3")
+	for _, r := range []string{root1, root3, other} {
+		if err := os.MkdirAll(r, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	legacy := binding.Binding{Carrier: binding.CarrierMailbox, Root: root1, Handle: "claude", Name: "claude-p"}
+	if err := binding.WriteNamed(legacy); err != nil {
+		t.Fatal(err)
+	}
+	if got := attachMailboxAs(t, root3); got != "claude-p-session3" {
+		t.Fatalf("session3 attached as %q; want claude-p-session3", got)
+	}
+	if got := attachMailboxAs(t, other); got != "claude-p-session3-2" {
+		t.Fatalf("another project's session3 attached as %q; want claude-p-session3-2", got)
+	}
+	if got := attachMailboxAs(t, root1); got != "claude-p" {
+		t.Fatalf("session1 attached as %q; want its own name claude-p", got)
+	}
+	all, err := binding.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{"claude-p": root1, "claude-p-session3": root3, "claude-p-session3-2": other}
+	if len(all) != len(want) {
+		t.Fatalf("bindings %+v; want %v", all, want)
+	}
+	for _, b := range all {
+		if want[b.Name] != b.Root {
+			t.Fatalf("binding %s names %s; want %s", b.Name, b.Root, want[b.Name])
+		}
+	}
+}
+
+// Buzz DX S2: /amq-remote status lists the bound sessions. A session proven
+// ended (its holder ran in another boot) is pruned; one with no holder is
+// unknown, listed, and kept.
+func TestBindingsPrunesEndedSessionsAndKeepsUnknownOnes(t *testing.T) {
+	self := endedHolder(t)
+	dir := canonicalTempDir(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(binding.EnvPath, filepath.Join(dir, "remote", "binding.json"))
+	for _, b := range []binding.Binding{
+		{Carrier: binding.CarrierMailbox, Root: dir, Handle: "codex", Name: "ended", Holder: self},
+		{Carrier: binding.CarrierMailbox, Root: dir, Handle: "claude", Name: "unknown"},
+	} {
+		if err := binding.WriteNamed(b); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var out bytes.Buffer
+	if code := run([]string{"bindings", "--json"}, nil, &out, io.Discard); code != 0 {
+		t.Fatalf("bindings exit %d: %s", code, out.String())
+	}
+	var got struct {
+		Bindings []struct{ Name, State string }
+		Pruned   []string
+	}
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("bindings output %q: %v", out.String(), err)
+	}
+	if len(got.Pruned) != 1 || got.Pruned[0] != "ended" || len(got.Bindings) != 1 ||
+		got.Bindings[0].Name != "unknown" || got.Bindings[0].State != string(binding.Unknown) {
+		t.Fatalf("bindings output %s; want ended pruned and unknown listed", out.String())
+	}
+	if _, err := binding.ReadNamed("ended"); !errors.Is(err, binding.ErrNone) {
+		t.Fatalf("the ended binding is still present: %v", err)
+	}
+}
+
+// attachMailboxAs runs attach --self --json as the AMQ handle claude of the
+// session at root, pinned as a real session is, and returns the bound name.
+func attachMailboxAs(t *testing.T, root string) string {
+	t.Helper()
+	rootID, err := fsq.StableTreeIdentity(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseID, err := fsq.StableTreeIdentity(filepath.Dir(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for k, v := range map[string]string{"AM_ROOT": root, "AM_ME": "claude", "AM_BASE_ROOT": filepath.Dir(root),
+		"AM_SESSION": filepath.Base(root), "AM_ROOT_ID": rootID, "AM_BASE_ROOT_ID": baseID} {
+		t.Setenv(k, v)
+	}
+	var out bytes.Buffer
+	if code, err := attach([]string{"--self", "--json"}, &out, io.Discard); code != 0 || err != nil {
+		t.Fatalf("attach from %s: code=%d err=%v", root, code, err)
+	}
+	var got struct{ Name string }
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("attach output %q: %v", out.String(), err)
+	}
+	return got.Name
+}
+
+// endedHolder is this test process as a holder recorded in another boot, so
+// its binding is proven ended; the test skips where the boot id is unreadable.
+func endedHolder(t *testing.T) launch.HolderIdentity {
+	t.Helper()
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("process start times and boot ids are read on darwin and linux only")
+	}
+	self, err := launch.HolderOf(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if self.BootID == "" {
+		t.Skip("boot id unavailable")
+	}
+	self.BootID = "another-boot"
+	return self
+}
+
+// Review-s2 P1-1: pruning an ended binding freed its name, so the next
+// session of another identity that computed the same name took over the
+// ended session's Buzz agent and DM. The name stays held by its identity.
+func TestPrunedNameStaysWithItsSession(t *testing.T) {
+	ended := endedHolder(t)
+	dir := canonicalTempDir(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(binding.EnvPath, filepath.Join(dir, "remote", "binding.json"))
+	mine := filepath.Join(dir, "p", ".agent-mail", "session3")
+	theirs := filepath.Join(dir, "q", "p", ".agent-mail", "session3")
+	for _, r := range []string{mine, theirs} {
+		if err := os.MkdirAll(r, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := binding.Binding{Carrier: binding.CarrierMailbox, Root: theirs, Handle: "claude", Name: "claude-p-session3", Holder: ended}
+	if err := binding.WriteNamed(old); err != nil {
+		t.Fatal(err)
+	}
+	if code := run([]string{"bindings"}, nil, io.Discard, io.Discard); code != 0 {
+		t.Fatalf("bindings exit %d", code)
+	}
+	if got := attachMailboxAs(t, mine); got != "claude-p-session3-2" {
+		t.Fatalf("another session attached as %q after the prune; want claude-p-session3-2", got)
+	}
+	if got := attachMailboxAs(t, theirs); got != "claude-p-session3" {
+		t.Fatalf("the ended session came back as %q; want its own claude-p-session3", got)
 	}
 }

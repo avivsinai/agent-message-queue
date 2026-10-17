@@ -129,3 +129,29 @@ func TestStopHookDeniesOddBindingsEntries(t *testing.T) {
 		})
 	}
 }
+
+// Review-s2r2 P1-A1: detach and prune leave <name>.ended.json, and the hook
+// read it as a binding naming the session, so a detached session that kept
+// running appended a Stop marker on every turn. A tombstone is not binding
+// evidence.
+func TestStopHookIgnoresATombstoneNamingTheSession(t *testing.T) {
+	if !noFollowSupported {
+		t.Skip("stop hook receiver needs a no-follow open")
+	}
+	const sid = "session-y"
+	home := t.TempDir()
+	if err := os.Mkdir(filepath.Join(home, "bindings"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "bindings", "y.ended.json"), []byte("{\"root\":\"/r\",\"target\":\"t\",\"native_session\":\"session-y\"}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AMQ_REMOTE_BINDING", filepath.Join(home, "binding.json"))
+	if got := bindingDecision(home, sid); got != bindingAbsent {
+		t.Fatalf("binding decision with only a tombstone = %d; want bindingAbsent", got)
+	}
+	RunStopHookReceiver(home, strings.NewReader(`{"session_id":"session-y","hook_event_name":"Stop"}`), io.Discard)
+	if _, err := os.Stat(stopMarkerPath(home, sid)); !os.IsNotExist(err) {
+		t.Fatalf("a detached session's tombstone wrote a Stop marker: %v", err)
+	}
+}

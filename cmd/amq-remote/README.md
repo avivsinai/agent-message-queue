@@ -532,11 +532,14 @@ background (log: `up.log` in the state directory). Claude needs the Stop hook
 on this path.
 
 Each attach writes a **named** binding, `~/.amq/remote/bindings/<name>.json`
-(default `<handle>-<project>`, or the native target; `--name` overrides), and
-removes any other binding for the same session. A defaulted name that
-already names another session is refused (use `--name`), except under
-`attach --self --link`: when the name pins the same root and target and the
-target now runs a new native session, the name moves to it. The bindings live
+(default `<handle>-<project>-<session>` for a root
+`<project>/.agent-mail/<session>`, or the native target; `--name` overrides),
+and removes any other binding for the same session. A session keeps the name
+it already holds; when another session holds its default name, it takes the
+first free `<name>-2`, `<name>-3`, and so on, and never replaces the other
+session's binding. Under `attach --self --link`, when the name pins the same
+root and target and the target now runs a new native session, the name moves
+to it. The bindings live
 in `$AMQ_REMOTE_BINDING`'s directory when that is set; its missing directories
 are created 0700 below an existing ancestor that has no symlink on its path,
 is owned by you, and is not group- or world-writable. Several sessions can be
@@ -548,9 +551,10 @@ writes its Import file).
 this session, `--name <name>` removes the binding of that name, and `--all`
 removes every binding. The session and the endpoint keep running.
 
-A defaulted name that another session already holds is refused, naming
-`--name <unique>` as the remedy; attaching the same session again is
-idempotent. An explicit `--name` replaces the binding of that name.
+A defaulted name that another session holds, or held before it was detached
+or ended, is never taken: the session gets the next free `<name>-N`.
+Attaching the same session again keeps its name. An explicit `--name`
+replaces the binding of that name.
 
 ### `share`
 

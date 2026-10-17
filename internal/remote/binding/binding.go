@@ -14,11 +14,13 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/amqhome"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/lock"
 )
 
@@ -55,6 +57,20 @@ type Binding struct {
 	NativeSession string `json:"native_session,omitempty"`
 	// Display is human text for replies; never an identity.
 	Display string `json:"display,omitempty"`
+	// Identity is the session identity that decides name reuse (see
+	// SessionIdentity); empty in a binding written before it was recorded.
+	Identity string `json:"identity,omitempty"`
+	// Harness is the harness kind that runs the session (claude, codex, pi);
+	// empty when it was not detected.
+	Harness string `json:"harness,omitempty"`
+	// Holder is the harness process of the session, recorded so that a
+	// session that ended can be proven ended; zero when it is not known.
+	Holder launch.HolderIdentity `json:"holder,omitzero"`
+	// Label is the human name of the session and of its Buzz agent:
+	// "<harness> · <project>/<session> @ <machine>".
+	Label string `json:"label,omitempty"`
+	// Machine is the short name of the machine that holds the binding.
+	Machine string `json:"machine,omitempty"`
 	// Name is the binding's name; it is the file name, not stored in it.
 	Name    string `json:"-"`
 	BoundAt string `json:"bound_at"`
@@ -75,6 +91,101 @@ func (b Binding) Same(o Binding) bool {
 		return sameRoot && b.Handle == o.Handle
 	}
 	return sameRoot && b.Target == o.Target && b.NativeSession == o.NativeSession
+}
+
+// SessionIdentity is the session b serves, the key that decides whether an
+// attach reuses b's name: the recorded Identity, else one derived from the
+// destination, so a binding written before Identity was recorded keeps its
+// name for the same session.
+func (b Binding) SessionIdentity() string {
+	switch {
+	case b.Identity != "":
+		return b.Identity
+	case b.Mailbox():
+		return "mailbox:" + b.Handle + "@" + canonicalRoot(b.Root)
+	}
+	return "native:" + b.Target + "\x00" + b.NativeSession + "\x00" + canonicalRoot(b.Root)
+}
+
+// NativeIdentity is the session identity of a native session: its harness,
+// root and working directory, symlinks resolved, not its process or native
+// session id, so the same session coming back to the same place is the same
+// identity.
+func NativeIdentity(kind, root, cwd string) string {
+	return "native:" + kind + "\x00" + canonicalRoot(cwd) + "\x00" + canonicalRoot(root)
+}
+
+// State is the liveness of a bound session.
+type State string
+
+// Liveness states. Only Ended is proof; Unknown is never treated as ended.
+const (
+	Live    State = "live"
+	Ended   State = "ended"
+	Unknown State = "unknown"
+)
+
+// Liveness reports whether b's session still runs, with the evidence. It is
+// Ended only when that is proven: the root is gone, or the holder process is
+// not running, runs with another start token, or ran in another boot. A
+// binding without a holder is Unknown, except a native Claude binding from
+// before holders were recorded, which is Ended when the pid in its target is
+// not running.
+func (b Binding) Liveness() (State, string) {
+	if _, err := os.Stat(b.Root); errors.Is(err, os.ErrNotExist) {
+		return Ended, "root is gone"
+	} else if err != nil {
+		return Unknown, err.Error()
+	}
+	h := b.Holder
+	if pid, ok := strings.CutPrefix(b.Target, "claude:"); ok && h.PID <= 0 && !b.Mailbox() {
+		h.PID, _ = strconv.Atoi(pid)
+	}
+	if h.PID <= 0 {
+		return Unknown, "no holder recorded"
+	}
+	switch state, evidence := launch.InspectHolder(h); state {
+	case launch.LeaseStale:
+		return Ended, evidence
+	case launch.LeaseValid:
+		return Live, evidence
+	default:
+		return Unknown, evidence
+	}
+}
+
+// Machine is this machine's short name for labels: the first label of the
+// host name, lowercased, at most 32 characters of [a-z0-9-]; empty when the
+// host name is unknown.
+func Machine() string {
+	host, err := os.Hostname()
+	if err != nil {
+		return ""
+	}
+	first, _, _ := strings.Cut(host, ".")
+	var b strings.Builder
+	for _, r := range strings.ToLower(first) {
+		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' {
+			b.WriteRune(r)
+		} else {
+			b.WriteRune('-')
+		}
+	}
+	out := strings.Trim(b.String(), "-")
+	if len(out) > 32 {
+		out = strings.Trim(out[:32], "-")
+	}
+	return out
+}
+
+// canonicalRoot is root with its symlinks resolved, so one root reached
+// through two spellings is one identity; the clean path when it does not
+// resolve.
+func canonicalRoot(root string) string {
+	if resolved, err := filepath.EvalSymlinks(root); err == nil {
+		return resolved
+	}
+	return filepath.Clean(root)
 }
 
 // Valid reports whether b is complete for its carrier.
@@ -416,8 +527,8 @@ func ReadNamed(name string) (Binding, error) {
 	return b, nil
 }
 
-// NameTakenError is returned by WriteNamedNew when another destination
-// already holds the binding name.
+// NameTakenError is returned by WriteNamedIf when the binding of that name is
+// not one it may replace.
 type NameTakenError struct{ Name string }
 
 func (e *NameTakenError) Error() string {
@@ -427,16 +538,124 @@ func (e *NameTakenError) Error() string {
 // WriteNamed adds or replaces only the binding called b.Name.
 func WriteNamed(b Binding) error { return writeNamed(b, nil) }
 
-// WriteNamedNew writes the binding called b.Name, refusing with
-// *NameTakenError when a binding of that name names a different destination.
-// The check and the write share one transaction. Writing the same
-// destination again stays idempotent.
-func WriteNamedNew(b Binding) error { return writeNamed(b, b.Same) }
-
 // WriteNamedIf writes the binding called b.Name when no binding of that name
 // exists or allow accepts the one that does; otherwise it refuses with
 // *NameTakenError. The check and the write share one transaction.
 func WriteNamedIf(b Binding, allow func(old Binding) bool) error { return writeNamed(b, allow) }
+
+// WriteSession writes b under the name b's own destination already holds, else
+// under a name its session identity holds, else under base, else under the
+// first of base-2, base-3, ... that is free or held by the same identity, and
+// returns the name written. A binding of the same identity with another
+// destination is taken over only when its holder is b's own or proven ended:
+// a live or unknown holder may be a concurrent session in the same place,
+// which keeps its name, so uncertain state is never weakened. A name whose
+// binding was pruned stays held by its identity through its tombstone (see
+// PruneEnded): that identity takes it back, and no other identity takes it.
+// Another session's binding is never replaced, so a session never inherits
+// another session's Buzz agent, and the same session always gets back its own
+// name. The choice and the write share one transaction.
+func WriteSession(b Binding, base string) (string, error) {
+	if err := ValidName(base); err != nil {
+		return "", err
+	}
+	if err := b.Valid(); err != nil {
+		return "", err
+	}
+	id := b.SessionIdentity()
+	b.Identity = id
+	if b.BoundAt == "" {
+		b.BoundAt = time.Now().UTC().Format(time.RFC3339)
+	}
+	raw, err := json.MarshalIndent(b, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	var name string
+	err = transact(func(string) error {
+		dir, err := namedDir(true)
+		if err != nil {
+			return err
+		}
+		bound, err := scanNamed(dir)
+		if err != nil {
+			return err
+		}
+		tombs, err := scanTombstones(dir)
+		if err != nil {
+			return err
+		}
+		reusable := func(o Binding) bool {
+			if o.SessionIdentity() != id {
+				return false
+			}
+			// A mailbox identity is its destination, so it is never a
+			// concurrent session, whatever spelling its root has.
+			if b.Mailbox() || b.Holder.PID > 0 && o.Holder == b.Holder {
+				return true
+			}
+			state, _ := o.Liveness()
+			return state == Ended
+		}
+		held := map[string]Binding{}
+		for _, o := range bound {
+			held[o.Name] = o
+			if o.Same(b) && name == "" {
+				name = o.Name
+			}
+		}
+		for _, o := range bound {
+			if name == "" && reusable(o) {
+				name = o.Name
+			}
+		}
+		for _, t := range tombs {
+			if o, taken := held[t.Name]; name == "" && t.SessionIdentity() == id && (!taken || reusable(o)) {
+				name = t.Name
+			}
+		}
+		tombOf := map[string]string{}
+		for _, t := range tombs {
+			tombOf[t.Name] = t.SessionIdentity()
+		}
+		for n := 1; name == ""; n++ {
+			candidate := base
+			if n > 1 {
+				suffix := fmt.Sprintf("-%d", n)
+				candidate = strings.TrimRight(base[:min(len(base), 64-len(suffix))], "-_") + suffix
+			}
+			// A file that does not read as a binding or a tombstone is
+			// taken, never overwritten.
+			o, taken := held[candidate]
+			// Any other Lstat error means the directory cannot be read, so
+			// no name is provably free: fail closed (review-s1 P1).
+			_, statErr := os.Lstat(filepath.Join(dir, candidate+".json"))
+			if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
+				return statErr
+			}
+			_, tombErr := os.Lstat(filepath.Join(dir, candidate+tombstoneSuffix))
+			if tombErr != nil && !errors.Is(tombErr, os.ErrNotExist) {
+				return tombErr
+			}
+			tombID, tombed := tombOf[candidate]
+			free := !taken && statErr != nil && (tombed && tombID == id || !tombed && tombErr != nil)
+			if taken && reusable(o) || free {
+				name = candidate
+			}
+		}
+		if _, err := fsq.WriteFileAtomic(dir, name+".json", append(raw, '\n'), 0o600); err != nil {
+			return err
+		}
+		if err := os.Remove(filepath.Join(dir, name+tombstoneSuffix)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	return name, nil
+}
 
 func writeNamed(b Binding, allow func(old Binding) bool) error {
 	if err := ValidName(b.Name); err != nil {
@@ -477,14 +696,91 @@ func List() ([]Binding, error) {
 	if err != nil {
 		return nil, err
 	}
-	var out []Binding
+	out, err := scanNamed(dir)
+	if err != nil {
+		return nil, err
+	}
+	if b, err := Read(); err == nil {
+		b.Name = LegacyName
+		out = append(out, b)
+	}
+	return out, nil
+}
+
+// tombstoneSuffix names the tombstone a removed binding leaves:
+// <name>.ended.json, the binding as it was when it was removed.
+const tombstoneSuffix = ".ended.json"
+
+// IsTombstone reports whether a file name in the bindings directory is a
+// tombstone. A tombstone is never a binding, so it is no evidence that a
+// session is bound: every reader of the directory skips it (review-s2r2
+// P1-A1).
+func IsTombstone(fileName string) bool { return strings.HasSuffix(fileName, tombstoneSuffix) }
+
+// PruneEnded removes every binding whose session is proven ended and returns
+// the names removed. Each binding is checked as read under the binding lock,
+// so a session that attached again meanwhile is kept, and an unknown one is
+// kept too. Like every removal, it leaves tombstones (see Retire).
+func PruneEnded() ([]string, error) {
+	return Retire(func(b Binding) bool {
+		state, _ := b.Liveness()
+		return state == Ended
+	})
+}
+
+// Retire removes every binding match accepts, as read under the binding lock,
+// and returns the names removed. A named binding is renamed to its tombstone,
+// which keeps its name held by its session identity, so a later session never
+// inherits the removed session's Buzz agent through a freed name (review-s2
+// P1-1). Tombstones are never removed. Their number is bounded by the
+// distinct session identities, and an identity derived from a target (a link
+// share, or a native session whose working directory is unknown) names a
+// process, so each such session leaves one. The legacy single binding has no
+// name to hold and is deleted.
+func Retire(match func(Binding) bool) ([]string, error) {
+	var removed []string
+	err := transact(func(path string) error {
+		dir, err := namedDir(false)
+		if err != nil {
+			return err
+		}
+		bound, err := scanNamed(dir)
+		if err != nil {
+			return err
+		}
+		for _, b := range bound {
+			if !match(b) {
+				continue
+			}
+			if err := os.Rename(filepath.Join(dir, b.Name+".json"), filepath.Join(dir, b.Name+tombstoneSuffix)); err != nil {
+				return err
+			}
+			removed = append(removed, b.Name)
+		}
+		if b, err := read(path); err == nil {
+			if b.Name = LegacyName; match(b) {
+				if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+					return err
+				}
+				removed = append(removed, LegacyName)
+			}
+		}
+		return nil
+	})
+	return removed, err
+}
+
+// scanTombstones reads the tombstones in dir, sorted by name. A file that
+// does not read as a binding is skipped.
+func scanTombstones(dir string) ([]Binding, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
+	var out []Binding
 	for _, e := range entries {
-		name := strings.TrimSuffix(e.Name(), ".json")
-		if e.IsDir() || name == e.Name() || ValidName(name) != nil {
+		name := strings.TrimSuffix(e.Name(), tombstoneSuffix)
+		if !IsTombstone(e.Name()) || e.IsDir() || ValidName(name) != nil {
 			continue
 		}
 		b, err := read(filepath.Join(dir, e.Name()))
@@ -495,10 +791,30 @@ func List() ([]Binding, error) {
 		out = append(out, b)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
-	if b, err := Read(); err == nil {
-		b.Name = LegacyName
+	return out, nil
+}
+
+// scanNamed reads the named bindings in dir, sorted by name. A file that does
+// not read as a binding is skipped.
+func scanNamed(dir string) ([]Binding, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	var out []Binding
+	for _, e := range entries {
+		name := strings.TrimSuffix(e.Name(), ".json")
+		if e.IsDir() || IsTombstone(e.Name()) || name == e.Name() || ValidName(name) != nil {
+			continue
+		}
+		b, err := read(filepath.Join(dir, e.Name()))
+		if err != nil {
+			continue
+		}
+		b.Name = name
 		out = append(out, b)
 	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out, nil
 }
 
@@ -517,7 +833,7 @@ func RemoveMatching(match func(Binding) bool) ([]string, error) {
 		}
 		for _, e := range entries {
 			name := strings.TrimSuffix(e.Name(), ".json")
-			if e.IsDir() || name == e.Name() || ValidName(name) != nil {
+			if e.IsDir() || IsTombstone(e.Name()) || name == e.Name() || ValidName(name) != nil {
 				continue
 			}
 			b, err := read(filepath.Join(dir, e.Name()))

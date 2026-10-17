@@ -73,6 +73,7 @@ Commands:
                            runs in (starts the endpoint when none runs)
   detach --self|--name N|--all
                            Unbind; the session keeps running
+  bindings                 Bound sessions: live, unknown, or ended (pruned)
   link add NAME URL --code CODE
                            Link this machine to a server; type the passkey
                            fingerprint your browser shows
@@ -280,6 +281,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		code, err = attach(rest, stdout, stderr, probe)
 	case "detach":
 		code, err = detach(rest, stdout, stderr, probe)
+	case "bindings":
+		code, err = bindings(rest, stdout, probe)
 	case "doctor":
 		out, code, err = doctor(rest, probe)
 	case "link":

@@ -1,7 +1,6 @@
 package binding
 
 import (
-	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -67,28 +66,6 @@ func TestOverrideWithSymlinkedAncestorIsRefused(t *testing.T) {
 	t.Setenv(EnvPath, filepath.Join(base, "link", "remote", "binding.json"))
 	if err := Write(Binding{Root: "/r", Target: "claude:1", NativeSession: "s"}); err == nil {
 		t.Fatal("wrote through a symlinked ancestor")
-	}
-}
-
-// Bead agent-message-queue-94w (review F3): two sessions whose default name
-// collides must not silently replace each other; the same session may attach
-// again.
-func TestWriteNamedNewRefusesAnotherSessionsName(t *testing.T) {
-	t.Setenv(EnvPath, filepath.Join(canonicalTempDir(t), "remote", "binding.json"))
-	a := Binding{Carrier: CarrierMailbox, Root: "/p/.agent-mail/a", Handle: "claude", Name: "claude-p"}
-	b := Binding{Carrier: CarrierMailbox, Root: "/p/.agent-mail/b", Handle: "claude", Name: "claude-p"}
-	if err := WriteNamedNew(a); err != nil {
-		t.Fatal(err)
-	}
-	if err := WriteNamedNew(a); err != nil {
-		t.Fatalf("re-attaching the same session: %v", err)
-	}
-	var taken *NameTakenError
-	if err := WriteNamedNew(b); !errors.As(err, &taken) {
-		t.Fatalf("second session with the same name: err=%v; want NameTakenError", err)
-	}
-	if got, err := ReadNamed("claude-p"); err != nil || !got.Same(a) {
-		t.Fatalf("binding = %+v %v; want session a kept", got, err)
 	}
 }
 
@@ -166,5 +143,29 @@ func TestBindingOverrideRefusesASymlinkSwappedInAfterTheCheck(t *testing.T) {
 	t.Setenv(EnvPath, filepath.Join(shared, "remote", "binding.json"))
 	if err := Write(b); err == nil {
 		t.Fatal("Write created the binding below a world-writable directory")
+	}
+}
+
+// Review of S1 (review-s1 P1): with the bindings directory readable but not
+// searchable, every Lstat failed, so WriteSession searched for a free name
+// forever while it held the binding lock. It now fails closed.
+func TestWriteSessionFailsOnAnUnsearchableBindingsDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix mode bits")
+	}
+	base := canonicalTempDir(t)
+	t.Setenv(EnvPath, filepath.Join(base, "remote", "binding.json"))
+	held := Binding{Carrier: CarrierMailbox, Root: "/p/.agent-mail/a", Handle: "claude", Name: "claude-p"}
+	if err := WriteNamed(held); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(base, "remote", "bindings")
+	if err := os.Chmod(dir, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	other := Binding{Carrier: CarrierMailbox, Root: "/p/.agent-mail/b", Handle: "claude"}
+	if name, err := WriteSession(other, "claude-p"); err == nil {
+		t.Fatalf("WriteSession wrote %q into an unsearchable bindings directory; want an error", name)
 	}
 }
