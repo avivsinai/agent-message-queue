@@ -165,7 +165,7 @@ func TestWriteSessionFailsOnAnUnsearchableBindingsDir(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
 	other := Binding{Carrier: CarrierMailbox, Root: "/p/.agent-mail/b", Handle: "claude"}
-	if name, err := WriteSession(other, "claude-p", Binding.Liveness); err == nil {
+	if name, _, err := WriteSession(other, "claude-p", Binding.Liveness); err == nil {
 		t.Fatalf("WriteSession wrote %q into an unsearchable bindings directory; want an error", name)
 	}
 }

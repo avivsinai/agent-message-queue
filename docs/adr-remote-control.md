@@ -161,8 +161,29 @@ DM. No wake and no Stop hook are required.
 `--native` drives the exact native session through `amq-remote`. Claude needs
 the Stop hook on that path.
 
-One Buzz agent serves one session. A named binding selects it: the ACP model
-id is `amq-remote:<name>`.
+One Buzz agent serves one session:
+
+- **Pin.** The agent names its binding with the system prompt line
+  `AMQ Remote session: <name>`, or, for an agent made before that line
+  existed, the model `amq-remote:<name>`. Two pins that name different
+  sessions refuse to deliver. The helper agent (`AMQ Remote helper`) and an
+  unpinned agent with several bindings never choose a session; they answer
+  with the list of sessions and the agent to DM for each.
+- **Reuse.** A binding's name belongs to its session identity: the clean
+  root and handle for a mailbox, the harness, root and working directory for
+  a native session. The same session always gets its name back, and with it
+  its agent and DM. A different session never takes that name, even after
+  the first one ended: a removed binding leaves a tombstone that keeps the
+  name, and the new session gets the next free `<name>-N`.
+- **Archive.** Only proven-ended sessions are pruned. When its binding is
+  gone, the agent archives its own identity, and it unarchives when the same
+  session binds the name again. AMQ never holds the owner's key and never
+  reads Buzz Desktop state; it learns an agent's state from the marker the
+  agent rewrites while it runs.
+- **Helper draft.** A new session's agent is created by the owner in Buzz
+  Desktop. When the per-machine helper agent runs, it sends a Desktop create
+  draft for the session, so the owner only confirms it; otherwise the owner
+  imports the file that `amq-acp setup --session <name>` writes.
 
 A link is the carrier to a server the user linked with `amq-remote link add`.
 The machine dials it (`wss://`, `ws://` only to loopback) and answers only

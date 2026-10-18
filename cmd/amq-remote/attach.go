@@ -188,7 +188,8 @@ func attach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 		}
 	}
 	inspect := inspectOutsideLock(codexes)
-	if nb.Name, err = writeBinding(nb, explicit, *linkName != "", inspect); err != nil {
+	var reused bool
+	if nb.Name, reused, err = writeBinding(nb, explicit, *linkName != "", inspect); err != nil {
 		return protocol.ExitActionRequired, err
 	}
 	pruneAfterAttach(inspect)
@@ -208,11 +209,14 @@ func attach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 		sayWarning(stdout, hookWarning)
 		return 0, nil
 	}
+	now := time.Now()
+	agent, helper := agentOf(nb.Name, now), helperOf(now)
 	if c.json {
-		emitJSON(stdout, withWarning(map[string]any{"connected": true, "name": nb.Name, "root": nb.Root, "target": nb.Target}, hookWarning))
+		out := map[string]any{"connected": true, "name": nb.Name, "root": nb.Root, "target": nb.Target}
+		emitJSON(stdout, withWarning(connectedJSON(out, nb.Label, reused, agent, helper), hookWarning))
 		return 0, nil
 	}
-	say(stdout, "Connected: %s (%s) as session %s. DM its Buzz agent \"AMQ: %s\".", nonEmpty(display, cand.Target), cand.Target, nb.Name, nb.Name)
+	connected(stdout, nb.Name, nb.Label, agent, helper)
 	sayWarning(stdout, hookWarning)
 	return 0, nil
 }
@@ -310,16 +314,19 @@ func attachMailbox(root, handle, name string, asJSON bool, stdout io.Writer) (in
 		return protocol.ExitActionRequired, err
 	}
 	inspect := inspectOutsideLock(codexes)
-	name, err := writeBinding(b, explicit, false, inspect)
+	name, reused, err := writeBinding(b, explicit, false, inspect)
 	if err != nil {
 		return protocol.ExitActionRequired, err
 	}
 	pruneAfterAttach(inspect)
+	now := time.Now()
+	agent, helper := agentOf(name, now), helperOf(now)
 	if asJSON {
-		emitJSON(stdout, map[string]any{"connected": true, "name": name, "root": root, "handle": handle})
+		out := map[string]any{"connected": true, "name": name, "root": root, "handle": handle}
+		emitJSON(stdout, connectedJSON(out, b.Label, reused, agent, helper))
 		return 0, nil
 	}
-	say(stdout, "Connected: AMQ handle %s at %s as session %s. DM its Buzz agent \"AMQ: %s\".", handle, root, name, name)
+	connected(stdout, name, b.Label, agent, helper)
 	return 0, nil
 }
 
@@ -366,7 +373,8 @@ func nativeBindingName(flagValue, target string) (string, bool) {
 
 // writeBinding adds the named binding, removes any other binding for the
 // same session, so one session is one Buzz agent (bead
-// agent-message-queue-611.39), and returns the name written. A defaulted name
+// agent-message-queue-611.39), and returns the name written and whether this
+// session already held that name. A defaulted name
 // never replaces another session's binding (bead agent-message-queue-94w); an
 // explicit --name is the caller's choice and replaces. A defaulted name is the
 // session's own: the name its identity already holds, else the first of
@@ -379,21 +387,20 @@ func nativeBindingName(flagValue, target string) (string, bool) {
 // to b's session, and one target reports one native session, so the old
 // session is no longer the attached one. An old session resumed in another
 // process is another target, so another default name.
-func writeBinding(b binding.Binding, explicitName, followLink bool, inspect binding.Inspector) (string, error) {
-	var err error
+func writeBinding(b binding.Binding, explicitName, followLink bool, inspect binding.Inspector) (name string, reused bool, err error) {
 	switch {
 	case explicitName:
 		err = binding.WriteNamed(b)
 	case followLink:
 		err = binding.WriteNamedIf(b, func(old binding.Binding) bool { return old.Same(b) || movedTarget(old, b) })
 	default:
-		b.Name, err = binding.WriteSession(b, b.Name, inspect)
+		b.Name, reused, err = binding.WriteSession(b, b.Name, inspect)
 	}
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	_, err = binding.Retire(func(o binding.Binding) bool { return o.Same(b) && o.Name != b.Name })
-	return b.Name, err
+	return b.Name, reused, err
 }
 
 // movedTarget reports whether old pins the same root and native target as b
@@ -717,11 +724,14 @@ type bindingRow struct {
 	Root     string        `json:"root"`
 	Handle   string        `json:"handle,omitempty"`
 	Target   string        `json:"target,omitempty"`
+	Agent    string        `json:"agent"`
 }
 
-// bindings lists the bound sessions with their liveness (/amq-remote
-// status), after it prunes the ones proven ended. A session whose liveness is
-// unknown is listed and kept.
+// bindings lists the bound sessions with their liveness and their Buzz
+// agents (/amq-remote status), after it prunes the ones proven ended. A
+// session whose liveness is unknown is listed and kept, with the command that
+// removes it. Agents of bindings made before sessions had labels are named
+// once, for the owner to delete.
 func bindings(args []string, stdout io.Writer, probe ...*jsonProbe) (int, error) {
 	fs := flag.NewFlagSet("bindings", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -738,25 +748,39 @@ func bindings(args []string, stdout io.Writer, probe ...*jsonProbe) (int, error)
 	if err != nil {
 		return protocol.ExitActionRequired, err
 	}
+	now := time.Now()
+	helper := helperOf(now)
 	rows := make([]bindingRow, 0, len(all))
+	var unknown []string
 	width := 0
 	for _, b := range all {
 		state, evidence := inspect(b)
-		rows = append(rows, bindingRow{Name: b.Name, Label: b.Label, State: state, Evidence: evidence, Root: b.Root, Handle: b.Handle, Target: b.Target})
+		rows = append(rows, bindingRow{Name: b.Name, Label: b.Label, State: state, Evidence: evidence, Root: b.Root, Handle: b.Handle, Target: b.Target,
+			Agent: agentOf(b.Name, now).State})
+		if state == binding.Unknown {
+			unknown = append(unknown, b.Name)
+		}
 		width = max(width, len([]rune(nonEmpty(b.Label, b.Name))))
 	}
+	legacy := legacyAgents()
 	if c.json {
 		if pruned == nil {
 			pruned = []string{}
 		}
-		emitJSON(stdout, map[string]any{"bindings": rows, "pruned": pruned})
+		if legacy == nil {
+			legacy = []string{}
+		}
+		emitJSON(stdout, map[string]any{"bindings": rows, "pruned": pruned, "helper": helper.State, "legacy_agents": legacy})
 		return 0, nil
+	}
+	if helper.State != agentMissing {
+		say(stdout, "Helper: %s (%s)", nonEmpty(helper.Display, "AMQ Remote helper"), helper.State)
 	}
 	if len(rows) == 0 {
 		say(stdout, "No session is connected.")
 	}
 	for _, r := range rows {
-		line := fmt.Sprintf("%-*s  %-7s  %s", width, nonEmpty(r.Label, r.Name), r.State, r.Name)
+		line := fmt.Sprintf("%-*s  %-7s  agent %-7s  %s", width, nonEmpty(r.Label, r.Name), r.State, r.Agent, r.Name)
 		if r.State != binding.Live {
 			line += ": " + r.Evidence
 		}
@@ -765,6 +789,10 @@ func bindings(args []string, stdout io.Writer, probe ...*jsonProbe) (int, error)
 	if len(pruned) > 0 {
 		say(stdout, "Pruned ended sessions: %s.", strings.Join(pruned, ", "))
 	}
+	if hint := unknownHint(unknown); hint != "" {
+		say(stdout, "%s", hint)
+	}
+	sayLegacyAgents(stdout, legacy)
 	return 0, nil
 }
 
@@ -846,7 +874,7 @@ func detach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 		say(stdout, "Not connected.")
 		return 0, nil
 	}
-	say(stdout, "Disconnected. The session keeps running; Buzz DMs now answer \"Not connected\".")
+	say(stdout, "Disconnected. The session keeps running; its Buzz agent archives itself and its DM answers \"Not connected\".")
 	return 0, nil
 }
 
