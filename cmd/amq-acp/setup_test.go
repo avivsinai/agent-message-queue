@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -14,7 +15,7 @@ func TestSetupWritesRemoteHarnessAndSnapshot(t *testing.T) {
 		return run([]string{"setup", "--out", out})
 	})
 	want := "In Buzz Desktop: if AMQ Remote is new and Desktop was open, click Settings, then Agents, then Check again. " +
-		"Then Agents, then + then Import, pick " + out + ", then Start. Turn on Auto-start in the agent's menu so it starts with Desktop. Then run /amq-remote in a Claude Code session, or $amq-remote in Codex.\n"
+		"Then Agents, then + then Import, pick " + out + ", then Start. Turn on Auto-start in the agent's menu so it starts with Desktop.\n"
 	if stdout != want {
 		t.Fatalf("stdout = %q", stdout)
 	}
@@ -51,6 +52,27 @@ func TestSetupWritesRemoteHarnessAndSnapshot(t *testing.T) {
 		snapshot.Definition.Model != remoteModelID || snapshot.Definition.Parallelism != 1 ||
 		snapshot.Definition.RespondTo != ownerOnlyRespondTo ||
 		snapshot.Profile.DisplayName != "AMQ Remote" || snapshot.Memory.Level != "none" {
+		t.Fatalf("snapshot = %#v", snapshot)
+	}
+}
+
+// Review of S5 P1-3: no command created the helper, so the draft path had
+// no entry point. setup --helper writes an import file whose system prompt
+// makes the agent the helper.
+func TestSetupHelperWritesTheHelperAgent(t *testing.T) {
+	pinInstallShell(t)
+	out := filepath.Join(t.TempDir(), helperSnapshotName)
+	captureStdout(t, func() int { return run([]string{"setup", "--helper", "--out", out}) })
+	raw, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snapshot agentSnapshot
+	if err := json.Unmarshal(raw, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Definition.SystemPrompt != "AMQ Remote helper" || snapshot.Definition.Model != remoteModelID ||
+		snapshot.Definition.RespondTo != ownerOnlyRespondTo || !strings.HasPrefix(snapshot.Profile.DisplayName, "AMQ Remote helper") {
 		t.Fatalf("snapshot = %#v", snapshot)
 	}
 }
