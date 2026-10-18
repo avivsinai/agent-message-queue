@@ -118,6 +118,7 @@ Once per Mac, write the harness. Each session then gets its own Desktop agent:
 ```sh
 amq-acp setup
 amq-acp setup --session <name>
+amq-acp setup --helper
 ```
 
 `setup` writes `custom_harnesses/amq_remote.json` with mode 0600, the stable
@@ -129,6 +130,11 @@ path): a `buzz-agent-snapshot` version 1 named `AMQ: <name>`, runtime
 `owner-only`. That model selects the named binding, so the agent serves that
 session only. A bare `setup` writes `AMQ Remote.agent.json` with model
 `amq-remote`, which drives the only binding and refuses when several exist.
+`setup --helper` writes `AMQ Remote helper.agent.json`: the agent `AMQ Remote
+helper @ <machine>` with the system prompt line `AMQ Remote helper`, model
+`amq-remote` and `respondTo` `owner-only`. Import it once per machine. The
+helper serves no session; it asks Buzz Desktop to create each new session's
+agent, so a new session needs only the Create agent dialog.
 Import the file in Buzz Desktop: Agents, then + then Import, pick the file,
 then Start, and turn on Auto-start in the agent's menu. Desktop caches its
 harness list: if AMQ Remote is new and Desktop was open, click Settings,

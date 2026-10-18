@@ -17,15 +17,19 @@ const setupUsage = `amq-acp setup writes the AMQ Remote Buzz harness and the Des
 
 Usage:
   amq-acp setup [--out <file>]
+  amq-acp setup --session <name> [--out <file>]
+  amq-acp setup --helper [--out <file>]
 
 The harness is ~/Library/Application Support/xyz.block.buzz.app/custom_harnesses/amq_remote.json
 with mode 0600. Its env is only AMQ_ACP_REMOTE=binding. A file this command did
 not write is left unchanged.
 
 The import file is "AMQ Remote.agent.json" in the current directory, or --out.
-Import it in Buzz Desktop, then Start; turn on Auto-start. A Desktop that is
-open sees a new harness after Settings, Agents, Check again. Then run
-/amq-remote in a Claude Code session, or $amq-remote in Codex.
+With --session it is "AMQ <name>.agent.json", an agent for that one session.
+With --helper it is "AMQ Remote helper.agent.json", the per-machine helper
+that asks Buzz Desktop to create each new session's agent; import it once per
+machine. Import the file in Buzz Desktop, then Start; turn on Auto-start. A
+Desktop that is open sees a new harness after Settings, Agents, Check again.
 `
 
 const (
@@ -35,6 +39,10 @@ const (
 	// (managed_agents/types/tests.rs: respond_to_serde_is_kebab_case).
 	ownerOnlyRespondTo = "owner-only"
 	agentSnapshotName  = "AMQ Remote.agent.json"
+	helperSnapshotName = "AMQ Remote helper.agent.json"
+	// helperLine makes an imported agent the per-machine helper
+	// (internal/acp lifecycle.go).
+	helperLine = "AMQ Remote helper"
 )
 
 type agentSnapshot struct {
@@ -67,6 +75,7 @@ func runSetup(args []string) int {
 	flags.SetOutput(os.Stderr)
 	out := flags.String("out", "", "Import file path (default: ./AMQ Remote.agent.json, or ./AMQ <session>.agent.json)")
 	session := flags.String("session", "", "binding name from amq-remote attach; the agent is \"AMQ: <session>\" and drives only that session")
+	helper := flags.Bool("helper", false, "write the per-machine helper, which asks Buzz Desktop to create each new session's agent")
 	flags.Usage = func() { fmt.Fprint(os.Stderr, setupUsage) }
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -94,12 +103,20 @@ func runSetup(args []string) int {
 			fmt.Fprintln(os.Stderr, "amq-acp setup:", err)
 			return exitUsage
 		}
+		if *helper {
+			fmt.Fprintln(os.Stderr, "amq-acp setup: --helper serves no session; give --session or --helper, not both")
+			return exitUsage
+		}
 	}
 	snapshotPath := *out
 	if snapshotPath == "" {
-		snapshotPath = agentSnapshotName
-		if name != "" {
+		switch {
+		case *helper:
+			snapshotPath = helperSnapshotName
+		case name != "":
 			snapshotPath = "AMQ " + name + ".agent.json"
+		default:
+			snapshotPath = agentSnapshotName
 		}
 	}
 	snapshotPath, err = filepath.Abs(snapshotPath)
@@ -112,7 +129,7 @@ func runSetup(args []string) int {
 		fmt.Fprintln(os.Stderr, "amq-acp setup:", err)
 		return exitGeneral
 	}
-	body, err := remoteSnapshotBody(name)
+	body, err := remoteSnapshotBody(name, *helper)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "amq-acp setup:", err)
 		return exitGeneral
@@ -122,6 +139,9 @@ func runSetup(args []string) int {
 		return exitGeneral
 	}
 	fmt.Print(setupSteps(snapshotPath))
+	if *helper {
+		fmt.Println("Do this once per machine: the helper then asks Buzz Desktop to create the agent of each new session.")
+	}
 	return 0
 }
 
@@ -152,11 +172,19 @@ func remoteHarness(command string) buzzHarness {
 // remoteSnapshotBody is the Import file. With a session name the agent is
 // "AMQ: <name>" and its system prompt line "AMQ Remote session: <name>" pins
 // it to that one binding, so each session has its own Buzz agent. The model
-// stays the plain amq-remote: the pin has one source. Without a session name
-// the agent is unpinned and serves no session.
-func remoteSnapshotBody(session string) ([]byte, error) {
+// stays the plain amq-remote: the pin has one source. The helper is
+// "AMQ Remote helper @ <machine>" with the line "AMQ Remote helper": it
+// serves no session and creates the session agents. Without either the
+// agent is unpinned.
+func remoteSnapshotBody(session string, helper bool) ([]byte, error) {
 	agentName, systemPrompt := "AMQ Remote", ""
-	if session != "" {
+	switch {
+	case helper:
+		agentName, systemPrompt = "AMQ Remote helper", helperLine
+		if machine := binding.Machine(); machine != "" {
+			agentName += " @ " + machine
+		}
+	case session != "":
 		agentName, systemPrompt = "AMQ: "+session, "AMQ Remote session: "+session
 	}
 	body, err := json.MarshalIndent(agentSnapshot{
