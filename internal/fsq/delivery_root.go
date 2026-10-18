@@ -989,6 +989,16 @@ func (r *DeliveryRoot) Remove(name string) error {
 	return r.root.Remove(name)
 }
 
+// RemoveAll removes a root-relative directory tree through the pinned
+// capability. os.Root's path resolution cannot escape the root by symlink or
+// traversal, so the tree is destroyed exactly as addressed.
+func (r *DeliveryRoot) RemoveAll(name string) error {
+	if err := r.VerifyBase(); err != nil {
+		return err
+	}
+	return r.root.RemoveAll(name)
+}
+
 // OpenLockFile opens or creates a root-relative file for advisory locking.
 // The file is opened O_CREATE on its stable name and is never replaced, so
 // flock serializes on one inode. Callers must close the returned file.

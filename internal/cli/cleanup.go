@@ -27,19 +27,29 @@ func runCleanup(args []string) error {
 		false,
 		"Remove one exact stuck managed-launch recovery journal",
 	)
+	mailboxFlag := fs.String("mailbox", "", "Remove one agent's mailbox (refused while mail is waiting)")
 	dryRunFlag := fs.Bool("dry-run", false, "Show what would be removed without deleting")
 	yesFlag := fs.Bool("yes", false, "Skip confirmation prompt")
 	usage := usageWithFlags(
 		fs,
-		"amq cleanup [--tmp-older-than <duration>] [--wake-quarantine-older-than <duration>] [--launch-journal --root <session-root>] [--dry-run] [--yes] [options]",
+		"amq cleanup [--mailbox <handle> --root <session-root>] [--tmp-older-than <duration>] [--wake-quarantine-older-than <duration>] [--launch-journal --root <session-root>] [--dry-run] [--yes] [options]",
 	)
 	if handled, err := parseFlags(fs, args, usage); err != nil {
 		return err
 	} else if handled {
 		return nil
 	}
-	if *olderFlag == "" && *wakeQuarantineOlderFlag == "" && !*launchJournalFlag {
-		return UsageError("one of --tmp-older-than, --wake-quarantine-older-than, or --launch-journal is required")
+	if *mailboxFlag == "" && *olderFlag == "" && *wakeQuarantineOlderFlag == "" && !*launchJournalFlag {
+		return UsageError("one of --mailbox, --tmp-older-than, --wake-quarantine-older-than, or --launch-journal is required")
+	}
+	if *mailboxFlag != "" {
+		if *olderFlag != "" || *wakeQuarantineOlderFlag != "" || *launchJournalFlag {
+			return UsageError("--mailbox cannot be combined with other cleanup selectors")
+		}
+		if !common.rootExplicit() {
+			return UsageError("--mailbox requires an explicit --root <session-root>")
+		}
+		return cleanupMailbox(resolveRoot(common.Root), *mailboxFlag, common, *dryRunFlag, *yesFlag)
 	}
 	if *launchJournalFlag {
 		if *olderFlag != "" || *wakeQuarantineOlderFlag != "" {

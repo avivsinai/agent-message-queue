@@ -96,7 +96,7 @@ Commands:
   thread       View a thread
   trace        Join current evidence for a message
   presence     Set or list presence
-  cleanup      Remove selected tmp, wake quarantine, or launch recovery artifacts
+  cleanup      Remove selected tmp, wake quarantine, launch recovery, or mailbox artifacts
   watch        Wait for new messages (uses fsnotify)
   drain        Drain new messages (read, move to cur, emit receipts)
   monitor      Combined watch+drain for co-op mode
@@ -441,7 +441,7 @@ Use "amq presence <subcommand> --help" for details.
 ```text
 $ amq cleanup --help
 Usage:
-  amq cleanup [--tmp-older-than <duration>] [--wake-quarantine-older-than <duration>] [--launch-journal --root <session-root>] [--dry-run] [--yes] [options]
+  amq cleanup [--mailbox <handle> --root <session-root>] [--tmp-older-than <duration>] [--wake-quarantine-older-than <duration>] [--launch-journal --root <session-root>] [--dry-run] [--yes] [options]
 
 Options:
   -dry-run
@@ -450,6 +450,8 @@ Options:
         Emit JSON output
   -launch-journal
         Remove one exact stuck managed-launch recovery journal
+  -mailbox string
+        Remove one agent's mailbox (refused while mail is waiting)
   -me string
         Agent handle (or AM_ME)
   -root string
