@@ -602,15 +602,21 @@ Attach tells the owner only what is still needed. It prints `Connected:
 under `~/.amq/remote/acp/agents/<name>/` while the agent runs:
 
 - the agent ran in the last 10 minutes: `DM "<agent>" in Buzz.`;
-- it has markers but none that recent: start it in Buzz Desktop;
-- it has none, and the helper agent runs: Buzz Desktop opens its Create
-  agent dialog;
+- it has markers but none that recent: start it in Buzz Desktop, or, if it
+  was deleted, run `amq-acp setup --session <name>` and import the file;
+- it has none, the helper agent runs with its control channel set up, and
+  the session is proven live: the helper opens Buzz Desktop's Create agent
+  dialog for it;
 - it has none otherwise: run `amq-acp setup --session <name>` once and
-  import the file.
+  import the file. With no helper on this machine, attach adds that
+  importing the helper once (`amq-acp setup --helper`) makes later sessions
+  need only that dialog.
 
 `--json` reports `name`, `label`, `reused` (this session already held the
-name, so its agent comes back), `agent` and `helper` (`running`, `offline`
-or `missing`), and `agent_name` when an agent is known. A link share prints
+name, as a binding or a tombstone, so its agent comes back), `agent` and
+`helper` (`running`, `offline` or `missing`), `draft` (the helper opens the
+Create agent dialog), and `agent_name` (the marker's display name, else the
+label, else `AMQ: <name>`) whenever there is an agent. A link share prints
 its own lines; a link has no Buzz agent.
 
 `amq-remote bindings` (`/amq-remote status`) prunes the sessions proven
@@ -618,7 +624,8 @@ ended, then lists each binding with its label, `live` or `unknown`, its
 agent's state and its name, with `amq-remote detach --name <name>` for the
 unknown ones. It names, once, the agents of removed bindings made before
 sessions had labels: those agents never archive themselves, so delete them in
-Buzz Desktop and hide their DMs. `--json` reports `bindings`, `pruned`,
+Buzz Desktop and hide their DMs. The text output records them as named;
+`--json` lists them without recording. `--json` reports `bindings`, `pruned`,
 `helper` and `legacy_agents`.
 
 `amq-remote detach` needs one scope: `--self` removes the binding that names

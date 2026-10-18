@@ -211,12 +211,13 @@ func attach(args []string, stdout, stderr io.Writer, probe ...*jsonProbe) (int, 
 	}
 	now := time.Now()
 	agent, helper := agentOf(nb.Name, now), helperOf(now)
+	draft := helperDrafts(nb, helper)
 	if c.json {
 		out := map[string]any{"connected": true, "name": nb.Name, "root": nb.Root, "target": nb.Target}
-		emitJSON(stdout, withWarning(connectedJSON(out, nb.Label, reused, agent, helper), hookWarning))
+		emitJSON(stdout, withWarning(connectedJSON(out, nb.Name, nb.Label, reused, agent, helper, draft), hookWarning))
 		return 0, nil
 	}
-	connected(stdout, nb.Name, nb.Label, agent, helper)
+	connected(stdout, nb.Name, nb.Label, agent, helper, draft)
 	sayWarning(stdout, hookWarning)
 	return 0, nil
 }
@@ -321,12 +322,13 @@ func attachMailbox(root, handle, name string, asJSON bool, stdout io.Writer) (in
 	pruneAfterAttach(inspect)
 	now := time.Now()
 	agent, helper := agentOf(name, now), helperOf(now)
+	draft := helperDrafts(b, helper)
 	if asJSON {
 		out := map[string]any{"connected": true, "name": name, "root": root, "handle": handle}
-		emitJSON(stdout, connectedJSON(out, b.Label, reused, agent, helper))
+		emitJSON(stdout, connectedJSON(out, name, b.Label, reused, agent, helper, draft))
 		return 0, nil
 	}
-	connected(stdout, name, b.Label, agent, helper)
+	connected(stdout, name, b.Label, agent, helper, draft)
 	return 0, nil
 }
 
@@ -390,8 +392,10 @@ func nativeBindingName(flagValue, target string) (string, bool) {
 func writeBinding(b binding.Binding, explicitName, followLink bool, inspect binding.Inspector) (name string, reused bool, err error) {
 	switch {
 	case explicitName:
+		reused = heldBySession(b)
 		err = binding.WriteNamed(b)
 	case followLink:
+		reused = heldBySession(b)
 		err = binding.WriteNamedIf(b, func(old binding.Binding) bool { return old.Same(b) || movedTarget(old, b) })
 	default:
 		b.Name, reused, err = binding.WriteSession(b, b.Name, inspect)
@@ -401,6 +405,25 @@ func writeBinding(b binding.Binding, explicitName, followLink bool, inspect bind
 	}
 	_, err = binding.Retire(func(o binding.Binding) bool { return o.Same(b) && o.Name != b.Name })
 	return b.Name, reused, err
+}
+
+// heldBySession reports whether b's session already held the name b.Name,
+// as a binding or a tombstone, so its agent comes back. It is a report read
+// before the write, not a lock.
+func heldBySession(b binding.Binding) bool {
+	ours := func(o binding.Binding) bool {
+		return o.Same(b) || o.SessionIdentity() == b.SessionIdentity() || movedTarget(o, b)
+	}
+	if o, err := binding.ReadNamed(b.Name); err == nil {
+		return ours(o)
+	}
+	tombs, _ := binding.Tombstones()
+	for _, t := range tombs {
+		if t.Name == b.Name {
+			return ours(t)
+		}
+	}
+	return false
 }
 
 // movedTarget reports whether old pins the same root and native target as b
@@ -762,7 +785,7 @@ func bindings(args []string, stdout io.Writer, probe ...*jsonProbe) (int, error)
 		}
 		width = max(width, len([]rune(nonEmpty(b.Label, b.Name))))
 	}
-	legacy := legacyAgents()
+	legacy := legacyAgents(!c.json)
 	if c.json {
 		if pruned == nil {
 			pruned = []string{}

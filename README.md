@@ -106,9 +106,11 @@ wake. The recipient can still get them with `amq drain --include-body`.
 Inside a running Claude Code session, type `/amq-remote`; inside Codex, invoke
 the skill as `$amq-remote` (Codex does not register `/` commands for skills).
 The first
-time, import that session's agent into Buzz Desktop. Each session has its own
-agent; the ACP model `amq-remote:<name>` selects it. DM that agent from the
-Buzz app or Desktop, and the DM runs in that session.
+time, import that session's agent into Buzz Desktop; with the AMQ Remote
+helper imported once on the machine, Desktop opens the Create agent dialog
+instead. Each session has its own agent, pinned to it by the system prompt
+line `AMQ Remote session: <name>`. DM that agent from the Buzz app or
+Desktop, and the DM runs in that session.
 `/amq-remote off` disconnects it. See [amq-remote](cmd/amq-remote/README.md).
 
 <a id="messaging"></a>

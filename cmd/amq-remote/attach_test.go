@@ -439,6 +439,36 @@ func TestAttachWithARunningAgentNamesOnlyTheDM(t *testing.T) {
 	}
 }
 
+// Review-s5 P1-1: attach promised Desktop's create dialog whenever the
+// helper ran, but the helper drafts only for a session proven live. A
+// session whose liveness is unknown never got the dialog, and nothing told
+// the owner to create the agent. It is now told to.
+func TestAttachOffersSetupWhenTheHelperWillNotDraft(t *testing.T) {
+	dir := canonicalTempDir(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(binding.EnvPath, filepath.Join(dir, "remote", "binding.json"))
+	root := filepath.Join(dir, "p", ".agent-mail", "session3")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	helper := filepath.Join(dir, "remote", "acp", "agents", helperMarkerDir)
+	if err := os.MkdirAll(helper, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	marker := `{"name":"_helper","pubkey":"hh","channel":"c1","owner_added":true,"updated":"` + time.Now().UTC().Format(time.RFC3339) + `"}`
+	if err := os.WriteFile(filepath.Join(helper, "hh.json"), []byte(marker), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pinMailboxSession(t, root)
+	var out bytes.Buffer
+	if code, err := attach([]string{"--self"}, &out, io.Discard); code != 0 || err != nil {
+		t.Fatalf("attach: code=%d err=%v", code, err)
+	}
+	if !strings.Contains(out.String(), "amq-acp setup --session claude-p-session3") || strings.Contains(out.String(), "Create agent") {
+		t.Fatalf("attach printed %q; want the setup step, not the create dialog, for a session whose liveness is unknown", out.String())
+	}
+}
+
 // endedHolder is this test process as a holder recorded in another boot, so
 // its binding is proven ended; the test skips where the boot id is unreadable.
 func endedHolder(t *testing.T) launch.HolderIdentity {

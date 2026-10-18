@@ -33,6 +33,9 @@ const (
 type agentInfo struct {
 	State   string
 	Display string // the display name of the newest marker
+	// Ready is true for a running helper whose control channel is set up
+	// with the owner in it, so it can send Desktop a create draft.
+	Ready bool
 }
 
 // helperOf reports this machine's helper agent.
@@ -61,6 +64,8 @@ func agentOf(dirName string, now time.Time) agentInfo {
 		var m struct {
 			DisplayName string `json:"display_name"`
 			Updated     string `json:"updated"`
+			Channel     string `json:"channel"`
+			OwnerAdded  bool   `json:"owner_added"`
 		}
 		if err != nil || json.Unmarshal(raw, &m) != nil {
 			continue
@@ -74,6 +79,7 @@ func agentOf(dirName string, now time.Time) agentInfo {
 		}
 		if now.Sub(updated) <= agentMarkerFresh {
 			info.State = agentRunning
+			info.Ready = info.Ready || m.Channel != "" && m.OwnerAdded
 		}
 		if updated.After(newest) {
 			newest, info.Display = updated, m.DisplayName
@@ -82,29 +88,47 @@ func agentOf(dirName string, now time.Time) agentInfo {
 	return info
 }
 
+// agentDisplay is the name the session's agent shows in Buzz: its marker's,
+// else the name the helper drafts with (the label), else the name setup
+// gives it.
+func agentDisplay(agent agentInfo, label, name string) string {
+	return nonEmpty(agent.Display, nonEmpty(label, "AMQ: "+name))
+}
+
+// helperDrafts reports whether the helper will send Desktop a create draft
+// for b, by the helper's own rule: it is ready, and b's session is proven
+// live (review-s5 P1-1). Only a session with no agent is drafted.
+func helperDrafts(b binding.Binding, helper agentInfo) bool {
+	state, _ := b.Liveness()
+	return helper.Ready && state == binding.Live
+}
+
 // connected prints what attach did and the one thing the owner still has to
 // do for this session's Buzz agent: nothing, start it, accept the helper's
 // create dialog, or create it once.
-func connected(w io.Writer, name, label string, agent, helper agentInfo) {
+func connected(w io.Writer, name, label string, agent, helper agentInfo, draft bool) {
 	say(w, "Connected: %s.", nonEmpty(label, name))
-	display := nonEmpty(agent.Display, "AMQ: "+name)
+	display := agentDisplay(agent, label, name)
 	switch {
 	case agent.State == agentRunning:
 		say(w, "DM %q in Buzz.", display)
 	case agent.State == agentOffline:
-		say(w, "Its Buzz agent %q is not running: start it in Buzz Desktop (Agents, the agent, Start), then DM it.", display)
-	case helper.State == agentRunning:
-		say(w, "Buzz Desktop opens \"Create agent\" for it: choose runtime AMQ Remote, then Create and start.")
+		say(w, "Its Buzz agent %q is not running: start it in Buzz Desktop (Agents, the agent, Start), then DM it. If you deleted it, run amq-acp setup --session %s and import the file.", display, name)
+	case draft:
+		say(w, "Buzz Desktop opens \"Create agent\" for it: pick AMQ Remote, then Create and start.")
+	case helper.State == agentMissing:
+		say(w, "This session has no Buzz agent yet: run amq-acp setup --session %s and import the file in Buzz Desktop. Tip: import the helper once (amq-acp setup --helper), and later sessions need only 3 clicks.", name)
 	default:
 		say(w, "This session has no Buzz agent yet: run amq-acp setup --session %s and import the file in Buzz Desktop.", name)
 	}
 }
 
-// connectedJSON adds the agent fields to an attach result.
-func connectedJSON(out map[string]any, label string, reused bool, agent, helper agentInfo) map[string]any {
-	out["label"], out["reused"], out["agent"], out["helper"] = label, reused, agent.State, helper.State
-	if agent.Display != "" {
-		out["agent_name"] = agent.Display
+// connectedJSON adds the agent fields to an attach result. draft is whether
+// the helper will open Desktop's create dialog for the session.
+func connectedJSON(out map[string]any, name, label string, reused bool, agent, helper agentInfo, draft bool) map[string]any {
+	out["label"], out["reused"], out["agent"], out["helper"], out["draft"] = label, reused, agent.State, helper.State, draft
+	if agent.State != agentMissing {
+		out["agent_name"] = agentDisplay(agent, label, name)
 	}
 	return out
 }
@@ -114,10 +138,11 @@ func connectedJSON(out map[string]any, label string, reused bool, agent, helper 
 const legacyNoticeFile = "legacy-agents.json"
 
 // legacyAgents returns the agents of bindings made before sessions had labels
-// whose bindings are now removed and that no notice has named yet, and
-// records them as named. Such an agent was made by hand and never archives
-// itself, so the owner deletes it.
-func legacyAgents() []string {
+// whose bindings are now removed and that no notice has named yet. With
+// record, it records them as named, so the printed notice names each once;
+// a JSON listing reports them without recording. Such an agent was made by
+// hand and never archives itself, so the owner deletes it.
+func legacyAgents(record bool) []string {
 	tombs, err := binding.Tombstones()
 	if err != nil {
 		return nil
@@ -140,16 +165,19 @@ func legacyAgents() []string {
 	if len(fresh) == 0 {
 		return nil
 	}
+	agents := make([]string, len(fresh))
+	for i, n := range fresh {
+		agents[i] = "AMQ: " + n
+	}
+	if !record {
+		return agents
+	}
 	raw, err := json.Marshal(append(named, fresh...))
 	if err != nil {
 		return nil
 	}
 	if _, err := fsq.WriteFileAtomic(dir, legacyNoticeFile, append(raw, '\n'), 0o600); err != nil {
 		return nil
-	}
-	agents := make([]string, len(fresh))
-	for i, n := range fresh {
-		agents[i] = "AMQ: " + n
 	}
 	return agents
 }

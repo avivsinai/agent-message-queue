@@ -52,19 +52,24 @@ command's own message. Do not work around a refusal.
      then run the attach again.
    - Any other failure: show its message and stop.
 3. **Tell the owner only what is still needed.** The JSON has `name`,
-   `label`, `agent`, `helper`, `reused`, and `agent_name` when the agent is
-   known. Say "Connected: <label>." and then exactly one of:
+   `label`, `agent`, `helper`, `draft`, `reused`, and `agent_name` when there
+   is an agent. Say "Connected: <label>." and then exactly one of:
    - `agent` is `running`: "DM **<agent_name>** in Buzz." Nothing else is
      needed.
    - `agent` is `offline`: "Start **<agent_name>** in Buzz Desktop (Agents,
-     the agent, Start), then DM it."
-   - `agent` is `missing` and `helper` is `running`: "Buzz Desktop opens
-     Create agent for it: choose runtime AMQ Remote, then Create and start."
-   - `agent` is `missing` otherwise: this is the one-time setup for this
-     session. Run
+     the agent, Start), then DM it. If you deleted it, run
+     `amq-acp setup --session <name>` and import the file."
+   - `agent` is `missing` and `draft` is true: "Buzz Desktop opens Create
+     agent for it: pick AMQ Remote, then Create and start."
+   - `agent` is `missing` and `helper` is `missing`: this machine has no
+     helper yet. Run
+     `amq-acp setup --helper --out "$HOME/Downloads/AMQ Remote helper.agent.json"`
+     once, and show its printed steps as they are (Buzz Desktop: Agents,
+     then + then Import, pick that file, then Start, and turn on
+     Auto-start). Later sessions then need only the Create agent dialog.
+   - `agent` is `missing` otherwise: this session's one-time setup. Run
      `amq-acp setup --session <name> --out "$HOME/Downloads/AMQ <name>.agent.json"`
-     and show its printed steps as they are (Buzz Desktop: Agents, then +
-     then Import, pick that file, then Start, and turn on Auto-start).
+     and show its printed steps as they are.
    If the JSON has `warning`, show it too.
 4. **`--native` on Claude Code only: the approval hook.** Run
    `amq-remote doctor --root "$ROOT" --json` and read its `failing` list; the
