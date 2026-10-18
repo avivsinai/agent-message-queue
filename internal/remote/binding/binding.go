@@ -563,7 +563,8 @@ func WriteNamedIf(b Binding, allow func(old Binding) bool) error { return writeN
 // WriteSession writes b under the name b's own destination already holds, else
 // under a name its session identity holds, else under base, else under the
 // first of base-2, base-3, ... that is free or held by the same identity, and
-// returns the name written. A binding of the same identity with another
+// returns the name written and whether this session already held it (reused).
+// A binding of the same identity with another
 // destination is taken over only when its holder is b's own or proven ended:
 // a live or unknown holder may be a concurrent session in the same place,
 // which keeps its name, so uncertain state is never weakened. A name whose
@@ -572,12 +573,12 @@ func WriteNamedIf(b Binding, allow func(old Binding) bool) error { return writeN
 // Another session's binding is never replaced, so a session never inherits
 // another session's Buzz agent, and the same session always gets back its own
 // name. The choice and the write share one transaction.
-func WriteSession(b Binding, base string, inspect Inspector) (string, error) {
+func WriteSession(b Binding, base string, inspect Inspector) (name string, reused bool, err error) {
 	if err := ValidName(base); err != nil {
-		return "", err
+		return "", false, err
 	}
 	if err := b.Valid(); err != nil {
-		return "", err
+		return "", false, err
 	}
 	id := b.SessionIdentity()
 	b.Identity = id
@@ -586,9 +587,8 @@ func WriteSession(b Binding, base string, inspect Inspector) (string, error) {
 	}
 	raw, err := json.MarshalIndent(b, "", "  ")
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
-	var name string
 	err = transact(func(string) error {
 		dir, err := namedDir(true)
 		if err != nil {
@@ -660,6 +660,9 @@ func WriteSession(b Binding, base string, inspect Inspector) (string, error) {
 				name = candidate
 			}
 		}
+		_, wasBound := held[name]
+		_, wasTomb := tombOf[name]
+		reused = wasBound || wasTomb
 		if _, err := fsq.WriteFileAtomic(dir, name+".json", append(raw, '\n'), 0o600); err != nil {
 			return err
 		}
@@ -669,9 +672,9 @@ func WriteSession(b Binding, base string, inspect Inspector) (string, error) {
 		return nil
 	})
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
-	return name, nil
+	return name, reused, nil
 }
 
 // Replace writes now in place of the binding called was.Name when that
@@ -826,6 +829,16 @@ func Retire(match func(Binding) bool) ([]string, error) {
 		return nil
 	})
 	return removed, err
+}
+
+// Tombstones returns the binding each tombstone recorded, named by its
+// binding name and sorted by it.
+func Tombstones() ([]Binding, error) {
+	dir, err := namedDir(false)
+	if err != nil {
+		return nil, err
+	}
+	return scanTombstones(dir)
 }
 
 // scanTombstones reads the tombstones in dir, sorted by name. A file that

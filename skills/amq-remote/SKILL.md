@@ -9,9 +9,11 @@ metadata:
 
 # AMQ Remote
 
-`/amq-remote` gives this session its own Buzz agent, "AMQ: <name>", with its
-own DM. The owner DMs that agent from the Buzz phone app or Buzz Desktop.
-Several sessions can be connected at once; each has its own agent.
+`/amq-remote` gives this session its own Buzz agent, with its own DM. The
+owner DMs that agent from the Buzz phone app or Buzz Desktop. Several
+sessions can be connected at once; each has its own agent. The same session
+connecting again gets its own agent back. A different session never gets
+another session's agent.
 
 In Codex the skill is invoked as `$amq-remote` (Codex does not register `/`
 commands for skills); the commands below are the same. Codex runs sandboxed:
@@ -36,21 +38,42 @@ command's own message. Do not work around a refusal.
 
 1. **Tools.** Run `command -v amq-remote amq-acp`. If either is missing, tell
    the user to run `brew install avivsinai/tap/amq`, then stop.
-2. **Bind.**
-   - Default: run `amq-remote attach --self`. It uses `AM_ROOT` and `AM_ME`.
-     If it says this session is not an AMQ participant, offer `--native`.
+2. **Connect.**
+   - Default: run `amq-remote attach --self --json`. It uses `AM_ROOT` and
+     `AM_ME`. If it says this session is not an AMQ participant, offer
+     `--native`.
    - `--native`: use `$AM_ROOT` when set, else `$HOME/.amq/remote/root`
      (create it private with `(umask 077 && mkdir -p "$HOME/.amq/remote/root")`). Run
-     `amq-remote attach --self --native --root "$ROOT"`.
-   If it fails, show its message and stop.
-3. **`--native` on Claude Code only: the Stop hook.** Run
+     `amq-remote attach --self --native --root "$ROOT" --json`.
+   - If it exits 6 and names `amq-remote claude install-stop-hook` (Claude
+     Code with `--native`), tell the user this adds one Stop hook to
+     `~/.claude/settings.json`; it always exits 0, and
+     `amq-remote claude uninstall-stop-hook` removes it. Ask once, run it,
+     then run the attach again.
+   - Any other failure: show its message and stop.
+3. **Tell the owner only what is still needed.** The JSON has `name`,
+   `label`, `agent`, `helper`, `draft`, `reused`, and `agent_name` when there
+   is an agent. Say "Connected: <label>." and then exactly one of:
+   - `agent` is `running`: "DM **<agent_name>** in Buzz." Nothing else is
+     needed.
+   - `agent` is `offline`: "Start **<agent_name>** in Buzz Desktop (Agents,
+     the agent, Start), then DM it. If you deleted it, run
+     `amq-acp setup --session <name>` and import the file."
+   - `agent` is `missing` and `draft` is true: "Buzz Desktop opens Create
+     agent for it: pick AMQ Remote, then Create and start."
+   - `agent` is `missing` and `helper` is `missing`: this machine has no
+     helper yet. Run
+     `amq-acp setup --helper --out "$HOME/Downloads/AMQ Remote helper.agent.json"`
+     once, and show its printed steps as they are (Buzz Desktop: Agents,
+     then + then Import, pick that file, then Start, and turn on
+     Auto-start). Later sessions then need only the Create agent dialog.
+   - `agent` is `missing` otherwise: this session's one-time setup. Run
+     `amq-acp setup --session <name> --out "$HOME/Downloads/AMQ <name>.agent.json"`
+     and show its printed steps as they are.
+   If the JSON has `warning`, show it too.
+4. **`--native` on Claude Code only: the approval hook.** Run
    `amq-remote doctor --root "$ROOT" --json` and read its `failing` list; the
-   exit code is not the signal. If an entry has `boundary`
-   `native_capability`, tell the user this step adds one Stop hook to
-   `~/.claude/settings.json` (it always exits 0, and
-   `amq-remote claude uninstall-stop-hook` removes it). Ask once, then run
-   `amq-remote claude install-stop-hook`. The default mailbox path never
-   needs this.
+   exit code is not the signal.
    If a `native_capability` entry says the PermissionRequest hook is not
    installed and there is no relay share (the usual `--native` case), tell
    the user: "This adds one PermissionRequest hook. It exits at once in
@@ -71,20 +94,12 @@ command's own message. Do not work around a refusal.
    answer first. `amq-remote claude uninstall-approval-hook` removes it." Ask once,
    then run `amq-remote claude install-approval-hook --root "$ROOT"`. If
    doctor reports `claude_approval_pin_warnings`, show them to the user.
-4. **This session's Buzz agent.** Attach printed the session name `<name>`.
-   Run `amq-acp setup --session <name> --out "$HOME/Downloads/AMQ <name>.agent.json"`
-   and show its printed steps as they are: in Buzz Desktop, Agents, then +
-   then Import, pick that file, then Start, and turn on Auto-start. If AMQ
-   Remote is new and Desktop was open, the owner first clicks Settings, then
-   Agents, then Check again; Desktop needs no restart. Skip this step
-   when the agent "AMQ: <name>" already exists in Desktop.
-5. Tell the user: "Connected. DM **AMQ: <name>** from the Buzz app or
-   Desktop."
+5. Add one line for the carrier:
    - Default: "DMs arrive in this agent's AMQ inbox. Stop in Buzz stops
      waiting; a delivered message may still be acted on."
    - `--native`: "A DM sent while this session is busy waits. Buzz Stop cannot
      interrupt a Claude turn."
-   - When the approval hook was installed in step 3: "When a Buzz request
+   - When the approval hook was installed in step 4: "When a Buzz request
      needs a tool approval, the DM shows it. ❌ blocks that call. ✅, or yes
      replied in the approval's thread, allows it when the DM offers ✅: a
      Bash command shown whole. Otherwise allow it in the terminal. The first answer wins." Without a relay share, say
@@ -108,13 +123,16 @@ read in a chat.
 
 ## `/amq-remote off`
 
-Run `amq-remote detach --self`. The session keeps running; the Buzz agent
-then answers "Not connected".
+Run `amq-remote detach --self`. The session keeps running; its Buzz agent
+archives itself and its DM answers "Not connected". When this session
+connects again, the same agent comes back.
 
 ## `/amq-remote status`
 
 Run `amq-remote bindings` and show its output. It lists each connected
-session as `live` or `unknown` and prunes the sessions proven ended.
+session as `live` or `unknown` with its agent (`running`, `offline` or
+`missing`), prunes the sessions proven ended, and names, once, old agents
+the owner should delete.
 
 ## Trust limits
 

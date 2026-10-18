@@ -51,6 +51,8 @@ amq-remote cancel REQUEST_REF
 amq-remote requests
 amq-remote share --session ID
 amq-remote attach --self [--native | --link NAME]
+amq-remote detach --self | --name NAME | --all
+amq-remote bindings
 amq-remote link add NAME URL --code CODE
 amq-remote link keys add NAME --code CODE
 amq-remote link local-key NAME
@@ -589,13 +591,48 @@ to it. The bindings live
 in `$AMQ_REMOTE_BINDING`'s directory when that is set; its missing directories
 are created 0700 below an existing ancestor that has no symlink on its path,
 is owned by you, and is not group- or world-writable. Several sessions can be
-connected at once. Each has its own Buzz agent, whose ACP model
-`amq-remote:<name>` selects that binding (`amq-acp setup --session <name>`
-writes its Import file).
+connected at once. Each has its own Buzz agent, pinned to its binding by the
+system prompt line `AMQ Remote session: <name>` (`amq-acp setup --session
+<name>` writes its Import file; an existing agent may pin with the model
+`amq-remote:<name>` instead).
+
+Attach tells the owner only what is still needed. It prints `Connected:
+<label>`, the session's label (`<harness> · <project>/<session> @
+<machine>`), then one line from the agent's markers, which amq-acp rewrites
+under `~/.amq/remote/acp/agents/<name>/` while the agent runs:
+
+- the agent ran in the last 10 minutes: `DM "<agent>" in Buzz.`;
+- it has markers but none that recent: start it in Buzz Desktop, or, if it
+  was deleted, run `amq-acp setup --session <name>` and import the file;
+- it has none, the helper agent runs with its control channel set up, and
+  the session is proven live: the helper opens Buzz Desktop's Create agent
+  dialog for it;
+- it has none otherwise: run `amq-acp setup --session <name>` once and
+  import the file. With no helper on this machine, attach adds that
+  importing the helper once (`amq-acp setup --helper`) makes later sessions
+  need only that dialog.
+
+`--json` reports `name`, `label`, `reused` (this session already held the
+name, as a binding or a tombstone, so its agent comes back), `agent` and
+`helper` (`running`, `offline` or `missing`), `draft` (the helper opens the
+Create agent dialog), and `agent_name` (the marker's display name, else the
+label, else `AMQ: <name>`) whenever there is an agent. A link share prints
+its own lines; a link has no Buzz agent.
+
+`amq-remote bindings` (`/amq-remote status`) prunes the sessions proven
+ended, then lists each binding with its label, `live` or `unknown`, its
+agent's state and its name, with `amq-remote detach --name <name>` for the
+unknown ones. It names, once, the agents of removed bindings made before
+sessions had labels: those agents never archive themselves, so delete them in
+Buzz Desktop and hide their DMs. The text output records them as named;
+`--json` lists them without recording. `--json` reports `bindings`, `pruned`,
+`helper` and `legacy_agents`.
 
 `amq-remote detach` needs one scope: `--self` removes the binding that names
 this session, `--name <name>` removes the binding of that name, and `--all`
-removes every binding. The session and the endpoint keep running.
+removes every binding. The session and the endpoint keep running. The
+session's agent then archives itself, and it unarchives when the same session
+attaches again.
 
 A defaulted name that another session holds, or held before it was detached
 or ended, is never taken: the session gets the next free `<name>-N`.

@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/config"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
@@ -272,15 +273,15 @@ func TestWriteBindingRepinsTheSameTargetAfterASessionChange(t *testing.T) {
 	dir := canonicalTempDir(t)
 	t.Setenv(binding.EnvPath, filepath.Join(dir, "binding.json"))
 	old := binding.Binding{Root: dir, Target: "claude:7", NativeSession: "session-old", Name: "claude-7"}
-	if _, err := writeBinding(old, false, true, binding.Binding.Liveness); err != nil {
+	if _, _, err := writeBinding(old, false, true, binding.Binding.Liveness); err != nil {
 		t.Fatal(err)
 	}
 	moved := old
 	moved.NativeSession = "session-new"
-	if name, err := writeBinding(moved, false, false, binding.Binding.Liveness); err != nil || name != "claude-7-2" {
+	if name, _, err := writeBinding(moved, false, false, binding.Binding.Liveness); err != nil || name != "claude-7-2" {
 		t.Fatalf("native attach without --link: name=%q err=%v; want claude-7-2", name, err)
 	}
-	if _, err := writeBinding(moved, false, true, binding.Binding.Liveness); err != nil {
+	if _, _, err := writeBinding(moved, false, true, binding.Binding.Liveness); err != nil {
 		t.Fatalf("re-attach with --link after a session change: %v", err)
 	}
 	if got, err := binding.ReadNamed("claude-7"); err != nil || got.NativeSession != "session-new" {
@@ -288,7 +289,7 @@ func TestWriteBindingRepinsTheSameTargetAfterASessionChange(t *testing.T) {
 	}
 	other := binding.Binding{Root: dir, Target: "claude:8", NativeSession: "session-8", Name: "claude-7"}
 	var taken *binding.NameTakenError
-	if _, err := writeBinding(other, false, true, binding.Binding.Liveness); !errors.As(err, &taken) {
+	if _, _, err := writeBinding(other, false, true, binding.Binding.Liveness); !errors.As(err, &taken) {
 		t.Fatalf("another target with the same name: err=%v; want NameTakenError", err)
 	}
 }
@@ -379,6 +380,22 @@ func TestBindingsPrunesEndedSessionsAndKeepsUnknownOnes(t *testing.T) {
 // session at root, pinned as a real session is, and returns the bound name.
 func attachMailboxAs(t *testing.T, root string) string {
 	t.Helper()
+	pinMailboxSession(t, root)
+	var out bytes.Buffer
+	if code, err := attach([]string{"--self", "--json"}, &out, io.Discard); code != 0 || err != nil {
+		t.Fatalf("attach from %s: code=%d err=%v", root, code, err)
+	}
+	var got struct{ Name string }
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("attach output %q: %v", out.String(), err)
+	}
+	return got.Name
+}
+
+// pinMailboxSession sets the environment of the AMQ handle claude of the
+// session at root, pinned as a real session is.
+func pinMailboxSession(t *testing.T, root string) {
+	t.Helper()
 	rootID, err := fsq.StableTreeIdentity(root)
 	if err != nil {
 		t.Fatal(err)
@@ -391,15 +408,65 @@ func attachMailboxAs(t *testing.T, root string) string {
 		"AM_SESSION": filepath.Base(root), "AM_ROOT_ID": rootID, "AM_BASE_ROOT_ID": baseID} {
 		t.Setenv(k, v)
 	}
+}
+
+// Buzz DX S5: a session whose Buzz agent runs is told only whom to DM: two
+// lines, no Buzz setup step.
+func TestAttachWithARunningAgentNamesOnlyTheDM(t *testing.T) {
+	dir := canonicalTempDir(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(binding.EnvPath, filepath.Join(dir, "remote", "binding.json"))
+	root := filepath.Join(dir, "p", ".agent-mail", "session3")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	markers := filepath.Join(dir, "remote", "acp", "agents", "claude-p-session3")
+	if err := os.MkdirAll(markers, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	marker := `{"name":"claude-p-session3","pubkey":"ab","display_name":"AMQ: claude-p-session3","updated":"` + time.Now().UTC().Format(time.RFC3339) + `"}`
+	if err := os.WriteFile(filepath.Join(markers, "ab.json"), []byte(marker), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pinMailboxSession(t, root)
 	var out bytes.Buffer
-	if code, err := attach([]string{"--self", "--json"}, &out, io.Discard); code != 0 || err != nil {
-		t.Fatalf("attach from %s: code=%d err=%v", root, code, err)
+	if code, err := attach([]string{"--self"}, &out, io.Discard); code != 0 || err != nil {
+		t.Fatalf("attach: code=%d err=%v", code, err)
 	}
-	var got struct{ Name string }
-	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
-		t.Fatalf("attach output %q: %v", out.String(), err)
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(lines) != 2 || !strings.HasPrefix(lines[0], "Connected: ") || lines[1] != `DM "AMQ: claude-p-session3" in Buzz.` {
+		t.Fatalf("attach printed %q; want Connected and the DM line only", out.String())
 	}
-	return got.Name
+}
+
+// Review-s5 P1-1: attach promised Desktop's create dialog whenever the
+// helper ran, but the helper drafts only for a session proven live. A
+// session whose liveness is unknown never got the dialog, and nothing told
+// the owner to create the agent. It is now told to.
+func TestAttachOffersSetupWhenTheHelperWillNotDraft(t *testing.T) {
+	dir := canonicalTempDir(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(binding.EnvPath, filepath.Join(dir, "remote", "binding.json"))
+	root := filepath.Join(dir, "p", ".agent-mail", "session3")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	helper := filepath.Join(dir, "remote", "acp", "agents", helperMarkerDir)
+	if err := os.MkdirAll(helper, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	marker := `{"name":"_helper","pubkey":"hh","channel":"c1","owner_added":true,"updated":"` + time.Now().UTC().Format(time.RFC3339) + `"}`
+	if err := os.WriteFile(filepath.Join(helper, "hh.json"), []byte(marker), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pinMailboxSession(t, root)
+	var out bytes.Buffer
+	if code, err := attach([]string{"--self"}, &out, io.Discard); code != 0 || err != nil {
+		t.Fatalf("attach: code=%d err=%v", code, err)
+	}
+	if !strings.Contains(out.String(), "amq-acp setup --session claude-p-session3") || strings.Contains(out.String(), "Create agent") {
+		t.Fatalf("attach printed %q; want the setup step, not the create dialog, for a session whose liveness is unknown", out.String())
+	}
 }
 
 // endedHolder is this test process as a holder recorded in another boot, so

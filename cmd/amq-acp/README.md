@@ -126,10 +126,12 @@ amq-acp setup --helper
 root, a target, or a session pin. `setup --session <name>` writes
 `AMQ <name>.agent.json` in the current directory (`--out` chooses another
 path): a `buzz-agent-snapshot` version 1 named `AMQ: <name>`, runtime
-`amq_remote`, model `amq-remote:<name>`, parallelism 1, and `respondTo`
-`owner-only`. That model selects the named binding, so the agent serves that
-session only. A bare `setup` writes `AMQ Remote.agent.json` with model
-`amq-remote`, which drives the only binding and refuses when several exist.
+`amq_remote`, model `amq-remote`, parallelism 1, `respondTo` `owner-only`,
+and the system prompt line `AMQ Remote session: <name>`. That line pins the
+agent to the named binding, so it serves that session only. A bare `setup`
+writes `AMQ Remote.agent.json` with no pin: that agent drives the only
+binding and, when several exist, answers with the list of sessions and the
+agent to DM for each.
 `setup --helper` writes `AMQ Remote helper.agent.json`: the agent `AMQ Remote
 helper @ <machine>` with the system prompt line `AMQ Remote helper`, model
 `amq-remote` and `respondTo` `owner-only`. Import it once per machine. The
@@ -139,8 +141,9 @@ Import the file in Buzz Desktop: Agents, then + then Import, pick the file,
 then Start, and turn on Auto-start in the agent's menu. Desktop caches its
 harness list: if AMQ Remote is new and Desktop was open, click Settings,
 then Agents, then Check again first (setup always prints this step). No
-restart is needed. Then run `/amq-remote` in the session. A harness file this command
-did not write is left unchanged.
+restart is needed. `/amq-remote` runs `setup --helper` or `setup --session`
+itself when the session has no agent yet. A harness file this command did not
+write is left unchanged.
 
 ## Buzz BYOH
 
@@ -235,12 +238,30 @@ wrote (`~/.amq/remote/bindings/<name>.json`).
   binding's native pin.
 With no binding, the agent answers "Not connected. Run /amq-remote in a
 Claude Code or Codex session." A request keeps the binding it started with;
-a later attach moves only new prompts. `session/new` advertises one model per
-named binding, `amq-remote:<name>`, and `session/set_model` selects which
-binding the ACP session drives, so each Buzz agent serves exactly one session.
-With no selection it uses the only binding, or refuses when there are several.
-With no binding it advertises the plain `amq-remote` model. `AMQ_ACP_TO`, `AMQ_ACP_REMOTE_TARGET` and
-`AMQ_ACP_REMOTE_NATIVE_SESSION` are refused in this mode.
+a later attach moves only new prompts.
+
+One Buzz agent serves one session. The agent's pin names the binding: the
+system prompt line `AMQ Remote session: <name>` (new agents), or the model
+`amq-remote:<name>` (agents made before the line existed). Both naming
+different sessions refuse with "conflicting session pins", and so does a
+`session/set_model` that names another binding. `session/new` advertises the
+plain `amq-remote` model first, then one `amq-remote:<name>` per binding. An
+unpinned agent drives the only binding, or answers with the list of
+sessions. The system prompt line `AMQ Remote helper` makes the agent this
+machine's helper: it never runs a prompt and answers with the list of
+sessions and the agent to DM for each. `AMQ_ACP_TO`, `AMQ_ACP_REMOTE_TARGET`
+and `AMQ_ACP_REMOTE_NATIVE_SESSION` are refused in this mode.
+
+A pinned agent keeps its Buzz identity in step with its binding. On each
+tick it rewrites its marker, `~/.amq/remote/acp/agents/<name>/<pubkey>.json`,
+which `amq-remote attach` and `bindings` read to report the agent as
+running (rewritten in the last 10 minutes), offline or missing. When the
+binding is gone (`/amq-remote off`, or a session proven ended), the agent
+archives itself (kind 9035, signed with its own key) and sets the status
+"session ended"; when the same session binds that name again, it unarchives
+itself (kind 9036) and clears the status. Archiving hides the agent from
+pickers, mentions, member lists and the Agents library in Buzz Desktop; its
+DM stays listed until the owner hides it.
 
 ### Posting answers into Buzz
 
