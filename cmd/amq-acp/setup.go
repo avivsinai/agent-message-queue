@@ -130,10 +130,11 @@ func runSetup(args []string) int {
 // sees it only after a forced discovery: Settings, Agents, Check again (Buzz
 // 0.5.26 HarnessesSettingsPanel). No restart is needed. The step is always
 // printed: a file on disk does not show that Desktop has discovered it.
+// The steps end at Desktop: /amq-remote runs setup, so they never send the
+// owner back to it.
 func setupSteps(snapshotPath string) string {
 	return fmt.Sprintf("In Buzz Desktop: if AMQ Remote is new and Desktop was open, click Settings, then Agents, then Check again. "+
-		"Then Agents, then + then Import, pick %s, then Start. Turn on Auto-start in the agent's menu so it starts with Desktop. "+
-		"Then run /amq-remote in a Claude Code session, or $amq-remote in Codex.\n", snapshotPath)
+		"Then Agents, then + then Import, pick %s, then Start. Turn on Auto-start in the agent's menu so it starts with Desktop.\n", snapshotPath)
 }
 
 func remoteHarness(command string) buzzHarness {
