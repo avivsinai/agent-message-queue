@@ -48,6 +48,17 @@ var errNoBuzzIdentity = errors.New("no Buzz agent identity")
 // <context> block, the reply destination buzz-acp supplies.
 var channelRe = regexp.MustCompile(`(?m)^Channel: [^\n]*\(#([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\)`)
 
+// dmScopeRe finds the scope line buzz-acp writes for a DM in the <context>
+// block (block/buzz crates/buzz-acp/src/queue.rs).
+var dmScopeRe = regexp.MustCompile(`(?m)^Scope: dm\r?$`)
+
+// buzzDM reports whether a buzz-acp prompt came from a DM with a channel.
+func buzzDM(prompt string) bool {
+	start := strings.Index(prompt, "<context>")
+	end := strings.Index(prompt, "</context>")
+	return start >= 0 && end > start && dmScopeRe.MatchString(prompt[start:end]) && buzzChannel(prompt) != ""
+}
+
 // buzzChannel returns the reply channel named by a buzz-acp prompt, or "".
 func buzzChannel(prompt string) string {
 	start := strings.Index(prompt, "<context>")
