@@ -490,14 +490,21 @@ func pinnedTestRoot(t *testing.T) *fsq.DeliveryRoot {
 
 // Pro review of #964 (P2): a mailbox an older amq made has an inbox but no
 // receipts/; delivery completes its layout instead of refusing it.
+// It calls publishOnce, where the layout is completed, without a turn timer:
+// a 50 ms turn budget expired before delivery under load ("inbox holds 0
+// prompts; want 1" in a machine run, the same family as #1050), and an
+// expired budget correctly publishes nothing.
 func TestMailboxDeliveryCompletesAnOlderMailbox(t *testing.T) {
-	s, root := mailboxServer(t)
-	s.cfg.TurnTimeout = 50 * time.Millisecond
+	root := canonicalTempDir(t)
+	if err := fsq.EnsureAgentDirs(root, "agent"); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Remove(fsq.AgentReceipts(root, "agent")); err != nil {
 		t.Fatal(err)
 	}
-	if _, rpcErr := s.runRemote("s", "say hi", strings.Repeat("6", 64), newTurn(), func(any) error { return nil }); rpcErr != nil {
-		t.Fatal(rpcErr)
+	b := binding.Binding{Carrier: binding.CarrierMailbox, Root: root, Handle: "agent"}
+	if err := publishOnce(b, "t", strings.Repeat("6", 64), time.Now(), "say hi"); err != nil {
+		t.Fatal(err)
 	}
 	if ids := inboxPrompts(t, root); len(ids) != 1 {
 		t.Fatalf("inbox holds %d prompts; want 1", len(ids))
