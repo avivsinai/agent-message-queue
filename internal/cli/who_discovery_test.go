@@ -25,6 +25,9 @@ func TestRunWhoPreservesBaseBesideUnrelatedAgents(t *testing.T) {
 		{name: "default", base: defaultCoopRoot, sibling: ".claude"},
 		{name: "environment", base: "mail", sibling: ".cursor", source: "env"},
 		{name: "configuration", base: "mail", sibling: ".claude", source: "config"},
+		// PR #1080 review P2-2: an unconfigured custom base beside ~/.claude/agents
+		// still showed HOME as the base and no sessions.
+		{name: "custom", base: "mail", sibling: ".claude"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			clearSendMailboxTestEnv(t)

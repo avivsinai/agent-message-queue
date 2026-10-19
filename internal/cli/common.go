@@ -167,7 +167,10 @@ func classifyRootForDisplay(root string) string {
 		return ""
 	}
 	for _, e := range entries {
-		if !e.IsDir() || e.Name() == filepath.Base(resolvedRoot) {
+		// who never lists a dot or underscore entry as a session, so such a
+		// sibling (for example ~/.claude/agents) is no session evidence.
+		if !e.IsDir() || e.Name() == filepath.Base(resolvedRoot) ||
+			strings.HasPrefix(e.Name(), ".") || strings.HasPrefix(e.Name(), "_") {
 			continue
 		}
 		if dirExists(filepath.Join(parent, e.Name(), "agents")) {
