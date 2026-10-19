@@ -109,8 +109,6 @@ and adapter state in `~/.amq/keepalive`. Older binaries use `~/.amq-keepalive`.
 These locations predate the rule and stay where they are:
 
 - Darwin wake restart stages are written to `<legacy>/wake-stages`, also on a
-  new machine. A wake also accepts, validates, and prunes a stage under
-  `~/.amq/state/wake-stages`, so a restart that a newer binary stages there
-  finishes. The writer moves to `~/.amq/state/wake-stages` in a later release
-  (see
-  [issue 1046](https://github.com/avivsinai/agent-message-queue/issues/1046)).
+  new machine; a wake also accepts, validates, and prunes a stage under
+  `~/.amq/state/wake-stages`
+  ([issue 1046](https://github.com/avivsinai/agent-message-queue/issues/1046)).
