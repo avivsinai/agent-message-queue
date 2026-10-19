@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
 const maxPassiveExtensionManifestBytes int64 = 64 * 1024
@@ -131,7 +133,7 @@ func scanAgentExtensions(root string, diagnostics *[]doctorExtensionDiagnostic) 
 	}
 
 	for _, agentEntry := range agents {
-		if !agentEntry.IsDir() {
+		if !agentEntry.IsDir() || fsq.IsMailboxRemovalName(agentEntry.Name()) {
 			continue
 		}
 		agent := agentEntry.Name()

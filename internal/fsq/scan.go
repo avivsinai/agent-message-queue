@@ -16,7 +16,7 @@ func ListAgents(root string) ([]string, error) {
 	}
 	out := make([]string, 0, len(entries))
 	for _, entry := range entries {
-		if entry.IsDir() {
+		if entry.IsDir() && !IsMailboxRemovalName(entry.Name()) {
 			out = append(out, entry.Name())
 		}
 	}

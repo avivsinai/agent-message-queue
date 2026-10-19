@@ -443,6 +443,18 @@ $ amq cleanup --help
 Usage:
   amq cleanup [--tmp-older-than <duration>] [--wake-quarantine-older-than <duration>] [--launch-journal --root <session-root>] [--mailbox <handle> --root <root>] [--dry-run] [--yes] [options]
 
+--mailbox uses --root as given and removes <root>/agents/<handle>, with its
+read history (inbox/cur), outbox, and receipts. It refuses (exit 6) while
+inbox/tmp, inbox/new, any dlq leaf, or extensions/ holds an entry, or while a
+live or uncertain wake holds the handle. It moves the mailbox to
+agents/.removing-<handle>-<nonce>, checks it, waits 250 ms, checks again, and
+puts it back if anything arrived. A delivery that stalls longer than that
+between opening the inbox and publishing can still fail or be removed with
+the mailbox. A later run finishes a removal that was interrupted.
+meta/config.json is not changed: a later local send to the handle recreates
+the mailbox and delivers. Remove the handle from the config to make send warn
+(or refuse with --strict).
+
 Options:
   -dry-run
         Show what would be removed without deleting
@@ -451,7 +463,7 @@ Options:
   -launch-journal
         Remove one exact stuck managed-launch recovery journal
   -mailbox string
-        Remove one agent mailbox under --root only when it holds no mail and no live wake
+        Remove one agent mailbox under --root when it holds no unread mail, dead letters, extension data, or live wake
   -me string
         Agent handle (or AM_ME)
   -root string

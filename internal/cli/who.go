@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/presence"
 )
 
@@ -75,7 +76,7 @@ func runWho(args []string) error {
 
 		var agents []agentInfo
 		for _, ae := range agentEntries {
-			if !ae.IsDir() {
+			if !ae.IsDir() || fsq.IsMailboxRemovalName(ae.Name()) {
 				continue
 			}
 			inbox := filepath.Join(agentsDir, ae.Name(), "inbox")

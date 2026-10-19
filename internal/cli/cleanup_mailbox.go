@@ -1,50 +1,110 @@
 package cli
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 )
 
+// mailboxRemovalSettle is the wait between the two checks of a moved
+// mailbox. Delivery publishes through directory handles opened before the
+// rename, so a sender already inside that step can still land in the moved
+// tree shortly after the first check.
+const mailboxRemovalSettle = 250 * time.Millisecond
+
 // mailboxCleanupReport is the one JSON shape for every cleanup --mailbox
 // outcome. Refusal is empty unless the command exits with action required.
 type mailboxCleanupReport struct {
-	Handle    string             `json:"handle"`
-	Root      string             `json:"root"`
-	Removed   bool               `json:"removed"`
-	Absent    bool               `json:"absent"`
-	DryRun    bool               `json:"dry_run,omitempty"`
-	Refusal   string             `json:"refusal,omitempty"`
-	Wake      string             `json:"wake,omitempty"`
-	Inbox     *mailboxLeafCounts `json:"inbox,omitempty"`
-	DLQ       *mailboxLeafCounts `json:"dlq,omitempty"`
-	Path      string             `json:"path,omitempty"`
-	Preserved string             `json:"preserved,omitempty"`
+	Handle     string              `json:"handle"`
+	Root       string              `json:"root"`
+	Removed    bool                `json:"removed"`
+	Absent     bool                `json:"absent"`
+	DryRun     bool                `json:"dry_run,omitempty"`
+	Refusal    string              `json:"refusal,omitempty"`
+	Wake       string              `json:"wake,omitempty"`
+	Inbox      *mailboxInboxCounts `json:"inbox,omitempty"`
+	DLQ        *mailboxDLQCounts   `json:"dlq,omitempty"`
+	Extensions *int                `json:"extensions,omitempty"`
+	Path       string              `json:"path,omitempty"`
+	Recovered  []string            `json:"recovered,omitempty"`
+	Preserved  string              `json:"preserved,omitempty"`
 }
 
-type mailboxLeafCounts struct {
+// mailboxInboxCounts counts unread inbox entries. inbox/cur is read history
+// and is removed with the mailbox, so it is not counted.
+type mailboxInboxCounts struct {
+	Tmp int `json:"tmp"`
+	New int `json:"new"`
+}
+
+type mailboxDLQCounts struct {
 	Tmp int `json:"tmp"`
 	New int `json:"new"`
 	Cur int `json:"cur"`
 }
 
-func (c mailboxLeafCounts) total() int { return c.Tmp + c.New + c.Cur }
+const (
+	mailboxRefusalMail       = "mail_present"
+	mailboxRefusalDLQ        = "dlq_present"
+	mailboxRefusalExtensions = "extensions_present"
+	mailboxRefusalWake       = "wake_live"
+	mailboxRefusalUnsafe     = "unsafe_path"
+	mailboxRefusalPreserved  = "preserved"
+)
 
-func (c mailboxLeafCounts) String() string {
-	return fmt.Sprintf("tmp=%d new=%d cur=%d", c.Tmp, c.New, c.Cur)
+// mailboxState is what decides whether one mailbox directory may go.
+type mailboxState struct {
+	Inbox      mailboxInboxCounts
+	DLQ        mailboxDLQCounts
+	Extensions int
+	Wake       wakeLockInspection
 }
 
-const (
-	mailboxRefusalMail      = "mail_present"
-	mailboxRefusalWake      = "wake_live"
-	mailboxRefusalUnsafe    = "unsafe_path"
-	mailboxRefusalPreserved = "preserved"
-)
+// refusal names what keeps the mailbox. Only a missing or proven-stale wake
+// lock permits removal.
+func (s mailboxState) refusal() string {
+	switch {
+	case s.Inbox.Tmp+s.Inbox.New > 0:
+		return mailboxRefusalMail
+	case s.DLQ.Tmp+s.DLQ.New+s.DLQ.Cur > 0:
+		return mailboxRefusalDLQ
+	case s.Extensions > 0:
+		return mailboxRefusalExtensions
+	case s.Wake.Exists && s.Wake.Status != wakeLockStale:
+		return mailboxRefusalWake
+	}
+	return ""
+}
+
+func (s mailboxState) refusalMessage(handle, root string) string {
+	switch s.refusal() {
+	case mailboxRefusalMail:
+		return fmt.Sprintf(
+			"mailbox %s holds unread mail (inbox tmp=%d new=%d); drain it before removal",
+			handle, s.Inbox.Tmp, s.Inbox.New,
+		)
+	case mailboxRefusalDLQ:
+		return fmt.Sprintf(
+			"mailbox %s holds dead letters (dlq tmp=%d new=%d cur=%d); recover them or run 'amq dlq purge' before removal",
+			handle, s.DLQ.Tmp, s.DLQ.New, s.DLQ.Cur,
+		)
+	case mailboxRefusalExtensions:
+		return fmt.Sprintf(
+			"mailbox %s holds %d extension entries; remove the layer's extension data first",
+			handle, s.Extensions,
+		)
+	case mailboxRefusalWake:
+		return fmt.Sprintf(
+			"mailbox %s has a %s wake lock; stop the wake (see 'amq wake check --me %s --root %s') before removal",
+			handle, s.Wake.Status, handle, root,
+		)
+	}
+	return ""
+}
 
 // mailboxUnsafePathError reports a symlink or non-directory where the
 // mailbox layout requires a real directory.
@@ -57,10 +117,12 @@ func (e *mailboxUnsafePathError) Error() string {
 	return fmt.Sprintf("%s %s", e.Path, e.Reason)
 }
 
-// cleanupMailbox removes <root>/agents/<handle> only when it holds no mail
-// and no live or uncertain wake. The mailbox is renamed to a private sibling
-// and checked again before deletion, so a message that lands during the
-// removal is restored instead of lost.
+// cleanupMailbox removes <root>/agents/<handle> only when it holds no unread
+// mail, no dead letters, no extension data, and no live or uncertain wake.
+// The mailbox is moved to a private sibling and checked twice before
+// deletion, so a message that lands during the removal is restored instead
+// of lost. Siblings left by an earlier interrupted removal are finished the
+// same way.
 func cleanupMailbox(rootPath, handle string, jsonOutput, dryRun, yes bool) error {
 	identity, err := fsq.SnapshotDeliveryRoot(rootPath)
 	if err != nil {
@@ -88,60 +150,87 @@ func cleanupMailbox(rootPath, handle string, jsonOutput, dryRun, yes bool) error
 		}
 		return err
 	}
-	absent := func() error {
-		report.Absent = true
+	record := func(state mailboxState) {
+		inbox, dlq, extensions := state.Inbox, state.DLQ, state.Extensions
+		report.Inbox, report.DLQ, report.Extensions = &inbox, &dlq, &extensions
+		report.Wake = string(state.Wake.Status)
+	}
+	// checkOrphan refuses when a sibling left by an earlier removal still
+	// holds anything that blocks removal.
+	checkOrphan := func(agents *fsq.DeliveryRoot, orphan string) error {
+		state, err := inspectMailboxDir(root, agents, handle, orphan, nil)
+		if err != nil {
+			return refuseUnsafe(err)
+		}
+		if refusal := state.refusal(); refusal != "" {
+			record(state)
+			report.Preserved = agents.DisplayPath(orphan)
+			return refuse(refusal, "%s; an earlier removal preserved it at %s",
+				state.refusalMessage(handle, report.Root), report.Preserved)
+		}
+		return nil
+	}
+	finish := func() error {
 		if jsonOutput {
 			return writeJSON(os.Stdout, report)
 		}
-		return writeStdout("Mailbox %s is absent under %s; nothing to remove.\n", handle, report.Root)
+		return writeMailboxCleanupReport(report)
 	}
 
-	if info, err := os.Lstat(root.Base()); err != nil {
-		return err
-	} else if info.Mode()&os.ModeSymlink != 0 || !os.SameFile(info, root.FileInfo()) {
-		return refuse(mailboxRefusalUnsafe, "refusing to remove mailbox %s: root %s is a symlink", handle, root.Base())
-	}
 	if present, err := lstatMailboxDir(root, "agents"); err != nil {
 		return refuseUnsafe(err)
 	} else if !present {
-		return absent()
+		report.Absent = true
+		return finish()
 	}
 	agents, err := root.OpenDirectChild("agents")
 	if err != nil {
 		return err
 	}
 	defer func() { _ = agents.Close() }()
-	if present, err := lstatMailboxDir(agents, handle); err != nil {
-		return refuseUnsafe(err)
-	} else if !present {
-		return absent()
-	}
-	report.Path = agents.DisplayPath(handle)
-	original, err := agents.Lstat(handle)
+
+	orphans, err := findMailboxRemovalOrphans(agents, handle)
 	if err != nil {
-		return err
+		return refuseUnsafe(err)
+	}
+	for _, orphan := range orphans {
+		if err := checkOrphan(agents, orphan); err != nil {
+			return err
+		}
+		report.Recovered = append(report.Recovered, agents.DisplayPath(orphan))
 	}
 
-	inbox, dlq, err := countPinnedMailbox(agents, handle, original)
+	present, err := lstatMailboxDir(agents, handle)
 	if err != nil {
 		return refuseUnsafe(err)
 	}
-	report.Inbox, report.DLQ = &inbox, &dlq
-	wake := inspectWakeLock(root.Base(), handle)
-	report.Wake = string(wake.Status)
-	if blocked := mailboxCleanupBlocked(inbox, dlq, wake); blocked != "" {
-		return refuse(blocked, "%s", mailboxCleanupBlockedMessage(blocked, report))
-	}
-	if dryRun {
-		if jsonOutput {
-			return writeJSON(os.Stdout, report)
+	var original os.FileInfo
+	if present {
+		report.Path = agents.DisplayPath(handle)
+		if original, err = agents.Lstat(handle); err != nil {
+			return err
 		}
-		return writeStdout("Would remove empty mailbox %s\n", report.Path)
+		state, err := inspectMailboxDir(root, agents, handle, handle, original)
+		if err != nil {
+			return refuseUnsafe(err)
+		}
+		record(state)
+		if refusal := state.refusal(); refusal != "" {
+			return refuse(refusal, "%s", state.refusalMessage(handle, report.Root))
+		}
+	} else {
+		report.Absent = true
+	}
+	if dryRun || (!present && len(orphans) == 0) {
+		return finish()
 	}
 	if !yes {
+		target := report.Path
+		if !present {
+			target = fmt.Sprintf("left by %d interrupted removal(s) of %s", len(orphans), handle)
+		}
 		confirmed, err := confirmPrompt(fmt.Sprintf(
-			"Remove empty mailbox %s with its outbox, receipts, and extensions?",
-			report.Path,
+			"Remove empty mailbox %s with its read history, outbox, and receipts?", target,
 		))
 		if err != nil {
 			return err
@@ -151,52 +240,95 @@ func cleanupMailbox(rootPath, handle string, jsonOutput, dryRun, yes bool) error
 		}
 	}
 
-	var random [12]byte
-	if _, err := rand.Read(random[:]); err != nil {
-		return fmt.Errorf("generate mailbox removal name: %w", err)
+	for _, orphan := range orphans {
+		if err := checkOrphan(agents, orphan); err != nil {
+			return err
+		}
+		if err := agents.RemoveAllDirectChild(orphan); err != nil {
+			return fmt.Errorf("remove preserved mailbox %s: %w", agents.DisplayPath(orphan), err)
+		}
 	}
-	staging := ".removing-" + handle + "-" + hex.EncodeToString(random[:])
+	if !present {
+		return finish()
+	}
+
+	staging, err := fsq.NewMailboxRemovalName(handle)
+	if err != nil {
+		return err
+	}
 	if err := agents.RenameDirectChildNoReplace(handle, staging); err != nil {
 		return fmt.Errorf("move mailbox %s aside: %w", report.Path, err)
 	}
-	// A writer that resolved the old path before the rename may have finished
-	// into the moved tree. Check again; on any doubt put the mailbox back.
-	inbox, dlq, err = countPinnedMailbox(agents, staging, original)
-	if err == nil {
-		report.Inbox, report.DLQ = &inbox, &dlq
-		lockPath := filepath.Join(fsq.AgentBase(root.Base(), staging), wakeLockFileName)
-		wake = inspectWakeLockWithReader(root.Base(), handle, lockPath, func() ([]byte, os.FileInfo, error) {
-			return readWakeLockFileWithInfo(lockPath)
-		})
-		report.Wake = string(wake.Status)
-		if blocked := mailboxCleanupBlocked(inbox, dlq, wake); blocked != "" {
-			err = errors.New(mailboxCleanupBlockedMessage(blocked, report))
-			report.Refusal = blocked
+	var state mailboxState
+	for check := 0; check < 2 && err == nil && state.refusal() == ""; check++ {
+		if check > 0 {
+			time.Sleep(mailboxRemovalSettle)
 		}
+		state, err = inspectMailboxDir(root, agents, handle, staging, original)
 	}
 	if err != nil {
-		if restoreErr := agents.RenameDirectChildNoReplace(staging, handle); restoreErr != nil {
-			report.Preserved = agents.DisplayPath(staging)
-			return refuse(
-				mailboxRefusalPreserved,
-				"%v; could not restore %s (%v), preserved at %s",
-				err, report.Path, restoreErr, report.Preserved,
-			)
-		}
-		if report.Refusal != "" {
-			return refuse(report.Refusal, "%v", err)
-		}
-		return refuseUnsafe(err)
+		state = mailboxState{}
 	}
-	if err := agents.RemoveAllDirectChild(staging); err != nil {
+	if err == nil {
+		record(state)
+		if state.refusal() == "" {
+			if err := agents.RemoveAllDirectChild(staging); err != nil {
+				return fmt.Errorf("remove mailbox %s (moved to %s): %w",
+					report.Path, agents.DisplayPath(staging), err)
+			}
+			report.Removed = true
+			return finish()
+		}
+		err = errors.New(state.refusalMessage(handle, report.Root))
+	}
+	// Something arrived or changed after the move: put the mailbox back. A
+	// recreated name is never overwritten; the moved tree is kept instead.
+	if restoreErr := agents.RenameDirectChildNoReplace(staging, handle); restoreErr != nil {
 		report.Preserved = agents.DisplayPath(staging)
-		return fmt.Errorf("remove mailbox %s (moved to %s): %w", report.Path, report.Preserved, err)
+		return refuse(mailboxRefusalPreserved, "%v; could not restore %s (%v), preserved at %s",
+			err, report.Path, restoreErr, report.Preserved)
 	}
-	report.Removed = true
-	if jsonOutput {
-		return writeJSON(os.Stdout, report)
+	if refusal := state.refusal(); refusal != "" {
+		return refuse(refusal, "%v", err)
 	}
-	return writeStdout("Removed empty mailbox %s\n", report.Path)
+	return refuseUnsafe(err)
+}
+
+func writeMailboxCleanupReport(report mailboxCleanupReport) error {
+	verb := "Removed"
+	if report.DryRun {
+		verb = "Would remove"
+	}
+	for _, path := range report.Recovered {
+		if err := writeStdout("%s mailbox left by an interrupted removal: %s\n", verb, path); err != nil {
+			return err
+		}
+	}
+	if report.Absent {
+		return writeStdout("Mailbox %s is absent under %s.\n", report.Handle, report.Root)
+	}
+	return writeStdout("%s empty mailbox %s\n", verb, report.Path)
+}
+
+// findMailboxRemovalOrphans lists agents/.removing-<handle>-<nonce> entries
+// that an interrupted removal of handle left behind.
+func findMailboxRemovalOrphans(agents *fsq.DeliveryRoot, handle string) ([]string, error) {
+	entries, err := agents.ReadDir(".")
+	if err != nil {
+		return nil, err
+	}
+	var orphans []string
+	for _, entry := range entries {
+		if owner, ok := fsq.ParseMailboxRemovalName(entry.Name()); !ok || owner != handle {
+			continue
+		}
+		if present, err := lstatMailboxDir(agents, entry.Name()); err != nil {
+			return nil, err
+		} else if present {
+			orphans = append(orphans, entry.Name())
+		}
+	}
+	return orphans, nil
 }
 
 // lstatMailboxDir reports whether name exists as a real directory. A symlink
@@ -218,72 +350,75 @@ func lstatMailboxDir(dir *fsq.DeliveryRoot, name string) (bool, error) {
 	return true, nil
 }
 
-// countPinnedMailbox pins agents/<name>, proves it is the directory first
-// observed as the mailbox, and counts entries in its inbox and DLQ leaves.
-// tmp entries count because a write may be in flight.
-func countPinnedMailbox(agents *fsq.DeliveryRoot, name string, original os.FileInfo) (inbox, dlq mailboxLeafCounts, err error) {
+// inspectMailboxDir pins agents/<name>, proves it is the directory first
+// observed as the mailbox when original is set, and reads everything that
+// decides whether it may go. tmp entries count because a write may be in
+// flight.
+func inspectMailboxDir(root, agents *fsq.DeliveryRoot, handle, name string, original os.FileInfo) (mailboxState, error) {
+	var state mailboxState
 	mailbox, err := agents.OpenDirectChild(name)
 	if err != nil {
-		return inbox, dlq, err
+		return state, err
 	}
 	defer func() { _ = mailbox.Close() }()
-	if !os.SameFile(original, mailbox.FileInfo()) {
-		return inbox, dlq, &mailboxUnsafePathError{Path: agents.DisplayPath(name), Reason: "changed while removing"}
+	if original != nil && !os.SameFile(original, mailbox.FileInfo()) {
+		return state, &mailboxUnsafePathError{Path: agents.DisplayPath(name), Reason: "changed while removing"}
 	}
-	if inbox, err = countMailboxLeaves(mailbox, "inbox"); err != nil {
-		return inbox, dlq, err
+	for _, c := range []struct {
+		path  []string
+		count *int
+	}{
+		{[]string{"inbox", "tmp"}, &state.Inbox.Tmp},
+		{[]string{"inbox", "new"}, &state.Inbox.New},
+		{[]string{"dlq", "tmp"}, &state.DLQ.Tmp},
+		{[]string{"dlq", "new"}, &state.DLQ.New},
+		{[]string{"dlq", "cur"}, &state.DLQ.Cur},
+		{[]string{"extensions"}, &state.Extensions},
+	} {
+		if *c.count, err = countMailboxEntries(mailbox, c.path...); err != nil {
+			return state, err
+		}
 	}
-	dlq, err = countMailboxLeaves(mailbox, "dlq")
-	return inbox, dlq, err
+	lockPath := filepath.Join(fsq.AgentBase(root.Base(), name), wakeLockFileName)
+	state.Wake = inspectWakeLockWithReader(root.Base(), handle, lockPath, func() ([]byte, os.FileInfo, error) {
+		return readWakeLockFileWithInfo(lockPath)
+	})
+	return state, nil
 }
 
-func countMailboxLeaves(mailbox *fsq.DeliveryRoot, parent string) (mailboxLeafCounts, error) {
-	var counts mailboxLeafCounts
-	if present, err := lstatMailboxDir(mailbox, parent); err != nil || !present {
-		return counts, err
-	}
-	for _, leaf := range []struct {
-		name  string
-		count *int
-	}{{"tmp", &counts.Tmp}, {"new", &counts.New}, {"cur", &counts.Cur}} {
-		name := filepath.Join(parent, leaf.name)
-		present, err := lstatMailboxDir(mailbox, name)
-		if err != nil {
-			return counts, err
+// countMailboxEntries counts the entries of one mailbox directory, refusing a
+// symlink or non-directory at any component. A missing directory counts 0.
+func countMailboxEntries(mailbox *fsq.DeliveryRoot, parts ...string) (int, error) {
+	for i := range parts {
+		if present, err := lstatMailboxDir(mailbox, filepath.Join(parts[:i+1]...)); err != nil || !present {
+			return 0, err
 		}
-		if !present {
+	}
+	entries, err := mailbox.ReadDir(filepath.Join(parts...))
+	return len(entries), err
+}
+
+// checkMailboxRemovalHints reports agents/.removing-* entries: mailboxes an
+// interrupted or refused removal left behind.
+func checkMailboxRemovalHints(root string) []opsHint {
+	entries, err := os.ReadDir(filepath.Join(root, "agents"))
+	if err != nil {
+		return nil
+	}
+	var hints []opsHint
+	for _, entry := range entries {
+		if !fsq.IsMailboxRemovalName(entry.Name()) {
 			continue
 		}
-		entries, err := mailbox.ReadDir(name)
-		if err != nil {
-			return counts, err
+		path := filepath.Join(root, "agents", entry.Name())
+		message := fmt.Sprintf("Mailbox removal left %s; inspect it and remove it by hand", path)
+		if handle, ok := fsq.ParseMailboxRemovalName(entry.Name()); ok {
+			message = fmt.Sprintf(
+				"Mailbox removal for %s left %s; run 'amq cleanup --mailbox %s --root %s' to finish it, or recover its mail first",
+				handle, path, handle, root,
+			)
 		}
-		*leaf.count = len(entries)
+		hints = append(hints, opsHint{Code: "mailbox_removal_left", Status: "warn", Message: message})
 	}
-	return counts, nil
-}
-
-// mailboxCleanupBlocked names the refusal for held mail or a live or
-// uncertain wake. Only a missing or proven-stale wake lock permits removal.
-func mailboxCleanupBlocked(inbox, dlq mailboxLeafCounts, wake wakeLockInspection) string {
-	if inbox.total() > 0 || dlq.total() > 0 {
-		return mailboxRefusalMail
-	}
-	if wake.Exists && wake.Status != wakeLockStale {
-		return mailboxRefusalWake
-	}
-	return ""
-}
-
-func mailboxCleanupBlockedMessage(refusal string, report mailboxCleanupReport) string {
-	if refusal == mailboxRefusalWake {
-		return fmt.Sprintf(
-			"mailbox %s has a %s wake lock; stop the wake (see 'amq wake check --me %s --root %s') before removal",
-			report.Handle, report.Wake, report.Handle, report.Root,
-		)
-	}
-	return fmt.Sprintf(
-		"mailbox %s holds mail (inbox %s; dlq %s); drain or recover it before removal",
-		report.Handle, report.Inbox, report.DLQ,
-	)
+	return hints
 }
