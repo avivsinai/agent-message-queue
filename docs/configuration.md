@@ -95,11 +95,19 @@ user config directory on macOS and Windows, else `~/.local/state/amq`. Older
 - The command moves the `<legacy>` that its own `XDG_STATE_HOME` selects.
   Programs that embed the `launchapi` package cannot be checked. An older
   one asks for trust again and recreates `<legacy>/launch`.
+- Run the migration while no `amq launch` runs. A launch that runs during
+  the move can recreate `<legacy>/launch` with one new record. Launches then
+  ask for trust again (fail closed), and the next `--migrate-home` refuses
+  with `both_exist`.
 - Do not delete `<legacy>/launch` by hand. If `~/.amq/state/launch` also
   exists, its older trust records become active again without a new confirm.
-  When both exist, `~/.amq/state/launch` is inert: find the older binary
-  that wrote `<legacy>/launch`, remove `~/.amq/state/launch` (the only effect
-  is a new trust prompt for the projects that only it holds), and run
+- When both exist, `<legacy>/launch` was written later: a newer `amq` writes
+  `~/.amq/state/launch` only while `<legacy>/launch` is absent. Removing
+  trust only causes a new trust prompt. Removing a whole tree while a
+  project is in both trees can make that project's older grant active. The
+  refusal lists the projects in both trees. Remove each of them from both
+  trees, then remove the tree with fewer projects (after a launch during
+  the move, that is `<legacy>/launch` with its one new record), and run
   `amq doctor --migrate-home` again.
 
 ## Keepalive home

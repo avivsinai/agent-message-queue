@@ -29,66 +29,91 @@ const (
 )
 
 type migrateHomeReport struct {
-	DryRun      bool                 `json:"dry_run"`
-	LaunchTrust migrateHomeTrustPart `json:"launch_trust"`
-	NotChecked  []string             `json:"not_checked"`
+	DryRun      bool            `json:"dry_run"`
+	LaunchTrust migrateHomePart `json:"launch_trust"`
 }
 
-type migrateHomeTrustPart struct {
-	Status   string                 `json:"status"`
-	From     string                 `json:"from"`
-	To       string                 `json:"to"`
-	Projects int                    `json:"projects"`
-	Gate     []migrateHomeGateEntry `json:"gate"`
-	Refusal  string                 `json:"refusal,omitempty"`
-	Detail   string                 `json:"detail,omitempty"`
-	Remedy   string                 `json:"remedy,omitempty"`
+// migrateHomePart is one home's migration. Every list is present, empty when
+// it has no entries.
+type migrateHomePart struct {
+	Status       string                 `json:"status"`
+	From         string                 `json:"from"`
+	To           string                 `json:"to"`
+	Gate         []migrateHomeGateEntry `json:"gate"`
+	Blockers     []migrateHomeBlocker   `json:"blockers"`
+	Steps        []migrateHomeStep      `json:"steps"`
+	OperatorNext []string               `json:"operator_next"`
+	NotChecked   []string               `json:"not_checked"`
+	fromProjects int
 }
 
 type migrateHomeGateEntry struct {
+	Source  string `json:"source"`
 	Path    string `json:"path"`
 	Version string `json:"version,omitempty"`
 	OK      bool   `json:"ok"`
 	Reason  string `json:"reason,omitempty"`
 }
 
+type migrateHomeBlocker struct {
+	Code    string `json:"code"`
+	Subject string `json:"subject"`
+	Detail  string `json:"detail"`
+	Remedy  string `json:"remedy"`
+}
+
+type migrateHomeStep struct {
+	Step string `json:"step"`
+	Done bool   `json:"done"`
+}
+
 func runDoctorMigrateHome(jsonOutput, dryRun, yes bool) error {
-	report := migrateHomeReport{
-		DryRun: dryRun,
+	report := migrateHomeReport{DryRun: dryRun}
+	part := &report.LaunchTrust
+	*part = migrateHomePart{
+		Gate:         []migrateHomeGateEntry{},
+		Blockers:     []migrateHomeBlocker{},
+		Steps:        []migrateHomeStep{},
+		OperatorNext: []string{},
 		NotChecked: []string{
 			"programs that embed the launchapi package: an older one asks for trust again and recreates the legacy trust directory; the next --migrate-home then refuses",
 			"amq binaries outside PATH=" + os.Getenv("PATH"),
 		},
 	}
-	part := &report.LaunchTrust
 	move, found, err := launch.PlanLegacyTrustMove()
-	part.From, part.To, part.Projects = move.From, move.To, move.Projects
-	if err != nil {
-		return migrateHomeRefuse(&report, jsonOutput, err)
+	part.From, part.To, part.fromProjects = move.From, move.To, move.FromProjects
+	if err != nil && !part.addRefusal(err, move) {
+		return err
 	}
 	if !found {
 		part.Status = migrateHomeNothingToDo
 		return writeMigrateHomeReport(report, jsonOutput)
 	}
 	part.Gate = migrateHomeGate("amq")
-	for i := range part.Gate {
-		if !part.Gate[i].OK {
-			code := migrateHomeBinaryTooOld
-			if part.Gate[i].Version == "" {
-				code = migrateHomeVersionUnreadable
-			}
-			return migrateHomeRefuse(&report, jsonOutput, &launch.TrustMoveRefusal{
-				Code:    code,
-				Message: fmt.Sprintf("%s: %s", part.Gate[i].Path, part.Gate[i].Reason),
-			})
+	for _, entry := range part.Gate {
+		if entry.OK {
+			continue
 		}
+		code := migrateHomeBinaryTooOld
+		if entry.Version == "" {
+			code = migrateHomeVersionUnreadable
+		}
+		part.Blockers = append(part.Blockers, migrateHomeBlocker{
+			Code:    code,
+			Subject: entry.Path,
+			Detail:  entry.Reason,
+			Remedy:  fmt.Sprintf("Replace it with amq %s or later, or remove it from PATH, then run again.", migrateHomeVersionFloor),
+		})
 	}
+	part.Steps = append(part.Steps, migrateHomeStep{Step: fmt.Sprintf("rename %s to %s", move.From, move.To)})
+	if len(part.Blockers) > 0 {
+		return migrateHomeRefuse(report, jsonOutput)
+	}
+	part.Status = migrateHomeWouldMove
 	if dryRun {
-		part.Status = migrateHomeWouldMove
 		return writeMigrateHomeReport(report, jsonOutput)
 	}
 	if !yes {
-		part.Status = migrateHomeWouldMove
 		if err := writeMigrateHomeReport(report, false); err != nil {
 			return err
 		}
@@ -101,48 +126,74 @@ func runDoctorMigrateHome(jsonOutput, dryRun, yes bool) error {
 		}
 	}
 	if err := launch.ExecuteLegacyTrustMove(move); err != nil {
-		return migrateHomeRefuse(&report, jsonOutput, err)
+		if !part.addRefusal(err, move) {
+			return err
+		}
+		return migrateHomeRefuse(report, jsonOutput)
 	}
+	part.Steps[0].Done = true
 	part.Status = migrateHomeMoved
 	return writeMigrateHomeReport(report, jsonOutput)
 }
 
-// migrateHomeRefuse reports a refusal with exit 6. Any other error is not a
-// refusal and is returned as it is.
-func migrateHomeRefuse(report *migrateHomeReport, jsonOutput bool, err error) error {
+// addRefusal records a trust move refusal as a blocker. It reports false for
+// any other error, which the caller returns as it is.
+func (part *migrateHomePart) addRefusal(err error, move launch.LegacyTrustMove) bool {
 	var refusal *launch.TrustMoveRefusal
 	if !errors.As(err, &refusal) {
-		return err
+		return false
 	}
-	part := &report.LaunchTrust
-	part.Status = migrateHomeRefused
-	part.Refusal = refusal.Code
-	part.Detail = refusal.Message
-	part.Remedy = migrateHomeRemedy(refusal.Code, part)
-	if err := writeMigrateHomeReport(*report, jsonOutput); err != nil {
-		return err
-	}
-	return ActionRequiredError("launch trust not moved (%s): %s", refusal.Code, refusal.Message)
+	part.Blockers = append(part.Blockers, migrateHomeBlocker{
+		Code:    refusal.Code,
+		Subject: refusal.Subject,
+		Detail:  refusal.Message,
+		Remedy:  migrateHomeTrustRemedy(refusal.Code, move),
+	})
+	return true
 }
 
-func migrateHomeRemedy(code string, part *migrateHomeTrustPart) string {
+func migrateHomeRefuse(report migrateHomeReport, jsonOutput bool) error {
+	report.LaunchTrust.Status = migrateHomeRefused
+	if err := writeMigrateHomeReport(report, jsonOutput); err != nil {
+		return err
+	}
+	codes := make([]string, 0, len(report.LaunchTrust.Blockers))
+	for _, blocker := range report.LaunchTrust.Blockers {
+		codes = append(codes, blocker.Code)
+	}
+	return ActionRequiredError("launch trust not moved: %s", strings.Join(codes, ", "))
+}
+
+func migrateHomeTrustRemedy(code string, move launch.LegacyTrustMove) string {
 	switch code {
 	case launch.TrustMoveBothExist:
-		return fmt.Sprintf("New binaries use %s, so %s is inert. An older amq or launchapi program, or a different XDG_STATE_HOME, wrote it: find that first. "+
-			"Then remove %s (the only effect is a new trust prompt for the projects that only it holds) and run again. "+
-			"Never remove %s: that makes the stale grants in %s active.", part.From, part.To, part.To, part.From, part.To)
+		inBoth := "none"
+		if len(move.InBoth) > 0 {
+			paths := make([]string, 0, 2*len(move.InBoth))
+			for _, name := range move.InBoth {
+				paths = append(paths, filepath.Join(move.From, "projects", name), filepath.Join(move.To, "projects", name))
+			}
+			inBoth = strings.Join(paths, ", ")
+		}
+		return fmt.Sprintf("A newer amq writes %s only while %s is absent, so %s was written after it: by an older amq or launchapi program, "+
+			"by an amq launch that ran during a migration, or by an amq with another XDG_STATE_HOME. Only one tree can hold trust. "+
+			"Removing trust is safe: the only effect is a new trust prompt. Removing a tree while a project is in both trees is not: "+
+			"it can make the older grant for that project active again. "+
+			"(1) Remove each project that is in both trees from both trees: %s. "+
+			"(2) Remove the tree with fewer projects. "+
+			"(3) Run amq doctor --migrate-home again while no amq launch runs.",
+			move.To, move.From, move.From, inBoth)
 	case launch.TrustMoveCrossDevice:
 		return "AMQ does not copy trust. Keep the legacy location; it continues to work. " +
 			"Changing XDG_STATE_HOME does not move the grants: it changes which directory amq reads, and every launch asks for trust again."
-	case migrateHomeBinaryTooOld, migrateHomeVersionUnreadable:
-		return fmt.Sprintf("Replace it with amq %s or later, or remove it from PATH, then run again.", migrateHomeVersionFloor)
 	}
-	return "Fix the path, then run again."
+	return "AMQ does not follow or replace it. Make it a plain directory, then run again."
 }
 
 // migrateHomeGate reads the version of every name binary on PATH from its
 // build information, without running it. A binary passes only when its
-// version is readable and not older than migrateHomeVersionFloor.
+// version is readable and not older than migrateHomeVersionFloor. An empty
+// PATH entry is the current directory, as it is for a shell.
 func migrateHomeGate(name string) []migrateHomeGateEntry {
 	if runtime.GOOS == "windows" {
 		name += ".exe"
@@ -151,9 +202,12 @@ func migrateHomeGate(name string) []migrateHomeGateEntry {
 	seen := map[string]bool{}
 	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
 		if dir == "" {
+			dir = "."
+		}
+		candidate, err := filepath.Abs(filepath.Join(dir, name))
+		if err != nil {
 			continue
 		}
-		candidate := filepath.Join(dir, name)
 		info, err := os.Stat(candidate)
 		if err != nil || !info.Mode().IsRegular() || (runtime.GOOS != "windows" && info.Mode().Perm()&0o111 == 0) {
 			continue
@@ -166,7 +220,7 @@ func migrateHomeGate(name string) []migrateHomeGateEntry {
 			continue
 		}
 		seen[path] = true
-		entry := migrateHomeGateEntry{Path: candidate}
+		entry := migrateHomeGateEntry{Source: "PATH", Path: candidate}
 		if path != candidate {
 			entry.Path = candidate + " -> " + path
 		}
@@ -193,11 +247,11 @@ func writeMigrateHomeReport(report migrateHomeReport, jsonOutput bool) error {
 	part := report.LaunchTrust
 	var b strings.Builder
 	b.WriteString("Launch trust\n")
-	fmt.Fprintf(&b, "  from    %s", part.From)
-	if part.Projects > 0 {
-		fmt.Fprintf(&b, "  (projects: %d)", part.Projects)
+	fmt.Fprintf(&b, "  from     %s", part.From)
+	if part.fromProjects > 0 {
+		fmt.Fprintf(&b, "  (projects: %d)", part.fromProjects)
 	}
-	fmt.Fprintf(&b, "\n  to      %s\n", part.To)
+	fmt.Fprintf(&b, "\n  to       %s\n", part.To)
 	for _, entry := range part.Gate {
 		verdict := "ok"
 		if !entry.OK {
@@ -207,22 +261,26 @@ func writeMigrateHomeReport(report migrateHomeReport, jsonOutput bool) error {
 		if version == "" {
 			version = "?"
 		}
-		fmt.Fprintf(&b, "  gate    amq %s  %s  %s\n", version, entry.Path, verdict)
+		fmt.Fprintf(&b, "  gate     %s: amq %s  %s  %s\n", entry.Source, version, entry.Path, verdict)
 	}
 	switch part.Status {
 	case migrateHomeNothingToDo:
-		fmt.Fprintf(&b, "  status  nothing to do: %s does not exist\n", part.From)
+		fmt.Fprintf(&b, "  status   nothing to do: %s does not exist\n", part.From)
 	case migrateHomeWouldMove:
-		b.WriteString("  status  would rename it; launches keep their trust\n")
+		b.WriteString("  status   would rename it; launches keep their trust\n")
 	case migrateHomeMoved:
-		b.WriteString("  status  moved; launches keep their trust\n")
+		b.WriteString("  status   moved; launches keep their trust\n")
 	case migrateHomeRefused:
-		fmt.Fprintf(&b, "  status  refused (%s): %s; nothing changed\n", part.Refusal, part.Detail)
-		fmt.Fprintf(&b, "  remedy  %s\n", part.Remedy)
+		fmt.Fprintf(&b, "  status   refused, %d blockers; nothing changed\n", len(part.Blockers))
+	}
+	for _, blocker := range part.Blockers {
+		fmt.Fprintf(&b, "  blocker  %s: %s\n", blocker.Code, blocker.Subject)
+		fmt.Fprintf(&b, "           %s\n", blocker.Detail)
+		fmt.Fprintf(&b, "           %s\n", blocker.Remedy)
 	}
 	if part.Status != migrateHomeNothingToDo {
 		b.WriteString("Not checked\n")
-		for _, line := range report.NotChecked {
+		for _, line := range part.NotChecked {
 			fmt.Fprintf(&b, "  %s\n", line)
 		}
 	}

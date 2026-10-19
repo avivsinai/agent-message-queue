@@ -34,7 +34,7 @@ func TestDoctorMigrateHomeMovesLaunchTrust(t *testing.T) {
 	if err := legacyStore.Replace(grant); err != nil {
 		t.Fatal(err)
 	}
-	migrate := func() (migrateHomeTrustPart, error) {
+	migrate := func() (migrateHomePart, error) {
 		t.Helper()
 		stdout, _, err := captureEnvOutput(t, func() error {
 			return runDoctor([]string{"--migrate-home", "--yes", "--json"})
@@ -49,7 +49,7 @@ func TestDoctorMigrateHomeMovesLaunchTrust(t *testing.T) {
 	}
 
 	part, err := migrate()
-	if err != nil || part.Status != migrateHomeMoved || part.Projects != 1 {
+	if err != nil || part.Status != migrateHomeMoved || len(part.Steps) != 1 || !part.Steps[0].Done {
 		t.Fatalf("first run: part=%+v err=%v", part, err)
 	}
 	stateDir, err := launch.DefaultLaunchStateDir()
@@ -71,7 +71,7 @@ func TestDoctorMigrateHomeMovesLaunchTrust(t *testing.T) {
 		t.Fatal(err)
 	}
 	part, err = migrate()
-	if GetExitCode(err) != ExitActionRequired || part.Refusal != launch.TrustMoveBothExist {
+	if GetExitCode(err) != ExitActionRequired || len(part.Blockers) != 1 || part.Blockers[0].Code != launch.TrustMoveBothExist {
 		t.Fatalf("both trees: part=%+v err=%v", part, err)
 	}
 	for _, path := range []string{legacyStore.Path(), store.Path()} {

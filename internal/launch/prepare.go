@@ -77,45 +77,49 @@ func LegacyStateDir() (string, error) {
 // Refusal codes of a legacy trust move. Each one leaves <legacy>/launch as it
 // was.
 const (
-	TrustMoveBothExist   = "both_exist"
-	TrustMoveCrossDevice = "cross_device"
-	TrustMoveUnsafePath  = "unsafe_path"
+	TrustMoveBothExist          = "both_exist"
+	TrustMoveCrossDevice        = "cross_device"
+	TrustMoveLegacyNotDirectory = "legacy_launch_not_directory"
+	TrustMoveUnsafePath         = "unsafe_path"
 )
 
 // TrustMoveRefusal is a legacy trust move that the operator must unblock.
 type TrustMoveRefusal struct {
 	Code    string
+	Subject string
 	Message string
 }
 
 func (e *TrustMoveRefusal) Error() string { return e.Message }
 
-// LegacyTrustMove moves <legacy>/launch to ~/.amq/state/launch.
+// LegacyTrustMove moves <legacy>/launch to ~/.amq/state/launch. FromProjects
+// and ToProjects count the project trust directories in each tree; InBoth
+// names the project directories that both trees hold.
 type LegacyTrustMove struct {
-	From     string
-	To       string
-	Projects int
+	From         string
+	To           string
+	FromProjects int
+	ToProjects   int
+	InBoth       []string
 }
 
-// PlanLegacyTrustMove returns the move without changing anything, and false
-// when there is no <legacy>/launch to move. It refuses when
+// PlanLegacyTrustMove returns the move without changing anything. found is
+// false when nothing is at <legacy>/launch. It refuses when
 // ~/.amq/state/launch already exists: while <legacy>/launch exists those
 // records are inert, and a trust record has no time or generation, so nothing
-// shows which of two grants for a project is the later decision. Keeping them
-// could bring back a grant that a later Replace revoked.
-func PlanLegacyTrustMove() (LegacyTrustMove, bool, error) {
+// shows which of two grants for one project is the later decision. Keeping
+// both could bring back a grant that a later Replace revoked.
+func PlanLegacyTrustMove() (move LegacyTrustMove, found bool, err error) {
 	legacy, err := LegacyStateDir()
 	if err != nil {
-		return LegacyTrustMove{}, false, err
+		return move, false, err
 	}
 	home, err := amqhome.Dir()
 	if err != nil {
-		return LegacyTrustMove{}, false, err
+		return move, false, err
 	}
-	move := LegacyTrustMove{
-		From: filepath.Join(legacy, "launch"),
-		To:   filepath.Join(home, "state", "launch"),
-	}
+	move.From = filepath.Join(legacy, "launch")
+	move.To = filepath.Join(home, "state", "launch")
 	info, err := os.Lstat(move.From)
 	if errors.Is(err, os.ErrNotExist) {
 		return move, false, nil
@@ -124,19 +128,48 @@ func PlanLegacyTrustMove() (LegacyTrustMove, bool, error) {
 		return move, false, err
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-		return move, false, &TrustMoveRefusal{Code: TrustMoveUnsafePath, Message: fmt.Sprintf("%s is not a plain directory", move.From)}
+		return move, true, &TrustMoveRefusal{Code: TrustMoveLegacyNotDirectory, Subject: move.From,
+			Message: fmt.Sprintf("%s is not a plain directory", move.From)}
 	}
-	if _, err := os.Lstat(move.To); err == nil {
-		return move, false, &TrustMoveRefusal{Code: TrustMoveBothExist, Message: fmt.Sprintf("both %s and %s exist", move.From, move.To)}
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return move, false, err
+	from, err := trustProjectDirs(move.From)
+	if err != nil {
+		return move, true, err
 	}
-	projects, err := os.ReadDir(filepath.Join(move.From, "projects"))
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return move, false, err
+	move.FromProjects = len(from)
+	if _, err := os.Lstat(move.To); errors.Is(err, os.ErrNotExist) {
+		return move, true, nil
+	} else if err != nil {
+		return move, true, err
 	}
-	move.Projects = len(projects)
-	return move, true, nil
+	to, err := trustProjectDirs(move.To)
+	if err != nil {
+		return move, true, err
+	}
+	move.ToProjects = len(to)
+	for name := range from {
+		if to[name] {
+			move.InBoth = append(move.InBoth, name)
+		}
+	}
+	slices.Sort(move.InBoth)
+	return move, true, &TrustMoveRefusal{Code: TrustMoveBothExist, Subject: move.To,
+		Message: fmt.Sprintf("both %s (%d projects) and %s (%d projects) exist; %d projects are in both",
+			move.From, move.FromProjects, move.To, move.ToProjects, len(move.InBoth))}
+}
+
+func trustProjectDirs(launchDir string) (map[string]bool, error) {
+	entries, err := os.ReadDir(filepath.Join(launchDir, "projects"))
+	if errors.Is(err, os.ErrNotExist) {
+		return map[string]bool{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	names := make(map[string]bool, len(entries))
+	for _, entry := range entries {
+		names[entry.Name()] = true
+	}
+	return names, nil
 }
 
 // ExecuteLegacyTrustMove renames the planned <legacy>/launch to
@@ -147,7 +180,7 @@ func PlanLegacyTrustMove() (LegacyTrustMove, bool, error) {
 func ExecuteLegacyTrustMove(move LegacyTrustMove) error {
 	home, err := amqhome.EnsureDir()
 	if err != nil {
-		return &TrustMoveRefusal{Code: TrustMoveUnsafePath, Message: err.Error()}
+		return &TrustMoveRefusal{Code: TrustMoveUnsafePath, Subject: move.To, Message: err.Error()}
 	}
 	stateDir := filepath.Join(home, "state")
 	if move.To != filepath.Join(stateDir, "launch") {
@@ -164,14 +197,17 @@ func ExecuteLegacyTrustMove(move LegacyTrustMove) error {
 		return err
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-		return &TrustMoveRefusal{Code: TrustMoveUnsafePath, Message: fmt.Sprintf("%s is not a plain directory", stateDir)}
+		return &TrustMoveRefusal{Code: TrustMoveUnsafePath, Subject: stateDir,
+			Message: fmt.Sprintf("%s is not a plain directory", stateDir)}
 	}
 	if err := os.Rename(move.From, move.To); err != nil {
 		switch {
-		case errors.Is(err, syscall.EXDEV):
-			return &TrustMoveRefusal{Code: TrustMoveCrossDevice, Message: fmt.Sprintf("%s and %s are on different filesystems", move.From, move.To)}
+		case isCrossDeviceRename(err):
+			return &TrustMoveRefusal{Code: TrustMoveCrossDevice, Subject: move.From,
+				Message: fmt.Sprintf("%s and %s are on different filesystems", move.From, move.To)}
 		case errors.Is(err, os.ErrExist), errors.Is(err, syscall.ENOTEMPTY):
-			return &TrustMoveRefusal{Code: TrustMoveBothExist, Message: fmt.Sprintf("both %s and %s exist", move.From, move.To)}
+			return &TrustMoveRefusal{Code: TrustMoveBothExist, Subject: move.To,
+				Message: fmt.Sprintf("%s appeared during the move", move.To)}
 		}
 		return err
 	}
