@@ -85,3 +85,28 @@ func TestCleanupMailboxRefusesMailboxHoldingMail(t *testing.T) {
 		t.Fatalf("message after refusal: %v", err)
 	}
 }
+
+func TestCleanupMailboxFinishesInterruptedRemoval(t *testing.T) {
+	rootPath := t.TempDir()
+	orphan := filepath.Join(rootPath, "agents", ".removing-chat-1-0123456789abcdef01234567")
+	for _, leaf := range fsq.RequiredMailboxLeaves() {
+		if err := os.MkdirAll(filepath.Join(orphan, filepath.FromSlash(string(leaf))), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	stdout, _, err := captureEnvOutput(t, func() error {
+		return runCleanup([]string{"--mailbox", "chat-1", "--root", rootPath, "--yes", "--json"})
+	})
+	if err != nil {
+		t.Fatalf("cleanup --mailbox: %v", err)
+	}
+	var report mailboxCleanupReport
+	if err := json.Unmarshal([]byte(stdout), &report); err != nil || !report.Absent || report.Removed ||
+		len(report.Recovered) != 1 || filepath.Base(report.Recovered[0]) != filepath.Base(orphan) {
+		t.Fatalf("report=%s err=%v", stdout, err)
+	}
+	if _, err := os.Lstat(orphan); !os.IsNotExist(err) {
+		t.Fatalf("orphan after cleanup: %v", err)
+	}
+}

@@ -198,7 +198,6 @@ func cleanupMailbox(rootPath, handle string, jsonOutput, dryRun, yes bool) error
 		if err := checkOrphan(agents, orphan); err != nil {
 			return err
 		}
-		report.Recovered = append(report.Recovered, agents.DisplayPath(orphan))
 	}
 
 	present, err := lstatMailboxDir(agents, handle)
@@ -222,7 +221,13 @@ func cleanupMailbox(rootPath, handle string, jsonOutput, dryRun, yes bool) error
 	} else {
 		report.Absent = true
 	}
-	if dryRun || (!present && len(orphans) == 0) {
+	if dryRun {
+		for _, orphan := range orphans {
+			report.Recovered = append(report.Recovered, agents.DisplayPath(orphan))
+		}
+		return finish()
+	}
+	if !present && len(orphans) == 0 {
 		return finish()
 	}
 	if !yes {
@@ -248,6 +253,7 @@ func cleanupMailbox(rootPath, handle string, jsonOutput, dryRun, yes bool) error
 		if err := agents.RemoveAllDirectChild(orphan); err != nil {
 			return fmt.Errorf("remove preserved mailbox %s: %w", agents.DisplayPath(orphan), err)
 		}
+		report.Recovered = append(report.Recovered, agents.DisplayPath(orphan))
 	}
 	if !present {
 		return finish()
