@@ -1,6 +1,7 @@
 package acp
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -38,12 +39,14 @@ type settingsDoc struct {
 // is reported once per distinct reason; it never fails the turn.
 func (s *Server) loadTurnTiming() turnTiming {
 	startup := turnTiming{s.cfg.TurnTimeout, s.cfg.PollInterval, s.cfg.HeartbeatInterval}
+	// The read holds no lock: s.mu guards every request, and a stalled home
+	// mount must not block them (review of #1023).
+	t, found, err := readSettingsFile(startup)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.lastGood == nil {
 		s.lastGood = &startup
 	}
-	t, found, err := readSettingsFile(startup)
 	switch {
 	case err != nil:
 		if reason := err.Error(); reason != s.settingsRefused {
@@ -81,8 +84,13 @@ func readSettingsFile(startup turnTiming) (turnTiming, bool, error) {
 		return t, false, fmt.Errorf("larger than %d bytes", settingsMaxBytes)
 	}
 	var doc settingsDoc
-	if err := json.Unmarshal(raw, &doc); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&doc); err != nil {
 		return t, false, err
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		return t, false, errors.New("trailing data after the document")
 	}
 	for _, f := range []struct {
 		name, value string

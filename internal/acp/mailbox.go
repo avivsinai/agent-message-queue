@@ -42,6 +42,10 @@ type mailboxClaim struct {
 	// sweep can post a reply that arrives after the turn ended. An older
 	// claim has none and is not swept.
 	Channel string `json:"channel,omitempty"`
+	// Deadline is when the first turn's budget ends, so the sweep knows when
+	// that turn is over even if the turn timeout was changed since. An older
+	// claim has none and the sweep uses the startup turn timeout.
+	Deadline string `json:"deadline,omitempty"`
 }
 
 // mailboxOutcome is the content of an event's final-answer marker
@@ -382,13 +386,13 @@ func (s *Server) mailboxAnswered(eventID string) (mailboxOutcome, bool) {
 // mailboxClaim returns the message id and time for this prompt, and whether
 // this call created the claim. With an event id it is claimed exclusively
 // under the publish lock, and a redelivery reuses it.
-func (s *Server) mailboxClaim(eventID, threadID, channel string) (mailboxClaim, bool, error) {
+func (s *Server) mailboxClaim(eventID, threadID, channel string, deadline time.Time) (mailboxClaim, bool, error) {
 	now := time.Now()
 	id, err := format.NewMessageID(now)
 	if err != nil {
 		return mailboxClaim{}, false, err
 	}
-	fresh := mailboxClaim{MessageID: id, Created: now.UTC().Format(time.RFC3339Nano), Thread: threadID, Channel: channel}
+	fresh := mailboxClaim{MessageID: id, Created: now.UTC().Format(time.RFC3339Nano), Thread: threadID, Channel: channel, Deadline: deadline.UTC().Format(time.RFC3339Nano)}
 	if eventID == "" {
 		return fresh, true, nil
 	}
@@ -441,7 +445,7 @@ func (s *Server) publishClaimed(r *remoteTurn, budget time.Time, b binding.Bindi
 		// The claim is created under the lock, so only the attempt that
 		// created it can know no earlier attempt published it
 		// (bead agent-message-queue-qff).
-		c, fresh, err := s.mailboxClaim(r.eventID, threadID, r.turn.channel)
+		c, fresh, err := s.mailboxClaim(r.eventID, threadID, r.turn.channel, budget)
 		if err != nil {
 			return err
 		}

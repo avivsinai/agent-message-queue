@@ -15,7 +15,9 @@ import (
 // before publish; the file's budget lets the turn end on its reply.
 func TestPromptReadsTurnTimeoutFromSettingsFile(t *testing.T) {
 	s, root := mailboxServer(t)
-	t.Setenv("HOME", canonicalTempDir(t))
+	home := canonicalTempDir(t)
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 	dir, err := amqhome.EnsureDir()
 	if err != nil {
 		t.Fatal(err)
@@ -45,5 +47,27 @@ func TestPromptReadsTurnTimeoutFromSettingsFile(t *testing.T) {
 	}
 	if got := res.(remotePromptResult); got.StopReason != StopReasonEndTurn {
 		t.Fatalf("result=%+v; want the turn to run on the file's turn_timeout", got)
+	}
+}
+
+// Review of #1023: {"turn_timout":"4s"} was accepted as an empty document, so
+// a typo silently reset a working turn timeout to the startup value. An
+// unknown key is refused and the last good value stays.
+func TestSettingsTypoKeepsTheLastGoodValue(t *testing.T) {
+	s, _ := mailboxServer(t)
+	t.Setenv("HOME", canonicalTempDir(t))
+	t.Setenv("USERPROFILE", os.Getenv("HOME"))
+	dir, err := amqhome.EnsureDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, settingsFile)
+	for _, body := range []string{`{"turn_timeout":"30m"}`, `{"turn_timout":"4s"}`} {
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if got := s.loadTurnTiming().timeout; got != 30*time.Minute {
+			t.Fatalf("after %s turn timeout=%v; want 30m", body, got)
+		}
 	}
 }

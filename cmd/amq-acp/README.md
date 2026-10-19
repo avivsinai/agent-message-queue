@@ -86,7 +86,7 @@ Each key is optional and uses the same positive Go duration as its
 `AMQ_ACP_*` variable. The file is read at the start of each prompt, so an edit
 applies from the next turn; a turn already running keeps its values. A missing
 file means the startup values, so deleting it reverts. A refused file (bad
-JSON, a bad or non-positive duration, over 64 KiB, a symlink or other
+JSON, an unknown key, a bad or non-positive duration, over 64 KiB, a symlink or other
 non-regular file) keeps the last good values and is logged once on stderr; it
 never stops `amq-acp`.
 Identity (root, handle, recipient, target, session pin, Buzz credentials) is
