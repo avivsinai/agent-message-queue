@@ -625,7 +625,8 @@ self-upgrade candidate, which reclaims and quarantines it instead of preserving
 it and re-probing every maintenance tick. Pinned
 binaries, ownerless/keepalive wakes, repair flows, destructive interrupts, and
 arbitrary `--inject-cmd` wakes never self-upgrade. The eligible default is
-disabled with `amq wake --no-self-upgrade` or `AMQ_WAKE_NO_SELF_UPGRADE=1`;
+disabled with `amq wake --no-self-upgrade` or `AMQ_WAKE_NO_SELF_UPGRADE=1`, or
+live with the `self_upgrade` setting (`amq wake config --self-upgrade=false`);
 schema-2 wake/doctor JSON reports the latest decision under `self_upgrade`.
 The separate `amq-keepalive` supervisor has its own direct-image self-upgrade
 contract documented in `docs/amq-keepalive.md`.

@@ -32,16 +32,18 @@ per-key overlay. See [Session routing and safety](session-routing.md).
 
 A long-running AMQ process must re-read its configuration while it runs.
 This is the project rule. The wake reloads the agent and machine wake
-settings files, and `amq-remote serve` reloads its relay shares. Two
-processes do not yet follow the rule:
-[issue 1022](https://github.com/avivsinai/agent-message-queue/issues/1022)
-(the self-upgrade kill switch in `amq wake` and `amq-keepalive`) and
+settings files, `amq-keepalive supervise` reloads its settings file, and
+`amq-remote serve` reloads its relay shares. One process does not yet follow
+the rule:
 [issue 1023](https://github.com/avivsinai/agent-message-queue/issues/1023)
 (turn timeout and poll settings in `amq-acp`).
 
 - A change applies without a restart.
 - A refused edit (bad syntax, unknown key, failed validation, failed trust
   check) keeps the last good value and is reported once, not on every check.
+- The self-upgrade kill switch (`self_upgrade`) applies live only as
+  `false`. Enabling needs the baseline a process captures at start, so `true`
+  does not enable a process started with `--no-self-upgrade`; restart it.
 - Identity is the exception. A value bound into a lock, a target, or resume
   state is fixed for the life of the process: `--me`, `--root`, `--inject-*`,
   `--interrupt-cmd`, and `--retry-until`. Changing it live would let a running

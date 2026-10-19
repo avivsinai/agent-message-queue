@@ -55,6 +55,43 @@ func TestSelfUpgradeExecsStrictlyNewerImageAtQuiescentBoundary(t *testing.T) {
 	assertSelfUpgradeStateMode(t, controller.statePath)
 }
 
+// Issue 1022: self_upgrade=false in the keepalive settings file stops a
+// running supervisor from replacing its image on the next pass.
+func TestSelfUpgradeSettingFalseStopsExecLive(t *testing.T) {
+	dir := t.TempDir()
+	incumbentPath := filepath.Join(dir, "incumbent")
+	candidatePath := filepath.Join(dir, "candidate")
+	writeExecutableForSelfUpgradeTest(t, incumbentPath, "old image")
+	writeExecutableForSelfUpgradeTest(t, candidatePath, "new image")
+	incumbent := captureSelfUpgradeTestImage(t, incumbentPath, "1.0.0")
+	controller := testSelfUpgradeController(dir, candidatePath, incumbent)
+	controller.settingsPath = keepaliveSettingsPath(filepath.Join(dir, "registry.json"))
+
+	previousCandidate := selfUpgradeCaptureCandidate
+	previousExec := selfUpgradeExecImage
+	t.Cleanup(func() {
+		selfUpgradeCaptureCandidate = previousCandidate
+		selfUpgradeExecImage = previousExec
+	})
+	selfUpgradeCaptureCandidate = func(path string) (selfupgrade.ImageEvidence, error) {
+		return captureSelfUpgradeTestImage(t, path, "1.1.0"), nil
+	}
+	selfUpgradeExecImage = func(selfupgrade.ImageEvidence, []string, []string) error {
+		t.Fatal("self-upgrade executed while disabled by settings")
+		return nil
+	}
+
+	if err := os.WriteFile(controller.settingsPath, []byte(`{"schema":1,"settings":{"self_upgrade":false}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if notice := controller.reloadSettings(); !strings.Contains(notice, "disabled by self_upgrade=false") {
+		t.Fatalf("reloadSettings() notice = %q, want disabled by settings", notice)
+	}
+	if err := controller.maintain(context.Background()); err != nil {
+		t.Fatalf("maintain() error = %v", err)
+	}
+}
+
 func TestSelfUpgradeSchema1MigratesBeforeProtectedExec(t *testing.T) {
 	dir := t.TempDir()
 	incumbentPath := filepath.Join(dir, "incumbent")

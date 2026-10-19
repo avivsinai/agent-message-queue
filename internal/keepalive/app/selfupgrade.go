@@ -70,6 +70,12 @@ type selfUpgradeController struct {
 	statePublished       bool
 	ledgerVersion        string
 	lastObservation      *selfUpgradeObservation
+	// settingsPath is the live settings file; disabledBySettings is its last
+	// good self_upgrade=false, a veto over the startup state.
+	settingsPath       string
+	settingsSeen       bool
+	settingsObserved   keepaliveSettingsRead
+	disabledBySettings bool
 }
 
 type selfUpgradeObservation struct {
@@ -104,7 +110,10 @@ type selfUpgradeAttemptsFile struct {
 }
 
 func newSelfUpgradeController(registryPath, locator, version string, enabled bool) *selfUpgradeController {
-	controller := &selfUpgradeController{enabled: enabled}
+	controller := &selfUpgradeController{
+		enabled:      enabled,
+		settingsPath: keepaliveSettingsPath(registryPath),
+	}
 	if !enabled {
 		controller.reason = "disabled by --no-self-upgrade"
 		return controller
@@ -676,7 +685,7 @@ func writeSelfUpgradeJSONFile(path string, data []byte) error {
 }
 
 func (controller *selfUpgradeController) maintain(ctx context.Context) error {
-	if controller == nil || !controller.enabled || !controller.eligible {
+	if controller == nil || !controller.enabled || !controller.eligible || controller.disabledBySettings {
 		return nil
 	}
 	if ctx != nil {

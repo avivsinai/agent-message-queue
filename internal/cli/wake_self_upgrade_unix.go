@@ -329,6 +329,31 @@ func validateWakeSelfUpgradeLaunchLocator(path string, info os.FileInfo) error {
 	return nil
 }
 
+// wakeSelfUpgradeSettingsVeto is the decision the live self_upgrade setting
+// forces over the startup state, if any. false stops new candidates without
+// a restart. true cannot enable a wake started disabled, because enabling
+// needs the startup baseline; an explicit true there says to restart. The
+// returned state is the one to record: the startup state with the veto.
+func wakeSelfUpgradeSettingsVeto(
+	state wakeSelfUpgradeState,
+	settings wakeSettings,
+	layers wakeSettingsLayers,
+) (wakeSelfUpgradeState, wakeSelfUpgradeDecision, bool) {
+	decision := wakeSelfUpgradeDecision{Action: wakeSelfUpgradeActionDisabled}
+	switch {
+	case !settings.selfUpgrade:
+		decision.Reason = "disabled by self_upgrade=false in the wake settings"
+	case !state.Enabled &&
+		(layers.agent.present["self_upgrade"] || layers.machine.present["self_upgrade"]):
+		decision.Reason = state.Reason + "; self_upgrade=true in the wake settings needs a restart to enable"
+	default:
+		return state, wakeSelfUpgradeDecision{}, false
+	}
+	state.Enabled = false
+	state.Reason = decision.Reason
+	return state, decision, true
+}
+
 func constrainWakeSelfUpgradeEligibility(
 	state wakeSelfUpgradeState,
 	resumeEligible bool,

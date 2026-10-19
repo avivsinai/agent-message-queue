@@ -135,8 +135,15 @@ A running wake has two kinds of input.
   `hold_normal`, `hold_low`, `preview_len`, `bell`, `defer_while_input`,
   `input_quiet_for`, `input_poll_interval`, `input_max_hold`, `interrupt`,
   `interrupt_label`, `interrupt_priority`, `interrupt_notice`,
-  `interrupt_cooldown`, and `inject_timeout`. Each has a flag of the same name
-  with `-` in place of `_`.
+  `interrupt_cooldown`, `inject_timeout`, and `self_upgrade`. Each has a flag
+  of the same name with `-` in place of `_`.
+- `self_upgrade` (default `true`) is the self-upgrade kill switch. `false`
+  stops new self-upgrade candidates at the next maintenance tick (every 30
+  seconds) without a restart; a restart request already published finishes.
+  `true` does not enable a wake started with `--no-self-upgrade` or
+  `AMQ_WAKE_NO_SELF_UPGRADE=1`: the wake stays disabled and its self-upgrade
+  decision says to restart it. `wake check --json --json-schema=2` shows the
+  decision under `self_upgrade`.
 
 The settings file is `<root>/agents/<handle>/.wake.settings`, canonical JSON:
 

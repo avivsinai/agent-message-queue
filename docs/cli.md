@@ -704,14 +704,15 @@ Hold by priority (default off): --hold-normal and --hold-low delay the
   time-critical unblocking requests or verdicts.
 
 Settings (hold, debounce, preview, bell, input deferral, interrupt notice,
-  inject timeout) live in <root>/agents/<me>/.wake.settings, over the machine
-  file ~/.amq/wake.settings (every wake of this user on this machine), over
-  the built-in defaults, key by key. Explicit settings flags on a fresh start
-  write their keys to the agent file. A resume (self-upgrade or restart) reads
-  the file and ignores settings flags in argv; if the file is absent it writes
-  them once. Repair, coop exec and keepalive pass no settings flags and use
-  the stored files. A refused machine file never stops a start; the wake runs
-  without it. Change running wakes with amq wake config (--machine for all).
+  inject timeout, self-upgrade) live in <root>/agents/<me>/.wake.settings,
+  over the machine file ~/.amq/wake.settings (every wake of this user on this
+  machine), over the built-in defaults, key by key. Explicit settings flags on
+  a fresh start write their keys to the agent file. A resume (self-upgrade or
+  restart) reads the file and ignores settings flags in argv; if the file is
+  absent it writes them once. Repair, coop exec and keepalive pass no settings
+  flags and use the stored files. A refused machine file never stops a start;
+  the wake runs without it. Change running wakes with amq wake config
+  (--machine for all).
 
 Interrupt notices (default on): urgent messages tagged with label "interrupt"
   trigger an interrupt notice. Ctrl+C injection is opt-in with
@@ -731,8 +732,10 @@ Safety: raw, paste, --inject-cmd, --inject-via, and opt-in interrupt Ctrl+C
 
 Self-upgrade: eligible co-op wakes observe their stable launch symlink and
   replace the running image only with a strictly newer installed AMQ while
-  preserving PID, terminal ownership, and unread work. Disable with
-  --no-self-upgrade or AMQ_WAKE_NO_SELF_UPGRADE=1.
+  preserving PID, terminal ownership, and unread work. Disable at start with
+  --no-self-upgrade or AMQ_WAKE_NO_SELF_UPGRADE=1, or live with amq wake config
+  --self-upgrade=false (--machine for every wake). A live true does not enable
+  a wake started with --no-self-upgrade; restart it to enable.
 
 EXPERIMENTAL: Uses TIOCSTI ioctl (macOS/Linux). May not work on all systems.
 
@@ -791,6 +794,8 @@ Options:
         Doorbell acknowledgement: drained or injected (default "drained")
   -root string
         Root directory for the queue (default ".agent-mail")
+  -self-upgrade
+        Allow automatic replacement by a newer installed AMQ image (false stops it live; true needs a wake started without --no-self-upgrade) (default true)
   -strict
         Error on unknown handles (default: warn)
 ```
@@ -1361,6 +1366,8 @@ Options:
         Replace the settings file with exactly the given setting flags (none = no overrides)
   -root string
         Root directory for the queue (default ".agent-mail")
+  -self-upgrade
+        Allow automatic replacement by a newer installed AMQ image (false stops it live; true needs a wake started without --no-self-upgrade) (default true)
   -strict
         Error on unknown handles (default: warn)
   -timeout duration

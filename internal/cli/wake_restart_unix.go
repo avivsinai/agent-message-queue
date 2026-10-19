@@ -1866,6 +1866,15 @@ func maintainWakeSelfUpgradeAtLoopBoundary(
 		}
 		cfg.selfUpgrade.restartPending = false
 	}
+	// The setting stops new candidates; a restart request already published
+	// above is control-plane state and finishes.
+	if state, decision, vetoed := wakeSelfUpgradeSettingsVeto(
+		cfg.selfUpgrade,
+		cfg.settings,
+		cfg.settingsLayers,
+	); vetoed {
+		return recordWakeSelfUpgradeDecision(agentDir, cfg.inspectTerminalGeneration(), state, decision)
+	}
 	if cfg.selfUpgrade.Enabled && cfg.selfUpgrade.Eligible {
 		for _, attempt := range cfg.selfUpgrade.attempts {
 			if attempt.Status == selfupgrade.AttemptStatusAttempt && attempt.IsFutureUncertain(wakeSelfUpgradeNow()) {
