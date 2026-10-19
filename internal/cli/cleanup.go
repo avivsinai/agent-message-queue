@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
@@ -27,19 +28,62 @@ func runCleanup(args []string) error {
 		false,
 		"Remove one exact stuck managed-launch recovery journal",
 	)
+	mailboxFlag := fs.String(
+		"mailbox",
+		"",
+		"Remove one agent mailbox under --root when it holds no unread mail, dead letters, extension data, or live wake",
+	)
 	dryRunFlag := fs.Bool("dry-run", false, "Show what would be removed without deleting")
 	yesFlag := fs.Bool("yes", false, "Skip confirmation prompt")
 	usage := usageWithFlags(
 		fs,
-		"amq cleanup [--tmp-older-than <duration>] [--wake-quarantine-older-than <duration>] [--launch-journal --root <session-root>] [--dry-run] [--yes] [options]",
+		"amq cleanup [--tmp-older-than <duration>] [--wake-quarantine-older-than <duration>] [--launch-journal --root <session-root>] [--mailbox <handle> --root <root>] [--dry-run] [--yes] [options]",
+		"--mailbox uses --root as given and removes <root>/agents/<handle>, with its",
+		"read history (inbox/cur), outbox, and receipts. It refuses (exit 6) while",
+		"inbox/tmp, inbox/new, any dlq leaf, or extensions/ holds an entry, or while a",
+		"live or uncertain wake holds the handle. One lock (meta/removing.lock)",
+		"serializes removals under a root; a second run exits 6 (busy). A dry run,",
+		"and a run that finds nothing to remove, write nothing. The mailbox moves to",
+		"meta/removing/<handle>-<nonce>, is checked, checked again after 250 ms, and",
+		"is put back if anything arrived. A delivery that stalls longer than that",
+		"between opening the inbox and publishing can still fail or be removed with",
+		"the mailbox. A later run removes a clean tree an interrupted run left there,",
+		"and restores one that holds mail to agents/<handle> so it can be drained.",
+		"meta/config.json is not changed: a later local send to the handle recreates",
+		"the mailbox and delivers. Remove the handle from the config to make send warn",
+		"(or refuse with --strict).",
+		"JSON: absent = no live mailbox when the run started; removed = this run",
+		"deleted the live mailbox; restored = this run moved a leftover back to",
+		"agents/<handle>, which exists at the end; recovered = leftovers deleted;",
+		"preserved = where a tree was kept; refusal = why the run exited 6.",
 	)
 	if handled, err := parseFlags(fs, args, usage); err != nil {
 		return err
 	} else if handled {
 		return nil
 	}
-	if *olderFlag == "" && *wakeQuarantineOlderFlag == "" && !*launchJournalFlag {
-		return UsageError("one of --tmp-older-than, --wake-quarantine-older-than, or --launch-journal is required")
+	mailboxSelected := flagWasVisited(fs, "mailbox")
+	if *olderFlag == "" && *wakeQuarantineOlderFlag == "" && !*launchJournalFlag && !mailboxSelected {
+		return UsageError("one of --tmp-older-than, --wake-quarantine-older-than, --launch-journal, or --mailbox is required")
+	}
+	if mailboxSelected {
+		if *olderFlag != "" || *wakeQuarantineOlderFlag != "" || *launchJournalFlag {
+			return UsageError("--mailbox cannot be combined with other cleanup selectors")
+		}
+		if !common.rootExplicit() {
+			return UsageError("--mailbox requires an explicit --root <root>")
+		}
+		handle := *mailboxFlag
+		if err := fsq.ValidateHandle(handle); err != nil {
+			return UsageError("--mailbox: %v", err)
+		}
+		if handle == reservedHumanHandle {
+			return UsageError("--mailbox %s is reserved for the human operator", handle)
+		}
+		if handle == strings.TrimSpace(common.Me) {
+			return UsageError("--mailbox %s is your own handle (--me/AM_ME)", handle)
+		}
+		return cleanupMailbox(common.Root, handle, common.JSON, *dryRunFlag, *yesFlag)
 	}
 	if *launchJournalFlag {
 		if *olderFlag != "" || *wakeQuarantineOlderFlag != "" {

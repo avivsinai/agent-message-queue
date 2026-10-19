@@ -3,11 +3,26 @@
 package fsq
 
 import (
+	"errors"
 	"fmt"
 	"os"
 
 	"golang.org/x/sys/unix"
 )
+
+// tryExclusiveFileLock holds an exclusive advisory lock on file for the
+// duration of fn without waiting. It returns ErrLockBusy when another holder
+// has the lock.
+func tryExclusiveFileLock(file *os.File, fn func() error) error {
+	if err := unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		if errors.Is(err, unix.EWOULDBLOCK) {
+			return ErrLockBusy
+		}
+		return fmt.Errorf("acquire file lock: %w", err)
+	}
+	defer func() { _ = unix.Flock(int(file.Fd()), unix.LOCK_UN) }()
+	return fn()
+}
 
 func withExclusiveDLQEnvelopeLock(file *os.File, fn func() error) error {
 	if err := unix.Flock(int(file.Fd()), unix.LOCK_EX); err != nil {

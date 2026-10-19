@@ -212,6 +212,7 @@ func runOpsChecksWithSchema(
 	result.Companions = companions
 	result.Hints = append(result.Hints, companionHints...)
 	result.Hints = append(result.Hints, checkLinkedWorktreeLocalHint(root, rootSource)...)
+	result.Hints = append(result.Hints, checkMailboxRemovalHints(root)...)
 
 	// Load the active root's config, falling back to the base config for normal
 	// session layouts where coop init owns the single config.json.
