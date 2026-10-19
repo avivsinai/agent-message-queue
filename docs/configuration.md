@@ -32,12 +32,11 @@ per-key overlay. See [Session routing and safety](session-routing.md).
 
 A long-running AMQ process must re-read its configuration while it runs.
 This is the project rule. The wake reloads the agent and machine wake
-settings files, and `amq-remote serve` reloads its relay shares. Two
-processes do not yet follow the rule:
+settings files, `amq-remote serve` reloads its relay shares, and `amq-acp`
+reads `~/.amq/acp.settings` at the start of each turn. One process does not
+yet follow the rule:
 [issue 1022](https://github.com/avivsinai/agent-message-queue/issues/1022)
-(the self-upgrade kill switch in `amq wake` and `amq-keepalive`) and
-[issue 1023](https://github.com/avivsinai/agent-message-queue/issues/1023)
-(turn timeout and poll settings in `amq-acp`).
+(the self-upgrade kill switch in `amq wake` and `amq-keepalive`).
 
 - A change applies without a restart.
 - A refused edit (bad syntax, unknown key, failed validation, failed trust

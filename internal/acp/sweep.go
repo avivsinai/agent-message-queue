@@ -293,7 +293,11 @@ func (s *Server) loadLateClaim(eventID string, now time.Time) (*lateClaim, bool)
 		return nil, false
 	}
 	c.created = created
-	if now.Before(created.Add(s.cfg.TurnTimeout)) {
+	turnEnds := created.Add(s.cfg.TurnTimeout)
+	if d, err := time.Parse(time.RFC3339Nano, c.claim.Deadline); err == nil {
+		turnEnds = d
+	}
+	if now.Before(turnEnds) {
 		return nil, true // its turn can still be open
 	}
 	// No delivery named a channel yet: a later one may record it.
