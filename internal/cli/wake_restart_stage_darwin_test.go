@@ -202,6 +202,73 @@ func TestDarwinRestartStageUsesMachineLocalStateAndSurvivesCandidateRemoval(t *t
 	}
 }
 
+// #1046: a restart that a later release stages under ~/.amq/state/wake-stages
+// validates and is pruned by this release, which still writes the legacy root.
+func TestDarwinRestartStageUnderAMQHomeValidatesAndIsPruned(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		stateHome func(root string) string
+	}{
+		{name: "legacy root elsewhere", stateHome: func(string) string { return t.TempDir() }},
+		// #1046 review: a legacy plan that fails (legacy root inside AM_ROOT)
+		// must not refuse a stage under ~/.amq/state.
+		{name: "legacy root inside AM_ROOT", stateHome: func(root string) string {
+			return filepath.Join(root, "state")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := canonicalWakeRoot(t.TempDir())
+			setDarwinWakeRestartStateHomeForTest(t, tc.stateHome(root))
+			t.Setenv("HOME", t.TempDir())
+			path := filepath.Join(t.TempDir(), "amq")
+			if err := os.WriteFile(path, []byte("amq image"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			candidate, err := captureWakeImageEvidence(path, "stage-amq-home-test")
+			if err != nil {
+				t.Fatal(err)
+			}
+			record := wakeRestartRecord{
+				RequestID: "0123456789abcdef0123456789abcdef",
+				Root:      root,
+				Agent:     "codex",
+				Candidate: candidate,
+			}
+			stageRoot, err := darwinWakeRestartAMQHomeStageRoot()
+			if err != nil {
+				t.Fatal(err)
+			}
+			record.StagePath, err = planWakeRestartStageUnderRootPlatform(record, stageRoot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			bound, err := bindWakeRestartCandidateForRecordPlatform(record)
+			if err != nil {
+				t.Fatal(err)
+			}
+			evidence := bound.evidence
+			if err := bound.file.Close(); err != nil {
+				t.Fatal(err)
+			}
+			record.BoundImage = &evidence
+
+			if err := validateWakeRestartStageStatePlatform(record); err != nil {
+				t.Fatalf("validate stage under ~/.amq/state: %v", err)
+			}
+			if err := reclaimWakeRestartStagePlatform(record); err != nil {
+				t.Fatalf("prune stage under ~/.amq/state: %v", err)
+			}
+			entries, err := os.ReadDir(stageRoot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) != 0 {
+				t.Fatalf("stage hierarchy under %s was not pruned: %v", stageRoot, entries)
+			}
+		})
+	}
+}
+
 func TestDoctorDiagnosesCrashOrphanedDarwinRestartStage(t *testing.T) {
 	record := newDarwinWakeRestartStageRecordForTest(t)
 	bound, err := bindWakeRestartCandidateAtPlatform(record.Candidate, record.StagePath)

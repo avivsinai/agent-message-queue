@@ -13,6 +13,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/avivsinai/agent-message-queue/internal/amqhome"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"golang.org/x/sys/unix"
@@ -33,22 +34,45 @@ func planWakeRestartStagePlatform(candidate wakeImageEvidenceV1, requestID strin
 }
 
 func planWakeRestartStageForRecordPlatform(record wakeRestartRecord) (string, error) {
-	if !validWakeReloadTransportGeneration(record.RequestID) {
-		return "", fmt.Errorf("wake restart stage request id is invalid")
-	}
-	if err := fsq.ValidateHandle(record.Agent); err != nil {
-		return "", fmt.Errorf("wake restart stage agent is invalid: %w", err)
-	}
-	if err := validateWakeImageEvidenceForPlatform(record.Candidate, "darwin"); err != nil {
+	if err := validateWakeRestartStageRequestPlatform(record); err != nil {
 		return "", err
-	}
-	rootIdentity, err := resolveTreeIdentityToken(record.Root)
-	if err != nil {
-		return "", fmt.Errorf("resolve wake restart stage root identity: %w", err)
 	}
 	stateRoot, err := darwinWakeRestartStageRoot()
 	if err != nil {
 		return "", err
+	}
+	return planWakeRestartStageUnderRootPlatform(record, stateRoot)
+}
+
+func validateWakeRestartStageRequestPlatform(record wakeRestartRecord) error {
+	if !validWakeReloadTransportGeneration(record.RequestID) {
+		return fmt.Errorf("wake restart stage request id is invalid")
+	}
+	if err := fsq.ValidateHandle(record.Agent); err != nil {
+		return fmt.Errorf("wake restart stage agent is invalid: %w", err)
+	}
+	return validateWakeImageEvidenceForPlatform(record.Candidate, "darwin")
+}
+
+// planWakeRestartStageUnderAMQHomePlatform plans the stage path a later
+// release writes under ~/.amq/state/wake-stages (#1046).
+func planWakeRestartStageUnderAMQHomePlatform(record wakeRestartRecord) (string, error) {
+	if err := validateWakeRestartStageRequestPlatform(record); err != nil {
+		return "", err
+	}
+	stateRoot, err := darwinWakeRestartAMQHomeStageRoot()
+	if err != nil {
+		return "", err
+	}
+	return planWakeRestartStageUnderRootPlatform(record, stateRoot)
+}
+
+// planWakeRestartStageUnderRootPlatform derives the exact stage path for a
+// validated record below one stage root.
+func planWakeRestartStageUnderRootPlatform(record wakeRestartRecord, stateRoot string) (string, error) {
+	rootIdentity, err := resolveTreeIdentityToken(record.Root)
+	if err != nil {
+		return "", fmt.Errorf("resolve wake restart stage root identity: %w", err)
 	}
 	if wakeRestartPathWithinDirectory(stateRoot, record.Root) {
 		return "", fmt.Errorf("wake restart stage state directory must be outside AM_ROOT")
@@ -63,12 +87,28 @@ func planWakeRestartStageForRecordPlatform(record wakeRestartRecord) (string, er
 	), nil
 }
 
+// darwinWakeRestartStageRoot is the root this binary writes new stages under.
 func darwinWakeRestartStageRoot() (string, error) {
 	stateDir, err := launch.LegacyStateDir()
 	if err != nil {
 		return "", fmt.Errorf("resolve Darwin wake restart state directory: %w", err)
 	}
-	stateDir, err = resolveDarwinWakeRestartStatePath(stateDir)
+	return darwinWakeRestartStageRootUnder(stateDir)
+}
+
+// darwinWakeRestartAMQHomeStageRoot is ~/.amq/state/wake-stages. This binary
+// validates and prunes stages there so that a restart staged by a later
+// release can finish here, but it writes no new stage there (#1046).
+func darwinWakeRestartAMQHomeStageRoot() (string, error) {
+	home, err := amqhome.Dir()
+	if err != nil {
+		return "", fmt.Errorf("resolve Darwin wake restart state directory: %w", err)
+	}
+	return darwinWakeRestartStageRootUnder(filepath.Join(home, "state"))
+}
+
+func darwinWakeRestartStageRootUnder(stateDir string) (string, error) {
+	stateDir, err := resolveDarwinWakeRestartStatePath(stateDir)
 	if err != nil {
 		return "", fmt.Errorf("resolve physical Darwin wake restart state directory: %w", err)
 	}
@@ -122,12 +162,21 @@ func validateWakeRestartStageStatePlatform(record wakeRestartRecord) error {
 	if record.StagePath == "" && record.BoundImage == nil {
 		return nil
 	}
-	planned, err := planWakeRestartStageForRecordPlatform(record)
-	if err != nil {
+	if err := validateWakeRestartStageRequestPlatform(record); err != nil {
 		return err
 	}
-	legacyPlanned, legacyErr := planWakeRestartStagePlatform(record.Candidate, record.RequestID)
-	if record.StagePath != planned && (legacyErr != nil || record.StagePath != legacyPlanned) {
+	// The record matches when its stage path is one of the exact plans. A
+	// plan that fails for one root never prevents a match on another root.
+	planned, plannedErr := planWakeRestartStageForRecordPlatform(record)
+	adjacentPlanned, adjacentErr := planWakeRestartStagePlatform(record.Candidate, record.RequestID)
+	amqHomePlanned, amqHomeErr := planWakeRestartStageUnderAMQHomePlatform(record)
+	switch {
+	case plannedErr == nil && record.StagePath == planned:
+	case adjacentErr == nil && record.StagePath == adjacentPlanned:
+	case amqHomeErr == nil && record.StagePath == amqHomePlanned:
+	case plannedErr != nil:
+		return plannedErr
+	default:
 		return fmt.Errorf("wake restart stage path does not match the exact request")
 	}
 	if record.BoundImage == nil {
@@ -207,7 +256,7 @@ func cleanupPersistedDarwinWakeRestartStage(bound wakeImageEvidenceV1) error {
 }
 
 func pruneEmptyStableDarwinWakeRestartStageHierarchy(stagePath string) error {
-	_, stable, err := stableDarwinWakeRestartStageParts(stagePath)
+	_, _, stable, err := stableDarwinWakeRestartStageParts(stagePath)
 	if err != nil || !stable {
 		return err
 	}
