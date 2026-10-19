@@ -1047,9 +1047,19 @@ With --ops, also checks runtime health:
   - Wake lock health
   - Integration hints (Kanban, Symphony)
 
+With --migrate-home, move <legacy>/launch to ~/.amq/state/launch in one
+rename, so launches keep their trust. It refuses (exit 6) and changes
+nothing when an amq on PATH is older than 0.97.0 or its version cannot be
+read, when ~/.amq/state/launch already exists, or when the two directories
+are on different filesystems. <legacy> is $XDG_STATE_HOME/amq, else the
+user config directory (macOS, Windows), else ~/.local/state/amq.
+--json requires --dry-run or --yes.
+
 Options:
   -base-root string
         Config-authority root for an explicit session --root
+  -dry-run
+        With --migrate-home, show the move without changing anything
   -fix-mailboxes
         Create missing required directories for configured mailboxes
   -fix-wake-locks
@@ -1060,10 +1070,14 @@ Options:
         Output as JSON
   -json-schema int
         JSON schema version: 1 or 2 (requires --json) (default 1)
+  -migrate-home
+        Move launch trust from the legacy state directory to ~/.amq/state
   -ops
         Include runtime operational checks
   -root string
         Exact AMQ root to inspect or repair
+  -yes
+        With --migrate-home, skip the confirmation prompt
 ```
 
 ## amq shell-setup

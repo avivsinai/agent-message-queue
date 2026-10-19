@@ -50,6 +50,9 @@ func runDoctor(args []string) error {
 	rootFlag := fs.String("root", "", "Exact AMQ root to inspect or repair")
 	baseRootFlag := fs.String("base-root", "", "Config-authority root for an explicit session --root")
 	ignoreSessionPinFlag := fs.Bool("ignore-session-pin", false, "With explicit --root, allow repair outside the pinned session context")
+	migrateHomeFlag := fs.Bool("migrate-home", false, "Move launch trust from the legacy state directory to ~/.amq/state")
+	dryRunFlag := fs.Bool("dry-run", false, "With --migrate-home, show the move without changing anything")
+	yesFlag := fs.Bool("yes", false, "With --migrate-home, skip the confirmation prompt")
 
 	usage := usageWithFlags(fs, "amq doctor [options]",
 		"Verify AMQ installation and configuration.",
@@ -69,6 +72,14 @@ func runDoctor(args []string) error {
 		"  - Git worktree mailbox divergence",
 		"  - Wake lock health",
 		"  - Integration hints (Kanban, Symphony)",
+		"",
+		"With --migrate-home, move <legacy>/launch to ~/.amq/state/launch in one",
+		"rename, so launches keep their trust. It refuses (exit 6) and changes",
+		"nothing when an amq on PATH is older than 0.97.0 or its version cannot be",
+		"read, when ~/.amq/state/launch already exists, or when the two directories",
+		"are on different filesystems. <legacy> is $XDG_STATE_HOME/amq, else the",
+		"user config directory (macOS, Windows), else ~/.local/state/amq.",
+		"--json requires --dry-run or --yes.",
 	)
 
 	if handled, err := parseFlags(fs, args, usage); err != nil {
@@ -78,6 +89,20 @@ func runDoctor(args []string) error {
 	}
 	if err := validateJSONSchemaFlag(fs, *jsonFlag, *jsonSchemaFlag); err != nil {
 		return err
+	}
+	if (*dryRunFlag || *yesFlag) && !*migrateHomeFlag {
+		return UsageError("--dry-run and --yes require --migrate-home")
+	}
+	if *migrateHomeFlag {
+		for _, name := range []string{"ops", "fix-wake-locks", "fix-mailboxes", "root", "base-root", "ignore-session-pin", "json-schema"} {
+			if flagWasVisited(fs, name) {
+				return UsageError("--migrate-home moves per-user state and cannot be combined with --%s", name)
+			}
+		}
+		if *jsonFlag && !*dryRunFlag && !*yesFlag {
+			return UsageError("--migrate-home --json requires --dry-run or --yes")
+		}
+		return runDoctorMigrateHome(*jsonFlag, *dryRunFlag, *yesFlag)
 	}
 	if *fixWakeLocksFlag && !*opsFlag {
 		return UsageError("--fix-wake-locks requires --ops")

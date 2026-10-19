@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"syscall"
 
 	"github.com/avivsinai/agent-message-queue/internal/amqhome"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
@@ -71,6 +72,136 @@ func LegacyStateDir() (string, error) {
 		return "", err
 	}
 	return filepath.Join(home, ".local", "state", "amq"), nil
+}
+
+// Refusal codes of a legacy trust move. Each one leaves <legacy>/launch as it
+// was.
+const (
+	TrustMoveBothExist          = "both_exist"
+	TrustMoveCrossDevice        = "cross_device"
+	TrustMoveLegacyNotDirectory = "legacy_launch_not_directory"
+	TrustMoveUnsafePath         = "unsafe_path"
+)
+
+// TrustMoveRefusal is a legacy trust move that the operator must unblock.
+type TrustMoveRefusal struct {
+	Code    string
+	Subject string
+	Message string
+}
+
+func (e *TrustMoveRefusal) Error() string { return e.Message }
+
+// LegacyTrustMove moves <legacy>/launch to ~/.amq/state/launch. FromProjects
+// and ToProjects count the project trust directories in each tree.
+type LegacyTrustMove struct {
+	From         string
+	To           string
+	FromProjects int
+	ToProjects   int
+}
+
+// PlanLegacyTrustMove returns the move without changing anything. found is
+// false when nothing is at <legacy>/launch. It refuses when
+// ~/.amq/state/launch already exists: while <legacy>/launch exists those
+// records are inert, and a trust record has no time or generation, so nothing
+// shows which of two grants for one project is the later decision. Keeping
+// both could bring back a grant that a later Replace revoked.
+func PlanLegacyTrustMove() (move LegacyTrustMove, found bool, err error) {
+	legacy, err := LegacyStateDir()
+	if err != nil {
+		return move, false, err
+	}
+	home, err := amqhome.Dir()
+	if err != nil {
+		return move, false, err
+	}
+	move.From = filepath.Join(legacy, "launch")
+	move.To = filepath.Join(home, "state", "launch")
+	info, err := os.Lstat(move.From)
+	if errors.Is(err, os.ErrNotExist) {
+		return move, false, nil
+	}
+	if err != nil {
+		return move, false, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return move, true, &TrustMoveRefusal{Code: TrustMoveLegacyNotDirectory, Subject: move.From,
+			Message: fmt.Sprintf("%s is not a plain directory", move.From)}
+	}
+	from, err := trustProjectDirs(move.From)
+	if err != nil {
+		return move, true, err
+	}
+	move.FromProjects = from
+	if _, err := os.Lstat(move.To); errors.Is(err, os.ErrNotExist) {
+		return move, true, nil
+	} else if err != nil {
+		return move, true, err
+	}
+	to, err := trustProjectDirs(move.To)
+	if err != nil {
+		return move, true, err
+	}
+	move.ToProjects = to
+	return move, true, &TrustMoveRefusal{Code: TrustMoveBothExist, Subject: move.To,
+		Message: fmt.Sprintf("both %s (%d projects) and %s (%d projects) exist",
+			move.From, move.FromProjects, move.To, move.ToProjects)}
+}
+
+func trustProjectDirs(launchDir string) (int, error) {
+	entries, err := os.ReadDir(filepath.Join(launchDir, "projects"))
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
+	return len(entries), err
+}
+
+// ExecuteLegacyTrustMove renames the planned <legacy>/launch to
+// ~/.amq/state/launch. DefaultLaunchStateDir probes only <legacy>/launch, so
+// the one rename moves every newer binary to ~/.amq/state at once, and a crash
+// leaves either the old tree or the moved one. The legacy root itself stays:
+// it holds the darwin wake restart stages.
+func ExecuteLegacyTrustMove(move LegacyTrustMove) error {
+	home, err := amqhome.EnsureDir()
+	if err != nil {
+		return &TrustMoveRefusal{Code: TrustMoveUnsafePath, Subject: move.To, Message: err.Error()}
+	}
+	stateDir := filepath.Join(home, "state")
+	if move.To != filepath.Join(stateDir, "launch") {
+		return fmt.Errorf("trust move target %s is not %s", move.To, filepath.Join(stateDir, "launch"))
+	}
+	info, err := os.Lstat(stateDir)
+	if errors.Is(err, os.ErrNotExist) {
+		if err := os.Mkdir(stateDir, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+			return err
+		}
+		info, err = os.Lstat(stateDir)
+	}
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return &TrustMoveRefusal{Code: TrustMoveUnsafePath, Subject: stateDir,
+			Message: fmt.Sprintf("%s is not a plain directory", stateDir)}
+	}
+	if err := os.Rename(move.From, move.To); err != nil {
+		switch {
+		case isCrossDeviceRename(err):
+			return &TrustMoveRefusal{Code: TrustMoveCrossDevice, Subject: move.From,
+				Message: fmt.Sprintf("%s and %s are on different filesystems", move.From, move.To)}
+		case errors.Is(err, os.ErrExist), errors.Is(err, syscall.ENOTEMPTY):
+			return &TrustMoveRefusal{Code: TrustMoveBothExist, Subject: move.To,
+				Message: fmt.Sprintf("%s appeared during the move", move.To)}
+		}
+		return err
+	}
+	for _, dir := range []string{stateDir, filepath.Dir(move.From)} {
+		if err := fsq.SyncDir(dir); err != nil {
+			return fmt.Errorf("moved %s to %s, but sync of %s failed: %w", move.From, move.To, dir, err)
+		}
+	}
+	return nil
 }
 
 const preparePlaceholderUUID = "00000000-0000-4000-8000-000000000000"

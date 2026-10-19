@@ -88,10 +88,30 @@ user config directory on macOS and Windows, else `~/.local/state/amq`. Older
   Older and newer `amq` binaries then read and write the same trust records.
 - `XDG_STATE_HOME` only locates the legacy directory. It does not move
   `~/.amq/state`.
-- AMQ does not move existing trust to `~/.amq/state`. See
-  [issue 1047](https://github.com/avivsinai/agent-message-queue/issues/1047).
+- `amq doctor --migrate-home` moves `<legacy>/launch` to
+  `~/.amq/state/launch` in one rename, so launches keep their trust. Use
+  `--dry-run` to see the move first. First upgrade or remove every `amq`
+  older than 0.97.0: an older binary writes `<legacy>/launch` again. The
+  command reads the version of each `amq` on `PATH` without running it, and
+  refuses (exit 6) when one is older or its version cannot be read. It also
+  refuses when `~/.amq/state/launch` already exists, or when the two
+  directories are on different filesystems. A refusal changes nothing.
+- The command moves the `<legacy>` that its own `XDG_STATE_HOME` selects.
+  Programs that embed the `launchapi` package cannot be checked. An older
+  one asks for trust again and recreates `<legacy>/launch`.
 - Do not delete `<legacy>/launch` by hand. If `~/.amq/state/launch` also
   exists, its older trust records become active again without a new confirm.
+- When both exist, `<legacy>/launch` was written after a newer `amq` wrote
+  `~/.amq/state/launch`, so `~/.amq/state/launch` is inert. Find the older
+  binary or program that wrote `<legacy>/launch`, remove
+  `~/.amq/state/launch` (the only effect is a new trust prompt for the
+  projects it holds), and run `amq doctor --migrate-home` again. Never
+  remove `<legacy>/launch`.
+- An `amq launch` that runs during the migration can recreate
+  `<legacy>/launch`. The next `--migrate-home` then refuses with
+  `both_exist`, and the safe fix is the same: remove `~/.amq/state/launch`
+  (the cost is new trust prompts for the moved projects). To avoid this,
+  run the migration while no launch runs.
 
 ## Keepalive home
 
