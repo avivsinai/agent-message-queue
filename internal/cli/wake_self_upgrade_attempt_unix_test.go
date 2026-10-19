@@ -114,6 +114,7 @@ func TestWakeSelfUpgradeAttemptSurvivesStaleLockReclaimAndRefusesOldWake(t *test
 		retainedAgent:        newAgentDir,
 		retainedInbox:        newInboxDir,
 		selfUpgrade:          state,
+		settings:             defaultWakeSettings(),
 		inspectTerminalGeneration: func() wakeLockInspection {
 			return inspectWakeLock(fixture.root, fixture.agent)
 		},

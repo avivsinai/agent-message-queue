@@ -769,7 +769,12 @@ func (a App) supervise(ctx context.Context, args []string) error {
 	if *interval <= 0 {
 		return errors.New("--interval must be greater than zero")
 	}
+	settingsPath, err := keepaliveSettingsPath(*registryPath)
+	if err != nil {
+		return err
+	}
 	selfUpgrade := newSelfUpgradeController(*registryPath, *self, a.SelfVersion, !*noSelfUpgrade)
+	selfUpgrade.settingsPath = settingsPath
 	if selfUpgrade.enabled && !selfUpgrade.eligible && selfUpgrade.reason != "" {
 		_, _ = fmt.Fprintf(a.Stderr, "amq-keepalive self-upgrade unavailable: %s\n", selfUpgrade.reason)
 	}
@@ -797,6 +802,9 @@ func (a App) supervise(ctx context.Context, args []string) error {
 	}
 	for {
 		passErr := runOnce(false)
+		if notice := selfUpgrade.reloadSettings(); notice != "" {
+			_, _ = fmt.Fprintln(a.Stderr, notice)
+		}
 		if passErr != nil {
 			_, _ = fmt.Fprintln(a.Stderr, passErr)
 		} else if err := selfUpgrade.maintain(ctx); err != nil {
@@ -1228,7 +1236,43 @@ func (a App) doctor(args []string) error {
 	if *ops {
 		return printJSON(a.Stdout, companionOpsReport(*registryPath, file))
 	}
-	return printJSON(a.Stdout, file)
+	settingsPath, err := keepaliveSettingsPath(*registryPath)
+	if err != nil {
+		return err
+	}
+	return printJSON(a.Stdout, doctorReport{File: file, SelfUpgrade: doctorSelfUpgradeSetting(settingsPath)})
+}
+
+// doctorReport is the registry file plus the self_upgrade setting a
+// supervisor using this registry reads. The setting is the file's value; a
+// supervisor started with --no-self-upgrade stays disabled whatever it says.
+type doctorReport struct {
+	registry.File
+	SelfUpgrade doctorSetting `json:"self_upgrade"`
+}
+
+type doctorSetting struct {
+	Value  bool   `json:"value"`
+	Source string `json:"source"`
+	Path   string `json:"path"`
+	Status string `json:"status"`
+	Error  string `json:"error,omitempty"`
+}
+
+// doctorSelfUpgradeSetting shows a refused file with the default, the value
+// a starting supervisor runs with; a running one keeps its last good value.
+func doctorSelfUpgradeSetting(path string) doctorSetting {
+	read := readKeepaliveSettings(path)
+	setting := doctorSetting{Value: true, Source: "default", Path: path, Status: keepaliveSettingsStatusOK}
+	switch {
+	case read.err != nil:
+		setting.Status, setting.Error = keepaliveSettingsStatusRefused, read.err.Error()
+	case !read.exists:
+		setting.Status = keepaliveSettingsStatusAbsent
+	case read.selfUpgradeSet:
+		setting.Value, setting.Source = read.selfUpgrade, "file"
+	}
+	return setting
 }
 
 // companionOpsReport classifies companion-supervised rows (adapter

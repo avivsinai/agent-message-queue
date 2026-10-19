@@ -1957,14 +1957,15 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 		"  time-critical unblocking requests or verdicts.",
 		"",
 		"Settings (hold, debounce, preview, bell, input deferral, interrupt notice,",
-		"  inject timeout) live in <root>/agents/<me>/.wake.settings, over the machine",
-		"  file ~/.amq/wake.settings (every wake of this user on this machine), over",
-		"  the built-in defaults, key by key. Explicit settings flags on a fresh start",
-		"  write their keys to the agent file. A resume (self-upgrade or restart) reads",
-		"  the file and ignores settings flags in argv; if the file is absent it writes",
-		"  them once. Repair, coop exec and keepalive pass no settings flags and use",
-		"  the stored files. A refused machine file never stops a start; the wake runs",
-		"  without it. Change running wakes with amq wake config (--machine for all).",
+		"  inject timeout, self-upgrade) live in <root>/agents/<me>/.wake.settings,",
+		"  over the machine file ~/.amq/wake.settings (every wake of this user on this",
+		"  machine), over the built-in defaults, key by key. Explicit settings flags on",
+		"  a fresh start write their keys to the agent file. A resume (self-upgrade or",
+		"  restart) reads the file and ignores settings flags in argv; if the file is",
+		"  absent it writes them once. Repair, coop exec and keepalive pass no settings",
+		"  flags and use the stored files. A refused machine file never stops a start;",
+		"  the wake runs without it. Change running wakes with amq wake config",
+		"  (--machine for all).",
 		"",
 		"Interrupt notices (default on): urgent messages tagged with label \"interrupt\"",
 		"  trigger an interrupt notice. Ctrl+C injection is opt-in with",
@@ -1984,8 +1985,10 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 		"",
 		"Self-upgrade: eligible co-op wakes observe their stable launch symlink and",
 		"  replace the running image only with a strictly newer installed AMQ while",
-		"  preserving PID, terminal ownership, and unread work. Disable with",
-		"  --no-self-upgrade or AMQ_WAKE_NO_SELF_UPGRADE=1.",
+		"  preserving PID, terminal ownership, and unread work. Disable at start with",
+		"  --no-self-upgrade or AMQ_WAKE_NO_SELF_UPGRADE=1, or live with amq wake config",
+		"  --self-upgrade=false (--machine for every wake). A live true does not enable",
+		"  a wake started with --no-self-upgrade; restart it to enable.",
 		"",
 		"EXPERIMENTAL: Uses TIOCSTI ioctl (macOS/Linux). May not work on all systems.")
 	if handled, err := parseFlags(fs, args, usage); err != nil {
@@ -2867,24 +2870,24 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 	defer func() {
 		_ = setWakeDoorbellStatusInDir(activeAgentDir, me, false, 0)
 	}()
-	initialSelfUpgradeDecision := wakeSelfUpgradeDecision{
-		Action: wakeSelfUpgradeActionUnchanged,
-		Reason: "stable launch locator is unchanged",
-	}
-	if !selfUpgrade.Enabled {
-		initialSelfUpgradeDecision.Action = wakeSelfUpgradeActionDisabled
-		initialSelfUpgradeDecision.Reason = selfUpgrade.Reason
-	} else if !selfUpgrade.Eligible {
-		initialSelfUpgradeDecision.Action = wakeSelfUpgradeActionIneligible
-		initialSelfUpgradeDecision.Reason = selfUpgrade.Reason
-	} else if selfUpgrade.startupRefusalReason != "" {
+	initialSelfUpgrade := selfUpgrade
+	initialSelfUpgradeDecision := wakeSelfUpgradeIdleDecision(selfUpgrade)
+	if state, decision, vetoed := wakeSelfUpgradeSettingsVeto(
+		selfUpgrade,
+		cfg.settings,
+		cfg.settingsLayers,
+	); vetoed {
+		cfg.selfUpgrade.settingsVetoed = true
+		initialSelfUpgrade = state
+		initialSelfUpgradeDecision = decision
+	} else if selfUpgrade.Enabled && selfUpgrade.Eligible && selfUpgrade.startupRefusalReason != "" {
 		initialSelfUpgradeDecision.Action = wakeSelfUpgradeActionRefusedMemory
 		initialSelfUpgradeDecision.Reason = selfUpgrade.startupRefusalReason
 	}
 	if err := recordWakeSelfUpgradeDecision(
 		activeAgentDir,
 		currentWake,
-		selfUpgrade,
+		initialSelfUpgrade,
 		initialSelfUpgradeDecision,
 	); err != nil {
 		_ = writeWakeDiagnostic(

@@ -158,8 +158,8 @@ ACP v2 is [the amq-acp companion](cmd/amq-acp/README.md).
   applies without a restart, a refused edit keeps the last good value, and
   identity bound into locks, targets, or resume state (`--me`, `--root`,
   `--inject-*`) is restart-only. Do not add configuration that a running
-  process reads only at startup. The wake follows the rule today; the known
-  gaps are in [Configuration](docs/configuration.md#hot-reload).
+  process reads only at startup. Which processes reload what is in
+  [Configuration](docs/configuration.md#hot-reload).
 
 See [Configuration](docs/configuration.md).
 

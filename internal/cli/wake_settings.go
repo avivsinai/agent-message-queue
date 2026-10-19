@@ -29,6 +29,7 @@ const (
 	defaultWakeInterruptLabel    = "interrupt"
 	defaultWakeInterruptPriority = format.PriorityUrgent
 	defaultWakeInterruptCooldown = 7 * time.Second
+	defaultWakeSelfUpgrade       = true
 )
 
 const (
@@ -70,6 +71,7 @@ type wakeSettings struct {
 	interruptNotice   string
 	interruptCooldown time.Duration
 	injectTimeout     time.Duration
+	selfUpgrade       bool
 }
 
 func defaultWakeSettings() wakeSettings {
@@ -85,6 +87,7 @@ func defaultWakeSettings() wakeSettings {
 		interruptPriority: defaultWakeInterruptPriority,
 		interruptCooldown: defaultWakeInterruptCooldown,
 		injectTimeout:     defaultInjectTimeout,
+		selfUpgrade:       defaultWakeSelfUpgrade,
 	}
 }
 
@@ -170,6 +173,8 @@ var wakeSettingDefs = []wakeSettingDef{
 		func(s *wakeSettings) any { return &s.interruptCooldown }},
 	{"inject_timeout", "inject-timeout", "Timeout for one --inject-via command",
 		func(s *wakeSettings) any { return &s.injectTimeout }},
+	{"self_upgrade", "self-upgrade", "Allow automatic replacement by a newer installed AMQ image (false stops it live; true needs a wake started without --no-self-upgrade)",
+		func(s *wakeSettings) any { return &s.selfUpgrade }},
 }
 
 // wakeRestartOnlyFlags are the amq wake flags bound into the running wake's
