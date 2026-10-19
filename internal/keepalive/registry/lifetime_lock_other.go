@@ -12,3 +12,8 @@ import "errors"
 func ProbeLifetimeLock(regPath, entryID string) (bool, error) {
 	return false, errors.Join(errLockProbeFailed, errors.New("lifetime lock probe unavailable on this platform"))
 }
+
+// ProbeLockHeld cannot tell either on this platform, and reports an error.
+func ProbeLockHeld(lockPath string) (bool, error) {
+	return false, errors.Join(errLockProbeFailed, errors.New("lock probe unavailable on this platform"))
+}

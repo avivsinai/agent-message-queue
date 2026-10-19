@@ -4,7 +4,9 @@
 operator explicitly registers. It is a companion binary, not a daemon and not
 part of the core `amq` process. Its private registry lives in the keepalive
 home: `~/.amq/keepalive/` on a new install, or an existing `~/.amq-keepalive/`.
-If both exist, keepalive refuses until you remove one. See
+If both exist, keepalive refuses until you remove one.
+`amq doctor --migrate-home` moves an existing `~/.amq-keepalive/` and asks
+you first to stop the supervisor job and the amq-remote login service. See
 [Configuration](configuration.md#keepalive-home). Wake state is created and
 retired through the public AMQ CLI.
 

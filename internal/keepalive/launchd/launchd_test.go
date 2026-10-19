@@ -410,7 +410,7 @@ func TestUnrelatedPlistWithMatchingSubstringsIsNotOwned(t *testing.T) {
 
 func TestServiceTargetUsesLaunchdLabelTarget(t *testing.T) {
 	want := "gui/" + strconv.Itoa(os.Getuid()) + "/com.example.amq-keepalive"
-	if got := serviceTarget("com.example.amq-keepalive"); got != want {
-		t.Fatalf("serviceTarget() = %q, want %q", got, want)
+	if got := ServiceTarget("com.example.amq-keepalive"); got != want {
+		t.Fatalf("ServiceTarget() = %q, want %q", got, want)
 	}
 }

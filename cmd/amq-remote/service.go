@@ -17,6 +17,7 @@ import (
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	karegistry "github.com/avivsinai/agent-message-queue/internal/keepalive/registry"
+	"github.com/avivsinai/agent-message-queue/internal/remote/loginservice"
 	"github.com/avivsinai/agent-message-queue/internal/remote/manifest"
 	"github.com/avivsinai/agent-message-queue/internal/remote/protocol"
 )
@@ -25,12 +26,8 @@ import (
 // so a linked server sees this machine again after a reboot with no manual
 // step (issue #1064): a launchd user agent on macOS, a systemd user unit on
 // Linux. `up` keeps its single-instance lock, so a manual `up` while the
-// service runs still refuses.
-const (
-	serviceLabel  = "io.github.avivsinai.amq-remote"
-	serviceUnit   = "amq-remote.service"
-	serviceMarker = "written by amq-remote service install"
-)
+// service runs still refuses. The names and the unit reader live in
+// internal/remote/loginservice, so amq can read the unit too.
 
 // serviceRun runs the service manager (launchctl or systemctl). It is a
 // variable so tests record the calls instead.
@@ -62,7 +59,7 @@ func service(args []string, stdout io.Writer, probe ...*jsonProbe) (int, error) 
 	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
 		return protocol.ExitUsage, protocol.Refuse(protocol.CodeUnsupported, "the login service is supported on macOS and Linux")
 	}
-	path, err := servicePath()
+	path, err := loginservice.Path()
 	if err != nil {
 		return protocol.ExitActionRequired, err
 	}
@@ -131,23 +128,6 @@ func serviceRoot(flagRoot string, create bool) (string, error) {
 	return canonical, nil
 }
 
-// servicePath is the unit file: ~/Library/LaunchAgents/<label>.plist on
-// macOS, $XDG_CONFIG_HOME/systemd/user/amq-remote.service on Linux.
-func servicePath() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	if runtime.GOOS == "darwin" {
-		return filepath.Join(home, "Library", "LaunchAgents", serviceLabel+".plist"), nil
-	}
-	config := os.Getenv("XDG_CONFIG_HOME")
-	if !filepath.IsAbs(config) {
-		config = filepath.Join(home, ".config")
-	}
-	return filepath.Join(config, "systemd", "user", serviceUnit), nil
-}
-
 // serviceContent is the unit that runs exe's `up` for root.
 func serviceContent(exe, root string) []byte {
 	if runtime.GOOS == "darwin" {
@@ -157,7 +137,7 @@ func serviceContent(exe, root string) []byte {
 }
 
 func serviceInstall(root, path string, asJSON bool, stdout io.Writer) (int, error) {
-	before, err := readService(path)
+	before, err := loginservice.Read(path)
 	if err != nil {
 		return protocol.ExitActionRequired, err
 	}
@@ -205,7 +185,7 @@ func serviceInstall(root, path string, asJSON bool, stdout io.Writer) (int, erro
 }
 
 func serviceUninstall(path string, asJSON bool, stdout io.Writer) (int, error) {
-	st, err := readService(path)
+	st, err := loginservice.Read(path)
 	if err != nil {
 		return protocol.ExitActionRequired, err
 	}
@@ -218,7 +198,7 @@ func serviceUninstall(path string, asJSON bool, stdout io.Writer) (int, error) {
 		if runtime.GOOS == "linux" {
 			// A failed disable leaves its wants link behind; the unit it names
 			// is gone, so remove it too.
-			wants := filepath.Join(filepath.Dir(path), "default.target.wants", serviceUnit)
+			wants := filepath.Join(filepath.Dir(path), "default.target.wants", loginservice.Unit)
 			if fi, err := os.Lstat(wants); err == nil && fi.Mode()&os.ModeSymlink != 0 {
 				_ = os.Remove(wants)
 			}
@@ -240,40 +220,6 @@ func serviceUninstall(path string, asJSON bool, stdout io.Writer) (int, error) {
 	return 0, nil
 }
 
-// installedService is what a unit file at the service path says.
-type installedService struct {
-	Owned bool   // the file exists and service install wrote it
-	Exe   string // the binary it runs
-	Root  string // the root it runs up for
-	Raw   []byte
-}
-
-// readService reads the unit at path. It refuses a file service install did
-// not write, so install and uninstall never touch another program's unit.
-func readService(path string) (installedService, error) {
-	raw, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return installedService{}, nil
-	}
-	if err != nil {
-		return installedService{}, err
-	}
-	if !bytes.Contains(raw, []byte(serviceMarker)) {
-		return installedService{}, fmt.Errorf("%s is not an amq-remote login service; amq-remote service install leaves it alone", path)
-	}
-	st := installedService{Owned: true, Raw: raw}
-	var args []string
-	if runtime.GOOS == "darwin" {
-		args = plistArguments(raw)
-	} else {
-		args = systemdExecArgs(raw)
-	}
-	if len(args) == 4 && args[1] == "up" && args[2] == "--root" {
-		st.Exe, st.Root = args[0], args[3]
-	}
-	return st, nil
-}
-
 // serviceStatus is the state of the login service for a root.
 type serviceStatus struct {
 	State string // missing, current, stale (another binary), or other_root
@@ -283,7 +229,7 @@ type serviceStatus struct {
 // inspectService compares the unit at path with the one install would write
 // for root now.
 func inspectService(root, path string) (serviceStatus, error) {
-	st, err := readService(path)
+	st, err := loginservice.Read(path)
 	if err != nil || !st.Owned {
 		return serviceStatus{State: "missing"}, err
 	}
@@ -318,7 +264,7 @@ func serviceLoad(path string) (bool, error) {
 		}
 		return true, serviceRun("launchctl", "bootstrap", launchdDomain(), path)
 	}
-	for _, args := range [][]string{{"daemon-reload"}, {"enable", serviceUnit}, {"restart", serviceUnit}} {
+	for _, args := range [][]string{{"daemon-reload"}, {"enable", loginservice.Unit}, {"restart", loginservice.Unit}} {
 		if err := serviceRun("systemctl", append([]string{"--user"}, args...)...); err != nil {
 			return false, err
 		}
@@ -335,7 +281,7 @@ func serviceUnload() error {
 		}
 		return serviceRun("launchctl", "bootout", launchdTarget())
 	}
-	return serviceRun("systemctl", "--user", "disable", "--now", serviceUnit)
+	return serviceRun("systemctl", "--user", "disable", "--now", loginservice.Unit)
 }
 
 // serviceRunning reports whether the service's process runs now.
@@ -343,76 +289,11 @@ func serviceRunning() error {
 	if runtime.GOOS == "darwin" {
 		return serviceRun("launchctl", "print", launchdTarget())
 	}
-	return serviceRun("systemctl", "--user", "is-active", "--quiet", serviceUnit)
-}
-
-// plistArguments is the ProgramArguments array of a plist this command wrote.
-func plistArguments(raw []byte) []string {
-	dec := xml.NewDecoder(bytes.NewReader(raw))
-	var args []string
-	key, inArgs := "", false
-	for {
-		tok, err := dec.Token()
-		if err != nil {
-			return args
-		}
-		switch t := tok.(type) {
-		case xml.StartElement:
-			var text string
-			switch t.Name.Local {
-			case "key":
-				if dec.DecodeElement(&text, &t) == nil {
-					key = text
-				}
-			case "array":
-				inArgs = key == "ProgramArguments"
-			case "string":
-				if dec.DecodeElement(&text, &t) == nil && inArgs {
-					args = append(args, text)
-				}
-			}
-		case xml.EndElement:
-			if t.Name.Local == "array" && inArgs {
-				return args
-			}
-		}
-	}
-}
-
-// systemdExecArgs is the ExecStart command of a unit this command wrote, with
-// systemdQuote undone.
-func systemdExecArgs(raw []byte) []string {
-	for _, line := range strings.Split(string(raw), "\n") {
-		cmd, ok := strings.CutPrefix(line, "ExecStart=")
-		if !ok {
-			continue
-		}
-		var args []string
-		for cmd != "" {
-			cmd = strings.TrimLeft(cmd, " ")
-			if !strings.HasPrefix(cmd, `"`) {
-				word, rest, _ := strings.Cut(cmd, " ")
-				args, cmd = append(args, word), rest
-				continue
-			}
-			var w strings.Builder
-			i := 1
-			for ; i < len(cmd) && cmd[i] != '"'; i++ {
-				if cmd[i] == '\\' && i+1 < len(cmd) {
-					i++
-				}
-				w.WriteByte(cmd[i])
-			}
-			args = append(args, strings.NewReplacer("%%", "%", "$$", "$").Replace(w.String()))
-			cmd = cmd[min(i+1, len(cmd)):]
-		}
-		return args
-	}
-	return nil
+	return serviceRun("systemctl", "--user", "is-active", "--quiet", loginservice.Unit)
 }
 
 func launchdDomain() string { return "gui/" + strconv.Itoa(os.Getuid()) }
-func launchdTarget() string { return launchdDomain() + "/" + serviceLabel }
+func launchdTarget() string { return launchdDomain() + "/" + loginservice.Label }
 
 // launchdPlist is the launchd user agent. It starts at load (login) and is
 // restarted only when `up` fails; `up` itself respawns serve.
@@ -420,9 +301,9 @@ func launchdPlist(exe, root, logPath string) []byte {
 	var b bytes.Buffer
 	b.WriteString(xml.Header)
 	b.WriteString(`<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">` + "\n")
-	b.WriteString("<!-- " + serviceMarker + " -->\n")
+	b.WriteString("<!-- " + loginservice.Marker + " -->\n")
 	b.WriteString(`<plist version="1.0">` + "\n<dict>\n")
-	plistString(&b, "\t", "Label", serviceLabel)
+	plistString(&b, "\t", "Label", loginservice.Label)
 	b.WriteString("\t<key>ProgramArguments</key>\n\t<array>\n")
 	for _, arg := range []string{exe, "up", "--root", root} {
 		b.WriteString("\t\t<string>")
@@ -452,7 +333,7 @@ func plistString(b *bytes.Buffer, indent, key, value string) {
 // and is restarted only when `up` fails; its output goes to the journal.
 func systemdUnit(exe, root string) []byte {
 	var b strings.Builder
-	b.WriteString("# " + serviceMarker + "\n")
+	b.WriteString("# " + loginservice.Marker + "\n")
 	b.WriteString("[Unit]\nDescription=AMQ Remote endpoint for " + systemdSpecifiers(root) + "\n\n")
 	b.WriteString("[Service]\n")
 	b.WriteString("ExecStart=" + systemdQuote(exe) + " up --root " + systemdQuote(root) + "\n")
@@ -550,7 +431,7 @@ func noteNoService(note func(boundary, subject, detail, remedy string), root, st
 	if err != nil || len(f.Links) == 0 {
 		return
 	}
-	path, err := servicePath()
+	path, err := loginservice.Path()
 	if err != nil {
 		return
 	}

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/avivsinai/agent-message-queue/internal/remote/loginservice"
 	"github.com/avivsinai/agent-message-queue/internal/remote/manifest"
 )
 
@@ -58,7 +59,7 @@ func TestServiceInstallWritesALoginUnitForTheRoot(t *testing.T) {
 	if code := run([]string{"service", "install", "--root", root}, nil, &out, io.Discard); code != 0 {
 		t.Fatalf("service install exit %d: %s", code, out.String())
 	}
-	path, err := servicePath()
+	path, err := loginservice.Path()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,9 +69,9 @@ func TestServiceInstallWritesALoginUnitForTheRoot(t *testing.T) {
 	}
 	unit, want, start := string(raw), "<string>up</string>\n\t\t<string>--root</string>\n\t\t<string>"+root+"</string>", "launchctl bootstrap"
 	if runtime.GOOS == "linux" {
-		want, start = ` up --root "`+root+`"`, "systemctl --user restart "+serviceUnit
+		want, start = ` up --root "`+root+`"`, "systemctl --user restart "+loginservice.Unit
 	}
-	if !strings.Contains(unit, serviceMarker) || !strings.Contains(unit, want) {
+	if !strings.Contains(unit, loginservice.Marker) || !strings.Contains(unit, want) {
 		t.Fatalf("unit %s:\n%s\nwant it to run up --root %s", path, unit, root)
 	}
 	if !strings.Contains(strings.Join(*calls, "\n"), start) {

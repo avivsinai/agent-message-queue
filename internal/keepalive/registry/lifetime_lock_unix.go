@@ -22,7 +22,13 @@ import (
 // releases it immediately; it never blocks and never creates the file if
 // it does not exist.
 func ProbeLifetimeLock(regPath, entryID string) (bool, error) {
-	lockPath := LifetimeLockPath(regPath, entryID)
+	return ProbeLockHeld(LifetimeLockPath(regPath, entryID))
+}
+
+// ProbeLockHeld reports whether a live process holds an exclusive flock on
+// the lock file at path, with the outcomes of ProbeLifetimeLock. A missing
+// file is not held.
+func ProbeLockHeld(lockPath string) (bool, error) {
 	f, err := os.OpenFile(lockPath, os.O_RDWR, 0o600)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {

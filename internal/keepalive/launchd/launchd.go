@@ -169,11 +169,79 @@ func Install(ctx context.Context, opts Options) error {
 	if !opts.Load {
 		return nil
 	}
-	_ = runLaunchctl(ctx, "bootout", serviceTarget(opts.Label))
-	if err := runLaunchctl(ctx, "bootstrap", userDomain(), opts.PlistPath); err != nil {
-		return err
+	for _, step := range LoadSteps(opts.Label, opts.PlistPath) {
+		if err := runLaunchctl(ctx, step.Args...); err != nil && !step.MayFail {
+			return err
+		}
 	}
-	return runLaunchctl(ctx, "kickstart", "-k", userDomain()+"/"+opts.Label)
+	return nil
+}
+
+// LaunchctlStep is one launchctl call of a load. The load ignores the failure
+// of a step that MayFail.
+type LaunchctlStep struct {
+	Args    []string
+	MayFail bool
+}
+
+// LoadSteps are the launchctl calls that start the job from its plist again:
+// bootout (the job may not be loaded), bootstrap, and kickstart.
+func LoadSteps(label, plistPath string) []LaunchctlStep {
+	return []LaunchctlStep{
+		{Args: []string{"bootout", ServiceTarget(label)}, MayFail: true},
+		{Args: []string{"bootstrap", userDomain(), plistPath}},
+		{Args: []string{"kickstart", "-k", ServiceTarget(label)}},
+	}
+}
+
+// Installed is an AMQ-owned supervisor plist read back from disk.
+type Installed struct {
+	Options Options // what Install writes again; BinaryPath is ProgramArguments[0]
+	Self    string  // the --self value
+	PATH    string  // the PATH in EnvironmentVariables
+}
+
+// ReadInstalled reads the plist at path. It refuses a plist that Install did
+// not write for label.
+func ReadInstalled(path, label string) (Installed, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return Installed{}, err
+	}
+	if !isOwnedPlist(data, label) {
+		return Installed{}, fmt.Errorf("%s is not an amq-keepalive launchd plist", path)
+	}
+	dict, err := parsePlistRootDict(data)
+	if err != nil {
+		return Installed{}, err
+	}
+	var args []string
+	for _, arg := range dict["ProgramArguments"].([]any) {
+		args = append(args, arg.(string))
+	}
+	installed := Installed{Options: Options{Label: label, PlistPath: path, BinaryPath: args[0]}}
+	for i := 1; i+1 < len(args); i++ {
+		switch value := args[i+1]; args[i] {
+		case "--registry":
+			installed.Options.RegistryPath = value
+		case "--amq":
+			installed.Options.AMQPath = value
+		case "--self":
+			installed.Self = value
+		case "--interval":
+			interval, err := time.ParseDuration(value)
+			if err != nil {
+				return Installed{}, fmt.Errorf("%s: --interval: %w", path, err)
+			}
+			installed.Options.Interval = interval
+		}
+	}
+	installed.Options.StdoutPath, _ = dict["StandardOutPath"].(string)
+	installed.Options.StderrPath, _ = dict["StandardErrorPath"].(string)
+	if env, ok := dict["EnvironmentVariables"].(map[string]any); ok {
+		installed.PATH, _ = env["PATH"].(string)
+	}
+	return installed, nil
 }
 
 func Uninstall(ctx context.Context, label string, plistPath string, unload bool) error {
@@ -196,7 +264,7 @@ func Uninstall(ctx context.Context, label string, plistPath string, unload bool)
 		}
 	}
 	if unload {
-		if err := runLaunchctl(ctx, "bootout", serviceTarget(label)); err != nil {
+		if err := runLaunchctl(ctx, "bootout", ServiceTarget(label)); err != nil {
 			return err
 		}
 	}
@@ -446,7 +514,8 @@ func userDomain() string {
 	return "gui/" + strconv.Itoa(os.Getuid())
 }
 
-func serviceTarget(label string) string {
+// ServiceTarget names the job for label in the user's launchd domain.
+func ServiceTarget(label string) string {
 	return userDomain() + "/" + label
 }
 

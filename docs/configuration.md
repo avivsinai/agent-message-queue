@@ -125,8 +125,39 @@ and adapter state in `~/.amq/keepalive`. Older binaries use `~/.amq-keepalive`.
   binary recreated `~/.amq-keepalive`, and the error tells you to remove it.
   A supervisor started with `--registry` continues to use that path.
 - A symlink or a non-directory at either path is refused.
-- AMQ does not move an existing `~/.amq-keepalive`. See
-  [issue 1047](https://github.com/avivsinai/agent-message-queue/issues/1047).
+- `amq doctor --migrate-home` moves `~/.amq-keepalive` to `~/.amq/keepalive`
+  in one rename. Then it changes `--registry` in the supervisor plist,
+  changes the AMQ SessionStart hooks in `~/.claude/settings.json` and
+  `~/.codex/hooks.json` that run the moved script, and bootstraps the
+  supervisor job again. Registered agents and their wakes do not change.
+  Use `--dry-run` to see the plan and every blocker first.
+- Before you run it:
+  1. Stop the supervisor job and keep its plist:
+     `launchctl bootout gui/$(id -u)/io.github.avivsinai.amq-keepalive`.
+     Do not run `amq-keepalive uninstall`, because it removes the plist.
+  2. Stop the amq-remote login service
+     (`launchctl bootout gui/$(id -u)/io.github.avivsinai.amq-remote`, or
+     `systemctl --user stop amq-remote.service`), and every other
+     `amq-keepalive` or `amq-remote` process.
+  3. Upgrade or remove each binary that the dry run names.
+- After it: start the amq-remote login service again
+  (`launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/io.github.avivsinai.amq-remote.plist`,
+  or `systemctl --user start amq-remote.service`). On Linux, start your own
+  supervisor again with no `--registry`, or with
+  `--registry ~/.amq/keepalive/registry.json`.
+- The command refuses (exit 6) while any `amq-keepalive` or `amq-remote`
+  process runs, whatever its version: a running one may hold the legacy path
+  and create it again. It also refuses while the supervisor job or the
+  amq-remote login service is loaded, or while an `up` or inject lock is held.
+  It refuses when an `amq`, `amq-keepalive` or `amq-remote` older than 0.97.0
+  can run: on `PATH`, in the plist (with the plist's `PATH`), in a hook, as a
+  wake's injector, or as the amq-remote login service. It refuses when
+  another launchd or systemd user unit names `~/.amq-keepalive`. A refusal
+  changes nothing.
+- An interrupted run is finished by running the command again. If a process
+  created `~/.amq-keepalive` again during the move, a rerun removes it when
+  it holds only lock files that no process holds and a registry with no
+  rows. Otherwise the command refuses and names what it holds.
 
 ## Locations outside `~/.amq`
 

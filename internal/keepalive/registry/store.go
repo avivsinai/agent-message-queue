@@ -127,13 +127,11 @@ func DefaultPath() (string, error) {
 // authority, and a wrong guess sends new attaches to a registry that no
 // supervisor reads. A symlink or a non-directory at either path is refused.
 func DefaultHome() (string, error) {
-	home, err := os.UserHomeDir()
+	legacy, current, err := HomeCandidates()
 	if err != nil {
 		return "", err
 	}
-	legacy := filepath.Join(home, ".amq-keepalive")
-	amqHome := amqhome.Under(home)
-	current := filepath.Join(amqHome, "keepalive")
+	amqHome := filepath.Dir(current)
 	legacyFound, err := homeDirFound(legacy)
 	if err != nil {
 		return "", err
@@ -159,6 +157,16 @@ func DefaultHome() (string, error) {
 		return legacy, nil
 	}
 	return current, nil
+}
+
+// HomeCandidates returns the two keepalive homes DefaultHome chooses from:
+// the legacy ~/.amq-keepalive and ~/.amq/keepalive. It checks neither.
+func HomeCandidates() (legacy, current string, err error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", "", err
+	}
+	return filepath.Join(home, ".amq-keepalive"), filepath.Join(amqhome.Under(home), "keepalive"), nil
 }
 
 // homeDirFound reports whether dir is a plain directory. A missing dir is
@@ -325,6 +333,13 @@ func (s *Store) WithRegistrationLockContext(ctx context.Context, fn func() error
 		return err
 	}
 	return fn()
+}
+
+// WithExclusive runs fn under the registration lock and then the write lock,
+// the order an attach takes them, so no attach, reattach or registry write
+// runs during fn.
+func (s *Store) WithExclusive(fn func() error) error {
+	return s.WithRegistrationLock(func() error { return s.withLock(fn) })
 }
 
 func (s *Store) loadUnlocked() (File, error) {
