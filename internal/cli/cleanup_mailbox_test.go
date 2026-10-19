@@ -29,6 +29,11 @@ func newCleanupMailboxRoot(t *testing.T, handle string) string {
 
 func TestCleanupMailboxRemovesEmptyMailboxThenReportsAbsent(t *testing.T) {
 	rootPath := newCleanupMailboxRoot(t, "chat-1")
+	// Read history in inbox/cur goes with the mailbox; only unread mail blocks.
+	read := filepath.Join(fsq.AgentBase(rootPath, "chat-1"), "inbox", "cur", "read.md")
+	if err := os.WriteFile(read, []byte("read"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	args := []string{"--mailbox", "chat-1", "--root", rootPath, "--yes", "--json"}
 
 	stdout, _, err := captureEnvOutput(t, func() error { return runCleanup(args) })

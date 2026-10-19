@@ -165,8 +165,8 @@ func cleanupMailbox(rootPath, handle string, jsonOutput, dryRun, yes bool) error
 		if refusal := state.refusal(); refusal != "" {
 			record(state)
 			report.Preserved = agents.DisplayPath(orphan)
-			return refuse(refusal, "%s; an earlier removal preserved it at %s",
-				state.refusalMessage(handle, report.Root), report.Preserved)
+			return refuse(refusal, "an earlier removal of mailbox %s preserved %s, which still holds data (%s); recover it by hand",
+				handle, report.Preserved, refusal)
 		}
 		return nil
 	}
