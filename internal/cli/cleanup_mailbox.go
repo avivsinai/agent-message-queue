@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
@@ -28,7 +29,7 @@ type mailboxCleanupReport struct {
 	Wake       string              `json:"wake,omitempty"`
 	Inbox      *mailboxInboxCounts `json:"inbox,omitempty"`
 	DLQ        *mailboxDLQCounts   `json:"dlq,omitempty"`
-	Extensions *int                `json:"extensions,omitempty"`
+	Extensions []string            `json:"extensions,omitempty"`
 	Path       string              `json:"path,omitempty"`
 	Recovered  []string            `json:"recovered,omitempty"`
 	Preserved  string              `json:"preserved,omitempty"`
@@ -60,7 +61,7 @@ const (
 type mailboxState struct {
 	Inbox      mailboxInboxCounts
 	DLQ        mailboxDLQCounts
-	Extensions int
+	Extensions []string
 	Wake       wakeLockInspection
 }
 
@@ -72,7 +73,7 @@ func (s mailboxState) refusal() string {
 		return mailboxRefusalMail
 	case s.DLQ.Tmp+s.DLQ.New+s.DLQ.Cur > 0:
 		return mailboxRefusalDLQ
-	case s.Extensions > 0:
+	case len(s.Extensions) > 0:
 		return mailboxRefusalExtensions
 	case s.Wake.Exists && s.Wake.Status != wakeLockStale:
 		return mailboxRefusalWake
@@ -84,18 +85,18 @@ func (s mailboxState) refusalMessage(handle, root string) string {
 	switch s.refusal() {
 	case mailboxRefusalMail:
 		return fmt.Sprintf(
-			"mailbox %s holds unread mail (inbox tmp=%d new=%d); drain it before removal",
-			handle, s.Inbox.Tmp, s.Inbox.New,
+			"mailbox %s holds unread mail (inbox tmp=%d new=%d); run 'amq drain --me %s --root %s' before removal",
+			handle, s.Inbox.Tmp, s.Inbox.New, handle, root,
 		)
 	case mailboxRefusalDLQ:
 		return fmt.Sprintf(
-			"mailbox %s holds dead letters (dlq tmp=%d new=%d cur=%d); recover them or run 'amq dlq purge' before removal",
-			handle, s.DLQ.Tmp, s.DLQ.New, s.DLQ.Cur,
+			"mailbox %s holds dead letters (dlq tmp=%d new=%d cur=%d); inspect them with 'amq dlq list --me %s --root %s', then retry or run 'amq dlq purge --me %s --root %s' before removal",
+			handle, s.DLQ.Tmp, s.DLQ.New, s.DLQ.Cur, handle, root, handle, root,
 		)
 	case mailboxRefusalExtensions:
 		return fmt.Sprintf(
-			"mailbox %s holds %d extension entries; remove the layer's extension data first",
-			handle, s.Extensions,
+			"mailbox %s holds extension data (%s); the owning layer removes its extension data first",
+			handle, strings.Join(s.Extensions, ", "),
 		)
 	case mailboxRefusalWake:
 		return fmt.Sprintf(
@@ -151,8 +152,8 @@ func cleanupMailbox(rootPath, handle string, jsonOutput, dryRun, yes bool) error
 		return err
 	}
 	record := func(state mailboxState) {
-		inbox, dlq, extensions := state.Inbox, state.DLQ, state.Extensions
-		report.Inbox, report.DLQ, report.Extensions = &inbox, &dlq, &extensions
+		inbox, dlq := state.Inbox, state.DLQ
+		report.Inbox, report.DLQ, report.Extensions = &inbox, &dlq, state.Extensions
 		report.Wake = string(state.Wake.Status)
 	}
 	// checkOrphan refuses when a sibling left by an earlier removal still
@@ -230,7 +231,7 @@ func cleanupMailbox(rootPath, handle string, jsonOutput, dryRun, yes bool) error
 			target = fmt.Sprintf("left by %d interrupted removal(s) of %s", len(orphans), handle)
 		}
 		confirmed, err := confirmPrompt(fmt.Sprintf(
-			"Remove empty mailbox %s with its read history, outbox, and receipts?", target,
+			"Remove empty mailbox %s with its outbox and receipts (read history in inbox/cur included)?", target,
 		))
 		if err != nil {
 			return err
@@ -373,11 +374,15 @@ func inspectMailboxDir(root, agents *fsq.DeliveryRoot, handle, name string, orig
 		{[]string{"dlq", "tmp"}, &state.DLQ.Tmp},
 		{[]string{"dlq", "new"}, &state.DLQ.New},
 		{[]string{"dlq", "cur"}, &state.DLQ.Cur},
-		{[]string{"extensions"}, &state.Extensions},
 	} {
-		if *c.count, err = countMailboxEntries(mailbox, c.path...); err != nil {
+		entries, err := listMailboxEntries(mailbox, c.path...)
+		if err != nil {
 			return state, err
 		}
+		*c.count = len(entries)
+	}
+	if state.Extensions, err = listMailboxEntries(mailbox, "extensions"); err != nil {
+		return state, err
 	}
 	lockPath := filepath.Join(fsq.AgentBase(root.Base(), name), wakeLockFileName)
 	state.Wake = inspectWakeLockWithReader(root.Base(), handle, lockPath, func() ([]byte, os.FileInfo, error) {
@@ -386,16 +391,23 @@ func inspectMailboxDir(root, agents *fsq.DeliveryRoot, handle, name string, orig
 	return state, nil
 }
 
-// countMailboxEntries counts the entries of one mailbox directory, refusing a
-// symlink or non-directory at any component. A missing directory counts 0.
-func countMailboxEntries(mailbox *fsq.DeliveryRoot, parts ...string) (int, error) {
+// listMailboxEntries names the entries of one mailbox directory, refusing a
+// symlink or non-directory at any component. A missing directory is empty.
+func listMailboxEntries(mailbox *fsq.DeliveryRoot, parts ...string) ([]string, error) {
 	for i := range parts {
 		if present, err := lstatMailboxDir(mailbox, filepath.Join(parts[:i+1]...)); err != nil || !present {
-			return 0, err
+			return nil, err
 		}
 	}
 	entries, err := mailbox.ReadDir(filepath.Join(parts...))
-	return len(entries), err
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		names = append(names, entry.Name())
+	}
+	return names, nil
 }
 
 // checkMailboxRemovalHints reports agents/.removing-* entries: mailboxes an
@@ -407,7 +419,7 @@ func checkMailboxRemovalHints(root string) []opsHint {
 	}
 	var hints []opsHint
 	for _, entry := range entries {
-		if !fsq.IsMailboxRemovalName(entry.Name()) {
+		if !fsq.IsMailboxRemovalStaging(entry.Name()) {
 			continue
 		}
 		path := filepath.Join(root, "agents", entry.Name())

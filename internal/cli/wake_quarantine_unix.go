@@ -70,7 +70,7 @@ func scanWakeQuarantine(root string) ([]wakeQuarantineEntry, error) {
 	}
 	var quarantined []wakeQuarantineEntry
 	for _, agent := range agents {
-		if !agent.IsDir() || fsq.IsMailboxRemovalName(agent.Name()) {
+		if !agent.IsDir() || fsq.IsMailboxRemovalStaging(agent.Name()) {
 			continue
 		}
 		path := filepath.Join(agentsDir, agent.Name())

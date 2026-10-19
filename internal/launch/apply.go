@@ -554,7 +554,7 @@ func discoveredApplyRoster(root *fsq.DeliveryRoot, requested []string) ([]string
 		return nil, err
 	}
 	for _, entry := range entries {
-		if fsq.IsMailboxRemovalName(entry.Name()) {
+		if fsq.IsMailboxRemovalStaging(entry.Name()) {
 			continue
 		}
 		if entry.Type()&os.ModeSymlink != 0 || !entry.IsDir() {

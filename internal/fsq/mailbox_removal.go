@@ -27,9 +27,9 @@ func NewMailboxRemovalName(handle string) (string, error) {
 	return mailboxRemovalPrefix + handle + "-" + hex.EncodeToString(nonce[:]), nil
 }
 
-// IsMailboxRemovalName reports whether an agents/ entry is a mailbox moved
+// IsMailboxRemovalStaging reports whether an agents/ entry is a mailbox moved
 // aside by a removal, complete or not.
-func IsMailboxRemovalName(name string) bool {
+func IsMailboxRemovalStaging(name string) bool {
 	return strings.HasPrefix(name, mailboxRemovalPrefix)
 }
 

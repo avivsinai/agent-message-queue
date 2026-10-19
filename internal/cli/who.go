@@ -76,7 +76,7 @@ func runWho(args []string) error {
 
 		var agents []agentInfo
 		for _, ae := range agentEntries {
-			if !ae.IsDir() || fsq.IsMailboxRemovalName(ae.Name()) {
+			if !ae.IsDir() || fsq.IsMailboxRemovalStaging(ae.Name()) {
 				continue
 			}
 			inbox := filepath.Join(agentsDir, ae.Name(), "inbox")

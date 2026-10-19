@@ -133,7 +133,7 @@ func scanAgentExtensions(root string, diagnostics *[]doctorExtensionDiagnostic) 
 	}
 
 	for _, agentEntry := range agents {
-		if !agentEntry.IsDir() || fsq.IsMailboxRemovalName(agentEntry.Name()) {
+		if !agentEntry.IsDir() || fsq.IsMailboxRemovalStaging(agentEntry.Name()) {
 			continue
 		}
 		agent := agentEntry.Name()
