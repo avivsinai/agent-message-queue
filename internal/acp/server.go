@@ -150,12 +150,15 @@ type Server struct {
 	// settingsRefused is the last reported reason acp.settings was refused,
 	// guarded by mu, so a bad file logs once, not on every turn.
 	settingsRefused string
-	cfg             Config
-	version         string
-	mu              sync.Mutex
-	sessions        map[string]*sessionState
-	store           *sessionStore
-	ready           bool
+	// lastGood is the last valid settings (startup values until a file is
+	// read), guarded by mu.
+	lastGood *turnTiming
+	cfg      Config
+	version  string
+	mu       sync.Mutex
+	sessions map[string]*sessionState
+	store    *sessionStore
+	ready    bool
 	// streamClosed records that the ACP input stream ended. A prompt that
 	// begins after this point never had a connected client, so it refuses
 	// immediately instead of waiting out the bounded timeout.
