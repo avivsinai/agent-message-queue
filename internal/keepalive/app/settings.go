@@ -34,9 +34,14 @@ type keepaliveSettingsRead struct {
 }
 
 // keepaliveSettingsPath is the settings file in the keepalive home, beside
-// the registry and the self-upgrade state.
-func keepaliveSettingsPath(registryPath string) string {
-	return filepath.Join(filepath.Dir(registryPath), keepaliveSettingsFileName)
+// the registry and the self-upgrade state. It is absolute, so a relative
+// --registry does not depend on the working directory.
+func keepaliveSettingsPath(registryPath string) (string, error) {
+	registryPath, err := filepath.Abs(registryPath)
+	if err != nil {
+		return "", fmt.Errorf("keepalive settings path: %w", err)
+	}
+	return filepath.Join(filepath.Dir(registryPath), keepaliveSettingsFileName), nil
 }
 
 func (read keepaliveSettingsRead) sameObservation(other keepaliveSettingsRead) bool {

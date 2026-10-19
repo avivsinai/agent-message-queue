@@ -1873,7 +1873,21 @@ func maintainWakeSelfUpgradeAtLoopBoundary(
 		cfg.settings,
 		cfg.settingsLayers,
 	); vetoed {
+		cfg.selfUpgrade.settingsVetoed = true
 		return recordWakeSelfUpgradeDecision(agentDir, cfg.inspectTerminalGeneration(), state, decision)
+	}
+	if cfg.selfUpgrade.settingsVetoed {
+		// Later ticks return early while the locator is unchanged, so the
+		// veto record would otherwise outlive the veto (#1022 review P1).
+		if err := recordWakeSelfUpgradeDecision(
+			agentDir,
+			cfg.inspectTerminalGeneration(),
+			cfg.selfUpgrade,
+			wakeSelfUpgradeIdleDecision(cfg.selfUpgrade),
+		); err != nil {
+			return err
+		}
+		cfg.selfUpgrade.settingsVetoed = false
 	}
 	if cfg.selfUpgrade.Enabled && cfg.selfUpgrade.Eligible {
 		for _, attempt := range cfg.selfUpgrade.attempts {

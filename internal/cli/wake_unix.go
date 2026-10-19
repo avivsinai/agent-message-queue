@@ -2870,25 +2870,17 @@ func runWakeWithLoop(args []string, loop wakeLoopFunc) (returnErr error) {
 	defer func() {
 		_ = setWakeDoorbellStatusInDir(activeAgentDir, me, false, 0)
 	}()
-	initialSelfUpgradeDecision := wakeSelfUpgradeDecision{
-		Action: wakeSelfUpgradeActionUnchanged,
-		Reason: "stable launch locator is unchanged",
-	}
 	initialSelfUpgrade := selfUpgrade
+	initialSelfUpgradeDecision := wakeSelfUpgradeIdleDecision(selfUpgrade)
 	if state, decision, vetoed := wakeSelfUpgradeSettingsVeto(
 		selfUpgrade,
 		cfg.settings,
 		cfg.settingsLayers,
 	); vetoed {
+		cfg.selfUpgrade.settingsVetoed = true
 		initialSelfUpgrade = state
 		initialSelfUpgradeDecision = decision
-	} else if !selfUpgrade.Enabled {
-		initialSelfUpgradeDecision.Action = wakeSelfUpgradeActionDisabled
-		initialSelfUpgradeDecision.Reason = selfUpgrade.Reason
-	} else if !selfUpgrade.Eligible {
-		initialSelfUpgradeDecision.Action = wakeSelfUpgradeActionIneligible
-		initialSelfUpgradeDecision.Reason = selfUpgrade.Reason
-	} else if selfUpgrade.startupRefusalReason != "" {
+	} else if selfUpgrade.Enabled && selfUpgrade.Eligible && selfUpgrade.startupRefusalReason != "" {
 		initialSelfUpgradeDecision.Action = wakeSelfUpgradeActionRefusedMemory
 		initialSelfUpgradeDecision.Reason = selfUpgrade.startupRefusalReason
 	}

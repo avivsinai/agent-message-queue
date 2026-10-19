@@ -55,40 +55,71 @@ func TestSelfUpgradeExecsStrictlyNewerImageAtQuiescentBoundary(t *testing.T) {
 	assertSelfUpgradeStateMode(t, controller.statePath)
 }
 
-// Issue 1022: self_upgrade=false in the keepalive settings file stops a
-// running supervisor from replacing its image on the next pass.
-func TestSelfUpgradeSettingFalseStopsExecLive(t *testing.T) {
-	dir := t.TempDir()
-	incumbentPath := filepath.Join(dir, "incumbent")
-	candidatePath := filepath.Join(dir, "candidate")
-	writeExecutableForSelfUpgradeTest(t, incumbentPath, "old image")
-	writeExecutableForSelfUpgradeTest(t, candidatePath, "new image")
-	incumbent := captureSelfUpgradeTestImage(t, incumbentPath, "1.0.0")
-	controller := testSelfUpgradeController(dir, candidatePath, incumbent)
-	controller.settingsPath = keepaliveSettingsPath(filepath.Join(dir, "registry.json"))
+// Issue 1022: the keepalive settings file applies on the next supervise pass
+// without a restart.
+func TestSelfUpgradeSettingAppliesLive(t *testing.T) {
+	tests := []struct {
+		name string
+		// enabled is the startup state: false is --no-self-upgrade.
+		enabled    bool
+		settings   string
+		wantNotice string
+	}{
+		{
+			name:       "false stops a newer candidate",
+			enabled:    true,
+			settings:   `{"schema":1,"settings":{"self_upgrade":false}}`,
+			wantNotice: "disabled by self_upgrade=false",
+		},
+		{
+			name:       "true does not enable a supervisor started with --no-self-upgrade",
+			settings:   `{"schema":1,"settings":{"self_upgrade":true}}`,
+			wantNotice: "needs a restart to enable",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			incumbentPath := filepath.Join(dir, "incumbent")
+			candidatePath := filepath.Join(dir, "candidate")
+			writeExecutableForSelfUpgradeTest(t, incumbentPath, "old image")
+			writeExecutableForSelfUpgradeTest(t, candidatePath, "new image")
+			incumbent := captureSelfUpgradeTestImage(t, incumbentPath, "1.0.0")
+			registryPath := filepath.Join(dir, "registry.json")
+			controller := testSelfUpgradeController(dir, candidatePath, incumbent)
+			if !tt.enabled {
+				controller = newSelfUpgradeController(registryPath, candidatePath, "1.0.0", false)
+			}
+			settingsPath, err := keepaliveSettingsPath(registryPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			controller.settingsPath = settingsPath
 
-	previousCandidate := selfUpgradeCaptureCandidate
-	previousExec := selfUpgradeExecImage
-	t.Cleanup(func() {
-		selfUpgradeCaptureCandidate = previousCandidate
-		selfUpgradeExecImage = previousExec
-	})
-	selfUpgradeCaptureCandidate = func(path string) (selfupgrade.ImageEvidence, error) {
-		return captureSelfUpgradeTestImage(t, path, "1.1.0"), nil
-	}
-	selfUpgradeExecImage = func(selfupgrade.ImageEvidence, []string, []string) error {
-		t.Fatal("self-upgrade executed while disabled by settings")
-		return nil
-	}
+			previousCandidate := selfUpgradeCaptureCandidate
+			previousExec := selfUpgradeExecImage
+			t.Cleanup(func() {
+				selfUpgradeCaptureCandidate = previousCandidate
+				selfUpgradeExecImage = previousExec
+			})
+			selfUpgradeCaptureCandidate = func(path string) (selfupgrade.ImageEvidence, error) {
+				return captureSelfUpgradeTestImage(t, path, "1.1.0"), nil
+			}
+			selfUpgradeExecImage = func(selfupgrade.ImageEvidence, []string, []string) error {
+				t.Fatal("self-upgrade executed")
+				return nil
+			}
 
-	if err := os.WriteFile(controller.settingsPath, []byte(`{"schema":1,"settings":{"self_upgrade":false}}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if notice := controller.reloadSettings(); !strings.Contains(notice, "disabled by self_upgrade=false") {
-		t.Fatalf("reloadSettings() notice = %q, want disabled by settings", notice)
-	}
-	if err := controller.maintain(context.Background()); err != nil {
-		t.Fatalf("maintain() error = %v", err)
+			if err := os.WriteFile(settingsPath, []byte(tt.settings), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if notice := controller.reloadSettings(); !strings.Contains(notice, tt.wantNotice) {
+				t.Fatalf("reloadSettings() notice = %q, want %q", notice, tt.wantNotice)
+			}
+			if err := controller.maintain(context.Background()); err != nil {
+				t.Fatalf("maintain() error = %v", err)
+			}
+		})
 	}
 }
 

@@ -41,9 +41,13 @@ the rule:
 - A change applies without a restart.
 - A refused edit (bad syntax, unknown key, failed validation, failed trust
   check) keeps the last good value and is reported once, not on every check.
-- The self-upgrade kill switch (`self_upgrade`) applies live only as
-  `false`. Enabling needs the baseline a process captures at start, so `true`
-  does not enable a process started with `--no-self-upgrade`; restart it.
+- The self-upgrade kill switch (`self_upgrade`) in `amq wake` and
+  `amq-keepalive supervise`: `false` stops new replacements live, and `true`
+  enables them again in a process that started enabled. `true` cannot enable
+  a process started with `--no-self-upgrade`, because enabling needs the
+  baseline a process captures at start; restart it. The key exists in this
+  version and later. An older wake refuses a settings file that holds it and
+  keeps its last good settings; a refused machine file never blocks a start.
 - Identity is the exception. A value bound into a lock, a target, or resume
   state is fixed for the life of the process: `--me`, `--root`, `--inject-*`,
   `--interrupt-cmd`, and `--retry-until`. Changing it live would let a running

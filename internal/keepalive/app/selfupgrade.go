@@ -110,10 +110,7 @@ type selfUpgradeAttemptsFile struct {
 }
 
 func newSelfUpgradeController(registryPath, locator, version string, enabled bool) *selfUpgradeController {
-	controller := &selfUpgradeController{
-		enabled:      enabled,
-		settingsPath: keepaliveSettingsPath(registryPath),
-	}
+	controller := &selfUpgradeController{enabled: enabled}
 	if !enabled {
 		controller.reason = "disabled by --no-self-upgrade"
 		return controller

@@ -50,6 +50,9 @@ type wakeSelfUpgradeState struct {
 	startupRefusalReason string
 	restartPending       bool
 	refusalPending       *wakeSelfUpgradeRefusalPending
+	// settingsVetoed is set while the recorded decision is a settings veto,
+	// so the tick that clears it records the state again.
+	settingsVetoed bool
 }
 
 type wakeSelfUpgradeRefusalPending struct {
@@ -352,6 +355,22 @@ func wakeSelfUpgradeSettingsVeto(
 	state.Enabled = false
 	state.Reason = decision.Reason
 	return state, decision, true
+}
+
+// wakeSelfUpgradeIdleDecision describes state before any candidate is
+// looked at: at startup, and when a settings veto clears.
+func wakeSelfUpgradeIdleDecision(state wakeSelfUpgradeState) wakeSelfUpgradeDecision {
+	switch {
+	case !state.Enabled:
+		return wakeSelfUpgradeDecision{Action: wakeSelfUpgradeActionDisabled, Reason: state.Reason}
+	case !state.Eligible:
+		return wakeSelfUpgradeDecision{Action: wakeSelfUpgradeActionIneligible, Reason: state.Reason}
+	default:
+		return wakeSelfUpgradeDecision{
+			Action: wakeSelfUpgradeActionUnchanged,
+			Reason: "stable launch locator is unchanged",
+		}
+	}
 }
 
 func constrainWakeSelfUpgradeEligibility(

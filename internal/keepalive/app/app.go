@@ -769,7 +769,12 @@ func (a App) supervise(ctx context.Context, args []string) error {
 	if *interval <= 0 {
 		return errors.New("--interval must be greater than zero")
 	}
+	settingsPath, err := keepaliveSettingsPath(*registryPath)
+	if err != nil {
+		return err
+	}
 	selfUpgrade := newSelfUpgradeController(*registryPath, *self, a.SelfVersion, !*noSelfUpgrade)
+	selfUpgrade.settingsPath = settingsPath
 	if selfUpgrade.enabled && !selfUpgrade.eligible && selfUpgrade.reason != "" {
 		_, _ = fmt.Fprintf(a.Stderr, "amq-keepalive self-upgrade unavailable: %s\n", selfUpgrade.reason)
 	}
@@ -1231,7 +1236,11 @@ func (a App) doctor(args []string) error {
 	if *ops {
 		return printJSON(a.Stdout, companionOpsReport(*registryPath, file))
 	}
-	return printJSON(a.Stdout, doctorReport{File: file, SelfUpgrade: doctorSelfUpgradeSetting(*registryPath)})
+	settingsPath, err := keepaliveSettingsPath(*registryPath)
+	if err != nil {
+		return err
+	}
+	return printJSON(a.Stdout, doctorReport{File: file, SelfUpgrade: doctorSelfUpgradeSetting(settingsPath)})
 }
 
 // doctorReport is the registry file plus the self_upgrade setting a
@@ -1252,8 +1261,7 @@ type doctorSetting struct {
 
 // doctorSelfUpgradeSetting shows a refused file with the default, the value
 // a starting supervisor runs with; a running one keeps its last good value.
-func doctorSelfUpgradeSetting(registryPath string) doctorSetting {
-	path := keepaliveSettingsPath(registryPath)
+func doctorSelfUpgradeSetting(path string) doctorSetting {
 	read := readKeepaliveSettings(path)
 	setting := doctorSetting{Value: true, Source: "default", Path: path, Status: keepaliveSettingsStatusOK}
 	switch {

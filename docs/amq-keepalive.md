@@ -102,7 +102,8 @@ must also pass `/usr/bin/codesign --verify --strict`.
 AMQ does not retain the previous image or roll back a successful replacement.
 Recover a bad image by reinstalling or selecting a known-good package version.
 An older rollback, an equal-version replacement, or a supervisor started with
-`--no-self-upgrade` requires a service-manager restart.
+`--no-self-upgrade` requires a service-manager restart. A corrupt or unsafe
+upgrade state file disables self-upgrade and defers refresh.
 
 To stop self-upgrade without a restart, write `settings.json` in the keepalive
 home, beside `registry.json` (`~/.amq/keepalive/settings.json` on a new
@@ -117,8 +118,7 @@ replacement while it says `false`. `true` does not enable a supervisor started
 with `--no-self-upgrade`; it logs that a restart is needed. A refused file
 (bad JSON, unknown key, newer schema, symlink) keeps the last good value and is
 logged once; a supervisor that starts with a refused file runs without it.
-`amq-keepalive doctor` shows the file's value under `self_upgrade`. A corrupt or unsafe
-upgrade state file disables self-upgrade and defers refresh.
+`amq-keepalive doctor` shows the file's value under `self_upgrade`.
 
 Before replacement, keepalive records a bounded unsettled attempt. A fresh
 matching unsettled attempt is refused until a healthy pass settles it. This
