@@ -3,6 +3,7 @@ package fsq
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -51,8 +52,12 @@ func ParseMailboxRemovalName(name string) (string, bool) {
 	return handle, true
 }
 
+// ErrLockBusy reports that another holder has an exclusive file lock.
+var ErrLockBusy = errors.New("lock is held by another process")
+
 // WithMailboxRemovalLock runs fn while holding the root's exclusive mailbox
-// removal lock. With the lock held, every entry under MailboxRemovalDir is
+// removal lock, without waiting: it returns ErrLockBusy when another run
+// holds it. With the lock held, every entry under MailboxRemovalDir is
 // left by an interrupted run, never by a live one. The lock file is retained;
 // the kernel releases the lock on close or process crash.
 func (r *DeliveryRoot) WithMailboxRemovalLock(fn func() error) error {
@@ -64,7 +69,7 @@ func (r *DeliveryRoot) WithMailboxRemovalLock(fn func() error) error {
 		return fmt.Errorf("open mailbox removal lock: %w", err)
 	}
 	defer func() { _ = lockFile.Close() }()
-	return withExclusiveDLQEnvelopeLock(lockFile, func() error {
+	return tryExclusiveFileLock(lockFile, func() error {
 		if err := r.VerifyBase(); err != nil {
 			return err
 		}

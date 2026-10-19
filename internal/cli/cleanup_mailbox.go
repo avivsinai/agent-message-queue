@@ -18,8 +18,13 @@ import (
 const mailboxRemovalSettle = 250 * time.Millisecond
 
 // mailboxCleanupReport is the one JSON shape for every cleanup --mailbox
-// outcome. Refusal names why the command exited with action required;
-// Preserved and Restored name where a mailbox tree was left.
+// outcome. Absent: no live mailbox at agents/<handle> when the run started.
+// Removed: this run deleted the live mailbox. Restored: this run moved a
+// leftover back to agents/<handle>, which exists at the end. Recovered:
+// leftovers this run deleted (a dry run: would delete). Preserved: where a
+// tree was kept. Refusal: why the run exited 6. Wake, Inbox, DLQ, and
+// Extensions describe agents/<handle>: the live mailbox, or the restored
+// tree when Restored is set.
 type mailboxCleanupReport struct {
 	Handle     string              `json:"handle"`
 	Root       string              `json:"root"`
@@ -57,6 +62,7 @@ const (
 	mailboxRefusalWake       = "wake_live"
 	mailboxRefusalUnsafe     = "unsafe_path"
 	mailboxRefusalPreserved  = "preserved"
+	mailboxRefusalBusy       = "busy"
 )
 
 // mailboxState is what decides whether one mailbox tree may go.
@@ -135,6 +141,27 @@ type stagedMailbox struct {
 	state mailboxState
 }
 
+// mailboxSurvey is a read-only look at agents/<handle> and the handle's
+// leftovers under meta/removing. It never creates anything.
+type mailboxSurvey struct {
+	agents   *fsq.DeliveryRoot // nil when agents/ is absent
+	removing *fsq.DeliveryRoot // nil when meta/removing is absent
+	present  bool
+	original os.FileInfo
+	live     mailboxState
+	clean    []stagedMailbox
+	dirty    []stagedMailbox
+}
+
+func (s *mailboxSurvey) close() {
+	if s.agents != nil {
+		_ = s.agents.Close()
+	}
+	if s.removing != nil {
+		_ = s.removing.Close()
+	}
+}
+
 type mailboxCleanup struct {
 	root   *fsq.DeliveryRoot
 	handle string
@@ -146,11 +173,12 @@ type mailboxCleanup struct {
 
 // cleanupMailbox removes <root>/agents/<handle> only when it holds no unread
 // mail, no dead letters, no extension data, and no live or uncertain wake.
-// One per-root lock serializes removals. The mailbox is moved under
-// meta/removing and checked twice before deletion, so a message that lands
-// during the removal is restored instead of lost. Trees left by an earlier
-// interrupted removal are removed when clean and restored to agents/<handle>
-// when they hold mail, so the normal CLI can drain them.
+// The mailbox is moved under meta/removing and checked twice before
+// deletion, so a message that lands during the removal is restored instead
+// of lost. Trees left by an earlier interrupted removal are removed when
+// clean and restored to agents/<handle> when they hold mail, so the normal
+// CLI can drain them. A dry run, and a run that finds nothing, write nothing;
+// every other run holds the root's removal lock and looks again under it.
 func cleanupMailbox(rootPath, handle string, jsonOutput, dryRun, yes bool) error {
 	identity, err := fsq.SnapshotDeliveryRoot(rootPath)
 	if err != nil {
@@ -166,78 +194,124 @@ func cleanupMailbox(rootPath, handle string, jsonOutput, dryRun, yes bool) error
 		Handle: handle, Root: root.Base(), DryRun: dryRun,
 		Path: root.DisplayPath(filepath.Join("agents", handle)),
 	}
-	return root.WithMailboxRemovalLock(c.run)
+	if _, err := lstatMailboxDir(root, "meta"); err != nil {
+		return c.refuseUnsafe(err)
+	}
+	survey, err := c.survey()
+	if err != nil {
+		return c.refuseUnsafe(err)
+	}
+	c.apply(survey)
+	nothing := !survey.present && len(survey.clean)+len(survey.dirty) == 0
+	if dryRun || nothing {
+		defer survey.close()
+		return c.preview(survey)
+	}
+	survey.close()
+	err = root.WithMailboxRemovalLock(c.run)
+	if errors.Is(err, fsq.ErrLockBusy) {
+		return c.refuse(mailboxRefusalBusy, "another cleanup --mailbox is running on %s; try again", c.report.Root)
+	}
+	return err
 }
 
-func (c *mailboxCleanup) run() error {
-	agents, err := openMailboxDirIfPresent(c.root, "agents")
+// survey looks at agents/<handle> and its leftovers without writing.
+func (c *mailboxCleanup) survey() (*mailboxSurvey, error) {
+	s := &mailboxSurvey{}
+	var err error
+	if s.agents, err = openMailboxDirIfPresent(c.root, "agents"); err != nil {
+		return nil, err
+	}
+	if s.agents != nil {
+		if s.present, err = lstatMailboxDir(s.agents, c.handle); err != nil {
+			s.close()
+			return nil, err
+		}
+	}
+	if s.present {
+		if s.original, err = s.agents.Lstat(c.handle); err == nil {
+			s.live, err = inspectMailboxDir(c.root, s.agents, c.handle, c.handle, s.original)
+		}
+		if err != nil {
+			s.close()
+			return nil, err
+		}
+	}
+	if s.removing, err = openMailboxRemovalDir(c.root, false); err == nil {
+		s.clean, s.dirty, err = c.findStaged(s.removing)
+	}
 	if err != nil {
-		return c.refuseUnsafe(err)
+		s.close()
+		return nil, err
 	}
-	if agents != nil {
-		defer func() { _ = agents.Close() }()
-	}
-	present := false
-	if agents != nil {
-		if present, err = lstatMailboxDir(agents, c.handle); err != nil {
-			return c.refuseUnsafe(err)
-		}
-	}
-	c.report.Absent = !present
-	var live mailboxState
-	var original os.FileInfo
-	if present {
-		if original, err = agents.Lstat(c.handle); err != nil {
-			return err
-		}
-		if live, err = inspectMailboxDir(c.root, agents, c.handle, c.handle, original); err != nil {
-			return c.refuseUnsafe(err)
-		}
-		c.record(live)
-	}
+	return s, nil
+}
 
-	removing, err := openMailboxRemovalDir(c.root, false)
-	if err != nil {
-		return c.refuseUnsafe(err)
+// apply copies what the survey saw of agents/<handle> into the report.
+func (c *mailboxCleanup) apply(s *mailboxSurvey) {
+	c.report.Absent = !s.present
+	if s.present {
+		c.record(s.live)
+		return
 	}
-	if removing != nil {
-		defer func() { _ = removing.Close() }()
-	}
-	clean, dirty, err := c.findStaged(removing)
-	if err != nil {
-		return c.refuseUnsafe(err)
-	}
+	c.report.Inbox, c.report.DLQ, c.report.Extensions, c.report.Wake = nil, nil, nil, ""
+}
 
-	if refusal := live.refusal(); present && refusal != "" {
-		message := live.refusalMessage(c.handle, c.report.Root)
-		if len(dirty) > 0 {
-			c.report.Preserved = removing.DisplayPath(dirty[0].name)
-			message += fmt.Sprintf(
-				"; an interrupted removal also preserved %s: drain %s, then run 'amq cleanup --mailbox %s --root %s' again",
-				c.report.Preserved, c.handle, c.handle, c.report.Root,
-			)
-		}
-		return c.refuse(refusal, "%s", message)
+// refuseLiveBlocked refuses for a live mailbox that cannot go, naming a
+// leftover that waits behind it.
+func (c *mailboxCleanup) refuseLiveBlocked(s *mailboxSurvey) error {
+	message := s.live.refusalMessage(c.handle, c.report.Root)
+	if len(s.dirty) > 0 {
+		c.report.Preserved = s.removing.DisplayPath(s.dirty[0].name)
+		message += fmt.Sprintf(
+			"; an interrupted removal also preserved %s: clear the block above, then run 'amq cleanup --mailbox %s --root %s' again",
+			c.report.Preserved, c.handle, c.report.Root,
+		)
 	}
-	if !present && len(clean)+len(dirty) == 0 {
+	return c.refuse(s.live.refusal(), "%s", message)
+}
+
+// preview reports what a run would do, without the lock and without writes.
+func (c *mailboxCleanup) preview(s *mailboxSurvey) error {
+	c.apply(s)
+	if s.present && s.live.refusal() != "" {
+		return c.refuseLiveBlocked(s)
+	}
+	for _, staged := range s.clean {
+		c.report.Recovered = append(c.report.Recovered, s.removing.DisplayPath(staged.name))
+	}
+	if len(s.dirty) == 0 {
 		return c.finish()
 	}
-	if c.dryRun {
-		for _, staged := range clean {
-			c.report.Recovered = append(c.report.Recovered, removing.DisplayPath(staged.name))
-		}
-		if len(dirty) > 0 {
-			c.record(dirty[0].state)
-			c.report.Preserved = removing.DisplayPath(dirty[0].name)
-			return c.refuse(dirty[0].state.refusal(), "%s; it would be restored from %s",
-				dirty[0].state.refusalMessage(c.handle, c.report.Root), c.report.Preserved)
-		}
+	// The live counts stay in the report; the leftover's counts are in the
+	// message.
+	staged := s.dirty[0]
+	c.report.Preserved = s.removing.DisplayPath(staged.name)
+	if err := c.writeTextActions(); err != nil {
+		return err
+	}
+	return c.refuse(staged.state.refusal(), "would restore %s to %s: %s",
+		c.report.Preserved, c.report.Path, staged.state.refusalMessage(c.handle, c.report.Root))
+}
+
+// run acts under the removal lock on a fresh survey.
+func (c *mailboxCleanup) run() error {
+	s, err := c.survey()
+	if err != nil {
+		return c.refuseUnsafe(err)
+	}
+	defer s.close()
+	c.apply(s)
+	if s.present && s.live.refusal() != "" {
+		return c.refuseLiveBlocked(s)
+	}
+	if !s.present && len(s.clean)+len(s.dirty) == 0 {
 		return c.finish()
 	}
 	if !c.yes {
 		prompt := fmt.Sprintf("Remove empty mailbox %s with its outbox and receipts (read history in inbox/cur included)?", c.report.Path)
-		if !present {
-			prompt = fmt.Sprintf("Finish %d interrupted removal(s) of mailbox %s?", len(clean)+len(dirty), c.handle)
+		if !s.present {
+			prompt = fmt.Sprintf("Finish %d interrupted removal(s) of mailbox %s?", len(s.clean)+len(s.dirty), c.handle)
 		}
 		confirmed, err := confirmPrompt(prompt)
 		if err != nil {
@@ -248,25 +322,24 @@ func (c *mailboxCleanup) run() error {
 		}
 	}
 
-	if present {
-		if removing == nil {
-			if removing, err = openMailboxRemovalDir(c.root, true); err != nil {
+	if s.present {
+		if s.removing == nil {
+			if s.removing, err = openMailboxRemovalDir(c.root, true); err != nil {
 				return c.refuseUnsafe(err)
 			}
-			defer func() { _ = removing.Close() }()
 		}
-		if err := c.removeLive(removing, original); err != nil {
+		if err := c.removeLive(s.removing, s.original); err != nil {
 			return err
 		}
 	}
-	for _, staged := range clean {
-		if err := removing.RemoveAllDirectChild(staged.name); err != nil {
-			return fmt.Errorf("remove interrupted mailbox removal %s: %w", removing.DisplayPath(staged.name), err)
+	for _, staged := range s.clean {
+		if err := s.removing.RemoveAllDirectChild(staged.name); err != nil {
+			return fmt.Errorf("remove interrupted mailbox removal %s: %w", s.removing.DisplayPath(staged.name), err)
 		}
-		c.report.Recovered = append(c.report.Recovered, removing.DisplayPath(staged.name))
+		c.report.Recovered = append(c.report.Recovered, s.removing.DisplayPath(staged.name))
 	}
-	if len(dirty) > 0 {
-		return c.restore(removing, dirty)
+	if len(s.dirty) > 0 {
+		return c.restore(s.removing, s.dirty)
 	}
 	return c.finish()
 }
@@ -316,9 +389,12 @@ func (c *mailboxCleanup) removeLive(removing *fsq.DeliveryRoot, original os.File
 
 // restore renames the first staged tree that holds mail back to
 // agents/<handle> so the normal CLI can drain it, then refuses with its
-// counts.
+// counts, which now describe agents/<handle>.
 func (c *mailboxCleanup) restore(removing *fsq.DeliveryRoot, dirty []stagedMailbox) error {
 	staged := dirty[0]
+	if err := c.writeTextActions(); err != nil {
+		return err
+	}
 	if _, err := lstatMailboxDir(c.root, "agents"); err != nil {
 		return c.refuseUnsafe(err)
 	}
@@ -338,12 +414,12 @@ func (c *mailboxCleanup) restore(removing *fsq.DeliveryRoot, dirty []stagedMailb
 	if len(dirty) > 1 {
 		c.report.Preserved = removing.DisplayPath(dirty[1].name)
 	}
-	return c.refuse(staged.state.refusal(), "%s; restored from an interrupted removal at %s",
-		staged.state.refusalMessage(c.handle, c.report.Root), stagedPath)
+	return c.refuse(staged.state.refusal(), "restored %s from an interrupted removal at %s: %s",
+		c.report.Path, stagedPath, staged.state.refusalMessage(c.handle, c.report.Root))
 }
 
 // findStaged inspects every tree an interrupted removal of handle left under
-// meta/removing. The removal lock guarantees none belongs to a live run.
+// meta/removing. Under the removal lock none belongs to a live run.
 func (c *mailboxCleanup) findStaged(removing *fsq.DeliveryRoot) (clean, dirty []stagedMailbox, err error) {
 	if removing == nil {
 		return nil, nil, nil
@@ -402,6 +478,21 @@ func (c *mailboxCleanup) finish() error {
 	if c.json {
 		return writeJSON(os.Stdout, c.report)
 	}
+	if err := c.writeTextActions(); err != nil {
+		return err
+	}
+	if c.report.Absent {
+		return writeStdout("Mailbox %s is absent under %s.\n", c.handle, c.report.Root)
+	}
+	return nil
+}
+
+// writeTextActions prints, in text mode, what this run did or a dry run
+// would do, so a refusal that follows never hides a deletion.
+func (c *mailboxCleanup) writeTextActions() error {
+	if c.json {
+		return nil
+	}
 	verb := "Removed"
 	if c.dryRun {
 		verb = "Would remove"
@@ -411,10 +502,10 @@ func (c *mailboxCleanup) finish() error {
 			return err
 		}
 	}
-	if c.report.Absent {
-		return writeStdout("Mailbox %s is absent under %s.\n", c.handle, c.report.Root)
+	if c.report.Removed || (c.dryRun && !c.report.Absent) {
+		return writeStdout("%s empty mailbox %s\n", verb, c.report.Path)
 	}
-	return writeStdout("%s empty mailbox %s\n", verb, c.report.Path)
+	return nil
 }
 
 // openMailboxDirIfPresent pins parent/name when it is a real directory and

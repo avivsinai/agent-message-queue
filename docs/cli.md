@@ -447,7 +447,8 @@ Usage:
 read history (inbox/cur), outbox, and receipts. It refuses (exit 6) while
 inbox/tmp, inbox/new, any dlq leaf, or extensions/ holds an entry, or while a
 live or uncertain wake holds the handle. One lock (meta/removing.lock)
-serializes removals under a root. The mailbox moves to
+serializes removals under a root; a second run exits 6 (busy). A dry run,
+and a run that finds nothing to remove, write nothing. The mailbox moves to
 meta/removing/<handle>-<nonce>, is checked, checked again after 250 ms, and
 is put back if anything arrived. A delivery that stalls longer than that
 between opening the inbox and publishing can still fail or be removed with
@@ -456,6 +457,10 @@ and restores one that holds mail to agents/<handle> so it can be drained.
 meta/config.json is not changed: a later local send to the handle recreates
 the mailbox and delivers. Remove the handle from the config to make send warn
 (or refuse with --strict).
+JSON: absent = no live mailbox when the run started; removed = this run
+deleted the live mailbox; restored = this run moved a leftover back to
+agents/<handle>, which exists at the end; recovered = leftovers deleted;
+preserved = where a tree was kept; refusal = why the run exited 6.
 
 Options:
   -dry-run
