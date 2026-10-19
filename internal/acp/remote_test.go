@@ -309,11 +309,14 @@ func TestRemoteBusyRedeliveryRetries(t *testing.T) {
 // TestRemoteBusyDMWaitsThenRuns is agent-message-queue-611.34: a DM that
 // arrives while the session is busy is queued once, then runs on the same
 // request id after the session is free.
+// The waits below are event-driven, each bounded only by a deadlock guard:
+// the earlier 1 s windows and 2 s turn budget failed on a loaded macOS CI
+// runner (release PR #1092, ci run 39306655165) with reply_timeout.
 func TestRemoteBusyDMWaitsThenRuns(t *testing.T) {
 	rt := fake.New("fake", "e_1")
 	s := remoteServer(t, rt, nil)
 	s.cfg.PollInterval = 5 * time.Millisecond
-	s.cfg.TurnTimeout = 2 * time.Second
+	s.cfg.TurnTimeout = time.Minute
 	occupy := "d2c80e1d-feb7-4c10-959e-23456789abce"
 	resp, err := ipc.Call(filepath.Join(s.cfg.Root, remoteStateDir), ipc.Request{Command: &protocol.Command{Schema: protocol.SchemaCommand, Op: protocol.OpRequestSubmit, RequestID: occupy, TargetID: "fake", Epoch: "e_1", NotAfter: protocol.FormatTime(time.Now().Add(time.Minute)), Input: &protocol.SubmitInput{Text: "local turn", Busy: protocol.BusyReject, Deliver: protocol.DeliverTurn}}})
 	if err != nil || resp.AsError() != nil {
@@ -342,8 +345,8 @@ func TestRemoteBusyDMWaitsThenRuns(t *testing.T) {
 		}
 		done <- result.(remotePromptResult)
 	}()
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) && queuedThoughts(&mu, &thoughts) == 0 {
+	guard := time.Now().Add(30 * time.Second)
+	for time.Now().Before(guard) && queuedThoughts(&mu, &thoughts) == 0 {
 		time.Sleep(5 * time.Millisecond)
 	}
 	queued := queuedThoughts(&mu, &thoughts)
@@ -356,7 +359,7 @@ func TestRemoteBusyDMWaitsThenRuns(t *testing.T) {
 	if !rt.Complete(occupy, "local done") {
 		t.Fatal("occupy did not complete")
 	}
-	for time.Now().Before(deadline.Add(time.Second)) {
+	for time.Now().Before(guard) {
 		if rt.Complete(id, "ran after the wait") {
 			break
 		}
