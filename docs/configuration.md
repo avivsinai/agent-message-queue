@@ -32,11 +32,9 @@ per-key overlay. See [Session routing and safety](session-routing.md).
 
 A long-running AMQ process must re-read its configuration while it runs.
 This is the project rule. The wake reloads the agent and machine wake
-settings files, `amq-keepalive supervise` reloads its settings file, and
-`amq-remote serve` reloads its relay shares. One process does not yet follow
-the rule:
-[issue 1023](https://github.com/avivsinai/agent-message-queue/issues/1023)
-(turn timeout and poll settings in `amq-acp`).
+settings files, `amq-keepalive supervise` reloads its settings file,
+`amq-remote serve` reloads its relay shares, and `amq-acp` reads
+`~/.amq/acp.settings` at the start of each turn.
 
 - A change applies without a restart.
 - A refused edit (bad syntax, unknown key, failed validation, failed trust
@@ -114,6 +112,7 @@ and adapter state in `~/.amq/keepalive`. Older binaries use `~/.amq-keepalive`.
 
 These locations predate the rule and stay where they are:
 
-- Darwin wake restart stages live in `<legacy>/wake-stages`, also on a new
-  machine. See
-  [issue 1046](https://github.com/avivsinai/agent-message-queue/issues/1046).
+- Darwin wake restart stages are written to `<legacy>/wake-stages`, also on a
+  new machine; a wake also accepts, validates, and prunes a stage under
+  `~/.amq/state/wake-stages`
+  ([issue 1046](https://github.com/avivsinai/agent-message-queue/issues/1046)).

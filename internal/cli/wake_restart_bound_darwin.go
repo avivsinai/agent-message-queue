@@ -12,6 +12,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/avivsinai/agent-message-queue/internal/amqhome"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"golang.org/x/sys/unix"
 )
@@ -233,23 +234,32 @@ func copyDarwinWakeRestartStage(source *os.File, stagePath string) error {
 }
 
 func prepareStableDarwinWakeRestartStageParent(stagePath string) error {
-	parts, stable, err := stableDarwinWakeRestartStageParts(stagePath)
+	root, parts, stable, err := stableDarwinWakeRestartStageParts(stagePath)
 	if err != nil || !stable {
 		return err
 	}
-	root, err := darwinWakeRestartStageRoot()
-	if err != nil {
-		return err
+	if amqHomeRoot, err := darwinWakeRestartAMQHomeStageRoot(); err == nil && root == amqHomeRoot {
+		if err := checkDarwinWakeRestartAMQHomeAncestors(); err != nil {
+			return err
+		}
 	}
-	parent := filepath.Dir(filepath.Dir(stagePath))
-	if err := os.MkdirAll(parent, 0o700); err != nil {
-		return fmt.Errorf("create stable Darwin wake restart stage hierarchy: %w", err)
+	// Inspect each managed level before anything is created below it, so a
+	// replaced level never receives new directories.
+	if _, err := os.Lstat(root); errors.Is(err, os.ErrNotExist) {
+		if err := os.MkdirAll(filepath.Dir(root), 0o700); err != nil {
+			return fmt.Errorf("create Darwin wake restart state directory: %w", err)
+		}
+	} else if err != nil {
+		return fmt.Errorf("inspect stable Darwin wake restart stage hierarchy: %w", err)
 	}
 	for _, managed := range []string{
 		root,
 		filepath.Join(root, parts[0]),
-		parent,
+		filepath.Join(root, parts[0], parts[1]),
 	} {
+		if err := os.Mkdir(managed, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+			return fmt.Errorf("create stable Darwin wake restart stage hierarchy: %w", err)
+		}
 		info, err := os.Lstat(managed)
 		if err != nil {
 			return fmt.Errorf("inspect stable Darwin wake restart stage hierarchy: %w", err)
@@ -263,27 +273,71 @@ func prepareStableDarwinWakeRestartStageParent(stagePath string) error {
 	return nil
 }
 
-func stableDarwinWakeRestartStageParts(stagePath string) ([]string, bool, error) {
-	root, err := darwinWakeRestartStageRoot()
+// checkDarwinWakeRestartAMQHomeAncestors refuses ~/.amq or ~/.amq/state when
+// it exists as a symlink, a non-directory, another user's directory, or a
+// directory that group or other can write.
+func checkDarwinWakeRestartAMQHomeAncestors() error {
+	home, err := amqhome.Dir()
 	if err != nil {
-		return nil, false, err
+		return fmt.Errorf("resolve Darwin wake restart state directory: %w", err)
 	}
-	rel, err := filepath.Rel(root, stagePath)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return nil, false, nil
+	for _, dir := range []string{home, filepath.Join(home, "state")} {
+		info, err := os.Lstat(dir)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("inspect Darwin wake restart state directory: %w", err)
+		}
+		stat, ok := info.Sys().(*syscall.Stat_t)
+		if !ok || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o022 != 0 ||
+			stat.Uid != uint32(os.Geteuid()) {
+			return fmt.Errorf("refuse unsafe Darwin wake restart state directory %s", dir)
+		}
+	}
+	return nil
+}
+
+// stableDarwinWakeRestartStageParts returns the stage root that contains
+// stagePath and the path's parts below it. The legacy root is checked first
+// and the first root that contains the path decides; ~/.amq/state/wake-stages
+// is the only other root. A root that does not resolve contains nothing, and
+// the legacy resolution error is returned only when no root contains the path.
+func stableDarwinWakeRestartStageParts(stagePath string) (string, []string, bool, error) {
+	root, rootErr := darwinWakeRestartStageRoot()
+	rel, within := "", false
+	if rootErr == nil {
+		rel, within = darwinWakeRestartStageRel(root, stagePath)
+	}
+	if !within {
+		if amqHomeRoot, err := darwinWakeRestartAMQHomeStageRoot(); err == nil {
+			root = amqHomeRoot
+			rel, within = darwinWakeRestartStageRel(root, stagePath)
+		}
+	}
+	if !within {
+		return "", nil, false, rootErr
 	}
 	parts := strings.Split(rel, string(filepath.Separator))
 	if len(parts) != 4 || len(parts[0]) != sha256HexLength {
-		return nil, true, fmt.Errorf("planned stable Darwin wake restart stage path is invalid")
+		return "", nil, true, fmt.Errorf("planned stable Darwin wake restart stage path is invalid")
 	}
 	if _, err := hex.DecodeString(parts[0]); err != nil {
-		return nil, true, fmt.Errorf("planned stable Darwin wake restart root identity is invalid")
+		return "", nil, true, fmt.Errorf("planned stable Darwin wake restart root identity is invalid")
 	}
 	if err := fsq.ValidateHandle(parts[1]); err != nil || !validWakeReloadTransportGeneration(parts[2]) ||
 		parts[3] == "" || filepath.Base(parts[3]) != parts[3] {
-		return nil, true, fmt.Errorf("planned stable Darwin wake restart stage path is invalid")
+		return "", nil, true, fmt.Errorf("planned stable Darwin wake restart stage path is invalid")
 	}
-	return parts, true, nil
+	return root, parts, true, nil
+}
+
+func darwinWakeRestartStageRel(root, stagePath string) (string, bool) {
+	rel, err := filepath.Rel(root, stagePath)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+	return rel, true
 }
 
 func sameWakeImageContent(first, second wakeImageEvidenceV1) bool {
@@ -380,7 +434,7 @@ func validPreviousWakeRestartBoundImagePlatform(bound wakeImageEvidenceV1) bool 
 	if legacy {
 		return true
 	}
-	_, stable, err := stableDarwinWakeRestartStageParts(stagePath)
+	_, _, stable, err := stableDarwinWakeRestartStageParts(stagePath)
 	return err == nil && stable
 }
 
