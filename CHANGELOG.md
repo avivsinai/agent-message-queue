@@ -8,6 +8,22 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.100.0](https://github.com/avivsinai/agent-message-queue/compare/v0.99.0...v0.100.0) (2026-10-19)
+
+
+### Features
+
+* **acp:** reload turn timeout and poll settings each turn ([#1086](https://github.com/avivsinai/agent-message-queue/issues/1086)) ([847c211](https://github.com/avivsinai/agent-message-queue/commit/847c211fdc082217f997728cb70f3b70c0974895))
+* **cli:** move launch trust to ~/.amq/state with doctor --migrate-home ([#1088](https://github.com/avivsinai/agent-message-queue/issues/1088)) ([55e5dfc](https://github.com/avivsinai/agent-message-queue/commit/55e5dfcab3be099005567658b8a40edb6d26e466))
+* **wake:** accept wake restart stages under ~/.amq/state ([dd378a1](https://github.com/avivsinai/agent-message-queue/commit/dd378a127b147914ee981c6dd7cb4d15ba133844))
+* **wake:** hot-reload the self-upgrade kill switch ([#1087](https://github.com/avivsinai/agent-message-queue/issues/1087)) ([e927c6e](https://github.com/avivsinai/agent-message-queue/commit/e927c6ee1c7d06f492b837a16df9610e586b896d))
+
+
+### Bug Fixes
+
+* **who:** find sessions of a custom base beside ~/.claude/agents ([#1084](https://github.com/avivsinai/agent-message-queue/issues/1084)) ([6529815](https://github.com/avivsinai/agent-message-queue/commit/65298151bedcbc7e7b057f574eb4db0004fbce8a))
+* **who:** preserve known bases during session discovery ([#1080](https://github.com/avivsinai/agent-message-queue/issues/1080)) ([9b259d4](https://github.com/avivsinai/agent-message-queue/commit/9b259d4bc229806e2418bb2de724eb79d2fc4dcb))
+
 ## [0.99.0](https://github.com/avivsinai/agent-message-queue/compare/v0.98.0...v0.99.0) (2026-10-19)
 
 
