@@ -350,7 +350,7 @@ func listSessionAgents(sessionRoot string) []string {
 	}
 	var agents []string
 	for _, entry := range entries {
-		if !entry.IsDir() || fsq.IsMailboxRemovalStaging(entry.Name()) {
+		if !entry.IsDir() {
 			continue
 		}
 		agents = append(agents, entry.Name())

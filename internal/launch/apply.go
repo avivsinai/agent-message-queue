@@ -554,9 +554,6 @@ func discoveredApplyRoster(root *fsq.DeliveryRoot, requested []string) ([]string
 		return nil, err
 	}
 	for _, entry := range entries {
-		if fsq.IsMailboxRemovalStaging(entry.Name()) {
-			continue
-		}
 		if entry.Type()&os.ModeSymlink != 0 || !entry.IsDir() {
 			return nil, fmt.Errorf("unsafe existing mailbox entry %q", entry.Name())
 		}

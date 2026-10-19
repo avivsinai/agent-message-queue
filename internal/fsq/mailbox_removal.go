@@ -4,18 +4,22 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"path/filepath"
 	"strings"
 )
 
-// mailboxRemovalPrefix marks agents/<entry> directories that a mailbox
-// removal moved aside. The leading dot keeps them outside the handle grammar,
-// so readers of agents/ must skip them instead of treating them as handles.
-const mailboxRemovalPrefix = ".removing-"
+// MailboxRemovalDir is the root-relative directory where a mailbox removal
+// stages agents/<handle> before deletion. It sits outside agents/ so no
+// mailbox reader ever sees a staged tree.
+var MailboxRemovalDir = filepath.Join("meta", "removing")
 
-const mailboxRemovalNonceBytes = 12
+const (
+	mailboxRemovalLockFile   = "removing.lock"
+	mailboxRemovalNonceBytes = 12
+)
 
-// NewMailboxRemovalName returns a fresh agents/ entry name for moving the
-// mailbox of handle aside before deletion.
+// NewMailboxRemovalName returns a fresh name under MailboxRemovalDir for
+// staging the mailbox of handle.
 func NewMailboxRemovalName(handle string) (string, error) {
 	if err := ValidateHandle(handle); err != nil {
 		return "", err
@@ -24,27 +28,17 @@ func NewMailboxRemovalName(handle string) (string, error) {
 	if _, err := rand.Read(nonce[:]); err != nil {
 		return "", fmt.Errorf("generate mailbox removal name: %w", err)
 	}
-	return mailboxRemovalPrefix + handle + "-" + hex.EncodeToString(nonce[:]), nil
+	return handle + "-" + hex.EncodeToString(nonce[:]), nil
 }
 
-// IsMailboxRemovalStaging reports whether an agents/ entry is a mailbox moved
-// aside by a removal, complete or not.
-func IsMailboxRemovalStaging(name string) bool {
-	return strings.HasPrefix(name, mailboxRemovalPrefix)
-}
-
-// ParseMailboxRemovalName returns the handle whose mailbox name was moved
-// aside, or false when name is not an exact removal name.
+// ParseMailboxRemovalName returns the handle whose mailbox a staged name
+// holds, or false when name is not an exact staging name.
 func ParseMailboxRemovalName(name string) (string, bool) {
-	rest, ok := strings.CutPrefix(name, mailboxRemovalPrefix)
-	if !ok {
-		return "", false
-	}
-	cut := strings.LastIndexByte(rest, '-')
+	cut := strings.LastIndexByte(name, '-')
 	if cut < 0 {
 		return "", false
 	}
-	handle, nonce := rest[:cut], rest[cut+1:]
+	handle, nonce := name[:cut], name[cut+1:]
 	if len(nonce) != 2*mailboxRemovalNonceBytes || strings.ToLower(nonce) != nonce {
 		return "", false
 	}
@@ -55,4 +49,25 @@ func ParseMailboxRemovalName(name string) (string, bool) {
 		return "", false
 	}
 	return handle, true
+}
+
+// WithMailboxRemovalLock runs fn while holding the root's exclusive mailbox
+// removal lock. With the lock held, every entry under MailboxRemovalDir is
+// left by an interrupted run, never by a live one. The lock file is retained;
+// the kernel releases the lock on close or process crash.
+func (r *DeliveryRoot) WithMailboxRemovalLock(fn func() error) error {
+	if fn == nil {
+		return fmt.Errorf("mailbox removal lock callback is nil")
+	}
+	lockFile, err := r.OpenLockFile("meta", mailboxRemovalLockFile, 0o600)
+	if err != nil {
+		return fmt.Errorf("open mailbox removal lock: %w", err)
+	}
+	defer func() { _ = lockFile.Close() }()
+	return withExclusiveDLQEnvelopeLock(lockFile, func() error {
+		if err := r.VerifyBase(); err != nil {
+			return err
+		}
+		return fn()
+	})
 }

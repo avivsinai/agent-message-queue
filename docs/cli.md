@@ -446,11 +446,13 @@ Usage:
 --mailbox uses --root as given and removes <root>/agents/<handle>, with its
 read history (inbox/cur), outbox, and receipts. It refuses (exit 6) while
 inbox/tmp, inbox/new, any dlq leaf, or extensions/ holds an entry, or while a
-live or uncertain wake holds the handle. It moves the mailbox to
-agents/.removing-<handle>-<nonce>, checks it, waits 250 ms, checks again, and
-puts it back if anything arrived. A delivery that stalls longer than that
+live or uncertain wake holds the handle. One lock (meta/removing.lock)
+serializes removals under a root. The mailbox moves to
+meta/removing/<handle>-<nonce>, is checked, checked again after 250 ms, and
+is put back if anything arrived. A delivery that stalls longer than that
 between opening the inbox and publishing can still fail or be removed with
-the mailbox. A later run finishes a removal that was interrupted.
+the mailbox. A later run removes a clean tree an interrupted run left there,
+and restores one that holds mail to agents/<handle> so it can be drained.
 meta/config.json is not changed: a later local send to the handle recreates
 the mailbox and delivers. Remove the handle from the config to make send warn
 (or refuse with --strict).

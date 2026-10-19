@@ -15,18 +15,14 @@ func (r *DeliveryRoot) Lstat(name string) (os.FileInfo, error) {
 	return r.root.Lstat(name)
 }
 
-// RenameDirectChildNoReplace renames one direct child to another direct-child
-// name of this root. An existing destination is never replaced.
-func (r *DeliveryRoot) RenameDirectChildNoReplace(oldName, newName string) error {
-	for _, name := range []string{oldName, newName} {
-		if err := validateDirectChildName(name); err != nil {
-			return err
-		}
-	}
+// RenameNoReplace moves a root-relative path to another root-relative path,
+// possibly in another directory, without replacing an existing destination
+// where the platform has a no-replace primitive.
+func (r *DeliveryRoot) RenameNoReplace(oldPath, newPath string) error {
 	if err := r.VerifyBase(); err != nil {
 		return err
 	}
-	return r.renameDirectChildNoReplace(oldName, newName)
+	return r.renameNoReplace(oldPath, newPath)
 }
 
 // RemoveAllDirectChild removes one direct child and everything below it.

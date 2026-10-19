@@ -13,7 +13,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"golang.org/x/sys/unix"
 )
 
@@ -70,7 +69,7 @@ func scanWakeQuarantine(root string) ([]wakeQuarantineEntry, error) {
 	}
 	var quarantined []wakeQuarantineEntry
 	for _, agent := range agents {
-		if !agent.IsDir() || fsq.IsMailboxRemovalStaging(agent.Name()) {
+		if !agent.IsDir() {
 			continue
 		}
 		path := filepath.Join(agentsDir, agent.Name())

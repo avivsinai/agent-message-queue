@@ -88,7 +88,7 @@ func TestCleanupMailboxRefusesMailboxHoldingMail(t *testing.T) {
 
 func TestCleanupMailboxFinishesInterruptedRemoval(t *testing.T) {
 	rootPath := t.TempDir()
-	orphan := filepath.Join(rootPath, "agents", ".removing-chat-1-0123456789abcdef01234567")
+	orphan := filepath.Join(rootPath, fsq.MailboxRemovalDir, "chat-1-0123456789abcdef01234567")
 	for _, leaf := range fsq.RequiredMailboxLeaves() {
 		if err := os.MkdirAll(filepath.Join(orphan, filepath.FromSlash(string(leaf))), 0o700); err != nil {
 			t.Fatal(err)
