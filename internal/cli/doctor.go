@@ -50,7 +50,7 @@ func runDoctor(args []string) error {
 	rootFlag := fs.String("root", "", "Exact AMQ root to inspect or repair")
 	baseRootFlag := fs.String("base-root", "", "Config-authority root for an explicit session --root")
 	ignoreSessionPinFlag := fs.Bool("ignore-session-pin", false, "With explicit --root, allow repair outside the pinned session context")
-	migrateHomeFlag := fs.Bool("migrate-home", false, "Move launch trust from the legacy state directory to ~/.amq/state")
+	migrateHomeFlag := fs.Bool("migrate-home", false, "Move launch trust and the keepalive home from their legacy locations into ~/.amq")
 	dryRunFlag := fs.Bool("dry-run", false, "With --migrate-home, show the move without changing anything")
 	yesFlag := fs.Bool("yes", false, "With --migrate-home, skip the confirmation prompt")
 
@@ -79,6 +79,16 @@ func runDoctor(args []string) error {
 		"read, when ~/.amq/state/launch already exists, or when the two directories",
 		"are on different filesystems. <legacy> is $XDG_STATE_HOME/amq, else the",
 		"user config directory (macOS, Windows), else ~/.local/state/amq.",
+		"",
+		"It also moves ~/.amq-keepalive to ~/.amq/keepalive, changes --registry in",
+		"the supervisor plist and the AMQ SessionStart hooks that run the moved",
+		"script, and bootstraps the supervisor job again. First stop the job",
+		"(launchctl bootout, keep the plist), the amq-remote login service, and",
+		"every amq-keepalive and amq-remote process. It refuses while one runs,",
+		"while a unit is loaded or a lock is held, or when an amq, amq-keepalive or",
+		"amq-remote older than 0.97.0 can run. Each part runs when its own checks",
+		"pass. A rerun finishes an interrupted move.",
+		"",
 		"--json requires --dry-run or --yes.",
 	)
 

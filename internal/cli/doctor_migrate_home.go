@@ -1,12 +1,15 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"github.com/avivsinai/agent-message-queue/internal/selfupgrade"
@@ -15,22 +18,44 @@ import (
 // migrateHomeVersionFloor is the first release that keeps launch trust in
 // ~/.amq/state on a fresh machine (#1049) and the keepalive home in
 // ~/.amq/keepalive (#1052). An older binary uses only the legacy locations,
-// so it would write <legacy>/launch again after the move.
+// so it would write <legacy>/launch or ~/.amq-keepalive again after the move.
 const migrateHomeVersionFloor = "0.97.0"
 
 const (
 	migrateHomeNothingToDo = "nothing_to_do"
 	migrateHomeWouldMove   = "would_move"
 	migrateHomeMoved       = "moved"
+	migrateHomeFinished    = "finished"
 	migrateHomeRefused     = "refused"
 
 	migrateHomeBinaryTooOld      = "binary_too_old"
 	migrateHomeVersionUnreadable = "version_unreadable"
 )
 
+// errMigrateHomeRefused reports that a part's run recorded a blocker.
+var errMigrateHomeRefused = errors.New("home migration refused")
+
+// migrateHomeRun runs a probe (ps, launchctl print, systemctl is-active) or a
+// launchctl step. It returns the combined output and the exit code; err is set
+// only when the command did not run.
+var migrateHomeRun = func(name string, args ...string) (string, int, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, name, args...).CombinedOutput()
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return string(out), exitErr.ExitCode(), nil
+	}
+	if err != nil {
+		return string(out), -1, err
+	}
+	return string(out), 0, nil
+}
+
 type migrateHomeReport struct {
 	DryRun      bool            `json:"dry_run"`
 	LaunchTrust migrateHomePart `json:"launch_trust"`
+	Keepalive   migrateHomePart `json:"keepalive"`
 }
 
 // migrateHomePart is one home's migration. Every list is present, empty when
@@ -44,7 +69,8 @@ type migrateHomePart struct {
 	Steps        []migrateHomeStep      `json:"steps"`
 	OperatorNext []string               `json:"operator_next"`
 	NotChecked   []string               `json:"not_checked"`
-	fromProjects int
+	title        string
+	summary      string
 }
 
 type migrateHomeGateEntry struct {
@@ -53,6 +79,7 @@ type migrateHomeGateEntry struct {
 	Version string `json:"version,omitempty"`
 	OK      bool   `json:"ok"`
 	Reason  string `json:"reason,omitempty"`
+	remedy  string
 }
 
 type migrateHomeBlocker struct {
@@ -67,101 +94,147 @@ type migrateHomeStep struct {
 	Done bool   `json:"done"`
 }
 
-func runDoctorMigrateHome(jsonOutput, dryRun, yes bool) error {
-	report := migrateHomeReport{DryRun: dryRun}
-	part := &report.LaunchTrust
-	*part = migrateHomePart{
+func newMigrateHomePart(title string, notChecked ...string) migrateHomePart {
+	return migrateHomePart{
 		Gate:         []migrateHomeGateEntry{},
 		Blockers:     []migrateHomeBlocker{},
 		Steps:        []migrateHomeStep{},
 		OperatorNext: []string{},
-		NotChecked: []string{
-			"programs that embed the launchapi package: an older one asks for trust again and recreates the legacy trust directory; the next --migrate-home then refuses",
-			"amq binaries outside PATH=" + os.Getenv("PATH"),
-		},
+		NotChecked:   notChecked,
+		title:        title,
 	}
-	move, found, err := launch.PlanLegacyTrustMove()
-	part.From, part.To, part.fromProjects = move.From, move.To, move.FromProjects
-	if err != nil && !part.addRefusal(err, move) {
-		return err
-	}
-	if !found {
-		part.Status = migrateHomeNothingToDo
-		return writeMigrateHomeReport(report, jsonOutput)
-	}
-	part.Gate = migrateHomeGate("amq")
-	for _, entry := range part.Gate {
-		if entry.OK {
-			continue
-		}
-		code := migrateHomeBinaryTooOld
-		if entry.Version == "" {
-			code = migrateHomeVersionUnreadable
-		}
-		part.Blockers = append(part.Blockers, migrateHomeBlocker{
-			Code:    code,
-			Subject: entry.Path,
-			Detail:  entry.Reason,
-			Remedy:  fmt.Sprintf("Replace it with amq %s or later, or remove it from PATH, then run again.", migrateHomeVersionFloor),
-		})
-	}
-	part.Steps = append(part.Steps, migrateHomeStep{Step: fmt.Sprintf("rename %s to %s", move.From, move.To)})
-	if len(part.Blockers) > 0 {
-		return migrateHomeRefuse(report, jsonOutput)
-	}
-	part.Status = migrateHomeWouldMove
-	if dryRun {
-		return writeMigrateHomeReport(report, jsonOutput)
-	}
-	if !yes {
-		if err := writeMigrateHomeReport(report, false); err != nil {
-			return err
-		}
-		confirmed, err := confirmPrompt("Move launch trust now?")
-		if err != nil {
-			return err
-		}
-		if !confirmed {
-			return writeStdoutLine("Aborted.")
-		}
-	}
-	if err := launch.ExecuteLegacyTrustMove(move); err != nil {
-		if !part.addRefusal(err, move) {
-			return err
-		}
-		return migrateHomeRefuse(report, jsonOutput)
-	}
-	part.Steps[0].Done = true
-	part.Status = migrateHomeMoved
-	return writeMigrateHomeReport(report, jsonOutput)
 }
 
-// addRefusal records a trust move refusal as a blocker. It reports false for
-// any other error, which the caller returns as it is.
-func (part *migrateHomePart) addRefusal(err error, move launch.LegacyTrustMove) bool {
+func (part *migrateHomePart) block(code, subject, detail, remedy string) {
+	part.Blockers = append(part.Blockers, migrateHomeBlocker{Code: code, Subject: subject, Detail: detail, Remedy: remedy})
+}
+
+// step adds a planned step and returns its index.
+func (part *migrateHomePart) step(format string, args ...any) int {
+	part.Steps = append(part.Steps, migrateHomeStep{Step: fmt.Sprintf(format, args...)})
+	return len(part.Steps) - 1
+}
+
+func runDoctorMigrateHome(jsonOutput, dryRun, yes bool) error {
+	report := migrateHomeReport{
+		DryRun: dryRun,
+		LaunchTrust: newMigrateHomePart("Launch trust",
+			"programs that embed the launchapi package: an older one asks for trust again and recreates the legacy trust directory; the next --migrate-home then refuses",
+			"amq binaries outside PATH="+os.Getenv("PATH"),
+		),
+		Keepalive: newMigrateHomePart("Keepalive home",
+			"amq, amq-keepalive and amq-remote binaries outside PATH="+os.Getenv("PATH")+" that no plist, hook or wake names",
+			"a supervisor you start yourself with an explicit --registry",
+		),
+	}
+	parts := []*migrateHomePart{&report.LaunchTrust, &report.Keepalive}
+	runs := make([]func() error, len(parts))
+	var err error
+	if runs[0], err = planMigrateHomeTrust(parts[0]); err != nil {
+		return err
+	}
+	if runs[1], err = planMigrateHomeKeepalive(parts[1]); err != nil {
+		return err
+	}
+	pending := 0
+	for i, part := range parts {
+		switch {
+		case len(part.Blockers) > 0:
+			part.Status = migrateHomeRefused
+			runs[i] = nil
+		case runs[i] == nil:
+			part.Status = migrateHomeNothingToDo
+		default:
+			part.Status = migrateHomeWouldMove
+			pending++
+		}
+	}
+	if !dryRun && pending > 0 {
+		if !yes {
+			if err := writeMigrateHomeReport(report, false); err != nil {
+				return err
+			}
+			confirmed, err := confirmPrompt("Migrate now?")
+			if err != nil {
+				return err
+			}
+			if !confirmed {
+				return writeStdoutLine("Aborted.")
+			}
+		}
+		for i, part := range parts {
+			if runs[i] == nil {
+				continue
+			}
+			if err := runs[i](); errors.Is(err, errMigrateHomeRefused) {
+				part.Status = migrateHomeRefused
+			} else if err != nil {
+				return err
+			}
+		}
+	}
+	if err := writeMigrateHomeReport(report, jsonOutput); err != nil {
+		return err
+	}
+	var refused []string
+	for _, part := range parts {
+		if part.Status != migrateHomeRefused {
+			continue
+		}
+		codes := make([]string, 0, len(part.Blockers))
+		for _, blocker := range part.Blockers {
+			codes = append(codes, blocker.Code)
+		}
+		refused = append(refused, fmt.Sprintf("%s (%s)", strings.ToLower(part.title), strings.Join(codes, ", ")))
+	}
+	if len(refused) > 0 {
+		return ActionRequiredError("not migrated: %s", strings.Join(refused, "; "))
+	}
+	return nil
+}
+
+// planMigrateHomeTrust plans the launch trust move. It returns nil when there
+// is nothing to run.
+func planMigrateHomeTrust(part *migrateHomePart) (func() error, error) {
+	move, found, err := launch.PlanLegacyTrustMove()
+	part.From, part.To = move.From, move.To
+	if move.FromProjects > 0 {
+		part.summary = fmt.Sprintf("projects: %d", move.FromProjects)
+	}
+	if err != nil && !part.addTrustRefusal(err, move) {
+		return nil, err
+	}
+	if !found {
+		return nil, nil
+	}
+	gate := newMigrateHomeGate()
+	gate.addDirs("PATH", migrateHomePATH(), "amq")
+	gate.report(part, func(string) string {
+		return fmt.Sprintf("Replace it with amq %s or later, or remove it from PATH, then run again.", migrateHomeVersionFloor)
+	})
+	rename := part.step("rename %s to %s", move.From, move.To)
+	return func() error {
+		if err := launch.ExecuteLegacyTrustMove(move); err != nil {
+			if part.addTrustRefusal(err, move) {
+				return errMigrateHomeRefused
+			}
+			return err
+		}
+		part.Steps[rename].Done = true
+		part.Status = migrateHomeMoved
+		return nil
+	}, nil
+}
+
+// addTrustRefusal records a trust move refusal as a blocker. It reports false
+// for any other error, which the caller returns as it is.
+func (part *migrateHomePart) addTrustRefusal(err error, move launch.LegacyTrustMove) bool {
 	var refusal *launch.TrustMoveRefusal
 	if !errors.As(err, &refusal) {
 		return false
 	}
-	part.Blockers = append(part.Blockers, migrateHomeBlocker{
-		Code:    refusal.Code,
-		Subject: refusal.Subject,
-		Detail:  refusal.Message,
-		Remedy:  migrateHomeTrustRemedy(refusal.Code, move),
-	})
+	part.block(refusal.Code, refusal.Subject, refusal.Message, migrateHomeTrustRemedy(refusal.Code, move))
 	return true
-}
-
-func migrateHomeRefuse(report migrateHomeReport, jsonOutput bool) error {
-	report.LaunchTrust.Status = migrateHomeRefused
-	if err := writeMigrateHomeReport(report, jsonOutput); err != nil {
-		return err
-	}
-	codes := make([]string, 0, len(report.LaunchTrust.Blockers))
-	for _, blocker := range report.LaunchTrust.Blockers {
-		codes = append(codes, blocker.Code)
-	}
-	return ActionRequiredError("launch trust not moved: %s", strings.Join(codes, ", "))
 }
 
 func migrateHomeTrustRemedy(code string, move launch.LegacyTrustMove) string {
@@ -179,98 +252,164 @@ func migrateHomeTrustRemedy(code string, move launch.LegacyTrustMove) string {
 	return "AMQ does not follow or replace it. Make it a plain directory, then run again."
 }
 
-// migrateHomeGate reads the version of every name binary on PATH from its
-// build information, without running it. A binary passes only when its
-// version is readable and not older than migrateHomeVersionFloor. An empty
-// PATH entry is the current directory, as it is for a shell.
-func migrateHomeGate(name string) []migrateHomeGateEntry {
-	if runtime.GOOS == "windows" {
-		name += ".exe"
-	}
-	entries := []migrateHomeGateEntry{}
-	seen := map[string]bool{}
-	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
+// migrateHomePATH is this process's PATH. An empty entry is the current
+// directory, as it is for a shell.
+func migrateHomePATH() []string {
+	return migrateHomeSplitPATH(os.Getenv("PATH"))
+}
+
+func migrateHomeSplitPATH(value string) []string {
+	dirs := filepath.SplitList(value)
+	for i, dir := range dirs {
 		if dir == "" {
-			dir = "."
+			dirs[i] = "."
 		}
-		candidate, err := filepath.Abs(filepath.Join(dir, name))
-		if err != nil {
-			continue
-		}
-		info, err := os.Stat(candidate)
-		if err != nil || !info.Mode().IsRegular() || (runtime.GOOS != "windows" && info.Mode().Perm()&0o111 == 0) {
-			continue
-		}
-		path, err := filepath.EvalSymlinks(candidate)
-		if err != nil {
-			path = candidate
-		}
-		if seen[path] {
-			continue
-		}
-		seen[path] = true
-		entry := migrateHomeGateEntry{Source: "PATH", Path: candidate}
-		if path != candidate {
-			entry.Path = candidate + " -> " + path
-		}
-		version, err := selfupgrade.ReadEmbeddedVersion(path)
-		switch {
-		case err != nil:
-			entry.Reason = fmt.Sprintf("version cannot be read: %v", err)
-		case selfupgrade.VersionStrictlyNewer(version, migrateHomeVersionFloor):
-			entry.Version = version
-			entry.Reason = "older than " + migrateHomeVersionFloor
-		default:
-			entry.Version = version
-			entry.OK = true
-		}
-		entries = append(entries, entry)
 	}
-	return entries
+	return dirs
+}
+
+// migrateHomeGate collects the binaries that can write a legacy home and
+// reads each version from build information, without running it. A binary
+// passes only when its version is readable and not older than
+// migrateHomeVersionFloor. A path that names no executable file is skipped:
+// nothing can run it.
+type migrateHomeGate struct {
+	entries []migrateHomeGateEntry
+	seen    map[string]bool
+}
+
+func newMigrateHomeGate() *migrateHomeGate {
+	return &migrateHomeGate{entries: []migrateHomeGateEntry{}, seen: map[string]bool{}}
+}
+
+func (gate *migrateHomeGate) addDirs(source string, dirs []string, names ...string) {
+	for _, dir := range dirs {
+		for _, name := range names {
+			if runtime.GOOS == "windows" {
+				name += ".exe"
+			}
+			gate.addPath(source, filepath.Join(dir, name))
+		}
+	}
+}
+
+func (gate *migrateHomeGate) addPath(source, candidate string) {
+	gate.addPathRemedy(source, candidate, "")
+}
+
+// addPathRemedy adds a binary whose remedy, when it fails, is remedy rather
+// than the one for its source.
+func (gate *migrateHomeGate) addPathRemedy(source, candidate, remedy string) {
+	if strings.TrimSpace(candidate) == "" {
+		return
+	}
+	candidate, err := filepath.Abs(candidate)
+	if err != nil {
+		return
+	}
+	info, err := os.Stat(candidate)
+	if err != nil || !info.Mode().IsRegular() || (runtime.GOOS != "windows" && info.Mode().Perm()&0o111 == 0) {
+		return
+	}
+	path, err := filepath.EvalSymlinks(candidate)
+	if err != nil {
+		path = candidate
+	}
+	if gate.seen[path] {
+		return
+	}
+	gate.seen[path] = true
+	entry := migrateHomeGateEntry{Source: source, Path: candidate, remedy: remedy}
+	if path != candidate {
+		entry.Path = candidate + " -> " + path
+	}
+	version, err := selfupgrade.ReadEmbeddedVersion(path)
+	switch {
+	case err != nil:
+		entry.Reason = fmt.Sprintf("version cannot be read: %v", err)
+	case selfupgrade.VersionStrictlyNewer(version, migrateHomeVersionFloor):
+		entry.Version = version
+		entry.Reason = "older than " + migrateHomeVersionFloor
+	default:
+		entry.Version = version
+		entry.OK = true
+	}
+	gate.entries = append(gate.entries, entry)
+}
+
+// report puts the gate into part, with a blocker for each binary that fails.
+func (gate *migrateHomeGate) report(part *migrateHomePart, remedy func(source string) string) {
+	part.Gate = gate.entries
+	for _, entry := range gate.entries {
+		if entry.OK {
+			continue
+		}
+		code := migrateHomeBinaryTooOld
+		if entry.Version == "" {
+			code = migrateHomeVersionUnreadable
+		}
+		fix := entry.remedy
+		if fix == "" {
+			fix = remedy(entry.Source)
+		}
+		part.block(code, entry.Path, entry.Source+": "+entry.Reason, fix)
+	}
 }
 
 func writeMigrateHomeReport(report migrateHomeReport, jsonOutput bool) error {
 	if jsonOutput {
 		return writeJSON(os.Stdout, map[string]any{"migrate_home": report})
 	}
-	part := report.LaunchTrust
 	var b strings.Builder
-	b.WriteString("Launch trust\n")
-	fmt.Fprintf(&b, "  from     %s", part.From)
-	if part.fromProjects > 0 {
-		fmt.Fprintf(&b, "  (projects: %d)", part.fromProjects)
-	}
-	fmt.Fprintf(&b, "\n  to       %s\n", part.To)
-	for _, entry := range part.Gate {
-		verdict := "ok"
-		if !entry.OK {
-			verdict = entry.Reason
+	for _, part := range []migrateHomePart{report.LaunchTrust, report.Keepalive} {
+		b.WriteString(part.title + "\n")
+		fmt.Fprintf(&b, "  from     %s", part.From)
+		if part.summary != "" {
+			fmt.Fprintf(&b, "  (%s)", part.summary)
 		}
-		version := entry.Version
-		if version == "" {
-			version = "?"
+		fmt.Fprintf(&b, "\n  to       %s\n", part.To)
+		for _, entry := range part.Gate {
+			verdict := "ok"
+			if !entry.OK {
+				verdict = entry.Reason
+			}
+			version := entry.Version
+			if version == "" {
+				version = "?"
+			}
+			fmt.Fprintf(&b, "  gate     %s: %s  %s  %s\n", entry.Source, version, entry.Path, verdict)
 		}
-		fmt.Fprintf(&b, "  gate     %s: amq %s  %s  %s\n", entry.Source, version, entry.Path, verdict)
-	}
-	switch part.Status {
-	case migrateHomeNothingToDo:
-		fmt.Fprintf(&b, "  status   nothing to do: %s does not exist\n", part.From)
-	case migrateHomeWouldMove:
-		b.WriteString("  status   would rename it; launches keep their trust\n")
-	case migrateHomeMoved:
-		b.WriteString("  status   moved; launches keep their trust\n")
-	case migrateHomeRefused:
-		fmt.Fprintf(&b, "  status   refused, %d blockers; nothing changed\n", len(part.Blockers))
-	}
-	for _, blocker := range part.Blockers {
-		fmt.Fprintf(&b, "  blocker  %s: %s\n", blocker.Code, blocker.Subject)
-		fmt.Fprintf(&b, "           %s\n", blocker.Detail)
-		fmt.Fprintf(&b, "           %s\n", blocker.Remedy)
-	}
-	if part.Status != migrateHomeNothingToDo {
-		b.WriteString("Not checked\n")
-		for _, line := range part.NotChecked {
-			fmt.Fprintf(&b, "  %s\n", line)
+		switch part.Status {
+		case migrateHomeNothingToDo:
+			b.WriteString("  status   nothing to do\n")
+		case migrateHomeWouldMove:
+			b.WriteString("  status   would migrate\n")
+		case migrateHomeMoved:
+			b.WriteString("  status   moved\n")
+		case migrateHomeFinished:
+			b.WriteString("  status   finished an earlier move\n")
+		case migrateHomeRefused:
+			fmt.Fprintf(&b, "  status   refused, %d blockers\n", len(part.Blockers))
+		}
+		for _, step := range part.Steps {
+			mark := "todo"
+			if step.Done {
+				mark = "done"
+			}
+			fmt.Fprintf(&b, "  step     %s: %s\n", mark, step.Step)
+		}
+		for _, blocker := range part.Blockers {
+			fmt.Fprintf(&b, "  blocker  %s: %s\n", blocker.Code, blocker.Subject)
+			fmt.Fprintf(&b, "           %s\n", blocker.Detail)
+			fmt.Fprintf(&b, "           %s\n", blocker.Remedy)
+		}
+		for _, next := range part.OperatorNext {
+			fmt.Fprintf(&b, "  next     %s\n", next)
+		}
+		if part.Status != migrateHomeNothingToDo {
+			for _, line := range part.NotChecked {
+				fmt.Fprintf(&b, "  unchecked %s\n", line)
+			}
 		}
 	}
 	if report.DryRun {

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -594,48 +595,68 @@ func classifyHook(hookObj map[string]interface{}) hookClass {
 // Returns the unescaped path and true on success; false (without dropping
 // anything) otherwise.
 func scriptPathFromAMQCommand(command string) (string, bool) {
+	parsed, ok := parseHookCommand(command)
+	return parsed.ScriptPath, ok
+}
+
+// HookCommand is an AMQ-owned SessionStart hook command read back into the
+// values buildHookCommand wrote. Command is the command string itself.
+type HookCommand struct {
+	Command    string
+	BinaryPath string
+	ScriptPath string
+	Timeout    time.Duration
+}
+
+// parseHookCommand decodes the fixed layout described at
+// scriptPathFromAMQCommand.
+func parseHookCommand(command string) (HookCommand, bool) {
 	s := command
 	// Token 1: AMQ_KEEPALIVE_BIN=<quoted>, then a space.
 	rest, ok := strings.CutPrefix(s, amqOwnedCommandPrefix)
 	if !ok {
-		return "", false
+		return HookCommand{}, false
 	}
 	token1, rest, ok := shellUnquoteToken(rest)
 	if !ok || token1 == "" {
-		return "", false
+		return HookCommand{}, false
 	}
 	rest, ok = consumeSingleSpace(rest)
 	if !ok {
-		return "", false
+		return HookCommand{}, false
 	}
 	// Token 2: AMQ_KEEPALIVE_TIMEOUT_SECONDS=<quoted>, then a space. The prefix
 	// must be present exactly (CutPrefix, not TrimPrefix) and the decoded token
 	// must be all digits, because buildHookCommand emits shellQuote(fmt.Sprintf("%d",...)).
 	rest, ok = strings.CutPrefix(rest, "AMQ_KEEPALIVE_TIMEOUT_SECONDS=")
 	if !ok {
-		return "", false
+		return HookCommand{}, false
 	}
 	timeoutToken, rest, ok := shellUnquoteToken(rest)
 	if !ok || timeoutToken == "" {
-		return "", false
+		return HookCommand{}, false
 	}
 	if !isAllDigits(timeoutToken) {
-		return "", false
+		return HookCommand{}, false
 	}
 	rest, ok = consumeSingleSpace(rest)
 	if !ok {
-		return "", false
+		return HookCommand{}, false
 	}
 	// Token 3: the script path.
 	path, left, ok := shellUnquoteToken(rest)
 	if !ok {
-		return "", false
+		return HookCommand{}, false
 	}
 	// Any leftover non-space bytes mean a 4th token is present: not parseable.
 	if strings.TrimSpace(left) != "" {
-		return "", false
+		return HookCommand{}, false
 	}
-	return path, true
+	seconds, err := strconv.Atoi(timeoutToken)
+	if err != nil {
+		return HookCommand{}, false
+	}
+	return HookCommand{Command: command, BinaryPath: token1, ScriptPath: path, Timeout: time.Duration(seconds) * time.Second}, true
 }
 
 // isAllDigits reports whether s is non-empty and consists only of ASCII digits,
@@ -822,6 +843,36 @@ func StaleSessionStartHooks(configPath, agent string) ([]StaleSessionStartHook, 
 		}
 	}
 	return stale, nil
+}
+
+// OwnedSessionStartHooks returns the AMQ-owned SessionStart hook commands in
+// a Claude or Codex hook config that it can parse. It does not modify the
+// file; a missing file has none.
+func OwnedSessionStartHooks(configPath string) ([]HookCommand, error) {
+	doc, err := loadJSONObject(configPath)
+	if err != nil {
+		return nil, err
+	}
+	hooks, _ := doc["hooks"].(map[string]interface{})
+	sessionStart, _ := hooks["SessionStart"].([]interface{})
+	var owned []HookCommand
+	for _, entry := range sessionStart {
+		obj, ok := entry.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		for _, hook := range interfaceArray(obj["hooks"]) {
+			hookObj, ok := hook.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			command := strings.TrimSpace(fmt.Sprint(hookObj["command"]))
+			if parsed, ok := parseHookCommand(command); ok && isAMQOwnedCommand(command) {
+				owned = append(owned, parsed)
+			}
+		}
+	}
+	return owned, nil
 }
 
 func loadJSONObject(path string) (map[string]interface{}, error) {
