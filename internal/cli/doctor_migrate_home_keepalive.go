@@ -64,7 +64,7 @@ func planMigrateHomeKeepalive(part *migrateHomePart) (func() error, error) {
 	var residue []string
 	if oldFound && curFound {
 		var why string
-		residue, why = migrateHomeKeepaliveResidue(old)
+		residue, why = migrateHomeKeepaliveResidue(old, false)
 		if why != "" {
 			part.block("both_exist", old, fmt.Sprintf("both %s and %s exist, and %s %s", old, cur, old, why),
 				fmt.Sprintf("Stop the program that created %s again (an older amq-keepalive, or a supervisor started with --registry %s), "+
@@ -79,7 +79,8 @@ func planMigrateHomeKeepalive(part *migrateHomePart) (func() error, error) {
 	if err != nil {
 		return nil, err
 	}
-	if _, err := os.Lstat(plistPath); err == nil {
+	plistInfo, err := os.Lstat(plistPath)
+	if err == nil {
 		got, err := launchd.ReadInstalled(plistPath, launchd.DefaultLabel)
 		if err != nil {
 			part.block("unit_unreadable", plistPath, err.Error(), "Fix or remove the plist, then run again.")
@@ -90,6 +91,13 @@ func planMigrateHomeKeepalive(part *migrateHomePart) (func() error, error) {
 		return nil, err
 	}
 	plistRewrite := installed != nil && migrateHomeUnder(installed.Options.RegistryPath, old)
+	if plistRewrite && (plistInfo.Mode()&os.ModeSymlink != 0 || installed.Edited()) {
+		// The rewrite writes the plist from its options. It would drop a
+		// hand edit (an extra flag, key or PATH) or replace a symlink.
+		part.block("unit_edited", plistPath, "the plist is a symlink or differs from what amq-keepalive install-launchd writes",
+			"Run amq-keepalive install-launchd again with amq-keepalive "+migrateHomeVersionFloor+" or later (before the move it writes the legacy registry path, which is correct), "+
+				"or restore the file (a regular file, not a symlink), then run again. AMQ does not rewrite an edited plist, because the rewrite would drop the change.")
+	}
 
 	var hooks, fixes []migrateHomeHookFix
 	for _, agent := range []string{hookinstall.AgentClaude, hookinstall.AgentCodex} {
@@ -111,15 +119,19 @@ func planMigrateHomeKeepalive(part *migrateHomePart) (func() error, error) {
 		}
 	}
 
-	// The job needs a bootstrap when its plist names the new registry (or
-	// will) and it is not loaded.
+	// The job is bootstrapped again only when this run moves the home or
+	// rewrites its plist, because the operator stopped it for that. A job
+	// that is stopped for any other reason is the operator's to start; at
+	// login, RunAtLoad starts it anyway.
 	jobLoaded, jobKnown := false, true
-	if runtime.GOOS == "darwin" && (rename || len(residue) > 0 || plistRewrite || installed != nil) {
+	if runtime.GOOS == "darwin" && (installed != nil || rename || len(residue) > 0) {
 		jobLoaded, jobKnown = migrateHomeLaunchdLoaded(launchd.ServiceTarget(launchd.DefaultLabel))
 	}
-	bootstrap := runtime.GOOS == "darwin" && installed != nil && jobKnown && !jobLoaded &&
-		(plistRewrite || migrateHomeUnder(installed.Options.RegistryPath, cur))
-	if !rename && len(residue) == 0 && !plistRewrite && len(fixes) == 0 && !bootstrap {
+	bootstrap := runtime.GOOS == "darwin" && installed != nil && jobKnown && !jobLoaded && (rename || plistRewrite)
+	if runtime.GOOS == "darwin" && installed != nil && jobKnown && !jobLoaded && !bootstrap {
+		part.OperatorNext = append(part.OperatorNext, "the supervisor job is not loaded; to start it: launchctl bootstrap gui/"+strconv.Itoa(os.Getuid())+" "+plistPath)
+	}
+	if !rename && len(residue) == 0 && !plistRewrite && len(fixes) == 0 {
 		return nil, nil
 	}
 
@@ -148,7 +160,11 @@ func planMigrateHomeKeepalive(part *migrateHomePart) (func() error, error) {
 		gate.addDirs("launchd plist PATH", migrateHomeSplitPATH(installed.PATH), names...)
 	}
 	for _, hook := range hooks {
-		gate.addPath(hook.agent+" hook", hook.hook.BinaryPath)
+		// install-hook with a new binary adds a second hook and keeps this
+		// one, so the remedy is to remove this entry.
+		gate.addPathRemedy(hook.agent+" hook", hook.hook.BinaryPath, fmt.Sprintf(
+			"Remove the SessionStart hook with this command from %s: %s. Then run amq-keepalive install-hook --agent %s with amq-keepalive %s or later if you want the hook, and run the migration again.",
+			hook.config, hook.hook.Command, hook.agent, migrateHomeVersionFloor))
 	}
 	migrateHomeWakeInjectors(part, gate, filepath.Join(regDir, "registry.json"))
 	servicePath, err := loginservice.Path()
@@ -203,9 +219,8 @@ func planMigrateHomeKeepalive(part *migrateHomePart) (func() error, error) {
 			return errMigrateHomeRefused
 		}
 		if residueStep >= 0 {
-			if err := migrateHomeRemoveResidue(old, residue); err != nil {
-				part.block("both_exist", old, err.Error(), "Inspect "+old+", then run again.")
-				return errMigrateHomeRefused
+			if err := migrateHomeRemoveResidue(part, old, residue); err != nil {
+				return err
 			}
 			part.Steps[residueStep].Done = true
 		}
@@ -214,6 +229,13 @@ func planMigrateHomeKeepalive(part *migrateHomePart) (func() error, error) {
 				return err
 			}
 			part.Steps[renameStep].Done = true
+			for _, dir := range []string{filepath.Dir(cur), filepath.Dir(old)} {
+				if err := fsq.SyncDir(dir); err != nil {
+					part.block("sync_failed", dir, fmt.Sprintf("moved %s to %s, but sync of %s failed: %v", old, cur, dir, err),
+						"Run amq doctor --migrate-home again to finish.")
+					return errMigrateHomeRefused
+				}
+			}
 			if _, err := os.Lstat(old); err == nil {
 				part.block("legacy_recreated", old, "a process created "+old+" again during the move; the home is at "+cur,
 					"Stop that process, then run again: the rerun removes the leftover lock files when they hold no registry rows.")
@@ -272,33 +294,30 @@ func planMigrateHomeKeepalive(part *migrateHomePart) (func() error, error) {
 // path fails its identity recheck after the rename and writes nothing.
 func migrateHomeRenameKeepalive(part *migrateHomePart, old, cur string) error {
 	store := registry.New(filepath.Join(old, "registry.json"))
-	err := store.WithExclusive(func() error {
+	return store.WithExclusive(func() error {
 		migrateHomeProcessBlockers(part)
 		migrateHomeHeldLockBlockers(part, old)
 		if len(part.Blockers) > 0 {
 			return errMigrateHomeRefused
 		}
-		home, err := amqhome.EnsureDir()
-		if err != nil {
+		if _, err := amqhome.EnsureDir(); err != nil {
 			part.block("unsafe_path", filepath.Dir(cur), err.Error(), "Make it a plain directory, then run again.")
 			return errMigrateHomeRefused
 		}
 		if err := os.Rename(old, cur); err != nil {
-			if errors.Is(err, syscall.EXDEV) {
+			switch {
+			case errors.Is(err, syscall.EXDEV):
 				part.block("cross_device", old, fmt.Sprintf("%s and %s are on different filesystems", old, cur),
 					"AMQ does not copy the keepalive home. Keep the legacy home; it continues to work.")
+				return errMigrateHomeRefused
+			case errors.Is(err, os.ErrExist), errors.Is(err, syscall.ENOTEMPTY):
+				part.block("both_exist", cur, cur+" appeared during the move", "Run amq doctor --migrate-home --dry-run to see what both homes hold.")
 				return errMigrateHomeRefused
 			}
 			return err
 		}
-		for _, dir := range []string{home, filepath.Dir(old)} {
-			if err := fsq.SyncDir(dir); err != nil {
-				return fmt.Errorf("moved %s to %s, but sync of %s failed: %w", old, cur, dir, err)
-			}
-		}
 		return nil
 	})
-	return err
 }
 
 func migrateHomeKeepaliveRemedy(source string) string {
@@ -306,8 +325,6 @@ func migrateHomeKeepaliveRemedy(source string) string {
 	switch {
 	case source == "launchd plist":
 		return "Upgrade it to " + floor + " or later, then run amq-keepalive install-launchd again and run the migration again."
-	case strings.HasSuffix(source, " hook"):
-		return "Upgrade it to " + floor + " or later, then run amq-keepalive install-hook --agent " + strings.TrimSuffix(source, " hook") + " again and run the migration again."
 	case strings.HasPrefix(source, "wake "):
 		return "Upgrade it to " + floor + " or later, then replace the wake with amq-keepalive reattach from the agent's session, and run the migration again."
 	case source == "amq-remote service":
@@ -347,7 +364,9 @@ func migrateHomeHookConfig(agent string) (string, error) {
 // migrateHomeKeepaliveResidue lists what old holds when it is only what a
 // process left by recreating it: lock files that no process holds, and a
 // registry with no rows. Otherwise why names the first thing that is more.
-func migrateHomeKeepaliveResidue(old string) (paths []string, why string) {
+// With own, the caller holds the registry and registration locks, which are
+// then not probed.
+func migrateHomeKeepaliveResidue(old string, own bool) (paths []string, why string) {
 	entries, err := os.ReadDir(old)
 	if err != nil {
 		return nil, "cannot be read: " + err.Error()
@@ -366,6 +385,9 @@ func migrateHomeKeepaliveResidue(old string) (paths []string, why string) {
 				return nil, fmt.Sprintf("holds a registry with %d entries", len(file.Entries))
 			}
 		case entry.Type().IsRegular() && migrateHomeLockName(name):
+			if own && migrateHomeOwnLock(name) {
+				break
+			}
 			if held, err := registry.ProbeLockHeld(path); err != nil || held {
 				return nil, "holds a lock that is held or cannot be probed: " + name
 			}
@@ -397,6 +419,10 @@ func migrateHomeKeepaliveResidue(old string) (paths []string, why string) {
 	return append(append(paths, dirs...), old), ""
 }
 
+func migrateHomeOwnLock(name string) bool {
+	return name == "registry.json.lock" || name == "registry.json.registration.lock"
+}
+
 func migrateHomeLockName(name string) bool {
 	switch name {
 	case "registry.json.lock", "registry.json.registration.lock", ".selfupgrade.lock":
@@ -405,19 +431,33 @@ func migrateHomeLockName(name string) bool {
 	return strings.HasPrefix(name, "registry.json.up-") && strings.HasSuffix(name, ".lock")
 }
 
-// migrateHomeRemoveResidue removes the listed paths, files first and then the
-// directories. os.Remove refuses a directory that gained an entry since the
-// check, so nothing else is removed.
-func migrateHomeRemoveResidue(old string, paths []string) error {
-	for _, path := range paths {
-		if !migrateHomeUnder(path, old) {
-			return fmt.Errorf("%s is not below %s", path, old)
-		}
-		if err := os.Remove(path); err != nil {
-			return fmt.Errorf("remove leftover %s: %w", path, err)
-		}
+// migrateHomeRemoveResidue removes the leftover old home under its registry
+// locks. It scans again first and refuses when the leftover changed since the
+// plan. os.Remove refuses a directory that gained an entry, so nothing else
+// is removed.
+func migrateHomeRemoveResidue(part *migrateHomePart, old string, planned []string) error {
+	withoutOwnLocks := func(paths []string) []string {
+		return slices.DeleteFunc(slices.Clone(paths), func(path string) bool {
+			return filepath.Dir(path) == old && migrateHomeOwnLock(filepath.Base(path))
+		})
 	}
-	return nil
+	return registry.New(filepath.Join(old, "registry.json")).WithExclusive(func() error {
+		paths, why := migrateHomeKeepaliveResidue(old, true)
+		if why == "" && !slices.Equal(withoutOwnLocks(paths), withoutOwnLocks(planned)) {
+			why = "changed since the plan"
+		}
+		if why != "" {
+			part.block("both_exist", old, old+" "+why, "Run amq doctor --migrate-home again.")
+			return errMigrateHomeRefused
+		}
+		for _, path := range paths {
+			if err := os.Remove(path); err != nil {
+				part.block("both_exist", old, fmt.Sprintf("remove leftover %s: %v", path, err), "Inspect "+old+", then run again.")
+				return errMigrateHomeRefused
+			}
+		}
+		return nil
+	})
 }
 
 // migrateHomeWakeInjectors adds the inject_via of each registered wake to the
@@ -509,11 +549,22 @@ func migrateHomeForeignUnitBlockers(part *migrateHomePart, old string, installed
 		}
 		for _, entry := range entries {
 			path := filepath.Join(dir, entry.Name())
-			if !entry.Type().IsRegular() || (installed != nil && path == installed.Options.PlistPath) {
+			if installed != nil && path == installed.Options.PlistPath {
 				continue
 			}
-			data, err := os.ReadFile(path)
-			if err != nil || !bytes.Contains(data, []byte(old)) {
+			info, err := os.Stat(path)
+			if err == nil && info.IsDir() {
+				continue
+			}
+			var data []byte
+			if err == nil {
+				data, err = os.ReadFile(path)
+			}
+			if err != nil {
+				part.block("foreign_unit_unknown", path, err.Error(), "Make the unit readable or remove it, then run again.")
+				continue
+			}
+			if !bytes.Contains(data, []byte(old)) {
 				continue
 			}
 			part.block("foreign_unit", path, "this unit names "+old, "Change it to use "+part.To+" (or no explicit path), stop it, then run again.")

@@ -129,7 +129,9 @@ and adapter state in `~/.amq/keepalive`. Older binaries use `~/.amq-keepalive`.
   in one rename. Then it changes `--registry` in the supervisor plist,
   changes the AMQ SessionStart hooks in `~/.claude/settings.json` and
   `~/.codex/hooks.json` that run the moved script, and bootstraps the
-  supervisor job again. Registered agents and their wakes do not change.
+  supervisor job again. It bootstraps the job only when it moves the home or
+  rewrites the plist; otherwise it prints the command to start it. Registered
+  agents and their wakes do not change.
   Use `--dry-run` to see the plan and every blocker first.
 - Before you run it:
   1. Stop the supervisor job and keep its plist:
@@ -152,12 +154,17 @@ and adapter state in `~/.amq/keepalive`. Older binaries use `~/.amq-keepalive`.
   It refuses when an `amq`, `amq-keepalive` or `amq-remote` older than 0.97.0
   can run: on `PATH`, in the plist (with the plist's `PATH`), in a hook, as a
   wake's injector, or as the amq-remote login service. It refuses when
-  another launchd or systemd user unit names `~/.amq-keepalive`. A refusal
-  changes nothing.
+  another launchd or systemd user unit names `~/.amq-keepalive`, and when the
+  supervisor plist is a symlink or differs from what
+  `amq-keepalive install-launchd` writes (the rewrite would drop the change).
+  A refusal changes nothing.
 - An interrupted run is finished by running the command again. If a process
   created `~/.amq-keepalive` again during the move, a rerun removes it when
-  it holds only lock files that no process holds and a registry with no
-  rows. Otherwise the command refuses and names what it holds.
+  it holds only a registry with no rows and lock files that no process
+  holds: `registry.json.lock`, `registry.json.registration.lock`,
+  `registry.json.up-*.lock`, `.selfupgrade.lock` and
+  `claude-print/*/inject.lock`. Otherwise the command refuses and names what
+  it holds.
 
 ## Locations outside `~/.amq`
 

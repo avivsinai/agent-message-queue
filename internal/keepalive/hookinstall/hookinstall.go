@@ -595,21 +595,22 @@ func classifyHook(hookObj map[string]interface{}) hookClass {
 // Returns the unescaped path and true on success; false (without dropping
 // anything) otherwise.
 func scriptPathFromAMQCommand(command string) (string, bool) {
-	parsed, ok := ParseHookCommand(command)
+	parsed, ok := parseHookCommand(command)
 	return parsed.ScriptPath, ok
 }
 
 // HookCommand is an AMQ-owned SessionStart hook command read back into the
-// values buildHookCommand wrote.
+// values buildHookCommand wrote. Command is the command string itself.
 type HookCommand struct {
+	Command    string
 	BinaryPath string
 	ScriptPath string
 	Timeout    time.Duration
 }
 
-// ParseHookCommand decodes the fixed layout described at
+// parseHookCommand decodes the fixed layout described at
 // scriptPathFromAMQCommand.
-func ParseHookCommand(command string) (HookCommand, bool) {
+func parseHookCommand(command string) (HookCommand, bool) {
 	s := command
 	// Token 1: AMQ_KEEPALIVE_BIN=<quoted>, then a space.
 	rest, ok := strings.CutPrefix(s, amqOwnedCommandPrefix)
@@ -655,7 +656,7 @@ func ParseHookCommand(command string) (HookCommand, bool) {
 	if err != nil {
 		return HookCommand{}, false
 	}
-	return HookCommand{BinaryPath: token1, ScriptPath: path, Timeout: time.Duration(seconds) * time.Second}, true
+	return HookCommand{Command: command, BinaryPath: token1, ScriptPath: path, Timeout: time.Duration(seconds) * time.Second}, true
 }
 
 // isAllDigits reports whether s is non-empty and consists only of ASCII digits,
@@ -866,7 +867,7 @@ func OwnedSessionStartHooks(configPath string) ([]HookCommand, error) {
 				continue
 			}
 			command := strings.TrimSpace(fmt.Sprint(hookObj["command"]))
-			if parsed, ok := ParseHookCommand(command); ok && isAMQOwnedCommand(command) {
+			if parsed, ok := parseHookCommand(command); ok && isAMQOwnedCommand(command) {
 				owned = append(owned, parsed)
 			}
 		}

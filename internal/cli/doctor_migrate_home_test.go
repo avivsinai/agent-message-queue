@@ -152,15 +152,19 @@ func TestDoctorMigrateHomeMovesKeepaliveHome(t *testing.T) {
 		return "", 0, nil
 	}
 
-	stdout, _, err := captureEnvOutput(t, func() error {
-		return runDoctor([]string{"--migrate-home", "--yes", "--json"})
-	})
-	var out struct {
-		MigrateHome migrateHomeReport `json:"migrate_home"`
+	migrate := func(want string) {
+		t.Helper()
+		stdout, _, err := captureEnvOutput(t, func() error {
+			return runDoctor([]string{"--migrate-home", "--yes", "--json"})
+		})
+		var out struct {
+			MigrateHome migrateHomeReport `json:"migrate_home"`
+		}
+		if jsonErr := json.Unmarshal([]byte(stdout), &out); jsonErr != nil || err != nil || out.MigrateHome.Keepalive.Status != want {
+			t.Fatalf("doctor --migrate-home: err=%v json=%v output=%s", err, jsonErr, stdout)
+		}
 	}
-	if jsonErr := json.Unmarshal([]byte(stdout), &out); jsonErr != nil || err != nil || out.MigrateHome.Keepalive.Status != migrateHomeMoved {
-		t.Fatalf("doctor --migrate-home: err=%v json=%v output=%s", err, jsonErr, stdout)
-	}
+	migrate(migrateHomeMoved)
 
 	if _, err := os.Lstat(old); !os.IsNotExist(err) {
 		t.Fatalf("legacy home after the move: %v", err)
@@ -179,10 +183,23 @@ func TestDoctorMigrateHomeMovesKeepaliveHome(t *testing.T) {
 	}
 	hooks, err := hookinstall.OwnedSessionStartHooks(claudeConfig)
 	want := hookinstall.HookCommand{BinaryPath: keepaliveBin, ScriptPath: filepath.Join(cur, "hooks", "amq-keepalive-session-start.sh"), Timeout: 30 * time.Second}
-	if err != nil || len(hooks) != 1 || hooks[0] != want {
+	if err != nil || len(hooks) != 1 || hooks[0].BinaryPath != want.BinaryPath || hooks[0].ScriptPath != want.ScriptPath || hooks[0].Timeout != want.Timeout {
 		t.Fatalf("claude hooks after the move = %+v, %v", hooks, err)
 	}
 	if wantCalls := []string{"bootout", "bootstrap", "kickstart"}; runtime.GOOS == "darwin" && !slices.Equal(launchctl, wantCalls) {
 		t.Fatalf("launchctl calls = %v, want %v", launchctl, wantCalls)
+	}
+
+	// A process that still held the legacy path created it again with only
+	// lock files and an empty registry. A rerun removes it and finishes.
+	if err := registry.New(filepath.Join(old, "registry.json")).Save(registry.File{}); err != nil {
+		t.Fatal(err)
+	}
+	migrate(migrateHomeFinished)
+	if _, err := os.Lstat(old); !os.IsNotExist(err) {
+		t.Fatalf("leftover legacy home after the rerun: %v", err)
+	}
+	if file, err := registry.New(regPath).Load(); err != nil || len(file.Entries) != 1 {
+		t.Fatalf("registry after the rerun = %+v, %v", file.Entries, err)
 	}
 }

@@ -79,6 +79,7 @@ type migrateHomeGateEntry struct {
 	Version string `json:"version,omitempty"`
 	OK      bool   `json:"ok"`
 	Reason  string `json:"reason,omitempty"`
+	remedy  string
 }
 
 type migrateHomeBlocker struct {
@@ -293,6 +294,12 @@ func (gate *migrateHomeGate) addDirs(source string, dirs []string, names ...stri
 }
 
 func (gate *migrateHomeGate) addPath(source, candidate string) {
+	gate.addPathRemedy(source, candidate, "")
+}
+
+// addPathRemedy adds a binary whose remedy, when it fails, is remedy rather
+// than the one for its source.
+func (gate *migrateHomeGate) addPathRemedy(source, candidate, remedy string) {
 	if strings.TrimSpace(candidate) == "" {
 		return
 	}
@@ -312,7 +319,7 @@ func (gate *migrateHomeGate) addPath(source, candidate string) {
 		return
 	}
 	gate.seen[path] = true
-	entry := migrateHomeGateEntry{Source: source, Path: candidate}
+	entry := migrateHomeGateEntry{Source: source, Path: candidate, remedy: remedy}
 	if path != candidate {
 		entry.Path = candidate + " -> " + path
 	}
@@ -341,7 +348,11 @@ func (gate *migrateHomeGate) report(part *migrateHomePart, remedy func(source st
 		if entry.Version == "" {
 			code = migrateHomeVersionUnreadable
 		}
-		part.block(code, entry.Path, entry.Source+": "+entry.Reason, remedy(entry.Source))
+		fix := entry.remedy
+		if fix == "" {
+			fix = remedy(entry.Source)
+		}
+		part.block(code, entry.Path, entry.Source+": "+entry.Reason, fix)
 	}
 }
 

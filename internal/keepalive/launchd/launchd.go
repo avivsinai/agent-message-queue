@@ -199,6 +199,14 @@ type Installed struct {
 	Options Options // what Install writes again; BinaryPath is ProgramArguments[0]
 	Self    string  // the --self value
 	PATH    string  // the PATH in EnvironmentVariables
+	raw     []byte
+}
+
+// Edited reports whether the file differs from what Install writes for its
+// options: someone changed it by hand or another version wrote it. Writing
+// it again would drop that change.
+func (installed Installed) Edited() bool {
+	return !bytes.Equal(BuildPlist(installed.Options), installed.raw)
 }
 
 // ReadInstalled reads the plist at path. It refuses a plist that Install did
@@ -219,7 +227,7 @@ func ReadInstalled(path, label string) (Installed, error) {
 	for _, arg := range dict["ProgramArguments"].([]any) {
 		args = append(args, arg.(string))
 	}
-	installed := Installed{Options: Options{Label: label, PlistPath: path, BinaryPath: args[0]}}
+	installed := Installed{Options: Options{Label: label, PlistPath: path, BinaryPath: args[0]}, raw: data}
 	for i := 1; i+1 < len(args); i++ {
 		switch value := args[i+1]; args[i] {
 		case "--registry":
