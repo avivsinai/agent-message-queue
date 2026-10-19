@@ -174,10 +174,11 @@ type agentMarker struct {
 	// Archived is the state the relay last accepted for this identity.
 	Archived bool `json:"archived"`
 	// Channel is where the agent posts on its own: a session agent's latest
-	// DM, or the helper's control channel. OwnerAdded records that the
-	// owner is a member of the control channel.
+	// DM, or the helper's control channel. OwnerAdmin records that the
+	// owner is an admin of the control channel. A marker from before it
+	// has only owner_added (a plain member), so setup runs again.
 	Channel    string `json:"channel,omitempty"`
-	OwnerAdded bool   `json:"owner_added,omitempty"`
+	OwnerAdmin bool   `json:"owner_admin,omitempty"`
 	// The rest are the helper's: when its control channel setup last
 	// failed, control channels it gave up on, and when and for which
 	// session it last sent a draft.
@@ -302,9 +303,10 @@ func (s *Server) writeAgentMarker(dir string, m agentMarker, now time.Time) {
 // The per-machine helper ("AMQ Remote helper" in its system prompt) creates
 // the session agents. It never delivers. On each tick it:
 //   - creates the private control channel "amq-remote @ <machine>" once and
-//     adds the owner: Desktop accepts an agent draft only from a channel
-//     that both the sending agent and the owner belong to, and adds each new
-//     agent to that channel;
+//     adds the owner as an admin: Desktop accepts an agent draft only from a
+//     channel that both the sending agent and the owner belong to, and adds
+//     each new agent to that channel as the owner, which a relay may allow
+//     only an owner or admin of a private channel to do;
 //   - sends one draft-create per helperRequestGap for a live binding that
 //     no agent has a marker for yet (the fewest tries, then the oldest), so
 //     Desktop opens "Create agent" with the session's name and pin filled
@@ -392,18 +394,18 @@ func dropChannel(m *agentMarker, now time.Time) {
 			m.Dropped = m.Dropped[len(m.Dropped)-helperDroppedMax:]
 		}
 	}
-	m.Channel, m.OwnerAdded = "", false
+	m.Channel, m.OwnerAdmin = "", false
 	m.SetupFailed = now.UTC().Format(time.RFC3339)
 }
 
-// helperChannel makes sure the control channel exists and the owner is in
-// it. Before it creates one, it adopts a private channel of the same name
+// helperChannel makes sure the control channel exists and the owner is an
+// admin of it. Before it creates one, it adopts a private channel of the same name
 // that the helper owns, unless it gave up on that channel. After a failure
 // it waits helperRequestGap, so a failing relay never gets a request every
 // tick and an unclear create never leaves a stream of new channels. A
 // channel that refuses the owner is given up.
 func (s *Server) helperChannel(m *agentMarker, now time.Time) bool {
-	if m.Channel != "" && m.OwnerAdded {
+	if m.Channel != "" && m.OwnerAdmin {
 		return true
 	}
 	if failed, err := time.Parse(time.RFC3339, m.SetupFailed); err == nil && now.Sub(failed) < helperRequestGap {
@@ -441,7 +443,9 @@ func (s *Server) helperChannel(m *agentMarker, now time.Time) bool {
 		}
 		m.Channel = created.ChannelID
 	}
-	out, err := buzzCall(s.cfg.PostTimeout, "channels", "add-member", "--channel", m.Channel, "--pubkey", buzzOwner)
+	// Adding the owner again with a new role changes the role, so a channel
+	// set up before the owner was made an admin is upgraded here.
+	out, err := buzzCall(s.cfg.PostTimeout, "channels", "add-member", "--channel", m.Channel, "--pubkey", buzzOwner, "--role", "admin")
 	var added struct {
 		Accepted bool `json:"accepted"`
 	}
@@ -455,7 +459,7 @@ func (s *Server) helperChannel(m *agentMarker, now time.Time) bool {
 		}
 		return false
 	}
-	m.OwnerAdded, m.SetupFailed = true, ""
+	m.OwnerAdmin, m.SetupFailed = true, ""
 	return true
 }
 

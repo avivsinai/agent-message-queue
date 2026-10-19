@@ -455,7 +455,7 @@ func TestAttachOffersSetupWhenTheHelperWillNotDraft(t *testing.T) {
 	if err := os.MkdirAll(helper, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	marker := `{"name":"_helper","pubkey":"hh","channel":"c1","owner_added":true,"updated":"` + time.Now().UTC().Format(time.RFC3339) + `"}`
+	marker := `{"name":"_helper","pubkey":"hh","channel":"c1","owner_admin":true,"updated":"` + time.Now().UTC().Format(time.RFC3339) + `"}`
 	if err := os.WriteFile(filepath.Join(helper, "hh.json"), []byte(marker), 0o600); err != nil {
 		t.Fatal(err)
 	}
