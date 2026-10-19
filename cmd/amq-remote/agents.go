@@ -65,7 +65,10 @@ func agentOf(dirName string, now time.Time) agentInfo {
 			DisplayName string `json:"display_name"`
 			Updated     string `json:"updated"`
 			Channel     string `json:"channel"`
-			OwnerAdded  bool   `json:"owner_added"`
+			// OwnerAdmin is the helper's control channel setup; an older
+			// helper wrote only OwnerAdded, and it drafts too.
+			OwnerAdmin bool `json:"owner_admin"`
+			OwnerAdded bool `json:"owner_added"`
 		}
 		if err != nil || json.Unmarshal(raw, &m) != nil {
 			continue
@@ -79,7 +82,7 @@ func agentOf(dirName string, now time.Time) agentInfo {
 		}
 		if now.Sub(updated) <= agentMarkerFresh {
 			info.State = agentRunning
-			info.Ready = info.Ready || m.Channel != "" && m.OwnerAdded
+			info.Ready = info.Ready || m.Channel != "" && (m.OwnerAdmin || m.OwnerAdded)
 		}
 		if updated.After(newest) {
 			newest, info.Display = updated, m.DisplayName
