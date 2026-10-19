@@ -13,6 +13,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/avivsinai/agent-message-queue/internal/amqhome"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/launch"
 	"golang.org/x/sys/unix"
@@ -42,13 +43,19 @@ func planWakeRestartStageForRecordPlatform(record wakeRestartRecord) (string, er
 	if err := validateWakeImageEvidenceForPlatform(record.Candidate, "darwin"); err != nil {
 		return "", err
 	}
-	rootIdentity, err := resolveTreeIdentityToken(record.Root)
-	if err != nil {
-		return "", fmt.Errorf("resolve wake restart stage root identity: %w", err)
-	}
 	stateRoot, err := darwinWakeRestartStageRoot()
 	if err != nil {
 		return "", err
+	}
+	return planWakeRestartStageUnderRootPlatform(record, stateRoot)
+}
+
+// planWakeRestartStageUnderRootPlatform derives the exact stage path for a
+// validated record below one stage root.
+func planWakeRestartStageUnderRootPlatform(record wakeRestartRecord, stateRoot string) (string, error) {
+	rootIdentity, err := resolveTreeIdentityToken(record.Root)
+	if err != nil {
+		return "", fmt.Errorf("resolve wake restart stage root identity: %w", err)
 	}
 	if wakeRestartPathWithinDirectory(stateRoot, record.Root) {
 		return "", fmt.Errorf("wake restart stage state directory must be outside AM_ROOT")
@@ -63,12 +70,28 @@ func planWakeRestartStageForRecordPlatform(record wakeRestartRecord) (string, er
 	), nil
 }
 
+// darwinWakeRestartStageRoot is the root this binary writes new stages under.
 func darwinWakeRestartStageRoot() (string, error) {
 	stateDir, err := launch.LegacyStateDir()
 	if err != nil {
 		return "", fmt.Errorf("resolve Darwin wake restart state directory: %w", err)
 	}
-	stateDir, err = resolveDarwinWakeRestartStatePath(stateDir)
+	return darwinWakeRestartStageRootUnder(stateDir)
+}
+
+// darwinWakeRestartAMQHomeStageRoot is ~/.amq/state/wake-stages. This binary
+// validates and prunes stages there so that a restart staged by a later
+// release can finish here, but it writes no new stage there (#1046).
+func darwinWakeRestartAMQHomeStageRoot() (string, error) {
+	home, err := amqhome.Dir()
+	if err != nil {
+		return "", fmt.Errorf("resolve Darwin wake restart state directory: %w", err)
+	}
+	return darwinWakeRestartStageRootUnder(filepath.Join(home, "state"))
+}
+
+func darwinWakeRestartStageRootUnder(stateDir string) (string, error) {
+	stateDir, err := resolveDarwinWakeRestartStatePath(stateDir)
 	if err != nil {
 		return "", fmt.Errorf("resolve physical Darwin wake restart state directory: %w", err)
 	}
@@ -127,7 +150,8 @@ func validateWakeRestartStageStatePlatform(record wakeRestartRecord) error {
 		return err
 	}
 	legacyPlanned, legacyErr := planWakeRestartStagePlatform(record.Candidate, record.RequestID)
-	if record.StagePath != planned && (legacyErr != nil || record.StagePath != legacyPlanned) {
+	if record.StagePath != planned && (legacyErr != nil || record.StagePath != legacyPlanned) &&
+		!wakeRestartStagePlannedUnderAMQHome(record) {
 		return fmt.Errorf("wake restart stage path does not match the exact request")
 	}
 	if record.BoundImage == nil {
@@ -145,6 +169,18 @@ func validateWakeRestartStageStatePlatform(record wakeRestartRecord) error {
 		return fmt.Errorf("wake restart previous and current stages use the same path")
 	}
 	return nil
+}
+
+// wakeRestartStagePlannedUnderAMQHome reports whether the record's stage path
+// is the exact path a later release plans under ~/.amq/state/wake-stages. An
+// unresolvable AMQ home matches nothing, so it never fails a legacy record.
+func wakeRestartStagePlannedUnderAMQHome(record wakeRestartRecord) bool {
+	stateRoot, err := darwinWakeRestartAMQHomeStageRoot()
+	if err != nil {
+		return false
+	}
+	planned, err := planWakeRestartStageUnderRootPlatform(record, stateRoot)
+	return err == nil && record.StagePath == planned
 }
 
 func reclaimWakeRestartStagePlatform(record wakeRestartRecord) error {
@@ -207,7 +243,7 @@ func cleanupPersistedDarwinWakeRestartStage(bound wakeImageEvidenceV1) error {
 }
 
 func pruneEmptyStableDarwinWakeRestartStageHierarchy(stagePath string) error {
-	_, stable, err := stableDarwinWakeRestartStageParts(stagePath)
+	_, _, stable, err := stableDarwinWakeRestartStageParts(stagePath)
 	if err != nil || !stable {
 		return err
 	}

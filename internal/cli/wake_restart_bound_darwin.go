@@ -233,12 +233,8 @@ func copyDarwinWakeRestartStage(source *os.File, stagePath string) error {
 }
 
 func prepareStableDarwinWakeRestartStageParent(stagePath string) error {
-	parts, stable, err := stableDarwinWakeRestartStageParts(stagePath)
+	root, parts, stable, err := stableDarwinWakeRestartStageParts(stagePath)
 	if err != nil || !stable {
-		return err
-	}
-	root, err := darwinWakeRestartStageRoot()
-	if err != nil {
 		return err
 	}
 	parent := filepath.Dir(filepath.Dir(stagePath))
@@ -263,27 +259,38 @@ func prepareStableDarwinWakeRestartStageParent(stagePath string) error {
 	return nil
 }
 
-func stableDarwinWakeRestartStageParts(stagePath string) ([]string, bool, error) {
+// stableDarwinWakeRestartStageParts returns the stage root that contains
+// stagePath and the path's parts below it. The legacy root is checked first
+// and the first root that contains the path decides; ~/.amq/state/wake-stages
+// is the only other root, and an unresolvable AMQ home contains nothing.
+func stableDarwinWakeRestartStageParts(stagePath string) (string, []string, bool, error) {
 	root, err := darwinWakeRestartStageRoot()
 	if err != nil {
-		return nil, false, err
+		return "", nil, false, err
 	}
 	rel, err := filepath.Rel(root, stagePath)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return nil, false, nil
+		root, err = darwinWakeRestartAMQHomeStageRoot()
+		if err != nil {
+			return "", nil, false, nil
+		}
+		rel, err = filepath.Rel(root, stagePath)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return "", nil, false, nil
+		}
 	}
 	parts := strings.Split(rel, string(filepath.Separator))
 	if len(parts) != 4 || len(parts[0]) != sha256HexLength {
-		return nil, true, fmt.Errorf("planned stable Darwin wake restart stage path is invalid")
+		return "", nil, true, fmt.Errorf("planned stable Darwin wake restart stage path is invalid")
 	}
 	if _, err := hex.DecodeString(parts[0]); err != nil {
-		return nil, true, fmt.Errorf("planned stable Darwin wake restart root identity is invalid")
+		return "", nil, true, fmt.Errorf("planned stable Darwin wake restart root identity is invalid")
 	}
 	if err := fsq.ValidateHandle(parts[1]); err != nil || !validWakeReloadTransportGeneration(parts[2]) ||
 		parts[3] == "" || filepath.Base(parts[3]) != parts[3] {
-		return nil, true, fmt.Errorf("planned stable Darwin wake restart stage path is invalid")
+		return "", nil, true, fmt.Errorf("planned stable Darwin wake restart stage path is invalid")
 	}
-	return parts, true, nil
+	return root, parts, true, nil
 }
 
 func sameWakeImageContent(first, second wakeImageEvidenceV1) bool {
@@ -380,7 +387,7 @@ func validPreviousWakeRestartBoundImagePlatform(bound wakeImageEvidenceV1) bool 
 	if legacy {
 		return true
 	}
-	_, stable, err := stableDarwinWakeRestartStageParts(stagePath)
+	_, _, stable, err := stableDarwinWakeRestartStageParts(stagePath)
 	return err == nil && stable
 }
 
