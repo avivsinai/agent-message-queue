@@ -189,7 +189,7 @@ func (s *Server) runRemote(sessionID, text, eventID string, turn *turnState, emi
 	}
 	// root, target and native stay the values captured above for every
 	// retry, so a rebind during the wait cannot move this turn (611.34).
-	deadline := time.Now().Add(r.s.cfg.TurnTimeout)
+	deadline := time.Now().Add(r.s.timing(r.turn).timeout)
 	queued := false
 	var last protocol.Snapshot
 	for {
@@ -592,7 +592,7 @@ func (r *remoteTurn) follow(snap protocol.Snapshot) (any, *rpcError) {
 	// consumer loop below (codex #876 r2 P1 #1). It waits past each revision
 	// it saw, so a pending interaction ends a wait, and stops once the
 	// request is terminal or uncertain.
-	ref, native, timeout, after := snap.RequestRef, r.native, r.s.cfg.HeartbeatInterval.Milliseconds(), snap.Revision
+	ref, native, timeout, after := snap.RequestRef, r.native, r.s.timing(r.turn).heartbeat.Milliseconds(), snap.Revision
 	waits := make(chan remoteWait, 1)
 	stop := make(chan struct{})
 	defer close(stop)
@@ -615,7 +615,7 @@ func (r *remoteTurn) follow(snap protocol.Snapshot) (any, *rpcError) {
 		}
 	}()
 
-	deadline := time.NewTimer(r.s.cfg.TurnTimeout)
+	deadline := time.NewTimer(r.s.timing(r.turn).timeout)
 	defer deadline.Stop()
 	for {
 		select {

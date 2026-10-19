@@ -73,6 +73,23 @@ than silently dropped.
 | `AMQ_ACP_POLL_INTERVAL` | Reply poll interval (default `100ms`). |
 | `AMQ_ACP_HEARTBEAT_INTERVAL` | `session/update` heartbeat interval (default `15s`). |
 
+### Live settings
+
+`~/.amq/acp.settings` is a JSON file that overrides the three durations
+without a restart:
+
+```json
+{"turn_timeout": "30m", "poll_interval": "100ms", "heartbeat_interval": "15s"}
+```
+
+Each key is optional and uses the same positive Go duration as its
+`AMQ_ACP_*` variable. The file is read at the start of each prompt, so an edit
+applies from the next turn; a turn already running keeps its values. A missing
+file means the startup values. An invalid file is ignored, logged once on
+stderr, and the turn uses the startup values; it never stops `amq-acp`.
+Identity (root, handle, recipient, target, session pin, Buzz credentials) is
+startup-only.
+
 Every `AMQ_ACP_*` duration is fail-closed: an unparsable or non-positive value
 refuses at startup and names the offending variable, so a typo can never
 silently turn a bounded wait into an unbounded one.

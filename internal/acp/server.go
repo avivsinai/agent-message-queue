@@ -103,6 +103,9 @@ type sessionState struct {
 // settles it first (codex ebo PR2 consult): a reply read after a cancel
 // cannot overturn the cancel, and a cancel after a reply is a no-op.
 type turnState struct {
+	// timing is set when the prompt starts and fixed for the turn; nil means
+	// the startup values.
+	timing *turnTiming
 	// prompt is the delivered prompt's message id; only a reply whose refs
 	// name it answers this turn.
 	prompt string
@@ -144,12 +147,15 @@ func (t *turnState) settleLocked(outcome string) bool {
 // AMQ routing context. Prompt requests run in goroutines so the reader stays
 // available while a turn waits for its reply.
 type Server struct {
-	cfg      Config
-	version  string
-	mu       sync.Mutex
-	sessions map[string]*sessionState
-	store    *sessionStore
-	ready    bool
+	// settingsRefused is the last reported reason acp.settings was refused,
+	// guarded by mu, so a bad file logs once, not on every turn.
+	settingsRefused string
+	cfg             Config
+	version         string
+	mu              sync.Mutex
+	sessions        map[string]*sessionState
+	store           *sessionStore
+	ready           bool
 	// streamClosed records that the ACP input stream ended. A prompt that
 	// begins after this point never had a connected client, so it refuses
 	// immediately instead of waiting out the bounded timeout.
@@ -746,6 +752,8 @@ func (s *Server) beginPrompt(params json.RawMessage) (func(emit func(any) error)
 	}
 	return func(emit func(any) error) (any, *rpcError) {
 		defer s.finishTurn(session, turn)
+		t := s.loadTurnTiming()
+		turn.timing = &t
 		if s.remote() {
 			s.mu.Lock()
 			close(turn.ready)
@@ -806,11 +814,11 @@ func (s *Server) waitForReply(sessionID string, delivery Delivery, turn *turnSta
 		return nil, newRPCError(codeInternalError, "emit ACP session update: %v", err)
 	}
 
-	deadline := time.NewTimer(s.cfg.TurnTimeout)
+	deadline := time.NewTimer(s.timing(turn).timeout)
 	defer deadline.Stop()
-	poll := time.NewTicker(s.cfg.PollInterval)
+	poll := time.NewTicker(s.timing(turn).poll)
 	defer poll.Stop()
-	heartbeat := time.NewTicker(s.cfg.HeartbeatInterval)
+	heartbeat := time.NewTicker(s.timing(turn).heartbeat)
 	defer heartbeat.Stop()
 
 	// settle decides the outcome under the mutex; if another path already

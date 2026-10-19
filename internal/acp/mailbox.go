@@ -83,7 +83,7 @@ func (s *Server) runMailbox(sessionID, text, eventID string, b binding.Binding, 
 	}
 	// The turn budget starts before the claim, so a publish-lock wait counts
 	// against it (codex #895 r2 P1).
-	budget := time.Now().Add(s.cfg.TurnTimeout)
+	budget := time.Now().Add(s.timing(turn).timeout)
 	claim, err := s.publishClaimed(r, budget, b, threadID, text)
 	if claim.MessageID != "" {
 		threadID = claim.Thread
@@ -141,9 +141,9 @@ func (s *Server) runMailbox(sessionID, text, eventID string, b binding.Binding, 
 
 	deadline := time.NewTimer(time.Until(budget))
 	defer deadline.Stop()
-	poll := time.NewTicker(s.cfg.PollInterval)
+	poll := time.NewTicker(s.timing(turn).poll)
 	defer poll.Stop()
-	heartbeat := time.NewTicker(s.cfg.HeartbeatInterval)
+	heartbeat := time.NewTicker(s.timing(turn).heartbeat)
 	defer heartbeat.Stop()
 	read := false
 	// The turn start and each heartbeat also recover replies another
