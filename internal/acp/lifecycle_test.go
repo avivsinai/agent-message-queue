@@ -140,9 +140,41 @@ func TestHelperDraftsAnAgentForANewSession(t *testing.T) {
 	want := []string{
 		"channels list --member --visibility private",
 		"channels create --name amq-remote @ " + binding.Machine() + " --type stream --visibility private",
-		"channels add-member --channel " + control + " --pubkey " + owner,
+		"channels add-member --channel " + control + " --pubkey " + owner + " --role admin",
 		"agents draft-create --channel " + control + " --display-name " + label + " --system-prompt AMQ Remote session: alpha",
 	}
+	if !slices.Equal(calls, want) {
+		t.Fatalf("buzz calls = %q\nwant %q", calls, want)
+	}
+}
+
+// Seen live on 2026-10-19: the relay refused Desktop's add of a new session
+// agent to the control channel ("only owners/admins may add private-channel
+// members"), because the helper had added the owner as a plain member. A
+// helper whose marker predates the fix makes the owner an admin of its
+// existing channel, without creating another one.
+func TestHelperMakesTheOwnerAnAdminOfAnExistingChannel(t *testing.T) {
+	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
+	savedSelf, savedOwner, savedCall := buzzSelf, buzzOwner, buzzCall
+	t.Cleanup(func() { buzzSelf, buzzOwner, buzzCall = savedSelf, savedOwner, savedCall })
+	recordPosts(t)
+	const control = "0b2c39a1-6f1e-4d0a-9b3a-5c1d2e3f4a5b"
+	buzzSelf, buzzOwner = strings.Repeat("c", 64), strings.Repeat("d", 64)
+	var calls []string
+	buzzCall = recordHelperCalls(&calls, control)
+	helper := NewServer(Config{RemoteBinding: true, Helper: true, StateDir: canonicalTempDir(t)}, "test")
+	dir := helper.agentMarkerDir(helperName)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	old := `{"name":"_helper","channel":"` + control + `","owner_added":true,"updated":"2026-10-19T15:48:38Z"}`
+	if err := os.WriteFile(filepath.Join(dir, buzzSelf+".json"), []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	helper.lifecycleTick(time.Now())
+
+	want := []string{"channels add-member --channel " + control + " --pubkey " + buzzOwner + " --role admin"}
 	if !slices.Equal(calls, want) {
 		t.Fatalf("buzz calls = %q\nwant %q", calls, want)
 	}
