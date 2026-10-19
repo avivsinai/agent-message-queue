@@ -108,42 +108,53 @@ func isDefaultCoopRoot(path string) bool {
 //  4. If root itself is the default root name (.agent-mail), return "" (known base)
 //  5. Otherwise, return "" (base or unknown — caller must handle)
 func classifyRoot(root string) string {
+	base, _ := classifyRootWithEvidence(root)
+	return base
+}
+
+// classifyRootWithEvidence distinguishes a known base from an unknown root,
+// while preserving classifyRoot's empty result for a base root itself.
+func classifyRootWithEvidence(root string) (base string, known bool) {
 	if strings.TrimSpace(root) == "" {
-		return ""
+		return "", false
 	}
 	resolvedRoot := absPath(resolveRoot(root))
 	if base := strings.TrimSpace(os.Getenv(envBaseRoot)); base != "" {
 		base = absPath(resolveRoot(base))
 		if resolvedRoot == base {
-			return ""
+			return "", true
 		}
 		if isSessionRootUnderBase(resolvedRoot, base) {
-			return base
+			return base, true
 		}
 	}
 	parent := filepath.Dir(resolvedRoot)
 	// A direct child of .agent-mail is always a session; this structural rule
 	// deliberately outranks root-local .amqrc and must not be rebased.
 	if isDefaultCoopRoot(parent) {
-		return parent
+		return parent, true
 	}
 	if base := configuredBaseRoot(resolvedRoot); base != "" {
 		if resolvedRoot == base {
-			return ""
+			return "", true
 		}
-		return base
+		return base, true
 	}
 	if isDefaultCoopRoot(resolvedRoot) {
-		return ""
+		return "", true
 	}
-	return ""
+	return "", false
 }
 
 // classifyRootForDisplay adds a lexical sibling-session hint for diagnostics.
+// A known base is returned as itself, without applying sibling hints.
 // It must never feed routing, pinning, or environment authority decisions.
 func classifyRootForDisplay(root string) string {
-	if base := classifyRoot(root); base != "" {
-		return base
+	if base, known := classifyRootWithEvidence(root); known {
+		if base != "" {
+			return base
+		}
+		return absPath(resolveRoot(root))
 	}
 	if strings.TrimSpace(root) == "" {
 		return ""

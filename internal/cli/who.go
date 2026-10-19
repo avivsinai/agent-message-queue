@@ -24,11 +24,11 @@ func runWho(args []string) error {
 	}
 	root := resolveRoot(common.Root)
 
-	// Discover from authoritative root evidence, not diagnostic sibling hints:
-	// unrelated directories with agents/ must not override a valid base root.
-	baseRoot := classifyRoot(root)
+	// Determine base root using the centralized classifier.
+	// Falls back to checking if root itself contains session subdirs.
+	baseRoot := classifyRootForDisplay(root)
 	if baseRoot == "" {
-		// classifyRoot returns empty for both a known base and an unknown root.
+		// classifyRoot couldn't determine from env or sibling sessions.
 		// Check if root IS the base root (contains session subdirs).
 		if hasSessionSubdirs(root) {
 			baseRoot = root
