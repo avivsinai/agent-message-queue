@@ -167,22 +167,11 @@ func migrateHomeRefuse(report migrateHomeReport, jsonOutput bool) error {
 func migrateHomeTrustRemedy(code string, move launch.LegacyTrustMove) string {
 	switch code {
 	case launch.TrustMoveBothExist:
-		inBoth := "none"
-		if len(move.InBoth) > 0 {
-			paths := make([]string, 0, 2*len(move.InBoth))
-			for _, name := range move.InBoth {
-				paths = append(paths, filepath.Join(move.From, "projects", name), filepath.Join(move.To, "projects", name))
-			}
-			inBoth = strings.Join(paths, ", ")
-		}
-		return fmt.Sprintf("A newer amq writes %s only while %s is absent, so %s was written after it: by an older amq or launchapi program, "+
-			"by an amq launch that ran during a migration, or by an amq with another XDG_STATE_HOME. Only one tree can hold trust. "+
-			"Removing trust is safe: the only effect is a new trust prompt. Removing a tree while a project is in both trees is not: "+
-			"it can make the older grant for that project active again. "+
-			"(1) Remove each project that is in both trees from both trees: %s. "+
-			"(2) Remove the tree with fewer projects. "+
-			"(3) Run amq doctor --migrate-home again while no amq launch runs.",
-			move.To, move.From, move.From, inBoth)
+		return fmt.Sprintf("New binaries use %[1]s, so %[2]s is inert. %[1]s was written after a newer amq wrote %[2]s: "+
+			"by an older amq or launchapi program, by an amq launch that ran during a migration, or by an amq with another XDG_STATE_HOME. "+
+			"Find that first. Then remove %[2]s (the only effect is a new trust prompt for the projects it holds) "+
+			"and run amq doctor --migrate-home again while no amq launch runs. Never remove %[1]s: that makes the stale grants in %[2]s active.",
+			move.From, move.To)
 	case launch.TrustMoveCrossDevice:
 		return "AMQ does not copy trust. Keep the legacy location; it continues to work. " +
 			"Changing XDG_STATE_HOME does not move the grants: it changes which directory amq reads, and every launch asks for trust again."

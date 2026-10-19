@@ -93,14 +93,12 @@ type TrustMoveRefusal struct {
 func (e *TrustMoveRefusal) Error() string { return e.Message }
 
 // LegacyTrustMove moves <legacy>/launch to ~/.amq/state/launch. FromProjects
-// and ToProjects count the project trust directories in each tree; InBoth
-// names the project directories that both trees hold.
+// and ToProjects count the project trust directories in each tree.
 type LegacyTrustMove struct {
 	From         string
 	To           string
 	FromProjects int
 	ToProjects   int
-	InBoth       []string
 }
 
 // PlanLegacyTrustMove returns the move without changing anything. found is
@@ -135,7 +133,7 @@ func PlanLegacyTrustMove() (move LegacyTrustMove, found bool, err error) {
 	if err != nil {
 		return move, true, err
 	}
-	move.FromProjects = len(from)
+	move.FromProjects = from
 	if _, err := os.Lstat(move.To); errors.Is(err, os.ErrNotExist) {
 		return move, true, nil
 	} else if err != nil {
@@ -145,31 +143,18 @@ func PlanLegacyTrustMove() (move LegacyTrustMove, found bool, err error) {
 	if err != nil {
 		return move, true, err
 	}
-	move.ToProjects = len(to)
-	for name := range from {
-		if to[name] {
-			move.InBoth = append(move.InBoth, name)
-		}
-	}
-	slices.Sort(move.InBoth)
+	move.ToProjects = to
 	return move, true, &TrustMoveRefusal{Code: TrustMoveBothExist, Subject: move.To,
-		Message: fmt.Sprintf("both %s (%d projects) and %s (%d projects) exist; %d projects are in both",
-			move.From, move.FromProjects, move.To, move.ToProjects, len(move.InBoth))}
+		Message: fmt.Sprintf("both %s (%d projects) and %s (%d projects) exist",
+			move.From, move.FromProjects, move.To, move.ToProjects)}
 }
 
-func trustProjectDirs(launchDir string) (map[string]bool, error) {
+func trustProjectDirs(launchDir string) (int, error) {
 	entries, err := os.ReadDir(filepath.Join(launchDir, "projects"))
 	if errors.Is(err, os.ErrNotExist) {
-		return map[string]bool{}, nil
+		return 0, nil
 	}
-	if err != nil {
-		return nil, err
-	}
-	names := make(map[string]bool, len(entries))
-	for _, entry := range entries {
-		names[entry.Name()] = true
-	}
-	return names, nil
+	return len(entries), err
 }
 
 // ExecuteLegacyTrustMove renames the planned <legacy>/launch to
