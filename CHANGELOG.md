@@ -8,6 +8,13 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.101.0](https://github.com/avivsinai/agent-message-queue/compare/v0.100.0...v0.101.0) (2026-10-19)
+
+
+### Features
+
+* **keepalive:** move ~/.amq-keepalive to ~/.amq/keepalive with doctor --migrate-home ([#1089](https://github.com/avivsinai/agent-message-queue/issues/1089)) ([e0862ad](https://github.com/avivsinai/agent-message-queue/commit/e0862ad23249f0ed3b5685a333cfffefe098acd0))
+
 ## [0.100.0](https://github.com/avivsinai/agent-message-queue/compare/v0.99.0...v0.100.0) (2026-10-19)
 
 
