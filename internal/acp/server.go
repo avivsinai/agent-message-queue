@@ -622,8 +622,12 @@ func (s *Server) newSession(params json.RawMessage) (any, *rpcError) {
 	if err != nil {
 		return nil, newRPCError(codeInternalError, "generate session id: %v", err)
 	}
-	if channelID == "" {
-		channelID = "session/" + id
+	// Buzz sends no channel id, so each session gets a fresh synthetic one.
+	// It can never be looked up again, so it is not persisted: persisting it
+	// grew the state file by one entry per session until load refused it.
+	synthetic := channelID == ""
+	if synthetic {
+		channelID = syntheticChannelPrefix + id
 	}
 	now := time.Now()
 	models := s.models()
@@ -634,19 +638,21 @@ func (s *Server) newSession(params json.RawMessage) (any, *rpcError) {
 	if s.store.err != nil {
 		return nil, newRPCError(codeInternalError, "load ACP session state: %v", s.store.err)
 	}
-	mapping, found, err := s.store.get(channelID)
-	if err != nil {
-		return nil, newRPCError(codeInternalError, "load ACP session mapping: %v", err)
-	}
 	threadID := cockpitThread(channelID)
-	if found {
-		threadID = mapping.Thread
-	}
-	if strings.TrimSpace(threadID) == "" {
-		return nil, newRPCError(codeInternalError, "stored ACP session mapping has an empty thread")
-	}
-	if err := s.store.put(channelID, threadID, now); err != nil {
-		return nil, newRPCError(codeInternalError, "persist ACP session mapping: %v", err)
+	if !synthetic {
+		mapping, found, err := s.store.get(channelID)
+		if err != nil {
+			return nil, newRPCError(codeInternalError, "load ACP session mapping: %v", err)
+		}
+		if found {
+			threadID = mapping.Thread
+		}
+		if strings.TrimSpace(threadID) == "" {
+			return nil, newRPCError(codeInternalError, "stored ACP session mapping has an empty thread")
+		}
+		if err := s.store.put(channelID, threadID, now); err != nil {
+			return nil, newRPCError(codeInternalError, "persist ACP session mapping: %v", err)
+		}
 	}
 	// The advertised default is the plain model, which selects no binding:
 	// the first binding in sort order never becomes the session's by default.

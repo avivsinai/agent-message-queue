@@ -17,6 +17,11 @@ import (
 
 const sessionStateFilename = "cockpit-sessions.json"
 
+// syntheticChannelPrefix marks a channel id that newSession made up because
+// the client sent none. Such an entry is never looked up again, so load drops
+// any that an older binary persisted, and the next save prunes them.
+const syntheticChannelPrefix = "session/"
+
 type persistedSession struct {
 	Thread    string `json:"thread"`
 	UpdatedAt string `json:"updatedAt"`
@@ -86,6 +91,9 @@ func (s *sessionStore) load() {
 		state.Channels = make(map[string]persistedSession)
 	}
 	for channelID, mapping := range state.Channels {
+		if strings.HasPrefix(channelID, syntheticChannelPrefix) {
+			continue
+		}
 		if _, err := normalizeChannelID(channelID); err != nil || strings.TrimSpace(mapping.Thread) == "" {
 			s.err = fmt.Errorf("ACP session state %s: invalid entry for channel %q", s.path(), channelID)
 			return
