@@ -598,6 +598,47 @@ func TestChannelThreadMappingSurvivesRespawn(t *testing.T) {
 	_ = second
 }
 
+// Found in review of #1094: Buzz sends no channel id, so every session/new
+// persisted a fresh "session/<id>" entry that is never read again. The state
+// file grew without bound until load refused it, which then refuses every
+// session/new. Synthetic entries are not persisted, and old ones are pruned
+// on the next save.
+func TestSessionsWithoutChannelIDAreNotPersisted(t *testing.T) {
+	cfg := testConfig(t)
+	// Over 1 MiB of synthetic entries, as an older binary left it: load must
+	// still read the file so the next save prunes it (review of #1096).
+	var old strings.Builder
+	old.WriteString(`{"version":1,"channels":{`)
+	for i := 0; i < 16000; i++ {
+		if i > 0 {
+			old.WriteByte(',')
+		}
+		fmt.Fprintf(&old, `"session/%08d":{"thread":"cockpit/session/%08d","updatedAt":"2026-10-01T00:00:00Z"}`, i, i)
+	}
+	old.WriteString(`}}`)
+	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cfg.StateDir, sessionStateFilename), []byte(old.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	live := startServer(t, cfg)
+	live.send(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":2,"clientCapabilities":{}}}`)
+	_ = live.read()
+	live.send(`{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/tmp"}}`)
+	if created := live.read(); created["result"] == nil {
+		t.Fatalf("session/new without a channel id = %v", created)
+	}
+	newLiveSession(t, cfg, "cockpit-real")
+	state, err := os.ReadFile(filepath.Join(cfg.StateDir, sessionStateFilename))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(state), syntheticChannelPrefix) || !strings.Contains(string(state), `"cockpit-real"`) {
+		t.Fatalf("state = %s; want only the real channel", state)
+	}
+}
+
 // TestClientDisconnectDoesNotHoldTheTurn proves a closed ACP input stream ends
 // in-flight turns promptly with a typed refusal instead of waiting out the
 // full turn timeout, and never retracts the queued AMQ message. The input is a

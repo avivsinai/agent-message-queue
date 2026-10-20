@@ -17,6 +17,13 @@ import (
 
 const sessionStateFilename = "cockpit-sessions.json"
 
+// syntheticChannelPrefix marks a channel id that newSession made up because
+// the client sent none. Such an entry is never looked up again, so load drops
+// any that an older binary persisted, and the next save prunes them.
+const syntheticChannelPrefix = "session/"
+
+const maxSessionStateBytes = 64 << 20
+
 type persistedSession struct {
 	Thread    string `json:"thread"`
 	UpdatedAt string `json:"updatedAt"`
@@ -60,8 +67,11 @@ func (s *sessionStore) load() {
 		return
 	}
 	defer func() { _ = file.Close() }()
-	if info.Size() > 1024*1024 {
-		s.err = fmt.Errorf("ACP session state %s exceeds 1 MiB", s.path())
+	// The cap bounds memory. It is well above a real file: an older binary
+	// persisted one synthetic entry per session, and load must still read
+	// such a file so the next save prunes it (review of #1096).
+	if info.Size() > maxSessionStateBytes {
+		s.err = fmt.Errorf("ACP session state %s exceeds %d MiB", s.path(), maxSessionStateBytes>>20)
 		return
 	}
 	var state persistedSessions
@@ -86,6 +96,9 @@ func (s *sessionStore) load() {
 		state.Channels = make(map[string]persistedSession)
 	}
 	for channelID, mapping := range state.Channels {
+		if strings.HasPrefix(channelID, syntheticChannelPrefix) {
+			continue
+		}
 		if _, err := normalizeChannelID(channelID); err != nil || strings.TrimSpace(mapping.Thread) == "" {
 			s.err = fmt.Errorf("ACP session state %s: invalid entry for channel %q", s.path(), channelID)
 			return
