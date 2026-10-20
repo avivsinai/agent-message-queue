@@ -117,15 +117,15 @@ Environment:
   AMQ_ACP_POLL_INTERVAL reply poll interval (default 100ms)
   AMQ_ACP_HEARTBEAT_INTERVAL session/update heartbeat interval (default 15s)
 
-BUZZ_* variables are read to refuse agents!=1 and non-owner inbound, then
-stripped from the environment. The managed agent identity (BUZZ_PRIVATE_KEY,
-BUZZ_AUTH_TAG, BUZZ_RELAY_URL) stays in process memory only to post each
+BUZZ_* variables are read to refuse non-owner inbound and agents!=1, then
+stripped from the environment. agents!=1 is refused in BYOH mode
+(AMQ_ACP_TO or AMQ_ACP_REMOTE_TARGET) and on platforms without advisory
+locks. With AMQ_ACP_REMOTE=binding any parallelism runs: one worker per Buzz
+identity leads the agent's lifecycle. The managed agent identity
+(BUZZ_PRIVATE_KEY, BUZZ_AUTH_TAG, BUZZ_RELAY_URL) stays in process memory only to post each
 owner-facing answer into its Buzz channel with the buzz CLI
 (AMQ_ACP_BUZZ_CLI, else the buzz inside Buzz.app; no implicit PATH fallback). It never
-enters an AMQ message. A lease-based gate that would relax
-this refusal is tracked in bead agent-message-queue-1xl; upstream Buzz has no
-deployment lease profile today, and this binary does not treat an env string
-as one.
+enters an AMQ message.
 
 A session pin that cannot be authenticated is refused with exit code 5.
 `

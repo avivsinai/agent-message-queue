@@ -269,10 +269,14 @@ func (s *Server) lifecycleTick(now time.Time) {
 	}
 	dir := s.agentMarkerDir(s.cfg.Pin)
 	m, _ := readAgentMarker(filepath.Join(dir, buzzSelf+".json"))
-	if raw, err := readSmallRegular(filepath.Join(dir, buzzSelf+".dm")); err == nil {
-		if channel := strings.TrimSpace(string(raw)); channel != "" {
-			m.Channel = channel
+	if raw, err := readSmallRegular(filepath.Join(dir, buzzSelf+".dm")); err == nil && strings.TrimSpace(string(raw)) != "" {
+		m.Channel = strings.TrimSpace(string(raw))
+	} else {
+		s.mu.Lock()
+		if s.lastChannel != "" {
+			m.Channel = s.lastChannel
 		}
+		s.mu.Unlock()
 	}
 	b, err := binding.ReadNamed(s.cfg.Pin)
 	switch {
@@ -324,8 +328,9 @@ func (s *Server) resign() {
 	}
 }
 
-// recordDM keeps channel as the latest DM of a pinned agent, so the worker
-// that leads its lifecycle posts "Connected again" there.
+// recordDM keeps channel as the latest DM of a pinned agent across its
+// workers, so the worker that leads its lifecycle posts "Connected again"
+// there. Every DM prompt writes it: the last writer is the latest DM.
 func (s *Server) recordDM(channel string) {
 	if !s.cfg.RemoteBinding || s.cfg.Helper || s.cfg.Pin == "" || s.cfg.PinErr != nil || buzzSelf == "" {
 		return

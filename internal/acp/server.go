@@ -166,7 +166,8 @@ type Server struct {
 	// late is the late-reply sweep state (binding mode only).
 	late lateReplySweep
 	// lastChannel is the DM channel of the latest DM prompt in this
-	// process; a change is written for the lifecycle leader (recordDM).
+	// process. Each DM is also written for the lifecycle leader (recordDM);
+	// the leader falls back to its own value when that file is unreadable.
 	lastChannel string
 	// leader releases the lifecycle lead of this worker's Buzz identity, or
 	// is nil. Only the sweep worker sets it; its stop releases it.
@@ -749,7 +750,7 @@ func (s *Server) beginPrompt(params json.RawMessage) (func(emit func(any) error)
 		if s.cfg.RemoteBinding {
 			turn.mailboxEvent = eventID
 		}
-		if buzzDM(text) && turn.channel != s.lastChannel {
+		if buzzDM(text) {
 			s.lastChannel = turn.channel
 			dm = turn.channel
 		}
