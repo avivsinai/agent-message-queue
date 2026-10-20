@@ -441,8 +441,8 @@ func TestBinaryRefusesParallelAgents(t *testing.T) {
 	if code != exitUsage {
 		t.Fatalf("exit code = %d, want %d (stderr: %s)", code, exitUsage, stderr)
 	}
-	if !strings.Contains(stderr, "agents=1") {
-		t.Errorf("stderr %q does not name agents=1", stderr)
+	if !strings.Contains(stderr, "BUZZ_ACP_AGENTS=1") {
+		t.Errorf("stderr %q does not name BUZZ_ACP_AGENTS=1", stderr)
 	}
 }
 

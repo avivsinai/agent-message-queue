@@ -110,6 +110,7 @@ func (s *Server) startLateReplySweep() (stop func()) {
 	return func() {
 		close(quit)
 		<-done
+		s.resign()
 		s.mu.Lock()
 		s.late.kick = nil
 		s.mu.Unlock()

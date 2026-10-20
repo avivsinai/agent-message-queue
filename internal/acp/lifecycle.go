@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
+	"github.com/avivsinai/agent-message-queue/internal/lock"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 )
 
@@ -250,21 +251,33 @@ func buzzRun(budget time.Duration, args ...string) error {
 // nothing and changes nothing.
 //
 // When it unarchives, it posts "Connected again" to its latest DM.
+//
+// Buzz may run N identical workers of one agent; only the worker that leads
+// its identity runs the tick, so each change runs once, not N times.
 func (s *Server) lifecycleTick(now time.Time) {
-	if s.cfg.Helper {
-		s.helperTick(now)
+	if buzzSelf == "" || (!s.cfg.Helper && (s.cfg.Pin == "" || s.cfg.PinErr != nil)) {
 		return
 	}
-	if s.cfg.Pin == "" || s.cfg.PinErr != nil || buzzSelf == "" {
+	if s.cfg.Helper {
+		if s.lead(helperName) {
+			s.helperTick(now)
+		}
+		return
+	}
+	if !s.lead(s.cfg.Pin) {
 		return
 	}
 	dir := s.agentMarkerDir(s.cfg.Pin)
 	m, _ := readAgentMarker(filepath.Join(dir, buzzSelf+".json"))
-	s.mu.Lock()
-	if s.lastChannel != "" {
-		m.Channel = s.lastChannel
+	if raw, err := readSmallRegular(filepath.Join(dir, buzzSelf+".dm")); err == nil && strings.TrimSpace(string(raw)) != "" {
+		m.Channel = strings.TrimSpace(string(raw))
+	} else {
+		s.mu.Lock()
+		if s.lastChannel != "" {
+			m.Channel = s.lastChannel
+		}
+		s.mu.Unlock()
 	}
-	s.mu.Unlock()
 	b, err := binding.ReadNamed(s.cfg.Pin)
 	switch {
 	case errors.Is(err, binding.ErrNone):
@@ -284,6 +297,49 @@ func (s *Server) lifecycleTick(now time.Time) {
 	}
 	m.Name, m.DisplayName = s.cfg.Pin, buzzAgent.displayName
 	s.writeAgentMarker(dir, m, now)
+}
+
+// lead reports whether this worker leads the lifecycle of its Buzz identity
+// under pin. The first worker to take <pin>/<self>.lock leads for the life of
+// Serve; when it exits, the kernel drops the lock and the next tick of
+// another worker takes it. Without advisory locks amq-acp runs one worker
+// (PrepareWorkerEnv), which leads. A lock error skips this tick.
+func (s *Server) lead(pin string) bool {
+	if s.leader != nil || !lock.AdvisoryLockAvailable() {
+		return true
+	}
+	dir := s.agentMarkerDir(pin)
+	if os.MkdirAll(dir, 0o700) != nil {
+		return false
+	}
+	release, ok, err := lock.TryExclusive(filepath.Join(dir, buzzSelf+".lock"))
+	if err != nil || !ok {
+		return false
+	}
+	s.leader = release
+	return true
+}
+
+// resign releases the lifecycle lead, if this worker holds it.
+func (s *Server) resign() {
+	if s.leader != nil {
+		s.leader()
+		s.leader = nil
+	}
+}
+
+// recordDM keeps channel as the latest DM of a pinned agent across its
+// workers, so the worker that leads its lifecycle posts "Connected again"
+// there. Every DM prompt writes it: the last writer is the latest DM.
+func (s *Server) recordDM(channel string) {
+	if !s.cfg.RemoteBinding || s.cfg.Helper || s.cfg.Pin == "" || s.cfg.PinErr != nil || buzzSelf == "" {
+		return
+	}
+	dir := s.agentMarkerDir(s.cfg.Pin)
+	if os.MkdirAll(dir, 0o700) != nil {
+		return
+	}
+	_, _ = fsq.WriteFileAtomic(dir, buzzSelf+".dm", []byte(channel+"\n"), 0o600)
 }
 
 // writeAgentMarker stamps m as this process's and writes it under dir.
