@@ -298,31 +298,35 @@ func TestB14bReplyRequiredNotDroppedAndPumpStaysLive(t *testing.T) {
 	close(release2)
 }
 
-// TestServerRequestHandlerPanicAnswersWithError: a handler that panics has
-// not answered, so the app-server would wait forever for that request id.
-// The worker answers it with an error and keeps serving the next request.
+// TestServerRequestHandlerPanicAnswersOnlyNonInteractive: a handler that
+// panics has not answered, so the app-server would wait forever for that
+// request id. The worker answers a non-interactive request with an error,
+// sends nothing for an approval (the terminal keeps it), and keeps serving.
 // Found in the repo quality audit (agent-message-queue-0ed.15).
-func TestServerRequestHandlerPanicAnswersWithError(t *testing.T) {
+func TestServerRequestHandlerPanicAnswersOnlyNonInteractive(t *testing.T) {
 	respCh := make(chan []byte, 1)
 	c, _ := newB14bClientWithServer(t, func(payload []byte) { respCh <- payload })
 	served := make(chan string, 1)
 	handlersOf(c).setReq(func(r ServerRequest) {
-		if string(r.ID) == `"srv-panic"` {
+		if string(r.ID) != `"srv-next"` {
 			panic("handler bug")
 		}
 		served <- string(r.ID)
 	})
-	c.dispatchServerRequest(ServerRequest{ID: json.RawMessage(`"srv-panic"`), Method: "item/commandExecution/requestApproval"})
+	// The worker is sequential and the stand-in server reports only the
+	// first frame, so an answer to the approval would arrive first.
+	c.dispatchServerRequest(ServerRequest{ID: json.RawMessage(`"srv-approval"`), Method: methodCommandApproval})
+	c.dispatchServerRequest(ServerRequest{ID: json.RawMessage(`"srv-other"`), Method: "example/nonInteractiveRequest"})
 	select {
 	case payload := <-respCh:
 		var msg rpcMessage
-		if err := json.Unmarshal(payload, &msg); err != nil || msg.Error == nil || msg.ID == nil || string(*msg.ID) != `"srv-panic"` {
-			t.Fatalf("panicked request answer = %s (%v), want an error for srv-panic", payload, err)
+		if err := json.Unmarshal(payload, &msg); err != nil || msg.Error == nil || msg.ID == nil || string(*msg.ID) != `"srv-other"` {
+			t.Fatalf("first answer = %s (%v), want only an error for srv-other", payload, err)
 		}
 	case <-time.After(b14bDeadline):
-		t.Fatal("panicked server request was never answered")
+		t.Fatal("panicked non-interactive server request was never answered")
 	}
-	c.dispatchServerRequest(ServerRequest{ID: json.RawMessage(`"srv-next"`), Method: "item/commandExecution/requestApproval"})
+	c.dispatchServerRequest(ServerRequest{ID: json.RawMessage(`"srv-next"`), Method: methodCommandApproval})
 	select {
 	case id := <-served:
 		if id != `"srv-next"` {
