@@ -20,6 +20,21 @@ own worktrees, dependency scheduling, task decomposition, and PR landing.
 - Keep one version across `CHANGELOG.md`, `.release-please-manifest.json`, and
   skill/plugin metadata. After the release PR merges, `release.yml` validates
   that commit, creates the tag, and publishes GitHub and Homebrew artifacts.
+- `scripts/codesign-macos.sh` signs every macOS binary with a Developer ID,
+  hardened runtime, and the Apple Events entitlement, then notarizes it, when
+  these repository secrets are set: `APPLE_TEAM_ID`,
+  `APPLE_DEVELOPER_ID_P12_BASE64` (base64 of a .p12 that holds the "Developer
+  ID Application" certificate, its key, and the Developer ID intermediate),
+  `APPLE_DEVELOPER_ID_P12_PASSWORD`, `APPLE_NOTARY_ISSUER_ID`,
+  `APPLE_NOTARY_KEY_ID`, and `APPLE_NOTARY_KEY_P8_BASE64` (base64 of an App
+  Store Connect API .p8). Set all six or none: with none, the release warns and
+  signs ad-hoc; with some, it fails. macOS keys privacy grants such as
+  Automation to the code identity, which for ad-hoc code changes on every
+  build, so users grant again after each upgrade; Developer ID grants survive
+  upgrades. Keep the `io.github.avivsinai.<binary>` identifiers: a changed
+  identifier or team makes every user grant again. The Homebrew formula only
+  installs the binaries; never add a re-sign step there, because it would
+  replace the Developer ID signature.
 - `make build` and GoReleaser embed the same bare semver (for example `0.63.0`,
   not `v0.63.0`); the Makefile strips one leading `v` from `VERSION`.
 - PR titles use `type(scope): description`. Squash merge makes the title the
