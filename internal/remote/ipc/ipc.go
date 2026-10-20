@@ -61,7 +61,27 @@ type Request struct {
 	// Features asks which features the endpoint serves. An endpoint that
 	// predates the question answers it as a request with no operation.
 	Features bool `json:"features,omitempty"`
+	// Activity streams the native activity of one running request. Local-only
+	// and read-only: see ActivityRequest.
+	Activity *ActivityRequest `json:"activity,omitempty"`
 }
+
+// ActivityRequest asks for the native activity of one request while it runs:
+// streamed text, tool calls and plan updates of the target's attached
+// session, as ACP session update objects. It is the one operation whose
+// connection carries many response records: each record's Reply is one
+// update, the stream ends with EOF once the request is terminal or uncertain,
+// and an error record ends it with a refusal. Nothing on it can submit,
+// cancel or answer anything.
+type ActivityRequest struct {
+	RequestRef string `json:"request_ref"`
+}
+
+// ActivityHandler serves an activity stream. send writes one update record
+// and fails once the client is gone; ctx ends when the client closes the
+// connection or the endpoint stops. native is the request's native pin, or ""
+// when the request carries none.
+type ActivityHandler func(ctx context.Context, req ActivityRequest, native string, send func(json.RawMessage) error) error
 
 // LinkRequest is one link.v1 operation: list the server's tools, call one,
 // or read a call's state. WaitMS bounds how long the endpoint waits for the
@@ -190,7 +210,12 @@ type Server struct {
 	path      string
 	registrar Registrar
 	link      LinkHandler
+	activity  ActivityHandler
 }
+
+// SetActivityHandler installs the activity stream handler. Call it before
+// Serve.
+func (s *Server) SetActivityHandler(h ActivityHandler) { s.activity = h }
 
 // SetLinkHandler installs the link.v1 handler. Call it before Serve.
 func (s *Server) SetLinkHandler(h LinkHandler) { s.link = h }
@@ -320,6 +345,8 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 		writeRecord(conn, Response{Reply: reply})
 	case req.Features:
 		writeRecord(conn, Response{Reply: mustJSON(Features{Link: true})})
+	case req.Activity != nil:
+		s.streamActivity(ctx, conn, req)
 	case req.Register != nil:
 		if s.registrar == nil {
 			writeRecord(conn, errorResponse(protocol.Refuse(protocol.CodeUnsupported, "this endpoint does not accept live registration")))
@@ -363,6 +390,8 @@ func (s *Server) checkPin(req *Request) error {
 	switch {
 	case req.Wait != nil:
 		ref = req.Wait.RequestRef
+	case req.Activity != nil:
+		ref = req.Activity.RequestRef
 	case req.Command != nil && req.Command.TargetID != "":
 		target = req.Command.TargetID
 	case req.Command != nil:
@@ -377,6 +406,31 @@ func (s *Server) checkPin(req *Request) error {
 		return protocol.Refuse(protocol.CodeUnshared, "target %q is not attached to the pinned native session", target)
 	}
 	return nil
+}
+
+// streamActivity runs the activity handler on conn until it returns, the
+// client closes the connection, or ctx ends. The client sends nothing after
+// its request, so a read that returns means it is gone.
+func (s *Server) streamActivity(ctx context.Context, conn net.Conn, req *Request) {
+	if s.activity == nil {
+		writeRecord(conn, errorResponse(protocol.Refuse(protocol.CodeUnsupported, "this endpoint does not stream activity")))
+		return
+	}
+	sctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() {
+		_, _ = conn.Read(make([]byte, 1))
+		cancel()
+	}()
+	send := func(update json.RawMessage) error {
+		if err := sctx.Err(); err != nil {
+			return err
+		}
+		return sendRecord(conn, Response{Reply: update})
+	}
+	if err := s.activity(sctx, *req.Activity, req.NativeSession, send); err != nil && sctx.Err() == nil {
+		writeRecord(conn, errorResponse(err))
+	}
 }
 
 func errorResponse(err error) Response {
@@ -439,6 +493,68 @@ func Call(stateDir string, req Request) (*Response, error) {
 	return resp, nil
 }
 
+// Activity streams the activity of one request from the endpoint at
+// stateDir, calling fn with each update in order. It returns nil when the
+// stream ends or ctx ends, and the refusal when the endpoint refuses. There is
+// no read deadline: the caller ends a quiet stream by cancelling ctx.
+func Activity(ctx context.Context, stateDir string, req Request, fn func(json.RawMessage)) error {
+	if req.Activity == nil {
+		return protocol.Refuse(protocol.CodeInvalid, "activity request is not set")
+	}
+	path := SocketPath(stateDir)
+	conn, err := net.DialTimeout("unix", path, 2*time.Second)
+	if err != nil {
+		return protocol.Refuse(protocol.CodeEndpointUnreachable, "no endpoint at %s; start one with `amq-remote serve`", path)
+	}
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stop()
+	defer func() { _ = conn.Close() }()
+	if err := sendRecord(conn, req); err != nil {
+		return err
+	}
+	br := bufio.NewReaderSize(conn, 64*1024)
+	for {
+		resp, err := nextRecord(br)
+		if err != nil {
+			if ctx.Err() != nil || errors.Is(err, io.EOF) {
+				return nil
+			}
+			return fmt.Errorf("read endpoint activity: %w", err)
+		}
+		if err := resp.AsError(); err != nil {
+			return err
+		}
+		fn(resp.Reply)
+	}
+}
+
+// nextRecord reads one response record of at most MaxRecordBytes from a
+// stream that carries several.
+func nextRecord(br *bufio.Reader) (*Response, error) {
+	var line []byte
+	for {
+		chunk, err := br.ReadSlice('\n')
+		line = append(line, chunk...)
+		if len(line) > MaxRecordBytes {
+			return nil, fmt.Errorf("record exceeds %d bytes", MaxRecordBytes)
+		}
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, bufio.ErrBufferFull) {
+			if len(line) == 0 {
+				return nil, err
+			}
+			return nil, fmt.Errorf("read record: %w", err)
+		}
+	}
+	var resp Response
+	if err := json.Unmarshal(line, &resp); err != nil {
+		return nil, fmt.Errorf("decode record: %w", err)
+	}
+	return &resp, nil
+}
+
 // AsError converts a response error body back into a typed refusal.
 func (r *Response) AsError() error {
 	if r == nil || r.Error == nil {
@@ -479,10 +595,14 @@ func readRecordLimit[T any](r io.Reader, limit int) (*T, int, error) {
 // goroutine and its fd for the life of the process.
 const writeResponseDeadline = 10 * time.Second
 
-func writeRecord(w io.Writer, v any) {
+func writeRecord(w io.Writer, v any) { _ = sendRecord(w, v) }
+
+// sendRecord is writeRecord that reports a failed write, for a stream that
+// must stop once its reader is gone.
+func sendRecord(w io.Writer, v any) error {
 	data, err := json.Marshal(v)
 	if err != nil {
-		return
+		return err
 	}
 	data = append(data, '\n')
 	// Bound the write when the writer is a connection: an unread socket must
@@ -491,5 +611,6 @@ func writeRecord(w io.Writer, v any) {
 		_ = c.SetWriteDeadline(time.Now().Add(writeResponseDeadline))
 		defer func() { _ = c.SetWriteDeadline(time.Time{}) }()
 	}
-	_, _ = w.Write(data)
+	_, err = w.Write(data)
+	return err
 }

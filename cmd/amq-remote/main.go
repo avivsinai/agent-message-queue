@@ -26,6 +26,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/config"
 	"github.com/avivsinai/agent-message-queue/internal/fsq"
 	"github.com/avivsinai/agent-message-queue/internal/relay"
+	"github.com/avivsinai/agent-message-queue/internal/remote/activity"
 	"github.com/avivsinai/agent-message-queue/internal/remote/amqio"
 	"github.com/avivsinai/agent-message-queue/internal/remote/buzzio"
 	"github.com/avivsinai/agent-message-queue/internal/remote/claude"
@@ -638,6 +639,8 @@ func serve(args []string, stdout, stderr io.Writer) (int, error) {
 	}
 	server.SetRegistrar(liveRegistrar(c.root, stateDir, ep, pinNative))
 	server.SetLinkHandler(links.request)
+	// amq-acp mirrors a Buzz-started request's native activity into Desktop.
+	server.SetActivityHandler(activity.MirrorHandler(ep))
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	say(stdout, "amq-remote %s serving root=%s handle=%s socket=%s targets=%d", version, c.root, *me, server.Path(), len(ep.Targets()))

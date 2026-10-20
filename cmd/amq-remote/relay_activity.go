@@ -24,23 +24,6 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/sharestate"
 )
 
-// notificationSource is the Codex attachment's read-only notification
-// observer; claudeSource is the Claude attachment's parsed-transcript
-// observer; piSource is the pi attachment's bridge activity tail (a distinct
-// method name keeps the type switch unambiguous). Activity export reads any
-// one.
-type notificationSource interface {
-	ObserveNotifications(fn func(codex.Notification)) (stop func())
-}
-
-type claudeSource interface {
-	ObserveActivity(fn func(claude.ActivityNote)) (stop func())
-}
-
-type piSource interface {
-	ObservePiActivity(fn func(pi.ActivityNote)) (stop func())
-}
-
 // activityItem is one queued native observation: exactly one field is set.
 type activityItem struct {
 	codex  *codex.Notification
@@ -75,23 +58,24 @@ func (it activityItem) size() int64 {
 // observeFunc registers offer as the attachment's observer and returns stop.
 type observeFunc func(offer func(activityItem)) (stop func())
 
-// observerOf returns the activity observer of an attachment, or nil.
+// observerOf returns the activity observer of an attachment (Codex
+// notifications, the Claude transcript or the pi bridge tail), or nil.
 func observerOf(att any) observeFunc {
 	switch src := att.(type) {
-	case notificationSource:
+	case activity.CodexSource:
 		return func(offer func(activityItem)) func() {
 			return src.ObserveNotifications(func(n codex.Notification) {
-				if !projectedMethods[n.Method] {
+				if !activity.CodexProjected(n.Method) {
 					return // ignored before any copy
 				}
 				offer(activityItem{codex: &n})
 			})
 		}
-	case claudeSource:
+	case activity.ClaudeSource:
 		return func(offer func(activityItem)) func() {
-			return src.ObserveActivity(func(n claude.ActivityNote) { offer(activityItem{claude: &n}) })
+			return activity.ObserveClaude(src, func(n claude.ActivityNote) { offer(activityItem{claude: &n}) })
 		}
-	case piSource:
+	case activity.PiSource:
 		return func(offer func(activityItem)) func() {
 			return src.ObservePiActivity(func(n pi.ActivityNote) { offer(activityItem{pi: &n}) })
 		}
@@ -189,13 +173,6 @@ const (
 	activityItemBytes  = 1 << 20
 	activityQueueBytes = 8 << 20
 )
-
-// projectedMethods are the Codex notifications the activity projection maps.
-var projectedMethods = map[string]bool{
-	"turn/started": true, "turn/completed": true, "turn/plan/updated": true,
-	"item/started": true, "item/completed": true,
-	"item/agentMessage/delta": true, "item/commandExecution/outputDelta": true,
-}
 
 // activityInbox is the bounded hand-off from the native observer to the
 // worker.

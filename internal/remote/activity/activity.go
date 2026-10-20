@@ -82,7 +82,7 @@ func (s *Sink) Drain(ctx context.Context) error {
 		return fmt.Errorf("activity publish is not set")
 	}
 	s.mu.Lock()
-	err := s.flushDueLocked(s.now())
+	err := s.stream.flushDue(s.now(), s.queue)
 	s.mu.Unlock()
 	if err != nil {
 		return err
@@ -131,39 +131,7 @@ func (s *Sink) enqueue(n codex.Notification) (bool, error) {
 		}
 		s.sawSession = true
 	}
-	switch fact.step {
-	case stepTextDelta:
-		s.stream.textDelta(fact.obs, now)
-		return true, s.flushDueLocked(now)
-	case stepOutputDelta:
-		s.stream.outputDelta(fact.obs, now)
-		return true, s.flushDueLocked(now)
-	}
-	// Any other fact ends the open runs first: Desktop closes the message
-	// being streamed when a tool or plan item arrives.
-	if err := s.flushLocked(); err != nil {
-		return false, err
-	}
-	obs := fact.obs
-	switch fact.step {
-	case stepMessageDone:
-		streamed := s.stream.streamed[obs.ItemID]
-		delete(s.stream.streamed, obs.ItemID)
-		if streamed || obs.Text == "" {
-			return true, nil
-		}
-	case stepCommandStart:
-		s.stream.command(obs.ToolID).title = obs.Title
-	case stepCommandDone:
-		if c := s.stream.commands[obs.ToolID]; c != nil && obs.Text == "" {
-			obs.Text = string(c.out)
-		}
-		delete(s.stream.commands, obs.ToolID)
-		obs.Text = capText(obs.Text, streamOutputCap)
-	case stepTurnDone:
-		s.stream = streamState{}
-	}
-	return true, s.queue(obs)
+	return true, s.stream.accept(fact, now, s.queue)
 }
 
 func (s *Sink) queue(obs observation) error {

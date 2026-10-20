@@ -215,6 +215,18 @@ can pin it; the identity is not part of the session schema.
   message and `stopReason: "end_turn"`. Any other state, or a refusal such as
   `busy` or `endpoint_unreachable`, returns `stopReason: "refusal"` and an
   agent message that names the state and code.
+- While the request runs, the native session's activity is mirrored into the
+  ACP session, so Buzz Desktop's activity view shows it live: streamed text
+  as `agent_message_chunk`, commands and tools as `tool_call` and
+  `tool_call_update`, and plan updates as `plan`. amq-acp reads it from the
+  endpoint socket's local `activity` stream for that exact request, under
+  the native pin. The stream is read-only and carries nothing that submits,
+  cancels or answers an approval. Codex text arrives as deltas merged per
+  100 ms; Claude and pi text arrive one message at a time. The owner's own
+  prompt is not repeated. When text was streamed, the final answer still
+  posts to the DM but is not sent to the activity view a second time.
+  Activity in the moment between admission and the start of the stream can
+  be missing, and an endpoint without the stream leaves the turn as before.
 - A submit whose outcome is unknown is reconciled by its exact request
   reference. When the record cannot be read, `_meta.remote.state` is
   `uncertain` and the message says not to resend.

@@ -318,6 +318,11 @@ no control: nothing in it can submit, cancel or approve. A frame the relay
 may or may not have accepted is never sent again. Codex and Claude targets
 export activity; pi targets do not.
 
+The endpoint socket also serves a local, read-only `activity` stream of one
+request while it runs, under the request's native pin. `amq-acp` remote mode
+reads it to show a Buzz-started turn live in Desktop (see
+[the amq-acp companion](../amq-acp/README.md#remote-mode)).
+
 ### Owner DM commands
 
 With `"commands": true`, `"dm_channel_id": "<channel>"` and
