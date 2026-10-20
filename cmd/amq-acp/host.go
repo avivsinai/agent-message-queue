@@ -142,9 +142,12 @@ func runHost(args []string) int {
 	select {
 	case <-exitDone:
 	case <-time.After(childExitWait):
-		killProcessGroup(child)
-		<-exitDone
 	}
+	// Kill what is left of the agent's process group on every path: the
+	// agent itself if it ignored its closed stdin, or anything it started
+	// and left behind after it exited.
+	killProcessGroup(child)
+	<-exitDone
 	if exitErr != nil {
 		fmt.Fprintln(os.Stderr, "amq-acp host: the agent exited:", exitErr)
 	}

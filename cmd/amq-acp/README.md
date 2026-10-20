@@ -377,7 +377,9 @@ record per message under `turns/`. A turn whose prompt may have reached the
 agent before a crash never runs again; on restart the host replies that it
 restarted during the turn. A reply that can never be delivered is recorded
 as `undeliverable` with the reason, and the host goes on to the next
-message. `settings.json` holds `turn_timeout` (default
+message. A recipient whose mailbox is damaged (an unsafe or symlinked
+mailbox, or a reply file name that holds another message id) stops the host
+until the mailbox is repaired; `amq doctor` reports the damage. `settings.json` holds `turn_timeout` (default
 `30m`), read at the start of each turn; a refused edit keeps the last good
 value. On timeout or Ctrl-C the host sends `session/cancel` and waits 30
 seconds for the turn to end.

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"sync"
 
 	"github.com/avivsinai/agent-message-queue/internal/format"
@@ -192,7 +193,11 @@ func (c *conn) read(in io.Reader) {
 	}
 	c.mu.Lock()
 	c.closed = true
-	c.err = scanner.Err()
+	// A read end the host closed itself, after the agent exited, is an
+	// ordinary end of stream.
+	if err := scanner.Err(); !errors.Is(err, os.ErrClosed) {
+		c.err = err
+	}
 	c.mu.Unlock()
 	close(c.done)
 }
