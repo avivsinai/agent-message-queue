@@ -59,7 +59,7 @@ func TestRetireWakeRefusesDifferentInjectTarget(t *testing.T) {
 	}
 }
 
-// Field (Amit 0.1.38, 2026-09-29): after a CLI take, the desktop app's Take over was refused with
+// Field (desktop app 0.1.38, 2026-09-29): after a CLI take, the desktop app's Take over was refused with
 // "saved wake target uses a different injector identity", because the two surfaces run the same
 // doorbell injector from different install paths. --takeover adopts the saved injector and keeps
 // the generation CAS.

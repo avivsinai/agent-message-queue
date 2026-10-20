@@ -1004,11 +1004,11 @@ func selfCandidate(root, stateDir string) (registry.Candidate, error) {
 		}
 		return registry.Candidate{}, fmt.Errorf("ambiguous: %s all report pid %d; refusing to guess", strings.Join(targets, ", "), pid)
 	}
-	return registry.Candidate{}, errors.New("cannot identify the session this runs in; run it from inside a Claude Code, Codex or pi (Amit) session")
+	return registry.Candidate{}, errors.New("cannot identify the session this runs in; run it from inside a Claude Code, Codex or pi session")
 }
 
 // candidatePID is the process that runs a candidate's session: Claude's
-// from its config, a pi (Amit) chat's from its bridge's liveness (its tools
+// from its config, a pi chat's from its bridge's liveness (its tools
 // run as children of that process); 0 for kinds found another way.
 func candidatePID(cand registry.Candidate) int {
 	switch cand.Kind {

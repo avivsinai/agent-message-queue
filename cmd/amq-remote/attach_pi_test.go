@@ -10,7 +10,7 @@ import (
 	"github.com/avivsinai/agent-message-queue/internal/remote/pi"
 )
 
-// Regression (local e2e F1, bead y2v): attach --self inside a pi (Amit) chat
+// Regression (bead y2v): attach --self inside a pi chat
 // could not find the chat. The chat runs its tools as children of the pi
 // process its bridge names in bridge.liveness, so the process ancestry
 // identifies it, with the chat's own session id, and a live chat that is not

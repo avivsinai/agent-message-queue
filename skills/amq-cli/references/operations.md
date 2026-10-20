@@ -509,7 +509,7 @@ the executable workflow, reply collection, and uncertain-result recovery.
 ## Two-host fleets
 
 A queue on a different machine is a different AMQ host, not a `--project` and not a
-foreign `--root`. Each host has its own handles; `claude` on G is not `claude`
+foreign `--root`. Each host has its own handles; `claude` on the cloud host is not `claude`
 on the Mac. Exchange between those host queues is companion `amq-bridge`
 only. A registered-machine shell executing AMQ on the destination Mac is the
 local-execution lane above; it does not transfer a cloud Maildir.

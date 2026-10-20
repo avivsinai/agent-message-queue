@@ -121,7 +121,7 @@ func decisionFor(row string, verdict Verdict) Decision {
 	return Decision{Row: row, Verdict: verdict}
 }
 
-// Decide is the pure W2a policy table. Filesystem resolution,
+// Decide is the pure policy table. Filesystem resolution,
 // identity authentication, preflight validation, error construction, and
 // output channels remain at the current call sites until Step 3 rewiring.
 //

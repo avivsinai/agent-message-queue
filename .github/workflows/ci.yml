@@ -67,7 +67,7 @@ jobs:
         run: go test ./...
       - name: Race tests (activity)
         # TestR2NativeEnqueueAndConsumer is a data-race regression: it can
-        # only fail under -race (agent-message-queue-8p9).
+        # only fail under -race.
         run: go test -race -count=1 ./internal/remote/activity/
       - name: Hook script tests (serial)
         # Real SessionStart bash script; wall-clock sensitive, so it runs
@@ -82,7 +82,6 @@ jobs:
       - name: Smoke test
         run: make smoke
       - name: Module, contract, and hook checks
-        # These make ci targets ran only in the old pre-push hook.
         run: make mod-tidy-check contract-check hook-env-check
       - name: Lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
@@ -104,10 +103,8 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-      # Focused regex, not the full fsq suite: pristine v0.60.2 already fails
-      # unrelated Windows tests (e.g. TestRetryFromDLQEnvelopeUpdateFailure...),
-      # tracked separately from this claim-exclusivity gate. read/monitor/DLQ
-      # capture all claim through the same MoveNewToCur primitive proven here.
+      # Focused regex, not the full fsq suite. read/monitor/DLQ capture all
+      # claim through the same MoveNewToCur primitive proven here.
       - name: Claim primitive and maildir contracts
         run: go test ./internal/fsq -run '^TestMoveNewToCur|^TestClaimRename|^TestClaimCollision|^TestClaimPinnedRoot|^TestWindowsNoReplace|^TestSyncDirPlatform' -count=1
       - name: Concurrent drain single-winner gate
@@ -123,8 +120,6 @@ jobs:
   # defect class where a test passes on Linux but fails on macOS (e.g. macOS
   # resolves /var -> /private/var). Live/PTY/cmux/ghostty paths are env-gated
   # (AMQ_*_LIVE) and skip by default, so plain `go test ./...` is sufficient.
-  # Not wired into branch protection yet; deliberately optional while we gauge
-  # runtime.
   macos-test:
     runs-on: macos-latest
     timeout-minutes: 30
@@ -132,8 +127,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # Full history: TestWakeSelfUpgradeRestartRecordIsCompatibleWithV0580Reader
-          # shells out to `git cat-file -e v0.58.0^{commit}`, mirroring the build job.
+          # Full history: a wake upgrade test shells out to `git cat-file`.
           fetch-depth: 0
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0

@@ -149,7 +149,7 @@ contract.
 
 Consumers selecting `injected` MUST retain their own durable-consumption
 policy. Injector acceptance MUST NOT be reported as a drained message receipt.
-Orch continues to use the original message's `drained` receipt for task
+An orchestrator that owns receipt-based recovery continues to use the original message's `drained` receipt for task
 delivery status and explicit recovery.
 
 ## Acceptance criteria
