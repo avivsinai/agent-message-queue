@@ -82,3 +82,20 @@ func TestStopHookBoundSessionAppendsUntilUnsubscribe(t *testing.T) {
 		t.Fatal("unsubscribe left the marker file")
 	}
 }
+
+func TestPinWarningsNamesAutoMode(t *testing.T) {
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Dir(settingsPath(home)), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(settingsPath(home), []byte(`{"permissions":{"defaultMode":"auto"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	warns, err := PinWarnings(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(warns) != 1 || !strings.Contains(warns[0], "auto") {
+		t.Fatalf("warnings = %q, want one naming auto mode", warns)
+	}
+}

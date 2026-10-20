@@ -86,7 +86,8 @@ command's own message. Do not work around a refusal.
    sessions that are not shared. It pins your Buzz public key and this
    share's relay, body, DM channel and target, so only your signed ✅, or
    your yes in the approval's thread, in this DM can allow a tool call. Do not allow Claude to edit .claude for a
-   session, use bypassPermissions mode, or allow every Bash command: each
+   session, use bypassPermissions or auto permission mode (also when started
+   with `--permission-mode`), or allow every Bash command: each
    lets the pin be changed. The relay is trusted to return the message's
    full edit and deletion history; replacing the amq-remote binary, or a
    settings edit you approve, defeats the pin. Run the install again if the
