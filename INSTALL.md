@@ -56,22 +56,12 @@ Release assets and `checksums.txt` are on the
 | Native Windows ARM64 | `amq_*_windows_arm64.zip` |
 | WSL x86_64 | `amq_*_linux_amd64.tar.gz` |
 
-Verify the one entry for your asset before you extract it. The same steps
-install a companion: set `BIN` and `ASSET` to the companion's name and archive.
-
-```sh
-TAG=vX.Y.Z
-BIN=amq
-ASSET=amq_X.Y.Z_darwin_arm64.tar.gz
-base="https://github.com/avivsinai/agent-message-queue/releases/download/$TAG"
-curl -fsSLO "$base/$ASSET" && curl -fsSLO "$base/checksums.txt"
-grep "  $ASSET\$" checksums.txt | shasum -a 256 -c   # or: sha256sum -c
-tar -xzf "$ASSET" "$BIN"
-mkdir -p ~/.local/bin && install -m 0755 "$BIN" ~/.local/bin/"$BIN"
-~/.local/bin/"$BIN" --version
-```
-
-On Windows, extract the ZIP and put the `.exe` at a stable path.
+The [installer script](#installer-script-macos-and-linux) is the recommended
+way to install a release on macOS and Linux; it performs the verification
+below for you. For a manual install, verify the downloaded asset against
+`checksums.txt` before you extract it, as in the recipe below. A companion
+archive is verified the same way; install its extracted executable at a
+stable path. On Windows, extract the ZIP and put the `.exe` at a stable path.
 
 <details>
 <summary>Advanced checksum-verified manual install</summary>
