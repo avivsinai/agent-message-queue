@@ -1161,8 +1161,6 @@ func (c *Carrier) answerThreadApproval(evt nostr.Event, messageID string, appr A
 	var refusal *protocol.Refusal
 	switch {
 	case err == nil:
-	case errors.As(err, &refusal) && refusal.Code == protocol.CodeAlreadyResolved:
-		return c.settleApprovalAnswer(evt, messageID, st, "Not sent: this approval was already answered.")
 	case errors.As(err, &refusal):
 		return c.settleApprovalAnswer(evt, messageID, st, "Not sent: "+protocol.InertInline(refusal.Message)+".")
 	default:

@@ -59,12 +59,17 @@ func TestTUITurnApprovalAnsweredFromOwnerShare(t *testing.T) {
 	if err := ep.RespondThreadApproval(owner, ta.ID, "accept"); err != nil {
 		t.Fatalf("respond: %v", err)
 	}
-	for msg := range srv.calls {
-		if msg.Method == "" && msg.ID != nil && string(*msg.ID) == `"7"` {
-			if string(msg.Result) != `{"decision":"accept"}` {
-				t.Fatalf("response = %s, want accept", msg.Result)
+	for answered := false; !answered; {
+		select {
+		case msg := <-srv.calls:
+			if msg.Method == "" && msg.ID != nil && string(*msg.ID) == `"7"` {
+				if string(msg.Result) != `{"decision":"accept"}` {
+					t.Fatalf("response = %s, want accept", msg.Result)
+				}
+				answered = true
 			}
-			break
+		case <-time.After(5 * time.Second):
+			t.Fatal("the decision never reached the app-server")
 		}
 	}
 	if done := next(); done.Resolution == nil || done.Resolution.Outcome != protocol.ResolutionAnswered || done.Resolution.Option != "accept" {

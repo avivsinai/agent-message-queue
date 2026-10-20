@@ -179,7 +179,7 @@ func (e *Endpoint) tickThreadApprovals() {
 // in-process seam, never a wire op: only a carrier in this process reaches
 // it, and only the owner share the approval was shown on may answer
 // (611.46). A nil error means the answer reached the harness; a refusal
-// with CodeAlreadyResolved means the approval is no longer open.
+// with CodeAlreadyResolved means the approval is no longer open here.
 func (e *Endpoint) RespondThreadApproval(src Source, id, option string) error {
 	e.mu.Lock()
 	if e.state != stateAccepting {
@@ -188,8 +188,9 @@ func (e *Endpoint) RespondThreadApproval(src Source, id, option string) error {
 	}
 	rec := e.threadApprovals[id]
 	if rec == nil {
+		// Resolved, expired, or raised before this process started.
 		e.mu.Unlock()
-		return protocol.Refuse(protocol.CodeAlreadyResolved, "the approval was already answered")
+		return protocol.Refuse(protocol.CodeAlreadyResolved, "the approval is no longer open here; if the terminal still asks, answer there")
 	}
 	if !sameShare(src, rec.host, rec.Origin) {
 		e.mu.Unlock()
