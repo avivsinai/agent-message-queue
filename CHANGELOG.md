@@ -8,6 +8,13 @@ Release Please generates new entries from conventional squash commits on
 `main`; richer or multi-entry notes can be added through commit overrides or by
 editing the release PR.
 
+## [0.101.1](https://github.com/avivsinai/agent-message-queue/compare/v0.101.0...v0.101.1) (2026-10-19)
+
+
+### Bug Fixes
+
+* **acp:** make the owner an admin of the helper's control channel ([#1091](https://github.com/avivsinai/agent-message-queue/issues/1091)) ([db602bf](https://github.com/avivsinai/agent-message-queue/commit/db602bfc2553844be4285953230bb7e98fa0afc4))
+
 ## [0.101.0](https://github.com/avivsinai/agent-message-queue/compare/v0.100.0...v0.101.0) (2026-10-19)
 
 
