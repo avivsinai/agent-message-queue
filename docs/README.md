@@ -38,7 +38,7 @@ syntax comes from the [generated CLI reference](cli.md).
 
 ## Understand the design
 
-- **Routing:** [session-guard decisions](w2a-session-guard-table.md).
+- **Routing:** [session-guard decisions](session-guard.md).
 - **Launch:** [recovery and ownership](launch-recovery.md).
 - **Wake:** [state invariants](wake-state-invariants.md),
   [lifecycle protocol](wake-lifecycle.md),
