@@ -284,6 +284,12 @@ after the package manager removes the old path. On Homebrew or Scoop installs,
   whose build metadata cannot be read is deferred. An incumbent without a
   parsable version does not self-upgrade. On Darwin, the staged image must pass
   `/usr/bin/codesign --verify --strict`.
+- **Preflights.** After the image is bound and verified, the wake runs it
+  twice before the exec: `--version` must print the version read from the
+  metadata, and a launch-contract preflight must confirm the exact wake argv
+  and bootstrap. Each probe runs in its own process group with a timeout and
+  is killed with that group. A descendant that calls `setsid` or `setpgid`
+  leaves the group and escapes this cleanup.
 - **Not eligible.** Pinned binaries, ownerless and keepalive wakes, repair
   flows, destructive interrupts, and `--inject-cmd` wakes never self-upgrade.
 - **Disable.** Start the wake with `--no-self-upgrade` or
@@ -294,7 +300,8 @@ after the package manager removes the old path. On Homebrew or Scoop installs,
   the wake writes a private `.wake.selfupgrade.attempt` record; a later wake
   that reaches maintenance refuses the same image while that attempt is fresh.
   The guard cannot help when the new image dies before any wake reaches
-  maintenance.
+  maintenance. A wake built without the guard ignores the record, so a mixed
+  pair of old and new images has no crash-loop protection.
 - **No rollback.** AMQ does not write or keep the executable. Recover from a
   bad image by reinstalling or selecting a known-good package version.
 

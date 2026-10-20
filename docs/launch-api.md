@@ -6,13 +6,13 @@ contract is [schemas/launch-api-v1.schema.json](../schemas/launch-api-v1.schema.
 
 ## Negotiation
 
-`launchapi.ContractSemverV1` owns the contract semver. A caller negotiates its
-required contract range, intent version, result version, and features before it
-depends on them:
+The build advertises its contract version in `launchapi.ContractSemverV1`. A
+caller negotiates its required contract range, intent version, result version,
+and features before it depends on them:
 
 ```go
 negotiated, err := launchapi.Negotiate(launchapi.RequirementV1{
-	ContractSemver: contractRange, // a semver range, for example ">=X.Y.0 <X.(Y+1).0"
+	ContractSemver: ">=0.61.0 <0.62.0", // a 0.61 contract
 	IntentVersion:  launchapi.IntentVersionV1,
 	ResultVersion:  launchapi.ResultVersionV1,
 	Features:       []string{"prepare_apply_v1"},
@@ -22,6 +22,11 @@ if err != nil {
 }
 _ = negotiated
 ```
+
+`ContractSemver` is either one exact version (`0.61.1`) or space-separated
+terms, each an operator (`>=`, `<=`, `>`, `<`, `=`) followed by a full
+`major.minor.patch` version. Negotiation fails when the build's
+`ContractSemverV1` is outside the range.
 
 A caller must require every feature it uses. Contract semver alone does not
 claim that an unadvertised feature is available.

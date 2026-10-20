@@ -279,8 +279,8 @@ info `amq-v3-x25519-static`. It is never stored. The Noise session is
 
 The v3 outbox is `bridge/tx/<peer>/<id>`. The sender removes a record only
 after it verifies the receiver's signed `STORED` receipt for that id. The v2
-ledger stays beside the v3 ledger, already-filed v2 ids are not re-hashed, and
-every v2 outbox drains before a host offers v3 records.
+ledger stays beside the v3 ledger. An operator drains every v2 outbox before a
+host offers v3 records; nothing enforces this.
 
 v3 ledger states `intent` and `published` live in
 `bridge/ledger/v3/<id[:2]>/<id>` as checksummed `O_APPEND` records. Filing
