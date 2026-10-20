@@ -301,6 +301,12 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 		return
 	}
 	_ = conn.SetReadDeadline(time.Time{})
+	// An activity record carries no other operation: checkPin fences the
+	// activity ref, so another operation must not ride on that check.
+	if req.Activity != nil && (req.Command != nil || req.Wait != nil || req.Native != nil || req.Register != nil || req.Link != nil || req.Features) {
+		writeRecord(conn, Response{Error: &ErrorBody{Code: string(protocol.CodeInvalid), Message: "activity request carries another operation"}})
+		return
+	}
 	if err := s.checkPin(req); err != nil {
 		writeRecord(conn, errorResponse(err))
 		return

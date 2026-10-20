@@ -44,6 +44,33 @@ func (c *codexFake) ObserveNotifications(fn func(codex.Notification)) func() {
 	}
 }
 
+// Submit, Lookup and the run events name the run as the Codex adapter does
+// once turn/start answered: after the native turn, here "t1".
+func (c *codexFake) Submit(req core.BoundRequest) (core.Admission, error) {
+	adm, err := c.Runtime.Submit(req)
+	if adm.RunID != "" {
+		adm.RunID = "turn:t1"
+	}
+	return adm, err
+}
+
+func (c *codexFake) Subscribe(fn func(core.NativeEvent)) func() {
+	return c.Runtime.Subscribe(func(ev core.NativeEvent) {
+		if ev.RunID != "" {
+			ev.RunID = "turn:t1"
+		}
+		fn(ev)
+	})
+}
+
+func (c *codexFake) Lookup(key requests.Key, epoch string) (core.Evidence, error) {
+	ev, err := c.Runtime.Lookup(key, epoch)
+	if ev.RunID != "" {
+		ev.RunID = "turn:t1"
+	}
+	return ev, err
+}
+
 func (c *codexFake) send(method, params string) {
 	c.mu.Lock()
 	fn := c.notify
@@ -155,6 +182,10 @@ func TestRemoteTurnMirrorsNativeActivity(t *testing.T) {
 	if !rt.Complete(requestID, "hello world") {
 		t.Fatal("no running request to complete")
 	}
+	// Review of 611.40 (P2-1): a local turn that starts right after the
+	// request, inside the stream's settle grace, is not this request's.
+	rt.send("item/agentMessage/delta", `{"threadId":"fake","turnId":"t2","itemId":"m2","delta":"later turn"}`)
+	rt.send("item/started", `{"threadId":"fake","turnId":"t2","item":{"type":"commandExecution","id":"c2","command":"pwd","status":"inProgress"}}`)
 
 	var kinds []string
 	text := ""

@@ -3,6 +3,7 @@ package activity
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"sync"
 	"time"
 
@@ -91,12 +92,19 @@ func ObserveClaude(src ClaudeSource, fn func(claude.ActivityNote)) (stop func())
 type Mirror struct {
 	ThreadID string
 	Send     func(json.RawMessage) error
+	// CodexTurn returns the Codex turn of the mirrored request, or "" while
+	// it is unknown. Codex items of any other turn on the thread, such as a
+	// local turn that starts right after the request, are not mirrored, and
+	// items that arrive before the turn is known are dropped.
+	CodexTurn func() string
 
 	mu     sync.Mutex
 	stream streamState
+	turn   string
 }
 
-// Codex mirrors one Codex notification for the pinned thread.
+// Codex mirrors one Codex notification for the request's turn on the pinned
+// thread.
 func (m *Mirror) Codex(n codex.Notification, now time.Time) error {
 	fact, ok := projectCodex(m.ThreadID, n)
 	if !ok {
@@ -104,6 +112,12 @@ func (m *Mirror) Codex(n codex.Notification, now time.Time) error {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.turn == "" && m.CodexTurn != nil {
+		m.turn = m.CodexTurn()
+	}
+	if m.turn == "" || fact.obs.TurnID != m.turn {
+		return nil
+	}
 	return m.stream.accept(fact, now, m.out)
 }
 
@@ -161,12 +175,30 @@ func (m *Mirror) Flush() error {
 	return m.stream.flush(m.out)
 }
 
+// Mirror bounds: a tool title or plan entry keeps a prefix of
+// mirrorLabelBytes, and an update that still exceeds mirrorUpdateBytes is
+// dropped, so one oversized item never ends the stream at the client's
+// record limit (ipc.MaxRecordBytes).
+const (
+	mirrorLabelBytes  = 4 << 10
+	mirrorUpdateBytes = 512 << 10
+)
+
 // out sends one observation as update objects. Text is split as frames
 // split it; a tool result is one update, because the client replaces the
 // whole result on each update, so a long one keeps a marked prefix.
 func (m *Mirror) out(obs observation) error {
 	if obs.Kind != "acp_read" || obs.Update == "user_message_chunk" {
 		return nil
+	}
+	obs.Title = capText(obs.Title, mirrorLabelBytes)
+	if obs.Plan != nil {
+		plan := make([]planEntry, len(obs.Plan))
+		for i, e := range obs.Plan {
+			e.Content = capText(e.Content, mirrorLabelBytes)
+			plan[i] = e
+		}
+		obs.Plan = plan
 	}
 	pieces := []string{obs.Text}
 	if obs.Update == "tool_call_update" {
@@ -189,6 +221,9 @@ func (m *Mirror) out(obs observation) error {
 		}
 		if err := json.Unmarshal(raw, &note); err != nil {
 			return err
+		}
+		if len(note.Params.Update) > mirrorUpdateBytes {
+			continue
 		}
 		if err := m.Send(note.Params.Update); err != nil {
 			return err
@@ -223,6 +258,12 @@ func MirrorHandler(ep *core.Endpoint) ipc.ActivityHandler {
 		if err != nil {
 			return err
 		}
+		// Only a request this endpoint holds is mirrored: an unknown ref is
+		// refused before anything is observed.
+		get := &protocol.Command{Schema: protocol.SchemaCommand, Op: protocol.OpRequestGet, RequestRef: req.RequestRef}
+		if _, err := ep.Handle(get, core.Source{Host: core.LocalHost}); err != nil {
+			return err
+		}
 		if native == "" {
 			native = ep.NativeSessionID(target)
 		}
@@ -230,7 +271,7 @@ func MirrorHandler(ep *core.Endpoint) ipc.ActivityHandler {
 		if !ok || native == "" {
 			return protocol.Refuse(protocol.CodeUnshared, "target %q has no attached native session", target)
 		}
-		m := &Mirror{ThreadID: native, Send: send}
+		m := &Mirror{ThreadID: native, Send: send, CodexTurn: func() string { return codexTurn(ep, get) }}
 		items := make(chan func() error, mirrorQueue)
 		offer := func(fn func() error) {
 			select {
@@ -300,4 +341,20 @@ func MirrorHandler(ep *core.Endpoint) ipc.ActivityHandler {
 			}
 		}
 	}
+}
+
+// codexTurn is the Codex turn the request runs as, from the run the endpoint
+// recorded: the Codex adapter names a run "turn:<turn id>" once turn/start
+// answered (codex run.runIDLocked).
+func codexTurn(ep *core.Endpoint, get *protocol.Command) string {
+	reply, err := ep.Handle(get, core.Source{Host: core.LocalHost})
+	rep, ok := reply.(protocol.Reply)
+	if err != nil || !ok || rep.Snapshot.NativeRun == nil {
+		return ""
+	}
+	turn, _ := strings.CutPrefix(*rep.Snapshot.NativeRun, "turn:")
+	if turn == *rep.Snapshot.NativeRun {
+		return ""
+	}
+	return turn
 }
