@@ -46,6 +46,9 @@ func run(args []string) int {
 	if len(args) > 0 && args[0] == "setup" {
 		return runSetup(args[1:])
 	}
+	if len(args) > 0 && args[0] == "host" {
+		return runHost(args[1:])
+	}
 
 	flags := flag.NewFlagSet("amq-acp", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
@@ -98,6 +101,9 @@ Usage:
                  delete the harness file this command wrote
   amq-acp setup [--out <file>]
                  write the AMQ Remote harness and the Desktop import file
+  amq-acp host [--cwd <dir>] -- <agent command>
+                 run an ACP agent as the AM_ME participant: each inbox
+                 message is one turn, answered on its thread
 
 Environment:
   AM_ROOT          required absolute queue root

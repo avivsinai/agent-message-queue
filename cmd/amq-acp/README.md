@@ -334,3 +334,48 @@ manifest block.
   arrive later on the thread; read it with `amq thread` and re-prompt if the
   work must run.
 - No audit copy is written to the sender's `outbox/sent`, unlike `amq send`.
+
+## Host mode
+
+`amq-acp host` runs the other direction: AMQ is the ACP client, and an ACP
+agent such as Grok Build becomes an AMQ participant under its own handle.
+
+```sh
+amq coop exec --no-wake --me grok amq-acp -- host -- grok agent --no-leader stdio
+```
+
+The host spawns the agent after `--` without a shell, in `--cwd` (default:
+the current directory), and opens one ACP session (protocol version 1). It
+takes its inbox oldest first, one message at a time: it moves the message to
+`cur`, writes a `drained` receipt, and runs the message as one
+`session/prompt` turn. The reply goes to the sender on the same thread, with
+`refs` naming the message, the kind `amq reply` would choose (`question`
+becomes `answer`, `review_request` becomes `review_response`), and the labels
+`acp-host` and `acp-stop:<stop reason>`. Its body is the turn's
+`agent_message_chunk` text.
+
+Only a question, a review request, a todo, a brainstorm, or a message with no
+kind runs a turn. An answer, a review response, a status, or a decision, and
+any message labelled `acp-host`, is drained with a receipt and gets no reply,
+so two hosts never answer each other forever.
+
+Every tool call the agent asks to run is rejected unless the agent's own
+arguments grant autonomy, for example Grok's `--always-approve`. The host
+advertises no file or terminal methods and never calls `authenticate`; an
+agent that needs a login is a refusal with exit code 6, and you log in once
+with the harness's own CLI. The agent's environment has every `AM_*`, `AMQ_*`
+and `BUZZ_*` variable removed, so it cannot act as the host's handle.
+
+State lives in `<root>/agents/<me>/extensions/acp-host/`: `host.lock` (one
+host per handle; a second one exits 6), `session.json`, and one journal
+record per message under `turns/`. A turn whose prompt may have reached the
+agent before a crash never runs again; on restart the host replies that it
+restarted during the turn. `settings.json` holds `turn_timeout` (default
+`30m`), read at the start of each turn; a refused edit keeps the last good
+value. On timeout or Ctrl-C the host sends `session/cancel` and waits 30
+seconds for the turn to end.
+
+The host never restarts the agent. When the agent exits, the host exits with
+code 1. A message whose sender set cross-root reply routing (`reply_to` or
+`reply_project`) runs no turn and gets a reply naming that limitation. The
+host refuses to run on platforms without advisory file locks.
