@@ -65,7 +65,7 @@ BIN=amq
 ASSET=amq_X.Y.Z_darwin_arm64.tar.gz
 base="https://github.com/avivsinai/agent-message-queue/releases/download/$TAG"
 curl -fsSLO "$base/$ASSET" && curl -fsSLO "$base/checksums.txt"
-grep "  $ASSET\$" checksums.txt | shasum -a 256 -c
+grep "  $ASSET\$" checksums.txt | shasum -a 256 -c   # or: sha256sum -c
 tar -xzf "$ASSET" "$BIN"
 mkdir -p ~/.local/bin && install -m 0755 "$BIN" ~/.local/bin/"$BIN"
 ~/.local/bin/"$BIN" --version
@@ -276,8 +276,7 @@ Install the AMQ skills for Claude Code or Codex:
 npx skills add avivsinai/agent-message-queue -g -y
 ```
 
-Without npm, copy the canonical skill directory from a clone. Check first that
-the target does not already exist:
+Without npm, copy the canonical skill directory from a clone:
 
 ```sh
 git clone https://github.com/avivsinai/agent-message-queue.git amq-src

@@ -319,8 +319,8 @@ test must fail on the pre-fix code; check that privately before it ships.
   the reason. A bead id or review finding may appear once, at the end, as a
   reference. Do not add review-round labels or narrate rulings. Test names
   describe behavior, not bead ids.
-- Production comments state invariants, not provenance: no bead ids, review
-  rounds, or reviewer names in code comments.
+- Production code comments state invariants, not provenance: no bead ids,
+  review rounds, or reviewer names. Test comments follow the Testing rule.
 
 ## Documentation Policy
 
