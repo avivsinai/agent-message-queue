@@ -4,6 +4,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/avivsinai/agent-message-queue/internal/lock"
 )
 
 func TestPrepareWorkerEnvStripsBuzzSecrets(t *testing.T) {
@@ -22,14 +24,23 @@ func TestPrepareWorkerEnvStripsBuzzSecrets(t *testing.T) {
 	}
 }
 
+// Desktop's Create agent gives a draft parallelism 10 (harness log
+// 2026-10-19): binding mode runs those workers, BYOH mode runs one.
 func TestPrepareWorkerEnvRefusesParallelAgents(t *testing.T) {
-	t.Setenv("BUZZ_ACP_AGENTS", "2")
+	t.Setenv("BUZZ_ACP_AGENTS", "10")
+	t.Setenv(EnvRemote, RemoteModeBinding)
+	if err := PrepareWorkerEnv(); (err == nil) != lock.AdvisoryLockAvailable() {
+		t.Fatalf("binding mode, agents=10: PrepareWorkerEnv = %v", err)
+	}
+
+	t.Setenv("BUZZ_ACP_AGENTS", "10")
+	t.Setenv(EnvRemote, "")
 	err := PrepareWorkerEnv()
 	if err == nil {
-		t.Fatal("PrepareWorkerEnv succeeded for agents=2, want refusal")
+		t.Fatal("BYOH mode: PrepareWorkerEnv succeeded for agents=10, want refusal")
 	}
-	if !strings.Contains(err.Error(), "agents=1") {
-		t.Errorf("error %q does not name the agents=1 constraint", err)
+	if !strings.Contains(err.Error(), "BUZZ_ACP_AGENTS=1") {
+		t.Errorf("error %q does not name BUZZ_ACP_AGENTS=1", err)
 	}
 }
 

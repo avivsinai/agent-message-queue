@@ -163,6 +163,14 @@ then Agents, then Check again first (setup always prints this step). No
 restart is needed. `/amq-remote` runs `setup --helper` or `setup --session`
 itself when the session has no agent yet. A harness file this command did not
 write is left unchanged.
+An `amq_remote` agent runs at any parallelism, so an agent made from the
+helper's draft (Desktop's default, 10) starts as is. Buzz starts that many
+identical workers with one identity. Each turn decides through per-event file
+locks, and one worker leads the agent's lifecycle (archive, unarchive,
+"Connected again", the helper's control channel and drafts) through the lock
+`agents/<pin or _helper>/<pubkey>.lock` in the state directory. When the
+leader exits, another worker takes over within 30 s. Without advisory locks
+(not macOS or Linux), parallelism must be 1.
 
 ## Buzz BYOH
 
@@ -173,7 +181,10 @@ and `amq-acp` would refuse.
 
 - ACP pool workers must not drain AMQ mailboxes. `amq-acp` only writes
   `inbox/new`. A separate Edge owner drains with `amq drain`.
-- `amq-acp` refuses `BUZZ_ACP_AGENTS` other than `1` and `BUZZ_ACP_RESPOND_TO`
+- In BYOH mode (`AMQ_ACP_TO` or `AMQ_ACP_REMOTE_TARGET`) `amq-acp` runs one
+  worker: it refuses `BUZZ_ACP_AGENTS` other than `1`, so set parallelism 1.
+  With `AMQ_ACP_REMOTE=binding` it accepts any parallelism and elects one
+  lifecycle leader (see setup above). It always refuses `BUZZ_ACP_RESPOND_TO`
   other than `owner-only`, then unsets every `BUZZ_*` variable so a leaked
   nsec cannot enter AMQ messages. These variables are policy inputs, not a
   replacement for AMQ recipient configuration.

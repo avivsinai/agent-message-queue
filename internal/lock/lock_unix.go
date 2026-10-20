@@ -44,6 +44,27 @@ func WithExclusiveFileLockUntil(lockPath string, stopped func() bool, fn func() 
 	return fn()
 }
 
+// TryExclusive takes an exclusive advisory lock on lockPath without waiting.
+// ok is false, with no error, when another holder has it. On success the
+// lock stays held until release is called or the process exits.
+func TryExclusive(lockPath string) (release func(), ok bool, err error) {
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, false, fmt.Errorf("open lock file: %w", err)
+	}
+	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		_ = f.Close()
+		if errors.Is(err, unix.EWOULDBLOCK) {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("acquire lock: %w", err)
+	}
+	return func() {
+		_ = unix.Flock(int(f.Fd()), unix.LOCK_UN)
+		_ = f.Close()
+	}, true, nil
+}
+
 // AdvisoryLockAvailable reports whether WithExclusiveFileLock holds a real
 // interprocess lock. On other platforms the helper runs fn with no lock.
 func AdvisoryLockAvailable() bool { return true }

@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/avivsinai/agent-message-queue/internal/lock"
 )
 
 const (
@@ -14,20 +16,24 @@ const (
 // PrepareWorkerEnv enforces the Buzz remote-task policy on this process, then
 // strips every BUZZ_* variable so secrets cannot leak into later work.
 //
-// agents must be 1 and inbound must be owner-only. A lease-based gate that
-// would relax this refusal waits on an upstream Buzz deployment-lease
-// construct — upstream Buzz has no quota-1 deployment-lease profile today
-// (bead agent-message-queue-1xl, premise corrected 2026-09-08: block/buzz
-// #5667 is the ghost-key RFC and names no NIP-PL kind:30350 lease); this
-// companion does not treat an env string as one.
+// Inbound must be owner-only. With AMQ_ACP_REMOTE=binding, Buzz may start any
+// number of identical workers: every turn decides through per-event file
+// locks, and one worker per Buzz identity leads the lifecycle (lifecycle.go).
+// In BYOH mode (AMQ_ACP_TO or AMQ_ACP_REMOTE_TARGET), or with no advisory
+// lock to elect that leader, amq-acp runs one worker, so agents must be 1.
 func PrepareWorkerEnv() error {
 	agents := strings.TrimSpace(os.Getenv(envBuzzAgents))
 	if agents != "" && agents != "1" {
-		return fmt.Errorf("%s=%s: amq-acp accepts only agents=1; a lease-based gate would relax this, but upstream Buzz has no deployment-lease profile today (tracked in bead agent-message-queue-1xl)", envBuzzAgents, agents)
+		switch {
+		case strings.TrimSpace(os.Getenv(EnvRemote)) != RemoteModeBinding:
+			return fmt.Errorf("%s=%s: amq-acp in BYOH mode runs one worker; set %s=1 (parallelism 1)", envBuzzAgents, agents, envBuzzAgents)
+		case !lock.AdvisoryLockAvailable():
+			return fmt.Errorf("%s=%s: amq-acp runs one worker on a platform without advisory locks; set %s=1 (parallelism 1)", envBuzzAgents, agents, envBuzzAgents)
+		}
 	}
 	respondTo := strings.TrimSpace(os.Getenv(envBuzzRespondTo))
 	if respondTo != "" && respondTo != "owner-only" {
-		return fmt.Errorf("%s=%s: amq-acp accepts only owner-only inbound; a lease-based gate would relax this, but upstream Buzz has no deployment-lease profile today (tracked in bead agent-message-queue-1xl)", envBuzzRespondTo, respondTo)
+		return fmt.Errorf("%s=%s: amq-acp answers only its owner; set %s=owner-only", envBuzzRespondTo, respondTo, envBuzzRespondTo)
 	}
 	// The managed agent's identity stays in process memory for posting
 	// answers (post.go); the environment is still stripped, so no later

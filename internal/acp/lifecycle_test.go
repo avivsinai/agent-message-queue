@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/avivsinai/agent-message-queue/internal/launch"
+	"github.com/avivsinai/agent-message-queue/internal/lock"
 	"github.com/avivsinai/agent-message-queue/internal/remote/binding"
 )
 
@@ -99,6 +100,55 @@ func TestTwoAgentsOnOnePinEachChangeOnce(t *testing.T) {
 		"a agents archive", "a users set-status", "b agents archive", "b users set-status",
 		"a agents unarchive", "a users set-status", "b agents unarchive", "b users set-status",
 	}
+	if !slices.Equal(calls, want) {
+		t.Fatalf("buzz calls = %q\nwant %q", calls, want)
+	}
+}
+
+// Desktop's Create agent runs one agent as N identical workers (parallelism
+// 10, harness log 2026-10-19), all with one Buzz identity. Each worker read
+// the shared marker and archived the agent once more; only the lifecycle
+// leader may act, and another worker takes over when the leader stops.
+func TestIdenticalWorkersChangeTheAgentOnce(t *testing.T) {
+	if !lock.AdvisoryLockAvailable() {
+		t.Skip("no advisory lock on this platform; amq-acp runs one worker")
+	}
+	t.Setenv(binding.EnvPath, filepath.Join(canonicalTempDir(t), "binding.json"))
+	bound := binding.Binding{Carrier: binding.CarrierMailbox, Root: canonicalTempDir(t), Handle: "agent", Name: "alpha"}
+	if err := binding.WriteNamed(bound); err != nil {
+		t.Fatal(err)
+	}
+	savedSelf, savedCall := buzzSelf, buzzCall
+	t.Cleanup(func() { buzzSelf, buzzCall = savedSelf, savedCall })
+	recordPosts(t)
+	buzzSelf = strings.Repeat("a", 64)
+	state := canonicalTempDir(t)
+	a := NewServer(Config{RemoteBinding: true, Pin: "alpha", StateDir: state}, "test")
+	b := NewServer(Config{RemoteBinding: true, Pin: "alpha", StateDir: state}, "test")
+	t.Cleanup(a.resign)
+	t.Cleanup(b.resign)
+	var calls []string
+	reentered := false
+	buzzCall = func(_ time.Duration, args ...string) ([]byte, error) {
+		calls = append(calls, strings.Join(args[:2], " "))
+		if args[1] == "archive" && !reentered {
+			reentered = true
+			b.lifecycleTick(time.Now()) // b ticks while a's archive runs
+		}
+		return nil, nil
+	}
+
+	if _, err := binding.RemoveMatching(func(b binding.Binding) bool { return b.Name == "alpha" }); err != nil {
+		t.Fatal(err)
+	}
+	a.lifecycleTick(time.Now())
+	a.resign() // a stops: b leads from its next tick
+	if err := binding.WriteNamed(bound); err != nil {
+		t.Fatal(err)
+	}
+	b.lifecycleTick(time.Now())
+
+	want := []string{"agents archive", "users set-status", "agents unarchive", "users set-status"}
 	if !slices.Equal(calls, want) {
 		t.Fatalf("buzz calls = %q\nwant %q", calls, want)
 	}

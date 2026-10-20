@@ -165,9 +165,12 @@ type Server struct {
 	streamClosed bool
 	// late is the late-reply sweep state (binding mode only).
 	late lateReplySweep
-	// lastChannel is the DM channel of the latest DM prompt; a pinned agent
-	// posts "Connected again" there (lifecycle.go).
+	// lastChannel is the DM channel of the latest DM prompt in this
+	// process; a change is written for the lifecycle leader (recordDM).
 	lastChannel string
+	// leader releases the lifecycle lead of this worker's Buzz identity, or
+	// is nil. Only the sweep worker sets it; its stop releases it.
+	leader func()
 }
 
 // NewServer builds a server bound to one already authenticated routing context.
@@ -734,6 +737,7 @@ func (s *Server) beginPrompt(params json.RawMessage) (func(emit func(any) error)
 		return nil, nil, rpcErr
 	}
 
+	var dm string
 	s.mu.Lock()
 	if s.streamClosed {
 		s.mu.Unlock()
@@ -745,11 +749,15 @@ func (s *Server) beginPrompt(params json.RawMessage) (func(emit func(any) error)
 		if s.cfg.RemoteBinding {
 			turn.mailboxEvent = eventID
 		}
-		if buzzDM(text) {
+		if buzzDM(text) && turn.channel != s.lastChannel {
 			s.lastChannel = turn.channel
+			dm = turn.channel
 		}
 	}
 	s.mu.Unlock()
+	if dm != "" {
+		s.recordDM(dm)
+	}
 	if rpcErr != nil {
 		return nil, nil, rpcErr
 	}
