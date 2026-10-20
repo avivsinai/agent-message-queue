@@ -359,13 +359,14 @@ func writeAtomicNew(path string, payload []byte) error {
 		return fmt.Errorf("pi: prepare dir: %v", err)
 	}
 	created, err := fsq.CreateNewFile(path, payload, 0o600)
-	if err != nil {
+	switch {
+	case created:
+		return nil // the link published it; a failed directory sync cannot take it back
+	case err != nil:
 		return fmt.Errorf("pi: publish %s: %v", path, err)
-	}
-	if !created {
+	default:
 		return fmt.Errorf("%w: %s", ErrAlreadyDelivered, strings.TrimSuffix(filepath.Base(path), ".json"))
 	}
-	return nil
 }
 
 // readReceipt reads receipts/<ref>.json (protocol: receipts). Returns (nil, nil) when the

@@ -346,13 +346,14 @@ func createNew(dir, name string, data []byte) error {
 		return errUnsupportedPlatform
 	}
 	created, err := fsq.CreateNewFile(filepath.Join(dir, name), data, 0o600)
-	if err != nil {
+	switch {
+	case created:
+		return nil // visible to readers; a failed directory sync cannot take it back
+	case err != nil:
 		return err
-	}
-	if !created {
+	default:
 		return errFileExists
 	}
-	return nil
 }
 
 // createNewJSON is createNew for one JSON record.

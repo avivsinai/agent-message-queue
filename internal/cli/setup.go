@@ -874,10 +874,17 @@ func loadOptionalLocalConfig(path string) (launch.LocalConfig, []byte, bool, err
 	return cfg, data, true, err
 }
 
+// setupMaxFileBytes bounds every file setup reads: queue and project
+// configuration and .gitignore.
+const setupMaxFileBytes = 1 << 20
+
 func readOptionalRegular(path string) ([]byte, bool, error) {
-	data, err := fsq.ReadRegularNoFollow(path)
+	data, err := fsq.ReadRegularNoFollowBounded(path, setupMaxFileBytes)
 	if os.IsNotExist(err) {
 		return nil, false, nil
+	}
+	if errors.Is(err, fsq.ErrNotRegularFile) {
+		return nil, false, fmt.Errorf("%s must be a regular file, not a symlink", path)
 	}
 	if err != nil {
 		return nil, false, err

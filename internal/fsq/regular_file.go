@@ -53,17 +53,22 @@ func validateRegularNoFollowFile(path string, info os.FileInfo) error {
 	return nil
 }
 
+// ErrNotRegularFile is wrapped by the refusal of a leaf that is a symlink,
+// FIFO, directory or other non-regular file.
+var ErrNotRegularFile = errors.New("not a regular file")
+
 // OpenRegularNoFollowBounded opens path for reading only if it is a regular
-// file, never through a symlink, and still the very file its lstat saw:
+// file, never through a symlink at the last path component (symlinks in the
+// parent directories are followed), and still the very file its lstat saw:
 //
 //  1. Lstat gate: the leaf must exist and be a regular file, and with
 //     max > 0 be no larger than max. A symlink, FIFO, directory or huge
 //     file is refused before any open.
-//  2. On darwin and linux the open is no-follow and non-blocking, so a
-//     symlink or FIFO swapped in after the gate is refused or cannot block.
-//     Other platforms (Windows) open normally; only step 3 stands there,
-//     and a Windows Lstat identity is not reliable, so a caller that needs
-//     the no-follow guarantee refuses on those platforms itself.
+//  2. On unix the open is no-follow and non-blocking, so a symlink or FIFO
+//     swapped in after the gate is refused or cannot block. Elsewhere
+//     (Windows) the open follows links and only step 3 stands, and a
+//     Windows Lstat identity is not reliable, so a caller that needs the
+//     no-follow guarantee refuses on those platforms itself.
 //  3. The opened file must be a regular file and os.SameFile with the lstat
 //     result.
 //
@@ -76,7 +81,7 @@ func OpenRegularNoFollowBounded(path string, max int64) (*os.File, os.FileInfo, 
 		return nil, nil, err
 	}
 	if !info.Mode().IsRegular() {
-		return nil, nil, fmt.Errorf("%s: not a regular file (mode %s); refusing", path, info.Mode())
+		return nil, nil, fmt.Errorf("%s: %w (mode %s); refusing", path, ErrNotRegularFile, info.Mode())
 	}
 	if max > 0 && info.Size() > max {
 		return nil, nil, fmt.Errorf("%s: %d bytes exceeds %d; refusing", path, info.Size(), max)
@@ -129,12 +134,17 @@ func ReadRegularNoFollowBounded(path string, max int64) ([]byte, error) {
 // CreateNewFile publishes data at path only if nothing is there yet, with
 // its whole content visible at once: the bytes go to a synced temporary file
 // in the same directory that is then hard-linked onto path, which fails when
-// the name exists. created reports whether this call published the file. In
-// both outcomes the directory is synced and its error returned, so a file
-// another writer published is durable before the caller acts on it.
+// the name exists. The directory is synced after the link.
+//
+// created reports whether this call published the file. When created is
+// true the file is visible to readers even if err is set: err then reports
+// only the failed directory sync, so the publication may not survive a
+// crash. When the name already exists, created is false and err is nil; the
+// directory is still synced, best effort, so the other writer's file is
+// durable before the caller acts on it.
 func CreateNewFile(path string, data []byte, perm os.FileMode) (created bool, err error) {
 	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
+	tmp, err := os.CreateTemp(dir, ".tmp-*")
 	if err != nil {
 		return false, err
 	}
@@ -155,9 +165,10 @@ func CreateNewFile(path string, data []byte, perm os.FileMode) (created bool, er
 		if !errors.Is(err, os.ErrExist) {
 			return false, err
 		}
-	} else {
-		created = true
+		_ = os.Remove(tmpName)
+		_ = SyncDir(dir)
+		return false, nil
 	}
 	_ = os.Remove(tmpName)
-	return created, SyncDir(dir)
+	return true, SyncDir(dir)
 }
