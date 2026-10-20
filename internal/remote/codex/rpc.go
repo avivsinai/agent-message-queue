@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"runtime/debug"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -189,13 +191,20 @@ func (c *Client) respondErrorCtx(ctx context.Context, id json.RawMessage, msg st
 }
 
 // reqWorker drains the reply-required queue. It exits when reqQ is closed.
+// A handler that panics has not answered its request, so the worker answers
+// it with an error, the same as an overflowed request, and keeps draining.
 func (c *Client) reqWorker() {
 	defer close(c.reqWorkerDone)
 	for sr := range c.reqQ {
 		c.reqInFlight.Add(1)
 		func() {
 			defer func() {
-				_ = recover()
+				if r := recover(); r != nil {
+					fmt.Fprintf(os.Stderr, "codex: server request %s handler panicked: %v\n%s", sr.Method, r, debug.Stack())
+					ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+					_ = c.respondErrorCtx(ctx, sr.ID, "server request handler failed: "+sr.Method)
+					cancel()
+				}
 				c.reqInFlight.Add(-1)
 			}()
 			if c.onServerRequest != nil {

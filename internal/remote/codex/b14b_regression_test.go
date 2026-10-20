@@ -298,6 +298,41 @@ func TestB14bReplyRequiredNotDroppedAndPumpStaysLive(t *testing.T) {
 	close(release2)
 }
 
+// TestServerRequestHandlerPanicAnswersWithError: a handler that panics has
+// not answered, so the app-server would wait forever for that request id.
+// The worker answers it with an error and keeps serving the next request.
+// Found in the repo quality audit (agent-message-queue-0ed.15).
+func TestServerRequestHandlerPanicAnswersWithError(t *testing.T) {
+	respCh := make(chan []byte, 1)
+	c, _ := newB14bClientWithServer(t, func(payload []byte) { respCh <- payload })
+	served := make(chan string, 1)
+	handlersOf(c).setReq(func(r ServerRequest) {
+		if string(r.ID) == `"srv-panic"` {
+			panic("handler bug")
+		}
+		served <- string(r.ID)
+	})
+	c.dispatchServerRequest(ServerRequest{ID: json.RawMessage(`"srv-panic"`), Method: "item/commandExecution/requestApproval"})
+	select {
+	case payload := <-respCh:
+		var msg rpcMessage
+		if err := json.Unmarshal(payload, &msg); err != nil || msg.Error == nil || msg.ID == nil || string(*msg.ID) != `"srv-panic"` {
+			t.Fatalf("panicked request answer = %s (%v), want an error for srv-panic", payload, err)
+		}
+	case <-time.After(b14bDeadline):
+		t.Fatal("panicked server request was never answered")
+	}
+	c.dispatchServerRequest(ServerRequest{ID: json.RawMessage(`"srv-next"`), Method: "item/commandExecution/requestApproval"})
+	select {
+	case id := <-served:
+		if id != `"srv-next"` {
+			t.Fatalf("served %s, want srv-next", id)
+		}
+	case <-time.After(b14bDeadline):
+		t.Fatal("request worker stopped after a handler panic")
+	}
+}
+
 // TestB14bCloseConcurrentWithInboundServerRequest pins the BLOCKER: Close
 // must tear the socket down and DRAIN the read pump BEFORE closing reqQ.
 // The old order (close reqQ -> drain -> ws.close) left the pump live during

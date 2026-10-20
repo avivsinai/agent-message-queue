@@ -134,7 +134,6 @@ adapters never receive message bytes.
 - `slack` POSTs `{"text":"AMQ mail waiting."}` to the URL in a mode-0600
   JSON file `{"url"}`. The body does not name the handle or the peer.
 
-`ShouldRing` in `internal/bridge/ring` is the start and stale-daily policy:
-mail present at start rings once immediately; after 14 days with no
-`STORED`, rings drop to daily. The 5s-to-2m inbox ladder stays in
-`amq wake`. These adapters do not change TTY `--baseline-existing`.
+The adapters decide nothing about timing: the caller, such as `amq wake`
+through `--inject-via`, owns when a ring fires. These adapters do not
+change TTY `--baseline-existing`.

@@ -62,7 +62,7 @@ check-xferv3-tx:
 	go test -count=1 ./cmd/amq-bridge/ -run '^TestRunEnqueueWritesTxForPinnedPeer$$|^TestRunEnqueuePinnedDestMustBeAllowlisted$$'
 
 check-xferv3-ring:
-	go test -count=1 ./internal/bridge/ring/ -run '^TestGrokbotWebhookPostsHandleAndPending$$|^TestSlackWebhookPostsConstantText$$|^TestRingPolicyStartAndStaleDaily$$'
+	go test -count=1 ./internal/bridge/ring/ -run '^TestGrokbotWebhookPostsHandleAndPending$$|^TestSlackWebhookPostsConstantText$$'
 
 check-xferv3-recv:
 	go test -count=1 ./internal/bridge/xferv3/ -run '^TestFileIdempotentAcrossRelock$$|^TestACLRefusalWritesNoFactThenFilesOnce$$|^TestRecoverIntentWithStagePublishes$$|^TestRecoverUsesAdmittedDestNotPayloadTo$$|^TestQuotaCountsOnlyThisPeersInboxFiles$$|^TestMiddleChecksumIsUncertain$$|^TestRecoverTornEmptyPrefixIsUncertain$$|^TestDurableSyncPrimitive$$'
